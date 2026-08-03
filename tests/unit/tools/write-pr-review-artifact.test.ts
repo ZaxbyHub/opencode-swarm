@@ -27,10 +27,14 @@ const REVISION_DIGEST = 'revision-1';
 
 let directory = '';
 const originalResolveCurrentGitHead = _test_exports.resolveCurrentGitHead;
+const originalResolveCurrentGitHeadAsync =
+	_test_exports.resolveCurrentGitHeadAsync;
 const originalResolveRevisionDigest =
 	_test_exports.resolvePrWorkflowRevisionDigest;
 const originalResolveIsWorkingTreeClean =
 	_test_exports.resolveIsWorkingTreeClean;
+const originalResolveIsWorkingTreeCleanAsync =
+	_test_exports.resolveIsWorkingTreeCleanAsync;
 
 beforeEach(() => {
 	directory = realpathSync(
@@ -40,13 +44,20 @@ beforeEach(() => {
 	_test_exports.resolveCurrentGitHead = () => HEAD_SHA;
 	_test_exports.resolvePrWorkflowRevisionDigest = () => REVISION_DIGEST;
 	_test_exports.resolveIsWorkingTreeClean = () => true;
+	_test_exports.resolveCurrentGitHeadAsync = async (dir) =>
+		_test_exports.resolveCurrentGitHead(dir);
+	_test_exports.resolveIsWorkingTreeCleanAsync = async (dir) =>
+		_test_exports.resolveIsWorkingTreeClean(dir);
 });
 
 afterEach(async () => {
 	_test_exports.resetTrackedStateCache();
 	_test_exports.resolveCurrentGitHead = originalResolveCurrentGitHead;
+	_test_exports.resolveCurrentGitHeadAsync = originalResolveCurrentGitHeadAsync;
 	_test_exports.resolvePrWorkflowRevisionDigest = originalResolveRevisionDigest;
 	_test_exports.resolveIsWorkingTreeClean = originalResolveIsWorkingTreeClean;
+	_test_exports.resolveIsWorkingTreeCleanAsync =
+		originalResolveIsWorkingTreeCleanAsync;
 	await fs.rm(directory, { recursive: true, force: true });
 });
 

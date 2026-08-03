@@ -336,7 +336,14 @@ describe('guardrails model fallback adversarial tests', () => {
 		expect(session.model_fallback_index).toBe(0);
 		expect(session.modelFallbackExhausted).toBe(false);
 
-		// Second error should fire a NEW advisory (advisory count increases)
+		// In production the messagesTransform drain runs between model turns and
+		// clears pendingAdvisoryMessages, so a re-fire after a reset lands in a
+		// fresh queue. Simulate that drain here (issue #1976: pushAdvisory dedupes
+		// within the current uncleared queue, so without the drain the
+		// identical-text re-fire would be collapsed).
+		session.pendingAdvisoryMessages = [];
+
+		// Second error should fire a NEW advisory in the fresh queue.
 		const input3 = { tool: 'bash', sessionID: sessionId, callID: 'call-3' };
 		const output3 = {
 			title: 'bash',
@@ -348,8 +355,8 @@ describe('guardrails model fallback adversarial tests', () => {
 
 		expect(session.model_fallback_index).toBe(1);
 		expect(session.modelFallbackExhausted).toBe(true);
-		// Should have 2 advisories now (one from first error, one from second)
-		expect(session.pendingAdvisoryMessages?.length).toBe(2);
+		// 1 advisory now in the fresh queue (the second error's re-fire).
+		expect(session.pendingAdvisoryMessages?.length).toBe(1);
 	});
 
 	// -------------------------------------------------------------------------

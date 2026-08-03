@@ -223,7 +223,7 @@ Launch a structured deep PR review using multi-lane parallel analysis with indep
 4. **Critic Challenge** â€” Adversarial review of HIGH/CRITICAL findings only
 5. **Synthesis** â€” Obligation assessment, findings table, merge recommendation
 
-The architect checks out the PR branch locally before launching explorers, ingests the existing feedback surfaces into the initial ledger, and runs all 11 mandatory repository-agnostic micro-lanes; diff/context signals focus those lanes but cannot waive them. OpenCode uses `dispatch_lanes_async` plus `collect_lane_results` for read-only lane fan-out so local models do not need to emit background Agent calls by hand; while lanes run or collect, the architect keeps doing non-dependent work and only blocks with `wait: true` when no independent work remains. Blocking dispatch and direct Task calls are not provenance-equivalent for this workflow; if structured lanes cannot close coverage, the review is BLOCKED and surfaced to the user rather than degraded. Lane results expose bounded `output` previews plus `output_ref` for full artifact retrieval; the review protocol retrieves `output_ref` before candidate extraction or routing. When the review ends with actionable findings, it writes a handoff artifact under `.swarm/pr-review/<run_id>/` and stops to ask whether to continue into `/swarm pr-feedback`.
+The architect checks out the PR branch locally before launching explorers, ingests the existing feedback surfaces into the initial ledger, and evaluates all 11 mandatory repository-agnostic risk families; diff/context signals focus that coverage but cannot waive it, and the controller-computed depth tier (S/M/L from the bound diff) decides whether families get dedicated micro-lanes (tier L) or consolidated sweep lanes with per-family attestation (S/M). OpenCode uses `dispatch_lanes_async` plus `collect_lane_results` for read-only lane fan-out so local models do not need to emit background Agent calls by hand; while lanes run or collect, the architect keeps doing non-dependent work and only blocks with `wait: true` when no independent work remains. Blocking dispatch and direct Task calls are not provenance-equivalent for this workflow; if structured lanes cannot close coverage, the review is BLOCKED and surfaced to the user rather than degraded. Lane results expose bounded `output` previews plus `output_ref` for full artifact retrieval; the review protocol retrieves `output_ref` before candidate extraction or routing. When the review ends with actionable findings, it writes a handoff artifact under `.swarm/pr-review/<run_id>/` and stops to ask whether to continue into `/swarm pr-feedback`.
 
 **Council variant** (`--council`): After standard review, convene a General Council to evaluate review quality and hunt for blind spots. Council findings are supplementary.
 
@@ -244,7 +244,7 @@ Ingest and close **known** PR feedback â€” review comments, requested chang
 **Command forms:**
 - `/swarm pr-feedback 155` â€” close feedback on PR 155 (a bare number is resolved against the `origin` remote of the command's project directory)
 - `/swarm pr-feedback owner/repo#155 also fix the lint errors` â€” PR + extra instructions
-- `/swarm pr-feedback owner/repo#155 continue from .swarm/pr-review/pr-155-20260619203000/feedback-handoff.md` - PR + review handoff artifact
+- `/swarm pr-feedback owner/repo#155 continue from .swarm/pr-review/pr-155-20260619203000/feedback-handoff.json` - atomically continue a terminal controller-backed review into feedback
 - `/swarm pr-feedback` â€” pasted-feedback session on the current branch
 - `/swarm pr-feedback address the review notes about error handling` â€” a leading token that is *not* shaped like a PR reference is treated as pasted-feedback instructions
 
@@ -260,7 +260,10 @@ A leading token that **is** shaped like a PR reference (bare number, `owner/repo
 5. **Mandatory gates** â€” Stage A always runs exact `git diff --check` and a targeted reproduction/regression plus every concrete workspace/category/source build, typecheck, and lint/format obligation mechanically discovered from the repository; Stage B (independent `reviewer` + `test_engineer`) must then pass on the current diff, followed by the separate reviewer + critic closeout gate. No fix lands and no closure ledger row is marked FIXED until all three gates pass
 6. **Closure ledger** â€” report status for every item, including disproved ones; GitHub review threads are only resolved when you explicitly instruct it
 
-**No-args behavior:** emits a bare `MODE: PR_FEEDBACK` session. The command never throws on bad input.
+**No-args behavior:** emits a bare `MODE: PR_FEEDBACK` session. The exact
+`continue from .swarm/pr-review/<run_id>/feedback-handoff.json` form is
+mechanically validated and rejects malformed, tampered, or nonterminal
+handoffs; other free-text input remains ordinary feedback instructions.
 
 ### `/swarm ci-monitor <pr-url|owner/repo#N|N>`
 
@@ -600,6 +603,20 @@ Use `--model`, `--swarm`, `--gates`, `--tasks`, `--runs`, `--max-concurrency`, `
 
 Aggregate stored audit cells by model and gate using exact run/task/candidate/model/gate/repetition ground-truth joins. Reports catch and clean-control false-rejection rates with Wilson confidence intervals, malformed/ambiguous/unjoined history, retries, unavailable cost, infrastructure failures, and reviewer-gate fallback versus genuine evidence telemetry. See [Evaluation Substrate](evaluation-substrate.md).
 
+### `/swarm review [--base <ref> | --range <from..to|from...to> | --working-tree] [--json]`
+
+Run the same bounded, read-only whole-diff engine used by automatic phase review. The command creates a fresh reviewer session, parses structured findings, independently validates eligible anchored HIGH/CRITICAL findings when configured (or required by gate mode), and persists both the review receipt and evidence.
+
+- No selector: review the merge base of the resolved default branch through the current tracked working tree, plus safe untracked text files.
+- `--base <ref>`: compute the merge base of `<ref>` and `HEAD`, then include current tracked and safe untracked working-tree changes.
+- `--range <from..to>` or `--range <from...to>`: review that exact committed-only Git range; uncommitted and untracked changes are excluded.
+- `--working-tree`: review tracked changes from `HEAD` plus safe untracked text files.
+- `--json`: return the bounded structured result inside `[SWARM_REVIEW_JSON]` markers.
+
+Exactly one selector is accepted. Refs are validated before they reach Git, all Git calls are bounded and non-interactive, and unsafe, binary, symlink/reparse, unreadable, or oversized untracked files are represented as explicit scope caveats. The human output includes scope completeness/hash, validation state, model calls, observed cost data, receipt/evidence paths, and severity-ranked findings.
+
+This is a local diff-review command. Use `/swarm pr-review` for the formal multi-lane pull-request review workflow.
+
 ### `/swarm costs [--json]`
 
 Show per-agent, per-task, per-gate, and per-retry-loop token and cost totals from `.swarm/telemetry.jsonl`.
@@ -682,9 +699,21 @@ Import `.swarm/memory/memories.jsonl` and `.swarm/memory/proposals.jsonl` into S
 
 Run the one-time legacy JSONL to SQLite migration. Original JSONL files are backed up under `.swarm/memory/backups/`, and the migration is marked in SQLite `schema_migrations`.
 
-### `/swarm promote [--category <cat>] [--from-swarm <id>] <text>`
+### `/swarm promote [--category <cat>] [--from-swarm <id>] [actionability flags] <text>`
 
 Manually promote a lesson to hive (cross-project) knowledge. Either pass lesson text directly or reference an existing swarm-level lesson by ID.
+
+Promotion is policy-gated. Since #1821 the policy includes an **actionability floor**, enforced by default: a lesson is only promotable if it carries at least one *predicate* and at least one *scope*. Pass them with these comma-separated flags (they may also be repeated):
+
+| Flag | Kind |
+| --- | --- |
+| `--required-actions <a,b>` | predicate |
+| `--forbidden-actions <a,b>` | predicate |
+| `--verification-checks <a,b>` | predicate |
+| `--applies-to-tools <a,b>` | scope |
+| `--applies-to-agents <a,b>` | scope |
+
+A lesson that fails the floor is blocked rather than silently promoted as un-actionable advice. `--force --reason "<why>"` still overrides and records a durable audited override listing the failed gates. To disable the floor entirely, set `knowledge.promotion_require_actionable = false`.
 
 ### `/swarm curate`
 

@@ -21,13 +21,15 @@ import { existsSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import { stripKnownSwarmPrefix } from '../config/schema.js';
+import { canonicalHash } from '../evaluation/hashing.js';
 import { sanitizeTaskId } from '../evidence/manager.js';
+import { enqueueCandidate } from '../learning/candidate-queue.js';
 import { reserveQuota } from '../services/skill-improver-quota.js';
 import { warn } from '../utils/logger.js';
 import type { CuratorLLMDelegate } from './curator.js';
 import { getStoredInputArgs } from './guardrails/stored-input-args.js';
 import type { EnrichmentQuotaOptions } from './knowledge-curator.js';
-import { transactFile } from './knowledge-store.js';
+import { dedupeCapped, transactFile } from './knowledge-store.js';
 import type { ActionableDirectiveFields } from './knowledge-types.js';
 import {
 	validateActionability,
@@ -58,17 +60,138 @@ const MAX_CANDIDATES = 2;
 
 /** One v3-schema candidate insight written to the queue. */
 export interface InsightCandidate extends ActionableDirectiveFields {
+	/**
+	 * Deterministic candidate identity (`ic_<16hex>`), issue #1821 Workstream B
+	 * D1. OPTIONAL on purpose: legacy id-less lines already on disk recompute
+	 * the identical value through `resolveInsightCandidateId`, so no migration
+	 * of `.swarm/insight-candidates.jsonl` is required.
+	 */
+	id?: string;
 	lesson: string;
 	category: string;
 	tags: string[];
 	source: {
-		kind: 'micro_reflection';
+		kind: 'micro_reflection' | 'prm_pattern';
 		task_id?: string;
 		agent: string;
 		outcome: MicroOutcome;
 		trajectory_steps: number;
 	};
 	created_at: string;
+}
+
+/** Identity prefix for an insight candidate. */
+const INSIGHT_CANDIDATE_ID_PREFIX = 'ic_';
+
+/** Hex characters retained from the sha256 digest. 16 hex chars = 64 bits. */
+const INSIGHT_CANDIDATE_ID_HEX_LENGTH = 16;
+
+/**
+ * Compute the deterministic identity of an insight candidate.
+ *
+ * Hashes exactly `{lesson, taskId, createdAt}`. `canonicalJson` DROPS
+ * `undefined` keys, so a candidate with no `source.task_id` hashes
+ * consistently whether the key is absent or explicitly undefined — which is
+ * what makes the value reproducible from a legacy durable line that never
+ * carried an `id`.
+ */
+export function computeInsightCandidateId(cand: {
+	lesson: string;
+	source?: { task_id?: string };
+	created_at: string;
+}): string {
+	const digest = canonicalHash({
+		lesson: cand.lesson,
+		taskId: cand.source?.task_id,
+		createdAt: cand.created_at,
+	});
+	return `${INSIGHT_CANDIDATE_ID_PREFIX}${digest.slice(
+		0,
+		INSIGHT_CANDIDATE_ID_HEX_LENGTH,
+	)}`;
+}
+
+/**
+ * Resolve a candidate's identity by ALWAYS deriving it from content.
+ *
+ * The stamped `id` is deliberately NOT trusted. `.swarm/insight-candidates.jsonl`
+ * is read back through a bare `JSON.parse(...) as InsightCandidate`, and the
+ * curator explicitly treats that file as tamper-suspect (it re-applies both
+ * write-time gates on read). A trusted `id` would be an unvalidated field on
+ * that same untrusted line: setting it to an already-admitted candidate's id
+ * would make the fold-in silently DROP a distinct new lesson, and rotating it
+ * every run would let the same lesson be re-confirmed every phase, inflating
+ * confidence toward hive auto-promotion.
+ *
+ * Recomputation is a single sha256 over a three-field object, bounded by the
+ * meso batch limit — far cheaper than the failure it prevents. The stamped `id`
+ * survives as a diagnostic and round-trip aid only.
+ */
+export function resolveInsightCandidateId(cand: InsightCandidate): string {
+	return computeInsightCandidateId(cand);
+}
+
+/**
+ * The marker recorded in an admitted entry's EXISTING `source_knowledge_ids`
+ * field so the phase-boundary fold-in can recognise a candidate real-time
+ * admission already handled. 27 chars, matching the 64-char per-id ceiling
+ * `validateActionableFields` applies wherever that field IS validated (the
+ * admission/fold-in paths pass an explicit field subset that omits it, so the
+ * length is a construction guarantee here rather than a checked one).
+ */
+export function insightAdmissionMarker(candidateId: string): string {
+	return `insight:${candidateId}`;
+}
+
+/**
+ * Cap on `source_knowledge_ids` for an entry stamped by real-time admission.
+ *
+ * The knowledge store deliberately EXCLUDES `source_knowledge_ids` from its
+ * 20-item write normalization (see `WRITE_NORMALIZED_ARRAY_FIELDS` in
+ * `knowledge-store.ts`) because `skill-invalidator.ts` walks the full list.
+ * That exclusion means nothing else bounds the array, so an entry reinforced by
+ * many distinct candidates would grow it forever (AGENTS.md invariant 8). 50
+ * matches the cap the curator's own producer already applies.
+ */
+export const MAX_SOURCE_KNOWLEDGE_IDS = 50;
+
+/**
+ * Union an insight marker into an entry's `source_knowledge_ids`, bounded.
+ *
+ * Eviction drops the OLDEST `insight:` markers only. Non-insight ids (`task:`
+ * ids and real knowledge ids) are NEVER dropped: `skill-invalidator.ts` walks
+ * them to retire skills whose source entry was archived, so silently losing one
+ * would leave a stale skill live. If the array is over cap purely because of
+ * non-insight ids it is left over cap — correctness beats the bound here, and
+ * that case is already bounded by the producers of those ids.
+ *
+ * Losing a very old insight marker can at worst allow ONE extra confirmation
+ * for a long-superseded candidate; unbounded growth has no such ceiling.
+ */
+export function unionInsightMarker(
+	existing: string[] | undefined,
+	marker: string,
+): string[] {
+	const ids = [...(existing ?? [])];
+	if (ids.includes(marker)) return ids;
+	ids.push(marker);
+	if (ids.length <= MAX_SOURCE_KNOWLEDGE_IDS) return ids;
+	const overflow = ids.length - MAX_SOURCE_KNOWLEDGE_IDS;
+	const evictable: number[] = [];
+	// Stop BEFORE the last index: that is the marker we just appended, and
+	// evicting it would defeat the whole point of stamping it.
+	for (let i = 0; i < ids.length - 1 && evictable.length < overflow; i++) {
+		if (ids[i].startsWith('insight:')) evictable.push(i);
+	}
+	const drop = new Set(evictable);
+	return ids.filter((_, index) => !drop.has(index));
+}
+
+/** Extract the insight marker carried by an entry, if any. */
+export function findInsightAdmissionMarker(
+	sourceKnowledgeIds: string[] | undefined,
+): string | undefined {
+	return (sourceKnowledgeIds ?? []).find((id) => id.startsWith('insight:'));
 }
 
 /** Returns `.swarm/insight-candidates.jsonl` for a project directory. */
@@ -169,8 +292,13 @@ export const INSIGHT_CANDIDATES_MAX_ENTRIES = 500;
 
 /** Append validated candidates to the insight queue (best-effort, fail-open).
  *  Uses transactFile for consistency with consumeInsightCandidates and enforces
- *  a FIFO cap to prevent unbounded growth between phase completions. */
-async function appendInsightCandidates(
+ *  a FIFO cap to prevent unbounded growth between phase completions.
+ *
+ *  EXPORTED (#1821) so the PRM pattern producer can write the SAME durable
+ *  crash backstop the micro-reflector writes. Any producer that only enqueues
+ *  in memory loses its candidate on process death, on queue overflow, and on a
+ *  drain failure — with no phase-boundary fold-in to recover it. */
+export async function appendInsightCandidates(
 	directory: string,
 	candidates: InsightCandidate[],
 ): Promise<void> {
@@ -311,10 +439,9 @@ export function parseMicroCandidates(
 		for (const key of CANDIDATE_ALLOWED_FIELDS) {
 			const v = rec[key];
 			if (Array.isArray(v)) {
-				const arr = v
-					.filter((x): x is string => typeof x === 'string')
-					.map((x) => x.slice(0, 200))
-					.slice(0, 20);
+				// #1821: truncate → dedupe (case-insensitive) → cap, in that order,
+				// so duplicates cannot evict distinct directives off the end.
+				const arr = dedupeCapped(v, { cap: 20, itemMaxChars: 200 });
 				if (arr.length > 0) (fields as Record<string, unknown>)[key] = arr;
 			}
 		}
@@ -334,7 +461,7 @@ export function parseMicroCandidates(
 
 		const category =
 			typeof rec.category === 'string' ? rec.category : 'process';
-		out.push({
+		const built: InsightCandidate = {
 			lesson,
 			category,
 			tags: [],
@@ -347,7 +474,13 @@ export function parseMicroCandidates(
 				trajectory_steps: meta.steps,
 			},
 			created_at: new Date().toISOString(),
-		});
+		};
+		// #1821 D1: stamp the deterministic identity so the durable line and the
+		// in-memory queue entry share one id. Recomputation on read yields the
+		// same value, so the stamp is an optimization, not a correctness
+		// requirement.
+		built.id = computeInsightCandidateId(built);
+		out.push(built);
 	}
 	return out;
 }
@@ -371,6 +504,10 @@ export async function runMicroReflection(params: {
 	trajectory: TrajectoryEntry[];
 	llmDelegate?: CuratorLLMDelegate;
 	quota?: EnrichmentQuotaOptions;
+	/** Session that produced the reflection — required for real-time admission. */
+	sessionID?: string;
+	/** `learning.realtime_admission` knobs the enqueue side needs. */
+	admission?: { enabled?: boolean; maxQueueSize?: number };
 }): Promise<MicroReflectionResult> {
 	const outcome = classifyOutcome(params.transcript, params.trajectory);
 	const result: MicroReflectionResult = {
@@ -411,6 +548,19 @@ export async function runMicroReflection(params: {
 		});
 		await appendInsightCandidates(params.directory, candidates);
 		result.candidates = candidates.length;
+		// #1821 Workstream B: ALSO hand the candidates to the in-memory
+		// same-session admission queue. The durable append above is deliberately
+		// left untouched — it remains the crash backstop (AC8), so a process that
+		// dies before the drain still folds these in at the next phase boundary.
+		// Enqueue is in-memory only and cannot throw a filesystem error, but it is
+		// still inside the outer try so a bug here can never break reflection.
+		if (params.sessionID && params.admission?.enabled !== false) {
+			for (const candidate of candidates) {
+				enqueueCandidate(params.sessionID, candidate, {
+					maxQueueSize: params.admission?.maxQueueSize ?? 50,
+				});
+			}
+		}
 		return result;
 	} catch (err) {
 		warn(
@@ -440,7 +590,15 @@ export interface MicroReflectorOutput {
 	output?: unknown;
 }
 
-function isTaskTool(tool: unknown): boolean {
+/**
+ * True for the delegation tool under either casing.
+ *
+ * EXPORTED (issue #1821 Workstream B) so the real-time admission drain adapter
+ * can self-gate on exactly the same predicate this hook uses. Six private
+ * copies of this two-line check already exist across the hook layer; the drain
+ * reuses this one rather than adding a seventh.
+ */
+export function isTaskTool(tool: unknown): boolean {
 	return tool === 'Task' || tool === 'task';
 }
 
@@ -456,6 +614,7 @@ export async function microReflectorAfter(
 	output: MicroReflectorOutput,
 	llmDelegate?: CuratorLLMDelegate,
 	quota?: EnrichmentQuotaOptions,
+	admission?: { enabled?: boolean; maxQueueSize?: number },
 ): Promise<void> {
 	if (!isTaskTool(input.tool)) return;
 	const transcript = typeof output.output === 'string' ? output.output : '';
@@ -489,5 +648,8 @@ export async function microReflectorAfter(
 		trajectory,
 		llmDelegate,
 		quota,
+		sessionID:
+			typeof input.sessionID === 'string' ? input.sessionID : undefined,
+		admission,
 	});
 }

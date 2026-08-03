@@ -1,6 +1,11 @@
 import { z } from 'zod';
+import packageJson from '../../package.json' with { type: 'json' };
 import { OUTCOME_BLOCK_THRESHOLD } from '../hooks/knowledge-types.js';
-import { type AgentName, ALL_AGENT_NAMES } from './constants';
+import {
+	type AgentName,
+	ALL_AGENT_NAMES,
+	SUMMARIZER_EXEMPT_TOOL_NAMES,
+} from './constants';
 
 /**
  * Test-only dependency-injection seam — see `gitignore-warning.ts:_internals`
@@ -239,10 +244,12 @@ export const HooksConfigSchema = z.object({
 	 * Opt-in support for OpenCode background subagents.
 	 * When false (default) swarm fail-closed-blocks background swarm `Task` dispatches
 	 * (PR 1 behavior). When true, background swarm dispatches are allowed and tracked as
-	 * durable records under `.swarm/background-delegations.jsonl`, and the completion
-	 * observer ingests trusted upstream completion signals into that advisory ledger. NO
-	 * workflow gate is advanced and NO gate evidence is recorded from a background completion.
-	 * Requires upstream `OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true` to have any effect.
+	 * durable records under `.swarm/background-delegations.jsonl`. Trusted, correlated,
+	 * workspace-fresh terminal completions are then ingested into coder workflow state or
+	 * Stage B gate evidence as appropriate, and surfaced to the parent architect.
+	 * Requires upstream `OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true` or the umbrella
+	 * `OPENCODE_EXPERIMENTAL=true` to have any effect. Keep the default false while upstream
+	 * still classifies the capability as experimental; see the recovery guide readiness list.
 	 */
 	background_subagents: z.boolean().default(false),
 	/** Bounded lifetime (minutes) after which a tracked pending background delegation is
@@ -494,9 +501,7 @@ export const SummaryConfigSchema = z.object({
 	max_summary_chars: z.number().min(100).max(5000).default(1000),
 	max_stored_bytes: z.number().min(10240).max(104857600).default(10485760),
 	retention_days: z.number().min(1).max(365).default(7),
-	exempt_tools: z
-		.array(z.string())
-		.default(['retrieve_summary', 'retrieve_lane_output', 'task', 'read']),
+	exempt_tools: z.array(z.string()).default([...SUMMARIZER_EXEMPT_TOOL_NAMES]),
 });
 
 export type SummaryConfig = z.infer<typeof SummaryConfigSchema>;
@@ -519,22 +524,170 @@ export const ReviewPassesConfigSchema = z.object({
 
 export type ReviewPassesConfig = z.infer<typeof ReviewPassesConfigSchema>;
 
-// Auto-review configuration (opt-in): automatic review of the execution diff
-// by the reviewer agent (its own configured model) in a fresh ephemeral
-// session at task/phase boundaries. Advisory-only: verdicts are persisted as
-// review receipts + events; REJECTED/unparseable verdicts inject an advisory.
-export const AutoReviewConfigSchema = z.object({
-	/** Enable automatic execution-diff review. Default: false (opt-in). */
-	enabled: z.boolean().default(false),
+export interface AutoReviewBurnInDecision {
+	approved: boolean;
+	artifact_path: string;
+	artifact_sha256: string;
+}
+
+/**
+ * Source-controlled release decision for the v8 default flip.
+ *
+ * Keep this side-effect free: plugin initialization must never synchronously read or
+ * hash the benchmark artifact. The committed decision pins the independently
+ * generated artifact by path and SHA-256; release-major alone cannot activate the
+ * default.
+ */
+export const AUTO_REVIEW_V8_BURN_IN_DECISION: AutoReviewBurnInDecision = {
+	approved: true,
+	artifact_path: 'docs/benchmarks/auto-review-v8-cost-baseline.json',
+	artifact_sha256:
+		'b4e981d4d87e3de80f6d7dd4ae782b08159d385019c4d8b0d300c0443f1984ce',
+};
+
+export interface AutoReviewReleaseContext {
+	packageVersion?: string;
+	burnInDecision?: AutoReviewBurnInDecision;
+}
+
+function hasApprovedAutoReviewBurnIn(
+	decision: AutoReviewBurnInDecision | undefined,
+): boolean {
+	return Boolean(
+		decision?.approved === true &&
+			decision.artifact_path ===
+				AUTO_REVIEW_V8_BURN_IN_DECISION.artifact_path &&
+			decision.artifact_sha256 ===
+				AUTO_REVIEW_V8_BURN_IN_DECISION.artifact_sha256,
+	);
+}
+
+function autoReviewEnabledByRelease(
+	context: AutoReviewReleaseContext = {},
+): boolean {
+	const version = context.packageVersion ?? packageJson.version;
+	const major = Number.parseInt(version.split('.')[0] ?? '', 10);
+	return (
+		Number.isInteger(major) &&
+		major >= 8 &&
+		hasApprovedAutoReviewBurnIn(
+			context.burnInDecision ?? AUTO_REVIEW_V8_BURN_IN_DECISION,
+		)
+	);
+}
+
+const AutoReviewFinalConfigSchema = z.object({
+	on_phase_complete: z.boolean().default(true),
+	on_plan_complete: z.boolean().default(true),
+	model: z.string().min(1).nullable().default(null),
+	mode: z.enum(['advisory', 'gate']).default('advisory'),
+	max_diff_bytes: z
+		.number()
+		.int()
+		.min(16 * 1024)
+		.max(2 * 1024 * 1024)
+		.default(262_144),
+	timeout_ms: z.number().int().min(10_000).max(1_800_000).default(300_000),
+});
+
+const AutoReviewConfigObjectSchema = z.object({
+	/** Enable automatic execution-diff review. V7 is opt-in; v8 is burn-in gated. */
+	enabled: z.boolean(),
 	/** When to dispatch: after completed tasks, at phase boundaries, or both. */
 	trigger: z
 		.enum(['task_completion', 'phase_boundary', 'both'])
 		.default('phase_boundary'),
-	/** Reviewer dispatch timeout (ephemeral session create + full response). */
+	/** Legacy task-review dispatch timeout. */
 	timeout_ms: z.number().int().min(10_000).max(1_800_000).default(300_000),
-	/** Maximum diff size included in the review prompt (KiB; truncated past this). */
+	/** Legacy task-review maximum diff size (KiB). */
 	max_diff_kb: z.number().int().min(16).max(2048).default(256),
+	/** Minimum confidence for a finding to retain its declared severity. */
+	min_confidence: z.number().min(0).max(1).default(0.7),
+	/** Request the bounded structured findings block from reviewers. */
+	structured_findings: z.boolean().default(true),
+	/** Independently validate anchored HIGH/CRITICAL findings. */
+	validate_findings: z.boolean().default(false),
+	/** Optional validator model override; null resolves the critic model. */
+	validation_model: z.string().min(1).nullable().default(null),
+	/** Bound for the fresh-context validator dispatch. */
+	validation_timeout_ms: z
+		.number()
+		.int()
+		.min(10_000)
+		.max(1_800_000)
+		.default(120_000),
+	final_review: AutoReviewFinalConfigSchema.default({
+		on_phase_complete: true,
+		on_plan_complete: true,
+		model: null,
+		mode: 'advisory',
+		max_diff_bytes: 262_144,
+		timeout_ms: 300_000,
+	}),
 });
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function normalizeAutoReviewInput(
+	value: unknown,
+	context: AutoReviewReleaseContext = {},
+): unknown {
+	if (!isPlainRecord(value)) return value;
+	const normalized: Record<string, unknown> = { ...value };
+	if (!Object.hasOwn(value, 'enabled')) {
+		normalized.enabled = autoReviewEnabledByRelease(context);
+	}
+
+	if (
+		Object.hasOwn(value, 'final_review') &&
+		!isPlainRecord(value.final_review)
+	) {
+		return normalized;
+	}
+	const nested = isPlainRecord(value.final_review)
+		? { ...value.final_review }
+		: {};
+	if (!Object.hasOwn(nested, 'max_diff_bytes')) {
+		nested.max_diff_bytes =
+			typeof value.max_diff_kb === 'number'
+				? value.max_diff_kb * 1024
+				: 262_144;
+	}
+	if (!Object.hasOwn(nested, 'timeout_ms')) {
+		nested.timeout_ms =
+			typeof value.timeout_ms === 'number' ? value.timeout_ms : 300_000;
+	}
+	normalized.final_review = nested;
+	return normalized;
+}
+
+// Auto-review configuration: automatic review of the execution diff by a
+// separately configured model in a fresh ephemeral session. The preprocessor
+// preserves presence-sensitive legacy inheritance before Zod applies defaults.
+export const AutoReviewConfigSchema = z.preprocess(
+	(value) => normalizeAutoReviewInput(value),
+	AutoReviewConfigObjectSchema,
+);
+
+export function resolveAutoReviewConfig(
+	raw: unknown = {},
+	context: AutoReviewReleaseContext = {},
+): AutoReviewConfig {
+	const parsed = AutoReviewConfigObjectSchema.parse(
+		normalizeAutoReviewInput(raw, context),
+	);
+	if (
+		parsed.final_review.mode === 'gate' &&
+		parsed.structured_findings === false
+	) {
+		throw new Error(
+			'auto_review.final_review.mode="gate" requires auto_review.structured_findings=true',
+		);
+	}
+	return parsed;
+}
 
 export type AutoReviewConfig = z.infer<typeof AutoReviewConfigSchema>;
 
@@ -1068,7 +1221,20 @@ export const CheckpointConfigSchema = z.preprocess(
 	z
 		.object({
 			enabled: z.boolean().default(true),
-			auto_checkpoint_threshold: z.number().int().min(1).max(20).default(3),
+			auto_checkpoint_threshold: z
+				.number()
+				.int()
+				.min(1)
+				.max(20)
+				.default(3)
+				.describe(
+					'Maximum number of checkpoints to retain. Oldest checkpoints are evicted when this limit is exceeded.',
+				),
+			// Maximum number of checkpoints to retain in the log. Older entries
+			// are evicted (FIFO) when this limit is exceeded. Distinct from
+			// auto_checkpoint_threshold (which controls how many completed tasks
+			// trigger an auto-checkpoint).
+			max_retention: z.number().int().min(1).max(100).default(20),
 			// When false (default), checkpoint save skips the git commit if the working
 			// tree is clean, recording only the current HEAD SHA. Set to true to restore
 			// the previous behaviour of creating a git commit even with no file changes.
@@ -1265,6 +1431,10 @@ export const KnowledgeConfigSchema = z.object({
 	/** #1847: minimum DISTINCT canonical cohort ids among the validated
 	 * terminal-application receipts. Default 0 (conservative). */
 	promotion_min_distinct_cohorts: z.number().min(0).max(50).default(0),
+	/** #1821: require a promotion candidate to carry an actionable directive
+	 * (a concrete action, not a bare observation) before it may be promoted.
+	 * Default true — prose-only lessons stay in the swarm tier. */
+	promotion_require_actionable: z.boolean().default(true),
 	/** Architect-only in-session nudge to capture durable lessons while work is still live. */
 	realtime_learning_nudge: z
 		.object({
@@ -1306,6 +1476,117 @@ export const KnowledgeConfigSchema = z.object({
 });
 
 export type KnowledgeConfig = z.infer<typeof KnowledgeConfigSchema>;
+
+/**
+ * Learning subsystem configuration (issue #1821).
+ *
+ * Governs the three bounded background learning loops: real-time knowledge
+ * admission (drains a queue of candidate lessons while a session is live), PRM
+ * pattern persistence, and the duplicate-knowledge sweep. Every budget here
+ * exists to keep the loops bounded per session (AGENTS.md invariants 1 and 8) —
+ * there is no "unlimited" setting by design.
+ *
+ * Nested blocks use `.prefault({})` rather than `.default({...})`: in Zod 4 a
+ * `.default(value)` is returned verbatim without being parsed, so
+ * `.default({})` would yield an empty object and silently skip every inner
+ * field default. `.prefault({})` runs the substituted value through the object
+ * schema, so inner defaults apply and cannot drift from the field declarations.
+ */
+export const LearningConfigSchema = z.object({
+	/** Real-time admission of candidate lessons during a live session. */
+	realtime_admission: z
+		.object({
+			/** Enable/disable real-time admission entirely. */
+			enabled: z.boolean().default(true),
+			/** Hard cap on pending candidates; excess candidates are dropped. */
+			max_queue_size: z.number().int().min(1).max(500).default(50),
+			/** Minimum candidates drained per drain cycle. */
+			min_drain: z.number().int().min(1).max(50).default(1),
+			/** Maximum candidates drained per drain cycle. */
+			max_drain: z.number().int().min(1).max(100).default(10),
+			/** Weight of queue depth when sizing a drain (0 = ignore depth). */
+			drain_depth_factor: z.number().min(0).max(1).default(0.5),
+			/** Weight of arrival velocity when sizing a drain (0 = ignore rate). */
+			drain_velocity_factor: z.number().min(0).max(1).default(0.25),
+			/** Per-session ceiling on admission LLM calls. 0 disables LLM admission. */
+			max_llm_calls_per_session: z.number().int().min(0).max(500).default(20),
+			/** Per-session ceiling on admission tokens. */
+			max_tokens_per_session: z.number().int().min(0).default(50_000),
+			/** Maximum admissions evaluated concurrently. */
+			max_concurrent_admissions: z.number().int().min(1).max(16).default(2),
+			/** Retries allowed per candidate before it is abandoned. */
+			max_retries_per_candidate: z.number().int().min(0).max(5).default(1),
+			/** Per-candidate LLM timeout in milliseconds. */
+			per_candidate_llm_timeout_ms: z.number().int().min(0).default(60_000),
+			/** Wall-clock ceiling for a single drain cycle, in milliseconds. */
+			max_drain_wall_time_ms: z.number().int().min(0).default(10_000),
+			/** SUPPRESS the prompt-only "supersede an existing lesson instead of
+			 * adding a near-duplicate" nudge to the architect while real-time
+			 * admission is enabled, since this loop already admits those lessons
+			 * automatically and the nudge would only ask the architect to redo it by
+			 * hand. Its sole consumer is
+			 * `shouldInjectRealtimeLearningNudge` (`src/hooks/realtime-learning-nudge.ts`),
+			 * which returns false — i.e. no nudge — when `realtime_admission.enabled`
+			 * is true AND this is not `false`. Set it to `false` to keep the nudge
+			 * even with admission on. The default `true` therefore means "suppress",
+			 * not "nudge"; `docs/configuration.md` has always described it correctly. */
+			supersede_nudge: z.boolean().default(true),
+		})
+		.prefault({}),
+	/** Persistence of PRM-detected patterns as durable knowledge. */
+	prm_persistence: z
+		.object({
+			/** Enable/disable PRM pattern persistence. */
+			enabled: z.boolean().default(true),
+			/** Distinct observations required before a pattern is persisted. */
+			min_support: z.number().int().min(1).max(20).default(3),
+			/** Cooldown between persistence passes, in milliseconds. */
+			cooldown_ms: z.number().int().min(0).default(900_000),
+		})
+		.prefault({}),
+	/** Background sweep that merges duplicate knowledge entries. */
+	dedup_sweep: z
+		.object({
+			/** Enable/disable the dedup sweep. */
+			enabled: z.boolean().default(true),
+			/** Hard cap on pairwise comparisons performed per sweep. */
+			max_comparisons: z.number().int().min(0).default(2_000),
+			/** Hard cap on merges applied per sweep. */
+			max_merges_per_sweep: z.number().int().min(0).default(10),
+		})
+		.prefault({}),
+});
+
+export type LearningConfig = z.infer<typeof LearningConfigSchema>;
+
+/**
+ * Consensus mining configuration (issue #1821).
+ *
+ * The consensus miner reads completed evaluation/run evidence and proposes
+ * lessons that multiple independent runs agree on. Support thresholds gate what
+ * counts as consensus; the excerpt and retention caps keep the generated report
+ * bounded.
+ */
+export const ConsensusConfigSchema = z.object({
+	/** Enable/disable consensus mining. */
+	enabled: z.boolean().default(true),
+	/** Default distinct-observation threshold for a consensus candidate. */
+	default_min_support: z.number().int().min(1).default(3),
+	/** Default number of successful runs required to trust a candidate. */
+	default_min_successful_runs: z.number().int().min(0).default(2),
+	/** Default cap on evidence items attached to a consensus candidate. */
+	default_max_evidence_items: z.number().int().min(1).default(50),
+	/** Maximum characters retained per evidence excerpt. */
+	max_excerpt_chars: z.number().int().min(1).default(500),
+	/** Enable LLM summarization of mined consensus candidates. */
+	llm_summarization_enabled: z.boolean().default(true),
+	/** Timeout for a consensus summarization LLM call, in milliseconds. */
+	llm_timeout_ms: z.number().int().min(0).default(60_000),
+	/** Number of consensus reports retained on disk. */
+	report_retention: z.number().int().min(0).default(50),
+});
+
+export type ConsensusConfig = z.infer<typeof ConsensusConfigSchema>;
 
 export const MemoryConfigSchema = z.object({
 	/** Enable Swarm memory tools and local memory storage. Default: false. */
@@ -2579,6 +2860,9 @@ export function resolveExternalSkillsConfig(
 
 // Main plugin configuration
 export const PluginConfigSchema = z.object({
+	/** Config format version for migration table. Increment when deprecating fields. Distinct from knowledge.schema_version. */
+	config_format_version: z.number().int().min(0).default(1),
+
 	// Legacy: Per-agent overrides (default swarm)
 	agents: z.record(z.string(), AgentOverrideConfigSchema).optional(),
 
@@ -2756,6 +3040,12 @@ export const PluginConfigSchema = z.object({
 
 	// Swarm memory substrate. Disabled by default so existing flows are unchanged.
 	memory: MemoryConfigSchema.optional(),
+
+	// Learning subsystem — real-time admission, PRM persistence, dedup sweep (issue #1821)
+	learning: LearningConfigSchema.optional(),
+
+	// Consensus mining over completed run evidence (issue #1821)
+	consensus: ConsensusConfigSchema.optional(),
 
 	// Curator configuration (phase context consolidation and drift detection)
 	curator: CuratorConfigSchema.optional(),

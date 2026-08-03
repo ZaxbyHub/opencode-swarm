@@ -263,10 +263,13 @@ export async function runDeterministicDriftCheck(
 			report_path: reportPath,
 		});
 
-		// Also inject advisory via callback if provided and drift was detected
+		// Also inject advisory via callback if provided and drift was detected.
+		// The critic_drift_verifier nudge is folded in here (issue #1976 B5.4) so the
+		// surviving advisory carries the actionable guidance even though the
+		// phase-complete side that re-reads prior reports is now de-duplicated.
 		if (injectAdvisory && alignment !== 'ALIGNED' && driftScore > 0) {
 			try {
-				const advisoryText = `CURATOR DRIFT DETECTED (phase ${phase}, score ${driftScore.toFixed(2)}): ${injectionSummary.slice(0, 300)}. Review .swarm/${DRIFT_REPORT_PREFIX}${phase}.json and address spec alignment before proceeding.`;
+				const advisoryText = `CURATOR DRIFT DETECTED (phase ${phase}, score ${driftScore.toFixed(2)}): ${injectionSummary.slice(0, 300)}. Review .swarm/${DRIFT_REPORT_PREFIX}${phase}.json and address spec alignment before proceeding. Consider running critic_drift_verifier before phase completion to get a proper drift review.`;
 				injectAdvisory(advisoryText);
 			} catch {
 				/* advisory injection failure must not block drift check */

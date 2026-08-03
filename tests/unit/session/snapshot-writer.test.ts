@@ -629,6 +629,7 @@ describe('writeSnapshot', () => {
 			reviewerCallCount: { '1': 5 },
 			lastGateFailure: null,
 			partialGateWarningsIssuedForTask: ['task-2'],
+			completionGateWarnedForTask: [],
 			selfFixAttempted: false,
 			selfCodingWarnedAtCount: 0,
 			catastrophicPhaseWarnings: [1, 2],

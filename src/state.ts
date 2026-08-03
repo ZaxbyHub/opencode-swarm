@@ -12,6 +12,7 @@
 // exported symbols and 100+ importing files. Splitting is deferred pending a concrete
 // driver. See .swarm/spec.md FR-007.
 
+import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { OpencodeClient } from '@opencode-ai/sdk';
@@ -38,6 +39,8 @@ import {
 	resetRealtimeLearningNudgeState,
 } from './hooks/realtime-learning-nudge.js';
 import { clearTrajectoryStepCounters } from './hooks/trajectory-step-state.js';
+import { resetSessionQueue } from './learning/candidate-queue.js';
+import { resetPrmPatternSupport } from './learning/prm-pattern-support.js';
 import {
 	isTaskSettled,
 	loadPlanJsonOnly,
@@ -143,6 +146,15 @@ export type TaskWorkflowState =
 	| 'complete';
 
 /**
+ * Upper bound for per-session task file-attribution entries.
+ *
+ * Runtime concurrency is capped well below this value. When the map is full,
+ * only workflow-complete entries may be reclaimed; live task attribution is
+ * never evicted to make room.
+ */
+export const MAX_TRACKED_TASK_FILE_ATTRIBUTIONS = 128;
+
+/**
  * Canonical ordering of TaskWorkflowState values for forward-only transition checks.
  * Used by advanceTaskState, canAdvanceTaskState, and applyRehydrationCache.
  * Extracted from three duplicate local literals to a single module-level constant
@@ -156,6 +168,93 @@ const STATE_ORDER: TaskWorkflowState[] = [
 	'tests_run',
 	'complete',
 ];
+
+/** Exact lifecycle state for one coder generation and its paired reviewer. */
+export interface ReviewerScopeGeneration {
+	taskId: string;
+	coderCallID: string;
+	generation: number;
+	sessionIncarnation: string;
+	background: boolean;
+	declaredFiles: string[];
+	modifiedFiles: string[];
+	modifiedFileFingerprints: import('./hooks/reviewer-scope-file-fingerprint.js').ReviewerScopeFileFingerprint[];
+	status: 'collecting' | 'ready' | 'claimed';
+	createdAt: number;
+	readyAt?: number;
+	reviewerCallID?: string;
+	reviewerDispatchScope?: ReviewerScopeDispatchSnapshot;
+}
+
+export interface ReviewerScopeDispatchSnapshot {
+	hash: string;
+	description: string;
+	files: string[];
+	headSha: string;
+	taskId: string;
+	coderCallID: string;
+	generation: number;
+	sessionIncarnation: string;
+}
+
+function cloneReviewerScopeGeneration(
+	generation: ReviewerScopeGeneration,
+): ReviewerScopeGeneration {
+	return {
+		...generation,
+		declaredFiles: [...generation.declaredFiles],
+		modifiedFiles: [...generation.modifiedFiles],
+		modifiedFileFingerprints: generation.modifiedFileFingerprints.map(
+			(entry) => ({
+				...entry,
+			}),
+		),
+		reviewerDispatchScope: generation.reviewerDispatchScope
+			? {
+					...generation.reviewerDispatchScope,
+					files: [...generation.reviewerDispatchScope.files],
+				}
+			: undefined,
+	};
+}
+
+export interface ReviewerScopeGenerationIdentity {
+	generation: number;
+	coderCallID: string;
+	sessionIncarnation: string;
+}
+
+/**
+ * Immutable ownership provenance retained after a background generation's
+ * reviewer consumes the live handoff. Delayed sibling completion ingestion may
+ * consult this bounded history, but only exact fingerprints and overlapping
+ * dispatch intervals can establish ownership.
+ */
+export interface ReviewerScopeOwnershipTombstone
+	extends ReviewerScopeGenerationIdentity {
+	parentSessionID: string;
+	taskId: string;
+	background: true;
+	declaredFiles: string[];
+	modifiedFiles: string[];
+	modifiedFileFingerprints: import('./hooks/reviewer-scope-file-fingerprint.js').ReviewerScopeFileFingerprint[];
+	createdAt: number;
+	readyAt: number;
+	consumedAt: number;
+}
+
+function cloneReviewerScopeOwnershipTombstone(
+	tombstone: ReviewerScopeOwnershipTombstone,
+): ReviewerScopeOwnershipTombstone {
+	return {
+		...tombstone,
+		declaredFiles: [...tombstone.declaredFiles],
+		modifiedFiles: [...tombstone.modifiedFiles],
+		modifiedFileFingerprints: tombstone.modifiedFileFingerprints.map(
+			(fingerprint) => ({ ...fingerprint }),
+		),
+	};
+}
 
 /**
  * Represents per-session state for guardrail tracking.
@@ -207,6 +306,10 @@ export interface AgentSessionState {
 	lastGateFailure: { tool: string; taskId: string; timestamp: number } | null;
 	/** Task IDs for which partial gate warning has already been issued (prevents per-task spam) */
 	partialGateWarningsIssuedForTask: Set<string>;
+	/** Task IDs for which the completion-gate violation advisory has already been issued
+	 *  (issue #1976 B3: prevents re-injecting the identical, unactionable directive on
+	 *  every subsequent Task tool call while the same task stays stuck in tests_run). */
+	completionGateWarnedForTask: Set<string>;
 	/** Whether architect attempted self-fix write after gate failure */
 	selfFixAttempted: boolean;
 	/** Value of architectWriteCount at the time the self-coding warning was last injected.
@@ -267,12 +370,96 @@ export interface AgentSessionState {
 	} | null;
 	/** Declared file scope for current coder task (null = no scope declared) */
 	declaredCoderScope: string[] | null;
+	/**
+	 * Issue #2002: the root this session actually EXECUTES in, when it differs
+	 * from the plugin-root `ctx.directory`.
+	 *
+	 * Worktree-isolated coder children are created with
+	 * `session.create({ query: { directory: <lane> } })`, and their scope binding
+	 * is derived and published against that lane. The write gates are constructed
+	 * once at plugin init with `ctx.directory` and would otherwise resolve every
+	 * session's binding, containment, and `.swarm/` reads against the project
+	 * root — which can never match a lane-rooted binding.
+	 *
+	 * TRUST BOUNDARY: written ONLY by `recordSessionWorkspaceRoot`, whose single
+	 * closed allowlist of production callers each pass `provisionWorktree`'s own
+	 * output. `ensureAgentSession`'s `directory` argument (which can carry an
+	 * agent-supplied `working_directory`, e.g. via `declare_scope`) must NEVER
+	 * write this field.
+	 *
+	 * DELIBERATELY NOT SNAPSHOTTED (issue #2002 follow-up). `serializeAgentSession`
+	 * (`src/session/snapshot-writer.ts`) intentionally omits this field, and it
+	 * MUST stay omitted. The reason is trust, not oversight: `.swarm/session/state.json`
+	 * lives under the project-root `.swarm/` directory, which the architect agent
+	 * can write, so a restored string in that file is not a trusted resolution
+	 * root — a tampered or stale snapshot could install an arbitrary root, or
+	 * re-point a session at a *different* lane it never owned (cross-lane
+	 * containment re-rooting). Persisting it would only be safe if rehydrate could
+	 * revalidate the restored value against a durable, plugin-owned record of
+	 * provisioned lanes, and no such record exists:
+	 *   - `worktree-provisioning-owner.ts`'s durable marker
+	 *     (`recordWorktreeProvisioningOwner`) stores no `worktreePath` at all, and
+	 *     its `worktreeSessionId` field is always the *parent* session id
+	 *     (`worktree-isolation.ts` passes `args.parentSessionID`, confirmed by
+	 *     every production and test call site) — it cannot answer "does child
+	 *     session X own lane path Y".
+	 *   - `background-delegations.jsonl` (`src/background/pending-delegations.ts`)
+	 *     does carry a `worktree.worktreePath` keyed by the child session id, but
+	 *     it is written only inside the `isBackgroundTrue(...)` branch of
+	 *     `delegation-gate.ts` (~line 3157) — i.e. only for `background: true` Task
+	 *     dispatches. It is never written for the ordinary synchronous worktree
+	 *     dispatch in `worktree-isolation.ts`, nor for the Lean Turbo dispatch in
+	 *     `src/turbo/lean/lane-scope.ts`, which are the two actual
+	 *     `recordSessionWorkspaceRoot` callers. It does not cover the field it
+	 *     would need to validate.
+	 *   - Re-deriving the expected path from `provisionWorktree`'s own naming
+	 *     scheme (`resolveWorktreeBaseDir(directory, worktreeDir)/parentSessionId/taskId`,
+	 *     or the `os.tmpdir()/swwt/...` Windows-shortened form) does not close the
+	 *     gap either: it requires the child's *parent* session id, which is only
+	 *     available from `delegationChains` in the very same untrusted snapshot —
+	 *     validating one untrusted field with another untrusted field is circular,
+	 *     not a validation. It would also require spawning `git worktree list` per
+	 *     restored session inside `loadSnapshot`, which runs on the plugin-init
+	 *     path under a bounded timeout (AGENTS.md invariant 1 / repro-704).
+	 * Net effect: a plugin restart mid-lane loses the recorded root, and
+	 * `resolveSessionWorkspaceDirectory` falls back to the plugin-root directory —
+	 * fail-closed, byte-identical to pre-#2002 behaviour, never a widened
+	 * authority (see its own doc comment). The lane coder is blocked with
+	 * `SCOPE_NOT_DECLARED` (`src/hooks/scope-guard.ts`,
+	 * `src/hooks/guardrails/tool-before.ts`) until a human/architect re-dispatches
+	 * it, exactly like the pre-fix bug — not worse. `rehydrateState` (which would
+	 * apply a restored value) only runs from `loadSnapshot`, itself only called at
+	 * plugin init (`src/index.ts`), so this window is a real process restart, not
+	 * something that can strip a live in-session lane coder of its root.
+	 * Do NOT add this field to `TRANSIENT_SESSION_FIELDS`
+	 * (`src/session/snapshot-reader.ts`) either — it is never restored in the
+	 * first place, so there is nothing to reset.
+	 */
+	workspaceDirectory?: string;
 	/** Last scope violation message (null = no violation) */
 	lastScopeViolation: string | null;
 	/** Flag for one-shot scope violation warning injection in messagesTransform */
 	scopeViolationDetected?: boolean;
-	/** Files modified by the current coder task (populated by guardrails toolBefore/toolAfter, reset on new coder delegation) */
+	/** Task-keyed files modified by coder work. Bounded by MAX_TRACKED_TASK_FILE_ATTRIBUTIONS. */
+	modifiedFilesByTask: Map<string, string[]>;
+	/**
+	 * Compatibility projection for callers that still inspect the active task.
+	 * Helpers in this module keep it synchronized only with `currentTaskId`.
+	 */
 	modifiedFilesThisCoderTask: string[];
+	/** Bounded coder generations awaiting exact reviewer claims. */
+	reviewerScopeGenerations?: Map<string, ReviewerScopeGeneration>;
+	/** Monotonic per-session generation source; call identity remains authoritative. */
+	reviewerScopeGenerationCounter?: number;
+	/** Non-reused identity for this in-memory parent-session incarnation. */
+	reviewerScopeIncarnation?: string;
+	/** Latest generation token by task, retained through async validation. */
+	reviewerScopeLatestGenerationByTask?: Map<
+		string,
+		ReviewerScopeGenerationIdentity
+	>;
+	/** Bounded recent background ownership retained after reviewer consumption. */
+	reviewerScopeOwnershipHistory?: Map<string, ReviewerScopeOwnershipTombstone>;
 
 	// Bounded Coder Revisions (v6.33)
 	/** Number of coder revisions in the current task (incremented on each coder delegation completion) */
@@ -374,6 +561,13 @@ export interface AgentSessionState {
 	prmHardStopPending: boolean;
 	/** Per-session escalation tracker instance (set lazily by PRM hook) */
 	prmEscalationTracker?: EscalationTracker;
+	/** Cross-turn set of already-injected PRM advisory dedupe keys
+	 *  (issue #1976 B1). The pushAdvisory helper only dedupes WITHIN a turn
+	 *  (the drain clears pendingAdvisoryMessages each turn); this set suppresses
+	 *  re-injecting the same pattern@level on subsequent tool calls until the
+	 *  pattern's count advances escalation. Bounded by distinct (pattern, level)
+	 *  pairs — at most (numPatterns × 3 levels). */
+	prmInjectedAdvisoryKeys: Set<string>;
 
 	// PR Monitor subscriptions (Phase 1)
 	/** Active PR subscriptions for the background poller, keyed by `${repoFullName}::${prNumber}` */
@@ -704,6 +898,534 @@ export function resetSwarmStatePreservingSingletons(): void {
  */
 const STALE_SESSION_TTL_MS = 7_200_000;
 
+/** Match the Stage-B scope builder's hard file-count ceiling. */
+export const MAX_REVIEWER_SCOPE_GENERATION_FILES = 256;
+/** One parent session may retain at most this many parallel task generations. */
+export const MAX_REVIEWER_SCOPE_GENERATIONS = 256;
+/** Recent consumed owners are bounded to the maximum parallel generation set. */
+export const MAX_REVIEWER_SCOPE_OWNERSHIP_HISTORY = 256;
+/** Generation expiry never exceeds the parent session's normal idle TTL. */
+export const REVIEWER_SCOPE_GENERATION_TTL_MS = STALE_SESSION_TTL_MS;
+
+function isBoundedGenerationValue(value: string, maxLength: number): boolean {
+	return (
+		value.length > 0 &&
+		value.length <= maxLength &&
+		!Array.from(value).some((char) => {
+			const code = char.charCodeAt(0);
+			return code <= 0x1f || code === 0x7f;
+		})
+	);
+}
+
+function reviewerScopeGenerationKey(
+	taskId: string,
+	coderCallID: string,
+	generation: number,
+): string {
+	return `${taskId}\0${coderCallID}\0${generation}`;
+}
+
+function reviewerScopeOwnershipKey(
+	taskId: string,
+	coderCallID: string,
+	generation: number,
+	sessionIncarnation: string,
+): string {
+	return `${taskId}\0${coderCallID}\0${generation}\0${sessionIncarnation}`;
+}
+
+function ensureReviewerScopeGenerationState(session: AgentSessionState): {
+	generations: Map<string, ReviewerScopeGeneration>;
+	counter: number;
+	incarnation: string;
+	latestByTask: Map<string, ReviewerScopeGenerationIdentity>;
+	ownershipHistory: Map<string, ReviewerScopeOwnershipTombstone>;
+} {
+	session.reviewerScopeGenerations ??= new Map();
+	session.reviewerScopeGenerationCounter ??= 0;
+	session.reviewerScopeIncarnation ??= randomUUID();
+	session.reviewerScopeLatestGenerationByTask ??= new Map();
+	session.reviewerScopeOwnershipHistory ??= new Map();
+	return {
+		generations: session.reviewerScopeGenerations,
+		counter: session.reviewerScopeGenerationCounter,
+		incarnation: session.reviewerScopeIncarnation,
+		latestByTask: session.reviewerScopeLatestGenerationByTask,
+		ownershipHistory: session.reviewerScopeOwnershipHistory,
+	};
+}
+
+function sweepReviewerScopeGenerations(
+	session: AgentSessionState,
+	now: number,
+): void {
+	const { generations } = ensureReviewerScopeGenerationState(session);
+	for (const [key, entry] of generations) {
+		// Claimed state is correlated to a durable reviewer delegation. Its
+		// terminal/error/stale lifecycle owns cleanup; an unrelated in-memory
+		// clock sweep must never invalidate a reviewer that is still running.
+		if (entry.status === 'claimed') continue;
+		if (
+			!Number.isFinite(entry.createdAt) ||
+			now < entry.createdAt ||
+			now - entry.createdAt > REVIEWER_SCOPE_GENERATION_TTL_MS
+		) {
+			generations.delete(key);
+		}
+	}
+}
+
+/** Begin one exact coder generation after the full blocking before-chain passes. */
+export function startReviewerScopeGeneration(input: {
+	parentSessionID: string;
+	taskId: string;
+	coderCallID: string;
+	background?: boolean;
+	declaredFiles?: string[];
+	createdAt?: number;
+}): ReviewerScopeGeneration | null {
+	const session = swarmState.agentSessions.get(input.parentSessionID);
+	if (
+		!session ||
+		!isBoundedGenerationValue(input.taskId, 512) ||
+		!isBoundedGenerationValue(input.coderCallID, 512)
+	) {
+		return null;
+	}
+	const now = input.createdAt ?? Date.now();
+	sweepReviewerScopeGenerations(session, now);
+	const { generations, counter, incarnation, latestByTask } =
+		ensureReviewerScopeGenerationState(session);
+	// A new coder call for the same task supersedes only older unclaimed
+	// generations. Claimed generations remain bound to their already-approved
+	// reviewer calls while the new coder generation proceeds independently.
+	for (const [key, entry] of generations) {
+		if (entry.taskId === input.taskId && entry.status !== 'claimed') {
+			generations.delete(key);
+		}
+	}
+	while (generations.size >= MAX_REVIEWER_SCOPE_GENERATIONS) {
+		const oldestUnclaimed = [...generations.entries()].find(
+			([, entry]) => entry.status !== 'claimed',
+		)?.[0];
+		if (!oldestUnclaimed) return null;
+		generations.delete(oldestUnclaimed);
+	}
+	session.reviewerScopeGenerationCounter =
+		counter >= Number.MAX_SAFE_INTEGER ? 1 : counter + 1;
+	const generation: ReviewerScopeGeneration = {
+		taskId: input.taskId,
+		coderCallID: input.coderCallID,
+		generation: session.reviewerScopeGenerationCounter,
+		sessionIncarnation: incarnation,
+		background: input.background === true,
+		declaredFiles: [...new Set(input.declaredFiles ?? [])],
+		modifiedFiles: [],
+		modifiedFileFingerprints: [],
+		status: 'collecting',
+		createdAt: now,
+	};
+	if (!latestByTask.has(generation.taskId)) {
+		while (latestByTask.size >= MAX_REVIEWER_SCOPE_GENERATIONS) {
+			const oldestTask = latestByTask.keys().next().value as string | undefined;
+			if (!oldestTask) break;
+			latestByTask.delete(oldestTask);
+		}
+	}
+	latestByTask.delete(generation.taskId);
+	latestByTask.set(generation.taskId, {
+		generation: generation.generation,
+		coderCallID: generation.coderCallID,
+		sessionIncarnation: generation.sessionIncarnation,
+	});
+	const key = reviewerScopeGenerationKey(
+		generation.taskId,
+		generation.coderCallID,
+		generation.generation,
+	);
+	generations.set(key, generation);
+	return cloneReviewerScopeGeneration(generation);
+}
+
+/** Route one child-observed write to its exact parent/task/coder generation. */
+export function recordReviewerScopeGenerationFile(input: {
+	parentSessionID: string;
+	taskId: string;
+	coderCallID: string;
+	file: string;
+	now?: number;
+}): boolean {
+	const session = swarmState.agentSessions.get(input.parentSessionID);
+	if (
+		!session ||
+		!isBoundedGenerationValue(input.file, 4_096) ||
+		!isBoundedGenerationValue(input.taskId, 512) ||
+		!isBoundedGenerationValue(input.coderCallID, 512)
+	) {
+		return false;
+	}
+	sweepReviewerScopeGenerations(session, input.now ?? Date.now());
+	const { generations } = ensureReviewerScopeGenerationState(session);
+	const matches = [...generations.values()].filter(
+		(entry) =>
+			entry.taskId === input.taskId &&
+			entry.coderCallID === input.coderCallID &&
+			entry.status === 'collecting',
+	);
+	if (matches.length !== 1) return false;
+	const generation = matches[0];
+	if (generation.modifiedFiles.includes(input.file)) return true;
+	if (generation.modifiedFiles.length >= MAX_REVIEWER_SCOPE_GENERATION_FILES) {
+		const key = reviewerScopeGenerationKey(
+			generation.taskId,
+			generation.coderCallID,
+			generation.generation,
+		);
+		generations.delete(key);
+		return false;
+	}
+	generation.modifiedFiles.push(input.file);
+	return true;
+}
+
+/**
+ * Record the bounded post-write state only after a guarded child write returns
+ * successfully. Pre-write routing in modifiedFiles remains authorization metadata.
+ */
+export function recordReviewerScopeGenerationFileFingerprint(input: {
+	parentSessionID: string;
+	taskId: string;
+	coderCallID: string;
+	fingerprint: import('./hooks/reviewer-scope-file-fingerprint.js').ReviewerScopeFileFingerprint;
+}): boolean {
+	const session = swarmState.agentSessions.get(input.parentSessionID);
+	if (!session) return false;
+	const { generations } = ensureReviewerScopeGenerationState(session);
+	const matches = [...generations.values()].filter(
+		(entry) =>
+			entry.taskId === input.taskId &&
+			entry.coderCallID === input.coderCallID &&
+			entry.status === 'collecting',
+	);
+	if (matches.length !== 1) return false;
+	const generation = matches[0];
+	if (!generation.modifiedFiles.includes(input.fingerprint.file)) return false;
+	const existingIndex = generation.modifiedFileFingerprints.findIndex(
+		(entry) => entry.file === input.fingerprint.file,
+	);
+	if (existingIndex >= 0) {
+		generation.modifiedFileFingerprints[existingIndex] = {
+			...input.fingerprint,
+		};
+		return true;
+	}
+	if (
+		generation.modifiedFileFingerprints.length >=
+		MAX_REVIEWER_SCOPE_GENERATION_FILES
+	) {
+		return false;
+	}
+	generation.modifiedFileFingerprints.push({ ...input.fingerprint });
+	return true;
+}
+
+/** Mark the exact coder call terminal; background running placeholders do not call this. */
+export function markReviewerScopeGenerationReady(input: {
+	parentSessionID: string;
+	taskId: string;
+	coderCallID: string;
+	readyAt?: number;
+}): boolean {
+	const session = swarmState.agentSessions.get(input.parentSessionID);
+	if (!session) return false;
+	const now = input.readyAt ?? Date.now();
+	sweepReviewerScopeGenerations(session, now);
+	const { generations } = ensureReviewerScopeGenerationState(session);
+	const matches = [...generations.values()].filter(
+		(entry) =>
+			entry.taskId === input.taskId &&
+			entry.coderCallID === input.coderCallID &&
+			(entry.status === 'collecting' || entry.status === 'ready'),
+	);
+	if (matches.length !== 1) return false;
+	if (matches[0].status === 'ready') return true;
+	matches[0].status = 'ready';
+	matches[0].readyAt = now;
+	return true;
+}
+
+/** Read one exact coder generation for terminal guardrail/evidence checks. */
+export function getReviewerScopeGenerationForCoderCall(input: {
+	parentSessionID: string;
+	taskId?: string;
+	coderCallID: string;
+	now?: number;
+}): ReviewerScopeGeneration | null {
+	const session = swarmState.agentSessions.get(input.parentSessionID);
+	if (!session) return null;
+	sweepReviewerScopeGenerations(session, input.now ?? Date.now());
+	const { generations } = ensureReviewerScopeGenerationState(session);
+	const matches = [...generations.values()].filter(
+		(entry) =>
+			entry.coderCallID === input.coderCallID &&
+			(input.taskId === undefined || entry.taskId === input.taskId),
+	);
+	return matches.length === 1 ? cloneReviewerScopeGeneration(matches[0]) : null;
+}
+
+/** Inspect the only ready generation for a task without claiming it. */
+export function peekReadyReviewerScopeGeneration(input: {
+	parentSessionID: string;
+	taskId: string;
+	now?: number;
+}): ReviewerScopeGeneration | null {
+	const session = swarmState.agentSessions.get(input.parentSessionID);
+	if (!session) return null;
+	sweepReviewerScopeGenerations(session, input.now ?? Date.now());
+	const { generations } = ensureReviewerScopeGenerationState(session);
+	const matches = [...generations.values()].filter(
+		(entry) => entry.taskId === input.taskId && entry.status === 'ready',
+	);
+	return matches.length === 1 ? cloneReviewerScopeGeneration(matches[0]) : null;
+}
+
+/**
+ * Claim the only ready generation for an exact task after every blocking
+ * reviewer before-hook has passed. Ambiguity fails closed to no receipt.
+ */
+export function claimReviewerScopeGeneration(input: {
+	parentSessionID: string;
+	taskId: string;
+	reviewerCallID: string;
+	now?: number;
+}): ReviewerScopeGeneration | null {
+	const session = swarmState.agentSessions.get(input.parentSessionID);
+	if (
+		!session ||
+		!isBoundedGenerationValue(input.taskId, 512) ||
+		!isBoundedGenerationValue(input.reviewerCallID, 512)
+	) {
+		return null;
+	}
+	sweepReviewerScopeGenerations(session, input.now ?? Date.now());
+	const { generations } = ensureReviewerScopeGenerationState(session);
+	const matches = [...generations.values()].filter(
+		(entry) => entry.taskId === input.taskId && entry.status === 'ready',
+	);
+	if (matches.length !== 1) return null;
+	matches[0].status = 'claimed';
+	matches[0].reviewerCallID = input.reviewerCallID;
+	return cloneReviewerScopeGeneration(matches[0]);
+}
+
+/** Bind the immutable scope captured immediately before the reviewer Task dispatch. */
+export function attachReviewerScopeGenerationDispatchSnapshot(input: {
+	parentSessionID: string;
+	taskId: string;
+	reviewerCallID: string;
+	snapshot: ReviewerScopeDispatchSnapshot;
+}): boolean {
+	const session = swarmState.agentSessions.get(input.parentSessionID);
+	if (!session) return false;
+	const { generations } = ensureReviewerScopeGenerationState(session);
+	const matches = [...generations.values()].filter(
+		(entry) =>
+			entry.taskId === input.taskId &&
+			entry.reviewerCallID === input.reviewerCallID &&
+			entry.status === 'claimed' &&
+			entry.coderCallID === input.snapshot.coderCallID &&
+			entry.generation === input.snapshot.generation &&
+			entry.sessionIncarnation === input.snapshot.sessionIncarnation,
+	);
+	if (matches.length !== 1) return false;
+	matches[0].reviewerDispatchScope = {
+		...input.snapshot,
+		files: [...input.snapshot.files],
+	};
+	return true;
+}
+
+/** Terminal one-shot consumption by exact task and reviewer Task call. */
+export function takeReviewerScopeGeneration(input: {
+	parentSessionID: string;
+	taskId: string;
+	reviewerCallID: string;
+	now?: number;
+}): ReviewerScopeGeneration | null {
+	const session = swarmState.agentSessions.get(input.parentSessionID);
+	if (!session) return null;
+	sweepReviewerScopeGenerations(session, input.now ?? Date.now());
+	const { generations } = ensureReviewerScopeGenerationState(session);
+	const matches = [...generations.entries()].filter(
+		([, entry]) =>
+			entry.taskId === input.taskId &&
+			entry.reviewerCallID === input.reviewerCallID &&
+			entry.status === 'claimed',
+	);
+	if (matches.length !== 1) return null;
+	const [key, generation] = matches[0];
+	if (
+		generation.background === true &&
+		generation.readyAt !== undefined &&
+		Number.isFinite(generation.createdAt) &&
+		Number.isFinite(generation.readyAt)
+	) {
+		const { ownershipHistory } = ensureReviewerScopeGenerationState(session);
+		while (ownershipHistory.size >= MAX_REVIEWER_SCOPE_OWNERSHIP_HISTORY) {
+			const oldestKey = ownershipHistory.keys().next().value as
+				| string
+				| undefined;
+			if (!oldestKey) break;
+			ownershipHistory.delete(oldestKey);
+		}
+		const tombstone: ReviewerScopeOwnershipTombstone = {
+			parentSessionID: input.parentSessionID,
+			taskId: generation.taskId,
+			coderCallID: generation.coderCallID,
+			generation: generation.generation,
+			sessionIncarnation: generation.sessionIncarnation,
+			background: true,
+			declaredFiles: [...generation.declaredFiles],
+			modifiedFiles: [...generation.modifiedFiles],
+			modifiedFileFingerprints: generation.modifiedFileFingerprints.map(
+				(fingerprint) => ({ ...fingerprint }),
+			),
+			createdAt: generation.createdAt,
+			readyAt: generation.readyAt,
+			consumedAt: input.now ?? Date.now(),
+		};
+		ownershipHistory.set(
+			reviewerScopeOwnershipKey(
+				tombstone.taskId,
+				tombstone.coderCallID,
+				tombstone.generation,
+				tombstone.sessionIncarnation,
+			),
+			tombstone,
+		);
+	}
+	generations.delete(key);
+	return cloneReviewerScopeGeneration(generation);
+}
+
+/** Read bounded immutable ownership history for delayed background ingestion. */
+export function getReviewerScopeOwnershipHistory(input: {
+	parentSessionID: string;
+}): ReviewerScopeOwnershipTombstone[] {
+	const session = swarmState.agentSessions.get(input.parentSessionID);
+	if (!session) return [];
+	const { ownershipHistory } = ensureReviewerScopeGenerationState(session);
+	return [...ownershipHistory.values()].map(
+		cloneReviewerScopeOwnershipTombstone,
+	);
+}
+
+/** Inspect one exact reviewer claim without consuming retryable state. */
+export function peekReviewerScopeGenerationClaim(input: {
+	parentSessionID: string;
+	taskId: string;
+	reviewerCallID: string;
+	now?: number;
+}): ReviewerScopeGeneration | null {
+	const session = swarmState.agentSessions.get(input.parentSessionID);
+	if (!session) return null;
+	sweepReviewerScopeGenerations(session, input.now ?? Date.now());
+	const { generations } = ensureReviewerScopeGenerationState(session);
+	const matches = [...generations.values()].filter(
+		(entry) =>
+			entry.taskId === input.taskId &&
+			entry.reviewerCallID === input.reviewerCallID &&
+			entry.status === 'claimed',
+	);
+	return matches.length === 1 ? cloneReviewerScopeGeneration(matches[0]) : null;
+}
+
+/** Clear one exact terminal/stale reviewer claim without touching parallel tasks. */
+export function discardReviewerScopeGenerationClaim(input: {
+	parentSessionID: string;
+	taskId?: string;
+	reviewerCallID: string;
+}): boolean {
+	const session = swarmState.agentSessions.get(input.parentSessionID);
+	if (!session) return false;
+	const { generations } = ensureReviewerScopeGenerationState(session);
+	const matches = [...generations.entries()].filter(
+		([, entry]) =>
+			(input.taskId === undefined || entry.taskId === input.taskId) &&
+			entry.reviewerCallID === input.reviewerCallID &&
+			entry.status === 'claimed',
+	);
+	if (matches.length !== 1) return false;
+	generations.delete(matches[0][0]);
+	return true;
+}
+
+/**
+ * Detect a concurrently collecting coder generation whose declaration overlaps
+ * this exact coder call. Shared declared paths cannot be attributed safely from
+ * one workspace snapshot, even when child write routing observed both calls.
+ */
+export function reviewerScopeGenerationHasDeclaredOverlap(input: {
+	parentSessionID: string;
+	taskId: string;
+	coderCallID: string;
+	declaredFiles: string[];
+}): boolean {
+	const session = swarmState.agentSessions.get(input.parentSessionID);
+	if (!session) return false;
+	const { generations } = ensureReviewerScopeGenerationState(session);
+	const declared = new Set(input.declaredFiles);
+	return [...generations.values()].some(
+		(entry) =>
+			entry.status === 'collecting' &&
+			(entry.taskId !== input.taskId ||
+				entry.coderCallID !== input.coderCallID) &&
+			entry.declaredFiles.some((file) => declared.has(file)),
+	);
+}
+
+/** Clear one exact collecting/ready coder generation on terminal error/stale. */
+export function discardReviewerScopeGenerationForCoderCall(input: {
+	parentSessionID: string;
+	taskId?: string;
+	coderCallID: string;
+}): boolean {
+	const session = swarmState.agentSessions.get(input.parentSessionID);
+	if (!session) return false;
+	const { generations } = ensureReviewerScopeGenerationState(session);
+	const matches = [...generations.entries()].filter(
+		([, entry]) =>
+			(input.taskId === undefined || entry.taskId === input.taskId) &&
+			entry.coderCallID === input.coderCallID &&
+			entry.status !== 'claimed',
+	);
+	if (matches.length !== 1) return false;
+	generations.delete(matches[0][0]);
+	return true;
+}
+
+/** Validate an async result against the latest coder generation for its task. */
+export function isReviewerScopeGenerationCurrent(input: {
+	parentSessionID: string;
+	taskId: string;
+	coderCallID: string;
+	generation: number;
+	sessionIncarnation: string;
+}): boolean {
+	const session = swarmState.agentSessions.get(input.parentSessionID);
+	if (!session) return false;
+	const { incarnation, latestByTask } =
+		ensureReviewerScopeGenerationState(session);
+	const latest = latestByTask.get(input.taskId);
+	return (
+		incarnation === input.sessionIncarnation &&
+		latest?.generation === input.generation &&
+		latest.coderCallID === input.coderCallID &&
+		latest.sessionIncarnation === input.sessionIncarnation
+	);
+}
+
 /**
  * Minimum interval (ms) between opportunistic idle sweeps triggered from the
  * per-tool-call hot path. Bounds the O(n) stale scan to at most once per
@@ -827,6 +1549,7 @@ export function startAgentSession(
 		reviewerCallCount: new Map(),
 		lastGateFailure: null,
 		partialGateWarningsIssuedForTask: new Set(),
+		completionGateWarnedForTask: new Set(),
 		selfFixAttempted: false,
 		selfCodingWarnedAtCount: 0,
 		catastrophicPhaseWarnings: new Set(),
@@ -847,7 +1570,13 @@ export function startAgentSession(
 		declaredCoderScope: null,
 		lastScopeViolation: null,
 		scopeViolationDetected: false,
+		modifiedFilesByTask: new Map(),
 		modifiedFilesThisCoderTask: [],
+		reviewerScopeGenerations: new Map(),
+		reviewerScopeGenerationCounter: 0,
+		reviewerScopeIncarnation: randomUUID(),
+		reviewerScopeLatestGenerationByTask: new Map(),
+		reviewerScopeOwnershipHistory: new Map(),
 		// Turbo Mode (v6.26)
 		turboMode: false,
 		// Lean Turbo Mode (Phase 2)
@@ -879,6 +1608,7 @@ export function startAgentSession(
 		prmLastPatternDetected: null,
 		prmTrajectoryStep: 0,
 		prmHardStopPending: false,
+		prmInjectedAdvisoryKeys: new Set(),
 		// PR Monitor subscriptions
 		prSubscriptions: new Map<string, PrSubscriptionState>(),
 	};
@@ -967,6 +1697,13 @@ export function endAgentSession(sessionId: string): void {
 	}
 	swarmState.agentSessions.delete(sessionId);
 	clearRealtimeLearningNudgeSession(sessionId);
+	// #1821: the same-session learning loop keeps per-session module state (the
+	// candidate queue and the PRM pattern-support/cooldown ledger). Both are
+	// already bounded by a 500-key FIFO, but releasing them at session end is
+	// what keeps that bound from being load-bearing — and it mirrors the
+	// nudge cleanup directly above (invariant 8).
+	resetSessionQueue(sessionId);
+	resetPrmPatternSupport(sessionId);
 }
 
 /**
@@ -1065,6 +1802,9 @@ export function ensureAgentSession(
 		if (!session.partialGateWarningsIssuedForTask) {
 			session.partialGateWarningsIssuedForTask = new Set();
 		}
+		if (!session.completionGateWarnedForTask) {
+			session.completionGateWarnedForTask = new Set();
+		}
 		if (session.selfFixAttempted === undefined) {
 			session.selfFixAttempted = false;
 		}
@@ -1118,8 +1858,36 @@ export function ensureAgentSession(
 		if (session.lastScopeViolation === undefined) {
 			session.lastScopeViolation = null;
 		}
-		if (session.modifiedFilesThisCoderTask === undefined) {
-			session.modifiedFilesThisCoderTask = [];
+		if (!(session.modifiedFilesByTask instanceof Map)) {
+			session.modifiedFilesByTask = new Map();
+			if (
+				isValidTaskId(session.currentTaskId) &&
+				Array.isArray(session.modifiedFilesThisCoderTask) &&
+				session.modifiedFilesThisCoderTask.length > 0
+			) {
+				session.modifiedFilesByTask.set(session.currentTaskId!, [
+					...new Set(session.modifiedFilesThisCoderTask),
+				]);
+			}
+		}
+		// modifiedFilesThisCoderTask is a derived compatibility view of the
+		// authoritative modifiedFilesByTask map. Re-project on every
+		// ensureAgentSession call so direct mutation/reassignment is discarded.
+		projectModifiedFilesForActiveTask(session);
+		if (!session.reviewerScopeGenerations) {
+			session.reviewerScopeGenerations = new Map();
+		}
+		if (session.reviewerScopeGenerationCounter === undefined) {
+			session.reviewerScopeGenerationCounter = 0;
+		}
+		if (!session.reviewerScopeIncarnation) {
+			session.reviewerScopeIncarnation = randomUUID();
+		}
+		if (!session.reviewerScopeLatestGenerationByTask) {
+			session.reviewerScopeLatestGenerationByTask = new Map();
+		}
+		if (!session.reviewerScopeOwnershipHistory) {
+			session.reviewerScopeOwnershipHistory = new Map();
 		}
 		if (session.scopeViolationDetected === undefined) {
 			session.scopeViolationDetected = false;
@@ -1186,6 +1954,9 @@ export function ensureAgentSession(
 		if (session.prmHardStopPending === undefined) {
 			session.prmHardStopPending = false;
 		}
+		if (!session.prmInjectedAdvisoryKeys) {
+			session.prmInjectedAdvisoryKeys = new Set();
+		}
 		// PR Monitor subscriptions migration safety
 		if (!session.prSubscriptions) {
 			session.prSubscriptions = new Map<string, PrSubscriptionState>();
@@ -1215,6 +1986,91 @@ export function ensureAgentSession(
 		throw new Error(`Failed to create guardrail session for ${sessionId}`);
 	}
 	return session;
+}
+
+/**
+ * Issue #2002 — record the root a session actually EXECUTES in, when it
+ * differs from the plugin-root `ctx.directory`.
+ *
+ * TRUST BOUNDARY (security-critical): this function performs NO path
+ * validation. `laneRoot` is trusted purely because of WHO calls it, not
+ * because of its shape — `provisionWorktree` can legitimately relocate a lane
+ * outside the swarm worktree base (e.g. a `os.tmpdir()`-shortened path on
+ * Windows when the path-budget check trips), so a shape predicate would
+ * refuse a legitimately provisioned lane and silently reintroduce the bug
+ * this closes.
+ *
+ * The only thing standing between this setter and a privilege-escalation bug
+ * is a closed allowlist of production callers, each of which passes
+ * `provisionWorktree`'s own return value — never a tool argument, never
+ * `ensureAgentSession`'s `directory` parameter (which CAN carry an
+ * agent-supplied `working_directory`, e.g. via `declare_scope`). That
+ * allowlist is mechanically enforced by
+ * `tests/unit/state/session-workspace-root-trusted-callers.test.ts`. Adding a
+ * new call site is a privilege-escalation review, not a formality: the
+ * reviewer must confirm the new caller passes `provisionWorktree` output
+ * before adding it to that test's allowlist.
+ *
+ * A blank or whitespace-only `laneRoot` is ignored (treated as unset) rather
+ * than being recorded and later resolving to `path.resolve('')` (cwd).
+ *
+ * ORDERING IS PART OF THE CONTRACT. This never creates the session — callers
+ * MUST register it with its real agent name (`ensureAgentSession(sessionId,
+ * 'coder', laneRoot)`) FIRST. Calling this on an unregistered session is a
+ * deliberate no-op, so resolution falls back to the plugin root and the write
+ * is blocked. Creating the session here instead would register
+ * `swarmState.activeAgent` as 'unknown', which fails OPEN rather than closed —
+ * see the inline comment in the body for the full chain.
+ *
+ * @param sessionId - The session identifier
+ * @param laneRoot - `provisionWorktree`'s own output; never agent-supplied
+ */
+export function recordSessionWorkspaceRoot(
+	sessionId: string,
+	laneRoot: string,
+): void {
+	const trimmed = laneRoot.trim();
+	if (!trimmed) return;
+	// MUST NOT create the session. `ensureAgentSession(sessionId)` with no agent
+	// name routes to `startAgentSession(..., 'unknown', ...)`, which sets
+	// `swarmState.activeAgent` to 'unknown' — and a later
+	// `ensureAgentSession(id, 'coder', dir)` updates `session.agentName` but
+	// never repairs `activeAgent`. That would FAIL OPEN, not closed: 'unknown'
+	// is truthy, so it passes the no-active-agent guards in
+	// `src/hooks/guardrails/tool-before.ts`, then lands in the `noScopeLenient`
+	// branch that skips the authority check for non-coder/non-architect roles,
+	// while `src/hooks/scope-guard.ts` returns early because the role is not
+	// 'coder'. A lane child's shell write would execute unenforced.
+	//
+	// Callers therefore register the session (with its real agent name) FIRST.
+	// If they have not, this is a no-op and resolution falls back to the plugin
+	// root — the fail-closed outcome.
+	const session = swarmState.agentSessions.get(sessionId);
+	if (!session) return;
+	session.workspaceDirectory = trimmed;
+}
+
+/**
+ * Issue #2002 — resolve the root a write gate should evaluate path
+ * containment and scope-binding lookups against for a given session.
+ *
+ * Fail-closed: returns `fallbackDirectory` (the plugin-root `ctx.directory`)
+ * whenever no root was recorded for this session, or the recorded value is
+ * blank/unset — i.e. byte-identical to pre-#2002 behaviour for every session
+ * that was never lane-rooted.
+ *
+ * @param sessionId - The session identifier
+ * @param fallbackDirectory - The plugin-root directory to fall back to
+ * @returns the session's recorded workspace root, or `fallbackDirectory`
+ */
+export function resolveSessionWorkspaceDirectory(
+	sessionId: string,
+	fallbackDirectory: string,
+): string {
+	const session = swarmState.agentSessions.get(sessionId);
+	const recorded = session?.workspaceDirectory;
+	if (recorded?.trim()) return recorded;
+	return fallbackDirectory;
 }
 
 /**
@@ -1377,6 +2233,136 @@ export function recordPhaseAgentDispatch(
 	session.phaseAgentsDispatched.add(normalizedName);
 }
 
+function ensureModifiedFilesByTask(
+	session: AgentSessionState,
+): Map<string, string[]> {
+	if (!(session.modifiedFilesByTask instanceof Map)) {
+		session.modifiedFilesByTask = new Map();
+	}
+	return session.modifiedFilesByTask;
+}
+
+function projectModifiedFilesForActiveTask(session: AgentSessionState): void {
+	const taskId = session.currentTaskId;
+	session.modifiedFilesThisCoderTask =
+		isValidTaskId(taskId) && session.modifiedFilesByTask instanceof Map
+			? [...(session.modifiedFilesByTask.get(taskId!) ?? [])]
+			: [];
+}
+
+/**
+ * Ensure an attribution slot exists without evicting live task data.
+ * Completed entries are reclaimed oldest-first (Map insertion order).
+ */
+function ensureModifiedFileTaskSlot(
+	session: AgentSessionState,
+	taskId: string,
+): boolean {
+	if (!isValidTaskId(taskId)) return false;
+	const entries = ensureModifiedFilesByTask(session);
+	if (entries.has(taskId)) return true;
+
+	while (entries.size >= MAX_TRACKED_TASK_FILE_ATTRIBUTIONS) {
+		const reclaimable = [...entries.keys()].find(
+			(candidate) =>
+				candidate !== taskId &&
+				session.taskWorkflowStates?.get(candidate) === 'complete',
+		);
+		if (!reclaimable) return false;
+		entries.delete(reclaimable);
+	}
+
+	entries.set(taskId, []);
+	return true;
+}
+
+/**
+ * Atomically replace one task's attributed file list.
+ *
+ * Returns false without mutation when the task id is invalid or the bounded
+ * map has no reclaimable workflow-complete slot.
+ */
+export function recordModifiedFilesForTask(
+	session: AgentSessionState,
+	taskId: string,
+	files: readonly string[],
+): boolean {
+	if (!ensureModifiedFileTaskSlot(session, taskId)) return false;
+	const normalized = [
+		...new Set(
+			files.filter((file) => typeof file === 'string' && file.length > 0),
+		),
+	];
+	session.modifiedFilesByTask.set(taskId, normalized);
+	if (session.currentTaskId === taskId) {
+		projectModifiedFilesForActiveTask(session);
+	}
+	return true;
+}
+
+/**
+ * Add one file to a task's attribution without disturbing its existing files.
+ */
+export function recordModifiedFileForTask(
+	session: AgentSessionState,
+	taskId: string,
+	file: string,
+): boolean {
+	if (typeof file !== 'string' || file.length === 0) return false;
+	const existing = getModifiedFilesForTask(session, taskId);
+	if (existing.includes(file)) return true;
+	return recordModifiedFilesForTask(session, taskId, [...existing, file]);
+}
+
+/**
+ * Return a defensive copy of the files attributed to one task.
+ */
+export function getModifiedFilesForTask(
+	session: AgentSessionState,
+	taskId: string,
+): string[] {
+	if (!isValidTaskId(taskId)) return [];
+	return [...(ensureModifiedFilesByTask(session).get(taskId) ?? [])];
+}
+
+/**
+ * Reset one task's attribution. `remove` is used at terminal cleanup; the
+ * default keeps an empty live-task slot ready for subsequent writes.
+ */
+export function resetModifiedFilesForTask(
+	session: AgentSessionState,
+	taskId: string,
+	options?: { remove?: boolean },
+): boolean {
+	if (!isValidTaskId(taskId)) return false;
+	const entries = ensureModifiedFilesByTask(session);
+	if (options?.remove) {
+		entries.delete(taskId);
+	} else {
+		if (!ensureModifiedFileTaskSlot(session, taskId)) return false;
+		entries.set(taskId, []);
+	}
+	if (session.currentTaskId === taskId) {
+		projectModifiedFilesForActiveTask(session);
+	}
+	return true;
+}
+
+/**
+ * Apply task-completion retention rules.
+ *
+ * Non-Epic sessions release attribution at the workflow-complete boundary.
+ * Epic sessions retain it until `epic_record_divergence` consumes the entry.
+ */
+export function completeModifiedFilesForTask(
+	session: AgentSessionState,
+	taskId: string,
+): void {
+	if (!session.epicModeActive) {
+		resetModifiedFilesForTask(session, taskId, { remove: true });
+	}
+}
+
 /**
  * Check if a task ID is valid (not null, undefined, empty, or whitespace-only).
  * @param taskId - The task identifier to validate
@@ -1471,6 +2457,7 @@ export function advanceTaskState(
 	// fire prematurely from stale completion data.
 	if (newState === 'complete') {
 		session.stageBCompletion?.delete(taskId);
+		completeModifiedFilesForTask(session, taskId);
 	}
 	if (options?.emitTelemetry !== false) {
 		telemetry.taskStateChanged(

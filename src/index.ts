@@ -1,4 +1,5 @@
 import * as path from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
 import type { Plugin } from '@opencode-ai/plugin';
 import packageJson from '../package.json' with { type: 'json' };
@@ -22,9 +23,16 @@ import {
 	createSwarmCommandHandler,
 } from './commands';
 import { COMMAND_REGISTRY, VALID_COMMANDS } from './commands/registry.js';
-import { loadPluginConfigWithMetaAsync } from './config';
+import {
+	getSafeDefaultConfigLoadResult,
+	loadPluginConfigWithMetaAsync,
+} from './config';
 import { syncBundledProjectSkillsIfMissingAsync } from './config/bundled-skills.js';
-import { DEFAULT_MODELS, ORCHESTRATOR_NAME } from './config/constants';
+import {
+	DEFAULT_MODELS,
+	ORCHESTRATOR_NAME,
+	SUMMARIZER_EXEMPT_TOOL_NAMES,
+} from './config/constants';
 import { resolveWorktreeIsolationConfig } from './config/index.js';
 import {
 	writeProjectConfigIfNew,
@@ -33,13 +41,15 @@ import {
 import {
 	AuthorityConfigSchema,
 	AutomationConfigSchema,
-	AutoReviewConfigSchema,
+	type AutoReviewConfig,
 	GuardrailsConfigSchema,
 	KnowledgeApplicationConfigSchema,
 	KnowledgeConfigSchema,
+	LearningConfigSchema,
 	type PluginConfig,
 	PrMonitorConfigSchema,
 	PrmConfigSchema,
+	resolveAutoReviewConfig,
 	SelfReviewConfigSchema,
 	SkillImproverConfigSchema,
 	SkillPropagationConfigSchema,
@@ -67,6 +77,7 @@ import {
 	createRepoGraphBuilderHook,
 	createSystemEnhancerHook,
 	createToolSummarizerHook,
+	outputLooksLikeBackgroundRunning,
 	safeHook,
 } from './hooks';
 import {
@@ -107,7 +118,10 @@ import {
 	knowledgeApplicationTransformScan,
 } from './hooks/knowledge-application-gate.js';
 import { createKnowledgeCuratorHook } from './hooks/knowledge-curator.js';
-import { createKnowledgeInjectorHook } from './hooks/knowledge-injector.js';
+import {
+	bumpKnowledgeGeneration,
+	createKnowledgeInjectorHook,
+} from './hooks/knowledge-injector.js';
 import { microReflectorAfter } from './hooks/micro-reflector.js';
 import { normalizeToolName } from './hooks/normalize-tool-name';
 import { createPrAutoSubscribeHook } from './hooks/pr-auto-subscribe.js';
@@ -115,6 +129,10 @@ import { enforcePrWorkflowToolBefore } from './hooks/pr-workflow-gate.js';
 import { createPrWorkflowResponseGate } from './hooks/pr-workflow-response-gate.js';
 import { createPrWorkflowSessionResolver } from './hooks/pr-workflow-session-resolver.js';
 import { collectReviewerReceiptAfter } from './hooks/review-receipt-collector.js';
+import {
+	beginApprovedReviewerScopeLifecycle,
+	completeReviewerScopeLifecycle,
+} from './hooks/reviewer-scope-lifecycle.js';
 import { collectReviewerVerdictsAfter } from './hooks/reviewer-verdict-parser.js';
 import { createScopeGuardHook } from './hooks/scope-guard.js';
 import { createSelfReviewHook } from './hooks/self-review.js';
@@ -127,8 +145,13 @@ import {
 import { createSlopDetectorHook } from './hooks/slop-detector';
 import { createSteeringConsumedHook } from './hooks/steering-consumed.js';
 import { createTrajectoryLoggerHook } from './hooks/trajectory-logger';
+import { realtimeAdmissionAfter } from './learning/admission.js';
 import { createMemoryLifecycleHooks } from './memory';
-import { createPrmHook } from './prm';
+import { loadPlan } from './plan/manager.js';
+import { createPrmHook, resolvePrmPatternPersistenceOptions } from './prm';
+import { createReviewModelDispatcher } from './review/contracts.js';
+import { createFindingValidationScheduler } from './review/finding-validator.js';
+import { captureReviewAgentModelRegistry } from './review/runtime.js';
 import { createCompactionService } from './services/compaction-service';
 import { shouldRunOnStartup } from './services/config-doctor';
 import { buildDelegationCostFields } from './services/cost-accounting.js';
@@ -136,9 +159,10 @@ import { scheduleVersionCheck } from './services/version-check.js';
 import { loadSnapshot } from './session/snapshot-reader.js';
 import { createSnapshotWriterHook } from './session/snapshot-writer.js';
 import { ensureAgentSession, getActiveWindow, swarmState } from './state';
-import { initTelemetry, telemetry } from './telemetry';
+import { initTelemetry, startHeartbeatTracking, telemetry } from './telemetry';
 import { buildPluginToolObject } from './tools/plugin-registration';
 import { error, log, warn } from './utils';
+import { pushAdvisory } from './utils/advisory-queue';
 import {
 	ENSURE_SWARM_GIT_EXCLUDED_OUTER_TIMEOUT_MS,
 	ensureSwarmGitExcluded,
@@ -178,6 +202,7 @@ export function capSessionMap<K, V>(map: Map<K, V>, max: number): void {
 
 import {
 	addDeferredWarning,
+	advisoryWarn,
 	clearDeferredWarnings,
 } from './services/warning-buffer.js';
 
@@ -196,6 +221,17 @@ const PACKAGE_ROOT = path.resolve(
 // pathological filesystems (antivirus interception, NFS stalls) — on timeout we
 // fail open and the command-path sync remains a backstop.
 const SYNC_BUNDLED_SKILLS_TIMEOUT_MS = 2_000;
+
+// Per Invariant 1 / Issue #704 / repro-704 T1 Windows failures: the plugin
+// init path used to await `loadPluginConfigWithMetaAsync` UNBOUNDED — the only
+// one of the three init-path I/O reads without a `withTimeout` wrapper. On
+// cold Windows CI runners with AV/indexing, the unbounded stat+read of up to
+// 2 config files can add 100–1000ms of latency, contributing to T1 misses.
+// 2s matches the SYNC_BUNDLED_SKILLS_TIMEOUT_MS precedent; on timeout we fail
+// open via `getSafeDefaultConfigLoadResult()` (empty config + guardrails
+// enabled), which is the same shape the loader itself returns for any config
+// read error. See `docs/audits/test-stability-audit.md` (issue #1782).
+const LOAD_PLUGIN_CONFIG_TIMEOUT_MS = 2_000;
 
 function createSwarmCommandSystemRuleHook(
 	agentDefinitions: Record<string, AgentDefinition>,
@@ -266,23 +302,58 @@ function schedulePostResolutionTasks(
 
 let createRepoGraphBuilderHookForInit = createRepoGraphBuilderHook;
 let schedulePostResolutionTasksForInit = schedulePostResolutionTasks;
+// Init-path I/O indirections (issue #1782): the three parallelized reads in
+// `initializeOpenCodeSwarm` route through these aliases so tests can inject
+// stalls / failures deterministically (the `overrideIndexInternalsForTest`
+// seam extension below). Default assignment preserves production behavior.
+let loadPluginConfigWithMetaAsyncForInit = loadPluginConfigWithMetaAsync;
+let loadSnapshotForInit = loadSnapshot;
+let ensureSwarmGitExcludedForInit = ensureSwarmGitExcluded;
+let resolveAutoReviewConfigForInit = resolveAutoReviewConfig;
 
 export function overrideIndexInternalsForTest(overrides: {
 	createRepoGraphBuilderHook?: typeof createRepoGraphBuilderHook;
 	schedulePostResolutionTasks?: typeof schedulePostResolutionTasks;
+	loadPluginConfigWithMetaAsync?: typeof loadPluginConfigWithMetaAsync;
+	loadSnapshot?: typeof loadSnapshot;
+	ensureSwarmGitExcluded?: typeof ensureSwarmGitExcluded;
+	resolveAutoReviewConfig?: typeof resolveAutoReviewConfig;
 }): () => void {
 	const previousCreateRepoGraphBuilderHook = createRepoGraphBuilderHookForInit;
 	const previousSchedulePostResolutionTasks =
 		schedulePostResolutionTasksForInit;
+	const previousLoadPluginConfigWithMetaAsync =
+		loadPluginConfigWithMetaAsyncForInit;
+	const previousLoadSnapshot = loadSnapshotForInit;
+	const previousEnsureSwarmGitExcluded = ensureSwarmGitExcludedForInit;
+	const previousResolveAutoReviewConfig = resolveAutoReviewConfigForInit;
 	if (overrides.createRepoGraphBuilderHook) {
 		createRepoGraphBuilderHookForInit = overrides.createRepoGraphBuilderHook;
 	}
 	if (overrides.schedulePostResolutionTasks) {
 		schedulePostResolutionTasksForInit = overrides.schedulePostResolutionTasks;
 	}
+	if (overrides.loadPluginConfigWithMetaAsync) {
+		loadPluginConfigWithMetaAsyncForInit =
+			overrides.loadPluginConfigWithMetaAsync;
+	}
+	if (overrides.loadSnapshot) {
+		loadSnapshotForInit = overrides.loadSnapshot;
+	}
+	if (overrides.ensureSwarmGitExcluded) {
+		ensureSwarmGitExcludedForInit = overrides.ensureSwarmGitExcluded;
+	}
+	if (overrides.resolveAutoReviewConfig) {
+		resolveAutoReviewConfigForInit = overrides.resolveAutoReviewConfig;
+	}
 	return () => {
 		createRepoGraphBuilderHookForInit = previousCreateRepoGraphBuilderHook;
 		schedulePostResolutionTasksForInit = previousSchedulePostResolutionTasks;
+		loadPluginConfigWithMetaAsyncForInit =
+			previousLoadPluginConfigWithMetaAsync;
+		loadSnapshotForInit = previousLoadSnapshot;
+		ensureSwarmGitExcludedForInit = previousEnsureSwarmGitExcluded;
+		resolveAutoReviewConfigForInit = previousResolveAutoReviewConfig;
 	};
 }
 
@@ -290,6 +361,32 @@ export function schedulePostResolutionTasksForTest(
 	tasks: readonly PostResolutionTask[],
 ): void {
 	schedulePostResolutionTasks(tasks);
+}
+
+/**
+ * Compute the effective set of tools eligible for line-based truncation.
+ *
+ * SUMMARIZER_EXEMPT_TOOL_NAMES is applied as an unconditional floor
+ * subtraction against BOTH the default allowlist and any operator-configured
+ * `tool_output.truncation_tools` override (finding R6). Line-truncating a
+ * lane/retrieval tool's payload destroys the `output_ref` rows a caller needs
+ * to recover the full content — the same unrecoverable-payload defect class
+ * the summarizer/context-budget floor already guards against — so operator
+ * config must never be able to reintroduce it via this separate rewriting
+ * layer.
+ */
+export function computeEffectiveTruncatableTools(
+	defaultTools: ReadonlySet<string>,
+	configuredTools: readonly string[] | undefined,
+): Set<string> {
+	const effective =
+		configuredTools && configuredTools.length > 0
+			? new Set(configuredTools)
+			: new Set(defaultTools);
+	for (const exempt of SUMMARIZER_EXEMPT_TOOL_NAMES) {
+		effective.delete(exempt);
+	}
+	return effective;
 }
 
 const OpenCodeSwarm: Plugin = async (ctx) => {
@@ -452,8 +549,80 @@ async function initializeOpenCodeSwarm(
 	// not raw stderr, so the buffer is the only /swarm diagnose channel).
 	clearDeferredWarnings();
 
-	const { config, loadedFromFile } = await loadPluginConfigWithMetaAsync(
-		ctx.directory,
+	// PARALLEL INIT I/O (issue #1782 / repro-704 T1 Windows failures).
+	//
+	// Three independent bounded reads used to be awaited SEQUENTIALLY here:
+	//   (1) loadPluginConfigWithMetaAsync — reads `.opencode/` config
+	//   (2) loadSnapshot                  — reads `.swarm/session-snapshot.json`
+	//   (3) ensureSwarmGitExcluded       — runs `git rev-parse` + writes `.git/info/exclude`
+	//
+	// Verified independent (cross-checked by two independent plan-critic rounds):
+	//   - loadSnapshot has NO `config` import (`src/session/snapshot-reader.ts`
+	//     imports only fs, state, hooks/utils, bun-compat, logger).
+	//   - loadPluginConfigWithMetaAsync does only `stat`+`readFile`+pure
+	//     computation; writes nothing other `init` steps read.
+	//   - ensureSwarmGitExcluded's `quiet` option is currently void-discarded
+	//     (`src/utils/gitignore-warning.ts:223-224`), so passing `{ quiet: false }`
+	//     is behavior-identical to the prior `{ quiet: config.quiet }`.
+	//   - `_swarmGitExcludedChecked` deduplication is sync check-and-set before
+	//     any `await`, so parallel invocation cannot double-spawn git.
+	//
+	// On cold Windows CI runners with AV/indexing, each step can take 100–500ms;
+	// the prior sequential shape summed them, easily exceeding the 400ms
+	// repro-704 T1 deadline. Parallelizing drops the floor to `max()` of the
+	// three. Promise.all also preserves the in-source ordering contract at
+	// `src/index.ts` (the `.swarm/` writes below run only after all three
+	// resolve, so `ensureSwarmGitExcluded` still completes before any `.swarm/`
+	// artifact is created).
+	const __initIoStart = performance.now();
+	const configLoadP = withTimeout(
+		loadPluginConfigWithMetaAsyncForInit(ctx.directory),
+		LOAD_PLUGIN_CONFIG_TIMEOUT_MS,
+		new Error(
+			`loadPluginConfigWithMetaAsync exceeded ${LOAD_PLUGIN_CONFIG_TIMEOUT_MS}ms budget; continuing with safe-default config`,
+		),
+	).catch((err: unknown) => {
+		const msg = err instanceof Error ? err.message : String(err);
+		log('loadPluginConfig timed out or failed (non-fatal)', { error: msg });
+		// advisoryWarn (not debug log) so `/swarm diagnose` surfaces this: on
+		// this path the user's agents/models/guardrails/full_auto settings are
+		// silently ignored for the entire session. The safe-default shape
+		// matches what the loader itself returns when no config file exists.
+		advisoryWarn(
+			`[opencode-swarm] Config load exceeded ${LOAD_PLUGIN_CONFIG_TIMEOUT_MS}ms budget; running with default configuration for this session.`,
+		);
+		return getSafeDefaultConfigLoadResult();
+	});
+	const snapshotP = withTimeout(
+		loadSnapshotForInit(ctx.directory),
+		5_000,
+		new Error(
+			'loadSnapshot exceeded 5s budget; continuing without snapshot rehydration',
+		),
+	).catch((err: unknown) => {
+		const msg = err instanceof Error ? err.message : String(err);
+		log('loadSnapshot timed out or failed (non-fatal)', { error: msg });
+	});
+	const gitExcludeP = withTimeout(
+		// `quiet` defaults to false; the option is currently void-discarded in
+		// `ensureSwarmGitExcluded` (src/utils/gitignore-warning.ts:223-224), so
+		// dropping `{ quiet: config.quiet }` is behavior-identical AND lets us
+		// parallelize without waiting on the config read.
+		ensureSwarmGitExcludedForInit(ctx.directory),
+		ENSURE_SWARM_GIT_EXCLUDED_OUTER_TIMEOUT_MS,
+		new Error(
+			`ensureSwarmGitExcluded exceeded ${ENSURE_SWARM_GIT_EXCLUDED_OUTER_TIMEOUT_MS}ms budget; continuing without git-hygiene check`,
+		),
+	).catch((err: unknown) => {
+		const msg = err instanceof Error ? err.message : String(err);
+		log('ensureSwarmGitExcluded timed out or failed (non-fatal)', {
+			error: msg,
+		});
+	});
+	await Promise.all([configLoadP, snapshotP, gitExcludeP]);
+	const { config, loadedFromFile } = await configLoadP;
+	log(
+		`init-path I/O completed in ${(performance.now() - __initIoStart).toFixed(1)}ms (parallel: config+snapshot+git-exclude)`,
 	);
 
 	// Full-auto mode validation: critic model must differ from architect model
@@ -530,21 +699,11 @@ async function initializeOpenCodeSwarm(
 	// Store SDK client for curator LLM delegation
 	swarmState.opencodeClient = ctx.client;
 
-	// v6.18 Session persistence — restore state from previous session.
-	// Bounded with a 5s timeout (issue #704): `loadSnapshot` is read-only, so
-	// timing out is safe — it only affects rehydration, not durable state. A
-	// slow filesystem (network home, iCloud-backed mount) must never block
-	// the plugin host's `await server(...)` indefinitely.
-	await withTimeout(
-		loadSnapshot(ctx.directory),
-		5_000,
-		new Error(
-			'loadSnapshot exceeded 5s budget; continuing without snapshot rehydration',
-		),
-	).catch((err: unknown) => {
-		const msg = err instanceof Error ? err.message : String(err);
-		log('loadSnapshot timed out or failed (non-fatal)', { error: msg });
-	});
+	// `loadSnapshot` was awaited in the parallel block above. Its comment
+	// (preserved here for context): bounded with a 5s timeout (issue #704);
+	// read-only, so timing out is safe — it only affects rehydration, not
+	// durable state. A slow filesystem (network home, iCloud-backed mount)
+	// must never block the plugin host's `await server(...)` indefinitely.
 
 	// Construct the repo-graph hook before any other side-task, but register its
 	// scan with the wrapper-owned post-resolution queue. Issue #704: the
@@ -557,6 +716,7 @@ async function initializeOpenCodeSwarm(
 	// watchdog around the detached scan.
 	// Ensure .swarm/ exists before repo graph init tries to save the first graph.
 	initTelemetry(ctx.directory);
+	startHeartbeatTracking();
 
 	const repoGraphHook = createRepoGraphBuilderHookForInit(
 		ctx.directory,
@@ -582,33 +742,14 @@ async function initializeOpenCodeSwarm(
 			.finally(() => clearTimeout(watchdog));
 	});
 
-	// Protect .swarm/ from Git before any write. Uses git CLI so worktrees and
-	// submodules (where .git is a file, not a directory) are handled correctly.
-	// The await is intentional: the exclude write should complete before the
-	// writes below create .swarm/ artifacts. The git subprocess calls finish in
-	// <50ms on a healthy host.
-	//
-	// HARD-BOUNDED via withTimeout because the OpenCode plugin host silently
-	// drops a plugin whose entry never resolves (issue #704). On a pathological
-	// host (antivirus interception, credential helper prompt, NFS-stalled .git,
-	// Bun-on-Windows stdin pipe semantics) this call could otherwise block
-	// plugin init forever and produce the symptom "no agents in TUI/GUI".
-	// On timeout we fail open: log non-fatal and let init continue.
-	// Repo-graph startup is registered above but cannot begin until the wrapper
-	// schedules the post-resolution queue, so this awaited hygiene check always
-	// completes before the graph can write `.swarm/repo-graph.json`.
-	await withTimeout(
-		ensureSwarmGitExcluded(ctx.directory, { quiet: config.quiet }),
-		ENSURE_SWARM_GIT_EXCLUDED_OUTER_TIMEOUT_MS,
-		new Error(
-			`ensureSwarmGitExcluded exceeded ${ENSURE_SWARM_GIT_EXCLUDED_OUTER_TIMEOUT_MS}ms budget; continuing without git-hygiene check`,
-		),
-	).catch((err: unknown) => {
-		const msg = err instanceof Error ? err.message : String(err);
-		log('ensureSwarmGitExcluded timed out or failed (non-fatal)', {
-			error: msg,
-		});
-	});
+	// `ensureSwarmGitExcluded` was awaited in the parallel block above. Its
+	// comment (preserved here for context): protects .swarm/ from Git before
+	// any write; uses git CLI so worktrees and submodules (where .git is a
+	// file, not a directory) are handled correctly. HARD-BOUNDED via
+	// withTimeout because the OpenCode plugin host silently drops a plugin
+	// whose entry never resolves (issue #704). Promise.all above guarantees
+	// the exclude write completes before any `.swarm/` artifact is created
+	// below — matching the in-source ordering contract.
 
 	// FR-103: Startup orphan recovery — reclaim orphaned worktrees and branches
 	// from crashed sessions. At plugin init no sessions are active yet, so
@@ -717,16 +858,36 @@ async function initializeOpenCodeSwarm(
 		return null;
 	});
 
+	let autoReviewConfig: AutoReviewConfig;
+	try {
+		autoReviewConfig = resolveAutoReviewConfigForInit(config.auto_review ?? {});
+	} catch (error) {
+		addDeferredWarning(
+			`[swarm] Invalid auto_review configuration; auto-review is disabled until corrected: ${error instanceof Error ? error.message : String(error)}`,
+		);
+		autoReviewConfig = resolveAutoReviewConfigForInit({ enabled: false });
+	}
+	// Agent prompts must use the same release-aware resolution as runtime hooks.
+	// In particular, a future approved v8 default must not leave the reviewer on
+	// the legacy output contract merely because `auto_review` was omitted.
+	const configWithResolvedAutoReview = {
+		...config,
+		auto_review: autoReviewConfig,
+	};
 	const agents = getAgentConfigs(
-		config,
+		configWithResolvedAutoReview,
 		ctx.directory,
 		undefined,
 		projectContext ?? undefined,
 	);
-	const agentDefinitions = createAgents(config, projectContext ?? undefined);
+	const agentDefinitions = createAgents(
+		configWithResolvedAutoReview,
+		projectContext ?? undefined,
+	);
 	const agentDefinitionMap = Object.fromEntries(
 		agentDefinitions.map((agent) => [agent.name, agent]),
 	);
+	const instanceGeneratedAgentNames = Object.freeze(Object.keys(agents));
 
 	// Collect all registered curator agent names across all swarms.
 	// The factory resolves the correct name at call time by matching the active
@@ -758,7 +919,7 @@ async function initializeOpenCodeSwarm(
 	// user-supplied prose like `not_an_architect` could collapse to
 	// `architect` via suffix-only matching and slip past the delegation
 	// guard (adversarial review C1 fix).
-	swarmState.generatedAgentNames = Object.keys(agents);
+	swarmState.generatedAgentNames = [...instanceGeneratedAgentNames];
 
 	const pipelineHook = createPipelineTrackerHook(config, ctx.directory);
 	const systemEnhancerHook = createSystemEnhancerHook(config, ctx.directory);
@@ -769,14 +930,26 @@ async function initializeOpenCodeSwarm(
 	const compactionHook = createCompactionCustomizerHook(config, ctx.directory);
 	const contextBudgetHandler = createContextBudgetHandler(config);
 	const evaluationModelDispatcher = createEvaluationModelDispatcher(ctx.client);
+	const reviewModelDispatcher = createReviewModelDispatcher(ctx.client);
+	const findingValidationScheduler = createFindingValidationScheduler();
+	const reviewAgentModelRegistry = captureReviewAgentModelRegistry(
+		config,
+		instanceGeneratedAgentNames,
+	);
+	const getActiveReviewAgentName = (sessionID: string): string | undefined =>
+		swarmState.activeAgent.get(sessionID) ??
+		swarmState.agentSessions.get(sessionID)?.agentName;
 	const commandHandler = createSwarmCommandHandler(
 		ctx.directory,
 		agentDefinitionMap,
 		{
-			getActiveAgentName: (sessionID) => swarmState.activeAgent.get(sessionID),
+			getActiveAgentName: getActiveReviewAgentName,
 			packageRoot: PACKAGE_ROOT,
 			registeredAgents: agents,
 			evaluationModelDispatcher,
+			reviewModelDispatcher,
+			autoReviewConfig,
+			reviewAgentModelRegistry,
 		},
 	);
 	const swarmCommandSystemRuleHook = createSwarmCommandSystemRuleHook(
@@ -784,9 +957,23 @@ async function initializeOpenCodeSwarm(
 		agents,
 	);
 	const activityHooks = createAgentActivityHooks(config, ctx.directory);
+	// #1821 Workstream B: real-time admission + PRM pattern persistence budgets.
+	// Parsed once at init (pure Zod, no I/O) so the hot hook path reads plain
+	// numbers rather than re-parsing per tool call.
+	const learningConfig = LearningConfigSchema.parse(config.learning ?? {});
 	const prmHook = createPrmHook(
 		config.prm ?? PrmConfigSchema.parse({}),
 		ctx.directory,
+		// #1821 F3: this mapping used to be an inline literal that ANDed
+		// `realtime_admission.enabled` into the producer's `enabled` flag, which
+		// also disabled the hook's durable `appendInsightCandidates` backstop — so
+		// a deployment with real-time admission off wrote no PRM candidate to
+		// `.swarm/insight-candidates.jsonl` and the phase-boundary drain never saw
+		// one, the exact loss AC8 forbids. `resolvePrmPatternPersistenceOptions`
+		// owns the coupling now (durable ← `prm_persistence.enabled`, enqueue ←
+		// `realtime_admission.enabled`) and is asserted directly by
+		// tests/unit/learning/wiring.test.ts.
+		resolvePrmPatternPersistenceOptions(learningConfig),
 	);
 	const trajectoryLoggerHook = createTrajectoryLoggerHook(
 		{
@@ -795,7 +982,16 @@ async function initializeOpenCodeSwarm(
 		},
 		ctx.directory,
 	);
-	const delegationGateHooks = createDelegationGateHook(config, ctx.directory);
+	const delegationGateHooks = createDelegationGateHook(
+		configWithResolvedAutoReview,
+		ctx.directory,
+	);
+	const advisoryInjector = (sessionId: string, message: string) => {
+		const session = swarmState.agentSessions.get(sessionId);
+		if (session) {
+			pushAdvisory(session, message);
+		}
+	};
 	// Advisory ingester for trusted background-subagent completion signals.
 	// No-op unless hooks.background_subagents is opted in; never advances gates.
 	const backgroundCompletionObserver = createBackgroundCompletionObserver({
@@ -805,6 +1001,14 @@ async function initializeOpenCodeSwarm(
 					?.background_subagents === true,
 		},
 		directory: ctx.directory,
+		reviewerReceiptOptions: {
+			dispatcher: reviewModelDispatcher,
+			config: autoReviewConfig,
+			generatedAgentNames: instanceGeneratedAgentNames,
+			agentModelRegistry: reviewAgentModelRegistry,
+			injectAdvisory: advisoryInjector,
+			validationScheduler: findingValidationScheduler,
+		},
 	});
 	const delegationSanitizerHook = createDelegationSanitizerHook(ctx.directory);
 	const memoryLifecycleHooks = createMemoryLifecycleHooks({
@@ -872,6 +1076,109 @@ async function initializeOpenCodeSwarm(
 		authorityConfig,
 		worktreeBaseDirOverrides,
 	);
+	const durableBackgroundAdvisoryMessagesTransform = async (
+		input: Record<string, never>,
+		output: {
+			messages?: Array<{
+				info: { role: string; agent?: string; sessionID?: string };
+				parts: Array<{ type: string; text?: string; [key: string]: unknown }>;
+			}>;
+		},
+	): Promise<void> => {
+		const mctx = resolveMessageTransformContext(output);
+		if (!mctx.sessionID) {
+			await guardrailsHooks.messagesTransform(input, output);
+			return;
+		}
+		const observedTexts = (output.messages ?? []).flatMap((message) =>
+			(message.parts ?? [])
+				.filter((part) => part.type === 'text' && typeof part.text === 'string')
+				.map((part) => part.text as string),
+		);
+		await backgroundCompletionObserver.ackObservedAdvisories(
+			mctx.sessionID,
+			observedTexts,
+		);
+		const prepared = await backgroundCompletionObserver.prepareAdvisories(
+			mctx.sessionID,
+		);
+		if (!prepared) {
+			await guardrailsHooks.messagesTransform(input, output);
+			return;
+		}
+		const session = swarmState.agentSessions.get(mctx.sessionID);
+		const pendingBefore = session
+			? [...(session.pendingAdvisoryMessages ?? [])]
+			: undefined;
+		// Snapshot guardrails-affected session flags so a failed advisory
+		// injection can fully undo guardrails' one-shot side effects (e.g.
+		// resumeModelAdvisoryDone, configModelAdvisoryDone). Without this,
+		// a rollback leaves those flags permanently set, and guardrails
+		// skips the corresponding advisories on the next turn.
+		const guardrailsSnapshot = session
+			? {
+					resumeModelAdvisoryDone: session.resumeModelAdvisoryDone,
+					configModelAdvisoryDone: session.configModelAdvisoryDone,
+					lastObservedModel: session.lastObservedModel,
+					lastObservedProviderID: session.lastObservedProviderID,
+					lastProviderRecoveryFingerprint:
+						session.lastProviderRecoveryFingerprint,
+					loopWarningPending: session.loopWarningPending,
+				}
+			: undefined;
+		// Capture messages BEFORE the try block so a structuredClone failure
+		// never leaves messagesBefore uninitialized (issue #1961 M-1).
+		const messagesBefore = output.messages
+			? structuredClone(output.messages)
+			: undefined;
+		try {
+			if (session) {
+				for (const message of prepared.messages) {
+					pushAdvisory(session, message);
+				}
+			}
+			await guardrailsHooks.messagesTransform(input, output);
+			const delivered = prepared.messages.every((message) =>
+				(output.messages ?? []).some((candidate) =>
+					(candidate.parts ?? []).some(
+						(part) =>
+							part.type === 'text' &&
+							typeof part.text === 'string' &&
+							part.text.includes(message),
+					),
+				),
+			);
+			if (!delivered) {
+				throw new Error('durable background advisory insertion failed');
+			}
+		} catch (error) {
+			if (session && pendingBefore) {
+				session.pendingAdvisoryMessages = pendingBefore;
+			}
+			// Restore guardrails-specific session flags to their pre-guardrails
+			// state so a retry does not skip one-shot advisories (PRR-001).
+			if (session && guardrailsSnapshot) {
+				session.resumeModelAdvisoryDone =
+					guardrailsSnapshot.resumeModelAdvisoryDone;
+				session.configModelAdvisoryDone =
+					guardrailsSnapshot.configModelAdvisoryDone;
+				session.lastObservedModel = guardrailsSnapshot.lastObservedModel;
+				session.lastObservedProviderID =
+					guardrailsSnapshot.lastObservedProviderID;
+				session.lastProviderRecoveryFingerprint =
+					guardrailsSnapshot.lastProviderRecoveryFingerprint;
+				session.loopWarningPending = guardrailsSnapshot.loopWarningPending;
+			}
+			output.messages = messagesBefore;
+			await backgroundCompletionObserver.releaseAdvisories(
+				mctx.sessionID,
+				prepared,
+			);
+			warn(
+				`[background] advisory injection rolled back for ${mctx.sessionID}: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	};
 
 	// Full-auto intercept: autonomous oversight when full-auto mode is active
 	const fullAutoInterceptHook = createFullAutoInterceptHook(
@@ -913,13 +1220,6 @@ async function initializeOpenCodeSwarm(
 
 	// Watchdog: scope-guard + delegation-ledger
 	const watchdogConfig = WatchdogConfigSchema.parse(config.watchdog ?? {});
-	const advisoryInjector = (sessionId: string, message: string) => {
-		const s = swarmState.agentSessions.get(sessionId);
-		if (s) {
-			s.pendingAdvisoryMessages ??= [];
-			s.pendingAdvisoryMessages.push(message);
-		}
-	};
 
 	const scopeGuardHook = createScopeGuardHook(
 		{
@@ -966,8 +1266,12 @@ async function initializeOpenCodeSwarm(
 	// ephemeral session to review the execution diff at task/phase
 	// boundaries. Advisory + fire-and-forget — never blocks a tool call.
 	const autoReviewHook = createAutoReviewHook({
-		config: AutoReviewConfigSchema.parse(config.auto_review ?? {}),
+		config: autoReviewConfig,
 		directory: ctx.directory,
+		dispatcher: reviewModelDispatcher,
+		generatedAgentNames: instanceGeneratedAgentNames,
+		agentModelRegistry: reviewAgentModelRegistry,
+		getActiveAgentName: getActiveReviewAgentName,
 		injectAdvisory: advisoryInjector,
 	});
 
@@ -1066,8 +1370,7 @@ async function initializeOpenCodeSwarm(
 					(sessionId, message) => {
 						const s = swarmState.agentSessions.get(sessionId);
 						if (s) {
-							s.pendingAdvisoryMessages ??= [];
-							s.pendingAdvisoryMessages.push(message);
+							pushAdvisory(s, message);
 						}
 					},
 				)
@@ -1085,8 +1388,7 @@ async function initializeOpenCodeSwarm(
 					(sessionId, message) => {
 						const s = swarmState.agentSessions.get(sessionId);
 						if (s) {
-							s.pendingAdvisoryMessages ??= [];
-							s.pendingAdvisoryMessages.push(message);
+							pushAdvisory(s, message);
 						}
 					},
 				)
@@ -1105,8 +1407,7 @@ async function initializeOpenCodeSwarm(
 					(sessionId, message) => {
 						const s = swarmState.agentSessions.get(sessionId);
 						if (s) {
-							s.pendingAdvisoryMessages ??= [];
-							s.pendingAdvisoryMessages.push(message);
+							pushAdvisory(s, message);
 						}
 					},
 				)
@@ -1440,11 +1741,15 @@ async function initializeOpenCodeSwarm(
 			agentDefinitionMap,
 			config,
 			evaluationModelDispatcher,
+			reviewModelDispatcher,
+			instanceGeneratedAgentNames,
+			reviewAgentModelRegistry,
+			getActiveReviewAgentName,
 		),
 
-		// Issue #1151 PR 2 (Stage A): observe the background-subagent completion signal.
-		// ADVISORY/observer-only - catches locally so it can never block event delivery or
-		// plugin load. Background observer is no-op unless hooks.background_subagents is opted in.
+		// Observe and ingest trusted background-subagent terminal signals. Errors
+		// are caught locally so completion handling can never block event delivery
+		// or plugin load. The observer is opt-in and fail-closed.
 		event: async (input: { event: unknown }): Promise<void> => {
 			try {
 				rememberAssistantUsageEvent(input);
@@ -1841,6 +2146,11 @@ async function initializeOpenCodeSwarm(
 					description:
 						'Use /swarm pr-review to launch deep PR review with multi-lane analysis',
 				},
+				'swarm-review': {
+					template: '/swarm review $ARGUMENTS',
+					description:
+						'Use /swarm review to run the bounded whole-diff review engine for the selected local scope',
+				},
 				'swarm-pr-feedback': {
 					template: '/swarm pr-feedback $ARGUMENTS',
 					description:
@@ -2071,6 +2381,10 @@ async function initializeOpenCodeSwarm(
 					description:
 						'Use /swarm doctor tools to run tool registration coherence check',
 				},
+				'swarm-context-map-stats': {
+					template: '/swarm context-map stats',
+					description: shortcutDescription('context-map-stats'),
+				},
 				'swarm-link': {
 					template: '/swarm link $ARGUMENTS',
 					description:
@@ -2119,7 +2433,7 @@ async function initializeOpenCodeSwarm(
 				pipelineHook['experimental.chat.messages.transform'],
 				contextBudgetHandler,
 				initOrphanRecoveryAdvisoryHook.messagesTransform,
-				guardrailsHooks.messagesTransform,
+				durableBackgroundAdvisoryMessagesTransform,
 				fullAutoInterceptHook?.messagesTransform,
 				ccCommandInterceptHook?.messagesTransform,
 				delegationGateHooks.messagesTransform,
@@ -2190,9 +2504,10 @@ async function initializeOpenCodeSwarm(
 			// biome-ignore lint/suspicious/noExplicitAny: Plugin API requires generic hook wrappers
 		) as any,
 
-		// Correctness boundary: while a durable PR workflow gate exists, no
-		// architect text can masquerade as a terminal verdict or closure response.
-		// Raw-await this hook so gate-state read failures block text completion.
+		// Correctness boundary: while a durable PR workflow gate exists, architect
+		// text is prepended with a workflow-active banner so it cannot masquerade
+		// as a terminal verdict or closure response. Raw-await this hook so
+		// gate-state read failures block text completion.
 		'experimental.text.complete': prWorkflowResponseGate.textComplete,
 
 		// Inject system prompt enhancements + phase monitor (when phase_preflight or knowledge enabled)
@@ -2352,7 +2667,7 @@ async function initializeOpenCodeSwarm(
 				prWorkflowControllerSessionID,
 				normalizeToolName(input.tool) ?? input.tool,
 				prWorkflowToolContext.args ?? undefined,
-				swarmState.generatedAgentNames,
+				instanceGeneratedAgentNames,
 			);
 
 			// 5. Full-Auto v2 outbound delegation guard (FAIL-CLOSED).
@@ -2425,8 +2740,7 @@ async function initializeOpenCodeSwarm(
 					input.sessionID,
 					swarmState.activeAgent.get(input.sessionID) ?? ORCHESTRATOR_NAME,
 				);
-				skillSession.pendingAdvisoryMessages ??= [];
-				skillSession.pendingAdvisoryMessages.push(skillResult.reason);
+				pushAdvisory(skillSession, skillResult.reason);
 			}
 
 			// 8. Skill injection: auto-inject recommended skills when SKILLS field
@@ -2491,8 +2805,8 @@ async function initializeOpenCodeSwarm(
 				);
 				if (!pressureSession.contextPressureWarningSent) {
 					pressureSession.contextPressureWarningSent = true;
-					pressureSession.pendingAdvisoryMessages ??= [];
-					pressureSession.pendingAdvisoryMessages.push(
+					pushAdvisory(
+						pressureSession,
 						`CONTEXT PRESSURE: ${swarmState.lastBudgetPct.toFixed(1)}% of context window used. Prioritize completing the current task before starting new work.`,
 					);
 				}
@@ -2502,6 +2816,20 @@ async function initializeOpenCodeSwarm(
 			// Wrapped in safeHook intentionally: errors here must NOT block
 			// the tool call that the fail-closed chain above has already
 			// approved.
+			// Stage-B scope state begins only after every blocking before-hook
+			// above approved this exact Task call. Starting or claiming earlier
+			// would strand identity-bound state when a later policy gate throws.
+			if (autoReviewConfig.enabled) {
+				await beginApprovedReviewerScopeLifecycle({
+					directory: ctx.directory,
+					tool: input.tool,
+					args: toolBeforeArgs,
+					parentSessionID: input.sessionID,
+					callID: input.callID,
+					maxBytes: autoReviewConfig.max_diff_kb * 1024,
+				});
+			}
+
 			await safeHook(activityHooks.toolBefore)(input, output);
 			// biome-ignore lint/suspicious/noExplicitAny: Plugin API requires generic hook wrappers
 		}) as any,
@@ -2526,6 +2854,16 @@ async function initializeOpenCodeSwarm(
 			const afterCtx = resolveToolAfterContext(
 				input as { tool: string; sessionID: string; callID: string },
 			);
+			if (autoReviewConfig.enabled && isTaskTool) {
+				await completeReviewerScopeLifecycle({
+					directory: ctx.directory,
+					tool: input.tool,
+					args: afterCtx.args,
+					output,
+					parentSessionID: input.sessionID,
+					callID: input.callID,
+				});
+			}
 
 			const hookChain = async (): Promise<void> => {
 				await activityHooks.toolAfter(input, output);
@@ -2583,9 +2921,56 @@ async function initializeOpenCodeSwarm(
 								maxCalls: knowledgeConfig.enrichment.max_calls_per_day,
 								window: knowledgeConfig.enrichment.quota_window,
 							},
+							// #1821: also hand new candidates to the same-session
+							// admission queue. The durable append stays the crash backstop.
+							{
+								enabled: learningConfig.realtime_admission.enabled,
+								maxQueueSize: learningConfig.realtime_admission.max_queue_size,
+							},
 						),
 					)(input, output);
 				}
+				// #1821 Workstream B: drain the same-session admission queue.
+				// Called UNCONDITIONALLY and self-gating inside — there is deliberately
+				// NO `return` here or anywhere else in `hookChain`, because an early
+				// return would skip every downstream hook for non-Task tool calls.
+				// The adapter's first check is `isTaskTool`, and its second is an O(1)
+				// queue-depth probe, so the non-Task path does no I/O and takes no lock.
+				await safeHook(async () => {
+					const summary = await realtimeAdmissionAfter(
+						ctx.directory,
+						{ tool: input.tool, sessionID: input.sessionID },
+						learningConfig.realtime_admission,
+						async () => {
+							const plan = await loadPlan(ctx.directory).catch(() => null);
+							return {
+								knowledgeConfig,
+								projectName: plan?.title ?? 'unknown',
+								phaseNumber: plan?.current_phase ?? 1,
+								sessionID: input.sessionID,
+								llmDelegate: createCuratorLLMDelegate(
+									ctx.directory,
+									'phase',
+									input.sessionID,
+								),
+								onKnowledgeChanged: bumpKnowledgeGeneration,
+							};
+						},
+					);
+					// `DrainSummary`'s counters were computed and discarded here, which
+					// made `deferred` and `failed` — the two that say the drain did NOT
+					// finish its work — unobservable in production (issue #1821).
+					// `log` is gated on OPENCODE_SWARM_DEBUG and writes to stderr, never
+					// to a chat-visible stream (AGENTS.md invariant 10). `undefined`
+					// means a gate short-circuited before any drain ran, which is the
+					// overwhelmingly common case on the hot path and must stay silent.
+					if (summary) {
+						log('realtime admission drain', {
+							sessionID: input.sessionID,
+							...summary,
+						});
+					}
+				})(input, output);
 				// Reviewer receipt collection: persist a returning reviewer Task's
 				// VERDICT/RISK/ISSUES block as a durable review receipt. Fail-open;
 				// independent of the knowledge system.
@@ -2597,14 +2982,23 @@ async function initializeOpenCodeSwarm(
 						{
 							tool: input.tool,
 							sessionID: input.sessionID,
+							callID: input.callID,
 							args: afterCtx.args,
 						},
 						output,
+						{
+							dispatcher: reviewModelDispatcher,
+							config: autoReviewConfig,
+							generatedAgentNames: instanceGeneratedAgentNames,
+							agentModelRegistry: reviewAgentModelRegistry,
+							injectAdvisory: advisoryInjector,
+							validationScheduler: findingValidationScheduler,
+						},
 					);
 				})(input, output);
 				// Auto-review (opt-in): fire-and-forget execution-diff review by
 				// the reviewer model at task/phase boundaries.
-				await safeHook(autoReviewHook.toolAfter)(input, output);
+				await safeHook(autoReviewHook.toolAfter)(input, afterCtx);
 				await safeHook(prmHook.toolAfter)(input, output);
 				await guardrailsHooks.toolAfter(input, output);
 				if (_dbg)
@@ -2647,8 +3041,8 @@ async function initializeOpenCodeSwarm(
 							const sessionId = input.sessionID;
 							const session = swarmState.agentSessions.get(sessionId);
 							if (session) {
-								session.pendingAdvisoryMessages ??= [];
-								session.pendingAdvisoryMessages.push(
+								pushAdvisory(
+									session,
 									`ADVERSARIAL PATTERN DETECTED: ${adversarialMatches.map((p) => p.pattern).join(', ')}. ` +
 										'Review agent output for potential prompt injection or gate bypass.',
 								);
@@ -2699,8 +3093,7 @@ async function initializeOpenCodeSwarm(
 						);
 						const session = swarmState.agentSessions.get(input.sessionID);
 						if (session) {
-							session.pendingAdvisoryMessages ??= [];
-							session.pendingAdvisoryMessages.push(spiralResult.message);
+							pushAdvisory(session, spiralResult.message);
 						}
 					}
 				} catch {
@@ -2792,10 +3185,10 @@ async function initializeOpenCodeSwarm(
 						'schema_drift',
 					]);
 					const configuredTools = toolOutputConfig.truncation_tools;
-					const truncatableTools =
-						configuredTools && configuredTools.length > 0
-							? new Set(configuredTools)
-							: defaultTruncatableTools;
+					const truncatableTools = computeEffectiveTruncatableTools(
+						defaultTruncatableTools,
+						configuredTools,
+					);
 					const maxLines =
 						toolOutputConfig.per_tool?.[input.tool] ??
 						toolOutputConfig.max_lines ??
@@ -2827,6 +3220,8 @@ async function initializeOpenCodeSwarm(
 			// Hooks must see the original subagent identity to record evidence
 			// correctly. The handoff restores architect identity afterward.
 			if (isTaskTool) {
+				const backgroundResultIsRunning =
+					outputLooksLikeBackgroundRunning(output);
 				const sessionId = input.sessionID;
 				const agentName = swarmState.activeAgent.get(sessionId) || 'unknown';
 				const baseAgentName = stripKnownSwarmPrefix(agentName);
@@ -2851,56 +3246,61 @@ async function initializeOpenCodeSwarm(
 				if (taskSession) {
 					taskSession.delegationActive = false;
 					taskSession.lastAgentEventTime = Date.now();
-					telemetry.delegationEnd(
-						sessionId,
-						agentName,
-						taskSession.currentTaskId || '',
-						'completed',
-						costFields,
-					);
-					// Pipeline continuation advisory — prevents happy-path stall when
-					// delegated agents return clean results. The architect must resume
-					// direct tool execution for remaining QA gate steps.
-					if (
-						baseAgentName === 'reviewer' ||
-						baseAgentName === 'test_engineer' ||
-						baseAgentName === 'critic' ||
-						baseAgentName === 'critic_sounding_board'
-					) {
-						taskSession.pendingAdvisoryMessages ??= [];
-						taskSession.pendingAdvisoryMessages.push(
-							`[PIPELINE] ${baseAgentName} delegation complete for task ${taskSession.currentTaskId ?? 'unknown'}. ` +
-								`Resume the QA gate pipeline — check your task pipeline steps for the next required action. ` +
-								`Do not stop here.`,
+					// A background Task's running placeholder is a handoff boundary,
+					// not terminal completion. Restore architect continuation now, but
+					// defer completion telemetry/advisories to the trusted terminal event.
+					if (!backgroundResultIsRunning) {
+						telemetry.delegationEnd(
+							sessionId,
+							agentName,
+							taskSession.currentTaskId || '',
+							'completed',
+							costFields,
 						);
-					}
-					// Issue #414: Wire Target B — parse sounding-board response and inject verdict advisory.
-					// Note: output.output is NOT truncated for task tools (tool name 'task' is not
-					// in defaultTruncatableTools), so the full critic response is available here.
-					if (baseAgentName === 'critic_sounding_board') {
-						const rawResponse =
-							typeof output.output === 'string' ? output.output : '';
-						const parsed = parseSoundingBoardResponse(rawResponse);
-						taskSession.pendingAdvisoryMessages ??= [];
-						if (parsed) {
-							let verdictMsg = `[SOUNDING_BOARD] Verdict: ${parsed.verdict}. ${parsed.reasoning}`;
-							if (parsed.improvedQuestion)
-								verdictMsg += ` Rephrase to: ${parsed.improvedQuestion}`;
-							if (parsed.answer) verdictMsg += ` Answer: ${parsed.answer}`;
-							if (parsed.warning) verdictMsg += ` WARNING: ${parsed.warning}`;
-							taskSession.pendingAdvisoryMessages.push(verdictMsg);
-							taskSession.lastDelegationReason = 'critic_consultation';
-						} else {
-							// Parsing failed — inject a fallback so the architect is not left without
-							// guidance. Use conservative behavior: treat as REPHRASE (needs review)
-							// rather than silently approving. Expected format:
-							// "Verdict: [APPROVED|REPHRASE|RESOLVE|UNNECESSARY]"
-							taskSession.pendingAdvisoryMessages.push(
-								`[SOUNDING_BOARD] WARNING: Could not parse a structured verdict from ` +
-									`critic_sounding_board response (${rawResponse.length} chars). ` +
-									`Treat as REPHRASE — review the raw response before surfacing to user or escalating. ` +
-									`Do not silently accept as resolved.`,
+						// Pipeline continuation advisory — prevents happy-path stall when
+						// delegated agents return clean results. The architect must resume
+						// direct tool execution for remaining QA gate steps.
+						if (
+							baseAgentName === 'reviewer' ||
+							baseAgentName === 'test_engineer' ||
+							baseAgentName === 'critic' ||
+							baseAgentName === 'critic_sounding_board'
+						) {
+							pushAdvisory(
+								taskSession,
+								`[PIPELINE] ${baseAgentName} delegation complete for task ${taskSession.currentTaskId ?? 'unknown'}. ` +
+									`Resume the QA gate pipeline — check your task pipeline steps for the next required action. ` +
+									`Do not stop here.`,
 							);
+						}
+						// Issue #414: Wire Target B — parse sounding-board response and inject verdict advisory.
+						// Note: output.output is NOT truncated for task tools (tool name 'task' is not
+						// in defaultTruncatableTools), so the full critic response is available here.
+						if (baseAgentName === 'critic_sounding_board') {
+							const rawResponse =
+								typeof output.output === 'string' ? output.output : '';
+							const parsed = parseSoundingBoardResponse(rawResponse);
+							if (parsed) {
+								let verdictMsg = `[SOUNDING_BOARD] Verdict: ${parsed.verdict}. ${parsed.reasoning}`;
+								if (parsed.improvedQuestion)
+									verdictMsg += ` Rephrase to: ${parsed.improvedQuestion}`;
+								if (parsed.answer) verdictMsg += ` Answer: ${parsed.answer}`;
+								if (parsed.warning) verdictMsg += ` WARNING: ${parsed.warning}`;
+								pushAdvisory(taskSession, verdictMsg);
+								taskSession.lastDelegationReason = 'critic_consultation';
+							} else {
+								// Parsing failed — inject a fallback so the architect is not left without
+								// guidance. Use conservative behavior: treat as REPHRASE (needs review)
+								// rather than silently approving. Expected format:
+								// "Verdict: [APPROVED|REPHRASE|RESOLVE|UNNECESSARY]"
+								pushAdvisory(
+									taskSession,
+									`[SOUNDING_BOARD] WARNING: Could not parse a structured verdict from ` +
+										`critic_sounding_board response (${rawResponse.length} chars). ` +
+										`Treat as REPHRASE — review the raw response before surfacing to user or escalating. ` +
+										`Do not silently accept as resolved.`,
+								);
+							}
 						}
 					}
 				}

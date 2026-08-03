@@ -8,6 +8,7 @@ import {
 	swarmState,
 } from '../../state';
 import { telemetry } from '../../telemetry';
+import { pushAdvisory } from '../../utils/advisory-queue';
 
 const SAME_CATEGORY_HARD_STOP_THRESHOLD = 3;
 const IMMEDIATE_HARD_STOP_CATEGORIES = new Set<NonTransientErrorCategory>([
@@ -179,7 +180,16 @@ export function classifyToolOutcome(
 	// Fatal, structured signatures outrank expected-exit adapters. Otherwise a
 	// missing `rg` or `git` executable that happens to return exit 1 would be
 	// misclassified as a legitimate no-match/clean-diff result.
-	if (explicitFailure || rawShellFailure) {
+	//
+	// All fatal categories (sandbox_wrapper_failure, shell_parse_error,
+	// command_not_found) are inherently SHELL-execution failures (issue #1976 B7).
+	// Gate them on isShellTool: a non-shell tool (read, custom log-inspector, …)
+	// whose stdout merely QUOTES "command not found" while exiting non-zero for an
+	// unrelated reason must not hard-stop the circuit. Real shell command-not-found
+	// surfaces in a shell tool's stderr/output and is still classified fatal. A
+	// non-shell tool with explicitFailure falls through to 'failure' below (no
+	// hard-stop), preserving diagnostics without the false-positive hard-stop.
+	if ((explicitFailure || rawShellFailure) && shell) {
 		const category = classifyFatalSignal(
 			signal,
 			correlation?.sandboxWrapped === true || correlatedWrappedCommand,
@@ -274,8 +284,8 @@ export function recordNonTransientFailure(
 			circuit.ownerAgent,
 			`nontransient:${category}`,
 		);
-		session.pendingAdvisoryMessages ??= [];
-		session.pendingAdvisoryMessages.push(
+		pushAdvisory(
+			session,
 			'NON-TRANSIENT STOP (' +
 				category +
 				', ' +

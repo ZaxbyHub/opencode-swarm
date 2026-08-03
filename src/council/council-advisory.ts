@@ -35,6 +35,7 @@
  */
 
 import type { AgentSessionState } from '../state';
+import { pushAdvisory } from '../utils/advisory-queue';
 import type { CouncilSynthesis } from './types';
 
 /**
@@ -76,5 +77,5 @@ export function pushCouncilAdvisory(
 	const header = `[${dedupKey}] (priority=HIGH, blocking=${blocking})`;
 	const body = synthesis.unifiedFeedbackMd;
 
-	session.pendingAdvisoryMessages.push(`${header}\n${body}`);
+	pushAdvisory(session, `${header}\n${body}`, { dedupeKey: dedupKey });
 }

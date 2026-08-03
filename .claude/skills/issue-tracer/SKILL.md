@@ -10,7 +10,7 @@ description: >
   class eradication, independent critic and implementation review, and PR-ready
   closure.
 metadata:
-  version: 2.0.0
+  version: 2.1.0
 ---
 
 # Issue Tracer
@@ -29,9 +29,10 @@ canonical workflow.
   named in the canonical
   `.opencode/skills/issue-tracer/references/critic-gate.md`, never your own
   reasoning narrative.
-- When running AS the `.claude/agents/issue-tracer.md` subagent, Claude Code
-  cannot spawn nested subagents. Record that limitation as the delegation
-  failure, run the labeled fallback pass from
+- When running AS the `.claude/agents/issue-tracer.md` subagent, nested
+  subagent tools may be absent from that context. Check the actual tool list
+  rather than assuming: if `Agent`/`Task` is genuinely unavailable, record
+  that as the delegation failure, run the labeled fallback pass from
   `.opencode/skills/issue-tracer/references/critic-gate.md` ("Fallback
   self-critic/self-review/final-critic: independent … unavailable"), and
   disclose it in the artifact and final response.

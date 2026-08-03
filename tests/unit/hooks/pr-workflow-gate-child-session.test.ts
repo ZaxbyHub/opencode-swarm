@@ -24,13 +24,21 @@ const REVISION = 'revision-1';
 const SHARED_CHILD_SESSION_ID = 'shared-child-session';
 let directory = '';
 const originalResolveCurrentGitHead = _test_exports.resolveCurrentGitHead;
+const originalResolveCurrentGitHeadAsync =
+	_test_exports.resolveCurrentGitHeadAsync;
 const originalResolveRevision = _test_exports.resolvePrWorkflowRevisionDigest;
 const originalResolveIsWorkingTreeClean =
 	_test_exports.resolveIsWorkingTreeClean;
+const originalResolveIsWorkingTreeCleanAsync =
+	_test_exports.resolveIsWorkingTreeCleanAsync;
 const originalResolveCurrentUpstreamPushTarget =
 	_test_exports.resolveCurrentUpstreamPushTarget;
+const originalResolveCurrentUpstreamPushTargetAsync =
+	_test_exports.resolveCurrentUpstreamPushTargetAsync;
 const originalResolveRemoteRefsContainingHead =
 	_test_exports.resolveRemoteRefsContainingHead;
+const originalResolveRemoteRefsContainingHeadAsync =
+	_test_exports.resolveRemoteRefsContainingHeadAsync;
 
 beforeEach(() => {
 	directory = realpathSync(
@@ -40,25 +48,40 @@ beforeEach(() => {
 	_test_exports.resolveCurrentGitHead = () => HEAD_SHA;
 	_test_exports.resolvePrWorkflowRevisionDigest = () => REVISION;
 	_test_exports.resolveIsWorkingTreeClean = () => true;
+	_test_exports.resolveCurrentGitHeadAsync = async (dir) =>
+		_test_exports.resolveCurrentGitHead(dir);
+	_test_exports.resolveIsWorkingTreeCleanAsync = async (dir) =>
+		_test_exports.resolveIsWorkingTreeClean(dir);
 	_test_exports.resolveCurrentUpstreamPushTarget = () => ({
 		remoteName: 'origin',
 		remoteBranchRef: 'refs/heads/pr-branch',
 		remoteTrackingRef: 'refs/remotes/origin/pr-branch',
 	});
+	_test_exports.resolveCurrentUpstreamPushTargetAsync = async (dir) =>
+		_test_exports.resolveCurrentUpstreamPushTarget(dir);
 	_test_exports.resolveRemoteRefsContainingHead = () => [
 		'refs/remotes/origin/pr-branch',
 	];
+	_test_exports.resolveRemoteRefsContainingHeadAsync = async (...a) =>
+		_test_exports.resolveRemoteRefsContainingHead(...a);
 });
 
 afterEach(async () => {
 	_test_exports.resetTrackedStateCache();
 	_test_exports.resolveCurrentGitHead = originalResolveCurrentGitHead;
+	_test_exports.resolveCurrentGitHeadAsync = originalResolveCurrentGitHeadAsync;
 	_test_exports.resolvePrWorkflowRevisionDigest = originalResolveRevision;
 	_test_exports.resolveIsWorkingTreeClean = originalResolveIsWorkingTreeClean;
+	_test_exports.resolveIsWorkingTreeCleanAsync =
+		originalResolveIsWorkingTreeCleanAsync;
 	_test_exports.resolveCurrentUpstreamPushTarget =
 		originalResolveCurrentUpstreamPushTarget;
+	_test_exports.resolveCurrentUpstreamPushTargetAsync =
+		originalResolveCurrentUpstreamPushTargetAsync;
 	_test_exports.resolveRemoteRefsContainingHead =
 		originalResolveRemoteRefsContainingHead;
+	_test_exports.resolveRemoteRefsContainingHeadAsync =
+		originalResolveRemoteRefsContainingHeadAsync;
 	await fs.rm(directory, { recursive: true, force: true });
 });
 

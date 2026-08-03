@@ -39,6 +39,7 @@ export const TOOL_METADATA = {
 		agents: [
 			'architect',
 			'reviewer',
+			'critic_finding_validator',
 			'critic_oversight',
 			'coder',
 			'test_engineer',
@@ -51,7 +52,12 @@ export const TOOL_METADATA = {
 	diff_summary: {
 		description:
 			'filter classified AST changes by category, risk level, or file for reviewer drill-down',
-		agents: ['architect', 'reviewer', 'critic_oversight'],
+		agents: [
+			'architect',
+			'reviewer',
+			'critic_finding_validator',
+			'critic_oversight',
+		],
 		prWorkflow: {
 			modes: ['PR_REVIEW', 'PR_FEEDBACK'],
 			capability: 'observe',
@@ -68,7 +74,7 @@ export const TOOL_METADATA = {
 	},
 	placeholder_scan: {
 		description: 'todo and FIXME comment detection',
-		agents: ['architect', 'reviewer'],
+		agents: ['architect', 'reviewer', 'critic_finding_validator'],
 		prWorkflow: {
 			modes: ['PR_REVIEW', 'PR_FEEDBACK'],
 			capability: 'observe',
@@ -87,6 +93,7 @@ export const TOOL_METADATA = {
 			'critic_drift_verifier',
 			'critic_hallucination_verifier',
 			'reviewer',
+			'critic_finding_validator',
 			'critic',
 			'coder',
 			'test_engineer',
@@ -99,7 +106,7 @@ export const TOOL_METADATA = {
 	lint: {
 		description:
 			'run project linter in check or fix mode; supports biome, eslint, ruff, clippy, and more, returns structured results',
-		agents: ['architect', 'reviewer', 'coder'],
+		agents: ['architect', 'reviewer', 'critic_finding_validator', 'coder'],
 		prWorkflow: {
 			modes: ['PR_REVIEW'],
 			capability: 'validate',
@@ -108,7 +115,12 @@ export const TOOL_METADATA = {
 	secretscan: {
 		description:
 			'scan for secrets (API keys, tokens, passwords) via regex and entropy; returns redacted previews, excludes common dirs',
-		agents: ['architect', 'reviewer', 'critic_oversight'],
+		agents: [
+			'architect',
+			'reviewer',
+			'critic_finding_validator',
+			'critic_oversight',
+		],
 		prWorkflow: {
 			modes: ['PR_REVIEW'],
 			capability: 'validate',
@@ -116,7 +128,12 @@ export const TOOL_METADATA = {
 	},
 	sast_scan: {
 		description: 'static analysis security scan',
-		agents: ['architect', 'reviewer', 'critic_oversight'],
+		agents: [
+			'architect',
+			'reviewer',
+			'critic_finding_validator',
+			'critic_oversight',
+		],
 		prWorkflow: {
 			modes: ['PR_REVIEW'],
 			capability: 'validate',
@@ -130,7 +147,7 @@ export const TOOL_METADATA = {
 	pre_check_batch: {
 		description:
 			'parallel verification: lint:check + secretscan + sast_scan + quality_budget',
-		agents: ['architect', 'reviewer'],
+		agents: ['architect', 'reviewer', 'critic_finding_validator'],
 	},
 	quality_budget: {
 		description: 'code quality budget check',
@@ -155,6 +172,7 @@ export const TOOL_METADATA = {
 			'critic_hallucination_verifier',
 			'spec_writer',
 			'reviewer',
+			'critic_finding_validator',
 			'critic',
 			'coder',
 			'test_engineer',
@@ -170,6 +188,7 @@ export const TOOL_METADATA = {
 			'critic_drift_verifier',
 			'critic_hallucination_verifier',
 			'reviewer',
+			'critic_finding_validator',
 			'critic',
 			'critic_oversight',
 			'explorer',
@@ -259,6 +278,7 @@ export const TOOL_METADATA = {
 			'architect',
 			'critic_hallucination_verifier',
 			'reviewer',
+			'critic_finding_validator',
 			'critic_oversight',
 			'test_engineer',
 		],
@@ -270,6 +290,11 @@ export const TOOL_METADATA = {
 	parse_lane_candidates: {
 		description:
 			'Parse [CANDIDATE] rows from a dispatch_lanes or collect_lane_results artifact (by output_ref), produce structured records with provenance, optionally persist to a per-batch sidecar JSONL. Pure-parser variant exists as internal module.',
+		agents: ['architect'],
+	},
+	plan_conflict_check: {
+		description:
+			'read-only advisory check (#1656): compute a pairwise file-conflict matrix for N proposed parallel task groups using declared scopes and optional git co-change; returns a verdict (all_disjoint / conflicts_present / unknown_scopes), per-pair evidence, and a suggested serialization order. Writes nothing — the execution gate independently recomputes the verdict inline at dispatch time via the same helper. Call BEFORE attempting parallel dispatch to confirm disjointness.',
 		agents: ['architect'],
 	},
 	write_pr_review_trigger_eval: {
@@ -289,7 +314,12 @@ export const TOOL_METADATA = {
 	},
 	test_runner: {
 		description: 'auto-detect and run tests',
-		agents: ['architect', 'reviewer', 'test_engineer'],
+		agents: [
+			'architect',
+			'reviewer',
+			'critic_finding_validator',
+			'test_engineer',
+		],
 		prWorkflow: {
 			modes: ['PR_REVIEW'],
 			capability: 'validate',
@@ -298,7 +328,13 @@ export const TOOL_METADATA = {
 	test_impact: {
 		description:
 			'identify test files impacted by changed source files via import analysis',
-		agents: ['architect', 'reviewer', 'critic_oversight', 'test_engineer'],
+		agents: [
+			'architect',
+			'reviewer',
+			'critic_finding_validator',
+			'critic_oversight',
+			'test_engineer',
+		],
 		prWorkflow: {
 			modes: ['PR_REVIEW', 'PR_FEEDBACK'],
 			capability: 'observe',
@@ -332,7 +368,7 @@ export const TOOL_METADATA = {
 	git_blame: {
 		description:
 			'per-line git blame metadata: sha, author, date, summary for each line in a file',
-		agents: ['reviewer', 'explorer', 'architect'],
+		agents: ['reviewer', 'critic_finding_validator', 'explorer', 'architect'],
 		prWorkflow: {
 			modes: ['PR_REVIEW', 'PR_FEEDBACK'],
 			capability: 'observe',
@@ -360,10 +396,18 @@ export const TOOL_METADATA = {
 			'critic_architecture_supervisor',
 			'spec_writer',
 			'reviewer',
+			'critic_finding_validator',
 			'critic',
 			'coder',
 			'test_engineer',
 		],
+		// Safe to gate-allow: read-only retrieval of a stored summary artifact.
+		// Necessary: the summarizer advertises this tool as the recovery path for
+		// truncated outputs, so it must remain reachable during PR workflows.
+		prWorkflow: {
+			modes: ['PR_REVIEW', 'PR_FEEDBACK'],
+			capability: 'observe',
+		},
 	},
 	retrieve_lane_output: {
 		description:
@@ -452,6 +496,22 @@ export const TOOL_METADATA = {
 			'run curator phase analysis and optionally apply knowledge recommendations',
 		agents: ['architect'],
 	},
+	consensus_mine: {
+		// Rendered into the architect system prompt, so it must not imply a single
+		// artifact. Naming only the report was false: the run also prunes its own
+		// older reports and appends to the shared recommendation dedup ledger,
+		// whose root is `resolveKnowledgeStoreDir` — under a knowledge-link pointer
+		// that ledger write lands in the shared cohort root, outside this project.
+		description:
+			'mine cross-run consensus from existing .swarm evidence into an immutable proposals-only report; also deletes its own reports past consensus.report_retention, appends to the shared recommendation dedup ledger (in the shared cohort root, outside this project, when a knowledge link is active), and mirrors proposals into pending swarm-memory proposals when memory is enabled',
+		// The curator phase/postmortem roles are the consumers of cross-run
+		// evidence; `curator` itself is NOT an AgentName (see
+		// src/config/agent-names.ts) and using it here would be a compile error.
+		agents: ['architect', 'curator_phase', 'curator_postmortem'],
+		// `prWorkflow` is deliberately omitted: omitted tools are fail-closed in
+		// PR_REVIEW / PR_FEEDBACK, which is the correct posture for a tool that
+		// writes .swarm state during a review-only workflow.
+	},
 	knowledge_add: {
 		description: 'store a new lesson in the knowledge base',
 		agents: ['architect', 'coder'],
@@ -473,6 +533,7 @@ export const TOOL_METADATA = {
 			'skill_improver',
 			'spec_writer',
 			'reviewer',
+			'critic_finding_validator',
 			'critic',
 			'critic_oversight',
 			'explorer',
@@ -507,6 +568,7 @@ export const TOOL_METADATA = {
 			'skill_improver',
 			'spec_writer',
 			'reviewer',
+			'critic_finding_validator',
 			'critic_oversight',
 			'explorer',
 			'coder',
@@ -557,6 +619,15 @@ export const TOOL_METADATA = {
 			capability: 'observe',
 		},
 	},
+	pr_workflow_status: {
+		description:
+			'Read-only architect observation of local git state (HEAD, branch, clean/dirty with a bounded changed-file list, remotes) plus a session-pinned PR workflow gate summary. Use to observe state under the fail-closed PR_REVIEW/PR_FEEDBACK gate. Never executes PR-controlled scripts and never reads another session gate.',
+		agents: ['architect'],
+		prWorkflow: {
+			modes: ['PR_REVIEW', 'PR_FEEDBACK'],
+			capability: 'observe',
+		},
+	},
 	batch_symbols: {
 		description:
 			'Batched symbol extraction across multiple files. Returns per-file symbol summaries with isolated error handling.',
@@ -564,6 +635,7 @@ export const TOOL_METADATA = {
 			'architect',
 			'critic_hallucination_verifier',
 			'reviewer',
+			'critic_finding_validator',
 			'critic_oversight',
 			'explorer',
 		],
@@ -571,7 +643,7 @@ export const TOOL_METADATA = {
 	suggest_patch: {
 		description:
 			'Reviewer-safe structured patch suggestion tool. Produces context-anchored patch artifacts without file modification. Returns structured diagnostics on context mismatch.',
-		agents: ['architect', 'reviewer'],
+		agents: ['architect', 'reviewer', 'critic_finding_validator'],
 	},
 	req_coverage: {
 		description:
@@ -600,6 +672,7 @@ export const TOOL_METADATA = {
 			'critic_hallucination_verifier',
 			'critic_architecture_supervisor',
 			'reviewer',
+			'critic_finding_validator',
 			'critic',
 			'critic_oversight',
 			'explorer',
@@ -704,6 +777,7 @@ export const TOOL_METADATA = {
 			'skill_improver',
 			'spec_writer',
 			'reviewer',
+			'critic_finding_validator',
 			'critic',
 			'coder',
 			'test_engineer',
@@ -735,6 +809,7 @@ export const TOOL_METADATA = {
 			'docs_design',
 			'designer',
 			'reviewer',
+			'critic_finding_validator',
 			'critic',
 			'explorer',
 			'coder',
@@ -753,7 +828,7 @@ export const TOOL_METADATA = {
 	},
 	collect_lane_results: {
 		description:
-			'collect or poll results for a dispatch_lanes_async batch; supports both non-blocking polling (wait omitted or false) and blocking join (wait: true). Non-blocking polls include pending lane identities by default and process settled lanes incrementally while continuing independent work; busy/retry lanes are not timed out just because they run for a long time. Does not advance workflow gates.',
+			'collect or poll results for a dispatch_lanes_async batch; supports both non-blocking polling (wait omitted or false) and blocking join (wait: true). Non-blocking polls include pending lane identities by default and process settled lanes incrementally while continuing independent work; busy/retry lanes are not timed out just because they run for a long time. Does not advance workflow gates. Inline output for a settled lane is delivered only once: later polls of the same lane set output_omitted_repeat: true and omit output, but still include output_ref for recovery via retrieve_lane_output.',
 		agents: ['architect'],
 	},
 	summarize_work: {

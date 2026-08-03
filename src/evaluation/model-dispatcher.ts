@@ -1,9 +1,14 @@
 import type { Agent, OpencodeClient } from '@opencode-ai/sdk';
-import { log } from '../utils/logger.js';
+import type { DelegationCostFields } from '../services/cost-accounting.js';
 import {
 	isQuotaError,
 	isTransientProviderError,
 } from '../utils/provider-error-classification';
+import {
+	DEFAULT_READ_ONLY_TOOLS,
+	dispatchEphemeralAgent,
+	_internals as ephemeralDispatcherInternals,
+} from './ephemeral-agent-dispatcher.js';
 
 export type EvaluationModelDispatchRequest = {
 	directory: string;
@@ -24,20 +29,14 @@ export type EvaluationModelDispatchResult = {
 	text: string;
 	durationMs: number;
 	error?: string;
+	promptBytes?: number;
+	responseBytes?: number;
+	costFields?: DelegationCostFields;
 };
 
 export type EvaluationModelDispatcher = (
 	request: EvaluationModelDispatchRequest,
 ) => Promise<EvaluationModelDispatchResult>;
-
-const READ_ONLY_TOOLS = {
-	write: false,
-	edit: false,
-	patch: false,
-	bash: false,
-	task: false,
-	todowrite: false,
-} as const;
 
 function parseRequestedModel(
 	modelId: string,
@@ -81,54 +80,49 @@ export function resolveEvaluationAgentName(
 	throw new Error(`evaluation agent ${logicalName} is not registered`);
 }
 
-async function boundedDelete(
-	client: OpencodeClient,
-	sessionId: string,
-	timeoutMs = 500,
-): Promise<void> {
-	const DELETED = 'deleted' as const;
-	const TIMED_OUT = 'timed-out' as const;
-	const controller = new AbortController();
-	let timer: ReturnType<typeof setTimeout> | undefined;
-	try {
-		const outcome = await Promise.race([
-			client.session
-				.delete({
-					path: { id: sessionId },
-					signal: controller.signal,
-				})
-				.then(() => DELETED),
-			new Promise<typeof TIMED_OUT>((resolve) => {
-				timer = setTimeout(() => {
-					controller.abort();
-					resolve(TIMED_OUT);
-				}, timeoutMs);
-			}),
-		]);
-		if (outcome === TIMED_OUT) {
-			_internals.log('evaluation session cleanup timed out', {
-				sessionId,
-				timeoutMs,
-			});
-		}
-	} catch (error) {
-		_internals.log('evaluation session cleanup failed', {
-			sessionId,
-			error: error instanceof Error ? error.message : String(error),
-		});
-	} finally {
-		if (timer) clearTimeout(timer);
-		controller.abort();
-	}
-}
-
+/**
+ * Compatibility proxy for the existing evaluation test seam. The shared
+ * primitive remains the single owner of cleanup and logging behavior.
+ */
 export const _internals: {
-	boundedDelete: typeof boundedDelete;
-	log: typeof log;
-} = {
-	boundedDelete,
-	log,
+	boundedDelete: typeof ephemeralDispatcherInternals.boundedDelete;
+	log: typeof ephemeralDispatcherInternals.log;
+} = Object.defineProperties(
+	{},
+	{
+		boundedDelete: {
+			enumerable: true,
+			get: () => ephemeralDispatcherInternals.boundedDelete,
+			set: (value) => {
+				ephemeralDispatcherInternals.boundedDelete = value;
+			},
+		},
+		log: {
+			enumerable: true,
+			get: () => ephemeralDispatcherInternals.log,
+			set: (value) => {
+				ephemeralDispatcherInternals.log = value;
+			},
+		},
+	},
+) as {
+	boundedDelete: typeof ephemeralDispatcherInternals.boundedDelete;
+	log: typeof ephemeralDispatcherInternals.log;
 };
+
+async function awaitWithAbort<T>(
+	promise: Promise<T>,
+	signal: AbortSignal,
+): Promise<T> {
+	if (signal.aborted) throw new Error('evaluation dispatch aborted');
+	return new Promise<T>((resolve, reject) => {
+		const onAbort = () => reject(new Error('evaluation dispatch aborted'));
+		signal.addEventListener('abort', onAbort, { once: true });
+		promise.then(resolve, reject).finally(() => {
+			signal.removeEventListener('abort', onAbort);
+		});
+	});
+}
 
 export function createEvaluationModelDispatcher(
 	client: OpencodeClient,
@@ -144,7 +138,6 @@ export function createEvaluationModelDispatcher(
 			};
 		}
 
-		let sessionId: string | undefined;
 		let resolvedAgentName: string | undefined;
 		const controller = new AbortController();
 		let timedOut = false;
@@ -158,87 +151,68 @@ export function createEvaluationModelDispatcher(
 		}, request.timeoutMs);
 
 		try {
-			const operation = async () => {
-				const requestedModel = parseRequestedModel(request.modelId);
-				const agentsResult = await client.app.agents({
-					query: { directory: request.directory },
-					signal: controller.signal,
-				});
-				if (!agentsResult.data) {
-					throw new Error('Failed to list registered evaluation agents');
-				}
-				resolvedAgentName = resolveEvaluationAgentName(
-					agentsResult.data,
-					request.agentName,
-					request.preferredSwarm,
-				);
-				const createResult = await client.session.create({
-					body: {
-						...(request.parentSessionId
-							? { parentID: request.parentSessionId }
-							: {}),
-						title: `evaluation gate (${resolvedAgentName})`,
-					},
-					query: { directory: request.directory },
-					signal: controller.signal,
-				});
-				sessionId = createResult.data?.id;
-				if (!sessionId) throw new Error('Failed to create evaluation session');
-
-				const response = await client.session.prompt({
-					path: { id: sessionId },
-					body: {
-						agent: resolvedAgentName,
-						...(requestedModel ? { model: requestedModel } : {}),
-						...(request.system ? { system: request.system } : {}),
-						tools: READ_ONLY_TOOLS,
-						parts: [{ type: 'text', text: request.prompt }],
-					},
-					signal: controller.signal,
-				});
-				if (!response.data)
-					throw new Error('Evaluation session returned no data');
-				const text = response.data.parts
-					.filter((part) => part.type === 'text')
-					.map((part) => part.text ?? '')
-					.join('\n');
-				if (Buffer.byteLength(text, 'utf8') > 64 * 1024) {
-					throw new Error('Evaluation model output exceeded 65536 bytes');
-				}
-				const actualModel = response.data.info;
-				return {
-					status: 'completed' as const,
-					modelId:
-						actualModel.providerID && actualModel.modelID
-							? `${actualModel.providerID}/${actualModel.modelID}`
-							: request.modelId,
-					agentName: resolvedAgentName,
-					text,
-					durationMs: Date.now() - startedAt,
-				};
-			};
-
 			// #1896 (evaluation deviation): `request.modelId` is the benchmark
-			// SUBJECT — the result is recorded against it — so we must NOT substitute
-			// a fallback model here (that would attribute a verdict to the wrong
-			// model and corrupt the evaluation). We DO absorb a transient/quota blip
-			// with a bounded SAME-model retry so a momentary quota hiccup does not
-			// fail the benchmark outright. Each failed attempt's session is cleaned up
-			// before retrying so no ephemeral session leaks.
+			// subject. Never substitute a fallback model because doing so corrupts
+			// attribution. A bounded same-model retry still absorbs transient quota
+			// blips; each attempt is cleaned up by dispatchEphemeralAgent.
 			const maxSameModelRetries = 2;
 			for (let attempt = 0; ; attempt++) {
 				try {
+					const requestedModel = parseRequestedModel(request.modelId);
+					// Agent resolution is evaluation policy. The shared primitive
+					// receives only an already-resolved agent name.
 					// eslint-disable-next-line no-await-in-loop
-					return await Promise.race([
-						operation(),
-						new Promise<never>((_, reject) => {
-							controller.signal.addEventListener(
-								'abort',
-								() => reject(new Error('evaluation dispatch aborted')),
-								{ once: true },
-							);
+					const agentsResult = await awaitWithAbort(
+						client.app.agents({
+							query: { directory: request.directory },
+							signal: controller.signal,
 						}),
-					]);
+						controller.signal,
+					);
+					if (!agentsResult.data) {
+						throw new Error(
+							`Failed to list registered evaluation agents: ${JSON.stringify(agentsResult.error)}`,
+						);
+					}
+					resolvedAgentName = resolveEvaluationAgentName(
+						agentsResult.data,
+						request.agentName,
+						request.preferredSwarm,
+					);
+					const remainingMs = Math.max(
+						1,
+						request.timeoutMs - (Date.now() - startedAt),
+					);
+					// eslint-disable-next-line no-await-in-loop
+					const result = await dispatchEphemeralAgent({
+						client,
+						directory: request.directory,
+						parentSessionId: request.parentSessionId,
+						agentName: resolvedAgentName,
+						model: requestedModel,
+						...(request.system === undefined ? {} : { system: request.system }),
+						prompt: request.prompt,
+						readOnlyTools: DEFAULT_READ_ONLY_TOOLS,
+						title: `evaluation gate (${resolvedAgentName})`,
+						timeoutMs: remainingMs,
+						abortSignal: controller.signal,
+					});
+					if (result.status === 'completed') {
+						return {
+							status: 'completed',
+							modelId: result.modelId ?? request.modelId,
+							agentName: resolvedAgentName,
+							text: result.text,
+							durationMs: Date.now() - startedAt,
+							promptBytes: result.promptBytes,
+							responseBytes: result.responseBytes,
+							costFields: result.costFields,
+						};
+					}
+					if (result.status === 'timeout') timedOut = true;
+					throw new Error(
+						result.error ?? `evaluation dispatch ${result.status}`,
+					);
 				} catch (error) {
 					const cancelled = request.abortSignal?.aborted === true;
 					const msg = error instanceof Error ? error.message : String(error);
@@ -259,19 +233,12 @@ export function createEvaluationModelDispatcher(
 								: msg,
 						};
 					}
-					// Clean up the failed attempt's session before the same-model retry.
-					if (sessionId) {
-						// eslint-disable-next-line no-await-in-loop
-						await _internals.boundedDelete(client, sessionId);
-						sessionId = undefined;
-					}
 				}
 			}
 		} finally {
 			clearTimeout(timeoutHandle);
 			request.abortSignal?.removeEventListener('abort', abortListener);
 			controller.abort();
-			if (sessionId) await _internals.boundedDelete(client, sessionId);
 		}
 	};
 }

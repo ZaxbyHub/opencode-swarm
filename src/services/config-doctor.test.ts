@@ -2869,3 +2869,80 @@ describe('Range-bounded test inventory (AC-3 SC-003) — self-updating', () => {
 		});
 	});
 });
+
+describe('Migration availability detection (availableMigrations)', () => {
+	let tempDir: string;
+
+	beforeEach(() => {
+		tempDir = createTempDir();
+	});
+
+	afterEach(() => {
+		cleanupDir(tempDir);
+	});
+
+	it('should show migrations when config_format_version is 1 (default), since all deprecatedIn=2', () => {
+		const config = createTestConfigObj({
+			config_format_version: 1,
+		});
+		const result = runConfigDoctor(config, tempDir);
+		expect(result.availableMigrations).toBeDefined();
+		expect(result.availableMigrations!.length).toBe(4);
+		expect(result.availableMigrations![0]!.deprecatedIn).toBe(2);
+		expect(result.availableMigrations![0]!.sinceVersion).toBe(1);
+		expect(result.availableMigrations![0]!.currentFormatVersion).toBe(1);
+		// Pin actual field/replacement content so the table can't silently drift.
+		const fields = result
+			.availableMigrations!.map((m) => `${m.field} → ${m.replacement}`)
+			.sort();
+		expect(fields).toEqual([
+			'skill_improver.fallback_models → agents.skill_improver.fallback_models',
+			'skill_improver.model → agents.skill_improver.model',
+			'spec_writer.fallback_models → agents.spec_writer.fallback_models',
+			'spec_writer.model → agents.spec_writer.model',
+		]);
+	});
+
+	it('should show NO migrations when config_format_version is at/above all deprecatedIn', () => {
+		// Use Number.MAX_SAFE_INTEGER as a universally-above-all sentinel so this
+		// test survives future DEPRECATED_FIELDS entries with higher deprecatedIn.
+		const config = createTestConfigObj({
+			config_format_version: Number.MAX_SAFE_INTEGER,
+		});
+		const result = runConfigDoctor(config, tempDir);
+		expect(result.availableMigrations).toBeUndefined();
+	});
+
+	it('should show ALL migrations when config_format_version is 0 (SC-005)', () => {
+		const config = createTestConfigObj({
+			config_format_version: 0,
+		});
+		const result = runConfigDoctor(config, tempDir);
+		expect(result.availableMigrations).toBeDefined();
+		expect(result.availableMigrations!.length).toBeGreaterThan(0);
+	});
+
+	it('should default to 1 when config_format_version is absent (SC-006)', () => {
+		// Omit config_format_version entirely; Zod .default(1) must apply.
+		const config = createTestConfigObj({});
+		const result = runConfigDoctor(config, tempDir);
+		expect(result.availableMigrations).toBeDefined();
+		expect(result.availableMigrations!.length).toBeGreaterThan(0);
+		expect(result.availableMigrations![0]!.currentFormatVersion).toBe(1);
+	});
+
+	it('should fall back to version 1 (and show migrations) when config_format_version is NaN/Infinity (raw bypass path)', () => {
+		// A raw object that skipped Zod (e.g. the readConfigFromFile cast in
+		// runConfigDoctorWithFixes) could carry NaN. `NaN < deprecatedIn` is
+		// false, which would silently suppress migrations — the guard must
+		// coerce it back to 1.
+		for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, 1.5, -1]) {
+			const config = createTestConfigObj({
+				config_format_version: bad,
+			});
+			const result = runConfigDoctor(config, tempDir);
+			expect(result.availableMigrations).toBeDefined();
+			expect(result.availableMigrations![0]!.currentFormatVersion).toBe(1);
+		}
+	});
+});

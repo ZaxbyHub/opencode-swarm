@@ -275,4 +275,80 @@ describe('createSwarmTool', () => {
 			expect(receivedCtx[0]?.sessionID).toBe('test-session-123');
 		});
 	});
+
+	describe('Group 7: error classification guard (issue #1931)', () => {
+		// The diagnostic-rich PR-workflow error messages introduced in #1931
+		// mention causes like "Git binary may not be on PATH". The
+		// createSwarmTool wrapper classifies thrown errors into failure_class
+		// via substring matching. These tests lock in that the new diagnostic
+		// wording is classified as `execution_error` (not `binary_missing`,
+		// `not_registered`, etc.) so a future wording tweak cannot silently
+		// change the failure classification.
+		it('classifies the #1931 null-HEAD diagnostic as execution_error', async () => {
+			const toolConfig = createSwarmTool({
+				description: 'Test tool',
+				args: { foo: z.string() },
+				execute: async () => {
+					throw new Error(
+						'BLOCKED: cannot resolve the current Git HEAD in "/repo" to verify against PR head "abc". ' +
+							'This means Git could not resolve HEAD (the working directory may not be a Git repository, ' +
+							'HEAD may be unborn, the commit object may be missing in a shallow clone, the Git binary may not be on PATH, ' +
+							'or the bounded Git invocation may have timed out). ' +
+							'Verify with: git -C "/repo" rev-parse --verify HEAD^{commit}',
+					);
+				},
+			});
+
+			const result = await toolConfig.execute({ foo: 'bar' }, {
+				directory: '/repo',
+			} as ToolContext);
+			const parsed = JSON.parse(result as string);
+			expect(parsed.success).toBe(false);
+			expect(parsed.failure_class).toBe('execution_error');
+		});
+
+		it('classifies the #1931 HEAD-mismatch diagnostic as execution_error', async () => {
+			const toolConfig = createSwarmTool({
+				description: 'Test tool',
+				args: { foo: z.string() },
+				execute: async () => {
+					throw new Error(
+						'BLOCKED: current checkout HEAD "deadbeef" does not match PR head "abc" ' +
+							'(working directory: "/repo"). ' +
+							'Run these bare, standalone commands from that directory: if the commit is not present locally, ' +
+							'`git fetch origin <pr-head-ref>`; then `git switch --detach abc`. ' +
+							'Do not prefix the switch with `git -C`; the read-only shell classifier refuses `git -C ... switch`.',
+					);
+				},
+			});
+
+			const result = await toolConfig.execute({ foo: 'bar' }, {
+				directory: '/repo',
+			} as ToolContext);
+			const parsed = JSON.parse(result as string);
+			expect(parsed.success).toBe(false);
+			expect(parsed.failure_class).toBe('execution_error');
+		});
+
+		it('classifies the #1931 no-active-gate diagnostic as execution_error', async () => {
+			const toolConfig = createSwarmTool({
+				description: 'Test tool',
+				args: { foo: z.string() },
+				execute: async () => {
+					throw new Error(
+						'BLOCKED: no active PR workflow gate for session "ses_x". ' +
+							'The gate is activated by running `/swarm pr-review <pr-ref>` (PR_REVIEW) or `/swarm pr-feedback <pr-ref>` (PR_FEEDBACK), ' +
+							'or by the first dispatch_lanes_async call with mode "swarm-pr-review:*" / "swarm-pr-feedback:*".',
+					);
+				},
+			});
+
+			const result = await toolConfig.execute({ foo: 'bar' }, {
+				directory: '/repo',
+			} as ToolContext);
+			const parsed = JSON.parse(result as string);
+			expect(parsed.success).toBe(false);
+			expect(parsed.failure_class).toBe('execution_error');
+		});
+	});
 });

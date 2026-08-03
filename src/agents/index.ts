@@ -201,12 +201,17 @@ export function resolveFallbackModel(
 	let fallbackModels = agentConfig?.fallback_models;
 
 	// 2. If not explicitly set, check if this is a curator agent that should inherit from explorer
-	// Only inherit if the curator agent does NOT have fallback_models key at all
+	// Only inherit if the curator agent does NOT have fallback_models key at all.
+	// All four curator modes default their model to explorer's (see createSwarmAgents:
+	// curator_init/phase/postmortem/consolidation all use `?? getModel('explorer')`), so
+	// they inherit explorer's fallback chain too — otherwise consolidation-mode dispatch
+	// (memory-consolidation service) would fail over to nothing while the other modes do.
 	if (
 		fallbackModels === undefined &&
 		(agentBaseName === 'curator_init' ||
 			agentBaseName === 'curator_phase' ||
-			agentBaseName === 'curator_postmortem')
+			agentBaseName === 'curator_postmortem' ||
+			agentBaseName === 'curator_consolidation')
 	) {
 		fallbackModels = swarmAgents?.explorer?.fallback_models;
 	}
@@ -534,13 +539,22 @@ If you call @coder instead of @${swarmId}_coder, the call will FAIL or go to the
 	for (const { name, factory } of TYPE_A_AGENTS) {
 		if (!isAgentDisabled(name, swarmAgents, swarmPrefix)) {
 			const prompts = getPrompts(name);
-			const agent = (
-				factory as (
-					model: string,
-					customPrompt?: string,
-					customAppendPrompt?: string,
-				) => AgentDefinition
-			)(getModel(name), prompts.prompt, prompts.appendPrompt);
+			const agent =
+				name === 'reviewer'
+					? createReviewerAgent(
+							getModel(name),
+							prompts.prompt,
+							prompts.appendPrompt,
+							pluginConfig?.auto_review?.enabled === true &&
+								pluginConfig.auto_review.structured_findings !== false,
+						)
+					: (
+							factory as (
+								model: string,
+								customPrompt?: string,
+								customAppendPrompt?: string,
+							) => AgentDefinition
+						)(getModel(name), prompts.prompt, prompts.appendPrompt);
 			agent.name = prefixName(name);
 			agents.push(applyOverrides(agent, swarmAgents, swarmPrefix, quiet));
 		}
@@ -608,6 +622,18 @@ If you call @coder instead of @${swarmId}_coder, the call will FAIL or go to the
 			'architecture_supervisor' as CriticRole,
 		);
 		critic.name = prefixName('critic_architecture_supervisor');
+		agents.push(applyOverrides(critic, swarmAgents, swarmPrefix, quiet));
+	}
+
+	// 5c-quater. Create independent structured-finding validator
+	if (!isAgentDisabled('critic_finding_validator', swarmAgents, swarmPrefix)) {
+		const critic = createCriticAgent(
+			swarmAgents?.critic_finding_validator?.model ?? getModel('critic'),
+			undefined,
+			undefined,
+			'finding_validator' as CriticRole,
+		);
+		critic.name = prefixName('critic_finding_validator');
 		agents.push(applyOverrides(critic, swarmAgents, swarmPrefix, quiet));
 	}
 

@@ -10,6 +10,7 @@ import type { AgentSessionState, TaskWorkflowState } from '../state';
 import {
 	applyRehydrationCache,
 	buildRehydrationCache,
+	MAX_TRACKED_TASK_FILE_ATTRIBUTIONS,
 	swarmState,
 } from '../state';
 import { bunFile } from '../utils/bun-compat';
@@ -23,6 +24,12 @@ import type {
 /**
  * Transient session fields that must be reset on rehydration.
  * Centralised here to keep the reset logic DRY and auditable.
+ *
+ * `workspaceDirectory` (issue #2002) deliberately does NOT belong in this
+ * list: it is never part of `SerializedAgentSession` in the first place (see
+ * the TRUST BOUNDARY / DELIBERATELY NOT SNAPSHOTTED comment at its field
+ * declaration in `src/state.ts`), so `deserializeAgentSession` never restores
+ * it and there is nothing here to reset.
  */
 export const TRANSIENT_SESSION_FIELDS: ReadonlyArray<{
 	name: string;
@@ -71,6 +78,29 @@ function deserializeTaskWorkflowStates(
 	return m;
 }
 
+function deserializeModifiedFilesByTask(
+	raw: Record<string, string[]> | undefined,
+): Map<string, string[]> {
+	const entries = new Map<string, string[]>();
+	if (!raw || typeof raw !== 'object') return entries;
+
+	const serializedEntries = Object.entries(raw);
+	// Oversized snapshots are malformed. Reject the attribution payload as a
+	// unit instead of partially evicting possibly-live task data.
+	if (serializedEntries.length > MAX_TRACKED_TASK_FILE_ATTRIBUTIONS) {
+		return entries;
+	}
+
+	for (const [taskId, files] of serializedEntries) {
+		if (!taskId.trim() || !Array.isArray(files)) continue;
+		const validFiles = files.filter(
+			(file): file is string => typeof file === 'string' && file.length > 0,
+		);
+		entries.set(taskId, [...new Set(validFiles)]);
+	}
+	return entries;
+}
+
 /**
  * Deserialize a SerializedAgentSession back to AgentSessionState.
  * Handles Map/Set conversion and migration safety defaults.
@@ -78,6 +108,12 @@ function deserializeTaskWorkflowStates(
 export function deserializeAgentSession(
 	s: SerializedAgentSession,
 ): AgentSessionState {
+	const taskWorkflowStates = deserializeTaskWorkflowStates(
+		s.taskWorkflowStates,
+	);
+	const modifiedFilesByTask = deserializeModifiedFilesByTask(
+		s.modifiedFilesByTask,
+	);
 	// Convert gateLog: Record<string, string[]> -> Map<string, Set<string>>
 	const gateLog = new Map<string, Set<string>>();
 	if (s.gateLog) {
@@ -100,6 +136,11 @@ export function deserializeAgentSession(
 	// Convert partialGateWarningsIssuedForTask: string[] -> Set<string>
 	const partialGateWarningsIssuedForTask = new Set(
 		s.partialGateWarningsIssuedForTask ?? [],
+	);
+
+	// Convert completionGateWarnedForTask: string[] -> Set<string>
+	const completionGateWarnedForTask = new Set(
+		s.completionGateWarnedForTask ?? [],
 	);
 
 	// Convert catastrophicPhaseWarnings: number[] -> Set<number>
@@ -167,6 +208,7 @@ export function deserializeAgentSession(
 		reviewerCallCount,
 		lastGateFailure: s.lastGateFailure ?? null,
 		partialGateWarningsIssuedForTask,
+		completionGateWarnedForTask,
 		selfFixAttempted: s.selfFixAttempted ?? false,
 		selfCodingWarnedAtCount: s.selfCodingWarnedAtCount ?? 0,
 		catastrophicPhaseWarnings,
@@ -176,12 +218,18 @@ export function deserializeAgentSession(
 		lastCompletedPhaseAgentsDispatched,
 		qaSkipCount: s.qaSkipCount ?? 0,
 		qaSkipTaskIds: s.qaSkipTaskIds ?? [],
-		taskWorkflowStates: deserializeTaskWorkflowStates(s.taskWorkflowStates),
+		taskWorkflowStates,
 		lastGateOutcome: null,
 		declaredCoderScope: null,
 		lastScopeViolation: null,
 		scopeViolationDetected: s.scopeViolationDetected,
-		modifiedFilesThisCoderTask: [],
+		modifiedFilesByTask,
+		modifiedFilesThisCoderTask:
+			s.currentTaskId &&
+			s.currentTaskId.trim() !== '' &&
+			modifiedFilesByTask.has(s.currentTaskId)
+				? [...(modifiedFilesByTask.get(s.currentTaskId) ?? [])]
+				: [],
 		loopDetectionWindow: [],
 		pendingAdvisoryMessages: s.pendingAdvisoryMessages ?? [],
 		model_fallback_index: s.model_fallback_index ?? 0,
@@ -203,6 +251,10 @@ export function deserializeAgentSession(
 		prmLastPatternDetected: null,
 		prmTrajectoryStep: 0,
 		prmHardStopPending: false,
+		// PRM advisory-injection dedupe state is transient like the rest of the
+		// PRM fields: reset on rehydrate so a resumed run re-evaluates patterns
+		// fresh (issue #1976 B1).
+		prmInjectedAdvisoryKeys: new Set(),
 		sessionRehydratedAt: s.sessionRehydratedAt ?? 0,
 		stageBCompletion,
 		prSubscriptions: new Map(),

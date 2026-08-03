@@ -349,7 +349,8 @@ describe('verifyLeanTurboPhaseReady — critic evidence integration', () => {
 				expected: 'local_critic',
 			},
 			{
-				generatedAgentNames: ['mega-critic', 'critic'],
+				generatedAgentNames: ['mega-architect', 'mega-critic', 'critic'],
+				activeAgentName: 'mega-architect',
 				expected: 'mega-critic',
 			},
 			{
@@ -365,6 +366,7 @@ describe('verifyLeanTurboPhaseReady — critic evidence integration', () => {
 		for (const tc of testCases) {
 			const resolved = criticInternals.resolveDefaultCriticAgent(
 				tc.generatedAgentNames,
+				'activeAgentName' in tc ? tc.activeAgentName : undefined,
 			);
 			expect(resolved).toBe(tc.expected);
 		}

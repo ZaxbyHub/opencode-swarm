@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import {
 	activatePrWorkflow,
 	assertPrFeedbackVerificationSettled,
@@ -11,8 +11,13 @@ import {
 	HEAD_SHA,
 	persistBatch,
 	SESSION_ID,
+	setupPrWorkflowGateFixtures,
+	teardownPrWorkflowGateFixtures,
 	tempDir,
 } from './pr-workflow-gate.test-fixtures.js';
+
+beforeEach(setupPrWorkflowGateFixtures);
+afterEach(teardownPrWorkflowGateFixtures);
 
 describe('pr-workflow-gate feedback verification', () => {
 	test('PR_FEEDBACK verification requires a declared inventory and exact non-overlapping ownership', async () => {

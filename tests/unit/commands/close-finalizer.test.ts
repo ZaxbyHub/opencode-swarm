@@ -34,7 +34,9 @@ import { rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
+import { isValidEvidenceType } from '../../../src/evidence/manager.js';
 import { initLedger } from '../../../src/plan/ledger.js';
+import { STATE_MOCK_TRANSITIVE_STUBS } from './state-mock-transitive-stubs.js';
 
 // ── Mocks (must precede the dynamic import) ──────────────────────────
 
@@ -161,10 +163,19 @@ mock.module('../../../src/hooks/knowledge-curator.js', () => ({
 
 mock.module('../../../src/evidence/manager.js', () => ({
 	archiveEvidence: mockArchiveEvidence,
+	isValidEvidenceType,
 }));
 
 mock.module('../../../src/session/snapshot-writer.js', () => ({
 	flushPendingSnapshot: mockFlushPendingSnapshot,
+	writeSnapshot: async () => {},
+}));
+
+mock.module('../../../src/hooks/hive-promoter.js', () => ({
+	isHiveEligible: () => false,
+	checkHivePromotions: async () => {},
+	promoteToHive: async () => '',
+	promoteFromSwarm: async () => '',
 }));
 
 // state.js mock — close.ts calls resetSwarmStatePreservingSingletons (NOT resetSwarmState)
@@ -191,6 +202,7 @@ mock.module('../../../src/state.js', () => {
 		environmentProfiles: new Map<string, unknown>(),
 	};
 	return {
+		...STATE_MOCK_TRANSITIVE_STUBS,
 		swarmState: mockedSwarmState,
 		endAgentSession: () => {},
 		// NOTE: resetSwarmState is NOT called by close.ts — only resetSwarmStatePreservingSingletons
@@ -201,6 +213,30 @@ mock.module('../../../src/state.js', () => {
 		},
 		resetSwarmStatePreservingSingletons:
 			mockResetSwarmStatePreservingSingletons,
+		// The remaining state.ts exports below are not exercised by this
+		// test's assertions, but must exist: some other module's import
+		// graph (reached transitively via createCuratorLLMDelegate ->
+		// agents/index.ts, #1927) now reaches them. Bound to
+		// `mockedSwarmState` (not a real import/spread) to avoid the
+		// real-vs-mock swarmState split-brain a full spread hits — real
+		// state.ts functions close over their own module-internal swarmState
+		// singleton, not this test's mocked one (see close.test.ts for the
+		// full incident notes).
+		getAgentSession: (sessionId: string) =>
+			mockedSwarmState.agentSessions?.get(sessionId),
+		ensureAgentSession: (sessionId: string, agentName?: string) => {
+			let session = mockedSwarmState.agentSessions.get(sessionId);
+			if (!session) {
+				session = { agentName };
+				mockedSwarmState.agentSessions.set(sessionId, session);
+			}
+			return session;
+		},
+		hasActiveTurboMode: () => false,
+		hasActiveFullAuto: () => false,
+		getActiveFullAutoSessionID: () => undefined,
+		hasActiveLeanTurbo: () => false,
+		hasActiveEpicMode: () => false,
 	};
 });
 
@@ -230,14 +266,12 @@ const realResetToMainAfterMerge = closeInternals.resetToMainAfterMerge;
 const realResetSwarmStatePreservingSingletons =
 	closeInternals.resetSwarmStatePreservingSingletons;
 
-// ── DI Conversion Summary ────────────────────────────────────────────
 //
 // WITHIN-MODULE MOCKS:
 // close.ts routes Git alignment dependencies through close._internals so this
 // file can test finalize alignment without a process-global mock of git/branch.
 // Other direct imports remain cross-module mocks.
 //
-// CROSS-MODULE MOCKS: All mocks remain as mock.module
 // - executeWriteRetro (tools/write-retro.ts)
 // - curateAndStoreSwarm (hooks/knowledge-curator.ts)
 // - archiveEvidence (evidence/manager.ts) — not in manager._internals

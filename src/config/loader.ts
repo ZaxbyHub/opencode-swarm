@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { z } from 'zod';
 import { advisoryWarn } from '../services/warning-buffer.js';
+import { sanitizeMalformedValues } from './sanitize-malformed-values';
 import {
 	ExternalSkillsConfigSchema,
 	GATE_CONFIG_KNOWN_SECTION_KEYS,
@@ -360,6 +361,10 @@ function stripUnrecognizedKeys(
  *                          the remaining configuration was preserved.
  *   'user_only'          – project config was discarded (failed validation and
  *                          targeted recovery); user config alone was used.
+ *   'sanitized_values'   – merged and user configs both failed, but recursive
+ *                          malformed-value recovery (step 7b, issue #1690)
+ *                          dropped the smallest invalid leaves/sections so the
+ *                          remaining valid configuration could load.
  *   'guardrails_defaults'– neither merged nor user config was recoverable;
  *                          fell back to fail-secure guardrails-only defaults.
  */
@@ -367,6 +372,7 @@ export type ConfigRecovery =
 	| 'none'
 	| 'stripped_keys'
 	| 'user_only'
+	| 'sanitized_values'
 	| 'guardrails_defaults';
 
 /** Full result from the shared config-build core. */
@@ -415,7 +421,11 @@ function rawFullAutoLocked(raw: Record<string, unknown> | null): boolean {
  *   2. On Zod failure: surgically drop only the confirmed unrecognized keys
  *      and re-parse (issue #1778 H6 — one typo must not wipe the whole config).
  *   3. If still invalid: retry user-config alone.
- *   4. Last resort: fail-secure guardrails-only defaults.
+ *   4. Recursive malformed-value recovery (step 7b, issue #1690): drop the
+ *      smallest invalid leaves/sections via the fixed-point sanitizer so a
+ *      single wrong-type value does not wipe the rest. Skipped when the raw
+ *      config explicitly sets `guardrails.enabled: false` (double-disable guard).
+ *   5. Last resort: fail-secure guardrails-only defaults.
  *
  * Returns `ConfigBuildResult` so callers that need metadata (e.g.
  * `loadPluginConfigWithMeta[Async]`) have it without a second file-read.
@@ -561,6 +571,70 @@ function buildConfigWithMeta(
 		}
 	}
 
+	// 7b. Recursive malformed-value recovery (issue #1690): if user-config
+	//     fallback also failed, the remaining failure is likely a malformed
+	//     VALUE (wrong type). Drop the smallest recoverable unit (leaf field
+	//     → parent section) so valid sections survive. This is the last
+	//     targeted recovery before bare guardrails defaults.
+	//
+	//     SECURITY: skip recovery when the raw config explicitly sets
+	//     guardrails.enabled: false. In that case, fall through to step 8
+	//     (guardrails defaults) so the user's non-guardrails values are
+	//     NOT preserved alongside a forced guardrails override — preventing
+	//     the "Double-disable" attack vector (adversarial test v6.1.2 AV8).
+	const rawGuardrailsDisabled =
+		mergedRaw.guardrails &&
+		typeof mergedRaw.guardrails === 'object' &&
+		!Array.isArray(mergedRaw.guardrails) &&
+		(mergedRaw.guardrails as Record<string, unknown>).enabled === false;
+
+	if (!rawGuardrailsDisabled) {
+		const valueRecovery = sanitizeMalformedValues(
+			PluginConfigSchema,
+			mergedRaw,
+		);
+		if (valueRecovery.recoveryWarnings.length > 0) {
+			const recoveredParse = PluginConfigSchema.safeParse(valueRecovery.config);
+			if (recoveredParse.success) {
+				const removedKeys = [
+					...gatesStripped,
+					...valueRecovery.recoveryWarnings.map((w) => w.section),
+				];
+				// Force guardrails enabled on recovery — the user's config had
+				// invalid values, so we apply the same fail-secure default as
+				// step 8 (guardrails_defaults) to preserve the security posture.
+				// Use safeParse (not parse) so a future schema refinement or an
+				// edge-case merge artifact cannot throw and bypass step 8's
+				// guardrails_defaults fallback (review PRR-009). On failure we
+				// fall through to step 8 rather than throwing.
+				const secureParse = PluginConfigSchema.safeParse({
+					...(recoveredParse.data as Record<string, unknown>),
+					guardrails: {
+						...((recoveredParse.data as Record<string, unknown>).guardrails as
+							| Record<string, unknown>
+							| undefined),
+						enabled: true,
+					},
+				});
+				if (secureParse.success) {
+					// Only announce recovery once it has actually succeeded —
+					// otherwise the "rest of your configuration was preserved"
+					// message would be misleading on the safeParse-failure path
+					// that falls through to step 8 (which discards everything).
+					advisoryWarn(
+						`[opencode-swarm] Ignored ${removedKeys.length} invalid or unrecognized config key(s): ${removedKeys.join(', ')}. The rest of your configuration was preserved. Fix or remove these keys.`,
+					);
+					return {
+						config: secure(secureParse.data),
+						recovery: 'sanitized_values',
+						removedKeys,
+						warnings: [],
+					};
+				}
+			}
+		}
+	} // end if (!rawGuardrailsDisabled)
+
 	// 8. Guardrails defaults: nothing was recoverable.
 	const offending = stripUnrecognizedKeys(mergedRaw, firstResult.error).removed;
 	if (offending.length > 0) {
@@ -649,6 +723,43 @@ export function loadPluginConfigWithMeta(directory: string): ConfigLoadResult {
 		recovery,
 		removedKeys,
 		warnings,
+	};
+}
+
+/**
+ * Safe-default `ConfigLoadResult` for init-path timeout / error fallback.
+ *
+ * Produces the same shape `loadPluginConfigWithMeta[Async]` returns when no
+ * config file exists on disk: empty config + guardrails enabled + no recovery.
+ * Used by `src/index.ts` when the parallelized config read times out or fails
+ * (Invariant 1 — init must remain bounded). A parity test in
+ * `tests/unit/config/loader-safe-default.test.ts` asserts this matches the
+ * classification fields the loader returns for a missing config file.
+ *
+ * Classification fields:
+ *   - `loadedFromFile: false` — on timeout we cannot know whether a file
+ *     existed (the `stat` itself may have stalled); `false` is the safe
+ *     choice that avoids the guardrails-disabled warning gated by this
+ *     flag at `src/index.ts` (the only init-path consumer).
+ *   - `configHadErrors: false` — we did not observe a corrupt/oversized
+ *     config, only a slow one; fail-closed consumers (e.g. the Full-Auto
+ *     `locked` activation guard) treat this as "config defaults", which
+ *     matches the runtime behavior of the safe-default `PluginConfig`.
+ */
+export function getSafeDefaultConfigLoadResult(): ConfigLoadResult {
+	const { config, recovery, removedKeys, warnings } = buildConfigWithMeta(
+		null,
+		null,
+		false,
+		false,
+	);
+	return {
+		config,
+		recovery,
+		removedKeys,
+		warnings,
+		loadedFromFile: false,
+		configHadErrors: false,
 	};
 }
 

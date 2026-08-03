@@ -186,9 +186,15 @@ describe('v6.12 Task 4.4: Gate-Tracking ADVERSARIAL TESTS', () => {
 			beginInvocation('partial-gates', ORCHESTRATOR_NAME);
 			swarmState.activeAgent.set('partial-gates', ORCHESTRATOR_NAME);
 
-			// Manually set gateLog with only partial gates
+			// Manually set gateLog with only partial gates.
+			// B10 (issue #1976): set currentTaskId so getCurrentTaskId() resolves to
+			// the same key the gateLog was populated under. Without this the lookup
+			// key fell back to 'partial-gates:unknown', missed the gateLog entirely,
+			// and reported ALL gates as missing — so the test passed for the wrong
+			// reason (validating the no-gateLog fallback, not the partial-gates path).
 			const session = getAgentSession('partial-gates');
 			const taskId = 'partial-gates:current';
+			session!.currentTaskId = taskId;
 			session!.gateLog.set(
 				taskId,
 				new Set(['pre_check_batch', 'syntax_check']),
@@ -211,6 +217,11 @@ describe('v6.12 Task 4.4: Gate-Tracking ADVERSARIAL TESTS', () => {
 			expect(messages[0].parts[0].text).toContain('diff');
 			expect(messages[0].parts[0].text).toContain('placeholder_scan');
 			expect(messages[0].parts[0].text).toContain('lint');
+			// Strengthened (B10): the PRESENT gates must NOT be reported as missing —
+			// this is what distinguishes the partial-gates path from the
+			// no-gateLog fallback the test previously exercised by accident.
+			expect(messages[0].parts[0].text).not.toContain('pre_check_batch');
+			expect(messages[0].parts[0].text).not.toContain('syntax_check');
 		});
 
 		it('only reviewer (no pre_check_batch) -> warning listing pre_check_batch', async () => {
@@ -226,9 +237,12 @@ describe('v6.12 Task 4.4: Gate-Tracking ADVERSARIAL TESTS', () => {
 			beginInvocation('reviewer-only', ORCHESTRATOR_NAME);
 			swarmState.activeAgent.set('reviewer-only', ORCHESTRATOR_NAME);
 
-			// Manually set gateLog with empty gates
+			// Manually set gateLog with empty gates.
+			// B10 (issue #1976): set currentTaskId so the lookup resolves to this
+			// empty gateLog key (not the no-gateLog fallback).
 			const session = getAgentSession('reviewer-only');
 			const taskId = 'reviewer-only:current';
+			session!.currentTaskId = taskId;
 			session!.gateLog.set(taskId, new Set());
 
 			// Set reviewerCallCount for phase 1 (has reviewer)
@@ -260,9 +274,13 @@ describe('v6.12 Task 4.4: Gate-Tracking ADVERSARIAL TESTS', () => {
 			beginInvocation('warn-test', ORCHESTRATOR_NAME);
 			swarmState.activeAgent.set('warn-test', ORCHESTRATOR_NAME);
 
-			// Manually set gateLog with partial gates but no reviewer
+			// Manually set gateLog with partial gates but no reviewer.
+			// B10 (issue #1976): set currentTaskId so the lookup resolves to this
+			// gateLog key (lint present), validating the partial-gates path rather
+			// than the no-gateLog fallback.
 			const session = getAgentSession('warn-test');
 			const taskId = 'warn-test:current';
+			session!.currentTaskId = taskId;
 			session!.gateLog.set(taskId, new Set(['lint']));
 
 			// NO reviewerCallCount (defaults to 0 for phase 1 check)
@@ -277,6 +295,9 @@ describe('v6.12 Task 4.4: Gate-Tracking ADVERSARIAL TESTS', () => {
 			await hooks.messagesTransform({}, { messages });
 
 			expect(messages[0].parts[0].text).toContain('PARTIAL GATE VIOLATION');
+			// Strengthened (B10): 'lint' is PRESENT in the gateLog, so it must not be
+			// reported as missing (a missing-gates list omits observed gates).
+			expect(messages[0].parts[0].text).not.toMatch(/\blint\b.*missing/);
 		});
 
 		it('uses guardrails.qa_gates.required_tools when checking partial gate violations', async () => {

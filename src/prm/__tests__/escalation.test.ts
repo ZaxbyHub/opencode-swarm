@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'bun:test';
 import { createDefaultEscalationState, EscalationTracker } from '../escalation';
-import type { CourseCorrection, EscalationState, PatternMatch } from '../types';
+import type { EscalationState, PatternMatch } from '../types';
 
 // Mock telemetry module - must use correct relative path from __tests__/
 vi.mock('../../telemetry', () => ({
@@ -36,7 +36,6 @@ describe('createDefaultEscalationState', () => {
 		expect(state.escalationLevel).toBe(0);
 		expect(state.lastPatternDetected).toBeNull();
 		expect(state.hardStopPending).toBe(false);
-		expect(state.correctionsPending).toEqual([]);
 	});
 });
 
@@ -49,7 +48,6 @@ describe('EscalationTracker', () => {
 			expect(state.escalationLevel).toBe(0);
 			expect(state.lastPatternDetected).toBeNull();
 			expect(state.hardStopPending).toBe(false);
-			expect(state.correctionsPending).toEqual([]);
 		});
 
 		test('creates tracker with initial state', () => {
@@ -58,23 +56,12 @@ describe('EscalationTracker', () => {
 				escalationLevel: 2,
 				lastPatternDetected: createMockPatternMatch('repetition_loop'),
 				hardStopPending: false,
-				correctionsPending: [
-					{
-						alert: 'GUIDANCE: Test',
-						category: 'coordination_error',
-						guidance: 'Test guidance',
-						action: 'Test action',
-						pattern: 'repetition_loop',
-						stepRange: [1, 3],
-					},
-				],
 			};
 			const tracker = new EscalationTracker('session-2', initialState);
 			const state = tracker.getState();
 			expect(state.patternCounts.get('repetition_loop')).toBe(2);
 			expect(state.escalationLevel).toBe(2);
 			expect(state.lastPatternDetected?.pattern).toBe('repetition_loop');
-			expect(state.correctionsPending.length).toBe(1);
 		});
 	});
 
@@ -170,19 +157,6 @@ describe('EscalationTracker', () => {
 			expect(r4.level).toBe(2); // Second for ping_pong
 		});
 
-		test('corrections are accumulated in pending array', () => {
-			const tracker = new EscalationTracker('session-1');
-			const match = createMockPatternMatch('repetition_loop');
-
-			tracker.recordDetection(match);
-			tracker.recordDetection(match);
-
-			const corrections = tracker.getPendingCorrections();
-			expect(corrections.length).toBe(2);
-			expect(corrections[0].alert).toContain('GUIDANCE');
-			expect(corrections[1].alert).toContain('STRONG GUIDANCE');
-		});
-
 		test('lastPatternDetected is updated on each detection', () => {
 			const tracker = new EscalationTracker('session-1');
 			const loopMatch = createMockPatternMatch('repetition_loop');
@@ -266,15 +240,6 @@ describe('EscalationTracker', () => {
 			state1.patternCounts.set('repetition_loop', 99);
 			state1.lastPatternDetected?.affectedAgents.push('mutated-agent');
 			state1.lastPatternDetected?.affectedTargets.push('mutated-target');
-			state1.correctionsPending.push({
-				alert: 'mutated',
-				category: 'reasoning_error',
-				pattern: 'repetition_loop',
-				guidance: 'mutated',
-				action: 'mutated',
-				stepRange: [1, 1],
-				timestamp: new Date().toISOString(),
-			});
 
 			const freshState = tracker.getState();
 			expect(freshState.patternCounts.get('repetition_loop')).toBe(1);
@@ -284,7 +249,6 @@ describe('EscalationTracker', () => {
 			expect(freshState.lastPatternDetected?.affectedTargets).toEqual([
 				'src/foo.ts',
 			]);
-			expect(freshState.correctionsPending).toHaveLength(1);
 		});
 	});
 
@@ -339,69 +303,6 @@ describe('EscalationTracker', () => {
 			tracker.reset();
 
 			expect(tracker.isHardStopPending()).toBe(false);
-		});
-
-		test('clears correctionsPending', () => {
-			const tracker = new EscalationTracker('session-1');
-			const match = createMockPatternMatch('repetition_loop');
-			tracker.recordDetection(match);
-			tracker.recordDetection(match);
-
-			expect(tracker.getPendingCorrections().length).toBe(2);
-
-			tracker.reset();
-
-			expect(tracker.getPendingCorrections().length).toBe(0);
-		});
-	});
-
-	describe('getPendingCorrections', () => {
-		test('returns empty array initially', () => {
-			const tracker = new EscalationTracker('session-1');
-			expect(tracker.getPendingCorrections()).toEqual([]);
-		});
-
-		test('returns defensive copies of internal corrections array', () => {
-			const tracker = new EscalationTracker('session-1');
-			const match = createMockPatternMatch('repetition_loop');
-			tracker.recordDetection(match);
-
-			const corrections = tracker.getPendingCorrections();
-			expect(corrections.length).toBe(1);
-			corrections.push({} as CourseCorrection);
-			corrections[0].stepRange[0] = 99;
-
-			const freshCorrections = tracker.getPendingCorrections();
-			expect(freshCorrections.length).toBe(1);
-			expect(freshCorrections[0].stepRange[0]).not.toBe(99);
-		});
-	});
-
-	describe('clearPendingCorrections', () => {
-		test('clears all pending corrections', () => {
-			const tracker = new EscalationTracker('session-1');
-			const match = createMockPatternMatch('repetition_loop');
-			tracker.recordDetection(match);
-			tracker.recordDetection(match);
-
-			expect(tracker.getPendingCorrections().length).toBe(2);
-
-			tracker.clearPendingCorrections();
-
-			expect(tracker.getPendingCorrections().length).toBe(0);
-		});
-
-		test('does not reset pattern counts or escalation level', () => {
-			const tracker = new EscalationTracker('session-1');
-			const match = createMockPatternMatch('repetition_loop');
-			tracker.recordDetection(match);
-			tracker.recordDetection(match);
-
-			tracker.clearPendingCorrections();
-
-			// Pattern counts still tracked
-			expect(tracker.getState().patternCounts.get('repetition_loop')).toBe(2);
-			expect(tracker.getState().escalationLevel).toBe(2);
 		});
 	});
 

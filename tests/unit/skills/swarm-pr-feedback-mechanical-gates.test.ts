@@ -39,10 +39,18 @@ describe('swarm-pr-feedback mechanical gates', () => {
 		}
 		expect(source).toContain('There is no speed, efficiency, token, or time');
 		expect(source).not.toContain('.claude/session/tasks/<slug>/gates.md');
+		// The gates are profile-aware: the controller sequence is Profile A, and
+		// the same ordered gates run without the controller on Profiles B/C.
+		expect(source).toContain('## Runtime Capability Profiles');
+		expect(source).toContain('**Mechanical controller contract (Profile A).**');
+		expect(source).toContain('**Without the controller (Profiles B/C).**');
+		expect(source).toContain(
+			'Controller-tool absence is NOT a blocker; Profiles B and C are first-class',
+		);
 	});
 
 	for (const adapter of ADAPTERS) {
-		test(`${adapter} preserves the structured-mode prohibition on fallback`, () => {
+		test(`${adapter} gives a native gate path and keeps controller modes conditional`, () => {
 			const source = read(adapter);
 			expect(source).toContain(
 				'../../../.opencode/skills/swarm-pr-feedback/SKILL.md',
@@ -53,6 +61,13 @@ describe('swarm-pr-feedback mechanical gates', () => {
 			expect(source).toContain('regression/test command');
 			expect(source).toContain('session task-gates artifact');
 			expect(source).toMatch(/direct/i);
+			// Controller absence is the normal non-OpenCode state, never a dead
+			// end; the controller sequence applies only when its tools exist.
+			expect(source).toContain('not an error');
+			expect(source).toContain('Never report BLOCKED merely because');
+			expect(source).toMatch(
+				/Only if (this|the) session actually exposes the plugin's mechanical tools/,
+			);
 			expect(source).not.toContain('.claude/session/tasks/<slug>/gates.md');
 			expect(source).not.toContain('$writing-tests');
 			expect(source).not.toContain('$commit-pr');

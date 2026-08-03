@@ -225,7 +225,7 @@ describe('delegation gate doc-only durable evidence', () => {
 		});
 	});
 
-	describe('regression: foreground standard-worktree evidence (F-003)', () => {
+	describe('regression: serial fallback preserves standard-worktree evidence (F-014)', () => {
 		test('observes the lane before merge rather than project-root changes', async () => {
 			const plan = makePlan(['README.md']);
 			plan.execution_profile = {
@@ -283,8 +283,9 @@ describe('delegation gate doc-only durable evidence', () => {
 					'export const rootOnly = true;\n',
 				);
 
-				// Before F-003, observing the project root here sees root-only.ts and
-				// fails closed. The lane itself contains exactly the declared Markdown.
+				// F-014: serial fallback must keep standard-worktree isolation.
+				// Observing the project root here sees root-only.ts and fails closed;
+				// the isolated lane itself contains exactly the declared Markdown.
 				await hook.toolAfter(
 					{
 						tool: 'Task',

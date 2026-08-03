@@ -1,10 +1,13 @@
 # Proposal: Automatic review of execution by a dedicated review model
 
-Status: proposal (research + design; no implementation in this document)
+Status: implemented by issue #1675
 Date: 2026-06-12
+Implemented: 2026-07-25
 Scope: how Claude Code and OpenAI Codex implement "a review model automatically reviews the main model's work," what opencode-swarm already has, the exact gaps, and a phased implementation design.
 
 > Validation note: every codebase claim below was verified against source and then independently challenged by an adversarial review pass. Gaps are scoped precisely — most hold only for the **default execution path** (non-council, non-lean-turbo, non-full-auto), and the document says so explicitly where that is the case.
+>
+> Implementation note: issue #1675 shipped the core design below: structured findings, independent finding validation, the shared bounded ephemeral dispatcher and canonical diff source, task/phase/plan triggers, advisory and evidence-only gate dispositions, the pinned v8 cost decision, and `/swarm review`. Sections 2–3 remain the pre-implementation evidence record.
 
 ---
 
@@ -78,7 +81,7 @@ The plugin is *ahead* of both products on enforcement and *behind* both on calib
 | `drift_check` QA gate (default ON): forces a per-phase `critic_drift_verifier` pass at PHASE-WRAP, hard-blocked by the drift gate | `src/agents/architect.ts:1328`, `src/tools/phase-complete/gates/drift-gate.ts` | ✅ fresh-context cumulative phase verification — spec-alignment-focused, architect-dispatched |
 | Other automatic post-execution verification: incremental typecheck after each coder Task (30 s cap, advisory), slop detector, dual-pass security review (`review_passes.security_globs`), quality budget | `src/hooks/incremental-verify.ts`, `src/hooks/slop-detector.ts`, `src/config/schema.ts:402-416`, `src/quality/` | ✅ deterministic/heuristic complements to model review |
 
-## 3. Gap analysis
+## 3. Pre-implementation gap analysis (resolved by #1675)
 
 All gaps below are stated for the **default execution path** (standard mode; council, lean turbo, and full-auto not enabled). Where an opt-in mode already closes a gap, that is noted — the design goal is to bring the pattern to the default path and unify the existing islands.
 
@@ -89,19 +92,20 @@ All gaps below are stated for the **default execution path** (standard mode; cou
 - **G5 — Second-model oversight is locked behind full-auto.** Verified: `tickAndEvaluate` returns undefined unless `config.full_auto?.enabled` (`src/full-auto/cadence.ts:141`); the oversight run can only start via `full_auto` (`src/commands/full-auto.ts:62`); the hooks are no-ops when disabled (`src/index.ts:543-544`). The cadence-triggered critic oversight is exactly the guardian/advisor pattern, but unavailable in normal interactive sessions.
 - **G6 — No per-finding confidence calibration on the default path, and no confidence-threshold filtering of findings anywhere.** Council mode already requires per-*verdict* numeric confidence and computes confidence-weighted consensus. But the default Stage-B reviewer emits severity only (CRITICAL…INFO), and no path filters individual findings by confidence the way CC (≥80/100) and Codex (calibrated `confidence_score`) do.
 
-## 4. Proposed design
+## 4. Implemented design (#1675)
 
-Phased so each stage ships independently and respects AGENTS.md invariants. One new top-level config block, `auto_review`, owns all phases (single `min_confidence`, matching the single-block convention of `full_auto`/`council`). No key collision: `PluginConfigSchema` has no `review`/`auto_review` key today (existing siblings: `self_review`, `review_passes`, `ui_review`, `incremental_verify`).
+The implementation follows the phased design while keeping one top-level `auto_review` policy block. Version 7 remains explicitly opt-in: while disabled, the legacy reviewer prompt/output contract is preserved and Stage-B does not parse or persist structured receipts or launch finding validation. In version 8 and later, an absent `enabled` resolves to true only when the source-controlled burn-in decision is approved and pins the 30-diff benchmark artifact by SHA-256; an explicit user value always wins. Enabled Stage-B receipts fingerprint the parent session's harness-observed `modifiedFilesThisCoderTask` scope, repository HEAD, and current file bytes rather than architect-authored prompt prose; unavailable or unsafe scope fails without a durable receipt.
 
 ```jsonc
 "auto_review": {
-  "enabled": false,                    // master switch (opt-in)
+  "enabled": false,                    // v7 default; v8+ uses the pinned burn-in decision when absent
+  "trigger": "phase_boundary",         // "task_completion" | "phase_boundary" | "both"
   "min_confidence": 0.7,               // finding-level filter threshold (0–1)
-  "structured_findings": true,          // Phase 1
-  "validate_findings": false,           // Phase 2 (flip after burn-in)
-  "validation_model": null,             // null → critic model resolution
+  "structured_findings": true,         // required by gate mode
+  "validate_findings": false,          // gate mode validates eligible findings regardless
+  "validation_model": null,            // null → critic_finding_validator model resolution
   "validation_timeout_ms": 120000,
-  "final_review": {                     // Phase 3
+  "final_review": {
     "on_phase_complete": true,
     "on_plan_complete": true,
     "model": null,                      // null → agents.reviewer.model resolution
@@ -139,15 +143,15 @@ Phased so each stage ships independently and respects AGENTS.md invariants. One 
 **Generalize the lean-turbo engine, not green-field** (adversarial finding C1/C4). `dispatchPhaseReviewer` (`src/turbo/lean/reviewer.ts:516`) already implements ephemeral-session dispatch with a replaced review prompt, fail-closed verdict parsing, and evidence persistence. The work is:
 
 1. **Extract the dispatch engine** from `src/turbo/lean/reviewer.ts` into a shared module (e.g. `src/review/final-review-dispatcher.ts`) consumed by both lean turbo and the new default-path trigger.
-2. **Harness-constructed input**: a bounded `git -C <dir> diff <merge-base>` (array-form spawn, explicit cwd, `stdin: 'ignore'`, timeout, bounded stdout, `proc.kill()` in `finally` — invariant 3), merge base computed by the harness exactly like Codex. Diff truncated at `max_diff_bytes` with file-list fallback. Combine with the existing semantic-diff summary.
+2. **Harness-constructed input**: a bounded `git -C <dir> diff <merge-base>` (array-form spawn, explicit cwd, `stdin: 'ignore'`, timeout, bounded stdout, `proc.kill()` in `finally` — invariant 3), merge base computed by the harness exactly like Codex. Diff truncated at `max_diff_bytes` with a separately bounded NUL-safe changed-file fallback; incomplete coverage is explicit in the prompt, evidence, manual result, and automatic advisory. The shared dispatcher derives its prompt allowance from the configured diff cap under a hard 3 MiB ceiling, so the documented 2 MiB maximum remains reachable after prompt overhead. Combine with the existing semantic-diff summary.
 3. **Review prompt**: Codex-style rubric (introduced-in-this-diff only, anti-speculation, "prefer no findings", Phase-1 structured JSON output) — a *replaced* prompt, not the Stage-B task-review prompt.
 4. **Where it runs (gate-layer contract, adversarial finding C4)**: the `gates/` layer is uniformly evidence-check-only — no gate dispatches a model. Follow the established split: the **dispatch** runs in the `phase_complete` tool body (precedent: the curator LLM call there, 300 s timeout) and **persists a receipt + evidence file**; a new thin `final-review-gate.ts` only **validates the persisted evidence** (presence, scope-hash freshness against the current diff, verdict) like every other gate.
-5. **Disposition**: `advisory` (default) injects a ranked findings summary and persists the receipt — CC's "neutral check run" stance. `gate` blocks `phase_complete` on CONFIRMED ≥ HIGH findings above `min_confidence`, honoring fail-closed semantics like `oversight.ts` (a verdict that cannot be persisted is not a verdict). Standard turbo mode skips it unless `mode: "gate"`; lean turbo keeps its own phase reviewer (same engine).
-6. No new user-visible tool (no invariant-11 tool surface). A manual `/swarm review` command wrapping the same engine is a natural follow-up, out of scope here.
+5. **Disposition**: `advisory` (default) injects a ranked findings summary and persists the receipt — CC's "neutral check run" stance. `gate` blocks `phase_complete` on independently CONFIRMED, diff-anchored, effective HIGH/CRITICAL findings and fails closed on incomplete or stale evidence. Lean Turbo keeps its own advisory phase reviewer; explicit gate mode still runs and is not turbo-bypassed.
+6. **Manual command**: `/swarm review [--base <ref> | --range <from..to|from...to> | --working-tree] [--json]` now wraps the same canonical diff and review engine. The original out-of-scope note was superseded by issue #1675's end-to-end acceptance criteria.
 
-### Phase 4 — Unlock oversight cadence outside full-auto (closes G5, optional)
+### Phase 4 — Normal-session oversight (closes G5)
 
-Lift `full_auto.oversight` triggers into a standalone `oversight` block consumable without `full_auto.enabled` (same dispatcher, advisory-only disposition when not in full-auto). Lowest priority: Phase 3 covers the highest-value automatic checkpoint.
+Issue #1675 closed the normal-session oversight gap through `auto_review.trigger` rather than duplicating `full_auto.oversight`. `task_completion`, `phase_boundary`, and `both` work without `full_auto.enabled`; task review is fire-and-forget and phase/plan review is integrated into `phase_complete`.
 
 ### Prompt upgrades (free-standing, any phase)
 
@@ -161,7 +165,7 @@ Port two Codex rubric rules into `REVIEWER_PROMPT`: the anti-speculation rule ("
 - **8 (session state)**: validator in-flight guard and auto-review state keyed by `sessionID` with eviction; ephemeral sessions deleted in `finally`.
 - **9 (guardrails/retry)**: reviewer/validator model failures use the existing per-agent `fallback_models` chain; advisory mode logs non-fatally; gate mode follows the `oversight.ts` fail-closed precedent.
 - **10 (chat/system msg)**: all surfacing via `pendingAdvisoryMessages` / debug-gated logger; no console noise.
-- **11 (tool registration)**: no new tools in Phases 1–3; the `critic_finding_validator` agent registration follows the full checklist (export, registration, `TOOL_NAMES`/agent-map untouched or mirrored, docs, tests **including multi-swarm prefixed-name primary/subagent tests**).
+- **11 (tool registration)**: `/swarm review` is registered across the command registry, command tool policy, chat template, help/docs, and parity tests. The `critic_finding_validator` registration follows the full checklist including legacy and multi-swarm prefixed-name tests.
 - **12 (release/cache)**: each shipped phase carries a `docs/releases/pending/<slug>.md` fragment.
 
 ## 6. Sources

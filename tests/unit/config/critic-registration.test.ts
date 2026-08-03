@@ -14,8 +14,8 @@ describe('Critic Agent Registration', () => {
 			expect(QA_AGENTS).toContain('critic');
 		});
 
-		test('QA_AGENTS has exactly 3 members', () => {
-			expect(QA_AGENTS).toHaveLength(3);
+		test('QA_AGENTS has exactly 4 members', () => {
+			expect(QA_AGENTS).toHaveLength(4);
 		});
 
 		test('critic_oversight is in QA_AGENTS', () => {

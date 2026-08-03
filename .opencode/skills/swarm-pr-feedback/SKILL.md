@@ -29,9 +29,12 @@ ledger row is marked FIXED, and no PR is published until all three gates pass on
 the current diff. There is no speed, efficiency, or time exception. See
 "Mandatory Gates" below for the full protocol.
 
-When the work starts from a prior `swarm-pr-review` run, ingest the review's
-handoff artifact (for example
-`.swarm/pr-review/<run_id>/feedback-handoff.md` or `.json`) before triage.
+When the work starts from a prior Profile-A `swarm-pr-review` run, use the exact
+user command `/swarm pr-feedback <PR_URL> continue from
+.swarm/pr-review/<run_id>/feedback-handoff.json`. The controller validates the
+terminal review and artifact before atomically creating an unbound feedback
+gate; the artifact alone is not write authorization. Profiles B/C ingest their
+task-workspace handoff directly before triage.
 Carry forward the original review finding IDs, classifications, reviewer/critic
 provenance, and any operational blockers instead of renumbering them as new
 discoveries.
@@ -123,6 +126,35 @@ Do not act on review-discovered findings from a prior `swarm-pr-review` run
 unless the user has explicitly approved the transition into `swarm-pr-feedback`.
 The handoff artifact is triage input, not standing authorization to change code.
 
+## Runtime Capability Profiles
+
+This skill runs on any agent harness. Detect the active profile from the
+actual tool list before triage — the same three profiles defined in
+`../swarm-pr-review/SKILL.md` (Runtime Capability Profiles):
+
+- **Profile A — mechanical PR-feedback controller.** The plugin's tools are
+  present in this session: `dispatch_lanes_async`, `collect_lane_results`,
+  `retrieve_lane_output`, `prepare_pr_feedback_scope`,
+  `run_pr_feedback_stage_a`, `complete_pr_workflow`. The controller's
+  fail-closed accounting (immutable inventory, ordered gate lanes, content
+  digests, arming, bound push) is authoritative; bypassing it — direct
+  subagent calls, blocking dispatch, prose verdicts — is BLOCKED while it is
+  active.
+- **Profile B — native parallel subagents, no controller.** Run the same
+  intake → verify → fix → gate → publish discipline using your harness's
+  subagent tool for verification lanes and gate roles; you maintain the
+  ledger, the ownership partition, and the digest accounting yourself in
+  session/task workspace files (never under `.swarm/`, which belongs to the
+  plugin runtime).
+- **Profile C — single context, no subagents.** Same discipline as strictly
+  separated sequential passes that re-derive rather than restate earlier
+  reasoning, plus explicit disclosure in the closure ledger that gate
+  independence was procedural.
+
+Controller-tool absence is NOT a blocker; Profiles B and C are first-class
+execution paths. BLOCKED is reserved for bypassing an active controller and
+for verification or coverage gaps that stay unclosable after bounded retries.
+
 ## Pre-flight: Check Out the PR Branch Locally
 
 Before verifying any claim or making any fix, ensure the PR branch is the working
@@ -141,9 +173,15 @@ tree:
   Abort your rebase, take the remote state, then add minor improvements on top.
 - Verify the working tree is clean first (`git status --porcelain`). If tracked
   changes exist, call `prepare_pr_workflow_checkout` with every explicit dirty
-  tracked path. It creates an auditable, path-scoped stash and returns its
+  tracked path (Profile A). It creates an auditable, path-scoped stash and returns its
   recovery command. Do not issue `git stash` through shell. The controller never
   stashes untracked files; move or remove those manually, or abort the checkout.
+  Without the controller, surface dirty tracked state to the user or abort the
+  checkout — do not blind-stash.
+- Treat `recovery-required` and `indeterminate` controller results as terminal
+  for the current attempt: report the typed `required_action`, abort/clear any
+  already-active gate, and stop. Only `stashable` permits one preparation call;
+  retry only when the controller explicitly returns `retryable: true`.
 - **Check out the head branch locally before dispatching feedback lanes.** Feedback verification reads the working-tree
   filesystem (`Read`/`Glob`/`Grep`), and fixes must land on the PR branch — without a
   checkout you would verify and patch the base branch's code instead. Record the
@@ -174,6 +212,9 @@ preview and call `retrieve_lane_output` before using it to classify, resolve,
 disprove, or group feedback items. If the result is `output_degraded`,
 `transcript_incomplete`, or truncated without a usable ref, keep the affected
 ledger items as `NEEDS_MORE_EVIDENCE` or re-dispatch a narrower read-only lane.
+(Profile A. On Profiles B/C, read each verification subagent's or pass's full
+report directly — a truncated or summary-only report is a preview, not
+verification evidence, and keeps its items open the same way.)
 
 ## Pre-flight: Dirty Worktree Handling
 
@@ -253,7 +294,8 @@ If a source is unavailable, retry with alternative access paths. If unavailable 
 
 ### Async advisory verification lanes
 
-After the complete feedback ledger exists and before editing, use
+After the complete feedback ledger exists and before editing, run independent
+read-only verification lanes. Under Profile A, use
 `dispatch_lanes_async` with `mode: "swarm-pr-feedback:verification"`, the
 complete immutable `feedback_inventory` ID list, the exact current
 `pr_head_sha`, and each lane's exact
@@ -298,11 +340,20 @@ COVERAGE GATE:
 retry failed lanes (max 2) as another
 `swarm-pr-feedback:verification` async batch with the same immutable inventory,
 exact `pr_head_sha`, agent type, prompt, scope, and isolation, or stop and
-surface the lane failure to the user as BLOCKED. Blocking and direct-Task
-fallbacks are rejected because they cannot satisfy the durable ownership and
-head-provenance gate.
+surface the lane failure to the user as BLOCKED. Under Profile A, blocking and
+direct-Task fallbacks are rejected because they cannot satisfy the durable
+ownership and head-provenance gate.
 Do not proceed with "blocking verification and record that async advisory lanes
 were unavailable" — record-and-continue is not coverage closure.
+
+Under Profile B, partition the same immutable inventory across fresh read-only
+verification subagents — every `FB-###` item owned by exactly one lane and the
+union of lanes covering the entire ledger — with each prompt stating its owned
+IDs and the exact `pr_head_sha`, and each lane returning one
+`[FEEDBACK-VERIFIED]` row per owned item. Under Profile C, verify the ledger
+in sequential category passes with the same one-row-per-item contract. On
+every profile, no item may be classified until its verification lane or pass
+has settled, and unclosable verification gaps are surfaced as BLOCKED.
 
 ### CI matrix cascade check (do this before fixing)
 
@@ -506,9 +557,9 @@ pre-checks; Stage B = `reviewer` + `test_engineer` per-task gates (consistent
 with `execute`, `plan`, `specify`, `brainstorm`, `docs/swarm-briefing.md`, and
 `docs/council/README.md`).
 
-**Mechanical controller contract.** Prose acknowledgements, direct `Task` calls,
+**Mechanical controller contract (Profile A).** Prose acknowledgements, direct `Task` calls,
 blocking dispatch, reused conversations, and free-form `APPROVE`/`PASS` text do
-not satisfy these gates. The durable controller requires this exact sequence on
+not satisfy these gates while the controller is active. The durable controller requires this exact sequence on
 one content digest:
 
 Controller authority follows the parent/child session ancestry. Coder and
@@ -563,6 +614,23 @@ index/worktree and a non-merge direct child commit whose sole parent is the
 immutable intake head, so zero commits, multiple commits, merge commits,
 amend/non-descendant histories,
 `--allow-empty`, and partially committed reviewed content fail closed. There is no speed, efficiency, token, or time exception.
+
+**Without the controller (Profiles B/C).** The same gates run in the same
+order with the same one-row-per-feedback-ID verdict contracts; what changes is
+the executor. Stage A: run the repository's discovered build, typecheck, and
+lint/format obligations, exact `git diff --check`, and one targeted
+reproduction/regression command yourself, recording each command and its
+output as a receipt in the ledger; track the content digest manually (for
+example `git rev-parse HEAD` plus a working-tree diff hash) so stale receipts
+are detectable, and re-run the whole set after any content change. Stage B:
+one fresh reviewer subagent, then one fresh test-engineer-role subagent
+(Profile B), or two strictly separated re-derivation passes (Profile C).
+Closeout: a separate fresh reviewer, then a separate fresh critic, per the
+swarm closeout contract. Emit the same `[STAGE-B-REVIEW]`, `[STAGE-B-TEST]`,
+`[CLOSEOUT-REVIEW]`, and `[CLOSEOUT-CRITIC]` rows, record the verdicts in the
+session task-gates artifact, and disclose Profile C's procedural independence
+in the closure ledger. Any edit after a gate verdict invalidates that verdict
+and every later one; restart at Stage A.
 
 If a gate failure is suspected pre-existing, prove it on the base branch or
 label it `UNVERIFIED`. Do not call the branch green while required checks are
@@ -624,6 +692,14 @@ shell/eval/wrapper, and credentialed publication surfaces fail closed. The
 controller snapshots the content revision plus HEAD, index, refs, upstream, and
 Git config before and after every command (including failures/timeouts); any
 mutation invalidates Stage A and prevents later commands from becoming proof.
+
+The Stage A response carries per-check summaries (category, command, exit code,
+duration) rather than inline stdout/stderr. On failure it also carries a bounded
+tail of the failing check and a `full_output_ref` for retrieving the complete
+output via `retrieve_summary`; if that persistence fails, the failing check's
+full stdout/stderr is inlined instead so evidence is never lost. A successful
+run persists nothing — there is no failure evidence to recover, and the
+per-check summaries are the useful record.
 
 ### Stage B — reviewer + test_engineer (mandatory after Stage A passes)
 
@@ -688,7 +764,8 @@ pre-checks and must not be folded into Stage A.
 ## Publishing And Communication
 
 After every ordered local gate passes on one unchanged content digest, create
-the reviewed commit with one standalone `git commit` command. Then call
+the reviewed commit with one standalone `git commit` command. Under Profile A,
+then call
 `complete_pr_workflow` once with `mode: "PR_FEEDBACK"` and the immutable intake
 `pr_head_sha`. A `ready-to-publish` result arms publication but deliberately
 keeps the durable gate active and binds that post-commit HEAD to the current
@@ -713,6 +790,12 @@ branch; a locally forged or fetched tracking ref is never publication proof.
 The gate clears only after both observations agree, before any PR
 comment/body/thread write.
 
+Under Profiles B/C, the same publication invariants apply procedurally: one
+reviewed commit on the PR branch, a single non-force push of exactly that
+commit to the PR head branch through the repository's normal workflow, then
+read-only verification that the actual remote head equals the pushed commit
+before any PR comment/body/thread write.
+
 Commits and pushes follow the repository's commit/PR workflow (for example
 `file:.swarm/bundled-skills/commit-pr/SKILL.md` when that bundled workflow is
 available) — do not push ad-hoc.
@@ -735,17 +818,22 @@ head, and record the exact evidence used.
 
 ## Final Output
 
-Before emitting the user-facing final response, call `complete_pr_workflow` a
+Under Profile A, before emitting the user-facing final response, call
+`complete_pr_workflow` a
 second time with the same mode and immutable verification `pr_head_sha`. The
 tool clears the durable session gate only when the content digest still equals
 the independently approved digest, the exact approved commit remains current,
 its bound upstream remote-tracking ref points to that exact commit, every
 feedback ID has exact-provenance evidence, and no PR-workflow lanes remain
-open. While the gate remains active, the runtime replaces architect
-final-response text with a mechanical blocked notice and normally re-wakes an
+open. While the gate remains active, the runtime prepends a workflow-active
+banner to architect text (the model's text is preserved below it) and normally re-wakes an
 idle parent session. A user interruption pauses automatic wakes until a later
 explicit user turn settles; the durable gate remains available to continue or
 abort.
+
+Under Profiles B/C, no mechanical gate exists: emit the final response only
+after the closure ledger accounts for every original item and the pushed
+remote head has been verified read-only.
 
 Report:
 
@@ -759,7 +847,7 @@ Report:
 
 End with a complete ledger mapping every original item to its outcome.
 
-## Aborting an unrecoverable feedback workflow (pre-armed only)
+## Aborting an unrecoverable feedback workflow (Profile A, pre-armed only)
 
 If the verification bind is genuinely unreachable (the PR head cannot be
 fetched or checked out, or a compound `git fetch … && git checkout …` keeps
@@ -772,4 +860,5 @@ arming you MUST complete via `complete_pr_workflow` (or push the bound
 commit first), because aborting an armed gate would drop the immutable-
 commit binding and leave a half-published commit. The user can also run
 `/swarm abort-pr-workflow` once the wake budget suspends. Abort is a
-recovery tool, not a gate-skip shortcut.
+recovery tool, not a gate-skip shortcut. On Profiles B/C there is no durable
+gate to abort: report the blocker to the user and stop.

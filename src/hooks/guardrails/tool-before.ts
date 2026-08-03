@@ -31,7 +31,12 @@ import {
 	beginInvocation,
 	ensureAgentSession,
 	getActiveWindow,
+	getModifiedFilesForTask,
 	type InvocationWindow,
+	recordModifiedFileForTask,
+	recordReviewerScopeGenerationFile,
+	resetModifiedFilesForTask,
+	resolveSessionWorkspaceDirectory,
 	swarmState,
 } from '../../state';
 import { telemetry } from '../../telemetry.js';
@@ -104,6 +109,14 @@ export interface ToolBeforeContext {
 	 * trusted roots when exempting `git worktree remove --force` (issue #1708).
 	 */
 	worktreeBaseDirOverrides?: string[];
+	/** Hold exact child-write provenance until the matching after-hook succeeds. */
+	rememberReviewerScopeWrite?: (input: {
+		callID: string;
+		parentSessionID: string;
+		taskId: string;
+		coderCallID: string;
+		file: string;
+	}) => void;
 }
 
 // Shared helper functions extracted to helpers.ts (task 1.4 / FR-005)
@@ -137,30 +150,55 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		authorityConfig,
 		consecutiveNoToolTurns,
 		worktreeBaseDirOverrides,
+		rememberReviewerScopeWrite,
 	} = ctx;
+
+	/**
+	 * Issue #2002: `effectiveDirectory` is the plugin-root `ctx.directory`,
+	 * captured once when this handler is built and shared by EVERY session.
+	 * Worktree-isolated coder children execute in a lane root and have their
+	 * scope binding derived and published against that lane, so resolving their
+	 * binding, containment, sandbox grants, or lstat checks against the project
+	 * root is always wrong.
+	 *
+	 * Use this for SESSION-SCOPED decisions ("where is this agent actually
+	 * working"). Do NOT use it for PROJECT-SCOPED governance checks — the
+	 * plan/spec write guards and the spec-drift gate protect *the project's*
+	 * artifacts and must keep `effectiveDirectory`.
+	 *
+	 * Fail-closed: a session with no recorded lane root resolves to
+	 * `effectiveDirectory`, i.e. the pre-#2002 behaviour.
+	 */
+	const sessionWorkspaceDirectory = (sessionID: string): string =>
+		resolveSessionWorkspaceDirectory(sessionID, effectiveDirectory);
 
 	/**
 	 * Resolves only an active, child-owned, Task-correlated v2 binding.
 	 * Legacy v1 disk/session entries are intentionally not authorization sources.
 	 */
-	function resolveDeclaredScope(sessionID: string): string[] | null {
+	function resolveActiveScopeBinding(sessionID: string) {
 		const session = swarmState.agentSessions.get(sessionID);
 		const taskId = session?.currentTaskId ?? null;
+		const bindingDirectory = sessionWorkspaceDirectory(sessionID);
 		const binding = taskId
 			? resolveAuthorizedScopeBinding({
-					directory: effectiveDirectory,
+					directory: bindingDirectory,
 					taskId,
 					activeSessionId: sessionID,
 				})
 			: resolveAuthorizedScopeBindingForSession({
-					directory: effectiveDirectory,
+					directory: bindingDirectory,
 					activeSessionId: sessionID,
 				});
 		if (!taskId && binding && session) {
 			session.currentTaskId = binding.taskId;
 			session.declaredCoderScope = [...binding.files];
 		}
-		return binding?.files ?? null;
+		return binding;
+	}
+
+	function resolveDeclaredScope(sessionID: string): string[] | null {
+		return resolveActiveScopeBinding(sessionID)?.files ?? null;
 	}
 
 	/**
@@ -229,7 +267,9 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			typeof toolArgs?.command === 'string' ? toolArgs.command.trim() : '';
 		if (!rawCommand) return;
 
-		const cwd = effectiveDirectory;
+		// Issue #2002: a lane coder's shell command runs with the lane as cwd, so
+		// destructive-target containment must be evaluated against the lane root.
+		const cwd = sessionWorkspaceDirectory(sessionID);
 
 		// --- Normalize the top-level command (NFKC + evasion collapse) ---
 		const command = dcNormalizeCommand(rawCommand);
@@ -870,6 +910,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 	 */
 	function checkShellWriteScope(
 		sessionID: string,
+		callID: string,
 		tool: string,
 		args: unknown,
 		commandOverride?: string,
@@ -973,10 +1014,14 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		const noScopeLenient =
 			!isArch && !isCoder && (!declaredScope || declaredScope.length === 0);
 
+		// Issue #2002: a lane coder's shell runs with the lane as cwd and its scope
+		// is lane-rooted. Every path decision in this loop must share that base.
+		const shellDirectory = sessionWorkspaceDirectory(sessionID);
+
 		const resolvedWrites = resolveWriteTargets(
 			detectionCommand,
 			analysis.writes,
-			effectiveDirectory,
+			shellDirectory,
 		);
 
 		for (const write of resolvedWrites) {
@@ -1017,8 +1062,8 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			if (universalDenyPrefixes.length > 0) {
 				const normalizedPath = path
 					.relative(
-						path.resolve(effectiveDirectory),
-						path.resolve(effectiveDirectory, write.resolvedPath),
+						path.resolve(shellDirectory),
+						path.resolve(shellDirectory, write.resolvedPath),
 					)
 					.replace(/\\/g, '/');
 				for (const prefix of universalDenyPrefixes) {
@@ -1037,7 +1082,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			const authorityCheck = checkFileAuthorityWithRules(
 				shellWriteAgent,
 				write.resolvedPath,
-				effectiveDirectory,
+				shellDirectory,
 				precomputedAuthorityRules,
 				{ declaredScope },
 			);
@@ -1050,15 +1095,41 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			if (
 				declaredScope &&
 				declaredScope.length > 0 &&
-				!isInDeclaredScope(
-					write.resolvedPath,
-					declaredScope,
-					effectiveDirectory,
-				)
+				!isInDeclaredScope(write.resolvedPath, declaredScope, shellDirectory)
 			) {
 				throw new Error(
 					`bash write detected outside declared scope: ${write.resolvedPath} (original: ${write.original.path})`,
 				);
+			}
+			if (isCoder) {
+				const writeBinding = resolveActiveScopeBinding(sessionID);
+				if (
+					writeBinding?.activation === 'active' &&
+					writeBinding.parentOwnerSessionId &&
+					writeBinding.parentCallId
+				) {
+					const relativeTarget = path
+						.relative(
+							path.resolve(shellDirectory),
+							path.resolve(shellDirectory, write.resolvedPath),
+						)
+						.replace(/\\/g, '/');
+					const routed = recordReviewerScopeGenerationFile({
+						parentSessionID: writeBinding.parentOwnerSessionId,
+						taskId: writeBinding.taskId,
+						coderCallID: writeBinding.parentCallId,
+						file: relativeTarget,
+					});
+					if (routed) {
+						rememberReviewerScopeWrite?.({
+							callID,
+							parentSessionID: writeBinding.parentOwnerSessionId,
+							taskId: writeBinding.taskId,
+							coderCallID: writeBinding.parentCallId,
+							file: relativeTarget,
+						});
+					}
+				}
 			}
 		}
 	}
@@ -1110,7 +1181,14 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		const declaredPaths = resolveDeclaredScope(sessionID);
 		if (!declaredPaths || declaredPaths.length === 0) return;
 
-		const resolved = resolveScopePaths(declaredPaths, effectiveDirectory);
+		// Issue #2002: these become the filesystem paths the OS sandbox is allowed
+		// to touch. For a lane command they must be lane-rooted, or the sandbox is
+		// granted project-root paths the command will never write and denied the
+		// lane paths it actually needs.
+		const resolved = resolveScopePaths(
+			declaredPaths,
+			sessionWorkspaceDirectory(sessionID),
+		);
 		if (resolved.paths.length === 0) return;
 
 		try {
@@ -1319,7 +1397,12 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			if (coderDeleg.isDelegation && coderDeleg.targetAgent === 'coder') {
 				const coderSession = swarmState.agentSessions.get(sessionID);
 				if (coderSession) {
-					coderSession.modifiedFilesThisCoderTask = [];
+					const taskId =
+						coderSession.currentTaskId ??
+						coderSession.lastCoderDelegationTaskId ??
+						`${sessionID}:unknown`;
+					coderSession.currentTaskId = taskId;
+					resetModifiedFilesForTask(coderSession, taskId);
 					if (!coderSession.revisionLimitHit) {
 						coderSession.coderRevisions = 0;
 					}
@@ -1381,7 +1464,9 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			const loopSession = swarmState.agentSessions.get(sessionID);
 			if (loopSession) {
 				const loopPattern = loopResult.pattern;
-				const modifiedFiles = loopSession.modifiedFilesThisCoderTask ?? [];
+				const modifiedFiles = loopSession.currentTaskId
+					? getModifiedFilesForTask(loopSession, loopSession.currentTaskId)
+					: [];
 				const accomplishmentSummary =
 					modifiedFiles.length > 0
 						? `Modified ${modifiedFiles.length} file(s): ${modifiedFiles.slice(0, 3).join(', ')}${modifiedFiles.length > 3 ? '...' : ''}`
@@ -1990,6 +2075,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		try {
 			checkShellWriteScope(
 				input.sessionID,
+				input.callID,
 				input.tool,
 				output.args,
 				rawShellCommand,
@@ -2003,9 +2089,10 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					: '';
 			const resolvedScopeText =
 				declaredScope != null && declaredScope.length > 0
-					? resolveScopePaths(declaredScope, effectiveDirectory).paths.join(
-							', ',
-						)
+					? resolveScopePaths(
+							declaredScope,
+							sessionWorkspaceDirectory(input.sessionID),
+						).paths.join(', ')
 					: '';
 			const pathMatch = /[^\s]+/.exec(
 				err instanceof Error ? err.message : String(err),
@@ -2106,12 +2193,19 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		// Issue #1875: resolve the complete write set once, before any authority,
 		// lstat, universal-deny, scope, or tracking decision. Non-architect write
 		// shapes that cannot be proven are blocked rather than becoming bypasses.
+		// Issue #2002: every path decision for this write — target resolution,
+		// lstat, universal deny, authority, containment, audit — must share ONE
+		// base, and for a worktree-isolated coder that base is the lane root, not
+		// the plugin-root `ctx.directory` this handler was built with. A partial
+		// re-root would produce a split base and silent false-allows/false-denies.
+		const writeDirectory = sessionWorkspaceDirectory(input.sessionID);
+
 		let resolvedFileTargets: string[] | null = null;
 		if (isWriteTool(input.tool)) {
 			const resolution = resolveFileWriteTargets(
 				normalizeToolName(input.tool),
 				output.args,
-				{ directory: effectiveDirectory },
+				{ directory: writeDirectory },
 			);
 			if (resolution.status === 'unverifiable') {
 				// Universal deny, containment, and lstat checks cannot be proven when
@@ -2135,7 +2229,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				// lstat: block writes through symlinks
 				const lstatBlock = checkWriteTargetForSymlink(
 					targetPath,
-					effectiveDirectory,
+					writeDirectory,
 				);
 				if (lstatBlock) {
 					void appendGuardrailDecision(
@@ -2166,8 +2260,8 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				if (universalDenyPrefixes.length > 0) {
 					const normalizedPath = path
 						.relative(
-							path.resolve(effectiveDirectory),
-							path.resolve(effectiveDirectory, targetPath),
+							path.resolve(writeDirectory),
+							path.resolve(writeDirectory, targetPath),
 						)
 						.replace(/\\/g, '/');
 					for (const prefix of universalDenyPrefixes) {
@@ -2201,12 +2295,13 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				}
 
 				// Per-agent authority check
-				const writeDeclaredScope = resolveDeclaredScope(input.sessionID);
+				const writeBinding = resolveActiveScopeBinding(input.sessionID);
+				const writeDeclaredScope = writeBinding?.files ?? null;
 
 				const authorityCheck = checkFileAuthorityWithRules(
 					agentName,
 					targetPath,
-					effectiveDirectory,
+					writeDirectory,
 					precomputedAuthorityRules,
 					{ declaredScope: writeDeclaredScope },
 				);
@@ -2254,14 +2349,14 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				if (
 					isConfigFilePath(
 						targetPath,
-						effectiveDirectory,
+						writeDirectory,
 						authorityConfig?.verifier_config_paths,
 					)
 				) {
 					const normalizedPath = path
 						.relative(
-							path.resolve(effectiveDirectory),
-							path.resolve(effectiveDirectory, targetPath),
+							path.resolve(writeDirectory),
+							path.resolve(writeDirectory, targetPath),
 						)
 						.replace(/\\/g, '/');
 					const logEntry: Record<string, unknown> = {
@@ -2278,11 +2373,40 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					warn('Config file write attempt', logEntry);
 				}
 
+				if (trackingSession?.delegationActive) {
+					const taskId =
+						trackingSession.currentTaskId ??
+						trackingSession.lastCoderDelegationTaskId ??
+						`${input.sessionID}:unknown`;
+					trackingSession.currentTaskId = taskId;
+					recordModifiedFileForTask(trackingSession, taskId, targetPath);
+				}
 				if (
-					trackingSession?.delegationActive &&
-					!trackingSession.modifiedFilesThisCoderTask.includes(targetPath)
+					writeBinding?.activation === 'active' &&
+					writeBinding.parentOwnerSessionId &&
+					writeBinding.parentCallId
 				) {
-					trackingSession.modifiedFilesThisCoderTask.push(targetPath);
+					const relativeTarget = path
+						.relative(
+							path.resolve(writeDirectory),
+							path.resolve(writeDirectory, targetPath),
+						)
+						.replace(/\\/g, '/');
+					const routed = recordReviewerScopeGenerationFile({
+						parentSessionID: writeBinding.parentOwnerSessionId,
+						taskId: writeBinding.taskId,
+						coderCallID: writeBinding.parentCallId,
+						file: relativeTarget,
+					});
+					if (routed) {
+						rememberReviewerScopeWrite?.({
+							callID: input.callID,
+							parentSessionID: writeBinding.parentOwnerSessionId,
+							taskId: writeBinding.taskId,
+							coderCallID: writeBinding.parentCallId,
+							file: relativeTarget,
+						});
+					}
 				}
 			}
 		}

@@ -13,6 +13,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { _internals as delegationGateInternals } from '../../../src/hooks/delegation-gate';
+import { _internals as hooksUtilsInternals } from '../../../src/hooks/utils';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 
 const {
@@ -292,7 +293,17 @@ describe('resolveEvidenceTaskId — issue #1914 plan-critic item 3 (transitive b
 
 	afterEach(() => {
 		resetSwarmState();
-		fs.rmSync(directory, { recursive: true, force: true });
+		// `maxRetries`/`retryDelay` harden the recursive rm against the same
+		// Windows AV/indexing EBUSY class that issue #1782 documents — the
+		// test just wrote and read .swarm/plan.json, so AV may still hold a
+		// brief handle when we tear down. (Node's fs.rmSync option is
+		// `retryDelay`, NOT `retryDelayMS`.)
+		fs.rmSync(directory, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 50,
+		});
 	});
 
 	test('reviewer dispatch with ses_ task_id + TASK: 2.1 attributes evidence to 2.1 (not session fallback)', async () => {
@@ -327,5 +338,54 @@ describe('resolveEvidenceTaskId — issue #1914 plan-critic item 3 (transitive b
 			directory,
 		);
 		expect(resolved).toBe('2.1');
+	});
+
+	test('issue #1782: EBUSY on freshly-written plan.json does not fall through to stale session fallback', async () => {
+		// Deterministic repro of the merge-group Windows CI flake in run
+		// 29854486821 (2026-07-21). Before the source-level retry fix in
+		// src/hooks/utils.ts:readSwarmFileAsync, a transient Windows AV
+		// EBUSY on the just-written .swarm/plan.json made loadPlanJsonOnly
+		// swallow the error and return null, which made resolveEvidenceTaskId
+		// skip TASK-line text extraction and return the stale
+		// session.currentTaskId ('9.9') instead of the expected '2.1'.
+		//
+		// With the fix (EBUSY added to the retry set + exponential backoff),
+		// the first EBUSY is retried, the second attempt succeeds, and the
+		// resolver correctly extracts '2.1' from the TASK: line.
+		const realReadCachedTextFile = hooksUtilsInternals.readCachedTextFile;
+		let calls = 0;
+		hooksUtilsInternals.readCachedTextFile = ((
+			resolvedPath: string,
+			reader: () => Promise<string>,
+		) => {
+			calls++;
+			if (calls < 2) {
+				const err = new Error('resource busy') as NodeJS.ErrnoException;
+				err.code = 'EBUSY';
+				throw err;
+			}
+			return reader();
+		}) as typeof realReadCachedTextFile;
+		try {
+			const session = ensureAgentSession(
+				'rev-session-ebusy',
+				'reviewer',
+				directory,
+			);
+			session.currentTaskId = '9.9'; // stale fallback the OLD behavior hit
+
+			const resolved = await resolveEvidenceTaskId(
+				{
+					task_id: 'ses_reviewer-session-id',
+					prompt: 'TASK: 2.1 — review the implementation\nACCEPTANCE: reviewed',
+				},
+				session,
+				directory,
+			);
+			expect(resolved).toBe('2.1');
+			expect(calls).toBeGreaterThanOrEqual(2);
+		} finally {
+			hooksUtilsInternals.readCachedTextFile = realReadCachedTextFile;
+		}
 	});
 });

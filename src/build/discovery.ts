@@ -185,11 +185,15 @@ export function isCommandAvailable(command: string): boolean {
 	}
 
 	const isWindows = process.platform === 'win32';
-	const cmd = isWindows ? `${command}.exe` : command;
 
 	try {
+		// On Windows, do NOT append .exe — `where` searches PATHEXT
+		// (.exe, .cmd, .bat, .ps1) automatically. Appending .exe misses
+		// npm-distributed .cmd shims (biome.cmd, eslint.cmd, tsc.cmd, etc.)
+		// which is the exact bug tracked in issue #1691.
+		const searchName = isWindows ? command : command;
 		const result = _internals.spawnSyncImpl(
-			isWindows ? ['where', cmd] : ['which', cmd],
+			isWindows ? ['where', searchName] : ['which', searchName],
 			{
 				cwd: process.cwd(),
 				stdin: 'ignore',

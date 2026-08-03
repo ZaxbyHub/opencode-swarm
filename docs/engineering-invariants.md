@@ -459,6 +459,8 @@ mock.module('node:fs', () => ({
 | **`src/utils/bun-compat.ts`** | **`mergeEnvForChild`** | **FR-202 spawn env-override helper** |
 | **`src/sandbox/executor.ts`** | **`isValidEnvKey`** | **FR-203 sandbox key validation** |
 | **`src/worktree/core.ts`** | **`removeLaneProfileFromDisk`, `writeLaneProfileToDisk`** | **FR-201 + FR-205 lane profile materialization + teardown** |
+| `src/services/recommendation-ledger.ts` | `now`, `transactFile`, `readLedgerStrict`, `resolveRecommendationLedgerPath` | #1821 AC21 dedup-ledger clock + fail-open path tests |
+| `src/services/trajectory-cluster.ts` | `now`, `checkRecommendations`, `recordEmittedRecommendations` | #1821 AC21 motif-emission dedup tests |
 
 **Delegation-gate split pattern (FR-006 SC-006.1):**
 

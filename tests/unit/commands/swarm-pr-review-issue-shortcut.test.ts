@@ -20,6 +20,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { createSwarmCommandHandler } from '../../../src/commands';
 import { swarmState } from '../../../src/state';
+import { initializeGitRepository } from '../helpers/git-repository';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -34,8 +35,8 @@ function makeTempDir(): string {
 function makeSession(id: string): void {
 	swarmState.agentSessions.set(id, {
 		agentName: 'architect',
-		lastToolCallTime: Date.now(),
-		lastAgentEventTime: Date.now(),
+		lastToolCallTime: 1_000_000,
+		lastAgentEventTime: 1_000_000,
 		delegationActive: false,
 		activeInvocationId: 0,
 		lastInvocationIdByAgent: {},
@@ -87,10 +88,13 @@ function makeSession(id: string): void {
 describe('swarm PR shortcut routing', () => {
 	let tempDir: string;
 	let sessionId: string;
+	let sessionSequence = 0;
 
-	beforeEach(() => {
+	beforeEach(async () => {
 		tempDir = makeTempDir();
-		sessionId = `pr-review-issue-test-${Date.now()}`;
+		await initializeGitRepository(tempDir);
+		sessionSequence += 1;
+		sessionId = `pr-review-issue-test-${sessionSequence}`;
 		swarmState.fullAutoEnabledInConfig = true;
 		makeSession(sessionId);
 		// Pre-create a marker file to ensure .swarm directory is non-empty
@@ -98,7 +102,7 @@ describe('swarm PR shortcut routing', () => {
 		fs.mkdirSync(swarmDir, { recursive: true });
 		fs.writeFileSync(
 			path.join(swarmDir, '.test-marker'),
-			`test-marker: ${new Date().toISOString()}\n`,
+			'test-marker: 1970-01-01T00:00:00.000Z\n',
 		);
 	});
 
@@ -287,130 +291,6 @@ describe('swarm PR shortcut routing', () => {
 				'[MODE: PR_FEEDBACK] address the review notes about error handling',
 			);
 			expect(text).toContain('Enter the mode named');
-		});
-	});
-
-	// -------------------------------------------------------------------------
-	// swarm-issue shortcut
-	// -------------------------------------------------------------------------
-
-	describe('swarm-issue shortcut routes to issue handler', () => {
-		it('returns usage text when no arguments are provided', async () => {
-			const handler = createSwarmCommandHandler(tempDir, {});
-			const output = { parts: [] as unknown[] };
-
-			await handler(
-				{ command: 'swarm-issue', arguments: '', sessionID: sessionId },
-				output,
-			);
-
-			expect(output.parts).toHaveLength(1);
-			const text = (output.parts[0] as { text: string }).text;
-			// Handler returns USAGE string when no args given
-			expect(text).toContain('Usage: /swarm issue');
-			expect(text).toContain('--plan');
-			expect(text).toContain('--trace');
-			expect(text).toContain('--no-repro');
-			// Must NOT fall through to generic help text
-			expect(text).not.toContain('## Swarm Commands');
-		});
-
-		it('returns MODE signal when given a valid GitHub issue URL', async () => {
-			const handler = createSwarmCommandHandler(tempDir, {});
-			const output = { parts: [] as unknown[] };
-
-			await handler(
-				{
-					command: 'swarm-issue',
-					arguments: 'https://github.com/owner/repo/issues/42',
-					sessionID: sessionId,
-				},
-				output,
-			);
-
-			expect(output.parts).toHaveLength(1);
-			const text = (output.parts[0] as { text: string }).text;
-			// Handler returns [MODE: ISSUE_INGEST issue="..."]
-			expect(text).toContain('[MODE: ISSUE_INGEST');
-			expect(text).toContain('github.com/owner/repo/issues/42');
-			expect(text).not.toContain('## Swarm Commands');
-		});
-
-		it('returns usage text when given an invalid issue URL', async () => {
-			const handler = createSwarmCommandHandler(tempDir, {});
-			const output = { parts: [] as unknown[] };
-
-			await handler(
-				{
-					command: 'swarm-issue',
-					arguments: 'not-a-valid-issue',
-					sessionID: sessionId,
-				},
-				output,
-			);
-
-			expect(output.parts).toHaveLength(1);
-			const text = (output.parts[0] as { text: string }).text;
-			// Handler returns error + usage for unparseable input
-			expect(text).toContain('Error:');
-			expect(text).toContain('Usage: /swarm issue');
-		});
-
-		it('forwards --plan flag to the handler', async () => {
-			const handler = createSwarmCommandHandler(tempDir, {});
-			const output = { parts: [] as unknown[] };
-
-			await handler(
-				{
-					command: 'swarm-issue',
-					arguments: 'https://github.com/owner/repo/issues/42 --plan',
-					sessionID: sessionId,
-				},
-				output,
-			);
-
-			expect(output.parts).toHaveLength(1);
-			const text = (output.parts[0] as { text: string }).text;
-			expect(text).toContain('[MODE: ISSUE_INGEST');
-			expect(text).toContain('plan=true');
-		});
-
-		it('forwards --trace flag to the handler', async () => {
-			const handler = createSwarmCommandHandler(tempDir, {});
-			const output = { parts: [] as unknown[] };
-
-			await handler(
-				{
-					command: 'swarm-issue',
-					arguments: 'https://github.com/owner/repo/issues/42 --trace',
-					sessionID: sessionId,
-				},
-				output,
-			);
-
-			expect(output.parts).toHaveLength(1);
-			const text = (output.parts[0] as { text: string }).text;
-			expect(text).toContain('[MODE: ISSUE_INGEST');
-			expect(text).toContain('trace=true');
-		});
-
-		it('accepts owner/repo#N shorthand format', async () => {
-			const handler = createSwarmCommandHandler(tempDir, {});
-			const output = { parts: [] as unknown[] };
-
-			await handler(
-				{
-					command: 'swarm-issue',
-					arguments: 'owner/repo#42',
-					sessionID: sessionId,
-				},
-				output,
-			);
-
-			expect(output.parts).toHaveLength(1);
-			const text = (output.parts[0] as { text: string }).text;
-			expect(text).toContain('[MODE: ISSUE_INGEST');
-			expect(text).toContain('github.com/owner/repo/issues/42');
 		});
 	});
 

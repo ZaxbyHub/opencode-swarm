@@ -57,6 +57,7 @@ These are invoked as `/swarm <subcommand>`, NOT as bare `/subcommand`. The list 
 - `/swarm lanes` — list active, awaiting-merge, and conflicted worktree lanes
 - `/swarm sync-plan` — ensure plan.json and plan.md are synced
 - `/swarm benchmark` — show performance metrics `[--cumulative] [--ci-gate] [--max-cost-usd <n>]`
+- `/swarm review` — run the independent review model against a selected Git diff
 - `/swarm costs` — show per-agent and per-task token/cost telemetry `[--json]`
 - `/swarm learning` — show learning metrics and violation trends
 - `/swarm guardrail explain` — dry-run: show what guardrails would do (executes nothing)

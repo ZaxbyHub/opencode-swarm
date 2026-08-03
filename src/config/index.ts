@@ -47,6 +47,7 @@ export type {
 } from './loader';
 // Re-export loaders for DI seam
 export {
+	getSafeDefaultConfigLoadResult,
 	loadAgentPrompt,
 	loadPluginConfig,
 	loadPluginConfigWithMeta,
@@ -92,6 +93,9 @@ export type {
 	AutomationCapabilities,
 	AutomationConfig,
 	AutomationMode,
+	AutoReviewBurnInDecision,
+	AutoReviewConfig,
+	AutoReviewReleaseContext,
 	LeanTurboConfig,
 	MemoryConfig,
 	ModelPricingConfig,
@@ -108,9 +112,11 @@ export type {
 export {
 	AgentOverrideConfigSchema,
 	ApplyPatchConfigSchema,
+	AUTO_REVIEW_V8_BURN_IN_DECISION,
 	AutomationCapabilitiesSchema,
 	AutomationConfigSchema,
 	AutomationModeSchema,
+	AutoReviewConfigSchema,
 	LeanTurboConfigSchema,
 	MemoryConfigSchema,
 	ModelPricingConfigSchema,
@@ -119,6 +125,7 @@ export {
 	PluginConfigSchema,
 	PricingConfigSchema,
 	RepoGraphConfigSchema,
+	resolveAutoReviewConfig,
 	SkillPropagationConfigSchema,
 	SwarmConfigSchema,
 	TurboConfigSchema,

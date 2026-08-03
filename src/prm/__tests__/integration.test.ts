@@ -832,6 +832,54 @@ describe('PRM Integration Tests', () => {
 			expect(mockPrmCourseCorrectionInjected).toHaveBeenCalledTimes(3);
 		});
 
+		test('issue #1976 B1: same pattern@level is not re-injected across turns after the drain clears', async () => {
+			// The pushAdvisory helper only dedupes WITHIN a turn (the drain clears
+			// pendingAdvisoryMessages each turn). prmInjectedAdvisoryKeys is the
+			// cross-turn suppressor: once a (pattern, level) advisory is delivered,
+			// re-detection at the SAME level on a later tool call does not re-inject
+			// (escalation counting/telemetry still run). Escalation to a new level
+			// (distinct key) still injects.
+			const config = createMockConfig({
+				enabled: true,
+				escalation_enabled: false, // hold level at 0 so the key stays constant
+			});
+			const session = createMockSession('b1-cross-turn');
+			_internals.getAgentSession = () => session;
+			_internals.readTrajectory = async () => createRepetitionLoopTrajectory();
+			const match = createMockPatternMatch('repetition_loop');
+			_internals.detectPatterns = () => ({
+				matches: [match],
+				detectionTimeMs: 1,
+				patternsChecked: 5,
+			});
+			_internals.generateCourseCorrection = () => ({
+				alert: 'ALERT',
+				category: 'coordination_error',
+				guidance: 'g',
+				action: 'a',
+				pattern: 'repetition_loop',
+				stepRange: [1, 3],
+			});
+			_internals.formatCourseCorrectionForInjection = () => 'CORRECTION';
+
+			const { toolAfter } = createPrmHook(config, directory);
+
+			// Turn 1: first detection at level 0 → injects once.
+			await toolAfter({ sessionID: 'b1-cross-turn' });
+			expect(session.pendingAdvisoryMessages).toHaveLength(1);
+			// Pattern counting still ran (unconditional).
+			expect(session.prmPatternCounts.get('repetition_loop')).toBe(1);
+
+			// Simulate the drain clearing the queue between turns.
+			session.pendingAdvisoryMessages = [];
+
+			// Turn 2: same pattern, same level 0 → must NOT re-inject (cross-turn
+			// dedupe), but counting must still advance.
+			await toolAfter({ sessionID: 'b1-cross-turn' });
+			expect(session.pendingAdvisoryMessages).toHaveLength(0);
+			expect(session.prmPatternCounts.get('repetition_loop')).toBe(2);
+		});
+
 		test('session isolation - different sessions have independent escalation state', async () => {
 			const config = createMockConfig({ enabled: true });
 

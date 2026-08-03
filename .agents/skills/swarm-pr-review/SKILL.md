@@ -13,47 +13,47 @@ description: >
 # Swarm PR Review
 Read and follow `../../../.opencode/skills/swarm-pr-review/SKILL.md` as the canonical workflow.
 ## Codex Execution Notes
-- `PR_REVIEW` is read-only with respect to the PR branch. You may fetch refs,
-  inspect metadata, and check out the PR head after verifying a clean working
-  tree, but do not fix code, resolve conflicts, commit, push, rebase, or reset
-  from this mode.
+- Codex and ZCode sessions normally have no swarm controller tools: that is
+  canonical Profile B, not an error — both runtimes can spawn fresh-context
+  subagents. Never report BLOCKED merely because those tools are absent —
+  dispatch the canonical lanes through the runtime's parallel-execution capability
+  as independent fresh-context subagents, honoring the canonical phases, role
+  boundaries, row contracts, and join barriers. Use Profile C strictly
+  separated sequential role passes (candidates → reviewer → critic) only when
+  the session genuinely lacks a subagent mechanism, and disclose that
+  procedural independence in the provenance.
+- `PR_REVIEW` is read-only with respect to the PR branch: fetch refs, inspect
+  metadata, and check out the PR head after verifying a clean working tree,
+  but do not fix code, resolve conflicts, commit, push, rebase, or reset.
 - Before dispatching explorer lanes, fetch the PR head and verify `git cat-file -e
   <full_pr_head_sha>^{commit}`; run `git switch --detach <full_pr_head_sha>`, confirm and bind that exact HEAD. Do not use `--track FETCH_HEAD`.
-- Ingest every review signal before explorer lanes: PR comments,
-  review summaries, requested changes, bot findings, CI/check failures,
+- Ingest every review signal before explorer lanes: PR comments, review
+  summaries, requested changes, bot findings, CI/check failures,
   mergeability/conflicts, stale branch/base drift, PR body claims, linked
-  issues, and commit messages.
-- If the repository defines a PR publication contract in local docs, templates,
-  skills, or CI, ingest it as an obligation source. Do not assume this repo's
-  title/body sections when the target repo does not define them.
-- Treat every ingested signal as a claim until reviewer validation proves or
-  disproves it with file:line evidence or explicit counter-evidence.
-- Prefer GitHub connector tools when available, or `gh`, to inspect PR metadata,
-  comments, review threads, checks, conflicts, and head SHA.
-- Use the runtime's parallel-execution capability for the deterministic lane
-  flow as one structured exact-six initial batch: dispatch the review lanes in
-  parallel, poll settled lanes incrementally to process results while continuing
-  independent work, and wait on the remainder only when no independent work
-  remains. All lanes must be settled before synthesis or phase transitions. If
-  the runtime cannot preserve one structured exact-six batch plus workflow-lane
-  and exact-head provenance, stop and report `BLOCKED`; sequential, blocking,
-  or direct-agent fallback is not equivalent.
-- If structured lane retries cannot close required coverage, stop and surface
-  the lane failure as BLOCKED. A different dispatch path is not equivalent
-  when it loses the canonical workflow-lane or exact-head provenance; do not
-  produce a degraded review or partial verdict.
-- When lane results include an `output_ref`, retrieve the full text, then
-  extract structured candidates for reviewer dispatch; degraded or incomplete
-  outputs are coverage gaps.
-- Clean lanes still require a fully populated row with evidence, such as
-  `[CLEAN] | workflow_lane | coverage_scope | evidence` for a base lane or
-  `[CLEAN] | micro_lane | coverage_scope | evidence` for a micro-lane.
-- All 11 repository-agnostic micro-lanes in the canonical skill are mandatory;
-  diff/path heuristics may focus prompts but cannot produce a `NO-MATCH` waiver.
-- A newer reviewer batch invalidates all older critic evidence. Re-run the
+  issues, and commit messages — each a claim until reviewer validation proves
+  or disproves it with file:line evidence.
+- If the repository defines a PR publication contract in local docs,
+  templates, skills, or CI, ingest it as an obligation source.
+- Accounting on Profiles B/C: classify the depth tier (S/M/L); cover all six
+  base dimensions and evaluate all 11 risk families with lane or pass counts
+  scaled per the canonical depth-tier table; stamp every lane prompt or pass
+  record with its workflow-lane id and exact-head provenance (the bound
+  `pr_head_sha`); persist findings and trigger ledgers in working notes,
+  never under `.swarm/`.
+- Clean lanes still require a fully populated row, such as
+  `[CLEAN] | workflow_lane | coverage_scope | evidence`; a missing per-family
+  attestation is an unclosed coverage gap — retry it or surface it as BLOCKED
+  rather than emitting a degraded review or partial verdict.
+- When a lane result includes an `output_ref`, retrieve the full text before
+  extracting candidates; degraded or truncated output is a coverage gap.
+- A newer reviewer batch invalidates all older critic evidence; re-run the
   critic from the latest complete reviewer inventory before completion.
-- Call `complete_pr_workflow` before the final response. While the gate remains
-  active it replaces the response and resumes idle work; a user interruption pauses automatic wakes until a later explicit user turn.
-- If actionable findings remain, write the canonical handoff artifact and ask
-  whether to continue with `swarm-pr-feedback`; do not improvise a fix path.
-  Carry validated findings forward with their original IDs and provenance.
+- Where the swarm plugin's structured controller is active (OpenCode hosts),
+  the initial base wave is one structured exact-six batch with workflow-lane
+  and exact-head provenance at depth tier L, or a smaller consolidated batch
+  whose `owned_workflow_lanes` partition all six dimensions at tiers S/M —
+  the controller computes the tier from the bound diff. While it is active a
+  different dispatch path is not equivalent — never bypass the controller.
+- If actionable findings remain, write the canonical handoff and ask to continue with
+  `/swarm pr-feedback <PR_URL> continue from .swarm/pr-review/<run_id>/feedback-handoff.json`.
+  On Profile A this is a mechanical transition; preserve finding IDs and provenance.

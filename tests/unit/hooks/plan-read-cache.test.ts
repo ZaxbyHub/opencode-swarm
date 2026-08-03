@@ -282,18 +282,24 @@ describe('plan-read-cache', () => {
 	});
 
 	/**
-	 * SC-007: Non-ENOENT error inside the inner read (readCachedTextFile) is
+	 * SC-007: Non-retryable error inside the inner read (readCachedTextFile) is
 	 * returned as null and the result is cached (no re-read on second call).
 	 * This tests the actual error path inside readCachedTextFile → bunFile().text()
 	 * rather than mocking at the validateSwarmPath layer.
+	 *
+	 * Note (issue #1782): the fixture deliberately uses a GENUINELY non-retryable
+	 * code (`EISDIR` — a permanent structural error) rather than `EACCES`.
+	 * `readSwarmFileAsync` now retries EACCES/EPERM/EBUSY (the transient
+	 * Windows AV class) with exponential backoff; only permanent structural
+	 * errors fail fast on the first attempt and cache the null result.
 	 */
 	it('SC-007: non-ENOENT error from inner readCachedTextFile returns null and caches', async () => {
 		let innerReadCount = 0;
 		const originalReadCached = _internals.readCachedTextFile;
 		_internals.readCachedTextFile = (async () => {
 			innerReadCount++;
-			const err = new Error('EACCES: permission denied');
-			(err as NodeJS.ErrnoException).code = 'EACCES';
+			const err = new Error('EISDIR: illegal operation on a directory');
+			(err as NodeJS.ErrnoException).code = 'EISDIR';
 			throw err;
 		}) as typeof _internals.readCachedTextFile;
 

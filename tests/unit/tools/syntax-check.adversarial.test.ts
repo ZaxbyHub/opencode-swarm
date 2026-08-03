@@ -63,6 +63,57 @@ describe('syntax-check.ts - ADVERSARIAL SECURITY TESTS', () => {
 		evidenceInternals.saveEvidence = originalSaveEvidence;
 	});
 
+	// ============ Vacuous-pass regression ============
+	//
+	// Field report: `syntax_check` returned "All 0 files passed" as its FIRST
+	// result in a live PR review, and that vacuous green verdict was written to
+	// the durable evidence store. A gate that examined nothing must never record
+	// itself as passing — a later reviewer reading the bundle cannot otherwise
+	// distinguish "syntax is fine" from "the input never reached the parser".
+	describe('empty check set never reports a passing verdict', () => {
+		test("mode='changed' filtering every file out yields skip, and names the filter", async () => {
+			const testFile = path.join(tmpDir, 'deleted.js');
+			fs.writeFileSync(testFile, 'const x = 1;');
+
+			// A deletion-only / pure-rename entry: present in changed_files but
+			// with additions === 0, so the default mode drops it silently. This is
+			// the exact shape that produced "All 0 files passed" in the field.
+			const result = await syntaxCheck(
+				{ changed_files: [{ path: testFile, additions: 0 }], mode: 'changed' },
+				tmpDir,
+			);
+
+			expect(result.verdict).toBe('skip');
+			expect(result.verdict).not.toBe('pass');
+			expect(result.summary).toContain('No files were checked');
+			expect(result.summary).toContain("mode='changed'");
+			expect(result.summary).toContain('NOT a passing syntax check');
+
+			// The same non-passing verdict must reach the durable evidence store,
+			// not just the tool's return value.
+			expect(evidenceInternals.saveEvidence).toHaveBeenCalledWith(
+				tmpDir,
+				'syntax_check',
+				expect.objectContaining({ verdict: 'skip', files_checked: 0 }),
+			);
+		});
+
+		test("mode='all' includes additions === 0 entries, so the same input is genuinely checked", async () => {
+			const testFile = path.join(tmpDir, 'renamed.js');
+			fs.writeFileSync(testFile, 'const x = 1;');
+
+			// Proves the skip above was caused by the filter and not by the file
+			// being unparseable — the remedy named in the summary actually works.
+			const result = await syntaxCheck(
+				{ changed_files: [{ path: testFile, additions: 0 }], mode: 'all' },
+				tmpDir,
+			);
+
+			expect(result.verdict).toBe('pass');
+			expect(result.summary).toContain('1 files passed');
+		});
+	});
+
 	// ============ Attack Vector 1: Empty/null/undefined Inputs ============
 
 	describe('Attack Vector 1: Empty/null/undefined inputs', () => {
@@ -74,9 +125,16 @@ describe('syntax-check.ts - ADVERSARIAL SECURITY TESTS', () => {
 
 			const result = await syntaxCheck(input, tmpDir);
 
-			expect(result.verdict).toBe('pass');
+			// A check that examined nothing is not a passing check. Previously this
+			// recorded verdict 'pass' with files_checked: 0 into the durable
+			// evidence store — a green gate earned by doing no work.
+			expect(result.verdict).toBe('skip');
 			expect(result.files).toHaveLength(0);
-			expect(result.summary).toBe('All 0 files passed syntax check');
+			expect(result.summary).toContain('No files were checked');
+			expect(result.summary).toContain(
+				'no files were supplied in changed_files',
+			);
+			expect(result.summary).toContain('NOT a passing syntax check');
 			expect(evidenceInternals.saveEvidence).toHaveBeenCalled();
 		});
 

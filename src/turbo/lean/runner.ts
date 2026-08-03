@@ -18,6 +18,7 @@
 import type { OpencodeClient } from '@opencode-ai/sdk';
 import { getSwarmAgents, resolveFallbackModel } from '../../agents/index';
 import { DEFAULT_LEAN_TURBO_CONFIG } from '../../config/constants';
+import type { Plan } from '../../config/plan-schema';
 import type { LeanTurboConfig } from '../../config/schema';
 import { stripKnownSwarmPrefix } from '../../config/schema';
 import { loadFullAutoRunState } from '../../full-auto/state';
@@ -25,13 +26,14 @@ import { acquireLaneLocks, releaseLaneLocks } from '../../parallel/file-locks';
 import { loadPlanJsonOnly } from '../../plan/manager';
 import { derivePlanId } from '../../plan/utils';
 import {
-	ensureAgentSession,
+	endAgentSession,
 	getAgentSession,
 	hasActiveFullAuto,
 	swarmState,
 } from '../../state';
 import { telemetry } from '../../telemetry';
-import { log } from '../../utils/logger';
+import { pushAdvisory } from '../../utils/advisory-queue';
+import { criticalWarn, log } from '../../utils/logger';
 import {
 	dispatchWithModelFallback,
 	type ModelOverride,
@@ -42,6 +44,7 @@ import {
 } from '../../utils/provider-error-classification';
 import type { LaneEvidence, PhaseEvidence } from './evidence';
 import { writeLaneEvidence, writePhaseEvidence } from './evidence';
+import { publishLeanTurboLaneScopeBinding } from './lane-scope';
 import {
 	attemptMergeBackFromDirty,
 	getMergeStrategy,
@@ -51,7 +54,8 @@ import {
 } from './merge-back';
 import type { LeanTurboLanePlan } from './planner';
 import { planLeanTurboLanes } from './planner';
-import type { LeanTurboLane } from './state';
+import { clearRecoveryRecord, writeRecoveryRecord } from './recovery';
+import type { LeanTurboDegradedTask, LeanTurboLane } from './state';
 import { loadLeanTurboRunState, saveLeanTurboRunState } from './state';
 import { withTurboStateLock } from './state-lock';
 import {
@@ -168,6 +172,12 @@ export interface LeanTurboPhaseResult {
 	/** Task IDs that were degraded (risk conditions) */
 	degradedTasks: string[];
 	/**
+	 * #1657: full degraded-task details (reason/files/requiredMode) so the
+	 * architect sees per-task degradation reasons in the tool result, not
+	 * just task IDs. Additive alongside `degradedTasks` (kept for back-compat).
+	 */
+	degradedDetails?: LeanTurboDegradedTask[];
+	/**
 	 * Task IDs excluded from parallel lanes due to lock conflicts.
 	 * Caller must complete these via standard serial flow before phase can advance.
 	 * (Issue #1: Serial Task Orphan Risk - Fixed with integration test)
@@ -264,6 +274,15 @@ function isTransientProvisionError(errorMsg: string): boolean {
 // ─── Module-level helpers ───────────────────────────────────────────────────────
 
 /**
+ * Error code returned when a lane's write authority could not be published
+ * (issue #2002). Deliberately free of any token matched by
+ * `TRANSIENT_MODEL_ERROR_PATTERN` / `QUOTA_ERROR_PATTERN`, and classified
+ * `permanent` explicitly in `_processLane` so a broken authority handshake can
+ * never be mistaken for a provider blip and retried across fallback models.
+ */
+export const LANE_SCOPE_DENIED_CODE = 'LEAN_TURBO_LANE_SCOPE_DENIED';
+
+/**
  * FR-106: Pushes a dirty-tree downgrade advisory into the architect's advisory queue.
  *
  * @param sessionID - The session to push the advisory into
@@ -275,15 +294,56 @@ function pushDirtyTreeDowngradeAdvisory(
 	reason: string,
 	lanesAffected: string[] = [],
 ): void {
-	const session = ensureAgentSession(sessionID);
-	session.pendingAdvisoryMessages ??= [];
+	// Issue #2002 hardening: never `ensureAgentSession(sessionID)` with no
+	// agent name. That call is the exact fail-open documented at
+	// `_doDispatch`/`_publishLaneScope` below: with no session registered it
+	// calls `startAgentSession(..., 'unknown', ...)`, setting
+	// `swarmState.activeAgent` to the truthy string 'unknown', which passes the
+	// no-active-agent guards in `src/hooks/guardrails/tool-before.ts` and lands
+	// in the `noScopeLenient` branch that skips the authority check entirely.
+	//
+	// A plain lookup-only fallback (drop the advisory when absent) over-corrected:
+	// FR-106 is a "never defer work" advisory — silently dropping it on a missing
+	// session is exactly the prohibited shape (see AGENTS.md "we never defer
+	// work").
+	//
+	// Naming the created session ORCHESTRATOR_NAME was also considered and
+	// REJECTED — but NOT because architect is more permissive than 'unknown'.
+	// It is not: `scope-guard.ts` early-returns for BOTH (`isArchitect` and
+	// `agentRole !== 'coder'`), and on the shell path `'unknown'` is strictly
+	// MORE permissive, because `noScopeLenient` (`tool-before.ts`) is
+	// `!isArch && !isCoder && …` and skips the authority check for 'unknown'
+	// while architect additionally picks up `handlePlanAndScopeProtection`.
+	//
+	// The actual reason: only the architect agent can invoke
+	// `lean_turbo_run_phase` (`TURBO_AGENT_TOOL_MAP`), but that authorizes the
+	// CALL, not the VALUE — `sessionID` is a zod tool argument
+	// (`src/tools/lean-turbo-run-phase.ts`), so the caller chooses the string.
+	// Minting here would write a durable, cross-hook identity assertion into
+	// `swarmState.activeAgent` for an id the plugin never issued. Advisory
+	// delivery is not a good enough reason to fabricate an identity.
+	//
+	// Resolution: never create; emit via `criticalWarn` when the session is
+	// unknown. `log()`/`warn()` are gated behind `OPENCODE_SWARM_DEBUG=1`
+	// (`src/utils/logger.ts`), so they would silence this in every normal run —
+	// which is the same vanishing-signal shape this comment exists to prevent.
 	const affected =
 		lanesAffected.length > 0
 			? `; affected lanes: ${lanesAffected.join(', ')}`
 			: '';
-	session.pendingAdvisoryMessages.push(
-		`LEAN_TURBO_DIRTY_TREE_DOWNGRADE: ${reason}${affected}. Worktree isolation is OFF for this phase; lanes run in the shared working tree.`,
-	);
+	const advisory = `LEAN_TURBO_DIRTY_TREE_DOWNGRADE: ${reason}${affected}. Worktree isolation is OFF for this phase; lanes run in the shared working tree.`;
+	const session = getAgentSession(sessionID);
+	if (!session) {
+		// Do NOT mint the session here — `sessionID` is caller-supplied (see the
+		// block comment above). `criticalWarn` and not `log`/`warn`: those are
+		// gated behind OPENCODE_SWARM_DEBUG=1, which would hide a phase-wide
+		// isolation downgrade in every normal run.
+		criticalWarn(
+			`[lean-turbo] ${advisory} (advisory not delivered: session ${sessionID} is not registered)`,
+		);
+		return;
+	}
+	pushAdvisory(session, advisory);
 }
 
 export class LeanTurboRunner {
@@ -314,8 +374,11 @@ export class LeanTurboRunner {
 		startupOrphanRecovery: typeof startupOrphanRecovery;
 		getMergeStrategy: typeof getMergeStrategy;
 		assertCleanWorkingTree: typeof assertCleanWorkingTree;
-		/** DI seam for ensureAgentSession — allows tests to intercept advisory queue writes. */
-		ensureAgentSession: typeof ensureAgentSession;
+		/**
+		 * Issue #2002: publishes a lane's plan-correlated, lane-rooted write
+		 * authority before the lane's coder prompt is sent.
+		 */
+		publishLeanTurboLaneScopeBinding: typeof publishLeanTurboLaneScopeBinding;
 	} = {
 		loadPlanJsonOnly,
 		planLeanTurboLanes,
@@ -337,7 +400,7 @@ export class LeanTurboRunner {
 		startupOrphanRecovery,
 		getMergeStrategy,
 		assertCleanWorkingTree,
-		ensureAgentSession,
+		publishLeanTurboLaneScopeBinding,
 	};
 
 	/**
@@ -401,7 +464,7 @@ export class LeanTurboRunner {
 		/** OpenCode SDK client. Pass null to stay fail-closed. Omit to allow test mock injection. */
 		opencodeClient?: OpencodeClient | null;
 		/** Pre-registered generated agent names */
-		generatedAgentNames?: string[];
+		generatedAgentNames?: readonly string[];
 		/** Lean-mode configuration. Falls back to hardcoded defaults if omitted. */
 		leanConfig?: LeanTurboConfig;
 	}) {
@@ -548,6 +611,12 @@ export class LeanTurboRunner {
 		}
 
 		const degradedTasks = lanePlan.degradedTasks.map((d) => d.taskId);
+		// #1657: also carry the full degraded-task objects (reason/files/
+		// requiredMode) so the tool result includes per-task degradation
+		// reasons, not just IDs. The full objects are already persisted in
+		// run state and reconstructed by /swarm status; this closes the
+		// tool-boundary thinning point.
+		const degradedDetails: LeanTurboDegradedTask[] = lanePlan.degradedTasks;
 
 		// Return NO_LANES only if planner produced zero lanes AND no fallback tasks
 		if (
@@ -560,6 +629,7 @@ export class LeanTurboRunner {
 				reason: 'NO_LANES',
 				lanes: [],
 				degradedTasks,
+				degradedDetails,
 				serializedTasks: lanePlan.serializedTasks,
 			};
 		}
@@ -581,6 +651,7 @@ export class LeanTurboRunner {
 				ok: true,
 				lanes: [],
 				degradedTasks,
+				degradedDetails,
 				serializedTasks: lanePlan.serializedTasks,
 			};
 		}
@@ -597,7 +668,7 @@ export class LeanTurboRunner {
 
 		// Process lanes concurrently for maximum throughput
 		const results = await Promise.all(
-			lanePlan.lanes.map((lane) => this._processLane(lane, leanConfig)),
+			lanePlan.lanes.map((lane) => this._processLane(lane, leanConfig, plan)),
 		);
 		laneResults.push(...results);
 
@@ -619,6 +690,7 @@ export class LeanTurboRunner {
 					: undefined,
 			lanes: laneResults,
 			degradedTasks,
+			degradedDetails,
 			serializedTasks: lanePlan.serializedTasks,
 			mergeBackFailures:
 				mergeBackFailures.length > 0 ? mergeBackFailures : undefined,
@@ -645,12 +717,23 @@ export class LeanTurboRunner {
 	 *
 	 * @param lane - Lane to dispatch
 	 * @param agentName - Agent name to dispatch to
+	 * @param worktreeDirectory - Provisioned lane worktree, when isolation is on
+	 * @param model - Per-call model override for a fallback attempt (#1896)
+	 * @param plan - Authoritative plan for this run. Required to publish the
+	 *   lane's write authority (issue #2002). When omitted, no binding is
+	 *   minted AND the lane's `write`/`edit`/`patch` tools are force-disabled
+	 *   (see `_doDispatch`) — an unscoped lane can never be dispatched
+	 *   writable, regardless of caller. Only `_processLane` supplies a plan in
+	 *   production (always, per `runPhase`'s own `NO_PLAN` guard); direct
+	 *   callers that omit it get a read-only lane rather than a silent
+	 *   unscoped-but-writable one.
 	 */
 	async dispatchLane(
 		lane: LeanTurboLane,
 		agentName: string,
 		worktreeDirectory?: string,
 		model?: ModelOverride,
+		plan?: Plan,
 	): Promise<LaneDispatchResult> {
 		const session =
 			this._sessionOps ??
@@ -668,6 +751,7 @@ export class LeanTurboRunner {
 			worktreeDirectory,
 			promptController,
 			model,
+			plan,
 		);
 
 		// Apply timeout if configured via _internals
@@ -700,6 +784,15 @@ export class LeanTurboRunner {
 									session
 										.delete({ path: { id: result.sessionId } })
 										.catch(() => {});
+									// Issue #2002 hardening (item 2b): a lane that timed out
+									// but later completed successfully in the background may
+									// already have a published scope binding + child
+									// AgentSessionState (`_publishLaneScope` ran before the
+									// slow step). Mirror the prompt-failure and
+									// thrown-exception cleanup in `_doDispatch` so a lane
+									// timeout does not leave those behind alongside the orphan
+									// remote session deleted above.
+									endAgentSession(result.sessionId);
 								} else {
 									// Timeout hadn't fired yet, clear the pending marker
 									this._timedOutLanes.delete(lane.laneId);
@@ -733,6 +826,7 @@ export class LeanTurboRunner {
 		worktreeDirectory?: string,
 		abortController?: AbortController,
 		model?: ModelOverride,
+		plan?: Plan,
 	): Promise<LaneDispatchResult> {
 		let sessionId: string | undefined;
 		try {
@@ -760,17 +854,57 @@ export class LeanTurboRunner {
 
 			sessionId = createResult.data.id;
 
+			// Issue #2002 (Lean Turbo half): the lane's coder is about to be
+			// prompted with write/edit/patch enabled. Publish its plan-correlated,
+			// lane-rooted write authority FIRST — mirroring the standard worktree
+			// path in `src/hooks/delegation-gate.ts` — or the coder runs with no
+			// binding at all and every write fails SCOPE_NOT_DECLARED.
+			if (plan) {
+				const laneScopeError = await this._publishLaneScope(
+					session,
+					lane,
+					plan,
+					sessionId,
+					worktreeDirectory,
+					effectiveDirectory,
+					abortController,
+				);
+				if (laneScopeError) return laneScopeError;
+			}
+
 			// Build task prompt for this lane
 			const promptText = this._buildLanePrompt(lane);
 
-			// Send prompt to the agent (file-modifying tools enabled so coders can implement tasks)
+			// Issue #2002 hardening: file-modifying tools are enabled ONLY when a
+			// plan was supplied. `plan` is what `_publishLaneScope` above needs to
+			// mint the lane's write-authority binding — without it, nothing was
+			// published and a writable lane would run with no scope binding at
+			// all. This was previously safety-by-convention (only `_processLane`
+			// calls `dispatchLane`, and it always has a plan). Gating the tools
+			// payload itself — rather than requiring the `plan` parameter — means
+			// no caller (typed, untyped, or a future direct `dispatchLane` call)
+			// can obtain a writable lane without also supplying the plan that
+			// authorizes it, regardless of how many other callers exist that
+			// legitimately omit `plan` to test dispatch mechanics unrelated to
+			// scope (session parenting, timeouts, model fallback).
+			//
+			// This `tools` gate covers write/edit/patch only — it does NOT disable
+			// `bash`, so a plan-less lane's coder can still attempt shell writes.
+			// What actually blocks those is that `_publishLaneScope` never runs
+			// without a `plan` (see the `if (plan)` guard above), so no session is
+			// ever registered for this child id, and the shell-write path in
+			// `src/hooks/guardrails/tool-before.ts` throws `WRITE BLOCKED: No
+			// active agent registered for session "…"` before any shell write is
+			// permitted.
 			const promptResult = await session.prompt({
 				path: { id: sessionId },
 				body: {
 					agent: agentName,
 					// #1896: per-call model override on a fallback attempt.
 					...(model ? { model } : {}),
-					tools: { write: true, edit: true, patch: true },
+					tools: plan
+						? { write: true, edit: true, patch: true }
+						: { write: false, edit: false, patch: false },
 					parts: [{ type: 'text' as const, text: promptText }],
 				},
 				signal: abortController?.signal,
@@ -779,6 +913,19 @@ export class LeanTurboRunner {
 			if (!promptResult.data) {
 				abortController?.abort();
 				session.delete({ path: { id: sessionId } }).catch(() => {});
+				// Issue #2002 (Lean Turbo half): `_publishLaneScope` may have already
+				// published this lane's write authority and created the child
+				// AgentSessionState before this dispatch failed. Mirror the standard
+				// worktree path's `clearPublishedScopeBindings` — the binding must not
+				// outlive the session it authorized. `endAgentSession` unconditionally
+				// clears any scope binding owned by this session id (plus its disk
+				// copy via `clearScopeBindingFromDisk`) and deletes the
+				// `AgentSessionState` entry (`src/state.ts`); for a fresh lane session
+				// id with nothing published (e.g. `plan` was omitted or the lane had
+				// no authorizable scope) those clears simply match zero bindings and a
+				// missing map key, so it is safe — but not a no-op in general — to
+				// call unconditionally here.
+				endAgentSession(sessionId);
 				return {
 					ok: false,
 					error: `session.prompt failed: ${typeof promptResult.error === 'string' ? promptResult.error : JSON.stringify(promptResult.error)}`,
@@ -790,10 +937,115 @@ export class LeanTurboRunner {
 			if (sessionId) {
 				abortController?.abort();
 				session.delete({ path: { id: sessionId } }).catch(() => {});
+				// Same rationale as the session.prompt failure branch above: clear
+				// any lane scope binding + AgentSessionState published for this
+				// session before the exception aborted dispatch.
+				endAgentSession(sessionId);
 			}
 			const msg = err instanceof Error ? err.message : String(err);
 			return { ok: false, error: msg };
 		}
+	}
+
+	/**
+	 * Publish the lane's write authority for a freshly created lane session
+	 * (issue #2002 — Lean Turbo half).
+	 *
+	 * Two distinct fail-closed outcomes, deliberately kept apart:
+	 *
+	 * - **No authorizable lane** (`publishLeanTurboLaneScopeBinding` returns
+	 *   null: representative task id not in strict `N.M[.P]` form, no
+	 *   plan-backed files, unusable child identity). Nothing is published and
+	 *   the lane still runs — the coder is blocked by the ordinary
+	 *   `SCOPE_NOT_DECLARED` gate exactly as it was before this fix. An
+	 *   architect advisory makes the unscoped lane visible instead of silent.
+	 * - **Publication failed unexpectedly** (I/O error, plan materialization
+	 *   rejected). That is not a pre-existing state, so the lane session is
+	 *   torn down and the dispatch fails permanently rather than running a
+	 *   coder whose authority is in an unknown state.
+	 *
+	 * @returns a failing `LaneDispatchResult` to abort the dispatch, or null to
+	 *   continue.
+	 */
+	private async _publishLaneScope(
+		session: SessionClient,
+		lane: LeanTurboLane,
+		plan: Plan,
+		childSessionId: string,
+		worktreeDirectory: string | undefined,
+		effectiveDirectory: string,
+		abortController?: AbortController,
+	): Promise<LaneDispatchResult | null> {
+		let published: Awaited<ReturnType<typeof publishLeanTurboLaneScopeBinding>>;
+		try {
+			published =
+				await LeanTurboRunner._internals.publishLeanTurboLaneScopeBinding({
+					primaryDirectory: this._directory,
+					laneRoot: effectiveDirectory,
+					// Trusted provisioning signal only — never a path comparison and
+					// never anything an agent can supply.
+					isolated: worktreeDirectory !== undefined,
+					plan,
+					lane,
+					parentSessionId: this._sessionID,
+					childSessionId,
+				});
+		} catch (scopeErr) {
+			const reason =
+				scopeErr instanceof Error ? scopeErr.message : String(scopeErr);
+			abortController?.abort();
+			session.delete({ path: { id: childSessionId } }).catch(() => {});
+			// Issue #2002 hardening (item 2a): `publishLeanTurboLaneScopeBinding`
+			// (`src/turbo/lean/lane-scope.ts`) calls `registerScopeBinding` before
+			// `writeScopeBindingToDisk`, and `ensureAgentSession` for the child
+			// session before `recordSessionWorkspaceRoot`. A throw from either of
+			// those disk/registration steps can leave the in-memory binding and/or
+			// the child `AgentSessionState` registered even though this whole
+			// publish attempt is being treated as failed. `endAgentSession` clears
+			// both for this child session id and is a safe no-op if neither was
+			// actually created yet.
+			endAgentSession(childSessionId);
+			log(
+				`[lean-turbo] lane ${lane.laneId} write authority could not be published: ${reason}`,
+			);
+			return {
+				ok: false,
+				error: `${LANE_SCOPE_DENIED_CODE}: ${reason}`,
+			};
+		}
+
+		if (!published) {
+			log(
+				`[lean-turbo] lane ${lane.laneId} has no plan-backed scope authority (tasks: ${lane.taskIds.join(', ')}) — the lane coder will be blocked on every write`,
+			);
+			if (this._sessionID) {
+				// Issue #2002 hardening: same rationale as
+				// `pushDirtyTreeDowngradeAdvisory` above — never
+				// `ensureAgentSession(this._sessionID)` with no agent name (that is
+				// the 'unknown' fail-open), and never mint an architect-named
+				// session for a caller-supplied id either. Look up only, and log
+				// rather than drop when the session is unknown.
+				try {
+					const unscopedAdvisory = `LEAN_TURBO_LANE_UNSCOPED: lane ${lane.laneId} (tasks: ${lane.taskIds.join(', ')}) could not be given a validated write scope, so its coder is blocked from writing. Declare a scope for the lane's tasks or give them files_touched in the plan.`;
+					const architectSession = getAgentSession(this._sessionID);
+					if (architectSession) {
+						pushAdvisory(architectSession, unscopedAdvisory);
+					} else {
+						// Same rule as `pushDirtyTreeDowngradeAdvisory`: never mint a
+						// session for a caller-supplied id. `criticalWarn`, not
+						// `log`/`warn` — those are gated behind OPENCODE_SWARM_DEBUG=1
+						// and would hide the fact that this lane's coder is running
+						// unable to write anything.
+						criticalWarn(
+							`[lean-turbo] ${unscopedAdvisory} (advisory not delivered: session ${this._sessionID} is not registered)`,
+						);
+					}
+				} catch {
+					/* advisory delivery is best-effort — never blocks dispatch */
+				}
+			}
+		}
+		return null;
 	}
 
 	/**
@@ -926,7 +1178,7 @@ export class LeanTurboRunner {
 	 * Prefers agents matching swarm prefix patterns (e.g. `mega_coder`)
 	 * over bare `coder`. Falls back to `['coder']` if no coder agents found.
 	 */
-	private _resolveCoderAgents(names: string[]): string[] {
+	private _resolveCoderAgents(names: readonly string[]): string[] {
 		// Filter to coder-role agents
 		const coders = names.filter((n) => n.toLowerCase().includes('coder'));
 
@@ -987,6 +1239,7 @@ export class LeanTurboRunner {
 	private async _processLane(
 		lane: LeanTurboLane,
 		leanConfig: LeanTurboConfig,
+		plan?: Plan,
 	): Promise<LaneResult> {
 		// Update status to running
 		const laneInState = this._laneStatuses.get(lane.laneId);
@@ -1202,6 +1455,7 @@ export class LeanTurboRunner {
 						agent,
 						worktreeDirectory,
 						model,
+						plan,
 					);
 					if (!r.ok) throw new Error(r.error ?? 'lane dispatch failed');
 					return r;
@@ -1216,6 +1470,10 @@ export class LeanTurboRunner {
 					// A lane-level dispatch timeout is not a provider transient — keep
 					// the existing fail-the-lane behavior instead of failing over.
 					if (/Lane dispatch timed out/i.test(msg)) return 'permanent';
+					// Issue #2002: a failed write-authority handshake is a local
+					// invariant break, never a provider blip. Retrying it on another
+					// model would create another unscoped lane session.
+					if (msg.includes(LANE_SCOPE_DENIED_CODE)) return 'permanent';
 					return isTransientProviderError(msg) ? 'transient' : 'permanent';
 				},
 				onFallback: ({ toModel, fallbackIndex }) => {
@@ -1230,8 +1488,8 @@ export class LeanTurboRunner {
 						? getAgentSession(this._sessionID)
 						: undefined;
 					if (session) {
-						session.pendingAdvisoryMessages ??= [];
-						session.pendingAdvisoryMessages.push(
+						pushAdvisory(
+							session,
 							`MODEL FALLBACK: coder lane ${lane.laneId} failed over to "${toModel}" (fallback ${fallbackIndex}) after a transient/quota dispatch error.`,
 						);
 					}
@@ -1331,6 +1589,31 @@ export class LeanTurboRunner {
 	}
 
 	/**
+	 * Persist a durable recovery record for a merge-back / dispatch failure (#1657).
+	 *
+	 * Wraps `writeRecoveryRecord` (best-effort, non-fatal) with this session's
+	 * id and portable human recovery guidance. Called from every failure branch of
+	 * `_sequentialWorktreeCleanup`. Records are auto-cleared on successful
+	 * merge-back so they exist only while a lane is preserved.
+	 */
+	private _persistRecovery(info: MergeBackFailureInfo): void {
+		writeRecoveryRecord(this._directory, {
+			laneId: info.laneId,
+			sessionId: this._sessionID,
+			branchName: info.branchName,
+			worktreePath: info.worktreePath,
+			status: info.status,
+			reason: info.reason,
+			conflictFiles: info.conflictFiles,
+			// F-006: shell quoting is platform-specific. Keep the filesystem path
+			// in the structured worktreePath field and give portable human
+			// guidance instead of synthesizing an executable `cd` command.
+			replayHint:
+				'Open the directory in worktreePath and run git status with that directory as the working directory.',
+		});
+	}
+
+	/**
 	 * Sequential worktree cleanup for completed and failed worktree lanes.
 	 *
 	 * Runs AFTER all lanes have been dispatched and completed via Promise.all.
@@ -1374,6 +1657,11 @@ export class LeanTurboRunner {
 						// Mark for post-merge cleanup AFTER worktree removal (branch delete
 						// fails while the branch is still checked out in an active worktree).
 						needsPostMergeCleanup = true;
+
+						// #1657: clear any prior recovery record for this lane now that it
+						// merged cleanly, so recovery records don't accumulate. (A record
+						// exists only while a lane is preserved; auto-clear on success.)
+						clearRecoveryRecord(this._directory, lr.laneId, this._sessionID);
 
 						// FR-205 SC-134: Remove lane profile at successful merge-back.
 						// Best-effort — non-fatal if removal fails (e.g. file already gone).
@@ -1441,6 +1729,10 @@ export class LeanTurboRunner {
 								mergeBackFailure: failureInfo,
 							},
 						);
+						// #1657: persist a durable recovery record so the preserved
+						// worktree/branch survives session end + orphan cleanup, and
+						// /swarm status can surface it.
+						this._persistRecovery(failureInfo);
 						log(
 							`[lean-turbo] merge-back PARTIAL for lane ${lr.laneId}: ${failureInfo.reason} — worktree preserved at ${laneInState.worktreePath} for manual recovery`,
 						);
@@ -1477,6 +1769,9 @@ export class LeanTurboRunner {
 						log(
 							`[lean-turbo] merge-back ERROR for lane ${lr.laneId}: ${failureInfo.reason} — worktree preserved at ${laneInState.worktreePath} for manual recovery`,
 						);
+						// #1657: persist durable recovery record (same rationale as the
+						// partial-conflict branch above).
+						this._persistRecovery(failureInfo);
 						continue; // Skip removeWorktree — keep worktree for manual recovery
 					}
 				} catch (err) {
@@ -1513,6 +1808,8 @@ export class LeanTurboRunner {
 					log(
 						`[lean-turbo] merge-back EXCEPTION for lane ${lr.laneId}: ${errMsg} — worktree preserved at ${laneInState.worktreePath} for manual recovery`,
 					);
+					// #1657: persist durable recovery record.
+					this._persistRecovery(failureInfo);
 					continue; // Skip removeWorktree — keep worktree for manual recovery
 				}
 			} else if (lr.status === 'failed' && laneInState._failureCleanupPending) {
@@ -1530,6 +1827,8 @@ export class LeanTurboRunner {
 				log(
 					`[lean-turbo] failed lane ${lr.laneId}: ${failureInfo.reason} — worktree preserved at ${laneInState.worktreePath}; not merging partial work`,
 				);
+				// #1657: persist durable recovery record.
+				this._persistRecovery(failureInfo);
 				continue; // Keep failed lane worktree for manual inspection.
 			}
 

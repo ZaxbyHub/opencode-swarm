@@ -596,7 +596,7 @@ describe('Command registration parity', () => {
 		// (dry-run CI), guardrail explain (dry-run guardrail preview),
 		// guardrail-log (read decision log), lanes (list worktree lanes),
 		// memory consolidation-log (read consolidation log), gate-audit (bounded
-		// production audit), and gate-stats (offline audit reducer).
+		// production audit), and gate-stats (offline audit reducer). `review`
 		const NEWER_ALLOWLIST_ADDITIONS = [
 			'ci-simulate',
 			'costs',
@@ -606,6 +606,7 @@ describe('Command registration parity', () => {
 			'memory consolidation-log',
 			'gate-audit',
 			'gate-stats',
+			'context-map stats',
 		];
 		const EXPECTED_ADDITIONS = {
 			allowlist: new Set([
@@ -632,6 +633,7 @@ describe('Command registration parity', () => {
 				'clear',
 				'abort-pr-workflow',
 				'approve-plan-critic',
+				'review',
 			]),
 			toolCommands: new Set([
 				'pr subscribe',
@@ -640,15 +642,14 @@ describe('Command registration parity', () => {
 				'learning',
 				'post-mortem',
 				...NEWER_ALLOWLIST_ADDITIONS,
+				'review',
 			]),
-			noArgs: new Set(['pr status', 'lanes']),
+			noArgs: new Set(['pr status', 'lanes', 'context-map stats']),
 		};
-
 		const expectedAllowlist = new Set([
 			...BASELINE_28_ALLOWLIST,
 			...EXPECTED_ADDITIONS.allowlist,
 		]);
-
 		const expectedHumanOnly = new Set([
 			...BASELINE_10_HUMAN_ONLY,
 			...EXPECTED_ADDITIONS.humanOnly,
@@ -676,7 +677,7 @@ describe('Command registration parity', () => {
 			).toBe(true);
 		});
 
-		it('HUMAN_ONLY_SWARM_COMMANDS matches baseline plus exactly 5 canonical-inheriting aliases', () => {
+		it('HUMAN_ONLY_SWARM_COMMANDS matches the permitted aliases and manual-only commands', () => {
 			const actual = HUMAN_ONLY_SWARM_COMMANDS;
 			const extra = [...actual].filter((x) => !expectedHumanOnly.has(x));
 			const missing = [...expectedHumanOnly].filter((x) => !actual.has(x));

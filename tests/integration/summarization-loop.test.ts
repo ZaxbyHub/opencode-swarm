@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { handleRetrieveCommand } from '../../src/commands/retrieve';
 import type { SummaryConfig } from '../../src/config/schema';
@@ -8,6 +7,7 @@ import {
 	createToolSummarizerHook,
 	resetSummaryIdCounter,
 } from '../../src/hooks/tool-summarizer';
+import { canonicalMkdtemp } from '../helpers/tmpdir.js';
 
 /**
  * Default configuration helper
@@ -31,8 +31,13 @@ describe('summarization loop fix integration', () => {
 		// Reset summary ID counter before each test
 		resetSummaryIdCounter();
 
-		// Create temporary directory for test
-		tempDir = join(tmpdir(), `summarization-loop-test-${Date.now()}`);
+		// Create temporary directory for test. `canonicalMkdtemp` is used rather
+		// than a millisecond-stamp suffix: the clock read it replaced was not a
+		// time-sensitive
+		// assertion (it was only a uniqueness token), and mkdtemp gives stronger
+		// uniqueness than a millisecond stamp while also closing the macOS
+		// /var -> /private/var symlink gap (issues #1737, #1782).
+		tempDir = canonicalMkdtemp('summarization-loop-test-');
 		mkdirSync(join(tempDir, '.swarm'), { recursive: true });
 	});
 
@@ -46,26 +51,43 @@ describe('summarization loop fix integration', () => {
 	// ==================== ADVERSARIAL TESTS ====================
 	// These test attack vectors against the exempt_tools configuration
 
-	test('ADVERSARY: empty array override disables all exemptions', async () => {
-		// Attack: Setting exempt_tools to [] should override defaults completely
-		// This would cause all tools (including retrieve_summary) to be summarized
+	test('ADVERSARY: empty array override disables operator exemptions but not the floor', async () => {
+		// Contract change (see docs/releases/pending/pr-workflow-lane-output-context.md):
+		// SUMMARIZER_EXEMPT_TOOL_NAMES is now an unconditional FLOOR. Operator
+		// config can no longer remove a floor member (retrieve_summary among
+		// them) by omitting it — summarizing it would destroy the recovery
+		// mechanism the summarizer itself points callers to. This test used to
+		// assert the pre-floor "empty array disables everything" behavior for
+		// retrieve_summary specifically; that premise no longer holds for a
+		// floor member, so it now asserts the floor holds for retrieve_summary
+		// while confirming an empty array genuinely disables exemption for a
+		// tool that is NOT on the floor.
 		const config = defaultConfig({ exempt_tools: [] });
 		const hook = createToolSummarizerHook(config, tempDir);
 
-		// Large retrieve_summary output that SHOULD be exempt but won't be
-		const largeOutput = 'retrieve_summary content'.repeat(100);
-		const input = {
-			tool: 'retrieve_summary',
-			sessionID: 'test',
-			callID: 'call-1',
+		const floorOutput = {
+			title: 'retrieve',
+			output: 'x'.repeat(2500),
+			metadata: {},
 		};
-		const output = { title: 'retrieve', output: largeOutput, metadata: {} };
+		await hook(
+			{ tool: 'retrieve_summary', sessionID: 'test', callID: 'call-1' },
+			floorOutput,
+		);
+		// Floor member: still exempt even with an empty operator list.
+		expect(floorOutput.output).not.toContain('[SUMMARY');
 
-		await hook(input, output);
-
-		// EXPECTED: With empty array, retrieval should be SUMMARIZED (not exempt)
-		// This is dangerous - summarization loop could occur
-		expect(output.output).toContain('[SUMMARY S1]');
+		const nonFloorOutput = {
+			title: 'other',
+			output: 'y'.repeat(2500),
+			metadata: {},
+		};
+		await hook(
+			{ tool: 'some_other_tool', sessionID: 'test', callID: 'call-2' },
+			nonFloorOutput,
+		);
+		// Non-floor tool: an empty operator list genuinely disables exemption.
+		expect(nonFloorOutput.output).toContain('[SUMMARY');
 	});
 
 	test('ADVERSARY: null/undefined exempt_tools uses defaults', async () => {
@@ -87,19 +109,28 @@ describe('summarization loop fix integration', () => {
 		expect(output.output).not.toContain('[SUMMARY');
 	});
 
-	test('ADVERSARY: case-sensitive mismatch - Read vs read', async () => {
-		// Attack: Passing uppercase 'Read' won't match lowercase 'read' in exempt list
-		const config = defaultConfig({ exempt_tools: ['Read'] }); // Wrong case
+	test('ADVERSARY: case-sensitive mismatch on an operator-added exemption', async () => {
+		// Contract change: 'read' is a floor member (SUMMARIZER_EXEMPT_TOOL_NAMES),
+		// so it stays exempt regardless of what an operator's exempt_tools list
+		// contains — a wrong-case entry for a floor member can no longer matter,
+		// since the floor is matched by its own canonical lowercase names, not
+		// by the operator's (possibly malformed) config. The original test used
+		// 'read' to demonstrate case-sensitive matching, which no longer
+		// demonstrates an attack now that 'read' cannot be un-exempted. Case
+		// sensitivity is still real JS behavior for OPERATOR-added exemptions on
+		// non-floor tools, so this now exercises that with a synthetic tool name.
+		const config = defaultConfig({ exempt_tools: ['Custom_Tool'] }); // wrong case
 		const hook = createToolSummarizerHook(config, tempDir);
 
-		const largeOutput = 'read output data'.repeat(100);
-		const input = { tool: 'read', sessionID: 'test', callID: 'call-1' };
-		const output = { title: 'read', output: largeOutput, metadata: {} };
+		const largeOutput = 'custom tool output data'.repeat(100);
+		const input = { tool: 'custom_tool', sessionID: 'test', callID: 'call-1' };
+		const output = { title: 'custom', output: largeOutput, metadata: {} };
 
 		await hook(input, output);
 
-		// 'read' (lowercase) won't match 'Read' (uppercase) in includes()
-		// So it WILL be summarized - case-sensitive matching is expected JS behavior
+		// 'custom_tool' (lowercase) won't match 'Custom_Tool' (mixed case) in
+		// includes() — case-sensitive matching is expected JS behavior for
+		// operator-supplied, non-floor exemptions.
 		expect(output.output).toContain('[SUMMARY S1]');
 	});
 

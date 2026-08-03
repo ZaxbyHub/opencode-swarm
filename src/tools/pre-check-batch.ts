@@ -31,8 +31,18 @@ const MAX_FILES = 100;
 
 export const _internals: {
 	qualityBudget: typeof qualityBudget;
+	runLintWrapped: typeof runLintWrapped;
+	runSecretscanWrapped: typeof runSecretscanWrapped;
+	runSastScanWrapped: typeof runSastScanWrapped;
+	runQualityBudgetWrapped: typeof runQualityBudgetWrapped;
+	getChangedLineRanges: typeof getChangedLineRanges;
 } = {
 	qualityBudget,
+	runLintWrapped,
+	runSecretscanWrapped,
+	runSastScanWrapped,
+	runQualityBudgetWrapped,
+	getChangedLineRanges,
 };
 
 // ============ Input/Output Types ============
@@ -752,10 +762,12 @@ export async function runPreCheckBatch(
 
 	const [lintResult, secretscanResult, sastScanResult, qualityBudgetResult] =
 		await Promise.all([
-			limit(() => runLintWrapped(changedFiles, directory, config)),
-			limit(() => runSecretscanWrapped(changedFiles, directory, config)),
+			limit(() => _internals.runLintWrapped(changedFiles, directory, config)),
 			limit(() =>
-				runSastScanWrapped(
+				_internals.runSecretscanWrapped(changedFiles, directory, config),
+			),
+			limit(() =>
+				_internals.runSastScanWrapped(
 					changedFiles,
 					directory,
 					sast_threshold,
@@ -763,7 +775,9 @@ export async function runPreCheckBatch(
 					phase,
 				),
 			),
-			limit(() => runQualityBudgetWrapped(changedFiles, directory, config)),
+			limit(() =>
+				_internals.runQualityBudgetWrapped(changedFiles, directory, config),
+			),
 		]);
 
 	// Calculate total duration
@@ -884,7 +898,8 @@ export async function runPreCheckBatch(
 			);
 
 			if (gateFindings.length > 0) {
-				const changedLineRanges = await getChangedLineRanges(directory);
+				const changedLineRanges =
+					await _internals.getChangedLineRanges(directory);
 				const { newFindings, preexistingFindings } = classifySastFindings(
 					gateFindings,
 					changedLineRanges,

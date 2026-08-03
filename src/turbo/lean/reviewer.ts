@@ -15,8 +15,20 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { getSwarmAgents, resolveFallbackModel } from '../../agents/index';
 import { stripKnownSwarmPrefix } from '../../config/schema';
+import { DEFAULT_EPHEMERAL_TIMEOUT_MS } from '../../evaluation/ephemeral-agent-dispatcher';
+import {
+	createReviewModelDispatcher,
+	type ReviewModelDispatcher,
+} from '../../review/contracts';
+import {
+	type ReviewAgentModelRegistry,
+	resolveAgentForActiveSwarm,
+	reviewFallbackModelStrings,
+	reviewPrimaryModel,
+} from '../../review/runtime';
 import { getAgentSession, swarmState } from '../../state';
 import { telemetry } from '../../telemetry';
+import { pushAdvisory } from '../../utils/advisory-queue';
 import {
 	dispatchWithModelFallback,
 	type ModelOverride,
@@ -49,7 +61,7 @@ export interface LeanTurboPhaseReviewerConfig {
 
 	/**
 	 * Timeout in milliseconds for the reviewer dispatch.
-	 * Default: no timeout (reviewer is awaited indefinitely).
+	 * Default: the shared bounded dispatcher timeout.
 	 */
 	timeoutMs?: number;
 
@@ -59,11 +71,37 @@ export interface LeanTurboPhaseReviewerConfig {
 	 * Default: false.
 	 */
 	requireDiffSummary?: boolean;
+
+	/**
+	 * Instance-local dispatcher bound to the active plugin client.
+	 * New runtime call paths inject this instead of reading global client state.
+	 */
+	dispatcher?: ReviewModelDispatcher;
+
+	/**
+	 * Immutable agent-name registry captured by the plugin instance.
+	 * Direct callers may omit this only when a single/default reviewer suffices.
+	 */
+	generatedAgentNames?: readonly string[];
+
+	/** Exact active agent identity used to select this session's swarm. */
+	activeAgentName?: string;
+
+	/** Immutable plugin-instance model configuration for fallback ownership. */
+	agentModelRegistry?: ReviewAgentModelRegistry;
 }
 
-const DEFAULT_CONFIG: Required<LeanTurboPhaseReviewerConfig> = {
+const DEFAULT_CONFIG: Required<
+	Omit<
+		LeanTurboPhaseReviewerConfig,
+		| 'dispatcher'
+		| 'generatedAgentNames'
+		| 'activeAgentName'
+		| 'agentModelRegistry'
+	>
+> = {
 	reviewerAgent: '', // empty → resolve from generatedAgentNames
-	timeoutMs: 0, // 0/undefined → no timeout
+	timeoutMs: DEFAULT_EPHEMERAL_TIMEOUT_MS,
 	requireDiffSummary: false,
 };
 
@@ -93,30 +131,40 @@ export interface PhaseReviewerResult {
  * Exported for reuse by the auto-review hook (src/hooks/auto-review.ts).
  */
 export function resolveDefaultReviewerAgent(
-	generatedAgentNames: string[],
+	generatedAgentNames: readonly string[],
+	activeAgentName?: string,
 ): string {
-	if (generatedAgentNames.length === 0) {
-		return 'reviewer';
-	}
-
-	// Find the longest agent name that ends with "_reviewer" or "-reviewer"
-	let best: string | null = null;
-	for (const name of generatedAgentNames) {
-		const lower = name.toLowerCase();
-		if (
-			(lower.endsWith('_reviewer') || lower.endsWith('-reviewer')) &&
-			(!best || name.length > best.length)
-		) {
-			best = name;
-		}
-	}
-
-	return (
-		best ??
-		(generatedAgentNames.includes('reviewer')
-			? 'reviewer'
-			: generatedAgentNames[0])
+	return resolveAgentForActiveSwarm(
+		generatedAgentNames,
+		'reviewer',
+		activeAgentName,
 	);
+}
+
+function resolveLegacyReviewerModelConfig(
+	agentName: string,
+	config: LeanTurboPhaseReviewerConfig | undefined,
+):
+	| {
+			agentBaseName: string;
+			swarmAgents: ReturnType<typeof getSwarmAgents>;
+	  }
+	| undefined {
+	// Plugin-owned paths inject both the dispatcher and immutable registry.
+	// Never consult process-global agent state for an injected runtime: doing so
+	// would reintroduce cross-instance fallback leakage. This compatibility
+	// fence exists only for older direct callers that still rely on getAgentConfigs.
+	if (config?.dispatcher || config?.agentModelRegistry) return undefined;
+
+	const agentBaseName = stripKnownSwarmPrefix(agentName);
+	const swarmId =
+		agentBaseName !== agentName
+			? agentName.slice(0, agentName.length - agentBaseName.length - 1)
+			: undefined;
+	return {
+		agentBaseName,
+		swarmAgents: getSwarmAgents(swarmId),
+	};
 }
 
 /**
@@ -369,11 +417,8 @@ async function writeReviewerEvidence(
 }
 
 /**
- * Default implementation: uses the OpencodeClient session API to dispatch a
- * read-only reviewer agent and await its response.
- *
- * Returns the raw response text from the agent.
- * Throws if the dispatch fails or times out.
+ * Default implementation delegates to the shared bounded ephemeral-session
+ * primitive through an instance-local ReviewModelDispatcher.
  */
 async function defaultDispatchReviewerAgent(
 	directory: string,
@@ -382,122 +427,66 @@ async function defaultDispatchReviewerAgent(
 	timeoutMs: number,
 	parentSessionId?: string,
 	model?: ModelOverride,
+	dispatcher?: ReviewModelDispatcher,
 ): Promise<string> {
-	const client = swarmState.opencodeClient;
-	if (!client) {
-		throw new Error('OpencodeClient not available');
+	let activeDispatcher = dispatcher;
+	if (!activeDispatcher) {
+		/**
+		 * Backward-compatibility fence for direct callers and older integrations.
+		 * Plugin/tool call paths inject a client-bound dispatcher and never take
+		 * this branch. Remove this fallback after the public API deprecation window.
+		 */
+		const legacyClient = swarmState.opencodeClient;
+		if (!legacyClient) throw new Error('ReviewModelDispatcher not available');
+		activeDispatcher = createReviewModelDispatcher(legacyClient);
 	}
 
-	// Create an ephemeral session for the reviewer
-	const sessionResult = await client.session.create({
-		...(parentSessionId
-			? {
-					body: {
-						parentID: parentSessionId,
-						title: 'lean_turbo_reviewer background',
-					},
-				}
-			: {}),
-		query: { directory },
-	});
-
-	if (!sessionResult.data?.id) {
-		throw new Error('Failed to create reviewer session');
-	}
-
-	const sessionId = sessionResult.data.id;
-	const promptController = new AbortController();
-	let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-
-	try {
-		const promptText = `You are a read-only phase reviewer for Lean Turbo execution.
-
-## Phase Review Package
+	const system = `You are a read-only phase reviewer for Lean Turbo execution.
+Review the supplied phase execution evidence and decide whether the phase is ready to advance.
+Evaluate lane completion, unresolved degraded tasks, the file change set, and build status.
+Conclude with exactly one verdict marker (APPROVED, NEEDS_REVISION, or REJECTED) and a REASON line.
+Be specific and evidence-based. Never approve unresolved degraded tasks or incomplete lane execution.`;
+	const prompt = `## Phase Review Package
 
 \`\`\`json
 ${JSON.stringify(reviewPackage, null, 2)}
 \`\`\`
 
-## Your Task
-
-Review the above phase execution evidence and produce a verdict on whether the phase is ready to advance.
-
-Evaluate:
-1. Were all lanes completed successfully (or gracefully failed)?
-2. Are there degraded tasks that remain unresolved?
-3. Does the file change set look correct and complete?
-4. Is the build status acceptable?
-
-## Output Format
-
 Provide your analysis and conclude with:
 
 VERDICT: APPROVED
-REASON: [brief explanation of why the phase is approved]
+REASON: [brief explanation]
 
 OR
 
 VERDICT: NEEDS_REVISION
-REASON: [what must be fixed before the phase can advance]
+REASON: [what must be fixed]
 
 OR
 
 VERDICT: REJECTED
-REASON: [critical issues that block phase advancement]
+REASON: [critical blocking issues]`;
 
-Be specific and evidence-based. Do not approve a phase with unresolved degraded tasks or incomplete lane execution.`;
-
-		// When timeoutMs > 0: race prompt against a rejecting timeout promise
-		// When timeoutMs <= 0 or undefined: await prompt directly (no race)
-		const response =
-			timeoutMs > 0
-				? await Promise.race([
-						client.session.prompt({
-							path: { id: sessionId },
-							body: {
-								agent: agentName,
-								// #1896: per-call model override on a fallback attempt.
-								...(model ? { model } : {}),
-								tools: { write: false, edit: false, patch: false },
-								parts: [{ type: 'text', text: promptText }],
-							},
-							signal: promptController.signal,
-						}),
-						new Promise<never>((_, reject) => {
-							timeoutHandle = setTimeout(() => {
-								promptController.abort();
-								reject(
-									new Error(`Reviewer dispatch timed out after ${timeoutMs}ms`),
-								);
-							}, timeoutMs);
-						}),
-					])
-				: await client.session.prompt({
-						path: { id: sessionId },
-						body: {
-							agent: agentName,
-							tools: { write: false, edit: false, patch: false },
-							parts: [{ type: 'text', text: promptText }],
-						},
-						signal: promptController.signal,
-					});
-
-		if (!response.data) {
-			throw new Error('Reviewer session returned no data');
-		}
-
-		// Extract text from response parts
-		const textParts = response.data.parts
-			.filter((p) => p.type === 'text')
-			.map((p) => p.text ?? '')
-			.join('\n');
-
-		return textParts;
-	} finally {
-		if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
-		promptController.abort();
-		client.session.delete({ path: { id: sessionId } }).catch(() => {});
+	const result = await activeDispatcher.dispatch({
+		directory,
+		parentSessionId,
+		agentName,
+		model,
+		system,
+		prompt,
+		title: parentSessionId ? 'lean_turbo_reviewer background' : undefined,
+		timeoutMs,
+	});
+	if (result.status === 'completed') return result.text;
+	if (result.status === 'timeout') {
+		const timeoutDescription =
+			timeoutMs > 0 ? `${timeoutMs}ms` : 'the bounded default';
+		throw new Error(`Reviewer dispatch timed out after ${timeoutDescription}`);
 	}
+	throw new Error(
+		result.error ??
+			`Reviewer dispatch ${result.status === 'cancelled' ? 'cancelled' : 'failed'}`,
+	);
 }
 
 // ─── _internals Seam ───────────────────────────────────────────────────────────
@@ -517,6 +506,7 @@ export const _internals: {
 		timeoutMs: number,
 		parentSessionId?: string,
 		model?: ModelOverride,
+		dispatcher?: ReviewModelDispatcher,
 	) => Promise<string>;
 	resolveDefaultReviewerAgent: typeof resolveDefaultReviewerAgent;
 	listLaneEvidence: typeof listLaneEvidence;
@@ -560,16 +550,25 @@ export async function dispatchPhaseReviewer(
 	sessionID: string,
 	config?: LeanTurboPhaseReviewerConfig,
 ): Promise<PhaseReviewerResult> {
-	const mergedConfig: Required<LeanTurboPhaseReviewerConfig> = {
+	const mergedConfig: Required<
+		Omit<
+			LeanTurboPhaseReviewerConfig,
+			| 'dispatcher'
+			| 'generatedAgentNames'
+			| 'activeAgentName'
+			| 'agentModelRegistry'
+		>
+	> = {
 		...DEFAULT_CONFIG,
 		...config,
 	};
 
 	// Resolve reviewer agent
-	const generatedAgentNames = swarmState.generatedAgentNames;
+	const generatedAgentNames =
+		config?.generatedAgentNames ?? swarmState.generatedAgentNames;
 	const agentName =
 		mergedConfig.reviewerAgent ||
-		resolveDefaultReviewerAgent(generatedAgentNames);
+		resolveDefaultReviewerAgent(generatedAgentNames, config?.activeAgentName);
 
 	// Compile the review package
 	const pkg = await _internals.compileReviewPackage(
@@ -584,12 +583,11 @@ export async function dispatchPhaseReviewer(
 	// reviewer fallback_model instead of immediately writing a REJECTED verdict
 	// (a quota blip previously cascaded into a false phase rejection). Only after
 	// the primary + all fallbacks are exhausted does the fail-closed path run.
-	const reviewerBase = stripKnownSwarmPrefix(agentName);
-	const reviewerSwarmId =
-		reviewerBase !== agentName
-			? agentName.slice(0, agentName.length - reviewerBase.length - 1)
-			: undefined;
-	const reviewerSwarmAgents = getSwarmAgents(reviewerSwarmId);
+	const fallbackModels = reviewFallbackModelStrings(
+		agentName,
+		config?.agentModelRegistry,
+	);
+	const legacyModelConfig = resolveLegacyReviewerModelConfig(agentName, config);
 	let responseText: string;
 	try {
 		const dispatched = await dispatchWithModelFallback<string>({
@@ -601,9 +599,18 @@ export async function dispatchPhaseReviewer(
 					mergedConfig.timeoutMs,
 					sessionID,
 					model,
+					config?.dispatcher,
 				),
 			resolveFallback: (index) =>
-				resolveFallbackModel(reviewerBase, index, reviewerSwarmAgents),
+				config?.agentModelRegistry
+					? (fallbackModels[index - 1] ?? null)
+					: legacyModelConfig
+						? resolveFallbackModel(
+								legacyModelConfig.agentBaseName,
+								index,
+								legacyModelConfig.swarmAgents,
+							)
+						: null,
 			// Advance to the next model immediately on a transient/quota error — an
 			// instant same-model retry cannot clear an exhausted quota.
 			maxTransientRetriesPerModel: 0,
@@ -620,14 +627,17 @@ export async function dispatchPhaseReviewer(
 				telemetry.modelFallback(
 					sessionID,
 					agentName,
-					reviewerSwarmAgents?.[reviewerBase]?.model ?? 'default',
+					reviewPrimaryModel(agentName, config?.agentModelRegistry) ??
+						legacyModelConfig?.swarmAgents?.[legacyModelConfig.agentBaseName]
+							?.model ??
+						'default',
 					toModel,
 					'transient_model_error',
 				);
 				const session = getAgentSession(sessionID);
 				if (session) {
-					session.pendingAdvisoryMessages ??= [];
-					session.pendingAdvisoryMessages.push(
+					pushAdvisory(
+						session,
 						`MODEL FALLBACK: reviewer failed over to "${toModel}" (fallback ${fallbackIndex}) after a transient/quota dispatch error.`,
 					);
 				}

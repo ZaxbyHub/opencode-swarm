@@ -108,4 +108,96 @@ describe('resolveAgentConflict', () => {
 		expect(msgs.length).toBe(1);
 		expect(msgs[0]).toContain('CONFLICT DETECTED');
 	});
+
+	// Issue #1976 — within-turn advisory dedupe regression coverage. The
+	// dedupeKey (conflict:taskId:rejections) must be embedded in the message
+	// body so pushAdvisory's key-presence dedupe actually matches.
+	describe('within-turn advisory dedupe (issue #1976)', () => {
+		it('suppresses byte-identical re-fires of the SAME (task, level) within a turn', () => {
+			ensureAgentSession(SESSION_ID, 'architect');
+
+			// Same taskId + same rejectionCount (2) twice in one turn.
+			for (let i = 0; i < 3; i++) {
+				resolveAgentConflict({
+					sessionID: SESSION_ID,
+					phase: 1,
+					taskId: 'task-dedup',
+					sourceAgent: 'reviewer',
+					targetAgent: 'coder',
+					conflictType: 'feedback_rejection',
+					rejectionCount: 2,
+					summary: 'Repeated identical conflict',
+				});
+			}
+
+			const session = ensureAgentSession(SESSION_ID);
+			const msgs = session.pendingAdvisoryMessages ?? [];
+			// Three identical calls → one advisory (within-turn dedupe).
+			expect(msgs.length).toBe(1);
+			expect(msgs[0]).toContain('CONFLICT DETECTED');
+		});
+
+		it('lets genuine escalation (2 → 3) survive dedupe', () => {
+			ensureAgentSession(SESSION_ID, 'architect');
+
+			// Same task, escalating rejectionCount: level 2 then level 3.
+			resolveAgentConflict({
+				sessionID: SESSION_ID,
+				phase: 1,
+				taskId: 'task-escalate',
+				sourceAgent: 'reviewer',
+				targetAgent: 'coder',
+				conflictType: 'feedback_rejection',
+				rejectionCount: 2,
+				summary: 'Second rejection',
+			});
+			resolveAgentConflict({
+				sessionID: SESSION_ID,
+				phase: 1,
+				taskId: 'task-escalate',
+				sourceAgent: 'reviewer',
+				targetAgent: 'coder',
+				conflictType: 'feedback_rejection',
+				rejectionCount: 3,
+				summary: 'Third rejection',
+			});
+
+			const session = ensureAgentSession(SESSION_ID);
+			const msgs = session.pendingAdvisoryMessages ?? [];
+			// Distinct levels → distinct dedupeKeys → both enqueued.
+			expect(msgs.length).toBe(2);
+			expect(msgs.some((m) => m.includes('CONFLICT DETECTED'))).toBe(true);
+			expect(msgs.some((m) => m.includes('CONFLICT ESCALATION'))).toBe(true);
+		});
+
+		it('does not collapse distinct tasks sharing a rejection level', () => {
+			ensureAgentSession(SESSION_ID, 'architect');
+
+			resolveAgentConflict({
+				sessionID: SESSION_ID,
+				phase: 1,
+				taskId: 'task-A',
+				sourceAgent: 'reviewer',
+				targetAgent: 'coder',
+				conflictType: 'feedback_rejection',
+				rejectionCount: 2,
+				summary: 'Conflict on task A',
+			});
+			resolveAgentConflict({
+				sessionID: SESSION_ID,
+				phase: 1,
+				taskId: 'task-B',
+				sourceAgent: 'reviewer',
+				targetAgent: 'coder',
+				conflictType: 'feedback_rejection',
+				rejectionCount: 2,
+				summary: 'Conflict on task B',
+			});
+
+			const session = ensureAgentSession(SESSION_ID);
+			const msgs = session.pendingAdvisoryMessages ?? [];
+			// Distinct taskIds → distinct dedupeKeys → both enqueued.
+			expect(msgs.length).toBe(2);
+		});
+	});
 });

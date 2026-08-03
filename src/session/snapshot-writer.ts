@@ -47,6 +47,7 @@ export interface SerializedAgentSession {
 	reviewerCallCount: Record<string, number>;
 	lastGateFailure: { tool: string; taskId: string; timestamp: number } | null;
 	partialGateWarningsIssuedForTask: string[];
+	completionGateWarnedForTask: string[];
 	selfFixAttempted: boolean;
 	selfCodingWarnedAtCount: number;
 	catastrophicPhaseWarnings: number[];
@@ -58,6 +59,8 @@ export interface SerializedAgentSession {
 	qaSkipTaskIds: string[];
 	pendingAdvisoryMessages: string[];
 	taskWorkflowStates?: Record<string, string>;
+	/** Task-keyed coder file attribution. Optional for backward compatibility. */
+	modifiedFilesByTask?: Record<string, string[]>;
 	/** Flag for one-shot scope violation warning injection (omitted when undefined for additive-only schema) */
 	scopeViolationDetected?: boolean;
 	/** Current index into the fallback_models array (v6.33) */
@@ -157,6 +160,11 @@ export function serializeAgentSession(
 		s.partialGateWarningsIssuedForTask ?? new Set(),
 	);
 
+	// Convert completionGateWarnedForTask: Set<string> -> string[]
+	const completionGateWarnedForTask = Array.from(
+		s.completionGateWarnedForTask ?? new Set(),
+	);
+
 	// Convert catastrophicPhaseWarnings: Set<number> -> number[]
 	const catastrophicPhaseWarnings = Array.from(
 		s.catastrophicPhaseWarnings ?? new Set(),
@@ -178,6 +186,11 @@ export function serializeAgentSession(
 		for (const [taskId, agents] of s.stageBCompletion) {
 			stageBCompletion[taskId] = Array.from(agents);
 		}
+	}
+
+	const modifiedFilesByTask: Record<string, string[]> = Object.create(null);
+	for (const [taskId, files] of s.modifiedFilesByTask ?? new Map()) {
+		modifiedFilesByTask[taskId] = [...files];
 	}
 
 	// Convert windows: Record<string, InvocationWindow> (already serializable)
@@ -222,6 +235,7 @@ export function serializeAgentSession(
 		reviewerCallCount,
 		lastGateFailure: s.lastGateFailure ?? null,
 		partialGateWarningsIssuedForTask,
+		completionGateWarnedForTask,
 		selfFixAttempted: s.selfFixAttempted ?? false,
 		selfCodingWarnedAtCount: s.selfCodingWarnedAtCount ?? 0,
 		catastrophicPhaseWarnings,
@@ -233,6 +247,9 @@ export function serializeAgentSession(
 		qaSkipTaskIds: s.qaSkipTaskIds ?? [],
 		pendingAdvisoryMessages: s.pendingAdvisoryMessages ?? [],
 		taskWorkflowStates: Object.fromEntries(s.taskWorkflowStates ?? new Map()),
+		...(Object.keys(modifiedFilesByTask).length > 0 && {
+			modifiedFilesByTask,
+		}),
 		...(s.scopeViolationDetected !== undefined && {
 			scopeViolationDetected: s.scopeViolationDetected,
 		}),

@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import type { AgentDefinition } from '../agents';
 import { loadPluginConfig } from '../config/loader';
 import { MemoryConfigSchema } from '../config/schema';
+import { countConsensusReportFiles } from '../consensus/store';
 import {
 	type FullAutoRunState,
 	loadFullAutoRunState,
@@ -32,6 +33,8 @@ import {
 	hasActiveTurboMode,
 	swarmState,
 } from '../state';
+import { getLastHeartbeat } from '../telemetry';
+import { listRecoveryRecords } from '../turbo/lean/recovery';
 import { loadLeanTurboRunState } from '../turbo/lean/state';
 import { getCompactionMetrics } from './compaction-service';
 import { DEFAULT_CONTEXT_BUDGET_CONFIG } from './context-budget-service';
@@ -74,6 +77,20 @@ export interface StatusData {
 	leanDegradedTasks?: number;
 	/** Human-readable degradation summary */
 	leanDegradationSummary?: string;
+	/**
+	 * #1657: merge-back conflict recovery worktrees preserved for manual
+	 * recovery (durable records under `.swarm/recovery/`). Surfaced so the
+	 * architect/operator can see pending recovery work in `/swarm status`
+	 * rather than having to re-read a prior tool result. `undefined`/empty when
+	 * no lanes are preserved.
+	 */
+	leanPreservedRecoveryWorktrees?: Array<{
+		laneId: string;
+		status: string;
+		worktreePath: string;
+		reason: string;
+		replayHint: string;
+	}>;
 	/** Whether Full-Auto mode is currently active */
 	fullAutoActive?: boolean;
 	/**
@@ -113,6 +130,19 @@ export interface StatusData {
 	/** #1234 Part 3: pending insight candidates awaiting phase boundary consumption */
 	insightCandidatesPending?: number;
 	/**
+	 * #1821 AC22: consensus report FILES stored under
+	 * `.swarm/evolution/consensus/`.
+	 *
+	 * The reader half of the consensus store. Without it the miner's reports were
+	 * a write-only directory — nothing in the product enumerated them, so a user
+	 * had no way to learn they existed. A file count, deliberately: it is one
+	 * `readdir` with no JSON parse and no integrity recomputation, so it costs the
+	 * same whether the store holds one report or fifty. It therefore includes any
+	 * corrupt report, because what it counts is files whose name is a well-formed
+	 * report id.
+	 */
+	consensusReports?: number;
+	/**
 	 * Cohort/link status (issue #1846). Makes the linked knowledge store and its
 	 * health obvious in `/swarm status`. `undefined` when link state is absent.
 	 */
@@ -124,6 +154,16 @@ export interface StatusData {
 		degraded?: boolean;
 		sharedRoot?: string;
 		generation?: number;
+	};
+	/** FR-010: last heartbeat activity for the session */
+	lastActivity?: {
+		sessionId: string;
+		/** epoch ms from getLastHeartbeat */
+		timestamp: number;
+		/** null when no heartbeat recorded */
+		agoMs: number | null;
+		/** human-readable: "5s ago", "12m ago", "2h ago", "never" */
+		agoLabel: string;
 	};
 	/**
 	 * #1850: memory cohort link status. Distinct from `cohort` (knowledge link)
@@ -178,12 +218,27 @@ function readSpecStalenessSnapshot(directory: string): {
 }
 
 /**
+ * Format a millisecond duration as a human-readable ago label.
+ */
+function formatAgo(ms: number): string {
+	const seconds = Math.floor(ms / 1000);
+	if (seconds < 60) return `${seconds}s ago`;
+	const minutes = Math.floor(seconds / 60);
+	if (minutes < 60) return `${minutes}m ago`;
+	const hours = Math.floor(minutes / 60);
+	if (hours < 24) return `${hours}h ago`;
+	const days = Math.floor(hours / 24);
+	return `${days}d ago`;
+}
+
+/**
  * Get status data from the swarm directory.
  * Returns structured data that can be used by GUI, background flows, or commands.
  */
 export async function getStatusData(
 	directory: string,
 	agents: Record<string, AgentDefinition>,
+	sessionId?: string,
 ): Promise<StatusData> {
 	// Try structured plan first
 	const plan = await loadPlan(directory);
@@ -288,6 +343,14 @@ export async function getStatusData(
 	status.insightCandidatesPending = await safeLineCount(
 		validateSwarmPath(directory, 'insight-candidates.jsonl'),
 	);
+	// #1821 AC22: make the consensus store reachable. Best-effort like every
+	// other counter in this block — a status command must never fail because an
+	// optional artifact directory is unreadable.
+	try {
+		status.consensusReports = await countConsensusReportFiles(directory);
+	} catch {
+		status.consensusReports = 0;
+	}
 
 	// Issue #1846: surface cohort/link status so `/swarm status` makes the
 	// linked knowledge store and its health obvious. Best-effort: a missing or
@@ -386,6 +449,27 @@ export async function getStatusData(
 		}
 	}
 
+	// FR-010: populate lastActivity when sessionId is provided.
+	if (sessionId) {
+		const timestamp = getLastHeartbeat(sessionId);
+		if (timestamp !== undefined) {
+			const agoMs = Date.now() - timestamp;
+			status.lastActivity = {
+				sessionId,
+				timestamp,
+				agoMs,
+				agoLabel: formatAgo(agoMs),
+			};
+		} else {
+			status.lastActivity = {
+				sessionId,
+				timestamp: 0,
+				agoMs: null,
+				agoLabel: 'never',
+			};
+		}
+	}
+
 	// Enrich with Lean Turbo data if active
 	return enrichWithLeanTurbo(status, directory);
 }
@@ -409,6 +493,27 @@ function enrichWithLeanTurbo(
 	}
 
 	status.turboStrategy = turboStrategy;
+
+	// #1657: surface durable merge-back recovery records (preserved worktrees)
+	// from `.swarm/recovery/`. This runs BEFORE the `!leanActive` early return
+	// because recovery records persist across sessions and are relevant whenever
+	// any lane's merge-back has failed — even if Lean Turbo is not currently
+	// active (e.g. the session ended, or the user is inspecting past recovery).
+	try {
+		const recoveryRecords = listRecoveryRecords(directory);
+		if (recoveryRecords.length > 0) {
+			status.leanPreservedRecoveryWorktrees = recoveryRecords.map((r) => ({
+				laneId: r.laneId,
+				status: r.status,
+				worktreePath: r.worktreePath,
+				reason: r.reason,
+				replayHint: r.replayHint,
+			}));
+		}
+	} catch {
+		// Non-fatal: status is best-effort. Missing the recovery section does
+		// not invalidate the rest of the status output.
+	}
 
 	if (!leanActive) {
 		return status;
@@ -478,6 +583,20 @@ export function formatStatusMarkdown(status: StatusData): string {
 		`**Agents**: ${status.agentCount} registered`,
 	];
 
+	// FR-010/FR-011: render last activity
+	if (status.lastActivity) {
+		const label = status.lastActivity.agoLabel;
+		// 'never' means no heartbeat was ever recorded — cannot be stalled
+		const annotation =
+			status.lastActivity.agoLabel !== 'never' &&
+			status.lastActivity.agoMs !== null &&
+			status.lastActivity.agoMs > 120 * 1000
+				? ' \u26a0\ufe0f possibly stalled'
+				: '';
+		lines.push('');
+		lines.push(`**Last activity:** ${label}${annotation}`);
+	}
+
 	// Issue #853 Layer C: spec drift surfacing in /swarm status output.
 	if (status.specStale) {
 		const reason = status.specStaleReason ?? 'spec.md changed since plan saved';
@@ -528,6 +647,24 @@ export function formatStatusMarkdown(status: StatusData): string {
 		lines.push('**TURBO MODE**: active');
 	}
 
+	// #1657: preserved merge-back recovery worktrees. Rendered as its own block
+	// because recovery records persist across sessions and are relevant even
+	// when Lean Turbo is not currently active.
+	if (
+		status.leanPreservedRecoveryWorktrees &&
+		status.leanPreservedRecoveryWorktrees.length > 0
+	) {
+		lines.push('');
+		lines.push(
+			`**Preserved recovery worktrees**: ${status.leanPreservedRecoveryWorktrees.length} lane(s) preserved for manual merge-back recovery`,
+		);
+		for (const w of status.leanPreservedRecoveryWorktrees) {
+			lines.push(
+				`  - ${w.laneId} (${w.status}): ${w.reason} — \`${w.replayHint}\``,
+			);
+		}
+	}
+
 	// Issue #1781 E2: Full-Auto status is rendered as its own block, OUTSIDE
 	// the turbo block, so escalation detail surfaces even when Full-Auto runs
 	// WITHOUT turbo (the common escalation scenario). Previously this was
@@ -573,7 +710,13 @@ export function formatStatusMarkdown(status: StatusData): string {
 	const proposals = status.pendingProposals ?? 0;
 	const unactionable = status.unactionableQueueDepth ?? 0;
 	const insights = status.insightCandidatesPending ?? 0;
-	if (proposals > 0 || unactionable > 0 || insights > 0) {
+	const consensusReports = status.consensusReports ?? 0;
+	if (
+		proposals > 0 ||
+		unactionable > 0 ||
+		insights > 0 ||
+		consensusReports > 0
+	) {
 		lines.push('', '**Learning Queues**:');
 		if (proposals > 0)
 			lines.push(
@@ -585,6 +728,13 @@ export function formatStatusMarkdown(status: StatusData): string {
 			);
 		if (insights > 0)
 			lines.push(`  - Insight candidates: ${insights} (consumed at phase end)`);
+		// #1821 AC22. The pointer is the directory, not a command: there is no
+		// list command for consensus reports, and naming one that does not exist
+		// would be worse than naming the path a reader can actually open.
+		if (consensusReports > 0)
+			lines.push(
+				`  - Consensus reports: ${consensusReports} (read under \`.swarm/evolution/consensus/\`; each holds proposals-only recommendations)`,
+			);
 	}
 
 	// Issue #1846: cohort/link status — make the shared knowledge store visible.
@@ -658,8 +808,9 @@ export function formatStatusMarkdown(status: StatusData): string {
 export async function handleStatusCommand(
 	directory: string,
 	agents: Record<string, AgentDefinition>,
+	sessionId?: string,
 ): Promise<string> {
-	const statusData = await getStatusData(directory, agents);
+	const statusData = await getStatusData(directory, agents, sessionId);
 
 	if (!statusData.hasPlan) {
 		// Issue #853 Layer C: surface spec drift even with no active plan, so

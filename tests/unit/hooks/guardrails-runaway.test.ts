@@ -8,6 +8,12 @@ import {
 	getStoredInputArgs,
 	setStoredInputArgs,
 } from '../../../src/hooks/guardrails';
+// Imported rather than duplicated as a literal. These assertions previously
+// matched on 'runaway output' — a string the advisory never contains — so seven
+// of them were vacuously true and would have passed even if the advisory fired
+// on every single transform. Sharing the constant with the emitter is what stops
+// that drift recurring.
+import { RUNAWAY_OUTPUT_ADVISORY_MARKER } from '../../../src/hooks/guardrails/messages-transform';
 import {
 	ensureAgentSession,
 	getAgentSession,
@@ -200,7 +206,7 @@ describe('runaway output detector', () => {
 		// because count would be 1 (< 3 threshold)
 		const session = getAgentSession(sessionId);
 		const hasRunawayWarning = session?.pendingAdvisoryMessages?.some(
-			(m: string) => m.includes('runaway output'),
+			(m: string) => m.includes(RUNAWAY_OUTPUT_ADVISORY_MARKER),
 		);
 		expect(hasRunawayWarning).toBeFalsy();
 	});
@@ -239,7 +245,7 @@ describe('runaway output detector', () => {
 		// Advisory should NOT fire because count < 3
 		const session = getAgentSession(sessionId);
 		const hasRunawayWarning = session?.pendingAdvisoryMessages?.some(
-			(m: string) => m.includes('runaway output'),
+			(m: string) => m.includes(RUNAWAY_OUTPUT_ADVISORY_MARKER),
 		);
 		expect(hasRunawayWarning).toBeFalsy();
 	});
@@ -260,7 +266,9 @@ describe('runaway output detector', () => {
 		await hooks.messagesTransform({}, { messages: messages1 });
 		// System message should NOT have advisory yet (count = 1 < 3)
 		expect(messages1[0].parts[0].text).not.toContain('WARNING');
-		expect(messages1[0].parts[0].text).not.toContain('runaway output');
+		expect(messages1[0].parts[0].text).not.toContain(
+			RUNAWAY_OUTPUT_ADVISORY_MARKER,
+		);
 
 		// Second high-output message - count should be 2
 		const messages2 = [
@@ -270,7 +278,9 @@ describe('runaway output detector', () => {
 		await hooks.messagesTransform({}, { messages: messages2 });
 		// System message should NOT have advisory yet (count = 2 < 3)
 		expect(messages2[0].parts[0].text).not.toContain('WARNING');
-		expect(messages2[0].parts[0].text).not.toContain('runaway output');
+		expect(messages2[0].parts[0].text).not.toContain(
+			RUNAWAY_OUTPUT_ADVISORY_MARKER,
+		);
 
 		// Third high-output message - count should be 3, advisory should fire
 		const messages3 = [
@@ -328,7 +338,7 @@ describe('runaway output detector', () => {
 		// No advisory should fire yet
 		const session = getAgentSession(sessionId);
 		const hasRunawayWarning = session?.pendingAdvisoryMessages?.some(
-			(m: string) => m.includes('runaway output'),
+			(m: string) => m.includes(RUNAWAY_OUTPUT_ADVISORY_MARKER),
 		);
 		expect(hasRunawayWarning).toBeFalsy();
 	});
@@ -398,7 +408,7 @@ describe('runaway output detector', () => {
 		// We can verify by checking that the counter was reset after injection
 		// and that advisory is NOT present (because STOP takes precedence)
 		const hasRunawayWarning = session?.pendingAdvisoryMessages?.some(
-			(m: string) => m.includes('runaway output'),
+			(m: string) => m.includes(RUNAWAY_OUTPUT_ADVISORY_MARKER),
 		);
 		// Advisory should not be present because hard STOP was triggered instead
 		expect(hasRunawayWarning).toBeFalsy();
@@ -428,7 +438,7 @@ describe('runaway output detector', () => {
 		// STOP should have been injected
 		const session = getAgentSession(sessionId);
 		const hasRunawayWarning = session?.pendingAdvisoryMessages?.some(
-			(m: string) => m.includes('runaway output'),
+			(m: string) => m.includes(RUNAWAY_OUTPUT_ADVISORY_MARKER),
 		);
 		// No advisory because STOP was triggered at maxTurns
 		expect(hasRunawayWarning).toBeFalsy();
@@ -500,7 +510,7 @@ describe('runaway output detector', () => {
 		// No advisory should be injected for non-architect
 		const session = getAgentSession(nonArchSessionId);
 		const hasRunawayWarning = session?.pendingAdvisoryMessages?.some(
-			(m: string) => m.includes('runaway output'),
+			(m: string) => m.includes(RUNAWAY_OUTPUT_ADVISORY_MARKER),
 		);
 		expect(hasRunawayWarning).toBeFalsy();
 	});
@@ -706,7 +716,7 @@ describe('runaway output detector', () => {
 
 		const session = getAgentSession(sessionId);
 		const hasRunawayWarning = session?.pendingAdvisoryMessages?.some(
-			(m: string) => m.includes('runaway output'),
+			(m: string) => m.includes(RUNAWAY_OUTPUT_ADVISORY_MARKER),
 		);
 		// No warning yet because we only have 2 high-output after the reset
 		expect(hasRunawayWarning).toBeFalsy();

@@ -204,7 +204,7 @@ describe('background doc-only gate evidence', () => {
 	});
 
 	describe('regression: dirty background baseline fails closed (F-005)', () => {
-		test('requires both gates when a declared Markdown path was already dirty', async () => {
+		test('publishes no coder evidence when a declared Markdown path was already dirty', async () => {
 			fs.writeFileSync(
 				path.join(testDirectory, 'README.md'),
 				'# pre-existing\n',
@@ -217,15 +217,21 @@ describe('background doc-only gate evidence', () => {
 
 			// A dirty baseline cannot attribute same-path changes to this coder. An
 			// exemption here would turn pre-existing workspace dirt into trusted proof.
-			await ingestBackgroundStageBCompletion({
+			const result = await ingestBackgroundStageBCompletion({
 				directory: testDirectory,
 				record: coder,
 				result: { text: 'done', chars: 4, truncated: false, digest: 'dirty' },
 			});
 
 			const evidence = await readTaskEvidence(testDirectory, '1.7');
-			expect(evidence?.required_gates).toEqual(['reviewer', 'test_engineer']);
-			expect(evidence?.test_engineer_exempt).not.toBe(true);
+			expect(result).toEqual({
+				ok: false,
+				consumed: false,
+				stale: true,
+				reason:
+					'background coder files could not be attributed to a clean immutable baseline',
+			});
+			expect(evidence).toBeNull();
 		});
 	});
 });

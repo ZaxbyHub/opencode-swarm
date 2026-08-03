@@ -519,8 +519,8 @@ describe('createPrmHook', () => {
 			await toolAfter({ sessionID: sessionId });
 
 			expect(
-				(session.pendingAdvisoryMessages as string[]).includes(
-					'FORMATTED CORRECTION STRING',
+				(session.pendingAdvisoryMessages as string[]).some((m) =>
+					m.includes('FORMATTED CORRECTION STRING'),
 				),
 			).toBe(true);
 		});

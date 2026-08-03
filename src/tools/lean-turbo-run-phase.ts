@@ -9,6 +9,7 @@ import { loadPluginConfigWithMeta as loadPluginConfigWithMeta_import } from '../
 import { swarmState } from '../state';
 import type { LaneResult, MergeBackFailureInfo } from '../turbo/lean/runner';
 import { LeanTurboRunner as LeanTurboRunner_import } from '../turbo/lean/runner';
+import type { LeanTurboDegradedTask } from '../turbo/lean/state';
 import * as logger from '../utils/logger.js';
 import { createSwarmTool } from './create-tool';
 
@@ -28,6 +29,12 @@ export interface LeanTurboRunPhaseResult {
 	success: boolean;
 	lanes?: LaneResult[];
 	degradedTasks?: string[];
+	/**
+	 * #1657: full degraded-task details (reason/files/requiredMode), additive
+	 * alongside `degradedTasks`. Lets the architect see per-task degradation
+	 * reasons in the tool result without reading /swarm status separately.
+	 */
+	degradedDetails?: LeanTurboDegradedTask[];
 	serializedTasks?: string[];
 	mergeBackFailures?: MergeBackFailureInfo[];
 	reason?: string;
@@ -37,6 +44,7 @@ export interface LeanTurboRunPhaseResult {
 /**
  * Test-only dependency-injection seam.
  * Allows tests to inject mocks without mock.module leakage.
+ * @tool-opt-out Test-only dependency-injection seam; not a public tool.
  */
 export const _internals = {
 	LeanTurboRunner: LeanTurboRunner_import as typeof LeanTurboRunner_import,
@@ -50,6 +58,7 @@ export const _internals = {
  */
 export async function executeLeanTurboRunPhase(
 	args: LeanTurboRunPhaseArgs,
+	generatedAgentNames?: readonly string[],
 ): Promise<LeanTurboRunPhaseResult> {
 	const { directory, phase, sessionID } = args;
 
@@ -57,6 +66,7 @@ export async function executeLeanTurboRunPhase(
 		ok: boolean;
 		lanes?: LaneResult[];
 		degradedTasks?: string[];
+		degradedDetails?: LeanTurboDegradedTask[];
 		serializedTasks?: string[];
 		mergeBackFailures?: MergeBackFailureInfo[];
 		reason?: string;
@@ -75,7 +85,8 @@ export async function executeLeanTurboRunPhase(
 			directory,
 			sessionID,
 			opencodeClient: swarmState.opencodeClient ?? null,
-			generatedAgentNames: swarmState.generatedAgentNames,
+			generatedAgentNames:
+				generatedAgentNames ?? swarmState.generatedAgentNames,
 			leanConfig,
 		});
 
@@ -112,6 +123,8 @@ export async function executeLeanTurboRunPhase(
 		success: runResult!.ok,
 		lanes: runResult!.lanes,
 		degradedTasks: runResult!.degradedTasks,
+		// #1657: pass through full degraded-task details (reason/files/requiredMode).
+		degradedDetails: runResult!.degradedDetails,
 		serializedTasks: runResult!.serializedTasks,
 		mergeBackFailures: runResult!.mergeBackFailures,
 		reason: runResult!.reason,
@@ -121,27 +134,37 @@ export async function executeLeanTurboRunPhase(
 /**
  * Tool definition for lean_turbo_run_phase
  */
-export const lean_turbo_run_phase: ToolDefinition = createSwarmTool({
-	description:
-		'Execute a phase using Lean Turbo parallel lane execution. ' +
-		'Plans lanes, acquires file locks, and dispatches coder agents concurrently. ' +
-		'Use when Lean Turbo is active and you want to execute all tasks in a phase in parallel lanes.',
-	args: {
-		directory: z.string().describe('Project root directory'),
-		phase: z.number().int().positive().describe('Phase number to execute'),
-		sessionID: z.string().describe('Lean Turbo session ID'),
-	},
-	execute: async (args: unknown, _directory: string) => {
-		const { phase, sessionID } = args as LeanTurboRunPhaseArgs;
-		// Use _directory from tool context for .swarm containment (invariant #4)
-		return JSON.stringify(
-			await executeLeanTurboRunPhase({
-				phase,
-				sessionID,
-				directory: _directory,
-			}),
-			null,
-			2,
-		);
-	},
-});
+export function createLeanTurboRunPhaseTool(
+	generatedAgentNames?: readonly string[],
+): ToolDefinition {
+	return createSwarmTool({
+		description:
+			'Execute a phase using Lean Turbo parallel lane execution. ' +
+			'Plans lanes, acquires file locks, and dispatches coder agents concurrently. ' +
+			'Use when Lean Turbo is active and you want to execute all tasks in a phase in parallel lanes.',
+		args: {
+			directory: z.string().describe('Project root directory'),
+			phase: z.number().int().positive().describe('Phase number to execute'),
+			sessionID: z.string().describe('Lean Turbo session ID'),
+		},
+		execute: async (args: unknown, _directory: string) => {
+			const { phase, sessionID } = args as LeanTurboRunPhaseArgs;
+			// Use _directory from tool context for .swarm containment (invariant #4)
+			return JSON.stringify(
+				await executeLeanTurboRunPhase(
+					{
+						phase,
+						sessionID,
+						directory: _directory,
+					},
+					generatedAgentNames,
+				),
+				null,
+				2,
+			);
+		},
+	});
+}
+
+export const lean_turbo_run_phase: ToolDefinition =
+	createLeanTurboRunPhaseTool();

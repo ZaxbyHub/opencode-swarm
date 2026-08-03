@@ -11,7 +11,9 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { getAgentConfigs } from '../../../../src/agents/index';
 import type { PluginConfig } from '../../../../src/config';
-import { resetSwarmState } from '../../../../src/state';
+import type { ReviewModelDispatcher } from '../../../../src/review/contracts';
+import type { ReviewAgentModelRegistry } from '../../../../src/review/runtime';
+import { resetSwarmState, swarmState } from '../../../../src/state';
 import {
 	_internals,
 	dispatchPhaseReviewer,
@@ -31,12 +33,19 @@ function seedReviewerFallback(): void {
 }
 
 const originalInternals = { ..._internals };
+const injectedDispatcher: ReviewModelDispatcher = {
+	dispatch: async () => {
+		throw new Error('the _internals dispatch seam should intercept this call');
+	},
+};
 
 describe('dispatchPhaseReviewer — model failover (#1896)', () => {
 	beforeEach(() => {
 		resetSwarmState();
 		seedReviewerFallback();
-		// Stub the fs/parse dependencies so the test is pure.
+		// Partial mock scope: compile/write/parse exercise only the successful
+		// fallback-selection path. Package I/O and parse failures are covered by
+		// the sibling reviewer tests.
 		_internals.compileReviewPackage = (async () => ({
 			phase: 1,
 		})) as unknown as typeof _internals.compileReviewPackage;
@@ -52,7 +61,7 @@ describe('dispatchPhaseReviewer — model failover (#1896)', () => {
 		resetSwarmState();
 	});
 
-	test('fails over to a fallback model on a quota dispatch error and recovers', async () => {
+	test('direct legacy caller fails over to a fallback model on a quota dispatch error and recovers', async () => {
 		const calls: Array<string | undefined> = [];
 		_internals.dispatchReviewerAgent = async (
 			_dir,
@@ -81,6 +90,76 @@ describe('dispatchPhaseReviewer — model failover (#1896)', () => {
 		// Primary attempted (undefined), then the first fallback.
 		expect(calls[0]).toBeUndefined();
 		expect(calls[1]).toBe('prov/fb1');
+	});
+
+	test('injected plugin runtime uses its instance-local registry instead of the legacy global map', async () => {
+		const calls: Array<string | undefined> = [];
+		// Partial mock scope: only dispatch selection is under test; the shared
+		// ephemeral dispatcher behavior is covered by its dedicated unit suite.
+		_internals.dispatchReviewerAgent = async (
+			_dir,
+			_pkg,
+			_agent,
+			_timeout,
+			_parent,
+			model,
+		) => {
+			calls.push(model ? `${model.providerID}/${model.modelID}` : undefined);
+			if (!model)
+				throw new Error('429 insufficient_quota: usage limit exceeded');
+			return 'VERDICT: APPROVED';
+		};
+		const agentModelRegistry: ReviewAgentModelRegistry = {
+			reviewer: {
+				primaryModel: 'instance/primary-reviewer',
+				fallbackModels: ['instance/fallback-reviewer'],
+			},
+		};
+
+		const result = await dispatchPhaseReviewer(
+			'/tmp/does-not-matter',
+			1,
+			'sess-instance-registry',
+			{
+				reviewerAgent: 'reviewer',
+				timeoutMs: 0,
+				dispatcher: injectedDispatcher,
+				agentModelRegistry,
+			},
+		);
+
+		expect(result.verdict).toBe('APPROVED');
+		expect(calls).toEqual([undefined, 'instance/fallback-reviewer']);
+	});
+
+	test('injected dispatcher without a registry fails closed instead of reading legacy global state', async () => {
+		const calls: Array<string | undefined> = [];
+		// Partial mock scope: only fallback source selection is under test.
+		_internals.dispatchReviewerAgent = async (
+			_dir,
+			_pkg,
+			_agent,
+			_timeout,
+			_parent,
+			model,
+		) => {
+			calls.push(model ? `${model.providerID}/${model.modelID}` : undefined);
+			throw new Error('429 insufficient_quota: usage limit exceeded');
+		};
+
+		const result = await dispatchPhaseReviewer(
+			'/tmp/does-not-matter',
+			1,
+			'sess-injected-missing-registry',
+			{
+				reviewerAgent: 'reviewer',
+				timeoutMs: 0,
+				dispatcher: injectedDispatcher,
+			},
+		);
+
+		expect(result.verdict).toBe('REJECTED');
+		expect(calls).toEqual([undefined]);
 	});
 
 	test('a permanent dispatch error still fails closed (REJECTED) with no failover', async () => {
@@ -138,5 +217,62 @@ describe('dispatchPhaseReviewer — model failover (#1896)', () => {
 		expect(result.verdict).toBe('REJECTED');
 		// Only the primary attempted — timeout is permanent, no failover.
 		expect(calls).toEqual([undefined]);
+	});
+
+	test('envelope-shaped quota error via the real defaultDispatchReviewerAgent (data:null + error envelope) triggers failover — pins the #1905 envelope-preservation parity fix', async () => {
+		// Issue #1905 critic item 1 (Critical): the sibling reviewer site
+		// (already wired in PR #1901) had the SAME envelope-discard gap as
+		// auto-review.ts and integration.ts. Without the parity fix at
+		// reviewer.ts:486, the classifier would see only "Reviewer session
+		// returned no data" with no quota token → permanent → no failover. The
+		// fix embeds JSON.stringify(response.error) in the thrown message.
+		//
+		// Drive the REAL defaultDispatchReviewerAgent with a mock client
+		// returning { data: null, error: { message: '429 ...' } }.
+		const promptCalls: Array<string | undefined> = [];
+		swarmState.opencodeClient = {
+			session: {
+				create: async () => ({ data: { id: 'reviewer-session-1' } }),
+				prompt: async (params: { body?: { model?: unknown } }) => {
+					const override = params.body?.model;
+					promptCalls.push(
+						override
+							? `${(override as { providerID: string; modelID: string }).providerID}/${(override as { providerID: string; modelID: string }).modelID}`
+							: undefined,
+					);
+					if (!override) {
+						return {
+							data: null,
+							error: {
+								code: 'RATE_LIMITED',
+								message: '429 rate_limit_exceeded: too many requests',
+							},
+						};
+					}
+					return {
+						data: { parts: [{ type: 'text', text: 'VERDICT: APPROVED' }] },
+					};
+				},
+				delete: async () => ({}),
+			},
+		} as typeof swarmState.opencodeClient;
+		// Restore the REAL default dispatch fn (beforeEach stubbed it).
+		_internals.dispatchReviewerAgent = originalInternals.dispatchReviewerAgent;
+
+		try {
+			const result = await dispatchPhaseReviewer(
+				'/tmp/does-not-matter',
+				1,
+				'sess-envelope',
+				{ reviewerAgent: 'reviewer', timeoutMs: 0 },
+			);
+
+			// Failover fired on the envelope-shaped error → APPROVED.
+			expect(result.verdict).toBe('APPROVED');
+			expect(promptCalls[0]).toBeUndefined();
+			expect(promptCalls[1]).toBe('prov/fb1');
+		} finally {
+			swarmState.opencodeClient = undefined;
+		}
 	});
 });

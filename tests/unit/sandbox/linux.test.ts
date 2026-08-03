@@ -141,8 +141,13 @@ describe('BubblewrapSandboxExecutor', () => {
 
 			expect(result).toContain('--tmpfs');
 			expect(result).toContain('/tmp');
-			expect(result).toContain('--size');
-			expect(result).toContain('500M');
+			// bwrap --size requires a plain decimal byte count, not a suffixed
+			// value like "500M" (issue #1997). 500 MiB = 524288000 bytes.
+			// bwrap also binds --size to the NEXT --tmpfs, so assert the two
+			// appear as an adjacent argv pair (`--size <bytes> --tmpfs`), not
+			// just as independent substrings (PRR-001/PRR-002 hardening).
+			expect(result).toContain('--size 524288000 --tmpfs');
+			expect(result).not.toContain('500M');
 		});
 
 		test('uses custom tempDir when provided to wrapCommand', () => {
@@ -150,8 +155,8 @@ describe('BubblewrapSandboxExecutor', () => {
 
 			expect(result).toContain('--tmpfs');
 			expect(result).toContain('/custom/tmp');
-			expect(result).toContain('--size');
-			expect(result).toContain('500M');
+			expect(result).toContain('--size 524288000 --tmpfs');
+			expect(result).not.toContain('500M');
 		});
 
 		test('includes --ro-bind /usr', () => {

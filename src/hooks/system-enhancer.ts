@@ -20,7 +20,7 @@ import {
 } from '../config/constants';
 import type { RetrospectiveEvidence } from '../config/evidence-schema';
 import type { RuntimePlan } from '../config/plan-schema';
-import { stripKnownSwarmPrefix } from '../config/schema';
+import { LearningConfigSchema, stripKnownSwarmPrefix } from '../config/schema';
 import { listEvidenceTaskIds, loadEvidence } from '../evidence/manager';
 import { getProfileForFile } from '../lang/detector';
 import { loadPlan } from '../plan/manager';
@@ -651,6 +651,17 @@ export function createSystemEnhancerHook(
 	if (!enabled) {
 		return {};
 	}
+
+	// #1821: effective real-time admission settings, parsed ONCE at hook creation.
+	// `PluginConfigSchema` declares `learning` as `.optional()` with no
+	// `.prefault({})`, so `config.learning` is UNDEFINED for any project without
+	// an explicit `learning` block — the default. Reading it raw would leave the
+	// admission loop running (its own default is enabled) while this nudge still
+	// told the architect to hand-curate the very lessons it is admitting.
+	// Hoisted out of the per-message hook body so the chat path does no Zod work.
+	const realtimeAdmission = LearningConfigSchema.parse(
+		config.learning ?? {},
+	).realtime_admission;
 
 	return {
 		'experimental.chat.system.transform': safeHook(
@@ -1541,6 +1552,18 @@ ${sanitizeContextText(scopedHandoff.body)}`;
 									shouldInjectRealtimeLearningNudge({
 										sessionID: sessionId_retro,
 										config: config.knowledge?.realtime_learning_nudge,
+										// #1821: suppress the prompt-only nudge when the
+										// real-time admission loop is already admitting this
+										// session's lessons automatically.
+										//
+										// Parsed rather than read raw: `PluginConfigSchema`
+										// declares `learning` as `.optional()` with no
+										// `.prefault({})`, so `config.learning` is UNDEFINED for
+										// any project without an explicit `learning` block — the
+										// default. Reading it raw would leave admission running
+										// (its own default is enabled) while this nudge still
+										// told the architect to hand-curate the same lessons.
+										realtimeAdmission,
 									})
 								) {
 									const learningNudge = buildRealtimeLearningNudge({
@@ -2200,6 +2223,10 @@ ${sanitizeContextText(scopedHandoff.body)}`;
 								shouldInjectRealtimeLearningNudge({
 									sessionID: sessionId_retro_b,
 									config: config.knowledge?.realtime_learning_nudge,
+									// #1821: the scoring/candidate-ranking path needs the same
+									// suppression as the direct path above — both push a
+									// REALTIME_LEARNING_NUDGE candidate.
+									realtimeAdmission,
 								})
 							) {
 								const learningNudge_b = buildRealtimeLearningNudge({

@@ -14,10 +14,37 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import type { Plan } from '../plan/manager';
 import type { AgentSessionState } from '../state';
 import { resetSwarmState, swarmState } from '../state';
 import { _internals } from './delegation-gate';
+
+/**
+ * #1674 v8: write disjoint declared scope files so the gate's inline verdict
+ * computes `all_disjoint` and permits parallel dispatch. Inlined here (rather
+ * than imported from tests/) to keep this src/ test self-contained.
+ */
+function writeDisjointScopesLocal(dir: string, taskIds: string[]): void {
+	const scopesDir = path.join(dir, '.swarm', 'scopes');
+	fs.mkdirSync(scopesDir, { recursive: true });
+	for (const id of taskIds) {
+		const safe = id.replace(/[^a-zA-Z0-9._-]/g, '_');
+		fs.writeFileSync(
+			path.join(scopesDir, `scope-${id}.json`),
+			JSON.stringify({
+				version: 1,
+				taskId: id,
+				files: [`src/${safe}.ts`],
+				declaredAt: 1,
+				expiresAt: Number.MAX_SAFE_INTEGER,
+			}),
+			'utf-8',
+		);
+	}
+}
 
 // Create mock functions BEFORE module mock
 const mockLoadPlanJsonOnly = mock(async () => null);
@@ -173,16 +200,34 @@ describe('buildParallelExecutionGuidance', () => {
 		const sessionId = 'test-override-precedence';
 		createTestSession(sessionId, { maxConcurrencyOverride: 5 });
 
-		const result = await buildParallelExecutionGuidance(
-			testDirectory,
-			sessionId,
-			swarmState.agentSessions.get(sessionId)!,
+		// v8: use a real temp dir with disjoint scopes so the guidance reaches
+		// the PARALLEL path (not the SERIAL fallback). Both messages contain
+		// `max_concurrent_tasks=N`, so without scopes this test would pass for
+		// the wrong reason.
+		const realDir = fs.mkdtempSync(
+			path.join(os.tmpdir(), 'concurrency-override-'),
 		);
+		try {
+			writeDisjointScopesLocal(realDir, ['1.1', '1.2', '1.3', '1.4']);
+			const result = await buildParallelExecutionGuidance(
+				realDir,
+				sessionId,
+				swarmState.agentSessions.get(sessionId)!,
+			);
 
-		expect(result).not.toBeNull();
-		// The override value (5) should appear in the output, not the plan value (2)
-		expect(result).toContain('max_concurrent_tasks=5');
-		expect(result).not.toContain('max_concurrent_tasks=2');
+			expect(result).not.toBeNull();
+			// On the PARALLEL path now; assert the parallel-specific marker too.
+			expect(result).toContain('Eligible now:');
+			// The override value (5) should appear in the output, not the plan value (2)
+			expect(result).toContain('max_concurrent_tasks=5');
+			expect(result).not.toContain('max_concurrent_tasks=2');
+		} finally {
+			try {
+				fs.rmSync(realDir, { recursive: true, force: true });
+			} catch {
+				// best-effort
+			}
+		}
 	});
 
 	// ── Test 2: Plan fallback when no override ──────────────────────────────────
@@ -194,15 +239,29 @@ describe('buildParallelExecutionGuidance', () => {
 		// maxConcurrencyOverride is undefined by default
 		createTestSession(sessionId);
 
-		const result = await buildParallelExecutionGuidance(
-			testDirectory,
-			sessionId,
-			swarmState.agentSessions.get(sessionId)!,
+		// v8: real temp dir + disjoint scopes (see Test 1 rationale).
+		const realDir = fs.mkdtempSync(
+			path.join(os.tmpdir(), 'concurrency-plan-fallback-'),
 		);
+		try {
+			writeDisjointScopesLocal(realDir, ['1.1', '1.2', '1.3', '1.4']);
+			const result = await buildParallelExecutionGuidance(
+				realDir,
+				sessionId,
+				swarmState.agentSessions.get(sessionId)!,
+			);
 
-		expect(result).not.toBeNull();
-		// Should use plan's max_concurrent_tasks=2
-		expect(result).toContain('max_concurrent_tasks=2');
+			expect(result).not.toBeNull();
+			expect(result).toContain('Eligible now:');
+			// Should use plan's max_concurrent_tasks=2
+			expect(result).toContain('max_concurrent_tasks=2');
+		} finally {
+			try {
+				fs.rmSync(realDir, { recursive: true, force: true });
+			} catch {
+				// best-effort
+			}
+		}
 	});
 
 	// ── Test 3: Lean Turbo bypass ───────────────────────────────────────────────
@@ -277,16 +336,32 @@ describe('buildParallelExecutionGuidance', () => {
 		// Set override to 4 (higher than plan's 3)
 		createTestSession(sessionId, { maxConcurrencyOverride: 4 });
 
-		const result = await buildParallelExecutionGuidance(
-			testDirectory,
-			sessionId,
-			swarmState.agentSessions.get(sessionId)!,
+		// v8: real temp dir + disjoint scopes so this exercises the PARALLEL
+		// path (the SERIAL fallback message also contains the override value,
+		// so without scopes the assertion would pass for the wrong reason).
+		const realDir = fs.mkdtempSync(
+			path.join(os.tmpdir(), 'concurrency-override-value-'),
 		);
+		try {
+			writeDisjointScopesLocal(realDir, ['1.1', '1.2', '1.3', '1.4']);
+			const result = await buildParallelExecutionGuidance(
+				realDir,
+				sessionId,
+				swarmState.agentSessions.get(sessionId)!,
+			);
 
-		expect(result).not.toBeNull();
-		expect(result).toContain('PARALLEL EXECUTION PROFILE');
-		expect(result).toContain('max_concurrent_tasks=4');
-		expect(result).not.toContain('max_concurrent_tasks=3');
+			expect(result).not.toBeNull();
+			expect(result).toContain('PARALLEL EXECUTION PROFILE');
+			expect(result).toContain('Eligible now:');
+			expect(result).toContain('max_concurrent_tasks=4');
+			expect(result).not.toContain('max_concurrent_tasks=3');
+		} finally {
+			try {
+				fs.rmSync(realDir, { recursive: true, force: true });
+			} catch {
+				// best-effort
+			}
+		}
 	});
 
 	// ── Additional edge case: undefined directory ─────────────────────────────────
@@ -360,15 +435,29 @@ describe('buildParallelExecutionGuidance', () => {
 		// Override with a lower value than plan
 		createTestSession(sessionId, { maxConcurrencyOverride: 2 });
 
-		const result = await buildParallelExecutionGuidance(
-			testDirectory,
-			sessionId,
-			swarmState.agentSessions.get(sessionId)!,
+		// v8: real temp dir + disjoint scopes (see Test 1 rationale).
+		const realDir = fs.mkdtempSync(
+			path.join(os.tmpdir(), 'concurrency-override-lower-'),
 		);
+		try {
+			writeDisjointScopesLocal(realDir, ['1.1', '1.2', '1.3', '1.4']);
+			const result = await buildParallelExecutionGuidance(
+				realDir,
+				sessionId,
+				swarmState.agentSessions.get(sessionId)!,
+			);
 
-		expect(result).not.toBeNull();
-		expect(result).toContain('max_concurrent_tasks=2');
-		expect(result).not.toContain('max_concurrent_tasks=8');
+			expect(result).not.toBeNull();
+			expect(result).toContain('Eligible now:');
+			expect(result).toContain('max_concurrent_tasks=2');
+			expect(result).not.toContain('max_concurrent_tasks=8');
+		} finally {
+			try {
+				fs.rmSync(realDir, { recursive: true, force: true });
+			} catch {
+				// best-effort
+			}
+		}
 	});
 
 	// ── Additional: Override value of 1 via setConcurrencyOverride ───────────────
@@ -496,17 +585,32 @@ describe('buildParallelExecutionGuidance', () => {
 		// Initial state: no override
 		expect(session.maxConcurrencyOverride).toBeUndefined();
 
-		const result = await buildParallelExecutionGuidance(
-			testDirectory,
-			sessionId,
-			session,
-		);
+		// v8: the gate requires provably file-disjoint pending tasks before
+		// parallel guidance (and thus the adaptive-backoff path) can fire.
+		// Use a real temp dir with disjoint scopes for the pending tasks
+		// (1.1, 1.4, 1.5) so the inline verdict computes `all_disjoint`.
+		const realDir = fs.mkdtempSync(path.join(os.tmpdir(), 'adaptive-backoff-'));
+		try {
+			writeDisjointScopesLocal(realDir, ['1.1', '1.4', '1.5']);
 
-		// After backoff: concurrency should be reduced to 5 (50% of 10)
-		// 2 blocked out of 5 tasks = 40% failure rate > 20% threshold
-		expect(session.maxConcurrencyOverride).toBe(5);
-		expect(result).toContain('blocked task(s) detected');
-		expect(result).toContain('max_concurrent_tasks=5');
+			const result = await buildParallelExecutionGuidance(
+				realDir,
+				sessionId,
+				session,
+			);
+
+			// After backoff: concurrency should be reduced to 5 (50% of 10)
+			// 2 blocked out of 5 tasks = 40% failure rate > 20% threshold
+			expect(session.maxConcurrencyOverride).toBe(5);
+			expect(result).toContain('blocked task(s) detected');
+			expect(result).toContain('max_concurrent_tasks=5');
+		} finally {
+			try {
+				fs.rmSync(realDir, { recursive: true, force: true });
+			} catch {
+				// best-effort cleanup
+			}
+		}
 	});
 
 	it('Adaptive backoff: does not reduce when failure rate is below threshold', async () => {

@@ -22,9 +22,16 @@ import {
 	stripKnownSwarmPrefix,
 } from '../../config/schema';
 import { loadPlan } from '../../plan/manager';
-import { advanceTaskState, getActiveWindow, swarmState } from '../../state';
+import {
+	advanceTaskState,
+	getActiveWindow,
+	getReviewerScopeGenerationForCoderCall,
+	recordReviewerScopeGenerationFileFingerprint,
+	swarmState,
+} from '../../state';
 import { telemetry } from '../../telemetry.js';
 import { log, warn } from '../../utils';
+import { pushAdvisory } from '../../utils/advisory-queue';
 import * as logger from '../../utils/logger';
 import {
 	extractStatusCode,
@@ -35,6 +42,11 @@ import { computeSpecDiff } from '../../utils/spec-hash';
 import { resolveAgentConflict } from '../conflict-resolution';
 import { extractCurrentPhaseFromPlan } from '../extractors';
 import { normalizeToolName } from '../normalize-tool-name';
+import {
+	captureReviewerScopeFileFingerprint,
+	MAX_REVIEWER_SCOPE_FINGERPRINT_AGGREGATE_BYTES,
+} from '../reviewer-scope-file-fingerprint';
+import { classifyTaskResult } from '../task-result-classifier';
 import { dcCheckJunctionCreation } from './destructive-command';
 import { buildEffectiveRules } from './file-authority';
 import {
@@ -62,6 +74,14 @@ export const _internals = {
 	resolveFallbackModel,
 	dcCheckJunctionCreation,
 	extractErrorSignal,
+	/**
+	 * Test/inspection seams for the no-op detector's bounded session state
+	 * (invariant 8). Production code does not call these; they exist so the
+	 * eviction bound can be asserted without exporting the maps themselves.
+	 */
+	noOpStateSize: (): number => toolCallsSinceLastWrite.size,
+	hasNoOpState: (sessionID: string): boolean =>
+		toolCallsSinceLastWrite.has(sessionID),
 };
 
 /**
@@ -244,9 +264,68 @@ const CONTENT_FILTER_PATTERN = /content.?filter/i;
 
 /**
  * v6.33.1: No-op work detector state.
+ *
+ * AGENTS.md invariant 8: module-level, session-keyed state must have an explicit
+ * eviction strategy. Both containers below are keyed by `sessionID` and were
+ * previously unbounded — they grew for the lifetime of the plugin process, since
+ * nothing removed a key when a session ended. `noOpWarningIssued` was only ever
+ * `delete`d on a reset, and `toolCallsSinceLastWrite` never shrank at all.
+ *
+ * Bounded LRU, evicting the LEAST-RECENTLY-TOUCHED session.
+ *
+ * Plain insertion-order (FIFO) eviction is wrong here and actively harmful.
+ * `Map.set()` on an EXISTING key does not move it, so the first session created
+ * in the process stays permanently at the front of the iteration order. In an
+ * OpenCode plugin process that first session is the architect — the very session
+ * this detector exists to watch — making it the guaranteed first eviction victim
+ * while a session touched once and abandoned later survives. Measured: with a
+ * FIFO bound, an architect climbing toward the threshold had its counter evicted
+ * and reset mid-climb, and its 15th consecutive no-write call produced ZERO
+ * warnings. A bound must not silence the detector it was added to protect.
+ *
+ * {@link touchNoOpSession} therefore deletes before setting, moving the key to
+ * the back on every touch, so eviction genuinely targets quiet sessions.
  */
+export const MAX_TRACKED_NO_OP_SESSIONS = 200;
 const toolCallsSinceLastWrite = new Map<string, number>();
 const noOpWarningIssued = new Set<string>();
+
+/**
+ * Record a session's no-write counter, refreshing its recency. The `delete`
+ * before `set` is load-bearing: it is what makes the eviction order
+ * least-recently-touched rather than first-inserted.
+ */
+function touchNoOpSession(sessionID: string, count: number): void {
+	toolCallsSinceLastWrite.delete(sessionID);
+	toolCallsSinceLastWrite.set(sessionID, count);
+	evictNoOpStateIfOverBound();
+}
+
+/**
+ * Evict least-recently-touched entries from the no-op detector's session state
+ * when either container exceeds {@link MAX_TRACKED_NO_OP_SESSIONS}. Called from
+ * {@link touchNoOpSession} and from the warning-latch insertion, i.e. at every
+ * site that can grow either container.
+ */
+function evictNoOpStateIfOverBound(): void {
+	while (toolCallsSinceLastWrite.size > MAX_TRACKED_NO_OP_SESSIONS) {
+		const stalestKey = toolCallsSinceLastWrite.keys().next().value;
+		if (stalestKey === undefined) break;
+		toolCallsSinceLastWrite.delete(stalestKey);
+		// Drop the paired warning latch with it, so an evicted session cannot
+		// come back with a stale "already warned" flag and never warn again.
+		noOpWarningIssued.delete(stalestKey);
+	}
+	// The latch Set is normally a subset of the counter map, but it is not
+	// guaranteed to be: a session evicted by the loop above can be re-added as a
+	// latch in the same invocation, leaving a latch with no counter. Bound it
+	// independently rather than relying on the subset argument.
+	while (noOpWarningIssued.size > MAX_TRACKED_NO_OP_SESSIONS) {
+		const stalestKey = noOpWarningIssued.values().next().value;
+		if (stalestKey === undefined) break;
+		noOpWarningIssued.delete(stalestKey);
+	}
+}
 
 /**
  * Extracts phase number from a phase string like "Phase 3: Implementation".
@@ -470,6 +549,46 @@ export function createGuardrailsHooks(
 
 	// Shared consecutiveNoToolTurns Map (shared between toolBefore and messagesTransform)
 	const consecutiveNoToolTurns = new Map<string, number>();
+	const pendingReviewerScopeWrites = new Map<
+		string,
+		Array<{
+			parentSessionID: string;
+			taskId: string;
+			coderCallID: string;
+			file: string;
+		}>
+	>();
+	const rememberReviewerScopeWrite = (input: {
+		callID: string;
+		parentSessionID: string;
+		taskId: string;
+		coderCallID: string;
+		file: string;
+	}): void => {
+		if (
+			!pendingReviewerScopeWrites.has(input.callID) &&
+			pendingReviewerScopeWrites.size >= 256
+		) {
+			const oldest = pendingReviewerScopeWrites.keys().next().value;
+			if (oldest !== undefined) pendingReviewerScopeWrites.delete(oldest);
+		}
+		const pending = pendingReviewerScopeWrites.get(input.callID) ?? [];
+		const candidate = {
+			parentSessionID: input.parentSessionID,
+			taskId: input.taskId,
+			coderCallID: input.coderCallID,
+			file: input.file,
+		};
+		const duplicate = pending.some(
+			(entry) =>
+				entry.parentSessionID === candidate.parentSessionID &&
+				entry.taskId === candidate.taskId &&
+				entry.coderCallID === candidate.coderCallID &&
+				entry.file === candidate.file,
+		);
+		if (!duplicate && pending.length < 256) pending.push(candidate);
+		pendingReviewerScopeWrites.set(input.callID, pending);
+	};
 
 	// Create toolBefore handler via factory
 	const toolBefore = createToolBeforeHandler({
@@ -483,6 +602,7 @@ export function createGuardrailsHooks(
 		authorityConfig,
 		consecutiveNoToolTurns,
 		worktreeBaseDirOverrides,
+		rememberReviewerScopeWrite,
 	});
 
 	// Create messagesTransform handler via factory
@@ -497,6 +617,10 @@ export function createGuardrailsHooks(
 	return {
 		toolBefore,
 		toolAfter: async (input, output) => {
+			const pendingReviewerScopeWrite = pendingReviewerScopeWrites.get(
+				input.callID,
+			);
+			pendingReviewerScopeWrites.delete(input.callID);
 			const correlatedExecution = takeToolExecution(
 				input.sessionID,
 				input.callID,
@@ -624,94 +748,133 @@ export function createGuardrailsHooks(
 				}
 
 				// v6.17 Task 9.3: Track currentTaskId when coder delegation completes
-				if (
-					delegation.isDelegation &&
-					delegation.targetAgent === 'coder' &&
-					session.lastCoderDelegationTaskId
-				) {
-					session.currentTaskId = session.lastCoderDelegationTaskId;
-					if (!session.revisionLimitHit) {
-						session.coderRevisions++;
-						if (session.coderRevisions > 1 && session.qaSkipCount === 0) {
-							let conflictPhase = 1;
-							try {
-								const plan = await loadPlan(effectiveDirectory);
-								if (plan) {
-									conflictPhase = extractPhaseNumber(
-										extractCurrentPhaseFromPlan(plan),
-									);
+				if (delegation.isDelegation && delegation.targetAgent === 'coder') {
+					const exactGeneration = getReviewerScopeGenerationForCoderCall({
+						parentSessionID: input.sessionID,
+						coderCallID: input.callID,
+					});
+					const completedTaskId =
+						exactGeneration?.taskId ?? session.lastCoderDelegationTaskId;
+					if (completedTaskId) {
+						session.currentTaskId = completedTaskId;
+						const exactGenerationFiles =
+							exactGeneration?.modifiedFiles ??
+							session.modifiedFilesThisCoderTask;
+						if (!session.revisionLimitHit) {
+							session.coderRevisions++;
+							if (session.coderRevisions > 1 && session.qaSkipCount === 0) {
+								let conflictPhase = 1;
+								try {
+									const plan = await loadPlan(effectiveDirectory);
+									if (plan) {
+										conflictPhase = extractPhaseNumber(
+											extractCurrentPhaseFromPlan(plan),
+										);
+									}
+								} catch {
+									// Non-fatal: default to phase 1
 								}
-							} catch {
-								// Non-fatal: default to phase 1
+								resolveAgentConflict({
+									sessionID: input.sessionID,
+									phase: conflictPhase,
+									taskId: session.currentTaskId ?? undefined,
+									sourceAgent: 'reviewer',
+									targetAgent: 'coder',
+									conflictType: 'feedback_rejection',
+									rejectionCount: session.coderRevisions - 1,
+									summary: `Coder revision ${session.coderRevisions} for task ${session.currentTaskId ?? 'unknown'}`,
+								});
+								session.lastDelegationReason = 'review_rejected';
 							}
-							resolveAgentConflict({
-								sessionID: input.sessionID,
-								phase: conflictPhase,
-								taskId: session.currentTaskId ?? undefined,
-								sourceAgent: 'reviewer',
-								targetAgent: 'coder',
-								conflictType: 'feedback_rejection',
-								rejectionCount: session.coderRevisions - 1,
-								summary: `Coder revision ${session.coderRevisions} for task ${session.currentTaskId ?? 'unknown'}`,
-							});
-							session.lastDelegationReason = 'review_rejected';
+							const maxRevisions = cfg.max_coder_revisions ?? 5;
+							if (session.coderRevisions >= maxRevisions) {
+								session.revisionLimitHit = true;
+								telemetry.revisionLimitHit(input.sessionID, session.agentName);
+								pushAdvisory(
+									session,
+									`CODER REVISION LIMIT: Agent has been revised ${session.coderRevisions} times ` +
+										`(max: ${maxRevisions}) for task ${session.currentTaskId ?? 'unknown'}. ` +
+										`Escalate to user or consider a fundamentally different approach.`,
+								);
+								swarmState.pendingEvents++;
+							}
 						}
-						const maxRevisions = cfg.max_coder_revisions ?? 5;
-						if (session.coderRevisions >= maxRevisions) {
-							session.revisionLimitHit = true;
-							telemetry.revisionLimitHit(input.sessionID, session.agentName);
-							session.pendingAdvisoryMessages ??= [];
-							session.pendingAdvisoryMessages.push(
-								`CODER REVISION LIMIT: Agent has been revised ${session.coderRevisions} times ` +
-									`(max: ${maxRevisions}) for task ${session.currentTaskId ?? 'unknown'}. ` +
-									`Escalate to user or consider a fundamentally different approach.`,
-							);
-							swarmState.pendingEvents++;
-						}
-					}
-					session.partialGateWarningsIssuedForTask?.delete(
-						session.currentTaskId,
-					);
+						session.partialGateWarningsIssuedForTask?.delete(
+							session.currentTaskId,
+						);
 
-					// v6.21 Task 5.4: Scope containment check
-					if (session.declaredCoderScope !== null) {
-						const undeclaredFiles = session.modifiedFilesThisCoderTask
-							.map((f) => f.replace(/[\r\n\t]/g, '_'))
-							.filter(
-								(f) =>
-									!isInDeclaredScope(f, session.declaredCoderScope!, directory),
-							);
-						if (undeclaredFiles.length >= 1) {
-							const safeTaskId = String(session.currentTaskId ?? '').replace(
-								/[\r\n\t]/g,
-								'_',
-							);
-							session.lastScopeViolation =
-								`Scope violation for task ${safeTaskId}: ` +
-								`${undeclaredFiles.length} undeclared files modified: ` +
-								undeclaredFiles.join(', ');
-							session.scopeViolationDetected = true;
-							telemetry.scopeViolation(
-								input.sessionID,
-								session.agentName,
-								session.currentTaskId ?? 'unknown',
-								'undeclared files modified',
-							);
+						// v6.21 Task 5.4: Scope containment check
+						if (session.declaredCoderScope !== null) {
+							const undeclaredFiles = exactGenerationFiles
+								.map((f) => f.replace(/[\r\n\t]/g, '_'))
+								.filter(
+									(f) =>
+										!isInDeclaredScope(
+											f,
+											session.declaredCoderScope!,
+											directory,
+										),
+								);
+							if (undeclaredFiles.length >= 1) {
+								const safeTaskId = String(session.currentTaskId ?? '').replace(
+									/[\r\n\t]/g,
+									'_',
+								);
+								session.lastScopeViolation =
+									`Scope violation for task ${safeTaskId}: ` +
+									`${undeclaredFiles.length} undeclared files modified: ` +
+									undeclaredFiles.join(', ');
+								session.scopeViolationDetected = true;
+								telemetry.scopeViolation(
+									input.sessionID,
+									session.agentName,
+									session.currentTaskId ?? 'unknown',
+									'undeclared files modified',
+								);
+							}
 						}
+						session.modifiedFilesThisCoderTask = [];
 					}
-					session.modifiedFilesThisCoderTask = [];
 				}
 			}
 
 			// v6.33.1: No-op work detector
 			const sessionId = input.sessionID;
 			const normalizedToolName = normalizeToolName(input.tool);
-			if (isWriteTool(normalizedToolName)) {
-				toolCallsSinceLastWrite.set(sessionId, 0);
+			// Handing work to a subagent IS progress, and it is the ONLY kind of
+			// progress an orchestrating architect makes.
+			//
+			// Before this, the counter reset solely on `isWriteTool`. A subagent's
+			// writes land under a DIFFERENT sessionID, and this counter is keyed by
+			// `input.sessionID`, so those writes could never reset the architect's
+			// count. An architect that delegates and reads therefore climbed toward
+			// the "you may be stuck" warning forever — in every mode, not just PR
+			// review: deep-dive, council, research, consult, discover, issue
+			// tracing, plain planning.
+			//
+			// Both dispatch mechanisms count. `isAgentDelegation` matches only
+			// `Task`/`task` (see its early return), but `/swarm pr-review` dispatches
+			// its lanes through `dispatch_lanes_async` — and the `task` tool is
+			// BLOCKED outright while a PR_REVIEW gate is active
+			// (pr-workflow-gate.ts, "PR_REVIEW is read-only and fail-closed").
+			// Keying on `Task` alone would therefore have left the originally
+			// reported case — a PR review told it was stuck — completely unfixed.
+			const laneDispatchTools = new Set([
+				'dispatch_lanes',
+				'dispatch_lanes_async',
+			]);
+			const isSubagentDispatch =
+				laneDispatchTools.has(normalizedToolName) ||
+				isAgentDelegation(
+					input.tool,
+					input.args ?? getStoredInputArgs(input.callID),
+				).isDelegation;
+			if (isWriteTool(normalizedToolName) || isSubagentDispatch) {
+				touchNoOpSession(sessionId, 0);
 				noOpWarningIssued.delete(sessionId);
 			} else {
 				const count = (toolCallsSinceLastWrite.get(sessionId) ?? 0) + 1;
-				toolCallsSinceLastWrite.set(sessionId, count);
+				touchNoOpSession(sessionId, count);
 				const threshold = cfg.no_op_warning_threshold ?? 15;
 				if (
 					count >= threshold &&
@@ -719,8 +882,18 @@ export function createGuardrailsHooks(
 					session?.pendingAdvisoryMessages
 				) {
 					noOpWarningIssued.add(sessionId);
-					session.pendingAdvisoryMessages.push(
-						`WARNING: Agent has made ${count} tool calls with no file modifications. If you are stuck, use /swarm handoff to reset or /swarm turbo to reduce overhead.`,
+					// BL-B: the latch Set can grow here independently of the counter
+					// map, so it needs its own bound check — the "it is a subset"
+					// argument does not hold in the self-eviction case.
+					evictNoOpStateIfOverBound();
+					// The old text advised `/swarm handoff`, which resets the session —
+					// discarding exactly the context an orchestrating architect has
+					// been assembling. Advice that destroys the user's work is worse
+					// than no advice, so the recovery hint is gone; the observation
+					// remains. Route through pushAdvisory for dedupe + cap (issue #1976).
+					pushAdvisory(
+						session,
+						`WARNING: Agent has made ${count} tool calls with no file modifications and no subagent dispatches. If you are stuck, state what is blocking you and report BLOCKED rather than continuing to probe.`,
 					);
 				}
 			}
@@ -732,6 +905,48 @@ export function createGuardrailsHooks(
 						safeOutput as typeof output & Record<string, unknown>,
 						correlatedExecution,
 					);
+			if (
+				pendingReviewerScopeWrite &&
+				classifyTaskResult(safeOutput) === 'success'
+			) {
+				const completedFingerprints: Array<{
+					pendingWrite: (typeof pendingReviewerScopeWrite)[number];
+					fingerprint: NonNullable<
+						ReturnType<typeof captureReviewerScopeFileFingerprint>
+					>;
+				}> = [];
+				let aggregateBytes = 0;
+				let captureFailed = false;
+				for (const pendingWrite of pendingReviewerScopeWrite) {
+					const fingerprint = captureReviewerScopeFileFingerprint(
+						effectiveDirectory,
+						pendingWrite.file,
+						MAX_REVIEWER_SCOPE_FINGERPRINT_AGGREGATE_BYTES - aggregateBytes,
+					);
+					if (!fingerprint) {
+						captureFailed = true;
+						break;
+					}
+					if (fingerprint.kind === 'file') {
+						aggregateBytes += fingerprint.size;
+					}
+					completedFingerprints.push({ pendingWrite, fingerprint });
+				}
+				if (
+					!captureFailed &&
+					completedFingerprints.length === pendingReviewerScopeWrite.length &&
+					aggregateBytes <= MAX_REVIEWER_SCOPE_FINGERPRINT_AGGREGATE_BYTES
+				) {
+					for (const { pendingWrite, fingerprint } of completedFingerprints) {
+						recordReviewerScopeGenerationFileFingerprint({
+							parentSessionID: pendingWrite.parentSessionID,
+							taskId: pendingWrite.taskId,
+							coderCallID: pendingWrite.coderCallID,
+							fingerprint,
+						});
+					}
+				}
+			}
 			if (outcome.kind === 'fatal') {
 				recordNonTransientFailure(
 					input.sessionID,
@@ -812,27 +1027,29 @@ export function createGuardrailsHooks(
 							!fallbackModels ||
 							session.model_fallback_index > fallbackModels.length;
 
-						session.pendingAdvisoryMessages ??= [];
 						if (isContentFilter) {
-							session.pendingAdvisoryMessages.push(
+							pushAdvisory(
+								session,
 								`DEGRADED: Content policy violation detected (content filter). Fallback model ${session.model_fallback_index}/${fallbackModels?.length ?? 0} considered. ` +
 									`The input may need content modification to comply with provider policies.`,
 							);
 						} else {
-							session.pendingAdvisoryMessages.push(
+							pushAdvisory(
+								session,
 								`DEGRADED: Context-limit or token-limit error detected. Fallback model ${session.model_fallback_index}/${fallbackModels?.length ?? 0} considered. ` +
 									`Consider reducing input size or using /swarm handoff to switch models.`,
 							);
 						}
 					} else if (session) {
-						session.pendingAdvisoryMessages ??= [];
 						if (isContentFilter) {
-							session.pendingAdvisoryMessages.push(
+							pushAdvisory(
+								session,
 								`DEGRADED: Content policy violation detected (content filter). No fallback models available. ` +
 									`The input may need content modification to comply with provider policies.`,
 							);
 						} else {
-							session.pendingAdvisoryMessages.push(
+							pushAdvisory(
+								session,
 								`DEGRADED: Context-limit or token-limit error detected. No fallback models available. ` +
 									`Consider reducing input size or add "fallback_models" config.`,
 							);
@@ -877,15 +1094,15 @@ export function createGuardrailsHooks(
 							swarmAgents[baseAgentName].model = fallbackModel;
 						}
 
-						session.pendingAdvisoryMessages ??= [];
-						session.pendingAdvisoryMessages.push(
+						pushAdvisory(
+							session,
 							`MODEL FALLBACK: Applied fallback model "${fallbackModel}" (attempt ${session.model_fallback_index}). ` +
 								`Using /swarm handoff to reset to primary model.`,
 						);
 						modelFallbackAdvisoryEmitted = true;
 					} else {
-						session.pendingAdvisoryMessages ??= [];
-						session.pendingAdvisoryMessages.push(
+						pushAdvisory(
+							session,
 							`MODEL FALLBACK: Transient model error detected (attempt ${session.model_fallback_index}). ` +
 								`No fallback models configured for this agent. Add "fallback_models": ["model-a", "model-b"] ` +
 								`to the agent's config in opencode-swarm.json.`,
@@ -910,15 +1127,15 @@ export function createGuardrailsHooks(
 					isTransientMatch &&
 					!modelFallbackAdvisoryEmitted
 				) {
-					session.pendingAdvisoryMessages ??= [];
 					if (
-						!session.pendingAdvisoryMessages.some(
+						!session.pendingAdvisoryMessages?.some(
 							(m: string) =>
 								m.startsWith('TRANSIENT ERROR:') ||
 								m.startsWith('MODEL FALLBACK:'),
 						)
 					) {
-						session.pendingAdvisoryMessages.push(
+						pushAdvisory(
+							session,
 							`TRANSIENT ERROR: Provider error detected (attempt ${window.transientRetryCount}/${maxTransientRetries}). Retrying...`,
 						);
 					}

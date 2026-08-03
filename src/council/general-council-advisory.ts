@@ -18,6 +18,7 @@
  */
 
 import type { AgentSessionState } from '../state';
+import { pushAdvisory } from '../utils/advisory-queue';
 import type { GeneralCouncilResult } from './general-council-types.js';
 
 const ADVISORY_HEADER = '[general_council] (advisory; not blocking)';
@@ -38,8 +39,7 @@ export function pushGeneralCouncilAdvisory(
 	const body = renderAdvisoryBody(result);
 	if (!body) return;
 
-	session.pendingAdvisoryMessages ??= [];
-	session.pendingAdvisoryMessages.push(`${ADVISORY_HEADER}\n${body}`);
+	pushAdvisory(session, `${ADVISORY_HEADER}\n${body}`);
 }
 
 function renderAdvisoryBody(result: GeneralCouncilResult): string {

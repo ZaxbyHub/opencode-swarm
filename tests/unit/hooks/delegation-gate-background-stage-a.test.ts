@@ -166,6 +166,31 @@ describe('delegation-gate background flag (Stage A)', () => {
 		expect(readDelegations(dir)).toHaveLength(0);
 	});
 
+	it('flag ON: terminal non-success cleans up without recording pending work', async () => {
+		const hook = createDelegationGateHook(makeConfig(true), dir);
+		const session = ensureAgentSession('s4-failed');
+		session.taskWorkflowStates.set('3.2', 'coder_delegated');
+
+		await hook.toolAfter(
+			{
+				tool: 'Task',
+				sessionID: 's4-failed',
+				callID: 'c4-failed',
+				args: { subagent_type: 'reviewer', background: true },
+			},
+			{
+				state: 'failed',
+				output:
+					'<task id="ses_failed" state="running">started before failure</task>',
+				metadata: { background: true, jobId: 'job_ses_failed' },
+			},
+		);
+
+		expect(findByCorrelationId(dir, 'ses_failed')).toBeNull();
+		expect(readDelegations(dir)).toHaveLength(0);
+		expect(getTaskState(session, '3.2')).toBe('coder_delegated');
+	});
+
 	// ── toolAfter: flag OFF preserves PR 1 (defensive bail, no record) ────────
 	it('flag OFF: toolAfter background bails with no record (PR 1 behavior)', async () => {
 		const hook = createDelegationGateHook(makeConfig(false), dir);

@@ -21,7 +21,11 @@ import {
 } from '../../../src/hooks/knowledge-store.js';
 import { validateActionability } from '../../../src/hooks/knowledge-validator.js';
 import type { InsightCandidate } from '../../../src/hooks/micro-reflector.js';
-import { resolveInsightCandidatesPath } from '../../../src/hooks/micro-reflector.js';
+import {
+	computeInsightCandidateId,
+	insightAdmissionMarker,
+	resolveInsightCandidatesPath,
+} from '../../../src/hooks/micro-reflector.js';
 import {
 	buildSynonymIndex,
 	readSynonymMap,
@@ -66,7 +70,20 @@ describe('insightCandidateToEntry', () => {
 		expect(entry.required_actions).toEqual([
 			'run the failing test before finishing',
 		]);
-		expect(entry.source_knowledge_ids).toEqual(['task:t-1']);
+		// #1821 D1: `source_knowledge_ids` is now a UNION of the task marker and
+		// the deterministic `insight:<id>` admission marker. The insight marker is
+		// what lets the phase-boundary fold-in recognise a candidate that real-time
+		// admission already confirmed, so it must be present even alongside a task id.
+		expect(entry.source_knowledge_ids).toEqual([
+			'task:t-1',
+			insightAdmissionMarker(
+				computeInsightCandidateId(
+					candidate(
+						'Re-run the failing test before declaring the fix complete',
+					),
+				),
+			),
+		]);
 		expect(validateActionability(entry).actionable).toBe(true);
 	});
 

@@ -31,15 +31,10 @@ import { tryAcquireLock } from '../parallel/file-locks.js';
 import { _internals as stateInternals } from '../state.js';
 import { telemetry } from '../telemetry';
 import { sleep } from '../utils/bun-compat';
+import { advanceInlineFallback } from '../utils/inline-fallback-advancer';
 import * as logger from '../utils/logger';
-import {
-	type ModelOverride,
-	parseModelString,
-} from '../utils/model-dispatch-fallback';
-import {
-	isQuotaError,
-	isTransientProviderError,
-} from '../utils/provider-error-classification';
+import type { ModelOverride } from '../utils/model-dispatch-fallback';
+import { isTransientProviderError } from '../utils/provider-error-classification';
 import {
 	type ParsedCriticResponse,
 	parseCriticResponseFields,
@@ -544,38 +539,33 @@ export async function dispatchFullAutoOversight(
 			// Transient — will retry. #1896: advance to the next configured fallback
 			// model (if any) before the retry, so a quota/rate-limit hit fails over
 			// instead of just re-hitting the same exhausted model.
+			//
+			// #1905: the advance block (resolve → increment-before-parse → skip
+			// malformed → tag quota/transient → notify) is shared with the legacy
+			// critic dispatch in `src/hooks/full-auto-intercept.ts`. It lives in
+			// `advanceInlineFallback` so the two bespoke loops cannot drift.
 			dispatchError = undefined;
-			const nextModel = resolveOversightFallback(modelFallbackIndex + 1);
-			if (nextModel) {
-				// Advance the index FIRST so a malformed entry is skipped rather
-				// than re-resolved every retry (which would strand any valid
-				// fallback listed after it); only adopt the model on a clean parse.
-				modelFallbackIndex++;
-				let parsed: ModelOverride | undefined;
-				try {
-					parsed = parseModelString(nextModel);
-				} catch {
-					parsed = undefined; // malformed provider/model entry — skip it
-				}
-				if (parsed) {
-					modelOverride = parsed;
-					modelUsedLabel = nextModel;
-					const reason = isQuotaError(
-						lastError instanceof Error ? lastError.message : String(lastError),
-					)
-						? 'quota'
-						: 'transient_model_error';
+			const advanced = advanceInlineFallback({
+				resolveFallback: resolveOversightFallback,
+				index: modelFallbackIndex,
+				lastError,
+				onAdopt: ({ toModel, fallbackIndex, reason }) => {
 					logger.warn(
-						`[full-auto/oversight] failing over critic to fallback model "${nextModel}" (fallback ${modelFallbackIndex}, reason=${reason})`,
+						`[full-auto/oversight] failing over critic to fallback model "${toModel}" (fallback ${fallbackIndex}, reason=${reason})`,
 					);
 					telemetry.modelFallback(
 						input.sessionID,
 						input.oversightAgentName,
 						input.criticModel,
-						nextModel,
+						toModel,
 						reason,
 					);
-				}
+				},
+			});
+			modelFallbackIndex = advanced.nextIndex;
+			if (advanced.adopted) {
+				modelOverride = advanced.adopted.override;
+				modelUsedLabel = advanced.adopted.modelString;
 			}
 		} else {
 			// Exhausted retries.

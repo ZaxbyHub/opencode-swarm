@@ -3,11 +3,15 @@ import {
 	BUNDLED_PROJECT_SKILL_ROOT,
 	syncBundledProjectSkillsIfMissingAsync,
 } from '../config/bundled-skills.js';
+import type { AutoReviewConfig } from '../config/schema.js';
 import type { EvaluationModelDispatcher } from '../evaluation/model-dispatcher.js';
 import {
 	activatePrWorkflow,
 	type PrWorkflowMode,
+	transitionPrReviewToFeedback,
 } from '../hooks/pr-workflow-gate.js';
+import type { ReviewModelDispatcher } from '../review/contracts.js';
+import type { ReviewAgentModelRegistry } from '../review/runtime.js';
 import { warn } from '../utils/logger.js';
 import { handleAbortPrWorkflowCommand } from './abort-pr-workflow.js';
 import { handleAcknowledgeSpecDriftCommand } from './acknowledge-spec-drift.js';
@@ -28,6 +32,7 @@ import { handleCodebaseReviewCommand } from './codebase-review.js';
 import { handleConcurrencyCommand } from './concurrency.js';
 import { handleConfigCommand } from './config.js';
 import { handleConsolidateCommand } from './consolidate.js';
+import { handleContextMapStatsCommand } from './context-map-stats.js';
 import { handleCostsCommand } from './costs.js';
 import { handleCouncilCommand } from './council.js';
 import { handleCouplingCommand } from './coupling.js';
@@ -82,7 +87,10 @@ import {
 } from './memory-link.js';
 import { handlePlanCommand } from './plan.js';
 import { handlePostMortemCommand } from './post-mortem.js';
-import { handlePrFeedbackCommand } from './pr-feedback.js';
+import {
+	handlePrFeedbackCommand,
+	parsePrFeedbackCommandInput,
+} from './pr-feedback.js';
 import { handlePrMonitorStatusCommand } from './pr-monitor-status.js';
 import { handlePrReviewCommand } from './pr-review.js';
 import { handlePrSubscribeCommand } from './pr-subscribe.js';
@@ -93,6 +101,7 @@ import { handleQaGatesCommand } from './qa-gates.js';
 import { handleResetCommand } from './reset.js';
 import { handleResetSessionCommand } from './reset-session.js';
 import { handleRetrieveCommand } from './retrieve.js';
+import { handleReviewCommand } from './review.js';
 import { handleRollbackCommand } from './rollback.js';
 import {
 	handleSddCommand,
@@ -271,6 +280,10 @@ export type CommandContext = {
 	 */
 	source?: 'cli' | 'chat';
 	evaluationModelDispatcher?: EvaluationModelDispatcher;
+	reviewModelDispatcher?: ReviewModelDispatcher;
+	autoReviewConfig?: AutoReviewConfig;
+	activeAgentName?: string;
+	reviewAgentModelRegistry?: ReviewAgentModelRegistry;
 };
 
 export type CommandResult = Promise<string>;
@@ -302,10 +315,41 @@ async function handleModeCommandWithBundledSkills(
 	const result = await Promise.resolve(handler(ctx.directory, ctx.args));
 	if (/^\s*\[MODE:\s*[A-Z][A-Z0-9_-]*\b/.test(result)) {
 		if (mechanicalMode) {
-			await activatePrWorkflow(ctx.directory, ctx.sessionID, mechanicalMode);
+			await activatePrWorkflow(ctx.directory, ctx.sessionID, mechanicalMode, {
+				requireCheckoutPreflight: true,
+			});
 		}
 	}
 	return result;
+}
+
+async function handlePrFeedbackCommandWithTransition(
+	ctx: CommandContext,
+): CommandResult {
+	if (ctx.packageRoot) {
+		await syncBundledProjectSkillsIfMissingAsync(
+			ctx.directory,
+			ctx.packageRoot,
+			true,
+		);
+	}
+	const parsed = parsePrFeedbackCommandInput(ctx.directory, ctx.args);
+	if (parsed.error) {
+		return handlePrFeedbackCommand(ctx.directory, ctx.args);
+	}
+	if (parsed.continuation) {
+		await transitionPrReviewToFeedback(ctx.directory, ctx.sessionID, {
+			runId: parsed.continuation.runId,
+			handoffPath: parsed.continuation.handoffPath,
+			prUrl: parsed.prUrl,
+		});
+	} else {
+		await activatePrWorkflow(ctx.directory, ctx.sessionID, 'PR_FEEDBACK', {
+			requireCheckoutPreflight: true,
+			...(parsed.prUrl ? { prUrl: parsed.prUrl } : {}),
+		});
+	}
+	return handlePrFeedbackCommand(ctx.directory, ctx.args);
 }
 
 export type CommandCategory =
@@ -379,12 +423,30 @@ export const COMMAND_REGISTRY = {
 		toolPolicy: 'restricted',
 	},
 	status: {
-		handler: (ctx) => handleStatusCommand(ctx.directory, ctx.agents),
+		handler: async (ctx) =>
+			handleStatusCommand(ctx.directory, ctx.agents, ctx.sessionID),
 		description: 'Show current swarm state',
 		category: 'core',
 		clashesWithNativeCcCommand: '/status',
 		toolPolicy: 'agent',
 		toolNoArgs: true,
+	},
+	'context-map stats': {
+		handler: async (ctx) => handleContextMapStatsCommand(ctx.directory),
+		description: 'Show aggregated context-capsule telemetry stats',
+		category: 'diagnostics',
+		toolPolicy: 'agent',
+		toolNoArgs: true,
+	},
+	// Alias for the hyphenated form '/swarm context-map-stats'. Without it,
+	// resolveCommand(['context-map-stats']) returns null and the TUI shows
+	// "command not found". Mirrors the 'doctor-tools' alias above.
+	'context-map-stats': {
+		handler: async (ctx) => handleContextMapStatsCommand(ctx.directory),
+		description: 'Show aggregated context-capsule telemetry stats',
+		category: 'diagnostics',
+		aliasOf: 'context-map stats',
+		deprecated: true,
 	},
 	'show-plan': {
 		handler: (ctx) => handlePlanCommand(ctx.directory, ctx.args),
@@ -581,6 +643,15 @@ export const COMMAND_REGISTRY = {
 		category: 'diagnostics',
 		toolPolicy: 'agent',
 	},
+	review: {
+		handler: handleReviewCommand,
+		description: 'Run the independent review model against a selected Git diff',
+		args: '--base <ref>, --range <from..to|from...to>, --working-tree, --json',
+		details:
+			'Collects one bounded canonical diff, dispatches the configured reviewer in a fresh read-only session, optionally validates eligible HIGH/CRITICAL findings when configured or required by gate mode, and persists the receipt and evidence. With no selector, reviews the default merge-base plus working-tree scope.',
+		category: 'diagnostics',
+		toolPolicy: 'human-only',
+	},
 	costs: {
 		handler: (ctx) => handleCostsCommand(ctx.directory, ctx.args),
 		description: 'Show per-agent and per-task token/cost telemetry [--json]',
@@ -651,7 +722,8 @@ export const COMMAND_REGISTRY = {
 		clashesWithNativeCcCommand: '/doctor',
 	},
 	info: {
-		handler: (ctx) => handleStatusCommand(ctx.directory, ctx.agents),
+		handler: async (ctx) =>
+			handleStatusCommand(ctx.directory, ctx.agents, ctx.sessionID),
 		description: 'Show current swarm state',
 		category: 'core',
 		aliasOf: 'status',
@@ -979,17 +1051,12 @@ export const COMMAND_REGISTRY = {
 			'Launch deep PR review with multi-lane analysis [url] [--council]',
 		args: '<pr-url|owner/repo#N|N> [--council]',
 		details:
-			'Launches a structured PR review: reconstructs PR intent via obligation extraction cascade, launches all 6 fixed base explorer lanes through dispatch_lanes_async while the architect keeps doing non-dependent work, polls collect_lane_results incrementally, runs all 11 mandatory repository-agnostic micro-lanes without applicability waivers, validates findings through independent reviewer confirmation, applies critic challenge to HIGH/CRITICAL findings, then synthesizes only after coverage is closed. Failed obligations retry through the same structured async mode and exact PR head; blocking or direct-Task dispatch is not provenance-equivalent, so unclosed coverage leaves the review BLOCKED rather than degraded. --council variant fires adversarial multi-model review. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolves against origin remote).',
+			'Launches a structured PR review: reconstructs PR intent via obligation extraction cascade, computes a depth tier (S/M/L) from the bound merge-base diff, launches the base explorer wave through dispatch_lanes_async (all 6 review dimensions covered on every PR — six singleton lanes at tier L, consolidated owned_workflow_lanes partitions at tiers S/M) while the architect keeps doing non-dependent work, polls collect_lane_results incrementally, evaluates all 11 mandatory repository-agnostic risk families without applicability waivers (dedicated micro-lanes at tier L, consolidated sweeps at S/M), validates findings through independent reviewer confirmation, applies critic challenge to HIGH/CRITICAL findings, then synthesizes only after coverage is closed. Failed obligations retry through the same structured async mode and exact PR head; blocking or direct-Task dispatch is not provenance-equivalent, so unclosed coverage leaves the review BLOCKED rather than degraded. --council variant fires adversarial multi-model review. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolves against origin remote).',
 		category: 'agent',
 		toolPolicy: 'none',
 	},
 	'pr-feedback': {
-		handler: (ctx) =>
-			handleModeCommandWithBundledSkills(
-				ctx,
-				handlePrFeedbackCommand,
-				'PR_FEEDBACK',
-			),
+		handler: (ctx) => handlePrFeedbackCommandWithTransition(ctx),
 		description:
 			'Ingest and close known PR feedback (review comments, CI failures, conflicts) [pr] [instructions]',
 		args: '[url|owner/repo#N|N] [instructions...]',
@@ -1225,8 +1292,8 @@ export const COMMAND_REGISTRY = {
 		description:
 			'Manually promote lesson to hive knowledge (policy-gated; --force --reason overrides with audit)',
 		details:
-			'Promotes a lesson directly to hive knowledge (--category flag sets category) or references an existing swarm lesson by ID (--from-swarm). Promotion runs the one policy evaluator inside a single cross-process transaction (#1847). A policy failure blocks promotion unless --force --reason "<why>" is supplied, which records a durable, audited override. An exact entry id alone is never authorization to bypass policy. Either direct text or --from-swarm ID is required.',
-		args: '--category <category>, --from-swarm <lesson-id>, <lesson-text>',
+			'Promotes a lesson to hive knowledge directly (--category) or via an existing swarm lesson (--from-swarm), in one cross-process policy transaction (#1847). A policy failure blocks promotion unless --force --reason "<why>" is given (audited); an entry id alone is not authorization. Requires direct text or --from-swarm. An actionability floor (#1821) needs at least one predicate flag and one scope flag (see args), unless knowledge.promotion_require_actionable=false.',
+		args: '--category <category>, --from-swarm <lesson-id>, --applies-to-tools <a,b>, --applies-to-agents <a,b>, --required-actions <a,b>, --forbidden-actions <a,b>, --verification-checks <a,b>, --force --reason <why>, <lesson-text>',
 		category: 'utility',
 		toolPolicy: 'none',
 	},

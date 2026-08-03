@@ -23,7 +23,10 @@ export function createKnowledgeProject(): string {
 	return directory;
 }
 
-export async function bootKnowledgeHost(directory: string): Promise<{
+export async function bootKnowledgeHost(
+	directory: string,
+	configOverrides: Record<string, unknown> = {},
+): Promise<{
 	hooks: Record<string, (...args: unknown[]) => Promise<unknown>>;
 	tool: Record<
 		string,
@@ -36,7 +39,11 @@ export async function bootKnowledgeHost(directory: string): Promise<{
 	writeFileSync(
 		path.join(opencodeDir, 'opencode-swarm.json'),
 		JSON.stringify(
-			{ version_check: false, knowledge: { enabled: true } },
+			{
+				version_check: false,
+				knowledge: { enabled: true },
+				...configOverrides,
+			},
 			null,
 			2,
 		),

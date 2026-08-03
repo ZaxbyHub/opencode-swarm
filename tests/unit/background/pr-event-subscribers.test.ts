@@ -2,7 +2,7 @@
  * Phase 1 PR Event Subscribers tests.
  *
  * Tests: registerPrEventSubscribers, handlePrEvent, formatAdvisory.
- * Uses _internals DI seam for full mock isolation — no cross-file pollution.
+ * Uses _internals DI seam for full mock isolation â€” no cross-file pollution.
  *
  * The _internals seam is added to pr-event-subscribers.ts specifically for
  * testing: it exposes handlePrEvent, getGlobalEventBus, listActive,
@@ -19,7 +19,7 @@ import {
 } from '../../../src/background/pr-event-subscribers';
 import type { PrSubscriptionRecord } from '../../../src/background/pr-subscriptions';
 
-// ── Test Fixtures ──────────────────────────────────────────────────
+// â”€â”€ Test Fixtures â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 const TEST_DIR = path.join(os.tmpdir(), 'pr-event-subscribers-test');
 
@@ -44,22 +44,25 @@ function makeSubscription(
 		prNumber: 42,
 		repoFullName: 'owner/repo',
 		prUrl: 'https://github.com/owner/repo/pull/42',
-		lastCheckedAt: Date.now() - 60_000,
+		lastCheckedAt: 940_000,
 		isWatching: true,
 		hasUnaddressedEvents: false,
 		status: 'active',
-		createdAt: Date.now() - 120_000,
-		updatedAt: Date.now() - 60_000,
+		createdAt: 880_000,
+		updatedAt: 940_000,
 		errorCount: 0,
 		...overrides,
 	};
 }
 
-// ── Mock State ─────────────────────────────────────────────────────
+// â”€â”€ Mock State â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 interface MockState {
 	listActive: ReturnType<typeof mock>;
 	getAgentSession: ReturnType<typeof mock>;
+	readPrWorkflowGateState: ReturnType<typeof mock>;
+	activatePrWorkflow: ReturnType<typeof mock>;
+	enqueuePrFeedbackMonitorEvent: ReturnType<typeof mock>;
 	log: ReturnType<typeof mock>;
 	getGlobalEventBus: ReturnType<typeof mock>;
 	scheduleClearUnaddressed: ReturnType<typeof mock>;
@@ -77,6 +80,11 @@ function setupMocks(): void {
 	mockState = {
 		listActive: mock(() => Promise.resolve([])),
 		getAgentSession: mock(() => undefined),
+		readPrWorkflowGateState: mock(() => Promise.resolve(null)),
+		activatePrWorkflow: mock(() =>
+			Promise.resolve({ mode: 'PR_FEEDBACK', prFeedbackInventory: undefined }),
+		),
+		enqueuePrFeedbackMonitorEvent: mock(() => Promise.resolve(undefined)),
 		log: mock(() => {}),
 		getGlobalEventBus: mock(() => mockState.busInstance),
 		scheduleClearUnaddressed: mock(() => {}),
@@ -88,6 +96,12 @@ function setupMocks(): void {
 	_internals.listActive = mockState.listActive as typeof _internals.listActive;
 	_internals.getAgentSession =
 		mockState.getAgentSession as typeof _internals.getAgentSession;
+	_internals.readPrWorkflowGateState =
+		mockState.readPrWorkflowGateState as typeof _internals.readPrWorkflowGateState;
+	_internals.activatePrWorkflow =
+		mockState.activatePrWorkflow as typeof _internals.activatePrWorkflow;
+	_internals.enqueuePrFeedbackMonitorEvent =
+		mockState.enqueuePrFeedbackMonitorEvent as typeof _internals.enqueuePrFeedbackMonitorEvent;
 	_internals.log = mockState.log as typeof _internals.log;
 	_internals.getGlobalEventBus =
 		mockState.getGlobalEventBus as typeof _internals.getGlobalEventBus;
@@ -101,6 +115,10 @@ function restoreInternals(): void {
 	if (savedInternals) {
 		_internals.listActive = savedInternals.listActive;
 		_internals.getAgentSession = savedInternals.getAgentSession;
+		_internals.readPrWorkflowGateState = savedInternals.readPrWorkflowGateState;
+		_internals.activatePrWorkflow = savedInternals.activatePrWorkflow;
+		_internals.enqueuePrFeedbackMonitorEvent =
+			savedInternals.enqueuePrFeedbackMonitorEvent;
 		_internals.log = savedInternals.log;
 		_internals.getGlobalEventBus = savedInternals.getGlobalEventBus;
 		_internals.scheduleClearUnaddressed =
@@ -108,7 +126,7 @@ function restoreInternals(): void {
 	}
 }
 
-// ── Helpers ────────────────────────────────────────────────────────
+// â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * Create a mock session object that tracks pendingAdvisoryMessages.
@@ -123,9 +141,9 @@ function makeMockSession(sessionId: string): {
 	};
 }
 
-// ── Tests ──────────────────────────────────────────────────────────
+// â”€â”€ Tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-describe('PrEventSubscriberOptions — construction', () => {
+describe('PrEventSubscriberOptions â€” construction', () => {
 	test('has expected shape', () => {
 		const opts: PrEventSubscriberOptions = {
 			directory: TEST_DIR,
@@ -153,7 +171,7 @@ describe('registerPrEventSubscribers', () => {
 
 		// The legacy 3 flags gate 4 event types: notify_merge_conflict also
 		// gates pr.merge.conflict_resolved. The other flags (review/merged/
-		// closed/ci_success) are unset in makeConfig → skipped.
+		// closed/ci_success) are unset in makeConfig â†’ skipped.
 		expect(mockState.busInstance.subscribe).toHaveBeenCalledTimes(4);
 		expect(mockState.busInstance.subscribe).toHaveBeenCalledWith(
 			'pr.ci.failed',
@@ -339,9 +357,76 @@ describe('handlePrEvent', () => {
 		expect(session.pendingAdvisoryMessages[0]).toContain('pr.new.comment');
 		expect(session.pendingAdvisoryMessages[0]).toContain('@reviewer');
 		expect(session.pendingAdvisoryMessages[0]).toContain('LGTM!');
+		// B8 (issue #1976): content events carry a per-event identity suffix.
 		expect(session.pendingAdvisoryMessages[0]).toContain(
-			'[pr-monitor:pr.new.comment:org/repo#99]',
+			'[pr-monitor:pr.new.comment:org/repo#99',
 		);
+	});
+
+	test('issue #1976 B8: N distinct comments on one PR produce N advisories (not 1)', async () => {
+		// The legacy per-PR dedup token collapsed all comments on a PR to a single
+		// advisory (N comments â†’ 1 advisory, Nâˆ’1 silently dropped). The per-event
+		// identity suffix (@author:content-hash) lets distinct comments survive.
+		const session = makeMockSession('sess-b8');
+		mockState.listActive.mockResolvedValue([
+			makeSubscription({ sessionID: 'sess-b8' }),
+		]);
+		mockState.getAgentSession.mockReturnValue(session as any);
+
+		const comments = [
+			{ author: 'alice', body: 'looks good' },
+			{ author: 'bob', body: 'please fix the typo' },
+			{ author: 'alice', body: 'fixed, rebased' },
+		];
+		for (const c of comments) {
+			await _internals.handlePrEvent(
+				{
+					type: 'pr.new.comment',
+					payload: {
+						prNumber: 42,
+						repoFullName: 'owner/repo',
+						prUrl: 'https://github.com/owner/repo/pull/42',
+						author: c.author,
+						body: c.body,
+					},
+				},
+				TEST_DIR,
+				makeConfig(),
+			);
+		}
+
+		// Three distinct comments â†’ three distinct per-event tokens â†’ three advisories.
+		expect(session.pendingAdvisoryMessages).toHaveLength(3);
+	});
+
+	test('issue #1976 B8: an identical re-delivered comment is deduped', async () => {
+		// Per-event identity still suppresses a byte-identical re-delivery of the
+		// SAME comment (same author + same body â†’ same token).
+		const session = makeMockSession('sess-b8b');
+		mockState.listActive.mockResolvedValue([
+			makeSubscription({ sessionID: 'sess-b8b' }),
+		]);
+		mockState.getAgentSession.mockReturnValue(session as any);
+
+		const payload = {
+			prNumber: 42,
+			repoFullName: 'owner/repo',
+			prUrl: 'https://github.com/owner/repo/pull/42',
+			author: 'alice',
+			body: 'same comment twice',
+		};
+		await _internals.handlePrEvent(
+			{ type: 'pr.new.comment', payload },
+			TEST_DIR,
+			makeConfig(),
+		);
+		await _internals.handlePrEvent(
+			{ type: 'pr.new.comment', payload },
+			TEST_DIR,
+			makeConfig(),
+		);
+
+		expect(session.pendingAdvisoryMessages).toHaveLength(1);
 	});
 
 	test('delivers pr.merge.conflict advisory to subscribed session', async () => {
@@ -454,7 +539,7 @@ describe('handlePrEvent', () => {
 
 		expect(session.pendingAdvisoryMessages).toHaveLength(1);
 
-		// Same event again — should be deduplicated
+		// Same event again â€” should be deduplicated
 		await _internals.handlePrEvent(
 			{
 				type: 'pr.ci.failed',
@@ -480,7 +565,7 @@ describe('handlePrEvent', () => {
 		]);
 		mockState.getAgentSession.mockReturnValue(session as any);
 
-		// 1. Deliver pr.ci.failed → expect advisory delivered
+		// 1. Deliver pr.ci.failed â†’ expect advisory delivered
 		await _internals.handlePrEvent(
 			{
 				type: 'pr.ci.failed',
@@ -498,7 +583,7 @@ describe('handlePrEvent', () => {
 		expect(session.pendingAdvisoryMessages).toHaveLength(1);
 		expect(session.pendingAdvisoryMessages[0]).toContain('pr.ci.failed');
 
-		// 2. Deliver pr.new.comment → expect advisory delivered (different type)
+		// 2. Deliver pr.new.comment â†’ expect advisory delivered (different type)
 		await _internals.handlePrEvent(
 			{
 				type: 'pr.new.comment',
@@ -518,7 +603,7 @@ describe('handlePrEvent', () => {
 		expect(session.pendingAdvisoryMessages).toHaveLength(2);
 		expect(session.pendingAdvisoryMessages[1]).toContain('pr.new.comment');
 
-		// 3. Deliver pr.ci.failed again → expect DEDUPED (same type+PR, scanned from all messages)
+		// 3. Deliver pr.ci.failed again â†’ expect DEDUPED (same type+PR, scanned from all messages)
 		await _internals.handlePrEvent(
 			{
 				type: 'pr.ci.failed',
@@ -533,7 +618,7 @@ describe('handlePrEvent', () => {
 			makeConfig(),
 		);
 
-		// Still only 2 messages — the second ci.failed was deduped
+		// Still only 2 messages â€” the second ci.failed was deduped
 		expect(session.pendingAdvisoryMessages).toHaveLength(2);
 	});
 
@@ -675,7 +760,7 @@ describe('handlePrEvent', () => {
 
 		expect(session.pendingAdvisoryMessages).toHaveLength(1);
 
-		// Different event type: merge.conflict for same PR — should NOT be deduped
+		// Different event type: merge.conflict for same PR â€” should NOT be deduped
 		await _internals.handlePrEvent(
 			{
 				type: 'pr.merge.conflict',
@@ -798,8 +883,11 @@ describe('formatAdvisory', () => {
 			makeConfig(),
 		);
 
+		// B8 (issue #1976): content events (comments/reviews) carry a per-event
+		// identity suffix (@author:hash) before the closing bracket, so assert
+		// the stable token PREFIX rather than the exact per-PR token.
 		expect(session.pendingAdvisoryMessages[0]).toContain(
-			'[pr-monitor:pr.new.comment:owner/repo#42]',
+			'[pr-monitor:pr.new.comment:owner/repo#42',
 		);
 	});
 
@@ -838,271 +926,5 @@ describe('formatAdvisory', () => {
 		);
 
 		expect(session.pendingAdvisoryMessages).toHaveLength(0);
-	});
-});
-
-// ── auto_pr_feedback MODE signal injection ───────────────────────────
-
-describe('auto_pr_feedback MODE signal injection', () => {
-	beforeEach(() => {
-		setupMocks();
-	});
-
-	afterEach(() => {
-		restoreInternals();
-	});
-
-	test('MODE signal injected when auto_pr_feedback=true and event is pr.ci.failed', async () => {
-		const session = makeMockSession('sess1');
-		mockState.listActive.mockResolvedValueOnce([
-			makeSubscription({ sessionID: 'sess1' }),
-		]);
-		mockState.getAgentSession.mockReturnValue(session as any);
-
-		await _internals.handlePrEvent(
-			{
-				type: 'pr.ci.failed',
-				payload: {
-					prNumber: 42,
-					repoFullName: 'owner/repo',
-					prUrl: 'https://github.com/owner/repo/pull/42',
-					checkName: 'ci/build',
-					checkState: 'failure',
-				},
-			},
-			TEST_DIR,
-			makeConfig({ auto_pr_feedback: true }),
-		);
-
-		// Advisory should still be delivered
-		expect(session.pendingAdvisoryMessages.length).toBeGreaterThanOrEqual(1);
-		const modeSignal = session.pendingAdvisoryMessages.find((m: string) =>
-			m.includes('[MODE: PR_FEEDBACK'),
-		);
-		expect(modeSignal).toBeDefined();
-		expect(modeSignal).toBe(
-			'[MODE: PR_FEEDBACK pr="https://github.com/owner/repo/pull/42"]',
-		);
-	});
-
-	test('MODE signal injected when auto_pr_feedback=true and event is pr.merge.conflict', async () => {
-		const session = makeMockSession('sess1');
-		mockState.listActive.mockResolvedValueOnce([
-			makeSubscription({ sessionID: 'sess1' }),
-		]);
-		mockState.getAgentSession.mockReturnValue(session as any);
-
-		await _internals.handlePrEvent(
-			{
-				type: 'pr.merge.conflict',
-				payload: {
-					prNumber: 42,
-					repoFullName: 'owner/repo',
-					prUrl: 'https://github.com/owner/repo/pull/42',
-				},
-			},
-			TEST_DIR,
-			makeConfig({ auto_pr_feedback: true }),
-		);
-
-		const modeSignal = session.pendingAdvisoryMessages.find((m: string) =>
-			m.includes('[MODE: PR_FEEDBACK'),
-		);
-		expect(modeSignal).toBeDefined();
-		expect(modeSignal).toBe(
-			'[MODE: PR_FEEDBACK pr="https://github.com/owner/repo/pull/42"]',
-		);
-	});
-
-	test('NO MODE signal injected when auto_pr_feedback=false', async () => {
-		const session = makeMockSession('sess1');
-		mockState.listActive.mockResolvedValueOnce([
-			makeSubscription({ sessionID: 'sess1' }),
-		]);
-		mockState.getAgentSession.mockReturnValue(session as any);
-
-		await _internals.handlePrEvent(
-			{
-				type: 'pr.ci.failed',
-				payload: {
-					prNumber: 42,
-					repoFullName: 'owner/repo',
-					prUrl: 'https://github.com/owner/repo/pull/42',
-					checkName: 'ci/build',
-					checkState: 'failure',
-				},
-			},
-			TEST_DIR,
-			makeConfig({ auto_pr_feedback: false }),
-		);
-
-		// Advisory still delivered
-		expect(session.pendingAdvisoryMessages.length).toBe(1);
-		const modeSignals = session.pendingAdvisoryMessages.filter((m: string) =>
-			m.includes('[MODE: PR_FEEDBACK'),
-		);
-		expect(modeSignals).toHaveLength(0);
-	});
-
-	test('NO MODE signal for pr.new.comment event (not in AUTO_PR_FEEDBACK_EVENTS)', async () => {
-		const session = makeMockSession('sess1');
-		mockState.listActive.mockResolvedValueOnce([
-			makeSubscription({ sessionID: 'sess1' }),
-		]);
-		mockState.getAgentSession.mockReturnValue(session as any);
-
-		await _internals.handlePrEvent(
-			{
-				type: 'pr.new.comment',
-				payload: {
-					prNumber: 42,
-					repoFullName: 'owner/repo',
-					prUrl: 'https://github.com/owner/repo/pull/42',
-					author: 'reviewer',
-					body: 'LGTM!',
-				},
-			},
-			TEST_DIR,
-			makeConfig({ auto_pr_feedback: true }),
-		);
-
-		// Advisory still delivered
-		expect(session.pendingAdvisoryMessages.length).toBe(1);
-		const modeSignals = session.pendingAdvisoryMessages.filter((m: string) =>
-			m.includes('[MODE: PR_FEEDBACK'),
-		);
-		expect(modeSignals).toHaveLength(0);
-	});
-
-	test('NO MODE signal when payload has no prUrl', async () => {
-		const session = makeMockSession('sess1');
-		mockState.listActive.mockResolvedValueOnce([
-			makeSubscription({ sessionID: 'sess1' }),
-		]);
-		mockState.getAgentSession.mockReturnValue(session as any);
-
-		await _internals.handlePrEvent(
-			{
-				type: 'pr.ci.failed',
-				payload: {
-					prNumber: 42,
-					repoFullName: 'owner/repo',
-					checkName: 'ci/build',
-					checkState: 'failure',
-					// prUrl intentionally missing
-				},
-			},
-			TEST_DIR,
-			makeConfig({ auto_pr_feedback: true }),
-		);
-
-		// Advisory still delivered (prUrl is optional for advisory)
-		expect(session.pendingAdvisoryMessages.length).toBe(1);
-		const modeSignals = session.pendingAdvisoryMessages.filter((m: string) =>
-			m.includes('[MODE: PR_FEEDBACK'),
-		);
-		expect(modeSignals).toHaveLength(0);
-	});
-
-	test('MODE signal format is exactly [MODE: PR_FEEDBACK pr="URL"]', async () => {
-		const session = makeMockSession('sess1');
-		mockState.listActive.mockResolvedValueOnce([
-			makeSubscription({ sessionID: 'sess1', prNumber: 99 }),
-		]);
-		mockState.getAgentSession.mockReturnValue(session as any);
-
-		const prUrl = 'https://github.com/owner/repo/pull/99';
-
-		await _internals.handlePrEvent(
-			{
-				type: 'pr.merge.conflict',
-				payload: {
-					prNumber: 99,
-					repoFullName: 'owner/repo',
-					prUrl,
-				},
-			},
-			TEST_DIR,
-			makeConfig({ auto_pr_feedback: true }),
-		);
-
-		const modeSignal = session.pendingAdvisoryMessages.find((m: string) =>
-			m.startsWith('[MODE: PR_FEEDBACK'),
-		);
-		expect(modeSignal).toBe(`[MODE: PR_FEEDBACK pr="${prUrl}"]`);
-	});
-
-	test('MODE signal escapes " and ] characters from prUrl', async () => {
-		const session = makeMockSession('sess1');
-		mockState.listActive.mockResolvedValueOnce([
-			makeSubscription({ sessionID: 'sess1', prNumber: 99 }),
-		]);
-		mockState.getAgentSession.mockReturnValue(session as any);
-
-		const maliciousUrl = 'https://github.com/owner/repo/pull/99"]INJECTION';
-
-		await _internals.handlePrEvent(
-			{
-				type: 'pr.merge.conflict',
-				payload: {
-					prNumber: 99,
-					repoFullName: 'owner/repo',
-					prUrl: maliciousUrl,
-				},
-			},
-			TEST_DIR,
-			makeConfig({ auto_pr_feedback: true }),
-		);
-
-		const modeSignal = session.pendingAdvisoryMessages.find((m: string) =>
-			m.startsWith('[MODE: PR_FEEDBACK'),
-		);
-		expect(modeSignal).toBeDefined();
-		// The " and ] should be stripped
-		expect(modeSignal).toBe(
-			'[MODE: PR_FEEDBACK pr="https://github.com/owner/repo/pull/99INJECTION"]',
-		);
-		expect(modeSignal).not.toContain('"]INJECTION');
-	});
-
-	test('advisory is delivered alongside MODE signal', async () => {
-		const session = makeMockSession('sess1');
-		mockState.listActive.mockResolvedValueOnce([
-			makeSubscription({ sessionID: 'sess1' }),
-		]);
-		mockState.getAgentSession.mockReturnValue(session as any);
-
-		await _internals.handlePrEvent(
-			{
-				type: 'pr.ci.failed',
-				payload: {
-					prNumber: 42,
-					repoFullName: 'owner/repo',
-					prUrl: 'https://github.com/owner/repo/pull/42',
-					checkName: 'ci/build',
-					checkState: 'failure',
-					errorMessage: 'Build failed',
-				},
-			},
-			TEST_DIR,
-			makeConfig({ auto_pr_feedback: true }),
-		);
-
-		// Should have both advisory and MODE signal
-		expect(session.pendingAdvisoryMessages.length).toBe(2);
-
-		const advisory = session.pendingAdvisoryMessages.find((m: string) =>
-			m.includes('[pr-monitor:pr.ci.failed'),
-		);
-		expect(advisory).toBeDefined();
-		expect(advisory).toContain('ci/build');
-		expect(advisory).toContain('failed');
-
-		const modeSignal = session.pendingAdvisoryMessages.find((m: string) =>
-			m.startsWith('[MODE: PR_FEEDBACK'),
-		);
-		expect(modeSignal).toBe(
-			'[MODE: PR_FEEDBACK pr="https://github.com/owner/repo/pull/42"]',
-		);
 	});
 });

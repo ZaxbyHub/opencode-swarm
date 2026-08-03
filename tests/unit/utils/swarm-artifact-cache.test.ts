@@ -208,7 +208,12 @@ describe('swarm-artifact-cache', () => {
 			'race-test',
 			async () => {
 				const content = await readFile(filePath, 'utf-8');
-				await writeFile(filePath, '{"value":"new"}', 'utf-8');
+				// Write content with a DIFFERENT length than the original so the
+				// cache's stamp check (which compares mtimeMs + ctimeMs + SIZE)
+				// detects the change even on filesystems with coarse mtimeMs
+				// granularity (Windows NTFS ~15ms ticks). The old content is
+				// 15 bytes; the new content is 18 bytes.
+				await writeFile(filePath, '{"value":"newer!"}', 'utf-8');
 				return content;
 			},
 			(content) => JSON.parse(content) as { value: string },
@@ -226,7 +231,7 @@ describe('swarm-artifact-cache', () => {
 			(content) => JSON.parse(content) as { value: string },
 		);
 
-		expect(second?.value).toBe('new');
+		expect(second?.value).toBe('newer!');
 		stats = getSwarmArtifactCacheStats();
 		expect(stats.parsedEntryCount).toBe(1);
 		expect(stats.parseCount).toBe(2);

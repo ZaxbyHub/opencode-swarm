@@ -138,6 +138,23 @@ export function resolveCurrentGitHead(directory: string): string | null {
 	return runGit(directory, ['rev-parse', '--verify', 'HEAD^{commit}']);
 }
 
+/**
+ * Async twin of {@link resolveCurrentGitHead}. PR-workflow gate/dispatch binding
+ * runs on the host tool/hook path, so HEAD verification must resolve Git off the
+ * blocking `spawnSync` path — a synchronous spawn on the long-running host (most
+ * acutely under Bun on Windows) can hang to its bound instead of returning, which
+ * a fail-closed gate would surface as a spurious "cannot resolve HEAD" block.
+ */
+export async function resolveCurrentGitHeadAsync(
+	directory: string,
+): Promise<string | null> {
+	return await runGitAsync(directory, [
+		'rev-parse',
+		'--verify',
+		'HEAD^{commit}',
+	]);
+}
+
 /** Resolve one exact PR merge base without shell interpolation or unbounded I/O. */
 export function resolveExactMergeBase(
 	directory: string,
@@ -148,6 +165,118 @@ export function resolveExactMergeBase(
 		return null;
 	const mergeBase = runGit(directory, ['merge-base', '--', baseRef, prHeadSha]);
 	return mergeBase && /^[0-9a-f]{6,64}$/i.test(mergeBase) ? mergeBase : null;
+}
+
+/** Async twin of {@link resolveExactMergeBase} for the gate/dispatch bind path. */
+export async function resolveExactMergeBaseAsync(
+	directory: string,
+	baseRef: string,
+	prHeadSha: string,
+): Promise<string | null> {
+	if (!isSafeGitRevisionToken(baseRef) || !isSafeGitRevisionToken(prHeadSha))
+		return null;
+	const mergeBase = await runGitAsync(directory, [
+		'merge-base',
+		'--',
+		baseRef,
+		prHeadSha,
+	]);
+	return mergeBase && /^[0-9a-f]{6,64}$/i.test(mergeBase) ? mergeBase : null;
+}
+
+export interface PrReviewDiffStats {
+	changedLines: number;
+	changedFiles: number;
+	/**
+	 * True when the range contains any gitlink (submodule) pointer change.
+	 * Git's numstat reports a submodule bump as a fixed 1-added/1-deleted row
+	 * regardless of the referenced repository's actual diff size, so size
+	 * thresholds cannot bound this case; callers must escalate unconditionally.
+	 */
+	hasSubmoduleChange: boolean;
+}
+
+const GITLINK_MODE_PATTERN = /^:\d{6} 160000 |^:160000 \d{6} /;
+
+/**
+ * Compute bounded changed-line/file totals for the exact reviewed PR range.
+ * Returns null on any Git failure, malformed numstat row, or buffer overflow
+ * so callers can fail strict (treat unknown size as the largest tier).
+ * Rename detection is pinned off (`--no-renames`) so the same logical diff
+ * produces the same totals regardless of the executing machine's ambient
+ * git version/config.
+ */
+export function resolvePrReviewDiffStats(
+	directory: string,
+	baseSha: string,
+	prHeadSha: string,
+): PrReviewDiffStats | null {
+	if (!isSafeGitRevisionToken(baseSha) || !isSafeGitRevisionToken(prHeadSha))
+		return null;
+	const range = `${baseSha}...${prHeadSha}`;
+	const output = runGit(directory, [
+		'diff',
+		'--no-renames',
+		'--numstat',
+		range,
+	]);
+	if (output === null) return null;
+	let changedLines = 0;
+	let changedFiles = 0;
+	for (const line of output.split('\n')) {
+		const trimmed = line.trim();
+		if (trimmed.length === 0) continue;
+		const fields = trimmed.split('\t');
+		if (fields.length < 3) return null;
+		const added = fields[0] === '-' ? 0 : Number.parseInt(fields[0], 10);
+		const deleted = fields[1] === '-' ? 0 : Number.parseInt(fields[1], 10);
+		if (Number.isNaN(added) || Number.isNaN(deleted)) return null;
+		changedFiles += 1;
+		changedLines += added + deleted;
+	}
+	const rawOutput = runGit(directory, ['diff', '--raw', range]);
+	if (rawOutput === null) return null;
+	const hasSubmoduleChange = rawOutput
+		.split('\n')
+		.some((line) => GITLINK_MODE_PATTERN.test(line.trim()));
+	return { changedLines, changedFiles, hasSubmoduleChange };
+}
+
+/** Async twin of {@link resolvePrReviewDiffStats} used off the blocking spawn on the gate/dispatch bind path. */
+export async function resolvePrReviewDiffStatsAsync(
+	directory: string,
+	baseSha: string,
+	prHeadSha: string,
+): Promise<PrReviewDiffStats | null> {
+	if (!isSafeGitRevisionToken(baseSha) || !isSafeGitRevisionToken(prHeadSha))
+		return null;
+	const range = `${baseSha}...${prHeadSha}`;
+	const output = await runGitAsync(directory, [
+		'diff',
+		'--no-renames',
+		'--numstat',
+		range,
+	]);
+	if (output === null) return null;
+	let changedLines = 0;
+	let changedFiles = 0;
+	for (const line of output.split('\n')) {
+		const trimmed = line.trim();
+		if (trimmed.length === 0) continue;
+		const fields = trimmed.split('\t');
+		if (fields.length < 3) return null;
+		const added = fields[0] === '-' ? 0 : Number.parseInt(fields[0], 10);
+		const deleted = fields[1] === '-' ? 0 : Number.parseInt(fields[1], 10);
+		if (Number.isNaN(added) || Number.isNaN(deleted)) return null;
+		changedFiles += 1;
+		changedLines += added + deleted;
+	}
+	const rawOutput = await runGitAsync(directory, ['diff', '--raw', range]);
+	if (rawOutput === null) return null;
+	const hasSubmoduleChange = rawOutput
+		.split('\n')
+		.some((line) => GITLINK_MODE_PATTERN.test(line.trim()));
+	return { changedLines, changedFiles, hasSubmoduleChange };
 }
 
 function isSafeGitRevisionToken(value: string): boolean {
@@ -210,6 +339,40 @@ export function resolveCurrentUpstreamPushTarget(
 	return { remoteName, remoteBranchRef, remoteTrackingRef };
 }
 
+/** Async twin of {@link resolveCurrentUpstreamPushTarget} used off the blocking spawn on the gate/dispatch bind path. */
+export async function resolveCurrentUpstreamPushTargetAsync(
+	directory: string,
+): Promise<PrUpstreamPushTarget | null> {
+	const localBranchRef = await runGitAsync(directory, [
+		'symbolic-ref',
+		'--quiet',
+		'HEAD',
+	]);
+	if (!localBranchRef?.startsWith('refs/heads/')) return null;
+	const encoded = await runGitAsync(directory, [
+		'for-each-ref',
+		'--format=%(upstream:remotename)%00%(upstream:remoteref)%00%(upstream)',
+		localBranchRef,
+	]);
+	if (!encoded) return null;
+	const [remoteName, remoteBranchRef, remoteTrackingRef, ...extras] =
+		encoded.split('\0');
+	if (
+		extras.length > 0 ||
+		!remoteName ||
+		remoteName.startsWith('-') ||
+		/[\s;&|<>`]/.test(remoteName) ||
+		!remoteBranchRef?.startsWith('refs/heads/') ||
+		remoteBranchRef === 'refs/heads/' ||
+		/[\s;&|<>`]/.test(remoteBranchRef) ||
+		!remoteTrackingRef?.startsWith('refs/remotes/') ||
+		remoteTrackingRef.endsWith('/HEAD')
+	) {
+		return null;
+	}
+	return { remoteName, remoteBranchRef, remoteTrackingRef };
+}
+
 /** Query the actual remote ref; local tracking refs are not publication proof. */
 export function resolveExactRemoteBranchHead(
 	directory: string,
@@ -227,6 +390,42 @@ export function resolveExactRemoteBranchHead(
 		return null;
 	}
 	const output = runGit(
+		directory,
+		['ls-remote', '--exit-code', '--heads', remoteName, remoteBranchRef],
+		20_000,
+	);
+	if (!output) return null;
+	const rows = output.split(/\r?\n/).filter(Boolean);
+	if (rows.length !== 1) return null;
+	const [objectName, refName, ...extras] = rows[0].split(/\s+/);
+	if (
+		extras.length > 0 ||
+		refName !== remoteBranchRef ||
+		!objectName ||
+		!(/^[0-9a-f]{40}$/i.test(objectName) || /^[0-9a-f]{64}$/i.test(objectName))
+	) {
+		return null;
+	}
+	return objectName;
+}
+
+/** Async twin of {@link resolveExactRemoteBranchHead} for the gate bind/publish path. */
+export async function resolveExactRemoteBranchHeadAsync(
+	directory: string,
+	remoteName: string,
+	remoteBranchRef: string,
+): Promise<string | null> {
+	if (
+		!remoteName ||
+		remoteName.startsWith('-') ||
+		/[\s;&|<>`]/.test(remoteName) ||
+		!remoteBranchRef.startsWith('refs/heads/') ||
+		remoteBranchRef === 'refs/heads/' ||
+		/[\s;&|<>`]/.test(remoteBranchRef)
+	) {
+		return null;
+	}
+	const output = await runGitAsync(
 		directory,
 		['ls-remote', '--exit-code', '--heads', remoteName, remoteBranchRef],
 		20_000,
@@ -281,9 +480,70 @@ export function resolveGitControlStateDigest(directory: string): string | null {
 	);
 }
 
+/** Async twin of {@link resolveGitControlStateDigest} used off the blocking spawn on the gate/dispatch bind path. */
+export async function resolveGitControlStateDigestAsync(
+	directory: string,
+): Promise<string | null> {
+	const head = await runGitAsync(directory, [
+		'rev-parse',
+		'--verify',
+		'HEAD^{commit}',
+	]);
+	const symbolicHead = await runGitAsync(directory, [
+		'symbolic-ref',
+		'--quiet',
+		'HEAD',
+	]);
+	const upstream = await resolveCurrentUpstreamPushTargetAsync(directory);
+	const refs = await runGitAsync(directory, [
+		'for-each-ref',
+		'--format=%(refname)%00%(objectname)',
+		'refs/heads',
+		'refs/remotes',
+		'refs/tags',
+	]);
+	const config = await runGitAsync(directory, [
+		'config',
+		'--null',
+		'--show-origin',
+		'--show-scope',
+		'--list',
+	]);
+	const index = await runGitAsync(directory, ['ls-files', '--stage', '-z']);
+	if (
+		head === null ||
+		symbolicHead === null ||
+		!upstream ||
+		refs === null ||
+		config === null ||
+		index === null
+	) {
+		return null;
+	}
+	return digest(
+		`head\0${head}\0symbolic\0${symbolicHead}\0upstream\0${upstream.remoteName}\0${upstream.remoteBranchRef}\0${upstream.remoteTrackingRef}\0refs\0${refs}\0config\0${config}\0index\0${index}`,
+	);
+}
+
 /** Require all independently reviewed content to be captured by the commit. */
 export function resolveIsWorkingTreeClean(directory: string): boolean | null {
 	const status = runGit(directory, [
+		'status',
+		'--porcelain=v1',
+		'--untracked-files=all',
+	]);
+	return status === null ? null : status.length === 0;
+}
+
+/**
+ * Async twin of {@link resolveIsWorkingTreeClean} for the gate/dispatch bind path.
+ * `git status` emits far more output than `rev-parse`, so it is the most exposed
+ * of the bind-path checks to a blocking synchronous spawn stalling the host.
+ */
+export async function resolveIsWorkingTreeCleanAsync(
+	directory: string,
+): Promise<boolean | null> {
+	const status = await runGitAsync(directory, [
 		'status',
 		'--porcelain=v1',
 		'--untracked-files=all',
@@ -297,11 +557,40 @@ export function resolveCommitCountSince(
 	baseHeadSha: string,
 	currentHeadSha: string,
 ): number | null {
+	if (
+		!isSafeGitRevisionToken(baseHeadSha) ||
+		!isSafeGitRevisionToken(currentHeadSha)
+	)
+		return null;
 	const output = runGit(directory, [
 		'rev-list',
 		'--count',
 		'--ancestry-path',
 		`${baseHeadSha}..${currentHeadSha}`,
+		'--',
+	]);
+	if (!output || !/^\d+$/.test(output)) return null;
+	const count = Number(output);
+	return Number.isSafeInteger(count) ? count : null;
+}
+
+/** Async twin of {@link resolveCommitCountSince} used off the blocking spawn on the gate/dispatch bind path. */
+export async function resolveCommitCountSinceAsync(
+	directory: string,
+	baseHeadSha: string,
+	currentHeadSha: string,
+): Promise<number | null> {
+	if (
+		!isSafeGitRevisionToken(baseHeadSha) ||
+		!isSafeGitRevisionToken(currentHeadSha)
+	)
+		return null;
+	const output = await runGitAsync(directory, [
+		'rev-list',
+		'--count',
+		'--ancestry-path',
+		`${baseHeadSha}..${currentHeadSha}`,
+		'--',
 	]);
 	if (!output || !/^\d+$/.test(output)) return null;
 	const count = Number(output);
@@ -314,18 +603,65 @@ export function resolveIsExactSingleChildCommit(
 	baseHeadSha: string,
 	currentHeadSha: string,
 ): boolean | null {
+	if (
+		!isSafeGitRevisionToken(baseHeadSha) ||
+		!isSafeGitRevisionToken(currentHeadSha)
+	)
+		return null;
 	const base = runGit(directory, [
 		'rev-parse',
 		'--verify',
 		`${baseHeadSha}^{commit}`,
+		'--',
 	]);
 	const current = runGit(directory, [
 		'rev-parse',
 		'--verify',
 		`${currentHeadSha}^{commit}`,
+		'--',
 	]);
 	if (!base || !current) return null;
 	const commitAndParents = runGit(directory, [
+		'rev-list',
+		'--parents',
+		'-n',
+		'1',
+		current,
+	]);
+	if (commitAndParents === null) return null;
+	const fields = commitAndParents.trim().split(/\s+/);
+	return (
+		fields.length === 2 &&
+		fields[0]?.toLowerCase() === current.toLowerCase() &&
+		fields[1]?.toLowerCase() === base.toLowerCase()
+	);
+}
+
+/** Async twin of {@link resolveIsExactSingleChildCommit} used off the blocking spawn on the gate/dispatch bind path. */
+export async function resolveIsExactSingleChildCommitAsync(
+	directory: string,
+	baseHeadSha: string,
+	currentHeadSha: string,
+): Promise<boolean | null> {
+	if (
+		!isSafeGitRevisionToken(baseHeadSha) ||
+		!isSafeGitRevisionToken(currentHeadSha)
+	)
+		return null;
+	const base = await runGitAsync(directory, [
+		'rev-parse',
+		'--verify',
+		`${baseHeadSha}^{commit}`,
+		'--',
+	]);
+	const current = await runGitAsync(directory, [
+		'rev-parse',
+		'--verify',
+		`${currentHeadSha}^{commit}`,
+		'--',
+	]);
+	if (!base || !current) return null;
+	const commitAndParents = await runGitAsync(directory, [
 		'rev-list',
 		'--parents',
 		'-n',
@@ -351,6 +687,29 @@ export function resolveRemoteRefsContainingHead(
 	headSha: string,
 ): string[] | null {
 	const output = runGit(directory, [
+		'for-each-ref',
+		'--format=%(refname)%09%(objectname)',
+		'refs/remotes',
+	]);
+	if (output === null) return null;
+	return output
+		.split(/\r?\n/)
+		.map((line) => line.trim().split('\t'))
+		.filter(
+			([ref, objectName]) =>
+				ref?.startsWith('refs/remotes/') &&
+				!ref.endsWith('/HEAD') &&
+				objectName?.toLowerCase() === headSha.toLowerCase(),
+		)
+		.map(([ref]) => ref);
+}
+
+/** Async twin of {@link resolveRemoteRefsContainingHead} used off the blocking spawn on the gate/dispatch bind path. */
+export async function resolveRemoteRefsContainingHeadAsync(
+	directory: string,
+	headSha: string,
+): Promise<string[] | null> {
+	const output = await runGitAsync(directory, [
 		'for-each-ref',
 		'--format=%(refname)%09%(objectname)',
 		'refs/remotes',
@@ -583,16 +942,23 @@ export function parsePorcelainPaths(output: string): string[] | null {
 	return [...new Set(paths)];
 }
 
-interface PorcelainV2Snapshot {
+export interface PorcelainV2Snapshot {
 	gitHead: string | null;
-	changedFiles: string[];
+	dirtyTrackedPaths: string[];
+	untrackedPaths: string[];
+	renameOrCopy: boolean;
+	unmergedPaths: string[];
+	unmergedCodes: string[];
+	dirtySubmodulePaths: string[];
 }
 
 /**
  * Parse the one-command `git status --porcelain=v2 --branch -z` snapshot used
  * by background evidence capture. A malformed or unknown record fails closed.
  */
-function parsePorcelainV2Snapshot(output: string): PorcelainV2Snapshot | null {
+export function parsePorcelainV2Snapshot(
+	output: string,
+): PorcelainV2Snapshot | null {
 	const records = output.split('\0');
 	const headers: string[] = [];
 	while (records[0]?.startsWith('# ')) {
@@ -600,41 +966,73 @@ function parsePorcelainV2Snapshot(output: string): PorcelainV2Snapshot | null {
 	}
 	const oidMatch = headers.join('\n').match(/^# branch\.oid (.+)$/m);
 	if (!oidMatch) return null;
-	const gitHead = /^[0-9a-f]{6,64}$/i.test(oidMatch[1])
-		? oidMatch[1]
-		: oidMatch[1] === '(initial)'
-			? null
-			: null;
-	const paths: string[] = [];
+	if (
+		!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(oidMatch[1]) &&
+		oidMatch[1] !== '(initial)'
+	) {
+		return null;
+	}
+	const gitHead = oidMatch[1] === '(initial)' ? null : oidMatch[1];
+	const dirtyTrackedPaths: string[] = [];
+	const untrackedPaths: string[] = [];
+	const unmergedPaths: string[] = [];
+	const unmergedCodes: string[] = [];
+	const dirtySubmodulePaths: string[] = [];
+	let renameOrCopy = false;
 	for (let index = 0; index < records.length; index++) {
 		const record = records[index];
 		if (!record) continue;
 		if (record.startsWith('? ')) {
-			paths.push(record.slice(2));
+			untrackedPaths.push(record.slice(2));
 			continue;
 		}
 		if (record.startsWith('1 ')) {
+			const fields = record.split(' ');
 			const changedPath = porcelainV2PathAfterFields(record, 8);
-			if (!changedPath) return null;
-			paths.push(changedPath);
+			if (!changedPath || !fields[2]) return null;
+			dirtyTrackedPaths.push(changedPath);
+			if (fields[2] !== 'N...') dirtySubmodulePaths.push(changedPath);
 			continue;
 		}
 		if (record.startsWith('2 ')) {
+			const fields = record.split(' ');
 			const changedPath = porcelainV2PathAfterFields(record, 9);
 			const originalPath = records[++index];
-			if (!changedPath || !originalPath) return null;
-			paths.push(changedPath, originalPath);
+			if (!changedPath || !originalPath || !fields[2]) return null;
+			renameOrCopy = true;
+			dirtyTrackedPaths.push(changedPath, originalPath);
+			if (fields[2] !== 'N...') dirtySubmodulePaths.push(changedPath);
 			continue;
 		}
 		if (record.startsWith('u ')) {
+			const fields = record.split(' ');
 			const changedPath = porcelainV2PathAfterFields(record, 10);
-			if (!changedPath) return null;
-			paths.push(changedPath);
+			const unmergedCode = fields[1];
+			if (
+				!changedPath ||
+				!fields[2] ||
+				!unmergedCode ||
+				!/^(?:DD|AU|UD|UA|DU|AA|UU)$/.test(unmergedCode)
+			) {
+				return null;
+			}
+			unmergedPaths.push(changedPath);
+			unmergedCodes.push(unmergedCode);
+			dirtyTrackedPaths.push(changedPath);
+			if (fields[2] !== 'N...') dirtySubmodulePaths.push(changedPath);
 			continue;
 		}
 		return null;
 	}
-	return { gitHead, changedFiles: [...new Set(paths)] };
+	return {
+		gitHead,
+		dirtyTrackedPaths: [...new Set(dirtyTrackedPaths)],
+		untrackedPaths: [...new Set(untrackedPaths)],
+		renameOrCopy,
+		unmergedPaths: [...new Set(unmergedPaths)],
+		unmergedCodes: [...new Set(unmergedCodes)],
+		dirtySubmodulePaths: [...new Set(dirtySubmodulePaths)],
+	};
 }
 
 function porcelainV2PathAfterFields(
@@ -694,7 +1092,14 @@ export function captureWorkspaceSnapshot(
 		directory: path.resolve(directory),
 		gitHead: snapshot?.gitHead ?? null,
 		dirtyHash: porcelain === null ? null : digest(porcelain),
-		changedFiles: snapshot?.changedFiles ?? null,
+		changedFiles: snapshot
+			? [
+					...new Set([
+						...snapshot.dirtyTrackedPaths,
+						...snapshot.untrackedPaths,
+					]),
+				]
+			: null,
 		prHeadSha,
 		scope,
 	};

@@ -10,7 +10,7 @@ description: >
   class eradication, independent critic and implementation review, and PR-ready
   closure.
 metadata:
-  version: 2.0.0
+  version: 2.1.0
 ---
 
 # Issue Tracer

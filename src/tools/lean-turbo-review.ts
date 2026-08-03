@@ -7,6 +7,8 @@
 import type { ToolDefinition } from '@opencode-ai/plugin/tool';
 import { z } from 'zod';
 import { loadPluginConfigWithMeta } from '../config';
+import type { ReviewModelDispatcher } from '../review/contracts.js';
+import type { ReviewAgentModelRegistry } from '../review/runtime.js';
 import {
 	dispatchPhaseReviewer,
 	type PhaseReviewerResult,
@@ -39,6 +41,10 @@ export interface LeanTurboReviewResult {
  */
 export async function executeLeanTurboReview(
 	args: LeanTurboReviewArgs,
+	dispatcher?: ReviewModelDispatcher,
+	generatedAgentNames?: readonly string[],
+	agentModelRegistry?: ReviewAgentModelRegistry,
+	activeAgentName?: string,
 ): Promise<LeanTurboReviewResult> {
 	const { directory, phase, sessionID } = args;
 
@@ -56,6 +62,10 @@ export async function executeLeanTurboReview(
 	try {
 		const result = await dispatchPhaseReviewer(directory, phase, sessionID, {
 			requireDiffSummary,
+			dispatcher,
+			generatedAgentNames,
+			agentModelRegistry,
+			activeAgentName,
 		});
 
 		return {
@@ -75,23 +85,44 @@ export async function executeLeanTurboReview(
 /**
  * Tool definition for lean_turbo_review
  */
-export const lean_turbo_review: ToolDefinition = createSwarmTool({
-	description:
-		'Dispatch a read-only reviewer agent to evaluate a completed Lean Turbo phase. ' +
-		'Wraps dispatchPhaseReviewer from src/turbo/lean/reviewer. ' +
-		'Returns verdict (APPROVED/NEEDS_REVISION/REJECTED), reason, and evidence path.',
-	args: {
-		directory: z.string().describe('Project root directory'),
-		phase: z.number().int().positive().describe('Phase number being reviewed'),
-		sessionID: z.string().describe('Lean Turbo session ID'),
-	},
-	execute: async (args: unknown, _directory: string) => {
-		const parsed = args as LeanTurboReviewArgs;
-		// Use _directory from tool context for .swarm containment (invariant #4)
-		return JSON.stringify(
-			await executeLeanTurboReview({ ...parsed, directory: _directory }),
-			null,
-			2,
-		);
-	},
-});
+export function createLeanTurboReviewTool(
+	dispatcher?: ReviewModelDispatcher,
+	generatedAgentNames?: readonly string[],
+	agentModelRegistry?: ReviewAgentModelRegistry,
+	getActiveAgentName?: (sessionID: string) => string | undefined,
+): ToolDefinition {
+	return createSwarmTool({
+		description:
+			'Dispatch a read-only reviewer agent to evaluate a completed Lean Turbo phase. ' +
+			'Wraps dispatchPhaseReviewer from src/turbo/lean/reviewer. ' +
+			'Returns verdict (APPROVED/NEEDS_REVISION/REJECTED), reason, and evidence path.',
+		args: {
+			directory: z.string().describe('Project root directory'),
+			phase: z
+				.number()
+				.int()
+				.positive()
+				.describe('Phase number being reviewed'),
+			sessionID: z.string().describe('Lean Turbo session ID'),
+		},
+		execute: async (args: unknown, _directory: string, ctx) => {
+			const parsed = args as LeanTurboReviewArgs;
+			// Use _directory from tool context for .swarm containment (invariant #4)
+			return JSON.stringify(
+				await executeLeanTurboReview(
+					{ ...parsed, directory: _directory },
+					dispatcher,
+					generatedAgentNames,
+					agentModelRegistry,
+					ctx?.agent !== undefined
+						? String(ctx.agent)
+						: getActiveAgentName?.(ctx?.sessionID ?? parsed.sessionID),
+				),
+				null,
+				2,
+			);
+		},
+	});
+}
+
+export const lean_turbo_review: ToolDefinition = createLeanTurboReviewTool();

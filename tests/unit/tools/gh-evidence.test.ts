@@ -335,3 +335,153 @@ describe('gh_evidence — existing targets still work', () => {
 		expect(parsed.number).toBe(99);
 	});
 });
+
+describe('gh_evidence — expanded PR field allowlist', () => {
+	const NEW_PR_FIELDS = [
+		'labels',
+		'comments',
+		'assignees',
+		'milestone',
+		'mergedAt',
+		'createdAt',
+		'closedAt',
+		'updatedAt',
+	];
+
+	test.each(
+		NEW_PR_FIELDS,
+	)('pr target accepts newly-allowed field %s', async (field) => {
+		ghInternals.resolveGhBinary = () => 'gh';
+		let sentJson = '';
+		ghInternals.runExternalTool = mock(async (options) => {
+			const jsonIdx = options.args.indexOf('--json');
+			sentJson = options.args[jsonIdx + 1] ?? '';
+			return {
+				status: 'completed',
+				exitCode: 0,
+				stdout: JSON.stringify({ number: 5 }),
+				stderr: '',
+				stdoutTruncated: false,
+				stderrTruncated: false,
+			};
+		}) as typeof realRunGh;
+		const parsed = await executeTool(
+			gh_evidence,
+			{ target: 'pr', number: 5, fields: field },
+			tmpDir,
+		);
+		expect(parsed.error).toBeUndefined();
+		expect(parsed.fields).toEqual([field]);
+		expect(sentJson.split(',')).toContain(field);
+	});
+});
+
+describe('gh_evidence — field rejection diagnostics', () => {
+	test('unsupported pr field names the rejected field and the allowed set', async () => {
+		const mockRun = mock(async () => {
+			throw new Error('runExternalTool must not run when fields are invalid');
+		}) as typeof realRunGh;
+		ghInternals.resolveGhBinary = () => 'gh';
+		ghInternals.runExternalTool = mockRun;
+		const parsed = await executeTool(
+			gh_evidence,
+			{ target: 'pr', number: 5, fields: 'bogusField' },
+			tmpDir,
+		);
+		expect(parsed.error).toBe(true);
+		expect(parsed.type).toBe('invalid-input');
+		expect(parsed.message).toContain('unsupported pr field(s): bogusField');
+		expect(parsed.message).toContain('Allowed pr fields:');
+		expect(parsed.message).toContain('labels');
+		expect(parsed.message).toContain('statusCheckRollup');
+		// invalid fields short-circuit before gh is ever invoked
+		expect(mockRun).not.toHaveBeenCalled();
+	});
+
+	test('control-char field names are dropped from the echoed rejection', async () => {
+		ghInternals.resolveGhBinary = () => 'gh';
+		const parsed = await executeTool(
+			gh_evidence,
+			{ target: 'pr', number: 5, fields: ['plainUnknown', 'bad\u0001name'] },
+			tmpDir,
+		);
+		expect(parsed.error).toBe(true);
+		expect(parsed.type).toBe('invalid-input');
+		expect(parsed.message).toContain('plainUnknown');
+		expect(parsed.message).not.toContain('\u0001');
+	});
+
+	test('a control-char-only rejection omits names entirely', async () => {
+		ghInternals.resolveGhBinary = () => 'gh';
+		const parsed = await executeTool(
+			gh_evidence,
+			{ target: 'issue', number: 7, fields: ['bad\u0002only'] },
+			tmpDir,
+		);
+		expect(parsed.error).toBe(true);
+		expect(parsed.type).toBe('invalid-input');
+		expect(parsed.message).toContain('contain control characters');
+		expect(parsed.message).not.toContain('\u0002');
+	});
+});
+
+describe('gh_evidence — gh-not-found guidance', () => {
+	test('pr: builds the REST URL from repo and names the web-fetch degraded path', async () => {
+		ghInternals.resolveGhBinary = () => null;
+		const parsed = await executeTool(
+			gh_evidence,
+			{ target: 'pr', number: 5, repo: 'owner/repo' },
+			tmpDir,
+		);
+		expect(parsed.error).toBe(true);
+		expect(parsed.type).toBe('gh-not-found');
+		expect(parsed.message).toContain(
+			'https://api.github.com/repos/owner/repo/pulls/5',
+		);
+		expect(parsed.message).toContain('web fetch');
+		expect(parsed.message).toContain('snake_case');
+		expect(parsed.message).toContain('statusCheckRollup');
+	});
+
+	test('missing repo yields the owner/name placeholder and a pass-repo instruction', async () => {
+		ghInternals.resolveGhBinary = () => null;
+		const parsed = await executeTool(
+			gh_evidence,
+			{ target: 'pr', number: 12 },
+			tmpDir,
+		);
+		expect(parsed.type).toBe('gh-not-found');
+		expect(parsed.message).toContain(
+			'https://api.github.com/repos/<owner>/<name>/pulls/12',
+		);
+		expect(parsed.message).toContain('pass repo');
+	});
+
+	test.each([
+		['issue', 9, 'issues/9'],
+		['run', 33, 'actions/runs/33'],
+	] as const)('%s target builds the matching REST path when gh is absent', async (target, number, restPath) => {
+		ghInternals.resolveGhBinary = () => null;
+		const parsed = await executeTool(
+			gh_evidence,
+			{ target, number, repo: 'o/r' },
+			tmpDir,
+		);
+		expect(parsed.type).toBe('gh-not-found');
+		expect(parsed.message).toContain(
+			`https://api.github.com/repos/o/r/${restPath}`,
+		);
+	});
+
+	test('run + log_failed notes that failed-job logs are gh-only', async () => {
+		ghInternals.resolveGhBinary = () => null;
+		const parsed = await executeTool(
+			gh_evidence,
+			{ target: 'run', number: 33, repo: 'o/r', log_failed: true },
+			tmpDir,
+		);
+		expect(parsed.type).toBe('gh-not-found');
+		expect(parsed.message).toContain('log_failed');
+		expect(parsed.message).toContain('gh-only');
+	});
+});
