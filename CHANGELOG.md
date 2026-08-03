@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.135.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.135.1...v7.135.2) (2026-08-03)
+
+
+### Bug Fixes
+
+* **pr-workflow:** resolve controller deadlocks ([666b66b](https://github.com/ZaxbyHub/opencode-swarm/commit/666b66bb6131d37425b5923f9749f6c1c77566ee))
+* **repo-graph:** incremental update lifecycle correctness ([8fd8246](https://github.com/ZaxbyHub/opencode-swarm/commit/8fd824608afd9a9cca943d95e7a704cd06f72a99))
+
 ## [7.135.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.135.0...v7.135.1) (2026-08-02)
 
 
