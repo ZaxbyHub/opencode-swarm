@@ -844,9 +844,14 @@ Under Profile A, after `collect_lane_results` returns for base lanes, process
 each lane result that carries an `output_ref`. The orchestrator MUST use the
 candidate parser rather than preview-text extraction:
 
-1. For each `output_ref`, call `parse_lane_candidates` with `output_ref`,
-   `producer: "swarm-pr-review"`, and `expected_family: "base_explorer"`. The parser reads
-   the full artifact from disk (no preview truncation issue) and returns
+1. For each singleton base `output_ref`, call `parse_lane_candidates` with
+   `output_ref`, `producer: "swarm-pr-review"`,
+   `expected_family: "base_explorer"`, and `expected_lane` set to the exact
+   `workflow_lane` declared at dispatch. For a consolidated tier-S/M lane, call
+   the parser once for each owned dimension with that dimension as
+   `expected_lane` and pass `expected_lanes` as the lane's complete
+   `owned_workflow_lanes` array on every call. The parser reads the full artifact
+   from disk (no preview truncation issue), rejects unowned rows, and returns
    structured `ParseResultWithSidecar` records.
 2. Filter the returned `candidates[]` by `producer: "swarm-pr-review"` plus the
    exact `source_batch_id` and `source_lane_id` from the base dispatch. Treat a
@@ -924,8 +929,10 @@ Explorers emit structured candidate records. The parser reads the full lane
 artifact and extracts these records. The canonical record shape is:
 
 ```text
-[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence: LOW/MEDIUM/HIGH
+[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence
 ```
+
+The confidence data value must be exactly LOW, MEDIUM, or HIGH.
 
 Under Profile A the parser normalizes this into a structured `candidates[]`
 array. On Profiles B/C — and as a Profile A fallback when the parser is
@@ -952,31 +959,35 @@ After base lanes settle, inspect the exact diff/context pack to focus every row
 in the micro-lane map and print a mandatory ledger with one row per map row:
 
 ```text
-[TRIGGER-EVAL] | trigger_row | MATCHED | focus_evidence
+[TRIGGER-EVAL] | trigger_row | MATCHED/NOT_TRIGGERED | focus_evidence
 ```
 
 Focus evidence must name the changed files, manifests, imports/symbols, semantic
-signals, or explicit absence conditions the lane should examine. `MATCHED` means
-the family's evaluation is required, not that a keyword heuristic guessed
-applicability.
+signals, or explicit absence conditions. Use `MATCHED` when the exact diff has
+an applicable surface and dispatch that family; use `NOT_TRIGGERED` only when
+the row was evaluated and concrete absence evidence proves it inapplicable.
+`unclassified-risk` is the always-`MATCHED` fallback. A `NOT_TRIGGERED` row is
+not a waiver or a micro artifact and carries no source batch/lane provenance.
 Repository identity, technology stack, PR size, elapsed time, or predicted risk
 never justifies skipping a row.
 
 Every row in the map is a risk **family** that must be evaluated against the
 diff on every PR, in every repository. What scales with the depth tier is the
 dispatch shape — how many subagents carry that evaluation — never the
-evaluation itself. Each family must end in its own attestation: `[CANDIDATE]`
-rows naming the family, or one fully populated per-family `[CLEAN]` row.
+evaluation itself. Each `MATCHED` family must end in its own attestation:
+`[CANDIDATE]` rows naming the family, or one fully populated per-family
+`[CLEAN]` row. `NOT_TRIGGERED` families end in the ledger with absence evidence
+and must not be dispatched.
 
 **Profile A dispatch.** Launch the micro coverage with
 `dispatch_lanes_async` and `mode: "swarm-pr-review:micro"`. At depth tier L,
-dispatch one focused micro-lane for every row, each lane's
+dispatch one focused micro-lane for every `MATCHED` row, each lane's
 `workflow_lane` equal to its trigger ID; because the dispatcher accepts at
-most eight lanes per call, split the
-eleven mandatory micro-lanes across bounded async batches. At tiers S and M,
+most eight lanes per call, split large matched sets across bounded async
+batches. At tiers S and M,
 consolidated lanes may each own several families: set `workflow_lane` to one
 owned trigger ID and declare the complete `owned_workflow_lanes` set — every
-family owned exactly once across the dispatch, and every owned family
+matched family owned exactly once across the dispatch, and every owned family
 attested in that lane's output, or the lane fails for all of them. Include
 the complete exact-set
 `trigger_evaluation` ledger and the same exact current `pr_head_sha` in every
@@ -985,37 +996,39 @@ unrelated or duplicate micro-lanes within a batch, and final ledger persistence
 rejects any row whose completed owning-lane provenance is absent.
 Poll incrementally, then settle every launched lane. Persist
 the complete ledger with `write_pr_review_trigger_eval`; its rows use the stable
-trigger IDs below, and every row includes its returned `source_batch_id` and
-`source_lane_id`. Missing, extra, duplicate, `NO-MATCH`, or unprovenanced
-rows make persistence fail and Phase 4 BLOCKED. The tool atomically writes
+trigger IDs below. Every `MATCHED` row includes its returned `source_batch_id`
+and `source_lane_id`; every `NOT_TRIGGERED` row must omit both fields. Missing,
+extra, duplicate, malformed, or incorrectly provenanced rows make persistence
+fail and Phase 4 BLOCKED. The tool atomically writes
 `.swarm/pr-review/<run_id>/trigger-eval.json`, separate from `findings.jsonl`;
 pass the exact reviewed merge-base as `base_sha`, the exact live base branch
 tip/ref used to compute it as `base_ref`, and the same `pr_head_sha` to the
 writer. The writer runs bounded `git merge-base -- <base_ref> <pr_head_sha>` and
-rejects any claimed `base_sha` that is not the exact result. It accepts only the
-exact eleven-row `MATCHED` set, each row backed by a completed, non-degraded,
-exact-head artifact from a lane that declared ownership of that family and
-attested every family it owns. It never uses keyword
-classification as permission to waive a family. Any head mismatch makes
-persistence fail.
+rejects any claimed `base_sha` that is not the exact result. It accepts only an
+exact eleven-row v2 receipt: `MATCHED` rows are backed by completed,
+non-degraded, exact-head artifacts from lanes that declared and attested their
+families; `NOT_TRIGGERED` rows are provenance-free. Counts are recomputed and
+must agree. It never uses keyword or path classification alone as absence
+evidence. Any head mismatch makes persistence fail. Historical unversioned and
+schema-v1 all-`MATCHED` receipts remain readable, but new writes are strict v2.
 Do not add trigger results to the finding-status enum.
 
 **Profiles B/C dispatch.** Scale the lane shape to the depth tier while
 keeping all eleven family evaluations:
 
-- Tier L: one focused lane per family, mirroring Profile A.
-- Tier M: a dedicated lane for every risk-triggered family; consolidate the
-  remaining families into one or two sweep lanes that each carry an explicit
-  per-family checklist.
-- Tier S: fold the full eleven-family checklist into the base wave's lanes
-  (B) or into one consolidated micro sweep or sequential checklist pass (C).
+- Tier L: one focused lane per `MATCHED` family, mirroring Profile A.
+- Tier M: dispatch the `MATCHED` families across at least the controller's
+  matched-set consolidation floor; `NOT_TRIGGERED` rows remain ledger-only.
+- Tier S: dispatch the `MATCHED` set in one or more consolidated micro lanes or
+  sequentially separated passes; keep `NOT_TRIGGERED` rows ledger-only.
 
 Whatever the dispatch shape: the ledger keeps one `[TRIGGER-EVAL]` row per
-family; each row's focus evidence names the lane or pass that evaluated it;
-each family gets its own `[CANDIDATE]`/`[CLEAN]` attestation naming the family
-id; and the completed ledger is persisted as `trigger-eval.json` in the
-session/task workspace before reviewer dispatch. A family with no attestation
-row is an unclosed coverage gap, exactly as if a Profile A lane had failed.
+family; each `MATCHED` row's focus evidence names the lane or pass that
+evaluated it and gets its own `[CANDIDATE]`/`[CLEAN]` attestation naming the
+family id; each `NOT_TRIGGERED` row records absence evidence without an
+artifact; and the completed ledger is persisted as `trigger-eval.json` in the
+session/task workspace before reviewer dispatch. A matched family with no
+attestation row is an unclosed coverage gap.
 
 For each micro `output_ref` (Profile A), call `parse_lane_candidates` with
 `producer: "swarm-pr-review"`, `expected_family: "micro_lane"`, and
@@ -1057,13 +1070,12 @@ Each micro-lane receives:
 
 ### Repository-agnostic mandatory micro-lane map
 
-Every row is evaluated in every repository. Diff/context analysis focuses each
-family's evaluation but cannot waive it: semantic applicability is not reliably
-decidable from paths or keywords, so `NO-MATCH` is invalid. Repository policy
+Every row is evaluated in every repository. Diff/context analysis determines
+whether it is `MATCHED` or `NOT_TRIGGERED`; paths or keywords alone are not
+sufficient absence evidence. Repository policy
 may require supplementary specialist review outside this canonical ledger, but
 supplementary work never replaces these portable rows. The `unclassified-risk`
-family is always evaluated to cover novel failure modes and classification
-gaps.
+family is always `MATCHED` to cover novel failure modes and classification gaps.
 
 > **Trigger-ID namespace — do not mix (issue #1931).** The `trigger_id` field
 > passed to `write_pr_review_trigger_eval` accepts **only** the 11 micro-lane
@@ -1123,9 +1135,10 @@ Verifier output is advisory until incorporated by the independent reviewer or cr
 
 ## Phase 6: Independent Reviewer Confirmation
 
-**Reviewer-dispatch join barrier:** reviewer dispatch MUST NOT begin until the micro-lane ledger is
-complete and persisted, every launched micro lane is settled with all eleven
-families attested (under Profile A: all eleven micro-lanes settled), and every
+**Reviewer-dispatch join barrier:** reviewer dispatch MUST NOT begin until the
+exact eleven-row micro-lane ledger is complete and persisted, every launched
+`MATCHED` micro lane is settled with its owned families attested, every
+`NOT_TRIGGERED` row has concrete absence evidence and no provenance, and every
 accepted micro result has parser-derived provenance (Profile A) or a valid
 CLEAN attestation.
 

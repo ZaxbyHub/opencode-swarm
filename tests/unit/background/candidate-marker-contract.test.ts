@@ -1,6 +1,10 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import {
+	CANDIDATE_FIELD_COUNT,
+	CANDIDATE_FIELDS,
+} from '../../../src/background/candidate-contract';
 import type {
 	ArtifactInput,
 	ParseFlags,
@@ -87,10 +91,8 @@ describe('CANDIDATE marker contract (FR-007)', () => {
 	// Prompt instructs 9-pipe format for both base_explorer and micro_lane
 	// -------------------------------------------------------------------------
 
-	test('SC-019: parser defines EXPECTED_FIELD_COUNT = 9', () => {
-		const match = parserSrc.match(/EXPECTED_FIELD_COUNT\s*=\s*(\d+)/);
-		expect(match).not.toBeNull();
-		expect(Number(match![1])).toBe(9);
+	test('SC-019: shared candidate contract defines 9 fields', () => {
+		expect(CANDIDATE_FIELD_COUNT).toBe(9);
 	});
 
 	test('SC-019: base_explorer prompt declares 9 pipe-delimited fields', () => {
@@ -156,13 +158,11 @@ describe('CANDIDATE marker contract (FR-007)', () => {
 	// -------------------------------------------------------------------------
 
 	test('base_explorer uses impact_context as family discriminator', () => {
-		expect(parserSrc).toContain('BASE_EXPLORER_DISCRIMINATOR');
-		expect(parserSrc).toContain('impact_context');
+		expect(CANDIDATE_FIELDS.base_explorer).toContain('impact_context');
 	});
 
 	test('micro_lane uses invariant_violated as family discriminator', () => {
-		expect(parserSrc).toContain('MICRO_LANE_DISCRIMINATOR');
-		expect(parserSrc).toContain('invariant_violated');
+		expect(CANDIDATE_FIELDS.micro_lane).toContain('invariant_violated');
 	});
 
 	test('explorer prompt distinguishes base_explorer and micro_lane by discriminator field', () => {

@@ -283,8 +283,10 @@ describe('buildDetailedHelp() — via handleHelpCommand for single-token command
 		expect(result).toContain('all 6 review dimensions covered on every PR');
 		expect(result).toContain('architect keeps doing non-dependent work');
 		expect(result).toContain(
-			'evaluates all 11 mandatory repository-agnostic risk families',
+			'evaluates an exact 11-row repository-agnostic risk-family ledger',
 		);
+		expect(result).toContain('provenance-free NOT_TRIGGERED');
+		expect(result).toContain('dispatches micro work only for MATCHED families');
 		expect(result).toContain(
 			'blocking or direct-Task dispatch is not provenance-equivalent',
 		);

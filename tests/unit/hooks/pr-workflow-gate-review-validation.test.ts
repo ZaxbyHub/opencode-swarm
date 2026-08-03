@@ -59,7 +59,7 @@ describe('pr-workflow-gate review validation', () => {
 				],
 				{ batchId: 'waived-review', prHeadSha: HEAD_SHA },
 			),
-		).rejects.toThrow('exact all-MATCHED');
+		).rejects.toThrow('trigger evaluation is invalid');
 	});
 
 	test('reviewer dispatch independently rejects missing micro-lane provenance', async () => {

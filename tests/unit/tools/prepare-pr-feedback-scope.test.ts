@@ -41,6 +41,10 @@ const originalResolveIsWorkingTreeClean =
 	_test_exports.resolveIsWorkingTreeClean;
 const originalResolveIsWorkingTreeCleanAsync =
 	_test_exports.resolveIsWorkingTreeCleanAsync;
+const originalResolveCurrentUpstreamPushTargetAsync =
+	_test_exports.resolveCurrentUpstreamPushTargetAsync;
+const originalResolveRemoteRefsContainingHeadAsync =
+	_test_exports.resolveRemoteRefsContainingHeadAsync;
 
 beforeEach(() => {
 	clearScopeBindings();
@@ -56,6 +60,17 @@ beforeEach(() => {
 		_test_exports.resolveCurrentGitHead(dir);
 	_test_exports.resolveIsWorkingTreeCleanAsync = async (dir) =>
 		_test_exports.resolveIsWorkingTreeClean(dir);
+	// This scope test exercises the existing-tracked-branch success path only.
+	// Detached attachment and ambiguous/missing candidates are covered by
+	// pr-workflow-gate-feedback-attachment.test.ts.
+	_test_exports.resolveCurrentUpstreamPushTargetAsync = async () => ({
+		remoteName: 'origin',
+		remoteBranchRef: 'refs/heads/pr-head',
+		remoteTrackingRef: 'refs/remotes/origin/pr-head',
+	});
+	_test_exports.resolveRemoteRefsContainingHeadAsync = async () => [
+		'refs/remotes/origin/pr-head',
+	];
 });
 
 afterEach(async () => {
@@ -68,6 +83,10 @@ afterEach(async () => {
 	_test_exports.resolveIsWorkingTreeClean = originalResolveIsWorkingTreeClean;
 	_test_exports.resolveIsWorkingTreeCleanAsync =
 		originalResolveIsWorkingTreeCleanAsync;
+	_test_exports.resolveCurrentUpstreamPushTargetAsync =
+		originalResolveCurrentUpstreamPushTargetAsync;
+	_test_exports.resolveRemoteRefsContainingHeadAsync =
+		originalResolveRemoteRefsContainingHeadAsync;
 	await fs.rm(directory, { recursive: true, force: true });
 });
 

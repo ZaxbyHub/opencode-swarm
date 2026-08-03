@@ -165,6 +165,34 @@ describe('PR workflow checkout bootstrap', () => {
 		}
 	});
 
+	test('accepts only a full exact SHA for inherited detached PR_FEEDBACK intake', async () => {
+		await activatePrWorkflow(
+			directory,
+			'feedback-exact-detached',
+			'PR_FEEDBACK',
+		);
+		await expect(
+			enforcePrWorkflowToolBefore(
+				directory,
+				'feedback-exact-detached',
+				'shell',
+				{ command: `git switch --detach ${'a'.repeat(40)}` },
+			),
+		).resolves.toBeUndefined();
+		const rejection = enforcePrWorkflowToolBefore(
+			directory,
+			'feedback-exact-detached',
+			'shell',
+			{ command: 'git switch --detach feature/pr-head' },
+		);
+		await expect(rejection).rejects.toThrow('exact local tracking branch');
+		await expect(rejection).rejects.toThrow('--track <remote>/<branch>');
+		await expect(rejection).rejects.toThrow('bind it directly');
+		await expect(rejection).rejects.not.toThrow(
+			'git switch --detach <full_pr_head_sha>',
+		);
+	});
+
 	test('does not classify a leading flag as a detached feedback ref (F-008)', async () => {
 		await activatePrWorkflow(directory, 'feedback-detach-flag', 'PR_FEEDBACK');
 		await expect(
@@ -193,7 +221,7 @@ describe('PR workflow checkout bootstrap', () => {
 		).rejects.toThrow('clean');
 	});
 
-	test('requires a tracking branch on the first real PR_FEEDBACK head bind', async () => {
+	test('attaches the exact remote-tracking branch on the first real PR_FEEDBACK head bind', async () => {
 		_test_exports.resolveCurrentGitHead = originalResolveCurrentGitHead;
 		_test_exports.resolveIsWorkingTreeClean = originalResolveIsWorkingTreeClean;
 		_test_exports.resolveCurrentUpstreamPushTarget =
@@ -230,17 +258,18 @@ describe('PR workflow checkout bootstrap', () => {
 		await activatePrWorkflow(checkout, 'feedback-detached', 'PR_FEEDBACK');
 		await expect(
 			bindPrWorkflowHead(checkout, 'feedback-detached', sha),
-		).rejects.toThrow('remote-tracking ref');
-
+		).resolves.toMatchObject({ prHeadSha: sha });
+		expect(git(checkout, ['branch', '--show-current']).stdout.trim()).toBe(
+			'pr-feedback',
+		);
 		expect(
 			git(checkout, [
-				'switch',
-				'-c',
-				'pr-feedback',
-				'--track',
-				'origin/pr-feedback',
-			]).status,
-		).toBe(0);
+				'rev-parse',
+				'--symbolic-full-name',
+				'@{u}',
+			]).stdout.trim(),
+		).toBe('refs/remotes/origin/pr-feedback');
+
 		await activatePrWorkflow(checkout, 'feedback-tracking', 'PR_FEEDBACK');
 		await expect(
 			bindPrWorkflowHead(checkout, 'feedback-tracking', sha),
@@ -351,13 +380,14 @@ describe('architect-visible checkout contract', () => {
 
 	test.each(
 		feedbackSurfaces,
-	)('%s requires safe local PR feedback checkout before verification', (relative) => {
+	)('%s documents safe exact-head feedback attachment before verification', (relative) => {
 		const content = readFileSync(path.join(root, relative), 'utf-8')
 			.replace(/\\`/g, '`')
 			.toLowerCase();
 		expect(content).toContain('before dispatching feedback lanes');
-		expect(content).toContain('pr head');
-		expect(content).toContain('`--force`');
-		expect(content).toContain('`--recurse-submodules`');
+		expect(content).toContain('exact');
+		expect(content).toMatch(/(?:remote-)?tracking ref/);
+		expect(content).toContain('tracked');
+		expect(content).toContain('untracked');
 	});
 });

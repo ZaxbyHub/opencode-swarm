@@ -110,7 +110,7 @@ async function persistPrReviewBatch(
 						? '[CRITIC] | C-001 | UPHELD | HIGH | reason | no change'
 						: mode === 'swarm-pr-feedback:verification'
 							? `[FEEDBACK-VERIFIED] | ${lane.workflowLane} | CONFIRMED | evidence`
-							: `[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence\nC-${index} | ${lane.workflowLane} | HIGH | correctness | file.ts:1 | claim | evidence | impact | HIGH`);
+							: `${mode === 'swarm-pr-review:micro' ? '[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence' : '[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence'}\nC-${index} | ${lane.workflowLane} | HIGH | correctness | file.ts:1 | claim | evidence | impact | HIGH`);
 		const stored = storeLaneOutput(directory, {
 			batchId,
 			laneId: lane.laneId,
@@ -165,7 +165,7 @@ async function establishPrReviewPrerequisites(): Promise<void> {
 			'swarm-pr-review:micro',
 			[{ laneId, workflowLane }],
 			{
-				textOverride: `[CLEAN] | ${workflowLane} | exact reviewed diff | no finding after focused invariant review`,
+				textOverride: `[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence\n[CLEAN] | ${workflowLane} | exact reviewed diff | no finding after focused invariant review`,
 			},
 		);
 	}
@@ -177,6 +177,7 @@ async function establishPrReviewPrerequisites(): Promise<void> {
 		triggerRows.push({
 			trigger_id: workflowLane,
 			result: 'MATCHED',
+			evidence: `Test fixture evidence for ${workflowLane}`,
 			source_batch_id: `micro-${index}`,
 			source_lane_id: `micro-lane-${index}`,
 		});

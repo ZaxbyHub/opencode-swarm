@@ -77,6 +77,20 @@ describe('PR-workflow bind path resolves Git off the blocking spawn', () => {
 		expect(syncHeadCalls).toBe(0);
 	});
 
+	test('PR_FEEDBACK head mismatch remediation requires tracking, never a detached checkout', async () => {
+		_test_exports.resolveCurrentGitHeadAsync = async () => 'b'.repeat(40);
+		let message = '';
+		try {
+			await assertCurrentCheckoutHead('/nonexistent-dir', HEAD, 'PR_FEEDBACK');
+		} catch (error) {
+			message = error instanceof Error ? error.message : String(error);
+		}
+		expect(message).toContain('local tracking branch');
+		expect(message).toContain('--track');
+		expect(message).not.toContain('switch --detach');
+		expect(message).not.toContain('detached PR head');
+	});
+
 	test('assertPrReviewCleanCheckout reads the async clean-check resolver, never the sync spawn', async () => {
 		await assertPrReviewCleanCheckout('/nonexistent-dir');
 		expect(asyncCleanCalls).toBe(1);

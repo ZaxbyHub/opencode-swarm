@@ -8,6 +8,12 @@ import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
 import { z } from 'zod';
 import { validateSwarmPath } from '../hooks/utils';
+import {
+	CANDIDATE_CONFIDENCES,
+	CANDIDATE_SEVERITIES,
+	CLEAN_COVERAGE_SCOPE_MIN_CHARS,
+	CLEAN_EVIDENCE_MIN_CHARS,
+} from './candidate-contract';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -55,62 +61,106 @@ const SidecarEnvelopeSchema = z
 	.strict();
 
 /** Schema for CLEAN attestation records written to the sidecar. */
-const SidecarCleanAttestationSchema = z
-	.object({
-		record_type: z.literal('clean_attestation'),
-		row_format_family: z.literal('micro_lane'),
-		row_format_version: z.number().int().nonnegative(),
-		record_version: z.object({
-			major: z.number().int().nonnegative(),
-			minor: z.number().int().nonnegative(),
-		}),
-		source_output_ref: z.string().min(1),
-		source_batch_id: z.string().min(1),
-		source_lane_id: z.string().min(1),
-		source_agent: z.string().min(1),
-		source_digest: z.string().regex(/^[a-f0-9]{64}$/),
-		extracted_from_partial_source: z.literal(false),
-		sessionId: z.string().min(1).optional(),
-		parentSessionId: z.string().min(1).optional(),
-		producer: z.string().optional(),
-		micro_lane: z.string().min(1),
-		coverage_scope: z.string().min(1),
-		evidence: z.string().min(1),
-	})
-	.strict();
+const SidecarCleanAttestationSchema = z.discriminatedUnion(
+	'row_format_family',
+	[
+		z
+			.object({
+				record_type: z.literal('clean_attestation'),
+				row_format_family: z.literal('base_explorer'),
+				row_format_version: z.number().int().nonnegative(),
+				record_version: z.object({
+					major: z.number().int().nonnegative(),
+					minor: z.number().int().nonnegative(),
+				}),
+				source_output_ref: z.string().min(1),
+				source_batch_id: z.string().min(1),
+				source_lane_id: z.string().min(1),
+				source_agent: z.string().min(1),
+				source_digest: z.string().regex(/^[a-f0-9]{64}$/),
+				extracted_from_partial_source: z.literal(false),
+				sessionId: z.string().min(1).optional(),
+				parentSessionId: z.string().min(1).optional(),
+				producer: z.string().optional(),
+				lane: z.string().min(1),
+				coverage_scope: z.string().min(CLEAN_COVERAGE_SCOPE_MIN_CHARS),
+				evidence: z.string().min(CLEAN_EVIDENCE_MIN_CHARS),
+			})
+			.strict(),
+		z
+			.object({
+				record_type: z.literal('clean_attestation'),
+				row_format_family: z.literal('micro_lane'),
+				row_format_version: z.number().int().nonnegative(),
+				record_version: z.object({
+					major: z.number().int().nonnegative(),
+					minor: z.number().int().nonnegative(),
+				}),
+				source_output_ref: z.string().min(1),
+				source_batch_id: z.string().min(1),
+				source_lane_id: z.string().min(1),
+				source_agent: z.string().min(1),
+				source_digest: z.string().regex(/^[a-f0-9]{64}$/),
+				extracted_from_partial_source: z.literal(false),
+				sessionId: z.string().min(1).optional(),
+				parentSessionId: z.string().min(1).optional(),
+				producer: z.string().optional(),
+				micro_lane: z.string().min(1),
+				coverage_scope: z.string().min(CLEAN_COVERAGE_SCOPE_MIN_CHARS),
+				evidence: z.string().min(CLEAN_EVIDENCE_MIN_CHARS),
+			})
+			.strict(),
+	],
+);
 
 /** Schema for candidate records written to the sidecar. */
-const SidecarCandidateSchema = z
-	.object({
-		record_type: z.literal('candidate'),
-		row_format_family: z.enum(['base_explorer', 'micro_lane']),
-		row_format_version: z.number().int().nonnegative(),
-		record_version: z.object({
-			major: z.number().int().nonnegative(),
-			minor: z.number().int().nonnegative(),
-		}),
-		source_output_ref: z.string().min(1),
-		source_batch_id: z.string().min(1),
-		source_lane_id: z.string().min(1),
-		source_agent: z.string().min(1),
-		source_digest: z.string().regex(/^[a-f0-9]{64}$/),
-		sessionId: z.string().min(1).optional(),
-		parentSessionId: z.string().min(1).optional(),
-		producer: z.string().optional(),
-		extracted_from_partial_source: z.boolean(),
-		candidate_id: z.string().min(1),
-		lane: z.string().nullable(),
-		micro_lane: z.string().nullable(),
-		severity: z.string().nullable(),
-		category: z.string().nullable(),
-		file_line: z.string().nullable(),
-		claim: z.string().nullable(),
-		evidence_summary: z.string().nullable(),
-		impact_context: z.string().nullable(),
-		invariant_violated: z.string().nullable(),
-		confidence: z.string().nullable(),
-	})
-	.strict();
+const SidecarCandidateCommon = {
+	record_type: z.literal('candidate'),
+	row_format_version: z.number().int().nonnegative(),
+	record_version: z.object({
+		major: z.number().int().nonnegative(),
+		minor: z.number().int().nonnegative(),
+	}),
+	source_output_ref: z.string().min(1),
+	source_batch_id: z.string().min(1),
+	source_lane_id: z.string().min(1),
+	source_agent: z.string().min(1),
+	source_digest: z.string().regex(/^[a-f0-9]{64}$/),
+	sessionId: z.string().min(1).optional(),
+	parentSessionId: z.string().min(1).optional(),
+	producer: z.string().optional(),
+	extracted_from_partial_source: z.boolean(),
+	candidate_id: z.string().min(1),
+	severity: z.enum(CANDIDATE_SEVERITIES),
+	category: z.string().min(1),
+	file_line: z.string().min(1),
+	claim: z.string().min(1),
+	evidence_summary: z.string().min(1),
+	confidence: z.enum(CANDIDATE_CONFIDENCES),
+} as const;
+
+const SidecarCandidateSchema = z.discriminatedUnion('row_format_family', [
+	z
+		.object({
+			...SidecarCandidateCommon,
+			row_format_family: z.literal('base_explorer'),
+			lane: z.string().min(1),
+			micro_lane: z.null(),
+			impact_context: z.string().min(1),
+			invariant_violated: z.null(),
+		})
+		.strict(),
+	z
+		.object({
+			...SidecarCandidateCommon,
+			row_format_family: z.literal('micro_lane'),
+			lane: z.null(),
+			micro_lane: z.string().min(1),
+			impact_context: z.null(),
+			invariant_violated: z.string().min(1),
+		})
+		.strict(),
+]);
 
 // ---------------------------------------------------------------------------
 // Public types

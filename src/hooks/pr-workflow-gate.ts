@@ -3,11 +3,27 @@ import { type BigIntStats, readFileSync } from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
 import { z } from 'zod';
+import {
+	analyzeCandidateFields,
+	candidateHeaderFamily,
+	type RowFormatFamily,
+	removeCandidateCodeFences,
+	splitPipeFields,
+} from '../background/candidate-contract.js';
+import { parseCandidates } from '../background/candidate-parser.js';
 import { readLaneOutput } from '../background/lane-output-store.js';
 import {
 	findByBatchId,
 	readDelegations,
 } from '../background/pending-delegations.js';
+import {
+	PR_REVIEW_REQUIRED_TRIGGER_IDS,
+	type PrReviewInlineTriggerRow,
+	PrReviewInlineTriggerRowSchema,
+	parsePrReviewTriggerReceipt,
+	prReviewTriggerLedgerDigest,
+	validatePrReviewInlineTriggerLedger,
+} from '../background/pr-review-trigger-contract.js';
 import {
 	resolveCommitCountSince,
 	resolveCommitCountSinceAsync,
@@ -22,12 +38,14 @@ import {
 	resolveIsExactSingleChildCommitAsync,
 	resolveIsWorkingTreeClean,
 	resolveIsWorkingTreeCleanAsync,
+	resolvePrFeedbackTrackingCandidatesAsync,
 	resolvePrReviewDiffStats,
 	resolvePrReviewDiffStatsAsync,
 	resolvePrWorkflowRevisionDigest,
 	resolvePrWorkflowRevisionDigestAsync,
 	resolveRemoteRefsContainingHead,
 	resolveRemoteRefsContainingHeadAsync,
+	switchPrFeedbackTrackingCandidateAsync,
 } from '../background/workspace-snapshot.js';
 import { WRITE_TOOL_NAMES } from '../config/constants.js';
 import { resolveGeneratedAgentRole } from '../config/schema.js';
@@ -47,19 +65,7 @@ export const PR_REVIEW_BASE_DIMENSION_IDS = [
 	'compatibility-delivery',
 ] as const;
 
-export const PR_REVIEW_REQUIRED_MICRO_LANE_IDS = [
-	'auth-identity-secrets',
-	'untrusted-input-boundaries',
-	'subprocess-platform',
-	'concurrency-state',
-	'dependencies-build-release',
-	'api-schema-migrations',
-	'test-infrastructure',
-	'ui-accessibility-i18n',
-	'privacy-observability',
-	'generated-provenance',
-	'unclassified-risk',
-] as const;
+export const PR_REVIEW_REQUIRED_MICRO_LANE_IDS = PR_REVIEW_REQUIRED_TRIGGER_IDS;
 
 export type PrReviewBaseDimensionId =
 	(typeof PR_REVIEW_BASE_DIMENSION_IDS)[number];
@@ -323,6 +329,8 @@ export interface PrWorkflowGateState {
 	prReviewBaseDispatches?: PrReviewBaseDispatchRecord[];
 	/** @deprecated Compatibility projection of the most recent base dispatch. */
 	prReviewBaseDispatch?: PrReviewBaseDispatchRecord;
+	/** Canonical ordered semantic ledger frozen by the first micro dispatch. */
+	prReviewTriggerLedger?: PrReviewInlineTriggerRow[];
 	prReviewTriggerEvalPath?: string;
 	prReviewValidationBatches?: PrReviewValidationBatchRecord[];
 	prReviewArtifactRunId?: string;
@@ -358,11 +366,18 @@ const RENAME_RETRY_DELAY_MS = 10;
 const STATE_MUTATION_LOCK_MAX_ATTEMPTS = 50;
 const STATE_MUTATION_LOCK_RETRY_DELAY_MS = 10;
 const STATE_MUTATION_LOCK_UNINITIALIZED_STALE_MS = 30_000;
+const MAX_COMPLETED_CHECKOUT_LOCK_OWNERS = 64;
+const CHECKOUT_MUTATION_ACTION_TIMEOUT_MS = 5 * 60_000;
+const MAX_CANDIDATE_ISSUES_PER_ARTIFACT = 8;
+const MAX_BASE_COVERAGE_DIAGNOSTICS = 8;
+const MAX_BASE_COVERAGE_DIAGNOSTIC_CHARS = 1_000;
 const DISPATCH_TOOL_NAME = 'dispatch_lanes_async';
 const BLOCKING_DISPATCH_TOOL_NAME = 'dispatch_lanes';
 const WORKFLOW_GATE_DIR = 'pr-workflow-gates';
 const trackedStatesByProjectSession = new Map<string, PrWorkflowGateState>();
 const pendingStateMutationsByProjectSession = new Map<string, Promise<void>>();
+const pendingCheckoutMutationsByProject = new Map<string, Promise<void>>();
+const completedCheckoutLockOwners = new Map<string, string>();
 
 const PrReviewBaseDimensionIdSchema = z.enum([
 	'intent-architecture',
@@ -601,6 +616,10 @@ const PrWorkflowGateStateSchema = z
 			.max(MAX_WORKFLOW_BATCHES)
 			.optional(),
 		prReviewBaseDispatch: PrReviewBaseDispatchRecordSchema.optional(),
+		prReviewTriggerLedger: z
+			.array(PrReviewInlineTriggerRowSchema)
+			.length(PR_REVIEW_REQUIRED_TRIGGER_IDS.length)
+			.optional(),
 		prReviewTriggerEvalPath: z.string().min(1).optional(),
 		prReviewValidationBatches: z
 			.array(PrReviewValidationBatchRecordSchema)
@@ -736,7 +755,7 @@ export async function activatePrWorkflow(
 		}
 	}
 	const initialHead = options.prHeadSha
-		? await assertCurrentCheckoutHead(directory, options.prHeadSha)
+		? await assertCurrentCheckoutHead(directory, options.prHeadSha, mode)
 		: undefined;
 	const timestamp = isoNow();
 	const feedbackTargetUrl =
@@ -807,45 +826,47 @@ export async function withPrWorkflowCheckoutPreparationLock<T>(
 	) => Promise<T>,
 ): Promise<T> {
 	const normalizedSessionID = normalizeSessionID(sessionID);
-	return withSessionStateMutation(directory, normalizedSessionID, async () => {
-		const state = await readPrWorkflowGateStateFromDisk(
-			directory,
-			normalizedSessionID,
-		);
-		if (!state) {
-			// Issue #1931 RC3: prepare_pr_workflow_checkout is called AFTER the
-			// gate is activated (by `/swarm pr-review` at commands/registry.ts
-			// or by the first swarm-pr-review: dispatch in dispatch_lanes_async).
-			// Calling it before either of those ran is a protocol ordering
-			// error, not a missing-file bug — point the caller at the
-			// activation path so they don't go hunting for a fictional
-			// gate file.
-			throw new Error(
-				`BLOCKED: no active PR workflow gate for session "${normalizedSessionID}". ` +
-					`The gate is activated by running \`/swarm pr-review <pr-ref>\` (which activates PR_REVIEW) ` +
-					`or \`/swarm pr-feedback <pr-ref>\` (which activates PR_FEEDBACK), or by the first ` +
-					`dispatch_lanes_async call with mode "swarm-pr-review:*" / "swarm-pr-feedback:*". ` +
-					`Run the appropriate command first, then retry checkout preparation.`,
+	return withPrWorkflowCheckoutMutationLock(directory, async () =>
+		withSessionStateMutation(directory, normalizedSessionID, async () => {
+			const state = await readPrWorkflowGateStateFromDisk(
+				directory,
+				normalizedSessionID,
 			);
-		}
-		if (state.prHeadSha) {
-			throw new Error(
-				`BLOCKED: ${state.mode} checkout preparation is allowed only before the PR head is bound`,
-			);
-		}
-		return action(state, {
-			markRecoveryRequired: async (gitState) => {
-				const nextState: PrWorkflowGateState = {
-					...state,
-					updatedAt: isoNow(),
-					checkoutRecovery: checkoutRecoveryRecord(gitState),
-				};
-				const persisted = await writeStateWhileLocked(directory, nextState);
-				Object.assign(state, persisted);
-				return persisted;
-			},
-		});
-	});
+			if (!state) {
+				// Issue #1931 RC3: prepare_pr_workflow_checkout is called AFTER the
+				// gate is activated (by `/swarm pr-review` at commands/registry.ts
+				// or by the first swarm-pr-review: dispatch in dispatch_lanes_async).
+				// Calling it before either of those ran is a protocol ordering
+				// error, not a missing-file bug — point the caller at the
+				// activation path so they don't go hunting for a fictional
+				// gate file.
+				throw new Error(
+					`BLOCKED: no active PR workflow gate for session "${normalizedSessionID}". ` +
+						`The gate is activated by running \`/swarm pr-review <pr-ref>\` (which activates PR_REVIEW) ` +
+						`or \`/swarm pr-feedback <pr-ref>\` (which activates PR_FEEDBACK), or by the first ` +
+						`dispatch_lanes_async call with mode "swarm-pr-review:*" / "swarm-pr-feedback:*". ` +
+						`Run the appropriate command first, then retry checkout preparation.`,
+				);
+			}
+			if (state.prHeadSha) {
+				throw new Error(
+					`BLOCKED: ${state.mode} checkout preparation is allowed only before the PR head is bound`,
+				);
+			}
+			return action(state, {
+				markRecoveryRequired: async (gitState) => {
+					const nextState: PrWorkflowGateState = {
+						...state,
+						updatedAt: isoNow(),
+						checkoutRecovery: checkoutRecoveryRecord(gitState),
+					};
+					const persisted = await writeStateWhileLocked(directory, nextState);
+					Object.assign(state, persisted);
+					return persisted;
+				},
+			});
+		}),
+	);
 }
 
 export async function clearPrWorkflowGateState(
@@ -987,27 +1008,50 @@ export async function bindPrWorkflowHead(
 	sessionID: string,
 	prHeadSha: string,
 ): Promise<PrWorkflowGateState> {
-	const state = await requireAnyActiveState(directory, sessionID);
 	const normalizedHead = normalizePrHeadSha(prHeadSha);
-	await assertCurrentCheckoutHead(directory, normalizedHead);
-	if (!state.prHeadSha)
-		await assertPrReviewCleanCheckout(directory, state.mode);
-	if (!state.prHeadSha && state.mode === 'PR_FEEDBACK') {
-		await assertPrFeedbackTrackingCheckout(directory, normalizedHead);
-	}
-	if (state.prHeadSha && state.prHeadSha !== normalizedHead) {
-		throw new Error(
-			`BLOCKED: active ${state.mode} workflow is bound to PR head "${state.prHeadSha}"; received "${normalizedHead}"`,
-		);
-	}
-	if (state.prHeadSha === normalizedHead) return state;
-	const nextState = {
-		...state,
-		prHeadSha: normalizedHead,
-		updatedAt: isoNow(),
-	};
-	await persistState(directory, nextState);
-	return nextState;
+	return withPrWorkflowCheckoutMutationLock(directory, async () =>
+		withSessionStateMutation(
+			directory,
+			normalizeSessionID(sessionID),
+			async () => {
+				const state = await readPrWorkflowGateStateFromDisk(
+					directory,
+					normalizeSessionID(sessionID),
+				);
+				if (!state) {
+					throw new Error(
+						`BLOCKED: no active PR workflow gate for session "${normalizeSessionID(sessionID)}". ` +
+							'The gate must be activated before the PR head can be bound.',
+					);
+				}
+				await assertCurrentCheckoutHead(directory, normalizedHead, state.mode);
+				if (state.prHeadSha && state.prHeadSha !== normalizedHead) {
+					throw new Error(
+						`BLOCKED: active ${state.mode} workflow is bound to PR head "${state.prHeadSha}"; received "${normalizedHead}"`,
+					);
+				}
+				if (!state.prHeadSha) {
+					await assertPrReviewCleanCheckout(directory, state.mode);
+				}
+				if (!state.prHeadSha && state.mode === 'PR_FEEDBACK') {
+					await assertPrFeedbackTrackingCheckout(directory, normalizedHead);
+				}
+				if (state.prHeadSha === normalizedHead) {
+					if (state.mode === 'PR_FEEDBACK') {
+						await assertPrFeedbackTrackingCheckout(directory, normalizedHead);
+					}
+					return state;
+				}
+				const nextState = {
+					...state,
+					prHeadSha: normalizedHead,
+					updatedAt: isoNow(),
+				};
+				await _test_exports.beforePrFeedbackTrackingPersist?.();
+				return writeStateWhileLocked(directory, nextState);
+			},
+		),
+	);
 }
 
 /** Bind an active PR_REVIEW workflow to one immutable merge-base scope. */
@@ -1068,6 +1112,7 @@ export async function bindPrReviewBase(
 export async function assertCurrentCheckoutHead(
 	directory: string,
 	expectedHead: string,
+	mode: PrWorkflowMode = 'PR_REVIEW',
 ): Promise<string> {
 	const normalizedExpected = normalizePrHeadSha(expectedHead);
 	const currentHead = (
@@ -1087,12 +1132,13 @@ export async function assertCurrentCheckoutHead(
 		// classifier actually accepts: `git -C ... switch` is banned as a state
 		// transition (see isAllowedPrWorkflowReadOnlyShell), so instructing it
 		// here contradicted the gate and left callers stuck (#1931 follow-up).
+		const remediation =
+			mode === 'PR_FEEDBACK'
+				? 'Check out the intended local tracking branch at that exact head (for example with a safe standalone `gh pr checkout <number-or-url>` or `git switch -c <local> --track <remote>/<branch>`), then retry the bind. Do not create a new detached feedback checkout.'
+				: `Run these bare, standalone commands from that directory: if the commit is not present locally, \`git fetch origin <pr-head-ref>\`; then \`git switch --detach ${normalizedExpected}\`. Do not prefix the switch with \`git -C\`; the read-only shell classifier refuses \`git -C ... switch\`.`;
 		throw new Error(
 			`BLOCKED: current checkout HEAD "${currentHead}" does not match PR head "${normalizedExpected}" ` +
-				`(working directory: "${directory}"). ` +
-				`Run these bare, standalone commands from that directory: if the commit is not present locally, ` +
-				`\`git fetch origin <pr-head-ref>\`; then \`git switch --detach ${normalizedExpected}\`. ` +
-				`Do not prefix the switch with \`git -C\`; the read-only shell classifier refuses \`git -C ... switch\`.`,
+				`(working directory: "${directory}"). ${remediation}`,
 		);
 	}
 	return normalizedExpected;
@@ -1116,21 +1162,121 @@ async function assertPrFeedbackTrackingCheckout(
 	directory: string,
 	prHeadSha: string,
 ): Promise<void> {
-	const upstream =
-		await _test_exports.resolveCurrentUpstreamPushTargetAsync(directory);
-	if (!upstream) {
+	const currentHead = (
+		await _test_exports.resolveCurrentGitHeadAsync(directory)
+	)?.trim();
+	if (!currentHead) {
 		throw new Error(
-			'BLOCKED: PR_FEEDBACK requires a current local branch bound to an exact remote name, remote branch ref, and remote-tracking ref before the first head bind; detached or non-tracking checkouts are not allowed',
+			'BLOCKED: PR_FEEDBACK requires a resolved exact Git HEAD before first head bind',
 		);
 	}
+	if (currentHead.toLowerCase() !== prHeadSha.toLowerCase()) {
+		throw new Error(
+			`BLOCKED: PR_FEEDBACK exact head changed before attach; expected ${prHeadSha}, received ${currentHead}`,
+		);
+	}
+	const currentUpstream =
+		await _test_exports.resolveCurrentUpstreamPushTargetAsync(directory);
 	const matchingRemoteRefs =
 		await _test_exports.resolveRemoteRefsContainingHeadAsync(
 			directory,
 			prHeadSha,
 		);
-	if (!matchingRemoteRefs?.includes(upstream.remoteTrackingRef)) {
+	if (currentUpstream) {
+		if (matchingRemoteRefs === null) {
+			throw new Error(
+				'BLOCKED: PR_FEEDBACK could not verify the current upstream against the exact intake PR head; the bounded Git query failed or timed out',
+			);
+		}
+		if (matchingRemoteRefs.includes(currentUpstream.remoteTrackingRef)) return;
 		throw new Error(
-			`BLOCKED: PR_FEEDBACK upstream "${upstream.remoteTrackingRef}" must point to the exact intake PR head "${prHeadSha}" before the first head bind`,
+			`BLOCKED: PR_FEEDBACK current upstream "${currentUpstream.remoteTrackingRef}" must point to the exact intake PR head "${prHeadSha}"; refusing to replace an existing tracking relationship`,
+		);
+	}
+	const candidates = await resolvePrFeedbackTrackingCandidatesAsync(
+		directory,
+		prHeadSha,
+	);
+	if (!candidates) {
+		throw new Error(
+			`BLOCKED: PR_FEEDBACK could not inspect tracked branches for exact PR head "${prHeadSha}"; the bounded Git query failed or timed out`,
+		);
+	}
+	const { local: localCandidates, remote: remoteCandidates } = candidates;
+	if (localCandidates.length === 1) {
+		await _test_exports.beforePrFeedbackTrackingSwitch?.();
+		if (
+			!(await switchPrFeedbackTrackingCandidateAsync(
+				directory,
+				localCandidates[0]!,
+			))
+		) {
+			throw new Error(
+				`BLOCKED: PR_FEEDBACK could not attach exact local tracked branch "${localCandidates[0]!.branchName}"; it may be checked out in another linked worktree or the bounded Git switch failed`,
+			);
+		}
+	} else if (localCandidates.length > 1) {
+		throw new Error(
+			`BLOCKED: PR_FEEDBACK exact head "${prHeadSha}" matches multiple local tracked branches: ${localCandidates
+				.map((candidate) => candidate.branchName)
+				.join(', ')}`,
+		);
+	} else {
+		if (remoteCandidates.length === 1) {
+			await _test_exports.beforePrFeedbackTrackingSwitch?.();
+			if (
+				!(await switchPrFeedbackTrackingCandidateAsync(
+					directory,
+					remoteCandidates[0]!,
+				))
+			) {
+				throw new Error(
+					`BLOCKED: PR_FEEDBACK could not attach exact remote-tracking branch "${remoteCandidates[0]!.remoteTrackingRef}"; the bounded Git switch failed or timed out`,
+				);
+			}
+		} else if (remoteCandidates.length > 1) {
+			throw new Error(
+				`BLOCKED: PR_FEEDBACK exact head "${prHeadSha}" matches multiple remote-tracking refs: ${remoteCandidates
+					.map((candidate) => candidate.remoteTrackingRef)
+					.join(', ')}`,
+			);
+		} else {
+			throw new Error(
+				'BLOCKED: PR_FEEDBACK requires a current local branch or exact remote-tracking ref that points to the intake PR head before the first bind',
+			);
+		}
+	}
+	await _test_exports.afterPrFeedbackTrackingSwitch?.();
+	const attachedHead = (
+		await _test_exports.resolveCurrentGitHeadAsync(directory)
+	)?.trim();
+	if (attachedHead?.toLowerCase() !== prHeadSha.toLowerCase()) {
+		throw new Error(
+			`BLOCKED: PR_FEEDBACK exact head changed after attach; expected ${prHeadSha}, received ${attachedHead ?? '(unresolved)'}`,
+		);
+	}
+	if (
+		(await _test_exports.resolveIsWorkingTreeCleanAsync(directory)) !== true
+	) {
+		throw new Error(
+			'BLOCKED: PR_FEEDBACK requires a clean working tree after checkout attachment',
+		);
+	}
+	const attachedUpstream =
+		await _test_exports.resolveCurrentUpstreamPushTargetAsync(directory);
+	if (!attachedUpstream) {
+		throw new Error(
+			'BLOCKED: PR_FEEDBACK could not resolve the attached branch upstream after checkout promotion',
+		);
+	}
+	const attachedRemoteRefs =
+		await _test_exports.resolveRemoteRefsContainingHeadAsync(
+			directory,
+			prHeadSha,
+		);
+	if (!attachedRemoteRefs?.includes(attachedUpstream.remoteTrackingRef)) {
+		throw new Error(
+			`BLOCKED: PR_FEEDBACK upstream "${attachedUpstream.remoteTrackingRef}" must point to the exact intake PR head "${prHeadSha}" before the first head bind`,
 		);
 	}
 }
@@ -1238,6 +1384,7 @@ export async function assertPrReviewBaseCoverageSettled(
 		throw new Error('BLOCKED: PR_REVIEW requires at least one base batch');
 	}
 	const covered = new Set<PrReviewBaseDimensionId>();
+	const malformedDiagnostics: string[] = [];
 	for (const batch of batches) {
 		const successful = successfulObligationsFromExactBatch(
 			directory,
@@ -1246,6 +1393,10 @@ export async function assertPrReviewBaseCoverageSettled(
 			batch.lanes,
 			'swarm-pr-review:base',
 			batch.validatedAt,
+			true,
+			new Set(),
+			undefined,
+			malformedDiagnostics,
 		);
 		for (const obligation of successful) {
 			covered.add(obligation as PrReviewBaseDimensionId);
@@ -1259,7 +1410,11 @@ export async function assertPrReviewBaseCoverageSettled(
 		covered.size !== PR_REVIEW_BASE_DIMENSION_IDS.length
 	) {
 		throw new Error(
-			`BLOCKED: PR_REVIEW base coverage is incomplete; missing dimensions: ${missing.join(', ') || '(none)'}`,
+			`BLOCKED: PR_REVIEW base coverage is incomplete; missing dimensions: ${missing.join(', ') || '(none)'}${
+				malformedDiagnostics.length > 0
+					? `; malformed candidate diagnostics: ${malformedDiagnostics.join(' | ')}`
+					: ''
+			}`,
 		);
 	}
 	return state;
@@ -2092,6 +2247,53 @@ export async function markPrReviewTriggerEvaluationComplete(
 		...state,
 		updatedAt: isoNow(),
 		prReviewTriggerEvalPath: normalizedPath,
+	};
+	await persistState(directory, nextState);
+	return nextState;
+}
+
+/** Freeze one exact inline trigger ledger across every micro dispatch. */
+export async function bindPrReviewTriggerLedger(
+	directory: string,
+	sessionID: string,
+	input: unknown,
+): Promise<PrWorkflowGateState> {
+	let ledger: ReturnType<typeof validatePrReviewInlineTriggerLedger>;
+	try {
+		ledger = validatePrReviewInlineTriggerLedger(input);
+	} catch (error) {
+		throw new Error(
+			`BLOCKED: invalid PR_REVIEW trigger_evaluation: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		);
+	}
+	const state = await assertPrReviewBaseCoverageSettled(directory, sessionID);
+	if (state.prReviewTriggerLedger) {
+		let frozen: ReturnType<typeof validatePrReviewInlineTriggerLedger>;
+		try {
+			frozen = validatePrReviewInlineTriggerLedger(state.prReviewTriggerLedger);
+		} catch (error) {
+			throw new Error(
+				`BLOCKED: persisted PR_REVIEW trigger ledger is invalid: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+		}
+		if (
+			prReviewTriggerLedgerDigest(frozen.rows) !==
+			prReviewTriggerLedgerDigest(ledger.rows)
+		) {
+			throw new Error(
+				'BLOCKED: PR_REVIEW trigger_evaluation must remain exactly identical across every micro dispatch and the final receipt',
+			);
+		}
+		return state;
+	}
+	const nextState: PrWorkflowGateState = {
+		...state,
+		updatedAt: isoNow(),
+		prReviewTriggerLedger: ledger.rows,
 	};
 	await persistState(directory, nextState);
 	return nextState;
@@ -3298,11 +3500,19 @@ export async function enforcePrWorkflowToolBefore(
 			'BLOCKED: PR_FEEDBACK is armed for publication; only read-only inspection, the exact approved push, and complete_pr_workflow are allowed',
 		);
 	}
-	if (!state.prHeadSha && isDetachedFeedbackCheckout) {
+	if (!state.prHeadSha && normalizedTool === 'prepare_pr_workflow_checkout') {
+		return;
+	}
+	if (
+		!state.prHeadSha &&
+		isDetachedFeedbackCheckout &&
+		!isCanonicalReviewCheckout
+	) {
 		throw new Error(
-			'BLOCKED: PR_FEEDBACK requires a tracked PR branch before the first head bind; detached checkout is valid for PR_REVIEW, not PR_FEEDBACK.',
+			'BLOCKED: PR_FEEDBACK checkout should use one exact local tracking branch, such as `gh pr checkout <number> --branch <local_branch>` or `git switch -c <local_branch> --track <remote>/<branch>`, before binding. If checkout is already detached at the authoritative full PR head SHA, bind it directly; the controller attaches one unambiguous exact tracking ref. Other detached refs are not accepted',
 		);
 	}
+	if (!state.prHeadSha && isCanonicalReviewCheckout) return;
 	if (isStandaloneGitCommitShell) {
 		await assertPrFeedbackReadyToPublish(directory, sessionID);
 		return;
@@ -3315,7 +3525,7 @@ export async function enforcePrWorkflowToolBefore(
 	if (isShellCommandRequiringVerification) {
 		if (!state.prHeadSha && isShellCheckout) {
 			throw new Error(
-				'BLOCKED: PR_FEEDBACK checkout must use a safe standalone pre-bind form: `gh pr checkout <number-or-url>` without force/submodule flags, or `git switch -c <local> --track <remote>/<branch>`. Detached checkouts are not allowed in PR_FEEDBACK. Then verify exact HEAD, a clean tree, and the intended upstream before dispatching feedback lanes.',
+				'BLOCKED: PR_FEEDBACK checkout should use one exact local tracking branch, such as `gh pr checkout <number> --branch <local_branch>` or `git switch -c <local_branch> --track <remote>/<branch>`, before binding. If checkout is already detached at the authoritative full PR head SHA, bind it directly; the controller attaches one unambiguous exact tracking ref',
 			);
 		}
 		throw new Error(
@@ -3481,28 +3691,51 @@ export async function completePrWorkflow(
 export const _test_exports = {
 	workflowGateStateRelativePath,
 	workflowGateStateLockRelativePath,
+	workflowCheckoutMutationLockRelativePath,
+	withPrWorkflowCheckoutMutationLock,
 	resetTrackedStateCache: () => {
 		trackedStatesByProjectSession.clear();
 		pendingStateMutationsByProjectSession.clear();
+		pendingCheckoutMutationsByProject.clear();
+		completedCheckoutLockOwners.clear();
 		_test_exports.beforeTerminalClear = undefined;
 		_test_exports.beforePrFeedbackTransitionLock = undefined;
+		_test_exports.beforePrFeedbackTrackingSwitch = undefined;
+		_test_exports.afterPrFeedbackTrackingSwitch = undefined;
+		_test_exports.beforePrFeedbackTrackingPersist = undefined;
 		_test_exports.beforeBoundedSwarmFileOpen = undefined;
 		_test_exports.beforeSessionStateLockWrite = undefined;
+		_test_exports.beforeCheckoutLockWrite = undefined;
 		_test_exports.beforeSafeDirectoryCreate = undefined;
 		_test_exports.beforeAtomicTempWrite = undefined;
 		_test_exports.beforeAtomicRename = undefined;
+		_test_exports.openCheckoutLock = openCheckoutLockFile;
+		_test_exports.removeCheckoutLock = removeCheckoutLockFile;
+		_test_exports.checkoutMutationActionTimeoutMs =
+			CHECKOUT_MUTATION_ACTION_TIMEOUT_MS;
 	},
 	beforeTerminalClear: undefined as (() => Promise<void>) | undefined,
 	beforePrFeedbackTransitionLock: undefined as
 		| (() => Promise<void>)
 		| undefined,
+	beforePrFeedbackTrackingSwitch: undefined as
+		| (() => Promise<void>)
+		| undefined,
+	afterPrFeedbackTrackingSwitch: undefined as (() => Promise<void>) | undefined,
+	beforePrFeedbackTrackingPersist: undefined as
+		| (() => Promise<void>)
+		| undefined,
 	beforeBoundedSwarmFileOpen: undefined as (() => Promise<void>) | undefined,
 	beforeSessionStateLockWrite: undefined as (() => Promise<void>) | undefined,
+	beforeCheckoutLockWrite: undefined as (() => Promise<void>) | undefined,
 	beforeSafeDirectoryCreate: undefined as
 		| ((parentPath: string, nextPath: string) => Promise<void>)
 		| undefined,
 	beforeAtomicTempWrite: undefined as (() => Promise<void>) | undefined,
 	beforeAtomicRename: undefined as (() => Promise<void>) | undefined,
+	openCheckoutLock: openCheckoutLockFile,
+	removeCheckoutLock: removeCheckoutLockFile,
+	checkoutMutationActionTimeoutMs: CHECKOUT_MUTATION_ACTION_TIMEOUT_MS,
 	resolveCurrentGitHead,
 	resolveCurrentGitHeadAsync,
 	resolveCurrentUpstreamPushTarget,
@@ -3564,7 +3797,7 @@ async function requireBoundState(
 		);
 	}
 	if (expectedMode === 'PR_REVIEW') {
-		await assertCurrentCheckoutHead(directory, state.prHeadSha);
+		await assertCurrentCheckoutHead(directory, state.prHeadSha, 'PR_REVIEW');
 		await assertPrReviewCleanCheckout(directory);
 	}
 	return state;
@@ -4641,61 +4874,23 @@ function derivePrReviewCandidateInventory(
 				'BLOCKED: PR_REVIEW trigger evaluation artifact is missing or invalid',
 			);
 		}
-		const rows = (triggerArtifact as { rows?: unknown }).rows;
-		if (!Array.isArray(rows)) {
-			throw new Error('BLOCKED: PR_REVIEW trigger evaluation rows are invalid');
-		}
-		const rowIds = rows.map((row) =>
-			typeof row === 'object' && row !== null
-				? (row as { trigger_id?: unknown }).trigger_id
-				: undefined,
-		);
-		const provenanceTuples = rows.map((row) => {
-			if (typeof row !== 'object' || row === null) return '';
-			const batchId = (row as { source_batch_id?: unknown }).source_batch_id;
-			const laneId = (row as { source_lane_id?: unknown }).source_lane_id;
-			return typeof batchId === 'string' &&
-				typeof laneId === 'string' &&
-				batchId.trim() &&
-				laneId.trim()
-				? `${batchId}\0${laneId}`
-				: '';
-		});
-		const exactMandatorySet =
-			rows.length === PR_REVIEW_REQUIRED_MICRO_LANE_IDS.length &&
-			new Set(rowIds).size === PR_REVIEW_REQUIRED_MICRO_LANE_IDS.length &&
-			provenanceTuples.every(Boolean) &&
-			PR_REVIEW_REQUIRED_MICRO_LANE_IDS.every((id) => rowIds.includes(id)) &&
-			rows.every(
-				(row) =>
-					typeof row === 'object' &&
-					row !== null &&
-					(row as { result?: unknown }).result === 'MATCHED',
-			);
-		if (!exactMandatorySet) {
+		let receipt: ReturnType<typeof parsePrReviewTriggerReceipt>;
+		try {
+			receipt = parsePrReviewTriggerReceipt(triggerArtifact);
+		} catch (error) {
 			throw new Error(
-				'BLOCKED: PR_REVIEW requires the exact all-MATCHED repository-agnostic micro-lane set with complete source provenance',
+				`BLOCKED: PR_REVIEW trigger evaluation is invalid: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
 			);
 		}
-		// A provenance tuple may back several rows only when the dispatched lane
-		// declared that consolidated ownership set; the per-row validation below
-		// enforces ownership containment and all-owned artifact attestation.
-		for (const row of rows) {
-			if (
-				typeof row === 'object' &&
-				row !== null &&
-				(row as { result?: unknown }).result === 'MATCHED' &&
-				typeof (row as { source_batch_id?: unknown }).source_batch_id ===
-					'string' &&
-				typeof (row as { source_lane_id?: unknown }).source_lane_id === 'string'
-			) {
-				sources.push({
-					batchId: (row as { source_batch_id: string }).source_batch_id,
-					laneId: (row as { source_lane_id: string }).source_lane_id,
-					mode: 'swarm-pr-review:micro',
-					workflowLane: (row as { trigger_id: string }).trigger_id,
-				});
-			}
+		for (const row of receipt.matchedRows) {
+			sources.push({
+				batchId: row.source_batch_id,
+				laneId: row.source_lane_id,
+				mode: 'swarm-pr-review:micro',
+				workflowLane: row.trigger_id,
+			});
 		}
 	}
 	const candidateIds: string[] = [];
@@ -4751,6 +4946,7 @@ function derivePrReviewCandidateInventory(
 					!prReviewDiscoveryArtifactCoversLane(
 						artifact.text,
 						source.workflowLane,
+						recordOwnedLanes,
 					))
 			)
 				continue;
@@ -4759,7 +4955,13 @@ function derivePrReviewCandidateInventory(
 			if (!extractedLaneKeys.has(laneKey)) {
 				extractedLaneKeys.add(laneKey);
 				candidateIds.push(
-					...extractCandidateIds(artifact.text, source.creditedLanes),
+					...extractCandidateIds(
+						artifact.text,
+						source.mode === 'swarm-pr-review:micro'
+							? 'micro_lane'
+							: 'base_explorer',
+						source.creditedLanes,
+					),
 				);
 			}
 		}
@@ -4781,42 +4983,88 @@ function derivePrReviewCandidateInventory(
  * no longer the authoritative source for (a more recent batch superseded it),
  * and that stale content must not re-enter the candidate pool.
  */
+interface CanonicalCandidateArtifactRow {
+	candidateId: string;
+	workflowLane: string;
+	evidence: string;
+	lineNumber: number;
+}
+
+interface CandidateArtifactParseResult {
+	rows: CanonicalCandidateArtifactRow[];
+	issues: string[];
+}
+
+function appendBoundedCandidateIssue(issues: string[], message: string): void {
+	if (issues.length < MAX_CANDIDATE_ISSUES_PER_ARTIFACT - 1) {
+		issues.push(message.slice(0, MAX_BASE_COVERAGE_DIAGNOSTIC_CHARS));
+		return;
+	}
+	if (issues.length === MAX_CANDIDATE_ISSUES_PER_ARTIFACT - 1) {
+		issues.push('additional malformed candidate diagnostics omitted');
+	}
+}
+
+function parseCanonicalCandidateRows(
+	text: string,
+	fallbackFamily: RowFormatFamily,
+): CandidateArtifactParseResult {
+	const rows: CanonicalCandidateArtifactRow[] = [];
+	const issues: string[] = [];
+	let headerFamily: RowFormatFamily | null = null;
+	for (const [index, line] of removeCandidateCodeFences(text)
+		.split(/\r?\n/)
+		.entries()) {
+		const fields = splitPipeFields(line).map((field) => field.trim());
+		const detectedHeaderFamily = candidateHeaderFamily(fields);
+		if (detectedHeaderFamily) {
+			headerFamily = detectedHeaderFamily;
+			continue;
+		}
+		const explicitMarker = fields[0] === '[CANDIDATE]';
+		const markerlessRow =
+			headerFamily !== null && Boolean(fields[0]) && !fields[0].startsWith('[');
+		if (!explicitMarker && !markerlessRow) continue;
+		if (explicitMarker && headerFamily === null) {
+			appendBoundedCandidateIssue(
+				issues,
+				`row ${index + 1} field header: candidate output must begin with one exact canonical base or micro [CANDIDATE] header`,
+			);
+			continue;
+		}
+		const family = headerFamily ?? fallbackFamily;
+		const candidateFields = explicitMarker ? fields.slice(1) : fields;
+		const analysis = analyzeCandidateFields(candidateFields, family);
+		if (!analysis.valid) {
+			for (const issue of analysis.issues) {
+				appendBoundedCandidateIssue(
+					issues,
+					`row ${index + 1} field ${issue.field}: ${issue.message}`,
+				);
+			}
+			continue;
+		}
+		if (!analysis.candidateId || !analysis.workflowLane) continue;
+		rows.push({
+			candidateId: analysis.candidateId,
+			workflowLane: analysis.workflowLane,
+			evidence: candidateFields.slice(2).join('\0'),
+			lineNumber: index + 1,
+		});
+	}
+	return { rows, issues };
+}
+
 function extractCandidateIds(
 	text: string,
+	fallbackFamily: RowFormatFamily,
 	scopeToLanes?: readonly string[],
 ): string[] {
-	const candidateIds: string[] = [];
-	let markerHeaderSeen = false;
 	const inScope = (lane: string | undefined) =>
 		!scopeToLanes || (lane !== undefined && scopeToLanes.includes(lane));
-	for (const line of text.split(/\r?\n/)) {
-		const fields = pipeFields(line);
-		if (
-			fields[0] === '[CANDIDATE]' &&
-			fields[1]?.toLowerCase() === 'candidate_id'
-		) {
-			markerHeaderSeen = true;
-			continue;
-		}
-		if (
-			fields[0] === '[CANDIDATE]' &&
-			fields.length >= 10 &&
-			fields.slice(1, 10).every(Boolean)
-		) {
-			if (inScope(fields[2])) candidateIds.push(fields[1]);
-			continue;
-		}
-		if (
-			markerHeaderSeen &&
-			fields.length >= 9 &&
-			fields[0] &&
-			!fields[0].startsWith('[') &&
-			fields.slice(0, 9).every(Boolean)
-		) {
-			if (inScope(fields[1])) candidateIds.push(fields[0]);
-		}
-	}
-	return candidateIds;
+	return parseCanonicalCandidateRows(text, fallbackFamily)
+		.rows.filter((row) => inScope(row.workflowLane))
+		.map((row) => row.candidateId);
 }
 
 function derivePrReviewCriticInventory(
@@ -4945,6 +5193,7 @@ function successfulObligationsFromExactBatch(
 	checkWorkflowLane = true,
 	forbiddenSubagentSessionIds: ReadonlySet<string> = new Set(),
 	expectedRevisionDigest?: string,
+	diagnostics?: string[],
 ): Set<string> {
 	const records = findByBatchId(directory, batchId, {
 		parentSessionId: state.sessionID,
@@ -5014,6 +5263,7 @@ function successfulObligationsFromExactBatch(
 				expectedLane?.reviewItemIds,
 				expectedRevisionDigest,
 				expectedOwnedLanes,
+				diagnostics,
 			)
 		) {
 			for (const obligation of expectedOwnedLanes) {
@@ -5061,6 +5311,7 @@ function workflowArtifactHasContractMarker(
 	reviewItemIds?: readonly string[],
 	expectedRevisionDigest?: string,
 	ownedWorkflowLanes?: readonly string[],
+	diagnostics?: string[],
 ): boolean {
 	const ref = record.result?.outputRef?.trim();
 	if (!ref) return false;
@@ -5157,11 +5408,24 @@ function workflowArtifactHasContractMarker(
 	const coveredLanes = ownedWorkflowLanes?.length
 		? ownedWorkflowLanes
 		: [expectedWorkflowLane];
-	if (
-		!coveredLanes.every((coveredLane) =>
-			prReviewDiscoveryArtifactCoversLane(artifact.text, coveredLane),
-		)
-	) {
+	const coverageAnalyses = coveredLanes.map((coveredLane) => ({
+		coveredLane,
+		analysis: analyzePrReviewDiscoveryArtifact(
+			artifact.text,
+			coveredLane,
+			coveredLanes,
+		),
+	}));
+	if (coverageAnalyses.some(({ analysis }) => !analysis.covered)) {
+		for (const { coveredLane, analysis } of coverageAnalyses) {
+			if (analysis.covered || analysis.issues.length === 0) continue;
+			if (diagnostics && diagnostics.length < MAX_BASE_COVERAGE_DIAGNOSTICS) {
+				const diagnostic = `batch=${record.batchId ?? '(missing)'} lane=${record.laneId ?? '(missing)'} workflow_lane=${coveredLane} output_ref=${ref} digest=${record.result?.digest ?? '(missing)'}: ${analysis.issues.join('; ')}`;
+				diagnostics.push(
+					diagnostic.slice(0, MAX_BASE_COVERAGE_DIAGNOSTIC_CHARS),
+				);
+			}
+		}
 		return false;
 	}
 	if (coveredLanes.length > 1) {
@@ -5179,6 +5443,7 @@ function workflowArtifactHasContractMarker(
 			const evidence = extractLaneCoverageEvidenceText(
 				artifact.text,
 				coveredLane,
+				coveredLanes,
 			);
 			if (evidence === null) continue;
 			const priorLane = seenEvidence.get(evidence);
@@ -5189,98 +5454,142 @@ function workflowArtifactHasContractMarker(
 	return true;
 }
 
-/** Require at least one real discovery row or a lane-bound CLEAN attestation. */
+interface PrReviewDiscoveryCoverageAnalysis {
+	covered: boolean;
+	evidence: string | null;
+	issues: string[];
+}
+
+function analyzePrReviewDiscoveryArtifact(
+	text: string,
+	expectedWorkflowLane: string,
+	ownedWorkflowLanes: readonly string[] = [expectedWorkflowLane],
+): PrReviewDiscoveryCoverageAnalysis {
+	const fallbackFamily: RowFormatFamily = PR_REVIEW_BASE_DIMENSION_IDS.includes(
+		expectedWorkflowLane as PrReviewBaseDimensionId,
+	)
+		? 'base_explorer'
+		: 'micro_lane';
+	const issues: string[] = [];
+	const canonicalText = removeCandidateCodeFences(text);
+	const firstTabularFields = canonicalText
+		.split(/\r?\n/)
+		.map((line) => splitPipeFields(line).map((field) => field.trim()))
+		.find(
+			(fields) =>
+				fields.length >= 2 && fields.some((field) => field.length > 0),
+		);
+	const headerFamily = firstTabularFields
+		? candidateHeaderFamily(firstTabularFields)
+		: null;
+	if (headerFamily !== fallbackFamily) {
+		appendBoundedCandidateIssue(
+			issues,
+			`field header: expected one exact canonical ${fallbackFamily} [CANDIDATE] header before discovery rows`,
+		);
+		return { covered: false, evidence: null, issues };
+	}
+
+	const parsed = parseCandidates(
+		{
+			output_ref: 'pr-workflow:discovery-artifact',
+			batchId: 'pr-workflow',
+			laneId: expectedWorkflowLane,
+			agent: 'explorer',
+			role: 'explorer',
+			digest: '0'.repeat(64),
+			text: canonicalText,
+			artifact_status: 'ok',
+			source: 'collect_lane_results',
+			produced_at: '1970-01-01T00:00:00.000Z',
+		},
+		{
+			accept_partial: false,
+			accept_degraded: false,
+			degraded: false,
+			row_format_version: 1,
+			producer: 'swarm-pr-review',
+			expected_family: fallbackFamily,
+			...(fallbackFamily === 'base_explorer'
+				? {
+						expected_lane: expectedWorkflowLane,
+						expected_lanes: [...ownedWorkflowLanes],
+					}
+				: {
+						expected_micro_lane: expectedWorkflowLane,
+						expected_micro_lanes: [...ownedWorkflowLanes],
+					}),
+		},
+	);
+	if (parsed.error) appendBoundedCandidateIssue(issues, parsed.error);
+	for (const detail of parsed.diagnostics.parse_error_details) {
+		appendBoundedCandidateIssue(
+			issues,
+			`row ${detail.row_index + 1} field ${detail.field}: ${detail.message}`,
+		);
+	}
+	if (parsed.error || parsed.diagnostics.parse_error_details.length > 0) {
+		return { covered: false, evidence: null, issues };
+	}
+	const matchingCandidate = parsed.candidates.find(
+		(candidate) =>
+			(candidate.lane ?? candidate.micro_lane) === expectedWorkflowLane,
+	);
+	if (matchingCandidate) {
+		return {
+			covered: true,
+			evidence: [
+				matchingCandidate.severity,
+				matchingCandidate.category,
+				matchingCandidate.file_line,
+				matchingCandidate.claim,
+				matchingCandidate.evidence_summary,
+				matchingCandidate.impact_context ??
+					matchingCandidate.invariant_violated,
+				matchingCandidate.confidence,
+			].join('\0'),
+			issues,
+		};
+	}
+	const clean = parsed.clean_attestation;
+	if (
+		clean &&
+		(clean.row_format_family === 'base_explorer'
+			? clean.lane
+			: clean.micro_lane) === expectedWorkflowLane
+	) {
+		return {
+			covered: true,
+			evidence: `${clean.coverage_scope}\0${clean.evidence}`,
+			issues,
+		};
+	}
+	return { covered: false, evidence: null, issues };
+}
+
+/** Require at least one semantically valid discovery row or CLEAN attestation. */
 export function prReviewDiscoveryArtifactCoversLane(
 	text: string,
 	expectedWorkflowLane: string,
+	ownedWorkflowLanes: readonly string[] = [expectedWorkflowLane],
 ): boolean {
-	const lines = text.split(/\r?\n/);
-	let candidateHeaderSeen = false;
-	for (const line of lines) {
-		const fields = pipeFields(line);
-		if (fields.length === 0) continue;
-		if (
-			fields[0] === '[CLEAN]' &&
-			fields.length >= 4 &&
-			fields[1] === expectedWorkflowLane &&
-			fields.slice(1, 4).every(Boolean) &&
-			fields[2].length >= 12 &&
-			fields[3].length >= 20
-		)
-			return true;
-		if (fields[0] === '[CANDIDATE]') {
-			if (fields[1]?.toLowerCase() === 'candidate_id') {
-				candidateHeaderSeen = true;
-				continue;
-			}
-			if (
-				fields.length >= 10 &&
-				fields[2] === expectedWorkflowLane &&
-				fields.slice(1, 10).every(Boolean)
-			)
-				return true;
-			continue;
-		}
-		if (
-			candidateHeaderSeen &&
-			fields.length >= 9 &&
-			fields[0]?.toLowerCase() !== 'candidate_id' &&
-			fields[1] === expectedWorkflowLane &&
-			fields.slice(0, 9).every(Boolean)
-		)
-			return true;
-	}
-	return false;
+	return analyzePrReviewDiscoveryArtifact(
+		text,
+		expectedWorkflowLane,
+		ownedWorkflowLanes,
+	).covered;
 }
 
-/**
- * Extract the exact evidence text that satisfies coverage for one lane,
- * mirroring prReviewDiscoveryArtifactCoversLane's own matching rules but
- * returning the matched substantive fields instead of a boolean. Used only
- * for cross-family distinctness comparison on consolidated (multi-owned-lane)
- * artifacts; returns null when the lane has no matching row.
- */
 function extractLaneCoverageEvidenceText(
 	text: string,
 	expectedWorkflowLane: string,
+	ownedWorkflowLanes: readonly string[] = [expectedWorkflowLane],
 ): string | null {
-	const lines = text.split(/\r?\n/);
-	let candidateHeaderSeen = false;
-	for (const line of lines) {
-		const fields = pipeFields(line);
-		if (fields.length === 0) continue;
-		if (
-			fields[0] === '[CLEAN]' &&
-			fields.length >= 4 &&
-			fields[1] === expectedWorkflowLane &&
-			fields.slice(1, 4).every(Boolean) &&
-			fields[2].length >= 12 &&
-			fields[3].length >= 20
-		)
-			return `${fields[2]}\0${fields[3]}`;
-		if (fields[0] === '[CANDIDATE]') {
-			if (fields[1]?.toLowerCase() === 'candidate_id') {
-				candidateHeaderSeen = true;
-				continue;
-			}
-			if (
-				fields.length >= 10 &&
-				fields[2] === expectedWorkflowLane &&
-				fields.slice(1, 10).every(Boolean)
-			)
-				return fields.slice(3, 10).join('\0');
-			continue;
-		}
-		if (
-			candidateHeaderSeen &&
-			fields.length >= 9 &&
-			fields[0]?.toLowerCase() !== 'candidate_id' &&
-			fields[1] === expectedWorkflowLane &&
-			fields.slice(0, 9).every(Boolean)
-		)
-			return fields.slice(2, 9).join('\0');
-	}
-	return null;
+	return analyzePrReviewDiscoveryArtifact(
+		text,
+		expectedWorkflowLane,
+		ownedWorkflowLanes,
+	).evidence;
 }
 
 const REVIEWER_CLASSIFICATIONS = new Set([
@@ -5492,6 +5801,370 @@ async function writeStateWhileLocked(
 	await writeAtomicJson(directory, filePath, nextState);
 	rememberState(directory, nextState);
 	return nextState;
+}
+
+function workflowCheckoutMutationLockRelativePath(): string {
+	return path.join(WORKFLOW_GATE_DIR, 'checkout.lock');
+}
+
+function workflowCheckoutMutationLockPath(directory: string): string {
+	return validateSwarmPath(
+		directory,
+		workflowCheckoutMutationLockRelativePath(),
+	);
+}
+
+function openCheckoutLockFile(lockPath: string) {
+	return fsp.open(lockPath, 'wx');
+}
+
+function removeCheckoutLockFile(lockPath: string): Promise<void> {
+	return fsp.rm(lockPath);
+}
+
+function checkoutMutationProjectKey(directory: string): string {
+	return normalizeComparableFsPath(directory);
+}
+
+/** A bounded checkout-mutation refusal that never permits unsafe late overlap. */
+export class PrWorkflowCheckoutMutationTimeoutError extends Error {
+	readonly code = 'PR_WORKFLOW_CHECKOUT_MUTATION_TIMEOUT' as const;
+	readonly retryable = false as const;
+
+	constructor(readonly phase: 'queue' | 'action') {
+		super(
+			phase === 'queue'
+				? 'BLOCKED: timed out waiting for the active PR workflow checkout mutation; the existing owner still holds serialization and must settle before retrying'
+				: 'BLOCKED: PR workflow checkout mutation exceeded its execution deadline; serialization remains held until the in-flight action actually settles',
+		);
+		this.name = 'PrWorkflowCheckoutMutationTimeoutError';
+	}
+}
+
+type CheckoutActionOutcome<T> =
+	| { status: 'fulfilled'; value: T }
+	| { status: 'rejected'; error: unknown };
+
+async function withCheckoutMutationDeadline<T>(
+	promise: Promise<T>,
+	phase: 'queue' | 'action',
+): Promise<
+	T | { status: 'timeout'; error: PrWorkflowCheckoutMutationTimeoutError }
+> {
+	let timeout: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			promise,
+			new Promise<{
+				status: 'timeout';
+				error: PrWorkflowCheckoutMutationTimeoutError;
+			}>((resolve) => {
+				timeout = setTimeout(() => {
+					resolve({
+						status: 'timeout',
+						error: new PrWorkflowCheckoutMutationTimeoutError(phase),
+					});
+				}, _test_exports.checkoutMutationActionTimeoutMs);
+			}),
+		]);
+	} finally {
+		if (timeout) clearTimeout(timeout);
+	}
+}
+
+/** Serialize project-wide checkout mutations before any session state lock. */
+export async function withPrWorkflowCheckoutMutationLock<T>(
+	directory: string,
+	action: () => Promise<T>,
+): Promise<T> {
+	const key = checkoutMutationProjectKey(directory);
+	const previous =
+		pendingCheckoutMutationsByProject.get(key) ?? Promise.resolve();
+	let release!: () => void;
+	const current = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	const queued = previous.then(() => current);
+	pendingCheckoutMutationsByProject.set(key, queued);
+	const previousResult = await withCheckoutMutationDeadline(
+		previous.then(() => ({ status: 'ready' as const })),
+		'queue',
+	);
+	if (previousResult.status === 'timeout') {
+		release();
+		// Keep this resolved tail chained to the still-running owner so later
+		// in-process waiters receive the same bounded typed refusal instead of
+		// bypassing to the durable lock. Remove it only after the owner settles.
+		void queued.then(() => {
+			if (pendingCheckoutMutationsByProject.get(key) === queued) {
+				pendingCheckoutMutationsByProject.delete(key);
+			}
+		});
+		throw previousResult.error;
+	}
+
+	let lock: Awaited<ReturnType<typeof acquireCheckoutMutationLock>>;
+	try {
+		lock = await acquireCheckoutMutationLock(directory);
+	} catch (error) {
+		release();
+		if (pendingCheckoutMutationsByProject.get(key) === queued) {
+			pendingCheckoutMutationsByProject.delete(key);
+		}
+		throw error;
+	}
+	const actionOutcome: Promise<CheckoutActionOutcome<T>> = Promise.resolve()
+		.then(action)
+		.then(
+			(value) => ({ status: 'fulfilled' as const, value }),
+			(error: unknown) => ({ status: 'rejected' as const, error }),
+		);
+	const outcome = await withCheckoutMutationDeadline(actionOutcome, 'action');
+	if (outcome.status === 'timeout') {
+		// Promises are not cancellable. Returning the lock here would let a late
+		// action mutate concurrently, so a retained owner task performs cleanup
+		// only after the action truly settles.
+		void actionOutcome.then(async () => {
+			try {
+				await releaseCheckoutMutationLock(lock);
+			} catch {
+				// Completed-owner recovery reclaims a persistently busy Windows lock.
+			} finally {
+				release();
+				if (pendingCheckoutMutationsByProject.get(key) === queued) {
+					pendingCheckoutMutationsByProject.delete(key);
+				}
+			}
+		});
+		throw outcome.error;
+	}
+	try {
+		if (outcome.status === 'rejected') throw outcome.error;
+		return outcome.value;
+	} finally {
+		try {
+			await releaseCheckoutMutationLock(lock);
+		} finally {
+			release();
+			if (pendingCheckoutMutationsByProject.get(key) === queued) {
+				pendingCheckoutMutationsByProject.delete(key);
+			}
+		}
+	}
+}
+
+async function acquireCheckoutMutationLock(
+	directory: string,
+): Promise<{ path: string; ownerToken: string }> {
+	const lockPath = workflowCheckoutMutationLockPath(directory);
+	const verifiedParent = await ensurePrWorkflowSafeParentDirectory(
+		directory,
+		lockPath,
+	);
+	for (let attempt = 0; attempt < STATE_MUTATION_LOCK_MAX_ATTEMPTS; attempt++) {
+		try {
+			const handle = await _test_exports.openCheckoutLock(lockPath);
+			const lock = {
+				ownerToken: randomUUID(),
+				pid: process.pid,
+				createdAtMs: _test_exports.nowMs(),
+			};
+			let lockIdentity: Pick<BigIntStats, 'dev' | 'ino'> | undefined;
+			let writeError: unknown;
+			try {
+				const openedStat = await handle.stat({ bigint: true });
+				lockIdentity = { dev: openedStat.dev, ino: openedStat.ino };
+				lockIdentity = await assertOpenedSwarmFileIdentity(
+					directory,
+					lockPath,
+					handle,
+					verifiedParent,
+					'PR workflow checkout mutation lock',
+				);
+				await _test_exports.beforeCheckoutLockWrite?.();
+				await handle.writeFile(JSON.stringify(lock), 'utf-8');
+			} catch (error) {
+				writeError = error;
+			} finally {
+				await handle.close().catch(() => undefined);
+			}
+			if (writeError) {
+				if (lockIdentity) {
+					await removeCheckoutMutationLockByIdentity(
+						directory,
+						lockPath,
+						lockIdentity,
+						verifiedParent,
+					);
+				}
+				throw writeError;
+			}
+			return { path: lockPath, ownerToken: lock.ownerToken };
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+			if (await reclaimAbandonedCheckoutMutationLock(lockPath)) continue;
+			if (attempt < STATE_MUTATION_LOCK_MAX_ATTEMPTS - 1) {
+				await delay(STATE_MUTATION_LOCK_RETRY_DELAY_MS);
+			}
+		}
+	}
+	throw new Error(
+		'BLOCKED: PR workflow checkout mutation is being handled by another process; retry after that checkout settles',
+	);
+}
+
+async function releaseCheckoutMutationLock(lock: {
+	path: string;
+	ownerToken: string;
+}): Promise<void> {
+	let lastError: unknown;
+	for (let attempt = 0; attempt < WINDOWS_RENAME_MAX_RETRIES; attempt++) {
+		try {
+			if (await removeCheckoutMutationLockIfOwned(lock.path, lock.ownerToken)) {
+				completedCheckoutLockOwners.delete(lock.path);
+				return;
+			}
+			lastError = new Error(
+				'PR workflow checkout mutation lock ownership changed before release',
+			);
+		} catch (error) {
+			lastError = error;
+		}
+		if (attempt < WINDOWS_RENAME_MAX_RETRIES - 1) {
+			await delay(RENAME_RETRY_DELAY_MS);
+		}
+	}
+	rememberCompletedCheckoutLockOwner(lock.path, lock.ownerToken);
+	throw lastError instanceof Error
+		? lastError
+		: new Error('PR workflow checkout mutation lock release failed');
+}
+
+async function reclaimAbandonedCheckoutMutationLock(
+	lockPath: string,
+): Promise<boolean> {
+	const lock = await readCheckoutMutationLock(lockPath);
+	if (lock) {
+		if (
+			lock.pid === process.pid &&
+			completedCheckoutLockOwners.get(lockPath) === lock.ownerToken
+		) {
+			const removed = await removeCheckoutMutationLockIfOwned(
+				lockPath,
+				lock.ownerToken,
+			);
+			if (removed) completedCheckoutLockOwners.delete(lockPath);
+			return removed;
+		}
+		if (_test_exports.isProcessAlive(lock.pid)) return false;
+		return removeCheckoutMutationLockIfOwned(lockPath, lock.ownerToken);
+	}
+	try {
+		const stat = await fsp.stat(lockPath);
+		if (
+			_test_exports.nowMs() - stat.mtimeMs <
+			STATE_MUTATION_LOCK_UNINITIALIZED_STALE_MS
+		) {
+			return false;
+		}
+		await fsp.rm(lockPath, { force: true });
+		return true;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true;
+		throw error;
+	}
+}
+
+async function readCheckoutMutationLock(
+	lockPath: string,
+): Promise<{ ownerToken: string; pid: number; createdAtMs: number } | null> {
+	let raw: string;
+	try {
+		raw = await fsp.readFile(lockPath, 'utf-8');
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+		throw error;
+	}
+	try {
+		const parsed: unknown = JSON.parse(raw);
+		if (
+			typeof parsed === 'object' &&
+			parsed !== null &&
+			typeof (parsed as { ownerToken?: unknown }).ownerToken === 'string' &&
+			(parsed as { ownerToken: string }).ownerToken.length > 0 &&
+			typeof (parsed as { pid?: unknown }).pid === 'number' &&
+			Number.isInteger((parsed as { pid: number }).pid) &&
+			(parsed as { pid: number }).pid > 0 &&
+			typeof (parsed as { createdAtMs?: unknown }).createdAtMs === 'number' &&
+			Number.isFinite((parsed as { createdAtMs: number }).createdAtMs)
+		) {
+			return parsed as { ownerToken: string; pid: number; createdAtMs: number };
+		}
+	} catch {
+		// A crash between exclusive create and metadata write is recovered below.
+	}
+	return null;
+}
+
+async function removeCheckoutMutationLockIfOwned(
+	lockPath: string,
+	ownerToken: string,
+): Promise<boolean> {
+	const lock = await readCheckoutMutationLock(lockPath);
+	if (!lock || lock.ownerToken !== ownerToken) return false;
+	try {
+		await _test_exports.removeCheckoutLock(lockPath);
+		return true;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+		throw error;
+	}
+}
+
+async function removeCheckoutMutationLockByIdentity(
+	directory: string,
+	lockPath: string,
+	identity: Pick<BigIntStats, 'dev' | 'ino'>,
+	verifiedParent: string,
+): Promise<void> {
+	let lastError: unknown;
+	for (let attempt = 0; attempt < WINDOWS_RENAME_MAX_RETRIES; attempt++) {
+		try {
+			await assertClosedSwarmFileIdentity(
+				directory,
+				lockPath,
+				identity,
+				verifiedParent,
+				'PR workflow checkout mutation lock',
+			);
+			await _test_exports.removeCheckoutLock(lockPath);
+			return;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+			lastError = error;
+			if (attempt < WINDOWS_RENAME_MAX_RETRIES - 1) {
+				await delay(RENAME_RETRY_DELAY_MS);
+			}
+		}
+	}
+	throw lastError instanceof Error
+		? lastError
+		: new Error('PR workflow checkout mutation lock cleanup failed');
+}
+
+function rememberCompletedCheckoutLockOwner(
+	lockPath: string,
+	ownerToken: string,
+): void {
+	completedCheckoutLockOwners.delete(lockPath);
+	completedCheckoutLockOwners.set(lockPath, ownerToken);
+	while (
+		completedCheckoutLockOwners.size > MAX_COMPLETED_CHECKOUT_LOCK_OWNERS
+	) {
+		const oldest = completedCheckoutLockOwners.keys().next().value;
+		if (oldest === undefined) break;
+		completedCheckoutLockOwners.delete(oldest);
+	}
 }
 
 /** Serialize in-process mutations; the durable revision rejects stale callers. */

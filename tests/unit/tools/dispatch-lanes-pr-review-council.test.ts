@@ -116,7 +116,7 @@ async function establishReviewPrerequisites(): Promise<void> {
 	});
 	for (const [index, lane] of lanes.entries()) {
 		const correlationId = `base-${index}`;
-		const text = `[CANDIDATE] | C-${index} | ${lane.workflowLane} | LOW | correctness | file.ts:1 | claim | evidence | impact | LOW`;
+		const text = `[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence\nC-${index} | ${lane.workflowLane} | LOW | correctness | file.ts:1 | claim | evidence | impact | LOW`;
 		await recordPendingDelegation(directory, {
 			correlationId,
 			jobId: null,
@@ -174,7 +174,7 @@ async function establishReviewPrerequisites(): Promise<void> {
 		const batchId = `micro-${index}`;
 		const laneId = `micro-lane-${index}`;
 		const correlationId = `micro-session-${index}`;
-		const text = `[CLEAN] | ${workflowLane} | exact reviewed diff | no finding after focused invariant review`;
+		const text = `[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence\n[CLEAN] | ${workflowLane} | exact reviewed diff | no finding after focused invariant review`;
 		await recordPendingDelegation(directory, {
 			correlationId,
 			jobId: null,
@@ -226,6 +226,7 @@ async function establishReviewPrerequisites(): Promise<void> {
 		triggerRows.push({
 			trigger_id: workflowLane,
 			result: 'MATCHED',
+			evidence: `Test fixture evidence for ${workflowLane}`,
 			source_batch_id: batchId,
 			source_lane_id: laneId,
 		});
@@ -286,9 +287,14 @@ describe('PR review council mechanical dispatch', () => {
 				'intent-architecture',
 			),
 		).toBe(false);
+		const clean =
+			'[CLEAN] | intent-architecture | all changed architecture paths | no candidate survived caller and sibling checks';
+		expect(
+			prReviewDiscoveryArtifactCoversLane(clean, 'intent-architecture'),
+		).toBe(false);
 		expect(
 			prReviewDiscoveryArtifactCoversLane(
-				'[CLEAN] | intent-architecture | all changed architecture paths | no candidate survived caller and sibling checks',
+				`[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence\n${clean}`,
 				'intent-architecture',
 			),
 		).toBe(true);

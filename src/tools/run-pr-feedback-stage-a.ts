@@ -2110,7 +2110,11 @@ export async function executeRunPrFeedbackStageA(
 				`PR_FEEDBACK head mismatch: expected ${state.prHeadSha ?? '(unbound)'}, received ${parsed.data.pr_head_sha}`,
 			);
 		}
-		await assertCurrentCheckoutHead(directory, parsed.data.pr_head_sha);
+		await assertCurrentCheckoutHead(
+			directory,
+			parsed.data.pr_head_sha,
+			'PR_FEEDBACK',
+		);
 		const beforeDigest = await _internals.resolvePrWorkflowRevisionDigestAsync(
 			directory,
 			parsed.data.pr_head_sha,

@@ -47,7 +47,7 @@ function beRow(
 	c6 = 'claim1',
 	c7 = 'evidence1',
 	c8 = 'impact1',
-	c9 = '0.9',
+	c9 = 'HIGH',
 ): string {
 	return [c1, c2, c3, c4, c5, c6, c7, c8, c9].join(' | ');
 }
@@ -63,7 +63,7 @@ function mlRow(
 	c6 = 'no-unused-vars',
 	c7 = 'evidence2',
 	c8 = '0.8',
-	c9 = '0.85',
+	c9 = 'HIGH',
 ): string {
 	return [c1, c2, c3, c4, c5, c6, c7, c8, c9].join(' | ');
 }
@@ -92,7 +92,7 @@ describe('SC-001 — well-formed base_explorer artifact', () => {
 				'cl',
 				'x',
 				'impact1',
-				'0.9',
+				'HIGH',
 			),
 			beRow(
 				'c2',
@@ -103,7 +103,7 @@ describe('SC-001 — well-formed base_explorer artifact', () => {
 				'cl',
 				'x',
 				'impact1',
-				'0.9',
+				'HIGH',
 			),
 			beRow(
 				'c3',
@@ -114,7 +114,7 @@ describe('SC-001 — well-formed base_explorer artifact', () => {
 				'cl',
 				'x',
 				'impact1',
-				'0.9',
+				'HIGH',
 			),
 			beRow(
 				'c4',
@@ -125,7 +125,7 @@ describe('SC-001 — well-formed base_explorer artifact', () => {
 				'cl',
 				'x',
 				'impact1',
-				'0.9',
+				'HIGH',
 			),
 			beRow(
 				'c5',
@@ -136,7 +136,7 @@ describe('SC-001 — well-formed base_explorer artifact', () => {
 				'cl',
 				'x',
 				'impact1',
-				'0.9',
+				'HIGH',
 			),
 		];
 		const input: ArtifactInput = { ...BASE_INPUT, text: buildBeText(rows) };
@@ -163,7 +163,7 @@ describe('SC-001 — well-formed base_explorer artifact', () => {
 				'cl',
 				'x',
 				'imp',
-				'0.9',
+				'HIGH',
 			),
 		];
 		const input: ArtifactInput = { ...BASE_INPUT, text: buildBeText(rows) };
@@ -456,7 +456,7 @@ describe('SC-017 — format-family auto-detection', () => {
 				'cl',
 				'x',
 				'has-impact',
-				'0.9',
+				'HIGH',
 			),
 		];
 		const input: ArtifactInput = { ...BASE_INPUT, text: buildBeText(rows) };
@@ -485,14 +485,14 @@ describe('SC-017 — format-family auto-detection', () => {
 				'cl',
 				'',
 				'',
-				'0.9',
+				'HIGH',
 			),
 		];
 		const input: ArtifactInput = { ...BASE_INPUT, text: buildBeText(rows) };
 		const result = parseCandidates(input, BASE_FLAGS);
-		expect(result.diagnostics.malformed_rows).toBe(0);
+		expect(result.diagnostics.malformed_rows).toBe(1);
 		expect(result.diagnostics.parse_errors).toBe(2);
-		expect(result.candidates.length).toBe(1);
+		expect(result.candidates.length).toBe(0);
 	});
 });
 
@@ -512,14 +512,14 @@ describe('SC-019 — recognized header with empty family fields', () => {
 				'cl',
 				'',
 				'',
-				'0.9',
+				'HIGH',
 			),
 		];
 		const input: ArtifactInput = { ...BASE_INPUT, text: buildBeText(rows) };
 		const result = parseCandidates(input, BASE_FLAGS);
-		expect(result.diagnostics.malformed_rows).toBe(0);
+		expect(result.diagnostics.malformed_rows).toBe(1);
 		expect(result.diagnostics.parse_errors).toBe(2);
-		expect(result.candidates.length).toBe(1);
+		expect(result.candidates.length).toBe(0);
 	});
 });
 
@@ -539,7 +539,7 @@ describe('SC-005 — escaped pipe in field value', () => {
 				'claim',
 				'code\\|more code',
 				'impact',
-				'0.9',
+				'HIGH',
 			),
 		];
 		const input: ArtifactInput = { ...BASE_INPUT, text: buildBeText(rows) };
@@ -562,9 +562,9 @@ describe('SC-006 — duplicate candidate IDs', () => {
 				'sec',
 				'src/foo.ts:10',
 				'cl',
-				'',
+				'evidence',
 				'imp',
-				'0.9',
+				'HIGH',
 			),
 			beRow(
 				'c1',
@@ -573,9 +573,9 @@ describe('SC-006 — duplicate candidate IDs', () => {
 				'sec',
 				'src/foo.ts:10',
 				'cl',
-				'',
+				'evidence',
 				'imp',
-				'0.9',
+				'HIGH',
 			),
 		];
 		const input: ArtifactInput = { ...BASE_INPUT, text: buildBeText(rows) };
@@ -607,13 +607,13 @@ describe('SC-007 — markdown code fence isolation', () => {
 
 \`\`\`
 [CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence
-c1 | lane-A | HIGH | security | src/foo.ts:10 | fake claim | fake evidence | fake impact | 0.9
+c1 | lane-A | HIGH | security | src/foo.ts:10 | fake claim | fake evidence | fake impact | HIGH
 \`\`\`
 
 More text after fence.
 
 [CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence
-c2 | lane-B | MEDIUM | style | src/bar.ts:20 | real claim | real evidence | real impact | 0.85`;
+c2 | lane-B | MEDIUM | style | src/bar.ts:20 | real claim | real evidence | real impact | HIGH`;
 
 		const input: ArtifactInput = { ...BASE_INPUT, text };
 		const result = parseCandidates(input, BASE_FLAGS);
@@ -639,7 +639,7 @@ describe('SC-008 — multiline field reassembly', () => {
 			'cl',
 			'base evidence',
 			'imp',
-			'0.9',
+			'HIGH',
 		);
 		const continuation = 'additional evidence\nspanning multiple lines';
 		const text = [BASE_EXPLORER_HEADER, completeRow, continuation].join('\n');
@@ -692,7 +692,7 @@ describe('SC-009 — missing required field (non-id)', () => {
 	// "both discriminators" parse_error. Additionally, the empty category triggers a
 	// "missing required field" parse_error. We verify the core invariants:
 	// candidate is produced, category is null, row is not malformed.
-	test('empty category → candidate with category:null, malformed_rows:0', () => {
+	test('empty category excludes the candidate and marks the row malformed', () => {
 		const rows = [
 			beRow(
 				'c1',
@@ -703,15 +703,14 @@ describe('SC-009 — missing required field (non-id)', () => {
 				'cl',
 				'x',
 				'imp',
-				'0.9',
+				'HIGH',
 			),
 		];
 		const input: ArtifactInput = { ...BASE_INPUT, text: buildBeText(rows) };
 		const result = parseCandidates(input, BASE_FLAGS);
 
-		expect(result.candidates.length).toBe(1);
-		expect(result.candidates[0].category).toBeNull();
-		expect(result.diagnostics.malformed_rows).toBe(0);
+		expect(result.candidates.length).toBe(0);
+		expect(result.diagnostics.malformed_rows).toBe(1);
 		expect(result.diagnostics.parse_errors).toBeGreaterThanOrEqual(1);
 		const categoryError = result.diagnostics.parse_error_details.find(
 			(e) => e.field === 'category',
@@ -736,7 +735,7 @@ describe('SC-010 — missing candidate_id is malformed', () => {
 				'cl',
 				'',
 				'imp',
-				'0.9',
+				'HIGH',
 			),
 		];
 		const input: ArtifactInput = { ...BASE_INPUT, text: buildBeText(rows) };
@@ -789,7 +788,7 @@ describe('SC-018 — invocation envelope present for every call', () => {
 				'cl',
 				'x',
 				'imp',
-				'0.9',
+				'HIGH',
 			),
 		];
 		const input: ArtifactInput = { ...BASE_INPUT, text: buildBeText(rows) };
@@ -954,11 +953,11 @@ describe('SC-021 — format_families_detected on invocation envelope', () => {
 });
 
 // ---------------------------------------------------------------------------
-// SC-022 — Both discriminators in header → base_explorer + parse_error
+// SC-022 — Both discriminators violate the exact canonical header
 // ---------------------------------------------------------------------------
 
 describe('SC-022 — both discriminators in header', () => {
-	test('header has both discriminators → base_explorer + parse_error diagnostic', () => {
+	test('header has both discriminators → fail-closed header refusal', () => {
 		const bothHeader =
 			'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | impact_context | invariant_violated | evidence_summary | confidence';
 		// row: pos7=impact_ctx, pos6=invariant (both non-empty)
@@ -971,18 +970,15 @@ describe('SC-022 — both discriminators in header', () => {
 			'cl',
 			'inv-val',
 			'imp-ctx',
-			'ev',
+			'HIGH',
 		].join(' | ');
 		const text = [bothHeader, row].join('\n');
 		const input: ArtifactInput = { ...BASE_INPUT, text };
 		const result = parseCandidates(input, BASE_FLAGS);
 
-		expect(result.candidates[0].row_format_family).toBe('base_explorer');
-		expect(result.diagnostics.parse_errors).toBeGreaterThan(0);
-		const headerError = result.diagnostics.parse_error_details.find(
-			(e) => e.field === 'header',
-		);
-		expect(headerError).toBeDefined();
+		expect(result.candidates).toEqual([]);
+		expect(result.error_code).toBe('invalid-candidate-header');
+		expect(result.error).toContain('exact canonical');
 	});
 });
 
@@ -1071,7 +1067,7 @@ describe('row_format_version propagation', () => {
 // ---------------------------------------------------------------------------
 
 describe('Field value preservation', () => {
-	test('confidence and severity are preserved as strings', () => {
+	test('canonical confidence and severity enums are preserved', () => {
 		const rows = [
 			beRow(
 				'c1',
@@ -1080,16 +1076,16 @@ describe('Field value preservation', () => {
 				'security',
 				'src/foo.ts:10',
 				'cl',
-				'',
+				'evidence',
 				'imp',
-				'0.99',
+				'HIGH',
 			),
 		];
 		const input: ArtifactInput = { ...BASE_INPUT, text: buildBeText(rows) };
 		const result = parseCandidates(input, BASE_FLAGS);
 
 		expect(result.candidates[0].severity).toBe('CRITICAL');
-		expect(result.candidates[0].confidence).toBe('0.99');
+		expect(result.candidates[0].confidence).toBe('HIGH');
 	});
 
 	test('category can be a custom string value', () => {
@@ -1101,9 +1097,9 @@ describe('Field value preservation', () => {
 				'my-custom-category',
 				'src/foo.ts:10',
 				'cl',
-				'',
+				'evidence',
 				'imp',
-				'0.9',
+				'HIGH',
 			),
 		];
 		const input: ArtifactInput = { ...BASE_INPUT, text: buildBeText(rows) };

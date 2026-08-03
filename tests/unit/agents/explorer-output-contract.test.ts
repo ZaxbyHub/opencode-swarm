@@ -77,6 +77,9 @@ describe('EXPLORER_PROMPT Output Contract Verification', () => {
 			expect(candidateSection).not.toBeNull();
 			expect(candidateSection).toContain('one unprefixed data row per finding');
 			expect(candidateSection).toContain(
+				'[CLEAN] | lane | coverage_scope | evidence',
+			);
+			expect(candidateSection).toContain(
 				'[CLEAN] | micro_lane | coverage_scope | evidence',
 			);
 			expect(candidateSection).toContain('negative evidence');

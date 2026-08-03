@@ -10,6 +10,7 @@ import {
 import {
 	activatePrWorkflow,
 	bindPrReviewBase,
+	bindPrReviewTriggerLedger,
 	enforcePrReviewBaseDimensions,
 	_test_exports as gateInternals,
 	PR_REVIEW_BASE_DIMENSION_IDS,
@@ -84,12 +85,17 @@ async function recordCompletedLane(
 	},
 ): Promise<void> {
 	const correlationId = `${input.batchId}-${input.laneId}-session`;
-	const text = (input.ownedWorkflowLanes ?? [input.workflowLane])
+	const header =
+		input.mode === 'swarm-pr-review:base'
+			? '[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence'
+			: '[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence';
+	const cleanRows = (input.ownedWorkflowLanes ?? [input.workflowLane])
 		.map(
 			(family) =>
 				`[CLEAN] | ${family} | exact reviewed diff | no candidate survived the focused review`,
 		)
 		.join('\n');
+	const text = `${header}\n${cleanRows}`;
 	await recordPendingDelegation(root, {
 		correlationId,
 		jobId: null,
@@ -184,6 +190,15 @@ async function establishBoundReviewGate(
 			mode: 'swarm-pr-review:base',
 		});
 	}
+	await bindPrReviewTriggerLedger(
+		root,
+		SESSION_ID,
+		rows().map(({ trigger_id, result, evidence }) => ({
+			trigger_id,
+			result,
+			evidence,
+		})),
+	);
 	if (options.consolidatedMicro) {
 		const sweepA = [...PR_REVIEW_REQUIRED_MICRO_LANE_IDS.slice(0, 6)];
 		const sweepB = [...PR_REVIEW_REQUIRED_MICRO_LANE_IDS.slice(6)];
@@ -291,6 +306,7 @@ describe('write_pr_review_trigger_eval provenance and ownership', () => {
 		duplicate[1] = {
 			...duplicate[0],
 			trigger_id: duplicate[1].trigger_id,
+			evidence: duplicate[1].evidence,
 		};
 		const duplicateResult = JSON.parse(
 			await executeWritePrReviewTriggerEval(

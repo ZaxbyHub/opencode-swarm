@@ -1459,7 +1459,7 @@ describe('executeDispatchLanesAsync and executeCollectLaneResults', () => {
 
 	test('does not stale a still-busy async lane after the stale budget elapses', async () => {
 		const directory = makeTempDir();
-		let now = Date.now();
+		let now = 2_000_000_000_000;
 		const ops: SessionOps = {
 			create: mock(async () => ({
 				data: { id: 'session-busy-stale' },
@@ -2048,7 +2048,7 @@ describe('executeDispatchLanesAsync and executeCollectLaneResults', () => {
 
 	test('sweeps stale async rows during collection and reports failure', async () => {
 		const directory = makeTempDir();
-		let now = Date.now();
+		let now = 2_000_000_000_000;
 		const ops: SessionOps = {
 			create: mock(async () => ({
 				data: { id: 'session-stale' },
@@ -2479,52 +2479,5 @@ describe('common_prompt (shared lane context)', () => {
 		expect(result.success).toBe(false);
 		expect(result.failure_class).toBe('invalid_args');
 		expect(ops.promptAsync).toHaveBeenCalledTimes(0);
-	});
-});
-
-describe('applyExplorerFormatSuffix', () => {
-	afterEach(() => {
-		Object.assign(_internals, originalInternals);
-	});
-
-	test('appends format suffix to explorer-role lanes', () => {
-		_internals.getGeneratedAgentNames = () => ['swarm_explorer'];
-		const lanes = [
-			{ id: 'L1', agent: 'swarm_explorer', prompt: 'inspect runtime' },
-		];
-		const result = _test_exports.applyExplorerFormatSuffix(lanes);
-		expect(result[0].prompt).toContain('inspect runtime');
-		expect(result[0].prompt).toContain('[CANDIDATE]');
-	});
-
-	test('skips non-explorer lanes', () => {
-		_internals.getGeneratedAgentNames = () => [
-			'swarm_explorer',
-			'swarm_reviewer',
-		];
-		const lanes = [
-			{ id: 'L1', agent: 'swarm_reviewer', prompt: 'review findings' },
-		];
-		const result = _test_exports.applyExplorerFormatSuffix(lanes);
-		expect(result[0].prompt).toBe('review findings');
-		expect(result[0].prompt).not.toContain('[CANDIDATE]');
-	});
-
-	test('skips lanes that already contain [CANDIDATE]', () => {
-		_internals.getGeneratedAgentNames = () => ['swarm_explorer'];
-		const originalPrompt = 'inspect with [CANDIDATE] format already';
-		const lanes = [
-			{ id: 'L1', agent: 'swarm_explorer', prompt: originalPrompt },
-		];
-		const result = _test_exports.applyExplorerFormatSuffix(lanes);
-		expect(result[0].prompt).toBe(originalPrompt);
-	});
-
-	test('skips when appending would exceed MAX_PROMPT_CHARS', () => {
-		_internals.getGeneratedAgentNames = () => ['swarm_explorer'];
-		const longPrompt = 'x'.repeat(MAX_PROMPT_CHARS - 10);
-		const lanes = [{ id: 'L1', agent: 'swarm_explorer', prompt: longPrompt }];
-		const result = _test_exports.applyExplorerFormatSuffix(lanes);
-		expect(result[0].prompt).toBe(longPrompt);
 	});
 });

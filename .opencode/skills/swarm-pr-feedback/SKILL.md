@@ -171,13 +171,14 @@ tree:
   supersedes your planned fixes, and prefer the parallel work if it's more
   comprehensive (more tests, better edge coverage, clearer error handling).
   Abort your rebase, take the remote state, then add minor improvements on top.
-- Verify the working tree is clean first (`git status --porcelain`). If tracked
-  changes exist, call `prepare_pr_workflow_checkout` with every explicit dirty
-  tracked path (Profile A). It creates an auditable, path-scoped stash and returns its
-  recovery command. Do not issue `git stash` through shell. The controller never
-  stashes untracked files; move or remove those manually, or abort the checkout.
-  Without the controller, surface dirty tracked state to the user or abort the
-  checkout — do not blind-stash.
+- Verify the working tree is clean first (`git status --porcelain`). If any
+  tracked or untracked changes exist, call `prepare_pr_workflow_checkout`
+  before binding (Profile A). Omit `paths` to auto-discover and atomically
+  preserve every dirty path, including untracked files; pass explicit `paths`
+  only for an exact bounded tracked-file set. It creates an auditable stash
+  receipt and recovery command. Do not issue `git stash` through shell.
+  Without the controller, surface dirty state to the user or abort the checkout
+  — do not blind-stash.
 - Treat `recovery-required` and `indeterminate` controller results as terminal
   for the current attempt: report the typed `required_action`, abort/clear any
   already-active gate, and stop. Only `stashable` permits one preparation call;
@@ -191,21 +192,23 @@ tree:
    with `git show` when needed.
 - If no PR reference was provided (a pasted-feedback session on the current branch),
    confirm the current branch is the intended PR branch before editing.
-- If the fetched PR head is detached or has no local tracking branch, establish
-  it only during this pre-bind transition with the constrained existing-remote
-  form `git switch -c <local-branch> --track <remote>/<remote-branch>` (or set
-  the upstream of an existing local branch with
-  `git branch --set-upstream-to=<remote>/<remote-branch> <local-branch>`).
-  Branch creation/tracking is blocked after the immutable head is bound.
-- `gh pr checkout` is permitted only in its non-force, non-submodule form with
-  the PR number/URL and optional `--repo` or `--branch` flags. Never use
-  `--force`, `--recurse-submodules`, or detached checkout during this
-  transition.
-- Before the first feedback verification dispatch binds the head, prove that
-  `git rev-parse HEAD` equals the authoritative full `pr_head_sha`,
+- A detached checkout at the authoritative full PR head is a valid pre-bind
+  intake state. On the first Profile-A bind, the controller attaches it only
+  when Git reports exactly one safe candidate: an existing local branch at
+  that SHA whose upstream is an exact remote ref at the same SHA, or one exact
+  remote-tracking ref. It never guesses a remote/name boundary. Zero
+  candidates, multiple candidates, a linked-worktree-owned local branch, or an
+  existing mismatched upstream fails closed without publishing the bind. Retry
+  is idempotent if switching succeeded but state persistence failed.
+- The existing constrained tracked-branch and safe `gh pr checkout` pre-bind
+  forms remain supported on every profile after proving the exact SHA and a
+  unique intended remote ref. Never use force, submodule-recursive, or detached
+  `gh pr checkout` variants.
+- Immediately after the first bind and before feedback verification dispatch,
+  prove that `git rev-parse HEAD` equals the authoritative full `pr_head_sha`,
   `git status --porcelain` is empty, and the current branch tracks the intended
-  PR head remote/branch. A detached checkout is valid for review, not feedback
-  publication.
+  PR head remote/branch. A detached exact-head checkout is intake-only; the
+  bind must attach it before feedback dispatch or publication.
 
 When a verification lane result includes `output_ref`, treat `output` as a
 preview and call `retrieve_lane_output` before using it to classify, resolve,
