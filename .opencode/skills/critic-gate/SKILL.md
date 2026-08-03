@@ -41,7 +41,7 @@ one-line `reason` (or ask the user to run `/swarm approve-plan-critic
 <reason>`). This records a manual `plan_critic_gate` approval snapshot
 tagged `method: "manual_override"`, audited to `.swarm/events.jsonl`.
 Architect-only. Use ONLY when a legitimate APPROVED was lost — this is an
-escape hatch, not a way to skip the critic review.
+escape hatch, not a substitute for running the critic review.
 
 CRITIC-GATE TRIGGER: Run ONCE when you first write the complete .swarm/plan.md.
 Do NOT re-run CRITIC-GATE before every project phase.
