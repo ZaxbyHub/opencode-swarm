@@ -12,6 +12,7 @@ import * as path from 'node:path';
 import {
 	getHostConfigDir,
 	getHostDataDir,
+	getHostSkillCacheDir,
 	getPluginCachePaths,
 	getPluginConfigDir,
 	getPluginLockFilePaths,
@@ -372,5 +373,61 @@ describe('getHostDataDir — precedence (worktree-lane allowlist only)', () => {
 	test('the data dir is NOT the config dir (they are independently derived)', () => {
 		delete process.env.XDG_DATA_HOME;
 		expect(getHostDataDir()).not.toBe(getHostConfigDir());
+	});
+});
+
+describe('getHostSkillCacheDir — URL-skill cache root', () => {
+	const saved = { XDG_CACHE_HOME: process.env.XDG_CACHE_HOME };
+
+	afterEach(() => {
+		for (const [k, v] of Object.entries(saved)) {
+			if (v === undefined) delete process.env[k];
+			else process.env[k] = v;
+		}
+	});
+
+	// Expected values are built from LITERAL joins, never by calling the
+	// function on both sides — the mistake that let a missing XDG branch survive
+	// a mutation run for getHostDataDir.
+
+	test('XDG_CACHE_HOME wins when set', () => {
+		// Verbatim host source (opencode 1.18.10, offset 107378747):
+		//   p = XDG_CACHE_HOME || join(homedir(), '.cache')
+		//   i = join(p, 'opencode')          -> Global.Path.cache
+		// and the skill cache root is join(cache, 'skills') (offset 102988349).
+		const xdg = path.join(os.tmpdir(), 'custom-xdg-cache');
+		process.env.XDG_CACHE_HOME = xdg;
+		expect(getHostSkillCacheDir()).toBe(path.join(xdg, 'opencode', 'skills'));
+	});
+
+	test('falls back to ~/.cache/opencode/skills when unset', () => {
+		delete process.env.XDG_CACHE_HOME;
+		expect(getHostSkillCacheDir()).toBe(
+			path.join(os.homedir(), '.cache', 'opencode', 'skills'),
+		);
+	});
+
+	test('an empty XDG_CACHE_HOME falls back (empty string is falsy, as in the host)', () => {
+		process.env.XDG_CACHE_HOME = '';
+		expect(getHostSkillCacheDir()).toBe(
+			path.join(os.homedir(), '.cache', 'opencode', 'skills'),
+		);
+	});
+
+	test('it is a strict SUBdirectory of the cache root, never the root itself', () => {
+		// Global.Path.bin = join(cache,'bin') is host-executed, so the parent must
+		// never be what this returns.
+		delete process.env.XDG_CACHE_HOME;
+		const skills = getHostSkillCacheDir();
+		const parent = path.dirname(skills);
+		expect(path.basename(skills)).toBe('skills');
+		expect(parent).toBe(path.join(os.homedir(), '.cache', 'opencode'));
+		expect(skills).not.toBe(parent);
+	});
+
+	test('the cache dir is independent of the data and config dirs', () => {
+		delete process.env.XDG_CACHE_HOME;
+		expect(getHostSkillCacheDir()).not.toBe(getHostDataDir());
+		expect(getHostSkillCacheDir()).not.toBe(getHostConfigDir());
 	});
 });

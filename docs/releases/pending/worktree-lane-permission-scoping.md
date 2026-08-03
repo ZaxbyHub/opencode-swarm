@@ -13,7 +13,9 @@ front instead of raising prompts that nothing can answer.
   directories the host reads (the XDG one and, when set, the `OPENCODE_CONFIG_DIR`
   override), OpenCode's own temp directory, OpenCode's plan storage
   (`<data>/plans`), on Windows the shortened-worktree lane root used by the
-  path-budget fallback, and the configured skill roots (`.opencode/skills`,
+  path-budget fallback, the URL-skill cache root
+  (`$XDG_CACHE_HOME/opencode/skills`, and only when `skills.urls` is
+  configured), and the configured skill roots (`.opencode/skills`,
   `.opencode/skills/generated`, `.claude/skills`) resolved against the parent
   project, the lane, and your home directory — and denies
   everything else outright, so no request can be left pending.
@@ -39,12 +41,21 @@ front instead of raising prompts that nothing can answer.
   | `<project>/.claude/skills/<skill>` | allow |
   | `<project>/.agents/skills/<skill>` | allow |
   | `<project>/.opencode/{skill,skills}/<skill>` | allow |
+  | `$XDG_CACHE_HOME/opencode/skills/<skill>` (URL-sourced) | allow |
   | `~/.opencode` (the tree itself) | **deny** |
+  | `$XDG_CACHE_HOME/opencode` (the cache parent) | **deny** |
 
   Directories listed in `skills.paths` are granted too, resolved exactly as
-  OpenCode resolves them. `skills.urls` are **not**: OpenCode pulls those over
-  the network into a cache the plugin cannot locate without performing the pull
-  itself, which the plugin-init path forbids.
+  OpenCode resolves them. URL-sourced skills (`skills.urls`) are covered too,
+  but conditionally and as a superset: OpenCode caches them under
+  `$XDG_CACHE_HOME/opencode/skills` and base-allows each pulled directory, so
+  the lane is granted that ROOT — and only when the config actually declares
+  `skills.urls`, since otherwise a lane would end up more permissive than an
+  ordinary session. Because the grant covers writes and OpenCode skips a
+  download whose destination exists, a lane could pre-place content a later
+  session would load as a skill; that is accepted only under an explicit
+  `skills.urls` opt-in. Never the cache parent, which holds the `bin/`
+  directory the host executes from.
 - Explicit configuration mostly wins: any `permission.external_directory` entry
   in `opencode.json` is merged after the generated rules and overrides both the
   allowlist and the catch-all deny. The one exception is `"ask"`, which is

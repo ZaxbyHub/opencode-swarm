@@ -105,6 +105,7 @@ import { addDeferredWarning } from '../services/warning-buffer';
 import {
 	getHostConfigDir,
 	getHostDataDir,
+	getHostSkillCacheDir,
 	getPluginConfigDir,
 } from './cache-paths';
 import { hostNormalizePathPattern } from './host-path';
@@ -301,6 +302,7 @@ function push(
 function buildLaneAllowlist(
 	lane: LaneContext,
 	configuredSkillPaths: readonly string[] = [],
+	configuredSkillUrls: readonly string[] = [],
 ): LaneAllowlistEntry[] {
 	const out: LaneAllowlistEntry[] = [];
 	const seen = new Set<string>();
@@ -535,11 +537,71 @@ function buildLaneAllowlist(
 	//     `isDir`-checks each one; we deliberately do not, because granting a
 	//     path that does not exist yet is harmless and a stat per entry is not.
 	//
-	//     `skills.urls` are NOT granted: the host pulls them over the network
-	//     into a cache directory this hook cannot resolve without doing the pull
-	//     itself. Disclosed in docs/configuration.md.
+	//     `skills.urls` themselves need no per-URL handling here — their cache
+	//     root is granted below.
+
+	// (e) The URL-skill cache root. A SCOPED SUPERSET of the host's base allow —
+	//     NOT a pure restoration like <data>/plans, and deliberately conditional.
+	//
+	//     WHY IT IS NEEDED: when `skills.urls` is configured, the host pulls each
+	//     one and adds every pulled skill's directory to `Skill.dirs()` (offset
+	//     ~102994300: the `skills.urls` loop calls the same `u()` helper, which
+	//     does `dirs.add(dirname(match))`), and `Skill.dirs()` is part of the
+	//     per-agent base allow (Agent.state, offset 100811506). Without this a
+	//     lane would be denied a URL-sourced skill an ordinary session can read.
+	//
+	//     WHY IT IS CONDITIONAL: with no `skills.urls`, nothing under the cache
+	//     is in `Skill.dirs()`, so an ordinary session evaluates this path under
+	//     the base `"*": "ask"`. Granting it unconditionally would make a LANE
+	//     more permissive than an ordinary session — inverting the property this
+	//     whole module exists to preserve. So it is granted only when the config
+	//     actually declares URLs. Reading them is a pure property access on the
+	//     config object the hook already holds: no I/O, no network.
+	//
+	//     WHY IT IS A SUPERSET: the host base-allows `join(n,"*")` per INDIVIDUAL
+	//     pulled directory; we grant the ROOT, and `*` compiles to `.*` under the
+	//     `s` flag, so it covers the whole subtree — including hashed directories
+	//     for URLs that were never pulled. Narrowing to the exact leaves is not
+	//     available to us: v2's layout is `resolve(cache,"skills",Bun.hash(url))`
+	//     (offset 103375250) and `Bun.hash` is a Bun-only API, unusable here
+	//     under AGENTS.md invariant 2 (the bundle must stay Node-ESM-loadable);
+	//     v1 (offset 102988349) uses a different destination scheme again.
+	//
+	//     CONSEQUENCE, stated plainly: `external_directory` has no read/write
+	//     split, so this is a WRITE grant over that subtree. `Discovery.download`
+	//     short-circuits on an existing destination
+	//     (`if (yield* j.exists(T)) return !0`, offset 102988349; v2 additionally
+	//     skips on a matching `.opencode-version`, offset 103375250) and
+	//     destinations are deterministic. A lane can therefore pre-plant content
+	//     at a path a LATER, DIFFERENT session's host will decline to overwrite
+	//     and will then load as skill instructions — a cross-session write→load
+	//     path. That is the same blast radius cited for excluding the plugin
+	//     install dirs. It is accepted here only because the alternative is
+	//     breaking URL skills in lanes outright, and only when the operator has
+	//     opted into `skills.urls` at all.
+	//
+	//     SCOPE: `<cache>/opencode/skills` ONLY, never `<cache>/opencode`. The
+	//     host defines `bin: join(cache,"bin")` (offset 107378747) and creates
+	//     it at startup — a directory the host EXECUTES from. Granting the parent
+	//     would put executable code inside the write grant. Same reasoning that
+	//     dropped getPluginCachePaths() and narrowed os.tmpdir() above.
+	const skillUrls = Array.isArray(configuredSkillUrls)
+		? configuredSkillUrls
+		: [];
+	if (skillUrls.some((u) => typeof u === 'string' && u.trim() !== '')) {
+		push(
+			out,
+			seen,
+			getHostSkillCacheDir(),
+			'URL-sourced skill cache (only because skills.urls is configured)',
+		);
+	}
+	// Back to (d): the `skills.paths` loop. (The (e) cache grant above is a
+	// single push and needs no per-entry handling, so it was placed before this
+	// loop rather than after it.)
+	//
 	// Defence in depth for the one argument that carries user data.
-	// `readConfiguredSkillPaths` already normalises this, but allowlist
+	// `readConfiguredSkillList` already normalises this, but allowlist
 	// construction runs on the plugin-init path, so a malformed `skills` config
 	// must not be able to throw.
 	//
@@ -744,20 +806,24 @@ export interface LanePermissionApplication {
 }
 
 /**
- * Reads `skills.paths` out of the live config object the hook was handed.
+ * Reads `skills.paths` or `skills.urls` out of the live config object the hook
+ * was handed, selected by `key`.
  *
  * Pure object access — no filesystem, no network — so it is safe on the
  * plugin-init path. Anything that is not an array of strings yields an empty
- * list rather than throwing.
+ * list rather than throwing, and blank or whitespace-only entries are dropped.
  */
-function readConfiguredSkillPaths(
+function readConfiguredSkillList(
 	opencodeConfig: Record<string, unknown>,
+	key: 'paths' | 'urls',
 ): string[] {
 	const skills = opencodeConfig.skills;
 	if (!skills || typeof skills !== 'object' || Array.isArray(skills)) return [];
-	const paths = (skills as Record<string, unknown>).paths;
-	if (!Array.isArray(paths)) return [];
-	return paths.filter((p): p is string => typeof p === 'string');
+	const value = (skills as Record<string, unknown>)[key];
+	if (!Array.isArray(value)) return [];
+	return value.filter(
+		(v): v is string => typeof v === 'string' && v.trim() !== '',
+	);
 }
 
 /**
@@ -907,7 +973,11 @@ export function applyLanePermissions(
 
 	const allowlist =
 		mode === 'scoped_allow'
-			? buildLaneAllowlist(lane, readConfiguredSkillPaths(opencodeConfig))
+			? buildLaneAllowlist(
+					lane,
+					readConfiguredSkillList(opencodeConfig, 'paths'),
+					readConfiguredSkillList(opencodeConfig, 'urls'),
+				)
 			: [];
 	const build = buildLaneExternalDirectoryRules(
 		mode,

@@ -80,6 +80,46 @@ export function getHostDataDir(): string {
 }
 
 /**
+ * The cache directory the OpenCode HOST uses (`Global.Path.cache`).
+ *
+ * Verbatim host source (opencode 1.18.10, offset 107378747):
+ *   `p = XDG_CACHE_HOME || join(homedir(), ".cache")`
+ *   `i = join(p, "opencode")`   -> `An.cache`
+ *
+ * Like `data`, there is no environment override beyond XDG.
+ *
+ * Not exported: the same object defines `bin: join(i, "bin")` — a directory the
+ * host creates at startup and EXECUTES from — so granting this directory
+ * wholesale would place executable code inside a write grant. Keeping it
+ * module-private means it cannot be imported and granted directly; callers take
+ * a specific subdirectory instead (see {@link getHostSkillCacheDir}).
+ *
+ * This is a speed bump, not a boundary: `getPluginCachePaths` and
+ * `getPluginLockFilePaths` below already inline the identical
+ * `XDG_CACHE_HOME || join(homedir(), '.cache')` expression, so the value is
+ * trivially reconstructible inside this file.
+ */
+function getHostCacheDir(): string {
+	const base = process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache');
+	return path.join(base, 'opencode');
+}
+
+/**
+ * Where OpenCode caches URL-sourced skills (`skills.urls`).
+ *
+ * Both discovery implementations agree on the root:
+ *   v1 (offset 102988349): `join(Global.Path.cache, "skills")`
+ *   v2 (offset 103375250): `resolve(cache, "skills", Bun.hash(url))` — a
+ *                          per-URL subdirectory of the same root.
+ *
+ * Pure path construction, no I/O and no network: the pull itself is the host's
+ * job, and the plugin only needs to know where the result lands.
+ */
+export function getHostSkillCacheDir(): string {
+	return path.join(getHostCacheDir(), 'skills');
+}
+
+/**
  * All known locations where OpenCode may cache the opencode-swarm plugin.
  * Order: newest/canonical first so status reporting shows the most relevant
  * path at the top.

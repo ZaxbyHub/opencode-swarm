@@ -11,9 +11,13 @@
  * host's own `Wildcard.match` / `fromConfig` / `merge` / `evaluate`.
  */
 import { describe, expect, test } from 'bun:test';
+import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { getHostDataDir } from '../../../src/config/cache-paths';
+import {
+	getHostDataDir,
+	getHostSkillCacheDir,
+} from '../../../src/config/cache-paths';
 import { _test_exports } from '../../../src/config/lane-permissions';
 import {
 	asPermission,
@@ -158,6 +162,70 @@ describe('regression: skill roots mirror the host glob, not half of it', () => {
 		}
 	});
 
+	/** Rules built with an explicit `skills.urls` list. */
+	const withUrls = (urls: string[]) =>
+		asPermission(
+			buildLaneExternalDirectoryRules(
+				'scoped_allow',
+				lane,
+				undefined,
+				buildLaneAllowlist(lane, [], urls),
+			)?.rules ?? null,
+		);
+
+	test('the URL-skill cache is granted ONLY when skills.urls is configured', () => {
+		// The host pulls `skills.urls` and adds each pulled skill's directory to
+		// Skill.dirs() (offset ~102994300), part of the per-agent base allow — so
+		// with URLs configured a lane must reach the cache.
+		const configured = withUrls(['https://example.com/skills/']);
+		expect(evaluateExternalDirectory(configured, getHostSkillCacheDir())).toBe(
+			'allow',
+		);
+		// v2 stores each URL under a hashed subdirectory of that root.
+		expect(
+			evaluateExternalDirectory(
+				configured,
+				path.join(getHostSkillCacheDir(), 'a1b2c3'),
+			),
+		).toBe('allow');
+	});
+
+	test('with NO skills.urls the cache is denied — a lane is never MORE permissive', () => {
+		// Nothing under the cache is in Skill.dirs() when no URLs are configured,
+		// so an ordinary session evaluates this path under the base `"*": "ask"`.
+		// An unconditional grant would make the LANE more permissive than an
+		// ordinary session, inverting the property this module preserves.
+		expect(
+			evaluateExternalDirectory(withUrls([]), getHostSkillCacheDir()),
+		).toBe('deny');
+		// The default allowlist (no urls threaded) must behave the same way.
+		expect(act(getHostSkillCacheDir())).toBe('deny');
+	});
+
+	test('a blank or malformed skills.urls entry does not trigger the grant', () => {
+		for (const urls of [[''], ['   '], [null as unknown as string]]) {
+			expect(
+				evaluateExternalDirectory(withUrls(urls), getHostSkillCacheDir()),
+			).toBe('deny');
+		}
+	});
+
+	test('the cache PARENT is denied — it contains host-executed bin/', () => {
+		// Global.Path.bin = join(cache,'bin') (offset 107378747) is created at
+		// startup and executed by the host. external_directory has no read/write
+		// split, so granting the parent would put executable code inside a lane's
+		// write grant. Same reasoning that dropped getPluginCachePaths().
+		const cacheParent = path.dirname(getHostSkillCacheDir());
+		expect(act(cacheParent)).toBe('deny');
+		expect(act(path.join(cacheParent, 'bin'))).toBe('deny');
+		// ...and still denied when the cache root IS granted.
+		const configured = withUrls(['https://example.com/skills/']);
+		expect(evaluateExternalDirectory(configured, cacheParent)).toBe('deny');
+		expect(
+			evaluateExternalDirectory(configured, path.join(cacheParent, 'bin')),
+		).toBe('deny');
+	});
+
 	test('granting the skill roots does NOT re-admit the ~/.opencode tree', () => {
 		// The narrowing that caused the regression must stay in force: the tree
 		// holds the GitLab OAuth auth.json when XDG_DATA_HOME is unset.
@@ -203,8 +271,26 @@ describe('pattern construction', () => {
 		// tests/unit/config/host-path.test.ts for the pinned behaviour.
 		const { dir, cleanup } = createSafeTestDir('lane-pattern-');
 		try {
-			const resolved = path.resolve(dir);
-			expect(laneDirectoryPattern(resolved)).toBe(path.join(resolved, '*'));
+			// The expectation is built with fs.realpathSync.NATIVE, matching the
+			// host's own normalizePath. Two reasons, both found by CI on
+			// windows-latest:
+			//
+			//  - createSafeTestDir canonicalises with plain fs.realpathSync,
+			//    which on Windows does NOT expand an 8.3 short name. The GitHub
+			//    runner's os.tmpdir() is C:\Users\RUNNER~1\..., so the fixture
+			//    keeps the short form while laneDirectoryPattern correctly emits
+			//    the long form C:\Users\runneradmin\...
+			//  - Production is RIGHT to expand it: the host normalises its asked
+			//    patterns with realpathSync.native too, so a short-form rule
+			//    would never match a long-form ask.
+			//
+			// So this asserts the CONTRACT -- natively-canonicalised directory
+			// plus /* -- computed independently of our implementation, rather
+			// than echoing whatever laneDirectoryPattern happens to return.
+			const canonical = fs.realpathSync.native(dir);
+			expect(laneDirectoryPattern(path.resolve(dir))).toBe(
+				path.join(canonical, '*'),
+			);
 		} finally {
 			cleanup();
 		}

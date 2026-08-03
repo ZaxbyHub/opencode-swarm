@@ -1178,7 +1178,8 @@ Under `"scoped_allow"` the allowlist is:
 - OpenCode's own temp directory (`<os-temp>/opencode`), and on Windows only the shortened-worktree lane root (`<os-temp>/swwt`) used by the path-budget fallback;
 - OpenCode's plan storage (`<data>/plans`), which the host natively allows to its built-in `plan` agent;
 - the skill roots OpenCode itself scans, mirroring its `{skill,skills}` glob (see the table below);
-- any directories listed in your `skills.paths` config, resolved the same way OpenCode resolves them (`~/` expands to your home directory, relative paths anchor to the lane).
+- any directories listed in your `skills.paths` config, resolved the same way OpenCode resolves them (`~/` expands to your home directory, relative paths anchor to the lane);
+- **only if you configure `skills.urls`**, the URL-skill cache root `$XDG_CACHE_HOME/opencode/skills` (default `~/.cache/opencode/skills`). With no `skills.urls` set, nothing under the cache is granted — see the note below.
 
 > **These are WRITE grants too.** OpenCode's `external_directory` permission has no read/write split, so every allowlist entry also permits writes. The list is deliberately narrow for that reason: the whole OS temp directory is **not** granted (only the two subtrees above), and neither are the opencode-swarm plugin cache/install locations — a lane writing to its own installed plugin would be executed in-process by the host on the next load. OpenCode's data directory is not granted either — only the `plans` subdirectory is, so session storage and the primary `auth.json` stay outside the grant. The user-level `~/.opencode` tree is deliberately **not** granted for the same reason: OpenCode's GitLab OAuth helper stores credentials at `~/.opencode/auth.json` when `XDG_DATA_HOME` is unset (the default on Windows and macOS). Its skill subdirectories (`~/.opencode/skill` and `~/.opencode/skills`) are granted individually instead. If a lane genuinely needs more of `~/.opencode`, add an explicit `permission.external_directory` allow — but be aware of what else lives there.
 
@@ -1202,9 +1203,15 @@ OpenCode discovers skills with two globs: `skills/**/SKILL.md` under `.claude` a
 | `<project>/.claude/skills/<skill>` | allow |
 | `<project>/.agents/skills/<skill>` | allow |
 | `<project>/.opencode/{skill,skills}/<skill>` | allow |
+| `$XDG_CACHE_HOME/opencode/skills/<skill>` (URL-sourced) | allow |
 | `~/.opencode` (the tree itself) | **deny** |
+| `$XDG_CACHE_HOME/opencode` (the cache parent) | **deny** |
 
-> **Not covered — `skills.urls`.** OpenCode pulls URL-sourced skills over the network into a cache directory the plugin cannot resolve without performing the pull itself, which is not permissible on the plugin-init path. If you use `skills.urls`, a lane will be denied access to the pulled content; add an explicit `permission.external_directory` allow for the cache location.
+> **`skills.urls` are covered — conditionally, and as a superset.** OpenCode pulls URL-sourced skills into `$XDG_CACHE_HOME/opencode/skills` (default `~/.cache/opencode/skills`) and adds each pulled skill's directory to the set it base-allows every agent, so a lane needs that root to read them. The grant is made **only when your config actually declares `skills.urls`** — otherwise nothing under the cache is base-allowed to an ordinary session either, and granting it would make a lane *more* permissive than a normal session.
+>
+> Note this is a **superset** of what OpenCode base-allows: the host allows each individual pulled directory, whereas the plugin grants the whole root (a rule pattern's `*` spans path separators). Because `external_directory` grants writes as well as reads, and OpenCode skips downloading a file whose destination already exists, a lane with this grant could pre-place content at a deterministic cache path that a later, different session would then load as skill instructions. That risk is accepted only when you have opted into `skills.urls`; set `worktree.lane_permissions: "deny"` if you would rather a lane never reach the cache.
+>
+> Only that subdirectory is granted — **not** the cache parent `$XDG_CACHE_HOME/opencode`, which contains `bin/`, a directory OpenCode executes from; granting the parent would place executable code inside a lane's write grant.
 
 > **Exception — `"ask"` becomes `"deny"` inside a lane.** A lane instance has no TUI attached, so an `ask` there is not a third policy choice; nothing can ever answer it, and the lane blocks forever. Any `external_directory` `"ask"` you configure — top level or per agent, string shorthand or pattern map — is therefore applied as `"deny"` inside a lane only, and the affected patterns are named in the advisory and in the `.swarm/events.jsonl` record. Use an explicit `"allow"` or `"deny"` to control the behavior, or `worktree.lane_permissions: "off"` if you really want the prompting (and hanging) restored. Outside a lane, `"ask"` is untouched.
 
