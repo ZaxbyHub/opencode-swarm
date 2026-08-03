@@ -53,6 +53,21 @@ import { createTestEngineerAgent } from './test-engineer';
 
 export type { AgentDefinition } from './architect';
 
+/**
+ * Test-only dependency-injection seam. `getAgentConfigs` calls
+ * `_internals.createAgents(...)` instead of the module-local `createAgents`
+ * directly, so tests can substitute a synthetic agent set (e.g. a primary
+ * agent whose definition already declares a `permission` block) without
+ * `mock.module`, which leaks across files in Bun's shared test-runner
+ * process. Mutating this object is file-scoped and trivially restorable via
+ * `afterEach`.
+ */
+export const _internals: {
+	createAgents: typeof createAgents;
+} = {
+	createAgents,
+};
+
 // Track agents for which we've already warned about missing config
 const warnedAgents = new Set<string>();
 
@@ -1116,7 +1131,10 @@ export function getAgentConfigs(
 	sessionId?: string,
 	projectContext?: ProjectContext,
 ): Record<string, SDKAgentConfig> {
-	const agents = createAgents(config, projectContext ?? emptyProjectContext());
+	const agents = _internals.createAgents(
+		config,
+		projectContext ?? emptyProjectContext(),
+	);
 
 	// Check if tool filtering is disabled globally
 	const toolFilterEnabled = config?.tool_filter?.enabled ?? true;
@@ -1178,6 +1196,16 @@ export function getAgentConfigs(
 		}
 	}
 
+	// Narrows `agent.config.permission` to the SDK's declared permission
+	// shape, defensively rejecting absent values and non-object primitives
+	// (a malformed agent definition must not throw here). Mirrors the
+	// `isObjectRecord` convention used for config-hook guards in
+	// src/index.ts.
+	const isPermissionRecord = (
+		value: SDKAgentConfig['permission'],
+	): value is NonNullable<SDKAgentConfig['permission']> =>
+		typeof value === 'object' && value !== null;
+
 	const result = Object.fromEntries(
 		agents.map((agent) => {
 			const sdkConfig: SDKAgentConfig = {
@@ -1189,8 +1217,39 @@ export function getAgentConfigs(
 
 			if (isPrimaryAgent) {
 				sdkConfig.mode = 'primary';
-				// Allow task delegation for primary agents
-				(sdkConfig.permission as Record<string, 'allow'>) = { task: 'allow' };
+				// Allow task delegation for primary agents. Merge — never
+				// replace — the agent definition's own permission block.
+				// OpenCode merges agent-level permission additively on its
+				// side (rule evaluation uses `findLast` over concatenated
+				// permission entries), so wholesale replacement here was
+				// never necessary and previously discarded any edit/bash/
+				// webfetch/external_directory entries (including nested
+				// per-pattern objects, e.g. `external_directory: { "C:/foo/*":
+				// "allow" }`) the agent definition declared. `task: 'allow'`
+				// always wins when the definition also declares its own
+				// `task` entry — primary agents must always be able to
+				// delegate, which is the existing intent this branch
+				// preserves.
+				const existingPermission = isPermissionRecord(agent.config.permission)
+					? agent.config.permission
+					: undefined;
+				// POSITION IS PRECEDENCE. The host evaluates with `findLast` over
+				// `Object.entries` order and wildcard-matches the permission NAME,
+				// so `'*'` also matches `task`. A duplicate key in an object
+				// literal keeps its FIRST position and only takes the last value:
+				// `{ ...{ task: 'deny', '*': 'deny' }, task: 'allow' }` yields
+				// `{ task: 'allow', '*': 'deny' }` with `task` still at index 0, so
+				// `findLast` picks `'*': 'deny'` and the primary agent silently
+				// loses delegation — the opposite of the intent documented above.
+				// Delete-then-set moves `task` to the end so it genuinely wins.
+				const mergedPermission: NonNullable<SDKAgentConfig['permission']> & {
+					task: 'allow';
+				} = { ...existingPermission } as NonNullable<
+					SDKAgentConfig['permission']
+				> & { task: 'allow' };
+				delete (mergedPermission as Record<string, unknown>).task;
+				mergedPermission.task = 'allow';
+				sdkConfig.permission = mergedPermission;
 			} else {
 				sdkConfig.mode = 'subagent';
 			}

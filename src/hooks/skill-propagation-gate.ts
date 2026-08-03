@@ -225,8 +225,16 @@ export const SKILL_CAPABLE_AGENTS = new Set([
 	'designer',
 ]);
 
-/** Skill root directories to scan for SKILL.md files. */
-const SKILL_SEARCH_ROOTS = [
+/**
+ * Skill root directories to scan for SKILL.md files.
+ *
+ * Exported because `src/config/lane-permissions.ts` resolves these same
+ * project-relative roots to absolute directories when building the
+ * `external_directory` allowlist for a worktree-lane instance. Keeping one
+ * definition means a new skill root cannot be added here and silently become
+ * an unanswerable permission prompt inside a lane.
+ */
+export const SKILL_SEARCH_ROOTS = [
 	'.opencode/skills',
 	'.opencode/skills/generated',
 	'.claude/skills',

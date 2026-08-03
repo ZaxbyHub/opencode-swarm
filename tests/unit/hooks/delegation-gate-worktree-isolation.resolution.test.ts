@@ -108,7 +108,7 @@ async function callToolBefore(
 	args: Record<string, unknown>,
 ): Promise<void> {
 	await hook.toolBefore(
-		{ tool, sessionID, callID: `call-${Date.now()}` },
+		{ tool, sessionID, callID: `call-${crypto.randomUUID()}` },
 		{ args },
 	);
 }
@@ -271,7 +271,7 @@ describe('delegation-gate: worktree isolation', () => {
 		});
 
 		try {
-			const session = ensureAgentSession('sc104-session');
+			const session = ensureAgentSession('ses_sc104Session');
 			session.pendingAdvisoryMessages = [];
 
 			await precreateStandardWorktreeSession({
@@ -283,7 +283,7 @@ describe('delegation-gate: worktree isolation', () => {
 					},
 				} as any,
 				directory: tempDir,
-				parentSessionID: 'sc104-session',
+				parentSessionID: 'ses_sc104Session',
 				callID: 'call-sc104',
 				taskId: 'task-sc104',
 				description: 'run tests and build the feature',
@@ -326,7 +326,7 @@ describe('delegation-gate: worktree isolation', () => {
 		});
 
 		try {
-			const session = ensureAgentSession('sc104-neg-session');
+			const session = ensureAgentSession('ses_sc104NegSession');
 			session.pendingAdvisoryMessages = [];
 
 			await precreateStandardWorktreeSession({
@@ -338,7 +338,7 @@ describe('delegation-gate: worktree isolation', () => {
 					},
 				} as any,
 				directory: tempDir,
-				parentSessionID: 'sc104-neg-session',
+				parentSessionID: 'ses_sc104NegSession',
 				callID: 'call-sc104-neg',
 				taskId: 'task-sc104-neg',
 				// Description has NO test/build/lint/check keywords
@@ -389,7 +389,7 @@ describe('delegation-gate: worktree isolation', () => {
 			await precreateStandardWorktreeSession({
 				config: { worktree: { policy: 'auto' } } as any,
 				directory: tempDir,
-				parentSessionID: 'scopefwd-session',
+				parentSessionID: 'ses_scopefwdSession',
 				callID: 'call-scopefwd',
 				taskId: 'task-scopefwd',
 				outputArgs: {},
@@ -475,7 +475,7 @@ describe('delegation-gate: worktree isolation', () => {
 				await precreateStandardWorktreeSession({
 					config: { worktree: { policy: 'auto' } } as any,
 					directory: realGitDir,
-					parentSessionID: 'e2e-scope-session',
+					parentSessionID: 'ses_e2eScopeSession',
 					callID: 'call-e2e-scope',
 					taskId: 'e2e-1.2',
 					outputArgs: {},

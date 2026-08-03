@@ -2414,6 +2414,35 @@ export const WorktreeIsolationConfigSchema = z.object({
 	worktree_dir: z.string().optional(),
 	deps_strategy: z.enum(['skip', 'copy', 'link']).default('skip'),
 	/**
+	 * Permission policy for OpenCode instances running inside a swarm worktree
+	 * lane. OpenCode partitions permission state per directory, so a lane gets
+	 * an empty `approved` list and a private pending map; because no TUI is
+	 * attached to a lane instance, an `external_directory` prompt raised there
+	 * can never be answered and the lane hangs indefinitely.
+	 *
+	 * scoped_allow: (default) pre-grant `external_directory` access to a
+	 * justified allowlist — the parent project the lane is a worktree of, the
+	 * plugin config/cache dirs, the OS temp dir, and the configured skill roots
+	 * — and deny everything else outright so nothing can be left pending.
+	 *
+	 * deny: emit no allowlist at all — only the catch-all deny. Anything you
+	 * have explicitly allowed in `permission.external_directory` still applies
+	 * (user configuration is merged last and always wins), so this denies
+	 * everything the plugin would otherwise have granted, not literally every
+	 * request. Still resolves rather than hanging.
+	 *
+	 * off: apply no lane-specific permission rules. This RESTORES the hanging
+	 * behaviour described above — an unanswerable prompt in a lane will block
+	 * that lane until the server is restarted. Provided only as an escape hatch
+	 * for hosts where the scoped rules are undesirable.
+	 *
+	 * Has no effect outside a swarm worktree lane; ordinary sessions are never
+	 * modified by this setting.
+	 */
+	lane_permissions: z
+		.enum(['scoped_allow', 'deny', 'off'])
+		.default('scoped_allow'),
+	/**
 	 * FR-104 SC-111: Release a serialized session after this many successful
 	 * dispatches have completed and merged back from that session.
 	 */

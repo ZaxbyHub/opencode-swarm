@@ -13,6 +13,11 @@ import * as fs from 'node:fs';
 import * as fsPromises from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { SWARM_WORKTREE_DIR_NAME } from '../config/constants';
+import {
+	buildSwarmBranchName,
+	matchSwarmLaneBranch,
+} from '../config/swarm-branch';
 import { advisoryWarn } from '../services/warning-buffer';
 import { log } from '../utils';
 import { bunSpawn } from '../utils/bun-compat';
@@ -458,10 +463,16 @@ export function makeWorktreeBranchName(
 	id: string,
 	options: Pick<WorktreeOptions, 'purpose' | 'branchStyle'>,
 ): string {
-	if (options.branchStyle === 'legacy-lane' && options.purpose === 'lane') {
-		return `swarm-lane/${sessionId}/${id}`;
-	}
-	return `swarm/${options.purpose}/${sessionId}/${id}`;
+	// Delegates to the shared grammar in src/config/swarm-branch.ts so that this
+	// producer and the lane-detection recogniser (matchSwarmLaneBranch) cannot
+	// drift. A new naming style must be added to that grammar, or lanes using it
+	// become invisible to lane-permission scoping.
+	return buildSwarmBranchName(
+		sessionId,
+		id,
+		options.purpose,
+		options.branchStyle === 'legacy-lane' && options.purpose === 'lane',
+	);
 }
 
 /**
@@ -502,7 +513,7 @@ export function resolveWorktreeBaseDir(
 ): string {
 	return worktreeDir
 		? path.resolve(directory, worktreeDir)
-		: path.resolve(path.dirname(directory), '.swarm-worktrees');
+		: path.resolve(path.dirname(directory), SWARM_WORKTREE_DIR_NAME);
 }
 
 /**
@@ -562,6 +573,35 @@ export async function provisionWorktree(
 	options: WorktreeOptions,
 ): Promise<WorktreeProvisionResult> {
 	const branchName = makeWorktreeBranchName(sessionId, id, options);
+
+	// STRUCTURAL GUARD — a lane whose branch the recogniser cannot match is a
+	// lane that will HANG.
+	//
+	// Lane permission scoping (src/config/lane-context.ts) identifies a lane by
+	// its branch. If we provision one whose branch falls outside the grammar,
+	// detection silently returns "not a lane", no permissions are pre-resolved,
+	// and the first external_directory request in that lane parks forever on a
+	// deferred no TUI can answer — the exact defect this subsystem exists to
+	// remove, reintroduced silently.
+	//
+	// The realistic source is an unvalidated `sessionId`: tool arguments are
+	// LLM-supplied (`sessionID: z.string()`), and the host's own `SessionID`
+	// brand is only `isStartsWith("ses")`, so a value like `ses-run-1` reaches
+	// here intact. Asserting at the provisioning boundary makes the defect
+	// unreachable no matter where the id came from.
+	//
+	// Hard failure, not a warning: silently creating an unrecognisable lane is
+	// strictly worse than refusing to create one.
+	if (!matchSwarmLaneBranch(branchName)) {
+		return {
+			error:
+				`Refusing to provision worktree: branch "${branchName}" does not match the swarm lane grammar, ` +
+				`so lane permission scoping could not recognise it and the lane would hang on the first ` +
+				`external-directory prompt. This is almost always an invalid sessionId ("${sessionId}"); ` +
+				`it must look like "ses_" followed by letters/digits, and the execution-unit id ("${id}") ` +
+				`must be a single path segment.`,
+		};
+	}
 
 	// Resolve worktree path: explicit config or DD-6 default
 	let worktreePath = path.resolve(

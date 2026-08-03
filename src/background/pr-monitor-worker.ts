@@ -209,6 +209,13 @@ export class PrMonitorWorker {
 			});
 		}, this.config.poll_interval_seconds * 1000);
 
+		// Never keep the process alive solely for this poll timer.
+		if (
+			typeof (this.pollTimer as { unref?: () => void }).unref === 'function'
+		) {
+			(this.pollTimer as { unref: () => void }).unref();
+		}
+
 		this.status = 'running';
 		log('[PrMonitorWorker] Started polling', {
 			intervalSeconds: this.config.poll_interval_seconds,

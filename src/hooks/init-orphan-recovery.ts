@@ -22,6 +22,7 @@ import {
 	scanDelegationFallbacksForRecovery,
 	scanDelegationsForRecovery,
 } from '../background/pending-delegations.js';
+import { SWARM_WORKTREE_DIR_NAME } from '../config/constants';
 import {
 	isLocked,
 	listActiveLocks,
@@ -191,7 +192,7 @@ async function enumerateOrphanedWorktreeDirs(
 	const orphanedDirs: string[] = [];
 	const worktreeRoot = path.resolve(
 		path.dirname(directory),
-		'.swarm-worktrees',
+		SWARM_WORKTREE_DIR_NAME,
 	);
 
 	let entries: fs.Dirent[];

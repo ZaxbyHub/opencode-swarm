@@ -6,6 +6,7 @@
 import type { ToolDefinition } from '@opencode-ai/plugin/tool';
 import { z } from 'zod';
 import { loadPluginConfigWithMeta as loadPluginConfigWithMeta_import } from '../config';
+import { isSwarmSessionId } from '../config/swarm-branch';
 import { swarmState } from '../state';
 import type { LaneResult, MergeBackFailureInfo } from '../turbo/lean/runner';
 import { LeanTurboRunner as LeanTurboRunner_import } from '../turbo/lean/runner';
@@ -147,8 +148,28 @@ export function createLeanTurboRunPhaseTool(
 			phase: z.number().int().positive().describe('Phase number to execute'),
 			sessionID: z.string().describe('Lean Turbo session ID'),
 		},
-		execute: async (args: unknown, _directory: string) => {
-			const { phase, sessionID } = args as LeanTurboRunPhaseArgs;
+		execute: async (args: unknown, _directory: string, ctx) => {
+			const { phase, sessionID: argSessionID } = args as LeanTurboRunPhaseArgs;
+			// Prefer the REAL session id from the tool context over the
+			// model-supplied argument (mirrors epic_run_phase). The argument is
+			// `z.string()`, so an LLM can pass anything; it reaches
+			// provisionWorktree -> buildSwarmBranchName and a value such as
+			// `ses-run-1` produces a branch lane detection cannot recognise,
+			// silently skipping permission scoping and reinstating the hang.
+			const sessionID =
+				ctx?.sessionID && ctx.sessionID.length > 0
+					? ctx.sessionID
+					: argSessionID;
+			if (!isSwarmSessionId(sessionID)) {
+				return JSON.stringify(
+					{
+						ok: false,
+						error: `Invalid sessionID "${sessionID}". It must look like "ses_" followed by letters/digits. Omit the argument so the tool can use the active session id.`,
+					},
+					null,
+					2,
+				);
+			}
 			// Use _directory from tool context for .swarm containment (invariant #4)
 			return JSON.stringify(
 				await executeLeanTurboRunPhase(

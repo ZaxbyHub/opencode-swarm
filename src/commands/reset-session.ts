@@ -1,5 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { SWARM_WORKTREE_DIR_NAME } from '../config/constants';
 import { clearTrajectoryStep } from '../hooks/trajectory-logger';
 import { validateSwarmPath } from '../hooks/utils';
 import { resetPrmSessionState } from '../prm';
@@ -144,7 +145,7 @@ export async function handleResetSessionCommand(
 	// Best-effort: clean stale worktree directories and orphan branches
 	const worktreesDir = path.resolve(
 		path.dirname(directory),
-		'.swarm-worktrees',
+		SWARM_WORKTREE_DIR_NAME,
 	);
 	try {
 		if (fs.existsSync(worktreesDir)) {

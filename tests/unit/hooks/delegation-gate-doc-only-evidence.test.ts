@@ -81,7 +81,7 @@ describe('delegation gate doc-only durable evidence', () => {
 			'\n.swarm/\n',
 		);
 		fs.mkdirSync(path.join(directory, '.swarm'), { recursive: true });
-		startAgentSession('architect-session', 'architect');
+		startAgentSession('ses_architectSession', 'architect');
 	});
 
 	afterEach(() => {
@@ -107,7 +107,7 @@ describe('delegation gate doc-only durable evidence', () => {
 				'TASK: 1.1\nImplement the approved task.\nACCEPTANCE: task complete and covered by tests',
 		};
 		await hook.toolBefore(
-			{ tool: 'Task', sessionID: 'architect-session', callID: 'coder-call' },
+			{ tool: 'Task', sessionID: 'ses_architectSession', callID: 'coder-call' },
 			{ args },
 		);
 		for (const relativePath of actualFiles) {
@@ -118,14 +118,14 @@ describe('delegation gate doc-only durable evidence', () => {
 		await hook.toolAfter(
 			{
 				tool: 'Task',
-				sessionID: 'architect-session',
+				sessionID: 'ses_architectSession',
 				callID: 'coder-call',
 				args,
 			},
 			{},
 		);
 		swarmState.agentSessions
-			.get('architect-session')
+			.get('ses_architectSession')
 			?.taskWorkflowStates?.set('1.1', 'coder_delegated');
 		return hook;
 	}
@@ -138,7 +138,7 @@ describe('delegation gate doc-only durable evidence', () => {
 		await hook.toolAfter(
 			{
 				tool: 'Task',
-				sessionID: 'architect-session',
+				sessionID: 'ses_architectSession',
 				callID: 'reviewer-call',
 				args: { subagent_type: 'reviewer', task_id: '1.1' },
 			},
@@ -148,7 +148,7 @@ describe('delegation gate doc-only durable evidence', () => {
 		expect(evidence?.gates.reviewer).toBeDefined();
 		expect(
 			swarmState.agentSessions
-				.get('architect-session')
+				.get('ses_architectSession')
 				?.taskWorkflowStates?.get('1.1'),
 		).toBe('tests_run');
 		expect(checkReviewerGate('1.1', directory).blocked).toBe(false);
@@ -160,7 +160,7 @@ describe('delegation gate doc-only durable evidence', () => {
 		await hook.toolAfter(
 			{
 				tool: 'update_task_status',
-				sessionID: 'architect-session',
+				sessionID: 'ses_architectSession',
 				callID: 'completion-call',
 				args: { task_id: '1.1', status: 'completed' },
 			},
@@ -168,7 +168,7 @@ describe('delegation gate doc-only durable evidence', () => {
 		);
 		expect(
 			swarmState.agentSessions
-				.get('architect-session')
+				.get('ses_architectSession')
 				?.taskWorkflowStates?.get('1.1'),
 		).toBe('complete');
 
@@ -208,7 +208,7 @@ describe('delegation gate doc-only durable evidence', () => {
 			await hook.toolBefore(
 				{
 					tool: 'Task',
-					sessionID: 'architect-session',
+					sessionID: 'ses_architectSession',
 					callID: 'non-doc-coder-call',
 				},
 				{
@@ -269,7 +269,7 @@ describe('delegation gate doc-only durable evidence', () => {
 				await hook.toolBefore(
 					{
 						tool: 'Task',
-						sessionID: 'architect-session',
+						sessionID: 'ses_architectSession',
 						callID: 'worktree-doc-coder-call',
 					},
 					{ args },
@@ -289,7 +289,7 @@ describe('delegation gate doc-only durable evidence', () => {
 				await hook.toolAfter(
 					{
 						tool: 'Task',
-						sessionID: 'architect-session',
+						sessionID: 'ses_architectSession',
 						callID: 'worktree-doc-coder-call',
 						args,
 					},
