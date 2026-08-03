@@ -367,6 +367,7 @@ const STATE_MUTATION_LOCK_MAX_ATTEMPTS = 50;
 const STATE_MUTATION_LOCK_RETRY_DELAY_MS = 10;
 const STATE_MUTATION_LOCK_UNINITIALIZED_STALE_MS = 30_000;
 const MAX_COMPLETED_CHECKOUT_LOCK_OWNERS = 64;
+const CHECKOUT_MUTATION_ACTION_TIMEOUT_MS = 5 * 60_000;
 const MAX_CANDIDATE_ISSUES_PER_ARTIFACT = 8;
 const MAX_BASE_COVERAGE_DIAGNOSTICS = 8;
 const MAX_BASE_COVERAGE_DIAGNOSTIC_CHARS = 1_000;
@@ -3710,6 +3711,8 @@ export const _test_exports = {
 		_test_exports.beforeAtomicRename = undefined;
 		_test_exports.openCheckoutLock = openCheckoutLockFile;
 		_test_exports.removeCheckoutLock = removeCheckoutLockFile;
+		_test_exports.checkoutMutationActionTimeoutMs =
+			CHECKOUT_MUTATION_ACTION_TIMEOUT_MS;
 	},
 	beforeTerminalClear: undefined as (() => Promise<void>) | undefined,
 	beforePrFeedbackTransitionLock: undefined as
@@ -3732,6 +3735,7 @@ export const _test_exports = {
 	beforeAtomicRename: undefined as (() => Promise<void>) | undefined,
 	openCheckoutLock: openCheckoutLockFile,
 	removeCheckoutLock: removeCheckoutLockFile,
+	checkoutMutationActionTimeoutMs: CHECKOUT_MUTATION_ACTION_TIMEOUT_MS,
 	resolveCurrentGitHead,
 	resolveCurrentGitHeadAsync,
 	resolveCurrentUpstreamPushTarget,
@@ -5822,6 +5826,52 @@ function checkoutMutationProjectKey(directory: string): string {
 	return normalizeComparableFsPath(directory);
 }
 
+/** A bounded checkout-mutation refusal that never permits unsafe late overlap. */
+export class PrWorkflowCheckoutMutationTimeoutError extends Error {
+	readonly code = 'PR_WORKFLOW_CHECKOUT_MUTATION_TIMEOUT' as const;
+	readonly retryable = false as const;
+
+	constructor(readonly phase: 'queue' | 'action') {
+		super(
+			phase === 'queue'
+				? 'BLOCKED: timed out waiting for the active PR workflow checkout mutation; the existing owner still holds serialization and must settle before retrying'
+				: 'BLOCKED: PR workflow checkout mutation exceeded its execution deadline; serialization remains held until the in-flight action actually settles',
+		);
+		this.name = 'PrWorkflowCheckoutMutationTimeoutError';
+	}
+}
+
+type CheckoutActionOutcome<T> =
+	| { status: 'fulfilled'; value: T }
+	| { status: 'rejected'; error: unknown };
+
+async function withCheckoutMutationDeadline<T>(
+	promise: Promise<T>,
+	phase: 'queue' | 'action',
+): Promise<
+	T | { status: 'timeout'; error: PrWorkflowCheckoutMutationTimeoutError }
+> {
+	let timeout: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			promise,
+			new Promise<{
+				status: 'timeout';
+				error: PrWorkflowCheckoutMutationTimeoutError;
+			}>((resolve) => {
+				timeout = setTimeout(() => {
+					resolve({
+						status: 'timeout',
+						error: new PrWorkflowCheckoutMutationTimeoutError(phase),
+					});
+				}, _test_exports.checkoutMutationActionTimeoutMs);
+			}),
+		]);
+	} finally {
+		if (timeout) clearTimeout(timeout);
+	}
+}
+
 /** Serialize project-wide checkout mutations before any session state lock. */
 export async function withPrWorkflowCheckoutMutationLock<T>(
 	directory: string,
@@ -5836,18 +5886,69 @@ export async function withPrWorkflowCheckoutMutationLock<T>(
 	});
 	const queued = previous.then(() => current);
 	pendingCheckoutMutationsByProject.set(key, queued);
-	await previous;
+	const previousResult = await withCheckoutMutationDeadline(
+		previous.then(() => ({ status: 'ready' as const })),
+		'queue',
+	);
+	if (previousResult.status === 'timeout') {
+		release();
+		// Keep this resolved tail chained to the still-running owner so later
+		// in-process waiters receive the same bounded typed refusal instead of
+		// bypassing to the durable lock. Remove it only after the owner settles.
+		void queued.then(() => {
+			if (pendingCheckoutMutationsByProject.get(key) === queued) {
+				pendingCheckoutMutationsByProject.delete(key);
+			}
+		});
+		throw previousResult.error;
+	}
+
+	let lock: Awaited<ReturnType<typeof acquireCheckoutMutationLock>>;
 	try {
-		const lock = await acquireCheckoutMutationLock(directory);
-		try {
-			return await action();
-		} finally {
-			await releaseCheckoutMutationLock(lock);
-		}
-	} finally {
+		lock = await acquireCheckoutMutationLock(directory);
+	} catch (error) {
 		release();
 		if (pendingCheckoutMutationsByProject.get(key) === queued) {
 			pendingCheckoutMutationsByProject.delete(key);
+		}
+		throw error;
+	}
+	const actionOutcome: Promise<CheckoutActionOutcome<T>> = Promise.resolve()
+		.then(action)
+		.then(
+			(value) => ({ status: 'fulfilled' as const, value }),
+			(error: unknown) => ({ status: 'rejected' as const, error }),
+		);
+	const outcome = await withCheckoutMutationDeadline(actionOutcome, 'action');
+	if (outcome.status === 'timeout') {
+		// Promises are not cancellable. Returning the lock here would let a late
+		// action mutate concurrently, so a retained owner task performs cleanup
+		// only after the action truly settles.
+		void actionOutcome.then(async () => {
+			try {
+				await releaseCheckoutMutationLock(lock);
+			} catch {
+				// Completed-owner recovery reclaims a persistently busy Windows lock.
+			} finally {
+				release();
+				if (pendingCheckoutMutationsByProject.get(key) === queued) {
+					pendingCheckoutMutationsByProject.delete(key);
+				}
+			}
+		});
+		throw outcome.error;
+	}
+	try {
+		if (outcome.status === 'rejected') throw outcome.error;
+		return outcome.value;
+	} finally {
+		try {
+			await releaseCheckoutMutationLock(lock);
+		} finally {
+			release();
+			if (pendingCheckoutMutationsByProject.get(key) === queued) {
+				pendingCheckoutMutationsByProject.delete(key);
+			}
 		}
 	}
 }

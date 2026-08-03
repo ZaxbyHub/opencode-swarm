@@ -1459,7 +1459,7 @@ describe('executeDispatchLanesAsync and executeCollectLaneResults', () => {
 
 	test('does not stale a still-busy async lane after the stale budget elapses', async () => {
 		const directory = makeTempDir();
-		let now = Date.now();
+		let now = 2_000_000_000_000;
 		const ops: SessionOps = {
 			create: mock(async () => ({
 				data: { id: 'session-busy-stale' },
@@ -2048,7 +2048,7 @@ describe('executeDispatchLanesAsync and executeCollectLaneResults', () => {
 
 	test('sweeps stale async rows during collection and reports failure', async () => {
 		const directory = makeTempDir();
-		let now = Date.now();
+		let now = 2_000_000_000_000;
 		const ops: SessionOps = {
 			create: mock(async () => ({
 				data: { id: 'session-stale' },

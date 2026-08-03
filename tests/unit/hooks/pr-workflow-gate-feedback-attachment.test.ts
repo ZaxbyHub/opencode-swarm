@@ -13,6 +13,12 @@ import {
 
 let root = '';
 const originalBeforeAtomicRename = _test_exports.beforeAtomicRename;
+const originalResolveCurrentGitHeadAsync =
+	_test_exports.resolveCurrentGitHeadAsync;
+const originalResolveCurrentUpstreamPushTargetAsync =
+	_test_exports.resolveCurrentUpstreamPushTargetAsync;
+const originalResolveRemoteRefsContainingHeadAsync =
+	_test_exports.resolveRemoteRefsContainingHeadAsync;
 
 function git(
 	cwd: string,
@@ -80,11 +86,88 @@ beforeEach(() => {
 
 afterEach(async () => {
 	_test_exports.beforeAtomicRename = originalBeforeAtomicRename;
+	_test_exports.resolveCurrentGitHeadAsync = originalResolveCurrentGitHeadAsync;
+	_test_exports.resolveCurrentUpstreamPushTargetAsync =
+		originalResolveCurrentUpstreamPushTargetAsync;
+	_test_exports.resolveRemoteRefsContainingHeadAsync =
+		originalResolveRemoteRefsContainingHeadAsync;
 	_test_exports.resetTrackedStateCache();
 	await fs.rm(root, { recursive: true, force: true });
 });
 
 describe('detached PR_FEEDBACK attachment', () => {
+	test('rejects when HEAD changes between intake verification and attachment (PRR-012)', async () => {
+		const { checkout, head } = await makeDetachedFeedbackCheckout();
+		await activatePrWorkflow(checkout, 'feedback-head-changed', 'PR_FEEDBACK');
+		let headReads = 0;
+		_test_exports.resolveCurrentGitHeadAsync = async () =>
+			++headReads === 1 ? head : 'b'.repeat(40);
+
+		await expect(
+			bindPrWorkflowHead(checkout, 'feedback-head-changed', head),
+		).rejects.toThrow('exact head changed before attach');
+		expect(
+			(await readPrWorkflowGateState(checkout, 'feedback-head-changed'))
+				?.prHeadSha,
+		).toBeUndefined();
+		expect(expectGit(checkout, ['branch', '--show-current'])).toBe('');
+	});
+
+	test('refuses to replace an existing upstream that misses the intake head (PRR-012)', async () => {
+		const { checkout, head } = await makeDetachedFeedbackCheckout();
+		await activatePrWorkflow(
+			checkout,
+			'feedback-upstream-mismatch',
+			'PR_FEEDBACK',
+		);
+		_test_exports.resolveCurrentUpstreamPushTargetAsync = async () => ({
+			remoteName: 'origin',
+			remoteBranchRef: 'refs/heads/main',
+			remoteTrackingRef: 'refs/remotes/origin/main',
+		});
+		_test_exports.resolveRemoteRefsContainingHeadAsync = async () => [
+			'refs/remotes/origin/feature/nested',
+		];
+
+		await expect(
+			bindPrWorkflowHead(checkout, 'feedback-upstream-mismatch', head),
+		).rejects.toThrow('refusing to replace an existing tracking relationship');
+		expect(
+			(await readPrWorkflowGateState(checkout, 'feedback-upstream-mismatch'))
+				?.prHeadSha,
+		).toBeUndefined();
+	});
+
+	test('rejects multiple exact local tracking branches without choosing one (PRR-012)', async () => {
+		const { checkout, head } = await makeDetachedFeedbackCheckout({
+			extraExactRemote: true,
+		});
+		for (const branch of ['feature/nested', 'feature/copy']) {
+			expectGit(checkout, [
+				'switch',
+				'-c',
+				branch,
+				'--track',
+				`origin/${branch}`,
+			]);
+			expectGit(checkout, ['switch', '--detach', head]);
+		}
+		await activatePrWorkflow(
+			checkout,
+			'feedback-local-ambiguous',
+			'PR_FEEDBACK',
+		);
+
+		await expect(
+			bindPrWorkflowHead(checkout, 'feedback-local-ambiguous', head),
+		).rejects.toThrow('matches multiple local tracked branches');
+		expect(
+			(await readPrWorkflowGateState(checkout, 'feedback-local-ambiguous'))
+				?.prHeadSha,
+		).toBeUndefined();
+		expect(expectGit(checkout, ['branch', '--show-current'])).toBe('');
+	});
+
 	test('promotes one exact remote-tracking ref and binds the immutable head', async () => {
 		const { checkout, head } = await makeDetachedFeedbackCheckout();
 		await activatePrWorkflow(checkout, 'feedback-remote-only', 'PR_FEEDBACK');
@@ -151,7 +234,7 @@ describe('detached PR_FEEDBACK attachment', () => {
 		expect(expectGit(checkout, ['branch', '--show-current'])).toBe('');
 	});
 
-	test('refuses an exact local branch held by another linked worktree', async () => {
+	test('covers a failed exact-local switch held by another linked worktree (PRR-012)', async () => {
 		const { checkout, head } = await makeDetachedFeedbackCheckout();
 		const linked = path.join(root, 'linked');
 		expectGit(checkout, [
@@ -171,6 +254,7 @@ describe('detached PR_FEEDBACK attachment', () => {
 		expect(
 			(await readPrWorkflowGateState(checkout, 'feedback-linked'))?.prHeadSha,
 		).toBeUndefined();
+		expect(expectGit(checkout, ['branch', '--show-current'])).toBe('');
 	});
 
 	test('revalidates exact HEAD after switching before publishing the bind', async () => {

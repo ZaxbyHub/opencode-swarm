@@ -8,6 +8,7 @@ import {
 	_test_exports,
 	activatePrWorkflow,
 	bindPrWorkflowHead,
+	type PrWorkflowCheckoutMutationTimeoutError,
 	withPrWorkflowCheckoutMutationLock,
 	withPrWorkflowCheckoutPreparationLock,
 } from '../../../src/hooks/pr-workflow-gate';
@@ -24,6 +25,23 @@ const originalResolveCurrentUpstreamPushTargetAsync =
 	_test_exports.resolveCurrentUpstreamPushTargetAsync;
 const originalResolveRemoteRefsContainingHeadAsync =
 	_test_exports.resolveRemoteRefsContainingHeadAsync;
+
+async function withTestDeadline<T>(promise: Promise<T>): Promise<T> {
+	let timeout: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			promise,
+			new Promise<never>((_resolve, reject) => {
+				timeout = setTimeout(
+					() => reject(new Error('test deadline exceeded')),
+					500,
+				);
+			}),
+		]);
+	} finally {
+		if (timeout) clearTimeout(timeout);
+	}
+}
 
 beforeEach(() => {
 	directory = realpathSync(
@@ -79,6 +97,68 @@ describe('project-scoped checkout mutation lock', () => {
 			'session-a-exit',
 			'session-b-enter',
 		]);
+	});
+
+	test('times out callers while retaining serialization until the late owner settles (PRR-008)', async () => {
+		_test_exports.checkoutMutationActionTimeoutMs = 20;
+		let releaseOwner!: () => void;
+		const ownerMayFinish = new Promise<void>((resolve) => {
+			releaseOwner = resolve;
+		});
+		let ownerEntered!: () => void;
+		const ownerDidEnter = new Promise<void>((resolve) => {
+			ownerEntered = resolve;
+		});
+		const owner = withPrWorkflowCheckoutMutationLock(directory, async () => {
+			ownerEntered();
+			await ownerMayFinish;
+			return 'late-owner-result';
+		});
+		await ownerDidEnter;
+
+		await expect(owner).rejects.toMatchObject({
+			name: 'PrWorkflowCheckoutMutationTimeoutError',
+			code: 'PR_WORKFLOW_CHECKOUT_MUTATION_TIMEOUT',
+			phase: 'action',
+			retryable: false,
+		});
+		const lockPath = path.join(
+			directory,
+			'.swarm',
+			_test_exports.workflowCheckoutMutationLockRelativePath(),
+		);
+		await expect(fs.stat(lockPath)).resolves.toBeDefined();
+
+		let waiterEntered = false;
+		await expect(
+			withTestDeadline(
+				withPrWorkflowCheckoutMutationLock(directory, async () => {
+					waiterEntered = true;
+				}),
+			),
+		).rejects.toEqual(
+			expect.objectContaining<Partial<PrWorkflowCheckoutMutationTimeoutError>>({
+				code: 'PR_WORKFLOW_CHECKOUT_MUTATION_TIMEOUT',
+				phase: 'queue',
+			}),
+		);
+		expect(waiterEntered).toBe(false);
+		await expect(fs.stat(lockPath)).resolves.toBeDefined();
+
+		let cleanupFinished!: () => void;
+		const cleanupDidFinish = new Promise<void>((resolve) => {
+			cleanupFinished = resolve;
+		});
+		_test_exports.removeCheckoutLock = async (pathToRemove) => {
+			await originalRemoveCheckoutLock(pathToRemove);
+			cleanupFinished();
+		};
+		releaseOwner();
+		await cleanupDidFinish;
+		await expect(fs.stat(lockPath)).rejects.toMatchObject({ code: 'ENOENT' });
+		await expect(
+			withPrWorkflowCheckoutMutationLock(directory, async () => 'next-owner'),
+		).resolves.toBe('next-owner');
 	});
 
 	test('serializes checkout preparation against another session head attachment', async () => {
@@ -137,7 +217,7 @@ describe('project-scoped checkout mutation lock', () => {
 			JSON.stringify({
 				ownerToken: 'abandoned-owner',
 				pid: 123456,
-				createdAtMs: Date.now() - 60_000,
+				createdAtMs: 1,
 			}),
 			'utf-8',
 		);

@@ -164,12 +164,30 @@ describe('persisted PR-review trigger receipts', () => {
 			trigger_count: 11,
 			matched_count: 4,
 			not_triggered_count: 7,
-			no_match_count: 7,
+			no_match_count: 0,
 		});
 		const parsed = parsePrReviewTriggerReceipt(receipt);
 		expect(parsed.schemaVersion).toBe(2);
 		expect(parsed.matchedRows).toHaveLength(4);
 		expect(parsed.notTriggeredRows).toHaveLength(7);
+	});
+
+	test('keeps legacy no_match_count at zero for schema v2 receipts (HERMES-001)', () => {
+		const receipt = buildPrReviewTriggerReceiptV2({
+			run_id: 'run-hermes-001',
+			pr_head_sha: 'a'.repeat(40),
+			base_ref: 'origin/main',
+			base_sha: 'b'.repeat(40),
+			evaluated_at: '2026-08-02T00:00:00.000Z',
+			dispatched_micro_lane_count: 4,
+			rows: persistedRows(),
+		});
+
+		// Previous code leaked the seven NOT_TRIGGERED rows into this legacy
+		// NO-MATCH counter even though schema v2 rejects NO-MATCH rows entirely.
+		expect(receipt.not_triggered_count).toBe(7);
+		expect(receipt.no_match_count).toBe(0);
+		expect(() => parsePrReviewTriggerReceipt(receipt)).not.toThrow();
 	});
 
 	test('rejects v2 count drift and unknown fields', () => {

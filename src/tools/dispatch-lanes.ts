@@ -760,7 +760,14 @@ export async function executeDispatchLanes(
 			errors: common.errors,
 		});
 	}
-	const formatted = applyExplorerFormatSuffix(common.lanes);
+	const requiresMandatoryExplorerFormat = common.lanes.some(
+		(lane) =>
+			lane.workflow_lane !== undefined ||
+			(lane.owned_workflow_lanes?.length ?? 0) > 0,
+	);
+	const formatted = applyExplorerFormatSuffix(common.lanes, {
+		failClosed: requiresMandatoryExplorerFormat,
+	});
 	if (!formatted.ok) {
 		return failureResult({
 			failure_class: 'invalid_args',
@@ -1360,6 +1367,7 @@ export async function executeCollectLaneResults(
 	}
 	const timeoutMs = parsed.data.timeout_ms ?? DEFAULT_COLLECT_TIMEOUT_MS;
 	const deadline = _internals.now() + timeoutMs;
+	const hostTimeouts = new Set<string>();
 	const batchFilter =
 		context.sessionID !== undefined
 			? { parentSessionId: context.sessionID }
@@ -1381,12 +1389,16 @@ export async function executeCollectLaneResults(
 			directory,
 			records,
 			parsed.data.cancel_pending === true,
+			deadline,
+			hostTimeouts,
 		);
 		await sweepStaleAsyncLaneRecords(
 			session,
 			directory,
 			records,
 			DEFAULT_ASYNC_STALE_TIMEOUT_MS,
+			deadline,
+			hostTimeouts,
 		);
 		records = findByBatchId(directory, parsed.data.batch_id, batchFilter);
 		if (allSettled(records) || parsed.data.wait !== true) {
@@ -1403,11 +1415,17 @@ export async function executeCollectLaneResults(
 		pollIntervalMs = nextCollectPollInterval(pollIntervalMs);
 	}
 
-	return buildCollectResult(
+	const result = buildCollectResult(
 		parsed.data.batch_id,
 		records,
 		parsed.data.include_pending ?? parsed.data.wait !== true,
 	);
+	if (hostTimeouts.size > 0) {
+		result.message =
+			'Collection deadline exhausted while waiting for OpenCode host calls; pending lanes remain safe to retry.';
+		result.errors = [...hostTimeouts];
+	}
+	return result;
 }
 
 async function launchAsyncLane(args: {
@@ -1562,14 +1580,26 @@ async function collectOnce(
 	directory: string,
 	records: BackgroundDelegationRecord[],
 	cancelPending: boolean,
+	deadline: number,
+	hostTimeouts: Set<string>,
 ): Promise<void> {
 	for (const record of records) {
 		if (record.status !== 'pending' && record.status !== 'running') continue;
 		if (cancelPending) {
 			if (typeof session.abort === 'function') {
-				await session
-					.abort({ path: { id: record.subagentSessionId } })
-					.catch(() => undefined);
+				const timeoutCount = hostTimeouts.size;
+				try {
+					await withCollectionDeadline(
+						() => session.abort!({ path: { id: record.subagentSessionId } }),
+						deadline,
+						`session.abort for lane session "${record.subagentSessionId}"`,
+						hostTimeouts,
+					);
+				} catch {
+					// Preserve the old best-effort behavior for ordinary host errors, but
+					// never claim cancellation when the abort request itself timed out.
+					if (hostTimeouts.size > timeoutCount) continue;
+				}
 			}
 			await appendDelegationTransition(directory, record.correlationId, {
 				status: 'cancelled',
@@ -1580,14 +1610,22 @@ async function collectOnce(
 			session,
 			directory,
 			record.subagentSessionId,
+			deadline,
+			hostTimeouts,
 		);
 		if (!readyForCollection) continue;
 		let messages: Awaited<ReturnType<NonNullable<SessionOps['messages']>>>;
 		try {
-			messages = await session.messages!({
-				path: { id: record.subagentSessionId },
-				query: { directory, limit: ASYNC_MESSAGE_FETCH_LIMIT },
-			});
+			messages = await withCollectionDeadline(
+				() =>
+					session.messages!({
+						path: { id: record.subagentSessionId },
+						query: { directory, limit: ASYNC_MESSAGE_FETCH_LIMIT },
+					}),
+				deadline,
+				`session.messages for lane "${record.laneId ?? record.correlationId}"`,
+				hostTimeouts,
+			);
 		} catch {
 			continue;
 		}
@@ -1733,10 +1771,17 @@ async function isLaneReadyForCollection(
 	session: SessionOps,
 	directory: string,
 	sessionId: string,
+	deadline: number,
+	hostTimeouts: Set<string>,
 ): Promise<boolean> {
 	if (typeof session.status !== 'function') return true;
 	try {
-		const status = await session.status({ query: { directory } });
+		const status = await withCollectionDeadline(
+			() => session.status!({ query: { directory } }),
+			deadline,
+			`session.status for lane session "${sessionId}"`,
+			hostTimeouts,
+		);
 		if (status.error || !status.data) return false;
 		const current = status.data[sessionId];
 		return current === undefined || current.type === 'idle';
@@ -1750,6 +1795,8 @@ async function sweepStaleAsyncLaneRecords(
 	directory: string,
 	records: BackgroundDelegationRecord[],
 	staleTimeoutMs: number,
+	deadline: number,
+	hostTimeouts: Set<string>,
 ): Promise<void> {
 	if (staleTimeoutMs <= 0) return;
 	const now = _internals.now();
@@ -1765,6 +1812,8 @@ async function sweepStaleAsyncLaneRecords(
 			session,
 			directory,
 			record.subagentSessionId,
+			deadline,
+			hostTimeouts,
 		);
 		if (!readyForCollection) continue;
 		await appendDelegationTransition(directory, record.correlationId, {
@@ -2492,6 +2541,26 @@ function cleanupAsyncLaunchSession(
 		void session.abort({ path: { id: sessionId } }).catch(() => undefined);
 	}
 	scheduleSessionCleanup(session, sessionId);
+}
+
+async function withCollectionDeadline<T>(
+	operationPromise: () => Promise<T>,
+	deadline: number,
+	operation: string,
+	hostTimeouts: Set<string>,
+): Promise<T> {
+	const remainingMs = Math.max(0, deadline - _internals.now());
+	const diagnostic = `${operation} exceeded the remaining collect_lane_results budget (${remainingMs}ms)`;
+	if (remainingMs === 0) {
+		hostTimeouts.add(diagnostic);
+		throw new Error(diagnostic);
+	}
+	try {
+		return await withTimeout(operationPromise(), remainingMs, diagnostic);
+	} catch (error) {
+		if (formatError(error) === diagnostic) hostTimeouts.add(diagnostic);
+		throw error;
+	}
 }
 
 async function withTimeout<T>(

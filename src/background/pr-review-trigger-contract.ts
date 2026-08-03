@@ -441,7 +441,7 @@ export function buildPrReviewTriggerReceiptV2(
 		trigger_count: rows.length,
 		matched_count: validated.matchedIds.length,
 		not_triggered_count: validated.notTriggeredIds.length,
-		no_match_count: validated.notTriggeredIds.length,
+		no_match_count: 0,
 		rows,
 	});
 }
@@ -557,7 +557,7 @@ export function parsePrReviewTriggerReceipt(
 			trigger_count: validated.rows.length,
 			matched_count: validated.matchedIds.length,
 			not_triggered_count: validated.notTriggeredIds.length,
-			no_match_count: validated.notTriggeredIds.length,
+			no_match_count: 0,
 			dispatched_micro_lane_count: dispatchedMicroLaneCount(validated.rows),
 		};
 		for (const [field, expected] of Object.entries(counts)) {

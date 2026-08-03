@@ -2,6 +2,11 @@ import * as child_process from 'node:child_process';
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import {
+	type BunCompatSpawnOptions,
+	type BunCompatSubprocess,
+	bunSpawn,
+} from '../utils/bun-compat.js';
 import type { BackgroundWorkspaceSnapshot } from './pending-delegations.js';
 
 const GIT_SNAPSHOT_TIMEOUT_MS = 3_000;
@@ -12,6 +17,54 @@ const REVISION_READ_CHUNK_BYTES = 64 * 1024;
 const REVISION_YIELD_EVERY_CHUNKS = 16;
 
 type SpawnSync = typeof child_process.spawnSync;
+
+interface BoundedGitOutput {
+	text: string;
+	truncated: boolean;
+}
+
+async function readBoundedGitOutput(
+	stream: BunCompatSubprocess['stdout'],
+	maxBytes: number,
+	onOverflow: () => void,
+): Promise<BoundedGitOutput> {
+	const reader = stream.getReader();
+	const chunks: Uint8Array[] = [];
+	let totalBytes = 0;
+	try {
+		for (;;) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			if (!value) continue;
+			const remaining = maxBytes - totalBytes;
+			if (value.byteLength > remaining) {
+				if (remaining > 0) chunks.push(value.slice(0, remaining));
+				onOverflow();
+				return { text: '', truncated: true };
+			}
+			chunks.push(value);
+			totalBytes += value.byteLength;
+		}
+		const joined = new Uint8Array(totalBytes);
+		let offset = 0;
+		for (const chunk of chunks) {
+			joined.set(chunk, offset);
+			offset += chunk.byteLength;
+		}
+		return { text: new TextDecoder().decode(joined), truncated: false };
+	} finally {
+		try {
+			await reader.cancel();
+		} catch {
+			// The process may already have closed the stream.
+		}
+		try {
+			reader.releaseLock();
+		} catch {
+			// Best-effort stream cleanup.
+		}
+	}
+}
 
 interface CaptureWorkspaceSnapshotOptions {
 	scope?: string | null;
@@ -48,54 +101,65 @@ function runGit(
 async function runGitAsync(
 	directory: string,
 	args: string[],
-	timeoutMs = GIT_SNAPSHOT_TIMEOUT_MS,
+	timeoutMs = _internals.gitTimeoutMs,
 ): Promise<string | null> {
-	return await new Promise((resolve) => {
-		let settled = false;
-		let stdout = '';
-		let stderrBytes = 0;
-		let timeout: NodeJS.Timeout | undefined;
-		let child: child_process.ChildProcess | undefined;
-		const finish = (value: string | null) => {
-			if (settled) return;
-			settled = true;
-			if (timeout) clearTimeout(timeout);
-			// A timeout, buffer failure, or host-side stream error must not leave
-			// a Git child behind. Killing an already-closed child is best-effort.
-			try {
-				child?.kill();
-			} catch {
-				// The child has already exited or cannot be signalled.
-			}
-			resolve(value);
+	let proc: BunCompatSubprocess | undefined;
+	let timeout: ReturnType<typeof setTimeout> | undefined;
+	try {
+		const options: BunCompatSpawnOptions = {
+			cwd: directory,
+			stdin: 'ignore',
+			stdout: 'pipe',
+			stderr: 'pipe',
+			timeout: timeoutMs,
+			killProcessTree: true,
 		};
-		try {
-			child = child_process.spawn('git', ['-C', directory, ...args], {
-				cwd: directory,
-				stdio: ['ignore', 'pipe', 'pipe'],
-				windowsHide: true,
-			});
-		} catch {
-			finish(null);
-			return;
+		proc = _internals.bunSpawn(['git', '-C', directory, ...args], options);
+		let overflowed = false;
+		const stopOverflow = () => {
+			overflowed = true;
+			try {
+				proc?.kill('SIGKILL');
+			} catch {
+				// Process already exited or cannot be signalled.
+			}
+		};
+		const completed = Promise.all([
+			proc.exited,
+			readBoundedGitOutput(proc.stdout, GIT_SNAPSHOT_MAX_BUFFER, stopOverflow),
+			readBoundedGitOutput(proc.stderr, GIT_SNAPSHOT_MAX_BUFFER, stopOverflow),
+		]);
+		const result = await Promise.race([
+			completed.then(([exitCode, stdout, stderr]) => ({
+				kind: 'completed' as const,
+				exitCode,
+				stdout,
+				stderr,
+			})),
+			new Promise<{ kind: 'timeout' }>((resolve) => {
+				timeout = setTimeout(() => resolve({ kind: 'timeout' }), timeoutMs);
+			}),
+		]);
+		if (
+			result.kind === 'timeout' ||
+			overflowed ||
+			result.exitCode !== 0 ||
+			result.stdout.truncated ||
+			result.stderr.truncated
+		) {
+			return null;
 		}
-		timeout = setTimeout(() => finish(null), timeoutMs);
-		child.stdout?.setEncoding('utf-8');
-		child.stdout?.on('data', (chunk: string) => {
-			stdout += chunk;
-			if (Buffer.byteLength(stdout, 'utf-8') > GIT_SNAPSHOT_MAX_BUFFER) {
-				finish(null);
-			}
-		});
-		child.stderr?.on('data', (chunk: Buffer) => {
-			stderrBytes += chunk.length;
-			if (stderrBytes > GIT_SNAPSHOT_MAX_BUFFER) {
-				finish(null);
-			}
-		});
-		child.once('error', () => finish(null));
-		child.once('close', (code) => finish(code === 0 ? stdout.trimEnd() : null));
-	});
+		return result.stdout.text.trimEnd();
+	} catch {
+		return null;
+	} finally {
+		if (timeout) clearTimeout(timeout);
+		try {
+			proc?.kill('SIGKILL');
+		} catch {
+			// Best-effort tree cleanup for an already-closed process.
+		}
+	}
 }
 
 /**
@@ -1262,10 +1326,14 @@ export function digest(text: string): string {
 
 export const _internals: {
 	spawnSync: SpawnSync;
+	bunSpawn: typeof bunSpawn;
+	gitTimeoutMs: number;
 	yieldControl: () => Promise<void>;
 	parsePorcelainV2Snapshot: typeof parsePorcelainV2Snapshot;
 } = {
 	spawnSync: child_process.spawnSync,
+	bunSpawn,
+	gitTimeoutMs: GIT_SNAPSHOT_TIMEOUT_MS,
 	yieldControl: () => new Promise<void>((resolve) => setImmediate(resolve)),
 	parsePorcelainV2Snapshot,
 };
