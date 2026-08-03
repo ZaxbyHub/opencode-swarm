@@ -385,6 +385,41 @@ describe('delegation gate plan critic approval', () => {
 			);
 		});
 
+		// PRR-006 (swarm-pr-review): the extractor supports all three verdicts
+		// across every fallback path; exercise NEEDS_REVISION and REJECTED so a
+		// future regression that hardcodes APPROVED is caught.
+		test('primary: matches VERDICT: NEEDS_REVISION', () => {
+			expect(
+				extractPlanCriticVerdict('VERDICT: NEEDS_REVISION\nfix the gaps'),
+			).toBe('NEEDS_REVISION');
+		});
+
+		test('primary: matches VERDICT: REJECTED', () => {
+			expect(
+				extractPlanCriticVerdict('VERDICT: REJECTED\nfundamental issues'),
+			).toBe('REJECTED');
+		});
+
+		test('bold label: matches **VERDICT**: NEEDS_REVISION', () => {
+			expect(
+				extractPlanCriticVerdict(
+					'**VERDICT**: NEEDS_REVISION\nSeveral concerns.',
+				),
+			).toBe('NEEDS_REVISION');
+		});
+
+		test('heading: matches ## Verdict followed by REJECTED', () => {
+			expect(extractPlanCriticVerdict('## Verdict\nREJECTED')).toBe('REJECTED');
+		});
+
+		test('bare token in final lines: matches a trailing bare NEEDS_REVISION', () => {
+			expect(
+				extractPlanCriticVerdict(
+					'PLAN REVIEW:\nSeveral gaps.\n\nNEEDS_REVISION',
+				),
+			).toBe('NEEDS_REVISION');
+		});
+
 		test('bold label: matches **VERDICT**: APPROVED', () => {
 			expect(extractPlanCriticVerdict('**VERDICT**: APPROVED\nAll good.')).toBe(
 				'APPROVED',
