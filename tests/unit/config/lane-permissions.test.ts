@@ -26,6 +26,7 @@ import {
 	evaluateExternalDirectory,
 	hostFromConfig,
 } from '../../helpers/opencode-permission-model';
+import { createSafeTestDir } from '../../helpers/safe-test-dir';
 
 const { laneDirectoryPattern, renderLanePermissionAdvisory } = _test_exports;
 
@@ -196,8 +197,17 @@ describe('regression: skill roots mirror the host glob, not half of it', () => {
 
 describe('pattern construction', () => {
 	test('laneDirectoryPattern covers the subtree', () => {
-		const dir = path.resolve('/a/b');
-		expect(laneDirectoryPattern(dir)).toBe(path.join(dir, '*'));
+		// A REAL directory. A synthetic '/a/b' collides with the host's
+		// windowsPath single-letter drive rewrite under POSIX ('/a/b' -> 'A:/b'),
+		// which path.resolve then re-anchors under cwd — see
+		// tests/unit/config/host-path.test.ts for the pinned behaviour.
+		const { dir, cleanup } = createSafeTestDir('lane-pattern-');
+		try {
+			const resolved = path.resolve(dir);
+			expect(laneDirectoryPattern(resolved)).toBe(path.join(resolved, '*'));
+		} finally {
+			cleanup();
+		}
 	});
 
 	test('emitted patterns survive host fromConfig unchanged (no ~ expansion surprises)', () => {

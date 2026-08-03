@@ -8,25 +8,38 @@
  * returned `config` hook itself, so only real behaviour can satisfy it.
  *
  * Both directions are asserted: a lane instance gets rules, and an ordinary
- * instance is left byte-identical.
+ * instance's permission surface is unchanged.
+ *
+ * The environment is ISOLATED (`createIsolatedTestEnv`). Without it the plugin
+ * loads the developer's real global `opencode-swarm.json`, so the generated
+ * agent set — and therefore this test's outcome — differs between a dev box and
+ * CI. That is exactly how the PR #2015 failure hid: a local `swarms` block
+ * prefixed every agent name, so the fixture agent was never clobbered.
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { getAgentConfigs } from '../../../src/agents';
 import {
 	type LaneContext,
 	_internals as laneContextInternals,
 } from '../../../src/config/lane-context';
+import { PluginConfigSchema } from '../../../src/config/schema';
 import OpenCodeSwarm from '../../../src/index';
+import { createIsolatedTestEnv } from '../../helpers/isolated-test-env';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
 
 let dir: string;
 let cleanup: () => void;
+let envCleanup: () => void;
 const realStat = laneContextInternals.statSync;
 const realRead = laneContextInternals.readFileSync;
 const realClear = laneContextInternals.clearCache;
 
 beforeEach(() => {
+	// Isolate XDG/HOME/APPDATA so the plugin cannot read the developer's real
+	// global config; without this the generated agent set is machine-dependent.
+	({ cleanup: envCleanup } = createIsolatedTestEnv());
 	({ dir, cleanup } = createSafeTestDir('lane-hook-'));
 	fs.mkdirSync(path.join(dir, '.opencode'), { recursive: true });
 	fs.mkdirSync(path.join(dir, '.swarm'), { recursive: true });
@@ -43,6 +56,7 @@ afterEach(() => {
 	laneContextInternals.readFileSync = realRead;
 	realClear();
 	cleanup();
+	envCleanup();
 });
 
 /** Runs the real plugin server() and returns its `config` hook. */
@@ -87,24 +101,75 @@ function forceLane(): LaneContext {
 	return lane;
 }
 
+/**
+ * An agent name the plugin does NOT generate.
+ *
+ * FOUND BY CI (PR #2015). These tests originally used `coder`, which the plugin
+ * DOES generate — `Object.assign(agentConfig, agents)` in the config hook
+ * therefore replaced the fixture wholesale, dropping its `permission` key and
+ * adding the generated prompt (hence the "SKILLS HANDLING" text in the CI diff)
+ * and, because generated `coder` is a SUBAGENT, leaving no `permission` key at
+ * all (hence the TypeError).
+ *
+ * It passed locally purely by accident of the developer's global config, which
+ * declares a `swarms` block — multi-swarm configs PREFIX every agent name
+ * (`mega_coder`, `local_coder`, ...), so no plain `coder` was generated and the
+ * fixture survived. CI has no such config, so plain `coder` is generated.
+ *
+ * The guard below asserts the chosen name really is un-generated, so this
+ * cannot silently rot if the agent set ever grows.
+ */
+const USER_AGENT_NAME = 'custom_user_agent';
+
 describe('plugin config hook — real invocation', () => {
-	test('an ordinary instance is left byte-identical', async () => {
+	test('the fixture agent name is one the plugin never generates', () => {
+		const generated = getAgentConfigs(PluginConfigSchema.parse({}));
+		expect(Object.hasOwn(generated, USER_AGENT_NAME)).toBe(false);
+		// Sanity: the plugin really does generate agents, so this is a live check
+		// rather than one that passes because the set is empty.
+		expect(Object.keys(generated).length).toBeGreaterThan(5);
+		// And pin the trap that caused the CI failure.
+		expect(Object.hasOwn(generated, 'coder')).toBe(true);
+	});
+
+	test('an ordinary instance keeps its permission surface unchanged', async () => {
 		const hook = await loadConfigHook();
 		const config: Record<string, unknown> = {
 			permission: { task: 'allow' },
-			agent: { coder: { permission: { external_directory: 'ask' } } },
+			agent: {
+				[USER_AGENT_NAME]: { permission: { external_directory: 'ask' } },
+			},
 		};
 		const beforePermission = structuredClone(config.permission);
-		const beforeAgent = structuredClone(config.agent);
+		const beforeAgent = structuredClone(
+			(config.agent as Record<string, unknown>)[USER_AGENT_NAME],
+		);
 
 		await hook(config);
 
-		// The hook legitimately adds agents/commands; what must NOT change is the
-		// permission surface.
+		// The hook legitimately ADDS its own agents and a /swarm command, so
+		// whole-config equality was never the right claim. What must not change
+		// outside a lane is the PERMISSION SURFACE:
+		//  - the top-level permission block, and
+		//  - the permission of an agent the plugin does not own.
 		expect(config.permission).toEqual(beforePermission);
 		expect(
-			(config.agent as Record<string, Record<string, unknown>>).coder,
-		).toEqual((beforeAgent as Record<string, Record<string, unknown>>).coder);
+			(config.agent as Record<string, Record<string, unknown>>)[
+				USER_AGENT_NAME
+			],
+		).toEqual(beforeAgent as Record<string, unknown>);
+		// Specifically: an ordinary session must NOT get external_directory rules.
+		expect(
+			Object.hasOwn(config.permission as object, 'external_directory'),
+		).toBe(false);
+		// And the user's own `ask` must survive untouched outside a lane.
+		expect(
+			(
+				(config.agent as Record<string, Record<string, unknown>>)[
+					USER_AGENT_NAME
+				].permission as Record<string, unknown>
+			).external_directory,
+		).toBe('ask');
 	});
 
 	test('a lane instance gets external_directory rules with the catch-all deny', async () => {
@@ -133,15 +198,18 @@ describe('plugin config hook — real invocation', () => {
 		forceLane();
 		const hook = await loadConfigHook();
 		const config: Record<string, unknown> = {
-			agent: { coder: { permission: { external_directory: 'ask' } } },
+			agent: {
+				[USER_AGENT_NAME]: { permission: { external_directory: 'ask' } },
+			},
 		};
 
 		await hook(config);
 
 		expect(
 			(
-				(config.agent as Record<string, Record<string, unknown>>).coder
-					.permission as Record<string, unknown>
+				(config.agent as Record<string, Record<string, unknown>>)[
+					USER_AGENT_NAME
+				].permission as Record<string, unknown>
 			).external_directory,
 		).toBe('deny');
 	});

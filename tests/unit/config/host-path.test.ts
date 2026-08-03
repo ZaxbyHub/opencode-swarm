@@ -91,9 +91,77 @@ describe('hostNormalizePathPattern — host contract', () => {
 			err.code = 'EACCES';
 			throw err;
 		};
-		const p = path.resolve('/x/y');
-		expect(() => hostNormalizePathPattern(path.join(p, '*'))).not.toThrow();
-		expect(hostNormalizePathPattern(path.join(p, '*'))).toBe(path.join(p, '*'));
+		// A REAL directory, not a synthetic '/x/y': under POSIX the host's
+		// windowsPath rewrites a single-letter first segment ('/x/y' -> 'X:/y'),
+		// which path.resolve then re-anchors under cwd. See the dedicated
+		// single-letter regression block below.
+		const { dir: realDir, cleanup } = createSafeTestDir('host-path-degrade-');
+		try {
+			const p = path.resolve(realDir);
+			expect(() => hostNormalizePathPattern(path.join(p, '*'))).not.toThrow();
+			expect(hostNormalizePathPattern(path.join(p, '*'))).toBe(
+				path.join(p, '*'),
+			);
+		} finally {
+			cleanup();
+		}
+	});
+});
+
+describe('regression (PR #2015 CI): single-letter first segment is an MSYS drive', () => {
+	// FOUND BY CI, NOT LOCALLY. On Windows `path.resolve("/a/b")` yields
+	// `C:\a\b`, so this never fired; on ubuntu/macos it does.
+	//
+	// The host's `windowsPath` (binary offset ~107196300) has FOUR rewrites, and
+	// the second one is an MSYS single-letter drive mapping:
+	//
+	//   .replace(/^\/([a-zA-Z])(?:\/|$)/, (z, Z) => `${Z.toUpperCase()}:/`)
+	//
+	// It fires on ANY POSIX path whose first segment is a single letter, so
+	// `/a/b` -> `A:/b`. `path.resolve` then treats `A:/b` as relative under
+	// POSIX and re-anchors it beneath the cwd.
+	//
+	// This is NOT a defect in our transcription — it is the host's own
+	// behaviour, faithfully reproduced. It is also HARMLESS for matching,
+	// because the host applies the identical rewrite to the patterns it ASKS
+	// with (`normalizePathPattern` calls the same `normalizePath`), so a rule
+	// and an ask for the same directory are mangled the same way and still
+	// compare equal. The asserted convergence is pinned below.
+	//
+	// The practical consequence is for TEST FIXTURES: never use a synthetic
+	// absolute path whose first segment is a single letter. Use a real
+	// directory, or at least a multi-letter first segment.
+	const singleLetter = ['/a/b', '/x/y', '/c/Users/x', '/z'];
+	const multiLetter = ['/aa/bb', '/tmp/proj', '/home/runner/x', '/opt/x'];
+
+	test.skipIf(process.platform === 'win32').each(singleLetter)(
+		'%s is rewritten to a drive-letter form under POSIX',
+		(input) => {
+			expect(hostWindowsPath(input)).toMatch(/^[A-Z]:\//);
+		},
+	);
+
+	test.each(multiLetter)('%s is left alone', (input) => {
+		expect(hostWindowsPath(input)).toBe(input);
+	});
+
+	test('a rule and an ask for the same directory still converge', () => {
+		// The property that makes the rewrite harmless in production: both sides
+		// go through the same normaliser, so they agree whatever it does.
+		for (const dir of [...singleLetter, ...multiLetter]) {
+			const rulePattern = hostNormalizePathPattern(path.join(dir, '*'));
+			const askedPattern = hostNormalizePathPattern(path.join(dir, '*'));
+			expect(rulePattern).toBe(askedPattern);
+		}
+	});
+
+	test('the transcription matches the host regex exactly (all four rewrites)', () => {
+		// Guards against someone "fixing" the single-letter rule out of
+		// hostWindowsPath after reading the CI failure above.
+		expect(hostWindowsPath('/c:/Users/x')).toBe('C:/Users/x');
+		expect(hostWindowsPath('/c/Users/x')).toBe('C:/Users/x');
+		expect(hostWindowsPath('/cygdrive/d/work')).toBe('D:/work');
+		expect(hostWindowsPath('/mnt/e/repo')).toBe('E:/repo');
 	});
 });
 

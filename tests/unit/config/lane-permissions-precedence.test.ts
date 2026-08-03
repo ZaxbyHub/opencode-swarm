@@ -331,8 +331,14 @@ describe('explicit user configuration always wins', () => {
 		const out = buildLaneExternalDirectoryRules('scoped_allow', lane, 'ask');
 		expect(out?.rules['*']).toBe('deny');
 		expect(out?.coercedAskPatterns).toEqual(['*']);
+		// Multi-segment: a single-letter first segment ('/x') is rewritten by the
+		// host's windowsPath under POSIX, so the assertion would hold for a
+		// cwd-anchored path rather than the one named here.
 		expect(
-			evaluateExternalDirectory(asPermission(out?.rules ?? null), '/x'),
+			evaluateExternalDirectory(
+				asPermission(out?.rules ?? null),
+				path.resolve('/definitely/not/allowlisted'),
+			),
 		).toBe('deny');
 	});
 
