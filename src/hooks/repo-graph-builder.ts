@@ -20,6 +20,7 @@ import * as path from 'node:path';
 import { WRITE_TOOL_NAMES } from '../config/constants';
 import {
 	buildWorkspaceGraphAsync,
+	isScannableSourcePath,
 	type RepoGraph,
 	saveGraph,
 	updateGraphForFiles,
@@ -60,16 +61,6 @@ export interface RepoGraphDeps {
 	safeRealpathSync?: typeof safeRealpathSync;
 }
 
-const SUPPORTED_EXTENSIONS = [
-	'.ts',
-	'.tsx',
-	'.js',
-	'.jsx',
-	'.mjs',
-	'.cjs',
-	'.py',
-];
-
 function extractFilePath(args: unknown): string | null {
 	if (!args || typeof args !== 'object') return null;
 	const a = args as Record<string, unknown>;
@@ -96,9 +87,59 @@ function extractFilePath(args: unknown): string | null {
 	return filePath;
 }
 
+/**
+ * Whether `filePath` is a scannable source file the graph tracks. Delegates to
+ * the single shared {@link isScannableSourcePath} (issue #1985, defect A2) so
+ * the write hook's allowlist can never drift from the builder's
+ * LANGUAGE_REGISTRY-derived set — picking up `.rs`/`.go`/`.pyw` automatically.
+ */
 function isSupportedSourceFile(filePath: string): boolean {
-	const ext = filePath.substring(filePath.lastIndexOf('.')).toLowerCase();
-	return SUPPORTED_EXTENSIONS.includes(ext);
+	return isScannableSourcePath(filePath);
+}
+
+/**
+ * Rebase a realpath'd file onto the lexical workspace root so the incremental
+ * update keys the same node the walk produced (issue #1985, defect A5). Exported
+ * for direct unit testing of the symlink-root rebase logic.
+ *
+ * The walk keys nodes lexically relative to `workspaceRoot` (realpath is used
+ * only as a cycle-break key). When the workspace root itself is a symlink
+ * (`workspaceRoot` → `realWorkspace`), a realpath'd file (`realFilePath`) lives
+ * under `realWorkspace` and would key a DIFFERENT node than the lexical path the
+ * walker would have produced — causing a duplicate node.
+ *
+ * If `realFilePath` is under `realWorkspace`, rebase its workspace-relative tail
+ * onto the lexical `workspaceRoot` (reconstructing the lexical absolute path the
+ * walker used). Otherwise (case-insensitive aliasing without a symlinked root,
+ * or an unexpected layout) return `realFilePath` so the case-folding benefit of
+ * the realpath is preserved.
+ */
+export function rebaseOntoWorkspace(
+	realFilePath: string,
+	realWorkspace: string,
+	workspaceRoot: string,
+): string {
+	// Normalize separators for a reliable prefix comparison.
+	const normRealFile = realFilePath.replace(/\\/g, '/');
+	const normRealWs = realWorkspace.replace(/\\/g, '/');
+	if (
+		normRealFile !== normRealWs &&
+		!normRealFile.startsWith(`${normRealWs}/`)
+	) {
+		// Not under the real workspace — keep the realpath (best effort).
+		return realFilePath;
+	}
+	// Same lexical and real workspace root? Nothing to rebase; the realpath
+	// already matches the walker's keys (modulo case, which realpath fixes).
+	if (path.resolve(workspaceRoot) === path.resolve(realWorkspace)) {
+		return realFilePath;
+	}
+	// Rebase the workspace-relative tail of the realpath'd file onto the
+	// lexical workspace root, reconstructing the path the walker produced.
+	const rel = normRealFile.slice(
+		normRealWs.length + (normRealFile === normRealWs ? 0 : 1),
+	);
+	return path.join(workspaceRoot, rel);
 }
 
 export function createRepoGraphBuilderHook(
@@ -279,7 +320,22 @@ export function createRepoGraphBuilderHook(
 			}
 
 			try {
-				await _updateGraphForFiles(workspaceRoot, [absoluteFilePath]);
+				// Pass a path consistent with how the graph's node keys were
+				// originally produced (issue #1985, defect A5). The walk keys
+				// nodes lexically relative to `workspaceRoot` (it uses realpath
+				// only as a cycle-break key, not for stored paths). To stay
+				// consistent on case-insensitive filesystems AND through symlink
+				// aliases (including a symlinked workspace root), rebase the
+				// realpath'd file back onto the lexical workspace root: this
+				// yields the same key the walker would have produced for a file
+				// reached via the lexical root, while still resolving any
+				// case/symlink aliasing of the file itself.
+				const pathForUpdate = rebaseOntoWorkspace(
+					realFilePath,
+					realWorkspace,
+					workspaceRoot,
+				);
+				await _updateGraphForFiles(workspaceRoot, [pathForUpdate]);
 				recordSuccess(input.sessionID);
 				logger.log(
 					`[repo-graph] Incremental update for ${path.basename(filePath)}`,

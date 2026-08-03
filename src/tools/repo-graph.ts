@@ -20,6 +20,7 @@ export {
 	addEdge,
 	buildWorkspaceGraph,
 	buildWorkspaceGraphAsync,
+	isScannableSourcePath,
 	resolveModuleSpecifier,
 	upsertNode,
 } from './repo-graph/builder';

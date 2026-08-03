@@ -255,6 +255,7 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 					ontologyFileCount,
 					buildTimestamp: graph.metadata.generatedAt,
 					elapsedMs,
+					truncated: graph.diagnostics?.walkTruncated === true,
 					path: '.swarm/repo-graph.json',
 				});
 			} catch (e) {

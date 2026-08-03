@@ -128,6 +128,32 @@ const SUPPORTED_EXTENSIONS = new Set(
 );
 
 /**
+ * Whether `p` is a scannable source file — i.e. one of the extensions the
+ * walker turns into a graph node. This is the SINGLE source of truth for "is
+ * this a graph-node-able file" (issue #1985, defect A2): the write hook and
+ * the incremental updater both route through it so the allowlist can never
+ * drift from the builder's `LANGUAGE_REGISTRY`-derived set.
+ */
+export function isScannableSourcePath(p: string): boolean {
+	return SUPPORTED_EXTENSIONS.has(path.extname(p).toLowerCase());
+}
+
+/**
+ * Whether an edge's resolved target is an asset (a real file that never
+ * becomes a graph node, e.g. JSON/CSS) rather than a node. Uses the explicit
+ * `targetKind` tag on schema >= 1.3.0 graphs and falls back to an extension
+ * check on older graphs whose edges are untagged (issue #1985, defect A1).
+ * Asset edges only require their source node to exist during incremental
+ * validation and are excluded from in-degree ranking / importer / dependent
+ * queries.
+ */
+export function isAssetEdge(edge: GraphEdge): boolean {
+	if (edge.targetKind === 'asset') return true;
+	if (edge.targetKind === 'node') return false;
+	return !isScannableSourcePath(edge.target);
+}
+
+/**
  * Default safety budgets for workspace traversal.
  */
 const DEFAULT_WALK_FILE_CAP = 10000;
@@ -513,9 +539,31 @@ interface ScanStats {
 	skippedFiles: number;
 	/** True if maxFiles limit was hit */
 	truncated: boolean;
+	/**
+	 * Absolute scan root, stashed by the builder so the recursive walker can
+	 * compute workspace-relative manifest-dir paths without threading an extra
+	 * parameter through every recursion (defect A8). Underscore-prefixed
+	 * because it is build-internal plumbing, not a reported diagnostic.
+	 */
+	_absoluteRoot?: string;
 }
 
-function createEmptyDiagnostics(): Required<RepoGraphDiagnostics> {
+/**
+ * Fully-populated diagnostics shape used during a build. `Required<>` would
+ * make `walkTruncationReason` (a `'budget' | 'cap'` union with no `undefined`)
+ * non-optional and therefore unrepresentable as "unset" — `undefined` is not
+ * assignable to that union under `strict` (issue #1985, defect A7). Omit the
+ * reason from `Required<>` and re-declare it optional so the rest of the
+ * fields stay required while the reason can be absent until a walk truncates.
+ */
+type FilledDiagnostics = Omit<
+	Required<RepoGraphDiagnostics>,
+	'walkTruncationReason'
+> & {
+	walkTruncationReason?: 'budget' | 'cap';
+};
+
+function createEmptyDiagnostics(): FilledDiagnostics {
 	return {
 		extractionFailures: [],
 		unresolvedImports: [],
@@ -524,6 +572,8 @@ function createEmptyDiagnostics(): Required<RepoGraphDiagnostics> {
 		binaryFiles: [],
 		unreadableFiles: [],
 		lowConfidenceEdgeCount: 0,
+		walkTruncated: false,
+		incrementalFallbacks: 0,
 	};
 }
 
@@ -535,7 +585,10 @@ function diagnosticsHaveEntries(diagnostics: RepoGraphDiagnostics): boolean {
 		(diagnostics.unsupportedFiles?.length ?? 0) > 0 ||
 		(diagnostics.binaryFiles?.length ?? 0) > 0 ||
 		(diagnostics.unreadableFiles?.length ?? 0) > 0 ||
-		(diagnostics.lowConfidenceEdgeCount ?? 0) > 0
+		(diagnostics.lowConfidenceEdgeCount ?? 0) > 0 ||
+		diagnostics.walkTruncated === true ||
+		diagnostics.walkTruncationReason !== undefined ||
+		(diagnostics.incrementalFallbacks ?? 0) > 0
 	);
 }
 
@@ -546,7 +599,7 @@ function pushCapped<T>(target: T[], value: T): void {
 }
 
 function mergeDiagnostics(
-	target: Required<RepoGraphDiagnostics>,
+	target: FilledDiagnostics,
 	source: RepoGraphDiagnostics | undefined,
 ): void {
 	if (!source) return;
@@ -569,6 +622,10 @@ function mergeDiagnostics(
 		pushCapped(target.unreadableFiles, entry);
 	}
 	target.lowConfidenceEdgeCount += source.lowConfidenceEdgeCount ?? 0;
+	// incrementalFallbacks accumulates across per-file scans (rare, but a
+	// single build could surface multiple); walk-level fields are set once
+	// after the walk completes, so they are NOT merged here.
+	target.incrementalFallbacks += source.incrementalFallbacks ?? 0;
 }
 
 function isRelativeImportSpecifier(specifier: string): boolean {
@@ -1273,6 +1330,41 @@ interface WalkContext {
 	/** Directory basenames to skip (built-in defaults ∪ caller excludeDirs). */
 	skipDirs: ReadonlySet<string>;
 	abortReason?: 'budget' | 'cap';
+	/**
+	 * Workspace-relative directories (forward slashes, no leading `./`) that
+	 * contain a package manifest (`package.json`, `Cargo.toml`,
+	 * `pyproject.toml`, `go.mod`). Populated during enumeration so the pure
+	 * ontology extractor can apply the generic manifest-driven boundary rule
+	 * without doing any fs I/O itself (issue #1985, defect A8). The workspace
+	 * root's own manifest is recorded as `''`; the seg0/seg1 boundary rule
+	 * never consults it (no seg0/seg1 at depth 1).
+	 */
+	manifestDirs: Set<string>;
+}
+
+/** Manifest basenames that mark a directory as a package root (defect A8). */
+const MANIFEST_BASENAMES = new Set([
+	'package.json',
+	'Cargo.toml',
+	'pyproject.toml',
+	'go.mod',
+]);
+
+/**
+ * Record `dir`'s workspace-relative path into `manifestDirs` when one of its
+ * direct file entries is a package manifest. `absoluteRoot` is the scan root
+ * used to compute the relative directory; the root itself records as `''`.
+ */
+function recordManifestDir(
+	manifestDirs: Set<string>,
+	absoluteRoot: string,
+	dir: string,
+	entryName: string,
+): void {
+	if (!MANIFEST_BASENAMES.has(entryName)) return;
+	let rel = path.relative(absoluteRoot, dir).split(path.sep).join('/');
+	if (rel.startsWith('./')) rel = rel.slice(2);
+	manifestDirs.add(rel);
 }
 
 function isWalkBudgetExceeded(ctx: WalkContext): boolean {
@@ -1317,7 +1409,7 @@ function findSourceFiles(
 		followSymlinks?: boolean;
 		excludeDirs?: readonly string[];
 	},
-): string[] {
+): { files: string[]; ctx: WalkContext } {
 	const ctx: WalkContext = {
 		stats,
 		seenRealPaths: new Set<string>(),
@@ -1326,13 +1418,14 @@ function findSourceFiles(
 		maxFiles: options?.maxFiles ?? DEFAULT_WALK_FILE_CAP,
 		followSymlinks: options?.followSymlinks ?? false,
 		skipDirs: resolveSkipDirectories(options?.excludeDirs),
+		manifestDirs: new Set<string>(),
 	};
 	const files: string[] = [];
 	walkSyncInto(dir, ctx, files);
 	if (ctx.abortReason === 'cap' || ctx.abortReason === 'budget') {
 		stats.truncated = true;
 	}
-	return files;
+	return { files, ctx };
 }
 
 function walkSyncInto(dir: string, ctx: WalkContext, files: string[]): void {
@@ -1361,6 +1454,9 @@ function walkSyncInto(dir: string, ctx: WalkContext, files: string[]): void {
 		a.name.toLowerCase().localeCompare(b.name.toLowerCase()),
 	);
 
+	// absoluteRoot is the scan root (first call's `dir`). Manifest dirs are
+	// recorded relative to it so the pure ontology extractor needs no fs I/O.
+	const absoluteRoot = ctx.stats._absoluteRoot;
 	for (const entry of entries) {
 		if (isWalkBudgetExceeded(ctx) || isFileCapReached(ctx, files.length)) {
 			return;
@@ -1383,6 +1479,9 @@ function walkSyncInto(dir: string, ctx: WalkContext, files: string[]): void {
 		if (entry.isDirectory()) {
 			walkSyncInto(fullPath, ctx, files);
 		} else if (entry.isFile()) {
+			if (absoluteRoot !== undefined) {
+				recordManifestDir(ctx.manifestDirs, absoluteRoot, dir, entry.name);
+			}
 			const ext = path.extname(fullPath).toLowerCase();
 			if (SUPPORTED_EXTENSIONS.has(ext)) {
 				files.push(fullPath);
@@ -1408,7 +1507,7 @@ async function findSourceFilesAsync(
 		followSymlinks?: boolean;
 		excludeDirs?: readonly string[];
 	},
-): Promise<string[]> {
+): Promise<{ files: string[]; ctx: WalkContext }> {
 	const ctx: WalkContext = {
 		stats,
 		seenRealPaths: new Set<string>(),
@@ -1417,6 +1516,7 @@ async function findSourceFilesAsync(
 		maxFiles: options?.maxFiles ?? DEFAULT_WALK_FILE_CAP,
 		followSymlinks: options?.followSymlinks ?? false,
 		skipDirs: resolveSkipDirectories(options?.excludeDirs),
+		manifestDirs: new Set<string>(),
 	};
 	const files: string[] = [];
 	const queue: string[] = [dir];
@@ -1445,6 +1545,7 @@ async function findSourceFilesAsync(
 			a.name.toLowerCase().localeCompare(b.name.toLowerCase()),
 		);
 
+		const absoluteRoot = ctx.stats._absoluteRoot;
 		for (const entry of entries) {
 			if (isWalkBudgetExceeded(ctx) || isFileCapReached(ctx, files.length)) {
 				break;
@@ -1461,6 +1562,14 @@ async function findSourceFilesAsync(
 			if (entry.isDirectory()) {
 				queue.push(fullPath);
 			} else if (entry.isFile()) {
+				if (absoluteRoot !== undefined) {
+					recordManifestDir(
+						ctx.manifestDirs,
+						absoluteRoot,
+						current,
+						entry.name,
+					);
+				}
 				const ext = path.extname(fullPath).toLowerCase();
 				if (SUPPORTED_EXTENSIONS.has(ext)) {
 					files.push(fullPath);
@@ -1475,7 +1584,7 @@ async function findSourceFilesAsync(
 	if (ctx.abortReason === 'cap' || ctx.abortReason === 'budget') {
 		ctx.stats.truncated = true;
 	}
-	return files;
+	return { files, ctx };
 }
 
 /**
@@ -1557,6 +1666,7 @@ export function scanFile(
 	filePath: string,
 	absoluteRoot: string,
 	maxFileSize: number,
+	hasManifest?: (relDir: string) => boolean,
 ): ScanResult {
 	let content: string;
 	let fileStats: fsSync.Stats;
@@ -1633,6 +1743,7 @@ export function scanFile(
 				language: getLanguage(filePath),
 				exports,
 				imports: parsedImports.map((p) => p.specifier),
+				hasManifest,
 			}),
 		};
 
@@ -1658,6 +1769,7 @@ export function scanFile(
 					importType: parsed.importType,
 					importedSymbols: parsed.importedSymbols,
 					...(usedSymbols !== undefined ? { usedSymbols } : {}),
+					targetKind: isScannableSourcePath(resolvedTarget) ? 'node' : 'asset',
 				});
 			}
 		}
@@ -1689,6 +1801,7 @@ export async function scanFileAsync(
 	filePath: string,
 	absoluteRoot: string,
 	maxFileSize: number,
+	hasManifest?: (relDir: string) => boolean,
 ): Promise<AsyncScanResult> {
 	let content: string;
 	let fileStats: fsSync.Stats;
@@ -1728,7 +1841,7 @@ export async function scanFileAsync(
 
 	// Fail-open: tree-sitter unavailable or timed out → minimal node
 	if (facts === null) {
-		const fallback = scanFile(filePath, absoluteRoot, maxFileSize);
+		const fallback = scanFile(filePath, absoluteRoot, maxFileSize, hasManifest);
 		let parsedImports: ParsedImport[] = [];
 		try {
 			parsedImports = _internals.parseFileImports(
@@ -1859,6 +1972,7 @@ export async function scanFileAsync(
 			language,
 			exports,
 			imports,
+			hasManifest,
 		}),
 	};
 
@@ -1905,6 +2019,7 @@ export async function scanFileAsync(
 				importType: edgeImportType,
 				importedSymbols: imp.bindings.map((b) => b.imported),
 				...(usedSymbols !== undefined ? { usedSymbols } : {}),
+				targetKind: isScannableSourcePath(resolvedTarget) ? 'node' : 'asset',
 			});
 		}
 	}
@@ -2067,13 +2182,16 @@ export function buildWorkspaceGraph(
 		skippedDirs: 0,
 		skippedFiles: 0,
 		truncated: false,
+		_absoluteRoot: absoluteRoot,
 	};
-	const sourceFiles = findSourceFiles(absoluteRoot, stats, {
+	const walked = findSourceFiles(absoluteRoot, stats, {
 		walkBudgetMs,
 		maxFiles,
 		followSymlinks,
 		excludeDirs: options?.excludeDirs,
 	});
+	const sourceFiles = walked.files;
+	const walkCtx = walked.ctx;
 
 	// Sort files for deterministic processing order
 	sourceFiles.sort((a, b) => {
@@ -2088,6 +2206,10 @@ export function buildWorkspaceGraph(
 				`${walkBudgetMs}ms / ${maxFiles}-file budget.`,
 		);
 	}
+
+	// Manifest-directory closure for the generic package-boundary rule (A8).
+	// Built once from the walk context; passed to every ontology extraction.
+	const hasManifest = (relDir: string) => walkCtx.manifestDirs.has(relDir);
 
 	// Process each file to extract nodes and edges. Edge dedup is tracked in a
 	// loop-local Set (O(1)) instead of addEdge's O(edges) linear scan, and nodes
@@ -2178,6 +2300,7 @@ export function buildWorkspaceGraph(
 				language,
 				exports,
 				imports: parsedImports.map((p) => p.specifier),
+				hasManifest,
 			}),
 		};
 
@@ -2214,6 +2337,7 @@ export function buildWorkspaceGraph(
 					importType: parsed.importType,
 					importedSymbols: parsed.importedSymbols,
 					...(usedSymbols !== undefined ? { usedSymbols } : {}),
+					targetKind: isScannableSourcePath(resolvedTarget) ? 'node' : 'asset',
 				};
 				// The node is already valid; an individual invalid edge (e.g. a
 				// control character in an import specifier) drops just that edge
@@ -2234,6 +2358,15 @@ export function buildWorkspaceGraph(
 		nodeCount: Object.keys(graph.nodes).length,
 		edgeCount: graph.edges.length,
 	};
+
+	// Surface walk-truncation diagnostics (defect A7) so getGraphHealth can
+	// report an INCOMPLETE graph instead of confidently wrong results.
+	const syncDiagnostics: FilledDiagnostics = createEmptyDiagnostics();
+	syncDiagnostics.walkTruncated = stats.truncated;
+	syncDiagnostics.walkTruncationReason = walkCtx.abortReason;
+	if (diagnosticsHaveEntries(syncDiagnostics)) {
+		graph.diagnostics = syncDiagnostics;
+	}
 
 	if (stats.skippedFiles > 0 || stats.skippedDirs > 0 || stats.truncated) {
 		logger.log(
@@ -2284,15 +2417,18 @@ export async function buildWorkspaceGraphAsync(
 		skippedDirs: 0,
 		skippedFiles: 0,
 		truncated: false,
+		_absoluteRoot: absoluteRoot,
 	};
 	const diagnostics = createEmptyDiagnostics();
 
-	const sourceFiles = await findSourceFilesAsync(absoluteRoot, stats, {
+	const walked = await findSourceFilesAsync(absoluteRoot, stats, {
 		walkBudgetMs,
 		maxFiles,
 		followSymlinks,
 		excludeDirs: options?.excludeDirs,
 	});
+	const sourceFiles = walked.files;
+	const walkCtx = walked.ctx;
 
 	sourceFiles.sort((a, b) => {
 		const normA = normalizeGraphPath(a);
@@ -2307,6 +2443,9 @@ export async function buildWorkspaceGraphAsync(
 		);
 	}
 
+	// Manifest-directory closure for the generic package-boundary rule (A8).
+	const hasManifest = (relDir: string) => walkCtx.manifestDirs.has(relDir);
+
 	// Edge dedup tracked in a loop-local Set (O(1)); nodes inserted via
 	// appendNodeFast — metadata is computed once below. Keeps construction O(N)
 	// on large repos. Async file reads yield naturally, and the smaller explicit
@@ -2317,7 +2456,12 @@ export async function buildWorkspaceGraphAsync(
 	const allSymbolEdges: SymbolEdge[] = [];
 	let processedSinceYield = 0;
 	for (const filePath of sourceFiles) {
-		const result = await scanFileAsync(filePath, absoluteRoot, maxFileSize);
+		const result = await scanFileAsync(
+			filePath,
+			absoluteRoot,
+			maxFileSize,
+			hasManifest,
+		);
 		mergeDiagnostics(diagnostics, result.diagnostics);
 		if (result.node) {
 			// A node that fails validation (e.g. control characters in ontology
@@ -2377,6 +2521,10 @@ export async function buildWorkspaceGraphAsync(
 	if (allSymbolEdges.length > 0) {
 		graph.symbolEdges = allSymbolEdges;
 	}
+	// Surface walk-truncation diagnostics (defect A7) — walk-level fields are
+	// set once after the walk, NOT merged per-file (extraction diagnostics are).
+	diagnostics.walkTruncated = stats.truncated;
+	diagnostics.walkTruncationReason = walkCtx.abortReason;
 	graph.diagnostics = diagnosticsHaveEntries(diagnostics)
 		? diagnostics
 		: createEmptyDiagnostics();
