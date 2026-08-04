@@ -215,11 +215,18 @@ export const submit_phase_council_verdicts: ReturnType<typeof tool> =
 				);
 			}
 
+			// Normalize round once — input.roundNumber is optional (no schema
+			// default), so every downstream use references this single value.
+			const round = input.roundNumber ?? 1;
+			// A verdict that omits verdictRound is untagged — default it to the
+			// CURRENT round, not 1, so fresh re-dispatched verdicts are accepted at
+			// round 2+ (issue #2020). The previous `?? 1` default deadlocked every
+			// round-2+ submission because no production code path stamps
+			// verdictRound. Explicit stale values (verdictRound: 1 into round 2)
+			// are still caught. See convene-council.ts for the full rationale.
 			const staleVerdicts =
-				(input.roundNumber ?? 1) > 1
-					? input.verdicts.filter(
-							(v) => (v.verdictRound ?? 1) < (input.roundNumber ?? 1),
-						)
+				round > 1
+					? input.verdicts.filter((v) => (v.verdictRound ?? round) < round)
 					: [];
 			if (staleVerdicts.length > 0) {
 				return JSON.stringify(
@@ -227,7 +234,7 @@ export const submit_phase_council_verdicts: ReturnType<typeof tool> =
 						success: false,
 						reason: 'stale_verdict_detected',
 						message:
-							`Round ${input.roundNumber ?? 1} requires fresh verdicts. ` +
+							`Round ${round} requires fresh verdicts. ` +
 							'One or more submitted verdicts are from an older round.',
 						staleVerdicts: staleVerdicts.map((v) => ({
 							agent: v.agent,
@@ -243,7 +250,7 @@ export const submit_phase_council_verdicts: ReturnType<typeof tool> =
 				input.phaseNumber,
 				input.phaseSummary,
 				input.verdicts as CouncilMemberVerdict[],
-				input.roundNumber ?? 1,
+				round,
 				config.council,
 				workingDir,
 			);

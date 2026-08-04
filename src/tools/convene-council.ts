@@ -253,10 +253,20 @@ export const submit_council_verdicts: ReturnType<typeof tool> = createSwarmTool(
 					2,
 				);
 			}
+			// A verdict that omits verdictRound is untagged — it carries no round
+			// information. Default it to the CURRENT round, not 1, so fresh
+			// re-dispatched verdicts are accepted at round 2+ (issue #2020). The
+			// previous `?? 1` default deadlocked every round-2+ submission because
+			// no production code path stamps verdictRound onto collected verdicts
+			// (council member agents never emit it; the architect prompt does not
+			// list it; collect_lane_results has no concept of council rounds).
+			// Explicit stale values (verdictRound: 1 carried into roundNumber: 2)
+			// are still caught and rejected, preserving the anti-replay guarantee
+			// for the case that matters.
 			const staleVerdicts =
 				input.roundNumber > 1
 					? input.verdicts.filter(
-							(v) => (v.verdictRound ?? 1) < input.roundNumber,
+							(v) => (v.verdictRound ?? input.roundNumber) < input.roundNumber,
 						)
 					: [];
 			if (staleVerdicts.length > 0) {
