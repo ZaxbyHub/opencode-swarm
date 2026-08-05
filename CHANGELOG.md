@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.135.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.135.3...v7.135.4) (2026-08-05)
+
+
+### Bug Fixes
+
+* **council:** resolve stale_verdict_detected deadlock on round 2+ submissions ([5d1af84](https://github.com/ZaxbyHub/opencode-swarm/commit/5d1af842dae90d705e3de3590a922f47b2984ffc))
+* **council:** resolve stale_verdict_detected deadlock on round 2+ submissions ([9f7ffc8](https://github.com/ZaxbyHub/opencode-swarm/commit/9f7ffc83c194133fabb5263aae3e28cd6cf6aef0)), closes [#2020](https://github.com/ZaxbyHub/opencode-swarm/issues/2020)
+
 ## [7.135.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.135.2...v7.135.3) (2026-08-03)
 
 
