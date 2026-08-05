@@ -447,8 +447,8 @@ describe('delegate-ack-collector', () => {
 				taskId: 'task-summary-1',
 			});
 
-			// Two explicit acks emitted
-			expect(result.emitted).toHaveLength(3); // applied + ignored + violated(critical)
+			// applied + ignored + violated(critical) + unacknowledged(ID_NA, 'low')
+			expect(result.emitted).toHaveLength(4);
 			expect(result.emitted).toContainEqual({
 				id: ID_APPLIED,
 				type: 'applied',

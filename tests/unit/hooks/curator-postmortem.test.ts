@@ -453,6 +453,46 @@ describe('_internals.collectKnowledgeSummary', () => {
 		expect(summary[0].applied).toBe(2);
 		expect(summary[0].violated).toBe(1);
 		expect(summary[0].ignored).toBe(1);
+		expect(summary[0].unacknowledged).toBe(0);
 		expect(summary[0].confidence).toBe(0.8);
+	});
+
+	test('tallies unacknowledged deliveries separately from the verdict counts', async () => {
+		// Before this event existed, a silently-delivered entry's row read
+		// applied=0 violated=0 ignored=0 — indistinguishable from never surfaced.
+		// It must be visible AND must not be folded into any verdict count.
+		const kid = randomUUID();
+		writeKnowledge(dir, [
+			{ id: kid, lesson: 'silently delivered', confidence: 0.6 },
+		]);
+		writeEvents(dir, [
+			{ type: 'unacknowledged', knowledge_id: kid },
+			{ type: 'unacknowledged', knowledge_id: kid },
+			{ type: 'applied', knowledge_id: kid },
+		]);
+
+		const summary = await _internals.collectKnowledgeSummary(dir);
+		expect(summary).toHaveLength(1);
+		expect(summary[0].unacknowledged).toBe(2);
+		expect(summary[0].applied).toBe(1);
+		expect(summary[0].violated).toBe(0);
+		expect(summary[0].ignored).toBe(0);
+
+		// And the count reaches the prompt the post-mortem LLM actually reads.
+		const promptInput = _internals.assembleLLMInput(
+			'plan-1',
+			'project',
+			undefined,
+			'Plan summary',
+			summary,
+			null,
+			[],
+			[],
+			[],
+			[],
+		);
+		expect(promptInput).toContain(
+			`${kid}: applied=1 violated=0 ignored=0 unacknowledged=2`,
+		);
 	});
 });

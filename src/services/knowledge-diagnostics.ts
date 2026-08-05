@@ -101,6 +101,8 @@ export interface KnowledgeDebugMeta {
 			contradicted: number;
 			violated: number;
 			no_relevant: number;
+			/** Shown to a delegate, no ack filed — audit-only delivery signal. */
+			unacknowledged: number;
 		};
 	};
 	/**
@@ -425,6 +427,10 @@ export async function computeKnowledgeDebug(
 				contradicted: eventsByType.contradicted ?? 0,
 				violated: eventsByType.violated ?? 0,
 				no_relevant: eventsByType.no_relevant ?? 0,
+				// Audit-only delivery signal (shown to a delegate, no ack filed) —
+				// the "where did the rest of the deliveries go" column this surface
+				// exists to answer. Never negative evidence.
+				unacknowledged: eventsByType.unacknowledged ?? 0,
 			},
 		},
 		cohort: {
