@@ -15,14 +15,21 @@
  * All existing imports of this module continue to work unchanged.
  */
 
-export type { ScanResult } from './repo-graph/builder';
+export type {
+	RepoGraphInputMetadata,
+	RepoGraphInputWalkOptions,
+	RepoGraphInputWalkResult,
+	ScanResult,
+} from './repo-graph/builder';
 export {
 	addEdge,
 	buildWorkspaceGraph,
 	buildWorkspaceGraphAsync,
+	isGraphWideInputPath,
 	isScannableSourcePath,
 	resolveModuleSpecifier,
 	upsertNode,
+	walkRepoGraphInputs,
 } from './repo-graph/builder';
 export {
 	clearCache,
@@ -32,6 +39,18 @@ export {
 	markDirty,
 	setCachedGraph,
 } from './repo-graph/cache';
+export type {
+	FreshnessOptions,
+	FreshnessProbe,
+} from './repo-graph/freshness';
+export {
+	EXTRACTOR_STAMP,
+	FINGERPRINT_SCHEMA_VERSION,
+	invalidateFreshnessCache,
+	probeFreshness,
+	REPO_GRAPH_FINGERPRINT_FILENAME,
+	writeFingerprint,
+} from './repo-graph/freshness';
 export { updateGraphForFiles } from './repo-graph/incremental';
 export type { ExtractFileOntologyInput } from './repo-graph/ontology';
 export { extractFileOntology } from './repo-graph/ontology';
@@ -75,8 +94,10 @@ export type {
 	FileOntology,
 	FileReference,
 	FileRole,
+	FreshnessProbeState,
 	GraphEdge,
 	GraphExtractionFailure,
+	GraphExtractorInputWitness,
 	GraphHealthResult,
 	GraphNode,
 	GraphUnresolvedImport,

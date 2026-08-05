@@ -49,6 +49,7 @@ import {
 	type PluginConfig,
 	PrMonitorConfigSchema,
 	PrmConfigSchema,
+	RepoGraphConfigSchema,
 	resolveAutoReviewConfig,
 	SelfReviewConfigSchema,
 	SkillImproverConfigSchema,
@@ -719,29 +720,36 @@ async function initializeOpenCodeSwarm(
 	initTelemetry(ctx.directory);
 	startHeartbeatTracking();
 
-	const repoGraphHook = createRepoGraphBuilderHookForInit(
-		ctx.directory,
-		undefined,
-		{
-			excludeDirs: config.repo_graph?.exclude_dirs,
-		},
-	);
-	postResolutionTasks.push(() => {
-		const watchdog = setTimeout(() => {
-			log(
-				'[repo-graph] init exceeded 30s budget; scan will continue but is overdue',
-			);
-		}, 30_000);
-		if (typeof (watchdog as { unref?: () => void }).unref === 'function') {
-			(watchdog as { unref: () => void }).unref();
-		}
-		repoGraphHook
-			.init()
-			.catch(() => {
-				/* logged inside init */
+	const repoGraphConfig = RepoGraphConfigSchema.parse(config.repo_graph ?? {});
+	const repoGraphHookFactory = createRepoGraphBuilderHookForInit;
+	const repoGraphHook = repoGraphConfig.enabled
+		? repoGraphHookFactory(ctx.directory, undefined, {
+				enabled: true,
+				initRefresh: repoGraphConfig.init_refresh,
+				refreshCap: repoGraphConfig.refresh_cap,
+				walkBudgetMs: repoGraphConfig.walk_budget_ms,
+				maxFiles: repoGraphConfig.max_files,
+				excludeDirs: repoGraphConfig.exclude_dirs,
 			})
-			.finally(() => clearTimeout(watchdog));
-	});
+		: null;
+	if (repoGraphHook) {
+		postResolutionTasks.push(() => {
+			const watchdog = setTimeout(() => {
+				log(
+					'[repo-graph] init exceeded 30s budget; scan will continue but is overdue',
+				);
+			}, 30_000);
+			if (typeof (watchdog as { unref?: () => void }).unref === 'function') {
+				(watchdog as { unref: () => void }).unref();
+			}
+			repoGraphHook
+				.init()
+				.catch(() => {
+					/* logged inside init */
+				})
+				.finally(() => clearTimeout(watchdog));
+		});
+	}
 
 	// `ensureSwarmGitExcluded` was awaited in the parallel block above. Its
 	// comment (preserved here for context): protects .swarm/ from Git before
@@ -3169,7 +3177,9 @@ async function initializeOpenCodeSwarm(
 				}
 
 				// Repo graph incremental update on write tools
-				await safeHook(repoGraphHook.toolAfter)(input, output);
+				if (repoGraphHook) {
+					await safeHook(repoGraphHook.toolAfter)(input, output);
+				}
 
 				// Context Map: post-agent update after Task tool completes
 				if (

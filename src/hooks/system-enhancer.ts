@@ -20,7 +20,11 @@ import {
 } from '../config/constants';
 import type { RetrospectiveEvidence } from '../config/evidence-schema';
 import type { RuntimePlan } from '../config/plan-schema';
-import { LearningConfigSchema, stripKnownSwarmPrefix } from '../config/schema';
+import {
+	LearningConfigSchema,
+	RepoGraphConfigSchema,
+	stripKnownSwarmPrefix,
+} from '../config/schema';
 import { listEvidenceTaskIds, loadEvidence } from '../evidence/manager';
 import { getProfileForFile } from '../lang/detector';
 import { loadPlan } from '../plan/manager';
@@ -662,6 +666,14 @@ export function createSystemEnhancerHook(
 	const realtimeAdmission = LearningConfigSchema.parse(
 		config.learning ?? {},
 	).realtime_admission;
+	const repoGraphConfig = RepoGraphConfigSchema.parse(config.repo_graph ?? {});
+	const repoGraphInjectionOptions = {
+		enabled: repoGraphConfig.enabled,
+		refreshCap: repoGraphConfig.refresh_cap,
+		maxFiles: repoGraphConfig.max_files,
+		walkBudgetMs: repoGraphConfig.walk_budget_ms,
+		excludeDirs: repoGraphConfig.exclude_dirs,
+	};
 
 	return {
 		'experimental.chat.system.transform': safeHook(
@@ -1356,9 +1368,10 @@ ${sanitizeContextText(scopedHandoff.body)}`;
 							try {
 								const coderScopePrimary = ccpSession?.declaredCoderScope?.[0];
 								if (coderScopePrimary) {
-									const localizationBlock = buildCoderLocalizationBlock(
+									const localizationBlock = await buildCoderLocalizationBlock(
 										directory,
 										coderScopePrimary,
+										repoGraphInjectionOptions,
 									);
 									if (localizationBlock) {
 										tryInject(localizationBlock);
@@ -1402,9 +1415,10 @@ ${sanitizeContextText(scopedHandoff.body)}`;
 									swarmState.agentSessions.get(reviewerSessionId);
 								const changed = reviewerSession?.declaredCoderScope ?? [];
 								if (changed.length > 0) {
-									const blastBlock = buildReviewerBlastRadiusBlock(
+									const blastBlock = await buildReviewerBlastRadiusBlock(
 										directory,
 										changed,
+										repoGraphInjectionOptions,
 									);
 									if (blastBlock) {
 										tryInject(blastBlock);
@@ -1425,6 +1439,8 @@ ${sanitizeContextText(scopedHandoff.body)}`;
 									const semDiffBlock = await buildSemanticDiffBlock(
 										directory,
 										semDiffChanged,
+										10,
+										repoGraphInjectionOptions,
 									);
 									if (semDiffBlock) {
 										tryInject(semDiffBlock);
@@ -2373,6 +2389,8 @@ ${sanitizeContextText(scopedHandoff.body)}`;
 								const semDiffBlock_b = await buildSemanticDiffBlock(
 									directory,
 									semDiffChanged_b,
+									10,
+									repoGraphInjectionOptions,
 								);
 								if (semDiffBlock_b) {
 									candidates.push({

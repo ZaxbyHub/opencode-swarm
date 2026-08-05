@@ -26,7 +26,10 @@ import {
 	GitBinaryMissingError,
 	isGitBinaryMissing,
 } from '../utils/git-binary-missing-error.js';
-import { getCachedGraph } from './repo-graph-injection.js';
+import {
+	getCachedGraph,
+	type RepoGraphInjectionOptions,
+} from './repo-graph-injection.js';
 
 export const _internals = {
 	execFile: child_process.execFile,
@@ -104,6 +107,7 @@ export async function buildSemanticDiffBlock(
 	directory: string,
 	changedFiles: string[],
 	maxFiles = 10,
+	repoGraphOptions?: RepoGraphInjectionOptions,
 ): Promise<string | null> {
 	if (changedFiles.length === 0) return null;
 
@@ -116,7 +120,7 @@ export async function buildSemanticDiffBlock(
 		const astDiffs: ASTDiffResult[] = [];
 
 		// Build fileConsumers map from repo graph
-		const graph = _internals.getCachedGraph(directory);
+		const graph = await _internals.getCachedGraph(directory, repoGraphOptions);
 		const fileConsumers: Record<string, number> = {};
 		if (graph) {
 			for (const f of filesToProcess) {

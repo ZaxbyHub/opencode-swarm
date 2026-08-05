@@ -21,31 +21,55 @@ import * as path from 'node:path';
 import * as logger from '../../utils/logger';
 import { containsControlChars } from '../../utils/path-security';
 
-/**
- * DI seam for the optimistic-concurrency stat check (defect A4). Tests override
- * `stat` to inject deterministic mtime shifts between load and the pre-save
- * re-check, exercising the reload-and-replay branch without races. Defaults to
- * the real `fsPromises.stat`. Restore in afterEach.
- */
-export const _internals: {
-	stat: (path: string) => Promise<Stats>;
-} = {
-	stat: (p: string) => fsPromises.stat(p),
-};
-
 import {
 	addEdge,
 	buildWorkspaceGraphAsync,
 	isAssetEdge,
 	isScannableSourcePath,
+	MAX_EXTRACTOR_INPUT_WITNESSES,
 	scanFileAsync,
 	upsertNode,
 } from './builder';
 import { clearCache, getCachedMtime } from './cache';
+import { writeFingerprint } from './freshness';
 import { resetQueryCache } from './query';
 import { getGraphPath, loadGraph, saveGraph } from './storage';
-import type { GraphEdge, RepoGraph, SymbolEdge } from './types';
+import type {
+	BuildWorkspaceGraphOptions,
+	GraphEdge,
+	GraphExtractorInputWitness,
+	RepoGraph,
+	RepoGraphDiagnostics,
+	SymbolEdge,
+} from './types';
 import { normalizeGraphPath, updateGraphMetadata } from './types';
+
+/** Public options shared by hook, read-repair, and direct callers. */
+export interface IncrementalUpdateOptions {
+	forceRebuild?: boolean;
+	/** Bounds and exclusions used by both direct and fallback full builds. */
+	buildOptions?: BuildWorkspaceGraphOptions;
+}
+
+/**
+ * DI seam for concurrency, scan-failure, and paired-persistence tests. Tests
+ * must restore every replaced entry in afterEach.
+ */
+export const _internals: {
+	stat: (path: string) => Promise<Stats>;
+	scanFileAsync: typeof scanFileAsync;
+	buildWorkspaceGraphAsync: typeof buildWorkspaceGraphAsync;
+	saveGraph: typeof saveGraph;
+	writeFingerprint: typeof writeFingerprint;
+} = {
+	stat: (p: string) => fsPromises.stat(p),
+	scanFileAsync,
+	buildWorkspaceGraphAsync,
+	saveGraph,
+	writeFingerprint,
+};
+
+const MAX_DIAGNOSTIC_ENTRIES = 200;
 
 /** Manifest basenames that mark a directory as a package root (mirrors builder). */
 const MANIFEST_BASENAMES = new Set([
@@ -104,49 +128,14 @@ function buildManifestClosure(
 }
 
 /**
- * Delete + validation half of the per-file update. For each changed file that
- * no longer exists on disk, remove its node and all edges referencing it; then
- * validate the resulting edge set. The async re-scan of still-existing files
- * is handled separately by {@link applyAsyncFileUpdates}. Splitting the two
- * halves lets both the normal incremental path and the concurrent-save replay
- * path (defect A4) share one validation implementation.
- *
- * Asset edges only require their source node to exist; node→node edges require
- * both endpoints (defect A1). Returns `validationFailed: true` when a genuine
- * orphan edge remains, along with the offending edge for diagnostics.
+ * Validate the graph after filesystem reconciliation. Asset edges require
+ * only their source node; node-to-node edges require both endpoints.
  */
-function applyFileUpdates(
-	graph: RepoGraph,
-	filePaths: string[],
-): {
+function validateFileUpdates(graph: RepoGraph): {
 	validationFailed: boolean;
 	offendingEdge?: GraphEdge;
 	reason?: 'missing-source-node' | 'missing-target-node';
 } {
-	for (const rawFilePath of filePaths) {
-		const normalizedPath = normalizeGraphPath(rawFilePath);
-		if (existsSync(rawFilePath)) continue;
-
-		// File was deleted - remove its node and all edges referencing it.
-		// NOTE (defect A1): asset edges whose target no longer exists on disk
-		// are retained but query-inert (assets are excluded from the reverse /
-		// forward indexes and every direct edge loop); pruning them is out of
-		// scope for this fix.
-		delete graph.nodes[normalizedPath];
-		graph.edges = graph.edges.filter(
-			(e) =>
-				normalizeGraphPath(e.source) !== normalizedPath &&
-				normalizeGraphPath(e.target) !== normalizedPath,
-		);
-		if (graph.symbolEdges) {
-			graph.symbolEdges = graph.symbolEdges.filter(
-				(se) =>
-					normalizeGraphPath(se.fromFile) !== normalizedPath &&
-					normalizeGraphPath(se.toFile) !== normalizedPath,
-			);
-		}
-	}
-
 	// Validate that edge endpoints have corresponding nodes. Asset edges
 	// (targetKind 'asset', or untagged edges whose target is not a scannable
 	// source file on pre-1.3.0 graphs) only require their source node; node→node
@@ -188,6 +177,135 @@ function applyFileUpdates(
 	return { validationFailed: false };
 }
 
+function diagnosticName(filePath: string, absoluteRoot: string): string {
+	return path.relative(absoluteRoot, filePath).split(path.sep).join('/');
+}
+
+function dedupeCapped<T>(
+	entries: readonly T[],
+	keyOf: (entry: T) => string,
+	limit = MAX_DIAGNOSTIC_ENTRIES,
+): T[] {
+	const seen = new Set<string>();
+	const result: T[] = [];
+	for (const entry of entries) {
+		const key = keyOf(entry);
+		if (seen.has(key)) continue;
+		seen.add(key);
+		result.push(entry);
+		if (result.length >= limit) break;
+	}
+	return result;
+}
+
+/** Replace diagnostics for one file while retaining unrelated entries. */
+function replaceFileDiagnostics(
+	graph: RepoGraph,
+	file: string,
+	replacement?: RepoGraphDiagnostics,
+): void {
+	const diagnostics: RepoGraphDiagnostics = { ...(graph.diagnostics ?? {}) };
+	const replaceStrings = (
+		current: readonly string[] | undefined,
+		incoming: readonly string[] | undefined,
+	): string[] =>
+		dedupeCapped(
+			[
+				...(current ?? []).filter((entry) => entry !== file),
+				...(incoming ?? []),
+			],
+			(entry) => entry,
+		);
+
+	diagnostics.extractionFailures = dedupeCapped(
+		[
+			...(diagnostics.extractionFailures ?? []).filter(
+				(entry) => entry.file !== file,
+			),
+			...(replacement?.extractionFailures ?? []),
+		],
+		(entry) => `${entry.file}\u0000${entry.language}\u0000${entry.reason}`,
+	);
+	diagnostics.unresolvedImports = dedupeCapped(
+		[
+			...(diagnostics.unresolvedImports ?? []).filter(
+				(entry) => entry.file !== file,
+			),
+			...(replacement?.unresolvedImports ?? []),
+		],
+		(entry) => `${entry.file}\u0000${entry.specifier}`,
+	);
+	diagnostics.oversizedFiles = replaceStrings(
+		diagnostics.oversizedFiles,
+		replacement?.oversizedFiles,
+	);
+	diagnostics.binaryFiles = replaceStrings(
+		diagnostics.binaryFiles,
+		replacement?.binaryFiles,
+	);
+	diagnostics.unreadableFiles = replaceStrings(
+		diagnostics.unreadableFiles,
+		replacement?.unreadableFiles,
+	);
+	diagnostics.validationSkippedFiles = replaceStrings(
+		diagnostics.validationSkippedFiles,
+		replacement?.validationSkippedFiles,
+	);
+	diagnostics.extractorInputWitnesses = dedupeCapped(
+		[
+			...(diagnostics.extractorInputWitnesses ?? []).filter(
+				(entry) => entry.file !== file,
+			),
+			...(replacement?.extractorInputWitnesses ?? []),
+		],
+		(entry) => `${entry.kind}\u0000${entry.file}`,
+		MAX_EXTRACTOR_INPUT_WITNESSES,
+	);
+	graph.diagnostics = diagnostics;
+}
+
+function scanDiagnostics(
+	diagnostics: RepoGraphDiagnostics | undefined,
+	inputWitness?: GraphExtractorInputWitness,
+): RepoGraphDiagnostics | undefined {
+	if (!diagnostics && !inputWitness) return undefined;
+	return {
+		...(diagnostics ?? {}),
+		extractorInputWitnesses: inputWitness ? [inputWitness] : [],
+	};
+}
+
+function isEnoent(error: unknown): boolean {
+	return (
+		error instanceof Error &&
+		'code' in error &&
+		(error as NodeJS.ErrnoException).code === 'ENOENT'
+	);
+}
+
+/** Delete only when the immediately preceding async stat returned ENOENT. */
+function applyAuthorizedDeletion(
+	graph: RepoGraph,
+	filePath: string,
+	absoluteRoot: string,
+): void {
+	const normalizedPath = normalizeGraphPath(filePath);
+	delete graph.nodes[normalizedPath];
+	graph.edges = graph.edges.filter(
+		(edge) =>
+			normalizeGraphPath(edge.source) !== normalizedPath &&
+			normalizeGraphPath(edge.target) !== normalizedPath,
+	);
+	if (graph.symbolEdges) {
+		graph.symbolEdges = graph.symbolEdges.filter(
+			(edge) =>
+				normalizeGraphPath(edge.fromFile) !== normalizedPath &&
+				normalizeGraphPath(edge.toFile) !== normalizedPath,
+		);
+	}
+	replaceFileDiagnostics(graph, diagnosticName(filePath, absoluteRoot));
+}
+
 /**
  * Incrementally update the graph for a set of changed files.
  * Re-scans only the specified files, updates their nodes and edges,
@@ -202,12 +320,15 @@ function applyFileUpdates(
 export async function updateGraphForFiles(
 	workspaceRoot: string,
 	filePaths: string[],
-	options?: { forceRebuild?: boolean },
+	options?: IncrementalUpdateOptions,
 ): Promise<RepoGraph> {
 	// If forced rebuild, do full rebuild and save
 	if (options?.forceRebuild) {
-		const graph = await buildWorkspaceGraphAsync(workspaceRoot);
-		await saveGraph(workspaceRoot, graph);
+		const graph = await _internals.buildWorkspaceGraphAsync(
+			workspaceRoot,
+			options.buildOptions,
+		);
+		await persistGraph(workspaceRoot, graph, options.buildOptions);
 		return graph;
 	}
 
@@ -215,14 +336,17 @@ export async function updateGraphForFiles(
 	const existingGraph = await loadGraph(workspaceRoot);
 	if (!existingGraph) {
 		// No existing graph - fall back to full rebuild
-		const graph = await buildWorkspaceGraphAsync(workspaceRoot);
-		await saveGraph(workspaceRoot, graph);
+		const graph = await _internals.buildWorkspaceGraphAsync(
+			workspaceRoot,
+			options?.buildOptions,
+		);
+		await persistGraph(workspaceRoot, graph, options?.buildOptions);
 		return graph;
 	}
 
 	const graph = existingGraph;
 	const absoluteRoot = path.resolve(workspaceRoot);
-	const maxFileSize = 1024 * 1024; // 1MB default
+	const maxFileSize = options?.buildOptions?.maxFileSizeBytes ?? 1024 * 1024;
 
 	// Manifest-aware package boundaries must stay consistent with the initial
 	// build across incremental edits (defect A8). Re-derive a bounded
@@ -237,12 +361,13 @@ export async function updateGraphForFiles(
 		hasManifest,
 	);
 
-	const firstCheck = applyFileUpdates(graph, filePaths);
+	const firstCheck = validateFileUpdates(graph);
 	if (firstCheck.validationFailed) {
 		return await fallBackToFullRebuild(
 			workspaceRoot,
 			firstCheck.offendingEdge,
 			firstCheck.reason,
+			options?.buildOptions,
 		);
 	}
 
@@ -277,7 +402,12 @@ export async function updateGraphForFiles(
 			if (!freshGraph) {
 				// File vanished between our load and the concurrent write —
 				// full rebuild reconciles from the live workspace.
-				return await fallBackToFullRebuild(workspaceRoot);
+				return await fallBackToFullRebuild(
+					workspaceRoot,
+					undefined,
+					undefined,
+					options?.buildOptions,
+				);
 			}
 			await applyAsyncFileUpdates(
 				freshGraph,
@@ -286,12 +416,13 @@ export async function updateGraphForFiles(
 				maxFileSize,
 				buildManifestClosure(freshGraph, absoluteRoot),
 			);
-			const replayCheck = applyFileUpdates(freshGraph, filePaths);
+			const replayCheck = validateFileUpdates(freshGraph);
 			if (replayCheck.validationFailed) {
 				return await fallBackToFullRebuild(
 					workspaceRoot,
 					replayCheck.offendingEdge,
 					replayCheck.reason,
+					options?.buildOptions,
 				);
 			}
 			// Re-stat before save: if the mtime moved AGAIN during replay,
@@ -307,33 +438,36 @@ export async function updateGraphForFiles(
 					logger.warn(
 						'[repo-graph] Concurrent modification persisted during replay — falling back to full rebuild',
 					);
-					return await fallBackToFullRebuild(workspaceRoot);
+					return await fallBackToFullRebuild(
+						workspaceRoot,
+						undefined,
+						undefined,
+						options?.buildOptions,
+					);
 				}
 			} catch {
 				logger.warn(
 					'[repo-graph] Re-stat failed after concurrent-modification replay — falling back to full rebuild',
 				);
-				return await fallBackToFullRebuild(workspaceRoot);
+				return await fallBackToFullRebuild(
+					workspaceRoot,
+					undefined,
+					undefined,
+					options?.buildOptions,
+				);
 			}
 
-			return finalizeAndSave(workspaceRoot, freshGraph);
+			return finalizeAndSave(workspaceRoot, freshGraph, options?.buildOptions);
 		}
 	}
 
-	return finalizeAndSave(workspaceRoot, graph);
+	return finalizeAndSave(workspaceRoot, graph, options?.buildOptions);
 }
 
 /**
- * Async re-scan half of the per-file update: for each existing file, remove
- * its old outgoing edges/symbolEdges, re-scan, and fold the new node + edges
- * + symbolEdges into `graph`. Deleted files are handled by the synchronous
- * `applyFileUpdates` delete branch.
- *
- * `hasManifest` (when available) is forwarded to the scanner so manifest-aware
- * package boundaries stay consistent with the initial build (defect A8). A
- * previously-tracked source file whose rescan returns `node: null` (it became
- * oversized, binary, or unreadable) has its stale node removed and any
- * incoming node→node edges caught by the subsequent validation fallback.
+ * Reconcile changed paths against live filesystem state. ENOENT is the only
+ * file-deletion authorization; recreation is scanned normally, and transient
+ * read failures preserve the last-known-good node and edges.
  */
 async function applyAsyncFileUpdates(
 	graph: RepoGraph,
@@ -344,7 +478,6 @@ async function applyAsyncFileUpdates(
 ): Promise<void> {
 	for (const rawFilePath of filePaths) {
 		const normalizedPath = normalizeGraphPath(rawFilePath);
-		if (!existsSync(rawFilePath)) continue;
 
 		// Defense in depth: only scannable source files become nodes. The write
 		// hook already filters, but updateGraphForFiles is a public entry point
@@ -352,17 +485,21 @@ async function applyAsyncFileUpdates(
 		// extension rather than letting scanFileAsync create an 'unknown' node.
 		if (!isScannableSourcePath(rawFilePath)) continue;
 
-		// Remove old edges from this file before adding new ones.
-		graph.edges = graph.edges.filter(
-			(e) => normalizeGraphPath(e.source) !== normalizedPath,
-		);
-		if (graph.symbolEdges) {
-			graph.symbolEdges = graph.symbolEdges.filter(
-				(se) => normalizeGraphPath(se.fromFile) !== normalizedPath,
-			);
+		const fileDiagnosticName = diagnosticName(rawFilePath, absoluteRoot);
+		try {
+			await _internals.stat(rawFilePath);
+		} catch (error: unknown) {
+			if (isEnoent(error)) {
+				applyAuthorizedDeletion(graph, rawFilePath, absoluteRoot);
+			} else {
+				replaceFileDiagnostics(graph, fileDiagnosticName, {
+					unreadableFiles: [fileDiagnosticName],
+				});
+			}
+			continue;
 		}
 
-		const result = await scanFileAsync(
+		const result = await _internals.scanFileAsync(
 			rawFilePath,
 			absoluteRoot,
 			maxFileSize,
@@ -380,8 +517,41 @@ async function applyAsyncFileUpdates(
 				imports: sanitizedImports,
 			};
 
-			delete graph.nodes[normalizedPath];
-			upsertNode(graph, sanitizedNode);
+			try {
+				upsertNode(graph, sanitizedNode);
+			} catch {
+				const validationWitness =
+					typeof sanitizedNode.sizeBytes === 'number' &&
+					typeof sanitizedNode.mtimeMs === 'number'
+						? {
+								file: fileDiagnosticName,
+								kind: 'stable-skip' as const,
+								sizeBytes: sanitizedNode.sizeBytes,
+								mtimeMs: sanitizedNode.mtimeMs,
+							}
+						: undefined;
+				replaceFileDiagnostics(
+					graph,
+					fileDiagnosticName,
+					scanDiagnostics(
+						{
+							...result.diagnostics,
+							validationSkippedFiles: [fileDiagnosticName],
+						},
+						validationWitness,
+					),
+				);
+				continue;
+			}
+
+			graph.edges = graph.edges.filter(
+				(edge) => normalizeGraphPath(edge.source) !== normalizedPath,
+			);
+			if (graph.symbolEdges) {
+				graph.symbolEdges = graph.symbolEdges.filter(
+					(edge) => normalizeGraphPath(edge.fromFile) !== normalizedPath,
+				);
+			}
 
 			for (const edge of result.edges) {
 				const edgeExists = graph.edges.some(
@@ -391,7 +561,11 @@ async function applyAsyncFileUpdates(
 						e.importSpecifier === edge.importSpecifier,
 				);
 				if (!edgeExists) {
-					addEdge(graph, edge);
+					try {
+						addEdge(graph, edge);
+					} catch {
+						/* invalid individual edge: retain the valid node */
+					}
 				}
 			}
 
@@ -413,12 +587,49 @@ async function applyAsyncFileUpdates(
 					}
 				}
 			}
+			replaceFileDiagnostics(
+				graph,
+				fileDiagnosticName,
+				scanDiagnostics(result.diagnostics, result.inputWitness),
+			);
 		} else {
-			// The file was previously a node but is now oversized/binary/
-			// unreadable. Remove its stale node so the subsequent validation
-			// pass catches any dangling incoming node→node edges and triggers
-			// the documented full-rebuild fallback (issue #1985 review).
-			delete graph.nodes[normalizedPath];
+			const definitelyUnindexable =
+				(result.diagnostics?.oversizedFiles?.length ?? 0) > 0 ||
+				(result.diagnostics?.binaryFiles?.length ?? 0) > 0;
+			if (definitelyUnindexable) {
+				graph.edges = graph.edges.filter(
+					(edge) => normalizeGraphPath(edge.source) !== normalizedPath,
+				);
+				if (graph.symbolEdges) {
+					graph.symbolEdges = graph.symbolEdges.filter(
+						(edge) => normalizeGraphPath(edge.fromFile) !== normalizedPath,
+					);
+				}
+				delete graph.nodes[normalizedPath];
+				replaceFileDiagnostics(
+					graph,
+					fileDiagnosticName,
+					scanDiagnostics(result.diagnostics, result.inputWitness),
+				);
+				continue;
+			}
+
+			try {
+				await _internals.stat(rawFilePath);
+				replaceFileDiagnostics(graph, fileDiagnosticName, {
+					...result.diagnostics,
+					unreadableFiles: [fileDiagnosticName],
+				});
+			} catch (error: unknown) {
+				if (isEnoent(error)) {
+					applyAuthorizedDeletion(graph, rawFilePath, absoluteRoot);
+				} else {
+					replaceFileDiagnostics(graph, fileDiagnosticName, {
+						...result.diagnostics,
+						unreadableFiles: [fileDiagnosticName],
+					});
+				}
+			}
 		}
 	}
 }
@@ -431,6 +642,7 @@ function clearCacheAndResetQuery(normalizedWorkspace: string): void {
 async function finalizeAndSave(
 	workspaceRoot: string,
 	graph: RepoGraph,
+	buildOptions?: BuildWorkspaceGraphOptions,
 ): Promise<RepoGraph> {
 	// Only keep symbolEdges when non-empty (matches buildWorkspaceGraphAsync behavior)
 	if (graph.symbolEdges && graph.symbolEdges.length === 0) {
@@ -438,8 +650,22 @@ async function finalizeAndSave(
 	}
 	updateGraphMetadata(graph);
 	resetQueryCache();
-	await saveGraph(workspaceRoot, graph);
+	await persistGraph(workspaceRoot, graph, buildOptions);
 	return graph;
+}
+
+async function persistGraph(
+	workspaceRoot: string,
+	graph: RepoGraph,
+	buildOptions?: BuildWorkspaceGraphOptions,
+): Promise<void> {
+	await _internals.saveGraph(workspaceRoot, graph);
+	await _internals.writeFingerprint(workspaceRoot, graph, {
+		maxFiles: buildOptions?.maxFiles,
+		walkBudgetMs: buildOptions?.walkBudgetMs,
+		followSymlinks: buildOptions?.followSymlinks,
+		excludeDirs: buildOptions?.excludeDirs,
+	});
 }
 
 /**
@@ -451,6 +677,7 @@ async function fallBackToFullRebuild(
 	workspaceRoot: string,
 	offendingEdge?: GraphEdge,
 	reason?: 'missing-source-node' | 'missing-target-node',
+	buildOptions?: BuildWorkspaceGraphOptions,
 ): Promise<RepoGraph> {
 	if (offendingEdge) {
 		logger.warn(
@@ -465,7 +692,10 @@ async function fallBackToFullRebuild(
 			'[repo-graph] Concurrent modification detected — falling back to full rebuild',
 		);
 	}
-	const rebuiltGraph = await buildWorkspaceGraphAsync(workspaceRoot);
+	const rebuiltGraph = await _internals.buildWorkspaceGraphAsync(
+		workspaceRoot,
+		buildOptions,
+	);
 	// Bump the fallback counter without clobbering extraction diagnostics.
 	const prev = rebuiltGraph.diagnostics ?? {};
 	const prevFallbacks =
@@ -476,6 +706,6 @@ async function fallBackToFullRebuild(
 		...prev,
 		incrementalFallbacks: prevFallbacks + 1,
 	};
-	await saveGraph(workspaceRoot, rebuiltGraph);
+	await persistGraph(workspaceRoot, rebuiltGraph, buildOptions);
 	return rebuiltGraph;
 }

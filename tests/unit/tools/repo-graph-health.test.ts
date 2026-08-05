@@ -7,6 +7,7 @@ import {
 	buildWorkspaceGraphAsync,
 	clearCache,
 	createEmptyGraph,
+	type FreshnessProbe,
 	getGraphHealth,
 	loadGraph,
 	type RepoGraph,
@@ -136,6 +137,7 @@ describe('repo graph health diagnostics', () => {
 			unsupportedFiles: ['README.md', '/etc/passwd'],
 			binaryFiles: ['src/blob.ts'],
 			unreadableFiles: ['src/secret.ts'],
+			validationSkippedFiles: ['src/invalid.ts', '../invalid.ts'],
 			lowConfidenceEdgeCount: 3,
 		};
 
@@ -153,11 +155,48 @@ describe('repo graph health diagnostics', () => {
 		expect(health.unsupportedFiles).toEqual(['README.md']);
 		expect(health.binaryFiles).toEqual(['src/blob.ts']);
 		expect(health.unreadableFiles).toEqual(['src/secret.ts']);
+		expect(health.validationSkippedFiles).toEqual(['src/invalid.ts']);
 		expect(health.lowConfidenceEdgeCount).toBe(3);
 		expect(health.notes).toContain('1 binary files skipped during last build.');
 		expect(health.notes).toContain(
 			'1 unreadable files skipped during last build.',
 		);
+	});
+
+	test('health derives additions and removals from the content probe', () => {
+		const graph = createEmptyGraph(tmp);
+		const probe: FreshnessProbe = {
+			state: 'drifted',
+			changed: [path.join(tmp, 'src/new.ts')],
+			removed: [path.join(tmp, 'src/removed.ts')],
+			truncated: false,
+			probedFiles: 2,
+			elapsedMs: 1,
+		};
+
+		const health = getGraphHealth(graph, tmp, probe);
+
+		expect(health.fresh).toBe(false);
+		expect(health.probeState).toBe('drifted');
+		expect(health.staleFiles).toEqual(['src/new.ts', 'src/removed.ts']);
+	});
+
+	test('health reports incomplete probe state without claiming stale content', () => {
+		const graph = createEmptyGraph(tmp);
+		const probe: FreshnessProbe = {
+			state: 'inconclusive',
+			changed: [],
+			removed: [],
+			truncated: true,
+			probedFiles: 1,
+			elapsedMs: 1,
+		};
+
+		const health = getGraphHealth(graph, tmp, probe);
+
+		expect(health.fresh).toBe(false);
+		expect(health.probeState).toBe('inconclusive');
+		expect(health.notes.join('\n')).toContain('freshness is unknown');
 	});
 
 	test('old graph without diagnostics loads and reports empty health diagnostics', async () => {

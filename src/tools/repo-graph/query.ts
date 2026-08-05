@@ -1,10 +1,10 @@
-import * as fsSync from 'node:fs';
 import * as path from 'node:path';
 import {
 	containsControlChars,
 	containsPathTraversal,
 } from '../../utils/path-security';
 import { isAssetEdge } from './builder';
+import type { FreshnessProbe } from './freshness';
 import type {
 	BlastRadiusResult,
 	CallerReference,
@@ -145,6 +145,11 @@ export function resetQueryCache(): void {
 	cachedReverseIndex = null;
 }
 
+/**
+ * @deprecated Graph age is not a content-freshness signal. Internal consumers
+ * use {@link probeFreshness}; this compatibility helper intentionally retains
+ * its historical five-minute TTL semantics for external callers.
+ */
 export function isGraphFresh(
 	graph: RepoGraph | null,
 	maxAgeMs: number = 5 * 60 * 1000,
@@ -213,35 +218,37 @@ function sanitizePathList(value: unknown): string[] {
 	return cap(value.filter(isSafeHealthPath));
 }
 
-function getStaleFiles(graph: RepoGraph, workspaceRoot?: string): string[] {
-	const built = Date.parse(graph.metadata.generatedAt);
-	if (!Number.isFinite(built)) return [];
-	const root = workspaceRoot ?? graph.workspaceRoot;
-	const stale: string[] = [];
-	for (const node of Object.values(graph.nodes)) {
-		const moduleName = normalizeGraphPath(node.moduleName);
-		if (!isSafeHealthPath(moduleName)) continue;
-		const filePath = path.join(root, moduleName);
-		try {
-			if (fsSync.statSync(filePath).mtimeMs > built) {
-				stale.push(moduleName);
-				if (stale.length >= GRAPH_HEALTH_OUTPUT_LIMIT) break;
-			}
-		} catch {
-			// Missing or unreadable files are handled by build diagnostics.
+function getProbeStaleFiles(
+	probe: FreshnessProbe | undefined,
+	workspaceRoot: string,
+): string[] {
+	if (!probe) return [];
+	const root = path.resolve(workspaceRoot);
+	const stale = new Set<string>();
+	for (const absolutePath of [...probe.changed, ...probe.removed]) {
+		if (typeof absolutePath !== 'string' || !path.isAbsolute(absolutePath)) {
+			continue;
 		}
+		const relative = normalizeGraphPath(path.relative(root, absolutePath));
+		if (!isSafeHealthPath(relative)) continue;
+		stale.add(relative);
 	}
-	return stale;
+	return [...stale]
+		.sort((a, b) => a.localeCompare(b))
+		.slice(0, GRAPH_HEALTH_OUTPUT_LIMIT);
 }
 
 export function getGraphHealth(
 	graph: RepoGraph | null,
 	workspaceRoot?: string,
+	probe?: FreshnessProbe,
 ): GraphHealthResult {
+	const probeState = probe?.state ?? 'no-fingerprint';
 	if (!graph) {
 		return {
 			schemaVersion: null,
 			fresh: false,
+			probeState,
 			staleFiles: [],
 			extractionFailures: [],
 			unresolvedImports: [],
@@ -249,6 +256,7 @@ export function getGraphHealth(
 			unsupportedFiles: [],
 			binaryFiles: [],
 			unreadableFiles: [],
+			validationSkippedFiles: [],
 			lowConfidenceEdgeCount: 0,
 			walkTruncated: false,
 			walkTruncationReason: null,
@@ -260,11 +268,24 @@ export function getGraphHealth(
 	}
 
 	const diagnostics = graph.diagnostics as Record<string, unknown> | undefined;
-	const fresh = isGraphFresh(graph);
-	const staleFiles = getStaleFiles(graph, workspaceRoot);
+	const fresh = probeState === 'clean';
+	const staleFiles = getProbeStaleFiles(
+		probe,
+		workspaceRoot ?? graph.workspaceRoot,
+	);
 	const notes: string[] = [];
-	if (!fresh || staleFiles.length > 0) {
-		notes.push('Graph is stale. Run repo_map with action="build" to refresh.');
+	if (probeState === 'drifted') {
+		notes.push(
+			'Graph content is stale relative to the workspace. Run repo_map with action="build" if automatic refresh is unavailable.',
+		);
+	} else if (probeState === 'no-fingerprint') {
+		notes.push(
+			'Graph has no matching content fingerprint. Run repo_map with action="build" to certify it.',
+		);
+	} else if (probeState === 'inconclusive') {
+		notes.push(
+			'Graph freshness is unknown because the bounded workspace probe did not complete; no refresh or deletion was attempted.',
+		);
 	}
 	if (!diagnostics) {
 		notes.push(
@@ -310,6 +331,7 @@ export function getGraphHealth(
 	return {
 		schemaVersion: graph.schema_version,
 		fresh,
+		probeState,
 		staleFiles,
 		extractionFailures: sanitizeExtractionFailures(
 			diagnostics?.extractionFailures,
@@ -321,6 +343,9 @@ export function getGraphHealth(
 		unsupportedFiles: sanitizePathList(diagnostics?.unsupportedFiles),
 		binaryFiles,
 		unreadableFiles,
+		validationSkippedFiles: sanitizePathList(
+			diagnostics?.validationSkippedFiles,
+		),
 		lowConfidenceEdgeCount:
 			typeof diagnostics?.lowConfidenceEdgeCount === 'number' &&
 			Number.isFinite(diagnostics.lowConfidenceEdgeCount) &&

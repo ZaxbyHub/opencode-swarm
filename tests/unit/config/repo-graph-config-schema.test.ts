@@ -10,7 +10,10 @@
  */
 
 import { describe, expect, it } from 'bun:test';
-import { RepoGraphConfigSchema } from '../../../src/config/schema';
+import {
+	PluginConfigSchema,
+	RepoGraphConfigSchema,
+} from '../../../src/config/schema';
 
 describe('RepoGraphConfigSchema.exclude_dirs', () => {
 	it('accepts valid directory basenames', () => {
@@ -43,5 +46,48 @@ describe('RepoGraphConfigSchema.exclude_dirs', () => {
 	it('defaults to an empty array when omitted', () => {
 		const parsed = RepoGraphConfigSchema.parse({});
 		expect(parsed.exclude_dirs).toEqual([]);
+	});
+});
+
+describe('RepoGraphConfigSchema freshness policy (issue #1986)', () => {
+	it('materializes safe defaults when the entire section is omitted', () => {
+		const parsed = PluginConfigSchema.parse({});
+		expect(parsed.repo_graph).toEqual({
+			enabled: true,
+			init_refresh: true,
+			refresh_cap: 50,
+			walk_budget_ms: 5_000,
+			max_files: 10_000,
+			exclude_dirs: [],
+		});
+	});
+
+	it('accepts the documented boundary values', () => {
+		const parsed = RepoGraphConfigSchema.parse({
+			enabled: false,
+			init_refresh: false,
+			refresh_cap: 0,
+			walk_budget_ms: 60_000,
+			max_files: 100_000,
+		});
+		expect(parsed).toMatchObject({
+			enabled: false,
+			init_refresh: false,
+			refresh_cap: 0,
+			walk_budget_ms: 60_000,
+			max_files: 100_000,
+		});
+	});
+
+	it.each([
+		['refresh_cap', -1],
+		['refresh_cap', 501],
+		['walk_budget_ms', 999],
+		['walk_budget_ms', 60_001],
+		['max_files', 99],
+		['max_files', 100_001],
+		['max_files', 100.5],
+	] as const)('rejects out-of-policy %s=%s', (key, value) => {
+		expect(() => RepoGraphConfigSchema.parse({ [key]: value })).toThrow();
 	});
 });

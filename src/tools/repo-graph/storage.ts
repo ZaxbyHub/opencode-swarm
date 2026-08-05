@@ -23,6 +23,7 @@ import {
 	isDirty,
 	setCachedGraph,
 } from './cache';
+import { type FreshnessOptions, writeFingerprint } from './freshness';
 import { safeRealpathSync } from './safe-realpath';
 import type { RepoGraph } from './types';
 import {
@@ -71,10 +72,12 @@ export const _internals: {
 	safeRealpathSync: typeof safeRealpathSync;
 	fsRename: typeof fsPromises.rename;
 	retryDelayMs: number;
+	writeFingerprint: typeof writeFingerprint;
 } = {
 	safeRealpathSync,
 	fsRename: fsPromises.rename.bind(fsPromises),
 	retryDelayMs: WINDOWS_RENAME_RETRY_DELAY_MS,
+	writeFingerprint,
 };
 
 function validateLoadedGraph(parsed: RepoGraph): void {
@@ -543,7 +546,10 @@ export async function loadOrCreateGraph(workspace: string): Promise<RepoGraph> {
  * @throws Error if workspace is dirty but cache is missing (inconsistent state)
  * @throws Error if save fails
  */
-export async function saveIfDirty(workspace: string): Promise<void> {
+export async function saveIfDirty(
+	workspace: string,
+	freshnessOptions?: FreshnessOptions,
+): Promise<void> {
 	const normalized = path.normalize(workspace);
 	if (isDirty(normalized)) {
 		const graph = getCachedGraph(normalized);
@@ -553,5 +559,6 @@ export async function saveIfDirty(workspace: string): Promise<void> {
 			);
 		}
 		await saveGraph(workspace, graph);
+		await _internals.writeFingerprint(workspace, graph, freshnessOptions);
 	}
 }

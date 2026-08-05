@@ -113,15 +113,12 @@ describe('repo_map: graph_health', () => {
 		expect(r.unresolvedImports).toEqual([]);
 	});
 
-	it('reports stale graph health after persisted timestamp changes', async () => {
+	it('reports stale graph health after source content changes', async () => {
 		await call({ action: 'build' });
-		const graphPath = path.join(tmp, '.swarm', 'repo-graph.json');
-		const graph = JSON.parse(fs.readFileSync(graphPath, 'utf-8')) as {
-			metadata: { generatedAt: string };
-		};
-		graph.metadata.generatedAt = '2000-01-01T00:00:00.000Z';
-		fs.writeFileSync(graphPath, JSON.stringify(graph), 'utf-8');
-		fs.utimesSync(graphPath, new Date(), new Date());
+		fs.appendFileSync(
+			path.join(tmp, 'src/main.ts'),
+			'\nexport const drift = 1;\n',
+		);
 
 		const out = await call({ action: 'graph_health' });
 		const r = JSON.parse(out) as {
@@ -133,7 +130,7 @@ describe('repo_map: graph_health', () => {
 		expect(r.success).toBe(true);
 		expect(r.fresh).toBe(false);
 		expect(r.staleFiles).toContain('src/main.ts');
-		expect(r.notes.join('\n')).toContain('Graph is stale');
+		expect(r.notes.join('\n')).toContain('Graph content is stale');
 	});
 
 	it('returns a structured graph_health error for corrupt graph JSON', async () => {
