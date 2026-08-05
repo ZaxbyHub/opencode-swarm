@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.135.5](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.135.4...v7.135.5) (2026-08-05)
+
+
+### Bug Fixes
+
+* **pr-workflow:** add total wake budget and widen depth-tier thresholds ([e50386b](https://github.com/ZaxbyHub/opencode-swarm/commit/e50386b94ee55792220c3b1c167ab8d51da9718d))
+* **pr-workflow:** add total wake budget and widen depth-tier thresholds ([f69ab27](https://github.com/ZaxbyHub/opencode-swarm/commit/f69ab27349165385c32541ef35dbaabb9b271e48))
+
 ## [7.135.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.135.3...v7.135.4) (2026-08-05)
 
 
