@@ -103,10 +103,10 @@ export type PrReviewDepthTier = 'S' | 'M' | 'L';
  * always dispatch more lanes than a tier's floor, never fewer.
  */
 export const PR_REVIEW_DEPTH_TIER_THRESHOLDS = {
-	smallMaxChangedLines: 50,
-	smallMaxChangedFiles: 3,
-	mediumMaxChangedLines: 500,
-	mediumMaxChangedFiles: 20,
+	smallMaxChangedLines: 100,
+	smallMaxChangedFiles: 5,
+	mediumMaxChangedLines: 1500,
+	mediumMaxChangedFiles: 50,
 } as const;
 
 /**
@@ -123,7 +123,7 @@ export const PR_REVIEW_BASE_LANE_FLOORS: Record<PrReviewDepthTier, number> = {
 /**
  * Minimum lane counts for a FULL micro (risk-family) sweep per depth tier. These
  * mirror the base floors' tier *semantics* — not their numbers — scaled to the
- * eleven risk families: S does not bind (a tier-S PR of ≤50 lines/≤3 files may
+ * eleven risk families: S does not bind (a tier-S PR of ≤100 lines/≤5 files may
  * consolidate a full sweep into one lane, exactly as base tier S permits); M
  * requires at least half the families to get independent lanes (ceil(11/2) = 6,
  * the deliberate scale-up from base M's 3 = ceil(6/2)); L requires one lane per
