@@ -388,24 +388,22 @@ describe('dispatch_lanes PR workflow enforcement', () => {
 	test('computePrReviewDepthTier maps sizes and fails strict to L on unknown stats', () => {
 		expect(computePrReviewDepthTier(null)).toBe('L');
 		expect(computePrReviewDepthTier(undefined)).toBe('L');
-		expect(
-			computePrReviewDepthTier({ changedLines: 10, changedFiles: 2 }),
-		).toBe('S');
-		expect(
-			computePrReviewDepthTier({ changedLines: 50, changedFiles: 3 }),
-		).toBe('S');
-		expect(
-			computePrReviewDepthTier({ changedLines: 51, changedFiles: 3 }),
-		).toBe('M');
-		expect(
-			computePrReviewDepthTier({ changedLines: 20, changedFiles: 4 }),
-		).toBe('M');
-		expect(
-			computePrReviewDepthTier({ changedLines: 500, changedFiles: 20 }),
-		).toBe('M');
-		expect(
-			computePrReviewDepthTier({ changedLines: 501, changedFiles: 2 }),
-		).toBe('L');
+		const tierCases: Array<[number, number, string]> = [
+			[100, 5, 'S'],
+			[100, 6, 'M'],
+			[101, 5, 'M'],
+			[51, 3, 'S'],
+			[20, 4, 'S'],
+			[1500, 50, 'M'],
+			[1500, 51, 'L'],
+			[1501, 2, 'L'],
+			[501, 2, 'M'],
+		];
+		for (const [lines, files, expected] of tierCases) {
+			expect(
+				computePrReviewDepthTier({ changedLines: lines, changedFiles: files }),
+			).toBe(expected);
+		}
 	});
 
 	test('computePrReviewDepthTier escalates to L on file-count overflow or a submodule change, closing the file-count blind spot', () => {
@@ -414,7 +412,7 @@ describe('dispatch_lanes PR workflow enforcement', () => {
 		// its aggregate changed-line count is small: file count now has its own
 		// ceiling, mirroring the S-tier check.
 		expect(
-			computePrReviewDepthTier({ changedLines: 500, changedFiles: 21 }),
+			computePrReviewDepthTier({ changedLines: 500, changedFiles: 51 }),
 		).toBe('L');
 		expect(
 			computePrReviewDepthTier({ changedLines: 0, changedFiles: 200 }),

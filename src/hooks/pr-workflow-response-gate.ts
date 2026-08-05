@@ -9,7 +9,10 @@ import {
 	markPrWorkflowPluginWake,
 	observePrWorkflowAutoWakeEvent,
 } from './pr-workflow-auto-wake.js';
-import { readPrWorkflowGateState } from './pr-workflow-gate.js';
+import {
+	type PrReviewDepthTier,
+	readPrWorkflowGateState,
+} from './pr-workflow-gate.js';
 
 const DEFAULT_WAKE_TIMEOUT_MS = 5_000;
 
@@ -89,6 +92,29 @@ const BANNER_PREFIX_PATTERN =
 	/^--- \[(?:PR_REVIEW|PR_FEEDBACK) WORKFLOW ACTIVE/;
 
 /**
+ * Per-tier default total-wake ceilings, derived proportionally from each
+ * depth tier's consolidation-floor workload (base lanes + micro lanes).
+ *
+ * DERIVATION:
+ *   Tier workloads (base + micro):  S = 1+1 = 2,  M = 3+6 = 9,  L = 6+11 = 17
+ *   Headroom multiplier: 6 (chosen so that L >= 100 and scales uniformly)
+ *   Ceilings:  S = 2×6 = 12,  M = 9×6 = 54,  L = 17×6 = 102
+ *
+ * The tier-L ceiling (102) is comfortably above the observed ~40–55 healthy
+ * tier-L wake count, providing generous headroom for real reviews while still
+ * bounding pathological loops. Tier-S is tightest because small PRs have the
+ * least lane work; tier-M is proportionally in between.
+ *
+ * When `totalWakeCeiling` is provided to `createPrWorkflowResponseGate`,
+ * it overrides these defaults.
+ */
+export const DEFAULT_TOTAL_WAKE_CEILINGS: Record<PrReviewDepthTier, number> = {
+	S: 12,
+	M: 54,
+	L: 102,
+};
+
+/**
  * Bounded FIFO map of tracked wake budgets. Invariant 8 (session/global
  * state): module-level state must have an explicit eviction strategy. Three
  * further per-session maps share this same bound and the same FIFO discipline:
@@ -121,6 +147,13 @@ interface WakeBudget {
 	lastWakeAt: number;
 	lastSeenRevision?: number;
 	suspended: boolean;
+	/** Total number of wake attempts across the session lifetime. Never reset by
+	 * revision progress — only the consecutive counter resets on progress. */
+	totalWakes: number;
+	/** Discriminator for WHY the session was suspended: 'consecutive' means
+	 * the consecutive-unproductive budget was exhausted; 'total' means the
+	 * absolute per-session total-wake ceiling was reached. */
+	suspendedReason: 'consecutive' | 'total';
 }
 
 function canonicalGitHubPrUrl(value: string): string | null {
@@ -178,6 +211,7 @@ function blockedText(
 	mode: string,
 	options: {
 		suspended?: boolean;
+		suspendedReason?: 'consecutive' | 'total';
 		userInterrupted?: boolean;
 		maxConsecutive?: number;
 		recovery?: { code: string; requiredAction: string };
@@ -189,10 +223,16 @@ function blockedText(
 		`If the bind/checkout path is unreachable — for example a compound \`git fetch && git checkout\` was rejected as read-only shell syntax, the PR head cannot be fetched, or the working tree is on the wrong branch — call \`abort_pr_workflow\` (mode: "${mode}", reason: "<one-line cause>") to clear the gate, or ask the user to run \`/swarm abort-pr-workflow\`.`,
 	];
 	if (options.suspended) {
-		const max = options.maxConsecutive;
-		lines.push(
-			`Auto-resume is suspended after ${max ?? 'the configured number of'} consecutive unproductive retries (the durable gate \`revision\` did not advance). The session will not be re-awoken automatically. Run \`/swarm abort-pr-workflow\` or call \`abort_pr_workflow\` to clear the gate, or complete the workflow with \`complete_pr_workflow\` to publish normally.`,
-		);
+		if (options.suspendedReason === 'total') {
+			lines.push(
+				'Auto-resume is suspended because the total per-session wake budget has been exhausted. The session will not be re-awoken automatically. Run `/swarm abort-pr-workflow`, call `abort_pr_workflow`, or complete the workflow with `complete_pr_workflow` to publish normally.',
+			);
+		} else {
+			const max = options.maxConsecutive;
+			lines.push(
+				`Auto-resume is suspended after ${max ?? 'the configured number of'} consecutive unproductive retries (the durable gate \`revision\` did not advance). The session will not be re-awoken automatically. Run \`/swarm abort-pr-workflow\` or call \`abort_pr_workflow\` to clear the gate, or complete the workflow with \`complete_pr_workflow\` to publish normally.`,
+			);
+		}
 	}
 	if (options.userInterrupted) {
 		lines.push(
@@ -222,6 +262,7 @@ function workflowBanner(
 	mode: string,
 	options: {
 		suspended?: boolean;
+		suspendedReason?: 'consecutive' | 'total';
 		userInterrupted?: boolean;
 		maxConsecutive?: number;
 		recovery?: { code: string; requiredAction: string };
@@ -231,10 +272,16 @@ function workflowBanner(
 		`--- [${mode} WORKFLOW ACTIVE — output below is not a terminal verdict; \`complete_pr_workflow\` clears the gate on success; if the bind/checkout path is unreachable call \`abort_pr_workflow\` or run \`/swarm abort-pr-workflow\`] ---`,
 	];
 	if (options.suspended) {
-		const max = options.maxConsecutive;
-		lines.push(
-			`[Auto-resume is suspended after ${max ?? 'the configured number of'} consecutive unproductive retries. Run \`/swarm abort-pr-workflow\` or call \`abort_pr_workflow\` to clear the gate, or complete the workflow with \`complete_pr_workflow\`.]`,
-		);
+		if (options.suspendedReason === 'total') {
+			lines.push(
+				'[Auto-resume is suspended because the total per-session wake budget has been exhausted. Run `/swarm abort-pr-workflow`, call `abort_pr_workflow`, or complete the workflow with `complete_pr_workflow`.]',
+			);
+		} else {
+			const max = options.maxConsecutive;
+			lines.push(
+				`[Auto-resume is suspended after ${max ?? 'the configured number of'} consecutive unproductive retries. Run \`/swarm abort-pr-workflow\` or call \`abort_pr_workflow\` to clear the gate, or complete the workflow with \`complete_pr_workflow\`.]`,
+			);
+		}
 	}
 	if (options.userInterrupted) {
 		lines.push(
@@ -276,6 +323,12 @@ export function createPrWorkflowResponseGate(options: {
 	maxConsecutiveUnproductiveWakes?: number;
 	wakeCooldownMs?: number;
 	bannerCooldownMs?: number;
+	/** Override the per-tier default total-wake ceilings. A single number
+	 * applies uniformly to all tiers; a partial Record allows per-tier
+	 * overrides with unspecified tiers falling back to the defaults.
+	 * When omitted, the context-aware defaults (DEFAULT_TOTAL_WAKE_CEILINGS)
+	 * apply. */
+	totalWakeCeiling?: number | Partial<Record<PrReviewDepthTier, number>>;
 }) {
 	const wakeTimeoutMs = options.wakeTimeoutMs ?? DEFAULT_WAKE_TIMEOUT_MS;
 	const maxConsecutive =
@@ -284,6 +337,21 @@ export function createPrWorkflowResponseGate(options: {
 	const wakeCooldownMs = options.wakeCooldownMs ?? DEFAULT_WAKE_COOLDOWN_MS;
 	const bannerCooldownMs =
 		options.bannerCooldownMs ?? DEFAULT_BANNER_COOLDOWN_MS;
+	const resolveTotalWakeCeiling = (tier: PrReviewDepthTier): number => {
+		if (options.totalWakeCeiling === undefined) {
+			return DEFAULT_TOTAL_WAKE_CEILINGS[tier];
+		}
+		return typeof options.totalWakeCeiling === 'number'
+			? options.totalWakeCeiling
+			: (options.totalWakeCeiling[tier] ?? DEFAULT_TOTAL_WAKE_CEILINGS[tier]);
+	};
+	/**
+	 * Per-session wake budgets (consecutive counter, suspension flag, and
+	 * total-wake counter). This is an IN-MEMORY map scoped to ONE PROCESS
+	 * LIFETIME — it resets on plugin reload / process restart. The total-wake
+	 * bound holds within a single process invocation; a plugin reload starts
+	 * fresh totals.
+	 */
 	const activeWakeSessions = new Set<string>();
 	const wakeBudgets = new Map<string, WakeBudget>();
 	/**
@@ -311,12 +379,22 @@ export function createPrWorkflowResponseGate(options: {
 	const fallbackInjections = new Map<string, number>();
 	const session = options.client?.session as SessionClient | undefined;
 
-	/** FIFO-evict the oldest budget entry when the map exceeds the bound. */
+	/** FIFO-evict the oldest NON-suspended budget entry when the map exceeds
+	 * the bound. Suspended budgets are never evicted — they represent bounded
+	 * sessions whose total-wake cap fired. Evicting a suspended budget would
+	 * allow re-entry to recreate it with totalWakes: 0, re-arming auto-resume
+	 * and defeating the total-wake cap. If ALL entries are suspended (unlikely
+	 * but possible), eviction stops as a safety valve. */
 	function evictIfOverBound(): void {
 		while (wakeBudgets.size > MAX_TRACKED_WAKE_SESSIONS) {
-			const oldestKey = wakeBudgets.keys().next().value;
-			if (oldestKey === undefined) break;
-			wakeBudgets.delete(oldestKey);
+			let evicted = false;
+			for (const [key, budget] of wakeBudgets) {
+				if (budget.suspended) continue;
+				wakeBudgets.delete(key);
+				evicted = true;
+				break;
+			}
+			if (!evicted) break;
 		}
 	}
 
@@ -416,6 +494,7 @@ export function createPrWorkflowResponseGate(options: {
 
 		const budget = wakeBudgets.get(input.sessionID);
 		const suspended = budget?.suspended ?? false;
+		const suspendedReason = budget?.suspendedReason;
 		const userInterrupted = isPrWorkflowAutoWakeSuppressed(
 			options.directory,
 			input.sessionID,
@@ -461,6 +540,7 @@ export function createPrWorkflowResponseGate(options: {
 		// abort_pr_workflow can clear an unarmed workflow.
 		const banner = workflowBanner(state.mode, {
 			suspended,
+			suspendedReason,
 			userInterrupted,
 			maxConsecutive: maxConsecutive,
 			recovery,
@@ -523,6 +603,8 @@ export function createPrWorkflowResponseGate(options: {
 					consecutiveUnproductive: 0,
 					lastWakeAt: 0,
 					suspended: false,
+					totalWakes: 0,
+					suspendedReason: 'consecutive',
 				};
 				wakeBudgets.set(sessionID, budget);
 			}
@@ -599,6 +681,7 @@ export function createPrWorkflowResponseGate(options: {
 								type: 'text',
 								text: `${blockedText(state.mode, {
 									suspended: false,
+									suspendedReason: undefined,
 									maxConsecutive: maxConsecutive,
 								})}\nDo not stop or summarize. Inspect the durable gate, dispatch or collect the next missing required lane, and continue until complete_pr_workflow succeeds. If the bind/checkout path is genuinely unreachable, call abort_pr_workflow instead of looping.${queuedMonitorText}`,
 							},
@@ -653,10 +736,23 @@ export function createPrWorkflowResponseGate(options: {
 				// falsely suspended at MAX-1. The fresh read here corrects that
 				// race: if the revision advanced during the wake, the wake IS
 				// productive and the counter resets.
-				const postWakeState = await _internals.readPrWorkflowGateState(
-					options.directory,
-					sessionID,
-				);
+				let postWakeState: Awaited<
+					ReturnType<typeof _internals.readPrWorkflowGateState>
+				>;
+				try {
+					postWakeState = await _internals.readPrWorkflowGateState(
+						options.directory,
+						sessionID,
+					);
+				} catch {
+					// The pre-wake read already validated the gate exists; a
+					// throw here is a transient fs error. Fall back to the
+					// pre-wake state so the bookkeeping proceeds with the
+					// last-known-good revision. Reserving null exclusively
+					// for a confirmed gate-clear prevents resetBudget from
+					// wiping the just-incremented totalWakes.
+					postWakeState = state;
+				}
 				if (
 					promptAccepted &&
 					queuedMonitorEvents.length > 0 &&
@@ -700,9 +796,23 @@ export function createPrWorkflowResponseGate(options: {
 						budget.consecutiveUnproductive += 1;
 						if (budget.consecutiveUnproductive >= maxConsecutive) {
 							budget.suspended = true;
+							budget.suspendedReason = 'consecutive';
 						}
 					} else {
 						budget.consecutiveUnproductive = 0;
+					}
+
+					// TOTAL-wake budget: increment on EVERY attempted wake
+					// (success, failure, timeout) and NEVER reset by progress.
+					// Read the depth tier from durable gate state; default to 'L'
+					// when absent (e.g. PR_FEEDBACK mode has no diff-stats tier).
+					budget.totalWakes += 1;
+					const tier: PrReviewDepthTier =
+						postWakeState.prReviewDepthTier ?? 'L';
+					const totalCeiling = resolveTotalWakeCeiling(tier);
+					if (budget.totalWakes >= totalCeiling) {
+						budget.suspended = true;
+						budget.suspendedReason = 'total';
 					}
 				}
 			}
