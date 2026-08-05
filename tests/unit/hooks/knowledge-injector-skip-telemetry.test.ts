@@ -125,6 +125,51 @@ describe('knowledge injector injection_skip telemetry (#1768/#1849)', () => {
 		expect(skips.length).toBe(1);
 		expect(skips[0].reason).toBe('headroom_budget');
 		expect(skips[0].detail).toMatchObject({ modelID: 'tiny' });
+		// Headroom-attribution fix: identity is now resolved BEFORE the headroom
+		// gate, so a recoverable session must carry agent/session_id on the event
+		// instead of firing anonymously (2,063 anonymous events in production —
+		// see knowledge-injector.ts headroom gate comment).
+		expect(skips[0].agent).toBe('architect');
+		expect(skips[0].session_id).toBe(SESSION);
+	});
+
+	test('headroom_budget: still emits (fields absent, no regression) when identity is unrecoverable', async () => {
+		const { events } = captureEvents();
+		// Deliberately do NOT set swarmState.activeAgent and provide no user
+		// message carrying info.agent — identity cannot be resolved.
+		const hook = createKnowledgeInjectorHook(
+			tempDir,
+			{ ...baseConfig, enabled: true, context_budget_threshold: 300 },
+			{ 'test-provider/tiny': 100 },
+		);
+		const big = 'x'.repeat(2000);
+		await hook(
+			{},
+			output([
+				{
+					info: {
+						role: 'assistant',
+						modelID: 'tiny',
+						providerID: 'test-provider',
+						sessionID: SESSION,
+					},
+					parts: [{ type: 'text', text: big }],
+				},
+				{
+					info: { role: 'user', sessionID: SESSION },
+					parts: [{ type: 'text', text: 'go' }],
+				},
+			]),
+		);
+		await new Promise((r) => setTimeout(r, 5));
+
+		const skips = skipEvents(events);
+		expect(skips.length).toBe(1);
+		expect(skips[0].reason).toBe('headroom_budget');
+		expect(skips[0].agent).toBeUndefined();
+		// sessionID IS recoverable here (every message carries info.sessionID
+		// regardless of agent identity), so only `agent` is expected absent.
+		expect(skips[0].session_id).toBe(SESSION);
 	});
 
 	test('no_agent_name: emits skip when no activeAgent AND no user message carries agent', async () => {

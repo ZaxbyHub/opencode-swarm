@@ -27,6 +27,7 @@ import { stripKnownSwarmPrefix } from '../config/schema.js';
 import { loadPlan } from '../plan/manager.js';
 import { log, warn } from '../utils/logger.js';
 import { extractCurrentPhaseFromPlan } from './extractors.js';
+import { recordKnowledgeEvent } from './knowledge-events.js';
 import {
 	buildDelegateDirectiveBlock,
 	defaultExpectedToolsForAgent,
@@ -37,6 +38,35 @@ import {
 import type { KnowledgeConfig } from './knowledge-types.js';
 import { readPhaseDirectivesToVerify } from './phase-directives.js';
 import { parseDelegationArgs } from './skill-propagation-gate.js';
+
+/**
+ * Emits a structured `injection_skip` diagnostic event so the reason a
+ * per-delegation skip fired is recoverable from `.swarm/knowledge-events.jsonl`
+ * (mirrors `recordInjectionSkip` in knowledge-injector.ts, issue #1768). Only
+ * called for skip branches that fire per-delegation (i.e. after the
+ * `isTaskTool` gate passes) — `knowledge_disabled` and `not_task_tool` fire on
+ * every non-Task tool call and stay log-only to avoid an event flood.
+ * Fire-and-forget + fail-open: telemetry must never break delegation.
+ */
+function recordDelegateInjectionSkip(
+	directory: string,
+	reason: string,
+	options?: {
+		agent?: string;
+		sessionId?: string;
+		detail?: Record<string, unknown>;
+	},
+): void {
+	recordKnowledgeEvent(directory, {
+		type: 'injection_skip',
+		reason,
+		agent: options?.agent,
+		session_id: options?.sessionId,
+		detail: options?.detail,
+	}).catch(() => {
+		// swallow — diagnostic telemetry must never propagate
+	});
+}
 
 export interface DelegateInjectionInput {
 	tool: unknown;
@@ -68,7 +98,13 @@ export async function injectDelegateDirectivesBefore(
 	input: DelegateInjectionInput,
 	config: KnowledgeConfig,
 ): Promise<number> {
+	// Declared outside the try so the catch block can still attribute a
+	// diagnostic event to the session even if something later throws; the
+	// derivation itself is a plain typeof check and cannot throw.
+	let sessionId: string | undefined;
 	try {
+		sessionId =
+			typeof input.sessionID === 'string' ? input.sessionID : undefined;
 		const debugSkip = (reason: string, data?: Record<string, unknown>) => {
 			log('[delegate-directive-injection] skipped', {
 				reason,
@@ -85,6 +121,11 @@ export async function injectDelegateDirectivesBefore(
 		const callerAgent = typeof input.agent === 'string' ? input.agent : '';
 		const callerRole = stripKnownSwarmPrefix(callerAgent).toLowerCase();
 		if (!callerAgent || callerRole !== 'architect') {
+			recordDelegateInjectionSkip(directory, 'delegate_caller_not_allowed', {
+				agent: callerAgent || undefined,
+				sessionId,
+				detail: { caller_role: callerRole },
+			});
 			return debugSkip('caller_not_allowed', { caller_role: callerRole });
 		}
 
@@ -92,14 +133,42 @@ export async function injectDelegateDirectivesBefore(
 			input.args && typeof input.args === 'object'
 				? (input.args as Record<string, unknown>)
 				: null;
-		if (!argsRecord) return debugSkip('missing_args');
+		if (!argsRecord) {
+			recordDelegateInjectionSkip(directory, 'delegate_missing_args', {
+				agent: callerAgent,
+				sessionId,
+			});
+			return debugSkip('missing_args');
+		}
 		const promptRaw = argsRecord.prompt;
-		if (typeof promptRaw !== 'string') return debugSkip('missing_prompt');
+		if (typeof promptRaw !== 'string') {
+			recordDelegateInjectionSkip(directory, 'delegate_missing_prompt', {
+				agent: callerAgent,
+				sessionId,
+			});
+			return debugSkip('missing_prompt');
+		}
 
 		const parsed = parseDelegationArgs(input.args);
-		if (!parsed) return debugSkip('unparseable_delegation_args');
+		if (!parsed) {
+			recordDelegateInjectionSkip(
+				directory,
+				'delegate_unparseable_delegation_args',
+				{ agent: callerAgent, sessionId },
+			);
+			return debugSkip('unparseable_delegation_args');
+		}
 		const targetAgent = parsed.targetAgent;
 		if (!isDelegatedAgent(targetAgent)) {
+			recordDelegateInjectionSkip(
+				directory,
+				'delegate_target_not_delegated_agent',
+				{
+					agent: targetAgent,
+					sessionId,
+					detail: { target_agent: targetAgent },
+				},
+			);
 			return debugSkip('target_not_delegated_agent', {
 				target_agent: targetAgent,
 			});
@@ -110,11 +179,12 @@ export async function injectDelegateDirectivesBefore(
 			hasDelegateDirectiveBlock(promptRaw) ||
 			hasDirectiveComplianceBlock(promptRaw)
 		) {
+			recordDelegateInjectionSkip(directory, 'delegate_already_injected', {
+				agent: targetAgent,
+				sessionId,
+			});
 			return debugSkip('already_injected', { target_agent: targetAgent });
 		}
-
-		const sessionId =
-			typeof input.sessionID === 'string' ? input.sessionID : undefined;
 
 		// Resolve the plan phase label so the emitted delegate_inject event (and
 		// thus the reviewer verdict loop + phase-complete gate) windows by phase.
@@ -154,6 +224,11 @@ export async function injectDelegateDirectivesBefore(
 		}
 
 		if (prefixParts.length === 0) {
+			recordDelegateInjectionSkip(
+				directory,
+				'delegate_no_directives_to_inject',
+				{ agent: targetAgent, sessionId },
+			);
 			return debugSkip('no_directives_to_inject', {
 				target_agent: targetAgent,
 			});
@@ -168,11 +243,12 @@ export async function injectDelegateDirectivesBefore(
 		});
 		return entries.length;
 	} catch (err) {
-		warn(
-			`[delegate-directive-injection] non-fatal: ${
-				err instanceof Error ? err.message : String(err)
-			}`,
-		);
+		const message = err instanceof Error ? err.message : String(err);
+		recordDelegateInjectionSkip(directory, 'delegate_injection_error', {
+			sessionId,
+			detail: { message },
+		});
+		warn(`[delegate-directive-injection] non-fatal: ${message}`);
 		return 0;
 	}
 }

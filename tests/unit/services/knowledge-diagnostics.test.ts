@@ -138,6 +138,38 @@ describe('knowledge-diagnostics', () => {
 		expect(debug.retrieval_events_7d).toBe(1);
 	});
 
+	it('surfaces unacknowledged deliveries in shown_vs_applied', async () => {
+		// `unacknowledged` (shown to a delegate, no ack filed) must appear in the
+		// purpose-built accountability surface — it is the "where did the rest of
+		// the deliveries go" column — while staying out of every negative count.
+		await appendKnowledgeEvent(dir, {
+			type: 'retrieved',
+			trace_id: 't-unack',
+			session_id: 's',
+			agent: 'coder',
+			query: 'q',
+			retrieval_mode: 'delegate_inject',
+			result_ids: ['k-1'],
+			ranks: { 'k-1': 1 },
+			scores: { 'k-1': 1 },
+		});
+		await appendKnowledgeEvent(dir, {
+			type: 'unacknowledged',
+			trace_id: 't-unack',
+			knowledge_id: 'k-1',
+			session_id: 's',
+			agent: 'coder',
+			source: 'delegate',
+			reason: 'no_ack_marker',
+		});
+		const debug = await computeKnowledgeDebug(dir);
+		expect(debug.learning.shown_vs_applied.unacknowledged).toBe(1);
+		expect(debug.learning.shown_vs_applied.shown).toBe(1);
+		expect(debug.learning.shown_vs_applied.ignored).toBe(0);
+		expect(debug.learning.shown_vs_applied.violated).toBe(0);
+		expect(debug.learning.events_by_type.unacknowledged).toBe(1);
+	});
+
 	it('flags corrupt lines as a raw-vs-normalized mismatch', async () => {
 		await appendKnowledge(kp, makeEntry('a'));
 		writeFileSync(kp, `${'{ not json'}\n`, { flag: 'a' });

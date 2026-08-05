@@ -116,7 +116,20 @@ export interface ReceiptEvent {
 		 * counter (there is no `knowledge_id` to credit; this is a trace-level
 		 * tombstone, not application credit).
 		 */
-		| 'no_relevant';
+		| 'no_relevant'
+		/**
+		 * A shown non-critical directive reached the end of a delegate Task with no
+		 * ack marker and no receipt. Audit-only visibility signal; never penalizes
+		 * the entry's outcome/violation counters.
+		 *
+		 * Motivation: before this event, only CRITICAL silence produced a signal (a
+		 * `violated`/`unacknowledged` event). Non-critical silence was invisible, so
+		 * a corpus with 1 critical entry out of 103 reported ~4% receipt compliance
+		 * with no way to see where the other 96% went. This is the missing
+		 * observation, NOT a verdict: the delegate filed nothing, so there is no
+		 * terminal to credit or penalize.
+		 */
+		| 'unacknowledged';
 	schema_version?: number;
 	event_id: string;
 	trace_id: string;
@@ -269,6 +282,13 @@ export const RECEIPT_EVENT_TYPES: ReadonlySet<string> = new Set([
 	 * strictly per-entry verbs should subtract this.
 	 */
 	'no_relevant',
+	// NOTE: `'unacknowledged'` is intentionally ABSENT from this set. It is not a
+	// terminal the delegate filed — it is the collector's observation that the
+	// delegate filed NOTHING — and must never satisfy a terminal / idempotency /
+	// conflict check. This set currently has no `src/` consumer, so its only
+	// plausible future use is exactly such an allowlist; pre-enrolling
+	// `'unacknowledged'` would silently opt it into whatever adopts the set next.
+	// Add it only after auditing every consumer at that time.
 ]);
 
 // ============================================================================
@@ -345,7 +365,28 @@ export async function appendKnowledgeEvent(
 	directory: string,
 	event: KnowledgeEventInput,
 ): Promise<KnowledgeEvent> {
-	const populated = withDefaults(event);
+	const [populated] = await appendKnowledgeEventsBatch(directory, [event]);
+	return populated;
+}
+
+/**
+ * Append several events under ONE lock acquisition and ONE cap-trim pass.
+ * Multi-event emitters on awaited paths (e.g. the delegate ack-collector's
+ * per-directive `unacknowledged` loop, up to `delegate_max_inject_count`
+ * events per delegation) must use this instead of N sequential
+ * {@link appendKnowledgeEvent} calls — each of those takes the directory
+ * lock and re-reads the whole log for the FIFO trim, which is material on
+ * cold filesystems and under parallel delegations.
+ *
+ * Throws on I/O failure — hot paths should prefer
+ * {@link recordKnowledgeEventsBatch}, which swallows errors.
+ */
+export async function appendKnowledgeEventsBatch(
+	directory: string,
+	events: KnowledgeEventInput[],
+): Promise<KnowledgeEvent[]> {
+	if (events.length === 0) return [];
+	const populated = events.map(withDefaults);
 	const filePath = resolveKnowledgeEventsPath(directory);
 	const dirPath = path.dirname(filePath);
 	await mkdir(dirPath, { recursive: true });
@@ -354,7 +395,11 @@ export async function appendKnowledgeEvent(
 		release = await lockfile.lock(dirPath, {
 			retries: { retries: 200, minTimeout: 10, maxTimeout: 100 },
 		});
-		await appendFile(filePath, `${JSON.stringify(populated)}\n`, 'utf-8');
+		await appendFile(
+			filePath,
+			`${populated.map((e) => JSON.stringify(e)).join('\n')}\n`,
+			'utf-8',
+		);
 		// Best-effort FIFO trim once the log exceeds MAX_EVENT_LOG_ENTRIES.
 		// Done under the same lock as append so we avoid lock nesting and keep
 		// append+trim race-free for concurrent writers.
@@ -395,6 +440,27 @@ export async function recordKnowledgeEvent(
 	} catch (err) {
 		warn(
 			`[knowledge-events] recordKnowledgeEvent failed: ${
+				err instanceof Error ? err.message : String(err)
+			}`,
+		);
+		return null;
+	}
+}
+
+/**
+ * Fail-open variant of {@link appendKnowledgeEventsBatch} for hot paths.
+ * Never throws; logs a warning and returns null on failure (all-or-nothing:
+ * the batch is a single append, so there are no partial writes to report).
+ */
+export async function recordKnowledgeEventsBatch(
+	directory: string,
+	events: KnowledgeEventInput[],
+): Promise<KnowledgeEvent[] | null> {
+	try {
+		return await appendKnowledgeEventsBatch(directory, events);
+	} catch (err) {
+		warn(
+			`[knowledge-events] recordKnowledgeEventsBatch failed: ${
 				err instanceof Error ? err.message : String(err)
 			}`,
 		);
@@ -875,6 +941,17 @@ export function recomputeCounters(
 				// (issue #1849) Terminal tombstone for an EMPTY retrieval. Trace-level:
 				// there is no knowledge_id to credit, so NO per-entry counter mutates.
 				// Surfaced separately via `countEmptyTraceTerminals` for diagnostics.
+				break;
+			case 'unacknowledged':
+				// Audit-only visibility signal: a shown non-critical directive reached
+				// the end of a delegate Task with no ack marker and no receipt. The
+				// delegate filed NO verdict, so there is nothing to credit or penalize
+				// — explicitly NEUTRAL, exactly like `no_relevant` above. Deliberately
+				// does NOT touch ignored_count / violated_count / n_a_count: silence is
+				// not a decision, and counting it would corrupt the application-rate
+				// and violation-rate denominators the ranking + escalation paths read.
+				// Surfaced instead via the curator post-mortem per-entry tally and the
+				// `events_by_type` diagnostics bucket.
 				break;
 			case 'outcome': {
 				if (!e.knowledge_id) break;
