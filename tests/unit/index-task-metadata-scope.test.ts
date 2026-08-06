@@ -9,6 +9,7 @@ import {
 	getAuthorizedScopeBinding,
 } from '../../src/scope/scope-binding';
 import { resetSwarmState } from '../../src/state';
+import { resetTelemetryForTesting } from '../../src/telemetry';
 
 const PARENT_SESSION = 'parent-session';
 const CHILD_SESSION = 'child-session';
@@ -64,6 +65,15 @@ describe('production Task metadata scope activation', () => {
 	afterEach(() => {
 		resetSwarmState();
 		clearScopeBindings();
+		// `OpenCodeSwarm.server(...)` below runs `initTelemetry`, which opens a
+		// long-lived `createWriteStream` on `<directory>/.swarm/telemetry.jsonl`.
+		// Only `resetTelemetryForTesting()` ends that stream. Without it the handle
+		// outlives the test and `fs.rmSync` below fails on Windows with
+		// `EBUSY: resource busy or locked` — observed as a real CI failure on
+		// `unit (windows-latest, 1)`, which retried twice and failed both times.
+		// POSIX tolerates unlinking an open file, which is why this only ever
+		// surfaced on Windows.
+		resetTelemetryForTesting();
 		fs.rmSync(directory, { recursive: true, force: true });
 	});
 
