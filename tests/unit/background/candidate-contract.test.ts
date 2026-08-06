@@ -5,6 +5,8 @@ import {
 	CANDIDATE_DIAGNOSTIC_PREVIEW_CHARS,
 	candidateHeaderFamily,
 	type RowFormatFamily,
+	selectCandidateHeader,
+	splitPipeFields,
 } from '../../../src/background/candidate-contract';
 import {
 	type ArtifactInput,
@@ -190,6 +192,50 @@ describe('shared candidate and CLEAN semantics', () => {
 		expect(
 			candidateHeaderFamily(`${BASE_HEADER} | extra`.split('|')),
 		).toBeNull();
+	});
+
+	test('selects the first marker-bearing header over a pipe-delimited transcript preamble', () => {
+		expect(
+			selectCandidateHeader([
+				'Review progress | inspected changed files',
+				BASE_HEADER,
+			]),
+		).toEqual({
+			lineIndex: 1,
+			fields: BASE_HEADER.split('|').map((field) => field.trim()),
+			family: 'base_explorer',
+			markerBearing: true,
+		});
+	});
+
+	test('keeps the first malformed candidate marker authoritative', () => {
+		expect(
+			selectCandidateHeader([
+				'[CANDIDATE] | not | a | canonical | header',
+				BASE_HEADER,
+			]),
+		).toMatchObject({
+			lineIndex: 0,
+			family: null,
+			markerBearing: true,
+		});
+	});
+
+	test('retains the first tabular line only when no candidate marker exists', () => {
+		expect(selectCandidateHeader(['legacy | positional header'])).toEqual({
+			lineIndex: 0,
+			fields: ['legacy', 'positional header'],
+			family: null,
+			markerBearing: false,
+		});
+	});
+
+	test('splits escaped pipes without dropping boundary fields', () => {
+		expect(splitPipeFields('left\\|escaped | right |')).toEqual([
+			'left|escaped ',
+			' right ',
+			'',
+		]);
 	});
 
 	test('strips fenced table noise before shared exact-header discovery', () => {
