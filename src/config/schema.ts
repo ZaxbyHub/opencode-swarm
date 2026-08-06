@@ -1164,8 +1164,21 @@ export const ContextMapConfigSchema = z.object({
 
 export type ContextMapConfig = z.infer<typeof ContextMapConfigSchema>;
 
-// Repo dependency-graph configuration (issue #1448)
+// Repo dependency-graph configuration (issues #1448 and #1986)
 export const RepoGraphConfigSchema = z.object({
+	/** Enable graph startup, incremental maintenance, reads, and injection. */
+	enabled: z.boolean().default(true),
+	/**
+	 * Use the bounded content-freshness probe at session start. When disabled,
+	 * startup retains the legacy full-rebuild behavior.
+	 */
+	init_refresh: z.boolean().default(true),
+	/** Maximum complete drift set eligible for an incremental refresh. */
+	refresh_cap: z.number().int().min(0).max(500).default(50),
+	/** Wall-clock budget for each bounded source-tree walk. */
+	walk_budget_ms: z.number().int().min(1_000).max(60_000).default(5_000),
+	/** Maximum source files a bounded source-tree walk may inspect. */
+	max_files: z.number().int().min(100).max(100_000).default(10_000),
 	/**
 	 * Extra directory names to skip when the repo dependency graph is built,
 	 * in addition to the built-in defaults (node_modules, .git, dist, build,
@@ -3016,7 +3029,9 @@ export const PluginConfigSchema = z.object({
 	context_map: ContextMapConfigSchema.optional(),
 
 	// Repo dependency-graph configuration (issue #1448 — directory excludes)
-	repo_graph: RepoGraphConfigSchema.optional(),
+	// Materialize nested defaults so every consumer observes one coherent
+	// policy even when the user omits the entire repo_graph section.
+	repo_graph: RepoGraphConfigSchema.prefault({}),
 
 	// Evidence configuration
 	evidence: EvidenceConfigSchema.optional(),

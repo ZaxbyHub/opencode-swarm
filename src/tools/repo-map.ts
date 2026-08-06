@@ -1,6 +1,8 @@
 import * as path from 'node:path';
 import type { ToolContext } from '@opencode-ai/plugin';
 import { z } from 'zod';
+import { loadPluginConfigWithMeta } from '../config/loader';
+import { type RepoGraphConfig, RepoGraphConfigSchema } from '../config/schema';
 import {
 	containsControlChars,
 	containsPathTraversal,
@@ -9,6 +11,8 @@ import { createSwarmTool } from './create-tool';
 import {
 	buildOntologyPreflightPacket,
 	buildWorkspaceGraphAsync,
+	type FreshnessOptions,
+	type FreshnessProbe,
 	getBlastRadius,
 	getCallers,
 	getContextPack,
@@ -21,11 +25,14 @@ import {
 	getLocalizationContext,
 	getPackageBoundaries,
 	getSymbolConsumers,
-	isGraphFresh,
+	isGraphWideInputPath,
 	loadGraph,
 	normalizeGraphPath,
+	probeFreshness,
 	type RepoGraph,
 	saveGraph,
+	updateGraphForFiles,
+	writeFingerprint,
 } from './repo-graph';
 
 /**
@@ -43,9 +50,9 @@ import {
  *   { success: false, error: '...', action }.
  *
  * Auto-load: every action except `build` lazily loads the graph from
- * `.swarm/repo-graph.json`; if absent or stale, the caller is told to run
- * `action: "build"` first (we do not auto-rebuild — builds can take seconds
- * and should be explicit so the agent sees the cost).
+ * `.swarm/repo-graph.json`. Complete source drift at/below `refresh_cap` is
+ * refreshed incrementally before answering. Missing, graph-wide, over-cap, or
+ * inconclusive freshness is reported explicitly without an implicit full build.
  */
 
 const VALID_ACTIONS = [
@@ -68,6 +75,15 @@ type RepoMapAction = (typeof VALID_ACTIONS)[number];
 
 const MAX_FILE_PATH_LENGTH = 500;
 const MAX_SYMBOL_LENGTH = 256;
+const REPO_GRAPH_DISABLED_NOTICE =
+	'Repository graph is disabled by configuration (repo_graph.enabled=false).';
+
+export const _internals = {
+	loadPluginConfigWithMeta,
+	probeFreshness,
+	updateGraphForFiles,
+	writeFingerprint,
+};
 
 interface RepoMapArgs {
 	action: string;
@@ -110,6 +126,50 @@ function err(action: string, message: string): string {
 
 function ok(action: string, payload: Record<string, unknown>): string {
 	return JSON.stringify({ success: true, action, ...payload }, null, 2);
+}
+
+function resolveRepoGraphConfig(directory: string): RepoGraphConfig {
+	try {
+		const { config } = _internals.loadPluginConfigWithMeta(directory);
+		return RepoGraphConfigSchema.parse(config.repo_graph ?? {});
+	} catch {
+		return RepoGraphConfigSchema.parse({});
+	}
+}
+
+function freshnessOptions(config: RepoGraphConfig): FreshnessOptions {
+	return {
+		maxFiles: config.max_files,
+		walkBudgetMs: config.walk_budget_ms,
+		excludeDirs: config.exclude_dirs,
+	};
+}
+
+function uniqueDriftPaths(probe: FreshnessProbe): string[] {
+	return [...new Set([...probe.changed, ...probe.removed])];
+}
+
+interface RepoMapFreshnessMetadata {
+	stale: boolean;
+	probeState: FreshnessProbe['state'];
+	changedFiles: number;
+	refreshedFiles: number;
+	freshnessNote?: string;
+}
+
+function metadataForProbe(
+	probe: FreshnessProbe,
+	detectedFiles: number,
+	refreshedFiles: number,
+	freshnessNote?: string,
+): RepoMapFreshnessMetadata {
+	return {
+		stale: probe.state === 'drifted' || probe.state === 'no-fingerprint',
+		probeState: probe.state,
+		changedFiles: detectedFiles,
+		refreshedFiles,
+		...(freshnessNote ? { freshnessNote } : {}),
+	};
 }
 
 /**
@@ -237,12 +297,23 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 			);
 		}
 
+		const repoGraphConfig = resolveRepoGraphConfig(directory);
+		if (!repoGraphConfig.enabled) {
+			return err(action, REPO_GRAPH_DISABLED_NOTICE);
+		}
+		const probeOptions = freshnessOptions(repoGraphConfig);
+
 		// ----- build -----
 		if (action === 'build') {
 			try {
 				const start = Date.now();
-				const graph = await buildWorkspaceGraphAsync(directory);
+				const graph = await buildWorkspaceGraphAsync(directory, probeOptions);
 				await saveGraph(directory, graph);
+				const fingerprintWritten = await _internals.writeFingerprint(
+					directory,
+					graph,
+					probeOptions,
+				);
 				const elapsedMs = Date.now() - start;
 				const fileCount = Object.keys(graph.nodes).length;
 				const edgeCount = graph.edges.length;
@@ -256,6 +327,7 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 					buildTimestamp: graph.metadata.generatedAt,
 					elapsedMs,
 					truncated: graph.diagnostics?.walkTruncated === true,
+					fingerprintWritten,
 					path: '.swarm/repo-graph.json',
 				});
 			} catch (e) {
@@ -267,7 +339,8 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 		if (action === 'graph_health') {
 			try {
 				const graph = await loadGraph(directory);
-				return ok(action, { ...getGraphHealth(graph, directory) });
+				const probe = await _internals.probeFreshness(directory, probeOptions);
+				return ok(action, { ...getGraphHealth(graph, directory, probe) });
 			} catch (e) {
 				const message = e instanceof Error ? e.message : String(e);
 				return err(action, `failed to load repo graph: ${message}`);
@@ -277,8 +350,57 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 		// All other actions need a loaded graph.
 		const loaded = await loadOrError(directory, action);
 		if (!loaded.ok) return loaded.response;
-		const graph = loaded.graph;
-		const stale = !isGraphFresh(graph);
+		let graph = loaded.graph;
+		let probe = await _internals.probeFreshness(directory, probeOptions);
+		const driftPaths = uniqueDriftPaths(probe);
+		const detectedFiles = driftPaths.length;
+		let refreshedFiles = 0;
+		let freshnessNote: string | undefined;
+
+		if (probe.state === 'drifted' && detectedFiles > 0) {
+			const graphWideDrift = driftPaths.some(isGraphWideInputPath);
+			if (graphWideDrift) {
+				freshnessNote =
+					'Graph-wide package manifest drift requires a full repo_map build; the stale graph was served without mutation.';
+			} else if (
+				repoGraphConfig.refresh_cap > 0 &&
+				detectedFiles <= repoGraphConfig.refresh_cap
+			) {
+				try {
+					graph = await _internals.updateGraphForFiles(directory, driftPaths, {
+						buildOptions: probeOptions,
+					});
+					refreshedFiles = detectedFiles;
+					probe = await _internals.probeFreshness(directory, probeOptions);
+					if (probe.state !== 'clean') {
+						freshnessNote =
+							'Incremental refresh completed, but the follow-up probe did not certify a clean graph.';
+					}
+				} catch (error) {
+					freshnessNote = `Incremental refresh failed; serving the stale graph: ${
+						error instanceof Error ? error.message : String(error)
+					}`;
+				}
+			} else {
+				freshnessNote =
+					repoGraphConfig.refresh_cap === 0
+						? 'Automatic read-time refresh is disabled by repo_graph.refresh_cap=0; serving the stale graph.'
+						: `Detected ${detectedFiles} changed files, above repo_graph.refresh_cap=${repoGraphConfig.refresh_cap}; serving the stale graph.`;
+			}
+		} else if (probe.state === 'no-fingerprint') {
+			freshnessNote =
+				'No matching repository-graph fingerprint is available; run repo_map action="build" to certify the graph.';
+		} else if (probe.state === 'inconclusive') {
+			freshnessNote =
+				'Workspace freshness is unknown because the bounded probe did not complete; the existing graph was served without refresh or deletion.';
+		}
+
+		const freshness = metadataForProbe(
+			probe,
+			detectedFiles,
+			refreshedFiles,
+			freshnessNote,
+		);
 
 		// ----- key_files -----
 		if (action === 'key_files') {
@@ -295,7 +417,7 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 			return ok(action, {
 				count: reverseCounts.length,
 				files: reverseCounts,
-				stale,
+				...freshness,
 			});
 		}
 
@@ -305,13 +427,13 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 			return ok(action, {
 				count: boundaries.length,
 				boundaries,
-				stale,
+				...freshness,
 			});
 		}
 
 		if (action === 'dead_exports') {
 			const result = getDeadExports(graph, { maxCandidates: a.top_n ?? 100 });
-			return ok(action, { ...result, stale });
+			return ok(action, { ...result, ...freshness });
 		}
 
 		if (action === 'preflight_packet') {
@@ -327,7 +449,7 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 					maxFiles: a.top_n ?? 12,
 					maxBoundaries: 10,
 				}),
-				stale,
+				...freshness,
 			});
 		}
 
@@ -344,7 +466,7 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 			}
 			const targets = inputs.map((f) => toRelativeGraphPath(f, directory));
 			const result = getBlastRadius(graph, targets, a.max_depth ?? 3);
-			return ok(action, { ...result, stale });
+			return ok(action, { ...result, ...freshness });
 		}
 
 		if (!a.file) {
@@ -364,7 +486,7 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 					symbol: a.symbol,
 					count: consumers.length,
 					consumers,
-					stale,
+					...freshness,
 				});
 			}
 			const importers = getImporters(graph, target);
@@ -372,7 +494,7 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 				target,
 				count: importers.length,
 				importers,
-				stale,
+				...freshness,
 			});
 		}
 
@@ -388,7 +510,7 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 				symbol: a.symbol,
 				count: callers.length,
 				callers,
-				stale,
+				...freshness,
 			});
 		}
 
@@ -434,7 +556,7 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 				spans: cappedSpans,
 				truncated,
 				estimatedTokens: raw.estimatedTokens,
-				stale,
+				...freshness,
 				schemaSupported: raw.schemaSupported,
 				...(raw.note ? { note: raw.note } : {}),
 			});
@@ -446,7 +568,7 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 				target,
 				count: deps.length,
 				dependencies: deps,
-				stale,
+				...freshness,
 			});
 		}
 
@@ -454,7 +576,7 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 			const ctx = getLocalizationContext(graph, target, {
 				maxDepth: a.max_depth,
 			});
-			return ok(action, { ...ctx, stale });
+			return ok(action, { ...ctx, ...freshness });
 		}
 
 		if (action === 'ontology') {
@@ -465,7 +587,7 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 					`No ontology facts found for ${target}. Rebuild the graph if the file was recently added.`,
 				);
 			}
-			return ok(action, { target, ontology, stale });
+			return ok(action, { target, ontology, ...freshness });
 		}
 
 		// Should be unreachable due to enum validation above.

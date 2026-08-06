@@ -661,10 +661,16 @@ Controls phase completion gating and validation.
 
 ## Repo Graph Configuration (`repo_graph`)
 
-Controls the repository dependency graph that the plugin builds on session start.
+Controls the persistent repository dependency graph, its bounded freshness
+probe, and automatic incremental refresh behavior.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
+| `enabled` | boolean | `true` | Master switch. When `false`, no startup or write-trigger maintenance runs, `repo_map` returns a disabled notice, and graph context is not injected. The tool remains registered. |
+| `init_refresh` | boolean | `true` | Probe the persisted fingerprint on session start and refresh only detected drift. Set to `false` to retain the legacy full rebuild on every session start. |
+| `refresh_cap` | integer (0-500) | `50` | Maximum complete drift set that a `repo_map` read may refresh incrementally. `0` disables read-time auto-refresh. Startup also uses this value in its incremental-versus-full-build cutover. |
+| `walk_budget_ms` | integer (1000-60000) | `5000` | Wall-clock budget for graph and freshness walks. An incomplete freshness walk is `inconclusive` and never authorizes refresh or deletion. |
+| `max_files` | integer (100-100000) | `10000` | Source-file cap for graph and freshness walks. Hitting the cap is conservative and produces an incomplete result. |
 | `exclude_dirs` | string[] | `[]` | Extra directory **names** to skip when scanning the workspace, in addition to the built-in defaults. |
 
 The graph scanner already skips common generated directories by default:
@@ -678,11 +684,37 @@ in the workspace. Entries are directory names, **not** glob or path patterns.
 The exclude also applies to write-triggered incremental updates, so files under
 an excluded directory are never (re-)added to the graph.
 
+Changing the exclusion policy invalidates the prior fingerprint and causes a
+configured startup rebuild. Changes to `package.json`, `Cargo.toml`,
+`pyproject.toml`, or `go.mod` also require a full rebuild because those
+manifests affect inferred package boundaries rather than a single source node.
+
+The freshness sidecar at `.swarm/repo-graph.fingerprint.json` records file size
+and modification time for source files and package manifests. This is a bounded
+`readdir` plus `stat` walk; it does not read or hash file contents. A change that
+preserves both size and filesystem mtime is outside the probe's detection model.
+Probe results are cached per normalized workspace for up to 30 seconds with
+bounded LRU eviction.
+
+`clean` means the current walk matches the persisted fingerprint. `drifted`
+means a complete walk found additions, metadata changes, or removals.
+`no-fingerprint` triggers a startup rebuild. `inconclusive` means a budget, cap,
+or filesystem error prevented complete observation; existing query answers are
+served with freshness marked unknown, and no refresh or deletion is attempted.
+Coder/reviewer graph context follows the same rule: inconclusive results remain
+available as freshness-unknown, while uncertified graphs and complete drift
+above `refresh_cap` are suppressed.
+
 **Example** — exclude a generated-code directory and a docs build dir:
 
 ```json
 {
   "repo_graph": {
+    "enabled": true,
+    "init_refresh": true,
+    "refresh_cap": 30,
+    "walk_budget_ms": 8000,
+    "max_files": 25000,
     "exclude_dirs": ["generated", "site"]
   }
 }

@@ -32,6 +32,7 @@ import { safeRealpathSync } from './safe-realpath';
 import type {
 	BuildWorkspaceGraphOptions,
 	GraphEdge,
+	GraphExtractorInputWitness,
 	GraphNode,
 	GraphUnresolvedImport,
 	RepoGraph,
@@ -161,6 +162,8 @@ const DEFAULT_WALK_BUDGET_MS = 5000;
 const ASYNC_WALK_YIELD_INTERVAL = 200;
 const ASYNC_SCAN_YIELD_INTERVAL = 16;
 const MAX_DIAGNOSTIC_ENTRIES = 200;
+/** Correctness witnesses are not display diagnostics and must cover the full walk. */
+export const MAX_EXTRACTOR_INPUT_WITNESSES = 100_256;
 
 /**
  * Mapping of file extensions to tree-sitter grammar identifiers.
@@ -571,6 +574,8 @@ function createEmptyDiagnostics(): FilledDiagnostics {
 		unsupportedFiles: [],
 		binaryFiles: [],
 		unreadableFiles: [],
+		validationSkippedFiles: [],
+		extractorInputWitnesses: [],
 		lowConfidenceEdgeCount: 0,
 		walkTruncated: false,
 		incrementalFallbacks: 0,
@@ -585,6 +590,8 @@ function diagnosticsHaveEntries(diagnostics: RepoGraphDiagnostics): boolean {
 		(diagnostics.unsupportedFiles?.length ?? 0) > 0 ||
 		(diagnostics.binaryFiles?.length ?? 0) > 0 ||
 		(diagnostics.unreadableFiles?.length ?? 0) > 0 ||
+		(diagnostics.validationSkippedFiles?.length ?? 0) > 0 ||
+		(diagnostics.extractorInputWitnesses?.length ?? 0) > 0 ||
 		(diagnostics.lowConfidenceEdgeCount ?? 0) > 0 ||
 		diagnostics.walkTruncated === true ||
 		diagnostics.walkTruncationReason !== undefined ||
@@ -596,6 +603,13 @@ function pushCapped<T>(target: T[], value: T): void {
 	if (target.length < MAX_DIAGNOSTIC_ENTRIES) {
 		target.push(value);
 	}
+}
+
+function pushInputWitness(
+	target: GraphExtractorInputWitness[],
+	value: GraphExtractorInputWitness,
+): void {
+	if (target.length < MAX_EXTRACTOR_INPUT_WITNESSES) target.push(value);
 }
 
 function mergeDiagnostics(
@@ -620,6 +634,12 @@ function mergeDiagnostics(
 	}
 	for (const entry of source.unreadableFiles ?? []) {
 		pushCapped(target.unreadableFiles, entry);
+	}
+	for (const entry of source.validationSkippedFiles ?? []) {
+		pushCapped(target.validationSkippedFiles, entry);
+	}
+	for (const entry of source.extractorInputWitnesses ?? []) {
+		pushInputWitness(target.extractorInputWitnesses, entry);
 	}
 	target.lowConfidenceEdgeCount += source.lowConfidenceEdgeCount ?? 0;
 	// incrementalFallbacks accumulates across per-file scans (rare, but a
@@ -1340,6 +1360,8 @@ interface WalkContext {
 	 * never consults it (no seg0/seg1 at depth 1).
 	 */
 	manifestDirs: Set<string>;
+	/** Build-time witnesses for graph-wide manifests found by the sync walk. */
+	manifestWitnesses: GraphExtractorInputWitness[];
 }
 
 /** Manifest basenames that mark a directory as a package root (defect A8). */
@@ -1349,6 +1371,15 @@ const MANIFEST_BASENAMES = new Set([
 	'pyproject.toml',
 	'go.mod',
 ]);
+
+/**
+ * Return whether a path is a graph-wide extractor input. Changes to these
+ * manifests can alter package-boundary ontology for many nodes, so consumers
+ * must rebuild rather than treating them as an ordinary one-file refresh.
+ */
+export function isGraphWideInputPath(filePath: string): boolean {
+	return MANIFEST_BASENAMES.has(path.basename(filePath));
+}
 
 /**
  * Record `dir`'s workspace-relative path into `manifestDirs` when one of its
@@ -1419,6 +1450,7 @@ function findSourceFiles(
 		followSymlinks: options?.followSymlinks ?? false,
 		skipDirs: resolveSkipDirectories(options?.excludeDirs),
 		manifestDirs: new Set<string>(),
+		manifestWitnesses: [],
 	};
 	const files: string[] = [];
 	walkSyncInto(dir, ctx, files);
@@ -1482,6 +1514,19 @@ function walkSyncInto(dir: string, ctx: WalkContext, files: string[]): void {
 			if (absoluteRoot !== undefined) {
 				recordManifestDir(ctx.manifestDirs, absoluteRoot, dir, entry.name);
 			}
+			if (absoluteRoot !== undefined && isGraphWideInputPath(fullPath)) {
+				try {
+					const manifestStats = fsSync.statSync(fullPath);
+					pushInputWitness(ctx.manifestWitnesses, {
+						file: toModuleName(fullPath, absoluteRoot),
+						kind: 'manifest',
+						sizeBytes: manifestStats.size,
+						mtimeMs: manifestStats.mtimeMs,
+					});
+				} catch {
+					// Build stays fail-open; persistence will refuse certification.
+				}
+			}
 			const ext = path.extname(fullPath).toLowerCase();
 			if (SUPPORTED_EXTENSIONS.has(ext)) {
 				files.push(fullPath);
@@ -1498,16 +1543,56 @@ function walkSyncInto(dir: string, ctx: WalkContext, files: string[]): void {
  * the variant called from the plugin init path; the sync variant remains
  * available for non-init callers (tools, tests) for compatibility.
  */
-async function findSourceFilesAsync(
+export interface RepoGraphInputMetadata {
+	absolutePath: string;
+	kind: 'source' | 'manifest';
+	sizeBytes: number;
+	mtimeMs: number;
+}
+
+export interface RepoGraphInputWalkResult {
+	sourceFiles: string[];
+	manifestFiles: string[];
+	metadata: RepoGraphInputMetadata[];
+	manifestDirs: Set<string>;
+	truncated: boolean;
+	truncationReason?: 'budget' | 'cap';
+	incomplete: boolean;
+	unreadableDirectories: string[];
+	unreadableFiles: string[];
+	probedFiles: number;
+	elapsedMs: number;
+}
+
+export interface RepoGraphInputWalkOptions {
+	walkBudgetMs?: number;
+	maxFiles?: number;
+	followSymlinks?: boolean;
+	excludeDirs?: readonly string[];
+	/** Capture size/mtime for every source and manifest during this same walk. */
+	captureMetadata?: boolean;
+	/** Capture only graph-wide manifest metadata (used by the graph builder). */
+	captureManifestMetadata?: boolean;
+}
+
+/**
+ * Enumerate every input used by repository-graph extraction with the same
+ * bounded, deterministic, cycle-safe traversal as the async graph builder.
+ * Directory and metadata I/O failures are surfaced through `incomplete` so a
+ * caller can refuse removals/certification instead of guessing.
+ */
+export async function walkRepoGraphInputs(
 	dir: string,
-	stats: ScanStats,
-	options?: {
-		walkBudgetMs?: number;
-		maxFiles?: number;
-		followSymlinks?: boolean;
-		excludeDirs?: readonly string[];
-	},
-): Promise<{ files: string[]; ctx: WalkContext }> {
+	options?: RepoGraphInputWalkOptions,
+): Promise<RepoGraphInputWalkResult> {
+	const absoluteRoot = path.resolve(dir);
+	const stats: ScanStats = {
+		filesScanned: 0,
+		skippedDirs: 0,
+		skippedFiles: 0,
+		truncated: false,
+		_absoluteRoot: absoluteRoot,
+	};
 	const ctx: WalkContext = {
 		stats,
 		seenRealPaths: new Set<string>(),
@@ -1517,9 +1602,14 @@ async function findSourceFilesAsync(
 		followSymlinks: options?.followSymlinks ?? false,
 		skipDirs: resolveSkipDirectories(options?.excludeDirs),
 		manifestDirs: new Set<string>(),
+		manifestWitnesses: [],
 	};
 	const files: string[] = [];
-	const queue: string[] = [dir];
+	const manifestFiles: string[] = [];
+	const metadata: RepoGraphInputMetadata[] = [];
+	const unreadableDirectories: string[] = [];
+	const unreadableFiles: string[] = [];
+	const queue: string[] = [absoluteRoot];
 	let processed = 0;
 	while (queue.length > 0) {
 		if (isWalkBudgetExceeded(ctx) || isFileCapReached(ctx, files.length)) {
@@ -1533,12 +1623,15 @@ async function findSourceFilesAsync(
 				continue;
 			}
 			ctx.seenRealPaths.add(key);
+		} else {
+			unreadableDirectories.push(current);
 		}
 
 		let entries: fsSync.Dirent[];
 		try {
 			entries = await fsPromises.readdir(current, { withFileTypes: true });
 		} catch {
+			unreadableDirectories.push(current);
 			continue;
 		}
 		entries.sort((a, b) =>
@@ -1571,8 +1664,29 @@ async function findSourceFilesAsync(
 					);
 				}
 				const ext = path.extname(fullPath).toLowerCase();
-				if (SUPPORTED_EXTENSIONS.has(ext)) {
+				const isSource = SUPPORTED_EXTENSIONS.has(ext);
+				const isManifest = isGraphWideInputPath(fullPath);
+				if (isSource) {
 					files.push(fullPath);
+				}
+				if (isManifest) {
+					manifestFiles.push(fullPath);
+				}
+				if (
+					(options?.captureMetadata && (isSource || isManifest)) ||
+					(options?.captureManifestMetadata && isManifest)
+				) {
+					try {
+						const fileStats = await fsPromises.stat(fullPath);
+						metadata.push({
+							absolutePath: fullPath,
+							kind: isManifest ? 'manifest' : 'source',
+							sizeBytes: fileStats.size,
+							mtimeMs: fileStats.mtimeMs,
+						});
+					} catch {
+						unreadableFiles.push(fullPath);
+					}
 				}
 			}
 			processed++;
@@ -1584,7 +1698,22 @@ async function findSourceFilesAsync(
 	if (ctx.abortReason === 'cap' || ctx.abortReason === 'budget') {
 		ctx.stats.truncated = true;
 	}
-	return { files, ctx };
+	return {
+		sourceFiles: files,
+		manifestFiles,
+		metadata,
+		manifestDirs: ctx.manifestDirs,
+		truncated: stats.truncated,
+		truncationReason: ctx.abortReason,
+		incomplete:
+			stats.truncated ||
+			unreadableDirectories.length > 0 ||
+			unreadableFiles.length > 0,
+		unreadableDirectories,
+		unreadableFiles,
+		probedFiles: metadata.length,
+		elapsedMs: Math.max(0, _internals.now() - ctx.startedAt),
+	};
 }
 
 /**
@@ -1651,6 +1780,8 @@ export interface AsyncScanResult {
 	symbolEdges: SymbolEdge[];
 	/** Optional file-level diagnostics collected during async scanning. */
 	diagnostics?: RepoGraphDiagnostics;
+	/** Build-time witness for a deterministic non-node skip. */
+	inputWitness?: GraphExtractorInputWitness;
 }
 
 /**
@@ -1736,6 +1867,8 @@ export function scanFile(
 			imports: parsedImports.map((p) => p.specifier),
 			language: getLanguage(filePath),
 			mtime: fileStats.mtime.toISOString(),
+			sizeBytes: fileStats.size,
+			mtimeMs: fileStats.mtimeMs,
 			ontology: _internals.extractFileOntology({
 				moduleName,
 				filePath,
@@ -1809,11 +1942,18 @@ export async function scanFileAsync(
 	try {
 		fileStats = await fsPromises.stat(filePath);
 		if (fileStats.size > maxFileSize) {
+			const moduleName = toModuleName(filePath, absoluteRoot);
 			return {
 				node: null,
 				edges: [],
 				symbolEdges: [],
-				diagnostics: { oversizedFiles: [toModuleName(filePath, absoluteRoot)] },
+				diagnostics: { oversizedFiles: [moduleName] },
+				inputWitness: {
+					file: moduleName,
+					kind: 'stable-skip',
+					sizeBytes: fileStats.size,
+					mtimeMs: fileStats.mtimeMs,
+				},
 			};
 		}
 		content = await fsPromises.readFile(filePath, 'utf-8');
@@ -1828,11 +1968,18 @@ export async function scanFileAsync(
 
 	// Skip binary files
 	if (isBinaryContent(content)) {
+		const moduleName = toModuleName(filePath, absoluteRoot);
 		return {
 			node: null,
 			edges: [],
 			symbolEdges: [],
-			diagnostics: { binaryFiles: [toModuleName(filePath, absoluteRoot)] },
+			diagnostics: { binaryFiles: [moduleName] },
+			inputWitness: {
+				file: moduleName,
+				kind: 'stable-skip',
+				sizeBytes: fileStats.size,
+				mtimeMs: fileStats.mtimeMs,
+			},
 		};
 	}
 
@@ -1965,6 +2112,8 @@ export async function scanFileAsync(
 		imports,
 		language,
 		mtime: fileStats.mtime.toISOString(),
+		sizeBytes: fileStats.size,
+		mtimeMs: fileStats.mtimeMs,
 		ontology: _internals.extractFileOntology({
 			moduleName,
 			filePath,
@@ -2216,6 +2365,10 @@ export function buildWorkspaceGraph(
 	// go straight in via appendNodeFast — metadata is computed once below. This
 	// keeps construction O(N) on large repos (issue #1144).
 	const seenEdges = new Set<string>();
+	const syncDiagnostics: FilledDiagnostics = createEmptyDiagnostics();
+	for (const witness of walkCtx.manifestWitnesses) {
+		pushInputWitness(syncDiagnostics.extractorInputWitnesses, witness);
+	}
 	for (const filePath of sourceFiles) {
 		let content: string;
 		let fileStats: fsSync.Stats;
@@ -2224,17 +2377,41 @@ export function buildWorkspaceGraph(
 			fileStats = fsSync.statSync(filePath);
 			if (fileStats.size > maxFileSize) {
 				stats.skippedFiles++;
+				pushCapped(
+					syncDiagnostics.oversizedFiles,
+					toModuleName(filePath, absoluteRoot),
+				);
+				pushInputWitness(syncDiagnostics.extractorInputWitnesses, {
+					file: toModuleName(filePath, absoluteRoot),
+					kind: 'stable-skip',
+					sizeBytes: fileStats.size,
+					mtimeMs: fileStats.mtimeMs,
+				});
 				continue;
 			}
 			content = fsSync.readFileSync(filePath, 'utf-8');
 		} catch {
 			stats.skippedFiles++;
+			pushCapped(
+				syncDiagnostics.unreadableFiles,
+				toModuleName(filePath, absoluteRoot),
+			);
 			continue;
 		}
 
 		// Skip binary files
 		if (isBinaryContent(content)) {
 			stats.skippedFiles++;
+			pushCapped(
+				syncDiagnostics.binaryFiles,
+				toModuleName(filePath, absoluteRoot),
+			);
+			pushInputWitness(syncDiagnostics.extractorInputWitnesses, {
+				file: toModuleName(filePath, absoluteRoot),
+				kind: 'stable-skip',
+				sizeBytes: fileStats.size,
+				mtimeMs: fileStats.mtimeMs,
+			});
 			continue;
 		}
 
@@ -2293,6 +2470,8 @@ export function buildWorkspaceGraph(
 			imports: parsedImports.map((p) => p.specifier),
 			language,
 			mtime: fileStats.mtime.toISOString(),
+			sizeBytes: fileStats.size,
+			mtimeMs: fileStats.mtimeMs,
 			ontology: _internals.extractFileOntology({
 				moduleName,
 				filePath,
@@ -2313,6 +2492,13 @@ export function buildWorkspaceGraph(
 		} catch {
 			stats.filesScanned--;
 			stats.skippedFiles++;
+			pushCapped(syncDiagnostics.validationSkippedFiles, moduleName);
+			pushInputWitness(syncDiagnostics.extractorInputWitnesses, {
+				file: moduleName,
+				kind: 'stable-skip',
+				sizeBytes: fileStats.size,
+				mtimeMs: fileStats.mtimeMs,
+			});
 			continue;
 		}
 
@@ -2361,7 +2547,6 @@ export function buildWorkspaceGraph(
 
 	// Surface walk-truncation diagnostics (defect A7) so getGraphHealth can
 	// report an INCOMPLETE graph instead of confidently wrong results.
-	const syncDiagnostics: FilledDiagnostics = createEmptyDiagnostics();
 	syncDiagnostics.walkTruncated = stats.truncated;
 	syncDiagnostics.walkTruncationReason = walkCtx.abortReason;
 	if (diagnosticsHaveEntries(syncDiagnostics)) {
@@ -2421,14 +2606,25 @@ export async function buildWorkspaceGraphAsync(
 	};
 	const diagnostics = createEmptyDiagnostics();
 
-	const walked = await findSourceFilesAsync(absoluteRoot, stats, {
+	const walked = await walkRepoGraphInputs(absoluteRoot, {
 		walkBudgetMs,
 		maxFiles,
 		followSymlinks,
 		excludeDirs: options?.excludeDirs,
+		captureManifestMetadata: true,
 	});
-	const sourceFiles = walked.files;
-	const walkCtx = walked.ctx;
+	const sourceFiles = walked.sourceFiles;
+	stats.truncated = walked.truncated;
+	for (const input of walked.metadata) {
+		if (input.kind !== 'manifest') continue;
+		const relative = toModuleName(input.absolutePath, absoluteRoot);
+		pushInputWitness(diagnostics.extractorInputWitnesses, {
+			file: relative,
+			kind: 'manifest',
+			sizeBytes: input.sizeBytes,
+			mtimeMs: input.mtimeMs,
+		});
+	}
 
 	sourceFiles.sort((a, b) => {
 		const normA = normalizeGraphPath(a);
@@ -2444,7 +2640,7 @@ export async function buildWorkspaceGraphAsync(
 	}
 
 	// Manifest-directory closure for the generic package-boundary rule (A8).
-	const hasManifest = (relDir: string) => walkCtx.manifestDirs.has(relDir);
+	const hasManifest = (relDir: string) => walked.manifestDirs.has(relDir);
 
 	// Edge dedup tracked in a loop-local Set (O(1)); nodes inserted via
 	// appendNodeFast — metadata is computed once below. Keeps construction O(N)
@@ -2463,6 +2659,12 @@ export async function buildWorkspaceGraphAsync(
 			hasManifest,
 		);
 		mergeDiagnostics(diagnostics, result.diagnostics);
+		if (result.inputWitness) {
+			pushInputWitness(
+				diagnostics.extractorInputWitnesses,
+				result.inputWitness,
+			);
+		}
 		if (result.node) {
 			// A node that fails validation (e.g. control characters in ontology
 			// evidence from a minified/generated file) must skip that one file,
@@ -2474,6 +2676,13 @@ export async function buildWorkspaceGraphAsync(
 				appended = true;
 			} catch {
 				stats.skippedFiles++;
+				pushCapped(diagnostics.validationSkippedFiles, result.node.moduleName);
+				pushInputWitness(diagnostics.extractorInputWitnesses, {
+					file: result.node.moduleName,
+					kind: 'stable-skip',
+					sizeBytes: result.node.sizeBytes as number,
+					mtimeMs: result.node.mtimeMs as number,
+				});
 			}
 			if (appended) {
 				for (const edge of result.edges) {
@@ -2524,7 +2733,7 @@ export async function buildWorkspaceGraphAsync(
 	// Surface walk-truncation diagnostics (defect A7) — walk-level fields are
 	// set once after the walk, NOT merged per-file (extraction diagnostics are).
 	diagnostics.walkTruncated = stats.truncated;
-	diagnostics.walkTruncationReason = walkCtx.abortReason;
+	diagnostics.walkTruncationReason = walked.truncationReason;
 	graph.diagnostics = diagnosticsHaveEntries(diagnostics)
 		? diagnostics
 		: createEmptyDiagnostics();

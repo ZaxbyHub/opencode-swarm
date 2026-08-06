@@ -40,8 +40,14 @@ export const REPO_GRAPH_FILENAME = 'repo-graph.json';
  * Diagnostics are additive and optional on all schema versions. Old graphs
  * without diagnostics remain readable; graph-health queries surface empty
  * diagnostics with an explicit rebuild note.
+ *
+ * 1.4.0 adds optional numeric `sizeBytes` and `mtimeMs` witnesses to each
+ * node. Builders capture them from the same stat used immediately before the
+ * source read. The content-freshness sidecar requires both witnesses before
+ * it will certify a graph; older graphs remain readable but are intentionally
+ * treated as needing a rebuild before certification.
  */
-export const GRAPH_SCHEMA_VERSION = '1.3.0';
+export const GRAPH_SCHEMA_VERSION = '1.4.0';
 
 /**
  * Compare dotted numeric version strings (e.g. '1.1.0' >= '1.1.0').
@@ -224,6 +230,10 @@ export interface GraphNode {
 	language: string;
 	/** Last modified timestamp */
 	mtime: string;
+	/** Exact byte size captured by the stat that preceded the source read. */
+	sizeBytes?: number;
+	/** Numeric mtime captured with `sizeBytes`; avoids ISO precision loss. */
+	mtimeMs?: number;
 	/** Optional code ontology facts for agent context/preflight packets */
 	ontology?: FileOntology;
 }
@@ -389,6 +399,15 @@ export interface GraphUnresolvedImport {
 	specifier: string;
 }
 
+/** Build-time metadata witness for a non-node extractor input. */
+export interface GraphExtractorInputWitness {
+	/** Normalized workspace-relative path. */
+	file: string;
+	kind: 'manifest' | 'stable-skip';
+	sizeBytes: number;
+	mtimeMs: number;
+}
+
 export interface RepoGraphDiagnostics {
 	extractionFailures?: GraphExtractionFailure[];
 	unresolvedImports?: GraphUnresolvedImport[];
@@ -396,6 +415,14 @@ export interface RepoGraphDiagnostics {
 	unsupportedFiles?: string[];
 	binaryFiles?: string[];
 	unreadableFiles?: string[];
+	/** Source files intentionally skipped because their extracted node failed validation. */
+	validationSkippedFiles?: string[];
+	/**
+	 * Build-time witnesses for manifests and deterministic non-node skips.
+	 * Persistence compares them against its live walk so an edit between graph
+	 * extraction and sidecar persistence cannot be blessed as clean.
+	 */
+	extractorInputWitnesses?: GraphExtractorInputWitness[];
 	lowConfidenceEdgeCount?: number;
 	/**
 	 * True when the last workspace walk was truncated by the file cap or wall-
@@ -416,6 +443,7 @@ export interface RepoGraphDiagnostics {
 export interface GraphHealthResult {
 	schemaVersion: string | null;
 	fresh: boolean;
+	probeState: FreshnessProbeState;
 	staleFiles: string[];
 	extractionFailures: GraphExtractionFailure[];
 	unresolvedImports: GraphUnresolvedImport[];
@@ -423,12 +451,20 @@ export interface GraphHealthResult {
 	unsupportedFiles: string[];
 	binaryFiles: string[];
 	unreadableFiles: string[];
+	validationSkippedFiles: string[];
 	lowConfidenceEdgeCount: number;
 	walkTruncated: boolean;
 	walkTruncationReason: 'budget' | 'cap' | null;
 	incrementalFallbacks: number;
 	notes: string[];
 }
+
+/** Authoritative states returned by the bounded repository freshness probe. */
+export type FreshnessProbeState =
+	| 'clean'
+	| 'drifted'
+	| 'no-fingerprint'
+	| 'inconclusive';
 
 export interface BlastRadiusResult {
 	target: string[];

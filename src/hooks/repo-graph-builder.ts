@@ -19,12 +19,21 @@
 import * as path from 'node:path';
 import { WRITE_TOOL_NAMES } from '../config/constants';
 import {
+	type BuildWorkspaceGraphOptions,
 	buildWorkspaceGraphAsync,
 	isScannableSourcePath,
+	loadGraph,
 	type RepoGraph,
 	saveGraph,
 	updateGraphForFiles,
 } from '../tools/repo-graph';
+import { isGraphWideInputPath } from '../tools/repo-graph/builder';
+import {
+	type FreshnessOptions,
+	type FreshnessProbe,
+	probeFreshness,
+	writeFingerprint,
+} from '../tools/repo-graph/freshness';
 import { safeRealpathSync } from '../tools/repo-graph/safe-realpath';
 import * as logger from '../utils/logger';
 import { yieldToEventLoop } from '../utils/timeout';
@@ -40,13 +49,7 @@ export interface RepoGraphBuilderHook {
 export interface RepoGraphDeps {
 	buildWorkspaceGraph: (
 		workspace: string,
-		options?: {
-			maxFileSizeBytes?: number;
-			maxFiles?: number;
-			walkBudgetMs?: number;
-			followSymlinks?: boolean;
-			excludeDirs?: readonly string[];
-		},
+		options?: BuildWorkspaceGraphOptions,
 	) => Promise<RepoGraph>;
 	saveGraph: (
 		workspace: string,
@@ -56,9 +59,32 @@ export interface RepoGraphDeps {
 	updateGraphForFiles: (
 		workspace: string,
 		files: string[],
-		options?: { forceRebuild?: boolean },
+		options?: {
+			forceRebuild?: boolean;
+			buildOptions?: BuildWorkspaceGraphOptions;
+		},
 	) => Promise<RepoGraph>;
+	loadGraph: (workspace: string) => Promise<RepoGraph | null>;
+	probeFreshness: (
+		workspace: string,
+		options?: FreshnessOptions,
+	) => Promise<FreshnessProbe>;
+	writeFingerprint: (
+		workspace: string,
+		graph: RepoGraph,
+		options?: FreshnessOptions,
+	) => Promise<boolean>;
+	isGraphWideInputPath: (filePath: string) => boolean;
 	safeRealpathSync?: typeof safeRealpathSync;
+}
+
+export interface RepoGraphBuilderOptions {
+	enabled?: boolean;
+	initRefresh?: boolean;
+	refreshCap?: number;
+	maxFiles?: number;
+	walkBudgetMs?: number;
+	excludeDirs?: readonly string[];
 }
 
 function extractFilePath(args: unknown): string | null {
@@ -145,19 +171,45 @@ export function rebaseOntoWorkspace(
 export function createRepoGraphBuilderHook(
 	workspaceRoot: string,
 	deps?: Partial<RepoGraphDeps>,
-	options?: { excludeDirs?: readonly string[] },
+	options?: RepoGraphBuilderOptions,
 ): RepoGraphBuilderHook {
 	const _buildWorkspaceGraph =
 		deps?.buildWorkspaceGraph ?? buildWorkspaceGraphAsync;
 	const _saveGraph = deps?.saveGraph ?? saveGraph;
 	const _updateGraphForFiles = deps?.updateGraphForFiles ?? updateGraphForFiles;
+	const _loadGraph = deps?.loadGraph ?? loadGraph;
+	const _probeFreshness = deps?.probeFreshness ?? probeFreshness;
+	const _writeFingerprint = deps?.writeFingerprint ?? writeFingerprint;
+	const _isGraphWideInputPath =
+		deps?.isGraphWideInputPath ?? isGraphWideInputPath;
 	const _safeRealpathSync = deps?.safeRealpathSync ?? safeRealpathSync;
+	const _enabled = options?.enabled ?? true;
+	const _initRefresh = options?.initRefresh ?? true;
+	const _refreshCap = options?.refreshCap ?? 50;
+	const _maxFiles = options?.maxFiles ?? 10_000;
+	const _walkBudgetMs = options?.walkBudgetMs ?? 5_000;
 
 	// User-configured directory excludes (issue #1448). Empty entries are
 	// dropped; the Set is used both to scope the initial scan and to keep
 	// incremental write-triggered updates consistent with the scan.
 	const _excludeDirs = (options?.excludeDirs ?? []).filter((d) => d.length > 0);
 	const _excludeDirSet = new Set<string>(_excludeDirs);
+	const _buildOptions: BuildWorkspaceGraphOptions = {
+		excludeDirs: _excludeDirs,
+		...(options?.maxFiles === undefined ? {} : { maxFiles: _maxFiles }),
+		...(options?.walkBudgetMs === undefined
+			? {}
+			: { walkBudgetMs: _walkBudgetMs }),
+	};
+	const _hasConfiguredBuildOptions =
+		options?.maxFiles !== undefined ||
+		options?.walkBudgetMs !== undefined ||
+		options?.excludeDirs !== undefined;
+	const _freshnessOptions: FreshnessOptions = {
+		maxFiles: _maxFiles,
+		walkBudgetMs: _walkBudgetMs,
+		excludeDirs: _excludeDirs,
+	};
 
 	let initStarted = false;
 	let initPromise: Promise<void> = Promise.resolve();
@@ -217,6 +269,36 @@ export function createRepoGraphBuilderHook(
 		return { count: state.failures, advise };
 	}
 
+	async function rebuildGraph(reason: string): Promise<void> {
+		const graph = await _buildWorkspaceGraph(workspaceRoot, _buildOptions);
+		await _saveGraph(workspaceRoot, graph);
+		const fingerprintWritten = await _writeFingerprint(
+			workspaceRoot,
+			graph,
+			_freshnessOptions,
+		);
+		logger.log(
+			`[repo-graph] Built graph (${reason}): ${graph.metadata.nodeCount} nodes, ${graph.metadata.edgeCount} edges`,
+		);
+		if (!fingerprintWritten) {
+			logger.warn(
+				'[repo-graph] Graph saved, but its freshness fingerprint could not be certified; the next session will rebuild it safely.',
+			);
+		}
+	}
+
+	function uniqueDriftFiles(probe: FreshnessProbe): string[] {
+		return [...new Set([...probe.changed, ...probe.removed])];
+	}
+
+	function updateFiles(files: string[]): Promise<RepoGraph> {
+		return _hasConfiguredBuildOptions
+			? _updateGraphForFiles(workspaceRoot, files, {
+					buildOptions: _buildOptions,
+				})
+			: _updateGraphForFiles(workspaceRoot, files);
+	}
+
 	async function doInit(): Promise<void> {
 		// Yield once before any scan work so the caller's promise chain has
 		// a chance to settle. Combined with the bounded async walker, this
@@ -224,12 +306,71 @@ export function createRepoGraphBuilderHook(
 		// even if the scan itself takes seconds.
 		await yieldToEventLoop();
 		try {
-			const graph = await _buildWorkspaceGraph(workspaceRoot, {
-				excludeDirs: _excludeDirs,
-			});
-			await _saveGraph(workspaceRoot, graph);
+			if (!_initRefresh) {
+				await rebuildGraph('configured legacy startup rebuild');
+				return;
+			}
+
+			let graph: RepoGraph | null;
+			try {
+				graph = await _loadGraph(workspaceRoot);
+			} catch (error) {
+				if (
+					error instanceof Error &&
+					'code' in error &&
+					(error as NodeJS.ErrnoException).code === 'CORRUPTION'
+				) {
+					await rebuildGraph('corrupt saved graph');
+					return;
+				}
+				throw error;
+			}
+
+			if (!graph) {
+				await rebuildGraph('no saved graph');
+				return;
+			}
+
+			const probe = await _probeFreshness(workspaceRoot, _freshnessOptions);
+			if (probe.state === 'clean' || probe.state === 'inconclusive') {
+				logger.log(
+					`[repo-graph] Startup freshness probe: ${probe.state}; no refresh`,
+				);
+				return;
+			}
+			if (probe.state === 'no-fingerprint') {
+				await rebuildGraph('no compatible freshness fingerprint');
+				return;
+			}
+
+			const driftFiles = uniqueDriftFiles(probe);
+			if (driftFiles.length === 0) {
+				logger.log(
+					'[repo-graph] Startup freshness probe reported no drift files',
+				);
+				return;
+			}
+
+			const fullRebuildThreshold = Math.max(
+				_refreshCap * 4,
+				graph.metadata.nodeCount * 0.4,
+			);
+			const requiresGraphWideRebuild = driftFiles.some(_isGraphWideInputPath);
+			if (
+				requiresGraphWideRebuild ||
+				driftFiles.length > fullRebuildThreshold
+			) {
+				await rebuildGraph(
+					requiresGraphWideRebuild
+						? 'graph-wide input drift'
+						: `drift set exceeded ${fullRebuildThreshold} files`,
+				);
+				return;
+			}
+
+			const refreshed = await updateFiles(driftFiles);
 			logger.log(
-				`[repo-graph] Built graph: ${graph.metadata.nodeCount} nodes, ${graph.metadata.edgeCount} edges`,
+				`[repo-graph] Incrementally refreshed ${driftFiles.length} startup drift files: ${refreshed.metadata.nodeCount} nodes`,
 			);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
@@ -249,6 +390,7 @@ export function createRepoGraphBuilderHook(
 
 	return {
 		init(): Promise<void> {
+			if (!_enabled) return Promise.resolve();
 			if (!initStarted) {
 				initStarted = true;
 				initPromise = doInit();
@@ -260,6 +402,7 @@ export function createRepoGraphBuilderHook(
 			input: { tool: string; sessionID: string; args?: unknown },
 			_output: { output?: unknown; args?: unknown },
 		): Promise<void> {
+			if (!_enabled) return;
 			// Wait for the initial scan before applying incremental updates.
 			// Without this gate, an early write tool could race the initial
 			// scan and stomp the saved graph with a partial update. The
@@ -335,7 +478,7 @@ export function createRepoGraphBuilderHook(
 					realWorkspace,
 					workspaceRoot,
 				);
-				await _updateGraphForFiles(workspaceRoot, [pathForUpdate]);
+				await updateFiles([pathForUpdate]);
 				recordSuccess(input.sessionID);
 				logger.log(
 					`[repo-graph] Incremental update for ${path.basename(filePath)}`,

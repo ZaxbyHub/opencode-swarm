@@ -11,18 +11,23 @@
  * the agent simply doesn't get the extra context. The graph is built
  * on-demand by the agent calling `repo_map` with action="build".
  *
- * Caching: the loaded graph is cached per-directory in module scope to
- * avoid re-reading the JSON on every system prompt construction. The
- * cache is bypassed if the file's mtime advances.
+ * Caching: the loaded graph is cached in a bounded per-directory LRU and
+ * invalidated when the graph artifact changes. Before returning it, the shared
+ * bounded workspace probe gates use of the graph. Uncertified graphs and
+ * complete drift above the configured refresh cap are suppressed;
+ * inconclusive probes remain usable as freshness-unknown, without mutation.
  */
 
 import * as fs from 'node:fs';
+import * as path from 'node:path';
 import {
+	type FreshnessOptions,
 	getBlastRadius,
 	getGraphNode,
 	getGraphPath,
 	getLocalizationContext,
 	loadGraphSync,
+	probeFreshness,
 	type RepoGraph,
 } from '../tools/repo-graph';
 
@@ -33,39 +38,81 @@ interface CachedGraph {
 }
 
 const cache = new Map<string, CachedGraph>();
+const MAX_CACHED_DIRECTORIES = 16;
+
+export interface RepoGraphInjectionOptions extends FreshnessOptions {
+	enabled?: boolean;
+	refreshCap?: number;
+}
+
+export const _internals = {
+	probeFreshness,
+	cacheSize: () => cache.size,
+};
+
+function touchCache(key: string, value: CachedGraph): void {
+	cache.delete(key);
+	cache.set(key, value);
+	while (cache.size > MAX_CACHED_DIRECTORIES) {
+		const oldest = cache.keys().next().value;
+		if (oldest === undefined) break;
+		cache.delete(oldest);
+	}
+}
 
 /**
- * Load the repo graph for `directory`, using a per-directory cache that
- * invalidates on file mtime change. Returns null if no graph exists.
+ * Load the repo graph for `directory`, using a bounded per-directory cache that
+ * invalidates on file mtime/size change and a shared content-freshness gate.
+ * Returns null if no graph exists or its workspace alignment is unsafe.
  *
  * Exported only for tests; production callers use the buildXxxBlock helpers below.
  */
-export function getCachedGraph(directory: string): RepoGraph | null {
+export async function getCachedGraph(
+	directory: string,
+	options?: RepoGraphInjectionOptions,
+): Promise<RepoGraph | null> {
+	const key = path.normalize(path.resolve(directory));
+	if (options?.enabled === false) {
+		cache.delete(key);
+		return null;
+	}
 	const file = getGraphPath(directory);
 	let stat: fs.Stats;
 	try {
 		stat = fs.statSync(file);
 	} catch {
 		// No graph file. Drop any stale cache entry.
-		cache.delete(directory);
+		cache.delete(key);
 		return null;
 	}
-	const cached = cache.get(directory);
-	if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
-		return cached.graph;
-	}
+	const cached = cache.get(key);
 	let graph: RepoGraph | null;
-	try {
-		graph = loadGraphSync(directory);
-	} catch {
-		cache.delete(directory);
+	if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+		graph = cached.graph;
+		touchCache(key, cached);
+	} else {
+		try {
+			graph = loadGraphSync(directory);
+		} catch {
+			cache.delete(key);
+			return null;
+		}
+		if (!graph) {
+			cache.delete(key);
+			return null;
+		}
+		touchCache(key, { graph, mtimeMs: stat.mtimeMs, size: stat.size });
+	}
+
+	const probe = await _internals.probeFreshness(directory, options);
+	const observedDrift = probe.changed.length + probe.removed.length;
+	const refreshCap = options?.refreshCap ?? 50;
+	if (
+		probe.state === 'no-fingerprint' ||
+		(probe.state === 'drifted' && observedDrift > refreshCap)
+	) {
 		return null;
 	}
-	if (!graph) {
-		cache.delete(directory);
-		return null;
-	}
-	cache.set(directory, { graph, mtimeMs: stat.mtimeMs, size: stat.size });
 	return graph;
 }
 
@@ -82,12 +129,13 @@ export function resetGraphInjectionCache(): void {
  *   - No graph exists.
  *   - The target isn't tracked in the graph (file too new, language unsupported).
  */
-export function buildCoderLocalizationBlock(
+export async function buildCoderLocalizationBlock(
 	directory: string,
 	targetFile: string,
-): string | null {
+	options?: RepoGraphInjectionOptions,
+): Promise<string | null> {
 	if (!targetFile) return null;
-	const graph = getCachedGraph(directory);
+	const graph = await getCachedGraph(directory, options);
 	if (!graph) return null;
 	const normalized = targetFile.replace(/\\/g, '/').replace(/^\.\/+/, '');
 	const targetNode = getGraphNode(graph, normalized);
@@ -112,12 +160,13 @@ export function buildCoderLocalizationBlock(
  * graph. The result is bounded to the top 8 dependents to stay within
  * the per-block context budget.
  */
-export function buildReviewerBlastRadiusBlock(
+export async function buildReviewerBlastRadiusBlock(
 	directory: string,
 	changedFiles: string[],
-): string | null {
+	options?: RepoGraphInjectionOptions,
+): Promise<string | null> {
 	if (changedFiles.length === 0) return null;
-	const graph = getCachedGraph(directory);
+	const graph = await getCachedGraph(directory, options);
 	if (!graph) return null;
 	const normalized = changedFiles
 		.map((f) => f.replace(/\\/g, '/').replace(/^\.\/+/, ''))
