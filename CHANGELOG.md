@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.136.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.135.5...v7.136.0) (2026-08-06)
+
+
+### Features
+
+* **repo-graph:** add content-based freshness probes ([03889f3](https://github.com/ZaxbyHub/opencode-swarm/commit/03889f37024f3739e8a8d12d50b40a419221d112))
+
 ## [7.135.5](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.135.4...v7.135.5) (2026-08-05)
 
 
