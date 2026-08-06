@@ -389,9 +389,14 @@ describe('PR review council mechanical dispatch', () => {
 				outputRef: stored.ref,
 			},
 		});
+		// The artifact carries exactly one well-formed [REVIEWED] row, for an id
+		// the lane does not own; every structurally assigned item must be named
+		// as lacking an authenticated verdict.
 		await expect(
 			assertPrReviewValidationSettled(directory, SESSION_ID, 'reviewer'),
-		).rejects.toThrow('one fully successful exact batch');
+		).rejects.toThrow(
+			`reviewer items lack an authenticated verdict from any successful lane: ${reviewItems.join(', ')}`,
+		);
 	});
 
 	test('accepts structured council mode and blocks reviewer dispatch until council settles', async () => {

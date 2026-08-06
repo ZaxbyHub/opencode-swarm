@@ -41,13 +41,13 @@ Read and follow `../../../.opencode/skills/swarm-pr-review/SKILL.md` as the cano
   `pr_head_sha`); persist findings and trigger ledgers in working notes,
   never under `.swarm/`.
 - Clean lanes still require a fully populated row, such as
-  `[CLEAN] | workflow_lane | coverage_scope | evidence`; a missing per-family
-  attestation is an unclosed coverage gap — retry it or surface it as BLOCKED
-  rather than emitting a degraded review or partial verdict.
+  `[CLEAN] | workflow_lane | coverage_scope | evidence`; a missing attestation
+  is a coverage gap — retry it or surface BLOCKED, never a degraded review.
 - When a lane result includes an `output_ref`, retrieve the full text before
   extracting candidates; degraded or truncated output is a coverage gap.
-- A newer reviewer batch invalidates all older critic evidence; re-run the
-  critic from the latest complete reviewer inventory before completion.
+- Reviewer and critic verdicts compose per item across passes: a reviewer retry
+  invalidates only the critic evidence for items whose reviewer row changed;
+  re-run the critic for items left without a critic verdict before completion.
 - Where the swarm plugin's structured controller is active (OpenCode hosts),
   the initial base wave is one structured exact-six batch with workflow-lane
   and exact-head provenance at depth tier L, or a smaller consolidated batch

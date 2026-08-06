@@ -184,6 +184,40 @@ describe('pr-workflow-gate base coverage', () => {
 		).rejects.toThrow('depth tier L requires one dedicated lane per dimension');
 	});
 
+	test('a retry base batch MAY consolidate dimensions whose lanes ran and failed at tier L', async () => {
+		// The mirror of the rejection above (issue #1968 P3.1): the ban is lifted
+		// only once every consolidated dimension has a recorded lane that reached a
+		// terminal non-successful state, none of them has a successful source, and
+		// the batch keeps the tier-L lane floor.
+		await activatePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW');
+		const singletonLanes = PR_REVIEW_BASE_DIMENSION_IDS.map((workflowLane) => ({
+			laneId: workflowLane,
+			workflowLane,
+		}));
+		await enforcePrReviewBaseDimensions(tempDir, SESSION_ID, singletonLanes, {
+			batchId: 'base-initial',
+			prHeadSha: HEAD_SHA,
+		});
+		const failedLanes = singletonLanes.slice(0, 2);
+		await persistBatch('base-initial', 'swarm-pr-review:base', failedLanes, {
+			status: 'error',
+		});
+
+		const state = await enforcePrReviewBaseDimensions(
+			tempDir,
+			SESSION_ID,
+			[
+				{
+					laneId: 'retry-consolidated',
+					workflowLane: failedLanes[0].workflowLane,
+					ownedWorkflowLanes: failedLanes.map((lane) => lane.workflowLane),
+				},
+			],
+			{ batchId: 'base-retry-consolidated', prHeadSha: HEAD_SHA },
+		);
+		expect(state.prReviewBaseDispatch?.batchId).toBe('base-retry-consolidated');
+	});
+
 	test('at depth tier S/M, a later base batch may consolidate ownership and settles all-or-none', async () => {
 		const originalResolveDiffStats = _test_exports.resolvePrReviewDiffStats;
 		_test_exports.resolvePrReviewDiffStats = () => ({
