@@ -100,6 +100,15 @@ These are invoked as `/swarm <subcommand>`, NOT as bare `/subcommand`. The list 
 - `/swarm link status` — show whether this worktree shares knowledge via a link
 - `/swarm unlink` — stop sharing swarm knowledge for this worktree
 - `/swarm write-retro` — write a retrospective evidence bundle for a completed phase
+- `/swarm skill-opt` — governed single-skill optimizer (plan|run|status|diff|approve|reject|rollback|history); disabled by default (`skill_opt.enabled`)
+- `/swarm skill-opt plan` — propose an optimization round (dry-run; no mutation)
+- `/swarm skill-opt run` — execute the optimization loop (requires `skill_opt.enabled=true` and `--confirm`)
+- `/swarm skill-opt status` — show the current candidate lifecycle state
+- `/swarm skill-opt diff` — show baseline-vs-candidate diff summary for a candidate
+- `/swarm skill-opt approve` — activate a pending candidate (human-only; requires `--expected-content-hash`)
+- `/swarm skill-opt reject` — record a rejection for a candidate (no active-skill mutation)
+- `/swarm skill-opt rollback` — restore the pre-activation snapshot (appends a rolled_back event)
+- `/swarm skill-opt history` — show the append-only lifecycle event log for a candidate
 
 **Architect MODE workflows**
 
