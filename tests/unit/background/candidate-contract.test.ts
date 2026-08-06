@@ -210,6 +210,101 @@ describe('shared candidate and CLEAN semantics', () => {
 		);
 	});
 
+	test.each([
+		[
+			'base candidate',
+			'base_explorer',
+			BASE_HEADER,
+			'correctness-state',
+			'C-1 | correctness-state | HIGH | correctness | src/a.ts:1 | claim | evidence | impact | HIGH',
+			false,
+		] as const,
+		[
+			'base CLEAN',
+			'base_explorer',
+			BASE_HEADER,
+			'correctness-state',
+			`[CLEAN] | correctness-state | ${CLEAN_SCOPE} | ${CLEAN_EVIDENCE}`,
+			true,
+		] as const,
+		[
+			'micro candidate',
+			'micro_lane',
+			MICRO_HEADER,
+			'concurrency-state',
+			'M-1 | concurrency-state | HIGH | concurrency | src/a.ts:1 | claim | invariant | evidence | HIGH',
+			false,
+		] as const,
+		[
+			'micro CLEAN',
+			'micro_lane',
+			MICRO_HEADER,
+			'concurrency-state',
+			`[CLEAN] | concurrency-state | ${CLEAN_SCOPE} | ${CLEAN_EVIDENCE}`,
+			true,
+		] as const,
+	])('ignores pipe-delimited transcript preamble before a canonical %s section', (_label, family, header, lane, row, expectClean) => {
+		// Regression: the first incidental pipe line used to become the header,
+		// so valid async-lane output failed at both parser trust boundaries.
+		const text = `Review progress | inspected changed files\nContinuing analysis before the final machine-readable section.\n${header}\n${row}`;
+		const parsed = parseCandidates(artifact(text), {
+			accept_partial: false,
+			accept_degraded: false,
+			degraded: false,
+			row_format_version: 1,
+			expected_family: family,
+			...(family === 'base_explorer'
+				? { expected_lane: lane }
+				: { expected_micro_lane: lane }),
+		});
+
+		expect(parsed.error_code).toBeUndefined();
+		expect(parsed.diagnostics.parse_errors).toBe(0);
+		expect(parsed.candidates).toHaveLength(expectClean ? 0 : 1);
+		expect(parsed.clean_attestation !== undefined).toBe(expectClean);
+		expect(prReviewDiscoveryArtifactCoversLane(text, lane)).toBe(true);
+	});
+
+	test('rejects a malformed first candidate marker even before a later canonical header', () => {
+		const row =
+			'C-1 | correctness-state | HIGH | correctness | src/a.ts:1 | claim | evidence | impact | HIGH';
+		const text = `[CANDIDATE] | not | a | canonical | header\n${BASE_HEADER}\n${row}`;
+		const parsed = parseCandidates(artifact(text), {
+			accept_partial: false,
+			accept_degraded: false,
+			degraded: false,
+			row_format_version: 1,
+			expected_family: 'base_explorer',
+			expected_lane: 'correctness-state',
+		});
+
+		expect(parsed.error_code).toBe('invalid-candidate-header');
+		expect(parsed.candidates).toEqual([]);
+		expect(prReviewDiscoveryArtifactCoversLane(text, 'correctness-state')).toBe(
+			false,
+		);
+	});
+
+	test('retains parser-only positional fallback when no candidate marker exists', () => {
+		const text =
+			'legacy | positional header\nC-1 | correctness-state | HIGH | correctness | src/a.ts:1 | claim | evidence | impact | HIGH';
+		const parsed = parseCandidates(artifact(text), {
+			accept_partial: false,
+			accept_degraded: false,
+			degraded: false,
+			row_format_version: 1,
+			expected_family: 'base_explorer',
+			expected_lane: 'correctness-state',
+		});
+
+		expect(parsed.candidates).toHaveLength(1);
+		expect(parsed.diagnostics.parse_errors).toBe(0);
+		// The controller gate still requires one canonical marker-bearing header.
+		expect(prReviewDiscoveryArtifactCoversLane(text, 'correctness-state')).toBe(
+			false,
+		);
+	});
+
 	test('does not let malformed or duplicate rows authenticate a CLEAN artifact', () => {
 		const lane = 'correctness-state';
 		const clean = `[CLEAN] | ${lane} | ${CLEAN_SCOPE} | ${CLEAN_EVIDENCE}`;

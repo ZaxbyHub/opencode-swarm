@@ -8,11 +8,11 @@ import {
 	type CandidateConfidence,
 	type CandidateSeverity,
 	candidateDiagnosticPreview,
-	candidateHeaderFamily,
 	isCandidateLookingShortRow,
 	type RowFormatFamily,
 	removeCandidateCodeFences,
 	type CleanAttestationRecord as SharedCleanAttestationRecord,
+	selectCandidateHeader,
 	splitPipeFields,
 } from './candidate-contract';
 import { appendToSidecar } from './candidate-sidecar-store';
@@ -515,32 +515,20 @@ function parseText(input: ArtifactInput, flags: ParseFlags): ParseResult {
 	const cleanedText = removeCandidateCodeFences(input.text);
 	const lines = cleanedText.split('\n');
 
-	// Locate the header row: first non-empty line that looks tabular.
-	let headerIndex = -1;
-	let headerFields: string[] = [];
-
-	for (let i = 0; i < lines.length; i++) {
-		const trimmed = lines[i].trim();
-		if (trimmed === '') continue;
-		const fields = splitPipeFields(trimmed);
-		if (fields.length >= 2 && fields.some((f) => f.trim() !== '')) {
-			headerIndex = i;
-			headerFields = fields.map((f) => f.trim());
-			break;
-		}
-	}
-
-	if (headerIndex === -1) {
+	// Locate the explicit candidate frame, with markerless positional fallback.
+	const header = selectCandidateHeader(lines);
+	if (header === null) {
 		// No header found — nothing to parse.
 		return emptyTextResult(input, flags);
 	}
+	const headerIndex = header.lineIndex;
 
 	// Marker-bearing candidate output has one exact shared header contract. A
 	// markerless unknown header keeps the historical positional fallback, but a
 	// malformed marker header (including a lone marker-prefixed data row) fails
 	// closed instead of being skipped as if it were trustworthy metadata.
-	const headerFamily = candidateHeaderFamily(headerFields) ?? undefined;
-	if (headerFields[0] === '[CANDIDATE]' && headerFamily === undefined) {
+	const headerFamily = header.family ?? undefined;
+	if (header.markerBearing && headerFamily === undefined) {
 		return refusalResult(
 			'invalid-candidate-header',
 			'Candidate output must begin with one exact canonical base or micro [CANDIDATE] header',

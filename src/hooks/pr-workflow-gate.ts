@@ -8,6 +8,7 @@ import {
 	candidateHeaderFamily,
 	type RowFormatFamily,
 	removeCandidateCodeFences,
+	selectCandidateHeader,
 	splitPipeFields,
 } from '../background/candidate-contract.js';
 import { parseCandidates } from '../background/candidate-parser.js';
@@ -5472,17 +5473,12 @@ function analyzePrReviewDiscoveryArtifact(
 		: 'micro_lane';
 	const issues: string[] = [];
 	const canonicalText = removeCandidateCodeFences(text);
-	const firstTabularFields = canonicalText
-		.split(/\r?\n/)
-		.map((line) => splitPipeFields(line).map((field) => field.trim()))
-		.find(
-			(fields) =>
-				fields.length >= 2 && fields.some((field) => field.length > 0),
-		);
-	const headerFamily = firstTabularFields
-		? candidateHeaderFamily(firstTabularFields)
-		: null;
-	if (headerFamily !== fallbackFamily) {
+	const header = selectCandidateHeader(canonicalText.split(/\r?\n/));
+	if (
+		header === null ||
+		!header.markerBearing ||
+		header.family !== fallbackFamily
+	) {
 		appendBoundedCandidateIssue(
 			issues,
 			`field header: expected one exact canonical ${fallbackFamily} [CANDIDATE] header before discovery rows`,

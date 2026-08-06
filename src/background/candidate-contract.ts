@@ -65,6 +65,39 @@ export function candidateHeaderFamily(
 	return null;
 }
 
+export interface CandidateHeaderSelection {
+	lineIndex: number;
+	fields: string[];
+	family: RowFormatFamily | null;
+	markerBearing: boolean;
+}
+
+/**
+ * Locate the candidate protocol frame in a stored assistant transcript.
+ * Unmarked tabular text remains a compatibility fallback only when the
+ * transcript contains no marker-bearing candidate line. The first marker is
+ * authoritative even when malformed so a later valid header cannot rescue it.
+ */
+export function selectCandidateHeader(
+	lines: readonly string[],
+): CandidateHeaderSelection | null {
+	let markerlessFallback: CandidateHeaderSelection | null = null;
+	for (const [lineIndex, line] of lines.entries()) {
+		const fields = splitPipeFields(line.trim()).map((field) => field.trim());
+		if (fields.length < 2 || !fields.some(Boolean)) continue;
+		const markerBearing = fields[0] === '[CANDIDATE]';
+		const selection: CandidateHeaderSelection = {
+			lineIndex,
+			fields,
+			family: candidateHeaderFamily(fields),
+			markerBearing,
+		};
+		if (markerBearing) return selection;
+		markerlessFallback ??= selection;
+	}
+	return markerlessFallback;
+}
+
 /** Remove fenced markdown blocks before any candidate-contract inspection. */
 export function removeCandidateCodeFences(text: string): string {
 	const lines: string[] = [];

@@ -932,6 +932,17 @@ artifact and extracts these records. The canonical record shape is:
 [CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence
 ```
 
+Profile A stores the full assistant transcript, so earlier unmarked progress
+turns may precede the machine-readable section. The parser locates that section
+at the first pipe-delimited line whose first field is exactly `[CANDIDATE]` and
+ignores unmarked preamble, including incidental pipe-delimited text. That first
+marker is authoritative and must be the exact canonical base or micro header;
+a malformed marker or marker-prefixed data row without a header fails closed.
+The Profile A controller coverage gate also refuses a missing marker. The pure
+parser retains markerless positional fallback only for legacy callers outside
+that controller trust boundary. Explorers should continue to make the canonical
+header the first line of their final machine-readable response.
+
 The confidence data value must be exactly LOW, MEDIUM, or HIGH.
 
 Under Profile A the parser normalizes this into a structured `candidates[]`
