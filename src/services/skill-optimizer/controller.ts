@@ -99,7 +99,7 @@ export interface RunRoundInput {
 	 * (F1 fix: previously the controller passed input.directory, causing
 	 * file-not-found on every real validation.)
 	 */
-	inputRoot: string;
+	inputRoot?: string;
 	/** Baseline + candidate EvaluationCandidateV1 builders are derived from content. */
 	baselineModel: string;
 	candidateModel: string;
@@ -387,6 +387,7 @@ async function runRoundLocked(
 		input,
 		candidate.content,
 		incumbent,
+		candidateId,
 	);
 
 	const toState =
@@ -449,16 +450,28 @@ async function runValidationWithTransientRetry(
 	input: RunRoundInput,
 	candidateContent: string,
 	baselineContent: string,
+	candidateId: string,
 ): Promise<ValidationOutcome> {
 	let transientRetries = 0;
 	const maxRetries = input.config.max_transient_retries;
 	while (true) {
 		try {
+			// Candidate payloads live under the candidate's artifact dir, resolved
+			// against projectRoot (NOT inputRoot, which is the fixture materialization
+			// root). payloadPath must be repo-relative per the substrate's
+			// RelativePathSchema + resolveContainedExistingPath contract.
+			const payloadDir = path.join(
+				'.swarm',
+				'evolution',
+				'skills',
+				input.skillSlug,
+				candidateId,
+			);
 			const baseline: EvaluationCandidateV1 = {
 				v: 1,
 				id: `${input.skillSlug}-baseline`,
 				kind: 'skill',
-				payloadPath: 'baseline.md',
+				payloadPath: path.join(payloadDir, 'baseline.md'),
 				model: input.baselineModel,
 				contentHash: computeContentHash(baselineContent),
 			};
@@ -466,7 +479,7 @@ async function runValidationWithTransientRetry(
 				v: 1,
 				id: `${input.skillSlug}-candidate-${randomUUID().slice(0, 8)}`,
 				kind: 'skill',
-				payloadPath: 'candidate.md',
+				payloadPath: path.join(payloadDir, 'candidate.md'),
 				model: input.candidateModel,
 				contentHash: computeContentHash(candidateContent),
 			};
@@ -486,7 +499,7 @@ async function runValidationWithTransientRetry(
 			);
 			const result = await _internals.evaluateCandidateV1({
 				projectRoot: input.directory,
-				inputRoot: input.inputRoot,
+				inputRoot: input.inputRoot ?? input.directory,
 				tasks: input.validationTasks as never,
 				baseline,
 				candidate,

@@ -1923,6 +1923,30 @@ export async function runCuratorPhase(
 					peRetirementMinAgeDays,
 				);
 				if (!input) continue;
+				// F5 fix: detect source-knowledge changes. Compare each source
+				// knowledge ID's updated_at against the skill file's mtime. If any
+				// source entry was modified after the skill was promoted, the source
+				// has drifted → set sourceChanged so the evaluator can return
+				// 'regenerate'.
+				if (input.sourceKnowledgeIds && input.sourceKnowledgeIds.length > 0) {
+					try {
+						const skillMtime = fs.statSync(active.path).mtimeMs;
+						const knowledgeEntries = await readKnowledge<SwarmKnowledgeEntry>(
+							resolveSwarmKnowledgePath(directory),
+						);
+						const sourceChanged = input.sourceKnowledgeIds.some((id) => {
+							const entry = knowledgeEntries.find((e) => e.id === id);
+							if (!entry) return false;
+							const updated = entry.updated_at
+								? Date.parse(entry.updated_at)
+								: 0;
+							return updated > skillMtime;
+						});
+						input.sourceChanged = sourceChanged;
+					} catch {
+						// best-effort; if we can't read knowledge, skip source-change detection
+					}
+				}
 				const decision = evaluatePromotedExternalStaleness(input);
 				if (decision.action === 'retire') {
 					await retireSkill(
@@ -1931,6 +1955,14 @@ export async function runCuratorPhase(
 						`promoted-external-staleness: ${decision.reason}`,
 					);
 					phaseDigest.summary += ` [promoted-external skill '${active.slug}' retired: ${decision.reason}]`;
+				} else if (decision.action === 'regenerate') {
+					// The curator does not auto-regenerate promoted-external skills
+					// (the user re-runs external discovery), but we log it so the
+					// source-drift signal is visible.
+					logger.warn(
+						`[curator] promoted-external skill '${active.slug}' has source drift: ${decision.reason}`,
+					);
+					phaseDigest.summary += ` [promoted-external skill '${active.slug}' source drift detected]`;
 				}
 				// 'regenerate' is advisory here — the curator does not auto-regenerate
 				// promoted-external skills (the user re-runs external discovery). Logged only.
