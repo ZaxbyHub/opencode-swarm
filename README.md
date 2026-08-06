@@ -37,6 +37,7 @@ Most AI coding tools let one model write code and ask that same model whether th
 - 🔎 **Independent auto-review engine** — bounded whole-diff review in a fresh read-only model session, structured diff-anchored findings, optional independent validation, advisory-by-default phase review, and an evidence-backed opt-in completion gate. v7 remains opt-in; v8's default is pinned to a committed 30-diff cost burn-in.
 - 🔍 **DEEP_DIVE Protocol** — High-rigor, on-demand read-only codebase audit via specialized skills
 - 🔬 **External Skill Curation Pipeline** — Opt-in discovery, quarantine, evaluation, and promotion of external skill candidates from configured sources (disabled by default; enable via `external_skills.curation_enabled: true` in config). Includes 7 tools: `external_skill_discover`, `external_skill_list`, `external_skill_inspect`, `external_skill_promote`, `external_skill_reject`, `external_skill_delete`, `external_skill_revoke`. Candidates pass through a 3-gate validation pipeline before evaluation: **prompt injection scan** (12 regex patterns), **unsafe instruction scan** (25 patterns), and **provenance integrity check** (SHA-256, timestamp, URL, publisher, and hash verification).
+- 🎯 **Governed Skill Optimizer** — Manually-activated, single-skill optimizer (`/swarm skill-opt plan|run|status|diff|approve|reject|rollback|history`) that drives one allowlisted `SKILL.md` candidate at a time through deterministic draft → smoke → evaluation-substrate validation → manual approval → atomic activation/rollback. Bounded, restartable, reversible, and unable to mutate source/harness/security surfaces. Disabled by default (`skill_opt.enabled: false`); see [docs/skill-optimizer.md](docs/skill-optimizer.md).
 - 🔄 **Phase completion gates** — completion-verify and drift verifier gates enforced before phase completion
 - 🔁 **Resumable sessions** — all state saved to `.swarm/`; pick up any project any day
 - 🖥️ **PR Monitor** — GitHub PR subscription and background polling via `gh` CLI; delivers real-time CI, review, and merge status updates via the AutomationEventBus (FR-001, opt-in via `pr_monitor.enabled: true`). Subscribe with `/swarm pr subscribe <pr-url|owner/repo#N|N>`; unsubscribe with `/swarm pr unsubscribe <pr-url|owner/repo#N|N>`; check status with `/swarm pr status`. With `auto_pr_feedback: true`, CI failures and merge conflicts mechanically activate PR_FEEDBACK only when no other workflow owns the session; otherwise they are durably queued for a later round.
@@ -637,6 +638,19 @@ Seven skill-management tools (`skill_generate`, `skill_list`, `skill_apply`, `sk
 
 - **Proposal cleanup** — When a draft skill proposal is activated via `skill_apply`, the source proposal file is deleted as part of the activation process (best-effort; permission errors are logged but do not block activation).
 
+### Governed Skill Optimizer
+
+`/swarm skill-opt` (issue #1822 — SkillOpt 3/7) is a **manually-activated, governed** optimizer that drives ONE allowlisted `SKILL.md` candidate at a time through deterministic draft → static smoke → evaluation-substrate validation (`split:'test'`) → manual approval → atomic activation (or rollback). The loop is bounded, restartable, reversible, and unable to mutate harness/source/security surfaces.
+
+Commands: `/swarm skill-opt plan|run|status|diff|approve|reject|rollback|history`.
+
+- **Disabled by default.** `/swarm skill-opt run` requires `skill_opt.enabled: true` AND `--confirm`. `plan`/`status`/`diff`/`history` are always available (read-only / proposal-only).
+- **No autonomous mutation.** `approve`/`activate`/`reject`/`rollback` are human-only and require `--expected-content-hash` to refuse a stale base.
+- **Validation reuse.** Uses the existing evaluation substrate (`evaluateCandidateV1`) — no duplicate runner/scorer. Held-out test sets are single-use (`claimHeldOutTest`), so a single `run` performs at most one validation.
+- **Durable lifecycle.** Append-only state machine under `.swarm/evolution/skills/<slug>/<candidateId>/` with hash-chain integrity and corrupt-tail quarantine.
+
+See `docs/skill-optimizer.md` for the full architecture and the `skill_opt` config block.
+
 ### External Skill Curation
 
 Swarm provides an opt-in, quarantine-first pipeline for discovering, validating, and promoting external skills. Disabled by default — no network calls are made until explicitly enabled.
@@ -711,6 +725,10 @@ Every candidate passes a 3-gate pipeline before entering quarantine:
 | `context_budget.unified_injection_tokens` | number | `undefined` | Opt-in unified ceiling (tokens) for combined system-enhancer + knowledge-injector injection per turn. When set, both hooks share this budget with proportional split |
 | `context_budget.tool_output_mask_threshold` | number | `2000` | Threshold for masking tool outputs (chars) |
 | `skills.enabled` | boolean | `false` | Gates the 7 skill-management tools (`skill_generate`, `skill_list`, `skill_apply`, `skill_inspect`, `skill_regenerate`, `skill_retire`, `skill_improve`) behind an opt-in flag. When `false` (default), these tools are hidden from the architect's tool map. |
+| `skill_opt.enabled` | boolean | `false` | Master opt-in for the governed skill optimizer (`/swarm skill-opt`). `run` also requires `--confirm`; `plan`/`status`/`diff`/`history` are always available. See `docs/skill-optimizer.md`. |
+| `skill_opt.deadband` | number | `0` | Promotion policy deadband forwarded to the evaluation substrate. |
+| `skill_opt.max_rounds` | number | `5` | Hard cap on draft/smoke retries before a validation (held-out test set is single-use). |
+| `skill_opt.max_transient_retries` | number | `5` | Max transient-infra retries before an infra failure becomes inconclusive. |
 | `context_budget.scoring.enabled` | boolean | `false` | Enable context scoring/ranking |
 | `context_budget.scoring.max_candidates` | number | `100` | Maximum items to score (10-500) |
 | `context_budget.scoring.weights` | object | `{ recency: 0.3, ... }` | Scoring weights for priority |

@@ -979,6 +979,38 @@ Scheduled consolidation is fire-and-forget, validates drafted skills against
 matching eval fixtures, and never auto-activates skills. Use `/swarm
 consolidate` for an explicit pass.
 
+## Governed Skill Optimizer
+
+`skill_opt` governs the `/swarm skill-opt` command family (issue #1822 —
+SkillOpt 3/7): a manually-activated optimizer that drives one allowlisted
+`SKILL.md` candidate at a time through deterministic draft → static smoke →
+evaluation-substrate validation (`split:'test'`) → manual approval → atomic
+activation (or rollback). See `docs/skill-optimizer.md` for the full
+architecture.
+
+Disabled by default. `/swarm skill-opt run` requires `enabled: true` AND
+`--confirm`; `approve`/`activate`/`reject`/`rollback` are human-only. The
+config is consulted only inside command handlers — never on the plugin init
+path.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `false` | Master opt-in for executing optimization rounds. `plan`/`status`/`diff`/`history` are always available (read-only / proposal-only). |
+| `max_rounds` | number | `5` | Hard cap on draft/smoke retries before a validation (the held-out test set is single-use, so a single `run` performs at most one validation). |
+| `max_candidates_per_round` | number | `3` | Max candidates drafted per round. (Forward-compatible; one candidate is drafted per round in v1.) |
+| `max_validations_per_round` | number | `1` | Max validation runs per round (held-out test consumptions). |
+| `max_round_time_ms` | number | `3600000` | Forwarded as a per-task validation timeout in v1 (no wall-clock round timer enforced yet). |
+| `max_tokens_per_round` | number | `50000` | Soft token spend budget for LLM drafting across a round. (Forward-compatible; not yet enforced in v1.) |
+| `max_rejections` | number | `5` | Max consecutive rejections before a multi-validation controller stops. (Forward-compatible in v1 — single validation per run.) |
+| `max_inconclusive_rounds` | number | `2` | Max consecutive inconclusive results before a multi-validation controller stops. (Forward-compatible in v1.) |
+| `max_transient_retries` | number | `5` | Max transient-infra retries before an infra failure becomes inconclusive. |
+| `convergence_non_improvements` | number | `3` | K consecutive draft/smoke non-progress results before the controller stops. |
+| `max_changed_lines` | number | `200` | Trust region: max changed lines in a candidate `SKILL.md`. |
+| `max_changed_bytes` | number | `20000` | Trust region: max changed bytes in a candidate `SKILL.md`. |
+| `max_changed_sections` | number | `6` | Trust region: max distinct frontmatter/body sections changed. |
+| `deadband` | number | `0` | Promotion policy deadband forwarded to the evaluation substrate (`PromotionPolicyV1.deadband`). |
+| `retirement_min_age_days` | number | `60` | Wall-clock retirement: minimum age (days) before a never-used skill is eligible for archival retirement. Real usage signal is still required; this is a floor. |
+
 ## External Skills Curation Pipeline
 
 Opt-in pipeline for discovering, quarantining, evaluating, and promoting external skill candidates from configured sources. Candidates are stored under `.swarm/skills/candidates/<uuid>.json`.
