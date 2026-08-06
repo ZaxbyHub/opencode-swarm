@@ -456,33 +456,66 @@ async function runValidationWithTransientRetry(
 	const maxRetries = input.config.max_transient_retries;
 	while (true) {
 		try {
-			// Candidate payloads live under the candidate's artifact dir, resolved
-			// against projectRoot (NOT inputRoot, which is the fixture materialization
-			// root). payloadPath must be repo-relative per the substrate's
-			// RelativePathSchema + resolveContainedExistingPath contract.
-			const payloadDir = path.join(
-				'.swarm',
-				'evolution',
-				'skills',
-				input.skillSlug,
+			// Candidate payloads must be resolvable from inputRoot (the fixture
+			// materialization root) AND their contentHash must match what the
+			// substrate recomputes via computeCandidateInputContentHash. So we
+			// copy baseline.md/candidate.md INTO inputRoot and compute the hash
+			// the same way the substrate does (F1 deep fix — the critic found
+			// that the substrate resolves payloadPath against inputRoot, not
+			// projectRoot, and expects a canonical candidate-input hash).
+			const evalInputRoot = input.inputRoot ?? input.directory;
+			const payloadSubdir = path.join(evalInputRoot, 'candidates', candidateId);
+			if (!existsSync(payloadSubdir))
+				mkdirSync(payloadSubdir, { recursive: true });
+			const baselinePayloadRel = path.join(
+				'candidates',
 				candidateId,
+				'baseline.md',
+			);
+			const candidatePayloadRel = path.join(
+				'candidates',
+				candidateId,
+				'candidate.md',
+			);
+			writeFileSync(
+				path.join(payloadSubdir, 'baseline.md'),
+				baselineContent,
+				'utf8',
+			);
+			writeFileSync(
+				path.join(payloadSubdir, 'candidate.md'),
+				candidateContent,
+				'utf8',
+			);
+			const { computeCandidateInputContentHash } = await import(
+				'../../evaluation/hashing.js'
 			);
 			const baseline: EvaluationCandidateV1 = {
 				v: 1,
 				id: `${input.skillSlug}-baseline`,
 				kind: 'skill',
-				payloadPath: path.join(payloadDir, 'baseline.md'),
+				payloadPath: baselinePayloadRel,
 				model: input.baselineModel,
-				contentHash: computeContentHash(baselineContent),
+				contentHash: '',
 			};
 			const candidate: EvaluationCandidateV1 = {
 				v: 1,
 				id: `${input.skillSlug}-candidate-${randomUUID().slice(0, 8)}`,
 				kind: 'skill',
-				payloadPath: path.join(payloadDir, 'candidate.md'),
+				payloadPath: candidatePayloadRel,
 				model: input.candidateModel,
-				contentHash: computeContentHash(candidateContent),
+				contentHash: '',
 			};
+			// Compute the substrate-compatible content hashes (must match what
+			// the runner recomputes from the payload files).
+			baseline.contentHash = await computeCandidateInputContentHash(
+				evalInputRoot,
+				baseline,
+			);
+			candidate.contentHash = await computeCandidateInputContentHash(
+				evalInputRoot,
+				candidate,
+			);
 			if (!input.dispatcher) {
 				throw new Error(
 					'no evaluation dispatcher available (cannot run validation)',

@@ -6,12 +6,15 @@
  * changed (or which became unsupported) is never reconciled. This module
  * provides the distinct policy the curator now consults:
  *
- *   - source-knowledge-changed → regenerate-or-retire;
+ *   - source-knowledge-changed → regenerate (advisory: the curator LOGS source
+ *     drift; it does not auto-regenerate promoted-external skills — the user
+ *     re-runs external discovery);
  *   - wall-clock retirement (configurable) using the REAL usage signal (#1770),
  *     with minimum-age and support safeguards, and a REVERSIBLE archive.
  *
- * The decision is advisory: the curator routes `regenerate` to
- * `regenerateSkill` and `retire` to `retireSkill` (both reversible / marked).
+ * The decision is advisory: the curator routes `retire` to `retireSkill`
+ * (reversible / marked); `regenerate` is log-only advisory (the user decides
+ * whether to re-run discovery/regeneration).
  */
 
 import { existsSync, readFileSync } from 'node:fs';

@@ -363,6 +363,12 @@ export async function handleSkillOptApprove(
 			parsed.json,
 		);
 	}
+	const idError = validateIds(
+		parsed.skillSlug,
+		parsed.candidateId,
+		parsed.json,
+	);
+	if (idError) return idError;
 	const result = await activateCandidate({
 		directory,
 		skillSlug: parsed.skillSlug,
@@ -388,6 +394,12 @@ export async function handleSkillOptReject(
 			parsed.json,
 		);
 	}
+	const rejectIdError = validateIds(
+		parsed.skillSlug,
+		parsed.candidateId,
+		parsed.json,
+	);
+	if (rejectIdError) return rejectIdError;
 	const state = currentCandidateState(
 		directory,
 		parsed.skillSlug,
@@ -427,6 +439,12 @@ export async function handleSkillOptRollback(
 			parsed.json,
 		);
 	}
+	const rbIdError = validateIds(
+		parsed.skillSlug,
+		parsed.candidateId,
+		parsed.json,
+	);
+	if (rbIdError) return rbIdError;
 	const result = await rollbackCandidate({
 		directory,
 		skillSlug: parsed.skillSlug,
