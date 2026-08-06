@@ -1,3 +1,4 @@
+import * as fsp from 'node:fs/promises';
 import {
 	claimPrFeedbackMonitorEvents,
 	readPrFeedbackMonitorQueue,
@@ -13,6 +14,7 @@ import {
 	type PrReviewDepthTier,
 	readPrWorkflowGateState,
 } from './pr-workflow-gate.js';
+import { validateSwarmPath } from './utils.js';
 
 const DEFAULT_WAKE_TIMEOUT_MS = 5_000;
 
@@ -115,12 +117,16 @@ export const DEFAULT_TOTAL_WAKE_CEILINGS: Record<PrReviewDepthTier, number> = {
 };
 
 /**
- * Bounded FIFO map of tracked wake budgets. Invariant 8 (session/global
- * state): module-level state must have an explicit eviction strategy. Three
- * further per-session maps share this same bound and the same FIFO discipline:
- * `bannerStamps` (instant of the last full banner), `banneredMessages` (the
- * assistant message already carrying a banner), and `fallbackInjections` (the
- * injection count on the messageID-less path).
+ * Bound on the tracked wake budgets. Invariant 8 (session/global state):
+ * module-level state must have an explicit eviction strategy. `wakeBudgets`
+ * evicts LEAST RECENTLY WOKEN — see {@link evictIfOverBound}, which also
+ * refuses to drop suspended or in-flight entries and therefore treats this
+ * bound as best-effort. Three further per-session maps share the same numeric
+ * bound but keep the simpler insertion-order FIFO discipline, because they
+ * hold no enforcement state that is unsafe to lose: `bannerStamps` (instant of
+ * the last full banner), `banneredMessages` (the assistant message already
+ * carrying a banner), and `fallbackInjections` (the injection count on the
+ * messageID-less path).
  */
 export const MAX_TRACKED_WAKE_SESSIONS = 200;
 
@@ -147,13 +153,49 @@ interface WakeBudget {
 	lastWakeAt: number;
 	lastSeenRevision?: number;
 	suspended: boolean;
-	/** Total number of wake attempts across the session lifetime. Never reset by
-	 * revision progress — only the consecutive counter resets on progress. */
+	/** Total number of wake attempts recorded for this budget. NEVER reset by
+	 * revision progress — only the consecutive counter resets on progress; that
+	 * is the guarantee this counter exists to provide. Its SCOPE is the scope of
+	 * the enclosing map (see `wakeBudgets` in
+	 * {@link createPrWorkflowResponseGate}): one PROCESS lifetime, running until
+	 * the durable gate CLEARS. `resetBudget` drops the entry on a gate clear
+	 * (complete/abort) and a plugin reload starts fresh totals — so this is not
+	 * a total across the whole conversation/session lifetime.
+	 *
+	 * Deliberately NOT "one workflow activation": `transitionPrReviewToFeedback`
+	 * (`pr-workflow-gate.ts`) mints a new `workflowInstanceId` WITHOUT clearing
+	 * the gate, so a budget survives the PR_REVIEW -> PR_FEEDBACK handoff and
+	 * keeps accumulating across both activations. See the ceiling note at the
+	 * `totalWakes` increment for why that matters. */
 	totalWakes: number;
 	/** Discriminator for WHY the session was suspended: 'consecutive' means
 	 * the consecutive-unproductive budget was exhausted; 'total' means the
-	 * absolute per-session total-wake ceiling was reached. */
+	 * total-wake ceiling in force for this process, at the tier the gate
+	 * currently reports, was reached (same scope caveat as
+	 * {@link WakeBudget.totalWakes}). */
 	suspendedReason: 'consecutive' | 'total';
+}
+
+/**
+ * A total-wake ceiling is only meaningful as a finite positive integer. Every
+ * other shape silently DISABLES or INVERTS the brake rather than tuning it:
+ * `Infinity` and `NaN` make `totalWakes >= ceiling` never true (so the total
+ * brake never fires), and `0` or a negative value makes it true on the very
+ * first wake (so the session suspends before it can do any work). Fractional
+ * values are accepted by the comparison but describe a ceiling that can never
+ * be hit exactly, which is a configuration mistake rather than an intent.
+ *
+ * Invalid values fall back to {@link DEFAULT_TOTAL_WAKE_CEILINGS} at RESOLVE
+ * time rather than throwing at construction. The sibling options
+ * (`maxConsecutiveUnproductiveWakes`, `wakeCooldownMs`, `bannerCooldownMs`) are
+ * all plain `?? default` reads, so a throw here would be the only option in
+ * this factory able to crash plugin initialization — a strictly worse failure
+ * mode than clamping to a safe default.
+ */
+function isValidTotalWakeCeiling(value: number | undefined): value is number {
+	// Number.isInteger is false for NaN and both Infinities, so this single
+	// predicate covers finiteness, integrality, and positivity.
+	return value !== undefined && Number.isInteger(value) && value > 0;
 }
 
 function canonicalGitHubPrUrl(value: string): string | null {
@@ -225,7 +267,7 @@ function blockedText(
 	if (options.suspended) {
 		if (options.suspendedReason === 'total') {
 			lines.push(
-				'Auto-resume is suspended because the total per-session wake budget has been exhausted. The session will not be re-awoken automatically. Run `/swarm abort-pr-workflow`, call `abort_pr_workflow`, or complete the workflow with `complete_pr_workflow` to publish normally.',
+				'Auto-resume is suspended because the total wake budget for this workflow has been exhausted. The session will not be re-awoken automatically. Run `/swarm abort-pr-workflow`, call `abort_pr_workflow`, or complete the workflow with `complete_pr_workflow` to publish normally.',
 			);
 		} else {
 			const max = options.maxConsecutive;
@@ -274,7 +316,7 @@ function workflowBanner(
 	if (options.suspended) {
 		if (options.suspendedReason === 'total') {
 			lines.push(
-				'[Auto-resume is suspended because the total per-session wake budget has been exhausted. Run `/swarm abort-pr-workflow`, call `abort_pr_workflow`, or complete the workflow with `complete_pr_workflow`.]',
+				'[Auto-resume is suspended because the total wake budget for this workflow has been exhausted. Run `/swarm abort-pr-workflow`, call `abort_pr_workflow`, or complete the workflow with `complete_pr_workflow`.]',
 			);
 		} else {
 			const max = options.maxConsecutive;
@@ -337,13 +379,22 @@ export function createPrWorkflowResponseGate(options: {
 	const wakeCooldownMs = options.wakeCooldownMs ?? DEFAULT_WAKE_COOLDOWN_MS;
 	const bannerCooldownMs =
 		options.bannerCooldownMs ?? DEFAULT_BANNER_COOLDOWN_MS;
+	/**
+	 * Resolve the total-wake ceiling for a tier, validating the caller-supplied
+	 * override (see {@link isValidTotalWakeCeiling}). The check is applied to
+	 * BOTH shapes of the option — the uniform scalar and each looked-up per-tier
+	 * record value — so one bad tier entry degrades to that tier's default
+	 * instead of disabling the brake for it. An absent value (option omitted, or
+	 * a partial record without this tier) takes the same default path.
+	 */
 	const resolveTotalWakeCeiling = (tier: PrReviewDepthTier): number => {
-		if (options.totalWakeCeiling === undefined) {
-			return DEFAULT_TOTAL_WAKE_CEILINGS[tier];
-		}
-		return typeof options.totalWakeCeiling === 'number'
-			? options.totalWakeCeiling
-			: (options.totalWakeCeiling[tier] ?? DEFAULT_TOTAL_WAKE_CEILINGS[tier]);
+		const configured =
+			typeof options.totalWakeCeiling === 'number'
+				? options.totalWakeCeiling
+				: options.totalWakeCeiling?.[tier];
+		return isValidTotalWakeCeiling(configured)
+			? configured
+			: DEFAULT_TOTAL_WAKE_CEILINGS[tier];
 	};
 	/**
 	 * Per-session wake budgets (consecutive counter, suspension flag, and
@@ -379,22 +430,72 @@ export function createPrWorkflowResponseGate(options: {
 	const fallbackInjections = new Map<string, number>();
 	const session = options.client?.session as SessionClient | undefined;
 
-	/** FIFO-evict the oldest NON-suspended budget entry when the map exceeds
-	 * the bound. Suspended budgets are never evicted — they represent bounded
-	 * sessions whose total-wake cap fired. Evicting a suspended budget would
-	 * allow re-entry to recreate it with totalWakes: 0, re-arming auto-resume
-	 * and defeating the total-wake cap. If ALL entries are suspended (unlikely
-	 * but possible), eviction stops as a safety valve. */
-	function evictIfOverBound(): void {
+	/**
+	 * Enforce the {@link MAX_TRACKED_WAKE_SESSIONS} bound on `wakeBudgets`
+	 * (invariant 8) by evicting the LEAST RECENTLY WOKEN entry — LRU by
+	 * `lastWakeAt`, not insertion order. Selection rules, in priority order:
+	 *
+	 *  1. Never evict a SUSPENDED budget. A suspended entry records a session
+	 *     whose consecutive or total cap already fired; recreating it on the
+	 *     next idle would reset `totalWakes` to 0 and re-arm auto-resume,
+	 *     defeating the cap this module exists to enforce.
+	 *  2. Never evict the CURRENT session (`currentSessionID`) or any session
+	 *     whose idle handler is mid-flight (`activeWakeSessions`). Those
+	 *     handlers hold a live reference to their budget object: deleting the
+	 *     map entry detaches it, so their later `totalWakes += 1` / `suspended =
+	 *     true` writes land on an object nothing can read, and the next idle
+	 *     rebuilds a zeroed budget. A rebuilt budget has `lastSeenRevision ===
+	 *     undefined`, which makes `madeProgress` unconditionally true — so the
+	 *     consecutive brake, the cooldown, and the total ceiling all become
+	 *     unreachable for that session.
+	 *  3. Among the survivors, evict the SMALLEST `lastWakeAt`.
+	 *  4. `lastWakeAt === 0` means "created, never woken", which is the NEWEST
+	 *     possible state, not the oldest — a naive minimum would invert the
+	 *     intent and evict the freshest entry first. Never-woken entries are
+	 *     therefore held back as a LAST RESORT, used only when no already-woken
+	 *     candidate exists at all (in insertion order, preserving the previous
+	 *     FIFO tie-break).
+	 *     This branch is defence-in-depth, not the common path: the ordinary
+	 *     create-then-wake window is already covered by rule 2, because
+	 *     `activeWakeSessions` holds the session for exactly as long as its
+	 *     entry sits at `lastWakeAt === 0`, and `lastWakeAt` is assigned
+	 *     unconditionally once the handler reaches its bookkeeping. What
+	 *     remains is the narrow case of a handler that threw between creating
+	 *     the budget and that assignment, which strands a never-woken entry
+	 *     permanently. Do not "simplify" this away by assuming rule 2 covers
+	 *     every zero — it covers every zero that is still in flight.
+	 *
+	 * The bound is best-effort by construction: when suspended entries plus the
+	 * in-flight/current sessions exhaust the candidate set, the map is allowed
+	 * to EXCEED MAX_TRACKED_WAKE_SESSIONS rather than drop state that is unsafe
+	 * to lose. `if (evicted === undefined) break` is the termination guard for
+	 * that case — it also makes an all-suspended map impossible to spin on.
+	 */
+	function evictIfOverBound(currentSessionID: string): void {
 		while (wakeBudgets.size > MAX_TRACKED_WAKE_SESSIONS) {
-			let evicted = false;
+			let lruKey: string | undefined;
+			let lruWakeAt = Number.POSITIVE_INFINITY;
+			let neverWokenKey: string | undefined;
 			for (const [key, budget] of wakeBudgets) {
-				if (budget.suspended) continue;
-				wakeBudgets.delete(key);
-				evicted = true;
-				break;
+				if (
+					budget.suspended ||
+					key === currentSessionID ||
+					activeWakeSessions.has(key)
+				) {
+					continue;
+				}
+				if (budget.lastWakeAt <= 0) {
+					if (neverWokenKey === undefined) neverWokenKey = key;
+					continue;
+				}
+				if (budget.lastWakeAt < lruWakeAt) {
+					lruWakeAt = budget.lastWakeAt;
+					lruKey = key;
+				}
 			}
-			if (!evicted) break;
+			const evicted = lruKey ?? neverWokenKey;
+			if (evicted === undefined) break;
+			wakeBudgets.delete(evicted);
 		}
 	}
 
@@ -434,6 +535,59 @@ export function createPrWorkflowResponseGate(options: {
 		bannerStamps.delete(sessionID);
 		banneredMessages.delete(sessionID);
 		fallbackInjections.delete(sessionID);
+	}
+
+	/**
+	 * Append a machine-readable suspension record to `.swarm/events.jsonl`.
+	 * Auto-resume suspension is otherwise observable only as prose inside a
+	 * chat banner, which no operator tooling can aggregate; this is the audit
+	 * surface for "why did this review stop resuming".
+	 *
+	 * Shape and failure policy mirror the abort-path append in
+	 * `pr-workflow-gate.ts` (`pr_workflow_aborted`): a `type`-tagged JSON line,
+	 * a path resolved through {@link validateSwarmPath}, and a non-fatal
+	 * try/catch. `validateSwarmPath` itself throws synchronously (null bytes,
+	 * traversal, symlinked `.swarm`), so it stays INSIDE the try. A missing
+	 * `.swarm` directory yields ENOENT and is likewise swallowed — the audit
+	 * trail is best-effort and must never break the gate or the wake
+	 * bookkeeping that surrounds this call.
+	 *
+	 * Awaited, never fire-and-forget: this runs inside the async `event`
+	 * handler, and a `queueMicrotask`-style detachment would let the process
+	 * tear down with the record unwritten (a recorded durability lesson in this
+	 * repo).
+	 */
+	async function appendWakeSuspendedEvent(fields: {
+		sessionID: string;
+		mode: string;
+		suspendedReason: 'consecutive' | 'total';
+		consecutiveUnproductive: number;
+		totalWakes: number;
+		tier: PrReviewDepthTier;
+	}): Promise<void> {
+		try {
+			const eventsPath = validateSwarmPath(options.directory, 'events.jsonl');
+			const suspendedEvent = {
+				type: 'pr_workflow_wake_suspended',
+				timestamp: new Date().toISOString(),
+				sessionID: fields.sessionID,
+				mode: fields.mode,
+				suspendedReason: fields.suspendedReason,
+				consecutiveUnproductive: fields.consecutiveUnproductive,
+				totalWakes: fields.totalWakes,
+				tier: fields.tier,
+				maxConsecutiveUnproductiveWakes: maxConsecutive,
+				totalWakeCeiling: resolveTotalWakeCeiling(fields.tier),
+			};
+			await fsp.appendFile(
+				eventsPath,
+				`${JSON.stringify(suspendedEvent)}\n`,
+				'utf-8',
+			);
+		} catch {
+			// Non-fatal: the audit trail is best-effort. A failed write must
+			// never break the gate or abort the suspension bookkeeping.
+		}
 	}
 
 	const textComplete = async (
@@ -596,7 +750,9 @@ export function createPrWorkflowResponseGate(options: {
 			if (isPrWorkflowAutoWakeSuppressed(options.directory, sessionID)) return;
 			if (!session) return;
 
-			evictIfOverBound();
+			// Pass the live session id so eviction can never drop the budget this
+			// handler is about to create or mutate (see evictIfOverBound rule 2).
+			evictIfOverBound(sessionID);
 			let budget = wakeBudgets.get(sessionID);
 			if (!budget) {
 				budget = {
@@ -745,12 +901,31 @@ export function createPrWorkflowResponseGate(options: {
 						sessionID,
 					);
 				} catch {
-					// The pre-wake read already validated the gate exists; a
-					// throw here is a transient fs error. Fall back to the
-					// pre-wake state so the bookkeeping proceeds with the
-					// last-known-good revision. Reserving null exclusively
-					// for a confirmed gate-clear prevents resetBudget from
-					// wiping the just-incremented totalWakes.
+					// Two distinct causes reach this catch, and neither is a
+					// gate-clear. (a) A transient fs error (EBUSY/EMFILE, or a
+					// concurrent writer). (b) A DURABLE validation failure:
+					// readPrWorkflowGateStateFromDisk deliberately throws
+					// `BLOCKED: ... is not valid JSON` / `... is invalid` for a
+					// corrupt or schema-invalid state file
+					// (pr-workflow-gate.ts:6357-6368), and
+					// `_internals.readPrWorkflowGateState` propagates it
+					// unmodified — so a throw here is NOT necessarily transient
+					// and may recur on every subsequent wake.
+					//
+					// Falling back to the pre-wake snapshot is nonetheless the
+					// correct handling for BOTH causes. This catch is nested
+					// inside the `finally` that owns all wake bookkeeping
+					// (lastWakeAt, the consecutive counter, totalWakes, and the
+					// suspension checks below); rethrowing would skip every one
+					// of them and recreate the unbounded-wake hazard this module
+					// exists to prevent — worst under cause (b), where the error
+					// recurs and the loop would never be braked at all.
+					// Continuing with the last-known-good revision instead makes
+					// the wake count as unproductive (a revision that cannot be
+					// re-read cannot advance), so a corrupt gate file suspends
+					// the session through the normal budget path. Reserving null
+					// exclusively for a confirmed gate-clear also prevents
+					// resetBudget from wiping the just-incremented totalWakes.
 					postWakeState = state;
 				}
 				if (
@@ -792,11 +967,20 @@ export function createPrWorkflowResponseGate(options: {
 						(budget.lastSeenRevision !== undefined &&
 							currentRevision > budget.lastSeenRevision);
 					budget.lastSeenRevision = currentRevision;
+					// Set by EITHER suspension branch below; the single audit
+					// append after both branches then reports the FINAL state.
+					// Emitting inside each branch instead would write two
+					// contradicting records for a wake that trips both budgets
+					// (reachable whenever maxConsecutive === totalCeiling), and
+					// the second one would disagree with the `suspendedReason`
+					// the user-facing banner renders.
+					let suspensionTripped = false;
 					if (!effectiveMadeProgress) {
 						budget.consecutiveUnproductive += 1;
 						if (budget.consecutiveUnproductive >= maxConsecutive) {
 							budget.suspended = true;
 							budget.suspendedReason = 'consecutive';
+							suspensionTripped = true;
 						}
 					} else {
 						budget.consecutiveUnproductive = 0;
@@ -806,6 +990,37 @@ export function createPrWorkflowResponseGate(options: {
 					// (success, failure, timeout) and NEVER reset by progress.
 					// Read the depth tier from durable gate state; default to 'L'
 					// when absent (e.g. PR_FEEDBACK mode has no diff-stats tier).
+					//
+					// KNOWN, INTENTIONALLY UNFIXED: the tier is read per-wake
+					// while `totalWakes` is tier-agnostic, so the ceiling a
+					// budget is measured against can CHANGE mid-budget. Two
+					// directions, and they are not symmetric:
+					//
+					//  - TIGHTENING (the common case): wakes accrued before the
+					//    depth tier is bound default to 'L' (102) and are later
+					//    compared against the bound tier. If that turns out to
+					//    be S (12) or M (54), the pre-bind wakes count against
+					//    the smaller ceiling and the brake fires EARLIER. Bind
+					//    happens early and the consecutive brake (5) caps any
+					//    unproductive run, so this is a 0-3 wake skew.
+					//  - LOOSENING (real, do not claim otherwise):
+					//    `transitionPrReviewToFeedback` mints a new
+					//    `workflowInstanceId` WITHOUT clearing the durable gate,
+					//    so `resetBudget` never runs and this budget survives
+					//    into PR_FEEDBACK — where the replacement state carries
+					//    no `prReviewDepthTier` and the `?? 'L'` below therefore
+					//    raises the ceiling to 102. A tier-S review that hands
+					//    off to feedback keeps its accumulated count but gains
+					//    headroom.
+					//
+					// Left as-is deliberately: the loosening is bounded by the
+					// same 102 that a tier-L review gets, the consecutive brake
+					// stays active throughout, and both candidate "fixes"
+					// (per-tier counters, or rebasing the count when the tier
+					// binds) would loosen the FIRST case further while adding
+					// state. Do not "correct" this without re-deriving that
+					// tradeoff — and do not restore the earlier claim that the
+					// skew can only ever tighten, which is false.
 					budget.totalWakes += 1;
 					const tier: PrReviewDepthTier =
 						postWakeState.prReviewDepthTier ?? 'L';
@@ -813,6 +1028,23 @@ export function createPrWorkflowResponseGate(options: {
 					if (budget.totalWakes >= totalCeiling) {
 						budget.suspended = true;
 						budget.suspendedReason = 'total';
+						suspensionTripped = true;
+					}
+					if (suspensionTripped) {
+						// Machine-readable audit record for the suspension. Both
+						// branches above route here, so exactly one line is
+						// written per suspension transition and its
+						// `suspendedReason` is by construction the value the
+						// banner will render. Awaited (never fire-and-forget) and
+						// internally non-fatal.
+						await appendWakeSuspendedEvent({
+							sessionID,
+							mode: postWakeState.mode,
+							suspendedReason: budget.suspendedReason,
+							consecutiveUnproductive: budget.consecutiveUnproductive,
+							totalWakes: budget.totalWakes,
+							tier,
+						});
 					}
 				}
 			}

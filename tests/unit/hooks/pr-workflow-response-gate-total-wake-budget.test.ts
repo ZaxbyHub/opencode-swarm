@@ -149,8 +149,12 @@ describe('PR workflow total wake budget', () => {
 		const output = { text: 'still working' };
 		await gate.textComplete({ sessionID: 'notice-session' }, output);
 
-		// Total-cap wording: "total per-session wake budget"
-		expect(output.text).toContain('total per-session wake budget');
+		// Total-cap wording: "total wake budget for this workflow"
+		// (corrected from the earlier "total per-session wake budget" wording,
+		// which overclaimed the counter's scope — WakeBudget.totalWakes is
+		// scoped to one process lifetime, until the durable gate clears, not the
+		// whole session).
+		expect(output.text).toContain('total wake budget for this workflow');
 		// Must NOT contain the consecutive-unproductive wording.
 		expect(output.text).not.toContain('consecutive unproductive retries');
 		// All three recovery paths must be named.
