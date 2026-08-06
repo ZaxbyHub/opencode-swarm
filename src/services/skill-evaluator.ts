@@ -330,9 +330,25 @@ function evaluateContent(
 	score: number;
 	failures: string[];
 } {
+	return scoreSkillPhrases({ content, required: testCase.required_phrases, forbidden: testCase.forbidden_phrases });
+}
+
+/**
+ * Pure phrase-scoring function (issue #1822 — factored out so the governed
+ * skill optimizer's `project` scorer wrapper can invoke the SAME scoring logic
+ * the internal gate uses, without duplicating it). Behavior is identical to the
+ * previous inline implementation in `evaluateContent`.
+ *
+ * Score = requiredHits / max(1, required.length), minus a 1-point penalty if
+ * any forbidden phrase is present, clamped to >= 0.
+ */
+export function scoreSkillPhrases(args: {
+	content: string;
+	required?: string[];
+	forbidden?: string[];
+}): { score: number; failures: string[] } {
+	const { content, required = [], forbidden = [] } = args;
 	const failures: string[] = [];
-	const required = testCase.required_phrases ?? [];
-	const forbidden = testCase.forbidden_phrases ?? [];
 	let requiredHits = 0;
 
 	for (const phrase of required) {

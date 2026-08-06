@@ -54,6 +54,10 @@ import {
 	retireSkill,
 } from '../services/skill-generator.js';
 import {
+	buildPromotedExternalInputFromSkill,
+	evaluatePromotedExternalStaleness,
+} from '../services/skill-optimizer/promoted-external-staleness.js';
+import {
 	getSkillVersion,
 	MAX_REVISION_CALLS_PER_PHASE,
 	REVISION_VIOLATION_THRESHOLD,
@@ -1863,6 +1867,67 @@ export async function runCuratorPhase(
 		} catch (revisionErr) {
 			logger.warn(
 				`[curator] skill revision check failed: ${revisionErr instanceof Error ? revisionErr.message : String(revisionErr)}`,
+			);
+		}
+
+		// 8c. Promoted-external staleness (issue #1822 Workstream A). Until now
+		// promoted_external skills were SKIPPED entirely (the revision path's
+		// `continue` at the skillOrigin check). That left source-changed or
+		// unsupported promoted-external skills unreconciled. This step gives
+		// them a distinct staleness policy using the real usage signal (#1770)
+		// plus minimum-age/support safeguards and reversible archive. Additive
+		// and non-blocking; existing behavior for non-promoted-external skills
+		// is unchanged.
+		try {
+			const peSkillList = await _internals.listSkills(directory);
+			const peUsageEntries = _internals.readSkillUsageEntries(directory);
+			const peRetirementMinAgeDays = 60; // default floor; configurable via skill_opt.retirement_min_age_days
+			for (const active of peSkillList.active) {
+				const content = await _internals.readFileAsync(active.path, 'utf-8');
+				const fm = _internals.parseDraftFrontmatter(content);
+				if (!fm || fm.skillOrigin !== 'promoted_external') continue;
+
+				// Aggregate real usage for this skill.
+				const skillUsage = peUsageEntries.filter((e) => {
+					let p = e.skillPath;
+					if (p.startsWith('file:')) p = p.slice(5);
+					const nu = p.replace(/\\/g, '/');
+					const na = active.path.replace(/\\/g, '/');
+					return nu === na || nu.endsWith(`/${na}`) || na.endsWith(`/${nu}`);
+				});
+				const usage = {
+					appliedExplicitCount: skillUsage.filter((e) => e.complianceVerdict === 'compliant').length,
+					ignoredCount: skillUsage.filter((e) => e.complianceVerdict === 'ignored').length,
+					violatedCount: skillUsage.filter((e) => e.complianceVerdict === 'violated').length,
+					failedAfterShownCount: 0,
+				};
+				// Age: days since the skill file was last modified (best-effort proxy).
+				let ageDays = 0;
+				try {
+					const stat = fs.statSync(active.path);
+					ageDays = Math.max(0, (Date.now() - stat.mtimeMs) / 86_400_000);
+				} catch {
+					ageDays = peRetirementMinAgeDays; // assume eligible if unknown
+				}
+				const input = buildPromotedExternalInputFromSkill(
+					directory,
+					active.slug,
+					usage,
+					ageDays,
+					peRetirementMinAgeDays,
+				);
+				if (!input) continue;
+				const decision = evaluatePromotedExternalStaleness(input);
+				if (decision.action === 'retire') {
+					await retireSkill(directory, active.slug, `promoted-external-staleness: ${decision.reason}`);
+					phaseDigest.summary += ` [promoted-external skill '${active.slug}' retired: ${decision.reason}]`;
+				}
+				// 'regenerate' is advisory here — the curator does not auto-regenerate
+				// promoted-external skills (the user re-runs external discovery). Logged only.
+			}
+		} catch (peErr) {
+			logger.warn(
+				`[curator] promoted-external staleness check failed: ${peErr instanceof Error ? peErr.message : String(peErr)}`,
 			);
 		}
 
