@@ -222,6 +222,50 @@ describe('skill-opt store — corrupt tail quarantine', () => {
 		const replay = replayCandidate(tmp, slug, id);
 		expect(replay.truncated).toBe(true);
 	});
+
+	it('F3: appending after a corrupt tail drops the corrupt suffix and recovers', async () => {
+		const slug = 'recover-skill';
+		const id = mintCandidateId();
+		await recordTransition({
+			directory: tmp,
+			skillSlug: slug,
+			candidateId: id,
+			toState: 'discovered',
+			eventType: 'discover',
+			actor: 't',
+			origin: 't',
+			reason: 'r',
+		});
+		const file = path.join(
+			tmp,
+			'.swarm',
+			'evolution',
+			'skills',
+			slug,
+			id,
+			'lifecycle.jsonl',
+		);
+		// Inject a corrupt suffix.
+		writeFileSync(file, '\n{CORRUPT_LINE}\n', { flag: 'a' });
+		// Append a new event — the corrupt suffix must be dropped (F3 fix).
+		await recordTransition({
+			directory: tmp,
+			skillSlug: slug,
+			candidateId: id,
+			toState: 'drafted',
+			eventType: 'draft',
+			actor: 't',
+			origin: 't',
+			reason: 'r',
+		});
+		const replay = replayCandidate(tmp, slug, id);
+		expect(replay.truncated).toBe(false);
+		expect(replay.state).toBe('drafted');
+		expect(replay.events).toHaveLength(2); // discovered + drafted, corrupt line gone
+		// The canonical file no longer contains the corruption.
+		const canonical = readFileSync(file, 'utf8');
+		expect(canonical).not.toContain('CORRUPT_LINE');
+	});
 });
 
 describe('skill-opt store — artifacts', () => {

@@ -35,6 +35,13 @@ export interface PromotedExternalStalenessInput {
 		ignoredCount: number;
 		violatedCount: number;
 	};
+	/**
+	 * Caller signals that the source knowledge entries have changed since the
+	 * skill was promoted (F5 fix: makes the 'regenerate' action reachable).
+	 * The curator compares the source knowledge IDs' current content/revision
+	 * against what the skill was compiled from.
+	 */
+	sourceChanged?: boolean;
 	/** Days since the skill was last regenerated / promoted. */
 	ageDays: number;
 	/** Configurable floor; defaults to 60. */
@@ -55,16 +62,40 @@ export function parsePromotedExternalFrontmatter(content: string): {
 	if (!match) return {};
 	const fm = match[1];
 	const originMatch = /^skill_origin:\s*(\S+)/m.exec(fm);
-	const idsMatch = /^source_knowledge_ids:\s*\[([^\]]*)\]/m.exec(fm);
 	const promotedAtMatch = /^promoted_at:\s*(\S+)/m.exec(fm);
 	const origin = originMatch?.[1];
-	const sourceKnowledgeIds = idsMatch
-		? idsMatch[1]
-				.split(',')
-				.map((s) => s.trim().replace(/^["']|["']$/g, ''))
-				.filter(Boolean)
-		: undefined;
 	const promotedAt = promotedAtMatch?.[1];
+
+	// Parse source_knowledge_ids supporting BOTH YAML forms (F5 fix):
+	//   inline:  source_knowledge_ids: ["a", "b"]
+	//   block:   source_knowledge_ids:
+	//              - "a"
+	//              - "b"
+	let sourceKnowledgeIds: string[] | undefined;
+	const inlineMatch = /^source_knowledge_ids:\s*\[([^\]]*)\]/m.exec(fm);
+	if (inlineMatch) {
+		sourceKnowledgeIds = inlineMatch[1]
+			.split(',')
+			.map((s) => s.trim().replace(/^["']|["']$/g, ''))
+			.filter(Boolean);
+	} else {
+		const blockMatch = /^source_knowledge_ids:\s*$/m.exec(fm);
+		if (blockMatch && blockMatch.index !== undefined) {
+			const afterKey = fm.slice(blockMatch.index + blockMatch[0].length);
+			const blockItems: string[] = [];
+			for (const line of afterKey.split('\n')) {
+				if (line.trim() === '') continue;
+				if (!/^\s+-\s+/.test(line)) break; // block list ended
+				const val = line
+					.replace(/^\s+-\s+/, '')
+					.trim()
+					.replace(/^["']|["']$/g, '');
+				if (val) blockItems.push(val);
+			}
+			if (blockItems.length > 0) sourceKnowledgeIds = blockItems;
+		}
+	}
+
 	return { origin, sourceKnowledgeIds, promotedAt };
 }
 
@@ -106,6 +137,22 @@ export function evaluatePromotedExternalStaleness(
 	// Minimum-age safeguard: never retire a skill younger than the floor.
 	const meetsAgeFloor = input.ageDays >= input.retirementMinAgeDays;
 
+	// Source-changed → regenerate (F5 fix: the caller signals that source
+	// knowledge has changed; we return 'regenerate' so the curator can route
+	// to regenerateSkill). This takes priority over retirement — a changed
+	// source may fix the negative-usage signal.
+	if (
+		input.sourceChanged &&
+		input.sourceKnowledgeIds &&
+		input.sourceKnowledgeIds.length > 0
+	) {
+		return {
+			action: 'regenerate',
+			reason: `source knowledge changed for ${input.sourceKnowledgeIds.length} entr(y|ies)`,
+			sourceKnowledgeIds: input.sourceKnowledgeIds,
+		};
+	}
+
 	// Negative-usage retirement (real usage signal, #1770). Only when the skill
 	// is old enough AND the negative signal is decisive.
 	const totalNegative = input.usage.ignoredCount + input.usage.violatedCount;
@@ -122,10 +169,6 @@ export function evaluatePromotedExternalStaleness(
 			reason: `negative-to-applied ratio ${totalNegative}/${applied} over ${input.ageDays}d (wall-clock retirement)`,
 		};
 	}
-
-	// Source-changed → regenerate (the caller signals this; we don't re-hash here
-	// because the caller has the current knowledge store and can compare).
-	// Handled by the curator routing in curator.ts.
 
 	return {
 		action: 'current',

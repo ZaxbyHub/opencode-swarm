@@ -134,9 +134,17 @@ export async function activateCandidate(
 		incumbent,
 	);
 
-	// Record the activated event BEFORE the file mutation. If this throws
-	// (it should not, given the pre-check above + the hash-chain verify), the
-	// SKILL.md is still untouched.
+	// Atomic write FIRST. The state pre-check (above) guarantees the
+	// transition is legal; recording the transition AFTER a successful write
+	// means a failed write never leaves a false terminal state in the ledger
+	// (F2 fix: previously the transition was recorded before the write, so a
+	// write failure left the ledger claiming 'activated' while SKILL.md was
+	// unchanged).
+	const skillRoot = path.dirname(skillPath);
+	if (!existsSync(skillRoot)) mkdirSync(skillRoot, { recursive: true });
+	writeSkillFileAtomic(skillPath, candidateContent);
+
+	// Record the activated event AFTER the successful write.
 	await recordTransition({
 		directory: input.directory,
 		skillSlug: input.skillSlug,
@@ -151,11 +159,6 @@ export async function activateCandidate(
 		evidenceRefs: [rollbackSnapshotRef],
 		payload: { rollbackSnapshotRef },
 	});
-
-	// Atomic write. Ensure the skill root exists.
-	const skillRoot = path.dirname(skillPath);
-	if (!existsSync(skillRoot)) mkdirSync(skillRoot, { recursive: true });
-	writeSkillFileAtomic(skillPath, candidateContent);
 
 	return {
 		activated: true,
@@ -225,8 +228,13 @@ export async function rollbackCandidate(
 		? readFileSync(skillPath, 'utf8')
 		: '';
 
-	// Record the rolled_back event BEFORE the file restore. If this throws, the
-	// SKILL.md is still untouched.
+	// Restore the file FIRST. The state pre-check guarantees the transition is
+	// legal; recording AFTER the successful write means a failed write never
+	// leaves a false 'rolled_back' terminal state (F2 fix — rolled_back is
+	// terminal, so a premature record would block retry).
+	writeSkillFileAtomic(skillPath, snapshot);
+
+	// Record the rolled_back event AFTER the successful restore.
 	await recordTransition({
 		directory: input.directory,
 		skillSlug: input.skillSlug,
@@ -239,8 +247,6 @@ export async function rollbackCandidate(
 		contentHashBefore: computeContentHash(beforeContent),
 		contentHashAfter: computeContentHash(snapshot),
 	});
-
-	writeSkillFileAtomic(skillPath, snapshot);
 
 	return { rolledBack: true, reason: 'rolled back from snapshot' };
 }

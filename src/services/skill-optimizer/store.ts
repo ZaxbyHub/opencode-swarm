@@ -234,7 +234,17 @@ function writeFileFsyncedThenRename(
 	} finally {
 		closeSync(fd);
 	}
-	renameSync(tempPath, targetPath);
+	try {
+		renameSync(tempPath, targetPath);
+	} catch (err) {
+		// F6 fix: clean up the temp file if the rename fails so it doesn't leak.
+		try {
+			unlinkSync(tempPath);
+		} catch {
+			// best-effort
+		}
+		throw err;
+	}
 }
 
 /** DI seam for test injection (AGENTS.md invariant #7 — preferred over mock.module). */
@@ -324,10 +334,17 @@ export async function appendEvent(
 
 			const tempPath = `${filePath}.tmp.${Date.now()}.${Math.floor(Math.random() * 1e9)}`;
 			const line = `${JSON.stringify(event)}\n`;
+			// Reconstruct the canonical content from the PARSED events only,
+			// dropping any corrupt tail (F3 fix: previously `existing + line`
+			// preserved the corrupt suffix, so the new event landed after it
+			// and replay stopped at the corruption, bricking the candidate).
+			const validContent =
+				events.map((e) => JSON.stringify(e)).join('\n') +
+				(events.length > 0 ? '\n' : '');
 			_internals.writeFileFsyncedThenRename(
 				tempPath,
 				filePath,
-				existing + line,
+				validContent + line,
 			);
 
 			// Replay-after-write verification — partial/corrupt writes never count.

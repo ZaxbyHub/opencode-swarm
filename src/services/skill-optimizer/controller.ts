@@ -92,6 +92,14 @@ export interface RunRoundInput {
 	claimedTestTaskIds?: ReadonlySet<string>;
 	/** Test task fixtures for validation (assembled by the command layer). */
 	validationTasks: unknown[];
+	/**
+	 * The root directory the evaluation substrate resolves task paths against
+	 * (instructionPath, environment.path, scorer argv). This is where the
+	 * command layer materialized the fixture files — NOT the project root.
+	 * (F1 fix: previously the controller passed input.directory, causing
+	 * file-not-found on every real validation.)
+	 */
+	inputRoot: string;
 	/** Baseline + candidate EvaluationCandidateV1 builders are derived from content. */
 	baselineModel: string;
 	candidateModel: string;
@@ -478,7 +486,7 @@ async function runValidationWithTransientRetry(
 			);
 			const result = await _internals.evaluateCandidateV1({
 				projectRoot: input.directory,
-				inputRoot: input.directory,
+				inputRoot: input.inputRoot,
 				tasks: input.validationTasks as never,
 				baseline,
 				candidate,

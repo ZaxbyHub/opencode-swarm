@@ -150,3 +150,46 @@ describe('outcomeSignal === 0 zero-evidence boundary', () => {
 		expect(classification).toBe('negative');
 	});
 });
+
+describe('promoted-external staleness — F5 block-list YAML + regenerate', () => {
+	it('parses block-list YAML source_knowledge_ids', () => {
+		const fm = parsePromotedExternalFrontmatter(
+			'---\nskill_origin: promoted_external\nsource_knowledge_ids:\n  - "abc-123"\n  - "def-456"\nname: x\ndescription: y\n---\nbody',
+		);
+		expect(fm.origin).toBe('promoted_external');
+		expect(fm.sourceKnowledgeIds).toEqual(['abc-123', 'def-456']);
+	});
+
+	it('still parses inline source_knowledge_ids', () => {
+		const fm = parsePromotedExternalFrontmatter(
+			'---\nskill_origin: promoted_external\nsource_knowledge_ids: ["a","b"]\n---\nbody',
+		);
+		expect(fm.sourceKnowledgeIds).toEqual(['a', 'b']);
+	});
+
+	it('returns regenerate when sourceChanged is true and IDs are present', () => {
+		const d = evaluatePromotedExternalStaleness({
+			directory: '',
+			skillSlug: 'x',
+			sourceKnowledgeIds: ['abc-123'],
+			sourceChanged: true,
+			usage: { appliedExplicitCount: 5, ignoredCount: 0, violatedCount: 0 },
+			ageDays: 10,
+			retirementMinAgeDays: 60,
+		});
+		expect(d.action).toBe('regenerate');
+		expect('sourceKnowledgeIds' in d).toBe(true);
+	});
+
+	it('does not regenerate when sourceChanged but no IDs', () => {
+		const d = evaluatePromotedExternalStaleness({
+			directory: '',
+			skillSlug: 'x',
+			sourceChanged: true,
+			usage: { appliedExplicitCount: 5, ignoredCount: 0, violatedCount: 0 },
+			ageDays: 90,
+			retirementMinAgeDays: 60,
+		});
+		expect(d.action).not.toBe('regenerate');
+	});
+});

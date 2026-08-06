@@ -13,7 +13,7 @@
  *   scope-guard (which is coder-only), so the hash check is the staleness guard.
  */
 
-import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import * as path from 'node:path';
 import {
 	DEFAULT_SKILL_OPT_CONFIG,
@@ -36,9 +36,33 @@ import {
 import { buildSkillEvalTasks } from '../services/skill-optimizer/skill-eval-tasks.js';
 import {
 	computeContentHash,
+	isValidCandidateId,
+	isValidSkillSlug,
 	readArtifact,
 	replayCandidate,
 } from '../services/skill-optimizer/store.js';
+
+/** Validate slug + candidateId at the command boundary (F4: defense-in-depth
+ * against path traversal via unvalidated IDs in read-path handlers). */
+function validateIds(
+	skillSlug: string,
+	candidateId: string | undefined,
+	json: boolean,
+): string | null {
+	if (!isValidSkillSlug(skillSlug)) {
+		return emit(
+			{ status: 'error', error: `invalid skill slug: ${skillSlug}` },
+			json,
+		);
+	}
+	if (candidateId !== undefined && !isValidCandidateId(candidateId)) {
+		return emit(
+			{ status: 'error', error: `invalid candidate id: ${candidateId}` },
+			json,
+		);
+	}
+	return null;
+}
 
 /** Resolve the skill_opt config from raw plugin config, fail-open to defaults. */
 export function resolveSkillOptConfig(input: unknown): SkillOptConfig {
@@ -139,6 +163,7 @@ export async function handleSkillOptPlan(
 		dispatcher: runtime.dispatcher,
 		models,
 		validationTasks: [],
+		inputRoot: directory,
 		baselineModel: models[0],
 		candidateModel: models[0],
 		origin: 'command:skill-opt:plan',
@@ -178,7 +203,11 @@ export async function handleSkillOptRun(
 		);
 	}
 	const models = parsed.models.length > 0 ? parsed.models : ['default'];
-	// Materialize the skill-eval task set into a fresh inputRoot.
+	// Materialize the skill-eval task set into a fresh inputRoot. The evaluation
+	// substrate resolves ALL task paths (instruction, environment, scorer argv)
+	// against inputRoot and enforces path containment, so the scorer must live
+	// INSIDE inputRoot (F1 fix: previously scorerRelPath pointed outside, which
+	// the containment check rejected).
 	const inputRoot = path.join(
 		directory,
 		'.swarm',
@@ -187,15 +216,21 @@ export async function handleSkillOptRun(
 		'_eval-input',
 	);
 	if (!existsSync(inputRoot)) mkdirSync(inputRoot, { recursive: true });
-	const scorerRelPath = path.join(
-		'..',
-		'..',
-		'..',
+	// Copy the scorer wrapper into the inputRoot so it passes containment.
+	const scorerDir = path.join(inputRoot, 'scoring');
+	if (!existsSync(scorerDir)) mkdirSync(scorerDir, { recursive: true });
+	const scorerSource = path.join(
+		directory,
 		'evaluation-fixtures',
 		'skill-eval',
 		'scoring',
 		'score-skill-eval.cjs',
 	);
+	const scorerDest = path.join(scorerDir, 'score-skill-eval.cjs');
+	if (existsSync(scorerSource)) {
+		copyFileSync(scorerSource, scorerDest);
+	}
+	const scorerRelPath = path.join('scoring', 'score-skill-eval.cjs');
 	const validationTasks = buildSkillEvalTasks({ inputRoot, scorerRelPath });
 	// Drive the full loop (caps + convergence + K-stop) rather than a single round.
 	const result = await runOptimizationLoop({
@@ -206,6 +241,7 @@ export async function handleSkillOptRun(
 		dispatcher: runtime.dispatcher,
 		models,
 		validationTasks,
+		inputRoot,
 		baselineModel: models[0],
 		candidateModel: models[0],
 		origin: 'command:skill-opt:run',
@@ -231,6 +267,8 @@ export async function handleSkillOptStatus(
 			parsed.json,
 		);
 	}
+	const idError = validateIds(parsed.skillSlug, candidateId, parsed.json);
+	if (idError) return idError;
 	const state = currentCandidateState(directory, parsed.skillSlug, candidateId);
 	return emit(
 		{ status: 'ok', skillSlug: parsed.skillSlug, candidateId, ...state },
@@ -250,6 +288,12 @@ export async function handleSkillOptDiff(
 			parsed.json,
 		);
 	}
+	const idError = validateIds(
+		parsed.skillSlug,
+		parsed.candidateId,
+		parsed.json,
+	);
+	if (idError) return idError;
 	const baseline =
 		readArtifact(
 			directory,
@@ -407,6 +451,12 @@ export async function handleSkillOptHistory(
 			parsed.json,
 		);
 	}
+	const idError = validateIds(
+		parsed.skillSlug,
+		parsed.candidateId,
+		parsed.json,
+	);
+	if (idError) return idError;
 	const replay = replayCandidate(
 		directory,
 		parsed.skillSlug,
