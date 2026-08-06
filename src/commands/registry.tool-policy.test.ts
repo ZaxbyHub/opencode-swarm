@@ -78,6 +78,12 @@ describe('toolPolicy classification snapshot — no regression', () => {
 		'memory link',
 		'memory link status',
 		'memory unlink',
+		// #1822: governed skill optimizer — read-only/proposal commands
+		'skill-opt',
+		'skill-opt plan',
+		'skill-opt status',
+		'skill-opt diff',
+		'skill-opt history',
 	]);
 
 	const EXPECTED_HUMAN_ONLY = new Set<string>([
@@ -86,6 +92,11 @@ describe('toolPolicy classification snapshot — no regression', () => {
 		'memory import',
 		'memory migrate',
 		// FR-004: sdd project moved to agent
+		// #1822: governed skill optimizer — mutating commands (human-gated)
+		'skill-opt run',
+		'skill-opt approve',
+		'skill-opt reject',
+		'skill-opt rollback',
 	]);
 
 	const EXPECTED_RESTRICTED = new Set<string>([
@@ -149,14 +160,14 @@ describe('toolPolicy classification snapshot — no regression', () => {
 		}
 	});
 
-	test("'human-only' bucket contains exactly the expected 4 commands", () => {
+	test("'human-only' bucket contains exactly the expected 8 commands", () => {
 		const actual = new Set<string>();
 		for (const [name, entry] of Object.entries(COMMAND_REGISTRY)) {
 			if ((entry as CommandEntry).toolPolicy === 'human-only') {
 				actual.add(name);
 			}
 		}
-		expect(actual.size).toBe(4);
+		expect(actual.size).toBe(8);
 		for (const name of EXPECTED_HUMAN_ONLY) {
 			expect(actual.has(name)).toBe(true);
 		}
