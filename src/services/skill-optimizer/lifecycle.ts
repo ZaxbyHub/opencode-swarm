@@ -20,11 +20,11 @@
 import {
 	appendEvent,
 	computeStateHash,
-	replayCandidate,
 	quarantineSuffix,
-	writeStateProjection,
+	replayCandidate,
 	type SkillOptEvent,
 	type SkillOptState,
+	writeStateProjection,
 } from './store.js';
 
 export class IllegalTransitionError extends Error {
@@ -69,7 +69,10 @@ export function isLegalTransition(
 	return allowed.includes(to);
 }
 
-export function assertTransition(from: SkillOptState | null, to: SkillOptState): void {
+export function assertTransition(
+	from: SkillOptState | null,
+	to: SkillOptState,
+): void {
 	if (!isLegalTransition(from, to)) {
 		throw new IllegalTransitionError(from, to);
 	}
@@ -113,7 +116,11 @@ export interface RecordTransitionResult {
 export async function recordTransition(
 	input: RecordTransitionInput,
 ): Promise<RecordTransitionResult> {
-	const replay = replayCandidate(input.directory, input.skillSlug, input.candidateId);
+	const replay = replayCandidate(
+		input.directory,
+		input.skillSlug,
+		input.candidateId,
+	);
 	let fromState = replay.state;
 
 	// Quarantine a corrupt tail so the canonical ledger is preserved and the
@@ -122,7 +129,9 @@ export async function recordTransition(
 		quarantineSuffix(input.directory, input.skillSlug, replay.badSuffix);
 		// Derive fromState from the last complete event.
 		fromState =
-			replay.events.length === 0 ? null : replay.events[replay.events.length - 1].toState;
+			replay.events.length === 0
+				? null
+				: replay.events[replay.events.length - 1].toState;
 	}
 
 	assertTransition(fromState, input.toState);
@@ -172,14 +181,24 @@ export function currentCandidateState(
 	directory: string,
 	skillSlug: string,
 	candidateId: string,
-): { state: SkillOptState | null; lastEvent: SkillOptEvent | null; truncated: boolean } {
+): {
+	state: SkillOptState | null;
+	lastEvent: SkillOptEvent | null;
+	truncated: boolean;
+} {
 	const replay = replayCandidate(directory, skillSlug, candidateId);
 	if (replay.truncated && replay.badSuffix) {
 		quarantineSuffix(directory, skillSlug, replay.badSuffix);
 	}
 	return {
-		state: replay.events.length === 0 ? null : replay.events[replay.events.length - 1].toState,
-		lastEvent: replay.events.length === 0 ? null : replay.events[replay.events.length - 1],
+		state:
+			replay.events.length === 0
+				? null
+				: replay.events[replay.events.length - 1].toState,
+		lastEvent:
+			replay.events.length === 0
+				? null
+				: replay.events[replay.events.length - 1],
 		truncated: replay.truncated,
 	};
 }

@@ -15,18 +15,39 @@
 
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import * as path from 'node:path';
-import { DEFAULT_SKILL_OPT_CONFIG, type SkillOptConfig } from '../config/schema.js';
+import {
+	DEFAULT_SKILL_OPT_CONFIG,
+	type SkillOptConfig,
+} from '../config/schema.js';
 import type { EvaluationModelDispatcher } from '../evaluation/model-dispatcher.js';
-import { activateCandidate, rollbackCandidate } from '../services/skill-optimizer/activation.js';
-import { runOptimizationLoop, runOptimizationRound } from '../services/skill-optimizer/controller.js';
-import { currentCandidateState, isLegalTransition } from '../services/skill-optimizer/lifecycle.js';
-import { computeContentHash, readArtifact, replayCandidate } from '../services/skill-optimizer/store.js';
-import { recordTransition } from '../services/skill-optimizer/lifecycle.js';
+import {
+	activateCandidate,
+	rollbackCandidate,
+} from '../services/skill-optimizer/activation.js';
+import {
+	runOptimizationLoop,
+	runOptimizationRound,
+} from '../services/skill-optimizer/controller.js';
+import {
+	currentCandidateState,
+	isLegalTransition,
+	recordTransition,
+} from '../services/skill-optimizer/lifecycle.js';
 import { buildSkillEvalTasks } from '../services/skill-optimizer/skill-eval-tasks.js';
+import {
+	computeContentHash,
+	readArtifact,
+	replayCandidate,
+} from '../services/skill-optimizer/store.js';
 
 /** Resolve the skill_opt config from raw plugin config, fail-open to defaults. */
 export function resolveSkillOptConfig(input: unknown): SkillOptConfig {
-	if (input === undefined || input === null || typeof input !== 'object' || Array.isArray(input)) {
+	if (
+		input === undefined ||
+		input === null ||
+		typeof input !== 'object' ||
+		Array.isArray(input)
+	) {
 		return { ...DEFAULT_SKILL_OPT_CONFIG };
 	}
 	const cfg = input as Partial<SkillOptConfig>;
@@ -56,8 +77,21 @@ function parseSkillOptArgs(args: string[]): ParsedArgs {
 	// --models m1,m2
 	const modelsIdx = args.indexOf('--models');
 	const modelsArg = modelsIdx >= 0 ? args[modelsIdx + 1] : undefined;
-	const models = modelsArg ? modelsArg.split(',').map((s) => s.trim()).filter(Boolean) : [];
-	return { json, confirm, skillSlug, candidateId, expectedContentHash, models, dryRun };
+	const models = modelsArg
+		? modelsArg
+				.split(',')
+				.map((s) => s.trim())
+				.filter(Boolean)
+		: [];
+	return {
+		json,
+		confirm,
+		skillSlug,
+		candidateId,
+		expectedContentHash,
+		models,
+		dryRun,
+	};
 }
 
 function emit(result: unknown, json: boolean): string {
@@ -93,7 +127,8 @@ export async function handleSkillOptPlan(
 	runtime: SkillOptRuntime = {},
 ): Promise<string> {
 	const parsed = parseSkillOptArgs(args);
-	if (!parsed.skillSlug) return emit({ status: 'error', error: 'missing skill slug' }, parsed.json);
+	if (!parsed.skillSlug)
+		return emit({ status: 'error', error: 'missing skill slug' }, parsed.json);
 	const config = runtime.config ?? readSkillOptConfigFromProject(directory);
 	const models = parsed.models.length > 0 ? parsed.models : ['default'];
 	const result = await runOptimizationRound({
@@ -119,25 +154,48 @@ export async function handleSkillOptRun(
 	runtime: SkillOptRuntime = {},
 ): Promise<string> {
 	const parsed = parseSkillOptArgs(args);
-	if (!parsed.skillSlug) return emit({ status: 'error', error: 'missing skill slug' }, parsed.json);
+	if (!parsed.skillSlug)
+		return emit({ status: 'error', error: 'missing skill slug' }, parsed.json);
 	const config = runtime.config ?? readSkillOptConfigFromProject(directory);
 	if (!config.enabled) {
 		return emit(
-			{ status: 'disabled', error: 'skill_opt.enabled is false — set to true to execute rounds (proposal-only by default)' },
+			{
+				status: 'disabled',
+				error:
+					'skill_opt.enabled is false — set to true to execute rounds (proposal-only by default)',
+			},
 			parsed.json,
 		);
 	}
 	if (!parsed.confirm) {
 		return emit(
-			{ status: 'needs-confirm', error: 'pass --confirm to execute a round (this consumes a held-out test set)' },
+			{
+				status: 'needs-confirm',
+				error:
+					'pass --confirm to execute a round (this consumes a held-out test set)',
+			},
 			parsed.json,
 		);
 	}
 	const models = parsed.models.length > 0 ? parsed.models : ['default'];
 	// Materialize the skill-eval task set into a fresh inputRoot.
-	const inputRoot = path.join(directory, '.swarm', 'evolution', 'skills', '_eval-input');
+	const inputRoot = path.join(
+		directory,
+		'.swarm',
+		'evolution',
+		'skills',
+		'_eval-input',
+	);
 	if (!existsSync(inputRoot)) mkdirSync(inputRoot, { recursive: true });
-	const scorerRelPath = path.join('..', '..', '..', 'evaluation-fixtures', 'skill-eval', 'scoring', 'score-skill-eval.cjs');
+	const scorerRelPath = path.join(
+		'..',
+		'..',
+		'..',
+		'evaluation-fixtures',
+		'skill-eval',
+		'scoring',
+		'score-skill-eval.cjs',
+	);
 	const validationTasks = buildSkillEvalTasks({ inputRoot, scorerRelPath });
 	// Drive the full loop (caps + convergence + K-stop) rather than a single round.
 	const result = await runOptimizationLoop({
@@ -161,16 +219,23 @@ export async function handleSkillOptStatus(
 	args: string[],
 ): Promise<string> {
 	const parsed = parseSkillOptArgs(args);
-	if (!parsed.skillSlug) return emit({ status: 'error', error: 'missing skill slug' }, parsed.json);
+	if (!parsed.skillSlug)
+		return emit({ status: 'error', error: 'missing skill slug' }, parsed.json);
 	const candidateId = parsed.candidateId;
 	if (!candidateId) {
 		return emit(
-			{ status: 'error', error: 'missing candidateId (usage: status <slug> <candidateId>)' },
+			{
+				status: 'error',
+				error: 'missing candidateId (usage: status <slug> <candidateId>)',
+			},
 			parsed.json,
 		);
 	}
 	const state = currentCandidateState(directory, parsed.skillSlug, candidateId);
-	return emit({ status: 'ok', skillSlug: parsed.skillSlug, candidateId, ...state }, parsed.json);
+	return emit(
+		{ status: 'ok', skillSlug: parsed.skillSlug, candidateId, ...state },
+		parsed.json,
+	);
 }
 
 /** `/swarm skill-opt diff <slug> <candidateId>` — baseline vs candidate diff. */
@@ -180,11 +245,30 @@ export async function handleSkillOptDiff(
 ): Promise<string> {
 	const parsed = parseSkillOptArgs(args);
 	if (!parsed.skillSlug || !parsed.candidateId) {
-		return emit({ status: 'error', error: 'usage: diff <slug> <candidateId>' }, parsed.json);
+		return emit(
+			{ status: 'error', error: 'usage: diff <slug> <candidateId>' },
+			parsed.json,
+		);
 	}
-	const baseline = readArtifact(directory, parsed.skillSlug, parsed.candidateId, 'baseline.md') ?? '';
-	const candidate = readArtifact(directory, parsed.skillSlug, parsed.candidateId, 'candidate.md') ?? '';
-	const replay = replayCandidate(directory, parsed.skillSlug, parsed.candidateId);
+	const baseline =
+		readArtifact(
+			directory,
+			parsed.skillSlug,
+			parsed.candidateId,
+			'baseline.md',
+		) ?? '';
+	const candidate =
+		readArtifact(
+			directory,
+			parsed.skillSlug,
+			parsed.candidateId,
+			'candidate.md',
+		) ?? '';
+	const replay = replayCandidate(
+		directory,
+		parsed.skillSlug,
+		parsed.candidateId,
+	);
 	// Compute a real line-level diff summary (final critic FI1).
 	const baselineLines = baseline.split('\n');
 	const candidateLines = candidate.split('\n');
@@ -227,7 +311,11 @@ export async function handleSkillOptApprove(
 	const parsed = parseSkillOptArgs(args);
 	if (!parsed.skillSlug || !parsed.candidateId || !parsed.expectedContentHash) {
 		return emit(
-			{ status: 'error', error: 'usage: approve <slug> <candidateId> --expected-content-hash <hash>' },
+			{
+				status: 'error',
+				error:
+					'usage: approve <slug> <candidateId> --expected-content-hash <hash>',
+			},
 			parsed.json,
 		);
 	}
@@ -238,7 +326,10 @@ export async function handleSkillOptApprove(
 		actor: 'user:skill-opt-approve',
 		expectedContentHash: parsed.expectedContentHash,
 	});
-	return emit({ status: result.activated ? 'activated' : 'error', ...result }, parsed.json);
+	return emit(
+		{ status: result.activated ? 'activated' : 'error', ...result },
+		parsed.json,
+	);
 }
 
 /** `/swarm skill-opt reject <slug> <candidateId>` — record rejection (no mutation). */
@@ -248,12 +339,22 @@ export async function handleSkillOptReject(
 ): Promise<string> {
 	const parsed = parseSkillOptArgs(args);
 	if (!parsed.skillSlug || !parsed.candidateId) {
-		return emit({ status: 'error', error: 'usage: reject <slug> <candidateId>' }, parsed.json);
+		return emit(
+			{ status: 'error', error: 'usage: reject <slug> <candidateId>' },
+			parsed.json,
+		);
 	}
-	const state = currentCandidateState(directory, parsed.skillSlug, parsed.candidateId);
+	const state = currentCandidateState(
+		directory,
+		parsed.skillSlug,
+		parsed.candidateId,
+	);
 	if (!isLegalTransition(state.state, 'rejected')) {
 		return emit(
-			{ status: 'error', error: `cannot reject a candidate in state ${state.state ?? '<none>'} (legal from: drafted, smoke_validated, validation_running, inconclusive)` },
+			{
+				status: 'error',
+				error: `cannot reject a candidate in state ${state.state ?? '<none>'} (legal from: drafted, smoke_validated, validation_running, inconclusive)`,
+			},
 			parsed.json,
 		);
 	}
@@ -277,7 +378,10 @@ export async function handleSkillOptRollback(
 ): Promise<string> {
 	const parsed = parseSkillOptArgs(args);
 	if (!parsed.skillSlug || !parsed.candidateId) {
-		return emit({ status: 'error', error: 'usage: rollback <slug> <candidateId>' }, parsed.json);
+		return emit(
+			{ status: 'error', error: 'usage: rollback <slug> <candidateId>' },
+			parsed.json,
+		);
 	}
 	const result = await rollbackCandidate({
 		directory,
@@ -285,7 +389,10 @@ export async function handleSkillOptRollback(
 		candidateId: parsed.candidateId,
 		actor: 'user:skill-opt-rollback',
 	});
-	return emit({ status: result.rolledBack ? 'rolled_back' : 'error', ...result }, parsed.json);
+	return emit(
+		{ status: result.rolledBack ? 'rolled_back' : 'error', ...result },
+		parsed.json,
+	);
 }
 
 /** `/swarm skill-opt history <slug> <candidateId>` — replay log. */
@@ -295,9 +402,16 @@ export async function handleSkillOptHistory(
 ): Promise<string> {
 	const parsed = parseSkillOptArgs(args);
 	if (!parsed.skillSlug || !parsed.candidateId) {
-		return emit({ status: 'error', error: 'usage: history <slug> <candidateId>' }, parsed.json);
+		return emit(
+			{ status: 'error', error: 'usage: history <slug> <candidateId>' },
+			parsed.json,
+		);
 	}
-	const replay = replayCandidate(directory, parsed.skillSlug, parsed.candidateId);
+	const replay = replayCandidate(
+		directory,
+		parsed.skillSlug,
+		parsed.candidateId,
+	);
 	return emit(
 		{
 			status: 'ok',
@@ -312,8 +426,18 @@ export async function handleSkillOptHistory(
 }
 
 /** Compute the current content hash of a skill (for the approve hash arg). */
-export function computeSkillContentHash(directory: string, skillSlug: string): string {
-	const skillPath = path.join(directory, '.opencode', 'skills', 'generated', skillSlug, 'SKILL.md');
+export function computeSkillContentHash(
+	directory: string,
+	skillSlug: string,
+): string {
+	const skillPath = path.join(
+		directory,
+		'.opencode',
+		'skills',
+		'generated',
+		skillSlug,
+		'SKILL.md',
+	);
 	const content = existsSync(skillPath) ? readFileSync(skillPath, 'utf8') : '';
 	return computeContentHash(content);
 }

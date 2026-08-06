@@ -330,7 +330,11 @@ function evaluateContent(
 	score: number;
 	failures: string[];
 } {
-	return scoreSkillPhrases({ content, required: testCase.required_phrases, forbidden: testCase.forbidden_phrases });
+	return scoreSkillPhrases({
+		content,
+		required: testCase.required_phrases,
+		forbidden: testCase.forbidden_phrases,
+	});
 }
 
 /**

@@ -19,15 +19,31 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
-import { runOptimizationRound, _internals } from '../../src/services/skill-optimizer/controller.js';
-import { activateCandidate, rollbackCandidate } from '../../src/services/skill-optimizer/activation.js';
-import { currentCandidateState } from '../../src/services/skill-optimizer/lifecycle.js';
-import { computeContentHash, replayCandidate } from '../../src/services/skill-optimizer/store.js';
-import { DEFAULT_SKILL_OPT_CONFIG } from '../../src/config/schema.js';
 import type { SkillOptConfig } from '../../src/config/schema.js';
+import { DEFAULT_SKILL_OPT_CONFIG } from '../../src/config/schema.js';
+import {
+	activateCandidate,
+	rollbackCandidate,
+} from '../../src/services/skill-optimizer/activation.js';
+import {
+	_internals,
+	runOptimizationRound,
+} from '../../src/services/skill-optimizer/controller.js';
+import { currentCandidateState } from '../../src/services/skill-optimizer/lifecycle.js';
+import {
+	computeContentHash,
+	replayCandidate,
+} from '../../src/services/skill-optimizer/store.js';
 
 let tmp = '';
 const originalInternals = { ..._internals };
@@ -42,7 +58,8 @@ afterEach(() => {
 	Object.assign(_internals, originalInternals);
 });
 
-const INCUMBENT = '---\nname: e2e\ndescription: an e2e skill\n---\n# E2E Skill\n\nOriginal body.\n';
+const INCUMBENT =
+	'---\nname: e2e\ndescription: an e2e skill\n---\n# E2E Skill\n\nOriginal body.\n';
 const CFG: SkillOptConfig = { ...DEFAULT_SKILL_OPT_CONFIG, enabled: true };
 
 function writeIncumbent(content: string): string {
@@ -72,7 +89,10 @@ describe('skill-opt e2e — full lifecycle with source/evaluator integrity', () 
 		// Stub validation to "accept" — the substrate's actual decision logic is
 		// covered by its own unit tests; here we verify the optimizer's wiring.
 		_internals.evaluateCandidateV1 = mock(() =>
-			Promise.resolve({ run: { runId: 'run-1' } as never, decision: makeAcceptDecision() as never }),
+			Promise.resolve({
+				run: { runId: 'run-1' } as never,
+				decision: makeAcceptDecision() as never,
+			}),
 		) as never;
 
 		// 1. Run a round (no dry-run → full validation).
@@ -110,13 +130,26 @@ describe('skill-opt e2e — full lifecycle with source/evaluator integrity', () 
 		expect(afterActivation).toContain('Optimization Notes');
 
 		// 6. Rollback restores the incumbent.
-		const rb = await rollbackCandidate({ directory: tmp, skillSlug: 'e2e-skill', candidateId: round.candidateId, actor: 'test' });
+		const rb = await rollbackCandidate({
+			directory: tmp,
+			skillSlug: 'e2e-skill',
+			candidateId: round.candidateId,
+			actor: 'test',
+		});
 		expect(rb.rolledBack).toBe(true);
 		expect(readFileSync(skillPath, 'utf8')).toBe(INCUMBENT);
 
 		// 7. History is append-only — both activated and rolled_back persist.
 		const ledger = readFileSync(
-			path.join(tmp, '.swarm', 'evolution', 'skills', 'e2e-skill', round.candidateId, 'lifecycle.jsonl'),
+			path.join(
+				tmp,
+				'.swarm',
+				'evolution',
+				'skills',
+				'e2e-skill',
+				round.candidateId,
+				'lifecycle.jsonl',
+			),
 			'utf8',
 		);
 		expect(ledger).toContain('"toState":"activated"');
@@ -134,7 +167,10 @@ describe('skill-opt e2e — replay survives a corrupt tail', () => {
 	it('quarantines a corrupt suffix and restarts from the last complete event', async () => {
 		const skillPath = writeIncumbent(INCUMBENT);
 		_internals.evaluateCandidateV1 = mock(() =>
-			Promise.resolve({ run: { runId: 'run-1' } as never, decision: makeAcceptDecision() as never }),
+			Promise.resolve({
+				run: { runId: 'run-1' } as never,
+				decision: makeAcceptDecision() as never,
+			}),
 		) as never;
 		const round = await runOptimizationRound({
 			directory: tmp,
@@ -148,7 +184,15 @@ describe('skill-opt e2e — replay survives a corrupt tail', () => {
 			dispatcher: (() => {}) as never,
 		});
 		// Corrupt the ledger tail.
-		const file = path.join(tmp, '.swarm', 'evolution', 'skills', 'e2e-skill', round.candidateId, 'lifecycle.jsonl');
+		const file = path.join(
+			tmp,
+			'.swarm',
+			'evolution',
+			'skills',
+			'e2e-skill',
+			round.candidateId,
+			'lifecycle.jsonl',
+		);
 		writeFileSync(file, '\n{corrupt}\n', { flag: 'a' });
 		// Replay stops at the corruption and reports truncated.
 		const replay = replayCandidate(tmp, 'e2e-skill', round.candidateId);

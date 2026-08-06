@@ -9,16 +9,28 @@ import {
 	buildGeneratorInputs,
 	draftCandidate,
 	enforceTrustRegion,
-	isEquivalentPatch,
 	type GeneratorInputs,
+	isEquivalentPatch,
 } from '../../../../src/services/skill-optimizer/candidates.js';
 
-const BASE_BUDGET = { maxChangedLines: 200, maxChangedBytes: 20_000, maxChangedSections: 6 };
+const BASE_BUDGET = {
+	maxChangedLines: 200,
+	maxChangedBytes: 20_000,
+	maxChangedSections: 6,
+};
 
 function makeInputs(overrides: Partial<GeneratorInputs> = {}): GeneratorInputs {
 	return {
 		baselineContent: '---\nname: test\ndescription: x\n---\n# Test\nbody',
-		eligibleEvidence: [{ id: 'e1', triggers: ['t'], requiredActions: ['a'], forbiddenActions: [], confidence: 0.8 }],
+		eligibleEvidence: [
+			{
+				id: 'e1',
+				triggers: ['t'],
+				requiredActions: ['a'],
+				forbiddenActions: [],
+				confidence: 0.8,
+			},
+		],
 		counterexamples: [],
 		budget: BASE_BUDGET,
 		...overrides,
@@ -35,7 +47,9 @@ describe('skill-opt candidates — trust region', () => {
 			rollbackSnapshot: '',
 			metric: { eligibilityScore: 0 },
 		};
-		expect(() => enforceTrustRegion(big, BASE_BUDGET)).toThrow(/TrustRegionViolation.*changedLines/);
+		expect(() => enforceTrustRegion(big, BASE_BUDGET)).toThrow(
+			/TrustRegionViolation.*changedLines/,
+		);
 	});
 
 	it('accepts a candidate within the trust region', () => {
@@ -65,10 +79,20 @@ describe('skill-opt candidates — leakage denial', () => {
 			buildGeneratorInputs({
 				baselineContent: 'x',
 				eligibleEvidence: [
-					{ id: 'e1', triggers: ['task-test-abc-123'], requiredActions: ['a'], forbiddenActions: [], confidence: 0.8 },
+					{
+						id: 'e1',
+						triggers: ['task-test-abc-123'],
+						requiredActions: ['a'],
+						forbiddenActions: [],
+						confidence: 0.8,
+					},
 				],
 				counterexamples: [],
-				budget: { max_changed_lines: 200, max_changed_bytes: 20_000, max_changed_sections: 6 } as never,
+				budget: {
+					max_changed_lines: 200,
+					max_changed_bytes: 20_000,
+					max_changed_sections: 6,
+				} as never,
 				claimedTestTaskIds: new Set(['task-test-abc-123']),
 			});
 		} catch (err) {
@@ -80,9 +104,21 @@ describe('skill-opt candidates — leakage denial', () => {
 	it('allows evidence that does not reference held-out task IDs', () => {
 		const inputs = buildGeneratorInputs({
 			baselineContent: 'x',
-			eligibleEvidence: [{ id: 'e1', triggers: ['safe'], requiredActions: ['a'], forbiddenActions: [], confidence: 0.8 }],
+			eligibleEvidence: [
+				{
+					id: 'e1',
+					triggers: ['safe'],
+					requiredActions: ['a'],
+					forbiddenActions: [],
+					confidence: 0.8,
+				},
+			],
 			counterexamples: [],
-			budget: { max_changed_lines: 200, max_changed_bytes: 20_000, max_changed_sections: 6 } as never,
+			budget: {
+				max_changed_lines: 200,
+				max_changed_bytes: 20_000,
+				max_changed_sections: 6,
+			} as never,
 			claimedTestTaskIds: new Set(['task-test-xyz']),
 		});
 		expect(inputs.eligibleEvidence).toHaveLength(1);
@@ -92,9 +128,21 @@ describe('skill-opt candidates — leakage denial', () => {
 		// A held-out ID `task-1` must not match a legitimate phrase `task-123`.
 		const inputs = buildGeneratorInputs({
 			baselineContent: 'x',
-			eligibleEvidence: [{ id: 'e1', triggers: ['reference task-123 for details'], requiredActions: ['a'], forbiddenActions: [], confidence: 0.8 }],
+			eligibleEvidence: [
+				{
+					id: 'e1',
+					triggers: ['reference task-123 for details'],
+					requiredActions: ['a'],
+					forbiddenActions: [],
+					confidence: 0.8,
+				},
+			],
 			counterexamples: [],
-			budget: { max_changed_lines: 200, max_changed_bytes: 20_000, max_changed_sections: 6 } as never,
+			budget: {
+				max_changed_lines: 200,
+				max_changed_bytes: 20_000,
+				max_changed_sections: 6,
+			} as never,
 			claimedTestTaskIds: new Set(['task-1']),
 		});
 		expect(inputs.eligibleEvidence).toHaveLength(1);
@@ -105,9 +153,21 @@ describe('skill-opt candidates — leakage denial', () => {
 		try {
 			buildGeneratorInputs({
 				baselineContent: 'x',
-				eligibleEvidence: [{ id: 'task-1', triggers: ['safe'], requiredActions: ['a'], forbiddenActions: [], confidence: 0.8 }],
+				eligibleEvidence: [
+					{
+						id: 'task-1',
+						triggers: ['safe'],
+						requiredActions: ['a'],
+						forbiddenActions: [],
+						confidence: 0.8,
+					},
+				],
 				counterexamples: [],
-				budget: { max_changed_lines: 200, max_changed_bytes: 20_000, max_changed_sections: 6 } as never,
+				budget: {
+					max_changed_lines: 200,
+					max_changed_bytes: 20_000,
+					max_changed_sections: 6,
+				} as never,
 				claimedTestTaskIds: new Set(['task-1']),
 			});
 		} catch (err) {
@@ -128,6 +188,8 @@ describe('skill-opt candidates — deterministic draft', () => {
 
 	it('drafts within the trust region by default', () => {
 		const candidate = draftCandidate(makeInputs());
-		expect(candidate.diffSummary.changedLines).toBeLessThanOrEqual(BASE_BUDGET.maxChangedLines);
+		expect(candidate.diffSummary.changedLines).toBeLessThanOrEqual(
+			BASE_BUDGET.maxChangedLines,
+		);
 	});
 });

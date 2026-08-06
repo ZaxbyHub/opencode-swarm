@@ -1896,9 +1896,15 @@ export async function runCuratorPhase(
 					return nu === na || nu.endsWith(`/${na}`) || na.endsWith(`/${nu}`);
 				});
 				const usage = {
-					appliedExplicitCount: skillUsage.filter((e) => e.complianceVerdict === 'compliant').length,
-					ignoredCount: skillUsage.filter((e) => e.complianceVerdict === 'ignored').length,
-					violatedCount: skillUsage.filter((e) => e.complianceVerdict === 'violated').length,
+					appliedExplicitCount: skillUsage.filter(
+						(e) => e.complianceVerdict === 'compliant',
+					).length,
+					ignoredCount: skillUsage.filter(
+						(e) => e.complianceVerdict === 'ignored',
+					).length,
+					violatedCount: skillUsage.filter(
+						(e) => e.complianceVerdict === 'violated',
+					).length,
 					failedAfterShownCount: 0,
 				};
 				// Age: days since the skill file was last modified (best-effort proxy).
@@ -1919,7 +1925,11 @@ export async function runCuratorPhase(
 				if (!input) continue;
 				const decision = evaluatePromotedExternalStaleness(input);
 				if (decision.action === 'retire') {
-					await retireSkill(directory, active.slug, `promoted-external-staleness: ${decision.reason}`);
+					await retireSkill(
+						directory,
+						active.slug,
+						`promoted-external-staleness: ${decision.reason}`,
+					);
 					phaseDigest.summary += ` [promoted-external skill '${active.slug}' retired: ${decision.reason}]`;
 				}
 				// 'regenerate' is advisory here — the curator does not auto-regenerate

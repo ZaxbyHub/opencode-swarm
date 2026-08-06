@@ -8,7 +8,10 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
-import { validateSkillSmoke, _internals } from '../../../../src/services/skill-optimizer/smoke.js';
+import {
+	_internals,
+	validateSkillSmoke,
+} from '../../../../src/services/skill-optimizer/smoke.js';
 
 let tmp = '';
 
@@ -73,7 +76,10 @@ describe('skill-opt smoke — symlink/reparse denial', () => {
 		const realIsSym = _internals.isSymbolicLink;
 		_internals.isSymbolicLink = () => true;
 		try {
-			mkdirSync(path.join(tmp, '.opencode', 'skills', 'generated', 'sym-skill'), { recursive: true });
+			mkdirSync(
+				path.join(tmp, '.opencode', 'skills', 'generated', 'sym-skill'),
+				{ recursive: true },
+			);
 			const result = await validateSkillSmoke({
 				directory: tmp,
 				skillSlug: 'sym-skill',
@@ -91,7 +97,10 @@ describe('skill-opt smoke — symlink/reparse denial', () => {
 		const realEscaped = _internals.escapedRoot;
 		_internals.escapedRoot = () => true;
 		try {
-			mkdirSync(path.join(tmp, '.opencode', 'skills', 'generated', 'esc-skill'), { recursive: true });
+			mkdirSync(
+				path.join(tmp, '.opencode', 'skills', 'generated', 'esc-skill'),
+				{ recursive: true },
+			);
 			const result = await validateSkillSmoke({
 				directory: tmp,
 				skillSlug: 'esc-skill',

@@ -27,7 +27,11 @@ export interface GeneratorInputs {
 	/** Counterexamples from the rejection ledger (prevents re-drafting rejects). */
 	counterexamples: readonly string[];
 	/** Edit/token budget for this round. */
-	budget: { maxChangedLines: number; maxChangedBytes: number; maxChangedSections: number };
+	budget: {
+		maxChangedLines: number;
+		maxChangedBytes: number;
+		maxChangedSections: number;
+	};
 }
 
 export interface SanitizedEvidence {
@@ -62,16 +66,24 @@ export function buildGeneratorInputs(args: {
 	for (const ev of args.eligibleEvidence) {
 		// Exact-equality on the evidence id.
 		if (args.claimedTestTaskIds.has(ev.id)) {
-			throw new Error(`LEAKAGE_DETECTED: evidence id ${ev.id} is a held-out task`);
+			throw new Error(
+				`LEAKAGE_DETECTED: evidence id ${ev.id} is a held-out task`,
+			);
 		}
 		// Word-boundary match on phrase fields.
-		const phraseFields = [...ev.triggers, ...ev.requiredActions, ...ev.forbiddenActions];
+		const phraseFields = [
+			...ev.triggers,
+			...ev.requiredActions,
+			...ev.forbiddenActions,
+		];
 		for (const id of args.claimedTestTaskIds) {
 			const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 			const re = new RegExp(`(^|[^A-Za-z0-9_-])${escaped}([^A-Za-z0-9_-]|$)`);
 			for (const phrase of phraseFields) {
 				if (re.test(phrase)) {
-					throw new Error(`LEAKAGE_DETECTED: evidence ${ev.id} phrase references held-out task ${id}`);
+					throw new Error(
+						`LEAKAGE_DETECTED: evidence ${ev.id} phrase references held-out task ${id}`,
+					);
 				}
 			}
 		}
@@ -90,7 +102,11 @@ export function buildGeneratorInputs(args: {
 
 export interface DraftedCandidate {
 	content: string;
-	diffSummary: { changedLines: number; changedBytes: number; changedSections: number };
+	diffSummary: {
+		changedLines: number;
+		changedBytes: number;
+		changedSections: number;
+	};
 	rationale: string;
 	risks: string[];
 	rollbackSnapshot: string; // == baselineContent, stored for atomic rollback
@@ -125,28 +141,40 @@ function defaultDeterministicDraft(inputs: GeneratorInputs): DraftedCandidate {
 		? baseline
 		: `${baseline.trimEnd()}\n\n${section}`;
 	const changedLines = countChangedLines(baseline, content);
-	const changedBytes = Buffer.byteLength(content, 'utf8') - Buffer.byteLength(baseline, 'utf8');
+	const changedBytes =
+		Buffer.byteLength(content, 'utf8') - Buffer.byteLength(baseline, 'utf8');
 	return {
 		content,
 		diffSummary: {
 			changedLines,
 			changedBytes: Math.abs(changedBytes),
-			changedSections: content.split(/^## /m).length - baseline.split(/^## /m).length,
+			changedSections:
+				content.split(/^## /m).length - baseline.split(/^## /m).length,
 		},
-		rationale: 'deterministic seed from eligible evidence + rejection-ledger counterexamples',
+		rationale:
+			'deterministic seed from eligible evidence + rejection-ledger counterexamples',
 		risks: [
 			'deterministic draft may underfit if evidence is sparse',
 			'supplemental LLM draft gated off (proposal-only)',
 		],
 		rollbackSnapshot: baseline,
-		metric: { eligibilityScore: inputs.eligibleEvidence.reduce((s, e) => s + e.confidence, 0) },
+		metric: {
+			eligibilityScore: inputs.eligibleEvidence.reduce(
+				(s, e) => s + e.confidence,
+				0,
+			),
+		},
 	};
 }
 
 /** Enforce the trust region; throws TrustRegionViolation on breach. */
 export function enforceTrustRegion(
 	candidate: DraftedCandidate,
-	budget: { maxChangedLines: number; maxChangedBytes: number; maxChangedSections: number },
+	budget: {
+		maxChangedLines: number;
+		maxChangedBytes: number;
+		maxChangedSections: number;
+	},
 ): void {
 	const v = candidate.diffSummary;
 	const breaches: string[] = [];
@@ -157,7 +185,9 @@ export function enforceTrustRegion(
 		breaches.push(`changedBytes ${v.changedBytes} > ${budget.maxChangedBytes}`);
 	}
 	if (v.changedSections > budget.maxChangedSections) {
-		breaches.push(`changedSections ${v.changedSections} > ${budget.maxChangedSections}`);
+		breaches.push(
+			`changedSections ${v.changedSections} > ${budget.maxChangedSections}`,
+		);
 	}
 	if (breaches.length > 0) {
 		throw new Error(`TrustRegionViolation: ${breaches.join('; ')}`);
@@ -165,7 +195,10 @@ export function enforceTrustRegion(
 }
 
 /** Equivalent-patch detection: identical content hash → no-op, stop convergence. */
-export function isEquivalentPatch(baselineContent: string, candidateContent: string): boolean {
+export function isEquivalentPatch(
+	baselineContent: string,
+	candidateContent: string,
+): boolean {
 	return hashContent(baselineContent) === hashContent(candidateContent);
 }
 

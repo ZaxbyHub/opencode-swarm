@@ -61,15 +61,48 @@ describe('promoted-external staleness', () => {
 
 describe('retirement gate', () => {
 	it('refuses below the age floor', () => {
-		expect(evaluateRetirement({ usage: { appliedExplicitCount: 0, ignoredCount: 5, violatedCount: 0, failedAfterShownCount: 0 }, ageDays: 10, minAgeDays: 60 }).retire).toBe(false);
+		expect(
+			evaluateRetirement({
+				usage: {
+					appliedExplicitCount: 0,
+					ignoredCount: 5,
+					violatedCount: 0,
+					failedAfterShownCount: 0,
+				},
+				ageDays: 10,
+				minAgeDays: 60,
+			}).retire,
+		).toBe(false);
 	});
 
 	it('retires never-applied with strong negatives past the floor', () => {
-		expect(evaluateRetirement({ usage: { appliedExplicitCount: 0, ignoredCount: 5, violatedCount: 0, failedAfterShownCount: 0 }, ageDays: 90, minAgeDays: 60 }).retire).toBe(true);
+		expect(
+			evaluateRetirement({
+				usage: {
+					appliedExplicitCount: 0,
+					ignoredCount: 5,
+					violatedCount: 0,
+					failedAfterShownCount: 0,
+				},
+				ageDays: 90,
+				minAgeDays: 60,
+			}).retire,
+		).toBe(true);
 	});
 
 	it('keeps a supported skill even if old', () => {
-		expect(evaluateRetirement({ usage: { appliedExplicitCount: 10, ignoredCount: 1, violatedCount: 0, failedAfterShownCount: 0 }, ageDays: 365, minAgeDays: 60 }).retire).toBe(false);
+		expect(
+			evaluateRetirement({
+				usage: {
+					appliedExplicitCount: 10,
+					ignoredCount: 1,
+					violatedCount: 0,
+					failedAfterShownCount: 0,
+				},
+				ageDays: 365,
+				minAgeDays: 60,
+			}).retire,
+		).toBe(false);
 	});
 });
 

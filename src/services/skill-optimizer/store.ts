@@ -23,14 +23,17 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
-import { closeSync, fsyncSync, openSync, writeFileSync } from 'node:fs';
 import {
+	closeSync,
 	existsSync,
+	fsyncSync,
 	mkdirSync,
+	openSync,
 	readFileSync,
 	renameSync,
 	statSync,
 	unlinkSync,
+	writeFileSync,
 	writeFileSync as writeFileSyncAsync,
 } from 'node:fs';
 import * as path from 'node:path';
@@ -97,7 +100,9 @@ function canonicalJson(value: unknown): string {
 
 /** SHA-256 over canonical JSON of an arbitrary value. */
 export function computeStateHash(value: unknown): string {
-	return createHash('sha256').update(canonicalJson(value), 'utf8').digest('hex');
+	return createHash('sha256')
+		.update(canonicalJson(value), 'utf8')
+		.digest('hex');
 }
 
 /** SHA-256 of raw text content (a SKILL.md body). */
@@ -165,12 +170,30 @@ export function mintCandidateId(): string {
 	return randomUUID();
 }
 
-function candidateDir(directory: string, skillSlug: string, candidateId: string): string {
-	return path.join(directory, '.swarm', 'evolution', 'skills', skillSlug, candidateId);
+function candidateDir(
+	directory: string,
+	skillSlug: string,
+	candidateId: string,
+): string {
+	return path.join(
+		directory,
+		'.swarm',
+		'evolution',
+		'skills',
+		skillSlug,
+		candidateId,
+	);
 }
 
-function ledgerPath(directory: string, skillSlug: string, candidateId: string): string {
-	return path.join(candidateDir(directory, skillSlug, candidateId), 'lifecycle.jsonl');
+function ledgerPath(
+	directory: string,
+	skillSlug: string,
+	candidateId: string,
+): string {
+	return path.join(
+		candidateDir(directory, skillSlug, candidateId),
+		'lifecycle.jsonl',
+	);
 }
 
 function stateProjectionPath(
@@ -178,10 +201,17 @@ function stateProjectionPath(
 	skillSlug: string,
 	candidateId: string,
 ): string {
-	return path.join(candidateDir(directory, skillSlug, candidateId), 'state.json');
+	return path.join(
+		candidateDir(directory, skillSlug, candidateId),
+		'state.json',
+	);
 }
 
-function ensureCandidateDir(directory: string, skillSlug: string, candidateId: string): string {
+function ensureCandidateDir(
+	directory: string,
+	skillSlug: string,
+	candidateId: string,
+): string {
 	const dir = candidateDir(directory, skillSlug, candidateId);
 	if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 	return dir;
@@ -192,7 +222,11 @@ function ensureCandidateDir(directory: string, skillSlug: string, candidateId: s
  * `src/plan/ledger.ts:169`). fsync guarantees the bytes hit durable storage
  * before the rename makes the file visible.
  */
-function writeFileFsyncedThenRename(tempPath: string, targetPath: string, data: string): void {
+function writeFileFsyncedThenRename(
+	tempPath: string,
+	targetPath: string,
+	data: string,
+): void {
 	const fd = openSync(tempPath, 'w');
 	try {
 		writeFileSync(fd, data, 'utf8');
@@ -237,20 +271,36 @@ export async function appendEvent(
 	if (!isValidCandidateId(eventInput.candidateId)) {
 		throw new Error(`invalid candidate id: ${eventInput.candidateId}`);
 	}
-	const filePath = ledgerPath(directory, eventInput.skillSlug, eventInput.candidateId);
+	const filePath = ledgerPath(
+		directory,
+		eventInput.skillSlug,
+		eventInput.candidateId,
+	);
 	ensureCandidateDir(directory, eventInput.skillSlug, eventInput.candidateId);
 
 	return _internals.withEvidenceLock(
 		directory,
-		path.join('.swarm', 'evolution', 'skills', eventInput.skillSlug, eventInput.candidateId, 'lifecycle.jsonl'),
+		path.join(
+			'.swarm',
+			'evolution',
+			'skills',
+			eventInput.skillSlug,
+			eventInput.candidateId,
+			'lifecycle.jsonl',
+		),
 		'skill-opt-ledger',
 		'append-skill-opt-event',
 		async () => {
-			const existing = existsSync(filePath) ? readFileSync(filePath, 'utf8') : '';
+			const existing = existsSync(filePath)
+				? readFileSync(filePath, 'utf8')
+				: '';
 			const events = parseEventsFromText(existing);
-			const nextSeq = events.length === 0 ? 1 : events[events.length - 1].seq + 1;
+			const nextSeq =
+				events.length === 0 ? 1 : events[events.length - 1].seq + 1;
 			const lastEvent = events.length === 0 ? null : events[events.length - 1];
-			const hashBefore = lastEvent ? lastEvent.hashAfter : computeStateHash(null);
+			const hashBefore = lastEvent
+				? lastEvent.hashAfter
+				: computeStateHash(null);
 
 			const event: SkillOptEvent = {
 				seq: nextSeq,
@@ -274,12 +324,22 @@ export async function appendEvent(
 
 			const tempPath = `${filePath}.tmp.${Date.now()}.${Math.floor(Math.random() * 1e9)}`;
 			const line = `${JSON.stringify(event)}\n`;
-			_internals.writeFileFsyncedThenRename(tempPath, filePath, existing + line);
+			_internals.writeFileFsyncedThenRename(
+				tempPath,
+				filePath,
+				existing + line,
+			);
 
 			// Replay-after-write verification — partial/corrupt writes never count.
-			const verify = parseEventsFromText(_internals.readFileSync(filePath, 'utf8'));
+			const verify = parseEventsFromText(
+				_internals.readFileSync(filePath, 'utf8'),
+			);
 			const last = verify.length > 0 ? verify[verify.length - 1] : null;
-			if (!last || last.seq !== event.seq || last.hashAfter !== event.hashAfter) {
+			if (
+				!last ||
+				last.seq !== event.seq ||
+				last.hashAfter !== event.hashAfter
+			) {
 				throw new Error(
 					`skill-opt ledger append verification failed for candidate ${event.candidateId} seq ${event.seq}`,
 				);
@@ -417,7 +477,11 @@ export function writeStateProjection(
 		updatedAt: new Date().toISOString(),
 	};
 	const tempPath = `${target}.tmp.${Date.now()}.${Math.floor(Math.random() * 1e9)}`;
-	_internals.writeFileFsyncedThenRename(tempPath, target, `${JSON.stringify(projection, null, 2)}\n`);
+	_internals.writeFileFsyncedThenRename(
+		tempPath,
+		target,
+		`${JSON.stringify(projection, null, 2)}\n`,
+	);
 }
 
 /** Snapshot a text file (baseline/candidate/rollback) atomically. */
@@ -442,7 +506,10 @@ export function readArtifact(
 	candidateId: string,
 	fileName: string,
 ): string | null {
-	const target = path.join(candidateDir(directory, skillSlug, candidateId), fileName);
+	const target = path.join(
+		candidateDir(directory, skillSlug, candidateId),
+		fileName,
+	);
 	if (!existsSync(target)) return null;
 	return readFileSync(target, 'utf8');
 }

@@ -47,7 +47,8 @@ export const DEFAULT_SKILL_EVAL_TASKS: readonly SkillEvalTaskSpec[] = [
 			'Read the candidate SKILL.md and confirm it declares a clear trigger condition. Return the trigger verbatim.',
 		requiredPhrases: ['trigger', 'when'],
 		forbiddenPhrases: ['maybe', 'sometimes'],
-		environmentBody: '## Trigger\n\nWhen the agent is about to delegate a coding task.',
+		environmentBody:
+			'## Trigger\n\nWhen the agent is about to delegate a coding task.',
 	},
 	{
 		id: 'skill-eval-required-actions',
@@ -57,7 +58,8 @@ export const DEFAULT_SKILL_EVAL_TASKS: readonly SkillEvalTaskSpec[] = [
 			'Read the candidate SKILL.md and confirm it lists the required actions an agent must take. Return them verbatim.',
 		requiredPhrases: ['required', 'must'],
 		forbiddenPhrases: ['shortcut', 'skip'],
-		environmentBody: '## Required Procedure\n\n1. Confirm scope. 2. Delegate. 3. Verify.',
+		environmentBody:
+			'## Required Procedure\n\n1. Confirm scope. 2. Delegate. 3. Verify.',
 	},
 	{
 		id: 'skill-eval-reviewer-checks',

@@ -25,12 +25,14 @@ export type OutcomeSignalClass = 'positive' | 'negative' | 'zero_evidence';
  * evidence. Callers that want the strict zero-evidence classification should
  * pass the raw outcome counts.
  */
-export function classifyOutcomeSignal(
-	outcomes: RetrievalOutcome | undefined,
-): { signal: number; classification: OutcomeSignalClass } {
+export function classifyOutcomeSignal(outcomes: RetrievalOutcome | undefined): {
+	signal: number;
+	classification: OutcomeSignalClass;
+} {
 	const signal = computeOutcomeSignal(outcomes);
 	const positives =
-		(outcomes?.applied_explicit_count ?? 0) + (outcomes?.succeeded_after_shown_count ?? 0);
+		(outcomes?.applied_explicit_count ?? 0) +
+		(outcomes?.succeeded_after_shown_count ?? 0);
 	const negatives =
 		(outcomes?.ignored_count ?? 0) +
 		(outcomes?.violated_count ?? 0) +
@@ -82,13 +84,20 @@ export function evaluateRetirement(args: {
 }): RetirementEvaluation {
 	const { usage, ageDays, minAgeDays } = args;
 	if (ageDays < minAgeDays) {
-		return { retire: false, reason: `below minimum age floor (${ageDays}d < ${minAgeDays}d)` };
+		return {
+			retire: false,
+			reason: `below minimum age floor (${ageDays}d < ${minAgeDays}d)`,
+		};
 	}
 	const applied = usage.appliedExplicitCount;
-	const negative = usage.ignoredCount + usage.violatedCount + usage.failedAfterShownCount;
+	const negative =
+		usage.ignoredCount + usage.violatedCount + usage.failedAfterShownCount;
 	// Never-applied AND materially-negative → retire.
 	if (applied === 0 && negative >= 3) {
-		return { retire: true, reason: `never applied, ${negative} negative signals, ${ageDays}d old` };
+		return {
+			retire: true,
+			reason: `never applied, ${negative} negative signals, ${ageDays}d old`,
+		};
 	}
 	// Still-supported but overwhelmingly negative → retire only if extreme.
 	if (applied > 0 && negative / applied >= 5) {

@@ -5,9 +5,16 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+	existsSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
+import { recordTransition } from '../../../../src/services/skill-optimizer/lifecycle.js';
 import {
 	appendEvent,
 	computeContentHash,
@@ -16,11 +23,10 @@ import {
 	isValidSkillSlug,
 	mintCandidateId,
 	quarantineSuffix,
+	readArtifact,
 	replayCandidate,
 	writeArtifact,
-	readArtifact,
 } from '../../../../src/services/skill-optimizer/store.js';
-import { recordTransition } from '../../../../src/services/skill-optimizer/lifecycle.js';
 
 let tmp = '';
 
@@ -51,7 +57,9 @@ describe('skill-opt store — IDs and hashes', () => {
 	it('computes deterministic content + state hashes', () => {
 		expect(computeContentHash('abc')).toBe(computeContentHash('abc'));
 		expect(computeContentHash('abc')).not.toBe(computeContentHash('abd'));
-		expect(computeStateHash({ b: 2, a: 1 })).toBe(computeStateHash({ a: 1, b: 2 }));
+		expect(computeStateHash({ b: 2, a: 1 })).toBe(
+			computeStateHash({ a: 1, b: 2 }),
+		);
 	});
 });
 
@@ -84,8 +92,26 @@ describe('skill-opt store — append + replay', () => {
 	it('chains subsequent events with hashBefore = previous hashAfter', async () => {
 		const slug = 'chain-skill';
 		const id = mintCandidateId();
-		await recordTransition({ directory: tmp, skillSlug: slug, candidateId: id, toState: 'discovered', eventType: 'discover', actor: 't', origin: 't', reason: 'r' });
-		await recordTransition({ directory: tmp, skillSlug: slug, candidateId: id, toState: 'drafted', eventType: 'draft', actor: 't', origin: 't', reason: 'r' });
+		await recordTransition({
+			directory: tmp,
+			skillSlug: slug,
+			candidateId: id,
+			toState: 'discovered',
+			eventType: 'discover',
+			actor: 't',
+			origin: 't',
+			reason: 'r',
+		});
+		await recordTransition({
+			directory: tmp,
+			skillSlug: slug,
+			candidateId: id,
+			toState: 'drafted',
+			eventType: 'draft',
+			actor: 't',
+			origin: 't',
+			reason: 'r',
+		});
 		const replay = replayCandidate(tmp, slug, id);
 		expect(replay.events).toHaveLength(2);
 		expect(replay.events[1].hashBefore).toBe(replay.events[0].hashAfter);
@@ -109,9 +135,19 @@ describe('skill-opt store — append + replay', () => {
 		});
 		expect(event.seq).toBe(1);
 		// File exists and is one valid JSON line.
-		const file = path.join(tmp, '.swarm', 'evolution', 'skills', 'verify-skill', 'cand-verify', 'lifecycle.jsonl');
+		const file = path.join(
+			tmp,
+			'.swarm',
+			'evolution',
+			'skills',
+			'verify-skill',
+			'cand-verify',
+			'lifecycle.jsonl',
+		);
 		expect(existsSync(file)).toBe(true);
-		const lines = readFileSync(file, 'utf8').split('\n').filter((l) => l.trim());
+		const lines = readFileSync(file, 'utf8')
+			.split('\n')
+			.filter((l) => l.trim());
 		expect(lines).toHaveLength(1);
 	});
 });
@@ -120,8 +156,25 @@ describe('skill-opt store — corrupt tail quarantine', () => {
 	it('stops at the first unparseable line and quarantines the suffix', async () => {
 		const slug = 'corrupt-skill';
 		const id = mintCandidateId();
-		await recordTransition({ directory: tmp, skillSlug: slug, candidateId: id, toState: 'discovered', eventType: 'discover', actor: 't', origin: 't', reason: 'r' });
-		const file = path.join(tmp, '.swarm', 'evolution', 'skills', slug, id, 'lifecycle.jsonl');
+		await recordTransition({
+			directory: tmp,
+			skillSlug: slug,
+			candidateId: id,
+			toState: 'discovered',
+			eventType: 'discover',
+			actor: 't',
+			origin: 't',
+			reason: 'r',
+		});
+		const file = path.join(
+			tmp,
+			'.swarm',
+			'evolution',
+			'skills',
+			slug,
+			id,
+			'lifecycle.jsonl',
+		);
 		// Append a corrupt line.
 		writeFileSync(file, '\n{not valid json}\n', { flag: 'a' });
 		const replay = replayCandidate(tmp, slug, id);
@@ -141,10 +194,29 @@ describe('skill-opt store — corrupt tail quarantine', () => {
 	it('detects a tampered hashAfter as corruption', async () => {
 		const slug = 'tamper-skill';
 		const id = mintCandidateId();
-		await recordTransition({ directory: tmp, skillSlug: slug, candidateId: id, toState: 'discovered', eventType: 'discover', actor: 't', origin: 't', reason: 'r' });
-		const file = path.join(tmp, '.swarm', 'evolution', 'skills', slug, id, 'lifecycle.jsonl');
+		await recordTransition({
+			directory: tmp,
+			skillSlug: slug,
+			candidateId: id,
+			toState: 'discovered',
+			eventType: 'discover',
+			actor: 't',
+			origin: 't',
+			reason: 'r',
+		});
+		const file = path.join(
+			tmp,
+			'.swarm',
+			'evolution',
+			'skills',
+			slug,
+			id,
+			'lifecycle.jsonl',
+		);
 		// Tamper: rewrite the event with a bogus hashAfter.
-		const original = JSON.parse(readFileSync(file, 'utf8')) as { hashAfter: string };
+		const original = JSON.parse(readFileSync(file, 'utf8')) as {
+			hashAfter: string;
+		};
 		original.hashAfter = '0'.repeat(64);
 		writeFileSync(file, `${JSON.stringify(original)}\n`);
 		const replay = replayCandidate(tmp, slug, id);
@@ -154,9 +226,17 @@ describe('skill-opt store — corrupt tail quarantine', () => {
 
 describe('skill-opt store — artifacts', () => {
 	it('writes and reads artifact files atomically', () => {
-		const p = writeArtifact(tmp, 'art-skill', 'cand-art', 'baseline.md', 'baseline content');
+		const p = writeArtifact(
+			tmp,
+			'art-skill',
+			'cand-art',
+			'baseline.md',
+			'baseline content',
+		);
 		expect(existsSync(p)).toBe(true);
-		expect(readArtifact(tmp, 'art-skill', 'cand-art', 'baseline.md')).toBe('baseline content');
+		expect(readArtifact(tmp, 'art-skill', 'cand-art', 'baseline.md')).toBe(
+			'baseline content',
+		);
 		expect(readArtifact(tmp, 'art-skill', 'cand-art', 'missing.md')).toBeNull();
 	});
 });

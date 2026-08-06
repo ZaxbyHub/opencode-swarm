@@ -5,8 +5,12 @@
  */
 
 import { describe, expect, it } from 'bun:test';
-import { COMMAND_REGISTRY, resolveCommand, VALID_COMMANDS } from '../../../src/commands/registry.js';
 import { buildHelpText } from '../../../src/commands/index.js';
+import {
+	COMMAND_REGISTRY,
+	resolveCommand,
+	VALID_COMMANDS,
+} from '../../../src/commands/registry.js';
 
 const SUBCOMMANDS = [
 	'skill-opt plan',
@@ -45,7 +49,9 @@ describe('skill-opt command registry', () => {
 		expect(COMMAND_REGISTRY['skill-opt approve'].toolPolicy).toBe('human-only');
 		expect(COMMAND_REGISTRY['skill-opt run'].toolPolicy).toBe('human-only');
 		expect(COMMAND_REGISTRY['skill-opt reject'].toolPolicy).toBe('human-only');
-		expect(COMMAND_REGISTRY['skill-opt rollback'].toolPolicy).toBe('human-only');
+		expect(COMMAND_REGISTRY['skill-opt rollback'].toolPolicy).toBe(
+			'human-only',
+		);
 	});
 
 	it('marks read-only commands agent-callable', () => {

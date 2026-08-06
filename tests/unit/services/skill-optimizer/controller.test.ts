@@ -8,9 +8,13 @@ import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
-import { runOptimizationLoop, runOptimizationRound, _internals } from '../../../../src/services/skill-optimizer/controller.js';
-import { DEFAULT_SKILL_OPT_CONFIG } from '../../../../src/config/schema.js';
 import type { SkillOptConfig } from '../../../../src/config/schema.js';
+import { DEFAULT_SKILL_OPT_CONFIG } from '../../../../src/config/schema.js';
+import {
+	_internals,
+	runOptimizationLoop,
+	runOptimizationRound,
+} from '../../../../src/services/skill-optimizer/controller.js';
 
 let tmp = '';
 const originalInternals = { ..._internals };
@@ -38,7 +42,9 @@ describe('skill-opt controller — concurrency / lock ordering', () => {
 	it('returns a locked status when the project lock is already held', async () => {
 		writeIncumbent('lock-skill', '---\nname: x\ndescription: y\n---\n# body\n');
 		// Stub tryAcquireLock to always report "not acquired".
-		_internals.tryAcquireLock = mock(() => Promise.resolve({ acquired: false }));
+		_internals.tryAcquireLock = mock(() =>
+			Promise.resolve({ acquired: false }),
+		);
 		const result = await runOptimizationRound({
 			directory: tmp,
 			skillSlug: 'lock-skill',
@@ -79,7 +85,8 @@ describe('skill-opt controller — equivalent patch stop', () => {
 		// Empty evidence → deterministic draft appends nothing new if the
 		// baseline already ends with the section. Use a baseline that already
 		// has the section to force equivalence.
-		const baseline = '---\nname: x\ndescription: y\n---\n# body\n\n## Optimization Notes\n';
+		const baseline =
+			'---\nname: x\ndescription: y\n---\n# body\n\n## Optimization Notes\n';
 		writeIncumbent('eq-skill', baseline);
 		const result = await runOptimizationRound({
 			directory: tmp,
@@ -101,9 +108,14 @@ describe('skill-opt controller — equivalent patch stop', () => {
 
 describe('skill-opt controller — caps', () => {
 	it('respects max_transient_retries for transient infra failures (exact call count)', async () => {
-		writeIncumbent('trans-skill', '---\nname: x\ndescription: y\n---\n# body\n');
+		writeIncumbent(
+			'trans-skill',
+			'---\nname: x\ndescription: y\n---\n# body\n',
+		);
 		// Force validation to throw a transient error every time.
-		_internals.evaluateCandidateV1 = mock(() => Promise.reject(new Error('infrastructure_failure: timeout')));
+		_internals.evaluateCandidateV1 = mock(() =>
+			Promise.reject(new Error('infrastructure_failure: timeout')),
+		);
 		const maxRetries = 1;
 		const result = await runOptimizationRound({
 			directory: tmp,
@@ -119,7 +131,10 @@ describe('skill-opt controller — caps', () => {
 		// After exhausting transient retries, the result is inconclusive.
 		expect(result.decidedState).toBe('inconclusive');
 		// The transient path retried exactly maxRetries+1 times (1 initial + maxRetries retries).
-		expect((_internals.evaluateCandidateV1 as ReturnType<typeof mock>).mock.calls.length).toBe(maxRetries + 1);
+		expect(
+			(_internals.evaluateCandidateV1 as ReturnType<typeof mock>).mock.calls
+				.length,
+		).toBe(maxRetries + 1);
 	});
 });
 
@@ -130,7 +145,12 @@ describe('skill-opt controller — optimization loop caps (reviewer CR3 + final 
 		_internals.evaluateCandidateV1 = mock(() =>
 			Promise.resolve({
 				run: { runId: 'r' } as never,
-				decision: { status: 'reject', reasons: ['decisive_regression:baseline'], deadband: 0, lineage: { baselineRunId: 'r' } } as never,
+				decision: {
+					status: 'reject',
+					reasons: ['decisive_regression:baseline'],
+					deadband: 0,
+					lineage: { baselineRunId: 'r' },
+				} as never,
 			}),
 		) as never;
 		const result = await runOptimizationLoop({
@@ -151,11 +171,21 @@ describe('skill-opt controller — optimization loop caps (reviewer CR3 + final 
 	});
 
 	it('stops immediately when a candidate is accepted (no autonomous chaining)', async () => {
-		writeIncumbent('accept-skill', '---\nname: x\ndescription: y\n---\n# body\n');
+		writeIncumbent(
+			'accept-skill',
+			'---\nname: x\ndescription: y\n---\n# body\n',
+		);
 		_internals.evaluateCandidateV1 = mock(() =>
 			Promise.resolve({
 				run: { runId: 'r' } as never,
-				decision: { status: 'accept', reasons: ['improvement_exceeds_deadband_for_baseline_and_historical_best'], deadband: 0, lineage: { baselineRunId: 'r' } } as never,
+				decision: {
+					status: 'accept',
+					reasons: [
+						'improvement_exceeds_deadband_for_baseline_and_historical_best',
+					],
+					deadband: 0,
+					lineage: { baselineRunId: 'r' },
+				} as never,
 			}),
 		) as never;
 		const result = await runOptimizationLoop({
@@ -202,7 +232,9 @@ describe('skill-opt controller — optimization loop caps (reviewer CR3 + final 
 			name = 'TestAlreadyConsumedError';
 		}
 		_internals.evaluateCandidateV1 = mock(() =>
-			Promise.reject(new TestAlreadyConsumedError('task set hash already claimed')),
+			Promise.reject(
+				new TestAlreadyConsumedError('task set hash already claimed'),
+			),
 		);
 		const result = await runOptimizationRound({
 			directory: tmp,

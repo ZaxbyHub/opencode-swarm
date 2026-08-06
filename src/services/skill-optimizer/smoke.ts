@@ -16,7 +16,10 @@ import { existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs';
 import * as path from 'node:path';
 import { validateSkillPath } from '../../hooks/knowledge-validator.js';
 import { spawnAsync } from '../../hooks/spawn-helper.js';
-import { evaluateSkillChange, isRejectedSkillContent } from '../skill-evaluator.js';
+import {
+	evaluateSkillChange,
+	isRejectedSkillContent,
+} from '../skill-evaluator.js';
 
 export interface SmokeInput {
 	directory: string;
@@ -57,12 +60,20 @@ export const _internals = {
 };
 
 /** Validate a candidate skill before the validation-running transition. */
-export async function validateSkillSmoke(input: SmokeInput): Promise<SmokeResult> {
+export async function validateSkillSmoke(
+	input: SmokeInput,
+): Promise<SmokeResult> {
 	const notes: string[] = [];
 
 	// 1. Path containment — the slug must resolve to an allowlisted skill root.
 	//    (validateSkillPath is the repo's existing guard; reuse, do not duplicate.)
-	const repoRel = path.join('.opencode', 'skills', 'generated', input.skillSlug, 'SKILL.md');
+	const repoRel = path.join(
+		'.opencode',
+		'skills',
+		'generated',
+		input.skillSlug,
+		'SKILL.md',
+	);
 	if (!_internals.validateSkillPath(repoRel)) {
 		return {
 			ok: false,
@@ -84,14 +95,20 @@ export async function validateSkillSmoke(input: SmokeInput): Promise<SmokeResult
 	);
 	if (existsSync(skillRoot)) {
 		if (_internals.isSymbolicLink(skillRoot)) {
-			return { ok: false, verdict: 'VIOLATED', notes: ['skill root is a symlink (reparse denied)'] };
+			return {
+				ok: false,
+				verdict: 'VIOLATED',
+				notes: ['skill root is a symlink (reparse denied)'],
+			};
 		}
 		const realRoot = _internals.realpath(skillRoot);
 		if (_internals.escapedRoot(input.directory, realRoot)) {
 			return {
 				ok: false,
 				verdict: 'VIOLATED',
-				notes: ['skill root escaped project root after realpath (reparse denied)'],
+				notes: [
+					'skill root escaped project root after realpath (reparse denied)',
+				],
 			};
 		}
 	}
@@ -100,7 +117,11 @@ export async function validateSkillSmoke(input: SmokeInput): Promise<SmokeResult
 	//    and a `description`. Malformed frontmatter fails the smoke check.
 	const fmError = checkFrontmatter(input.candidateContent);
 	if (fmError) {
-		return { ok: false, verdict: 'VIOLATED', notes: [`frontmatter: ${fmError}`] };
+		return {
+			ok: false,
+			verdict: 'VIOLATED',
+			notes: [`frontmatter: ${fmError}`],
+		};
 	}
 
 	// 4. Phrase-eval gate — refuse content the rejection ledger already rejected.
@@ -113,7 +134,9 @@ export async function validateSkillSmoke(input: SmokeInput): Promise<SmokeResult
 		return {
 			ok: false,
 			verdict: 'VIOLATED',
-			notes: ['candidate matches a previously-rejected edit (rejection ledger)'],
+			notes: [
+				'candidate matches a previously-rejected edit (rejection ledger)',
+			],
 		};
 	}
 
@@ -134,7 +157,9 @@ export async function validateSkillSmoke(input: SmokeInput): Promise<SmokeResult
 			notes: [`phrase-eval gate rejected: ${evalResult.reason}`],
 		};
 	} else if (evalResult.status === 'passed') {
-		notes.push(`phrase-eval passed (score ${evalResult.candidateScore.toFixed(2)})`);
+		notes.push(
+			`phrase-eval passed (score ${evalResult.candidateScore.toFixed(2)})`,
+		);
 	}
 
 	// 6. Optional bounded subprocess check — if the skill declares a check command.
@@ -174,7 +199,10 @@ function checkFrontmatter(content: string): string | null {
 }
 
 /** Read the incumbent SKILL.md content, or return empty string if absent. */
-export function readIncumbentContent(directory: string, skillSlug: string): string {
+export function readIncumbentContent(
+	directory: string,
+	skillSlug: string,
+): string {
 	const incumbent = path.join(
 		directory,
 		'.opencode',

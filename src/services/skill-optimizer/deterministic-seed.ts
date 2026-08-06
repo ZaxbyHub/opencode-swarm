@@ -9,9 +9,9 @@
  */
 
 import {
-	selectCandidateEntries,
 	DEFAULT_SKILL_MIN_CONFIDENCE,
 	DEFAULT_SKILL_MIN_CONFIRMATIONS,
+	selectCandidateEntries,
 } from '../skill-generator.js';
 import type { SanitizedEvidence } from './candidates.js';
 
@@ -49,8 +49,12 @@ export async function deterministicSeed(
 		// generator. Free-text fields (notes, rationale) are intentionally
 		// excluded so historical evidence is treated as data, not instructions.
 		const triggers = (entry.triggers ?? []).slice(0, 8).map(String);
-		const requiredActions = (entry.required_actions ?? []).slice(0, 8).map(String);
-		const forbiddenActions = (entry.forbidden_actions ?? []).slice(0, 8).map(String);
+		const requiredActions = (entry.required_actions ?? [])
+			.slice(0, 8)
+			.map(String);
+		const forbiddenActions = (entry.forbidden_actions ?? [])
+			.slice(0, 8)
+			.map(String);
 		if (triggers.length === 0 && requiredActions.length === 0) {
 			filteredOut++;
 			continue;
@@ -65,5 +69,8 @@ export async function deterministicSeed(
 	}
 	// Cap the seed size to keep the generator's input bounded.
 	const capped = evidence.slice(0, 24);
-	return { evidence: capped, filteredOut: filteredOut + Math.max(0, evidence.length - capped.length) };
+	return {
+		evidence: capped,
+		filteredOut: filteredOut + Math.max(0, evidence.length - capped.length),
+	};
 }

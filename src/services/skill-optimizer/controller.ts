@@ -42,23 +42,37 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 import type { SkillOptConfig } from '../../config/schema.js';
-import type { EvaluationModelDispatcher } from '../../evaluation/model-dispatcher.js';
-import { evaluateCandidateV1 } from '../../evaluation/public-api.js';
 import type {
 	EvaluationCandidateV1,
 	EvaluationRunV1,
 	PromotionDecisionV1,
 } from '../../evaluation/contracts.js';
+import type { EvaluationModelDispatcher } from '../../evaluation/model-dispatcher.js';
+import { evaluateCandidateV1 } from '../../evaluation/public-api.js';
 import { tryAcquireLock } from '../../parallel/file-locks.js';
 import { emit as emitTelemetry } from '../../telemetry.js';
-import { mintCandidateId, computeContentHash, writeArtifact } from './store.js';
-import { recordTransition, currentCandidateState } from './lifecycle.js';
-import { draftCandidate, buildGeneratorInputs, type GeneratorInputs } from './candidates.js';
+import {
+	buildGeneratorInputs,
+	draftCandidate,
+	type GeneratorInputs,
+} from './candidates.js';
 import { deterministicSeed } from './deterministic-seed.js';
-import { validateSkillSmoke, readIncumbentContent } from './smoke.js';
+import { currentCandidateState, recordTransition } from './lifecycle.js';
+import { readIncumbentContent, validateSkillSmoke } from './smoke.js';
+import { computeContentHash, mintCandidateId, writeArtifact } from './store.js';
 
-const PROJECT_LOCK_PATH = path.join('.swarm', 'evolution', 'skills', '.run.lock');
-const CONVERGENCE_FILE = path.join('.swarm', 'evolution', 'skills', '.convergence.json');
+const PROJECT_LOCK_PATH = path.join(
+	'.swarm',
+	'evolution',
+	'skills',
+	'.run.lock',
+);
+const CONVERGENCE_FILE = path.join(
+	'.swarm',
+	'evolution',
+	'skills',
+	'.convergence.json',
+);
 
 export type Origin = 'command:skill-opt:run' | 'command:skill-opt:plan';
 
@@ -139,7 +153,13 @@ async function acquireSkillLock(
 	directory: string,
 	skillSlug: string,
 ): Promise<(() => Promise<void>) | null> {
-	const lockPath = path.join('.swarm', 'evolution', 'skills', skillSlug, '.skill.lock');
+	const lockPath = path.join(
+		'.swarm',
+		'evolution',
+		'skills',
+		skillSlug,
+		'.skill.lock',
+	);
 	const result = await _internals.tryAcquireLock(
 		directory,
 		lockPath,
@@ -217,7 +237,13 @@ async function runRoundLocked(
 	});
 
 	// Freeze baseline snapshot.
-	writeArtifact(input.directory, input.skillSlug, candidateId, 'baseline.md', incumbent);
+	writeArtifact(
+		input.directory,
+		input.skillSlug,
+		candidateId,
+		'baseline.md',
+		incumbent,
+	);
 
 	// Deterministic seed (Workstream A) + constrained draft (Workstream B).
 	const seed =
@@ -349,7 +375,11 @@ async function runRoundLocked(
 	});
 
 	// Assemble the substrate inputs and run validation with bounded transient retry.
-	const decision = await runValidationWithTransientRetry(input, candidate.content, incumbent);
+	const decision = await runValidationWithTransientRetry(
+		input,
+		candidate.content,
+		incumbent,
+	);
 
 	const toState =
 		decision.status === 'accept'
@@ -433,12 +463,19 @@ async function runValidationWithTransientRetry(
 				contentHash: computeContentHash(candidateContent),
 			};
 			if (!input.dispatcher) {
-				throw new Error('no evaluation dispatcher available (cannot run validation)');
+				throw new Error(
+					'no evaluation dispatcher available (cannot run validation)',
+				);
 			}
 			// Note: validationTasks are validated/typed at the command layer. Here we
 			// trust the command layer passed valid EvaluationTaskV1[] for split:'test'.
-			const { createModelEvaluationExecutor } = await import('../../evaluation/runner.js');
-			const executor = createModelEvaluationExecutor(input.dispatcher, input.sessionId);
+			const { createModelEvaluationExecutor } = await import(
+				'../../evaluation/runner.js'
+			);
+			const executor = createModelEvaluationExecutor(
+				input.dispatcher,
+				input.sessionId,
+			);
 			const result = await _internals.evaluateCandidateV1({
 				projectRoot: input.directory,
 				inputRoot: input.directory,
@@ -480,10 +517,16 @@ async function runValidationWithTransientRetry(
 			// (a new candidate) to re-test. This enforces the issue's "test-set
 			// result cannot generate another round" invariant without mislabeling
 			// the collision as a hard-stop fault (final critic FC2).
-			if (errName === 'TestAlreadyConsumedError' || message.includes('TestAlreadyConsumed') || message.includes('test-already-consumed')) {
+			if (
+				errName === 'TestAlreadyConsumedError' ||
+				message.includes('TestAlreadyConsumed') ||
+				message.includes('test-already-consumed')
+			) {
 				return {
 					status: 'inconclusive',
-					reasons: [`held-out-test-set-already-consumed: ${message.slice(0, 160)}`],
+					reasons: [
+						`held-out-test-set-already-consumed: ${message.slice(0, 160)}`,
+					],
 					deadband: input.config.deadband,
 				};
 			}
@@ -502,7 +545,9 @@ async function runValidationWithTransientRetry(
 				// Exhausted transient retries → inconclusive (does NOT mutate skill).
 				return {
 					status: 'inconclusive',
-					reasons: [`transient-infra-failure-after-${transientRetries}-retries: ${message.slice(0, 160)}`],
+					reasons: [
+						`transient-infra-failure-after-${transientRetries}-retries: ${message.slice(0, 160)}`,
+					],
 					deadband: input.config.deadband,
 				};
 			}
@@ -525,21 +570,32 @@ async function runValidationWithTransientRetry(
 }
 
 /** Read convergence state (non-improvement count) for the K-stop check. */
-export function readConvergenceState(directory: string): { nonImprovements: number } {
+export function readConvergenceState(directory: string): {
+	nonImprovements: number;
+} {
 	const file = path.join(directory, CONVERGENCE_FILE);
 	if (!existsSync(file)) return { nonImprovements: 0 };
 	try {
-		return JSON.parse(readFileSync(file, 'utf8')) as { nonImprovements: number };
+		return JSON.parse(readFileSync(file, 'utf8')) as {
+			nonImprovements: number;
+		};
 	} catch {
 		return { nonImprovements: 0 };
 	}
 }
 
 /** Update convergence state after a round. */
-export function writeConvergenceState(directory: string, nonImprovements: number): void {
+export function writeConvergenceState(
+	directory: string,
+	nonImprovements: number,
+): void {
 	const dir = path.dirname(path.join(directory, CONVERGENCE_FILE));
 	if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-	writeFileSync(path.join(directory, CONVERGENCE_FILE), JSON.stringify({ nonImprovements }), 'utf8');
+	writeFileSync(
+		path.join(directory, CONVERGENCE_FILE),
+		JSON.stringify({ nonImprovements }),
+		'utf8',
+	);
 }
 
 export interface OptimizationLoopResult {
@@ -581,16 +637,27 @@ export async function runOptimizationLoop(
 		// Immediate stops.
 		if (result.stopReason === 'equivalent-patch') {
 			writeConvergenceState(input.directory, ++nonImprovements);
-			return { rounds, stopped: true, stopReason: 'equivalent-patch-convergence' };
+			return {
+				rounds,
+				stopped: true,
+				stopReason: 'equivalent-patch-convergence',
+			};
 		}
-		if (result.stopReason?.startsWith('skill-locked') || result.stopReason === 'project-run-locked') {
+		if (
+			result.stopReason?.startsWith('skill-locked') ||
+			result.stopReason === 'project-run-locked'
+		) {
 			return { rounds, stopped: true, stopReason: result.stopReason };
 		}
 		if (result.stopReason?.startsWith('smoke:')) {
 			// Smoke failure did not consume the held-out set — retry drafting.
 			writeConvergenceState(input.directory, ++nonImprovements);
 			if (nonImprovements >= input.config.convergence_non_improvements) {
-				return { rounds, stopped: true, stopReason: `convergence-non-improvements:${nonImprovements}` };
+				return {
+					rounds,
+					stopped: true,
+					stopReason: `convergence-non-improvements:${nonImprovements}`,
+				};
 			}
 			continue;
 		}
@@ -625,7 +692,11 @@ export async function runOptimizationLoop(
 		}
 	}
 
-	return { rounds, stopped: true, stopReason: `max-rounds:${input.config.max_rounds}` };
+	return {
+		rounds,
+		stopped: true,
+		stopReason: `max-rounds:${input.config.max_rounds}`,
+	};
 }
 
 /** Re-export current state helper for the command layer. */

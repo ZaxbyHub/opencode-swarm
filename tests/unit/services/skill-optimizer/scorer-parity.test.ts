@@ -12,7 +12,7 @@
 
 import { describe, expect, it } from 'bun:test';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { scoreSkillPhrases } from '../../../../src/services/skill-evaluator.js';
@@ -31,7 +31,13 @@ const SCORER_PATH = path.resolve(
 function resolveScorerPath(): string {
 	const candidates = [
 		SCORER_PATH,
-		path.resolve(process.cwd(), 'evaluation-fixtures', 'skill-eval', 'scoring', 'score-skill-eval.cjs'),
+		path.resolve(
+			process.cwd(),
+			'evaluation-fixtures',
+			'skill-eval',
+			'scoring',
+			'score-skill-eval.cjs',
+		),
 	];
 	for (const c of candidates) {
 		try {
@@ -52,12 +58,37 @@ interface Case {
 }
 
 const MATRIX: Case[] = [
-	{ name: 'all-required-no-forbidden', content: 'use the trigger when delegating', required: ['trigger', 'when'], forbidden: [] },
-	{ name: 'partial-required', content: 'use the trigger', required: ['trigger', 'when', 'how'], forbidden: [] },
+	{
+		name: 'all-required-no-forbidden',
+		content: 'use the trigger when delegating',
+		required: ['trigger', 'when'],
+		forbidden: [],
+	},
+	{
+		name: 'partial-required',
+		content: 'use the trigger',
+		required: ['trigger', 'when', 'how'],
+		forbidden: [],
+	},
 	{ name: 'no-required', content: 'anything', required: [], forbidden: [] },
-	{ name: 'forbidden-present', content: 'use the trigger shortcut when', required: ['trigger', 'when'], forbidden: ['shortcut'] },
-	{ name: 'partial-plus-forbidden', content: 'use the shortcut', required: ['trigger', 'when'], forbidden: ['shortcut'] },
-	{ name: 'case-insensitive', content: 'REVIEWER must CHECK', required: ['reviewer', 'check'], forbidden: [] },
+	{
+		name: 'forbidden-present',
+		content: 'use the trigger shortcut when',
+		required: ['trigger', 'when'],
+		forbidden: ['shortcut'],
+	},
+	{
+		name: 'partial-plus-forbidden',
+		content: 'use the shortcut',
+		required: ['trigger', 'when'],
+		forbidden: ['shortcut'],
+	},
+	{
+		name: 'case-insensitive',
+		content: 'REVIEWER must CHECK',
+		required: ['reviewer', 'check'],
+		forbidden: [],
+	},
 ];
 
 function runCjsScorer(c: Case): number {
@@ -72,15 +103,30 @@ function runCjsScorer(c: Case): number {
 		const specPath = path.join(dir, 'phrase-spec.json');
 		writeFileSync(
 			specPath,
-			JSON.stringify({ required_phrases: c.required, forbidden_phrases: c.forbidden }),
+			JSON.stringify({
+				required_phrases: c.required,
+				forbidden_phrases: c.forbidden,
+			}),
 		);
-		const stdout = execFileSync(process.execPath, [resolveScorerPath(), specPath], {
-			cwd: dir,
-			timeout: 10_000,
-			env: { ...process.env, SWARM_EVAL_ARTIFACT_DIR: artifactDir, SWARM_EVAL_TASK_ID: 't', SWARM_EVAL_CANDIDATE_ID: 'c', SWARM_EVAL_SEED: 's' },
-			maxBuffer: 1024 * 1024,
-		}).toString();
-		const parsed = JSON.parse(stdout.trim().split('\n').pop() as string) as { score: number };
+		const stdout = execFileSync(
+			process.execPath,
+			[resolveScorerPath(), specPath],
+			{
+				cwd: dir,
+				timeout: 10_000,
+				env: {
+					...process.env,
+					SWARM_EVAL_ARTIFACT_DIR: artifactDir,
+					SWARM_EVAL_TASK_ID: 't',
+					SWARM_EVAL_CANDIDATE_ID: 'c',
+					SWARM_EVAL_SEED: 's',
+				},
+				maxBuffer: 1024 * 1024,
+			},
+		).toString();
+		const parsed = JSON.parse(stdout.trim().split('\n').pop() as string) as {
+			score: number;
+		};
 		return parsed.score;
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
@@ -90,7 +136,11 @@ function runCjsScorer(c: Case): number {
 describe('scorer parity — .cjs wrapper equals scoreSkillPhrases (final critic FC1)', () => {
 	for (const c of MATRIX) {
 		it(`matches on ${c.name}`, () => {
-			const expected = scoreSkillPhrases({ content: c.content, required: c.required, forbidden: c.forbidden }).score;
+			const expected = scoreSkillPhrases({
+				content: c.content,
+				required: c.required,
+				forbidden: c.forbidden,
+			}).score;
 			const actual = runCjsScorer(c);
 			expect(actual).toBeCloseTo(expected, 6);
 		});

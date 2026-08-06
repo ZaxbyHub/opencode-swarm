@@ -672,7 +672,8 @@ export const COMMAND_REGISTRY = {
 				dispatcher: ctx.evaluationModelDispatcher,
 				parentSessionId: ctx.sessionID,
 			}),
-		description: 'Propose an optimization round (dry-run; no mutation, no validation)',
+		description:
+			'Propose an optimization round (dry-run; no mutation, no validation)',
 		subcommandOf: 'skill-opt',
 		args: '<slug> [--json] [--models <csv>]',
 		category: 'utility',
@@ -718,7 +719,8 @@ export const COMMAND_REGISTRY = {
 	},
 	'skill-opt reject': {
 		handler: (ctx) => handleSkillOptReject(ctx.directory, ctx.args),
-		description: 'Record a rejection for a candidate (no active-skill mutation)',
+		description:
+			'Record a rejection for a candidate (no active-skill mutation)',
 		subcommandOf: 'skill-opt',
 		args: '<slug> <candidateId> [--json]',
 		category: 'utility',
@@ -726,7 +728,8 @@ export const COMMAND_REGISTRY = {
 	},
 	'skill-opt rollback': {
 		handler: (ctx) => handleSkillOptRollback(ctx.directory, ctx.args),
-		description: 'Restore the pre-activation snapshot (appends a rolled_back event)',
+		description:
+			'Restore the pre-activation snapshot (appends a rolled_back event)',
 		subcommandOf: 'skill-opt',
 		args: '<slug> <candidateId> [--json]',
 		category: 'utility',

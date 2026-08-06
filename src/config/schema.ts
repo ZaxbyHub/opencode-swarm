@@ -2116,9 +2116,19 @@ export const SkillOptConfigSchema = z
 		/** Max validation runs per round (held-out test consumptions). */
 		max_validations_per_round: z.number().int().min(1).max(10).default(1),
 		/** Hard wall-clock budget for a single round, in milliseconds. */
-		max_round_time_ms: z.number().int().min(10_000).max(86_400_000).default(3_600_000),
+		max_round_time_ms: z
+			.number()
+			.int()
+			.min(10_000)
+			.max(86_400_000)
+			.default(3_600_000),
 		/** Soft token spend budget for LLM drafting across a round. */
-		max_tokens_per_round: z.number().int().min(1_000).max(2_000_000).default(50_000),
+		max_tokens_per_round: z
+			.number()
+			.int()
+			.min(1_000)
+			.max(2_000_000)
+			.default(50_000),
 		/**
 		 * Max consecutive rejections before a MULTI-validation controller stops.
 		 * NOTE: in v1 a single `run` performs at most one validation (the held-out

@@ -46,9 +46,11 @@ export interface PromotedExternalStalenessInput {
  * SKILL.md YAML frontmatter CONTENT. Pure (no I/O) so it is directly testable.
  * Returns `{}` if frontmatter is absent or unparseable.
  */
-export function parsePromotedExternalFrontmatter(
-	content: string,
-): { origin?: string; sourceKnowledgeIds?: string[]; promotedAt?: string } {
+export function parsePromotedExternalFrontmatter(content: string): {
+	origin?: string;
+	sourceKnowledgeIds?: string[];
+	promotedAt?: string;
+} {
 	const match = /^---\n([\s\S]*?)\n---/.exec(content);
 	if (!match) return {};
 	const fm = match[1];
@@ -70,9 +72,11 @@ export function parsePromotedExternalFrontmatter(
  * Frontmatter helper: read a SKILL.md from disk and parse its frontmatter.
  * Returns `{}` if absent or unparseable.
  */
-export function readPromotedExternalFrontmatter(
-	skillPath: string,
-): { origin?: string; sourceKnowledgeIds?: string[]; promotedAt?: string } {
+export function readPromotedExternalFrontmatter(skillPath: string): {
+	origin?: string;
+	sourceKnowledgeIds?: string[];
+	promotedAt?: string;
+} {
 	if (!existsSync(skillPath)) return {};
 	const content = readFileSync(skillPath, 'utf8');
 	return parsePromotedExternalFrontmatter(content);

@@ -15,10 +15,17 @@
  * to coder tool calls under a Task, not human slash commands).
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import {
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	renameSync,
+	unlinkSync,
+	writeFileSync,
+} from 'node:fs';
 import * as path from 'node:path';
 import { currentCandidateState, recordTransition } from './lifecycle.js';
-import { computeContentHash, writeArtifact, readArtifact } from './store.js';
+import { computeContentHash, readArtifact, writeArtifact } from './store.js';
 
 /** Atomic file write helper (temp + rename). Used for the SKILL.md mutation. */
 function writeSkillFileAtomic(targetPath: string, content: string): void {
@@ -62,7 +69,9 @@ export interface ActivateResult {
  * the candidate content to the skill root, record the `activated` event with
  * user/origin + snapshot ref.
  */
-export async function activateCandidate(input: ActivateInput): Promise<ActivateResult> {
+export async function activateCandidate(
+	input: ActivateInput,
+): Promise<ActivateResult> {
 	const skillPath = path.join(
 		input.directory,
 		'.opencode',
@@ -71,7 +80,9 @@ export async function activateCandidate(input: ActivateInput): Promise<ActivateR
 		input.skillSlug,
 		'SKILL.md',
 	);
-	const incumbent = existsSync(skillPath) ? readFileSync(skillPath, 'utf8') : '';
+	const incumbent = existsSync(skillPath)
+		? readFileSync(skillPath, 'utf8')
+		: '';
 	const currentHash = computeContentHash(incumbent);
 
 	// Stale-base refusal — the caller must have a current view of the content.
@@ -101,7 +112,11 @@ export async function activateCandidate(input: ActivateInput): Promise<ActivateR
 	// State pre-check: activation is only legal from accepted_pending_approval.
 	// This MUST happen BEFORE any filesystem mutation so an illegal-transition
 	// throw never leaves the SKILL.md mutated with no audit trail (reviewer CR1).
-	const state = currentCandidateState(input.directory, input.skillSlug, input.candidateId);
+	const state = currentCandidateState(
+		input.directory,
+		input.skillSlug,
+		input.candidateId,
+	);
 	if (state.state !== 'accepted_pending_approval') {
 		return {
 			activated: false,
@@ -166,7 +181,9 @@ export interface RollbackResult {
  * event — history is NEVER deleted. The restored snapshot becomes the live
  * SKILL.md content atomically.
  */
-export async function rollbackCandidate(input: RollbackInput): Promise<RollbackResult> {
+export async function rollbackCandidate(
+	input: RollbackInput,
+): Promise<RollbackResult> {
 	const snapshot = readArtifact(
 		input.directory,
 		input.skillSlug,
@@ -174,14 +191,21 @@ export async function rollbackCandidate(input: RollbackInput): Promise<RollbackR
 		'rollback.md',
 	);
 	if (snapshot === null) {
-		return { rolledBack: false, reason: 'no rollback snapshot recorded for this candidate' };
+		return {
+			rolledBack: false,
+			reason: 'no rollback snapshot recorded for this candidate',
+		};
 	}
 
 	// State pre-check: rollback is only legal from activated (or, defensively,
 	// accepted_pending_approval if a snapshot exists). This MUST happen BEFORE
 	// the file mutation so an illegal-transition throw never diverges the live
 	// file from the audit log (reviewer CR2).
-	const state = currentCandidateState(input.directory, input.skillSlug, input.candidateId);
+	const state = currentCandidateState(
+		input.directory,
+		input.skillSlug,
+		input.candidateId,
+	);
 	if (state.state !== 'activated') {
 		return {
 			rolledBack: false,
@@ -197,7 +221,9 @@ export async function rollbackCandidate(input: RollbackInput): Promise<RollbackR
 		input.skillSlug,
 		'SKILL.md',
 	);
-	const beforeContent = existsSync(skillPath) ? readFileSync(skillPath, 'utf8') : '';
+	const beforeContent = existsSync(skillPath)
+		? readFileSync(skillPath, 'utf8')
+		: '';
 
 	// Record the rolled_back event BEFORE the file restore. If this throws, the
 	// SKILL.md is still untouched.
