@@ -757,9 +757,9 @@ never which review dimensions or risk families get evaluated:
 
 | Tier | Diff shape | Dispatch shape (Profiles B/C) |
 |---|---|---|
-| S | ≤ ~50 changed lines, ≤ 3 files, no risk triggers | Consolidate: 1–2 explorer lanes covering all six dimensions (B), or one candidate-generation pass (C); Phase 4 risk families fold into the same lanes as an explicit per-family checklist |
-| M | ≤ ~500 changed lines, or any risk trigger | Dedicated lanes for the triggered dimensions/families; consolidate the remaining thin dimensions into 1–2 lanes |
-| L | > ~500 changed lines, > ~20 files, multi-subsystem, or security-sensitive surface | Full fan-out: one lane per dimension (six) and per-family micro dispatch in Phase 4 |
+| S | ≤ ~100 changed lines, ≤ 5 files, no risk triggers | Consolidate: 1–2 explorer lanes covering all six dimensions (B), or one candidate-generation pass (C); Phase 4 risk families fold into the same lanes as an explicit per-family checklist |
+| M | ≤ ~1500 changed lines, or any risk trigger | Dedicated lanes for the triggered dimensions/families; consolidate the remaining thin dimensions into 1–2 lanes |
+| L | > ~1500 changed lines, > ~50 files, multi-subsystem, or security-sensitive surface | Full fan-out: one lane per dimension (six) and per-family micro dispatch in Phase 4 |
 
 Risk triggers (any one escalates to at least tier M, and the triggered
 dimension/family always gets a dedicated lane at M and above):
@@ -1744,8 +1744,17 @@ checkout …` is repeatedly rejected as read-only shell syntax (the runtime
 requires each git intake command to be a single standalone command), when
 the PR ref is missing, or when the working tree is on the wrong branch and
 the merge-base bind can never verify. In that state the response gate
-suspends further auto-resumes after a small number of consecutive
-unproductive wakes, and the only exits are:
+suspends further auto-resumes for either of two independent reasons: a
+small number of consecutive unproductive wakes (the durable gate `revision`
+did not advance), or the total wake ceiling being reached (tier-scaled
+defaults S=12 / M=54 / L=102, overridable via the `totalWakeCeiling`
+option, and in-memory/per-process so the count resets on plugin reload and
+when the durable gate clears — but NOT across the PR_REVIEW → PR_FEEDBACK
+handoff, which keeps accumulating). Either suspension appends a
+`pr_workflow_wake_suspended` record to `.swarm/events.jsonl` naming the
+reason, both counters, the tier, and the ceiling in force — read that first
+when diagnosing why a review stopped resuming. Either way, the only exits
+are:
 
 1. **Diagnose and retry the canonical standalone sequence.** Run
    `git fetch origin refs/pull/<N>/head`, verify
