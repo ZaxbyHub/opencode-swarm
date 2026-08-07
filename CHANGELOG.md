@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.136.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.136.0...v7.136.1) (2026-08-07)
+
+
+### Bug Fixes
+
+* **pr-review:** accept framed candidate transcripts ([6cd958f](https://github.com/ZaxbyHub/opencode-swarm/commit/6cd958feedd962e078882ba882cd8c24871b7662))
+* **pr-review:** accept framed candidate transcripts ([44c4145](https://github.com/ZaxbyHub/opencode-swarm/commit/44c4145b59a7a3349d18082934822b2118fc2c61))
+
 ## [7.136.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.135.5...v7.136.0) (2026-08-06)
 
 
