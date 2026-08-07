@@ -102,7 +102,13 @@ export async function validateSkillSmoke(
 			};
 		}
 		const realRoot = _internals.realpath(skillRoot);
-		if (_internals.escapedRoot(input.directory, realRoot)) {
+		// Compare against the REALPATH of the project directory, not the raw
+		// path — on macOS, os.tmpdir() returns /var/folders/... which is a
+		// symlink to /private/var/folders/... Without realpath, the containment
+		// check falsely reports escape (the skill root resolves to
+		// /private/var/... while the raw directory is /var/...).
+		const realProjectDir = _internals.realpath(input.directory);
+		if (_internals.escapedRoot(realProjectDir, realRoot)) {
 			return {
 				ok: false,
 				verdict: 'VIOLATED',
