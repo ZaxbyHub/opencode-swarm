@@ -2132,6 +2132,11 @@ async function initializeOpenCodeSwarm(
 					description:
 						'Use /swarm gate-stats to summarize stored gate-audit evidence',
 				},
+				'swarm-skill-opt': {
+					template: '/swarm skill-opt $ARGUMENTS',
+					description:
+						'Use /swarm skill-opt to govern skill optimization (plan|run|status|diff|approve|reject|rollback|history)',
+				},
 				'swarm-costs': {
 					template: '/swarm costs $ARGUMENTS',
 					description:

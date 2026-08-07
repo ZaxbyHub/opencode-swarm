@@ -616,6 +616,12 @@ describe('Command registration parity', () => {
 				'learning',
 				'post-mortem',
 				...NEWER_ALLOWLIST_ADDITIONS,
+				// #1822: governed skill optimizer — read-only/proposal commands
+				'skill-opt',
+				'skill-opt plan',
+				'skill-opt status',
+				'skill-opt diff',
+				'skill-opt history',
 			]),
 			// Aliases that inherit a human-only/restricted canonical target (so
 			// the Bash CLI guardrail blocks the alias/dash form too — see
@@ -634,6 +640,11 @@ describe('Command registration parity', () => {
 				'abort-pr-workflow',
 				'approve-plan-critic',
 				'review',
+				// #1822: governed skill optimizer — mutating commands (human-gated)
+				'skill-opt run',
+				'skill-opt approve',
+				'skill-opt reject',
+				'skill-opt rollback',
 			]),
 			toolCommands: new Set([
 				'pr subscribe',
@@ -643,6 +654,16 @@ describe('Command registration parity', () => {
 				'post-mortem',
 				...NEWER_ALLOWLIST_ADDITIONS,
 				'review',
+				// #1822: all 9 skill-opt commands carry a toolPolicy
+				'skill-opt',
+				'skill-opt plan',
+				'skill-opt status',
+				'skill-opt diff',
+				'skill-opt history',
+				'skill-opt run',
+				'skill-opt approve',
+				'skill-opt reject',
+				'skill-opt rollback',
 			]),
 			noArgs: new Set(['pr status', 'lanes', 'context-map stats']),
 		};

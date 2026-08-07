@@ -1624,6 +1624,10 @@ function validateConfigKey(path: string, value: unknown): ConfigFinding[] {
 			emitObjectTypeMismatch('external_skills', value, findings);
 			break;
 		}
+		case 'skill_opt': {
+			emitObjectTypeMismatch('skill_opt', value, findings);
+			break;
+		}
 
 		// ── DEFAULT CASE: Unknown config key detection + Levenshtein suggestion ──
 		default: {

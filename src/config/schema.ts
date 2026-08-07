@@ -2108,6 +2108,95 @@ export const SkillsConfigSchema = z.object({
 
 export type SkillsConfig = z.infer<typeof SkillsConfigSchema>;
 
+/**
+ * Governed skill optimizer configuration (issue #1822 — SkillOpt 3/7).
+ *
+ * Disabled by default. When disabled, `/swarm skill-opt run` refuses to
+ * execute a round (it still allows `plan`/`status`/`diff`/`history` in
+ * proposal-only mode). Enabling does NOT mutate skills autonomously: every
+ * activation requires an explicit human `/swarm skill-opt approve` with a
+ * current content hash. This config is consulted only inside command handlers
+ * (never on the plugin init path — AGENTS.md invariant #1).
+ */
+export const SkillOptConfigSchema = z
+	.object({
+		/** Master opt-in for executing optimization rounds. Default: false. */
+		enabled: z.boolean().default(false),
+		/** Max optimization rounds per project before the controller stops. */
+		max_rounds: z.number().int().min(1).max(50).default(5),
+		/** Max candidates drafted per round. */
+		max_candidates_per_round: z.number().int().min(1).max(20).default(3),
+		/** Max validation runs per round (held-out test consumptions). */
+		max_validations_per_round: z.number().int().min(1).max(10).default(1),
+		/** Hard wall-clock budget for a single round, in milliseconds. */
+		max_round_time_ms: z
+			.number()
+			.int()
+			.min(10_000)
+			.max(86_400_000)
+			.default(3_600_000),
+		/** Soft token spend budget for LLM drafting across a round. */
+		max_tokens_per_round: z
+			.number()
+			.int()
+			.min(1_000)
+			.max(2_000_000)
+			.default(50_000),
+		/**
+		 * Max consecutive rejections before a MULTI-validation controller stops.
+		 * NOTE: in v1 a single `run` performs at most one validation (the held-out
+		 * test set is single-use), so this knob is forward-compatible and not yet
+		 * enforced. See controller.ts "Caps" docstring.
+		 */
+		max_rejections: z.number().int().min(1).max(50).default(5),
+		/**
+		 * Max consecutive inconclusive results before a MULTI-validation controller
+		 * stops. NOTE: forward-compatible in v1 (single validation per run); see
+		 * controller.ts "Caps" docstring.
+		 */
+		max_inconclusive_rounds: z.number().int().min(0).max(10).default(2),
+		/** Max transient-infra retries before an infra failure becomes inconclusive. */
+		max_transient_retries: z.number().int().min(0).max(20).default(5),
+		/** Convergence stop: K consecutive non-improvements before stopping. */
+		convergence_non_improvements: z.number().int().min(1).max(20).default(3),
+		/** Trust region: max changed lines in a candidate SKILL.md. */
+		max_changed_lines: z.number().int().min(1).max(2000).default(200),
+		/** Trust region: max changed bytes in a candidate SKILL.md. */
+		max_changed_bytes: z.number().int().min(64).max(200_000).default(20_000),
+		/** Trust region: max distinct frontmatter/body sections changed. */
+		max_changed_sections: z.number().int().min(1).max(40).default(6),
+		/** Promotion policy deadband forwarded to the evaluation substrate. */
+		deadband: z.number().min(0).max(1).default(0),
+		/**
+		 * Wall-clock retirement: minimum age (days) before a never-used skill is
+		 * eligible for archival retirement. Real usage signal (#1770) is still
+		 * required; this is a floor, not a trigger.
+		 */
+		retirement_min_age_days: z.number().int().min(1).max(3650).default(60),
+	})
+	.strict();
+
+export type SkillOptConfig = z.infer<typeof SkillOptConfigSchema>;
+
+/** Default governed-skill-optimizer config (fully disabled/safe). */
+export const DEFAULT_SKILL_OPT_CONFIG: SkillOptConfig = {
+	enabled: false,
+	max_rounds: 5,
+	max_candidates_per_round: 3,
+	max_validations_per_round: 1,
+	max_round_time_ms: 3_600_000,
+	max_tokens_per_round: 50_000,
+	max_rejections: 5,
+	max_inconclusive_rounds: 2,
+	max_transient_retries: 5,
+	convergence_non_improvements: 3,
+	max_changed_lines: 200,
+	max_changed_bytes: 20_000,
+	max_changed_sections: 6,
+	deadband: 0,
+	retirement_min_age_days: 60,
+};
+
 // Spec-writer agent configuration
 export const SpecWriterConfigSchema = z.object({
 	/** Default: true (cheap on demand from architect). */
@@ -3393,6 +3482,12 @@ export const PluginConfigSchema = z.object({
 	// When false (default), the tools are absent from the architect tool surface.
 	// Tools remain exported/registered/TOOL_NAMES-listed; only the architect map is gated.
 	skills: SkillsConfigSchema.optional(),
+
+	// Governed skill optimizer (issue #1822 — SkillOpt 3/7). Disabled by
+	// default. `/swarm skill-opt run` requires `enabled: true` to execute a
+	// round; all other subcommands are proposal-only/read-only by default.
+	// Consulted only inside command handlers, never on the init path.
+	skill_opt: SkillOptConfigSchema.optional(),
 });
 
 export type PluginConfig = z.infer<typeof PluginConfigSchema>;

@@ -109,6 +109,16 @@ import {
 	handleSddValidateCommand,
 } from './sdd.js';
 import { handleSimulateCommand } from './simulate.js';
+import {
+	handleSkillOptApprove,
+	handleSkillOptDiff,
+	handleSkillOptHistory,
+	handleSkillOptPlan,
+	handleSkillOptReject,
+	handleSkillOptRollback,
+	handleSkillOptRun,
+	handleSkillOptStatus,
+} from './skill-opt.js';
 import { handleSpecifyCommand } from './specify.js';
 import { handleStatusCommand } from './status.js';
 import { handleSyncPlanCommand } from './sync-plan.js';
@@ -640,6 +650,97 @@ export const COMMAND_REGISTRY = {
 			'Show offline per-model gate catch, false-reject, retry, cost, and reviewer fallback statistics',
 		args: '--json, --min-samples <n>',
 		category: 'diagnostics',
+		toolPolicy: 'agent',
+	},
+	'skill-opt': {
+		handler: (ctx) =>
+			handleSkillOptPlan(ctx.directory, ctx.args, {
+				dispatcher: ctx.evaluationModelDispatcher,
+				parentSessionId: ctx.sessionID,
+			}),
+		description:
+			'Governed single-skill optimizer (issue #1822). Proposes, validates, and activates one allowlisted SKILL.md candidate at a time with durable lifecycle, serial control, and manual approval.',
+		args: 'plan|run|status|diff|approve|reject|rollback|history <slug> [candidateId] [--json] [--confirm] [--expected-content-hash <hash>] [--models <csv>] [--dry-run]',
+		details:
+			'Disabled/proposal-only by default. `run` requires skill_opt.enabled=true AND --confirm (consumes a held-out test set). approve/activate/reject/rollback are human-only and require --expected-content-hash to refuse a stale base. Stores append-only lifecycle under .swarm/evolution/skills/<slug>/<candidateId>/.',
+		category: 'utility',
+		toolPolicy: 'agent',
+	},
+	'skill-opt plan': {
+		handler: (ctx) =>
+			handleSkillOptPlan(ctx.directory, ctx.args, {
+				dispatcher: ctx.evaluationModelDispatcher,
+				parentSessionId: ctx.sessionID,
+			}),
+		description:
+			'Propose an optimization round (dry-run; no mutation, no validation)',
+		subcommandOf: 'skill-opt',
+		args: '<slug> [--json] [--models <csv>]',
+		category: 'utility',
+		toolPolicy: 'agent',
+	},
+	'skill-opt run': {
+		handler: (ctx) =>
+			handleSkillOptRun(ctx.directory, ctx.args, {
+				dispatcher: ctx.evaluationModelDispatcher,
+				parentSessionId: ctx.sessionID,
+			}),
+		description:
+			'Execute the optimization loop (draft→smoke→validate; held-out set is single-use so at most one validation per run). Requires skill_opt.enabled=true and --confirm.',
+		subcommandOf: 'skill-opt',
+		args: '<slug> --confirm [--json] [--models <csv>]',
+		category: 'utility',
+		toolPolicy: 'human-only',
+	},
+	'skill-opt status': {
+		handler: (ctx) => handleSkillOptStatus(ctx.directory, ctx.args),
+		description: 'Show the current candidate lifecycle state',
+		subcommandOf: 'skill-opt',
+		args: '<slug> <candidateId> [--json]',
+		category: 'utility',
+		toolPolicy: 'agent',
+	},
+	'skill-opt diff': {
+		handler: (ctx) => handleSkillOptDiff(ctx.directory, ctx.args),
+		description: 'Show baseline-vs-candidate diff summary for a candidate',
+		subcommandOf: 'skill-opt',
+		args: '<slug> <candidateId> [--json]',
+		category: 'utility',
+		toolPolicy: 'agent',
+	},
+	'skill-opt approve': {
+		handler: (ctx) => handleSkillOptApprove(ctx.directory, ctx.args),
+		description:
+			'Activate a pending candidate (human-only; requires --expected-content-hash)',
+		subcommandOf: 'skill-opt',
+		args: '<slug> <candidateId> --expected-content-hash <hash> [--json]',
+		category: 'utility',
+		toolPolicy: 'human-only',
+	},
+	'skill-opt reject': {
+		handler: (ctx) => handleSkillOptReject(ctx.directory, ctx.args),
+		description:
+			'Record a rejection for a candidate (no active-skill mutation)',
+		subcommandOf: 'skill-opt',
+		args: '<slug> <candidateId> [--json]',
+		category: 'utility',
+		toolPolicy: 'human-only',
+	},
+	'skill-opt rollback': {
+		handler: (ctx) => handleSkillOptRollback(ctx.directory, ctx.args),
+		description:
+			'Restore the pre-activation snapshot (appends a rolled_back event)',
+		subcommandOf: 'skill-opt',
+		args: '<slug> <candidateId> [--json]',
+		category: 'utility',
+		toolPolicy: 'human-only',
+	},
+	'skill-opt history': {
+		handler: (ctx) => handleSkillOptHistory(ctx.directory, ctx.args),
+		description: 'Show the append-only lifecycle event log for a candidate',
+		subcommandOf: 'skill-opt',
+		args: '<slug> <candidateId> [--json]',
+		category: 'utility',
 		toolPolicy: 'agent',
 	},
 	review: {
