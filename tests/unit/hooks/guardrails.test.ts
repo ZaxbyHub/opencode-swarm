@@ -656,6 +656,37 @@ describe('guardrails circuit breaker', () => {
 			expect(typeof hash).toBe('number');
 			// It could be 0 or non-zero, both are valid
 		});
+
+		it('nested args with different content produce different hashes (no nested-key filtering)', () => {
+			// Regression guard for the recursive stable-stringify fix. The
+			// previous `JSON.stringify(args, sortedKeys)` replacer-array
+			// approach FILTERED keys at every object depth, collapsing
+			// `{todos:[{content:'a',status:'pending'}]}` to `{todos:[{}]}`.
+			// Two todo lists with completely different content therefore
+			// collided — the exact bug class that breaks repetition detection
+			// on nested-args tools like `todowrite`.
+			const hash1 = hashArgs({
+				todos: [{ content: 'Write the auth module', status: 'pending' }],
+			});
+			const hash2 = hashArgs({
+				todos: [{ content: 'Review the coder PR', status: 'in_progress' }],
+			});
+			expect(hash1).not.toBe(hash2);
+		});
+
+		it('nested args with reordered keys at any depth produce the same hash', () => {
+			// Key-order independence must hold at every depth, not just the
+			// top level, so a genuine repetition loop whose nested args are
+			// semantically identical (just built with reordered keys) is still
+			// detected.
+			const hash1 = hashArgs({
+				todos: [{ content: 'same task', status: 'pending' }],
+			});
+			const hash2 = hashArgs({
+				todos: [{ status: 'pending', content: 'same task' }],
+			});
+			expect(hash1).toBe(hash2);
+		});
 	});
 
 	describe('circular buffer', () => {

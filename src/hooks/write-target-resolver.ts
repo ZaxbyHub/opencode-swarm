@@ -23,7 +23,35 @@ type WriteTargetResolver = (
 
 const SCALAR_PATH_KEYS = ['path', 'filePath', 'file', 'target'] as const;
 const ARRAY_PATH_KEYS = ['files', 'paths', 'targetFiles'] as const;
-const PATCH_PAYLOAD_KEYS = ['patch', 'input', 'diff'] as const;
+
+/**
+ * Field names a patch-family tool (`patch` / `apply_patch` /
+ * `swarm_apply_patch`) may use to carry its patch payload. Issue #2059: models
+ * and tool wrappers commonly emit `patchText`, `patch_text`, `patchPayload`,
+ * `text`, or `content`; recognizing only `patch`/`input`/`diff` made the
+ * resolver throw `WRITE TARGET UNVERIFIABLE: No patch payload was provided`
+ * for valid diffs.
+ *
+ * Exported so the guardrail layer (`tool-before.ts`) can reuse the single
+ * source of truth instead of drifting its own inline copies (the drift is what
+ * hid the original bug — three copies of this list existed).
+ *
+ * Collision safety: the patch resolver only runs for tools in
+ * `WRITE_TOOL_NAMES`, and `extract_code_blocks` (which uses `content`) routes
+ * to `extractResolver`, not `patchResolver`. Any future `WRITE_TOOL_NAMES`
+ * addition that uses `text` or `content` for a non-patch purpose must be
+ * audited against this list.
+ */
+export const PATCH_PAYLOAD_KEYS = [
+	'patch',
+	'input',
+	'diff',
+	'patchText',
+	'patch_text',
+	'patchPayload',
+	'text',
+	'content',
+] as const;
 
 function unverifiable(reason: string): WriteTargetResolution {
 	return { status: 'unverifiable', reason };
@@ -151,10 +179,24 @@ function parsePatchPayload(payload: string): ParsedPatch | string {
 			nativeOperationIndices.push(index);
 		}
 	}
+	// A payload is a Native Vibe Patch when it has a `*** Begin Patch` marker,
+	// OR carries any native operation marker (`*** Update/Add/Delete File:` /
+	// `*** Move to|from:` — these are unambiguous native syntax that never
+	// appears in a unified-diff body, so their presence always demands native
+	// framing), OR has a bare `*** End Patch` marker with NO unified-diff
+	// headers. The last clause tolerates a model appending `*** End Patch` as a
+	// stray trailer on an otherwise-standard unified diff (issue #2059) while
+	// still failing closed on a genuinely malformed native patch that is missing
+	// its begin marker. Operation markers are intentionally NOT relaxed: a
+	// payload with `*** Update File:` and no begin marker is always a malformed
+	// native patch, never a unified diff (this preserves the security guard at
+	// `tests/unit/hooks/write-target-resolver.test.ts` "rejects unframed ...
+	// native operations").
+	const hasUnifiedHeaders = lines.some((l) => /^(---|\+\+\+)\s+/.test(l));
 	const native =
 		beginIndices.length > 0 ||
-		endIndices.length > 0 ||
-		nativeOperationIndices.length > 0;
+		nativeOperationIndices.length > 0 ||
+		(!hasUnifiedHeaders && endIndices.length > 0);
 	if (native) {
 		if (beginIndices.length === 0)
 			return 'Native patch is missing *** Begin Patch';

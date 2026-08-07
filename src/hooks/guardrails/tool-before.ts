@@ -51,7 +51,10 @@ import {
 	resolveWriteTargets,
 	type WriteAnalysis,
 } from '../shell-write-detect';
-import { resolveWriteTargets as resolveFileWriteTargets } from '../write-target-resolver';
+import {
+	PATCH_PAYLOAD_KEYS,
+	resolveWriteTargets as resolveFileWriteTargets,
+} from '../write-target-resolver';
 import { appendGuardrailDecision } from './audit-log';
 import {
 	DC_SAFE_TARGETS,
@@ -1545,7 +1548,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		const toolArgs = args as Record<string, unknown> | undefined;
 		if (!toolArgs) return [];
 		const out: string[] = [];
-		for (const key of ['patch', 'input', 'diff'] as const) {
+		for (const key of PATCH_PAYLOAD_KEYS) {
 			const v = toolArgs[key];
 			if (typeof v === 'string' && v.length > 0) out.push(v);
 		}
@@ -1611,12 +1614,33 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			}
 		}
 
-		const patchText = (toolArgs?.input ??
-			toolArgs?.patch ??
-			toolArgs?.diff ??
-			(Array.isArray(toolArgs?.cmd) ? toolArgs.cmd[1] : undefined)) as
-			| string
-			| undefined;
+		// Resolve the patch payload field, preserving the historical precedence
+		// (`input` > `patch` > `diff`) before the additional aliases added for
+		// issue #2059, and falling back to `cmd[1]` last. `PATCH_PAYLOAD_KEYS`
+		// is the single source of truth for the recognized field set, but its
+		// declared order is not the legacy precedence, so we check the legacy
+		// three explicitly first.
+		let patchText: string | undefined;
+		for (const key of ['input', 'patch', 'diff'] as const) {
+			const v = toolArgs?.[key];
+			if (typeof v === 'string') {
+				patchText = v;
+				break;
+			}
+		}
+		if (patchText === undefined) {
+			for (const key of PATCH_PAYLOAD_KEYS) {
+				if (key === 'patch' || key === 'input' || key === 'diff') continue;
+				const v = toolArgs?.[key];
+				if (typeof v === 'string') {
+					patchText = v;
+					break;
+				}
+			}
+		}
+		if (patchText === undefined && Array.isArray(toolArgs?.cmd)) {
+			patchText = toolArgs.cmd[1] as string | undefined;
+		}
 		if (typeof patchText !== 'string') return Array.from(paths);
 		if (patchText.length > 1_000_000) {
 			throw new Error(
