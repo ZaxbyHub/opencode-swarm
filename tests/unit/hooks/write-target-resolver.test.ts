@@ -177,3 +177,70 @@ describe('write-target resolver registry — issue #1875', () => {
 		expect(extra).toEqual({ status: 'resolved', paths: ['src/a.ts'] });
 	});
 });
+
+describe('write-target resolver patch payload aliases — issue #2059', () => {
+	// Models and tool wrappers commonly emit patch content under alternative
+	// field names. The resolver must recognize each of them.
+	test.each([
+		['patchText'],
+		['patch_text'],
+		['patchPayload'],
+		['text'],
+		['content'],
+	] as const)('resolves a unified diff carried under the %s alias', (field) => {
+		const payload = '--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-a\n+b';
+		const result = resolveWriteTargets(
+			'apply_patch',
+			{ [field]: payload },
+			{ directory: process.cwd() },
+		);
+		expect(result).toEqual({ status: 'resolved', paths: ['src/a.ts'] });
+	});
+
+	test('a unified diff with a trailing *** End Patch trailer (no begin) resolves as a unified diff', () => {
+		// Issue #2059 repro: a model emits a standard unified diff but appends
+		// "*** End Patch" at the bottom. The bare End marker must not classify
+		// the payload as a malformed Native Vibe Patch.
+		const payload =
+			'--- a/src/main.cpp\n+++ b/src/main.cpp\n@@ -1 +1 @@\n-old\n+new\n*** End Patch';
+		const result = resolveWriteTargets(
+			'patch',
+			{ patch: payload },
+			{ directory: process.cwd() },
+		);
+		expect(result).toEqual({ status: 'resolved', paths: ['src/main.cpp'] });
+	});
+
+	test('a unified diff with a stray *** Update File line but no begin marker still fails closed (security guard preserved)', () => {
+		// Operation markers (Update/Add/Delete File, Move to|from) are
+		// unambiguous native syntax — they never appear in a unified-diff body.
+		// A payload carrying one without a begin marker must stay classified as
+		// a malformed native patch and fail closed, never fall through to the
+		// unified-diff parser (which would silently drop the operation target,
+		// including a path-traversal target). This is the regression the plan
+		// critic caught: an earlier draft relaxed operation markers too.
+		const payload =
+			'*** Update File: ../../../etc/passwd\n--- a/test\n+++ b/test';
+		const result = resolveWriteTargets(
+			'apply_patch',
+			{ patch: payload },
+			{ directory: process.cwd() },
+		);
+		expect(result.status).toBe('unverifiable');
+		if (result.status === 'unverifiable') {
+			expect(result.reason).toContain('*** Begin Patch');
+		}
+	});
+
+	test('a genuine native patch (begin + operation + end) still resolves', () => {
+		// Regression guard for the native classification change: a real native
+		// patch must continue to resolve after relaxing the bare-End case.
+		const payload = '*** Begin Patch\n*** Update File: src/a.ts\n*** End Patch';
+		const result = resolveWriteTargets(
+			'patch',
+			{ patch: payload },
+			{ directory: process.cwd() },
+		);
+		expect(result).toEqual({ status: 'resolved', paths: ['src/a.ts'] });
+	});
+});

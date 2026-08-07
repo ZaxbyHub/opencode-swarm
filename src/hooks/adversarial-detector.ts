@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import type { PluginConfig } from '../config';
 import { DEFAULT_MODELS } from '../config/constants';
 import { stripKnownSwarmPrefix } from '../config/schema';
+import { bunHash } from '../utils/bun-compat';
 
 // Safe property lookup — prevents prototype chain pollution
 function safeGet<T>(
@@ -485,6 +486,80 @@ export function recentToolCallSessionCount(): number {
 }
 
 /**
+ * Recursively produces a canonical JSON string with object keys sorted at
+ * EVERY depth (not just the top level). Arrays are serialized element-wise in
+ * index order. This is the correct way to make two semantically-equal values
+ * serialize identically regardless of key-insertion order.
+ *
+ * Why not `JSON.stringify(value, sortedKeysArray)`: a property-list replacer
+ * array acts as a KEY FILTER at every object depth, not just the top level, so
+ * any key not in the (top-level-derived) list is silently dropped from nested
+ * objects. For tool args like `{todos:[{content,status}]}`, that collapses
+ * every todo to `{}`, re-introducing the exact false-spiral collision class
+ * this function exists to eliminate. Sorting must be done by rebuilding each
+ * object with sorted keys before serialization.
+ */
+function stableCanonicalStringify(value: unknown): string {
+	if (value === null) return 'null';
+	if (typeof value !== 'object') return JSON.stringify(value);
+	if (Array.isArray(value)) {
+		return `[${value.map((el) => stableCanonicalStringify(el)).join(',')}]`;
+	}
+	const obj = value as Record<string, unknown>;
+	const keys = Object.keys(obj).sort();
+	const entries = keys
+		.map((k) => `${JSON.stringify(k)}:${stableCanonicalStringify(obj[k])}`)
+		.join(',');
+	return `{${entries}}`;
+}
+
+/**
+ * Stable, fixed-length hash of tool-call args for spiral detection (issue #2060).
+ *
+ * Replaces the old `.slice(0, 100)` truncation, which collided for any args
+ * whose first 100 JSON characters matched — e.g. paged `read` calls on a long
+ * file path where the differing `offset` value sat past character 100, making
+ * five legitimate calls look identical and triggering a false-positive
+ * `debugging_spiral_detected` event.
+ *
+ * The hash is fixed-length so memory stays bounded regardless of arg size:
+ * patch payloads can reach 1 MB, and the buffer retains up to
+ * `MAX_RECENT_CALLS` (20) calls × `MAX_TRACKED_SESSIONS` (500) sessions.
+ *
+ * Object keys are sorted at every depth via `stableCanonicalStringify`, so
+ * `{a:{b:1,c:2}}` and `{a:{c:2,b:1}}` hash equally — a correctness improvement
+ * over the old code, which would have missed a genuine spiral whose args had
+ * reordered keys. Crucially, the recursive sort does NOT drop nested keys (a
+ * property-list replacer array would, re-introducing collisions for nested
+ * args like todo lists). Strings are hashed too (not stored raw) so a multi-KB
+ * `bash` command cannot blow up the per-entry size.
+ *
+ * `bunHash` returns different values on Bun (xxHash64) vs Node (djb2); this is
+ * safe because the buffer is per-process and never persisted. Verified:
+ * `formatDebuggingSpiralEvent` does not serialize `argsHash`.
+ */
+function hashArgsForSpiral(args: unknown): string {
+	if (args && typeof args === 'object') {
+		try {
+			const stable = stableCanonicalStringify(args);
+			return `h:${bunHash(stable).toString(36)}`;
+		} catch {
+			// Unstringifiable args (cyclic, BigInt quirks) — fall back to a
+			// stable but coarser hash so detection still functions.
+			return 'h:fallback';
+		}
+	}
+	if (typeof args === 'string') {
+		// Short strings are cheap to compare directly and keep the hash
+		// debuggable; long strings (e.g. bash commands) are hashed to stay
+		// bounded. The 64-char cutoff keeps the worst-case entry (~66 chars)
+		// below the old 100-char ceiling.
+		return args.length <= 64 ? `s:${args}` : `s:${bunHash(args).toString(36)}`;
+	}
+	return `p:${String(args ?? '')}`;
+}
+
+/**
  * Record a tool call for debugging spiral detection.
  * Call this from toolAfter to track repetitive patterns.
  */
@@ -493,10 +568,7 @@ export function recordToolCall(
 	args: unknown,
 	sessionId: string,
 ): void {
-	const argsHash =
-		typeof args === 'string'
-			? args.slice(0, 100)
-			: JSON.stringify(args ?? '').slice(0, 100);
+	const argsHash = hashArgsForSpiral(args);
 	let calls = recentToolCallsBySession.get(sessionId);
 	if (!calls) {
 		calls = [];
