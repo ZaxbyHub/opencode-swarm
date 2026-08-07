@@ -251,10 +251,19 @@ export function deserializeAgentSession(
 		prmLastPatternDetected: null,
 		prmTrajectoryStep: 0,
 		prmHardStopPending: false,
+		// (issue #2063 C2) The hard-stop INJECT token is transient like every other
+		// PRM field: a resumed run must re-detect the pattern before it re-arms,
+		// otherwise a snapshot taken mid-escalation would replay a `[HARD STOP]`
+		// the agent has no current cause for.
+		prmHardStopInjectPending: false,
 		// PRM advisory-injection dedupe state is transient like the rest of the
 		// PRM fields: reset on rehydrate so a resumed run re-evaluates patterns
 		// fresh (issue #1976 B1).
 		prmInjectedAdvisoryKeys: new Set(),
+		// (issue #2063 B3/B5) Execution episodes are per-session by construction.
+		// A stale `in_progress` task carried in a snapshot must NOT arm a fresh
+		// session — arming requires an in-session execution attempt.
+		executionEpisodeArmed: false,
 		sessionRehydratedAt: s.sessionRehydratedAt ?? 0,
 		stageBCompletion,
 		prSubscriptions: new Map(),

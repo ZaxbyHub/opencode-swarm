@@ -48,6 +48,7 @@ import {
 } from '../reviewer-scope-file-fingerprint';
 import { classifyTaskResult } from '../task-result-classifier';
 import { dcCheckJunctionCreation } from './destructive-command';
+import { recordExecutionStallToolAfter } from './execution-stall';
 import { buildEffectiveRules } from './file-authority';
 import {
 	createMessagesTransformHandler,
@@ -289,6 +290,20 @@ const CONTENT_FILTER_PATTERN = /content.?filter/i;
 export const MAX_TRACKED_NO_OP_SESSIONS = 200;
 const toolCallsSinceLastWrite = new Map<string, number>();
 const noOpWarningIssued = new Set<string>();
+/**
+ * Issue #2063 B2 — latch for STAGE 2 of the no-op ladder, deliberately DISTINCT
+ * from {@link noOpWarningIssued}.
+ *
+ * Stage 1 latches at `no_op_warning_threshold` and stays latched until a write
+ * or dispatch. A single shared latch would therefore make stage 2 unreachable:
+ * by the time the count doubles, the latch that stage 2 would test is already
+ * held by stage 1, so the strong advisory could never fire. The whole point of
+ * the ladder is that an agent which ignores the first observation gets a
+ * sharper one, so the two rungs need independent latches.
+ *
+ * Both latches clear together on the same progress events.
+ */
+const noOpStrongWarningIssued = new Set<string>();
 
 /**
  * Record a session's no-write counter, refreshing its recency. The `delete`
@@ -312,18 +327,24 @@ function evictNoOpStateIfOverBound(): void {
 		const stalestKey = toolCallsSinceLastWrite.keys().next().value;
 		if (stalestKey === undefined) break;
 		toolCallsSinceLastWrite.delete(stalestKey);
-		// Drop the paired warning latch with it, so an evicted session cannot
+		// Drop the paired warning latches with it, so an evicted session cannot
 		// come back with a stale "already warned" flag and never warn again.
 		noOpWarningIssued.delete(stalestKey);
+		noOpStrongWarningIssued.delete(stalestKey);
 	}
-	// The latch Set is normally a subset of the counter map, but it is not
+	// The latch Sets are normally subsets of the counter map, but they are not
 	// guaranteed to be: a session evicted by the loop above can be re-added as a
-	// latch in the same invocation, leaving a latch with no counter. Bound it
+	// latch in the same invocation, leaving a latch with no counter. Bound them
 	// independently rather than relying on the subset argument.
 	while (noOpWarningIssued.size > MAX_TRACKED_NO_OP_SESSIONS) {
 		const stalestKey = noOpWarningIssued.values().next().value;
 		if (stalestKey === undefined) break;
 		noOpWarningIssued.delete(stalestKey);
+	}
+	while (noOpStrongWarningIssued.size > MAX_TRACKED_NO_OP_SESSIONS) {
+		const stalestKey = noOpStrongWarningIssued.values().next().value;
+		if (stalestKey === undefined) break;
+		noOpStrongWarningIssued.delete(stalestKey);
 	}
 }
 
@@ -549,6 +570,11 @@ export function createGuardrailsHooks(
 
 	// Shared consecutiveNoToolTurns Map (shared between toolBefore and messagesTransform)
 	const consecutiveNoToolTurns = new Map<string, number>();
+	// Issue #2063 B3: sessionID → id of the assistant turn the MEDIUM band last
+	// counted. Owned by messagesTransform (producer and consumer both live
+	// there); declared here so it shares the handler's lifetime, exactly like
+	// consecutiveNoToolTurns. Bounded inside messages-transform.ts.
+	const lastCountedAssistantMsgId = new Map<string, string>();
 	const pendingReviewerScopeWrites = new Map<
 		string,
 		Array<{
@@ -590,6 +616,24 @@ export function createGuardrailsHooks(
 		pendingReviewerScopeWrites.set(input.callID, pending);
 	};
 
+	/**
+	 * Issue #2063 B5 — execution-stall knobs for the toolAfter side.
+	 *
+	 * Reads the TOP-LEVEL `cfg`, matching `tool-before.ts`. Not an oversight:
+	 * `GuardrailsProfileSchema` (schema.ts:916-924) is a closed seven-key budget
+	 * subset and Zod strips unknown keys, so a per-agent
+	 * `profiles.<agent>.execution_stall_*` (or `enabled`) is dropped at parse time
+	 * and `resolveGuardrailsConfig` provably returns the base value for all four.
+	 * See the longer note at the matching site in `tool-before.ts`; the assumption
+	 * is pinned by `tests/unit/hooks/execution-stall-wiring.test.ts`.
+	 */
+	const executionStallOptions = {
+		enabled: cfg.enabled,
+		warnCalls: cfg.execution_stall_warn_calls,
+		stopCalls: cfg.execution_stall_stop_calls,
+		episodeMinutes: cfg.execution_stall_episode_minutes,
+	};
+
 	// Create toolBefore handler via factory
 	const toolBefore = createToolBeforeHandler({
 		effectiveDirectory,
@@ -612,6 +656,7 @@ export function createGuardrailsHooks(
 		requiredQaGates,
 		requireReviewerAndTestEngineer,
 		consecutiveNoToolTurns,
+		lastCountedAssistantMsgId,
 	});
 
 	return {
@@ -838,6 +883,31 @@ export function createGuardrailsHooks(
 				}
 			}
 
+			// Issue #2063 B5 — execution-stall progress/arming events.
+			//
+			// Placed with the no-op detector because it is the same class of
+			// bookkeeping over the same signal (did this session make progress?),
+			// and above it so a progress event is recorded before the advisory
+			// ladder reads its own counters. Never throws.
+			//
+			// `input.args` is passed through unchanged: the SDK's toolAfter input
+			// carries no args for the architect, which is exactly why the module
+			// remembers the dispatched role at toolBefore time instead of relying
+			// on it — see `pendingDispatchRoles` there.
+			recordExecutionStallToolAfter({
+				sessionID: input.sessionID,
+				tool: input.tool,
+				callID: input.callID,
+				args:
+					input.args ??
+					(getStoredInputArgs(input.callID) as
+						| Record<string, unknown>
+						| undefined),
+				output: safeOutput,
+				directory: effectiveDirectory,
+				options: executionStallOptions,
+			});
+
 			// v6.33.1: No-op work detector
 			const sessionId = input.sessionID;
 			const normalizedToolName = normalizeToolName(input.tool);
@@ -871,11 +941,20 @@ export function createGuardrailsHooks(
 				).isDelegation;
 			if (isWriteTool(normalizedToolName) || isSubagentDispatch) {
 				touchNoOpSession(sessionId, 0);
+				// Issue #2063 B2: BOTH ladder latches re-arm on progress. Leaving the
+				// stage-2 latch set would silence the strong rung for the remaining
+				// life of the session after a single episode.
 				noOpWarningIssued.delete(sessionId);
+				noOpStrongWarningIssued.delete(sessionId);
 			} else {
 				const count = (toolCallsSinceLastWrite.get(sessionId) ?? 0) + 1;
 				touchNoOpSession(sessionId, count);
 				const threshold = cfg.no_op_warning_threshold ?? 15;
+				// Issue #2063 B2 stage 2 — no new config key by design. The strong
+				// rung is derived as 2× the stage-1 threshold so a user who tunes
+				// `no_op_warning_threshold` moves the whole ladder coherently instead
+				// of having to keep two knobs consistent.
+				const strongThreshold = threshold * 2;
 				if (
 					count >= threshold &&
 					!noOpWarningIssued.has(sessionId) &&
@@ -894,6 +973,33 @@ export function createGuardrailsHooks(
 					pushAdvisory(
 						session,
 						`WARNING: Agent has made ${count} tool calls with no file modifications and no subagent dispatches. If you are stuck, state what is blocking you and report BLOCKED rather than continuing to probe.`,
+					);
+				}
+				// Deliberately a separate `if`, not an `else if`: a session that
+				// crosses both rungs in one call (possible after an eviction dropped
+				// its latches mid-climb) must still receive the strong rung.
+				//
+				// Advisory-only, like stage 1. Read-only modes (deep-dive, council,
+				// research, consult, PR review) legitimately make hundreds of
+				// non-write calls, so denying here would break correct workflows; the
+				// hard levers for a genuinely wedged session live elsewhere in the
+				// containment set.
+				if (
+					count >= strongThreshold &&
+					!noOpStrongWarningIssued.has(sessionId) &&
+					session?.pendingAdvisoryMessages
+				) {
+					noOpStrongWarningIssued.add(sessionId);
+					evictNoOpStateIfOverBound();
+					pushAdvisory(
+						session,
+						`CRITICAL: Agent has made ${count} tool calls with no file modifications and no subagent dispatches — twice the point at which you were first warned. STOP investigating; report BLOCKED to the user now with what you tried.`,
+					);
+					telemetry.noOpStrongWarning(
+						sessionId,
+						session.agentName,
+						count,
+						strongThreshold,
 					);
 				}
 			}

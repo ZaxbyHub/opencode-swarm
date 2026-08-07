@@ -76,8 +76,8 @@ describe('DROP Protection Mechanical Enforcement Documentation', () => {
 				expect(content).toContain('failure mode');
 			});
 
-			it(`references src/agents/critic.ts as relevant code location (${slug})`, () => {
-				expect(content).toContain('src/agents/critic.ts');
+			it(`references the SoundingBoardVerdict enum inline (${slug})`, () => {
+				expect(content).toContain('SoundingBoardVerdict');
 			});
 		}
 	});

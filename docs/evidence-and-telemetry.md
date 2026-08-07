@@ -153,7 +153,7 @@ Every line is a JSON object with a timestamp, event name, and event-specific pay
 
 ### Event Types
 
-Forty events across six categories (`src/telemetry.ts:10-40`):
+The telemetry events are defined in `src/telemetry.ts` and grouped into the categories below:
 
 **Core:** `session_started`, `session_ended`, `agent_activated`, `delegation_begin`, `delegation_end`, `task_state_changed`
 
@@ -161,11 +161,25 @@ Forty events across six categories (`src/telemetry.ts:10-40`):
 
 **Execution:** `phase_changed`, `budget_updated`, `model_fallback`, `hard_limit_hit`, `revision_limit_hit`
 
-**Anomalies:** `loop_detected`, `scope_violation`, `qa_skip_violation`, `turbo_mode_changed`
+**Anomalies:** `loop_detected`, `no_op_strong_warning`, `scope_violation`, `qa_skip_violation`, `turbo_mode_changed`
+
+**Loop containment (issue #2063):** `gate_denial_loop`, `execution_stall_warning`, `execution_stall_denied`, `swarm_internals_read_denied`
+
+`execution_stall_warning` and `execution_stall_denied` are the two rungs of the
+architect execution-stall ladder and are each emitted **once per non-progress
+streak**, so a `warning` with no matching `denied` means the session recovered on
+its own. `swarm_internals_read_denied` records a read/glob/grep/bash call that
+targeted the installed plugin package; its `target` field is relative to the
+package root, never an absolute user path.
 
 **Parallel foundation:** `evidence_lock_acquired`, `evidence_lock_contended`, `plan_ledger_cas_retry`
 
-**PRM:** `prm_pattern_detected`, `prm_course_correction_injected`, `prm_escalation_triggered`, `prm_hard_stop`
+**PRM:** `prm_pattern_detected`, `prm_course_correction_injected`, `prm_escalation_triggered`, `prm_hard_stop`, `prm_hard_stop_delivered`
+
+`prm_hard_stop` records that an escalation reached the maximum (emitted by the
+escalation tracker); `prm_hard_stop_delivered` records that the denial actually
+reached the agent. A trigger with no matching delivery means the containment
+armed but never got through.
 
 **Environment:** `environment_detected`, `auto_oversight_escalation`, `heartbeat`
 

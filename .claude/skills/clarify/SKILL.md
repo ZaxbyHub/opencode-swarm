@@ -7,7 +7,7 @@ description: >
 
 # Clarify Protocol
 
-This protocol is loaded on demand by the architect stub in src/agents/architect.ts. The architect prompt keeps only activation, action, and hard safety constraints; the full execution details live here.
+This protocol is loaded on demand by the architect runtime. The architect prompt keeps only activation, action, and hard safety constraints; the full execution details live here.
 
 ### MODE: CLARIFY
 Ambiguous request → Run the clarification funnel
@@ -47,7 +47,7 @@ Classify each item as exactly one of:
 
 Before asking the user any clarification question, the architect MUST consult `critic_sounding_board` with the candidate question set and context.
 
-For each item classified as `research_needed` or `user_decision` in Stage 2, send it to the critic. The critic responds with a verdict from `SoundingBoardVerdict` (see `src/agents/critic.ts`). The mapping between critic verdicts and funnel actions is:
+For each item classified as `research_needed` or `user_decision` in Stage 2, send it to the critic. The critic responds with a verdict from the `SoundingBoardVerdict` enum (`UNNECESSARY | RESOLVE | REPHRASE | APPROVED`). The mapping between critic verdicts and funnel actions is:
 
 | Critic Verdict (SoundingBoardVerdict) | Funnel Action | Meaning |
 |---|---|---|
@@ -105,6 +105,6 @@ All items resolved in Stages 2-3 (self_resolved, critic_resolved, deferred_nonbl
 
 ### Mechanical Enforcement of DROP Protection
 
-**Implementation Note:** The hard constraint against `DROP` on always-surface items (defined in Stage 3 of the clarification funnel) is currently enforced via skill instructions to the architect. A lightweight runtime enforcement mechanism is recommended: when processing the critic sounding board verdict response in `src/agents/critic.ts`, validate that any items tagged as "always-surface" do not receive `UNNECESSARY`/`DROP` verdicts. If a DROP verdict is encountered on an always-surface item, override it to `APPROVED`/`ASK_USER` at the code level rather than relying solely on prompt-based enforcement.
+**Implementation Note:** The hard constraint against `DROP` on always-surface items (defined in Stage 3 of the clarification funnel) is currently enforced via skill instructions to the architect. A lightweight runtime enforcement mechanism is recommended: when the critic sounding board verdict response is parsed, validate that any items tagged as "always-surface" do not receive `UNNECESSARY`/`DROP` verdicts. If a DROP verdict is encountered on an always-surface item, override it to `APPROVED`/`ASK_USER` at the code level rather than relying solely on prompt-based enforcement.
 
 This mechanical enforcement prevents the following failure mode: the architect prompt instructs the override, but due to parsing errors, context limits, or model behavior variance, the DROP verdict is mistakenly applied to an always-surface item and silently accepted. The validation should occur in the decision-packet assembly code (when building the final clarification packet to surface to the user) and should emit a warning log when an override is applied. This is tracked as future work in a follow-up issue; until then, enforcement relies on the skill instructions.

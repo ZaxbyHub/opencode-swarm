@@ -63,6 +63,10 @@ import {
 	dcUnwrapWrappers,
 	dcValidateTargets,
 } from './destructive-command';
+import {
+	enforceExecutionStallDenial,
+	observeExecutionStallToolCall,
+} from './execution-stall';
 import type { AgentRule } from './file-authority';
 import {
 	checkFileAuthorityWithRules,
@@ -70,6 +74,7 @@ import {
 	hashArgs,
 } from './file-authority';
 import { enforceSpecDriftGate } from './index';
+import { enforceInternalsGuard } from './internals-guard';
 import {
 	assertNonTransientCircuitAllowsTool,
 	forgetToolExecution,
@@ -152,6 +157,39 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		worktreeBaseDirOverrides,
 		rememberReviewerScopeWrite,
 	} = ctx;
+
+	/**
+	 * Issue #2063 B4/B5 — containment options, computed once per handler.
+	 *
+	 * These read the TOP-LEVEL `cfg` and deliberately do NOT go through
+	 * `resolveGuardrailsConfig`. That is safe, and verified rather than assumed:
+	 * `GuardrailsProfileSchema` (schema.ts:916-924) is a CLOSED seven-key budget
+	 * subset — `max_tool_calls`, `max_duration_minutes`, `max_repetitions`,
+	 * `max_consecutive_errors`, `warning_threshold`, `idle_timeout_minutes`,
+	 * `max_transient_retries`. Zod strips unknown keys, so a user writing
+	 * `guardrails.profiles.architect.execution_stall_stop_calls` (or a per-agent
+	 * `enabled`) has it dropped at PARSE time and
+	 * `resolveGuardrailsConfig(cfg, 'architect').execution_stall_stop_calls`
+	 * provably equals `cfg.execution_stall_stop_calls`. Resolving per agent here
+	 * would therefore be machinery that can never change an answer.
+	 *
+	 * `tests/unit/hooks/execution-stall-wiring.test.ts` pins that assumption: if
+	 * `GuardrailsProfileSchema` ever gains `enabled` or an `execution_stall_*`
+	 * key, that test fails and points here.
+	 *
+	 * `enabled` is threaded explicitly even though `createGuardrailsHooks`
+	 * already short-circuits to no-op handlers when guardrails are disabled: the
+	 * two containment modules are also callable directly (and are unit-tested
+	 * that way), so each must own its own inert path rather than relying on a
+	 * caller-side guard. Same contract as `GateDenialOptions.enabled` (B1).
+	 */
+	const executionStallOptions = {
+		enabled: cfg.enabled,
+		warnCalls: cfg.execution_stall_warn_calls,
+		stopCalls: cfg.execution_stall_stop_calls,
+		episodeMinutes: cfg.execution_stall_episode_minutes,
+	};
+	const internalsGuardOptions = { enabled: cfg.enabled };
 
 	/**
 	 * Issue #2002: `effectiveDirectory` is the plugin-root `ctx.directory`,
@@ -1955,6 +1993,33 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		// v6.35.1: Runaway output detector — reset counter on any tool call
 		consecutiveNoToolTurns.set(input.sessionID, 0);
 
+		// Issue #2063 B5 — execution-stall OBSERVATION. Deliberately the first
+		// thing after the runaway-counter reset and BEFORE every guardrails POLICY
+		// gate that can throw (`handleLoopDetection`'s CIRCUIT BREAKER,
+		// `handleTestSuiteBlocking`, interpreter gating, file authority, …).
+		//
+		// It is NOT the first throwable thing in this handler:
+		// `assertNonTransientCircuitAllowsTool` runs above it. That is deliberate
+		// and harmless — a non-transient hard stop is a terminal invocation-owned
+		// failure that only a verified new invocation/session can clear
+		// (AGENTS.md invariant 9), so there is no retry loop left for an episode
+		// to contain, and arming one would be bookkeeping for a session that is
+		// already stopped.
+		//
+		// The spec requires an episode to arm on an ATTEMPTED dispatch even when
+		// a later gate denies it — the motivating loop is exactly a `Task` that
+		// `delegation-gate` rejects — so the observation cannot sit behind any
+		// throw. It never throws itself; the matching DENIAL is a separate call
+		// in the handler tail so budget/circuit accounting still runs first
+		// (same argument as C3's PRM-hard-stop placement).
+		observeExecutionStallToolCall({
+			sessionID: input.sessionID,
+			tool: input.tool,
+			args: output.args,
+			callID: input.callID,
+			options: executionStallOptions,
+		});
+
 		// v6.12: Self-coding detection — MUST be first, before any exemptions
 		handleDelegatedWriteTracking(input.sessionID, input.tool, output.args);
 
@@ -2411,36 +2476,103 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			}
 		}
 
-		// v6.29: PRM hard stop
+		// Resolve session — null when the session is architect-exempt (no window).
+		const resolved = resolvedSessionWindow;
+
+		// (1) Budget / circuit-breaker accounting. Issue #2063 C3: this now runs
+		// BEFORE the PRM hard stop. Previously the hard stop threw first, so the
+		// call that tripped it — and every call after it until the flag was
+		// consumed — never reached `trackToolCall`/`checkGateLimits`. A session
+		// wedged behind a hard stop therefore stopped accruing tool-call, duration
+		// and repetition budget, i.e. the circuit breaker went blind at exactly
+		// the moment containment mattered most.
+		if (resolved) {
+			const { agentConfig, window } = resolved;
+			const { repetitionCount, elapsedMinutes } = trackToolCall(
+				window,
+				input.tool,
+				output.args,
+			);
+
+			await checkGateLimits({
+				sessionID: input.sessionID,
+				window,
+				agentConfig,
+				elapsedMinutes,
+				repetitionCount,
+			});
+		}
+
+		// (2) v6.29 / issue #2063 C2+C3: PRM hard stop — DENY once.
+		//
+		// Deliberately OUTSIDE the `if (resolved)` block and ABOVE the
+		// `if (!resolved) return` below. Simply moving these lines beneath the
+		// early return would fail-open the hard stop for every null-window
+		// (architect-exempt) session — the containment would silently not exist
+		// for the sessions that have no budget window. The conditional-block
+		// shape above is the only arrangement with both properties: accounting
+		// runs when there IS a window, and the denial runs regardless.
+		//
+		// One-shot: the token is cleared before throwing, so the NEXT tool call
+		// proceeds. The stop is a directive to report progress, not a permanent
+		// wedge — and `EscalationTracker` re-arms both tokens on any further
+		// detection at count >= 3, so a session that ignores it is stopped again.
 		{
 			const prmSession = swarmState.agentSessions.get(input.sessionID);
 			if (prmSession?.prmHardStopPending) {
+				prmSession.prmHardStopPending = false;
+				// Delivery observability is the `prm_hard_stop_delivered` event
+				// emitted just below — it already carries sessionID, pattern, level,
+				// and count. A `prmHardStopDeliveredAt` session field used to be
+				// stamped here too; it had no readers and was not serialized, so it
+				// was removed (reviewer round-4 REQUIRED 3).
+				const patternType =
+					prmSession.prmLastPatternDetected?.pattern ?? 'unknown';
+				telemetry.prmHardStopDelivered(
+					input.sessionID,
+					patternType,
+					prmSession.prmEscalationLevel,
+					prmSession.prmPatternCounts?.get(patternType) ?? 0,
+				);
 				throw new Error(
 					'🛑 PRM HARD STOP: Pattern escalation maximum reached. Stop tool calls and return progress summary.',
 				);
 			}
 		}
 
-		// Resolve session — returns null if architect-exempt
-		const resolved = resolvedSessionWindow;
-		if (!resolved) return;
-
-		const { agentConfig, window } = resolved;
-		const { repetitionCount, elapsedMinutes } = trackToolCall(
-			window,
-			input.tool,
-			output.args,
-		);
-
-		await checkGateLimits({
+		// (2b) Issue #2063 B4 — plugin-internals read guard, and B5 — execution
+		// stall hard rung.
+		//
+		// Both sit here for the SAME reason the PRM hard stop above does: the
+		// architect session is precisely the `resolved === null` case
+		// (`resolveSessionAndWindow` returns null for ORCHESTRATOR_NAME), so a
+		// denial placed below the early return would silently not exist for the
+		// only session B5 targets, and would miss every architect read for B4.
+		// Placing them AFTER block (1) keeps the C3 property that a denied call
+		// still accrues tool-call/duration/repetition budget — the circuit
+		// breaker must not go blind at the moment containment matters most.
+		//
+		// B4 runs first: it is unconditional and its guidance is the more
+		// specific of the two ("the plugin's files are never the fix"), so when
+		// a stalled architect starts spelunking the installed package it reads
+		// the message that names the actual mistake.
+		enforceInternalsGuard({
 			sessionID: input.sessionID,
-			window,
-			agentConfig,
-			elapsedMinutes,
-			repetitionCount,
+			tool: input.tool,
+			args: output.args,
+			directory: effectiveDirectory,
+			options: internalsGuardOptions,
+		});
+		enforceExecutionStallDenial({
+			sessionID: input.sessionID,
+			tool: input.tool,
+			options: executionStallOptions,
 		});
 
-		// v6.12: Store input args for delegation detection in toolAfter
+		// (3) Nothing below this point applies to a windowless session.
+		if (!resolved) return;
+
+		// (4) v6.12: Store input args for delegation detection in toolAfter
 		setStoredInputArgs(input.callID, output.args);
 	};
 }

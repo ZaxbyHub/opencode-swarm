@@ -7,7 +7,7 @@ description: >
 
 # Discover Protocol
 
-This protocol is loaded on demand by the architect stub in src/agents/architect.ts. The architect prompt keeps only activation, action, and hard safety constraints; the full execution details live here.
+This protocol is loaded on demand by the architect runtime. The architect prompt keeps only activation, action, and hard safety constraints; the full execution details live here.
 
 ### MODE: DISCOVER
 Delegate to the active swarm's explorer agent. Wait for response.

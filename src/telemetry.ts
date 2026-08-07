@@ -25,6 +25,7 @@ export type TelemetryEvent =
 	| 'hard_limit_hit'
 	| 'revision_limit_hit'
 	| 'loop_detected'
+	| 'no_op_strong_warning'
 	| 'scope_violation'
 	| 'qa_skip_violation'
 	| 'heartbeat'
@@ -38,11 +39,40 @@ export type TelemetryEvent =
 	| 'plan_ledger_cas_retry'
 	| 'plan_md_write_failed'
 	| 'snapshot_failed' // FR-004: emitted when snapshot write exhausts retries
+	// Gate-denial containment (issue #2063 B1): emitted when the same
+	// (session, tool, denial-code) streak reaches the hard rung.
+	| 'gate_denial_loop'
+	/**
+	 * Issue #2063 B5 — an ARMED execution episode reached the advisory rung:
+	 * `execution_stall_warn_calls` tool calls with no delegation completion, no
+	 * file write, no `update_task_status`, and no workspace change. Emitted once
+	 * per non-progress streak.
+	 */
+	| 'execution_stall_warning'
+	/**
+	 * Issue #2063 B5 — the same episode reached `execution_stall_stop_calls` and
+	 * a non-productive tool (read/glob/grep/bash/shell) was hard-denied. Emitted
+	 * once per non-progress streak; the denial itself repeats until a progress
+	 * event clears the rung.
+	 */
+	| 'execution_stall_denied'
+	/**
+	 * Issue #2063 B4 — a read/glob/grep/bash call resolved to a path inside the
+	 * INSTALLED opencode-swarm package and was denied. `target` is relative to
+	 * the package root so no user home path is written to the ledger.
+	 */
+	| 'swarm_internals_read_denied'
 	// PRM events
 	| 'prm_pattern_detected'
 	| 'prm_course_correction_injected'
 	| 'prm_escalation_triggered'
-	| 'prm_hard_stop';
+	| 'prm_hard_stop'
+	/**
+	 * Issue #2063 C2 — DELIVERY of a PRM hard stop, as distinct from the
+	 * `prm_hard_stop` TRIGGER emitted by `src/prm/escalation.ts`. A trigger with
+	 * no matching delivery means the containment never reached the agent.
+	 */
+	| 'prm_hard_stop_delivered';
 
 /** Stable classification for how a reviewer-gate decision was established. */
 export type ReviewerGateEvidenceKind =
@@ -481,6 +511,93 @@ export const telemetry = {
 		_internals.emit('loop_detected', { sessionId, agentName, loopType });
 	},
 
+	/**
+	 * Issue #2063 B2 — stage 2 of the no-op ladder fired: the session has made
+	 * `count` consecutive tool calls with no file write and no subagent dispatch,
+	 * at or beyond 2× `no_op_warning_threshold`.
+	 */
+	noOpStrongWarning(
+		sessionId: string,
+		agentName: string,
+		count: number,
+		threshold: number,
+	): void {
+		_internals.emit('no_op_strong_warning', {
+			sessionId,
+			agentName,
+			count,
+			threshold,
+		});
+	},
+
+	/**
+	 * Issue #2063 B1 — a fail-closed `tool.execute.before` denial streak reached
+	 * the hard rung: `count` consecutive denials with the same classification
+	 * (`code`) for the same tool in the same session. Emitted from
+	 * `src/hooks/gate-denial-tracker.ts` at every denial at or past the rung, so
+	 * the ledger shows how long the model kept retrying after being told to stop.
+	 */
+	gateDenialLoop(
+		sessionId: string,
+		tool: string,
+		code: string,
+		count: number,
+	): void {
+		_internals.emit('gate_denial_loop', { sessionId, tool, code, count });
+	},
+
+	/**
+	 * Issue #2063 B5 — advisory rung of the execution-stall ladder. Emitted from
+	 * `src/hooks/guardrails/execution-stall.ts` once per non-progress streak, so
+	 * a warning with no matching `execution_stall_denied` means the agent
+	 * recovered on its own.
+	 */
+	executionStallWarning(
+		sessionId: string,
+		count: number,
+		threshold: number,
+	): void {
+		_internals.emit('execution_stall_warning', {
+			sessionId,
+			count,
+			threshold,
+		});
+	},
+
+	/**
+	 * Issue #2063 B5 — hard rung of the execution-stall ladder. `tool` is the
+	 * normalized name of the denied non-productive tool.
+	 */
+	executionStallDenied(
+		sessionId: string,
+		tool: string,
+		count: number,
+		threshold: number,
+	): void {
+		_internals.emit('execution_stall_denied', {
+			sessionId,
+			tool,
+			count,
+			threshold,
+		});
+	},
+
+	/**
+	 * Issue #2063 B4 — a call targeting the installed plugin package was denied.
+	 * `target` is package-root-relative (never an absolute user path).
+	 */
+	swarmInternalsReadDenied(
+		sessionId: string,
+		tool: string,
+		target: string,
+	): void {
+		_internals.emit('swarm_internals_read_denied', {
+			sessionId,
+			tool,
+			target,
+		});
+	},
+
 	scopeViolation(
 		sessionId: string,
 		agentName: string,
@@ -589,6 +706,27 @@ export const telemetry = {
 		occurrenceCount: number,
 	): void {
 		_internals.emit('prm_hard_stop', {
+			sessionId,
+			pattern,
+			level,
+			occurrenceCount,
+		});
+	},
+
+	/**
+	 * Issue #2063 C2 — the PRM hard-stop DENIAL was actually delivered to the
+	 * agent (thrown by the guardrails `toolBefore` consumer). `prm_hard_stop`
+	 * above records the TRIGGER and is emitted solely by
+	 * `src/prm/escalation.ts`; a trigger without a matching delivery means the
+	 * containment armed but never reached the model.
+	 */
+	prmHardStopDelivered(
+		sessionId: string,
+		pattern: string,
+		level: number,
+		occurrenceCount: number,
+	): void {
+		_internals.emit('prm_hard_stop_delivered', {
 			sessionId,
 			pattern,
 			level,

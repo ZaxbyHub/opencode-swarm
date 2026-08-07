@@ -559,6 +559,29 @@ export interface AgentSessionState {
 	prmTrajectoryStep: number;
 	/** Whether a hard stop has been triggered */
 	prmHardStopPending: boolean;
+	/**
+	 * Issue #2063 C2 — second, independent one-shot token for the PRM hard stop.
+	 *
+	 * `prmHardStopPending` is the DENY token: guardrails `toolBefore` consumes it
+	 * by throwing the HARD STOP denial once. `prmHardStopInjectPending` is the
+	 * INJECT token: `messagesTransform` consumes it by prepending the
+	 * `[HARD STOP]` block into the next completion. They are deliberately
+	 * separate because either consumer can run first, and a single shared flag
+	 * meant whichever ran first disarmed the other — so the escalation was either
+	 * denied without ever being explained, or explained without ever being
+	 * denied.
+	 *
+	 * Optional: ~25 existing test/session literals enumerate the required PRM
+	 * fields, and this one is additive.
+	 */
+	prmHardStopInjectPending?: boolean;
+	// NOTE (issue #2063 C2, reviewer round-4 REQUIRED 3): there is deliberately
+	// NO `prmHardStopDeliveredAt` field. A delivery timestamp was added here and
+	// stamped at the deny site, but it had zero readers and was never serialized,
+	// so it was write-only state on a hot, bounded session object. The
+	// `prm_hard_stop_delivered` telemetry event — which already carries
+	// sessionID, pattern, level, and count — is the delivery-observability
+	// surface. Do not reintroduce the field without a reader.
 	/** Per-session escalation tracker instance (set lazily by PRM hook) */
 	prmEscalationTracker?: EscalationTracker;
 	/** Cross-turn set of already-injected PRM advisory dedupe keys
@@ -568,6 +591,23 @@ export interface AgentSessionState {
 	 *  pattern's count advances escalation. Bounded by distinct (pattern, level)
 	 *  pairs — at most (numPatterns × 3 levels). */
 	prmInjectedAdvisoryKeys: Set<string>;
+
+	/**
+	 * Issue #2063 B3/B5 — whether an "execution episode" is currently armed for
+	 * this session.
+	 *
+	 * An episode arms when the session actually attempts execution work (a `Task`
+	 * dispatch to a mutating/verifying role, or an `update_task_status(...,
+	 * in_progress)` that succeeds) and disarms on episode lapse. Consumers read
+	 * it through {@link isExecutionEpisodeArmed} in
+	 * `src/hooks/guardrails/execution-episode.ts` rather than touching the field,
+	 * so the arming policy has exactly one owner.
+	 *
+	 * Deliberately reset on rehydrate (see `src/session/snapshot-reader.ts`): a
+	 * stale `in_progress` task left over from a previous session must NOT arm a
+	 * fresh one.
+	 */
+	executionEpisodeArmed?: boolean;
 
 	// PR Monitor subscriptions (Phase 1)
 	/** Active PR subscriptions for the background poller, keyed by `${repoFullName}::${prNumber}` */
@@ -1608,7 +1648,14 @@ export function startAgentSession(
 		prmLastPatternDetected: null,
 		prmTrajectoryStep: 0,
 		prmHardStopPending: false,
+		// Issue #2063 C2: the inject token is independent of the deny token
+		// above; both start disarmed and are re-armed together by the PRM
+		// producer on every level-3 detection.
+		prmHardStopInjectPending: false,
 		prmInjectedAdvisoryKeys: new Set(),
+		// Issue #2063 B3/B5: no execution episode until this session actually
+		// attempts execution work.
+		executionEpisodeArmed: false,
 		// PR Monitor subscriptions
 		prSubscriptions: new Map<string, PrSubscriptionState>(),
 	};
@@ -1954,8 +2001,14 @@ export function ensureAgentSession(
 		if (session.prmHardStopPending === undefined) {
 			session.prmHardStopPending = false;
 		}
+		if (session.prmHardStopInjectPending === undefined) {
+			session.prmHardStopInjectPending = false;
+		}
 		if (!session.prmInjectedAdvisoryKeys) {
 			session.prmInjectedAdvisoryKeys = new Set();
+		}
+		if (session.executionEpisodeArmed === undefined) {
+			session.executionEpisodeArmed = false;
 		}
 		// PR Monitor subscriptions migration safety
 		if (!session.prSubscriptions) {

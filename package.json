@@ -94,6 +94,7 @@
 		"lint:ci": "biome ci .",
 		"test:unit:ci": "bun scripts/ci/run-unit-tests-local.ts",
 		"drift:check": "bun run scripts/drift-check.ts",
+		"check:runtime-src-refs": "bun run scripts/check-runtime-src-refs.ts",
 		"drift:fix": "bun run scripts/drift-check.ts --fix --confirm",
 		"skills:sync": "bun run scripts/sync-qa-gate-skills.ts",
 		"format": "biome format . --write",
