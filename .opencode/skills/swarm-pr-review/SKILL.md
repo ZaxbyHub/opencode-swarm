@@ -775,14 +775,29 @@ cost, or predicted simplicity — permits fewer lanes than the classified tier,
 and no tier permits skipping a dimension or family. Under Profile A the
 controller computes the tier itself from the bound `base_sha...pr_head_sha`
 diff (`--numstat` totals; an uncomputable diff fails strict to tier L) and
-mechanically enforces the matching floors on every base and micro batch —
-initial waves and retries alike: tier L requires the historical
-full fan-out (six singleton base lanes, one micro-lane per family, on every
-batch, not only the first), while
-tiers S and M accept consolidated lanes that declare their complete
-`owned_workflow_lanes` set — every dimension and family still owned exactly
-once and attested per family. Risk triggers remain caller-side escalation on
-every profile: dispatch MORE than the floor whenever a trigger warrants it.
+mechanically enforces the matching floors on every base and micro batch. The
+initial base wave and every micro batch keep the historical tier-L full
+fan-out (six singleton base lanes on the initial base wave; one micro-lane
+per family on every micro batch, not only the first), while tiers S and M
+accept consolidated lanes that declare their complete `owned_workflow_lanes`
+set — every dimension and family still owned exactly once and attested per
+family. A tier-L base **retry** may consolidate dimensions that each have a
+recorded, terminally-failed prior attempt and currently have no successful
+source, subject to two lane floors: no single lane may own all six
+dimensions, and — counted cumulatively across every recorded base batch, not
+per batch, and including batches the capacity GC has since dropped — the six
+dimensions must stay backed by at least four distinct lanes (each dimension
+no consolidated lane claims counts as one, plus the FEWEST declared
+consolidated lanes that suffice to cover the rest). That permits a small
+consolidation as failure recovery and rejects re-doing the whole wave in two
+or three lanes, whether the attempt is split across several batches or
+disguised as overlapping or duplicate consolidations — declaring more lanes
+than the cover needs buys no budget. A dimension that already has a
+successful source, or whose prior attempt is still in flight, still requires
+its own dedicated retry lane, and
+a full six-lane singleton re-dispatch is always accepted. Risk triggers
+remain caller-side escalation on every profile: dispatch MORE than the floor
+whenever a trigger warrants it.
 
 ### Dispatch
 
@@ -1295,23 +1310,47 @@ machine enforcement cannot safely infer every repository-specific trust
 boundary from prose. Completion is blocked until that exact derived inventory
 has valid critic rows.
 
-Reviewer and critic retries cannot be combined as complementary partial verdict
-sets. Each phase requires at least one fully successful exact batch covering its
-entire mechanically assigned inventory on one revision. A later degraded,
-truncated, stale, wrong-identity, or malformed batch cannot replace an earlier
-valid batch or suppress critic routing.
+Reviewer and critic settlement compose across batches, item by item: a phase
+settles once every review item in the current mechanically assigned inventory
+holds a successful verdict, whether that coverage comes from one batch or from
+several complementary partial retries. A later degraded, truncated, stale,
+wrong-identity, or malformed batch never supplies a verdict for the items it
+touches, but it does not discard verdicts other batches already supplied for
+different items.
 
-Any newer reviewer batch invalidates every older critic batch, even when the
-new reviewer rows happen to be identical. Dispatch a fresh critic wave from the
-latest coherent reviewer batch; critic evidence can never predate the reviewer
-evidence it purports to challenge.
+When more than one successful batch covers the same item, the most recent
+successful batch wins that item. This conflict rule is one shared computation,
+so settlement and every downstream verdict use (candidate inventory, critic
+routing, final synthesis) never disagree about which claim is authoritative
+for an item. A batch contributes only when it was validated against the exact
+candidate inventory current at validation time; a batch recorded before that
+binding existed contributes only if it is wholly successful and its item set
+exactly matches the current inventory — the historical all-or-nothing rule,
+preserved unchanged for state that predates composition.
+
+A critic claim is bound per item to the exact reviewer row it was validated
+against, not to the reviewer batch as a whole. A reviewer retry that
+reproduces a byte-identical row for an item retains that item's critic work;
+a reviewer row that changed at all — even one field — invalidates only that
+item's critic claim, not the whole critic wave. Critic batches recorded
+before per-item binding existed keep the old behavior: any newer reviewer
+batch invalidates them wholesale. Dispatch a fresh critic wave to cover
+whatever items composition leaves unclaimed; critic evidence can never
+predate the reviewer evidence it purports to challenge.
+
+Settlement is item completeness, not lane completeness: a declared lane that
+never completes produces a diagnostic naming the abandoned lane, not an
+automatic block, as long as every item in the inventory already holds a
+successful verdict from some lane.
 
 Under Profile A, dispatch critic chunks with `dispatch_lanes_async`,
 `mode: "swarm-pr-review:critic"`, a unique non-empty `workflow_lane` per
 chunk, `review_item_ids` containing the exact finding IDs assigned to that
 chunk, critic-role agents only, and the same exact `pr_head_sha`. The runtime
 requires one parseable `[CRITIC]` row for every structurally assigned ID and
-requires one coherent fully successful exact reviewer batch before a critic wave.
+requires the reviewer phase to have settled — every item in the current
+inventory holding a successful reviewer verdict, composed across batches —
+before a critic wave.
 Under Profile B, dispatch each critic chunk to a fresh subagent that was
 neither the explorer nor the reviewer for those findings; under Profile C, run
 a separate critic pass. The one-parseable-`[CRITIC]`-row-per-assigned-ID

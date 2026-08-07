@@ -608,7 +608,10 @@ Only exact positive verdict fields pass. A sentence containing “not APPROVE,�
 header without item rows, duplicate rows, missing IDs, degraded/truncated
 artifacts, wrong roles, stale content digests, parallel or out-of-order phases,
 and reused pre-edit approvals all fail closed. Any content change after Stage A
-invalidates Stage A and every later gate; restart at step 1. Publication tools
+invalidates Stage A and every later gate; restart at step 1. See
+"Re-recording Stage A on an unchanged revision" below for the one retention
+exception, which applies only when the revision digest itself did not change.
+Publication tools
 and `git commit`/`git push` remain blocked until all four ordered lane phases
 settle on the Stage-A digest. After they settle, only one standalone `git commit`
 command may create the reviewed commit; push and remote publication remain
@@ -703,6 +706,43 @@ output via `retrieve_summary`; if that persistence fails, the failing check's
 full stdout/stderr is inlined instead so evidence is never lost. A successful
 run persists nothing — there is no failure evidence to recover, and the
 per-check summaries are the useful record.
+
+### Re-recording Stage A on an unchanged revision
+
+Re-recording Stage A always requires a fresh, complete receipt set on the
+current revision digest — that part is unconditional. What happens to the
+already-recorded Stage B and closeout gate batches depends on whether the
+revision digest itself changed. If the digest is unchanged from the prior
+Stage A record **and** the newly declared applicable obligations/categories
+are equal to or a superset of the prior declaration, the already-approved
+independent gate batches are retained: re-recording Stage A to add a
+previously-missed obligation, or to re-attest the same set, does not by
+itself discard Stage B and closeout work that already passed on that
+revision. A narrower obligation set than the prior declaration, or any actual
+digest change, still wipes every recorded gate batch and un-arms publication
+exactly as before — a controller cannot narrow what it declares in order to
+dodge re-verification.
+
+### Why gate evidence is not item-scoped
+
+Stage A, Stage B, and closeout evidence invalidate as whole gate batches, not
+per feedback item, and that is a deliberate design decision, not unfinished
+work:
+
+- **No trustworthy item-to-file mapping exists to key invalidation on.** The
+  file scope a caller declares for a feedback item is caller-asserted and
+  only path-sanitized — it is never intersected with the actual changed-file
+  set, and it carries no persisted binding back to feedback item IDs. Keying
+  invalidation on that declaration would let a controller dodge
+  re-verification by under-declaring scope, turning a fail-closed guarantee
+  into a fail-open one (AGENTS.md invariant 9) — the same failure class that
+  already ruled out keying digest invalidation on `git diff --raw` blob OIDs.
+- **The four gate phases are holistic by contract.** Each recorded batch must
+  own every inventory item exactly once and in declared order. Retaining
+  evidence for a subset of items per gate would re-partition that
+  independent-review contract itself, and would need its own
+  collusion/independence analysis before it could be trusted — it is not a
+  drop-in extension of the revision-level retention above.
 
 ### Stage B — reviewer + test_engineer (mandatory after Stage A passes)
 

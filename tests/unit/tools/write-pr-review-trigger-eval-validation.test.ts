@@ -47,6 +47,8 @@ const originalGateRevisionDigest =
 	gateInternals.resolvePrWorkflowRevisionDigest;
 const originalResolveRevisionDigest =
 	writerInternals.resolvePrWorkflowRevisionDigest;
+const originalResolveRevisionDigestAsync =
+	writerInternals.resolvePrWorkflowRevisionDigestAsync;
 const originalResolveMergeBase = writerInternals.resolveMergeBase;
 
 function tempRoot(): string {
@@ -224,6 +226,8 @@ afterEach(() => {
 	gateInternals.resolvePrWorkflowRevisionDigest = originalGateRevisionDigest;
 	writerInternals.resolvePrWorkflowRevisionDigest =
 		originalResolveRevisionDigest;
+	writerInternals.resolvePrWorkflowRevisionDigestAsync =
+		originalResolveRevisionDigestAsync;
 	writerInternals.resolveMergeBase = originalResolveMergeBase;
 	for (const dir of tempDirs.splice(0)) {
 		rmSync(dir, { recursive: true, force: true });
@@ -315,6 +319,35 @@ describe('write_pr_review_trigger_eval - row validation', () => {
 		expect(result.message).toContain('NO-MATCH');
 		expect(result.message).toContain('MATCHED');
 		expect(result.message).toContain('NOT_TRIGGERED');
+	});
+
+	test('binds the revision digest off the blocking synchronous path', async () => {
+		const root = tempRoot();
+		await establishBoundReviewGate(root);
+		// Restore the sync seam to its real implementation so the selection rule
+		// must fall through to the async twin; a regression to the blocking
+		// resolver would shell out to real git here instead.
+		writerInternals.resolvePrWorkflowRevisionDigest =
+			originalResolveRevisionDigest;
+		let asyncCalls = 0;
+		writerInternals.resolvePrWorkflowRevisionDigestAsync = async () => {
+			asyncCalls += 1;
+			return REVISION_DIGEST;
+		};
+		const args = {
+			run_id: 'async-digest',
+			pr_head_sha: HEAD_SHA,
+			base_sha: 'def456',
+			base_ref: 'origin/main',
+			rows: rows(),
+		};
+		const response = JSON.parse(
+			await executeWritePrReviewTriggerEval(args, root, {
+				sessionID: SESSION_ID,
+			}),
+		);
+		expect(response).toMatchObject({ success: true });
+		expect(asyncCalls).toBe(1);
 	});
 
 	test('rejects traversal', async () => {

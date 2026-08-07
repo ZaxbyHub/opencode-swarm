@@ -73,8 +73,37 @@ describe('pr-workflow-gate independent session provenance', () => {
 			{ ...shared, textOverride: criticRows },
 		);
 
+		// Every critic row parses and the batch covers the whole inventory; the
+		// ONLY defect is the reused child session, so no item may be claimed.
 		await expect(
 			assertPrReviewValidationSettled(tempDir, SESSION_ID, 'critic'),
-		).rejects.toThrow('one fully successful exact batch');
+		).rejects.toThrow(
+			`critic items lack an authenticated verdict from any successful lane: ${ids.join(', ')}`,
+		);
+
+		// Positive control: the identical critic batch from an independent child
+		// session settles, proving the rejection above isolates session reuse.
+		await recordPrReviewValidationBatch(
+			tempDir,
+			SESSION_ID,
+			'critic',
+			[
+				{
+					laneId: 'critic-independent',
+					workflowLane: 'critic-independent',
+					reviewItemIds: ids,
+				},
+			],
+			{ batchId: 'critic-independent', prHeadSha: HEAD_SHA },
+		);
+		await persistBatch(
+			'critic-independent',
+			'swarm-pr-review:critic',
+			[{ laneId: 'critic-independent', workflowLane: 'critic-independent' }],
+			{ subagentSessionId: 'independent-critic', textOverride: criticRows },
+		);
+		await expect(
+			assertPrReviewValidationSettled(tempDir, SESSION_ID, 'critic'),
+		).resolves.toMatchObject({ mode: 'PR_REVIEW' });
 	});
 });

@@ -14,6 +14,7 @@ import {
 import {
 	resolveExactMergeBase,
 	resolvePrWorkflowRevisionDigest,
+	resolvePrWorkflowRevisionDigestAsync,
 } from '../background/workspace-snapshot.js';
 import {
 	assertPrReviewBaseCoverageSettled,
@@ -29,8 +30,30 @@ export { PR_REVIEW_TRIGGER_DEFINITIONS } from '../background/pr-review-trigger-c
 
 export const _internals = {
 	resolvePrWorkflowRevisionDigest,
+	resolvePrWorkflowRevisionDigestAsync,
 	resolveMergeBase: resolveExactMergeBase,
 };
+
+/**
+ * Production uses the non-blocking, chunked digest implementation; the three
+ * blocking `spawnSync` git calls plus a full re-read of every changed file do
+ * not belong on a tool call's synchronous path. The synchronous member stays as
+ * the injection seam existing focused tests stub, and is selected only while it
+ * is overridden — mirroring `resolvePrWorkflowRevisionDigestForGate` in the
+ * gate itself.
+ */
+async function resolveCurrentRevisionDigest(
+	directory: string,
+	prHeadSha: string,
+): Promise<string | null> {
+	if (
+		_internals.resolvePrWorkflowRevisionDigest !==
+		resolvePrWorkflowRevisionDigest
+	) {
+		return _internals.resolvePrWorkflowRevisionDigest(directory, prHeadSha);
+	}
+	return _internals.resolvePrWorkflowRevisionDigestAsync(directory, prHeadSha);
+}
 
 const WritePrReviewTriggerEvalArgsSchema = z
 	.object({
@@ -151,7 +174,7 @@ export async function executeWritePrReviewTriggerEval(
 			'PR_REVIEW trigger evaluation differs from the canonical ledger frozen across micro dispatches',
 		);
 	}
-	const currentRevisionDigest = _internals.resolvePrWorkflowRevisionDigest(
+	const currentRevisionDigest = await resolveCurrentRevisionDigest(
 		directory,
 		parsed.data.pr_head_sha,
 	);

@@ -18,6 +18,7 @@ import {
 import {
 	resolveExactMergeBaseAsync,
 	resolvePrWorkflowRevisionDigestAsync,
+	resolvePrWorkflowRevisionDigestDetailedAsync,
 } from '../background/workspace-snapshot.js';
 import { WRITE_TOOL_NAMES } from '../config/constants.js';
 import {
@@ -31,6 +32,7 @@ import {
 	bindPrReviewBase,
 	bindPrReviewTriggerLedger,
 	declarePrFeedbackInventory,
+	describePrWorkflowRevisionDigestFailure,
 	enforcePrFeedbackVerificationOwnership,
 	enforcePrReviewBaseDimensions,
 	enforcePrWorkflowDispatchLanesAsync,
@@ -903,16 +905,35 @@ export async function executeDispatchLanesAsync(
 					? 'PR_FEEDBACK'
 					: 'PR_REVIEW',
 			);
-			workflowRevisionDigest =
-				(await _internals.resolvePrWorkflowRevisionDigestAsync(
-					directory,
-					parsed.data.pr_head_sha,
-				)) ?? undefined;
-			if (!workflowRevisionDigest) {
+			// Issue #1968 P2.2: name the exact bound that fired. The pre-existing
+			// `string | null` seam keeps priority when a test injected it, so every
+			// existing fixture drives this path unchanged; production takes the
+			// discriminated twin and gets a diagnosable reason.
+			const resolvedDigest =
+				_internals.resolvePrWorkflowRevisionDigestAsync !==
+				resolvePrWorkflowRevisionDigestAsync
+					? await _internals
+							.resolvePrWorkflowRevisionDigestAsync(
+								directory,
+								parsed.data.pr_head_sha,
+							)
+							.then((digest) =>
+								digest
+									? ({ ok: true, digest } as const)
+									: ({ ok: false, reason: 'seam-unavailable' } as const),
+							)
+					: await resolvePrWorkflowRevisionDigestDetailedAsync(
+							directory,
+							parsed.data.pr_head_sha,
+						);
+			if (!resolvedDigest.ok) {
 				throw new Error(
-					'BLOCKED: PR workflow could not compute a bounded current-revision digest',
+					'BLOCKED: PR workflow could not compute a bounded current-revision digest for ' +
+						`pr_head_sha "${parsed.data.pr_head_sha}"; ` +
+						describePrWorkflowRevisionDigestFailure(resolvedDigest),
 				);
 			}
+			workflowRevisionDigest = resolvedDigest.digest;
 			if (parsed.data.mode?.startsWith('swarm-pr-review:')) {
 				if (!parsed.data.base_sha || !parsed.data.base_ref) {
 					throw new Error(
@@ -1116,7 +1137,15 @@ export async function executeDispatchLanesAsync(
 						directory,
 						context.sessionID,
 						laneSpecs,
-						{ batchId, prHeadSha: headSha },
+						{
+							batchId,
+							prHeadSha: headSha,
+							// Reuse the digest already resolved above (issue #1968 MS-5).
+							// The tier-L retry predicate and the batch GC both need
+							// per-dimension artifact state; neither may add a fresh
+							// synchronous digest resolution to the dispatch path.
+							revisionDigest: workflowRevisionDigest,
+						},
 					);
 				} else if (parsed.data.mode === 'swarm-pr-review:micro') {
 					await assertPrReviewBaseCoverageSettled(directory, context.sessionID);

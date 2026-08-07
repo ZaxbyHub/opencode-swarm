@@ -40,12 +40,12 @@ Read and follow `../../../.opencode/skills/swarm-pr-review/SKILL.md` as the cano
   persist findings and trigger ledgers as files in the session task workspace,
   never under `.swarm/`.
 - Clean lanes still require a fully populated row, such as
-  `[CLEAN] | workflow_lane | coverage_scope | evidence`; a missing per-family
-  attestation is an unclosed coverage gap — retry it or surface it as BLOCKED
-  rather than emitting a degraded review or partial verdict.
+  `[CLEAN] | workflow_lane | coverage_scope | evidence`; a missing attestation
+  is a coverage gap — retry it or surface BLOCKED, never a degraded review.
 - Use fresh reviewer subagents for candidate validation and fresh critic
-  subagents after review; a newer reviewer batch invalidates older critic
-  evidence. The Pre-Synthesis Gate checklist is the completion gate.
+  subagents after review; settlement composes per item, so a reviewer retry
+  invalidates only the critic claim for an item whose reviewer row changed.
+  The Pre-Synthesis Gate checklist is the completion gate.
 - Only if this session actually exposes the swarm controller tools
   (`dispatch_lanes_async`, `collect_lane_results`, `retrieve_lane_output`),
   run Profile A instead: structured modes, incremental polling, full-text

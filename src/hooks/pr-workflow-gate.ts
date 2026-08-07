@@ -26,6 +26,7 @@ import {
 	validatePrReviewInlineTriggerLedger,
 } from '../background/pr-review-trigger-contract.js';
 import {
+	type RevisionDigestResult,
 	resolveCommitCountSince,
 	resolveCommitCountSinceAsync,
 	resolveCurrentGitHead,
@@ -43,7 +44,8 @@ import {
 	resolvePrReviewDiffStats,
 	resolvePrReviewDiffStatsAsync,
 	resolvePrWorkflowRevisionDigest,
-	resolvePrWorkflowRevisionDigestAsync,
+	resolvePrWorkflowRevisionDigestDetailed,
+	resolvePrWorkflowRevisionDigestDetailedAsync,
 	resolveRemoteRefsContainingHead,
 	resolveRemoteRefsContainingHeadAsync,
 	switchPrFeedbackTrackingCandidateAsync,
@@ -55,6 +57,7 @@ import {
 	type PrWorkflowGitState,
 } from '../git/pr-workflow-state.js';
 import { getPrWorkflowToolCapability } from '../tools/tool-metadata.js';
+import { warn } from '../utils/logger.js';
 import { validateSwarmPath } from './utils.js';
 
 export const PR_REVIEW_BASE_DIMENSION_IDS = [
@@ -120,6 +123,27 @@ export const PR_REVIEW_BASE_LANE_FLOORS: Record<PrReviewDepthTier, number> = {
 	M: 3,
 	L: PR_REVIEW_BASE_DIMENSION_IDS.length,
 };
+
+/**
+ * Cumulative lane floor for a tier-L base wave that used consolidated failure
+ * recovery (issue #1968 MUST-FIX 1).
+ *
+ * `PR_REVIEW_BASE_LANE_FLOORS.L` is the *initial wave* floor and equals the
+ * dimension count, so it cannot also serve as the post-consolidation floor: any
+ * consolidated lane owns at least two dimensions, so a wave that consolidated
+ * even once is backed by at most five lanes. Enforcing six cumulatively would
+ * make the tier-L retry exception unreachable — i.e. delete the feature.
+ *
+ * The bound that *is* enforceable, and is the property worth defending, is that
+ * a tier-L wave may never be reduced by consolidation to a lane count a tier-M
+ * dispatch would already have satisfied: the depth tier chosen for this PR must
+ * not be silently downgraded by failure recovery. Hence "strictly more than the
+ * tier-M floor" — four distinct lanes for six dimensions, a bounded loss of at
+ * most two lanes of depth, versus the unbounded loss (down to two lanes) a
+ * per-batch-only floor permits when a retry is split across batches.
+ */
+export const PR_REVIEW_TIER_L_CONSOLIDATED_LANE_FLOOR =
+	PR_REVIEW_BASE_LANE_FLOORS.M + 1;
 
 /**
  * Minimum lane counts for a FULL micro (risk-family) sweep per depth tier. These
@@ -306,6 +330,36 @@ interface PrReviewValidationBatchRecord {
 	validatedAt: string;
 }
 
+/**
+ * Per-batch coherence keys for item-keyed reviewer/critic composition.
+ *
+ * This deliberately lives OUTSIDE `PrReviewValidationBatchRecord`: that record's
+ * schema is `.strict()`, and Zod's unknown-key policy is per-schema — the parent
+ * state schema's `.passthrough()` does not relax a strict child. Adding fields to
+ * the batch record would make a rolled-back plugin fail `safeParse` on every gate
+ * state read, including `requireAnyActiveState`, which `abortPrWorkflow` calls
+ * *before* the clear escape hatch. Keeping this as one new optional TOP-LEVEL key
+ * on the passthrough parent keeps older code at "ignore the field I don't know"
+ * instead of "refuse to read the file at all".
+ */
+interface PrReviewBatchCoherenceRecord {
+	/**
+	 * The exact candidate/critic inventory this batch's ownership was validated
+	 * against at record time (the same set `assertExactStringSet` compared the
+	 * declared lane items to).
+	 */
+	validatedInventory: string[];
+	/**
+	 * Critic batches only: per-item sha256 of the full canonical `[REVIEWED]` row
+	 * that was authoritative for that item when the critic batch was declared. A
+	 * critic claim is admitted only while the current winning reviewer row for
+	 * that item is byte-identical, so a reviewer re-run that changes evidence or
+	 * root cause — not only classification/severity — drops exactly the critic
+	 * claims it invalidated and leaves its siblings intact.
+	 */
+	reviewerItemBindings?: Record<string, string>;
+}
+
 export interface PrWorkflowGateState {
 	schemaVersion: 1;
 	/** Monotonic durable revision used to reject stale same-session transitions. */
@@ -334,6 +388,29 @@ export interface PrWorkflowGateState {
 	prReviewTriggerLedger?: PrReviewInlineTriggerRow[];
 	prReviewTriggerEvalPath?: string;
 	prReviewValidationBatches?: PrReviewValidationBatchRecord[];
+	/** Keyed by validation batch id. See `PrReviewBatchCoherenceRecord`. */
+	prReviewBatchCoherence?: Record<string, PrReviewBatchCoherenceRecord>;
+	/**
+	 * Child session ids that produced a reviewer artifact for a validation batch
+	 * the capacity GC has since dropped (issue #1968 MUST-FIX 3).
+	 *
+	 * `reviewerSubagentSessionIds` derives the critic reuse ban by walking the
+	 * live reviewer batches, so pruning one would silently un-forbid its child
+	 * sessions and let an agent challenge its own review. This ledger carries
+	 * that fail-closed set across the prune.
+	 */
+	prReviewRetiredReviewerSessionIds?: string[];
+	/**
+	 * Canonical dimension-set keys of consolidated base lanes whose batch the
+	 * capacity GC dropped (issue #1968 review round 2, FIX D).
+	 *
+	 * `tierLBackingLaneCount` covers the consolidated lanes it can see, and it can
+	 * only see surviving `prReviewBaseDispatches`. A failed consolidated base
+	 * batch is prunable, so without this ledger a prune would shrink the cover's
+	 * universe and monotonically hand the wave back consolidation budget it had
+	 * already spent.
+	 */
+	prReviewRetiredConsolidatedLanes?: string[];
 	prReviewArtifactRunId?: string;
 	prReviewFindingsPath?: string;
 	prReviewArtifactBoundaries?: PrReviewArtifactBoundary[];
@@ -345,6 +422,16 @@ export interface PrWorkflowGateState {
 	prFeedbackReviewHandoff?: PrFeedbackReviewHandoffRecord;
 	prFeedbackInventory?: string[];
 	prFeedbackVerifications?: PrFeedbackVerificationRecord[];
+	/**
+	 * Item -> lane bindings of verification batches the capacity GC dropped
+	 * (issue #1968 review round 2, MUST-FIX C).
+	 *
+	 * `enforcePrFeedbackVerificationOwnership` rejects a re-claim of an inventory
+	 * item by a different lane using a ledger rebuilt from every live batch.
+	 * Pruning a batch would silently un-claim its items; this carries the binding
+	 * across the prune so the rejection stays cumulative.
+	 */
+	prFeedbackRetiredItemOwnership?: Record<string, string>;
 	/** @deprecated Compatibility projection of the most recent verification dispatch. */
 	prFeedbackVerification?: PrFeedbackVerificationRecord;
 	prFeedbackStageA?: PrFeedbackStageARecord;
@@ -362,6 +449,42 @@ interface SessionStateMutationLock {
 const GATE_SCHEMA_VERSION = 1 as const;
 const MAX_TRACKED_SESSIONS = 200;
 const MAX_WORKFLOW_BATCHES = 128;
+/**
+ * Ceiling on the retired-reviewer-session ledger the capacity GC maintains,
+ * sized at eight child sessions per pruned batch across a full cap. If a prune
+ * would exceed it, the GC keeps every batch instead of dropping a forbidden
+ * session id — losing the ban is a fail-open, losing the reclaim is only a dead
+ * end, and the schema bound must never be the thing that decides which.
+ */
+const MAX_RETIRED_REVIEWER_SESSION_IDS = 1024;
+/**
+ * Ceiling on the retired-consolidated-lane ledger. Every entry this code
+ * *writes* is a canonical subset of the six base dimensions with at least two
+ * members — `PrReviewBaseDispatchRecordSchema` constrains both `workflowLane`
+ * and `ownedWorkflowLanes` to `PrReviewBaseDimensionIdSchema` — so there are
+ * exactly 2^6 - 6 - 1 = 57 such values and self-written state can never reach
+ * 64.
+ *
+ * The guard is nonetheless live, because the ledger is *seeded from disk* and
+ * its own schema is `z.array(z.string().min(1)).max(64)`, not the dimension
+ * enum: a state file carrying up to 64 non-canonical entries plus the canonical
+ * keys a prune contributes exceeds the bound. That is precisely the case a
+ * fail-closed guard is for — the same reasoning as `MAX_COVER_UNIVERSE_BITS`,
+ * which also refuses to assume disk state is enum-shaped. As with the
+ * reviewer-session ledger, an overflowing prune keeps every batch rather than
+ * dropping an entry: losing the ledger is a fail-open, losing the reclaim is
+ * only a dead end.
+ */
+const MAX_RETIRED_CONSOLIDATED_LANES = 64;
+/**
+ * Ceiling on the retired feedback item-ownership ledger. An entry can only exist
+ * for an item that passed the `inventorySet` membership check, so the ledger is
+ * bounded by the declared feedback inventory; this is the schema's independent
+ * backstop for an inventory the schema itself does not bound. A prune that would
+ * exceed it keeps every batch rather than dropping a binding, on the same
+ * reasoning as the reviewer-session ledger.
+ */
+const MAX_RETIRED_FEEDBACK_ITEM_OWNERS = 4096;
 const WINDOWS_RENAME_MAX_RETRIES = 3;
 const RENAME_RETRY_DELAY_MS = 10;
 const STATE_MUTATION_LOCK_MAX_ATTEMPTS = 50;
@@ -535,6 +658,18 @@ const PrReviewValidationBatchRecordSchema = z
 	})
 	.strict();
 
+// Intentionally NOT .strict(): this record is the newest persisted shape and is
+// the most likely to gain fields. Passthrough keeps a future field opaque but
+// present through any read-modify-write cycle instead of bricking a rollback.
+const PrReviewBatchCoherenceRecordSchema = z
+	.object({
+		validatedInventory: z.array(z.string().min(1)),
+		reviewerItemBindings: z
+			.record(z.string().min(1), z.string().regex(/^[0-9a-f]{64}$/))
+			.optional(),
+	})
+	.passthrough();
+
 const PrFeedbackScopeDeclarationRecordSchema = z
 	.object({
 		taskId: z.string().regex(/^\d+\.\d+(?:\.\d+)*$/),
@@ -626,6 +761,21 @@ const PrWorkflowGateStateSchema = z
 			.array(PrReviewValidationBatchRecordSchema)
 			.max(MAX_WORKFLOW_BATCHES)
 			.optional(),
+		prReviewBatchCoherence: z
+			.record(z.string().min(1), PrReviewBatchCoherenceRecordSchema)
+			.refine(
+				(entries) => Object.keys(entries).length <= MAX_WORKFLOW_BATCHES,
+				`prReviewBatchCoherence may not exceed ${MAX_WORKFLOW_BATCHES} entries`,
+			)
+			.optional(),
+		prReviewRetiredReviewerSessionIds: z
+			.array(z.string().min(1))
+			.max(MAX_RETIRED_REVIEWER_SESSION_IDS)
+			.optional(),
+		prReviewRetiredConsolidatedLanes: z
+			.array(z.string().min(1))
+			.max(MAX_RETIRED_CONSOLIDATED_LANES)
+			.optional(),
 		prReviewArtifactRunId: z.string().min(1).optional(),
 		prReviewFindingsPath: z.string().min(1).optional(),
 		prReviewArtifactBoundaries: z
@@ -641,6 +791,14 @@ const PrWorkflowGateStateSchema = z
 		prFeedbackVerifications: z
 			.array(PrFeedbackVerificationRecordSchema)
 			.max(MAX_WORKFLOW_BATCHES)
+			.optional(),
+		prFeedbackRetiredItemOwnership: z
+			.record(z.string().min(1), z.string().min(1))
+			.refine(
+				(entries) =>
+					Object.keys(entries).length <= MAX_RETIRED_FEEDBACK_ITEM_OWNERS,
+				`prFeedbackRetiredItemOwnership may not exceed ${MAX_RETIRED_FEEDBACK_ITEM_OWNERS} entries`,
+			)
 			.optional(),
 		prFeedbackVerification: PrFeedbackVerificationRecordSchema.optional(),
 		prFeedbackStageA: PrFeedbackStageARecordSchema.optional(),
@@ -1302,13 +1460,9 @@ export async function enforcePrReviewBaseDimensions(
 	directory: string,
 	sessionID: string,
 	lanes: readonly PrWorkflowLaneSpec[],
-	options: { batchId: string; prHeadSha: string },
+	options: { batchId: string; prHeadSha: string; revisionDigest?: string },
 ): Promise<PrWorkflowGateState> {
-	const state = await bindPrWorkflowHead(
-		directory,
-		sessionID,
-		options.prHeadSha,
-	);
+	let state = await bindPrWorkflowHead(directory, sessionID, options.prHeadSha);
 	if (state.mode !== 'PR_REVIEW') {
 		throw wrongModeError(state, 'PR_REVIEW');
 	}
@@ -1330,24 +1484,60 @@ export async function enforcePrReviewBaseDimensions(
 	// Tier L requires one dedicated lane per dimension on every base batch, not
 	// only the initial wave — a later retry/supplementary batch may not use a
 	// consolidated lane to settle multiple dimensions from a single artifact
-	// that never went through the initial-wave tier check.
+	// that never went through the initial-wave tier check. The one exception is
+	// narrow, and every clause of it is load-bearing (issue #1968 P3.1).
 	if (
 		(state.prReviewDepthTier ?? 'L') === 'L' &&
 		normalizedLanes.some((lane) => (lane.ownedWorkflowLanes?.length ?? 1) !== 1)
 	) {
-		throw new Error(
-			'BLOCKED: PR_REVIEW base dispatch at depth tier L requires one dedicated lane per dimension; consolidated owned_workflow_lanes are allowed only at tiers S and M',
+		const rejection = await tierLConsolidationRejection(
+			directory,
+			state,
+			normalizedLanes,
+			options.revisionDigest,
 		);
+		if (rejection) {
+			throw new Error(
+				'BLOCKED: PR_REVIEW base dispatch at depth tier L requires one dedicated lane per dimension; ' +
+					'consolidated owned_workflow_lanes are allowed only at tiers S and M, or on a retry batch that ' +
+					'satisfies all five of: (1) every consolidated dimension already has a recorded lane that ' +
+					'reached a terminal non-successful state; (2) no consolidated dimension already has a ' +
+					`successful source; (3) no single lane owns all ${PR_REVIEW_BASE_DIMENSION_IDS.length} ` +
+					`dimensions; (4) a batch claiming all ${PR_REVIEW_BASE_DIMENSION_IDS.length} dimensions uses ` +
+					`at least ${PR_REVIEW_BASE_LANE_FLOORS.L} lanes; and (5) across every recorded base batch the ` +
+					`six dimensions stay backed by at least ${PR_REVIEW_TIER_L_CONSOLIDATED_LANE_FLOOR} distinct ` +
+					'lanes, counting each dimension no consolidated lane claims as one plus the FEWEST declared ' +
+					'consolidated lanes that suffice to cover every dimension consolidated lanes do claim. ' +
+					'Clause 5 is cumulative over every base batch this wave recorded, including batches the ' +
+					'capacity GC has since dropped, and it counts a minimum cover rather than declarations — so ' +
+					'neither splitting one consolidation across several batches nor declaring overlapping or ' +
+					'duplicate consolidations evades it. ' +
+					rejection,
+			);
+		}
 	}
 	const batchId = normalizeBatchId(options.batchId);
-	const previous = state.prReviewBaseDispatches ?? [];
+	let previous = state.prReviewBaseDispatches ?? [];
 	if (previous.some((record) => record.batchId === batchId)) {
 		throw new Error(
 			`BLOCKED: PR_REVIEW base batch id "${batchId}" is already recorded`,
 		);
 	}
 	if (previous.length >= MAX_WORKFLOW_BATCHES) {
-		throw new Error('BLOCKED: PR_REVIEW base batch limit reached');
+		// The cap used to be a permanent dead end with no recovery path. Prune
+		// provably-inert batches from the in-memory state FIRST, then re-read
+		// `previous` from the pruned object, so the append below and the single
+		// persistState downstream both operate on the same state — a separate GC
+		// write would be undone by `[...previous, record]` and would trip the CAS.
+		state = await prunePrWorkflowBatchesForCapacity(
+			directory,
+			state,
+			options.revisionDigest,
+		);
+		previous = state.prReviewBaseDispatches ?? [];
+		if (previous.length >= MAX_WORKFLOW_BATCHES) {
+			throw new Error('BLOCKED: PR_REVIEW base batch limit reached');
+		}
 	}
 	const record: PrReviewBaseDispatchRecord = {
 		batchId,
@@ -1374,16 +1564,670 @@ export async function enforcePrReviewBaseDimensions(
 	return nextState;
 }
 
+/**
+ * Delegation statuses that prove a lane will produce nothing further.
+ *
+ * Enumerated here rather than reusing `isTerminal`
+ * (`src/background/pending-delegations.ts:1829`) because that helper is private
+ * to its module and because the two sets deliberately differ: `consumed` is a
+ * *successfully ingested* terminal state, so treating it as a failure would let
+ * a healthy lane be consolidated over. `pending` / `running` / `ingesting` /
+ * `ingestion_error` are in flight or retryable. Any unrecognized (future) status
+ * is treated as "not proven failed" and denies consolidation — default-deny.
+ *
+ * `completed` is included because completion alone is not success: a completed
+ * record whose artifact is degraded, truncated, empty or identity-mismatched
+ * fails `recordsPassingBatchIntegrity` and is exactly the ran-and-failed case
+ * the tier-L retry exception exists for. This set is therefore only ever
+ * consulted for lanes that already failed that integrity chain.
+ */
+const TERMINAL_FAILED_DELEGATION_STATUSES: ReadonlySet<string> = new Set([
+	'completed',
+	'error',
+	'cancelled',
+	'stale',
+]);
+
+interface PrReviewBaseDimensionAttempts {
+	/** Dimensions with a currently authoritative successful artifact. */
+	successful: Set<string>;
+	/**
+	 * The subset of `successful` supplied by a lane that owns that dimension
+	 * alone. Used by the cumulative tier-L lane floor to decide when an earlier
+	 * consolidated lane has been superseded and no longer spends lane budget.
+	 */
+	dedicatedSuccessful: Set<string>;
+	/** Dimensions whose recorded lane ran to a terminal, non-successful end. */
+	terminallyFailed: Set<string>;
+}
+
+/**
+ * Per-dimension success/failure across every recorded base batch.
+ *
+ * The two halves deliberately use different evidence:
+ *
+ * - **successful** is revision-aware (`successfulObligationsFromExactBatch`
+ *   compares each artifact's `revisionDigest` against the current worktree), so
+ *   a stale artifact is correctly not a current source.
+ * - **terminallyFailed** is revision-INdependent on purpose.
+ *   `recordsPassingBatchIntegrity` takes no digest and checks only
+ *   session-immutable identity plus the delegation outcome. If failure were
+ *   derived from the revision-aware set instead, any working-tree edit would
+ *   make all six dimensions read as "failed" at once and a caller could then
+ *   consolidate the whole base wave into two lanes — re-opening the tier-L lane
+ *   floor by a second route (issue #1968 BL-4).
+ */
+function summarizePrReviewBaseDimensionAttempts(
+	directory: string,
+	state: PrWorkflowGateState,
+	revisionDigest: string,
+): PrReviewBaseDimensionAttempts {
+	const successful = new Set<string>();
+	const dedicatedSuccessful = new Set<string>();
+	const terminallyFailed = new Set<string>();
+	for (const batch of state.prReviewBaseDispatches ?? []) {
+		const batchSuccessful = successfulObligationsFromExactBatch(
+			directory,
+			state,
+			batch.batchId,
+			batch.lanes,
+			'swarm-pr-review:base',
+			batch.validatedAt,
+			true,
+			new Set(),
+			revisionDigest,
+		);
+		for (const obligation of batchSuccessful) {
+			successful.add(obligation);
+		}
+		for (const lane of batch.lanes) {
+			if ((lane.ownedWorkflowLanes?.length ?? 1) !== 1) continue;
+			const dimension = lane.ownedWorkflowLanes?.[0] ?? lane.workflowLane;
+			if (batchSuccessful.has(dimension)) dedicatedSuccessful.add(dimension);
+		}
+		const integrityPassingLaneIds = new Set(
+			recordsPassingBatchIntegrity(
+				directory,
+				state,
+				batch.batchId,
+				batch.lanes,
+				'swarm-pr-review:base',
+				batch.validatedAt,
+			).map((qualified) => qualified.record.laneId),
+		);
+		const records = findByBatchId(directory, batch.batchId, {
+			parentSessionId: state.sessionID,
+		});
+		for (const lane of batch.lanes) {
+			if (integrityPassingLaneIds.has(lane.laneId)) continue;
+			const laneRecords = records.filter(
+				(record) => record.laneId === lane.laneId,
+			);
+			// No record at all: never dispatched. Any record not in the terminal
+			// failure set: still in flight or retryable. Both deny consolidation.
+			if (
+				laneRecords.length === 0 ||
+				!laneRecords.every((record) =>
+					TERMINAL_FAILED_DELEGATION_STATUSES.has(record.status),
+				)
+			) {
+				continue;
+			}
+			for (const dimension of lane.ownedWorkflowLanes?.length
+				? lane.ownedWorkflowLanes
+				: [lane.workflowLane]) {
+				terminallyFailed.add(dimension);
+			}
+		}
+	}
+	return { successful, dedicatedSuccessful, terminallyFailed };
+}
+
+/**
+ * Fewest of these consolidated lane sets that together cover their own union.
+ *
+ * This is the "how many agents actually have to produce a review" number, and it
+ * is deliberately a **minimum cover** rather than a count of declared lanes
+ * (issue #1968 review round 2, MUST-FIX A). Declaring a lane costs nothing, so a
+ * count of declarations inflates without bound while the union of the dimensions
+ * they own saturates at six: four pairwise consolidations
+ * `{A,B} {B,C} {D,E} {F,A}` are each individually legal, yet three of them
+ * ({B,C}, {D,E}, {F,A}) already cover all six dimensions, and the wave settles at
+ * three producing lanes — precisely `PR_REVIEW_BASE_LANE_FLOORS.M`, the tier-M
+ * dispatch shape the tier-L floor exists to forbid. Re-declaring one identical
+ * set several times is the same defect in its simplest form.
+ *
+ * Exact, not greedy. Greedy subset-elimination is order-dependent — on the four
+ * pairs above it counts 4 in declaration order and 3 with `{A,B}` considered
+ * last — and declaration order is chosen by the very controller being gated, so
+ * an order-dependent count is not a floor.
+ *
+ * Cost is a bitmask DP over `2^|universe|` states. The universe is the set of
+ * dimensions consolidated lanes own, which `enforcePrReviewBaseDimensions`
+ * constrains to `PR_REVIEW_BASE_DIMENSION_IDS` before this ever runs, so it is
+ * six in practice. State is nonetheless read from disk, so a universe wider than
+ * `MAX_COVER_UNIVERSE_BITS` falls back to `ceil(|universe| / largest set size)` —
+ * a valid lower bound on any cover, hence still fail-closed: it can only make the
+ * floor reject more.
+ */
+const MAX_COVER_UNIVERSE_BITS = 12;
+
+/**
+ * Canonical key for a consolidated lane's owned dimension set. Sorted so two
+ * declarations of the same set collapse, and `|`-joined because
+ * `enforcePrReviewBaseDimensions` constrains every dimension to
+ * `PR_REVIEW_BASE_DIMENSION_IDS`, none of which contains that character.
+ */
+function encodeConsolidatedLaneKey(owned: readonly string[]): string {
+	return [...new Set(owned)].sort().join('|');
+}
+
+function decodeConsolidatedLaneKey(key: string): string[] {
+	return key.split('|').filter((dimension) => dimension.length > 0);
+}
+
+function minimumConsolidatedLaneCover(
+	sets: ReadonlyArray<readonly string[]>,
+): number {
+	const bitOf = new Map<string, number>();
+	for (const set of sets) {
+		for (const dimension of set) {
+			if (!bitOf.has(dimension)) bitOf.set(dimension, bitOf.size);
+		}
+	}
+	const universeSize = bitOf.size;
+	if (universeSize === 0) return 0;
+	const distinctMasks = new Set<number>();
+	let largestSetSize = 1;
+	for (const set of sets) {
+		let mask = 0;
+		let size = 0;
+		for (const dimension of set) {
+			const bit = 1 << (bitOf.get(dimension) as number);
+			if ((mask & bit) === 0) size += 1;
+			mask |= bit;
+		}
+		if (mask === 0) continue;
+		distinctMasks.add(mask);
+		largestSetSize = Math.max(largestSetSize, size);
+	}
+	if (universeSize > MAX_COVER_UNIVERSE_BITS) {
+		return Math.ceil(universeSize / largestSetSize);
+	}
+	const full = (1 << universeSize) - 1;
+	// Forward DP in increasing mask order. `mask | setMask` is strictly greater
+	// than `mask` whenever it differs, so ascending order is a valid topological
+	// order and one pass suffices. `full` is always reachable because the union
+	// of every set is the universe by construction.
+	const unreachable = universeSize + 1;
+	const best: number[] = new Array<number>(full + 1).fill(unreachable);
+	best[0] = 0;
+	for (let mask = 0; mask < full; mask += 1) {
+		const steps = best[mask] as number;
+		if (steps === unreachable) continue;
+		for (const setMask of distinctMasks) {
+			const next = mask | setMask;
+			if (next === mask) continue;
+			if ((best[next] as number) > steps + 1) best[next] = steps + 1;
+		}
+	}
+	return best[full] as number;
+}
+
+/**
+ * Distinct lanes that would still back the six base dimensions once this batch
+ * is recorded (issue #1968 MUST-FIX 1, refined by review round 2 MUST-FIX A).
+ *
+ * Counting rule: every dimension no consolidated lane claims contributes one
+ * lane (it has, or will need, a dedicated lane of its own at tier L), plus the
+ * MINIMUM number of the declared consolidated lanes needed to cover every
+ * dimension consolidated lanes do claim — see `minimumConsolidatedLaneCover` for
+ * why a count of declarations is not a floor. That sum is exactly "how many
+ * agents actually produce the six-dimension base review".
+ *
+ * The cover is taken over lanes as **declared**, not as produced. Covering only
+ * lanes that currently supply a source would let a controller declare every
+ * consolidated retry batch before any of them lands — each one measured against
+ * a wave that still looks un-consolidated — and land them all afterwards. A
+ * consolidated lane that was later superseded by a successful *dedicated* lane
+ * for every dimension it owned is dropped, so a failed consolidation followed by
+ * singleton re-dispatch does not spend budget forever.
+ *
+ * `prReviewRetiredConsolidatedLanes` is walked alongside the live batches so the
+ * cover is invariant under the capacity GC (issue #1968 review round 2, FIX D):
+ * a failed consolidated base batch is prunable, and without the ledger dropping
+ * it would shrink the cover's universe and hand the wave its consolidation
+ * budget back.
+ */
+function tierLBackingLaneCount(
+	state: PrWorkflowGateState,
+	normalizedLanes: readonly PrWorkflowLaneSpec[],
+	dedicatedSuccessful: ReadonlySet<string>,
+): { backingLanes: number; consolidatedDimensions: string[] } {
+	const consolidatedDimensions = new Set<string>();
+	const consolidatedSets: string[][] = [];
+	const consider = (
+		owned: readonly (string | undefined)[],
+		allowSupersede: boolean,
+	): void => {
+		const declared = owned.filter((dimension): dimension is string =>
+			Boolean(dimension),
+		);
+		if (declared.length < 2) return;
+		const live = allowSupersede
+			? declared.filter((dimension) => !dedicatedSuccessful.has(dimension))
+			: declared;
+		if (live.length === 0) return;
+		consolidatedSets.push([...new Set(live)]);
+		for (const dimension of live) consolidatedDimensions.add(dimension);
+	};
+	const considerLane = (
+		lane: { workflowLane?: string; ownedWorkflowLanes?: readonly string[] },
+		allowSupersede: boolean,
+	): void =>
+		consider(
+			lane.ownedWorkflowLanes?.length
+				? lane.ownedWorkflowLanes
+				: [lane.workflowLane],
+			allowSupersede,
+		);
+	for (const batch of state.prReviewBaseDispatches ?? []) {
+		for (const lane of batch.lanes) considerLane(lane, true);
+	}
+	for (const key of state.prReviewRetiredConsolidatedLanes ?? []) {
+		consider(decodeConsolidatedLaneKey(key), true);
+	}
+	for (const lane of normalizedLanes) considerLane(lane, false);
+	const dedicatedDimensions = PR_REVIEW_BASE_DIMENSION_IDS.filter(
+		(dimension) => !consolidatedDimensions.has(dimension),
+	).length;
+	return {
+		backingLanes:
+			dedicatedDimensions + minimumConsolidatedLaneCover(consolidatedSets),
+		consolidatedDimensions: [...consolidatedDimensions],
+	};
+}
+
+/**
+ * Why this tier-L batch may not consolidate, or `null` when it may.
+ *
+ * Every clause of the retry exception must hold (issue #1968 P3.1, MUST-FIX 1).
+ * The purely structural clauses — initial wave, one lane owning everything, and
+ * the per-batch all-six floor — run first, so those rejections still cost no
+ * artifact reads and no digest resolution. The remaining clauses, including the
+ * cumulative wave floor, all read from the one `attempts` summary; the
+ * cumulative floor adds no read the success/failure clauses did not already do.
+ */
+async function tierLConsolidationRejection(
+	directory: string,
+	state: PrWorkflowGateState,
+	normalizedLanes: readonly PrWorkflowLaneSpec[],
+	revisionDigest: string | undefined,
+): Promise<string | null> {
+	if ((state.prReviewBaseDispatches?.length ?? 0) === 0) {
+		return 'This is the initial base wave, which may never consolidate at tier L.';
+	}
+	const dimensionCount = PR_REVIEW_BASE_DIMENSION_IDS.length;
+	const consolidatedLanes = normalizedLanes.filter(
+		(lane) => (lane.ownedWorkflowLanes?.length ?? 1) !== 1,
+	);
+	const wholeWaveLane = consolidatedLanes.find(
+		(lane) => (lane.ownedWorkflowLanes?.length ?? 1) >= dimensionCount,
+	);
+	if (wholeWaveLane) {
+		return `Lane "${wholeWaveLane.laneId}" owns all ${dimensionCount} dimensions on its own.`;
+	}
+	const claimedDimensions = new Set(
+		normalizedLanes.flatMap(
+			(lane) => lane.ownedWorkflowLanes ?? [lane.workflowLane],
+		),
+	);
+	if (
+		claimedDimensions.size >= dimensionCount &&
+		normalizedLanes.length < PR_REVIEW_BASE_LANE_FLOORS.L
+	) {
+		return `This batch claims all ${dimensionCount} dimensions with only ${normalizedLanes.length} lanes.`;
+	}
+	let digest = revisionDigest;
+	if (!digest) {
+		// Dispatch always threads the digest it already resolved, so this branch
+		// only serves direct callers (focused tests, future entry points). It is
+		// the gate's single memoized resolve, never a per-record one.
+		digest = (await createPrReviewGateContext(directory, state)).revisionDigest;
+	}
+	const attempts = summarizePrReviewBaseDimensionAttempts(
+		directory,
+		state,
+		digest,
+	);
+	const consolidatedDimensions = [
+		...new Set(
+			consolidatedLanes.flatMap(
+				(lane) => lane.ownedWorkflowLanes ?? [lane.workflowLane],
+			),
+		),
+	].filter((dimension): dimension is string => Boolean(dimension));
+	const alreadySuccessful = consolidatedDimensions.filter((dimension) =>
+		attempts.successful.has(dimension),
+	);
+	if (alreadySuccessful.length > 0) {
+		return `These consolidated dimensions already have a successful source: ${alreadySuccessful.join(', ')}.`;
+	}
+	const notTerminallyFailed = consolidatedDimensions.filter(
+		(dimension) => !attempts.terminallyFailed.has(dimension),
+	);
+	if (notTerminallyFailed.length > 0) {
+		return `These consolidated dimensions have no recorded lane that reached a terminal non-successful state (never dispatched, still in flight, or awaiting ingestion): ${notTerminallyFailed.join(', ')}.`;
+	}
+	// The cumulative floor. The per-batch clause above is defeated by splitting
+	// one consolidation across two batches (claim five dimensions in one batch,
+	// the sixth in a singleton batch that never reaches this predicate at all),
+	// so the floor has to be measured over the whole base wave.
+	const backing = tierLBackingLaneCount(
+		state,
+		normalizedLanes,
+		attempts.dedicatedSuccessful,
+	);
+	if (backing.backingLanes < PR_REVIEW_TIER_L_CONSOLIDATED_LANE_FLOOR) {
+		return (
+			`Across every base batch this wave would be backed by only ${backing.backingLanes} distinct ` +
+			`lanes (each dimension no consolidated lane claims counts as one, plus the fewest declared ` +
+			`consolidated lanes that cover the rest), and dimensions ` +
+			`${backing.consolidatedDimensions.join(', ')} would be covered by consolidated lanes.`
+		);
+	}
+	return null;
+}
+
+/**
+ * Reclaim `MAX_WORKFLOW_BATCHES` capacity by dropping provably-inert batches.
+ *
+ * Pure with respect to durable state: it reads artifacts, returns a new state
+ * object, and never persists. The caller re-reads its batch array from the
+ * returned object and performs the one `persistState` for the whole
+ * read-prune-append transaction — a separate GC write would be undone by the
+ * subsequent `[...previous, record]` and would leave the local `revision` stale,
+ * tripping the optimistic-concurrency check (issue #1968 BL-6).
+ *
+ * Fail-closed: the discharge of "pruning changed nothing observable" is
+ * **inventory equality only** — `derivePrReviewCandidateInventory` and
+ * `derivePrReviewCriticInventory`, the two pure `(directory, state)` derivations
+ * the downstream gates consume. A past artifact-boundary exact-cover verdict is
+ * deliberately NOT recomputed: `prReviewArtifactBoundaries` persists boundary
+ * names only and the `findingIds` that check compares are caller-supplied and
+ * never persisted, so that verdict is not a property of state and never was
+ * (issue #1968 BL-5). If either inventory changes, or anything at all throws,
+ * every batch is kept and the caller's cap error stands.
+ */
+async function prunePrWorkflowBatchesForCapacity(
+	directory: string,
+	state: PrWorkflowGateState,
+	revisionDigest: string | undefined,
+): Promise<PrWorkflowGateState> {
+	try {
+		const digest =
+			revisionDigest ??
+			(await createPrReviewGateContext(directory, state)).revisionDigest;
+		const before = {
+			candidate: derivePrReviewCandidateInventory(directory, state, {
+				revisionDigest: digest,
+			}),
+			critic: derivePrReviewCriticInventory(directory, state, {
+				revisionDigest: digest,
+			}),
+		};
+		const pruned = pruneWorkflowBatches(directory, state, digest);
+		if (!pruned) return state;
+		const after = {
+			candidate: derivePrReviewCandidateInventory(directory, pruned, {
+				revisionDigest: digest,
+			}),
+			critic: derivePrReviewCriticInventory(directory, pruned, {
+				revisionDigest: digest,
+			}),
+		};
+		if (
+			!sameStringSet(before.candidate, after.candidate) ||
+			!sameStringSet(before.critic, after.critic)
+		) {
+			warn(
+				'PR_REVIEW batch GC aborted: pruning would have changed the derived inventory; every batch was kept',
+			);
+			return state;
+		}
+		// The newest batch of every kind is unprunable, so the singular "latest"
+		// pointers must survive. Assert rather than assume: a pointer left dangling
+		// past its array entry would silently misreport the active dispatch.
+		const survivingBaseIds = new Set(
+			(pruned.prReviewBaseDispatches ?? []).map((batch) => batch.batchId),
+		);
+		if (
+			state.prReviewBaseDispatch &&
+			!survivingBaseIds.has(state.prReviewBaseDispatch.batchId)
+		) {
+			warn(
+				'PR_REVIEW batch GC aborted: the latest base dispatch pointer would have been orphaned',
+			);
+			return state;
+		}
+		return pruned;
+	} catch (error) {
+		warn(
+			`PR_REVIEW batch GC aborted: ${error instanceof Error ? error.message : String(error)}`,
+		);
+		return state;
+	}
+}
+
+/**
+ * The pure prune itself. Returns `null` when nothing is prunable.
+ *
+ * Never pruned:
+ * - every `council` batch. `assertPrReviewValidationSettled` derives
+ *   `declaredPhases` from the whole array and `prReviewPhaseWindow('reviewer')`
+ *   scopes itself with `slice(latestCouncilIndex + 1)`, so council membership is
+ *   load-bearing. Non-council batches are position-independent: removing one
+ *   never changes *which* batches sit after the last council batch, only their
+ *   indices, so the reviewer window is preserved by keeping council intact;
+ * - every `critic` batch. `prReviewPhaseWindow('critic')` is **not** council
+ *   scoped — it returns every critic batch in the array — so no critic batch is
+ *   inert, including one recorded before the latest council. The fix plan's
+ *   never-prune list omits this; dropping a pre-council critic batch would
+ *   silently remove claims from critic settlement, which the inventory-equality
+ *   proof below does not cover (critic settlement is not an inventory);
+ * - the newest batch of each kind/phase, which keeps the singular latest-dispatch
+ *   pointer and `declaredPhases` intact;
+ * - any base batch carrying a fully-successful lane. The fix plan says "a current
+ *   authoritative source for a dimension"; this protects the strict superset,
+ *   because `derivePrReviewCandidateInventory` picks its authoritative source
+ *   per *lane* under the tier-L singleton-first precedence, and a reverse
+ *   per-batch scan here would not always agree. A superset can only under-prune;
+ * - any reviewer batch that contributed at least one claim to the **exhaustive**
+ *   composition. Contribution is read from a full-window scan rather than from
+ *   the memoized early-exit pass, so this durable decision never rests on the
+ *   composition's performance heuristic (issue #1968 MUST-FIX 3 / FIX 5; the two
+ *   agree under today's exit condition — see `composePrReviewPhaseVerdicts`).
+ *   A non-contributing reviewer batch is provably unable to change any verdict —
+ *   composition is
+ *   first-write-wins over a reverse scan, so a batch that claimed nothing at its
+ *   own position cannot claim anything once the batches ahead of it are still
+ *   there. That is a stronger warrant than inventory inequality and subsumes it:
+ *   a batch validated against a different inventory contributes nothing anyway.
+ *   The warrant is about the composition as it stands now; if a later inventory
+ *   change made a dropped batch eligible again, its claims are simply absent,
+ *   which can only leave an item unclaimed and BLOCK — never admit a verdict.
+ *
+ * Pruning a reviewer batch would otherwise loosen one fail-closed check —
+ * `reviewerSubagentSessionIds`, the ban on a critic lane reusing a reviewer's
+ * child session, which walks the live reviewer batches. Their child sessions are
+ * therefore moved to `prReviewRetiredReviewerSessionIds`, which that function
+ * unions in; if the ledger would overflow its bound the prune is abandoned.
+ *
+ * Pruning a base batch would loosen the other cumulative check the same way:
+ * `tierLBackingLaneCount` covers the consolidated lanes it can see, and dropping
+ * a failed consolidated batch would shrink that cover's universe and hand the
+ * wave back consolidation budget it had already spent (issue #1968 review round
+ * 2, FIX D). A dropped batch's consolidated lanes are therefore recorded in
+ * `prReviewRetiredConsolidatedLanes` as canonical dimension-set keys, under the
+ * same overflow-abandons-the-prune rule. Keys, not batches: the cover dedupes
+ * identical sets anyway, so the ledger is bounded by the 57 non-singleton
+ * subsets of six dimensions no matter how many batches retire.
+ *
+ * `prFeedbackVerifications` is not touched here — it belongs to the PR_FEEDBACK
+ * mode, which never reaches this function — but it is no longer uncollected:
+ * `prunePrFeedbackVerificationsForCapacity` reclaims it under the same
+ * fail-closed contract (issue #1968 review round 2, MUST-FIX C).
+ *
+ * Survivor order is preserved, and an orphaned `prReviewBatchCoherence` entry is
+ * always pruned with its batch.
+ */
+function pruneWorkflowBatches(
+	directory: string,
+	state: PrWorkflowGateState,
+	revisionDigest: string,
+): PrWorkflowGateState | null {
+	const baseBatches = state.prReviewBaseDispatches ?? [];
+	const validationBatches = state.prReviewValidationBatches ?? [];
+	const ctx: PrReviewGateContext = { revisionDigest };
+
+	const contributingBaseBatchIds = new Set<string>();
+	for (const batch of baseBatches) {
+		const successful = successfulObligationsFromExactBatch(
+			directory,
+			state,
+			batch.batchId,
+			batch.lanes,
+			'swarm-pr-review:base',
+			batch.validatedAt,
+			true,
+			new Set(),
+			revisionDigest,
+		);
+		const hasFullySuccessfulLane = batch.lanes.some((lane) =>
+			(lane.ownedWorkflowLanes?.length
+				? lane.ownedWorkflowLanes
+				: [lane.workflowLane]
+			).every((dimension) => successful.has(dimension)),
+		);
+		if (hasFullySuccessfulLane) contributingBaseBatchIds.add(batch.batchId);
+	}
+	const newestBaseBatchId = baseBatches.at(-1)?.batchId;
+	const survivingBase = baseBatches.filter(
+		(batch) =>
+			batch.batchId === newestBaseBatchId ||
+			contributingBaseBatchIds.has(batch.batchId),
+	);
+
+	const newestBatchIdByPhase = new Map<string, string>();
+	for (const batch of validationBatches) {
+		newestBatchIdByPhase.set(batch.phase, batch.batchId);
+	}
+	// Exhaustive on purpose: the hot path stops as soon as every item is claimed,
+	// and "was not reached before the early exit" is not evidence of inertness.
+	const contributingReviewerBatchIds = new Set(
+		composePrReviewPhaseVerdicts(directory, state, 'reviewer', ctx, true)
+			.contributingBatchIds,
+	);
+	const survivingValidation = validationBatches.filter((batch) => {
+		if (batch.phase === 'council' || batch.phase === 'critic') return true;
+		if (newestBatchIdByPhase.get(batch.phase) === batch.batchId) return true;
+		return contributingReviewerBatchIds.has(batch.batchId);
+	});
+
+	if (
+		survivingBase.length === baseBatches.length &&
+		survivingValidation.length === validationBatches.length
+	) {
+		return null;
+	}
+	const survivingValidationIds = new Set(
+		survivingValidation.map((batch) => batch.batchId),
+	);
+	const retiredReviewerSessionIds = new Set(
+		state.prReviewRetiredReviewerSessionIds ?? [],
+	);
+	for (const batch of validationBatches) {
+		if (batch.phase !== 'reviewer') continue;
+		if (survivingValidationIds.has(batch.batchId)) continue;
+		for (const record of findByBatchId(directory, batch.batchId, {
+			parentSessionId: state.sessionID,
+		})) {
+			const subagentSessionId = record.subagentSessionId?.trim();
+			if (subagentSessionId) retiredReviewerSessionIds.add(subagentSessionId);
+		}
+	}
+	if (retiredReviewerSessionIds.size > MAX_RETIRED_REVIEWER_SESSION_IDS) {
+		warn(
+			'PR_REVIEW batch GC aborted: retiring these reviewer batches would overflow the forbidden child-session ledger; every batch was kept',
+		);
+		return null;
+	}
+	// Same shape, for the other fail-closed check a prune would loosen: the
+	// tier-L cumulative consolidation floor covers the consolidated lanes it can
+	// see, and it can only see surviving base batches (issue #1968 FIX D).
+	const survivingBaseIds = new Set(survivingBase.map((batch) => batch.batchId));
+	const retiredConsolidatedLanes = new Set(
+		state.prReviewRetiredConsolidatedLanes ?? [],
+	);
+	for (const batch of baseBatches) {
+		if (survivingBaseIds.has(batch.batchId)) continue;
+		for (const lane of batch.lanes) {
+			const owned = lane.ownedWorkflowLanes?.length
+				? lane.ownedWorkflowLanes
+				: [lane.workflowLane];
+			if (new Set(owned).size < 2) continue;
+			retiredConsolidatedLanes.add(encodeConsolidatedLaneKey(owned));
+		}
+	}
+	if (retiredConsolidatedLanes.size > MAX_RETIRED_CONSOLIDATED_LANES) {
+		warn(
+			'PR_REVIEW batch GC aborted: retiring these base batches would overflow the retired consolidated-lane ledger; every batch was kept',
+		);
+		return null;
+	}
+	const survivingBatchIds = new Set([
+		...survivingBaseIds,
+		...survivingValidationIds,
+	]);
+	const coherence = Object.fromEntries(
+		Object.entries(state.prReviewBatchCoherence ?? {}).filter(([batchId]) =>
+			survivingBatchIds.has(batchId),
+		),
+	);
+	return {
+		...state,
+		...(state.prReviewBaseDispatches
+			? { prReviewBaseDispatches: survivingBase }
+			: {}),
+		...(state.prReviewValidationBatches
+			? { prReviewValidationBatches: survivingValidation }
+			: {}),
+		prReviewBatchCoherence:
+			Object.keys(coherence).length > 0 ? coherence : undefined,
+		prReviewRetiredReviewerSessionIds:
+			retiredReviewerSessionIds.size > 0
+				? [...retiredReviewerSessionIds]
+				: undefined,
+		prReviewRetiredConsolidatedLanes:
+			retiredConsolidatedLanes.size > 0
+				? [...retiredConsolidatedLanes]
+				: undefined,
+	};
+}
+
 /** Validate durable exact-six PR review evidence across all base and retry batches. */
 export async function assertPrReviewBaseCoverageSettled(
 	directory: string,
 	sessionID: string,
+	gateContext?: PrReviewGateContext,
 ): Promise<PrWorkflowGateState> {
 	const state = await requireBoundState(directory, sessionID, 'PR_REVIEW');
 	const batches = state.prReviewBaseDispatches ?? [];
 	if (batches.length === 0) {
 		throw new Error('BLOCKED: PR_REVIEW requires at least one base batch');
 	}
+	const ctx =
+		gateContext ?? (await createPrReviewGateContext(directory, state));
 	const covered = new Set<PrReviewBaseDimensionId>();
 	const malformedDiagnostics: string[] = [];
 	for (const batch of batches) {
@@ -1396,7 +2240,7 @@ export async function assertPrReviewBaseCoverageSettled(
 			batch.validatedAt,
 			true,
 			new Set(),
-			undefined,
+			ctx.revisionDigest,
 			malformedDiagnostics,
 		);
 		for (const obligation of successful) {
@@ -1436,6 +2280,7 @@ export async function recordPrReviewValidationBatch(
 			'BLOCKED: PR_REVIEW validation dispatch requires a completed trigger evaluation',
 		);
 	}
+	let ctx = await createPrReviewGateContext(directory, state);
 	if (
 		phase === 'reviewer' &&
 		(state.prReviewValidationBatches ?? []).some(
@@ -1446,14 +2291,21 @@ export async function recordPrReviewValidationBatch(
 			directory,
 			sessionID,
 			'council',
+			ctx,
 		);
 	} else if (phase === 'critic') {
 		state = await assertPrReviewValidationSettled(
 			directory,
 			sessionID,
 			'reviewer',
+			ctx,
 		);
 	}
+	// requireBoundState re-reads through the same snapshot, but the returned
+	// object identity changed; the memoized compositions were computed against
+	// the pre-reload object, so keep the digest and re-memoize against the state
+	// this function actually persists from.
+	ctx = { revisionDigest: ctx.revisionDigest };
 	const normalizedLanes = normalizeWorkflowLanes(lanes);
 	if (
 		(phase === 'reviewer' || phase === 'critic') &&
@@ -1463,6 +2315,7 @@ export async function recordPrReviewValidationBatch(
 			`BLOCKED: PR_REVIEW ${phase} lanes require non-empty review_item_ids ownership`,
 		);
 	}
+	let validatedInventory: string[] | undefined;
 	if (phase === 'reviewer' || phase === 'critic') {
 		assertNoDuplicates(
 			normalizedLanes.flatMap((lane) => lane.reviewItemIds ?? []),
@@ -1471,21 +2324,36 @@ export async function recordPrReviewValidationBatch(
 		const assigned = normalizedLanes.flatMap(
 			(lane) => lane.reviewItemIds ?? [],
 		);
-		const required =
+		validatedInventory =
 			phase === 'reviewer'
-				? derivePrReviewCandidateInventory(directory, state)
-				: derivePrReviewCriticInventory(directory, state);
-		assertExactStringSet(assigned, required, `PR_REVIEW ${phase} ownership`);
+				? derivePrReviewCandidateInventory(directory, state, ctx)
+				: derivePrReviewCriticInventory(directory, state, ctx);
+		assertExactStringSet(
+			assigned,
+			validatedInventory,
+			`PR_REVIEW ${phase} ownership`,
+		);
 	}
 	const batchId = normalizeBatchId(options.batchId);
-	const previous = state.prReviewValidationBatches ?? [];
+	let previous = state.prReviewValidationBatches ?? [];
 	if (previous.some((batch) => batch.batchId === batchId)) {
 		throw new Error(
 			`BLOCKED: PR_REVIEW validation batch id "${batchId}" is already recorded`,
 		);
 	}
 	if (previous.length >= MAX_WORKFLOW_BATCHES) {
-		throw new Error('BLOCKED: PR_REVIEW validation batch limit reached');
+		// Prune inside this same read-prune-append transaction, before `previous`
+		// and `retained` are derived, so the single persistState below writes the
+		// pruned array (issue #1968 BL-6).
+		state = await prunePrWorkflowBatchesForCapacity(
+			directory,
+			state,
+			ctx.revisionDigest,
+		);
+		previous = state.prReviewValidationBatches ?? [];
+		if (previous.length >= MAX_WORKFLOW_BATCHES) {
+			throw new Error('BLOCKED: PR_REVIEW validation batch limit reached');
+		}
 	}
 	const record: PrReviewValidationBatchRecord = {
 		batchId,
@@ -1493,29 +2361,73 @@ export async function recordPrReviewValidationBatch(
 		lanes: normalizedLanes,
 		validatedAt: isoNow(),
 	};
-	// Any new reviewer verdict set invalidates every prior critic receipt. A
-	// critic is meaningful only for the reviewer inventory that immediately
-	// precedes it; stale critic batches must never certify later severities.
+	// A critic batch is meaningful only for the exact reviewer rows it was
+	// launched against. Pin each owned item to the sha256 of the full canonical
+	// [REVIEWED] row that was authoritative right now; composition drops exactly
+	// the claims whose reviewer row later changed and keeps the rest.
+	const reviewerItemBindings =
+		phase === 'critic'
+			? criticReviewerItemBindings(directory, state, normalizedLanes, ctx)
+			: undefined;
+	// Legacy critic batches carry no bindings, so nothing can decide per item
+	// whether they went stale; for those the pre-existing blanket prune on every
+	// new reviewer batch is retained verbatim. Bound critic batches survive and
+	// are filtered per item at composition time instead.
 	const retained =
 		phase === 'reviewer'
-			? previous.filter((batch) => batch.phase !== 'critic')
+			? previous.filter(
+					(batch) =>
+						batch.phase !== 'critic' ||
+						Boolean(
+							state.prReviewBatchCoherence?.[batch.batchId]
+								?.reviewerItemBindings,
+						),
+				)
 			: previous;
-	const nextState = {
+	const retainedIds = new Set(retained.map((batch) => batch.batchId));
+	const coherence: Record<string, PrReviewBatchCoherenceRecord> =
+		Object.fromEntries(
+			Object.entries(state.prReviewBatchCoherence ?? {}).filter(([id]) =>
+				retainedIds.has(id),
+			),
+		);
+	if (validatedInventory) {
+		coherence[batchId] = {
+			validatedInventory,
+			...(reviewerItemBindings ? { reviewerItemBindings } : {}),
+		};
+	}
+	const nextState: PrWorkflowGateState = {
 		...state,
 		updatedAt: isoNow(),
 		prReviewValidationBatches: [...retained, record],
+		// Always reassigned, never spread-inherited: a pruned critic batch must
+		// take its coherence entry with it.
+		prReviewBatchCoherence:
+			Object.keys(coherence).length > 0 ? coherence : undefined,
 	};
 	await persistState(directory, nextState);
 	return nextState;
 }
 
-/** Validate that every declared council/reviewer/critic obligation has a successful retry. */
+/**
+ * Validate that every declared council obligation has a successful retry, and
+ * that every reviewer/critic *item* carries an authenticated verdict.
+ *
+ * Council keeps lane-level accounting (council lanes carry no item ownership).
+ * Reviewer and critic settle through `composePrReviewPhaseVerdicts`, so
+ * settlement and every verdict derivation are literally the same computation —
+ * settlement can never pass while derivation is empty.
+ */
 export async function assertPrReviewValidationSettled(
 	directory: string,
 	sessionID: string,
 	phase?: PrReviewValidationPhase,
+	gateContext?: PrReviewGateContext,
 ): Promise<PrWorkflowGateState> {
 	const state = await requireBoundState(directory, sessionID, 'PR_REVIEW');
+	const ctx =
+		gateContext ?? (await createPrReviewGateContext(directory, state));
 	const declaredPhases = new Set(
 		(state.prReviewValidationBatches ?? []).map((batch) => batch.phase),
 	);
@@ -1526,37 +2438,13 @@ export async function assertPrReviewValidationSettled(
 			);
 	for (const requiredPhase of phases) {
 		const validationBatches = state.prReviewValidationBatches ?? [];
-		const forbiddenSubagentSessionIds = new Set<string>();
-		if (requiredPhase === 'critic') {
-			for (const reviewerBatch of validationBatches.filter(
-				(batch) => batch.phase === 'reviewer',
-			)) {
-				for (const record of findByBatchId(directory, reviewerBatch.batchId, {
-					parentSessionId: state.sessionID,
-				})) {
-					const subagentSessionId = record.subagentSessionId?.trim();
-					if (subagentSessionId) {
-						forbiddenSubagentSessionIds.add(subagentSessionId);
-					}
-				}
-			}
-		}
-		let batches = validationBatches.filter(
-			(batch) => batch.phase === requiredPhase,
-		);
-		if (requiredPhase === 'reviewer') {
-			let latestCouncilIndex = -1;
-			for (let index = 0; index < validationBatches.length; index++) {
-				if (validationBatches[index]?.phase === 'council') {
-					latestCouncilIndex = index;
-				}
-			}
-			if (latestCouncilIndex >= 0) {
-				batches = validationBatches
-					.slice(latestCouncilIndex + 1)
-					.filter((batch) => batch.phase === 'reviewer');
-			}
-		}
+		const batches =
+			requiredPhase === 'council'
+				? validationBatches.filter((batch) => batch.phase === 'council')
+				: prReviewPhaseWindow(state, requiredPhase);
+		// Ordering is load-bearing: the "no batch at all" diagnostic must fire
+		// before composition, which derives the candidate inventory and can raise
+		// its own (less useful, here) provenance errors.
 		if (batches.length === 0) {
 			throw new Error(
 				requiredPhase === 'reviewer' && declaredPhases.has('council')
@@ -1564,46 +2452,72 @@ export async function assertPrReviewValidationSettled(
 					: `BLOCKED: PR_REVIEW requires at least one ${requiredPhase} batch`,
 			);
 		}
-		const allObligations = new Set(
-			batches.flatMap((batch) => batch.lanes.map((lane) => lane.workflowLane)),
-		);
-		const settled = new Set<string>();
-		let hasFullySuccessfulExactBatch = false;
-		for (const batch of batches) {
-			const successful = successfulObligationsFromExactBatch(
-				directory,
-				state,
-				batch.batchId,
-				batch.lanes,
-				`swarm-pr-review:${requiredPhase}`,
-				batch.validatedAt,
-				true,
-				forbiddenSubagentSessionIds,
-			);
-			if (
-				successful.size === batch.lanes.length &&
-				batch.lanes.every((lane) => successful.has(lane.workflowLane))
-			) {
-				hasFullySuccessfulExactBatch = true;
+		if (requiredPhase === 'council') {
+			const settled = new Set<string>();
+			for (const batch of batches) {
+				for (const obligation of successfulObligationsFromExactBatch(
+					directory,
+					state,
+					batch.batchId,
+					batch.lanes,
+					'swarm-pr-review:council',
+					batch.validatedAt,
+					true,
+					new Set(),
+					ctx.revisionDigest,
+				)) {
+					settled.add(obligation);
+				}
 			}
-			for (const obligation of successful) {
-				settled.add(obligation);
+			const missing = [
+				...new Set(
+					batches.flatMap((batch) =>
+						batch.lanes.map((lane) => lane.workflowLane),
+					),
+				),
+			].filter((obligation) => !settled.has(obligation));
+			if (missing.length > 0) {
+				throw new Error(
+					`BLOCKED: PR_REVIEW council obligations lack successful exact artifacts: ${missing.join(', ')}`,
+				);
 			}
+			continue;
 		}
-		if (
-			(requiredPhase === 'reviewer' || requiredPhase === 'critic') &&
-			!hasFullySuccessfulExactBatch
-		) {
+		const composed = composePrReviewPhaseVerdicts(
+			directory,
+			state,
+			requiredPhase,
+			ctx,
+		);
+		if (composed.unclaimed.length > 0) {
+			const named = composed.unclaimed.slice(0, MAX_UNCLAIMED_ITEMS_IN_MESSAGE);
+			const overflow = composed.unclaimed.length - named.length;
 			throw new Error(
-				`BLOCKED: PR_REVIEW ${requiredPhase} requires one fully successful exact batch; complementary partial retries are not a coherent verdict set`,
+				`BLOCKED: PR_REVIEW ${requiredPhase} items lack an authenticated verdict from any successful lane: ${named.join(', ')}` +
+					(overflow > 0 ? ` (+${overflow} more)` : '') +
+					(composed.diagnostics.length > 0
+						? `; diagnostics: ${composed.diagnostics.join(' | ')}`
+						: ''),
 			);
 		}
-		const missing = [...allObligations].filter(
-			(obligation) => !settled.has(obligation),
+		// B1 (issue #1968): reaching here means this phase is now *treated as
+		// settled*. Settling is only meaningful if the authoritative verdict map
+		// every downstream gate reads is actually populated over the same
+		// inventory — a settled-but-empty reviewer map skips critic coverage
+		// silently. Same memoized composition, so this costs one filter and adds
+		// no digest resolution or artifact read.
+		assertSettledPhaseHasAuthoritativeVerdicts(
+			requiredPhase,
+			composed,
+			requiredPhase === 'reviewer'
+				? deriveLatestPrReviewReviewerVerdicts(directory, state, ctx)
+				: deriveLatestPrReviewCriticVerdicts(directory, state, ctx),
+			`assertPrReviewValidationSettled(${requiredPhase})`,
 		);
-		if (missing.length > 0) {
-			throw new Error(
-				`BLOCKED: PR_REVIEW ${requiredPhase} obligations lack successful exact artifacts: ${missing.join(', ')}`,
+		if (composed.diagnostics.length > 0) {
+			warn(
+				`PR_REVIEW ${requiredPhase} settled by composition across batches [${composed.contributingBatchIds.join(', ')}] with abandoned or ineligible lanes`,
+				composed.diagnostics,
 			);
 		}
 	}
@@ -1653,17 +2567,114 @@ export async function declarePrFeedbackInventory(
 	return nextState;
 }
 
+/**
+ * Reclaim `MAX_WORKFLOW_BATCHES` capacity for `prFeedbackVerifications` (issue
+ * #1968 review round 2, MUST-FIX C).
+ *
+ * Same contract as `prunePrWorkflowBatchesForCapacity`: pure with respect to
+ * durable state (reads artifacts, returns a new object, never persists), so the
+ * caller performs the one `persistState` for the whole read-prune-append
+ * transaction and the optimistic-concurrency revision stays consistent.
+ *
+ * A verification batch holds exactly two things a later call reads:
+ * - its contribution to settlement coverage, which is only ever the items of a
+ *   lane that both passed batch integrity and produced an artifact covering
+ *   them. `assertPrFeedbackVerificationSettled` unions coverage from those lanes
+ *   alone, so a batch whose every lane failed contributes nothing at all — the
+ *   retry-driven accumulation this cap suffers from is made entirely of such
+ *   batches;
+ * - its item->lane ownership bindings, which `enforcePrFeedbackVerificationOwnership`
+ *   rebuilds cumulatively to reject a re-claim of an item by a *different* lane.
+ *   Those are moved to `prFeedbackRetiredItemOwnership`, which that function
+ *   seeds from, so the fail-closed re-claim rejection survives the prune. If the
+ *   ledger would overflow its bound, every batch is kept instead.
+ *
+ * Fail-closed like its PR_REVIEW sibling: the covered-item set is recomputed
+ * over the pruned state and must be identical, the newest batch is never
+ * dropped (so the singular `prFeedbackVerification` pointer cannot dangle), and
+ * anything that throws keeps every batch and lets the caller's cap error stand.
+ *
+ * Batch ids of dropped batches become reusable, which is safe for the same
+ * reason it is in the PR_REVIEW GC: `recordsPassingBatchIntegrity` requires
+ * `record.createdAt >= validatedAt`, so a new batch reusing a retired id cannot
+ * inherit the retired batch's older delegation records.
+ */
+async function prunePrFeedbackVerificationsForCapacity(
+	directory: string,
+	state: PrWorkflowGateState,
+): Promise<PrWorkflowGateState> {
+	try {
+		const digest = await currentPrFeedbackRevisionDigest(directory, state);
+		const batches = state.prFeedbackVerifications ?? [];
+		const before = prFeedbackCoveredItems(directory, state, digest);
+		const newestBatchId = batches.at(-1)?.batchId;
+		const surviving = batches.filter(
+			(batch) =>
+				batch.batchId === newestBatchId ||
+				prFeedbackBatchCoveredItems(directory, state, batch, digest).size > 0,
+		);
+		if (surviving.length === batches.length) return state;
+		const retiredItemOwnership: Record<string, string> = {
+			...(state.prFeedbackRetiredItemOwnership ?? {}),
+		};
+		const survivingIds = new Set(surviving.map((batch) => batch.batchId));
+		for (const batch of batches) {
+			if (survivingIds.has(batch.batchId)) continue;
+			for (const lane of batch.ownership) {
+				for (const itemId of lane.ownedItemIds) {
+					retiredItemOwnership[itemId] = lane.laneId;
+				}
+			}
+		}
+		if (
+			Object.keys(retiredItemOwnership).length >
+			MAX_RETIRED_FEEDBACK_ITEM_OWNERS
+		) {
+			warn(
+				'PR_FEEDBACK verification GC aborted: retiring these batches would overflow the item-ownership ledger; every batch was kept',
+			);
+			return state;
+		}
+		const pruned: PrWorkflowGateState = {
+			...state,
+			prFeedbackVerifications: surviving,
+			prFeedbackRetiredItemOwnership:
+				Object.keys(retiredItemOwnership).length > 0
+					? retiredItemOwnership
+					: undefined,
+		};
+		const after = prFeedbackCoveredItems(directory, pruned, digest);
+		if (!sameStringSet([...before], [...after])) {
+			warn(
+				'PR_FEEDBACK verification GC aborted: pruning would have changed the covered inventory; every batch was kept',
+			);
+			return state;
+		}
+		if (
+			state.prFeedbackVerification &&
+			!survivingIds.has(state.prFeedbackVerification.batchId)
+		) {
+			warn(
+				'PR_FEEDBACK verification GC aborted: the latest verification pointer would have been orphaned',
+			);
+			return state;
+		}
+		return pruned;
+	} catch (error) {
+		warn(
+			`PR_FEEDBACK verification GC aborted: ${error instanceof Error ? error.message : String(error)}`,
+		);
+		return state;
+	}
+}
+
 export async function enforcePrFeedbackVerificationOwnership(
 	directory: string,
 	sessionID: string,
 	ownership: readonly PrFeedbackLaneOwnership[],
 	options: { batchId: string; prHeadSha: string },
 ): Promise<PrWorkflowGateState> {
-	const state = await bindPrWorkflowHead(
-		directory,
-		sessionID,
-		options.prHeadSha,
-	);
+	let state = await bindPrWorkflowHead(directory, sessionID, options.prHeadSha);
 	if (state.mode !== 'PR_FEEDBACK') {
 		throw wrongModeError(state, 'PR_FEEDBACK');
 	}
@@ -1677,7 +2688,7 @@ export async function enforcePrFeedbackVerificationOwnership(
 	const normalizedOwnership = normalizeOwnership(ownership);
 	const inventorySet = new Set(inventory);
 	const claimedByItemId = new Map<string, string>();
-	const previous = state.prFeedbackVerifications ?? [];
+	let previous = state.prFeedbackVerifications ?? [];
 	const batchId = normalizeBatchId(options.batchId);
 	if (previous.some((record) => record.batchId === batchId)) {
 		throw new Error(
@@ -1685,7 +2696,25 @@ export async function enforcePrFeedbackVerificationOwnership(
 		);
 	}
 	if (previous.length >= MAX_WORKFLOW_BATCHES) {
-		throw new Error('BLOCKED: PR_FEEDBACK verification batch limit reached');
+		// Feedback verification accumulates on retry exactly as the PR_REVIEW
+		// arrays do — `dispatch-lanes.ts` appends a batch on EVERY verification
+		// dispatch, retries included — so this cap needs the same reclaim (issue
+		// #1968 review round 2, MUST-FIX C). What a dropped batch would otherwise
+		// take with it is the cumulative item->lane ownership ledger rebuilt just
+		// below; `prFeedbackRetiredItemOwnership` carries those bindings across the
+		// prune so the re-claim rejection is preserved. Same transaction shape as
+		// the PR_REVIEW GC: prune the in-memory state first, re-read `previous`
+		// from it, and let the single persistState downstream commit both.
+		state = await prunePrFeedbackVerificationsForCapacity(directory, state);
+		previous = state.prFeedbackVerifications ?? [];
+		if (previous.length >= MAX_WORKFLOW_BATCHES) {
+			throw new Error('BLOCKED: PR_FEEDBACK verification batch limit reached');
+		}
+	}
+	for (const [itemId, laneId] of Object.entries(
+		state.prFeedbackRetiredItemOwnership ?? {},
+	)) {
+		claimedByItemId.set(itemId, laneId);
 	}
 	for (const record of previous) {
 		for (const lane of record.ownership) {
@@ -1728,6 +2757,71 @@ export async function enforcePrFeedbackVerificationOwnership(
 	return nextState;
 }
 
+/**
+ * Inventory items a verification batch settles: the items of every lane that is
+ * both successful under batch integrity and whose artifact actually covers them.
+ *
+ * Shared with the capacity GC so "what this batch contributes to coverage" is
+ * one computation rather than two that can drift (issue #1968 review round 2,
+ * MUST-FIX C). A batch with no such lane contributes nothing to settlement.
+ */
+function prFeedbackBatchCoveredItems(
+	directory: string,
+	state: PrWorkflowGateState,
+	batch: PrFeedbackVerificationRecord,
+	currentDigest: string,
+): Set<string> {
+	const covered = new Set<string>();
+	const successfulLaneIds = successfulObligationsFromExactBatch(
+		directory,
+		state,
+		batch.batchId,
+		batch.ownership.map((lane) => ({
+			laneId: lane.laneId,
+			workflowLane: lane.laneId,
+		})),
+		'swarm-pr-feedback:verification',
+		batch.validatedAt,
+		false,
+		new Set(),
+		currentDigest,
+	);
+	for (const lane of batch.ownership) {
+		if (!successfulLaneIds.has(lane.laneId)) continue;
+		if (
+			!feedbackArtifactCoversItems(
+				directory,
+				state,
+				batch.batchId,
+				lane.laneId,
+				lane.ownedItemIds,
+			)
+		)
+			continue;
+		for (const itemId of lane.ownedItemIds) covered.add(itemId);
+	}
+	return covered;
+}
+
+function prFeedbackCoveredItems(
+	directory: string,
+	state: PrWorkflowGateState,
+	currentDigest: string,
+): Set<string> {
+	const covered = new Set<string>();
+	for (const batch of state.prFeedbackVerifications ?? []) {
+		for (const itemId of prFeedbackBatchCoveredItems(
+			directory,
+			state,
+			batch,
+			currentDigest,
+		)) {
+			covered.add(itemId);
+		}
+	}
+	return covered;
+}
+
 /** Validate cumulative exact inventory ownership and settled verification artifacts. */
 export async function assertPrFeedbackVerificationSettled(
 	directory: string,
@@ -1742,37 +2836,7 @@ export async function assertPrFeedbackVerificationSettled(
 			'BLOCKED: PR_FEEDBACK requires an immutable inventory and verification batches',
 		);
 	}
-	const covered = new Set<string>();
-	for (const batch of batches) {
-		const successfulLaneIds = successfulObligationsFromExactBatch(
-			directory,
-			state,
-			batch.batchId,
-			batch.ownership.map((lane) => ({
-				laneId: lane.laneId,
-				workflowLane: lane.laneId,
-			})),
-			'swarm-pr-feedback:verification',
-			batch.validatedAt,
-			false,
-			new Set(),
-			currentDigest,
-		);
-		for (const lane of batch.ownership) {
-			if (!successfulLaneIds.has(lane.laneId)) continue;
-			if (
-				!feedbackArtifactCoversItems(
-					directory,
-					state,
-					batch.batchId,
-					lane.laneId,
-					lane.ownedItemIds,
-				)
-			)
-				continue;
-			for (const itemId of lane.ownedItemIds) covered.add(itemId);
-		}
-	}
+	const covered = prFeedbackCoveredItems(directory, state, currentDigest);
 	const missing = inventory.filter((itemId) => !covered.has(itemId));
 	if (missing.length > 0 || covered.size !== inventory.length) {
 		throw new Error(
@@ -1968,6 +3032,23 @@ export async function recordPrFeedbackStageA(
 			'BLOCKED: PR_FEEDBACK Stage A reproduction must map every immutable feedback item exactly once and in declared order',
 		);
 	}
+	const normalizedCategories = optionalCategoryOrder.filter((category) =>
+		applicableCategories.includes(category),
+	);
+	// Issue #1968 P5a: a re-record on the SAME revision with an equal-or-wider
+	// attestation invalidates nothing the already-recorded independent gate
+	// batches proved, so those batches are retained instead of forcing a full
+	// four-phase re-dispatch. An unchanged digest is NOT sufficient on its own:
+	// `applicableObligations` / `applicableCategories` are caller-supplied and
+	// validated only for internal self-consistency, so a re-record may narrow the
+	// attestation, and a gate batch proved on the wider one is then no longer
+	// evidence for what is being attested now. Narrower (or a changed revision)
+	// wipes exactly as before.
+	const retainsGateBatches = stageARetainsGateBatches(state.prFeedbackStageA, {
+		revisionDigest: currentDigest,
+		applicableCategories: normalizedCategories,
+		applicableObligations,
+	});
 	const nextState: PrWorkflowGateState = {
 		...state,
 		updatedAt: isoNow(),
@@ -1975,17 +3056,90 @@ export async function recordPrFeedbackStageA(
 			revisionDigest: currentDigest,
 			checks: [...checks],
 			feedbackItemIds: reproductionFeedbackItemIds,
-			applicableCategories: optionalCategoryOrder.filter((category) =>
-				applicableCategories.includes(category),
-			),
+			applicableCategories: normalizedCategories,
 			applicableObligations,
 			validatedAt: isoNow(),
 		},
-		prFeedbackGateBatches: [],
+		prFeedbackGateBatches: retainsGateBatches
+			? [...(state.prFeedbackGateBatches ?? [])]
+			: [],
+		// Always disarmed, even when the gate batches are retained: re-arming is
+		// one `complete_pr_workflow` call that re-verifies every retained phase,
+		// so keeping an armed publication alive across a Stage A re-record would
+		// widen the publication window for no saving worth having.
 		prFeedbackReadyToPublish: undefined,
 	};
 	await persistState(directory, nextState);
 	return nextState;
+}
+
+/**
+ * Canonical identity of one Stage A workspace obligation.
+ *
+ * Field-ordered by construction rather than `JSON.stringify`-ed, because a fresh
+ * caller object and a schema-parsed round-trip do not agree on key order. Every
+ * field the obligation is validated against at `recordPrFeedbackStageA` time
+ * participates: the same `id` carrying a different `source` or
+ * `validatorContract` is a *different* obligation and must not read as retained.
+ */
+function canonicalStageAObligation(obligation: {
+	id: string;
+	category: string;
+	workingDirectory: string;
+	source: string;
+	validatorContract?: { path: string; id: string };
+}): string {
+	return [
+		obligation.id,
+		obligation.category,
+		obligation.workingDirectory,
+		obligation.source,
+		obligation.validatorContract?.path ?? '',
+		obligation.validatorContract?.id ?? '',
+	].join('\0');
+}
+
+/**
+ * May the already-recorded PR_FEEDBACK gate batches survive this Stage A
+ * re-record? Only when the revision is unchanged AND the incoming attestation is
+ * equal to or a superset of the prior one.
+ *
+ * A previous record that carries neither attestation field is a *legacy* record
+ * (both keys are optional in the schema and were absent before this retention
+ * rule existed). Defaulting them to `[]` would make the superset check
+ * vacuously true and retain gate approvals straight across a narrowed
+ * re-attestation — the exact fail-open this function exists to close (issue
+ * #1968 FIX 6). Unprovable therefore means wipe. `recordPrFeedbackStageA` always
+ * writes both fields, so no record this code writes can take that branch.
+ */
+function stageARetainsGateBatches(
+	previous: PrWorkflowGateState['prFeedbackStageA'],
+	next: {
+		revisionDigest: string;
+		applicableCategories: ReadonlyArray<'build' | 'typecheck' | 'lint'>;
+		applicableObligations: ReadonlyArray<
+			Parameters<typeof canonicalStageAObligation>[0]
+		>;
+	},
+): boolean {
+	if (!previous || previous.revisionDigest !== next.revisionDigest)
+		return false;
+	if (!previous.applicableCategories || !previous.applicableObligations)
+		return false;
+	const nextCategories = new Set<string>(next.applicableCategories);
+	if (
+		!previous.applicableCategories.every((category) =>
+			nextCategories.has(category),
+		)
+	) {
+		return false;
+	}
+	const nextObligations = new Set(
+		next.applicableObligations.map(canonicalStageAObligation),
+	);
+	return previous.applicableObligations.every((obligation) =>
+		nextObligations.has(canonicalStageAObligation(obligation)),
+	);
 }
 
 /** Record one ordered, single-lane feedback validation phase before launch. */
@@ -2338,19 +3492,39 @@ export async function assertPrReviewArtifactBoundary(
 			`BLOCKED: PR_REVIEW ${boundary} findings cannot be persisted after a later checkpoint`,
 		);
 	}
+	// One digest resolution and one composed verdict map for this whole gate
+	// call: the settlement pass, the critic-inventory derivation and the
+	// candidate-inventory check below must all see the same verdicts.
+	const ctx = await createPrReviewGateContext(directory, state);
 	if (boundary === 'post_reviewer') {
 		state = await assertPrReviewValidationSettled(
 			directory,
 			sessionID,
 			'reviewer',
+			ctx,
 		);
 	} else if (boundary === 'post_critic') {
-		await assertPrReviewValidationSettled(directory, sessionID, 'reviewer');
-		if (derivePrReviewCriticInventory(directory, state).length > 0) {
+		await assertPrReviewValidationSettled(
+			directory,
+			sessionID,
+			'reviewer',
+			ctx,
+		);
+		// Empty here must mean "no CONFIRMED CRITICAL/HIGH/MEDIUM verdict exists",
+		// never "the reviewer map was empty" or "reviewer never settled".
+		if (
+			derivePrReviewCriticInventoryForCoverageGate(
+				directory,
+				state,
+				ctx,
+				'assertPrReviewArtifactBoundary(post_critic)',
+			).length > 0
+		) {
 			state = await assertPrReviewValidationSettled(
 				directory,
 				sessionID,
 				'critic',
+				ctx,
 			);
 		}
 	}
@@ -2359,7 +3533,11 @@ export async function assertPrReviewArtifactBoundary(
 			`BLOCKED: PR_REVIEW artifacts are already bound to run "${state.prReviewArtifactRunId}"`,
 		);
 	}
-	const expectedFindingIds = derivePrReviewCandidateInventory(directory, state);
+	const expectedFindingIds = derivePrReviewCandidateInventory(
+		directory,
+		state,
+		ctx,
+	);
 	const normalizedFindingIds = [...new Set(findingIds)].sort();
 	if (
 		normalizedFindingIds.length !== findingIds.length ||
@@ -2399,13 +3577,24 @@ export async function assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts(
 		return;
 	}
 
-	const reviewerVerdicts = deriveLatestPrReviewReviewerVerdicts(
+	const ctx = await createPrReviewGateContext(directory, state);
+	// B1: this is the gate that emits the misleading "no authoritative reviewer
+	// verdict" per record. When the real cause is a settled-but-empty verdict
+	// map, the guarded accessors name that cause instead.
+	const reviewerVerdicts = authoritativeReviewerVerdictsForGate(
 		directory,
 		state,
+		ctx,
+		`assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts(${boundary})`,
 	);
 	const criticVerdicts =
 		boundary === 'post_critic'
-			? deriveLatestPrReviewCriticVerdicts(directory, state)
+			? authoritativeCriticVerdictsForGate(
+					directory,
+					state,
+					ctx,
+					`assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts(${boundary})`,
+				)
 			: undefined;
 	for (const record of records) {
 		const reviewer = reviewerVerdicts.get(record.finding_id);
@@ -2884,7 +4073,9 @@ async function assertPrReviewTerminalReady(
 			`BLOCKED: PR_REVIEW transition has ${open.length} unsettled PR workflow lane(s)`,
 		);
 	}
-	await assertPrReviewBaseCoverageSettled(directory, sessionID);
+	// One digest + one composed verdict map for the entire terminal check.
+	const ctx = await createPrReviewGateContext(directory, state);
+	await assertPrReviewBaseCoverageSettled(directory, sessionID, ctx);
 	if (!state.prReviewTriggerEvalPath) {
 		throw new Error(
 			'BLOCKED: PR_REVIEW transition requires a persisted trigger evaluation artifact',
@@ -2895,10 +4086,19 @@ async function assertPrReviewTerminalReady(
 			(batch) => batch.phase === 'council',
 		)
 	) {
-		await assertPrReviewValidationSettled(directory, sessionID, 'council');
+		await assertPrReviewValidationSettled(directory, sessionID, 'council', ctx);
 	}
-	await assertPrReviewValidationSettled(directory, sessionID, 'reviewer');
-	const criticInventory = derivePrReviewCriticInventory(directory, state);
+	await assertPrReviewValidationSettled(directory, sessionID, 'reviewer', ctx);
+	// The critic-coverage gate. `length === 0` skips the critic phase entirely,
+	// so it must provably mean "no CONFIRMED CRITICAL/HIGH/MEDIUM reviewer
+	// verdict exists" — not "reviewer never settled" and not "the authoritative
+	// reviewer map came back empty". Both pathologies BLOCK inside this call.
+	const criticInventory = derivePrReviewCriticInventoryForCoverageGate(
+		directory,
+		state,
+		ctx,
+		'completePrWorkflow critic-coverage gate',
+	);
 	if (criticInventory.length > 0) {
 		if (
 			!(state.prReviewValidationBatches ?? []).some(
@@ -2909,7 +4109,7 @@ async function assertPrReviewTerminalReady(
 				`BLOCKED: PR_REVIEW reviewer verdicts require critic coverage for: ${criticInventory.join(', ')}`,
 			);
 		}
-		await assertPrReviewValidationSettled(directory, sessionID, 'critic');
+		await assertPrReviewValidationSettled(directory, sessionID, 'critic', ctx);
 	}
 	const requiredBoundaries: PrReviewArtifactBoundary[] = [
 		'post_explorer',
@@ -3690,6 +4890,8 @@ export async function completePrWorkflow(
 }
 
 export const _test_exports = {
+	minimumConsolidatedLaneCover,
+	MAX_COVER_UNIVERSE_BITS,
 	workflowGateStateRelativePath,
 	workflowGateStateLockRelativePath,
 	workflowCheckoutMutationLockRelativePath,
@@ -3753,9 +4955,94 @@ export const _test_exports = {
 	resolvePrReviewDiffStats,
 	resolvePrReviewDiffStatsAsync,
 	resolvePrWorkflowRevisionDigest,
+	/**
+	 * The batch cap the capacity GC reclaims against. Exposed so the GC suite
+	 * builds its fixture from the real bound instead of a hand-copied literal
+	 * that would silently drift if the cap ever moved.
+	 */
+	MAX_WORKFLOW_BATCHES,
+	/**
+	 * The three ledger ceilings whose overflow makes the capacity GC abandon a
+	 * prune and keep every batch. Exposed on the same reasoning as
+	 * `MAX_WORKFLOW_BATCHES`: the overflow suite seeds a ledger to exactly its
+	 * bound from the real constant, so a hand-copied literal cannot drift away
+	 * from the branch it is meant to reach.
+	 */
+	MAX_RETIRED_REVIEWER_SESSION_IDS,
+	MAX_RETIRED_CONSOLIDATED_LANES,
+	MAX_RETIRED_FEEDBACK_ITEM_OWNERS,
+	/**
+	 * Issue #1968 P2.2: lets a focused test drive one specific bounded-snapshot
+	 * failure reason so the BLOCKED diagnostic can be asserted per bound. The
+	 * pre-existing `resolvePrWorkflowRevisionDigest` seam above still takes
+	 * priority-two precedence and is unchanged for every existing fixture.
+	 */
+	resolvePrWorkflowRevisionDigestDetailed,
 	resolveRemoteRefsContainingHead,
 	resolveRemoteRefsContainingHeadAsync,
 	parseCriticVerdict,
+	/**
+	 * Read-only view of the item-keyed composition for one session, including
+	 * the diagnostics that settlement only logs (abandoned declared lanes,
+	 * batches skipped for inventory incoherence). Production callers reach the
+	 * same computation through settlement and the verdict derivations.
+	 */
+	composePrReviewPhaseVerdicts: async (
+		directory: string,
+		sessionID: string,
+		phase: PrReviewComposablePhase,
+	): Promise<PrReviewPhaseComposition> => {
+		const state = await requireBoundState(directory, sessionID, 'PR_REVIEW');
+		const ctx = await createPrReviewGateContext(directory, state);
+		return composePrReviewPhaseVerdicts(directory, state, phase, ctx);
+	},
+	/**
+	 * Issue #1968 B1 guardrail, exposed directly.
+	 *
+	 * Production reaches it from `assertPrReviewValidationSettled`, both
+	 * critic-coverage gates and the artifact-record projection check. Item-keyed
+	 * composition makes a real violation unreachable by construction, so the only
+	 * way to exercise the assertion's own behaviour (and its cause-naming
+	 * message) without mutating production code is to hand it the divergent pair
+	 * a future re-split would produce.
+	 */
+	assertSettledPhaseHasAuthoritativeVerdicts,
+	/**
+	 * The critic-coverage gate's guarded input, exposed for the same reason as
+	 * the assertion above: production reaches its unsettled-reviewer branch only
+	 * if a caller stops settling reviewer first, which is precisely the future
+	 * regression it exists to catch, so the branch is otherwise untestable.
+	 */
+	derivePrReviewCriticInventoryForCoverageGate: async (
+		directory: string,
+		sessionID: string,
+		origin = '_test_exports',
+	): Promise<string[]> => {
+		const state = await requireBoundState(directory, sessionID, 'PR_REVIEW');
+		const ctx = await createPrReviewGateContext(directory, state);
+		return derivePrReviewCriticInventoryForCoverageGate(
+			directory,
+			state,
+			ctx,
+			origin,
+		);
+	},
+	/**
+	 * Read-only view of the mandatory candidate inventory for one session.
+	 * Production reaches the same derivation through validation-batch ownership
+	 * validation, the composition, and the artifact-boundary checks; this seam
+	 * lets a focused test observe *which* base lane won a dimension (the tier-L
+	 * singleton-over-consolidated precedence) without standing up the full
+	 * micro-sweep and trigger-ledger prerequisites those entry points require.
+	 */
+	derivePrReviewCandidateInventory: async (
+		directory: string,
+		sessionID: string,
+	): Promise<string[]> => {
+		const state = await requireBoundState(directory, sessionID, 'PR_REVIEW');
+		const ctx = await createPrReviewGateContext(directory, state);
+		return derivePrReviewCandidateInventory(directory, state, ctx);
+	},
 	isProcessAlive,
 	// Exposed for the `-c` config-injection regression test. The publication
 	// path that calls this needs a fully-armed ready-to-publish state, so the
@@ -4669,38 +5956,166 @@ async function currentPrFeedbackRevisionDigest(
 			'BLOCKED: PR_FEEDBACK revision binding requires pr_head_sha',
 		);
 	}
-	const digest = await resolvePrWorkflowRevisionDigestForGate(
+	const resolved = await resolvePrWorkflowRevisionDigestForGate(
 		directory,
 		state.prHeadSha,
 	);
-	if (!digest) {
+	if (!resolved.ok) {
 		throw new Error(
-			'BLOCKED: PR_FEEDBACK could not compute a bounded current-revision digest',
+			'BLOCKED: PR_FEEDBACK could not compute a bounded current-revision digest' +
+				` for pr_head_sha "${state.prHeadSha}"; ${describePrWorkflowRevisionDigestFailure(resolved)}`,
 		);
 	}
-	return digest;
+	return resolved.digest;
 }
 
 /**
- * Production gate calls use the non-blocking, chunked digest implementation.
- * Keep the synchronous seam for existing focused tests and explicit test
- * injection; it is never selected while the production implementation is in
- * place.
+ * The gate's view of a digest failure. Everything the bounded-snapshot resolver
+ * can report, plus one test-only case: an injected `string | null` seam returned
+ * `null`, which carries no reason at all. Modelled explicitly rather than folded
+ * into one of the real reasons so a diagnostic never claims a bound fired when
+ * nothing proved it did.
+ */
+type GateRevisionDigestResult =
+	| RevisionDigestResult
+	| { ok: false; reason: 'seam-unavailable'; detail?: string };
+
+/**
+ * Name the exact bound that fired, plus what to do about it.
+ *
+ * Exported because `dispatch_lanes_async` resolves the same bounded revision
+ * digest before any gate entry point runs, and must produce the same
+ * bound-naming diagnostic rather than the pre-fix "could not compute" with no
+ * indication of which of six limits was hit (issue #1968 P2.2 / criterion 6).
+ */
+export function describePrWorkflowRevisionDigestFailure(
+	failure: Extract<GateRevisionDigestResult, { ok: false }>,
+): string {
+	const detail = failure.detail ? ` (${failure.detail})` : '';
+	switch (failure.reason) {
+		case 'file-cap':
+			return `the changed-file snapshot exceeded REVISION_MAX_FILES${detail}. Reduce the changed-path count (commit or stash generated/vendored output) before retrying`;
+		case 'byte-cap':
+			return `the changed-file snapshot exceeded REVISION_MAX_TOTAL_BYTES${detail}. Reduce the changed content size before retrying`;
+		case 'buffer-truncated':
+			return `a bounded git enumeration exceeded GIT_SNAPSHOT_MAX_BUFFER${detail}. The changed-path list is too large to enumerate`;
+		case 'timeout':
+			return `a bounded git enumeration timed out${detail}. Retry once the working tree is quiescent`;
+		case 'git-failed':
+			return `a bounded git enumeration failed${detail}. Verify the checkout is a healthy Git worktree at the recorded head`;
+		case 'containment':
+			return `git reported a changed path outside the project root${detail}. Nothing outside the project root may be hashed`;
+		case 'read-failed':
+			return `a changed path could not be read${detail}. Resolve the filesystem error before retrying`;
+		default:
+			return `an injected revision-digest seam returned no digest${detail}; production names one of REVISION_MAX_FILES / REVISION_MAX_TOTAL_BYTES / GIT_SNAPSHOT_MAX_BUFFER, a bounded git enumeration timeout, or a read failure`;
+	}
+}
+
+/**
+ * Production gate calls use the non-blocking, chunked digest implementation, and
+ * consume its discriminated failure reason so a BLOCKED message can name the one
+ * bound that actually fired instead of listing every bound that might have.
+ *
+ * Two synchronous seams are kept for focused tests, in priority order. The
+ * detailed seam lets a test drive a specific failure reason; the pre-existing
+ * `string | null` seam is preserved verbatim so every existing fixture keeps
+ * working, and its `null` maps to the reasonless `seam-unavailable` case rather
+ * than being attributed to a bound no test proved. Neither is selected while the
+ * production implementation is in place.
  */
 async function resolvePrWorkflowRevisionDigestForGate(
 	directory: string,
 	baseHeadSha: string,
-): Promise<string | null> {
+): Promise<GateRevisionDigestResult> {
 	if (
-		_test_exports.resolvePrWorkflowRevisionDigest !==
-		resolvePrWorkflowRevisionDigest
+		_test_exports.resolvePrWorkflowRevisionDigestDetailed !==
+		resolvePrWorkflowRevisionDigestDetailed
 	) {
-		return _test_exports.resolvePrWorkflowRevisionDigest(
+		return _test_exports.resolvePrWorkflowRevisionDigestDetailed(
 			directory,
 			baseHeadSha,
 		);
 	}
-	return resolvePrWorkflowRevisionDigestAsync(directory, baseHeadSha);
+	if (
+		_test_exports.resolvePrWorkflowRevisionDigest !==
+		resolvePrWorkflowRevisionDigest
+	) {
+		const digest = _test_exports.resolvePrWorkflowRevisionDigest(
+			directory,
+			baseHeadSha,
+		);
+		return digest
+			? { ok: true, digest }
+			: { ok: false, reason: 'seam-unavailable' };
+	}
+	return resolvePrWorkflowRevisionDigestDetailedAsync(directory, baseHeadSha);
+}
+
+/**
+ * One PR_REVIEW gate entry point's memoized derivation context.
+ *
+ * Two properties, both load-bearing:
+ *
+ * 1. **One revision digest per gate call.** Every artifact-integrity check below
+ *    compares the persisted artifact's `revisionDigest` against the current
+ *    worktree revision. Resolving that per record costs three blocking `git`
+ *    calls plus a full re-read of every changed file, once per record. Both
+ *    callers of the marker check already require
+ *    `record.workspace.prHeadSha === state.prHeadSha` earlier in the same
+ *    predicate, so every record reaching the comparison shares one head and one
+ *    resolution is equivalent to N.
+ *
+ *    **Honest equivalence statement:** one digest is equivalent to N per-record
+ *    resolves *absent concurrent worktree mutation during a gate call*. The
+ *    resolver reads the live worktree, so this narrows a TOCTOU window rather
+ *    than being a pure cost change. It adopts the precedent already set by the
+ *    PR_FEEDBACK verification path, which resolves once and threads.
+ *
+ * 2. **One composed verdict map per gate call.** Settlement, critic-inventory
+ *    derivation, the artifact-record projection check and the legacy-eligibility
+ *    marker check are separate passes over the same state. They must never hold
+ *    two different notions of "the current reviewer verdict", so the composition
+ *    is computed once here and the same object is handed to all of them.
+ *
+ * A context is valid for exactly one gate entry-point call over one state
+ * snapshot. Never cache it across calls.
+ */
+interface PrReviewGateContext {
+	readonly revisionDigest: string;
+	reviewer?: PrReviewPhaseComposition;
+	critic?: PrReviewPhaseComposition;
+	candidateInventory?: string[];
+}
+
+/**
+ * Resolve the single current-revision digest this gate call will thread.
+ *
+ * A failed resolution is a hard BLOCK, never a silently-threaded `undefined`:
+ * `undefined` restores the per-record synchronous fallback inside the marker
+ * check, which would make the gate quietly do 1+N blocking resolutions and
+ * would make a "resolved once" guardrail assert something production does not
+ * do. The resolver reports a discriminated failure reason, so the message names
+ * the one bound that actually fired rather than every bound that might have.
+ */
+async function createPrReviewGateContext(
+	directory: string,
+	state: PrWorkflowGateState,
+): Promise<PrReviewGateContext> {
+	if (!state.prHeadSha) {
+		throw new Error('BLOCKED: PR_REVIEW revision binding requires pr_head_sha');
+	}
+	const resolved = await resolvePrWorkflowRevisionDigestForGate(
+		directory,
+		state.prHeadSha,
+	);
+	if (!resolved.ok) {
+		throw new Error(
+			'BLOCKED: PR_REVIEW could not compute a bounded current-revision digest for ' +
+				`pr_head_sha "${state.prHeadSha}"; ${describePrWorkflowRevisionDigestFailure(resolved)}`,
+		);
+	}
+	return { revisionDigest: resolved.digest };
 }
 
 function normalizeBatchId(batchId: string): string {
@@ -4718,6 +6133,18 @@ function sameStringArray(
 	return (
 		left.length === right.length &&
 		left.every((value, index) => value === right[index])
+	);
+}
+
+/** Order- and duplicate-insensitive set equality over two id lists. */
+function sameStringSet(
+	left: readonly string[],
+	right: readonly string[],
+): boolean {
+	const leftSet = new Set(left);
+	const rightSet = new Set(right);
+	return (
+		leftSet.size === rightSet.size && [...leftSet].every((v) => rightSet.has(v))
 	);
 }
 
@@ -4745,7 +6172,9 @@ function assertExactStringSet(
 function derivePrReviewCandidateInventory(
 	directory: string,
 	state: PrWorkflowGateState,
+	ctx: PrReviewGateContext,
 ): string[] {
+	if (ctx.candidateInventory) return ctx.candidateInventory;
 	const sources: Array<{
 		batchId: string;
 		laneId: string;
@@ -4780,34 +6209,64 @@ function derivePrReviewCandidateInventory(
 	>();
 	const baseSourceCreditedDimensions = new Map<string, string[]>();
 	const baseSourceFullOwnershipCount = new Map<string, number>();
-	for (const batch of [...(state.prReviewBaseDispatches ?? [])].reverse()) {
-		const successful = successfulObligationsFromExactBatch(
-			directory,
-			state,
+	const reversedBaseBatches = [
+		...(state.prReviewBaseDispatches ?? []),
+	].reverse();
+	const successfulByBaseBatchId = new Map<string, Set<string>>();
+	for (const batch of reversedBaseBatches) {
+		successfulByBaseBatchId.set(
 			batch.batchId,
-			batch.lanes,
-			'swarm-pr-review:base',
-			batch.validatedAt,
+			successfulObligationsFromExactBatch(
+				directory,
+				state,
+				batch.batchId,
+				batch.lanes,
+				'swarm-pr-review:base',
+				batch.validatedAt,
+				true,
+				new Set(),
+				ctx.revisionDigest,
+			),
 		);
-		for (const lane of batch.lanes) {
-			const ownedDimensions = lane.ownedWorkflowLanes?.length
-				? lane.ownedWorkflowLanes
-				: [lane.workflowLane];
-			if (!ownedDimensions.every((dimension) => successful.has(dimension)))
-				continue;
-			const key = `${batch.batchId}\0${lane.laneId}`;
-			baseSourceFullOwnershipCount.set(key, ownedDimensions.length);
-			for (const dimension of ownedDimensions) {
-				if (!baseDimensionSources.has(dimension)) {
-					baseDimensionSources.set(dimension, {
-						batchId: batch.batchId,
-						laneId: lane.laneId,
-					});
-					const credited = baseSourceCreditedDimensions.get(key);
-					if (credited) {
-						credited.push(dimension);
-					} else {
-						baseSourceCreditedDimensions.set(key, [dimension]);
+	}
+	// Tier L only (issue #1968 P3.2): a successful SINGLETON source outranks a
+	// consolidated one for the same dimension, with most-recent-wins applying
+	// within each class. Tier L's contract is per-dimension depth
+	// (PR_REVIEW_BASE_LANE_FLOORS.L), and consolidation is permitted there only
+	// as failure recovery — so when both exist, the singleton is the lane that
+	// actually satisfied the tier's contract. This closes the residual race where
+	// a singleton's record completes only after a consolidated retry was already
+	// declared against it. Tiers S and M keep plain most-recent-wins, where
+	// consolidation is a first-class dispatch shape rather than a fallback.
+	const laneClassPasses: Array<(ownedCount: number) => boolean> =
+		(state.prReviewDepthTier ?? 'L') === 'L'
+			? [(ownedCount) => ownedCount === 1, (ownedCount) => ownedCount !== 1]
+			: [() => true];
+	for (const laneIsInClass of laneClassPasses) {
+		for (const batch of reversedBaseBatches) {
+			const successful =
+				successfulByBaseBatchId.get(batch.batchId) ?? new Set<string>();
+			for (const lane of batch.lanes) {
+				const ownedDimensions = lane.ownedWorkflowLanes?.length
+					? lane.ownedWorkflowLanes
+					: [lane.workflowLane];
+				if (!laneIsInClass(ownedDimensions.length)) continue;
+				if (!ownedDimensions.every((dimension) => successful.has(dimension)))
+					continue;
+				const key = `${batch.batchId}\0${lane.laneId}`;
+				baseSourceFullOwnershipCount.set(key, ownedDimensions.length);
+				for (const dimension of ownedDimensions) {
+					if (!baseDimensionSources.has(dimension)) {
+						baseDimensionSources.set(dimension, {
+							batchId: batch.batchId,
+							laneId: lane.laneId,
+						});
+						const credited = baseSourceCreditedDimensions.get(key);
+						if (credited) {
+							credited.push(dimension);
+						} else {
+							baseSourceCreditedDimensions.set(key, [dimension]);
+						}
 					}
 				}
 			}
@@ -4847,6 +6306,9 @@ function derivePrReviewCandidateInventory(
 			batch.lanes,
 			'swarm-pr-review:council',
 			batch.validatedAt,
+			true,
+			new Set(),
+			ctx.revisionDigest,
 		);
 		for (const lane of batch.lanes) {
 			if (
@@ -4936,7 +6398,7 @@ function derivePrReviewCandidateInventory(
 					source.mode,
 					record.workflowLane ?? source.workflowLane ?? source.laneId,
 					undefined,
-					undefined,
+					ctx.revisionDigest,
 					recordOwnedLanes,
 				)
 			)
@@ -4973,7 +6435,9 @@ function derivePrReviewCandidateInventory(
 		}
 	}
 	assertNoDuplicates(candidateIds, 'PR_REVIEW discovery candidate ids');
-	return candidateIds.length > 0 ? candidateIds.sort() : ['CLEAN-REVIEW'];
+	ctx.candidateInventory =
+		candidateIds.length > 0 ? candidateIds.sort() : ['CLEAN-REVIEW'];
+	return ctx.candidateInventory;
 }
 
 /**
@@ -5068,11 +6532,459 @@ function extractCandidateIds(
 		.map((row) => row.candidateId);
 }
 
+type PrReviewComposablePhase = 'reviewer' | 'critic';
+
+/** One item's admitted verdict plus the lane provenance that admitted it. */
+interface PrReviewItemClaim {
+	batchId: string;
+	laneId: string;
+	workflowLane: string;
+	/** Reviewer classification, or critic status. */
+	classification: string;
+	severity: string;
+	/**
+	 * sha256 of the full canonical `[REVIEWED]` row this claim was parsed from.
+	 * Reviewer claims only — this is what a critic batch binds to per item.
+	 */
+	rowDigest?: string;
+}
+
+interface PrReviewPhaseComposition {
+	/** Item id -> winning claim. Most recent successful lane per item wins. */
+	claims: Map<string, PrReviewItemClaim>;
+	requiredInventory: string[];
+	unclaimed: string[];
+	contributingBatchIds: string[];
+	diagnostics: string[];
+}
+
+const MAX_COMPOSITION_DIAGNOSTICS = 16;
+/** Item ids named in one BLOCKED message before it degrades to a count. */
+const MAX_UNCLAIMED_ITEMS_IN_MESSAGE = 50;
+
+function appendCompositionDiagnostic(
+	diagnostics: string[],
+	message: string,
+): void {
+	if (diagnostics.length >= MAX_COMPOSITION_DIAGNOSTICS) return;
+	diagnostics.push(message.slice(0, MAX_BASE_COVERAGE_DIAGNOSTIC_CHARS));
+}
+
+/**
+ * The batches a phase composes over.
+ *
+ * Reviewer is scoped to everything after the latest council batch (a council
+ * verdict re-opens the reviewer question). Critic spans every critic batch;
+ * critic staleness is enforced per item by the reviewer row binding rather than
+ * positionally. Note this makes reviewer *derivation* council-scoped, which it
+ * was not before — derivation and settlement previously disagreed on the window,
+ * and one computation cannot hold two windows.
+ */
+function prReviewPhaseWindow(
+	state: PrWorkflowGateState,
+	phase: PrReviewComposablePhase,
+): PrReviewValidationBatchRecord[] {
+	const all = state.prReviewValidationBatches ?? [];
+	if (phase === 'critic') {
+		return all.filter((batch) => batch.phase === 'critic');
+	}
+	let latestCouncilIndex = -1;
+	for (let index = 0; index < all.length; index++) {
+		if (all[index]?.phase === 'council') latestCouncilIndex = index;
+	}
+	return (
+		latestCouncilIndex >= 0 ? all.slice(latestCouncilIndex + 1) : all
+	).filter((batch) => batch.phase === 'reviewer');
+}
+
+/**
+ * Child sessions that already produced a reviewer artifact. A critic lane may
+ * never reuse one — an agent cannot independently challenge its own review.
+ *
+ * Seeded from `prReviewRetiredReviewerSessionIds` so the ban survives the
+ * capacity GC: a pruned reviewer batch is gone from the array this walks, and
+ * without the ledger its child sessions would silently become reusable.
+ */
+function reviewerSubagentSessionIds(
+	directory: string,
+	state: PrWorkflowGateState,
+): Set<string> {
+	const forbidden = new Set<string>(
+		state.prReviewRetiredReviewerSessionIds ?? [],
+	);
+	for (const reviewerBatch of (state.prReviewValidationBatches ?? []).filter(
+		(batch) => batch.phase === 'reviewer',
+	)) {
+		for (const record of findByBatchId(directory, reviewerBatch.batchId, {
+			parentSessionId: state.sessionID,
+		})) {
+			const subagentSessionId = record.subagentSessionId?.trim();
+			if (subagentSessionId) forbidden.add(subagentSessionId);
+		}
+	}
+	return forbidden;
+}
+
+/**
+ * May this batch contribute claims at all?
+ *
+ * Two live paths, deliberately different in granularity:
+ *
+ * - **Coherent (has a `prReviewBatchCoherence` entry).** Reviewer batches must
+ *   have been validated against exactly the inventory in force now: a reviewer
+ *   verdict set is only meaningful for the candidate inventory it was assigned,
+ *   and nothing else pins it. Critic batches are admitted at batch level and
+ *   filtered *per item* by `reviewerItemBindings`, which is the finer and
+ *   strictly stronger check — batch-level inventory equality for critics would
+ *   discard every sibling item's still-valid claim the moment one item left the
+ *   critic inventory, reintroducing exactly the batch-granularity failure this
+ *   composition exists to remove.
+ * - **Legacy (no entry, written by an older plugin).** Exactly today's rule: the
+ *   batch must be wholly successful and its declared item set must equal the
+ *   current inventory. Expressed as a stricter predicate inside the same
+ *   algorithm, so legacy state can never loosen.
+ */
+function batchMayContributeClaims(
+	directory: string,
+	state: PrWorkflowGateState,
+	batch: PrReviewValidationBatchRecord,
+	phase: PrReviewComposablePhase,
+	requiredInventory: readonly string[],
+	forbiddenSubagentSessionIds: ReadonlySet<string>,
+	reviewerClaims: ReadonlyMap<string, PrReviewItemClaim> | undefined,
+	ctx: PrReviewGateContext,
+): boolean {
+	const coherence = state.prReviewBatchCoherence?.[batch.batchId];
+	if (coherence) {
+		return (
+			phase === 'critic' ||
+			sameStringSet(coherence.validatedInventory, requiredInventory)
+		);
+	}
+	const declaredItems = batch.lanes.flatMap((lane) => lane.reviewItemIds ?? []);
+	if (!sameStringSet(declaredItems, requiredInventory)) return false;
+	const successful = successfulObligationsFromExactBatch(
+		directory,
+		state,
+		batch.batchId,
+		batch.lanes,
+		`swarm-pr-review:${phase}`,
+		batch.validatedAt,
+		true,
+		forbiddenSubagentSessionIds,
+		ctx.revisionDigest,
+		undefined,
+		reviewerClaims,
+	);
+	return (
+		successful.size === batch.lanes.length &&
+		batch.lanes.every((lane) => successful.has(lane.workflowLane))
+	);
+}
+
+/**
+ * The single item-keyed computation behind reviewer/critic settlement AND every
+ * reviewer/critic verdict derivation.
+ *
+ * Settlement *is* `unclaimed.length === 0` over this map, so settlement can never
+ * pass while derivation returns nothing — the failure mode that would let
+ * CONFIRMED CRITICAL/HIGH findings ship without critic coverage.
+ *
+ * Scanning the window reverse-chronologically and claiming only *unclaimed*
+ * items makes first-write-wins equal "most recent successful lane per item wins",
+ * which is the explicit conflict rule for the case where two batches both carry a
+ * parseable verdict for one item. Memoized per gate context so two passes never
+ * hold two different verdict maps.
+ *
+ * The scan stops as soon as every required item is claimed (issue #1968 FIX 5).
+ * `readLaneOutput` is a synchronous `readFileSync` per lane per batch, and the
+ * window can hold up to `MAX_WORKFLOW_BATCHES` batches, so scanning past a
+ * complete claim set is unbounded blocking I/O for no verdict change — first
+ * write wins, and every required item has already been written.
+ *
+ * `exhaustive` turns the exit off for the batch GC, which prunes a reviewer
+ * batch on "it contributed no claim". Being precise about what that buys: with
+ * *this* exit condition the two scans yield the same `contributingBatchIds`,
+ * because the exit fires only when every required item is claimed and a batch
+ * reached after that point could never have claimed anything anyway. The flag is
+ * therefore not fixing a live divergence — it decouples a durable-state decision
+ * from a performance heuristic, so that weakening the exit condition later
+ * cannot silently turn "not examined" into "proven inert". It also keeps the
+ * whole-window abandoned-lane diagnostics intact for the GC's scan.
+ */
+function composePrReviewPhaseVerdicts(
+	directory: string,
+	state: PrWorkflowGateState,
+	phase: PrReviewComposablePhase,
+	ctx: PrReviewGateContext,
+	exhaustive = false,
+): PrReviewPhaseComposition {
+	const memoized = phase === 'reviewer' ? ctx.reviewer : ctx.critic;
+	if (memoized && !exhaustive) return memoized;
+
+	const requiredInventory =
+		phase === 'reviewer'
+			? derivePrReviewCandidateInventory(directory, state, ctx)
+			: derivePrReviewCriticInventory(directory, state, ctx);
+	const reviewerClaims =
+		phase === 'critic'
+			? authoritativeReviewerClaims(directory, state, ctx)
+			: undefined;
+	const forbiddenSubagentSessionIds =
+		phase === 'critic'
+			? reviewerSubagentSessionIds(directory, state)
+			: new Set<string>();
+	const expectedMode = `swarm-pr-review:${phase}`;
+	const window = prReviewPhaseWindow(state, phase);
+	const requiredSet = new Set(requiredInventory);
+	const claims = new Map<string, PrReviewItemClaim>();
+	const contributingBatchIds: string[] = [];
+	const diagnostics: string[] = [];
+	const satisfiedObligations = new Set<string>();
+	const scannedBatches: PrReviewValidationBatchRecord[] = [];
+
+	for (const batch of [...window].reverse()) {
+		scannedBatches.push(batch);
+		if (
+			!batchMayContributeClaims(
+				directory,
+				state,
+				batch,
+				phase,
+				requiredInventory,
+				forbiddenSubagentSessionIds,
+				reviewerClaims,
+				ctx,
+			)
+		) {
+			appendCompositionDiagnostic(
+				diagnostics,
+				`${phase} batch "${batch.batchId}" was validated against a different inventory or is not wholly successful legacy state; it contributes no claims`,
+			);
+			continue;
+		}
+		const coherence = state.prReviewBatchCoherence?.[batch.batchId];
+		let contributed = false;
+		for (const qualified of recordsPassingBatchIntegrity(
+			directory,
+			state,
+			batch.batchId,
+			batch.lanes,
+			expectedMode,
+			batch.validatedAt,
+			true,
+			forbiddenSubagentSessionIds,
+		)) {
+			const artifact = loadArtifactPassingLaneIntegrity(
+				directory,
+				state,
+				qualified.record,
+				expectedMode,
+				qualified.expectedWorkflowLane,
+				ctx.revisionDigest,
+			);
+			if (!artifact) continue;
+			const declaredItems = qualified.expectedLane.reviewItemIds ?? [];
+			const parsed = parseLaneItemVerdicts(
+				artifact.text,
+				declaredItems,
+				phase,
+				reviewerClaims,
+			);
+			if (declaredItems.length > 0 && parsed.size === declaredItems.length) {
+				satisfiedObligations.add(qualified.expectedWorkflowLane);
+			}
+			for (const [itemId, verdict] of parsed) {
+				if (!requiredSet.has(itemId) || claims.has(itemId)) continue;
+				// Defense in depth: the persisted inventory this batch was
+				// validated against must still list the item. Declaration time
+				// already makes the lane item set equal to it, so a mismatch here
+				// means the persisted state was mutated out of band.
+				if (coherence && !coherence.validatedInventory.includes(itemId)) {
+					continue;
+				}
+				if (
+					phase === 'critic' &&
+					coherence &&
+					!criticClaimIsBoundToCurrentReviewerRow(
+						coherence,
+						itemId,
+						reviewerClaims,
+					)
+				) {
+					continue;
+				}
+				claims.set(itemId, {
+					batchId: batch.batchId,
+					laneId: qualified.expectedLane.laneId,
+					workflowLane: qualified.expectedWorkflowLane,
+					...verdict,
+				});
+				contributed = true;
+			}
+		}
+		if (contributed) contributingBatchIds.push(batch.batchId);
+		if (!exhaustive && claims.size === requiredSet.size) break;
+	}
+
+	// The lane-level "every declared obligation across every batch in the window
+	// must be settled" requirement was deliberately dropped: it is part of the
+	// all-or-nothing accounting that forces a full re-run for one failed lane,
+	// and it re-blocks exactly the composed-retry case. Item completeness
+	// (`unclaimed.length === 0`) is the stronger property for what actually
+	// ships — verdicts are per item; lane ids are bookkeeping. An abandoned
+	// declared lane is now a named diagnostic, not a block.
+	//
+	// Scoped to the batches actually scanned: an unscanned batch's lanes were
+	// never examined, so reporting them as "produced no successful exact
+	// artifact" would be an unevidenced claim. Nothing is lost — the early exit
+	// only fires once every required item is claimed, and the diagnostic exists
+	// to explain a settlement that succeeded despite abandoned lanes.
+	for (const obligation of new Set(
+		scannedBatches.flatMap((batch) =>
+			batch.lanes.map((lane) => lane.workflowLane),
+		),
+	)) {
+		if (satisfiedObligations.has(obligation)) continue;
+		appendCompositionDiagnostic(
+			diagnostics,
+			`declared ${phase} lane "${obligation}" produced no successful exact artifact`,
+		);
+	}
+
+	const composition: PrReviewPhaseComposition = {
+		claims,
+		requiredInventory,
+		unclaimed: requiredInventory.filter((itemId) => !claims.has(itemId)),
+		contributingBatchIds,
+		diagnostics,
+	};
+	// An exhaustive pass is a superset of the memoizable one, but it is computed
+	// for a different question (which batches are inert) and its diagnostics
+	// cover a wider window; never let it become the map the gates read.
+	if (!exhaustive) {
+		if (phase === 'reviewer') ctx.reviewer = composition;
+		else ctx.critic = composition;
+	}
+	return composition;
+}
+
+/**
+ * A critic claim survives only while the reviewer row it challenged is
+ * byte-identical.
+ *
+ * What this guarantees: the critic verdict was produced against reviewer row
+ * *content* identical to the content authoritative now. A reviewer verdict keeps
+ * only 2 of the 10 required row fields, so a classification/severity tuple would
+ * still match after the evidence and root cause changed entirely; the full-row
+ * digest does not. That also closes the `DOWNGRADED` hole in
+ * `parseCriticVerdict`, where a reviewer severity *increase* leaves a stale
+ * DOWNGRADED row still parseable.
+ *
+ * What this does NOT guarantee (issue #1968 FIX 8; the fix plan's claim that it
+ * "closes the leave-and-return readmission path" is retracted as false):
+ * `reviewerVerdictRowDigest` hashes the ten parsed `[REVIEWED]` fields and
+ * nothing else — no lane, session, or batch identity. So a byte-identical row
+ * emitted by a *different* lane or session re-admits the bound critic claim, and
+ * an item that leaves the critic inventory and later returns with an identical
+ * row re-admits the original critic verdict rather than requiring a fresh one.
+ * Both are content-equivalent by construction, and the artifact behind the claim
+ * is still pinned to the current revision digest and to its own lane identity by
+ * `loadArtifactPassingLaneIntegrity`, so neither admits a verdict about
+ * different content — but neither is prevented, and the binding is not the thing
+ * that prevents them.
+ */
+function criticClaimIsBoundToCurrentReviewerRow(
+	coherence: PrReviewBatchCoherenceRecord,
+	itemId: string,
+	reviewerClaims: ReadonlyMap<string, PrReviewItemClaim> | undefined,
+): boolean {
+	// A coherent critic batch always carries bindings; absent bindings on a
+	// coherent entry means out-of-band mutation, so fail closed.
+	const bound = coherence.reviewerItemBindings?.[itemId];
+	const current = reviewerClaims?.get(itemId)?.rowDigest;
+	return Boolean(bound && current && bound === current);
+}
+
+/**
+ * Reviewer claims only when the reviewer phase is item-complete. Preserves the
+ * pre-existing fail-closed "empty map" semantics for an unsettled reviewer
+ * phase, now derived from the same computation settlement uses.
+ */
+function authoritativeReviewerClaims(
+	directory: string,
+	state: PrWorkflowGateState,
+	ctx: PrReviewGateContext,
+): ReadonlyMap<string, PrReviewItemClaim> {
+	const composed = composePrReviewPhaseVerdicts(
+		directory,
+		state,
+		'reviewer',
+		ctx,
+	);
+	return composed.unclaimed.length === 0 ? composed.claims : new Map();
+}
+
+/**
+ * Pin every item a critic batch owns to the sha256 of the reviewer row that is
+ * authoritative for it right now.
+ *
+ * The throw is unreachable defense in depth, kept deliberately: callers reach
+ * here only via `recordPrReviewValidationBatch`, which first asserts reviewer
+ * settlement and then requires the assigned items to exactly equal
+ * `derivePrReviewCriticInventory` — an inventory derived *from* the reviewer
+ * claims — so every assigned item necessarily has an authoritative row. It
+ * throws rather than emitting a partial binding set so that a future caller
+ * reaching it out of that order fails loudly instead of recording a critic
+ * batch with silently missing bindings.
+ *
+ * It is NOT protecting against an `undefined === undefined` admission: an
+ * earlier version of this comment claimed that, and it was wrong.
+ * `criticClaimIsBoundToCurrentReviewerRow` requires
+ * `Boolean(bound && current && bound === current)`, so a missing binding
+ * already blocks. Both the throw and its absence are fail-closed.
+ */
+function criticReviewerItemBindings(
+	directory: string,
+	state: PrWorkflowGateState,
+	lanes: ReadonlyArray<{ reviewItemIds?: string[] }>,
+	ctx: PrReviewGateContext,
+): Record<string, string> {
+	const reviewerClaims = authoritativeReviewerClaims(directory, state, ctx);
+	const bindings: Record<string, string> = {};
+	for (const itemId of lanes.flatMap((lane) => lane.reviewItemIds ?? [])) {
+		const rowDigest = reviewerClaims.get(itemId)?.rowDigest;
+		if (!rowDigest) {
+			throw new Error(
+				`BLOCKED: PR_REVIEW critic dispatch cannot bind item "${itemId}" to an authoritative reviewer verdict row`,
+			);
+		}
+		bindings[itemId] = rowDigest;
+	}
+	return bindings;
+}
+
+/**
+ * Items whose reviewer verdict obliges critic coverage.
+ *
+ * The reviewer map is read through the B1-guarded accessor: an empty or partial
+ * map after a *settled* reviewer phase is a hard BLOCK here rather than an
+ * empty critic inventory that silently disables the critic gate. The
+ * complementary "reviewer never settled" case is rejected at the coverage gates
+ * by `derivePrReviewCriticInventoryForCoverageGate`; this function stays usable
+ * on unsettled states because batch GC derives it there.
+ */
 function derivePrReviewCriticInventory(
 	directory: string,
 	state: PrWorkflowGateState,
+	ctx: PrReviewGateContext,
 ): string[] {
-	const verdicts = deriveLatestPrReviewReviewerVerdicts(directory, state);
+	const verdicts = authoritativeReviewerVerdictsForGate(
+		directory,
+		state,
+		ctx,
+		'derivePrReviewCriticInventory',
+	);
 	return [...verdicts.entries()]
 		.filter(
 			([, verdict]) =>
@@ -5083,129 +6995,233 @@ function derivePrReviewCriticInventory(
 		.sort();
 }
 
+/** Thin projection of the composed critic phase. Empty unless item-complete. */
 function deriveLatestPrReviewCriticVerdicts(
 	directory: string,
 	state: PrWorkflowGateState,
+	ctx: PrReviewGateContext,
 ): Map<string, { status: string; severity: string }> {
-	const reviewerVerdicts = deriveLatestPrReviewReviewerVerdicts(
+	const composed = composePrReviewPhaseVerdicts(
 		directory,
 		state,
+		'critic',
+		ctx,
 	);
-	const criticBatches = (state.prReviewValidationBatches ?? []).filter(
-		(batch) => batch.phase === 'critic',
+	if (composed.unclaimed.length > 0) return new Map();
+	return new Map(
+		[...composed.claims].map(([itemId, claim]) => [
+			itemId,
+			{ status: claim.classification, severity: claim.severity },
+		]),
 	);
-	for (const batch of [...criticBatches].reverse()) {
-		const successful = successfulObligationsFromExactBatch(
-			directory,
-			state,
-			batch.batchId,
-			batch.lanes,
-			'swarm-pr-review:critic',
-			batch.validatedAt,
-		);
-		if (
-			batch.lanes.some((lane) => !successful.has(lane.workflowLane)) ||
-			successful.size !== batch.lanes.length
-		) {
-			continue;
-		}
-		const required = batch.lanes.flatMap((lane) => lane.reviewItemIds ?? []);
-		const verdicts = new Map<string, { status: string; severity: string }>();
-		for (const lane of batch.lanes) {
-			const record = findByBatchId(directory, batch.batchId, {
-				parentSessionId: state.sessionID,
-			}).find((candidate) => candidate.laneId === lane.laneId);
-			const ref = record?.result?.outputRef?.trim();
-			const artifact = ref
-				? readLaneOutput(directory, ref)?.artifact
-				: undefined;
-			if (!artifact) continue;
-			for (const itemId of lane.reviewItemIds ?? []) {
-				const verdict = parseCriticVerdict(
-					artifact.text,
-					itemId,
-					reviewerVerdicts.get(itemId)?.severity,
-				);
-				if (verdict) verdicts.set(itemId, verdict);
-			}
-		}
-		if (required.every((itemId) => verdicts.has(itemId))) return verdicts;
-	}
-	return new Map();
 }
 
+/** Thin projection of the composed reviewer phase. Empty unless item-complete. */
 function deriveLatestPrReviewReviewerVerdicts(
 	directory: string,
 	state: PrWorkflowGateState,
+	ctx: PrReviewGateContext,
 ): Map<string, ReviewerVerdict> {
-	const reviewerBatches = (state.prReviewValidationBatches ?? []).filter(
-		(batch) => batch.phase === 'reviewer',
+	return new Map(
+		[...authoritativeReviewerClaims(directory, state, ctx)].map(
+			([itemId, claim]) => [
+				itemId,
+				{ classification: claim.classification, severity: claim.severity },
+			],
+		),
 	);
-	for (const batch of [...reviewerBatches].reverse()) {
-		const successful = successfulObligationsFromExactBatch(
-			directory,
-			state,
-			batch.batchId,
-			batch.lanes,
-			'swarm-pr-review:reviewer',
-			batch.validatedAt,
-		);
-		if (
-			batch.lanes.some((lane) => !successful.has(lane.workflowLane)) ||
-			successful.size !== batch.lanes.length
-		) {
-			continue;
-		}
-		const required = batch.lanes.flatMap((lane) => lane.reviewItemIds ?? []);
-		const verdicts = new Map<string, ReviewerVerdict>();
-		for (const lane of batch.lanes) {
-			const record = findByBatchId(directory, batch.batchId, {
-				parentSessionId: state.sessionID,
-			}).find((candidate) => candidate.laneId === lane.laneId);
-			const ref = record?.result?.outputRef?.trim();
-			const artifact = ref
-				? readLaneOutput(directory, ref)?.artifact
-				: undefined;
-			if (!artifact) continue;
-			for (const itemId of lane.reviewItemIds ?? []) {
-				const verdict = parseReviewerVerdict(artifact.text, itemId);
-				if (verdict) verdicts.set(itemId, verdict);
-			}
-		}
-		if (required.every((itemId) => verdicts.has(itemId))) {
-			return verdicts;
-		}
-	}
-	return new Map();
 }
 
-function successfulObligationsFromExactBatch(
+/**
+ * **B1 invariant — the accounting defect class's most dangerous recurrence.**
+ *
+ * Issue #1968's defect class treats the whole inventory on the current revision
+ * as the atomic unit of validity. Its worst recurrence is not a false BLOCK, it
+ * is a silent PASS: a phase treated as *settled* while the authoritative verdict
+ * map every downstream gate reads is empty or partial. For the reviewer phase
+ * that chain is `derivePrReviewCriticInventory` -> `[]` ->
+ * `completePrWorkflow`'s `criticInventory.length > 0` is false -> **critic
+ * coverage is skipped entirely** and CONFIRMED CRITICAL/HIGH findings ship
+ * unchallenged, with the only surface symptom a downstream
+ * `no authoritative reviewer verdict` that names a consequence, not the cause.
+ *
+ * Composition currently makes this unreachable by construction: settlement *is*
+ * `unclaimed.length === 0` over the very map derivation projects, and claims are
+ * filtered to `requiredInventory`, so `unclaimed === []` implies the map covers
+ * every required item. This assertion deliberately does **not** rely on that
+ * adjacency. It states the property directly so a future refactor that re-splits
+ * settlement from derivation fails loudly at the gate instead of silently
+ * skipping the critic phase.
+ *
+ * Fail-closed and always on; never downgraded to a warning, because the failure
+ * it catches is invisible in the passing direction. Pure over values the caller
+ * already computed: no digest resolution, no artifact reads, no subprocess work.
+ */
+function assertSettledPhaseHasAuthoritativeVerdicts(
+	phase: PrReviewComposablePhase,
+	// Narrowed to the two fields the property is stated over, so the check can
+	// never come to depend on the rest of the composition.
+	composed: Pick<PrReviewPhaseComposition, 'requiredInventory' | 'unclaimed'>,
+	authoritative: ReadonlyMap<string, unknown>,
+	origin: string,
+): void {
+	// Antecedent, both halves load-bearing: an *unsettled* phase is supposed to
+	// project an empty map (that is the pre-existing fail-closed semantics), and
+	// an empty required inventory legitimately yields an empty map.
+	if (composed.unclaimed.length > 0) return;
+	if (composed.requiredInventory.length === 0) return;
+	const missing = composed.requiredInventory.filter(
+		(itemId) => !authoritative.has(itemId),
+	);
+	if (missing.length === 0) return;
+	const named = missing.slice(0, MAX_UNCLAIMED_ITEMS_IN_MESSAGE);
+	const overflow = missing.length - named.length;
+	throw new Error(
+		`BLOCKED: PR_REVIEW internal invariant violated at ${origin}: the ${phase} phase settled over ` +
+			`${composed.requiredInventory.length} required item(s), but its authoritative ${phase} verdict map is ` +
+			(authoritative.size === 0
+				? 'EMPTY'
+				: `PARTIAL (${authoritative.size} of ${composed.requiredInventory.length} items)`) +
+			' after successful settlement' +
+			(phase === 'reviewer'
+				? '; an empty or partial reviewer verdict map empties the critic inventory, which silently skips the critic-coverage gate and lets CONFIRMED CRITICAL/HIGH findings ship unchallenged'
+				: '; an empty or partial critic verdict map silently drops challenges the gate already accepted') +
+			`; missing ${phase} verdicts for: ${named.join(', ')}` +
+			(overflow > 0 ? ` (+${overflow} more)` : ''),
+	);
+}
+
+/**
+ * The reviewer verdict map downstream gates consume, with the B1 invariant
+ * checked at the point of use. Reuses the caller's memoized composition, so the
+ * check costs one array filter and adds no digest or artifact work.
+ */
+function authoritativeReviewerVerdictsForGate(
+	directory: string,
+	state: PrWorkflowGateState,
+	ctx: PrReviewGateContext,
+	origin: string,
+): Map<string, ReviewerVerdict> {
+	const verdicts = deriveLatestPrReviewReviewerVerdicts(directory, state, ctx);
+	assertSettledPhaseHasAuthoritativeVerdicts(
+		'reviewer',
+		composePrReviewPhaseVerdicts(directory, state, 'reviewer', ctx),
+		verdicts,
+		origin,
+	);
+	return verdicts;
+}
+
+/** Critic twin of `authoritativeReviewerVerdictsForGate`. */
+function authoritativeCriticVerdictsForGate(
+	directory: string,
+	state: PrWorkflowGateState,
+	ctx: PrReviewGateContext,
+	origin: string,
+): Map<string, { status: string; severity: string }> {
+	const verdicts = deriveLatestPrReviewCriticVerdicts(directory, state, ctx);
+	assertSettledPhaseHasAuthoritativeVerdicts(
+		'critic',
+		composePrReviewPhaseVerdicts(directory, state, 'critic', ctx),
+		verdicts,
+		origin,
+	);
+	return verdicts;
+}
+
+/**
+ * The critic-coverage gate's input, with the "empty" case made provable.
+ *
+ * `completePrWorkflow` and the `post_critic` artifact boundary both branch on
+ * `length > 0` to decide whether the critic phase is required *at all*, so an
+ * empty result there must provably mean "no CONFIRMED CRITICAL/HIGH/MEDIUM
+ * reviewer verdict exists" and never "the reviewer verdict map came back empty".
+ * Two distinct pathologies produce the same `[]`:
+ *
+ * 1. the reviewer phase was never settled — rejected here explicitly;
+ * 2. the reviewer phase settled but its verdict map is empty or partial —
+ *    rejected by `assertSettledPhaseHasAuthoritativeVerdicts` (B1).
+ *
+ * Past both, `[]` is a filter result over a map that covers every required
+ * reviewer item. This cannot newly block any state reachable today: both call
+ * sites run `assertPrReviewValidationSettled(..., 'reviewer', ctx)` on the same
+ * context immediately beforehand, which already throws on `unclaimed > 0`. The
+ * point is that the guarantee stops depending on that adjacency.
+ *
+ * Deliberately NOT folded into `derivePrReviewCriticInventory` itself:
+ * `prunePrWorkflowBatchesForCapacity` derives the critic inventory on states
+ * whose reviewer phase is legitimately unsettled, and its fail-closed try/catch
+ * would convert the throw into "keep every batch", silently disabling GC.
+ */
+function derivePrReviewCriticInventoryForCoverageGate(
+	directory: string,
+	state: PrWorkflowGateState,
+	ctx: PrReviewGateContext,
+	origin: string,
+): string[] {
+	const reviewer = composePrReviewPhaseVerdicts(
+		directory,
+		state,
+		'reviewer',
+		ctx,
+	);
+	if (reviewer.unclaimed.length > 0) {
+		const named = reviewer.unclaimed.slice(0, MAX_UNCLAIMED_ITEMS_IN_MESSAGE);
+		const overflow = reviewer.unclaimed.length - named.length;
+		throw new Error(
+			`BLOCKED: PR_REVIEW internal invariant violated at ${origin}: the critic-coverage decision requires a settled reviewer phase, ` +
+				`but ${reviewer.unclaimed.length} reviewer item(s) lack an authenticated verdict; an unsettled reviewer phase derives an empty ` +
+				`critic inventory, which would skip critic coverage instead of demanding it; unsettled reviewer items: ${named.join(', ')}` +
+				(overflow > 0 ? ` (+${overflow} more)` : ''),
+		);
+	}
+	return derivePrReviewCriticInventory(directory, state, ctx);
+}
+
+interface ExpectedWorkflowLane {
+	laneId: string;
+	workflowLane: string;
+	reviewItemIds?: string[];
+	ownedWorkflowLanes?: string[];
+}
+
+interface QualifiedBatchRecord {
+	record: ReturnType<typeof findByBatchId>[number];
+	expectedLane: ExpectedWorkflowLane;
+	expectedWorkflowLane: string;
+	expectedOwnedLanes: string[];
+}
+
+/**
+ * Every record of a batch that passes the record-level integrity chain: exactly
+ * one record per declared lane, exactly one record per child session, no reuse
+ * of a forbidden child session, recorded after the batch was declared, exact
+ * lane/ownership/mode/head match, and a complete non-degraded result.
+ *
+ * Extracted so the per-item composition can reuse the identical chain instead of
+ * re-deriving it. `successfulObligationsFromExactBatch` composes this with the
+ * contract-marker check and keeps its exact prior semantics.
+ */
+function recordsPassingBatchIntegrity(
 	directory: string,
 	state: PrWorkflowGateState,
 	batchId: string,
-	expectedLanes: ReadonlyArray<{
-		laneId: string;
-		workflowLane: string;
-		reviewItemIds?: string[];
-		ownedWorkflowLanes?: string[];
-	}>,
+	expectedLanes: ReadonlyArray<ExpectedWorkflowLane>,
 	expectedMode: string,
 	validatedAt: string,
 	checkWorkflowLane = true,
 	forbiddenSubagentSessionIds: ReadonlySet<string> = new Set(),
-	expectedRevisionDigest?: string,
-	diagnostics?: string[],
-): Set<string> {
-	const records = findByBatchId(directory, batchId, {
-		parentSessionId: state.sessionID,
-	});
-	const successful = new Set<string>();
+): QualifiedBatchRecord[] {
+	const qualified: QualifiedBatchRecord[] = [];
 	const validatedAtMs = Date.parse(validatedAt);
-	if (!Number.isFinite(validatedAtMs)) return successful;
+	if (!Number.isFinite(validatedAtMs)) return qualified;
 	const expectedByLaneId = new Map(
 		expectedLanes.map((lane) => [lane.laneId, lane]),
 	);
-	if (expectedByLaneId.size !== expectedLanes.length) return successful;
+	if (expectedByLaneId.size !== expectedLanes.length) return qualified;
+	const records = findByBatchId(directory, batchId, {
+		parentSessionId: state.sessionID,
+	});
 	const recordCountByLaneId = new Map<string, number>();
 	const recordCountBySubagentSessionId = new Map<string, number>();
 	for (const record of records) {
@@ -5234,6 +7250,7 @@ function successfulObligationsFromExactBatch(
 				: undefined;
 		const subagentSessionId = record.subagentSessionId?.trim();
 		if (
+			expectedLane !== undefined &&
 			expectedWorkflowLane !== undefined &&
 			expectedOwnedLanes !== undefined &&
 			record.laneId !== undefined &&
@@ -5254,20 +7271,58 @@ function successfulObligationsFromExactBatch(
 			record.result?.truncated !== true &&
 			(record.result?.chars ?? 0) > 0 &&
 			Boolean(record.result?.digest?.trim()) &&
-			Boolean(record.result?.outputRef?.trim()) &&
+			Boolean(record.result?.outputRef?.trim())
+		) {
+			qualified.push({
+				record,
+				expectedLane,
+				expectedWorkflowLane,
+				expectedOwnedLanes,
+			});
+		}
+	}
+	return qualified;
+}
+
+function successfulObligationsFromExactBatch(
+	directory: string,
+	state: PrWorkflowGateState,
+	batchId: string,
+	expectedLanes: ReadonlyArray<ExpectedWorkflowLane>,
+	expectedMode: string,
+	validatedAt: string,
+	checkWorkflowLane = true,
+	forbiddenSubagentSessionIds: ReadonlySet<string> = new Set(),
+	expectedRevisionDigest?: string,
+	diagnostics?: string[],
+	reviewerClaims?: ReadonlyMap<string, PrReviewItemClaim>,
+): Set<string> {
+	const successful = new Set<string>();
+	for (const qualified of recordsPassingBatchIntegrity(
+		directory,
+		state,
+		batchId,
+		expectedLanes,
+		expectedMode,
+		validatedAt,
+		checkWorkflowLane,
+		forbiddenSubagentSessionIds,
+	)) {
+		if (
 			workflowArtifactHasContractMarker(
 				directory,
 				state,
-				record,
+				qualified.record,
 				expectedMode,
-				expectedWorkflowLane,
-				expectedLane?.reviewItemIds,
+				qualified.expectedWorkflowLane,
+				qualified.expectedLane.reviewItemIds,
 				expectedRevisionDigest,
-				expectedOwnedLanes,
+				qualified.expectedOwnedLanes,
 				diagnostics,
+				reviewerClaims,
 			)
 		) {
-			for (const obligation of expectedOwnedLanes) {
+			for (const obligation of qualified.expectedOwnedLanes) {
 				successful.add(obligation);
 			}
 		}
@@ -5303,32 +7358,41 @@ function ownedLaneSetsEqual(
 	return recordOwned.every((owned) => expectedSet.has(owned));
 }
 
-function workflowArtifactHasContractMarker(
+type LaneArtifact = NonNullable<ReturnType<typeof readLaneOutput>>['artifact'];
+
+/**
+ * The mode-independent half of the contract-marker check: load the lane artifact
+ * and prove it is the exact artifact this delegation record produced, on this
+ * revision, for this identity. Returns the artifact when the lane passes, `null`
+ * otherwise.
+ *
+ * Split out of `workflowArtifactHasContractMarker` so the item-keyed composition
+ * can admit *individual items* from a lane. The marker function itself still
+ * ends in an all-items-or-nothing verdict, which is what base, council, micro
+ * and every PR_FEEDBACK caller require and continue to get unchanged.
+ *
+ * `expectedRevisionDigest` is required (issue #1968 FIX 7). It used to fall back
+ * to a per-record synchronous `resolvePrWorkflowRevisionDigest`, which was dead
+ * in production — every entry point threads a digest resolved once per gate call
+ * from a context that hard-throws when it cannot be resolved — while keeping an
+ * unchunked `readFileSync` snapshot loop reachable under the raised 512 MB cap.
+ * An empty digest still fails closed below rather than matching an artifact.
+ */
+function loadArtifactPassingLaneIntegrity(
 	directory: string,
 	state: PrWorkflowGateState,
 	record: ReturnType<typeof findByBatchId>[number],
 	expectedMode: string,
 	expectedWorkflowLane: string,
-	reviewItemIds?: readonly string[],
-	expectedRevisionDigest?: string,
-	ownedWorkflowLanes?: readonly string[],
-	diagnostics?: string[],
-): boolean {
+	expectedRevisionDigest: string,
+): LaneArtifact | null {
 	const ref = record.result?.outputRef?.trim();
-	if (!ref) return false;
+	if (!ref) return null;
 	const loaded = readLaneOutput(directory, ref);
-	if (!loaded) return false;
+	if (!loaded) return null;
 	const artifact = loaded.artifact;
 	const recordPrHeadSha = record.workspace?.prHeadSha;
 	const recordGitHead = record.workspace?.gitHead;
-	const resolvedRevisionDigest =
-		expectedRevisionDigest ??
-		(recordPrHeadSha
-			? _test_exports.resolvePrWorkflowRevisionDigest(
-					directory,
-					recordPrHeadSha,
-				)
-			: null);
 	const expectedReviewScope =
 		state.mode === 'PR_REVIEW' && state.prReviewBaseSha && state.prHeadSha
 			? `complete PR diff ${state.prReviewBaseSha}...${state.prHeadSha}`
@@ -5348,40 +7412,66 @@ function workflowArtifactHasContractMarker(
 		artifact.prHeadSha !== recordPrHeadSha ||
 		!recordGitHead ||
 		artifact.gitHead !== recordGitHead ||
-		!resolvedRevisionDigest ||
-		artifact.revisionDigest !== resolvedRevisionDigest ||
+		!expectedRevisionDigest ||
+		artifact.revisionDigest !== expectedRevisionDigest ||
 		(expectedReviewScope !== undefined &&
 			(record.workspace?.scope !== expectedReviewScope ||
 				artifact.scope !== expectedReviewScope)) ||
 		artifact.digest !== record.result?.digest ||
 		artifact.chars !== record.result?.chars
 	) {
-		return false;
+		return null;
 	}
-	if (expectedMode === 'swarm-pr-review:reviewer') {
+	return artifact;
+}
+
+function workflowArtifactHasContractMarker(
+	directory: string,
+	state: PrWorkflowGateState,
+	record: ReturnType<typeof findByBatchId>[number],
+	expectedMode: string,
+	expectedWorkflowLane: string,
+	reviewItemIds?: readonly string[],
+	expectedRevisionDigest?: string,
+	ownedWorkflowLanes?: readonly string[],
+	diagnostics?: string[],
+	// Reviewer claims for the critic branch. The only production caller that
+	// reaches that branch is the legacy-eligibility predicate in the composition,
+	// which always passes the memoized map. Absent, the critic branch degrades to
+	// the pre-existing "reviewer map was empty" behaviour rather than inventing a
+	// second reviewer derivation with its own digest cost.
+	reviewerClaims?: ReadonlyMap<string, PrReviewItemClaim>,
+): boolean {
+	const ref = record.result?.outputRef?.trim();
+	// Fail closed rather than resolving a digest here (issue #1968 FIX 7): every
+	// production path threads the gate's single memoized digest, so an absent one
+	// means a caller skipped the resolve, not that a per-record resolve is owed.
+	const artifact = expectedRevisionDigest
+		? loadArtifactPassingLaneIntegrity(
+				directory,
+				state,
+				record,
+				expectedMode,
+				expectedWorkflowLane,
+				expectedRevisionDigest,
+			)
+		: null;
+	if (!artifact) return false;
+	if (
+		expectedMode === 'swarm-pr-review:reviewer' ||
+		expectedMode === 'swarm-pr-review:critic'
+	) {
+		const phase: PrReviewComposablePhase =
+			expectedMode === 'swarm-pr-review:reviewer' ? 'reviewer' : 'critic';
+		const parsed = parseLaneItemVerdicts(
+			artifact.text,
+			reviewItemIds ?? [],
+			phase,
+			reviewerClaims,
+		);
 		return Boolean(
 			reviewItemIds?.length &&
-				reviewItemIds.every((itemId) =>
-					Boolean(parseReviewerVerdict(artifact.text, itemId)),
-				),
-		);
-	}
-	if (expectedMode === 'swarm-pr-review:critic') {
-		const reviewerVerdicts = deriveLatestPrReviewReviewerVerdicts(
-			directory,
-			state,
-		);
-		return Boolean(
-			reviewItemIds?.length &&
-				reviewItemIds.every((itemId) =>
-					Boolean(
-						parseCriticVerdict(
-							artifact.text,
-							itemId,
-							reviewerVerdicts.get(itemId)?.severity,
-						),
-					),
-				),
+				reviewItemIds.every((itemId) => parsed.has(itemId)),
 		);
 	}
 	if (expectedMode === 'swarm-pr-feedback:verification') {
@@ -5628,10 +7718,11 @@ interface ReviewerVerdict {
 	severity: string;
 }
 
-function parseReviewerVerdict(
+/** The validated 10 canonical fields of the single `[REVIEWED]` row for an item. */
+function parseReviewerVerdictFields(
 	text: string,
 	itemId: string,
-): ReviewerVerdict | null {
+): string[] | null {
 	const rows = text
 		.split(/\r?\n/)
 		.map(pipeFields)
@@ -5651,7 +7742,61 @@ function parseReviewerVerdict(
 		return null;
 	if (fields[7].length < 8 || fields[8].length < 5 || fields[9].length < 3)
 		return null;
-	return { classification: fields[2], severity: fields[4] };
+	return fields;
+}
+
+/**
+ * Digest of the FULL canonical reviewer row, not the classification/severity
+ * pair a reviewer verdict projects to. Only 2 of the 10 required fields survive
+ * that projection, so a tuple binding would still match a row whose evidence,
+ * file:line and root cause all changed. Fields are joined on NUL, which
+ * `pipeFields` can never produce, so no field boundary is forgeable.
+ */
+function reviewerVerdictRowDigest(fields: readonly string[]): string {
+	return createHash('sha256').update(fields.join('\0')).digest('hex');
+}
+
+/**
+ * Per-item verdicts an artifact actually carries, as a map rather than a
+ * boolean. This is the granularity the composition needs: one unparseable item
+ * must not discard its healthy siblings in the same lane.
+ */
+function parseLaneItemVerdicts(
+	text: string,
+	itemIds: readonly string[],
+	phase: PrReviewComposablePhase,
+	reviewerClaims?: ReadonlyMap<string, PrReviewItemClaim>,
+): Map<
+	string,
+	{ classification: string; severity: string; rowDigest?: string }
+> {
+	const parsed = new Map<
+		string,
+		{ classification: string; severity: string; rowDigest?: string }
+	>();
+	for (const itemId of itemIds) {
+		if (phase === 'reviewer') {
+			const fields = parseReviewerVerdictFields(text, itemId);
+			if (!fields) continue;
+			parsed.set(itemId, {
+				classification: fields[2],
+				severity: fields[4],
+				rowDigest: reviewerVerdictRowDigest(fields),
+			});
+			continue;
+		}
+		const verdict = parseCriticVerdict(
+			text,
+			itemId,
+			reviewerClaims?.get(itemId)?.severity,
+		);
+		if (!verdict) continue;
+		parsed.set(itemId, {
+			classification: verdict.status,
+			severity: verdict.severity,
+		});
+	}
+	return parsed;
 }
 
 function parseCriticVerdict(
