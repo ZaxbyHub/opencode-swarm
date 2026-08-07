@@ -125,10 +125,80 @@ export interface RunRoundResult {
 }
 
 /** DI seam for lock + telemetry injection (AGENTS.md invariant #7). */
+/**
+ * Prepare candidate payloads inside inputRoot and compute substrate-compatible
+ * content hashes. Extracted to _internals so tests that mock evaluateCandidateV1
+ * can bypass the real filesystem hash computation (which is platform-sensitive).
+ */
+async function prepareCandidatePayloads(
+	inputRoot: string,
+	candidateId: string,
+	skillSlug: string,
+	baselineModel: string,
+	candidateModel: string,
+	baselineContent: string,
+	candidateContent: string,
+): Promise<{
+	baseline: EvaluationCandidateV1;
+	candidate: EvaluationCandidateV1;
+}> {
+	const payloadSubdir = path.join(inputRoot, 'candidates', candidateId);
+	if (!existsSync(payloadSubdir)) mkdirSync(payloadSubdir, { recursive: true });
+	const baselinePayloadRel = path.join(
+		'candidates',
+		candidateId,
+		'baseline.md',
+	);
+	const candidatePayloadRel = path.join(
+		'candidates',
+		candidateId,
+		'candidate.md',
+	);
+	writeFileSync(
+		path.join(payloadSubdir, 'baseline.md'),
+		baselineContent,
+		'utf8',
+	);
+	writeFileSync(
+		path.join(payloadSubdir, 'candidate.md'),
+		candidateContent,
+		'utf8',
+	);
+	const { computeCandidateInputContentHash } = await import(
+		'../../evaluation/hashing.js'
+	);
+	const baseline: EvaluationCandidateV1 = {
+		v: 1,
+		id: `${skillSlug}-baseline`,
+		kind: 'skill',
+		payloadPath: baselinePayloadRel,
+		model: baselineModel,
+		contentHash: '',
+	};
+	const candidate: EvaluationCandidateV1 = {
+		v: 1,
+		id: `${skillSlug}-candidate-${randomUUID().slice(0, 8)}`,
+		kind: 'skill',
+		payloadPath: candidatePayloadRel,
+		model: candidateModel,
+		contentHash: '',
+	};
+	baseline.contentHash = await computeCandidateInputContentHash(
+		inputRoot,
+		baseline,
+	);
+	candidate.contentHash = await computeCandidateInputContentHash(
+		inputRoot,
+		candidate,
+	);
+	return { baseline, candidate };
+}
+
 export const _internals = {
 	tryAcquireLock,
 	emitTelemetry,
 	evaluateCandidateV1,
+	prepareCandidatePayloads,
 };
 
 /**
@@ -458,63 +528,18 @@ async function runValidationWithTransientRetry(
 		try {
 			// Candidate payloads must be resolvable from inputRoot (the fixture
 			// materialization root) AND their contentHash must match what the
-			// substrate recomputes via computeCandidateInputContentHash. So we
-			// copy baseline.md/candidate.md INTO inputRoot and compute the hash
-			// the same way the substrate does (F1 deep fix — the critic found
-			// that the substrate resolves payloadPath against inputRoot, not
-			// projectRoot, and expects a canonical candidate-input hash).
+			// substrate recomputes. Prepared via _internals so tests that mock
+			// evaluateCandidateV1 can bypass the real filesystem hash computation
+			// (which is platform-sensitive — fails on macOS in the merge queue).
 			const evalInputRoot = input.inputRoot ?? input.directory;
-			const payloadSubdir = path.join(evalInputRoot, 'candidates', candidateId);
-			if (!existsSync(payloadSubdir))
-				mkdirSync(payloadSubdir, { recursive: true });
-			const baselinePayloadRel = path.join(
-				'candidates',
+			const { baseline, candidate } = await _internals.prepareCandidatePayloads(
+				evalInputRoot,
 				candidateId,
-				'baseline.md',
-			);
-			const candidatePayloadRel = path.join(
-				'candidates',
-				candidateId,
-				'candidate.md',
-			);
-			writeFileSync(
-				path.join(payloadSubdir, 'baseline.md'),
+				input.skillSlug,
+				input.baselineModel,
+				input.candidateModel,
 				baselineContent,
-				'utf8',
-			);
-			writeFileSync(
-				path.join(payloadSubdir, 'candidate.md'),
 				candidateContent,
-				'utf8',
-			);
-			const { computeCandidateInputContentHash } = await import(
-				'../../evaluation/hashing.js'
-			);
-			const baseline: EvaluationCandidateV1 = {
-				v: 1,
-				id: `${input.skillSlug}-baseline`,
-				kind: 'skill',
-				payloadPath: baselinePayloadRel,
-				model: input.baselineModel,
-				contentHash: '',
-			};
-			const candidate: EvaluationCandidateV1 = {
-				v: 1,
-				id: `${input.skillSlug}-candidate-${randomUUID().slice(0, 8)}`,
-				kind: 'skill',
-				payloadPath: candidatePayloadRel,
-				model: input.candidateModel,
-				contentHash: '',
-			};
-			// Compute the substrate-compatible content hashes (must match what
-			// the runner recomputes from the payload files).
-			baseline.contentHash = await computeCandidateInputContentHash(
-				evalInputRoot,
-				baseline,
-			);
-			candidate.contentHash = await computeCandidateInputContentHash(
-				evalInputRoot,
-				candidate,
 			);
 			if (!input.dispatcher) {
 				throw new Error(

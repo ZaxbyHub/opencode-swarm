@@ -38,6 +38,29 @@ function writeIncumbent(slug: string, content: string): void {
 
 const CFG: SkillOptConfig = { ...DEFAULT_SKILL_OPT_CONFIG };
 
+/** Stub prepareCandidatePayloads so tests that mock evaluateCandidateV1 don't
+ * hit the real (platform-sensitive) filesystem hash computation. */
+function stubPayloadPrep() {
+	_internals.prepareCandidatePayloads = mock(async () => ({
+		baseline: {
+			v: 1,
+			id: 'baseline',
+			kind: 'skill',
+			payloadPath: 'baseline.md',
+			model: 'm',
+			contentHash: 'h'.repeat(64),
+		},
+		candidate: {
+			v: 1,
+			id: 'candidate',
+			kind: 'skill',
+			payloadPath: 'candidate.md',
+			model: 'm',
+			contentHash: 'h'.repeat(64),
+		},
+	}));
+}
+
 describe('skill-opt controller — concurrency / lock ordering', () => {
 	it('returns a locked status when the project lock is already held', async () => {
 		writeIncumbent('lock-skill', '---\nname: x\ndescription: y\n---\n# body\n');
@@ -112,6 +135,7 @@ describe('skill-opt controller — caps', () => {
 			'trans-skill',
 			'---\nname: x\ndescription: y\n---\n# body\n',
 		);
+		stubPayloadPrep();
 		// Force validation to throw a transient error every time.
 		_internals.evaluateCandidateV1 = mock(() =>
 			Promise.reject(new Error('infrastructure_failure: timeout')),
@@ -141,6 +165,7 @@ describe('skill-opt controller — caps', () => {
 describe('skill-opt controller — optimization loop caps (reviewer CR3 + final critic FC2)', () => {
 	it('stops after a rejected validation (held-out set consumed; no re-validation)', async () => {
 		writeIncumbent('loop-skill', '---\nname: x\ndescription: y\n---\n# body\n');
+		stubPayloadPrep();
 		// Validation rejects → the held-out set is consumed → loop stops.
 		_internals.evaluateCandidateV1 = mock(() =>
 			Promise.resolve({
@@ -175,6 +200,7 @@ describe('skill-opt controller — optimization loop caps (reviewer CR3 + final 
 			'accept-skill',
 			'---\nname: x\ndescription: y\n---\n# body\n',
 		);
+		stubPayloadPrep();
 		_internals.evaluateCandidateV1 = mock(() =>
 			Promise.resolve({
 				run: { runId: 'r' } as never,
@@ -206,6 +232,7 @@ describe('skill-opt controller — optimization loop caps (reviewer CR3 + final 
 
 	it('stops immediately on a non-transient hard stop (does NOT retry)', async () => {
 		writeIncumbent('hard-skill', '---\nname: x\ndescription: y\n---\n# body\n');
+		stubPayloadPrep();
 		_internals.evaluateCandidateV1 = mock(() =>
 			Promise.reject(new Error('permanent configuration error: no scorer')),
 		);
@@ -227,6 +254,7 @@ describe('skill-opt controller — optimization loop caps (reviewer CR3 + final 
 
 	it('classifies TestAlreadyConsumedError as terminal inconclusive (NOT a hard stop)', async () => {
 		writeIncumbent('tac-skill', '---\nname: x\ndescription: y\n---\n# body\n');
+		stubPayloadPrep();
 		// Simulate the held-out set already being claimed (e.g. a prior run).
 		class TestAlreadyConsumedError extends Error {
 			name = 'TestAlreadyConsumedError';
