@@ -4,6 +4,7 @@ import type { PluginConfig } from '../config';
 import { DEFAULT_MODELS } from '../config/constants';
 import { stripKnownSwarmPrefix } from '../config/schema';
 import { bunHash } from '../utils/bun-compat';
+import { stableCanonicalStringify } from '../utils/stable-stringify';
 
 // Safe property lookup — prevents prototype chain pollution
 function safeGet<T>(
@@ -486,34 +487,6 @@ export function recentToolCallSessionCount(): number {
 }
 
 /**
- * Recursively produces a canonical JSON string with object keys sorted at
- * EVERY depth (not just the top level). Arrays are serialized element-wise in
- * index order. This is the correct way to make two semantically-equal values
- * serialize identically regardless of key-insertion order.
- *
- * Why not `JSON.stringify(value, sortedKeysArray)`: a property-list replacer
- * array acts as a KEY FILTER at every object depth, not just the top level, so
- * any key not in the (top-level-derived) list is silently dropped from nested
- * objects. For tool args like `{todos:[{content,status}]}`, that collapses
- * every todo to `{}`, re-introducing the exact false-spiral collision class
- * this function exists to eliminate. Sorting must be done by rebuilding each
- * object with sorted keys before serialization.
- */
-function stableCanonicalStringify(value: unknown): string {
-	if (value === null) return 'null';
-	if (typeof value !== 'object') return JSON.stringify(value);
-	if (Array.isArray(value)) {
-		return `[${value.map((el) => stableCanonicalStringify(el)).join(',')}]`;
-	}
-	const obj = value as Record<string, unknown>;
-	const keys = Object.keys(obj).sort();
-	const entries = keys
-		.map((k) => `${JSON.stringify(k)}:${stableCanonicalStringify(obj[k])}`)
-		.join(',');
-	return `{${entries}}`;
-}
-
-/**
  * Stable, fixed-length hash of tool-call args for spiral detection (issue #2060).
  *
  * Replaces the old `.slice(0, 100)` truncation, which collided for any args
@@ -526,13 +499,14 @@ function stableCanonicalStringify(value: unknown): string {
  * patch payloads can reach 1 MB, and the buffer retains up to
  * `MAX_RECENT_CALLS` (20) calls × `MAX_TRACKED_SESSIONS` (500) sessions.
  *
- * Object keys are sorted at every depth via `stableCanonicalStringify`, so
- * `{a:{b:1,c:2}}` and `{a:{c:2,b:1}}` hash equally — a correctness improvement
- * over the old code, which would have missed a genuine spiral whose args had
- * reordered keys. Crucially, the recursive sort does NOT drop nested keys (a
- * property-list replacer array would, re-introducing collisions for nested
- * args like todo lists). Strings are hashed too (not stored raw) so a multi-KB
- * `bash` command cannot blow up the per-entry size.
+ * Object keys are sorted at every depth via the shared `stableCanonicalStringify`
+ * (`src/utils/stable-stringify.ts`), so `{a:{b:1,c:2}}` and `{a:{c:2,b:1}}` hash
+ * equally — a correctness improvement over the old code, which would have
+ * missed a genuine spiral whose args had reordered keys. Crucially, the
+ * recursive sort does NOT drop nested keys (a property-list replacer array
+ * would, re-introducing collisions for nested args like todo lists). Strings
+ * are hashed too (not stored raw) so a multi-KB `bash` command cannot blow up
+ * the per-entry size.
  *
  * `bunHash` returns different values on Bun (xxHash64) vs Node (djb2); this is
  * safe because the buffer is per-process and never persisted. Verified:

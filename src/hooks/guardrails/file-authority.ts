@@ -22,19 +22,29 @@ import {
 import { classifyFile, type FileZone } from '../../context/zone-classifier';
 import { log, warn } from '../../utils';
 import { bunHash } from '../../utils/bun-compat';
+import { stableCanonicalStringify } from '../../utils/stable-stringify';
 
 /**
- * Hashes tool arguments for repetition detection
+ * Hashes tool arguments for repetition detection.
+ *
+ * Uses `stableCanonicalStringify` (recursive key-sorting at every depth, no
+ * nested-key filtering) so that two args with the same values hash equally
+ * regardless of key insertion order — including nested objects. This matters
+ * for repetition detection on nested-args tools (e.g. `todowrite` with a
+ * `todos` array): the previous `JSON.stringify(args, sortedKeys)` replacer
+ * silently dropped nested keys, collapsing distinct todo contents to the same
+ * hash.
+ *
  * @param args Tool arguments to hash
- * @returns Numeric hash (0 if hashing fails)
+ * @returns Numeric hash (0 for non-objects or if hashing fails)
  */
 export function hashArgs(args: unknown): number {
 	try {
 		if (typeof args !== 'object' || args === null) {
 			return 0;
 		}
-		const sortedKeys = Object.keys(args as Record<string, unknown>).sort();
-		return Number(bunHash(JSON.stringify(args, sortedKeys)));
+		const stable = stableCanonicalStringify(args);
+		return Number(bunHash(stable));
 	} catch (error) {
 		log('[Guardrails] hashArgs failed', {
 			error: error instanceof Error ? error.message : String(error),

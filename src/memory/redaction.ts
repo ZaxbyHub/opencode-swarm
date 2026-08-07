@@ -101,6 +101,7 @@ export function computeRedactionPolicyVersion(
  * are considered config-compatible.
  */
 import { createHash } from 'node:crypto';
+import { stableCanonicalStringify } from '../utils/stable-stringify';
 
 export interface MemoryCohortFingerprintInput {
 	provider: string;
@@ -113,7 +114,13 @@ export interface MemoryCohortFingerprintInput {
 export function computeMemoryCohortFingerprint(
 	input: MemoryCohortFingerprintInput,
 ): string {
-	const canonical = JSON.stringify(input, Object.keys(input).sort());
+	// `stableCanonicalStringify` sorts keys at every depth (the current input
+	// is flat, so output is byte-identical to the prior
+	// `JSON.stringify(input, Object.keys(input).sort())` — existing
+	// fingerprints remain valid). It avoids the property-list-replacer
+	// anti-pattern, which would silently drop nested keys if a nested field is
+	// ever added to `MemoryCohortFingerprintInput`.
+	const canonical = stableCanonicalStringify(input);
 	return createHash('sha256').update(canonical).digest('hex').slice(0, 12);
 }
 
