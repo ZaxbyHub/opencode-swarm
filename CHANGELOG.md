@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.136.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.136.1...v7.136.2) (2026-08-07)
+
+
+### Bug Fixes
+
+* **pr-workflow:** close swarm-pr-review findings on the wake budget ([96bfad3](https://github.com/ZaxbyHub/opencode-swarm/commit/96bfad3a8e8785c276d233d321d1ee0f4c92e12d))
+
 ## [7.136.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.136.0...v7.136.1) (2026-08-07)
 
 
