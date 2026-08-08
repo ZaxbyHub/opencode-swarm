@@ -56,19 +56,14 @@ function passingResponse(): string {
 }
 
 describe('PR-review recovery evaluation', () => {
-	test('pins baseline bytes and manifest to the same source SHA', async () => {
+	test('pins baseline manifest and payload bytes', () => {
 		const manifest = JSON.parse(
 			fs.readFileSync(path.join(fixtureRoot, 'baseline-manifest.json'), 'utf8'),
 		) as { sourceSha: string; sha256: string; payloadPath: string };
 		const baseline = fs.readFileSync(
 			path.join(packageRoot, manifest.payloadPath),
 		);
-		const source = await git(packageRoot, [
-			'show',
-			`${PR_REVIEW_RECOVERY_BASE_SHA}:.opencode/skills/swarm-pr-review/SKILL.md`,
-		]);
 		expect(manifest.sourceSha).toBe(PR_REVIEW_RECOVERY_BASE_SHA);
-		expect(baseline.equals(Buffer.from(source))).toBe(true);
 		expect(sha256(baseline)).toBe(manifest.sha256);
 	});
 

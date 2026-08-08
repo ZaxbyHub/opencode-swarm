@@ -9,7 +9,6 @@ description: >
   validation, critic challenge, and the explicit handoff into
   swarm-pr-feedback for approved fix work.
 ---
-
 # Swarm PR Review
 Read and follow `../../../.opencode/skills/swarm-pr-review/SKILL.md` as the canonical workflow.
 ## Claude Code Execution Notes
