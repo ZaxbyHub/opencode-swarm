@@ -40,14 +40,30 @@ interface MessageInfo {
 	sessionID?: string;
 	modelID?: string;
 	providerID?: string;
-	toolName?: string;
-	toolArgs?: unknown;
 	[key: string]: unknown;
 }
 
 interface MessagePart {
 	type?: string;
 	text?: string;
+	// ToolPart fields (OpenCode SDK `ToolPart`).
+	tool?: string;
+	state?: ToolStateLike;
+	[key: string]: unknown;
+}
+
+/**
+ * Minimal shape of a `ToolPart.state` value. The OpenCode SDK `ToolState` is a
+ * discriminated union on `status`; only `completed` carries `output` and only
+ * `error` carries `error`. We read defensively and never mutate `state` in
+ * place (see context-budget.ts mask/prune logic — those replace the whole
+ * ToolPart with a synthetic text part rather than corrupting the union).
+ */
+interface ToolStateLike {
+	status?: string;
+	output?: string;
+	error?: string;
+	input?: Record<string, unknown>;
 	[key: string]: unknown;
 }
 
@@ -76,24 +92,86 @@ export function containsPlanContent(text: string): boolean {
 }
 
 /**
- * Checks if a message is a tool result (assistant message with tool call).
+ * Returns all `ToolPart` objects in a message's `parts[]`.
+ *
+ * Per the OpenCode SDK contract (`@opencode-ai/sdk` v1+v2), tool results are
+ * delivered as `ToolPart` objects (`part.type === 'tool'`, with `part.tool`
+ * and `part.state`) inside a message's `parts[]` array — they are NOT separate
+ * `role:'tool'` messages and do not carry an `info.toolName` field. A message
+ * may contain multiple tool parts (parallel tool calls).
+ *
+ * @param message - The message to inspect
+ * @returns Array of tool parts (empty if none / malformed)
+ */
+export function getToolParts(message: MessageWithParts): MessagePart[] {
+	if (!message?.parts || !Array.isArray(message.parts)) return [];
+	return message.parts.filter(
+		(part) => part?.type === 'tool' && typeof part === 'object',
+	);
+}
+
+/**
+ * Returns the completed tool outputs in a message — the countable, maskable
+ * payloads (`part.state.output` where `state.status === 'completed'`).
+ *
+ * Pending/running tools have no output; error tools expose `state.error`
+ * (diagnostic signal — never masked, only routed via the stale-error →
+ * DISPOSABLE pruning path). Completed outputs are the heavy payloads the
+ * context budget must count and may mask/prune.
+ *
+ * @param message - The message to inspect
+ * @returns Array of `{ part, output }` for each completed tool part
+ */
+export function getCompletedToolOutputs(
+	message: MessageWithParts,
+): Array<{ part: MessagePart; output: string }> {
+	const results: Array<{ part: MessagePart; output: string }> = [];
+	for (const part of getToolParts(message)) {
+		const state = part.state;
+		if (
+			state &&
+			state.status === 'completed' &&
+			typeof state.output === 'string'
+		) {
+			results.push({ part, output: state.output });
+		}
+	}
+	return results;
+}
+
+/**
+ * Returns the tool names (`part.tool`) for every tool part in a message.
+ *
+ * @param message - The message to inspect
+ * @returns Array of tool name strings (empty if none)
+ */
+export function getToolNames(message: MessageWithParts): string[] {
+	return getToolParts(message)
+		.map((part) => part.tool)
+		.filter((name): name is string => typeof name === 'string' && !!name);
+}
+
+/**
+ * Checks if a message carries at least one tool result (a `ToolPart` in its
+ * `parts[]`).
+ *
+ * This detects the real OpenCode SDK shape. The legacy `info.toolName` field
+ * never existed on production payloads and was removed (issue #2068).
  *
  * @param message - The message to check
- * @returns true if the message appears to be a tool result
+ * @returns true if the message contains at least one tool part
  */
 export function isToolResult(message: MessageWithParts): boolean {
-	if (!message?.info) return false;
-
-	const role = message.info.role;
-	const toolName = message.info.toolName;
-
-	// Assistant messages with tool info are tool results
-	return role === 'assistant' && !!toolName;
+	return getToolParts(message).length > 0;
 }
 
 /**
  * Checks if two consecutive tool read calls are duplicates
  * (same tool with same first argument).
+ *
+ * Compares the first tool part in each message (`part.tool` name and the first
+ * value of `part.state.input`). Two messages are duplicate reads when both
+ * call a read tool whose name contains "read" with the same first input value.
  *
  * @param current - The current message
  * @param previous - The previous message
@@ -103,40 +181,38 @@ export function isDuplicateToolRead(
 	current: MessageWithParts,
 	previous: MessageWithParts,
 ): boolean {
-	if (!current?.info || !previous?.info) return false;
+	const currentTools = getToolNames(current);
+	const previousTools = getToolNames(previous);
+	if (currentTools.length === 0 || previousTools.length === 0) return false;
 
-	const currentTool = current.info.toolName;
-	const previousTool = previous.info.toolName;
+	const currentTool = currentTools[0];
+	const previousTool = previousTools[0];
 
 	// Must be the same tool
 	if (currentTool !== previousTool) return false;
 
 	// Must be read operations
 	const isReadTool =
-		currentTool?.toLowerCase().includes('read') &&
-		previousTool?.toLowerCase().includes('read');
-
+		currentTool.toLowerCase().includes('read') &&
+		previousTool.toLowerCase().includes('read');
 	if (!isReadTool) return false;
 
-	// Check if first argument is the same
-	const currentArgs = current.info.toolArgs as
-		| Record<string, unknown>
-		| undefined;
-	const previousArgs = previous.info.toolArgs as
-		| Record<string, unknown>
-		| undefined;
+	// Compare first input value from state.input
+	const currentInput = getFirstInputValue(current);
+	const previousInput = getFirstInputValue(previous);
+	if (currentInput === undefined || previousInput === undefined) return false;
 
-	if (!currentArgs || !previousArgs) return false;
+	return currentInput === previousInput;
+}
 
-	// Get the first key/value from tool args
-	const currentKeys = Object.keys(currentArgs);
-	const previousKeys = Object.keys(previousArgs);
-
-	if (currentKeys.length === 0 || previousKeys.length === 0) return false;
-
-	// Compare first argument value
-	const firstKey = currentKeys[0];
-	return currentArgs[firstKey] === previousArgs[firstKey];
+/** Returns the first value of `state.input` for the first tool part, or undefined. */
+function getFirstInputValue(message: MessageWithParts): unknown {
+	const part = getToolParts(message)[0];
+	const input = part?.state?.input;
+	if (!input || typeof input !== 'object') return undefined;
+	const keys = Object.keys(input);
+	if (keys.length === 0) return undefined;
+	return (input as Record<string, unknown>)[keys[0]];
 }
 
 /**
@@ -173,7 +249,15 @@ export function isStaleError(text: string, turnsAgo: number): boolean {
 }
 
 /**
- * Extracts text content from a message's parts.
+ * Extracts text content from a message's parts, including completed tool
+ * outputs (`ToolPart.state.output`) so classification checks (plan content,
+ * stale errors) can see tool-result text.
+ *
+ * NOTE: a sibling `extractMessageText` lives in `context-budget.ts` for token
+ * accounting. They intentionally differ slightly: this one accepts any part
+ * with a truthy `.text` (classification is lenient), while the context-budget
+ * copy requires `part.type === 'text'` (accounting is strict). Keep both in
+ * sync when changing part-walking logic.
  *
  * @param message - The message to extract text from
  * @returns The concatenated text content
@@ -181,7 +265,21 @@ export function isStaleError(text: string, turnsAgo: number): boolean {
 function extractMessageText(message: MessageWithParts): string {
 	if (!message?.parts || message.parts.length === 0) return '';
 
-	return message.parts.map((part) => part?.text || '').join('');
+	const chunks: string[] = [];
+	for (const part of message.parts) {
+		if (typeof part?.text === 'string' && part.text) {
+			chunks.push(part.text);
+		} else if (
+			part?.type === 'tool' &&
+			part.state?.status === 'completed' &&
+			typeof part.state.output === 'string'
+		) {
+			// Include completed tool output so stale-error / plan-content
+			// classification applies to tool results too.
+			chunks.push(part.state.output);
+		}
+	}
+	return chunks.join('');
 }
 
 /**
