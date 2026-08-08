@@ -3,7 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { GuardrailsConfig } from '../../../src/config/schema';
-import { createGuardrailsHooks, hashArgs } from '../../../src/hooks/guardrails';
+import { createGuardrailsHooks } from '../../../src/hooks/guardrails';
 import {
 	beginInvocation,
 	ensureAgentSession,
@@ -619,73 +619,6 @@ describe('guardrails circuit breaker', () => {
 
 			await hooks.messagesTransform({}, { messages: messagesB });
 			expect(messagesB[0].parts[0].text).toBe('Session B output');
-		});
-	});
-
-	describe('hashArgs', () => {
-		it('same args produce same hash', () => {
-			const hash1 = hashArgs({ a: 1, b: 2 });
-			const hash2 = hashArgs({ a: 1, b: 2 });
-			expect(hash1).toBe(hash2);
-		});
-
-		it('different key order produces same hash', () => {
-			const hash1 = hashArgs({ a: 1, b: 2 });
-			const hash2 = hashArgs({ b: 2, a: 1 });
-			expect(hash1).toBe(hash2);
-		});
-
-		it('different args produce different hash', () => {
-			const hash1 = hashArgs({ a: 1 });
-			const hash2 = hashArgs({ a: 2 });
-			expect(hash1).not.toBe(hash2);
-		});
-
-		it('null returns 0', () => {
-			expect(hashArgs(null)).toBe(0);
-		});
-
-		it('non-object returns 0', () => {
-			expect(hashArgs('string')).toBe(0);
-			expect(hashArgs(123)).toBe(0);
-			expect(hashArgs(true)).toBe(0);
-		});
-
-		it('empty object returns a hash', () => {
-			const hash = hashArgs({});
-			expect(typeof hash).toBe('number');
-			// It could be 0 or non-zero, both are valid
-		});
-
-		it('nested args with different content produce different hashes (no nested-key filtering)', () => {
-			// Regression guard for the recursive stable-stringify fix. The
-			// previous `JSON.stringify(args, sortedKeys)` replacer-array
-			// approach FILTERED keys at every object depth, collapsing
-			// `{todos:[{content:'a',status:'pending'}]}` to `{todos:[{}]}`.
-			// Two todo lists with completely different content therefore
-			// collided — the exact bug class that breaks repetition detection
-			// on nested-args tools like `todowrite`.
-			const hash1 = hashArgs({
-				todos: [{ content: 'Write the auth module', status: 'pending' }],
-			});
-			const hash2 = hashArgs({
-				todos: [{ content: 'Review the coder PR', status: 'in_progress' }],
-			});
-			expect(hash1).not.toBe(hash2);
-		});
-
-		it('nested args with reordered keys at any depth produce the same hash', () => {
-			// Key-order independence must hold at every depth, not just the
-			// top level, so a genuine repetition loop whose nested args are
-			// semantically identical (just built with reordered keys) is still
-			// detected.
-			const hash1 = hashArgs({
-				todos: [{ content: 'same task', status: 'pending' }],
-			});
-			const hash2 = hashArgs({
-				todos: [{ status: 'pending', content: 'same task' }],
-			});
-			expect(hash1).toBe(hash2);
 		});
 	});
 

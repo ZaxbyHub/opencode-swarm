@@ -152,6 +152,8 @@ jobs:
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         if: needs.detect-release.outputs.is-release != 'true'
+        with:
+          fetch-depth: 0
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         if: needs.detect-release.outputs.is-release != 'true'
         with:
@@ -193,8 +195,10 @@ jobs:
         if: needs.detect-release.outputs.is-release != 'true'
         shell: bash
         run: chmod +x scripts/check-cross-contamination.sh && bash scripts/check-cross-contamination.sh
-      # Diff-scoped: fails only on NEW time-touching tests that don't reference
-      # the freezeClock helper. Pre-existing files are non-blocking warnings
+      # Line-scoped: fails only on lines ADDED by the diff that introduce a
+      # raw-clock pattern in a test that doesn't reference the freezeClock
+      # helper. Merely touching a file that already violates stays a
+      # non-blocking warning, as do files outside the diff
       # (issue #1782 root-cause class 1 prevention).
       - name: Test-clock lint (freezeClock adoption)
         if: needs.detect-release.outputs.is-release != 'true'

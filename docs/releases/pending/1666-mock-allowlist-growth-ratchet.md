@@ -33,7 +33,7 @@ No action required for existing PRs. Only PRs that add new `mock.module` targets
 - The marker is **standalone-line only**: `# APPROVED-NEW: src/path/to/target` on its own line. Inline trailing comments on the entry are not accepted (the regenerator would not preserve them).
 - The marker target is normalized through `scripts/lib/normalize-mock-target.sh`, so `# APPROVED-NEW: ../../../src/foo/bar.js` matches the entry `src/foo/bar`.
 - The marker may appear **anywhere** in the allowlist (the checker does flat set-membership, not adjacency). Convention places it immediately above the entry it approves, and `scripts/generate-mock-allowlist.sh` preserves that placement across regeneration.
-- The no-base-branch path (local-dev clone without `origin/main` fetched) is non-blocking: Check 4 prints a `NOTE:` and skips. Real CI (PR + merge-group events with `actions/checkout fetch-depth: 0`) always resolves `origin/main`.
+- The no-base-branch path (local-dev clone without `origin/main` fetched) is non-blocking: Check 4 prints a `NOTE:` and skips. This requires the calling job's `actions/checkout` to use `fetch-depth: 0` (or another depth deep enough to include the merge base) — a shallow default-depth-1 checkout never resolves `origin/main`, silently no-ops every diff-scoped ratchet in that job, and is not itself guaranteed by "real CI" in general (see PR #2062 F-003: the `quality` job's checkout previously had no `fetch-depth` set at all).
 
 ## Test plan
 

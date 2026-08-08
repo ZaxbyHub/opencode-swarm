@@ -21,7 +21,10 @@ import {
 } from '../../config/schema';
 import { classifyFile, type FileZone } from '../../context/zone-classifier';
 import { log, warn } from '../../utils';
-import { bunHash } from '../../utils/bun-compat';
+import {
+	boundedBunHash,
+	coarseObjectDiscriminator,
+} from '../../utils/arg-hash';
 import { stableCanonicalStringify } from '../../utils/stable-stringify';
 
 /**
@@ -35,8 +38,27 @@ import { stableCanonicalStringify } from '../../utils/stable-stringify';
  * silently dropped nested keys, collapsing distinct todo contents to the same
  * hash.
  *
+ * When `stableCanonicalStringify` throws (cyclic refs, BigInt quirks), a
+ * constant fallback would make distinct-but-unserializable args collide,
+ * producing false-positive consecutive-equality detection (#2060-class
+ * bug). `coarseObjectDiscriminator` mixes in a shallow structural summary
+ * instead, so identical unserializable args still collide (true positive
+ * preserved) while distinct ones no longer do.
+ *
+ * Hash input is bounded by `boundedBunHash` (`src/utils/arg-hash.ts`), which
+ * hashes a length-prefixed head+tail SAMPLE rather than a bare prefix. That
+ * matters here more than anywhere: this hash drives the consecutive-repetition
+ * circuit breaker in `tool-before.ts`, which THROWS. Under a bare-prefix cap,
+ * ten consecutive large writes sharing a 64 KB boilerplate header but with
+ * differing appended bodies would have hashed identically and tripped it.
+ *
+ * Both this bounding and the fallback discriminator are shared verbatim with
+ * `hooks/adversarial-detector.ts:hashArgsForSpiral`; keep them in the shared
+ * module rather than re-inlining a copy here.
+ *
  * @param args Tool arguments to hash
- * @returns Numeric hash (0 for non-objects or if hashing fails)
+ * @returns Numeric hash (0 for non-objects; a discriminated fallback hash if
+ *   stable stringification fails)
  */
 export function hashArgs(args: unknown): number {
 	try {
@@ -44,12 +66,12 @@ export function hashArgs(args: unknown): number {
 			return 0;
 		}
 		const stable = stableCanonicalStringify(args);
-		return Number(bunHash(stable));
+		return Number(boundedBunHash(stable));
 	} catch (error) {
 		log('[Guardrails] hashArgs failed', {
 			error: error instanceof Error ? error.message : String(error),
 		});
-		return 0;
+		return Number(boundedBunHash(coarseObjectDiscriminator(args)));
 	}
 }
 
