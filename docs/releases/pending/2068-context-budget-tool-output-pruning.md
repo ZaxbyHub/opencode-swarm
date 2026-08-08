@@ -54,11 +54,13 @@ to the provider. The reporter's proposed fix targeted a `role: 'tool'` /
   output and are skipped. Removed the dead `extractToolName` regex fallback.
 - `src/hooks/index.ts`: export the new helpers.
 - Tests: migrated all fixtures in `message-priority.test.ts` and
-  `context-budget.test.ts` to the real `ToolPart` shape and added 12
-  regression tests covering the issue scenario (32k-model overflow),
-  exempt tools, error/pending/running states, multiple tool parts per message,
-  mixed exempt+non-exempt messages, `preserve_last_n_turns` protection, and
-  idempotency.
+  `context-budget.test.ts` to the real `ToolPart` shape and added 15
+  regression tests (T1–T15, split across `context-budget-2068-toolpart.test.ts`
+  and `context-budget-2068-edge-cases.test.ts` for the FR-006 500-line cap)
+  covering the issue scenario (32k-model overflow), exempt tools,
+  error/pending/running states, multiple tool parts per message, mixed
+  exempt+non-exempt messages, `preserve_last_n_turns` protection, idempotency,
+  and pending-only messages.
 
 ## Invariant audit
 

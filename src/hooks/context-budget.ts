@@ -239,7 +239,14 @@ export function createContextBudgetHandler(config: PluginConfig) {
 					preserveLastNTurns,
 				);
 
-				// Step 3: Remove messages until targetTokens reached
+				// Step 3: Remove messages until targetTokens reached.
+				// NOTE: extractMessageText reads the POST-MASKING parts (masking
+				// already ran above and subtracted toolMaskFreedTokens from
+				// totalTokens). So for a message that was masked, this measures
+				// only the residual placeholder text — which is the correct
+				// amount pruning can still free (masking already credited the
+				// heavy tool output). Do NOT add toolMaskFreedTokens here: that
+				// would double-count the masking credit.
 				let freedTokens = 0;
 				const toRemove = new Set<number>();
 
