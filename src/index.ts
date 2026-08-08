@@ -156,6 +156,7 @@ import {
 } from './hooks/trajectory-logger';
 import { realtimeAdmissionAfter } from './learning/admission.js';
 import { createMemoryLifecycleHooks } from './memory';
+import { initObservability } from './observability/index.js';
 import { loadPlan } from './plan/manager.js';
 import { createPrmHook, resolvePrmPatternPersistenceOptions } from './prm';
 import { createReviewModelDispatcher } from './review/contracts.js';
@@ -714,6 +715,33 @@ async function initializeOpenCodeSwarm(
 	// read-only, so timing out is safe — it only affects rehydration, not
 	// durable state. A slow filesystem (network home, iCloud-backed mount)
 	// must never block the plugin host's `await server(...)` indefinitely.
+
+	// Observability provenance/lineage (issue #2029) must be established BEFORE
+	// `initTelemetry`, so no `emit()` can produce an observation with empty
+	// lineage. `initObservability` performs zero I/O — it only hashes strings
+	// already in memory — so it adds no measurable cost to the bounded init path
+	// (AGENTS.md invariant 1) and it never throws (AGENTS.md invariant 1
+	// "fail-open"): plugin registration resolves even if it fails.
+	//
+	// `gitSha` and `configHash` are deliberately absent, i.e. explicitly UNKNOWN
+	// rather than zero (issue #2029 item 4). Init already shells out to git via
+	// `ensureSwarmGitExcluded`, but only for `rev-parse --show-toplevel` and
+	// `--git-path info/exclude`; neither yields a HEAD SHA, and adding a third
+	// init-path subprocess to obtain one is exactly what invariant 1 forbids.
+	// Populating it is #2047's call, off the init path.
+	initObservability({
+		directory: ctx.directory,
+		provenance: {
+			pluginVersion: packageJson.version,
+			// Detected via `process.versions`, never a `Bun` global reference —
+			// AGENTS.md invariant 2 confines `Bun.*` to src/utils/bun-compat.ts,
+			// and this module must stay Node-ESM-loadable.
+			runtime: process.versions.bun === undefined ? 'node' : 'bun',
+			runtimeVersion: process.versions.bun ?? process.versions.node,
+			os: process.platform,
+			arch: process.arch,
+		},
+	});
 
 	// Construct the repo-graph hook before any other side-task, but register its
 	// scan with the wrapper-owned post-resolution queue. Issue #704: the

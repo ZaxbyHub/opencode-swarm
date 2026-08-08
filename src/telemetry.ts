@@ -2,6 +2,10 @@ import * as fs from 'node:fs';
 import { createWriteStream } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import {
+	createObservation,
+	toLegacyTelemetryLine,
+} from './observability/index.js';
 import type { DelegationCostFields } from './services/cost-accounting.js';
 
 // ============================================================================
@@ -72,7 +76,14 @@ export type TelemetryEvent =
 	 * `prm_hard_stop` TRIGGER emitted by `src/prm/escalation.ts`. A trigger with
 	 * no matching delivery means the containment never reached the agent.
 	 */
-	| 'prm_hard_stop_delivered';
+	| 'prm_hard_stop_delivered'
+	// Emitted by src/hooks/conflict-resolution.ts. Until issue #2029 this member
+	// was MISSING and that producer reached `emit` through
+	// `'agent_conflict_detected' as Parameters<typeof emit>[0]` — a cast that
+	// defeated the type system, so a live production event kind existed in
+	// `.swarm/telemetry.jsonl` that no type, catalog, or consumer knew about.
+	// That is the exact defect class this issue targets; the cast is now gone.
+	| 'agent_conflict_detected';
 
 /** Stable classification for how a reviewer-gate decision was established. */
 export type ReviewerGateEvidenceKind =
@@ -265,12 +276,24 @@ export function emit(
 			return;
 		}
 
+		// Build the canonical observability event (issue #2029), then project it
+		// down to the legacy JSONL line. `createObservation` performs no I/O, never
+		// throws, and never clones or traverses `data` — see
+		// `docs/observability-event-contract.md`.
+		//
+		// The written line is BYTE-IDENTICAL to the previous inline construction:
+		// `toLegacyTelemetryLine` takes `timestamp` from `canonical.observedAt`
+		// (stamped with the same `new Date().toISOString()`) and spreads the
+		// caller's original `data` object last. Proven by
+		// `tests/unit/telemetry/emit-line-parity.test.ts` against a corpus captured
+		// from the unmodified tree at e50386b9.
+		//
+		// `JSON.stringify` still throws here for circular/BigInt payloads, before
+		// the listener fan-out below — preserving the ordering asserted by
+		// `src/telemetry.test.ts:137-162`.
+		const canonical = _internals.createObservation(event, data);
 		const line =
-			JSON.stringify({
-				timestamp: new Date().toISOString(),
-				event,
-				...data,
-			}) + os.EOL;
+			JSON.stringify(_internals.toLegacyTelemetryLine(canonical)) + os.EOL;
 
 		const stream = _writeStream;
 		stream.write(line, (err) => {
@@ -748,9 +771,13 @@ export const _internals: {
 	emit: typeof emit;
 	rotateTelemetryIfNeeded: typeof rotateTelemetryIfNeeded;
 	heartbeatListenerCount: () => number;
+	createObservation: typeof createObservation;
+	toLegacyTelemetryLine: typeof toLegacyTelemetryLine;
 } = {
 	telemetry,
 	emit,
 	rotateTelemetryIfNeeded,
 	heartbeatListenerCount: () => (_heartbeatListener !== null ? 1 : 0),
+	createObservation,
+	toLegacyTelemetryLine,
 };

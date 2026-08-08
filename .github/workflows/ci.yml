@@ -191,6 +191,13 @@ jobs:
       - name: Runtime src/ reference ratchet (issue #2063)
         if: needs.detect-release.outputs.is-release != 'true'
         run: bun run check:runtime-src-refs
+      # Blocking gate for issue #2029 AC6: a new event type is not complete
+      # until it has a catalog entry, producer, consumer/retention owner,
+      # privacy class, tests, and documentation. Hard-fail, no enforce/warn
+      # env var (unlike drift-check, which is soft-warn by default).
+      - name: Event contract check (issue #2029 AC6)
+        if: needs.detect-release.outputs.is-release != 'true'
+        run: bun run check:events
       - name: Cross-contamination check (mock.module / vi.mock leaks)
         if: needs.detect-release.outputs.is-release != 'true'
         shell: bash

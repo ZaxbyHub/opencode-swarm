@@ -64,8 +64,11 @@ export function resolveAgentConflict(input: ResolveAgentConflictInput): void {
 		resolutionPath,
 		summary: input.summary,
 	};
-	emit(
-		'agent_conflict_detected' as Parameters<typeof emit>[0],
-		event as unknown as Record<string, unknown>,
-	);
+	// `agent_conflict_detected` is a real member of `TelemetryEvent` as of issue
+	// #2029 and has a catalog entry in `src/observability/catalog.ts`, so this no
+	// longer needs to be cast past the type system. The previous
+	// `'agent_conflict_detected' as Parameters<typeof emit>[0]` cast meant a live
+	// production event kind existed in `.swarm/telemetry.jsonl` that no type and no
+	// consumer knew about — the defect class #2029 exists to close.
+	emit('agent_conflict_detected', event as unknown as Record<string, unknown>);
 }

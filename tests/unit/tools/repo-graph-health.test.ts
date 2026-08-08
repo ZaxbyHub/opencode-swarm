@@ -18,6 +18,7 @@ import { _internals as builderInternals } from '../../../src/tools/repo-graph/bu
 describe('repo graph health diagnostics', () => {
 	let tmp: string;
 	let originalExtractFileSymbols: typeof builderInternals.extractFileSymbols;
+	let originalNow: typeof builderInternals.now;
 
 	beforeEach(() => {
 		// realpathSync resolves the macOS /var → /private/var symlink (and Windows
@@ -27,10 +28,12 @@ describe('repo graph health diagnostics', () => {
 			fs.mkdtempSync(path.join(os.tmpdir(), 'repo-graph-health-')),
 		);
 		originalExtractFileSymbols = builderInternals.extractFileSymbols;
+		originalNow = builderInternals.now;
 	});
 
 	afterEach(() => {
 		builderInternals.extractFileSymbols = originalExtractFileSymbols;
+		builderInternals.now = originalNow;
 		clearCache(tmp);
 		fs.rmSync(tmp, { recursive: true, force: true });
 	});
@@ -262,7 +265,20 @@ describe('repo graph health diagnostics', () => {
 				`export const f${i} = ${i};\n`,
 			);
 		}
-		// A 0ms budget aborts on the first budget check.
+		// The budget check is `now() - startedAt > walkBudgetMs`
+		// (`src/tools/repo-graph/builder.ts`), so a 0ms budget needs STRICTLY MORE
+		// than 0ms of elapsed wall clock to trip. Walking this 3-file fixture can
+		// finish inside a single millisecond on a fast runner, leaving `0 > 0`
+		// false and nothing truncated — a real `unit (macos-latest, 2)` failure
+		// that survived both CI retries (run 31272876577).
+		//
+		// Drive the seam instead of the wall clock: the first call establishes
+		// `startedAt`, every later call is 1ms further on, so the first budget
+		// check is guaranteed to trip regardless of how fast the machine is. This
+		// pins the ABORT REASON, which is what the test is about; it deliberately
+		// does not assert how many files were visited first.
+		let tick = 0;
+		builderInternals.now = () => tick++;
 		const graph = await buildWorkspaceGraphAsync(tmp, { walkBudgetMs: 0 });
 		expect(graph.diagnostics?.walkTruncated).toBe(true);
 		expect(graph.diagnostics?.walkTruncationReason).toBe('budget');

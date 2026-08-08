@@ -104,7 +104,8 @@
 		"prepare": "bun run build",
 		"repro:704": "node scripts/repro-704.mjs",
 		"repro:1144": "bun scripts/repro-1144.mjs",
-		"repro:1873": "bun build scripts/repro-1873-entry.ts --outdir dist-build-test/repro-1873 --target node --format esm && node scripts/repro-1873.mjs"
+		"repro:1873": "bun build scripts/repro-1873-entry.ts --outdir dist-build-test/repro-1873 --target node --format esm && node scripts/repro-1873.mjs",
+		"check:events": "bun run scripts/check-event-contract.ts"
 	},
 	"dependencies": {
 		"@opencode-ai/plugin": "^1.18.3",
