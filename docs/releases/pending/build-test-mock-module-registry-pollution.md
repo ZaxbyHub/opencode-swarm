@@ -7,8 +7,9 @@
 `src/lang/detector` and `src/lang/profiles` via `mock.module` with **partial**
 objects — `LANGUAGE_REGISTRY` was mocked with a `get` method and nothing else.
 
-Both mocks now follow the AGENTS.md invariant 7 spread-real-exports pattern, and
-a permanent regression guard was added at
+Both mocks now follow the AGENTS.md invariant 7 spread-real-exports pattern, the
+shared scaffolding moved to `tests/unit/build/discovery-profiles-mocks.ts`, and a
+local-only regression guard was added at
 `tests/unit/build/zz-imports-plugin-entry.test.ts`.
 
 ## Why
@@ -41,13 +42,13 @@ on the prototype. `{ ...realProfiles.LANGUAGE_REGISTRY, get: mockGet }` copies
 only own enumerable properties and would silently drop every method, leaving the
 mock just as partial as before.
 
-The mocks instead derive from the real singleton:
+The mocks instead derive from the real singleton, via
+`deriveMockedRegistry` in `tests/unit/build/discovery-profiles-mocks.ts`
+(schematic — see the helper for the exact generic signature):
 
 ```ts
-const mockedLanguageRegistry = Object.create(
-	realProfiles.LANGUAGE_REGISTRY,
-) as typeof realProfiles.LANGUAGE_REGISTRY;
-mockedLanguageRegistry.get = (...args) => mockLangRegistryGet(...args);
+const derived = Object.create(realRegistry) as R;
+derived.get = ((...args: Parameters<R['get']>) => mockGet(...args)) as R['get'];
 ```
 
 Prototype lookup keeps every real method and the instance's private `Map`s
@@ -56,7 +57,20 @@ reachable, and the own-property `get` override never mutates the real singleton.
 Caveat for future edits: do not call the registry's mutators (`register`,
 `unregister`) through the derived object — `this.profiles` resolves up the
 prototype chain to the **real** singleton's `Map` and would pollute it globally.
-Neither test file does so today.
+Neither test file does so today, and the caveat is repeated as a doc comment on
+`deriveMockedRegistry` itself so it is visible at the point of use.
+
+### Why the `mock.module` calls stayed in the test files
+
+The shared helper holds only the fixture type and the registry derivation. The
+literal `mock.module('../../../src/lang/detector', …)` /
+`('../../../src/lang/profiles', …)` calls deliberately remain in each
+`*.test.ts`, because `scripts/check-mock-cleanup.sh` and
+`scripts/generate-mock-allowlist.sh` both discover mocks with
+`grep -r --include="*.test.ts"`. Hoisting those calls into a non-test helper
+would have hidden both targets (`scripts/mock-allowlist.txt:93-94`) from the
+very gates that police this defect class — trading a real guardrail for tidier
+files.
 
 ## Migration
 
@@ -65,10 +79,14 @@ affected.
 
 ## Known caveats
 
-`tests/unit/build/zz-imports-plugin-entry.test.ts` relies on filename sort order
-so that it imports `src/index.ts` *after* the sibling mocks install. The `zz-`
-prefix is load-bearing; a guard that sorts before `discovery-*` would be inert.
-This is documented in the file's own docstring.
+`tests/unit/build/zz-imports-plugin-entry.test.ts` is a **local-only** guard, and
+the label matters: CI (`scripts/ci/run-unit-tests-local.ts`) runs every test file
+in its own process, so the sibling mocks are never installed alongside it and it
+passes trivially there. It bites only on a shared-process run such as
+`bun test tests/unit/build/` — which is exactly how the defect was found. It is
+also inert under `bun test --randomize`, which can schedule it before the
+`discovery-*` mocks install. Both limits are documented in the file's docstring;
+neither is a defect, but a green CI run is not evidence the guard fired.
 
 `scripts/check-mock-cleanup.sh` still reports 14 pre-existing non-spreading
 `mock.module` violations elsewhere in the repository (currently warning-only,

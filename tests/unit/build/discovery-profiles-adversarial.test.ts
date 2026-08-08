@@ -13,6 +13,10 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as realDetector from '../../../src/lang/detector';
 import * as realProfiles from '../../../src/lang/profiles';
+import {
+	deriveMockedRegistry,
+	type MockLanguageProfile,
+} from './discovery-profiles-mocks';
 
 // Test directory
 const TEST_DIR = path.join(
@@ -27,20 +31,9 @@ const mockDetectProjectLanguages = mock();
 const mockLangRegistryGet = mock();
 const mockIsCommandAvailable = mock();
 
-// AGENTS.md invariant 7: `mock.module` leaks across test files in Bun's shared
-// test-runner process, so every mock must spread the real module's exports and
-// override only what it needs. A partial mock here previously broke *any* other
-// file in tests/unit/build/ that transitively imported `src/index.ts`
-// (`LANGUAGE_REGISTRY.getAll is not a function` at repo-graph/builder.ts module
-// scope). `LANGUAGE_REGISTRY` is a class instance, so its methods live on the
-// prototype and a plain `{...}` spread would drop them — `Object.create` keeps
-// the whole real object (methods and private Maps) reachable behind the override.
-const mockedLanguageRegistry = Object.create(
-	realProfiles.LANGUAGE_REGISTRY,
-) as typeof realProfiles.LANGUAGE_REGISTRY;
-mockedLanguageRegistry.get = (
-	...args: Parameters<typeof realProfiles.LANGUAGE_REGISTRY.get>
-) => mockLangRegistryGet(...args);
+// Both factories spread the real module per AGENTS.md invariant 7 — a partial
+// mock here leaks process-wide and breaks sibling files. See
+// ./discovery-profiles-mocks.ts for why the registry needs Object.create.
 
 // Mock the detector module
 mock.module('../../../src/lang/detector', () => ({
@@ -52,39 +45,14 @@ mock.module('../../../src/lang/detector', () => ({
 // Mock the profiles module
 mock.module('../../../src/lang/profiles', () => ({
 	...realProfiles,
-	LANGUAGE_REGISTRY: mockedLanguageRegistry,
+	LANGUAGE_REGISTRY: deriveMockedRegistry(
+		realProfiles.LANGUAGE_REGISTRY,
+		(...args) => mockLangRegistryGet(...args),
+	),
 }));
 
 // Mock the isCommandAvailable function by importing from the real module and replacing it
 // We'll need to clear the toolchain cache to ensure clean state
-
-// ============ Helper Types ============
-
-interface MockLanguageProfile {
-	id: string;
-	displayName: string;
-	tier: number;
-	extensions: string[];
-	treeSitter: { grammarId: string; wasmFile: string };
-	build: {
-		detectFiles: string[];
-		commands: Array<{
-			name: string;
-			cmd: string;
-			detectFile?: string;
-			priority: number;
-		}>;
-	};
-	test: { detectFiles: string[]; frameworks: unknown[] };
-	lint: { detectFiles: string[]; linters: unknown[] };
-	audit: {
-		detectFiles: string[];
-		command: string | null;
-		outputFormat: 'json' | 'text';
-	};
-	sast: { nativeRuleSet: string | null; semgrepSupport: string };
-	prompts: { coderConstraints: string[]; reviewerChecklist: string[] };
-}
 
 // ============ Test Setup ============
 
