@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import {
 	_internals,
@@ -11,6 +10,7 @@ import {
 	CATALOG_KINDS,
 	type CatalogEntry,
 } from '../../../src/observability/catalog.ts';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 /**
  * FB-011: end-to-end coverage of the gate's PER-ENTRY loop conditions.
@@ -21,7 +21,7 @@ import {
  * injectable root/doc paths precisely so each condition is reachable here.
  */
 function fixtureRoot(): string {
-	const root = fs.mkdtempSync(path.join(os.tmpdir(), 'evt-entry-'));
+	const root = canonicalMkdtemp('evt-entry-');
 	fs.mkdirSync(path.join(root, 'src'), { recursive: true });
 	fs.mkdirSync(path.join(root, 'tests'), { recursive: true });
 	fs.writeFileSync(path.join(root, 'src', 'p.ts'), "emit('k', {\n});\n");

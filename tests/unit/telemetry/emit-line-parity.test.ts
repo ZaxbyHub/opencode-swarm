@@ -23,7 +23,6 @@
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import {
 	emit,
@@ -35,6 +34,7 @@ import golden from '../../fixtures/observability/telemetry-lines-golden.json' wi
 	type: 'json',
 };
 import { freezeClock } from '../../helpers/test-clock.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 /** Mirrors scripts/capture-telemetry-golden.ts emitAllHelpers() exactly. */
 function emitAllHelpers(): void {
@@ -173,9 +173,7 @@ describe('emit() line parity — issue #2029 observability wiring', () => {
 	let tmpDir: string;
 
 	beforeEach(() => {
-		tmpDir = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'swarm-parity-')),
-		);
+		tmpDir = canonicalMkdtemp('swarm-parity-');
 		resetTelemetryForTesting();
 	});
 

@@ -13,7 +13,6 @@
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { createObservation } from '../../../src/observability/observe.js';
 import {
@@ -23,6 +22,7 @@ import {
 	resetTelemetryForTesting,
 	type TelemetryEvent,
 } from '../../../src/telemetry.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 describe('createObservation — fail-open on unrecognized kind', () => {
 	test('an unrecognized kind returns category: "unrecognized" and does not throw', () => {
@@ -45,9 +45,7 @@ describe('emit() — unrecognized kind still writes and still notifies listeners
 	let tmpDir: string;
 
 	beforeEach(() => {
-		tmpDir = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'swarm-failopen-')),
-		);
+		tmpDir = canonicalMkdtemp('swarm-failopen-');
 		resetTelemetryForTesting();
 	});
 
@@ -112,9 +110,7 @@ describe('emit() — circular payload: no throw, writes nothing, listeners NOT n
 	let tmpDir: string;
 
 	beforeEach(() => {
-		tmpDir = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'swarm-failopen-circ-')),
-		);
+		tmpDir = canonicalMkdtemp('swarm-failopen-circ-');
 		resetTelemetryForTesting();
 	});
 

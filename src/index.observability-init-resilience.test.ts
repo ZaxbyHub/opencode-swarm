@@ -50,8 +50,8 @@
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
+import { canonicalMkdtemp } from '../tests/helpers/tmpdir.js';
 import OpenCodeSwarm from './index.js';
 import {
 	createObservation,
@@ -216,7 +216,7 @@ describe('AC5 (structural) — initObservability cannot escape its own try/catch
 
 describe('AC5 (b, best-effort) - real OpenCodeSwarm.server() resolves through the real initObservability call site', () => {
 	// Every adversarial directory is a REAL, EXISTING directory rooted under
-	// os.tmpdir() - never '', never a '..'-escaping path, and never the
+	// the system temp directory - never '', never a '..'-escaping path, and never the
 	// process cwd. server() performs real fs/git I/O keyed off directory
 	// (writes .swarm/, runs ensureSwarmGitExcluded), so an adversarial value
 	// here means unusual bytes in an otherwise valid, isolated temp path, not
@@ -224,9 +224,7 @@ describe('AC5 (b, best-effort) - real OpenCodeSwarm.server() resolves through th
 	let parentDir: string;
 
 	beforeEach(() => {
-		parentDir = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'ocsm-adv-')),
-		);
+		parentDir = canonicalMkdtemp('ocsm-adv-');
 	});
 
 	afterEach(() => {

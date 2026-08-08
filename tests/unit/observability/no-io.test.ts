@@ -6,8 +6,8 @@
 import { describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const OBSERVABILITY_DIR = path.join(
 	__dirname,
@@ -95,9 +95,7 @@ describe('src/observability/*.ts — no I/O', () => {
 	});
 
 	test('importing the barrel (index.ts) has no observable filesystem side effect', async () => {
-		const tmpDir = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'swarm-noio-')),
-		);
+		const tmpDir = canonicalMkdtemp('swarm-noio-');
 		const before = fs.readdirSync(tmpDir);
 
 		// Run the import in a subprocess with tmpDir as cwd so any accidental

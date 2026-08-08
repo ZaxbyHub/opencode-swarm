@@ -14,7 +14,6 @@
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import {
 	checkCitationMentions,
@@ -26,6 +25,7 @@ import {
 } from '../../../scripts/check-event-contract.ts';
 import { detectEventContractDrift } from '../../../scripts/drift-check.ts';
 import { CATALOG_KINDS } from '../../../src/observability/catalog.ts';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const REPO_ROOT = path.resolve(__dirname, '../../../');
 const TELEMETRY_FILE = path.join(REPO_ROOT, 'src', 'telemetry.ts');
@@ -320,7 +320,7 @@ describe('checkCitationMentions (fixture-driven)', () => {
 	let root: string;
 
 	beforeEach(() => {
-		root = fs.mkdtempSync(path.join(os.tmpdir(), 'evt-cite-'));
+		root = canonicalMkdtemp('evt-cite-');
 		fs.mkdirSync(path.join(root, 'src'), { recursive: true });
 		fs.writeFileSync(
 			path.join(root, 'src', 'producer.ts'),
@@ -397,7 +397,7 @@ describe('collectCitationResolutionErrors (fixture-driven)', () => {
 	let root: string;
 
 	beforeEach(() => {
-		root = fs.mkdtempSync(path.join(os.tmpdir(), 'evt-resolve-'));
+		root = canonicalMkdtemp('evt-resolve-');
 		fs.mkdirSync(path.join(root, 'src'), { recursive: true });
 		fs.writeFileSync(
 			path.join(root, 'src', 'target.ts'),
