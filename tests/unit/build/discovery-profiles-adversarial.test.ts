@@ -11,6 +11,12 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import * as realDetector from '../../../src/lang/detector';
+import * as realProfiles from '../../../src/lang/profiles';
+import {
+	deriveMockedRegistry,
+	type MockLanguageProfile,
+} from './discovery-profiles-mocks';
 
 // Test directory
 const TEST_DIR = path.join(
@@ -25,49 +31,28 @@ const mockDetectProjectLanguages = mock();
 const mockLangRegistryGet = mock();
 const mockIsCommandAvailable = mock();
 
+// Both factories spread the real module per AGENTS.md invariant 7 — a partial
+// mock here leaks process-wide and breaks sibling files. See
+// ./discovery-profiles-mocks.ts for why the registry needs Object.create.
+
 // Mock the detector module
 mock.module('../../../src/lang/detector', () => ({
+	...realDetector,
 	detectProjectLanguages: (...args: unknown[]) =>
 		mockDetectProjectLanguages(...args),
 }));
 
 // Mock the profiles module
 mock.module('../../../src/lang/profiles', () => ({
-	LANGUAGE_REGISTRY: {
-		get: (...args: unknown[]) => mockLangRegistryGet(...args),
-	},
+	...realProfiles,
+	LANGUAGE_REGISTRY: deriveMockedRegistry(
+		realProfiles.LANGUAGE_REGISTRY,
+		(...args) => mockLangRegistryGet(...args),
+	),
 }));
 
 // Mock the isCommandAvailable function by importing from the real module and replacing it
 // We'll need to clear the toolchain cache to ensure clean state
-
-// ============ Helper Types ============
-
-interface MockLanguageProfile {
-	id: string;
-	displayName: string;
-	tier: number;
-	extensions: string[];
-	treeSitter: { grammarId: string; wasmFile: string };
-	build: {
-		detectFiles: string[];
-		commands: Array<{
-			name: string;
-			cmd: string;
-			detectFile?: string;
-			priority: number;
-		}>;
-	};
-	test: { detectFiles: string[]; frameworks: unknown[] };
-	lint: { detectFiles: string[]; linters: unknown[] };
-	audit: {
-		detectFiles: string[];
-		command: string | null;
-		outputFormat: 'json' | 'text';
-	};
-	sast: { nativeRuleSet: string | null; semgrepSupport: string };
-	prompts: { coderConstraints: string[]; reviewerChecklist: string[] };
-}
 
 // ============ Test Setup ============
 
