@@ -116,18 +116,48 @@ export function initObservability(input: InitObservabilityInput): void {
 			lineage.projectRef = pseudonymousRef(directory, salt);
 		}
 
-		// The cohort ref is bound to the project path, not just the label. Two
-		// projects using the SAME cohort label must not share an identity —
-		// that is acceptance criterion AC3.
+		// `cohortRef` and `worktreeRef` are each bound to the project path, not to
+		// the label alone. Two projects using the SAME cohort label — or the same
+		// worktree id — must not share an identity; that is acceptance criterion
+		// AC3.
+		//
+		// SCOPE, stated honestly. Both branches run only when the caller SUPPLIES
+		// `cohortLabel` / `worktreeId`. The sole production caller
+		// (`src/index.ts:732-744`) passes `directory` and `provenance` only, so
+		// `cohortRef` and `worktreeRef` are `undefined` in every real run today.
+		// AC3 is therefore asserted at unit level against this API
+		// (tests/unit/observability/identity-isolation.test.ts), not against a
+		// production emission path. Supplying real cohort/worktree identity is
+		// #2047's work.
+		//
+		// `sampleRate` is unsupplied by that same caller for the same reason, so
+		// the fallback path's `shouldSample(...)` runs against DEFAULT_SAMPLE_RATE
+		// in production and `policy` is discarded by `toLegacyTelemetryLine`
+		// anyway — the configured-rate fix is correct but currently unobservable
+		// on the live line. Also #2047.
+		//
+		// Each ref carries a DOMAIN TAG ("cohort" / "worktree") inside its digest
+		// input. Without one the two constructions are byte-identical, so a caller
+		// passing the same string as both `cohortLabel` and `worktreeId` — entirely
+		// plausible in an issue/worktree-keyed swarm where both commonly derive from
+		// the same branch slug — would get `cohortRef === worktreeRef`, silently
+		// collapsing two distinct identity dimensions into one. Adding the tag is
+		// free now (nothing consumes these values yet, see SCOPE above) and expensive
+		// once a sink has persisted digests. Caught by the PR #2056 Stage-B reviewer
+		// after an earlier fix made worktreeRef path-bound by copying cohortRef
+		// verbatim.
 		if (typeof input.cohortLabel === 'string' && input.cohortLabel.length > 0) {
 			lineage.cohortRef = pseudonymousRef(
-				`${directory ?? ''}\u0000${input.cohortLabel}`,
+				`${directory ?? ''}\u0000cohort\u0000${input.cohortLabel}`,
 				salt,
 			);
 		}
 
 		if (typeof input.worktreeId === 'string' && input.worktreeId.length > 0) {
-			lineage.worktreeRef = pseudonymousRef(input.worktreeId, salt);
+			lineage.worktreeRef = pseudonymousRef(
+				`${directory ?? ''}\u0000worktree\u0000${input.worktreeId}`,
+				salt,
+			);
 		}
 
 		// Frozen because every observation receives the SAME object reference
@@ -176,9 +206,11 @@ function safeNowIso(): string {
 /**
  * Minimal valid event used when construction fails.
  *
- * Built from literals only — no CSPRNG call, no catalog lookup, no validation —
- * so it cannot fail for the same reason the main path did. `legacy.raw` still
- * aliases the caller's payload, so the legacy projection remains byte-identical.
+ * Built from literals plus one total pure function — no CSPRNG call, no catalog
+ * lookup, no relationship validation — so it cannot fail for the same reason the
+ * main path did. The single call it makes is `shouldSample`, which is
+ * branch-total and never throws. `legacy.raw` still aliases the caller's
+ * payload, so the legacy projection remains byte-identical.
  */
 function buildFallbackObservation(
 	kind: string,
@@ -200,9 +232,15 @@ function buildFallbackObservation(
 		lineage: {},
 		provenance: {},
 		outcome: {},
+		// The sampling policy is the REAL module state, not a hardcoded default:
+		// reporting `sampleRate: DEFAULT_SAMPLE_RATE` while the process runs at a
+		// configured rate would misdescribe the policy in effect, and hardcoding
+		// `sampled: true` would claim a decision that was never made. `shouldSample`
+		// is total (every branch returns a boolean, no throw path), so calling it
+		// here does not weaken this function's never-throw contract.
 		policy: {
-			sampled: true,
-			sampleRate: DEFAULT_SAMPLE_RATE,
+			sampled: shouldSample(FALLBACK_TRACE_ID, _sampleRate),
+			sampleRate: _sampleRate,
 			privacyClass: 'operational',
 		},
 		legacy: {
@@ -306,9 +344,9 @@ export function createObservation(
  *
  * ## Byte-for-byte preservation
  *
- * The caller's object is spread **LAST**, exactly as
- * `the pre-change inline construction (removed by this change)` does today. Three properties depend on that
- * ordering, and all three are observable in
+ * The caller's object is spread **LAST**, exactly as the pre-change inline line
+ * construction in `src/telemetry.ts` `emit()` did. Three properties depend on
+ * that ordering, and all three are observable in
  * `tests/fixtures/observability/telemetry-lines-golden.json` (issue #2029 item
  * 5 arm (a) — "preserve the existing output"):
  *

@@ -64,10 +64,14 @@ export {
 } from './envelope.js';
 export type { TraceAndSpanId } from './ids.js';
 // ── Identity ────────────────────────────────────────────────────────────────
+// `newTraceId` is deliberately NOT re-exported. It had zero consumers through
+// this barrel, and its name collides with `newTraceId` in
+// `src/hooks/knowledge-events.ts` — identical `(): string` signature, different
+// on-wire shape (32 hex vs. a 36-character UUID) and no type guard between them.
+// The function itself stays in `./ids.js`, where `newTraceAndSpanId` uses it.
 export {
 	newEventId,
 	newSpanId,
-	newTraceId,
 	pseudonymousRef,
 	SPAN_ID_HEX_LENGTH,
 	TRACE_ID_HEX_LENGTH,

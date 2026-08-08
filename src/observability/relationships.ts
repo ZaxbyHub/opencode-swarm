@@ -39,6 +39,7 @@ export const RELATIONSHIP_VIOLATION_CODES = Object.freeze({
 	forbiddenWorkflowIdPresent: 'forbidden_workflow_id_present',
 	parentSpanNotAllowed: 'parent_span_not_allowed',
 	parentSpanMissing: 'parent_span_missing',
+	malformedParentSpanId: 'malformed_parent_span_id',
 	linksNotAllowed: 'links_not_allowed',
 	malformedLinkTraceId: 'malformed_link_trace_id',
 	malformedLinkSpanId: 'malformed_link_span_id',
@@ -55,8 +56,9 @@ export const RELATIONSHIP_VIOLATION_CODES = Object.freeze({
  *       was manufactured upstream — issue #2029 item 2);
  *   (d) a parent span is absent when the kind does not take one;
  *   (e) a parent span is present when the kind requires one;
- *   (f) links are absent when the kind does not allow them;
- *   (g) every link carries a well-formed trace/span id pair.
+ *   (f) a present parent span is a well-formed W3C span id;
+ *   (g) links are absent when the kind does not allow them;
+ *   (h) every link carries a well-formed trace/span id pair.
  *
  * @returns `{ ok: true }` or `{ ok: false, violations }`. Never throws.
  */
@@ -105,13 +107,24 @@ export function validateEventRelationships(
 				violations.push(RELATIONSHIP_VIOLATION_CODES.parentSpanMissing);
 			}
 
-			// (f) links on a kind that does not admit them.
+			// A PRESENT parent span must also be W3C-shaped. Link ids are already
+			// format-validated below; checking presence only here would let a
+			// malformed `parentSpanId` — the one id a consumer joins a span tree
+			// on — pass unreported.
+			if (
+				parentSpanId !== undefined &&
+				!SPAN_ID_PATTERN.test(String(parentSpanId))
+			) {
+				violations.push(RELATIONSHIP_VIOLATION_CODES.malformedParentSpanId);
+			}
+
+			// (g) links on a kind that does not admit them.
 			if (!entry.allowsLinks && links.length > 0) {
 				violations.push(RELATIONSHIP_VIOLATION_CODES.linksNotAllowed);
 			}
 		}
 
-		// (g) Link ids must be W3C-shaped regardless of whether the kind is
+		// (h) Link ids must be W3C-shaped regardless of whether the kind is
 		// catalogued — a malformed link is unusable to any consumer.
 		for (let index = 0; index < links.length; index++) {
 			const link = links[index];

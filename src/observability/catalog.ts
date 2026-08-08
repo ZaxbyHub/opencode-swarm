@@ -1,17 +1,20 @@
 /**
  * The event catalog (issue #2029).
  *
- * Exactly 33 entries, matching the `TelemetryEvent` union at
- * `src/telemetry.ts:15-86`. Thirty-two of them predate this change; the 33rd is
+ * Exactly 39 entries, matching the `TelemetryEvent` union at
+ * `src/telemetry.ts:15-86`. Thirty-eight of them predate this change; the 39th is
  * `agent_conflict_detected`, which before this change was emitted in
  * production through a force-cast past the type system before this change
  * (at `src/hooks/conflict-resolution.ts:67-70` in the BASE tree; the replacement typed call is
  * `:73` here) and was absent from the union. That
- * 33rd entry is the already-found instance of the defect class this contract
+ * 39th entry is the already-found instance of the defect class this contract
  * exists to close: an event kind can enter the stream with no registration.
  *
- * Every entry names a real producer `file:line`, a retention owner issue in
- * #2030-#2051, a privacy class, a doc anchor and a test file. An entry with no
+ * Every entry names a real producer `file:line`, a retention owner issue at or
+ * above #2030 — every entry today cites the #2030-#2051 programme, but only the
+ * LOWER bound is enforced, so a successor issue numbered past that window is not
+ * forced into a false in-window citation — a privacy class, a doc anchor and a
+ * test file. An entry with no
  * live reader declares `consumers: []` AND a `futureOwnerIssue` — an empty
  * consumer list without an owner is a contract violation, not a shrug.
  *
@@ -43,7 +46,11 @@ export interface CatalogEntry {
 	readonly consumers: readonly string[];
 	/** Owner issue for a kind that currently has no reader. */
 	readonly futureOwnerIssue?: number;
-	/** Owner issue for this kind's retention/lifecycle decision (#2030-#2051). */
+	/**
+	 * Owner issue for this kind's retention/lifecycle decision. Must be >= #2030;
+	 * every entry today names the #2030-#2051 programme, but no upper bound is
+	 * enforced (see `scripts/check-event-contract.ts`).
+	 */
 	readonly retentionOwnerIssue: number;
 	/**
 	 * Correlation IDs the producer GENUINELY always supplies. Conservative by
@@ -61,7 +68,7 @@ export interface CatalogEntry {
 	/**
 	 * Whether an event of this kind must carry `trace.parentSpanId`.
 	 *
-	 * `false` for all 33 entries today, and that is a truthful statement about
+	 * `false` for all 39 entries today, and that is a truthful statement about
 	 * the current system rather than a placeholder: no producer supplies a
 	 * parent span, so `createObservation` never sets one. Setting this to `true`
 	 * for a kind whose producer cannot supply a parent would make every
@@ -444,7 +451,18 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 		{
 			category: 'guardrail',
 			severity: 'warning',
-			privacyClass: 'pseudonymous',
+			// `sensitive`, not `pseudonymous`, because the `loopType` argument
+			// carries FILESYSTEM PATHS today. The guardrail producer at
+			// `src/hooks/guardrails/messages-transform.ts:554` passes
+			// `pending.message`, which is built at
+			// `src/hooks/guardrails/tool-before.ts:1513` as
+			// `Modified N file(s): <paths>`. That is free text embedding paths,
+			// which `src/observability/envelope.ts` defines as `sensitive`.
+			// A per-kind class must take the WORST CASE across producers: the
+			// second producer (`src/hooks/guardrails/nontransient-circuit.ts:282`)
+			// passes a clean closed-vocabulary `nontransient:<category>`, but one
+			// clean producer cannot downgrade the kind.
+			privacyClass: 'sensitive',
 			producer: 'src/telemetry.ts:534',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,

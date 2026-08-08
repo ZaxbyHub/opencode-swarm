@@ -11,8 +11,10 @@ import {
 	EVENT_CATALOG,
 } from '../../../src/observability/catalog.js';
 
+// Lower bound only — mirrors `scripts/check-event-contract.ts`, which dropped its
+// upper bound so a kind whose real owner issue is numbered above the #2030-#2051
+// programme cannot be forced into citing a false in-window issue.
 const MIN_RETENTION_ISSUE = 2030;
-const MAX_RETENTION_ISSUE = 2051;
 
 const VALID_PRIVACY_CLASSES = new Set([
 	'operational',
@@ -43,6 +45,54 @@ const VALID_SEVERITIES = new Set([
 ]);
 
 const PRODUCER_PATTERN = /^src\/.+\.ts:\d+$/;
+
+const CONTRACT_DOC_REL = 'docs/observability-event-contract.md';
+const CONTRACT_DOC_PATH = path.join(
+	__dirname,
+	'..',
+	'..',
+	'..',
+	'docs',
+	'observability-event-contract.md',
+);
+
+/**
+ * The per-kind declaration line every `#### <kind>` section opens with, e.g.
+ * ``Category `guardrail`, severity `warning`, privacy **`sensitive`**.``
+ *
+ * Anchored on the full `Category …, severity …, privacy …` form rather than a
+ * bare `` privacy `x` `` so it cannot be satisfied by explanatory prose further
+ * down a section — `loop_detected`'s body, for instance, goes on to discuss
+ * `sensitive` and `pseudonymous` at length. `\s+` spans newlines, so a
+ * hard-wrapped declaration still matches. Bold markers are optional because the
+ * doc emphasises the non-obvious classes.
+ */
+const PRIVACY_DECLARATION_RE =
+	/Category\s+\*{0,2}`[a-z_]+`\*{0,2},\s+severity\s+\*{0,2}`[a-z]+`\*{0,2},\s+privacy\s+\*{0,2}`([a-z]+)`/;
+
+/**
+ * Split the contract doc into `#### <kind>` section bodies, keyed by heading
+ * text. A section runs until the next heading of ANY level.
+ */
+function readKindSections(): Map<string, string> {
+	const doc = fs.readFileSync(CONTRACT_DOC_PATH, 'utf-8');
+	const sections = new Map<string, string[]>();
+	let current: string | null = null;
+	for (const line of doc.split('\n')) {
+		const heading = line.match(/^(#{1,6})\s+(.+)$/);
+		if (heading) {
+			current = heading[1].length === 4 ? heading[2].trim() : null;
+			if (current) sections.set(current, []);
+			continue;
+		}
+		if (current) sections.get(current)?.push(line);
+	}
+	return new Map(
+		[...sections].map(([name, body]) => [name, body.join('\n')] as const),
+	);
+}
+
+const KIND_SECTIONS = readKindSections();
 
 /**
  * Parse the `TelemetryEvent` union members straight out of
@@ -113,18 +163,94 @@ describe('catalog contract — AC6', () => {
 		expect(catalogSet.size).toBe(unionMembers.size);
 	});
 
+	/**
+	 * FB-003: the privacy RECLASSIFICATION itself, not merely "some valid class".
+	 *
+	 * `loop_detected` was `pseudonymous` and this PR moved it to `sensitive`.
+	 * Nothing asserted the new value: the only privacy assertion was membership in
+	 * VALID_PRIVACY_CLASSES, which `pseudonymous` also satisfies — so reverting the
+	 * reclassification left 712/712 tests passing and `check:events` green. That is
+	 * a silent privacy downgrade, the exact failure this catalog exists to prevent.
+	 *
+	 * The class is `sensitive` because `loopType` carries FILESYSTEM PATHS today:
+	 * `src/hooks/guardrails/messages-transform.ts:554` passes `pending.message`,
+	 * built at `src/hooks/guardrails/tool-before.ts:1513` as
+	 * `Modified N file(s): <paths>` — free text embedding a path. A per-kind class
+	 * takes the WORST CASE across producers, so the second, closed-vocabulary
+	 * producer (`src/hooks/guardrails/nontransient-circuit.ts:282`) cannot
+	 * downgrade it. Do not relax this to `pseudonymous` without first proving no
+	 * producer can put a path in `loopType`.
+	 */
+	test('loop_detected is classified sensitive (path-bearing loopType)', () => {
+		expect(EVENT_CATALOG.loop_detected?.privacyClass).toBe('sensitive');
+	});
+
+	/**
+	 * FB-003, generalised: close the whole doc<->catalog privacy divergence class,
+	 * not just the one instance above.
+	 *
+	 * `docs/observability-event-contract.md` states a privacy class per kind in
+	 * prose and `src/observability/catalog.ts` states one in code. Two independent
+	 * statements of the same fact drift silently; a reviewer reading only the doc
+	 * would then believe a guarantee the runtime does not enforce. This asserts
+	 * they are equal for EVERY catalogued kind.
+	 *
+	 * Failure modes are enumerated rather than skipped on purpose: a missing
+	 * section or an unparseable declaration is reported as a problem, so a doc
+	 * restructure turns this test red instead of quietly making it vacuous.
+	 */
+	test('every catalog privacyClass equals the class documented per kind', () => {
+		const problems: string[] = [];
+		for (const kind of CATALOG_KINDS) {
+			const body = KIND_SECTIONS.get(kind);
+			if (body === undefined) {
+				problems.push(
+					`${kind}: no "#### ${kind}" section in ${CONTRACT_DOC_REL}`,
+				);
+				continue;
+			}
+			const match = body.match(PRIVACY_DECLARATION_RE);
+			if (match === null) {
+				problems.push(
+					`${kind}: section has no "Category \`x\`, severity \`y\`, privacy \`z\`" declaration`,
+				);
+				continue;
+			}
+			const documented = match[1];
+			if (!VALID_PRIVACY_CLASSES.has(documented)) {
+				problems.push(
+					`${kind}: documented privacy "${documented}" is not a valid privacy class`,
+				);
+				continue;
+			}
+			const catalogued = EVENT_CATALOG[kind]?.privacyClass;
+			if (documented !== catalogued) {
+				problems.push(
+					`${kind}: ${CONTRACT_DOC_REL} says "${documented}" but src/observability/catalog.ts says "${catalogued}"`,
+				);
+			}
+		}
+		expect(problems).toEqual([]);
+	});
+
+	test('the #### section parser found a plausible number of kinds', () => {
+		// Anti-vacuity for the test above: if the parser returned an empty map its
+		// loop would report every kind as missing, but if CATALOG_KINDS were ever
+		// empty the loop would pass over nothing at all.
+		expect(CATALOG_KINDS.length).toBeGreaterThan(20);
+		expect(KIND_SECTIONS.size).toBeGreaterThanOrEqual(CATALOG_KINDS.length);
+	});
+
 	describe.each(Object.entries(EVENT_CATALOG))('entry: %s', (kind, entry) => {
 		test(`${kind} has a non-empty producer matching src/*.ts:line`, () => {
 			expect(entry.producer.length).toBeGreaterThan(0);
 			expect(PRODUCER_PATTERN.test(entry.producer)).toBe(true);
 		});
 
-		test(`${kind} has a retentionOwnerIssue in [2030, 2051]`, () => {
+		test(`${kind} has a retentionOwnerIssue >= 2030`, () => {
+			expect(Number.isInteger(entry.retentionOwnerIssue)).toBe(true);
 			expect(entry.retentionOwnerIssue).toBeGreaterThanOrEqual(
 				MIN_RETENTION_ISSUE,
-			);
-			expect(entry.retentionOwnerIssue).toBeLessThanOrEqual(
-				MAX_RETENTION_ISSUE,
 			);
 		});
 
@@ -150,14 +276,12 @@ describe('catalog contract — AC6', () => {
 			expect(entry.testFile.length).toBeGreaterThan(0);
 		});
 
-		test(`${kind}: empty consumers requires a futureOwnerIssue in [2030, 2051]`, () => {
+		test(`${kind}: empty consumers requires a futureOwnerIssue >= 2030`, () => {
 			if (entry.consumers.length === 0) {
 				expect(entry.futureOwnerIssue).toBeDefined();
+				expect(Number.isInteger(entry.futureOwnerIssue as number)).toBe(true);
 				expect(entry.futureOwnerIssue as number).toBeGreaterThanOrEqual(
 					MIN_RETENTION_ISSUE,
-				);
-				expect(entry.futureOwnerIssue as number).toBeLessThanOrEqual(
-					MAX_RETENTION_ISSUE,
 				);
 			}
 		});

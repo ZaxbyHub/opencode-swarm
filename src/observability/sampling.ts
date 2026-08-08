@@ -32,6 +32,17 @@ const SAMPLE_SUFFIX_PATTERN = /^[0-9a-f]{8}$/;
  * sampled distributed trace complete rather than a set of disconnected
  * fragments, and it is why the decision is not `Math.random()`.
  *
+ * **CAVEAT — that property is currently VACUOUS in this system, and saying so
+ * is the point.** `createObservation` mints a FRESH `traceId` per event, with
+ * `links: []` and no `parentSpanId`, so every event today is its own
+ * single-span trace. At a rate below 1 the decision is therefore independent
+ * PER EVENT, not per logical trace: a "trace" never spans two events, so
+ * nothing can be kept whole or torn apart. Trace continuation — propagating one
+ * trace id across the events that belong together — is #2047's work, and only
+ * then does trace-coherent sampling become a real property rather than a
+ * latent one. Nothing is dropped today regardless: {@link DEFAULT_SAMPLE_RATE}
+ * is `1`.
+ *
  * **Fail-open.** Every unusable input returns `true`. Dropping an event because
  * an id was malformed would lose data silently, which is the failure mode this
  * contract exists to prevent. A non-finite rate also fails open, for the same

@@ -23,11 +23,11 @@
  *
  * The script refuses to run if `src/telemetry.ts` has uncommitted modifications.
  *
- * COVERAGE
- * --------
- * All 33 event kinds: the 26 `telemetry.*` convenience helpers, plus the 7 kinds
- * emitted by direct `emit(...)` calls elsewhere in `src/`, with their real payload
- * shapes (not synthesized ones):
+ * COVERAGE — 33 of the 39 catalogued kinds. PARTIAL, deliberately.
+ * ---------------------------------------------------------------
+ * This script replays 33 kinds: the 26 `telemetry.*` convenience helpers, plus
+ * the 7 kinds emitted by direct `emit(...)` calls elsewhere in `src/`, with their
+ * real payload shapes (not synthesized ones):
  *   - src/evidence/lock.ts:86,94,129
  *   - src/plan/ledger.ts:681
  *   - src/plan/manager.ts:329,1696
@@ -38,6 +38,19 @@
  * the reason the projection must spread the caller's object last, and they use a
  * literal timestamp distinct from FIXED_ISO so the collision stays observable even
  * when the parity test freezes the clock.
+ *
+ * The remaining SIX catalogued kinds have NO golden line and therefore NO
+ * byte-parity coverage:
+ *   `no_op_strong_warning`, `gate_denial_loop`, `execution_stall_warning`,
+ *   `execution_stall_denied`, `swarm_internals_read_denied`,
+ *   `prm_hard_stop_delivered`
+ * They were added by #2063/#2065 — AFTER the corpus was captured. The fixture is
+ * frozen at `capturedFromSha` e50386b9 on purpose (see CAPTURE ORDERING above):
+ * regenerating it now would capture the POST-change tree and make
+ * `tests/unit/telemetry/emit-line-parity.test.ts` tautological, which is a worse
+ * outcome than a known, named coverage gap. Closing the gap needs a corpus
+ * captured from a base that predates the observability wiring but postdates those
+ * six kinds; that is not this PR's work. Do NOT restate this as "all 39 kinds".
  */
 
 import { spawnSync } from 'node:child_process';
@@ -66,8 +79,60 @@ const OUT = path.join(
 	'telemetry-lines-golden.json',
 );
 
+/**
+ * Every path whose content the captured bytes depend on.
+ *
+ * `src/telemetry.ts` alone is NOT sufficient: this script also replays direct
+ * `emit(...)` call sites from four other producers, so an uncommitted edit to any
+ * of them changes the recorded payloads just as silently. The output fixture is
+ * guarded too — a locally-modified corpus is the exact state that would let a
+ * regeneration overwrite the frozen baseline on an otherwise-clean tree and make
+ * the parity test tautological.
+ */
+export const CAPTURE_INPUT_PATHS: readonly string[] = [
+	'src/telemetry.ts',
+	'src/evidence/lock.ts',
+	'src/plan/ledger.ts',
+	'src/plan/manager.ts',
+	'src/hooks/conflict-resolution.ts',
+	'tests/fixtures/observability/telemetry-lines-golden.json',
+];
+
+/**
+ * The guard's DECISION, split out from its I/O so it is testable.
+ *
+ * FB-019: widening `CAPTURE_INPUT_PATHS` from `src/telemetry.ts` alone to all six
+ * inputs is behaviourally load-bearing — with the narrow list, a dirty
+ * `src/evidence/lock.ts` let the capture proceed and OVERWRITE the frozen fixture,
+ * which is precisely what makes
+ * `tests/unit/telemetry/emit-line-parity.test.ts` tautological. Nothing tested
+ * that. It could not be tested while the guard was welded to `spawnSync` inside a
+ * script whose module body ran the real capture on import.
+ *
+ * This function is pure: it takes the `git status --porcelain` output and throws
+ * if anything is dirty. `assertCleanTelemetrySource()` supplies the real git
+ * output; `tests/unit/scripts/capture-telemetry-golden-guard.test.ts` supplies
+ * synthetic strings and never runs the capture.
+ *
+ * @param statusOutput - Raw stdout of `git status --porcelain -- <inputs>`.
+ */
+export function assertCleanCaptureInputs(statusOutput: string): void {
+	if (statusOutput.trim() !== '') {
+		throw new Error(
+			'REFUSING TO CAPTURE: one or more capture inputs have uncommitted changes.\n' +
+				`Guarded paths: ${CAPTURE_INPUT_PATHS.join(', ')}\n` +
+				`git status --porcelain reported:\n${statusOutput.trimEnd()}\n` +
+				'The golden corpus must be captured from the unmodified tree, before the\n' +
+				'observability wiring lands, or the parity test becomes tautological. That\n' +
+				'applies to every producer replayed below, not just src/telemetry.ts, and to\n' +
+				'the output fixture itself.\n' +
+				'See the header of this file and issue #2029 plan blocker BL-5.',
+		);
+	}
+}
+
 function assertCleanTelemetrySource(): void {
-	const res = spawnSync('git', ['status', '--porcelain', '--', 'src/telemetry.ts'], {
+	const res = spawnSync('git', ['status', '--porcelain', '--', ...CAPTURE_INPUT_PATHS], {
 		cwd: path.join(import.meta.dir, '..'),
 		encoding: 'utf-8',
 		stdio: ['ignore', 'pipe', 'pipe'],
@@ -76,14 +141,7 @@ function assertCleanTelemetrySource(): void {
 	if (res.status !== 0) {
 		throw new Error(`git status failed: ${res.stderr}`);
 	}
-	if (res.stdout.trim() !== '') {
-		throw new Error(
-			'REFUSING TO CAPTURE: src/telemetry.ts has uncommitted changes.\n' +
-				'The golden corpus must be captured from the unmodified tree, before the\n' +
-				'observability wiring lands, or the parity test becomes tautological.\n' +
-				'See the header of this file and issue #2029 plan blocker BL-5.',
-		);
-	}
+	assertCleanCaptureInputs(res.stdout);
 }
 
 /** Drive every convenience helper with representative, stable arguments. */
@@ -286,4 +344,19 @@ async function main(): Promise<void> {
 	console.log(`wrote ${OUT}`);
 }
 
-await main();
+/**
+ * Entry-point guard — mirrors `scripts/check-event-contract.ts:575` and the other
+ * scripts in this directory.
+ *
+ * REQUIRED, not stylistic: `main()` OVERWRITES the frozen golden fixture. Without
+ * this guard, merely `import`ing anything from this module — which
+ * `tests/unit/scripts/capture-telemetry-golden-guard.test.ts` must do to reach
+ * `CAPTURE_INPUT_PATHS` and `assertCleanCaptureInputs` — would regenerate the
+ * corpus from the POST-wiring tree and make
+ * `tests/unit/telemetry/emit-line-parity.test.ts` tautological. `await` is kept so
+ * a guard rejection still exits non-zero, exactly as the previous top-level
+ * `await main()` did.
+ */
+if (import.meta.main) {
+	await main();
+}

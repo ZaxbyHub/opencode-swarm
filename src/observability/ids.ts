@@ -12,8 +12,14 @@
  *     lowercase hex). The W3C spec declares an all-zero id invalid, so both
  *     generators regenerate rather than return one.
  *   - Lineage refs (`projectRef` / `cohortRef` / `worktreeRef`) are salted,
- *     truncated SHA-256 digests. They never contain, encode, or reveal the
- *     absolute path they were derived from (issue #2029 item 2 / AC3).
+ *     truncated SHA-256 digests. They are PSEUDONYMS, not anonymous values: the
+ *     digest never contains or encodes the path, but with the PUBLIC
+ *     {@link DEFAULT_LINEAGE_SALT} and a low-entropy path space a holder of an
+ *     export can CONFIRM a guessed path by re-hashing candidates. Setting
+ *     {@link LINEAGE_SALT_ENV} to a private per-install value restores
+ *     guess-resistance and cross-install unlinkability (issue #2029 item 2 /
+ *     AC3). A per-install persisted salt would need init-path I/O, which
+ *     AGENTS.md invariant 1 forbids; that belongs with #2047.
  */
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 
@@ -84,6 +90,14 @@ export interface TraceAndSpanId {
 /**
  * Generate a W3C-compatible trace id: 32 lowercase hex characters, never
  * all-zero.
+ *
+ * NAME COLLISION, deliberate to record rather than rename: `newTraceId` in
+ * `src/hooks/knowledge-events.ts` has the identical `(): string` signature but
+ * a DIFFERENT on-wire shape — a 36-character RFC 4122 UUID, not 32 hex
+ * characters. Nothing outside this directory imports this one, and it is no
+ * longer re-exported from `src/observability/index.ts`, so the two cannot be
+ * confused through the barrel. (`newEventId` is unaffected: both return
+ * `randomUUID()`.)
  */
 export function newTraceId(): string {
 	for (let attempt = 0; attempt < MAX_REGENERATION_ATTEMPTS; attempt++) {
@@ -177,12 +191,29 @@ export function resolveLineageSalt(): string {
  * `sha256(salt + NUL + absolutePath)`, truncated to 16 hex characters.
  *
  * Properties this guarantees, and why each matters (issue #2029 item 2 / AC3):
- *   - The result NEVER contains, encodes, or reveals the input path. It is a
- *     one-way digest, not an encoding.
+ *   - The result never CONTAINS or ENCODES the input path. It is a one-way
+ *     digest, not an encoding.
  *   - Two different project paths carrying the SAME cohort label produce
  *     DIFFERENT refs, because the path is part of the digest input.
  *   - The result is stable for a given (salt, path) pair, so the same project
  *     correlates across processes and restarts.
+ *
+ * What it does NOT guarantee, stated plainly rather than overclaimed: this is a
+ * PSEUDONYM, not an anonymous value, and it is not "irreversible" in the sense
+ * that matters. With the PUBLIC {@link DEFAULT_LINEAGE_SALT} the digest input is
+ * fully known except for the path, and real paths are low entropy, so a holder
+ * of an export can CONFIRM a guessed path by re-hashing candidates and matching
+ * the ref. Setting {@link LINEAGE_SALT_ENV} to a private per-install value
+ * restores guess-resistance and makes refs unlinkable across installs. The
+ * algorithm is deliberately left alone here: deriving and persisting a
+ * per-install salt needs init-path I/O, which AGENTS.md invariant 1 forbids, so
+ * it belongs with #2047.
+ *
+ * SCOPE of the AC3 claim: `cohortRef` and `worktreeRef` are computed only when a
+ * caller supplies `cohortLabel` / `worktreeId` to `initObservability`. The sole
+ * production caller (`src/index.ts:732-744`) supplies neither, so both are
+ * `undefined` in every real run today; AC3 is asserted at unit level against
+ * this API, not against a production emission path.
  *
  * @param absolutePath - Value to pseudonymize. Never stored or echoed.
  * @param salt - Salt from {@link resolveLineageSalt}.

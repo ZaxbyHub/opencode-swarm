@@ -3,7 +3,7 @@
 ## What
 
 Introduces `src/observability/`: a canonical, zod-typed observability event
-envelope, a 33-entry catalog of every event kind the codebase currently emits,
+envelope, a 39-entry catalog of every event kind the codebase currently emits,
 a relationship-validation function, a legacy-payload adapter, deterministic
 sampling and bounded-cardinality helpers, and a versioned OTel/OpenInference
 attribute-mapping table. Wires the envelope into the one live production event
@@ -35,7 +35,7 @@ not add a new destination for observability data.
 
 ## After
 
-- `src/observability/` exists, exporting a canonical envelope, a 33-entry
+- `src/observability/` exists, exporting a canonical envelope, a 39-entry
   catalog (`EVENT_CATALOG`), relationship validation, a legacy adapter,
   sampling/cardinality helpers, and OTel/OpenInference mapping tables — fully
   documented in `docs/observability-event-contract.md`.
@@ -72,5 +72,5 @@ golden-corpus test.
 - Closes part of #2029 (Observability event contract). PR 01 of 23 in the
   observability sequence (#2029–#2051).
 - `docs/observability-event-contract.md` — the full contract reference,
-  including the 33-entry catalog and the 16-row producer/consumer matrix.
+  including the 39-entry catalog and the 16-row producer/consumer matrix.
 - `docs/engineering-invariants.md` — the invariant entry for issue #2029.

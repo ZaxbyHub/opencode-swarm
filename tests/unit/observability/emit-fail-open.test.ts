@@ -68,15 +68,19 @@ describe('emit() — unrecognized kind still writes and still notifies listeners
 		resetTelemetryForTesting();
 
 		const file = path.join(tmpDir, '.swarm', 'telemetry.jsonl');
-		// Poll briefly for the async stream flush.
-		const deadline = Date.now() + 5000;
+		// Poll briefly for the async stream flush. Bounded by an ATTEMPT COUNT
+		// rather than a wall-clock deadline: a raw clock read here would make
+		// this file a `scripts/check-test-clock.sh` violation for a loop that has
+		// no time-sensitive assertion at all (200 * 25ms = the same 5s ceiling).
+		const maxAttempts = 200;
+		const pollDelayMs = 25;
 		let content = '';
-		while (Date.now() < deadline) {
+		for (let attempt = 0; attempt < maxAttempts; attempt++) {
 			if (fs.existsSync(file)) {
 				content = fs.readFileSync(file, 'utf-8');
 				if (content.trim() !== '') break;
 			}
-			await new Promise((r) => setTimeout(r, 25));
+			await new Promise((r) => setTimeout(r, pollDelayMs));
 		}
 		expect(content).toContain('this_kind_does_not_exist_in_the_catalog');
 		const parsed = JSON.parse(content.trim());

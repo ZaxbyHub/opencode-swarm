@@ -18,6 +18,7 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
 	CATALOG_KINDS,
+	type CatalogEntry,
 	EVENT_CATALOG,
 	type OtelMappingKind,
 } from '../src/observability/catalog';
@@ -40,8 +41,12 @@ const CONTRACT_DOC = path.join(
 	'observability-event-contract.md',
 );
 
+// Lower bound only, deliberately. Pinning an upper bound at 2051 would, once the
+// #2030-#2051 programme closes, hard-fail any new kind whose real owner issue is
+// numbered above the window — with no escape hatch, which pressures a contributor
+// to cite a false in-window issue just to get green. A stale-but-truthful citation
+// beats an in-range lie.
 const MIN_RETENTION_OWNER_ISSUE = 2030;
-const MAX_RETENTION_OWNER_ISSUE = 2051;
 
 const OTEL_MAPPING_KINDS: readonly OtelMappingKind[] = [
 	'genai',
@@ -290,6 +295,187 @@ export function collectCitationResolutionErrors(
 }
 
 /**
+ * Per-entry structural checks (checks 2-8 of the contract gate).
+ *
+ * Extracted from `collectEventContractErrors`'s loop and EXPORTED with
+ * injectable paths so these conditions are reachable from a test. They were
+ * previously inline in a zero-parameter function that read the real repo through
+ * module constants, which meant neutering any one of them still produced a green
+ * suite — proven by mutation during PR #2056 feedback (FB-011): changing the
+ * docAnchor check to `if (false)` left all 35 tests passing.
+ *
+ * @param kind - Catalog key, used in every error message.
+ * @param entry - The catalog entry to validate.
+ * @param root - Repository root; injectable so tests can drive a fixture tree.
+ * @param contractDocPath - Absolute path to the contract doc; injectable likewise.
+ */
+export function collectEntryErrors(
+	kind: string,
+	entry: CatalogEntry,
+	root: string = REPO_ROOT,
+	contractDocPath: string = CONTRACT_DOC,
+): string[] {
+	const errors: string[] = [];
+
+	// 2) Per-entry completeness.
+	if (!PRODUCER_PATTERN.test(entry.producer)) {
+		errors.push(
+			`Event "${kind}": producer "${entry.producer}" does not match the required "src/<path>.ts:<line>" format. Cite the real emit call site.`,
+		);
+	}
+	if (!entry.privacyClass) {
+		errors.push(
+			`Event "${kind}": missing privacyClass. Declare the data-sensitivity classification for this event.`,
+		);
+	}
+	if (!entry.category) {
+		errors.push(`Event "${kind}": missing category.`);
+	}
+	if (!entry.severity) {
+		errors.push(`Event "${kind}": missing severity.`);
+	}
+	if (
+		!Number.isInteger(entry.retentionOwnerIssue) ||
+		entry.retentionOwnerIssue < MIN_RETENTION_OWNER_ISSUE
+	) {
+		errors.push(
+			`Event "${kind}": retentionOwnerIssue (${entry.retentionOwnerIssue}) must be an integer issue number >= ${MIN_RETENTION_OWNER_ISSUE}. Assign a retention-owner issue and cite it.`,
+		);
+	}
+	if (!entry.docAnchor || entry.docAnchor.trim().length === 0) {
+		errors.push(
+			`Event "${kind}": missing docAnchor. Add a documented anchor in docs/observability-event-contract.md and reference it.`,
+		);
+	}
+	if (!entry.testFile || entry.testFile.trim().length === 0) {
+		errors.push(
+			`Event "${kind}": missing testFile. Point to the test that asserts this entry's completeness.`,
+		);
+	}
+
+	// 3) Producer reachability: the citation must resolve to a real file AND
+	// the cited line must actually mention this event kind.
+	//
+	// A range-check alone is NOT sufficient, and that is not a hypothetical:
+	// during issue #2029's own implementation review, all 26 `src/telemetry.ts`
+	// citations silently went stale by +22 lines when the union and `emit()`
+	// grew, and every one still "resolved" because the file was long enough.
+	// A citation that points at unrelated code is exactly the silent drift this
+	// catalog exists to prevent, so the gate reads the line.
+	//
+	// The cited line must mention the kind EXACTLY — no tolerance window. An
+	// earlier version of this check allowed a 3-line forward window so a
+	// formatted multi-line `emit(` could put the kind on the next line. The
+	// final critic proved that window silently tolerated the very drift
+	// direction that caused the original failure: when lines are inserted
+	// ABOVE an emit, a stale citation points a line or two EARLY, which a
+	// forward window swallows. Citations are therefore required to land on the
+	// exact line bearing the kind literal.
+	errors.push(
+		...checkCitationMentions(
+			entry.producer,
+			kind,
+			`Event "${kind}": producer`,
+			'Repoint it at the exact line of the emit call.',
+			root,
+		),
+	);
+
+	// 3b) Consumer citations get the SAME treatment. Previously they were not
+	// validated at all — and because rule 4 below treats a non-empty consumer
+	// list as the escape hatch from the `futureOwnerIssue` requirement, an
+	// unverified consumer string could silently exempt an entry from the owner
+	// rule. A fabricated consumer is therefore load-bearing, not cosmetic.
+	for (const consumer of entry.consumers) {
+		errors.push(
+			...checkCitationMentions(
+				consumer,
+				kind,
+				`Event "${kind}": consumer`,
+				'Repoint it at the exact line where the reader discriminates on this kind, or drop it and declare a futureOwnerIssue.',
+				root,
+			),
+		);
+	}
+
+	// 4) Consumer/owner rule: an empty consumer list is allowed only
+	// together with a valid futureOwnerIssue.
+	if (entry.consumers.length === 0) {
+		const owner = entry.futureOwnerIssue;
+		if (
+			owner === undefined ||
+			!Number.isInteger(owner) ||
+			owner < MIN_RETENTION_OWNER_ISSUE
+		) {
+			errors.push(
+				`Event "${kind}" has no consumer and no futureOwnerIssue (or an out-of-range one). Assign a futureOwnerIssue >= ${MIN_RETENTION_OWNER_ISSUE}, or add a real consumer.`,
+			);
+		}
+	}
+
+	// 5) Documentation exists and covers this entry's docAnchor.
+	if (!fs.existsSync(contractDocPath)) {
+		errors.push(
+			`Event "${kind}": docs/observability-event-contract.md does not exist. Create it and document every catalog entry's docAnchor as a heading.`,
+		);
+	} else if (entry.docAnchor) {
+		const docSource = fs.readFileSync(contractDocPath, 'utf-8');
+		const headingSlugs = extractHeadingSlugs(docSource);
+		const anchorTarget = entry.docAnchor.replace(/^#/, '');
+		if (!headingSlugs.has(anchorTarget)) {
+			errors.push(
+				`Event "${kind}": docAnchor "${entry.docAnchor}" has no matching heading (slug "${anchorTarget}") in docs/observability-event-contract.md. Add a heading that slugifies to "${anchorTarget}".`,
+			);
+		}
+	}
+
+	// 6) Test file exists.
+	if (entry.testFile) {
+		const testAbsPath = path.join(root, entry.testFile);
+		if (!fs.existsSync(testAbsPath)) {
+			errors.push(
+				`Event "${kind}": testFile "${entry.testFile}" does not exist. Add the test that asserts this entry's completeness.`,
+			);
+		}
+	}
+
+	// 8) OTel mapping decision recorded.
+	if (!OTEL_MAPPING_KINDS.includes(entry.otelMapping)) {
+		errors.push(
+			`Event "${kind}": otelMapping "${entry.otelMapping}" is not one of ${OTEL_MAPPING_KINDS.join(', ')}. Record an explicit OTel-mapping decision.`,
+		);
+	} else if (entry.otelMapping !== 'none') {
+		const table = mappingForEntry(entry.otelMapping);
+		if (Object.keys(table).length === 0) {
+			errors.push(
+				`Event "${kind}": otelMapping "${entry.otelMapping}" resolves to an empty attribute table via mappingForEntry(). Record a real mapping table, or declare "none".`,
+			);
+		}
+	}
+
+	return errors;
+}
+
+/**
+ * `_internals` DI seam — AGENTS.md invariant 7, mirroring
+ * `scripts/drift-check.ts:501`.
+ *
+ * FB-011 (round 2): extracting `collectEntryErrors` made its CONDITIONS testable
+ * but left the CALL SITE unprotected — replacing the
+ * `errors.push(...collectEntryErrors(kind, entry))` line in
+ * `collectEventContractErrors` with a comment left the whole suite byte-identical
+ * AND `check:events` still printed "Event contract check passed". Routing the loop
+ * through this seam lets
+ * `tests/unit/scripts/check-event-contract-entry-loop.test.ts` stub the collector
+ * and assert the loop actually invokes it once per catalogued kind, so a
+ * disconnected loop is now a red test rather than a silent green.
+ *
+ * Do NOT inline `collectEntryErrors(kind, entry)` back into the loop: that
+ * restores exactly the mutation this seam exists to catch.
+ */
+export const _internals = { collectEntryErrors };
+
+/**
  * Pure collector for event-contract violations (issue #2029 AC6). Returns
  * the list of human-readable error strings (empty when the contract holds).
  * Exported so the CI drift checker (scripts/drift-check.ts, issue #1497) can
@@ -333,141 +519,9 @@ export function collectEventContractErrors(): string[] {
 		const entry = EVENT_CATALOG[kind];
 		if (!entry) continue;
 
-		// 2) Per-entry completeness.
-		if (!PRODUCER_PATTERN.test(entry.producer)) {
-			errors.push(
-				`Event "${kind}": producer "${entry.producer}" does not match the required "src/<path>.ts:<line>" format. Cite the real emit call site.`,
-			);
-		}
-		if (!entry.privacyClass) {
-			errors.push(
-				`Event "${kind}": missing privacyClass. Declare the data-sensitivity classification for this event.`,
-			);
-		}
-		if (!entry.category) {
-			errors.push(`Event "${kind}": missing category.`);
-		}
-		if (!entry.severity) {
-			errors.push(`Event "${kind}": missing severity.`);
-		}
-		if (
-			!Number.isInteger(entry.retentionOwnerIssue) ||
-			entry.retentionOwnerIssue < MIN_RETENTION_OWNER_ISSUE ||
-			entry.retentionOwnerIssue > MAX_RETENTION_OWNER_ISSUE
-		) {
-			errors.push(
-				`Event "${kind}": retentionOwnerIssue (${entry.retentionOwnerIssue}) must be an integer issue number in ${MIN_RETENTION_OWNER_ISSUE}..${MAX_RETENTION_OWNER_ISSUE}. Assign a retention-owner issue and cite it.`,
-			);
-		}
-		if (!entry.docAnchor || entry.docAnchor.trim().length === 0) {
-			errors.push(
-				`Event "${kind}": missing docAnchor. Add a documented anchor in docs/observability-event-contract.md and reference it.`,
-			);
-		}
-		if (!entry.testFile || entry.testFile.trim().length === 0) {
-			errors.push(
-				`Event "${kind}": missing testFile. Point to the test that asserts this entry's completeness.`,
-			);
-		}
-
-		// 3) Producer reachability: the citation must resolve to a real file AND
-		// the cited line must actually mention this event kind.
-		//
-		// A range-check alone is NOT sufficient, and that is not a hypothetical:
-		// during issue #2029's own implementation review, all 26 `src/telemetry.ts`
-		// citations silently went stale by +22 lines when the union and `emit()`
-		// grew, and every one still "resolved" because the file was long enough.
-		// A citation that points at unrelated code is exactly the silent drift this
-		// catalog exists to prevent, so the gate reads the line.
-		//
-		// The cited line must mention the kind EXACTLY — no tolerance window. An
-		// earlier version of this check allowed a 3-line forward window so a
-		// formatted multi-line `emit(` could put the kind on the next line. The
-		// final critic proved that window silently tolerated the very drift
-		// direction that caused the original failure: when lines are inserted
-		// ABOVE an emit, a stale citation points a line or two EARLY, which a
-		// forward window swallows. Citations are therefore required to land on the
-		// exact line bearing the kind literal.
-		errors.push(
-			...checkCitationMentions(
-				entry.producer,
-				kind,
-				`Event "${kind}": producer`,
-				'Repoint it at the exact line of the emit call.',
-			),
-		);
-
-		// 3b) Consumer citations get the SAME treatment. Previously they were not
-		// validated at all — and because rule 4 below treats a non-empty consumer
-		// list as the escape hatch from the `futureOwnerIssue` requirement, an
-		// unverified consumer string could silently exempt an entry from the owner
-		// rule. A fabricated consumer is therefore load-bearing, not cosmetic.
-		for (const consumer of entry.consumers) {
-			errors.push(
-				...checkCitationMentions(
-					consumer,
-					kind,
-					`Event "${kind}": consumer`,
-					'Repoint it at the exact line where the reader discriminates on this kind, or drop it and declare a futureOwnerIssue.',
-				),
-			);
-		}
-
-		// 4) Consumer/owner rule: an empty consumer list is allowed only
-		// together with a valid futureOwnerIssue.
-		if (entry.consumers.length === 0) {
-			const owner = entry.futureOwnerIssue;
-			if (
-				owner === undefined ||
-				!Number.isInteger(owner) ||
-				owner < MIN_RETENTION_OWNER_ISSUE ||
-				owner > MAX_RETENTION_OWNER_ISSUE
-			) {
-				errors.push(
-					`Event "${kind}" has no consumer and no futureOwnerIssue (or an out-of-range one). Assign a futureOwnerIssue in ${MIN_RETENTION_OWNER_ISSUE}..${MAX_RETENTION_OWNER_ISSUE}, or add a real consumer.`,
-				);
-			}
-		}
-
-		// 5) Documentation exists and covers this entry's docAnchor.
-		if (!fs.existsSync(CONTRACT_DOC)) {
-			errors.push(
-				`Event "${kind}": docs/observability-event-contract.md does not exist. Create it and document every catalog entry's docAnchor as a heading.`,
-			);
-		} else if (entry.docAnchor) {
-			const docSource = fs.readFileSync(CONTRACT_DOC, 'utf-8');
-			const headingSlugs = extractHeadingSlugs(docSource);
-			const anchorTarget = entry.docAnchor.replace(/^#/, '');
-			if (!headingSlugs.has(anchorTarget)) {
-				errors.push(
-					`Event "${kind}": docAnchor "${entry.docAnchor}" has no matching heading (slug "${anchorTarget}") in docs/observability-event-contract.md. Add a heading that slugifies to "${anchorTarget}".`,
-				);
-			}
-		}
-
-		// 6) Test file exists.
-		if (entry.testFile) {
-			const testAbsPath = path.join(REPO_ROOT, entry.testFile);
-			if (!fs.existsSync(testAbsPath)) {
-				errors.push(
-					`Event "${kind}": testFile "${entry.testFile}" does not exist. Add the test that asserts this entry's completeness.`,
-				);
-			}
-		}
-
-		// 8) OTel mapping decision recorded.
-		if (!OTEL_MAPPING_KINDS.includes(entry.otelMapping)) {
-			errors.push(
-				`Event "${kind}": otelMapping "${entry.otelMapping}" is not one of ${OTEL_MAPPING_KINDS.join(', ')}. Record an explicit OTel-mapping decision.`,
-			);
-		} else if (entry.otelMapping !== 'none') {
-			const table = mappingForEntry(entry.otelMapping);
-			if (Object.keys(table).length === 0) {
-				errors.push(
-					`Event "${kind}": otelMapping "${entry.otelMapping}" resolves to an empty attribute table via mappingForEntry(). Record a real mapping table, or declare "none".`,
-				);
-			}
-		}
+		// Through the `_internals` seam, never a direct call — see the seam's
+		// docstring: a direct call makes disconnecting this loop invisible.
+		errors.push(..._internals.collectEntryErrors(kind, entry));
 	}
 
 	// 7) Bounded cardinality self-consistency: the allowlist itself must

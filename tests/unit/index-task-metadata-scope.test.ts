@@ -74,7 +74,18 @@ describe('production Task metadata scope activation', () => {
 		// POSIX tolerates unlinking an open file, which is why this only ever
 		// surfaced on Windows.
 		resetTelemetryForTesting();
-		fs.rmSync(directory, { recursive: true, force: true });
+		// Best-effort: `resetTelemetryForTesting()` calls `stream.end()`, which
+		// flushes ASYNCHRONOUSLY. The handle is therefore not guaranteed to be
+		// closed by the time this line runs, so on Windows the rmSync can still
+		// lose the race and throw EBUSY. Failing teardown on a leftover temp dir
+		// would turn a passing test red for a reason unrelated to what it asserts.
+		// The sibling `src/index.observability-init-resilience.test.ts` guards the
+		// same way.
+		try {
+			fs.rmSync(directory, { recursive: true, force: true });
+		} catch {
+			// best-effort cleanup
+		}
 	});
 
 	/**

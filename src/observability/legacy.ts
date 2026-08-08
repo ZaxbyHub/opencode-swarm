@@ -43,7 +43,7 @@ export const LEGACY_ADAPTER_RULES: readonly string[] = Object.freeze([
 	'Record the source store and its schema version: `sourceStore` names the file; `sourceSchemaVersion` is the version the store declares.',
 	'Preserve originally reported values: values are aliased, never coerced, normalized, rounded, or re-serialized.',
 	'Record timing confidence: a time read by the writer at record time is `writer-clock`, never `exact`.',
-	'Unknown is not zero: a field the producer did not supply is listed in `unknown` and is never defaulted to 0, "", false, or null.',
+	"Unknown is not zero: the adapter lists in `unknown` every catalogued key the PRODUCER left undefined, and never itself defaults one to 0, \"\", false, or null. The guarantee stops at the adapter boundary — a producer that pre-coerces its own defaults defeats it, because the adapter only ever sees the coerced value. The known instance is `delegation_end` (`src/telemetry.ts` `delegationEnd`, pre-existing): it coerces `?? 0` / `?? null` / `?? 'unavailable'` before emitting, so its cost fields can never appear in `unknown`; there, `cost_source: 'unavailable'` is how absence stays recoverable.",
 	'Missing lineage stays missing: an absent correlation ID stays `undefined` and is never synthesized to make a join succeed.',
 	'Never drop unrecognized fields: no allowlist filter is applied to the payload on the way through.',
 ]);
@@ -278,7 +278,7 @@ const EMPTY_UNKNOWN: readonly string[] = Object.freeze([]);
  * {@link KNOWN_TELEMETRY_KEYS}. A caller that builds a fresh array per call
  * simply misses the cache and pays the old cost — never a wrong answer. The map
  * is bounded by the number of distinct arrays the process ever passes, which for
- * production is the 33 catalogued kinds plus the shared empty array.
+ * production is the 39 catalogued kinds plus the shared empty array.
  */
 const _knownKeySetCache = new WeakMap<readonly string[], ReadonlySet<string>>();
 

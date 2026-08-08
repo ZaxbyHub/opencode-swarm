@@ -147,3 +147,67 @@ describe('identity isolation — AC3', () => {
 		resetObservabilityForTesting();
 	});
 });
+
+describe('lineage ref domain separation (FB-006, PR #2056 Stage-B)', () => {
+	// `worktreeRef` was originally hashed from the label ALONE, so the same
+	// worktree name under two different projects collided — the exact AC3
+	// failure `cohortRef` is path-bound to avoid. Making it path-bound by
+	// copying `cohortRef` verbatim then introduced the OPPOSITE collision:
+	// identical construction meant `cohortRef === worktreeRef` whenever the
+	// caller passed the same string for both, which is plausible in an
+	// issue/worktree-keyed swarm. Both properties are pinned here.
+
+	test('the same worktree id under two projects yields DIFFERENT refs', () => {
+		resetObservabilityForTesting();
+		initObservability({ directory: '/proj/a', worktreeId: 'shared-name' });
+		const a = createObservation('heartbeat', { sessionId: 's' });
+		resetObservabilityForTesting();
+		initObservability({ directory: '/proj/b', worktreeId: 'shared-name' });
+		const b = createObservation('heartbeat', { sessionId: 's' });
+
+		expect(a.lineage.worktreeRef).toBeDefined();
+		expect(b.lineage.worktreeRef).toBeDefined();
+		expect(a.lineage.worktreeRef).not.toBe(b.lineage.worktreeRef);
+	});
+
+	test('cohortLabel === worktreeId still yields DIFFERENT refs (domain tag)', () => {
+		resetObservabilityForTesting();
+		initObservability({
+			directory: '/proj/a',
+			cohortLabel: 'issue-2029',
+			worktreeId: 'issue-2029',
+		});
+		const e = createObservation('heartbeat', { sessionId: 's' });
+
+		expect(e.lineage.cohortRef).toBeDefined();
+		expect(e.lineage.worktreeRef).toBeDefined();
+		// Without the domain tag these are byte-identical digests.
+		expect(e.lineage.cohortRef).not.toBe(e.lineage.worktreeRef);
+	});
+
+	test('worktreeRef is stable for the same (directory, worktreeId)', () => {
+		resetObservabilityForTesting();
+		initObservability({ directory: '/proj/a', worktreeId: 'w1' });
+		const first = createObservation('heartbeat', { sessionId: 's' });
+		resetObservabilityForTesting();
+		initObservability({ directory: '/proj/a', worktreeId: 'w1' });
+		const second = createObservation('heartbeat', { sessionId: 's' });
+
+		expect(first.lineage.worktreeRef).toBe(second.lineage.worktreeRef);
+	});
+
+	test('worktreeRef leaks no substring of the directory or the id', () => {
+		resetObservabilityForTesting();
+		initObservability({
+			directory: '/home/someuser/secret-project',
+			worktreeId: 'my-branch',
+		});
+		const e = createObservation('heartbeat', { sessionId: 's' });
+		const ref = e.lineage.worktreeRef ?? '';
+
+		expect(ref).toMatch(/^[0-9a-f]{16}$/);
+		expect(ref).not.toContain('someuser');
+		expect(ref).not.toContain('secret-project');
+		expect(ref).not.toContain('my-branch');
+	});
+});

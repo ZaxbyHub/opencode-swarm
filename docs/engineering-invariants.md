@@ -171,7 +171,7 @@ Each entry below points at a release note in `docs/releases/` and the invariant(
   `ObservabilityEvent` envelope (`envelope.ts`) with a stable identity, an
   explicit occurred/observed clock pair, W3C-compatible trace context, and
   thirteen optional (never synthesized) workflow correlation IDs; a
-  33-entry `EVENT_CATALOG` (`catalog.ts`) covering every `TelemetryEvent`
+  39-entry `EVENT_CATALOG` (`catalog.ts`) covering every `TelemetryEvent`
   member plus the previously-uncatalogued `agent_conflict_detected`, each
   entry naming a real producer `file:line`, a live consumer or a
   `futureOwnerIssue`, a privacy class, a retention owner, and a doc anchor;

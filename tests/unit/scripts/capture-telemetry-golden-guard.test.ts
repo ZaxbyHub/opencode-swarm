@@ -1,0 +1,144 @@
+/**
+ * FB-019 — the golden-capture guard in `scripts/capture-telemetry-golden.ts`.
+ *
+ * The guard was widened from `src/telemetry.ts` alone to all six capture inputs.
+ * That widening is behaviourally load-bearing and was proven so by mutation: with
+ * a dirty `src/evidence/lock.ts`, the wide guard REFUSES; narrowed back to
+ * `src/telemetry.ts` the capture proceeds and OVERWRITES the frozen corpus —
+ * which is exactly what makes `tests/unit/telemetry/emit-line-parity.test.ts`
+ * tautological (it would then compare new code against a fresh recording of new
+ * code). Nothing tested the widening. This file does.
+ *
+ * SAFETY CONTRACT FOR THIS FILE: it must NEVER run the capture. `main()` writes
+ * `tests/fixtures/observability/telemetry-lines-golden.json`, and the fixture is
+ * deliberately frozen at a pre-wiring SHA. The script therefore carries an
+ * `import.meta.main` guard (added with this test) so importing it is inert; the
+ * last two tests pin that guard, and the guard's decision was extracted into the
+ * pure `assertCleanCaptureInputs(statusOutput)` so it can be exercised with
+ * synthetic strings and no git, no subprocess, and no writes.
+ */
+import { describe, expect, test } from 'bun:test';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import {
+	assertCleanCaptureInputs,
+	CAPTURE_INPUT_PATHS,
+} from '../../../scripts/capture-telemetry-golden.ts';
+
+const REPO_ROOT = path.join(__dirname, '..', '..', '..');
+const SCRIPT_PATH = path.join(
+	REPO_ROOT,
+	'scripts',
+	'capture-telemetry-golden.ts',
+);
+const FIXTURE_PATH = path.join(
+	REPO_ROOT,
+	'tests',
+	'fixtures',
+	'observability',
+	'telemetry-lines-golden.json',
+);
+
+/**
+ * The five producers whose direct `emit(...)` call sites the capture replays,
+ * plus the output corpus itself.
+ *
+ * Listed literally rather than derived from the export: deriving it from the
+ * value under test would make the assertion vacuous — a narrowed list would still
+ * "match itself". This is the FB-019 mutation, pinned.
+ */
+const REQUIRED_GUARDED_PATHS = [
+	'src/telemetry.ts',
+	'src/evidence/lock.ts',
+	'src/plan/ledger.ts',
+	'src/plan/manager.ts',
+	'src/hooks/conflict-resolution.ts',
+	'tests/fixtures/observability/telemetry-lines-golden.json',
+] as const;
+
+describe('capture-telemetry-golden guard — CAPTURE_INPUT_PATHS (FB-019)', () => {
+	test.each(REQUIRED_GUARDED_PATHS)('guards %s', (guarded) => {
+		expect(CAPTURE_INPUT_PATHS).toContain(guarded);
+	});
+
+	test('guards exactly the six known capture inputs, no more', () => {
+		// Set-equality, so narrowing the list fails here AND a silently added path
+		// has to be acknowledged in this test.
+		expect([...CAPTURE_INPUT_PATHS].sort()).toEqual(
+			[...REQUIRED_GUARDED_PATHS].sort(),
+		);
+	});
+});
+
+describe('capture-telemetry-golden guard — assertCleanCaptureInputs (FB-019)', () => {
+	test('a dirty non-telemetry producer refuses the capture', () => {
+		// The precise mutation case: only `src/evidence/lock.ts` is dirty. Under the
+		// pre-FB-019 narrow guard this string would never have been produced at all,
+		// and the capture would have proceeded and written.
+		expect(() => assertCleanCaptureInputs(' M src/evidence/lock.ts\n')).toThrow(
+			/REFUSING TO CAPTURE/,
+		);
+	});
+
+	test('a dirty output fixture refuses the capture', () => {
+		expect(() =>
+			assertCleanCaptureInputs(
+				' M tests/fixtures/observability/telemetry-lines-golden.json\n',
+			),
+		).toThrow(/REFUSING TO CAPTURE/);
+	});
+
+	test('the refusal names the offending path and every guarded path', () => {
+		let message = '';
+		try {
+			assertCleanCaptureInputs(' M src/plan/ledger.ts\n');
+		} catch (err) {
+			message = err instanceof Error ? err.message : String(err);
+		}
+		expect(message).toContain('REFUSING TO CAPTURE');
+		expect(message).toContain('src/plan/ledger.ts');
+		for (const guarded of REQUIRED_GUARDED_PATHS) {
+			expect(message).toContain(guarded);
+		}
+	});
+
+	test('an empty status string does NOT throw', () => {
+		expect(() => {
+			assertCleanCaptureInputs('');
+		}).not.toThrow();
+	});
+
+	test('a whitespace-only status string does NOT throw', () => {
+		// `git status --porcelain` on a clean tree yields '' — but a trailing
+		// newline must not be mistaken for dirtiness, or the capture could never be
+		// run at all.
+		expect(() => {
+			assertCleanCaptureInputs('\n  \n');
+		}).not.toThrow();
+	});
+});
+
+describe('capture-telemetry-golden — importing the script is inert', () => {
+	test('the script guards main() behind import.meta.main', () => {
+		// Pinned TEXTUALLY, not behaviourally: the alternative proof (importing and
+		// checking nothing was written) passes for the wrong reason whenever the
+		// tree happens to be dirty, because the capture would then abort on the
+		// guard above rather than on the entry-point guard. Removing
+		// `if (import.meta.main)` must fail here.
+		const source = fs.readFileSync(SCRIPT_PATH, 'utf-8');
+		expect(source).toContain('if (import.meta.main) {');
+	});
+
+	test('the frozen corpus was not regenerated by importing the script', () => {
+		// This module was imported at the top of this file. If `main()` had run it
+		// would have rewritten the fixture with `capturedFromSha` = current HEAD.
+		const fixture = JSON.parse(fs.readFileSync(FIXTURE_PATH, 'utf-8')) as {
+			capturedFromSha: string;
+			lineCount: number;
+		};
+		expect(fixture.capturedFromSha).toBe(
+			'e50386b94ee55792220c3b1c167ab8d51da9718d',
+		);
+		expect(fixture.lineCount).toBe(34);
+	});
+});

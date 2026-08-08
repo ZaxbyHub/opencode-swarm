@@ -3,7 +3,7 @@
 Companion to `docs/evidence-and-telemetry.md` (evidence bundles + the legacy
 telemetry stream from a user's point of view) and `docs/engineering-invariants.md`
 (the invariant this PR establishes). This document is the contract definition for
-`src/observability/`: the canonical event envelope, the 33-entry event catalog,
+`src/observability/`: the canonical event envelope, the 39-entry event catalog,
 the legacy adapter, sampling/cardinality rules, the OTel mapping pin, and the
 exhaustive producer/consumer matrix across all sixteen known observability
 stores in the repository.
@@ -16,7 +16,7 @@ Issue: #2029. This is PR 01 of 23 in the observability sequence (#2029–#2051).
 
 **What this PR defines.** A single canonical `ObservabilityEvent` envelope
 (`src/observability/envelope.ts`), a discriminated catalog of every event kind
-the codebase emits today (`src/observability/catalog.ts`, 33 entries), a
+the codebase emits today (`src/observability/catalog.ts`, 39 entries), a
 relationship-validation function, a legacy-payload adapter, deterministic
 sampling and bounded-cardinality helpers, and a versioned OTel/OpenInference
 attribute-mapping table. It wires the envelope into the one live production
@@ -75,7 +75,7 @@ in production stops anything or is visible anywhere today — it is not.
 
 Defined in `src/observability/envelope.ts` as a zod schema (`z.infer`d for the
 `ObservabilityEvent` type). The schema is safe-parsed by the tests
-(`tests/unit/observability/envelope-roundtrip.test.ts`, all 33 kinds). It is **not** parsed by the
+(`tests/unit/observability/envelope-roundtrip.test.ts`, all 39 kinds). It is **not** parsed by the
 CI contract check, and **not** parsed on the `emit()` hot path; `createObservation` builds a plain
 object and never calls `.parse()`, because parsing would reallocate on every
 emit and would clone or reject `legacy.raw` (see §4).
@@ -95,7 +95,7 @@ emit and would clone or reject `legacy.raw` (see §4).
 | `trace.parentSpanId` | `string \| undefined` | Absent when this event has no parent. **No current producer supplies a parent span, so this is never synthesized** — every catalog entry declares `requiresParent: false` (§5), and that is a truthful statement about the system today, not a placeholder. |
 | `trace.links` | `SpanLink[]` | Typed non-parent relationships (`kind: resume \| lane \| cross-process \| retry \| parent-batch`), each carrying its own `traceId`/`spanId`. Empty for every event today. |
 | `workflow.*` | all optional `string` | The thirteen recognized correlation IDs — see the enumeration below. |
-| `lineage.projectRef` / `cohortRef` / `worktreeRef` | `string \| undefined` | Salted, truncated SHA-256 digests (`pseudonymousRef`, `src/observability/ids.ts`). Computed **once** at `initObservability` and reused for every event in the process — never per-emit. Never a path, never reversible. |
+| `lineage.projectRef` / `cohortRef` / `worktreeRef` | `string \| undefined` | Salted, truncated SHA-256 digests (`pseudonymousRef`, `src/observability/ids.ts`). Computed **once** at `initObservability` and reused for every event in the process — never per-emit. Never a path: the digest neither contains nor encodes one. But these are **pseudonyms, not anonymous values** — with the public default salt a holder of an export can CONFIRM a guessed path by re-hashing candidates, so "never reversible" would overclaim; setting `SWARM_OBSERVABILITY_LINEAGE_SALT` to a private per-install value restores guess-resistance and cross-install unlinkability. `cohortRef` and `worktreeRef` are computed **only** when a caller supplies `cohortLabel` / `worktreeId`; the sole production caller (`src/index.ts:732-744`) supplies neither, so both are `undefined` in every real run today and AC3 is asserted at unit level against the API rather than against a production emission path. |
 | `provenance.*` | all optional `string` | `pluginVersion`, `opencodeVersion`, `runtime`, `runtimeVersion`, `os`, `arch`, `model`, `provider`, `gitSha`, `configHash`. `gitSha` and `configHash` are **deliberately `undefined`** — see §3.1. |
 | `outcome.status` | `'success' \| 'failure' \| 'partial' \| 'unknown' \| undefined` | Absent means the producer said nothing about success/failure. `'unknown'` means the producer *did* report a result the adapter could not map — a different fact, kept distinct on purpose. |
 | `outcome.reason` / `errorName` / `errorMessage` / `retryIndex` / `durationMs` | optional | Extracted where a legacy payload supplies them (`extractOutcome`, `src/observability/legacy.ts`). `durationMs` is never populated today — no current producer reports one, and deriving one would fabricate a measurement. |
@@ -138,7 +138,7 @@ rule applied to this contract's own producer.
 
 ## 4. The lossy projection
 
-`toLegacyTelemetryLine` (`src/observability/observe.ts:327-343`) turns a
+`toLegacyTelemetryLine` (`src/observability/observe.ts:368-383`) turns a
 canonical `ObservabilityEvent` into the line actually written to
 `.swarm/telemetry.jsonl`:
 
@@ -170,7 +170,8 @@ not throw. Cloning or `JSON.stringify`-ing `raw` would throw on those payloads;
 LEGACY-PINNED projection of the canonical event, not the canonical event
 itself.** The `timestamp` field *is* a real, load-bearing data dependency on
 the canonical event (`event.observedAt`), which is why this composition is not
-the identity function on the old `the pre-change inline construction (removed by this change)` object literal —
+the identity function on the object literal the pre-change inline construction
+in `src/telemetry.ts` `emit()` built —
 but every field beyond `timestamp` and `event` on the written line comes
 straight from the caller's own object, exactly as it did before this change,
 and every canonical field not named above is discarded at this boundary (§2).
@@ -181,9 +182,9 @@ those inputs before this change.
 
 ---
 
-## 5. The 33-entry catalog
+## 5. The 39-entry catalog
 
-Source: `src/observability/catalog.ts`. Exactly 33 entries = the 32 pre-existing members of
+Source: `src/observability/catalog.ts`. Exactly 39 entries = the 38 pre-existing members of
 `TelemetryEvent` (`src/telemetry.ts:15-86`) plus `agent_conflict_detected`,
 which was emitted in production via a force-cast past the type system
 (`src/hooks/conflict-resolution.ts:73`) and absent from the union — the
@@ -314,9 +315,19 @@ Category `guardrail`, severity `warning`, privacy `pseudonymous`. Producer
 Required workflow IDs: `hostSessionId`.
 
 #### loop_detected
-Category `guardrail`, severity `warning`, privacy `pseudonymous`. Producer
+Category `guardrail`, severity `warning`, privacy **`sensitive`**. Producer
 `src/telemetry.ts:534`. Consumers: none — owner **#2047**. Retention: **#2047**.
 Required workflow IDs: `hostSessionId`.
+
+`sensitive`, not `pseudonymous`, because the `loopType` argument carries
+filesystem paths today: the guardrail producer at
+`src/hooks/guardrails/messages-transform.ts:554` passes `pending.message`, built
+at `src/hooks/guardrails/tool-before.ts:1513` as `Modified N file(s): <paths>` —
+free text embedding a path, which is exactly the `sensitive` definition in §3.
+The kind has a second producer
+(`src/hooks/guardrails/nontransient-circuit.ts:282`) that passes a clean
+closed-vocabulary `nontransient:<category>`, but a per-kind privacy class must
+take the worst case across producers; one clean producer cannot downgrade it.
 
 #### scope_violation
 Category `guardrail`, severity `error`, privacy **`sensitive`** (carries `file`,
@@ -446,10 +457,26 @@ favor of a plain typed `emit(...)` call, and the kind is added to both
 
 ## 6. The exhaustive producer/consumer matrix (16 rows)
 
-**This matrix is manually verified with a `file:line` citation in every row.
-`scripts/check-event-contract.ts` mechanically validates the 33-entry
+**Every row carries a `file:line` citation, but those citations are
+UNGATED and go stale on any rebase that shifts a cited file.**
+`scripts/check-event-contract.ts` mechanically validates the 39-entry
 *catalog* in §5 (catalog ↔ `TelemetryEvent` union parity, per-entry
-completeness) — it does not and cannot check this prose matrix.** The two are
+completeness) — it does not and cannot check this prose matrix. Treat a
+citation here as "verified as of `origin/main` `0060f48d`", not as a standing
+guarantee: that is the tree the line numbers were last re-verified in full
+against. That sweep corrected, across all 16 rows: **8 wrong line numbers**
+(including a **writer** citation 28 lines off target in row 7), **2 files that
+were cited by **bare filename** and resolve outside the directory their
+neighbours imply (`role-filter.ts` is `src/context/`, not `src/hooks/`;
+`phase-complete.ts` is `src/tools/`), and **3 shifted `+1` by this PR's own
+closeout rebase** (rows 13–15, from an import added upstream to
+`src/memory/sqlite-provider.ts`). Making these citations gate-checked —
+extending `checkCitationMentions` (`scripts/check-event-contract.ts:130`) over
+the matrix, or demoting them to file-level references that cannot rot — **is
+not yet owned by any issue.** It is deliberately not filed against #2047, whose
+scope is the local segment sink, not this gate. Until an owner exists,
+re-verify this section on every rebase; a green `check:events` says nothing
+about it. The two are
 deliberately different instruments: the catalog covers one store
 (`.swarm/telemetry.jsonl`) at kind granularity; this matrix covers every known
 observability store in the repository at store granularity, including the ten
@@ -459,21 +486,21 @@ rows 13–16 were added after a plan-critic round flagged them as missing.
 
 | # | Store | Writer (file:line) | Reader(s) (file:line) | Discriminator | Clock | Schema ver. | Correlation carried | Correlation MISSING | Close/archive | State class | Owner |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| 1 | `.swarm/telemetry.jsonl` (+`.1`) | `src/telemetry.ts:240` | `src/services/cost-accounting.ts:133` (`readTelemetryEvents`) → `summarizeTelemetryCosts:124` → `/swarm costs`; `src/evaluation/gate-stats.ts:99`; in-process `addTelemetryListener` heartbeat (`src/telemetry.ts:146-163`) → `/swarm status` | `event` | ISO string | none | `sessionId`, `taskId`, `agentName`, `gate` | no trace/span id, no delegation id linking begin↔end; `gate_parse_error` has no `sessionId` (`src/telemetry.ts:425`) | yes — `close.ts:270-297` | operational | #2045 (lifecycle/terminals), #2043 (cost provenance) |
+| 1 | `.swarm/telemetry.jsonl` (+`.1`) | `src/telemetry.ts:299` (the `stream.write(line, …)` call) | `src/services/cost-accounting.ts:133` (`readTelemetryEvents`) → `summarizeTelemetryCosts:124` → `/swarm costs`; `src/evaluation/gate-stats.ts:99`; in-process `addTelemetryListener` heartbeat (`src/telemetry.ts:146-163`) → `/swarm status` | `event` | ISO string | none | `sessionId`, `taskId`, `agentName`, `gate` | no trace/span id, no delegation id linking begin↔end; `gate_parse_error` has no `sessionId` (`gateParseError` emit payload, `src/telemetry.ts:457-461`) | yes — `close.ts:270-297` | operational | #2045 (lifecycle/terminals), #2043 (cost provenance) |
 | 2 | `.swarm/context-telemetry.jsonl` | `src/context-map/telemetry.ts:154` | `src/context-map/telemetry.ts:181,225` → `src/commands/context-map-stats.ts:6,11` (sole non-test consumer, verified) | none (uniform shape) | ISO string | none | `task_id` only | `session_id`, agent identity beyond a free-text `agent_role` | **no** | operational | **#2037** |
 | 3 | `.swarm/skill-usage.jsonl` | `src/hooks/skill-usage-log.ts:233` | `readSkillUsageEntries:321`, `readSkillUsageEntriesTail:389`, `applySkillUsageFeedback:760` → `bumpKnowledgeConfidenceBatch` | `type` (marker variant only) | ISO string | none (`skillVersion` versions the *skill*, not the record) | `sessionID`, `agentName`, `taskID`, `skillPath` | no trace/span | **no** | derived | **#2038** |
-| 4 | `.swarm/events.jsonl` | ~30 call sites | `src/services/context-budget-service.ts:195` (line-count proxy for turn count — does NOT parse JSON); `src/hooks/curator.ts:1519` | **`event` OR `type`** (split across writers: `role-filter.ts:147`/`phase-complete.ts:1571` use `event:`; `curator.ts:1755`/`full-auto-intercept.ts:269` use `type:`) | ISO string | none | inconsistent per writer | `sessionID` absent on `phase_complete`, `auto_oversight`, `context_filtered` | yes — `close.ts:275` | operational | **#2039** |
+| 4 | `.swarm/events.jsonl` | ~30 call sites | `src/services/context-budget-service.ts:195` (line-count proxy for turn count — does NOT parse JSON); `src/hooks/curator.ts:1524` | **`event` OR `type`** (split across writers: `src/context/role-filter.ts:147`/`src/tools/phase-complete.ts:1571` use `event:`; `src/hooks/curator.ts:1759`/`src/hooks/full-auto-intercept.ts:269` use `type:`) | ISO string | none | inconsistent per writer | `sessionID` absent on `phase_complete`, `auto_oversight`, `context_filtered` | yes — `close.ts:275` | operational | **#2039** |
 | 5 | `<knowledgeStore>/knowledge-events.jsonl` | `src/hooks/knowledge-events.ts:384` | `curator-postmortem.ts:147`, `knowledge-receipt-validator.ts:162`, `knowledge-escalator.ts:232`, `phase-directives.ts:32`, `phase-complete-directive-gate.ts:108`, `knowledge-diagnostics.ts:313`, `learning-metrics.ts:160`, `curation-policy.ts:265` | `type` | ISO string | `schema_version` = 1 (richest producer on main) | `event_id`, `trace_id`, `session_id`, `task_id`, `phase`, `agent` | none material | yes — via `knowledge.jsonl` path, skipped when worktree is linked, `close.ts:1070` | governed content | **#2031**, #2032 |
 | 6 | `<knowledgeStore>/knowledge-application.jsonl` (legacy v2) | `src/hooks/knowledge-application.ts:87` | via knowledge store consumers | none | ISO string | none | `sessionId?`, `taskId?`, `phase?`, `knowledgeId` | `event_id`, `trace_id`; lossy — `n_a` is stored as `acknowledged` (`:267-271`) | via knowledge store | governed content | **#2031** |
-| 7 | `.swarm/evidence/{taskId}/trajectory.jsonl` | `src/hooks/trajectory-logger.ts:357` | `src/hooks/micro-reflector.ts:265`, `src/services/trajectory-cluster.ts:24` | none | ISO string | none | `agent`, `step` | `task_id`/`session_id`/`trace_id` **only in the path**, never the record body | yes — `evidence/` dir | derived | **#2036** (retention registry; #2041 owns *PRM session* trajectories, not this task-scoped store) |
-| 8 | `.swarm/trajectories/{sessionId}.jsonl` | `src/prm/trajectory-store.ts:80` | `src/prm/index.ts:269,273`, `src/consensus/corpus.ts:641` | none | ISO string | none | `agent`, `step` | `session_id` **only in the filename** | **no** | derived | **#2041** |
+| 7 | `.swarm/evidence/{taskId}/trajectory.jsonl` | `src/hooks/trajectory-logger.ts:385` | `src/hooks/micro-reflector.ts:262`, `src/services/trajectory-cluster.ts:99` | none | ISO string | none | `agent`, `step` | `task_id`/`session_id`/`trace_id` **only in the path**, never the record body | yes — `evidence/` dir | derived | **#2036** (retention registry; #2041 owns *PRM session* trajectories, not this task-scoped store) |
+| 8 | `.swarm/trajectories/{sessionId}.jsonl` | `src/prm/trajectory-store.ts:80` | `src/prm/index.ts:275,279`, `src/consensus/corpus.ts:641` | none | ISO string | none | `agent`, `step` | `session_id` **only in the filename** | **no** | derived | **#2041** |
 | 9 | `.swarm/background-delegations.jsonl` | `src/background/pending-delegations.ts:716` | `pr-workflow-session-resolver.ts`, `pr-workflow-gate.ts`, `init-orphan-recovery.ts`, `delegation-gate/worktree-collision-ownership.ts` | `status` | **epoch-ms number** | `schemaVersion` 1\|2\|3 | `correlationId`, `parentSessionId`, `callID`, `jobId`, `planTaskId`, `evidenceTaskId`, `batchId`, `laneId`, `workflowLane`, `worktreeId` | no swarm-run id distinct from `parentSessionId` | **no — neither archived nor cleaned** | authoritative | **#2034** |
-| 10 | `.swarm/session/shell-audit.jsonl` | `src/hooks/guardrails/audit-log.ts:332` | `src/services/guardrail-log-service.ts:63` (the only module that resolves the store path); `src/hooks/guardrails/index.ts:547` names the same path when wiring the writer. **Correction:** an earlier draft of this row cited `src/commands/archive.ts` as a reader with invented line numbers and behaviour — that file contains no reference to `shell-audit` at all, and the claim was removed (issue #2029 final-critic B-4). | `type` (**stripped for `shell`**, `:344-351`) | ISO string (caller-supplied) | none | `sessionID`, `agent`, `tool` | **no `callID`** → cannot join to row 9 (`background-delegations.jsonl`) | via `session/` dir — `close.ts:421-426` | operational | **#2040** |
+| 10 | `.swarm/session/shell-audit.jsonl` | `src/hooks/guardrails/audit-log.ts:332` | `src/services/guardrail-log-service.ts:63` (the only module that resolves the store path); `src/hooks/guardrails/index.ts:568` names the same path when wiring the writer. **Correction:** an earlier draft of this row cited `src/commands/archive.ts` as a reader with invented line numbers and behaviour — that file contains no reference to `shell-audit` at all, and the claim was removed (issue #2029 final-critic B-4). | `type` (**stripped for `shell`**, `:344-351`) | ISO string (caller-supplied) | none | `sessionID`, `agent`, `tool` | **no `callID`** → cannot join to row 9 (`background-delegations.jsonl`) | via `session/` dir — `close.ts:421-426` | operational | **#2040** |
 | 11 | council evidence + `.swarm/council/{taskId}.rounds.jsonl` | `src/council/council-evidence-writer.ts:91` (evidence rewrite at `.swarm/evidence/{taskId}.json`; rounds append) | (council-consuming code paths; not itemized separately from evidence consumers) | none | `synthesis.timestamp` | none (implicit: `quorumSize` defaulted to 1 when absent, `:156-158`) | `sessionId` (= `swarmId`), `roundNumber` | `taskId` only in filename on the rounds log; no `callID` | evidence: yes; `council/`: **no** | authoritative | **#2046** |
-| 12 | `.swarm/archive/swarm-{ts}-{suffix}/` | `src/commands/close.ts:1049` | `src/commands/close.ts:1870-1875` (`fs.readdir(archiveDir)`, filters `startsWith('swarm-')` — retention pruning only; nothing re-reads bundle *contents*) | n/a | ISO in path | preserves bytes verbatim | n/a | n/a | is the archive | governed content | **#2030** |
-| 13 | SQLite `memory_events` | `src/memory/sqlite-provider.ts:199-206` | memory-provider internal readers (not itemized here — index design is #2048's scope) | `operation` column | `timestamp` column, ISO string | table has no explicit version column (SQLite `_meta` table tracks migration version 4+, not per-row) | `target_id` | no `session_id`/`task_id` column | **no** | authoritative | **#2036** (retention), #2048 (index) |
-| 14 | SQLite `memory_recall_usage` | `src/memory/sqlite-provider.ts:208-213` | memory-provider internal readers | `bundle_id` column | `timestamp` column, ISO string | none (migration-versioned schema, not row-versioned) | `bundle_id`, `run_id` (added migration v9) | no `session_id`/`task_id` column | **no** | derived | **#2036**, #2048 |
-| 15 | SQLite `memory_reward_events` | `src/memory/sqlite-provider.ts:285` | memory-provider internal readers | `verdict` column | `timestamp` column, ISO string | none | `memory_id`, `run_id`, `unit_id` | no `session_id`/`task_id` column | **no** | derived | **#2036**, #2048 |
+| 12 | `.swarm/archive/swarm-{ts}-{suffix}/` | `src/commands/close.ts:1051-1054` | `src/commands/close.ts:1870-1875` (`fs.readdir(archiveDir)`, filters `startsWith('swarm-')` — retention pruning only; nothing re-reads bundle *contents*) | n/a | ISO in path | preserves bytes verbatim | n/a | n/a | is the archive | governed content | **#2030** |
+| 13 | SQLite `memory_events` | `src/memory/sqlite-provider.ts:200-207` | memory-provider internal readers (not itemized here — index design is #2048's scope) | `operation` column | `timestamp` column, ISO string | table has no explicit version column (SQLite `_meta` table tracks migration version 4+, not per-row) | `target_id` | no `session_id`/`task_id` column | **no** | authoritative | **#2036** (retention), #2048 (index) |
+| 14 | SQLite `memory_recall_usage` | `src/memory/sqlite-provider.ts:209-214` | memory-provider internal readers | `bundle_id` column | `timestamp` column, ISO string | none (migration-versioned schema, not row-versioned) | `bundle_id`, `run_id` (added migration v9) | no `session_id`/`task_id` column | **no** | derived | **#2036**, #2048 |
+| 15 | SQLite `memory_reward_events` | `src/memory/sqlite-provider.ts:286` | memory-provider internal readers | `verdict` column | `timestamp` column, ISO string | none | `memory_id`, `run_id`, `unit_id` | no `session_id`/`task_id` column | **no** | derived | **#2036**, #2048 |
 | 16 | `.swarm/pr-monitor/subscriptions.jsonl` | `src/background/pr-subscriptions.ts:26` (path constant `PR_SUBSCRIPTIONS_FILE`); writes serialized under `withEvidenceLock` | background PR-monitor poller (reads fold to latest snapshot per `correlationId`, lock-free) | full-record snapshot per line, folded by `correlationId` | ISO string (implementation-supplied) | none observed at the constant/module-doc level | `correlationId` | no explicit `sessionID`/`taskId` columns beyond `correlationId` | not itemized as archived by `/swarm close` in the localization sweep | operational | **#2042** |
 
 State classification legend: **authoritative** (the record IS the domain fact —
@@ -499,8 +526,16 @@ intent the implementation follows):
    normalized, rounded, or re-serialized.
 4. **Record timing confidence.** A time read by the writer at record time is
    `writer-clock`, never `exact`.
-5. **Unknown is not zero.** A field the producer did not supply is listed in
-   `legacy.unknown` and is never defaulted to `0`, `""`, `false`, or `null`.
+5. **Unknown is not zero.** The adapter lists in `legacy.unknown` every
+   catalogued key the *producer* left `undefined`, and never itself defaults one
+   to `0`, `""`, `false`, or `null`. The guarantee stops at the adapter
+   boundary: a producer that pre-coerces its own defaults defeats it, because
+   the adapter only ever sees the coerced value. The known instance is
+   `delegation_end` (`src/telemetry.ts` `delegationEnd`, pre-existing and not
+   introduced by this PR), which coerces `?? 0` / `?? null` /
+   `?? 'unavailable'` before emitting — so its cost fields can never appear in
+   `legacy.unknown`. There, `cost_source: 'unavailable'` is the field that keeps
+   absence recoverable.
 6. **Missing lineage stays missing.** An absent correlation ID stays
    `undefined` and is never synthesized to make a join succeed.
 7. **Never drop unrecognized fields.** No allowlist filter is applied to the
@@ -537,6 +572,16 @@ state, no RNG, no coordination. Fail-open by construction: every unusable input
 an event for a malformed id would lose data silently, which is exactly the
 failure mode this contract exists to prevent. `DEFAULT_SAMPLE_RATE = 1`
 (sample everything) — this PR introduces no dropping.
+
+> **Caveat — trace-coherent sampling is VACUOUS in this system today.**
+> `createObservation` mints a **fresh** `traceId` per event, with `links: []`
+> and no `parentSpanId`, so every event is its own single-span trace. At a rate
+> below 1 the decision is therefore independent **per event**, not per logical
+> trace — a trace never spans two events, so nothing can be kept whole or torn
+> apart. Trace continuation (propagating one trace id across the events that
+> belong together) is **#2047**'s work; only then does the determinism above
+> buy a real property rather than a latent one. Nothing is dropped today
+> regardless, because `DEFAULT_SAMPLE_RATE = 1`.
 
 **Bounded cardinality** (`METRIC_LABEL_ALLOWLIST`, `assertBoundedCardinality`):
 the only permitted metric labels today are `kind`, `category`, `severity`,
