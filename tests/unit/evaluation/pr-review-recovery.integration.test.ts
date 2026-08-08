@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 import {
 	computeCandidateInputContentHash,
 	sha256,
@@ -38,9 +38,7 @@ async function git(root: string, args: string[]): Promise<string> {
 }
 
 async function createGitProject(): Promise<string> {
-	const root = fs.realpathSync(
-		fs.mkdtempSync(path.join(os.tmpdir(), 'pr-review-recovery-eval-')),
-	);
+	const root = canonicalMkdtemp('pr-review-recovery-eval-');
 	await git(root, ['init']);
 	await git(root, ['config', 'user.email', 'evaluation@example.invalid']);
 	await git(root, ['config', 'user.name', 'Evaluation Test']);
@@ -101,9 +99,7 @@ describe('PR-review recovery evaluation', () => {
 	});
 
 	test('rejects baseline bytes that do not match the pinned manifest hash', async () => {
-		const inputRoot = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'pr-review-recovery-input-')),
-		);
+		const inputRoot = canonicalMkdtemp('pr-review-recovery-input-');
 		try {
 			const target = path.join(
 				inputRoot,
@@ -131,9 +127,7 @@ describe('PR-review recovery evaluation', () => {
 	});
 
 	test('rejects a baseline manifest pinned to a different source SHA', async () => {
-		const inputRoot = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'pr-review-recovery-sha-')),
-		);
+		const inputRoot = canonicalMkdtemp('pr-review-recovery-sha-');
 		try {
 			const target = path.join(
 				inputRoot,

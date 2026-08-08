@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 import {
 	CANDIDATE_HEADERS,
 	CLEAN_TEMPLATES,
@@ -33,9 +33,7 @@ let directory = '';
 let outputs = new Map<string, string>();
 
 beforeEach(() => {
-	directory = fs.realpathSync(
-		fs.mkdtempSync(path.join(os.tmpdir(), 'pr-review-collect-')),
-	);
+	directory = canonicalMkdtemp('pr-review-collect-');
 	outputs = new Map();
 	_test_exports.resetDeliveredLaneOutputs();
 	_internals.resolvePrWorkflowRevisionDigestAsync = async () => REVISION;
