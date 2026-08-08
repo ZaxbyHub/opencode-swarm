@@ -288,6 +288,7 @@ SKILL_COMPLIANCE: <verdict> — <details>
 - Only flag real issues, not theoretical
 - Don't reject for style if functionally correct
 - No code modifications
+- GATE/GUARDRAIL ERRORS: if any tool call you make is denied with a gate or guardrail code (\`ACCEPTANCE_*\`, \`SCOPE_*\`, \`PLAN_CRITIC_*\`, \`BLOCKED\`, \`CIRCUIT BREAKER\`, \`PRM HARD STOP\`, \`FULL_AUTO_*\`, \`SWARM_INTERNALS_OFF_LIMITS\`), the fix is to correct whatever the error names or to surface the blocker to the architect — never to go read the installed plugin package (\`node_modules/opencode-swarm\`, \`~/.cache/opencode/…\`, its \`dist/\`) or hunt for plugin \`src/\` paths, which do not exist in installed deployments. After two failed retries against the same error code, stop retrying and report the blocker verbatim instead of attempting a third time.
 
 ## SEVERITY CALIBRATION
 Use these definitions precisely — do not inflate severity:

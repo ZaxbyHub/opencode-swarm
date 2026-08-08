@@ -931,6 +931,15 @@ export interface CoverageMissDiagnostic {
 const COVERAGE_DIAG_SNIPPET_CAP = 80;
 const COVERAGE_DIAG_MAX_SCAN = 400;
 
+/**
+ * Issue #2063 (A2): per-body cap, in characters, on the raw requirement body
+ * embedded verbatim in the ACCEPTANCE_FIELD_COVERAGE_MISMATCH error. Keeps the
+ * thrown message bounded even for an unusually long FR/SC body; when a body
+ * exceeds this cap the message states the cap and points at `.swarm/spec.md`
+ * for the remainder rather than growing the error without limit.
+ */
+export const ACCEPTANCE_EXPECTED_BODY_CAP = 2000;
+
 export function describeCoverageMiss(params: {
 	rawExpectedBody: string;
 	rawAcceptanceText: string;
@@ -996,7 +1005,9 @@ export function describeCoverageMiss(params: {
  *
  * @returns `{ covered: true }` when every id is present-and-covered or skipped;
  *   `{ covered: false, missingId }` naming the FIRST id whose body is not a
- *   substring of the ACCEPTANCE text.
+ *   substring of the ACCEPTANCE text, plus `expectedBody` — the RAW, UNTRIMMED
+ *   requirement body for `missingId` (issue #2063 A2) — so the throw site can
+ *   embed paste-ready remediation text instead of just pointing at a location.
  */
 export function checkAcceptanceCoversFrRefs(params: {
 	acceptanceText: string;
@@ -1006,6 +1017,7 @@ export function checkAcceptanceCoversFrRefs(params: {
 	covered: boolean;
 	missingId?: string;
 	diagnostic?: CoverageMissDiagnostic;
+	expectedBody?: string;
 } {
 	const normalizedAcceptance = normalizeAcceptanceText(params.acceptanceText);
 	for (const id of params.frRefs) {
@@ -1025,6 +1037,10 @@ export function checkAcceptanceCoversFrRefs(params: {
 					normalizedExpected: normalizedBody,
 					normalizedAcceptance,
 				}),
+				// Raw (pre-normalization) body, untrimmed — #2063 A2 embeds this
+				// verbatim (fenced) in the thrown error so the architect can paste
+				// it directly instead of re-reading spec.md.
+				expectedBody: body,
 			};
 		}
 	}
@@ -2675,14 +2691,15 @@ export function createDelegationGateHook(
 					acceptanceCheck.reason === 'acceptance_field_empty'
 						? 'its ACCEPTANCE field is present but empty/whitespace-only'
 						: 'it has no ACCEPTANCE field';
-				const inputFormatFile =
-					targetAgent === 'reviewer' ? 'reviewer' : 'coder';
 				throw new Error(
 					`ACCEPTANCE_FIELD_REQUIRED: the ${targetAgent} delegation was blocked because ${detail}. ` +
 						`Every coder/reviewer dispatch MUST carry a non-empty ACCEPTANCE: line in its prompt — the verbatim ` +
-						`FR-###/SC-### requirement text from spec.md when the task maps to one or more spec requirements, or a ` +
-						`one-line task-derived statement of what DONE looks like otherwise (see the INPUT FORMAT in ` +
-						`src/agents/${inputFormatFile}.ts). Add an ACCEPTANCE: line to the delegation prompt and re-dispatch.`,
+						`FR-###/SC-### requirement text from .swarm/spec.md when the task maps to one or more spec requirements, or a ` +
+						`one-line task-derived statement of what DONE looks like otherwise (see the ACCEPTANCE FIELD RESOLUTION ` +
+						`section of your system prompt and .swarm/spec.md). Add an ACCEPTANCE: line to the delegation prompt and ` +
+						`re-dispatch. Do NOT investigate the installed swarm plugin package (node_modules/opencode-swarm, ` +
+						`~/.cache/opencode) — the fix is in your dispatch content, not in plugin internals. If this same error ` +
+						`repeats after 2 fix attempts, STOP and present the blocker to the user.`,
 				);
 			}
 
@@ -2701,6 +2718,7 @@ export function createDelegationGateHook(
 						covered: boolean;
 						missingId?: string;
 						diagnostic?: CoverageMissDiagnostic;
+						expectedBody?: string;
 				  }
 				| undefined;
 			let coverageTaskId: string | null = null;
@@ -2758,8 +2776,30 @@ export function createDelegationGateHook(
 						diagLines.push(`  ENCODING WARNING: ${diag.corruptionHint}`);
 					}
 				}
+				// #2063 A2: embed the raw, untrimmed requirement body verbatim (fenced,
+				// capped) so the architect can paste it directly instead of re-reading
+				// spec.md. `normalizeAcceptanceText`'s leading list-marker strip is
+				// POSITION-dependent (only a line-initial `- `/`* ` is stripped), so a
+				// bulleted multi-line body flattened onto one line can false-fail even
+				// when "pasted verbatim" — hence the explicit line-break instruction.
+				const rawExpectedBody = coverageResult.expectedBody ?? '';
+				const truncated = rawExpectedBody.length > ACCEPTANCE_EXPECTED_BODY_CAP;
+				const expectedBodyBlock = truncated
+					? `${rawExpectedBody.slice(0, ACCEPTANCE_EXPECTED_BODY_CAP)}\n…[truncated — read the remainder from .swarm/spec.md under ${coverageResult.missingId}]`
+					: rawExpectedBody;
 				throw new Error(
-					`ACCEPTANCE_FIELD_COVERAGE_MISMATCH: the ${targetAgent} delegation for task ${coverageTaskId} was blocked because its ACCEPTANCE field does not cover the requirement text for ${coverageResult.missingId} from .swarm/spec.md (compared after Unicode/whitespace normalization, not raw bytes).\n${diagLines.join('\n')}\n  Fix: copy ${coverageResult.missingId}'s full requirement text into ACCEPTANCE (see ACCEPTANCE FIELD RESOLUTION in src/agents/architect.ts and the INPUT FORMAT in src/agents/${targetAgent}.ts); if the ENCODING WARNING is present, repair .swarm/spec.md first, then re-dispatch.`,
+					`ACCEPTANCE_FIELD_COVERAGE_MISMATCH: the ${targetAgent} delegation for task ${coverageTaskId} was blocked because its ACCEPTANCE field does not cover the requirement text for ${coverageResult.missingId} from .swarm/spec.md (compared after Unicode/whitespace normalization, not raw bytes).\n${diagLines.join('\n')}\n` +
+						`Replace your ACCEPTANCE text for ${coverageResult.missingId} with the exact requirement text below, ` +
+						`PRESERVING ITS LINE BREAKS, then re-dispatch (body capped at ${ACCEPTANCE_EXPECTED_BODY_CAP} chars` +
+						`${truncated ? ', truncated below' : ''}):\n` +
+						'```\n' +
+						`${expectedBodyBlock}\n` +
+						'```\n' +
+						`(see the ACCEPTANCE FIELD RESOLUTION section of your system prompt for how ACCEPTANCE is derived; ` +
+						`if the ENCODING WARNING above is present, repair .swarm/spec.md first, then re-dispatch.) ` +
+						`Do NOT investigate the installed swarm plugin package (node_modules/opencode-swarm, ~/.cache/opencode) ` +
+						`— the fix is in your dispatch content, not in plugin internals. If this same error repeats after 2 fix ` +
+						`attempts, STOP and present the blocker to the user.`,
 				);
 			}
 		}

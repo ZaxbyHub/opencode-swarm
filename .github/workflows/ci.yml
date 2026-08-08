@@ -183,6 +183,12 @@ jobs:
       - name: Tool registration coherence check
         if: needs.detect-release.outputs.is-release != 'true'
         run: bun run scripts/check-tool-registration.ts
+      # Issue #2063 E2: baseline-ratcheted guard against runtime-surfaced
+      # agent guidance (thrown gate errors, advisories, agent prompts, shipped
+      # skills) referencing src/ paths absent from an installed deployment.
+      - name: Runtime src/ reference ratchet (issue #2063)
+        if: needs.detect-release.outputs.is-release != 'true'
+        run: bun run check:runtime-src-refs
       - name: Cross-contamination check (mock.module / vi.mock leaks)
         if: needs.detect-release.outputs.is-release != 'true'
         shell: bash

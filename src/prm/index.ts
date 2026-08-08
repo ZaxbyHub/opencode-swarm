@@ -141,6 +141,8 @@ interface ResettablePrmSessionState {
 	prmEscalationLevel?: number;
 	prmLastPatternDetected?: unknown;
 	prmHardStopPending?: boolean;
+	/** Issue #2063 C2 — twin one-shot token; reset with its deny counterpart. */
+	prmHardStopInjectPending?: boolean;
 	prmTrajectoryStep?: number;
 	prmInjectedAdvisoryKeys?: Set<string>;
 	replayArtifactPath?: string | null;
@@ -156,6 +158,10 @@ export function resetPrmSessionState(
 	session.prmEscalationLevel = 0;
 	session.prmLastPatternDetected = null;
 	session.prmHardStopPending = false;
+	// Issue #2063 C2: both hard-stop tokens are cleared together. Leaving the
+	// inject token armed across a PRM reset would replay a `[HARD STOP]` for an
+	// escalation the reset just erased.
+	session.prmHardStopInjectPending = false;
 	session.prmTrajectoryStep = 0;
 	// Clear cross-turn injection-dedupe state so a reset re-evaluates patterns
 	// fresh (issue #1976 B1).
@@ -386,6 +392,24 @@ export function createPrmHook(
 			// Track previous escalation level for change detection
 			const previousEscalationLevel = session.prmEscalationLevel;
 
+			/**
+			 * Issue #2063 C2 — hard stop is an OR across THIS tick's matches.
+			 *
+			 * The assignment used to be per-match (`= hardStopPending`), so when a
+			 * single detection tick produced a level-3 match followed by a level-1
+			 * match of a different pattern, the level-1 match overwrote the hard
+			 * stop with `false` before either consumer could see it. The escalation
+			 * that had genuinely reached the maximum was silently discarded.
+			 *
+			 * The OR is scoped to the tick, not accumulated across ticks: the
+			 * assignment stays INSIDE the loop and starts from `false` on every
+			 * invocation, so a later tick with only level-1 matches still clears the
+			 * token (unchanged producer semantics — pinned by
+			 * `__tests__/integration.test.ts` "hard stop telemetry only called on
+			 * 3rd detection").
+			 */
+			let tickHardStop = false;
+
 			// Process each pattern match
 			for (const match of detectionResult.matches) {
 				// Generate course correction
@@ -441,7 +465,18 @@ export function createPrmHook(
 				);
 				session.prmEscalationLevel = escalationLevel;
 				session.prmLastPatternDetected = match;
-				session.prmHardStopPending = hardStopPending;
+				tickHardStop = tickHardStop || hardStopPending;
+				// DENY token — consumed once by guardrails toolBefore.
+				session.prmHardStopPending = tickHardStop;
+				// INJECT token — consumed once by guardrails messagesTransform.
+				// Deliberately SET-only here: the two tokens are independent
+				// one-shots, and mirroring the deny token's clear would let a later
+				// level-1 tick disarm an inject that no consumer has seen yet,
+				// re-opening the "denied but never explained" failure this design
+				// exists to close.
+				if (tickHardStop) {
+					session.prmHardStopInjectPending = true;
+				}
 
 				// Emit telemetry for pattern detection
 				_internals.telemetry.prmPatternDetected(

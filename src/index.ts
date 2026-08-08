@@ -100,6 +100,11 @@ import { createFullAutoDelegationHook } from './hooks/full-auto-delegation.js';
 import { createFullAutoInputProbeHook } from './hooks/full-auto-input-probe.js';
 import { createFullAutoPermissionHook } from './hooks/full-auto-permission.js';
 import {
+	isAbortLikeError,
+	noteGateDenial,
+	resetGateDenialStreaks,
+} from './hooks/gate-denial-tracker.js';
+import {
 	deleteStoredInputArgs,
 	setStoredInputArgs,
 } from './hooks/guardrails.js';
@@ -145,7 +150,10 @@ import {
 } from './hooks/skill-propagation-gate.js';
 import { createSlopDetectorHook } from './hooks/slop-detector';
 import { createSteeringConsumedHook } from './hooks/steering-consumed.js';
-import { createTrajectoryLoggerHook } from './hooks/trajectory-logger';
+import {
+	createTrajectoryLoggerHook,
+	recordDeniedToolCall,
+} from './hooks/trajectory-logger';
 import { realtimeAdmissionAfter } from './learning/admission.js';
 import { createMemoryLifecycleHooks } from './memory';
 import { loadPlan } from './plan/manager.js';
@@ -2687,200 +2695,299 @@ async function initializeOpenCodeSwarm(
 			// individually documented for future maintainers.
 			//
 			// Regression test: tests/unit/hooks/hook-composition.test.ts
-			// asserts every callsite below uses raw `await` (not safeHook).
+			// static-analysis block reads THIS file and asserts raw `await` for
+			// guardrailsHooks, scopeGuardHook, delegationGateHooks, the PR-workflow
+			// enforcement pair (prWorkflowSessionResolver.resolve +
+			// enforcePrWorkflowToolBefore), and both Full-Auto hooks. It does NOT
+			// yet cover knowledgeApplicationGateBefore or skillPropagationGateBefore
+			// — those two callsites are unpinned, so do not assume a safeHook
+			// regression on them would be caught by that test.
 			// ---------------------------------------------------------------
 
-			// 1. Guardrails authority enforcement (FAIL-CLOSED).
-			//    Throws must propagate to block tools.
-			await guardrailsHooks.toolBefore(input, output);
+			// B1 (#2063): everything below runs inside a try/catch so a fail-closed
+			// denial can be COUNTED and DECORATED before it propagates. The chain
+			// order, the raw awaits, and the rethrow semantics are unchanged — the
+			// catch always rethrows the SAME object it caught.
+			let failClosedRegionCompleted = false;
+			try {
+				// 1. Guardrails authority enforcement (FAIL-CLOSED).
+				//    Throws must propagate to block tools.
+				await guardrailsHooks.toolBefore(input, output);
 
-			// 2. Scope-guard watchdog (FAIL-CLOSED).
-			//    Blocks out-of-scope writes by non-architect agents.
-			await scopeGuardHook.toolBefore(input, output);
+				// 2. Scope-guard watchdog (FAIL-CLOSED).
+				//    Blocks out-of-scope writes by non-architect agents.
+				await scopeGuardHook.toolBefore(input, output);
 
-			// 3. Reviewer gate (FAIL-CLOSED).
-			//    Blocks coder re-delegation when the prior reviewer round
-			//    has not produced an explicit pass/decision.
-			await delegationGateHooks.toolBefore(input, output);
+				// 3. Reviewer gate (FAIL-CLOSED).
+				//    Blocks coder re-delegation when the prior reviewer round
+				//    has not produced an explicit pass/decision.
+				await delegationGateHooks.toolBefore(input, output);
 
-			// 4. PR workflow obligation gate (FAIL-CLOSED).
-			//    Prevents review/feedback mutation or validation transitions until
-			//    their durable lane and trigger obligations are satisfied.
-			const prWorkflowControllerSessionID =
-				await prWorkflowSessionResolver.resolve(input.sessionID);
-			const prWorkflowToolContext = resolveToolBeforeContext(
-				input as { tool: string; sessionID: string; callID: string },
-				output as { args?: unknown },
-			);
-			await enforcePrWorkflowToolBefore(
-				ctx.directory,
-				prWorkflowControllerSessionID,
-				normalizeToolName(input.tool) ?? input.tool,
-				prWorkflowToolContext.args ?? undefined,
-				instanceGeneratedAgentNames,
-			);
-
-			// 5. Full-Auto v2 outbound delegation guard (FAIL-CLOSED).
-			//    Throws FULL_AUTO_DELEGATION_DENY on disallowed Task
-			//    delegations (unknown canonical role, missing coder scope).
-			await fullAutoDelegationHook.toolBefore(input, output);
-
-			// 6. Full-Auto v2 permission policy (FAIL-CLOSED).
-			//    Throws FULL_AUTO_DENY / FULL_AUTO_BLOCKED / FULL_AUTO_PAUSED /
-			//    FULL_AUTO_ESCALATE_HUMAN on denied actions and dispatches the
-			//    critic when escalate_critic is needed.
-			await fullAutoPermissionHook.toolBefore(input, output);
-
-			// 7. v2 knowledge-application gate (FAIL-CLOSED in enforce mode).
-			//    Reads in-memory currentCriticalShownIds populated at injection
-			//    time and the in-process ack dedup set. Throws
-			//    KNOWLEDGE_ENFORCE_GATE_DENY for high-risk architect actions
-			//    (save_plan / update_task_status / phase_complete / Task) when
-			//    a critical directive was shown but no ack was recorded.
-			//    In `warn` mode it appends to events.jsonl and returns.
-			await knowledgeApplicationGateBefore(
-				ctx.directory,
-				{
-					// (#1849) tool.execute.before input has no agent/sessionID-derived
-					// agent; use the host-boundary adapter (reads swarmState.activeAgent).
-					tool: input.tool,
-					agent: resolveToolBeforeContext(
-						input as { tool: string; sessionID: string; callID: string },
-						output as { args?: unknown },
-					).agent,
-					sessionID: input.sessionID,
-				},
-				KnowledgeApplicationConfigSchema.parse(
-					config.knowledge_application ?? {},
-				),
-			);
-			// 7. Skill propagation gate (soft warning when SKILLS field missing).
-			//    Logs to events.jsonl when architect delegates to skill-capable
-			//    agents without a SKILLS field. Also pushes a visible warning
-			//    to pendingAdvisoryMessages for injection into the architect's
-			//    next prompt. When enforce=true, blocks the delegation entirely.
-			// This gate always performs mandatory explicit-reference validation
-			// before its optional propagation-enabled early return. Calling it once
-			// avoids reopening every referenced skill twice.
-			const skillResult = await skillPropagationGateBefore(
-				ctx.directory,
-				{
-					// (#1849) agent + args via the host-boundary adapter.
-					tool: input.tool,
-					agent: resolveToolBeforeContext(
-						input as { tool: string; sessionID: string; callID: string },
-						output as { args?: unknown },
-					).agent,
-					sessionID: input.sessionID,
-					args:
-						resolveToolBeforeContext(
-							input as { tool: string; sessionID: string; callID: string },
-							output as { args?: unknown },
-						).args ?? undefined,
-				},
-				skillPropagationConfig,
-			);
-			if (skillResult.blocked) {
-				throw new Error(
-					skillResult.reason ?? 'Blocked by skill propagation gate',
+				// 4. PR workflow obligation gate (FAIL-CLOSED).
+				//    Prevents review/feedback mutation or validation transitions until
+				//    their durable lane and trigger obligations are satisfied.
+				const prWorkflowControllerSessionID =
+					await prWorkflowSessionResolver.resolve(input.sessionID);
+				const prWorkflowToolContext = resolveToolBeforeContext(
+					input as { tool: string; sessionID: string; callID: string },
+					output as { args?: unknown },
 				);
-			}
-			if (skillResult.reason) {
-				const skillSession = ensureAgentSession(
-					input.sessionID,
-					swarmState.activeAgent.get(input.sessionID) ?? ORCHESTRATOR_NAME,
+				await enforcePrWorkflowToolBefore(
+					ctx.directory,
+					prWorkflowControllerSessionID,
+					normalizeToolName(input.tool) ?? input.tool,
+					prWorkflowToolContext.args ?? undefined,
+					instanceGeneratedAgentNames,
 				);
-				pushAdvisory(skillSession, skillResult.reason);
-			}
 
-			// 8. Skill injection: auto-inject recommended skills when SKILLS field
-			//    is missing from the delegation prompt. Preserves explicit
-			//    SKILLS: none and architect-set SKILLS fields. Implemented in
-			//    src/hooks/skill-injection.ts (issue #1770) so the injection +
-			//    usage-recording path is testable against the REAL implementation.
-			//    The function mutates `input.args.prompt` in place and records
-			//    usage with the TARGET subagent (canonicalized via
-			//    stripKnownSwarmPrefix so 'mega_coder' and 'coder' produce the
-			//    same usage attribution as the gate's site 4a) + real taskID
-			//    (not the architect + synthetic 'injection' literal the inline
-			//    block used).
-			// (#1849) Resolve the real mutable args from output.args (the SDK
-			// mutation target), not input.args (which the host never populates).
-			const toolBeforeCtx = resolveToolBeforeContext(
-				input as { tool: string; sessionID: string; callID: string },
-				output as { args?: unknown },
-			);
-			const toolBeforeArgs = toolBeforeCtx.args ?? {};
-			injectSkillsIntoDelegation(
-				ctx.directory,
-				toolBeforeArgs,
-				skillResult.recommendedSkills,
-				stripKnownSwarmPrefix(
-					parseDelegationArgs(toolBeforeArgs)?.targetAgent ?? '',
-				) || toolBeforeCtx.agent,
-				input.sessionID,
-				{ quiet: config.quiet },
-			);
-			// ---------------------------------------------------------------
+				// 5. Full-Auto v2 outbound delegation guard (FAIL-CLOSED).
+				//    Throws FULL_AUTO_DELEGATION_DENY on disallowed Task
+				//    delegations (unknown canonical role, missing coder scope).
+				await fullAutoDelegationHook.toolBefore(input, output);
 
-			// 9. Per-delegate knowledge directive injection (Change 1, Task 1.4).
-			//    ADVISORY: prepends the role-scoped <delegate_knowledge_directives>
-			//    block to a Task delegation's prompt so the subagent sees the
-			//    directives + ack contract. Internally fail-open; never blocks.
-			if (knowledgeConfig.enabled) {
-				await injectDelegateDirectivesBefore(
+				// 6. Full-Auto v2 permission policy (FAIL-CLOSED).
+				//    Throws FULL_AUTO_DENY / FULL_AUTO_BLOCKED / FULL_AUTO_PAUSED /
+				//    FULL_AUTO_ESCALATE_HUMAN on denied actions and dispatches the
+				//    critic when escalate_critic is needed.
+				await fullAutoPermissionHook.toolBefore(input, output);
+
+				// 7. v2 knowledge-application gate (FAIL-CLOSED in enforce mode).
+				//    Reads in-memory currentCriticalShownIds populated at injection
+				//    time and the in-process ack dedup set. Throws
+				//    KNOWLEDGE_ENFORCE_GATE_DENY for high-risk architect actions
+				//    (save_plan / update_task_status / phase_complete / Task) when
+				//    a critical directive was shown but no ack was recorded.
+				//    In `warn` mode it appends to events.jsonl and returns.
+				await knowledgeApplicationGateBefore(
 					ctx.directory,
 					{
+						// (#1849) tool.execute.before input has no agent/sessionID-derived
+						// agent; use the host-boundary adapter (reads swarmState.activeAgent).
 						tool: input.tool,
-						agent: toolBeforeCtx.agent,
+						agent: resolveToolBeforeContext(
+							input as { tool: string; sessionID: string; callID: string },
+							output as { args?: unknown },
+						).agent,
 						sessionID: input.sessionID,
-						args: toolBeforeArgs,
 					},
-					knowledgeConfig,
+					KnowledgeApplicationConfigSchema.parse(
+						config.knowledge_application ?? {},
+					),
 				);
-				// (#1849) Re-snapshot output.args AFTER directive injection so the
-				// tool.execute.after ack collector recovers the FINAL prompt (with
-				// the <delegate_knowledge_directives> block + trace_id). The guardrails
-				// snapshot at step 1 captured the PRE-injection args; without this
-				// re-snapshot the after path could not find the directive block and the
-				// entire delegate-ack reconciliation would be dark in production.
-				setStoredInputArgs(input.callID, output.args);
-			}
-
-			// v6.29: One-time 50% context pressure warning
-			if (swarmState.lastBudgetPct >= 50) {
-				const pressureSession = ensureAgentSession(
-					input.sessionID,
-					swarmState.activeAgent.get(input.sessionID) ?? ORCHESTRATOR_NAME,
+				// 7. Skill propagation gate (soft warning when SKILLS field missing).
+				//    Logs to events.jsonl when architect delegates to skill-capable
+				//    agents without a SKILLS field. Also pushes a visible warning
+				//    to pendingAdvisoryMessages for injection into the architect's
+				//    next prompt. When enforce=true, blocks the delegation entirely.
+				// This gate always performs mandatory explicit-reference validation
+				// before its optional propagation-enabled early return. Calling it once
+				// avoids reopening every referenced skill twice.
+				const skillResult = await skillPropagationGateBefore(
+					ctx.directory,
+					{
+						// (#1849) agent + args via the host-boundary adapter.
+						tool: input.tool,
+						agent: resolveToolBeforeContext(
+							input as { tool: string; sessionID: string; callID: string },
+							output as { args?: unknown },
+						).agent,
+						sessionID: input.sessionID,
+						args:
+							resolveToolBeforeContext(
+								input as { tool: string; sessionID: string; callID: string },
+								output as { args?: unknown },
+							).args ?? undefined,
+					},
+					skillPropagationConfig,
 				);
-				if (!pressureSession.contextPressureWarningSent) {
-					pressureSession.contextPressureWarningSent = true;
-					pushAdvisory(
-						pressureSession,
-						`CONTEXT PRESSURE: ${swarmState.lastBudgetPct.toFixed(1)}% of context window used. Prioritize completing the current task before starting new work.`,
+				if (skillResult.blocked) {
+					throw new Error(
+						skillResult.reason ?? 'Blocked by skill propagation gate',
 					);
 				}
-			}
+				if (skillResult.reason) {
+					const skillSession = ensureAgentSession(
+						input.sessionID,
+						swarmState.activeAgent.get(input.sessionID) ?? ORCHESTRATOR_NAME,
+					);
+					pushAdvisory(skillSession, skillResult.reason);
+				}
 
-			// ADVISORY — activity tracking is observer-only.
-			// Wrapped in safeHook intentionally: errors here must NOT block
-			// the tool call that the fail-closed chain above has already
-			// approved.
-			// Stage-B scope state begins only after every blocking before-hook
-			// above approved this exact Task call. Starting or claiming earlier
-			// would strand identity-bound state when a later policy gate throws.
-			if (autoReviewConfig.enabled) {
-				await beginApprovedReviewerScopeLifecycle({
-					directory: ctx.directory,
-					tool: input.tool,
-					args: toolBeforeArgs,
-					parentSessionID: input.sessionID,
-					callID: input.callID,
-					maxBytes: autoReviewConfig.max_diff_kb * 1024,
-				});
-			}
+				// 8. Skill injection: auto-inject recommended skills when SKILLS field
+				//    is missing from the delegation prompt. Preserves explicit
+				//    SKILLS: none and architect-set SKILLS fields. Implemented in
+				//    src/hooks/skill-injection.ts (issue #1770) so the injection +
+				//    usage-recording path is testable against the REAL implementation.
+				//    The function mutates `input.args.prompt` in place and records
+				//    usage with the TARGET subagent (canonicalized via
+				//    stripKnownSwarmPrefix so 'mega_coder' and 'coder' produce the
+				//    same usage attribution as the gate's site 4a) + real taskID
+				//    (not the architect + synthetic 'injection' literal the inline
+				//    block used).
+				// (#1849) Resolve the real mutable args from output.args (the SDK
+				// mutation target), not input.args (which the host never populates).
+				const toolBeforeCtx = resolveToolBeforeContext(
+					input as { tool: string; sessionID: string; callID: string },
+					output as { args?: unknown },
+				);
+				const toolBeforeArgs = toolBeforeCtx.args ?? {};
+				injectSkillsIntoDelegation(
+					ctx.directory,
+					toolBeforeArgs,
+					skillResult.recommendedSkills,
+					stripKnownSwarmPrefix(
+						parseDelegationArgs(toolBeforeArgs)?.targetAgent ?? '',
+					) || toolBeforeCtx.agent,
+					input.sessionID,
+					{ quiet: config.quiet },
+				);
+				// ---------------------------------------------------------------
 
-			await safeHook(activityHooks.toolBefore)(input, output);
+				// B1 (#2063): the fail-closed region completed, so a throw from the
+				// ADVISORY steps below must NOT be counted as a gate denial.
+				// NOTE: the streak RESET deliberately does not happen here. Steps
+				// below (notably beginApprovedReviewerScopeLifecycle, which is
+				// raw-awaited and does unguarded I/O) can still throw and reject the
+				// call. Clearing the streak here would let a repeatable advisory-tail
+				// failure silently zero the counter on every attempt, so the ladder
+				// would never climb. The reset lives at the very end of the handler.
+				failClosedRegionCompleted = true;
+
+				// 9. Per-delegate knowledge directive injection (Change 1, Task 1.4).
+				//    ADVISORY: prepends the role-scoped <delegate_knowledge_directives>
+				//    block to a Task delegation's prompt so the subagent sees the
+				//    directives + ack contract. Internally fail-open; never blocks.
+				if (knowledgeConfig.enabled) {
+					await injectDelegateDirectivesBefore(
+						ctx.directory,
+						{
+							tool: input.tool,
+							agent: toolBeforeCtx.agent,
+							sessionID: input.sessionID,
+							args: toolBeforeArgs,
+						},
+						knowledgeConfig,
+					);
+					// (#1849) Re-snapshot output.args AFTER directive injection so the
+					// tool.execute.after ack collector recovers the FINAL prompt (with
+					// the <delegate_knowledge_directives> block + trace_id). The guardrails
+					// snapshot at step 1 captured the PRE-injection args; without this
+					// re-snapshot the after path could not find the directive block and the
+					// entire delegate-ack reconciliation would be dark in production.
+					setStoredInputArgs(input.callID, output.args);
+				}
+
+				// v6.29: One-time 50% context pressure warning
+				if (swarmState.lastBudgetPct >= 50) {
+					const pressureSession = ensureAgentSession(
+						input.sessionID,
+						swarmState.activeAgent.get(input.sessionID) ?? ORCHESTRATOR_NAME,
+					);
+					if (!pressureSession.contextPressureWarningSent) {
+						pressureSession.contextPressureWarningSent = true;
+						pushAdvisory(
+							pressureSession,
+							`CONTEXT PRESSURE: ${swarmState.lastBudgetPct.toFixed(1)}% of context window used. Prioritize completing the current task before starting new work.`,
+						);
+					}
+				}
+
+				// ADVISORY — activity tracking is observer-only.
+				// Wrapped in safeHook intentionally: errors here must NOT block
+				// the tool call that the fail-closed chain above has already
+				// approved.
+				// Stage-B scope state begins only after every blocking before-hook
+				// above approved this exact Task call. Starting or claiming earlier
+				// would strand identity-bound state when a later policy gate throws.
+				if (autoReviewConfig.enabled) {
+					await beginApprovedReviewerScopeLifecycle({
+						directory: ctx.directory,
+						tool: input.tool,
+						args: toolBeforeArgs,
+						parentSessionID: input.sessionID,
+						callID: input.callID,
+						maxBytes: autoReviewConfig.max_diff_kb * 1024,
+					});
+				}
+
+				await safeHook(activityHooks.toolBefore)(input, output);
+
+				// B1 (#2063): the WHOLE handler completed, so this tool call is
+				// actually going to run — the denial streak for it is genuinely over.
+				// Scoped to this tool so a successful `read` cannot erase an
+				// in-progress `Task` denial loop, and (reviewer round-4) to this
+				// call's dispatch target so a successful `Task` → `explorer` cannot
+				// erase an in-progress `Task` → `coder` one. `toolBeforeArgs` is the
+				// resolved args of the call that just succeeded.
+				resetGateDenialStreaks(input.sessionID, input.tool, toolBeforeArgs);
+			} catch (err) {
+				// A fail-closed gate denied this call. Count the denial, record it as
+				// a trajectory failure, and APPEND escalating guidance to the message
+				// the agent reads — then rethrow the SAME object so the host still
+				// rejects the tool and every consumer that matches on the leading code
+				// token sees a byte-identical prefix.
+				if (!failClosedRegionCompleted) {
+					// Read the message BEFORE noteGateDenial decorates it, so the
+					// trajectory carries the gate's own text, not our advisory.
+					const deniedMessage =
+						err &&
+						typeof err === 'object' &&
+						typeof (err as { message?: unknown }).message === 'string'
+							? (err as { message: string }).message
+							: null;
+					// Resolved args of the DENIED call. `toolBeforeArgs` is declared
+					// inside the try above and is therefore NOT in scope here, so the
+					// args are re-resolved — in their own try/catch, because a throw
+					// escaping this catch block would change WHICH error propagates.
+					let deniedArgs: Record<string, unknown> | undefined;
+					try {
+						deniedArgs =
+							resolveToolBeforeContext(
+								input as {
+									tool: string;
+									sessionID: string;
+									callID: string;
+								},
+								output as { args?: unknown },
+							).args ?? undefined;
+					} catch {
+						deniedArgs = undefined;
+					}
+					if (deniedMessage !== null && !isAbortLikeError(err)) {
+						try {
+							await recordDeniedToolCall(
+								input.sessionID,
+								{
+									tool: input.tool,
+									callID: input.callID,
+									args: deniedArgs,
+								},
+								deniedMessage,
+								ctx.directory,
+								{ maxLines: 1000 },
+							);
+						} catch {
+							/* D1 recording is observational; never alters the rethrow */
+						}
+					}
+					// noteGateDenial never throws and mutates err.message in place.
+					// `deniedArgs` sub-scopes the streak by dispatch target so an
+					// interleaved successful `Task` → `explorer` cannot zero a
+					// `Task` → `coder` denial loop (reviewer round-4).
+					noteGateDenial(
+						input.sessionID,
+						input.tool,
+						err,
+						{
+							enabled: guardrailsConfig.enabled,
+							warnThreshold: guardrailsConfig.gate_denial_warn_threshold,
+							stopThreshold: guardrailsConfig.gate_denial_stop_threshold,
+						},
+						deniedArgs,
+					);
+				}
+				throw err;
+			}
 			// biome-ignore lint/suspicious/noExplicitAny: Plugin API requires generic hook wrappers
 		}) as any,
 

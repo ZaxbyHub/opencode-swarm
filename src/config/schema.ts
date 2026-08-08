@@ -1029,6 +1029,45 @@ export const GuardrailsConfigSchema = z.object({
 	 * known secret patterns (tokens, passwords, Bearer headers) redacted.
 	 */
 	shell_audit_log: z.boolean().default(true),
+
+	// ── Loop containment (issue #2063) ──────────────────────────────────────
+	/**
+	 * Consecutive fail-closed `tool.execute.before` denials with the SAME
+	 * classification, tool, and session before "do not retry this dispatch"
+	 * guidance is appended to the denial the agent reads.
+	 * Consumed by `src/hooks/gate-denial-tracker.ts` (B1).
+	 */
+	gate_denial_warn_threshold: z.number().int().min(1).default(3),
+	/**
+	 * Same streak length at which the denial additionally carries a hard STOP
+	 * directive, pushes an advisory, and emits `gate_denial_loop` telemetry.
+	 * Consumed by `src/hooks/gate-denial-tracker.ts` (B1).
+	 */
+	gate_denial_stop_threshold: z.number().int().min(1).default(5),
+	/**
+	 * Non-progress tool calls inside an armed execution episode before a strong
+	 * "you are not making progress" advisory fires.
+	 *
+	 * NOTE: the three `execution_stall_*` keys are declared here so this schema
+	 * has a single writer for the #2063 config surface. Their consumer is
+	 * `src/hooks/guardrails/execution-stall.ts` (workstream B5), wired through
+	 * `createGuardrailsHooks`.
+	 */
+	execution_stall_warn_calls: z.number().int().min(1).default(30),
+	/**
+	 * Non-progress tool calls inside an armed execution episode before
+	 * read/glob/grep/bash are hard-denied (delegation, status, and plan tools
+	 * stay allowed). Consumed by `src/hooks/guardrails/execution-stall.ts`.
+	 */
+	execution_stall_stop_calls: z.number().int().min(1).default(60),
+	/**
+	 * Minutes of complete tool inactivity after which an armed execution
+	 * episode disarms and its counters reset. Idleness — not elapsed time since
+	 * arming — is the lapse condition, so a long slow stall still escalates. The
+	 * episode ALSO disarms when the plan carries no `in_progress` task, which is
+	 * not configurable. Consumed by `src/hooks/guardrails/execution-stall.ts`.
+	 */
+	execution_stall_episode_minutes: z.number().int().min(1).default(30),
 });
 
 export type GuardrailsConfig = z.infer<typeof GuardrailsConfigSchema>;

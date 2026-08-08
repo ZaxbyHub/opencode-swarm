@@ -7,7 +7,7 @@ description: >
 
 # Specify Protocol
 
-This protocol is loaded on demand by the architect stub in src/agents/architect.ts. The architect prompt keeps only activation, action, and hard safety constraints; the full execution details live here.
+This protocol is loaded on demand by the architect runtime. The architect prompt keeps only activation, action, and hard safety constraints; the full execution details live here.
 
 ### MODE: SPECIFY
 Activates when: user asks to "specify", "define requirements", "write a spec", or "define a feature"; OR `/swarm specify` is invoked; OR no EFFECTIVE spec exists and no `.swarm/plan.md` exists (use `/swarm sdd status` to determine effective-spec existence — native `.swarm/spec.md`, OpenSpec `openspec/`, or Spec-Kit `.specify/`).

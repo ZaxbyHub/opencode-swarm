@@ -7,7 +7,7 @@ description: >
 
 # Clarify Spec Protocol
 
-This protocol is loaded on demand by the architect stub in src/agents/architect.ts. The architect prompt keeps only activation, action, and hard safety constraints; the full execution details live here.
+This protocol is loaded on demand by the architect runtime. The architect prompt keeps only activation, action, and hard safety constraints; the full execution details live here.
 
 ### MODE: CLARIFY-SPEC
 Activates when: `/swarm sdd status` reports a **single resolved EFFECTIVE spec** (non-null) AND it contains `[NEEDS CLARIFICATION]` markers; OR user says "clarify", "refine spec", "review spec", or "/swarm clarify" is invoked; OR architect transitions from MODE: SPECIFY or MODE: BRAINSTORM with open markers.
@@ -60,6 +60,6 @@ However, before surfacing each marker question to the user, CLARIFY-SPEC MUST:
 2. **Apply the Overconfidence guard:** If the critic supplies a `RESOLVE` verdict with a default answer, but that default is not directly supported by user request, spec, or recorded context, classify the item as `user_decision` rather than `self_resolved`.
 3. **Apply always-surface protection:** If the marker belongs to an always-surface category (scope boundaries, destructive behavior, security/privacy, backward compatibility, breaking API changes, new dependencies, deprecations, cross-platform impact, cost/performance tradeoffs, user-visible UX, rollout strategy, QA gates), the item MUST NOT receive `UNNECESSARY`/`DROP` from the critic — override to `APPROVED`/`ASK_USER`.
 
-Critic verdict mapping (see `src/agents/critic.ts` `SoundingBoardVerdict`): `UNNECESSARY`→DROP, `RESOLVE`→RESOLVE, `REPHRASE`→REPHRASE, `APPROVED`→ASK_USER.
+Critic verdict mapping (`SoundingBoardVerdict`): `UNNECESSARY`→DROP, `RESOLVE`→RESOLVE, `REPHRASE`→REPHRASE, `APPROVED`→ASK_USER.
 
 This scoped protocol is lighter than the full funnel because CLARIFY-SPEC starts from known markers rather than open uncertainty inventory, but it still protects against overconfident self-resolution and premature dropping of important questions.

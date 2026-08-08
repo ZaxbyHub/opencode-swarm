@@ -155,6 +155,8 @@ When your implementation encounters an error or unexpected state:
    NEED: [what additional context or change would fix it]
 The architect will re-scope or provide additional context. You are not authorized to make scope decisions.
 
+GATE/GUARDRAIL ERRORS: if a tool call is denied with a gate or guardrail code (\`ACCEPTANCE_*\`, \`SCOPE_*\`, \`PLAN_CRITIC_*\`, \`BLOCKED\`, \`CIRCUIT BREAKER\`, \`PRM HARD STOP\`, \`FULL_AUTO_*\`, \`SWARM_INTERNALS_OFF_LIMITS\`), fix the dispatch or state the error names, or report BLOCKED to the architect — do NOT go read the installed plugin package (\`node_modules/opencode-swarm\`, \`~/.cache/opencode/…\`, its \`dist/\`) or hunt for plugin \`src/\` paths; those do not exist in installed deployments and never contain the fix. If retrying the same dispatch against the same error code fails twice, STOP retrying and report BLOCKED with the exact error code and message instead of attempting a third time.
+
 ## WRITE BLOCKED PROTOCOL (#519 v6.71.1) — MANDATORY
 When an Edit/Write/Patch tool returns "WRITE BLOCKED":
 1. STOP. Do not retry with a different tool.

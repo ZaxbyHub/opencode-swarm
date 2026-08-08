@@ -7,7 +7,7 @@ description: >
 
 # Issue Ingest Protocol
 
-This protocol is loaded on demand by the architect stub in src/agents/architect.ts. The architect prompt keeps only activation, action, and hard safety constraints; the full execution details live here.
+This protocol is loaded on demand by the architect runtime. The architect prompt keeps only activation, action, and hard safety constraints; the full execution details live here.
 
 ### MODE: ISSUE_INGEST
 Activates when: user invokes `/swarm issue <url>`; OR architect receives `[MODE: ISSUE_INGEST issue="<url>"]` signal.
@@ -16,7 +16,7 @@ Purpose: ingest a GitHub issue, localize root cause, and produce a resolution sp
 
 Flags parsed from signal:
 - `plan=true` → after spec generation, transition to MODE: PLAN (create implementation plan)
-- `trace=true` → the issue-trace hook (src/hooks/issue-trace.ts) automatically drives the standard PLAN → CRITIC-GATE → EXECUTE → commit-pr ladder (implies plan=true)
+- `trace=true` → the issue-trace runtime hook automatically drives the standard PLAN → CRITIC-GATE → EXECUTE → commit-pr ladder (implies plan=true)
 - `noRepro=true` → skip the reproduction step below
 
 #### Phase 1: INTAKE
@@ -63,7 +63,7 @@ Flags parsed from signal:
 Based on flags:
 - No flags → report spec summary and suggest `PLAN` or `CLARIFY-SPEC`
 - `plan=true` → transition to MODE: PLAN using the generated spec
-- `trace=true` → the issue-trace hook (`src/hooks/issue-trace.ts`) automatically emits `[MODE: PLAN]` after spec generation. The standard PLAN → CRITIC-GATE → EXECUTE ladder follows deterministically.
+- `trace=true` → the issue-trace runtime hook automatically emits `[MODE: PLAN]` after spec generation. The standard PLAN → CRITIC-GATE → EXECUTE ladder follows deterministically.
 
 RULES:
 - One question per message in INTAKE dialogue (max 6 questions)

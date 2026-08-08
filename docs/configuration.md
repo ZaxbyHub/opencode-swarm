@@ -632,6 +632,116 @@ routing:
 
 Routing skills are merged with scored recommendations, with explicitly routed skills receiving a boosted score (0.9) to prioritize them.
 
+## Guardrails — loop containment (`guardrails`)
+
+Two escalation ladders bound the failure modes where an agent keeps burning
+turns without making progress (issue #2063). Both are per-session, in-memory,
+and additive to the existing `guardrails` block — omit them and the defaults
+below apply.
+
+### Gate-denial escalation
+
+Every fail-closed `tool.execute.before` hook (guardrails authority, scope
+guard, delegation gate, PR-workflow obligations, Full-Auto) blocks a tool call
+by throwing. Nothing previously counted how many times the *same* denial was
+re-triggered, so an agent could re-issue an identical rejected dispatch
+indefinitely. Denials are now classified by the leading code token of the error
+message (`ACCEPTANCE_FIELD_REQUIRED`, `SCOPE_NOT_DECLARED`, …) and counted per
+session, tool, and code.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `gate_denial_warn_threshold` | number (≥ 1) | `3` | Consecutive same-cause denials before "do NOT retry the same dispatch" guidance is appended to the denial text the agent reads. |
+| `gate_denial_stop_threshold` | number (≥ 1) | `5` | Consecutive same-cause denials before the denial additionally carries a hard STOP directive, an advisory is queued, and a `gate_denial_loop` telemetry event is emitted. |
+
+The agent prompts separately instruct stopping after **2** failed self-recovery
+attempts for the same error code — deliberately stricter than this mechanical
+3/5 ladder, which is the backstop for an agent that ignores its prompt.
+
+Guidance is **appended only** — the original message, and therefore the leading
+code token, is preserved byte-for-byte, and the error still propagates so the
+tool call is still rejected. User cancellations (`AbortError`) are excluded
+entirely: they neither count toward a streak nor clear one.
+
+A streak is tracked per (session, tool, dispatch target, cause) and resets only
+when the chain lets *that* tool through *for that dispatch target* — so a
+successful `Task` to `explorer` does not clear an in-progress denial loop
+against `coder`. Denials whose message carries no recognizable leading code
+token are pooled under a single `UNCLASSIFIED` bucket; that bucket can still
+reach `gate_denial_warn_threshold`, but never the STOP rung, because repeats
+there are not evidence of one repeating cause.
+
+### Execution-stall ladder
+
+Bounds a session that is armed for execution (a subagent dispatch was attempted,
+or a task moved to `in_progress`) but keeps making tool calls that produce no
+progress event.
+
+An episode disarms — resetting every counter — on **either** of two conditions:
+
+- **Idleness**: `execution_stall_episode_minutes` with no tool calls at all.
+  Idleness, not elapsed time since arming, so a long slow stall still reaches
+  the hard rung.
+- **No open task**: the plan carries no task with status `in_progress`. Checked
+  right after a status update settles a task, and again on the periodic
+  workspace probe so an out-of-band plan change is picked up too. This is what
+  keeps a session that finishes its execution phase and moves on to commit, CI,
+  and reporting work from being denied. A missing or unreadable plan is *not*
+  treated as "no open task" — only a plan that parses and has zero `in_progress`
+  tasks disarms.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `execution_stall_warn_calls` | number (≥ 1) | `30` | Non-progress tool calls in an armed episode before a strong advisory fires. |
+| `execution_stall_stop_calls` | number (≥ 1) | `60` | Non-progress tool calls before read/glob/grep/bash are hard-denied. Delegation, `update_task_status`, plan/status/query tools, and advisory surfacing always remain allowed. |
+| `execution_stall_episode_minutes` | number (≥ 1) | `30` | Minutes of complete tool inactivity after which the episode disarms and all counters reset. The no-open-task disarm above is unconditional and not configurable. |
+
+**Example** — tighter denial containment, looser stall budget:
+
+```json
+{
+  "guardrails": {
+    "gate_denial_warn_threshold": 2,
+    "gate_denial_stop_threshold": 3,
+    "execution_stall_warn_calls": 50,
+    "execution_stall_stop_calls": 100
+  }
+}
+```
+
+## PRM
+
+Controls the Process Remediation Manager (PRM) — the subagent-session trajectory
+monitor that detects stuck-loop patterns (repetition, ping-pong delegation,
+scope drift, test-fix cycling, context thrash) and escalates course-correction
+guidance to the agent before a hard stop.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `true` | Master switch for PRM trajectory monitoring. When `false`, no trajectory entries are recorded and no patterns are detected. |
+| `pattern_thresholds.repetition_loop` | number (≥ 1) | `2` | Occurrences before a "same agent, same file, same action within N steps" loop is flagged. |
+| `pattern_thresholds.ping_pong` | number (≥ 1) | `2` | Occurrences before an alternating A→B→A delegation pattern targeting the same file is flagged. |
+| `pattern_thresholds.expansion_drift` | number (≥ 1) | `3` | Occurrences before successive plans whose unique-target scope grows by more than 50% are flagged. |
+| `pattern_thresholds.stuck_on_test` | number (≥ 1) | `3` | Occurrences before an edit → test-fail → edit-same-file cycle is flagged. |
+| `pattern_thresholds.context_thrash` | number (≥ 1) | `3` | Consecutive steps before a monotonically increasing unique-target set (no plateaus) is flagged. |
+| `escalation_enabled` | boolean | `true` | Enable the count-based escalation ladder (advisory → hard stop) once a pattern's threshold is met repeatedly. |
+| `max_trajectory_lines` | number (≥ 10) | `1000` | Maximum trajectory entries retained per session before older entries are evicted. |
+| `detection_timeout_ms` | number (≥ 10) | `100` | Bounded time budget for a single pattern-detection pass; detection is skipped (fail-open) if it would exceed this. |
+
+**Example** — tighten the repetition-loop and ping-pong thresholds:
+
+```json
+{
+  "prm": {
+    "enabled": true,
+    "pattern_thresholds": {
+      "repetition_loop": 1,
+      "ping_pong": 1
+    }
+  }
+}
+```
+
 ## Phase Complete Configuration
 
 Controls phase completion gating and validation.

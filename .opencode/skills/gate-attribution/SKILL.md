@@ -48,7 +48,7 @@ taskId: X.Y
 ```
 
 ## Why this exists
-The gate tracker (`src/hooks/delegation-gate.ts`) keys delegation chains by
+The gate tracker (the delegation-gate runtime) keys delegation chains by
 `sessionID`. Ambiguous multi-task prompts still fail closed, but parseable
 `[REVIEWED] | task-id | ...` rows provide explicit per-task attribution for
 set-dispatches. Tracked in issue #1746 item 6.

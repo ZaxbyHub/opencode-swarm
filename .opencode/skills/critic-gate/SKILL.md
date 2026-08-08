@@ -7,7 +7,7 @@ description: >
 
 # Critic Gate Protocol
 
-This protocol is loaded on demand by the architect stub in src/agents/architect.ts. The architect prompt keeps only activation, action, and hard safety constraints; the full execution details live here.
+This protocol is loaded on demand by the architect runtime. The architect prompt keeps only activation, action, and hard safety constraints; the full execution details live here.
 
 ### MODE: CRITIC-GATE
 Delegate plan to the active swarm's critic agent for review BEFORE any implementation begins.
@@ -96,5 +96,10 @@ Caveat: this assumption breaks if the plan lacks a `plan_critic_gate`-tagged app
   plan object) rather than relying solely on plan.md, which omits acceptance
   criteria.
 - This is a structural-completeness failure, not a style concern.
-- The detection logic mirrors the existing ANALYZE-mode SC-### coverage check
-  (see src/agents/critic.ts ANALYZE mode, step 4).
+- The detection logic mirrors the existing ANALYZE-mode SC-### coverage check:
+  map each spec obligation to the task(s) whose description or acceptance field
+  addresses it, then flag obligations with zero covering tasks as gaps — MUST
+  obligations with no covering task are CRITICAL severity, SHOULD obligations
+  with no covering task are HIGH severity, and SC-### success criteria with no
+  covering task are HIGH severity (untestable success criteria = unverifiable
+  requirement).
