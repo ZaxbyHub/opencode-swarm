@@ -1,7 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 import {
 	computeCandidateInputContentHash,
 	sha256,
@@ -13,6 +12,7 @@ import {
 } from '../../../src/evaluation/pr-review-recovery.js';
 import { evaluationV1 } from '../../../src/evaluation/public-api.js';
 import { runExternalTool } from '../../../src/utils/external-tool-runner.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const packageRoot = path.resolve(import.meta.dir, '../../..');
 const fixtureRoot = path.join(

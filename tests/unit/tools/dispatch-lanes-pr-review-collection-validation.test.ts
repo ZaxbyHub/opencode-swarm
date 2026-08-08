@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 import {
 	CANDIDATE_HEADERS,
 	CLEAN_TEMPLATES,
@@ -18,6 +17,7 @@ import {
 	type SessionOps,
 } from '../../../src/tools/dispatch-lanes.js';
 import { retrieve_lane_output } from '../../../src/tools/retrieve-lane-output.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const PARENT = 'collection-validation-parent';
 const HEAD = 'abc123';
