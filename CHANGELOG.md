@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.136.5](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.136.4...v7.136.5) (2026-08-08)
+
+
+### Bug Fixes
+
+* **guardrails:** close review findings from PR [#2062](https://github.com/ZaxbyHub/opencode-swarm/issues/2062) ([0060f48](https://github.com/ZaxbyHub/opencode-swarm/commit/0060f48de70a0154b199d05a4827d8f94afea8d4))
+
 ## [7.136.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.136.3...v7.136.4) (2026-08-08)
 
 
