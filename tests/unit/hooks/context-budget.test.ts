@@ -12,6 +12,31 @@ function makeMessages(textLength: number, agent?: string) {
 	];
 }
 
+/**
+ * Build a real OpenCode SDK tool-result assistant message: the heavy output
+ * lives in a `ToolPart` (`part.state.output`), NOT in a text part and NOT in
+ * a fictional `info.toolName` field (issue #2068).
+ */
+function toolMsg(tool: string, output: string) {
+	return {
+		info: { role: 'assistant' },
+		parts: [
+			{
+				type: 'tool',
+				tool,
+				state: {
+					status: 'completed',
+					input: {},
+					output,
+					title: tool,
+					metadata: {},
+					time: { start: 0, end: 1 },
+				},
+			},
+		],
+	};
+}
+
 describe('context-budget hook', () => {
 	describe('Returns no-op when disabled', () => {
 		test('when config.context_budget.enabled === false', async () => {
@@ -798,18 +823,12 @@ describe('context-budget hook', () => {
 					info: { role: 'user', agent: 'architect' },
 					parts: [{ type: 'text', text: 'x'.repeat(100) }],
 				},
-				{
-					info: { role: 'assistant', toolName: 'read' },
-					parts: [{ type: 'text', text: 'y'.repeat(100) }],
-				},
+				toolMsg('bash', 'y'.repeat(100)),
 				{
 					info: { role: 'user', agent: 'architect' },
 					parts: [{ type: 'text', text: 'a'.repeat(100) }],
 				},
-				{
-					info: { role: 'assistant', toolName: 'write' },
-					parts: [{ type: 'text', text: 'b'.repeat(100) }],
-				},
+				toolMsg('write', 'b'.repeat(100)),
 				{
 					info: { role: 'user', agent: 'architect' },
 					parts: [{ type: 'text', text: 'c'.repeat(100) }],
@@ -860,10 +879,7 @@ describe('context-budget hook', () => {
 					info: { role: 'user', agent: 'architect' },
 					parts: [{ type: 'text', text: 'x'.repeat(300) }],
 				},
-				{
-					info: { role: 'assistant', toolName: 'read' },
-					parts: [{ type: 'text', text: 'y'.repeat(300) }],
-				},
+				toolMsg('read', 'y'.repeat(300)),
 			];
 			const output = { messages: [...messages] };
 			await handler({}, output);
@@ -905,18 +921,12 @@ describe('context-budget hook', () => {
 					info: { role: 'user', agent: 'architect' },
 					parts: [{ type: 'text', text: 'x'.repeat(300) }],
 				},
-				{
-					info: { role: 'assistant', toolName: 'read' },
-					parts: [{ type: 'text', text: 'y'.repeat(300) }],
-				},
+				toolMsg('read', 'y'.repeat(300)),
 				{
 					info: { role: 'user', agent: 'architect' },
 					parts: [{ type: 'text', text: 'a'.repeat(300) }],
 				},
-				{
-					info: { role: 'assistant', toolName: 'write' },
-					parts: [{ type: 'text', text: 'b'.repeat(300) }],
-				},
+				toolMsg('write', 'b'.repeat(300)),
 			];
 			const output1 = { messages: [...messages1] };
 			await handler({}, output1);
@@ -963,20 +973,20 @@ describe('context-budget hook', () => {
 					info: { role: 'user' },
 					parts: [{ type: 'text', text: 'x'.repeat(100) }],
 				},
-				{
-					info: { role: 'assistant', toolName: 'read' },
-					parts: [{ type: 'text', text: 'y'.repeat(100) }],
-				},
+				toolMsg('bash', 'y'.repeat(100)),
 				{
 					info: { role: 'user' },
 					parts: [{ type: 'text', text: 'a'.repeat(100) }],
 				},
-				{
-					info: { role: 'assistant', toolName: 'write' },
-					parts: [{ type: 'text', text: 'b'.repeat(100) }],
-				},
+				toolMsg('write', 'b'.repeat(100)),
 			];
 
+			// Note: baseMessages is shared (shallow-spread) across the three
+			// invocations. The spread copies `info` but shares `parts`, so prior
+			// enforcement mutations persist into later calls. This is intentional
+			// for this agent-switch plumbing test (it asserts that a placeholder
+			// is visible after the sequence, not per-call enforcement). The
+			// T1–T12 regression block uses deep clones for isolation.
 			const messages1 = baseMessages.map((msg, i) =>
 				i % 2 === 0
 					? { ...msg, info: { ...msg.info, agent: 'architect' } }
@@ -1040,7 +1050,7 @@ describe('context-budget hook', () => {
 					enforce: true,
 					prune_target: 0.7,
 					recent_window: 5,
-					preserve_last_n_turns: 4,
+					preserve_last_n_turns: 0,
 					tool_output_mask_threshold: 2000,
 				},
 				max_iterations: 5,
@@ -1056,34 +1066,13 @@ describe('context-budget hook', () => {
 					info: { role: 'user', agent: 'architect' },
 					parts: [{ type: 'text', text: 'user msg' }],
 				},
-				{
-					info: { role: 'assistant', toolName: 'tool_1' },
-					parts: [{ type: 'text', text: 'output 1' }],
-				}, // Index 1
-				{
-					info: { role: 'assistant', toolName: 'tool_2' },
-					parts: [{ type: 'text', text: 'output 2' }],
-				}, // Index 2
-				{
-					info: { role: 'assistant', toolName: 'tool_3' },
-					parts: [{ type: 'text', text: 'output 3' }],
-				}, // Index 3
-				{
-					info: { role: 'assistant', toolName: 'tool_4' },
-					parts: [{ type: 'text', text: 'output 4' }],
-				}, // Index 4
-				{
-					info: { role: 'assistant', toolName: 'read' },
-					parts: [{ type: 'text', text: largeToolOutput }],
-				}, // Index 5, large
-				{
-					info: { role: 'assistant', toolName: 'tool_6' },
-					parts: [{ type: 'text', text: 'output 6' }],
-				}, // Index 6
-				{
-					info: { role: 'assistant', toolName: 'tool_7' },
-					parts: [{ type: 'text', text: 'output 7' }],
-				}, // Index 7
+				toolMsg('tool_1', 'output 1'), // Index 1
+				toolMsg('tool_2', 'output 2'), // Index 2
+				toolMsg('tool_3', 'output 3'), // Index 3
+				toolMsg('tool_4', 'output 4'), // Index 4
+				toolMsg('read', largeToolOutput), // Index 5, large
+				toolMsg('tool_6', 'output 6'), // Index 6
+				toolMsg('tool_7', 'output 7'), // Index 7
 			];
 
 			messages.push(
@@ -1129,30 +1118,12 @@ describe('context-budget hook', () => {
 					info: { role: 'user', agent: 'architect' },
 					parts: [{ type: 'text', text: 'user msg' }],
 				},
-				{
-					info: { role: 'assistant', toolName: 'tool_1' },
-					parts: [{ type: 'text', text: 'output 1' }],
-				},
-				{
-					info: { role: 'assistant', toolName: 'tool_2' },
-					parts: [{ type: 'text', text: 'output 2' }],
-				},
-				{
-					info: { role: 'assistant', toolName: 'tool_3' },
-					parts: [{ type: 'text', text: 'output 3' }],
-				},
-				{
-					info: { role: 'assistant', toolName: 'tool_4' },
-					parts: [{ type: 'text', text: 'output 4' }],
-				},
-				{
-					info: { role: 'assistant', toolName: 'read' },
-					parts: [{ type: 'text', text: largeToolOutput }],
-				}, // Index 5
-				{
-					info: { role: 'assistant', toolName: 'tool_6' },
-					parts: [{ type: 'text', text: 'output 6' }],
-				}, // Index 6, recent
+				toolMsg('tool_1', 'output 1'),
+				toolMsg('tool_2', 'output 2'),
+				toolMsg('tool_3', 'output 3'),
+				toolMsg('tool_4', 'output 4'),
+				toolMsg('read', largeToolOutput), // Index 5
+				toolMsg('tool_6', 'output 6'), // Index 6, recent
 			];
 
 			messages.push({
@@ -1163,8 +1134,10 @@ describe('context-budget hook', () => {
 			const output = { messages: [...messages] };
 			await handler({}, output);
 
-			// Index 6 is within recent window (age = 2 < 5), should NOT be masked
-			expect(output.messages[6].parts[0].text).toBe('output 6');
+			// Index 6 is within recent window (age = 2 < 5), should NOT be masked.
+			// Unmasked tool result retains its ToolPart shape with state.output.
+			expect(output.messages[6].parts[0].type).toBe('tool');
+			expect(output.messages[6].parts[0].state.output).toBe('output 6');
 		});
 
 		test('Small tool output (< threshold) NOT masked', async () => {
@@ -1191,18 +1164,9 @@ describe('context-budget hook', () => {
 					info: { role: 'user', agent: 'architect' },
 					parts: [{ type: 'text', text: 'user msg' }],
 				},
-				{
-					info: { role: 'assistant', toolName: 'read' },
-					parts: [{ type: 'text', text: smallToolOutput }],
-				}, // Small output (< 2000)
-				{
-					info: { role: 'assistant', toolName: 'tool_2' },
-					parts: [{ type: 'text', text: 'output 2' }],
-				},
-				{
-					info: { role: 'assistant', toolName: 'tool_3' },
-					parts: [{ type: 'text', text: 'output 3' }],
-				},
+				toolMsg('read', smallToolOutput), // Small output (< 2000)
+				toolMsg('tool_2', 'output 2'),
+				toolMsg('tool_3', 'output 3'),
 			];
 
 			messages.push({
@@ -1213,19 +1177,21 @@ describe('context-budget hook', () => {
 			const output = { messages: [...messages] };
 			await handler({}, output);
 
-			// Small output (< 2000 threshold) should NOT be masked even if old
-			expect(output.messages[1].parts[0].text).toBe(smallToolOutput);
+			// Small output (< 2000 threshold) should NOT be masked even if old.
+			// 'read' is also exempt. Unmasked → retains ToolPart shape.
+			expect(output.messages[1].parts[0].type).toBe('tool');
+			expect(output.messages[1].parts[0].state.output).toBe(smallToolOutput);
 		});
 
 		test('Tool output masking returns freed tokens (original - masked)', async () => {
 			const config = {
 				context_budget: {
 					enabled: true,
-					model_limits: { default: 10000 },
+					model_limits: { default: 5000 },
 					enforce: true,
-					prune_target: 0.7,
+					prune_target: 0.3,
 					recent_window: 2,
-					preserve_last_n_turns: 4,
+					preserve_last_n_turns: 0,
 					tool_output_mask_threshold: 2000,
 				},
 				max_iterations: 5,
@@ -1235,36 +1201,30 @@ describe('context-budget hook', () => {
 
 			const handler = createContextBudgetHandler(config);
 
-			const originalOutput = 'x'.repeat(5000);
+			const originalOutput = 'x'.repeat(20000);
 			const messages = [
 				{
 					info: { role: 'user', agent: 'architect' },
 					parts: [{ type: 'text', text: 'user msg' }],
 				},
-				{
-					info: { role: 'assistant', toolName: 'bash' },
-					parts: [{ type: 'text', text: originalOutput }],
-				}, // Large output, index 1
-				{
-					info: { role: 'assistant', toolName: 'tool_2' },
-					parts: [{ type: 'text', text: 'output 2' }],
-				},
-				{
-					info: { role: 'assistant', toolName: 'tool_3' },
-					parts: [{ type: 'text', text: 'output 3' }],
-				},
+				toolMsg('bash', originalOutput), // Large output, index 1
+				toolMsg('tool_2', 'output 2'),
+				toolMsg('tool_3', 'output 3'),
 			];
 
 			messages.push({
 				info: { role: 'user', agent: 'architect' },
-				parts: [{ type: 'text', text: 'x'.repeat(90000) }],
+				parts: [{ type: 'text', text: 'final' }],
 			});
 
 			const output = { messages: [...messages] };
 			await handler({}, output);
 
-			// Index 1 should be masked (age = 4 > recent_window of 2)
-			const maskedText = output.messages[1].parts[0].text;
+			// Index 1 should be masked (age = 4 > recent_window of 2). The
+			// ToolPart is replaced with a synthetic text placeholder.
+			const maskedPart = output.messages[1].parts[0];
+			expect(maskedPart.type).toBe('text');
+			const maskedText = maskedPart.text as string;
 			expect(maskedText).not.toBe(originalOutput);
 			expect(maskedText.length).toBeLessThan(originalOutput.length);
 			expect(maskedText).toMatch(/\[Tool output masked/);
@@ -1275,13 +1235,13 @@ describe('context-budget hook', () => {
 			const config = {
 				context_budget: {
 					enabled: true,
-					model_limits: { default: 10000 },
+					model_limits: { default: 5000 },
 					warn_threshold: 0.7,
 					critical_threshold: 0.9,
 					enforce: true,
-					prune_target: 0.7,
+					prune_target: 0.3,
 					recent_window: 3,
-					preserve_last_n_turns: 4,
+					preserve_last_n_turns: 0,
 					tool_output_mask_threshold: 2000,
 				},
 				max_iterations: 5,
@@ -1291,40 +1251,30 @@ describe('context-budget hook', () => {
 
 			const handler = createContextBudgetHandler(config);
 
-			const largeToolOutput = 'x'.repeat(50000);
+			const largeToolOutput = 'x'.repeat(20000);
 			const messages = [
 				{
 					info: { role: 'user', agent: 'architect' },
 					parts: [{ type: 'text', text: 'user' }],
 				},
-				{
-					info: { role: 'assistant', toolName: 'bash' },
-					parts: [{ type: 'text', text: largeToolOutput }],
-				}, // Index 1, age = 4 > recent_window (3)
-				{
-					info: { role: 'assistant', toolName: 'tool_2' },
-					parts: [{ type: 'text', text: 'output 2' }],
-				},
-				{
-					info: { role: 'assistant', toolName: 'tool_3' },
-					parts: [{ type: 'text', text: 'output 3' }],
-				},
-				{
-					info: { role: 'assistant', toolName: 'tool_4' },
-					parts: [{ type: 'text', text: 'output 4' }],
-				},
+				toolMsg('bash', largeToolOutput), // Index 1, age = 4 > recent_window (3)
+				toolMsg('tool_2', 'output 2'),
+				toolMsg('tool_3', 'output 3'),
+				toolMsg('tool_4', 'output 4'),
 			];
 
 			messages.push({
 				info: { role: 'user', agent: 'architect' },
-				parts: [{ type: 'text', text: 'x'.repeat(90000) }],
+				parts: [{ type: 'text', text: 'final' }],
 			});
 
 			const output = { messages: [...messages] };
 			await handler({}, output);
 
 			// Masking should happen first (old large output masked)
-			const maskedText = output.messages[1].parts[0].text;
+			const maskedPart = output.messages[1].parts[0];
+			expect(maskedPart.type).toBe('text');
+			const maskedText = maskedPart.text as string;
 			expect(maskedText).not.toBe(largeToolOutput);
 			expect(maskedText.length).toBeLessThan(largeToolOutput.length);
 			expect(maskedText).toMatch(/\[Tool output masked/);
@@ -1417,9 +1367,9 @@ describe('context-budget hook', () => {
 		});
 
 		test('[Task 4.2] retrieve_lane_output messages are NOT masked during enforcement', async () => {
-			// Verify the structured-toolName exemption path: when msg.info.toolName is
-			// 'retrieve_lane_output', shouldMaskToolOutput must return false even when
-			// enforcement fires and the message is large/old.
+			// Verify the structured-tool exemption path: when a tool part's `tool`
+			// is 'retrieve_lane_output', shouldMaskToolOutput must return false
+			// even when enforcement fires and the message is large/old.
 			const config = {
 				context_budget: {
 					enabled: true,
@@ -1441,15 +1391,9 @@ describe('context-budget hook', () => {
 			const largeText = 'z'.repeat(600);
 			const messages = [
 				// Old, large retrieve_lane_output result — must NOT be masked
-				{
-					info: { role: 'assistant', toolName: 'retrieve_lane_output' },
-					parts: [{ type: 'text', text: largeText }],
-				},
+				toolMsg('retrieve_lane_output', largeText),
 				// Old, large generic tool result — eligible for masking
-				{
-					info: { role: 'assistant', toolName: 'bash' },
-					parts: [{ type: 'text', text: largeText }],
-				},
+				toolMsg('bash', largeText),
 				// Recent user message (preserves the turn)
 				{
 					info: { role: 'user', agent: 'architect' },
@@ -1461,7 +1405,9 @@ describe('context-budget hook', () => {
 			await handler({}, output);
 
 			const retrieveMsg = output.messages[0];
-			const retrieveText = retrieveMsg.parts[0].text as string;
+			// Unmasked exempt tool retains its ToolPart shape with state.output.
+			expect(retrieveMsg.parts[0].type).toBe('tool');
+			const retrieveText = retrieveMsg.parts[0].state.output as string;
 			expect(retrieveText).not.toContain('[Tool output masked');
 			expect(retrieveText).not.toContain('[Context pruned');
 			expect(retrieveText).toBe(largeText);

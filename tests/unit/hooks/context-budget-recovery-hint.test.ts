@@ -26,11 +26,16 @@ function laneRef(char: string): string {
 }
 
 /**
- * Config that forces the Task 4.2 tool-output-masking path to run
- * unconditionally on non-terminal messages, while protecting every message
- * from the separate priority-based pruning pass (Step 2/3) so a message is
- * masked exactly once and `recoveryHint` is observable directly in the
- * "[Tool output masked" placeholder.
+ * Config that forces the Task 4.2 tool-output-masking path to run on old
+ * tool messages. After masking, the placeholder is tiny, so the prune pass
+ * (Step 2/3) does not need to remove the message — `recoveryHint` stays
+ * observable directly in the "[Tool output masked" placeholder.
+ *
+ * Note (issue #2068): masking now respects `preserve_last_n_turns` (it shares
+ * `computeProtectedIndices` with pruning). `preserve_last_n_turns: 0` leaves
+ * only the last user + last assistant message protected, so older tool
+ * messages are maskable; the trailing assistant turn in each fixture ensures
+ * the masked tool is not the last assistant.
  */
 function makeMaskingConfig() {
 	return {
@@ -41,9 +46,7 @@ function makeMaskingConfig() {
 			// recent_window: 0 makes every non-last message "old" (age > 0),
 			// so shouldMaskToolOutput triggers regardless of text length.
 			recent_window: 0,
-			// Protect all messages from Step 2/3 removal so the masked
-			// placeholder is not re-masked by applyObservationMasking.
-			preserve_last_n_turns: 100,
+			preserve_last_n_turns: 0,
 			tool_output_mask_threshold: 100_000,
 		},
 		max_iterations: 5,
@@ -61,6 +64,32 @@ function findMaskedText(messages: Array<{ parts: Array<{ text?: string }> }>) {
 	return undefined;
 }
 
+/**
+ * Build a real OpenCode SDK completed-tool assistant message: the heavy output
+ * lives in a `ToolPart` (`part.state.output`), NOT in a text part or a
+ * fictional `info.toolName` field (issue #2068). Masking replaces the ToolPart
+ * with a synthetic text placeholder, which is what `findMaskedText` reads.
+ */
+function toolMessage(tool: string, output: string) {
+	return {
+		info: { role: 'assistant' },
+		parts: [
+			{
+				type: 'tool',
+				tool,
+				state: {
+					status: 'completed',
+					input: {},
+					output,
+					title: tool,
+					metadata: {},
+					time: { start: 0, end: 1 },
+				},
+			},
+		],
+	};
+}
+
 describe('recoveryHint via tool-output masking', () => {
 	test('a lane ref in the original text produces a retrieve_lane_output placeholder containing the ref', async () => {
 		const handler = createContextBudgetHandler(makeMaskingConfig());
@@ -70,23 +99,15 @@ describe('recoveryHint via tool-output masking', () => {
 				info: { role: 'user', agent: 'architect' },
 				parts: [{ type: 'text', text: 'x'.repeat(100) }],
 			},
-			{
-				info: { role: 'assistant', toolName: 'bash' },
-				parts: [
-					{
-						type: 'text',
-						text: `lane result ref ${ref} plus padding ${'y'.repeat(100)}`,
-					},
-				],
-			},
+			toolMessage(
+				'bash',
+				`lane result ref ${ref} plus padding ${'y'.repeat(100)}`,
+			),
 			{
 				info: { role: 'user', agent: 'architect' },
 				parts: [{ type: 'text', text: 'a'.repeat(100) }],
 			},
-			{
-				info: { role: 'assistant', toolName: 'bash' },
-				parts: [{ type: 'text', text: 'b'.repeat(100) }],
-			},
+			toolMessage('bash', 'b'.repeat(100)),
 			{
 				info: { role: 'user', agent: 'architect' },
 				parts: [{ type: 'text', text: 'c'.repeat(100) }],
@@ -108,18 +129,12 @@ describe('recoveryHint via tool-output masking', () => {
 				info: { role: 'user', agent: 'architect' },
 				parts: [{ type: 'text', text: 'x'.repeat(100) }],
 			},
-			{
-				info: { role: 'assistant', toolName: 'bash' },
-				parts: [{ type: 'text', text: 'plain tool output '.repeat(20) }],
-			},
+			toolMessage('bash', 'plain tool output '.repeat(20)),
 			{
 				info: { role: 'user', agent: 'architect' },
 				parts: [{ type: 'text', text: 'a'.repeat(100) }],
 			},
-			{
-				info: { role: 'assistant', toolName: 'bash' },
-				parts: [{ type: 'text', text: 'b'.repeat(100) }],
-			},
+			toolMessage('bash', 'b'.repeat(100)),
 			{
 				info: { role: 'user', agent: 'architect' },
 				parts: [{ type: 'text', text: 'c'.repeat(100) }],
@@ -152,23 +167,15 @@ describe('recoveryHint via tool-output masking', () => {
 				info: { role: 'user', agent: 'architect' },
 				parts: [{ type: 'text', text: 'x'.repeat(100) }],
 			},
-			{
-				info: { role: 'assistant', toolName: 'bash' },
-				parts: [
-					{
-						type: 'text',
-						text: `${refA} then ${refB} then ${refC} then ${refD} end ${'y'.repeat(100)}`,
-					},
-				],
-			},
+			toolMessage(
+				'bash',
+				`${refA} then ${refB} then ${refC} then ${refD} end ${'y'.repeat(100)}`,
+			),
 			{
 				info: { role: 'user', agent: 'architect' },
 				parts: [{ type: 'text', text: 'a'.repeat(100) }],
 			},
-			{
-				info: { role: 'assistant', toolName: 'bash' },
-				parts: [{ type: 'text', text: 'b'.repeat(100) }],
-			},
+			toolMessage('bash', 'b'.repeat(100)),
 			{
 				info: { role: 'user', agent: 'architect' },
 				parts: [{ type: 'text', text: 'c'.repeat(100) }],
