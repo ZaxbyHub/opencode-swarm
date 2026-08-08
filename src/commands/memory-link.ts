@@ -46,6 +46,7 @@ import { evictAndCloseForRoot } from '../memory/provider-pool.js';
 import {
 	buildMemoryCohortFingerprintInput,
 	computeMemoryCohortFingerprint,
+	FINGERPRINT_ALGORITHM_VERSION,
 } from '../memory/redaction.js';
 import {
 	type VettedMemoryRoot,
@@ -202,6 +203,11 @@ export async function handleMemoryLinkCommand(
 			JSON.stringify(
 				{
 					fingerprint,
+					// #2062 F-012: stamp the algorithm that produced `fingerprint`.
+					// Readers that see a different version skip the (meaningless)
+					// cross-algorithm byte comparison and tell the user to re-link,
+					// instead of reporting a bogus provider/embedding config mismatch.
+					algorithm_version: FINGERPRINT_ALGORITHM_VERSION,
 					config: fingerprintInput,
 					updated_at: new Date().toISOString(),
 				},

@@ -3,7 +3,7 @@ import * as path from 'node:path';
 import type { PluginConfig } from '../config';
 import { DEFAULT_MODELS } from '../config/constants';
 import { stripKnownSwarmPrefix } from '../config/schema';
-import { bunHash } from '../utils/bun-compat';
+import { boundedBunHash, coarseObjectDiscriminator } from '../utils/arg-hash';
 import { stableCanonicalStringify } from '../utils/stable-stringify';
 
 // Safe property lookup — prevents prototype chain pollution
@@ -512,15 +512,32 @@ export function recentToolCallSessionCount(): number {
  * safe because the buffer is per-process and never persisted. Verified:
  * `formatDebuggingSpiralEvent` does not serialize `argsHash`.
  */
+/**
+ * Bounding and fallback-discrimination live in `src/utils/arg-hash.ts`
+ * (`HASH_INPUT_CAP_BYTES`, `boundedBunHash`, `coarseObjectDiscriminator`),
+ * shared verbatim with `hooks/guardrails/file-authority.ts:hashArgs`. Both
+ * call sites had the same unbounded-input (F-010) and constant-fallback
+ * (F-009) bugs; the fix lives in one module so it cannot drift.
+ *
+ * `boundedBunHash` hashes a length-prefixed head+tail SAMPLE, not a bare
+ * prefix, so two large payloads that share a 64 KB header but differ in their
+ * appended bodies no longer collapse to one hash.
+ */
 function hashArgsForSpiral(args: unknown): string {
 	if (args && typeof args === 'object') {
 		try {
 			const stable = stableCanonicalStringify(args);
-			return `h:${bunHash(stable).toString(36)}`;
+			return `h:${boundedBunHash(stable).toString(36)}`;
 		} catch {
-			// Unstringifiable args (cyclic, BigInt quirks) — fall back to a
-			// stable but coarser hash so detection still functions.
-			return 'h:fallback';
+			// Unstringifiable args (cyclic, BigInt quirks) — mix in a coarse
+			// structural discriminator rather than collapsing to a constant.
+			// A constant fallback made 5+ same-tool calls with DISTINCT but
+			// unserializable args collide into one hash, firing a
+			// false-positive spiral (#2060-class bug). The discriminator
+			// below cannot itself throw (see `coarseObjectDiscriminator`),
+			// so genuinely identical unserializable args still collide
+			// (true positive preserved) while distinct ones no longer do.
+			return `h:fb:${boundedBunHash(coarseObjectDiscriminator(args)).toString(36)}`;
 		}
 	}
 	if (typeof args === 'string') {
@@ -528,7 +545,9 @@ function hashArgsForSpiral(args: unknown): string {
 		// debuggable; long strings (e.g. bash commands) are hashed to stay
 		// bounded. The 64-char cutoff keeps the worst-case entry (~66 chars)
 		// below the old 100-char ceiling.
-		return args.length <= 64 ? `s:${args}` : `s:${bunHash(args).toString(36)}`;
+		return args.length <= 64
+			? `s:${args}`
+			: `s:${boundedBunHash(args).toString(36)}`;
 	}
 	return `p:${String(args ?? '')}`;
 }

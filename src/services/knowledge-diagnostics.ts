@@ -37,6 +37,7 @@ import { resolveInsightCandidatesPath } from '../hooks/micro-reflector.js';
 import { readMemoryLinkPointer } from '../memory/memory-link.js';
 import {
 	buildMemoryCohortFingerprintInput,
+	classifyStoredFingerprintAlgorithmVersion,
 	computeMemoryCohortFingerprint,
 } from '../memory/redaction.js';
 import { readSynonymMap } from './synonym-map.js';
@@ -506,23 +507,39 @@ function computeMemoryCohortDiagnostics(directory: string): {
 				if (existsSync(cohortConfigPath)) {
 					const stored = JSON.parse(
 						readFileSync(cohortConfigPath, 'utf-8'),
-					) as { fingerprint?: string };
-					const expected = computeMemoryCohortFingerprint(
-						buildMemoryCohortFingerprintInput({
-							provider: cfg.memory.provider ?? 'sqlite',
-							redaction: {
-								rejectDurableSecrets:
-									cfg.memory.redaction?.rejectDurableSecrets ?? true,
-							},
-							embeddings: {
-								model:
-									cfg.memory.embeddings?.model ?? 'Xenova/all-MiniLM-L6-v2',
-								dimension: cfg.memory.embeddings?.dimension ?? 384,
-								version: cfg.memory.embeddings?.version,
-							},
-						}),
+					) as { fingerprint?: unknown; algorithm_version?: unknown };
+					// #2062 F-012 (R3 fix): mirror the provider version-aware pattern.
+					// An ABSENT `algorithm_version` means the file predates the field,
+					// i.e. algorithm version 1 — not "the current version", which would
+					// make legacy files silently byte-compare across algorithms after a
+					// bump. When the stored version is not comparable (a different
+					// version, or present but non-numeric) leave the field null
+					// (unknown) rather than reporting a false mismatch. This is a
+					// read-only reporting surface, so stay silent rather than warn.
+					const versionCheck = classifyStoredFingerprintAlgorithmVersion(
+						stored.algorithm_version,
 					);
-					configFingerprintMatch = stored.fingerprint === expected;
+					if (
+						versionCheck.status === 'comparable' &&
+						typeof stored.fingerprint === 'string'
+					) {
+						const expected = computeMemoryCohortFingerprint(
+							buildMemoryCohortFingerprintInput({
+								provider: cfg.memory.provider ?? 'sqlite',
+								redaction: {
+									rejectDurableSecrets:
+										cfg.memory.redaction?.rejectDurableSecrets ?? true,
+								},
+								embeddings: {
+									model:
+										cfg.memory.embeddings?.model ?? 'Xenova/all-MiniLM-L6-v2',
+									dimension: cfg.memory.embeddings?.dimension ?? 384,
+									version: cfg.memory.embeddings?.version,
+								},
+							}),
+						);
+						configFingerprintMatch = stored.fingerprint === expected;
+					}
 				}
 			}
 		} catch {

@@ -5,6 +5,7 @@ import {
 	recentToolCallSessionCount,
 	recordToolCall,
 } from '../../../src/hooks/adversarial-detector';
+import { HASH_INPUT_CAP_BYTES } from '../../../src/utils/arg-hash';
 
 describe('adversarial detector wiring', () => {
 	test('detectAdversarialPatterns detects PRECEDENT_MANIPULATION', () => {
@@ -257,5 +258,120 @@ describe('adversarial detector spiral hash stability (issue #2060)', () => {
 		const result = await detectDebuggingSpiral('/tmp/test', sessionId);
 		expect(result).not.toBeNull();
 		expect(result!.matchedText).toContain('todowrite');
+	});
+});
+
+describe('adversarial detector spiral hash fallback discriminator (F-009)', () => {
+	// All tests use unique `2060-` prefixed session IDs (module-private state
+	// is not reset between tests).
+
+	test('distinct unserializable args (cyclic) do NOT spiral', async () => {
+		// Before the fix, hashArgsForSpiral's catch branch returned the
+		// constant 'h:fallback' for ANY unstringifiable args, so five DISTINCT
+		// cyclic objects collapsed to one hash and falsely fired a spiral.
+		const sessionId = '2060-fallback-distinct-cyclic';
+		for (let i = 0; i < 6; i++) {
+			const cyclic: Record<string, unknown> = {
+				id: i,
+				label: `distinct-${i}`,
+			};
+			cyclic.self = cyclic;
+			recordToolCall('bash', cyclic, sessionId);
+		}
+		const result = await detectDebuggingSpiral('/tmp/test', sessionId);
+		expect(result).toBeNull();
+	});
+
+	test('distinct unserializable args (BigInt-bearing) do NOT spiral', async () => {
+		const sessionId = '2060-fallback-distinct-bigint';
+		for (let i = 0; i < 6; i++) {
+			recordToolCall(
+				'bash',
+				{ command: `run-${i}`, weight: BigInt(i + 1) },
+				sessionId,
+			);
+		}
+		const result = await detectDebuggingSpiral('/tmp/test', sessionId);
+		expect(result).toBeNull();
+	});
+
+	test('identical unserializable args (cyclic) still DO spiral (true positive preserved)', async () => {
+		const sessionId = '2060-fallback-identical-cyclic';
+		for (let i = 0; i < 6; i++) {
+			const cyclic: Record<string, unknown> = {
+				id: 'same',
+				label: 'same-shape',
+			};
+			cyclic.self = cyclic;
+			recordToolCall('bash', cyclic, sessionId);
+		}
+		const result = await detectDebuggingSpiral('/tmp/test', sessionId);
+		expect(result).not.toBeNull();
+		expect(result!.matchedText).toContain('bash');
+	});
+
+	test('identical unserializable args (BigInt) still DO spiral (true positive preserved)', async () => {
+		const sessionId = '2060-fallback-identical-bigint';
+		for (let i = 0; i < 6; i++) {
+			recordToolCall('bash', { command: 'run', weight: BigInt(7) }, sessionId);
+		}
+		const result = await detectDebuggingSpiral('/tmp/test', sessionId);
+		expect(result).not.toBeNull();
+		expect(result!.matchedText).toContain('bash');
+	});
+});
+
+describe('adversarial detector spiral hash input cap (F-010)', () => {
+	// The cap samples a length-prefixed HEAD AND TAIL (see
+	// `src/utils/arg-hash.ts`), not a bare prefix, so payloads that merely
+	// share a large boilerplate header stay distinguishable.
+
+	test('args differing only in the discarded middle hash equally (still spiral)', async () => {
+		// Same total length, same first CAP/2 and last CAP/2 characters of the
+		// serialized args — only the sampled-out middle differs. This is the
+		// assertion that fails if the cap is removed and the full input is
+		// hashed again, so it pins that the bound is really applied.
+		const sessionId = '2060-cap-collide-middle';
+		const head = 'a'.repeat(HASH_INPUT_CAP_BYTES);
+		const tail = 'b'.repeat(HASH_INPUT_CAP_BYTES);
+		for (let i = 0; i < 6; i++) {
+			recordToolCall('write', { blob: `${head}MIDDLE-${i}${tail}` }, sessionId);
+		}
+		const result = await detectDebuggingSpiral('/tmp/test', sessionId);
+		expect(result).not.toBeNull();
+		expect(result!.matchedText).toContain('write');
+	});
+
+	test('args differing only in an APPENDED tail past the cap do NOT spiral', async () => {
+		// Under the previous bare-prefix cap these six calls hashed EQUAL and
+		// falsely spiralled: identical 64KB header, six different bodies.
+		const sessionId = '2060-cap-append-distinct';
+		const prefix = 'x'.repeat(HASH_INPUT_CAP_BYTES);
+		for (let i = 0; i < 6; i++) {
+			recordToolCall('write', { blob: `${prefix}-tail-${i}` }, sessionId);
+		}
+		const result = await detectDebuggingSpiral('/tmp/test', sessionId);
+		expect(result).toBeNull();
+	});
+
+	test('args differing only in a PREPENDED head past the cap do NOT spiral', async () => {
+		const sessionId = '2060-cap-prepend-distinct';
+		const suffix = 'x'.repeat(HASH_INPUT_CAP_BYTES);
+		for (let i = 0; i < 6; i++) {
+			recordToolCall('write', { blob: `head-${i}${suffix}` }, sessionId);
+		}
+		const result = await detectDebuggingSpiral('/tmp/test', sessionId);
+		expect(result).toBeNull();
+	});
+
+	test('args differing within the cap do NOT hash equally (do not spiral)', async () => {
+		const sessionId = '2060-cap-distinct-within-64kb';
+		for (let i = 0; i < 6; i++) {
+			// Difference sits well within the cap, so calls must remain
+			// distinguishable and no false-positive spiral should fire.
+			recordToolCall('write', { blob: `distinct-${i}` }, sessionId);
+		}
+		const result = await detectDebuggingSpiral('/tmp/test', sessionId);
+		expect(result).toBeNull();
 	});
 });

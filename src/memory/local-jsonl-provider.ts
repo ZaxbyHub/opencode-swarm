@@ -9,6 +9,7 @@ import {
 } from 'node:fs/promises';
 import * as path from 'node:path';
 import { validateSwarmPath } from '../hooks/utils';
+import { warn } from '../utils';
 import { DEFAULT_MEMORY_CONFIG, type MemoryConfig } from './config';
 import {
 	applyPatchToMemory,
@@ -32,6 +33,7 @@ import type {
 } from './provider';
 import {
 	buildMemoryCohortFingerprintInput,
+	classifyStoredFingerprintAlgorithmVersion,
 	computeMemoryCohortFingerprint,
 } from './redaction';
 import { validateMemoryProposal, validateMemoryRecordRules } from './schema';
@@ -553,7 +555,10 @@ export class LocalJsonlMemoryProvider
 	/**
 	 * #1850 (KC-001 fix): mirror the SQLite provider's fingerprint check. Reads
 	 * `memory-cohort-config.json` and throws on mismatch. Absent/malformed file
-	 * is permissive (fail-open never strands memory).
+	 * is permissive (fail-open never strands memory). #2062 F-012: a file whose
+	 * `algorithm_version` is not the current one — or is present but
+	 * uninterpretable — is also permissive, because the digests are not
+	 * comparable; both warn with a re-link instruction.
 	 */
 	private assertCohortConfigFingerprint(): void {
 		if (!this.cohortRoot) return;
@@ -564,6 +569,41 @@ export class LocalJsonlMemoryProvider
 				string,
 				unknown
 			>;
+			// #2062 F-012 (R3 fix): mirror the SQLite provider — compare ALGORITHM
+			// versions before comparing digests. An ABSENT `algorithm_version` means
+			// the file predates the field, i.e. algorithm version 1 — NOT the
+			// current version. Defaulting to current would make this gate unfireable
+			// for legacy files after the first bump and then byte-compare a v1
+			// digest against a v2 expected value.
+			const versionCheck = classifyStoredFingerprintAlgorithmVersion(
+				stored.algorithm_version,
+			);
+			if (versionCheck.status === 'unknown') {
+				// Present but uninterpretable: skip rather than guess "current".
+				warn(
+					'[memory-cohort] cohort config has a present but non-numeric `algorithm_version`, so its fingerprint cannot be attributed to a known algorithm and the config-coherence check was skipped. Run `/swarm memory link` to rewrite the cohort fingerprint.',
+					{
+						cohortRoot: this.cohortRoot,
+						storedVersion: stored.algorithm_version,
+					},
+				);
+				return;
+			}
+			if (versionCheck.status === 'mismatch') {
+				// Cross-algorithm digests are not comparable; a byte compare would
+				// report a config difference that does not exist. Fail open, but
+				// warn (unlike the silent absent/malformed cases) because this one
+				// has a concrete user action.
+				warn(
+					`[memory-cohort] cohort config was fingerprinted with algorithm version ${versionCheck.storedVersion}, but this worktree computes version ${versionCheck.currentVersion}. Digests from different algorithm versions are not comparable, so the config-coherence check was skipped. Run \`/swarm memory link\` to refresh the cohort fingerprint.`,
+					{
+						cohortRoot: this.cohortRoot,
+						storedVersion: versionCheck.storedVersion,
+						expectedVersion: versionCheck.currentVersion,
+					},
+				);
+				return;
+			}
 			const storedFingerprint = stored.fingerprint;
 			if (typeof storedFingerprint !== 'string') return;
 			const expectedFingerprint = computeMemoryCohortFingerprint(

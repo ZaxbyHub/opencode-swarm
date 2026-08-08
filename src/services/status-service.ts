@@ -23,6 +23,7 @@ import { readSwarmFileAsync, validateSwarmPath } from '../hooks/utils';
 import { readMemoryLinkPointer } from '../memory/memory-link';
 import {
 	buildMemoryCohortFingerprintInput,
+	classifyStoredFingerprintAlgorithmVersion,
 	computeMemoryCohortFingerprint,
 } from '../memory/redaction';
 import { loadPlan } from '../plan/manager';
@@ -398,12 +399,28 @@ export async function getStatusData(
 				if (fsSync.existsSync(cohortConfigPath)) {
 					const stored = JSON.parse(
 						fsSync.readFileSync(cohortConfigPath, 'utf-8'),
-					) as { fingerprint?: string };
-					// #1850 (final-critic dedup): shared fingerprint helper.
-					const expected = computeMemoryCohortFingerprint(
-						buildMemoryCohortFingerprintInput(memoryConfig),
+					) as { fingerprint?: unknown; algorithm_version?: unknown };
+					// #2062 F-012 (R3 fix): mirror the provider version-aware pattern.
+					// An ABSENT `algorithm_version` means the file predates the field,
+					// i.e. algorithm version 1 — not "the current version", which would
+					// make legacy files silently byte-compare across algorithms after a
+					// bump. When the stored version is not comparable (a different
+					// version, or present but non-numeric) leave configFingerprintMatch
+					// unset (unknown) rather than reporting a false mismatch. This is a
+					// read-only reporting surface, so stay silent rather than warn.
+					const versionCheck = classifyStoredFingerprintAlgorithmVersion(
+						stored.algorithm_version,
 					);
-					configFingerprintMatch = stored.fingerprint === expected;
+					if (
+						versionCheck.status === 'comparable' &&
+						typeof stored.fingerprint === 'string'
+					) {
+						// #1850 (final-critic dedup): shared fingerprint helper.
+						const expected = computeMemoryCohortFingerprint(
+							buildMemoryCohortFingerprintInput(memoryConfig),
+						);
+						configFingerprintMatch = stored.fingerprint === expected;
+					}
 				}
 			}
 		} catch {

@@ -82,6 +82,7 @@ export {
 	buildMemoryCohortFingerprintInput,
 	computeMemoryCohortFingerprint,
 	computeRedactionPolicyVersion,
+	FINGERPRINT_ALGORITHM_VERSION,
 	findSecrets,
 	redactSecrets,
 } from './redaction';
