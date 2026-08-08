@@ -1,5 +1,19 @@
 # Changelog
 
+## [7.136.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.136.3...v7.136.4) (2026-08-08)
+
+
+### Bug Fixes
+
+* **context-budget:** prune real ToolPart outputs (issue [#2068](https://github.com/ZaxbyHub/opencode-swarm/issues/2068)) ([35fa5dc](https://github.com/ZaxbyHub/opencode-swarm/commit/35fa5dc44f5f25c7dba7d0489f226777356ed2b3))
+
+## [7.136.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.136.2...v7.136.3) (2026-08-08)
+
+
+### Bug Fixes
+
+* **guardrails:** contain endless self-loops with self-sufficient gate errors and working escalation ([a5659e5](https://github.com/ZaxbyHub/opencode-swarm/commit/a5659e5a5dce65175bcf304f2f99990c5fe9f9d3))
+
 ## [7.136.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.136.1...v7.136.2) (2026-08-07)
 
 

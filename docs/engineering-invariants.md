@@ -536,6 +536,7 @@ mock.module('node:fs', () => ({
 | **`src/worktree/core.ts`** | **`removeLaneProfileFromDisk`, `writeLaneProfileToDisk`** | **FR-201 + FR-205 lane profile materialization + teardown** |
 | `src/services/recommendation-ledger.ts` | `now`, `transactFile`, `readLedgerStrict`, `resolveRecommendationLedgerPath` | #1821 AC21 dedup-ledger clock + fail-open path tests |
 | `src/services/trajectory-cluster.ts` | `now`, `checkRecommendations`, `recordEmittedRecommendations` | #1821 AC21 motif-emission dedup tests |
+| `src/memory/redaction.ts` | `currentAlgorithmVersion` | #2062 F-012 cohort-fingerprint version gate: simulates a FUTURE bump of `FINGERPRINT_ALGORITHM_VERSION` so the legacy-file gate is testable before a real bump exists. Production code never mutates it. |
 
 **Delegation-gate split pattern (FR-006 SC-006.1):**
 
