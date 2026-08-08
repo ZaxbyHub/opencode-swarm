@@ -3,6 +3,10 @@ import { mkdtempSync, realpathSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import {
+	CANDIDATE_HEADERS,
+	CLEAN_TEMPLATES,
+} from '../../../src/background/candidate-contract.js';
 import { storeLaneOutput } from '../../../src/background/lane-output-store.js';
 import {
 	appendDelegationTransition,
@@ -24,6 +28,7 @@ import {
 import {
 	_internals as dispatchInternals,
 	executeDispatchLanesAsync,
+	type SessionOps,
 } from '../../../src/tools/dispatch-lanes.js';
 
 const SESSION_ID = 'review-council';
@@ -32,6 +37,7 @@ const REVIEW_SCOPE = `complete PR diff def456...${HEAD_SHA}`;
 const REVISION_DIGEST = 'review-revision';
 let directory = '';
 let createdSessions = 0;
+let deliveredPrompts: string[] = [];
 const originalGetSessionOps = dispatchInternals.getSessionOps;
 const originalGetGeneratedAgentNames = dispatchInternals.getGeneratedAgentNames;
 const originalResolveCurrentGitHead = gateInternals.resolveCurrentGitHead;
@@ -53,6 +59,7 @@ beforeEach(() => {
 		mkdtempSync(path.join(os.tmpdir(), 'dispatch-review-council-')),
 	);
 	createdSessions = 0;
+	deliveredPrompts = [];
 	gateInternals.resetTrackedStateCache();
 	gateInternals.resolveCurrentGitHead = () => HEAD_SHA;
 	gateInternals.resolveIsWorkingTreeClean = () => true;
@@ -72,15 +79,19 @@ beforeEach(() => {
 		'council_generalist',
 		'reviewer',
 	];
-	dispatchInternals.getSessionOps = () => ({
+	const sessionOps: SessionOps = {
 		create: mock(async () => ({
 			data: { id: `child-${++createdSessions}` },
 			error: undefined,
 		})),
 		prompt: mock(async () => ({ data: undefined, error: undefined })),
-		promptAsync: mock(async () => ({ data: undefined, error: undefined })),
+		promptAsync: mock(async (args) => {
+			deliveredPrompts.push(args.body.parts[0]?.text ?? '');
+			return { data: undefined, error: undefined };
+		}),
 		delete: mock(async () => undefined),
-	});
+	};
+	dispatchInternals.getSessionOps = () => sessionOps;
 });
 
 afterEach(async () => {
@@ -422,6 +433,17 @@ describe('PR review council mechanical dispatch', () => {
 		);
 		expect(council.success).toBe(true);
 		expect(council.pending).toBe(1);
+		expect(deliveredPrompts[0]).toContain(CANDIDATE_HEADERS.micro_lane);
+		expect(deliveredPrompts[0]).toContain(CLEAN_TEMPLATES.micro_lane);
+		expect(deliveredPrompts[0]).toContain(
+			'for swarm-pr-review:council discovery',
+		);
+		expect(deliveredPrompts[0]).toContain(
+			'put the exact workflow_lane only in the `micro_lane` field',
+		);
+		expect(deliveredPrompts[0]).not.toContain(
+			'put the exact workflow_lane only in the lane field',
+		);
 		const councilRecord = readDelegations(directory).find(
 			(record) => record.batchId === council.batch_id,
 		);

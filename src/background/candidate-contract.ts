@@ -45,11 +45,40 @@ export const CANDIDATE_FIELDS = {
 	],
 } as const;
 
+export const CANDIDATE_MARKER = '[CANDIDATE]' as const;
+export const CLEAN_MARKER = '[CLEAN]' as const;
+
+/** Canonical marker-bearing header derived from the parser's field authority. */
+export function formatCandidateHeader(family: RowFormatFamily): string {
+	return [
+		CANDIDATE_MARKER,
+		...CANDIDATE_FIELDS[family].map((name) =>
+			name === 'file_line' ? 'file:line' : name,
+		),
+	].join(' | ');
+}
+
+/** Canonical zero-finding attestation template for one row family. */
+export function formatCleanTemplate(family: RowFormatFamily): string {
+	const laneField = family === 'base_explorer' ? 'lane' : 'micro_lane';
+	return [CLEAN_MARKER, laneField, 'coverage_scope', 'evidence'].join(' | ');
+}
+
+export const CANDIDATE_HEADERS = {
+	base_explorer: formatCandidateHeader('base_explorer'),
+	micro_lane: formatCandidateHeader('micro_lane'),
+} as const;
+
+export const CLEAN_TEMPLATES = {
+	base_explorer: formatCleanTemplate('base_explorer'),
+	micro_lane: formatCleanTemplate('micro_lane'),
+} as const;
+
 /** Identify only an exact, marker-bearing canonical candidate header. */
 export function candidateHeaderFamily(
 	fields: readonly string[],
 ): RowFormatFamily | null {
-	if (fields[0]?.trim() !== '[CANDIDATE]') return null;
+	if (fields[0]?.trim() !== CANDIDATE_MARKER) return null;
 	const normalized = fields.slice(1).map((field) => field.trim());
 	for (const family of ['base_explorer', 'micro_lane'] as const) {
 		const canonicalHeaderFields = CANDIDATE_FIELDS[family].map((name) =>

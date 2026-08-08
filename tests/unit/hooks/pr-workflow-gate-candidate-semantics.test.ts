@@ -58,26 +58,20 @@ describe('PR-review candidate semantics at the coverage gate', () => {
 		});
 		await persistBatch('semantic-good', 'swarm-pr-review:base', remainingLanes);
 
-		await expect(
-			assertPrReviewBaseCoverageSettled(tempDir, SESSION_ID),
-		).rejects.toThrow(/batch=semantic-bad.*lane=bad-intent-output/);
-		await expect(
-			assertPrReviewBaseCoverageSettled(tempDir, SESSION_ID),
-		).rejects.toThrow(/row 2 field severity: Invalid severity: BLOCKER/);
-		await expect(
-			assertPrReviewBaseCoverageSettled(tempDir, SESSION_ID),
-		).rejects.toThrow(
-			new RegExp(
-				`field lane: expected lane ${malformedDimension}, received not-a-real-lane`,
-				'i',
-			),
-		);
 		let diagnostic = '';
 		try {
 			await assertPrReviewBaseCoverageSettled(tempDir, SESSION_ID);
 		} catch (error) {
 			diagnostic = error instanceof Error ? error.message : String(error);
 		}
+		expect(diagnostic).toMatch(/batch=semantic-bad.*lane=bad-intent-output/);
+		expect(diagnostic).toContain('predicate=discovery.row');
+		expect(diagnostic).toMatch(
+			/row 2 field severity: Invalid severity: BLOCKER/,
+		);
+		// The structured diagnostic is deliberately first-failure-only; a later
+		// malformed row cannot replace the deterministic severity predicate.
+		expect(diagnostic).not.toContain('not-a-real-lane');
 		expect(diagnostic.length).toBeLessThan(2_000);
 		expect(diagnostic).not.toContain('x'.repeat(1_000));
 	});

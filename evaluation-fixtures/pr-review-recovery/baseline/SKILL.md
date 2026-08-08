@@ -846,44 +846,12 @@ Before Phase 4 or synthesis, all base lanes must be settled. `dispatch_lanes_asy
 
 **COVERAGE GATE — zero tolerance for unclosed gaps.** After `collect_lane_results`, verify every lane produced validated output. Two failure modes exist:
 - **Mode A (empty output):** Lane returns 0 chars, `status: cancelled`, `output_digest` matches SHA-256 of empty string (`e3b0c442...b855`).
-- **Mode B (invalid structured output):** Under Profile A, collection reports `status: failed` with a named contract predicate while retaining the non-empty preview, digest, and `output_ref`; the artifact has zero valid `[CANDIDATE]` rows and no parseable `[CLEAN] | lane | coverage_scope | evidence` attestation. Under Profiles B/C, treat the equivalent non-empty report as failed when parsing yields zero candidates and no valid clean attestation. The non-empty transcript is diagnostic evidence, never coverage proof.
+- **Mode B (intermediate reasoning only):** Lane reports `status: completed` with non-empty output, but the output is preliminary reasoning ("Now let me check...") with zero `[CANDIDATE]` rows and no parseable `[CLEAN] | workflow_lane | coverage_scope | evidence` attestation. The `output_digest` does NOT match the empty-string hash. `parse_lane_candidates` returns 0 candidates. This mode is MORE dangerous — the lane appears successful but produced no findings or clean proof.
 
 For ANY lane that failed (either mode):
 1. **Retry** (max 2 attempts) with materially different parameters — different session or prompt decomposition, while preserving the required structured async mode and exact head provenance.
 2. If a base lane fails under Profile A, retry only the failed `workflow_lane` identifiers with `dispatch_lanes_async`, `mode: "swarm-pr-review:base"`, the same exact `pr_head_sha`, and explorer agents. The durable gate joins successful provenance across the initial wave and retry batches. While that controller is active, blocking `dispatch_lanes` and direct Task dispatch are not equivalent because they cannot satisfy the structured provenance gate. Under Profiles B/C, retry only the failed `workflow_lane` identifiers with a fresh subagent or pass, the same exact `pr_head_sha`, and a materially different prompt decomposition.
 3. If no equivalent alternative can be verified, **STOP and surface the lane failure to the user as BLOCKED** with the lane id, scope, failure mode, retry attempts, and why equivalence could not be proven. Do not present partial findings, do not issue a review verdict, and do not synthesize from successful lanes. A low-quality partial review is worse than no review.
-
-### Contract-failure diagnosis and recovery
-
-Under Profile A, `dispatch_lanes_async` adds the authoritative
-controller-appended row contract and exact lane identity to every explorer
-prompt. Do not duplicate that contract in `common_prompt`: duplicated copies
-can drift, compete for prompt budget, and are not the controller's acceptance
-boundary.
-
-When collection or a later coverage gate rejects a lane, first isolate the
-emitting validator named by the diagnostic. Preserve the rejected artifact and
-build a minimal correct single-lane reproduction using the same workflow mode,
-lane identity, exact head, and canonical row. Before retrying, distinguish the
-three independent input layers: the header schema, data-row values, and tool
-argument shape. A correct header does not repair an invalid severity or lane
-value, and correct row data does not repair malformed dispatch JSON.
-
-Classify the incident from actual user-visible harm and the first failed
-predicate, not from the number of retries or the eventual result. A successful
-post-hoc fallback is recovery evidence; it does not justify the protocol
-deviation or erase the original failure. Conversely, the candidate tool and
-the coverage gate use a shared row parser, while the gate separately verifies
-durable provenance such as batch, session, lane, role, head, digest, and
-artifact identity. Parser success therefore proves row structure only; it does
-not settle the durable coverage obligation.
-
-If a controller denial omits the failed predicate, expected contract, or lane
-identity, record that as an opacity defect and escalate it with the preserved
-artifact and minimal reproduction. An opaque denial is not proof that correct
-input was rejected. Do not guess at hidden predicates, weaken acceptance, or
-switch to blocking/direct-Task dispatch; repair the named contract when it is
-available, otherwise stop at the coverage gate with the diagnostic gap.
 
 ### Candidate extraction via parser
 
@@ -1003,7 +971,7 @@ A base lane that finds no surviving candidates must emit exactly one fully
 populated clean row:
 
 ```text
-[CLEAN] | lane | coverage_scope | evidence
+[CLEAN] | workflow_lane | coverage_scope | evidence
 ```
 
 Header-only `[CLEAN]` markers, prose-only "clean" claims, or empty output do
@@ -1565,7 +1533,7 @@ When triggered:
 2. After the default base-dimension and risk-family coverage is complete, launch all supplementary council agents. Under Profile A, use one `dispatch_lanes_async` call with `mode: "swarm-pr-review:council"`, the same exact `pr_head_sha`, and one unique `workflow_lane` per council member; continue independent context preparation while they run, polling with `collect_lane_results` (without `wait`) to process settled agents incrementally, and use `wait: true` only when no independent work remains. All agents must be settled and their candidates added to the ledger before reviewer classification; under Profile A the runtime enforces this join barrier, and blocking, sequential, or direct-Task fallback is not equivalent to the structured council dispatch — bypassing the active controller is `BLOCKED`. Under Profile B, dispatch council members as parallel subagents with the same marker contract and settle them all before reviewer classification; under Profile C, run each council lens as a separate sequential pass.
 3. Each council agent assumes all work is wrong until code evidence proves otherwise.
 4. Each agent hunts within its lane only.
-5. Council uses the micro-lane row family: `[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence`. Emit one row per `EVIDENCE_FOUND` or `SUSPICIOUS` claim, or a fully populated `[CLEAN] | micro_lane | coverage_scope | evidence` row when no candidate survives. Put the exact council `workflow_lane` value in the `micro_lane` data field. Council prose without one of those markers does not settle the lane.
+5. Agents return the same mechanically parseable candidate contract as other discovery lanes: one `[CANDIDATE]` row per `EVIDENCE_FOUND` or `SUSPICIOUS` claim, or a fully populated `[CLEAN] | workflow_lane | coverage_scope | evidence` row when no candidate survives. Council prose without one of those markers does not settle the lane.
 6. Agents must not return `CONFIRMED`, `DISPROVED`, or final severity; candidate severity remains provisional until reviewer classification.
 7. The independent reviewer then classifies every council candidate as `CONFIRMED`, `DISPROVED`, `UNVERIFIED`, or `PRE_EXISTING`.
 8. Apply critic challenge to reviewer-confirmed HIGH/CRITICAL or borderline findings.

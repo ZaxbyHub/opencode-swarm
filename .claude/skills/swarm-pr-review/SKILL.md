@@ -39,9 +39,10 @@ Read and follow `../../../.opencode/skills/swarm-pr-review/SKILL.md` as the cano
   its workflow-lane id and exact-head provenance (the bound `pr_head_sha`);
   persist findings and trigger ledgers as files in the session task workspace,
   never under `.swarm/`.
-- Clean lanes still require a fully populated row, such as
-  `[CLEAN] | workflow_lane | coverage_scope | evidence`; a missing attestation
-  is a coverage gap — retry it or surface BLOCKED, never a degraded review.
+- Clean lanes still require a fully populated row: base lanes use
+  `[CLEAN] | lane | coverage_scope | evidence`; micro and council lanes use
+  `[CLEAN] | micro_lane | coverage_scope | evidence`. A missing attestation is
+  a coverage gap — retry it or surface BLOCKED, never a degraded review.
 - Use fresh reviewer subagents for candidate validation and fresh critic
   subagents after review; settlement composes per item, so a reviewer retry
   invalidates only the critic claim for an item whose reviewer row changed.

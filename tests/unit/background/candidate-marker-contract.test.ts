@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import {
 	CANDIDATE_FIELD_COUNT,
 	CANDIDATE_FIELDS,
+	CANDIDATE_HEADERS,
 } from '../../../src/background/candidate-contract';
 import type {
 	ArtifactInput,
@@ -126,14 +127,11 @@ describe('CANDIDATE marker contract (FR-007)', () => {
 	});
 
 	test('SC-019: dispatch tool declares same 9-pipe formats as explorer prompt', () => {
-		// dispatch-lanes.ts lines 51 and 54 declare the same formats
-		const dispatchLines = dispatchSrc
-			.split('\n')
-			.filter((l) => l.includes('[CANDIDATE]') && l.includes('candidate_id'));
-		expect(dispatchLines.length).toBeGreaterThanOrEqual(2);
-
-		// Both format lines should have 9 pipes
-		for (const line of dispatchLines) {
+		// The dispatch suffix consumes the shared canonical format surface instead
+		// of duplicating literal headers that can drift from parser field order.
+		expect(dispatchSrc).toContain('CANDIDATE_HEADERS.base_explorer');
+		expect(dispatchSrc).toContain('CANDIDATE_HEADERS.micro_lane');
+		for (const line of Object.values(CANDIDATE_HEADERS)) {
 			const pipeCount = (line.match(/\|/g) || []).length;
 			expect(pipeCount).toBe(9);
 		}

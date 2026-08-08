@@ -37,6 +37,7 @@ export {
 	createEvaluationModelDispatcher,
 	resolveEvaluationAgentName,
 } from './model-dispatcher.js';
+export * from './pr-review-recovery.js';
 export * from './public-api.js';
 export * from './retention.js';
 export type {

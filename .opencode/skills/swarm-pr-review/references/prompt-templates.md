@@ -87,11 +87,15 @@ You must inspect or mark unavailable:
 7. Swarm artifacts/knowledge,
 8. the exact `base_sha...pr_head_sha` merge-base range and both endpoint revisions.
 
-Return:
+For a base explorer, return:
 [CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence
+
+For a micro-lane or council explorer, return:
+[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence
+
 Emit the marker-bearing header once, then unprefixed data rows.
-For a clean micro-lane, emit `[CLEAN] | micro_lane | coverage_scope | evidence`.
-For a clean base lane, emit `[CLEAN] | workflow_lane | coverage_scope | evidence`.
+For a clean micro-lane or council lane, emit `[CLEAN] | micro_lane | coverage_scope | evidence`.
+For a clean base lane, emit `[CLEAN] | lane | coverage_scope | evidence`.
 ```
 
 Under Profile A the orchestrator extracts candidates from the full lane

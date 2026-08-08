@@ -53,7 +53,9 @@ describe('applyExplorerFormatSuffix', () => {
 		const result = applyExplorerFormatSuffix(lanes);
 		expect(result[0].prompt).not.toBe(originalPrompt);
 		expect(result[0].prompt).toContain('CONTROLLER-BOUND OUTPUT IDENTITY');
-		expect(result[0].prompt).toContain('[CLEAN] | workflow_lane');
+		expect(result[0].prompt).toContain('[CLEAN] | lane');
+		expect(result[0].prompt).toContain('[CLEAN] | micro_lane');
+		expect(result[0].prompt).toContain('for swarm-pr-review:council discovery');
 		expect(result[0].prompt).toContain('at least 12 characters');
 		expect(result[0].prompt).toMatch(/at least 20\s+characters/);
 		expect(result[0].prompt).not.toContain(
@@ -69,6 +71,35 @@ describe('applyExplorerFormatSuffix', () => {
 		const once = applyExplorerFormatSuffix(lanes);
 		const twice = applyExplorerFormatSuffix(once);
 		expect(twice).toEqual(once);
+	});
+
+	test.each([
+		{
+			mode: 'swarm-pr-review:base',
+			expected: 'exact workflow_lane only in the `lane` field',
+		},
+		{
+			mode: 'swarm-pr-review:micro',
+			expected: 'exact workflow_lane only in the `micro_lane` field',
+		},
+	] as const)('binds $mode to its exact row-family field', ({
+		mode,
+		expected,
+	}) => {
+		_internals.getGeneratedAgentNames = () => ['swarm_explorer'];
+		const result = _test_exports.applyExplorerFormatSuffix(
+			[
+				{
+					id: 'L1',
+					agent: 'swarm_explorer',
+					prompt: 'inspect runtime',
+				},
+			],
+			{ failClosed: true, mode },
+		);
+		expect(result.ok).toBe(true);
+		if (!result.ok) throw new Error(result.errors.join('; '));
+		expect(result.lanes[0].prompt).toContain(expected);
 	});
 
 	test('appends the controller identity exactly once for a consolidated Tier-M lane', () => {
@@ -91,7 +122,10 @@ describe('applyExplorerFormatSuffix', () => {
 			twice[0].prompt.match(/CONTROLLER-BOUND OUTPUT IDENTITY/g),
 		).toHaveLength(1);
 		expect(twice[0].prompt).toContain(
-			'[CLEAN] | workflow_lane | coverage_scope | evidence',
+			'[CLEAN] | lane | coverage_scope | evidence',
+		);
+		expect(twice[0].prompt).toContain(
+			'[CLEAN] | micro_lane | coverage_scope | evidence',
 		);
 	});
 

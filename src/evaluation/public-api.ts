@@ -8,6 +8,7 @@ import {
 	computeCandidateInputContentHash,
 	computeTaskInputContentHash,
 } from './hashing.js';
+import { evaluatePrReviewRecoveryV1 } from './pr-review-recovery.js';
 import { type RunEvaluationOptions, runEvaluation } from './runner.js';
 import { type DecidePromotionInput, decidePromotion } from './statistics.js';
 import { savePromotionDecision } from './store.js';
@@ -55,6 +56,7 @@ export const evaluationV1 = Object.freeze(
 		(options: EvaluateCandidateV1Options) => evaluateCandidateV1(options),
 		{
 			evaluateCandidate: evaluateCandidateV1,
+			evaluatePrReviewRecovery: evaluatePrReviewRecoveryV1,
 			runEvaluation,
 			decidePromotion: (input: DecidePromotionInput) => decidePromotion(input),
 			hashTaskInput: computeTaskInputContentHash,
