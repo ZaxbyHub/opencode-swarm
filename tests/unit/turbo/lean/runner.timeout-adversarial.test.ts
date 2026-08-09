@@ -7,7 +7,10 @@
  * - Session orphan creation when timeout fires after session.create but before prompt
  * - Lock leak when dispatchLane has no timeout (infinite hang with locks held)
  * - Empty files array lane dispatch
- * - Concurrent timeout races on _timedOutLanes Map
+ *
+ * Concurrent timeout races on `_timedOutLanes` (formerly attack vector T6
+ * here) moved to `runner.timeout-adversarial-lane-state.test.ts` under
+ * FR-006 (500-line test-file cap) once this file grew past the cap.
  *
  * Strategy:
  * - Uses real tmpDir + real lane planning via _internals
@@ -669,145 +672,6 @@ describe('ATTACK VECTOR T5 — empty files array lane dispatch', () => {
 		} else {
 			expect(result.reason).toBe('NO_LANES');
 		}
-	});
-});
-
-// ════════════════════════════════════════════════════════════════════════════════
-// ATTACK VECTOR T6: Concurrent timeout race on _timedOutLanes Map
-// ════════════════════════════════════════════════════════════════════════════════
-
-describe('ATTACK VECTOR T6 — concurrent timeout race on _timedOutLanes', () => {
-	test('two lanes with same laneId do not interfere on _timedOutLanes', async () => {
-		writeMinimalPlan(1);
-		writeScopeFiles({ '1.1': ['src/a.ts'], '1.2': ['src/b.ts'] });
-
-		const sessionId1 = `session-1-${Math.random().toString(36).slice(2)}`;
-		const sessionId2 = `session-2-${Math.random().toString(36).slice(2)}`;
-
-		// Both lanes share the same laneId (adversarial input)
-		const lane1: LeanTurboLane = {
-			laneId: 'same-lane-id', // Same laneId
-			taskIds: ['1.1'],
-			files: ['src/a.ts'],
-			status: 'pending',
-		};
-		const lane2: LeanTurboLane = {
-			laneId: 'same-lane-id', // Same laneId
-			taskIds: ['1.2'],
-			files: ['src/b.ts'],
-			status: 'pending',
-		};
-
-		const createMock = mock((opts: { query: { directory: string } }) => {
-			const id = opts.query.directory === tmpDir ? sessionId1 : sessionId2;
-			return Promise.resolve({ data: { id }, error: null });
-		});
-		const promptMock = mock(() =>
-			Bun.sleep(500).then(() =>
-				Promise.resolve({
-					data: { parts: [{ type: 'text', text: 'Done' }] },
-					error: null,
-				}),
-			),
-		);
-		const deleteMock = mock(() => Promise.resolve());
-
-		const concurrentOps = {
-			create: createMock,
-			prompt: promptMock,
-			delete: deleteMock,
-		};
-
-		const runner = makeRunner({ generatedAgentNames: ['mega_coder'] });
-		injectMockSessionOps(runner, concurrentOps);
-
-		LeanTurboRunner._internals.laneDispatchTimeoutMs = 20;
-
-		// Dispatch both lanes with same laneId concurrently
-		const [result1, result2] = await Promise.all([
-			runner.dispatchLane(lane1, 'mega_coder'),
-			runner.dispatchLane(lane2, 'mega_coder'),
-		]);
-
-		// Wait for background completions
-		await Bun.sleep(600);
-
-		// Both should get timeout errors
-		expect(result1.ok).toBe(false);
-		expect(result2.ok).toBe(false);
-		expect(result1.error).toContain('timed out');
-		expect(result2.error).toContain('timed out');
-
-		// Both sessions should be cleaned up
-		expect(deleteMock).toHaveBeenCalled();
-	});
-
-	test('rapid concurrent timeouts on different lanes do not corrupt _timedOutLanes state', async () => {
-		writeMinimalPlan(1);
-		writeScopeFiles({
-			'1.1': ['src/a.ts'],
-			'1.2': ['src/b.ts'],
-		});
-
-		// 2 lanes that timeout quickly
-		const lanes: LeanTurboLane[] = [
-			{
-				laneId: 'lane-1',
-				taskIds: ['1.1'],
-				files: ['src/a.ts'],
-				status: 'pending',
-			},
-			{
-				laneId: 'lane-2',
-				taskIds: ['1.2'],
-				files: ['src/b.ts'],
-				status: 'pending',
-			},
-		];
-
-		// Fast create (resolves immediately), prompt rejects after delay
-		// This ensures _doDispatch settles when prompt rejects, triggering completion handler
-		const rejectPromptOps = {
-			create: mock(() =>
-				Promise.resolve({
-					data: { id: `session-${Math.random().toString(36).slice(2)}` },
-					error: null,
-				}),
-			),
-			prompt: mock(
-				() =>
-					new Promise((_, reject) =>
-						setTimeout(() => reject(new Error('Prompt rejected')), 20),
-					),
-			),
-			delete: mock(() => Promise.resolve()),
-		};
-
-		const runner = makeRunner({ generatedAgentNames: ['mega_coder'] });
-		injectMockSessionOps(runner, rejectPromptOps);
-
-		LeanTurboRunner._internals.laneDispatchTimeoutMs = 5;
-
-		// Fire all dispatches concurrently
-		const results = await Promise.all(
-			lanes.map((lane) => runner.dispatchLane(lane, 'mega_coder')),
-		);
-
-		// All should timeout (timeout fires at 5ms, prompt rejects at 20ms)
-		for (const result of results) {
-			expect(result.ok).toBe(false);
-			expect(result.error).toContain('timed out');
-		}
-
-		// Wait for background completions to clean up _timedOutLanes
-		// prompt rejects at 20ms, so by 100ms everything should be settled
-		await Bun.sleep(100);
-
-		// _timedOutLanes should be empty after all completions
-		const timedOutLanes = (
-			runner as unknown as { _timedOutLanes: Map<string, string> }
-		)._timedOutLanes;
-		expect(timedOutLanes.size).toBe(0);
 	});
 });
 

@@ -516,6 +516,27 @@ jobs:
             coverage-output.txt
             coverage/lcov.info
           if-no-files-found: warn
+      # Upload the coverage job's flake-annotations file `if: always()` so the
+      # downstream flake-detection workflow_run can pick it up alongside the
+      # unit shards' annotations (issue #1782). run-coverage-gate.sh always
+      # creates flake-annotations-coverage.txt unconditionally (`: >`), even
+      # on a clean run with no retries/failures, so this step normally always
+      # has a file to upload (a 0-byte one on a clean run). if-no-files-found:
+      # ignore is not about the skipped case — a step whose `if:` is false
+      # never evaluates the setting at all. It covers the case where the file
+      # was never created. The two upload steps are the only ones in this job
+      # carrying `always()`, so they still run when an earlier step failed:
+      # if install / build / the gate step itself fails, the script never
+      # executes and never creates the file (the common case), and likewise
+      # if the script aborts under `set -euo pipefail` before creating it.
+      # Neither must fail the job over a missing artifact.
+      - name: Upload coverage flake annotations
+        if: always() && github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: flake-annotations-coverage
+          path: flake-annotations-coverage.txt
+          if-no-files-found: ignore
 
   # Merge-queue-only: on pull_request all steps are skipped, job reports success
   # to satisfy required checks without doing work. Also skipped for release-please.

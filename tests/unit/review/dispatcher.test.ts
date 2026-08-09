@@ -169,11 +169,51 @@ describe('ephemeral agent dispatcher', () => {
 	});
 
 	test('aborts a stalled prompt and awaits bounded cleanup before returning', async () => {
+		// The old shape (`timeoutMs: 15` then `await Bun.sleep(40)`) had a
+		// single real timer racing a fixed 40ms observation window — 2.67x
+		// margin, not a removed race. The prompt mock below already never
+		// settles on its own (`return new Promise(() => {})`), so the
+		// dispatch race itself was already deterministic: the production
+		// `setTimeout` in `dispatchEphemeralAgent`
+		// (src/evaluation/ephemeral-agent-dispatcher.ts:238-241) is the only
+		// thing that can ever resolve it. The only nondeterminism left was
+		// the fixed 40ms wait used to *observe* that resolution.
+		//
+		// Fix: wait on the actual `'abort'` event the production timeout
+		// handler fires on `controller.signal`, captured here as
+		// `promptSignal` the moment the prompt mock is invoked (that call is
+		// where the signal first becomes observable to the test, before
+		// `awaitWithAbort` gets a chance to consume it). That event is a
+		// necessary and immediate consequence of the real 15ms timer plus
+		// abort propagation — nothing else in this dispatch can fire it — so
+		// awaiting it has zero margin instead of 2.67x. Delivered via a
+		// deferred so the never-settling prompt promise keeps its shape.
+		// Budget for the self-contained race below. `bun test`'s own
+		// `--timeout` (CLI or the per-test third argument) does NOT reliably
+		// preempt a test that is genuinely stuck on an `await` of a promise
+		// that never settles — confirmed empirically against this repo's Bun
+		// 1.3.14: a minimal `test('x', async () => { await new Promise(() =>
+		// {}) }, 3000)` still ran past both a 3000ms per-test budget and a
+		// 5000ms `--timeout` flag. So the FALSIFIABILITY probe for this test
+		// (removing `controller.abort()` from the production timeout handler)
+		// must be bounded by this test's OWN timer, not by the harness's.
+		const ABORT_WAIT_BUDGET_MS = 2000;
 		let promptSignal: AbortSignal | undefined;
 		let releaseDelete: (() => void) | undefined;
+		let resolveAbortSeen: () => void = () => undefined;
+		const abortSeen = new Promise<void>((resolve) => {
+			resolveAbortSeen = resolve;
+		});
 		const fake = fakeClient({
 			prompt: async (request: unknown) => {
 				promptSignal = (request as { signal: AbortSignal }).signal;
+				if (promptSignal.aborted) {
+					resolveAbortSeen();
+				} else {
+					promptSignal.addEventListener('abort', resolveAbortSeen, {
+						once: true,
+					});
+				}
 				return new Promise(() => {});
 			},
 			remove: () =>
@@ -196,7 +236,31 @@ describe('ephemeral agent dispatcher', () => {
 			return value;
 		});
 
-		await Bun.sleep(40);
+		await Promise.race([
+			abortSeen,
+			new Promise<never>((_, reject) => {
+				setTimeout(() => {
+					reject(
+						new Error(
+							`promptSignal never emitted 'abort' within ${ABORT_WAIT_BUDGET_MS}ms — ` +
+								'the production timeout handler in dispatchEphemeralAgent ' +
+								'(src/evaluation/ephemeral-agent-dispatcher.ts:238-241) may no ' +
+								'longer call controller.abort()',
+						),
+					);
+				}, ABORT_WAIT_BUDGET_MS);
+			}),
+		]);
+		// `abortSeen` resolves the instant `controller.abort()` fires — before
+		// `dispatchEphemeralAgent`'s own `awaitWithAbort` rejection has had a
+		// chance to propagate through its microtask chain into the `finally`
+		// block that issues the bounded `session.delete` call. A bounded
+		// microtask poll (no real timer — this loop advances one microtask
+		// tick per iteration, not wall-clock time) closes that ordering gap
+		// without reintroducing a wall-clock margin.
+		for (let i = 0; i < 1000 && fake.deleteRequest() === undefined; i++) {
+			await Promise.resolve();
+		}
 		expect(promptSignal?.aborted).toBe(true);
 		expect(fake.deleteRequest().path).toEqual({ id: 'review-session' });
 		expect(settled).toBe(false);
@@ -204,7 +268,7 @@ describe('ephemeral agent dispatcher', () => {
 
 		const result = await pending;
 		expect(result.status).toBe('timeout');
-	});
+	}, 4000);
 
 	test('caps the response transcript and preserves SDK error envelopes', async () => {
 		const promptCapped = await dispatchEphemeralAgent({
