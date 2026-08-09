@@ -11,7 +11,25 @@ import {
 } from './ephemeral-agent-dispatcher.js';
 
 export type EvaluationModelDispatchRequest = {
-	directory: string;
+	/**
+	 * The directory the ephemeral session is created against.
+	 *
+	 * This is the directory OpenCode uses to key permission state
+	 * (`Permission.state`, `Agent.state`, `ToolRegistry.state` are all built
+	 * through the directory-keyed `InstanceState` cache) AND to resolve
+	 * registered agents. It MUST be the invoking instance's directory (the
+	 * project root) so the session lands in the SAME permission partition as
+	 * the user's session — a foreign directory gets a fresh, empty `approved`
+	 * list and a private pending map that the user's TUI cannot reach, so an
+	 * `external_directory` prompt raised there hangs forever.
+	 *
+	 * The SDK's `session.create` has no separate working-directory field, so
+	 * this is also the agent's CWD. When the fixture the agent must inspect is
+	 * NOT under this directory, the caller conveys the fixture path via the
+	 * prompt (see gate-audit.ts `modelPrompt` and runner.ts
+	 * `createModelEvaluationExecutor`).
+	 */
+	sessionDirectory: string;
 	agentName: string;
 	modelId: string;
 	prompt: string;
@@ -164,7 +182,7 @@ export function createEvaluationModelDispatcher(
 					// eslint-disable-next-line no-await-in-loop
 					const agentsResult = await awaitWithAbort(
 						client.app.agents({
-							query: { directory: request.directory },
+							query: { directory: request.sessionDirectory },
 							signal: controller.signal,
 						}),
 						controller.signal,
@@ -186,7 +204,7 @@ export function createEvaluationModelDispatcher(
 					// eslint-disable-next-line no-await-in-loop
 					const result = await dispatchEphemeralAgent({
 						client,
-						directory: request.directory,
+						directory: request.sessionDirectory,
 						parentSessionId: request.parentSessionId,
 						agentName: resolvedAgentName,
 						model: requestedModel,

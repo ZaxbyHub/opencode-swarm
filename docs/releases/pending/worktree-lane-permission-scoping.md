@@ -151,12 +151,13 @@ hang.
   text. The explanation is therefore delivered out of band (advisory plus
   `.swarm/events.jsonl`), not in the model-visible denial.
 - Sessions created against a foreign directory that is **not** a swarm worktree
-  lane are out of scope and unchanged: `src/evaluation/ephemeral-agent-dispatcher.ts`
-  reaches `os.tmpdir()` roots via `src/evaluation/runner.ts` and
-  `src/evaluation/gate-audit.ts`. Those can hang the same way, but applying lane
-  policy to a non-lane session would violate the requirement that ordinary
-  sessions are untouched. The gap is recorded, with evidence, in the new
-  guardrail's inventory so it cannot be forgotten.
+  lane were initially out of scope here: `src/evaluation/ephemeral-agent-dispatcher.ts`
+  reached `os.tmpdir()` roots via `src/evaluation/runner.ts` and
+  `src/evaluation/gate-audit.ts`. That gap is now closed by #2009, which binds
+  all evaluation ephemeral sessions to the invoking instance's project root
+  (same permission partition as the user's session) instead of the isolated
+  fixture directory. The guardrail inventory entry for the evaluation dispatcher
+  has been updated from `foreign-non-lane-documented` to `same-instance`.
 - One directory family that OpenCode base-allows for every agent is **not**
   re-granted inside a lane: `config.references` directories, which the plugin
   cannot resolve from the config hook. A lane will be denied access to them; add

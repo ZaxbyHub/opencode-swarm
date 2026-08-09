@@ -80,18 +80,16 @@ const DECLARED_SITES: DeclaredSite[] = [
 	{
 		file: 'src/evaluation/ephemeral-agent-dispatcher.ts',
 		directoryExpr: 'request.directory',
-		classification: 'foreign',
-		disposition: 'foreign-non-lane-documented',
+		classification: 'same-instance',
 		note:
-			'Two production chains, both under os.tmpdir() and neither a swarm worktree lane: ' +
-			'src/evaluation/runner.ts:750 passes args.isolatedRoot (a subpath of a disposable ' +
-			'worktree created at path.join(os.tmpdir(), WORKTREE_PARENT) by ' +
-			'src/evaluation/disposable-worktree.ts), and src/evaluation/gate-audit.ts:480 passes ' +
-			'a mkdtempSync root under os.tmpdir(). Both get a fresh permission partition and can ' +
-			'hang the same way. NOT covered by lane-permission handling: resolveLaneContext ' +
-			'requires a swarm-OWNED linked git worktree (a `swarm/`/`swarm-lane/` branch, or the ' +
-			'.swarm-worktrees path fallback) and neither temp root is one, and the approved ' +
-			'policy explicitly forbids applying lane policy to non-lane sessions. Known gap.',
+			'#2009: all evaluation dispatcher callers (gate-audit.ts, runner.ts ' +
+			'createModelEvaluationExecutor, consensus/miner.ts) now pass the invoking ' +
+			"instance's project root as sessionDirectory, which flows through to " +
+			'request.directory here. The fixture path is conveyed to the agent via the ' +
+			'prompt as an absolute path (the SDK has no separate working-directory field). ' +
+			'An external_directory permission request for the fixture path, if raised, ' +
+			"now lands in the project-root instance the user's TUI can answer — it no " +
+			'longer hangs in an unreachable foreign partition.',
 	},
 	{
 		file: 'src/full-auto/oversight.ts',

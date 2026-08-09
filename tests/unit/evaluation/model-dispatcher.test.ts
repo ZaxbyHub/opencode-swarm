@@ -37,16 +37,27 @@ function fakeClient(options?: {
 }) {
 	let deleted = 0;
 	let promptRequest: unknown;
+	let agentsDirectory: string | undefined;
+	let createDirectory: string | undefined;
 	return {
 		value: {
 			app: {
-				agents: async () => ({
-					data: (options?.agents ?? ['reviewer']).map((name) => ({ name })),
-				}),
+				agents: async (req?: { query?: { directory?: string } }) => {
+					agentsDirectory = req?.query?.directory;
+					return {
+						data: (options?.agents ?? ['reviewer']).map((name) => ({
+							name,
+						})),
+					};
+				},
 			},
 			session: {
 				create:
-					options?.create ?? (async () => ({ data: { id: 'session-1' } })),
+					options?.create ??
+					(async (req?: { query?: { directory?: string } }) => {
+						createDirectory = req?.query?.directory;
+						return { data: { id: 'session-1' } };
+					}),
 				prompt: async (request: unknown) => {
 					promptRequest = request;
 					return options?.prompt
@@ -65,6 +76,8 @@ function fakeClient(options?: {
 			},
 		} as never,
 		deleted: () => deleted,
+		agentsDirectory: () => agentsDirectory,
+		createDirectory: () => createDirectory,
 		promptRequest: () =>
 			promptRequest as {
 				body: Record<string, unknown>;
@@ -74,7 +87,7 @@ function fakeClient(options?: {
 
 function request(overrides: Record<string, unknown> = {}) {
 	return {
-		directory: process.cwd(),
+		sessionDirectory: process.cwd(),
 		agentName: 'reviewer',
 		modelId: 'configured',
 		prompt: 'inspect',
@@ -160,6 +173,22 @@ describe('evaluation model dispatcher', () => {
 		});
 		expect(fake.deleted()).toBe(1);
 		expect(debugLog).not.toHaveBeenCalled();
+	});
+
+	test('#2009: forwards sessionDirectory to both agent discovery and session create (same permission partition)', async () => {
+		// OpenCode keys permission state per directory. The session directory MUST
+		// be the invoking instance's directory so the ephemeral session lands in
+		// the SAME permission universe — a foreign directory gets an empty
+		// approved list and a private pending map the TUI cannot reach, so a
+		// prompt raised there hangs forever. Both app.agents and session.create
+		// must receive the SAME sessionDirectory (agents are registered per-dir
+		// for the plugin; the session must match).
+		const fake = fakeClient();
+		const dispatch = createEvaluationModelDispatcher(fake.value);
+		const sessionDir = '/project/root';
+		await dispatch(request({ sessionDirectory: sessionDir }));
+		expect(fake.agentsDirectory()).toBe(sessionDir);
+		expect(fake.createDirectory()).toBe(sessionDir);
 	});
 
 	test('omits the system field when evaluation supplies no override', async () => {

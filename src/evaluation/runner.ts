@@ -86,6 +86,15 @@ export type EvaluationExecutor = (args: {
 	payload: string;
 	seed: string;
 	abortSignal: AbortSignal;
+	/**
+	 * The invoking instance's directory (the project root). An executor that
+	 * creates an OpenCode session MUST bind it here — NOT to `isolatedRoot` —
+	 * so the session lands in the same permission partition as the user's
+	 * session (#2009). OpenCode keys permission state per directory; a foreign
+	 * directory gets an empty approved list and a private pending map the TUI
+	 * cannot reach, so a prompt raised there hangs forever.
+	 */
+	projectRoot: string;
 }) => Promise<EvaluationExecutorResult>;
 
 export type RunEvaluationOptions = {
@@ -302,6 +311,7 @@ async function runExecutorWithinBudget(args: {
 				payload: args.payload,
 				seed: args.seed,
 				abortSignal: controller.signal,
+				projectRoot: args.options.projectRoot,
 			}),
 			aborted,
 		]);
@@ -746,8 +756,14 @@ export function createModelEvaluationExecutor(
 	parentSessionId?: string,
 ): EvaluationExecutor {
 	return async (args) => {
+		// Bind the ephemeral session to the invoking instance's directory (the
+		// project root) so it lands in the SAME permission partition as the
+		// user's session. OpenCode keys permission state per directory; a
+		// foreign directory gets an empty approved list and a private pending
+		// map the user's TUI cannot reach, so an external_directory prompt
+		// raised there hangs forever. The fixture is conveyed via the prompt.
 		const result = await dispatcher({
-			directory: args.isolatedRoot,
+			sessionDirectory: args.projectRoot,
 			agentName: args.candidate.agent ?? 'reviewer',
 			modelId: args.candidate.model,
 			system: args.payload,
@@ -755,6 +771,7 @@ export function createModelEvaluationExecutor(
 				'EVALUATION TASK:',
 				args.instruction,
 				'',
+				`Work ONLY in this directory: ${args.isolatedRoot}`,
 				'Return the task-required scorer payload exactly.',
 			].join('\n'),
 			timeoutMs: args.task.scorer.timeoutMs,

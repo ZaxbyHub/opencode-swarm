@@ -1060,7 +1060,7 @@ async function summarizeStatements(
 	for (const attribute of budget) {
 		try {
 			const result = await dispatcher({
-				directory,
+				sessionDirectory: directory,
 				agentName: SUMMARIZATION_AGENT,
 				modelId: deps.summarizationModelId ?? 'configured',
 				system: SUMMARIZATION_SYSTEM,
