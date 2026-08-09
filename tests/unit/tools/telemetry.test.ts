@@ -14,6 +14,7 @@ import * as path from 'node:path';
 import {
 	addTelemetryListener,
 	emit,
+	flushAndDrainTelemetry,
 	initTelemetry,
 	resetTelemetryForTesting,
 	rotateTelemetryIfNeeded,
@@ -287,10 +288,58 @@ describe('telemetry module', () => {
 			rotateTelemetryIfNeeded(100);
 
 			// The new telemetry.jsonl won't exist until written to, so we can't compare sizes directly
-			// Instead, verify that the rotated file has the old content
-			expect(fs.existsSync(rotatedPath)).toBe(true);
-			const rotatedSize = fs.statSync(rotatedPath).size;
-			expect(rotatedSize).toBe(originalSize);
+		// Instead, verify that the rotated file has the old content
+		expect(fs.existsSync(rotatedPath)).toBe(true);
+		const rotatedSize = fs.statSync(rotatedPath).size;
+		expect(rotatedSize).toBe(originalSize);
+	});
+	});
+
+	describe('flushAndDrainTelemetry (issue #2030)', () => {
+		test('drains buffered records to disk so a subsequent copyFile sees them', async () => {
+			const swarmDir = path.join(sharedTempDir, '.swarm');
+			const telemetryPath = path.join(swarmDir, 'telemetry.jsonl');
+
+			// Emit several records. The WriteStream buffers in memory, so
+			// without a flush these may not yet be on disk.
+			emit('heartbeat', { n: 1 });
+			emit('heartbeat', { n: 2 });
+			emit('heartbeat', { n: 3 });
+
+			// Flush + drain: awaits the stream 'finish' callback, then reopens.
+			await flushAndDrainTelemetry();
+
+			// The on-disk file must now contain all three records (the
+			// archive-copy path in close.ts reads the file directly via
+			// fs.copyFile, so any unflushed buffer would be lost).
+			const content = fs.readFileSync(telemetryPath, 'utf-8');
+			const lines = content.split('\n').filter((l) => l.trim());
+			expect(lines.length).toBe(3);
+			expect(lines.every((l) => l.includes('"event":"heartbeat"'))).toBe(
+				true,
+			);
+		});
+
+		test('subsequent emits after flush continue to write to the file', async () => {
+			const swarmDir = path.join(sharedTempDir, '.swarm');
+			const telemetryPath = path.join(swarmDir, 'telemetry.jsonl');
+
+			emit('heartbeat', { before: true });
+			await flushAndDrainTelemetry();
+			// After flush the stream is reopened in append mode, so a further
+			// emit must still land on disk after a second flush.
+			emit('heartbeat', { after: true });
+			await flushAndDrainTelemetry();
+
+			const content = fs.readFileSync(telemetryPath, 'utf-8');
+			expect(content).toContain('"before":true');
+			expect(content).toContain('"after":true');
+		});
+
+		test('is a no-op when telemetry is not initialized', async () => {
+			resetTelemetryForTesting();
+			// No initTelemetry call — _writeStream is null. Must not throw.
+			await flushAndDrainTelemetry();
 		});
 	});
 

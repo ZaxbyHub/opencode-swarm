@@ -1,7 +1,10 @@
-import * as child_process from 'node:child_process';
 import * as fsSync from 'node:fs';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import {
+	archiveSqliteSnapshot,
+	type SqliteRowCounts,
+} from './archive-sqlite';
 import { loadPluginConfigWithMeta } from '../config';
 import type { Plan } from '../config/plan-schema';
 import {
@@ -48,7 +51,7 @@ import {
 	swarmState,
 } from '../state';
 import { executeWriteRetro } from '../tools/write-retro';
-import { mergeEnvForChild } from '../utils/bun-compat';
+import { telemetry as telemetryEmit } from '../telemetry';
 import { log } from '../utils/logger';
 
 interface PlanPhase {
@@ -81,6 +84,32 @@ interface CurationCounts {
 
 interface CloseKnowledgeEntry {
 	created_at?: string;
+}
+
+// ── Structured archive result (issue #2030) ────────────────────────────────
+// One result per archived artifact. This is the single source of truth from
+// which the user-facing prose, the clean-stage gate (archivedActiveStateFiles),
+// the failure map, AND the `close_archive_result` telemetry event are all
+// derived — so none of them can disagree (issue item 6 acceptance: "Archive
+// prose and canonical event are derived from the same result object and cannot
+// disagree").
+export type ArchiveRequiredness = 'required' | 'optional';
+export type ArchiveAttempt = 'not_attempted' | 'succeeded' | 'failed';
+export type ArchiveValidation = 'not_applicable' | 'passed' | 'failed';
+export type ArchiveSourceDisposition = 'absent' | 'retained' | 'removed';
+
+export interface ArtifactArchiveResult {
+	artifact: string;
+	requiredness: ArchiveRequiredness;
+	attempt: ArchiveAttempt;
+	validation: ArchiveValidation;
+	source_disposition: ArchiveSourceDisposition;
+	method: string; // 'copy' | 'vacuum_into' | 'none'
+	reason_code: string;
+	/** Counts only (no row content), present for validated sqlite snapshots. */
+	row_counts?: SqliteRowCounts;
+	/** Non-sensitive diagnostic. */
+	detail?: string;
 }
 
 export interface ArchiveStageContext {
@@ -126,6 +155,8 @@ export interface CloseStageContext {
 	archivedActiveStateFiles: Set<string>;
 	archivedActiveStateDirs: Set<string>;
 	archiveFailureReasons: Map<string, string>;
+	/** Structured per-artifact results — single source of truth (issue #2030). */
+	archiveResults: ArtifactArchiveResult[];
 	timestamp: string;
 	archiveDir: string;
 	archiveSuffix: string;
@@ -283,7 +314,13 @@ const ARCHIVE_ARTIFACTS = [
 	'repo-graph.json',
 	'doc-manifest.json',
 	'dark-matter.md',
+	// telemetry.jsonl (active) AND telemetry.jsonl.1 (rotated) are archived as a
+	// set so the bundle is a complete ordered telemetry snapshot. Only one `.1`
+	// generation ever exists (rotateTelemetryIfNeeded produces no `.2`), so
+	// archiving both is complete and non-overlapping. The active stream is
+	// flushed before archiving via flushAndDrainTelemetry (issue #2030 item 8).
 	'telemetry.jsonl',
+	'telemetry.jsonl.1',
 	'swarm.db',
 	// swarm.db-shm / swarm.db-wal are intentionally NOT listed: they are
 	// transient SQLite sidecars recreated on next open. They are never archived
@@ -361,6 +398,11 @@ const ACTIVE_STATE_TO_CLEAN = [
 	'doc-manifest.json',
 	'dark-matter.md',
 	'telemetry.jsonl',
+	// telemetry.jsonl.1 is the rotated generation (rotateTelemetryIfNeeded
+	// renames telemetry.jsonl → telemetry.jsonl.1). Without it in the clean
+	// set, a rotated generation would be orphaned on disk after close. Paired
+	// with its ARCHIVE_ARTIFACTS entry so it is archived then cleaned.
+	'telemetry.jsonl.1',
 	'session-reflection.md',
 	'spec.md',
 	'spec-staleness.json',
@@ -412,6 +454,18 @@ const KNOWLEDGE_FAMILY_ARTIFACTS = new Set([
 	'knowledge.jsonl',
 	'knowledge-rejected.jsonl',
 ]);
+
+/**
+ * Artifacts whose absence is a genuine state anomaly (vs the normal "optional,
+ * session-generated, may simply not exist" case). `plan.json`/`plan-ledger.jsonl`
+ * back the authoritative plan state (plan-durability invariant 5); their
+ * absence in a plan-based session warrants a warning. All other artifacts —
+ * including `swarm.db`, which `getProjectDb` creates lazily only when a
+ * DB-backed tool actually runs — are optional: a fresh or plan-free session
+ * legitimately has none of them, and an absent optional artifact is reported
+ * as `source_disposition: 'absent'`, NOT as a failure (issue #2030 item 7).
+ */
+const REQUIRED_ARTIFACTS = new Set(['plan.json', 'plan-ledger.jsonl']);
 
 /**
  * Active-state directories to archive and clean after archiving.
@@ -918,126 +972,6 @@ export async function runFinalizeStage(ctx: CloseStageContext): Promise<void> {
 }
 
 /**
- * Copies a WAL-mode SQLite database to a destination path using a safe
- * two-step mechanism that avoids capturing uncommitted WAL pages:
- *
- *   1. Run PRAGMA wal_checkpoint(TRUNCATE) to flush all WAL pages into the
- *      main DB file and truncate the WAL to zero length.
- *   2. Copy only the .db file (skip -shm/-wal, which are transient by design).
- *
- * Falls back to raw copyFile if the sqlite3 CLI is not available, logging
- * a warning so operators know the copy may include uncommitted WAL state.
- *
- * Returns `{ success, skipped?, reason? }` so callers can distinguish a
- * silent ENOENT skip from a real failure.
- */
-async function copySqliteSafe(
-	srcPath: string,
-	destPath: string,
-	laneEnv?: Record<string, string>,
-): Promise<
-	| { success: true; skipped?: true; reason?: string }
-	| { success: false; reason: string; skipped?: boolean }
-> {
-	// Source must exist before invoking sqlite3 — sqlite3 will silently CREATE
-	// an empty DB for a missing path, which would cause a fabricated file to
-	// be archived instead of a clean ENOENT skip.
-	if (!fsSync.existsSync(srcPath)) {
-		return {
-			success: true,
-			skipped: true,
-			reason: 'source does not exist (ENOENT)',
-		};
-	}
-
-	// Step 1 — flush WAL → main DB via sqlite3 CLI (no SQLite library dep).
-	let checkpointVerified = false;
-	try {
-		const result = _internals.spawnSync(
-			'sqlite3',
-			[srcPath, 'PRAGMA wal_checkpoint(TRUNCATE);'],
-			{
-				cwd: path.dirname(srcPath),
-				encoding: 'utf-8',
-				stdio: ['ignore', 'pipe', 'pipe'],
-				timeout: 10_000,
-				windowsHide: true,
-				maxBuffer: 1024,
-				envOverrides: laneEnv,
-			},
-		);
-		if (result.error) {
-			const code = (result.error as NodeJS.ErrnoException).code;
-			if (code === 'ENOENT') {
-				// sqlite3 CLI not installed — fall back to raw copy with warning
-				try {
-					await fs.copyFile(srcPath, destPath);
-					return {
-						success: true,
-						reason: 'copied without WAL checkpoint (sqlite3 CLI unavailable)',
-					};
-				} catch (copyErr) {
-					return {
-						success: false,
-						reason: `fallback copy failed: ${copyErr instanceof Error ? copyErr.message : String(copyErr)}`,
-					};
-				}
-			}
-			// Other spawnSync errors (ETIMEDOUT, etc.)
-			return {
-				success: false,
-				reason: `wal_checkpoint failed: ${result.error instanceof Error ? result.error.message : String(result.error)}`,
-			};
-		}
-		if (result.status !== 0) {
-			return {
-				success: false,
-				reason: `wal_checkpoint exited with code ${result.status}`,
-			};
-		}
-
-		// PRAGMA wal_checkpoint(TRUNCATE) output format:
-		//   busy|log|checkpointed
-		//   0|0|0          ← busy=0 means checkpoint completed
-		//   1|104|103      ← busy=1 means checkpoint incomplete
-		const output = ((result.stdout as string) || '').trim();
-		const lines = output.split('\n').filter((l) => l.trim());
-		if (lines.length >= 1) {
-			const dataLine = lines[0];
-			const columns = dataLine.split('|');
-			const busyFlag = parseInt(columns[0], 10);
-			checkpointVerified = !Number.isNaN(busyFlag) && busyFlag === 0;
-		}
-	} catch (err) {
-		return {
-			success: false,
-			reason: `wal_checkpoint error: ${err instanceof Error ? err.message : String(err)}`,
-		};
-	}
-
-	// Step 2 — copy only the .db file; -shm/-wal are transient and intentionally skipped.
-	// Only mark as "safe to clean" (no reason) when the WAL checkpoint was verified complete.
-	// In all other cases, preserve the original by including a reason so the caller
-	// knows not to delete the source swarm.db.
-	try {
-		await fs.copyFile(srcPath, destPath);
-		if (checkpointVerified) {
-			return { success: true };
-		}
-		return {
-			success: true,
-			reason:
-				'WAL checkpoint incomplete (busy) — archive copy may be stale, original preserved',
-		};
-	} catch (err) {
-		return {
-			success: false,
-			reason: `copy failed: ${err instanceof Error ? err.message : String(err)}`,
-		};
-	}
-}
-
-/**
  * STAGE 2: ARCHIVE
  *
  * Creates a timestamped archive bundle under .swarm/archive/, copies flat-file
@@ -1057,15 +991,32 @@ export async function runArchiveStage(ctx: CloseStageContext): Promise<void> {
 	try {
 		await fs.mkdir(ctx.archiveDir, { recursive: true });
 
+		// Flush the telemetry write stream BEFORE archiving its files. The
+		// writer holds an open buffered WriteStream whose in-memory buffer is
+		// not on disk until drained; without this, archiving telemetry.jsonl
+		// via fs.copyFile would silently lose the session's tail records
+		// (issue #2030 item 8). Fail-open: a flush failure never blocks close.
+		try {
+			await _internals.flushAndDrainTelemetry();
+		} catch (flushErr) {
+			const msg =
+				flushErr instanceof Error ? flushErr.message : String(flushErr);
+			ctx.warnings.push(`Telemetry flush before archive failed: ${msg}`);
+		}
+
 		// Copy swarm artifacts to archive.
-		// Tracks per-artifact failures so the clean-stage "Preserved …" message
-		// can distinguish "file absent" (ENOENT, silent) from lock/perm/space
-		// errors (surfaced as warnings with the actual errno code).
+		// Each artifact produces a structured ArtifactArchiveResult pushed into
+		// ctx.archiveResults — the single source of truth from which the
+		// user-facing prose, the clean-stage gate (archivedActiveStateFiles),
+		// the failure map, and the close_archive_result telemetry event are all
+		// derived (so none can disagree — issue #2030 item 6).
+		//
 		// WAL sidecar files (swarm.db-shm/-wal) are transient SQLite internals
 		// that SQLite recreates on next open; they are deliberately absent from
 		// ARCHIVE_ARTIFACTS/ACTIVE_STATE_TO_CLEAN, so they are neither archived
-		// nor cleaned (left in place). swarm.db itself is handled by
-		// copySqliteSafe below, which copies only the .db file.
+		// nor cleaned (left in place). swarm.db itself is snapshotted via the
+		// in-process VACUUM INTO engine (archiveSqliteSnapshot), which produces
+		// a single self-contained, transactionally-consistent file.
 
 		// When linked, the knowledge family lives in the shared link store, which
 		// is cohort-owned. Do not archive or clean it from a single worktree's
@@ -1085,36 +1036,64 @@ export async function runArchiveStage(ctx: CloseStageContext): Promise<void> {
 
 			const srcPath = path.join(ctx.swarmDir, artifact);
 			const destPath = path.join(ctx.archiveDir, artifact);
+			const requiredness: ArchiveRequiredness = REQUIRED_ARTIFACTS.has(
+				artifact,
+			)
+				? 'required'
+				: 'optional';
 
 			if (artifact === 'swarm.db') {
-				// SQLite-safe path: checkpoint WAL first, then copy only the .db file.
-				// Sidecar files (-shm/-wal) are transient SQLite internals and are
-				// intentionally neither archived nor cleaned — SQLite recreates them
-				// on next open, so they are left in place (no warning is emitted).
-				const result = await copySqliteSafe(srcPath, destPath, undefined);
-				if (result.skipped) {
-					// ENOENT — file absent; treat as silent skip, same as other artifacts.
-				} else if (result.success) {
+				// In-process VACUUM INTO snapshot via the shared, runtime-portable
+				// loader (src/db/sqlite-loader.ts). Produces a single self-contained
+				// file (journal_mode=delete, no WAL sidecars) containing ALL committed
+				// rows and EXCLUDING uncommitted writers (spike-proven under Bun + Node).
+				// Sidecar files (-shm/-wal) are transient and intentionally neither
+				// archived nor cleaned — left in place, no warning.
+				const r = await archiveSqliteSnapshot({
+					sourcePath: srcPath,
+					destDir: ctx.archiveDir,
+					destName: artifact,
+				});
+				const result: ArtifactArchiveResult = {
+					artifact,
+					requiredness,
+					attempt: r.attempt,
+					validation: r.validation,
+					source_disposition:
+						r.attempt === 'succeeded'
+							? 'retained'
+							: r.source_disposition,
+					method: r.method,
+					reason_code: r.reason_code,
+					detail: r.detail,
+					row_counts: r.rowCounts,
+				};
+				ctx.archiveResults.push(result);
+				if (
+					r.attempt === 'succeeded' &&
+					r.validation === 'passed'
+				) {
 					ctx.archivedFileCount++;
-					if (result.reason) {
-						// Fallback path — WAL checkpoint NOT performed (sqlite3 CLI unavailable,
-						// or other non-fatal issue). Archive copy was created, but original is
-						// PRESERVED to prevent data loss (uncheckpointed WAL pages in swarm.db-wal
-						// would be orphaned if base is deleted).
-						ctx.warnings.push(
-							`Archived ${artifact}: ${result.reason}. Original preserved to prevent data loss.`,
-						);
-						// DON'T add to archivedActiveStateFiles — original swarm.db is preserved
-					} else {
-						// WAL checkpoint succeeded — safe to clean the original
+					if (ACTIVE_STATE_TO_CLEAN.includes(artifact)) {
 						ctx.archivedActiveStateFiles.add(artifact);
 					}
-				} else {
-					ctx.archiveFailureReasons.set(artifact, result.reason);
+				} else if (
+					!(
+						r.attempt === 'not_attempted' &&
+						r.source_disposition === 'absent'
+					)
+				) {
+					// Real failure (not a clean absence). Truthful warning; source
+					// is preserved (archiveSqliteSnapshot never deletes the source).
+					ctx.archiveFailureReasons.set(
+						artifact,
+						`${r.reason_code}: ${r.detail ?? ''}`,
+					);
 					ctx.warnings.push(
-						`Failed to archive ${artifact}: ${result.reason}. File preserved (not cleaned up).`,
+						`Failed to archive ${artifact} [${r.reason_code}]: ${r.detail ?? ''}. Source preserved.`,
 					);
 				}
+				// absent optional → silent (no warning, no failure map entry)
 			} else {
 				try {
 					await fs.copyFile(srcPath, destPath);
@@ -1122,12 +1101,36 @@ export async function runArchiveStage(ctx: CloseStageContext): Promise<void> {
 					if (ACTIVE_STATE_TO_CLEAN.includes(artifact)) {
 						ctx.archivedActiveStateFiles.add(artifact);
 					}
+					ctx.archiveResults.push({
+						artifact,
+						requiredness,
+						attempt: 'succeeded',
+						validation: 'not_applicable',
+						source_disposition: ACTIVE_STATE_TO_CLEAN.includes(
+							artifact,
+						)
+							? 'retained'
+							: 'retained',
+						method: 'copy',
+						reason_code: 'ok',
+					});
 				} catch (err: unknown) {
 					const errno = (err as NodeJS.ErrnoException)?.code;
 					if (errno === 'ENOENT') {
-						// File absent — expected for optional artifacts; silent skip.
+						// File absent — expected for optional artifacts; silent skip,
+						// recorded as absent so the structured result is truthful.
+						ctx.archiveResults.push({
+							artifact,
+							requiredness,
+							attempt: 'not_attempted',
+							validation: 'not_applicable',
+							source_disposition: 'absent',
+							method: 'none',
+							reason_code: 'source_absent',
+						});
 					} else {
-						const reason = err instanceof Error ? err.message : String(err);
+						const reason =
+							err instanceof Error ? err.message : String(err);
 						ctx.archiveFailureReasons.set(
 							artifact,
 							`${errno ?? 'unknown'}: ${reason}`,
@@ -1135,6 +1138,16 @@ export async function runArchiveStage(ctx: CloseStageContext): Promise<void> {
 						ctx.warnings.push(
 							`Failed to archive ${artifact} [${errno ?? 'unknown'}]: ${reason}. File preserved (not cleaned up).`,
 						);
+						ctx.archiveResults.push({
+							artifact,
+							requiredness,
+							attempt: 'failed',
+							validation: 'not_applicable',
+							source_disposition: 'retained',
+							method: 'copy',
+							reason_code: 'copy_failed',
+							detail: `${errno ?? 'unknown'}: ${reason}`,
+						});
 					}
 				}
 			}
@@ -1154,6 +1167,18 @@ export async function runArchiveStage(ctx: CloseStageContext): Promise<void> {
 				await fs.copyFile(srcPath, destPath);
 				ctx.archivedFileCount++;
 				ctx.archivedActiveStateFiles.add(artifact);
+				// Record in the structured result so the close_archive_result
+				// event's artifacts[] array is complete (issue #2030: prose and
+				// event must derive from the same result object).
+				ctx.archiveResults.push({
+					artifact,
+					requiredness: 'optional',
+					attempt: 'succeeded',
+					validation: 'not_applicable',
+					source_disposition: 'retained',
+					method: 'copy',
+					reason_code: 'ok',
+				});
 			} catch (err: unknown) {
 				const errno = (err as NodeJS.ErrnoException)?.code;
 				if (errno !== 'ENOENT') {
@@ -1165,6 +1190,26 @@ export async function runArchiveStage(ctx: CloseStageContext): Promise<void> {
 					ctx.warnings.push(
 						`Failed to archive ${artifact} [${errno ?? 'unknown'}]: ${reason}. File preserved (not cleaned up).`,
 					);
+					ctx.archiveResults.push({
+						artifact,
+						requiredness: 'optional',
+						attempt: 'failed',
+						validation: 'not_applicable',
+						source_disposition: 'retained',
+						method: 'copy',
+						reason_code: 'copy_failed',
+						detail: `${errno ?? 'unknown'}: ${reason}`,
+					});
+				} else {
+					ctx.archiveResults.push({
+						artifact,
+						requiredness: 'optional',
+						attempt: 'not_attempted',
+						validation: 'not_applicable',
+						source_disposition: 'absent',
+						method: 'none',
+						reason_code: 'source_absent',
+					});
 				}
 			}
 		}
@@ -1201,7 +1246,62 @@ export async function runArchiveStage(ctx: CloseStageContext): Promise<void> {
 			}
 		}
 
-		ctx.archiveResult = `Archived ${ctx.archivedFileCount} artifact(s) to .swarm/archive/swarm-${ctx.timestamp}-${ctx.archiveSuffix}/`;
+		// Derive the user-facing prose AND the telemetry event from the SAME
+		// ctx.archiveResults array so they cannot disagree (issue #2030 item 6).
+		const succeededCount = ctx.archiveResults.filter(
+			(r) => r.attempt === 'succeeded',
+		).length;
+		const failedCount = ctx.archiveResults.filter(
+			(r) => r.attempt === 'failed',
+		).length;
+		const absentCount = ctx.archiveResults.filter(
+			(r) => r.source_disposition === 'absent',
+		).length;
+		const archiveValid = failedCount === 0;
+		// archive_empty: at least one sqlite snapshot succeeded AND every such
+		// snapshot carried zero domain rows. (No sqlite snapshot at all → not
+		// "empty", just not applicable; archive_empty stays false.)
+		const sqliteSnapshots = ctx.archiveResults.filter(
+			(r) => r.method === 'vacuum_into' && r.attempt === 'succeeded',
+		);
+		const archiveEmpty =
+			sqliteSnapshots.length > 0 &&
+			sqliteSnapshots.every(
+				(r) =>
+					(r.row_counts?.project_constraints ?? 0) === 0 &&
+					(r.row_counts?.qa_gate_profile ?? 0) === 0,
+			);
+		const bundleName = `swarm-${ctx.timestamp}-${ctx.archiveSuffix}`;
+		ctx.archiveResult =
+			failedCount > 0
+				? `Archive partial: ${succeededCount} succeeded, ${failedCount} failed, ${absentCount} absent (see warnings). Bundle: .swarm/archive/${bundleName}/`
+				: `Archived ${ctx.archivedFileCount} artifact(s) to .swarm/archive/${bundleName}/`;
+
+		// One structured event — counts only, no row content (issue items 6, 9).
+		try {
+			telemetryEmit.closeArchiveResult({
+				archive_valid: archiveValid,
+				archive_empty: archiveEmpty,
+				file_count: ctx.archivedFileCount,
+				bundle: bundleName,
+				artifacts: ctx.archiveResults.map((r) => ({
+					artifact: r.artifact,
+					requiredness: r.requiredness,
+					attempt: r.attempt,
+					validation: r.validation,
+					source_disposition: r.source_disposition,
+					method: r.method,
+					reason_code: r.reason_code,
+					...(r.row_counts ? { row_counts: r.row_counts } : {}),
+				})),
+			});
+		} catch (telemetryErr) {
+			// Telemetry must never block close; record and continue.
+			log(
+				'[close-command] close_archive_result telemetry emit failed:',
+				telemetryErr,
+			);
+		}
 	} catch (archiveError) {
 		ctx.warnings.push(
 			`Archive creation failed: ${archiveError instanceof Error ? archiveError.message : String(archiveError)}`,
@@ -1948,6 +2048,7 @@ export async function handleCloseCommand(
 			archivedActiveStateFiles: new Set(),
 			archivedActiveStateDirs: new Set(),
 			archiveFailureReasons: new Map(),
+			archiveResults: [],
 			timestamp: '',
 			archiveDir: '',
 			archiveSuffix: '',
@@ -2241,28 +2342,13 @@ export const _internals = {
 	archiveEvidence,
 	closePlanTerminalState,
 	endAgentSession,
-	spawnSync: (
-		cmd: string,
-		args: string[],
-		options?: {
-			cwd?: string;
-			encoding?: BufferEncoding;
-			timeout?: number;
-			maxBuffer?: number;
-			windowsHide?: boolean;
-			stdio?:
-				| 'pipe'
-				| 'ignore'
-				| 'inherit'
-				| Array<'pipe' | 'ignore' | 'inherit'>;
-			env?: Record<string, string | undefined>;
-			envOverrides?: Record<string, string | null>;
-		},
-	) => {
-		const mergedEnv = mergeEnvForChild(options?.env, options?.envOverrides);
-		return child_process.spawnSync(cmd, args, {
-			...options,
-			env: mergedEnv as NodeJS.ProcessEnv | undefined,
-		});
+	// Flushes the telemetry write stream before its files are archived. Delegates
+	// to the telemetry module's _internals so tests can substitute a no-op.
+	// (Replaces the former spawnSync seam, which was used only by the deleted
+	// copySqliteSafe to shell out to the external sqlite3 CLI — issue #2030
+	// removes that external dependency entirely.)
+	flushAndDrainTelemetry: async (): Promise<void> => {
+		const { flushAndDrainTelemetry } = await import('../telemetry.js');
+		return flushAndDrainTelemetry();
 	},
 };

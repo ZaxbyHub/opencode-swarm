@@ -38,11 +38,16 @@ export type TelemetryEvent =
 	| 'plan_ledger_cas_retry'
 	| 'plan_md_write_failed'
 	| 'snapshot_failed' // FR-004: emitted when snapshot write exhausts retries
-	// PRM events
-	| 'prm_pattern_detected'
-	| 'prm_course_correction_injected'
-	| 'prm_escalation_triggered'
-	| 'prm_hard_stop';
+    // PRM events
+    | 'prm_pattern_detected'
+    | 'prm_course_correction_injected'
+    | 'prm_escalation_triggered'
+    | 'prm_hard_stop'
+    // Close/archive observability (issue #2030): one structured event shared by
+    // user-facing prose and the telemetry stream, carrying per-artifact
+    // requiredness/attempt/validation/source_disposition plus aggregate
+    // archive_valid/archive_empty health facts (counts only, no row content).
+    | 'close_archive_result';
 
 /** Stable classification for how a reviewer-gate decision was established. */
 export type ReviewerGateEvidenceKind =
@@ -272,6 +277,55 @@ export function rotateTelemetryIfNeeded(
 	} catch {
 		// Rotation errors must be silent
 	}
+}
+
+/**
+ * Flush any buffered telemetry records to disk and reopen the append stream.
+ *
+ * Why this exists (issue #2030 item 8): `/swarm close` archives
+ * `telemetry.jsonl` via `fs.copyFile`, but the writer holds an open buffered
+ * `WriteStream` whose in-memory buffer is not reflected in the on-disk file
+ * until the OS accepts the bytes. Archiving without flushing silently loses the
+ * tail records of the session.
+ *
+ * `WriteStream.end(cb)` invokes `cb` on the `'finish'` event — AFTER the buffer
+ * has been drained to the OS — so awaiting that callback is the documented way
+ * to guarantee the on-disk file contains every emitted record up to this point.
+ * The stream is then reopened in append mode so subsequent emits continue to
+ * work (same pattern as `rotateTelemetryIfNeeded`, minus the rename).
+ *
+ * Fail-open: any error during reopen disables telemetry rather than throwing —
+ * a flush failure must never block the close pipeline.
+ */
+export async function flushAndDrainTelemetry(): Promise<void> {
+	const stream = _writeStream;
+	if (stream === null || _projectDirectory === null) {
+		return;
+	}
+	await new Promise<void>((resolve) => {
+		stream.end(() => {
+			try {
+				const telemetryPath = path.join(
+					_projectDirectory!,
+					'.swarm',
+					'telemetry.jsonl',
+				);
+				const next = createWriteStream(telemetryPath, { flags: 'a' });
+				next.on('error', () => {
+					if (_writeStream === next) {
+						_disabled = true;
+						_writeStream = null;
+					}
+				});
+				_writeStream = next;
+			} catch {
+				// Reopen failed — leave telemetry disabled rather than throwing.
+				_disabled = true;
+				_writeStream = null;
+			}
+			resolve();
+		});
+	});
 }
 
 // ============================================================================
@@ -532,6 +586,38 @@ export const telemetry = {
 			occurrenceCount,
 		});
 	},
+
+	/**
+	 * Close/archive structured result (issue #2030). This single event is the
+	 * shared source of truth for both the user-facing close summary prose and
+	 * the telemetry stream, so the two cannot disagree. Carries per-artifact
+	 * structured fields plus aggregate `archive_valid`/`archive_empty` health
+	 * facts. Row counts are counts ONLY — no row content is ever emitted (issue
+	 * item 4/9), enabling PR 16 to alarm and PR 20 to report without leaking
+	 * data.
+	 */
+	closeArchiveResult(data: {
+		archive_valid: boolean;
+		archive_empty: boolean;
+		file_count: number;
+		bundle: string;
+		artifacts: Array<{
+			artifact: string;
+			requiredness: string;
+			attempt: string;
+			validation: string;
+			source_disposition: string;
+			method: string;
+			reason_code: string;
+			row_counts?: {
+				schema_migrations_max_version: number | null;
+				project_constraints: number;
+				qa_gate_profile: number;
+			};
+		}>;
+	}): void {
+		_internals.emit('close_archive_result', data);
+	},
 };
 
 /**
@@ -546,4 +632,10 @@ export const _internals: {
 	telemetry: typeof telemetry;
 	emit: typeof emit;
 	rotateTelemetryIfNeeded: typeof rotateTelemetryIfNeeded;
-} = { telemetry, emit, rotateTelemetryIfNeeded };
+	flushAndDrainTelemetry: typeof flushAndDrainTelemetry;
+} = {
+	telemetry,
+	emit,
+	rotateTelemetryIfNeeded,
+	flushAndDrainTelemetry,
+};

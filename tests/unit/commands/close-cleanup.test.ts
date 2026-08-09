@@ -2,8 +2,8 @@
  * Tests for handleCloseCommand — expanded artifact cleanup (Phase 1 sub-task 1.2).
  *
  * Verifies the flat-file and directory archiving/deletion behavior:
- *   - 22 flat files in ARCHIVE_ARTIFACTS are copied to the archive bundle
- *   - 18 flat files in ACTIVE_STATE_TO_CLEAN are removed from .swarm/ after archiving
+ *   - 23 flat files in ARCHIVE_ARTIFACTS are copied to the archive bundle
+ *   - 19 flat files in ACTIVE_STATE_TO_CLEAN are removed from .swarm/ after archiving
  *   - 4 active-state directories (evidence/, session/, scopes/, spec-archive/)
  *     are recursively copied to the archive and then deleted. (locks/ is
  *     intentionally excluded — per-run locks are managed via proper-lockfile,
@@ -45,6 +45,7 @@ import path from 'node:path';
 // trajectory-cluster.ts -> listEvidenceTaskIds) without having to hand-stub
 // every export it happens to need.
 import * as actualEvidenceManager from '../../../src/evidence/manager.js';
+import { loadDatabaseCtor } from '../../../src/db/sqlite-loader.js';
 // Same rationale as actualEvidenceManager above: knowledge-curator.js is
 // imported transitively by other (unmocked) close.ts dependencies for
 // exports beyond curateAndStoreSwarm (e.g. enrichLessonToV3), so spread the
@@ -207,18 +208,43 @@ function getLatestArchivePath(): string {
 	return path.join(archiveBase, entries[entries.length - 1]);
 }
 
-// close.ts's copySqliteSafe() shells out to the `sqlite3` CLI to checkpoint
-// the WAL before archiving swarm.db. Whether that binary is actually on
-// PATH varies by host (confirmed absent on Windows dev machines, and not
-// guaranteed in every CI matrix cell either), which makes the happy-path
-// assertions below ("checkpoint succeeds -> swarm.db archived and removed")
-// non-deterministic if we let the real spawnSync run. Spy on just the
-// `spawnSync` named export (kept live via spyOn — NOT a full
-// node:child_process module replacement, since that risks
-// dropping other exports this test's reachable import graph needs; see
-// issue #1683) and make the sqlite3 invocation deterministically report a
-// completed checkpoint (busy=0). Non-sqlite3 invocations, if any ever occur
-// on this path, fall through to the real implementation.
+/**
+ * Create a real WAL-mode swarm.db with a valid schema (schema_migrations +
+ * project_constraints) so the VACUUM INTO snapshot engine (issue #2030) can
+ * produce a validated, transactionally-consistent archive. Writing a fake byte
+ * buffer would fail the engine's integrity_check and leave the source preserved
+ * (not cleaned), which would break the cleanup assertions below.
+ */
+function writeRealSwarmDb(): void {
+	const Db = loadDatabaseCtor();
+	const dbPath = path.join(swarmDir(), 'swarm.db');
+	const db = new Db(dbPath);
+	db.run('PRAGMA journal_mode = WAL;');
+	db.run(`CREATE TABLE project_constraints (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		constraint_type TEXT NOT NULL,
+		content TEXT NOT NULL,
+		created_at TEXT NOT NULL DEFAULT (datetime('now'))
+	);`);
+	db.run(`CREATE TABLE schema_migrations (
+		version INTEGER PRIMARY KEY,
+		name TEXT NOT NULL,
+		applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+	);`);
+	db.run('INSERT INTO schema_migrations (version, name) VALUES (?, ?)', [
+		1,
+		'create_project_constraints',
+	]);
+	db.close();
+}
+
+// Issue #2030 removed close.ts's external `sqlite3` CLI spawn entirely (the
+// snapshot engine is now in-process VACUUM INTO via src/db/sqlite-loader.ts).
+// The spy below is retained as a harmless vestige: it still intercepts any
+// sqlite3 spawn (there are none on this path now) and passes everything else
+// through to the real implementation. It documents that NO external CLI is
+// invoked during close on this code path — a regression here would mean the
+// forbidden external dependency crept back.
 const realSpawnSync = childProcess.spawnSync;
 let spawnSyncSpy: ReturnType<typeof spyOn>;
 
@@ -360,6 +386,37 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 			expect(existsSync(path.join(swarmDir(), 'telemetry.jsonl'))).toBe(false);
 		});
 
+		it('archives and removes rotated telemetry.jsonl.1 (issue #2030 item 8)', async () => {
+			writePlan();
+			// Stage BOTH the active and rotated generations: rotateTelemetryIfNeeded
+			// renames telemetry.jsonl → telemetry.jsonl.1, so a session that crossed
+			// the rotation threshold leaves exactly this pair on disk. The archive
+			// must capture both as a complete ordered set, and the clean stage must
+			// remove both so the rotated generation is not orphaned.
+			writeFileSync(
+				path.join(swarmDir(), 'telemetry.jsonl'),
+				'{"event":"active","ts":2}\n',
+			);
+			writeFileSync(
+				path.join(swarmDir(), 'telemetry.jsonl.1'),
+				'{"event":"rotated","ts":1}\n',
+			);
+
+			await handleCloseCommand(testDir, []);
+
+			const archivePath = getLatestArchivePath();
+			// Both generations archived to their own names (no collision).
+			expect(existsSync(path.join(archivePath, 'telemetry.jsonl'))).toBe(true);
+			expect(existsSync(path.join(archivePath, 'telemetry.jsonl.1'))).toBe(
+				true,
+			);
+			// Both cleaned from source.
+			expect(existsSync(path.join(swarmDir(), 'telemetry.jsonl'))).toBe(false);
+			expect(existsSync(path.join(swarmDir(), 'telemetry.jsonl.1'))).toBe(
+				false,
+			);
+		});
+
 		it('archives all handoff-related files', async () => {
 			writePlan();
 			writeFileSync(path.join(swarmDir(), 'handoff.md'), '# Handoff');
@@ -441,10 +498,7 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 	describe('swarm.db cleanup (swarm.db, swarm.db-shm, swarm.db-wal)', () => {
 		it('archives and removes swarm.db', async () => {
 			writePlan();
-			writeFileSync(
-				path.join(swarmDir(), 'swarm.db'),
-				Buffer.from('sqlite db content'),
-			);
+			writeRealSwarmDb();
 
 			await handleCloseCommand(testDir, []);
 
@@ -491,15 +545,34 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 
 		it('swarm.db is archived with correct content; -shm/-wal sidecars are not archived', async () => {
 			writePlan();
-			writeFileSync(path.join(swarmDir(), 'swarm.db'), Buffer.from('db'));
+			// Real WAL-mode DB with a committed row so the VACUUM INTO snapshot
+			// has verifiable content (issue #2030: the archive must contain
+			// committed rows, not a stale main-file shell).
+			const Db = loadDatabaseCtor();
+			const srcPath = path.join(swarmDir(), 'swarm.db');
+			const db = new Db(srcPath);
+			db.run('PRAGMA journal_mode = WAL;');
+			db.run(`CREATE TABLE project_constraints (id INTEGER PRIMARY KEY AUTOINCREMENT, content TEXT NOT NULL);`);
+			db.run(`CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL);`);
+			db.run('INSERT INTO schema_migrations (version, name) VALUES (?, ?)', [1, 'init']);
+			db.run('INSERT INTO project_constraints (content) VALUES (?)', ['committed-row']);
+			db.close();
+			// Stage stale sidecar files (these are NOT real SQLite sidecars;
+			// they verify the archive never copies sidecars even when present).
 			writeFileSync(path.join(swarmDir(), 'swarm.db-shm'), Buffer.from('shm'));
 			writeFileSync(path.join(swarmDir(), 'swarm.db-wal'), Buffer.from('wal'));
 
 			await handleCloseCommand(testDir, []);
 
 			const archivePath = getLatestArchivePath();
-			const archivedDb = readFileSync(path.join(archivePath, 'swarm.db'));
-			expect(archivedDb.toString()).toBe('db');
+			// The archived DB is a real, openable SQLite snapshot containing
+			// the committed row (transactionally consistent — issue #2030).
+			const archivedDbPath = path.join(archivePath, 'swarm.db');
+			expect(existsSync(archivedDbPath)).toBe(true);
+			const Vdb = new Db(archivedDbPath);
+			const row = Vdb.query('SELECT COUNT(*) AS c FROM project_constraints WHERE content = ?').get('committed-row');
+			Vdb.close();
+			expect(Number((row as { c: number }).c)).toBe(1);
 			// WAL sidecar files are transient SQLite internals and are
 			// deliberately excluded from archiving (see the two tests above).
 			expect(existsSync(path.join(archivePath, 'swarm.db-shm'))).toBe(false);
@@ -1072,7 +1145,10 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 			writeFileSync(path.join(swarmDir(), 'knowledge.jsonl'), '[]');
 			writeFileSync(path.join(swarmDir(), 'telemetry.jsonl'), '[]');
 			writeFileSync(path.join(swarmDir(), 'repo-graph.json'), '{}');
-			writeFileSync(path.join(swarmDir(), 'swarm.db'), Buffer.from('db'));
+			// Real WAL-mode swarm.db (issue #2030: VACUUM INTO requires a valid
+			// SQLite source; a fake byte buffer would fail validation and be
+			// preserved rather than cleaned).
+			writeRealSwarmDb();
 
 			// Directories
 			mkdirSync(path.join(swarmDir(), 'evidence', 'retro-1'), {
