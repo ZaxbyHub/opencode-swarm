@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import {
@@ -6,7 +6,6 @@ import {
 	completePrWorkflow,
 	_test_exports as gateInternals,
 	PR_REVIEW_BASE_DIMENSION_IDS,
-	readPrWorkflowGateState,
 	recordPrReviewValidationBatch,
 } from '../../../src/hooks/pr-workflow-gate.js';
 import {
@@ -14,8 +13,29 @@ import {
 	HEAD_SHA,
 	persistBatch,
 	SESSION_ID,
+	setupPrWorkflowGateFixtures,
+	teardownPrWorkflowGateFixtures,
 	tempDir,
 } from './pr-workflow-gate.test-fixtures.js';
+
+beforeEach(setupPrWorkflowGateFixtures);
+afterEach(teardownPrWorkflowGateFixtures);
+
+/** Canonical CONFIRMED/HIGH reviewer rows; `rationale` varies the row digest. */
+const reviewedRows = (
+	ids: readonly string[],
+	rationale = 'rationale',
+): string =>
+	ids
+		.map(
+			(id) =>
+				`[REVIEWED] | ${id} | CONFIRMED | STRUCTURALLY_PROVEN | HIGH | YES | file.ts:1 | ${rationale} | probe | reviewer`,
+		)
+		.join('\n');
+
+/** Settlement now blocks on the exact items that lack an authenticated verdict. */
+const unclaimed = (ids: readonly string[]): string =>
+	`items lack an authenticated verdict from any successful lane: ${ids.join(', ')}`;
 
 describe('pr-workflow-gate review validation', () => {
 	test('PR review completion cannot clear with zero reviewer obligations', async () => {
@@ -54,7 +74,7 @@ describe('pr-workflow-gate review validation', () => {
 				],
 				{ batchId: 'waived-review', prHeadSha: HEAD_SHA },
 			),
-		).rejects.toThrow('exact all-MATCHED');
+		).rejects.toThrow('trigger evaluation is invalid');
 	});
 
 	test('reviewer dispatch independently rejects missing micro-lane provenance', async () => {
@@ -86,7 +106,7 @@ describe('pr-workflow-gate review validation', () => {
 				],
 				{ batchId: 'missing-provenance-review', prHeadSha: HEAD_SHA },
 			),
-		).rejects.toThrow('unique source provenance');
+		).rejects.toThrow('complete source provenance');
 	});
 
 	test('reviewer ownership is derived from discovery artifacts and critic routing is mandatory', async () => {
@@ -138,12 +158,7 @@ describe('pr-workflow-gate review validation', () => {
 			],
 			{ batchId: 'review-all', prHeadSha: HEAD_SHA },
 		);
-		const reviewerRows = candidateIds
-			.map(
-				(id) =>
-					`[REVIEWED] | ${id} | CONFIRMED | STRUCTURALLY_PROVEN | HIGH | YES | file.ts:1 | rationale | probe | reviewer`,
-			)
-			.join('\n');
+		const reviewerRows = reviewedRows(candidateIds);
 		await persistBatch(
 			'review-all',
 			'swarm-pr-review:reviewer',
@@ -230,7 +245,7 @@ describe('pr-workflow-gate review validation', () => {
 		);
 		await expect(
 			assertPrReviewValidationSettled(tempDir, SESSION_ID, 'critic'),
-		).rejects.toThrow('one fully successful exact batch');
+		).rejects.toThrow(unclaimed(candidateIds));
 	});
 
 	test('semantic verdict enums reject structurally populated nonsense', async () => {
@@ -265,7 +280,7 @@ describe('pr-workflow-gate review validation', () => {
 		);
 		await expect(
 			assertPrReviewValidationSettled(tempDir, SESSION_ID, 'reviewer'),
-		).rejects.toThrow('one fully successful exact batch');
+		).rejects.toThrow(unclaimed(candidateIds));
 	});
 
 	test('critic verdicts reject unresolved and incoherent terminal rows', () => {
@@ -310,17 +325,12 @@ describe('pr-workflow-gate review validation', () => {
 		).toBeNull();
 	});
 
-	test('a new reviewer batch invalidates every older critic batch', async () => {
+	test('a reviewer row that changed at all invalidates its critic claims', async () => {
 		await establishReviewPrerequisites();
 		const candidateIds = PR_REVIEW_BASE_DIMENSION_IDS.map(
 			(_dimension, index) => `C-${index}`,
 		);
-		const reviewerRows = candidateIds
-			.map(
-				(id) =>
-					`[REVIEWED] | ${id} | CONFIRMED | STRUCTURALLY_PROVEN | HIGH | YES | file.ts:1 | rationale | probe | reviewer`,
-			)
-			.join('\n');
+		const reviewerRows = reviewedRows(candidateIds);
 		await recordPrReviewValidationBatch(
 			tempDir,
 			SESSION_ID,
@@ -383,24 +393,25 @@ describe('pr-workflow-gate review validation', () => {
 			],
 			{ batchId: 'review-after-critic', prHeadSha: HEAD_SHA },
 		);
+		// Identical classification AND severity, entirely different rationale: a
+		// CLASSIFICATION|SEVERITY tuple binding would still admit the old critic
+		// rows, and parseCriticVerdict alone still accepts them. Only the
+		// full-row digest drops them.
 		await persistBatch(
 			'review-after-critic',
 			'swarm-pr-review:reviewer',
 			[{ laneId: 'review-after-critic', workflowLane: 'review-all' }],
-			{ textOverride: reviewerRows },
+			{ textOverride: reviewedRows(candidateIds, 'revised root cause') },
 		);
-		const state = await readPrWorkflowGateState(tempDir, SESSION_ID);
-		expect(
-			state?.prReviewValidationBatches?.some(
-				(batch) => batch.phase === 'critic',
-			),
-		).toBe(false);
 		await expect(
-			completePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW', HEAD_SHA),
-		).rejects.toThrow('require critic coverage');
+			assertPrReviewValidationSettled(tempDir, SESSION_ID, 'reviewer'),
+		).resolves.toMatchObject({ mode: 'PR_REVIEW' });
+		await expect(
+			assertPrReviewValidationSettled(tempDir, SESSION_ID, 'critic'),
+		).rejects.toThrow(unclaimed(candidateIds));
 	});
 
-	test('reviewer settlement rejects complementary partial retry batches', async () => {
+	test('reviewer settlement composes complementary partial retry batches', async () => {
 		await establishReviewPrerequisites();
 		const candidateIds = PR_REVIEW_BASE_DIMENSION_IDS.map(
 			(_dimension, index) => `C-${index}`,
@@ -428,12 +439,6 @@ describe('pr-workflow-gate review validation', () => {
 				{ batchId, prHeadSha: HEAD_SHA },
 			);
 			const successfulLane = lanes[index];
-			const rows = successfulHalf
-				.map(
-					(id) =>
-						`[REVIEWED] | ${id} | CONFIRMED | STRUCTURALLY_PROVEN | HIGH | YES | file.ts:1 | rationale | probe | reviewer`,
-				)
-				.join('\n');
 			await persistBatch(
 				batchId,
 				'swarm-pr-review:reviewer',
@@ -443,13 +448,15 @@ describe('pr-workflow-gate review validation', () => {
 						workflowLane: successfulLane.workflowLane,
 					},
 				],
-				{ textOverride: rows },
+				{ textOverride: reviewedRows(successfulHalf) },
 			);
 		}
 
+		// Each batch has one failed lane, so neither is a "fully successful exact
+		// batch"; between them every item has exactly one authenticated verdict.
 		await expect(
 			assertPrReviewValidationSettled(tempDir, SESSION_ID, 'reviewer'),
-		).rejects.toThrow('one fully successful exact batch');
+		).resolves.toMatchObject({ mode: 'PR_REVIEW' });
 	});
 
 	test('workflow artifacts must match the exact delegation role identity', async () => {
@@ -470,21 +477,17 @@ describe('pr-workflow-gate review validation', () => {
 			],
 			{ batchId: 'review-wrong-role', prHeadSha: HEAD_SHA },
 		);
-		const rows = candidateIds
-			.map(
-				(id) =>
-					`[REVIEWED] | ${id} | CONFIRMED | STRUCTURALLY_PROVEN | HIGH | YES | file.ts:1 | rationale | probe | reviewer`,
-			)
-			.join('\n');
 		await persistBatch(
 			'review-wrong-role',
 			'swarm-pr-review:reviewer',
 			[{ laneId: 'review-wrong-role', workflowLane: 'review-wrong-role' }],
-			{ textOverride: rows, artifactRole: 'critic' },
+			{ textOverride: reviewedRows(candidateIds), artifactRole: 'critic' },
 		);
 
+		// The verdict rows themselves are perfectly valid; only the artifact's
+		// role identity is wrong, so no item may be claimed from this lane.
 		await expect(
 			assertPrReviewValidationSettled(tempDir, SESSION_ID, 'reviewer'),
-		).rejects.toThrow('one fully successful exact batch');
+		).rejects.toThrow(unclaimed(candidateIds));
 	});
 });

@@ -555,6 +555,29 @@ function detectBuiltinWrites(cmd: unknown): WriteTarget[] {
 		return results;
 	}
 
+	// tee writes to every positional (non-flag) argument; -a means append (still a write).
+	// After a '--' end-of-flags sentinel, all remaining tokens are positional even if they
+	// start with '-' (e.g. tee -- -dashed-filename).
+	if (lowerName === 'tee') {
+		const suffixWords = getSuffixWords(cmd);
+		let pastDoubleDash = false;
+		for (const word of suffixWords) {
+			if (word === '--') {
+				pastDoubleDash = true;
+				continue;
+			}
+			if (!pastDoubleDash && word.startsWith('-')) continue;
+			if (word && !isNullDevice(word)) {
+				results.push({
+					category: 'builtin_write',
+					operator: 'tee',
+					path: word,
+				});
+			}
+		}
+		return results;
+	}
+
 	if (!BUILTIN_WRITE_COMMANDS.has(lowerName)) return results;
 
 	const suffixWords = getSuffixWords(cmd);
@@ -684,8 +707,11 @@ function detectInterpreterEval(cmd: unknown): WriteTarget[] {
 	};
 
 	const relevantFlags = evalFlags[lowerName] ?? [];
+	// Match exact flag (-c), equals-glued (-c=CODE), or directly-glued (-cCODE / -c'code')
 	const hasEvalFlag = suffixWords.some((word) =>
-		relevantFlags.some((f) => word === f || word.startsWith(`${f}=`)),
+		relevantFlags.some(
+			(f) => word === f || (word.startsWith(f) && word.length > f.length),
+		),
 	);
 
 	if (!hasEvalFlag) return [];
@@ -1555,7 +1581,7 @@ export function detectInteractiveSession(
  *
  * Detects:
  * - Redirection operators: >, >>, >|, <<, <<- (here-docs)
- * - Write-effect builtins: cp, mv, install, ln, truncate, dd (of=)
+ * - Write-effect builtins: cp, mv, install, ln, truncate, dd (of=), tee
  * - In-place editors: sed -i, perl -i, awk -i
  * - Interpreter eval: python -c, node -e, bun -e, ruby -e, perl -e, php -r
  * - Network downloaders: curl -o, wget -O, scp

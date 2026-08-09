@@ -616,6 +616,31 @@ describe('Task 3.1 — New alias entries (doctor, info, list-agents, health, che
 		expect(clearResult).not.toBeNull();
 		expect(clearResult!.key).toBe('clear');
 		expect(clearResult!.entry.aliasOf).toBe('reset-session');
+
+		// context-map-stats → context-map stats (FR-013 testability, FR-014 documented invocation)
+		const cmsResult = resolveCommand(['context-map-stats']);
+		expect(cmsResult).not.toBeNull();
+		expect(cmsResult!.key).toBe('context-map-stats');
+		expect(cmsResult!.entry.aliasOf).toBe('context-map stats');
+
+		// Documented invocation form: /swarm context-map stats — should resolve
+		const cmsCanonicalResult = resolveCommand(['context-map', 'stats']);
+		// ResolveCommand returns null for multi-token compound keys per docs; the bridge
+		// is the hyphenated alias entry. The documented invocation in
+		// docs/context-map.md:145 is `/swarm context-map stats` — handlers matching
+		// either key (space or hyphen) should be reachable. Lazy-engine concern only.
+	});
+
+	// 4b. Resolve context-map stats alias under the documented invocation path
+	test('resolveCommand() finds context-map stats handler via both keys', () => {
+		// The hyphenated key resolves (SME-flagged wiring requirement)
+		const hyphenResult = resolveCommand(['context-map-stats']);
+		expect(hyphenResult).not.toBeNull();
+		expect(hyphenResult!.key).toBe('context-map-stats');
+		// Canonical key (space) also resolves
+		const spaceResult = resolveCommand(['context-map', 'stats']);
+		expect(spaceResult).not.toBeNull();
+		expect(spaceResult!.key).toBe('context-map stats');
 	});
 
 	// 4. Verify deprecation warnings work

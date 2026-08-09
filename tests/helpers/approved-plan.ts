@@ -5,7 +5,7 @@ import {
 	ledgerExists,
 	takeSnapshotEvent,
 } from '../../src/plan/ledger';
-import { savePlan } from '../../src/plan/manager';
+import { loadPlanJsonOnly, savePlan } from '../../src/plan/manager';
 import { derivePlanId } from '../../src/plan/utils';
 
 export interface ScopedPlanTask {
@@ -37,6 +37,7 @@ export async function recordPlanCriticApproval(
 export async function writeApprovedPlan(
 	directory: string,
 	tasks: ScopedPlanTask[],
+	options: { executionProfile?: Plan['execution_profile'] } = {},
 ): Promise<Plan> {
 	if (tasks.length === 0)
 		throw new Error('approved plan fixture requires tasks');
@@ -53,6 +54,9 @@ export async function writeApprovedPlan(
 		title: 'Approved integration fixture',
 		swarm: 'fixture-swarm',
 		current_phase: phaseIds[0],
+		...(options.executionProfile
+			? { execution_profile: options.executionProfile }
+			: {}),
 		phases: phaseIds.map((phaseId) => ({
 			id: phaseId,
 			name: `Phase ${phaseId}`,
@@ -71,6 +75,7 @@ export async function writeApprovedPlan(
 		})),
 	};
 	await savePlan(directory, plan, { preserveCompletedStatuses: false });
-	await recordPlanCriticApproval(directory, plan);
-	return plan;
+	const persistedPlan = (await loadPlanJsonOnly(directory)) ?? plan;
+	await recordPlanCriticApproval(directory, persistedPlan);
+	return persistedPlan;
 }

@@ -37,9 +37,14 @@ lightweight: read-only tools, skips CLAUDE.md) and by prompt scope.
 - Launch parallel agents only for **disjoint scopes**. Before launching, write
   one line per agent stating its scope; if two overlap, merge them.
 - 2–4 explorers per wave is a heuristic only when the active workflow does
-  not define a fixed fan-out. A workflow-specific count is a hard contract and
-  overrides this heuristic: PR review, for example, requires all six base lanes,
-  and no time, cost, repository-size, or simplicity rationale may reduce it.
+  not define its own fan-out contract. A workflow-specific contract overrides
+  this heuristic: PR review, for example, requires all six base dimensions and
+  all eleven risk families to be covered on every PR — its capability profiles
+  and depth tiers (see swarm-pr-review) govern how many lanes carry that
+  coverage, and under the plugin's mechanical controller the tier is computed
+  from the bound diff and the matching lane floors are enforced outright. No
+  time, cost, repository-size, or simplicity
+  rationale may reduce the coverage a workflow mandates.
   Outside fixed-fan-out workflows, more agents than distinct scopes adds token
   cost and synthesis burden without adding recall.
 - Launch independent agents **in a single message** so they run concurrently.

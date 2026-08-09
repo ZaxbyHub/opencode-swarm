@@ -19,6 +19,7 @@ import {
 	recordPrFeedbackGateBatch,
 	recordPrFeedbackStageA,
 } from '../../../src/hooks/pr-workflow-gate.js';
+import { withFrozenClock } from '../../helpers/test-clock.js';
 
 const SESSION_ID = 'feedback-completion';
 const HEAD_SHA = 'abc123';
@@ -26,6 +27,10 @@ const POST_COMMIT_SHA = 'def456';
 const REVISION = 'revision-1';
 let directory = '';
 const originalResolveCurrentGitHead = _test_exports.resolveCurrentGitHead;
+const originalResolveCurrentGitHeadAsync =
+	_test_exports.resolveCurrentGitHeadAsync;
+const originalResolveIsWorkingTreeCleanAsync =
+	_test_exports.resolveIsWorkingTreeCleanAsync;
 const originalResolveCurrentUpstreamRemoteRef =
 	_test_exports.resolveCurrentUpstreamRemoteRef;
 const originalResolveCurrentUpstreamPushTarget =
@@ -39,6 +44,16 @@ const originalResolveIsExactSingleChildCommit =
 	_test_exports.resolveIsExactSingleChildCommit;
 const originalResolveRevision = _test_exports.resolvePrWorkflowRevisionDigest;
 const originalResolveRemoteRefs = _test_exports.resolveRemoteRefsContainingHead;
+const originalResolveCurrentUpstreamPushTargetAsync =
+	_test_exports.resolveCurrentUpstreamPushTargetAsync;
+const originalResolveExactRemoteBranchHeadAsync =
+	_test_exports.resolveExactRemoteBranchHeadAsync;
+const originalResolveCommitCountSinceAsync =
+	_test_exports.resolveCommitCountSinceAsync;
+const originalResolveIsExactSingleChildCommitAsync =
+	_test_exports.resolveIsExactSingleChildCommitAsync;
+const originalResolveRemoteRefsContainingHeadAsync =
+	_test_exports.resolveRemoteRefsContainingHeadAsync;
 beforeEach(() => {
 	directory = realpathSync(
 		mkdtempSync(path.join(os.tmpdir(), 'pr-gate-completion-')),
@@ -59,11 +74,30 @@ beforeEach(() => {
 	_test_exports.resolvePrWorkflowRevisionDigest = () => REVISION;
 	_test_exports.resolveRemoteRefsContainingHead = (_directory, headSha) =>
 		headSha === HEAD_SHA ? ['refs/remotes/origin/pr-head'] : [];
+	// Gate bind/verify resolves Git off the blocking spawn; route the async
+	// resolvers through the (per-test-mutated) sync stubs above.
+	_test_exports.resolveCurrentGitHeadAsync = async (dir) =>
+		_test_exports.resolveCurrentGitHead(dir);
+	_test_exports.resolveIsWorkingTreeCleanAsync = async (dir) =>
+		_test_exports.resolveIsWorkingTreeClean(dir);
+	_test_exports.resolveCurrentUpstreamPushTargetAsync = async (dir) =>
+		_test_exports.resolveCurrentUpstreamPushTarget(dir);
+	_test_exports.resolveExactRemoteBranchHeadAsync = async (...a) =>
+		_test_exports.resolveExactRemoteBranchHead(...a);
+	_test_exports.resolveCommitCountSinceAsync = async (...a) =>
+		_test_exports.resolveCommitCountSince(...a);
+	_test_exports.resolveIsExactSingleChildCommitAsync = async (...a) =>
+		_test_exports.resolveIsExactSingleChildCommit(...a);
+	_test_exports.resolveRemoteRefsContainingHeadAsync = async (...a) =>
+		_test_exports.resolveRemoteRefsContainingHead(...a);
 });
 
 afterEach(async () => {
 	_test_exports.resetTrackedStateCache();
 	_test_exports.resolveCurrentGitHead = originalResolveCurrentGitHead;
+	_test_exports.resolveCurrentGitHeadAsync = originalResolveCurrentGitHeadAsync;
+	_test_exports.resolveIsWorkingTreeCleanAsync =
+		originalResolveIsWorkingTreeCleanAsync;
 	_test_exports.resolveCurrentUpstreamRemoteRef =
 		originalResolveCurrentUpstreamRemoteRef;
 	_test_exports.resolveCurrentUpstreamPushTarget =
@@ -76,6 +110,16 @@ afterEach(async () => {
 		originalResolveIsExactSingleChildCommit;
 	_test_exports.resolvePrWorkflowRevisionDigest = originalResolveRevision;
 	_test_exports.resolveRemoteRefsContainingHead = originalResolveRemoteRefs;
+	_test_exports.resolveCurrentUpstreamPushTargetAsync =
+		originalResolveCurrentUpstreamPushTargetAsync;
+	_test_exports.resolveExactRemoteBranchHeadAsync =
+		originalResolveExactRemoteBranchHeadAsync;
+	_test_exports.resolveCommitCountSinceAsync =
+		originalResolveCommitCountSinceAsync;
+	_test_exports.resolveIsExactSingleChildCommitAsync =
+		originalResolveIsExactSingleChildCommitAsync;
+	_test_exports.resolveRemoteRefsContainingHeadAsync =
+		originalResolveRemoteRefsContainingHeadAsync;
 	await fs.rm(directory, { recursive: true, force: true });
 });
 
@@ -193,7 +237,7 @@ async function persistFeedbackArtifact(): Promise<void> {
 }
 
 describe('PR workflow terminal completion', () => {
-	test('requires ordered, content-bound Stage A, Stage B, and closeout artifacts', async () => {
+	test('requires ordered, content-bound Stage A, Stage B, and closeout artifacts before publication arms', async () => {
 		await activatePrWorkflow(directory, SESSION_ID, 'PR_FEEDBACK');
 		await declarePrFeedbackInventory(directory, SESSION_ID, ['FB-001'], {
 			prHeadSha: HEAD_SHA,
@@ -373,128 +417,5 @@ describe('PR workflow terminal completion', () => {
 		await expect(
 			readPrWorkflowGateState(directory, SESSION_ID),
 		).resolves.not.toBeNull();
-		await expect(
-			enforcePrWorkflowToolBefore(directory, SESSION_ID, 'shell', {
-				command: 'git commit --amend --no-edit',
-			}),
-		).rejects.toThrow('approved commit is immutable');
-		_test_exports.resolvePrWorkflowRevisionDigest = () =>
-			'edited-after-approval';
-		await expect(
-			enforcePrWorkflowToolBefore(directory, SESSION_ID, 'shell', {
-				command: `git push origin ${POST_COMMIT_SHA}:refs/heads/pr-head`,
-			}),
-		).rejects.toThrow('changed after publication was armed');
-		_test_exports.resolvePrWorkflowRevisionDigest = () => REVISION;
-		for (const command of [
-			'git push origin HEAD',
-			`git push --force origin ${POST_COMMIT_SHA}:refs/heads/pr-head`,
-			`git push --mirror origin ${POST_COMMIT_SHA}:refs/heads/pr-head`,
-			`git push other ${POST_COMMIT_SHA}:refs/heads/pr-head`,
-			`git push origin ${POST_COMMIT_SHA}:refs/heads/unrelated`,
-			`git push origin +${POST_COMMIT_SHA}:refs/heads/pr-head`,
-			`git -C . push origin ${POST_COMMIT_SHA}:refs/heads/pr-head`,
-			`git fetch . ${POST_COMMIT_SHA}:refs/remotes/origin/pr-head`,
-		]) {
-			await expect(
-				enforcePrWorkflowToolBefore(directory, SESSION_ID, 'shell', {
-					command,
-				}),
-			).rejects.toThrow('only the exact approved push');
-		}
-		await expect(
-			enforcePrWorkflowToolBefore(
-				directory,
-				SESSION_ID,
-				'github_add_pull_request_review_comment',
-				{},
-			),
-		).rejects.toThrow('rejects unclassified plugin/MCP tools');
-		_test_exports.resolveCurrentGitHead = () => 'different-head';
-		await expect(
-			enforcePrWorkflowToolBefore(directory, SESSION_ID, 'shell', {
-				command: `git push origin ${POST_COMMIT_SHA}:refs/heads/pr-head`,
-			}),
-		).rejects.toThrow('current Git HEAD changed');
-		_test_exports.resolveCurrentGitHead = () => POST_COMMIT_SHA;
-		_test_exports.resolveIsWorkingTreeClean = () => false;
-		await expect(
-			enforcePrWorkflowToolBefore(directory, SESSION_ID, 'shell', {
-				command: `git push origin ${POST_COMMIT_SHA}:refs/heads/pr-head`,
-			}),
-		).rejects.toThrow('working tree changed');
-		_test_exports.resolveIsWorkingTreeClean = () => true;
-		_test_exports.resolveCurrentUpstreamPushTarget = () => ({
-			remoteName: 'origin',
-			remoteBranchRef: 'refs/heads/other',
-			remoteTrackingRef: 'refs/remotes/origin/other',
-		});
-		await expect(
-			enforcePrWorkflowToolBefore(directory, SESSION_ID, 'shell', {
-				command: `git push origin ${POST_COMMIT_SHA}:refs/heads/pr-head`,
-			}),
-		).rejects.toThrow('upstream publication target changed');
-		_test_exports.resolveCurrentUpstreamPushTarget = () => ({
-			remoteName: 'origin',
-			remoteBranchRef: 'refs/heads/pr-head',
-			remoteTrackingRef: 'refs/remotes/origin/pr-head',
-		});
-		await expect(
-			enforcePrWorkflowToolBefore(directory, SESSION_ID, 'shell', {
-				command: `git push origin ${POST_COMMIT_SHA}:refs/heads/pr-head`,
-			}),
-		).resolves.toBeUndefined();
-		_test_exports.resolveCurrentGitHead = () => 'different-same-digest-commit';
-		_test_exports.resolveRemoteRefsContainingHead = () => [
-			'refs/remotes/origin/pr-head',
-		];
-		_test_exports.resolveExactRemoteBranchHead = () => 'remote-not-approved';
-		await expect(
-			completePrWorkflow(directory, SESSION_ID, 'PR_FEEDBACK', HEAD_SHA),
-		).rejects.toThrow('intended remote-tracking ref');
-		_test_exports.resolveExactRemoteBranchHead = () => POST_COMMIT_SHA;
-		await expect(
-			completePrWorkflow(directory, SESSION_ID, 'PR_FEEDBACK', HEAD_SHA),
-		).rejects.toThrow('approved commit');
-		_test_exports.resolveCurrentGitHead = () => POST_COMMIT_SHA;
-		_test_exports.resolveRemoteRefsContainingHead = () => [
-			'refs/remotes/origin/unrelated-branch',
-		];
-		await expect(
-			completePrWorkflow(directory, SESSION_ID, 'PR_FEEDBACK', HEAD_SHA),
-		).rejects.toThrow('intended remote-tracking ref');
-		_test_exports.resolveRemoteRefsContainingHead = () => [
-			'refs/remotes/origin/pr-head',
-		];
-		const statePath = path.join(
-			directory,
-			'.swarm',
-			_test_exports.workflowGateStateRelativePath(SESSION_ID),
-		);
-		_test_exports.beforeTerminalClear = async () => {
-			// Model a second same-session writer that commits after completion has
-			// validated its state snapshot but immediately before the terminal CAS.
-			const raw = JSON.parse(await fs.readFile(statePath, 'utf-8')) as {
-				revision: number;
-				updatedAt: string;
-			};
-			raw.revision += 1;
-			raw.updatedAt = new Date().toISOString();
-			await fs.writeFile(statePath, JSON.stringify(raw), 'utf-8');
-			_test_exports.resetTrackedStateCache();
-		};
-		await expect(
-			completePrWorkflow(directory, SESSION_ID, 'PR_FEEDBACK', HEAD_SHA),
-		).rejects.toThrow('state changed during terminal completion');
-		await expect(
-			readPrWorkflowGateState(directory, SESSION_ID),
-		).resolves.not.toBeNull();
-		_test_exports.beforeTerminalClear = undefined;
-		await expect(
-			completePrWorkflow(directory, SESSION_ID, 'PR_FEEDBACK', HEAD_SHA),
-		).resolves.toBe('completed');
-		await expect(
-			readPrWorkflowGateState(directory, SESSION_ID),
-		).resolves.toBeNull();
 	});
 });

@@ -6,7 +6,10 @@ import {
 	classifySwarmCommandToolUse,
 	SWARM_COMMAND_TOOL_COMMANDS,
 } from '../commands/tool-policy.js';
+import type { AutoReviewConfig } from '../config/schema.js';
 import type { EvaluationModelDispatcher } from '../evaluation/model-dispatcher.js';
+import type { ReviewModelDispatcher } from '../review/contracts.js';
+import type { ReviewAgentModelRegistry } from '../review/runtime.js';
 import { createSwarmTool } from './create-tool.js';
 
 type SwarmCommandArgs = {
@@ -17,6 +20,10 @@ type SwarmCommandArgs = {
 export function createSwarmCommandTool(
 	agents: Record<string, AgentDefinition>,
 	evaluationModelDispatcher?: EvaluationModelDispatcher,
+	reviewModelDispatcher?: ReviewModelDispatcher,
+	autoReviewConfig?: AutoReviewConfig,
+	reviewAgentModelRegistry?: ReviewAgentModelRegistry,
+	getActiveAgentName?: (sessionID: string) => string | undefined,
 ): ReturnType<typeof createSwarmTool> {
 	return createSwarmTool({
 		description:
@@ -43,6 +50,10 @@ export function createSwarmCommandTool(
 				tokens: [args.command, ...(args.args ?? [])],
 				policy: classifySwarmCommandToolUse,
 				evaluationModelDispatcher,
+				reviewModelDispatcher,
+				autoReviewConfig,
+				reviewAgentModelRegistry,
+				activeAgentName: getActiveAgentName?.(ctx?.sessionID ?? ''),
 			});
 			return result.text;
 		},

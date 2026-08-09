@@ -288,11 +288,11 @@ describe('telemetry module', () => {
 			rotateTelemetryIfNeeded(100);
 
 			// The new telemetry.jsonl won't exist until written to, so we can't compare sizes directly
-		// Instead, verify that the rotated file has the old content
-		expect(fs.existsSync(rotatedPath)).toBe(true);
-		const rotatedSize = fs.statSync(rotatedPath).size;
-		expect(rotatedSize).toBe(originalSize);
-	});
+			// Instead, verify that the rotated file has the old content
+			expect(fs.existsSync(rotatedPath)).toBe(true);
+			const rotatedSize = fs.statSync(rotatedPath).size;
+			expect(rotatedSize).toBe(originalSize);
+		});
 	});
 
 	describe('flushAndDrainTelemetry (issue #2030)', () => {
@@ -315,9 +315,7 @@ describe('telemetry module', () => {
 			const content = fs.readFileSync(telemetryPath, 'utf-8');
 			const lines = content.split('\n').filter((l) => l.trim());
 			expect(lines.length).toBe(3);
-			expect(lines.every((l) => l.includes('"event":"heartbeat"'))).toBe(
-				true,
-			);
+			expect(lines.every((l) => l.includes('"event":"heartbeat"'))).toBe(true);
 		});
 
 		test('subsequent emits after flush continue to write to the file', async () => {
@@ -340,6 +338,61 @@ describe('telemetry module', () => {
 			resetTelemetryForTesting();
 			// No initTelemetry call — _writeStream is null. Must not throw.
 			await flushAndDrainTelemetry();
+		});
+
+		test('a racing emit across the flush does not latch _disabled (F-003)', async () => {
+			// Regression for swarm-pr-review F-003: if the replacement stream is
+			// assigned only inside the end() callback, a concurrent emit() writes
+			// to the ending stream, ERR_STREAM_WRITE_AFTER_END fires, and _disabled
+			// latches true — killing telemetry for every subsequent session in the
+			// server-scoped plugin process. The fix assigns the new stream BEFORE
+			// end(). This test races an emit across the flush and asserts the
+			// post-flush emit IS delivered (it would be a no-op if _disabled
+			// latched) and the buffered tail is retained byte-for-byte.
+			const swarmDir = path.join(sharedTempDir, '.swarm');
+			const telemetryPath = path.join(swarmDir, 'telemetry.jsonl');
+
+			// Buffer ~10 lines in the WriteStream's in-memory buffer.
+			for (let i = 0; i < 10; i++) {
+				emit('heartbeat', { n: i });
+			}
+
+			// Schedule an emit that races across the flush's await (setImmediate
+			// fires on the next macro-task turn, during the awaited end() drain).
+			const racingPayload = { race_marker: 'racing-emit' };
+			setImmediate(() => emit('heartbeat', racingPayload));
+
+			await flushAndDrainTelemetry();
+
+			// Post-flush emit: must be delivered (proves _disabled did NOT latch).
+			const receivedPost: unknown[] = [];
+			const listener = (event: string, data: unknown) => {
+				if (event === 'heartbeat') receivedPost.push(data);
+			};
+			addTelemetryListener(listener);
+			emit('heartbeat', { post_flush: true });
+			// Allow the listener + write to settle.
+			await new Promise((r) => setImmediate(r));
+			await flushAndDrainTelemetry();
+			// (listener is cleared by the next beforeEach's resetTelemetryForTesting.)
+
+			// _disabled latched? post-flush emit would be a silent no-op.
+			expect(
+				receivedPost.some(
+					(d) =>
+						d !== null &&
+						typeof d === 'object' &&
+						(d as { post_flush?: boolean }).post_flush === true,
+				),
+			).toBe(true);
+
+			// Buffered tail retained byte-for-byte (all 10 pre-flush records + the
+			// racing emit + the post-flush emit landed on disk).
+			const content = fs.readFileSync(telemetryPath, 'utf-8');
+			for (let i = 0; i < 10; i++) {
+				expect(content).toContain(`"n":${i}`);
+			}
+			expect(content).toContain('"race_marker":"racing-emit"');
 		});
 	});
 

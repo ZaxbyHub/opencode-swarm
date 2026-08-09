@@ -42,12 +42,21 @@ import {
 	formatLearningSummary,
 } from '../services/learning-metrics.js';
 import {
+	checkRecommendations,
+	type RecommendationCandidate,
+	recordEmittedRecommendations,
+} from '../services/recommendation-ledger.js';
+import {
 	DEFAULT_SKILL_MIN_CONFIDENCE,
 	listSkills,
 	parseDraftFrontmatter,
 	retireOrMarkStale,
 	retireSkill,
 } from '../services/skill-generator.js';
+import {
+	buildPromotedExternalInputFromSkill,
+	evaluatePromotedExternalStaleness,
+} from '../services/skill-optimizer/promoted-external-staleness.js';
 import {
 	getSkillVersion,
 	MAX_REVISION_CALLS_PER_PHASE,
@@ -67,10 +76,12 @@ import type {
 	KnowledgeRecommendation,
 	PhaseDigestEntry,
 } from './curator-types.js';
+import { sweepActiveNearDuplicates } from './knowledge-dedup-sweep.js';
 import { recordKnowledgeEvent } from './knowledge-events.js';
 import {
 	appendKnowledge,
 	computeContentHash,
+	dedupeCapped,
 	getArchivedKnowledgeIds,
 	readKnowledge,
 	resolveSwarmKnowledgePath,
@@ -108,6 +119,8 @@ const DEFAULT_CURATOR_LLM_TIMEOUT_MS = 300_000;
 const MAX_CURATOR_PHASE_DIGESTS = 50;
 const MAX_CURATOR_COMPLIANCE_OBSERVATIONS = 200;
 const MAX_CURATOR_RECOMMENDATIONS = 200;
+/** Length bound a curated lesson is written at (and gated on for rewrites). */
+const MAX_LESSON_CHARS = 280;
 
 // ============================================================================
 // DI Seam — _internals (declared before functions that use it to avoid TDZ)
@@ -142,6 +155,8 @@ export const _internals = {
 	getSkillVersion,
 	readLatestPostMortemDigest: (directory: string) =>
 		readLatestPostMortemDigest(directory),
+	checkRecommendations,
+	recordEmittedRecommendations,
 };
 
 export interface RecommendationParseDiagnostic {
@@ -589,15 +604,13 @@ export function parseStructuredCuratorBlocks(llmOutput: string): {
 					const observed = String(
 						(item as { observed_behavior?: unknown }).observed_behavior ?? '',
 					).slice(0, 500);
-					const refs = Array.isArray(
+					// #1821: dedupe (case-insensitive, first casing wins) before the
+					// cap so duplicate refs cannot evict distinct ones. No per-item
+					// truncation here — matching this site's existing behavior.
+					const refs = dedupeCapped(
 						(item as { evidence_refs?: unknown }).evidence_refs,
-					)
-						? (
-								(item as { evidence_refs: unknown[] }).evidence_refs.filter(
-									(r) => typeof r === 'string',
-								) as string[]
-							).slice(0, 20)
-						: [];
+						{ cap: 20 },
+					);
 					out.findings.push({
 						knowledge_id,
 						expected_behavior: expected,
@@ -689,12 +702,45 @@ export function parseStructuredCuratorBlocks(llmOutput: string): {
 	return out;
 }
 
+// #1821: truncate → dedupe (case-insensitive, first casing wins) → cap, in
+// that order, so duplicates cannot evict distinct values off the end.
 function arrayOfStrings(v: unknown): string[] {
-	if (!Array.isArray(v)) return [];
-	return v
-		.filter((x) => typeof x === 'string')
-		.map((x) => (x as string).slice(0, 200))
-		.slice(0, 20);
+	return dedupeCapped(v, { cap: 20, itemMaxChars: 200 });
+}
+
+/**
+ * Mirror of WRITE_FIELD_CAP in src/hooks/knowledge-store.ts. Not imported,
+ * because adding a second named import from that module would force every
+ * non-spreading `mock.module('…/knowledge-store.js')` factory in the test tree
+ * to stub one more export. Keep the two values in sync; CI Check 5 does not
+ * cover this.
+ */
+const TAG_WRITE_CAP = 20;
+
+/**
+ * Attach a `contradiction:<reason>` marker to an entry's tag list (#1821).
+ *
+ * The store write boundary caps `tags` at 20 keeping the FIRST N, so a plain
+ * append would silently evict the marker from an entry that already carries 20
+ * tags — the curator would count the update as applied and emit a
+ * `contradicted` event while `buildCuratorBriefing`'s
+ * `e.tags.some((t) => t.includes('contradiction'))` never saw it.
+ *
+ * Appending is therefore kept for the common (under-cap) case, which preserves
+ * historical tag order — `slugSeed` in src/services/skill-generator.ts falls
+ * back to `tags[0]`. Only when the list is already at or above the cap does the
+ * marker move to the front, which guarantees it survives at the cost of
+ * dropping the last tag. Something must be dropped at 21 values; the fresh,
+ * actionable marker is the wrong thing to lose. The tradeoff is pinned by
+ * tests/unit/hooks/knowledge-contradiction.test.ts.
+ */
+function withContradictionMarker(
+	existing: string[] | undefined,
+	reason: string | undefined,
+): string[] {
+	const marker = `contradiction:${(reason ?? '').slice(0, 50)}`;
+	const tags = existing ?? [];
+	return tags.length >= TAG_WRITE_CAP ? [marker, ...tags] : [...tags, marker];
 }
 
 function readLatestPostMortemDigest(directory: string): string | null {
@@ -1824,6 +1870,109 @@ export async function runCuratorPhase(
 			);
 		}
 
+		// 8c. Promoted-external staleness (issue #1822 Workstream A). Until now
+		// promoted_external skills were SKIPPED entirely (the revision path's
+		// `continue` at the skillOrigin check). That left source-changed or
+		// unsupported promoted-external skills unreconciled. This step gives
+		// them a distinct staleness policy using the real usage signal (#1770)
+		// plus minimum-age/support safeguards and reversible archive. Additive
+		// and non-blocking; existing behavior for non-promoted-external skills
+		// is unchanged.
+		try {
+			const peSkillList = await _internals.listSkills(directory);
+			const peUsageEntries = _internals.readSkillUsageEntries(directory);
+			const peRetirementMinAgeDays = 60; // default floor; configurable via skill_opt.retirement_min_age_days
+			for (const active of peSkillList.active) {
+				const content = await _internals.readFileAsync(active.path, 'utf-8');
+				const fm = _internals.parseDraftFrontmatter(content);
+				if (!fm || fm.skillOrigin !== 'promoted_external') continue;
+
+				// Aggregate real usage for this skill.
+				const skillUsage = peUsageEntries.filter((e) => {
+					let p = e.skillPath;
+					if (p.startsWith('file:')) p = p.slice(5);
+					const nu = p.replace(/\\/g, '/');
+					const na = active.path.replace(/\\/g, '/');
+					return nu === na || nu.endsWith(`/${na}`) || na.endsWith(`/${nu}`);
+				});
+				const usage = {
+					appliedExplicitCount: skillUsage.filter(
+						(e) => e.complianceVerdict === 'compliant',
+					).length,
+					ignoredCount: skillUsage.filter(
+						(e) => e.complianceVerdict === 'ignored',
+					).length,
+					violatedCount: skillUsage.filter(
+						(e) => e.complianceVerdict === 'violated',
+					).length,
+					failedAfterShownCount: 0,
+				};
+				// Age: days since the skill file was last modified (best-effort proxy).
+				let ageDays = 0;
+				try {
+					const stat = fs.statSync(active.path);
+					ageDays = Math.max(0, (Date.now() - stat.mtimeMs) / 86_400_000);
+				} catch {
+					ageDays = peRetirementMinAgeDays; // assume eligible if unknown
+				}
+				const input = buildPromotedExternalInputFromSkill(
+					directory,
+					active.slug,
+					usage,
+					ageDays,
+					peRetirementMinAgeDays,
+				);
+				if (!input) continue;
+				// F5 fix: detect source-knowledge changes. Compare each source
+				// knowledge ID's updated_at against the skill file's mtime. If any
+				// source entry was modified after the skill was promoted, the source
+				// has drifted → set sourceChanged so the evaluator can return
+				// 'regenerate'.
+				if (input.sourceKnowledgeIds && input.sourceKnowledgeIds.length > 0) {
+					try {
+						const skillMtime = fs.statSync(active.path).mtimeMs;
+						const knowledgeEntries = await readKnowledge<SwarmKnowledgeEntry>(
+							resolveSwarmKnowledgePath(directory),
+						);
+						const sourceChanged = input.sourceKnowledgeIds.some((id) => {
+							const entry = knowledgeEntries.find((e) => e.id === id);
+							if (!entry) return false;
+							const updated = entry.updated_at
+								? Date.parse(entry.updated_at)
+								: 0;
+							return updated > skillMtime;
+						});
+						input.sourceChanged = sourceChanged;
+					} catch {
+						// best-effort; if we can't read knowledge, skip source-change detection
+					}
+				}
+				const decision = evaluatePromotedExternalStaleness(input);
+				if (decision.action === 'retire') {
+					await retireSkill(
+						directory,
+						active.slug,
+						`promoted-external-staleness: ${decision.reason}`,
+					);
+					phaseDigest.summary += ` [promoted-external skill '${active.slug}' retired: ${decision.reason}]`;
+				} else if (decision.action === 'regenerate') {
+					// The curator does not auto-regenerate promoted-external skills
+					// (the user re-runs external discovery), but we log it so the
+					// source-drift signal is visible.
+					logger.warn(
+						`[curator] promoted-external skill '${active.slug}' has source drift: ${decision.reason}`,
+					);
+					phaseDigest.summary += ` [promoted-external skill '${active.slug}' source drift detected]`;
+				}
+				// 'regenerate' is advisory here — the curator does not auto-regenerate
+				// promoted-external skills (the user re-runs external discovery). Logged only.
+			}
+		} catch (peErr) {
+			logger.warn(
+				`[curator] promoted-external staleness check failed: ${peErr instanceof Error ? peErr.message : String(peErr)}`,
+			);
+		}
+
 		// 9. Auto-retire health check for generated skills.
 		// Retires skills whose violation rate exceeds 30% or whose source
 		// knowledge entries are all archived. Non-blocking: errors are
@@ -1895,6 +2044,42 @@ export async function runCuratorPhase(
 			);
 		}
 
+		// 9c. Near-duplicate dedup sweep (issue #1821 Lane A). Merges active
+		// near-duplicate knowledge entries into a single surviving winner and
+		// archives the losers (tombstone + skill invalidation included).
+		//
+		// CONFIG: the sweep reads its own budgets via `loadPluginConfigWithMeta`
+		// and self-guards on `learning.dedup_sweep.enabled`. It is NOT gated here
+		// because `knowledgeConfig` is only `{ directory?: string }` and cannot
+		// carry thresholds; widening that signature would ripple through all
+		// three curator entry points.
+		//
+		// REACHABILITY: `phase_complete`, the `curator_analyze` tool, and
+		// `/swarm curate` ALL funnel through runCuratorPhase, so the sweep runs
+		// under all three. That is intended, not an accident — the sweep is
+		// idempotent (losers are archived and only active entries are considered)
+		// and hard-bounded by `max_comparisons` / `max_merges_per_sweep`, so
+		// running it more often costs a bounded scan and converges to the same
+		// store.
+		//
+		// Placed after auto-retire (§9) so the retire pass and the sweep's own
+		// per-loser skill invalidation do not contend for the same skill
+		// directories. Non-blocking: a sweep failure must never fail a phase.
+		try {
+			const dedupSweep = await sweepActiveNearDuplicates(directory, {
+				knowledgeDirectory,
+			});
+			if (dedupSweep.merges.length > 0) {
+				phaseDigest.summary += ` [${dedupSweep.merges.length} duplicate knowledge ${
+					dedupSweep.merges.length === 1 ? 'entry' : 'entries'
+				} merged]`;
+			}
+		} catch (sweepErr) {
+			logger.warn(
+				`[curator] knowledge dedup sweep failed: ${sweepErr instanceof Error ? sweepErr.message : String(sweepErr)}`,
+			);
+		}
+
 		const result: CuratorPhaseResult = {
 			phase,
 			digest: phaseDigest,
@@ -1937,6 +2122,89 @@ export async function runCuratorPhase(
 			summary_updated: false,
 		};
 	}
+}
+
+/**
+ * Describe a curator recommendation to the cross-producer dedup ledger
+ * (issue #1821 AC21).
+ *
+ * Scope-key policy, and why it differs per recommendation shape:
+ *
+ * - An **entry-scoped** recommendation (`entry_id` present) mutates one existing
+ *   knowledge entry, so its identity is `(action, entry_id)` in addition to its
+ *   text. Without the action a `rewrite` of entry X would suppress a later,
+ *   genuinely different `archive` of entry X carrying the same lesson text;
+ *   without the entry id a `rewrite` targeting one entry would suppress a
+ *   rewrite targeting another.
+ * - A **new-knowledge** recommendation (no `entry_id`, always `promote`) mints a
+ *   lesson that does not exist yet, so its content alone is its identity. That
+ *   is deliberately the case where the skill improver or the consensus miner can
+ *   be proposing the very same lesson, and where cross-producer suppression is
+ *   the intended outcome.
+ *
+ * The `lesson` is the statement because it is what the recommendation actually
+ * asserts; `reason` is sweep-local commentary and would defeat dedup by varying
+ * run to run. It is trimmed and capped to `MAX_LESSON_CHARS` here — the same
+ * bound the new-entry path applies before writing — so the key the pre-apply
+ * check computes and the key the post-apply record computes are the same key for
+ * an over-long lesson.
+ */
+function buildCuratorRecommendationCandidate(
+	rec: KnowledgeRecommendation,
+): RecommendationCandidate {
+	return {
+		kind: 'curator',
+		target: rec.entry_id ?? 'new-knowledge',
+		statement: (rec.lesson?.trim() ?? '').slice(0, MAX_LESSON_CHARS),
+		scopeKeys: rec.entry_id ? [rec.action, rec.entry_id] : [],
+		provenance: {
+			mechanism: 'curator_sweep',
+			...(rec.entry_id ? { sourceKnowledgeIds: [rec.entry_id] } : {}),
+		},
+		origin: { agentRole: 'curator' },
+	};
+}
+
+/**
+ * Expand a prefix-form `entry_id` to its canonical id for dedup-key purposes.
+ *
+ * Mirrors `resolveKnowledgeRecommendationIds`, which performs the authoritative
+ * expansion inside the knowledge transaction. Unlike that function this one
+ * never drops a recommendation: an unresolvable or ambiguous id is left as-is so
+ * the caller's own not-found handling still runs. It exists purely so the
+ * pre-apply dedup CHECK and the post-apply RECORD derive the same key.
+ */
+function canonicalizeRecommendationEntryId(
+	rec: KnowledgeRecommendation,
+	entries: Pick<SwarmKnowledgeEntry, 'id' | 'status'>[],
+): KnowledgeRecommendation {
+	if (typeof rec.entry_id !== 'string') return rec;
+	const token = normalizeRecommendationEntryIdToken(rec.entry_id);
+	if (!token) return rec;
+	const active = entries.filter((entry) => isActiveStatus(entry.status));
+	if (active.some((entry) => entry.id === token)) {
+		return rec.entry_id === token ? rec : { ...rec, entry_id: token };
+	}
+	const matches = active.filter((entry) => entry.id.startsWith(token));
+	const only = matches.length === 1 ? matches[0] : undefined;
+	return only ? { ...rec, entry_id: only.id } : rec;
+}
+
+/**
+ * Whether an applied recommendation is a durable *emission* worth remembering.
+ *
+ * A `promote` on an EXISTING entry is not an emission — it is a reinforcement
+ * signal that adds +0.1 confidence (see the `promote` case below), and an entry
+ * needs five of them to climb 0.5 → 1.0. Recording it would cap that accrual at
+ * a single increment forever and quietly change hive-promotion eligibility.
+ * Duplicate promotes *within one sweep* are still collapsed, by the batch half
+ * of `checkRecommendations` and by the entry-id resolution in the transaction.
+ *
+ * Everything else — new knowledge, archive, rewrite, flag_contradiction — mints
+ * or replaces content exactly once, which is precisely what AC21 deduplicates.
+ */
+function isDurableCuratorEmission(rec: KnowledgeRecommendation): boolean {
+	return !(rec.action === 'promote' && rec.entry_id !== undefined);
 }
 
 /**
@@ -1984,6 +2252,11 @@ export async function applyCuratorKnowledgeUpdates(
 		(rec): rec is KnowledgeRecommendation => rec != null,
 	);
 
+	// #1821 AC21: recommendations that actually took effect, recorded once at the
+	// end. Populated by the transaction (existing-entry mutations) and by the
+	// new-entry append loop.
+	const emittedCandidates: RecommendationCandidate[] = [];
+
 	const knowledgePath = resolveSwarmKnowledgePath(directory);
 
 	// #1848 §2 (C-4 fix): PRE-TRANSACTION cohort-safe authorization. The
@@ -1999,8 +2272,9 @@ export async function applyCuratorKnowledgeUpdates(
 	// policy. Promote/flag_contradiction are non-destructive (they only enrich,
 	// not remove/replace) and are not gated.
 	const authorizedRevisions = new Map<string, number | undefined>();
+	let preSnapshot: SwarmKnowledgeEntry[] = [];
 	if (validRecommendations.length > 0) {
-		const preSnapshot =
+		preSnapshot =
 			await _internals.readKnowledge<SwarmKnowledgeEntry>(knowledgePath);
 		const authorizedRecs: KnowledgeRecommendation[] = [];
 		for (const rec of validRecommendations) {
@@ -2051,9 +2325,59 @@ export async function applyCuratorKnowledgeUpdates(
 		validRecommendations = authorizedRecs;
 	}
 
+	// #1821 AC21: cross-producer dedup, READ-ONLY half. A recommendation whose
+	// cross-producer key was already emitted — by an earlier curator sweep, by the
+	// skill improver's macro-reflector, or by the consensus miner — is dropped
+	// here instead of being applied a second time. The matching record half runs
+	// at the very end of this function, over the recommendations that ACTUALLY
+	// took effect; nothing is claimed up front, because every deferral path below
+	// (cohort-safety, entry-id resolution, CAS drift, generation guard,
+	// actionability quarantine) expects a later sweep to retry. Fail-open — a
+	// degraded check leaves every recommendation in place, which is the pre-#1821
+	// behaviour.
+	//
+	// It runs AFTER the authorization snapshot on purpose: the key includes
+	// `entry_id`, and the transaction below expands a prefix id to its canonical
+	// form before the record half sees it. Canonicalizing here too keeps the two
+	// halves computing the SAME key — otherwise a prefix-form recommendation would
+	// record under the full id and never match its own next sweep.
+	const dedupCheck = await _internals.checkRecommendations(
+		directory,
+		validRecommendations.map((rec) =>
+			buildCuratorRecommendationCandidate(
+				canonicalizeRecommendationEntryId(rec, preSnapshot),
+			),
+		),
+	);
+	if (!dedupCheck.degraded) {
+		const keptRecommendations: KnowledgeRecommendation[] = [];
+		for (const decision of dedupCheck.decisions) {
+			const rec = validRecommendations[decision.index];
+			if (rec === undefined) continue;
+			if (decision.emit) {
+				keptRecommendations.push(rec);
+				continue;
+			}
+			skipped++;
+			logger.log(
+				`[curator] recommendation suppressed as a duplicate (${decision.suppressedBy}): ${decision.crossKey}`,
+			);
+		}
+		validRecommendations = keptRecommendations;
+	}
+	if (validRecommendations.length === 0) {
+		return { applied, skipped };
+	}
+
 	// Closure variables written by the transactKnowledge callback so the
 	// post-transaction code (skipped counting, new-entry append) can see them.
 	const appliedIds = new Set<string>();
+	// #1821 AC21: the RECOMMENDATIONS that actually mutated an entry, by object
+	// identity. `appliedIds` cannot stand in for this — it is keyed by entry id,
+	// and `entries.map` resolves at most one recommendation per entry, so two
+	// recommendations targeting the same entry would both look "applied".
+	// Recording the loser would burn its cross key for something that never ran.
+	const appliedRecs = new Set<KnowledgeRecommendation>();
 	const foundIds = new Set<string>();
 	let idResolutionSkipped = 0;
 	// #1848 §3 CAS: count destructive mutations skipped because the entry's fresh
@@ -2077,6 +2401,7 @@ export async function applyCuratorKnowledgeUpdates(
 	await transactKnowledge<SwarmKnowledgeEntry>(knowledgePath, (entries) => {
 		// Reset closure state on each call (in case of future retry semantics).
 		appliedIds.clear();
+		appliedRecs.clear();
 		foundIds.clear();
 		archivedPrevStatus.clear();
 		contradictedEntries.length = 0;
@@ -2118,6 +2443,7 @@ export async function applyCuratorKnowledgeUpdates(
 			switch (rec.action) {
 				case 'promote':
 					appliedIds.add(entry.id);
+					appliedRecs.add(rec);
 					txApplied++;
 					modified = true;
 					return {
@@ -2146,6 +2472,7 @@ export async function applyCuratorKnowledgeUpdates(
 						return entry;
 					}
 					appliedIds.add(entry.id);
+					appliedRecs.add(rec);
 					// G11 (issue #1717): capture BEFORE mutation so the
 					// tombstone records the real prior status.
 					archivedPrevStatus.set(entry.id, entry.status);
@@ -2164,6 +2491,7 @@ export async function applyCuratorKnowledgeUpdates(
 				}
 				case 'flag_contradiction':
 					appliedIds.add(entry.id);
+					appliedRecs.add(rec);
 					txApplied++;
 					modified = true;
 					// G3 (#1715): capture for post-transaction event emission.
@@ -2173,10 +2501,7 @@ export async function applyCuratorKnowledgeUpdates(
 					});
 					return {
 						...entry,
-						tags: [
-							...(entry.tags ?? []),
-							`contradiction:${(rec.reason ?? '').slice(0, 50)}`,
-						],
+						tags: withContradictionMarker(entry.tags, rec.reason),
 						updated_at: new Date().toISOString(),
 						...genStamp,
 					};
@@ -2191,7 +2516,7 @@ export async function applyCuratorKnowledgeUpdates(
 						return entry;
 					}
 					const newLesson = (rec.lesson ?? '').trim();
-					if (newLesson.length < 15 || newLesson.length > 280) {
+					if (newLesson.length < 15 || newLesson.length > MAX_LESSON_CHARS) {
 						return entry;
 					}
 					// F-001: validate rewritten lesson text through the same
@@ -2213,6 +2538,7 @@ export async function applyCuratorKnowledgeUpdates(
 						}
 					}
 					appliedIds.add(entry.id);
+					appliedRecs.add(rec);
 					txApplied++;
 					modified = true;
 					// #1848 §3: stamp revision + content_hash on rewrite so the
@@ -2302,6 +2628,16 @@ export async function applyCuratorKnowledgeUpdates(
 		}
 	}
 
+	// #1821 AC21: collect the existing-entry mutations that actually landed.
+	// `validRecommendations` now carries the ids resolved inside the transaction,
+	// so a prefix-form `entry_id` records under its canonical id. Entry-scoped
+	// `promote` is excluded — see `isDurableCuratorEmission`.
+	for (const rec of validRecommendations) {
+		if (!appliedRecs.has(rec)) continue;
+		if (!isDurableCuratorEmission(rec)) continue;
+		emittedCandidates.push(buildCuratorRecommendationCandidate(rec));
+	}
+
 	// G11 (issue #1717): route curator-archive recommendations through the
 	// same tombstone + retire/stale invalidation path as the knowledge_archive
 	// tool. Before this, curator-archived knowledge silently orphaned its
@@ -2357,7 +2693,7 @@ export async function applyCuratorKnowledgeUpdates(
 			skipped++;
 			continue;
 		}
-		const lesson = (rec.lesson?.trim() ?? '').slice(0, 280);
+		const lesson = (rec.lesson?.trim() ?? '').slice(0, MAX_LESSON_CHARS);
 		if (lesson.length < 15) {
 			skipped++;
 			continue;
@@ -2428,7 +2764,16 @@ export async function applyCuratorKnowledgeUpdates(
 		await appendKnowledge(knowledgePath, newEntry);
 		applied++;
 		currentLessons.push(lesson);
+		// #1821 AC21: a lesson that reached the store is a durable emission. The
+		// candidate is rebuilt from the trimmed/capped `lesson` that was actually
+		// written, so the recorded identity matches the persisted content.
+		emittedCandidates.push(buildCuratorRecommendationCandidate(rec));
 	}
+
+	// #1821 AC21: record half. Runs last, outside every knowledge lock, over only
+	// the recommendations that took effect. Fail-open: a failed record leaves the
+	// ledger unchanged and the next sweep re-proposes, which is safe.
+	await _internals.recordEmittedRecommendations(directory, emittedCandidates);
 
 	return { applied, skipped };
 }

@@ -3,6 +3,10 @@ import { mkdtempSync, realpathSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import {
+	CANDIDATE_HEADERS,
+	CLEAN_TEMPLATES,
+} from '../../../src/background/candidate-contract.js';
 import { storeLaneOutput } from '../../../src/background/lane-output-store.js';
 import {
 	appendDelegationTransition,
@@ -24,6 +28,7 @@ import {
 import {
 	_internals as dispatchInternals,
 	executeDispatchLanesAsync,
+	type SessionOps,
 } from '../../../src/tools/dispatch-lanes.js';
 
 const SESSION_ID = 'review-council';
@@ -32,51 +37,74 @@ const REVIEW_SCOPE = `complete PR diff def456...${HEAD_SHA}`;
 const REVISION_DIGEST = 'review-revision';
 let directory = '';
 let createdSessions = 0;
+let deliveredPrompts: string[] = [];
 const originalGetSessionOps = dispatchInternals.getSessionOps;
 const originalGetGeneratedAgentNames = dispatchInternals.getGeneratedAgentNames;
 const originalResolveCurrentGitHead = gateInternals.resolveCurrentGitHead;
+const originalResolveCurrentGitHeadAsync =
+	gateInternals.resolveCurrentGitHeadAsync;
 const originalResolveIsWorkingTreeClean =
 	gateInternals.resolveIsWorkingTreeClean;
+const originalResolveIsWorkingTreeCleanAsync =
+	gateInternals.resolveIsWorkingTreeCleanAsync;
 const originalGateRevisionDigest =
 	gateInternals.resolvePrWorkflowRevisionDigest;
-const originalDispatchRevisionDigest =
-	dispatchInternals.resolvePrWorkflowRevisionDigest;
-const originalDispatchMergeBase = dispatchInternals.resolveExactMergeBase;
+const originalDispatchRevisionDigestAsync =
+	dispatchInternals.resolvePrWorkflowRevisionDigestAsync;
+const originalDispatchMergeBaseAsync =
+	dispatchInternals.resolveExactMergeBaseAsync;
 
 beforeEach(() => {
 	directory = realpathSync(
 		mkdtempSync(path.join(os.tmpdir(), 'dispatch-review-council-')),
 	);
 	createdSessions = 0;
+	deliveredPrompts = [];
 	gateInternals.resetTrackedStateCache();
 	gateInternals.resolveCurrentGitHead = () => HEAD_SHA;
 	gateInternals.resolveIsWorkingTreeClean = () => true;
 	gateInternals.resolvePrWorkflowRevisionDigest = () => REVISION_DIGEST;
-	dispatchInternals.resolvePrWorkflowRevisionDigest = () => REVISION_DIGEST;
-	dispatchInternals.resolveExactMergeBase = () => 'def456';
+	// The gate/dispatch bind path resolves Git off the blocking spawn (async).
+	// The gate seam keeps a live sync twin (used by its override-detection path),
+	// so route the gate async resolvers through the sync stubs above; the dispatch
+	// seam is async-only, so stub those directly.
+	gateInternals.resolveCurrentGitHeadAsync = async (dir) =>
+		gateInternals.resolveCurrentGitHead(dir);
+	gateInternals.resolveIsWorkingTreeCleanAsync = async (dir) =>
+		gateInternals.resolveIsWorkingTreeClean(dir);
+	dispatchInternals.resolvePrWorkflowRevisionDigestAsync = async () =>
+		REVISION_DIGEST;
+	dispatchInternals.resolveExactMergeBaseAsync = async () => 'def456';
 	dispatchInternals.getGeneratedAgentNames = () => [
 		'council_generalist',
 		'reviewer',
 	];
-	dispatchInternals.getSessionOps = () => ({
+	const sessionOps: SessionOps = {
 		create: mock(async () => ({
 			data: { id: `child-${++createdSessions}` },
 			error: undefined,
 		})),
 		prompt: mock(async () => ({ data: undefined, error: undefined })),
-		promptAsync: mock(async () => ({ data: undefined, error: undefined })),
+		promptAsync: mock(async (args) => {
+			deliveredPrompts.push(args.body.parts[0]?.text ?? '');
+			return { data: undefined, error: undefined };
+		}),
 		delete: mock(async () => undefined),
-	});
+	};
+	dispatchInternals.getSessionOps = () => sessionOps;
 });
 
 afterEach(async () => {
 	gateInternals.resetTrackedStateCache();
 	gateInternals.resolveCurrentGitHead = originalResolveCurrentGitHead;
+	gateInternals.resolveCurrentGitHeadAsync = originalResolveCurrentGitHeadAsync;
 	gateInternals.resolveIsWorkingTreeClean = originalResolveIsWorkingTreeClean;
+	gateInternals.resolveIsWorkingTreeCleanAsync =
+		originalResolveIsWorkingTreeCleanAsync;
 	gateInternals.resolvePrWorkflowRevisionDigest = originalGateRevisionDigest;
-	dispatchInternals.resolvePrWorkflowRevisionDigest =
-		originalDispatchRevisionDigest;
-	dispatchInternals.resolveExactMergeBase = originalDispatchMergeBase;
+	dispatchInternals.resolvePrWorkflowRevisionDigestAsync =
+		originalDispatchRevisionDigestAsync;
+	dispatchInternals.resolveExactMergeBaseAsync = originalDispatchMergeBaseAsync;
 	dispatchInternals.getSessionOps = originalGetSessionOps;
 	dispatchInternals.getGeneratedAgentNames = originalGetGeneratedAgentNames;
 	await fs.rm(directory, { recursive: true, force: true });
@@ -99,7 +127,7 @@ async function establishReviewPrerequisites(): Promise<void> {
 	});
 	for (const [index, lane] of lanes.entries()) {
 		const correlationId = `base-${index}`;
-		const text = `[CANDIDATE] | C-${index} | ${lane.workflowLane} | LOW | correctness | file.ts:1 | claim | evidence | impact | LOW`;
+		const text = `[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence\nC-${index} | ${lane.workflowLane} | LOW | correctness | file.ts:1 | claim | evidence | impact | LOW`;
 		await recordPendingDelegation(directory, {
 			correlationId,
 			jobId: null,
@@ -157,7 +185,7 @@ async function establishReviewPrerequisites(): Promise<void> {
 		const batchId = `micro-${index}`;
 		const laneId = `micro-lane-${index}`;
 		const correlationId = `micro-session-${index}`;
-		const text = `[CLEAN] | ${workflowLane} | exact reviewed diff | no finding after focused invariant review`;
+		const text = `[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence\n[CLEAN] | ${workflowLane} | exact reviewed diff | no finding after focused invariant review`;
 		await recordPendingDelegation(directory, {
 			correlationId,
 			jobId: null,
@@ -209,6 +237,7 @@ async function establishReviewPrerequisites(): Promise<void> {
 		triggerRows.push({
 			trigger_id: workflowLane,
 			result: 'MATCHED',
+			evidence: `Test fixture evidence for ${workflowLane}`,
 			source_batch_id: batchId,
 			source_lane_id: laneId,
 		});
@@ -269,9 +298,14 @@ describe('PR review council mechanical dispatch', () => {
 				'intent-architecture',
 			),
 		).toBe(false);
+		const clean =
+			'[CLEAN] | intent-architecture | all changed architecture paths | no candidate survived caller and sibling checks';
+		expect(
+			prReviewDiscoveryArtifactCoversLane(clean, 'intent-architecture'),
+		).toBe(false);
 		expect(
 			prReviewDiscoveryArtifactCoversLane(
-				'[CLEAN] | intent-architecture | all changed architecture paths | no candidate survived caller and sibling checks',
+				`[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence\n${clean}`,
 				'intent-architecture',
 			),
 		).toBe(true);
@@ -366,9 +400,14 @@ describe('PR review council mechanical dispatch', () => {
 				outputRef: stored.ref,
 			},
 		});
+		// The artifact carries exactly one well-formed [REVIEWED] row, for an id
+		// the lane does not own; every structurally assigned item must be named
+		// as lacking an authenticated verdict.
 		await expect(
 			assertPrReviewValidationSettled(directory, SESSION_ID, 'reviewer'),
-		).rejects.toThrow('one fully successful exact batch');
+		).rejects.toThrow(
+			`reviewer items lack an authenticated verdict from any successful lane: ${reviewItems.join(', ')}`,
+		);
 	});
 
 	test('accepts structured council mode and blocks reviewer dispatch until council settles', async () => {
@@ -394,6 +433,17 @@ describe('PR review council mechanical dispatch', () => {
 		);
 		expect(council.success).toBe(true);
 		expect(council.pending).toBe(1);
+		expect(deliveredPrompts[0]).toContain(CANDIDATE_HEADERS.micro_lane);
+		expect(deliveredPrompts[0]).toContain(CLEAN_TEMPLATES.micro_lane);
+		expect(deliveredPrompts[0]).toContain(
+			'for swarm-pr-review:council discovery',
+		);
+		expect(deliveredPrompts[0]).toContain(
+			'put the exact workflow_lane only in the `micro_lane` field',
+		);
+		expect(deliveredPrompts[0]).not.toContain(
+			'put the exact workflow_lane only in the lane field',
+		);
 		const councilRecord = readDelegations(directory).find(
 			(record) => record.batchId === council.batch_id,
 		);

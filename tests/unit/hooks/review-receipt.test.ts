@@ -16,7 +16,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import type {
 	ApprovedReviewReceipt,
@@ -36,32 +35,27 @@ import {
 	resolveReceiptIndexPath,
 	resolveReceiptsDir,
 } from '../../../src/hooks/review-receipt.js';
+import { createSafeTestDir } from '../../helpers/safe-test-dir.js';
 
 // ============================================================================
 // Test helpers
 // ============================================================================
 
 let tmpDir: string;
-
-function makeTestDir(): string {
-	const dir = path.join(
-		os.tmpdir(),
-		`review-receipt-test-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-	);
-	fs.mkdirSync(dir, { recursive: true });
-	return dir;
-}
+let cleanupTestDir: () => void;
 
 function sha256(content: string): string {
 	return crypto.createHash('sha256').update(content, 'utf-8').digest('hex');
 }
 
 beforeEach(() => {
-	tmpDir = makeTestDir();
+	const fixture = createSafeTestDir('review-receipt-test-');
+	tmpDir = fixture.dir;
+	cleanupTestDir = fixture.cleanup;
 });
 
 afterEach(() => {
-	fs.rmSync(tmpDir, { recursive: true, force: true });
+	cleanupTestDir();
 });
 
 // ============================================================================

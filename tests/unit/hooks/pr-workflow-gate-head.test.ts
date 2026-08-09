@@ -12,11 +12,16 @@ import {
 	clearPrWorkflowGateState,
 	readPrWorkflowGateState,
 } from '../../../src/hooks/pr-workflow-gate.js';
+import { withFrozenClock } from '../../helpers/test-clock.js';
 
 const HEAD_SHA = 'abcdef1234567890';
 const originalResolveCurrentGitHead = _test_exports.resolveCurrentGitHead;
+const originalResolveCurrentGitHeadAsync =
+	_test_exports.resolveCurrentGitHeadAsync;
 const originalResolveIsWorkingTreeClean =
 	_test_exports.resolveIsWorkingTreeClean;
+const originalResolveIsWorkingTreeCleanAsync =
+	_test_exports.resolveIsWorkingTreeCleanAsync;
 const originalIsProcessAlive = _test_exports.isProcessAlive;
 const originalNowMs = _test_exports.nowMs;
 let directory = '';
@@ -27,12 +32,22 @@ beforeEach(() => {
 	);
 	_test_exports.resetTrackedStateCache();
 	_test_exports.resolveIsWorkingTreeClean = () => true;
+	// The gate bind/verify path resolves Git off the blocking spawn (async).
+	// Route the async resolvers through the sync stubs each test already sets,
+	// so existing synchronous fixtures drive the async production path.
+	_test_exports.resolveCurrentGitHeadAsync = async (dir) =>
+		_test_exports.resolveCurrentGitHead(dir);
+	_test_exports.resolveIsWorkingTreeCleanAsync = async (dir) =>
+		_test_exports.resolveIsWorkingTreeClean(dir);
 });
 
 afterEach(async () => {
 	_test_exports.resetTrackedStateCache();
 	_test_exports.resolveCurrentGitHead = originalResolveCurrentGitHead;
+	_test_exports.resolveCurrentGitHeadAsync = originalResolveCurrentGitHeadAsync;
 	_test_exports.resolveIsWorkingTreeClean = originalResolveIsWorkingTreeClean;
+	_test_exports.resolveIsWorkingTreeCleanAsync =
+		originalResolveIsWorkingTreeCleanAsync;
 	_test_exports.isProcessAlive = originalIsProcessAlive;
 	_test_exports.nowMs = originalNowMs;
 	await fs.rm(directory, { recursive: true, force: true });
@@ -44,12 +59,48 @@ describe('PR workflow exact checkout head', () => {
 		_test_exports.resolveCurrentGitHead = () => null;
 		await expect(
 			bindPrWorkflowHead(directory, 'review-head', HEAD_SHA),
-		).rejects.toThrow('cannot verify the current Git HEAD');
+		).rejects.toThrow('cannot resolve the current Git HEAD');
 
 		_test_exports.resolveCurrentGitHead = () => 'different-head';
 		await expect(
 			bindPrWorkflowHead(directory, 'review-head', HEAD_SHA),
 		).rejects.toThrow('does not match PR head');
+	});
+
+	test('diagnostic-rich error when HEAD cannot be resolved (issue #1931)', async () => {
+		// The null-HEAD branch must name the directory and the exact
+		// remediation command so callers can self-diagnose instead of
+		// cascading into fictional root causes (missing gate file, etc).
+		await activatePrWorkflow(directory, 'review-diagnostic', 'PR_REVIEW');
+		_test_exports.resolveCurrentGitHead = () => null;
+		const promise = bindPrWorkflowHead(
+			directory,
+			'review-diagnostic',
+			HEAD_SHA,
+		);
+		await expect(promise).rejects.toThrow(
+			`cannot resolve the current Git HEAD in "${directory}"`,
+		);
+		await expect(promise).rejects.toThrow('git -C');
+		await expect(promise).rejects.toThrow('rev-parse --verify HEAD^{commit}');
+		// Must enumerate at least one real cause so the caller knows where
+		// to look (unborn HEAD, shallow clone, missing binary, timeout, non-repo).
+		await expect(promise).rejects.toThrow(
+			/unborn|shallow|PATH|timed out|repository/i,
+		);
+	});
+
+	test('diagnostic-rich error when HEAD does not match (issue #1931)', async () => {
+		// The mismatch branch must name the directory and the exact
+		// remediation command (switch --detach) so the caller can recover.
+		await activatePrWorkflow(directory, 'review-mismatch', 'PR_REVIEW');
+		_test_exports.resolveCurrentGitHead = () => 'different-head';
+		const promise = bindPrWorkflowHead(directory, 'review-mismatch', HEAD_SHA);
+		await expect(promise).rejects.toThrow(
+			`does not match PR head "${HEAD_SHA}"`,
+		);
+		await expect(promise).rejects.toThrow(`working directory: "${directory}"`);
+		await expect(promise).rejects.toThrow(/switch --detach/);
 	});
 
 	test('revalidates live HEAD throughout PR review after binding', async () => {
@@ -112,7 +163,7 @@ describe('PR workflow exact checkout head', () => {
 		const external = {
 			...cached!,
 			revision: cached!.revision + 1,
-			updatedAt: new Date().toISOString(),
+			updatedAt: withFrozenClock(() => new Date().toISOString()),
 		};
 		await fs.writeFile(statePath, JSON.stringify(external), 'utf-8');
 
@@ -186,4 +237,76 @@ describe('PR workflow exact checkout head', () => {
 		).resolves.toMatchObject({ prHeadSha: HEAD_SHA });
 		await expect(fs.stat(lockPath)).rejects.toMatchObject({ code: 'ENOENT' });
 	});
+
+	test.skipIf(process.platform === 'win32')(
+		'rejects a state-lock parent swapped after exclusive open (PRR-009)',
+		async () => {
+			const sessionID = 'state-lock-parent-swap';
+			_test_exports.resolveCurrentGitHead = () => HEAD_SHA;
+			await activatePrWorkflow(directory, sessionID, 'PR_REVIEW');
+			const lockPath = path.join(
+				directory,
+				'.swarm',
+				_test_exports.workflowGateStateLockRelativePath(sessionID),
+			);
+			const gateDirectory = path.dirname(lockPath);
+			const preserved = `${gateDirectory}-preserved`;
+			const outside = path.join(directory, 'outside-state-lock-race');
+			let swapInstalled = false;
+			await fs.mkdir(outside, { recursive: true });
+			_test_exports.beforeSessionStateLockWrite = async () => {
+				_test_exports.beforeSessionStateLockWrite = undefined;
+				await fs.rename(gateDirectory, preserved);
+				await fs.symlink(
+					outside,
+					gateDirectory,
+					process.platform === 'win32' ? 'junction' : 'dir',
+				);
+				expect(path.normalize(await fs.realpath(gateDirectory))).toBe(
+					path.normalize(await fs.realpath(outside)),
+				);
+				swapInstalled = true;
+			};
+
+			await expect(
+				bindPrWorkflowHead(directory, sessionID, HEAD_SHA),
+			).rejects.toThrow(/changed|escaped|ENOENT/i);
+			expect(swapInstalled).toBe(true);
+			expect(await fs.readdir(outside)).toEqual([]);
+		},
+	);
+
+	test.skipIf(process.platform !== 'win32')(
+		'Windows blocks a state-lock parent rename after exclusive open (PRR-009)',
+		async () => {
+			const sessionID = 'state-lock-parent-rename-blocked';
+			_test_exports.resolveCurrentGitHead = () => HEAD_SHA;
+			await activatePrWorkflow(directory, sessionID, 'PR_REVIEW');
+			const lockPath = path.join(
+				directory,
+				'.swarm',
+				_test_exports.workflowGateStateLockRelativePath(sessionID),
+			);
+			const gateDirectory = path.dirname(lockPath);
+			const preserved = `${gateDirectory}-preserved`;
+			let hookReached = false;
+			let renameBlocked = false;
+			_test_exports.beforeSessionStateLockWrite = async () => {
+				_test_exports.beforeSessionStateLockWrite = undefined;
+				hookReached = true;
+				try {
+					await fs.rename(gateDirectory, preserved);
+				} catch (error) {
+					renameBlocked = (error as NodeJS.ErrnoException).code === 'EPERM';
+					throw error;
+				}
+			};
+
+			await expect(
+				bindPrWorkflowHead(directory, sessionID, HEAD_SHA),
+			).rejects.toThrow(/EPERM/i);
+			expect(hookReached).toBe(true);
+			expect(renameBlocked).toBe(true);
+		},
+	);
 });

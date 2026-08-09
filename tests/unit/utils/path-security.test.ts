@@ -225,4 +225,96 @@ describe('validateSymlinkBoundary', () => {
 			fs.rmSync(tmpDir, { recursive: true });
 		},
 	);
+
+	test('rejects a not-yet-existing target whose ".." tail would escape the root', () => {
+		const root = fs.mkdtempSync(
+			path.join(fs.realpathSync(os.tmpdir()), 'dotdot-tail-root-'),
+		);
+		try {
+			// subdir/../../escaped.txt: neither 'subdir' nor 'escaped.txt'
+			// exists, and the '..' segments climb out past root once resolved.
+			// The fix must normalize this tail before composing with the
+			// resolved ancestor, not just check the ancestor in isolation. This
+			// is a general containment guard test, not #1986 regression coverage
+			// — it also passes against the pre-#1986-fix implementation.
+			const target = `${root}${path.sep}subdir${path.sep}..${path.sep}..${path.sep}escaped.txt`;
+			expect(() => validateSymlinkBoundary(target, root)).toThrow(
+				'Symlink resolution escaped boundary',
+			);
+		} finally {
+			fs.rmSync(root, { recursive: true });
+		}
+	});
 });
+
+describe(
+	'validateSymlinkBoundary — regression: not-yet-existing target under a ' +
+		'symlinked root spuriously rejected (#1986)',
+	() => {
+		// Previous code resolved a not-yet-existing target via path.resolve
+		// (unresolved literal path) while an existing, symlinked root resolved
+		// via realpathSync (fully resolved) — an apples-to-oranges comparison
+		// that spuriously threw "escaped boundary" even though the target was
+		// genuinely inside the root. This mirrors macOS's /var -> /private/var
+		// symlink: any workspace root under /tmp or /var hit this on first
+		// write, before the target file existed.
+		//
+		// Both tests below are falsifiable against the pre-fix implementation:
+		// reverting resolveNearestExistingCanonical to a direct
+		// realpathSync-or-path.resolve fallback (the old validateSymlinkBoundary
+		// body) makes the first test throw spuriously and the second test throw
+		// for the wrong reason (both symptoms of the apples-to-oranges bug).
+		test.skipIf(process.platform === 'win32')(
+			'accepts a not-yet-existing target directly under a symlinked root',
+			() => {
+				const realBase = fs.mkdtempSync(
+					path.join(fs.realpathSync(os.tmpdir()), 'symlink-root-real-'),
+				);
+				const linkRoot = path.join(
+					fs.realpathSync(os.tmpdir()),
+					`symlink-root-link-${process.pid}-${Date.now()}`,
+				);
+				fs.symlinkSync(realBase, linkRoot, 'dir');
+
+				try {
+					// repo-graph.json does not exist yet — this is the exact shape
+					// of the pre-fix failure (creating .swarm/repo-graph.json under
+					// a workspace root that is itself a symlink).
+					const target = path.join(linkRoot, 'repo-graph.json');
+					expect(() => validateSymlinkBoundary(target, linkRoot)).not.toThrow();
+				} finally {
+					fs.unlinkSync(linkRoot);
+					fs.rmSync(realBase, { recursive: true });
+				}
+			},
+		);
+
+		test.skipIf(process.platform === 'win32')(
+			'rejects a not-yet-existing target under a symlinked subdirectory that escapes the root',
+			() => {
+				const root = fs.mkdtempSync(
+					path.join(fs.realpathSync(os.tmpdir()), 'symlink-escape-root-'),
+				);
+				const elsewhere = fs.mkdtempSync(
+					path.join(fs.realpathSync(os.tmpdir()), 'symlink-escape-target-'),
+				);
+				const linkedSubdir = path.join(root, 'escape-link');
+				fs.symlinkSync(elsewhere, linkedSubdir, 'dir');
+
+				try {
+					// evil.txt does not exist yet, but its parent (the symlinked
+					// subdirectory) does — the nearest-existing-ancestor walk must
+					// still resolve that symlink and reject the escape.
+					const target = path.join(linkedSubdir, 'evil.txt');
+					expect(() => validateSymlinkBoundary(target, root)).toThrow(
+						'Symlink resolution escaped boundary',
+					);
+				} finally {
+					fs.unlinkSync(linkedSubdir);
+					fs.rmSync(root, { recursive: true });
+					fs.rmSync(elsewhere, { recursive: true });
+				}
+			},
+		);
+	},
+);

@@ -3,6 +3,8 @@ import * as path from 'node:path';
 import type { PluginConfig } from '../config';
 import { DEFAULT_MODELS } from '../config/constants';
 import { stripKnownSwarmPrefix } from '../config/schema';
+import { boundedBunHash, coarseObjectDiscriminator } from '../utils/arg-hash';
+import { stableCanonicalStringify } from '../utils/stable-stringify';
 
 // Safe property lookup — prevents prototype chain pollution
 function safeGet<T>(
@@ -485,6 +487,72 @@ export function recentToolCallSessionCount(): number {
 }
 
 /**
+ * Stable, fixed-length hash of tool-call args for spiral detection (issue #2060).
+ *
+ * Replaces the old `.slice(0, 100)` truncation, which collided for any args
+ * whose first 100 JSON characters matched — e.g. paged `read` calls on a long
+ * file path where the differing `offset` value sat past character 100, making
+ * five legitimate calls look identical and triggering a false-positive
+ * `debugging_spiral_detected` event.
+ *
+ * The hash is fixed-length so memory stays bounded regardless of arg size:
+ * patch payloads can reach 1 MB, and the buffer retains up to
+ * `MAX_RECENT_CALLS` (20) calls × `MAX_TRACKED_SESSIONS` (500) sessions.
+ *
+ * Object keys are sorted at every depth via the shared `stableCanonicalStringify`
+ * (`src/utils/stable-stringify.ts`), so `{a:{b:1,c:2}}` and `{a:{c:2,b:1}}` hash
+ * equally — a correctness improvement over the old code, which would have
+ * missed a genuine spiral whose args had reordered keys. Crucially, the
+ * recursive sort does NOT drop nested keys (a property-list replacer array
+ * would, re-introducing collisions for nested args like todo lists). Strings
+ * are hashed too (not stored raw) so a multi-KB `bash` command cannot blow up
+ * the per-entry size.
+ *
+ * `bunHash` returns different values on Bun (xxHash64) vs Node (djb2); this is
+ * safe because the buffer is per-process and never persisted. Verified:
+ * `formatDebuggingSpiralEvent` does not serialize `argsHash`.
+ */
+/**
+ * Bounding and fallback-discrimination live in `src/utils/arg-hash.ts`
+ * (`HASH_INPUT_CAP_BYTES`, `boundedBunHash`, `coarseObjectDiscriminator`),
+ * shared verbatim with `hooks/guardrails/file-authority.ts:hashArgs`. Both
+ * call sites had the same unbounded-input (F-010) and constant-fallback
+ * (F-009) bugs; the fix lives in one module so it cannot drift.
+ *
+ * `boundedBunHash` hashes a length-prefixed head+tail SAMPLE, not a bare
+ * prefix, so two large payloads that share a 64 KB header but differ in their
+ * appended bodies no longer collapse to one hash.
+ */
+function hashArgsForSpiral(args: unknown): string {
+	if (args && typeof args === 'object') {
+		try {
+			const stable = stableCanonicalStringify(args);
+			return `h:${boundedBunHash(stable).toString(36)}`;
+		} catch {
+			// Unstringifiable args (cyclic, BigInt quirks) — mix in a coarse
+			// structural discriminator rather than collapsing to a constant.
+			// A constant fallback made 5+ same-tool calls with DISTINCT but
+			// unserializable args collide into one hash, firing a
+			// false-positive spiral (#2060-class bug). The discriminator
+			// below cannot itself throw (see `coarseObjectDiscriminator`),
+			// so genuinely identical unserializable args still collide
+			// (true positive preserved) while distinct ones no longer do.
+			return `h:fb:${boundedBunHash(coarseObjectDiscriminator(args)).toString(36)}`;
+		}
+	}
+	if (typeof args === 'string') {
+		// Short strings are cheap to compare directly and keep the hash
+		// debuggable; long strings (e.g. bash commands) are hashed to stay
+		// bounded. The 64-char cutoff keeps the worst-case entry (~66 chars)
+		// below the old 100-char ceiling.
+		return args.length <= 64
+			? `s:${args}`
+			: `s:${boundedBunHash(args).toString(36)}`;
+	}
+	return `p:${String(args ?? '')}`;
+}
+
+/**
  * Record a tool call for debugging spiral detection.
  * Call this from toolAfter to track repetitive patterns.
  */
@@ -493,10 +561,7 @@ export function recordToolCall(
 	args: unknown,
 	sessionId: string,
 ): void {
-	const argsHash =
-		typeof args === 'string'
-			? args.slice(0, 100)
-			: JSON.stringify(args ?? '').slice(0, 100);
+	const argsHash = hashArgsForSpiral(args);
 	let calls = recentToolCallsBySession.get(sessionId);
 	if (!calls) {
 		calls = [];

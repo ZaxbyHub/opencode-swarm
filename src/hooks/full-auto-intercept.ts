@@ -11,6 +11,7 @@
 import * as fs from 'node:fs';
 
 import { createCriticAutonomousOversightAgent } from '../agents/critic';
+import { getSwarmAgents, resolveFallbackModel } from '../agents/index.js';
 import type { PluginConfig } from '../config';
 import { stripKnownSwarmPrefix } from '../config/schema.js';
 import {
@@ -36,7 +37,10 @@ import { tryAcquireLock } from '../parallel/file-locks.js';
 import { _internals as stateInternals } from '../state.js';
 import { telemetry } from '../telemetry';
 import { sleep } from '../utils/bun-compat';
+import { advanceInlineFallback } from '../utils/inline-fallback-advancer.js';
 import * as logger from '../utils/logger';
+import type { ModelOverride } from '../utils/model-dispatch-fallback.js';
+import { isTransientProviderError } from '../utils/provider-error-classification.js';
 import { validateSwarmPath } from './utils';
 
 // Pattern for detecting end-of-sentence question marks (not mid-sentence like "v1?")
@@ -524,7 +528,13 @@ export async function dispatchCriticAndWriteEvent(
 
 	// FR-003 retry helper: attempts one dispatch, returns { ok, response, error }.
 	// On retry attempts, waits 1s, 2s, 4s, … between tries.
-	async function attemptDispatch(attempt: number): Promise<{
+	// #1905: `modelOverride` lets a transient/quota retry fail over to a configured
+	// fallback model via the per-call `model` override (undefined = the registered
+	// critic_oversight agent model).
+	async function attemptDispatch(
+		attempt: number,
+		modelOverride: ModelOverride | undefined,
+	): Promise<{
 		ok: boolean;
 		response: string;
 		error: unknown;
@@ -573,11 +583,14 @@ export async function dispatchCriticAndWriteEvent(
 					`[full-auto-intercept] Created ephemeral session: ${ephemeralSessionId}`,
 				);
 
-				// 2. Prompt using the registered oversight agent (read-only tools)
+				// 2. Prompt using the registered oversight agent (read-only tools).
+				// #1905: per-call model override on a fallback attempt; omitted
+				// (undefined) means the registered critic_oversight agent model.
 				const promptResult = await client.session.prompt({
 					path: { id: ephemeralSessionId },
 					body: {
 						agent: oversightAgentName,
+						...(modelOverride ? { model: modelOverride } : {}),
 						tools: { write: false, edit: false, patch: false },
 						parts: [{ type: 'text', text: criticContext }],
 					},
@@ -619,11 +632,38 @@ export async function dispatchCriticAndWriteEvent(
 		return { ok: false, response: '', error: lastError };
 	}
 
+	// #1905: model-failover setup. On a transient/quota dispatch failure the
+	// critic fails over to a configured fallback model (critic_oversight's
+	// fallback_models, else critic's) via a per-call `model` override. The
+	// fallback index is tracked locally: this dispatch is a child of the parent
+	// orchestrator session and there is no per-role fallback state to reuse.
+	// Mirrors the sibling inline loop in `src/full-auto/oversight.ts` — the
+	// shared advance block lives in `advanceInlineFallback` (see utils/
+	// inline-fallback-advancer.ts) so the two bespoke loops cannot drift.
+	const oversightBaseRole = stripKnownSwarmPrefix(oversightAgentName);
+	const oversightSwarmId =
+		oversightBaseRole !== oversightAgentName
+			? oversightAgentName.slice(
+					0,
+					oversightAgentName.length - oversightBaseRole.length - 1,
+				)
+			: undefined;
+	const oversightSwarmAgents = getSwarmAgents(oversightSwarmId);
+	const oversightFallbackRole = oversightSwarmAgents?.[oversightBaseRole]
+		?.fallback_models?.length
+		? oversightBaseRole
+		: 'critic';
+	const resolveOversightFallback = (index: number): string | null =>
+		resolveFallbackModel(oversightFallbackRole, index, oversightSwarmAgents);
+	let modelFallbackIndex = 0;
+	let modelOverride: ModelOverride | undefined;
+	let modelUsedLabel = criticModel;
+
 	let criticResponse = '';
 	let lastDispatchError: unknown;
 	for (let attempt = 0; attempt <= maxDispatchRetries; attempt++) {
 		// eslint-disable-next-line no-await-in-loop
-		const result = await attemptDispatch(attempt);
+		const result = await attemptDispatch(attempt, modelOverride);
 		if (result.ok) {
 			criticResponse = result.response;
 			lastDispatchError = undefined;
@@ -636,7 +676,42 @@ export async function dispatchCriticAndWriteEvent(
 			`[full-auto-intercept] dispatch attempt ${attempt + 1}/${maxDispatchRetries + 1} failed: ${lastDispatchError instanceof Error ? lastDispatchError.message : String(lastDispatchError)}`,
 		);
 		if (attempt < maxDispatchRetries) {
-			// Transient — will retry.
+			// Will retry. #1905: if the failure is transient/quota, advance to the
+			// next configured fallback model BEFORE the retry so a quota/rate-limit
+			// hit fails over instead of just re-hitting the same exhausted model.
+			// NOTE: this site intentionally retries on PERMANENT errors too (FR-003
+			// semantics differ from oversight.ts's break-on-permanent) — the
+			// transient gate here only controls whether a fallback is adopted, not
+			// whether a retry happens. The advance block itself is shared with
+			// `src/full-auto/oversight.ts:543–579` via `advanceInlineFallback`.
+			const failureText =
+				lastDispatchError instanceof Error
+					? lastDispatchError.message
+					: String(lastDispatchError);
+			if (isTransientProviderError(failureText)) {
+				const advanced = advanceInlineFallback({
+					resolveFallback: resolveOversightFallback,
+					index: modelFallbackIndex,
+					lastError: lastDispatchError,
+					onAdopt: ({ toModel, fallbackIndex, reason }) => {
+						logger.warn(
+							`[full-auto-intercept] failing over critic to fallback model "${toModel}" (fallback ${fallbackIndex}, reason=${reason})`,
+						);
+						telemetry.modelFallback(
+							sessionID ?? '',
+							oversightAgentName,
+							criticModel,
+							toModel,
+							reason,
+						);
+					},
+				});
+				modelFallbackIndex = advanced.nextIndex;
+				if (advanced.adopted) {
+					modelOverride = advanced.adopted.override;
+					modelUsedLabel = advanced.adopted.modelString;
+				}
+			}
 		} else {
 			// Exhausted retries: SC-011 auto-degrade.
 			const infraReason = `oversight infrastructure failure after ${maxDispatchRetries + 1} attempt(s): ${lastDispatchError instanceof Error ? lastDispatchError.message : String(lastDispatchError)}`;
@@ -673,6 +748,13 @@ export async function dispatchCriticAndWriteEvent(
 		logger.log(
 			`[full-auto-intercept] Critic verdict: ${parsed.verdict} | escalation: ${parsed.escalationNeeded}`,
 		);
+		// #1905: when a fallback was adopted, record the actual model so the
+		// operational trail reflects which model landed the verdict.
+		if (modelFallbackIndex > 0) {
+			logger.log(
+				`[full-auto-intercept] Critic verdict recovered on fallback model "${modelUsedLabel}" (fallback ${modelFallbackIndex})`,
+			);
+		}
 	} catch (parseError) {
 		logger.error(
 			`[full-auto-intercept] Failed to parse critic response: ${parseError instanceof Error ? parseError.message : String(parseError)}`,
@@ -705,6 +787,9 @@ export async function dispatchCriticAndWriteEvent(
 	// v2: Mirror the verdict into the shared oversight pipeline so that phase
 	// approval evidence and durable run-state stay coherent with reactive
 	// intercept verdicts. Best-effort — never throw.
+	// #1905: pass the landed model (may differ from `criticModel` when a
+	// transient/quota failover adopted a fallback) so the v2 event's
+	// `critic_model` attribution stays accurate.
 	try {
 		await mirrorReactiveVerdictToV2({
 			directory,
@@ -713,6 +798,7 @@ export async function dispatchCriticAndWriteEvent(
 			escalationType,
 			oversightAgentName,
 			criticModel,
+			criticModelUsed: modelUsedLabel,
 			sessionID,
 		});
 	} catch (mirrorError) {
@@ -1145,6 +1231,16 @@ interface MirrorParams {
 	escalationType: 'phase_completion' | 'question';
 	oversightAgentName: string;
 	criticModel: string;
+	/**
+	 * #1905: the ACTUAL model used for the dispatch — equal to `criticModel`
+	 * (the configured critic) on the primary, or a `provider/model` fallback
+	 * string when a transient/quota error forced a failover. The v2 mirror
+	 * writes the SAME `full_auto_oversight` event type as `oversight.ts`, which
+	 * rewrites `baseEvent.critic_model` post-fallback — passing the landed model
+	 * here keeps the two event writers' attribution coherent rather than
+	 * diverging (configured vs actual) when a fallback lands.
+	 */
+	criticModelUsed?: string;
 	sessionID?: string;
 }
 
@@ -1252,7 +1348,9 @@ async function mirrorReactiveVerdictToV2(params: MirrorParams): Promise<void> {
 		trigger_source: triggerSource,
 		trigger_reason: `reactive intercept (${params.escalationType})`,
 		critic_agent: params.oversightAgentName,
-		critic_model: params.criticModel,
+		// #1905: prefer the landed model when a fallback was adopted during
+		// dispatch, so the v2 event's audit trail matches oversight.ts.
+		critic_model: params.criticModelUsed ?? params.criticModel,
 		verdict: params.parsed.verdict,
 		reasoning: params.parsed.reasoning,
 		evidence_checked: params.parsed.evidenceChecked,

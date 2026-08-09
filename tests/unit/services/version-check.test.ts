@@ -82,6 +82,12 @@ describe('scheduleVersionCheck', () => {
 		expect(warnings.length).toBe(1);
 		expect(warnings[0]).toContain('6.84.2 → 6.86.7');
 		expect(warnings[0]).toContain('bunx opencode-swarm update');
+		expect(warnings[0]).toContain('/swarm config doctor');
+		// The config-doctor hint must follow the update hint (positional order).
+		const w = warnings[0]!;
+		expect(w.indexOf('/swarm config doctor')).toBeGreaterThan(
+			w.indexOf('bunx opencode-swarm update'),
+		);
 
 		// Cache file written.
 		const cache = readVersionCache();

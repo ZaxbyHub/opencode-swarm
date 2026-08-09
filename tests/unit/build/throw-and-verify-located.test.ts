@@ -40,19 +40,24 @@ describe('throw-and-verify-located release gate (FR-007.1)', () => {
 	test('minified bundle: server() re-throws when initialization fails (error propagation intact)', async () => {
 		const mod = await import(BUNDLE);
 		// server() wraps init in try/catch and re-throws (src/index.ts OpenCodeSwarm).
-		// Calling with an invalid ctx (no usable directory) forces init to throw,
-		// which the wrapper re-throws — proving the try/catch/rethrow scope survived
-		// minification and errors propagate to the caller.
-		await expect(
-			mod.default.server({ directory: null as never }),
-		).rejects.toThrow();
+		// Passing `null` as the entire ctx (not `{ directory: null }`) forces a
+		// synchronous TypeError when `ctx.directory` is accessed — BEFORE any of
+		// the parallel init I/O's `.catch` fallbacks are constructed, so it is
+		// not swallowed. This proves the wrapper's try/catch/rethrow scope
+		// survived minification and errors propagate to the caller.
+		//
+		// (Pre-#1782, `{ directory: null }` was used as the trigger, but the
+		// parallel init I/O now wraps config/snapshot/git-exclude reads in
+		// `.catch` fallbacks that swallow the resulting rejection. A `null` ctx
+		// throws synchronously before that wrapper exists.)
+		await expect(mod.default.server(null as never)).rejects.toThrow();
 	});
 
 	test('minified bundle: a thrown error carries a readable stack with preserved identifiers', async () => {
 		const mod = await import(BUNDLE);
 		let caught: unknown;
 		try {
-			await mod.default.server({ directory: null as never });
+			await mod.default.server(null as never);
 		} catch (err) {
 			caught = err;
 		}

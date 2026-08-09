@@ -204,10 +204,12 @@ describe('config/loader', () => {
 
 		it('returns defaults when no config files exist', () => {
 			const result = loadPluginConfig(tempDir);
-
+			const { repo_graph: _repoGraph, ...legacyDefaults } = result;
 			// Should return defaults when no user config and no project config exist.
-			// adversarial_testing has a schema-level default and is always present.
-			expect(result).toEqual({
+			// adversarial_testing and config_format_version have schema-level defaults
+			// are always present; repo_graph defaults are pinned in its focused schema test.
+			expect(legacyDefaults).toEqual({
+				config_format_version: 1,
 				max_iterations: 5,
 				qa_retry_limit: 3,
 				inject_phase_reminders: true,

@@ -3,11 +3,18 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { appendKnowledgeEvent } from '../../../src/hooks/knowledge-events';
+import { resolveLinkDir } from '../../../src/hooks/knowledge-link';
 import {
 	appendKnowledge,
 	resolveSwarmKnowledgePath,
 } from '../../../src/hooks/knowledge-store';
 import type { SwarmKnowledgeEntry } from '../../../src/hooks/knowledge-types';
+import {
+	buildMemoryCohortFingerprintInput,
+	computeMemoryCohortFingerprint,
+	FINGERPRINT_ALGORITHM_VERSION,
+	_internals as fingerprintInternals,
+} from '../../../src/memory/redaction';
 import {
 	checkKnowledgeHealth,
 	computeKnowledgeDebug,
@@ -136,6 +143,38 @@ describe('knowledge-diagnostics', () => {
 		const debug = await computeKnowledgeDebug(dir);
 		expect(debug.event_count).toBe(2);
 		expect(debug.retrieval_events_7d).toBe(1);
+	});
+
+	it('surfaces unacknowledged deliveries in shown_vs_applied', async () => {
+		// `unacknowledged` (shown to a delegate, no ack filed) must appear in the
+		// purpose-built accountability surface — it is the "where did the rest of
+		// the deliveries go" column — while staying out of every negative count.
+		await appendKnowledgeEvent(dir, {
+			type: 'retrieved',
+			trace_id: 't-unack',
+			session_id: 's',
+			agent: 'coder',
+			query: 'q',
+			retrieval_mode: 'delegate_inject',
+			result_ids: ['k-1'],
+			ranks: { 'k-1': 1 },
+			scores: { 'k-1': 1 },
+		});
+		await appendKnowledgeEvent(dir, {
+			type: 'unacknowledged',
+			trace_id: 't-unack',
+			knowledge_id: 'k-1',
+			session_id: 's',
+			agent: 'coder',
+			source: 'delegate',
+			reason: 'no_ack_marker',
+		});
+		const debug = await computeKnowledgeDebug(dir);
+		expect(debug.learning.shown_vs_applied.unacknowledged).toBe(1);
+		expect(debug.learning.shown_vs_applied.shown).toBe(1);
+		expect(debug.learning.shown_vs_applied.ignored).toBe(0);
+		expect(debug.learning.shown_vs_applied.violated).toBe(0);
+		expect(debug.learning.events_by_type.unacknowledged).toBe(1);
 	});
 
 	it('flags corrupt lines as a raw-vs-normalized mismatch', async () => {
@@ -291,5 +330,125 @@ describe('knowledge-diagnostics', () => {
 		expect(health.detail).toContain('diag-cohort');
 		expect(health.detail).toContain('DEGRADED');
 		expect(health.detail).toContain('degraded (via git-common-dir)');
+	});
+
+	// #2062 gap-closure (group E): `debug.memory.config_fingerprint_match` must
+	// be version-aware, mirroring `src/memory/sqlite-provider.ts` /
+	// `src/memory/local-jsonl-provider.ts`. A legacy cohort-config file (no
+	// `algorithm_version`) still compares normally; a file stamped with a
+	// DIFFERENT algorithm version must not report a false mismatch — digests
+	// from different algorithms are not comparable, so the field stays `null`
+	// (unknown) rather than `false`.
+	describe('#2062 F-012 memory cohort config_fingerprint_match algorithm_version handling', () => {
+		function setUpLinkedMemoryCohort(stored: Record<string, unknown>): void {
+			mkdirSync(join(dir, '.opencode'), { recursive: true });
+			writeFileSync(
+				join(dir, '.opencode', 'opencode-swarm.json'),
+				JSON.stringify({ memory: {} }),
+				'utf-8',
+			);
+			mkdirSync(join(dir, '.swarm'), { recursive: true });
+			const linkId = 'kd-cohort';
+			writeFileSync(
+				join(dir, '.swarm', 'memory-link.json'),
+				JSON.stringify({
+					version: 2,
+					linkId,
+					createdAt: '2026-01-01T00:00:00.000Z',
+				}),
+				'utf-8',
+			);
+			const cohortMemoryDir = join(resolveLinkDir(linkId), 'memory');
+			mkdirSync(cohortMemoryDir, { recursive: true });
+			writeFileSync(
+				join(cohortMemoryDir, 'memory-cohort-config.json'),
+				JSON.stringify(stored),
+				'utf-8',
+			);
+		}
+
+		const matchingFingerprint = (): string =>
+			computeMemoryCohortFingerprint(
+				buildMemoryCohortFingerprintInput({
+					provider: 'sqlite',
+					redaction: { rejectDurableSecrets: true },
+					embeddings: { model: 'Xenova/all-MiniLM-L6-v2', dimension: 384 },
+				}),
+			);
+
+		it('legacy config with no algorithm_version still compares normally (match)', async () => {
+			setUpLinkedMemoryCohort({ fingerprint: matchingFingerprint() });
+			const debug = await computeKnowledgeDebug(dir);
+			expect(debug.memory.linked).toBe(true);
+			expect(debug.memory.config_fingerprint_match).toBe(true);
+		});
+
+		it('legacy config with no algorithm_version still compares normally (mismatch)', async () => {
+			setUpLinkedMemoryCohort({ fingerprint: 'deadbeefdead' });
+			const debug = await computeKnowledgeDebug(dir);
+			expect(debug.memory.config_fingerprint_match).toBe(false);
+		});
+
+		it('differing algorithm_version does not report a false mismatch', async () => {
+			setUpLinkedMemoryCohort({
+				fingerprint: 'deadbeefdead',
+				algorithm_version: FINGERPRINT_ALGORITHM_VERSION + 1,
+			});
+			const debug = await computeKnowledgeDebug(dir);
+			// Digests from a different algorithm version are not comparable — the
+			// field must stay unknown (null), never a false `false`.
+			expect(debug.memory.config_fingerprint_match).toBeNull();
+		});
+
+		it('matching stored algorithm_version keeps the real mismatch signal', async () => {
+			setUpLinkedMemoryCohort({
+				fingerprint: 'deadbeefdead',
+				algorithm_version: FINGERPRINT_ALGORITHM_VERSION,
+			});
+			const debug = await computeKnowledgeDebug(dir);
+			expect(debug.memory.config_fingerprint_match).toBe(false);
+		});
+
+		// #2062 R3: restore the bump seam after every case in this block so a
+		// throwing test cannot leak a simulated version into later tests.
+		afterEach(() => {
+			fingerprintInternals.currentAlgorithmVersion =
+				FINGERPRINT_ALGORITHM_VERSION;
+		});
+
+		it('present but non-numeric algorithm_version reports unknown, not a match', async () => {
+			// The digest below is byte-correct for this config, so assuming the
+			// current version would report `true` off an uninterpretable stamp.
+			setUpLinkedMemoryCohort({
+				fingerprint: matchingFingerprint(),
+				algorithm_version: 'not-a-number',
+			});
+			const debug = await computeKnowledgeDebug(dir);
+			expect(debug.memory.linked).toBe(true);
+			expect(debug.memory.config_fingerprint_match).toBeNull();
+		});
+
+		it('current version but missing fingerprint reports unknown, not a mismatch', async () => {
+			// The version is comparable, but there is no digest to compare. Reading
+			// `stored.fingerprint` unguarded yields `undefined === expected` → a
+			// reported MISMATCH for a merely malformed file.
+			setUpLinkedMemoryCohort({
+				algorithm_version: FINGERPRINT_ALGORITHM_VERSION,
+			});
+			const debug = await computeKnowledgeDebug(dir);
+			expect(debug.memory.linked).toBe(true);
+			expect(debug.memory.config_fingerprint_match).toBeNull();
+		});
+
+		it('legacy config under a simulated version bump reports unknown', async () => {
+			// An absent field means algorithm v1, so once the current version is 2
+			// the digests are not comparable — even a byte-identical one. Before the
+			// R3 fix the absent field defaulted to the CURRENT version, so this
+			// compared anyway and reported a match that means nothing.
+			fingerprintInternals.currentAlgorithmVersion = 2;
+			setUpLinkedMemoryCohort({ fingerprint: matchingFingerprint() });
+			const debug = await computeKnowledgeDebug(dir);
+			expect(debug.memory.config_fingerprint_match).toBeNull();
+		});
 	});
 });

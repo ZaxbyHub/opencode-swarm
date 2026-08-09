@@ -286,35 +286,73 @@ Full-Auto v2 — opencode-swarm's autonomy control plane. Reduces approval frict
 
 ### auto_review
 
-Opt-in automatic review of the execution diff by the reviewer agent — its own configured model (`agents.reviewer.model`), in a fresh ephemeral session, with write/edit/patch disabled. This is the "second model reviews the work in a clean context" pattern used by Claude Code's auto-review and Codex's review model.
+Automatic review of a harness-constructed Git diff by the registered reviewer agent in a fresh, read-only ephemeral session. The reviewer model is resolved independently from the worker model, and eligible findings can be checked by the separate `critic_finding_validator` before they influence a gate.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enabled` | boolean | `false` | Enable automatic execution-diff review |
-| `trigger` | `"task_completion" \| "phase_boundary" \| "both"` | `"phase_boundary"` | When to dispatch: after `update_task_status` → `completed`, at `phase_complete`, or both |
-| `timeout_ms` | number | `300000` | Reviewer dispatch timeout (10s–30min) |
-| `max_diff_kb` | number | `256` | Maximum diff size included in the review prompt (16–2048 KiB). Larger diffs are truncated to this size; if the raw diff exceeds twice this cap, collection aborts and the pass is skipped with an `error` event. |
+| `enabled` | boolean | v7: `false`; v8+: `true` only with the approved burn-in pin | Master switch. An explicit user value always wins. |
+| `trigger` | `"task_completion" \| "phase_boundary" \| "both"` | `"phase_boundary"` | Run after `update_task_status` → `completed`, from `phase_complete`, or at both boundaries. |
+| `timeout_ms` | number | `300000` | Task-completion reviewer timeout (10s–30min). Also supplies `final_review.timeout_ms` only when that nested field is absent. |
+| `max_diff_kb` | number | `256` | Task-completion diff cap (16–2048 KiB). Also supplies `final_review.max_diff_bytes` only when that nested field is absent. |
+| `min_confidence` | number | `0.7` | Findings below this 0–1 threshold remain in receipts but are demoted to effective severity `info`. |
+| `structured_findings` | boolean | `true` | Request the bounded structured findings block. Required when `final_review.mode` is `"gate"`. |
+| `validate_findings` | boolean | `false` | Independently validate anchored, effective HIGH/CRITICAL findings in one fresh-context validator batch. Gate mode performs this validation even when this field is `false`. |
+| `validation_model` | string or `null` | `null` | Validator model override. `null` resolves the registered `critic_finding_validator` model. |
+| `validation_timeout_ms` | number | `120000` | Bound for the independent validator dispatch (10s–30min). |
+| `final_review.on_phase_complete` | boolean | `true` | Run the whole-diff engine at non-final phase boundaries. |
+| `final_review.on_plan_complete` | boolean | `true` | Run the whole-diff engine when the last durable plan phase completes. |
+| `final_review.model` | string or `null` | `null` | Whole-diff reviewer model override. `null` resolves the registered reviewer model and fallbacks. |
+| `final_review.mode` | `"advisory" \| "gate"` | `"advisory"` | Advisory injects findings without blocking. Gate enforces complete, current, persisted review and validation evidence. |
+| `final_review.max_diff_bytes` | number | `262144` | Whole-diff cap (16 KiB–2 MiB), unless inherited from an explicitly provided `max_diff_kb`. |
+| `final_review.timeout_ms` | number | `300000` | Whole-diff reviewer timeout, unless inherited from an explicitly provided top-level `timeout_ms`. |
 
 Behavior:
 
-- **Advisory and fire-and-forget** — the tool call that triggered the review is never delayed; dispatches are deduplicated per session with a 60-second cooldown (repeated `phase_complete` retries do not spam review sessions).
-- Verdicts are persisted as **durable review receipts** under `.swarm/review-receipts/` (scope-fingerprinted over the reviewed diff) and an `auto_review` event is appended to `.swarm/events.jsonl`.
-- A **REJECTED** verdict injects an `[AUTO-REVIEW]` advisory (top findings + required fixes) into the architect's next prompt; an unparseable response injects an UNVERIFIED advisory; APPROVED stays silent.
-- A clean working tree or missing git skips the pass with a `skipped` event.
+- Task-completion review is fire-and-forget, session-keyed, and protected by a 60-second cooldown. It reviews tracked and safe untracked working-tree content without delaying the triggering tool call.
+- Phase/plan review runs in the `phase_complete` body so the exact scope hash can be handed to an evidence-only gate. Default and phase scopes use a harness-computed merge base plus tracked and safe untracked working-tree content.
+- The shared engine measures the replacement system prompt plus the fully rendered review prompt and forwards that exact byte allowance under a hard 3 MiB ceiling. This keeps every documented 16 KiB–2 MiB review scope dispatchable, including quote-heavy path inventories whose JSON rendering expands beyond their raw Git output size.
+- When diff text reaches its cap, the collector adds a separately bounded NUL-safe changed-file inventory to durable scope evidence and the scope hash. If rendering every escaped path would cross the 3 MiB request ceiling, only the prompt inventory is shortened; its included, total, and omitted counts are explicit, the prompt/result mark that inventory incomplete, and durable evidence retains the collector's full bounded list. Automatic and manual results always label the review as an incomplete subset; a no-findings result never implies whole-diff coverage. The engine fails before dispatch only when the diff plus fixed review metadata cannot fit even after every fallback name is omitted.
+- Structured findings receive stable SHA-256 IDs, are deduplicated, and must anchor to current-side changed lines. Unanchored, out-of-scope, or low-confidence findings remain durable caveats but cannot block.
+- `critic_finding_validator` returns exactly one `CONFIRMED`, `DISPROVED`, or `UNVERIFIED` disposition for every eligible finding. Only anchored, effective HIGH/CRITICAL findings independently marked `CONFIRMED` block.
+- Advisory mode records and injects ranked results but never blocks. Gate mode fails closed for truncated/incomplete scope, non-structured output, incomplete validation, missing required receipt/evidence, stale scope or policy, or confirmed blockers. A clean scope is valid with current clean evidence and does not need a finding receipt.
+- Review receipts live under `.swarm/review-receipts/`; phase evidence lives at `.swarm/evidence/<phase>/auto-review.json`; task-completion events are appended to `.swarm/events.jsonl`. Fresh phase evidence is reused only when the HEAD, scope hash, and policy match.
+- Lean Turbo keeps its existing phase reviewer. The generic advisory pass is skipped while Lean Turbo owns that phase; explicit gate mode still runs and cannot be turbo-bypassed.
 
-Independently of `auto_review`, every returning reviewer Task delegation now has its `VERDICT`/`RISK`/`ISSUES`/`FIXES` block parsed and persisted as a review receipt — a durable machine-readable record of prior judgments that future re-review and drift-verification consumers can build on (the parser is fail-safe: ambiguous or missing verdict lines persist nothing).
+Default resolution is presence-sensitive:
+
+1. An explicit `auto_review.enabled` value always wins.
+2. If `enabled` is absent, all v7 releases resolve it to `false`.
+3. A v8+ release resolves it to `true` only when `AUTO_REVIEW_V8_BURN_IN_DECISION` is approved and pins `docs/benchmarks/auto-review-v8-cost-baseline.json` with its exact SHA-256. The committed baseline covers 30 fixed canonical-main diffs and is pinned as `b4e981d4d87e3de80f6d7dd4ae782b08159d385019c4d8b0d300c0443f1984ce`.
+4. Explicit nested `final_review.timeout_ms` and `final_review.max_diff_bytes` win over legacy top-level fields. If a nested field is absent, explicitly supplied `timeout_ms` or `max_diff_kb` is inherited. Otherwise the nested defaults apply.
+
+When `auto_review.enabled` is `true`, every returning reviewer Task delegation has its legacy verdict and structured findings parsed and persisted when unambiguous, independently of which automatic trigger is selected. Version-7 installations with auto-review disabled keep their legacy reviewer prompts and do not parse or persist structured Stage-B receipts.
 
 ```json
 {
   "auto_review": {
     "enabled": true,
-    "trigger": "both"
+    "trigger": "both",
+    "min_confidence": 0.7,
+    "validate_findings": true,
+    "final_review": {
+      "mode": "advisory",
+      "on_phase_complete": true,
+      "on_plan_complete": true
+    }
   },
   "agents": {
-    "reviewer": { "model": "anthropic/claude-sonnet-4-6", "fallback_models": ["opencode/big-pickle"] }
+    "reviewer": {
+      "model": "anthropic/claude-sonnet-4-6",
+      "fallback_models": ["opencode/big-pickle"]
+    },
+    "critic_finding_validator": {
+      "model": "opencode/big-pickle"
+    }
   }
 }
 ```
+
+At the pinned v8 advisory policy, the deterministic baseline models one reviewer call and no validator call per phase. Across its 30 fixed diffs, estimated reviewer input was 1,380 tokens minimum, 2,438 p50, 50,480 p95, and 88,121 maximum, with an 800-token output budget requested by the reviewer contract. It deliberately leaves USD cost null because a source-only benchmark has neither provider-reported usage nor runtime pricing. Runtime `delegation_end` telemetry and `/swarm costs [--json]` are authoritative for observed token and cost usage.
 
 ### slop_detector
 
@@ -456,7 +494,7 @@ GitHub PR subscription and background polling infrastructure (FR-001). When enab
 | `notify_merged` | boolean | `true` | Emit notification when the PR is merged (terminal event) |
 | `notify_closed` | boolean | `true` | Emit notification when the PR is closed without merge (terminal event) |
 | `notify_ci_success` | boolean | `false` | Emit notification when CI recovers / all checks pass (quiet by default) |
-| `auto_pr_feedback` | boolean | `false` | When enabled, injects `[MODE: PR_FEEDBACK pr="URL"]` signal on CI failure and merge conflict events. Advisory-channel only: with `event_delivery: "prompt"` the wake message already routes fix events through the swarm-pr-feedback protocol, so no separate MODE signal is injected on successful wakes |
+| `auto_pr_feedback` | boolean | `false` | When enabled, CI failure and merge-conflict events mechanically establish PR_FEEDBACK before routing fix work. Events arriving during PR_REVIEW or after a PR_FEEDBACK inventory freezes are durably queued and delivered mode-neutrally for a later round; they never override the active controller. |
 | `event_delivery` | string | `"prompt"` | `"prompt"` wakes the subscribed session with a structured `<pr-activity>` message via the SDK session prompt; `"advisory"` is the legacy passive channel (session advisories surface on the next model turn) |
 | `auto_subscribe_on_pr_create` | boolean | `true` | Automatically subscribe the session to a PR created via `gh pr create` in a bash tool call |
 
@@ -594,6 +632,116 @@ routing:
 
 Routing skills are merged with scored recommendations, with explicitly routed skills receiving a boosted score (0.9) to prioritize them.
 
+## Guardrails — loop containment (`guardrails`)
+
+Two escalation ladders bound the failure modes where an agent keeps burning
+turns without making progress (issue #2063). Both are per-session, in-memory,
+and additive to the existing `guardrails` block — omit them and the defaults
+below apply.
+
+### Gate-denial escalation
+
+Every fail-closed `tool.execute.before` hook (guardrails authority, scope
+guard, delegation gate, PR-workflow obligations, Full-Auto) blocks a tool call
+by throwing. Nothing previously counted how many times the *same* denial was
+re-triggered, so an agent could re-issue an identical rejected dispatch
+indefinitely. Denials are now classified by the leading code token of the error
+message (`ACCEPTANCE_FIELD_REQUIRED`, `SCOPE_NOT_DECLARED`, …) and counted per
+session, tool, and code.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `gate_denial_warn_threshold` | number (≥ 1) | `3` | Consecutive same-cause denials before "do NOT retry the same dispatch" guidance is appended to the denial text the agent reads. |
+| `gate_denial_stop_threshold` | number (≥ 1) | `5` | Consecutive same-cause denials before the denial additionally carries a hard STOP directive, an advisory is queued, and a `gate_denial_loop` telemetry event is emitted. |
+
+The agent prompts separately instruct stopping after **2** failed self-recovery
+attempts for the same error code — deliberately stricter than this mechanical
+3/5 ladder, which is the backstop for an agent that ignores its prompt.
+
+Guidance is **appended only** — the original message, and therefore the leading
+code token, is preserved byte-for-byte, and the error still propagates so the
+tool call is still rejected. User cancellations (`AbortError`) are excluded
+entirely: they neither count toward a streak nor clear one.
+
+A streak is tracked per (session, tool, dispatch target, cause) and resets only
+when the chain lets *that* tool through *for that dispatch target* — so a
+successful `Task` to `explorer` does not clear an in-progress denial loop
+against `coder`. Denials whose message carries no recognizable leading code
+token are pooled under a single `UNCLASSIFIED` bucket; that bucket can still
+reach `gate_denial_warn_threshold`, but never the STOP rung, because repeats
+there are not evidence of one repeating cause.
+
+### Execution-stall ladder
+
+Bounds a session that is armed for execution (a subagent dispatch was attempted,
+or a task moved to `in_progress`) but keeps making tool calls that produce no
+progress event.
+
+An episode disarms — resetting every counter — on **either** of two conditions:
+
+- **Idleness**: `execution_stall_episode_minutes` with no tool calls at all.
+  Idleness, not elapsed time since arming, so a long slow stall still reaches
+  the hard rung.
+- **No open task**: the plan carries no task with status `in_progress`. Checked
+  right after a status update settles a task, and again on the periodic
+  workspace probe so an out-of-band plan change is picked up too. This is what
+  keeps a session that finishes its execution phase and moves on to commit, CI,
+  and reporting work from being denied. A missing or unreadable plan is *not*
+  treated as "no open task" — only a plan that parses and has zero `in_progress`
+  tasks disarms.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `execution_stall_warn_calls` | number (≥ 1) | `30` | Non-progress tool calls in an armed episode before a strong advisory fires. |
+| `execution_stall_stop_calls` | number (≥ 1) | `60` | Non-progress tool calls before read/glob/grep/bash are hard-denied. Delegation, `update_task_status`, plan/status/query tools, and advisory surfacing always remain allowed. |
+| `execution_stall_episode_minutes` | number (≥ 1) | `30` | Minutes of complete tool inactivity after which the episode disarms and all counters reset. The no-open-task disarm above is unconditional and not configurable. |
+
+**Example** — tighter denial containment, looser stall budget:
+
+```json
+{
+  "guardrails": {
+    "gate_denial_warn_threshold": 2,
+    "gate_denial_stop_threshold": 3,
+    "execution_stall_warn_calls": 50,
+    "execution_stall_stop_calls": 100
+  }
+}
+```
+
+## PRM
+
+Controls the Process Remediation Manager (PRM) — the subagent-session trajectory
+monitor that detects stuck-loop patterns (repetition, ping-pong delegation,
+scope drift, test-fix cycling, context thrash) and escalates course-correction
+guidance to the agent before a hard stop.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `true` | Master switch for PRM trajectory monitoring. When `false`, no trajectory entries are recorded and no patterns are detected. |
+| `pattern_thresholds.repetition_loop` | number (≥ 1) | `2` | Occurrences before a "same agent, same file, same action within N steps" loop is flagged. |
+| `pattern_thresholds.ping_pong` | number (≥ 1) | `2` | Occurrences before an alternating A→B→A delegation pattern targeting the same file is flagged. |
+| `pattern_thresholds.expansion_drift` | number (≥ 1) | `3` | Occurrences before successive plans whose unique-target scope grows by more than 50% are flagged. |
+| `pattern_thresholds.stuck_on_test` | number (≥ 1) | `3` | Occurrences before an edit → test-fail → edit-same-file cycle is flagged. |
+| `pattern_thresholds.context_thrash` | number (≥ 1) | `3` | Consecutive steps before a monotonically increasing unique-target set (no plateaus) is flagged. |
+| `escalation_enabled` | boolean | `true` | Enable the count-based escalation ladder (advisory → hard stop) once a pattern's threshold is met repeatedly. |
+| `max_trajectory_lines` | number (≥ 10) | `1000` | Maximum trajectory entries retained per session before older entries are evicted. |
+| `detection_timeout_ms` | number (≥ 10) | `100` | Bounded time budget for a single pattern-detection pass; detection is skipped (fail-open) if it would exceed this. |
+
+**Example** — tighten the repetition-loop and ping-pong thresholds:
+
+```json
+{
+  "prm": {
+    "enabled": true,
+    "pattern_thresholds": {
+      "repetition_loop": 1,
+      "ping_pong": 1
+    }
+  }
+}
+```
+
 ## Phase Complete Configuration
 
 Controls phase completion gating and validation.
@@ -623,10 +771,16 @@ Controls phase completion gating and validation.
 
 ## Repo Graph Configuration (`repo_graph`)
 
-Controls the repository dependency graph that the plugin builds on session start.
+Controls the persistent repository dependency graph, its bounded freshness
+probe, and automatic incremental refresh behavior.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
+| `enabled` | boolean | `true` | Master switch. When `false`, no startup or write-trigger maintenance runs, `repo_map` returns a disabled notice, and graph context is not injected. The tool remains registered. |
+| `init_refresh` | boolean | `true` | Probe the persisted fingerprint on session start and refresh only detected drift. Set to `false` to retain the legacy full rebuild on every session start. |
+| `refresh_cap` | integer (0-500) | `50` | Maximum complete drift set that a `repo_map` read may refresh incrementally. `0` disables read-time auto-refresh. Startup also uses this value in its incremental-versus-full-build cutover. |
+| `walk_budget_ms` | integer (1000-60000) | `5000` | Wall-clock budget for graph and freshness walks. An incomplete freshness walk is `inconclusive` and never authorizes refresh or deletion. |
+| `max_files` | integer (100-100000) | `10000` | Source-file cap for graph and freshness walks. Hitting the cap is conservative and produces an incomplete result. |
 | `exclude_dirs` | string[] | `[]` | Extra directory **names** to skip when scanning the workspace, in addition to the built-in defaults. |
 
 The graph scanner already skips common generated directories by default:
@@ -640,11 +794,37 @@ in the workspace. Entries are directory names, **not** glob or path patterns.
 The exclude also applies to write-triggered incremental updates, so files under
 an excluded directory are never (re-)added to the graph.
 
+Changing the exclusion policy invalidates the prior fingerprint and causes a
+configured startup rebuild. Changes to `package.json`, `Cargo.toml`,
+`pyproject.toml`, or `go.mod` also require a full rebuild because those
+manifests affect inferred package boundaries rather than a single source node.
+
+The freshness sidecar at `.swarm/repo-graph.fingerprint.json` records file size
+and modification time for source files and package manifests. This is a bounded
+`readdir` plus `stat` walk; it does not read or hash file contents. A change that
+preserves both size and filesystem mtime is outside the probe's detection model.
+Probe results are cached per normalized workspace for up to 30 seconds with
+bounded LRU eviction.
+
+`clean` means the current walk matches the persisted fingerprint. `drifted`
+means a complete walk found additions, metadata changes, or removals.
+`no-fingerprint` triggers a startup rebuild. `inconclusive` means a budget, cap,
+or filesystem error prevented complete observation; existing query answers are
+served with freshness marked unknown, and no refresh or deletion is attempted.
+Coder/reviewer graph context follows the same rule: inconclusive results remain
+available as freshness-unknown, while uncertified graphs and complete drift
+above `refresh_cap` are suppressed.
+
 **Example** — exclude a generated-code directory and a docs build dir:
 
 ```json
 {
   "repo_graph": {
+    "enabled": true,
+    "init_refresh": true,
+    "refresh_cap": 30,
+    "walk_budget_ms": 8000,
+    "max_files": 25000,
     "exclude_dirs": ["generated", "site"]
   }
 }
@@ -803,6 +983,126 @@ auto-activate skills.
 | `knowledge.realtime_learning_nudge.enabled` | boolean | `true` | Enables the architect-only in-session learning nudge when knowledge is enabled. |
 | `knowledge.realtime_learning_nudge.first_after_tool_calls` | number | `10` | First total session tool-call count that can trigger the nudge. |
 | `knowledge.realtime_learning_nudge.repeat_after_tool_calls` | number | `25` | Minimum additional tool calls before the same session can be nudged again. |
+| `knowledge.promotion_require_actionable` | boolean | `true` | Enforces the actionability floor on **every** hive-promotion path — automatic promotion, `/swarm promote <text>`, and `/swarm promote --from-swarm <id>`. A lesson is promotable only if it carries at least one predicate (`required_actions`, `forbidden_actions`, `verification_checks`) **and** at least one scope (`applies_to_tools`, `applies_to_agents`). See [the promote command](./commands.md#swarm-promote---category-cat---from-swarm-id-actionability-flags-text) for the flags that supply them. |
+
+> **`knowledge.promotion_require_actionable` is default-ON and is a behavior change (issue #1821).** Before
+> this, a lesson could reach hive knowledge as un-actionable prose that no agent could act on. Now such a
+> lesson is **blocked** rather than silently promoted, and that applies to entries which previously
+> auto-promoted. `--force --reason "<why>"` still overrides and records a durable audited override naming the
+> failed gate; set this key to `false` to restore the previous behavior wholesale.
+
+> **Superseded by real-time admission (issue #1821).** When
+> `learning.realtime_admission.enabled` is `true` (the default) the nudge is suppressed, because the
+> admission loop below does the same job for real — it validates and admits candidates instead of asking the
+> model to remember to. Set `learning.realtime_admission.supersede_nudge` to `false` to keep both, or disable
+> `learning.realtime_admission` to fall back to the nudge alone.
+
+## Learning Data Plane
+
+The learning data plane turns in-session observations into durable knowledge under explicit budgets, and
+mines accumulated evidence into improvement proposals. It never activates a skill or edits an active
+artifact on its own.
+
+Note this is the **top-level `learning` block**, which is unrelated to `memory.learning` (the memory
+subsystem's Q-learning tuning).
+
+```jsonc
+{
+  "learning": {
+    "realtime_admission": { "enabled": true, "max_queue_size": 50, "max_drain_wall_time_ms": 10000 },
+    "prm_persistence": { "enabled": true, "min_support": 3, "cooldown_ms": 900000 },
+    "dedup_sweep": { "enabled": true, "max_comparisons": 2000, "max_merges_per_sweep": 10 }
+  },
+  "consensus": { "enabled": true, "default_min_support": 3, "default_min_successful_runs": 2 }
+}
+```
+
+### `learning.realtime_admission`
+
+Admits knowledge candidates while the session is still running, so a lesson captured early can be retrieved
+by a later delegation. Every field is a hard cap; the phase-boundary curator remains the durable backstop, so
+disabling this loses nothing but timeliness.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `true` | Enable mid-session admission. |
+| `max_queue_size` | number | `50` | Per-session candidate queue cap (drop-oldest). |
+| `min_drain` / `max_drain` | number | `1` / `10` | Bounds on the adaptive drain batch size. |
+| `drain_depth_factor` / `drain_velocity_factor` | number | `0.5` / `0.25` | How queue depth and arrival velocity scale the batch. |
+| `max_llm_calls_per_session` | number | `20` | Cap on validation model calls per session. |
+| `max_tokens_per_session` | number | `50000` | Token budget per session. |
+| `max_concurrent_admissions` | number | `2` | Concurrency limit. |
+| `max_retries_per_candidate` | number | `1` | Retries before a candidate is requeued. |
+| `per_candidate_llm_timeout_ms` | number | `60000` | Per-candidate bound on cancellable model work. |
+| `max_drain_wall_time_ms` | number | `10000` | Total wall-clock budget for one drain. |
+| `supersede_nudge` | boolean | `true` | Suppress the prompt-only nudge while this loop is active. |
+
+### `learning.prm_persistence`
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `true` | Persist repeated PRM patterns as knowledge. |
+| `min_support` | number | `3` | Distinct occurrences required before a pattern is persisted. |
+| `cooldown_ms` | number | `900000` | Per-pattern cooldown after a persist. |
+
+### `learning.dedup_sweep`
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `true` | Merge active near-duplicate knowledge entries at curator phase boundaries. |
+| `max_comparisons` | number | `2000` | Upper bound on pairwise comparisons per sweep. |
+| `max_merges_per_sweep` | number | `10` | Upper bound on merges applied per sweep. |
+
+### Cross-producer recommendation dedup
+
+Three mechanisms propose learning recommendations — the curator sweep, the skill improver's
+macro-reflector, and the consensus miner. They share one dedup memory so a lesson one of them has
+already emitted is not emitted again. There is nothing to configure; the behaviour is always on and
+always fails open (an unreadable or unwritable ledger emits everything, which is the pre-dedup
+behaviour).
+
+| Property | Value |
+|----------|-------|
+| Location | `learning/recommendation-ledger.jsonl` under the resolved knowledge store — `<project>/.swarm/` normally, the shared cohort store when the worktree is linked. Survives `/swarm close` and `/swarm reset`, like `knowledge.jsonl` |
+| Identity | Normalized recommendation text plus its scope keys — deliberately independent of which mechanism produced it, and of the target it names |
+| Retention | 500 entries, oldest-first eviction, applied on a whole-file rewrite at every append; each entry capped at 4 KB. Eviction is by position, not by producer, so one mechanism's append can evict another's oldest entries |
+| Provenance | Each entry carries a `LearningProvenanceV1` record (mechanism, source knowledge/task/evidence/run/model refs, write origin) |
+| Visibility | `/swarm consolidate` prints `Duplicate recommendations suppressed`; `consensus_mine` returns a `recommendation_ledger` block whose `duplicate_recommendation_count` counts keys the ledger had already seen — including this miner's own earlier emissions, not only other producers' (see [Reading `duplicate_recommendation_count`](./consensus-mining.md#reading-duplicate_recommendation_count), and [Response shape](./consensus-mining.md#response-shape) for every field it returns) — and whose `degraded: true` says the fail-open path was taken and **nothing** was recorded; curator suppressions land in its `skipped` tally and the debug log |
+
+Matching is **exact** over normalized text, so two mechanisms suppress each other only when they emit
+the same sentence. The improver and the miner build statements from fixed templates while the curator
+emits free-form lessons, so in practice this mostly deduplicates each mechanism against its own
+earlier runs; treat cross-mechanism suppression as a bonus rather than the common case.
+
+Because retention is bounded, a recommendation older than the most recent 500 emissions can surface
+again. Retention is also independent of `knowledge.swarm_max_entries` (default 100), so a lesson the
+knowledge store has already evicted can still be suppressed until its ledger entry ages out.
+
+A generated motif or workflow proposal removed from `.swarm/skills/proposals/` is **not** regenerated
+— the ledger has already recorded it. This matters most on the automated path: a full-auto or
+post-mortem `REJECT` deletes the proposal, which now retires that motif until its ledger entry ages
+out. Knowledge-derived skill drafts are not routed through the ledger and are unaffected.
+
+### `consensus`
+
+Governs the `consensus_mine` tool. It mutates none of the evidence it reads, writes no knowledge entry,
+and admits no durable memory record — but it is not write-minimal: besides its own immutable report it
+prunes its own older reports, rewrites the shared dedup ledger, leaves a lock sentinel per report id,
+and (when `memory.enabled`) mirrors each proposal into a pending memory proposal. See
+[What a mining run writes](./consensus-mining.md#what-a-mining-run-writes) for the complete list,
+[Finding the reports](./consensus-mining.md#finding-the-reports) for how to read what it produced, and
+[Response shape](./consensus-mining.md#response-shape) for what the tool returns.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `true` | Enable consensus mining. |
+| `default_min_support` | number | `3` | Minimum distinct supporting runs. |
+| `default_min_successful_runs` | number | `2` | Minimum successful runs. |
+| `default_max_evidence_items` | number | `50` | Cap on evidence items loaded per mine. |
+| `max_excerpt_chars` | number | `500` | Per-excerpt length bound (excerpts are also secret-redacted). |
+| `llm_summarization_enabled` | boolean | `true` | Allow optional statement summarization after the deterministic pass. When on and an OpenCode client is wired, a mine issues up to **20** `session.create` + `session.prompt` calls. |
+| `llm_timeout_ms` | number | `60000` | Bound on summarization calls. |
+| `report_retention` | number | `50` | Reports retained under `.swarm/evolution/consensus/`. Pruning runs after **every** mine, so at the default the steady state of a long-lived project is that each run deletes the oldest report. `0` **disables** pruning (retain everything) rather than deleting everything; the tool then reports `retention.pruning_enabled: false` and omits `retention.retained` and `retention.corrupt`. |
 
 ## Skill Improver Consolidation
 
@@ -820,6 +1120,38 @@ auto-activate skills.
 Scheduled consolidation is fire-and-forget, validates drafted skills against
 matching eval fixtures, and never auto-activates skills. Use `/swarm
 consolidate` for an explicit pass.
+
+## Governed Skill Optimizer
+
+`skill_opt` governs the `/swarm skill-opt` command family (issue #1822 —
+SkillOpt 3/7): a manually-activated optimizer that drives one allowlisted
+`SKILL.md` candidate at a time through deterministic draft → static smoke →
+evaluation-substrate validation (`split:'test'`) → manual approval → atomic
+activation (or rollback). See `docs/skill-optimizer.md` for the full
+architecture.
+
+Disabled by default. `/swarm skill-opt run` requires `enabled: true` AND
+`--confirm`; `approve`/`activate`/`reject`/`rollback` are human-only. The
+config is consulted only inside command handlers — never on the plugin init
+path.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `false` | Master opt-in for executing optimization rounds. `plan`/`status`/`diff`/`history` are always available (read-only / proposal-only). |
+| `max_rounds` | number | `5` | Hard cap on draft/smoke retries before a validation (the held-out test set is single-use, so a single `run` performs at most one validation). |
+| `max_candidates_per_round` | number | `3` | Max candidates drafted per round. (Forward-compatible; one candidate is drafted per round in v1.) |
+| `max_validations_per_round` | number | `1` | Max validation runs per round (held-out test consumptions). |
+| `max_round_time_ms` | number | `3600000` | Forwarded as a per-task validation timeout in v1 (no wall-clock round timer enforced yet). |
+| `max_tokens_per_round` | number | `50000` | Soft token spend budget for LLM drafting across a round. (Forward-compatible; not yet enforced in v1.) |
+| `max_rejections` | number | `5` | Max consecutive rejections before a multi-validation controller stops. (Forward-compatible in v1 — single validation per run.) |
+| `max_inconclusive_rounds` | number | `2` | Max consecutive inconclusive results before a multi-validation controller stops. (Forward-compatible in v1.) |
+| `max_transient_retries` | number | `5` | Max transient-infra retries before an infra failure becomes inconclusive. |
+| `convergence_non_improvements` | number | `3` | K consecutive draft/smoke non-progress results before the controller stops. |
+| `max_changed_lines` | number | `200` | Trust region: max changed lines in a candidate `SKILL.md`. |
+| `max_changed_bytes` | number | `20000` | Trust region: max changed bytes in a candidate `SKILL.md`. |
+| `max_changed_sections` | number | `6` | Trust region: max distinct frontmatter/body sections changed. |
+| `deadband` | number | `0` | Promotion policy deadband forwarded to the evaluation substrate (`PromotionPolicyV1.deadband`). |
+| `retirement_min_age_days` | number | `60` | Wall-clock retirement: minimum age (days) before a never-used skill is eligible for archival retirement. Real usage signal is still required; this is a floor. |
 
 ## External Skills Curation Pipeline
 
@@ -987,6 +1319,7 @@ Extended worktree isolation configuration. These settings apply to all worktree 
 | `merge_strategy` | `"merge" \| "rebase" \| "cherry-pick"` | `"merge"` | Branch merge strategy after lane worktree completion. |
 | `worktree_dir` | string | _(none)_ | Optional user-specified worktree directory override. When set, worktrees are created under this path instead of the default `.swarm-worktrees/<sessionId>/<laneId>`. |
 | `deps_strategy` | `"skip" \| "copy" \| "link"` | `"skip"` | How to handle `node_modules` when provisioning a lane worktree. `"skip"` (default) does not copy — the lane runs without host packages. `"copy"` uses `cpSync` to duplicate `node_modules`. `"link"` creates symlinks (POSIX) or junctions (Windows). |
+| `lane_permissions` | `"scoped_allow" \| "deny" \| "off"` | `"scoped_allow"` | Permission policy for OpenCode instances running **inside** a worktree lane. See below. Has no effect outside a lane — ordinary sessions are never modified by this setting. |
 | `serialization_release_after_dispatches` | number | `5` | Release a serialized session after this many successful dispatches have completed and merged back from that session. Only applies when serialization mode is active. |
 | `serialization_release_after_ms` | number | `60000` | Release a serialized session after this many milliseconds have elapsed since the session was first serialized (even if zero dispatches have succeeded). Acts as a TTL ceiling on serialized sessions. |
 
@@ -999,6 +1332,86 @@ Extended worktree isolation configuration. These settings apply to all worktree 
 | `"link"` | Creates symlinks (POSIX) or directory junctions (Windows). | Projects with many packages where copying is slow; requires filesystem support for symlinks. |
 
 > **Advisory for `deps_strategy: "skip"`:** When a task's gates include test/build commands and the lane was provisioned with `deps_strategy: "skip"`, the system emits a `WORKTREE_DEPS_SKIP` advisory suggesting to set `deps_strategy` to `"copy"` or `"link"` if the task requires host dependencies.
+
+#### `worktree.lane_permissions` — Permission policy inside a lane
+
+OpenCode partitions **all** permission state by directory. A worktree lane runs in its own OpenCode instance, so it starts with an empty `approved` list — every prior "Allow always" is forgotten — and a private pending-prompt map. Because no TUI is attached to a lane instance, an `external_directory` prompt raised there can never be answered, and the lane blocks indefinitely.
+
+This setting decides how that is resolved. It applies **only** inside a swarm worktree lane; every other session is left exactly as it is today.
+
+| Value | Behavior |
+|-------|----------|
+| `"scoped_allow"` (default) | Pre-grant `external_directory` access to a justified allowlist and deny everything else outright, so no request can be left pending. See the allowlist below. |
+| `"deny"` | Emit no allowlist — only the catch-all deny. Anything you have explicitly allowed in `permission.external_directory` still applies (your configuration is merged last and always wins), so this denies everything the plugin would otherwise have granted rather than literally every request. Still resolves rather than hanging. |
+| `"off"` | Apply no lane-specific rules. **This restores the hanging behavior described above** — an unanswerable prompt inside a lane will block that lane until the server is restarted. Provided only as an escape hatch. |
+
+Under `"scoped_allow"` the allowlist is:
+
+- the parent project the lane is a git worktree of, and the lane itself;
+- both OpenCode config directories — the XDG one (`~/.config/opencode`) and, when set, the `OPENCODE_CONFIG_DIR` override. OpenCode reads config from both, but does **not** base-allow either to an agent, so granting them is a deliberate widening (see the note below);
+- OpenCode's own temp directory (`<os-temp>/opencode`), and on Windows only the shortened-worktree lane root (`<os-temp>/swwt`) used by the path-budget fallback;
+- OpenCode's plan storage (`<data>/plans`), which the host natively allows to its built-in `plan` agent;
+- the skill roots OpenCode itself scans, mirroring its `{skill,skills}` glob (see the table below);
+- any directories listed in your `skills.paths` config, resolved the same way OpenCode resolves them (`~/` expands to your home directory, relative paths anchor to the lane);
+- **only if you configure `skills.urls`**, the URL-skill cache root `$XDG_CACHE_HOME/opencode/skills` (default `~/.cache/opencode/skills`). With no `skills.urls` set, nothing under the cache is granted — see the note below.
+
+> **These are WRITE grants too.** OpenCode's `external_directory` permission has no read/write split, so every allowlist entry also permits writes. The list is deliberately narrow for that reason: the whole OS temp directory is **not** granted (only the two subtrees above), and neither are the opencode-swarm plugin cache/install locations — a lane writing to its own installed plugin would be executed in-process by the host on the next load. OpenCode's data directory is not granted either — only the `plans` subdirectory is, so session storage and the primary `auth.json` stay outside the grant. The user-level `~/.opencode` tree is deliberately **not** granted for the same reason: OpenCode's GitLab OAuth helper stores credentials at `~/.opencode/auth.json` when `XDG_DATA_HOME` is unset (the default on Windows and macOS). Its skill subdirectories (`~/.opencode/skill` and `~/.opencode/skills`) are granted individually instead. If a lane genuinely needs more of `~/.opencode`, add an explicit `permission.external_directory` allow — but be aware of what else lives there.
+
+Explicit configuration mostly wins: any `permission.external_directory` entry you set in `opencode.json` is merged **after** the generated rules, so your own `allow` and `deny` entries override both the allowlist and the catch-all deny.
+
+> **Known residual — a hand-made worktree at the exact lane path.** A worktree you create yourself at literally `<parent>/.swarm-worktrees/ses_<letters-and-digits>/<id>` is treated as a lane even on your own branch, and will get the scoped rules. This is accepted rather than fixed: it takes a deliberately lane-shaped directory name to reach, and the same leniency is what keeps a real lane recognised after you check out a different branch inside it. Use a directory name outside that shape, or set `worktree.lane_permissions: "off"`.
+
+> **Known narrowing — `references` directories.** OpenCode base-allows any directory listed in your top-level `references` config for every agent, but the plugin cannot resolve those paths from the config hook, so they are **not** re-granted inside a lane and a lane will be denied access to them. If you use `references`, add each directory explicitly: `{ "permission": { "external_directory": { "/path/to/reference/*": "allow" } } }`. The other families OpenCode base-allows for an agent — its own temp directory and the tool-output directory — are preserved inside a lane, as are the skill roots enumerated in the table below. The OpenCode config directories are granted as well; that one is a deliberate widening rather than a restoration, since OpenCode does not base-allow them to an agent. The user-level `~/.opencode` tree is **not** granted (only its skill subdirectories are) — see the write-grant note above.
+
+#### Skill roots reachable from a lane
+
+OpenCode discovers skills with two globs: `skills/**/SKILL.md` under `.claude` and `.agents` (plural only), and `{skill,skills}/**/SKILL.md` under each of its config directories (either spelling). The allowlist mirrors both, so every layout OpenCode supports stays reachable. Measured effective actions inside a lane under `scoped_allow`:
+
+| Skill layout | Action in a lane |
+|---|---|
+| `~/.claude/skills/<skill>` | allow |
+| `~/.agents/skills/<skill>` | allow |
+| `~/.opencode/skills/<skill>` | allow |
+| `~/.opencode/skill/<skill>` | allow |
+| `<xdg-config>/opencode/skill/<skill>` | allow |
+| `<project>/.claude/skills/<skill>` | allow |
+| `<project>/.agents/skills/<skill>` | allow |
+| `<project>/.opencode/{skill,skills}/<skill>` | allow |
+| `$XDG_CACHE_HOME/opencode/skills/<skill>` (URL-sourced) | allow |
+| `~/.opencode` (the tree itself) | **deny** |
+| `$XDG_CACHE_HOME/opencode` (the cache parent) | **deny** |
+
+> **`skills.urls` are covered — conditionally, and as a superset.** OpenCode pulls URL-sourced skills into `$XDG_CACHE_HOME/opencode/skills` (default `~/.cache/opencode/skills`) and adds each pulled skill's directory to the set it base-allows every agent, so a lane needs that root to read them. The grant is made **only when your config actually declares `skills.urls`** — otherwise nothing under the cache is base-allowed to an ordinary session either, and granting it would make a lane *more* permissive than a normal session.
+>
+> Note this is a **superset** of what OpenCode base-allows: the host allows each individual pulled directory, whereas the plugin grants the whole root (a rule pattern's `*` spans path separators). Because `external_directory` grants writes as well as reads, and OpenCode skips downloading a file whose destination already exists, a lane with this grant could pre-place content at a deterministic cache path that a later, different session would then load as skill instructions. That risk is accepted only when you have opted into `skills.urls`; set `worktree.lane_permissions: "deny"` if you would rather a lane never reach the cache.
+>
+> Only that subdirectory is granted — **not** the cache parent `$XDG_CACHE_HOME/opencode`, which contains `bin/`, a directory OpenCode executes from; granting the parent would place executable code inside a lane's write grant.
+
+> **Exception — `"ask"` becomes `"deny"` inside a lane.** A lane instance has no TUI attached, so an `ask` there is not a third policy choice; nothing can ever answer it, and the lane blocks forever. Any `external_directory` `"ask"` you configure — top level or per agent, string shorthand or pattern map — is therefore applied as `"deny"` inside a lane only, and the affected patterns are named in the advisory and in the `.swarm/events.jsonl` record. Use an explicit `"allow"` or `"deny"` to control the behavior, or `worktree.lane_permissions: "off"` if you really want the prompting (and hanging) restored. Outside a lane, `"ask"` is untouched.
+
+A denial cannot carry a message — a permission rule holds an action, not text. So when lane scoping activates, the plugin emits one advisory (visible via `/swarm diagnose`) and appends a `lane_permissions` record to `.swarm/events.jsonl` naming the lane, the parent project, the full allowlist with justifications, and the remedy below.
+
+**To widen the allowlist**, add the directory to `opencode.json`:
+
+```json
+{
+  "permission": {
+    "external_directory": {
+      "/absolute/path/to/dir/*": "allow"
+    }
+  }
+}
+```
+
+**Example** — deny all external directory access inside lanes:
+
+```json
+{
+  "worktree": {
+    "lane_permissions": "deny"
+  }
+}
+```
 
 #### `worktree.runtime_isolation` — Per-lane runtime isolation settings
 
@@ -1041,7 +1454,7 @@ The execution profile (per-plan, set during QA GATE SELECTION or via `save_plan`
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `parallelization_enabled` | boolean | `false` | Enable parallel task execution within phases (composes with Lean Turbo) |
+| `parallelization_enabled` | boolean | `false` (schema) / `true` (new plans, v8) | Enable parallel task execution within phases (composes with Lean Turbo). **v8 (#1674):** new plans created via `save_plan` default to `true`; the execution gate enforces serial automatically when the active phase's pending tasks are not provably file-disjoint. Existing plans are unchanged on upgrade. Opt out per-plan with `parallelization_enabled: false`. |
 | `max_concurrent_tasks` | number | `10` | Maximum tasks that may run concurrently when `parallelization_enabled: true` (1–64) |
 | `council_parallel` | boolean | `true` | Allow council review phases to run council members in parallel |
 | `auto_proceed` | boolean | `false` | Skip the "Ready for Phase N+1?" prompt and advance automatically at phase boundaries |

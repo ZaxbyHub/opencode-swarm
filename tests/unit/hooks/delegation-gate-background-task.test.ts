@@ -1,10 +1,10 @@
 /**
  * Issue #1151 — Support OpenCode background subagents safely in swarm (PR 1).
  *
- * OpenCode v1.16.2 background subagents (`Task` with `background=true`) return a
+ * OpenCode background subagents (`Task` with `background=true`) return a
  * "running" placeholder immediately and complete later via synthetic injection.
- * Swarm cannot yet correlate that deferred completion, so PR 1 fail-closed-blocks
- * background swarm delegations:
+ * The default-off compatibility path still fail-closed-blocks background swarm
+ * delegations until users opt into the trusted completion/settlement pipeline:
  *   - toolBefore throws (pre-dispatch, fail-closed chain) for swarm roles.
  *   - toolAfter defensively early-returns so a running placeholder never advances
  *     Stage B or records gate evidence.

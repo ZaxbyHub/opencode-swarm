@@ -247,6 +247,43 @@ Skips the compaction service. Use when you're hitting context pressure on short 
 | `execution_mode: balanced` | Project | Yes | Nothing | Default |
 | `execution_mode: fast` | Project | Yes | Compaction service | Short sessions |
 
+## v8 Parallel-First Execution (#1674)
+
+v8 flips opencode-swarm's published core execution contract from serial-by-default
+to **safe-concurrent-by-default for provably disjoint work**, with serial as the
+automatic, gate-enforced fallback.
+
+### How it works
+- **New plans default to `parallelization_enabled: true`** (applied at
+  `save_plan` time; existing plans are unchanged on upgrade — see the v8 release
+  fragment for the migration guard).
+- **The execution gate enforces disjointness inline.** On every coder dispatch,
+  the delegation gate computes a pairwise file-conflict verdict over the active
+  phase's pending tasks (via the same pure helper the `plan_conflict_check` tool
+  exposes). Overlapping or unknown declared scopes → `parallelModeActive === false`
+  → serial, automatically. No architect discretion required.
+- **Worktree isolation is the safety net.** When the gate permits parallel
+  dispatch, each coder runs in its own isolated git worktree; merge-back aborts
+  preserve the worktree on conflict (`#1657` durable recovery records + orphan-
+  cleanup exemption).
+
+### `plan_conflict_check` (advisory tool, #1656)
+The architect can call `plan_conflict_check` *before* attempting parallel
+dispatch to inspect the conflict matrix and a suggested serialization order. It
+is genuinely read-only (writes nothing); the gate independently recomputes the
+same verdict at dispatch time. Use it to choose disjoint task groups and
+understand why the gate will (or won't) permit parallelism.
+
+### Recovery UX (#1657)
+When a lane's merge-back fails, a durable recovery record is written under
+`.swarm/recovery/`. `/swarm status` surfaces a "Preserved recovery worktrees"
+section, and `cleanupOrphanedBranches` exempts recovery branches (fail-safe on
+read error). Records auto-clear when the lane later merges back successfully.
+
+### Opting out
+- Per-plan: `execution_profile.parallelization_enabled: false` at `save_plan`.
+- Globally: `worktree.policy: disabled` (disables worktree isolation entirely).
+
 ---
 
 ## QA Gate Reference

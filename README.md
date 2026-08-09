@@ -32,13 +32,15 @@ Most AI coding tools let one model write code and ask that same model whether th
 
 ### Key Features
 
-- 🏗️ **Specialized core, optional, and conditional agents** — architect, coder, reviewer, test_engineer, critic, explorer, sme, docs, designer, critic_oversight, critic_sounding_board, critic_drift_verifier, critic_hallucination_verifier, curator_init, curator_phase, council_generalist, council_skeptic, council_domain_expert. Run `/swarm agents` for the live roster — that is the source of truth, not this list.
+- 🏗️ **Specialized core, optional, and conditional agents** — architect, coder, reviewer, test_engineer, critic, critic_finding_validator, explorer, sme, docs, designer, critic_oversight, critic_sounding_board, critic_drift_verifier, critic_hallucination_verifier, curator_init, curator_phase, council_generalist, council_skeptic, council_domain_expert. Run `/swarm agents` for the live roster — that is the source of truth, not this list.
 - 🔒 **Gated pipeline** — code never ships without reviewer + test engineer approval
+- 🔎 **Independent auto-review engine** — bounded whole-diff review in a fresh read-only model session, structured diff-anchored findings, optional independent validation, advisory-by-default phase review, and an evidence-backed opt-in completion gate. v7 remains opt-in; v8's default is pinned to a committed 30-diff cost burn-in.
 - 🔍 **DEEP_DIVE Protocol** — High-rigor, on-demand read-only codebase audit via specialized skills
 - 🔬 **External Skill Curation Pipeline** — Opt-in discovery, quarantine, evaluation, and promotion of external skill candidates from configured sources (disabled by default; enable via `external_skills.curation_enabled: true` in config). Includes 7 tools: `external_skill_discover`, `external_skill_list`, `external_skill_inspect`, `external_skill_promote`, `external_skill_reject`, `external_skill_delete`, `external_skill_revoke`. Candidates pass through a 3-gate validation pipeline before evaluation: **prompt injection scan** (12 regex patterns), **unsafe instruction scan** (25 patterns), and **provenance integrity check** (SHA-256, timestamp, URL, publisher, and hash verification).
+- 🎯 **Governed Skill Optimizer** — Manually-activated, single-skill optimizer (`/swarm skill-opt plan|run|status|diff|approve|reject|rollback|history`) that drives one allowlisted `SKILL.md` candidate at a time through deterministic draft → smoke → evaluation-substrate validation → manual approval → atomic activation/rollback. Bounded, restartable, reversible, and unable to mutate source/harness/security surfaces. Disabled by default (`skill_opt.enabled: false`); see [docs/skill-optimizer.md](docs/skill-optimizer.md).
 - 🔄 **Phase completion gates** — completion-verify and drift verifier gates enforced before phase completion
 - 🔁 **Resumable sessions** — all state saved to `.swarm/`; pick up any project any day
-- 🖥️ **PR Monitor** — GitHub PR subscription and background polling via `gh` CLI; delivers real-time CI, review, and merge status updates via the AutomationEventBus (FR-001, opt-in via `pr_monitor.enabled: true`). Subscribe with `/swarm pr subscribe <pr-url|owner/repo#N|N>`; unsubscribe with `/swarm pr unsubscribe <pr-url|owner/repo#N|N>`; check status with `/swarm pr status`. Enable `auto_pr_feedback: true` in `pr_monitor` config to inject `[MODE: PR_FEEDBACK pr="URL"]` on CI failures and merge conflicts automatically.
+- 🖥️ **PR Monitor** — GitHub PR subscription and background polling via `gh` CLI; delivers real-time CI, review, and merge status updates via the AutomationEventBus (FR-001, opt-in via `pr_monitor.enabled: true`). Subscribe with `/swarm pr subscribe <pr-url|owner/repo#N|N>`; unsubscribe with `/swarm pr unsubscribe <pr-url|owner/repo#N|N>`; check status with `/swarm pr status`. With `auto_pr_feedback: true`, CI failures and merge conflicts mechanically activate PR_FEEDBACK only when no other workflow owns the session; otherwise they are durably queued for a later round.
 - 🌐 **13 full language profiles** (TypeScript, JavaScript, Python, Go, Rust, Java, Kotlin, C/C++, C#, Ruby, Swift, Dart, PHP) with **tree-sitter parse validation across 20 grammars** (adds CSS, Bash, PowerShell, INI, Regex — and `.tsx` / `.c` aliases) — extending: see [docs/adding-a-language.md](docs/adding-a-language.md)
 - 🛡️ **Built-in security** — SAST, secrets scanning, dependency audit per task
 - 🔒 **Scope enforcement** — Validates write targets against declared scope with cross-process persistence, TTL expiry, and scope-aware destructive command blocking. **Handles both single-string and array-based path arguments** (`files[]`, `paths[]`, `targetFiles[]`) to prevent scope bypass via multi-file tool calls.
@@ -107,7 +109,7 @@ Swarm then:
 3. Consults domain experts when needed and caches the guidance.
 4. Writes a phased implementation plan.
 5. Sends that plan through a critic gate before coding starts.
-6. Executes one task at a time through the QA pipeline:
+6. Executes tasks through the QA pipeline — one at a time, or concurrently in isolated worktrees for plans with provably file-disjoint task groups (v8 default for new plans, #1674; serial is the automatic fallback when scopes overlap or are unknown):
 
 * coder writes code
 * automated checks run
@@ -307,10 +309,11 @@ Swarm registers a roster of specialized core, optional, and conditional agents. 
 |---|---|---|
 | **architect** | Orchestrates workflow, writes plans, enforces gates | Core |
 | **explorer** | Scans codebase, gathers context, maps facts | Core |
-| **coder** | Implements one task at a time | Core |
+| **coder** | Implements one task at a time (or concurrently in isolated worktrees for provably file-disjoint task groups — v8, #1674) | Core |
 | **reviewer** | Checks correctness and security | Core |
 | **test_engineer** | Writes and runs tests, adversarial testing | Core |
 | **critic** | Reviews plans before implementation begins | Core |
+| **critic_finding_validator** | Independently confirms, disproves, or leaves reviewer findings unverified | Core |
 | **critic_oversight** | Sole quality gate in full-auto autonomous mode | Core |
 | **sme** | Provides domain expertise guidance | Core |
 | **docs** | Updates documentation to match implementation | Core |
@@ -635,6 +638,19 @@ Seven skill-management tools (`skill_generate`, `skill_list`, `skill_apply`, `sk
 
 - **Proposal cleanup** — When a draft skill proposal is activated via `skill_apply`, the source proposal file is deleted as part of the activation process (best-effort; permission errors are logged but do not block activation).
 
+### Governed Skill Optimizer
+
+`/swarm skill-opt` (issue #1822 — SkillOpt 3/7) is a **manually-activated, governed** optimizer that drives ONE allowlisted `SKILL.md` candidate at a time through deterministic draft → static smoke → evaluation-substrate validation (`split:'test'`) → manual approval → atomic activation (or rollback). The loop is bounded, restartable, reversible, and unable to mutate harness/source/security surfaces.
+
+Commands: `/swarm skill-opt plan|run|status|diff|approve|reject|rollback|history`.
+
+- **Disabled by default.** `/swarm skill-opt run` requires `skill_opt.enabled: true` AND `--confirm`. `plan`/`status`/`diff`/`history` are always available (read-only / proposal-only).
+- **No autonomous mutation.** `approve`/`activate`/`reject`/`rollback` are human-only and require `--expected-content-hash` to refuse a stale base.
+- **Validation reuse.** Uses the existing evaluation substrate (`evaluateCandidateV1`) — no duplicate runner/scorer. Held-out test sets are single-use (`claimHeldOutTest`), so a single `run` performs at most one validation.
+- **Durable lifecycle.** Append-only state machine under `.swarm/evolution/skills/<slug>/<candidateId>/` with hash-chain integrity and corrupt-tail quarantine.
+
+See `docs/skill-optimizer.md` for the full architecture and the `skill_opt` config block.
+
 ### External Skill Curation
 
 Swarm provides an opt-in, quarantine-first pipeline for discovering, validating, and promoting external skills. Disabled by default — no network calls are made until explicitly enabled.
@@ -709,6 +725,10 @@ Every candidate passes a 3-gate pipeline before entering quarantine:
 | `context_budget.unified_injection_tokens` | number | `undefined` | Opt-in unified ceiling (tokens) for combined system-enhancer + knowledge-injector injection per turn. When set, both hooks share this budget with proportional split |
 | `context_budget.tool_output_mask_threshold` | number | `2000` | Threshold for masking tool outputs (chars) |
 | `skills.enabled` | boolean | `false` | Gates the 7 skill-management tools (`skill_generate`, `skill_list`, `skill_apply`, `skill_inspect`, `skill_regenerate`, `skill_retire`, `skill_improve`) behind an opt-in flag. When `false` (default), these tools are hidden from the architect's tool map. |
+| `skill_opt.enabled` | boolean | `false` | Master opt-in for the governed skill optimizer (`/swarm skill-opt`). `run` also requires `--confirm`; `plan`/`status`/`diff`/`history` are always available. See `docs/skill-optimizer.md`. |
+| `skill_opt.deadband` | number | `0` | Promotion policy deadband forwarded to the evaluation substrate. |
+| `skill_opt.max_rounds` | number | `5` | Hard cap on draft/smoke retries before a validation (held-out test set is single-use). |
+| `skill_opt.max_transient_retries` | number | `5` | Max transient-infra retries before an infra failure becomes inconclusive. |
 | `context_budget.scoring.enabled` | boolean | `false` | Enable context scoring/ranking |
 | `context_budget.scoring.max_candidates` | number | `100` | Maximum items to score (10-500) |
 | `context_budget.scoring.weights` | object | `{ recency: 0.3, ... }` | Scoring weights for priority |
@@ -1057,13 +1077,22 @@ Control how tool outputs are summarized for LLM context.
 {
   "summaries": {
     "threshold_bytes": 102400,
-    "exempt_tools": ["retrieve_summary", "task", "read"]
+    "exempt_tools": [
+      "retrieve_summary",
+      "retrieve_lane_output",
+      "task",
+      "read",
+      "dispatch_lanes",
+      "dispatch_lanes_async",
+      "collect_lane_results",
+      "parse_lane_candidates"
+    ]
   }
 }
 ```
 
 - **threshold_bytes** – Output size threshold in bytes before summarization is triggered (default 102400 = 100KB).
-- **exempt_tools** – Tools whose outputs are never summarized. Defaults to `["retrieve_summary", "task", "read"]` to prevent re-summarization loops.
+- **exempt_tools** – Tools whose outputs are never summarized. Defaults to `["retrieve_summary", "retrieve_lane_output", "task", "read", "dispatch_lanes", "dispatch_lanes_async", "collect_lane_results", "parse_lane_candidates"]`. Retrieval and lane tools are always exempt—summarizing them would destroy the references needed to recover their full outputs.
 
 > **Note:** The `retrieve_summary` tool supports paginated retrieval via `offset` and `limit` parameters to fetch large summarized outputs in chunks.
 
@@ -1102,6 +1131,7 @@ Control how tool outputs are summarized for LLM context.
 | `/swarm benchmark` | Performance benchmarks; optionally consume a stored gate audit with `--gate-audit-run <id>` |
 | `/swarm gate-audit` | Run the bounded 12-fixture reviewer/test/SAST/mutation/quality evaluation matrix |
 | `/swarm gate-stats` | Aggregate offline catch, false-reject, retry, cost, and reviewer-fallback statistics |
+| `/swarm review [--base <ref> \| --range <from..to\|from...to> \| --working-tree] [--json]` | Run the bounded local whole-diff review engine with structured findings, optional independent validation when configured or required by gate mode, and durable evidence |
 | `/swarm costs [--json]` | Per-agent, per-task, per-gate, and per-retry token/cost totals from telemetry |
 | `/swarm retrieve [id]` | Retrieve auto-summarized tool outputs (supports offset/limit pagination) |
 | `/swarm reset --confirm` | Clear swarm state files |

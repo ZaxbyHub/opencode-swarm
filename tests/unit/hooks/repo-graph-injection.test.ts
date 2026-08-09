@@ -11,6 +11,7 @@ import {
 import {
 	buildWorkspaceGraphAsync,
 	saveGraph,
+	writeFingerprint,
 } from '../../../src/tools/repo-graph';
 
 let tmp: string;
@@ -43,31 +44,35 @@ afterEach(() => {
 async function buildAndSaveStartupGraph(): Promise<void> {
 	const graph = await buildWorkspaceGraphAsync(tmp);
 	await saveGraph(tmp, graph);
+	await writeFingerprint(tmp, graph);
 }
 
 describe('graph injection — silent fallback when no graph exists', () => {
-	it('returns null for coder block', () => {
-		expect(buildCoderLocalizationBlock(tmp, 'src/util.ts')).toBeNull();
+	it('returns null for coder block', async () => {
+		expect(await buildCoderLocalizationBlock(tmp, 'src/util.ts')).toBeNull();
 	});
 
-	it('returns null for reviewer block', () => {
-		expect(buildReviewerBlastRadiusBlock(tmp, ['src/util.ts'])).toBeNull();
+	it('returns null for reviewer block', async () => {
+		expect(
+			await buildReviewerBlastRadiusBlock(tmp, ['src/util.ts']),
+		).toBeNull();
 	});
 
-	it('returns null when getCachedGraph called pre-build', () => {
-		expect(getCachedGraph(tmp)).toBeNull();
+	it('returns null when getCachedGraph called pre-build', async () => {
+		expect(await getCachedGraph(tmp)).toBeNull();
 	});
 
-	it('regression RGI-001: corrupt graph files fail open instead of throwing', () => {
+	it('regression RGI-001: corrupt graph files fail open instead of throwing', async () => {
 		fs.mkdirSync(path.join(tmp, '.swarm'), { recursive: true });
 		fs.writeFileSync(path.join(tmp, '.swarm', 'repo-graph.json'), '{ nope');
 
 		// Previous code let loadGraphSync corruption errors escape into prompt
 		// construction, violating this hook's documented silent-fallback contract.
-		expect(() => getCachedGraph(tmp)).not.toThrow();
-		expect(getCachedGraph(tmp)).toBeNull();
-		expect(buildCoderLocalizationBlock(tmp, 'src/util.ts')).toBeNull();
-		expect(buildReviewerBlastRadiusBlock(tmp, ['src/util.ts'])).toBeNull();
+		expect(await getCachedGraph(tmp)).toBeNull();
+		expect(await buildCoderLocalizationBlock(tmp, 'src/util.ts')).toBeNull();
+		expect(
+			await buildReviewerBlastRadiusBlock(tmp, ['src/util.ts']),
+		).toBeNull();
 	});
 });
 
@@ -76,8 +81,8 @@ describe('graph injection — after build', () => {
 		await buildAndSaveStartupGraph();
 	});
 
-	it('coder block contains the localization summary', () => {
-		const block = buildCoderLocalizationBlock(tmp, 'src/util.ts');
+	it('coder block contains the localization summary', async () => {
+		const block = await buildCoderLocalizationBlock(tmp, 'src/util.ts');
 		expect(block).not.toBeNull();
 		expect(block?.split('\n')[0]).toBe('## REPO GRAPH — LOCALIZATION');
 		expect(block).toContain('LOCALIZATION CONTEXT');
@@ -90,26 +95,26 @@ describe('graph injection — after build', () => {
 		expect(block!.length).toBeLessThanOrEqual(500);
 	});
 
-	it('coder block returns null for files not in the graph', () => {
-		const block = buildCoderLocalizationBlock(tmp, 'src/missing.ts');
+	it('coder block returns null for files not in the graph', async () => {
+		const block = await buildCoderLocalizationBlock(tmp, 'src/missing.ts');
 		expect(block).toBeNull();
 	});
 
-	it('coder block returns null for empty target', () => {
-		expect(buildCoderLocalizationBlock(tmp, '')).toBeNull();
+	it('coder block returns null for empty target', async () => {
+		expect(await buildCoderLocalizationBlock(tmp, '')).toBeNull();
 	});
 
-	it('coder block normalizes backslashes and ./ prefixes', () => {
-		const a = buildCoderLocalizationBlock(tmp, 'src/util.ts');
-		const b = buildCoderLocalizationBlock(tmp, './src/util.ts');
-		const c = buildCoderLocalizationBlock(tmp, 'src\\util.ts');
+	it('coder block normalizes backslashes and ./ prefixes', async () => {
+		const a = await buildCoderLocalizationBlock(tmp, 'src/util.ts');
+		const b = await buildCoderLocalizationBlock(tmp, './src/util.ts');
+		const c = await buildCoderLocalizationBlock(tmp, 'src\\util.ts');
 		expect(a).not.toBeNull();
 		expect(b).toBe(a as string);
 		expect(c).toBe(a as string);
 	});
 
-	it('reviewer block lists direct dependents and risk', () => {
-		const block = buildReviewerBlastRadiusBlock(tmp, ['src/util.ts']);
+	it('reviewer block lists direct dependents and risk', async () => {
+		const block = await buildReviewerBlastRadiusBlock(tmp, ['src/util.ts']);
 		expect(block).not.toBeNull();
 		expect(block).toContain('BLAST RADIUS');
 		expect(block).toContain('src/util.ts');
@@ -127,26 +132,28 @@ describe('graph injection — after build', () => {
 		}
 		await buildAndSaveStartupGraph();
 
-		const block = buildReviewerBlastRadiusBlock(tmp, ['src/util.ts']);
+		const block = await buildReviewerBlastRadiusBlock(tmp, ['src/util.ts']);
 		expect(block).not.toBeNull();
 		expect(block).toContain('+1 more');
 		expect(block).toContain('extra-0.ts');
 	});
 
-	it('reviewer block returns null when no changed files match the graph', () => {
-		const block = buildReviewerBlastRadiusBlock(tmp, ['does/not/exist.ts']);
+	it('reviewer block returns null when no changed files match the graph', async () => {
+		const block = await buildReviewerBlastRadiusBlock(tmp, [
+			'does/not/exist.ts',
+		]);
 		expect(block).toBeNull();
 	});
 
-	it('reviewer block returns null on empty input', () => {
-		expect(buildReviewerBlastRadiusBlock(tmp, [])).toBeNull();
+	it('reviewer block returns null on empty input', async () => {
+		expect(await buildReviewerBlastRadiusBlock(tmp, [])).toBeNull();
 	});
 });
 
 describe('cache invalidation', () => {
 	it('reloads the graph when the file mtime changes', async () => {
 		await buildAndSaveStartupGraph();
-		const block1 = buildCoderLocalizationBlock(tmp, 'src/util.ts');
+		const block1 = await buildCoderLocalizationBlock(tmp, 'src/util.ts');
 		expect(block1).not.toBeNull();
 
 		// Add a new importer, then rebuild the graph (this updates the file mtime).
@@ -160,7 +167,7 @@ describe('cache invalidation', () => {
 		await new Promise((r) => setTimeout(r, 20));
 		await buildAndSaveStartupGraph();
 
-		const block2 = buildCoderLocalizationBlock(tmp, 'src/util.ts');
+		const block2 = await buildCoderLocalizationBlock(tmp, 'src/util.ts');
 		expect(block2).not.toBeNull();
 		expect(block2).toContain('Imported by (3)');
 	});

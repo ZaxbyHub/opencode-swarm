@@ -23,7 +23,35 @@ type WriteTargetResolver = (
 
 const SCALAR_PATH_KEYS = ['path', 'filePath', 'file', 'target'] as const;
 const ARRAY_PATH_KEYS = ['files', 'paths', 'targetFiles'] as const;
-const PATCH_PAYLOAD_KEYS = ['patch', 'input', 'diff'] as const;
+
+/**
+ * Field names a patch-family tool (`patch` / `apply_patch` /
+ * `swarm_apply_patch`) may use to carry its patch payload. Issue #2059: models
+ * and tool wrappers commonly emit `patchText`, `patch_text`, `patchPayload`,
+ * `text`, or `content`; recognizing only `patch`/`input`/`diff` made the
+ * resolver throw `WRITE TARGET UNVERIFIABLE: No patch payload was provided`
+ * for valid diffs.
+ *
+ * Exported so the guardrail layer (`tool-before.ts`) can reuse the single
+ * source of truth instead of drifting its own inline copies (the drift is what
+ * hid the original bug — three copies of this list existed).
+ *
+ * Collision safety: the patch resolver only runs for tools in
+ * `WRITE_TOOL_NAMES`, and `extract_code_blocks` (which uses `content`) routes
+ * to `extractResolver`, not `patchResolver`. Any future `WRITE_TOOL_NAMES`
+ * addition that uses `text` or `content` for a non-patch purpose must be
+ * audited against this list.
+ */
+export const PATCH_PAYLOAD_KEYS = [
+	'patch',
+	'input',
+	'diff',
+	'patchText',
+	'patch_text',
+	'patchPayload',
+	'text',
+	'content',
+] as const;
 
 function unverifiable(reason: string): WriteTargetResolution {
 	return { status: 'unverifiable', reason };
@@ -135,26 +163,67 @@ function parsePatchPayload(payload: string): ParsedPatch | string {
 		return null;
 	};
 
-	const lines = payload.split('\n');
+	// Split on CRLF *or* LF. This is the single choke point feeding every
+	// marker/header regex below; splitting on `\n` alone left a trailing `\r`
+	// on each line, and because JS `.` does not match `\r`, every `(.+)$` /
+	// `(.*)$` path-extraction regex failed on CRLF input — so *every* CRLF
+	// patch resolved to "Patch contains no recognizable write targets" (F-011).
+	// `parseTarget` keeps its own trailing-`\r` strip as defence in depth.
+	const lines = payload.split(/\r?\n/);
 	const beginIndices: number[] = [];
 	const endIndices: number[] = [];
 	const nativeOperationIndices: number[] = [];
 	for (let index = 0; index < lines.length; index++) {
-		const line = lines[index] ?? '';
-		const trimmed = line.trim();
+		const trimmed = (lines[index] ?? '').trim();
 		if (trimmed === '*** Begin Patch') beginIndices.push(index);
 		if (trimmed === '*** End Patch') endIndices.push(index);
 		if (
-			/^\*\*\* (?:Update|Add|Delete) File:/i.test(line) ||
-			/^\*\*\* Move (?:to|from):/i.test(line)
+			/^\*\*\* (?:Update|Add|Delete) File:/i.test(trimmed) ||
+			/^\*\*\* Move (?:to|from):/i.test(trimmed)
 		) {
 			nativeOperationIndices.push(index);
 		}
 	}
+	// A payload is a Native Vibe Patch when it has a `*** Begin Patch` marker,
+	// OR carries any native operation marker (`*** Update/Add/Delete File:` /
+	// `*** Move to|from:`), OR has a bare `*** End Patch` marker with NO
+	// unified-diff headers. That last clause tolerates a model appending
+	// `*** End Patch` as a stray trailer on an otherwise-standard unified diff
+	// (issue #2059) while still failing closed on a genuinely malformed native
+	// patch that is missing its begin marker.
+	//
+	// Operation markers are matched against the TRIMMED line, symmetrically with
+	// the framing markers above. Previously framing was trimmed but operation
+	// markers were anchored to the raw line, so a single leading space or tab
+	// hid an operation marker from both classification here and extraction
+	// below: a correctly framed patch carrying `*** Update File: src/safe.ts` at
+	// column 0 plus ` *** Update File: ../../../etc/passwd` resolved to
+	// `['src/safe.ts']` alone, and the traversal target never reached the
+	// caller that validates the resolved set (F-002).
+	//
+	// The relaxation is scoped to leading WHITESPACE only. `+`/`-` prefixed
+	// lines are deliberately NOT accepted as operation markers: inside a unified
+	// diff they are legitimate added/removed body content, and inside native
+	// framing they are not valid native syntax, so honouring them would
+	// reclassify ordinary diff bodies as native and fail them closed for no
+	// security gain.
+	//
+	// Known cost, accepted: a unified diff whose space-prefixed CONTEXT lines
+	// reproduce a column-0 operation marker from the file being patched now
+	// classifies as native and fails closed ("missing *** Begin Patch") instead
+	// of resolving. Measured blast radius in this repo: the native-patch
+	// fixtures in `tests/unit/hooks/write-lstat-authority.test.ts`,
+	// `guardrails-plan-md-guard.test.ts`,
+	// `guardrails-directory.adversarial.test.ts`, and
+	// `guardrails-v622-patch-aliases.test.ts` (the last added by this change).
+	// Failing closed is the correct
+	// direction for a write guardrail, and the same hazard already existed for
+	// the trimmed `*** Begin Patch` framing marker.
+	const hasUnifiedHeaders = lines.some((l) => /^(---|\+\+\+)\s+/.test(l));
 	const native =
 		beginIndices.length > 0 ||
-		endIndices.length > 0 ||
-		nativeOperationIndices.length > 0;
+		nativeOperationIndices.length > 0 ||
+		(!hasUnifiedHeaders && endIndices.length > 0);
 	if (native) {
 		if (beginIndices.length === 0)
 			return 'Native patch is missing *** Begin Patch';
@@ -174,7 +243,10 @@ function parsePatchPayload(payload: string): ParsedPatch | string {
 		}
 
 		for (let index = beginIndex + 1; index < endIndex; index++) {
-			const line = lines[index] ?? '';
+			// Trimmed for the same reason as the classification pass above: an
+			// indented operation marker must contribute its target to `paths`,
+			// not be silently skipped (F-002).
+			const line = (lines[index] ?? '').trim();
 			const match = line.match(/^\*\*\* (Update|Add|Delete) File:\s*(.*)$/);
 			if (match) {
 				const error = add(match[2] ?? '', (match[1] ?? '').toLowerCase());

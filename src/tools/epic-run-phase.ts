@@ -26,6 +26,7 @@
 import type { ToolDefinition } from '@opencode-ai/plugin/tool';
 import { z } from 'zod';
 import { loadPluginConfigWithMeta as loadPluginConfigWithMeta_import } from '../config/index.js';
+import { isSwarmSessionId } from '../config/swarm-branch.js';
 import { isGitRepo as isGitRepo_import } from '../git/branch.js';
 import { loadPlanJsonOnly as loadPlanJsonOnly_import } from '../plan/manager.js';
 import { swarmState } from '../state.js';
@@ -673,6 +674,32 @@ export const epic_decide_phase: ToolDefinition = createSwarmTool({
 		const { phase, sessionID: argSessionID } = args as EpicRunPhaseArgs;
 		const sessionID =
 			ctx?.sessionID && ctx.sessionID.length > 0 ? ctx.sessionID : argSessionID;
+		// This is the `epic_decide_phase` tool. When ctx carries no session id we
+		// fall back to the model-supplied argument, which is `z.string()`.
+		//
+		// What this guard does NOT do: protect lane provisioning.
+		// `executeEpicDecidePhase` uses `sessionID` only as a lookup key —
+		// `isEpicModeActive` (:170) and `recordEpicDecision` (:511) — and never
+		// reaches `provisionWorktree`. (The `LeanTurboRunner` construction lower
+		// in this file belongs to `executeEpicRunPhase`, which has no
+		// ToolDefinition; see the note above it.) The lane-provisioning guard for
+		// that path is in `provisionWorktree` itself.
+		//
+		// What it DOES do: turn an unencodable session id into a precise error
+		// instead of a misleading one. Without it, `isEpicModeActive` simply
+		// returns false for the bogus key and the tool reports "epic mode is not
+		// active for this session" — which is wrong-sounding when epic mode IS
+		// active, just under the real id.
+		if (!isSwarmSessionId(sessionID)) {
+			return JSON.stringify(
+				{
+					ok: false,
+					error: `Invalid sessionID "${sessionID}". It must look like "ses_" followed by letters/digits. Omit the argument so the tool can use the active session id.`,
+				},
+				null,
+				2,
+			);
+		}
 		const result = await executeEpicDecidePhase({
 			phase,
 			sessionID,

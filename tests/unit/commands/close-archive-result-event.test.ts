@@ -5,12 +5,7 @@
  * disagree (issue #2030 items 6, 9).
  */
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
-import {
-	mkdirSync,
-	mkdtempSync,
-	rmSync,
-	writeFileSync,
-} from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { CloseStageContext } from '../../../src/commands/close.js';
@@ -77,6 +72,7 @@ function makeCtx(): CloseStageContext {
 		archivedActiveStateDirs: new Set<string>(),
 		archiveFailureReasons: new Map<string, string>(),
 		archiveResults: [],
+		archiveStageFailed: false,
 		timestamp: '',
 		archiveDir: '',
 		archiveSuffix: '',
@@ -114,7 +110,9 @@ function createRealWalSource(committedRows: number): void {
 }
 
 async function importClose() {
-	const { _internals: ci } = await import('../../../src/commands/close.js');
+	const mod = await import('../../../src/commands/close.js');
+	const ci = mod._internals;
+	const emitCloseArchiveResult = mod.emitCloseArchiveResult;
 	const realArchiveEvidence = ci.archiveEvidence;
 	const realLoadPluginConfigWithMeta = ci.loadPluginConfigWithMeta;
 	const realFlush = ci.flushAndDrainTelemetry;
@@ -131,6 +129,7 @@ async function importClose() {
 	ci.flushAndDrainTelemetry = async () => {};
 	return {
 		ci,
+		emitCloseArchiveResult,
 		restore() {
 			ci.archiveEvidence = realArchiveEvidence;
 			ci.loadPluginConfigWithMeta = realLoadPluginConfigWithMeta;
@@ -147,10 +146,19 @@ describe('close_archive_result telemetry event (issue #2030)', () => {
 			path.join(testDir, '.swarm', 'telemetry.jsonl'),
 			'{"event":"heartbeat"}\n',
 		);
-		const { ci, restore } = await importClose();
+		const { ci, emitCloseArchiveResult, restore } = await importClose();
 		try {
 			const ctx = makeCtx();
 			await ci.runArchiveStage(ctx);
+			// The event is emitted after clean; mirror the production call order.
+			// cleanedFiles includes the succeeded artifacts → their disposition
+			// is finalized to 'removed' (the only producer of 'removed').
+			emitCloseArchiveResult(ctx, {
+				cleanedFiles: ['swarm.db', 'telemetry.jsonl'],
+				configBackupsRemoved: 0,
+				swarmPlanFilesRemoved: 0,
+				tmpFilesRemoved: 0,
+			});
 
 			const archiveEvents = emitMock.mock.calls.filter(
 				(c: unknown[]) => c[0] === 'close_archive_result',
@@ -163,23 +171,22 @@ describe('close_archive_result telemetry event (issue #2030)', () => {
 			expect(typeof payload.file_count).toBe('number');
 			expect(typeof payload.bundle).toBe('string');
 
-			const artifacts = payload.artifacts as Array<
-				Record<string, unknown>
-			>;
-			// swarm.db present with vacuum_into method + row_counts.
+			const artifacts = payload.artifacts as Array<Record<string, unknown>>;
+			// swarm.db present with vacuum_into method + row_counts. Cleaned →
+			// source_disposition finalized to 'removed' (F-002).
 			const dbArt = artifacts.find((a) => a.artifact === 'swarm.db');
 			expect(dbArt).toBeDefined();
 			expect(dbArt!.method).toBe('vacuum_into');
 			expect(dbArt!.attempt).toBe('succeeded');
 			expect(dbArt!.validation).toBe('passed');
-			expect(dbArt!.source_disposition).toBe('retained');
+			expect(dbArt!.source_disposition).toBe('removed');
 			expect(dbArt!.row_counts).toBeDefined();
 			expect(
 				(dbArt!.row_counts as { project_constraints: number })
 					.project_constraints,
 			).toBe(2);
 
-			// telemetry.jsonl present with copy method.
+			// telemetry.jsonl present with copy method; also cleaned → 'removed'.
 			const telArt = artifacts.find((a) => a.artifact === 'telemetry.jsonl');
 			expect(telArt).toBeDefined();
 			expect(telArt!.method).toBe('copy');
@@ -194,10 +201,16 @@ describe('close_archive_result telemetry event (issue #2030)', () => {
 			path.join(testDir, '.swarm', 'swarm.db'),
 			Buffer.from('not a sqlite database'.padEnd(4096, ' ')),
 		);
-		const { ci, restore } = await importClose();
+		const { ci, emitCloseArchiveResult, restore } = await importClose();
 		try {
 			const ctx = makeCtx();
 			await ci.runArchiveStage(ctx);
+			emitCloseArchiveResult(ctx, {
+				cleanedFiles: [],
+				configBackupsRemoved: 0,
+				swarmPlanFilesRemoved: 0,
+				tmpFilesRemoved: 0,
+			});
 
 			// Prose reflects the failure.
 			expect(ctx.archiveResult).toContain('failed');
@@ -210,9 +223,7 @@ describe('close_archive_result telemetry event (issue #2030)', () => {
 			const payload = archiveEvents[0]![1] as Record<string, unknown>;
 			expect(payload.archive_valid).toBe(false);
 
-			const artifacts = payload.artifacts as Array<
-				Record<string, unknown>
-			>;
+			const artifacts = payload.artifacts as Array<Record<string, unknown>>;
 			const dbArt = artifacts.find((a) => a.artifact === 'swarm.db');
 			expect(dbArt).toBeDefined();
 			expect(dbArt!.attempt).toBe('failed');
@@ -230,18 +241,28 @@ describe('close_archive_result telemetry event (issue #2030)', () => {
 		const srcPath = path.join(testDir, '.swarm', 'swarm.db');
 		const db = new Db(srcPath);
 		db.run('PRAGMA journal_mode = WAL;');
-		db.run('CREATE TABLE project_constraints (id INTEGER PRIMARY KEY, x TEXT);');
-		db.run('CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT);');
+		db.run(
+			'CREATE TABLE project_constraints (id INTEGER PRIMARY KEY, x TEXT);',
+		);
+		db.run(
+			'CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT);',
+		);
 		db.run('INSERT INTO schema_migrations (version, name) VALUES (?, ?)', [
 			1,
 			'init',
 		]);
 		db.close();
 
-		const { ci, restore } = await importClose();
+		const { ci, emitCloseArchiveResult, restore } = await importClose();
 		try {
 			const ctx = makeCtx();
 			await ci.runArchiveStage(ctx);
+			emitCloseArchiveResult(ctx, {
+				cleanedFiles: [],
+				configBackupsRemoved: 0,
+				swarmPlanFilesRemoved: 0,
+				tmpFilesRemoved: 0,
+			});
 
 			const archiveEvents = emitMock.mock.calls.filter(
 				(c: unknown[]) => c[0] === 'close_archive_result',
@@ -271,10 +292,19 @@ describe('close_archive_result telemetry event (issue #2030)', () => {
 			'{"phase":1}',
 		);
 
-		const { ci, restore } = await importClose();
+		const { ci, emitCloseArchiveResult, restore } = await importClose();
 		try {
 			const ctx = makeCtx();
 			await ci.runArchiveStage(ctx);
+			emitCloseArchiveResult(ctx, {
+				cleanedFiles: [
+					'post-mortem-2030-probe.md',
+					'drift-report-phase-1.json',
+				],
+				configBackupsRemoved: 0,
+				swarmPlanFilesRemoved: 0,
+				tmpFilesRemoved: 0,
+			});
 
 			// Structured result array includes both dynamic artifacts.
 			const pmResult = ctx.archiveResults.find(
@@ -296,15 +326,87 @@ describe('close_archive_result telemetry event (issue #2030)', () => {
 			);
 			expect(archiveEvents.length).toBe(1);
 			const payload = archiveEvents[0]![1] as Record<string, unknown>;
-			const artifacts = payload.artifacts as Array<
-				Record<string, unknown>
-			>;
+			const artifacts = payload.artifacts as Array<Record<string, unknown>>;
 			expect(
 				artifacts.find((a) => a.artifact === 'post-mortem-2030-probe.md'),
 			).toBeDefined();
 			expect(
 				artifacts.find((a) => a.artifact === 'drift-report-phase-1.json'),
 			).toBeDefined();
+		} finally {
+			restore();
+		}
+	});
+
+	it('wholesale archive-stage failure → archive_valid=false (not vacuously true)', async () => {
+		// Regression for swarm-critic F-003: if fs.mkdir(archiveDir) throws,
+		// archiveResults stays empty and failedCount === 0, which would make
+		// archive_valid=true — inverting the alarm signal. The archiveStageFailed
+		// flag must force archive_valid=false.
+		const { ci, emitCloseArchiveResult, restore } = await importClose();
+		try {
+			const ctx = makeCtx();
+			ctx.archiveStageFailed = true;
+			ctx.archiveResults = []; // empty — as it would be after a mkdir throw
+			ctx.archiveResult = 'Archive creation failed (see warnings)';
+			emitCloseArchiveResult(ctx, {
+				cleanedFiles: [],
+				configBackupsRemoved: 0,
+				swarmPlanFilesRemoved: 0,
+				tmpFilesRemoved: 0,
+			});
+
+			const archiveEvents = emitMock.mock.calls.filter(
+				(c: unknown[]) => c[0] === 'close_archive_result',
+			);
+			expect(archiveEvents.length).toBe(1);
+			const payload = archiveEvents[0]![1] as Record<string, unknown>;
+			expect(payload.archive_valid).toBe(false);
+		} finally {
+			restore();
+		}
+	});
+
+	it('failed-archive terminal file unlinked → (failed, removed, copy_failed) tuple', async () => {
+		// Regression for swarm-critic F-003: terminal-state files (plan.json etc.)
+		// are unlinked unconditionally even when archiving failed. The event must
+		// report source_disposition:'removed' (the file IS gone) — NOT 'retained'
+		// — with the archive failure carried by attempt/reason_code.
+		const { ci, emitCloseArchiveResult, restore } = await importClose();
+		try {
+			const ctx = makeCtx();
+			// plan.json archive failed (copy_failed), but the clean stage removed it.
+			ctx.archiveResults = [
+				{
+					artifact: 'plan.json',
+					requiredness: 'required',
+					attempt: 'failed',
+					validation: 'not_applicable',
+					source_disposition: 'retained', // archive-time disposition
+					method: 'copy',
+					reason_code: 'copy_failed',
+					detail: 'EBUSY',
+				},
+			];
+			emitCloseArchiveResult(ctx, {
+				cleanedFiles: ['plan.json'], // clean stage removed it anyway
+				configBackupsRemoved: 0,
+				swarmPlanFilesRemoved: 0,
+				tmpFilesRemoved: 0,
+			});
+
+			const archiveEvents = emitMock.mock.calls.filter(
+				(c: unknown[]) => c[0] === 'close_archive_result',
+			);
+			expect(archiveEvents.length).toBe(1);
+			const payload = archiveEvents[0]![1] as Record<string, unknown>;
+			expect(payload.archive_valid).toBe(false);
+			const artifacts = payload.artifacts as Array<Record<string, unknown>>;
+			const planArt = artifacts.find((a) => a.artifact === 'plan.json');
+			expect(planArt).toBeDefined();
+			expect(planArt!.attempt).toBe('failed');
+			expect(planArt!.source_disposition).toBe('removed');
+			expect(planArt!.reason_code).toBe('copy_failed');
 		} finally {
 			restore();
 		}

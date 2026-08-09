@@ -7,11 +7,14 @@
  */
 
 import type { PluginConfig } from '../config';
+import { SUMMARIZER_EXEMPT_TOOL_NAMES } from '../config/constants';
 import { stripKnownSwarmPrefix } from '../config/schema';
 import { log, warn } from '../utils';
 import {
 	classifyMessages,
-	isToolResult,
+	getCompletedToolOutputs,
+	getToolNames,
+	getToolParts,
 	MessagePriority,
 	type MessagePriorityType,
 } from './message-priority';
@@ -33,6 +36,15 @@ interface MessageInfo {
 interface MessagePart {
 	type: string;
 	text?: string;
+	// ToolPart fields (OpenCode SDK `ToolPart`).
+	tool?: string;
+	state?: {
+		status?: string;
+		output?: string;
+		error?: string;
+		input?: Record<string, unknown>;
+		[key: string]: unknown;
+	};
 	[key: string]: unknown;
 }
 
@@ -91,7 +103,11 @@ export function createContextBudgetHandler(config: PluginConfig) {
 			);
 		}
 
-		// Calculate total token usage across all text parts
+		// Calculate total token usage across all text parts AND completed tool
+		// outputs. Tool results are `ToolPart` objects (`part.type === 'tool'`)
+		// whose heavy payload lives in `part.state.output` — the previous loop
+		// only counted `type === 'text'` parts, so it systematically undercounted
+		// real prompt size (issue #2068).
 		let totalTokens = 0;
 		for (const message of messages) {
 			if (!message?.parts) continue;
@@ -100,6 +116,12 @@ export function createContextBudgetHandler(config: PluginConfig) {
 				if (part?.type === 'text' && part.text) {
 					totalTokens += estimateTokens(part.text);
 				}
+			}
+			// Completed tool outputs are the heavy payloads the provider
+			// serializes. Error-state outputs are diagnostic and not counted
+			// here (they are routed via stale-error → DISPOSABLE).
+			for (const { output } of getCompletedToolOutputs(message)) {
+				totalTokens += estimateTokens(output);
 			}
 		}
 
@@ -161,14 +183,29 @@ export function createContextBudgetHandler(config: PluginConfig) {
 					recentWindow,
 				);
 
+				// Compute the protected-turn indices FIRST so that both
+				// tool-output masking and observation pruning respect
+				// `preserve_last_n_turns`. Without this, a large completed tool
+				// result inside the preserved window could be masked away,
+				// discarding the substance of a supposedly preserved turn
+				// (issue #2068 review).
+				const preserveLastNTurns =
+					config.context_budget?.preserve_last_n_turns ?? 4;
+				const protectedIndices = computeProtectedIndices(
+					output.messages || [],
+					preserveLastNTurns,
+				);
+
 				// Tool output masking (Task 4.2): Replace old tool results with placeholders
-				// This runs BEFORE priority-based pruning to reduce token load early
+				// This runs BEFORE priority-based pruning to reduce token load early.
+				// Protected (recent) messages are exempt from masking.
 				const toolMaskThreshold =
 					config.context_budget?.tool_output_mask_threshold ?? 2000;
 				let toolMaskFreedTokens = 0;
 				const maskedIndices = new Set<number>();
 
 				for (let i = 0; i < (output.messages || []).length; i++) {
+					if (protectedIndices.has(i)) continue;
 					const msg = (output.messages || [])[i];
 					if (
 						shouldMaskToolOutput(
@@ -196,15 +233,20 @@ export function createContextBudgetHandler(config: PluginConfig) {
 				}
 
 				// Step 2: Identify messages to remove (by priority, excluding last N turns)
-				const preserveLastNTurns =
-					config.context_budget?.preserve_last_n_turns ?? 4;
 				const removableMessages = identifyRemovableMessages(
 					output.messages || [],
 					priorities,
 					preserveLastNTurns,
 				);
 
-				// Step 3: Remove messages until targetTokens reached
+				// Step 3: Remove messages until targetTokens reached.
+				// NOTE: extractMessageText reads the POST-MASKING parts (masking
+				// already ran above and subtracted toolMaskFreedTokens from
+				// totalTokens). So for a message that was masked, this measures
+				// only the residual placeholder text — which is the correct
+				// amount pruning can still free (masking already credited the
+				// heavy tool output). Do NOT add toolMaskFreedTokens here: that
+				// would double-count the masking credit.
 				let freedTokens = 0;
 				const toRemove = new Set<number>();
 
@@ -219,6 +261,12 @@ export function createContextBudgetHandler(config: PluginConfig) {
 				// Step 4: Apply observation masking to removed messages
 				const beforeTokens = totalTokens;
 				if (toRemove.size > 0) {
+					// applyObservationMasking clamps each part's contribution to >= 0
+					// (R7 fix), so actualFreedTokens can never be negative here —
+					// unlike the toolMaskFreedTokens branch above, this subtraction
+					// was previously unconditional and would have silently INCREASED
+					// totalTokens had a placeholder ever come out longer than the
+					// text it replaced.
 					const actualFreedTokens = applyObservationMasking(
 						output.messages || [],
 						toRemove,
@@ -302,18 +350,26 @@ export function createContextBudgetHandler(config: PluginConfig) {
 }
 
 /**
- * Identify messages that can be safely removed
- * Returns indices in priority removal order (DISPOSABLE, LOW, MEDIUM)
+ * Compute the set of message indices protected from pruning/masking. Walks
+ * backward from the newest message, protecting every user/assistant message
+ * until `preserveLastNTurns` user messages have been seen (inherited
+ * semantics: because `turnCount` increments only on user messages, the
+ * effective protected window spans roughly the last `preserveLastNTurns` user
+ * turns plus their interleaved assistant/tool messages — wider than the name
+ * suggests). Also unconditionally protects the single last user and last
+ * assistant message. Extracted so both tool-output masking and observation
+ * pruning honor the same protection window (issue #2068 review).
  */
-function identifyRemovableMessages(
+function computeProtectedIndices(
 	messages: MessageWithParts[],
-	priorities: MessagePriorityType[],
 	preserveLastNTurns: number,
-): number[] {
-	// Find last N user+assistant pairs (turn boundaries)
-	let turnCount = 0;
+): Set<number> {
 	const protectedIndices = new Set<number>();
 
+	// Walk backward until `preserveLastNTurns` user messages are protected.
+	// (Inherited bound: the loop visits up to 2N messages; user-only increment
+	// means N user turns + their interleaved assistants are protected.)
+	let turnCount = 0;
 	for (
 		let i = messages.length - 1;
 		i >= 0 && turnCount < preserveLastNTurns * 2;
@@ -343,6 +399,23 @@ function identifyRemovableMessages(
 	if (lastUserIdx !== -1) protectedIndices.add(lastUserIdx);
 	if (lastAssistantIdx !== -1) protectedIndices.add(lastAssistantIdx);
 
+	return protectedIndices;
+}
+
+/**
+ * Identify messages that can be safely removed
+ * Returns indices in priority removal order (DISPOSABLE, LOW, MEDIUM)
+ */
+function identifyRemovableMessages(
+	messages: MessageWithParts[],
+	priorities: MessagePriorityType[],
+	preserveLastNTurns: number,
+): number[] {
+	const protectedIndices = computeProtectedIndices(
+		messages,
+		preserveLastNTurns,
+	);
+
 	// Collect removable indices by priority
 	const HIGH = MessagePriority.HIGH;
 	const MEDIUM = MessagePriority.MEDIUM;
@@ -362,8 +435,10 @@ function identifyRemovableMessages(
 }
 
 /**
- * Replace message content with observation masking placeholder
- * Returns the actual number of tokens freed (original - masked placeholder)
+ * Replace message content with an observation-masking placeholder. Text parts
+ * are rewritten in place; completed `ToolPart`s are REPLACED with a synthetic
+ * text part (never mutating `state` — see `maskToolOutput`). Returns the
+ * actual number of tokens freed (clamped to ≥ 0 per part — see R7 note).
  */
 function applyObservationMasking(
 	messages: MessageWithParts[],
@@ -373,15 +448,54 @@ function applyObservationMasking(
 
 	for (const idx of toRemove) {
 		const msg = messages[idx];
-		if (msg?.parts) {
-			for (const part of msg.parts) {
-				if (part.type === 'text' && part.text) {
-					const originalTokens = estimateTokens(part.text);
-					const placeholder = `[Context pruned — message from turn ${idx}, ~${originalTokens} tokens freed. Use retrieve_summary if needed.]`;
-					const maskedTokens = estimateTokens(placeholder);
-					part.text = placeholder;
-					actualFreedTokens += originalTokens - maskedTokens;
+		if (!msg?.parts || !Array.isArray(msg.parts)) continue;
+
+		for (let i = 0; i < msg.parts.length; i++) {
+			const part = msg.parts[i];
+			if (part.type === 'text' && part.text) {
+				if (
+					part.text.includes('[Context pruned') ||
+					part.text.includes('[Tool output masked')
+				) {
+					continue;
 				}
+				const originalTokens = estimateTokens(part.text);
+				const placeholder = `[Context pruned — message from turn ${idx}, ~${originalTokens} tokens freed. ${recoveryHint(part.text)}]`;
+				const maskedTokens = estimateTokens(placeholder);
+				part.text = placeholder;
+				// Clamp to 0 (R7): see matching comment below in maskToolOutput.
+				actualFreedTokens += Math.max(0, originalTokens - maskedTokens);
+			} else if (
+				part.type === 'tool' &&
+				part.state?.status === 'completed' &&
+				typeof part.state.output === 'string'
+			) {
+				// Per-part exempt check (mirrors maskToolOutput): exempt tool
+				// outputs must stay visible even when the message is pruned.
+				const partToolName =
+					typeof part.tool === 'string' ? part.tool.toLowerCase() : '';
+				if (
+					partToolName &&
+					(SUMMARIZER_EXEMPT_TOOL_NAMES as readonly string[]).includes(
+						partToolName,
+					)
+				) {
+					continue;
+				}
+				const output = part.state.output;
+				if (
+					output.includes('[Context pruned') ||
+					output.includes('[Tool output masked')
+				) {
+					continue;
+				}
+				const originalTokens = estimateTokens(output);
+				const placeholder = `[Context pruned — message from turn ${idx}, ~${originalTokens} tokens freed. ${recoveryHint(output)}]`;
+				const maskedTokens = estimateTokens(placeholder);
+				// Replace the ToolPart with a synthetic text part (do NOT mutate
+				// `state` — preserves the SDK discriminated-union shape).
+				msg.parts[i] = { type: 'text', text: placeholder };
+				actualFreedTokens += Math.max(0, originalTokens - maskedTokens);
 			}
 		}
 	}
@@ -389,32 +503,82 @@ function applyObservationMasking(
 	return actualFreedTokens;
 }
 
+/** Matches lane-output store refs, e.g. `L1:<sha256>:<sha256>:<sha256>`. */
+const LANE_OUTPUT_REF_PATTERN = /L1:[a-f0-9]{64}:[a-f0-9]{64}:[a-f0-9]{64}/g;
+
+/** Generic fallback hint used when no lane ref is present in the text. */
+const GENERIC_RECOVERY_HINT = 'Use retrieve_summary if needed.';
+
 /**
- * Extract plain text from message parts
+ * Choose the correct recovery pointer for a placeholder that replaces
+ * pruned/masked text. Lane artifacts and general tool/summary output live in
+ * two different subsystems with two different retrieval tools:
+ *   - Generic oversized tool output is stored by tool-summarizer.ts and
+ *     retrieved with `retrieve_summary`.
+ *   - Lane batch output (dispatch_lanes / collect_lane_results) is stored in
+ *     the lane-output store and retrieved with `retrieve_lane_output <ref>`.
+ * Pointing a lane-artifact placeholder at `retrieve_summary` is a dead end —
+ * that store never held the content. This scans the original text (before
+ * truncation) for lane-output refs and, if found, names the correct tool and
+ * ref directly, since the truncated excerpt kept in the placeholder does not
+ * reliably preserve the ref.
+ *
+ * R7 fix: capped to ONE ref, not the full unique set. Each `L1:` ref is ~197
+ * characters, and the entire purpose of a placeholder is to FREE tokens.
+ * Including up to three refs (the prior behavior) could add ~600 characters
+ * to a placeholder replacing a short tool result — growing it instead of
+ * shrinking it, and driving the computed `freedTokens` negative. One ref is
+ * enough for the model to recover the lane payload; it does not need every
+ * ref that happened to appear in the excerpt. This does not fully guarantee
+ * the placeholder stays shorter than the original (the fixed "First 200
+ * chars" excerpt overhead can already exceed a very short original on its
+ * own — a separate, pre-existing class of bloat this fix does not attempt to
+ * solve), but it removes the ref list as an *additional* multiplier on top
+ * of that. `freedTokens` is separately clamped to non-negative at both call
+ * sites (`applyObservationMasking`, `maskToolOutput`) so a placeholder that
+ * still comes out longer than the original can never corrupt the summed
+ * budget accounting.
+ */
+function recoveryHint(originalText: string): string {
+	const matches = originalText.match(LANE_OUTPUT_REF_PATTERN);
+	if (matches && matches.length > 0) {
+		return `Use retrieve_lane_output with ref ${matches[0]} if needed.`;
+	}
+	return GENERIC_RECOVERY_HINT;
+}
+
+/**
+ * Extract plain text from message parts, including completed tool outputs
+ * (`ToolPart.state.output`). Used for size checks and freed-token estimates so
+ * the heavy tool-result payloads are accounted for (issue #2068).
+ *
+ * NOTE: a sibling `extractMessageText` lives in `message-priority.ts` for
+ * classification. They intentionally differ slightly (see the comment there).
  */
 function extractMessageText(msg: MessageWithParts): string {
 	if (!msg?.parts) return '';
-	return msg.parts
-		.filter((p) => p.type === 'text' && p.text)
-		.map((p) => p.text)
-		.join('\n');
+	const chunks: string[] = [];
+	for (const part of msg.parts) {
+		if (part.type === 'text' && part.text) {
+			chunks.push(part.text);
+		} else if (
+			part.type === 'tool' &&
+			part.state?.status === 'completed' &&
+			typeof part.state.output === 'string'
+		) {
+			chunks.push(part.state.output);
+		}
+	}
+	return chunks.join('\n');
 }
 
 /**
- * Extract tool name from tool output text
- * Looks for common patterns like "read_file", "write", "edit", etc.
- */
-function extractToolName(text: string): string | undefined {
-	// Try to extract tool name from common patterns
-	const match = text.match(
-		/^(read_file|write|edit|apply_patch|swarm_apply_patch|task|bun|npm|git|bash|glob|grep|mkdir|cp|mv|rm)\b/i,
-	);
-	return match?.[1];
-}
-
-/**
- * Check if tool output should be masked
- * Mask if older than recentWindowSize OR larger than threshold
+ * Check if tool output should be masked.
+ * Mask completed tool results that are older than recentWindowSize OR larger
+ * than the threshold. Error-state outputs are never masked (diagnostic
+ * signal); pending/running have no output. Exempt tools (paged artifacts,
+ * summarized task results, reads, ref-carrying lane tools —
+ * `SUMMARIZER_EXEMPT_TOOL_NAMES`) are preserved.
  */
 function shouldMaskToolOutput(
 	msg: MessageWithParts,
@@ -423,10 +587,18 @@ function shouldMaskToolOutput(
 	recentWindowSize: number,
 	threshold: number,
 ): boolean {
-	// Only mask tool result messages
-	if (!isToolResult(msg)) return false;
+	const toolParts = getToolParts(msg);
+	if (toolParts.length === 0) return false;
 
-	// Check if already masked (contains placeholder text)
+	// Only completed tool outputs are maskable. Error/pending/running carry no
+	// maskable output (errors preserve diagnostic signal).
+	const maskable = toolParts.filter(
+		(p) =>
+			p.state?.status === 'completed' && typeof p.state.output === 'string',
+	);
+	if (maskable.length === 0) return false;
+
+	// Skip if already masked (a synthetic text placeholder replaced the part).
 	const text = extractMessageText(msg);
 	if (
 		text.includes('[Tool output masked') ||
@@ -435,65 +607,78 @@ function shouldMaskToolOutput(
 		return false;
 	}
 
-	// Exempt retrieval tools and small read/task outputs.
-	// - retrieve_lane_output / retrieve_summary: paged artifacts must stay visible so the
-	//   architect can page through them; masking defeats the delivery mechanism.
-	// - task: results are already summarized by the agent that created the task call
-	// Check structured tool name first (reliable); fall back to text heuristic for
-	// legacy tool result formats that may not carry toolName in msg.info.
-	const structuredToolName = msg.info.toolName as string | undefined;
-	const exemptList = [
-		'retrieve_summary',
-		'retrieve_lane_output',
-		'task',
-		'read',
-	];
-	if (
-		structuredToolName &&
-		exemptList.includes(structuredToolName.toLowerCase())
-	) {
-		return false;
-	}
-	const toolName = extractToolName(text);
-	if (toolName && exemptList.includes(toolName.toLowerCase())) {
+	// Exempt tools: only skip when ALL tool parts are exempt.
+	const exemptList = SUMMARIZER_EXEMPT_TOOL_NAMES as readonly string[];
+	const toolNames = getToolNames(msg).map((n) => n.toLowerCase());
+	if (toolNames.length > 0 && toolNames.every((n) => exemptList.includes(n))) {
 		return false;
 	}
 
 	// Calculate age of message (0 = most recent)
 	const age = totalMessages - 1 - index;
 
-	// Mask if old enough OR large enough (changed from AND to OR for v6.14.12)
+	// Mask if old enough OR large enough
 	return age > recentWindowSize || text.length > threshold;
 }
 
 /**
- * Mask tool output with placeholder
- * Returns the number of tokens freed (original - masked)
+ * Mask completed tool outputs by REPLACING each `ToolPart` with a synthetic
+ * `{ type: 'text', text: placeholder }` part. The OpenCode `ToolState` is a
+ * discriminated union on `status`; mutating `state.output` in place would
+ * corrupt the shape and break downstream lifecycle/summarizer consumers.
+ * Replacing the whole part is the contract-valid way to reduce provider tokens
+ * (the host serializes the mutated `parts[]` after the transform hook runs —
+ * v6.85.1, v7.4.0). Per-part exempt tools are skipped. Returns the number of
+ * tokens freed (clamped to ≥ 0 per part — R7).
  */
 function maskToolOutput(msg: MessageWithParts, _threshold: number): number {
-	if (!msg?.parts) return 0;
+	if (!msg?.parts || !Array.isArray(msg.parts)) return 0;
 
+	const exemptList = SUMMARIZER_EXEMPT_TOOL_NAMES as readonly string[];
 	let freedTokens = 0;
 
-	for (const part of msg.parts) {
-		if (part.type === 'text' && part.text) {
-			// Skip if already masked
-			if (
-				part.text.includes('[Tool output masked') ||
-				part.text.includes('[Context pruned')
-			) {
-				continue;
-			}
-
-			const originalTokens = estimateTokens(part.text);
-			const toolName = extractToolName(part.text) || 'unknown';
-			const excerpt = part.text.substring(0, 200).replace(/\n/g, ' ');
-
-			const placeholder = `[Tool output masked — ${toolName} returned ~${originalTokens} tokens. First 200 chars: "${excerpt}..." Use retrieve_summary if needed.]`;
-			const maskedTokens = estimateTokens(placeholder);
-			part.text = placeholder;
-			freedTokens += originalTokens - maskedTokens;
+	for (let i = 0; i < msg.parts.length; i++) {
+		const part = msg.parts[i];
+		if (
+			part?.type !== 'tool' ||
+			part.state?.status !== 'completed' ||
+			typeof part.state?.output !== 'string'
+		) {
+			continue;
 		}
+
+		// Per-part exempt check: even when the message is eligible (it has at
+		// least one non-exempt tool), individual exempt tool outputs must stay
+		// visible (issue #2068 review).
+		const partToolName =
+			typeof part.tool === 'string' ? part.tool.toLowerCase() : '';
+		if (partToolName && exemptList.includes(partToolName)) {
+			continue;
+		}
+
+		const output = part.state.output;
+		// Skip if already masked.
+		if (
+			output.includes('[Tool output masked') ||
+			output.includes('[Context pruned')
+		) {
+			continue;
+		}
+
+		const originalTokens = estimateTokens(output);
+		const toolName = part.tool || 'unknown';
+		const excerpt = output.substring(0, 200).replace(/\n/g, ' ');
+		const placeholder = `[Tool output masked — ${toolName} returned ~${originalTokens} tokens. First 200 chars: "${excerpt}..." ${recoveryHint(output)}]`;
+		const maskedTokens = estimateTokens(placeholder);
+
+		// Replace the ToolPart with a synthetic text part. This preserves the
+		// `parts[]` array contract (no phantom fields on `state`) and reduces
+		// the provider-serialized payload.
+		msg.parts[i] = { type: 'text', text: placeholder };
+		// Clamp to 0 (R7): a placeholder can come out longer than a very short
+		// original; never let that show as negative freed tokens (which would
+		// silently INCREASE totalTokens in the summed budget accounting).
+		freedTokens += Math.max(0, originalTokens - maskedTokens);
 	}
 
 	return freedTokens;

@@ -337,4 +337,48 @@ describe('delegation-ledger hook (Task 3.2)', () => {
 		expect(advisories.length).toBe(1);
 		expect(advisories[0].message).toContain('delegation-ledger.ts');
 	});
+
+	// ─────────────────────────────────────────────────────────────
+	// Issue #1976 B9: per-session ledger entry cap + disclosure
+	// (invariant 8 bounded-memory remediation)
+	// ─────────────────────────────────────────────────────────────
+	it('B9: caps per-session entries at 200 and discloses dropped calls in the summary', async () => {
+		ensureAgentSession(CODER_SESSION_ID, 'coder');
+
+		const advisories: Array<{ sessionId: string; message: string }> = [];
+		const hook = createDelegationLedgerHook(
+			{ enabled: true },
+			WORKSPACE_DIR,
+			(sessionId, message) => {
+				advisories.push({ sessionId, message });
+			},
+		);
+
+		// Record 210 tool calls for ONE session — exceeds the 200-entry cap.
+		for (let i = 0; i < 210; i++) {
+			await hook.toolAfter(
+				{
+					tool: 'edit',
+					sessionID: CODER_SESSION_ID,
+					callID: `cap-call-${i}`,
+					args: { path: `/workspace/src/file-${i}.ts` },
+				},
+				{
+					title: 'edit',
+					output: 'ok',
+					metadata: {},
+				},
+			);
+		}
+
+		hook.onArchitectResume(ARCHITECT_SESSION_ID);
+
+		expect(advisories.length).toBe(1);
+		// The summary is built from the capped (keep-latest 200) entry list, so
+		// the retained tool-call count is 200…
+		expect(advisories[0].message).toContain('Tool calls: 200');
+		// …and the disclosure reports that 10 older calls were dropped by the cap.
+		expect(advisories[0].message).toContain('10 earlier call(s) omitted');
+		expect(advisories[0].message).toContain('per-session ledger cap');
+	});
 });

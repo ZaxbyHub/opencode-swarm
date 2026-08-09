@@ -105,6 +105,31 @@ export function validateGraphNode(node: GraphNode): void {
 	if (typeof node.mtime !== 'string') {
 		throw new Error('Invalid node: mtime is required');
 	}
+	if ((node.sizeBytes === undefined) !== (node.mtimeMs === undefined)) {
+		throw new Error(
+			'Invalid node: sizeBytes and mtimeMs must either both be present or both be absent',
+		);
+	}
+	if (
+		node.sizeBytes !== undefined &&
+		(typeof node.sizeBytes !== 'number' ||
+			!Number.isFinite(node.sizeBytes) ||
+			node.sizeBytes < 0)
+	) {
+		throw new Error(
+			'Invalid node: sizeBytes must be a finite non-negative number',
+		);
+	}
+	if (
+		node.mtimeMs !== undefined &&
+		(typeof node.mtimeMs !== 'number' ||
+			!Number.isFinite(node.mtimeMs) ||
+			node.mtimeMs < 0)
+	) {
+		throw new Error(
+			'Invalid node: mtimeMs must be a finite non-negative number',
+		);
+	}
 	if (!Array.isArray(node.exports)) {
 		throw new Error('Invalid node: exports must be an array');
 	}
@@ -392,5 +417,14 @@ export function validateGraphEdge(edge: GraphEdge): void {
 				);
 			}
 		}
+	}
+	// targetKind is optional (schema >= 1.3.0). Old graphs omit it and load
+	// unchanged; a present-but-invalid value fails closed (issue #1985, A1).
+	if (
+		edge.targetKind !== undefined &&
+		edge.targetKind !== 'node' &&
+		edge.targetKind !== 'asset'
+	) {
+		throw new Error('Invalid edge: targetKind must be "node" or "asset"');
 	}
 }

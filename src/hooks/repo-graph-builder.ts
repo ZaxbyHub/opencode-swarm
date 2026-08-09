@@ -19,11 +19,21 @@
 import * as path from 'node:path';
 import { WRITE_TOOL_NAMES } from '../config/constants';
 import {
+	type BuildWorkspaceGraphOptions,
 	buildWorkspaceGraphAsync,
+	isScannableSourcePath,
+	loadGraph,
 	type RepoGraph,
 	saveGraph,
 	updateGraphForFiles,
 } from '../tools/repo-graph';
+import { isGraphWideInputPath } from '../tools/repo-graph/builder';
+import {
+	type FreshnessOptions,
+	type FreshnessProbe,
+	probeFreshness,
+	writeFingerprint,
+} from '../tools/repo-graph/freshness';
 import { safeRealpathSync } from '../tools/repo-graph/safe-realpath';
 import * as logger from '../utils/logger';
 import { yieldToEventLoop } from '../utils/timeout';
@@ -39,13 +49,7 @@ export interface RepoGraphBuilderHook {
 export interface RepoGraphDeps {
 	buildWorkspaceGraph: (
 		workspace: string,
-		options?: {
-			maxFileSizeBytes?: number;
-			maxFiles?: number;
-			walkBudgetMs?: number;
-			followSymlinks?: boolean;
-			excludeDirs?: readonly string[];
-		},
+		options?: BuildWorkspaceGraphOptions,
 	) => Promise<RepoGraph>;
 	saveGraph: (
 		workspace: string,
@@ -55,20 +59,33 @@ export interface RepoGraphDeps {
 	updateGraphForFiles: (
 		workspace: string,
 		files: string[],
-		options?: { forceRebuild?: boolean },
+		options?: {
+			forceRebuild?: boolean;
+			buildOptions?: BuildWorkspaceGraphOptions;
+		},
 	) => Promise<RepoGraph>;
+	loadGraph: (workspace: string) => Promise<RepoGraph | null>;
+	probeFreshness: (
+		workspace: string,
+		options?: FreshnessOptions,
+	) => Promise<FreshnessProbe>;
+	writeFingerprint: (
+		workspace: string,
+		graph: RepoGraph,
+		options?: FreshnessOptions,
+	) => Promise<boolean>;
+	isGraphWideInputPath: (filePath: string) => boolean;
 	safeRealpathSync?: typeof safeRealpathSync;
 }
 
-const SUPPORTED_EXTENSIONS = [
-	'.ts',
-	'.tsx',
-	'.js',
-	'.jsx',
-	'.mjs',
-	'.cjs',
-	'.py',
-];
+export interface RepoGraphBuilderOptions {
+	enabled?: boolean;
+	initRefresh?: boolean;
+	refreshCap?: number;
+	maxFiles?: number;
+	walkBudgetMs?: number;
+	excludeDirs?: readonly string[];
+}
 
 function extractFilePath(args: unknown): string | null {
 	if (!args || typeof args !== 'object') return null;
@@ -96,27 +113,103 @@ function extractFilePath(args: unknown): string | null {
 	return filePath;
 }
 
+/**
+ * Whether `filePath` is a scannable source file the graph tracks. Delegates to
+ * the single shared {@link isScannableSourcePath} (issue #1985, defect A2) so
+ * the write hook's allowlist can never drift from the builder's
+ * LANGUAGE_REGISTRY-derived set — picking up `.rs`/`.go`/`.pyw` automatically.
+ */
 function isSupportedSourceFile(filePath: string): boolean {
-	const ext = filePath.substring(filePath.lastIndexOf('.')).toLowerCase();
-	return SUPPORTED_EXTENSIONS.includes(ext);
+	return isScannableSourcePath(filePath);
+}
+
+/**
+ * Rebase a realpath'd file onto the lexical workspace root so the incremental
+ * update keys the same node the walk produced (issue #1985, defect A5). Exported
+ * for direct unit testing of the symlink-root rebase logic.
+ *
+ * The walk keys nodes lexically relative to `workspaceRoot` (realpath is used
+ * only as a cycle-break key). When the workspace root itself is a symlink
+ * (`workspaceRoot` → `realWorkspace`), a realpath'd file (`realFilePath`) lives
+ * under `realWorkspace` and would key a DIFFERENT node than the lexical path the
+ * walker would have produced — causing a duplicate node.
+ *
+ * If `realFilePath` is under `realWorkspace`, rebase its workspace-relative tail
+ * onto the lexical `workspaceRoot` (reconstructing the lexical absolute path the
+ * walker used). Otherwise (case-insensitive aliasing without a symlinked root,
+ * or an unexpected layout) return `realFilePath` so the case-folding benefit of
+ * the realpath is preserved.
+ */
+export function rebaseOntoWorkspace(
+	realFilePath: string,
+	realWorkspace: string,
+	workspaceRoot: string,
+): string {
+	// Normalize separators for a reliable prefix comparison.
+	const normRealFile = realFilePath.replace(/\\/g, '/');
+	const normRealWs = realWorkspace.replace(/\\/g, '/');
+	if (
+		normRealFile !== normRealWs &&
+		!normRealFile.startsWith(`${normRealWs}/`)
+	) {
+		// Not under the real workspace — keep the realpath (best effort).
+		return realFilePath;
+	}
+	// Same lexical and real workspace root? Nothing to rebase; the realpath
+	// already matches the walker's keys (modulo case, which realpath fixes).
+	if (path.resolve(workspaceRoot) === path.resolve(realWorkspace)) {
+		return realFilePath;
+	}
+	// Rebase the workspace-relative tail of the realpath'd file onto the
+	// lexical workspace root, reconstructing the path the walker produced.
+	const rel = normRealFile.slice(
+		normRealWs.length + (normRealFile === normRealWs ? 0 : 1),
+	);
+	return path.join(workspaceRoot, rel);
 }
 
 export function createRepoGraphBuilderHook(
 	workspaceRoot: string,
 	deps?: Partial<RepoGraphDeps>,
-	options?: { excludeDirs?: readonly string[] },
+	options?: RepoGraphBuilderOptions,
 ): RepoGraphBuilderHook {
 	const _buildWorkspaceGraph =
 		deps?.buildWorkspaceGraph ?? buildWorkspaceGraphAsync;
 	const _saveGraph = deps?.saveGraph ?? saveGraph;
 	const _updateGraphForFiles = deps?.updateGraphForFiles ?? updateGraphForFiles;
+	const _loadGraph = deps?.loadGraph ?? loadGraph;
+	const _probeFreshness = deps?.probeFreshness ?? probeFreshness;
+	const _writeFingerprint = deps?.writeFingerprint ?? writeFingerprint;
+	const _isGraphWideInputPath =
+		deps?.isGraphWideInputPath ?? isGraphWideInputPath;
 	const _safeRealpathSync = deps?.safeRealpathSync ?? safeRealpathSync;
+	const _enabled = options?.enabled ?? true;
+	const _initRefresh = options?.initRefresh ?? true;
+	const _refreshCap = options?.refreshCap ?? 50;
+	const _maxFiles = options?.maxFiles ?? 10_000;
+	const _walkBudgetMs = options?.walkBudgetMs ?? 5_000;
 
 	// User-configured directory excludes (issue #1448). Empty entries are
 	// dropped; the Set is used both to scope the initial scan and to keep
 	// incremental write-triggered updates consistent with the scan.
 	const _excludeDirs = (options?.excludeDirs ?? []).filter((d) => d.length > 0);
 	const _excludeDirSet = new Set<string>(_excludeDirs);
+	const _buildOptions: BuildWorkspaceGraphOptions = {
+		excludeDirs: _excludeDirs,
+		...(options?.maxFiles === undefined ? {} : { maxFiles: _maxFiles }),
+		...(options?.walkBudgetMs === undefined
+			? {}
+			: { walkBudgetMs: _walkBudgetMs }),
+	};
+	const _hasConfiguredBuildOptions =
+		options?.maxFiles !== undefined ||
+		options?.walkBudgetMs !== undefined ||
+		options?.excludeDirs !== undefined;
+	const _freshnessOptions: FreshnessOptions = {
+		maxFiles: _maxFiles,
+		walkBudgetMs: _walkBudgetMs,
+		excludeDirs: _excludeDirs,
+	};
 
 	let initStarted = false;
 	let initPromise: Promise<void> = Promise.resolve();
@@ -176,6 +269,36 @@ export function createRepoGraphBuilderHook(
 		return { count: state.failures, advise };
 	}
 
+	async function rebuildGraph(reason: string): Promise<void> {
+		const graph = await _buildWorkspaceGraph(workspaceRoot, _buildOptions);
+		await _saveGraph(workspaceRoot, graph);
+		const fingerprintWritten = await _writeFingerprint(
+			workspaceRoot,
+			graph,
+			_freshnessOptions,
+		);
+		logger.log(
+			`[repo-graph] Built graph (${reason}): ${graph.metadata.nodeCount} nodes, ${graph.metadata.edgeCount} edges`,
+		);
+		if (!fingerprintWritten) {
+			logger.warn(
+				'[repo-graph] Graph saved, but its freshness fingerprint could not be certified; the next session will rebuild it safely.',
+			);
+		}
+	}
+
+	function uniqueDriftFiles(probe: FreshnessProbe): string[] {
+		return [...new Set([...probe.changed, ...probe.removed])];
+	}
+
+	function updateFiles(files: string[]): Promise<RepoGraph> {
+		return _hasConfiguredBuildOptions
+			? _updateGraphForFiles(workspaceRoot, files, {
+					buildOptions: _buildOptions,
+				})
+			: _updateGraphForFiles(workspaceRoot, files);
+	}
+
 	async function doInit(): Promise<void> {
 		// Yield once before any scan work so the caller's promise chain has
 		// a chance to settle. Combined with the bounded async walker, this
@@ -183,12 +306,71 @@ export function createRepoGraphBuilderHook(
 		// even if the scan itself takes seconds.
 		await yieldToEventLoop();
 		try {
-			const graph = await _buildWorkspaceGraph(workspaceRoot, {
-				excludeDirs: _excludeDirs,
-			});
-			await _saveGraph(workspaceRoot, graph);
+			if (!_initRefresh) {
+				await rebuildGraph('configured legacy startup rebuild');
+				return;
+			}
+
+			let graph: RepoGraph | null;
+			try {
+				graph = await _loadGraph(workspaceRoot);
+			} catch (error) {
+				if (
+					error instanceof Error &&
+					'code' in error &&
+					(error as NodeJS.ErrnoException).code === 'CORRUPTION'
+				) {
+					await rebuildGraph('corrupt saved graph');
+					return;
+				}
+				throw error;
+			}
+
+			if (!graph) {
+				await rebuildGraph('no saved graph');
+				return;
+			}
+
+			const probe = await _probeFreshness(workspaceRoot, _freshnessOptions);
+			if (probe.state === 'clean' || probe.state === 'inconclusive') {
+				logger.log(
+					`[repo-graph] Startup freshness probe: ${probe.state}; no refresh`,
+				);
+				return;
+			}
+			if (probe.state === 'no-fingerprint') {
+				await rebuildGraph('no compatible freshness fingerprint');
+				return;
+			}
+
+			const driftFiles = uniqueDriftFiles(probe);
+			if (driftFiles.length === 0) {
+				logger.log(
+					'[repo-graph] Startup freshness probe reported no drift files',
+				);
+				return;
+			}
+
+			const fullRebuildThreshold = Math.max(
+				_refreshCap * 4,
+				graph.metadata.nodeCount * 0.4,
+			);
+			const requiresGraphWideRebuild = driftFiles.some(_isGraphWideInputPath);
+			if (
+				requiresGraphWideRebuild ||
+				driftFiles.length > fullRebuildThreshold
+			) {
+				await rebuildGraph(
+					requiresGraphWideRebuild
+						? 'graph-wide input drift'
+						: `drift set exceeded ${fullRebuildThreshold} files`,
+				);
+				return;
+			}
+
+			const refreshed = await updateFiles(driftFiles);
 			logger.log(
-				`[repo-graph] Built graph: ${graph.metadata.nodeCount} nodes, ${graph.metadata.edgeCount} edges`,
+				`[repo-graph] Incrementally refreshed ${driftFiles.length} startup drift files: ${refreshed.metadata.nodeCount} nodes`,
 			);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
@@ -208,6 +390,7 @@ export function createRepoGraphBuilderHook(
 
 	return {
 		init(): Promise<void> {
+			if (!_enabled) return Promise.resolve();
 			if (!initStarted) {
 				initStarted = true;
 				initPromise = doInit();
@@ -219,6 +402,7 @@ export function createRepoGraphBuilderHook(
 			input: { tool: string; sessionID: string; args?: unknown },
 			_output: { output?: unknown; args?: unknown },
 		): Promise<void> {
+			if (!_enabled) return;
 			// Wait for the initial scan before applying incremental updates.
 			// Without this gate, an early write tool could race the initial
 			// scan and stomp the saved graph with a partial update. The
@@ -279,7 +463,22 @@ export function createRepoGraphBuilderHook(
 			}
 
 			try {
-				await _updateGraphForFiles(workspaceRoot, [absoluteFilePath]);
+				// Pass a path consistent with how the graph's node keys were
+				// originally produced (issue #1985, defect A5). The walk keys
+				// nodes lexically relative to `workspaceRoot` (it uses realpath
+				// only as a cycle-break key, not for stored paths). To stay
+				// consistent on case-insensitive filesystems AND through symlink
+				// aliases (including a symlinked workspace root), rebase the
+				// realpath'd file back onto the lexical workspace root: this
+				// yields the same key the walker would have produced for a file
+				// reached via the lexical root, while still resolving any
+				// case/symlink aliasing of the file itself.
+				const pathForUpdate = rebaseOntoWorkspace(
+					realFilePath,
+					realWorkspace,
+					workspaceRoot,
+				);
+				await updateFiles([pathForUpdate]);
 				recordSuccess(input.sessionID);
 				logger.log(
 					`[repo-graph] Incremental update for ${path.basename(filePath)}`,

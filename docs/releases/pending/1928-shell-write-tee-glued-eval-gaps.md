@@ -1,0 +1,19 @@
+# Fix shell-write-detection gaps: tee not flagged + glued interpreter-eval bypass
+
+## What changed
+
+Two pre-existing gaps in `shell-write-detect.ts` / `checkShellWriteScope` that allowed out-of-scope writes to slip through the POSIX write guard are now closed.
+
+### 1. `tee` is now detected as a write command
+
+`tee FILE`, `echo x | tee FILE`, `tee -a FILE`, and `tee FILE1 FILE2` were previously invisible to the write detector — `tee` was absent from the builtin-write list entirely. All positional (non-flag) arguments to `tee` are write targets (with `-a` meaning append, which is still a write), and each is now resolved and scope-checked the same way as `cp`, `mv`, and `dd of=`. Writing to `/dev/null` (a sink device) is still not flagged.
+
+### 2. Glued interpreter-eval flags are now detected
+
+`python -c'code'` / `python -cCODE` and `node -e'code'` / `node -eCODE` (where the inline code is glued directly to the flag token with no space) bypassed the interpreter-eval guard because the matcher only recognized the exact token `-c` or a `-c=VALUE` form. The guard now also matches any token that *starts with* an eval flag and carries additional characters (the glued code). The `-m` carve-out for `python -m <module>` (introduced in the #1902 fix) is unaffected — `-m` is not in the eval-flag list and the glued check does not alter that.
+
+## Migration
+
+No configuration or schema migration is required. Commands like `tee /etc/hosts` or `python -c'import shutil; shutil.rmtree("/")'` that were previously invisible to the scope guard will now be detected and blocked when the target is outside declared scope or in a config-protected zone. Legitimate in-scope `tee` uses (writing to a path inside the project working directory) continue to be allowed.
+
+Fixes #1928.

@@ -596,7 +596,7 @@ describe('Command registration parity', () => {
 		// (dry-run CI), guardrail explain (dry-run guardrail preview),
 		// guardrail-log (read decision log), lanes (list worktree lanes),
 		// memory consolidation-log (read consolidation log), gate-audit (bounded
-		// production audit), and gate-stats (offline audit reducer).
+		// production audit), and gate-stats (offline audit reducer). `review`
 		const NEWER_ALLOWLIST_ADDITIONS = [
 			'ci-simulate',
 			'costs',
@@ -606,6 +606,7 @@ describe('Command registration parity', () => {
 			'memory consolidation-log',
 			'gate-audit',
 			'gate-stats',
+			'context-map stats',
 		];
 		const EXPECTED_ADDITIONS = {
 			allowlist: new Set([
@@ -615,6 +616,12 @@ describe('Command registration parity', () => {
 				'learning',
 				'post-mortem',
 				...NEWER_ALLOWLIST_ADDITIONS,
+				// #1822: governed skill optimizer — read-only/proposal commands
+				'skill-opt',
+				'skill-opt plan',
+				'skill-opt status',
+				'skill-opt diff',
+				'skill-opt history',
 			]),
 			// Aliases that inherit a human-only/restricted canonical target (so
 			// the Bash CLI guardrail blocks the alias/dash form too — see
@@ -622,13 +629,22 @@ describe('Command registration parity', () => {
 			// is a pre-existing alias that the canonical-aware derivation now
 			// also covers, closing a latent bypass.
 			// FR-004: sdd-project removed — canonical target (sdd project) is now agent
-			// `abort-pr-workflow` is a new restricted human-only escape hatch for
+			// `abort-pr-workflow` is a restricted human-only escape hatch for
 			// unrecoverable PR_REVIEW/PR_FEEDBACK mechanical gates.
+			// `approve-plan-critic` is a restricted human-only escape hatch for
+			// the ratchet-tighter critic_pre_plan execution gate (issue #2012).
 			humanOnly: new Set([
 				'memory-import',
 				'memory-migrate',
 				'clear',
 				'abort-pr-workflow',
+				'approve-plan-critic',
+				'review',
+				// #1822: governed skill optimizer — mutating commands (human-gated)
+				'skill-opt run',
+				'skill-opt approve',
+				'skill-opt reject',
+				'skill-opt rollback',
 			]),
 			toolCommands: new Set([
 				'pr subscribe',
@@ -637,15 +653,24 @@ describe('Command registration parity', () => {
 				'learning',
 				'post-mortem',
 				...NEWER_ALLOWLIST_ADDITIONS,
+				'review',
+				// #1822: all 9 skill-opt commands carry a toolPolicy
+				'skill-opt',
+				'skill-opt plan',
+				'skill-opt status',
+				'skill-opt diff',
+				'skill-opt history',
+				'skill-opt run',
+				'skill-opt approve',
+				'skill-opt reject',
+				'skill-opt rollback',
 			]),
-			noArgs: new Set(['pr status', 'lanes']),
+			noArgs: new Set(['pr status', 'lanes', 'context-map stats']),
 		};
-
 		const expectedAllowlist = new Set([
 			...BASELINE_28_ALLOWLIST,
 			...EXPECTED_ADDITIONS.allowlist,
 		]);
-
 		const expectedHumanOnly = new Set([
 			...BASELINE_10_HUMAN_ONLY,
 			...EXPECTED_ADDITIONS.humanOnly,
@@ -673,7 +698,7 @@ describe('Command registration parity', () => {
 			).toBe(true);
 		});
 
-		it('HUMAN_ONLY_SWARM_COMMANDS matches baseline plus exactly 4 canonical-inheriting aliases', () => {
+		it('HUMAN_ONLY_SWARM_COMMANDS matches the permitted aliases and manual-only commands', () => {
 			const actual = HUMAN_ONLY_SWARM_COMMANDS;
 			const extra = [...actual].filter((x) => !expectedHumanOnly.has(x));
 			const missing = [...expectedHumanOnly].filter((x) => !actual.has(x));

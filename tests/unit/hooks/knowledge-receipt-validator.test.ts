@@ -331,4 +331,62 @@ describe('receipt validator', () => {
 		if (!r.ok) return;
 		expect(r.closes_no_relevant).toBe(true);
 	});
+
+	test('an unacknowledged event does not block a later real terminal for the same (trace, id)', async () => {
+		// The delegate-ack collector emits `unacknowledged` for a shown non-critical
+		// directive the delegate never answered for. It is an OBSERVATION, not a
+		// terminal — so it must not enter the validator's prior-terminal index. If
+		// it did, a later real receipt for the same (trace, knowledge_id) would be
+		// misread as either an idempotent retry or a conflicting terminal, and the
+		// delegate's actual verdict would be silently discarded.
+		const traceId = newTraceId();
+		await seedTrace(dir, traceId, ['k1']);
+		await appendKnowledgeEvent(dir, {
+			type: 'unacknowledged',
+			trace_id: traceId,
+			knowledge_id: 'k1',
+			session_id: SESSION,
+			agent: 'coder',
+			source: 'delegate',
+			reason: 'no_ack_marker',
+			timestamp: new Date().toISOString(),
+		});
+
+		const r = await validateReceipt(
+			ctx(dir, traceId, [{ id: 'k1', outcome: 'applied' }]),
+		);
+
+		expect(r.ok).toBe(true);
+		if (!r.ok) return;
+		expect(r.accepted).toHaveLength(1);
+		expect(r.accepted[0].id).toBe('k1');
+		expect(r.idempotent_skips).toHaveLength(0);
+		expect(r.rejected_items ?? []).toHaveLength(0);
+	});
+
+	test('a real terminal after an unacknowledged event still conflicts with a DIFFERENT later outcome', async () => {
+		// Guards the other direction: ignoring `unacknowledged` must not weaken the
+		// one-terminal-per-(trace, id) rule for the terminals that do count.
+		const traceId = newTraceId();
+		await seedTrace(dir, traceId, ['k1']);
+		await appendKnowledgeEvent(dir, {
+			type: 'unacknowledged',
+			trace_id: traceId,
+			knowledge_id: 'k1',
+			session_id: SESSION,
+			agent: 'coder',
+			source: 'delegate',
+			reason: 'no_ack_marker',
+			timestamp: new Date().toISOString(),
+		});
+		await seedPriorReceipt(dir, traceId, 'k1', 'applied');
+
+		const r = await validateReceipt(
+			ctx(dir, traceId, [{ id: 'k1', outcome: 'ignored' }]),
+		);
+
+		expect(r.ok).toBe(false);
+		if (r.ok) return;
+		expect(r.reason).toBe('duplicate_conflicting_terminal');
+	});
 });

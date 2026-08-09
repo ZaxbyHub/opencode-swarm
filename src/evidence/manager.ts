@@ -48,6 +48,33 @@ export type LoadEvidenceResult =
 	| { status: 'invalid_schema'; errors: string[] };
 
 /**
+ * Options for {@link loadEvidence}.
+ *
+ * Additive and backward-compatible: omitting the argument entirely — which every
+ * pre-existing caller does — keeps the historical behaviour exactly, including
+ * the lazy in-place upgrade of a legacy flat retrospective.
+ */
+export interface LoadEvidenceOptions {
+	/**
+	 * Whether a legacy flat retrospective may be upgraded **in place** on read.
+	 *
+	 * `true` (the default, and the historical behaviour) persists the wrapped
+	 * bundle back to `.swarm/evidence/<taskId>/evidence.json` under the evidence
+	 * lock, so the repair happens once instead of on every read.
+	 *
+	 * `false` makes the call a pure read: the caller still receives the wrapped,
+	 * validated bundle, but nothing is written, no lock is taken, and no
+	 * `evidence-loader` actor appears in lock telemetry. Callers that advertise a
+	 * read-only contract — the consensus corpus (`src/consensus/corpus.ts`) is the
+	 * first — MUST pass `false`. A mining run that silently rewrote the evidence
+	 * it was merely reading would falsify that contract and, because
+	 * `LEGACY_TASK_COMPLEXITY_MAP` remaps values on the way through, would also
+	 * change the stored data.
+	 */
+	migrate?: boolean;
+}
+
+/**
  * All valid evidence types (13 total)
  */
 export const VALID_EVIDENCE_TYPES = [
@@ -422,10 +449,15 @@ function wrapFlatRetrospective(
 /**
  * Load evidence bundle for a task.
  * Returns a LoadEvidenceResult discriminated union.
+ *
+ * By default this may perform a one-time in-place upgrade of a legacy flat
+ * retrospective (see {@link LoadEvidenceOptions.migrate}). Pass
+ * `{ migrate: false }` for a guaranteed pure read.
  */
 export async function loadEvidence(
 	directory: string,
 	taskId: string,
+	options?: LoadEvidenceOptions,
 ): Promise<LoadEvidenceResult> {
 	// Validate task ID
 	const sanitizedTaskId = sanitizeTaskId(taskId);
@@ -468,6 +500,14 @@ export async function loadEvidence(
 			// Persist repaired bundle under the evidence lock so the write-back
 			// cannot race with a concurrent saveEvidence call.
 			// Non-fatal: read-only return value is valid even if write-back fails.
+			//
+			// `migrate: false` skips this entire block — no lock, no temp file, no
+			// rename. The caller still gets `validated`; the only thing it gives up
+			// is the persistence of the repair. This is the single branch that makes
+			// a read-only evidence read possible.
+			if (options?.migrate === false) {
+				return { status: 'found', bundle: validated };
+			}
 			try {
 				await withEvidenceLock(
 					directory,

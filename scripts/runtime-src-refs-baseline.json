@@ -1,0 +1,284 @@
+[
+	{
+		"file": ".opencode/skills/ci-fix-monitor/SKILL.md",
+		"match": "src/evidence/manager.ts",
+		"category": "repo-development",
+		"justification": "ci-fix-monitor triages opencode-swarm's own CI failures; the referenced path-length guard lives in this repository where src/ exists, so the pointer is valid in its execution context."
+	},
+	{
+		"file": "src/agents/docs.ts",
+		"match": "src/foo.ts",
+		"category": "illustrative-example",
+		"justification": "Placeholder file name inside a worked JSON example of the docs agent's traceability-registry code_anchors field; not a real path."
+	},
+	{
+		"file": "src/agents/reviewer.ts",
+		"match": "src/foo.ts",
+		"category": "illustrative-example",
+		"justification": "Placeholder file name inside a worked example of the [REVIEWED] output line format."
+	},
+	{
+		"file": "src/agents/test-engineer.ts",
+		"match": "src/foo.ts",
+		"category": "illustrative-example",
+		"justification": "Placeholder file name inside a worked example pairing a test file with its source file for scoped test-runner guidance."
+	},
+	{
+		"file": "src/agents/explorer.ts",
+		"match": "src/agents/explorer.ts",
+		"category": "illustrative-example",
+		"justification": "Worked example inside the OUTPUT FORMAT/KEY FILES section demonstrating how the explorer should describe key files in whatever repo it is exploring."
+	},
+	{
+		"file": "src/agents/explorer.ts",
+		"match": "src/agents/architect.ts",
+		"category": "illustrative-example",
+		"justification": "Worked example inside the OUTPUT FORMAT/KEY FILES section; same illustrative block as src/agents/explorer.ts above."
+	},
+	{
+		"file": "src/agents/explorer.ts",
+		"match": "src/tools/declare-scope.ts",
+		"category": "illustrative-example",
+		"justification": "Worked example inside the FOLLOW-UP CANDIDATE AREAS section demonstrating the [path]: [observable condition] output shape."
+	},
+	{
+		"file": "src/agents/explorer.ts",
+		"match": "src/utils/cache.ts",
+		"category": "illustrative-example",
+		"justification": "Worked example inside the CANDIDATE REPORTING MODE field-rules block demonstrating the file:line format."
+	},
+	{
+		"file": "src/agents/explorer.ts",
+		"match": "src/config/constants.ts",
+		"category": "illustrative-example",
+		"justification": "Worked example inside the INTEGRATION IMPACT ANALYSIS MODE output-format block (COMPATIBLE_CHANGES example line)."
+	},
+	{
+		"file": "src/agents/explorer.ts",
+		"match": "src/agents/coder.ts",
+		"category": "illustrative-example",
+		"justification": "Worked example inside the INTEGRATION IMPACT ANALYSIS MODE output-format block (CONSUMERS_AFFECTED example line)."
+	},
+	{
+		"file": "src/agents/explorer.ts",
+		"match": "src/agents/reviewer.ts",
+		"category": "illustrative-example",
+		"justification": "Worked example inside the INTEGRATION IMPACT ANALYSIS MODE output-format block; same example line as src/agents/coder.ts above."
+	},
+	{
+		"file": "src/agents/explorer.ts",
+		"match": "src/main.ts",
+		"category": "illustrative-example",
+		"justification": "Worked example inside the INTEGRATION IMPACT ANALYSIS MODE output-format block; same example line as src/agents/coder.ts above."
+	},
+	{
+		"file": ".opencode/skills/consult/SKILL.md",
+		"match": "src/foo.ts",
+		"category": "illustrative-example",
+		"justification": "Anti-pattern example (quoting a line range without reading it) uses a placeholder path, not a real one."
+	},
+	{
+		"file": ".opencode/skills/pre-phase-briefing/SKILL.md",
+		"match": "src/hooks/incremental-verify.ts",
+		"category": "illustrative-example",
+		"justification": "Worked example of a fact-check transcript line (✓/✗ verification results); illustrates the transcript format, not a remediation pointer."
+	},
+	{
+		"file": ".opencode/skills/pre-phase-briefing/SKILL.md",
+		"match": "src/services/status-service.ts",
+		"category": "illustrative-example",
+		"justification": "Worked example of a fact-check transcript line; same illustrative block as src/hooks/incremental-verify.ts above."
+	},
+	{
+		"file": ".opencode/skills/pre-phase-briefing/SKILL.md",
+		"match": "src/config/evidence-schema.ts",
+		"category": "illustrative-example",
+		"justification": "Worked example of a fact-check transcript line; same illustrative block as src/hooks/incremental-verify.ts above."
+	},
+	{
+		"file": ".opencode/skills/council/SKILL.md",
+		"match": "src/foo.ts",
+		"category": "illustrative-example",
+		"justification": "Anti-pattern example (quoting a line range without reading it) uses a placeholder path, not a real one."
+	},
+	{
+		"file": ".opencode/skills/swarm-pr-review/SKILL.md",
+		"match": "src/file.ts",
+		"category": "illustrative-example",
+		"justification": "Placeholder file_line value inside a worked JSON finding-record example."
+	},
+	{
+		"file": ".opencode/skills/swarm-pr-feedback/SKILL.md",
+		"match": "src/foo.ts",
+		"category": "illustrative-example",
+		"justification": "Placeholder path inside a `git add` worked-example command line."
+	},
+	{
+		"file": ".opencode/skills/ci-fix-monitor/SKILL.md",
+		"match": "src/path/to/changed-file.ts",
+		"category": "illustrative-example",
+		"justification": "Placeholder path (literal 'path/to') inside a worked `biome format --write` fix-command example."
+	},
+	{
+		"file": "src/agents/template.ts",
+		"match": "src/agents/architect.ts",
+		"category": "provenance",
+		"justification": "Developer-facing JSDoc/assertion-message reference identifying which prompt-substitution chain (Chain A) failed; fires only during plugin init, is caught and downgraded to a warning before ever reaching an agent's context (see assertNoUnresolvedPlaceholders' fail-open contract), and is meaningful only to a maintainer reading server logs against this repo's own source, not agent-facing remediation guidance."
+	},
+	{
+		"file": "src/agents/template.ts",
+		"match": "src/agents/index.ts",
+		"category": "provenance",
+		"justification": "Same class as src/agents/architect.ts above — Chain B's identifying reference in the same developer-facing JSDoc/assertion-message context."
+	},
+	{
+		"file": ".opencode/skills/writing-tests/SKILL.md",
+		"match": "src/tools/test-runner.ts",
+		"category": "repo-development",
+		"justification": "writing-tests documents this repo's own test-authoring conventions for opencode-swarm contributors; audience is repo development, not a runtime remediation pointer for a deployed agent."
+	},
+	{
+		"file": ".opencode/skills/writing-tests/SKILL.md",
+		"match": "src/module.js",
+		"category": "repo-development",
+		"justification": "Illustrative mock.module() code sample inside the repo-development writing-tests conventions guide."
+	},
+	{
+		"file": ".opencode/skills/writing-tests/SKILL.md",
+		"match": "src/tools/formatter.ts",
+		"category": "repo-development",
+		"justification": "Illustrative source-file code sample inside the repo-development writing-tests conventions guide."
+	},
+	{
+		"file": ".opencode/skills/writing-tests/SKILL.md",
+		"match": "src/services/my-service.ts",
+		"category": "repo-development",
+		"justification": "Illustrative source-file code sample inside the repo-development writing-tests conventions guide."
+	},
+	{
+		"file": ".opencode/skills/writing-tests/SKILL.md",
+		"match": "src/state.ts",
+		"category": "repo-development",
+		"justification": "Real repo-internal reference used as a documentation example of the _internals DI seam pattern, in the repo-development writing-tests conventions guide."
+	},
+	{
+		"file": ".opencode/skills/writing-tests/SKILL.md",
+		"match": "src/path/to/module.ts",
+		"category": "repo-development",
+		"justification": "Placeholder path inside a worked `grep` command example in the repo-development writing-tests conventions guide."
+	},
+	{
+		"file": ".opencode/skills/writing-tests/SKILL.md",
+		"match": "src/config/schema.js",
+		"category": "repo-development",
+		"justification": "Illustrative mock.module() code sample inside the repo-development writing-tests conventions guide."
+	},
+	{
+		"file": ".opencode/skills/writing-tests/SKILL.md",
+		"match": "src/hooks/knowledge-store.ts",
+		"category": "repo-development",
+		"justification": "Real repo-internal reference cited as a documented platform-quirk example (os.homedir() caching) in the repo-development writing-tests conventions guide."
+	},
+	{
+		"file": ".opencode/skills/writing-tests/SKILL.md",
+		"match": "src/hooks/guardrails/file-authority.ts",
+		"category": "repo-development",
+		"justification": "Real repo-internal reference used as a documentation example of ordered-hook testing, in the repo-development writing-tests conventions guide."
+	},
+	{
+		"file": ".opencode/skills/writing-tests/SKILL.md",
+		"match": "src/config/constants.ts",
+		"category": "repo-development",
+		"justification": "Real repo-internal reference used as a documentation example of sibling-parity test coverage, in the repo-development writing-tests conventions guide."
+	},
+	{
+		"file": ".opencode/skills/writing-tests/SKILL.md",
+		"match": "src/tools/tool-names.ts",
+		"category": "repo-development",
+		"justification": "Real repo-internal reference used as a documentation example of sibling-parity test coverage, in the repo-development writing-tests conventions guide."
+	},
+	{
+		"file": ".opencode/skills/writing-tests/SKILL.md",
+		"match": "src/utils/bun-compat.ts",
+		"category": "repo-development",
+		"justification": "Real repo-internal reference describing this repo's temp-file/fsync helper, in the repo-development writing-tests conventions guide."
+	},
+	{
+		"file": ".opencode/skills/running-tests/SKILL.md",
+		"match": "src/agents/coder.ts",
+		"category": "repo-development",
+		"justification": "Round-3 plan decision: running-tests/SKILL.md:60 is repo-development (a worked test_runner scope example for opencode-swarm contributors)."
+	},
+	{
+		"file": ".opencode/skills/engineering-conventions/SKILL.md",
+		"match": "src/index.ts",
+		"category": "repo-development",
+		"justification": "Real repo-internal reference to this repo's plugin entry point, in the repo-development engineering-conventions guide for opencode-swarm contributors."
+	},
+	{
+		"file": ".opencode/skills/engineering-conventions/SKILL.md",
+		"match": "src/utils/bun-compat.ts",
+		"category": "repo-development",
+		"justification": "Real repo-internal reference to this repo's subprocess shim, in the repo-development engineering-conventions guide."
+	},
+	{
+		"file": ".opencode/skills/engineering-conventions/SKILL.md",
+		"match": "src/utils/timeout.ts",
+		"category": "repo-development",
+		"justification": "Real repo-internal reference to this repo's withTimeout primitive, in the repo-development engineering-conventions guide."
+	},
+	{
+		"file": ".opencode/skills/engineering-conventions/SKILL.md",
+		"match": "src/utils/gitignore-warning.ts",
+		"category": "repo-development",
+		"justification": "Real repo-internal reference to this repo's Git-hygiene init-path module, in the repo-development engineering-conventions guide."
+	},
+	{
+		"file": ".opencode/skills/engineering-conventions/SKILL.md",
+		"match": "src/state.ts",
+		"category": "repo-development",
+		"justification": "Real repo-internal reference to this repo's session/runtime state module, in the repo-development engineering-conventions guide."
+	},
+	{
+		"file": ".opencode/skills/engineering-conventions/SKILL.md",
+		"match": "src/hooks/guardrails.ts",
+		"category": "repo-development",
+		"justification": "Real repo-internal reference to this repo's guardrails module, in the repo-development engineering-conventions guide."
+	},
+	{
+		"file": ".opencode/skills/engineering-conventions/SKILL.md",
+		"match": "src/hooks/diff-scope.ts",
+		"category": "repo-development",
+		"justification": "Real repo-internal reference used as a documentation example of the _internals DI seam pattern, in the repo-development engineering-conventions guide."
+	},
+	{
+		"file": ".opencode/skills/engineering-conventions/SKILL.md",
+		"match": "src/tools/test-runner.ts",
+		"category": "repo-development",
+		"justification": "Real repo-internal reference to this repo's MAX_SAFE_TEST_FILES guard, in the repo-development engineering-conventions guide."
+	},
+	{
+		"file": ".opencode/skills/engineering-conventions/SKILL.md",
+		"match": "src/gate-evidence.ts",
+		"category": "repo-development",
+		"justification": "Real repo-internal reference to this repo's gate-evidence schema module, in the repo-development engineering-conventions guide."
+	},
+	{
+		"file": ".opencode/skills/engineering-conventions/SKILL.md",
+		"match": "src/lang/index.ts",
+		"category": "repo-development",
+		"justification": "Real repo-internal reference to this repo's language-dispatch barrel module, in the repo-development engineering-conventions guide."
+	},
+	{
+		"file": ".opencode/skills/engineering-conventions/SKILL.md",
+		"match": "src/config/skill-mirrors.ts",
+		"category": "repo-development",
+		"justification": "Real repo-internal reference to this repo's skill-mirror contract registry, in the repo-development engineering-conventions guide."
+	},
+	{
+		"file": ".opencode/skills/engineering-conventions/SKILL.md",
+		"match": "src/sandbox/executor.ts",
+		"category": "repo-development",
+		"justification": "Real repo-internal reference to this repo's SandboxExecutor interface, in the repo-development engineering-conventions guide."
+	}
+]

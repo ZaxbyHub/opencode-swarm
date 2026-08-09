@@ -320,11 +320,21 @@ function killProcessTreeImpl(
 	}
 	if (process.platform === 'win32') {
 		try {
-			nodeSpawnSync('taskkill', ['/PID', String(pid), '/T', '/F']);
+			const result = nodeSpawnSync(
+				'taskkill',
+				['/PID', String(pid), '/T', '/F'],
+				{
+					cwd: process.cwd(),
+					stdio: ['ignore', 'ignore', 'ignore'],
+					timeout: 5_000,
+					windowsHide: true,
+				},
+			);
+			if (!result.error && result.status === 0) return;
 		} catch {
-			// taskkill unavailable or already gone — fall back to direct kill
-			directKill();
+			// taskkill unavailable; fall through to direct kill.
 		}
+		directKill();
 		return;
 	}
 	if (wasDetached) {
@@ -341,24 +351,32 @@ function killProcessTreeImpl(
 function streamFromNode(
 	pipe: NodeJS.ReadableStream | null | undefined,
 ): BunCompatStream {
-	// Build two consumers off the same pipe: one that resolves to the full
-	// buffered output (for `text()`/`bytes()`) and one that exposes a Web
-	// ReadableStream reader (for callers like `readBoundedStream` that need
-	// incremental, bounded consumption). The first reader to attach drains
-	// the pipe — they are mutually exclusive in practice but both are wired
-	// so callers can pick the shape they need without surprises.
-	const collected: Promise<Buffer> = new Promise((resolve) => {
-		if (!pipe) {
-			resolve(Buffer.alloc(0));
-			return;
+	// Expose either full buffered output (`text()`/`bytes()`) or a Web reader for
+	// incremental bounded consumption. Claim exactly one mode lazily: Node
+	// streams start paused, so a bounded reader must not run beside an eager,
+	// unbounded chunk collector.
+	let collected: Promise<Buffer> | undefined;
+	let readerClaimed = false;
+	const collect = (): Promise<Buffer> => {
+		if (readerClaimed) {
+			return Promise.reject(
+				new TypeError('Subprocess output is already consumed by a reader'),
+			);
 		}
-		const chunks: Buffer[] = [];
-		pipe.on('data', (chunk: Buffer | string) => {
-			chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
+		collected ??= new Promise((resolve) => {
+			if (!pipe) {
+				resolve(Buffer.alloc(0));
+				return;
+			}
+			const chunks: Buffer[] = [];
+			pipe.on('data', (chunk: Buffer | string) => {
+				chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
+			});
+			pipe.on('end', () => resolve(Buffer.concat(chunks)));
+			pipe.on('error', () => resolve(Buffer.concat(chunks)));
 		});
-		pipe.on('end', () => resolve(Buffer.concat(chunks)));
-		pipe.on('error', () => resolve(Buffer.concat(chunks)));
-	});
+		return collected;
+	};
 
 	const toWebReadable = (): ReadableStream<Uint8Array> => {
 		// `node:stream`'s Readable has `.toWeb()` on Node 17+. Bun also
@@ -407,13 +425,17 @@ function streamFromNode(
 
 	return {
 		async text(): Promise<string> {
-			return (await collected).toString('utf-8');
+			return (await collect()).toString('utf-8');
 		},
 		async bytes(): Promise<Uint8Array> {
-			const b = await collected;
+			const b = await collect();
 			return new Uint8Array(b.buffer, b.byteOffset, b.byteLength);
 		},
 		getReader(): ReadableStreamDefaultReader<Uint8Array> {
+			if (readerClaimed || collected) {
+				throw new TypeError('Subprocess output is already consumed');
+			}
+			readerClaimed = true;
 			return toWebReadable().getReader();
 		},
 	};
@@ -564,6 +586,7 @@ export function bunSpawn(
 		const mergedEnv = mergeEnvForChild(options?.env, options?.envOverrides);
 		// Always build a fresh options object so we never mutate the caller's.
 		const spawnOpts: Record<string, unknown> = { ...options };
+		delete spawnOpts.killProcessTree;
 		if (mergedEnv !== undefined) spawnOpts.env = mergedEnv;
 		// Security (SC-003.4): a child that traps SIGTERM must still be killed
 		// when the timeout fires. Bun's default kill signal on timeout is
@@ -571,8 +594,19 @@ export function bunSpawn(
 		// forever (a timeout bypass). Force SIGKILL: the deadline has already
 		// passed, so a graceful signal is no longer owed. This mirrors the Node
 		// fallback path below, which already escalates to SIGKILL on timeout.
-		if (options?.timeout && options.timeout > 0) {
+		if (
+			options?.timeout &&
+			options.timeout > 0 &&
+			options.killProcessTree !== true
+		) {
 			spawnOpts.killSignal = 'SIGKILL';
+		}
+		if (options?.killProcessTree === true) {
+			// Bun's native timeout can reap the parent before Windows taskkill can
+			// discover its descendants, so tree-aware timeouts are wrapper-owned.
+			delete spawnOpts.timeout;
+			delete spawnOpts.killSignal;
+			spawnOpts.detached = true;
 		}
 		const proc = bun.spawn(cmd, spawnOpts) as {
 			stdout?: unknown;
@@ -582,22 +616,40 @@ export function bunSpawn(
 			pid?: number;
 			kill: (sig?: NodeJS.Signals | number) => void;
 		};
+		const killBunProcess = (sig?: NodeJS.Signals | number) => {
+			if (options?.killProcessTree) {
+				killProcessTreeImpl(proc.pid, sig, () => proc.kill(sig), true);
+			} else {
+				proc.kill(sig);
+			}
+		};
+		let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+		if (
+			options?.killProcessTree === true &&
+			options.timeout &&
+			options.timeout > 0
+		) {
+			timeoutHandle = setTimeout(() => {
+				try {
+					killBunProcess('SIGKILL');
+				} catch {
+					// Process may already have exited.
+				}
+			}, options.timeout);
+			if (typeof timeoutHandle.unref === 'function') timeoutHandle.unref();
+		}
+		const exited = proc.exited.finally(() => {
+			if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+		});
 		return {
 			stdout: streamFromBun(proc.stdout),
 			stderr: streamFromBun(proc.stderr),
-			exited: proc.exited,
+			exited,
 			get exitCode() {
 				return proc.exitCode;
 			},
 			kill(sig) {
-				if (options?.killProcessTree) {
-					// Bun.spawn does not expose a detached option here, so the
-					// POSIX group-kill path is unavailable; taskkill /T still
-					// reaps the tree on Windows.
-					killProcessTreeImpl(proc.pid, sig, () => proc.kill(sig), false);
-				} else {
-					proc.kill(sig);
-				}
+				killBunProcess(sig);
 			},
 		};
 	}

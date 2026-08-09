@@ -3,7 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { GuardrailsConfig } from '../../../src/config/schema';
-import { createGuardrailsHooks, hashArgs } from '../../../src/hooks/guardrails';
+import { createGuardrailsHooks } from '../../../src/hooks/guardrails';
 import {
 	beginInvocation,
 	ensureAgentSession,
@@ -619,42 +619,6 @@ describe('guardrails circuit breaker', () => {
 
 			await hooks.messagesTransform({}, { messages: messagesB });
 			expect(messagesB[0].parts[0].text).toBe('Session B output');
-		});
-	});
-
-	describe('hashArgs', () => {
-		it('same args produce same hash', () => {
-			const hash1 = hashArgs({ a: 1, b: 2 });
-			const hash2 = hashArgs({ a: 1, b: 2 });
-			expect(hash1).toBe(hash2);
-		});
-
-		it('different key order produces same hash', () => {
-			const hash1 = hashArgs({ a: 1, b: 2 });
-			const hash2 = hashArgs({ b: 2, a: 1 });
-			expect(hash1).toBe(hash2);
-		});
-
-		it('different args produce different hash', () => {
-			const hash1 = hashArgs({ a: 1 });
-			const hash2 = hashArgs({ a: 2 });
-			expect(hash1).not.toBe(hash2);
-		});
-
-		it('null returns 0', () => {
-			expect(hashArgs(null)).toBe(0);
-		});
-
-		it('non-object returns 0', () => {
-			expect(hashArgs('string')).toBe(0);
-			expect(hashArgs(123)).toBe(0);
-			expect(hashArgs(true)).toBe(0);
-		});
-
-		it('empty object returns a hash', () => {
-			const hash = hashArgs({});
-			expect(typeof hash).toBe('number');
-			// It could be 0 or non-zero, both are valid
 		});
 	});
 

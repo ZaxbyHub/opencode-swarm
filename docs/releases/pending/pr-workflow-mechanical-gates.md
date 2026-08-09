@@ -59,8 +59,9 @@
   count as coverage. Workflow lane, agent, role, child-session, parent-session,
   mode, source, PR head, checkout head, content revision, and output integrity
   must all match the durable delegation record; incompatible output-ref
-  collisions fail closed. Reviewer and critic retries also require one coherent
-  fully successful exact batch rather than complementary partial successes.
+  collisions fail closed. Reviewer and critic settlement composes across
+  batches item by item, so complementary partial retries can jointly satisfy
+  a phase instead of every retry re-covering the full inventory.
   Structured PR-workflow lane prompts also receive a controller-appended,
   caller-non-overridable block binding lane ID, exact head, revision, scope, and
   assigned items. Unresolved or cross-field-incoherent critic rows do not settle.
@@ -77,8 +78,9 @@
   reaches the matching mechanical transition.
 - An active PR workflow also gates architect response completion: final text is
   replaced with a blocked notice, and an idle parent session is automatically
-  resumed until `complete_pr_workflow` clears the durable obligations. A newer
-  reviewer batch invalidates every older critic batch.
+  resumed until `complete_pr_workflow` clears the durable obligations. A
+  reviewer retry invalidates only the critic claims for the items whose
+  reviewer row actually changed, not the whole critic batch.
 - The package smoke budget is raised from 4.9 MiB to 5.4 MiB to accommodate the
   controller and its integrity checks while retaining roughly 350 KB of headroom;
   another 10% increase still fails the guard.

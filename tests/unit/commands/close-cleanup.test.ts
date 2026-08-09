@@ -37,6 +37,7 @@ import {
 } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { loadDatabaseCtor } from '../../../src/db/sqlite-loader.js';
 // Static import (hoisted, resolves to the real module) so the mock below can
 // spread the real exports and only override the ones this suite cares about.
 // This keeps the mock resilient to the live import graph (close.ts pulls in
@@ -45,7 +46,6 @@ import path from 'node:path';
 // trajectory-cluster.ts -> listEvidenceTaskIds) without having to hand-stub
 // every export it happens to need.
 import * as actualEvidenceManager from '../../../src/evidence/manager.js';
-import { loadDatabaseCtor } from '../../../src/db/sqlite-loader.js';
 // Same rationale as actualEvidenceManager above: knowledge-curator.js is
 // imported transitively by other (unmocked) close.ts dependencies for
 // exports beyond curateAndStoreSwarm (e.g. enrichLessonToV3), so spread the
@@ -552,10 +552,19 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 			const srcPath = path.join(swarmDir(), 'swarm.db');
 			const db = new Db(srcPath);
 			db.run('PRAGMA journal_mode = WAL;');
-			db.run(`CREATE TABLE project_constraints (id INTEGER PRIMARY KEY AUTOINCREMENT, content TEXT NOT NULL);`);
-			db.run(`CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL);`);
-			db.run('INSERT INTO schema_migrations (version, name) VALUES (?, ?)', [1, 'init']);
-			db.run('INSERT INTO project_constraints (content) VALUES (?)', ['committed-row']);
+			db.run(
+				`CREATE TABLE project_constraints (id INTEGER PRIMARY KEY AUTOINCREMENT, content TEXT NOT NULL);`,
+			);
+			db.run(
+				`CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL);`,
+			);
+			db.run('INSERT INTO schema_migrations (version, name) VALUES (?, ?)', [
+				1,
+				'init',
+			]);
+			db.run('INSERT INTO project_constraints (content) VALUES (?)', [
+				'committed-row',
+			]);
 			db.close();
 			// Stage stale sidecar files (these are NOT real SQLite sidecars;
 			// they verify the archive never copies sidecars even when present).
@@ -570,7 +579,9 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 			const archivedDbPath = path.join(archivePath, 'swarm.db');
 			expect(existsSync(archivedDbPath)).toBe(true);
 			const Vdb = new Db(archivedDbPath);
-			const row = Vdb.query('SELECT COUNT(*) AS c FROM project_constraints WHERE content = ?').get('committed-row');
+			const row = Vdb.query(
+				'SELECT COUNT(*) AS c FROM project_constraints WHERE content = ?',
+			).get('committed-row');
 			Vdb.close();
 			expect(Number((row as { c: number }).c)).toBe(1);
 			// WAL sidecar files are transient SQLite internals and are

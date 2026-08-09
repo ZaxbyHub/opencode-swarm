@@ -3,16 +3,21 @@ import {
 	BUNDLED_PROJECT_SKILL_ROOT,
 	syncBundledProjectSkillsIfMissingAsync,
 } from '../config/bundled-skills.js';
+import type { AutoReviewConfig } from '../config/schema.js';
 import type { EvaluationModelDispatcher } from '../evaluation/model-dispatcher.js';
 import {
 	activatePrWorkflow,
 	type PrWorkflowMode,
+	transitionPrReviewToFeedback,
 } from '../hooks/pr-workflow-gate.js';
+import type { ReviewModelDispatcher } from '../review/contracts.js';
+import type { ReviewAgentModelRegistry } from '../review/runtime.js';
 import { warn } from '../utils/logger.js';
 import { handleAbortPrWorkflowCommand } from './abort-pr-workflow.js';
 import { handleAcknowledgeSpecDriftCommand } from './acknowledge-spec-drift.js';
 import { handleAgentsCommand } from './agents.js';
 import { handleAnalyzeCommand } from './analyze.js';
+import { handleApprovePlanCriticCommand } from './approve-plan-critic.js';
 import { handleArchiveCommand } from './archive.js';
 import { handleAutoProceedCommand } from './auto-proceed.js';
 import { handleBenchmarkCommand } from './benchmark.js';
@@ -26,6 +31,7 @@ import { handleCodebaseReviewCommand } from './codebase-review.js';
 import { handleConcurrencyCommand } from './concurrency.js';
 import { handleConfigCommand } from './config.js';
 import { handleConsolidateCommand } from './consolidate.js';
+import { handleContextMapStatsCommand } from './context-map-stats.js';
 import { handleCostsCommand } from './costs.js';
 import { handleCouncilCommand } from './council.js';
 import { handleCouplingCommand } from './coupling.js';
@@ -80,7 +86,10 @@ import {
 } from './memory-link.js';
 import { handlePlanCommand } from './plan.js';
 import { handlePostMortemCommand } from './post-mortem.js';
-import { handlePrFeedbackCommand } from './pr-feedback.js';
+import {
+	handlePrFeedbackCommand,
+	parsePrFeedbackCommandInput,
+} from './pr-feedback.js';
 import { handlePrMonitorStatusCommand } from './pr-monitor-status.js';
 import { handlePrReviewCommand } from './pr-review.js';
 import { handlePrSubscribeCommand } from './pr-subscribe.js';
@@ -91,6 +100,7 @@ import { handleQaGatesCommand } from './qa-gates.js';
 import { handleResetCommand } from './reset.js';
 import { handleResetSessionCommand } from './reset-session.js';
 import { handleRetrieveCommand } from './retrieve.js';
+import { handleReviewCommand } from './review.js';
 import { handleRollbackCommand } from './rollback.js';
 import {
 	handleSddCommand,
@@ -99,6 +109,16 @@ import {
 	handleSddValidateCommand,
 } from './sdd.js';
 import { handleSimulateCommand } from './simulate.js';
+import {
+	handleSkillOptApprove,
+	handleSkillOptDiff,
+	handleSkillOptHistory,
+	handleSkillOptPlan,
+	handleSkillOptReject,
+	handleSkillOptRollback,
+	handleSkillOptRun,
+	handleSkillOptStatus,
+} from './skill-opt.js';
 import { handleSpecifyCommand } from './specify.js';
 import { handleStatusCommand } from './status.js';
 import { handleSyncPlanCommand } from './sync-plan.js';
@@ -269,6 +289,10 @@ export type CommandContext = {
 	 */
 	source?: 'cli' | 'chat';
 	evaluationModelDispatcher?: EvaluationModelDispatcher;
+	reviewModelDispatcher?: ReviewModelDispatcher;
+	autoReviewConfig?: AutoReviewConfig;
+	activeAgentName?: string;
+	reviewAgentModelRegistry?: ReviewAgentModelRegistry;
 };
 
 export type CommandResult = Promise<string>;
@@ -300,10 +324,41 @@ async function handleModeCommandWithBundledSkills(
 	const result = await Promise.resolve(handler(ctx.directory, ctx.args));
 	if (/^\s*\[MODE:\s*[A-Z][A-Z0-9_-]*\b/.test(result)) {
 		if (mechanicalMode) {
-			await activatePrWorkflow(ctx.directory, ctx.sessionID, mechanicalMode);
+			await activatePrWorkflow(ctx.directory, ctx.sessionID, mechanicalMode, {
+				requireCheckoutPreflight: true,
+			});
 		}
 	}
 	return result;
+}
+
+async function handlePrFeedbackCommandWithTransition(
+	ctx: CommandContext,
+): CommandResult {
+	if (ctx.packageRoot) {
+		await syncBundledProjectSkillsIfMissingAsync(
+			ctx.directory,
+			ctx.packageRoot,
+			true,
+		);
+	}
+	const parsed = parsePrFeedbackCommandInput(ctx.directory, ctx.args);
+	if (parsed.error) {
+		return handlePrFeedbackCommand(ctx.directory, ctx.args);
+	}
+	if (parsed.continuation) {
+		await transitionPrReviewToFeedback(ctx.directory, ctx.sessionID, {
+			runId: parsed.continuation.runId,
+			handoffPath: parsed.continuation.handoffPath,
+			prUrl: parsed.prUrl,
+		});
+	} else {
+		await activatePrWorkflow(ctx.directory, ctx.sessionID, 'PR_FEEDBACK', {
+			requireCheckoutPreflight: true,
+			...(parsed.prUrl ? { prUrl: parsed.prUrl } : {}),
+		});
+	}
+	return handlePrFeedbackCommand(ctx.directory, ctx.args);
 }
 
 export type CommandCategory =
@@ -377,12 +432,30 @@ export const COMMAND_REGISTRY = {
 		toolPolicy: 'restricted',
 	},
 	status: {
-		handler: (ctx) => handleStatusCommand(ctx.directory, ctx.agents),
+		handler: async (ctx) =>
+			handleStatusCommand(ctx.directory, ctx.agents, ctx.sessionID),
 		description: 'Show current swarm state',
 		category: 'core',
 		clashesWithNativeCcCommand: '/status',
 		toolPolicy: 'agent',
 		toolNoArgs: true,
+	},
+	'context-map stats': {
+		handler: async (ctx) => handleContextMapStatsCommand(ctx.directory),
+		description: 'Show aggregated context-capsule telemetry stats',
+		category: 'diagnostics',
+		toolPolicy: 'agent',
+		toolNoArgs: true,
+	},
+	// Alias for the hyphenated form '/swarm context-map-stats'. Without it,
+	// resolveCommand(['context-map-stats']) returns null and the TUI shows
+	// "command not found". Mirrors the 'doctor-tools' alias above.
+	'context-map-stats': {
+		handler: async (ctx) => handleContextMapStatsCommand(ctx.directory),
+		description: 'Show aggregated context-capsule telemetry stats',
+		category: 'diagnostics',
+		aliasOf: 'context-map stats',
+		deprecated: true,
 	},
 	'show-plan': {
 		handler: (ctx) => handlePlanCommand(ctx.directory, ctx.args),
@@ -579,6 +652,106 @@ export const COMMAND_REGISTRY = {
 		category: 'diagnostics',
 		toolPolicy: 'agent',
 	},
+	'skill-opt': {
+		handler: (ctx) =>
+			handleSkillOptPlan(ctx.directory, ctx.args, {
+				dispatcher: ctx.evaluationModelDispatcher,
+				parentSessionId: ctx.sessionID,
+			}),
+		description:
+			'Governed single-skill optimizer (issue #1822). Proposes, validates, and activates one allowlisted SKILL.md candidate at a time with durable lifecycle, serial control, and manual approval.',
+		args: 'plan|run|status|diff|approve|reject|rollback|history <slug> [candidateId] [--json] [--confirm] [--expected-content-hash <hash>] [--models <csv>] [--dry-run]',
+		details:
+			'Disabled/proposal-only by default. `run` requires skill_opt.enabled=true AND --confirm (consumes a held-out test set). approve/activate/reject/rollback are human-only and require --expected-content-hash to refuse a stale base. Stores append-only lifecycle under .swarm/evolution/skills/<slug>/<candidateId>/.',
+		category: 'utility',
+		toolPolicy: 'agent',
+	},
+	'skill-opt plan': {
+		handler: (ctx) =>
+			handleSkillOptPlan(ctx.directory, ctx.args, {
+				dispatcher: ctx.evaluationModelDispatcher,
+				parentSessionId: ctx.sessionID,
+			}),
+		description:
+			'Propose an optimization round (dry-run; no mutation, no validation)',
+		subcommandOf: 'skill-opt',
+		args: '<slug> [--json] [--models <csv>]',
+		category: 'utility',
+		toolPolicy: 'agent',
+	},
+	'skill-opt run': {
+		handler: (ctx) =>
+			handleSkillOptRun(ctx.directory, ctx.args, {
+				dispatcher: ctx.evaluationModelDispatcher,
+				parentSessionId: ctx.sessionID,
+			}),
+		description:
+			'Execute the optimization loop (draft→smoke→validate; held-out set is single-use so at most one validation per run). Requires skill_opt.enabled=true and --confirm.',
+		subcommandOf: 'skill-opt',
+		args: '<slug> --confirm [--json] [--models <csv>]',
+		category: 'utility',
+		toolPolicy: 'human-only',
+	},
+	'skill-opt status': {
+		handler: (ctx) => handleSkillOptStatus(ctx.directory, ctx.args),
+		description: 'Show the current candidate lifecycle state',
+		subcommandOf: 'skill-opt',
+		args: '<slug> <candidateId> [--json]',
+		category: 'utility',
+		toolPolicy: 'agent',
+	},
+	'skill-opt diff': {
+		handler: (ctx) => handleSkillOptDiff(ctx.directory, ctx.args),
+		description: 'Show baseline-vs-candidate diff summary for a candidate',
+		subcommandOf: 'skill-opt',
+		args: '<slug> <candidateId> [--json]',
+		category: 'utility',
+		toolPolicy: 'agent',
+	},
+	'skill-opt approve': {
+		handler: (ctx) => handleSkillOptApprove(ctx.directory, ctx.args),
+		description:
+			'Activate a pending candidate (human-only; requires --expected-content-hash)',
+		subcommandOf: 'skill-opt',
+		args: '<slug> <candidateId> --expected-content-hash <hash> [--json]',
+		category: 'utility',
+		toolPolicy: 'human-only',
+	},
+	'skill-opt reject': {
+		handler: (ctx) => handleSkillOptReject(ctx.directory, ctx.args),
+		description:
+			'Record a rejection for a candidate (no active-skill mutation)',
+		subcommandOf: 'skill-opt',
+		args: '<slug> <candidateId> [--json]',
+		category: 'utility',
+		toolPolicy: 'human-only',
+	},
+	'skill-opt rollback': {
+		handler: (ctx) => handleSkillOptRollback(ctx.directory, ctx.args),
+		description:
+			'Restore the pre-activation snapshot (appends a rolled_back event)',
+		subcommandOf: 'skill-opt',
+		args: '<slug> <candidateId> [--json]',
+		category: 'utility',
+		toolPolicy: 'human-only',
+	},
+	'skill-opt history': {
+		handler: (ctx) => handleSkillOptHistory(ctx.directory, ctx.args),
+		description: 'Show the append-only lifecycle event log for a candidate',
+		subcommandOf: 'skill-opt',
+		args: '<slug> <candidateId> [--json]',
+		category: 'utility',
+		toolPolicy: 'agent',
+	},
+	review: {
+		handler: handleReviewCommand,
+		description: 'Run the independent review model against a selected Git diff',
+		args: '--base <ref>, --range <from..to|from...to>, --working-tree, --json',
+		details:
+			'Collects one bounded canonical diff, dispatches the configured reviewer in a fresh read-only session, optionally validates eligible HIGH/CRITICAL findings when configured or required by gate mode, and persists the receipt and evidence. With no selector, reviews the default merge-base plus working-tree scope.',
+		category: 'diagnostics',
+		toolPolicy: 'human-only',
+	},
 	costs: {
 		handler: (ctx) => handleCostsCommand(ctx.directory, ctx.args),
 		description: 'Show per-agent and per-task token/cost telemetry [--json]',
@@ -649,7 +822,8 @@ export const COMMAND_REGISTRY = {
 		clashesWithNativeCcCommand: '/doctor',
 	},
 	info: {
-		handler: (ctx) => handleStatusCommand(ctx.directory, ctx.agents),
+		handler: async (ctx) =>
+			handleStatusCommand(ctx.directory, ctx.agents, ctx.sessionID),
 		description: 'Show current swarm state',
 		category: 'core',
 		aliasOf: 'status',
@@ -951,6 +1125,17 @@ export const COMMAND_REGISTRY = {
 		category: 'utility',
 		toolPolicy: 'restricted',
 	},
+	'approve-plan-critic': {
+		handler: (ctx) =>
+			handleApprovePlanCriticCommand(ctx.directory, ctx.args, ctx.sessionID),
+		description:
+			'Record a MANUAL plan-critic approval to unblock the critic_pre_plan execution gate [reason...]',
+		args: '[reason...]',
+		details:
+			'Human-only escape hatch for the ratchet-tighter critic_pre_plan execution gate (issue #2012). When the critic already returned APPROVED but the mechanical snapshot recorder failed to persist it (verdict-format mismatch, dispatch-signal miss, or a plan.json read race), the gate permanently blocks ALL coder delegations because critic_pre_plan defaults to true and cannot be disabled. Running this records a manual plan_critic_gate approval snapshot so the gate unblocks, with a distinct method: "manual_override" audit marker. The agent itself cannot run this command; it must call the approve_plan_critic tool (or ask you to run this command). Both paths funnel into the same forceRecordPlanCriticApproval hook, which requires an active architect session. An audit event is appended to .swarm/events.jsonl. Prefer re-running MODE: CRITIC-GATE first; use this only as an escape hatch when a legitimate APPROVED was lost.',
+		category: 'utility',
+		toolPolicy: 'restricted',
+	},
 	'pr-review': {
 		handler: (ctx) =>
 			handleModeCommandWithBundledSkills(
@@ -962,17 +1147,12 @@ export const COMMAND_REGISTRY = {
 			'Launch deep PR review with multi-lane analysis [url] [--council]',
 		args: '<pr-url|owner/repo#N|N> [--council]',
 		details:
-			'Launches a structured PR review: reconstructs PR intent via obligation extraction cascade, launches all 6 fixed base explorer lanes through dispatch_lanes_async while the architect keeps doing non-dependent work, polls collect_lane_results incrementally, runs all 11 mandatory repository-agnostic micro-lanes without applicability waivers, validates findings through independent reviewer confirmation, applies critic challenge to HIGH/CRITICAL findings, then synthesizes only after coverage is closed. Failed obligations retry through the same structured async mode and exact PR head; blocking or direct-Task dispatch is not provenance-equivalent, so unclosed coverage leaves the review BLOCKED rather than degraded. --council variant fires adversarial multi-model review. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolves against origin remote).',
+			'Launches a structured PR review: preserves dirty state, verifies and binds an exact detached PR head, reconstructs PR intent via obligation extraction cascade, computes a depth tier (S/M/L) from the bound merge-base diff, launches the base explorer wave through dispatch_lanes_async (all 6 review dimensions covered on every PR — six singleton lanes at tier L, consolidated owned_workflow_lanes partitions at tiers S/M) while the architect keeps doing non-dependent work, and polls collect_lane_results incrementally. It evaluates an exact 11-row repository-agnostic risk-family ledger, records applicable rows as MATCHED and concretely inapplicable rows as provenance-free NOT_TRIGGERED, always keeps unclassified-risk MATCHED, and dispatches micro work only for MATCHED families (dedicated lanes at tier L, consolidated sweeps at S/M). It then validates findings through independent reviewer confirmation, applies critic challenge to HIGH/CRITICAL findings, and synthesizes only after matched coverage is closed. Failed obligations retry through the same structured async mode and exact PR head; blocking or direct-Task dispatch is not provenance-equivalent, so unclosed matched coverage leaves the review BLOCKED rather than degraded. --council variant fires adversarial multi-model review. Supports full GitHub URL, owner/repo#N shorthand, or bare PR number (resolves against origin remote).',
 		category: 'agent',
 		toolPolicy: 'none',
 	},
 	'pr-feedback': {
-		handler: (ctx) =>
-			handleModeCommandWithBundledSkills(
-				ctx,
-				handlePrFeedbackCommand,
-				'PR_FEEDBACK',
-			),
+		handler: (ctx) => handlePrFeedbackCommandWithTransition(ctx),
 		description:
 			'Ingest and close known PR feedback (review comments, CI failures, conflicts) [pr] [instructions]',
 		args: '[url|owner/repo#N|N] [instructions...]',
@@ -1208,8 +1388,8 @@ export const COMMAND_REGISTRY = {
 		description:
 			'Manually promote lesson to hive knowledge (policy-gated; --force --reason overrides with audit)',
 		details:
-			'Promotes a lesson directly to hive knowledge (--category flag sets category) or references an existing swarm lesson by ID (--from-swarm). Promotion runs the one policy evaluator inside a single cross-process transaction (#1847). A policy failure blocks promotion unless --force --reason "<why>" is supplied, which records a durable, audited override. An exact entry id alone is never authorization to bypass policy. Either direct text or --from-swarm ID is required.',
-		args: '--category <category>, --from-swarm <lesson-id>, <lesson-text>',
+			'Promotes a lesson to hive knowledge directly (--category) or via an existing swarm lesson (--from-swarm), in one cross-process policy transaction (#1847). A policy failure blocks promotion unless --force --reason "<why>" is given (audited); an entry id alone is not authorization. Requires direct text or --from-swarm. An actionability floor (#1821) needs at least one predicate flag and one scope flag (see args), unless knowledge.promotion_require_actionable=false.',
+		args: '--category <category>, --from-swarm <lesson-id>, --applies-to-tools <a,b>, --applies-to-agents <a,b>, --required-actions <a,b>, --forbidden-actions <a,b>, --verification-checks <a,b>, --force --reason <why>, <lesson-text>',
 		category: 'utility',
 		toolPolicy: 'none',
 	},

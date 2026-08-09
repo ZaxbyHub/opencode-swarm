@@ -1,8 +1,10 @@
 # Dry-Run: Parser-Based Candidate Extraction
 
-This section demonstrates the new parser-based extraction path end-to-end
-using synthetic data. It is concrete enough to implement the same pattern in
-another skill.
+This section demonstrates the Profile A (structured controller) extraction
+path end-to-end using synthetic data. It is concrete enough to implement the
+same pattern in another skill. On Profiles B/C the `[CANDIDATE]` row format in
+the lane reports is the extraction contract itself; this parser flow does not
+apply.
 
 ### Scenario
 

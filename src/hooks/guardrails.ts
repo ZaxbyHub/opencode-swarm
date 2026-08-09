@@ -33,6 +33,7 @@ export {
 	_internals,
 	createGuardrailsHooks,
 	enforceSpecDriftGate,
+	MAX_TRACKED_NO_OP_SESSIONS,
 	redactShellCommand,
 	SPEC_DRIFT_BLOCKED_TOOLS,
 } from './guardrails/index';

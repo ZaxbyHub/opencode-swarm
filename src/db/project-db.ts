@@ -134,7 +134,9 @@ export function getProjectDb(directory: string): Database {
 
 /**
  * Close and remove the cached project database for the given directory.
- * Test-only.
+ * Called by the `/swarm close` clean stage before unlinking `swarm.db` (so a
+ * long-lived WAL-mode connection releases its file lock and Windows `unlink`
+ * does not fail with EBUSY), and from tests.
  */
 export function closeProjectDb(directory: string): void {
 	const key = resolve(directory);

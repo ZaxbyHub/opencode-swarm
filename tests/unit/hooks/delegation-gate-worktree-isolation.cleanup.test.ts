@@ -5,14 +5,26 @@
  * - Worktree state cleanup
  * - Cross-session worktree isolation
  */
-import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { PluginConfig } from '../../../src/config';
 import type { Plan } from '../../../src/config/plan-schema';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
+import {
+	awaitingMergeByCallID,
+	resetStandardWorktreeIsolationState,
+	type StandardWorktreeDispatch,
+	standardWorktreeByCallID,
+	_internals as worktreeInternals,
+} from '../../../src/hooks/delegation-gate/worktree-isolation';
+import {
+	clearWorktreeMergeStatus,
+	getWorktreeMergeFailure,
+} from '../../../src/hooks/delegation-gate/worktree-merge-status';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
+import type { WorktreeHandle } from '../../../src/worktree';
 import { withFrozenClock } from '../../helpers/test-clock.js';
 import { recordPlanCriticApproval } from './_delegation-gate-helpers';
 
@@ -148,6 +160,91 @@ describe('delegation-gate: worktree state cleanup', () => {
 		}
 
 		expect(threw).toBe(false);
+	});
+
+	it('terminal coder failure preserves and cleans the lane without merge-back', async () => {
+		const hook = createDelegationGateHook(makeConfig(), tempDir);
+		const callID = 'failed-standard-coder';
+		const worktreePath = path.join(tempDir, 'failed-lane');
+		const branchName = 'swarm-lane/test-session/failed-lane';
+		const dispatch: StandardWorktreeDispatch = {
+			callID,
+			parentSessionID: 'test-session',
+			taskId: '1.1',
+			planTaskId: '1.1',
+			handle: {
+				worktreePath,
+				branchName,
+				purpose: 'lane',
+				id: 'failed-lane',
+				sessionId: 'test-session',
+			} as WorktreeHandle,
+			mergeStrategy: 'merge',
+			laneIndex: 0,
+		};
+		ensureAgentSession('test-session');
+		standardWorktreeByCallID.set(callID, dispatch);
+		const originalAttemptMerge = worktreeInternals.attemptMergeBackFromDirty;
+		const originalPreserve = worktreeInternals.preserveDirtyWorktreeForCallId;
+		const originalRemove = worktreeInternals.removeWorktree;
+		const originalPostCleanup = worktreeInternals.postMergeCleanup;
+		let mergeAttempts = 0;
+		const preserveReasons: string[] = [];
+		const removed: string[] = [];
+		const cleanedBranches: string[] = [];
+		try {
+			worktreeInternals.attemptMergeBackFromDirty = mock(async () => {
+				mergeAttempts += 1;
+				return { merged: true, strategy: 'merge' };
+			});
+			worktreeInternals.preserveDirtyWorktreeForCallId = mock(
+				async (_callID, reason) => {
+					preserveReasons.push(reason);
+					return {
+						outcome: 'preserved' as const,
+						preserved: true as const,
+						ref: 'preserved-commit',
+					};
+				},
+			);
+			worktreeInternals.removeWorktree = mock(async (target) => {
+				removed.push(target);
+			});
+			worktreeInternals.postMergeCleanup = mock(async (_directory, branch) => {
+				cleanedBranches.push(branch);
+			});
+
+			await hook.toolAfter(
+				{
+					tool: 'Task',
+					sessionID: 'test-session',
+					callID,
+					args: { subagent_type: 'coder', task_id: '1.1' },
+				},
+				{ state: 'cancelled', output: 'child cancelled' },
+			);
+
+			expect(mergeAttempts).toBe(0);
+			expect(preserveReasons).toEqual(['cancelled']);
+			expect(removed).toEqual([worktreePath]);
+			expect(cleanedBranches).toEqual([branchName]);
+			expect(standardWorktreeByCallID.has(callID)).toBe(false);
+			expect(awaitingMergeByCallID.has(callID)).toBe(false);
+			expect(getWorktreeMergeFailure('1.1')).toMatchObject({
+				outcome: 'failed',
+				stage: 'task-result',
+			});
+			expect(
+				ensureAgentSession('test-session').pendingAdvisoryMessages?.join('\n'),
+			).toContain('STANDARD_WORKTREE_TASK_FAILED');
+		} finally {
+			worktreeInternals.attemptMergeBackFromDirty = originalAttemptMerge;
+			worktreeInternals.preserveDirtyWorktreeForCallId = originalPreserve;
+			worktreeInternals.removeWorktree = originalRemove;
+			worktreeInternals.postMergeCleanup = originalPostCleanup;
+			clearWorktreeMergeStatus('1.1');
+			resetStandardWorktreeIsolationState();
+		}
 	});
 
 	it('should isolate state across sessions within same worktree', async () => {

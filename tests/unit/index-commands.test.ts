@@ -39,8 +39,9 @@ describe('Swarm subcommand registration', () => {
 		const commandKeys = Object.keys(commands);
 
 		// Catch-all plus the current command registry entries. This includes the
-		// evaluation gate commands and main's CI-monitor command.
-		expect(commandKeys.length).toBe(79);
+		// evaluation gate commands, main's CI-monitor command, the context-map
+		// stats command (issue #1672), and the swarm-skill-opt shortcut (issue #1822).
+		expect(commandKeys.length).toBe(83);
 
 		expect(commands.swarm).toBeDefined();
 	});
@@ -101,6 +102,7 @@ describe('Swarm subcommand registration', () => {
 			'swarm-benchmark',
 			'swarm-gate-audit',
 			'swarm-gate-stats',
+			'swarm-review',
 			'swarm-costs',
 			'swarm-export',
 			'swarm-reset',
@@ -119,6 +121,7 @@ describe('Swarm subcommand registration', () => {
 			'swarm-pr-review',
 			'swarm-pr-feedback',
 			'swarm-abort-pr-workflow',
+			'swarm-approve-plan-critic',
 			'swarm-pr-subscribe',
 			'swarm-pr-unsubscribe',
 			'swarm-pr-status',
@@ -163,6 +166,8 @@ describe('Swarm subcommand registration', () => {
 			'swarm-diagnosis',
 			'swarm-ci-simulate',
 			'swarm-ci-monitor',
+			'swarm-context-map-stats',
+			'swarm-skill-opt',
 		];
 
 		for (const subcommand of expectedSubcommands) {

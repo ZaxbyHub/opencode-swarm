@@ -271,13 +271,12 @@ describe('Architect Agent - Agent Delegation Patterns', () => {
 		expect(section).toContain('collect_lane_results');
 		expect(section).toContain('without `wait`');
 		expect(section).toContain('wait: true');
-		expect(section).toContain('RUN ALL MICRO-LANES');
-		expect(section).toContain('all 11 micro-lanes');
+		expect(section).toContain('EVALUATE ALL RISK FAMILIES');
+		expect(section).toContain('exact eleven-row `trigger_evaluation`');
 		expect(section).toContain('swarm-pr-review:micro');
-		expect(section).toContain('heuristics cannot waive a row');
-		expect(section).toContain(
-			'Missing any micro-lane is a BLOCKED coverage gap',
-		);
+		expect(section).toContain('provenance-free `NOT_TRIGGERED`');
+		expect(section).toContain('`unclassified-risk` always remains `MATCHED`');
+		expect(section).toContain('a `NOT_TRIGGERED` family must not create');
 		expect(section).toContain(
 			'surface the lane failure to the user as BLOCKED',
 		);

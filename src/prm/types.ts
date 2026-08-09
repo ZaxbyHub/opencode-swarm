@@ -132,6 +132,4 @@ export interface EscalationState {
 	lastPatternDetected: PatternMatch | null;
 	/** Whether a hard stop has been triggered */
 	hardStopPending: boolean;
-	/** Queue of correction messages to inject */
-	correctionsPending: CourseCorrection[];
 }

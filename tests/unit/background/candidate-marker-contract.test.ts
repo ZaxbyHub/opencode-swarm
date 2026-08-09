@@ -1,6 +1,11 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import {
+	CANDIDATE_FIELD_COUNT,
+	CANDIDATE_FIELDS,
+	CANDIDATE_HEADERS,
+} from '../../../src/background/candidate-contract';
 import type {
 	ArtifactInput,
 	ParseFlags,
@@ -87,10 +92,8 @@ describe('CANDIDATE marker contract (FR-007)', () => {
 	// Prompt instructs 9-pipe format for both base_explorer and micro_lane
 	// -------------------------------------------------------------------------
 
-	test('SC-019: parser defines EXPECTED_FIELD_COUNT = 9', () => {
-		const match = parserSrc.match(/EXPECTED_FIELD_COUNT\s*=\s*(\d+)/);
-		expect(match).not.toBeNull();
-		expect(Number(match![1])).toBe(9);
+	test('SC-019: shared candidate contract defines 9 fields', () => {
+		expect(CANDIDATE_FIELD_COUNT).toBe(9);
 	});
 
 	test('SC-019: base_explorer prompt declares 9 pipe-delimited fields', () => {
@@ -124,14 +127,11 @@ describe('CANDIDATE marker contract (FR-007)', () => {
 	});
 
 	test('SC-019: dispatch tool declares same 9-pipe formats as explorer prompt', () => {
-		// dispatch-lanes.ts lines 51 and 54 declare the same formats
-		const dispatchLines = dispatchSrc
-			.split('\n')
-			.filter((l) => l.includes('[CANDIDATE]') && l.includes('candidate_id'));
-		expect(dispatchLines.length).toBeGreaterThanOrEqual(2);
-
-		// Both format lines should have 9 pipes
-		for (const line of dispatchLines) {
+		// The dispatch suffix consumes the shared canonical format surface instead
+		// of duplicating literal headers that can drift from parser field order.
+		expect(dispatchSrc).toContain('CANDIDATE_HEADERS.base_explorer');
+		expect(dispatchSrc).toContain('CANDIDATE_HEADERS.micro_lane');
+		for (const line of Object.values(CANDIDATE_HEADERS)) {
 			const pipeCount = (line.match(/\|/g) || []).length;
 			expect(pipeCount).toBe(9);
 		}
@@ -156,13 +156,11 @@ describe('CANDIDATE marker contract (FR-007)', () => {
 	// -------------------------------------------------------------------------
 
 	test('base_explorer uses impact_context as family discriminator', () => {
-		expect(parserSrc).toContain('BASE_EXPLORER_DISCRIMINATOR');
-		expect(parserSrc).toContain('impact_context');
+		expect(CANDIDATE_FIELDS.base_explorer).toContain('impact_context');
 	});
 
 	test('micro_lane uses invariant_violated as family discriminator', () => {
-		expect(parserSrc).toContain('MICRO_LANE_DISCRIMINATOR');
-		expect(parserSrc).toContain('invariant_violated');
+		expect(CANDIDATE_FIELDS.micro_lane).toContain('invariant_violated');
 	});
 
 	test('explorer prompt distinguishes base_explorer and micro_lane by discriminator field', () => {
@@ -335,6 +333,88 @@ describe('CANDIDATE marker contract (FR-007)', () => {
 			expect(result.candidates).toHaveLength(1);
 			expect(result.candidates[0].candidate_id).toBe('C-001');
 			expect(result.diagnostics.parse_errors).toBe(0);
+		});
+	});
+
+	describe('consolidated depth-tier lane artifacts (per-family extraction)', () => {
+		const consolidatedFlags: ParseFlags = {
+			...defaultFlags,
+			expected_family: 'micro_lane',
+			expected_micro_lane: 'auth-identity-secrets',
+			expected_micro_lanes: ['auth-identity-secrets', 'subprocess-platform'],
+		};
+
+		test('extracts only the expected family; owned sibling rows skip without errors', () => {
+			const text = [
+				'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence',
+				'C-AUTH-1 | auth-identity-secrets | HIGH | secrets | src/auth.ts:10 | leaked token | LEAST_PRIVILEGE | token in log output | HIGH',
+				'C-SUB-1 | subprocess-platform | MEDIUM | shell | src/run.ts:20 | unbounded exec | BOUNDED_EXECUTION | no timeout on spawn | MEDIUM',
+			].join('\n');
+
+			const result = parseCandidates(
+				makeArtifactInput(text),
+				consolidatedFlags,
+			);
+			expect(result.candidates).toHaveLength(1);
+			expect(result.candidates[0].candidate_id).toBe('C-AUTH-1');
+			expect(result.diagnostics.parse_errors).toBe(0);
+			expect(result.diagnostics.malformed_rows).toBe(0);
+		});
+
+		test('accepts a CLEAN for the expected family alongside sibling-family candidates', () => {
+			const text = [
+				'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence',
+				'C-SUB-1 | subprocess-platform | MEDIUM | shell | src/run.ts:20 | unbounded exec | BOUNDED_EXECUTION | no timeout on spawn | MEDIUM',
+				'[CLEAN] | auth-identity-secrets | exact reviewed diff | no candidate survived the focused review',
+			].join('\n');
+
+			const result = parseCandidates(
+				makeArtifactInput(text),
+				consolidatedFlags,
+			);
+			expect(result.candidates).toHaveLength(0);
+			expect(result.clean_attestation?.micro_lane).toBe(
+				'auth-identity-secrets',
+			);
+			expect(result.diagnostics.parse_errors).toBe(0);
+			expect(result.diagnostics.malformed_rows).toBe(0);
+		});
+
+		test('sibling-family CLEAN rows skip so each per-family call sees one attestation', () => {
+			const text = [
+				'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence',
+				'[CLEAN] | auth-identity-secrets | exact reviewed diff | no candidate survived the focused review',
+				'[CLEAN] | subprocess-platform | exact reviewed diff | no candidate survived the focused review',
+			].join('\n');
+
+			const result = parseCandidates(
+				makeArtifactInput(text),
+				consolidatedFlags,
+			);
+			expect(result.clean_attestation?.micro_lane).toBe(
+				'auth-identity-secrets',
+			);
+			expect(result.diagnostics.parse_errors).toBe(0);
+			expect(result.diagnostics.malformed_rows).toBe(0);
+		});
+
+		test('families outside the owned set are still refused as mismatches', () => {
+			const text = [
+				'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence',
+				'C-UI-1 | ui-accessibility-i18n | LOW | focus | src/ui.ts:5 | focus trap | KEYBOARD_ACCESS | tab order breaks | LOW',
+			].join('\n');
+
+			const result = parseCandidates(
+				makeArtifactInput(text),
+				consolidatedFlags,
+			);
+			expect(result.candidates).toHaveLength(0);
+			expect(result.diagnostics.malformed_rows).toBe(1);
+			expect(
+				result.diagnostics.parse_error_details.some((detail) =>
+					detail.message.includes('Expected micro_lane'),
+				),
+			).toBe(true);
 		});
 	});
 });

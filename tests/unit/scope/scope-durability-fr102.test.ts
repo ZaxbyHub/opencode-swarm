@@ -129,7 +129,7 @@ describe('FR-102 SC-105: precreateStandardWorktreeSession without scope does NOT
 	test('precreateStandardWorktreeSession without scope option does not materialize a scope file', async () => {
 		swarmState.opencodeClient = {
 			session: {
-				create: async () => ({ data: { id: 'sess-no-scope' } }),
+				create: async () => ({ data: { id: 'ses_noScope' } }),
 			},
 		} as any;
 
@@ -146,7 +146,7 @@ describe('FR-102 SC-105: precreateStandardWorktreeSession without scope does NOT
 		await precreateStandardWorktreeSession({
 			config: { worktree: { policy: 'auto' } } as any,
 			directory: gitDir,
-			parentSessionID: 'neg-session',
+			parentSessionID: 'ses_negSession',
 			callID: 'call-neg-scope',
 			taskId: 'task-neg',
 			outputArgs: {},
@@ -219,7 +219,7 @@ describe('FR-102 SC-105: lean turbo provisionWorktree creates scope file in lane
 		const result = await provisionLeanWorktree(
 			gitDir,
 			'lane-lean',
-			'sess-lean',
+			'ses_lean',
 			{
 				worktree_dir: undefined,
 				merge_strategy: 'merge',
@@ -252,7 +252,7 @@ describe('FR-102 SC-105: lean turbo provisionWorktree creates scope file in lane
 		const result = await provisionLeanWorktree(
 			gitDir,
 			'lane-lean-no-scope',
-			'sess-lean-no-scope',
+			'ses_leanNoScope',
 			{
 				worktree_dir: undefined,
 				merge_strategy: 'merge',
@@ -353,7 +353,7 @@ describe('FR-102 SC-105: scope write is contained within lane — symlink bounda
 		const taskId = '5.5';
 		const scopeFiles = ['src/safe.ts'];
 
-		const result = await provisionWorktree(gitDir, 'lane-safe', 'sess-safe', {
+		const result = await provisionWorktree(gitDir, 'lane-safe', 'ses_safe', {
 			purpose: 'lane',
 			scope: { taskId, files: scopeFiles },
 		});
@@ -453,7 +453,7 @@ describe('FR-102: AGENTS.md invariant 4 — materialized scope file is gitignore
 		const taskId = '4.5';
 		const scopeFiles = ['src/gi.ts'];
 
-		const result = await provisionWorktree(gitDir, 'lane-gi', 'sess-gi', {
+		const result = await provisionWorktree(gitDir, 'lane-gi', 'ses_gi', {
 			purpose: 'lane',
 			scope: { taskId, files: scopeFiles },
 		});

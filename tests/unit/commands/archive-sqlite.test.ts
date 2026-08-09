@@ -19,11 +19,11 @@ import {
 } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { loadDatabaseCtor } from '../../../src/db/sqlite-loader.js';
 import {
-	archiveSqliteSnapshot,
 	_internals as archiveInternals,
+	archiveSqliteSnapshot,
 } from '../../../src/commands/archive-sqlite.js';
+import { loadDatabaseCtor } from '../../../src/db/sqlite-loader.js';
 
 let testDir: string;
 let srcDir: string;
@@ -53,10 +53,7 @@ afterEach(() => {
  * project_constraints rows + a fully-applied schema_migrations table.
  * Returns the absolute source path.
  */
-function createWalSource(
-	dbName: string,
-	committedRows: number,
-): string {
+function createWalSource(dbName: string, committedRows: number): string {
 	const Db = loadDatabaseCtor();
 	const srcPath = path.join(srcDir, dbName);
 	const db = new Db(srcPath);
@@ -80,10 +77,10 @@ function createWalSource(
 			['type_a', `committed-row-${i}`],
 		);
 	}
-	db.run(
-		'INSERT INTO schema_migrations (version, name) VALUES (?, ?)',
-		[1, 'create_project_constraints'],
-	);
+	db.run('INSERT INTO schema_migrations (version, name) VALUES (?, ?)', [
+		1,
+		'create_project_constraints',
+	]);
 	db.close();
 	return srcPath;
 }
@@ -195,8 +192,7 @@ describe('archiveSqliteSnapshot — concurrent uncommitted writer excluded', () 
 		expect(Number((uncommitted as { c: number }).c)).toBe(0);
 		// integrity_check row shape differs across drivers; assert it's 'ok'.
 		const ic =
-			(integrity as { integrity_check?: string }).integrity_check ??
-			'';
+			(integrity as { integrity_check?: string }).integrity_check ?? '';
 		expect(ic).toBe('ok');
 
 		// Commit the writer and confirm the SOURCE now has 4 (proving the
@@ -232,9 +228,7 @@ describe('archiveSqliteSnapshot — corrupt source', () => {
 		});
 		expect(r.attempt).toBe('failed');
 		expect(r.source_disposition).toBe('retained');
-		expect(['snapshot_failed', 'validation_failed']).toContain(
-			r.reason_code,
-		);
+		expect(['snapshot_failed', 'validation_failed']).toContain(r.reason_code);
 		// Source preserved.
 		expect(existsSync(srcPath)).toBe(true);
 		// No destination published.
@@ -251,7 +245,9 @@ describe('archiveSqliteSnapshot — schema mismatch', () => {
 		const db = new Db(srcPath);
 		db.run('PRAGMA journal_mode = WAL;');
 		// Create a valid DB but WITHOUT the schema_migrations table.
-		db.run('CREATE TABLE project_constraints (id INTEGER PRIMARY KEY, x TEXT);');
+		db.run(
+			'CREATE TABLE project_constraints (id INTEGER PRIMARY KEY, x TEXT);',
+		);
 		db.run('INSERT INTO project_constraints (x) VALUES (?);', ['row']);
 		db.close();
 
@@ -338,9 +334,13 @@ describe('archiveSqliteSnapshot — zero-row-but-valid DB (archive_empty signal)
 		const srcPath = path.join(srcDir, 'swarm.db');
 		const db = new Db(srcPath);
 		db.run('PRAGMA journal_mode = WAL;');
-		db.run(`CREATE TABLE project_constraints (id INTEGER PRIMARY KEY, x TEXT);`);
+		db.run(
+			`CREATE TABLE project_constraints (id INTEGER PRIMARY KEY, x TEXT);`,
+		);
 		db.run(`CREATE TABLE qa_gate_profile (id INTEGER PRIMARY KEY, y TEXT);`);
-		db.run(`CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT);`);
+		db.run(
+			`CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT);`,
+		);
 		db.run('INSERT INTO schema_migrations (version, name) VALUES (?, ?)', [
 			1,
 			'create_project_constraints',

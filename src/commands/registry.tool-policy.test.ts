@@ -72,22 +72,37 @@ describe('toolPolicy classification snapshot — no regression', () => {
 		'guardrail-log',
 		'lanes',
 		'ci-simulate',
+		// #1672: aggregated context-capsule telemetry stats (toolPolicy: 'agent', toolNoArgs)
+		'context-map stats',
 		// #1850: cohort memory sharing commands
 		'memory link',
 		'memory link status',
 		'memory unlink',
+		// #1822: governed skill optimizer — read-only/proposal commands
+		'skill-opt',
+		'skill-opt plan',
+		'skill-opt status',
+		'skill-opt diff',
+		'skill-opt history',
 	]);
 
 	const EXPECTED_HUMAN_ONLY = new Set<string>([
+		'review',
 		'memory compact',
 		'memory import',
 		'memory migrate',
 		// FR-004: sdd project moved to agent
+		// #1822: governed skill optimizer — mutating commands (human-gated)
+		'skill-opt run',
+		'skill-opt approve',
+		'skill-opt reject',
+		'skill-opt rollback',
 	]);
 
 	const EXPECTED_RESTRICTED = new Set<string>([
 		'abort-pr-workflow',
 		'acknowledge-spec-drift',
+		'approve-plan-critic',
 		'reset',
 		'reset-session',
 		'rollback',
@@ -145,14 +160,14 @@ describe('toolPolicy classification snapshot — no regression', () => {
 		}
 	});
 
-	test("'human-only' bucket contains exactly the expected 3 commands", () => {
+	test("'human-only' bucket contains exactly the expected 8 commands", () => {
 		const actual = new Set<string>();
 		for (const [name, entry] of Object.entries(COMMAND_REGISTRY)) {
 			if ((entry as CommandEntry).toolPolicy === 'human-only') {
 				actual.add(name);
 			}
 		}
-		expect(actual.size).toBe(3);
+		expect(actual.size).toBe(8);
 		for (const name of EXPECTED_HUMAN_ONLY) {
 			expect(actual.has(name)).toBe(true);
 		}
@@ -161,14 +176,14 @@ describe('toolPolicy classification snapshot — no regression', () => {
 		}
 	});
 
-	test("'restricted' bucket contains exactly the expected 7 commands", () => {
+	test("'restricted' bucket contains exactly the expected 8 commands", () => {
 		const actual = new Set<string>();
 		for (const [name, entry] of Object.entries(COMMAND_REGISTRY)) {
 			if ((entry as CommandEntry).toolPolicy === 'restricted') {
 				actual.add(name);
 			}
 		}
-		expect(actual.size).toBe(7);
+		expect(actual.size).toBe(8);
 		for (const name of EXPECTED_RESTRICTED) {
 			expect(actual.has(name)).toBe(true);
 		}
@@ -351,6 +366,8 @@ describe('derived-set reproduction from registry toolPolicy fields', () => {
 			'lanes',
 			// #1850: memory link status has toolNoArgs: true
 			'memory link status',
+			// #1672: context-map stats has toolNoArgs: true
+			'context-map stats',
 		]);
 		const derived = new Set<string>();
 		for (const [name, entry] of Object.entries(COMMAND_REGISTRY)) {
@@ -420,7 +437,6 @@ describe('cost command argument policies', () => {
 	test('costs allows only empty args or --json through swarm_command', () => {
 		const jsonResolved = _internals.resolveCommand(['costs', '--json']);
 		const badResolved = _internals.resolveCommand(['costs', '--verbose']);
-
 		expect(jsonResolved).not.toBeNull();
 		expect(badResolved).not.toBeNull();
 		expect(classifySwarmCommandToolUse(jsonResolved!)).toEqual({
@@ -507,7 +523,7 @@ describe('two-tier human-only: "restricted" is disjoint from "human-only"', () =
 		}
 	});
 
-	test('the 6 restricted commands are NOT in the "agent" set', () => {
+	test('the 8 restricted commands are NOT in the "agent" set', () => {
 		const restricted = new Set<string>();
 		const agent = new Set<string>();
 		for (const [name, entry] of Object.entries(COMMAND_REGISTRY)) {
@@ -546,14 +562,14 @@ describe('two-tier human-only: "restricted" is disjoint from "human-only"', () =
 	});
 
 	test('classifySwarmCommandToolUse: human-only commands (not restricted) return human-only refusal message', () => {
-		// These are human-only but NOT restricted — they are in SWARM_COMMAND_TOOL_ALLOWLIST
-		// so classifySwarmCommandToolUse falls through to them via the SWARM_COMMAND_TOOL_ALLOWLIST check
-		// and they are NOT in the allowlist but ARE in HUMAN_ONLY_SWARM_COMMANDS
-		// Actually: human-only commands (memory compact, memory import, memory migrate)
-		// are in SWARM_COMMAND_TOOL_COMMANDS but NOT in SWARM_COMMAND_TOOL_ALLOWLIST
-		// They should return allowed: false with the human-only message.
+		// Human-only commands are schema-visible but never agent-callable.
 		// FR-004: sdd project is now agent-invocable (removed from this list)
-		const humanOnly = ['memory compact', 'memory import', 'memory migrate'];
+		const humanOnly = [
+			'review',
+			'memory compact',
+			'memory import',
+			'memory migrate',
+		];
 		for (const name of humanOnly) {
 			const tokens = name.includes(' ') ? name.split(' ') : [name];
 			const resolved = _internals.resolveCommand(tokens);

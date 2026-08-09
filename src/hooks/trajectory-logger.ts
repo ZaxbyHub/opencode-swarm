@@ -13,6 +13,8 @@ import * as path from 'node:path';
 import { sanitizeTaskId } from '../evidence/manager';
 import { appendTrajectoryEntry } from '../prm/trajectory-store';
 import { swarmState } from '../state';
+import { deriveGateDenialCode } from './gate-denial-tracker';
+import { normalizeToolNameLowerCase } from './normalize-tool-name';
 import {
 	clearTrajectoryStepCounters,
 	nextTrajectoryStep,
@@ -37,6 +39,13 @@ export interface TrajectoryEntry {
 	args_summary: string;
 	verdict: string;
 	elapsed_ms: number;
+	/**
+	 * Host tool-call id. Written only by {@link recordDeniedToolCall} (issue
+	 * #2063 D1) so a `tool.execute.after` that unexpectedly fires for a call
+	 * whose before-hook already threw can be recognised and skipped instead of
+	 * double-recording the same call.
+	 */
+	callID?: string;
 }
 
 /**
@@ -123,15 +132,22 @@ export async function truncateTrajectoryFile(
 /**
  * Derives the action type from the tool name.
  *
- * @param tool - Tool name
+ * Issue #2063 D2: the name is normalized via `normalizeToolNameLowerCase`
+ * first, so host-namespaced names (`opencode:bash`, `opencode.read`) bucket
+ * identically to their bare forms. Previously they all fell through to
+ * `tool_use`, which flattened the taxonomy PRM pattern detection reads. `grep`
+ * was likewise missing from the read bucket despite being one of the most
+ * frequent read-only calls.
+ *
+ * @param tool - Tool name (may carry a host namespace prefix)
  * @returns Action type string
  */
 function deriveAction(tool: string): string {
-	const toolLower = tool.toLowerCase();
+	const toolLower = normalizeToolNameLowerCase(tool ?? '');
 	if (toolLower === 'task') return 'delegate';
 	if (['write', 'edit', 'apply_patch', 'swarm_apply_patch'].includes(toolLower))
 		return 'edit';
-	if (['read', 'glob', 'search'].includes(toolLower)) return 'read';
+	if (['read', 'glob', 'grep', 'search'].includes(toolLower)) return 'read';
 	if (['bash', 'shell'].includes(toolLower)) return 'execute';
 	if (toolLower === 'test_runner') return 'test';
 	return 'tool_use';
@@ -284,6 +300,18 @@ export function createTrajectoryLoggerHook(
 			if (!enabled) return;
 
 			const sessionId = input.sessionID;
+
+			// (#2063 D1) The before-hook chain already recorded this exact call as
+			// a denial. The host is not expected to fire `tool.execute.after` for a
+			// call whose `tool.execute.before` threw, but if it ever does, recording
+			// again would double-count the call AND burn a second trajectory step —
+			// desynchronising the `prmTrajectoryStep` window PRM reads. Consume the
+			// marker and bail BEFORE `nextTrajectoryStep` is called.
+			if (consumeDeniedCallMarker(sessionId, input.callID)) {
+				callStartTimes.delete(`${sessionId}:${input.callID}`);
+				return;
+			}
+
 			const session = swarmState.agentSessions.get(sessionId);
 
 			// Only log INSIDE delegation scope
@@ -370,6 +398,164 @@ export function createTrajectoryLoggerHook(
 			}
 		},
 	};
+}
+
+// ─── Denied-call recording (issue #2063 D1) ─────────────────────────────────
+
+/** Bound on tracked denied-call dedupe markers (invariant 8). */
+const MAX_DENIED_CALL_MARKERS = 500;
+
+/**
+ * Idle TTL for a dedupe marker. A `tool.execute.after` for a given callID
+ * either arrives on the same turn or never; five minutes is generous.
+ */
+const DENIED_CALL_TTL_MS = 5 * 60_000;
+
+/**
+ * `${sessionID}:${callID}` -> expiry. Written by {@link recordDeniedToolCall}
+ * when it actually appended an entry; consumed (and cleared) by `toolAfter`.
+ */
+const deniedCallMarkers = new Map<string, number>();
+
+function markDeniedCall(sessionId: string, callID: string | undefined): void {
+	if (!callID) return;
+	const now = Date.now();
+	for (const [key, expiresAt] of deniedCallMarkers) {
+		if (expiresAt <= now) deniedCallMarkers.delete(key);
+	}
+	const key = `${sessionId}:${callID}`;
+	deniedCallMarkers.delete(key);
+	deniedCallMarkers.set(key, now + DENIED_CALL_TTL_MS);
+	while (deniedCallMarkers.size > MAX_DENIED_CALL_MARKERS) {
+		const oldest = deniedCallMarkers.keys().next().value;
+		if (oldest === undefined || oldest === key) break;
+		deniedCallMarkers.delete(oldest);
+	}
+}
+
+function consumeDeniedCallMarker(
+	sessionId: string,
+	callID: string | undefined,
+): boolean {
+	if (!callID) return false;
+	const key = `${sessionId}:${callID}`;
+	const expiresAt = deniedCallMarkers.get(key);
+	if (expiresAt === undefined) return false;
+	deniedCallMarkers.delete(key);
+	return expiresAt > Date.now();
+}
+
+/**
+ * Records a tool call that a fail-closed `tool.execute.before` hook DENIED.
+ *
+ * Before this existed the trajectory only contained calls that ran, so a
+ * session that spent fifty turns re-issuing a dispatch the delegation gate kept
+ * rejecting looked, to PRM and to any post-hoc reader, like a session that made
+ * no tool calls at all — the exact loop shape #2063 is about was invisible in
+ * the record of it.
+ *
+ * Contract:
+ *   - The step is minted with the SHARED `nextTrajectoryStep(sessionId)`. Any
+ *     private counter would desynchronise the `prmTrajectoryStep` window and
+ *     silently break PRM's step-range filtering.
+ *   - `session.delegationActive` gates recording at all (the architect session
+ *     is deliberately out of scope); the task-evidence copy additionally
+ *     requires `session.currentTaskId`, so a subagent running without a task id
+ *     still lands in the PRM store.
+ *   - EVERY failure is swallowed. This runs inside the `catch` that is about to
+ *     rethrow a policy denial; it must never change which error propagates.
+ *
+ * @param sessionID - Session whose chain denied the call
+ * @param input - The host `tool.execute.before` input (tool / callID / args)
+ * @param errorMessage - The ORIGINAL denial message, before any B1 decoration
+ * @param directory - Workspace root (evidence + PRM store live under `.swarm/`)
+ * @param options - `maxLines` mirrors the hook's `max_lines` config
+ */
+export async function recordDeniedToolCall(
+	sessionID: string,
+	input: {
+		tool: string;
+		callID?: string;
+		args?: Record<string, unknown>;
+	},
+	errorMessage: string,
+	directory: string,
+	options?: { maxLines?: number },
+): Promise<void> {
+	try {
+		const session = swarmState.agentSessions.get(sessionID);
+		if (!session?.delegationActive) return;
+
+		const maxLines = options?.maxLines ?? 500;
+
+		const startKey = `${sessionID}:${input.callID}`;
+		const startTime = callStartTimes.get(startKey);
+		if (startTime !== undefined) callStartTimes.delete(startKey);
+		const elapsed_ms = startTime === undefined ? 0 : Date.now() - startTime;
+
+		const agentName =
+			swarmState.activeAgent.get(sessionID) ?? session.agentName ?? 'unknown';
+
+		const code = deriveGateDenialCode(errorMessage);
+
+		const entry: TrajectoryEntry = {
+			step: nextTrajectoryStep(sessionID),
+			agent: agentName,
+			action: deriveAction(input.tool),
+			target: extractTarget(input.tool, input.args),
+			intent: `denied: ${code}`,
+			timestamp: new Date().toISOString(),
+			result: 'failure',
+			tool: input.tool,
+			args_summary: summarizeArgs(input.args, 200),
+			verdict: 'failure',
+			elapsed_ms,
+			callID: input.callID,
+		};
+
+		// Claim the callID before any I/O so a `tool.execute.after` that races in
+		// cannot slip a duplicate entry past the guard.
+		markDeniedCall(sessionID, input.callID);
+
+		// Session-level PRM store — the copy that matters for loop detection.
+		try {
+			await appendTrajectoryEntry(sessionID, entry, directory, maxLines);
+		} catch {
+			/* non-blocking: PRM store failures must not block the rethrow */
+		}
+
+		// Task-evidence copy, only when the session is bound to a task.
+		const taskId = session.currentTaskId;
+		if (!taskId) return;
+		try {
+			const relativePath = path.join(
+				'evidence',
+				sanitizeTaskId(taskId),
+				'trajectory.jsonl',
+			);
+			const trajectoryPath = validateSwarmPath(directory, relativePath);
+			// drift-test:exempt — target is .swarm/evidence/{taskId}/trajectory.jsonl and
+			// 'evidence/' IS in PRESERVED_SWARM_PATHS, but the scanner matches the literal
+			// against a +/-2-line window and path.join('evidence', ...) segments never carry
+			// the trailing slash it looks for. Same artifact as the toolAfter writer above.
+			await fs.mkdir(path.dirname(trajectoryPath), { recursive: true });
+			await fs.appendFile(
+				trajectoryPath,
+				`${JSON.stringify(entry)}\n`,
+				'utf-8',
+			);
+			await truncateTrajectoryFile(trajectoryPath, maxLines);
+		} catch {
+			/* non-blocking: evidence I/O errors are swallowed */
+		}
+	} catch {
+		/* fail-open by contract: never prevent the B1 rethrow */
+	}
+}
+
+/** Test helper: drop all denied-call dedupe markers. */
+export function clearDeniedCallMarkers(): void {
+	deniedCallMarkers.clear();
 }
 
 /**
@@ -513,3 +699,15 @@ function deriveVerdict(output: {
 
 	return 'success';
 }
+
+/**
+ * Tier-0 pure-function test seam (writing-tests skill). These helpers take no
+ * external dependencies, so testing them directly needs no mocks at all.
+ */
+export const _test_exports = {
+	deriveAction,
+	extractTarget,
+	MAX_DENIED_CALL_MARKERS,
+	DENIED_CALL_TTL_MS,
+	deniedCallMarkerCount: (): number => deniedCallMarkers.size,
+} as const;

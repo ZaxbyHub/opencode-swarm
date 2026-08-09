@@ -1,6 +1,11 @@
 import { z } from 'zod';
+import packageJson from '../../package.json' with { type: 'json' };
 import { OUTCOME_BLOCK_THRESHOLD } from '../hooks/knowledge-types.js';
-import { type AgentName, ALL_AGENT_NAMES } from './constants';
+import {
+	type AgentName,
+	ALL_AGENT_NAMES,
+	SUMMARIZER_EXEMPT_TOOL_NAMES,
+} from './constants';
 
 /**
  * Test-only dependency-injection seam — see `gitignore-warning.ts:_internals`
@@ -239,10 +244,12 @@ export const HooksConfigSchema = z.object({
 	 * Opt-in support for OpenCode background subagents.
 	 * When false (default) swarm fail-closed-blocks background swarm `Task` dispatches
 	 * (PR 1 behavior). When true, background swarm dispatches are allowed and tracked as
-	 * durable records under `.swarm/background-delegations.jsonl`, and the completion
-	 * observer ingests trusted upstream completion signals into that advisory ledger. NO
-	 * workflow gate is advanced and NO gate evidence is recorded from a background completion.
-	 * Requires upstream `OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true` to have any effect.
+	 * durable records under `.swarm/background-delegations.jsonl`. Trusted, correlated,
+	 * workspace-fresh terminal completions are then ingested into coder workflow state or
+	 * Stage B gate evidence as appropriate, and surfaced to the parent architect.
+	 * Requires upstream `OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true` or the umbrella
+	 * `OPENCODE_EXPERIMENTAL=true` to have any effect. Keep the default false while upstream
+	 * still classifies the capability as experimental; see the recovery guide readiness list.
 	 */
 	background_subagents: z.boolean().default(false),
 	/** Bounded lifetime (minutes) after which a tracked pending background delegation is
@@ -494,9 +501,7 @@ export const SummaryConfigSchema = z.object({
 	max_summary_chars: z.number().min(100).max(5000).default(1000),
 	max_stored_bytes: z.number().min(10240).max(104857600).default(10485760),
 	retention_days: z.number().min(1).max(365).default(7),
-	exempt_tools: z
-		.array(z.string())
-		.default(['retrieve_summary', 'retrieve_lane_output', 'task', 'read']),
+	exempt_tools: z.array(z.string()).default([...SUMMARIZER_EXEMPT_TOOL_NAMES]),
 });
 
 export type SummaryConfig = z.infer<typeof SummaryConfigSchema>;
@@ -519,22 +524,170 @@ export const ReviewPassesConfigSchema = z.object({
 
 export type ReviewPassesConfig = z.infer<typeof ReviewPassesConfigSchema>;
 
-// Auto-review configuration (opt-in): automatic review of the execution diff
-// by the reviewer agent (its own configured model) in a fresh ephemeral
-// session at task/phase boundaries. Advisory-only: verdicts are persisted as
-// review receipts + events; REJECTED/unparseable verdicts inject an advisory.
-export const AutoReviewConfigSchema = z.object({
-	/** Enable automatic execution-diff review. Default: false (opt-in). */
-	enabled: z.boolean().default(false),
+export interface AutoReviewBurnInDecision {
+	approved: boolean;
+	artifact_path: string;
+	artifact_sha256: string;
+}
+
+/**
+ * Source-controlled release decision for the v8 default flip.
+ *
+ * Keep this side-effect free: plugin initialization must never synchronously read or
+ * hash the benchmark artifact. The committed decision pins the independently
+ * generated artifact by path and SHA-256; release-major alone cannot activate the
+ * default.
+ */
+export const AUTO_REVIEW_V8_BURN_IN_DECISION: AutoReviewBurnInDecision = {
+	approved: true,
+	artifact_path: 'docs/benchmarks/auto-review-v8-cost-baseline.json',
+	artifact_sha256:
+		'b4e981d4d87e3de80f6d7dd4ae782b08159d385019c4d8b0d300c0443f1984ce',
+};
+
+export interface AutoReviewReleaseContext {
+	packageVersion?: string;
+	burnInDecision?: AutoReviewBurnInDecision;
+}
+
+function hasApprovedAutoReviewBurnIn(
+	decision: AutoReviewBurnInDecision | undefined,
+): boolean {
+	return Boolean(
+		decision?.approved === true &&
+			decision.artifact_path ===
+				AUTO_REVIEW_V8_BURN_IN_DECISION.artifact_path &&
+			decision.artifact_sha256 ===
+				AUTO_REVIEW_V8_BURN_IN_DECISION.artifact_sha256,
+	);
+}
+
+function autoReviewEnabledByRelease(
+	context: AutoReviewReleaseContext = {},
+): boolean {
+	const version = context.packageVersion ?? packageJson.version;
+	const major = Number.parseInt(version.split('.')[0] ?? '', 10);
+	return (
+		Number.isInteger(major) &&
+		major >= 8 &&
+		hasApprovedAutoReviewBurnIn(
+			context.burnInDecision ?? AUTO_REVIEW_V8_BURN_IN_DECISION,
+		)
+	);
+}
+
+const AutoReviewFinalConfigSchema = z.object({
+	on_phase_complete: z.boolean().default(true),
+	on_plan_complete: z.boolean().default(true),
+	model: z.string().min(1).nullable().default(null),
+	mode: z.enum(['advisory', 'gate']).default('advisory'),
+	max_diff_bytes: z
+		.number()
+		.int()
+		.min(16 * 1024)
+		.max(2 * 1024 * 1024)
+		.default(262_144),
+	timeout_ms: z.number().int().min(10_000).max(1_800_000).default(300_000),
+});
+
+const AutoReviewConfigObjectSchema = z.object({
+	/** Enable automatic execution-diff review. V7 is opt-in; v8 is burn-in gated. */
+	enabled: z.boolean(),
 	/** When to dispatch: after completed tasks, at phase boundaries, or both. */
 	trigger: z
 		.enum(['task_completion', 'phase_boundary', 'both'])
 		.default('phase_boundary'),
-	/** Reviewer dispatch timeout (ephemeral session create + full response). */
+	/** Legacy task-review dispatch timeout. */
 	timeout_ms: z.number().int().min(10_000).max(1_800_000).default(300_000),
-	/** Maximum diff size included in the review prompt (KiB; truncated past this). */
+	/** Legacy task-review maximum diff size (KiB). */
 	max_diff_kb: z.number().int().min(16).max(2048).default(256),
+	/** Minimum confidence for a finding to retain its declared severity. */
+	min_confidence: z.number().min(0).max(1).default(0.7),
+	/** Request the bounded structured findings block from reviewers. */
+	structured_findings: z.boolean().default(true),
+	/** Independently validate anchored HIGH/CRITICAL findings. */
+	validate_findings: z.boolean().default(false),
+	/** Optional validator model override; null resolves the critic model. */
+	validation_model: z.string().min(1).nullable().default(null),
+	/** Bound for the fresh-context validator dispatch. */
+	validation_timeout_ms: z
+		.number()
+		.int()
+		.min(10_000)
+		.max(1_800_000)
+		.default(120_000),
+	final_review: AutoReviewFinalConfigSchema.default({
+		on_phase_complete: true,
+		on_plan_complete: true,
+		model: null,
+		mode: 'advisory',
+		max_diff_bytes: 262_144,
+		timeout_ms: 300_000,
+	}),
 });
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function normalizeAutoReviewInput(
+	value: unknown,
+	context: AutoReviewReleaseContext = {},
+): unknown {
+	if (!isPlainRecord(value)) return value;
+	const normalized: Record<string, unknown> = { ...value };
+	if (!Object.hasOwn(value, 'enabled')) {
+		normalized.enabled = autoReviewEnabledByRelease(context);
+	}
+
+	if (
+		Object.hasOwn(value, 'final_review') &&
+		!isPlainRecord(value.final_review)
+	) {
+		return normalized;
+	}
+	const nested = isPlainRecord(value.final_review)
+		? { ...value.final_review }
+		: {};
+	if (!Object.hasOwn(nested, 'max_diff_bytes')) {
+		nested.max_diff_bytes =
+			typeof value.max_diff_kb === 'number'
+				? value.max_diff_kb * 1024
+				: 262_144;
+	}
+	if (!Object.hasOwn(nested, 'timeout_ms')) {
+		nested.timeout_ms =
+			typeof value.timeout_ms === 'number' ? value.timeout_ms : 300_000;
+	}
+	normalized.final_review = nested;
+	return normalized;
+}
+
+// Auto-review configuration: automatic review of the execution diff by a
+// separately configured model in a fresh ephemeral session. The preprocessor
+// preserves presence-sensitive legacy inheritance before Zod applies defaults.
+export const AutoReviewConfigSchema = z.preprocess(
+	(value) => normalizeAutoReviewInput(value),
+	AutoReviewConfigObjectSchema,
+);
+
+export function resolveAutoReviewConfig(
+	raw: unknown = {},
+	context: AutoReviewReleaseContext = {},
+): AutoReviewConfig {
+	const parsed = AutoReviewConfigObjectSchema.parse(
+		normalizeAutoReviewInput(raw, context),
+	);
+	if (
+		parsed.final_review.mode === 'gate' &&
+		parsed.structured_findings === false
+	) {
+		throw new Error(
+			'auto_review.final_review.mode="gate" requires auto_review.structured_findings=true',
+		);
+	}
+	return parsed;
+}
 
 export type AutoReviewConfig = z.infer<typeof AutoReviewConfigSchema>;
 
@@ -876,6 +1029,45 @@ export const GuardrailsConfigSchema = z.object({
 	 * known secret patterns (tokens, passwords, Bearer headers) redacted.
 	 */
 	shell_audit_log: z.boolean().default(true),
+
+	// ── Loop containment (issue #2063) ──────────────────────────────────────
+	/**
+	 * Consecutive fail-closed `tool.execute.before` denials with the SAME
+	 * classification, tool, and session before "do not retry this dispatch"
+	 * guidance is appended to the denial the agent reads.
+	 * Consumed by `src/hooks/gate-denial-tracker.ts` (B1).
+	 */
+	gate_denial_warn_threshold: z.number().int().min(1).default(3),
+	/**
+	 * Same streak length at which the denial additionally carries a hard STOP
+	 * directive, pushes an advisory, and emits `gate_denial_loop` telemetry.
+	 * Consumed by `src/hooks/gate-denial-tracker.ts` (B1).
+	 */
+	gate_denial_stop_threshold: z.number().int().min(1).default(5),
+	/**
+	 * Non-progress tool calls inside an armed execution episode before a strong
+	 * "you are not making progress" advisory fires.
+	 *
+	 * NOTE: the three `execution_stall_*` keys are declared here so this schema
+	 * has a single writer for the #2063 config surface. Their consumer is
+	 * `src/hooks/guardrails/execution-stall.ts` (workstream B5), wired through
+	 * `createGuardrailsHooks`.
+	 */
+	execution_stall_warn_calls: z.number().int().min(1).default(30),
+	/**
+	 * Non-progress tool calls inside an armed execution episode before
+	 * read/glob/grep/bash are hard-denied (delegation, status, and plan tools
+	 * stay allowed). Consumed by `src/hooks/guardrails/execution-stall.ts`.
+	 */
+	execution_stall_stop_calls: z.number().int().min(1).default(60),
+	/**
+	 * Minutes of complete tool inactivity after which an armed execution
+	 * episode disarms and its counters reset. Idleness — not elapsed time since
+	 * arming — is the lapse condition, so a long slow stall still escalates. The
+	 * episode ALSO disarms when the plan carries no `in_progress` task, which is
+	 * not configurable. Consumed by `src/hooks/guardrails/execution-stall.ts`.
+	 */
+	execution_stall_episode_minutes: z.number().int().min(1).default(30),
 });
 
 export type GuardrailsConfig = z.infer<typeof GuardrailsConfigSchema>;
@@ -1011,8 +1203,21 @@ export const ContextMapConfigSchema = z.object({
 
 export type ContextMapConfig = z.infer<typeof ContextMapConfigSchema>;
 
-// Repo dependency-graph configuration (issue #1448)
+// Repo dependency-graph configuration (issues #1448 and #1986)
 export const RepoGraphConfigSchema = z.object({
+	/** Enable graph startup, incremental maintenance, reads, and injection. */
+	enabled: z.boolean().default(true),
+	/**
+	 * Use the bounded content-freshness probe at session start. When disabled,
+	 * startup retains the legacy full-rebuild behavior.
+	 */
+	init_refresh: z.boolean().default(true),
+	/** Maximum complete drift set eligible for an incremental refresh. */
+	refresh_cap: z.number().int().min(0).max(500).default(50),
+	/** Wall-clock budget for each bounded source-tree walk. */
+	walk_budget_ms: z.number().int().min(1_000).max(60_000).default(5_000),
+	/** Maximum source files a bounded source-tree walk may inspect. */
+	max_files: z.number().int().min(100).max(100_000).default(10_000),
 	/**
 	 * Extra directory names to skip when the repo dependency graph is built,
 	 * in addition to the built-in defaults (node_modules, .git, dist, build,
@@ -1068,7 +1273,20 @@ export const CheckpointConfigSchema = z.preprocess(
 	z
 		.object({
 			enabled: z.boolean().default(true),
-			auto_checkpoint_threshold: z.number().int().min(1).max(20).default(3),
+			auto_checkpoint_threshold: z
+				.number()
+				.int()
+				.min(1)
+				.max(20)
+				.default(3)
+				.describe(
+					'Maximum number of checkpoints to retain. Oldest checkpoints are evicted when this limit is exceeded.',
+				),
+			// Maximum number of checkpoints to retain in the log. Older entries
+			// are evicted (FIFO) when this limit is exceeded. Distinct from
+			// auto_checkpoint_threshold (which controls how many completed tasks
+			// trigger an auto-checkpoint).
+			max_retention: z.number().int().min(1).max(100).default(20),
 			// When false (default), checkpoint save skips the git commit if the working
 			// tree is clean, recording only the current HEAD SHA. Set to true to restore
 			// the previous behaviour of creating a git commit even with no file changes.
@@ -1265,6 +1483,10 @@ export const KnowledgeConfigSchema = z.object({
 	/** #1847: minimum DISTINCT canonical cohort ids among the validated
 	 * terminal-application receipts. Default 0 (conservative). */
 	promotion_min_distinct_cohorts: z.number().min(0).max(50).default(0),
+	/** #1821: require a promotion candidate to carry an actionable directive
+	 * (a concrete action, not a bare observation) before it may be promoted.
+	 * Default true — prose-only lessons stay in the swarm tier. */
+	promotion_require_actionable: z.boolean().default(true),
 	/** Architect-only in-session nudge to capture durable lessons while work is still live. */
 	realtime_learning_nudge: z
 		.object({
@@ -1306,6 +1528,117 @@ export const KnowledgeConfigSchema = z.object({
 });
 
 export type KnowledgeConfig = z.infer<typeof KnowledgeConfigSchema>;
+
+/**
+ * Learning subsystem configuration (issue #1821).
+ *
+ * Governs the three bounded background learning loops: real-time knowledge
+ * admission (drains a queue of candidate lessons while a session is live), PRM
+ * pattern persistence, and the duplicate-knowledge sweep. Every budget here
+ * exists to keep the loops bounded per session (AGENTS.md invariants 1 and 8) —
+ * there is no "unlimited" setting by design.
+ *
+ * Nested blocks use `.prefault({})` rather than `.default({...})`: in Zod 4 a
+ * `.default(value)` is returned verbatim without being parsed, so
+ * `.default({})` would yield an empty object and silently skip every inner
+ * field default. `.prefault({})` runs the substituted value through the object
+ * schema, so inner defaults apply and cannot drift from the field declarations.
+ */
+export const LearningConfigSchema = z.object({
+	/** Real-time admission of candidate lessons during a live session. */
+	realtime_admission: z
+		.object({
+			/** Enable/disable real-time admission entirely. */
+			enabled: z.boolean().default(true),
+			/** Hard cap on pending candidates; excess candidates are dropped. */
+			max_queue_size: z.number().int().min(1).max(500).default(50),
+			/** Minimum candidates drained per drain cycle. */
+			min_drain: z.number().int().min(1).max(50).default(1),
+			/** Maximum candidates drained per drain cycle. */
+			max_drain: z.number().int().min(1).max(100).default(10),
+			/** Weight of queue depth when sizing a drain (0 = ignore depth). */
+			drain_depth_factor: z.number().min(0).max(1).default(0.5),
+			/** Weight of arrival velocity when sizing a drain (0 = ignore rate). */
+			drain_velocity_factor: z.number().min(0).max(1).default(0.25),
+			/** Per-session ceiling on admission LLM calls. 0 disables LLM admission. */
+			max_llm_calls_per_session: z.number().int().min(0).max(500).default(20),
+			/** Per-session ceiling on admission tokens. */
+			max_tokens_per_session: z.number().int().min(0).default(50_000),
+			/** Maximum admissions evaluated concurrently. */
+			max_concurrent_admissions: z.number().int().min(1).max(16).default(2),
+			/** Retries allowed per candidate before it is abandoned. */
+			max_retries_per_candidate: z.number().int().min(0).max(5).default(1),
+			/** Per-candidate LLM timeout in milliseconds. */
+			per_candidate_llm_timeout_ms: z.number().int().min(0).default(60_000),
+			/** Wall-clock ceiling for a single drain cycle, in milliseconds. */
+			max_drain_wall_time_ms: z.number().int().min(0).default(10_000),
+			/** SUPPRESS the prompt-only "supersede an existing lesson instead of
+			 * adding a near-duplicate" nudge to the architect while real-time
+			 * admission is enabled, since this loop already admits those lessons
+			 * automatically and the nudge would only ask the architect to redo it by
+			 * hand. Its sole consumer is
+			 * `shouldInjectRealtimeLearningNudge` (`src/hooks/realtime-learning-nudge.ts`),
+			 * which returns false — i.e. no nudge — when `realtime_admission.enabled`
+			 * is true AND this is not `false`. Set it to `false` to keep the nudge
+			 * even with admission on. The default `true` therefore means "suppress",
+			 * not "nudge"; `docs/configuration.md` has always described it correctly. */
+			supersede_nudge: z.boolean().default(true),
+		})
+		.prefault({}),
+	/** Persistence of PRM-detected patterns as durable knowledge. */
+	prm_persistence: z
+		.object({
+			/** Enable/disable PRM pattern persistence. */
+			enabled: z.boolean().default(true),
+			/** Distinct observations required before a pattern is persisted. */
+			min_support: z.number().int().min(1).max(20).default(3),
+			/** Cooldown between persistence passes, in milliseconds. */
+			cooldown_ms: z.number().int().min(0).default(900_000),
+		})
+		.prefault({}),
+	/** Background sweep that merges duplicate knowledge entries. */
+	dedup_sweep: z
+		.object({
+			/** Enable/disable the dedup sweep. */
+			enabled: z.boolean().default(true),
+			/** Hard cap on pairwise comparisons performed per sweep. */
+			max_comparisons: z.number().int().min(0).default(2_000),
+			/** Hard cap on merges applied per sweep. */
+			max_merges_per_sweep: z.number().int().min(0).default(10),
+		})
+		.prefault({}),
+});
+
+export type LearningConfig = z.infer<typeof LearningConfigSchema>;
+
+/**
+ * Consensus mining configuration (issue #1821).
+ *
+ * The consensus miner reads completed evaluation/run evidence and proposes
+ * lessons that multiple independent runs agree on. Support thresholds gate what
+ * counts as consensus; the excerpt and retention caps keep the generated report
+ * bounded.
+ */
+export const ConsensusConfigSchema = z.object({
+	/** Enable/disable consensus mining. */
+	enabled: z.boolean().default(true),
+	/** Default distinct-observation threshold for a consensus candidate. */
+	default_min_support: z.number().int().min(1).default(3),
+	/** Default number of successful runs required to trust a candidate. */
+	default_min_successful_runs: z.number().int().min(0).default(2),
+	/** Default cap on evidence items attached to a consensus candidate. */
+	default_max_evidence_items: z.number().int().min(1).default(50),
+	/** Maximum characters retained per evidence excerpt. */
+	max_excerpt_chars: z.number().int().min(1).default(500),
+	/** Enable LLM summarization of mined consensus candidates. */
+	llm_summarization_enabled: z.boolean().default(true),
+	/** Timeout for a consensus summarization LLM call, in milliseconds. */
+	llm_timeout_ms: z.number().int().min(0).default(60_000),
+	/** Number of consensus reports retained on disk. */
+	report_retention: z.number().int().min(0).default(50),
+});
+
+export type ConsensusConfig = z.infer<typeof ConsensusConfigSchema>;
 
 export const MemoryConfigSchema = z.object({
 	/** Enable Swarm memory tools and local memory storage. Default: false. */
@@ -1814,6 +2147,95 @@ export const SkillsConfigSchema = z.object({
 
 export type SkillsConfig = z.infer<typeof SkillsConfigSchema>;
 
+/**
+ * Governed skill optimizer configuration (issue #1822 — SkillOpt 3/7).
+ *
+ * Disabled by default. When disabled, `/swarm skill-opt run` refuses to
+ * execute a round (it still allows `plan`/`status`/`diff`/`history` in
+ * proposal-only mode). Enabling does NOT mutate skills autonomously: every
+ * activation requires an explicit human `/swarm skill-opt approve` with a
+ * current content hash. This config is consulted only inside command handlers
+ * (never on the plugin init path — AGENTS.md invariant #1).
+ */
+export const SkillOptConfigSchema = z
+	.object({
+		/** Master opt-in for executing optimization rounds. Default: false. */
+		enabled: z.boolean().default(false),
+		/** Max optimization rounds per project before the controller stops. */
+		max_rounds: z.number().int().min(1).max(50).default(5),
+		/** Max candidates drafted per round. */
+		max_candidates_per_round: z.number().int().min(1).max(20).default(3),
+		/** Max validation runs per round (held-out test consumptions). */
+		max_validations_per_round: z.number().int().min(1).max(10).default(1),
+		/** Hard wall-clock budget for a single round, in milliseconds. */
+		max_round_time_ms: z
+			.number()
+			.int()
+			.min(10_000)
+			.max(86_400_000)
+			.default(3_600_000),
+		/** Soft token spend budget for LLM drafting across a round. */
+		max_tokens_per_round: z
+			.number()
+			.int()
+			.min(1_000)
+			.max(2_000_000)
+			.default(50_000),
+		/**
+		 * Max consecutive rejections before a MULTI-validation controller stops.
+		 * NOTE: in v1 a single `run` performs at most one validation (the held-out
+		 * test set is single-use), so this knob is forward-compatible and not yet
+		 * enforced. See controller.ts "Caps" docstring.
+		 */
+		max_rejections: z.number().int().min(1).max(50).default(5),
+		/**
+		 * Max consecutive inconclusive results before a MULTI-validation controller
+		 * stops. NOTE: forward-compatible in v1 (single validation per run); see
+		 * controller.ts "Caps" docstring.
+		 */
+		max_inconclusive_rounds: z.number().int().min(0).max(10).default(2),
+		/** Max transient-infra retries before an infra failure becomes inconclusive. */
+		max_transient_retries: z.number().int().min(0).max(20).default(5),
+		/** Convergence stop: K consecutive non-improvements before stopping. */
+		convergence_non_improvements: z.number().int().min(1).max(20).default(3),
+		/** Trust region: max changed lines in a candidate SKILL.md. */
+		max_changed_lines: z.number().int().min(1).max(2000).default(200),
+		/** Trust region: max changed bytes in a candidate SKILL.md. */
+		max_changed_bytes: z.number().int().min(64).max(200_000).default(20_000),
+		/** Trust region: max distinct frontmatter/body sections changed. */
+		max_changed_sections: z.number().int().min(1).max(40).default(6),
+		/** Promotion policy deadband forwarded to the evaluation substrate. */
+		deadband: z.number().min(0).max(1).default(0),
+		/**
+		 * Wall-clock retirement: minimum age (days) before a never-used skill is
+		 * eligible for archival retirement. Real usage signal (#1770) is still
+		 * required; this is a floor, not a trigger.
+		 */
+		retirement_min_age_days: z.number().int().min(1).max(3650).default(60),
+	})
+	.strict();
+
+export type SkillOptConfig = z.infer<typeof SkillOptConfigSchema>;
+
+/** Default governed-skill-optimizer config (fully disabled/safe). */
+export const DEFAULT_SKILL_OPT_CONFIG: SkillOptConfig = {
+	enabled: false,
+	max_rounds: 5,
+	max_candidates_per_round: 3,
+	max_validations_per_round: 1,
+	max_round_time_ms: 3_600_000,
+	max_tokens_per_round: 50_000,
+	max_rejections: 5,
+	max_inconclusive_rounds: 2,
+	max_transient_retries: 5,
+	convergence_non_improvements: 3,
+	max_changed_lines: 200,
+	max_changed_bytes: 20_000,
+	max_changed_sections: 6,
+	deadband: 0,
+	retirement_min_age_days: 60,
+};
+
 // Spec-writer agent configuration
 export const SpecWriterConfigSchema = z.object({
 	/** Default: true (cheap on demand from architect). */
@@ -2132,6 +2554,35 @@ export const WorktreeIsolationConfigSchema = z.object({
 	merge_strategy: z.enum(['merge', 'rebase', 'cherry-pick']).default('merge'),
 	worktree_dir: z.string().optional(),
 	deps_strategy: z.enum(['skip', 'copy', 'link']).default('skip'),
+	/**
+	 * Permission policy for OpenCode instances running inside a swarm worktree
+	 * lane. OpenCode partitions permission state per directory, so a lane gets
+	 * an empty `approved` list and a private pending map; because no TUI is
+	 * attached to a lane instance, an `external_directory` prompt raised there
+	 * can never be answered and the lane hangs indefinitely.
+	 *
+	 * scoped_allow: (default) pre-grant `external_directory` access to a
+	 * justified allowlist — the parent project the lane is a worktree of, the
+	 * plugin config/cache dirs, the OS temp dir, and the configured skill roots
+	 * — and deny everything else outright so nothing can be left pending.
+	 *
+	 * deny: emit no allowlist at all — only the catch-all deny. Anything you
+	 * have explicitly allowed in `permission.external_directory` still applies
+	 * (user configuration is merged last and always wins), so this denies
+	 * everything the plugin would otherwise have granted, not literally every
+	 * request. Still resolves rather than hanging.
+	 *
+	 * off: apply no lane-specific permission rules. This RESTORES the hanging
+	 * behaviour described above — an unanswerable prompt in a lane will block
+	 * that lane until the server is restarted. Provided only as an escape hatch
+	 * for hosts where the scoped rules are undesirable.
+	 *
+	 * Has no effect outside a swarm worktree lane; ordinary sessions are never
+	 * modified by this setting.
+	 */
+	lane_permissions: z
+		.enum(['scoped_allow', 'deny', 'off'])
+		.default('scoped_allow'),
 	/**
 	 * FR-104 SC-111: Release a serialized session after this many successful
 	 * dispatches have completed and merged back from that session.
@@ -2579,6 +3030,9 @@ export function resolveExternalSkillsConfig(
 
 // Main plugin configuration
 export const PluginConfigSchema = z.object({
+	/** Config format version for migration table. Increment when deprecating fields. Distinct from knowledge.schema_version. */
+	config_format_version: z.number().int().min(0).default(1),
+
 	// Legacy: Per-agent overrides (default swarm)
 	agents: z.record(z.string(), AgentOverrideConfigSchema).optional(),
 
@@ -2703,7 +3157,9 @@ export const PluginConfigSchema = z.object({
 	context_map: ContextMapConfigSchema.optional(),
 
 	// Repo dependency-graph configuration (issue #1448 — directory excludes)
-	repo_graph: RepoGraphConfigSchema.optional(),
+	// Materialize nested defaults so every consumer observes one coherent
+	// policy even when the user omits the entire repo_graph section.
+	repo_graph: RepoGraphConfigSchema.prefault({}),
 
 	// Evidence configuration
 	evidence: EvidenceConfigSchema.optional(),
@@ -2756,6 +3212,12 @@ export const PluginConfigSchema = z.object({
 
 	// Swarm memory substrate. Disabled by default so existing flows are unchanged.
 	memory: MemoryConfigSchema.optional(),
+
+	// Learning subsystem — real-time admission, PRM persistence, dedup sweep (issue #1821)
+	learning: LearningConfigSchema.optional(),
+
+	// Consensus mining over completed run evidence (issue #1821)
+	consensus: ConsensusConfigSchema.optional(),
 
 	// Curator configuration (phase context consolidation and drift detection)
 	curator: CuratorConfigSchema.optional(),
@@ -3059,6 +3521,12 @@ export const PluginConfigSchema = z.object({
 	// When false (default), the tools are absent from the architect tool surface.
 	// Tools remain exported/registered/TOOL_NAMES-listed; only the architect map is gated.
 	skills: SkillsConfigSchema.optional(),
+
+	// Governed skill optimizer (issue #1822 — SkillOpt 3/7). Disabled by
+	// default. `/swarm skill-opt run` requires `enabled: true` to execute a
+	// round; all other subcommands are proposal-only/read-only by default.
+	// Consulted only inside command handlers, never on the init path.
+	skill_opt: SkillOptConfigSchema.optional(),
 });
 
 export type PluginConfig = z.infer<typeof PluginConfigSchema>;

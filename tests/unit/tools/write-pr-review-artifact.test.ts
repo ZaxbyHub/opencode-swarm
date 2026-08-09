@@ -27,10 +27,14 @@ const REVISION_DIGEST = 'revision-1';
 
 let directory = '';
 const originalResolveCurrentGitHead = _test_exports.resolveCurrentGitHead;
+const originalResolveCurrentGitHeadAsync =
+	_test_exports.resolveCurrentGitHeadAsync;
 const originalResolveRevisionDigest =
 	_test_exports.resolvePrWorkflowRevisionDigest;
 const originalResolveIsWorkingTreeClean =
 	_test_exports.resolveIsWorkingTreeClean;
+const originalResolveIsWorkingTreeCleanAsync =
+	_test_exports.resolveIsWorkingTreeCleanAsync;
 
 beforeEach(() => {
 	directory = realpathSync(
@@ -40,13 +44,20 @@ beforeEach(() => {
 	_test_exports.resolveCurrentGitHead = () => HEAD_SHA;
 	_test_exports.resolvePrWorkflowRevisionDigest = () => REVISION_DIGEST;
 	_test_exports.resolveIsWorkingTreeClean = () => true;
+	_test_exports.resolveCurrentGitHeadAsync = async (dir) =>
+		_test_exports.resolveCurrentGitHead(dir);
+	_test_exports.resolveIsWorkingTreeCleanAsync = async (dir) =>
+		_test_exports.resolveIsWorkingTreeClean(dir);
 });
 
 afterEach(async () => {
 	_test_exports.resetTrackedStateCache();
 	_test_exports.resolveCurrentGitHead = originalResolveCurrentGitHead;
+	_test_exports.resolveCurrentGitHeadAsync = originalResolveCurrentGitHeadAsync;
 	_test_exports.resolvePrWorkflowRevisionDigest = originalResolveRevisionDigest;
 	_test_exports.resolveIsWorkingTreeClean = originalResolveIsWorkingTreeClean;
+	_test_exports.resolveIsWorkingTreeCleanAsync =
+		originalResolveIsWorkingTreeCleanAsync;
 	await fs.rm(directory, { recursive: true, force: true });
 });
 
@@ -99,7 +110,7 @@ async function persistPrReviewBatch(
 						? '[CRITIC] | C-001 | UPHELD | HIGH | reason | no change'
 						: mode === 'swarm-pr-feedback:verification'
 							? `[FEEDBACK-VERIFIED] | ${lane.workflowLane} | CONFIRMED | evidence`
-							: `[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence\nC-${index} | ${lane.workflowLane} | HIGH | correctness | file.ts:1 | claim | evidence | impact | HIGH`);
+							: `${mode === 'swarm-pr-review:micro' ? '[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence' : '[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence'}\nC-${index} | ${lane.workflowLane} | HIGH | correctness | file.ts:1 | claim | evidence | impact | HIGH`);
 		const stored = storeLaneOutput(directory, {
 			batchId,
 			laneId: lane.laneId,
@@ -154,7 +165,7 @@ async function establishPrReviewPrerequisites(): Promise<void> {
 			'swarm-pr-review:micro',
 			[{ laneId, workflowLane }],
 			{
-				textOverride: `[CLEAN] | ${workflowLane} | exact reviewed diff | no finding after focused invariant review`,
+				textOverride: `[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence\n[CLEAN] | ${workflowLane} | exact reviewed diff | no finding after focused invariant review`,
 			},
 		);
 	}
@@ -166,6 +177,7 @@ async function establishPrReviewPrerequisites(): Promise<void> {
 		triggerRows.push({
 			trigger_id: workflowLane,
 			result: 'MATCHED',
+			evidence: `Test fixture evidence for ${workflowLane}`,
 			source_batch_id: `micro-${index}`,
 			source_lane_id: `micro-lane-${index}`,
 		});

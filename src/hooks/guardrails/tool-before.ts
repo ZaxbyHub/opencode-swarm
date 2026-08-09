@@ -31,7 +31,12 @@ import {
 	beginInvocation,
 	ensureAgentSession,
 	getActiveWindow,
+	getModifiedFilesForTask,
 	type InvocationWindow,
+	recordModifiedFileForTask,
+	recordReviewerScopeGenerationFile,
+	resetModifiedFilesForTask,
+	resolveSessionWorkspaceDirectory,
 	swarmState,
 } from '../../state';
 import { telemetry } from '../../telemetry.js';
@@ -46,7 +51,10 @@ import {
 	resolveWriteTargets,
 	type WriteAnalysis,
 } from '../shell-write-detect';
-import { resolveWriteTargets as resolveFileWriteTargets } from '../write-target-resolver';
+import {
+	PATCH_PAYLOAD_KEYS,
+	resolveWriteTargets as resolveFileWriteTargets,
+} from '../write-target-resolver';
 import { appendGuardrailDecision } from './audit-log';
 import {
 	DC_SAFE_TARGETS,
@@ -58,6 +66,10 @@ import {
 	dcUnwrapWrappers,
 	dcValidateTargets,
 } from './destructive-command';
+import {
+	enforceExecutionStallDenial,
+	observeExecutionStallToolCall,
+} from './execution-stall';
 import type { AgentRule } from './file-authority';
 import {
 	checkFileAuthorityWithRules,
@@ -65,6 +77,7 @@ import {
 	hashArgs,
 } from './file-authority';
 import { enforceSpecDriftGate } from './index';
+import { enforceInternalsGuard } from './internals-guard';
 import {
 	assertNonTransientCircuitAllowsTool,
 	forgetToolExecution,
@@ -104,6 +117,14 @@ export interface ToolBeforeContext {
 	 * trusted roots when exempting `git worktree remove --force` (issue #1708).
 	 */
 	worktreeBaseDirOverrides?: string[];
+	/** Hold exact child-write provenance until the matching after-hook succeeds. */
+	rememberReviewerScopeWrite?: (input: {
+		callID: string;
+		parentSessionID: string;
+		taskId: string;
+		coderCallID: string;
+		file: string;
+	}) => void;
 }
 
 // Shared helper functions extracted to helpers.ts (task 1.4 / FR-005)
@@ -137,30 +158,88 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		authorityConfig,
 		consecutiveNoToolTurns,
 		worktreeBaseDirOverrides,
+		rememberReviewerScopeWrite,
 	} = ctx;
+
+	/**
+	 * Issue #2063 B4/B5 — containment options, computed once per handler.
+	 *
+	 * These read the TOP-LEVEL `cfg` and deliberately do NOT go through
+	 * `resolveGuardrailsConfig`. That is safe, and verified rather than assumed:
+	 * `GuardrailsProfileSchema` (schema.ts:916-924) is a CLOSED seven-key budget
+	 * subset — `max_tool_calls`, `max_duration_minutes`, `max_repetitions`,
+	 * `max_consecutive_errors`, `warning_threshold`, `idle_timeout_minutes`,
+	 * `max_transient_retries`. Zod strips unknown keys, so a user writing
+	 * `guardrails.profiles.architect.execution_stall_stop_calls` (or a per-agent
+	 * `enabled`) has it dropped at PARSE time and
+	 * `resolveGuardrailsConfig(cfg, 'architect').execution_stall_stop_calls`
+	 * provably equals `cfg.execution_stall_stop_calls`. Resolving per agent here
+	 * would therefore be machinery that can never change an answer.
+	 *
+	 * `tests/unit/hooks/execution-stall-wiring.test.ts` pins that assumption: if
+	 * `GuardrailsProfileSchema` ever gains `enabled` or an `execution_stall_*`
+	 * key, that test fails and points here.
+	 *
+	 * `enabled` is threaded explicitly even though `createGuardrailsHooks`
+	 * already short-circuits to no-op handlers when guardrails are disabled: the
+	 * two containment modules are also callable directly (and are unit-tested
+	 * that way), so each must own its own inert path rather than relying on a
+	 * caller-side guard. Same contract as `GateDenialOptions.enabled` (B1).
+	 */
+	const executionStallOptions = {
+		enabled: cfg.enabled,
+		warnCalls: cfg.execution_stall_warn_calls,
+		stopCalls: cfg.execution_stall_stop_calls,
+		episodeMinutes: cfg.execution_stall_episode_minutes,
+	};
+	const internalsGuardOptions = { enabled: cfg.enabled };
+
+	/**
+	 * Issue #2002: `effectiveDirectory` is the plugin-root `ctx.directory`,
+	 * captured once when this handler is built and shared by EVERY session.
+	 * Worktree-isolated coder children execute in a lane root and have their
+	 * scope binding derived and published against that lane, so resolving their
+	 * binding, containment, sandbox grants, or lstat checks against the project
+	 * root is always wrong.
+	 *
+	 * Use this for SESSION-SCOPED decisions ("where is this agent actually
+	 * working"). Do NOT use it for PROJECT-SCOPED governance checks — the
+	 * plan/spec write guards and the spec-drift gate protect *the project's*
+	 * artifacts and must keep `effectiveDirectory`.
+	 *
+	 * Fail-closed: a session with no recorded lane root resolves to
+	 * `effectiveDirectory`, i.e. the pre-#2002 behaviour.
+	 */
+	const sessionWorkspaceDirectory = (sessionID: string): string =>
+		resolveSessionWorkspaceDirectory(sessionID, effectiveDirectory);
 
 	/**
 	 * Resolves only an active, child-owned, Task-correlated v2 binding.
 	 * Legacy v1 disk/session entries are intentionally not authorization sources.
 	 */
-	function resolveDeclaredScope(sessionID: string): string[] | null {
+	function resolveActiveScopeBinding(sessionID: string) {
 		const session = swarmState.agentSessions.get(sessionID);
 		const taskId = session?.currentTaskId ?? null;
+		const bindingDirectory = sessionWorkspaceDirectory(sessionID);
 		const binding = taskId
 			? resolveAuthorizedScopeBinding({
-					directory: effectiveDirectory,
+					directory: bindingDirectory,
 					taskId,
 					activeSessionId: sessionID,
 				})
 			: resolveAuthorizedScopeBindingForSession({
-					directory: effectiveDirectory,
+					directory: bindingDirectory,
 					activeSessionId: sessionID,
 				});
 		if (!taskId && binding && session) {
 			session.currentTaskId = binding.taskId;
 			session.declaredCoderScope = [...binding.files];
 		}
-		return binding?.files ?? null;
+		return binding;
+	}
+
+	function resolveDeclaredScope(sessionID: string): string[] | null {
+		return resolveActiveScopeBinding(sessionID)?.files ?? null;
 	}
 
 	/**
@@ -229,7 +308,9 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			typeof toolArgs?.command === 'string' ? toolArgs.command.trim() : '';
 		if (!rawCommand) return;
 
-		const cwd = effectiveDirectory;
+		// Issue #2002: a lane coder's shell command runs with the lane as cwd, so
+		// destructive-target containment must be evaluated against the lane root.
+		const cwd = sessionWorkspaceDirectory(sessionID);
 
 		// --- Normalize the top-level command (NFKC + evasion collapse) ---
 		const command = dcNormalizeCommand(rawCommand);
@@ -870,6 +951,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 	 */
 	function checkShellWriteScope(
 		sessionID: string,
+		callID: string,
 		tool: string,
 		args: unknown,
 		commandOverride?: string,
@@ -973,10 +1055,14 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		const noScopeLenient =
 			!isArch && !isCoder && (!declaredScope || declaredScope.length === 0);
 
+		// Issue #2002: a lane coder's shell runs with the lane as cwd and its scope
+		// is lane-rooted. Every path decision in this loop must share that base.
+		const shellDirectory = sessionWorkspaceDirectory(sessionID);
+
 		const resolvedWrites = resolveWriteTargets(
 			detectionCommand,
 			analysis.writes,
-			effectiveDirectory,
+			shellDirectory,
 		);
 
 		for (const write of resolvedWrites) {
@@ -1017,8 +1103,8 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			if (universalDenyPrefixes.length > 0) {
 				const normalizedPath = path
 					.relative(
-						path.resolve(effectiveDirectory),
-						path.resolve(effectiveDirectory, write.resolvedPath),
+						path.resolve(shellDirectory),
+						path.resolve(shellDirectory, write.resolvedPath),
 					)
 					.replace(/\\/g, '/');
 				for (const prefix of universalDenyPrefixes) {
@@ -1037,7 +1123,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			const authorityCheck = checkFileAuthorityWithRules(
 				shellWriteAgent,
 				write.resolvedPath,
-				effectiveDirectory,
+				shellDirectory,
 				precomputedAuthorityRules,
 				{ declaredScope },
 			);
@@ -1050,15 +1136,41 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			if (
 				declaredScope &&
 				declaredScope.length > 0 &&
-				!isInDeclaredScope(
-					write.resolvedPath,
-					declaredScope,
-					effectiveDirectory,
-				)
+				!isInDeclaredScope(write.resolvedPath, declaredScope, shellDirectory)
 			) {
 				throw new Error(
 					`bash write detected outside declared scope: ${write.resolvedPath} (original: ${write.original.path})`,
 				);
+			}
+			if (isCoder) {
+				const writeBinding = resolveActiveScopeBinding(sessionID);
+				if (
+					writeBinding?.activation === 'active' &&
+					writeBinding.parentOwnerSessionId &&
+					writeBinding.parentCallId
+				) {
+					const relativeTarget = path
+						.relative(
+							path.resolve(shellDirectory),
+							path.resolve(shellDirectory, write.resolvedPath),
+						)
+						.replace(/\\/g, '/');
+					const routed = recordReviewerScopeGenerationFile({
+						parentSessionID: writeBinding.parentOwnerSessionId,
+						taskId: writeBinding.taskId,
+						coderCallID: writeBinding.parentCallId,
+						file: relativeTarget,
+					});
+					if (routed) {
+						rememberReviewerScopeWrite?.({
+							callID,
+							parentSessionID: writeBinding.parentOwnerSessionId,
+							taskId: writeBinding.taskId,
+							coderCallID: writeBinding.parentCallId,
+							file: relativeTarget,
+						});
+					}
+				}
 			}
 		}
 	}
@@ -1110,7 +1222,14 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		const declaredPaths = resolveDeclaredScope(sessionID);
 		if (!declaredPaths || declaredPaths.length === 0) return;
 
-		const resolved = resolveScopePaths(declaredPaths, effectiveDirectory);
+		// Issue #2002: these become the filesystem paths the OS sandbox is allowed
+		// to touch. For a lane command they must be lane-rooted, or the sandbox is
+		// granted project-root paths the command will never write and denied the
+		// lane paths it actually needs.
+		const resolved = resolveScopePaths(
+			declaredPaths,
+			sessionWorkspaceDirectory(sessionID),
+		);
 		if (resolved.paths.length === 0) return;
 
 		try {
@@ -1319,7 +1438,12 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			if (coderDeleg.isDelegation && coderDeleg.targetAgent === 'coder') {
 				const coderSession = swarmState.agentSessions.get(sessionID);
 				if (coderSession) {
-					coderSession.modifiedFilesThisCoderTask = [];
+					const taskId =
+						coderSession.currentTaskId ??
+						coderSession.lastCoderDelegationTaskId ??
+						`${sessionID}:unknown`;
+					coderSession.currentTaskId = taskId;
+					resetModifiedFilesForTask(coderSession, taskId);
 					if (!coderSession.revisionLimitHit) {
 						coderSession.coderRevisions = 0;
 					}
@@ -1381,7 +1505,9 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			const loopSession = swarmState.agentSessions.get(sessionID);
 			if (loopSession) {
 				const loopPattern = loopResult.pattern;
-				const modifiedFiles = loopSession.modifiedFilesThisCoderTask ?? [];
+				const modifiedFiles = loopSession.currentTaskId
+					? getModifiedFilesForTask(loopSession, loopSession.currentTaskId)
+					: [];
 				const accomplishmentSummary =
 					modifiedFiles.length > 0
 						? `Modified ${modifiedFiles.length} file(s): ${modifiedFiles.slice(0, 3).join(', ')}${modifiedFiles.length > 3 ? '...' : ''}`
@@ -1460,7 +1586,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		const toolArgs = args as Record<string, unknown> | undefined;
 		if (!toolArgs) return [];
 		const out: string[] = [];
-		for (const key of ['patch', 'input', 'diff'] as const) {
+		for (const key of PATCH_PAYLOAD_KEYS) {
 			const v = toolArgs[key];
 			if (typeof v === 'string' && v.length > 0) out.push(v);
 		}
@@ -1526,12 +1652,33 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			}
 		}
 
-		const patchText = (toolArgs?.input ??
-			toolArgs?.patch ??
-			toolArgs?.diff ??
-			(Array.isArray(toolArgs?.cmd) ? toolArgs.cmd[1] : undefined)) as
-			| string
-			| undefined;
+		// Resolve the patch payload field, preserving the historical precedence
+		// (`input` > `patch` > `diff`) before the additional aliases added for
+		// issue #2059, and falling back to `cmd[1]` last. `PATCH_PAYLOAD_KEYS`
+		// is the single source of truth for the recognized field set, but its
+		// declared order is not the legacy precedence, so we check the legacy
+		// three explicitly first.
+		let patchText: string | undefined;
+		for (const key of ['input', 'patch', 'diff'] as const) {
+			const v = toolArgs?.[key];
+			if (typeof v === 'string') {
+				patchText = v;
+				break;
+			}
+		}
+		if (patchText === undefined) {
+			for (const key of PATCH_PAYLOAD_KEYS) {
+				if (key === 'patch' || key === 'input' || key === 'diff') continue;
+				const v = toolArgs?.[key];
+				if (typeof v === 'string') {
+					patchText = v;
+					break;
+				}
+			}
+		}
+		if (patchText === undefined && Array.isArray(toolArgs?.cmd)) {
+			patchText = toolArgs.cmd[1] as string | undefined;
+		}
 		if (typeof patchText !== 'string') return Array.from(paths);
 		if (patchText.length > 1_000_000) {
 			throw new Error(
@@ -1870,6 +2017,33 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		// v6.35.1: Runaway output detector — reset counter on any tool call
 		consecutiveNoToolTurns.set(input.sessionID, 0);
 
+		// Issue #2063 B5 — execution-stall OBSERVATION. Deliberately the first
+		// thing after the runaway-counter reset and BEFORE every guardrails POLICY
+		// gate that can throw (`handleLoopDetection`'s CIRCUIT BREAKER,
+		// `handleTestSuiteBlocking`, interpreter gating, file authority, …).
+		//
+		// It is NOT the first throwable thing in this handler:
+		// `assertNonTransientCircuitAllowsTool` runs above it. That is deliberate
+		// and harmless — a non-transient hard stop is a terminal invocation-owned
+		// failure that only a verified new invocation/session can clear
+		// (AGENTS.md invariant 9), so there is no retry loop left for an episode
+		// to contain, and arming one would be bookkeeping for a session that is
+		// already stopped.
+		//
+		// The spec requires an episode to arm on an ATTEMPTED dispatch even when
+		// a later gate denies it — the motivating loop is exactly a `Task` that
+		// `delegation-gate` rejects — so the observation cannot sit behind any
+		// throw. It never throws itself; the matching DENIAL is a separate call
+		// in the handler tail so budget/circuit accounting still runs first
+		// (same argument as C3's PRM-hard-stop placement).
+		observeExecutionStallToolCall({
+			sessionID: input.sessionID,
+			tool: input.tool,
+			args: output.args,
+			callID: input.callID,
+			options: executionStallOptions,
+		});
+
 		// v6.12: Self-coding detection — MUST be first, before any exemptions
 		handleDelegatedWriteTracking(input.sessionID, input.tool, output.args);
 
@@ -1990,6 +2164,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		try {
 			checkShellWriteScope(
 				input.sessionID,
+				input.callID,
 				input.tool,
 				output.args,
 				rawShellCommand,
@@ -2003,9 +2178,10 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					: '';
 			const resolvedScopeText =
 				declaredScope != null && declaredScope.length > 0
-					? resolveScopePaths(declaredScope, effectiveDirectory).paths.join(
-							', ',
-						)
+					? resolveScopePaths(
+							declaredScope,
+							sessionWorkspaceDirectory(input.sessionID),
+						).paths.join(', ')
 					: '';
 			const pathMatch = /[^\s]+/.exec(
 				err instanceof Error ? err.message : String(err),
@@ -2106,12 +2282,19 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		// Issue #1875: resolve the complete write set once, before any authority,
 		// lstat, universal-deny, scope, or tracking decision. Non-architect write
 		// shapes that cannot be proven are blocked rather than becoming bypasses.
+		// Issue #2002: every path decision for this write — target resolution,
+		// lstat, universal deny, authority, containment, audit — must share ONE
+		// base, and for a worktree-isolated coder that base is the lane root, not
+		// the plugin-root `ctx.directory` this handler was built with. A partial
+		// re-root would produce a split base and silent false-allows/false-denies.
+		const writeDirectory = sessionWorkspaceDirectory(input.sessionID);
+
 		let resolvedFileTargets: string[] | null = null;
 		if (isWriteTool(input.tool)) {
 			const resolution = resolveFileWriteTargets(
 				normalizeToolName(input.tool),
 				output.args,
-				{ directory: effectiveDirectory },
+				{ directory: writeDirectory },
 			);
 			if (resolution.status === 'unverifiable') {
 				// Universal deny, containment, and lstat checks cannot be proven when
@@ -2135,7 +2318,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				// lstat: block writes through symlinks
 				const lstatBlock = checkWriteTargetForSymlink(
 					targetPath,
-					effectiveDirectory,
+					writeDirectory,
 				);
 				if (lstatBlock) {
 					void appendGuardrailDecision(
@@ -2166,8 +2349,8 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				if (universalDenyPrefixes.length > 0) {
 					const normalizedPath = path
 						.relative(
-							path.resolve(effectiveDirectory),
-							path.resolve(effectiveDirectory, targetPath),
+							path.resolve(writeDirectory),
+							path.resolve(writeDirectory, targetPath),
 						)
 						.replace(/\\/g, '/');
 					for (const prefix of universalDenyPrefixes) {
@@ -2201,12 +2384,13 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				}
 
 				// Per-agent authority check
-				const writeDeclaredScope = resolveDeclaredScope(input.sessionID);
+				const writeBinding = resolveActiveScopeBinding(input.sessionID);
+				const writeDeclaredScope = writeBinding?.files ?? null;
 
 				const authorityCheck = checkFileAuthorityWithRules(
 					agentName,
 					targetPath,
-					effectiveDirectory,
+					writeDirectory,
 					precomputedAuthorityRules,
 					{ declaredScope: writeDeclaredScope },
 				);
@@ -2254,14 +2438,14 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				if (
 					isConfigFilePath(
 						targetPath,
-						effectiveDirectory,
+						writeDirectory,
 						authorityConfig?.verifier_config_paths,
 					)
 				) {
 					const normalizedPath = path
 						.relative(
-							path.resolve(effectiveDirectory),
-							path.resolve(effectiveDirectory, targetPath),
+							path.resolve(writeDirectory),
+							path.resolve(writeDirectory, targetPath),
 						)
 						.replace(/\\/g, '/');
 					const logEntry: Record<string, unknown> = {
@@ -2278,45 +2462,141 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					warn('Config file write attempt', logEntry);
 				}
 
+				if (trackingSession?.delegationActive) {
+					const taskId =
+						trackingSession.currentTaskId ??
+						trackingSession.lastCoderDelegationTaskId ??
+						`${input.sessionID}:unknown`;
+					trackingSession.currentTaskId = taskId;
+					recordModifiedFileForTask(trackingSession, taskId, targetPath);
+				}
 				if (
-					trackingSession?.delegationActive &&
-					!trackingSession.modifiedFilesThisCoderTask.includes(targetPath)
+					writeBinding?.activation === 'active' &&
+					writeBinding.parentOwnerSessionId &&
+					writeBinding.parentCallId
 				) {
-					trackingSession.modifiedFilesThisCoderTask.push(targetPath);
+					const relativeTarget = path
+						.relative(
+							path.resolve(writeDirectory),
+							path.resolve(writeDirectory, targetPath),
+						)
+						.replace(/\\/g, '/');
+					const routed = recordReviewerScopeGenerationFile({
+						parentSessionID: writeBinding.parentOwnerSessionId,
+						taskId: writeBinding.taskId,
+						coderCallID: writeBinding.parentCallId,
+						file: relativeTarget,
+					});
+					if (routed) {
+						rememberReviewerScopeWrite?.({
+							callID: input.callID,
+							parentSessionID: writeBinding.parentOwnerSessionId,
+							taskId: writeBinding.taskId,
+							coderCallID: writeBinding.parentCallId,
+							file: relativeTarget,
+						});
+					}
 				}
 			}
 		}
 
-		// v6.29: PRM hard stop
+		// Resolve session — null when the session is architect-exempt (no window).
+		const resolved = resolvedSessionWindow;
+
+		// (1) Budget / circuit-breaker accounting. Issue #2063 C3: this now runs
+		// BEFORE the PRM hard stop. Previously the hard stop threw first, so the
+		// call that tripped it — and every call after it until the flag was
+		// consumed — never reached `trackToolCall`/`checkGateLimits`. A session
+		// wedged behind a hard stop therefore stopped accruing tool-call, duration
+		// and repetition budget, i.e. the circuit breaker went blind at exactly
+		// the moment containment mattered most.
+		if (resolved) {
+			const { agentConfig, window } = resolved;
+			const { repetitionCount, elapsedMinutes } = trackToolCall(
+				window,
+				input.tool,
+				output.args,
+			);
+
+			await checkGateLimits({
+				sessionID: input.sessionID,
+				window,
+				agentConfig,
+				elapsedMinutes,
+				repetitionCount,
+			});
+		}
+
+		// (2) v6.29 / issue #2063 C2+C3: PRM hard stop — DENY once.
+		//
+		// Deliberately OUTSIDE the `if (resolved)` block and ABOVE the
+		// `if (!resolved) return` below. Simply moving these lines beneath the
+		// early return would fail-open the hard stop for every null-window
+		// (architect-exempt) session — the containment would silently not exist
+		// for the sessions that have no budget window. The conditional-block
+		// shape above is the only arrangement with both properties: accounting
+		// runs when there IS a window, and the denial runs regardless.
+		//
+		// One-shot: the token is cleared before throwing, so the NEXT tool call
+		// proceeds. The stop is a directive to report progress, not a permanent
+		// wedge — and `EscalationTracker` re-arms both tokens on any further
+		// detection at count >= 3, so a session that ignores it is stopped again.
 		{
 			const prmSession = swarmState.agentSessions.get(input.sessionID);
 			if (prmSession?.prmHardStopPending) {
+				prmSession.prmHardStopPending = false;
+				// Delivery observability is the `prm_hard_stop_delivered` event
+				// emitted just below — it already carries sessionID, pattern, level,
+				// and count. A `prmHardStopDeliveredAt` session field used to be
+				// stamped here too; it had no readers and was not serialized, so it
+				// was removed (reviewer round-4 REQUIRED 3).
+				const patternType =
+					prmSession.prmLastPatternDetected?.pattern ?? 'unknown';
+				telemetry.prmHardStopDelivered(
+					input.sessionID,
+					patternType,
+					prmSession.prmEscalationLevel,
+					prmSession.prmPatternCounts?.get(patternType) ?? 0,
+				);
 				throw new Error(
 					'🛑 PRM HARD STOP: Pattern escalation maximum reached. Stop tool calls and return progress summary.',
 				);
 			}
 		}
 
-		// Resolve session — returns null if architect-exempt
-		const resolved = resolvedSessionWindow;
-		if (!resolved) return;
-
-		const { agentConfig, window } = resolved;
-		const { repetitionCount, elapsedMinutes } = trackToolCall(
-			window,
-			input.tool,
-			output.args,
-		);
-
-		await checkGateLimits({
+		// (2b) Issue #2063 B4 — plugin-internals read guard, and B5 — execution
+		// stall hard rung.
+		//
+		// Both sit here for the SAME reason the PRM hard stop above does: the
+		// architect session is precisely the `resolved === null` case
+		// (`resolveSessionAndWindow` returns null for ORCHESTRATOR_NAME), so a
+		// denial placed below the early return would silently not exist for the
+		// only session B5 targets, and would miss every architect read for B4.
+		// Placing them AFTER block (1) keeps the C3 property that a denied call
+		// still accrues tool-call/duration/repetition budget — the circuit
+		// breaker must not go blind at the moment containment matters most.
+		//
+		// B4 runs first: it is unconditional and its guidance is the more
+		// specific of the two ("the plugin's files are never the fix"), so when
+		// a stalled architect starts spelunking the installed package it reads
+		// the message that names the actual mistake.
+		enforceInternalsGuard({
 			sessionID: input.sessionID,
-			window,
-			agentConfig,
-			elapsedMinutes,
-			repetitionCount,
+			tool: input.tool,
+			args: output.args,
+			directory: effectiveDirectory,
+			options: internalsGuardOptions,
+		});
+		enforceExecutionStallDenial({
+			sessionID: input.sessionID,
+			tool: input.tool,
+			options: executionStallOptions,
 		});
 
-		// v6.12: Store input args for delegation detection in toolAfter
+		// (3) Nothing below this point applies to a windowless session.
+		if (!resolved) return;
+
+		// (4) v6.12: Store input args for delegation detection in toolAfter
 		setStoredInputArgs(input.callID, output.args);
 	};
 }

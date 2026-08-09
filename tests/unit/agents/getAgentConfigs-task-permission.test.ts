@@ -1,10 +1,31 @@
-import { describe, expect, test } from 'bun:test';
-import { getAgentConfigs } from '../../../src/agents';
+import { afterEach, describe, expect, test } from 'bun:test';
+import {
+	type AgentDefinition,
+	_internals as agentInternals,
+	getAgentConfigs,
+} from '../../../src/agents';
 import type { PluginConfig } from '../../../src/config';
+import {
+	hostEvaluate,
+	hostFromConfig,
+} from '../../helpers/opencode-permission-model';
 
 // Helper to create minimal valid PluginConfig
 const minimalConfig = (partial: Partial<PluginConfig> = {}): PluginConfig =>
 	partial as PluginConfig;
+
+// Helper to build a synthetic AgentDefinition with an arbitrary `config`
+// shape (including malformed `permission` values for defensive tests).
+// Casts through `unknown` because callers intentionally construct shapes
+// the real `AgentConfig` type would reject (e.g. a non-object permission).
+const fakeAgent = (
+	name: string,
+	config: Record<string, unknown>,
+): AgentDefinition => ({
+	name,
+	description: `synthetic agent: ${name}`,
+	config: config as unknown as AgentDefinition['config'],
+});
 
 describe('getAgentConfigs - Architect Task Permission Hotfix', () => {
 	describe('architect agents get task:allow permission', () => {
@@ -164,5 +185,146 @@ describe('getAgentConfigs - Architect Task Permission Hotfix', () => {
 			expect(configs['coder'].tools?.swarm_command).toBe(true);
 			expect(configs['cloud_coder'].tools?.swarm_command).toBe(true);
 		});
+	});
+});
+
+/**
+ * Regression tests for the primary-agent permission clobber (src/agents/index.ts).
+ *
+ * `getAgentConfigs` used to REPLACE `sdkConfig.permission` wholesale when
+ * granting `task: 'allow'` to a primary agent:
+ *   `(sdkConfig.permission as Record<string, 'allow'>) = { task: 'allow' };`
+ * Any permission entries the agent's own definition already declared (edit,
+ * bash, webfetch, external_directory — including nested per-pattern
+ * objects) were silently discarded, and the cast defeated type checking.
+ *
+ * These tests inject a synthetic agent set via the `_internals.createAgents`
+ * DI seam (bun:test `mock.module` leaks across files in this repo's shared
+ * test-runner process — see AGENTS.md invariant 7) so we can construct an
+ * `AgentDefinition` whose `config.permission` is pre-populated, which no
+ * production `create*Agent` factory currently does.
+ */
+describe('getAgentConfigs - primary agent permission merge (not replace)', () => {
+	const realCreateAgents = agentInternals.createAgents;
+
+	afterEach(() => {
+		agentInternals.createAgents = realCreateAgents;
+	});
+
+	// Disabling tool_filter short-circuits getAgentConfigs before it reaches
+	// AGENT_TOOL_MAP lookups, which have no entry for these synthetic names.
+	const noToolFilterConfig = () =>
+		minimalConfig({ tool_filter: { enabled: false } });
+
+	test('primary agent keeps its own permission entries and gains task:allow', () => {
+		agentInternals.createAgents = () => [
+			fakeAgent('architect', {
+				permission: {
+					edit: 'deny',
+					external_directory: { 'C:/foo/*': 'allow' },
+				},
+			}),
+			fakeAgent('coder', { permission: { edit: 'deny' } }),
+		];
+
+		const configs = getAgentConfigs(noToolFilterConfig());
+
+		expect(configs.architect.mode).toBe('primary');
+		expect(configs.architect.permission).toEqual({
+			edit: 'deny',
+			external_directory: { 'C:/foo/*': 'allow' },
+			task: 'allow',
+		});
+	});
+
+	test('regression (LOW-5): task:allow is emitted LAST, not left in its old slot', () => {
+		// POSITION IS PRECEDENCE: the host evaluates permission with `findLast`
+		// over Object.entries order and wildcard-matches the permission NAME, so
+		// `'*'` also matches `task`. A duplicate key in an object literal keeps
+		// its FIRST position, so `{ ...{task:'deny','*':'deny'}, task:'allow' }`
+		// leaves `task` at index 0 and `findLast` picks `'*': 'deny'` — the
+		// primary agent silently loses delegation.
+		//
+		// `toEqual` does NOT compare key order, which is why this asserts
+		// Object.keys directly.
+		agentInternals.createAgents = () => [
+			fakeAgent('architect', {
+				permission: { task: 'deny', '*': 'deny' },
+			}),
+		];
+
+		const configs = getAgentConfigs(noToolFilterConfig());
+		const permission = configs.architect.permission as Record<string, string>;
+		const keys = Object.keys(permission);
+
+		expect(keys[keys.length - 1]).toBe('task');
+		expect(permission.task).toBe('allow');
+		// The wildcard the agent declared is preserved, just outranked for `task`.
+		expect(keys.indexOf('*')).toBeLessThan(keys.indexOf('task'));
+		expect(permission['*']).toBe('deny');
+	});
+
+	test('regression (LOW-5): a primary agent with a wildcard deny can still delegate', () => {
+		// The end-to-end property the key order exists to protect, evaluated
+		// through a faithful model of the host's own rule evaluation.
+		agentInternals.createAgents = () => [
+			fakeAgent('architect', {
+				permission: { task: 'deny', '*': 'deny' },
+			}),
+		];
+
+		const configs = getAgentConfigs(noToolFilterConfig());
+		const rules = hostFromConfig(
+			configs.architect.permission as Record<string, unknown>,
+		);
+		expect(hostEvaluate('task', '*', rules).action).toBe('allow');
+	});
+
+	test('task:allow wins when the agent definition also declares task', () => {
+		agentInternals.createAgents = () => [
+			fakeAgent('architect', { permission: { task: 'deny' } }),
+		];
+
+		const configs = getAgentConfigs(noToolFilterConfig());
+
+		expect(configs.architect.mode).toBe('primary');
+		expect(configs.architect.permission).toEqual({ task: 'allow' });
+	});
+
+	test('primary agent with no permission block gets exactly {task: allow}', () => {
+		agentInternals.createAgents = () => [fakeAgent('architect', {})];
+
+		const configs = getAgentConfigs(noToolFilterConfig());
+
+		expect(configs.architect.mode).toBe('primary');
+		expect(configs.architect.permission).toEqual({ task: 'allow' });
+	});
+
+	test("a subagent's own permission block is left untouched", () => {
+		agentInternals.createAgents = () => [
+			fakeAgent('architect', {}),
+			fakeAgent('coder', {
+				permission: { edit: 'deny', bash: { 'git *': 'allow' } },
+			}),
+		];
+
+		const configs = getAgentConfigs(noToolFilterConfig());
+
+		expect(configs.coder.mode).toBe('subagent');
+		expect(configs.coder.permission).toEqual({
+			edit: 'deny',
+			bash: { 'git *': 'allow' },
+		});
+	});
+
+	test('a non-object permission primitive does not throw and yields {task: allow}', () => {
+		agentInternals.createAgents = () => [
+			fakeAgent('architect', { permission: 'not-an-object' }),
+		];
+
+		expect(() => getAgentConfigs(noToolFilterConfig())).not.toThrow();
+		const configs = getAgentConfigs(noToolFilterConfig());
+		expect(configs.architect.mode).toBe('primary');
+		expect(configs.architect.permission).toEqual({ task: 'allow' });
 	});
 });

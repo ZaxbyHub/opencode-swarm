@@ -21,10 +21,22 @@
  * (it neither credits nor blocks) and current behavior is preserved. Operators
  * raise the thresholds to activate application-evidence gating.
  *
+ * Actionability floor (#1821 A3): the `actionability_floor` gate refuses to
+ * promote a plain-prose lesson — a promotion candidate must carry at least one
+ * machine-checkable predicate AND at least one scope tag. It is ON by default
+ * (`knowledge.promotion_require_actionable`, schema default `true`); the
+ * hand-written `KnowledgeConfig` interface declares the field OPTIONAL, so this
+ * module reads it as `?? true`.
+ *
  * This module performs NO I/O and holds NO module-level mutable state
  * (invariant 8). It is NOT imported on the plugin-init path (invariant 1).
+ * `validateActionability` is imported from the LEAF module
+ * `./actionability-predicate.js` rather than from `./knowledge-validator.js`,
+ * which imports `node:fs/promises` + `proper-lockfile` — importing the
+ * validator here would have made the no-I/O statement above false.
  */
 
+import { validateActionability } from './actionability-predicate.js';
 import type {
 	KnowledgeConfig,
 	PromotionEvidenceRecord,
@@ -119,6 +131,30 @@ export function evaluatePromotionPolicy(
 		detail: notFloorDemoted
 			? 'entry not confidence-floor-demoted'
 			: 'entry is confidence-floor-demoted; recover above the floor before promoting',
+	});
+
+	// Gate: actionability floor (#1821 A3). A promotion candidate must carry at
+	// least one machine-checkable predicate (required/forbidden actions,
+	// verification checks, or a verification predicate) AND at least one scope
+	// tag (applies_to_tools / applies_to_agents). Plain-prose observations stay
+	// in the swarm tier instead of becoming cross-project knowledge.
+	//
+	// Default ON. `promotion_require_actionable` is `.default(true)` on the Zod
+	// schema but OPTIONAL on the hand-written `KnowledgeConfig` interface that
+	// the hooks layer imports, so it is read as `?? true` — an operator who has
+	// never heard of the flag still gets the floor.
+	const requireActionable = config.promotion_require_actionable ?? true;
+	const actionability = validateActionability(entry);
+	gates.push({
+		name: 'actionability_floor',
+		passed: !requireActionable || actionability.actionable,
+		detail: !requireActionable
+			? 'promotion_require_actionable=false — actionability floor not enforced'
+			: actionability.actionable
+				? 'entry carries a machine-checkable predicate and a scope tag'
+				: `not actionable (${actionability.reason}): a promotion candidate needs a predicate ` +
+					`(required_actions / forbidden_actions / verification_checks / verification_predicate) ` +
+					`AND a scope (applies_to_tools / applies_to_agents)`,
 	});
 
 	const eligible = gates.every((g) => g.passed);

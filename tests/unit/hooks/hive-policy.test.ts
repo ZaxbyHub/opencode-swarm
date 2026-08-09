@@ -11,7 +11,7 @@
  *    not qualify; only validated terminal receipts count.
  */
 
-import { describe, expect, it } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import {
 	describeEligibilityRoute,
 	evaluatePromotionPolicy,
@@ -24,7 +24,23 @@ import type {
 	PromotionEvidenceRecord,
 	SwarmKnowledgeEntry,
 } from '../../../src/hooks/knowledge-types.js';
+import { freezeClock, type Restore } from '../../helpers/test-clock.js';
+import { ACTIONABLE_FIELDS } from './hive-fixtures.js';
 
+// Route 3 is age-based (`Date.now() - created_at` vs `auto_promote_days`), so a
+// live clock drifts each fixture's route. Pinned past the fixtures (#1782 c1).
+const FROZEN_NOW = Date.parse('2026-07-01T00:00:00.000Z');
+let restoreClock: Restore | null = null;
+beforeEach(() => {
+	restoreClock = freezeClock({ fixedNow: FROZEN_NOW });
+});
+afterEach(() => restoreClock?.());
+
+/**
+ * A policy-evaluation fixture. Carries `ACTIONABLE_FIELDS` so it clears the
+ * default-ON #1821 A3 `actionability_floor` gate; tests that target that gate
+ * override the fields explicitly (see the actionability_floor describe block).
+ */
 function makeEntry(
 	overrides: Partial<SwarmKnowledgeEntry> = {},
 ): SwarmKnowledgeEntry {
@@ -47,6 +63,7 @@ function makeEntry(
 		created_at: '2026-01-01T00:00:00Z',
 		updated_at: '2026-01-01T00:00:00Z',
 		project_name: 'p',
+		...ACTIONABLE_FIELDS,
 		...overrides,
 	};
 }
@@ -230,11 +247,12 @@ describe('evaluatePromotionPolicy — gates + diagnostics (#1847)', () => {
 	});
 
 	it('diagnostics explain each failed condition', () => {
+		// created_at === the frozen now, so route 3 (age) fails by 0-day age.
 		const entry = makeEntry({
 			hive_eligible: false,
 			tags: [],
 			confirmed_by: [],
-			created_at: new Date().toISOString(),
+			created_at: new Date(FROZEN_NOW).toISOString(),
 		});
 		const decision = evaluatePromotionPolicy({
 			entry,
@@ -347,6 +365,89 @@ describe('evaluatePromotionPolicy — conservative application evidence (#1847)'
 	});
 });
 
+describe('evaluatePromotionPolicy — actionability_floor gate (#1821 A3)', () => {
+	/** An otherwise-eligible entry stripped of every predicate/scope field. */
+	function proseOnly(): SwarmKnowledgeEntry {
+		return makeEntry({
+			tags: ['hive-fast-track'],
+			applies_to_tools: undefined,
+			applies_to_agents: undefined,
+			required_actions: undefined,
+			forbidden_actions: undefined,
+			verification_checks: undefined,
+			verification_predicate: undefined,
+		});
+	}
+
+	it('a prose-only entry fails the gate and is NOT eligible (default ON)', () => {
+		// baseConfig does not declare promotion_require_actionable at all, so this
+		// also pins the `?? true` read of the OPTIONAL interface field: an
+		// operator who never heard of the flag still gets the floor.
+		expect(baseConfig.promotion_require_actionable).toBeUndefined();
+		const decision = evaluatePromotionPolicy({
+			entry: proseOnly(),
+			config: baseConfig,
+			evidence: [],
+		});
+		expect(decision.eligible).toBe(false);
+		// The fast-track tag satisfies eligibility_route ONLY — it is a separate
+		// gate and never bypasses the floor.
+		expect(
+			decision.gates.find((g) => g.name === 'eligibility_route')?.passed,
+		).toBe(true);
+		const gate = decision.gates.find((g) => g.name === 'actionability_floor');
+		expect(gate?.passed).toBe(false);
+		expect(gate?.detail).toContain('missing_predicate_and_scope');
+		expect(failedGateNames(decision)).toContain('actionability_floor');
+		expect(decision.reason).toContain('actionability_floor');
+	});
+
+	it('a predicate with no scope tag fails with missing_scope', () => {
+		const decision = evaluatePromotionPolicy({
+			entry: makeEntry({
+				tags: ['hive-fast-track'],
+				applies_to_tools: undefined,
+				applies_to_agents: undefined,
+				required_actions: ['run the type checker'],
+			}),
+			config: baseConfig,
+			evidence: [],
+		});
+		expect(decision.eligible).toBe(false);
+		expect(
+			decision.gates.find((g) => g.name === 'actionability_floor')?.detail,
+		).toContain('missing_scope');
+	});
+
+	it('a scope tag with no predicate fails with missing_predicate', () => {
+		const decision = evaluatePromotionPolicy({
+			entry: makeEntry({
+				tags: ['hive-fast-track'],
+				applies_to_tools: ['write'],
+				required_actions: undefined,
+			}),
+			config: baseConfig,
+			evidence: [],
+		});
+		expect(decision.eligible).toBe(false);
+		expect(
+			decision.gates.find((g) => g.name === 'actionability_floor')?.detail,
+		).toContain('missing_predicate');
+	});
+
+	it('promotion_require_actionable=false restores legacy behavior', () => {
+		const decision = evaluatePromotionPolicy({
+			entry: proseOnly(),
+			config: { ...baseConfig, promotion_require_actionable: false },
+			evidence: [],
+		});
+		expect(decision.eligible).toBe(true);
+		const gate = decision.gates.find((g) => g.name === 'actionability_floor');
+		expect(gate?.passed).toBe(true);
+		expect(gate?.detail).toContain('not enforced');
+	});
+});
+
 describe('describeEligibilityRoute — preserved 3 routes (#1847 M1)', () => {
 	it('route 1: hive_eligible + 3 distinct phases', () => {
 		const r = describeEligibilityRoute(
@@ -386,7 +487,7 @@ describe('describeEligibilityRoute — preserved 3 routes (#1847 M1)', () => {
 	});
 
 	it('route 3: age', () => {
-		const old = new Date(Date.now() - 100 * 86_400_000).toISOString();
+		const old = new Date(FROZEN_NOW - 100 * 86_400_000).toISOString();
 		const r = describeEligibilityRoute(
 			makeEntry({ hive_eligible: false, tags: [], created_at: old }),
 			90,

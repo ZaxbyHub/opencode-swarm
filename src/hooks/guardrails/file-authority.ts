@@ -21,25 +21,57 @@ import {
 } from '../../config/schema';
 import { classifyFile, type FileZone } from '../../context/zone-classifier';
 import { log, warn } from '../../utils';
-import { bunHash } from '../../utils/bun-compat';
+import {
+	boundedBunHash,
+	coarseObjectDiscriminator,
+} from '../../utils/arg-hash';
+import { stableCanonicalStringify } from '../../utils/stable-stringify';
 
 /**
- * Hashes tool arguments for repetition detection
+ * Hashes tool arguments for repetition detection.
+ *
+ * Uses `stableCanonicalStringify` (recursive key-sorting at every depth, no
+ * nested-key filtering) so that two args with the same values hash equally
+ * regardless of key insertion order — including nested objects. This matters
+ * for repetition detection on nested-args tools (e.g. `todowrite` with a
+ * `todos` array): the previous `JSON.stringify(args, sortedKeys)` replacer
+ * silently dropped nested keys, collapsing distinct todo contents to the same
+ * hash.
+ *
+ * When `stableCanonicalStringify` throws (cyclic refs, BigInt quirks), a
+ * constant fallback would make distinct-but-unserializable args collide,
+ * producing false-positive consecutive-equality detection (#2060-class
+ * bug). `coarseObjectDiscriminator` mixes in a shallow structural summary
+ * instead, so identical unserializable args still collide (true positive
+ * preserved) while distinct ones no longer do.
+ *
+ * Hash input is bounded by `boundedBunHash` (`src/utils/arg-hash.ts`), which
+ * hashes a length-prefixed head+tail SAMPLE rather than a bare prefix. That
+ * matters here more than anywhere: this hash drives the consecutive-repetition
+ * circuit breaker in `tool-before.ts`, which THROWS. Under a bare-prefix cap,
+ * ten consecutive large writes sharing a 64 KB boilerplate header but with
+ * differing appended bodies would have hashed identically and tripped it.
+ *
+ * Both this bounding and the fallback discriminator are shared verbatim with
+ * `hooks/adversarial-detector.ts:hashArgsForSpiral`; keep them in the shared
+ * module rather than re-inlining a copy here.
+ *
  * @param args Tool arguments to hash
- * @returns Numeric hash (0 if hashing fails)
+ * @returns Numeric hash (0 for non-objects; a discriminated fallback hash if
+ *   stable stringification fails)
  */
 export function hashArgs(args: unknown): number {
 	try {
 		if (typeof args !== 'object' || args === null) {
 			return 0;
 		}
-		const sortedKeys = Object.keys(args as Record<string, unknown>).sort();
-		return Number(bunHash(JSON.stringify(args, sortedKeys)));
+		const stable = stableCanonicalStringify(args);
+		return Number(boundedBunHash(stable));
 	} catch (error) {
 		log('[Guardrails] hashArgs failed', {
 			error: error instanceof Error ? error.message : String(error),
 		});
-		return 0;
+		return Number(boundedBunHash(coarseObjectDiscriminator(args)));
 	}
 }
 
@@ -516,6 +548,60 @@ function isInDeclaredScope(
 }
 
 /**
+ * Maximum number of entries rendered per allow-pattern category in a Step 8
+ * block reason. Generous so every built-in rule shows in full (the largest is
+ * test_engineer's 15 ordinary globs at the time of writing); only pathological
+ * custom configs truncate, with an accurate omitted-count tail. Keeps the
+ * surfaced WRITE BLOCKED message bounded.
+ */
+const MAX_ALLOWED_HINT_ENTRIES = 20;
+
+/**
+ * Formats an agent's effective positive allow patterns into a hint appended to a
+ * Step 8 allowedPrefix block reason, so a blocked agent can self-correct (rename
+ * / redirect the file) instead of guessing.
+ *
+ * SECURITY: discloses ONLY the current agent's OWN positive permissions — never
+ * blocked* rules, universal deny prefixes, or any other agent's policy. Allow
+ * patterns are necessary-but-not-sufficient: blocked zones/prefixes/globs and
+ * universal deny paths still take precedence, which the trailing caveat states
+ * so a looping agent does not assume every listed pattern will succeed.
+ *
+ * Categories are rendered separately (exact paths, prefixes, globs, and
+ * case-sensitive globs) because they have distinct matching semantics — in
+ * particular `allowedCaseSensitiveGlobs` must not be merged into the
+ * case-insensitive globs list (e.g. `*Test.java` is case-sensitive; merging it
+ * could mislead an agent into a wrong-case filename).
+ */
+function formatAllowedHints(rules: AgentRule): string {
+	const fmt = (items: string[] | undefined): string => {
+		if (!items || items.length === 0) return '(none)';
+		if (items.length <= MAX_ALLOWED_HINT_ENTRIES) return items.join(', ');
+		const omitted = items.length - MAX_ALLOWED_HINT_ENTRIES;
+		return `${items.slice(0, MAX_ALLOWED_HINT_ENTRIES).join(', ')}, … (+${omitted} more)`;
+	};
+	const parts: string[] = [];
+	// Order mirrors the DENY-first evaluation so the hint reads like the rule model.
+	if (rules.allowedExact && rules.allowedExact.length > 0) {
+		parts.push(`Allowed exact paths: ${fmt(rules.allowedExact)}`);
+	}
+	parts.push(`Allowed prefixes: ${fmt(rules.allowedPrefix)}`);
+	parts.push(`Allowed globs: ${fmt(rules.allowedGlobs)}`);
+	if (
+		rules.allowedCaseSensitiveGlobs &&
+		rules.allowedCaseSensitiveGlobs.length > 0
+	) {
+		parts.push(
+			`Allowed case-sensitive globs: ${fmt(rules.allowedCaseSensitiveGlobs)}`,
+		);
+	}
+	parts.push(
+		'Block rules (blocked zones/prefixes/globs/exact) and universal deny paths still apply.',
+	);
+	return parts.join(' ');
+}
+
+/**
  * Checks file path authority against a pre-computed rules map.
  * Implements DENY-first evaluation order:
  * 1. readOnly - blocks all writes
@@ -733,7 +819,7 @@ export function checkFileAuthorityWithRules(
 			if (!isAllowed) {
 				return {
 					allowed: false,
-					reason: `Path ${normalizedPath} not in allowed list for ${normalizedAgent}`,
+					reason: `Path ${normalizedPath} not in allowed list for ${normalizedAgent}. ${formatAllowedHints(rules)}`,
 				};
 			}
 		} else if (
@@ -743,7 +829,7 @@ export function checkFileAuthorityWithRules(
 			// Empty allowedPrefix means nothing is allowed by prefix
 			return {
 				allowed: false,
-				reason: `Path ${normalizedPath} not in allowed list for ${normalizedAgent}`,
+				reason: `Path ${normalizedPath} not in allowed list for ${normalizedAgent}. ${formatAllowedHints(rules)}`,
 			};
 		}
 	}

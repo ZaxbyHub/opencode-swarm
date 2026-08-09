@@ -19,24 +19,54 @@ import * as fs from 'node:fs';
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 import {
+	scanDelegationFallbacksForRecovery,
+	scanDelegationsForRecovery,
+} from '../background/pending-delegations.js';
+import { SWARM_WORKTREE_DIR_NAME } from '../config/constants';
+import {
 	isLocked,
 	listActiveLocks,
 	tryAcquireLock,
 } from '../parallel/file-locks';
 import { swarmState } from '../state';
+import {
+	listRecoveryRecords,
+	recoveryReadErrored,
+} from '../turbo/lean/recovery';
 import { log } from '../utils/index.js';
 import { withTimeout } from '../utils/timeout.js';
 import { removeWorktree } from '../worktree/core';
 import { cleanupOrphanedBranches } from '../worktree/merge';
+import { scanWorktreeMergeFailuresForRecovery } from './delegation-gate/worktree-merge-status';
+import { scanBackgroundWorktreeOwnershipTagsForRecovery } from './delegation-gate/worktree-ownership-tag';
+import {
+	scanWorktreeProvisioningOwnersForRecovery,
+	WORKTREE_LIFECYCLE_LOCK_FILE,
+} from './delegation-gate/worktree-provisioning-owner';
 
 const INIT_ORPHAN_RECOVERY_TIMEOUT_MS = 10_000;
+const OWNERSHIP_TAG_SCAN_TIMEOUT_MS = 2_000;
+
+type OwnershipTagSessionScan =
+	| { status: 'ok'; sessionIds: string[] }
+	| { status: 'uncertain'; reason: string };
+
+async function listOwnershipTagSessionIds(
+	directory: string,
+): Promise<OwnershipTagSessionScan> {
+	const scan = await scanBackgroundWorktreeOwnershipTagsForRecovery(directory);
+	if (scan.status === 'uncertain') return scan;
+	return {
+		status: 'ok',
+		sessionIds: [...new Set(scan.owners.map((owner) => owner.sessionId))],
+	};
+}
 
 /**
  * Lock file path for the init orphan recovery advisory lock.
  * advisory-only — signals that another process may be actively using the repo.
  */
-export const ORPHAN_RECOVERY_LOCK_FILE =
-	'.swarm/locks/init-orphan-recovery.lock';
+export const ORPHAN_RECOVERY_LOCK_FILE = WORKTREE_LIFECYCLE_LOCK_FILE;
 
 /**
  * DI seam for orphaned worktree removal operations and cross-process lock checking.
@@ -49,12 +79,22 @@ export const _internals: {
 	isLocked: typeof isLocked;
 	listActiveLocks: typeof listActiveLocks;
 	tryAcquireLock: typeof tryAcquireLock;
+	listOwnershipTagSessionIds: typeof listOwnershipTagSessionIds;
+	scanDelegationsForRecovery: typeof scanDelegationsForRecovery;
+	scanDelegationFallbacksForRecovery: typeof scanDelegationFallbacksForRecovery;
+	scanWorktreeMergeFailuresForRecovery: typeof scanWorktreeMergeFailuresForRecovery;
+	scanWorktreeProvisioningOwnersForRecovery: typeof scanWorktreeProvisioningOwnersForRecovery;
 } = {
 	rmSync: fs.rmSync,
 	removeWorktree,
 	isLocked,
 	listActiveLocks,
 	tryAcquireLock,
+	listOwnershipTagSessionIds,
+	scanDelegationsForRecovery,
+	scanDelegationFallbacksForRecovery,
+	scanWorktreeMergeFailuresForRecovery,
+	scanWorktreeProvisioningOwnersForRecovery,
 };
 
 export interface InitOrphanRecoveryResult {
@@ -82,6 +122,10 @@ async function writeAdvisoryFile(
 	cleanupResult: {
 		removed: string[];
 		skipped: string[];
+		/** #1657: lane branches skipped due to an unresolved recovery record. */
+		skippedRecoveryBranches?: string[];
+		/** #1657: set when recovery-dir read errored and all deletions were skipped. */
+		recoveryReadError?: boolean;
 		errors: Array<{ branch: string; error: string }>;
 	},
 	warnings: string[],
@@ -103,6 +147,20 @@ async function writeAdvisoryFile(
 			removedWorktrees,
 			prunedWorktrees: attempted,
 		},
+		// #1657: surface preserved recovery branches + fail-safe state so a
+		// human reading the advisory knows why cleanup skipped them.
+		...(cleanupResult.skippedRecoveryBranches &&
+		cleanupResult.skippedRecoveryBranches.length > 0
+			? {
+					preservedRecoveryBranches: cleanupResult.skippedRecoveryBranches,
+				}
+			: {}),
+		...(cleanupResult.recoveryReadError
+			? {
+					recoveryReadError: true,
+					note: 'skipped all lane-branch deletions this pass because .swarm/recovery/ was unreadable (fail-safe)',
+				}
+			: {}),
 	};
 	try {
 		await fsPromises.mkdir(path.dirname(advisoryPath), { recursive: true });
@@ -129,11 +187,12 @@ async function writeAdvisoryFile(
 async function enumerateOrphanedWorktreeDirs(
 	directory: string,
 	activeSessionIds: string[],
+	protectedWorktreePaths: ReadonlySet<string> = new Set(),
 ): Promise<string[]> {
 	const orphanedDirs: string[] = [];
 	const worktreeRoot = path.resolve(
 		path.dirname(directory),
-		'.swarm-worktrees',
+		SWARM_WORKTREE_DIR_NAME,
 	);
 
 	let entries: fs.Dirent[];
@@ -164,6 +223,7 @@ async function enumerateOrphanedWorktreeDirs(
 		for (const laneEntry of sessionEntries) {
 			if (!laneEntry.isDirectory()) continue;
 			const worktreePath = path.join(worktreeRoot, sessionId, laneEntry.name);
+			if (protectedWorktreePaths.has(path.resolve(worktreePath))) continue;
 			orphanedDirs.push(worktreePath);
 		}
 	}
@@ -217,6 +277,19 @@ async function removeOrphanedWorktreeDir(
 	worktreePath: string,
 	projectRoot: string,
 ): Promise<string | undefined> {
+	// A registered linked worktree always carries a `.git` pointer. Directories
+	// without one are stale filesystem remnants, so remove them directly instead
+	// of spawning one failing `git worktree remove` process per directory. This
+	// keeps recovery bounded when a crash leaves many partial lane directories.
+	if (!fs.existsSync(path.join(worktreePath, '.git'))) {
+		try {
+			_internals.rmSync(worktreePath, { recursive: true, force: true });
+			return undefined;
+		} catch (error) {
+			return error instanceof Error ? error.message : String(error);
+		}
+	}
+
 	// Try git worktree remove first
 	const removeResult = await _internals.removeWorktree(
 		worktreePath,
@@ -239,6 +312,36 @@ async function removeOrphanedWorktreeDir(
 	}
 }
 
+async function crossProcessAdvisoryResult(
+	directory: string,
+	warning: string,
+): Promise<InitOrphanRecoveryResult> {
+	const result: InitOrphanRecoveryResult = {
+		attempted: true,
+		crossProcessLockHeld: true,
+		warnings: [warning],
+		orphanedBranches: [],
+		removedWorktrees: [],
+		prunedWorktrees: false,
+	};
+	await writeAdvisoryFile(
+		directory,
+		{ removed: [], skipped: [], errors: [] },
+		result.warnings,
+		false,
+		[],
+	);
+	return result;
+}
+
+function worktreePathKey(worktreePath: string, directory: string): string {
+	const absolutePath = path.isAbsolute(worktreePath)
+		? worktreePath
+		: path.resolve(directory, worktreePath);
+	const normalized = path.normalize(absolutePath);
+	return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+}
+
 /**
  * Runs bounded orphan cleanup at plugin init time.
  *
@@ -258,113 +361,223 @@ export async function runInitOrphanRecovery(
 	directory: string,
 ): Promise<InitOrphanRecoveryResult> {
 	let result: InitOrphanRecoveryResult;
-
-	// Get active session IDs from swarmState so their branches are protected during cleanup
-	const activeSessionIds = Array.from(swarmState.agentSessions.keys());
+	let recoveryLockRelease: (() => Promise<void>) | undefined;
 
 	try {
-		// Cross-process safety check: if another process holds the advisory lock,
-		// skip destructive cleanup and report detected orphans as warnings.
-		// This prevents a second opencode process from deleting the first process's
-		// active worktrees/branches (final council finding, Phase 1 hardening).
+		// Acquire the shared lifecycle exclusion before reading any owner store.
+		// Standard worktree provisioning publishes its provisional owner while
+		// holding this same lock, so no worktree can appear after our snapshot
+		// without either its marker being visible or waiting for cleanup to finish.
 		const lockHeld = await isCrossProcessLockHeld(directory);
-
 		if (lockHeld) {
-			// Another process is active — enumerate orphans for advisory reporting only
-			const orphanedWorktreeDirs = await withTimeout(
-				enumerateOrphanedWorktreeDirs(directory, activeSessionIds),
-				INIT_ORPHAN_RECOVERY_TIMEOUT_MS,
-				new Error(
-					`runInitOrphanRecovery exceeded ${INIT_ORPHAN_RECOVERY_TIMEOUT_MS}ms budget during worktree enumeration; continuing without orphan reclamation`,
-				),
-			);
-
-			const orphanedBranches: string[] = [];
-
-			result = {
-				attempted: true,
-				crossProcessLockHeld: true,
-				warnings: [
-					`Cross-process lock held — another opencode process may be active. ` +
-						`Skipping destructive cleanup to preserve its worktrees/branches. ` +
-						`Detected ${orphanedWorktreeDirs.length} orphaned worktree dir(s). ` +
-						`Run '/swarm status' or check '.swarm/locks/' to identify active processes.`,
-				],
-				orphanedBranches,
-				removedWorktrees: [],
-				prunedWorktrees: false,
-			};
-
-			// Write advisory file (best-effort)
-			await writeAdvisoryFile(
+			return crossProcessAdvisoryResult(
 				directory,
-				{ removed: [], skipped: orphanedBranches, errors: [] },
-				result.warnings,
-				false,
-				[],
+				'Cross-process lock held — another opencode process may be active. ' +
+					'Skipping destructive cleanup to preserve its worktrees/branches. ' +
+					"Run '/swarm status' or check '.swarm/locks/' to identify active processes.",
 			);
-
-			return result;
 		}
-
-		// Acquire the advisory lock to prevent TOCTOU: another process could start
-		// between our isCrossProcessLockHeld check and the destructive operations below.
 		const lockAcquireResult = await _internals.tryAcquireLock(
 			directory,
 			ORPHAN_RECOVERY_LOCK_FILE,
 			'init-orphan-recovery',
 			'init',
 		);
-
 		if (!lockAcquireResult.acquired) {
-			// Lost the race — another process acquired the lock between our check and here.
-			// Treat same as lockHeld: advisory mode only, skip destructive cleanup.
-			const orphanedWorktreeDirs = await withTimeout(
-				enumerateOrphanedWorktreeDirs(directory, activeSessionIds),
-				INIT_ORPHAN_RECOVERY_TIMEOUT_MS,
-				new Error(
-					`runInitOrphanRecovery exceeded ${INIT_ORPHAN_RECOVERY_TIMEOUT_MS}ms budget during worktree enumeration; continuing without orphan reclamation`,
-				),
-			);
-
-			result = {
-				attempted: true,
-				crossProcessLockHeld: true,
-				warnings: [
-					`Cross-process lock acquired by another process during init — ` +
-						`skipping destructive cleanup to preserve its worktrees/branches. ` +
-						`Detected ${orphanedWorktreeDirs.length} orphaned worktree dir(s).`,
-				],
-				orphanedBranches: [],
-				removedWorktrees: [],
-				prunedWorktrees: false,
-			};
-
-			await writeAdvisoryFile(
+			return crossProcessAdvisoryResult(
 				directory,
-				{ removed: [], skipped: [], errors: [] },
-				result.warnings,
-				false,
-				[],
+				'Cross-process lifecycle lock was acquired by another process during init; ' +
+					'skipping destructive cleanup to preserve its worktrees/branches.',
 			);
+		}
+		recoveryLockRelease = lockAcquireResult.lock._release;
 
-			return result;
+		// Durable background owners survive process restart, when swarmState is
+		// empty. Protect their exact worktree coordinates from orphan cleanup.
+		const activeSessionIds = Array.from(swarmState.agentSessions.keys());
+		const provisioningOwnerScan = await withTimeout(
+			// Best-effort: the scan is synchronous (uses fs.*Sync) so the
+			// withTimeout cannot interrupt a stuck call. File-size bounds
+			// (MAX_PROVISIONING_OWNERS, etc.) provide the real protection;
+			// the timeout adds observability for the init-budget invariant.
+			Promise.resolve(
+				_internals.scanWorktreeProvisioningOwnersForRecovery(directory),
+			),
+			INIT_ORPHAN_RECOVERY_TIMEOUT_MS,
+			new Error(
+				'worktree provisioning ownership scan exceeded its bounded init budget',
+			),
+		);
+		if (provisioningOwnerScan.status === 'uncertain') {
+			throw new Error(
+				`worktree provisioning ownership state is uncertain; destructive orphan cleanup skipped: ${provisioningOwnerScan.reason}`,
+			);
+		}
+		for (const owner of provisioningOwnerScan.owners) {
+			if (!activeSessionIds.includes(owner.worktreeSessionId)) {
+				activeSessionIds.push(owner.worktreeSessionId);
+			}
+			if (!activeSessionIds.includes(owner.parentSessionId)) {
+				activeSessionIds.push(owner.parentSessionId);
+			}
+		}
+		const ownershipTagScan = await withTimeout(
+			_internals.listOwnershipTagSessionIds(directory),
+			OWNERSHIP_TAG_SCAN_TIMEOUT_MS,
+			new Error(
+				'background ownership tag scan exceeded its bounded init budget',
+			),
+		);
+		if (ownershipTagScan.status === 'uncertain') {
+			throw new Error(
+				`background ownership tag state is uncertain; destructive orphan cleanup skipped: ${ownershipTagScan.reason}`,
+			);
+		}
+		for (const sessionId of ownershipTagScan.sessionIds) {
+			if (!activeSessionIds.includes(sessionId))
+				activeSessionIds.push(sessionId);
+		}
+		// Scan fallback before primary. Promotion appends the primary record before
+		// deleting its fallback, so this ordering cannot observe the owner absent
+		// from both stores during a concurrent promotion.
+		const fallbackOwnerScan = await withTimeout(
+			_internals.scanDelegationFallbacksForRecovery(directory),
+			INIT_ORPHAN_RECOVERY_TIMEOUT_MS,
+			new Error(
+				'background delegation fallback ownership scan exceeded its bounded init budget',
+			),
+		);
+		if (fallbackOwnerScan.status === 'uncertain') {
+			throw new Error(
+				`background fallback ownership state is uncertain; destructive orphan cleanup skipped: ${fallbackOwnerScan.reason}`,
+			);
+		}
+		const primaryOwnerScan = await withTimeout(
+			// Best-effort: synchronous scan (fs.*Sync), timeout provides
+			// observability rather than interrupt capability.
+			Promise.resolve(_internals.scanDelegationsForRecovery(directory)),
+			INIT_ORPHAN_RECOVERY_TIMEOUT_MS,
+			new Error(
+				'background primary ownership scan exceeded its bounded init budget',
+			),
+		);
+		if (primaryOwnerScan.status === 'uncertain') {
+			throw new Error(
+				`background primary ownership state is uncertain; destructive orphan cleanup skipped: ${primaryOwnerScan.reason}`,
+			);
+		}
+		const isUnsettledWorktreeOwner = (
+			record: (typeof primaryOwnerScan.owners)[number],
+		): boolean =>
+			Boolean(record.worktree) &&
+			!(
+				record.coderSettlement?.state === 'settled' &&
+				record.coderSettlement.outcome?.kind === 'standard-worktree' &&
+				(record.coderSettlement.outcome.result === 'merged' ||
+					record.coderSettlement.outcome.result === 'unchanged')
+			);
+		const durableWorktreeOwners = primaryOwnerScan.owners.filter(
+			isUnsettledWorktreeOwner,
+		);
+		const mergeOwnerScan = await withTimeout(
+			// Best-effort: synchronous scan (fs.*Sync), timeout provides
+			// observability rather than interrupt capability.
+			Promise.resolve(
+				_internals.scanWorktreeMergeFailuresForRecovery(directory),
+			),
+			INIT_ORPHAN_RECOVERY_TIMEOUT_MS,
+			new Error(
+				'worktree merge ownership scan exceeded its bounded init budget',
+			),
+		);
+		if (mergeOwnerScan.status === 'uncertain') {
+			throw new Error(
+				`worktree merge ownership state is uncertain; destructive orphan cleanup skipped: ${mergeOwnerScan.reason}`,
+			);
+		}
+		const allDurableOwners = [
+			...durableWorktreeOwners,
+			...fallbackOwnerScan.owners
+				.map((artifact) => artifact.record)
+				.filter(isUnsettledWorktreeOwner),
+		];
+		const preservedMergeFailures = mergeOwnerScan.failures
+			.map(([, failure]) => failure)
+			.filter((failure) => typeof failure.worktreePath === 'string');
+		const protectedWorktreePaths = new Set(
+			[
+				...allDurableOwners.map((record) => record.worktree?.worktreePath),
+				...preservedMergeFailures.map((failure) => failure.worktreePath),
+			]
+				.filter((value): value is string => typeof value === 'string')
+				.map((value) => path.resolve(value)),
+		);
+		for (const owner of allDurableOwners) {
+			const worktreeSessionId = owner.worktree?.worktreeSessionId;
+			if (worktreeSessionId && !activeSessionIds.includes(worktreeSessionId)) {
+				activeSessionIds.push(worktreeSessionId);
+			}
+			if (!activeSessionIds.includes(owner.parentSessionId)) {
+				activeSessionIds.push(owner.parentSessionId);
+			}
+		}
+		for (const failure of preservedMergeFailures) {
+			const branch = failure.branch;
+			const segments = branch?.split('/') ?? [];
+			const worktreeSessionId =
+				segments[0] === 'swarm' && segments.length >= 4
+					? segments[2]
+					: segments[0] === 'swarm-lane' && segments.length >= 3
+						? segments[1]
+						: undefined;
+			if (worktreeSessionId && !activeSessionIds.includes(worktreeSessionId)) {
+				activeSessionIds.push(worktreeSessionId);
+			}
 		}
 
-		try {
-			// Step 1: Enumerate and remove orphaned worktree directories
-			const orphanedWorktreeDirs = await withTimeout(
-				enumerateOrphanedWorktreeDirs(directory, activeSessionIds),
-				INIT_ORPHAN_RECOVERY_TIMEOUT_MS,
-				new Error(
-					`runInitOrphanRecovery exceeded ${INIT_ORPHAN_RECOVERY_TIMEOUT_MS}ms budget during worktree enumeration; continuing without orphan reclamation`,
-				),
+		// Step 1: Enumerate and remove orphaned worktree directories
+		const orphanedWorktreeDirs = await withTimeout(
+			enumerateOrphanedWorktreeDirs(
+				directory,
+				activeSessionIds,
+				protectedWorktreePaths,
+			),
+			INIT_ORPHAN_RECOVERY_TIMEOUT_MS,
+			new Error(
+				`runInitOrphanRecovery exceeded ${INIT_ORPHAN_RECOVERY_TIMEOUT_MS}ms budget during worktree enumeration; continuing without orphan reclamation`,
+			),
+		);
+
+		const removedWorktrees: string[] = [];
+		const worktreeWarnings: string[] = [];
+
+		// F-002: recovery records preserve worktree directories as well as
+		// branches. Read the valid paths before any deletion, then perform a
+		// second full-schema check. Any malformed/unreadable record makes the
+		// whole worktree cleanup pass fail safe.
+		const recoveryRecords = listRecoveryRecords(directory);
+		const recoveryReadError = recoveryReadErrored(directory);
+		const recoveryWorktreePaths = new Set(
+			recoveryRecords.map((record) =>
+				worktreePathKey(record.worktreePath, directory),
+			),
+		);
+
+		if (recoveryReadError) {
+			worktreeWarnings.push(
+				'Recovery records are unreadable or fail schema validation; skipped all orphaned worktree deletion this pass (fail-safe).',
 			);
-
-			const removedWorktrees: string[] = [];
-			const worktreeWarnings: string[] = [];
-
+		} else {
 			for (const worktreePath of orphanedWorktreeDirs) {
+				if (
+					recoveryWorktreePaths.has(worktreePathKey(worktreePath, directory))
+				) {
+					worktreeWarnings.push(
+						`Preserved recovery worktree "${worktreePath}"; an unresolved recovery record still references it.`,
+					);
+					continue;
+				}
+
 				const error = await removeOrphanedWorktreeDir(worktreePath, directory);
 				if (error) {
 					worktreeWarnings.push(
@@ -374,47 +587,43 @@ export async function runInitOrphanRecovery(
 					removedWorktrees.push(worktreePath);
 				}
 			}
-
-			// Step 2: Clean up orphaned branches (remaining after worktree removal)
-			const cleanupResult = await withTimeout(
-				cleanupOrphanedBranches(directory, activeSessionIds),
-				INIT_ORPHAN_RECOVERY_TIMEOUT_MS,
-				new Error(
-					`runInitOrphanRecovery exceeded ${INIT_ORPHAN_RECOVERY_TIMEOUT_MS}ms budget during branch cleanup; continuing without orphan reclamation`,
-				),
-			);
-
-			const branchWarnings = cleanupResult.errors.map(
-				(e) => `Could not delete orphaned branch "${e.branch}": ${e.error}`,
-			);
-
-			const allWarnings = [...worktreeWarnings, ...branchWarnings];
-
-			result = {
-				attempted: true,
-				crossProcessLockHeld: false,
-				warnings: allWarnings,
-				orphanedBranches: cleanupResult.removed, // branches actually deleted by cleanup (orphaned = no active session)
-				removedWorktrees,
-				prunedWorktrees: true, // cleanupOrphanedBranches always runs worktree prune
-			};
-
-			// Write advisory file (best-effort) so session-start can surface warnings
-			await writeAdvisoryFile(
-				directory,
-				cleanupResult,
-				allWarnings,
-				true,
-				removedWorktrees,
-			);
-		} finally {
-			// Release the advisory lock — best-effort, never throws
-			try {
-				await lockAcquireResult.lock._release?.();
-			} catch {
-				// Best-effort release; lock has a stale timeout fallback
-			}
 		}
+
+		// Step 2: Clean up orphaned branches (remaining after worktree removal)
+		const cleanupResult = await withTimeout(
+			cleanupOrphanedBranches(directory, activeSessionIds),
+			INIT_ORPHAN_RECOVERY_TIMEOUT_MS,
+			new Error(
+				`runInitOrphanRecovery exceeded ${INIT_ORPHAN_RECOVERY_TIMEOUT_MS}ms budget during branch cleanup; continuing without orphan reclamation`,
+			),
+		);
+
+		const branchWarnings = cleanupResult.errors.map(
+			(e) => `Could not delete orphaned branch "${e.branch}": ${e.error}`,
+		);
+
+		const allWarnings = [...worktreeWarnings, ...branchWarnings];
+
+		result = {
+			attempted: true,
+			crossProcessLockHeld: false,
+			warnings: allWarnings,
+			orphanedBranches: cleanupResult.removed, // branches actually deleted by cleanup (orphaned = no active session)
+			removedWorktrees,
+			// #1657 fail-safe: when recovery records are unreadable,
+			// cleanupOrphanedBranches skips ALL lane-branch deletions and
+			// does NOT run `git worktree prune`.
+			prunedWorktrees: cleanupResult.recoveryReadError !== true,
+		};
+
+		// Write advisory file (best-effort) so session-start can surface warnings
+		await writeAdvisoryFile(
+			directory,
+			cleanupResult,
+			allWarnings,
+			true,
+			removedWorktrees,
+		);
 	} catch (err: unknown) {
 		const msg = err instanceof Error ? err.message : String(err);
 		log('initOrphanRecovery timed out or failed (non-fatal)', { error: msg });
@@ -433,11 +642,17 @@ export async function runInitOrphanRecovery(
 		// On error, write advisory with empty state so session-start still gets a notification
 		await writeAdvisoryFile(
 			directory,
-			{ removed: [], skipped: [], errors: [] },
+			{ removed: [], skipped: [], skippedRecoveryBranches: [], errors: [] },
 			result.warnings,
 			false,
 			[],
 		);
+	} finally {
+		try {
+			await recoveryLockRelease?.();
+		} catch {
+			// Best-effort release; proper-lockfile has a stale timeout fallback.
+		}
 	}
 
 	return result;

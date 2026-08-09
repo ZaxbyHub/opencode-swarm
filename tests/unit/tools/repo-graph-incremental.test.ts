@@ -8,6 +8,7 @@ import * as fsSync from 'node:fs';
 import * as path from 'node:path';
 import { clearCache } from '../../../src/tools/repo-graph';
 import { _internals as builderInternals } from '../../../src/tools/repo-graph/builder';
+import { _internals as incrementalInternals } from '../../../src/tools/repo-graph/incremental';
 
 // Use dynamic import to get the real module (bypasses any mock.module from other test files)
 // This is necessary because bun:test's mock.module persists globally across tests
@@ -409,5 +410,250 @@ export const indexExport = 'hello';`,
 			expect(updatedGraph.nodes[normalizeKey(edge.source)]).toBeDefined();
 			expect(updatedGraph.nodes[normalizeKey(edge.target)]).toBeDefined();
 		}
+	});
+
+	test('normal incremental update does not bump incrementalFallbacks (A4 happy path)', async () => {
+		// Sanity that the optimistic-concurrency / replay path (defect A4) does
+		// not spuriously fire on a clean single-session update: the
+		// incrementalFallbacks diagnostics counter must stay at 0/undefined.
+		const files = {
+			'a.ts': `import { b } from './b';\nexport const a = b;\n`,
+			'b.ts': `export const b = 1;\n`,
+		};
+		for (const [name, content] of Object.entries(files)) {
+			await fsSync.promises.writeFile(path.join(tempDir, name), content);
+		}
+		const initialGraph = buildWorkspaceGraph(workspacePath);
+		await saveGraph(workspacePath, initialGraph);
+
+		await fsSync.promises.writeFile(
+			path.join(tempDir, 'b.ts'),
+			'export const b = 2;\nexport const bNew = 3;\n',
+		);
+		const updated = await updateGraphForFiles(workspacePath, [
+			path.join(tempDir, 'b.ts'),
+		]);
+		const fallbacks =
+			(updated.diagnostics?.incrementalFallbacks as number | undefined) ?? 0;
+		expect(fallbacks).toBe(0);
+		// The edit took effect (proves the incremental save path ran).
+		const bNode = updated.nodes[normalizeKey(path.join(tempDir, 'b.ts'))];
+		expect(bNode?.exports).toContain('bNew');
+	});
+});
+
+describe('updateGraphForFiles concurrent-save replay (A4)', () => {
+	let tempDir: string;
+	let workspacePath: string;
+	const realStat = incrementalInternals.stat;
+	const realParseFileImports = builderInternals.parseFileImports;
+
+	/** Normalize a path for use as a graph key (forward slashes). */
+	function normalizeKey(p: string): string {
+		return path.normalize(p).replace(/\\/g, '/');
+	}
+
+	async function real() {
+		const module = await getRealRepoGraph();
+		return {
+			buildWorkspaceGraph: module.buildWorkspaceGraph,
+			saveGraph: module.saveGraph,
+			loadGraph: module.loadGraph,
+			updateGraphForFiles: module.updateGraphForFiles,
+		};
+	}
+
+	beforeEach(async () => {
+		tempDir = await fsSync.promises.mkdtemp(
+			path.join(process.cwd(), 'incremental-a4-test-'),
+		);
+		workspacePath = path.relative(process.cwd(), tempDir);
+		await fsSync.promises.mkdir(path.join(tempDir, '.swarm'), {
+			recursive: true,
+		});
+	});
+
+	afterEach(async () => {
+		incrementalInternals.stat = realStat;
+		builderInternals.parseFileImports = realParseFileImports;
+		clearCache(workspacePath);
+		try {
+			await fsSync.promises.rm(tempDir, { recursive: true, force: true });
+		} catch {
+			/* ignore */
+		}
+	});
+
+	test('one mtime shift triggers reload+replay (no full rebuild)', async () => {
+		const m = await real();
+		await fsSync.promises.writeFile(
+			path.join(tempDir, 'a.ts'),
+			`export const a = 1;\n`,
+		);
+		await fsSync.promises.writeFile(
+			path.join(tempDir, 'b.ts'),
+			`export const b = 1;\n`,
+		);
+		const initial = m.buildWorkspaceGraph(workspacePath);
+		await m.saveGraph(workspacePath, initial);
+
+		// Override the concurrency stat so the FIRST call (the pre-save mtime
+		// check) returns a shifted mtime, simulating a concurrent writer having
+		// saved between our load and our pre-save check. Subsequent calls use
+		// the real mtime so the post-replay re-stat matches and the replay
+		// succeeds without a terminal fallback.
+		let statCall = 0;
+		const graphFile = path.join(tempDir, '.swarm', 'repo-graph.json');
+		const realFileStats = await fsSync.promises.stat(graphFile);
+		incrementalInternals.stat = async (p: string) => {
+			if (p === graphFile) {
+				statCall++;
+				// First stat (pre-save check) reports a shifted mtime.
+				if (statCall === 1) {
+					return {
+						...realFileStats,
+						mtimeMs: realFileStats.mtimeMs + 5000,
+					} as fsSync.Stats;
+				}
+			}
+			return realStat(p);
+		};
+
+		await fsSync.promises.writeFile(
+			path.join(tempDir, 'b.ts'),
+			'export const b = 2;\nexport const bNew = 3;\n',
+		);
+
+		const updated = await m.updateGraphForFiles(workspacePath, [
+			path.join(tempDir, 'b.ts'),
+		]);
+
+		// Reload+replay succeeded (no terminal full rebuild): the fallback
+		// counter must NOT have been bumped.
+		const fallbacks =
+			(updated.diagnostics?.incrementalFallbacks as number | undefined) ?? 0;
+		expect(fallbacks).toBe(0);
+		// The replayed edit took effect (proves the reload+replay path ran and
+		// saved the fresh graph).
+		const bNode = updated.nodes[normalizeKey(path.join(tempDir, 'b.ts'))];
+		expect(bNode?.exports).toContain('bNew');
+	});
+
+	test('second mtime shift during replay triggers exactly one full rebuild', async () => {
+		const m = await real();
+		await fsSync.promises.writeFile(
+			path.join(tempDir, 'a.ts'),
+			`export const a = 1;\n`,
+		);
+		const initial = m.buildWorkspaceGraph(workspacePath);
+		await m.saveGraph(workspacePath, initial);
+
+		// Make EVERY concurrency stat report a shifted mtime, so: pre-save
+		// check shifts (triggers reload+replay), then post-replay re-stat also
+		// shifts (triggers terminal full rebuild). This exercises the double-
+		// shift terminal-fallback path — bounded, never loops.
+		const graphFile = path.join(tempDir, '.swarm', 'repo-graph.json');
+		const realFileStats = await fsSync.promises.stat(graphFile);
+		incrementalInternals.stat = async (p: string) => {
+			if (p === graphFile) {
+				return {
+					...realFileStats,
+					mtimeMs: realFileStats.mtimeMs + 5000,
+				} as fsSync.Stats;
+			}
+			return realStat(p);
+		};
+
+		await fsSync.promises.writeFile(
+			path.join(tempDir, 'a.ts'),
+			'export const a = 2;\nexport const aNew = 3;\n',
+		);
+
+		const updated = await m.updateGraphForFiles(workspacePath, [
+			path.join(tempDir, 'a.ts'),
+		]);
+
+		// The terminal full rebuild fired exactly once (counter bumped by 1).
+		const fallbacks =
+			(updated.diagnostics?.incrementalFallbacks as number | undefined) ?? 0;
+		expect(fallbacks).toBe(1);
+	});
+});
+
+describe('incremental manifest-aware boundaries (A8 manifest closure)', () => {
+	let tempDir: string;
+	let workspacePath: string;
+
+	async function real() {
+		const module = await getRealRepoGraph();
+		return {
+			buildWorkspaceGraph: module.buildWorkspaceGraph,
+			saveGraph: module.saveGraph,
+			loadGraph: module.loadGraph,
+			updateGraphForFiles: module.updateGraphForFiles,
+		};
+	}
+
+	beforeEach(async () => {
+		tempDir = await fsSync.promises.mkdtemp(
+			path.join(process.cwd(), 'incremental-manifest-test-'),
+		);
+		workspacePath = path.relative(process.cwd(), tempDir);
+		await fsSync.promises.mkdir(path.join(tempDir, '.swarm'), {
+			recursive: true,
+		});
+	});
+
+	afterEach(async () => {
+		clearCache(workspacePath);
+		try {
+			await fsSync.promises.rm(tempDir, { recursive: true, force: true });
+		} catch {
+			/* ignore */
+		}
+	});
+
+	test('incremental edit preserves manifest-driven package boundary (buildManifestClosure)', async () => {
+		const m = await real();
+		// customdomain/ is NOT in the static packages|crates|apps|libs|services
+		// set, so without a manifest it would fall back to segment 0. A
+		// package.json under customdomain/ makes the boundary customdomain/users.
+		await fsSync.promises.mkdir(path.join(tempDir, 'customdomain/users'), {
+			recursive: true,
+		});
+		await fsSync.promises.writeFile(
+			path.join(tempDir, 'customdomain/package.json'),
+			'{ "name": "customdomain" }\n',
+		);
+		await fsSync.promises.writeFile(
+			path.join(tempDir, 'customdomain/users/svc.ts'),
+			'export const svc = 1;\n',
+		);
+
+		const initial = m.buildWorkspaceGraph(workspacePath);
+		await m.saveGraph(workspacePath, initial);
+
+		const svcNode = Object.values(initial.nodes).find(
+			(n) => n.moduleName === 'customdomain/users/svc.ts',
+		);
+		// The initial (manifest-aware) build classifies the boundary as
+		// customdomain/users thanks to the package.json under customdomain/.
+		expect(svcNode?.ontology?.packageBoundary).toBe('customdomain/users');
+
+		// Edit svc.ts. The incremental re-scan must re-derive the manifest
+		// closure (buildManifestClosure) and preserve the manifest-driven
+		// boundary — NOT regress to the static-rule 'customdomain'.
+		await fsSync.promises.writeFile(
+			path.join(tempDir, 'customdomain/users/svc.ts'),
+			'export const svc = 2;\nexport const svcNew = 3;\n',
+		);
+		const updated = await m.updateGraphForFiles(workspacePath, [
+			path.join(tempDir, 'customdomain/users/svc.ts'),
+		]);
+		const updatedSvc = Object.values(updated.nodes).find(
+			(n) => n.moduleName === 'customdomain/users/svc.ts',
+		);
+		expect(updatedSvc?.ontology?.packageBoundary).toBe('customdomain/users');
+		expect(updatedSvc?.exports).toContain('svcNew');
 	});
 });

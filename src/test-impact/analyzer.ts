@@ -254,7 +254,7 @@ function findTestFilesSync(cwd: string): string[] {
 		'.cache',
 	]);
 
-	function walk(dir: string, visitedInodes: Set<number>): void {
+	function walk(dir: string, visitedRealPaths: Set<string>): void {
 		let entries: fs.Dirent[];
 		try {
 			entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -262,25 +262,29 @@ function findTestFilesSync(cwd: string): string[] {
 			return; // permission denied, skip
 		}
 
-		// Check for symlink cycle using inode
-		let dirInode: number;
+		// Use the canonical path as the directory identity. Bun on Windows may
+		// report colliding non-zero inode values for distinct directories, which
+		// previously caused nested test trees to be mistaken for symlink cycles.
+		// Normalize case on Windows because its default filesystems are
+		// case-insensitive and a junction may expose the same target with
+		// different casing.
+		let realPath: string;
 		try {
-			dirInode = fs.statSync(dir).ino;
+			realPath = normalizePath(fs.realpathSync.native(dir));
 		} catch {
-			return; // can't stat, skip
+			return; // can't resolve safely, skip
 		}
-		// On Windows, ino is typically 0 for all files - skip cycle check
-		if (dirInode !== 0) {
-			if (visitedInodes.has(dirInode)) {
-				return; // symlink cycle detected, skip
-			}
-			visitedInodes.add(dirInode);
+		const directoryKey =
+			process.platform === 'win32' ? realPath.toLowerCase() : realPath;
+		if (visitedRealPaths.has(directoryKey)) {
+			return; // symlink/junction cycle detected, skip
 		}
+		visitedRealPaths.add(directoryKey);
 
 		for (const entry of entries) {
 			if (entry.isDirectory()) {
 				if (!skipDirs.has(entry.name)) {
-					walk(path.join(dir, entry.name), visitedInodes);
+					walk(path.join(dir, entry.name), visitedRealPaths);
 				}
 			} else if (entry.isFile()) {
 				const name = entry.name;
@@ -303,7 +307,7 @@ function findTestFilesSync(cwd: string): string[] {
 		}
 	}
 
-	walk(cwd, new Set<number>());
+	walk(cwd, new Set<string>());
 	return [...new Set(testFiles)];
 }
 

@@ -24,6 +24,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { ensureAgentSession, swarmState } from '../state';
+import { pushAdvisory } from '../utils/advisory-queue';
 
 export interface InitOrphanAdvisory {
 	initTimestamp: string;
@@ -153,47 +154,96 @@ export function createInitOrphanRecoveryAdvisoryHook(directory: string): {
 		// Best-effort delete after reading (await to ensure file is deleted before returning)
 		await deleteAdvisoryFile();
 
+		// Emptiness gate: say nothing when there is nothing to report.
+		//
+		// The producer writes this file unconditionally on the happy path of every
+		// plugin init — `writeAdvisoryFile(directory, cleanupResult, allWarnings,
+		// true, removedWorktrees)` (init-orphan-recovery.ts) passes `attempted` as a
+		// literal `true`, and `writeAdvisoryFile` sets `prunedWorktrees: attempted`.
+		// So on a clean repo with zero orphans the advisory carries no warnings, no
+		// errors, nothing reclaimed, and `prunedWorktrees: true` — and the block
+		// below still emitted a header plus "Stale worktree metadata pruned.": two
+		// lines of zero information at the top of the architect's system message,
+		// once per session, on every project.
+		//
+		// `prunedWorktrees` alone is deliberately NOT treated as reportable content.
+		// It is true on every successful init, so gating on it would suppress
+		// nothing. Only warnings, errors, or something actually reclaimed count.
+		// AGENTS.md invariant 10: "Do not emit diagnostic noise into chat-visible
+		// streams." Mirrors the in-repo reference implementation in
+		// council/council-advisory.ts, which returns early when its payload would
+		// be content-free.
+		//
+		// The consume/delete above still runs, so a stale file is cleared either
+		// way — this gate changes what is SAID, never what is CLEANED UP.
+		// Optional chaining throughout: `readAdvisoryFile` does a bare
+		// `JSON.parse(content) as InitOrphanAdvisory` cast with no runtime
+		// validation, so an older or hand-edited file can be missing these fields
+		// even though the type declares them required. Reading them defensively
+		// means a PARTIALLY-SHAPED advisory degrades to silence instead of
+		// throwing. The throw itself is caught — `composeHandlers` wraps every
+		// handler in `safeHook` (src/hooks/utils.ts), so it degrades to a warning
+		// rather than breaking the transform chain. What is lost is this
+		// advisory's payload, because the file was already deleted above.
+		// Scope: this covers MISSING fields. A type-confused file (e.g.
+		// `warnings: {}`) still throws, but `writeAdvisoryFile` always writes
+		// arrays, so that shape is not producible.
+		const reclaimedForGate = advisory.reclaimed;
+		const hasReportableContent =
+			(advisory.warnings?.length ?? 0) > 0 ||
+			(advisory.errors?.length ?? 0) > 0 ||
+			(reclaimedForGate?.removedBranches?.length ?? 0) > 0 ||
+			(reclaimedForGate?.removedWorktrees?.length ?? 0) > 0;
+		if (!hasReportableContent) return;
+
 		// Push warnings to pendingAdvisoryMessages
 		// ensureAgentSession is idempotent — gets existing or creates new
 		const targetSession = ensureAgentSession(sessionId);
-		targetSession.pendingAdvisoryMessages ??= [];
 
 		// Format header
 		const timestamp = advisory.initTimestamp
 			? new Date(advisory.initTimestamp).toLocaleString()
 			: 'unknown';
-		targetSession.pendingAdvisoryMessages.push(
+		pushAdvisory(
+			targetSession,
 			`[INIT ORPHAN RECOVERY] Plugin init detected the following at ${timestamp}:`,
 		);
 
 		// Add warnings
-		for (const warning of advisory.warnings) {
-			targetSession.pendingAdvisoryMessages.push(`  WARNING: ${warning}`);
+		//
+		// Every field below is read defensively for the same reason the gate above
+		// is: `readAdvisoryFile` does a bare `JSON.parse(content) as
+		// InitOrphanAdvisory` with NO runtime validation, so an older or
+		// hand-edited file can be missing fields the type declares as required.
+		// Guarding only the gate would not have been enough — an advisory that
+		// PASSES the gate on one field (say `errors`) while missing another (say
+		// `warnings`) would still throw here. The file is already deleted by this
+		// point, so the payload would be lost with it.
+		for (const warning of advisory.warnings ?? []) {
+			pushAdvisory(targetSession, `  WARNING: ${warning}`);
 		}
 
 		// Add errors (state-unreadable conditions)
-		for (const err of advisory.errors) {
-			targetSession.pendingAdvisoryMessages.push(
-				`  ERROR: ${formatError(err)}`,
-			);
+		for (const err of advisory.errors ?? []) {
+			pushAdvisory(targetSession, `  ERROR: ${formatError(err)}`);
 		}
 
 		// Add summary of what was reclaimed
 		const reclaimed = advisory.reclaimed;
-		if (reclaimed.removedBranches.length > 0) {
-			targetSession.pendingAdvisoryMessages.push(
+		if ((reclaimed?.removedBranches?.length ?? 0) > 0) {
+			pushAdvisory(
+				targetSession,
 				`  Reclaimed ${reclaimed.removedBranches.length} orphaned branch(es): ${reclaimed.removedBranches.join(', ')}`,
 			);
 		}
-		if (reclaimed.removedWorktrees && reclaimed.removedWorktrees.length > 0) {
-			targetSession.pendingAdvisoryMessages.push(
+		if (reclaimed?.removedWorktrees && reclaimed.removedWorktrees.length > 0) {
+			pushAdvisory(
+				targetSession,
 				`  Reclaimed ${reclaimed.removedWorktrees.length} orphaned worktree directory(ies): ${reclaimed.removedWorktrees.join(', ')}`,
 			);
 		}
-		if (reclaimed.prunedWorktrees) {
-			targetSession.pendingAdvisoryMessages.push(
-				'  Stale worktree metadata pruned.',
-			);
+		if (reclaimed?.prunedWorktrees) {
+			pushAdvisory(targetSession, '  Stale worktree metadata pruned.');
 		}
 	}
 

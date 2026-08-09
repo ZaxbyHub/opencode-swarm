@@ -13,7 +13,12 @@
  * `skill_improver` agent.
  */
 
+import { getSwarmAgents, resolveFallbackModel } from '../agents/index.js';
+import { stripKnownSwarmPrefix } from '../config/schema.js';
 import { swarmState } from '../state.js';
+import { telemetry } from '../telemetry.js';
+import { dispatchWithModelFallback } from '../utils/model-dispatch-fallback.js';
+import { isTransientProviderError } from '../utils/provider-error-classification.js';
 import { isAbortError } from './abort-utils.js';
 
 export type SkillImproverLLMDelegate = (
@@ -130,26 +135,82 @@ export function createSkillImproverLLMDelegate(
 
 			const agentName = resolveSkillImproverAgentName(sessionId);
 
+			// Derive the canonical role + swarm id so quota/rate-limit failover can
+			// route through the configured skill_improver fallback chain. Uses
+			// stripKnownSwarmPrefix — NOT a naive `_`-split — because `skill_improver`
+			// itself contains an underscore. Mirrors src/turbo/lean/reviewer.ts.
+			const baseRole = stripKnownSwarmPrefix(agentName);
+			const swarmId =
+				baseRole !== agentName
+					? agentName.slice(0, agentName.length - baseRole.length - 1)
+					: undefined;
+			const swarmAgents = getSwarmAgents(swarmId);
+
+			// Capture the session id as a const so the type narrows to `string`
+			// inside the dispatch closure below (the `let` binding is `string |
+			// undefined` and cleanup can null it, so flow-narrowing is lost across
+			// the closure boundary).
+			const promptSessionId = ephemeralSessionId;
+
 			const prelude = systemPrompt
 				? `${systemPrompt}\n\n---\n\n${userInput}`
 				: userInput;
-			const promptResult = await client.session.prompt({
-				path: { id: ephemeralSessionId },
-				body: {
-					agent: agentName,
-					tools: { write: false, edit: false, patch: false },
-					parts: [{ type: 'text', text: prelude }],
+			// Prompt the registered skill_improver agent, failing over to a
+			// configured fallback model on a transient/quota dispatch error (#1927,
+			// the #1905 follow-up for the opt-in skill-improvement site). The
+			// fallback wraps only the prompt: the ephemeral session is reused across
+			// attempts and still torn down in `finally`.
+			const dispatched = await dispatchWithModelFallback({
+				dispatch: async (model) => {
+					const promptResult = await client.session.prompt({
+						path: { id: promptSessionId },
+						body: {
+							agent: agentName,
+							// #1927: per-call model override on a fallback attempt;
+							// omitted (undefined) means the registered skill_improver model.
+							...(model ? { model } : {}),
+							tools: { write: false, edit: false, patch: false },
+							parts: [{ type: 'text', text: prelude }],
+						},
+						...sdkOpts,
+					});
+					if (!promptResult.data) {
+						// Preserve the SDK error envelope so the transient/quota
+						// classifier can read the real provider message (#1905
+						// envelope-preservation pattern).
+						throw new Error(
+							`skill_improver LLM prompt failed: ${JSON.stringify(promptResult.error)}`,
+						);
+					}
+					return promptResult.data;
 				},
-				...sdkOpts,
+				resolveFallback: (index) =>
+					resolveFallbackModel(baseRole, index, swarmAgents),
+				// Advance to the next model immediately on a transient/quota error —
+				// an instant same-model retry cannot clear an exhausted quota.
+				maxTransientRetriesPerModel: 0,
+				classify: (err) => {
+					// A genuine cancellation is not a provider transient: surface it so
+					// the outer catch maps it to SKILL_IMPROVER_LLM_TIMEOUT, and never
+					// fail over on abort.
+					if (isAbortError(err)) return 'permanent';
+					const msg = err instanceof Error ? err.message : String(err);
+					return isTransientProviderError(msg) ? 'transient' : 'permanent';
+				},
+				onFallback: ({ toModel }) => {
+					if (sessionId) {
+						telemetry.modelFallback(
+							sessionId,
+							agentName,
+							swarmAgents?.[baseRole]?.model ?? 'default',
+							toModel,
+							'transient_model_error',
+						);
+					}
+				},
 			});
 
-			if (!promptResult.data) {
-				throw new Error(
-					`skill_improver LLM prompt failed: ${JSON.stringify(promptResult.error)}`,
-				);
-			}
-
-			const textParts = promptResult.data.parts.filter(
+			const textParts = dispatched.result.parts.filter(
 				(p): p is typeof p & { text: string } => p.type === 'text',
 			);
 			return textParts.map((p) => p.text).join('\n');

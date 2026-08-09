@@ -147,7 +147,7 @@ describe('SC-101: provisionWorktree deps_strategy=copy (real fs)', () => {
 		]);
 		currentTestDirs = { hostDir, cleanup };
 
-		const result = await provisionWorktree(hostDir, 'lane-copy', 'sess-copy', {
+		const result = await provisionWorktree(hostDir, 'lane-copy', 'ses_copy', {
 			purpose: 'lane',
 			branchStyle: 'legacy-lane',
 			depsStrategy: 'copy',
@@ -193,7 +193,7 @@ describe('SC-101: provisionWorktree deps_strategy=copy (real fs)', () => {
 		const result = await provisionWorktree(
 			hostDir,
 			'lane-copy-missing',
-			'sess-copy-missing',
+			'ses_copyMissing',
 			{
 				purpose: 'lane',
 				branchStyle: 'legacy-lane',
@@ -228,16 +228,11 @@ describe('SC-102: provisionWorktree deps_strategy=link (real fs)', () => {
 			]);
 			currentTestDirs = { hostDir, cleanup };
 
-			const result = await provisionWorktree(
-				hostDir,
-				'lane-link',
-				'sess-link',
-				{
-					purpose: 'lane',
-					branchStyle: 'legacy-lane',
-					depsStrategy: 'link',
-				},
-			);
+			const result = await provisionWorktree(hostDir, 'lane-link', 'ses_link', {
+				purpose: 'lane',
+				branchStyle: 'legacy-lane',
+				depsStrategy: 'link',
+			});
 
 			expect(result).toHaveProperty('worktreePath');
 			const wtPath = (result as { worktreePath: string }).worktreePath;
@@ -263,7 +258,7 @@ describe('SC-102: provisionWorktree deps_strategy=link (real fs)', () => {
 		const result = await provisionWorktree(
 			hostDir,
 			'lane-link-missing',
-			'sess-link-missing',
+			'ses_linkMissing',
 			{
 				purpose: 'lane',
 				branchStyle: 'legacy-lane',
@@ -306,16 +301,11 @@ describe('SC-103: provisionWorktree missing host node_modules — no silent no-o
 		const { hostDir, cleanup } = setupRealGitRepo('sc103-copy-');
 		currentTestDirs = { hostDir, cleanup };
 
-		const result = await provisionWorktree(
-			hostDir,
-			'lane-sc103',
-			'sess-sc103',
-			{
-				purpose: 'lane',
-				branchStyle: 'legacy-lane',
-				depsStrategy: 'copy',
-			},
-		);
+		const result = await provisionWorktree(hostDir, 'lane-sc103', 'ses_sc103', {
+			purpose: 'lane',
+			branchStyle: 'legacy-lane',
+			depsStrategy: 'copy',
+		});
 
 		expect(result).toHaveProperty('error');
 		expect((result as { error: string }).error).toContain(
@@ -329,7 +319,7 @@ describe('SC-103: provisionWorktree missing host node_modules — no silent no-o
 		// Use computed path since result.worktreePath may be undefined when
 		// checkPathBudget fails before worktree creation.
 		const laneNm = path.join(
-			expectedWorktreePath(hostDir, 'lane-sc103', 'sess-sc103'),
+			expectedWorktreePath(hostDir, 'lane-sc103', 'ses_sc103'),
 			'node_modules',
 		);
 		expect(
@@ -345,7 +335,7 @@ describe('SC-103: provisionWorktree missing host node_modules — no silent no-o
 		const result = await provisionWorktree(
 			hostDir,
 			'lane-sc103-link',
-			'sess-sc103-link',
+			'ses_sc103link',
 			{
 				purpose: 'lane',
 				branchStyle: 'legacy-lane',
@@ -361,7 +351,7 @@ describe('SC-103: provisionWorktree missing host node_modules — no silent no-o
 
 		// No lane node_modules symlink should have been created
 		const laneNm = path.join(
-			expectedWorktreePath(hostDir, 'lane-sc103-link', 'sess-sc103-link'),
+			expectedWorktreePath(hostDir, 'lane-sc103-link', 'ses_sc103link'),
 			'node_modules',
 		);
 		expect(
@@ -391,7 +381,7 @@ describe('Lean adapter provisionWorktree — deps_strategy passthrough', () => {
 		const result = await leanProvision(
 			hostDir,
 			'lane-lean-copy',
-			'sess-lean-copy',
+			'ses_leanCopy',
 			{ deps_strategy: 'copy' } as any, // LeanTurboConfig shape
 		);
 
@@ -420,7 +410,7 @@ describe('Lean adapter provisionWorktree — deps_strategy passthrough', () => {
 		const result = await leanProvision(
 			hostDir,
 			'lane-lean-link',
-			'sess-lean-link',
+			'ses_leanLink',
 			{ deps_strategy: 'link' } as any,
 		);
 

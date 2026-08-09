@@ -1,5 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { SWARM_WORKTREE_DIR_NAME } from '../config/constants';
 import { clearTrajectoryStep } from '../hooks/trajectory-logger';
 import { validateSwarmPath } from '../hooks/utils';
 import { resetPrmSessionState } from '../prm';
@@ -144,7 +145,7 @@ export async function handleResetSessionCommand(
 	// Best-effort: clean stale worktree directories and orphan branches
 	const worktreesDir = path.resolve(
 		path.dirname(directory),
-		'.swarm-worktrees',
+		SWARM_WORKTREE_DIR_NAME,
 	);
 	try {
 		if (fs.existsSync(worktreesDir)) {
@@ -168,6 +169,21 @@ export async function handleResetSessionCommand(
 		if (branchResult.errors.length > 0) {
 			results.push(
 				`⚠️ Failed to remove ${branchResult.errors.length} branch(es): ${branchResult.errors.map((e) => e.error).join('; ')}`,
+			);
+		}
+		// #1657: surface preserved recovery branches + fail-safe state so the
+		// user running /swarm reset-session knows why some branches were skipped.
+		if (
+			branchResult.skippedRecoveryBranches &&
+			branchResult.skippedRecoveryBranches.length > 0
+		) {
+			results.push(
+				`ℹ️ Preserved ${branchResult.skippedRecoveryBranches.length} branch(es) with unresolved merge-back recovery records (run /swarm status to inspect)`,
+			);
+		}
+		if (branchResult.recoveryReadError) {
+			results.push(
+				`⚠️ Skipped all lane-branch deletions: .swarm/recovery/ was unreadable (fail-safe). Resolve or clear corrupt recovery records and re-run.`,
 			);
 		}
 	} catch (err) {

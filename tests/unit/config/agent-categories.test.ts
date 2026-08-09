@@ -22,10 +22,10 @@ describe('agent-categories', () => {
 	});
 
 	describe('AGENT_CATEGORY map', () => {
-		test('has exactly 13 entries', () => {
-			// v6.36.0: added critic_drift_verifier; v6.73.0: added critic_hallucination_verifier; #893: added critic_architecture_supervisor
+		test('has exactly 14 entries', () => {
+			// v6.36.0: added critic_drift_verifier; v6.73.0: added critic_hallucination_verifier; #893: added critic_architecture_supervisor; #1675: added critic_finding_validator
 			const entries = Object.entries(AGENT_CATEGORY);
-			expect(entries).toHaveLength(13);
+			expect(entries).toHaveLength(14);
 		});
 
 		test('architect maps to orchestrator', () => {
@@ -62,6 +62,10 @@ describe('agent-categories', () => {
 
 		test('critic_hallucination_verifier maps to qa', () => {
 			expect(AGENT_CATEGORY['critic_hallucination_verifier']).toBe('qa');
+		});
+
+		test('critic_finding_validator maps to qa', () => {
+			expect(AGENT_CATEGORY['critic_finding_validator']).toBe('qa');
 		});
 
 		test('sme maps to support', () => {
@@ -120,6 +124,11 @@ describe('agent-categories', () => {
 
 		test('returns qa for critic_hallucination_verifier', () => {
 			const result = getAgentCategory('critic_hallucination_verifier');
+			expect(result).toBe('qa');
+		});
+
+		test('returns qa for critic_finding_validator', () => {
+			const result = getAgentCategory('critic_finding_validator');
 			expect(result).toBe('qa');
 		});
 

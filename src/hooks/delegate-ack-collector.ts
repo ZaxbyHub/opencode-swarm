@@ -12,6 +12,11 @@
  *   - For every CRITICAL directive that was shown but never acknowledged, emit a
  *     `violated` event with reason `unacknowledged` and append an audit line to
  *     `.swarm/unacknowledged-criticals.jsonl`.
+ *   - For every NON-CRITICAL directive that was shown but never acknowledged,
+ *     emit a neutral, audit-only `unacknowledged` event (reason
+ *     `no_ack_marker`). Silence is not a violation for non-criticals — it is a
+ *     visibility signal, so it is never escalated, never audited to the
+ *     criticals file, and never mutates a counter.
  *
  * Stateless by design: it re-parses the prompt rather than relying on
  * cross-hook mutable state, so it is safe under parallel delegations. Fail-open:
@@ -23,7 +28,12 @@ import * as path from 'node:path';
 import { ensureCohortIdCached } from './cohort-cache.js';
 import { parseAcknowledgments } from './knowledge-application.js';
 import { escalateViolatedEntries } from './knowledge-escalator.js';
-import { newTraceId, recordKnowledgeEvent } from './knowledge-events.js';
+import {
+	type KnowledgeEventInput,
+	newTraceId,
+	recordKnowledgeEvent,
+	recordKnowledgeEventsBatch,
+} from './knowledge-events.js';
 import {
 	parseDelegateDirectiveBlock,
 	parseDelegateDirectiveTraceId,
@@ -77,7 +87,23 @@ async function appendUnacknowledgedCritical(
 
 export interface CollectDelegateAcksResult {
 	emitted: Array<{ id: string; type: string }>;
+	/**
+	 * CRITICAL directives shown to the delegate that it never acknowledged. Each
+	 * one is a contract violation: emitted as `violated`/`unacknowledged`, audited
+	 * to `.swarm/unacknowledged-criticals.jsonl`, and fed to the repeat-mistake
+	 * escalator.
+	 */
 	unacknowledgedCriticals: string[];
+	/**
+	 * NON-critical directives shown to the delegate that it never acknowledged.
+	 * These are NOT contract violations — the ack contract only obliges the
+	 * delegate to answer for criticals. Each is emitted as a neutral,
+	 * audit-only `unacknowledged` event so silent non-critical delivery is
+	 * visible to the curator post-mortem instead of vanishing. They are never
+	 * escalated, never written to the criticals audit file, and never produce
+	 * promotion evidence.
+	 */
+	unacknowledgedNonCritical: string[];
 }
 
 /**
@@ -95,6 +121,7 @@ export async function collectDelegateAcks(params: {
 	const result: CollectDelegateAcksResult = {
 		emitted: [],
 		unacknowledgedCriticals: [],
+		unacknowledgedNonCritical: [],
 	};
 	try {
 		const shown = parseDelegateDirectiveBlock(params.prompt);
@@ -213,6 +240,15 @@ export async function collectDelegateAcks(params: {
 				for (const item of validation.idempotent_skips) {
 					ackedIds.add(item.id);
 				}
+				// Partial rejection (ok:true can still carry rejected_items, e.g. a
+				// duplicate_conflicting_terminal when the delegate also filed a
+				// knowledge_receipt under the same trace): the delegate DID respond
+				// for these ids, so they are neither silent (`unacknowledged`) nor
+				// an unacknowledged critical. The validator already audited the
+				// rejection; we only preserve the acked set.
+				for (const rejected of validation.rejected_items ?? []) {
+					ackedIds.add(rejected.item.id);
+				}
 			}
 			// (#PRR-008) If validation did NOT succeed (ok:false) on a REAL trace, the
 			// ackedItems the delegate DID explicitly acknowledge (ackByItemId) are
@@ -292,6 +328,47 @@ export async function collectDelegateAcks(params: {
 			} catch {
 				// audit log is best-effort
 			}
+		}
+
+		// Every NON-critical directive that was shown but never acknowledged is
+		// silence, not a violation: the ack contract only obliges the delegate to
+		// answer for criticals. Before this, that silence was completely invisible —
+		// a corpus with 1 critical out of 103 entries reported ~4% receipt
+		// compliance and no signal explained the other 96%. Emit a neutral,
+		// audit-only `unacknowledged` event so the curator post-mortem can say
+		// "entry X: shown N times, unacknowledged M times".
+		//
+		// Deliberately NOT done here (each would turn an observation into a verdict):
+		//   - no escalation (`violatedIds` is untouched — see the escalator call below),
+		//   - no PromotionEvidenceRecord (that block ran above and only pairs
+		//     accepted applied/violated/contradicted terminals),
+		//   - no append to `unacknowledged-criticals.jsonl` (criticals-only file).
+		//
+		// Iterating `shownById` (a Map keyed by id) rather than the `shown` array
+		// makes this duplicate-immune if a block ever renders the same id twice.
+		// Silence is the dominant case, so the whole batch goes through ONE lock
+		// acquisition + cap-trim pass (recordKnowledgeEventsBatch) instead of up
+		// to `delegate_max_inject_count` sequential appends on this awaited
+		// tool.execute.after path.
+		const silentEvents: KnowledgeEventInput[] = [];
+		for (const [id, directive] of shownById) {
+			if (directive.priority === 'critical') continue;
+			if (ackedIds.has(id)) continue;
+			result.unacknowledgedNonCritical.push(id);
+			silentEvents.push({
+				type: 'unacknowledged',
+				trace_id: traceId,
+				knowledge_id: id,
+				session_id: sessionId,
+				task_id: taskId,
+				agent: params.agent,
+				source: 'delegate',
+				reason: 'no_ack_marker',
+			});
+			result.emitted.push({ id, type: 'unacknowledged' });
+		}
+		if (silentEvents.length > 0) {
+			await recordKnowledgeEventsBatch(params.directory, silentEvents);
 		}
 
 		// Repeat-mistake escalation (Change 3): after all violated events are

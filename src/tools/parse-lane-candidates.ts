@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs';
 import * as path from 'node:path';
 import { z } from 'zod';
+import { analyzeCandidateLaneContext } from '../background/candidate-contract';
 import {
 	type ArtifactInput,
 	type ParseFlags,
@@ -16,71 +17,108 @@ import { createSwarmTool } from './create-tool';
 // Zod args schema
 // ---------------------------------------------------------------------------
 
+const ParseLaneCandidatesArgsShape = {
+	output_ref: z
+		.string()
+		.min(1)
+		.describe(
+			'Opaque lane output ref returned as output_ref by dispatch_lanes or collect_lane_results.',
+		),
+	accept_partial: z
+		.boolean()
+		.default(false)
+		.describe(
+			'Accept sources where transcriptIncomplete is true (partial transcripts).',
+		),
+	accept_degraded: z
+		.boolean()
+		.default(false)
+		.describe(
+			'Accept sources where the artifact storage was degraded (output_degraded).',
+		),
+	degraded: z
+		.boolean()
+		.default(false)
+		.describe(
+			'Passed through from DispatchLaneResult.output_degraded by the orchestrator.',
+		),
+	row_format_version: z
+		.number()
+		.int()
+		.nonnegative()
+		.default(1)
+		.describe('Row format version; currently only version 1 is supported.'),
+	producer: z
+		.string()
+		.optional()
+		.default('swarm-pr-review')
+		.describe('Producer label for cross-skill filtering in the sidecar.'),
+	expected_family: z
+		.enum(['base_explorer', 'micro_lane'])
+		.optional()
+		.describe(
+			'Assert the row family for this dispatch batch. A recognizable conflicting header is refused.',
+		),
+	expected_lane: z
+		.string()
+		.trim()
+		.min(1)
+		.max(120)
+		.optional()
+		.describe(
+			'Assert the base-explorer lane linked to this dispatch provenance. Requires expected_family=base_explorer; mismatched base CLEAN attestations are refused.',
+		),
+	expected_lanes: z
+		.array(z.string().trim().min(1).max(120))
+		.min(1)
+		.max(11)
+		.optional()
+		.describe(
+			'Full owned base-explorer lane set for a consolidated batch. Requires expected_family=base_explorer and expected_lane; owned-but-not-expected lanes are skipped as out-of-scope for this per-lane call instead of refused, while foreign lanes are still refused.',
+		),
+	expected_micro_lane: z
+		.string()
+		.trim()
+		.min(1)
+		.max(120)
+		.optional()
+		.describe(
+			'Assert the micro-lane label linked to this dispatch provenance. Requires expected_family=micro_lane; mismatched candidates and CLEAN attestations are refused.',
+		),
+	expected_micro_lanes: z
+		.array(z.string().trim().min(1).max(120))
+		.min(1)
+		.max(11)
+		.optional()
+		.describe(
+			'Full owned family set of a consolidated depth-tier lane. Requires expected_family=micro_lane and expected_micro_lane; rows for owned-but-not-expected families are skipped as out-of-scope for this per-family call instead of refused, while families outside the set are still refused.',
+		),
+	use_lockfile: z
+		.boolean()
+		.default(false)
+		.describe(
+			'When true, use proper-lockfile for concurrency-safe sidecar writes.',
+		),
+	project_root: z
+		.string()
+		.optional()
+		.describe(
+			'Project root directory where .swarm/ lives. Defaults to the injected working directory.',
+		),
+} satisfies z.ZodRawShape;
+
 const ParseLaneCandidatesArgsSchema = z
-	.object({
-		output_ref: z
-			.string()
-			.min(1)
-			.describe(
-				'Opaque lane output ref returned as output_ref by dispatch_lanes or collect_lane_results.',
-			),
-		accept_partial: z
-			.boolean()
-			.default(false)
-			.describe(
-				'Accept sources where transcriptIncomplete is true (partial transcripts).',
-			),
-		accept_degraded: z
-			.boolean()
-			.default(false)
-			.describe(
-				'Accept sources where the artifact storage was degraded (output_degraded).',
-			),
-		degraded: z
-			.boolean()
-			.default(false)
-			.describe(
-				'Passed through from DispatchLaneResult.output_degraded by the orchestrator.',
-			),
-		row_format_version: z
-			.number()
-			.int()
-			.nonnegative()
-			.default(1)
-			.describe('Row format version; currently only version 1 is supported.'),
-		producer: z
-			.string()
-			.optional()
-			.default('swarm-pr-review')
-			.describe('Producer label for cross-skill filtering in the sidecar.'),
-		expected_family: z
-			.enum(['base_explorer', 'micro_lane'])
-			.optional()
-			.describe(
-				'Assert the row family for this dispatch batch. A recognizable conflicting header is refused.',
-			),
-		expected_micro_lane: z
-			.string()
-			.trim()
-			.min(1)
-			.optional()
-			.describe(
-				'Assert the micro-lane label linked to this dispatch provenance. Mismatched candidates and CLEAN attestations are refused.',
-			),
-		use_lockfile: z
-			.boolean()
-			.default(false)
-			.describe(
-				'When true, use proper-lockfile for concurrency-safe sidecar writes.',
-			),
-		project_root: z
-			.string()
-			.optional()
-			.describe(
-				'Project root directory where .swarm/ lives. Defaults to the injected working directory.',
-			),
-	})
-	.strict();
+	.object(ParseLaneCandidatesArgsShape)
+	.strict()
+	.superRefine((value, context) => {
+		for (const issue of analyzeCandidateLaneContext(value)) {
+			context.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: [issue.field],
+				message: issue.message,
+			});
+		}
+	});
 
 // ---------------------------------------------------------------------------
 // Lane-output ref path derivation (mirrors lane-output-store internals)
@@ -109,18 +147,19 @@ export const parse_lane_candidates: ReturnType<typeof createSwarmTool> =
 		description:
 			'Parse [CANDIDATE] rows from a dispatch_lanes or collect_lane_results artifact (by output_ref), produce structured records with provenance, optionally persist to a per-batch sidecar JSONL. Pure-parser variant exists as internal module.',
 		args: {
-			output_ref: ParseLaneCandidatesArgsSchema.shape.output_ref,
-			accept_partial: ParseLaneCandidatesArgsSchema.shape.accept_partial,
-			accept_degraded: ParseLaneCandidatesArgsSchema.shape.accept_degraded,
-			degraded: ParseLaneCandidatesArgsSchema.shape.degraded,
-			row_format_version:
-				ParseLaneCandidatesArgsSchema.shape.row_format_version,
-			producer: ParseLaneCandidatesArgsSchema.shape.producer,
-			expected_family: ParseLaneCandidatesArgsSchema.shape.expected_family,
-			expected_micro_lane:
-				ParseLaneCandidatesArgsSchema.shape.expected_micro_lane,
-			use_lockfile: ParseLaneCandidatesArgsSchema.shape.use_lockfile,
-			project_root: ParseLaneCandidatesArgsSchema.shape.project_root,
+			output_ref: ParseLaneCandidatesArgsShape.output_ref,
+			accept_partial: ParseLaneCandidatesArgsShape.accept_partial,
+			accept_degraded: ParseLaneCandidatesArgsShape.accept_degraded,
+			degraded: ParseLaneCandidatesArgsShape.degraded,
+			row_format_version: ParseLaneCandidatesArgsShape.row_format_version,
+			producer: ParseLaneCandidatesArgsShape.producer,
+			expected_family: ParseLaneCandidatesArgsShape.expected_family,
+			expected_lane: ParseLaneCandidatesArgsShape.expected_lane,
+			expected_lanes: ParseLaneCandidatesArgsShape.expected_lanes,
+			expected_micro_lane: ParseLaneCandidatesArgsShape.expected_micro_lane,
+			expected_micro_lanes: ParseLaneCandidatesArgsShape.expected_micro_lanes,
+			use_lockfile: ParseLaneCandidatesArgsShape.use_lockfile,
+			project_root: ParseLaneCandidatesArgsShape.project_root,
 		},
 		async execute(args: unknown, directory: string): Promise<string> {
 			const parsed = ParseLaneCandidatesArgsSchema.safeParse(args);
@@ -147,7 +186,10 @@ export const parse_lane_candidates: ReturnType<typeof createSwarmTool> =
 				row_format_version,
 				producer,
 				expected_family,
+				expected_lane,
+				expected_lanes,
 				expected_micro_lane,
+				expected_micro_lanes,
 				use_lockfile,
 				project_root,
 			} = parsed.data;
@@ -228,6 +270,11 @@ export const parse_lane_candidates: ReturnType<typeof createSwarmTool> =
 					degraded,
 					row_format_version,
 					...(producer ? { producer } : {}),
+					...(expected_family ? { expected_family } : {}),
+					...(expected_lane ? { expected_lane } : {}),
+					...(expected_lanes ? { expected_lanes } : {}),
+					...(expected_micro_lane ? { expected_micro_lane } : {}),
+					...(expected_micro_lanes ? { expected_micro_lanes } : {}),
 				};
 
 				const options: ParsePersistOptions = {
@@ -279,7 +326,10 @@ export const parse_lane_candidates: ReturnType<typeof createSwarmTool> =
 				row_format_version,
 				...(producer ? { producer } : {}),
 				...(expected_family ? { expected_family } : {}),
+				...(expected_lane ? { expected_lane } : {}),
+				...(expected_lanes ? { expected_lanes } : {}),
 				...(expected_micro_lane ? { expected_micro_lane } : {}),
+				...(expected_micro_lanes ? { expected_micro_lanes } : {}),
 			};
 
 			// -------------------------------------------------------------------

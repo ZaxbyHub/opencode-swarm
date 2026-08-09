@@ -42,13 +42,21 @@ const DEFAULT_ISSUE_FIELDS = [
 const PR_FIELD_ALLOWLIST = new Set([
 	...DEFAULT_PR_FIELDS,
 	'additions',
+	'assignees',
 	'body',
 	'changedFiles',
+	'closedAt',
+	'comments',
 	'commits',
+	'createdAt',
 	'deletions',
 	'files',
+	'labels',
 	'latestReviews',
+	'mergedAt',
+	'milestone',
 	'reviews',
+	'updatedAt',
 ]);
 
 const ISSUE_FIELD_ALLOWLIST = new Set([
@@ -156,14 +164,34 @@ function normalizeFields(
 				? ISSUE_FIELD_ALLOWLIST
 				: RUN_FIELD_ALLOWLIST;
 	const fields = Array.from(new Set(raw.map((f) => f.trim()).filter(Boolean)));
-	if (
-		fields.length === 0 ||
-		fields.some((f) => containsControlChars(f) || !allowlist.has(f))
-	) {
+	const allowedList = Array.from(allowlist).sort().join(', ');
+	if (fields.length === 0) {
 		return {
 			error: true,
 			type: 'invalid-input',
-			message: `fields must be selected from the ${target} allowlist`,
+			message: `no ${target} fields provided. Allowed ${target} fields: ${allowedList}.`,
+		};
+	}
+	// A field is rejected when it is unknown OR carries control characters. Names
+	// bearing control chars are never echoed back (they could smuggle escape
+	// sequences into logs/messages), so they are dropped from the printed list
+	// while still forcing the rejection.
+	const rejected = fields.filter(
+		(f) => containsControlChars(f) || !allowlist.has(f),
+	);
+	if (rejected.length > 0) {
+		const printable = rejected
+			.filter((f) => !containsControlChars(f))
+			.map((f) => (f.length > 60 ? `${f.slice(0, 60)}...` : f))
+			.slice(0, 12);
+		const rejectedText =
+			printable.length > 0
+				? printable.join(', ')
+				: '(names omitted: contain control characters)';
+		return {
+			error: true,
+			type: 'invalid-input',
+			message: `unsupported ${target} field(s): ${rejectedText}. Allowed ${target} fields: ${allowedList}.`,
 		};
 	}
 	return fields;
@@ -192,6 +220,53 @@ function sanitizeParsedJson(value: unknown): unknown {
 		return out;
 	}
 	return value;
+}
+
+/**
+ * Actionable guidance emitted when the gh CLI is not on PATH.
+ *
+ * There is DELIBERATELY no hidden REST fallback wired in. Two reasons make a
+ * silent transport swap unsafe: (1) the in-repo web_fetch tool pins a public IP,
+ * blocks loopback, and ignores HTTPS_PROXY, so it cannot be a general REST
+ * client from inside the plugin; (2) field-shape divergence — `gh --json`
+ * returns camelCase keys plus gh-only synthesized fields (statusCheckRollup,
+ * reviewDecision, mergeStateStatus) absent from the snake_case api.github.com
+ * REST payload, so auto-swapping transports would return a differently-shaped
+ * object under the same contract and mislead readers. Instead we hand the caller
+ * the exact REST URL and the gate-allowed degraded read path.
+ */
+function ghNotFoundGuidance(
+	target: 'pr' | 'issue' | 'run',
+	number: number,
+	repo: string | undefined,
+	logFailed: boolean,
+): string {
+	const repoSlug = repo ?? '<owner>/<name>';
+	const restPath =
+		target === 'pr'
+			? `pulls/${number}`
+			: target === 'issue'
+				? `issues/${number}`
+				: `actions/runs/${number}`;
+	const restUrl = `https://api.github.com/repos/${repoSlug}/${restPath}`;
+	const lines = [
+		'GitHub CLI (gh) not found on PATH. Install gh for full evidence.',
+		`Degraded read-only path: fetch ${restUrl} with the web fetch tool (a gate-allowed observation).`,
+	];
+	if (!repo) {
+		lines.push(
+			'No repo argument was provided, so the URL uses an <owner>/<name> placeholder; pass repo as "owner/name" to make it fetchable.',
+		);
+	}
+	lines.push(
+		'Caveats: REST returns snake_case keys and omits gh-only fields (statusCheckRollup, reviewDecision, mergeStateStatus). Public repos work unauthenticated; private repos need gh or an authenticated client.',
+	);
+	if (target === 'run' && logFailed) {
+		lines.push(
+			'Note: log_failed job logs are gh-only and have no REST-URL equivalent.',
+		);
+	}
+	return lines.join(' ');
 }
 
 export const gh_evidence: ToolDefinition = createSwarmTool({
@@ -256,8 +331,7 @@ export const gh_evidence: ToolDefinition = createSwarmTool({
 				{
 					error: true,
 					type: 'gh-not-found',
-					message:
-						'GitHub CLI executable not found. Install gh and ensure it is on PATH.',
+					message: ghNotFoundGuidance(target, number, repo, logFailed),
 				} satisfies GhEvidenceError,
 				null,
 				2,

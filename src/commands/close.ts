@@ -1,10 +1,6 @@
 import * as fsSync from 'node:fs';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import {
-	archiveSqliteSnapshot,
-	type SqliteRowCounts,
-} from './archive-sqlite';
 import { loadPluginConfigWithMeta } from '../config';
 import type { Plan } from '../config/plan-schema';
 import {
@@ -13,6 +9,7 @@ import {
 	type PluginConfig,
 	SkillImproverConfigSchema,
 } from '../config/schema';
+import { closeProjectDb } from '../db/project-db';
 import { archiveEvidence } from '../evidence/manager';
 import {
 	getGitRepositoryStatus,
@@ -50,9 +47,10 @@ import {
 	resetSwarmStatePreservingSingletons,
 	swarmState,
 } from '../state';
-import { executeWriteRetro } from '../tools/write-retro';
 import { telemetry as telemetryEmit } from '../telemetry';
+import { executeWriteRetro } from '../tools/write-retro';
 import { log } from '../utils/logger';
+import { archiveSqliteSnapshot, type SqliteRowCounts } from './archive-sqlite';
 
 interface PlanPhase {
 	id: number;
@@ -157,6 +155,8 @@ export interface CloseStageContext {
 	archiveFailureReasons: Map<string, string>;
 	/** Structured per-artifact results — single source of truth (issue #2030). */
 	archiveResults: ArtifactArchiveResult[];
+	/** True when the archive STAGE threw wholesale (e.g. mkdir EACCES/ENOSPC). */
+	archiveStageFailed: boolean;
 	timestamp: string;
 	archiveDir: string;
 	archiveSuffix: string;
@@ -527,6 +527,76 @@ export interface CleanStageResult {
 	configBackupsRemoved: number;
 	swarmPlanFilesRemoved: number;
 	tmpFilesRemoved: number;
+}
+
+/**
+ * Emit the single `close_archive_result` telemetry event whose payload is the
+ * SAME `ctx.archiveResults` array the user-facing prose derives from, so the
+ * two cannot disagree (issue #2030 item 6). Called AFTER `runCleanStage` so
+ * `source_disposition` can be finalized truthfully: artifacts that were
+ * successfully archived AND then unlinked by the clean stage report `'removed'`;
+ * artifacts preserved (absent, or failed/retained) keep their archive-time
+ * disposition. Counts only — no row content (issue items 4/9).
+ */
+export function emitCloseArchiveResult(
+	ctx: CloseStageContext,
+	cleanResult: CleanStageResult,
+): void {
+	// Finalize dispositions: any artifact the clean stage actually removed is
+	// 'removed' — regardless of whether its archive attempt succeeded or failed
+	// (terminal-state files like plan.json are unlinked unconditionally even on
+	// archive failure; reporting those as 'retained' would be factually false
+	// about on-disk state). The attempt/reason_code fields still carry the
+	// archive-outcome truth, so the tuple (failed, removed, copy_failed) reads
+	// truthfully as "archive failed, source file removed, no archive copy".
+	const cleaned = new Set(cleanResult.cleanedFiles);
+	const failedCount = ctx.archiveResults.filter(
+		(r) => r.attempt === 'failed',
+	).length;
+	const sqliteSnapshots = ctx.archiveResults.filter(
+		(r) => r.method === 'vacuum_into' && r.attempt === 'succeeded',
+	);
+	const archiveEmpty =
+		sqliteSnapshots.length > 0 &&
+		sqliteSnapshots.every(
+			(r) =>
+				(r.row_counts?.project_constraints ?? 0) === 0 &&
+				(r.row_counts?.qa_gate_profile ?? 0) === 0,
+		);
+	// archive_valid must be false when the stage threw wholesale (empty
+	// archiveResults would otherwise make failedCount === 0 and invert the
+	// alarm signal PR 16 depends on).
+	const archiveValid = !ctx.archiveStageFailed && failedCount === 0;
+
+	try {
+		telemetryEmit.closeArchiveResult({
+			archive_valid: archiveValid,
+			archive_empty: archiveEmpty,
+			file_count: ctx.archivedFileCount,
+			bundle: `swarm-${ctx.timestamp}-${ctx.archiveSuffix}`,
+			artifacts: ctx.archiveResults.map((r) => {
+				const removed = cleaned.has(r.artifact);
+				return {
+					artifact: r.artifact,
+					requiredness: r.requiredness,
+					attempt: r.attempt,
+					validation: r.validation,
+					source_disposition: removed
+						? ('removed' as ArchiveSourceDisposition)
+						: r.source_disposition,
+					method: r.method,
+					reason_code: r.reason_code,
+					...(r.row_counts ? { row_counts: r.row_counts } : {}),
+				};
+			}),
+		});
+	} catch (telemetryErr) {
+		// Telemetry must never block close; record and continue.
+		log(
+			'[close-command] close_archive_result telemetry emit failed:',
+			telemetryErr,
+		);
+	}
 }
 
 /**
@@ -1036,9 +1106,7 @@ export async function runArchiveStage(ctx: CloseStageContext): Promise<void> {
 
 			const srcPath = path.join(ctx.swarmDir, artifact);
 			const destPath = path.join(ctx.archiveDir, artifact);
-			const requiredness: ArchiveRequiredness = REQUIRED_ARTIFACTS.has(
-				artifact,
-			)
+			const requiredness: ArchiveRequiredness = REQUIRED_ARTIFACTS.has(artifact)
 				? 'required'
 				: 'optional';
 
@@ -1060,28 +1128,20 @@ export async function runArchiveStage(ctx: CloseStageContext): Promise<void> {
 					attempt: r.attempt,
 					validation: r.validation,
 					source_disposition:
-						r.attempt === 'succeeded'
-							? 'retained'
-							: r.source_disposition,
+						r.attempt === 'succeeded' ? 'retained' : r.source_disposition,
 					method: r.method,
 					reason_code: r.reason_code,
 					detail: r.detail,
 					row_counts: r.rowCounts,
 				};
 				ctx.archiveResults.push(result);
-				if (
-					r.attempt === 'succeeded' &&
-					r.validation === 'passed'
-				) {
+				if (r.attempt === 'succeeded' && r.validation === 'passed') {
 					ctx.archivedFileCount++;
 					if (ACTIVE_STATE_TO_CLEAN.includes(artifact)) {
 						ctx.archivedActiveStateFiles.add(artifact);
 					}
 				} else if (
-					!(
-						r.attempt === 'not_attempted' &&
-						r.source_disposition === 'absent'
-					)
+					!(r.attempt === 'not_attempted' && r.source_disposition === 'absent')
 				) {
 					// Real failure (not a clean absence). Truthful warning; source
 					// is preserved (archiveSqliteSnapshot never deletes the source).
@@ -1106,11 +1166,10 @@ export async function runArchiveStage(ctx: CloseStageContext): Promise<void> {
 						requiredness,
 						attempt: 'succeeded',
 						validation: 'not_applicable',
-						source_disposition: ACTIVE_STATE_TO_CLEAN.includes(
-							artifact,
-						)
-							? 'retained'
-							: 'retained',
+						// 'retained' at archive time; finalized to 'removed'
+						// post-clean for artifacts actually unlinked (see
+						// emitCloseArchiveResult in handleCloseCommand).
+						source_disposition: 'retained',
 						method: 'copy',
 						reason_code: 'ok',
 					});
@@ -1129,8 +1188,7 @@ export async function runArchiveStage(ctx: CloseStageContext): Promise<void> {
 							reason_code: 'source_absent',
 						});
 					} else {
-						const reason =
-							err instanceof Error ? err.message : String(err);
+						const reason = err instanceof Error ? err.message : String(err);
 						ctx.archiveFailureReasons.set(
 							artifact,
 							`${errno ?? 'unknown'}: ${reason}`,
@@ -1248,6 +1306,8 @@ export async function runArchiveStage(ctx: CloseStageContext): Promise<void> {
 
 		// Derive the user-facing prose AND the telemetry event from the SAME
 		// ctx.archiveResults array so they cannot disagree (issue #2030 item 6).
+		// (archive_valid / archive_empty are computed in emitCloseArchiveResult,
+		// which runs after the clean stage so source_disposition is truthful.)
 		const succeededCount = ctx.archiveResults.filter(
 			(r) => r.attempt === 'succeeded',
 		).length;
@@ -1257,56 +1317,20 @@ export async function runArchiveStage(ctx: CloseStageContext): Promise<void> {
 		const absentCount = ctx.archiveResults.filter(
 			(r) => r.source_disposition === 'absent',
 		).length;
-		const archiveValid = failedCount === 0;
-		// archive_empty: at least one sqlite snapshot succeeded AND every such
-		// snapshot carried zero domain rows. (No sqlite snapshot at all → not
-		// "empty", just not applicable; archive_empty stays false.)
-		const sqliteSnapshots = ctx.archiveResults.filter(
-			(r) => r.method === 'vacuum_into' && r.attempt === 'succeeded',
-		);
-		const archiveEmpty =
-			sqliteSnapshots.length > 0 &&
-			sqliteSnapshots.every(
-				(r) =>
-					(r.row_counts?.project_constraints ?? 0) === 0 &&
-					(r.row_counts?.qa_gate_profile ?? 0) === 0,
-			);
 		const bundleName = `swarm-${ctx.timestamp}-${ctx.archiveSuffix}`;
 		ctx.archiveResult =
 			failedCount > 0
 				? `Archive partial: ${succeededCount} succeeded, ${failedCount} failed, ${absentCount} absent (see warnings). Bundle: .swarm/archive/${bundleName}/`
 				: `Archived ${ctx.archivedFileCount} artifact(s) to .swarm/archive/${bundleName}/`;
-
-		// One structured event — counts only, no row content (issue items 6, 9).
-		try {
-			telemetryEmit.closeArchiveResult({
-				archive_valid: archiveValid,
-				archive_empty: archiveEmpty,
-				file_count: ctx.archivedFileCount,
-				bundle: bundleName,
-				artifacts: ctx.archiveResults.map((r) => ({
-					artifact: r.artifact,
-					requiredness: r.requiredness,
-					attempt: r.attempt,
-					validation: r.validation,
-					source_disposition: r.source_disposition,
-					method: r.method,
-					reason_code: r.reason_code,
-					...(r.row_counts ? { row_counts: r.row_counts } : {}),
-				})),
-			});
-		} catch (telemetryErr) {
-			// Telemetry must never block close; record and continue.
-			log(
-				'[close-command] close_archive_result telemetry emit failed:',
-				telemetryErr,
-			);
-		}
 	} catch (archiveError) {
 		ctx.warnings.push(
 			`Archive creation failed: ${archiveError instanceof Error ? archiveError.message : String(archiveError)}`,
 		);
 		ctx.archiveResult = 'Archive creation failed (see warnings)';
+		// Mark the stage failed so the close_archive_result event does NOT
+		// report archive_valid=true on an empty archiveResults array (which
+		// would otherwise make failedCount === 0 and invert the alarm signal).
+		ctx.archiveStageFailed = true;
 	}
 
 	// Archive evidence bundles (retention policy)
@@ -1442,6 +1466,21 @@ export async function runCleanStage(
 				continue;
 			}
 			const filePath = path.join(ctx.swarmDir, artifact);
+			// For swarm.db, close the cached project-db connection for this
+			// directory BEFORE unlinking. On Windows a long-lived WAL-mode
+			// connection holds a file lock that makes fs.unlink fail with EBUSY
+			// (swarm-pr-review F-005). closeProjectDb also checkpoints the
+			// cached connection on close, but the archive stage already took a
+			// transactionally consistent VACUUM INTO snapshot, so any checkpoint
+			// here is redundant for the archive. The close is best-effort and
+			// never throws into the clean stage.
+			if (artifact === 'swarm.db') {
+				try {
+					closeProjectDb(ctx.directory);
+				} catch {
+					// best-effort — the unlink below will surface any real failure
+				}
+			}
 			try {
 				await fs.unlink(filePath);
 				cleanedFiles.push(artifact);
@@ -2049,6 +2088,7 @@ export async function handleCloseCommand(
 			archivedActiveStateDirs: new Set(),
 			archiveFailureReasons: new Map(),
 			archiveResults: [],
+			archiveStageFailed: false,
 			timestamp: '',
 			archiveDir: '',
 			archiveSuffix: '',
@@ -2076,6 +2116,10 @@ export async function handleCloseCommand(
 
 		await runArchiveStage(ctx);
 		const cleanResult = await runCleanStage(ctx);
+		// Emit the structured archive event AFTER clean so source_disposition
+		// can be finalized truthfully ('removed' for cleaned artifacts).
+		// Swallowed: a telemetry failure never blocks close.
+		emitCloseArchiveResult(ctx, cleanResult);
 		const { gitAlignResult, prunedBranches } = await runAlignStage(ctx);
 
 		// ─── WRITE CLOSE SUMMARY ─────────────────────────────────────────

@@ -81,7 +81,7 @@ describe('delegation gate doc-only durable evidence', () => {
 			'\n.swarm/\n',
 		);
 		fs.mkdirSync(path.join(directory, '.swarm'), { recursive: true });
-		startAgentSession('architect-session', 'architect');
+		startAgentSession('ses_architectSession', 'architect');
 	});
 
 	afterEach(() => {
@@ -107,7 +107,7 @@ describe('delegation gate doc-only durable evidence', () => {
 				'TASK: 1.1\nImplement the approved task.\nACCEPTANCE: task complete and covered by tests',
 		};
 		await hook.toolBefore(
-			{ tool: 'Task', sessionID: 'architect-session', callID: 'coder-call' },
+			{ tool: 'Task', sessionID: 'ses_architectSession', callID: 'coder-call' },
 			{ args },
 		);
 		for (const relativePath of actualFiles) {
@@ -118,14 +118,14 @@ describe('delegation gate doc-only durable evidence', () => {
 		await hook.toolAfter(
 			{
 				tool: 'Task',
-				sessionID: 'architect-session',
+				sessionID: 'ses_architectSession',
 				callID: 'coder-call',
 				args,
 			},
 			{},
 		);
 		swarmState.agentSessions
-			.get('architect-session')
+			.get('ses_architectSession')
 			?.taskWorkflowStates?.set('1.1', 'coder_delegated');
 		return hook;
 	}
@@ -138,7 +138,7 @@ describe('delegation gate doc-only durable evidence', () => {
 		await hook.toolAfter(
 			{
 				tool: 'Task',
-				sessionID: 'architect-session',
+				sessionID: 'ses_architectSession',
 				callID: 'reviewer-call',
 				args: { subagent_type: 'reviewer', task_id: '1.1' },
 			},
@@ -148,7 +148,7 @@ describe('delegation gate doc-only durable evidence', () => {
 		expect(evidence?.gates.reviewer).toBeDefined();
 		expect(
 			swarmState.agentSessions
-				.get('architect-session')
+				.get('ses_architectSession')
 				?.taskWorkflowStates?.get('1.1'),
 		).toBe('tests_run');
 		expect(checkReviewerGate('1.1', directory).blocked).toBe(false);
@@ -160,7 +160,7 @@ describe('delegation gate doc-only durable evidence', () => {
 		await hook.toolAfter(
 			{
 				tool: 'update_task_status',
-				sessionID: 'architect-session',
+				sessionID: 'ses_architectSession',
 				callID: 'completion-call',
 				args: { task_id: '1.1', status: 'completed' },
 			},
@@ -168,7 +168,7 @@ describe('delegation gate doc-only durable evidence', () => {
 		);
 		expect(
 			swarmState.agentSessions
-				.get('architect-session')
+				.get('ses_architectSession')
 				?.taskWorkflowStates?.get('1.1'),
 		).toBe('complete');
 
@@ -208,7 +208,7 @@ describe('delegation gate doc-only durable evidence', () => {
 			await hook.toolBefore(
 				{
 					tool: 'Task',
-					sessionID: 'architect-session',
+					sessionID: 'ses_architectSession',
 					callID: 'non-doc-coder-call',
 				},
 				{
@@ -225,7 +225,7 @@ describe('delegation gate doc-only durable evidence', () => {
 		});
 	});
 
-	describe('regression: foreground standard-worktree evidence (F-003)', () => {
+	describe('regression: serial fallback preserves standard-worktree evidence (F-014)', () => {
 		test('observes the lane before merge rather than project-root changes', async () => {
 			const plan = makePlan(['README.md']);
 			plan.execution_profile = {
@@ -269,7 +269,7 @@ describe('delegation gate doc-only durable evidence', () => {
 				await hook.toolBefore(
 					{
 						tool: 'Task',
-						sessionID: 'architect-session',
+						sessionID: 'ses_architectSession',
 						callID: 'worktree-doc-coder-call',
 					},
 					{ args },
@@ -283,12 +283,13 @@ describe('delegation gate doc-only durable evidence', () => {
 					'export const rootOnly = true;\n',
 				);
 
-				// Before F-003, observing the project root here sees root-only.ts and
-				// fails closed. The lane itself contains exactly the declared Markdown.
+				// F-014: serial fallback must keep standard-worktree isolation.
+				// Observing the project root here sees root-only.ts and fails closed;
+				// the isolated lane itself contains exactly the declared Markdown.
 				await hook.toolAfter(
 					{
 						tool: 'Task',
-						sessionID: 'architect-session',
+						sessionID: 'ses_architectSession',
 						callID: 'worktree-doc-coder-call',
 						args,
 					},

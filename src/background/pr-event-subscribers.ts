@@ -25,8 +25,14 @@
  */
 
 import type { PrMonitorConfig } from '../config/schema';
+import {
+	activatePrWorkflow,
+	type PrWorkflowGateState,
+	readPrWorkflowGateState,
+} from '../hooks/pr-workflow-gate';
 import { getAgentSession } from '../state';
 import { log } from '../utils';
+import { pushAdvisory } from '../utils/advisory-queue';
 import type { AutomationEventType, EventListener } from './event-bus';
 import { getGlobalEventBus } from './event-bus';
 import {
@@ -34,6 +40,7 @@ import {
 	type FormattedPrEvent,
 	isPrEventDeliveryRegistered,
 } from './pr-event-delivery';
+import { enqueuePrFeedbackMonitorEvent } from './pr-feedback-event-queue.js';
 import { listActive, updateSnapshot } from './pr-subscriptions';
 
 export interface PrEventSubscriberOptions {
@@ -70,6 +77,9 @@ export const _internals: {
 	listActive: typeof listActive;
 	updateSnapshot: typeof updateSnapshot;
 	getAgentSession: typeof getAgentSession;
+	readPrWorkflowGateState: typeof readPrWorkflowGateState;
+	activatePrWorkflow: typeof activatePrWorkflow;
+	enqueuePrFeedbackMonitorEvent: typeof enqueuePrFeedbackMonitorEvent;
 	deliverPrActivity: typeof deliverPrActivity;
 	isPrEventDeliveryRegistered: typeof isPrEventDeliveryRegistered;
 	scheduleClearUnaddressed: typeof scheduleClearUnaddressed;
@@ -82,6 +92,9 @@ export const _internals: {
 	listActive,
 	updateSnapshot,
 	getAgentSession,
+	readPrWorkflowGateState,
+	activatePrWorkflow,
+	enqueuePrFeedbackMonitorEvent,
 	deliverPrActivity,
 	isPrEventDeliveryRegistered,
 	scheduleClearUnaddressed,
@@ -198,7 +211,7 @@ async function handlePrEvent(
 	const message = formatAdvisory(event.type, payload);
 	if (!message) return;
 
-	const dedupToken = `[pr-monitor:${event.type}:${payload.repoFullName}#${payload.prNumber}]`;
+	const dedupToken = buildPrEventToken(event.type, payload);
 
 	// Build optional MODE signal when auto_pr_feedback is enabled
 	const modeSignal =
@@ -217,14 +230,109 @@ async function handlePrEvent(
 
 	// Deliver to each subscribed session
 	for (const sub of matching) {
+		const prUrl = payload.prUrl ?? sub.prUrl;
+		let activeGate: PrWorkflowGateState | null = null;
+		let gateReadFailed = false;
+		try {
+			activeGate = await _internals.readPrWorkflowGateState(
+				directory,
+				sub.sessionID,
+			);
+		} catch (error) {
+			gateReadFailed = true;
+			_internals.log(
+				`[pr-monitor] Failed to read PR workflow ownership for session ${sub.sessionID}`,
+				{ error: error instanceof Error ? error.message : String(error) },
+			);
+		}
+		const autoFeedbackEventAuthorized = Boolean(modeSignal) && Boolean(prUrl);
+		const feedbackTarget =
+			activeGate?.prFeedbackTargetUrl ??
+			activeGate?.prFeedbackReviewHandoff?.prUrl;
+		let queueForLater =
+			gateReadFailed ||
+			activeGate?.mode === 'PR_REVIEW' ||
+			(activeGate?.mode === 'PR_FEEDBACK' &&
+				(Boolean(activeGate.prFeedbackInventory) ||
+					!feedbackTarget ||
+					!sameGitHubPr(feedbackTarget, prUrl)));
+		let queuedForLater = false;
+		if (queueForLater || autoFeedbackEventAuthorized) {
+			try {
+				await _internals.enqueuePrFeedbackMonitorEvent(
+					directory,
+					sub.sessionID,
+					{
+						type: event.type,
+						repoFullName: payload.repoFullName,
+						prNumber: payload.prNumber,
+						prUrl,
+						message,
+						dedupToken,
+						authorized: autoFeedbackEventAuthorized,
+						queuedAt: new Date().toISOString(),
+					},
+				);
+				queuedForLater = true;
+			} catch (error) {
+				_internals.log(
+					`[pr-monitor] Failed to queue PR_FEEDBACK monitor event for session ${sub.sessionID}`,
+					{
+						error: error instanceof Error ? error.message : String(error),
+					},
+				);
+			}
+		}
+		if (!gateReadFailed && !activeGate && autoFeedbackEventAuthorized) {
+			try {
+				activeGate = await _internals.activatePrWorkflow(
+					directory,
+					sub.sessionID,
+					'PR_FEEDBACK',
+					{ requireCheckoutPreflight: true, prUrl },
+				);
+			} catch (error) {
+				_internals.log(
+					`[pr-monitor] Auto PR_FEEDBACK activation failed for session ${sub.sessionID}`,
+					{
+						error: error instanceof Error ? error.message : String(error),
+					},
+				);
+				queueForLater = true;
+			}
+		}
+		if (queueForLater && !queuedForLater) {
+			try {
+				await _internals.enqueuePrFeedbackMonitorEvent(
+					directory,
+					sub.sessionID,
+					{
+						type: event.type,
+						repoFullName: payload.repoFullName,
+						prNumber: payload.prNumber,
+						prUrl,
+						message,
+						dedupToken,
+						authorized: autoFeedbackEventAuthorized,
+						queuedAt: new Date().toISOString(),
+					},
+				);
+			} catch (error) {
+				_internals.log(
+					`[pr-monitor] Failed to queue PR_FEEDBACK monitor event for session ${sub.sessionID}`,
+					{ error: error instanceof Error ? error.message : String(error) },
+				);
+			}
+		}
 		if (usePromptDelivery) {
 			const formatted: FormattedPrEvent = {
 				type: event.type,
 				repoFullName: payload.repoFullName,
 				prNumber: payload.prNumber,
-				prUrl: payload.prUrl ?? sub.prUrl,
+				prUrl,
 				message,
 				dedupToken,
+				...(queueForLater ? { disposition: 'queued-for-later' as const } : {}),
 			};
 			let wakeOk = false;
 			try {
@@ -256,28 +364,28 @@ async function handlePrEvent(
 			);
 			continue;
 		}
-
-		session.pendingAdvisoryMessages ??= [];
-		// Dedup: skip if the advisory for this PR+event type was already delivered.
-		// The advisory body always starts with the dedupToken, so scanning all
-		// pending messages detects duplicates regardless of interleaving order.
-		const isDuplicate = session.pendingAdvisoryMessages.some((msg) =>
-			msg.includes(dedupToken),
-		);
-		if (isDuplicate) {
+		// Dedup + cap via the shared pushAdvisory helper. The dedupeToken (from
+		// buildPrEventToken) is embedded at the start of the advisory body
+		// (formatAdvisory uses the same builder), so it serves as the
+		// key-presence identity. Content events (comments/reviews) already carry
+		// per-event identity (@author:content-hash); state events keep the
+		// per-PR token (issue #1976 B8).
+		const delivered = pushAdvisory(session, message, { dedupeKey: dedupToken });
+		if (!delivered) {
 			continue;
 		}
-		session.pendingAdvisoryMessages.push(message);
 		_internals.scheduleClearUnaddressed(directory, sub.correlationId);
 		_internals.log(
 			`[pr-monitor] Delivered ${event.type} advisory to session ${sub.sessionID}`,
 		);
 
-		// Inject MODE signal alongside the advisory
-		if (modeSignal) {
-			session.pendingAdvisoryMessages.push(modeSignal);
+		if (autoFeedbackEventAuthorized && activeGate?.mode === 'PR_REVIEW') {
 			_internals.log(
-				`[pr-monitor] Injected PR_FEEDBACK mode signal for session ${sub.sessionID} (${event.type})`,
+				`[pr-monitor] Queued PR_FEEDBACK monitor event for session ${sub.sessionID} without mutating the active PR_REVIEW workflow`,
+			);
+		} else if (autoFeedbackEventAuthorized) {
+			_internals.log(
+				`[pr-monitor] Queued PR_FEEDBACK monitor event for session ${sub.sessionID} for workflow-safe intake`,
 			);
 		}
 	}
@@ -325,12 +433,88 @@ function scheduleClearUnaddressed(
 }
 
 /**
+ * Build the dedup/identity token for a PR event advisory.
+ *
+ * B8 (issue #1976): the legacy token `[pr-monitor:<type>:<repo>#<n>]` lacked
+ * per-event identity, so N distinct comments on one PR collapsed to 1 advisory
+ * (the dedupe check matched on the shared token). Content events (comments,
+ * reviews) now fold in the author + a short content fingerprint so distinct
+ * events survive dedupe while a re-delivered identical event is suppressed.
+ * State events (CI pass/fail, merge-conflict) keep the per-PR token because
+ * re-reporting the same state IS the intended dedupe.
+ *
+ * The token always starts with `[pr-monitor:` so the non-architect drain's
+ * TRANSIENT_PREFIXES filter (messages-transform.ts) still recognizes it. This
+ * is the SINGLE source of truth — handlePrEvent, formatAdvisory, and the
+ * wake-channel payload all call it, avoiding the twin-token-construction
+ * hazard where changing one builder silently broke dedupe.
+ */
+const CONTENT_EVENT_TYPES = new Set([
+	'pr.new.comment',
+	'pr.review.changes_requested',
+	'pr.review.approved',
+	'pr.review.comment',
+]);
+
+function canonicalGitHubPrUrl(value: string): string | null {
+	try {
+		const url = new URL(value);
+		const match = url.pathname.match(/^\/([^/]+)\/([^/]+)\/pull\/(\d+)\/?$/);
+		if (
+			url.protocol !== 'https:' ||
+			url.hostname.toLowerCase() !== 'github.com' ||
+			!match
+		) {
+			return null;
+		}
+		const number = Number(match[3]);
+		if (!Number.isSafeInteger(number) || number <= 0) return null;
+		return `github.com/${match[1].toLowerCase()}/${match[2].toLowerCase()}/pull/${number}`;
+	} catch {
+		return null;
+	}
+}
+
+function sameGitHubPr(left: string, right: string): boolean {
+	const leftCanonical = canonicalGitHubPrUrl(left);
+	return (
+		leftCanonical !== null && leftCanonical === canonicalGitHubPrUrl(right)
+	);
+}
+
+function shortHash(input: string): string {
+	// Small deterministic fingerprint (not cryptographic). base36 keeps the
+	// token short and token-safe.
+	let h = 0;
+	for (let i = 0; i < input.length; i++) {
+		h = (h * 31 + input.charCodeAt(i)) | 0;
+	}
+	return (h >>> 0).toString(36);
+}
+
+function buildPrEventToken(type: string, payload: PrEventPayload): string {
+	const base = `[pr-monitor:${type}:${payload.repoFullName}#${payload.prNumber}`;
+	if (!CONTENT_EVENT_TYPES.has(type)) {
+		return `${base}]`;
+	}
+	// Content event: fold in author + content fingerprint.
+	const author = payload.author ?? 'unknown';
+	const content = (
+		payload.body ??
+		payload.checkName ??
+		payload.reviewDecision ??
+		''
+	).slice(0, 80);
+	return `${base}@${author}:${shortHash(content)}]`;
+}
+
+/**
  * Format a structured advisory message for the given PR event type.
  * Returns null for unknown event types. The first token is always the
- * dedup token `[pr-monitor:<type>:<repo>#<n>]`.
+ * dedup token from buildPrEventToken.
  */
 function formatAdvisory(type: string, payload: PrEventPayload): string | null {
-	const dedupToken = `[pr-monitor:${type}:${payload.repoFullName}#${payload.prNumber}]`;
+	const dedupToken = buildPrEventToken(type, payload);
 
 	switch (type) {
 		case 'pr.ci.failed': {

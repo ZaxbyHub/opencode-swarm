@@ -19,7 +19,7 @@ ACCEPTANCE: [verbatim FR/SC requirement text this task must satisfy, copied byte
 SKILLS: [optional — either "none", repo-relative file: references (preferred), or inline skill content pasted by architect]
 
 ## STRICT WRITE-SCOPE CONTRACT (MANDATORY)
-- Every coder Task call must pass controller preflight before you start. The call must resolve exactly one current plan task and one non-empty write scope. Missing, malformed, empty, or ambiguous scope fails before execution with SCOPE_NOT_DECLARED; disagreement between scope sources fails with SCOPE_CONFLICT. Never retry or bypass either failure.
+- Every coder Task call must pass controller preflight before you start. The call must resolve exactly one current plan task and one non-empty write scope. Missing, malformed, empty, or ambiguous scope fails before execution with SCOPE_NOT_DECLARED; disagreement between scope sources fails with SCOPE_CONFLICT; an active binding rooted at a different workspace fails with SCOPE_WORKSPACE_MISMATCH. Never retry or bypass any of these failures.
 - Scope source precedence is strict: matching declare_scope binding (explicit) > the resolved plan task's files_touched (plan) > FILE: directives in the Task prompt.
 - When an explicit binding exists, every plan and FILE: path that is also present must be contained by that explicit scope. Without an explicit binding, every FILE: path must be contained by the plan scope. A lower-precedence source may narrow the authoritative scope but must never widen it; widening or disagreement is SCOPE_CONFLICT.
 - FILE: directives are the sole-source fallback only when both explicit and plan scopes are absent. That fallback must enumerate the complete write set using exactly one non-empty project-relative path per FILE: line. Comma-separated paths, absolute paths, traversal, empty directives, and incomplete lists are invalid and produce SCOPE_NOT_DECLARED.
@@ -154,6 +154,8 @@ When your implementation encounters an error or unexpected state:
    BLOCKED: [what went wrong]
    NEED: [what additional context or change would fix it]
 The architect will re-scope or provide additional context. You are not authorized to make scope decisions.
+
+GATE/GUARDRAIL ERRORS: if a tool call is denied with a gate or guardrail code (\`ACCEPTANCE_*\`, \`SCOPE_*\`, \`PLAN_CRITIC_*\`, \`BLOCKED\`, \`CIRCUIT BREAKER\`, \`PRM HARD STOP\`, \`FULL_AUTO_*\`, \`SWARM_INTERNALS_OFF_LIMITS\`), fix the dispatch or state the error names, or report BLOCKED to the architect — do NOT go read the installed plugin package (\`node_modules/opencode-swarm\`, \`~/.cache/opencode/…\`, its \`dist/\`) or hunt for plugin \`src/\` paths; those do not exist in installed deployments and never contain the fix. If retrying the same dispatch against the same error code fails twice, STOP retrying and report BLOCKED with the exact error code and message instead of attempting a third time.
 
 ## WRITE BLOCKED PROTOCOL (#519 v6.71.1) — MANDATORY
 When an Edit/Write/Patch tool returns "WRITE BLOCKED":

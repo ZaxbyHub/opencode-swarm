@@ -7,6 +7,7 @@ import {
 	buildWorkspaceGraphAsync,
 	clearCache,
 	createEmptyGraph,
+	type FreshnessProbe,
 	getGraphHealth,
 	loadGraph,
 	type RepoGraph,
@@ -17,6 +18,7 @@ import { _internals as builderInternals } from '../../../src/tools/repo-graph/bu
 describe('repo graph health diagnostics', () => {
 	let tmp: string;
 	let originalExtractFileSymbols: typeof builderInternals.extractFileSymbols;
+	let originalNow: typeof builderInternals.now;
 
 	beforeEach(() => {
 		// realpathSync resolves the macOS /var → /private/var symlink (and Windows
@@ -26,10 +28,12 @@ describe('repo graph health diagnostics', () => {
 			fs.mkdtempSync(path.join(os.tmpdir(), 'repo-graph-health-')),
 		);
 		originalExtractFileSymbols = builderInternals.extractFileSymbols;
+		originalNow = builderInternals.now;
 	});
 
 	afterEach(() => {
 		builderInternals.extractFileSymbols = originalExtractFileSymbols;
+		builderInternals.now = originalNow;
 		clearCache(tmp);
 		fs.rmSync(tmp, { recursive: true, force: true });
 	});
@@ -136,6 +140,7 @@ describe('repo graph health diagnostics', () => {
 			unsupportedFiles: ['README.md', '/etc/passwd'],
 			binaryFiles: ['src/blob.ts'],
 			unreadableFiles: ['src/secret.ts'],
+			validationSkippedFiles: ['src/invalid.ts', '../invalid.ts'],
 			lowConfidenceEdgeCount: 3,
 		};
 
@@ -153,11 +158,48 @@ describe('repo graph health diagnostics', () => {
 		expect(health.unsupportedFiles).toEqual(['README.md']);
 		expect(health.binaryFiles).toEqual(['src/blob.ts']);
 		expect(health.unreadableFiles).toEqual(['src/secret.ts']);
+		expect(health.validationSkippedFiles).toEqual(['src/invalid.ts']);
 		expect(health.lowConfidenceEdgeCount).toBe(3);
 		expect(health.notes).toContain('1 binary files skipped during last build.');
 		expect(health.notes).toContain(
 			'1 unreadable files skipped during last build.',
 		);
+	});
+
+	test('health derives additions and removals from the content probe', () => {
+		const graph = createEmptyGraph(tmp);
+		const probe: FreshnessProbe = {
+			state: 'drifted',
+			changed: [path.join(tmp, 'src/new.ts')],
+			removed: [path.join(tmp, 'src/removed.ts')],
+			truncated: false,
+			probedFiles: 2,
+			elapsedMs: 1,
+		};
+
+		const health = getGraphHealth(graph, tmp, probe);
+
+		expect(health.fresh).toBe(false);
+		expect(health.probeState).toBe('drifted');
+		expect(health.staleFiles).toEqual(['src/new.ts', 'src/removed.ts']);
+	});
+
+	test('health reports incomplete probe state without claiming stale content', () => {
+		const graph = createEmptyGraph(tmp);
+		const probe: FreshnessProbe = {
+			state: 'inconclusive',
+			changed: [],
+			removed: [],
+			truncated: true,
+			probedFiles: 1,
+			elapsedMs: 1,
+		};
+
+		const health = getGraphHealth(graph, tmp, probe);
+
+		expect(health.fresh).toBe(false);
+		expect(health.probeState).toBe('inconclusive');
+		expect(health.notes.join('\n')).toContain('freshness is unknown');
 	});
 
 	test('old graph without diagnostics loads and reports empty health diagnostics', async () => {
@@ -186,5 +228,82 @@ describe('repo graph health diagnostics', () => {
 		expect(health.notes).toContain(
 			'Graph has no recorded diagnostics. Rebuild with repo_map action="build" to collect health details.',
 		);
+	});
+
+	test('truncated walk surfaces walkTruncated and an INCOMPLETE note (A7)', async () => {
+		// Force a walk truncation by setting a tiny file cap and producing more
+		// scannable files than it allows.
+		fs.mkdirSync(path.join(tmp, 'src'), { recursive: true });
+		for (let i = 0; i < 5; i++) {
+			fs.writeFileSync(
+				path.join(tmp, 'src', `f${i}.ts`),
+				`export const f${i} = ${i};\n`,
+			);
+		}
+		const graph = await buildWorkspaceGraphAsync(tmp, { maxFiles: 2 });
+
+		expect(graph.diagnostics?.walkTruncated).toBe(true);
+		expect(graph.diagnostics?.walkTruncationReason).toBe('cap');
+
+		const health = getGraphHealth(graph);
+		expect(health.walkTruncated).toBe(true);
+		expect(health.walkTruncationReason).toBe('cap');
+		expect(
+			health.notes.some((n) =>
+				n.startsWith(
+					'Graph is INCOMPLETE: walk hit the file-cap/wall-clock budget',
+				),
+			),
+		).toBe(true);
+	});
+
+	test('budget-truncated walk reports reason "budget" (A7)', async () => {
+		fs.mkdirSync(path.join(tmp, 'src'), { recursive: true });
+		for (let i = 0; i < 3; i++) {
+			fs.writeFileSync(
+				path.join(tmp, 'src', `f${i}.ts`),
+				`export const f${i} = ${i};\n`,
+			);
+		}
+		// The budget check is `now() - startedAt > walkBudgetMs`
+		// (`src/tools/repo-graph/builder.ts`), so a 0ms budget needs STRICTLY MORE
+		// than 0ms of elapsed wall clock to trip. Walking this 3-file fixture can
+		// finish inside a single millisecond on a fast runner, leaving `0 > 0`
+		// false and nothing truncated — a real `unit (macos-latest, 2)` failure
+		// that survived both CI retries (run 31272876577).
+		//
+		// Drive the seam instead of the wall clock: the first call establishes
+		// `startedAt`, every later call is 1ms further on, so the first budget
+		// check is guaranteed to trip regardless of how fast the machine is. This
+		// pins the ABORT REASON, which is what the test is about; it deliberately
+		// does not assert how many files were visited first.
+		let tick = 0;
+		builderInternals.now = () => tick++;
+		const graph = await buildWorkspaceGraphAsync(tmp, { walkBudgetMs: 0 });
+		expect(graph.diagnostics?.walkTruncated).toBe(true);
+		expect(graph.diagnostics?.walkTruncationReason).toBe('budget');
+	});
+
+	test('incrementalFallbacks surface in graph_health (A7)', () => {
+		const graph = createEmptyGraph(tmp);
+		graph.diagnostics = { incrementalFallbacks: 4 };
+		const health = getGraphHealth(graph);
+		expect(health.incrementalFallbacks).toBe(4);
+		expect(
+			health.notes.some((n) =>
+				n.includes('incremental update(s) fell back to a full rebuild'),
+			),
+		).toBe(true);
+	});
+
+	test('non-truncated build reports walkTruncated false (A7)', async () => {
+		fs.mkdirSync(path.join(tmp, 'src'), { recursive: true });
+		fs.writeFileSync(path.join(tmp, 'src', 'a.ts'), 'export const a = 1;\n');
+		const graph = await buildWorkspaceGraphAsync(tmp);
+		expect(graph.diagnostics?.walkTruncated).toBe(false);
+		const health = getGraphHealth(graph);
+		expect(health.walkTruncated).toBe(false);
+		expect(health.walkTruncationReason).toBeNull();
+		expect(health.incrementalFallbacks).toBe(0);
 	});
 });

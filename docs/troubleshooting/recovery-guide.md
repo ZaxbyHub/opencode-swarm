@@ -84,12 +84,14 @@ await importCheckpoint()
 
 **Symptom:** A delegation throws `SWARM_BACKGROUND_TASK_BLOCKED: OpenCode background subagents ...`.
 
-**Why:** OpenCode v1.16.2 added background subagents — calling the `Task` tool with
-`background=true` (enabled upstream by `OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true`).
+**Why:** OpenCode added experimental background subagents — calling the `Task` tool with
+`background=true` is enabled upstream by either
+`OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true` or the umbrella
+`OPENCODE_EXPERIMENTAL=true`.
 A background `Task` returns a **running placeholder immediately** and delivers the real
-result **later** via a synthetic parent message. Swarm's delegation gate treats a `Task`
-result as completion, so consuming the placeholder would advance Stage B and record gate
-evidence **before any review/test output exists**. By default, swarm **fail-closed-blocks**
+result **later** via a synthetic parent message. Swarm must treat the placeholder as a
+handoff rather than completion, then correlate and settle the later terminal result before
+it can affect workflow state or evidence. By default, swarm **fail-closed-blocks**
 background delegations for any swarm role (reviewer, test_engineer, coder, explorer, etc.).
 Swarm never silently rewrites `background` to `false` — the unsupported capability is
 surfaced explicitly.
@@ -118,7 +120,49 @@ For Stage B reviewer/test_engineer background delegations, the completion is no
 longer advisory-only after PR2: it must correlate to a pending record, match the
 parent session, pass workspace freshness checks, and record durable gate evidence
 before live workflow state can advance. Requires upstream
-`OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true`.
+`OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true` or
+`OPENCODE_EXPERIMENTAL=true`.
+
+For background coder delegations, a trusted terminal completion must additionally
+prove an immutable clean baseline, attribute the exact changed files, and settle any
+standard isolated worktree into the project root before coder evidence or workflow state
+is published. Successful ingestion advances an idle task to `coder_delegated`, preserves
+later states idempotently, stores task-keyed modified files for concurrent review routing,
+and queues a durable parent-architect completion advisory. Unknown attribution, workspace
+identity drift, or a partial/failed worktree merge remains unconsumed and cannot satisfy
+the coder gate.
+
+If startup cannot read or validate the primary ledger, fallback artifacts, merge-status
+owners, provisioning markers, or the Git ownership tags used as a last-resort guard for
+an uncorrelated isolated coder, orphan recovery fails closed with an
+`init-orphan-recovery` advisory and performs no destructive cleanup. Standard worktree
+creation publishes a provisional marker under the same lifecycle lock held by recovery,
+closing the creation-to-ledger gap. Size/count overflow has the same behavior. Recover or
+inspect the reported owner data before repairing the store, removing obsolete
+`swarm-preserved-owner/*` tags, and retrying startup.
+
+### Readiness checklist before changing the default
+
+`hooks.background_subagents` remains `false` by default while OpenCode requires either
+experimental environment flag. A future compatible release may change that default only
+after all of the following are true:
+
+1. A stable OpenCode release exposes `background` without
+   `OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS` or `OPENCODE_EXPERIMENTAL`, and official
+   docs/release notes explicitly graduate the completion contract from Experimental.
+2. The minimum supported OpenCode and `@opencode-ai/plugin` / `@opencode-ai/sdk` versions
+   are pinned to that stable contract, with older hosts still failing closed.
+3. Placeholder correlation and terminal success/error/cancel delivery are documented as
+   durable and exactly once across restart/resume, or swarm explicitly bounds and tests
+   any weaker upstream guarantee.
+4. Coder, reviewer, and `test_engineer` tests prove exact-parent state, task-keyed files,
+   evidence/receipts, stale/error/duplicate rejection, and durable mid-turn advisories.
+5. Background mode composes with parallel-first scheduling and standard worktree
+   isolation, including reverse-order completion and merge-conflict recovery.
+6. Windows, macOS, and Linux pass TUI, Desktop/Node-sidecar, Bun, cancellation, and
+   restart coverage.
+7. The default flip ships with migration/release notes and retains an explicit user
+   hard-off. It must not be combined speculatively with another concurrency-default flip.
 
 ---
 
@@ -200,20 +244,29 @@ git branch -D sw-lane-<sessionId>-<laneId>
 
 When `hooks.background_subagents: true` is enabled, native background `Task`
 dispatches to gate-bearing agents are tracked in `.swarm/background-delegations.jsonl`.
-Reviewer and `test_engineer` completions are correctness-critical: they only
+Coder, reviewer, and `test_engineer` completions are correctness-critical: they only
 advance `.swarm/evidence/{taskId}.json` and `taskWorkflowStates` after the
 trusted synthetic terminal envelope is correlated to the original parent
 session and the workspace snapshot still matches.
 
-**Pending reviewer/test gate:** do not mark the task complete while the matching
+**Pending coder/reviewer/test gate:** do not mark the task complete while the matching
 background row is `pending` or `running`. Wait for the synthetic completion. The
 task should remain before `tests_run`, so `update_task_status(... completed)`
 continues to block.
 
-**Consumed Stage B row:** `consumed` means the terminal background completion was
-accepted and applied to gate evidence, review receipts when applicable, and the
-live Stage B state machine. If both reviewer and `test_engineer` evidence rows
-exist, completion can proceed normally.
+**Primary-ledger write failure:** a launched dispatch whose primary append fails is
+owned by an exact per-correlation artifact under
+`.swarm/background-delegation-fallback/`. The completion observer promotes that
+artifact atomically before terminal handling. Init orphan recovery treats both
+primary and fallback owners as live, so it will not delete their standard
+worktrees or branches after a process restart.
+
+**Consumed row:** `consumed` means the terminal background completion was accepted and
+applied exactly once. For coders, worktree settlement and task-keyed modified-file
+attribution completed before coder state/evidence publication. For reviewer/test rows,
+gate evidence, review receipts when applicable, and the live Stage B state machine were
+updated. If both reviewer and `test_engineer` evidence rows exist, completion can proceed
+normally.
 
 **Stale workspace:** a Stage B row becomes `stale` when the git head, dirty-tree
 hash, PR head SHA, or project directory no longer matches the dispatch snapshot.
@@ -230,6 +283,12 @@ trusted and stored, but swarm could not apply the evidence, receipt, or workflow
 state update. Fix the reported local storage/problem and replay the trusted
 completion event if available, or re-dispatch the missing Stage B gate. Do not
 count the gate as satisfied until the row becomes `consumed`.
+
+**Preserved coder settlement:** an isolated coder merge conflict, failed merge,
+or failed recovery-identity check remains unconsumed with its worktree, branch,
+operation identity, and observed-file set intact. Resolve the reported recovery
+condition and replay the same trusted completion; never mark the task complete
+from the child transcript alone.
 
 ---
 

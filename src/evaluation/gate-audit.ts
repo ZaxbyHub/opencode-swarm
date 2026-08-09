@@ -110,6 +110,7 @@ function modelPrompt(
 	task: EvaluationTaskV1,
 	instruction: string,
 	variant: CandidateVariant,
+	fixtureDir: string,
 ): string {
 	return [
 		'You are executing a read-only production gate audit against a curated defect fixture.',
@@ -118,7 +119,8 @@ function modelPrompt(
 		variant === 'defect'
 			? instruction
 			: 'This is a reviewed clean control. Report caught=false unless you find a concrete defect in the supplied implementation.',
-		'Inspect the files in the current isolated directory. Do not modify them.',
+		`Inspect ONLY the files under: ${fixtureDir}`,
+		'Do not modify them and do not inspect files outside that directory.',
 		'Return exactly one JSON object and no markdown:',
 		'{"v":1,"caught":true|false,"reason":"concise evidence"}',
 	].join('\n');
@@ -477,11 +479,11 @@ async function runCell(args: {
 				});
 			}
 			const dispatch = await args.options.dispatcher({
-				directory: tempRoot,
+				sessionDirectory: args.options.projectRoot,
 				agentName: args.gate === 'reviewer' ? 'reviewer' : 'test_engineer',
 				modelId: args.model,
 				preferredSwarm: args.options.manifest.preferredSwarm,
-				prompt: modelPrompt(args.task, instruction, args.variant),
+				prompt: modelPrompt(args.task, instruction, args.variant, tempRoot),
 				timeoutMs: Math.min(args.options.manifest.maxTimeMs, 120_000),
 				parentSessionId: args.options.parentSessionId,
 				abortSignal: args.signal,

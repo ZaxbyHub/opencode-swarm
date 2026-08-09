@@ -4,6 +4,49 @@ import {
 	SkillImproverConfigSchema,
 } from '../config/schema';
 import { runSkillConsolidation } from '../services/skill-consolidation.js';
+import type { SkillImproveResult } from '../services/skill-improver.js';
+
+/**
+ * Render the success summary for a completed consolidation run.
+ *
+ * Extracted as a pure function so the reporting surface — in particular the
+ * #1821 AC21 duplicate-suppression line, whose only production consumer is this
+ * command — is testable without mocking `runSkillConsolidation`.
+ */
+function buildConsolidateSummary(
+	improver: SkillImproveResult | undefined,
+	statePath: string,
+	fallbackMaxCalls: number,
+): string {
+	const lines = [
+		'Skill consolidation complete.',
+		'',
+		`Source: ${improver?.source ?? 'unknown'}`,
+		`Proposal: ${improver?.proposalPath ?? '(none)'}`,
+		`Quota: ${improver?.quota.calls_used ?? 0}/${improver?.quota.max_calls ?? fallbackMaxCalls}`,
+		`State: ${statePath}`,
+	];
+	if (improver?.draftSkillsWritten?.length) {
+		lines.push(`Draft skills: ${improver.draftSkillsWritten.length}`);
+	}
+	if (improver?.macroMotifs) {
+		lines.push(`Failure motifs: ${improver.macroMotifs.proposalsWritten}`);
+	}
+	if (improver?.successMotifs) {
+		lines.push(`Success motifs: ${improver.successMotifs.proposalsWritten}`);
+	}
+	// #1821 AC21: surface cross-producer dedup so a run that proposes nothing
+	// because everything was already emitted is distinguishable from a run that
+	// found nothing at all.
+	const duplicatesSuppressed =
+		(improver?.macroMotifs?.duplicatesSuppressed ?? 0) +
+		(improver?.successMotifs?.duplicatesSuppressed ?? 0);
+	if (duplicatesSuppressed > 0) {
+		lines.push(`Duplicate recommendations suppressed: ${duplicatesSuppressed}`);
+	}
+	lines.push('', 'No skills were auto-activated.');
+	return lines.join('\n');
+}
 
 export async function handleConsolidateCommand(
 	directory: string,
@@ -46,26 +89,11 @@ export async function handleConsolidateCommand(
 			].join('\n');
 		}
 
-		const improver = result.result;
-		const lines = [
-			'Skill consolidation complete.',
-			'',
-			`Source: ${improver?.source ?? 'unknown'}`,
-			`Proposal: ${improver?.proposalPath ?? '(none)'}`,
-			`Quota: ${improver?.quota.calls_used ?? 0}/${improver?.quota.max_calls ?? skillConfig.max_calls_per_day}`,
-			`State: ${result.statePath}`,
-		];
-		if (improver?.draftSkillsWritten?.length) {
-			lines.push(`Draft skills: ${improver.draftSkillsWritten.length}`);
-		}
-		if (improver?.macroMotifs) {
-			lines.push(`Failure motifs: ${improver.macroMotifs.proposalsWritten}`);
-		}
-		if (improver?.successMotifs) {
-			lines.push(`Success motifs: ${improver.successMotifs.proposalsWritten}`);
-		}
-		lines.push('', 'No skills were auto-activated.');
-		return lines.join('\n');
+		return buildConsolidateSummary(
+			result.result,
+			result.statePath,
+			skillConfig.max_calls_per_day,
+		);
 	} catch (err) {
 		return [
 			'Skill consolidation encountered an error.',
@@ -78,3 +106,6 @@ export async function handleConsolidateCommand(
 export const _internals = {
 	handleConsolidateCommand,
 };
+
+/** Pure-function seam for tests (writing-tests SKILL.md, Tier 0). */
+export const _test_exports = { buildConsolidateSummary };

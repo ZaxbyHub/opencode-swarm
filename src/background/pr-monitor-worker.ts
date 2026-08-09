@@ -87,6 +87,43 @@ interface ComputedChanges {
 	newReviewDecision: string;
 }
 
+// ── Meaningful snapshot fields for idle-backoff reset (FR-008) ──────
+// These fields indicate a real state change worth resetting the idle counter.
+// Excluded: mergeableState (GitHub flaps MERGEABLE/UNKNOWN), lastCheckedAt,
+// lastCheckRunSet, hasUnaddressedEvents, errorCount (always-written bookkeeping).
+const MEANINGFUL_SNAPSHOT_FIELDS = [
+	'isWatching',
+	'headRefOid',
+	'mergeGroupRunStatus',
+	'mergeGroupRunConclusion',
+	'mergeGroupRunHtmlUrl',
+	'lastCommentId',
+] as const satisfies readonly (keyof PrSubscriptionRecord)[];
+
+/**
+ * Determine whether to skip polling a PR based on idle backoff (issue #1691).
+ *
+ * After N consecutive no-change polls, skip cycles deterministically:
+ *   idle 0-2:  poll every cycle (no skip)
+ *   idle 3-5:  poll every 2nd cycle (50% reduction)
+ *   idle 6+:   poll every 3rd cycle (67% reduction) — 3× cap per General Council
+ *
+ * Uses pollCycleCount for deterministic scheduling (no random skips).
+ * Any detected change resets the counter to 0.
+ *
+ * Pure function — exported for direct unit testing without worker setup.
+ */
+export function shouldSkipIdlePoll(
+	idleCount: number,
+	cycleNumber: number,
+): boolean {
+	if (idleCount < 3) return false;
+	// 3× cap: poll every 3rd cycle once idleCount >= 6.
+	// idleCount 3-5 retains skipEvery=2 (50% reduction).
+	const skipEvery = idleCount >= 6 ? 3 : 2;
+	return cycleNumber % skipEvery !== 0;
+}
+
 // ── Worker ──────────────────────────────────────────────────────────
 
 /**
@@ -110,6 +147,14 @@ export class PrMonitorWorker {
 
 	/** In-memory circuit-breaker state per PR correlationId. */
 	private readonly circuitBreakerMap = new Map<string, CircuitBreakerState>();
+
+	/** In-memory idle-backoff counter per PR correlationId (issue #1691).
+	 *  Incremented when a poll cycle detects zero changes; reset on any change.
+	 *  Used to skip polls for PRs that have been idle for many cycles. */
+	private readonly idlePollCountMap = new Map<string, number>();
+
+	/** In-memory total poll cycle counter for deterministic skip scheduling. */
+	private pollCycleCount = 0;
 
 	/** In-memory review decision per PR correlationId (not persisted). */
 	private readonly reviewStateMap = new Map<string, string>();
@@ -164,6 +209,13 @@ export class PrMonitorWorker {
 			});
 		}, this.config.poll_interval_seconds * 1000);
 
+		// Never keep the process alive solely for this poll timer.
+		if (
+			typeof (this.pollTimer as { unref?: () => void }).unref === 'function'
+		) {
+			(this.pollTimer as { unref: () => void }).unref();
+		}
+
 		this.status = 'running';
 		log('[PrMonitorWorker] Started polling', {
 			intervalSeconds: this.config.poll_interval_seconds,
@@ -191,6 +243,8 @@ export class PrMonitorWorker {
 		this.status = 'stopped';
 		this.circuitBreakerMap.clear();
 		this.reviewStateMap.clear();
+		this.idlePollCountMap.clear();
+		this.pollCycleCount = 0;
 		log('[PrMonitorWorker] Stopped');
 	}
 
@@ -249,6 +303,8 @@ export class PrMonitorWorker {
 
 			const toPoll = activeSubs.slice(0, this.config.max_prs_per_cycle);
 			const concurrencyLimit = this.config.max_concurrent_pr_polls;
+
+			this.pollCycleCount++;
 
 			await this.processWithConcurrency(toPoll, concurrencyLimit);
 			await this.runSweep();
@@ -361,6 +417,18 @@ export class PrMonitorWorker {
 			return;
 		}
 
+		// Idle backoff (issue #1691): skip polls for PRs that have been
+		// unchanged for many consecutive cycles. This reduces steady-state
+		// gh subprocess volume from 4×polls/cycle to near-zero for idle PRs.
+		const idleCount = this.idlePollCountMap.get(correlationId) ?? 0;
+		if (shouldSkipIdlePoll(idleCount, this.pollCycleCount)) {
+			log('[PrMonitorWorker] Skipping idle PR poll (backoff)', {
+				correlationId,
+				idleCount,
+			});
+			return;
+		}
+
 		try {
 			const [statusResult, commentsResult, mergeResult, reviewResult] =
 				await Promise.all([
@@ -439,10 +507,36 @@ export class PrMonitorWorker {
 			// Reset circuit breaker on success
 			if (!isTimedOut?.()) {
 				this.circuitBreakerMap.delete(correlationId);
+
 				await _internals.updateSnapshot(this.directory, correlationId, {
 					errorCount: 0,
 					lastCheckedAt: Date.now(),
 				});
+
+				// Update idle backoff counter AFTER successful persistence (issue #1691).
+				// Counter must only advance when the snapshot is actually persisted,
+				// otherwise a failed cycle would corrupt the idle count (FR-008).
+				// Also resets on meaningful snapshot-field changes (not just events).
+				let hasMeaningfulSnapshotChange = false;
+				for (const field of MEANINGFUL_SNAPSHOT_FIELDS) {
+					if (Object.hasOwn(changes.snapshotUpdates, field)) {
+						const newVal = changes.snapshotUpdates[field];
+						const priorVal = sub[field];
+						if (newVal !== priorVal) {
+							hasMeaningfulSnapshotChange = true;
+							break;
+						}
+					}
+				}
+
+				if (changes.events.length > 0 || hasMeaningfulSnapshotChange) {
+					this.idlePollCountMap.set(correlationId, 0);
+				} else {
+					this.idlePollCountMap.set(
+						correlationId,
+						(this.idlePollCountMap.get(correlationId) ?? 0) + 1,
+					);
+				}
 			}
 		} catch (err) {
 			// Skip error handling if timeout already recorded this failure
@@ -512,6 +606,7 @@ export class PrMonitorWorker {
 		const currentCheckSet = this.serializeChecks(
 			current.status.statusCheckRollup,
 		);
+		snapshotUpdates.lastCheckRunSet = currentCheckSet;
 		if (
 			sub.lastCheckRunSet !== undefined &&
 			currentCheckSet !== sub.lastCheckRunSet

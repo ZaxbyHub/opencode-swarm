@@ -8,7 +8,9 @@ import {
 } from '../hooks/knowledge-reinforcement.js';
 import {
 	computeContentHash,
+	dedupeCapped,
 	findNearDuplicate,
+	inferTags,
 	resolveSwarmKnowledgePath,
 	transactKnowledge,
 } from '../hooks/knowledge-store.js';
@@ -40,6 +42,42 @@ const VALID_CATEGORIES: KnowledgeCategory[] = [
 	'todo',
 	'other',
 ];
+
+/** Cap shared by the tag list and every actionability array (#1821 Lane 0b). */
+const KNOWLEDGE_ADD_FIELD_CAP = 20;
+
+/**
+ * Merge caller-supplied tags with the tags inferred from the lesson.
+ *
+ * Caller tags come FIRST so that when the combined list exceeds the cap,
+ * truncation drops inferred tags before it drops user intent. `dedupeCapped`
+ * is case-insensitive (first casing wins), so an inferred tag the caller
+ * already supplied collapses into the caller's casing instead of duplicating.
+ *
+ * Hoisted to module scope and exposed via `_test_exports` so this call site is
+ * observable on its own: the store write boundary normalizes the same fields,
+ * which would otherwise mask a regression here (issue #1821 Lane 0b).
+ */
+function mergeLessonTags(tagsInput: unknown, lesson: string): string[] {
+	return dedupeCapped(
+		[...(Array.isArray(tagsInput) ? tagsInput : []), ...inferTags(lesson)],
+		{ cap: KNOWLEDGE_ADD_FIELD_CAP },
+	);
+}
+
+/**
+ * Normalize one optional v3 actionability array from untrusted tool input.
+ *
+ * The `undefined` return is load-bearing: `validateActionableFields` and
+ * `validateActionability` distinguish an ABSENT field from an empty one, and
+ * JSON.stringify drops an `undefined` value so the persisted record keeps that
+ * distinction. Only the inner filter+cap is `dedupeCapped` (#1821 Lane 0b).
+ */
+function strArray(v: unknown): string[] | undefined {
+	return Array.isArray(v)
+		? dedupeCapped(v, { cap: KNOWLEDGE_ADD_FIELD_CAP })
+		: undefined;
+}
 
 export const knowledge_add: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
@@ -138,15 +176,8 @@ export const knowledge_add: ReturnType<typeof createSwarmTool> =
 				});
 			}
 
-			// Parse tags (optional, default to empty array)
-			let tags: string[] = [];
-			if (tagsInput !== undefined) {
-				if (Array.isArray(tagsInput)) {
-					tags = tagsInput
-						.filter((t): t is string => typeof t === 'string')
-						.slice(0, 20); // cap at 20 tags
-				}
-			}
+			// Parse tags (optional) and merge in the tags inferred from the lesson.
+			const tags: string[] = mergeLessonTags(tagsInput, lesson);
 
 			// Parse scope (optional, default to 'global')
 			const scope =
@@ -155,11 +186,8 @@ export const knowledge_add: ReturnType<typeof createSwarmTool> =
 					: 'global';
 
 			// Parse optional v3 actionability fields (Change 4). Untrusted input:
-			// shape-validated below via validateActionableFields.
-			const strArray = (v: unknown): string[] | undefined =>
-				Array.isArray(v)
-					? v.filter((x): x is string => typeof x === 'string').slice(0, 20)
-					: undefined;
+			// shape-validated below via validateActionableFields. See the
+			// module-scope `strArray` for the load-bearing `undefined` contract.
 			const obj =
 				args && typeof args === 'object'
 					? (args as Record<string, unknown>)
@@ -385,3 +413,12 @@ export const knowledge_add: ReturnType<typeof createSwarmTool> =
 			});
 		},
 	});
+
+/**
+ * Tier-0 test seam (issue #1821 Lane 0b). These are pure functions with no I/O.
+ * They are exported so the call-site normalization can be asserted directly:
+ * the store write boundary normalizes the same fields with the same semantics,
+ * so an assertion made against a PERSISTED entry cannot distinguish "call site
+ * fixed" from "call site reverted".
+ */
+export const _test_exports = { mergeLessonTags, strArray };

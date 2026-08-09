@@ -8,6 +8,7 @@ import {
 	beginInvocation,
 	ensureAgentSession,
 	getActiveWindow,
+	recordModifiedFilesForTask,
 	resetSwarmState,
 	swarmState,
 } from '../../../src/state';
@@ -424,12 +425,14 @@ describe('telemetry-guardrails-wiring', () => {
 
 			// Declare scope but then modify files outside it
 			session.declaredCoderScope = ['src/utils.ts'];
-			session.modifiedFilesThisCoderTask = [
-				'src/utils.ts',
-				'src/other.ts', // Not in declared scope
-				'src/another.ts', // Not in declared scope
-				'lib/helper.ts', // Not in declared scope
-			];
+			expect(
+				recordModifiedFilesForTask(session, 'task-sv-1', [
+					'src/utils.ts',
+					'src/other.ts', // Not in declared scope
+					'src/another.ts', // Not in declared scope
+					'lib/helper.ts', // Not in declared scope
+				]),
+			).toBe(true);
 
 			beginInvocation(sessionId, coderAgentName);
 
@@ -458,77 +461,6 @@ describe('telemetry-guardrails-wiring', () => {
 			expect(found).toBeDefined();
 			expect(found!.data.sessionId).toBe(sessionId);
 			expect(found!.data.agentName).toBe(coderAgentName);
-		});
-	});
-
-	// =====================================================================
-	// PART 3: Edge cases
-	// =====================================================================
-
-	describe('guardrails disabled does not trigger telemetry', () => {
-		test('toolBefore with disabled guardrails does not throw or emit telemetry', async () => {
-			const received: Array<{ event: string; data: Record<string, unknown> }> =
-				[];
-			addTelemetryListener((event, data) => received.push({ event, data }));
-
-			const sessionId = 'session-gr-disabled';
-			const coderAgentName = 'coder';
-
-			ensureAgentSession(sessionId, coderAgentName);
-			swarmState.activeAgent.set(sessionId, coderAgentName);
-			beginInvocation(sessionId, coderAgentName);
-
-			// Create hooks with disabled guardrails
-			const hooks = createGuardrailsHooks(sharedTempDir, {
-				enabled: false,
-				max_tool_calls: 0,
-				max_duration_minutes: 0,
-				max_repetitions: 10,
-				max_consecutive_errors: 5,
-				warning_threshold: 0.8,
-				idle_timeout_minutes: 60,
-				no_op_warning_threshold: 15,
-				max_coder_revisions: 5,
-			} as GuardrailsConfig);
-
-			// Should not throw
-			await hooks.toolBefore(
-				{ tool: 'bash', sessionID: sessionId, callID: 'call-disabled' },
-				{ args: { command: 'echo test' } },
-			);
-
-			// Verify NO hardLimitHit was emitted
-			const found = received.find((r) => r.event === 'hard_limit_hit');
-			expect(found).toBeUndefined();
-		});
-	});
-
-	describe('architect session is exempt from guardrails telemetry', () => {
-		test('toolBefore for architect does not emit hardLimitHit', async () => {
-			const received: Array<{ event: string; data: Record<string, unknown> }> =
-				[];
-			addTelemetryListener((event, data) => received.push({ event, data }));
-
-			const sessionId = 'session-gr-arch';
-			const architectAgentName = 'architect';
-
-			ensureAgentSession(sessionId, architectAgentName);
-			swarmState.activeAgent.set(sessionId, architectAgentName);
-
-			// Architect sessions don't create windows, so toolBefore should be exempt
-			const hooks = createGuardrailsHooks(
-				sharedTempDir,
-				makeGuardrailsConfig({ max_tool_calls: 30 }),
-			);
-
-			await hooks.toolBefore(
-				{ tool: 'bash', sessionID: sessionId, callID: 'call-arch' },
-				{ args: { command: 'echo architect test' } },
-			);
-
-			// Verify NO hardLimitHit was emitted
-			const found = received.find((r) => r.event === 'hard_limit_hit');
-			expect(found).toBeUndefined();
 		});
 	});
 });

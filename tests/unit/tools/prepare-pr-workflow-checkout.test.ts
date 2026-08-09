@@ -337,7 +337,7 @@ describe('prepare_pr_workflow_checkout', () => {
 		expect(await abort).toMatchObject({ mode: 'PR_REVIEW', openLanes: 0 });
 		const secondResult = JSON.parse(await second);
 		expect(secondResult.success).toBe(false);
-		expect(secondResult.message).toContain('not dirty');
+		expect(secondResult.message).toContain('no active PR workflow gate');
 		expect(
 			(await expectGitSuccess(['stash', 'list'])).trim().split('\n').length,
 		).toBe(1);

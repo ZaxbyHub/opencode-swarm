@@ -294,12 +294,45 @@ export async function syntaxCheck(
 		if (outcome.skipped) skippedCount++;
 	}
 
-	const verdict: EvidenceVerdict = filesFailed > 0 ? 'fail' : 'pass';
+	// A check that examined nothing is not a passing check. Reporting
+	// `verdict: 'pass'` with `files_checked: 0` records a green gate in the
+	// durable evidence store on the strength of having done no work — a caller
+	// (or a later reviewer reading the evidence bundle) cannot distinguish
+	// "syntax is fine" from "the input never reached the parser". Three silent
+	// paths produce an empty set: an empty `changed_files`, the default
+	// `mode: 'changed'` filter dropping every entry with `additions === 0`
+	// (deletion-only and pure-rename files), and a `languages` filter matching
+	// nothing. Each is now named in the summary so the cause is actionable.
+	const emptyCheckReasons: string[] = [];
+	if (changed_files.length === 0) {
+		emptyCheckReasons.push('no files were supplied in changed_files');
+	} else {
+		if (mode === 'changed') {
+			emptyCheckReasons.push(
+				`mode='changed' dropped files with additions === 0 (deletion-only or pure-rename entries); pass mode='all' to include them`,
+			);
+		}
+		if (languages?.length) {
+			emptyCheckReasons.push(
+				`the languages filter [${languages.join(', ')}] matched no supplied file`,
+			);
+		}
+		if (emptyCheckReasons.length === 0) {
+			emptyCheckReasons.push(
+				'every supplied file was skipped as unsupported, unreadable, too large, or binary',
+			);
+		}
+	}
+
+	const verdict: EvidenceVerdict =
+		filesFailed > 0 ? 'fail' : filesChecked === 0 ? 'skip' : 'pass';
 
 	const summary =
 		filesFailed > 0
 			? `Syntax errors found in ${filesFailed} of ${filesChecked} files`
-			: `All ${filesChecked} files passed syntax check`;
+			: filesChecked === 0
+				? `No files were checked — ${emptyCheckReasons.join('; ')}. This is NOT a passing syntax check.`
+				: `All ${filesChecked} files passed syntax check`;
 
 	// Save evidence
 	await evidenceInternals.saveEvidence(directory, 'syntax_check', {
@@ -338,7 +371,7 @@ export const syntax_check: ReturnType<typeof tool> = createSwarmTool({
 			.enum(['changed', 'all'])
 			.optional()
 			.describe(
-				"Check mode: 'changed' = only changed files, 'all' = all files in repo",
+				"Check mode over the supplied changed_files. 'changed' (default) checks only entries with additions > 0, so deletion-only and pure-rename entries are excluded; 'all' checks every supplied entry. Neither mode enumerates the repository — this tool only ever inspects the files you pass in changed_files. If the filters leave nothing to check the verdict is 'skip', never 'pass'.",
 			),
 		languages: z
 			.array(z.string())

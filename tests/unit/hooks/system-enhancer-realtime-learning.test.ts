@@ -95,7 +95,12 @@ describe('System Enhancer real-time learning nudge', () => {
 		qa_retry_limit: 3,
 		inject_phase_reminders: true,
 		context_budget: { max_injection_tokens: 20_000 },
-	};
+		// #1821: real-time admission defaults to ENABLED, and `supersede_nudge`
+		// defaults to true, so with a bare config the nudge is now suppressed by
+		// design. These cases exercise the nudge CADENCE, so admission is turned
+		// off here; the suppression behaviour itself is asserted separately below.
+		learning: { realtime_admission: { enabled: false } },
+	} as PluginConfig;
 
 	it('injects the nudge at the first default threshold and suppresses duplicates', async () => {
 		await recordCompletedToolCalls('learning-session', 10);

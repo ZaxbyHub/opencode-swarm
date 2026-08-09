@@ -7,7 +7,7 @@ description: >
 
 # Critic Gate Protocol
 
-This protocol is loaded on demand by the architect stub in src/agents/architect.ts. The architect prompt keeps only activation, action, and hard safety constraints; the full execution details live here.
+This protocol is loaded on demand by the architect runtime. The architect prompt keeps only activation, action, and hard safety constraints; the full execution details live here.
 
 ### MODE: CRITIC-GATE
 Delegate plan to the active swarm's critic agent for review BEFORE any implementation begins.
@@ -32,6 +32,16 @@ if the dispatch prompt didn't contain the expected keywords. Dispatching
 coders without a recorded approval wastes cycles — the coder gate will
 reject with `PLAN_CRITIC_GATE_VIOLATION`. One read-only call prevents
 this entire failure class.
+
+**Escape hatch (issue #2012):** If the critic genuinely returned APPROVED
+but the mechanical recorder failed to persist the snapshot (verdict-format
+mismatch, dispatch-signal miss, or a plan.json read race) AND re-running
+MODE: CRITIC-GATE does not help, call `approve_plan_critic` with a
+one-line `reason` (or ask the user to run `/swarm approve-plan-critic
+<reason>`). This records a manual `plan_critic_gate` approval snapshot
+tagged `method: "manual_override"`, audited to `.swarm/events.jsonl`.
+Architect-only. Use ONLY when a legitimate APPROVED was lost — this is an
+escape hatch, not a substitute for running the critic review.
 
 CRITIC-GATE TRIGGER: Run ONCE when you first write the complete .swarm/plan.md.
 Do NOT re-run CRITIC-GATE before every project phase.
@@ -86,5 +96,10 @@ Caveat: this assumption breaks if the plan lacks a `plan_critic_gate`-tagged app
   plan object) rather than relying solely on plan.md, which omits acceptance
   criteria.
 - This is a structural-completeness failure, not a style concern.
-- The detection logic mirrors the existing ANALYZE-mode SC-### coverage check
-  (see src/agents/critic.ts ANALYZE mode, step 4).
+- The detection logic mirrors the existing ANALYZE-mode SC-### coverage check:
+  map each spec obligation to the task(s) whose description or acceptance field
+  addresses it, then flag obligations with zero covering tasks as gaps — MUST
+  obligations with no covering task are CRITICAL severity, SHOULD obligations
+  with no covering task are HIGH severity, and SC-### success criteria with no
+  covering task are HIGH severity (untestable success criteria = unverifiable
+  requirement).

@@ -4,7 +4,10 @@ export { createCompactionCustomizerHook } from './compaction-customizer';
 export { createContextBudgetHandler } from './context-budget';
 export { createContextCapsuleInjectHook } from './context-capsule-inject';
 export { createCuratorLLMDelegate } from './curator-llm-factory';
-export { createDelegationGateHook } from './delegation-gate';
+export {
+	createDelegationGateHook,
+	outputLooksLikeBackgroundRunning,
+} from './delegation-gate';
 export { createDelegationSanitizerHook } from './delegation-sanitizer';
 export { createDelegationTrackerHook } from './delegation-tracker';
 export {
@@ -27,6 +30,9 @@ export {
 	classifyMessage,
 	classifyMessages,
 	containsPlanContent,
+	getCompletedToolOutputs,
+	getToolNames,
+	getToolParts,
 	isDuplicateToolRead,
 	isStaleError,
 	isToolResult,

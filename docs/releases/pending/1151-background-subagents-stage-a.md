@@ -38,19 +38,23 @@ not yet verifiable at runtime in the pinned SDK. Stage A lands the safe, reversi
 foundation — durable dispatch tracking + the empirical observation instrument — **without any
 gate effect**, so the signal can be confirmed before Stage B enables advancement.
 
-## Stage A is observe-only
+## Stage A history and current status
 
-A background completion does **not** advance workflow gates or record gate evidence in this
-stage. Reviewer/test_engineer gates are satisfied only by foreground delegations. The
-gate-affecting completion ingestion (correlate → reuse foreground transitions → exact-once,
-with parent-session-gone and multi-swarm isolation handling) is **Stage B**, a separate PR
-gated on runtime confirmation produced by this observer.
+The change described by this fragment originally shipped Stage A as observe-only:
+background completions did not advance workflow gates or record gate evidence.
+That historical boundary has since graduated for opted-in trusted completions.
+Current coder/reviewer/test-engineer ingestion correlates the exact parent,
+validates or settles workspace provenance, applies role-appropriate state and
+evidence exactly once, and publishes a durable architect advisory. The feature
+remains off by default while upstream still requires an experimental flag.
 
 ## Migration
 
 No action and no behavior change for existing users — the feature is **off by default** and
-preserves the PR 1 fail-closed block. Enabling requires both `hooks.background_subagents: true`
-and the upstream `OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true`.
+preserves the PR 1 fail-closed block. Enabling requires
+`hooks.background_subagents: true` plus either upstream
+`OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true` or
+`OPENCODE_EXPERIMENTAL=true`.
 
 ## Invariant audit
 

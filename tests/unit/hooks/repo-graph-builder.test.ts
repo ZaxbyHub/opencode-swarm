@@ -18,7 +18,10 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-import { createRepoGraphBuilderHook } from '../../../src/hooks/repo-graph-builder';
+import {
+	createRepoGraphBuilderHook,
+	rebaseOntoWorkspace,
+} from '../../../src/hooks/repo-graph-builder';
 import * as logger from '../../../src/utils/logger';
 
 // Workaround for Bun #32056: on Windows, a pending promise that leaves the
@@ -322,6 +325,96 @@ describe('toolAfter hook', () => {
 
 		// Verify updateGraphForFiles was NOT called
 		expect(mockUpdateGraphForFiles).not.toHaveBeenCalled();
+	});
+
+	test('toolAfter triggers update for .rs/.go/.pyw writes (A2 extension parity)', async () => {
+		// Regression for issue #1985 defect A2: the hook's extension list used
+		// to drift from the builder's, so Rust/Go/.pyw edits never triggered an
+		// incremental update. They now route through the shared
+		// isScannableSourcePath and pick up .rs/.go/.pyw automatically.
+		const workspaceRoot = tempWorkspace;
+		const hook = createRepoGraphBuilderHook(workspaceRoot, {
+			buildWorkspaceGraph: mockBuildWorkspaceGraph,
+			saveGraph: mockSaveGraph,
+			updateGraphForFiles: mockUpdateGraphForFiles,
+		});
+
+		for (const ext of ['.rs', '.go', '.pyw']) {
+			mockUpdateGraphForFiles.mockClear();
+			await hook.toolAfter(
+				{
+					tool: 'edit',
+					sessionID: 'test-session',
+					args: { file_path: `module${ext}` },
+				},
+				{ output: undefined },
+			);
+			expect(mockUpdateGraphForFiles).toHaveBeenCalledTimes(1);
+			expect(mockUpdateGraphForFiles.mock.calls[0][1]).toEqual(
+				expect.arrayContaining([expect.stringContaining(`module${ext}`)]),
+			);
+		}
+	});
+
+	test('toolAfter passes the realpath of the edited file (A5)', async () => {
+		// Regression for issue #1985 defect A5: the hook must pass the realpath
+		// (not the raw absolute path) into updateGraphForFiles so node keys
+		// match the realpath'd walk on case-insensitive filesystems.
+		const workspaceRoot = tempWorkspace;
+		const hook = createRepoGraphBuilderHook(workspaceRoot, {
+			buildWorkspaceGraph: mockBuildWorkspaceGraph,
+			saveGraph: mockSaveGraph,
+			updateGraphForFiles: mockUpdateGraphForFiles,
+		});
+
+		const absFile = path.join(workspaceRoot, 'real.ts');
+		fs.writeFileSync(absFile, 'export const x = 1;\n');
+		await hook.toolAfter(
+			{
+				tool: 'edit',
+				sessionID: 'test-session',
+				args: { file_path: absFile },
+			},
+			{ output: undefined },
+		);
+
+		expect(mockUpdateGraphForFiles).toHaveBeenCalledTimes(1);
+		const passedPath = mockUpdateGraphForFiles.mock.calls[0][1][0] as string;
+		// The passed path must resolve to the same canonical path as the file
+		// on disk (realpath), not a stale non-realpath'd absolute form.
+		expect(fs.realpathSync(passedPath)).toBe(fs.realpathSync(absFile));
+		fs.rmSync(absFile, { force: true });
+	});
+
+	test('rebaseOntoWorkspace rebases a symlinked-root file onto the lexical root (A5)', () => {
+		// The walk keys nodes lexically relative to workspaceRoot. When the
+		// workspace root is a symlink (lexical → real), a realpath'd file lives
+		// under the real root and must be rebased onto the lexical root so the
+		// incremental update keys the same node the walk produced.
+		const lexical = '/home/user/work';
+		const real = '/real/projects/work';
+		const realFile = `${real}/src/main.ts`;
+		const rebased = rebaseOntoWorkspace(realFile, real, lexical);
+		// The rebased path rejoins the lexical root with the workspace-relative
+		// tail — matching the walker's lexical key (modulo path.sep on Windows).
+		expect(rebased.replace(/\\/g, '/')).toBe(`${lexical}/src/main.ts`);
+	});
+
+	test('rebaseOntoWorkspace preserves realpath when workspace is not a symlink (A5)', () => {
+		// Same lexical and real root → return the realpath (case-folding fix
+		// preserved, no rebase needed).
+		const root = '/home/user/work';
+		const realFile = `${root}/src/main.ts`;
+		const rebased = rebaseOntoWorkspace(realFile, root, root);
+		expect(rebased).toBe(realFile);
+	});
+
+	test('rebaseOntoWorkspace falls back to realpath when file is outside the real workspace (A5)', () => {
+		const real = '/real/projects/work';
+		const lexical = '/home/user/work';
+		const outside = '/elsewhere/main.ts';
+		const rebased = rebaseOntoWorkspace(outside, real, lexical);
+		expect(rebased).toBe(outside);
 	});
 
 	test('toolAfter handles missing file_path gracefully', async () => {

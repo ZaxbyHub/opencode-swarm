@@ -15,6 +15,7 @@ import {
 	KnowledgeConfigSchema,
 	type PhaseCompleteConfig,
 	PhaseCompleteConfigSchema,
+	resolveAutoReviewConfig,
 	SkillImproverConfigSchema,
 	stripKnownSwarmPrefix,
 } from '../config/schema';
@@ -68,6 +69,12 @@ import {
 	savePlan,
 	savePlanWithAutoAcknowledgedRemovals,
 } from '../plan/manager';
+import type { ReviewModelDispatcher } from '../review/contracts.js';
+import {
+	mayRunPhaseAutoReview,
+	runPhaseAutoReview,
+} from '../review/phase-runner.js';
+import type { ReviewAgentModelRegistry } from '../review/runtime.js';
 import { runMemoryConsolidationFireAndForget } from '../services/memory-consolidation.js';
 import { runSkillConsolidationFireAndForget } from '../services/skill-consolidation.js';
 import { flushPendingSnapshot } from '../session/snapshot-writer';
@@ -80,6 +87,7 @@ import {
 import { telemetry } from '../telemetry';
 import { isEpicModeActiveForProject } from '../turbo/epic/state';
 import { _internals as leanPhaseInternals } from '../turbo/lean/phase-ready';
+import { pushAdvisory } from '../utils/advisory-queue';
 import * as logger from '../utils/logger';
 import { createSwarmTool } from './create-tool';
 import {
@@ -88,6 +96,7 @@ import {
 	runCompletionVerifyGate,
 	runDriftGate,
 	runFinalCouncilGate,
+	runFinalReviewGate,
 	runHallucinationGate,
 	runMutationGate,
 	runPhaseCouncilGate,
@@ -114,6 +123,19 @@ export interface PhaseCompleteArgs {
 	acceptViolationsJustification?: string;
 	/** Calling agent identity (from tool ctx) — gates the override to the architect. */
 	callerAgent?: string;
+}
+
+export interface PhaseCompleteRuntime {
+	reviewModelDispatcher?: ReviewModelDispatcher;
+	generatedAgentNames?: readonly string[];
+	reviewAgentModelRegistry?: ReviewAgentModelRegistry;
+	getActiveAgentName?: (sessionID: string) => string | undefined;
+}
+
+function resolvePhaseReviewAgentNames(
+	runtime: PhaseCompleteRuntime,
+): Iterable<string> {
+	return runtime.generatedAgentNames ?? swarmState.generatedAgentNames;
 }
 
 /**
@@ -152,6 +174,7 @@ function safeWarn(message: string, error: unknown): void {
 	}
 }
 
+/** @tool-opt-out Output-size constant, not a tool definition. */
 export const MAX_OUTPUT_BYTES = 512_000; // 512KB max output (FR-007, DD-013)
 
 const TASK_GATE_INFERABLE_AGENTS = new Set([
@@ -465,6 +488,7 @@ export async function executePhaseComplete(
 	args: PhaseCompleteArgs,
 	workingDirectory?: string,
 	directory?: string,
+	runtime: PhaseCompleteRuntime = {},
 ): Promise<string> {
 	// Extract arguments
 	const phase = Number(args.phase);
@@ -839,6 +863,60 @@ export async function executePhaseComplete(
 	}
 
 	// Gate 6: Final Council — NOT turbo-bypassed (is last-phase only by design)
+	// Generalized whole-diff review. This tool body owns the bounded dispatch
+	// and durable evidence write; the gate only verifies that exact evidence.
+	// Gate mode is intentionally not bypassed by Turbo.
+	try {
+		const autoReviewConfig = resolveAutoReviewConfig(config.auto_review ?? {});
+		if (mayRunPhaseAutoReview(autoReviewConfig)) {
+			const plan = await loadPlan(dir).catch(() => null);
+			const phaseIds =
+				plan?.phases
+					?.map((item) => Number(item.id))
+					.filter((id) => Number.isInteger(id) && id > 0) ?? [];
+			const phaseReview = await runPhaseAutoReview({
+				directory: dir,
+				sessionID,
+				phase,
+				isFinalPlanPhase:
+					phaseIds.length > 0 && phase === Math.max(...phaseIds),
+				activeLeanTurbo: hasActiveLeanTurbo(sessionID),
+				config: autoReviewConfig,
+				dispatcher: runtime.reviewModelDispatcher,
+				generatedAgentNames: resolvePhaseReviewAgentNames(runtime),
+				activeAgentName:
+					args.callerAgent ?? runtime.getActiveAgentName?.(sessionID),
+				agentModelRegistry: runtime.reviewAgentModelRegistry,
+				injectAdvisory: (_targetSessionID, advisory) => {
+					const sessionState = swarmState.agentSessions.get(sessionID);
+					if (!sessionState) return;
+					pushAdvisory(sessionState, advisory);
+				},
+			});
+			gateCtx.autoReviewTrigger = phaseReview.trigger;
+			gateCtx.autoReviewScopeHash = phaseReview.scopeHash;
+			gateCtx.autoReviewScopeComplete = phaseReview.scopeComplete;
+			gateCtx.autoReviewBlocked = phaseReview.blocked;
+			gateCtx.autoReviewBlockReason = phaseReview.blockReason;
+			warnings.push(...phaseReview.warnings);
+		}
+	} catch (error) {
+		gateCtx.autoReviewTrigger = 'phase_completion';
+		gateCtx.autoReviewBlocked = true;
+		gateCtx.autoReviewBlockReason = 'REVIEW_DISPATCH_FAILED';
+		warnings.push(
+			`Auto-review configuration or dispatch failed: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+
+	{
+		const reviewGateResult = await runFinalReviewGate(gateCtx);
+		if (reviewGateResult.blocked) {
+			return blockedResult(phase, reviewGateResult);
+		}
+		warnings.push(...reviewGateResult.warnings);
+	}
+
 	const gateResult = await runFinalCouncilGate(gateCtx);
 	if (gateResult.blocked) {
 		return blockedResult(phase, gateResult);
@@ -961,11 +1039,22 @@ export async function executePhaseComplete(
 					},
 				},
 			);
-			if (curationResult) {
+			// curateAndStoreSwarm always returns a non-nullable object, so gate on
+			// substance: only announce the curation when it actually did something
+			// (stored/reinforced/quarantined/rejected). A skipped-only curation is a
+			// no-op not worth surfacing to the architect.
+			const curationTouchedAny =
+				curationResult &&
+				curationResult.stored +
+					curationResult.reinforced +
+					curationResult.quarantined +
+					curationResult.rejected >
+					0;
+			if (curationTouchedAny) {
 				const sessionState = swarmState.agentSessions.get(sessionID);
 				if (sessionState) {
-					sessionState.pendingAdvisoryMessages ??= [];
-					sessionState.pendingAdvisoryMessages.push(
+					pushAdvisory(
+						sessionState,
 						`[CURATOR] Knowledge curation: ${curationResult.stored} stored, ${curationResult.reinforced} reinforced, ${curationResult.skipped} skipped, ${curationResult.rejected} rejected, ${curationResult.quarantined} quarantined (unactionable).`,
 					);
 				}
@@ -1051,6 +1140,12 @@ export async function executePhaseComplete(
 				curatorResult.knowledge_recommendations,
 				knowledgeConfig,
 			);
+			// Site A: deterministic drift check for the current phase. When it
+			// detects drift it writes an on-disk report AND pushes an advisory via
+			// the callback below. Track whether that callback fired so the
+			// prior-report re-read (Site B) can avoid re-pushing a near-duplicate
+			// for the SAME phase in the SAME run (issue #1976 B5.4).
+			let driftAdvisoryPushedThisRun = false;
 			try {
 				const { runDeterministicDriftCheck } = await import(
 					'../hooks/curator-drift.js'
@@ -1063,8 +1158,8 @@ export async function executePhaseComplete(
 					(message) => {
 						const sessionState = swarmState.agentSessions.get(sessionID);
 						if (sessionState) {
-							sessionState.pendingAdvisoryMessages ??= [];
-							sessionState.pendingAdvisoryMessages.push(message);
+							pushAdvisory(sessionState, message);
+							driftAdvisoryPushedThisRun = true;
 						}
 					},
 				);
@@ -1074,11 +1169,10 @@ export async function executePhaseComplete(
 			// Advisory injection: push actionable curator message to architect session
 			const callerSessionState = swarmState.agentSessions.get(sessionID);
 			if (callerSessionState) {
-				callerSessionState.pendingAdvisoryMessages ??= [];
-
+				const DIGEST_PLACEHOLDER = 'Phase analysis complete';
 				const digestSummary = curatorResult.digest?.summary
 					? curatorResult.digest.summary.slice(0, 200)
-					: 'Phase analysis complete';
+					: DIGEST_PLACEHOLDER;
 				const complianceNote =
 					curatorResult.compliance.length > 0
 						? ` (${curatorResult.compliance.length} compliance observation(s))`
@@ -1091,9 +1185,15 @@ export async function executePhaseComplete(
 					? ' Call curator_analyze with recommendations to apply knowledge updates from this phase.'
 					: '';
 
-				callerSessionState.pendingAdvisoryMessages.push(
-					`[CURATOR] Phase ${phase} digest: ${digestSummary}${complianceNote}. Knowledge: ${knowledgeResult.applied} applied, ${knowledgeResult.skipped} skipped.${analyzeHint}`,
-				);
+				// Only surface the phase-digest advisory when there is real analysis to
+				// report. When the digest has no summary we fall back to a placeholder,
+				// which carries no information worth announcing to the architect.
+				if (digestSummary !== DIGEST_PLACEHOLDER) {
+					pushAdvisory(
+						callerSessionState,
+						`[CURATOR] Phase ${phase} digest: ${digestSummary}${complianceNote}. Knowledge: ${knowledgeResult.applied} applied, ${knowledgeResult.skipped} skipped.${analyzeHint}`,
+					);
+				}
 
 				// Check for drift advisories from prior deterministic drift checks
 				try {
@@ -1104,9 +1204,19 @@ export async function executePhaseComplete(
 					const phaseReport = priorReports
 						.filter((r) => r.phase === phase)
 						.pop();
-					if (phaseReport && phaseReport.drift_score > 0) {
-						callerSessionState.pendingAdvisoryMessages.push(
-							`[CURATOR DRIFT DETECTED (phase ${phase}, score ${phaseReport.drift_score})]: Consider running critic_drift_verifier before phase completion to get a proper drift review. Review drift report for phase ${phase} and address spec alignment if applicable.`,
+					// Site B: only reach here for a PRIOR on-disk drift report when the
+					// deterministic check this run did NOT already push for this phase
+					// (e.g. it threw, or returned ALIGNED). When Site A already fired we
+					// skip to avoid a near-duplicate advisory for the same phase (the
+					// critic_drift_verifier nudge was folded into Site A's message).
+					if (
+						phaseReport &&
+						phaseReport.drift_score > 0 &&
+						!driftAdvisoryPushedThisRun
+					) {
+						pushAdvisory(
+							callerSessionState,
+							`[CURATOR DRIFT DETECTED (phase ${phase}, score ${phaseReport.drift_score})]: Prior drift report found on disk. Consider running critic_drift_verifier before phase completion to get a proper drift review. Review drift report for phase ${phase} and address spec alignment if applicable.`,
 						);
 					}
 				} catch {
@@ -1147,12 +1257,12 @@ export async function executePhaseComplete(
 			if (docReport?.verdict === 'DOC_STALE') {
 				const callerSessionState = swarmState.agentSessions.get(sessionID);
 				if (callerSessionState) {
-					callerSessionState.pendingAdvisoryMessages ??= [];
 					const staleIds = docReport.stale_sections
 						.map((s) => s.section_id)
 						.slice(0, 8)
 						.join(', ');
-					callerSessionState.pendingAdvisoryMessages.push(
+					pushAdvisory(
+						callerSessionState,
 						`[DESIGN-DOC DRIFT (phase ${phase})]: ${docReport.stale_sections.length} design-doc section(s) are stale (${staleIds}). Run /swarm design-docs --update to sync ${outDir}/ and append a design-changelog entry. Advisory only — does not block completion.`,
 					);
 				}
@@ -1182,8 +1292,8 @@ export async function executePhaseComplete(
 		if (feedbackResult.processed > 0) {
 			const sessionState = swarmState.agentSessions.get(sessionID);
 			if (sessionState) {
-				sessionState.pendingAdvisoryMessages ??= [];
-				sessionState.pendingAdvisoryMessages.push(
+				pushAdvisory(
+					sessionState,
 					`[FEEDBACK] Skill usage feedback: ${feedbackResult.processed} skills processed, ${feedbackResult.bumps} confidence updates applied.`,
 				);
 			}
@@ -1249,8 +1359,8 @@ export async function executePhaseComplete(
 		if (verdictResult.bumps > 0) {
 			const sessionState = swarmState.agentSessions.get(sessionID);
 			if (sessionState) {
-				sessionState.pendingAdvisoryMessages ??= [];
-				sessionState.pendingAdvisoryMessages.push(
+				pushAdvisory(
+					sessionState,
 					`[FEEDBACK] Knowledge verdict feedback: ${verdictResult.processed} entries processed, ${verdictResult.bumps} confidence updates applied.`,
 				);
 			}
@@ -1372,6 +1482,28 @@ export async function executePhaseComplete(
 		agentsMissing,
 		warnings,
 	};
+
+	// Plan-free code-change enforcement (issue #1744): when there's no plan.json,
+	// the agent-dispatch fallback can't infer from task gates. If reviewer/
+	// test_engineer weren't dispatched independently, emit a prominent warning
+	// so the gap is visible in phase-complete output and curator reports.
+	let hasPlan = false;
+	try {
+		hasPlan = fs.existsSync(validateSwarmPath(dir, 'plan.json'));
+	} catch {
+		// Non-blocking — treat as plan-free if path validation fails
+	}
+	if (
+		!hasPlan &&
+		!crossSessionResult.agents.has('reviewer') &&
+		!crossSessionResult.agents.has('test_engineer')
+	) {
+		warnings.push(
+			`⚠️ Plan-free phase ${phase}: no independent reviewer or test_engineer dispatch detected. ` +
+				`Code changes in plan-free sessions should have independent review. ` +
+				`Consider dispatching reviewer + test_engineer before completing future plan-free phases.`,
+		);
+	}
 
 	// Record retrieval outcome for shown lessons from this phase, using the
 	// REAL outcome. Previously this was hardcoded `true` and ran before `success`
@@ -1520,9 +1652,18 @@ export async function executePhaseComplete(
 						if (!consolidationResult.started) return;
 						const sessionState = swarmState.agentSessions.get(sessionID);
 						if (!sessionState) return;
-						sessionState.pendingAdvisoryMessages ??= [];
-						sessionState.pendingAdvisoryMessages.push(
-							`[SKILL CONSOLIDATION] Scheduled skill_improver consolidation wrote ${consolidationResult.result?.proposalPath ?? 'a proposal'} and auto-activated no skills.`,
+						// Derive the activation suffix from the critic-gated auto-apply
+						// outcome rather than hardcoding "auto-activated no skills" — the
+						// run may legitimately have activated approved proposals.
+						const activatedSlugs =
+							consolidationResult.result?.autoApply?.approved ?? [];
+						const activationSuffix =
+							activatedSlugs.length > 0
+								? ` and auto-activated ${activatedSlugs.length} skill(s): ${activatedSlugs.join(', ')}.`
+								: ' and auto-activated no skills.';
+						pushAdvisory(
+							sessionState,
+							`[SKILL CONSOLIDATION] Scheduled skill_improver consolidation wrote ${consolidationResult.result?.proposalPath ?? 'a proposal'}${activationSuffix}`,
 						);
 					},
 					(err) => {
@@ -1952,112 +2093,121 @@ export function _buildOutputJson(outputData: {
 /**
  * Tool definition for phase_complete
  */
-export const phase_complete: ToolDefinition = createSwarmTool({
-	description:
-		'Mark a phase as complete and track which agents were dispatched. ' +
-		'Used for phase completion gating and tracking. ' +
-		'Accepts phase number and optional summary. Returns list of agents that were dispatched.',
-	args: {
-		phase: z
-			.number()
-			.int()
-			.min(1)
-			.describe(
-				'The phase number being completed — a positive integer (e.g., 1, 2, 3)',
-			),
-		summary: z
-			.string()
-			.optional()
-			.describe('Optional summary of what was accomplished in this phase'),
-		sessionID: z
-			.string()
-			.optional()
-			.describe(
-				'Session ID for tracking state (auto-provided by plugin context)',
-			),
-		working_directory: z
-			.string()
-			.optional()
-			.describe(
-				'Explicit project root directory. When provided, .swarm/ is resolved relative to this path instead of the plugin context directory. Use this when CWD differs from the actual project root.',
-			),
-		accept_violations: z
-			.array(z.string())
-			.optional()
-			.describe(
-				'ARCHITECT ONLY. Critical knowledge-directive IDs to explicitly accept as unresolved. Requires accept_violations_justification. Each is logged as an override event.',
-			),
-		accept_violations_justification: z
-			.string()
-			.optional()
-			.describe(
-				'Written justification required when accept_violations is provided.',
-			),
-	},
-	execute: async (args, directory, ctx) => {
-		// Parse and validate arguments
-		let phaseCompleteArgs: PhaseCompleteArgs;
-		let workingDirInput: string | undefined;
+export function createPhaseCompleteTool(
+	runtime: PhaseCompleteRuntime = {},
+): ToolDefinition {
+	return createSwarmTool({
+		description:
+			'Mark a phase as complete and track which agents were dispatched. ' +
+			'Used for phase completion gating and tracking. ' +
+			'Accepts phase number and optional summary. Returns list of agents that were dispatched.',
+		args: {
+			phase: z
+				.number()
+				.int()
+				.min(1)
+				.describe(
+					'The phase number being completed — a positive integer (e.g., 1, 2, 3)',
+				),
+			summary: z
+				.string()
+				.optional()
+				.describe('Optional summary of what was accomplished in this phase'),
+			sessionID: z
+				.string()
+				.optional()
+				.describe(
+					'Session ID for tracking state (auto-provided by plugin context)',
+				),
+			working_directory: z
+				.string()
+				.optional()
+				.describe(
+					'Explicit project root directory. When provided, .swarm/ is resolved relative to this path instead of the plugin context directory. Use this when CWD differs from the actual project root.',
+				),
+			accept_violations: z
+				.array(z.string())
+				.optional()
+				.describe(
+					'ARCHITECT ONLY. Critical knowledge-directive IDs to explicitly accept as unresolved. Requires accept_violations_justification. Each is logged as an override event.',
+				),
+			accept_violations_justification: z
+				.string()
+				.optional()
+				.describe(
+					'Written justification required when accept_violations is provided.',
+				),
+		},
+		execute: async (args, directory, ctx) => {
+			// Parse and validate arguments
+			let phaseCompleteArgs: PhaseCompleteArgs;
+			let workingDirInput: string | undefined;
 
-		try {
-			phaseCompleteArgs = {
-				phase: Number(args.phase),
-				summary: args.summary !== undefined ? String(args.summary) : undefined,
-				sessionID:
-					ctx?.sessionID ??
-					(args.sessionID !== undefined ? String(args.sessionID) : undefined),
-				acceptViolations: Array.isArray(args.accept_violations)
-					? (args.accept_violations as unknown[]).map((s) => String(s))
-					: undefined,
-				acceptViolationsJustification:
-					args.accept_violations_justification !== undefined
-						? String(args.accept_violations_justification)
+			try {
+				phaseCompleteArgs = {
+					phase: Number(args.phase),
+					summary:
+						args.summary !== undefined ? String(args.summary) : undefined,
+					sessionID:
+						ctx?.sessionID ??
+						(args.sessionID !== undefined ? String(args.sessionID) : undefined),
+					acceptViolations: Array.isArray(args.accept_violations)
+						? (args.accept_violations as unknown[]).map((s) => String(s))
 						: undefined,
-				// Caller identity for the architect-only override gate.
-				callerAgent: ctx?.agent !== undefined ? String(ctx.agent) : undefined,
-			};
-			workingDirInput =
-				args.working_directory !== undefined
-					? String(args.working_directory)
-					: undefined;
-		} catch {
-			return JSON.stringify(
-				{
-					success: false,
-					phase: 0,
-					message: 'Invalid arguments',
-					agentsDispatched: [],
-					warnings: ['Failed to parse arguments'],
-				},
-				null,
-				2,
-			);
-		}
+					acceptViolationsJustification:
+						args.accept_violations_justification !== undefined
+							? String(args.accept_violations_justification)
+							: undefined,
+					// Caller identity for the architect-only override gate.
+					callerAgent: ctx?.agent !== undefined ? String(ctx.agent) : undefined,
+				};
+				workingDirInput =
+					args.working_directory !== undefined
+						? String(args.working_directory)
+						: undefined;
+			} catch {
+				return JSON.stringify(
+					{
+						success: false,
+						phase: 0,
+						message: 'Invalid arguments',
+						agentsDispatched: [],
+						warnings: ['Failed to parse arguments'],
+					},
+					null,
+					2,
+				);
+			}
 
-		// Resolve effective directory: explicit working_directory > injected directory
-		const dirResult = resolveWorkingDirectory(workingDirInput, directory);
-		if (!dirResult.success) {
-			return JSON.stringify(
-				{
-					success: false,
-					phase: phaseCompleteArgs.phase,
-					message: dirResult.message,
-					agentsDispatched: [],
-					warnings: [dirResult.message],
-				},
-				null,
-				2,
-			);
-		}
+			// Resolve effective directory: explicit working_directory > injected directory
+			const dirResult = resolveWorkingDirectory(workingDirInput, directory);
+			if (!dirResult.success) {
+				return JSON.stringify(
+					{
+						success: false,
+						phase: phaseCompleteArgs.phase,
+						message: dirResult.message,
+						agentsDispatched: [],
+						warnings: [dirResult.message],
+					},
+					null,
+					2,
+				);
+			}
 
-		return executePhaseComplete(
-			phaseCompleteArgs,
-			dirResult.directory,
-			dirResult.directory,
-		);
-	},
-});
+			return executePhaseComplete(
+				phaseCompleteArgs,
+				dirResult.directory,
+				dirResult.directory,
+				runtime,
+			);
+		},
+	});
+}
+
+export const phase_complete: ToolDefinition = createPhaseCompleteTool();
 
 export const _test_exports = {
 	allCompletedTasksHavePassedGateEvidence,
+	resolvePhaseReviewAgentNames,
 };

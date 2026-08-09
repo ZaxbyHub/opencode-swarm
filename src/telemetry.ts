@@ -2,6 +2,10 @@ import * as fs from 'node:fs';
 import { createWriteStream } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import {
+	createObservation,
+	toLegacyTelemetryLine,
+} from './observability/index.js';
 import type { DelegationCostFields } from './services/cost-accounting.js';
 
 // ============================================================================
@@ -25,6 +29,7 @@ export type TelemetryEvent =
 	| 'hard_limit_hit'
 	| 'revision_limit_hit'
 	| 'loop_detected'
+	| 'no_op_strong_warning'
 	| 'scope_violation'
 	| 'qa_skip_violation'
 	| 'heartbeat'
@@ -38,16 +43,52 @@ export type TelemetryEvent =
 	| 'plan_ledger_cas_retry'
 	| 'plan_md_write_failed'
 	| 'snapshot_failed' // FR-004: emitted when snapshot write exhausts retries
-    // PRM events
-    | 'prm_pattern_detected'
-    | 'prm_course_correction_injected'
-    | 'prm_escalation_triggered'
-    | 'prm_hard_stop'
-    // Close/archive observability (issue #2030): one structured event shared by
-    // user-facing prose and the telemetry stream, carrying per-artifact
-    // requiredness/attempt/validation/source_disposition plus aggregate
-    // archive_valid/archive_empty health facts (counts only, no row content).
-    | 'close_archive_result';
+	// Gate-denial containment (issue #2063 B1): emitted when the same
+	// (session, tool, denial-code) streak reaches the hard rung.
+	| 'gate_denial_loop'
+	/**
+	 * Issue #2063 B5 — an ARMED execution episode reached the advisory rung:
+	 * `execution_stall_warn_calls` tool calls with no delegation completion, no
+	 * file write, no `update_task_status`, and no workspace change. Emitted once
+	 * per non-progress streak.
+	 */
+	| 'execution_stall_warning'
+	/**
+	 * Issue #2063 B5 — the same episode reached `execution_stall_stop_calls` and
+	 * a non-productive tool (read/glob/grep/bash/shell) was hard-denied. Emitted
+	 * once per non-progress streak; the denial itself repeats until a progress
+	 * event clears the rung.
+	 */
+	| 'execution_stall_denied'
+	/**
+	 * Issue #2063 B4 — a read/glob/grep/bash call resolved to a path inside the
+	 * INSTALLED opencode-swarm package and was denied. `target` is relative to the
+	 * package root so no user home path is written to the ledger.
+	 */
+	| 'swarm_internals_read_denied'
+	// PRM events
+	| 'prm_pattern_detected'
+	| 'prm_course_correction_injected'
+	| 'prm_escalation_triggered'
+	| 'prm_hard_stop'
+	/**
+	 * Issue #2063 C2 — DELIVERY of a PRM hard stop, as distinct from the
+	 * `prm_hard_stop` TRIGGER emitted by `src/prm/escalation.ts`. A trigger with
+	 * no matching delivery means the containment never reached the agent.
+	 */
+	| 'prm_hard_stop_delivered'
+	// Emitted by src/hooks/conflict-resolution.ts. Until issue #2029 this member
+	// was MISSING and that producer reached `emit` through
+	// `'agent_conflict_detected' as Parameters<typeof emit>[0]` — a cast that
+	// defeated the type system, so a live production event kind existed in
+	// `.swarm/telemetry.jsonl` that no type, catalog, or consumer knew about.
+	// That is the exact defect class this issue targets; the cast is now gone.
+	| 'agent_conflict_detected'
+	// Close/archive observability (issue #2030): one structured event shared by
+	// user-facing prose and the telemetry stream, carrying per-artifact
+	// requiredness/attempt/validation/source_disposition plus aggregate
+	// archive_valid/archive_empty health facts (counts only, no row content).
+	| 'close_archive_result';
 
 /** Stable classification for how a reviewer-gate decision was established. */
 export type ReviewerGateEvidenceKind =
@@ -91,6 +132,68 @@ let _projectDirectory: string | null = null;
 const _listeners: TelemetryListener[] = [];
 let _disabled: boolean = false;
 
+// ── Heartbeat tracking (FR-010) ───────────────────────────────────
+// Production listener captures latest heartbeat timestamp per sessionId.
+// Used by /swarm status to render "Last activity: Xs ago".
+let _heartbeatTrackingActive = false;
+let _heartbeatListener: TelemetryListener | null = null;
+const heartbeatTimestamps = new Map<string, number>();
+
+function capHeartbeatMap(): void {
+	// Cap at 500 entries (matches _heartbeatTimers pattern in src/index.ts).
+	while (heartbeatTimestamps.size >= 500) {
+		const oldestKey = heartbeatTimestamps.keys().next().value;
+		if (oldestKey === undefined) break;
+		heartbeatTimestamps.delete(oldestKey);
+	}
+}
+
+export function startHeartbeatTracking(): void {
+	if (_heartbeatTrackingActive) return;
+	_heartbeatTrackingActive = true;
+	// Track the listener reference so stopHeartbeatTracking can remove it.
+	// addTelemetryListener is push-only with no return disposer; without
+	// tracking here, repeated start/stop cycles would leak listeners on _listeners.
+	const listener: TelemetryListener = (event, data) => {
+		if (event !== 'heartbeat') return;
+		const payload = data as { sessionId?: string } | undefined;
+		if (!payload?.sessionId) return;
+		heartbeatTimestamps.set(payload.sessionId, Date.now());
+		capHeartbeatMap();
+	};
+	_heartbeatListener = listener;
+	addTelemetryListener(listener);
+}
+
+export function getLastHeartbeat(sessionId: string): number | undefined {
+	return heartbeatTimestamps.get(sessionId);
+}
+
+export function stopHeartbeatTracking(): void {
+	_heartbeatTrackingActive = false;
+	// Remove the previously-registered listener to prevent accumulation on
+	// repeated start/stop cycles. _listeners.filter preserves the registration
+	// order of unrelated listeners.
+	if (_heartbeatListener !== null) {
+		const idx = _listeners.indexOf(_heartbeatListener);
+		if (idx >= 0) _listeners.splice(idx, 1);
+		_heartbeatListener = null;
+	}
+}
+
+export function resetHeartbeatTrackingForTesting(): void {
+	_heartbeatTrackingActive = false;
+	heartbeatTimestamps.clear();
+	// Drain any heartbeat listener from _listeners so the next test starts
+	// from a clean slate. Without this, listener accumulation would skew
+	// listener-count assertions in the test suite.
+	if (_heartbeatListener !== null) {
+		const idx = _listeners.indexOf(_heartbeatListener);
+		if (idx >= 0) _listeners.splice(idx, 1);
+		_heartbeatListener = null;
+	}
+}
+
 /**
  * Emit counter for rotation throttling. Rotation is checked every
  * `ROTATION_CHECK_INTERVAL` emits so the hot path never pays a `statSync`
@@ -111,6 +214,7 @@ export function resetTelemetryForTesting(): void {
 	_projectDirectory = null;
 	_listeners.length = 0;
 	_emitCount = 0;
+	resetHeartbeatTrackingForTesting();
 	if (_writeStream !== null) {
 		_writeStream.end();
 		_writeStream = null;
@@ -177,12 +281,24 @@ export function emit(
 			return;
 		}
 
+		// Build the canonical observability event (issue #2029), then project it
+		// down to the legacy JSONL line. `createObservation` performs no I/O, never
+		// throws, and never clones or traverses `data` — see
+		// `docs/observability-event-contract.md`.
+		//
+		// The written line is BYTE-IDENTICAL to the previous inline construction:
+		// `toLegacyTelemetryLine` takes `timestamp` from `canonical.observedAt`
+		// (stamped with the same `new Date().toISOString()`) and spreads the
+		// caller's original `data` object last. Proven by
+		// `tests/unit/telemetry/emit-line-parity.test.ts` against a corpus captured
+		// from the unmodified tree at e50386b9.
+		//
+		// `JSON.stringify` still throws here for circular/BigInt payloads, before
+		// the listener fan-out below — preserving the ordering asserted by
+		// `src/telemetry.test.ts:137-162`.
+		const canonical = _internals.createObservation(event, data);
 		const line =
-			JSON.stringify({
-				timestamp: new Date().toISOString(),
-				event,
-				...data,
-			}) + os.EOL;
+			JSON.stringify(_internals.toLegacyTelemetryLine(canonical)) + os.EOL;
 
 		const stream = _writeStream;
 		stream.write(line, (err) => {
@@ -288,11 +404,17 @@ export function rotateTelemetryIfNeeded(
  * until the OS accepts the bytes. Archiving without flushing silently loses the
  * tail records of the session.
  *
+ * Ordering (race fix, swarm-pr-review F-003): the replacement stream is created
+ * and assigned to `_writeStream` BEFORE `end()` is called on the old handle, so
+ * a concurrent `emit()` that races across the await lands on the live stream.
+ * The old handle's write callback would otherwise fire
+ * `ERR_STREAM_WRITE_AFTER_END`, latch `_disabled = true`, and kill telemetry for
+ * every subsequent session until restart (server-scoped plugin process). This
+ * mirrors the already-safe `rotateTelemetryIfNeeded` ordering.
+ *
  * `WriteStream.end(cb)` invokes `cb` on the `'finish'` event — AFTER the buffer
  * has been drained to the OS — so awaiting that callback is the documented way
  * to guarantee the on-disk file contains every emitted record up to this point.
- * The stream is then reopened in append mode so subsequent emits continue to
- * work (same pattern as `rotateTelemetryIfNeeded`, minus the rename).
  *
  * Fail-open: any error during reopen disables telemetry rather than throwing —
  * a flush failure must never block the close pipeline.
@@ -302,29 +424,33 @@ export async function flushAndDrainTelemetry(): Promise<void> {
 	if (stream === null || _projectDirectory === null) {
 		return;
 	}
-	await new Promise<void>((resolve) => {
-		stream.end(() => {
-			try {
-				const telemetryPath = path.join(
-					_projectDirectory!,
-					'.swarm',
-					'telemetry.jsonl',
-				);
-				const next = createWriteStream(telemetryPath, { flags: 'a' });
-				next.on('error', () => {
-					if (_writeStream === next) {
-						_disabled = true;
-						_writeStream = null;
-					}
-				});
-				_writeStream = next;
-			} catch {
-				// Reopen failed — leave telemetry disabled rather than throwing.
+	// Create the replacement stream and install it BEFORE ending the old one,
+	// so a racing emit() lands on the live stream and the old handle fails the
+	// identity guard in the emit() error handler.
+	let next: ReturnType<typeof createWriteStream>;
+	try {
+		const telemetryPath = path.join(
+			_projectDirectory,
+			'.swarm',
+			'telemetry.jsonl',
+		);
+		next = createWriteStream(telemetryPath, { flags: 'a' });
+		next.on('error', () => {
+			if (_writeStream === next) {
 				_disabled = true;
 				_writeStream = null;
 			}
-			resolve();
 		});
+		_writeStream = next;
+	} catch {
+		// Reopen failed — leave telemetry disabled rather than throwing.
+		_disabled = true;
+		_writeStream = null;
+		return;
+	}
+	// Now drain the old handle. Racing emits go to `next` (already installed).
+	await new Promise<void>((resolve) => {
+		stream.end(() => resolve());
 	});
 }
 
@@ -470,6 +596,93 @@ export const telemetry = {
 
 	loopDetected(sessionId: string, agentName: string, loopType: string): void {
 		_internals.emit('loop_detected', { sessionId, agentName, loopType });
+	},
+
+	/**
+	 * Issue #2063 B2 — stage 2 of the no-op ladder fired: the session has made
+	 * `count` consecutive tool calls with no file write and no subagent dispatch,
+	 * at or beyond 2× `no_op_warning_threshold`.
+	 */
+	noOpStrongWarning(
+		sessionId: string,
+		agentName: string,
+		count: number,
+		threshold: number,
+	): void {
+		_internals.emit('no_op_strong_warning', {
+			sessionId,
+			agentName,
+			count,
+			threshold,
+		});
+	},
+
+	/**
+	 * Issue #2063 B1 — a fail-closed `tool.execute.before` denial streak reached
+	 * the hard rung: `count` consecutive denials with the same classification
+	 * (`code`) for the same tool in the same session. Emitted from
+	 * `src/hooks/gate-denial-tracker.ts` at every denial at or past the rung, so
+	 * the ledger shows how long the model kept retrying after being told to stop.
+	 */
+	gateDenialLoop(
+		sessionId: string,
+		tool: string,
+		code: string,
+		count: number,
+	): void {
+		_internals.emit('gate_denial_loop', { sessionId, tool, code, count });
+	},
+
+	/**
+	 * Issue #2063 B5 — advisory rung of the execution-stall ladder. Emitted from
+	 * `src/hooks/guardrails/execution-stall.ts` once per non-progress streak, so
+	 * a warning with no matching `execution_stall_denied` means the agent
+	 * recovered on its own.
+	 */
+	executionStallWarning(
+		sessionId: string,
+		count: number,
+		threshold: number,
+	): void {
+		_internals.emit('execution_stall_warning', {
+			sessionId,
+			count,
+			threshold,
+		});
+	},
+
+	/**
+	 * Issue #2063 B5 — hard rung of the execution-stall ladder. `tool` is the
+	 * normalized name of the denied non-productive tool.
+	 */
+	executionStallDenied(
+		sessionId: string,
+		tool: string,
+		count: number,
+		threshold: number,
+	): void {
+		_internals.emit('execution_stall_denied', {
+			sessionId,
+			tool,
+			count,
+			threshold,
+		});
+	},
+
+	/**
+	 * Issue #2063 B4 — a call targeting the installed plugin package was denied.
+	 * `target` is package-root-relative (never an absolute user path).
+	 */
+	swarmInternalsReadDenied(
+		sessionId: string,
+		tool: string,
+		target: string,
+	): void {
+		_internals.emit('swarm_internals_read_denied', {
+			sessionId,
+			tool,
+			target,
+		});
 	},
 
 	scopeViolation(
@@ -618,6 +831,27 @@ export const telemetry = {
 	}): void {
 		_internals.emit('close_archive_result', data);
 	},
+
+	/**
+	 * Issue #2063 C2 — the PRM hard-stop DENIAL was actually delivered to the
+	 * agent (thrown by the guardrails `toolBefore` consumer). `prm_hard_stop`
+	 * above records the TRIGGER and is emitted solely by
+	 * `src/prm/escalation.ts`; a trigger without a matching delivery means the
+	 * containment armed but never reached the model.
+	 */
+	prmHardStopDelivered(
+		sessionId: string,
+		pattern: string,
+		level: number,
+		occurrenceCount: number,
+	): void {
+		_internals.emit('prm_hard_stop_delivered', {
+			sessionId,
+			pattern,
+			level,
+			occurrenceCount,
+		});
+	},
 };
 
 /**
@@ -633,9 +867,15 @@ export const _internals: {
 	emit: typeof emit;
 	rotateTelemetryIfNeeded: typeof rotateTelemetryIfNeeded;
 	flushAndDrainTelemetry: typeof flushAndDrainTelemetry;
+	heartbeatListenerCount: () => number;
+	createObservation: typeof createObservation;
+	toLegacyTelemetryLine: typeof toLegacyTelemetryLine;
 } = {
 	telemetry,
 	emit,
 	rotateTelemetryIfNeeded,
 	flushAndDrainTelemetry,
+	heartbeatListenerCount: () => (_heartbeatListener !== null ? 1 : 0),
+	createObservation,
+	toLegacyTelemetryLine,
 };

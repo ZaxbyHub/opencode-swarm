@@ -24,7 +24,8 @@ export type CriticRole =
 	| 'sounding_board'
 	| 'phase_drift_verifier'
 	| 'hallucination_verifier'
-	| 'architecture_supervisor';
+	| 'architecture_supervisor'
+	| 'finding_validator';
 
 export type SoundingBoardVerdict =
 	| 'UNNECESSARY'
@@ -721,6 +722,36 @@ EVIDENCE_CHECKED: [list of files/artifacts you read]
 ANTI_PATTERNS_DETECTED: [list or "none"]
 ESCALATION_NEEDED: YES | NO`;
 
+export const FINDING_VALIDATOR_PROMPT = `## IDENTITY
+You are Critic (Finding Validator), an independent false-positive filter.
+You receive candidate review findings in a fresh context and verify each against the
+repository and exact diff evidence. You never approve code and never invent replacement
+findings. Your only job is to classify the supplied candidates.
+
+${READ_ONLY_LANE_GUIDANCE}
+
+RULES:
+- Treat every candidate as DISPROVED until direct source/diff evidence supports it.
+- Correlate exclusively by the harness-provided finding_id. Echo every ID exactly once.
+- CONFIRMED requires reproducible evidence that the reported current-code location
+  overlaps the supplied change and the described impact follows.
+- DISPROVED means the claim is false, pre-existing, out of scope, or contradicted.
+- UNVERIFIED means the supplied scope is insufficient to decide after diligent checks.
+- Do not omit, duplicate, rename, or add finding IDs.
+- Do not edit files, propose fixes, approve the patch, or return prose outside JSON.
+
+OUTPUT FORMAT (STRICT JSON):
+{
+  "validations": [
+    {
+      "finding_id": "<exact harness ID>",
+      "disposition": "CONFIRMED" | "DISPROVED" | "UNVERIFIED",
+      "confidence": 0.0,
+      "evidence": "<concise source/diff evidence>"
+    }
+  ]
+}`;
+
 export function createCriticAgent(
 	model: string,
 	customPrompt?: string,
@@ -740,9 +771,11 @@ export function createCriticAgent(
 					? SOUNDING_BOARD_PROMPT
 					: role === 'phase_drift_verifier'
 						? PHASE_DRIFT_VERIFIER_PROMPT
-						: role === 'architecture_supervisor'
-							? ARCHITECTURE_SUPERVISOR_PROMPT
-							: HALLUCINATION_VERIFIER_PROMPT;
+						: role === 'finding_validator'
+							? FINDING_VALIDATOR_PROMPT
+							: role === 'architecture_supervisor'
+								? ARCHITECTURE_SUPERVISOR_PROMPT
+								: HALLUCINATION_VERIFIER_PROMPT;
 
 		prompt = customAppendPrompt
 			? `${rolePrompt}\n\n${customAppendPrompt}`
@@ -774,6 +807,11 @@ export function createCriticAgent(
 			name: 'critic_architecture_supervisor',
 			description:
 				'Architecture supervisor. Reviews compressed per-phase summaries (not code) to catch cross-task contradictions, constraint/doc drift, repeated failure loops, and knowledge gaps. Read-only; emits a structured verdict.',
+		},
+		finding_validator: {
+			name: 'critic_finding_validator',
+			description:
+				'Finding validator. Independently falsifies structured review findings in a fresh read-only context and returns exact-ID dispositions.',
 		},
 	};
 

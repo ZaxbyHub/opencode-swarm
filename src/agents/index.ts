@@ -53,6 +53,21 @@ import { createTestEngineerAgent } from './test-engineer';
 
 export type { AgentDefinition } from './architect';
 
+/**
+ * Test-only dependency-injection seam. `getAgentConfigs` calls
+ * `_internals.createAgents(...)` instead of the module-local `createAgents`
+ * directly, so tests can substitute a synthetic agent set (e.g. a primary
+ * agent whose definition already declares a `permission` block) without
+ * `mock.module`, which leaks across files in Bun's shared test-runner
+ * process. Mutating this object is file-scoped and trivially restorable via
+ * `afterEach`.
+ */
+export const _internals: {
+	createAgents: typeof createAgents;
+} = {
+	createAgents,
+};
+
 // Track agents for which we've already warned about missing config
 const warnedAgents = new Set<string>();
 
@@ -201,12 +216,17 @@ export function resolveFallbackModel(
 	let fallbackModels = agentConfig?.fallback_models;
 
 	// 2. If not explicitly set, check if this is a curator agent that should inherit from explorer
-	// Only inherit if the curator agent does NOT have fallback_models key at all
+	// Only inherit if the curator agent does NOT have fallback_models key at all.
+	// All four curator modes default their model to explorer's (see createSwarmAgents:
+	// curator_init/phase/postmortem/consolidation all use `?? getModel('explorer')`), so
+	// they inherit explorer's fallback chain too — otherwise consolidation-mode dispatch
+	// (memory-consolidation service) would fail over to nothing while the other modes do.
 	if (
 		fallbackModels === undefined &&
 		(agentBaseName === 'curator_init' ||
 			agentBaseName === 'curator_phase' ||
-			agentBaseName === 'curator_postmortem')
+			agentBaseName === 'curator_postmortem' ||
+			agentBaseName === 'curator_consolidation')
 	) {
 		fallbackModels = swarmAgents?.explorer?.fallback_models;
 	}
@@ -534,13 +554,22 @@ If you call @coder instead of @${swarmId}_coder, the call will FAIL or go to the
 	for (const { name, factory } of TYPE_A_AGENTS) {
 		if (!isAgentDisabled(name, swarmAgents, swarmPrefix)) {
 			const prompts = getPrompts(name);
-			const agent = (
-				factory as (
-					model: string,
-					customPrompt?: string,
-					customAppendPrompt?: string,
-				) => AgentDefinition
-			)(getModel(name), prompts.prompt, prompts.appendPrompt);
+			const agent =
+				name === 'reviewer'
+					? createReviewerAgent(
+							getModel(name),
+							prompts.prompt,
+							prompts.appendPrompt,
+							pluginConfig?.auto_review?.enabled === true &&
+								pluginConfig.auto_review.structured_findings !== false,
+						)
+					: (
+							factory as (
+								model: string,
+								customPrompt?: string,
+								customAppendPrompt?: string,
+							) => AgentDefinition
+						)(getModel(name), prompts.prompt, prompts.appendPrompt);
 			agent.name = prefixName(name);
 			agents.push(applyOverrides(agent, swarmAgents, swarmPrefix, quiet));
 		}
@@ -608,6 +637,18 @@ If you call @coder instead of @${swarmId}_coder, the call will FAIL or go to the
 			'architecture_supervisor' as CriticRole,
 		);
 		critic.name = prefixName('critic_architecture_supervisor');
+		agents.push(applyOverrides(critic, swarmAgents, swarmPrefix, quiet));
+	}
+
+	// 5c-quater. Create independent structured-finding validator
+	if (!isAgentDisabled('critic_finding_validator', swarmAgents, swarmPrefix)) {
+		const critic = createCriticAgent(
+			swarmAgents?.critic_finding_validator?.model ?? getModel('critic'),
+			undefined,
+			undefined,
+			'finding_validator' as CriticRole,
+		);
+		critic.name = prefixName('critic_finding_validator');
 		agents.push(applyOverrides(critic, swarmAgents, swarmPrefix, quiet));
 	}
 
@@ -1090,7 +1131,10 @@ export function getAgentConfigs(
 	sessionId?: string,
 	projectContext?: ProjectContext,
 ): Record<string, SDKAgentConfig> {
-	const agents = createAgents(config, projectContext ?? emptyProjectContext());
+	const agents = _internals.createAgents(
+		config,
+		projectContext ?? emptyProjectContext(),
+	);
 
 	// Check if tool filtering is disabled globally
 	const toolFilterEnabled = config?.tool_filter?.enabled ?? true;
@@ -1152,6 +1196,16 @@ export function getAgentConfigs(
 		}
 	}
 
+	// Narrows `agent.config.permission` to the SDK's declared permission
+	// shape, defensively rejecting absent values and non-object primitives
+	// (a malformed agent definition must not throw here). Mirrors the
+	// `isObjectRecord` convention used for config-hook guards in
+	// src/index.ts.
+	const isPermissionRecord = (
+		value: SDKAgentConfig['permission'],
+	): value is NonNullable<SDKAgentConfig['permission']> =>
+		typeof value === 'object' && value !== null;
+
 	const result = Object.fromEntries(
 		agents.map((agent) => {
 			const sdkConfig: SDKAgentConfig = {
@@ -1163,8 +1217,39 @@ export function getAgentConfigs(
 
 			if (isPrimaryAgent) {
 				sdkConfig.mode = 'primary';
-				// Allow task delegation for primary agents
-				(sdkConfig.permission as Record<string, 'allow'>) = { task: 'allow' };
+				// Allow task delegation for primary agents. Merge — never
+				// replace — the agent definition's own permission block.
+				// OpenCode merges agent-level permission additively on its
+				// side (rule evaluation uses `findLast` over concatenated
+				// permission entries), so wholesale replacement here was
+				// never necessary and previously discarded any edit/bash/
+				// webfetch/external_directory entries (including nested
+				// per-pattern objects, e.g. `external_directory: { "C:/foo/*":
+				// "allow" }`) the agent definition declared. `task: 'allow'`
+				// always wins when the definition also declares its own
+				// `task` entry — primary agents must always be able to
+				// delegate, which is the existing intent this branch
+				// preserves.
+				const existingPermission = isPermissionRecord(agent.config.permission)
+					? agent.config.permission
+					: undefined;
+				// POSITION IS PRECEDENCE. The host evaluates with `findLast` over
+				// `Object.entries` order and wildcard-matches the permission NAME,
+				// so `'*'` also matches `task`. A duplicate key in an object
+				// literal keeps its FIRST position and only takes the last value:
+				// `{ ...{ task: 'deny', '*': 'deny' }, task: 'allow' }` yields
+				// `{ task: 'allow', '*': 'deny' }` with `task` still at index 0, so
+				// `findLast` picks `'*': 'deny'` and the primary agent silently
+				// loses delegation — the opposite of the intent documented above.
+				// Delete-then-set moves `task` to the end so it genuinely wins.
+				const mergedPermission: NonNullable<SDKAgentConfig['permission']> & {
+					task: 'allow';
+				} = { ...existingPermission } as NonNullable<
+					SDKAgentConfig['permission']
+				> & { task: 'allow' };
+				delete (mergedPermission as Record<string, unknown>).task;
+				mergedPermission.task = 'allow';
+				sdkConfig.permission = mergedPermission;
 			} else {
 				sdkConfig.mode = 'subagent';
 			}

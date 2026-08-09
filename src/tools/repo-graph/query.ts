@@ -1,9 +1,10 @@
-import * as fsSync from 'node:fs';
 import * as path from 'node:path';
 import {
 	containsControlChars,
 	containsPathTraversal,
 } from '../../utils/path-security';
+import { isAssetEdge } from './builder';
+import type { FreshnessProbe } from './freshness';
 import type {
 	BlastRadiusResult,
 	CallerReference,
@@ -25,7 +26,11 @@ import type {
 	SymbolEdge,
 	SymbolReference,
 } from './types';
-import { isSchemaVersionAtLeast, normalizeGraphPath } from './types';
+import {
+	inferPackageBoundary,
+	isSchemaVersionAtLeast,
+	normalizeGraphPath,
+} from './types';
 
 const GRAPH_HEALTH_OUTPUT_LIMIT = 50;
 const MAX_HEALTH_PATH_LENGTH = 500;
@@ -82,6 +87,10 @@ function buildReverseIndex(graph: RepoGraph): Map<string, FileReference[]> {
 		moduleNameIndex.set(normalizeLookupPath(node.moduleName), node);
 	}
 	for (const edge of graph.edges) {
+		// Asset edges (e.g. import './data.json') never have a target node and
+		// must not count toward in-degree / importer / dependent rankings
+		// (issue #1985, defect A1).
+		if (isAssetEdge(edge)) continue;
 		const source = normalizeGraphPath(edge.source);
 		const target = normalizeGraphPath(edge.target);
 		const sourceRef: FileReference = {
@@ -136,6 +145,11 @@ export function resetQueryCache(): void {
 	cachedReverseIndex = null;
 }
 
+/**
+ * @deprecated Graph age is not a content-freshness signal. Internal consumers
+ * use {@link probeFreshness}; this compatibility helper intentionally retains
+ * its historical five-minute TTL semantics for external callers.
+ */
 export function isGraphFresh(
 	graph: RepoGraph | null,
 	maxAgeMs: number = 5 * 60 * 1000,
@@ -204,35 +218,37 @@ function sanitizePathList(value: unknown): string[] {
 	return cap(value.filter(isSafeHealthPath));
 }
 
-function getStaleFiles(graph: RepoGraph, workspaceRoot?: string): string[] {
-	const built = Date.parse(graph.metadata.generatedAt);
-	if (!Number.isFinite(built)) return [];
-	const root = workspaceRoot ?? graph.workspaceRoot;
-	const stale: string[] = [];
-	for (const node of Object.values(graph.nodes)) {
-		const moduleName = normalizeGraphPath(node.moduleName);
-		if (!isSafeHealthPath(moduleName)) continue;
-		const filePath = path.join(root, moduleName);
-		try {
-			if (fsSync.statSync(filePath).mtimeMs > built) {
-				stale.push(moduleName);
-				if (stale.length >= GRAPH_HEALTH_OUTPUT_LIMIT) break;
-			}
-		} catch {
-			// Missing or unreadable files are handled by build diagnostics.
+function getProbeStaleFiles(
+	probe: FreshnessProbe | undefined,
+	workspaceRoot: string,
+): string[] {
+	if (!probe) return [];
+	const root = path.resolve(workspaceRoot);
+	const stale = new Set<string>();
+	for (const absolutePath of [...probe.changed, ...probe.removed]) {
+		if (typeof absolutePath !== 'string' || !path.isAbsolute(absolutePath)) {
+			continue;
 		}
+		const relative = normalizeGraphPath(path.relative(root, absolutePath));
+		if (!isSafeHealthPath(relative)) continue;
+		stale.add(relative);
 	}
-	return stale;
+	return [...stale]
+		.sort((a, b) => a.localeCompare(b))
+		.slice(0, GRAPH_HEALTH_OUTPUT_LIMIT);
 }
 
 export function getGraphHealth(
 	graph: RepoGraph | null,
 	workspaceRoot?: string,
+	probe?: FreshnessProbe,
 ): GraphHealthResult {
+	const probeState = probe?.state ?? 'no-fingerprint';
 	if (!graph) {
 		return {
 			schemaVersion: null,
 			fresh: false,
+			probeState,
 			staleFiles: [],
 			extractionFailures: [],
 			unresolvedImports: [],
@@ -240,7 +256,11 @@ export function getGraphHealth(
 			unsupportedFiles: [],
 			binaryFiles: [],
 			unreadableFiles: [],
+			validationSkippedFiles: [],
 			lowConfidenceEdgeCount: 0,
+			walkTruncated: false,
+			walkTruncationReason: null,
+			incrementalFallbacks: 0,
 			notes: [
 				'No repo graph found at .swarm/repo-graph.json. Run repo_map with action="build" first.',
 			],
@@ -248,11 +268,24 @@ export function getGraphHealth(
 	}
 
 	const diagnostics = graph.diagnostics as Record<string, unknown> | undefined;
-	const fresh = isGraphFresh(graph);
-	const staleFiles = getStaleFiles(graph, workspaceRoot);
+	const fresh = probeState === 'clean';
+	const staleFiles = getProbeStaleFiles(
+		probe,
+		workspaceRoot ?? graph.workspaceRoot,
+	);
 	const notes: string[] = [];
-	if (!fresh || staleFiles.length > 0) {
-		notes.push('Graph is stale. Run repo_map with action="build" to refresh.');
+	if (probeState === 'drifted') {
+		notes.push(
+			'Graph content is stale relative to the workspace. Run repo_map with action="build" if automatic refresh is unavailable.',
+		);
+	} else if (probeState === 'no-fingerprint') {
+		notes.push(
+			'Graph has no matching content fingerprint. Run repo_map with action="build" to certify it.',
+		);
+	} else if (probeState === 'inconclusive') {
+		notes.push(
+			'Graph freshness is unknown because the bounded workspace probe did not complete; no refresh or deletion was attempted.',
+		);
 	}
 	if (!diagnostics) {
 		notes.push(
@@ -272,9 +305,33 @@ export function getGraphHealth(
 		);
 	}
 
+	// Walk-truncation + incremental-fallback diagnostics (issue #1985, A7).
+	const walkTruncated = diagnostics?.walkTruncated === true;
+	const rawReason = diagnostics?.walkTruncationReason;
+	const walkTruncationReason: 'budget' | 'cap' | null =
+		rawReason === 'budget' || rawReason === 'cap' ? rawReason : null;
+	const incrementalFallbacks =
+		typeof diagnostics?.incrementalFallbacks === 'number' &&
+		Number.isFinite(diagnostics.incrementalFallbacks) &&
+		diagnostics.incrementalFallbacks > 0
+			? Math.floor(diagnostics.incrementalFallbacks)
+			: 0;
+	if (walkTruncated) {
+		notes.push(
+			'Graph is INCOMPLETE: walk hit the file-cap/wall-clock budget — results may be missing files.' +
+				(walkTruncationReason ? ` (reason: ${walkTruncationReason})` : ''),
+		);
+	}
+	if (incrementalFallbacks > 0) {
+		notes.push(
+			`${incrementalFallbacks} incremental update(s) fell back to a full rebuild (validation failure or concurrent modification).`,
+		);
+	}
+
 	return {
 		schemaVersion: graph.schema_version,
 		fresh,
+		probeState,
 		staleFiles,
 		extractionFailures: sanitizeExtractionFailures(
 			diagnostics?.extractionFailures,
@@ -286,12 +343,18 @@ export function getGraphHealth(
 		unsupportedFiles: sanitizePathList(diagnostics?.unsupportedFiles),
 		binaryFiles,
 		unreadableFiles,
+		validationSkippedFiles: sanitizePathList(
+			diagnostics?.validationSkippedFiles,
+		),
 		lowConfidenceEdgeCount:
 			typeof diagnostics?.lowConfidenceEdgeCount === 'number' &&
 			Number.isFinite(diagnostics.lowConfidenceEdgeCount) &&
 			diagnostics.lowConfidenceEdgeCount > 0
 				? Math.floor(diagnostics.lowConfidenceEdgeCount)
 				: 0,
+		walkTruncated,
+		walkTruncationReason,
+		incrementalFallbacks,
 		notes,
 	};
 }
@@ -325,6 +388,7 @@ export function getSymbolConsumers(
 	const targetKey = normalizeGraphPath(node.filePath);
 	const refs: SymbolReference[] = [];
 	for (const edge of graph.edges) {
+		if (isAssetEdge(edge)) continue;
 		if (normalizeGraphPath(edge.target) !== targetKey) continue;
 		const importedSymbols = edge.importedSymbols ?? [];
 		if (edge.importType === 'namespace') {
@@ -362,6 +426,7 @@ export function getCallers(
 	const refs: CallerReference[] = [];
 	const seen = new Set<string>();
 	for (const edge of graph.edges) {
+		if (isAssetEdge(edge)) continue;
 		if (normalizeGraphPath(edge.target) !== targetKey) continue;
 		const file = moduleNameForEdgePath(graph, edge.source);
 		if (seen.has(file)) continue;
@@ -431,6 +496,9 @@ export function getDeadExports(
 	// One O(edges) pass: per target, union of used symbols + unresolvable flag.
 	const usage = new Map<string, { used: Set<string>; unresolvable: boolean }>();
 	for (const edge of graph.edges) {
+		// Asset edges carry no node-level usage signal (their target never
+		// became a node), so they cannot contribute to dead-export analysis.
+		if (isAssetEdge(edge)) continue;
 		const target = normalizeGraphPath(edge.target);
 		let entry = usage.get(target);
 		if (!entry) {
@@ -793,6 +861,7 @@ function collectExternallyUsedSymbols(
 	const used = new Set<string>();
 	const targetKey = normalizeGraphPath(node.filePath);
 	for (const edge of graph.edges) {
+		if (isAssetEdge(edge)) continue;
 		if (normalizeGraphPath(edge.target) !== targetKey) continue;
 		for (const symbol of edge.importedSymbols ?? []) {
 			if (exported.has(symbol)) used.add(symbol);
@@ -911,6 +980,9 @@ function summarizePackageBoundaries(
 	const dependsOn = new Map<string, Set<string>>();
 	const dependedOnBy = new Map<string, Set<string>>();
 	for (const edge of edges) {
+		// Asset edges do not represent a real package dependency (their target
+		// is not a source file), so they are excluded from boundary graphs.
+		if (isAssetEdge(edge)) continue;
 		const sourceBoundary = boundaryByPath.get(normalizeGraphPath(edge.source));
 		const targetBoundary = boundaryByPath.get(normalizeGraphPath(edge.target));
 		if (
@@ -997,13 +1069,15 @@ function summarizeSelectedPackageBoundaries(
 	return summaries;
 }
 
+/**
+ * No-ontology fallback for the package boundary. Delegates to the shared
+ * `inferPackageBoundary` helper (no `hasManifest` callback here — the query
+ * path does not retain the walk-time manifest set, so it falls back to the
+ * static segment rules). Keeps the query fallback in lockstep with ontology
+ * extraction (issue #1985, defect A8).
+ */
 function inferBoundary(moduleName: string): string {
-	const parts = normalizeLookupPath(moduleName).split('/').filter(Boolean);
-	if (parts[0] === 'src' && parts.length >= 2) return `src/${parts[1]}`;
-	if (parts.length >= 2 && (parts[0] === 'packages' || parts[0] === 'crates')) {
-		return `${parts[0]}/${parts[1]}`;
-	}
-	return parts[0] || '.';
+	return inferPackageBoundary(moduleName);
 }
 
 export function buildOntologyPreflightPacket(

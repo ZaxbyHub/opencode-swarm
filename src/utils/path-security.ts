@@ -85,6 +85,75 @@ export function validateDirectory(directory: string): void {
 }
 
 /**
+ * Resolve a path to its canonical (symlink-free) form, tolerating the case
+ * where the path (or some suffix of it) does not exist yet.
+ *
+ * Strategy:
+ * 1. Try `resolver(inputPath)` directly — the common case where the path
+ *    already exists. This preserves the exact historical behavior (and the
+ *    exact string handed to the resolver) for existing paths.
+ * 2. On failure (ENOENT — the path, or a not-yet-created tail of it, does
+ *    not exist), lexically resolve the input with `path.resolve` (attaches a
+ *    drive letter on Windows, matching what `realpathSync` would produce for
+ *    a path that DOES exist — see the drive-letter-consistency note on
+ *    `validateSymlinkBoundary` below) so any `..`/`.` segments in the input
+ *    are collapsed BEFORE any ancestor is examined. This is what prevents a
+ *    `..` in the non-existent tail from surviving into the composed result
+ *    and climbing back out of a resolved ancestor.
+ * 3. Walk up the lexically-resolved path one component at a time (bounded
+ *    to 4096 iterations to guard against unbounded loops on malformed
+ *    input), calling `resolver` on each shorter ancestor. The first
+ *    ancestor that resolves successfully is the nearest EXISTING ancestor —
+ *    resolving it follows any symlink on that component (or any component
+ *    above it). The already-lexically-normalized tail (which cannot contain
+ *    `..`) is then rejoined onto that canonical ancestor, so the returned
+ *    path reflects every symlink that exists on disk today while still
+ *    describing the not-yet-created target.
+ * 4. If no ancestor resolves (walk reaches the filesystem root without a
+ *    single successful `resolver` call — effectively unreachable on a real
+ *    OS, since the filesystem root always exists), fall back to the
+ *    lexically-resolved path.
+ */
+function resolveNearestExistingCanonical(
+	inputPath: string,
+	resolver: (p: string) => string,
+): string {
+	try {
+		return resolver(inputPath);
+	} catch {
+		// Path (or a suffix of it) does not exist yet — fall through to the
+		// ancestor walk below.
+	}
+
+	const lexicallyResolved = path.resolve(inputPath);
+	let probe = lexicallyResolved;
+	const tail: string[] = [];
+	for (let i = 0; i < 4096; i++) {
+		const parent = path.dirname(probe);
+		if (parent === probe) {
+			// Reached the filesystem root without finding an existing ancestor.
+			return lexicallyResolved;
+		}
+		// unshift runs before every resolver() attempt below, so by the time
+		// resolver(probe) can succeed, tail always has at least one entry —
+		// the composed-path branch below is the only reachable outcome.
+		tail.unshift(path.basename(probe));
+		probe = parent;
+		try {
+			const canonicalAncestor = resolver(probe);
+			// tail contains only plain path components — lexicallyResolved was
+			// already normalized above, so no '..'/'.' segment can be present —
+			// rejoining it onto the canonical ancestor cannot escape further
+			// than the ancestor itself already has.
+			return path.normalize(path.join(canonicalAncestor, ...tail));
+		} catch {
+			// Keep climbing.
+		}
+	}
+	return lexicallyResolved;
+}
+
+/**
  * Validate that a resolved path stays within an allowed root directory.
  * Resolves symlinks via realpathSync for both the target path and the root,
  * then verifies the resolved target is within the resolved root.
@@ -102,6 +171,28 @@ export function validateDirectory(directory: string): void {
  * both fallback branches keeps the comparison basis consistent whether
  * realpathSync succeeds or not, independent of incidental filesystem state.
  *
+ * Not-yet-existing targets (e.g. a file about to be created by an atomic
+ * write) are handled the same way: realpathSync on the full target throws
+ * ENOENT, so resolution falls back to `resolveNearestExistingCanonical`,
+ * which walks up to the nearest existing ancestor, resolves symlinks on
+ * that ancestor (and everything above it), and rejoins the not-yet-existing
+ * tail. Without this, a target under a workspace root that itself sits
+ * behind a symlink (e.g. macOS `/tmp` and `/var`, which are symlinks to
+ * `/private/tmp` and `/private/var`) would resolve to its unresolved literal
+ * path while the (already-existing) root resolves to its `/private/...`
+ * form, producing a spurious boundary-escape error even though the target
+ * is genuinely inside the root. See issue #1986.
+ *
+ * This also TIGHTENS containment versus the pre-#1986-fix behavior in one
+ * case: if `.swarm/` or any other ancestor between the target and the
+ * workspace root is itself a symlink/junction pointing outside the
+ * workspace, the old fallback (unresolved `path.resolve`) could let a
+ * not-yet-existing target through on its first write; the ancestor walk now
+ * resolves that symlinked ancestor and correctly throws. If a deployment
+ * relies on a symlinked `.swarm/` (or similar) pointing outside the
+ * workspace root, that setup will now be rejected — this is the intended,
+ * correct behavior, not a regression.
+ *
  * @param targetPath - The path to validate (absolute)
  * @param rootPath - The root directory boundary (absolute)
  * @throws Error if the resolved target escapes the root boundary
@@ -110,19 +201,14 @@ export function validateSymlinkBoundary(
 	targetPath: string,
 	rootPath: string,
 ): void {
-	let realTarget: string;
-	try {
-		realTarget = _internals.realpathSync(targetPath);
-	} catch {
-		realTarget = path.resolve(targetPath);
-	}
-
-	let realRoot: string;
-	try {
-		realRoot = _internals.realpathSync(rootPath);
-	} catch {
-		realRoot = path.resolve(rootPath);
-	}
+	const realTarget = resolveNearestExistingCanonical(
+		targetPath,
+		_internals.realpathSync,
+	);
+	const realRoot = resolveNearestExistingCanonical(
+		rootPath,
+		_internals.realpathSync,
+	);
 
 	const normalizedTarget = path.normalize(realTarget);
 	const normalizedRoot = path.normalize(realRoot);

@@ -8,7 +8,6 @@
  * - Branch exists + expected path registered → ERROR
  * - git worktree list fails → ERROR (fail-safe, never adopt)
  * - Error message bounded at ~500 chars
- * - startupOrphanRecovery called BEFORE provisionWorktree (call order)
  *
  * Uses real git repos for functional coverage + _internals.bunSpawn mock for
  * error-path injection.
@@ -119,11 +118,11 @@ describe('provisionWorktree — verification (FR-004)', () => {
 
 	beforeEach(() => {
 		// Clean the shared default worktree parent dir to prevent cross-test pollution
-		// Tests use the same default path: os.tmpdir()/.swarm-worktrees/parent-session/<id>
+		// Tests use the same default path: os.tmpdir()/.swarm-worktrees/ses_parentSession/<id>
 		const sharedWtParent = path.join(
 			os.tmpdir(),
 			'.swarm-worktrees',
-			'parent-session',
+			'ses_parentSession',
 		);
 		fs.rmSync(sharedWtParent, { recursive: true, force: true });
 		origBunSpawn = worktreeInternals.bunSpawn;
@@ -139,15 +138,20 @@ describe('provisionWorktree — verification (FR-004)', () => {
 		fs.mkdirSync(repoDir, { recursive: true });
 		await initGitRepo(repoDir);
 
-		const result = await provisionWorktree(repoDir, '1.1', 'parent-session', {
-			purpose: 'lane',
-		});
+		const result = await provisionWorktree(
+			repoDir,
+			'1.1',
+			'ses_parentSession',
+			{
+				purpose: 'lane',
+			},
+		);
 
 		// Fail with the actual error message if provisioning failed
 		expect(result).toHaveProperty('worktreePath');
 		expect(result).toHaveProperty('branchName');
 		const handle = result as { worktreePath: string; branchName: string };
-		expect(handle.branchName).toBe('swarm/lane/parent-session/1.1');
+		expect(handle.branchName).toBe('swarm/lane/ses_parentSession/1.1');
 		const listResult = await runGit(
 			['worktree', 'list', '--porcelain'],
 			repoDir,
@@ -182,16 +186,21 @@ describe('provisionWorktree — verification (FR-004)', () => {
 		fs.mkdirSync(repoDir, { recursive: true });
 		await initGitRepo(repoDir);
 
-		const branchName = 'swarm/lane/parent-session/2.1';
+		const branchName = 'swarm/lane/ses_parentSession/2.1';
 
 		// Create the branch (but no worktree), then switch back to main so it is
 		// stale but has no commits ahead of HEAD.
 		await runGit(['checkout', '-b', branchName], repoDir);
 		await runGit(['checkout', 'main'], repoDir);
 
-		const result = await provisionWorktree(repoDir, '2.1', 'parent-session', {
-			purpose: 'lane',
-		});
+		const result = await provisionWorktree(
+			repoDir,
+			'2.1',
+			'ses_parentSession',
+			{
+				purpose: 'lane',
+			},
+		);
 
 		// Should succeed and recreate the branch from the current HEAD, not adopt
 		// the stale branch state.
@@ -223,14 +232,19 @@ describe('provisionWorktree — verification (FR-004)', () => {
 		fs.mkdirSync(repoDir, { recursive: true });
 		await initGitRepo(repoDir);
 
-		const branchName = 'swarm/lane/parent-session/2.1';
+		const branchName = 'swarm/lane/ses_parentSession/2.1';
 		await runGit(['checkout', '-b', branchName], repoDir);
 		await runGit(['commit', '--allow-empty', '-m', 'stale commit'], repoDir);
 		await runGit(['checkout', 'main'], repoDir);
 
-		const result = await provisionWorktree(repoDir, '2.1', 'parent-session', {
-			purpose: 'lane',
-		});
+		const result = await provisionWorktree(
+			repoDir,
+			'2.1',
+			'ses_parentSession',
+			{
+				purpose: 'lane',
+			},
+		);
 
 		expect(result).toEqual({
 			error: `Branch already exists and has unmerged commits: ${branchName}`,
@@ -249,20 +263,25 @@ describe('provisionWorktree — verification (FR-004)', () => {
 		fs.mkdirSync(repoDir, { recursive: true });
 		await initGitRepo(repoDir);
 
-		const branchName = 'swarm/lane/parent-session/3.1';
+		const branchName = 'swarm/lane/ses_parentSession/3.1';
 		const worktreePath = path.join(
 			repoDir,
 			'.swarm-worktrees',
-			'parent-session',
+			'ses_parentSession',
 			'3.1',
 		);
 
 		// Create a REAL worktree with this branch (active collision)
 		await createRealWorktree(repoDir, branchName, worktreePath);
 
-		const result = await provisionWorktree(repoDir, '3.1', 'parent-session', {
-			purpose: 'lane',
-		});
+		const result = await provisionWorktree(
+			repoDir,
+			'3.1',
+			'ses_parentSession',
+			{
+				purpose: 'lane',
+			},
+		);
 
 		// Should return error (active collision)
 		expect(result).toHaveProperty('error');
@@ -284,7 +303,7 @@ describe('provisionWorktree — verification (FR-004)', () => {
 		fs.mkdirSync(repoDir, { recursive: true });
 		await initGitRepo(repoDir);
 
-		const branchName = 'swarm/lane/parent-session/4.1';
+		const branchName = 'swarm/lane/ses_parentSession/4.1';
 
 		// Create the branch (no worktree), then manually register a worktree at
 		// the EXPECTED path (simulating a previously created worktree that's now gone
@@ -298,7 +317,7 @@ describe('provisionWorktree — verification (FR-004)', () => {
 		const expectedPath = path.join(
 			path.dirname(repoDir),
 			'.swarm-worktrees',
-			'parent-session',
+			'ses_parentSession',
 			'4.1',
 		);
 		fs.mkdirSync(path.dirname(expectedPath), { recursive: true });
@@ -314,9 +333,14 @@ describe('provisionWorktree — verification (FR-004)', () => {
 			fs.writeFileSync(path.join(expectedPath, 'dirty.txt'), 'do not delete');
 		}
 
-		const result = await provisionWorktree(repoDir, '4.1', 'parent-session', {
-			purpose: 'lane',
-		});
+		const result = await provisionWorktree(
+			repoDir,
+			'4.1',
+			'ses_parentSession',
+			{
+				purpose: 'lane',
+			},
+		);
 
 		// Should return error because same-task cleanup must not delete dirty work.
 		expect(result).toHaveProperty('error');
@@ -342,7 +366,7 @@ describe('provisionWorktree — verification (FR-004)', () => {
 		fs.mkdirSync(repoDir, { recursive: true });
 		await initGitRepo(repoDir);
 
-		const branchName = 'swarm/lane/parent-session/5.1';
+		const branchName = 'swarm/lane/ses_parentSession/5.1';
 
 		// Create the branch so provisionWorktree enters the reconciliation branch
 		await runGit(['checkout', '-b', branchName], repoDir);
@@ -368,9 +392,14 @@ describe('provisionWorktree — verification (FR-004)', () => {
 			return origBunSpawn(args, _opts as Parameters<typeof bunSpawn>[1]);
 		});
 
-		const result = await provisionWorktree(repoDir, '5.1', 'parent-session', {
-			purpose: 'lane',
-		});
+		const result = await provisionWorktree(
+			repoDir,
+			'5.1',
+			'ses_parentSession',
+			{
+				purpose: 'lane',
+			},
+		);
 
 		// Should return error (fail-safe, never adopt)
 		expect(result).toHaveProperty('error');
@@ -395,7 +424,7 @@ describe('provisionWorktree — verification (FR-004)', () => {
 		fs.mkdirSync(repoDir, { recursive: true });
 		await initGitRepo(repoDir);
 
-		const branchName = 'swarm/lane/parent-session/6.1';
+		const branchName = 'swarm/lane/ses_parentSession/6.1';
 
 		// Create the branch so we enter the reconciliation branch
 		await runGit(['checkout', '-b', branchName], repoDir);
@@ -417,9 +446,14 @@ describe('provisionWorktree — verification (FR-004)', () => {
 			return origBunSpawn(args, _opts as Parameters<typeof bunSpawn>[1]);
 		});
 
-		const result = await provisionWorktree(repoDir, '6.1', 'parent-session', {
-			purpose: 'lane',
-		});
+		const result = await provisionWorktree(
+			repoDir,
+			'6.1',
+			'ses_parentSession',
+			{
+				purpose: 'lane',
+			},
+		);
 
 		expect(result).toHaveProperty('error');
 		if ('error' in result) {
@@ -435,214 +469,6 @@ describe('provisionWorktree — verification (FR-004)', () => {
 		await runGit(['branch', '-D', branchName], repoDir);
 		fs.rmSync(repoDir, { recursive: true, force: true });
 	});
-
-	// V7: startupOrphanRecovery called BEFORE provisionWorktree (via precreateStandardWorktreeSession)
-	test('V7: precreateStandardWorktreeSession calls startupOrphanRecovery before provisionWorktree', async () => {
-		// We test this via the _internals seam in worktree-isolation.ts
-		// by replacing both functions and verifying call order.
-		const { _internals: di, precreateStandardWorktreeSession } = await import(
-			'../../../src/hooks/delegation-gate/worktree-isolation'
-		);
-
-		// Save originals
-		const origProvision = di.provisionWorktree;
-		const origRecovery = di.startupOrphanRecovery;
-		const origCleanup = di.cleanupOrphanedBranches;
-
-		const callOrder: string[] = [];
-
-		di.startupOrphanRecovery = mock(async () => {
-			callOrder.push('startupOrphanRecovery');
-			return { prunedWorktrees: false, remainingBranches: [], warnings: [] };
-		});
-
-		di.cleanupOrphanedBranches = mock(async () => {
-			callOrder.push('cleanupOrphanedBranches');
-			return { removed: [], skipped: [], errors: [] };
-		});
-
-		di.provisionWorktree = mock(async () => {
-			callOrder.push('provisionWorktree');
-			// Return success to avoid hitting handleStandardWorktreeFailure
-			return {
-				worktreePath: '/fake/path',
-				branchName: 'swarm/lane/test/1.1',
-				purpose: 'lane',
-				id: '1.1',
-				sessionId: 'test-session',
-			};
-		});
-
-		// We also need to mock the OpenCode SDK client to avoid NPE
-		const { swarmState } = await import('../../../src/state');
-		const origClient = swarmState.opencodeClient;
-		swarmState.opencodeClient = {
-			session: {
-				create: mock(async () => ({
-					data: { id: 'fake-session-id' },
-				})),
-			},
-		} as unknown as typeof swarmState.opencodeClient;
-
-		try {
-			await precreateStandardWorktreeSession({
-				config: { swarms: {} },
-				directory: '/fake/dir',
-				parentSessionID: 'test-session',
-				callID: 'call-1',
-				taskId: '1.1',
-				outputArgs: {},
-			});
-
-			// startupOrphanRecovery MUST be called before provisionWorktree
-			expect(callOrder).toEqual([
-				'startupOrphanRecovery',
-				'cleanupOrphanedBranches',
-				'provisionWorktree',
-			]);
-		} finally {
-			// Restore originals
-			di.provisionWorktree = origProvision;
-			di.startupOrphanRecovery = origRecovery;
-			di.cleanupOrphanedBranches = origCleanup;
-			swarmState.opencodeClient = origClient;
-		}
-	});
-
-	// V8: cleanupOrphanedBranches called with (directory, [parentSessionID]) as active allowlist
-	// Part of SC-004.2 (resume branch-cleanup depth fix): stale lane branches from
-	// inactive sessions are deleted on resume, while the current session's branches survive.
-	test('V8: precreateStandardWorktreeSession calls cleanupOrphanedBranches with parentSessionID allowlist', async () => {
-		const { _internals: di, precreateStandardWorktreeSession } = await import(
-			'../../../src/hooks/delegation-gate/worktree-isolation'
-		);
-
-		const origProvision = di.provisionWorktree;
-		const origRecovery = di.startupOrphanRecovery;
-		const origCleanup = di.cleanupOrphanedBranches;
-
-		let capturedArgs: [string, string[]] | undefined;
-
-		di.startupOrphanRecovery = mock(async () => ({
-			prunedWorktrees: false,
-			remainingBranches: [],
-			warnings: [],
-		}));
-
-		di.cleanupOrphanedBranches = mock(
-			async (dir: string, activeIds: string[]) => {
-				capturedArgs = [dir, activeIds];
-				return { removed: [], skipped: [], errors: [] };
-			},
-		);
-
-		di.provisionWorktree = mock(async () => ({
-			worktreePath: '/fake/path',
-			branchName: 'swarm/lane/test/1.1',
-			purpose: 'lane',
-			id: '1.1',
-			sessionId: 'test-session',
-		}));
-
-		const { swarmState } = await import('../../../src/state');
-		const origClient = swarmState.opencodeClient;
-		swarmState.opencodeClient = {
-			session: {
-				create: mock(async () => ({ data: { id: 'fake-session-id' } })),
-			},
-		} as unknown as typeof swarmState.opencodeClient;
-
-		try {
-			await precreateStandardWorktreeSession({
-				config: { swarms: {} },
-				directory: '/test/project/root',
-				parentSessionID: 'my-parent-session',
-				callID: 'call-2',
-				taskId: '2.1',
-				outputArgs: {},
-			});
-
-			// SC-004.2: cleanupOrphanedBranches receives the project directory and
-			// [parentSessionID] as the active-session allowlist — the current session's
-			// branches are preserved, all others are eligible for deletion.
-			expect(capturedArgs).toEqual([
-				'/test/project/root',
-				['my-parent-session'],
-			]);
-		} finally {
-			di.provisionWorktree = origProvision;
-			di.startupOrphanRecovery = origRecovery;
-			di.cleanupOrphanedBranches = origCleanup;
-			swarmState.opencodeClient = origClient;
-		}
-	});
-
-	// V9: cleanupOrphanedBranches failure is non-fatal — provisioning still succeeds.
-	// Part of SC-004.2 (resume branch-cleanup depth fix): cleanup is best-effort;
-	// a failed cleanup must not block lane provisioning.
-	test('V9: cleanupOrphanedBranches failure is non-fatal — provisioning proceeds', async () => {
-		const { _internals: di, precreateStandardWorktreeSession } = await import(
-			'../../../src/hooks/delegation-gate/worktree-isolation'
-		);
-
-		const origProvision = di.provisionWorktree;
-		const origRecovery = di.startupOrphanRecovery;
-		const origCleanup = di.cleanupOrphanedBranches;
-
-		let provisionCalled = false;
-
-		di.startupOrphanRecovery = mock(async () => ({
-			prunedWorktrees: false,
-			remainingBranches: [],
-			warnings: [],
-		}));
-
-		// Simulate cleanupOrphanedBranches throwing — must NOT prevent provisionWorktree
-		di.cleanupOrphanedBranches = mock(async () => {
-			throw new Error('git branch -D failed');
-		});
-
-		di.provisionWorktree = mock(async () => {
-			provisionCalled = true;
-			return {
-				worktreePath: '/fake/path',
-				branchName: 'swarm/lane/test/1.1',
-				purpose: 'lane',
-				id: '1.1',
-				sessionId: 'test-session',
-			};
-		});
-
-		const { swarmState } = await import('../../../src/state');
-		const origClient = swarmState.opencodeClient;
-		swarmState.opencodeClient = {
-			session: {
-				create: mock(async () => ({ data: { id: 'fake-session-id' } })),
-			},
-		} as unknown as typeof swarmState.opencodeClient;
-
-		const outputArgs: Record<string, unknown> = {};
-
-		try {
-			await precreateStandardWorktreeSession({
-				config: { swarms: {} },
-				directory: '/fake/dir',
-				parentSessionID: 'test-session',
-				callID: 'call-3',
-				taskId: '3.1',
-				outputArgs: {},
-			});
-
-			// Even though cleanupOrphanedBranches threw, provisioning must still run.
-			expect(provisionCalled).toBe(true);
-			// The session must have been created (no early return from handleStandardWorktreeFailure).
-		} finally {
-			di.provisionWorktree = origProvision;
-			di.startupOrphanRecovery = origRecovery;
-			di.cleanupOrphanedBranches = origCleanup;
-			swarmState.opencodeClient = origClient;
-		}
-	});
 });
 
 // ---------------------------------------------------------------------------
@@ -653,16 +479,9 @@ describe('provisionWorktree — verification (FR-004)', () => {
  *
  * Tier 1 (_internals seams):
  * - worktreeInternals.bunSpawn    — mocked for V5, V6 (git worktree list failure paths)
- * - di.provisionWorktree           — mocked for V7, V8, V9 (call-order + non-fatal assertions)
- * - di.startupOrphanRecovery       — mocked for V7, V8, V9
- * - di.cleanupOrphanedBranches     — mocked for V8, V9 (new SC-004.2 coverage)
- * - swarmState.opencodeClient     — mocked for V7, V8, V9 (SDK client substitution)
  *
  * Gaps / known limitations:
- * - cleanupOrphanedBranches is mocked at the _internals seam; Bun's v1.3.11
- *   mock.restore() does NOT reliably restore mock.module cross-file mocks, but
- *   _internals reassignment is a direct object-property write and is reliably
- *   undone in each finally{} block above — no cross-file pollution risk.
- * - The fake OpenCode SDK client (swarmState.opencodeClient) returns a fixed
- *   session ID; real session-creation failure paths are not exercised here.
+ * - Dispatch-time lifecycle locking and durable collision ownership are covered
+ *   in worktree-precreate-durable-collision.test.ts. Bounded global orphan
+ *   recovery is covered separately in init-orphan-recovery.test.ts.
  */

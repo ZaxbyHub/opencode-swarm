@@ -289,16 +289,22 @@ export function buildDelegateDirectiveBlock(
 		'These directives were learned from prior swarm runs and scoped to your role. Apply them to the task below.',
 	);
 	lines.push(
-		'ACK CONTRACT: end your FINAL message with one line per CRITICAL directive in this block:',
+		'ACK CONTRACT: end your FINAL message with one line per directive in this block:',
 	);
 	lines.push('  KNOWLEDGE_APPLIED:<id> — you applied it');
+	// IGNORED is a NEGATIVE outcome signal (it counts against the directive in
+	// ranking and quarantine evidence); N_A is neutral. The descriptions below
+	// steer merely-irrelevant directives to N_A so the widened all-priority
+	// contract does not turn routine irrelevance into negative signal.
 	lines.push(
-		'  KNOWLEDGE_IGNORED:<id> reason=<short why> — you intentionally did not apply it',
+		'  KNOWLEDGE_IGNORED:<id> reason=<short why> — you judged it relevant but deliberately chose not to follow it (counts against the directive)',
 	);
 	lines.push(
-		'  KNOWLEDGE_N_A:<id> reason=<why> — it did not apply to your task',
+		'  KNOWLEDGE_N_A:<id> reason=<why> — it was not relevant to your task (neutral; prefer this when the directive simply did not apply)',
 	);
-	lines.push('Omitting a critical id is a contract violation.');
+	lines.push(
+		'Omitting a critical id is a contract violation. Omitting any other id is recorded as unacknowledged.',
+	);
 	// (#1849 RC-4) Carry the retrieval trace_id into the block so a delegate can
 	// cite it in a knowledge_receipt and the delegate-ack-collector can recover
 	// the ORIGINAL retrieval trace (rather than minting an untied one).
@@ -400,6 +406,35 @@ export interface InjectForDelegateParams {
 export interface InjectForDelegateResult {
 	entries: RankedEntry[];
 	trace_id: string;
+}
+
+/**
+ * Monotonic counter bumped whenever the knowledge corpus changes underneath a
+ * live session (issue #1821, Workstream B).
+ *
+ * The architect injector memoizes its rendered block against a cache key built
+ * from the retrieval CONTEXT only (phase, tool, agent, task, files, last user
+ * message). Real-time admission changes the corpus without changing any of
+ * those, so an architect sitting in the same phase would keep seeing the
+ * pre-admission block — the newly learned lesson would be invisible for the
+ * rest of the phase. Folding this counter into the cache key makes an
+ * admission invalidate the memo exactly once.
+ *
+ * The delegate path (`injectForDelegate`) is UNCACHED and `readKnowledge`'s
+ * parse cache is already invalidated by `atomicWriteFile`, so only this
+ * architect-side memo needed the extra signal.
+ */
+let knowledgeGeneration = 0;
+
+/** Invalidate memoized injections. Called by the admission path after a write. */
+export function bumpKnowledgeGeneration(): number {
+	knowledgeGeneration++;
+	return knowledgeGeneration;
+}
+
+/** Current corpus generation. Part of the architect injection cache key. */
+export function getKnowledgeGeneration(): number {
+	return knowledgeGeneration;
 }
 
 /**
@@ -767,6 +802,10 @@ export function createKnowledgeInjectorHook(
 	): string {
 		const parts = [
 			String(phase),
+			// #1821: corpus generation. Without it a real-time admission cannot
+			// invalidate this memo, because none of the context fields below change
+			// when knowledge is added mid-phase.
+			String(getKnowledgeGeneration()),
 			ctx.currentTool ?? '',
 			ctx.currentAction ?? '',
 			ctx.targetAgent ?? '',
@@ -798,6 +837,16 @@ export function createKnowledgeInjectorHook(
 			const plan = await loadPlan(directory);
 			const currentPhase = plan?.current_phase ?? 1;
 
+			// (#1849/headroom-attribution) Identity recovery via the host-boundary
+			// adapter, resolved BEFORE the headroom gate below. This is pure
+			// in-memory recovery (swarmState.activeAgent / message info scan — no
+			// I/O, see resolveMessageTransformContext in host-boundary.ts), so
+			// resolving it early is cheap and lets the headroom_budget skip event
+			// carry agent/session identity instead of firing anonymously.
+			const mctx = resolveMessageTransformContext(output);
+			const agentName = mctx.agent;
+			const sessionId = mctx.sessionID;
+
 			// Budget-residual check (BACM-style: evaluate headroom before appending)
 			// Uses the same 0.33 tok/char ratio as estimateTokens() in context-budget.ts
 			const CHARS_PER_TOKEN = 1 / 0.33;
@@ -824,6 +873,8 @@ export function createKnowledgeInjectorHook(
 				// candidate for the dark-in-production symptom (a small/default model
 				// limit makes headroom negative permanently). Diagnose from .swarm.
 				recordInjectionSkip(directory, 'headroom_budget', {
+					agent: agentName,
+					sessionId,
 					extra: {
 						headroomChars,
 						existingChars,
@@ -843,7 +894,8 @@ export function createKnowledgeInjectorHook(
 						? Math.floor(maxInjectChars * 0.5) // moderate: 20–60% — half budget
 						: Math.floor(maxInjectChars * 0.25); // low: 5–20% — quarter budget
 
-			// (#1849) Identity recovery via the host-boundary adapter. The SDK
+			// (#1849) `agentName`/`sessionId` were resolved above (before the
+			// headroom gate) via the host-boundary adapter. The SDK
 			// `experimental.chat.messages.transform` input is `{}` and the
 			// `Message` union has NO `role:'system'` variant — so the pre-#1849
 			// `output.messages.find(role==='system')` lookup was always undefined,
@@ -852,9 +904,6 @@ export function createKnowledgeInjectorHook(
 			// The adapter recovers agent from swarmState.activeAgent (primary, set
 			// by chat.message) with the last user message's info.agent as a
 			// first-turn fallback, and sessionID from any message's info.sessionID.
-			const mctx = resolveMessageTransformContext(output);
-			const agentName = mctx.agent;
-			const sessionId = mctx.sessionID;
 			if (!agentName) {
 				// (#1768/#1849) Genuine empty case: no swarmState entry AND no user
 				// message carrying info.agent. Diagnostic tombstone only.

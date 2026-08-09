@@ -79,6 +79,7 @@ function makeCtx(): CloseStageContext {
 		archivedActiveStateDirs: new Set<string>(),
 		archiveFailureReasons: new Map<string, string>(),
 		archiveResults: [],
+		archiveStageFailed: false,
 		timestamp: '',
 		archiveDir: '',
 		archiveSuffix: '',
@@ -114,10 +115,10 @@ function createRealWalSource(committedRows: number): void {
 			['type_a', `committed-row-${i}`],
 		);
 	}
-	db.run(
-		'INSERT INTO schema_migrations (version, name) VALUES (?, ?)',
-		[1, 'create_project_constraints'],
-	);
+	db.run('INSERT INTO schema_migrations (version, name) VALUES (?, ?)', [
+		1,
+		'create_project_constraints',
+	]);
 	db.close();
 }
 
@@ -225,9 +226,7 @@ describe('swarm.db archival via runArchiveStage (issue #2030 VACUUM INTO)', () =
 			// The telemetry event would carry archive_valid=true, archive_empty=false.
 			// We assert the derivation inputs here (the event emission itself is
 			// covered in close-archive-result-event.test.ts).
-			const anyFailed = ctx.archiveResults.some(
-				(r) => r.attempt === 'failed',
-			);
+			const anyFailed = ctx.archiveResults.some((r) => r.attempt === 'failed');
 			expect(anyFailed).toBe(false); // archive_valid
 			const sqliteSnapshots = ctx.archiveResults.filter(
 				(r) => r.method === 'vacuum_into' && r.attempt === 'succeeded',

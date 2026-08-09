@@ -122,6 +122,7 @@ describe('dispatchPhaseReviewer', () => {
 
 	beforeEach(() => {
 		dir = mkdtemp();
+		swarmState.generatedAgentNames = [];
 	});
 
 	afterEach(() => {
@@ -129,6 +130,7 @@ describe('dispatchPhaseReviewer', () => {
 		_internals.listLaneEvidence = _originalListLaneEvidence;
 		_internals.readPhaseEvidence = _originalReadPhaseEvidence;
 		_internals.dispatchReviewerAgent = _originalDispatchReviewerAgent;
+		swarmState.generatedAgentNames = [];
 
 		// Clean up temp dir
 		try {
@@ -454,38 +456,6 @@ describe('dispatchPhaseReviewer', () => {
 		expect(parsed.verdict).toBe('APPROVED');
 		expect(parsed.reason).toBe('test reason');
 		expect(parsed.timestamp).toBeTruthy();
-	});
-
-	// ─── Test 8: resolveDefaultReviewerAgent ──────────────────────────────────
-	test('resolveDefaultReviewerAgent: returns reviewer when no generated names', () => {
-		const result = _internals.resolveDefaultReviewerAgent([]);
-		expect(result).toBe('reviewer');
-	});
-
-	test('resolveDefaultReviewerAgent: returns longest matching _reviewer suffix', () => {
-		const result = _internals.resolveDefaultReviewerAgent([
-			'reviewer',
-			'local_reviewer',
-			'mega_reviewer',
-		]);
-		// 'local_reviewer' (14 chars) is longest
-		expect(result).toBe('local_reviewer');
-	});
-
-	test('resolveDefaultReviewerAgent: prefers -reviewer suffix over bare reviewer', () => {
-		const result = _internals.resolveDefaultReviewerAgent([
-			'reviewer',
-			'cloud-reviewer',
-		]);
-		expect(result).toBe('cloud-reviewer');
-	});
-
-	test('resolveDefaultReviewerAgent: falls back to first generated name if no reviewer suffix', () => {
-		const result = _internals.resolveDefaultReviewerAgent([
-			'mega_coder',
-			'local_coder',
-		]);
-		expect(result).toBe('mega_coder');
 	});
 
 	// ─── Test 9: compileReviewPackage with requireDiffSummary ──────────────────

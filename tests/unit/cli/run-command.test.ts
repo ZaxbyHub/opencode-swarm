@@ -246,12 +246,13 @@ describe('run() - CLI entry point', () => {
 		);
 	});
 
-	it('status → handleStatusCommand called with (cwd, {}), returns 0', async () => {
+	it('status → handleStatusCommand called with (cwd, {}, sessionId), returns 0', async () => {
 		const result = await run(['status']);
 		expect(result).toBe(0);
 		expect(mockHandleStatusCommand).toHaveBeenCalledWith(
 			expect.any(String),
 			{},
+			'',
 		);
 		expect(mockConsoleLog).toHaveBeenCalledWith('status mock output');
 	});

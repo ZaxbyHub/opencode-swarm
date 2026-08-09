@@ -2,16 +2,106 @@ import * as child_process from 'node:child_process';
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import {
+	type BunCompatSpawnOptions,
+	type BunCompatSubprocess,
+	bunSpawn,
+} from '../utils/bun-compat.js';
 import type { BackgroundWorkspaceSnapshot } from './pending-delegations.js';
 
 const GIT_SNAPSHOT_TIMEOUT_MS = 3_000;
-const GIT_SNAPSHOT_MAX_BUFFER = 512 * 1024;
-const REVISION_MAX_FILES = 5_000;
-const REVISION_MAX_TOTAL_BYTES = 64 * 1024 * 1024;
+/**
+ * Bounds stdout/stderr for every Git call in this module (issue #1968 P6).
+ * Raised 64x (512 KB -> 32 MB) in lockstep with `REVISION_MAX_FILES`: at an
+ * assumed worst-case average of ~600 bytes/path (NUL-delimited path plus a
+ * generous allowance for deep monorepo directory nesting and the 2-3 byte
+ * porcelain status prefix, doubled again for rename records which emit two
+ * paths per entry), 32 MB covers `REVISION_MAX_FILES` (50,000) paths with
+ * headroom (50,000 * 600 = ~28.6 MB < 32 MB). Raising the file cap alone is
+ * inert without this: `readBoundedGitOutput` (below) truncates the
+ * `git diff --name-only -z` / `git status --porcelain -z` output the digest
+ * enumerates *before* `REVISION_MAX_FILES` is ever consulted.
+ */
+const GIT_SNAPSHOT_MAX_BUFFER = 32 * 1024 * 1024;
+/**
+ * Raised 10x (5,000 -> 50,000). "Cost is time, not correctness": a real bound
+ * remains (unbounded enumeration is forbidden by AGENTS.md invariant 3), but
+ * 50,000 changed paths accommodates large-scale mechanical changes
+ * (repo-wide codemods, vendored dependency bumps) that legitimately touch far
+ * more than 5,000 files without forcing every such revision through the
+ * dead-end `null` this issue exists to fix.
+ */
+const REVISION_MAX_FILES = 50_000;
+/**
+ * Raised 8x (64 MB -> 512 MB). Chunked, cooperatively-yielded reads (see
+ * `REVISION_READ_CHUNK_BYTES`/`REVISION_YIELD_EVERY_CHUNKS` below) make this
+ * a cost-in-time bound, not a correctness bound, so it can move well past
+ * "one big generated asset" without materializing more than one chunk at a
+ * time in memory.
+ */
+const REVISION_MAX_TOTAL_BYTES = 512 * 1024 * 1024;
 const REVISION_READ_CHUNK_BYTES = 64 * 1024;
 const REVISION_YIELD_EVERY_CHUNKS = 16;
+/**
+ * Timeout used only for the two path-ENUMERATION Git calls inside the
+ * revision-digest twins (`git diff --name-only` / `git status --porcelain`),
+ * not for `GIT_SNAPSHOT_TIMEOUT_MS`'s default (still 3s) used by every other
+ * Git call in this module. `git status --untracked-files=all` on a huge tree
+ * walks the full working directory and can independently exceed 3s well
+ * before any byte cap is reached; 15s (5x) gives that walk real headroom
+ * while remaining a bounded subprocess call per AGENTS.md invariant 3.
+ */
+const REVISION_ENUMERATION_TIMEOUT_MS = 15_000;
 
 type SpawnSync = typeof child_process.spawnSync;
+
+interface BoundedGitOutput {
+	text: string;
+	truncated: boolean;
+}
+
+async function readBoundedGitOutput(
+	stream: BunCompatSubprocess['stdout'],
+	maxBytes: number,
+	onOverflow: () => void,
+): Promise<BoundedGitOutput> {
+	const reader = stream.getReader();
+	const chunks: Uint8Array[] = [];
+	let totalBytes = 0;
+	try {
+		for (;;) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			if (!value) continue;
+			const remaining = maxBytes - totalBytes;
+			if (value.byteLength > remaining) {
+				if (remaining > 0) chunks.push(value.slice(0, remaining));
+				onOverflow();
+				return { text: '', truncated: true };
+			}
+			chunks.push(value);
+			totalBytes += value.byteLength;
+		}
+		const joined = new Uint8Array(totalBytes);
+		let offset = 0;
+		for (const chunk of chunks) {
+			joined.set(chunk, offset);
+			offset += chunk.byteLength;
+		}
+		return { text: new TextDecoder().decode(joined), truncated: false };
+	} finally {
+		try {
+			await reader.cancel();
+		} catch {
+			// The process may already have closed the stream.
+		}
+		try {
+			reader.releaseLock();
+		} catch {
+			// Best-effort stream cleanup.
+		}
+	}
+}
 
 interface CaptureWorkspaceSnapshotOptions {
 	scope?: string | null;
@@ -44,58 +134,205 @@ function runGit(
  * Async equivalent of the bounded snapshot helper. Revision binding runs on
  * tool/hook gates, so it must never monopolize the host event loop while Git
  * is resolving the checked-out state.
+ *
+ * This one deliberately keeps the `timeout` spawn option alongside the
+ * `Promise.race` deadline, unlike `runGitAsyncDetailed`, which had to drop it.
+ * The two-timer arrangement is only a defect when the *reason* for failing is
+ * observable: there, whichever timer won decided whether a timeout was reported
+ * as `timeout` or as a generic `git-failed`. This function returns
+ * `string | null` and has no discriminated reason, so both timers collapse to
+ * the same `null` and there is nothing to misreport.
+ *
+ * If a discriminated failure reason is ever added here, that stops being true —
+ * give the deadline a single owner first (see `runGitAsyncDetailed`).
  */
 async function runGitAsync(
 	directory: string,
 	args: string[],
-	timeoutMs = GIT_SNAPSHOT_TIMEOUT_MS,
+	timeoutMs = _internals.gitTimeoutMs,
 ): Promise<string | null> {
-	return await new Promise((resolve) => {
-		let settled = false;
-		let stdout = '';
-		let stderrBytes = 0;
-		let timeout: NodeJS.Timeout | undefined;
-		let child: child_process.ChildProcess | undefined;
-		const finish = (value: string | null) => {
-			if (settled) return;
-			settled = true;
-			if (timeout) clearTimeout(timeout);
-			// A timeout, buffer failure, or host-side stream error must not leave
-			// a Git child behind. Killing an already-closed child is best-effort.
-			try {
-				child?.kill();
-			} catch {
-				// The child has already exited or cannot be signalled.
-			}
-			resolve(value);
+	let proc: BunCompatSubprocess | undefined;
+	let timeout: ReturnType<typeof setTimeout> | undefined;
+	try {
+		const options: BunCompatSpawnOptions = {
+			cwd: directory,
+			stdin: 'ignore',
+			stdout: 'pipe',
+			stderr: 'pipe',
+			timeout: timeoutMs,
+			killProcessTree: true,
 		};
-		try {
-			child = child_process.spawn('git', ['-C', directory, ...args], {
-				cwd: directory,
-				stdio: ['ignore', 'pipe', 'pipe'],
-				windowsHide: true,
-			});
-		} catch {
-			finish(null);
-			return;
+		proc = _internals.bunSpawn(['git', '-C', directory, ...args], options);
+		let overflowed = false;
+		const stopOverflow = () => {
+			overflowed = true;
+			try {
+				proc?.kill('SIGKILL');
+			} catch {
+				// Process already exited or cannot be signalled.
+			}
+		};
+		const completed = Promise.all([
+			proc.exited,
+			readBoundedGitOutput(proc.stdout, GIT_SNAPSHOT_MAX_BUFFER, stopOverflow),
+			readBoundedGitOutput(proc.stderr, GIT_SNAPSHOT_MAX_BUFFER, stopOverflow),
+		]);
+		const result = await Promise.race([
+			completed.then(([exitCode, stdout, stderr]) => ({
+				kind: 'completed' as const,
+				exitCode,
+				stdout,
+				stderr,
+			})),
+			new Promise<{ kind: 'timeout' }>((resolve) => {
+				timeout = setTimeout(() => resolve({ kind: 'timeout' }), timeoutMs);
+			}),
+		]);
+		if (
+			result.kind === 'timeout' ||
+			overflowed ||
+			result.exitCode !== 0 ||
+			result.stdout.truncated ||
+			result.stderr.truncated
+		) {
+			return null;
 		}
-		timeout = setTimeout(() => finish(null), timeoutMs);
-		child.stdout?.setEncoding('utf-8');
-		child.stdout?.on('data', (chunk: string) => {
-			stdout += chunk;
-			if (Buffer.byteLength(stdout, 'utf-8') > GIT_SNAPSHOT_MAX_BUFFER) {
-				finish(null);
-			}
-		});
-		child.stderr?.on('data', (chunk: Buffer) => {
-			stderrBytes += chunk.length;
-			if (stderrBytes > GIT_SNAPSHOT_MAX_BUFFER) {
-				finish(null);
-			}
-		});
-		child.once('error', () => finish(null));
-		child.once('close', (code) => finish(code === 0 ? stdout.trimEnd() : null));
+		return result.stdout.text.trimEnd();
+	} catch {
+		return null;
+	} finally {
+		if (timeout) clearTimeout(timeout);
+		try {
+			proc?.kill('SIGKILL');
+		} catch {
+			// Best-effort tree cleanup for an already-closed process.
+		}
+	}
+}
+
+/**
+ * Discriminated Git call result used only by the revision-digest twins below
+ * (issue #1968 P6). `resolvePrWorkflowRevisionDigest[Async]` need to know
+ * *why* a Git call failed — timeout, output-buffer overflow, or a genuine
+ * Git failure — to report a diagnosable `RevisionDigestFailureReason`
+ * instead of the bare `null` that made the digest cap a dead end. Unrelated
+ * callers in this module keep using {@link runGit} / {@link runGitAsync},
+ * which stay plain null-on-any-failure helpers; this type and the two
+ * functions below are intentionally scoped to the digest path so no other
+ * call site's behavior changes.
+ */
+type GitCallResult =
+	| { ok: true; text: string }
+	| { ok: false; reason: 'timeout' | 'buffer-truncated' | 'git-failed' };
+
+/**
+ * Sync Git invocation for the revision-digest path. Node's `spawnSync` sets
+ * `error.code` to `'ETIMEDOUT'` when the `timeout` option is exceeded and to
+ * `'ENOBUFS'` when stdout/stderr exceeds `maxBuffer` — both verified against
+ * real `spawnSync` behavior, not assumed — so this distinguishes both from a
+ * generic non-zero-exit Git failure.
+ */
+function runGitDetailed(
+	directory: string,
+	args: string[],
+	timeoutMs: number,
+): GitCallResult {
+	const result = _internals.spawnSync('git', ['-C', directory, ...args], {
+		cwd: directory,
+		encoding: 'utf-8',
+		timeout: timeoutMs,
+		maxBuffer: _internals.gitSnapshotMaxBuffer,
+		stdio: ['ignore', 'pipe', 'pipe'],
 	});
+	const errorCode = (result.error as NodeJS.ErrnoException | undefined)?.code;
+	if (errorCode === 'ENOBUFS') return { ok: false, reason: 'buffer-truncated' };
+	if (errorCode === 'ETIMEDOUT') return { ok: false, reason: 'timeout' };
+	if (
+		result.error ||
+		result.status !== 0 ||
+		typeof result.stdout !== 'string'
+	) {
+		return { ok: false, reason: 'git-failed' };
+	}
+	return { ok: true, text: result.stdout.trimEnd() };
+}
+
+/**
+ * Async twin of {@link runGitDetailed}, reusing the bounded chunked-read
+ * stream helper so a large permitted revision cannot stall the host event
+ * loop while still surfacing which bound (timeout vs buffer) was hit.
+ *
+ * The deadline has exactly ONE owner: the `Promise.race` below. Passing
+ * `timeout` to `bunSpawn` as well would arm a second timer on the *same*
+ * deadline — `bunSpawn` installs its own `setTimeout` whenever
+ * `killProcessTree` is set, and Bun/Node arm theirs natively otherwise — and
+ * whichever of the two fired first decided the reported reason: the spawn-side
+ * timer SIGKILLs the child, `proc.exited` then resolves non-zero, and the
+ * completion branch below reports `git-failed` ("Verify the checkout is a
+ * healthy Git worktree") for what was in fact a timeout. Relative firing order
+ * of two timers on one deadline is an implementation detail, not a contract, so
+ * this reason must not be decided by it. The `finally` clause performs exactly
+ * the tree-kill the spawn-side timer would have, so dropping it costs no
+ * cleanup.
+ */
+async function runGitAsyncDetailed(
+	directory: string,
+	args: string[],
+	timeoutMs: number,
+): Promise<GitCallResult> {
+	let proc: BunCompatSubprocess | undefined;
+	let timeout: ReturnType<typeof setTimeout> | undefined;
+	try {
+		const options: BunCompatSpawnOptions = {
+			cwd: directory,
+			stdin: 'ignore',
+			stdout: 'pipe',
+			stderr: 'pipe',
+			killProcessTree: true,
+		};
+		proc = _internals.bunSpawn(['git', '-C', directory, ...args], options);
+		let overflowed = false;
+		const stopOverflow = () => {
+			overflowed = true;
+			try {
+				proc?.kill('SIGKILL');
+			} catch {
+				// Process already exited or cannot be signalled.
+			}
+		};
+		const maxBuffer = _internals.gitSnapshotMaxBuffer;
+		const completed = Promise.all([
+			proc.exited,
+			readBoundedGitOutput(proc.stdout, maxBuffer, stopOverflow),
+			readBoundedGitOutput(proc.stderr, maxBuffer, stopOverflow),
+		]);
+		const result = await Promise.race([
+			completed.then(([exitCode, stdout, stderr]) => ({
+				kind: 'completed' as const,
+				exitCode,
+				stdout,
+				stderr,
+			})),
+			new Promise<{ kind: 'timeout' }>((resolve) => {
+				timeout = setTimeout(() => resolve({ kind: 'timeout' }), timeoutMs);
+			}),
+		]);
+		if (result.kind === 'timeout') return { ok: false, reason: 'timeout' };
+		if (overflowed || result.stdout.truncated || result.stderr.truncated) {
+			return { ok: false, reason: 'buffer-truncated' };
+		}
+		if (result.exitCode !== 0) return { ok: false, reason: 'git-failed' };
+		return { ok: true, text: result.stdout.text.trimEnd() };
+	} catch {
+		return { ok: false, reason: 'git-failed' };
+	} finally {
+		if (timeout) clearTimeout(timeout);
+		try {
+			proc?.kill('SIGKILL');
+		} catch {
+			// Best-effort tree cleanup for an already-closed process.
+		}
+	}
 }
 
 /**
@@ -138,6 +375,23 @@ export function resolveCurrentGitHead(directory: string): string | null {
 	return runGit(directory, ['rev-parse', '--verify', 'HEAD^{commit}']);
 }
 
+/**
+ * Async twin of {@link resolveCurrentGitHead}. PR-workflow gate/dispatch binding
+ * runs on the host tool/hook path, so HEAD verification must resolve Git off the
+ * blocking `spawnSync` path — a synchronous spawn on the long-running host (most
+ * acutely under Bun on Windows) can hang to its bound instead of returning, which
+ * a fail-closed gate would surface as a spurious "cannot resolve HEAD" block.
+ */
+export async function resolveCurrentGitHeadAsync(
+	directory: string,
+): Promise<string | null> {
+	return await runGitAsync(directory, [
+		'rev-parse',
+		'--verify',
+		'HEAD^{commit}',
+	]);
+}
+
 /** Resolve one exact PR merge base without shell interpolation or unbounded I/O. */
 export function resolveExactMergeBase(
 	directory: string,
@@ -148,6 +402,118 @@ export function resolveExactMergeBase(
 		return null;
 	const mergeBase = runGit(directory, ['merge-base', '--', baseRef, prHeadSha]);
 	return mergeBase && /^[0-9a-f]{6,64}$/i.test(mergeBase) ? mergeBase : null;
+}
+
+/** Async twin of {@link resolveExactMergeBase} for the gate/dispatch bind path. */
+export async function resolveExactMergeBaseAsync(
+	directory: string,
+	baseRef: string,
+	prHeadSha: string,
+): Promise<string | null> {
+	if (!isSafeGitRevisionToken(baseRef) || !isSafeGitRevisionToken(prHeadSha))
+		return null;
+	const mergeBase = await runGitAsync(directory, [
+		'merge-base',
+		'--',
+		baseRef,
+		prHeadSha,
+	]);
+	return mergeBase && /^[0-9a-f]{6,64}$/i.test(mergeBase) ? mergeBase : null;
+}
+
+export interface PrReviewDiffStats {
+	changedLines: number;
+	changedFiles: number;
+	/**
+	 * True when the range contains any gitlink (submodule) pointer change.
+	 * Git's numstat reports a submodule bump as a fixed 1-added/1-deleted row
+	 * regardless of the referenced repository's actual diff size, so size
+	 * thresholds cannot bound this case; callers must escalate unconditionally.
+	 */
+	hasSubmoduleChange: boolean;
+}
+
+const GITLINK_MODE_PATTERN = /^:\d{6} 160000 |^:160000 \d{6} /;
+
+/**
+ * Compute bounded changed-line/file totals for the exact reviewed PR range.
+ * Returns null on any Git failure, malformed numstat row, or buffer overflow
+ * so callers can fail strict (treat unknown size as the largest tier).
+ * Rename detection is pinned off (`--no-renames`) so the same logical diff
+ * produces the same totals regardless of the executing machine's ambient
+ * git version/config.
+ */
+export function resolvePrReviewDiffStats(
+	directory: string,
+	baseSha: string,
+	prHeadSha: string,
+): PrReviewDiffStats | null {
+	if (!isSafeGitRevisionToken(baseSha) || !isSafeGitRevisionToken(prHeadSha))
+		return null;
+	const range = `${baseSha}...${prHeadSha}`;
+	const output = runGit(directory, [
+		'diff',
+		'--no-renames',
+		'--numstat',
+		range,
+	]);
+	if (output === null) return null;
+	let changedLines = 0;
+	let changedFiles = 0;
+	for (const line of output.split('\n')) {
+		const trimmed = line.trim();
+		if (trimmed.length === 0) continue;
+		const fields = trimmed.split('\t');
+		if (fields.length < 3) return null;
+		const added = fields[0] === '-' ? 0 : Number.parseInt(fields[0], 10);
+		const deleted = fields[1] === '-' ? 0 : Number.parseInt(fields[1], 10);
+		if (Number.isNaN(added) || Number.isNaN(deleted)) return null;
+		changedFiles += 1;
+		changedLines += added + deleted;
+	}
+	const rawOutput = runGit(directory, ['diff', '--raw', range]);
+	if (rawOutput === null) return null;
+	const hasSubmoduleChange = rawOutput
+		.split('\n')
+		.some((line) => GITLINK_MODE_PATTERN.test(line.trim()));
+	return { changedLines, changedFiles, hasSubmoduleChange };
+}
+
+/** Async twin of {@link resolvePrReviewDiffStats} used off the blocking spawn on the gate/dispatch bind path. */
+export async function resolvePrReviewDiffStatsAsync(
+	directory: string,
+	baseSha: string,
+	prHeadSha: string,
+): Promise<PrReviewDiffStats | null> {
+	if (!isSafeGitRevisionToken(baseSha) || !isSafeGitRevisionToken(prHeadSha))
+		return null;
+	const range = `${baseSha}...${prHeadSha}`;
+	const output = await runGitAsync(directory, [
+		'diff',
+		'--no-renames',
+		'--numstat',
+		range,
+	]);
+	if (output === null) return null;
+	let changedLines = 0;
+	let changedFiles = 0;
+	for (const line of output.split('\n')) {
+		const trimmed = line.trim();
+		if (trimmed.length === 0) continue;
+		const fields = trimmed.split('\t');
+		if (fields.length < 3) return null;
+		const added = fields[0] === '-' ? 0 : Number.parseInt(fields[0], 10);
+		const deleted = fields[1] === '-' ? 0 : Number.parseInt(fields[1], 10);
+		if (Number.isNaN(added) || Number.isNaN(deleted)) return null;
+		changedFiles += 1;
+		changedLines += added + deleted;
+	}
+	const rawOutput = await runGitAsync(directory, ['diff', '--raw', range]);
+	if (rawOutput === null) return null;
+	const hasSubmoduleChange = rawOutput
+		.split('\n')
+		.some((line) => GITLINK_MODE_PATTERN.test(line.trim()));
+	return { changedLines, changedFiles, hasSubmoduleChange };
 }
 
 function isSafeGitRevisionToken(value: string): boolean {
@@ -210,6 +576,40 @@ export function resolveCurrentUpstreamPushTarget(
 	return { remoteName, remoteBranchRef, remoteTrackingRef };
 }
 
+/** Async twin of {@link resolveCurrentUpstreamPushTarget} used off the blocking spawn on the gate/dispatch bind path. */
+export async function resolveCurrentUpstreamPushTargetAsync(
+	directory: string,
+): Promise<PrUpstreamPushTarget | null> {
+	const localBranchRef = await runGitAsync(directory, [
+		'symbolic-ref',
+		'--quiet',
+		'HEAD',
+	]);
+	if (!localBranchRef?.startsWith('refs/heads/')) return null;
+	const encoded = await runGitAsync(directory, [
+		'for-each-ref',
+		'--format=%(upstream:remotename)%00%(upstream:remoteref)%00%(upstream)',
+		localBranchRef,
+	]);
+	if (!encoded) return null;
+	const [remoteName, remoteBranchRef, remoteTrackingRef, ...extras] =
+		encoded.split('\0');
+	if (
+		extras.length > 0 ||
+		!remoteName ||
+		remoteName.startsWith('-') ||
+		/[\s;&|<>`]/.test(remoteName) ||
+		!remoteBranchRef?.startsWith('refs/heads/') ||
+		remoteBranchRef === 'refs/heads/' ||
+		/[\s;&|<>`]/.test(remoteBranchRef) ||
+		!remoteTrackingRef?.startsWith('refs/remotes/') ||
+		remoteTrackingRef.endsWith('/HEAD')
+	) {
+		return null;
+	}
+	return { remoteName, remoteBranchRef, remoteTrackingRef };
+}
+
 /** Query the actual remote ref; local tracking refs are not publication proof. */
 export function resolveExactRemoteBranchHead(
 	directory: string,
@@ -227,6 +627,42 @@ export function resolveExactRemoteBranchHead(
 		return null;
 	}
 	const output = runGit(
+		directory,
+		['ls-remote', '--exit-code', '--heads', remoteName, remoteBranchRef],
+		20_000,
+	);
+	if (!output) return null;
+	const rows = output.split(/\r?\n/).filter(Boolean);
+	if (rows.length !== 1) return null;
+	const [objectName, refName, ...extras] = rows[0].split(/\s+/);
+	if (
+		extras.length > 0 ||
+		refName !== remoteBranchRef ||
+		!objectName ||
+		!(/^[0-9a-f]{40}$/i.test(objectName) || /^[0-9a-f]{64}$/i.test(objectName))
+	) {
+		return null;
+	}
+	return objectName;
+}
+
+/** Async twin of {@link resolveExactRemoteBranchHead} for the gate bind/publish path. */
+export async function resolveExactRemoteBranchHeadAsync(
+	directory: string,
+	remoteName: string,
+	remoteBranchRef: string,
+): Promise<string | null> {
+	if (
+		!remoteName ||
+		remoteName.startsWith('-') ||
+		/[\s;&|<>`]/.test(remoteName) ||
+		!remoteBranchRef.startsWith('refs/heads/') ||
+		remoteBranchRef === 'refs/heads/' ||
+		/[\s;&|<>`]/.test(remoteBranchRef)
+	) {
+		return null;
+	}
+	const output = await runGitAsync(
 		directory,
 		['ls-remote', '--exit-code', '--heads', remoteName, remoteBranchRef],
 		20_000,
@@ -281,9 +717,70 @@ export function resolveGitControlStateDigest(directory: string): string | null {
 	);
 }
 
+/** Async twin of {@link resolveGitControlStateDigest} used off the blocking spawn on the gate/dispatch bind path. */
+export async function resolveGitControlStateDigestAsync(
+	directory: string,
+): Promise<string | null> {
+	const head = await runGitAsync(directory, [
+		'rev-parse',
+		'--verify',
+		'HEAD^{commit}',
+	]);
+	const symbolicHead = await runGitAsync(directory, [
+		'symbolic-ref',
+		'--quiet',
+		'HEAD',
+	]);
+	const upstream = await resolveCurrentUpstreamPushTargetAsync(directory);
+	const refs = await runGitAsync(directory, [
+		'for-each-ref',
+		'--format=%(refname)%00%(objectname)',
+		'refs/heads',
+		'refs/remotes',
+		'refs/tags',
+	]);
+	const config = await runGitAsync(directory, [
+		'config',
+		'--null',
+		'--show-origin',
+		'--show-scope',
+		'--list',
+	]);
+	const index = await runGitAsync(directory, ['ls-files', '--stage', '-z']);
+	if (
+		head === null ||
+		symbolicHead === null ||
+		!upstream ||
+		refs === null ||
+		config === null ||
+		index === null
+	) {
+		return null;
+	}
+	return digest(
+		`head\0${head}\0symbolic\0${symbolicHead}\0upstream\0${upstream.remoteName}\0${upstream.remoteBranchRef}\0${upstream.remoteTrackingRef}\0refs\0${refs}\0config\0${config}\0index\0${index}`,
+	);
+}
+
 /** Require all independently reviewed content to be captured by the commit. */
 export function resolveIsWorkingTreeClean(directory: string): boolean | null {
 	const status = runGit(directory, [
+		'status',
+		'--porcelain=v1',
+		'--untracked-files=all',
+	]);
+	return status === null ? null : status.length === 0;
+}
+
+/**
+ * Async twin of {@link resolveIsWorkingTreeClean} for the gate/dispatch bind path.
+ * `git status` emits far more output than `rev-parse`, so it is the most exposed
+ * of the bind-path checks to a blocking synchronous spawn stalling the host.
+ */
+export async function resolveIsWorkingTreeCleanAsync(
+	directory: string,
+): Promise<boolean | null> {
+	const status = await runGitAsync(directory, [
 		'status',
 		'--porcelain=v1',
 		'--untracked-files=all',
@@ -297,11 +794,40 @@ export function resolveCommitCountSince(
 	baseHeadSha: string,
 	currentHeadSha: string,
 ): number | null {
+	if (
+		!isSafeGitRevisionToken(baseHeadSha) ||
+		!isSafeGitRevisionToken(currentHeadSha)
+	)
+		return null;
 	const output = runGit(directory, [
 		'rev-list',
 		'--count',
 		'--ancestry-path',
 		`${baseHeadSha}..${currentHeadSha}`,
+		'--',
+	]);
+	if (!output || !/^\d+$/.test(output)) return null;
+	const count = Number(output);
+	return Number.isSafeInteger(count) ? count : null;
+}
+
+/** Async twin of {@link resolveCommitCountSince} used off the blocking spawn on the gate/dispatch bind path. */
+export async function resolveCommitCountSinceAsync(
+	directory: string,
+	baseHeadSha: string,
+	currentHeadSha: string,
+): Promise<number | null> {
+	if (
+		!isSafeGitRevisionToken(baseHeadSha) ||
+		!isSafeGitRevisionToken(currentHeadSha)
+	)
+		return null;
+	const output = await runGitAsync(directory, [
+		'rev-list',
+		'--count',
+		'--ancestry-path',
+		`${baseHeadSha}..${currentHeadSha}`,
+		'--',
 	]);
 	if (!output || !/^\d+$/.test(output)) return null;
 	const count = Number(output);
@@ -314,18 +840,65 @@ export function resolveIsExactSingleChildCommit(
 	baseHeadSha: string,
 	currentHeadSha: string,
 ): boolean | null {
+	if (
+		!isSafeGitRevisionToken(baseHeadSha) ||
+		!isSafeGitRevisionToken(currentHeadSha)
+	)
+		return null;
 	const base = runGit(directory, [
 		'rev-parse',
 		'--verify',
 		`${baseHeadSha}^{commit}`,
+		'--',
 	]);
 	const current = runGit(directory, [
 		'rev-parse',
 		'--verify',
 		`${currentHeadSha}^{commit}`,
+		'--',
 	]);
 	if (!base || !current) return null;
 	const commitAndParents = runGit(directory, [
+		'rev-list',
+		'--parents',
+		'-n',
+		'1',
+		current,
+	]);
+	if (commitAndParents === null) return null;
+	const fields = commitAndParents.trim().split(/\s+/);
+	return (
+		fields.length === 2 &&
+		fields[0]?.toLowerCase() === current.toLowerCase() &&
+		fields[1]?.toLowerCase() === base.toLowerCase()
+	);
+}
+
+/** Async twin of {@link resolveIsExactSingleChildCommit} used off the blocking spawn on the gate/dispatch bind path. */
+export async function resolveIsExactSingleChildCommitAsync(
+	directory: string,
+	baseHeadSha: string,
+	currentHeadSha: string,
+): Promise<boolean | null> {
+	if (
+		!isSafeGitRevisionToken(baseHeadSha) ||
+		!isSafeGitRevisionToken(currentHeadSha)
+	)
+		return null;
+	const base = await runGitAsync(directory, [
+		'rev-parse',
+		'--verify',
+		`${baseHeadSha}^{commit}`,
+		'--',
+	]);
+	const current = await runGitAsync(directory, [
+		'rev-parse',
+		'--verify',
+		`${currentHeadSha}^{commit}`,
+		'--',
+	]);
+	if (!base || !current) return null;
+	const commitAndParents = await runGitAsync(directory, [
 		'rev-list',
 		'--parents',
 		'-n',
@@ -368,45 +941,203 @@ export function resolveRemoteRefsContainingHead(
 		.map(([ref]) => ref);
 }
 
+/** Async twin of {@link resolveRemoteRefsContainingHead} used off the blocking spawn on the gate/dispatch bind path. */
+export async function resolveRemoteRefsContainingHeadAsync(
+	directory: string,
+	headSha: string,
+): Promise<string[] | null> {
+	const output = await runGitAsync(directory, [
+		'for-each-ref',
+		'--format=%(refname)%09%(objectname)',
+		'refs/remotes',
+	]);
+	if (output === null) return null;
+	return output
+		.split(/\r?\n/)
+		.map((line) => line.trim().split('\t'))
+		.filter(
+			([ref, objectName]) =>
+				ref?.startsWith('refs/remotes/') &&
+				!ref.endsWith('/HEAD') &&
+				objectName?.toLowerCase() === headSha.toLowerCase(),
+		)
+		.map(([ref]) => ref);
+}
+
+export type PrFeedbackTrackingCandidate =
+	| {
+			kind: 'local';
+			branchName: string;
+			remoteTrackingRef: string;
+	  }
+	| {
+			kind: 'remote';
+			remoteTrackingRef: string;
+	  };
+
+/**
+ * Discover the exact tracked branches that can safely attach a detached
+ * PR_FEEDBACK checkout. Full ref names come from Git; no remote-name slash
+ * boundary is guessed in application code.
+ */
+export async function resolvePrFeedbackTrackingCandidatesAsync(
+	directory: string,
+	headSha: string,
+): Promise<{
+	local: Extract<PrFeedbackTrackingCandidate, { kind: 'local' }>[];
+	remote: Extract<PrFeedbackTrackingCandidate, { kind: 'remote' }>[];
+} | null> {
+	const [localOutput, remoteRefs] = await Promise.all([
+		runGitAsync(directory, [
+			'for-each-ref',
+			'--format=%(refname)%09%(objectname)%09%(upstream)',
+			'refs/heads',
+		]),
+		resolveRemoteRefsContainingHeadAsync(directory, headSha),
+	]);
+	if (localOutput === null || remoteRefs === null) return null;
+	const exactRemoteRefs = new Set(remoteRefs);
+	const local = localOutput
+		.split(/\r?\n/)
+		.map((line) => line.trim().split('\t'))
+		.flatMap(([ref, objectName, upstream, ...extras]) => {
+			if (
+				extras.length > 0 ||
+				!ref?.startsWith('refs/heads/') ||
+				objectName?.toLowerCase() !== headSha.toLowerCase() ||
+				!upstream?.startsWith('refs/remotes/') ||
+				!exactRemoteRefs.has(upstream)
+			) {
+				return [];
+			}
+			return [
+				{
+					kind: 'local' as const,
+					branchName: ref.slice('refs/heads/'.length),
+					remoteTrackingRef: upstream,
+				},
+			];
+		});
+	return {
+		local,
+		remote: remoteRefs.map((remoteTrackingRef) => ({
+			kind: 'remote' as const,
+			remoteTrackingRef,
+		})),
+	};
+}
+
+/** Run the exact array-form switch selected by the controller. */
+export async function switchPrFeedbackTrackingCandidateAsync(
+	directory: string,
+	candidate: PrFeedbackTrackingCandidate,
+): Promise<boolean> {
+	const args =
+		candidate.kind === 'local'
+			? ['switch', '--no-guess', '--', candidate.branchName]
+			: ['switch', '--track', '--', candidate.remoteTrackingRef];
+	const output = await runGitAsync(directory, args);
+	return output !== null;
+}
+
+/**
+ * Discriminated result for the revision-digest twins (issue #1968 P6). A
+ * bare `null` on any failure made the digest cap a dead end: a gate consumer
+ * could not tell "revision too large" (a bound the operator can act on) from
+ * "Git failed" or "output truncated" (an environment problem). `detail` is a
+ * best-effort human-readable diagnostic and is not part of the failure
+ * contract; only `reason` is.
+ */
+export type RevisionDigestFailureReason =
+	| 'file-cap'
+	| 'byte-cap'
+	| 'buffer-truncated'
+	| 'timeout'
+	| 'git-failed'
+	| 'containment'
+	| 'read-failed';
+
+export type RevisionDigestResult =
+	| { ok: true; digest: string }
+	| { ok: false; reason: RevisionDigestFailureReason; detail?: string };
+
+function revisionDigestGitCallFailure(
+	call: string,
+	result: Extract<GitCallResult, { ok: false }>,
+): { ok: false; reason: RevisionDigestFailureReason; detail: string } {
+	const description =
+		result.reason === 'timeout'
+			? 'timed out'
+			: result.reason === 'buffer-truncated'
+				? 'output exceeded the bounded buffer'
+				: 'failed';
+	return {
+		ok: false,
+		reason: result.reason,
+		detail: `git ${call} ${description}`,
+	};
+}
+
 /**
  * Bind a mutable working tree to its actual content, not merely porcelain status.
  * This lets PR-feedback approvals fail closed when a same-path edit occurs after a
  * gate. Paths come from Git, are containment-checked, and are hashed without
  * following symlinks outside the project.
+ *
+ * This is the one implementation of the sync digest; {@link
+ * resolvePrWorkflowRevisionDigest} is a thin `.ok ? digest : null` delegate
+ * that preserves the pre-existing signature/behavior for existing callers.
  */
-export function resolvePrWorkflowRevisionDigest(
+export function resolvePrWorkflowRevisionDigestDetailed(
 	directory: string,
 	baseHeadSha: string,
-): string | null {
+): RevisionDigestResult {
 	const projectRoot = path.resolve(directory);
-	const baseHead = runGit(projectRoot, [
-		'rev-parse',
-		'--verify',
-		`${baseHeadSha}^{commit}`,
-	]);
-	const diffNames = runGit(projectRoot, [
-		'diff',
-		'--no-ext-diff',
-		'--name-only',
-		'-z',
-		baseHeadSha,
-	]);
-	const porcelain = runGit(projectRoot, [
-		'status',
-		'--porcelain=v1',
-		'-z',
-		'--untracked-files=all',
-	]);
-	if (!baseHead || diffNames === null || porcelain === null) return null;
-	const porcelainPaths = parsePorcelainPaths(porcelain);
-	if (!porcelainPaths) return null;
+	const baseHeadResult = runGitDetailed(
+		projectRoot,
+		['rev-parse', '--verify', `${baseHeadSha}^{commit}`],
+		_internals.gitTimeoutMs,
+	);
+	if (!baseHeadResult.ok) {
+		return revisionDigestGitCallFailure('rev-parse --verify', baseHeadResult);
+	}
+	const diffResult = runGitDetailed(
+		projectRoot,
+		['diff', '--no-ext-diff', '--name-only', '-z', baseHeadSha],
+		_internals.revisionEnumerationTimeoutMs,
+	);
+	if (!diffResult.ok) {
+		return revisionDigestGitCallFailure('diff --name-only', diffResult);
+	}
+	const porcelainResult = runGitDetailed(
+		projectRoot,
+		['status', '--porcelain=v1', '-z', '--untracked-files=all'],
+		_internals.revisionEnumerationTimeoutMs,
+	);
+	if (!porcelainResult.ok) {
+		return revisionDigestGitCallFailure('status --porcelain', porcelainResult);
+	}
+	const porcelainPaths = parsePorcelainPaths(porcelainResult.text);
+	if (!porcelainPaths) {
+		return {
+			ok: false,
+			reason: 'git-failed',
+			detail: 'malformed git status --porcelain=v1 output',
+		};
+	}
 	const changedPaths = [
-		...new Set([...parseNulPaths(diffNames), ...porcelainPaths]),
+		...new Set([...parseNulPaths(diffResult.text), ...porcelainPaths]),
 	].sort((left, right) => left.localeCompare(right));
-	if (changedPaths.length > REVISION_MAX_FILES) return null;
+	if (changedPaths.length > _internals.revisionMaxFiles) {
+		return {
+			ok: false,
+			reason: 'file-cap',
+			detail: `${changedPaths.length} changed paths exceed the cap of ${_internals.revisionMaxFiles}`,
+		};
+	}
 
 	const hash = createHash('sha256');
-	hash.update(`base\0${baseHead}\0`);
+	hash.update(`base\0${baseHeadResult.text}\0`);
 	let totalBytes = 0;
 	for (const relativePath of changedPaths) {
 		const resolvedPath = path.resolve(projectRoot, relativePath);
@@ -415,8 +1146,13 @@ export function resolvePrWorkflowRevisionDigest(
 			!relativeToRoot ||
 			relativeToRoot.startsWith('..') ||
 			path.isAbsolute(relativeToRoot)
-		)
-			return null;
+		) {
+			return {
+				ok: false,
+				reason: 'containment',
+				detail: `path escapes the project root: ${relativePath}`,
+			};
+		}
 		hash.update(`path\0${relativePath}\0`);
 		let stats: fs.Stats;
 		try {
@@ -426,14 +1162,22 @@ export function resolvePrWorkflowRevisionDigest(
 				hash.update('deleted\0');
 				continue;
 			}
-			return null;
+			return {
+				ok: false,
+				reason: 'read-failed',
+				detail: `lstat failed for ${relativePath}`,
+			};
 		}
 		if (stats.isSymbolicLink()) {
 			try {
 				hash.update(`symlink\0${fs.readlinkSync(resolvedPath)}\0`);
 				continue;
 			} catch {
-				return null;
+				return {
+					ok: false,
+					reason: 'read-failed',
+					detail: `readlink failed for ${relativePath}`,
+				};
 			}
 		}
 		if (!stats.isFile()) {
@@ -441,58 +1185,104 @@ export function resolvePrWorkflowRevisionDigest(
 			continue;
 		}
 		totalBytes += stats.size;
-		if (totalBytes > REVISION_MAX_TOTAL_BYTES) return null;
+		if (totalBytes > _internals.revisionMaxTotalBytes) {
+			return {
+				ok: false,
+				reason: 'byte-cap',
+				detail: `accumulated content bytes ${totalBytes} exceed the cap of ${_internals.revisionMaxTotalBytes} at ${relativePath}`,
+			};
+		}
 		try {
 			hash.update(`file\0${stats.mode}\0`);
-			hash.update(fs.readFileSync(resolvedPath));
+			hash.update(_internals.readChangedFileSync(resolvedPath));
 			hash.update('\0');
 		} catch {
-			return null;
+			return {
+				ok: false,
+				reason: 'read-failed',
+				detail: `read failed for ${relativePath}`,
+			};
 		}
 	}
-	return hash.digest('hex');
+	return { ok: true, digest: hash.digest('hex') };
+}
+
+export function resolvePrWorkflowRevisionDigest(
+	directory: string,
+	baseHeadSha: string,
+): string | null {
+	const result = resolvePrWorkflowRevisionDigestDetailed(
+		directory,
+		baseHeadSha,
+	);
+	return result.ok ? result.digest : null;
 }
 
 /**
  * Asynchronously bind a mutable working tree to its actual content. File
  * reads are chunked with bounded cooperative yields so a large, permitted
  * revision cannot stall the synchronous plugin gate path.
+ *
+ * This is the one implementation of the async digest; {@link
+ * resolvePrWorkflowRevisionDigestAsync} is a thin `.ok ? digest : null`
+ * delegate that preserves the pre-existing signature/behavior for existing
+ * callers. Sequenced after P2 (see issue #1968 05-fix-plan.md P6.4): the sync
+ * twin above has no chunking/yield, so enlarging its `readFileSync` loop
+ * before P2 threads the digest through a single gate-entry-point resolve
+ * would have worsened blocking on the production path.
  */
-export async function resolvePrWorkflowRevisionDigestAsync(
+export async function resolvePrWorkflowRevisionDigestDetailedAsync(
 	directory: string,
 	baseHeadSha: string,
-): Promise<string | null> {
+): Promise<RevisionDigestResult> {
 	const projectRoot = path.resolve(directory);
-	const [baseHead, diffNames, porcelain] = await Promise.all([
-		runGitAsync(projectRoot, [
-			'rev-parse',
-			'--verify',
-			`${baseHeadSha}^{commit}`,
-		]),
-		runGitAsync(projectRoot, [
-			'diff',
-			'--no-ext-diff',
-			'--name-only',
-			'-z',
-			baseHeadSha,
-		]),
-		runGitAsync(projectRoot, [
-			'status',
-			'--porcelain=v1',
-			'-z',
-			'--untracked-files=all',
-		]),
+	const [baseHeadResult, diffResult, porcelainResult] = await Promise.all([
+		runGitAsyncDetailed(
+			projectRoot,
+			['rev-parse', '--verify', `${baseHeadSha}^{commit}`],
+			_internals.gitTimeoutMs,
+		),
+		runGitAsyncDetailed(
+			projectRoot,
+			['diff', '--no-ext-diff', '--name-only', '-z', baseHeadSha],
+			_internals.revisionEnumerationTimeoutMs,
+		),
+		runGitAsyncDetailed(
+			projectRoot,
+			['status', '--porcelain=v1', '-z', '--untracked-files=all'],
+			_internals.revisionEnumerationTimeoutMs,
+		),
 	]);
-	if (!baseHead || diffNames === null || porcelain === null) return null;
-	const porcelainPaths = parsePorcelainPaths(porcelain);
-	if (!porcelainPaths) return null;
+	if (!baseHeadResult.ok) {
+		return revisionDigestGitCallFailure('rev-parse --verify', baseHeadResult);
+	}
+	if (!diffResult.ok) {
+		return revisionDigestGitCallFailure('diff --name-only', diffResult);
+	}
+	if (!porcelainResult.ok) {
+		return revisionDigestGitCallFailure('status --porcelain', porcelainResult);
+	}
+	const porcelainPaths = parsePorcelainPaths(porcelainResult.text);
+	if (!porcelainPaths) {
+		return {
+			ok: false,
+			reason: 'git-failed',
+			detail: 'malformed git status --porcelain=v1 output',
+		};
+	}
 	const changedPaths = [
-		...new Set([...parseNulPaths(diffNames), ...porcelainPaths]),
+		...new Set([...parseNulPaths(diffResult.text), ...porcelainPaths]),
 	].sort((left, right) => left.localeCompare(right));
-	if (changedPaths.length > REVISION_MAX_FILES) return null;
+	if (changedPaths.length > _internals.revisionMaxFiles) {
+		return {
+			ok: false,
+			reason: 'file-cap',
+			detail: `${changedPaths.length} changed paths exceed the cap of ${_internals.revisionMaxFiles}`,
+		};
+	}
 
 	const hash = createHash('sha256');
-	hash.update(`base\0${baseHead}\0`);
+	hash.update(`base\0${baseHeadResult.text}\0`);
 	let totalBytes = 0;
 	let chunksSinceYield = 0;
 	for (const relativePath of changedPaths) {
@@ -502,8 +1292,13 @@ export async function resolvePrWorkflowRevisionDigestAsync(
 			!relativeToRoot ||
 			relativeToRoot.startsWith('..') ||
 			path.isAbsolute(relativeToRoot)
-		)
-			return null;
+		) {
+			return {
+				ok: false,
+				reason: 'containment',
+				detail: `path escapes the project root: ${relativePath}`,
+			};
+		}
 		hash.update(`path\0${relativePath}\0`);
 		let stats: fs.Stats;
 		try {
@@ -513,14 +1308,22 @@ export async function resolvePrWorkflowRevisionDigestAsync(
 				hash.update('deleted\0');
 				continue;
 			}
-			return null;
+			return {
+				ok: false,
+				reason: 'read-failed',
+				detail: `lstat failed for ${relativePath}`,
+			};
 		}
 		if (stats.isSymbolicLink()) {
 			try {
 				hash.update(`symlink\0${await fs.promises.readlink(resolvedPath)}\0`);
 				continue;
 			} catch {
-				return null;
+				return {
+					ok: false,
+					reason: 'read-failed',
+					detail: `readlink failed for ${relativePath}`,
+				};
 			}
 		}
 		if (!stats.isFile()) {
@@ -528,7 +1331,13 @@ export async function resolvePrWorkflowRevisionDigestAsync(
 			continue;
 		}
 		totalBytes += stats.size;
-		if (totalBytes > REVISION_MAX_TOTAL_BYTES) return null;
+		if (totalBytes > _internals.revisionMaxTotalBytes) {
+			return {
+				ok: false,
+				reason: 'byte-cap',
+				detail: `accumulated content bytes ${totalBytes} exceed the cap of ${_internals.revisionMaxTotalBytes} at ${relativePath}`,
+			};
+		}
 		hash.update(`file\0${stats.mode}\0`);
 		let handle: fs.promises.FileHandle | undefined;
 		try {
@@ -540,7 +1349,13 @@ export async function resolvePrWorkflowRevisionDigestAsync(
 					stats.size - position,
 				);
 				const { bytesRead } = await handle.read(buffer, 0, length, position);
-				if (bytesRead <= 0) return null;
+				if (bytesRead <= 0) {
+					return {
+						ok: false,
+						reason: 'read-failed',
+						detail: `short read for ${relativePath}`,
+					};
+				}
 				hash.update(buffer.subarray(0, bytesRead));
 				position += bytesRead;
 				chunksSinceYield++;
@@ -551,12 +1366,27 @@ export async function resolvePrWorkflowRevisionDigestAsync(
 			}
 			hash.update('\0');
 		} catch {
-			return null;
+			return {
+				ok: false,
+				reason: 'read-failed',
+				detail: `read failed for ${relativePath}`,
+			};
 		} finally {
 			await handle?.close().catch(() => undefined);
 		}
 	}
-	return hash.digest('hex');
+	return { ok: true, digest: hash.digest('hex') };
+}
+
+export async function resolvePrWorkflowRevisionDigestAsync(
+	directory: string,
+	baseHeadSha: string,
+): Promise<string | null> {
+	const result = await resolvePrWorkflowRevisionDigestDetailedAsync(
+		directory,
+		baseHeadSha,
+	);
+	return result.ok ? result.digest : null;
 }
 
 function parseNulPaths(output: string): string[] {
@@ -583,16 +1413,23 @@ export function parsePorcelainPaths(output: string): string[] | null {
 	return [...new Set(paths)];
 }
 
-interface PorcelainV2Snapshot {
+export interface PorcelainV2Snapshot {
 	gitHead: string | null;
-	changedFiles: string[];
+	dirtyTrackedPaths: string[];
+	untrackedPaths: string[];
+	renameOrCopy: boolean;
+	unmergedPaths: string[];
+	unmergedCodes: string[];
+	dirtySubmodulePaths: string[];
 }
 
 /**
  * Parse the one-command `git status --porcelain=v2 --branch -z` snapshot used
  * by background evidence capture. A malformed or unknown record fails closed.
  */
-function parsePorcelainV2Snapshot(output: string): PorcelainV2Snapshot | null {
+export function parsePorcelainV2Snapshot(
+	output: string,
+): PorcelainV2Snapshot | null {
 	const records = output.split('\0');
 	const headers: string[] = [];
 	while (records[0]?.startsWith('# ')) {
@@ -600,41 +1437,73 @@ function parsePorcelainV2Snapshot(output: string): PorcelainV2Snapshot | null {
 	}
 	const oidMatch = headers.join('\n').match(/^# branch\.oid (.+)$/m);
 	if (!oidMatch) return null;
-	const gitHead = /^[0-9a-f]{6,64}$/i.test(oidMatch[1])
-		? oidMatch[1]
-		: oidMatch[1] === '(initial)'
-			? null
-			: null;
-	const paths: string[] = [];
+	if (
+		!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(oidMatch[1]) &&
+		oidMatch[1] !== '(initial)'
+	) {
+		return null;
+	}
+	const gitHead = oidMatch[1] === '(initial)' ? null : oidMatch[1];
+	const dirtyTrackedPaths: string[] = [];
+	const untrackedPaths: string[] = [];
+	const unmergedPaths: string[] = [];
+	const unmergedCodes: string[] = [];
+	const dirtySubmodulePaths: string[] = [];
+	let renameOrCopy = false;
 	for (let index = 0; index < records.length; index++) {
 		const record = records[index];
 		if (!record) continue;
 		if (record.startsWith('? ')) {
-			paths.push(record.slice(2));
+			untrackedPaths.push(record.slice(2));
 			continue;
 		}
 		if (record.startsWith('1 ')) {
+			const fields = record.split(' ');
 			const changedPath = porcelainV2PathAfterFields(record, 8);
-			if (!changedPath) return null;
-			paths.push(changedPath);
+			if (!changedPath || !fields[2]) return null;
+			dirtyTrackedPaths.push(changedPath);
+			if (fields[2] !== 'N...') dirtySubmodulePaths.push(changedPath);
 			continue;
 		}
 		if (record.startsWith('2 ')) {
+			const fields = record.split(' ');
 			const changedPath = porcelainV2PathAfterFields(record, 9);
 			const originalPath = records[++index];
-			if (!changedPath || !originalPath) return null;
-			paths.push(changedPath, originalPath);
+			if (!changedPath || !originalPath || !fields[2]) return null;
+			renameOrCopy = true;
+			dirtyTrackedPaths.push(changedPath, originalPath);
+			if (fields[2] !== 'N...') dirtySubmodulePaths.push(changedPath);
 			continue;
 		}
 		if (record.startsWith('u ')) {
+			const fields = record.split(' ');
 			const changedPath = porcelainV2PathAfterFields(record, 10);
-			if (!changedPath) return null;
-			paths.push(changedPath);
+			const unmergedCode = fields[1];
+			if (
+				!changedPath ||
+				!fields[2] ||
+				!unmergedCode ||
+				!/^(?:DD|AU|UD|UA|DU|AA|UU)$/.test(unmergedCode)
+			) {
+				return null;
+			}
+			unmergedPaths.push(changedPath);
+			unmergedCodes.push(unmergedCode);
+			dirtyTrackedPaths.push(changedPath);
+			if (fields[2] !== 'N...') dirtySubmodulePaths.push(changedPath);
 			continue;
 		}
 		return null;
 	}
-	return { gitHead, changedFiles: [...new Set(paths)] };
+	return {
+		gitHead,
+		dirtyTrackedPaths: [...new Set(dirtyTrackedPaths)],
+		untrackedPaths: [...new Set(untrackedPaths)],
+		renameOrCopy,
+		unmergedPaths: [...new Set(unmergedPaths)],
+		unmergedCodes: [...new Set(unmergedCodes)],
+		dirtySubmodulePaths: [...new Set(dirtySubmodulePaths)],
+	};
 }
 
 function porcelainV2PathAfterFields(
@@ -694,7 +1563,14 @@ export function captureWorkspaceSnapshot(
 		directory: path.resolve(directory),
 		gitHead: snapshot?.gitHead ?? null,
 		dirtyHash: porcelain === null ? null : digest(porcelain),
-		changedFiles: snapshot?.changedFiles ?? null,
+		changedFiles: snapshot
+			? [
+					...new Set([
+						...snapshot.dirtyTrackedPaths,
+						...snapshot.untrackedPaths,
+					]),
+				]
+			: null,
 		prHeadSha,
 		scope,
 	};
@@ -781,10 +1657,42 @@ export function digest(text: string): string {
 
 export const _internals: {
 	spawnSync: SpawnSync;
+	bunSpawn: typeof bunSpawn;
+	gitTimeoutMs: number;
 	yieldControl: () => Promise<void>;
 	parsePorcelainV2Snapshot: typeof parsePorcelainV2Snapshot;
+	/**
+	 * Revision-digest bound seams (issue #1968 P6). Defaults mirror the
+	 * top-level constants; tests lower these to deterministically produce
+	 * `file-cap` / `byte-cap` / `buffer-truncated` against small real temp
+	 * git repos instead of materializing tens of thousands of real files.
+	 */
+	revisionMaxFiles: number;
+	revisionMaxTotalBytes: number;
+	gitSnapshotMaxBuffer: number;
+	revisionEnumerationTimeoutMs: number;
+	/**
+	 * The synchronous digest's changed-file content read, behind the same kind
+	 * of seam as `spawnSync` above. The `read-failed` reason it guards has no
+	 * portable filesystem trigger: Windows normalizes every crafted-path failure
+	 * (nested-under-a-file, reserved characters, over-length) to `ENOENT`, which
+	 * this code deliberately treats as "deleted, keep hashing", and `chmod` is a
+	 * no-op there — so without this seam the sync twin's `read-failed` arm is
+	 * unreachable from a test while remaining reachable in production (EACCES,
+	 * EIO, a vanished mount). The async twin needs no equivalent: its chunked
+	 * reader reaches `read-failed` through the short-read branch, which a test
+	 * drives via the existing `yieldControl` seam.
+	 */
+	readChangedFileSync: (filePath: string) => Buffer;
 } = {
 	spawnSync: child_process.spawnSync,
+	bunSpawn,
+	gitTimeoutMs: GIT_SNAPSHOT_TIMEOUT_MS,
 	yieldControl: () => new Promise<void>((resolve) => setImmediate(resolve)),
 	parsePorcelainV2Snapshot,
+	revisionMaxFiles: REVISION_MAX_FILES,
+	revisionMaxTotalBytes: REVISION_MAX_TOTAL_BYTES,
+	gitSnapshotMaxBuffer: GIT_SNAPSHOT_MAX_BUFFER,
+	revisionEnumerationTimeoutMs: REVISION_ENUMERATION_TIMEOUT_MS,
+	readChangedFileSync: (filePath: string) => fs.readFileSync(filePath),
 };

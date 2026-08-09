@@ -353,6 +353,158 @@ export async function readRewriteHistory(
 }
 
 // ============================================================================
+// Field Normalization — dedupe + positional cap (issue #1821 Lane 0b)
+// ============================================================================
+
+/**
+ * Normalize a loosely-typed knowledge array field: keep only strings,
+ * optionally truncate each item, deduplicate case-insensitively, then cap.
+ *
+ * The steps run in EXACTLY this order and the order is observable:
+ *
+ *  1. non-array input      → `[]`
+ *  2. drop non-string items
+ *  3. truncate each item to `itemMaxChars` (when provided)
+ *  4. deduplicate on a case-insensitive key, PRESERVING the first
+ *     occurrence's original casing
+ *  5. cap to `opts.cap`, keeping the first N survivors
+ *
+ * Truncation happens BEFORE deduplication, so two items that differ only past
+ * `itemMaxChars` collapse into one. Deduplication happens BEFORE the cap, so a
+ * run of duplicates can no longer evict distinct values off the end — that
+ * eviction was the defect this helper eradicates (a bare positional cap of 20
+ * with no dedup, repeated at six call sites — issue #1821 Lane 0b).
+ *
+ * `values` is typed `unknown` because every call site receives untrusted or
+ * loosely-typed input (LLM output, tool arguments, on-disk records).
+ */
+export function dedupeCapped(
+	values: unknown,
+	opts: { cap: number; itemMaxChars?: number },
+): string[] {
+	if (!Array.isArray(values)) return [];
+	const seen = new Set<string>();
+	const out: string[] = [];
+	for (const raw of values) {
+		// Early exit once the cap is reached: identical to filter → truncate →
+		// dedupe → slice(0, cap), because dedup preserves input order.
+		if (out.length >= opts.cap) break;
+		if (typeof raw !== 'string') continue;
+		const item =
+			opts.itemMaxChars === undefined ? raw : raw.slice(0, opts.itemMaxChars);
+		const key = item.toLowerCase();
+		if (seen.has(key)) continue;
+		seen.add(key);
+		out.push(item);
+	}
+	return out;
+}
+
+/** Cap applied to every normalized knowledge array field on the write path. */
+const WRITE_FIELD_CAP = 20;
+
+/**
+ * Entry fields normalized at the store write boundary (issue #1821 Lane 0b).
+ *
+ * `source_knowledge_ids` is DELIBERATELY EXCLUDED. Its producer in
+ * `curator.ts` caps it at FIFTY ids, not 20, and `skill-invalidator.ts` walks
+ * the full list to retire skills whose source entry was archived — a cap of 20
+ * would silently drop ids and leave those skills live. Issue #1821 additionally
+ * reserves the field for a sibling workstream's markers.
+ *
+ * `triggers` and `source_refs` are likewise left alone — this list is scoped to
+ * `tags` plus the five actionability arrays that the six fixed call sites
+ * produce.
+ */
+const WRITE_NORMALIZED_ARRAY_FIELDS = [
+	'tags',
+	'applies_to_agents',
+	'applies_to_tools',
+	'required_actions',
+	'forbidden_actions',
+	'verification_checks',
+] as const;
+
+/**
+ * Structural guardrail: normalize an entry's array fields immediately before it
+ * is serialized to disk, so a call site that forgets to dedupe cannot persist
+ * duplicate / over-cap arrays.
+ *
+ * COVERAGE — be precise, this is not a whole-repo guarantee. Three writers in
+ * this module route through it: `appendKnowledge`, `rewriteKnowledge`, and the
+ * `transactKnowledge` commit path. Those cover every current producer of the
+ * six normalized fields. Writers that still bypass it, deliberately:
+ *   - `applyConfidenceDeltas` (below) — re-persists exactly what `readKnowledge`
+ *     returned, and the read path is intentionally un-normalized, so passing
+ *     entries through here would silently rewrite untouched historical records.
+ *   - `knowledge-validator.ts` quarantine / restore / unarchive, and
+ *     `hive-transaction.ts` — outside this module; they relocate existing
+ *     records rather than author new field values. (That module's
+ *     `appendUnactionable` DOES go through `transactKnowledge` and IS
+ *     normalized.)
+ *   - `knowledge/family-migration.ts` — outside this module, and it DOES author
+ *     a new `tags` value. `mergeEntryFields` now caps and de-duplicates it
+ *     itself (case-INsensitively, winner first) via `unionArrayField`, so this
+ *     path no longer emits an over-cap list for a later transaction to trim
+ *     silently. It remains listed here because it still writes through
+ *     `atomicWriteFile` without passing through this module's normalizer — the
+ *     guarantee now rests on that call site, not on this boundary.
+ * A NEW producer of `tags` or an actionability array must still call
+ * `dedupeCapped` at its own call site. CI Check 5 is a recurrence tripwire for
+ * the literal `.slice(0, 20)` spelling inside four path globs — it is NOT a
+ * complete enforcement of that rule.
+ *
+ * WRITE ONLY. `normalizeEntry` (the v1/v2 read-path back-compat shim) is
+ * deliberately untouched — normalizing on read would rewrite history for
+ * records written before this guardrail existed.
+ *
+ * ORDER MATTERS AT THE CALL SITE: the cap keeps the FIRST N values, so a
+ * caller that appends a semantically important marker to an already-full tag
+ * list would see that marker silently evicted. `withContradictionMarker` in
+ * `curator.ts` is the worked example — it appends under the cap (preserving
+ * historical tag order) and prepends at or above it.
+ *
+ * RETROACTIVE TRUNCATION IS REAL AND INTENDED: normalization applies to EVERY
+ * entry in the written array, not just the one a mutation touched. A record
+ * that predates this guardrail and carries 30 tags comes back with 20 after any
+ * transaction on its file. That is the point — the store converges on the
+ * invariant — but it does mean a write can shorten a record the caller never
+ * looked at. `applyConfidenceDeltas` is excluded precisely to avoid doing this
+ * on a path whose only job is to bump a number.
+ *
+ * Returns the original reference when nothing changed; otherwise a shallow
+ * copy with the offending fields replaced, so callers never observe their own
+ * in-memory object being mutated underneath them.
+ */
+function normalizeEntryArraysForWrite<T>(entry: T): T {
+	if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return entry;
+	const obj = entry as unknown as Record<string, unknown>;
+	let copy: Record<string, unknown> | null = null;
+	for (const field of WRITE_NORMALIZED_ARRAY_FIELDS) {
+		let value: unknown;
+		try {
+			value = obj[field];
+		} catch {
+			// Throwing getter (prototype-pollution edge case) — leave it alone.
+			continue;
+		}
+		// Only arrays are in scope. A non-array value is a different defect class
+		// and is already handled by normalizeEntry() on the read path.
+		if (!Array.isArray(value)) continue;
+		const normalized = dedupeCapped(value, { cap: WRITE_FIELD_CAP });
+		if (
+			normalized.length === value.length &&
+			normalized.every((v, i) => v === value[i])
+		) {
+			continue;
+		}
+		if (!copy) copy = { ...obj };
+		copy[field] = normalized;
+	}
+	return (copy ?? entry) as T;
+}
+
+// ============================================================================
 // Write Functions
 // ============================================================================
 
@@ -375,7 +527,14 @@ export async function appendKnowledge<T>(
 			retries: { retries: 5, minTimeout: 100, maxTimeout: 500 },
 			stale: 5000,
 		});
-		await appendFile(filePath, `${JSON.stringify(entry)}\n`, 'utf-8');
+		// #1821 Lane 0b: normalize at the write boundary — see
+		// normalizeEntryArraysForWrite for the exact coverage this does and
+		// does not give.
+		await appendFile(
+			filePath,
+			`${JSON.stringify(normalizeEntryArraysForWrite(entry))}\n`,
+			'utf-8',
+		);
 	} finally {
 		if (release) {
 			try {
@@ -405,9 +564,13 @@ export async function rewriteKnowledge<T>(
 			retries: { retries: 5, minTimeout: 100, maxTimeout: 500 },
 			stale: 5000,
 		});
+		// #1821 Lane 0b: rewriteKnowledge is the third store write path
+		// (knowledge-migrator, knowledge-curator cap/sweep, system-enhancer) and
+		// would otherwise be a hole in the structural guardrail.
 		const content =
-			entries.map((e) => JSON.stringify(e)).join('\n') +
-			(entries.length > 0 ? '\n' : '');
+			entries
+				.map((e) => JSON.stringify(normalizeEntryArraysForWrite(e)))
+				.join('\n') + (entries.length > 0 ? '\n' : '');
 		await atomicWriteFile(filePath, content);
 	} finally {
 		if (release) {
@@ -482,9 +645,12 @@ export async function transactKnowledge<T>(
 		filePath,
 		readKnowledge,
 		async (fp, entries) => {
+			// #1821 Lane 0b: normalize at the write boundary — see
+			// normalizeEntryArraysForWrite for the exact coverage.
 			const content =
-				entries.map((e) => JSON.stringify(e)).join('\n') +
-				(entries.length > 0 ? '\n' : '');
+				entries
+					.map((e) => JSON.stringify(normalizeEntryArraysForWrite(e)))
+					.join('\n') + (entries.length > 0 ? '\n' : '');
 			await atomicWriteFile(fp, content);
 		},
 		mutate,

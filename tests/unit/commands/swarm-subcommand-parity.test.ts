@@ -51,6 +51,7 @@ const SKILL_DOCUMENTED_SPACE_VARIANTS: Record<string, string> = {
 const REGISTRY_INTENTIONALLY_UNDOCUMENTED: Set<string> = new Set([
 	'gate-audit', // Evaluation gate matrix — internal diagnostic
 	'gate-stats', // Offline gate statistics — internal diagnostic
+	'context-map stats', // Aggregated context-capsule telemetry — internal diagnostic
 ]);
 
 describe('swarm-subcommand-parity', () => {
@@ -357,7 +358,7 @@ describe('swarm-subcommand-parity', () => {
 		// Pin the expected command count to prevent silent shrinkage.
 		// If commands are added to or removed from COMMAND_REGISTRY, update this number
 		// after verifying the skill's subcommand list is updated to match.
-		expect(expectedCommands.size).toBe(90);
+		expect(expectedCommands.size).toBe(101);
 
 		console.info(
 			`[swarm-subcommand-parity] skill documented commands (raw): ${skillRawCommands.length}`,

@@ -12,8 +12,12 @@ import {
 
 let directory = '';
 const originalResolveCurrentGitHead = _test_exports.resolveCurrentGitHead;
+const originalResolveCurrentGitHeadAsync =
+	_test_exports.resolveCurrentGitHeadAsync;
 const originalResolveIsWorkingTreeClean =
 	_test_exports.resolveIsWorkingTreeClean;
+const originalResolveIsWorkingTreeCleanAsync =
+	_test_exports.resolveIsWorkingTreeCleanAsync;
 const originalResolveRevisionDigest =
 	_test_exports.resolvePrWorkflowRevisionDigest;
 
@@ -25,12 +29,19 @@ beforeEach(() => {
 	_test_exports.resolveCurrentGitHead = () => 'abc123';
 	_test_exports.resolveIsWorkingTreeClean = () => true;
 	_test_exports.resolvePrWorkflowRevisionDigest = () => 'revision-1';
+	_test_exports.resolveCurrentGitHeadAsync = async (dir) =>
+		_test_exports.resolveCurrentGitHead(dir);
+	_test_exports.resolveIsWorkingTreeCleanAsync = async (dir) =>
+		_test_exports.resolveIsWorkingTreeClean(dir);
 });
 
 afterEach(async () => {
 	_test_exports.resetTrackedStateCache();
 	_test_exports.resolveCurrentGitHead = originalResolveCurrentGitHead;
+	_test_exports.resolveCurrentGitHeadAsync = originalResolveCurrentGitHeadAsync;
 	_test_exports.resolveIsWorkingTreeClean = originalResolveIsWorkingTreeClean;
+	_test_exports.resolveIsWorkingTreeCleanAsync =
+		originalResolveIsWorkingTreeCleanAsync;
 	_test_exports.resolvePrWorkflowRevisionDigest = originalResolveRevisionDigest;
 	await fs.rm(directory, { recursive: true, force: true });
 });
@@ -61,6 +72,21 @@ async function writeArmedState(sessionID: string): Promise<void> {
 }
 
 describe('abort_pr_workflow controller-tool gating (defense in depth)', () => {
+	test('prepare checkout remains reachable immediately after activation while unbound', async () => {
+		for (const mode of ['PR_REVIEW', 'PR_FEEDBACK'] as const) {
+			const sessionID = `prepare-${mode.toLowerCase()}`;
+			await activatePrWorkflow(directory, sessionID, mode);
+			await expect(
+				enforcePrWorkflowToolBefore(
+					directory,
+					sessionID,
+					'prepare_pr_workflow_checkout',
+					{},
+				),
+			).resolves.toBeUndefined();
+		}
+	});
+
 	test('passes the PR_REVIEW read-only gate as an internal controller tool', async () => {
 		// The deadlock scenario: PR_REVIEW is active but unbound. Every bash
 		// command fails closed, but abort_pr_workflow must be reachable so the

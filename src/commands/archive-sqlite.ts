@@ -26,9 +26,9 @@
  * authorized to delete an archived source.
  */
 
+import type { Database } from 'bun:sqlite';
 import * as fsSync from 'node:fs';
 import path from 'node:path';
-import type { Database } from 'bun:sqlite';
 import { loadDatabaseCtor } from '../db/sqlite-loader';
 
 // ── Result types ────────────────────────────────────────────────────────────
@@ -114,7 +114,7 @@ export const _internals: {
 	 * (e.g. a fake ctor whose `VACUUM INTO` throws). Leave null in production
 	 * and in tests that exercise the real driver.
 	 */
-	DatabaseCtor: (typeof Database) | null;
+	DatabaseCtor: typeof Database | null;
 } = {
 	existsSync: fsSync.existsSync,
 	statSync: fsSync.statSync,
@@ -141,7 +141,15 @@ function resolveDatabaseCtor(): typeof Database {
  */
 function safeRemoveTemp(tempPath: string): void {
 	try {
-		_internals.rmSync(tempPath, { force: true, maxRetries: 3, retryDelay: 100 });
+		// `recursive: true` is required for `maxRetries`/`retryDelay` to take
+		// effect on Node (the retry logic only runs in recursive mode), which is
+		// what makes the Windows antivirus-EPERM retry actually fire.
+		_internals.rmSync(tempPath, {
+			force: true,
+			recursive: true,
+			maxRetries: 3,
+			retryDelay: 100,
+		});
 	} catch {
 		// Stale temp in a unique archive dir is acceptable and non-fatal.
 	}
@@ -165,7 +173,11 @@ function buildVacuumIntoSql(destPath: string): string {
  * '' when the row or column is absent.
  */
 function rowString(row: unknown, col: string): string {
-	if (row && typeof row === 'object' && col in (row as Record<string, unknown>)) {
+	if (
+		row &&
+		typeof row === 'object' &&
+		col in (row as Record<string, unknown>)
+	) {
 		const v = (row as Record<string, unknown>)[col];
 		return v === null || v === undefined ? '' : String(v);
 	}
@@ -173,7 +185,11 @@ function rowString(row: unknown, col: string): string {
 }
 
 function rowNumber(row: unknown, col: string): number | null {
-	if (row && typeof row === 'object' && col in (row as Record<string, unknown>)) {
+	if (
+		row &&
+		typeof row === 'object' &&
+		col in (row as Record<string, unknown>)
+	) {
 		const v = (row as Record<string, unknown>)[col];
 		if (typeof v === 'number' && Number.isFinite(v)) return v;
 		if (typeof v === 'bigint') return Number(v);
@@ -193,22 +209,32 @@ function rowNumber(row: unknown, col: string): number | null {
 function captureRowCounts(db: Database): SqliteRowCounts {
 	const tableExists = (name: string): boolean => {
 		const row = db
-			.query("SELECT COUNT(*) AS c FROM sqlite_master WHERE type='table' AND name=?")
+			.query(
+				"SELECT COUNT(*) AS c FROM sqlite_master WHERE type='table' AND name=?",
+			)
 			.get(name);
 		return rowNumber(row, 'c') !== null && (rowNumber(row, 'c') ?? 0) > 0;
 	};
 
 	let schemaMigrationsMax: number | null = null;
 	if (tableExists('schema_migrations')) {
-		const row = db.query('SELECT MAX(version) AS m FROM schema_migrations').get();
+		const row = db
+			.query('SELECT MAX(version) AS m FROM schema_migrations')
+			.get();
 		schemaMigrationsMax = rowNumber(row, 'm');
 	}
 
 	const projectConstraints = tableExists('project_constraints')
-		? (rowNumber(db.query('SELECT COUNT(*) AS c FROM project_constraints').get(), 'c') ?? 0)
+		? (rowNumber(
+				db.query('SELECT COUNT(*) AS c FROM project_constraints').get(),
+				'c',
+			) ?? 0)
 		: 0;
 	const qaGateProfile = tableExists('qa_gate_profile')
-		? (rowNumber(db.query('SELECT COUNT(*) AS c FROM qa_gate_profile').get(), 'c') ?? 0)
+		? (rowNumber(
+				db.query('SELECT COUNT(*) AS c FROM qa_gate_profile').get(),
+				'c',
+			) ?? 0)
 		: 0;
 
 	return {
@@ -246,17 +272,30 @@ export async function archiveSqliteSnapshot(
 	}
 
 	// 2) Byte-budget preflight over main + wal + shm before any expensive work.
+	//    A stat failure on the MAIN file is fatal (the budget cannot be
+	//    meaningfully computed without it and the snapshot would likely fail
+	//    anyway); a stat failure on a transient sidecar is tolerated so a
+	//    temporary EBUSY on -wal/-shm does not abort a viable snapshot.
 	let sourceBytes = 0;
 	for (const suffix of ['', '-wal', '-shm']) {
 		const sidecar = opts.sourcePath + suffix;
+		if (!_internals.existsSync(sidecar)) continue;
 		try {
-			if (_internals.existsSync(sidecar)) {
-				sourceBytes += _internals.statSync(sidecar).size;
+			sourceBytes += _internals.statSync(sidecar).size;
+		} catch (err) {
+			if (suffix === '') {
+				// Main-file stat failure — the "hard" budget must not fail open.
+				return {
+					requiredness: 'required',
+					attempt: 'failed',
+					validation: 'not_applicable',
+					source_disposition: 'retained',
+					method: 'vacuum_into',
+					reason_code: 'snapshot_failed',
+					detail: `source stat failed: ${err instanceof Error ? err.message : String(err)}`,
+				};
 			}
-		} catch {
-			// If a sidecar stat fails (e.g. transient EBUSY), do not abort —
-			// the snapshot may still succeed. The budget is a guardrail, not a
-			// hard gate that must be exact.
+			// Sidecar stat failure — tolerate; the snapshot may still succeed.
 		}
 	}
 	if (sourceBytes > maxSourceBytes) {

@@ -151,6 +151,81 @@ Each entry below points at a release note in `docs/releases/` and the invariant(
   - **Cross-platform proof is mandatory.** Linux/macOS `repro-704` passing does **not** prove Windows; cold-FS op latency is several× higher there. The T1 400 ms assertion (`scripts/repro-704.mjs:42`) runs on the Windows runner in the `smoke` matrix (`.github/workflows/ci.yml`); the CI step's summary comment mentions the looser 10 s `BUDGET_MS` (T2/T3), but T1 is the tight bound that catches this class of regression. Green locally is necessary, not sufficient.
 - **Maps to AGENTS.md:** invariant 1 (plugin init).
 
+### Issue #2029 — No canonical observability event contract; a type-system bypass reached production
+
+- **Symptom:** every observability producer independently invented its record
+  shape, discriminator key, clock representation, and correlation-ID set, with
+  no shared definition of what an observation is. `.swarm/events.jsonl` is
+  written under **two different discriminator keys within a single file**
+  (`src/context/role-filter.ts:147` and `src/tools/phase-complete.ts:1571` write `event:`; `src/hooks/curator.ts:1755` and `src/hooks/full-auto-intercept.ts:269` write `type:`; `src/hooks/curator.ts:1185` comments on the split). Eight of ten named legacy stores carry no schema version at all.
+  `background-delegations.jsonl` stores epoch-ms numbers while every other
+  inventoried store uses ISO-8601 strings, with no shared clock definition
+  bridging them. Separately, and more sharply: `agent_conflict_detected` was
+  emitted in production via `'agent_conflict_detected' as
+  Parameters<typeof emit>[0]` — a force-cast past the `TelemetryEvent` union
+  (`src/hooks/conflict-resolution.ts:67-70`) — so a new event kind entered the
+  stream with zero registration, and the type system did not catch it because
+  the cast defeated it by construction.
+- **Fix applied:** a new `src/observability/` module (no filesystem, network,
+  subprocess, or OTel SDK dependency) defining: a canonical zod-typed
+  `ObservabilityEvent` envelope (`envelope.ts`) with a stable identity, an
+  explicit occurred/observed clock pair, W3C-compatible trace context, and
+  thirteen optional (never synthesized) workflow correlation IDs; a
+  39-entry `EVENT_CATALOG` (`catalog.ts`) covering every `TelemetryEvent`
+  member plus the previously-uncatalogued `agent_conflict_detected`, each
+  entry naming a real producer `file:line`, a live consumer or a
+  `futureOwnerIssue`, a privacy class, a retention owner, and a doc anchor;
+  `relationships.ts` validating required/forbidden workflow IDs and
+  parent/link shape without ever throwing; a legacy adapter (`legacy.ts`)
+  that projects the untyped payload `emit()` already receives onto the
+  contract while preserving unknown fields, recording `unknown ≠ 0`, and
+  never synthesizing a missing correlation ID. The force-cast at
+  `conflict-resolution.ts:67-70` is removed in favor of a plain typed
+  `emit(...)` call, with `agent_conflict_detected` added to both
+  `TelemetryEvent` and the catalog. `src/telemetry.ts:emit()` now builds a
+  canonical event and derives the written `.swarm/telemetry.jsonl` line from
+  it as a documented lossy projection (`toLegacyTelemetryLine`) — output is
+  byte-identical to before this change, verified against a checked-in golden
+  corpus captured from the unmodified tree at `e50386b9`. **One documented
+  exception:** a payload carrying an own *accessor* (getter) property is read
+  more than once on the new path (`extractWorkflowIds`, `extractOutcome` and
+  the adapter's shallow key scan all read own keys before the spread), whereas
+  the old inline construction read each key exactly once at spread time. For a
+  side-effecting or counter-style getter the emitted value therefore differs.
+  No `emit()` call site in the repo passes an own accessor property (prototype
+  getters are unaffected — they are not own-enumerable and never reached the
+  spread on either path), so this is not reachable today; it is recorded
+  because the byte-preservation guarantee is otherwise stated absolutely.
+  A blocking CI check (`scripts/check-event-contract.ts`, `bun run
+  check:events`) fails on catalog↔union drift, an incomplete catalog entry,
+  an unowned empty consumer list, or a metric label outside the bounded
+  allowlist. The envelope's non-legacy fields (`eventId`, `trace`, `lineage`,
+  `provenance`, `policy`, `writerSequence`, `relationshipViolations`) are
+  **currently discarded** after the legacy line is written — documented as
+  the honesty clause in `docs/observability-event-contract.md` §2, with a
+  named future consumer (#2047). This PR does not add a new sink, an OTLp
+  network path, a SQLite query index, or replace any authoritative
+  plan/scope/evidence/knowledge-receipt/background-ownership/council state —
+  those are owned by the remaining PRs in the #2029–#2051 sequence.
+- **Invariant(s) established:** every telemetry event kind must have a
+  catalog entry with a real producer `file:line`, a consumer or a named
+  future-owner issue, a privacy class, a doc anchor, and a test — an event
+  kind with no catalog entry, or a catalog entry with an empty consumer list
+  and no owner, is a contract violation caught by CI, not a shrug. A cast
+  that bypasses `TelemetryEvent` (or, going forward, `EVENT_CATALOG`) to
+  reach `emit()` is a contract violation of the same class regardless of
+  whether it currently type-checks. An ID a producer does not genuinely hold
+  stays `undefined` — never `''`, never synthesized to make a join succeed —
+  and a field a legacy record does not version stays `null` (unknown), never
+  defaulted to `0`.
+- **Maps to AGENTS.md:** invariants 1 (plugin init — `initObservability`
+  performs zero I/O and never throws on the init path), 2 (runtime
+  portability — `node:crypto`/`zod` only, no `bun:` anywhere in the module),
+  7 (test writing — the golden-corpus emit-line-parity test and the
+  catalog-contract test), and 11 (tool/registration coherence — the same
+  registry-completeness discipline `check-tool-registration.ts` enforces for
+  tools now applies to event kinds via `check-event-contract.ts`).
+
 ## Invariants — anti-pattern, required pattern, verification
 
 ### Skill ownership and audience routing
@@ -459,6 +534,9 @@ mock.module('node:fs', () => ({
 | **`src/utils/bun-compat.ts`** | **`mergeEnvForChild`** | **FR-202 spawn env-override helper** |
 | **`src/sandbox/executor.ts`** | **`isValidEnvKey`** | **FR-203 sandbox key validation** |
 | **`src/worktree/core.ts`** | **`removeLaneProfileFromDisk`, `writeLaneProfileToDisk`** | **FR-201 + FR-205 lane profile materialization + teardown** |
+| `src/services/recommendation-ledger.ts` | `now`, `transactFile`, `readLedgerStrict`, `resolveRecommendationLedgerPath` | #1821 AC21 dedup-ledger clock + fail-open path tests |
+| `src/services/trajectory-cluster.ts` | `now`, `checkRecommendations`, `recordEmittedRecommendations` | #1821 AC21 motif-emission dedup tests |
+| `src/memory/redaction.ts` | `currentAlgorithmVersion` | #2062 F-012 cohort-fingerprint version gate: simulates a FUTURE bump of `FINGERPRINT_ALGORITHM_VERSION` so the legacy-file gate is testable before a real bump exists. Production code never mutates it. |
 
 **Delegation-gate split pattern (FR-006 SC-006.1):**
 

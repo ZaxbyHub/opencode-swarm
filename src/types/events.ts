@@ -171,6 +171,20 @@ export interface PrmHardStopEvent {
 	occurrenceCount: number;
 }
 
+/**
+ * Issue #2063 C2 — the hard stop was DELIVERED (denial thrown at the agent),
+ * as opposed to {@link PrmHardStopEvent} which records that it was TRIGGERED.
+ * The pair makes "armed but never reached the model" observable.
+ */
+export interface PrmHardStopDeliveredEvent {
+	type: 'prm_hard_stop_delivered';
+	timestamp: string;
+	sessionId: string;
+	pattern: string;
+	level: number;
+	occurrenceCount: number;
+}
+
 // Union type for all v6.19 events
 export type V619Event =
 	| SoundingBoardConsultedEvent
@@ -186,4 +200,5 @@ export type V619Event =
 	| PrmPatternDetectedEvent
 	| PrmCourseCorrectionInjectedEvent
 	| PrmEscalationTriggeredEvent
-	| PrmHardStopEvent;
+	| PrmHardStopEvent
+	| PrmHardStopDeliveredEvent;

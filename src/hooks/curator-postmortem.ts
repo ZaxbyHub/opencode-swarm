@@ -70,6 +70,14 @@ interface KnowledgeEventSummary {
 	applied: number;
 	violated: number;
 	ignored: number;
+	/**
+	 * Shown to a delegate that ended its Task without any ack marker or receipt.
+	 * Audit-only silence, NOT a verdict — kept strictly separate from
+	 * applied/violated/ignored so it never enters an application- or
+	 * violation-rate calculation. Surfaced so a post-mortem can say
+	 * "entry X: shown N times, unacknowledged M times" instead of nothing.
+	 */
+	unacknowledged: number;
 	confidence: number;
 	status: string;
 }
@@ -150,19 +158,40 @@ async function collectKnowledgeSummary(
 
 	const countsMap = new Map<
 		string,
-		{ applied: number; violated: number; ignored: number }
+		{
+			applied: number;
+			violated: number;
+			ignored: number;
+			unacknowledged: number;
+		}
 	>();
 	for (const e of events) {
-		if (e.type !== 'applied' && e.type !== 'violated' && e.type !== 'ignored')
+		if (
+			e.type !== 'applied' &&
+			e.type !== 'violated' &&
+			e.type !== 'ignored' &&
+			// Audit-only silence signal: a shown non-critical directive whose
+			// delegate Task ended with no ack marker and no receipt. Tallied
+			// SEPARATELY (never folded into applied/violated/ignored) so the
+			// post-mortem can report unanswered delivery without it reading as a
+			// verdict on the entry.
+			e.type !== 'unacknowledged'
+		)
 			continue;
 		const kid =
 			(e as { knowledge_id?: string }).knowledge_id ??
 			(e as { entry_id?: string }).entry_id;
 		if (!kid) continue;
-		const c = countsMap.get(kid) ?? { applied: 0, violated: 0, ignored: 0 };
+		const c = countsMap.get(kid) ?? {
+			applied: 0,
+			violated: 0,
+			ignored: 0,
+			unacknowledged: 0,
+		};
 		if (e.type === 'applied') c.applied++;
 		else if (e.type === 'violated') c.violated++;
 		else if (e.type === 'ignored') c.ignored++;
+		else c.unacknowledged++;
 		countsMap.set(kid, c);
 	}
 
@@ -171,6 +200,7 @@ async function collectKnowledgeSummary(
 			applied: 0,
 			violated: 0,
 			ignored: 0,
+			unacknowledged: 0,
 		};
 		return {
 			id: entry.id,
@@ -178,6 +208,7 @@ async function collectKnowledgeSummary(
 			applied: c.applied,
 			violated: c.violated,
 			ignored: c.ignored,
+			unacknowledged: c.unacknowledged,
 			confidence: entry.confidence ?? 0.5,
 			status: entry.status ?? 'active',
 		};
@@ -865,6 +896,13 @@ function buildDataOnlyReport(
 	const totalApplied = knowledgeSummary.reduce((s, e) => s + e.applied, 0);
 	const totalViolated = knowledgeSummary.reduce((s, e) => s + e.violated, 0);
 	const totalIgnored = knowledgeSummary.reduce((s, e) => s + e.ignored, 0);
+	const totalUnacknowledged = knowledgeSummary.reduce(
+		(s, e) => s + e.unacknowledged,
+		0,
+	);
+	// `unacknowledged` is deliberately NOT part of this predicate: an entry a
+	// delegate never answered for is still never-applied, and folding silence in
+	// here would change the long-standing meaning of the retirement-review list.
 	const neverApplied = knowledgeSummary.filter(
 		(e) => e.applied === 0 && e.violated === 0 && e.ignored === 0,
 	);
@@ -872,6 +910,11 @@ function buildDataOnlyReport(
 	lines.push(`- Total entries: ${totalEntries}`);
 	lines.push(
 		`- Application events: ${totalApplied} applied, ${totalViolated} violated, ${totalIgnored} ignored`,
+	);
+	// Reported on its own line, outside the application-rate arithmetic below:
+	// silence is not a verdict and must not move the application rate.
+	lines.push(
+		`- Unacknowledged deliveries: ${totalUnacknowledged} (shown to a delegate that filed no ack/receipt)`,
 	);
 	lines.push(`- Never-applied entries: ${neverApplied.length}`);
 	if (totalApplied + totalViolated > 0) {
@@ -978,10 +1021,14 @@ function assembleLLMInput(
 
 	sections.push(`CURATOR_DIGESTS: ${curatorDigest ?? 'none'}`);
 
+	// `unacknowledged` is rendered alongside the verdict counts but is explicitly
+	// NOT one of them: it is the count of deliveries a delegate never answered.
+	// Surfacing it lets the post-mortem reason about silent delivery ("shown N
+	// times, unacknowledged M times") instead of seeing an all-zero row.
 	const eventsSummary = knowledgeSummary
 		.map(
 			(e) =>
-				`${e.id}: applied=${e.applied} violated=${e.violated} ignored=${e.ignored} confidence=${e.confidence.toFixed(2)} status=${e.status}`,
+				`${e.id}: applied=${e.applied} violated=${e.violated} ignored=${e.ignored} unacknowledged=${e.unacknowledged} confidence=${e.confidence.toFixed(2)} status=${e.status}`,
 		)
 		.join('\n');
 	sections.push(`KNOWLEDGE_EVENTS_SUMMARY:\n${eventsSummary || 'none'}`);

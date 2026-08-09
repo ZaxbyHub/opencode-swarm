@@ -639,10 +639,10 @@ describe('epic_decide_phase tool — ctx.sessionID precedence (Fix B)', () => {
 			) => Promise<unknown>;
 		};
 		await def.execute(
-			{ phase: 1, sessionID: 'default' },
-			{ sessionID: 'real-session-abc123', directory: '/fake' },
+			{ phase: 1, sessionID: 'ses_defaultArg' },
+			{ sessionID: 'ses_realCtxAbc123', directory: '/fake' },
 		);
-		expect(observedSessionID).toBe('real-session-abc123');
+		expect(observedSessionID).toBe('ses_realCtxAbc123');
 	});
 
 	test('falls back to args.sessionID when ctx is missing', async () => {
@@ -660,10 +660,10 @@ describe('epic_decide_phase tool — ctx.sessionID precedence (Fix B)', () => {
 		};
 		// ctx with no sessionID — must use args.sessionID.
 		await def.execute(
-			{ phase: 1, sessionID: 'from-args' },
+			{ phase: 1, sessionID: 'ses_fromArgs' },
 			{ directory: '/fake' },
 		);
-		expect(observedSessionID).toBe('from-args');
+		expect(observedSessionID).toBe('ses_fromArgs');
 	});
 });
 

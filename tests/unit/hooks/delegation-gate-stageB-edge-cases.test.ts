@@ -131,6 +131,31 @@ describe('Stage B helpers — edge cases', () => {
 		expect(getTaskState(session, '1.1')).toBe('reviewer_run');
 	});
 
+	it('EC-3b: explicit terminal reviewer failure never advances Stage B', async () => {
+		const hook = createDelegationGateHook(makeConfig(), process.cwd());
+		startAgentSession('sess-ec3b', 'architect');
+		const session = ensureAgentSession('sess-ec3b');
+		session.currentTaskId = '1.1';
+		session.taskWorkflowStates.set('1.1', 'coder_delegated');
+
+		await hook.toolAfter(
+			{
+				tool: 'Task',
+				sessionID: 'sess-ec3b',
+				callID: 'call-ec3b',
+				args: { subagent_type: 'reviewer', task_id: '1.1' },
+			},
+			{
+				state: 'completed',
+				status: 'failed',
+				output: '[REVIEWED] | task-1.1 | APPROVED | contradictory',
+			},
+		);
+
+		expect(getTaskState(session, '1.1')).toBe('coder_delegated');
+		expect(session.stageBCompletion?.get('1.1')).toBeUndefined();
+	});
+
 	it('EC-4: getSeedTaskId returns null — cross-session seeding is skipped', async () => {
 		const config = makeConfig();
 		const hook = createDelegationGateHook(config, process.cwd());

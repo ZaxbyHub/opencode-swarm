@@ -142,12 +142,17 @@ Every capsule delegation is recorded to `.swarm/context-telemetry.jsonl` as a si
 - `skipped_reads` — count of files whose cached summaries were sufficient
 - `success` — whether capsule generation succeeded
 
-To inspect aggregate statistics, use the `getTelemetrySummary()` function (available in the telemetry module). This computes:
+To inspect aggregate statistics, use the `/swarm context-map stats` command (issue #1672). This wraps `getTelemetrySummary()` from `src/context-map/telemetry.ts` and displays:
 
 - Total delegations
-- Cache hit/miss totals
-- Average token estimate
+- Cache hit/miss totals (with hit-rate percentage)
+- Stale entries detected
+- Average token estimate (tokens per capsule)
 - Success rate
+- Recommended reads
+- Skipped reads
+
+If no telemetry has been recorded, the command returns `No capsule telemetry recorded.`. The underlying `getTelemetrySummary()` function remains available in the telemetry module for programmatic access.
 
 ## Coexistence with Existing Systems
 

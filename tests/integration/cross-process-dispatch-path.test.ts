@@ -176,7 +176,7 @@ describe('SC-124: lane profile end-to-end via provisionWorktree() entry point', 
 		};
 
 		const laneId = 'lane-2'; // 0-based index = 1
-		const sessionId = 'test-session';
+		const sessionId = 'ses_testSession';
 
 		// provisionWorktree() from turbo/lean/worktree.ts:
 		// 1. Calls provisionSharedWorktree (git worktree add)
@@ -252,7 +252,7 @@ console.log('LANE_CUSTOM_VAR=' + (env.CUSTOM_VAR ?? 'UNSET'));
 				port_stride: 10,
 			},
 		};
-		const sessionId = 'multi-lane-session';
+		const sessionId = 'ses_multiLaneSession';
 
 		// Provision 3 lanes and verify each gets a distinct env file
 		for (let i = 0; i < 3; i++) {
@@ -305,7 +305,7 @@ console.log('LANE_CUSTOM_VAR=' + (env.CUSTOM_VAR ?? 'UNSET'));
 			const result = await provisionWorktree(
 				tmpDir,
 				laneId,
-				`session-${laneId}`,
+				`ses_lane${laneId.replace(/[^A-Za-z0-9]/g, '')}`,
 				config,
 			);
 

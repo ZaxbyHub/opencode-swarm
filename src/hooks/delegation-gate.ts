@@ -8,7 +8,11 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { ZodError, z } from 'zod';
-import type { BackgroundTaskChangeContext } from '../background/pending-delegations.js';
+import type {
+	BackgroundCoderReservation,
+	BackgroundDelegationRecord,
+	BackgroundTaskChangeContext,
+} from '../background/pending-delegations.js';
 import {
 	captureWorkspaceSnapshot,
 	changedFilesSinceSnapshot,
@@ -31,6 +35,7 @@ import {
 	takeSnapshotEvent,
 } from '../plan/ledger';
 import { loadPlanJsonOnly, savePlan } from '../plan/manager';
+import { computeParallelVerdict } from '../plan/parallel-verdict';
 import { derivePlanId } from '../plan/utils.js';
 import {
 	canonicalWorkspaceIdentity,
@@ -55,6 +60,7 @@ import {
 	advanceTaskState,
 	advanceTaskStateAndPersist,
 	ensureAgentSession,
+	getModifiedFilesForTask,
 	getTaskState,
 	hasActiveLeanTurbo,
 	hasActiveTurboMode,
@@ -91,6 +97,7 @@ import {
 	applyCouncilReward,
 	truncateObjectForJson,
 } from '../memory/reward-capture';
+import { pushAdvisory } from '../utils/advisory-queue';
 import { _internals as _wtiInternals } from './delegation-gate/worktree-isolation';
 import {
 	initDurableStatusPath,
@@ -362,19 +369,19 @@ async function prepareCoderScope(
  * `Task` with `background=true` (gated upstream by
  * `OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true`) returns a "running" placeholder
  * immediately and completes later via synthetic parent injection. The delegation gate
- * treats a `Task` result as completion, so a background swarm delegation would advance
- * Stage B / record gate evidence before any review/test output exists. Until swarm can
- * correlate the deferred completion safely (a separate, spike-gated PR), background
- * swarm delegations are fail-closed-blocked. We do NOT silently coerce `background` to
- * false — the unsupported capability is surfaced explicitly.
+ * treats a foreground `Task` result as completion, so the running placeholder must be
+ * tracked without terminal side effects. When the opt-in is enabled, trusted deferred
+ * completion ingestion performs exact parent correlation, workspace settlement, and
+ * role-appropriate state/evidence updates. With the opt-in disabled (the default while
+ * upstream remains experimental), background swarm delegations are fail-closed-blocked.
+ * We do NOT silently coerce `background` to false.
  */
 export const SWARM_BACKGROUND_TASK_BLOCKED_MESSAGE =
 	'SWARM_BACKGROUND_TASK_BLOCKED: OpenCode background subagents (Task with background=true, ' +
-	'requires OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true) are recognized upstream, but swarm ' +
-	'cannot yet safely consume their deferred completion events — the Task returns a running ' +
-	'placeholder now and completes later via synthetic injection, which would advance swarm gates ' +
-	'before any review/test output exists. Omit `background` (or set background=false) for swarm ' +
-	'delegations until the completion-ingestion PR lands.';
+	'requires OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true or OPENCODE_EXPERIMENTAL=true) ' +
+	'remain experimental upstream and are disabled by default in swarm. Omit `background` ' +
+	'(or set background=false), or explicitly enable hooks.background_subagents only after ' +
+	'reviewing the background-subagent recovery and readiness guidance.';
 
 /**
  * Fail-closed background-flag detector. Treats both the boolean `true` and the
@@ -699,8 +706,8 @@ export function appendDelegationEnvelopeAdvisory(
 		if (!envelope) return null; // free-text / non-envelope → no advisory, no block
 		const result = validateDelegationEnvelope(envelope, context);
 		if (!result.valid) {
-			session.pendingAdvisoryMessages ??= [];
-			session.pendingAdvisoryMessages.push(
+			pushAdvisory(
+				session,
 				`DELEGATION ENVELOPE ADVISORY: a parsed delegation envelope failed validation (${result.reason}). ` +
 					`This is advisory-only — the delegation was NOT blocked. Review the envelope's structured ` +
 					`fields (including the optional specCriteria acceptance/FR/SC arrays) before the next dispatch.`,
@@ -924,6 +931,15 @@ export interface CoverageMissDiagnostic {
 const COVERAGE_DIAG_SNIPPET_CAP = 80;
 const COVERAGE_DIAG_MAX_SCAN = 400;
 
+/**
+ * Issue #2063 (A2): per-body cap, in characters, on the raw requirement body
+ * embedded verbatim in the ACCEPTANCE_FIELD_COVERAGE_MISMATCH error. Keeps the
+ * thrown message bounded even for an unusually long FR/SC body; when a body
+ * exceeds this cap the message states the cap and points at `.swarm/spec.md`
+ * for the remainder rather than growing the error without limit.
+ */
+export const ACCEPTANCE_EXPECTED_BODY_CAP = 2000;
+
 export function describeCoverageMiss(params: {
 	rawExpectedBody: string;
 	rawAcceptanceText: string;
@@ -989,7 +1005,9 @@ export function describeCoverageMiss(params: {
  *
  * @returns `{ covered: true }` when every id is present-and-covered or skipped;
  *   `{ covered: false, missingId }` naming the FIRST id whose body is not a
- *   substring of the ACCEPTANCE text.
+ *   substring of the ACCEPTANCE text, plus `expectedBody` — the RAW, UNTRIMMED
+ *   requirement body for `missingId` (issue #2063 A2) — so the throw site can
+ *   embed paste-ready remediation text instead of just pointing at a location.
  */
 export function checkAcceptanceCoversFrRefs(params: {
 	acceptanceText: string;
@@ -999,6 +1017,7 @@ export function checkAcceptanceCoversFrRefs(params: {
 	covered: boolean;
 	missingId?: string;
 	diagnostic?: CoverageMissDiagnostic;
+	expectedBody?: string;
 } {
 	const normalizedAcceptance = normalizeAcceptanceText(params.acceptanceText);
 	for (const id of params.frRefs) {
@@ -1018,6 +1037,10 @@ export function checkAcceptanceCoversFrRefs(params: {
 					normalizedExpected: normalizedBody,
 					normalizedAcceptance,
 				}),
+				// Raw (pre-normalization) body, untrimmed — #2063 A2 embeds this
+				// verbatim (fenced) in the thrown error so the architect can paste
+				// it directly instead of re-reading spec.md.
+				expectedBody: body,
 			};
 		}
 	}
@@ -1106,11 +1129,79 @@ function outputText(output: unknown): string {
 function extractPlanCriticVerdict(
 	output: unknown,
 ): 'APPROVED' | 'NEEDS_REVISION' | 'REJECTED' | null {
-	const match = /^\s*VERDICT:\s*(APPROVED|NEEDS_REVISION|REJECTED)\b/im.exec(
-		outputText(output),
-	);
-	if (!match) return null;
-	return match[1].toUpperCase() as 'APPROVED' | 'NEEDS_REVISION' | 'REJECTED';
+	const text = outputText(output);
+	if (!text) return null;
+
+	// Primary signal (highest confidence): a `VERDICT: <TOKEN>` line. The critic
+	// system prompt (src/agents/critic.ts) instructs this exact shape, so a
+	// conforming critic always matches here. Also tolerates markdown-bold labels
+	// (`**VERDICT**:`) which LLMs frequently emit despite the plain instruction.
+	const primary =
+		/^\s*(?:\*\*)?VERDICT(?:\*\*)?\s*:\s*(APPROVED|NEEDS_REVISION|REJECTED)\b/im.exec(
+			text,
+		);
+	if (primary) {
+		return primary[1].toUpperCase() as
+			| 'APPROVED'
+			| 'NEEDS_REVISION'
+			| 'REJECTED';
+	}
+
+	// Fallback 1: a `## Verdict` (or `### Verdict`, …) heading followed (within
+	// 2 lines) by a line whose only non-whitespace content is the verdict token.
+	// Matches critics that emit the verdict under a markdown heading instead of
+	// the `VERDICT:` label. The heading must be the verdict section specifically
+	// (not e.g. `## PLAN REVIEW`), so the `Verdict` word is required.
+	const heading = /^(#{1,6})\s*Verdict\s*$/im.exec(text);
+	if (heading && heading.index !== undefined) {
+		const after = text.slice(heading.index + heading[0].length);
+		const nextLines = after.split('\n').slice(0, 3).join('\n');
+		const headingMatch = /^\s*(APPROVED|NEEDS_REVISION|REJECTED)\s*$/im.exec(
+			nextLines,
+		);
+		if (headingMatch) {
+			return headingMatch[1].toUpperCase() as
+				| 'APPROVED'
+				| 'NEEDS_REVISION'
+				| 'REJECTED';
+		}
+	}
+
+	// Fallback 2: a BARE verdict token on its own line — but ONLY in the final
+	// few lines of output (so a mid-review mention like "this is approved for
+	// execution" cannot trigger it) and ONLY when the line does not contain a
+	// `|` separator (which marks the critic-rubric template line
+	// `VERDICT: APPROVED | NEEDS_REVISION | REJECTED`, an enumeration rather
+	// than a real verdict) and is not inside a fenced code block.
+	//
+	// Issue #2012: real critics do not always emit the `VERDICT:` label, and a
+	// missing snapshot here permanently wedges every coder delegation because
+	// the gate is ratchet-tighter with no escape hatch. The tail-only + no-pipe
+	// + no-code-fence guards keep false positives out while recovering the
+	// common "the critic just wrote APPROVED at the end" case.
+	const lines = text.split('\n');
+	const tailStart = Math.max(0, lines.length - 6);
+	let inFence = false;
+	for (let i = 0; i < lines.length; i++) {
+		// Match 3+ backticks so a 4-backtick fenced block (common for nested
+		// code blocks) also toggles the fence state, not just exactly ```.
+		// The regex is "3 or more backtick characters" — the {3,} quantifier
+		// applies to the single preceding backtick literal.
+		if (/^\s*(?:`{3,})/.test(lines[i])) inFence = !inFence;
+		if (i < tailStart) continue;
+		if (inFence) continue;
+		const line = lines[i];
+		if (line.includes('|')) continue;
+		const bare = /^\s*(APPROVED|NEEDS_REVISION|REJECTED)\s*$/i.exec(line);
+		if (bare) {
+			return bare[1].toUpperCase() as
+				| 'APPROVED'
+				| 'NEEDS_REVISION'
+				| 'REJECTED';
+		}
+	}
+
+	return null;
 }
 
 function taskLooksLikePlanCritic(args: Record<string, unknown>): boolean {
@@ -1144,6 +1235,20 @@ const PLAN_CRITIC_TASK_SIGNALS = [
 	'plan.md', // critic-gate/SKILL.md: "Send the full plan.md content"
 	'approve the plan',
 	'plan approval',
+	// Issue #2012: realistic architect phrasings that the original 7 signals
+	// silently missed, wedging the ratchet-tighter critic_pre_plan gate with
+	// no recovery. These are safe to add: the caller already narrows to
+	// `subagent_type === 'critic'` (a target the trusted architect controls),
+	// so a false positive is low-risk, while a false negative silently blocks
+	// ALL EXECUTE-phase coder work with no auto-recovery.
+	'pre-implementation review',
+	'evaluate this plan',
+	'evaluate the plan',
+	'assess this plan',
+	'assess the plan',
+	'plan soundness',
+	'before implementation',
+	'review the plan below',
 ] as const;
 
 /**
@@ -1191,7 +1296,10 @@ async function assertPlanCriticApprovedForExecution(
 	if (!approved) {
 		throw new Error(
 			'PLAN_CRITIC_GATE_VIOLATION: Cannot delegate to coder before plan critic approval. ' +
-				'Delegate to critic in MODE: CRITIC-GATE and require VERDICT: APPROVED before EXECUTE.',
+				'Delegate to critic in MODE: CRITIC-GATE and require VERDICT: APPROVED before EXECUTE. ' +
+				'If the critic already returned APPROVED but the snapshot was not recorded ' +
+				'(format/signal mismatch — issue #2012), call approve_plan_critic with a reason, ' +
+				'or run /swarm approve-plan-critic <reason>, to record a manual approval.',
 		);
 	}
 
@@ -1204,7 +1312,9 @@ async function assertPlanCriticApprovedForExecution(
 	) {
 		throw new Error(
 			'PLAN_CRITIC_GATE_VIOLATION: Latest approved-plan snapshot does not contain plan critic VERDICT: APPROVED evidence. ' +
-				'Re-run MODE: CRITIC-GATE and wait for explicit approval before coder execution.',
+				'Re-run MODE: CRITIC-GATE and wait for explicit approval before coder execution. ' +
+				'If the critic already returned APPROVED but the snapshot was not recorded ' +
+				'(issue #2012), call approve_plan_critic or run /swarm approve-plan-critic.',
 		);
 	}
 
@@ -1218,7 +1328,9 @@ async function assertPlanCriticApprovedForExecution(
 	if (approved.payloadHash !== computePlanStructureHash(plan)) {
 		throw new Error(
 			'PLAN_CRITIC_GATE_VIOLATION: Current plan differs from the last critic-approved snapshot. ' +
-				'Re-run MODE: CRITIC-GATE after plan changes before delegating to coder.',
+				'Re-run MODE: CRITIC-GATE after plan changes before delegating to coder. ' +
+				'If re-review is not possible, call approve_plan_critic or run ' +
+				'/swarm approve-plan-critic to record a fresh manual approval for the current plan.',
 		);
 	}
 }
@@ -1237,8 +1349,31 @@ async function recordPlanCriticApprovalSnapshotIfApplicable(
 	if (!taskLooksLikePlanCritic(args)) return;
 	if (extractPlanCriticVerdict(output) !== 'APPROVED') return;
 
-	const plan = await loadPlanJsonOnly(directory);
-	if (!plan) return;
+	// Issue #2012: a critic APPROVED verdict that fails to record a snapshot
+	// permanently wedges the ratchet-tighter critic_pre_plan gate (no escape
+	// hatch). loadPlanJsonOnly can transiently return null if the critic
+	// dispatch landed microseconds before a concurrent save_plan flush. The
+	// architect skill ordering (save_plan → CRITIC-GATE) is the primary
+	// guarantee; this bounded retry is cheap insurance against the race so a
+	// legitimate APPROVED is not silently dropped. Keep attempts tiny — the
+	// common path resolves on the first read.
+	let plan = await loadPlanJsonOnly(directory);
+	if (!plan) {
+		for (let attempt = 0; attempt < 2 && !plan; attempt++) {
+			await new Promise((resolve) => setTimeout(resolve, 150));
+			plan = await loadPlanJsonOnly(directory);
+		}
+	}
+	if (!plan) {
+		logger.warn(
+			`[delegation-gate] plan critic APPROVED verdict could not be recorded: ` +
+				`plan.json not readable after retry. The critic_pre_plan gate will ` +
+				`block coder delegation until a snapshot exists. Call ` +
+				`approve_plan_critic (or /swarm approve-plan-critic) with a reason ` +
+				`to record a manual approval if the critic genuinely approved.`,
+		);
+		return;
+	}
 
 	// Store the STRUCTURAL hash (status-excluded) as the snapshot's payload_hash
 	// so `assertPlanCriticApprovedForExecution` can match this approval after the
@@ -1256,6 +1391,141 @@ async function recordPlanCriticApprovalSnapshotIfApplicable(
 		},
 		payloadHashOverride: computePlanStructureHash(plan),
 	});
+}
+
+/**
+ * Escape hatch for the ratchet-tighter `critic_pre_plan` gate (issue #2012).
+ *
+ * When the critic returns APPROVED but the mechanical snapshot recorder
+ * ({@link recordPlanCriticApprovalSnapshotIfApplicable}) fails to persist it
+ * (verdict-format mismatch, dispatch-signal miss, or a plan.json read race),
+ * the gate permanently blocks ALL coder delegations because `critic_pre_plan`
+ * defaults to `true` and cannot be disabled (ratchet-tighter). This records a
+ * manual `plan_critic_gate` approval snapshot so the gate unblocks, with a
+ * distinct `method: 'manual_override'` audit marker so a human or downstream
+ * review can distinguish a manual approval from a mechanical critic approval.
+ *
+ * This mirrors the established escape-hatch pattern (PR_REVIEW gate #1898:
+ * `abortPrWorkflow` + `/swarm abort-pr-workflow` + `abort_pr_workflow` tool).
+ *
+ * Fail-closed preconditions:
+ * - The session must be an active **architect** session. The escape hatch is an
+ *   escalation; non-architect callers are rejected so a coder/reviewer cannot
+ *   self-unblock.
+ * - A plan.json must exist; you cannot approve a non-existent plan.
+ *
+ * @param directory - Project root containing `.swarm/`
+ * @param sessionID - The caller's session id (must be an architect session)
+ * @param options.reason - Optional human/agent-supplied reason (audited)
+ * @param options.userConfirmed - `true` only when invoked via the restricted
+ *   `/swarm approve-plan-critic` command (human-run); `false` when invoked via
+ *   the `approve_plan_critic` tool (agent-initiated). Recorded in the audit so a
+ *   self-approve is visible.
+ */
+export async function forceRecordPlanCriticApproval(
+	directory: string,
+	sessionID: string,
+	options: { reason?: string; userConfirmed?: boolean } = {},
+): Promise<{
+	planId: string;
+	recordedAt: string;
+	reason?: string;
+	userConfirmed: boolean;
+}> {
+	const session = ensureAgentSession(sessionID);
+	// Defense-in-depth: the approve_plan_critic tool is registered in
+	// AGENT_TOOL_MAP.architect only, so only the architect can call it. But the
+	// /swarm approve-plan-critic command passes the *current* sessionID, whose
+	// agentName may not be the architect (e.g. a user ran it while a coder was
+	// active). Require the active session to be the architect so a non-architect
+	// context cannot self-unblock the gate. agentName may be swarm-prefixed.
+	if (
+		!session ||
+		!session.agentName ||
+		stripKnownSwarmPrefix(session.agentName) !== 'architect'
+	) {
+		throw new Error(
+			'NOT_AUTHORIZED: approve_plan_critic requires an active architect session. ' +
+				'The plan-critic gate escape hatch is an architect-only escalation; ' +
+				'a coder/reviewer cannot self-unblock. Run /swarm approve-plan-critic ' +
+				'from an architect context, or ask the user to run it.',
+		);
+	}
+
+	const plan = await loadPlanJsonOnly(directory);
+	if (!plan) {
+		// loadPlanJsonOnly returns null for missing, corrupt, OR schema-invalid
+		// plan.json. Distinguish so the user knows whether to save a plan or
+		// repair a corrupt one.
+		const planPath = path.join(directory, '.swarm', 'plan.json');
+		if (fs.existsSync(planPath)) {
+			throw new Error(
+				'PLAN_CORRUPT: .swarm/plan.json exists but could not be parsed ' +
+					'(corrupt or schema-invalid). Repair or re-save the plan before ' +
+					'recording a plan-critic approval.',
+			);
+		}
+		throw new Error(
+			'PLAN_NOT_FOUND: no .swarm/plan.json — cannot record a plan-critic ' +
+				'approval for a non-existent plan. Save a plan first.',
+		);
+	}
+
+	const planId = derivePlanId(plan);
+	const recordedAt = new Date().toISOString();
+	const sanitizedReason =
+		typeof options.reason === 'string' && options.reason.trim().length > 0
+			? options.reason.trim().slice(0, 500)
+			: undefined;
+	const userConfirmed = options.userConfirmed === true;
+
+	// Write a snapshot the gate's scoped loader accepts. `source: 'plan_critic_gate'`
+	// MUST match {@link loadLastPlanCriticApprovedSnapshot}'s extraFilter so the
+	// gate unblocks; `method: 'manual_override'` distinguishes it from a
+	// mechanical critic approval for audit/review.
+	await takeSnapshotEvent(directory, plan, {
+		source: 'critic_approved',
+		approvalMetadata: {
+			verdict: 'APPROVED',
+			source: 'plan_critic_gate',
+			method: 'manual_override',
+			reason: sanitizedReason,
+			user_confirmed: userConfirmed,
+			session_id: sessionID,
+			approved_at: recordedAt,
+		},
+		payloadHashOverride: computePlanStructureHash(plan),
+	});
+
+	// Best-effort non-fatal audit event (matches abortPrWorkflow / knowledge-gate
+	// precedent). The snapshot is authoritative for the gate; the audit event is
+	// the human-readable trail.
+	try {
+		const eventsPath = validateSwarmPath(directory, 'events.jsonl');
+		await fs.promises.appendFile(
+			eventsPath,
+			`${JSON.stringify({
+				type: 'plan_critic_gate_manual_approval',
+				timestamp: recordedAt,
+				sessionID,
+				plan_id: planId,
+				user_confirmed: userConfirmed,
+				...(sanitizedReason ? { reason: sanitizedReason } : {}),
+			})}\n`,
+			'utf-8',
+		);
+	} catch (err) {
+		logger.warn(
+			`[delegation-gate] plan_critic_gate_manual_approval audit event write failed: ${err instanceof Error ? err.message : String(err)}`,
+		);
+	}
+
+	return {
+		planId,
+		recordedAt,
+		...(sanitizedReason ? { reason: sanitizedReason } : {}),
+		userConfirmed,
+	};
 }
 
 /**
@@ -1298,7 +1568,7 @@ function getPlanTaskDeclaredFiles(
 	return null;
 }
 
-function resolveDelegatedPlanTaskId(
+export function resolveDelegatedPlanTaskId(
 	args: Record<string, unknown>,
 	knownPlanTaskIds?: ReadonlySet<string>,
 ): string | null {
@@ -1614,6 +1884,15 @@ async function buildParallelExecutionGuidance(
 	const tasks = currentPhase.tasks;
 	if (tasks.length === 0) return null;
 
+	// #1674 v8 AUTOMATIC FALLBACK message: when parallelization is enabled but
+	// the active phase's pending tasks are NOT provably file-disjoint, the gate
+	// forces serial. Tell the architect exactly what happened and how to
+	// inspect the conflict matrix, so it is never left guessing why parallel
+	// dispatch was blocked.
+	if (!scopeVerdictAllowsParallel(directory, plan)) {
+		return `[PARALLEL EXECUTION PROFILE] parallelization_enabled=true max_concurrent_tasks=${effectiveMaxConcurrent}; the active phase's pending tasks are NOT provably file-disjoint (overlapping or unknown declared scopes) — SERIAL fallback active (v8 automatic safety). Run plan_conflict_check on the pending tasks to inspect the conflict matrix and a suggested serialization order, or proceed serially (one coder at a time).`;
+	}
+
 	const completed = new Set<string>();
 	for (const task of allTasks) {
 		const taskId = task.id;
@@ -1664,6 +1943,48 @@ function isParallelGuidancePhaseComplete(phase: Phase): boolean {
 		phase.status === 'completed' ||
 		phase.status === 'closed'
 	);
+}
+
+/**
+ * #1674 v8: collect the pending-task ids of the active phase, mirroring
+ * `buildParallelExecutionGuidance`'s `currentPhase` selection EXACTLY
+ * (`plan.current_phase` first, else the first non-complete phase). The
+ * execution gate uses this to compute the parallel/serial verdict over the
+ * same task set the advisory guidance references, so the two never disagree.
+ *
+ * Returns `[]` when there is no active phase or no pending tasks in it.
+ */
+function collectPendingTaskIdsForActivePhase(plan: Plan): string[] {
+	const currentPhase =
+		plan.current_phase !== undefined
+			? plan.phases.find((phase) => phase.id === plan.current_phase)
+			: plan.phases.find((phase) => !isParallelGuidancePhaseComplete(phase));
+	if (!currentPhase) return [];
+	return currentPhase.tasks
+		.filter((t) => t.status === 'pending')
+		.map((t) => t.id);
+}
+
+/**
+ * #1674 v8: compute whether the active phase's pending tasks are provably
+ * file-disjoint. This is the AUTOMATIC fallback that enforces acceptance
+ * criterion 4 (overlapping/unknown scopes → serial by default). Fail-safe:
+ * any error → false (serial). Pure + bounded — the gate calls this inline
+ * in `toolBefore` on every coder dispatch.
+ */
+function scopeVerdictAllowsParallel(directory: string, plan: Plan): boolean {
+	try {
+		const pendingTaskIds = collectPendingTaskIdsForActivePhase(plan);
+		if (pendingTaskIds.length < 2) return false; // nothing to parallelize
+		return (
+			computeParallelVerdict(directory, pendingTaskIds).verdict ===
+			'all_disjoint'
+		);
+	} catch {
+		// Fail-safe serial: a verdict-computation failure must never permit
+		// parallel dispatch on potentially-overlapping scopes.
+		return false;
+	}
 }
 
 /**
@@ -1804,6 +2125,36 @@ async function resolveEvidenceTaskId(
 	return getEvidenceTaskId(session, directory);
 }
 
+const recordPendingDelegationForBackground: typeof import('../background/pending-delegations.js').recordPendingDelegation =
+	async (...args) =>
+		(
+			await import('../background/pending-delegations.js')
+		).recordPendingDelegation(...args);
+
+const writeDelegationFallbackForBackground: typeof import('../background/pending-delegations.js').writeDelegationFallback =
+	async (...args) =>
+		(
+			await import('../background/pending-delegations.js')
+		).writeDelegationFallback(...args);
+
+const reserveBackgroundCoderSlotForDispatch: typeof import('../background/pending-delegations.js').reserveBackgroundCoderSlot =
+	async (...args) =>
+		(
+			await import('../background/pending-delegations.js')
+		).reserveBackgroundCoderSlot(...args);
+
+const bindBackgroundCoderReservationForDispatch: typeof import('../background/pending-delegations.js').bindBackgroundCoderReservation =
+	async (...args) =>
+		(
+			await import('../background/pending-delegations.js')
+		).bindBackgroundCoderReservation(...args);
+
+const releaseBackgroundCoderReservationForDispatch: typeof import('../background/pending-delegations.js').releaseBackgroundCoderReservation =
+	async (...args) =>
+		(
+			await import('../background/pending-delegations.js')
+		).releaseBackgroundCoderReservation(...args);
+
 /**
  * _internals export for testing — do not use in production code.
  * Exposes resolveEvidenceTaskId, resolveDelegatedPlanTaskId,
@@ -1820,8 +2171,15 @@ export const _internals = {
 	parsePerTaskVerdicts,
 	buildParallelExecutionGuidance,
 	loadPlanJsonOnly,
+	recordPendingDelegationForBackground,
+	writeDelegationFallbackForBackground,
+	reserveBackgroundCoderSlotForDispatch,
+	bindBackgroundCoderReservationForDispatch,
+	releaseBackgroundCoderReservationForDispatch,
 	resetStandardWorktreeIsolationState,
 	PLAN_CRITIC_TASK_SIGNALS,
+	extractPlanCriticVerdict,
+	forceRecordPlanCriticApproval,
 	get provisionWorktree() {
 		return _wtiInternals.provisionWorktree;
 	},
@@ -1845,6 +2203,12 @@ export const _internals = {
 	},
 	set postMergeCleanup(v: typeof _wtiInternals.postMergeCleanup) {
 		_wtiInternals.postMergeCleanup = v;
+	},
+	get preserveBackgroundWorktreeOwnershipForCallId() {
+		return _wtiInternals.preserveBackgroundWorktreeOwnershipForCallId;
+	},
+	set preserveBackgroundWorktreeOwnershipForCallId(v: typeof _wtiInternals.preserveBackgroundWorktreeOwnershipForCallId,) {
+		_wtiInternals.preserveBackgroundWorktreeOwnershipForCallId = v;
 	},
 };
 
@@ -1883,6 +2247,7 @@ export function createDelegationGateHook(
 		childSessionID: string;
 	}) => Promise<void>;
 	sessionEnded: (sessionID: string, includeOwnedChildren?: boolean) => void;
+	backgroundCompletionClaimed: (record: BackgroundDelegationRecord) => void;
 } {
 	// Initialize durable worktree merge-back status before any coders dispatch
 	initDurableStatusPath(directory);
@@ -1894,9 +2259,9 @@ export function createDelegationGateHook(
 		((config.hooks as Record<string, unknown> | undefined)
 			?.delegation_max_chars as number | undefined) ?? 4000;
 
-	// Issue #1151 PR 2 (Stage A): opt-in background-subagent support. When false (default)
-	// background swarm Task dispatches are fail-closed-blocked (PR 1). When true, they are
-	// allowed and tracked as durable pending records (no gate advancement in Stage A).
+	// Opt-in background-subagent support. When false (default), background swarm
+	// Task dispatches remain fail-closed-blocked. When true, running placeholders
+	// are durably tracked for later trusted completion settlement.
 	const backgroundSubagentsEnabled =
 		(config.hooks as Record<string, unknown> | undefined)
 			?.background_subagents === true;
@@ -1908,6 +2273,10 @@ export function createDelegationGateHook(
 	const coderTaskChangeContextByCallID = new Map<
 		string,
 		BackgroundTaskChangeContext
+	>();
+	const backgroundCoderReservationByCallID = new Map<
+		string,
+		BackgroundCoderReservation
 	>();
 	const coderObservedFilesByCallID = new Map<string, string[] | null>();
 	const publishedScopeBindingsByCallID = new Map<
@@ -2066,6 +2435,24 @@ export function createDelegationGateHook(
 		coderTaskChangeContextByCallID.delete(callID);
 		coderObservedFilesByCallID.delete(callID);
 	};
+	const releasePrelaunchBackgroundCoderReservation = async (
+		callID: string,
+	): Promise<void> => {
+		const reservation = backgroundCoderReservationByCallID.get(callID);
+		if (!reservation) return;
+		const released =
+			await _internals.releaseBackgroundCoderReservationForDispatch(directory, {
+				...reservation,
+				reason: 'recovered',
+			});
+		if (released) {
+			backgroundCoderReservationByCallID.delete(callID);
+			return;
+		}
+		logger.warn(
+			`[delegation-gate] pre-launch background coder reservation ${reservation.reservationId} could not be released; later admission remains fail-closed`,
+		);
+	};
 	const rememberCoderObservedFiles = (
 		callID: string,
 		observedFiles: string[] | null,
@@ -2084,21 +2471,31 @@ export function createDelegationGateHook(
 		declaredFiles: string[] | null,
 		observationDirectory = directory,
 	): void => {
-		if (!isMarkdownOnlyDeclaredScope(declaredFiles)) {
-			clearCoderTaskChangeContext(callID);
-			return;
-		}
 		if (
 			!coderTaskChangeContextByCallID.has(callID) &&
 			coderTaskChangeContextByCallID.size >= MAX_PENDING_CODER_CHANGE_CONTEXTS
 		) {
-			const oldest = coderTaskChangeContextByCallID.keys().next().value;
-			if (oldest !== undefined) clearCoderTaskChangeContext(oldest);
+			throw new Error(
+				`BACKGROUND_CODER_CONTEXT_CAPACITY: refusing coder dispatch because ${MAX_PENDING_CODER_CHANGE_CONTEXTS} live change baselines are already tracked`,
+			);
 		}
 		coderTaskChangeContextByCallID.set(callID, {
 			declaredFiles,
 			baseline: captureWorkspaceSnapshot(observationDirectory),
 		});
+	};
+	const shouldRememberCoderTaskChangeContext = (
+		declaredFiles: string[] | null,
+		background: unknown,
+	): boolean =>
+		isBackgroundTrue(background) || isMarkdownOnlyDeclaredScope(declaredFiles);
+	const backgroundCompletionClaimed = (
+		record: BackgroundDelegationRecord,
+	): void => {
+		const callID = record.callID;
+		clearPublishedScopeBindings(callID);
+		clearCoderTaskChangeContext(callID);
+		deleteStoredInputArgs(callID);
 	};
 
 	if (!enabled) {
@@ -2133,6 +2530,7 @@ export function createDelegationGateHook(
 			},
 			taskMetadata,
 			sessionEnded,
+			backgroundCompletionClaimed,
 		};
 	}
 
@@ -2217,9 +2615,10 @@ export function createDelegationGateHook(
 		// tool.execute.before chain in src/index.ts (no safeHook wrapper), so OpenCode
 		// rejects the tool before launching the background task.
 		//
-		// PR 2 Stage A: when background_subagents is opted in, the block is lifted — the
-		// dispatch is allowed and tracked as a durable pending record in toolAfter (still
-		// no gate advancement in Stage A). When disabled (default), PR 1 behavior stands.
+		// When background_subagents is opted in, the block is lifted and toolAfter
+		// records the running placeholder without terminal effects. Only the later
+		// trusted completion observer may apply role-appropriate state/evidence.
+		// When disabled (default), the fail-closed behavior stands.
 		if (
 			!backgroundSubagentsEnabled &&
 			isBackgroundTrue(args.background) &&
@@ -2233,16 +2632,24 @@ export function createDelegationGateHook(
 			try {
 				const reviewSession = swarmState.agentSessions.get(input.sessionID);
 				if (reviewSession) {
-					// Use modified files from the current coder task as changed files
-					const changedFiles = reviewSession.modifiedFilesThisCoderTask ?? [];
+					const reviewTaskId = await resolveEvidenceTaskId(
+						args,
+						reviewSession,
+						directory,
+					);
+					// Route against the exact reviewed task. The singular projection is
+					// compatibility-only and may point at a different concurrent task.
+					const changedFiles = reviewTaskId
+						? getModifiedFilesForTask(reviewSession, reviewTaskId)
+						: [];
 					if (changedFiles.length > 0) {
 						const routing = await routeReviewForChanges(
 							directory,
 							changedFiles,
 						);
 						if (shouldParallelizeReview(routing)) {
-							reviewSession.pendingAdvisoryMessages ??= [];
-							reviewSession.pendingAdvisoryMessages.push(
+							pushAdvisory(
+								reviewSession,
 								`REVIEW ROUTING: High complexity detected (${routing.reason}). ` +
 									`Consider parallel review: ${routing.reviewerCount} reviewers, ${routing.testEngineerCount} test engineers recommended.`,
 							);
@@ -2284,14 +2691,15 @@ export function createDelegationGateHook(
 					acceptanceCheck.reason === 'acceptance_field_empty'
 						? 'its ACCEPTANCE field is present but empty/whitespace-only'
 						: 'it has no ACCEPTANCE field';
-				const inputFormatFile =
-					targetAgent === 'reviewer' ? 'reviewer' : 'coder';
 				throw new Error(
 					`ACCEPTANCE_FIELD_REQUIRED: the ${targetAgent} delegation was blocked because ${detail}. ` +
 						`Every coder/reviewer dispatch MUST carry a non-empty ACCEPTANCE: line in its prompt — the verbatim ` +
-						`FR-###/SC-### requirement text from spec.md when the task maps to one or more spec requirements, or a ` +
-						`one-line task-derived statement of what DONE looks like otherwise (see the INPUT FORMAT in ` +
-						`src/agents/${inputFormatFile}.ts). Add an ACCEPTANCE: line to the delegation prompt and re-dispatch.`,
+						`FR-###/SC-### requirement text from .swarm/spec.md when the task maps to one or more spec requirements, or a ` +
+						`one-line task-derived statement of what DONE looks like otherwise (see the ACCEPTANCE FIELD RESOLUTION ` +
+						`section of your system prompt and .swarm/spec.md). Add an ACCEPTANCE: line to the delegation prompt and ` +
+						`re-dispatch. Do NOT investigate the installed swarm plugin package (node_modules/opencode-swarm, ` +
+						`~/.cache/opencode) — the fix is in your dispatch content, not in plugin internals. If this same error ` +
+						`repeats after 2 fix attempts, STOP and present the blocker to the user.`,
 				);
 			}
 
@@ -2310,6 +2718,7 @@ export function createDelegationGateHook(
 						covered: boolean;
 						missingId?: string;
 						diagnostic?: CoverageMissDiagnostic;
+						expectedBody?: string;
 				  }
 				| undefined;
 			let coverageTaskId: string | null = null;
@@ -2367,8 +2776,30 @@ export function createDelegationGateHook(
 						diagLines.push(`  ENCODING WARNING: ${diag.corruptionHint}`);
 					}
 				}
+				// #2063 A2: embed the raw, untrimmed requirement body verbatim (fenced,
+				// capped) so the architect can paste it directly instead of re-reading
+				// spec.md. `normalizeAcceptanceText`'s leading list-marker strip is
+				// POSITION-dependent (only a line-initial `- `/`* ` is stripped), so a
+				// bulleted multi-line body flattened onto one line can false-fail even
+				// when "pasted verbatim" — hence the explicit line-break instruction.
+				const rawExpectedBody = coverageResult.expectedBody ?? '';
+				const truncated = rawExpectedBody.length > ACCEPTANCE_EXPECTED_BODY_CAP;
+				const expectedBodyBlock = truncated
+					? `${rawExpectedBody.slice(0, ACCEPTANCE_EXPECTED_BODY_CAP)}\n…[truncated — read the remainder from .swarm/spec.md under ${coverageResult.missingId}]`
+					: rawExpectedBody;
 				throw new Error(
-					`ACCEPTANCE_FIELD_COVERAGE_MISMATCH: the ${targetAgent} delegation for task ${coverageTaskId} was blocked because its ACCEPTANCE field does not cover the requirement text for ${coverageResult.missingId} from .swarm/spec.md (compared after Unicode/whitespace normalization, not raw bytes).\n${diagLines.join('\n')}\n  Fix: copy ${coverageResult.missingId}'s full requirement text into ACCEPTANCE (see ACCEPTANCE FIELD RESOLUTION in src/agents/architect.ts and the INPUT FORMAT in src/agents/${targetAgent}.ts); if the ENCODING WARNING is present, repair .swarm/spec.md first, then re-dispatch.`,
+					`ACCEPTANCE_FIELD_COVERAGE_MISMATCH: the ${targetAgent} delegation for task ${coverageTaskId} was blocked because its ACCEPTANCE field does not cover the requirement text for ${coverageResult.missingId} from .swarm/spec.md (compared after Unicode/whitespace normalization, not raw bytes).\n${diagLines.join('\n')}\n` +
+						`Replace your ACCEPTANCE text for ${coverageResult.missingId} with the exact requirement text below, ` +
+						`PRESERVING ITS LINE BREAKS, then re-dispatch (body capped at ${ACCEPTANCE_EXPECTED_BODY_CAP} chars` +
+						`${truncated ? ', truncated below' : ''}):\n` +
+						'```\n' +
+						`${expectedBodyBlock}\n` +
+						'```\n' +
+						`(see the ACCEPTANCE FIELD RESOLUTION section of your system prompt for how ACCEPTANCE is derived; ` +
+						`if the ENCODING WARNING above is present, repair .swarm/spec.md first, then re-dispatch.) ` +
+						`Do NOT investigate the installed swarm plugin package (node_modules/opencode-swarm, ~/.cache/opencode) ` +
+						`— the fix is in your dispatch content, not in plugin internals. If this same error repeats after 2 fix ` +
+						`attempts, STOP and present the blocker to the user.`,
 				);
 			}
 		}
@@ -2383,9 +2814,63 @@ export function createDelegationGateHook(
 		// gates. It creates a staged binding but does not publish authorization.
 		const preparedScope = await prepareCoderScope(directory, input, args);
 		const { plan, taskId: incomingCoderTaskId } = preparedScope;
+		const reserveBackgroundCoderIfNeeded = async (
+			maxConcurrent: number,
+		): Promise<void> => {
+			if (!backgroundSubagentsEnabled || !isBackgroundTrue(args.background)) {
+				return;
+			}
+			const occupiedTaskIds = [...session.taskWorkflowStates.entries()]
+				.filter(([, state]) => state === 'coder_delegated')
+				.map(([taskId]) => taskId);
+			const claim = await _internals.reserveBackgroundCoderSlotForDispatch(
+				directory,
+				{
+					parentSessionId: input.sessionID,
+					planTaskId: incomingCoderTaskId || null,
+					callID: input.callID,
+					maxConcurrent,
+					occupiedTaskIds,
+				},
+			);
+			if (!claim.ok) {
+				const detail = claim.detail ? ` ${claim.detail}` : '';
+				const code =
+					claim.reason === 'capacity'
+						? 'PARALLEL_SLOTS_EXHAUSTED'
+						: claim.reason === 'duplicate_task' ||
+								claim.reason === 'duplicate_call'
+							? 'BACKGROUND_CODER_TASK_RESERVED'
+							: 'BACKGROUND_CODER_RESERVATION_UNCERTAIN';
+				throw new Error(
+					`${code}: background coder admission was blocked (${claim.reason}).${detail}`,
+				);
+			}
+			backgroundCoderReservationByCallID.set(input.callID, claim.reservation);
+		};
 		if (!plan) {
-			rememberCoderTaskChangeContext(input.callID, preparedScope.declaredFiles);
-			await publishScopeBinding(input.callID, directory, preparedScope.binding);
+			await reserveBackgroundCoderIfNeeded(1);
+			try {
+				if (
+					shouldRememberCoderTaskChangeContext(
+						preparedScope.declaredFiles,
+						args.background,
+					)
+				) {
+					rememberCoderTaskChangeContext(
+						input.callID,
+						preparedScope.declaredFiles,
+					);
+				}
+				await publishScopeBinding(
+					input.callID,
+					directory,
+					preparedScope.binding,
+				);
+			} catch (error) {
+				await releasePrelaunchBackgroundCoderReservation(input.callID);
+				throw error;
+			}
 			return;
 		}
 		const profile = plan?.execution_profile;
@@ -2393,12 +2878,24 @@ export function createDelegationGateHook(
 		const maxConcurrent = profile?.max_concurrent_tasks ?? 10;
 		const effectiveMaxConcurrent =
 			session.maxConcurrencyOverride ?? maxConcurrent;
-		// Parallel mode is active only when the plan enables it, allows >1 concurrent
-		// task, and Lean Turbo is not driving its own lane execution.
-		const parallelModeActive =
+		// #1674 v8 AUTOMATIC FALLBACK (acceptance criterion 4): parallel mode
+		// additionally requires the active phase's pending tasks to be PROVABLY
+		// file-disjoint. The gate computes the verdict inline via the same pure
+		// helper the architect's `plan_conflict_check` tool uses; conflicts or
+		// unknown scopes → serial by default, with no architect discretion.
+		const scopeAllowsParallel = scopeVerdictAllowsParallel(directory, plan);
+		// Standard worktree isolation remains active even when the concurrency
+		// verdict falls back to serial. F-014: coupling isolation to
+		// `scopeAllowsParallel` made overlapping/unknown scopes run in the project
+		// root, defeating the safety boundary that serial fallback is meant to keep.
+		const standardWorktreeIsolationActive =
 			parallelEnabled &&
 			effectiveMaxConcurrent > 1 &&
 			!hasActiveLeanTurbo(input.sessionID);
+		// Parallel gate exemptions and slot accounting additionally require the
+		// pending tasks to be provably disjoint.
+		const parallelModeActive =
+			standardWorktreeIsolationActive && scopeAllowsParallel;
 		await assertPlanCriticApprovedForExecution(directory, plan);
 		const incomingCoderDeclaredFiles = preparedScope.declaredFiles;
 		const correlatedBinding = preparedScope.binding;
@@ -2500,87 +2997,141 @@ export function createDelegationGateHook(
 			}
 		}
 
-		if (!parallelModeActive) {
-			rememberCoderTaskChangeContext(input.callID, incomingCoderDeclaredFiles);
-			await publishScopeBinding(input.callID, directory, correlatedBinding);
-			return;
-		}
-
-		const resolvedTaskId = incomingCoderTaskId;
-		// FR-102: pass declared scope (from pending map populated by FILE: extraction
-		// or prior declare_scope) so provisionWorktree can materialize it into the
-		// lane's .swarm/scopes/ for durability across plugin restart.
-		const laneScope = correlatedBinding.files;
-		await precreateStandardWorktreeSession({
-			config,
-			directory,
-			parentSessionID: input.sessionID,
-			callID: input.callID,
-			taskId: resolvedTaskId ?? sanitizeWorktreeTaskId(input.callID),
-			planTaskId: resolvedTaskId ?? undefined,
-			description:
-				typeof args.description === 'string' ? args.description : undefined,
-			outputArgs: args,
-			scope:
-				laneScope && laneScope.length > 0 && resolvedTaskId
-					? { taskId: resolvedTaskId, files: laneScope }
-					: undefined,
-		});
-		const standardDispatch = standardWorktreeByCallID.get(input.callID);
-		if (standardDispatch) {
-			if (resolvedTaskId) {
-				try {
-					const childSessionId =
-						typeof args.task_id === 'string' ? args.task_id.trim() : '';
-					if (!childSessionId || childSessionId === input.sessionID) {
-						throw new Error(
-							'SCOPE_CHILD_IDENTITY_MISSING: worktree dispatch did not return a distinct child session id',
-						);
-					}
-					// Materialize the current authoritative plan in the isolated root via
-					// the ledger-aware writer. Strict child authorization never trusts a
-					// binding-era snapshot or a raw hand-written plan projection.
-					await savePlan(standardDispatch.handle.worktreePath, plan, {
-						preserveCompletedStatuses: false,
-					});
-					const childBinding = deriveChildScopeBinding(correlatedBinding, {
-						childDirectory: standardDispatch.handle.worktreePath,
-						childSessionId,
-						parentCallId: input.callID,
-					});
-					await publishScopeBinding(
+		// Background coder dispatch: reserve a slot and record task context.
+		// The 5-store durable ownership system protects the resulting worktree.
+		await reserveBackgroundCoderIfNeeded(
+			parallelModeActive ? effectiveMaxConcurrent : 1,
+		);
+		try {
+			if (!parallelModeActive) {
+				if (
+					shouldRememberCoderTaskChangeContext(
+						incomingCoderDeclaredFiles,
+						args.background,
+					)
+				) {
+					rememberCoderTaskChangeContext(
 						input.callID,
-						standardDispatch.handle.worktreePath,
-						childBinding,
+						incomingCoderDeclaredFiles,
 					);
-					const childSession = ensureAgentSession(
-						childSessionId,
-						'coder',
-						standardDispatch.handle.worktreePath,
-					);
-					childSession.currentTaskId = childBinding.taskId;
-					childSession.declaredCoderScope = [...childBinding.files];
-				} catch (error) {
-					clearPublishedScopeBindings(input.callID);
-					await cleanupStandardWorktreeForCallId(
-						input.callID,
-						'denied',
-						directory,
-						resolveWorktreeIsolationConfig(config).worktree_dir,
-					);
-					throw error;
 				}
 			}
-			rememberCoderTaskChangeContext(
-				input.callID,
-				incomingCoderDeclaredFiles,
-				standardDispatch.handle.worktreePath,
-			);
-		} else {
-			// Isolation may degrade to the project root; capture only after the
-			// provisioning attempt and before the upstream coder begins execution.
-			rememberCoderTaskChangeContext(input.callID, incomingCoderDeclaredFiles);
-			await publishScopeBinding(input.callID, directory, correlatedBinding);
+
+			// Standard (non-background) coder: check worktree isolation and
+			// short-circuit when no isolated worktree is configured.
+			if (!standardWorktreeIsolationActive) {
+				if (
+					shouldRememberCoderTaskChangeContext(
+						incomingCoderDeclaredFiles,
+						args.background,
+					)
+				) {
+					rememberCoderTaskChangeContext(
+						input.callID,
+						incomingCoderDeclaredFiles,
+					);
+				}
+				await publishScopeBinding(input.callID, directory, correlatedBinding);
+				return;
+			}
+
+			const resolvedTaskId = incomingCoderTaskId;
+			// FR-102: pass declared scope (from pending map populated by FILE: extraction
+			// or prior declare_scope) so provisionWorktree can materialize it into the
+			// lane's .swarm/scopes/ for durability across plugin restart.
+			const laneScope = correlatedBinding.files;
+			await precreateStandardWorktreeSession({
+				config,
+				directory,
+				parentSessionID: input.sessionID,
+				callID: input.callID,
+				taskId: resolvedTaskId ?? sanitizeWorktreeTaskId(input.callID),
+				planTaskId: resolvedTaskId ?? undefined,
+				description:
+					typeof args.description === 'string' ? args.description : undefined,
+				outputArgs: args,
+				scope:
+					laneScope && laneScope.length > 0 && resolvedTaskId
+						? { taskId: resolvedTaskId, files: laneScope }
+						: undefined,
+			});
+			const standardDispatch = standardWorktreeByCallID.get(input.callID);
+			if (standardDispatch) {
+				if (resolvedTaskId) {
+					try {
+						const childSessionId =
+							typeof args.task_id === 'string' ? args.task_id.trim() : '';
+						if (!childSessionId || childSessionId === input.sessionID) {
+							throw new Error(
+								'SCOPE_CHILD_IDENTITY_MISSING: worktree dispatch did not return a distinct child session id',
+							);
+						}
+						// Materialize the current authoritative plan in the isolated root via
+						// the ledger-aware writer. Strict child authorization never trusts a
+						// binding-era snapshot or a raw hand-written plan projection.
+						await savePlan(standardDispatch.handle.worktreePath, plan, {
+							preserveCompletedStatuses: false,
+						});
+						const childBinding = deriveChildScopeBinding(correlatedBinding, {
+							childDirectory: standardDispatch.handle.worktreePath,
+							childSessionId,
+							parentCallId: input.callID,
+						});
+						await publishScopeBinding(
+							input.callID,
+							standardDispatch.handle.worktreePath,
+							childBinding,
+						);
+						const childSession = ensureAgentSession(
+							childSessionId,
+							'coder',
+							standardDispatch.handle.worktreePath,
+						);
+						childSession.currentTaskId = childBinding.taskId;
+						childSession.declaredCoderScope = [...childBinding.files];
+					} catch (error) {
+						clearPublishedScopeBindings(input.callID);
+						await cleanupStandardWorktreeForCallId(
+							input.callID,
+							'denied',
+							directory,
+							resolveWorktreeIsolationConfig(config).worktree_dir,
+						);
+						throw error;
+					}
+				}
+				// Record task-change context for the isolated worktree path.
+				if (
+					shouldRememberCoderTaskChangeContext(
+						incomingCoderDeclaredFiles,
+						args.background,
+					)
+				) {
+					rememberCoderTaskChangeContext(
+						input.callID,
+						incomingCoderDeclaredFiles,
+						standardDispatch.handle.worktreePath,
+					);
+				}
+			} else {
+				// Isolation may degrade to the project root; capture only after the
+				// provisioning attempt and before the upstream coder begins execution.
+				if (
+					shouldRememberCoderTaskChangeContext(
+						incomingCoderDeclaredFiles,
+						args.background,
+					)
+				) {
+					rememberCoderTaskChangeContext(
+						input.callID,
+						incomingCoderDeclaredFiles,
+					);
+				}
+				await publishScopeBinding(input.callID, directory, correlatedBinding);
+			}
+		} catch (error) {
+			await releasePrelaunchBackgroundCoderReservation(input.callID);
+			throw error;
 		}
 	};
 
@@ -2882,24 +3433,80 @@ export function createDelegationGateHook(
 			//   - PR 2 Stage A (flag ON): additionally record a DURABLE pending delegation so a
 			//     later (Stage B) trusted completion can be correlated. Still no gate effect.
 			// Either way: clean up stored args so the callID entry does not leak, then bail.
+			// A terminal failure (state === 'failed' or 'error') must not record a
+			// pending delegation — there is no later trusted completion to correlate.
+			const outputTerminalState = (_output as { state?: string } | undefined)
+				?.state;
+			const isTerminalFailure =
+				outputTerminalState === 'failed' || outputTerminalState === 'error';
 			if (
+				!isTerminalFailure &&
 				typeof subagentType === 'string' &&
 				isKnownCanonicalRole(stripKnownSwarmPrefix(subagentType)) &&
 				(isBackgroundTrue(directArgs?.background) ||
 					isBackgroundTrue(storedArgs?.background) ||
 					backgroundResultIsRunning)
 			) {
+				const coderReservation = backgroundCoderReservationByCallID.get(
+					input.callID,
+				);
+				let backgroundRecordDurable = !backgroundSubagentsEnabled;
+				let backgroundOwnershipDurable = backgroundRecordDurable;
 				if (backgroundSubagentsEnabled) {
+					const protectUntrackedBackgroundWorktree = async (
+						taskId: string | null | undefined,
+						reason: string,
+					): Promise<{ detail: string; durable: boolean }> => {
+						if (!standardDispatch) {
+							return {
+								detail: 'no isolated worktree ownership tag was available',
+								durable: false,
+							};
+						}
+						let detail: string;
+						let durable = false;
+						try {
+							const preserved =
+								await _wtiInternals.preserveBackgroundWorktreeOwnershipForCallId(
+									input.callID,
+								);
+							durable = preserved.outcome === 'preserved';
+							detail = durable
+								? `ownership tag ${preserved.tag} at ${preserved.ref}`
+								: `ownership preservation failed: ${preserved.error ?? preserved.outcome}`;
+						} catch (err) {
+							detail = `ownership preservation threw: ${err instanceof Error ? err.message : String(err)}`;
+						}
+						recordWorktreeMergeFailure(taskId ?? undefined, {
+							outcome: 'failed',
+							stage: 'background-correlation-persist',
+							message:
+								`${reason}; ${detail}. ` +
+								'Automatic orphan reclamation is blocked until the dispatch is recovered.',
+							worktreePath: standardDispatch.handle.worktreePath,
+							branch: standardDispatch.handle.branchName,
+							queuedAt: Date.now(),
+						});
+						return { detail, durable };
+					};
 					try {
 						const { extractDispatchIds } = await import(
 							'../background/task-envelope.js'
 						);
-						const { buildPromptSnapshot, recordPendingDelegation } =
-							await import('../background/pending-delegations.js');
+						const { buildPromptSnapshot } = await import(
+							'../background/pending-delegations.js'
+						);
 						const { captureWorkspaceSnapshot } = await import(
 							'../background/workspace-snapshot.js'
 						);
 						const { subagentSessionId, jobId } = extractDispatchIds(_output);
+						if (!subagentSessionId && !backgroundResultIsRunning) {
+							await releasePrelaunchBackgroundCoderReservation(input.callID);
+							clearPublishedScopeBindings(input.callID);
+							clearCoderTaskChangeContext(input.callID);
+							if (storedArgs !== undefined) deleteStoredInputArgs(input.callID);
+							return;
+						}
 						if (subagentSessionId) {
 							const mergedArgs = { ...(storedArgs ?? {}), ...directArgs };
 							const evidenceTaskId = await resolveEvidenceTaskId(
@@ -2920,53 +3527,136 @@ export function createDelegationGateHook(
 								stripKnownSwarmPrefix(subagentType) === 'coder'
 									? coderTaskChangeContextByCallID.get(input.callID)
 									: undefined;
-							await recordPendingDelegation(
-								directory,
-								{
-									correlationId: subagentSessionId,
-									jobId,
-									subagentSessionId,
-									parentSessionId: input.sessionID,
-									callID: input.callID,
-									normalizedAgent: stripKnownSwarmPrefix(subagentType),
-									swarmPrefixedAgent: subagentType,
-									planTaskId: evidenceTaskId,
-									evidenceTaskId,
-									workspace: taskChangeContext
-										? { ...taskChangeContext.baseline, prHeadSha, scope }
-										: captureWorkspaceSnapshot(directory, {
-												prHeadSha,
-												scope,
-											}),
-									taskChangeContext,
-									prompt:
-										typeof mergedArgs.prompt === 'string'
-											? buildPromptSnapshot(
-													mergedArgs.prompt,
-													delegationMaxChars,
-												)
-											: undefined,
-									generation: 1,
-								},
-								{ staleTimeoutMs: backgroundPendingTimeoutMs },
-							);
+							const pendingInput = {
+								correlationId: subagentSessionId,
+								jobId,
+								subagentSessionId,
+								parentSessionId: input.sessionID,
+								callID: input.callID,
+								normalizedAgent: stripKnownSwarmPrefix(subagentType),
+								swarmPrefixedAgent: subagentType,
+								planTaskId: evidenceTaskId,
+								evidenceTaskId,
+								workspace: taskChangeContext
+									? { ...taskChangeContext.baseline, prHeadSha, scope }
+									: captureWorkspaceSnapshot(directory, {
+											prHeadSha,
+											scope,
+										}),
+								taskChangeContext,
+								worktree: standardDispatch
+									? {
+											callID: standardDispatch.callID,
+											parentSessionId: standardDispatch.parentSessionID,
+											taskId: standardDispatch.taskId,
+											planTaskId: standardDispatch.planTaskId ?? null,
+											worktreePath: standardDispatch.handle.worktreePath,
+											branchName: standardDispatch.handle.branchName,
+											worktreeId: standardDispatch.handle.id,
+											worktreeSessionId: standardDispatch.handle.sessionId,
+											mergeStrategy: standardDispatch.mergeStrategy,
+											laneIndex: standardDispatch.laneIndex,
+											worktreeDir: standardDispatch.worktree_dir ?? null,
+										}
+									: undefined,
+								coderReservationId: coderReservation?.reservationId,
+								prompt:
+									typeof mergedArgs.prompt === 'string'
+										? buildPromptSnapshot(mergedArgs.prompt, delegationMaxChars)
+										: undefined,
+								generation: 1,
+							};
+							const primary =
+								await _internals.recordPendingDelegationForBackground(
+									directory,
+									pendingInput,
+									{ staleTimeoutMs: backgroundPendingTimeoutMs },
+								);
+							backgroundRecordDurable = primary !== null;
+							if (!primary) {
+								backgroundRecordDurable =
+									(await _internals.writeDelegationFallbackForBackground(
+										directory,
+										pendingInput,
+									)) !== null;
+								if (backgroundRecordDurable) {
+									logger.warn(
+										`[delegation-gate] background delegation ${subagentSessionId} persisted to the independent fallback artifact after the primary ledger write failed`,
+									);
+								}
+							}
+							if (!backgroundRecordDurable) {
+								const preservation = await protectUntrackedBackgroundWorktree(
+									evidenceTaskId ?? standardDispatch?.planTaskId,
+									'both background correlation stores failed',
+								);
+								backgroundOwnershipDurable = preservation.durable;
+								pushAdvisory(
+									session,
+									`BACKGROUND DELEGATION UNTRACKED: ${subagentType} (${subagentSessionId}) launched, but both durable correlation stores failed. Recovery protection: ${preservation.detail}. Do not advance task ${evidenceTaskId ?? 'unknown'} until the dispatch is recovered.`,
+								);
+							} else {
+								backgroundOwnershipDurable = true;
+								if (coderReservation) {
+									const bound =
+										await _internals.bindBackgroundCoderReservationForDispatch(
+											directory,
+											{
+												...coderReservation,
+												correlationId: subagentSessionId,
+											},
+										);
+									if (!bound) {
+										pushAdvisory(
+											session,
+											`BACKGROUND CODER RESERVATION UNBOUND: task ${evidenceTaskId ?? 'unknown'} is durably tracked, but its pre-launch reservation could not be bound to ${subagentSessionId}. Further coder admission remains fail-closed until completion or recovery reconciles it.`,
+										);
+									}
+								}
+							}
 						} else {
 							// No usable correlation id (no jobId and no parseable dispatch
-							// envelope). Do NOT write an unkeyable/orphan record; the dispatch
-							// already launched upstream, but Stage A has no gate effect so an
-							// untracked background dispatch is safe (it is simply unobservable).
+							// envelope). Do not invent an owner. Preserve the isolated
+							// worktree durably and tell the architect to fail closed.
+							const preservation = await protectUntrackedBackgroundWorktree(
+								standardDispatch?.planTaskId,
+								'background dispatch returned no trusted correlation id',
+							);
+							backgroundOwnershipDurable = preservation.durable;
 							logger.warn(
 								'[delegation-gate] background dispatch had no correlation id (no jobId / no envelope) — not tracked',
 							);
+							pushAdvisory(
+								session,
+								`BACKGROUND DELEGATION UNCORRELATED: ${subagentType} launched without a trusted session correlation. Recovery protection: ${preservation.detail}. Do not advance the task until the dispatch is recovered or safely re-dispatched.`,
+							);
 						}
 					} catch (err) {
+						const preservation = await protectUntrackedBackgroundWorktree(
+							standardDispatch?.planTaskId,
+							'background dispatch correlation recording threw',
+						);
+						backgroundOwnershipDurable = preservation.durable;
 						logger.warn(
 							`[delegation-gate] background pending recording failed: ${err instanceof Error ? err.message : String(err)}`,
 						);
+						pushAdvisory(
+							session,
+							`BACKGROUND DELEGATION DURABILITY FAILURE: ${subagentType} launched, but its completion owner could not be persisted. Recovery protection: ${preservation.detail}. Do not advance the task until the dispatch is recovered.`,
+						);
 					}
 				}
-				clearCoderTaskChangeContext(input.callID);
-				if (storedArgs !== undefined) deleteStoredInputArgs(input.callID);
+				if (backgroundOwnershipDurable) {
+					_wtiInternals.removeWorktreeProvisioningOwner(
+						directory,
+						input.callID,
+					);
+				}
+				if (backgroundRecordDurable) {
+					clearCoderTaskChangeContext(input.callID);
+					if (storedArgs !== undefined) deleteStoredInputArgs(input.callID);
+				}
+				backgroundCoderReservationByCallID.delete(input.callID);
 				if (!backgroundResultIsRunning)
 					clearPublishedScopeBindings(input.callID);
 				return;
@@ -3010,7 +3700,14 @@ export function createDelegationGateHook(
 				}
 			}
 
-			if (standardDispatch) {
+			let standardWorktreeSettled = !standardDispatch;
+			// A terminal failure (cancelled/error/failed) must not attempt merge-back.
+			// The worktree is preserved for inspection and cleaned up without merging.
+			const isStandardWorktreeFailure =
+				outputTerminalState === 'cancelled' ||
+				outputTerminalState === 'failed' ||
+				outputTerminalState === 'error';
+			if (standardDispatch && !isStandardWorktreeFailure) {
 				const taskChangeContext = coderTaskChangeContextByCallID.get(
 					input.callID,
 				);
@@ -3040,7 +3737,7 @@ export function createDelegationGateHook(
 					mergeStrategy: standardDispatch.mergeStrategy,
 					queuedAt: Date.now(),
 				});
-				await finishStandardWorktreeDispatch(
+				const settlement = await finishStandardWorktreeDispatch(
 					directory,
 					standardDispatch,
 					config,
@@ -3068,13 +3765,51 @@ export function createDelegationGateHook(
 					const dispatchSession = ensureAgentSession(
 						standardDispatch.parentSessionID,
 					);
-					dispatchSession.pendingAdvisoryMessages ??= [];
-					dispatchSession.pendingAdvisoryMessages.push(
+					pushAdvisory(
+						dispatchSession,
 						`STANDARD_WORKTREE_MERGE_FAILED: task ${standardDispatch.taskId} preserved at ${standardDispatch.handle.worktreePath}; reason: ${reason}.`,
 					);
 					// SC-115: Remove from awaiting-merge registry after recording failure.
 					awaitingMergeByCallID.delete(input.callID);
 				});
+				standardWorktreeSettled = settlement?.outcome === 'merged';
+			}
+			if (standardDispatch && isStandardWorktreeFailure) {
+				// Terminal failure: preserve the worktree for inspection, clean up
+				// the lane without merge-back, and record the failure.
+				standardWorktreeByCallID.delete(input.callID);
+				const reason = (
+					outputTerminalState === 'cancelled' ? 'cancelled' : 'denied'
+				) as 'cancelled' | 'denied';
+				await _wtiInternals.preserveDirtyWorktreeForCallId(
+					input.callID,
+					reason,
+					directory,
+				);
+				await _wtiInternals.removeWorktree(
+					standardDispatch.handle.worktreePath,
+					directory,
+				);
+				await _wtiInternals.postMergeCleanup(
+					directory,
+					standardDispatch.handle.branchName,
+				);
+				awaitingMergeByCallID.delete(input.callID);
+				recordWorktreeMergeFailure(
+					standardDispatch.planTaskId ?? standardDispatch.taskId,
+					{
+						outcome: 'failed',
+						stage: 'task-result',
+						message: `task terminated with ${outputTerminalState ?? 'terminal-failure'}`,
+					},
+				);
+				const dispatchSession = ensureAgentSession(
+					standardDispatch.parentSessionID,
+				);
+				pushAdvisory(
+					dispatchSession,
+					`STANDARD_WORKTREE_TASK_FAILED: task ${standardDispatch.taskId} terminated with ${outputTerminalState ?? 'terminal-failure'}; worktree preserved and cleaned without merge-back.`,
+				);
 			}
 
 			// Track if we detected reviewer and/or test_engineer via stored args
@@ -3101,7 +3836,12 @@ export function createDelegationGateHook(
 						// Order-independent barrier: record each completion independently.
 						// Advance to tests_run only when BOTH reviewer and test_engineer
 						// have completed. Either may complete first.
+						// A terminal failure must never advance Stage B.
+						const outputStatus = (_output as { status?: string } | undefined)
+							?.status;
 						if (
+							outputStatus !== 'failed' &&
+							!isStandardWorktreeFailure &&
 							(targetAgent === 'reviewer' || targetAgent === 'test_engineer') &&
 							session.taskWorkflowStates
 						) {
@@ -3607,6 +4347,10 @@ export function createDelegationGateHook(
 			}
 
 			// ── Completion gate: push advisory if a task awaits completion ──
+			// B3 (issue #1976): the `break` below only caps pushes to one per
+			// toolBefore invocation; without cross-invocation state, a task stuck
+			// in tests_run re-injected the identical directive on EVERY Task tool
+			// call. Track warned task IDs so the same stuck task warns once.
 			if (session.taskWorkflowStates) {
 				for (const [, state] of session.taskWorkflowStates) {
 					if (state === 'tests_run') {
@@ -3614,15 +4358,22 @@ export function createDelegationGateHook(
 							directory,
 							session,
 						);
-						if (taskAwaiting) {
-							session.pendingAdvisoryMessages ??= [];
-							session.pendingAdvisoryMessages.push(
+						if (
+							taskAwaiting &&
+							!session.completionGateWarnedForTask.has(taskAwaiting)
+						) {
+							pushAdvisory(
+								session,
 								completionGateViolationMessage(taskAwaiting),
 							);
+							session.completionGateWarnedForTask.add(taskAwaiting);
 						}
 						break; // only push once
 					}
 				}
+			}
+			if (standardWorktreeSettled) {
+				_wtiInternals.removeWorktreeProvisioningOwner(directory, input.callID);
 			}
 		}
 	};
@@ -4040,5 +4791,6 @@ ${warningLines.join('\n')}`;
 		toolAfter,
 		taskMetadata,
 		sessionEnded,
+		backgroundCompletionClaimed,
 	};
 }

@@ -105,73 +105,15 @@ describe('GuardrailsProfileSchema', () => {
 });
 
 describe('GuardrailsConfigSchema with profiles', () => {
-	it('GuardrailsConfigSchema with profiles field parses', () => {
-		const config = {
-			enabled: true,
-			block_destructive_commands: true,
-			shell_audit_log: true,
-			max_tool_calls: 200,
-			max_duration_minutes: 30,
-			max_repetitions: 10,
-			max_consecutive_errors: 5,
-			max_transient_retries: 5,
-			warning_threshold: 0.75,
-			idle_timeout_minutes: 60,
-			no_op_warning_threshold: 15,
-			max_coder_revisions: 5,
-			runaway_output_max_turns: 5,
-			profiles: {
-				coder: { max_tool_calls: 400 },
-				explorer: { max_duration_minutes: 60 },
-			},
-		};
-
-		const result = GuardrailsConfigSchema.parse(config);
-		expect(result).toEqual(config);
-	});
-
-	it('GuardrailsConfigSchema without profiles (backward compat) parses', () => {
-		const config = {
-			enabled: true,
-			block_destructive_commands: true,
-			shell_audit_log: true,
-			max_tool_calls: 200,
-			max_duration_minutes: 30,
-			max_repetitions: 10,
-			max_consecutive_errors: 5,
-			max_transient_retries: 5,
-			warning_threshold: 0.75,
-			idle_timeout_minutes: 60,
-			no_op_warning_threshold: 15,
-			max_coder_revisions: 5,
-			runaway_output_max_turns: 5,
-		};
-
-		const result = GuardrailsConfigSchema.parse(config);
-		expect(result).toEqual(config);
-	});
-
-	it('empty profiles object parses', () => {
-		const config = {
-			enabled: true,
-			block_destructive_commands: true,
-			shell_audit_log: true,
-			max_tool_calls: 200,
-			max_duration_minutes: 30,
-			max_repetitions: 10,
-			max_consecutive_errors: 5,
-			max_transient_retries: 5,
-			warning_threshold: 0.75,
-			idle_timeout_minutes: 60,
-			no_op_warning_threshold: 15,
-			max_coder_revisions: 5,
-			runaway_output_max_turns: 5,
-			profiles: {},
-		};
-
-		const result = GuardrailsConfigSchema.parse(config);
-		expect(result).toEqual(config);
-	});
+	// NOTE: The exhaustive toEqual() fixture tests for this describe block
+	// ('...with profiles field parses', '...without profiles (backward compat)
+	// parses', 'empty profiles object parses') were moved to
+	// guardrails-profile-loop-containment.test.ts to keep this file under the
+	// FR-006 500-line cap. They remain exhaustive there — see that file for the
+	// full config-key enumeration including the issue #2063 loop-containment
+	// defaults (gate_denial_warn_threshold, gate_denial_stop_threshold,
+	// execution_stall_warn_calls, execution_stall_stop_calls,
+	// execution_stall_episode_minutes).
 
 	it('validates profile fields within profiles object', () => {
 		const config = {

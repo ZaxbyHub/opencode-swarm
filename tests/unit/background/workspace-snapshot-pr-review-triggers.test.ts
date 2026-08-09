@@ -2,13 +2,16 @@ import { afterEach, describe, expect, mock, test } from 'bun:test';
 import {
 	_internals,
 	resolveCommitCountSince,
+	resolveCommitCountSinceAsync,
 	resolveCurrentUpstreamPushTarget,
 	resolveCurrentUpstreamRemoteRef,
 	resolveExactMergeBase,
 	resolveExactRemoteBranchHead,
 	resolveGitControlStateDigest,
 	resolveIsExactSingleChildCommit,
+	resolveIsExactSingleChildCommitAsync,
 	resolveIsWorkingTreeClean,
+	resolvePrReviewDiffStats,
 	resolveRemoteRefsContainingHead,
 } from '../../../src/background/workspace-snapshot.js';
 
@@ -33,6 +36,122 @@ describe('PR workflow Git publication observations', () => {
 		expect(resolveExactMergeBase('.', 'origin/main', 'abc123')).toBe('def456');
 		expect(resolveExactMergeBase('.', '--all', 'abc123')).toBeNull();
 		expect(spawn).toHaveBeenCalledTimes(1);
+	});
+
+	test('diff stats sum numstat lines and files for the exact bound range', () => {
+		const spawn = mock((_command, args) => ({
+			status: 0,
+			signal: null,
+			pid: 1,
+			output: [],
+			stdout: args.includes('--numstat')
+				? '10\t2\tsrc/a.ts\n3\t0\tsrc/b.ts\n-\t-\tassets/logo.png\n'
+				: '',
+			stderr: '',
+		}));
+		_internals.spawnSync = spawn as typeof _internals.spawnSync;
+
+		expect(resolvePrReviewDiffStats('.', 'def456', 'abc123')).toEqual({
+			changedLines: 15,
+			changedFiles: 3,
+			hasSubmoduleChange: false,
+		});
+		// Rename detection is pinned off so results do not depend on the
+		// executing machine's ambient git config/version.
+		expect(spawn.mock.calls[0][1]).toContain('--no-renames');
+		// Unsafe revision tokens never reach Git.
+		expect(resolvePrReviewDiffStats('.', '--all', 'abc123')).toBeNull();
+		// Exactly one numstat call plus one raw (gitlink-detection) call for the
+		// single valid invocation above; the unsafe-token invocation never
+		// reaches Git at all.
+		expect(spawn).toHaveBeenCalledTimes(2);
+	});
+
+	test('diff stats detect a submodule (gitlink) pointer change from the raw diff', () => {
+		const spawn = mock((_command, args) => ({
+			status: 0,
+			signal: null,
+			pid: 1,
+			output: [],
+			stdout: args.includes('--numstat')
+				? '1\t1\tvendor/sub\n'
+				: args.includes('--raw')
+					? ':100644 160000 aaaaaaa bbbbbbb M\tvendor/sub\n'
+					: '',
+			stderr: '',
+		}));
+		_internals.spawnSync = spawn as typeof _internals.spawnSync;
+
+		expect(resolvePrReviewDiffStats('.', 'def456', 'abc123')).toEqual({
+			changedLines: 2,
+			changedFiles: 1,
+			hasSubmoduleChange: true,
+		});
+	});
+
+	test('diff stats fail strict to null when the raw gitlink-detection call fails', () => {
+		const spawn = mock((_command, args) => ({
+			status: args.includes('--raw') ? 1 : 0,
+			signal: null,
+			pid: 1,
+			output: [],
+			stdout: args.includes('--numstat') ? '1\t1\tsrc/a.ts\n' : '',
+			stderr: '',
+		}));
+		_internals.spawnSync = spawn as typeof _internals.spawnSync;
+
+		expect(resolvePrReviewDiffStats('.', 'def456', 'abc123')).toBeNull();
+	});
+
+	test('diff stats fail strict to null on git failure or malformed numstat', () => {
+		_internals.spawnSync = mock(() => ({
+			status: 1,
+			signal: null,
+			pid: 1,
+			output: [],
+			stdout: '',
+			stderr: 'fatal: bad revision',
+		})) as typeof _internals.spawnSync;
+		expect(resolvePrReviewDiffStats('.', 'def456', 'abc123')).toBeNull();
+
+		_internals.spawnSync = mock(() => ({
+			status: 0,
+			signal: null,
+			pid: 1,
+			output: [],
+			stdout: 'not-a-numstat-row\n',
+			stderr: '',
+		})) as typeof _internals.spawnSync;
+		expect(resolvePrReviewDiffStats('.', 'def456', 'abc123')).toBeNull();
+	});
+
+	test('diff stats fail strict to null on a spawn/buffer-overflow error', () => {
+		_internals.spawnSync = mock(() => ({
+			status: null,
+			signal: null,
+			pid: 1,
+			output: [],
+			stdout: '',
+			stderr: '',
+			error: new Error('spawnSync git ENOBUFS'),
+		})) as typeof _internals.spawnSync;
+		expect(resolvePrReviewDiffStats('.', 'def456', 'abc123')).toBeNull();
+	});
+
+	test('diff stats return zero totals for an empty diff', () => {
+		_internals.spawnSync = mock(() => ({
+			status: 0,
+			signal: null,
+			pid: 1,
+			output: [],
+			stdout: '',
+			stderr: '',
+		})) as typeof _internals.spawnSync;
+		expect(resolvePrReviewDiffStats('.', 'def456', 'abc123')).toEqual({
+			changedLines: 0,
+			changedFiles: 0,
+			hasSubmoduleChange: false,
+		});
 	});
 
 	test('publication proof accepts only a remote ref whose tip exactly equals HEAD', () => {
@@ -65,6 +184,33 @@ describe('PR workflow Git publication observations', () => {
 		})) as typeof _internals.spawnSync;
 
 		expect(resolveCommitCountSince('.', 'base', 'current')).toBe(1);
+	});
+
+	test('commit count rejects unsafe revision tokens before reaching Git', async () => {
+		const spawn = mock(() => ({
+			status: 0,
+			signal: null,
+			pid: 1,
+			output: [],
+			stdout: '1\n',
+			stderr: '',
+		}));
+		_internals.spawnSync = spawn as typeof _internals.spawnSync;
+
+		expect(resolveCommitCountSince('.', '--upload-pack=evil', 'current')).toBe(
+			null,
+		);
+		expect(resolveCommitCountSince('.', 'base', '--upload-pack=evil')).toBe(
+			null,
+		);
+		expect(spawn).not.toHaveBeenCalled();
+
+		await expect(
+			resolveCommitCountSinceAsync('.', '--upload-pack=evil', 'current'),
+		).resolves.toBeNull();
+		await expect(
+			resolveCommitCountSinceAsync('.', 'base', '--upload-pack=evil'),
+		).resolves.toBeNull();
 	});
 
 	test('clean proof includes tracked, staged, and untracked worktree state', () => {
@@ -124,6 +270,37 @@ describe('PR workflow Git publication observations', () => {
 		}) as typeof _internals.spawnSync;
 
 		expect(resolveIsExactSingleChildCommit('.', 'base', 'current')).toBe(false);
+	});
+
+	test('single-child-commit proof rejects unsafe revision tokens before reaching Git', async () => {
+		const spawn = mock(() => ({
+			status: 0,
+			signal: null,
+			pid: 1,
+			output: [],
+			stdout: 'irrelevant\n',
+			stderr: '',
+		}));
+		_internals.spawnSync = spawn as typeof _internals.spawnSync;
+
+		expect(
+			resolveIsExactSingleChildCommit('.', '--upload-pack=evil', 'current'),
+		).toBe(null);
+		expect(
+			resolveIsExactSingleChildCommit('.', 'base', '--upload-pack=evil'),
+		).toBe(null);
+		expect(spawn).not.toHaveBeenCalled();
+
+		await expect(
+			resolveIsExactSingleChildCommitAsync(
+				'.',
+				'--upload-pack=evil',
+				'current',
+			),
+		).resolves.toBeNull();
+		await expect(
+			resolveIsExactSingleChildCommitAsync('.', 'base', '--upload-pack=evil'),
+		).resolves.toBeNull();
 	});
 });
 

@@ -57,6 +57,7 @@ These are invoked as `/swarm <subcommand>`, NOT as bare `/subcommand`. The list 
 - `/swarm lanes` — list active, awaiting-merge, and conflicted worktree lanes
 - `/swarm sync-plan` — ensure plan.json and plan.md are synced
 - `/swarm benchmark` — show performance metrics `[--cumulative] [--ci-gate] [--max-cost-usd <n>]`
+- `/swarm review` — run the independent review model against a selected Git diff
 - `/swarm costs` — show per-agent and per-task token/cost telemetry `[--json]`
 - `/swarm learning` — show learning metrics and violation trends
 - `/swarm guardrail explain` — dry-run: show what guardrails would do (executes nothing)
@@ -99,6 +100,15 @@ These are invoked as `/swarm <subcommand>`, NOT as bare `/subcommand`. The list 
 - `/swarm link status` — show whether this worktree shares knowledge via a link
 - `/swarm unlink` — stop sharing swarm knowledge for this worktree
 - `/swarm write-retro` — write a retrospective evidence bundle for a completed phase
+- `/swarm skill-opt` — governed single-skill optimizer (plan|run|status|diff|approve|reject|rollback|history); disabled by default (`skill_opt.enabled`)
+- `/swarm skill-opt plan` — propose an optimization round (dry-run; no mutation)
+- `/swarm skill-opt run` — execute the optimization loop (requires `skill_opt.enabled=true` and `--confirm`)
+- `/swarm skill-opt status` — show the current candidate lifecycle state
+- `/swarm skill-opt diff` — show baseline-vs-candidate diff summary for a candidate
+- `/swarm skill-opt approve` — activate a pending candidate (human-only; requires `--expected-content-hash`)
+- `/swarm skill-opt reject` — record a rejection for a candidate (no active-skill mutation)
+- `/swarm skill-opt rollback` — restore the pre-activation snapshot (appends a rolled_back event)
+- `/swarm skill-opt history` — show the append-only lifecycle event log for a candidate
 
 **Architect MODE workflows**
 
@@ -130,6 +140,7 @@ These are invoked as `/swarm <subcommand>`, NOT as bare `/subcommand`. The list 
 - `/swarm pr-review` — launch deep PR review with multi-lane analysis
 - `/swarm pr-feedback` — ingest and close known PR feedback (review comments, CI failures, conflicts)
 - `/swarm abort-pr-workflow` — clear a stuck PR_REVIEW/PR_FEEDBACK mechanical gate and stop the auto-resume loop (human-only escape hatch)
+- `/swarm approve-plan-critic` — record a MANUAL plan-critic approval to unblock the ratchet-tighter critic_pre_plan execution gate when the critic already returned APPROVED but the snapshot was not recorded (human-only escape hatch)
 - `/swarm ci-monitor` — drive an already-reviewed, approved PR to green and merged (monitor CI, fix, merge; max 5 fix cycles)
 - `/swarm pr subscribe` / `/swarm pr-subscribe` — subscribe session to PR state-change notifications
 - `/swarm pr unsubscribe` / `/swarm pr-unsubscribe` — unsubscribe session from PR notifications

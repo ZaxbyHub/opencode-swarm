@@ -109,15 +109,10 @@ describe('FR-102: scope materialization into lane worktrees (SC-105)', () => {
 		const taskId = '1.2';
 		const scopeFiles = ['src/foo.ts', 'src/bar.ts'];
 
-		const result = await provisionWorktree(
-			dirs.hostDir,
-			'lane-42',
-			'sess-abc',
-			{
-				purpose: 'lane',
-				scope: { taskId, files: scopeFiles },
-			},
-		);
+		const result = await provisionWorktree(dirs.hostDir, 'lane-42', 'ses_abc', {
+			purpose: 'lane',
+			scope: { taskId, files: scopeFiles },
+		});
 
 		if ('error' in result) {
 			throw new Error(`provision failed: ${result.error}`);
@@ -141,15 +136,10 @@ describe('FR-102: scope materialization into lane worktrees (SC-105)', () => {
 		const taskId = '1.2';
 		const scopeFiles = ['src/a.ts', 'src/b.ts'];
 
-		const result = await provisionWorktree(
-			dirs.hostDir,
-			'lane-43',
-			'sess-def',
-			{
-				purpose: 'lane',
-				scope: { taskId, files: scopeFiles },
-			},
-		);
+		const result = await provisionWorktree(dirs.hostDir, 'lane-43', 'ses_def', {
+			purpose: 'lane',
+			scope: { taskId, files: scopeFiles },
+		});
 		if ('error' in result) throw new Error(result.error);
 
 		const lanePath = result.worktreePath;
@@ -169,15 +159,10 @@ describe('FR-102: scope materialization into lane worktrees (SC-105)', () => {
 		const taskId = '1.2';
 		const scopeFiles = ['src/x.ts'];
 
-		const result = await provisionWorktree(
-			dirs.hostDir,
-			'lane-44',
-			'sess-ghi',
-			{
-				purpose: 'lane',
-				scope: { taskId, files: scopeFiles },
-			},
-		);
+		const result = await provisionWorktree(dirs.hostDir, 'lane-44', 'ses_ghi', {
+			purpose: 'lane',
+			scope: { taskId, files: scopeFiles },
+		});
 		if ('error' in result) throw new Error(result.error);
 
 		const lanePath = result.worktreePath;
@@ -250,7 +235,7 @@ describe('FR-102: restart-mid-dispatch durability (SC-106)', () => {
 		const provisionResult = await provisionWorktree(
 			dirs.hostDir,
 			'lane-restart',
-			'sess-restart',
+			'ses_restart',
 			{
 				purpose: 'lane',
 				scope: { taskId, files: scopeFiles },

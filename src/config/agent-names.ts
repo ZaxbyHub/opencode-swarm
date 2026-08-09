@@ -10,7 +10,12 @@
  * `import { ALL_AGENT_NAMES } from '../config/constants'` call sites are unchanged.
  */
 
-export const QA_AGENTS = ['reviewer', 'critic', 'critic_oversight'] as const;
+export const QA_AGENTS = [
+	'reviewer',
+	'critic',
+	'critic_oversight',
+	'critic_finding_validator',
+] as const;
 
 export const PIPELINE_AGENTS = ['explorer', 'coder', 'test_engineer'] as const;
 
