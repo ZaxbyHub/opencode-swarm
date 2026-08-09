@@ -1,5 +1,14 @@
 # Changelog
 
+## [7.137.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.137.0...v7.137.1) (2026-08-09)
+
+
+### Bug Fixes
+
+* **evaluation:** bind ephemeral sessions to the project root, not the isolated fixture directory ([4e6205c](https://github.com/ZaxbyHub/opencode-swarm/commit/4e6205c4df2f7f1d11861f9a2f648bbce431d827))
+* **evaluation:** bind ephemeral sessions to the project root, not the isolated fixture directory ([ef36cb5](https://github.com/ZaxbyHub/opencode-swarm/commit/ef36cb503d460c975432c45aaf034a866f4c9e83)), closes [#2009](https://github.com/ZaxbyHub/opencode-swarm/issues/2009)
+* **pr-review:** surface lane contract failures ([ac92b14](https://github.com/ZaxbyHub/opencode-swarm/commit/ac92b14ae7c8446101a1c7c37468781f67f3bffc))
+
 ## [7.137.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.136.5...v7.137.0) (2026-08-09)
 
 
