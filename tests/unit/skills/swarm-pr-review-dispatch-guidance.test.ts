@@ -2,11 +2,21 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
+	CANDIDATE_HEADERS,
+	CLEAN_TEMPLATES,
 	candidateHeaderFamily,
 	splitPipeFields,
 } from '../../../src/background/candidate-contract';
 
 const CANONICAL_SKILL = '.opencode/skills/swarm-pr-review/SKILL.md';
+const PROMPT_TEMPLATES =
+	'.opencode/skills/swarm-pr-review/references/prompt-templates.md';
+const STALE_CLEAN_TEMPLATE = [
+	'[CLEAN]',
+	'workflow_lane',
+	'coverage_scope',
+	'evidence',
+].join(' | ');
 const ADAPTER_SKILLS = [
 	'.agents/skills/swarm-pr-review/SKILL.md',
 	'.claude/skills/swarm-pr-review/SKILL.md',
@@ -61,6 +71,9 @@ describe('swarm-pr-review deterministic async lane dispatch guidance', () => {
 			'## Phase 6: Independent Reviewer Confirmation',
 			'## Phase 7: Falsification Probe Requirement',
 		);
+		const councilSection = source.slice(
+			source.indexOf('# Council Mode Workflow'),
+		);
 
 		expect(phase3Section).toContain('dispatch_lanes_async');
 		expect(phase3Section).toContain('collect_lane_results');
@@ -77,8 +90,16 @@ describe('swarm-pr-review deterministic async lane dispatch guidance', () => {
 			'A low-quality partial review is worse than no review',
 		);
 		expect(phase3Section).toContain(
-			'[CLEAN] | workflow_lane | coverage_scope | evidence',
+			'[CLEAN] | lane | coverage_scope | evidence',
 		);
+		expect(phase3Section).toContain('collection reports `status: failed`');
+		expect(phase3Section).toContain(
+			'retaining the non-empty preview, digest, and `output_ref`',
+		);
+		expect(phase3Section).not.toContain(
+			'Lane reports `status: completed` with non-empty output',
+		);
+		expect(phase3Section).not.toContain(STALE_CLEAN_TEMPLATE);
 		expect(phase3Section).toContain('Header-only `[CLEAN]` markers');
 		expect(phase3Section).toContain('UNVERIFIED');
 		expect(phase3Section).toContain('dispatch_lanes');
@@ -105,6 +126,7 @@ describe('swarm-pr-review deterministic async lane dispatch guidance', () => {
 		expect(source).toContain(
 			'The confidence data value must be exactly LOW, MEDIUM, or HIGH.',
 		);
+		expect(source).not.toContain(STALE_CLEAN_TEMPLATE);
 		// Depth tiers scale dispatch shape (never dimension coverage) on
 		// profiles without the controller.
 		expect(phase3Section).toContain('### Review depth tiers');
@@ -186,6 +208,13 @@ describe('swarm-pr-review deterministic async lane dispatch guidance', () => {
 			'blocking, sequential, or direct-Task fallback is not equivalent',
 		);
 		expect(source).toContain('mode: "swarm-pr-review:council"');
+		expect(councilSection).toContain(
+			'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence',
+		);
+		expect(councilSection).toContain(CLEAN_TEMPLATES.micro_lane);
+		expect(councilSection).toContain(
+			'exact council `workflow_lane` value in the `micro_lane` data field',
+		);
 		expect(source).toContain('runtime enforces this join barrier');
 		expect(source).toContain(
 			'Council prose without one of those markers does not settle the lane',
@@ -221,6 +250,15 @@ describe('swarm-pr-review deterministic async lane dispatch guidance', () => {
 		);
 	});
 
+	test('canonical prompt templates use the runtime-owned CLEAN field names', () => {
+		const source = readSkill(PROMPT_TEMPLATES);
+		expect(source).toContain(CANDIDATE_HEADERS.base_explorer);
+		expect(source).toContain(CANDIDATE_HEADERS.micro_lane);
+		expect(source).toContain(CLEAN_TEMPLATES.base_explorer);
+		expect(source).toContain(CLEAN_TEMPLATES.micro_lane);
+		expect(source).not.toContain(STALE_CLEAN_TEMPLATE);
+	});
+
 	for (const skillPath of ADAPTER_SKILLS) {
 		test(`${skillPath} stays a thin adapter to the canonical .opencode skill`, () => {
 			const source = readSkill(skillPath);
@@ -238,6 +276,9 @@ describe('swarm-pr-review deterministic async lane dispatch guidance', () => {
 			expect(source).toContain('BLOCKED');
 			expect(source).toContain('degraded review');
 			expect(source).toContain('output_ref');
+			expect(source).toContain(CLEAN_TEMPLATES.base_explorer);
+			expect(source).toContain(CLEAN_TEMPLATES.micro_lane);
+			expect(source).not.toContain(STALE_CLEAN_TEMPLATE);
 			expect(source).not.toContain('## Phase 0A:');
 			expect(source).not.toContain('## Phase 0B:');
 			expect(source).not.toContain(
@@ -286,5 +327,30 @@ describe('swarm-pr-review deterministic async lane dispatch guidance', () => {
 		expect(source).toContain(
 			'Only if this session actually exposes the swarm controller tools',
 		);
+	});
+
+	test('canonical Profile A guidance diagnoses contract failures without bypass or hindsight', () => {
+		const source = readSkill(CANONICAL_SKILL);
+		const phase3Section = sectionBetween(
+			source,
+			'## Phase 3: Parallel Base Explorer Lanes',
+			'## Phase 4: Mandatory Repository-Agnostic Micro-Lanes',
+		);
+		const compact = phase3Section.replace(/\s+/g, ' ');
+
+		expect(compact).toContain('### Contract-failure diagnosis and recovery');
+		expect(compact).toContain('controller-appended row contract');
+		expect(compact).toContain('Do not duplicate that contract');
+		expect(compact).toContain('isolate the emitting validator');
+		expect(compact).toContain('minimal correct single-lane reproduction');
+		expect(compact).toContain('header schema');
+		expect(compact).toContain('data-row values');
+		expect(compact).toContain('tool argument shape');
+		expect(compact).toContain('actual user-visible harm');
+		expect(compact).toContain('post-hoc fallback');
+		expect(compact).toContain('shared row parser');
+		expect(compact).toContain('durable provenance');
+		expect(compact).toContain('opacity defect');
+		expect(compact).toContain('not proof that correct input was rejected');
 	});
 });

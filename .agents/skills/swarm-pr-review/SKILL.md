@@ -9,7 +9,6 @@ description: >
   validation, critic challenge, and the explicit handoff into
   swarm-pr-feedback for approved fix work.
 ---
-
 # Swarm PR Review
 Read and follow `../../../.opencode/skills/swarm-pr-review/SKILL.md` as the canonical workflow.
 ## Codex Execution Notes
@@ -40,9 +39,10 @@ Read and follow `../../../.opencode/skills/swarm-pr-review/SKILL.md` as the cano
   record with its workflow-lane id and exact-head provenance (the bound
   `pr_head_sha`); persist findings and trigger ledgers in working notes,
   never under `.swarm/`.
-- Clean lanes still require a fully populated row, such as
-  `[CLEAN] | workflow_lane | coverage_scope | evidence`; a missing attestation
-  is a coverage gap — retry it or surface BLOCKED, never a degraded review.
+- Clean lanes still require a fully populated row: base lanes use
+  `[CLEAN] | lane | coverage_scope | evidence`; micro and council lanes use
+  `[CLEAN] | micro_lane | coverage_scope | evidence`. A missing attestation is
+  a coverage gap — retry it or surface BLOCKED, never a degraded review.
 - When a lane result includes an `output_ref`, retrieve the full text before
   extracting candidates; degraded or truncated output is a coverage gap.
 - Reviewer and critic verdicts compose per item across passes: a reviewer retry

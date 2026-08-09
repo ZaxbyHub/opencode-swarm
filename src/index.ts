@@ -2724,18 +2724,19 @@ async function initializeOpenCodeSwarm(
 			//
 			// Regression test: tests/unit/hooks/hook-composition.test.ts
 			// static-analysis block reads THIS file and asserts raw `await` for
-			// guardrailsHooks, scopeGuardHook, delegationGateHooks, the PR-workflow
-			// enforcement pair (prWorkflowSessionResolver.resolve +
-			// enforcePrWorkflowToolBefore), and both Full-Auto hooks. It does NOT
+			// guardrailsHooks, scopeGuardHook, the PR-workflow enforcement pair
+			// (prWorkflowSessionResolver.resolve + enforcePrWorkflowToolBefore),
+			// delegationGateHooks, and both Full-Auto hooks. It also pins that order.
+			// It does NOT
 			// yet cover knowledgeApplicationGateBefore or skillPropagationGateBefore
 			// — those two callsites are unpinned, so do not assume a safeHook
 			// regression on them would be caught by that test.
 			// ---------------------------------------------------------------
 
 			// B1 (#2063): everything below runs inside a try/catch so a fail-closed
-			// denial can be COUNTED and DECORATED before it propagates. The chain
-			// order, the raw awaits, and the rethrow semantics are unchanged — the
-			// catch always rethrows the SAME object it caught.
+			// denial can be COUNTED and DECORATED before it propagates. The raw awaits
+			// and rethrow semantics are unchanged — the catch always rethrows the SAME
+			// object it caught. The intentional chain order is documented below.
 			let failClosedRegionCompleted = false;
 			try {
 				// 1. Guardrails authority enforcement (FAIL-CLOSED).
@@ -2746,14 +2747,12 @@ async function initializeOpenCodeSwarm(
 				//    Blocks out-of-scope writes by non-architect agents.
 				await scopeGuardHook.toolBefore(input, output);
 
-				// 3. Reviewer gate (FAIL-CLOSED).
-				//    Blocks coder re-delegation when the prior reviewer round
-				//    has not produced an explicit pass/decision.
-				await delegationGateHooks.toolBefore(input, output);
-
-				// 4. PR workflow obligation gate (FAIL-CLOSED).
-				//    Prevents review/feedback mutation or validation transitions until
-				//    their durable lane and trigger obligations are satisfied.
+				// 3. PR workflow obligation gate (FAIL-CLOSED).
+				//    This mode-specific authority runs before the generic delegation gate
+				//    so an active PR_REVIEW direct Task receives the actionable structured-
+				//    dispatch denial before generic delegation processing can validate its
+				//    prompt or publish delegation, scope, or background state. Guardrails and
+				//    scope-guard remain first.
 				const prWorkflowControllerSessionID =
 					await prWorkflowSessionResolver.resolve(input.sessionID);
 				const prWorkflowToolContext = resolveToolBeforeContext(
@@ -2767,6 +2766,11 @@ async function initializeOpenCodeSwarm(
 					prWorkflowToolContext.args ?? undefined,
 					instanceGeneratedAgentNames,
 				);
+
+				// 4. Reviewer/delegation gate (FAIL-CLOSED).
+				//    Enforces acceptance, scope preflight, and coder re-delegation only
+				//    after an active PR workflow has admitted the requested operation.
+				await delegationGateHooks.toolBefore(input, output);
 
 				// 5. Full-Auto v2 outbound delegation guard (FAIL-CLOSED).
 				//    Throws FULL_AUTO_DELEGATION_DENY on disallowed Task
@@ -3598,6 +3602,8 @@ export type {
 } from './config';
 export { loadTier1EvaluationTasks } from './evaluation/fixtures.js';
 export { recordTestImpactGateGroundTruth } from './evaluation/gate-ground-truth.js';
+export type { EvaluatePrReviewRecoveryV1Options } from './evaluation/pr-review-recovery.js';
+export { evaluatePrReviewRecoveryV1 } from './evaluation/pr-review-recovery.js';
 export type {
 	EvaluateCandidateV1Options,
 	EvaluateCandidateV1Result,

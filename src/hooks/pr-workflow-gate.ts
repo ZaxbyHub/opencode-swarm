@@ -5,6 +5,8 @@ import * as path from 'node:path';
 import { z } from 'zod';
 import {
 	analyzeCandidateFields,
+	CANDIDATE_HEADERS,
+	CLEAN_TEMPLATES,
 	candidateHeaderFamily,
 	type RowFormatFamily,
 	removeCandidateCodeFences,
@@ -12,8 +14,13 @@ import {
 	splitPipeFields,
 } from '../background/candidate-contract.js';
 import { parseCandidates } from '../background/candidate-parser.js';
-import { readLaneOutput } from '../background/lane-output-store.js';
 import {
+	type LaneOutputArtifact,
+	readLaneOutput,
+} from '../background/lane-output-store.js';
+import {
+	type BackgroundDelegationRecord,
+	type BackgroundDelegationResult,
 	findByBatchId,
 	readDelegations,
 } from '../background/pending-delegations.js';
@@ -74,6 +81,77 @@ export const PR_REVIEW_REQUIRED_MICRO_LANE_IDS = PR_REVIEW_REQUIRED_TRIGGER_IDS;
 export type PrReviewBaseDimensionId =
 	(typeof PR_REVIEW_BASE_DIMENSION_IDS)[number];
 export type PrWorkflowMode = 'PR_REVIEW' | 'PR_FEEDBACK';
+
+export type PrReviewLaneValidationPredicate =
+	| 'batch.validated_at'
+	| 'batch.expected_lane_unique'
+	| 'record.missing'
+	| 'record.duplicate_lane'
+	| 'record.subagent_session_id'
+	| 'record.duplicate_subagent_session_id'
+	| 'record.forbidden_subagent_session_id'
+	| 'record.created_at'
+	| 'record.workflow_lane'
+	| 'record.owned_workflow_lanes'
+	| 'record.mode'
+	| 'record.pr_head_sha'
+	| 'record.git_head'
+	| 'record.status'
+	| 'result.output_degraded'
+	| 'result.transcript_incomplete'
+	| 'result.truncated'
+	| 'result.chars'
+	| 'result.digest'
+	| 'result.output_ref'
+	| 'artifact.readable'
+	| 'artifact.ref'
+	| 'artifact.batch_id'
+	| 'artifact.lane_id'
+	| 'artifact.mode'
+	| 'artifact.session_id'
+	| 'artifact.parent_session_id'
+	| 'artifact.agent'
+	| 'artifact.role'
+	| 'artifact.source'
+	| 'artifact.workflow_lane_record'
+	| 'artifact.workflow_lane_expected'
+	| 'artifact.pr_head_sha'
+	| 'artifact.git_head'
+	| 'artifact.revision_digest'
+	| 'record.scope'
+	| 'artifact.scope'
+	| 'artifact.digest'
+	| 'artifact.chars'
+	| 'discovery.header'
+	| 'discovery.row'
+	| 'discovery.coverage'
+	| 'discovery.duplicate_evidence';
+
+export interface PrReviewLaneValidationFailure {
+	predicate: PrReviewLaneValidationPredicate;
+	expected: string;
+	actual: string;
+}
+
+export type PrReviewLaneValidationResult =
+	| { ok: true }
+	| { ok: false; failure: PrReviewLaneValidationFailure };
+
+export interface PrReviewDiscoveryLaneValidationInput {
+	record: BackgroundDelegationRecord;
+	result: BackgroundDelegationResult;
+	artifact: LaneOutputArtifact | null;
+	expected: {
+		mode: 'swarm-pr-review:base' | 'swarm-pr-review:micro';
+		workflowLane: string;
+		ownedWorkflowLanes?: readonly string[];
+		prHeadSha: string;
+		gitHead: string;
+		revisionDigest: string;
+		reviewScope?: string;
+		checkWorkflowLane?: boolean;
+	};
+}
 
 export interface PrWorkflowCheckoutRecoveryRecord {
 	code:
@@ -495,6 +573,7 @@ const CHECKOUT_MUTATION_ACTION_TIMEOUT_MS = 5 * 60_000;
 const MAX_CANDIDATE_ISSUES_PER_ARTIFACT = 8;
 const MAX_BASE_COVERAGE_DIAGNOSTICS = 8;
 const MAX_BASE_COVERAGE_DIAGNOSTIC_CHARS = 1_000;
+const MAX_LANE_VALIDATION_VALUE_CHARS = 240;
 const DISPATCH_TOOL_NAME = 'dispatch_lanes_async';
 const BLOCKING_DISPATCH_TOOL_NAME = 'dispatch_lanes';
 const WORKFLOW_GATE_DIR = 'pr-workflow-gates';
@@ -2257,9 +2336,9 @@ export async function assertPrReviewBaseCoverageSettled(
 		throw new Error(
 			`BLOCKED: PR_REVIEW base coverage is incomplete; missing dimensions: ${missing.join(', ') || '(none)'}${
 				malformedDiagnostics.length > 0
-					? `; malformed candidate diagnostics: ${malformedDiagnostics.join(' | ')}`
+					? `; first failed lane predicates: ${malformedDiagnostics.join(' | ')}`
 					: ''
-			}`,
+			}; valid dimensions: ${PR_REVIEW_BASE_DIMENSION_IDS.join(', ')}; expected candidate row: ${CANDIDATE_HEADERS.base_explorer}; expected clean row: ${CLEAN_TEMPLATES.base_explorer}`,
 		);
 	}
 	return state;
@@ -4891,6 +4970,7 @@ export async function completePrWorkflow(
 
 export const _test_exports = {
 	minimumConsolidatedLaneCover,
+	analyzePrReviewBatchRecordIntegrity,
 	MAX_COVER_UNIVERSE_BITS,
 	workflowGateStateRelativePath,
 	workflowGateStateLockRelativePath,
@@ -7192,6 +7272,294 @@ interface QualifiedBatchRecord {
 	expectedOwnedLanes: string[];
 }
 
+type BatchRecordIntegrityAnalysis =
+	| ({ ok: true } & QualifiedBatchRecord)
+	| {
+			ok: false;
+			expectedLane: ExpectedWorkflowLane;
+			expectedWorkflowLane: string;
+			expectedOwnedLanes: string[];
+			failure: PrReviewLaneValidationFailure;
+	  };
+
+function boundedLaneValidationValue(value: unknown): string {
+	let rendered: string;
+	try {
+		rendered = typeof value === 'string' ? value : JSON.stringify(value);
+	} catch {
+		rendered = String(value);
+	}
+	const sanitized = [...(rendered ?? String(value))]
+		.map((character) => {
+			const code = character.charCodeAt(0);
+			return code <= 31 || code === 127 ? ' ' : character;
+		})
+		.join('')
+		.trim();
+	return sanitized.length <= MAX_LANE_VALIDATION_VALUE_CHARS
+		? sanitized
+		: `${sanitized.slice(0, MAX_LANE_VALIDATION_VALUE_CHARS - 1)}…`;
+}
+
+function failedLaneValidation(
+	predicate: PrReviewLaneValidationPredicate,
+	expected: unknown,
+	actual: unknown,
+): { ok: false; failure: PrReviewLaneValidationFailure } {
+	return {
+		ok: false,
+		failure: {
+			predicate,
+			expected: boundedLaneValidationValue(expected),
+			actual: boundedLaneValidationValue(actual),
+		},
+	};
+}
+
+export function formatPrReviewLaneValidationFailure(
+	failure: PrReviewLaneValidationFailure,
+): string {
+	return `predicate=${failure.predicate} expected=${JSON.stringify(failure.expected)} actual=${JSON.stringify(failure.actual)}`.slice(
+		0,
+		MAX_BASE_COVERAGE_DIAGNOSTIC_CHARS,
+	);
+}
+
+interface LaneRecordResultExpected {
+	mode: string;
+	workflowLane: string;
+	ownedWorkflowLanes: readonly string[];
+	prHeadSha: string;
+	gitHead: string;
+	checkWorkflowLane: boolean;
+}
+
+function analyzeLaneRecordResultIntegrity(args: {
+	record: BackgroundDelegationRecord;
+	result: BackgroundDelegationResult | undefined;
+	expected: LaneRecordResultExpected;
+	requireCompleted: boolean;
+}): PrReviewLaneValidationResult {
+	const { record, result, expected } = args;
+	if (
+		expected.checkWorkflowLane &&
+		record.workflowLane !== expected.workflowLane
+	) {
+		return failedLaneValidation(
+			'record.workflow_lane',
+			expected.workflowLane,
+			record.workflowLane ?? '(missing)',
+		);
+	}
+	if (
+		expected.checkWorkflowLane &&
+		!ownedLaneSetsEqual(record.ownedWorkflowLanes, expected.ownedWorkflowLanes)
+	) {
+		return failedLaneValidation(
+			'record.owned_workflow_lanes',
+			expected.ownedWorkflowLanes,
+			record.ownedWorkflowLanes ??
+				(record.workflowLane ? [record.workflowLane] : []),
+		);
+	}
+	if (record.mode !== expected.mode) {
+		return failedLaneValidation(
+			'record.mode',
+			expected.mode,
+			record.mode ?? '(missing)',
+		);
+	}
+	if (record.workspace?.prHeadSha !== expected.prHeadSha) {
+		return failedLaneValidation(
+			'record.pr_head_sha',
+			expected.prHeadSha,
+			record.workspace?.prHeadSha ?? '(missing)',
+		);
+	}
+	if (record.workspace?.gitHead !== expected.gitHead) {
+		return failedLaneValidation(
+			'record.git_head',
+			expected.gitHead,
+			record.workspace?.gitHead ?? '(missing)',
+		);
+	}
+	if (args.requireCompleted && record.status !== 'completed') {
+		return failedLaneValidation('record.status', 'completed', record.status);
+	}
+	if (result?.outputDegraded === true) {
+		return failedLaneValidation('result.output_degraded', 'not true', true);
+	}
+	if (result?.transcriptIncomplete === true) {
+		return failedLaneValidation(
+			'result.transcript_incomplete',
+			'not true',
+			true,
+		);
+	}
+	if (result?.truncated === true) {
+		return failedLaneValidation('result.truncated', 'not true', true);
+	}
+	if ((result?.chars ?? 0) <= 0) {
+		return failedLaneValidation(
+			'result.chars',
+			'greater than 0',
+			result?.chars ?? 0,
+		);
+	}
+	if (!result?.digest?.trim()) {
+		return failedLaneValidation(
+			'result.digest',
+			'non-empty digest',
+			result?.digest ?? '(missing)',
+		);
+	}
+	if (!result?.outputRef?.trim()) {
+		return failedLaneValidation(
+			'result.output_ref',
+			'non-empty output ref',
+			result?.outputRef ?? '(missing)',
+		);
+	}
+	return { ok: true };
+}
+
+function analyzePrReviewBatchRecordIntegrity(args: {
+	batchId: string;
+	expectedLanes: ReadonlyArray<ExpectedWorkflowLane>;
+	expectedMode: string;
+	validatedAt: string;
+	checkWorkflowLane: boolean;
+	forbiddenSubagentSessionIds: ReadonlySet<string>;
+	records: readonly BackgroundDelegationRecord[];
+	expectedPrHeadSha?: string;
+}): BatchRecordIntegrityAnalysis[] {
+	const validatedAtMs = Date.parse(args.validatedAt);
+	const expectedByLaneId = new Map(
+		args.expectedLanes.map((lane) => [lane.laneId, lane]),
+	);
+	const batchFailure = !Number.isFinite(validatedAtMs)
+		? failedLaneValidation(
+				'batch.validated_at',
+				'valid ISO timestamp',
+				args.validatedAt,
+			)
+		: expectedByLaneId.size !== args.expectedLanes.length
+			? failedLaneValidation(
+					'batch.expected_lane_unique',
+					'unique expected lane ids',
+					args.expectedLanes.map((lane) => lane.laneId),
+				)
+			: null;
+	const relevantRecords = args.records.filter(
+		(record) => record.laneId && expectedByLaneId.has(record.laneId),
+	);
+	const recordsByLaneId = new Map<string, BackgroundDelegationRecord[]>();
+	const recordCountBySubagentSessionId = new Map<string, number>();
+	for (const record of relevantRecords) {
+		const laneRecords = recordsByLaneId.get(record.laneId!) ?? [];
+		laneRecords.push(record);
+		recordsByLaneId.set(record.laneId!, laneRecords);
+		const sessionId = record.subagentSessionId?.trim();
+		if (sessionId) {
+			recordCountBySubagentSessionId.set(
+				sessionId,
+				(recordCountBySubagentSessionId.get(sessionId) ?? 0) + 1,
+			);
+		}
+	}
+
+	return args.expectedLanes.map((expectedLane) => {
+		const expectedWorkflowLane = expectedLane.workflowLane;
+		const expectedOwnedLanes = expectedLane.ownedWorkflowLanes?.length
+			? expectedLane.ownedWorkflowLanes
+			: [expectedWorkflowLane];
+		const failed = (
+			failure: PrReviewLaneValidationFailure,
+		): BatchRecordIntegrityAnalysis => ({
+			ok: false,
+			expectedLane,
+			expectedWorkflowLane,
+			expectedOwnedLanes,
+			failure,
+		});
+		if (batchFailure && !batchFailure.ok) return failed(batchFailure.failure);
+		const laneRecords = recordsByLaneId.get(expectedLane.laneId) ?? [];
+		if (laneRecords.length === 0) {
+			return failed(
+				failedLaneValidation('record.missing', 'exactly one record', 0).failure,
+			);
+		}
+		if (laneRecords.length !== 1) {
+			return failed(
+				failedLaneValidation(
+					'record.duplicate_lane',
+					'exactly one record',
+					laneRecords.length,
+				).failure,
+			);
+		}
+		const record = laneRecords[0];
+		const subagentSessionId = record.subagentSessionId?.trim();
+		if (!subagentSessionId) {
+			return failed(
+				failedLaneValidation(
+					'record.subagent_session_id',
+					'non-empty child session id',
+					record.subagentSessionId ?? '(missing)',
+				).failure,
+			);
+		}
+		if (recordCountBySubagentSessionId.get(subagentSessionId) !== 1) {
+			return failed(
+				failedLaneValidation(
+					'record.duplicate_subagent_session_id',
+					'one record per child session',
+					recordCountBySubagentSessionId.get(subagentSessionId),
+				).failure,
+			);
+		}
+		if (args.forbiddenSubagentSessionIds.has(subagentSessionId)) {
+			return failed(
+				failedLaneValidation(
+					'record.forbidden_subagent_session_id',
+					'child session not reused from a forbidden phase',
+					subagentSessionId,
+				).failure,
+			);
+		}
+		if (record.createdAt < validatedAtMs) {
+			return failed(
+				failedLaneValidation(
+					'record.created_at',
+					`at or after ${args.validatedAt}`,
+					new Date(record.createdAt).toISOString(),
+				).failure,
+			);
+		}
+		const recordIntegrity = analyzeLaneRecordResultIntegrity({
+			record,
+			result: record.result,
+			expected: {
+				mode: args.expectedMode,
+				workflowLane: expectedWorkflowLane,
+				ownedWorkflowLanes: expectedOwnedLanes,
+				prHeadSha: args.expectedPrHeadSha ?? record.workspace?.prHeadSha ?? '',
+				gitHead: args.expectedPrHeadSha ?? record.workspace?.gitHead ?? '',
+				checkWorkflowLane: args.checkWorkflowLane,
+			},
+			requireCompleted: true,
+		});
+		if (!recordIntegrity.ok) return failed(recordIntegrity.failure);
+		return {
+			ok: true,
+			record,
+			expectedLane,
+			expectedWorkflowLane,
+			expectedOwnedLanes,
+		};
+	});
+}
+
 /**
  * Every record of a batch that passes the record-level integrity chain: exactly
  * one record per declared lane, exactly one record per child session, no reuse
@@ -7211,77 +7579,41 @@ function recordsPassingBatchIntegrity(
 	validatedAt: string,
 	checkWorkflowLane = true,
 	forbiddenSubagentSessionIds: ReadonlySet<string> = new Set(),
+	diagnostics?: string[],
 ): QualifiedBatchRecord[] {
-	const qualified: QualifiedBatchRecord[] = [];
-	const validatedAtMs = Date.parse(validatedAt);
-	if (!Number.isFinite(validatedAtMs)) return qualified;
-	const expectedByLaneId = new Map(
-		expectedLanes.map((lane) => [lane.laneId, lane]),
-	);
-	if (expectedByLaneId.size !== expectedLanes.length) return qualified;
 	const records = findByBatchId(directory, batchId, {
 		parentSessionId: state.sessionID,
 	});
-	const recordCountByLaneId = new Map<string, number>();
-	const recordCountBySubagentSessionId = new Map<string, number>();
-	for (const record of records) {
-		if (!record.laneId || !expectedByLaneId.has(record.laneId)) continue;
-		recordCountByLaneId.set(
-			record.laneId,
-			(recordCountByLaneId.get(record.laneId) ?? 0) + 1,
-		);
-		const subagentSessionId = record.subagentSessionId?.trim();
-		if (subagentSessionId) {
-			recordCountBySubagentSessionId.set(
-				subagentSessionId,
-				(recordCountBySubagentSessionId.get(subagentSessionId) ?? 0) + 1,
+	const analyses = analyzePrReviewBatchRecordIntegrity({
+		batchId,
+		expectedLanes,
+		expectedMode,
+		validatedAt,
+		checkWorkflowLane,
+		forbiddenSubagentSessionIds,
+		records,
+		expectedPrHeadSha: state.prHeadSha,
+	});
+	for (const analysis of analyses) {
+		if (
+			!analysis.ok &&
+			diagnostics &&
+			diagnostics.length < MAX_BASE_COVERAGE_DIAGNOSTICS
+		) {
+			diagnostics.push(
+				`batch=${batchId} lane=${analysis.expectedLane.laneId} workflow_lane=${analysis.expectedWorkflowLane}: ${formatPrReviewLaneValidationFailure(analysis.failure)}`.slice(
+					0,
+					MAX_BASE_COVERAGE_DIAGNOSTIC_CHARS,
+				),
 			);
 		}
 	}
-	for (const record of records) {
-		const expectedLane = record.laneId
-			? expectedByLaneId.get(record.laneId)
-			: undefined;
-		const expectedWorkflowLane = expectedLane?.workflowLane;
-		const expectedOwnedLanes = expectedLane?.ownedWorkflowLanes?.length
-			? expectedLane.ownedWorkflowLanes
-			: expectedWorkflowLane !== undefined
-				? [expectedWorkflowLane]
-				: undefined;
-		const subagentSessionId = record.subagentSessionId?.trim();
-		if (
-			expectedLane !== undefined &&
-			expectedWorkflowLane !== undefined &&
-			expectedOwnedLanes !== undefined &&
-			record.laneId !== undefined &&
-			recordCountByLaneId.get(record.laneId) === 1 &&
-			Boolean(subagentSessionId) &&
-			recordCountBySubagentSessionId.get(subagentSessionId!) === 1 &&
-			!forbiddenSubagentSessionIds.has(subagentSessionId!) &&
-			record.createdAt >= validatedAtMs &&
-			(!checkWorkflowLane || record.workflowLane === expectedWorkflowLane) &&
-			(!checkWorkflowLane ||
-				ownedLaneSetsEqual(record.ownedWorkflowLanes, expectedOwnedLanes)) &&
-			record.mode === expectedMode &&
-			record.workspace?.prHeadSha === state.prHeadSha &&
-			record.workspace?.gitHead === state.prHeadSha &&
-			record.status === 'completed' &&
-			record.result?.outputDegraded !== true &&
-			record.result?.transcriptIncomplete !== true &&
-			record.result?.truncated !== true &&
-			(record.result?.chars ?? 0) > 0 &&
-			Boolean(record.result?.digest?.trim()) &&
-			Boolean(record.result?.outputRef?.trim())
-		) {
-			qualified.push({
-				record,
-				expectedLane,
-				expectedWorkflowLane,
-				expectedOwnedLanes,
-			});
-		}
-	}
-	return qualified;
+	return analyses.filter(
+		(
+			analysis,
+		): analysis is Extract<BatchRecordIntegrityAnalysis, { ok: true }> =>
+			analysis.ok,
+	);
 }
 
 function successfulObligationsFromExactBatch(
@@ -7307,6 +7639,7 @@ function successfulObligationsFromExactBatch(
 		validatedAt,
 		checkWorkflowLane,
 		forbiddenSubagentSessionIds,
+		diagnostics,
 	)) {
 		if (
 			workflowArtifactHasContractMarker(
@@ -7358,7 +7691,159 @@ function ownedLaneSetsEqual(
 	return recordOwned.every((owned) => expectedSet.has(owned));
 }
 
-type LaneArtifact = NonNullable<ReturnType<typeof readLaneOutput>>['artifact'];
+interface LaneArtifactExpected {
+	mode: string;
+	workflowLane: string;
+	prHeadSha: string;
+	gitHead: string;
+	revisionDigest: string;
+	reviewScope?: string;
+}
+
+function analyzeLaneArtifactIntegrity(args: {
+	record: BackgroundDelegationRecord;
+	result: BackgroundDelegationResult;
+	artifact: LaneOutputArtifact | null;
+	expected: LaneArtifactExpected;
+}): PrReviewLaneValidationResult {
+	const { record, result, artifact, expected } = args;
+	if (!artifact) {
+		return failedLaneValidation(
+			'artifact.readable',
+			'readable stored artifact',
+			'missing or invalid',
+		);
+	}
+	if (artifact.ref !== result.outputRef?.trim()) {
+		return failedLaneValidation(
+			'artifact.ref',
+			result.outputRef?.trim() ?? '(missing)',
+			artifact.ref,
+		);
+	}
+	if (artifact.batchId !== record.batchId) {
+		return failedLaneValidation(
+			'artifact.batch_id',
+			record.batchId ?? '(missing)',
+			artifact.batchId,
+		);
+	}
+	if (artifact.laneId !== record.laneId) {
+		return failedLaneValidation(
+			'artifact.lane_id',
+			record.laneId ?? '(missing)',
+			artifact.laneId,
+		);
+	}
+	if (artifact.mode !== expected.mode) {
+		return failedLaneValidation(
+			'artifact.mode',
+			expected.mode,
+			artifact.mode ?? '(missing)',
+		);
+	}
+	if (artifact.sessionId !== record.subagentSessionId) {
+		return failedLaneValidation(
+			'artifact.session_id',
+			record.subagentSessionId,
+			artifact.sessionId ?? '(missing)',
+		);
+	}
+	if (artifact.parentSessionId !== record.parentSessionId) {
+		return failedLaneValidation(
+			'artifact.parent_session_id',
+			record.parentSessionId,
+			artifact.parentSessionId ?? '(missing)',
+		);
+	}
+	if (artifact.agent !== record.swarmPrefixedAgent) {
+		return failedLaneValidation(
+			'artifact.agent',
+			record.swarmPrefixedAgent,
+			artifact.agent,
+		);
+	}
+	if (artifact.role !== record.normalizedAgent) {
+		return failedLaneValidation(
+			'artifact.role',
+			record.normalizedAgent,
+			artifact.role,
+		);
+	}
+	if (artifact.source !== 'collect_lane_results') {
+		return failedLaneValidation(
+			'artifact.source',
+			'collect_lane_results',
+			artifact.source,
+		);
+	}
+	if (artifact.workflowLane !== record.workflowLane) {
+		return failedLaneValidation(
+			'artifact.workflow_lane_record',
+			record.workflowLane ?? '(missing)',
+			artifact.workflowLane ?? '(missing)',
+		);
+	}
+	if (artifact.workflowLane !== expected.workflowLane) {
+		return failedLaneValidation(
+			'artifact.workflow_lane_expected',
+			expected.workflowLane,
+			artifact.workflowLane ?? '(missing)',
+		);
+	}
+	if (artifact.prHeadSha !== expected.prHeadSha) {
+		return failedLaneValidation(
+			'artifact.pr_head_sha',
+			expected.prHeadSha,
+			artifact.prHeadSha ?? '(missing)',
+		);
+	}
+	if (artifact.gitHead !== expected.gitHead) {
+		return failedLaneValidation(
+			'artifact.git_head',
+			expected.gitHead,
+			artifact.gitHead ?? '(missing)',
+		);
+	}
+	if (artifact.revisionDigest !== expected.revisionDigest) {
+		return failedLaneValidation(
+			'artifact.revision_digest',
+			expected.revisionDigest,
+			artifact.revisionDigest ?? '(missing)',
+		);
+	}
+	if (
+		expected.reviewScope !== undefined &&
+		record.workspace?.scope !== expected.reviewScope
+	) {
+		return failedLaneValidation(
+			'record.scope',
+			expected.reviewScope,
+			record.workspace?.scope ?? '(missing)',
+		);
+	}
+	if (
+		expected.reviewScope !== undefined &&
+		artifact.scope !== expected.reviewScope
+	) {
+		return failedLaneValidation(
+			'artifact.scope',
+			expected.reviewScope,
+			artifact.scope ?? '(missing)',
+		);
+	}
+	if (artifact.digest !== result.digest) {
+		return failedLaneValidation(
+			'artifact.digest',
+			result.digest,
+			artifact.digest,
+		);
+	}
+	if (artifact.chars !== result.chars) {
+		return failedLaneValidation('artifact.chars', result.chars, artifact.chars);
+	}
+	return { ok: true };
+}
 
 /**
  * The mode-independent half of the contract-marker check: load the lane artifact
@@ -7385,41 +7870,38 @@ function loadArtifactPassingLaneIntegrity(
 	expectedMode: string,
 	expectedWorkflowLane: string,
 	expectedRevisionDigest: string,
-): LaneArtifact | null {
+	diagnostics?: string[],
+): LaneOutputArtifact | null {
 	const ref = record.result?.outputRef?.trim();
 	if (!ref) return null;
 	const loaded = readLaneOutput(directory, ref);
-	if (!loaded) return null;
-	const artifact = loaded.artifact;
-	const recordPrHeadSha = record.workspace?.prHeadSha;
-	const recordGitHead = record.workspace?.gitHead;
+	const artifact = loaded?.artifact ?? null;
 	const expectedReviewScope =
 		state.mode === 'PR_REVIEW' && state.prReviewBaseSha && state.prHeadSha
 			? `complete PR diff ${state.prReviewBaseSha}...${state.prHeadSha}`
 			: undefined;
-	if (
-		artifact.batchId !== record.batchId ||
-		artifact.laneId !== record.laneId ||
-		artifact.mode !== expectedMode ||
-		artifact.sessionId !== record.subagentSessionId ||
-		artifact.parentSessionId !== record.parentSessionId ||
-		artifact.agent !== record.swarmPrefixedAgent ||
-		artifact.role !== record.normalizedAgent ||
-		artifact.source !== 'collect_lane_results' ||
-		artifact.workflowLane !== record.workflowLane ||
-		artifact.workflowLane !== expectedWorkflowLane ||
-		!recordPrHeadSha ||
-		artifact.prHeadSha !== recordPrHeadSha ||
-		!recordGitHead ||
-		artifact.gitHead !== recordGitHead ||
-		!expectedRevisionDigest ||
-		artifact.revisionDigest !== expectedRevisionDigest ||
-		(expectedReviewScope !== undefined &&
-			(record.workspace?.scope !== expectedReviewScope ||
-				artifact.scope !== expectedReviewScope)) ||
-		artifact.digest !== record.result?.digest ||
-		artifact.chars !== record.result?.chars
-	) {
+	const integrity = analyzeLaneArtifactIntegrity({
+		record,
+		result: record.result!,
+		artifact,
+		expected: {
+			mode: expectedMode,
+			workflowLane: expectedWorkflowLane,
+			prHeadSha: record.workspace?.prHeadSha ?? '',
+			gitHead: record.workspace?.gitHead ?? '',
+			revisionDigest: expectedRevisionDigest,
+			reviewScope: expectedReviewScope,
+		},
+	});
+	if (!integrity.ok) {
+		if (diagnostics && diagnostics.length < MAX_BASE_COVERAGE_DIAGNOSTICS) {
+			diagnostics.push(
+				`batch=${record.batchId ?? '(missing)'} lane=${record.laneId ?? '(missing)'} workflow_lane=${expectedWorkflowLane} output_ref=${ref}: ${formatPrReviewLaneValidationFailure(integrity.failure)}`.slice(
+					0,
+					MAX_BASE_COVERAGE_DIAGNOSTIC_CHARS,
+				),
+			);
+		}
 		return null;
 	}
 	return artifact;
@@ -7454,6 +7936,7 @@ function workflowArtifactHasContractMarker(
 				expectedMode,
 				expectedWorkflowLane,
 				expectedRevisionDigest,
+				diagnostics,
 			)
 		: null;
 	if (!artifact) return false;
@@ -7495,6 +7978,41 @@ function workflowArtifactHasContractMarker(
 					),
 				),
 		);
+	}
+	if (
+		expectedMode === 'swarm-pr-review:base' ||
+		expectedMode === 'swarm-pr-review:micro'
+	) {
+		const reviewScope =
+			state.mode === 'PR_REVIEW' && state.prReviewBaseSha && state.prHeadSha
+				? `complete PR diff ${state.prReviewBaseSha}...${state.prHeadSha}`
+				: undefined;
+		const validation = validatePrReviewDiscoveryLaneCompletion({
+			record,
+			result: record.result!,
+			artifact,
+			expected: {
+				mode: expectedMode,
+				workflowLane: expectedWorkflowLane,
+				ownedWorkflowLanes,
+				prHeadSha: state.prHeadSha ?? '',
+				gitHead: state.prHeadSha ?? '',
+				revisionDigest: expectedRevisionDigest ?? '',
+				reviewScope,
+			},
+		});
+		if (!validation.ok) {
+			if (diagnostics && diagnostics.length < MAX_BASE_COVERAGE_DIAGNOSTICS) {
+				diagnostics.push(
+					`batch=${record.batchId ?? '(missing)'} lane=${record.laneId ?? '(missing)'} workflow_lane=${expectedWorkflowLane} output_ref=${ref}: ${formatPrReviewLaneValidationFailure(validation.failure)}`.slice(
+						0,
+						MAX_BASE_COVERAGE_DIAGNOSTIC_CHARS,
+					),
+				);
+			}
+			return false;
+		}
+		return true;
 	}
 	const coveredLanes = ownedWorkflowLanes?.length
 		? ownedWorkflowLanes
@@ -7549,6 +8067,10 @@ interface PrReviewDiscoveryCoverageAnalysis {
 	covered: boolean;
 	evidence: string | null;
 	issues: string[];
+	failurePredicate?: Extract<
+		PrReviewLaneValidationPredicate,
+		'discovery.header' | 'discovery.row' | 'discovery.coverage'
+	>;
 }
 
 function analyzePrReviewDiscoveryArtifact(
@@ -7573,7 +8095,12 @@ function analyzePrReviewDiscoveryArtifact(
 			issues,
 			`field header: expected one exact canonical ${fallbackFamily} [CANDIDATE] header before discovery rows`,
 		);
-		return { covered: false, evidence: null, issues };
+		return {
+			covered: false,
+			evidence: null,
+			issues,
+			failurePredicate: 'discovery.header',
+		};
 	}
 
 	const parsed = parseCandidates(
@@ -7615,7 +8142,12 @@ function analyzePrReviewDiscoveryArtifact(
 		);
 	}
 	if (parsed.error || parsed.diagnostics.parse_error_details.length > 0) {
-		return { covered: false, evidence: null, issues };
+		return {
+			covered: false,
+			evidence: null,
+			issues,
+			failurePredicate: 'discovery.row',
+		};
 	}
 	const matchingCandidate = parsed.candidates.find(
 		(candidate) =>
@@ -7650,7 +8182,88 @@ function analyzePrReviewDiscoveryArtifact(
 			issues,
 		};
 	}
-	return { covered: false, evidence: null, issues };
+	return {
+		covered: false,
+		evidence: null,
+		issues,
+		failurePredicate: 'discovery.coverage',
+	};
+}
+
+/**
+ * Validate a just-collected base/micro discovery result before the delegation
+ * ledger publishes it as completed. The caller supplies the prospective result
+ * and the exact stored artifact, so this pure validator cannot accidentally
+ * accept stale terminal state or a different output reference.
+ */
+export function validatePrReviewDiscoveryLaneCompletion(
+	input: PrReviewDiscoveryLaneValidationInput,
+): PrReviewLaneValidationResult {
+	const ownedWorkflowLanes = input.expected.ownedWorkflowLanes?.length
+		? [...input.expected.ownedWorkflowLanes]
+		: [input.expected.workflowLane];
+	const recordIntegrity = analyzeLaneRecordResultIntegrity({
+		record: input.record,
+		result: input.result,
+		expected: {
+			mode: input.expected.mode,
+			workflowLane: input.expected.workflowLane,
+			ownedWorkflowLanes,
+			prHeadSha: input.expected.prHeadSha,
+			gitHead: input.expected.gitHead,
+			checkWorkflowLane: input.expected.checkWorkflowLane ?? true,
+		},
+		requireCompleted: false,
+	});
+	if (!recordIntegrity.ok) return recordIntegrity;
+	const artifactIntegrity = analyzeLaneArtifactIntegrity({
+		record: input.record,
+		result: input.result,
+		artifact: input.artifact,
+		expected: {
+			mode: input.expected.mode,
+			workflowLane: input.expected.workflowLane,
+			prHeadSha: input.expected.prHeadSha,
+			gitHead: input.expected.gitHead,
+			revisionDigest: input.expected.revisionDigest,
+			reviewScope: input.expected.reviewScope,
+		},
+	});
+	if (!artifactIntegrity.ok) return artifactIntegrity;
+
+	const artifact = input.artifact!;
+	const analyses = ownedWorkflowLanes.map((workflowLane) => ({
+		workflowLane,
+		analysis: analyzePrReviewDiscoveryArtifact(
+			artifact.text,
+			workflowLane,
+			ownedWorkflowLanes,
+		),
+	}));
+	const failedCoverage = analyses.find(({ analysis }) => !analysis.covered);
+	if (failedCoverage) {
+		return failedLaneValidation(
+			failedCoverage.analysis.failurePredicate ?? 'discovery.coverage',
+			`one valid ${input.expected.mode === 'swarm-pr-review:base' ? 'base_explorer' : 'micro_lane'} [CANDIDATE] row or [CLEAN] attestation for ${failedCoverage.workflowLane}`,
+			failedCoverage.analysis.issues.join('; ') || 'no matching lane row',
+		);
+	}
+	if (ownedWorkflowLanes.length > 1) {
+		const seenEvidence = new Map<string, string>();
+		for (const { workflowLane, analysis } of analyses) {
+			if (analysis.evidence === null) continue;
+			const priorLane = seenEvidence.get(analysis.evidence);
+			if (priorLane) {
+				return failedLaneValidation(
+					'discovery.duplicate_evidence',
+					'distinct evidence for every owned workflow lane',
+					`${priorLane} and ${workflowLane} share evidence`,
+				);
+			}
+			seenEvidence.set(analysis.evidence, workflowLane);
+		}
+	}
+	return { ok: true };
 }
 
 /** Require at least one semantically valid discovery row or CLEAN attestation. */

@@ -115,6 +115,7 @@ describe('PR-review mandatory explorer prompt contract', () => {
 		if (!contracted.ok) throw new Error(contracted.errors.join('; '));
 		const formatted = dispatchTestExports.applyExplorerFormatSuffix(
 			contracted.lanes,
+			{ failClosed: true, mode: 'swarm-pr-review:base' },
 		);
 		expect(formatted.ok).toBe(true);
 		if (!formatted.ok) throw new Error(formatted.errors.join('; '));

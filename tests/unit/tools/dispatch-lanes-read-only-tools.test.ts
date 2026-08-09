@@ -97,11 +97,10 @@ describe('dispatch_lanes read-only tool permissions', () => {
 		expect(ops.prompt.mock.calls[0][0].body.tools).not.toHaveProperty('shell');
 		expect(ops.prompt.mock.calls[0][0].body.tools).not.toHaveProperty('bash');
 		const promptText = ops.prompt.mock.calls[0][0].body.parts[0].text;
+		expect(promptText).toContain('If a standard explorer finds zero issues');
+		expect(promptText).toContain('[CLEAN] | lane | coverage_scope | evidence');
 		expect(promptText).toContain(
-			'If either a standard explorer or micro-lane finds zero issues',
-		);
-		expect(promptText).toContain(
-			'[CLEAN] | workflow_lane | coverage_scope | evidence',
+			'[CLEAN] | micro_lane | coverage_scope | evidence',
 		);
 		expect(promptText).not.toContain(
 			'If a standard explorer finds zero issues, emit only the header row',

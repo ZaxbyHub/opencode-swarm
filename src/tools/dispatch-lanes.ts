@@ -2,12 +2,18 @@ import { createHash } from 'node:crypto';
 import pLimit from 'p-limit';
 import { z } from 'zod';
 import {
+	CANDIDATE_HEADERS,
+	CLEAN_TEMPLATES,
+} from '../background/candidate-contract.js';
+import {
 	buildLaneOutputPreview,
+	readLaneOutput,
 	storeLaneOutput,
 } from '../background/lane-output-store.js';
 import {
 	appendDelegationTransition,
 	type BackgroundDelegationRecord,
+	type BackgroundDelegationResult,
 	findByBatchId,
 	recordPendingDelegation,
 } from '../background/pending-delegations.js';
@@ -36,12 +42,14 @@ import {
 	enforcePrFeedbackVerificationOwnership,
 	enforcePrReviewBaseDimensions,
 	enforcePrWorkflowDispatchLanesAsync,
+	formatPrReviewLaneValidationFailure,
 	PR_REVIEW_BASE_DIMENSION_IDS,
 	PR_REVIEW_BASE_LANE_FLOORS,
 	PR_REVIEW_MICRO_LANE_FLOORS,
 	type PrReviewDepthTier,
 	recordPrFeedbackGateBatch,
 	recordPrReviewValidationBatch,
+	validatePrReviewDiscoveryLaneCompletion,
 } from '../hooks/pr-workflow-gate.js';
 import type { ParallelDispatcher } from '../parallel/dispatcher/parallel-dispatcher.js';
 import { createParallelDispatcher } from '../parallel/dispatcher/parallel-dispatcher.js';
@@ -176,19 +184,19 @@ You MUST emit your findings as a pipe-delimited [CANDIDATE] table.
 Emit the marker-bearing header first, then one unprefixed data row per finding.
 
 Standard explorer format (use unless the prompt specifies micro-lane work):
-[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence
+${CANDIDATE_HEADERS.base_explorer}
 
-Micro-lane format (use when the prompt references invariant checking or micro_lane):
-[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence
+Micro-lane format (use when the prompt references invariant checking or micro_lane, or for swarm-pr-review:council discovery):
+${CANDIDATE_HEADERS.micro_lane}
 
 Candidate IDs must be globally unique across the run; prefix them with the
 exact workflow_lane value from this dispatch.
 
-If either a standard explorer or micro-lane finds zero issues, emit its header
-followed by exactly:
-[CLEAN] | workflow_lane | coverage_scope | evidence
-Put the exact workflow_lane only in the lane field. Write a substantive
-coverage_scope of at least 12 characters and concrete evidence of at least 20
+If a standard explorer finds zero issues, emit its header followed by exactly:
+${CLEAN_TEMPLATES.base_explorer}
+If a micro-lane finds zero issues, emit its header followed by exactly:
+${CLEAN_TEMPLATES.micro_lane}
+Write a substantive coverage_scope of at least 12 characters and concrete evidence of at least 20
 characters; bare header-only output is UNATTESTED for every PR-review lane.
 Do NOT use the default PROJECT/STRUCTURE output format for this dispatch.`;
 
@@ -1020,6 +1028,7 @@ export async function executeDispatchLanesAsync(
 			parsed.data.mode?.startsWith('swarm-pr-review:') ||
 				parsed.data.mode?.startsWith('swarm-pr-feedback:'),
 		),
+		mode: parsed.data.mode,
 	});
 	if (!formatted.ok) {
 		return asyncFailureResult({
@@ -1686,26 +1695,61 @@ async function collectOnce(
 			messageCount: transcript.messageCount,
 			transcriptIncomplete: transcript.transcriptIncomplete,
 		});
+		const prospectiveResult: BackgroundDelegationResult = {
+			text: output.output,
+			chars: output.output_chars,
+			truncated: output.output_truncated,
+			digest: output.output_digest,
+			...(output.output_ref ? { outputRef: output.output_ref } : {}),
+			outputPreviewChars: output.output.length,
+			...(output.output_degraded !== undefined
+				? { outputDegraded: output.output_degraded }
+				: {}),
+			...(output.output_artifact_error
+				? { outputArtifactError: output.output_artifact_error }
+				: {}),
+			...(output.transcript_incomplete !== undefined
+				? { transcriptIncomplete: output.transcript_incomplete }
+				: {}),
+			messageCount: transcript.messageCount,
+		};
+		let terminalStatus: 'completed' | 'error' = 'completed';
+		if (
+			record.mode === 'swarm-pr-review:base' ||
+			record.mode === 'swarm-pr-review:micro'
+		) {
+			const artifact = output.output_ref
+				? (readLaneOutput(directory, output.output_ref)?.artifact ?? null)
+				: null;
+			const validation = validatePrReviewDiscoveryLaneCompletion({
+				record,
+				result: prospectiveResult,
+				artifact,
+				expected: {
+					mode: record.mode,
+					workflowLane: record.workflowLane ?? '',
+					ownedWorkflowLanes: record.ownedWorkflowLanes,
+					prHeadSha: record.workspace?.prHeadSha ?? '',
+					gitHead: record.workspace?.gitHead ?? '',
+					revisionDigest: collectedRevisionDigest ?? '',
+					reviewScope: record.workspace?.scope ?? undefined,
+				},
+			});
+			if (!validation.ok) {
+				terminalStatus = 'error';
+				const family =
+					record.mode === 'swarm-pr-review:base'
+						? 'base_explorer'
+						: 'micro_lane';
+				prospectiveResult.error =
+					`PR_REVIEW_DISCOVERY_CONTRACT_INVALID: batch=${record.batchId ?? '(missing)'} lane=${record.laneId ?? '(missing)'} workflow_lane=${record.workflowLane ?? '(missing)'} ` +
+					`${formatPrReviewLaneValidationFailure(validation.failure)}; expected candidate row: ${CANDIDATE_HEADERS[family]}; expected clean row: ${CLEAN_TEMPLATES[family]}`;
+				prospectiveResult.error = prospectiveResult.error.slice(0, 1_024);
+			}
+		}
 		await appendDelegationTransition(directory, record.correlationId, {
-			status: 'completed',
-			result: {
-				text: output.output,
-				chars: output.output_chars,
-				truncated: output.output_truncated,
-				digest: output.output_digest,
-				...(output.output_ref ? { outputRef: output.output_ref } : {}),
-				outputPreviewChars: output.output.length,
-				...(output.output_degraded !== undefined
-					? { outputDegraded: output.output_degraded }
-					: {}),
-				...(output.output_artifact_error
-					? { outputArtifactError: output.output_artifact_error }
-					: {}),
-				...(output.transcript_incomplete !== undefined
-					? { transcriptIncomplete: output.transcript_incomplete }
-					: {}),
-				messageCount: transcript.messageCount,
-			},
+			status: terminalStatus,
+			result: prospectiveResult,
 		});
 	}
 }
@@ -2430,14 +2474,22 @@ function applyCommonPrompt(
 
 function applyExplorerFormatSuffix(
 	lanes: DispatchLaneSpec[],
-	options: { failClosed?: boolean } = {},
+	options: { failClosed?: boolean; mode?: string } = {},
 ): ApplyCommonPromptResult {
 	const generatedAgentNames = _internals.getGeneratedAgentNames();
 	const errors: string[] = [];
 	const formatted = lanes.map((lane) => {
 		const role = resolveGeneratedAgentRole(lane.agent, generatedAgentNames);
-		if (role !== 'explorer') return lane;
+		const isPrReviewCouncilExplorer =
+			options.mode === 'swarm-pr-review:council' && role.startsWith('council_');
+		if (role !== 'explorer' && !isPrReviewCouncilExplorer) return lane;
 		if (lane.prompt.endsWith(EXPLORER_CANDIDATE_FORMAT_SUFFIX)) return lane;
+		const rowFamilyIdentity =
+			options.mode === 'swarm-pr-review:base'
+				? 'For this base explorer lane, use the base row family and put the exact workflow_lane only in the `lane` field.'
+				: options.mode === 'swarm-pr-review:micro' || isPrReviewCouncilExplorer
+					? 'For this micro/council lane, use the micro row family and put the exact workflow_lane only in the `micro_lane` field; do not use the base `lane` field.'
+					: "Use the row family applicable to this dispatch and put the exact workflow_lane only in that family's `lane` or `micro_lane` field.";
 		const exactLane = lane.workflow_lane ?? lane.id;
 		const ownedLanes = lane.owned_workflow_lanes?.length
 			? lane.owned_workflow_lanes
@@ -2452,7 +2504,7 @@ function applyExplorerFormatSuffix(
 						)}; every output row MUST use the exact lane value of the obligation it reports`;
 		const prompt = `${lane.prompt}
 
-CONTROLLER-BOUND OUTPUT IDENTITY: ${identity}. Placeholder text such as "workflow_lane" is invalid.${EXPLORER_CANDIDATE_FORMAT_SUFFIX}`;
+CONTROLLER-BOUND OUTPUT IDENTITY: ${identity}. Placeholder text such as "workflow_lane" is invalid. ${rowFamilyIdentity}${EXPLORER_CANDIDATE_FORMAT_SUFFIX}`;
 		if (prompt.length > MAX_PROMPT_CHARS) {
 			const diagnostic = `Lane "${lane.id}" prompt plus mandatory explorer output contract is ${prompt.length} chars; max ${MAX_PROMPT_CHARS}`;
 			if (options.failClosed) {

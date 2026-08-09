@@ -193,6 +193,26 @@ describe('static-analysis: src/index.ts tool.execute.before registration', () =>
 		);
 	});
 
+	test('PR workflow enforcement precedes the delegation gate after guardrails and scope guard', () => {
+		const guardrailsIndex = toolBeforeBlock.indexOf(
+			'await guardrailsHooks.toolBefore',
+		);
+		const scopeGuardIndex = toolBeforeBlock.indexOf(
+			'await scopeGuardHook.toolBefore',
+		);
+		const workflowIndex = toolBeforeBlock.indexOf(
+			'await enforcePrWorkflowToolBefore',
+		);
+		const delegationIndex = toolBeforeBlock.indexOf(
+			'await delegationGateHooks.toolBefore',
+		);
+
+		expect(guardrailsIndex).toBeGreaterThan(-1);
+		expect(scopeGuardIndex).toBeGreaterThan(guardrailsIndex);
+		expect(workflowIndex).toBeGreaterThan(scopeGuardIndex);
+		expect(delegationIndex).toBeGreaterThan(workflowIndex);
+	});
+
 	test('advisory toolBefore (activity tracker) IS safe-wrapped (intentional)', () => {
 		// Documents the intentional asymmetry: activityHooks.toolBefore is
 		// observer-only and may safely swallow errors.
@@ -228,7 +248,7 @@ describe('static-analysis: src/index.ts PR workflow response gate registration',
 describe('runtime contract: composed Full-Auto-style handler chain blocks tool execution on deny', () => {
 	test('a deny in the second handler stops execution and surfaces FULL_AUTO_DENY', async () => {
 		// Simulate the actual src/index.ts tool.execute.before chain shape:
-		// guardrails -> scope-guard -> delegation-gate -> fullAutoDelegation
+		// guardrails -> scope-guard -> PR-workflow -> delegation-gate -> fullAutoDelegation
 		// -> fullAutoPermission -> activity (advisory).
 		const ordered: string[] = [];
 		const guardrails = async () => {
@@ -236,6 +256,9 @@ describe('runtime contract: composed Full-Auto-style handler chain blocks tool e
 		};
 		const scopeGuard = async () => {
 			ordered.push('scope-guard');
+		};
+		const prWorkflow = async () => {
+			ordered.push('pr-workflow');
 		};
 		const delegationGate = async () => {
 			ordered.push('delegation-gate');
@@ -254,6 +277,7 @@ describe('runtime contract: composed Full-Auto-style handler chain blocks tool e
 		const blockingChain = composeBlockingHandlers(
 			guardrails,
 			scopeGuard,
+			prWorkflow,
 			delegationGate,
 			fullAutoDelegation,
 			fullAutoPermission,
@@ -272,6 +296,7 @@ describe('runtime contract: composed Full-Auto-style handler chain blocks tool e
 		expect(ordered).toEqual([
 			'guardrails',
 			'scope-guard',
+			'pr-workflow',
 			'delegation-gate',
 			'fullAutoDelegation',
 		]);

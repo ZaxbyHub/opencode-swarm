@@ -115,7 +115,25 @@ Current signal-triggered modes: `DEEP_DIVE`, `PR_REVIEW`, `PR_FEEDBACK`, `DESIGN
 Current contract: PR review starts with Phase 0A signal ingestion before the explorer lanes run. The architect captures PR comments, review summaries, requested changes, bot findings, CI/check failures, merge conflicts, stale branch state, PR body claims, linked issues, and commit messages in the initial evidence ledger, then validates those signals alongside explorer findings. The workflow stays read-only, writes a handoff artifact under `.swarm/pr-review/<run_id>/`, and stops to ask whether to continue into `/swarm pr-feedback`.
 Triggered by `/swarm pr-review`. A read-only, structured review: dirty tracked/untracked preservation -> authoritative full-head verification -> exact detached checkout and bind -> intent reconstruction -> controller-computed depth tier (S/M/L from the bound merge-base diff; uncomputable fails strict to L) -> base explorer wave launched with `dispatch_lanes_async` covering all 6 review dimensions (six singleton lanes at tier L; consolidated `owned_workflow_lanes` partitions at S/M) while the architect continues non-dependent PR inspection -> incremental `collect_lane_results` polling and final join barrier -> an exact 11-row repository-agnostic risk-family ledger (`MATCHED` for applicable surfaces, provenance-free `NOT_TRIGGERED` with concrete absence evidence, and always-`MATCHED` `unclassified-risk`) -> micro dispatch only for the matched set (dedicated lanes at tier L; consolidated sweeps at S/M with per-family attestation) -> independent reviewer confirmation -> critic challenge on HIGH/CRITICAL -> synthesis only after matched coverage closure. Explorers read the checked-out working-tree filesystem, not Git history. The workflow does not mutate source or delegate to the coder. Blocking dispatch and direct Task calls are not provenance-equivalent; if structured lanes cannot close matched coverage, the review is BLOCKED and surfaced to the user rather than degraded.
 
+At the plugin-host boundary, the active PR workflow gate runs after guardrails
+and scope guard but before the generic delegation gate. This preserves the
+global safety checks while ensuring a direct reviewer Task during `PR_REVIEW`
+gets the authoritative structured-dispatch diagnostic before generic
+`ACCEPTANCE_FIELD_REQUIRED` validation or delegation/scope/background state
+publication. Outside an active workflow, coder and reviewer Task acceptance
+rules are unchanged; verified `PR_FEEDBACK` coder Tasks continue through the
+normal acceptance and scope preflight.
+
 Dispatch lane joins return bounded previews in `lane_results[].output` and durable full-output refs in `lane_results[].output_ref`. The architect retrieves full artifacts with `retrieve_lane_output` before candidate extraction, JSON response parsing, or reviewer routing. Degraded, incomplete, stale, cancelled, failed, or preview-only lanes are explicit coverage gaps rather than negative evidence.
+
+Base and micro discovery artifacts are validated against the same row and
+durable-provenance contract during collection and final coverage accounting.
+Malformed completed output is surfaced as a lane failure immediately, and
+aggregate coverage diagnostics report the first failed predicate for each
+missing lane with bounded expected/actual context and the canonical candidate
+or clean-row template. Parser success alone is not coverage success: row
+parsing is shared, while the gate additionally verifies batch, session, role,
+head, digest, and artifact identity.
 
 #### PR_FEEDBACK Protocol
 Current contract: PR feedback ingests all known feedback sources plus any validated handoff artifact from `PR_REVIEW`, preserves prior IDs/provenance, and uses the broader closure statuses `CONFIRMED`, `PARTIAL`, `DISPROVED`, `PRE_EXISTING`, `NEEDS_MORE_EVIDENCE`, and `NEEDS_USER_DECISION`.
