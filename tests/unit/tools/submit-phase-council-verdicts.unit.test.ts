@@ -57,11 +57,9 @@ const writeMalformedMutationGateEvidence = (
 const makeVerdict = (
 	agent: string,
 	verdict: 'APPROVE' | 'CONCERNS' | 'REJECT' = 'APPROVE',
-	verdictRound?: number,
 ): Record<string, unknown> => ({
 	agent,
 	verdict,
-	...(verdictRound !== undefined ? { verdictRound } : {}),
 	confidence: 0.9,
 	findings: [],
 	criteriaAssessed: [],
