@@ -1,10 +1,15 @@
 # Flake detection (issue #1782, root-cause detection phase §6).
 #
 # Triggers on completion of the `ci.yml` workflow when the triggering event was
-# a merge_group run. Downloads the per-shard flake-annotations artifacts
-# uploaded by ci.yml's unit job, concatenates them, and runs
-# scripts/ci/detect-and-quarantine-flakes.sh to produce quarantine suggestions
-# + a best-effort tracking issue.
+# a merge_group run AND that run's conclusion was `failure` (see the job-level
+# `if:` below). A run that goes green — including one where a flaky test passed
+# on retry — never reaches this workflow, so a self-healed flake is only
+# surfaced when some OTHER job in the same run failed. That is true of the unit
+# shards' annotations as much as the coverage job's.
+# Downloads every flake-annotations artifact uploaded by
+# ci.yml (the per-shard unit annotations AND the coverage job's annotations),
+# concatenates them, and runs scripts/ci/detect-and-quarantine-flakes.sh to
+# produce quarantine suggestions + a best-effort tracking issue.
 #
 # This workflow is ADVISORY ONLY: it never fails a run (the detection script
 # always exits 0). A detected flake already failed in ci.yml; this workflow
@@ -56,7 +61,7 @@ jobs:
           # cannot see the triggering run's artifacts).
           run-id: ${{ github.event.workflow_run.id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          pattern: flake-annotations-unit-shard-*
+          pattern: flake-annotations-*
           merge-multiple: true
           path: annotations
 
@@ -64,7 +69,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p detection-out
-          cat annotations/flake-annotations-unit-shard-*.txt 2>/dev/null > detection-out/flake-annotations.txt || true
+          cat annotations/flake-annotations-*.txt 2>/dev/null > detection-out/flake-annotations.txt || true
           echo "Combined annotation line count: $(wc -l < detection-out/flake-annotations.txt | tr -d ' ')"
           if [ ! -s detection-out/flake-annotations.txt ]; then
             echo "No flake annotations found (ci.yml may have failed for a non-test reason)."

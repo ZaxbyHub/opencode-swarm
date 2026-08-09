@@ -157,9 +157,12 @@ Do NOT un-quarantine without a merge-group validation run confirming the fix.
 ## Auto-detection (the flake-detection workflow)
 
 When a merge-group CI run fails, `.github/workflows/flake-detection.yml`
-(`workflow_run` trigger) downloads the per-shard `flake-annotations-*`
-artifacts that ci.yml's unit job uploads, concatenates them, and runs
-`scripts/ci/detect-and-quarantine-flakes.sh`. The script:
+(`workflow_run` trigger) downloads every `flake-annotations-*` artifact
+ci.yml uploads — the per-shard unit annotations AND the coverage job's
+`flake-annotations-coverage` artifact (both jobs run a bounded retry, two
+retries / three attempts total, before treating a failure as real) —
+concatenates them, and runs `scripts/ci/detect-and-quarantine-flakes.sh`.
+The script:
 
 1. Extracts candidate flaky/hard-failed test files from the annotations.
 2. Drops candidates that are already quarantined, have an infra-signature
@@ -173,6 +176,16 @@ artifacts that ci.yml's unit job uploads, concatenates them, and runs
 suggestion and, if warranted, appends the line to the appropriate quarantine
 file in a follow-up PR. Auto-appending directly to the quarantine file would
 require a PAT + branch-protection bypass and is intentionally out of scope.
+
+**A self-healed flake is not always auto-surfaced.** `flake-detection.yml`
+only runs when the triggering `ci` run's overall conclusion is `failure`. A
+flake that passes on retry makes its job succeed, so if nothing else in that
+merge-group run failed, the run goes green and detection never fires — the
+retry is logged in that job's own step output but is not auto-surfaced as a
+quarantine suggestion. This is a property of the trigger, not of any one job:
+it applies to the **unit shards' annotations exactly as much as the coverage
+job's**. Detection only ever sees annotations from runs that failed for some
+reason; a run that self-heals everywhere is invisible to it.
 
 ## Known limitations
 

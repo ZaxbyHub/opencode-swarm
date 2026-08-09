@@ -10,14 +10,34 @@ const COVERAGE_GATE_SCRIPT_PATH = join(
 	import.meta.dir,
 	'../../../../scripts/ci/run-coverage-gate.sh',
 );
+const FLAKE_DETECTION_YML_PATH = join(
+	import.meta.dir,
+	'../../../../.github/workflows/flake-detection.yml',
+);
 
+/*
+ * Every extractor below ends its lazy match on the same four-alternative
+ * lookahead: the next step, a section comment, the next JOB (two-space key),
+ * or end of input spelled `(?![\s\S])`.
+ *
+ * Do NOT "simplify" that last alternative to `$`. These regexes carry the `/m`
+ * flag, under which `$` matches at every line end — the lookahead would
+ * succeed immediately and collapse each slice to its `- name:` line alone
+ * (measured: 3803 chars -> 22). Assertions would still pass, but the negative
+ * one below (`not.toContain('bun --smol test "$f"')`) would pass vacuously,
+ * which is exactly the guard it exists to provide.
+ *
+ * The job-boundary alternative matters too: without it the coverage-upload
+ * slice ran past the end of its own job into the integration job's steps
+ * (measured: 1067 chars -> 547 once bounded).
+ */
 function extractRunUnitTestsStep(yml: string): string {
 	// Normalize CRLF to LF so regex anchors work consistently
 	const normalized = yml.replace(/\r\n/g, '\n');
 	// The "Run unit tests" step starts at 6-space indentation under the jobs.*.steps key.
 	// Its content ends before the next step (also at 6-space indent) or section comment.
 	const match = normalized.match(
-		/- name: Run unit tests[\s\S]*?(?=\n {6}- name:|\n {6}# ---|Z)/m,
+		/- name: Run unit tests[\s\S]*?(?=\n {6}- name:|\n {6}# ---|\n {2}[A-Za-z][\w-]*:|(?![\s\S]))/m,
 	);
 	return match ? match[0] : '';
 }
@@ -25,7 +45,7 @@ function extractRunUnitTestsStep(yml: string): string {
 function extractCollectAndPartitionStep(yml: string): string {
 	const normalized = yml.replace(/\r\n/g, '\n');
 	const match = normalized.match(
-		/- name: Collect and partition test files[\s\S]*?(?=\n {6}- name:|\n {6}# ---|Z)/m,
+		/- name: Collect and partition test files[\s\S]*?(?=\n {6}- name:|\n {6}# ---|\n {2}[A-Za-z][\w-]*:|(?![\s\S]))/m,
 	);
 	return match ? match[0] : '';
 }
@@ -33,7 +53,7 @@ function extractCollectAndPartitionStep(yml: string): string {
 function extractCoverageMeasurementStep(yml: string): string {
 	const normalized = yml.replace(/\r\n/g, '\n');
 	const match = normalized.match(
-		/- name: Coverage gate enforcement[\s\S]*?(?=\n {6}- name:|\n {6}# ---|Z)/m,
+		/- name: Coverage gate enforcement[\s\S]*?(?=\n {6}- name:|\n {6}# ---|\n {2}[A-Za-z][\w-]*:|(?![\s\S]))/m,
 	);
 	return match ? match[0] : '';
 }
@@ -41,7 +61,23 @@ function extractCoverageMeasurementStep(yml: string): string {
 function extractIntegrationTestsStep(yml: string): string {
 	const normalized = yml.replace(/\r\n/g, '\n');
 	const match = normalized.match(
-		/- name: Integration tests[\s\S]*?(?=\n {6}- name:|\n {6}# ---|Z)/m,
+		/- name: Integration tests[\s\S]*?(?=\n {6}- name:|\n {6}# ---|\n {2}[A-Za-z][\w-]*:|(?![\s\S]))/m,
+	);
+	return match ? match[0] : '';
+}
+
+function extractUnitFlakeAnnotationsUploadStep(yml: string): string {
+	const normalized = yml.replace(/\r\n/g, '\n');
+	const match = normalized.match(
+		/- name: Upload flake annotations[\s\S]*?(?=\n {6}- name:|\n {6}# ---|\n {2}[A-Za-z][\w-]*:|(?![\s\S]))/m,
+	);
+	return match ? match[0] : '';
+}
+
+function extractCoverageFlakeAnnotationsUploadStep(yml: string): string {
+	const normalized = yml.replace(/\r\n/g, '\n');
+	const match = normalized.match(
+		/- name: Upload coverage flake annotations[\s\S]*?(?=\n {6}- name:|\n {6}# ---|\n {2}[A-Za-z][\w-]*:|(?![\s\S]))/m,
 	);
 	return match ? match[0] : '';
 }
@@ -119,5 +155,112 @@ describe('ci.yml integration — merge-queue coverage isolation', () => {
 		expect(coverageGateScript).toContain('scripts/ci/merge-lcov.mjs');
 		expect(coverageGateScript).toContain('coverage/lcov.info');
 		expect(coverageGateScript).toContain('Coverage gate passed');
+	});
+});
+
+describe('ci.yml integration — coverage gate bounded retry (issue #1782 parity)', () => {
+	const yml = readFileSync(CI_YML_PATH, 'utf8');
+	// Normalize CRLF to LF so the loop-body slice/index assertions below are
+	// stable regardless of the checkout's line-ending config.
+	const coverageGateScript = readFileSync(
+		COVERAGE_GATE_SCRIPT_PATH,
+		'utf8',
+	).replace(/\r\n/g, '\n');
+	const flakeDetectionYml = readFileSync(FLAKE_DETECTION_YML_PATH, 'utf8');
+
+	test('coverage helper retries up to max_retries=2 (three attempts total)', () => {
+		expect(coverageGateScript).toContain('max_retries=2');
+		expect(coverageGateScript).toContain(
+			'while [ "$exit_code" -ne 0 ] && [ "$retry_num" -lt "$max_retries" ]; do',
+		);
+	});
+
+	test('coverage helper does NOT use `let` for the retry counter (set -euo pipefail would kill the script on a 0 result)', () => {
+		expect(coverageGateScript).not.toMatch(/(^|\n)\t*let\s/);
+		expect(coverageGateScript).toContain('retry_num=$((retry_num + 1))');
+	});
+
+	// Anchored ordering assertion (writing-tests skill "Anchored Content
+	// Assertions"): a bare `toContain('rm -rf coverage')` would still pass if
+	// someone moved the reset back outside the retry loop, because the
+	// pre-loop reset (once per file, before the first attempt) also contains
+	// that literal. Slicing to the retry-loop body specifically, and then
+	// checking index order INSIDE that slice, is what actually fails if the
+	// reset is relocated outside the loop (issue #1712 per-attempt isolation).
+	test('coverage helper resets the coverage dir INSIDE the retry loop, not just once per file', () => {
+		const whileStart = coverageGateScript.indexOf(
+			'while [ "$exit_code" -ne 0 ] && [ "$retry_num" -lt "$max_retries" ]; do',
+		);
+		expect(whileStart).toBeGreaterThan(-1);
+		const doneIdx = coverageGateScript.indexOf('\n\tdone\n', whileStart);
+		expect(doneIdx).toBeGreaterThan(whileStart);
+		const loopBody = coverageGateScript.slice(whileStart, doneIdx);
+
+		const retryIncrementIdx = loopBody.indexOf('retry_num=$((retry_num + 1))');
+		const rmIdx = loopBody.indexOf('rm -rf coverage');
+		const mkdirIdx = loopBody.indexOf('mkdir -p coverage');
+		const bunTestIdx = loopBody.indexOf(
+			'bun test --isolate --coverage --timeout 60000 "$test_file"',
+		);
+
+		// All four markers must be present inside the loop body itself.
+		expect(retryIncrementIdx).toBeGreaterThan(-1);
+		expect(rmIdx).toBeGreaterThan(-1);
+		expect(mkdirIdx).toBeGreaterThan(-1);
+		expect(bunTestIdx).toBeGreaterThan(-1);
+
+		// And in this order: increment retry counter -> reset coverage dir ->
+		// recreate coverage dir -> re-run bun test. If the reset were moved
+		// outside the loop, rmIdx/mkdirIdx would be -1 inside this slice and
+		// the assertions above would already fail; this also guards against a
+		// reset that's present but reordered after the retried bun test run.
+		expect(rmIdx).toBeGreaterThan(retryIncrementIdx);
+		expect(mkdirIdx).toBeGreaterThan(rmIdx);
+		expect(bunTestIdx).toBeGreaterThan(mkdirIdx);
+	});
+
+	test('coverage helper appends the "passed on retry" notice to flake-annotations-coverage.txt', () => {
+		expect(coverageGateScript).toContain(
+			'echo "::notice file=${test_file}::Passed on retry ${retry_num} (flaky): ${test_file}" >> flake-annotations-coverage.txt',
+		);
+	});
+
+	test('coverage helper appends the hard-failure error to flake-annotations-coverage.txt', () => {
+		expect(coverageGateScript).toContain(
+			'echo "::error file=${test_file}::FAILED: ${test_file}" >> flake-annotations-coverage.txt',
+		);
+	});
+
+	test('ci.yml uploads flake-annotations-coverage.txt from the coverage job', () => {
+		const coverageUploadStep = extractCoverageFlakeAnnotationsUploadStep(yml);
+		const unitUploadStep = extractUnitFlakeAnnotationsUploadStep(yml);
+		expect(coverageUploadStep).toContain('name: flake-annotations-coverage');
+		expect(coverageUploadStep).toContain(
+			'path: flake-annotations-coverage.txt',
+		);
+		expect(coverageUploadStep).toContain('if-no-files-found: ignore');
+
+		// Pinned to the same upload-artifact SHA as the sibling per-shard step,
+		// so both artifacts are produced by an identically-audited action version.
+		const pinnedShaMatch = unitUploadStep.match(
+			/uses: actions\/upload-artifact@([a-f0-9]+) # v[\d.]+/,
+		);
+		expect(pinnedShaMatch).not.toBeNull();
+		expect(coverageUploadStep).toContain(
+			`uses: actions/upload-artifact@${pinnedShaMatch?.[1]}`,
+		);
+	});
+
+	test('flake-detection.yml downloads the broadened flake-annotations-* pattern (covers unit shards AND coverage)', () => {
+		expect(flakeDetectionYml).toContain('pattern: flake-annotations-*');
+		expect(flakeDetectionYml).not.toContain(
+			'pattern: flake-annotations-unit-shard-*',
+		);
+	});
+
+	test('flake-detection.yml concatenates the downloaded coverage/unit annotations end-to-end', () => {
+		expect(flakeDetectionYml).toContain(
+			'cat annotations/flake-annotations-*.txt 2>/dev/null > detection-out/flake-annotations.txt || true',
+		);
 	});
 });
