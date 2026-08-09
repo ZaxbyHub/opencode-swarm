@@ -1,5 +1,19 @@
 # Changelog
 
+## [7.137.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.136.5...v7.137.0) (2026-08-09)
+
+
+### Features
+
+* **observability:** define canonical event contract, correlation model, and stream inventory ([ff08b0c](https://github.com/ZaxbyHub/opencode-swarm/commit/ff08b0c6b0820dba1127736d5ec9c37ed6ce8373))
+
+
+### Bug Fixes
+
+* **observability:** close PR [#2056](https://github.com/ZaxbyHub/opencode-swarm/issues/2056) review feedback (21 items) ([04fd304](https://github.com/ZaxbyHub/opencode-swarm/commit/04fd3045a5b1cfb583f37dbeadb033ba50a8f4b6))
+* **tests:** canonicalize tmpdir usage to satisfy FR-011 (issue [#1737](https://github.com/ZaxbyHub/opencode-swarm/issues/1737)) ([5820155](https://github.com/ZaxbyHub/opencode-swarm/commit/5820155765a83bc659579b03090b952b8c9b89fc))
+* **tests:** deflake repo-graph-health budget test via the clock seam ([f79cf31](https://github.com/ZaxbyHub/opencode-swarm/commit/f79cf3193b3dcaa19c443e039124fafaddfe0b5f))
+
 ## [7.136.5](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.136.4...v7.136.5) (2026-08-08)
 
 
