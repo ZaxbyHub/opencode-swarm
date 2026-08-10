@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.138.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.137.5...v7.138.0) (2026-08-10)
+
+
+### Features
+
+* **reflection:** surface knowledge/skill/issue signals + action menu ([c74a08a](https://github.com/ZaxbyHub/opencode-swarm/commit/c74a08a55f174ab0b4838cf294e19f89755aa955))
+
 ## [7.137.5](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.137.4...v7.137.5) (2026-08-10)
 
 
