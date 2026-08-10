@@ -1400,7 +1400,7 @@ The evidence system persists verifiable execution artifacts per task.
 | `diff` | files_changed[], additions, deletions | Code change summary |
 | `approval` | (base fields only) | Explicit approval record |
 | `note` | (base fields only) | Free-form annotation |
-| `secretscan` | findings_count, scan_directory, files_scanned, skipped_files | Secret scan results (v6.33) |
+| `secretscan` | findings_count, scan_directory, files_scanned, skipped_files, incomplete_files | Secret scan results and incomplete-coverage accounting |
 | `mutation-gate` | verdict, killRate, adjustedKillRate, summary, survivedMutants[] | Phase-close mutation testing gate results — written by `write_mutation_evidence` tool; blocks phase completion when verdict is `fail` (v6.68+) |
 
 ### Storage

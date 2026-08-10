@@ -36,6 +36,7 @@ export const _internals: {
 	runSastScanWrapped: typeof runSastScanWrapped;
 	runQualityBudgetWrapped: typeof runQualityBudgetWrapped;
 	getChangedLineRanges: typeof getChangedLineRanges;
+	saveEvidence: typeof saveEvidence;
 } = {
 	qualityBudget,
 	runLintWrapped,
@@ -43,6 +44,7 @@ export const _internals: {
 	runSastScanWrapped,
 	runQualityBudgetWrapped,
 	getChangedLineRanges,
+	saveEvidence,
 };
 
 // ============ Input/Output Types ============
@@ -74,6 +76,62 @@ export interface ToolResult<T> {
 	error?: string;
 	/** Duration in milliseconds */
 	duration_ms: number;
+}
+
+interface SecretscanGateDecision {
+	passed: boolean;
+	summary: string;
+	result?: SecretscanResult;
+	findingsCount: number;
+}
+
+function evaluateSecretscanGate(
+	toolResult: ToolResult<SecretscanResult | SecretscanErrorResult>,
+	requestedFiles: number,
+): SecretscanGateDecision {
+	if (toolResult.error) {
+		return {
+			passed: false,
+			summary: `Secretscan wrapper error: ${toolResult.error}`,
+			findingsCount: 0,
+		};
+	}
+	if (!toolResult.ran || !toolResult.result) {
+		return {
+			passed: false,
+			summary: 'Secretscan did not return a result',
+			findingsCount: 0,
+		};
+	}
+	if ('error' in toolResult.result) {
+		return {
+			passed: false,
+			summary: `Secretscan error: ${toolResult.result.error}`,
+			findingsCount: 0,
+		};
+	}
+
+	const result = toolResult.result;
+	const findingsCount = Math.max(result.count, result.findings.length);
+	const failures: string[] = [];
+	if (findingsCount > 0) failures.push(`${findingsCount} secret finding(s)`);
+	if ((result.incomplete_files ?? 0) > 0) {
+		failures.push(`${result.incomplete_files} incomplete file(s)`);
+	}
+	if (requestedFiles > 0 && result.files_scanned === 0) {
+		failures.push('zero requested files scanned');
+	}
+
+	const statistics = `Secretscan: ${findingsCount} finding(s), ${result.files_scanned} files scanned, ${result.skipped_files} skipped`;
+	return {
+		passed: failures.length === 0,
+		summary:
+			failures.length > 0
+				? `${statistics}; failed: ${failures.join('; ')}`
+				: statistics,
+		result,
+		findingsCount,
+	};
 }
 
 export interface PreCheckBatchResult {
@@ -805,55 +863,37 @@ export async function runPreCheckBatch(
 	}
 
 	// Check secretscan (hard gate - MUST pass)
-	if (secretscanResult.ran && secretscanResult.result) {
-		const scanResult = secretscanResult.result as SecretscanResult;
-		// F-003: an internal scan error returns SecretscanErrorResult (has `error`);
-		// fail closed instead of treating an errored scan as a clean pass.
-		if ('error' in scanResult && (scanResult as { error?: string }).error) {
-			gatesPassed = false;
-			warn(
-				`pre_check_batch: Secretscan error - GATE FAILED: ${(scanResult as { error?: string }).error}`,
-			);
-		} else if ('findings' in scanResult && scanResult.findings.length > 0) {
-			gatesPassed = false;
-			warn('pre_check_batch: Secretscan found secrets - GATE FAILED');
-		} else if (
-			// F-002: vacuous pass — scan ran but scanned zero files despite files being
-			// requested. Mirror SAST's zero-coverage-fail guard (sast-scan.ts:597).
-			files &&
-			files.length > 0 &&
-			(scanResult.files_scanned ?? 0) === 0
-		) {
-			gatesPassed = false;
-			warn(
-				'pre_check_batch: Secretscan scanned 0 files despite requested file scope - GATE FAILED (possible vacuous pass)',
-			);
-		}
-	} else if (secretscanResult.error) {
-		// Error in secretscan - fail closed
+	const secretscanDecision = evaluateSecretscanGate(
+		secretscanResult,
+		changedFiles.length,
+	);
+	if (!secretscanDecision.passed) {
 		gatesPassed = false;
-		warn(
-			`pre_check_batch: Secretscan error - GATE FAILED: ${secretscanResult.error}`,
-		);
+		warn(`pre_check_batch: ${secretscanDecision.summary} - GATE FAILED`);
 	}
 
 	// v6.33: Persist secretscan results to evidence bundle
-	if (secretscanResult.ran && secretscanResult.result) {
+	if (secretscanResult.ran || secretscanResult.error) {
 		try {
-			const scanResult = secretscanResult.result as SecretscanResult;
+			const scanResult = secretscanDecision.result;
 			const secretscanEvidence: SecretscanEvidence = {
 				task_id: 'secretscan',
 				type: 'secretscan',
 				timestamp: new Date().toISOString(),
 				agent: 'pre_check_batch',
-				verdict: scanResult.count > 0 ? 'fail' : 'pass',
-				summary: `Secretscan: ${scanResult.count} finding(s), ${scanResult.files_scanned ?? 0} files scanned, ${scanResult.skipped_files ?? 0} skipped`,
-				findings_count: scanResult.count,
-				scan_directory: scanResult.scan_dir,
-				files_scanned: scanResult.files_scanned,
-				skipped_files: scanResult.skipped_files,
+				verdict: secretscanDecision.passed ? 'pass' : 'fail',
+				summary: secretscanDecision.summary,
+				findings_count: secretscanDecision.findingsCount,
+				scan_directory: scanResult?.scan_dir ?? directory,
+				files_scanned: scanResult?.files_scanned ?? 0,
+				skipped_files: scanResult?.skipped_files ?? 0,
+				incomplete_files: scanResult?.incomplete_files ?? 0,
 			};
-			await saveEvidence(directory, 'secretscan', secretscanEvidence);
+			await _internals.saveEvidence(
+				directory,
+				'secretscan',
+				secretscanEvidence,
+			);
 		} catch (e) {
 			warn(
 				`Failed to persist secretscan evidence: ${e instanceof Error ? e.message : String(e)}`,

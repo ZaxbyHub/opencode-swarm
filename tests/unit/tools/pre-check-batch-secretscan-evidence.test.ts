@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { SecretscanEvidence } from '../../../src/config/evidence-schema';
 import {
+	_internals,
 	type PreCheckBatchInput,
 	runPreCheckBatch,
 } from '../../../src/tools/pre-check-batch';
@@ -105,6 +106,7 @@ const mockSaveEvidence = mock(
 mock.module('../../../src/evidence/manager', () => ({
 	saveEvidence: mockSaveEvidence,
 }));
+const originalSaveEvidence = _internals.saveEvidence;
 
 // Helper to create temp test directories
 function createTempDir(): string {
@@ -142,9 +144,11 @@ describe('secretscan evidence persistence', () => {
 		mockSastScan.mockClear();
 		mockQualityBudget.mockClear();
 		mockSaveEvidence.mockClear();
+		_internals.saveEvidence = mockSaveEvidence;
 	});
 
 	afterEach(() => {
+		_internals.saveEvidence = originalSaveEvidence;
 		process.chdir(originalCwd);
 		fs.rmSync(tempDir, { recursive: true, force: true });
 	});

@@ -150,6 +150,36 @@ describe('AWS integration — end-to-end gate', () => {
 	});
 });
 
+describe('Stripe integration - end-to-end gate', () => {
+	test('hard-fails with the registry confidence and severity for Stripe keys', async () => {
+		const stripeKey = ['sk', 'test', 'x'.repeat(24)].join('_');
+		fs.writeFileSync(
+			path.join(tempDir, 'billing.env'),
+			`STRIPE_KEY=${stripeKey}\n`,
+		);
+
+		const result = await runPreCheckBatch({
+			directory: tempDir,
+			files: ['billing.env'],
+		});
+
+		expect(result.gates_passed).toBe(false);
+		const scan = result.secretscan.result as {
+			findings: Array<{
+				type: string;
+				confidence: string;
+				severity: string;
+			}>;
+		};
+		const finding = scan.findings.find((item) => item.type === 'stripe_key');
+		expect(finding).toMatchObject({
+			type: 'stripe_key',
+			confidence: 'high',
+			severity: 'critical',
+		});
+	});
+});
+
 describe('vacuous-pass guard (F-002)', () => {
 	/**
 	 * F-002: When files are provided but ALL are excluded by extension,
@@ -176,5 +206,28 @@ describe('vacuous-pass guard (F-002)', () => {
 		};
 		expect(scanResult.files_scanned).toBe(0);
 		expect(scanResult.skipped_files).toBe(1);
+	});
+});
+
+describe('incomplete-coverage hard gate', () => {
+	test('fails when one requested file is scanned and another is oversized', async () => {
+		fs.writeFileSync(path.join(tempDir, 'clean.txt'), 'clean\n');
+		fs.writeFileSync(
+			path.join(tempDir, 'oversized.txt'),
+			Buffer.alloc(513 * 1024, 0x61),
+		);
+
+		const result = await runPreCheckBatch({
+			directory: tempDir,
+			files: ['clean.txt', 'oversized.txt'],
+		});
+		const scan = result.secretscan.result as {
+			files_scanned: number;
+			incomplete_files: number;
+		};
+
+		expect(result.gates_passed).toBe(false);
+		expect(scan.files_scanned).toBe(1);
+		expect(scan.incomplete_files).toBe(1);
 	});
 });
