@@ -58,6 +58,7 @@ import {
 	stripKnownSwarmPrefix,
 	WatchdogConfigSchema,
 } from './config/schema';
+import { createRoleFilterSystemHook } from './context/role-filter.js';
 import { updateContextMapAfterAgent } from './context-map/post-agent-update.js';
 import { createEvaluationModelDispatcher } from './evaluation/model-dispatcher.js';
 import { tickAndMaybeDispatchCadence } from './full-auto/cadence.js';
@@ -984,6 +985,9 @@ async function initializeOpenCodeSwarm(
 	const getActiveReviewAgentName = (sessionID: string): string | undefined =>
 		swarmState.activeAgent.get(sessionID) ??
 		swarmState.agentSessions.get(sessionID)?.agentName;
+	const roleFilterSystemHook = createRoleFilterSystemHook(
+		getActiveReviewAgentName,
+	);
 	const commandHandler = createSwarmCommandHandler(
 		ctx.directory,
 		agentDefinitionMap,
@@ -2649,6 +2653,7 @@ async function initializeOpenCodeSwarm(
 							)
 						: undefined,
 				swarmCommandSystemRuleHook,
+				roleFilterSystemHook['experimental.chat.system.transform'],
 				(_input: unknown, output: { system?: string[] }): Promise<void> => {
 					if (Array.isArray(output.system) && output.system.length > 1) {
 						output.system = [output.system.join('\n\n')];

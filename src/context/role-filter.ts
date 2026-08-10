@@ -18,6 +18,11 @@ export interface ContextEntry {
 	name?: string;
 }
 
+export interface FilterByRoleOptions {
+	/** Allow valid leading [FOR: ...] tags to route otherwise-protected system entries. */
+	filterTaggedSystem?: boolean;
+}
+
 /**
  * Regex pattern for extracting [FOR: ...] tags from content
  * Matches patterns like: [FOR: ALL], [FOR: reviewer, test_engineer]
@@ -178,13 +183,15 @@ function logFilteringMetrics(
  *
  * @param entries - Array of context entries to filter
  * @param targetRole - The target agent role to filter for
- * @param directory - Optional project directory for metrics logging (defaults to cwd)
+ * @param directory - Optional project directory for metrics logging
+ * @param options - Optional routing behavior; defaults preserve historical semantics
  * @returns Filtered array of context entries
  */
 export function filterByRole(
 	entries: ContextEntry[],
 	targetRole: string,
 	directory?: string,
+	options: FilterByRoleOptions = {},
 ): ContextEntry[] {
 	// If no entries, return empty array
 	if (!entries || entries.length === 0) {
@@ -195,14 +202,22 @@ export function filterByRole(
 	const filtered: ContextEntry[] = [];
 
 	for (const entry of entries) {
+		// Parse before the exemption check so the production system-hook adapter
+		// can opt valid tagged system fragments into routing. Empty/malformed tags
+		// remain protected system context, and all default callers keep the
+		// historical unconditional system exemption.
+		const allowedAgents = parseForTag(entry.content);
+		const canFilterTaggedSystem =
+			entry.role === 'system' &&
+			options.filterTaggedSystem === true &&
+			allowedAgents !== null &&
+			allowedAgents.length > 0;
+
 		// Check if entry should never be filtered
-		if (shouldNeverFilter(entry)) {
+		if (shouldNeverFilter(entry) && !canFilterTaggedSystem) {
 			filtered.push(entry);
 			continue;
 		}
-
-		// Parse [FOR: ...] tag from content
-		const allowedAgents = parseForTag(entry.content);
 
 		// If no tag present, include for all (backward compatibility)
 		if (allowedAgents === null) {
@@ -222,4 +237,38 @@ export function filterByRole(
 	}
 
 	return filtered;
+}
+
+/**
+ * Create the production adapter for role-scoped system fragments.
+ *
+ * The adapter intentionally has no directory parameter: chat-system filtering
+ * must stay free of synchronous metrics I/O. Missing session or agent identity
+ * fails open so critical system context is never dropped speculatively.
+ */
+export function createRoleFilterSystemHook(
+	getActiveAgentName: (sessionID: string) => string | undefined,
+): {
+	'experimental.chat.system.transform': (
+		input: { sessionID?: string },
+		output: { system?: string[] },
+	) => Promise<void>;
+} {
+	return {
+		'experimental.chat.system.transform': async (input, output) => {
+			if (!input.sessionID || !Array.isArray(output.system)) return;
+
+			const targetRole = getActiveAgentName(input.sessionID);
+			if (!targetRole) return;
+
+			const entries: ContextEntry[] = output.system.map((content) => ({
+				role: 'system',
+				content,
+			}));
+			const filtered = filterByRole(entries, targetRole, undefined, {
+				filterTaggedSystem: true,
+			});
+			output.system = filtered.map(({ content }) => content);
+		},
+	};
 }
