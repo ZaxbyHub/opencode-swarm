@@ -17,6 +17,7 @@ import {
 	VERDICT_SET_2,
 } from '../evidence/normalize-verdict';
 import { validateSwarmPath } from '../hooks/utils';
+import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
 import { createSwarmTool } from './create-tool';
 
 /**
@@ -124,6 +125,7 @@ export async function executeWriteHallucinationEvidence(
 			'utf-8',
 		);
 		await fs.promises.rename(tempPath, validatedPath);
+		invalidateCachedArtifact(validatedPath);
 
 		return JSON.stringify(
 			{

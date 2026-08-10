@@ -22,6 +22,39 @@ describe('context-transparency', () => {
 
 	describe('formatStatusMarkdown context utilization', () => {
 		test('1: includes context utilization line when contextBudgetPct is 34', () => {
+			// The denominator is now carried on the snapshot (`contextBudgetTokens`,
+			// written next to the pct by system-enhancer) instead of being
+			// reconstructed from a constant. This test previously asserted
+			// `13,600 / 40,000` against the then-hardcoded
+			// DEFAULT_CONTEXT_BUDGET_CONFIG.budgetTokens; both that number and the
+			// idea of a single global denominator are gone, because the window is
+			// derived per model from `model.limit.context` (issue #1619).
+			const status: StatusData = {
+				hasPlan: true,
+				currentPhase: 'Phase 1',
+				completedTasks: 3,
+				totalTasks: 5,
+				agentCount: 7,
+				isLegacy: false,
+				turboMode: false,
+				contextBudgetPct: 34,
+				contextBudgetTokens: 200000,
+				compactionCount: 0,
+				lastSnapshotAt: null,
+			};
+
+			const output = formatStatusMarkdown(status);
+
+			// 34% of 200,000 = 68,000 — the estimate tracks the snapshot's own
+			// denominator, so it can no longer contradict the percentage.
+			expect(output).toContain('34.0% used');
+			expect(output).toContain('68,000 / 200,000 tokens');
+		});
+
+		test('1b: renders the percentage alone when the denominator is unknown', () => {
+			// Unreachable in production (the pct and the denominator are written on
+			// the same statement), but a snapshot without one must not have a
+			// token estimate fabricated against a constant.
 			const status: StatusData = {
 				hasPlan: true,
 				currentPhase: 'Phase 1',
@@ -37,9 +70,8 @@ describe('context-transparency', () => {
 
 			const output = formatStatusMarkdown(status);
 
-			// 34% of 40,000 = 13,600
-			expect(output).toContain('34.0% used');
-			expect(output).toContain('13,600 / 40,000 tokens');
+			expect(output).toContain('**Context**: 34.0% used');
+			expect(output).not.toContain('tokens)');
 		});
 
 		test('2: does NOT include context line when contextBudgetPct is null', () => {

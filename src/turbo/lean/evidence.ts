@@ -13,6 +13,7 @@ import { rmSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { bunWrite } from '../../utils/bun-compat';
+import { invalidateCachedArtifact } from '../../utils/swarm-artifact-cache';
 
 /**
  * Evidence record for a single lane.
@@ -182,6 +183,7 @@ async function atomicWriteJson<T>(filePath: string, data: T): Promise<void> {
 	try {
 		await bunWrite(tempPath, content);
 		await fs.rename(tempPath, filePath);
+		invalidateCachedArtifact(filePath);
 	} catch (error) {
 		// Clean up temp file on failure
 		try {

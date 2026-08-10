@@ -10,6 +10,7 @@ import type { tool } from '@opencode-ai/plugin';
 import { z } from 'zod';
 import { readEffectiveSpecSync } from '../sdd/effective-spec';
 import * as logger from '../utils/logger.js';
+import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache.js';
 import { createSwarmTool } from './create-tool';
 
 // ============ Constants ============
@@ -546,7 +547,15 @@ export const req_coverage: ReturnType<typeof tool> = createSwarmTool({
 				fs.mkdirSync(evidenceDir, { recursive: true });
 			}
 
+			// Re-running the tool for the same phase overwrites this exact path
+			// under `.swarm/evidence/`, which cached readers consume by path
+			// (`readCachedTextFileSync` in src/hooks/system-enhancer.ts and
+			// `readSwarmFileAsync` in src/hooks/knowledge-curator.ts, the latter
+			// reading whatever `.swarm/evidence/` path a trigger hands it). Drop the
+			// cache entry after the write SUCCEEDS so a same-size rewrite inside one
+			// filesystem timestamp tick cannot serve the previous report (#1729).
 			fs.writeFileSync(reportPath, JSON.stringify(result, null, 2), 'utf-8');
+			invalidateCachedArtifact(reportPath);
 		} catch (writeError) {
 			// Non-blocking - return result even if report write fails
 			logger.log(

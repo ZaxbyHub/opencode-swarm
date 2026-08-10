@@ -10,6 +10,7 @@ import type { ToolDefinition } from '@opencode-ai/plugin';
 import { z } from 'zod';
 import { validateSwarmPath } from '../hooks/utils';
 import { hasActiveTurboMode } from '../state';
+import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
 import { createSwarmTool } from './create-tool';
 import { resolveWorkingDirectory } from './resolve-working-directory';
 
@@ -487,6 +488,7 @@ export async function executeCompletionVerify(
 			JSON.stringify(evidenceBundle, null, 2),
 			'utf-8',
 		);
+		invalidateCachedArtifact(evidencePath);
 	} catch {
 		// Non-blocking - don't fail the tool if evidence write fails
 	}

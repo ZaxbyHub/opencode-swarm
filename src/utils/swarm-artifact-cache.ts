@@ -61,9 +61,22 @@ function sameStamp(a: ArtifactStamp, b: ArtifactStamp): boolean {
 	);
 }
 
+/**
+ * Dependency-injection seam for testing. Tests can temporarily replace these
+ * to force a specific (e.g. colliding) stat stamp without relying on
+ * filesystem/platform-specific ctime semantics (utimesSync cannot set ctime
+ * portably — see swarm-artifact-cache.test.ts's documented Windows/POSIX
+ * divergence). Restore each entry in afterEach via the saved original
+ * reference.
+ */
+export const _internals = {
+	stat: fs.stat,
+	statSync: fsSync.statSync,
+};
+
 async function getStamp(filePath: string): Promise<ArtifactStamp | null> {
 	try {
-		const stat = await fs.stat(filePath);
+		const stat = await _internals.stat(filePath);
 		if (!stat.isFile()) return null;
 		return { mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs, size: stat.size };
 	} catch {
@@ -74,7 +87,7 @@ async function getStamp(filePath: string): Promise<ArtifactStamp | null> {
 
 function getStampSync(filePath: string): ArtifactStamp | null {
 	try {
-		const stat = fsSync.statSync(filePath);
+		const stat = _internals.statSync(filePath);
 		if (!stat.isFile()) return null;
 		return { mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs, size: stat.size };
 	} catch {

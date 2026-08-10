@@ -88,7 +88,10 @@ import {
 	isObligationPreserving,
 	isSpecStale,
 } from '../utils/spec-hash';
-import { readCachedParsedFile } from '../utils/swarm-artifact-cache';
+import {
+	invalidateCachedArtifact,
+	readCachedParsedFile,
+} from '../utils/swarm-artifact-cache';
 import {
 	appendLedgerEvent,
 	computeCurrentPlanHash,
@@ -624,6 +627,7 @@ export async function regeneratePlanMarkdown(
 			/* already renamed or never created */
 		}
 	}
+	invalidateCachedArtifact(mdPath);
 }
 
 /**
@@ -849,6 +853,23 @@ export async function loadPlan(
 								// Write spec-staleness.json (includes precomputed diff so
 								// system-enhancer can render the advisory without importing
 								// spec-hash at module-load time — avoids repro-704 T1 regression).
+								//
+								// #1619 F1 — why the write below is followed by
+								// invalidateCachedArtifact: system-enhancer reads this marker back
+								// through `readCachedParsedFileSync`
+								// (SPEC_STALENESS_CACHE_NAMESPACE, src/hooks/system-enhancer.ts:152)
+								// in the SAME turn that loadPlan writes it (:1002 -> :1009 -> :187,
+								// mirrored on Path B at :1854/:1861). That cache decides freshness
+								// from the stat stamp alone, and a rewrite whose only changed field
+								// is the fixed-width ISO `timestamp` is byte-identical in length —
+								// so inside one filesystem timestamp tick `sameStamp()` matches and
+								// the PREVIOUS turn's snapshot is served to the spec-drift advisory
+								// that gates save_plan / update_task_status / phase_complete. This
+								// path does NOT route through `atomicWriteFile`, so the invalidation
+								// is manual. Keep it INSIDE the try and directly after the await:
+								// only a successful write may drop the cache entry, and the G2 scan
+								// (tests/helpers/swarm-write-cache-scan.ts) only looks 25 lines
+								// forward from the write call.
 								try {
 									const diffInfo = computeSpecDiff(directory);
 									const specStalenessPath = path.join(
@@ -875,6 +896,8 @@ export async function loadPlan(
 										),
 										'utf-8',
 									);
+									// #1619 F1 — see the rationale above the enclosing try.
+									invalidateCachedArtifact(specStalenessPath);
 								} catch {
 									// Non-fatal: spec-staleness.json write failure does not block plan loading
 								}
@@ -1645,6 +1668,7 @@ export async function savePlan(
 			/* already renamed or never created */
 		}
 	}
+	invalidateCachedArtifact(planPath);
 
 	// Write in-progress marker right after plan.json rename so that
 	// PlanSyncWorker's checkForUnauthorizedWrite() can skip its mtime
@@ -1687,6 +1711,7 @@ export async function savePlan(
 				/* already renamed or never created */
 			}
 		}
+		invalidateCachedArtifact(mdPath);
 	} catch (mdError) {
 		const message =
 			mdError instanceof Error ? mdError.message : String(mdError);
@@ -1774,6 +1799,7 @@ export async function rebuildPlan(
 		}
 	}
 	renameSync(tempPlanPath, planPath);
+	invalidateCachedArtifact(planPath);
 
 	// Write in-progress marker right after plan.json rename.
 	try {
@@ -1806,6 +1832,7 @@ export async function rebuildPlan(
 		);
 		await bunWrite(tempMdPath, markdownWithHash);
 		renameSync(tempMdPath, mdPath);
+		invalidateCachedArtifact(mdPath);
 	} finally {
 		// Always reset the marker to in_progress: false, even if plan.md write failed,
 		// so PlanSyncWorker's unauthorized-write checks are not permanently disabled.
@@ -1952,6 +1979,7 @@ export async function closePlanTerminalState(
 	);
 	await bunWrite(tempPlanPath, JSON.stringify(validated, null, 2));
 	renameSync(tempPlanPath, planPath);
+	invalidateCachedArtifact(planPath);
 
 	// Write in-progress marker right after plan.json rename so that
 	// PlanSyncWorker's checkForUnauthorizedWrite() can skip its mtime
@@ -1985,6 +2013,7 @@ export async function closePlanTerminalState(
 		);
 		await bunWrite(mdTempPath, markdownWithHash);
 		renameSync(mdTempPath, mdPath);
+		invalidateCachedArtifact(mdPath);
 	} finally {
 		// Always reset the marker to in_progress: false, even if plan.md write failed,
 		// so PlanSyncWorker's unauthorized-write checks are not permanently disabled.

@@ -40,7 +40,10 @@ describe('model-limits: adversarial/attack-vector tests', () => {
 			expect(mockLog).toHaveBeenCalledTimes(1);
 			const logCall = mockLog.mock.calls[0] as any[];
 			expect(logCall[0]).toContain('empty-string-provider');
-			expect(logCall[0]).toContain('fallback');
+			// Source label renamed 'fallback' -> 'static_default' when resolution
+			// moved into src/config/context-window.ts and gained named rungs; this
+			// still pins "the log names the rung that produced the number".
+			expect(logCall[0]).toContain('static_default');
 		});
 	});
 
@@ -55,7 +58,8 @@ describe('model-limits: adversarial/attack-vector tests', () => {
 			expect(mockLog).toHaveBeenCalledTimes(1);
 			const logCall = mockLog.mock.calls[0] as any[];
 			expect(logCall[0]).toContain('null-coercion-provider');
-			expect(logCall[0]).toContain('fallback');
+			// See the Scenario 2 note on the 'fallback' -> 'static_default' rename.
+			expect(logCall[0]).toContain('static_default');
 		});
 	});
 

@@ -14,7 +14,11 @@ import {
 	getSystemEnhancerDemand,
 } from '../services/injection-budget.js';
 import { getRunMemorySummary } from '../services/run-memory.js';
-import { clearCriticalShownIds, setCriticalShownIds } from '../state.js';
+import {
+	clearCriticalShownIds,
+	getLiveContextWindow,
+	setCriticalShownIds,
+} from '../state.js';
 import { warn } from '../utils/logger.js';
 import { sanitizeContextText } from './context-sanitizer.js';
 import {
@@ -851,10 +855,19 @@ export function createKnowledgeInjectorHook(
 			// Uses the same 0.33 tok/char ratio as estimateTokens() in context-budget.ts
 			const CHARS_PER_TOKEN = 1 / 0.33;
 			const { modelID, providerID } = extractModelInfo(output.messages);
+			// Live `model.limit.context` relayed from the system.transform hook via
+			// session state (this hook receives messages, never a `Model`). Without
+			// it the headroom gate below measured against a stale 128000, so a
+			// session on a 200k–1M model looked out of headroom — and
+			// `recordInjectionSkip('headroom_budget')` shows this gate is already a
+			// known dark-in-production suspect. `undefined` before the first
+			// system.transform of a session; that falls back to the static rungs.
+			const liveContextLimit = getLiveContextWindow(sessionId);
 			const modelLimitTokens = resolveModelLimit(
 				modelID,
 				providerID,
 				modelLimitOverrides,
+				liveContextLimit,
 			);
 			const MODEL_LIMIT_CHARS = Math.floor(modelLimitTokens * CHARS_PER_TOKEN);
 			const existingChars = output.messages.reduce((sum, msg) => {
@@ -1397,4 +1410,16 @@ export const _internals: {
 	buildEscalationBriefing,
 	recordLessonsShown,
 	confirmEntriesPhase,
+};
+
+/**
+ * Tier-0 test seam (see `.opencode/skills/writing-tests/SKILL.md`). Exposes the
+ * real injection primitive and its sentinel so the
+ * `consolidateSystemMessages` interaction test (issue #1619) exercises the
+ * production splice position and message shape instead of a hand-copied fixture
+ * that could silently drift from this module.
+ */
+export const _test_exports = {
+	injectKnowledgeMessage,
+	INJECTION_SENTINEL,
 };

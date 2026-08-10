@@ -22,6 +22,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { stripKnownSwarmPrefix } from '../config/schema.js';
 import { warn } from '../utils/logger.js';
+import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache.js';
 import type { MessageWithParts } from './knowledge-types.js';
 import {
 	computeSkillRelevanceScore,
@@ -1084,6 +1085,7 @@ export async function skillPropagationGateBefore(
 					_internals.mkdirSync(swarmDir, { recursive: true }); // drift-test:exempt — context.md is in PRESERVED_SWARM_PATHS, variable resolution prevents static match
 				}
 				_internals.writeFileSync(contextPath, updatedContent, 'utf-8'); // drift-test:exempt
+				invalidateCachedArtifact(contextPath);
 			}
 		} catch (err) {
 			warn(

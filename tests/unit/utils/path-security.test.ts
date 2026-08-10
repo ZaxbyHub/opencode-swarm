@@ -7,8 +7,10 @@ import {
 	containsControlChars,
 	containsPathTraversal,
 	validateDirectory,
+	validateProjectDirectory,
 	validateSymlinkBoundary,
 } from '../../../src/utils/path-security';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 describe('containsPathTraversal', () => {
 	test('blocks basic ../', () => {
@@ -124,6 +126,133 @@ describe('validateDirectory', () => {
 		expect(() => validateDirectory('D:/Projects')).toThrow(
 			'Windows absolute path',
 		);
+	});
+});
+
+describe('validateProjectDirectory', () => {
+	// The trust-model counterpart to validateDirectory: the project root the
+	// plugin host injects is TRUSTED and always ABSOLUTE. Both absolute forms
+	// must be accepted on EVERY platform — a Linux CI runner has to validate a
+	// Windows-style root string and vice versa, otherwise the same source is
+	// only exercised on one host (issue #1619 follow-up).
+	test('accepts POSIX-absolute roots on every platform', () => {
+		expect(() =>
+			validateProjectDirectory('/home/runner/work/repo'),
+		).not.toThrow();
+		expect(() =>
+			validateProjectDirectory('/Users/dev/my project'),
+		).not.toThrow();
+	});
+
+	test('accepts Windows-drive-absolute roots on every platform', () => {
+		expect(() => validateProjectDirectory('C:\\Users\\dev\\app')).not.toThrow();
+		expect(() =>
+			validateProjectDirectory('E:/ClaudeCode/opencode-swarm'),
+		).not.toThrow();
+	});
+
+	test('accepts a real absolute temp directory (the shape tests actually use)', () => {
+		const dir = canonicalMkdtemp('vpd-');
+		try {
+			expect(() => validateProjectDirectory(dir)).not.toThrow();
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	// #1619 review round 4 (F5). The previous version of this test asserted the
+	// BACKSLASH UNC root is accepted unconditionally. That is a Windows-only
+	// truth: `path.isAbsolute` is bound to the host platform, `\\server\share`
+	// is win32-absolute but NOT posix-absolute, and the drive-letter fallback
+	// does not match it — so the old assertion passed on a Windows dev box and
+	// would have thrown on a Linux/macOS CI runner. Both arms below assert, so
+	// neither platform runs a vacuous test.
+	test('UNC roots: the forward-slash form is portable, the backslash form is Windows-only', () => {
+		// Mechanism, pinned platform-independently so this documents the rule on
+		// every runner rather than only on the one executing it.
+		expect(path.posix.isAbsolute('//server/share/project')).toBe(true);
+		expect(path.win32.isAbsolute('//server/share/project')).toBe(true);
+		expect(path.posix.isAbsolute('\\\\server\\share\\project')).toBe(false);
+		expect(path.win32.isAbsolute('\\\\server\\share\\project')).toBe(true);
+
+		// Forward-slash UNC is absolute under both parsers, so it validates
+		// everywhere.
+		expect(() =>
+			validateProjectDirectory('//server/share/project'),
+		).not.toThrow();
+
+		if (process.platform === 'win32') {
+			expect(() =>
+				validateProjectDirectory('\\\\server\\share\\project'),
+			).not.toThrow();
+		} else {
+			expect(() =>
+				validateProjectDirectory('\\\\server\\share\\project'),
+			).toThrow('must be an absolute path');
+		}
+	});
+
+	test('a driveless rooted POSIX path is absolute on Windows too', () => {
+		// path.win32.isAbsolute('/srv/app') is true, so this validates on both
+		// platforms — the reason the docblock calls out driveless rooted paths.
+		expect(path.win32.isAbsolute('/srv/app')).toBe(true);
+		expect(() => validateProjectDirectory('/srv/app')).not.toThrow();
+	});
+
+	test('rejects empty and whitespace-only roots', () => {
+		// An empty root makes path.resolve('', '.swarm') land on the host process
+		// cwd — an invariant-4 (.swarm containment) escape, not a harmless no-op.
+		expect(() => validateProjectDirectory('')).toThrow('empty');
+		expect(() => validateProjectDirectory('   ')).toThrow('empty');
+	});
+
+	test('rejects traversal even when the root is otherwise absolute', () => {
+		expect(() => validateProjectDirectory('/srv/app/../../etc')).toThrow(
+			'path traversal',
+		);
+		expect(() => validateProjectDirectory('C:\\app\\..\\..\\Windows')).toThrow(
+			'path traversal',
+		);
+		expect(() => validateProjectDirectory('/srv/%2e%2e/etc')).toThrow(
+			'path traversal',
+		);
+	});
+
+	test('rejects control and directional-format characters', () => {
+		expect(() => validateProjectDirectory('/srv/app\0/etc')).toThrow(
+			'control characters',
+		);
+		expect(() => validateProjectDirectory('/srv/app\nrm -rf')).toThrow(
+			'control characters',
+		);
+		// U+202E RIGHT-TO-LEFT OVERRIDE — display-spoofing a path segment.
+		expect(() => validateProjectDirectory('/srv/\u202egpj.exe')).toThrow(
+			'control characters',
+		);
+	});
+
+	test('rejects RELATIVE roots — they resolve against the host process cwd', () => {
+		expect(() => validateProjectDirectory('src')).toThrow('absolute path');
+		expect(() => validateProjectDirectory('tests/unit')).toThrow(
+			'absolute path',
+		);
+		expect(() => validateProjectDirectory('./app')).toThrow('absolute path');
+		// Drive-relative (no separator after the colon) is NOT absolute.
+		expect(() => validateProjectDirectory('C:app')).toThrow('absolute path');
+	});
+
+	test('is NOT interchangeable with validateDirectory — the two are duals', () => {
+		// Guards against a future "simplification" that collapses them.
+		const absolute = '/srv/app';
+		const relative = 'src/tools';
+		expect(() => validateDirectory(absolute)).toThrow();
+		expect(() => validateProjectDirectory(absolute)).not.toThrow();
+		expect(() => validateDirectory(relative)).not.toThrow();
+		expect(() => validateProjectDirectory(relative)).toThrow();
+	});
+
+	test('is reachable through the _internals DI seam', () => {
+		expect(_internals.validateProjectDirectory).toBe(validateProjectDirectory);
 	});
 });
 

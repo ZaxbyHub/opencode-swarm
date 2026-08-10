@@ -37,6 +37,7 @@ import {
 	isQuotaError,
 	isTransientProviderError,
 } from '../../utils/provider-error-classification';
+import { invalidateCachedArtifact } from '../../utils/swarm-artifact-cache';
 import {
 	type LaneEvidence,
 	listLaneEvidence,
@@ -403,6 +404,7 @@ async function writeReviewerEvidence(
 	try {
 		await fs.writeFile(tempPath, content, 'utf-8');
 		await fs.rename(tempPath, evidencePath);
+		invalidateCachedArtifact(evidencePath);
 	} catch (error) {
 		// Clean up temp file on failure
 		try {

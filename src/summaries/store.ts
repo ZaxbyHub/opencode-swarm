@@ -27,6 +27,7 @@ import {
 } from '../evidence/manager';
 import { validateSwarmPath } from '../hooks/utils';
 import { warn } from '../utils';
+import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
 import {
 	type AgentWorkSummary,
 	AgentWorkSummarySchema,
@@ -46,6 +47,7 @@ function writeRawSidecar(absPath: string, bundle: unknown): void {
 	try {
 		writeFileSync(tempFile, JSON.stringify(bundle, null, 2), 'utf-8');
 		renameSync(tempFile, absPath);
+		invalidateCachedArtifact(absPath);
 	} finally {
 		if (existsSync(tempFile)) {
 			try {

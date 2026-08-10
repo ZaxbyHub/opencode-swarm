@@ -3,19 +3,18 @@
  * Tests: append-only, getRunMemorySummary, token limits, fingerprint, filtering
  */
 
-import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-// Mock validateDirectory to a no-op so Windows absolute temp paths work in tests.
-mock.module('../../../src/utils/path-security', () => ({
-	containsPathTraversal: () => false,
-	containsControlChars: () => false,
-	validateDirectory: () => {},
-}));
-
-afterEach(() => mock.restore());
+// No path-security mock: run-memory now validates its trusted project root with
+// validateProjectDirectory, which ACCEPTS the absolute temp directories below.
+// The previous no-op mock.module existed only because validateDirectory (the
+// untrusted-relative-input validator) rejected every absolute path; keeping it
+// would silently stub a function the service no longer calls (issue #1619
+// follow-up). Rejection behaviour is covered in
+// tests/unit/services/trusted-root-validation.adversarial.test.ts.
 
 import {
 	generateTaskFingerprint,

@@ -15,6 +15,7 @@ import {
 } from '../hooks/review-receipt.js';
 import { validateSwarmPath } from '../hooks/utils.js';
 import { bunWrite } from '../utils/bun-compat.js';
+import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache.js';
 import type {
 	ReviewDiffCompleteness,
 	ReviewDiffSelector,
@@ -152,6 +153,7 @@ export async function persistAutoReviewEvidence(
 			throw new Error('auto-review evidence temp path changed before commit');
 		}
 		fs.renameSync(revalidatedTemp, safeTarget);
+		invalidateCachedArtifact(safeTarget);
 		return safeTarget;
 	} finally {
 		try {
