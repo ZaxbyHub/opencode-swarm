@@ -12,7 +12,10 @@ import {
 	type ArtifactInput,
 	parseCandidates,
 } from '../../../src/background/candidate-parser';
-import { prReviewDiscoveryArtifactCoversLane } from '../../../src/hooks/pr-workflow-gate';
+import {
+	_test_exports,
+	prReviewDiscoveryArtifactCoversLane,
+} from '../../../src/hooks/pr-workflow-gate';
 
 const DIGEST = 'a'.repeat(64);
 const BASE_HEADER =
@@ -144,18 +147,13 @@ describe('shared candidate and CLEAN semantics', () => {
 			'concurrency-state',
 			'M-1 | concurrency-state | HIGH | concurrency | src/a.ts:1 | claim | invariant | evidence | HIGH',
 		] as const,
-	])('rejects malformed or missing canonical headers identically for %s', (family, header, lane, row) => {
+	])('rejects a wrong canonical header but repairs an absent one for %s', (family, header, lane, row) => {
 		const misorderedHeader = header.replace(
 			'severity | category',
 			'category | severity',
 		);
-		const malformedArtifacts = [
-			`${header} | extra\n${row}`,
-			`${misorderedHeader}\n${row}`,
-			`[CANDIDATE] | ${row}`,
-		];
-		for (const text of malformedArtifacts) {
-			const parsed = parseCandidates(artifact(text), {
+		const parse = (text: string) =>
+			parseCandidates(artifact(text), {
 				accept_partial: false,
 				accept_degraded: false,
 				degraded: false,
@@ -165,10 +163,28 @@ describe('shared candidate and CLEAN semantics', () => {
 					? { expected_lane: lane }
 					: { expected_micro_lane: lane }),
 			});
+
+		// A header that is PRESENT but wrong (extra field, misordered fields) is a
+		// genuine contract violation and still fails closed at both boundaries.
+		for (const text of [
+			`${header} | extra\n${row}`,
+			`${misorderedHeader}\n${row}`,
+		]) {
+			const parsed = parse(text);
 			expect(parsed.candidates).toEqual([]);
 			expect(parsed.error_code).toBe('invalid-candidate-header');
 			expect(prReviewDiscoveryArtifactCoversLane(text, lane)).toBe(false);
 		}
+
+		// A header that is ABSENT, alongside a valid marker-bearing row, is now
+		// repaired so the lane's real findings survive (approved salvage). The raw
+		// parser still refuses it; only the PR-review boundary, which normalizes
+		// the artifact first, accepts.
+		const absentHeader = `[CANDIDATE] | ${row}`;
+		const parsedAbsent = parse(absentHeader);
+		expect(parsedAbsent.candidates).toEqual([]);
+		expect(parsedAbsent.error_code).toBe('invalid-candidate-header');
+		expect(prReviewDiscoveryArtifactCoversLane(absentHeader, lane)).toBe(true);
 	});
 
 	test('uses the shared exact header analyzer at both trust boundaries', () => {
@@ -387,13 +403,31 @@ describe('shared candidate and CLEAN semantics', () => {
 		).toBe(true);
 	});
 
-	test('rejects a candidate from a NOT_TRIGGERED micro family outside ownership', () => {
+	test('never credits a micro family outside ownership, even while salvaging', () => {
 		const text = `${MICRO_HEADER}\nM-AUTH | auth-identity-secrets | HIGH | security | src/auth.ts:1 | claim | invariant | auth evidence | HIGH\nM-PRIVACY | privacy-observability | HIGH | privacy | src/log.ts:1 | claim | invariant | privacy evidence | HIGH`;
+		// The owned row is real work and now establishes coverage (approved
+		// salvage) instead of being discarded because a foreign row sits beside it.
 		expect(
 			prReviewDiscoveryArtifactCoversLane(text, 'auth-identity-secrets', [
 				'auth-identity-secrets',
 			]),
-		).toBe(false);
+		).toBe(true);
+		// The integrity property that must NOT move: when a source is scoped to the
+		// lanes it owns, the out-of-ownership row is excluded from the credited
+		// inventory.
+		expect(
+			_test_exports.extractCandidateIds(text, 'micro_lane', [
+				'auth-identity-secrets',
+			]),
+		).toEqual(['M-AUTH']);
+		// Unscoped extraction is intentional for full-ownership sources (a
+		// subagent's inconsistent lane labelling must not silently drop a real
+		// candidate), so it keeps both rows. Pinned so the difference between the
+		// two shapes is explicit rather than accidental.
+		expect(_test_exports.extractCandidateIds(text, 'micro_lane')).toEqual([
+			'M-AUTH',
+			'M-PRIVACY',
+		]);
 		expect(
 			prReviewDiscoveryArtifactCoversLane(text, 'auth-identity-secrets', [
 				'auth-identity-secrets',
@@ -402,12 +436,18 @@ describe('shared candidate and CLEAN semantics', () => {
 		).toBe(true);
 	});
 
-	test('rejects an unprefixed short foreign row after a valid owned candidate', () => {
+	test('retains a valid owned candidate despite a short foreign row', () => {
 		const text = `${BASE_HEADER}\nC-OWNED | intent-architecture | HIGH | correctness | src/a.ts:1 | claim | evidence | impact | HIGH\nC-FOREIGN | security-trust | HIGH`;
 		expect(
 			prReviewDiscoveryArtifactCoversLane(text, 'intent-architecture', [
 				'intent-architecture',
 			]),
-		).toBe(false);
+		).toBe(true);
+		// The malformed foreign row contributes nothing to the inventory.
+		expect(
+			_test_exports.extractCandidateIds(text, 'base_explorer', [
+				'intent-architecture',
+			]),
+		).toEqual(['C-OWNED']);
 	});
 });

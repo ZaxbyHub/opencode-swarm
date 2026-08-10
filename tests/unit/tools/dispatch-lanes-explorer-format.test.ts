@@ -156,4 +156,34 @@ describe('applyExplorerFormatSuffix', () => {
 		);
 		expect(result.errors.join('; ').length).toBeLessThan(300);
 	});
+
+	test('delivers the hardened format rules into the composed lane prompt', () => {
+		// Scope note: this asserts DELIVERY, not compliance. Whether a lane obeys
+		// the contract cannot be unit-tested — the measured evidence for that is the
+		// real-run replay in 08-test-results.md. What is testable, and what was
+		// previously untested, is that the three rules added after the PR #2090
+		// analysis actually reach the prompt a lane receives.
+		_internals.getGeneratedAgentNames = () => ['swarm_explorer'];
+		const [lane] = applyExplorerFormatSuffix([
+			{ id: 'L1', agent: 'swarm_explorer', prompt: 'inspect the diff' },
+		]);
+
+		// 1. Pipe escaping — the rule that 3 of the 14 real failures needed. Must
+		// carry a literal backslash: `\|` in a template literal renders as a bare
+		// `|`, which would instruct lanes to emit the character that breaks a row.
+		expect(lane.prompt).toContain('\\|');
+		// 2. A worked example, placed before the per-family reference blocks. A
+		// header restated only as a format spec measured ~1/6 compliance.
+		expect(lane.prompt).toContain('WORKED EXAMPLE');
+		expect(lane.prompt.indexOf('WORKED EXAMPLE')).toBeLessThan(
+			lane.prompt.indexOf('Micro-lane format'),
+		);
+		// 3. The [CLEAN] shape — no confidence field, zero-findings only. A
+		// confidence appended to CLEAN caused 4 of the real failures.
+		expect(lane.prompt).toContain('NO\nconfidence field');
+		expect(lane.prompt).toContain('never alongside');
+		// The example id obeys the uniqueness rule stated below it, so a lane that
+		// copies it verbatim cannot collide at assertNoDuplicates.
+		expect(lane.prompt).toContain('example-lane-001 | example-lane');
+	});
 });

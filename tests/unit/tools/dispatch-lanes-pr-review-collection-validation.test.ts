@@ -9,7 +9,10 @@ import {
 	readLaneOutput,
 	storeLaneOutput,
 } from '../../../src/background/lane-output-store.js';
-import { recordPendingDelegation } from '../../../src/background/pending-delegations.js';
+import {
+	findByCorrelationId,
+	recordPendingDelegation,
+} from '../../../src/background/pending-delegations.js';
 import {
 	_internals,
 	_test_exports,
@@ -305,5 +308,31 @@ describe('PR-review discovery validation during collection', () => {
 		expect(result.success).toBe(true);
 		expect(result.completed).toBe(1);
 		expect(result.lane_results[0].output).toBe('ordinary advisory prose');
+	});
+
+	test('persists salvagedWorkflowLanes to the ledger through the real collect path', async () => {
+		// End-to-end wiring guard. The pending-delegations round-trip test passes the
+		// field straight to appendDelegationTransition, so it cannot catch a break in
+		// the assignment inside collectOnce that actually derives it from
+		// validation.salvaged — this test drives the real collect path instead.
+		const session = 'session-salvage-ledger-salvage-lane';
+		await recordLane({
+			batch: 'salvage-ledger',
+			lane: 'salvage-lane',
+			mode: 'swarm-pr-review:base',
+			workflowLane: 'intent-architecture',
+			// Headerless but salvageable: one valid row, canonical header absent.
+			text: 'prose the explorer wrote first\n[CANDIDATE] | S-1 | intent-architecture | HIGH | correctness | src/a.ts:1 | claim text | evidence text | impact text | HIGH',
+		});
+
+		const result = await collect('salvage-ledger');
+		expect(result.success).toBe(true);
+		expect(result.completed).toBe(1);
+
+		const record = findByCorrelationId(directory, session);
+		expect(record?.status).toBe('completed');
+		expect(record?.result?.salvagedWorkflowLanes).toEqual([
+			'intent-architecture',
+		]);
 	});
 });

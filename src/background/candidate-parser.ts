@@ -9,6 +9,7 @@ import {
 	type CandidateSeverity,
 	candidateDiagnosticPreview,
 	isCandidateLookingShortRow,
+	normalizeCandidateArtifact,
 	type RowFormatFamily,
 	removeCandidateCodeFences,
 	type CleanAttestationRecord as SharedCleanAttestationRecord,
@@ -931,7 +932,12 @@ function parseText(input: ArtifactInput, flags: ParseFlags): ParseResult {
 		formatFamiliesDetected.add(cleanAttestation.row_format_family);
 	}
 
-	const acceptedCandidates = cleanErrorCode ? [] : candidates;
+	// A defective CLEAN attestation discredits the attestation, never the
+	// candidate rows: every candidate here was independently validated by
+	// analyzeCandidateFields. Discarding them made one malformed trailing row
+	// destroy an entire lane's findings. The attestation itself stays gated
+	// below on `!cleanErrorCode && candidates.length === 0`.
+	const acceptedCandidates = candidates;
 	const parseErrors = parseErrorDetails.length;
 
 	const envelope = buildInvocationEnvelope(
@@ -1003,7 +1009,23 @@ export function parseAndPersist(
 	flags: ParseFlags,
 	options: ParsePersistOptions,
 ): ParseResultWithSidecar {
-	const result = parseCandidates(input, flags);
+	// Normalize at this tool boundary for the same reason the PR-review gate does:
+	// otherwise an artifact the gate accepts as covered could still be refused
+	// here, leaving the caller unable to retrieve findings from a lane that had
+	// already been credited. Scope note: it is specifically HEADER REPAIR that stays
+	// boundary-only — parseCandidates itself never synthesizes a header, so the two
+	// boundaries that consume artifacts on a caller's behalf agree while the pure
+	// parser does not silently rewrite input. Candidate acceptance is a separate
+	// question and DID change for every consumer: a defective [CLEAN] no longer
+	// discards independently validated candidate rows (see acceptedCandidates).
+	const normalizedInput = flags.expected_family
+		? {
+				...input,
+				text: normalizeCandidateArtifact(input.text, flags.expected_family)
+					.text,
+			}
+		: input;
+	const result = parseCandidates(normalizedInput, flags);
 
 	try {
 		appendToSidecar(

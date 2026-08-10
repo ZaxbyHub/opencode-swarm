@@ -179,6 +179,13 @@ export interface BackgroundDelegationResult {
 	outputArtifactError?: string;
 	transcriptIncomplete?: boolean;
 	messageCount?: number;
+	/**
+	 * Workflow lanes whose discovery artifact was accepted only after repair — a
+	 * synthesized canonical header, or valid rows retained beside malformed ones.
+	 * Recorded on the durable ledger so a repaired lane stays distinguishable from
+	 * a well-formed one after the fact, which is where post-mortems actually look.
+	 */
+	salvagedWorkflowLanes?: string[];
 }
 
 export interface BackgroundTerminalResult {
@@ -272,8 +279,47 @@ const ResultSchema = z
 		outputArtifactError: z.string().optional(),
 		transcriptIncomplete: z.boolean().optional(),
 		messageCount: z.number().optional(),
+		// Must be declared here: this schema is .strict() and readDelegations
+		// safeParse-skips any record it rejects, so an undeclared field would make
+		// the entire terminal transition invisible to every reader — turning a
+		// successfully salvaged lane into one that appears never to have completed.
+		salvagedWorkflowLanes: z.array(z.string()).optional(),
 	})
 	.strict();
+
+/**
+ * Compile-time parity guard between the TypeScript interface and the `.strict()`
+ * schema above.
+ *
+ * `appendRecord` writes without validating while `readDelegations`
+ * safeParse-skips anything the schema rejects, so a field declared on the
+ * interface but missing from the schema is written to disk and then silently
+ * invisible to every reader — dropping the whole record, not just the field.
+ * That is not a hypothetical: it shipped once during this change and made
+ * completed lanes read back as `pending`.
+ *
+ * Mutual assignability makes `tsc` reject the next occurrence for free, which is
+ * a strictly stronger rung than another runtime test.
+ */
+// Compared by KEY, deliberately. Mutual assignability does not work here: an
+// optional field present on one side and absent from the other still satisfies
+// `extends` in both directions, so an assignability guard would silently pass on
+// exactly the drift that caused the bug.
+type FieldsMissingFromResultSchema = Exclude<
+	keyof BackgroundDelegationResult,
+	keyof z.infer<typeof ResultSchema>
+>;
+type FieldsMissingFromResultInterface = Exclude<
+	keyof z.infer<typeof ResultSchema>,
+	keyof BackgroundDelegationResult
+>;
+const _RESULT_SCHEMA_MATCHES_INTERFACE: [
+	FieldsMissingFromResultSchema,
+	FieldsMissingFromResultInterface,
+] extends [never, never]
+	? true
+	: false = true;
+void _RESULT_SCHEMA_MATCHES_INTERFACE;
 
 const WorkspaceSchema = z
 	.object({
