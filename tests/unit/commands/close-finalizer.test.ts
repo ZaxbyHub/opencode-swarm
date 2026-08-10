@@ -733,7 +733,11 @@ describe('handleCloseCommand — finalizer stages', () => {
 			).toBe('critical data');
 			// Result should contain a warning about the preserved file
 			expect(result).toContain('Preserved handoff.md');
-			expect(result).toContain('Archived');
+			// Partial archive → prose says "Archive partial" (issue #2030: the
+			// prose is derived from the structured result and truthfully reports
+			// failures). The archive bundle path is still present.
+			expect(result).toContain('Archive');
+			expect(result).toContain('.swarm/archive/swarm-');
 		});
 
 		it('partial archive failure path: close output includes warnings about unarchived files and completes without crash even when copy fails for some (FR-018)', async () => {
@@ -825,8 +829,10 @@ describe('handleCloseCommand — finalizer stages', () => {
 
 			const result = await handleCloseCommand(testDir, []);
 
-			// context.md was archived (archivedFileCount > 0)
-			expect(result).toContain('Archived');
+			// context.md was archived (archivedFileCount > 0). The prose
+			// truthfully reports the partial state ("Archive partial" when any
+			// artifact failed, "Archived" when all succeeded — issue #2030).
+			expect(result).toContain('Archive');
 			// But no active-state files were archived → archivedActiveStateFiles empty
 			// So events.jsonl directory must still exist
 			expect(existsSync(path.join(swarmDir(), 'events.jsonl'))).toBe(true);
