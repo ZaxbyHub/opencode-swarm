@@ -15,11 +15,12 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { ToolContext } from '@opencode-ai/plugin';
-
 // Import the tool
 import { check_gate_status } from '../../../src/tools/check-gate-status';
+import { freezeClock } from '../../helpers/test-clock.js';
 
 describe('check_gate_status secretscan feature', () => {
+	let restoreClock: (() => void) | undefined;
 	const TEST_DIR = path.join(
 		os.tmpdir(),
 		`check-gate-status-test-${Date.now()}`,
@@ -88,11 +89,17 @@ describe('check_gate_status secretscan feature', () => {
 	}
 
 	beforeEach(() => {
+		restoreClock = freezeClock({
+			fixedNow: 1_700_000_000_000,
+			isoNow: '2023-11-14T22:13:20.000Z',
+		});
 		// Create test directory structure
 		fs.mkdirSync(EVIDENCE_DIR, { recursive: true });
 	});
 
 	afterEach(() => {
+		restoreClock?.();
+		restoreClock = undefined;
 		// Clean up test directory
 		fs.rmSync(TEST_DIR, { recursive: true, force: true });
 	});
