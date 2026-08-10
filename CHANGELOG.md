@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.137.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.137.3...v7.137.4) (2026-08-10)
+
+
+### Bug Fixes
+
+* **context:** wire role filter into system injection ([433b9f4](https://github.com/ZaxbyHub/opencode-swarm/commit/433b9f492e7834a6ccd84a177556cc206449be1d))
+* **scripts:** make the FR-006 test-file cap gate cross-platform ([#2078](https://github.com/ZaxbyHub/opencode-swarm/issues/2078)) ([a8aee21](https://github.com/ZaxbyHub/opencode-swarm/commit/a8aee2104c57fb782ccda01c1f7c16421b6135b3))
+
 ## [7.137.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.137.2...v7.137.3) (2026-08-10)
 
 
