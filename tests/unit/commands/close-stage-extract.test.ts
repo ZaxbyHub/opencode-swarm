@@ -50,7 +50,6 @@ const realResetSwarmStatePreservingSingletons =
 	closeInternals.resetSwarmStatePreservingSingletons;
 
 // ── Helpers ───────────────────────────────────────────────────────────────
-
 let testDir: string;
 
 function swarmDir(): string {
