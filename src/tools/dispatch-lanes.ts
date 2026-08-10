@@ -1689,10 +1689,38 @@ function isRetryableSessionCreateFailure(error: unknown): boolean {
 			truncated = true;
 			continue;
 		}
-		if (Array.isArray(object)) {
+		let isArray = false;
+		try {
+			isArray = Array.isArray(object);
+		} catch {
+			truncated = true;
+			continue;
+		}
+		if (isArray) {
+			let arrayLength: number;
+			try {
+				const lengthDescriptor = Object.getOwnPropertyDescriptor(
+					object,
+					'length',
+				);
+				if (
+					!lengthDescriptor ||
+					!('value' in lengthDescriptor) ||
+					typeof lengthDescriptor.value !== 'number' ||
+					!Number.isSafeInteger(lengthDescriptor.value) ||
+					lengthDescriptor.value < 0
+				) {
+					truncated = true;
+					continue;
+				}
+				arrayLength = lengthDescriptor.value;
+			} catch {
+				truncated = true;
+				continue;
+			}
 			const remainingNodes = MAX_CREATE_FAILURE_WALK_NODES - visited;
-			const itemCount = Math.min(object.length, remainingNodes);
-			if (itemCount < object.length) truncated = true;
+			const itemCount = Math.min(arrayLength, remainingNodes);
+			if (itemCount < arrayLength) truncated = true;
 			for (let index = 0; index < itemCount; index++) {
 				let descriptor: PropertyDescriptor | undefined;
 				try {

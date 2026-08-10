@@ -12,6 +12,7 @@ import type {
 	BackgroundCoderReservation,
 	BackgroundDelegationRecord,
 	BackgroundTaskChangeContext,
+	RecordPendingInput,
 } from '../background/pending-delegations.js';
 import {
 	captureWorkspaceSnapshot,
@@ -2131,6 +2132,54 @@ const recordPendingDelegationForBackground: typeof import('../background/pending
 			await import('../background/pending-delegations.js')
 		).recordPendingDelegationDetailed(...args);
 
+function sameReplayPrompt(
+	existing: BackgroundDelegationRecord['prompt'],
+	incoming: RecordPendingInput['prompt'],
+): boolean {
+	if (existing === undefined || incoming === undefined) {
+		return existing === incoming;
+	}
+	return (
+		existing.digest === incoming.digest &&
+		existing.chars === incoming.chars &&
+		existing.truncated === incoming.truncated &&
+		existing.text === incoming.text
+	);
+}
+
+function hasStableBackgroundReplayIdentity(
+	existing: BackgroundDelegationRecord,
+	incoming: RecordPendingInput,
+): boolean {
+	return (
+		existing.correlationId === incoming.correlationId &&
+		existing.subagentSessionId === incoming.subagentSessionId &&
+		existing.parentSessionId === incoming.parentSessionId &&
+		existing.callID === incoming.callID &&
+		existing.jobId === incoming.jobId &&
+		existing.normalizedAgent === incoming.normalizedAgent &&
+		existing.swarmPrefixedAgent === incoming.swarmPrefixedAgent &&
+		existing.planTaskId === incoming.planTaskId &&
+		existing.evidenceTaskId === incoming.evidenceTaskId &&
+		sameReplayPrompt(existing.prompt, incoming.prompt)
+	);
+}
+
+function hydrateBackgroundReplayInput(
+	existing: BackgroundDelegationRecord,
+	incoming: RecordPendingInput,
+): RecordPendingInput {
+	return {
+		...incoming,
+		workspace: existing.workspace,
+		taskChangeContext: existing.taskChangeContext,
+		worktree: existing.worktree,
+		coderReservationId: existing.coderReservationId,
+		prompt: existing.prompt,
+		generation: existing.generation ?? 1,
+	};
+}
+
 const writeDelegationFallbackForBackground: typeof import('../background/pending-delegations.js').writeDelegationFallback =
 	async (...args) =>
 		(
@@ -3494,7 +3543,7 @@ export function createDelegationGateHook(
 						const { extractDispatchIds } = await import(
 							'../background/task-envelope.js'
 						);
-						const { buildPromptSnapshot } = await import(
+						const { buildPromptSnapshot, findByCorrelationId } = await import(
 							'../background/pending-delegations.js'
 						);
 						const { captureWorkspaceSnapshot } = await import(
@@ -3528,7 +3577,7 @@ export function createDelegationGateHook(
 								stripKnownSwarmPrefix(subagentType) === 'coder'
 									? coderTaskChangeContextByCallID.get(input.callID)
 									: undefined;
-							const pendingInput = {
+							const pendingInputDraft: RecordPendingInput = {
 								correlationId: subagentSessionId,
 								jobId,
 								subagentSessionId,
@@ -3567,6 +3616,21 @@ export function createDelegationGateHook(
 										: undefined,
 								generation: 1,
 							};
+							const existingOwner = findByCorrelationId(
+								directory,
+								subagentSessionId,
+							);
+							const pendingInput =
+								existingOwner &&
+								hasStableBackgroundReplayIdentity(
+									existingOwner,
+									pendingInputDraft,
+								)
+									? hydrateBackgroundReplayInput(
+											existingOwner,
+											pendingInputDraft,
+										)
+									: pendingInputDraft;
 							const primaryOutcome =
 								await _internals.recordPendingDelegationForBackground(
 									directory,
@@ -3578,15 +3642,25 @@ export function createDelegationGateHook(
 								primaryOutcome.status === 'duplicate';
 							backgroundCorrelationConflict =
 								primaryOutcome.status === 'conflict';
-							if (backgroundCorrelationConflict) {
+							if (primaryOutcome.status === 'conflict') {
 								const preservation = await protectUntrackedBackgroundWorktree(
 									evidenceTaskId ?? standardDispatch?.planTaskId,
 									'background correlation id conflicts with an existing immutable launch owner',
 								);
+								const worktreeStatus = !standardDispatch
+									? 'No isolated worktree was attached to this conflicting call.'
+									: preservation.durable
+										? `The current worktree was durably preserved with ${preservation.detail}.`
+										: `The current worktree was not durably preserved (${preservation.detail}); automatic reclamation remains blocked pending recovery.`;
+								const reservationStatus = coderReservation
+									? `The current reservation ${coderReservation.reservationId} was retained and was not bound to the conflicting correlation.`
+									: primaryOutcome.record.coderReservationId
+										? `No new reservation was present for this replay; the durable owner's reservation ${primaryOutcome.record.coderReservationId} remains unchanged.`
+										: 'No current or durable-owner coder reservation was present.';
 								backgroundOwnershipDurable = preservation.durable;
 								pushAdvisory(
 									session,
-									`BACKGROUND DELEGATION CORRELATION CONFLICT: ${subagentType} (${subagentSessionId}) collided with a different durable launch owner. No fallback owner was written and no reservation was bound. Recovery protection: ${preservation.detail}. Do not advance task ${evidenceTaskId ?? 'unknown'} until the collision is resolved.`,
+									`BACKGROUND DELEGATION CORRELATION CONFLICT: ${subagentType} (${subagentSessionId}) collided with a different durable launch owner (parent=${primaryOutcome.record.parentSessionId}, call=${primaryOutcome.record.callID}, agent=${primaryOutcome.record.swarmPrefixedAgent}, task=${primaryOutcome.record.planTaskId ?? 'none'}). Inspect that existing owner and reconcile it before continuing. ${worktreeStatus} ${reservationStatus} No fallback owner was written and no reservation was bound. Do not abort, delete, or re-dispatch this correlation until reconciliation is complete. Do not advance task ${evidenceTaskId ?? 'unknown'} until the collision is resolved.`,
 								);
 							} else if (primaryOutcome.status === 'failed') {
 								backgroundRecordDurable =

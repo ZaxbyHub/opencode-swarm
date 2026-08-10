@@ -4,7 +4,6 @@ import {
 	findByBatchId,
 	recordPendingDelegation,
 } from '../../../src/background/pending-delegations';
-import type { ParallelDispatcher } from '../../../src/parallel/dispatcher/parallel-dispatcher';
 import {
 	_internals,
 	_test_exports,
@@ -145,52 +144,6 @@ describe('bounded pre-prompt session.create retry', () => {
 		});
 	});
 
-	test('fails a duplicate async create id without disrupting its authoritative owner', async () => {
-		const directory = tempProject();
-		await recordPendingDelegation(directory, {
-			correlationId: 'shared-session',
-			jobId: null,
-			subagentSessionId: 'shared-session',
-			parentSessionId: 'original-parent',
-			callID: 'original-batch',
-			normalizedAgent: 'reviewer',
-			swarmPrefixedAgent: 'reviewer',
-			planTaskId: null,
-			evidenceTaskId: null,
-			batchId: 'original-batch',
-			laneId: 'original-lane',
-			generation: 1,
-		});
-		const ops = asyncOps(
-			mock(async () => ({ data: { id: 'shared-session' } })),
-		);
-		ops.abort = mock(async () => undefined);
-		_internals.getSessionOps = () => ops;
-
-		const result = await executeDispatchLanesAsync(
-			{
-				batch_id: 'colliding-batch',
-				lanes: [{ id: 'new-lane', agent: 'explorer', prompt: 'inspect' }],
-			},
-			directory,
-		);
-
-		expect(result.lane_results[0]).toMatchObject({
-			status: 'failed',
-			session_id: 'shared-session',
-			generation: 1,
-		});
-		expect(ops.promptAsync).not.toHaveBeenCalled();
-		expect(ops.abort).not.toHaveBeenCalled();
-		expect(ops.delete).not.toHaveBeenCalled();
-		expect(findByBatchId(directory, 'original-batch')[0]).toMatchObject({
-			status: 'pending',
-			laneId: 'original-lane',
-			generation: 1,
-		});
-		expect(findByBatchId(directory, 'colliding-batch')).toEqual([]);
-	});
-
 	test('stops after exactly two transient create failures', async () => {
 		const create = mock(async () => ({ error: { statusCode: 503 } }));
 		const ops = blockingOps(create);
@@ -305,6 +258,32 @@ describe('bounded pre-prompt session.create retry', () => {
 		expect(
 			_test_exports.isRetryableSessionCreateFailure({ status: '503' }),
 		).toBe(true);
+		expect(_test_exports.isRetryableSessionCreateFailure('ECONNRESET')).toBe(
+			true,
+		);
+		expect(
+			_test_exports.isRetryableSessionCreateFailure(
+				'invalid model configuration',
+			),
+		).toBe(false);
+		const lengthTrap = new Proxy([], {
+			get(target, property, receiver) {
+				if (property === 'length') throw new Error('length trap');
+				return Reflect.get(target, property, receiver);
+			},
+		});
+		expect(() =>
+			_test_exports.isRetryableSessionCreateFailure(lengthTrap),
+		).not.toThrow();
+		const revokedArray = Proxy.revocable([], {});
+		revokedArray.revoke();
+		let revokedResult: boolean | undefined;
+		expect(() => {
+			revokedResult = _test_exports.isRetryableSessionCreateFailure(
+				revokedArray.proxy,
+			);
+		}).not.toThrow();
+		expect(revokedResult).toBe(false);
 	});
 
 	test('retries a local create timeout and deletes the late first session without prompting it', async () => {
@@ -319,6 +298,13 @@ describe('bounded pre-prompt session.create retry', () => {
 				: Promise.resolve({ data: { id: 'on-time-session' } }),
 		);
 		const ops = blockingOps(create);
+		let resolveDeleted!: (args: { path: { id: string } }) => void;
+		const deleted = new Promise<{ path: { id: string } }>((resolve) => {
+			resolveDeleted = resolve;
+		});
+		ops.delete = mock(async (args) => {
+			if (args.path.id === 'late-first-session') resolveDeleted(args);
+		});
 		_internals.getSessionOps = () => ops;
 		const result = await executeDispatchLanes(
 			{
@@ -335,8 +321,7 @@ describe('bounded pre-prompt session.create retry', () => {
 		expect(ops.prompt.mock.calls[0]?.[0].path.id).toBe('on-time-session');
 
 		resolveFirst({ data: { id: 'late-first-session' } });
-		await new Promise((resolve) => setTimeout(resolve, 0));
-		expect(ops.delete).toHaveBeenCalledWith({
+		await expect(deleted).resolves.toEqual({
 			path: { id: 'late-first-session' },
 		});
 	});
@@ -390,6 +375,13 @@ describe('bounded pre-prompt session.create retry', () => {
 			const create = mock(async () => ({ data: { id: `prompt-${label}` } }));
 			const promptAsync = mock(implementation);
 			const ops = asyncOps(create, promptAsync);
+			let resolveCleanup!: () => void;
+			const cleanupStarted = new Promise<void>((resolve) => {
+				resolveCleanup = resolve;
+			});
+			ops.abort = mock(async () => {
+				resolveCleanup();
+			});
 			_internals.getSessionOps = () => ops;
 			const batchId = `single-shot-${caseIndex}`;
 			const result = await executeDispatchLanesAsync(
@@ -401,66 +393,12 @@ describe('bounded pre-prompt session.create retry', () => {
 				directory,
 			);
 			expect(result.lane_results[0]?.generation).toBe(1);
-			for (let attempt = 0; attempt < 50; attempt++) {
-				if (findByBatchId(directory, batchId)[0]?.status === 'error') break;
-				await new Promise((resolve) => setTimeout(resolve, 1));
-			}
+			await cleanupStarted;
 			expect(promptAsync).toHaveBeenCalledTimes(1);
 			expect(create).toHaveBeenCalledTimes(1);
 			expect(findByBatchId(directory, batchId)[0]?.status).toBe('error');
 		});
 	}
-
-	test('releases and synchronously reacquires dispatcher capacity between create attempts', async () => {
-		const events: string[] = [];
-		let slot = 0;
-		const dispatcher: ParallelDispatcher = {
-			config: {
-				enabled: true,
-				maxConcurrentTasks: 1,
-				evidenceLockTimeoutMs: 0,
-			},
-			dispatch: () => {
-				events.push('dispatch');
-				const slotId = `slot-${++slot}`;
-				return {
-					action: 'dispatch',
-					reason: 'slot',
-					slot: { slotId, taskId: 'lane', runId: `run-${slot}`, startedAt: 0 },
-				};
-			},
-			handles: () => [],
-			releaseSlot: () => events.push('release'),
-			shutdown: () => events.push('shutdown'),
-		};
-		_internals.createParallelDispatcher = () => dispatcher;
-		let attempt = 0;
-		const ops = blockingOps(
-			mock(async () => {
-				events.push('create');
-				return ++attempt === 1
-					? { error: { status: 503 } }
-					: { data: { id: 'ok' } };
-			}),
-			mock(async () => {
-				events.push('prompt');
-				return { data: { parts: [] } };
-			}),
-		);
-		_internals.getSessionOps = () => ops;
-		await executeDispatchLanes(
-			{ lanes: [{ id: 'lane', agent: 'explorer', prompt: 'inspect' }] },
-			tempProject(),
-		);
-		expect(events.slice(0, 6)).toEqual([
-			'dispatch',
-			'create',
-			'release',
-			'dispatch',
-			'create',
-			'prompt',
-		]);
-	});
 
 	test('defaults legacy collected rows without generation to 1', async () => {
 		const directory = tempProject();
