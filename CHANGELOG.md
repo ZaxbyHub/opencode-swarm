@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.138.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.138.0...v7.138.1) (2026-08-10)
+
+
+### Bug Fixes
+
+* **secretscan:** fail closed on incomplete coverage ([ebd6586](https://github.com/ZaxbyHub/opencode-swarm/commit/ebd65863503c877e7903ac37c7db3f88ec708ed0))
+
 ## [7.138.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.137.5...v7.138.0) (2026-08-10)
 
 
