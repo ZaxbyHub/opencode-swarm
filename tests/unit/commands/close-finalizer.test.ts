@@ -680,14 +680,11 @@ describe('handleCloseCommand — finalizer stages', () => {
 			const archivePath = path.join(swarmDir(), 'archive');
 			mkdirSync(archivePath, { recursive: true });
 			writeFileSync(path.join(archivePath, 'blocker'), 'x');
-			// Can't easily make dir unwritable in all envs, so test the
-			// positive case: when archive succeeds (archivedFileCount > 0),
-			// files ARE cleaned
+			// Can't easily make dir unwritable in all envs; test the positive
+			// case: when archive succeeds, active-state files ARE cleaned.
 			const result = await handleCloseCommand(testDir, []);
 
-			// events.jsonl should be cleaned because archive succeeded
 			expect(existsSync(path.join(swarmDir(), 'events.jsonl'))).toBe(false);
-			// Result should mention archive success
 			expect(result).toContain('Archived');
 		});
 
@@ -733,7 +730,9 @@ describe('handleCloseCommand — finalizer stages', () => {
 			).toBe('critical data');
 			// Result should contain a warning about the preserved file
 			expect(result).toContain('Preserved handoff.md');
-			expect(result).toContain('Archived');
+			// Partial archive → prose truthfully says "Archive partial" (#2030).
+			expect(result).toContain('Archive');
+			expect(result).toContain('.swarm/archive/swarm-');
 		});
 
 		it('partial archive failure path: close output includes warnings about unarchived files and completes without crash even when copy fails for some (FR-018)', async () => {
@@ -825,8 +824,9 @@ describe('handleCloseCommand — finalizer stages', () => {
 
 			const result = await handleCloseCommand(testDir, []);
 
-			// context.md was archived (archivedFileCount > 0)
-			expect(result).toContain('Archived');
+			// context.md was archived (archivedFileCount > 0). Prose truthfully
+			// says "Archive partial" on failure paths (#2030).
+			expect(result).toContain('Archive');
 			// But no active-state files were archived → archivedActiveStateFiles empty
 			// So events.jsonl directory must still exist
 			expect(existsSync(path.join(swarmDir(), 'events.jsonl'))).toBe(true);

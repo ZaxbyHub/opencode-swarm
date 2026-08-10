@@ -3591,6 +3591,12 @@ export default {
 // Type re-exports remain — they are erased at runtime so they do not appear
 // in Object.values(mod) and cannot break OpenCode's plugin loader.
 export type { AgentDefinition } from './agents';
+// SQLite archive snapshot engine (issue #2030). Re-exported so the Node-side
+// parity proof (scripts/repro-2030-archive-node.mjs) can exercise the REAL
+// shipped engine — including the byte-budget preflight, typed reason_code,
+// temp-then-rename publish, and row-count validation — under node:sqlite via
+// the shared loader, not a standalone shim. Pure until invoked.
+export { archiveSqliteSnapshot } from './commands/archive-sqlite.js';
 export type {
 	AgentName,
 	AutomationCapabilities,

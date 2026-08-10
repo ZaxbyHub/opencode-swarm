@@ -62,8 +62,8 @@ export type TelemetryEvent =
 	| 'execution_stall_denied'
 	/**
 	 * Issue #2063 B4 — a read/glob/grep/bash call resolved to a path inside the
-	 * INSTALLED opencode-swarm package and was denied. `target` is relative to
-	 * the package root so no user home path is written to the ledger.
+	 * INSTALLED opencode-swarm package and was denied. `target` is relative to the
+	 * package root so no user home path is written to the ledger.
 	 */
 	| 'swarm_internals_read_denied'
 	// PRM events
@@ -83,7 +83,12 @@ export type TelemetryEvent =
 	// defeated the type system, so a live production event kind existed in
 	// `.swarm/telemetry.jsonl` that no type, catalog, or consumer knew about.
 	// That is the exact defect class this issue targets; the cast is now gone.
-	| 'agent_conflict_detected';
+	| 'agent_conflict_detected'
+	// Close/archive observability (issue #2030): one structured event shared by
+	// user-facing prose and the telemetry stream, carrying per-artifact
+	// requiredness/attempt/validation/source_disposition plus aggregate
+	// archive_valid/archive_empty health facts (counts only, no row content).
+	| 'close_archive_result';
 
 /** Stable classification for how a reviewer-gate decision was established. */
 export type ReviewerGateEvidenceKind =
@@ -388,6 +393,65 @@ export function rotateTelemetryIfNeeded(
 	} catch {
 		// Rotation errors must be silent
 	}
+}
+
+/**
+ * Flush any buffered telemetry records to disk and reopen the append stream.
+ *
+ * Why this exists (issue #2030 item 8): `/swarm close` archives
+ * `telemetry.jsonl` via `fs.copyFile`, but the writer holds an open buffered
+ * `WriteStream` whose in-memory buffer is not reflected in the on-disk file
+ * until the OS accepts the bytes. Archiving without flushing silently loses the
+ * tail records of the session.
+ *
+ * Ordering (race fix, swarm-pr-review F-003): the replacement stream is created
+ * and assigned to `_writeStream` BEFORE `end()` is called on the old handle, so
+ * a concurrent `emit()` that races across the await lands on the live stream.
+ * The old handle's write callback would otherwise fire
+ * `ERR_STREAM_WRITE_AFTER_END`, latch `_disabled = true`, and kill telemetry for
+ * every subsequent session until restart (server-scoped plugin process). This
+ * mirrors the already-safe `rotateTelemetryIfNeeded` ordering.
+ *
+ * `WriteStream.end(cb)` invokes `cb` on the `'finish'` event — AFTER the buffer
+ * has been drained to the OS — so awaiting that callback is the documented way
+ * to guarantee the on-disk file contains every emitted record up to this point.
+ *
+ * Fail-open: any error during reopen disables telemetry rather than throwing —
+ * a flush failure must never block the close pipeline.
+ */
+export async function flushAndDrainTelemetry(): Promise<void> {
+	const stream = _writeStream;
+	if (stream === null || _projectDirectory === null) {
+		return;
+	}
+	// Create the replacement stream and install it BEFORE ending the old one,
+	// so a racing emit() lands on the live stream and the old handle fails the
+	// identity guard in the emit() error handler.
+	let next: ReturnType<typeof createWriteStream>;
+	try {
+		const telemetryPath = path.join(
+			_projectDirectory,
+			'.swarm',
+			'telemetry.jsonl',
+		);
+		next = createWriteStream(telemetryPath, { flags: 'a' });
+		next.on('error', () => {
+			if (_writeStream === next) {
+				_disabled = true;
+				_writeStream = null;
+			}
+		});
+		_writeStream = next;
+	} catch {
+		// Reopen failed — leave telemetry disabled rather than throwing.
+		_disabled = true;
+		_writeStream = null;
+		return;
+	}
+	// Now drain the old handle. Racing emits go to `next` (already installed).
+	await new Promise<void>((resolve) => {
+		stream.end(() => resolve());
+	});
 }
 
 // ============================================================================
@@ -737,6 +801,38 @@ export const telemetry = {
 	},
 
 	/**
+	 * Close/archive structured result (issue #2030). This single event is the
+	 * shared source of truth for both the user-facing close summary prose and
+	 * the telemetry stream, so the two cannot disagree. Carries per-artifact
+	 * structured fields plus aggregate `archive_valid`/`archive_empty` health
+	 * facts. Row counts are counts ONLY — no row content is ever emitted (issue
+	 * item 4/9), enabling PR 16 to alarm and PR 20 to report without leaking
+	 * data.
+	 */
+	closeArchiveResult(data: {
+		archive_valid: boolean;
+		archive_empty: boolean;
+		file_count: number;
+		bundle: string;
+		artifacts: Array<{
+			artifact: string;
+			requiredness: string;
+			attempt: string;
+			validation: string;
+			source_disposition: string;
+			method: string;
+			reason_code: string;
+			row_counts?: {
+				schema_migrations_max_version: number | null;
+				project_constraints: number;
+				qa_gate_profile: number;
+			};
+		}>;
+	}): void {
+		_internals.emit('close_archive_result', data);
+	},
+
+	/**
 	 * Issue #2063 C2 — the PRM hard-stop DENIAL was actually delivered to the
 	 * agent (thrown by the guardrails `toolBefore` consumer). `prm_hard_stop`
 	 * above records the TRIGGER and is emitted solely by
@@ -770,6 +866,7 @@ export const _internals: {
 	telemetry: typeof telemetry;
 	emit: typeof emit;
 	rotateTelemetryIfNeeded: typeof rotateTelemetryIfNeeded;
+	flushAndDrainTelemetry: typeof flushAndDrainTelemetry;
 	heartbeatListenerCount: () => number;
 	createObservation: typeof createObservation;
 	toLegacyTelemetryLine: typeof toLegacyTelemetryLine;
@@ -777,6 +874,7 @@ export const _internals: {
 	telemetry,
 	emit,
 	rotateTelemetryIfNeeded,
+	flushAndDrainTelemetry,
 	heartbeatListenerCount: () => (_heartbeatListener !== null ? 1 : 0),
 	createObservation,
 	toLegacyTelemetryLine,

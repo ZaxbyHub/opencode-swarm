@@ -50,7 +50,6 @@ const realResetSwarmStatePreservingSingletons =
 	closeInternals.resetSwarmStatePreservingSingletons;
 
 // ── Helpers ───────────────────────────────────────────────────────────────
-
 let testDir: string;
 
 function swarmDir(): string {
@@ -162,6 +161,9 @@ function buildBaseCtx(
 		archivedFileCount: 0,
 		archivedActiveStateFiles: new Set<string>(),
 		archivedActiveStateDirs: new Set<string>(),
+		archiveFailureReasons: new Map<string, string>(),
+		archiveResults: [] as unknown[],
+		archiveStageFailed: false,
 		timestamp: '',
 		archiveDir: '',
 		archiveSuffix: '',
@@ -364,8 +366,7 @@ describe('runArchiveStage', () => {
 	});
 
 	// Regression: a linked worktree must NOT archive the cohort-shared knowledge
-	// family (it has its own lifecycle; peers may be active). This is the
-	// scenario whose absence let the close.ts split-brain ship undetected.
+	// family (it has its own lifecycle; peers may be active).
 	it('skips cohort-shared knowledge artifacts when the worktree is linked', async () => {
 		writeArtifact('knowledge.jsonl', '{"id":"k1"}\n');
 		writeArtifact('knowledge-rejected.jsonl', '{"id":"r1"}\n');
@@ -427,8 +428,7 @@ describe('runArchiveStage', () => {
 		const ctx = buildBaseCtx() as any;
 		await runArchiveStage(ctx);
 
-		// archiveEvidence is called with ctx.directory (testDir). We verify by
-		// checking that the bundle was actually created in .swarm/archive/ under testDir.
+		// archiveEvidence is called with ctx.directory; verify the bundle is under testDir.
 		expect(ctx.archiveDir).toContain(testDir);
 	});
 

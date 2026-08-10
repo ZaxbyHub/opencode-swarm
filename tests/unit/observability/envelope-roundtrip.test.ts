@@ -208,6 +208,30 @@ const FIXTURES: Record<string, Record<string, unknown>> = {
 		resolutionPath: 'escalate_critic',
 		summary: 'reviewer rejected three cycles',
 	},
+	// Issue #2030 close/archive structured result. Payload mirrors the real
+	// producer in src/commands/close.ts (emitCloseArchiveResult).
+	close_archive_result: {
+		archive_valid: true,
+		archive_empty: false,
+		file_count: 12,
+		bundle: 'swarm-2026-08-09T12-00-00-000Z-abc123',
+		artifacts: [
+			{
+				artifact: 'swarm.db',
+				requiredness: 'optional',
+				attempt: 'succeeded',
+				validation: 'passed',
+				source_disposition: 'removed',
+				method: 'vacuum_into',
+				reason_code: 'ok',
+				row_counts: {
+					schema_migrations_max_version: 1,
+					project_constraints: 3,
+					qa_gate_profile: 0,
+				},
+			},
+		],
+	},
 };
 
 describe('envelope roundtrip — AC1 positive', () => {
