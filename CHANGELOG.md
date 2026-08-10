@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.138.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.138.1...v7.138.2) (2026-08-10)
+
+
+### Bug Fixes
+
+* **pr-review:** salvage valid discovery rows instead of discarding lanes ([1495fdd](https://github.com/ZaxbyHub/opencode-swarm/commit/1495fdded23ed08fa6af1e094d7534da98c2b75a))
+* **pr-review:** salvage valid discovery rows instead of discarding lanes ([2daf0af](https://github.com/ZaxbyHub/opencode-swarm/commit/2daf0af5cae0dd56f30dcff44841d557873e48ea))
+
 ## [7.138.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.138.0...v7.138.1) (2026-08-10)
 
 
