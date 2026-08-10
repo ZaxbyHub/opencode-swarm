@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
+	_internals,
 	runSecretscan,
 	runSecretscanOnFiles,
 	type SecretscanErrorResult,
@@ -10,6 +11,7 @@ import {
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 let tempDir: string;
+const originalLstatFile = _internals.lstatFile;
 
 function successful(
 	result: SecretscanResult | SecretscanErrorResult,
@@ -23,6 +25,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	_internals.lstatFile = originalLstatFile;
 	fs.rmSync(tempDir, { recursive: true, force: true });
 });
 
@@ -38,7 +41,23 @@ describe('truthful per-file accounting', () => {
 			expect(result.files_scanned).toBe(0);
 			expect(result.skipped_files).toBe(1);
 			expect(result.incomplete_files).toBe(0);
+			expect(result.incomplete_paths).toEqual([]);
 		}
+	});
+
+	test('skips oversized binary prefixes without marking them incomplete', async () => {
+		fs.writeFileSync(
+			path.join(tempDir, 'oversized-binary.txt'),
+			Buffer.alloc(513 * 1024, 0),
+		);
+		const result = successful(
+			await runSecretscanOnFiles(['oversized-binary.txt'], tempDir),
+		);
+
+		expect(result.files_scanned).toBe(0);
+		expect(result.skipped_files).toBe(1);
+		expect(result.incomplete_files).toBe(0);
+		expect(result.incomplete_paths).toEqual([]);
 	});
 
 	test('reports oversized files as incomplete in both entry points', async () => {
@@ -55,6 +74,8 @@ describe('truthful per-file accounting', () => {
 			expect(result.files_scanned).toBe(0);
 			expect(result.skipped_files).toBe(1);
 			expect(result.incomplete_files).toBe(1);
+			expect(result.incomplete_paths).toHaveLength(1);
+			expect(result.incomplete_paths[0].reason).toBe('oversized');
 		}
 	});
 
@@ -65,6 +86,61 @@ describe('truthful per-file accounting', () => {
 		expect(result.files_scanned).toBe(0);
 		expect(result.skipped_files).toBe(1);
 		expect(result.incomplete_files).toBe(1);
+		expect(result.incomplete_paths).toHaveLength(1);
+		expect(result.incomplete_paths[0].path).toBe('nested');
+		expect(result.incomplete_paths[0].reason).toBe('non_file');
+	});
+
+	test('treats non-ENOENT inspection failures as incomplete', async () => {
+		fs.writeFileSync(path.join(tempDir, 'blocked.txt'), 'clean\n');
+		_internals.lstatFile = ((filePath: fs.PathLike) => {
+			if (String(filePath).endsWith('blocked.txt')) {
+				const error = new Error('access denied') as NodeJS.ErrnoException;
+				error.code = 'EACCES';
+				throw error;
+			}
+			return originalLstatFile(filePath);
+		}) as typeof _internals.lstatFile;
+
+		const result = successful(
+			await runSecretscanOnFiles(['blocked.txt'], tempDir),
+		);
+
+		expect(result.files_scanned).toBe(0);
+		expect(result.incomplete_files).toBe(1);
+		expect(result.incomplete_paths).toEqual([
+			{ path: 'blocked.txt', reason: 'read_error' },
+		]);
+	});
+
+	test('skips an explicitly requested file that disappeared', async () => {
+		const result = successful(
+			await runSecretscanOnFiles(['missing.txt'], tempDir),
+		);
+
+		expect(result.files_scanned).toBe(0);
+		expect(result.skipped_files).toBe(1);
+		expect(result.incomplete_files).toBe(0);
+		expect(result.incomplete_paths).toEqual([]);
+	});
+
+	test('bounds incomplete path diagnostics and marks truncation', async () => {
+		const directories = Array.from(
+			{ length: 30 },
+			(_, index) => `dir-${index}`,
+		);
+		for (const directory of directories) {
+			fs.mkdirSync(path.join(tempDir, directory));
+		}
+
+		const result = successful(await runSecretscanOnFiles(directories, tempDir));
+
+		expect(result.incomplete_files).toBe(30);
+		expect(result.incomplete_paths).toHaveLength(25);
+		expect(result.incomplete_paths.at(-1)).toEqual({
+			path: '.',
+			reason: 'truncated',
+		});
 	});
 });
 
@@ -140,6 +216,10 @@ describe('complete bounded content coverage', () => {
 			result.findings.some((finding) => finding.type === 'high_entropy'),
 		).toBe(true);
 		expect(serialized).not.toContain(highEntropyValue);
+		expect(
+			result.findings.find((finding) => finding.type === 'high_entropy')
+				?.redacted,
+		).toBe('credential=[HIGH_ENTROPY]');
 	});
 
 	test('preserves findings when another requested file is incomplete', async () => {

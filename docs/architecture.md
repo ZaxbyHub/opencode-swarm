@@ -1206,9 +1206,11 @@ Read-only tool to query the gate status of a specific task. Reads `.swarm/eviden
 **Output**: JSON with `taskId`, `status` (all_passed|incomplete|no_evidence), `required_gates`, `passed_gates`, `missing_gates`, `gates` map, `message`, `todo_scan` (advisory TODO count if available), and `secretscan_verdict` (v6.33)
 
 **Secretscan verdict (v6.33)**: The tool now scans EvidenceBundle entries for `secretscan` type evidence using the `isSecretscanEvidence` type guard. When secretscan entries are found, it reports:
-- `pass` — No secrets found (verdict: pass, approved, or info)
-- `fail` — Secrets detected (verdict: fail or rejected), status becomes `incomplete` and task is BLOCKED
+- `pass` — No secrets found, no incomplete coverage, and no zero-coverage or count mismatch
+- `fail` — Secrets detected, or the scan was incomplete / zero-coverage / count-mismatched; status becomes `incomplete` and task is BLOCKED
 - `not_run` — No secretscan evidence found for this task
+
+When the verdict is blocked for incomplete coverage rather than findings, the message names the coverage failure instead of claiming secrets were found. The persisted secretscan evidence also carries bounded `incomplete_paths` entries so the gate can surface the affected paths and reasons without dumping an unbounded scan trace.
 
 **Safety**: Validates task ID format against three accepted patterns (canonical N.M or N.M.P numeric format, retrospective format retro-N, or internal tool IDs like sast_scan/quality_budget/syntax_check/placeholder_scan/sbom_generate/build/secretscan), enforces path containment within workspace `.swarm/evidence/` directory, reads-only (no writes)
 

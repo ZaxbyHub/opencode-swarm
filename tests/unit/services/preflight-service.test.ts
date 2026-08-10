@@ -13,12 +13,15 @@ import { tmpdir } from 'os';
 import * as path from 'path';
 import { resetGlobalEventBus } from '../../../src/background/event-bus';
 import {
+	_internals,
 	formatPreflightMarkdown,
 	handlePreflightCommand,
 	type PreflightConfig,
 	type PreflightReport,
 	runPreflight,
 } from '../../../src/services/preflight-service';
+
+const originalRunSecretscan = _internals.runSecretscan;
 
 describe('Preflight Service', () => {
 	let testDir: string;
@@ -30,6 +33,7 @@ describe('Preflight Service', () => {
 	});
 
 	afterEach(() => {
+		_internals.runSecretscan = originalRunSecretscan;
 		// Clean up test directory
 		if (fs.existsSync(testDir)) {
 			fs.rmSync(testDir, { recursive: true, force: true });
@@ -675,6 +679,7 @@ describe('Preflight Service', () => {
 	describe('secrets check execution', () => {
 		it('should run secrets check when not skipped and return pass for clean directory', async () => {
 			// Run with secrets check NOT skipped - should hit the actual secrets check code path
+			fs.writeFileSync(path.join(testDir, 'clean.txt'), 'clean\n');
 			const report = await runPreflight(testDir, 1, {
 				skipTests: true,
 				skipEvidence: true,
@@ -685,6 +690,74 @@ describe('Preflight Service', () => {
 			const secretsCheck = report.checks.find((c) => c.type === 'secrets');
 			expect(secretsCheck).toBeDefined();
 			expect(['pass', 'skip']).toContain(secretsCheck?.status);
+		});
+
+		it('fails the secrets check when a requested file is oversized', async () => {
+			fs.writeFileSync(path.join(testDir, 'clean.txt'), 'clean\n');
+			fs.writeFileSync(
+				path.join(testDir, 'oversized.txt'),
+				Buffer.alloc(513 * 1024, 0x61),
+			);
+
+			const report = await runPreflight(testDir, 1, {
+				skipTests: true,
+				skipEvidence: true,
+				skipVersion: true,
+			});
+
+			const secretsCheck = report.checks.find((c) => c.type === 'secrets');
+			expect(secretsCheck?.status).toBe('fail');
+			expect(secretsCheck?.message).toContain('incomplete file(s)');
+			expect(secretsCheck?.details?.incompleteFiles).toBe(1);
+			expect(secretsCheck?.details?.incompletePaths).toEqual([
+				expect.objectContaining({
+					path: expect.stringContaining('oversized.txt'),
+					reason: 'oversized',
+				}),
+			]);
+			expect(report.overall).toBe('fail');
+		});
+
+		it('fails the secrets check when zero files are scanned', async () => {
+			fs.writeFileSync(
+				path.join(testDir, 'screenshot.png'),
+				Buffer.from([0x89]),
+			);
+
+			const report = await runPreflight(testDir, 1, {
+				skipTests: true,
+				skipEvidence: true,
+				skipVersion: true,
+			});
+
+			const secretsCheck = report.checks.find((c) => c.type === 'secrets');
+			expect(secretsCheck?.status).toBe('fail');
+			expect(secretsCheck?.message).toContain('zero requested files scanned');
+			expect(secretsCheck?.details?.filesScanned).toBe(0);
+			expect(report.overall).toBe('fail');
+		});
+
+		it('fails closed when the scanner reports deadline-truncated coverage', async () => {
+			_internals.runSecretscan = (async () => ({
+				scan_dir: testDir,
+				findings: [],
+				count: 0,
+				files_scanned: 1,
+				skipped_files: 1,
+				incomplete_files: 1,
+				incomplete_paths: [{ path: 'later.txt', reason: 'deadline' }],
+			})) as typeof _internals.runSecretscan;
+
+			const report = await runPreflight(testDir, 1, {
+				skipTests: true,
+				skipEvidence: true,
+				skipVersion: true,
+			});
+
+			const secretsCheck = report.checks.find((c) => c.type === 'secrets');
+			expect(secretsCheck?.status).toBe('fail');
+			expect(secretsCheck?.message).toContain('later.txt (deadline)');
+			expect(report.overall).toBe('fail');
 		});
 	});
 

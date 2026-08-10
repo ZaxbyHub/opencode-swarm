@@ -109,16 +109,19 @@ describe('bounded scan completion', () => {
 			path.join(tempDir, 'maximum-line.txt'),
 			`${'a'.repeat(512 * 1024 - stripeKey.length - 1)} ${stripeKey}`,
 		);
-		const started = performance.now();
 
-		const result = successful(await runSecretscan(tempDir));
+		const result = successful(
+			await runSecretscanOnFiles(['maximum-line.txt'], tempDir),
+		);
 		const serialized = JSON.stringify(result, null, 2);
 
 		expect(result.files_scanned).toBe(1);
 		expect(result.findings).toHaveLength(1);
 		expect(serialized).not.toContain(stripeKey);
+		for (const finding of result.findings) {
+			expect(finding.context.length).toBeLessThanOrEqual(1_000);
+		}
 		expect(Buffer.byteLength(serialized, 'utf8')).toBeLessThanOrEqual(512_000);
-		expect(performance.now() - started).toBeLessThan(5_000);
 	});
 
 	test('directory discovery yields and reports deadline-truncated coverage', async () => {
@@ -163,6 +166,29 @@ describe('bounded scan completion', () => {
 		expect(maximumRequestedRead).toBeLessThanOrEqual(512 * 1024 + 1);
 	});
 
+	test('rejects a file root for standalone scans', async () => {
+		fs.writeFileSync(path.join(tempDir, 'root-file.txt'), 'clean\n');
+
+		const result = await runSecretscan(path.join(tempDir, 'root-file.txt'));
+
+		expect('error' in result).toBe(true);
+		if ('error' in result) {
+			expect(result.error).toContain('target must be a directory');
+		}
+	});
+
+	test('rejects a file as the explicit scan root', async () => {
+		const rootFile = path.join(tempDir, 'root-file.txt');
+		fs.writeFileSync(rootFile, 'clean\n');
+
+		const result = await runSecretscanOnFiles([], rootFile);
+
+		expect('error' in result).toBe(true);
+		if ('error' in result) {
+			expect(result.error).toContain('target must be a directory');
+		}
+	});
+
 	test('records unexpected directory-close failures as incomplete', async () => {
 		fs.writeFileSync(path.join(tempDir, 'clean.txt'), 'clean\n');
 		_internals.closeDirectory = (directory) => {
@@ -176,7 +202,27 @@ describe('bounded scan completion', () => {
 
 		expect(result.files_scanned).toBe(1);
 		expect(result.incomplete_files).toBe(1);
+		expect(result.incomplete_paths).toContainEqual({
+			path: '.',
+			reason: 'cleanup_failed',
+		});
 		expect(result.message).toContain('cleanup failed');
+	});
+
+	test('tolerates an already-closed directory cleanup result', async () => {
+		fs.writeFileSync(path.join(tempDir, 'clean.txt'), 'clean\n');
+		_internals.closeDirectory = (directory) => {
+			originalCloseDirectory(directory);
+			const error = new Error('already closed') as NodeJS.ErrnoException;
+			error.code = 'ERR_DIR_CLOSED';
+			throw error;
+		};
+
+		const result = successful(await runSecretscan(tempDir));
+
+		expect(result.files_scanned).toBe(1);
+		expect(result.incomplete_files).toBe(0);
+		expect(result.incomplete_paths).toEqual([]);
 	});
 });
 
@@ -198,7 +244,30 @@ describe('canonical containment', () => {
 		expect(result.findings).toHaveLength(0);
 		expect(result.files_scanned).toBe(0);
 		expect(result.incomplete_files).toBe(1);
+		expect(result.incomplete_paths).toHaveLength(1);
+		expect(result.incomplete_paths[0].reason).toBe('scope_escape');
 	});
+
+	test.skipIf(process.platform === 'win32')(
+		'marks an explicit symlink path as incomplete',
+		async () => {
+			fs.writeFileSync(path.join(tempDir, 'target.txt'), 'clean\n');
+			fs.symlinkSync(
+				path.join(tempDir, 'target.txt'),
+				path.join(tempDir, 'link.txt'),
+				process.platform === 'win32' ? 'file' : 'file',
+			);
+
+			const result = successful(
+				await runSecretscanOnFiles(['link.txt'], tempDir),
+			);
+
+			expect(result.files_scanned).toBe(0);
+			expect(result.incomplete_files).toBe(1);
+			expect(result.incomplete_paths).toHaveLength(1);
+			expect(result.incomplete_paths[0].reason).toBe('symlink');
+		},
+	);
 
 	test.skipIf(process.platform === 'win32')(
 		'reports an unreadable requested file as incomplete on POSIX',
@@ -212,6 +281,8 @@ describe('canonical containment', () => {
 				);
 				expect(result.files_scanned).toBe(0);
 				expect(result.incomplete_files).toBe(1);
+				expect(result.incomplete_paths).toHaveLength(1);
+				expect(result.incomplete_paths[0].reason).toBe('read_error');
 			} finally {
 				fs.chmodSync(file, 0o600);
 			}

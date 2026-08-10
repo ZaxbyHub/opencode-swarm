@@ -16,6 +16,9 @@ const MAX_EXPLICIT_FILES_SCANNED = 100;
 const MAX_FINDINGS = 100;
 const MAX_OUTPUT_BYTES = 512_000; // 512KB max output
 const MAX_CONTEXT_CHARS = 1000;
+const MAX_LONG_LINE_CHARS = 10_000;
+const MAX_INCOMPLETE_PATHS = 25;
+const MAX_DISCOVERY_DIRECTORIES = 10_000;
 // Leave headroom for pre_check_batch's 60-second wrapper timeout so the scan
 // can return truthful incomplete-coverage accounting before the wrapper fires.
 const SCAN_TIME_BUDGET_MS = 55_000;
@@ -61,8 +64,24 @@ export interface SecretscanResult {
 	files_scanned: number;
 	skipped_files: number;
 	/** Files requested or discovered but not completely examined. */
-	incomplete_files?: number;
+	incomplete_files: number;
+	incomplete_paths: IncompletePath[];
 	message?: string;
+}
+
+export interface IncompletePath {
+	path: string;
+	reason:
+		| 'cleanup_failed'
+		| 'deadline'
+		| 'directory_limit'
+		| 'max_files'
+		| 'non_file'
+		| 'oversized'
+		| 'read_error'
+		| 'scope_escape'
+		| 'symlink'
+		| 'truncated';
 }
 
 export interface SecretscanErrorResult {
@@ -126,6 +145,7 @@ const DEFAULT_EXCLUDE_EXTENSIONS = new Set([
 	'.gz',
 	'.rar',
 	'.7z',
+	'.wasm',
 	'.exe',
 	'.dll',
 	'.so',
@@ -495,9 +515,9 @@ function scanLineForSecrets(line: string, _lineNum: number): ScanLineResult[] {
 	// High entropy string detection (run regardless of pattern matches, avoid duplicates)
 	// Look for potential high-entropy values in key=value patterns - bounded to prevent ReDoS
 	const valueMatch = line.match(
-		/(?:secret|key|token|password|cred|credential)\s*[=:]\s*["']?([a-zA-Z0-9+/=_-]{20,100})["']?/i,
+		/((?:secret|key|token|password|cred|credential))\s*[=:]\s*["']?([a-zA-Z0-9+/=_-]{20,100})["']?/i,
 	);
-	if (valueMatch && isHighEntropyString(valueMatch[1])) {
+	if (valueMatch && isHighEntropyString(valueMatch[2])) {
 		const matchStart = valueMatch.index || 0;
 		const matchEnd = matchStart + valueMatch[0].length;
 
@@ -511,7 +531,7 @@ function scanLineForSecrets(line: string, _lineNum: number): ScanLineResult[] {
 				type: 'high_entropy',
 				confidence: 'low',
 				severity: 'medium',
-				redacted: '[HIGH_ENTROPY]',
+				redacted: `${valueMatch[1]}=[HIGH_ENTROPY]`,
 				matchStart,
 				matchEnd,
 			});
@@ -546,8 +566,12 @@ function createRedactedContext(
 	result += line.slice(lastEnd);
 
 	if (result.length <= MAX_CONTEXT_CHARS) return result;
-	const edgeLength = Math.floor((MAX_CONTEXT_CHARS - 20) / 2);
-	return `${result.slice(0, edgeLength)}...[context truncated]...${result.slice(-edgeLength)}`;
+	const truncationMarker = '...[context truncated]...';
+	const edgeLength = Math.floor(
+		(MAX_CONTEXT_CHARS - truncationMarker.length) / 2,
+	);
+	const remaining = MAX_CONTEXT_CHARS - truncationMarker.length - edgeLength;
+	return `${result.slice(0, edgeLength)}${truncationMarker}${result.slice(-remaining)}`;
 }
 
 // O_NOFOLLOW flag for atomic symlink prevention (POSIX only, undefined on Windows)
@@ -557,16 +581,18 @@ const O_NOFOLLOW: number | undefined =
 		: undefined;
 
 // ============ File Scanning ============
+type ScanMode = 'standalone' | 'explicit';
+
 type SecretFileScanOutcome =
 	| { status: 'scanned'; findings: SecretFinding[] }
 	| { status: 'skipped'; reason: 'binary' | 'symlink' }
 	| {
 			status: 'incomplete';
-			reason: 'oversized' | 'non_file' | 'read_error';
+			reason: 'oversized' | 'non_file' | 'read_error' | 'symlink';
 	  };
 
 type BoundedFileReadOutcome =
-	| { status: 'ok'; buffer: Buffer }
+	| { status: 'ok'; buffer: Buffer; truncated: boolean }
 	| { status: 'incomplete'; reason: 'oversized' | 'non_file' | 'read_error' };
 
 function readBoundedFile(filePath: string): BoundedFileReadOutcome {
@@ -582,12 +608,12 @@ function readBoundedFile(filePath: string): BoundedFileReadOutcome {
 	let outcome: BoundedFileReadOutcome;
 	try {
 		const stat = _internals.fstatFile(fd);
+		const initialSize = stat.size;
 		if (!stat.isFile()) {
 			outcome = { status: 'incomplete', reason: 'non_file' };
-		} else if (stat.size > MAX_FILE_SIZE_BYTES) {
-			outcome = { status: 'incomplete', reason: 'oversized' };
 		} else {
-			const buffer = Buffer.allocUnsafe(MAX_FILE_SIZE_BYTES + 1);
+			const bufferLength = Math.min(initialSize + 1, MAX_FILE_SIZE_BYTES + 1);
+			const buffer = Buffer.allocUnsafe(bufferLength);
 			let bytesRead = 0;
 			while (bytesRead < buffer.length) {
 				const count = _internals.readFileChunk(
@@ -600,10 +626,20 @@ function readBoundedFile(filePath: string): BoundedFileReadOutcome {
 				if (count === 0) break;
 				bytesRead += count;
 			}
-			outcome =
-				bytesRead > MAX_FILE_SIZE_BYTES
-					? { status: 'incomplete', reason: 'oversized' }
-					: { status: 'ok', buffer: buffer.subarray(0, bytesRead) };
+			const postStat = _internals.fstatFile(fd);
+			if (postStat.size !== initialSize) {
+				outcome = {
+					status: 'incomplete',
+					reason:
+						postStat.size > MAX_FILE_SIZE_BYTES ? 'oversized' : 'read_error',
+				};
+			} else {
+				outcome = {
+					status: 'ok',
+					buffer: buffer.subarray(0, bytesRead),
+					truncated: initialSize > MAX_FILE_SIZE_BYTES,
+				};
+			}
 		}
 	} catch {
 		outcome = { status: 'incomplete', reason: 'read_error' };
@@ -617,14 +653,19 @@ function readBoundedFile(filePath: string): BoundedFileReadOutcome {
 	return outcome;
 }
 
-function scanFileForSecrets(filePath: string): SecretFileScanOutcome {
+function scanFileForSecrets(
+	filePath: string,
+	mode: ScanMode,
+): SecretFileScanOutcome {
 	const findings: SecretFinding[] = [];
 
 	try {
 		// Use lstat to check if file is a symlink (defense in depth)
 		const lstat = fs.lstatSync(filePath);
 		if (lstat.isSymbolicLink()) {
-			return { status: 'skipped', reason: 'symlink' };
+			return mode === 'explicit'
+				? { status: 'incomplete', reason: 'symlink' }
+				: { status: 'skipped', reason: 'symlink' };
 		}
 
 		if (!lstat.isFile()) {
@@ -635,11 +676,15 @@ function scanFileForSecrets(filePath: string): SecretFileScanOutcome {
 		// the limit so growth/replacement races cannot cause unbounded allocation.
 		const readOutcome = readBoundedFile(filePath);
 		if (readOutcome.status === 'incomplete') return readOutcome;
-		const { buffer } = readOutcome;
+		const { buffer, truncated } = readOutcome;
 
-		// Skip binary files
+		// Skip binary files, including oversized binary prefixes.
 		if (isBinaryFile(filePath, buffer)) {
 			return { status: 'skipped', reason: 'binary' };
+		}
+
+		if (truncated) {
+			return { status: 'incomplete', reason: 'oversized' };
 		}
 
 		// Handle UTF-8 BOM (EF BB BF) - strip it to prevent issues
@@ -663,6 +708,9 @@ function scanFileForSecrets(filePath: string): SecretFileScanOutcome {
 		const lines = content.split('\n');
 
 		for (let i = 0; i < lines.length; i++) {
+			if (mode === 'standalone' && lines[i].length > MAX_LONG_LINE_CHARS) {
+				continue;
+			}
 			const lineResults = scanLineForSecrets(lines[i], i + 1);
 			const context = createRedactedContext(lines[i], lineResults);
 
@@ -763,6 +811,32 @@ interface DiscoveryState {
 	deadlineExceeded: boolean;
 	cleanupFailed: boolean;
 	entriesSinceYield: number;
+	incompletePaths: IncompletePath[];
+	directoriesQueued: number;
+	unexaminedDirectories: number;
+}
+
+function toSafeRelativePath(rootDir: string, targetPath: string): string {
+	const relative = path.relative(rootDir, targetPath).replace(/\\/g, '/');
+	if (!relative || relative === '.') return '.';
+	if (relative.startsWith('..') || path.isAbsolute(relative)) {
+		const basename = path.basename(targetPath).replace(/\\/g, '/');
+		return basename || '.';
+	}
+	return relative;
+}
+
+function recordIncompletePath(
+	target: IncompletePath[],
+	rootDir: string,
+	targetPath: string,
+	reason: IncompletePath['reason'],
+): void {
+	if (target.length >= MAX_INCOMPLETE_PATHS) {
+		target[MAX_INCOMPLETE_PATHS - 1] = { path: '.', reason: 'truncated' };
+		return;
+	}
+	target.push({ path: toSafeRelativePath(rootDir, targetPath), reason });
 }
 
 function compareFilePaths(a: string, b: string): number {
@@ -812,7 +886,7 @@ function addBoundedCandidate(state: DiscoveryState, filePath: string): void {
 	}
 }
 
-async function findScannableFiles(
+async function collectScannableFiles(
 	dir: string,
 	excludeExact: Set<string>,
 	excludeGlobs: string[],
@@ -821,99 +895,145 @@ async function findScannableFiles(
 	stats: ScanStats,
 	state: DiscoveryState,
 ): Promise<void> {
-	const deadlineReached = _internals.now() >= state.deadline;
-	if (state.deadlineExceeded || state.cleanupFailed || deadlineReached) {
-		if (deadlineReached) state.deadlineExceeded = true;
-		return;
-	}
+	const pending = [dir];
 
-	let directory: fs.Dir;
-	try {
-		directory = fs.opendirSync(dir);
-	} catch {
-		stats.fileErrors++;
-		return;
-	}
+	while (pending.length > 0) {
+		if (state.deadlineExceeded || state.cleanupFailed) return;
+		const currentDir = pending.pop();
+		if (!currentDir) continue;
 
-	try {
-		while (true) {
-			if (state.entriesSinceYield >= DISCOVERY_YIELD_INTERVAL) {
-				state.entriesSinceYield = 0;
-				await _internals.yieldToEventLoop();
-				if (_internals.now() >= state.deadline) {
-					state.deadlineExceeded = true;
-					break;
+		let directory: fs.Dir;
+		try {
+			directory = fs.opendirSync(currentDir);
+		} catch {
+			stats.fileErrors++;
+			recordIncompletePath(
+				state.incompletePaths,
+				scanDir,
+				currentDir,
+				'read_error',
+			);
+			continue;
+		}
+
+		let stoppedEarly = false;
+		try {
+			while (true) {
+				if (state.entriesSinceYield >= DISCOVERY_YIELD_INTERVAL) {
+					state.entriesSinceYield = 0;
+					await _internals.yieldToEventLoop();
+					if (_internals.now() >= state.deadline) {
+						state.deadlineExceeded = true;
+						recordIncompletePath(
+							state.incompletePaths,
+							scanDir,
+							currentDir,
+							'deadline',
+						);
+						stoppedEarly = true;
+						break;
+					}
 				}
-			}
 
-			const entry = directory.readSync();
-			if (!entry) break;
-			state.entriesSinceYield++;
-			const fullPath = path.join(dir, entry.name);
-			const relPath = path.relative(scanDir, fullPath).replace(/\\/g, '/');
+				const entry = directory.readSync();
+				if (!entry) break;
+				state.entriesSinceYield++;
+				const fullPath = path.join(currentDir, entry.name);
+				const relPath = path.relative(scanDir, fullPath).replace(/\\/g, '/');
 
-			if (isExcluded(entry.name, relPath, excludeExact, excludeGlobs)) {
-				stats.skippedDirs++;
-				continue;
-			}
-
-			let lstat: fs.Stats;
-			try {
-				lstat = fs.lstatSync(fullPath);
-			} catch {
-				stats.fileErrors++;
-				continue;
-			}
-
-			if (lstat.isSymbolicLink()) {
-				stats.symlinkSkipped++;
-				continue;
-			}
-
-			if (lstat.isDirectory()) {
-				let realPath: string;
-				try {
-					realPath = fs.realpathSync(fullPath);
-				} catch {
-					stats.fileErrors++;
+				if (isExcluded(entry.name, relPath, excludeExact, excludeGlobs)) {
+					stats.skippedDirs++;
 					continue;
 				}
 
-				if (
-					isSymlinkLoop(realPath, visited) ||
-					!isPathWithinScope(realPath, scanDir)
-				) {
+				let lstat: fs.Stats;
+				try {
+					lstat = fs.lstatSync(fullPath);
+				} catch {
+					stats.fileErrors++;
+					recordIncompletePath(
+						state.incompletePaths,
+						scanDir,
+						fullPath,
+						'read_error',
+					);
+					continue;
+				}
+
+				if (lstat.isSymbolicLink()) {
 					stats.symlinkSkipped++;
 					continue;
 				}
 
-				await findScannableFiles(
-					fullPath,
-					excludeExact,
-					excludeGlobs,
-					scanDir,
-					visited,
-					stats,
-					state,
-				);
-				if (state.deadlineExceeded || state.cleanupFailed) break;
-			} else if (lstat.isFile()) {
-				const ext = path.extname(fullPath).toLowerCase();
-				if (!DEFAULT_EXCLUDE_EXTENSIONS.has(ext)) {
-					addBoundedCandidate(state, fullPath);
+				if (lstat.isDirectory()) {
+					if (state.directoriesQueued >= MAX_DISCOVERY_DIRECTORIES) {
+						state.unexaminedDirectories++;
+						recordIncompletePath(
+							state.incompletePaths,
+							scanDir,
+							fullPath,
+							'directory_limit',
+						);
+						continue;
+					}
+					let realPath: string;
+					try {
+						realPath = fs.realpathSync(fullPath);
+					} catch {
+						stats.fileErrors++;
+						recordIncompletePath(
+							state.incompletePaths,
+							scanDir,
+							fullPath,
+							'read_error',
+						);
+						continue;
+					}
+
+					if (
+						isSymlinkLoop(realPath, visited) ||
+						!isPathWithinScope(realPath, scanDir)
+					) {
+						stats.symlinkSkipped++;
+						continue;
+					}
+
+					pending.push(fullPath);
+					state.directoriesQueued++;
+				} else if (lstat.isFile()) {
+					const ext = path.extname(fullPath).toLowerCase();
+					if (!DEFAULT_EXCLUDE_EXTENSIONS.has(ext)) {
+						addBoundedCandidate(state, fullPath);
+					} else {
+						stats.skippedFiles++;
+					}
 				} else {
-					stats.skippedFiles++;
+					stats.fileErrors++;
+					recordIncompletePath(
+						state.incompletePaths,
+						scanDir,
+						fullPath,
+						'non_file',
+					);
+				}
+			}
+		} finally {
+			try {
+				_internals.closeDirectory(directory);
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== 'ERR_DIR_CLOSED') {
+					state.cleanupFailed = true;
+					recordIncompletePath(
+						state.incompletePaths,
+						scanDir,
+						currentDir,
+						'cleanup_failed',
+					);
 				}
 			}
 		}
-	} finally {
-		try {
-			_internals.closeDirectory(directory);
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException)?.code !== 'ERR_DIR_CLOSED') {
-				state.cleanupFailed = true;
-			}
-		}
+
+		if (stoppedEarly) break;
 	}
 }
 
@@ -1000,19 +1120,25 @@ export const secretscan: ReturnType<typeof createSwarmTool> = createSwarmTool({
 			// any OS-level symlinks (e.g. /var → /private/var on macOS) so that
 			// isPathWithinScope() comparisons against fs.realpathSync()-resolved
 			// subdirectory paths always match.
-			const _scanDirRaw = path.resolve(directory);
+			const scanDirRaw = path.resolve(directory);
 			const scanDir = (() => {
 				try {
-					return fs.realpathSync(_scanDirRaw);
+					return fs.realpathSync(scanDirRaw);
 				} catch {
-					return _scanDirRaw;
+					return scanDirRaw;
 				}
 			})();
 
-			// Check if directory exists
-			if (!fs.existsSync(scanDir)) {
+			let dirStat: fs.Stats;
+			try {
+				dirStat = fs.lstatSync(scanDir);
+			} catch (error) {
+				const err = error as NodeJS.ErrnoException;
 				const errorResult: SecretscanErrorResult = {
-					error: 'directory not found',
+					error:
+						err.code === 'ENOENT'
+							? 'directory not found'
+							: `scan failed: ${err.message || 'unable to inspect directory'}`,
 					scan_dir: directory,
 					findings: [],
 					count: 0,
@@ -1022,7 +1148,6 @@ export const secretscan: ReturnType<typeof createSwarmTool> = createSwarmTool({
 				return JSON.stringify(errorResult, null, 2);
 			}
 
-			const dirStat = fs.statSync(scanDir);
 			if (!dirStat.isDirectory()) {
 				const errorResult: SecretscanErrorResult = {
 					error: 'target must be a directory, not a file',
@@ -1069,9 +1194,12 @@ export const secretscan: ReturnType<typeof createSwarmTool> = createSwarmTool({
 				deadlineExceeded: false,
 				cleanupFailed: false,
 				entriesSinceYield: 0,
+				incompletePaths: [],
+				directoriesQueued: 1,
+				unexaminedDirectories: 0,
 			};
 			await _internals.yieldToEventLoop();
-			await findScannableFiles(
+			await collectScannableFiles(
 				scanDir,
 				excludeExact,
 				excludeGlobs,
@@ -1085,6 +1213,30 @@ export const secretscan: ReturnType<typeof createSwarmTool> = createSwarmTool({
 			// Sort for deterministic order (case-insensitive but stable)
 			files.sort(compareFilePaths);
 			const filesToScan = files;
+			if (discovery.totalCandidates > filesToScan.length) {
+				recordIncompletePath(
+					discovery.incompletePaths,
+					scanDir,
+					scanDir,
+					'max_files',
+				);
+			}
+			if (discovery.deadlineExceeded) {
+				recordIncompletePath(
+					discovery.incompletePaths,
+					scanDir,
+					scanDir,
+					'deadline',
+				);
+			}
+			if (discovery.cleanupFailed) {
+				recordIncompletePath(
+					discovery.incompletePaths,
+					scanDir,
+					scanDir,
+					'cleanup_failed',
+				);
+			}
 
 			// Scan files for secrets
 			const allFindings: SecretFinding[] = [];
@@ -1093,19 +1245,34 @@ export const secretscan: ReturnType<typeof createSwarmTool> = createSwarmTool({
 			let incompleteFiles =
 				stats.fileErrors +
 				Math.max(0, discovery.totalCandidates - filesToScan.length) +
-				(discovery.deadlineExceeded || discovery.cleanupFailed ? 1 : 0);
+				(discovery.deadlineExceeded || discovery.cleanupFailed ? 1 : 0) +
+				discovery.unexaminedDirectories;
 
 			for (let index = 0; index < filesToScan.length; index++) {
 				if (_internals.now() >= deadline) {
+					for (const remaining of filesToScan.slice(index)) {
+						recordIncompletePath(
+							discovery.incompletePaths,
+							scanDir,
+							remaining,
+							'deadline',
+						);
+					}
 					incompleteFiles += filesToScan.length - index;
 					break;
 				}
 				if (allFindings.length >= MAX_FINDINGS) {
+					recordIncompletePath(
+						discovery.incompletePaths,
+						scanDir,
+						scanDir,
+						'truncated',
+					);
 					incompleteFiles += filesToScan.length - index;
 					break;
 				}
 
-				const outcome = scanFileForSecrets(filesToScan[index]);
+				const outcome = scanFileForSecrets(filesToScan[index], 'standalone');
 				switch (outcome.status) {
 					case 'scanned':
 						filesScanned++;
@@ -1116,6 +1283,12 @@ export const secretscan: ReturnType<typeof createSwarmTool> = createSwarmTool({
 					case 'incomplete':
 						skippedFiles++;
 						incompleteFiles++;
+						recordIncompletePath(
+							discovery.incompletePaths,
+							scanDir,
+							filesToScan[index],
+							outcome.reason,
+						);
 						break;
 					default:
 						assertNever(outcome);
@@ -1152,6 +1325,7 @@ export const secretscan: ReturnType<typeof createSwarmTool> = createSwarmTool({
 				files_scanned: filesScanned,
 				skipped_files: skippedFiles + stats.fileErrors + stats.symlinkSkipped,
 				incomplete_files: incompleteFiles,
+				incomplete_paths: discovery.incompletePaths,
 			};
 
 			// Add informative message if results were truncated
@@ -1252,22 +1426,71 @@ export async function runSecretscanOnFiles(
 		const findings: SecretFinding[] = [];
 		let filesScanned = 0;
 		let skippedFiles = 0;
+		const incompletePaths: IncompletePath[] = [];
 		const rawRoot = path.resolve(directory);
-		const canonicalRoot = fs.realpathSync(rawRoot);
-		if (!fs.statSync(canonicalRoot).isDirectory()) {
+		const canonicalRoot = (() => {
+			try {
+				return fs.realpathSync(rawRoot);
+			} catch {
+				return rawRoot;
+			}
+		})();
+		let rootStat: fs.Stats;
+		try {
+			rootStat = fs.lstatSync(canonicalRoot);
+		} catch (error) {
+			const err = error as NodeJS.ErrnoException;
+			return {
+				error:
+					err.code === 'ENOENT'
+						? 'directory not found'
+						: `scan failed: ${err.message || 'unable to inspect directory'}`,
+				scan_dir: directory,
+				findings: [],
+				count: 0,
+				files_scanned: 0,
+				skipped_files: 0,
+			};
+		}
+		if (!rootStat.isDirectory()) {
 			throw new Error('target must be a directory');
 		}
 		const filesToScan = files.slice(0, MAX_EXPLICIT_FILES_SCANNED);
 		let incompleteFiles = Math.max(0, files.length - filesToScan.length);
+		if (files.length > filesToScan.length) {
+			recordIncompletePath(
+				incompletePaths,
+				canonicalRoot,
+				canonicalRoot,
+				'max_files',
+			);
+		}
 		const deadline = _internals.now() + SCAN_TIME_BUDGET_MS;
 		await _internals.yieldToEventLoop();
 
 		for (let index = 0; index < filesToScan.length; index++) {
 			if (_internals.now() >= deadline) {
+				for (const remaining of filesToScan.slice(index)) {
+					const remainingPath = path.isAbsolute(remaining)
+						? path.resolve(remaining)
+						: path.resolve(rawRoot, remaining);
+					recordIncompletePath(
+						incompletePaths,
+						canonicalRoot,
+						remainingPath,
+						'deadline',
+					);
+				}
 				incompleteFiles += filesToScan.length - index;
 				break;
 			}
 			if (findings.length >= MAX_FINDINGS) {
+				recordIncompletePath(
+					incompletePaths,
+					canonicalRoot,
+					canonicalRoot,
+					'truncated',
+				);
 				incompleteFiles += filesToScan.length - index;
 				break;
 			}
@@ -1285,6 +1508,56 @@ export async function runSecretscanOnFiles(
 			if (!isPathWithinScope(resolvedPath, rawRoot)) {
 				skippedFiles++;
 				incompleteFiles++;
+				recordIncompletePath(
+					incompletePaths,
+					canonicalRoot,
+					resolvedPath,
+					'scope_escape',
+				);
+				continue;
+			}
+
+			let lstat: fs.Stats;
+			try {
+				lstat = _internals.lstatFile(resolvedPath);
+			} catch (error) {
+				const err = error as NodeJS.ErrnoException;
+				if (err.code === 'ENOENT') {
+					skippedFiles++;
+					continue;
+				}
+				skippedFiles++;
+				incompleteFiles++;
+				recordIncompletePath(
+					incompletePaths,
+					canonicalRoot,
+					resolvedPath,
+					'read_error',
+				);
+				continue;
+			}
+
+			if (lstat.isSymbolicLink()) {
+				skippedFiles++;
+				incompleteFiles++;
+				recordIncompletePath(
+					incompletePaths,
+					canonicalRoot,
+					resolvedPath,
+					'symlink',
+				);
+				continue;
+			}
+
+			if (!lstat.isFile()) {
+				skippedFiles++;
+				incompleteFiles++;
+				recordIncompletePath(
+					incompletePaths,
+					canonicalRoot,
+					resolvedPath,
+					'non_file',
+				);
 				continue;
 			}
 
@@ -1294,36 +1567,38 @@ export async function runSecretscanOnFiles(
 				continue;
 			}
 
-			if (!fs.existsSync(resolvedPath)) {
-				skippedFiles++;
-				continue;
-			}
-
-			let lstat: fs.Stats;
+			let scanPath = resolvedPath;
 			try {
-				lstat = fs.lstatSync(resolvedPath);
-			} catch {
+				scanPath = fs.realpathSync(resolvedPath);
+			} catch (error) {
+				const err = error as NodeJS.ErrnoException;
+				if (err.code === 'ENOENT') {
+					skippedFiles++;
+					continue;
+				}
 				skippedFiles++;
 				incompleteFiles++;
+				recordIncompletePath(
+					incompletePaths,
+					canonicalRoot,
+					resolvedPath,
+					'read_error',
+				);
 				continue;
 			}
-			let scanPath = resolvedPath;
-			if (!lstat.isSymbolicLink()) {
-				try {
-					scanPath = fs.realpathSync(resolvedPath);
-				} catch {
-					skippedFiles++;
-					incompleteFiles++;
-					continue;
-				}
-				if (!isPathWithinScope(scanPath, canonicalRoot)) {
-					skippedFiles++;
-					incompleteFiles++;
-					continue;
-				}
+			if (!isPathWithinScope(scanPath, canonicalRoot)) {
+				skippedFiles++;
+				incompleteFiles++;
+				recordIncompletePath(
+					incompletePaths,
+					canonicalRoot,
+					scanPath,
+					'scope_escape',
+				);
+				continue;
 			}
 
-			const outcome = scanFileForSecrets(scanPath);
+			const outcome = scanFileForSecrets(scanPath, 'explicit');
 			switch (outcome.status) {
 				case 'scanned':
 					filesScanned++;
@@ -1336,6 +1611,12 @@ export async function runSecretscanOnFiles(
 				case 'incomplete':
 					skippedFiles++;
 					incompleteFiles++;
+					recordIncompletePath(
+						incompletePaths,
+						canonicalRoot,
+						scanPath,
+						outcome.reason,
+					);
 					break;
 				default:
 					assertNever(outcome);
@@ -1359,6 +1640,7 @@ export async function runSecretscanOnFiles(
 			files_scanned: filesScanned,
 			skipped_files: skippedFiles,
 			incomplete_files: incompleteFiles,
+			incomplete_paths: incompletePaths,
 		};
 	} catch (e) {
 		return {
@@ -1390,6 +1672,7 @@ export const _internals: {
 	fstatFile: typeof fs.fstatSync;
 	readFileChunk: typeof fs.readSync;
 	closeFile: typeof fs.closeSync;
+	lstatFile: typeof fs.lstatSync;
 	closeDirectory: (directory: fs.Dir) => void;
 } = {
 	secretscan,
@@ -1402,5 +1685,6 @@ export const _internals: {
 	fstatFile: fs.fstatSync,
 	readFileChunk: fs.readSync,
 	closeFile: fs.closeSync,
+	lstatFile: fs.lstatSync,
 	closeDirectory: (directory) => directory.closeSync(),
 } as const;

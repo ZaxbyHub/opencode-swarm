@@ -22,7 +22,11 @@ import {
 import { loadPlan } from '../plan/manager';
 import { readEffectiveSpecSync } from '../sdd/effective-spec';
 import { runLint } from '../tools/lint';
-import { runSecretscan, type SecretscanResult } from '../tools/secretscan';
+import {
+	runSecretscan,
+	type SecretscanErrorResult,
+	type SecretscanResult,
+} from '../tools/secretscan';
 import { runTests, type TestResult } from '../tools/test-runner';
 import { log } from '../utils';
 
@@ -88,6 +92,20 @@ const DEFAULT_CONFIG: Required<PreflightConfig> = {
 	testScope: 'convention',
 	linter: 'biome',
 };
+
+function formatSecretscanIncompletePaths(
+	incompletePaths: Array<{ path: string; reason: string }>,
+	maxEntries = 3,
+): string {
+	const visible = incompletePaths.slice(0, maxEntries).map((entry) => {
+		return `${entry.path} (${entry.reason})`;
+	});
+	const suffix =
+		incompletePaths.length > maxEntries
+			? ` (+${incompletePaths.length - maxEntries} more)`
+			: '';
+	return `${visible.join('; ')}${suffix}`;
+}
 
 /**
  * Validate directory path to prevent path traversal attacks.
@@ -476,34 +494,96 @@ async function runSecretsCheck(
 
 	try {
 		// Race the secretscan execution with a timeout
-		const secretsPromise = runSecretscan(dir);
+		const secretsPromise = _internals.runSecretscan(dir);
 		const timeoutPromise = new Promise<never>((_, reject) => {
 			setTimeout(() => {
 				reject(new Error(`Secrets check timed out after ${timeoutMs}ms`));
 			}, timeoutMs);
 		});
 
-		const result: SecretscanResult = await Promise.race([
-			secretsPromise,
-			timeoutPromise,
-		]);
+		const result: SecretscanResult | SecretscanErrorResult = await Promise.race(
+			[secretsPromise, timeoutPromise],
+		);
 
-		if (result.findings && result.findings.length > 0) {
-			// Group by severity
+		if ('error' in result) {
+			return {
+				type: 'secrets',
+				status: 'fail',
+				message: `Secrets check failed: ${result.error}`,
+				details: {
+					error: result.error,
+					filesScanned: result.files_scanned,
+					incompleteFiles: 0,
+					incompletePaths: [],
+				},
+				durationMs: Date.now() - startTime,
+			};
+		}
+
+		const findingsCount = Math.max(result.count, result.findings.length);
+		if (
+			typeof result.incomplete_files !== 'number' ||
+			!Array.isArray(result.incomplete_paths)
+		) {
+			return {
+				type: 'secrets',
+				status: 'fail',
+				message:
+					'Secrets check failed: scanner returned incomplete coverage metadata',
+				details: { filesScanned: result.files_scanned },
+				durationMs: Date.now() - startTime,
+			};
+		}
+		const incompleteFiles = result.incomplete_files;
+		const incompletePaths = result.incomplete_paths;
+		const hasCountMismatch = result.count !== result.findings.length;
+		const hasIncompleteCoverage =
+			incompleteFiles > 0 || incompletePaths.length > 0;
+		const hasZeroCoverage = result.files_scanned === 0;
+
+		const failures: string[] = [];
+		if (findingsCount > 0) {
 			const critical = result.findings.filter(
 				(f) => f.severity === 'critical',
 			).length;
 			const high = result.findings.filter((f) => f.severity === 'high').length;
+			failures.push(
+				`Found ${findingsCount} secret(s): ${critical} critical, ${high} high`,
+			);
+		}
+		if (hasIncompleteCoverage) {
+			const incompleteSummary =
+				incompletePaths.length > 0
+					? `; incomplete paths: ${formatSecretscanIncompletePaths(incompletePaths)}`
+					: '';
+			failures.push(
+				`${incompleteFiles} incomplete file(s)${incompleteSummary}`,
+			);
+		}
+		if (hasCountMismatch) {
+			failures.push(
+				`findings/count mismatch (reported ${result.count}, actual ${result.findings.length})`,
+			);
+		}
+		if (hasZeroCoverage) {
+			failures.push('zero requested files scanned');
+		}
 
+		if (failures.length > 0) {
 			return {
 				type: 'secrets',
 				status: 'fail',
-				message: `Found ${result.findings.length} secret(s): ${critical} critical, ${high} high`,
+				message: `Secrets check failed: ${failures.join('; ')}`,
 				details: {
-					count: result.count,
-					critical,
-					high,
+					count: findingsCount,
+					reportedCount: result.count,
+					critical: result.findings.filter((f) => f.severity === 'critical')
+						.length,
+					high: result.findings.filter((f) => f.severity === 'high').length,
 					filesScanned: result.files_scanned,
+					skippedFiles: result.skipped_files,
+					incompleteFiles,
+					incompletePaths,
 				},
 				durationMs: Date.now() - startTime,
 			};
@@ -515,6 +595,9 @@ async function runSecretsCheck(
 			message: 'No secrets detected',
 			details: {
 				filesScanned: result.files_scanned,
+				skippedFiles: result.skipped_files,
+				incompleteFiles,
+				incompletePaths,
 			},
 			durationMs: Date.now() - startTime,
 		};
@@ -965,6 +1048,7 @@ export const _internals: {
 	runVersionCheck: typeof runVersionCheck;
 	runLintCheck: typeof runLintCheck;
 	runTestsCheck: typeof runTestsCheck;
+	runSecretscan: typeof runSecretscan;
 	runSecretsCheck: typeof runSecretsCheck;
 	runEvidenceCheck: typeof runEvidenceCheck;
 	runRequirementCoverageCheck: typeof runRequirementCoverageCheck;
@@ -980,6 +1064,7 @@ export const _internals: {
 	runVersionCheck,
 	runLintCheck,
 	runTestsCheck,
+	runSecretscan,
 	runSecretsCheck,
 	runEvidenceCheck,
 	runRequirementCoverageCheck,

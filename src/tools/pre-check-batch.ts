@@ -85,6 +85,20 @@ interface SecretscanGateDecision {
 	findingsCount: number;
 }
 
+function formatIncompletePaths(
+	incompletePaths: Array<{ path: string; reason: string }>,
+	maxEntries = 3,
+): string {
+	const visible = incompletePaths.slice(0, maxEntries).map((entry) => {
+		return `${entry.path} (${entry.reason})`;
+	});
+	const suffix =
+		incompletePaths.length > maxEntries
+			? ` (+${incompletePaths.length - maxEntries} more)`
+			: '';
+	return `${visible.join('; ')}${suffix}`;
+}
+
 function evaluateSecretscanGate(
 	toolResult: ToolResult<SecretscanResult | SecretscanErrorResult>,
 	requestedFiles: number,
@@ -112,11 +126,34 @@ function evaluateSecretscanGate(
 	}
 
 	const result = toolResult.result;
+	if (
+		typeof result.incomplete_files !== 'number' ||
+		!Array.isArray(result.incomplete_paths)
+	) {
+		return {
+			passed: false,
+			summary:
+				'Secretscan failed: scanner returned incomplete coverage metadata',
+			result,
+			findingsCount: Math.max(result.count, result.findings.length),
+		};
+	}
 	const findingsCount = Math.max(result.count, result.findings.length);
 	const failures: string[] = [];
 	if (findingsCount > 0) failures.push(`${findingsCount} secret finding(s)`);
-	if ((result.incomplete_files ?? 0) > 0) {
-		failures.push(`${result.incomplete_files} incomplete file(s)`);
+	if (result.incomplete_files > 0 || result.incomplete_paths.length > 0) {
+		const incompletePaths =
+			result.incomplete_paths.length > 0
+				? `; incomplete paths: ${formatIncompletePaths(result.incomplete_paths)}`
+				: '';
+		failures.push(
+			`${result.incomplete_files} incomplete file(s)${incompletePaths}`,
+		);
+	}
+	if (result.count !== result.findings.length) {
+		failures.push(
+			`findings/count mismatch (reported ${result.count}, actual ${result.findings.length})`,
+		);
 	}
 	if (requestedFiles > 0 && result.files_scanned === 0) {
 		failures.push('zero requested files scanned');
@@ -887,7 +924,10 @@ export async function runPreCheckBatch(
 				scan_directory: scanResult?.scan_dir ?? directory,
 				files_scanned: scanResult?.files_scanned ?? 0,
 				skipped_files: scanResult?.skipped_files ?? 0,
-				incomplete_files: scanResult?.incomplete_files ?? 0,
+				incomplete_files: scanResult?.incomplete_files ?? changedFiles.length,
+				incomplete_paths: scanResult?.incomplete_paths ?? [
+					{ path: '.', reason: 'missing_coverage_metadata' },
+				],
 			};
 			await _internals.saveEvidence(
 				directory,

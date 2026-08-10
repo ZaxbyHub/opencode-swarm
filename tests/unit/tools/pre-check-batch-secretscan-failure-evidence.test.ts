@@ -111,6 +111,12 @@ describe('secretscan hard-gate evidence parity', () => {
 				files_scanned: 1,
 				skipped_files: 1,
 				incomplete_files: 1,
+				incomplete_paths: [
+					{
+						path: path.join(tempDir, 'oversized.txt'),
+						reason: 'oversized',
+					},
+				],
 			}),
 		);
 
@@ -119,6 +125,12 @@ describe('secretscan hard-gate evidence parity', () => {
 		expect(savedEvidence[0].verdict).toBe('fail');
 		expect(savedEvidence[0].summary).toContain('incomplete');
 		expect(savedEvidence[0].incomplete_files).toBe(1);
+		expect(savedEvidence[0].incomplete_paths).toEqual([
+			{
+				path: path.join(tempDir, 'oversized.txt'),
+				reason: 'oversized',
+			},
+		]);
 		expect(
 			SecretscanEvidenceSchema.parse(savedEvidence[0]).incomplete_files,
 		).toBe(1);
@@ -133,6 +145,7 @@ describe('secretscan hard-gate evidence parity', () => {
 				files_scanned: 0,
 				skipped_files: 1,
 				incomplete_files: 0,
+				incomplete_paths: [],
 			}),
 		);
 
@@ -161,11 +174,13 @@ describe('secretscan hard-gate evidence parity', () => {
 				files_scanned: 1,
 				skipped_files: 0,
 				incomplete_files: 0,
+				incomplete_paths: [],
 			}),
 		);
 
 		expect(result.gates_passed).toBe(false);
 		expect(savedEvidence[0].verdict).toBe('fail');
 		expect(savedEvidence[0].findings_count).toBe(1);
+		expect(savedEvidence[0].summary).toContain('mismatch');
 	});
 });

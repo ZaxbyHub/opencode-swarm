@@ -20,6 +20,7 @@ import {
 	ReviewEvidenceSchema,
 	SastEvidenceSchema,
 	SbomEvidenceSchema,
+	SecretscanEvidenceSchema,
 	SyntaxEvidenceSchema,
 	TestEvidenceSchema,
 } from '../../../src/config/evidence-schema';
@@ -1298,6 +1299,46 @@ describe('QualityBudgetEvidenceSchema', () => {
 		if (result.success) {
 			expect(result.data.violations.length).toBe(4);
 		}
+	});
+});
+
+describe('SecretscanEvidenceSchema', () => {
+	it('requires incomplete_files and preserves incomplete_paths diagnostics', () => {
+		const valid = SecretscanEvidenceSchema.safeParse({
+			task_id: '1.1',
+			type: 'secretscan' as const,
+			timestamp: '2026-02-09T12:00:00.000Z',
+			agent: 'pre_check_batch',
+			verdict: 'fail' as const,
+			summary: 'Scan incomplete',
+			findings_count: 0,
+			scan_directory: 'src',
+			files_scanned: 0,
+			skipped_files: 1,
+			incomplete_files: 1,
+			incomplete_paths: [{ path: 'src/oversized.txt', reason: 'oversized' }],
+		});
+		expect(valid.success).toBe(true);
+		if (valid.success) {
+			expect(valid.data.incomplete_files).toBe(1);
+			expect(valid.data.incomplete_paths).toEqual([
+				{ path: 'src/oversized.txt', reason: 'oversized' },
+			]);
+		}
+
+		const missingIncompleteFiles = SecretscanEvidenceSchema.safeParse({
+			task_id: '1.1',
+			type: 'secretscan' as const,
+			timestamp: '2026-02-09T12:00:00.000Z',
+			agent: 'pre_check_batch',
+			verdict: 'pass' as const,
+			summary: 'Scan complete',
+			findings_count: 0,
+			scan_directory: 'src',
+			files_scanned: 1,
+			skipped_files: 0,
+		});
+		expect(missingIncompleteFiles.success).toBe(false);
 	});
 });
 
