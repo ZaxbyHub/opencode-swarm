@@ -6,6 +6,7 @@ import {
 	getScopeBinding,
 } from '../../../src/scope/scope-binding';
 import {
+	flushScopeBindingMaintenance,
 	readScopeBindingFromDisk,
 	readScopeFromDisk,
 } from '../../../src/scope/scope-persistence';
@@ -53,9 +54,10 @@ function setup(): { directory: string; plan: any } {
 	return { directory: created.dir, plan };
 }
 
-afterEach(() => {
+afterEach(async () => {
 	resetSwarmState();
 	clearScopeBindings();
+	await flushScopeBindingMaintenance();
 	cleanup?.();
 	cleanup = undefined;
 });
