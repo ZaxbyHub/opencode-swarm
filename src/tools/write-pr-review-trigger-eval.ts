@@ -241,6 +241,7 @@ export async function executeWritePrReviewTriggerEval(
 					outputArtifact.artifact.text,
 					ownedFamily,
 					recordOwnedLanes,
+					record.mode,
 				),
 			) ||
 			record.workspace?.prHeadSha !== parsed.data.pr_head_sha ||

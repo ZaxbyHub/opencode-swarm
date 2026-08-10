@@ -291,7 +291,7 @@ describe('PR review council mechanical dispatch', () => {
 		);
 	});
 
-	test('rejects a marker header without a data row or lane-bound CLEAN attestation', () => {
+	test('rejects a marker header with no attestation but accepts a headerless CLEAN', () => {
 		expect(
 			prReviewDiscoveryArtifactCoversLane(
 				'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence | impact | confidence',
@@ -300,9 +300,21 @@ describe('PR review council mechanical dispatch', () => {
 		).toBe(false);
 		const clean =
 			'[CLEAN] | intent-architecture | all changed architecture paths | no candidate survived caller and sibling checks';
+		// Intent change (approved salvage): a lane that correctly found nothing and
+		// said so, but omitted the canonical header, is now repaired rather than
+		// discarded. This exact shape — a well-formed lane-bound CLEAN with no
+		// header — failed three consecutive attempts on the real PR #2090 run and
+		// was the single lane that blocked it, because one unresolved micro source
+		// fails the whole workflow. The bar is unchanged: coverage_scope and
+		// evidence must still clear their length floors and the lane must match, so
+		// the header was never the thing proving work had been done.
 		expect(
 			prReviewDiscoveryArtifactCoversLane(clean, 'intent-architecture'),
-		).toBe(false);
+		).toBe(true);
+		// Still refused: a CLEAN whose lane does not match the expected lane.
+		expect(prReviewDiscoveryArtifactCoversLane(clean, 'security-trust')).toBe(
+			false,
+		);
 		expect(
 			prReviewDiscoveryArtifactCoversLane(
 				`[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence\n${clean}`,

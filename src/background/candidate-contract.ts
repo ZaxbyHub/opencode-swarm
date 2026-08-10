@@ -141,6 +141,118 @@ export function removeCandidateCodeFences(text: string): string {
 	return lines.join('\n');
 }
 
+export interface NormalizedCandidateArtifact {
+	/** Fence-stripped text, with a canonical header synthesized when salvageable. */
+	text: string;
+	/** True when a canonical header was supplied by this normalizer. */
+	synthesizedHeader: boolean;
+}
+
+/** Every canonical header family declared on any line of `source`. */
+function declaredCanonicalFamilies(source: string): RowFormatFamily[] {
+	const families: RowFormatFamily[] = [];
+	for (const line of source.split(/\r?\n/)) {
+		const family = candidateHeaderFamily(
+			splitPipeFields(line).map((field) => field.trim()),
+		);
+		if (family && !families.includes(family)) families.push(family);
+	}
+	return families;
+}
+
+/**
+ * Normalize a lane artifact ONCE so every consumer parses byte-identical text.
+ *
+ * Coverage validation and candidate-id extraction previously applied the header
+ * rule in two separate places, so a repair applied to one could not be seen by
+ * the other — a lane could be judged "covered" while contributing zero findings
+ * to the inventory. Both callers now route through this function.
+ *
+ * A missing header is repaired; a *wrong* or *late* header is not, so genuine
+ * contract violations still fail closed:
+ *  - a leading canonical header (either family) is left alone, preserving
+ *    `expected-family-mismatch`;
+ *  - a canonical header that exists but does not lead is left alone, preserving
+ *    "a later valid header cannot rescue a malformed first marker";
+ *  - only a total absence of any canonical header, together with at least one
+ *    valid marker-bearing row, is repaired.
+ *
+ * KNOWN RESIDUAL: the two row families are both nine fields and differ only in
+ * the meaning of positions 6 and 7 (`evidence_summary`/`impact_context` versus
+ * `invariant_violated`/`evidence_summary`), neither of which is structurally
+ * distinguishable. A headerless lane that emits the other family's field order
+ * is therefore repaired into the expected family and its two prose fields are
+ * transposed. Callers surface `synthesizedHeader` so this is auditable.
+ */
+export function normalizeCandidateArtifact(
+	rawText: string,
+	fallbackFamily: RowFormatFamily,
+): NormalizedCandidateArtifact {
+	const text = removeCandidateCodeFences(rawText);
+	const header = selectCandidateHeader(text.split(/\r?\n/));
+	if (header?.markerBearing && header.family !== null) {
+		return { text, synthesizedHeader: false };
+	}
+	// A canonical header that survives fence-stripping but does not lead is a
+	// genuine contract violation: a later valid header still cannot rescue a
+	// malformed first marker.
+	if (declaredCanonicalFamilies(text).length > 0) {
+		return { text, synthesizedHeader: false };
+	}
+	// A header that existed only inside a code fence was deleted before it could
+	// be read. Honour the family it declared: if that disagrees with the expected
+	// family the artifact must still fail closed, but if it agrees there is
+	// nothing to protect and refusing would discard the lane's findings for no
+	// reason.
+	if (
+		declaredCanonicalFamilies(rawText).some(
+			(family) => family !== fallbackFamily,
+		)
+	) {
+		return { text, synthesizedHeader: false };
+	}
+	// A lane proves it did the work with EITHER a valid candidate row or a valid
+	// zero-findings [CLEAN] attestation. Triggering only on candidate rows would
+	// leave a lane that correctly found nothing permanently unsalvageable — and a
+	// single unresolved micro lane blocks an entire PR-review run.
+	const lines = text.split(/\r?\n/);
+	// The TRIGGER asks whether the lane produced anything worth keeping.
+	const hasSalvageableRow = lines.some((line) => {
+		if (analyzeCandidateLine(line, fallbackFamily)?.valid === true) return true;
+		const fields = splitPipeFields(line).map((field) => field.trim());
+		if (fields[0] !== CLEAN_MARKER) return false;
+		return analyzeCleanFields(fields, fallbackFamily).valid;
+	});
+	if (!hasSalvageableRow) return { text, synthesizedHeader: false };
+	// The INSERTION POINT is the first marker-bearing line, valid or not —
+	// deliberately not the first *valid* row. selectCandidateHeader takes the
+	// first marker-bearing line as authoritative, so inserting after a malformed
+	// marker would leave that malformed line as the header and fail the artifact
+	// anyway. Placing the header above it demotes it to a data row, which is then
+	// rejected on its own merits while its valid siblings survive. This matters:
+	// headerless (9/16) co-occurring with an unescaped pipe (7/16) is the single
+	// most likely recurrence shape.
+	// Cannot be -1: hasSalvageableRow above only returns true for a line whose
+	// first field is one of these two markers, so at least one such line exists.
+	const firstSalvageableIndex = lines.findIndex((line) => {
+		const marker = splitPipeFields(line)[0]?.trim();
+		return marker === CANDIDATE_MARKER || marker === CLEAN_MARKER;
+	});
+	// Insert the header immediately before the first salvageable row, not at the
+	// top. Prepending would push the explorer's leading prose BELOW the header,
+	// where every prose line is counted as a malformed row — which both inflates
+	// the diagnostics and trips the CLEAN attestation's zero-malformed-rows rule,
+	// defeating the repair it was supposed to enable.
+	return {
+		text: [
+			...lines.slice(0, firstSalvageableIndex),
+			CANDIDATE_HEADERS[fallbackFamily],
+			...lines.slice(firstSalvageableIndex),
+		].join('\n'),
+		synthesizedHeader: true,
+	};
+}
+
 export type CandidateFieldName =
 	(typeof CANDIDATE_FIELDS)[RowFormatFamily][number];
 

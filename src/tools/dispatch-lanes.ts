@@ -2,7 +2,9 @@ import { createHash } from 'node:crypto';
 import pLimit from 'p-limit';
 import { z } from 'zod';
 import {
+	CANDIDATE_FIELD_COUNT,
 	CANDIDATE_HEADERS,
+	CLEAN_FIELD_COUNT,
 	CLEAN_TEMPLATES,
 } from '../background/candidate-contract.js';
 import {
@@ -226,17 +228,32 @@ const PR_WORKFLOW_LANE_CHECKLISTS: Readonly<Record<string, string>> = {
 		'challenge the closeout evidence, omissions, false confidence, severity, scope, and publication readiness',
 };
 
-const EXPLORER_CANDIDATE_FORMAT_SUFFIX = `
+/**
+ * Exported so a test can assert the RENDERED contract, not its source text: the
+ * pipe-escaping rule is a backslash inside a template literal, where a single
+ * backslash is silently dropped and would instruct lanes to emit the exact
+ * character that breaks row parsing.
+ */
+export const EXPLORER_CANDIDATE_FORMAT_SUFFIX = `
 
 IMPORTANT — OUTPUT FORMAT REQUIREMENT:
-You MUST emit your findings as a pipe-delimited [CANDIDATE] table.
-Emit the marker-bearing header first, then one unprefixed data row per finding.
+You MUST emit your findings as a pipe-delimited [CANDIDATE] table. The FIRST
+[CANDIDATE]-prefixed line is the literal column header, copied verbatim with the
+field NAMES as its values; data rows follow it.
+
+WORKED EXAMPLE — copy this shape exactly. The first line is the header, not a finding:
+${CANDIDATE_HEADERS.base_explorer}
+[CANDIDATE] | example-lane-001 | example-lane | MEDIUM | correctness | src/a.ts:12 | claim without pipes | evidence without pipes | impact without pipes | HIGH
 
 Standard explorer format (use unless the prompt specifies micro-lane work):
 ${CANDIDATE_HEADERS.base_explorer}
 
 Micro-lane format (use when the prompt references invariant checking or micro_lane, or for swarm-pr-review:council discovery):
 ${CANDIDATE_HEADERS.micro_lane}
+
+Every data row has exactly ${CANDIDATE_FIELD_COUNT} fields after the marker. A
+literal pipe inside any field MUST be written as \\| — an unescaped | starts a
+new field, and the row is then rejected as malformed.
 
 Candidate IDs must be globally unique across the run; prefix them with the
 exact workflow_lane value from this dispatch.
@@ -245,6 +262,9 @@ If a standard explorer finds zero issues, emit its header followed by exactly:
 ${CLEAN_TEMPLATES.base_explorer}
 If a micro-lane finds zero issues, emit its header followed by exactly:
 ${CLEAN_TEMPLATES.micro_lane}
+A [CLEAN] row has exactly ${CLEAN_FIELD_COUNT - 1} fields after the marker and NO
+confidence field. Emit it ONLY when the lane has zero findings — never alongside
+[CANDIDATE] rows.
 Write a substantive coverage_scope of at least 12 characters and concrete evidence of at least 20
 characters; bare header-only output is UNATTESTED for every PR-review lane.
 Do NOT use the default PROJECT/STRUCTURE output format for this dispatch.`;
@@ -2041,6 +2061,12 @@ async function collectOnce(
 					reviewScope: record.workspace?.scope ?? undefined,
 				},
 			});
+			if (validation.ok && validation.salvaged?.length) {
+				// Persist the repair on the durable ledger: a salvaged lane is
+				// accepted, so nothing downstream would otherwise record that its
+				// artifact needed fixing.
+				prospectiveResult.salvagedWorkflowLanes = [...validation.salvaged];
+			}
 			if (!validation.ok) {
 				terminalStatus = 'error';
 				const family =

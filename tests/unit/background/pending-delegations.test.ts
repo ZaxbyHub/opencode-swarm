@@ -244,4 +244,32 @@ describe('pending-delegations store', () => {
 		expect(second?.status).toBe('completed');
 		expect(findByCorrelationId(dir, 'ses_done')?.result?.text).toBe('done');
 	});
+
+	it('round-trips salvagedWorkflowLanes instead of dropping the whole record', async () => {
+		// ResultSchema is .strict() and readDelegations safeParse-skips records it
+		// rejects, while appendRecord writes without validating. An undeclared
+		// result field is therefore written to disk and then silently invisible to
+		// every reader — which would make a successfully salvaged PR-review lane
+		// look like one that never reached a terminal state.
+		await recordPendingDelegation(
+			dir,
+			input({ correlationId: 'ses_salvaged' }),
+		);
+		await appendDelegationTransition(dir, 'ses_salvaged', {
+			status: 'completed',
+			result: {
+				text: 'salvaged output',
+				chars: 15,
+				truncated: false,
+				digest: 'd'.repeat(64),
+				salvagedWorkflowLanes: ['correctness-state'],
+			},
+		});
+
+		const record = findByCorrelationId(dir, 'ses_salvaged');
+		expect(record?.status).toBe('completed');
+		expect(record?.result?.salvagedWorkflowLanes).toEqual([
+			'correctness-state',
+		]);
+	});
 });

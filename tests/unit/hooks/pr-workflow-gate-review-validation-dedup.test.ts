@@ -164,9 +164,24 @@ describe('pr-workflow-gate candidate inventory deduplication', () => {
 		).resolves.toMatchObject({ mode: 'PR_REVIEW' });
 	});
 
-	test('rejects a mislabeled candidate in a singleton base lane at the coverage gate', async () => {
+	test('salvages a singleton base lane whose second row is lane-mislabeled', async () => {
+		// Intent change (approved salvage). The fixture is one correctly-labeled row
+		// plus a second, well-formed row for the same dispatch whose lane label has
+		// a typo — the fixture's own comment calls this "a realistic case of a
+		// subagent finding two issues in one dispatch and being inconsistent about
+		// the exact label on the second one".
+		//
+		// This previously threw 'Expected lane intent-architecture' and discarded
+		// BOTH findings. Coverage is still established only by the correctly-labeled
+		// row, so the proof-of-work bar has not moved; the mislabeled row is now a
+		// diagnostic rather than a lane-killer, and extraction (deliberately
+		// unscoped for full-ownership sources) still carries it into the inventory
+		// so the finding is reviewed instead of silently lost.
 		await expect(
 			establishReviewPrerequisitesWithMislabeledSingletonLane(),
-		).rejects.toThrow('Expected lane intent-architecture');
+		).resolves.toMatchObject({
+			coveringCandidateId: 'C-COVERING',
+			mislabeledCandidateId: 'C-MISLABELED',
+		});
 	});
 });

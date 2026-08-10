@@ -8,6 +8,7 @@ import {
 	CANDIDATE_HEADERS,
 	CLEAN_TEMPLATES,
 	candidateHeaderFamily,
+	normalizeCandidateArtifact,
 	type RowFormatFamily,
 	removeCandidateCodeFences,
 	selectCandidateHeader,
@@ -134,7 +135,16 @@ export interface PrReviewLaneValidationFailure {
 }
 
 export type PrReviewLaneValidationResult =
-	| { ok: true }
+	| {
+			ok: true;
+			/**
+			 * Workflow lanes accepted only after repair — a synthesized canonical
+			 * header, or valid rows retained beside malformed ones. Structural rather
+			 * than log-only, so a repaired artifact is programmatically
+			 * distinguishable from a well-formed one.
+			 */
+			salvaged?: readonly string[];
+	  }
 	| { ok: false; failure: PrReviewLaneValidationFailure };
 
 export interface PrReviewDiscoveryLaneValidationInput {
@@ -4972,6 +4982,12 @@ export const _test_exports = {
 	minimumConsolidatedLaneCover,
 	analyzePrReviewBatchRecordIntegrity,
 	MAX_COVER_UNIVERSE_BITS,
+	// Exposed so a regression test can assert the coverage verdict and the
+	// candidate-id extraction agree on the same artifact — the split-brain that
+	// let a lane be judged "covered" while contributing zero findings.
+	extractCandidateIds,
+	parseCanonicalCandidateRows,
+	resolvePrReviewRowFamily,
 	workflowGateStateRelativePath,
 	workflowGateStateLockRelativePath,
 	workflowCheckoutMutationLockRelativePath,
@@ -6490,6 +6506,7 @@ function derivePrReviewCandidateInventory(
 						artifact.text,
 						source.workflowLane,
 						recordOwnedLanes,
+						source.mode,
 					))
 			)
 				continue;
@@ -6500,9 +6517,7 @@ function derivePrReviewCandidateInventory(
 				candidateIds.push(
 					...extractCandidateIds(
 						artifact.text,
-						source.mode === 'swarm-pr-review:micro'
-							? 'micro_lane'
-							: 'base_explorer',
+						resolvePrReviewRowFamily(source.workflowLane, source.mode),
 						source.creditedLanes,
 					),
 				);
@@ -6550,6 +6565,39 @@ function appendBoundedCandidateIssue(issues: string[], message: string): void {
 	}
 }
 
+/**
+ * Single source of truth for a PR-review lane's row family.
+ *
+ * Coverage validation and id extraction previously derived this separately (one
+ * from the dispatch mode, one from lane membership). Because the artifact
+ * normalizer's output depends on the family, any disagreement would reintroduce
+ * the very coverage/inventory split this normalization exists to remove.
+ */
+function resolvePrReviewRowFamily(
+	workflowLane: string | undefined,
+	mode?: string,
+): RowFormatFamily {
+	// MODE FIRST, deliberately. The dispatch output contract tells a lane which
+	// row family to emit purely from the mode (dispatch-lanes.ts: base -> base row
+	// family; micro and council -> micro row family), so the mode is the ground
+	// truth about what the artifact will contain. Deriving from the lane label
+	// instead lets a council lane named after a base dimension resolve one way at
+	// the coverage site and the other way at the extraction site — the exact
+	// coverage/inventory split this normalization exists to remove.
+	if (mode === 'swarm-pr-review:base') return 'base_explorer';
+	if (mode === 'swarm-pr-review:micro' || mode === 'swarm-pr-review:council') {
+		return 'micro_lane';
+	}
+	// No mode available: fall back to lane membership. Base dimension ids are a
+	// closed set, so anything outside it is a micro/trigger lane.
+	return workflowLane !== undefined &&
+		PR_REVIEW_BASE_DIMENSION_IDS.includes(
+			workflowLane as PrReviewBaseDimensionId,
+		)
+		? 'base_explorer'
+		: 'micro_lane';
+}
+
 function parseCanonicalCandidateRows(
 	text: string,
 	fallbackFamily: RowFormatFamily,
@@ -6557,8 +6605,8 @@ function parseCanonicalCandidateRows(
 	const rows: CanonicalCandidateArtifactRow[] = [];
 	const issues: string[] = [];
 	let headerFamily: RowFormatFamily | null = null;
-	for (const [index, line] of removeCandidateCodeFences(text)
-		.split(/\r?\n/)
+	for (const [index, line] of normalizeCandidateArtifact(text, fallbackFamily)
+		.text.split(/\r?\n/)
 		.entries()) {
 		const fields = splitPipeFields(line).map((field) => field.trim());
 		const detectedHeaderFamily = candidateHeaderFamily(fields);
@@ -8023,6 +8071,7 @@ function workflowArtifactHasContractMarker(
 			artifact.text,
 			coveredLane,
 			coveredLanes,
+			expectedMode,
 		),
 	}));
 	if (coverageAnalyses.some(({ analysis }) => !analysis.covered)) {
@@ -8053,6 +8102,7 @@ function workflowArtifactHasContractMarker(
 				artifact.text,
 				coveredLane,
 				coveredLanes,
+				expectedMode,
 			);
 			if (evidence === null) continue;
 			const priorLane = seenEvidence.get(evidence);
@@ -8067,6 +8117,12 @@ interface PrReviewDiscoveryCoverageAnalysis {
 	covered: boolean;
 	evidence: string | null;
 	issues: string[];
+	/**
+	 * True when coverage required a synthesized canonical header. Surfaced so a
+	 * repaired artifact is auditable rather than silently indistinguishable from
+	 * a well-formed one.
+	 */
+	salvaged: boolean;
 	failurePredicate?: Extract<
 		PrReviewLaneValidationPredicate,
 		'discovery.header' | 'discovery.row' | 'discovery.coverage'
@@ -8077,14 +8133,18 @@ function analyzePrReviewDiscoveryArtifact(
 	text: string,
 	expectedWorkflowLane: string,
 	ownedWorkflowLanes: readonly string[] = [expectedWorkflowLane],
+	mode?: string,
 ): PrReviewDiscoveryCoverageAnalysis {
-	const fallbackFamily: RowFormatFamily = PR_REVIEW_BASE_DIMENSION_IDS.includes(
-		expectedWorkflowLane as PrReviewBaseDimensionId,
-	)
-		? 'base_explorer'
-		: 'micro_lane';
+	// `mode` is threaded in so this site and the extraction site
+	// (derivePrReviewCandidateInventory) resolve the row family from the SAME
+	// input. Without it, a council lane named after a base dimension resolves
+	// base_explorer here and micro_lane there, and the artifact can be judged
+	// covered while contributing nothing to the inventory.
+	const fallbackFamily = resolvePrReviewRowFamily(expectedWorkflowLane, mode);
 	const issues: string[] = [];
-	const canonicalText = removeCandidateCodeFences(text);
+	const normalized = normalizeCandidateArtifact(text, fallbackFamily);
+	const canonicalText = normalized.text;
+	const salvaged = normalized.synthesizedHeader;
 	const header = selectCandidateHeader(canonicalText.split(/\r?\n/));
 	if (
 		header === null ||
@@ -8099,6 +8159,7 @@ function analyzePrReviewDiscoveryArtifact(
 			covered: false,
 			evidence: null,
 			issues,
+			salvaged,
 			failurePredicate: 'discovery.header',
 		};
 	}
@@ -8141,14 +8202,36 @@ function analyzePrReviewDiscoveryArtifact(
 			`row ${detail.row_index + 1} field ${detail.field}: ${detail.message}`,
 		);
 	}
-	if (parsed.error || parsed.diagnostics.parse_error_details.length > 0) {
+	const hasParseFailure =
+		Boolean(parsed.error) || parsed.diagnostics.parse_error_details.length > 0;
+	// Duplicate candidate ids are the one row defect that is never salvaged: the
+	// inventory they feed is asserted globally unique, so admitting them would
+	// convert a recoverable lane defect into a late workflow-wide failure.
+	//
+	// Checked against the EXTRACTOR's rows rather than the parser's diagnostics.
+	// The parser drops an out-of-ownership row before its duplicate detector runs,
+	// so a reused id spread across one owned and one foreign row produces no
+	// duplicate diagnostic at all — while extractCandidateIds deliberately keeps
+	// both rows (an unscoped extraction is intentional so inconsistent lane
+	// labelling never silently drops a real candidate). Reading the extractor's
+	// output is the only check that sees exactly what assertNoDuplicates will.
+	const extractedCandidateIds = parseCanonicalCandidateRows(
+		canonicalText,
+		fallbackFamily,
+	).rows.map((row) => row.candidateId);
+	const hasDuplicateCandidateId =
+		new Set(extractedCandidateIds).size !== extractedCandidateIds.length;
+	if (hasDuplicateCandidateId) {
 		return {
 			covered: false,
 			evidence: null,
 			issues,
+			salvaged,
 			failurePredicate: 'discovery.row',
 		};
 	}
+	// Otherwise a malformed row is a diagnostic, not a verdict: valid rows that
+	// establish coverage are retained and the defective ones are reported.
 	const matchingCandidate = parsed.candidates.find(
 		(candidate) =>
 			(candidate.lane ?? candidate.micro_lane) === expectedWorkflowLane,
@@ -8167,6 +8250,7 @@ function analyzePrReviewDiscoveryArtifact(
 				matchingCandidate.confidence,
 			].join('\0'),
 			issues,
+			salvaged,
 		};
 	}
 	const clean = parsed.clean_attestation;
@@ -8180,13 +8264,17 @@ function analyzePrReviewDiscoveryArtifact(
 			covered: true,
 			evidence: `${clean.coverage_scope}\0${clean.evidence}`,
 			issues,
+			salvaged,
 		};
 	}
 	return {
 		covered: false,
 		evidence: null,
 		issues,
-		failurePredicate: 'discovery.coverage',
+		salvaged,
+		// Preserve today's predicate: a row-level defect is still reported as
+		// such once it turns out no valid row could establish coverage.
+		failurePredicate: hasParseFailure ? 'discovery.row' : 'discovery.coverage',
 	};
 }
 
@@ -8238,8 +8326,34 @@ export function validatePrReviewDiscoveryLaneCompletion(
 			artifact.text,
 			workflowLane,
 			ownedWorkflowLanes,
+			input.expected.mode,
 		),
 	}));
+	// A lane that is covered but carried defects is the whole point of salvage —
+	// and also the one case the failure path never reports, because diagnostics
+	// are only rendered for lanes that fail. Record them here so a repaired or
+	// partially-dropped artifact is never silently indistinguishable from a
+	// clean one.
+	//
+	// The returned `salvaged` list is the PRODUCTION signal: the caller persists it
+	// as `salvagedWorkflowLanes` on the durable delegation ledger, which is what a
+	// post-mortem actually reads. The `warn` below is debug-gated — `utils/logger.ts`
+	// returns early unless `process.env.OPENCODE_SWARM_DEBUG === '1'` exactly, so any
+	// other value (including `true`) leaves it silent — and is therefore a developer
+	// convenience only. Do not treat it as the observability guarantee, and do not
+	// weaken the ledger write on the assumption the log covers it.
+	const salvagedLanes: string[] = [];
+	for (const { workflowLane, analysis } of analyses) {
+		if (!analysis.covered) continue;
+		if (!analysis.salvaged && analysis.issues.length === 0) continue;
+		salvagedLanes.push(workflowLane);
+		const reason = analysis.salvaged
+			? `canonical ${resolvePrReviewRowFamily(workflowLane, input.expected.mode)} header was absent and was synthesized from valid marker rows`
+			: 'one or more rows were dropped as malformed or out-of-ownership';
+		warn(
+			`[pr-workflow-gate] discovery artifact salvaged: batch=${input.record.batchId ?? '(missing)'} lane=${input.record.laneId ?? '(missing)'} workflow_lane=${workflowLane} — ${reason}; retained coverage from the valid rows. Dropped-row diagnostics: ${analysis.issues.join('; ') || '(none)'}`,
+		);
+	}
 	const failedCoverage = analyses.find(({ analysis }) => !analysis.covered);
 	if (failedCoverage) {
 		return failedLaneValidation(
@@ -8263,7 +8377,9 @@ export function validatePrReviewDiscoveryLaneCompletion(
 			seenEvidence.set(analysis.evidence, workflowLane);
 		}
 	}
-	return { ok: true };
+	return salvagedLanes.length > 0
+		? { ok: true, salvaged: salvagedLanes }
+		: { ok: true };
 }
 
 /** Require at least one semantically valid discovery row or CLEAN attestation. */
@@ -8271,11 +8387,13 @@ export function prReviewDiscoveryArtifactCoversLane(
 	text: string,
 	expectedWorkflowLane: string,
 	ownedWorkflowLanes: readonly string[] = [expectedWorkflowLane],
+	mode?: string,
 ): boolean {
 	return analyzePrReviewDiscoveryArtifact(
 		text,
 		expectedWorkflowLane,
 		ownedWorkflowLanes,
+		mode,
 	).covered;
 }
 
@@ -8283,11 +8401,13 @@ function extractLaneCoverageEvidenceText(
 	text: string,
 	expectedWorkflowLane: string,
 	ownedWorkflowLanes: readonly string[] = [expectedWorkflowLane],
+	mode?: string,
 ): string | null {
 	return analyzePrReviewDiscoveryArtifact(
 		text,
 		expectedWorkflowLane,
 		ownedWorkflowLanes,
+		mode,
 	).evidence;
 }
 

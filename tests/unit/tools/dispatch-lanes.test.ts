@@ -1147,7 +1147,7 @@ describe('executeDispatchLanesAsync and executeCollectLaneResults', () => {
 			'inspect runtime',
 		);
 		expect(promptAsyncCalls[0][0].body.parts[0].text).toContain(
-			'one unprefixed data row per finding',
+			'is the literal column header',
 		);
 		expect(promptAsyncCalls[0][0].body.parts[0].text).toContain(
 			'[CLEAN] | lane | coverage_scope | evidence',

@@ -76,7 +76,7 @@ describe('PR-review candidate semantics at the coverage gate', () => {
 		expect(diagnostic).not.toContain('x'.repeat(1_000));
 	});
 
-	test('refuses coverage when a valid owned candidate is followed by a malformed owned candidate', async () => {
+	test('retains coverage when a valid owned candidate is followed by a malformed owned candidate', async () => {
 		await activatePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW');
 		const [malformedDimension, ...remainingDimensions] =
 			PR_REVIEW_BASE_DIMENSION_IDS;
@@ -110,9 +110,23 @@ describe('PR-review candidate semantics at the coverage gate', () => {
 			remainingLanes,
 		);
 
+		// Approved salvage: one malformed row no longer destroys the lane's valid
+		// finding. The VALID row establishes coverage; the malformed row is
+		// reported as a diagnostic and contributes nothing to the inventory.
 		await expect(
 			assertPrReviewBaseCoverageSettled(tempDir, SESSION_ID),
-		).rejects.toThrow(/row 3 field severity: Invalid severity: URGENT/);
+		).resolves.toBeDefined();
+		expect(
+			_test_exports.extractCandidateIds(
+				[
+					BASE_HEADER,
+					`VALID | ${malformedDimension} | HIGH | correctness | src/a.ts:1 | valid claim | valid evidence | valid impact | HIGH`,
+					`MALFORMED | ${malformedDimension} | URGENT | correctness | src/a.ts:2 | dropped claim | dropped evidence | dropped impact | HIGH`,
+				].join('\n'),
+				'base_explorer',
+				[malformedDimension],
+			),
+		).toEqual(['VALID']);
 	});
 
 	test('Tier M preserves earlier valid evidence when a later retry is malformed', async () => {

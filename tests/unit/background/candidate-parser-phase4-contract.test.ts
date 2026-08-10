@@ -15,6 +15,7 @@ import {
 	parseAndPersist,
 	parseCandidates,
 } from '../../../src/background/candidate-parser';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const tempDirs: string[] = [];
 const digest = createHash('sha256').update('phase4').digest('hex');
@@ -288,5 +289,32 @@ describe('candidate parser Phase 4 contract', () => {
 		) as ReturnType<typeof parseCandidates> & { clean_attestation?: unknown };
 		expect(result.candidates).toEqual([]);
 		expect(result.clean_attestation).toBeUndefined();
+	});
+
+	test('parseAndPersist repairs an absent header while the pure parser does not', () => {
+		// The tool boundary normalizes so a caller cannot be refused findings from a
+		// lane the PR-review gate already credited. The pure parser deliberately does
+		// NOT synthesize a header, so the two must disagree on the same input — that
+		// asymmetry is the contract, and this pins both halves of it.
+		const headerless =
+			'[CANDIDATE] | M-1 | subprocess | HIGH | correctness | src/a.ts:1 | claim text | invariant text | evidence text | HIGH';
+		const parserFlags = flags({
+			expected_family: 'micro_lane',
+			expected_micro_lane: 'subprocess',
+		});
+
+		const pure = parseCandidates(input(headerless), parserFlags);
+		expect(pure.candidates).toEqual([]);
+		expect(pure.error_code).toBe('invalid-candidate-header');
+
+		// Use the shared canonicalizing helper: it closes the macOS
+		// /var -> /private/var symlink gap that FR-011 exists to enforce.
+		const boundaryRoot = canonicalMkdtemp('phase4-repair-');
+		tempDirs.push(boundaryRoot);
+		const boundary = parseAndPersist(input(headerless), parserFlags, {
+			projectRoot: boundaryRoot,
+		});
+		expect(boundary.candidates).toHaveLength(1);
+		expect(boundary.candidates[0].candidate_id).toBe('M-1');
 	});
 });
