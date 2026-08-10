@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import {
 	isOnDifferentPathRoot,
 	isPathIdentityWithin,
+	isPathWithinDeclaredScope,
 	normalizePathIdentity,
 	pathIdentitiesEqual,
 	sanitizeDiagnosticText,
@@ -58,6 +59,33 @@ describe('issue #2096 platform-aware path identity', () => {
 		expect(isPathIdentityWithin('/repo/src2/a.ts', '/repo/src', 'posix')).toBe(
 			false,
 		);
+	});
+
+	test('declared-scope resolution shares canonical platform identity (FB-009)', () => {
+		expect(
+			isPathWithinDeclaredScope(
+				'C:\\Repo\\SRC\\a.ts',
+				['c:/repo/src'],
+				'C:\\Repo',
+				'win32',
+			),
+		).toBe(true);
+		expect(
+			isPathWithinDeclaredScope(
+				'/repo/SRC/a.ts',
+				['/repo/src'],
+				'/repo',
+				'posix',
+			),
+		).toBe(false);
+		expect(
+			isPathWithinDeclaredScope(
+				'/repo/src2/a.ts',
+				['/repo/src'],
+				'/repo',
+				'posix',
+			),
+		).toBe(false);
 	});
 
 	test('control and bidi text are rejected and rendered safely', () => {

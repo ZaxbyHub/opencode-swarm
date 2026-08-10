@@ -110,4 +110,25 @@ describe('issue #2096 direct scope diagnostic advisories', () => {
 		expect(advisories).toHaveLength(1);
 		expect(advisories[0]).toContain('ACTION[architect]');
 	});
+
+	test('wrong gate root emits workspace mismatch and architect advisory (FB-007)', async () => {
+		const lane = path.join(directory, 'lane-mismatch');
+		fs.mkdirSync(lane, { recursive: true });
+		ensureAgentSession('coder-mismatch', 'coder', directory);
+		installActiveScopeBinding({
+			directory: lane,
+			childSessionId: 'coder-mismatch',
+			taskId: '1.1',
+			files: ['src/a.ts'],
+		});
+		const operation = hook().toolBefore(
+			{ tool: 'write', sessionID: 'coder-mismatch', callID: 'mismatch' },
+			{ args: { path: 'src/a.ts', content: 'x' } },
+		);
+		await expect(operation).rejects.toThrow(
+			/SCOPE_WORKSPACE_MISMATCH.*rooted at.*gate resolved.*ACTION\[architect\]/i,
+		);
+		expect(advisories).toHaveLength(1);
+		expect(advisories[0]).toContain('SCOPE_WORKSPACE_MISMATCH');
+	});
 });

@@ -25,6 +25,7 @@ import {
 	getPathFlavor,
 	isOnDifferentPathRoot,
 	isPathIdentityWithin,
+	isPathWithinDeclaredScope,
 	type PathFlavor,
 	pathIdentitiesEqual,
 	sanitizeDiagnosticText,
@@ -626,27 +627,6 @@ export function isOnDifferentFilesystemRoot(
 	return isOnDifferentPathRoot(targetAbsolute, cwdAbsolute, flavor);
 }
 
-/**
- * Checks whether the given filePath is within declared scope entries.
- * Handles both exact matches and directory containment.
- *
- * v6.70.0 gap-closure: on Windows (case-insensitive FS), compare lowercased
- * variants so scope `config/` correctly matches a write to `Config/foo.rb`.
- * POSIX filesystems stay case-sensitive.
- */
-function isInDeclaredScope(
-	filePath: string,
-	scopeEntries: string[],
-	cwd?: string,
-): boolean {
-	const dir = cwd ?? process.cwd();
-	const flavor = getPathFlavor();
-	const resolvedFile = path.resolve(dir, filePath);
-	return scopeEntries.some((scope) => {
-		return isPathIdentityWithin(resolvedFile, path.resolve(dir, scope), flavor);
-	});
-}
-
 export const BUILT_IN_VERIFIER_CONFIG_GLOBS = [
 	'**/oxlintrc*',
 	'**/.oxlintrc*',
@@ -960,7 +940,7 @@ export function checkFileAuthorityWithRules(
 		isCoderAgent &&
 		options.declaredScope != null &&
 		options.declaredScope.length > 0 &&
-		isInDeclaredScope(normalizedPath, options.declaredScope, dir);
+		isPathWithinDeclaredScope(normalizedPath, options.declaredScope, dir);
 	if (pathIsInDeclaredScope) {
 		return {
 			allowed: true,

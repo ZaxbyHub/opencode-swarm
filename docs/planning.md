@@ -32,7 +32,7 @@ Each model needs to know:
 - The Architect delegates all coding to the Coder — it never writes code itself
 - Each task runs through a full 15-step QA gate
 - Tasks must be atomic: one file, one concern, one logical change
-- Tasks need `FILE`, `TASK`, `CONSTRAINT`, and `ACCEPTANCE CRITERIA` fields
+- Tasks need `description`, `files_touched`, and verifiable `acceptance` fields; use `depends` and `fr_refs` when applicable
 - The Critic reviews the plan before implementation starts
 
 ---
@@ -61,6 +61,7 @@ When scope preflight fails:
 
 - `SCOPE_CONFLICT`: reconcile the named explicit/plan/`FILE:` sets, update stale plan data through `save_plan`, then redeclare the exact list with `replace_existing: true`.
 - `SCOPE_BINDING_EXPIRED` or `SCOPE_BINDING_AMBIGUOUS`: re-read the task and redeclare its exact intended list with `replace_existing: true`.
+- `SCOPE_BINDING_STORE_OVERLOADED`: finish or expire terminal tasks, then retry `declare_scope`; the runtime will not choose from an incompletely scanned store.
 - `SCOPE_WORKSPACE_MISMATCH`: use the reported lane/worktree root as `working_directory`; paths stay relative to that root.
 - `SCOPE_ROOT_ESCAPE`: retry with the diagnostic's safe relative path only; never authorize an outside absolute path.
 - Effective-authority or verifier-config denial: redeclaration cannot override it. Assign the operation to the correct role or change the task.

@@ -352,6 +352,32 @@ Each exact generation uses the same identity-bound v2 schema as the primary work
 }
 ```
 
+### Active scope leases and recovery codes
+
+Declarations and pending dispatch records have a bounded inactivity lifetime. Claiming or deriving an active child starts a fresh bounded lease instead of inheriting the declaration's remaining deadline. After a write passes every identity, scope, containment, and authority check and the tool succeeds, the runtime refreshes that exact binding generation with a revision-checked update. A stale revision, different session/task/root, failed tool call, or already expired generation cannot renew authority.
+
+Expiry remains fail-closed. The runtime retains bounded expiry tombstones so restart recovery can identify the expired binding generation and report its `expiredAt` time. The architect must re-read the current task, call `declare_scope` with the exact workspace-relative list and `replace_existing: true`, then dispatch a new Task call. Cleanup and replacement retire only exact generations; ambiguity never selects an enumeration-order winner.
+
+Scope and effective-authority denials use stable recovery codes:
+
+| Code | Meaning and reachable recovery |
+|------|--------------------------------|
+| `SCOPE_NOT_DECLARED` | No exact active generation authorizes this session/task. The architect declares the exact task scope and dispatches a new Task call. |
+| `SCOPE_BINDING_EXPIRED` | The reported generation expired at the reported time. The architect replaces the declaration, then redispatches. |
+| `SCOPE_BINDING_AMBIGUOUS` | Multiple exact live generations match. The architect reconciles/replaces them; the runtime never picks one by order. |
+| `SCOPE_BINDING_PERSISTENCE_FAILED` | The durable write, verification, lock, or rollback transaction failed. Do not retry the write through another mechanism; fix the reported storage failure, then have the architect replace the declaration and redispatch. |
+| `SCOPE_BINDING_CAPACITY` | The bounded live-binding admission capacity is exhausted or the candidate is no longer admissible. Finish or expire terminal tasks, then have the architect declare and dispatch again. |
+| `SCOPE_BINDING_ALREADY_CLAIMED` | This exact Task dispatch already belongs to another child session. Continue with that child or have the architect create a new Task dispatch; never reuse the claimed dispatch identity. |
+| `SCOPE_BINDING_STORE_OVERLOADED` | The complete durable set exceeded its bounded scan/admission budget. Finish or expire terminal tasks before retrying declaration. |
+| `SCOPE_BINDING_STALE` | The generation identity or revision changed, was retired, or is no longer the exact active generation. Stop using the stale child; the architect re-reads current task state, replaces the declaration, and dispatches a new Task call. |
+| `SCOPE_WORKSPACE_MISMATCH` | An otherwise plausible binding belongs to another lane/root. Use the reported active root and workspace-relative paths. |
+| `SCOPE_ROOT_ESCAPE` | The target escapes the active root. Retry only the reported safe relative form; never authorize the outside absolute path. |
+| `SCOPE_CONFLICT` | Explicit, plan, and/or `FILE:` sources disagree. Reconcile the named sets, update stale plan data, and replace the declaration. |
+| `SCOPE_VIOLATION` | The target is outside the active exact scope. Correct the target or have the architect declare the exact intended path and redispatch. |
+| `AUTHORITY_INVALID_PATH` / `AUTHORITY_ROOT_ESCAPE` | Static path validation or authority containment failed. Correct the path/root; declaration cannot override this layer. |
+| `AUTHORITY_UNIVERSAL_DENY` / `AUTHORITY_PROTECTED_PATH` / `AUTHORITY_VERIFIER_CONFIG` | A hard protected policy denied the target. Assign the operation to the supported owner or change the task; scope cannot override it. |
+| `AUTHORITY_ROLE_READ_ONLY` / `AUTHORITY_UNKNOWN_AGENT` / `AUTHORITY_POLICY_DENY` | The acting role cannot perform the write under immutable capability or enabled role policy. Use the responsible writable role or revise policy/task intent. |
+
 ## Quick Reference
 
 | Operation | Command / Trigger |

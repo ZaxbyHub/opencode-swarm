@@ -52,6 +52,7 @@ import { classifyTaskResult } from '../task-result-classifier';
 import { dcCheckJunctionCreation } from './destructive-command';
 import { recordExecutionStallToolAfter } from './execution-stall';
 import { buildEffectiveRules } from './file-authority';
+import { isInDeclaredScope } from './helpers';
 import {
 	createMessagesTransformHandler,
 	getMostRecentAssistantText,
@@ -366,31 +367,6 @@ function extractPhaseNumber(phaseString: string | null): number {
 function isWriteTool(toolName: string): boolean {
 	const normalized = normalizeToolName(toolName);
 	return (WRITE_TOOL_NAMES as readonly string[]).includes(normalized);
-}
-
-/**
- * v6.21 Task 5.4: Check if a file path is within declared scope entries.
- */
-function isInDeclaredScope(
-	filePath: string,
-	scopeEntries: string[],
-	cwd?: string,
-): boolean {
-	const dir = cwd ?? process.cwd();
-	const caseInsensitive = process.platform === 'win32';
-	const resolvedFileRaw = path.resolve(dir, filePath);
-	const resolvedFile = caseInsensitive
-		? resolvedFileRaw.toLowerCase()
-		: resolvedFileRaw;
-	return scopeEntries.some((scope) => {
-		const resolvedScopeRaw = path.resolve(dir, scope);
-		const resolvedScope = caseInsensitive
-			? resolvedScopeRaw.toLowerCase()
-			: resolvedScopeRaw;
-		if (resolvedFile === resolvedScope) return true;
-		const rel = path.relative(resolvedScope, resolvedFile);
-		return rel.length > 0 && !rel.startsWith('..') && !path.isAbsolute(rel);
-	});
 }
 
 /**

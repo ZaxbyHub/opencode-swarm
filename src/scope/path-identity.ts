@@ -70,6 +70,24 @@ export function isPathIdentityWithin(
 }
 
 /**
+ * Resolves a candidate and declared entries with one filesystem flavor, then
+ * applies the canonical identity containment rule. This is the shared scope
+ * predicate for guardrails, completion observers, and authority evaluation.
+ */
+export function isPathWithinDeclaredScope(
+	filePath: string,
+	scopeEntries: readonly string[],
+	cwd = process.cwd(),
+	flavor: PathFlavor = getPathFlavor(),
+): boolean {
+	const pathImpl = pathImplementation(flavor);
+	const resolvedFile = pathImpl.resolve(cwd, filePath);
+	return scopeEntries.some((scope) =>
+		isPathIdentityWithin(resolvedFile, pathImpl.resolve(cwd, scope), flavor),
+	);
+}
+
+/**
  * Compares drive/UNC/extended-device roots with Windows case-insensitive
  * identity while retaining POSIX case-sensitive path semantics.
  */

@@ -45,6 +45,15 @@ function fixture(): { directory: string; plan: Plan } {
 						depends: [],
 						files_touched: ['src/a.ts'],
 					},
+					{
+						id: '1.2',
+						phase: 1,
+						status: 'pending',
+						size: 'small',
+						description: 'Keep task identity distinct',
+						depends: [],
+						files_touched: ['src/a.ts'],
+					},
 				],
 			},
 		],
@@ -80,6 +89,58 @@ afterEach(() => {
 });
 
 describe('generation-safe scope persistence', () => {
+	test('plan- and task-mismatched active records never authorize (FB-005)', async () => {
+		const { directory, plan } = fixture();
+		const stalePlan = { ...plan, title: 'Stale binding plan' };
+		const staleActive = createClaimedScopeBinding(
+			pending(directory, stalePlan, 'stale-plan-call'),
+			{
+				parentSessionId: 'architect-session',
+				childSessionId: 'coder-plan-mismatch',
+				dispatchCallId: 'stale-plan-call',
+			},
+		);
+		expect(await writeScopeBindingToDisk(directory, staleActive)).toMatchObject(
+			{
+				ok: true,
+			},
+		);
+		expect(
+			resolveAuthorizedScopeBindingDetailed({
+				directory,
+				taskId: '1.1',
+				activeSessionId: 'coder-plan-mismatch',
+			}),
+		).toEqual({ status: 'not_declared' });
+
+		const otherTask = createScopeBinding({
+			directory,
+			plan,
+			taskId: '1.2',
+			files: ['src/a.ts'],
+			ownerSessionId: 'architect-session',
+			ownerMessageId: 'other-task-call',
+			dispatchCallId: 'other-task-call',
+			source: 'plan',
+		});
+		if (!otherTask) throw new Error('task-mismatch fixture failed');
+		const otherTaskActive = createClaimedScopeBinding(otherTask, {
+			parentSessionId: 'architect-session',
+			childSessionId: 'coder-task-mismatch',
+			dispatchCallId: 'other-task-call',
+		});
+		expect(
+			await writeScopeBindingToDisk(directory, otherTaskActive),
+		).toMatchObject({ ok: true });
+		expect(
+			resolveAuthorizedScopeBindingDetailed({
+				directory,
+				taskId: '1.1',
+				activeSessionId: 'coder-task-mismatch',
+			}),
+		).toEqual({ status: 'not_declared' });
+	});
+
 	test('claims successor-first and makes repeated same-child claim idempotent', async () => {
 		const { directory, plan } = fixture();
 		const predecessor = pending(directory, plan);
