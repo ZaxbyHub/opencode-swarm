@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.137.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.137.1...v7.137.2) (2026-08-10)
+
+
+### Bug Fixes
+
+* **council:** persist authoritative round state ([d111234](https://github.com/ZaxbyHub/opencode-swarm/commit/d111234041afe03ff7675b1a220717ca0a16b615))
+* **council:** persist authoritative round state ([a5243a7](https://github.com/ZaxbyHub/opencode-swarm/commit/a5243a7ab94bdd02a49836257c758c12ccfbafe2))
+
 ## [7.137.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.137.0...v7.137.1) (2026-08-09)
 
 
