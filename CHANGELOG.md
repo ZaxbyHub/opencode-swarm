@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.137.5](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.137.4...v7.137.5) (2026-08-10)
+
+
+### Bug Fixes
+
+* **dispatch:** address launch retry review ([bd3286a](https://github.com/ZaxbyHub/opencode-swarm/commit/bd3286aa77b0d3f8206de918f255b2aea6286fcc))
+* **dispatch:** retry transient session creation ([a7916c1](https://github.com/ZaxbyHub/opencode-swarm/commit/a7916c15e0c75972f6b50641aa54385b68fea3f3))
+
 ## [7.137.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.137.3...v7.137.4) (2026-08-10)
 
 
