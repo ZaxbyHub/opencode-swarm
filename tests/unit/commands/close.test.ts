@@ -1860,9 +1860,9 @@ describe('handleCloseCommand', () => {
 					'utf-8',
 				);
 
-				expect(result).not.toContain('knowledge entries created this session');
-				expect(result).not.toContain('skill_improve');
-				expect(summary).not.toContain('knowledge entries created this session');
+				expect(result).not.toContain('Consider running skill_improve');
+				expect(result).not.toContain('skill_generate');
+				expect(summary).not.toContain('Consider running skill_improve');
 			});
 
 			it('counts knowledge entries at and after session start while ignoring older and invalid timestamps', async () => {

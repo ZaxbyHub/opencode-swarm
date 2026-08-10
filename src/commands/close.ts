@@ -11,6 +11,7 @@ import {
 } from '../config/schema';
 import { closeProjectDb } from '../db/project-db';
 import { archiveEvidence } from '../evidence/manager';
+import { isFullAutoRunActive } from '../full-auto/state.js';
 import {
 	getGitRepositoryStatus,
 	resetToMainAfterMerge,
@@ -32,6 +33,7 @@ import { tryAcquireLock } from '../parallel/file-locks.js';
 import { closePlanTerminalState } from '../plan/manager';
 import { clearAllScopes } from '../scope/scope-persistence';
 import {
+	buildActionMenu,
 	runSessionReflection,
 	type SessionReflectionResult,
 	writeSessionReflection,
@@ -44,6 +46,7 @@ import {
 import { readEarliestSessionStart } from '../session/session-start-store.js';
 import {
 	endAgentSession,
+	hasActiveFullAuto,
 	resetSwarmStatePreservingSingletons,
 	swarmState,
 } from '../state';
@@ -75,6 +78,8 @@ interface CloseCommandOptions {
 
 interface CurationCounts {
 	stored: number;
+	/** Issue #2077: surfaced for the reflection knowledge-delta report. */
+	reinforced: number;
 	skipped: number;
 	rejected: number;
 	quarantined: number;
@@ -146,6 +151,14 @@ export interface CloseStageContext {
 	hivePromoted: number;
 	sessionKnowledgeCreated: number;
 	fallbackKnowledgeCreated: number;
+	/** Issue #2077: FR-015 dedup drop count (retro lessons dropped as already-known). */
+	dedupDropped: number;
+	/** Issue #2077: false when the dedup knowledge read failed (fail-open). */
+	dedupAvailable: boolean;
+	/** Issue #2077: total retro lessons before dedup. */
+	retroLessonTotal: number;
+	/** Issue #2077: full-auto state computed once, reused at reflection + menu render. */
+	fullAuto: boolean;
 	originalStatuses: Map<string, string>;
 	guaranteeResult: { closedPhaseIds: number[]; closedTaskIds: string[] };
 	archiveResult: string;
@@ -779,6 +792,8 @@ export async function runFinalizeStage(ctx: CloseStageContext): Promise<void> {
 
 	// FR-015: exclude retro lessons already committed in the knowledge store
 	let dedupedRetroLessons = ctx.retroLessons;
+	ctx.retroLessonTotal = ctx.retroLessons.length;
+	ctx.dedupAvailable = true;
 	try {
 		const existingEntries = await readKnowledge<SwarmKnowledgeEntry>(
 			resolveSwarmKnowledgePath(ctx.directory),
@@ -795,7 +810,11 @@ export async function runFinalizeStage(ctx: CloseStageContext): Promise<void> {
 		}
 	} catch {
 		dedupedRetroLessons = ctx.retroLessons; // fail-open
+		ctx.dedupAvailable = false; // issue #2077: distinguish "0 deduped" from "dedup did not run"
 	}
+	// Issue #2077: capture the dedup drop count so the reflection report can
+	// surface "N deduped as already-known" instead of dropping it invisibly.
+	ctx.dedupDropped = ctx.retroLessons.length - dedupedRetroLessons.length;
 
 	ctx.allLessons = [
 		...new Set([...ctx.explicitLessons, ...dedupedRetroLessons]),
@@ -939,6 +958,33 @@ export async function runFinalizeStage(ctx: CloseStageContext): Promise<void> {
 				toolAggregates: swarmState.toolAggregates,
 				agentSessions: swarmState.agentSessions,
 				sessionId: ctx.options.sessionID,
+				sessionStart: ctx.sessionStart,
+				// Issue #2077: thread the configured dedup threshold so a
+				// user-tuned threshold (e.g. 0.8) does not cause contradiction-
+				// candidate false negatives for pairs in [0.6, 0.8) that can
+				// coexist in the active store (the write paths dedup at the
+				// configured value, not the 0.6 default).
+				dedupThreshold: ctx.config.dedup_threshold,
+				// Issue #2077: pass the knowledge delta (close-time curation
+				// counts + FR-015 dedup state) into the reflection service.
+				// Realtime admission counts are recovered read-only inside the
+				// service from durable markers (the in-memory DrainSummary is
+				// discarded at index.ts; tracked in #1821).
+				knowledgeDelta: {
+					sessionKnowledgeCreated: ctx.sessionKnowledgeCreated,
+					dedupDropped: ctx.dedupDropped,
+					dedupAvailable: ctx.dedupAvailable,
+					retroLessonTotal: ctx.retroLessonTotal,
+					curation: ctx.curationResult
+						? {
+								stored: ctx.curationResult.stored,
+								reinforced: ctx.curationResult.reinforced ?? 0,
+								skipped: ctx.curationResult.skipped ?? 0,
+								rejected: ctx.curationResult.rejected ?? 0,
+								quarantined: ctx.curationResult.quarantined ?? 0,
+							}
+						: undefined,
+				},
 			},
 			CLOSE_REFLECTION_TIMEOUT_MS,
 		);
@@ -2081,6 +2127,10 @@ export async function handleCloseCommand(
 			hivePromoted: 0,
 			sessionKnowledgeCreated: 0,
 			fallbackKnowledgeCreated: 0,
+			dedupDropped: 0,
+			dedupAvailable: true,
+			retroLessonTotal: 0,
+			fullAuto: false,
 			originalStatuses: new Map(),
 			guaranteeResult: { closedPhaseIds: [], closedTaskIds: [] },
 			archiveResult: '',
@@ -2095,6 +2145,16 @@ export async function handleCloseCommand(
 			archiveSuffix: '',
 			args,
 		};
+
+		// Issue #2077: compute full-auto state ONCE (guarded by sessionID to
+		// avoid the cross-session leak documented at skill-improver.ts —
+		// hasActiveFullAuto(undefined) scans ALL sessions) and reuse it at both
+		// the reflection call and the menu render so the two cannot disagree.
+		// Combines the in-memory flag (hasActiveFullAuto) with the durable run
+		// state (isFullAutoRunActive) for robustness across process restarts.
+		ctx.fullAuto = options.sessionID
+			? _internals.detectFullAuto(directory, options.sessionID)
+			: false;
 
 		await runFinalizeStage(ctx);
 
@@ -2326,10 +2386,32 @@ export async function handleCloseCommand(
 			}
 		}
 
-		if (ctx.planAlreadyDone) {
-			return `✅ Session finalized. Plan was already in a terminal state — cleanup and archive applied.\n\n**Archive:** ${ctx.archiveResult}\n**Git:** ${gitAlignResult}${lessonSummary}${knowledgeHintSummary}${skillReviewOutput}${postMortemOutput}${reflectionOutput}${warningMsg}`;
+		// Issue #2077: the signals block renders UNCONDITIONALLY (not gated by
+		// the narrative-report hasSignals check above) so the "0 captured; N
+		// deduped" / NOOP line appears even in a clean session — the issue's
+		// "single genuinely-absent capability".
+		let signalsOutput = '';
+		if (ctx.sessionReflection?.signalsReport) {
+			signalsOutput = `\n\n---\n\n${ctx.sessionReflection.signalsReport}`;
 		}
-		return `✅ Swarm finalized. ${ctx.closedPhases.length} phase(s) closed, ${ctx.closedTasks.length} incomplete task(s) marked closed.\n\n**Archive:** ${ctx.archiveResult}\n**Git:** ${gitAlignResult}${lessonSummary}${knowledgeHintSummary}${skillReviewOutput}${postMortemOutput}${reflectionOutput}${warningMsg}`;
+
+		// Issue #2077 Phase B: numbered action menu (advisory; application is a
+		// later user turn via existing tools). Under full-auto the prompt suffix
+		// is suppressed (reported-only) so the run is not blocked.
+		let actionMenuOutput = '';
+		if (
+			ctx.sessionReflection &&
+			ctx.sessionReflection.actionProposals.length > 0
+		) {
+			actionMenuOutput =
+				'\n\n' +
+				buildActionMenu(ctx.sessionReflection.actionProposals, ctx.fullAuto);
+		}
+
+		if (ctx.planAlreadyDone) {
+			return `✅ Session finalized. Plan was already in a terminal state — cleanup and archive applied.\n\n**Archive:** ${ctx.archiveResult}\n**Git:** ${gitAlignResult}${lessonSummary}${knowledgeHintSummary}${skillReviewOutput}${postMortemOutput}${reflectionOutput}${signalsOutput}${actionMenuOutput}${warningMsg}`;
+		}
+		return `✅ Swarm finalized. ${ctx.closedPhases.length} phase(s) closed, ${ctx.closedTasks.length} incomplete task(s) marked closed.\n\n**Archive:** ${ctx.archiveResult}\n**Git:** ${gitAlignResult}${lessonSummary}${knowledgeHintSummary}${skillReviewOutput}${postMortemOutput}${reflectionOutput}${signalsOutput}${actionMenuOutput}${warningMsg}`;
 	} finally {
 		if (finalizeLock.release) {
 			try {
@@ -2360,11 +2442,32 @@ async function acquireFinalizeLock(
 	return { acquired: false };
 }
 
+/**
+ * Issue #2077: detect full-auto state for the action-menu prompt suppression.
+ * Combines the in-memory session flag (hasActiveFullAuto) with the durable
+ * run state (isFullAutoRunActive reads .swarm/full-auto-state.json) so a
+ * process restart mid-run does not silently re-enable the interactive menu
+ * prompt. The durable check is sync and takes a state lock; if it throws,
+ * fall back to the in-memory flag alone. Caller MUST guard with a defined
+ * sessionID to avoid the cross-session leak (hasActiveFullAuto(undefined)
+ * scans all sessions).
+ */
+function detectFullAuto(directory: string, sessionID: string): boolean {
+	if (hasActiveFullAuto(sessionID)) return true;
+	try {
+		return isFullAutoRunActive(directory, sessionID);
+	} catch {
+		// Durable state read failed — fall back to in-memory flag only.
+		return false;
+	}
+}
+
 export const _internals = {
 	ACTIVE_STATE_DIRS_TO_CLEAN,
 	countSessionKnowledgeEntries,
 	CLOSE_SKILL_REVIEW_TIMEOUT_MS,
 	CLOSE_REFLECTION_TIMEOUT_MS,
+	detectFullAuto, // issue #2077: full-auto detection (testable via _internals)
 	guaranteeAllPlansComplete,
 	getGitRepositoryStatus,
 	resetToMainAfterMerge,

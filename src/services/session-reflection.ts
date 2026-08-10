@@ -18,9 +18,24 @@
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import {
+	jaccardBigram,
+	readKnowledge,
+	readRejectedLessons,
+	resolveSwarmKnowledgePath,
+	wordBigrams,
+} from '../hooks/knowledge-store';
+import type {
+	RejectedLesson,
+	SwarmKnowledgeEntry,
+} from '../hooks/knowledge-types';
+import {
 	createSkillImproverLLMDelegate,
 	type SkillImproverLLMDelegate,
 } from '../hooks/skill-improver-llm-factory';
+import {
+	normalizeComplianceVerdict,
+	readSkillUsageEntriesTail,
+} from '../hooks/skill-usage-log';
 import { validateSwarmPath } from '../hooks/utils';
 import type { ToolAggregate } from '../state';
 
@@ -46,6 +61,73 @@ export interface GateFailureSummary {
 	count: number;
 }
 
+/**
+ * Knowledge-delta surface for the reflection report (issue #2077).
+ *
+ * `admitted` / `reinforcedRealtime` / `rejectedCurator` are recovered
+ * READ-ONLY from durable markers stamped by the realtime admission path
+ * (`src/learning/admission.ts`) and the curator rejected-lessons file —
+ * the in-memory `DrainSummary` is discarded at `src/index.ts` (issue
+ * #1821), but the outcomes it summarized persist on the entries
+ * themselves, so the counts are reconstructable here without any new
+ * writes. Realtime *rejections* (screened-out candidates that never
+ * reached the store) remain unobservable and are flagged in the report.
+ */
+export interface KnowledgeDelta {
+	/** Entries created this session (count, from countSessionKnowledgeEntries). */
+	sessionKnowledgeCreated: number;
+	/** FR-015 dedup: retro lessons dropped as already-known. */
+	dedupDropped: number;
+	/** False when the dedup read failed (fail-open) — distinguishes "0 deduped" from "dedup did not run". */
+	dedupAvailable: boolean;
+	/** Retro lessons that survived dedup and were curated. */
+	retroLessonTotal: number;
+	/** Close-time curation counts (finalize retro-lesson batch). */
+	curation?: {
+		stored: number;
+		reinforced: number;
+		skipped: number;
+		rejected: number;
+		quarantined: number;
+	};
+	/** Entries admitted this session (created_at >= sessionStart AND carry an `insight:` provenance marker). */
+	admitted?: number;
+	/** Pre-existing entries reinforced this session (some confirmed_by[].confirmed_at >= sessionStart). */
+	reinforcedRealtime?: number;
+	/** Curator-path rejections this session (rejected_at >= sessionStart, from .swarm/knowledge-rejected.jsonl). */
+	rejectedCurator?: number;
+}
+
+export interface SkillViolationSignal {
+	skillPath: string;
+	violations: number;
+	total: number;
+	/** Always true — the 64 KB tail may truncate the denominator. */
+	tailBounded: boolean;
+	/** 'session' when filtered by sessionID; 'all_sessions' when no sessionID was available. */
+	scope: 'session' | 'all_sessions';
+}
+
+export interface ContradictionCandidate {
+	newLesson: string;
+	newEntryId: string;
+	conflictsWithId: string;
+	conflictsWithLesson: string;
+	similarity: number;
+}
+
+export type ReflectionActionKind = 'supersede' | 'file_issue' | 'draft_skill';
+
+export interface ReflectionActionProposal {
+	kind: ReflectionActionKind;
+	/** Short human-readable label for the menu line. */
+	label: string;
+	/** Longer body (issue body, lesson text, etc.). */
+	detail: string;
+	/** Existing tool/command to route to, e.g. '/swarm curate'. */
+	routing: string;
+}
+
 export interface SessionReflectionData {
 	timestamp: string;
 	totalToolCalls: number;
@@ -55,12 +137,23 @@ export interface SessionReflectionData {
 	gateFailures: GateFailureSummary[];
 	lessonsFromRetros: string[];
 	errorTaxonomy: Record<string, number>;
+	knowledgeDelta?: KnowledgeDelta;
+	skillViolations: SkillViolationSignal[];
+	contradictionCandidates: ContradictionCandidate[];
 }
 
 export interface SessionReflectionResult {
 	data: SessionReflectionData;
 	architectReport: string;
+	/**
+	 * Always-rendered signals block (issue #2077). Surfaced UNCONDITIONALLY
+	 * by close.ts (not gated by the narrative-report `hasSignals` check) so
+	 * the "0 captured; N deduped" / NOOP line appears even in a clean
+	 * session. Present on BOTH the llm and deterministic paths.
+	 */
+	signalsReport: string;
 	source: 'llm' | 'deterministic';
+	actionProposals: ReflectionActionProposal[];
 }
 
 // ─── Phase 1: Deterministic gathering ────────────────────────────────
@@ -217,10 +310,234 @@ async function gatherGateFailures(
 	return [...failures.values()].sort((a, b) => b.count - a.count);
 }
 
+// ─── Issue #2077 signal gatherers (advisory, read-only) ──────────────
+//
+// Every function below is READ-ONLY: it reads durable artifacts
+// (.swarm/skill-usage.jsonl, the swarm knowledge file, the rejected
+// lessons file) and never mutates a store. Each fails open to an empty
+// result so reflection never blocks finalize. They are exposed via the
+// `_internals` seam AND invoked through it from `runSessionReflection`,
+// so tests inject fakes without `mock.module`.
+
+/** Lower band for the contradiction-candidate similarity window. */
+const CONTRADICTION_LOWER = 0.45;
+/** Cap on session-created entries scanned for contradiction pairs. */
+const CONTRADICTION_SESSION_CAP = 50;
+/** Cap on emitted contradiction pairs. */
+const CONTRADICTION_PAIR_CAP = 10;
+/** Cap on skill-violation rows. */
+const SKILL_VIOLATION_CAP = 5;
+/** Default realtime admission dedup threshold, mirrored from config schema. */
+const DEFAULT_DEDUP_THRESHOLD = 0.6;
+
+/** Negation-polarity heuristic. A contradiction candidate diverges in polarity. */
+const NEGATION_RE =
+	/\b(never|not|don't|avoid|must\s+not|no\s+longer|forbid|prohibit)\b/i;
+
+function isNegationDivergent(a: string, b: string): boolean {
+	const aNeg = NEGATION_RE.test(a ?? '');
+	const bNeg = NEGATION_RE.test(b ?? '');
+	// Divergence = exactly one side carries negation polarity.
+	return aNeg !== bNeg;
+}
+
+/**
+ * Top skills by violation this session (issue #2077).
+ *
+ * Reads the bounded tail of `.swarm/skill-usage.jsonl`, groups by
+ * `skillPath`, and counts entries where the normalized compliance
+ * verdict is `'violated'`. Returns `[]` when `sessionId` is undefined:
+ * without a session filter the tail is cumulative cross-session data
+ * and MUST NOT be labeled "this session" (issue #2077 critic item 8).
+ * `tailBounded` is always true — the 64 KB tail may truncate the
+ * denominator.
+ */
+export function gatherSkillViolations(
+	directory: string,
+	sessionId?: string,
+): SkillViolationSignal[] {
+	if (!sessionId) return [];
+	try {
+		const entries = _internals.readSkillUsageEntriesTail(directory, {
+			sessionID: sessionId,
+		});
+		const bySkill = new Map<string, { violations: number; total: number }>();
+		for (const entry of entries) {
+			const skill = entry.skillPath;
+			if (!skill) continue;
+			const agg = bySkill.get(skill) ?? { violations: 0, total: 0 };
+			agg.total++;
+			if (normalizeComplianceVerdict(entry.complianceVerdict) === 'violated') {
+				agg.violations++;
+			}
+			bySkill.set(skill, agg);
+		}
+		return [...bySkill.entries()]
+			.map(([skillPath, agg]) => ({
+				skillPath,
+				violations: agg.violations,
+				total: agg.total,
+				tailBounded: true,
+				scope: 'session' as const,
+			}))
+			.filter((s) => s.violations > 0)
+			.sort((a, b) => b.violations - a.violations)
+			.slice(0, SKILL_VIOLATION_CAP);
+	} catch {
+		return [];
+	}
+}
+
+/**
+ * Contradiction candidates among session-created knowledge (issue #2077).
+ *
+ * IMPORTANT (issue #2077 critic item 3): the realtime admission and
+ * curator write paths dedup at `dedup_threshold` (default 0.6) BEFORE an
+ * entry becomes active, so two active entries with Jaccard similarity
+ * ≥ that threshold cannot coexist. A detector run at the dedup threshold
+ * would therefore return `[]` in every real session. Instead this looks
+ * in a sub-threshold band `[CONTRADICTION_LOWER, dedupThreshold)` AND
+ * requires negation-polarity divergence — the only shape that can occur
+ * in production. Uses the exported `wordBigrams`/`jaccardBigram`
+ * primitives directly so the score is available (the
+ * `findActiveSwarmNearDuplicate` helper returns only the entry, with no
+ * score and no self-exclusion). Detect-only: never writes, never
+ * auto-supersedes. Supersession is operationally deletion
+ * (`superseded_by IS NULL` read filter) and is surfaced only as a menu
+ * item the user opts into.
+ */
+export async function gatherContradictionCandidates(
+	directory: string,
+	sessionStart?: string,
+	dedupThreshold: number = DEFAULT_DEDUP_THRESHOLD,
+): Promise<ContradictionCandidate[]> {
+	if (!sessionStart) return [];
+	const sessionStartMs = Date.parse(sessionStart);
+	if (!Number.isFinite(sessionStartMs)) return [];
+	try {
+		const all = await _internals.readKnowledge<SwarmKnowledgeEntry>(
+			resolveSwarmKnowledgePath(directory),
+		);
+		const sessionCreated = all
+			.filter((e) => {
+				if (typeof e.created_at !== 'string') return false;
+				const ms = Date.parse(e.created_at);
+				return Number.isFinite(ms) && ms >= sessionStartMs;
+			})
+			.slice(0, CONTRADICTION_SESSION_CAP);
+		if (sessionCreated.length === 0) return [];
+		const seen = new Set<string>();
+		const pairs: ContradictionCandidate[] = [];
+		for (const entry of sessionCreated) {
+			if (pairs.length >= CONTRADICTION_PAIR_CAP) break;
+			const entryBigrams = wordBigrams(entry.lesson);
+			for (const other of all) {
+				if (other.id === entry.id) continue; // self-exclusion
+				const sim = jaccardBigram(entryBigrams, wordBigrams(other.lesson));
+				if (
+					sim >= CONTRADICTION_LOWER &&
+					sim < dedupThreshold &&
+					isNegationDivergent(entry.lesson, other.lesson)
+				) {
+					const key = [entry.id, other.id].sort().join('|');
+					if (seen.has(key)) continue; // dedup symmetric (A,B)/(B,A)
+					seen.add(key);
+					pairs.push({
+						newLesson: entry.lesson,
+						newEntryId: entry.id,
+						conflictsWithId: other.id,
+						conflictsWithLesson: other.lesson,
+						similarity: Math.round(sim * 100) / 100,
+					});
+					if (pairs.length >= CONTRADICTION_PAIR_CAP) break;
+				}
+			}
+		}
+		return pairs;
+	} catch {
+		return [];
+	}
+}
+
+/**
+ * Realtime admission counts recovered READ-ONLY from durable markers
+ * (issue #2077 critic item 4). The in-memory `DrainSummary` is
+ * discarded at `src/index.ts`, but the outcomes persist:
+ *   - admitted:   entries created this session with an `insight:` provenance marker
+ *     (stamped by `admitCandidate` via `unionSourceKnowledgeIds`).
+ *   - reinforced: pre-existing entries with a `confirmed_by` record
+ *     stamped this session (the realtime reinforce path).
+ *   - rejected:   curator-path rejections this session, from
+ *     `.swarm/knowledge-rejected.jsonl`.
+ * Returns `undefined` when `sessionStart` is undefined (counts are
+ * session-scoped). Realtime *rejections* (screened-out candidates that
+ * never reached the store) are NOT recoverable and are flagged in the
+ * report as tracked by #1821.
+ */
+export async function gatherRealtimeAdmissionCounts(
+	directory: string,
+	sessionStart?: string,
+): Promise<
+	| {
+			admitted: number;
+			reinforced: number;
+			rejected: number;
+	  }
+	| undefined
+> {
+	if (!sessionStart) return undefined;
+	const sessionStartMs = Date.parse(sessionStart);
+	if (!Number.isFinite(sessionStartMs)) return undefined;
+	try {
+		const entries = await _internals.readKnowledge<SwarmKnowledgeEntry>(
+			resolveSwarmKnowledgePath(directory),
+		);
+		let admitted = 0;
+		let reinforced = 0;
+		for (const e of entries) {
+			const createdMs =
+				typeof e.created_at === 'string'
+					? Date.parse(e.created_at)
+					: Number.NaN;
+			const createdThisSession =
+				Number.isFinite(createdMs) && createdMs >= sessionStartMs;
+			const hasInsightMarker = (e.source_knowledge_ids ?? []).some((id) =>
+				id.startsWith('insight:'),
+			);
+			if (createdThisSession && hasInsightMarker) admitted++;
+			const confirmedThisSession = (e.confirmed_by ?? []).some(
+				(rec: { confirmed_at?: string }) => {
+					const ts =
+						typeof rec?.confirmed_at === 'string' ? rec.confirmed_at : '';
+					const ms = Date.parse(ts);
+					return Number.isFinite(ms) && ms >= sessionStartMs;
+				},
+			);
+			if (!createdThisSession && confirmedThisSession) reinforced++;
+		}
+		let rejected = 0;
+		try {
+			const rejectedLessons = await _internals.readRejectedLessons(directory);
+			rejected = rejectedLessons.filter((r: RejectedLesson) => {
+				const ms = Date.parse(r.rejected_at ?? '');
+				return Number.isFinite(ms) && ms >= sessionStartMs;
+			}).length;
+		} catch {
+			rejected = 0;
+		}
+		return { admitted, reinforced, rejected };
+	} catch {
+		return undefined;
+	}
+}
+
 // ─── Phase 2: Architect review ───────────────────────────────────────
 
 function buildReflectionDataSummary(data: SessionReflectionData): string {
 	const lines: string[] = [];
+	// Defensive defaults: tests and older callers may construct partial data.
+	const skillViolations = data.skillViolations ?? [];
+	const contradictionCandidates = data.contradictionCandidates ?? [];
 
 	lines.push('SESSION DATA SNAPSHOT');
 	lines.push(`Total tool calls: ${data.totalToolCalls}`);
@@ -280,7 +597,246 @@ function buildReflectionDataSummary(data: SessionReflectionData): string {
 		lines.push('');
 	}
 
+	if (data.knowledgeDelta) {
+		const kd = data.knowledgeDelta;
+		lines.push('KNOWLEDGE DELTA:');
+		lines.push(
+			`  - ${kd.sessionKnowledgeCreated} knowledge entries created this session.`,
+		);
+		if (kd.curation) {
+			lines.push(
+				`  - Curation (finalize batch): ${kd.curation.stored} stored, ${kd.curation.reinforced} reinforced, ${kd.curation.skipped} skipped, ${kd.curation.rejected} rejected, ${kd.curation.quarantined} quarantined.`,
+			);
+		}
+		if (
+			kd.admitted !== undefined ||
+			kd.reinforcedRealtime !== undefined ||
+			kd.rejectedCurator !== undefined
+		) {
+			lines.push(
+				`  - Realtime admission: ${kd.admitted ?? 0} admitted, ${kd.reinforcedRealtime ?? 0} reinforced, ${kd.rejectedCurator ?? 0} curator-rejected (from durable markers).`,
+			);
+		}
+		lines.push(
+			`  - FR-015 dedup: ${kd.dedupDropped} retro lesson(s) deduped as already-known${kd.dedupAvailable ? '' : ' (dedup unavailable — knowledge read failed)'}.`,
+		);
+		lines.push('');
+	}
+
+	if (skillViolations.length > 0) {
+		lines.push('SKILL COMPLIANCE SIGNALS:');
+		for (const s of skillViolations) {
+			lines.push(
+				`  - ${s.skillPath}: ${s.violations} violation(s) across ${s.total} use(s) [${s.scope}${s.tailBounded ? ', tail-bounded' : ''}]`,
+			);
+		}
+		lines.push('');
+	}
+
+	if (contradictionCandidates.length > 0) {
+		lines.push('CONTRADICTION CANDIDATES (advisory):');
+		for (const c of contradictionCandidates) {
+			lines.push(
+				`  - "${c.newLesson}" (id ${c.newEntryId}) ≈ "${c.conflictsWithLesson}" (id ${c.conflictsWithId}) [sim ${c.similarity}]`,
+			);
+		}
+		lines.push('');
+	}
+
 	return lines.join('\n');
+}
+
+/**
+ * Always-rendered signals block (issue #2077). Rendered UNCONDITIONALLY
+ * by close.ts (not gated by the narrative-report `hasSignals` check) so
+ * the "0 captured; N deduped" / NOOP line appears even in a clean
+ * session. Surfaces all six signal classes: knowledge delta, skill
+ * violations, contradiction candidates, negatives, drafted issues.
+ */
+export function buildSignalsBlock(data: SessionReflectionData): string {
+	const lines: string[] = [];
+	lines.push('## Session Signals');
+	lines.push('');
+
+	// Defensive defaults: tests and older callers may construct partial data.
+	const skillViolations = data.skillViolations ?? [];
+	const contradictionCandidates = data.contradictionCandidates ?? [];
+
+	// Knowledge delta — always emit, even when zero (the "report negatives"
+	// requirement; issue #2077 calls this "the single genuinely-absent
+	// capability"). Mem0's NOOP-as-first-class-outcome.
+	const kd = data.knowledgeDelta;
+	if (kd) {
+		lines.push('**Knowledge Delta**');
+		lines.push(
+			`- ${kd.sessionKnowledgeCreated} knowledge entries created this session.`,
+		);
+		if (kd.curation) {
+			lines.push(
+				`- Curation (finalize batch): ${kd.curation.stored} stored, ${kd.curation.reinforced} reinforced, ${kd.curation.skipped} skipped, ${kd.curation.rejected} rejected, ${kd.curation.quarantined} quarantined.`,
+			);
+		}
+		if (
+			kd.admitted !== undefined ||
+			kd.reinforcedRealtime !== undefined ||
+			kd.rejectedCurator !== undefined
+		) {
+			lines.push(
+				`- Realtime admission: ${kd.admitted ?? 0} admitted, ${kd.reinforcedRealtime ?? 0} reinforced, ${kd.rejectedCurator ?? 0} curator-rejected (from durable markers).`,
+			);
+			lines.push(
+				'- Realtime rejections (screened-out candidates) are not observable here — tracked in #1821.',
+			);
+		}
+		if (!kd.dedupAvailable) {
+			lines.push(
+				'- FR-015 dedup unavailable (knowledge read failed); drop count not meaningful.',
+			);
+		} else if (kd.sessionKnowledgeCreated === 0 && kd.dedupDropped === 0) {
+			lines.push('- 0 lessons captured; 0 deduped as already-known.');
+		} else {
+			lines.push(
+				`- FR-015 dedup: ${kd.dedupDropped} retro lesson(s) deduped as already-known.`,
+			);
+		}
+		lines.push('');
+	}
+
+	// Skill violations — scope-aware (issue #2077 critic item 8).
+	if (skillViolations.length > 0) {
+		const scopeLabel =
+			skillViolations[0]?.scope === 'session'
+				? 'this session'
+				: 'recent, all sessions (no session id)';
+		lines.push(`**Skill Compliance Signals** [${scopeLabel}]`);
+		for (const s of skillViolations) {
+			lines.push(
+				`- ${s.skillPath}: ${s.violations} violation(s) across ${s.total} use(s)${s.tailBounded ? ' (tail-bounded)' : ''}`,
+			);
+		}
+		lines.push('');
+	}
+
+	// Contradiction candidates — detect only, never auto-supersede.
+	if (contradictionCandidates.length > 0) {
+		lines.push(
+			'**Contradiction Candidates** (advisory — review before acting)',
+		);
+		for (const c of contradictionCandidates) {
+			lines.push(
+				`- "${c.newLesson}" (id ${c.newEntryId}) ≈ "${c.conflictsWithLesson}" (id ${c.conflictsWithId}) [sim ${c.similarity}] → candidate supersede`,
+			);
+		}
+		lines.push('');
+	}
+
+	// Issue candidates — deterministic, gated on minimal-reproduction evidence.
+	const reproBacked: { title: string; evidence: string }[] = [];
+	for (const gf of data.gateFailures.slice(0, 3)) {
+		reproBacked.push({
+			title: `Gate ${gf.gate} rejected on task ${gf.taskId} (${gf.count}x)`,
+			evidence: `gate-fail evidence (verdict: fail/REJECT), ${gf.count} occurrence(s)`,
+		});
+	}
+	for (const p of data.toolProblems.slice(0, 2)) {
+		if (p.failureCount > 0) {
+			reproBacked.push({
+				title: `Tool ${p.tool} failing (${p.failureCount}/${p.totalCalls}, ${Math.round(p.failureRate * 100)}%)`,
+				evidence: `tool failure rate ${Math.round(p.failureRate * 100)}% (${p.failureCount}/${p.totalCalls})`,
+			});
+		}
+	}
+	if (reproBacked.length > 0) {
+		lines.push('**Issue Candidates** (repro evidence verified)');
+		for (const r of reproBacked) {
+			lines.push(`- ${r.title} — repro evidence: ${r.evidence}`);
+		}
+		lines.push('');
+	}
+
+	return lines.join('\n').trimEnd();
+}
+
+/**
+ * Assemble a numbered action menu from reflection proposals (issue #2077
+ * Phase B). Advisory only — application happens in a later user turn via
+ * the named existing tools. Under full-auto the "reply with numbers"
+ * prompt is suppressed (reported-only) so the run is not blocked waiting
+ * on human input. Returns '' when there are no proposals.
+ */
+export function buildActionMenu(
+	proposals: ReflectionActionProposal[],
+	fullAuto: boolean,
+): string {
+	if (proposals.length === 0) return '';
+	const lines: string[] = [];
+	// Under full-auto there is no human to reply, so do NOT emit the
+	// "reply with numbers" prompt — report the proposals only, with a note
+	// that application happens in a later turn (issue #2077 safety constraint).
+	lines.push(
+		fullAuto
+			? '**Proposed actions** (reported-only — full-auto):'
+			: '**Proposed actions** (reply with numbers, or "none"):',
+	);
+	proposals.forEach((p, i) => {
+		lines.push(` [${i + 1}] ${p.label} → ${p.routing}`);
+	});
+	if (fullAuto) {
+		lines.push('_Apply in a later turn via the listed tools._');
+	}
+	return lines.join('\n');
+}
+
+/**
+ * Build action proposals from gathered signals (issue #2077 Phase B).
+ * The `capture` kind is intentionally absent (issue #2077 critic item 7):
+ * aggregate curation counts cannot derive per-lesson outcomes, and
+ * re-proposing quarantined lessons would fail the actionability gate
+ * identically when applied. A menu item guaranteed to be rejected is
+ * worse than no menu item.
+ */
+export function buildActionProposals(
+	data: SessionReflectionData,
+): ReflectionActionProposal[] {
+	// Defensive defaults: tests and older callers may construct partial data.
+	const contradictionCandidates = data.contradictionCandidates ?? [];
+	const skillViolations = data.skillViolations ?? [];
+	const proposals: ReflectionActionProposal[] = [];
+	for (const c of contradictionCandidates) {
+		proposals.push({
+			kind: 'supersede',
+			label: `SUPERSEDE ${c.conflictsWithId} with newer entry (contradiction candidate, sim ${c.similarity})`,
+			detail: `"${c.newLesson}" (id ${c.newEntryId}) appears to contradict "${c.conflictsWithLesson}" (id ${c.conflictsWithId}).`,
+			routing: '/swarm curate',
+		});
+	}
+	for (const gf of data.gateFailures.slice(0, 3)) {
+		proposals.push({
+			kind: 'file_issue',
+			label: `FILE issue: "Gate ${gf.gate} rejected on task ${gf.taskId}" (repro verified)`,
+			detail: `Gate ${gf.gate} rejected ${gf.count}x on task ${gf.taskId}. Repro evidence: gate-fail verdict.`,
+			routing: 'gh issue create',
+		});
+	}
+	for (const p of data.toolProblems.slice(0, 2)) {
+		if (p.failureCount > 0) {
+			proposals.push({
+				kind: 'file_issue',
+				label: `FILE issue: "Tool ${p.tool} failing ${Math.round(p.failureRate * 100)}%" (repro verified)`,
+				detail: `Tool ${p.tool}: ${p.failureCount}/${p.totalCalls} failures (${Math.round(p.failureRate * 100)}%).`,
+				routing: 'gh issue create',
+			});
+		}
+	}
+	for (const s of skillViolations) {
+		proposals.push({
+			kind: 'draft_skill',
+			label: `DRAFT skill change: ${s.skillPath} (${s.violations} violations)`,
+			detail: `Skill ${s.skillPath} had ${s.violations} violation(s) across ${s.total} use(s) this session.`,
+			routing: 'skill_improve',
+		});
+	}
+	return proposals;
 }
 
 const REFLECTION_SYSTEM_PROMPT = `You are the architect reviewing a completed swarm session. Your job is to analyze what happened and produce a concise, actionable report for the human operator.
@@ -301,6 +857,7 @@ Based on everything that happened in this session, should any existing skills be
 - Workarounds the agents had to use
 - Knowledge gaps the agents exposed
 - Conventions the session revealed that aren't captured in any skill
+If no skill changes are warranted, say so explicitly — capturing nothing is a valid outcome. Do not invent recommendations to fill the section.
 
 ## Process Improvements
 What should the swarm do differently next time? Dispatch patterns, gate configurations, agent routing, phase structure — anything the architect should learn from this session.
@@ -382,6 +939,10 @@ function buildDeterministicReport(data: SessionReflectionData): string {
 	}
 	lines.push('');
 
+	// Issue #2077: the signals block is NOT embedded here. It is returned
+	// separately as `signalsReport` and rendered unconditionally by close.ts
+	// (independent of the hasSignals gate), so embedding it inline in the
+	// deterministic architectReport would duplicate it in the finalize output.
 	return lines.join('\n');
 }
 
@@ -394,6 +955,17 @@ export interface SessionReflectionInput {
 	sessionId?: string;
 	signal?: AbortSignal;
 	delegate?: SkillImproverLLMDelegate;
+	/** Issue #2077: knowledge-delta surface (close-time curation counts + dedup state). */
+	knowledgeDelta?: KnowledgeDelta;
+	/** Issue #2077: session start (ISO), used to scope session-created entries. */
+	sessionStart?: string;
+	/**
+	 * Issue #2077: configured dedup threshold (upper bound of the contradiction
+	 * band). Read from `config.dedup_threshold` so a user-tuned threshold (e.g.
+	 * 0.8) does not cause advisory false negatives for pairs in [0.6, 0.8) that
+	 * can coexist in the active store. Defaults to 0.6 (the schema default).
+	 */
+	dedupThreshold?: number;
 }
 
 export async function runSessionReflection(
@@ -408,6 +980,33 @@ export async function runSessionReflection(
 	);
 	const gateFailures = await gatherGateFailures(input.directory);
 
+	// Issue #2077: advisory signal gatherers (read-only, fail-open, invoked
+	// through the _internals seam so tests inject fakes without mock.module).
+	const skillViolations = _internals.gatherSkillViolations(
+		input.directory,
+		input.sessionId,
+	);
+	const contradictionCandidates =
+		await _internals.gatherContradictionCandidates(
+			input.directory,
+			input.sessionStart,
+			input.dedupThreshold ?? DEFAULT_DEDUP_THRESHOLD,
+		);
+	const realtimeCounts = await _internals.gatherRealtimeAdmissionCounts(
+		input.directory,
+		input.sessionStart,
+	);
+	const knowledgeDelta: KnowledgeDelta | undefined = input.knowledgeDelta
+		? {
+				...input.knowledgeDelta,
+				admitted: realtimeCounts?.admitted ?? input.knowledgeDelta.admitted,
+				reinforcedRealtime:
+					realtimeCounts?.reinforced ?? input.knowledgeDelta.reinforcedRealtime,
+				rejectedCurator:
+					realtimeCounts?.rejected ?? input.knowledgeDelta.rejectedCurator,
+			}
+		: undefined;
+
 	const data: SessionReflectionData = {
 		timestamp: new Date().toISOString(),
 		totalToolCalls: totalCalls,
@@ -417,7 +1016,18 @@ export async function runSessionReflection(
 		gateFailures,
 		lessonsFromRetros: lessons,
 		errorTaxonomy: taxonomy,
+		knowledgeDelta,
+		skillViolations,
+		contradictionCandidates,
 	};
+
+	// Issue #2077: the signals block + action proposals are computed ONCE and
+	// returned on BOTH the llm and deterministic paths. close.ts renders
+	// `signalsReport` unconditionally (not gated by the narrative-report
+	// hasSignals check) so the "0 captured; N deduped" / NOOP line appears
+	// even in a clean session.
+	const signalsReport = buildSignalsBlock(data);
+	const actionProposals = buildActionProposals(data);
 
 	const delegate =
 		input.delegate ??
@@ -432,7 +1042,13 @@ export async function runSessionReflection(
 				input.signal,
 			);
 			if (report && report.trim().length > 0) {
-				return { data, architectReport: report.trim(), source: 'llm' };
+				return {
+					data,
+					architectReport: report.trim(),
+					signalsReport,
+					actionProposals,
+					source: 'llm',
+				};
 			}
 		} catch {
 			// LLM failed — fall through to deterministic
@@ -442,6 +1058,8 @@ export async function runSessionReflection(
 	return {
 		data,
 		architectReport: buildDeterministicReport(data),
+		signalsReport,
+		actionProposals,
 		source: 'deterministic',
 	};
 }
@@ -470,4 +1088,17 @@ export const _internals = {
 	gatherGateFailures,
 	buildReflectionDataSummary,
 	buildDeterministicReport,
+	// Issue #2077 advisory gatherers + their read-only dependencies.
+	// Tests reassign these (restored in afterEach) to inject fakes without
+	// mock.module. The gatherers reference `_internals.*` at call time, so
+	// reassignment here is observed by runSessionReflection.
+	gatherSkillViolations,
+	gatherContradictionCandidates,
+	gatherRealtimeAdmissionCounts,
+	buildSignalsBlock,
+	buildActionMenu,
+	buildActionProposals,
+	readSkillUsageEntriesTail,
+	readKnowledge,
+	readRejectedLessons,
 };
