@@ -13,24 +13,23 @@ import {
 	closeSync,
 	existsSync,
 	mkdirSync,
-	mkdtempSync,
 	rmSync,
 	writeFileSync,
 } from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import {
 	_internals as archiveInternals,
 	archiveSqliteSnapshot,
 } from '../../../src/commands/archive-sqlite.js';
 import { loadDatabaseCtor } from '../../../src/db/sqlite-loader.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 let testDir: string;
 let srcDir: string;
 let destDir: string;
 
 beforeEach(() => {
-	testDir = mkdtempSync(path.join(os.tmpdir(), 'archive-sqlite-test-'));
+	testDir = canonicalMkdtemp('archive-sqlite-test-');
 	srcDir = path.join(testDir, 'src');
 	destDir = path.join(testDir, 'dest');
 	mkdirSync(srcDir, { recursive: true });

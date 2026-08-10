@@ -5,19 +5,19 @@
  * disagree (issue #2030 items 6, 9).
  */
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import os from 'node:os';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import type { CloseStageContext } from '../../../src/commands/close.js';
 import { KnowledgeConfigSchema } from '../../../src/config/schema.js';
 import { loadDatabaseCtor } from '../../../src/db/sqlite-loader.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 let testDir: string;
 let emitMock: ReturnType<typeof mock>;
 let realEmit: typeof import('../../../src/telemetry.js').emit;
 
 beforeEach(async () => {
-	testDir = mkdtempSync(path.join(os.tmpdir(), 'close-archive-event-'));
+	testDir = canonicalMkdtemp('close-archive-event-');
 	mkdirSync(path.join(testDir, '.swarm'), { recursive: true });
 
 	emitMock = mock(() => {});

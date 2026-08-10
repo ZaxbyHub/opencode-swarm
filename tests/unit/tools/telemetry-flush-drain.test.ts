@@ -17,9 +17,7 @@ import {
 	test,
 } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
-
 import {
 	addTelemetryListener,
 	emit,
@@ -27,11 +25,12 @@ import {
 	initTelemetry,
 	resetTelemetryForTesting,
 } from '../../../src/telemetry';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 let sharedTempDir: string;
 
 beforeAll(() => {
-	sharedTempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'telemetry-flush-'));
+	sharedTempDir = canonicalMkdtemp('telemetry-flush-');
 });
 
 beforeEach(() => {

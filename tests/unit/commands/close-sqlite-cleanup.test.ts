@@ -15,12 +15,12 @@ import {
 	rmSync,
 	writeFileSync,
 } from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { loadDatabaseCtor } from '../../../src/db/sqlite-loader.js';
 import * as actualEvidenceManager from '../../../src/evidence/manager.js';
 import * as actualKnowledgeCurator from '../../../src/hooks/knowledge-curator.js';
 import * as actualState from '../../../src/state.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 mock.module('../../../src/tools/write-retro.js', () => ({
 	executeWriteRetro: mock(async () =>
@@ -90,7 +90,7 @@ let testDir: string;
 const swarmDir = (): string => path.join(testDir, '.swarm');
 
 beforeEach(() => {
-	testDir = mkdtempSync(path.join(os.tmpdir(), 'close-sqlite-cleanup-'));
+	testDir = canonicalMkdtemp('close-sqlite-cleanup-');
 	mkdirSync(swarmDir(), { recursive: true });
 });
 

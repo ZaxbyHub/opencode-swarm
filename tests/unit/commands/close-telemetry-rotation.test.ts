@@ -11,16 +11,15 @@ import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import {
 	existsSync,
 	mkdirSync,
-	mkdtempSync,
 	readdirSync,
 	rmSync,
 	writeFileSync,
 } from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import * as actualEvidenceManager from '../../../src/evidence/manager.js';
 import * as actualKnowledgeCurator from '../../../src/hooks/knowledge-curator.js';
 import * as actualState from '../../../src/state.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 // Mirror the mock.module setup used by close-cleanup.test.ts so
 // handleCloseCommand runs without LLM/git side effects.
@@ -92,7 +91,7 @@ let testDir: string;
 const swarmDir = (): string => path.join(testDir, '.swarm');
 
 beforeEach(() => {
-	testDir = mkdtempSync(path.join(os.tmpdir(), 'close-tel-rot-'));
+	testDir = canonicalMkdtemp('close-tel-rot-');
 	mkdirSync(swarmDir(), { recursive: true });
 });
 
