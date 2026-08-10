@@ -2125,11 +2125,11 @@ async function resolveEvidenceTaskId(
 	return getEvidenceTaskId(session, directory);
 }
 
-const recordPendingDelegationForBackground: typeof import('../background/pending-delegations.js').recordPendingDelegation =
+const recordPendingDelegationForBackground: typeof import('../background/pending-delegations.js').recordPendingDelegationDetailed =
 	async (...args) =>
 		(
 			await import('../background/pending-delegations.js')
-		).recordPendingDelegation(...args);
+		).recordPendingDelegationDetailed(...args);
 
 const writeDelegationFallbackForBackground: typeof import('../background/pending-delegations.js').writeDelegationFallback =
 	async (...args) =>
@@ -3452,6 +3452,7 @@ export function createDelegationGateHook(
 				);
 				let backgroundRecordDurable = !backgroundSubagentsEnabled;
 				let backgroundOwnershipDurable = backgroundRecordDurable;
+				let backgroundCorrelationConflict = false;
 				if (backgroundSubagentsEnabled) {
 					const protectUntrackedBackgroundWorktree = async (
 						taskId: string | null | undefined,
@@ -3566,14 +3567,28 @@ export function createDelegationGateHook(
 										: undefined,
 								generation: 1,
 							};
-							const primary =
+							const primaryOutcome =
 								await _internals.recordPendingDelegationForBackground(
 									directory,
 									pendingInput,
 									{ staleTimeoutMs: backgroundPendingTimeoutMs },
 								);
-							backgroundRecordDurable = primary !== null;
-							if (!primary) {
+							backgroundRecordDurable =
+								primaryOutcome.status === 'recorded' ||
+								primaryOutcome.status === 'duplicate';
+							backgroundCorrelationConflict =
+								primaryOutcome.status === 'conflict';
+							if (backgroundCorrelationConflict) {
+								const preservation = await protectUntrackedBackgroundWorktree(
+									evidenceTaskId ?? standardDispatch?.planTaskId,
+									'background correlation id conflicts with an existing immutable launch owner',
+								);
+								backgroundOwnershipDurable = preservation.durable;
+								pushAdvisory(
+									session,
+									`BACKGROUND DELEGATION CORRELATION CONFLICT: ${subagentType} (${subagentSessionId}) collided with a different durable launch owner. No fallback owner was written and no reservation was bound. Recovery protection: ${preservation.detail}. Do not advance task ${evidenceTaskId ?? 'unknown'} until the collision is resolved.`,
+								);
+							} else if (primaryOutcome.status === 'failed') {
 								backgroundRecordDurable =
 									(await _internals.writeDelegationFallbackForBackground(
 										directory,
@@ -3585,7 +3600,7 @@ export function createDelegationGateHook(
 									);
 								}
 							}
-							if (!backgroundRecordDurable) {
+							if (!backgroundCorrelationConflict && !backgroundRecordDurable) {
 								const preservation = await protectUntrackedBackgroundWorktree(
 									evidenceTaskId ?? standardDispatch?.planTaskId,
 									'both background correlation stores failed',
@@ -3595,7 +3610,7 @@ export function createDelegationGateHook(
 									session,
 									`BACKGROUND DELEGATION UNTRACKED: ${subagentType} (${subagentSessionId}) launched, but both durable correlation stores failed. Recovery protection: ${preservation.detail}. Do not advance task ${evidenceTaskId ?? 'unknown'} until the dispatch is recovered.`,
 								);
-							} else {
+							} else if (!backgroundCorrelationConflict) {
 								backgroundOwnershipDurable = true;
 								if (coderReservation) {
 									const bound =
@@ -3656,7 +3671,9 @@ export function createDelegationGateHook(
 					clearCoderTaskChangeContext(input.callID);
 					if (storedArgs !== undefined) deleteStoredInputArgs(input.callID);
 				}
-				backgroundCoderReservationByCallID.delete(input.callID);
+				if (!backgroundCorrelationConflict) {
+					backgroundCoderReservationByCallID.delete(input.callID);
+				}
 				if (!backgroundResultIsRunning)
 					clearPublishedScopeBindings(input.callID);
 				return;

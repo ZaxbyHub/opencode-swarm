@@ -2,6 +2,7 @@ import { afterEach, describe, expect, mock, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import type { BackgroundDelegationRecord } from '../../../src/background/pending-delegations';
 import type { PluginConfig } from '../../../src/config';
 import {
 	_internals,
@@ -19,12 +20,31 @@ import {
 import { runInitOrphanRecovery } from '../../../src/hooks/init-orphan-recovery';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 import type { WorktreeHandle } from '../../../src/worktree';
+import { writeApprovedPlan } from '../../helpers/approved-plan';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
 
 const originalRecord = _internals.recordPendingDelegationForBackground;
 const originalFallback = _internals.writeDelegationFallbackForBackground;
 const originalPreserve =
 	_internals.preserveBackgroundWorktreeOwnershipForCallId;
+const originalBind = _internals.bindBackgroundCoderReservationForDispatch;
+
+const existingRecord: BackgroundDelegationRecord = {
+	schemaVersion: 1,
+	correlationId: 'child-session',
+	jobId: 'existing-job',
+	subagentSessionId: 'child-session',
+	parentSessionId: 'different-parent',
+	callID: 'different-call',
+	normalizedAgent: 'coder',
+	swarmPrefixedAgent: 'coder',
+	planTaskId: 'other-task',
+	evidenceTaskId: 'other-task',
+	status: 'pending',
+	createdAt: 1,
+	updatedAt: 1,
+	generation: 1,
+};
 
 function git(directory: string, args: string[]): string {
 	const result = spawnSync('git', ['-C', directory, ...args], {
@@ -45,6 +65,7 @@ describe('background dispatch double-store recovery', () => {
 		_internals.recordPendingDelegationForBackground = originalRecord;
 		_internals.writeDelegationFallbackForBackground = originalFallback;
 		_internals.preserveBackgroundWorktreeOwnershipForCallId = originalPreserve;
+		_internals.bindBackgroundCoderReservationForDispatch = originalBind;
 		resetStandardWorktreeIsolationState();
 		mergeStatusInternals.resetForTest();
 		resetSwarmState();
@@ -71,7 +92,10 @@ describe('background dispatch double-store recovery', () => {
 				mergeStrategy: 'merge',
 				laneIndex: 0,
 			} satisfies StandardWorktreeDispatch);
-			_internals.recordPendingDelegationForBackground = mock(async () => null);
+			_internals.recordPendingDelegationForBackground = mock(async () => ({
+				status: 'failed',
+				record: null,
+			}));
 			_internals.writeDelegationFallbackForBackground = mock(async () => null);
 			const preserve = mock(async () => ({
 				outcome: 'preserved' as const,
@@ -165,7 +189,10 @@ describe('background dispatch double-store recovery', () => {
 				mergeStrategy: 'merge',
 				laneIndex: 0,
 			});
-			_internals.recordPendingDelegationForBackground = mock(async () => null);
+			_internals.recordPendingDelegationForBackground = mock(async () => ({
+				status: 'failed',
+				record: null,
+			}));
 			_internals.writeDelegationFallbackForBackground = mock(async () => null);
 			_internals.preserveBackgroundWorktreeOwnershipForCallId =
 				originalPreserve;
@@ -216,6 +243,137 @@ describe('background dispatch double-store recovery', () => {
 			expect(
 				fs.readFileSync(path.join(worktreePath, 'valuable.txt'), 'utf8'),
 			).toBe('keep\n');
+		} finally {
+			cleanup();
+		}
+	});
+
+	test('correlation conflict fails closed without fallback or reservation binding', async () => {
+		const { dir, cleanup } = createSafeTestDir('swarm-bg-conflict-');
+		try {
+			await writeApprovedPlan(dir, [{ id: '9.1', files: ['src/example.ts'] }]);
+			const session = ensureAgentSession('parent', 'architect', dir);
+			session.currentTaskId = '9.1';
+			_internals.recordPendingDelegationForBackground = mock(async () => ({
+				status: 'conflict',
+				record: existingRecord,
+			}));
+			const fallback = mock(async () => null);
+			const bind = mock(async () => null);
+			_internals.writeDelegationFallbackForBackground = fallback;
+			_internals.bindBackgroundCoderReservationForDispatch = bind;
+			const hook = createDelegationGateHook(
+				{
+					max_iterations: 5,
+					qa_retry_limit: 3,
+					inject_phase_reminders: true,
+					hooks: { delegation_gate: true, background_subagents: true },
+				} as PluginConfig,
+				dir,
+			);
+			const taskArgs = {
+				subagent_type: 'coder',
+				background: true,
+				task_id: '9.1',
+				prompt:
+					'TASK: 9.1\nFILE: src/example.ts\nACCEPTANCE: preserve the conflicting reservation for safe recovery',
+			};
+			await hook.toolBefore(
+				{ tool: 'Task', sessionID: 'parent', callID: 'conflicting-call' },
+				{ args: taskArgs },
+			);
+
+			await hook.toolAfter(
+				{
+					tool: 'Task',
+					sessionID: 'parent',
+					callID: 'conflicting-call',
+					args: taskArgs,
+				},
+				{
+					state: 'running',
+					output:
+						'<task id="child-session" state="running">Background task started</task>',
+					metadata: { background: true, jobId: 'new-job' },
+				},
+			);
+
+			expect(fallback).not.toHaveBeenCalled();
+			expect(bind).not.toHaveBeenCalled();
+			expect(session.pendingAdvisoryMessages?.at(-1)).toContain(
+				'BACKGROUND DELEGATION CORRELATION CONFLICT',
+			);
+			expect(session.pendingAdvisoryMessages?.at(-1)).toContain(
+				'No fallback owner was written and no reservation was bound',
+			);
+			expect(session.pendingAdvisoryMessages ?? []).not.toContainEqual(
+				expect.stringContaining('BACKGROUND DELEGATION UNTRACKED'),
+			);
+			await expect(
+				hook.toolBefore(
+					{ tool: 'Task', sessionID: 'parent', callID: 'second-call' },
+					{ args: taskArgs },
+				),
+			).rejects.toThrow(
+				/BACKGROUND_CODER_TASK_RESERVED|PARALLEL_SLOTS_EXHAUSTED/,
+			);
+		} finally {
+			cleanup();
+		}
+	});
+
+	test('exact duplicate remains durable without writing fallback', async () => {
+		const { dir, cleanup } = createSafeTestDir('swarm-bg-duplicate-');
+		try {
+			const session = ensureAgentSession('parent', 'architect', dir);
+			session.currentTaskId = '9.2';
+			_internals.recordPendingDelegationForBackground = mock(async () => ({
+				status: 'duplicate',
+				record: {
+					...existingRecord,
+					parentSessionId: 'parent',
+					callID: 'duplicate-call',
+					normalizedAgent: 'reviewer',
+					swarmPrefixedAgent: 'reviewer',
+					planTaskId: '9.2',
+					evidenceTaskId: '9.2',
+				},
+			}));
+			const fallback = mock(async () => null);
+			_internals.writeDelegationFallbackForBackground = fallback;
+			const hook = createDelegationGateHook(
+				{
+					max_iterations: 5,
+					qa_retry_limit: 3,
+					inject_phase_reminders: true,
+					hooks: { delegation_gate: true, background_subagents: true },
+				} as PluginConfig,
+				dir,
+			);
+
+			await hook.toolAfter(
+				{
+					tool: 'Task',
+					sessionID: 'parent',
+					callID: 'duplicate-call',
+					args: {
+						subagent_type: 'reviewer',
+						background: true,
+						task_id: '9.2',
+					},
+				},
+				{
+					state: 'running',
+					output:
+						'<task id="child-session" state="running">Background task started</task>',
+					metadata: { background: true, jobId: 'existing-job' },
+				},
+			);
+
+			expect(fallback).not.toHaveBeenCalled();
+			expect(session.pendingAdvisoryMessages ?? []).not.toContainEqual(
+				expect.stringContaining('CORRELATION CONFLICT'),
+			);
 		} finally {
 			cleanup();
 		}

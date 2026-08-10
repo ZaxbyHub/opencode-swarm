@@ -138,7 +138,10 @@ export async function persistBatch(
 	} = {},
 ): Promise<void> {
 	for (const [index, lane] of lanes.entries()) {
-		const correlationId = `${batchId}-${index}`;
+		// Correlation IDs identify one immutable launch. Derive the fixture ID from
+		// the logical lane so separate persistBatch calls for disjoint slices of the
+		// same batch cannot collide merely because each slice restarts at index 0.
+		const correlationId = `${batchId}--${lane.laneId}`;
 		const subagentSessionId = options.subagentSessionId ?? correlationId;
 		await recordPendingDelegation(tempDir, {
 			correlationId,

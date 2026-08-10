@@ -137,14 +137,9 @@ const DECLARED_SITES: DeclaredSite[] = [
 		directoryExpr: 'HELPER buildLaneSessionCreateArgs(args.directory)',
 		classification: 'same-instance',
 		note:
-			'dispatch_lanes_async tool ctx.directory. buildLaneSessionCreateArgs ' +
-			'(src/tools/dispatch-lanes.ts:2510) returns query.directory unchanged.',
-	},
-	{
-		file: 'src/tools/dispatch-lanes.ts',
-		directoryExpr: 'HELPER buildLaneSessionCreateArgs(directory)',
-		classification: 'same-instance',
-		note: 'dispatch_lanes tool ctx.directory, passed through buildLaneSessionCreateArgs unchanged.',
+			'Shared dispatch_lanes and dispatch_lanes_async session-create helper. ' +
+			'Both callers pass their tool ctx.directory as args.directory, and ' +
+			'buildLaneSessionCreateArgs returns query.directory unchanged.',
 	},
 	{
 		file: 'src/turbo/lean/integration.ts',
