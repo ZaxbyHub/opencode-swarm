@@ -191,7 +191,7 @@ describe('delegation-gate: path validation', () => {
 		}
 	});
 
-	it('should handle very long paths', async () => {
+	it('rejects paths beyond the durable UTF-8 byte cap', async () => {
 		const hook = createDelegationGateHook(makeConfig(), tempDir);
 		const session = ensureAgentSession('test-session');
 
@@ -208,7 +208,7 @@ describe('delegation-gate: path validation', () => {
 			threw = true;
 		}
 
-		expect(threw).toBe(false);
+		expect(threw).toBe(true);
 	});
 
 	it('should handle paths with special characters', async () => {

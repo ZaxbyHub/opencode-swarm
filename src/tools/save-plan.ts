@@ -29,6 +29,7 @@ import {
 	savePlan,
 } from '../plan/manager';
 import { derivePlanId } from '../plan/utils.js';
+import { normalizeScopeFiles } from '../scope/scope-binding.js';
 import { readEffectiveSpecSync } from '../sdd/effective-spec';
 import { swarmState } from '../state';
 import { createSwarmTool } from './create-tool';
@@ -52,6 +53,8 @@ export interface SavePlanArgs {
 			size?: 'small' | 'medium' | 'large';
 			depends?: string[];
 			acceptance?: string;
+			/** Exact project-relative paths this task is expected to modify. */
+			files_touched?: string[];
 			/** Spec FR-###/SC-### IDs this task maps to (issue #1687, FR-000). */
 			fr_refs?: string[];
 		}>;
@@ -547,6 +550,7 @@ export async function executeSavePlan(
 	// reject any attempt to change it (fail-closed).
 	const dir = targetWorkspace as string;
 	const existingStatusMap: Map<string, TaskStatus> = new Map();
+	const existingFilesMap: Map<string, string[]> = new Map();
 	// Captured regardless of reset_statuses so the task-removal acknowledgement
 	// check below can compare incoming task IDs against the prior plan
 	// (issue #853).
@@ -562,7 +566,10 @@ export async function executeSavePlan(
 
 		if (existing) {
 			for (const phase of existing.phases) {
-				for (const task of phase.tasks) priorTaskIds.add(task.id);
+				for (const task of phase.tasks) {
+					priorTaskIds.add(task.id);
+					existingFilesMap.set(task.id, [...task.files_touched]);
+				}
 			}
 			// Status map (skip when resetting)
 			if (!args.reset_statuses) {
@@ -827,6 +834,39 @@ export async function executeSavePlan(
 		}
 	}
 
+	// Normalize task scope before constructing or persisting any plan projection.
+	// Omission means "preserve the existing task scope" during a revision, while
+	// an explicit empty array intentionally clears it. Non-empty lists use the
+	// same canonical project-relative normalizer as declare_scope so plan and
+	// runtime scope cannot disagree because of separators, dot segments, or order.
+	const resolvedFilesByTask = new Map<string, string[]>();
+	for (const phase of args.phases) {
+		for (const task of phase.tasks) {
+			if (task.files_touched === undefined) {
+				resolvedFilesByTask.set(task.id, existingFilesMap.get(task.id) ?? []);
+				continue;
+			}
+			if (task.files_touched.length === 0) {
+				resolvedFilesByTask.set(task.id, []);
+				continue;
+			}
+			const normalized = normalizeScopeFiles(task.files_touched);
+			if (!normalized) {
+				return {
+					success: false,
+					message:
+						'PLAN_TASK_SCOPE_INVALID: files_touched must contain valid project-relative paths',
+					errors: [
+						`Task "${task.id}" has an invalid files_touched list. Absolute paths, traversal, empty entries, and control characters are not allowed.`,
+					],
+					recovery_guidance:
+						'Retry save_plan with normalized project-relative paths, omit files_touched to preserve the prior task scope, or pass [] to clear it explicitly.',
+				};
+			}
+			resolvedFilesByTask.set(task.id, normalized);
+		}
+	}
+
 	// Step 4: Build the Plan object from args
 	const plan: Plan = {
 		schema_version: '1.0.0',
@@ -853,7 +893,7 @@ export async function executeSavePlan(
 						description: task.description,
 						depends: task.depends ?? [],
 						acceptance: task.acceptance,
-						files_touched: [],
+						files_touched: resolvedFilesByTask.get(task.id) ?? [],
 						fr_refs: task.fr_refs,
 					};
 				}),
@@ -1098,6 +1138,13 @@ export const save_plan: ToolDefinition = createSwarmTool({
 									.string()
 									.optional()
 									.describe('Acceptance criteria for this task'),
+								files_touched: z
+									.array(z.string())
+									.max(10_000)
+									.optional()
+									.describe(
+										'Exact project-relative files or directories this task may modify. Omit on revision to preserve the prior scope; pass [] to clear it explicitly.',
+									),
 								fr_refs: z
 									.array(z.string())
 									.optional()

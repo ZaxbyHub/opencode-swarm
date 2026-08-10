@@ -11,7 +11,6 @@ import { createSafeTestDir } from '../../helpers/safe-test-dir';
 
 let TEST_DIR = '';
 let cleanup = () => {};
-
 function defaultConfig(
 	overrides?: Partial<GuardrailsConfig>,
 ): GuardrailsConfig {
@@ -28,15 +27,12 @@ function defaultConfig(
 		...overrides,
 	};
 }
-
 function makeBashInput(sessionID = 'test-session', command: string) {
 	return { tool: 'bash', sessionID, callID: 'call-1' };
 }
-
 function makeBashOutput(command: string) {
 	return { args: { command } };
 }
-
 function setDeclaredScope(scope: string[]): void {
 	installActiveScopeBinding({
 		directory: TEST_DIR,
@@ -45,7 +41,6 @@ function setDeclaredScope(scope: string[]): void {
 		files: scope,
 	});
 }
-
 describe('destructive command guard', () => {
 	beforeEach(() => {
 		resetSwarmState();
@@ -54,13 +49,11 @@ describe('destructive command guard', () => {
 		cleanup = created.cleanup;
 		startAgentSession('test-session', 'coder', TEST_DIR);
 	});
-
 	afterEach(() => {
 		resetSwarmState();
 		cleanup();
 		cleanup = () => {};
 	});
-
 	describe('rm -rf commands', () => {
 		test('rm -rf node_modules → ALLOWED', async () => {
 			const config = defaultConfig();
@@ -69,15 +62,15 @@ describe('destructive command guard', () => {
 			const output = makeBashOutput('rm -rf node_modules');
 			await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
 		});
-
-		test('rm -rf .git → ALLOWED', async () => {
+		test('rm -rf .git → BLOCKED', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 			const input = makeBashInput('test-session', 'rm -rf .git');
 			const output = makeBashOutput('rm -rf .git');
-			await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
+			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
+				/protected/i,
+			);
 		});
-
 		test('rm -rf / → BLOCKED', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
@@ -85,7 +78,6 @@ describe('destructive command guard', () => {
 			const output = makeBashOutput('rm -rf /');
 			await expect(hooks.toolBefore(input, output)).rejects.toThrow(/BLOCKED/);
 		});
-
 		test('rm -rf /important → BLOCKED', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
@@ -347,7 +339,7 @@ describe('destructive command guard', () => {
 
 	describe('scope-aware destructive command guard', () => {
 		describe('POSIX rm -rf with scope', () => {
-			test('rm -rf plugins/oxlint-plugin-effect with scope → ALLOWED', async () => {
+			test('rm -rf arbitrary directory with scope → BLOCKED', async () => {
 				const config = defaultConfig();
 				const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 				setDeclaredScope(['plugins/oxlint-plugin-effect']);
@@ -356,7 +348,9 @@ describe('destructive command guard', () => {
 					'rm -rf plugins/oxlint-plugin-effect',
 				);
 				const output = makeBashOutput('rm -rf plugins/oxlint-plugin-effect');
-				await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
+				await expect(hooks.toolBefore(input, output)).rejects.toThrow(
+					/allowlisted/,
+				);
 			});
 
 			test('rm -rf plugins/oxlint-plugin-effect without scope → BLOCKED', async () => {
@@ -391,7 +385,7 @@ describe('destructive command guard', () => {
 		});
 
 		describe('rmdir with scope (Windows cmd.exe)', () => {
-			test('rmdir /s plugins with scope → ALLOWED', async () => {
+			test('rmdir /s arbitrary directory with scope → BLOCKED', async () => {
 				const config = defaultConfig();
 				const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 				setDeclaredScope(['plugins/oxlint-plugin-effect']);
@@ -400,12 +394,14 @@ describe('destructive command guard', () => {
 					'rmdir /s plugins/oxlint-plugin-effect',
 				);
 				const output = makeBashOutput('rmdir /s plugins/oxlint-plugin-effect');
-				await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
+				await expect(hooks.toolBefore(input, output)).rejects.toThrow(
+					/allowlisted/,
+				);
 			});
 		});
 
 		describe('del /s with scope (Windows cmd.exe)', () => {
-			test('del /s plugins with scope → ALLOWED', async () => {
+			test('del /s arbitrary directory with scope → BLOCKED', async () => {
 				const config = defaultConfig();
 				const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 				setDeclaredScope(['plugins/oxlint-plugin-effect']);
@@ -414,12 +410,14 @@ describe('destructive command guard', () => {
 					'del /s plugins/oxlint-plugin-effect',
 				);
 				const output = makeBashOutput('del /s plugins/oxlint-plugin-effect');
-				await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
+				await expect(hooks.toolBefore(input, output)).rejects.toThrow(
+					/allowlisted/,
+				);
 			});
 		});
 
 		describe('Remove-Item with scope (PowerShell)', () => {
-			test('Remove-Item -Recurse plugins with scope → ALLOWED', async () => {
+			test('Remove-Item arbitrary directory with scope → BLOCKED', async () => {
 				const config = defaultConfig();
 				const hooks = createGuardrailsHooks(TEST_DIR, undefined, config);
 				setDeclaredScope(['plugins/oxlint-plugin-effect']);
@@ -430,7 +428,9 @@ describe('destructive command guard', () => {
 				const output = makeBashOutput(
 					'Remove-Item -Recurse plugins/oxlint-plugin-effect',
 				);
-				await expect(hooks.toolBefore(input, output)).resolves.toBeUndefined();
+				await expect(hooks.toolBefore(input, output)).rejects.toThrow(
+					/allowlisted/,
+				);
 			});
 		});
 

@@ -22,6 +22,8 @@ import {
 	stripKnownSwarmPrefix,
 } from '../../config/schema';
 import { loadPlan } from '../../plan/manager';
+import { getExecutor } from '../../sandbox/executor';
+import { createScopeLeaseRenewalTracker } from '../../scope/scope-lease-renewal';
 import {
 	advanceTaskState,
 	getActiveWindow,
@@ -75,6 +77,7 @@ export const _internals = {
 	resolveFallbackModel,
 	dcCheckJunctionCreation,
 	extractErrorSignal,
+	getSandboxExecutor: getExecutor,
 	/**
 	 * Test/inspection seams for the no-op detector's bounded session state
 	 * (invariant 8). Production code does not call these; they exist so the
@@ -584,6 +587,7 @@ export function createGuardrailsHooks(
 			file: string;
 		}>
 	>();
+	const scopeLeaseRenewal = createScopeLeaseRenewalTracker();
 	const rememberReviewerScopeWrite = (input: {
 		callID: string;
 		parentSessionID: string;
@@ -647,6 +651,8 @@ export function createGuardrailsHooks(
 		consecutiveNoToolTurns,
 		worktreeBaseDirOverrides,
 		rememberReviewerScopeWrite,
+		rememberScopeLeaseCandidate: scopeLeaseRenewal.remember,
+		getSandboxExecutor: _internals.getSandboxExecutor,
 	});
 
 	// Create messagesTransform handler via factory
@@ -674,6 +680,7 @@ export function createGuardrailsHooks(
 				correlatedExecution &&
 				!isToolExecutionCurrent(input.sessionID, correlatedExecution)
 			) {
+				await scopeLeaseRenewal.consume({ ...input, output: null });
 				return;
 			}
 			// OpenCode should provide a ToolResult-shaped object, but malformed or
@@ -684,6 +691,10 @@ export function createGuardrailsHooks(
 			const safeOutput = malformedOutput
 				? { title: '', output: '', metadata: null }
 				: output;
+			await scopeLeaseRenewal.consume({
+				...input,
+				output: malformedOutput ? null : safeOutput,
+			});
 			// v6.12: Gate completion tracking (moved above window check for architect sessions)
 			const session = swarmState.agentSessions.get(input.sessionID);
 			if (session) {

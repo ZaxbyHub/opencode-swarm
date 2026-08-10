@@ -366,8 +366,7 @@ describe('architect config zone protection — adversarial (#894)', () => {
 			}
 		});
 
-		test('coder declaredScope does NOT bypass blockedZones', () => {
-			// Even for coder, declaredScope can't override blockedZones
+		test('coder exact declaredScope overrides configurable zones', () => {
 			const authorityConfig: AuthorityConfig = {
 				enabled: true,
 				rules: {
@@ -377,12 +376,13 @@ describe('architect config zone protection — adversarial (#894)', () => {
 				},
 			};
 			const result = checkFileAuthority(
-				'architect',
-				'biome.json',
+				'coder',
+				'config/database.yml',
 				TEST_CWD,
 				authorityConfig,
+				{ declaredScope: ['config/database.yml'] },
 			);
-			expect(result.allowed).toBe(false);
+			expect(result.allowed).toBe(true);
 		});
 	});
 
@@ -603,17 +603,16 @@ describe('architect config zone protection — adversarial (#894)', () => {
 			const result = checkFileAuthority('coder', 'biome.json', TEST_CWD);
 			expect(result.allowed).toBe(false);
 			if (isDenied(result)) {
-				expect(result.reason).toContain('config zone');
+				expect(result.code).toBe('AUTHORITY_VERIFIER_CONFIG');
 			}
 		});
 
-		test('GAP: coder can write .eslintrc — coder has no blockedGlobs for .eslintrc', () => {
-			// coder has blockedZones: ['generated', 'config'] but NOT blockedGlobs.
-			// .eslintrc is not in 'generated' or 'config' zone (classifyFile: no extension match).
-			// This is a KNOWN GAP: coder should not be able to edit config files.
+		test('coder cannot write protected verifier config .eslintrc', () => {
 			const result = checkFileAuthority('coder', '.eslintrc', TEST_CWD);
-			// Currently NOT blocked — this is a gap in coder config protection.
-			expect(result.allowed).toBe(true); // Gap: coder can currently write .eslintrc
+			expect(result).toMatchObject({
+				allowed: false,
+				code: 'AUTHORITY_VERIFIER_CONFIG',
+			});
 		});
 	});
 });

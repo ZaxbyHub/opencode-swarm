@@ -15,7 +15,7 @@
  *
  * This module publishes that authority using the same primitives as the
  * standard worktree path (`src/hooks/delegation-gate.ts`, the
- * `savePlan` → `deriveChildScopeBinding` → register + `writeScopeBindingToDisk`
+ * `savePlan` → `deriveChildScopeBinding` → `persistAndRegisterScopeBinding`
  * sequence), so every identity condition in
  * `getAuthorizedScopeBindingByPlanIdentity` is satisfied without weakening or
  * bypassing any of them.
@@ -59,11 +59,10 @@ import {
 	createScopeBinding,
 	deriveChildScopeBinding,
 	normalizeScopeFiles,
-	registerScopeBinding,
 	type ScopeBinding,
 	scopeContains,
 } from '../../scope/scope-binding';
-import { writeScopeBindingToDisk } from '../../scope/scope-persistence';
+import { persistAndRegisterScopeBinding } from '../../scope/scope-persistence';
 import { ensureAgentSession, recordSessionWorkspaceRoot } from '../../state';
 
 /**
@@ -242,13 +241,17 @@ export async function publishLeanTurboLaneScopeBinding(
 		});
 	}
 
-	const childBinding = deriveChildScopeBinding(parentBinding, {
+	const derivedBinding = deriveChildScopeBinding(parentBinding, {
 		childDirectory: input.laneRoot,
 		childSessionId,
 		parentCallId: dispatchCallId,
 	});
-	registerScopeBinding(childBinding);
-	await writeScopeBindingToDisk(input.laneRoot, childBinding);
+	const published = await persistAndRegisterScopeBinding(
+		input.laneRoot,
+		derivedBinding,
+	);
+	if (!published.ok) return null;
+	const childBinding = published.value;
 
 	// Register the session as a coder BEFORE recording its workspace root.
 	// ORDER IS LOAD-BEARING: `recordSessionWorkspaceRoot` deliberately does NOT

@@ -2303,6 +2303,14 @@ export function derivePlanMarkdown(plan: Plan): string {
 				suffix += ` (depends: ${sortedDepends.join(', ')})`;
 			}
 
+			// JSON quoting keeps paths unambiguous and safely escapes any legacy
+			// control characters while preserving a deterministic, human-readable
+			// projection. The ledger/plan.json remain authoritative.
+			if (task.files_touched.length > 0) {
+				const sortedFiles = [...task.files_touched].sort();
+				suffix += ` (files_touched: ${JSON.stringify(sortedFiles)})`;
+			}
+
 			// Mark as CURRENT if it's the first in_progress task in current phase
 			if (
 				phase.id === plan.current_phase &&

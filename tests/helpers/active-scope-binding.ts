@@ -65,14 +65,22 @@ export function installActiveScopeBinding(input: {
 	});
 	if (!binding) throw new Error('scope fixture was not created');
 	registerScopeBinding(binding);
-	if (
-		!claimScopeBindingForChild({
-			directory: input.directory,
-			parentSessionId,
-			childSessionId: input.childSessionId,
-			dispatchCallId,
-		})
-	)
-		throw new Error('scope fixture was not activated');
+	const active = claimScopeBindingForChild({
+		directory: input.directory,
+		parentSessionId,
+		childSessionId: input.childSessionId,
+		dispatchCallId,
+	});
+	if (!active) throw new Error('scope fixture was not activated');
+	const claimed = active.claimed;
+	const scopesDir = path.join(input.directory, '.swarm', 'scopes');
+	fs.mkdirSync(scopesDir, { recursive: true });
+	fs.writeFileSync(
+		path.join(
+			scopesDir,
+			`binding-${claimed.taskId}-${claimed.bindingId}-${claimed.generationId}.json`,
+		),
+		JSON.stringify(claimed, null, 2),
+	);
 	return plan;
 }

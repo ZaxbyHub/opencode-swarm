@@ -17,6 +17,23 @@
 
 > **Migration note:** As of v7.x, SWARM_PLAN files live inside `.swarm/plan-export/` instead of the project root. The `/swarm close` and `/swarm reset --confirm` commands clean up all three locations (`.swarm/plan-export/`, flat `.swarm/`, and project root) during the transition window.
 
+## Durable task write scope (`files_touched`)
+
+Architects author a coding task's exact project-relative write scope with the optional `files_touched` array on `save_plan`. Non-empty arrays are canonicalized with the same path normalizer used by `declare_scope` (separator normalization, dot-segment collapse, deduplication, and stable sorting). Absolute paths, traversal components, empty entries, control characters, entries over 4,096 UTF-8 bytes, and aggregate scope text over 1 MiB fail before any plan write. On revision, omission preserves that task's existing scope; an explicit `[]` clears it.
+
+The field is lossless across the six planning surfaces:
+
+| Surface | `files_touched` contract |
+|---|---|
+| `save_plan` input | Optional per task; normalized once before persistence |
+| Ledger replay and snapshots | Full task data is embedded and replayed; the ledger remains authoritative |
+| `.swarm/plan.json` | Machine-readable derived projection preserves the normalized array |
+| `.swarm/plan.md` | Human-readable derived projection renders sorted JSON-quoted paths; never authoritative |
+| Checkpoint import/export | Full JSON round-trip preserves the array; checkpoint Markdown uses the same derived renderer |
+| `get_approved_plan` | Full mode returns the immutable approved task array; `summary_only` intentionally omits task details |
+
+At coder dispatch, scope-source precedence is active `declare_scope` binding, then plan `files_touched`, then complete `FILE:` directives. Any present lower-precedence set must be a subset of the authoritative set; conflicts fail closed rather than silently widening authority.
+
 ### Ledger append concurrency
 
 `appendLedgerEvent()` serializes its read -> validate -> rewrite sequence under
@@ -307,7 +324,7 @@ Unlike `execution_profile` (which IS included in `computePlanHash`), `fr_refs` i
 When Lean Turbo provisions a lane worktree, the task's declared scope is materialized at:
 
 ```
-<worktreePath>/.swarm/scopes/scope-{taskId}.json
+<worktreePath>/.swarm/scopes/binding-{taskId}-{bindingId}-{generationId}.json
 ```
 
 This enables:
@@ -315,15 +332,23 @@ This enables:
 - **Gitignore inheritance**: The worktree's `.gitignore` is set to include `.swarm/` paths from the host, preventing scope files from being committed to the lane branch.
 - **Cross-lane scope verification**: The scope file is readable by tooling that needs to verify task scope containment without accessing the primary session state.
 
-The scope file schema is the same as the primary `.swarm/scopes/scope-{taskId}.json`:
+Each exact generation uses the same identity-bound v2 schema as the primary workspace:
 ```json
 {
-  "taskId": "1.1",
-  "files": ["src/auth.ts", "src/auth.test.ts"],
-  "whitelist": [],
-  "createdAt": "ISO8601",
-  "expiresAt": "ISO8601",
-  "schemaVersion": "1.0"
+	"version": 2,
+	"bindingId": "0f5e7c0e-41dc-4e78-9a42-53794a5db601",
+	"generationId": "c2fd86ce-6a8e-4e7e-9b1d-2b5be04e4ea0",
+	"revision": 1,
+	"lifecycleState": "live",
+	"workspaceIdentity": "/project/worktree",
+	"taskId": "1.1",
+	"ownerSessionId": "coder-session",
+	"activation": "active",
+	"files": ["src/auth.ts", "src/auth.test.ts"],
+	"declaredAt": 1776024000000,
+	"updatedAt": 1776024000000,
+	"leaseStartedAt": 1776024000000,
+	"expiresAt": 1776027600000
 }
 ```
 

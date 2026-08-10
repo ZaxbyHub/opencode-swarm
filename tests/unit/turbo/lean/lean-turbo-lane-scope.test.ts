@@ -169,7 +169,7 @@ describe('lean turbo lane scope publication (#2002)', () => {
 				{ tool: 'write', sessionID: 'lane-esc-session', callID: 'w3' },
 				{ args: { path: '../src/lane-a.ts', content: 'no' } },
 			),
-		).rejects.toThrow('SCOPE VIOLATION');
+		).rejects.toThrow('SCOPE_ROOT_ESCAPE');
 	});
 
 	test('one lane cannot use another lane binding', async () => {
@@ -197,7 +197,7 @@ describe('lean turbo lane scope publication (#2002)', () => {
 					},
 				},
 			),
-		).rejects.toThrow('SCOPE VIOLATION');
+		).rejects.toThrow('SCOPE_ROOT_ESCAPE');
 	});
 
 	test("a lane binding does not resolve against another lane's root", async () => {

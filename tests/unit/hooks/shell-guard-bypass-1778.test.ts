@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type { Plan } from '../../../src/config/plan-schema';
 import type {
 	AuthorityConfig,
 	GuardrailsConfig,
@@ -12,16 +11,11 @@ import {
 	dcStripOneWrapper,
 } from '../../../src/hooks/guardrails/destructive-command';
 import {
-	claimScopeBindingForChild,
-	createScopeBinding,
-	registerScopeBinding,
-} from '../../../src/scope/scope-binding';
-import {
-	getAgentSession,
+	ensureAgentSession,
 	resetSwarmState,
-	startAgentSession,
 	swarmState,
 } from '../../../src/state';
+import { installActiveScopeBinding } from '../../helpers/active-scope-binding';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
 
 /**
@@ -32,29 +26,6 @@ import { createSafeTestDir } from '../../helpers/safe-test-dir';
 
 let testDir = '';
 let cleanup = () => {};
-const plan: Plan = {
-	schema_version: '1.0.0',
-	title: 'Shell guard fixture',
-	swarm: 'test',
-	phases: [
-		{
-			id: 1,
-			name: 'Test',
-			status: 'in_progress',
-			tasks: [
-				{
-					id: '1.1',
-					phase: 1,
-					status: 'pending',
-					size: 'small',
-					description: 'Shell guard',
-					depends: [],
-					files_touched: ['src'],
-				},
-			],
-		},
-	],
-};
 
 function defaultConfig(): GuardrailsConfig {
 	return {
@@ -76,37 +47,18 @@ function makeOutput(command: string) {
 	return { args: { command } };
 }
 function coderSession(id: string): void {
-	startAgentSession(id, 'coder', testDir);
+	ensureAgentSession(id, 'coder', testDir);
 	swarmState.activeAgent.set(id, 'coder');
 }
 function setDeclaredScope(sessionId: string, scope: string[]): void {
-	const session = getAgentSession(sessionId);
-	if (!session) throw new Error('test session missing');
-	session.currentTaskId = '1.1';
-	session.declaredCoderScope = scope;
-	const parentSessionId = `${sessionId}-parent`;
-	const callId = `${sessionId}-call`;
-	const pending = createScopeBinding({
+	installActiveScopeBinding({
 		directory: testDir,
-		plan,
+		childSessionId: sessionId,
 		taskId: '1.1',
 		files: scope,
-		ownerSessionId: parentSessionId,
-		ownerMessageId: callId,
-		dispatchCallId: callId,
-		source: 'plan',
+		parentSessionId: `${sessionId}-parent`,
+		dispatchCallId: 'call-1',
 	});
-	if (!pending) throw new Error('scope fixture was not created');
-	registerScopeBinding(pending);
-	if (
-		!claimScopeBindingForChild({
-			directory: testDir,
-			parentSessionId,
-			childSessionId: sessionId,
-			dispatchCallId: callId,
-		})
-	)
-		throw new Error('scope fixture was not activated');
 }
 
 describe('shell guard bypasses closed (#1778 H3)', () => {
@@ -116,10 +68,6 @@ describe('shell guard bypasses closed (#1778 H3)', () => {
 		testDir = created.dir;
 		cleanup = created.cleanup;
 		fs.mkdirSync(path.join(testDir, '.swarm'), { recursive: true });
-		fs.writeFileSync(
-			path.join(testDir, '.swarm', 'plan.json'),
-			JSON.stringify(plan),
-		);
 	});
 
 	afterEach(() => {
@@ -137,7 +85,7 @@ describe('shell guard bypasses closed (#1778 H3)', () => {
 				makeBashInput('h3-bashc'),
 				makeOutput(`bash -c "echo pwn > outside-scope.txt"`),
 			),
-		).rejects.toThrow(/outside declared scope|not authorised|unresolvable/);
+		).rejects.toThrow(/SCOPE_VIOLATION/);
 	});
 
 	it('blocks a write hidden inside eval that is outside declared scope', async () => {
@@ -150,7 +98,7 @@ describe('shell guard bypasses closed (#1778 H3)', () => {
 				makeBashInput('h3-eval'),
 				makeOutput(`eval "echo pwn > outside-scope.txt"`),
 			),
-		).rejects.toThrow(/outside declared scope|not authorised|unresolvable/);
+		).rejects.toThrow(/SCOPE_VIOLATION/);
 	});
 
 	it('fails closed before any coder shell write when scope is absent', async () => {

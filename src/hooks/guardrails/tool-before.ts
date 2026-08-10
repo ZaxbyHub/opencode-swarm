@@ -21,12 +21,14 @@ import {
 	resolveGuardrailsConfig,
 	stripKnownSwarmPrefix,
 } from '../../config/schema';
-import { getExecutor } from '../../sandbox/executor';
 import { resolveScopePaths } from '../../sandbox/scope-resolver';
+import { sanitizeDiagnosticText } from '../../scope/path-identity';
+import type { ScopeLeaseCandidateInput } from '../../scope/scope-lease-renewal';
 import {
-	resolveAuthorizedScopeBinding,
-	resolveAuthorizedScopeBindingForSession,
+	resolveAuthorizedScopeBindingDetailed,
+	resolveAuthorizedScopeBindingForSessionDetailed,
 } from '../../scope/scope-persistence';
+import { formatScopeResolutionDiagnostic } from '../../scope/scope-resolution-diagnostic';
 import {
 	beginInvocation,
 	ensureAgentSession,
@@ -57,14 +59,14 @@ import {
 } from '../write-target-resolver';
 import { appendGuardrailDecision } from './audit-log';
 import {
-	DC_SAFE_TARGETS,
 	dcCheckJunctionCreation,
+	dcEvaluateRecursiveDeleteTargets,
 	dcExtractPowerShellTargets,
+	dcExtractRecursiveRmTargets,
 	dcExtractWindowsCmdTargets,
 	dcNormalizeCommand,
 	dcSplitSegments,
 	dcUnwrapWrappers,
-	dcValidateTargets,
 } from './destructive-command';
 import {
 	enforceExecutionStallDenial,
@@ -72,9 +74,11 @@ import {
 } from './execution-stall';
 import type { AgentRule } from './file-authority';
 import {
+	AUTHORITY_ROLE_CAPABILITIES,
 	checkFileAuthorityWithRules,
 	checkWriteTargetForSymlink,
 	hashArgs,
+	matchesAuthorityDenyPrefix,
 } from './file-authority';
 import { enforceSpecDriftGate } from './index';
 import { enforceInternalsGuard } from './internals-guard';
@@ -117,6 +121,8 @@ export interface ToolBeforeContext {
 	 * trusted roots when exempting `git worktree remove --force` (issue #1708).
 	 */
 	worktreeBaseDirOverrides?: string[];
+	/** Sandbox executor getter seam for tests and platform-specific overrides. */
+	getSandboxExecutor: typeof import('../../sandbox/executor').getExecutor;
 	/** Hold exact child-write provenance until the matching after-hook succeeds. */
 	rememberReviewerScopeWrite?: (input: {
 		callID: string;
@@ -125,6 +131,8 @@ export interface ToolBeforeContext {
 		coderCallID: string;
 		file: string;
 	}) => void;
+	/** Snapshot an exact authorized write for success-only lease renewal. */
+	rememberScopeLeaseCandidate?: (input: ScopeLeaseCandidateInput) => void;
 }
 
 // Shared helper functions extracted to helpers.ts (task 1.4 / FR-005)
@@ -158,7 +166,9 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		authorityConfig,
 		consecutiveNoToolTurns,
 		worktreeBaseDirOverrides,
+		getSandboxExecutor,
 		rememberReviewerScopeWrite,
+		rememberScopeLeaseCandidate,
 	} = ctx;
 
 	/**
@@ -221,16 +231,25 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		const session = swarmState.agentSessions.get(sessionID);
 		const taskId = session?.currentTaskId ?? null;
 		const bindingDirectory = sessionWorkspaceDirectory(sessionID);
-		const binding = taskId
-			? resolveAuthorizedScopeBinding({
+		const resolution = taskId
+			? resolveAuthorizedScopeBindingDetailed({
 					directory: bindingDirectory,
 					taskId,
 					activeSessionId: sessionID,
 				})
-			: resolveAuthorizedScopeBindingForSession({
+			: resolveAuthorizedScopeBindingForSessionDetailed({
 					directory: bindingDirectory,
 					activeSessionId: sessionID,
 				});
+		const binding = resolution.status === 'found' ? resolution.binding : null;
+		if (!binding) {
+			const diagnostic = formatScopeResolutionDiagnostic({
+				resolution,
+				taskId,
+				sessionId: sessionID,
+			});
+			if (diagnostic) throw new Error(diagnostic);
+		}
 		if (!taskId && binding && session) {
 			session.currentTaskId = binding.taskId;
 			session.declaredCoderScope = [...binding.files];
@@ -302,7 +321,24 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			: 'unknown';
 		const isCoder = agentRole === 'coder';
 
-		const declaredScope = isCoder ? resolveDeclaredScope(sessionID) : null;
+		const activeBinding = isCoder ? resolveActiveScopeBinding(sessionID) : null;
+		const bindingIdentity = activeBinding as
+			| (typeof activeBinding & {
+					bindingId?: unknown;
+					generationId?: unknown;
+			  })
+			| null;
+		const verifiedScope =
+			bindingIdentity &&
+			typeof bindingIdentity.bindingId === 'string' &&
+			typeof bindingIdentity.generationId === 'string'
+				? {
+						bindingId: bindingIdentity.bindingId,
+						generationId: bindingIdentity.generationId,
+						files: bindingIdentity.files,
+					}
+				: undefined;
+		const declaredScope = activeBinding?.files ?? null;
 		const toolArgs = args as Record<string, unknown> | undefined;
 		const rawCommand =
 			typeof toolArgs?.command === 'string' ? toolArgs.command.trim() : '';
@@ -347,36 +383,14 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			// strict -[rRfF]+ class) catches stacked non-rf letters such as
 			// `rm -rfv` / `rm -vrf` that the old pattern missed (issue #1778 H3),
 			// while still catching -r/-f alone and --recursive/--force in any order.
-			const rmMatch = /^rm\s+((?:-\S+\s+)+)(.+)$/.exec(seg);
-			const rmFlagsPart = rmMatch?.[1] ?? '';
-			const rmHasRecursiveOrForce =
-				/(?:^|\s)-[A-Za-z]*[rRfF]/.test(rmFlagsPart) ||
-				/(?:^|\s)--(?:recursive|force)\b/.test(rmFlagsPart);
-			if (rmMatch && rmHasRecursiveOrForce) {
-				const targetPart = rmMatch[2].trim();
-				const targets = targetPart.split(/\s+/);
-				const validateBlock = dcValidateTargets(targets, cwd);
-				if (validateBlock) throw new Error(validateBlock);
-				const allSafe = targets.every((t) =>
-					DC_SAFE_TARGETS.has(t.replace(/^["']|["']$/g, '').trim()),
-				);
-				if (!allSafe) {
-					const scopeExempt =
-						declaredScope != null &&
-						declaredScope.length > 0 &&
-						targets.every((t) =>
-							isInDeclaredScope(
-								t.replace(/^["']|["']$/g, '').trim(),
-								declaredScope,
-								cwd,
-							),
-						);
-					if (!scopeExempt) {
-						throw new Error(
-							`BLOCKED: Potentially destructive shell command: rm with recursive/force flags on unsafe path(s): ${targetPart}`,
-						);
-					}
-				}
+			const rmTargets = dcExtractRecursiveRmTargets(seg);
+			if (rmTargets) {
+				const decision = dcEvaluateRecursiveDeleteTargets({
+					targets: rmTargets,
+					cwd,
+					verifiedScope,
+				});
+				if (!decision.allowed) throw new Error(decision.reason);
 			}
 
 			// Windows cmd.exe: rmdir /s, rd /s
@@ -387,44 +401,24 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 						`BLOCKED: Windows recursive directory delete (rmdir /s or rd /s) detected. Verify the target is not a junction/symlink.`,
 					);
 				}
-				const validateBlock = dcValidateTargets(targets, cwd);
-				if (validateBlock) throw new Error(validateBlock);
-				const allSafe = targets.every((t) => DC_SAFE_TARGETS.has(t.trim()));
-				if (!allSafe) {
-					const scopeExempt =
-						declaredScope != null &&
-						declaredScope.length > 0 &&
-						targets.every((t) =>
-							isInDeclaredScope(t.trim(), declaredScope, cwd),
-						);
-					if (!scopeExempt) {
-						throw new Error(
-							`BLOCKED: Windows recursive directory delete on unsafe path(s): ${targets.join(', ')}`,
-						);
-					}
-				}
+				const decision = dcEvaluateRecursiveDeleteTargets({
+					targets,
+					cwd,
+					verifiedScope,
+				});
+				if (!decision.allowed) throw new Error(decision.reason);
 			}
 
 			// Windows cmd.exe: del /s /q /f
 			if (/^del(?:\.exe)?\s+.*\/[sS]/i.test(seg)) {
 				const targets = dcExtractWindowsCmdTargets(seg);
 				if (targets.length > 0) {
-					const validateBlock = dcValidateTargets(targets, cwd);
-					if (validateBlock) throw new Error(validateBlock);
-					const allSafe = targets.every((t) => DC_SAFE_TARGETS.has(t.trim()));
-					if (!allSafe) {
-						const scopeExempt =
-							declaredScope != null &&
-							declaredScope.length > 0 &&
-							targets.every((t) =>
-								isInDeclaredScope(t.trim(), declaredScope, cwd),
-							);
-						if (!scopeExempt) {
-							throw new Error(
-								`BLOCKED: Windows recursive file delete (del /s) on unsafe path(s): ${targets.join(', ')}`,
-							);
-						}
-					}
+					const decision = dcEvaluateRecursiveDeleteTargets({
+						targets,
+						cwd,
+						verifiedScope,
+					});
+					if (!decision.allowed) throw new Error(decision.reason);
 				}
 			}
 
@@ -437,22 +431,12 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			) {
 				const targets = dcExtractPowerShellTargets(seg);
 				if (targets.length > 0) {
-					const validateBlock = dcValidateTargets(targets, cwd);
-					if (validateBlock) throw new Error(validateBlock);
-					const allSafe = targets.every((t) => DC_SAFE_TARGETS.has(t.trim()));
-					if (!allSafe) {
-						const scopeExempt =
-							declaredScope != null &&
-							declaredScope.length > 0 &&
-							targets.every((t) =>
-								isInDeclaredScope(t.trim(), declaredScope, cwd),
-							);
-						if (!scopeExempt) {
-							throw new Error(
-								`BLOCKED: PowerShell recursive delete on unsafe path(s): ${targets.join(', ')}`,
-							);
-						}
-					}
+					const decision = dcEvaluateRecursiveDeleteTargets({
+						targets,
+						cwd,
+						verifiedScope,
+					});
+					if (!decision.allowed) throw new Error(decision.reason);
 				} else {
 					throw new Error(
 						`BLOCKED: PowerShell Remove-Item with -Recurse detected — cannot verify target safety`,
@@ -1044,16 +1028,26 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		const shellWriteRole = stripKnownSwarmPrefix(shellWriteAgent).toLowerCase();
 		const isArch = shellWriteRole === 'architect';
 		const isCoder = shellWriteRole === 'coder';
+		const shellRoleCapability =
+			AUTHORITY_ROLE_CAPABILITIES[
+				shellWriteRole as keyof typeof AUTHORITY_ROLE_CAPABILITIES
+			];
+		const isImmutableNonWriter =
+			shellRoleCapability === 'read-only' ||
+			shellRoleCapability === 'dedicated-tool-only';
 		if (isCoder && (!declaredScope || declaredScope.length === 0)) {
 			throw new Error(
-				`SCOPE_NOT_DECLARED: ${shellWriteAgent} cannot perform shell writes without an active Task-correlated scope binding.`,
+				`SCOPE_NOT_DECLARED: ${shellWriteAgent} cannot perform shell writes without an active Task-correlated scope binding. ACTION[architect]: call declare_scope with the exact workspace-relative paths and replace_existing=true, then dispatch a new Task call.`,
 			);
 		}
 		// Coders fail closed without a Task-correlated scope. Other non-architect
 		// roles retain legacy no-scope leniency, but universal deny prefixes still
 		// apply to them (issue #1778 H3).
 		const noScopeLenient =
-			!isArch && !isCoder && (!declaredScope || declaredScope.length === 0);
+			!isArch &&
+			!isCoder &&
+			!isImmutableNonWriter &&
+			(!declaredScope || declaredScope.length === 0);
 
 		// Issue #2002: a lane coder's shell runs with the lane as cwd and its scope
 		// is lane-rooted. Every path decision in this loop must share that base.
@@ -1100,15 +1094,15 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				);
 			}
 
-			if (universalDenyPrefixes.length > 0) {
-				const normalizedPath = path
-					.relative(
-						path.resolve(shellDirectory),
-						path.resolve(shellDirectory, write.resolvedPath),
-					)
-					.replace(/\\/g, '/');
+			if (noScopeLenient && universalDenyPrefixes.length > 0) {
 				for (const prefix of universalDenyPrefixes) {
-					if (normalizedPath.toLowerCase().startsWith(prefix.toLowerCase())) {
+					if (
+						matchesAuthorityDenyPrefix(
+							write.resolvedPath,
+							prefix,
+							shellDirectory,
+						)
+					) {
 						throw new Error(
 							`WRITE BLOCKED: Agent "${shellWriteAgent}" is not authorised to write "${write.resolvedPath}" (via shell). Reason: Path is under universal deny prefix "${prefix}"`,
 						);
@@ -1125,7 +1119,12 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				write.resolvedPath,
 				shellDirectory,
 				precomputedAuthorityRules,
-				{ declaredScope },
+				{
+					declaredScope,
+					authorityEnabled: authorityConfig?.enabled,
+					universalDenyPrefixes,
+					verifierConfigPaths: authorityConfig?.verifier_config_paths,
+				},
 			);
 			if (!authorityCheck.allowed) {
 				throw new Error(
@@ -1138,8 +1137,14 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				declaredScope.length > 0 &&
 				!isInDeclaredScope(write.resolvedPath, declaredScope, shellDirectory)
 			) {
+				const safeTarget = sanitizeDiagnosticText(write.resolvedPath, 320);
+				const scopeSummary = declaredScope
+					.slice(0, 10)
+					.map((entry) => sanitizeDiagnosticText(entry, 160))
+					.join(', ');
+				const omitted = Math.max(0, declaredScope.length - 10);
 				throw new Error(
-					`bash write detected outside declared scope: ${write.resolvedPath} (original: ${write.original.path})`,
+					`WRITE BLOCKED: SCOPE_VIOLATION: shell write target "${safeTarget}" is outside the active scope [${scopeSummary}${omitted > 0 ? `, ... (+${omitted} more)` : ''}]. ACTION[architect]: if the target is intended, call declare_scope for the exact workspace-relative path and redispatch; otherwise correct the command.`,
 				);
 			}
 			if (isCoder) {
@@ -1173,6 +1178,24 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				}
 			}
 		}
+		if (isCoder) {
+			const binding = resolveActiveScopeBinding(sessionID);
+			if (binding) {
+				rememberScopeLeaseCandidate?.({
+					callID,
+					sessionID,
+					tool,
+					directory: shellDirectory,
+					binding,
+					targets: resolvedWrites.flatMap((write) =>
+						write.resolvedPath === null
+							? []
+							: [path.resolve(shellDirectory, write.resolvedPath)],
+					),
+					args,
+				});
+			}
+		}
 	}
 
 	/**
@@ -1190,7 +1213,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 	): Promise<void> {
 		if (tool !== 'bash' && tool !== 'shell') return;
 
-		const executor = await getExecutor();
+		const executor = await getSandboxExecutor();
 		if (!executor || !executor.isAvailable()) {
 			if (!hasWarnedSandboxUnavailable) {
 				hasWarnedSandboxUnavailable = true;
@@ -2304,6 +2327,20 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			} else {
 				resolvedFileTargets = resolution.paths;
 			}
+			const writeBinding = resolveActiveScopeBinding(input.sessionID);
+			if (writeBinding) {
+				rememberScopeLeaseCandidate?.({
+					callID: input.callID,
+					sessionID: input.sessionID,
+					tool: input.tool,
+					directory: writeDirectory,
+					binding: writeBinding,
+					targets: (resolvedFileTargets ?? []).map((target) =>
+						path.resolve(writeDirectory, target),
+					),
+					args: output.args,
+				});
+			}
 		}
 
 		// Authority + lstat + universal-deny checks for ALL agents on Write/Edit
@@ -2345,44 +2382,6 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					throw new Error(lstatBlock);
 				}
 
-				// Universal deny prefixes
-				if (universalDenyPrefixes.length > 0) {
-					const normalizedPath = path
-						.relative(
-							path.resolve(writeDirectory),
-							path.resolve(writeDirectory, targetPath),
-						)
-						.replace(/\\/g, '/');
-					for (const prefix of universalDenyPrefixes) {
-						if (normalizedPath.toLowerCase().startsWith(prefix.toLowerCase())) {
-							void appendGuardrailDecision(
-								{
-									type: 'file_write',
-									ts: new Date().toISOString(),
-									sessionID: input.sessionID,
-									agent: agentName,
-									tool: input.tool,
-									path: targetPath,
-									reason: `Path is under universal deny prefix "${prefix}"`,
-									resolvedScope: (() => {
-										const scope = resolveDeclaredScope(input.sessionID);
-										return scope != null && scope.length > 0
-											? scope.join(', ')
-											: '';
-									})(),
-								},
-								{
-									auditPath: shellAuditPath,
-									enabled: shellAuditEnabled,
-								},
-							);
-							throw new Error(
-								`WRITE BLOCKED: Agent "${agentName}" is not authorised to write "${targetPath}". Reason: Path is under universal deny prefix "${prefix}"`,
-							);
-						}
-					}
-				}
-
 				// Per-agent authority check
 				const writeBinding = resolveActiveScopeBinding(input.sessionID);
 				const writeDeclaredScope = writeBinding?.files ?? null;
@@ -2392,7 +2391,12 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					targetPath,
 					writeDirectory,
 					precomputedAuthorityRules,
-					{ declaredScope: writeDeclaredScope },
+					{
+						declaredScope: writeDeclaredScope,
+						authorityEnabled: authorityConfig?.enabled,
+						universalDenyPrefixes,
+						verifierConfigPaths: authorityConfig?.verifier_config_paths,
+					},
 				);
 				if (!authorityCheck.allowed) {
 					void appendGuardrailDecision(

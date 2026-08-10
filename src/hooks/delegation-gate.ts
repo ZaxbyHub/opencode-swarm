@@ -39,22 +39,23 @@ import { computeParallelVerdict } from '../plan/parallel-verdict';
 import { derivePlanId } from '../plan/utils.js';
 import {
 	canonicalWorkspaceIdentity,
-	claimScopeBindingForChild,
+	clearExactScopeBinding,
 	clearScopeBindings,
 	createPrFeedbackScopeBinding,
 	createScopeBinding,
 	deriveChildScopeBinding,
-	getScopeBinding,
+	formatCoderScopeConflict,
 	MAX_PENDING_SCOPE_BINDINGS,
-	registerScopeBinding,
 	resolveCoderScopeSources,
 	type ScopeBinding,
 } from '../scope/scope-binding';
 import {
+	claimScopeBindingForChildDurably,
 	clearScopeBindingFromDisk,
-	readScopeBindingFromDisk,
-	writeScopeBindingToDisk,
+	persistAndRegisterScopeBinding,
+	resolveScopeBindingFromDisk,
 } from '../scope/scope-persistence';
+import { formatScopeResolutionDiagnostic } from '../scope/scope-resolution-diagnostic';
 import type { AgentSessionState } from '../state';
 import {
 	advanceTaskState,
@@ -257,9 +258,7 @@ async function prepareCoderScope(
 					fileDirectiveFiles: directives.files,
 				});
 				if (!resolved.ok) {
-					throw new Error(
-						`${resolved.code}: PR-feedback coder scope conflicts with the verified controller declaration.`,
-					);
+					throw new Error(formatCoderScopeConflict(resolved));
 				}
 				const binding = createPrFeedbackScopeBinding({
 					directory,
@@ -319,20 +318,29 @@ async function prepareCoderScope(
 			'SCOPE_NOT_DECLARED: FILE: directives are present but empty or ambiguous; provide one complete relative path per FILE: line.',
 		);
 	}
+	const explicitResolution = resolveScopeBindingFromDisk({
+		directory,
+		plan,
+		taskId,
+		ownerSessionId: input.sessionID,
+		requireDeclaration: true,
+		includeExpired: true,
+	});
+	if (
+		explicitResolution.status === 'ambiguous' ||
+		explicitResolution.status === 'expired' ||
+		explicitResolution.status === 'overloaded'
+	) {
+		throw new Error(
+			formatScopeResolutionDiagnostic({
+				resolution: explicitResolution,
+				taskId,
+				sessionId: input.sessionID,
+			}) ?? 'SCOPE_NOT_DECLARED: durable declaration resolution failed.',
+		);
+	}
 	const explicitBinding =
-		getScopeBinding({
-			directory,
-			plan,
-			taskId,
-			ownerSessionId: input.sessionID,
-		}) ??
-		readScopeBindingFromDisk({
-			directory,
-			plan,
-			taskId,
-			ownerSessionId: input.sessionID,
-			requireDeclaration: true,
-		});
+		explicitResolution.status === 'found' ? explicitResolution.binding : null;
 	const declaredFiles = getPlanTaskDeclaredFiles(plan, taskId);
 	const resolved = resolveCoderScopeSources({
 		explicitFiles: explicitBinding?.files,
@@ -340,9 +348,7 @@ async function prepareCoderScope(
 		fileDirectiveFiles: directives.files,
 	});
 	if (!resolved.ok) {
-		throw new Error(
-			`${resolved.code}: ${resolved.code === 'SCOPE_CONFLICT' ? 'coder scope sources disagree or a lower-precedence source exceeds the authoritative scope.' : 'coder delegation has no complete, valid, non-empty scope.'}`,
-		);
+		throw new Error(formatCoderScopeConflict(resolved));
 	}
 	const binding = createScopeBinding({
 		directory,
@@ -2283,23 +2289,18 @@ export function createDelegationGateHook(
 		string,
 		Array<{ directory: string; binding: PreparedCoderScope['binding'] }>
 	>();
-	const sameScopeBindingIdentity = (
-		left: PreparedCoderScope['binding'],
-		right: PreparedCoderScope['binding'],
-	): boolean =>
-		left.workspaceIdentity === right.workspaceIdentity &&
-		left.planStructureHash === right.planStructureHash &&
-		left.taskId === right.taskId &&
-		left.ownerSessionId === right.ownerSessionId &&
-		left.ownerMessageId === right.ownerMessageId &&
-		left.dispatchCallId === right.dispatchCallId;
 	const publishScopeBinding = async (
 		callID: string,
 		bindingDirectory: string,
 		binding: PreparedCoderScope['binding'],
 	): Promise<void> => {
-		registerScopeBinding(binding);
-		await writeScopeBindingToDisk(bindingDirectory, binding);
+		const published = await persistAndRegisterScopeBinding(
+			bindingDirectory,
+			binding,
+		);
+		if (!published.ok) {
+			throw new Error(`${published.code}: ${published.message}`);
+		}
 		const entries = publishedScopeBindingsByCallID.get(callID) ?? [];
 		entries.push({ directory: bindingDirectory, binding });
 		publishedScopeBindingsByCallID.delete(callID);
@@ -2309,32 +2310,24 @@ export function createDelegationGateHook(
 			if (oldest === undefined) break;
 			const evicted = publishedScopeBindingsByCallID.get(oldest) ?? [];
 			publishedScopeBindingsByCallID.delete(oldest);
-			clearScopeBindings((binding) =>
-				evicted.some((entry) =>
-					sameScopeBindingIdentity(binding, entry.binding),
-				),
-			);
 			for (const entry of evicted) {
 				clearScopeBindingFromDisk({
 					directory: entry.directory,
-					taskId: entry.binding.taskId,
-					ownerSessionId: entry.binding.ownerSessionId,
+					binding: entry.binding,
 				});
+				clearExactScopeBinding(entry.binding);
 			}
 		}
 	};
 	const clearPublishedScopeBindings = (callID: string): void => {
 		const entries = publishedScopeBindingsByCallID.get(callID) ?? [];
 		publishedScopeBindingsByCallID.delete(callID);
-		clearScopeBindings((binding) =>
-			entries.some((entry) => sameScopeBindingIdentity(binding, entry.binding)),
-		);
 		for (const entry of entries) {
 			clearScopeBindingFromDisk({
 				directory: entry.directory,
-				taskId: entry.binding.taskId,
-				ownerSessionId: entry.binding.ownerSessionId,
+				binding: entry.binding,
 			});
+			clearExactScopeBinding(entry.binding);
 		}
 	};
 	const taskMetadata = async (input: {
@@ -2342,27 +2335,25 @@ export function createDelegationGateHook(
 		parentSessionID: string;
 		childSessionID: string;
 	}): Promise<void> => {
-		const result = claimScopeBindingForChild({
+		const result = await claimScopeBindingForChildDurably({
 			directory,
 			parentSessionId: input.parentSessionID,
 			childSessionId: input.childSessionID,
 			dispatchCallId: input.callID,
 		});
-		if (!result) return;
-		clearScopeBindingFromDisk({
-			directory,
-			taskId: result.previous.taskId,
-			ownerSessionId: result.previous.ownerSessionId,
-		});
-		await writeScopeBindingToDisk(directory, result.claimed);
+		if (!result.ok) {
+			if (result.code === 'SCOPE_NOT_DECLARED') return;
+			throw new Error(`${result.code}: ${result.message}`);
+		}
+		const { previous, claimed } = result.value;
 		const entries = publishedScopeBindingsByCallID.get(input.callID) ?? [];
 		for (const entry of entries) {
 			if (
 				entry.directory === directory &&
-				entry.binding.ownerSessionId === result.previous.ownerSessionId &&
-				entry.binding.taskId === result.previous.taskId
+				entry.binding.bindingId === previous.bindingId &&
+				entry.binding.generationId === previous.generationId
 			) {
-				entry.binding = result.claimed;
+				entry.binding = claimed;
 			}
 		}
 		const childSession = ensureAgentSession(
@@ -2370,8 +2361,8 @@ export function createDelegationGateHook(
 			'coder',
 			directory,
 		);
-		childSession.currentTaskId = result.claimed.taskId;
-		childSession.declaredCoderScope = [...result.claimed.files];
+		childSession.currentTaskId = claimed.taskId;
+		childSession.declaredCoderScope = [...claimed.files];
 	};
 	const sessionEnded = (
 		sessionID: string,
@@ -2386,8 +2377,7 @@ export function createDelegationGateHook(
 		for (const binding of removed) {
 			clearScopeBindingFromDisk({
 				directory: binding.workspaceIdentity,
-				taskId: binding.taskId,
-				ownerSessionId: binding.ownerSessionId,
+				binding,
 			});
 		}
 		if (
@@ -3198,8 +3188,7 @@ export function createDelegationGateHook(
 					for (const binding of removed) {
 						clearScopeBindingFromDisk({
 							directory: binding.workspaceIdentity,
-							taskId: binding.taskId,
-							ownerSessionId: binding.ownerSessionId,
+							binding,
 						});
 						if (binding.activation === 'active') {
 							const childSession = swarmState.agentSessions.get(

@@ -229,8 +229,8 @@ describe('checkFileAuthorityWithRules - DENY-first evaluation', () => {
 				'.swarm/plan.md',
 				TEST_CWD,
 			);
-			expect(result.allowed).toBe(false);
-			expect(result.reason).toContain('blocked (exact)');
+			expect(result.code).toBe('AUTHORITY_POLICY_DENY');
+			expect(result.reason).toContain('exact role policy');
 		});
 
 		test('architect blocked exact plan.json', () => {
@@ -239,8 +239,8 @@ describe('checkFileAuthorityWithRules - DENY-first evaluation', () => {
 				'.swarm/plan.json',
 				TEST_CWD,
 			);
-			expect(result.allowed).toBe(false);
-			expect(result.reason).toContain('blocked (exact)');
+			expect(result.code).toBe('AUTHORITY_POLICY_DENY');
+			expect(result.reason).toContain('exact role policy');
 		});
 
 		test('reviewer blocked exact plan files', () => {
@@ -733,8 +733,8 @@ describe('Rule merging with defaults', () => {
 			TEST_CWD,
 			authorityConfig,
 		);
-		expect(result.allowed).toBe(false);
-		expect(result.reason).toContain('blocked (exact)');
+		expect(result.code).toBe('AUTHORITY_POLICY_DENY');
+		expect(result.reason).toContain('exact role policy');
 	});
 
 	test('returns defaults when no rules provided', () => {

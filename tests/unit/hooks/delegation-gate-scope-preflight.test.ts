@@ -14,6 +14,10 @@ import {
 	registerScopeBinding,
 } from '../../../src/scope/scope-binding';
 import {
+	flushScopeBindingMaintenance,
+	replaceExistingScopeDeclaration,
+} from '../../../src/scope/scope-persistence';
+import {
 	ensureAgentSession,
 	getAgentSession,
 	resetSwarmState,
@@ -64,8 +68,9 @@ describe('coder scope preflight', () => {
 		ensureAgentSession('parent', 'architect', directory);
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
 		resetSwarmState();
+		await flushScopeBindingMaintenance(directory);
 		fs.rmSync(directory, { recursive: true, force: true });
 	});
 
@@ -125,21 +130,27 @@ describe('coder scope preflight', () => {
 
 	test('a second declaration is the sole expanded preflight authority', async () => {
 		await writePlan(['src/a.ts']);
-		for (const [message, files] of [
+		for (const [index, [message, files]] of [
 			['declare-1', ['src/a.ts']],
 			['declare-2', ['src/a.ts', 'src/b.ts']],
-		] as const) {
-			registerScopeBinding(
-				createScopeBinding({
+		].entries()) {
+			const declared = createScopeBinding({
+				directory,
+				plan,
+				taskId: '1.1',
+				files,
+				ownerSessionId: 'parent',
+				ownerMessageId: message,
+				source: 'declare_scope',
+			});
+			if (!declared) throw new Error('declaration fixture failed');
+			expect(
+				await replaceExistingScopeDeclaration({
 					directory,
-					plan,
-					taskId: '1.1',
-					files,
-					ownerSessionId: 'parent',
-					ownerMessageId: message,
-					source: 'declare_scope',
-				})!,
-			);
+					binding: declared,
+					replaceExisting: index > 0,
+				}),
+			).toMatchObject({ ok: true });
 		}
 		await expect(
 			dispatch('TASK: 1.1\nFILE: src/b.ts'),

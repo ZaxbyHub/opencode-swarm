@@ -32,7 +32,6 @@ const DC_MAX_UNWRAP_DEPTH = 5;
  */
 export const DC_SAFE_TARGETS = new Set([
 	'node_modules',
-	'.git',
 	'dist',
 	'build',
 	'coverage',
@@ -305,6 +304,37 @@ export function dcSplitSegments(cmd: string): string[] {
 }
 
 /**
+ * Extract targets from an `rm` command whose leading option set requests
+ * recursive or forced deletion. Accepts stacked short flags and long flags in
+ * any leading order. Quoted targets remain one token. Returns null when the
+ * segment is not a destructive rm form.
+ */
+export function dcExtractRecursiveRmTargets(segment: string): string[] | null {
+	const tokens = segment.match(/"(?:[^"\\]|\\.)*"|'[^']*'|\S+/g) ?? [];
+	if (tokens.length < 2 || tokens[0] !== 'rm') return null;
+
+	let destructive = false;
+	let index = 1;
+	for (; index < tokens.length; index++) {
+		const token = tokens[index];
+		if (token === '--') {
+			index++;
+			break;
+		}
+		if (!token.startsWith('-') || token === '-') break;
+		if (token === '--recursive' || token === '--force') destructive = true;
+		if (!token.startsWith('--') && /[rRfF]/.test(token.slice(1))) {
+			destructive = true;
+		}
+	}
+	if (!destructive) return null;
+
+	return tokens
+		.slice(index)
+		.map((target) => target.replace(/^(["'])|(["'])$/g, ''));
+}
+
+/**
  * Returns true if a path string contains unexpanded environment variable
  * references that we cannot resolve at check time.
  */
@@ -340,12 +370,13 @@ export function dcLstatAncestorWalk(
 	const ancestors: string[] = [];
 	let current = normalizedTarget;
 	while (true) {
+		const rel = path.relative(normalizedCwd, current);
+		if (rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel))
+			break;
 		ancestors.push(current);
+		if (rel === '') break;
 		const parent = path.dirname(current);
 		if (parent === current) break; // filesystem root
-		// Stop once we've gone past cwd
-		const rel = path.relative(normalizedCwd, current);
-		if (rel === '' || rel.startsWith('..')) break;
 		current = parent;
 	}
 
@@ -357,7 +388,9 @@ export function dcLstatAncestorWalk(
 			const code = (err as NodeJS.ErrnoException).code;
 			if (code === 'ENOENT') {
 				// Target does not exist — nothing to delete at this point
-				break;
+				// Continue upward: a missing leaf may still sit below an existing
+				// symlink/junction ancestor (issue #2096).
+				continue;
 			}
 			// Unexpected error (EPERM, EACCES, etc.) — fail closed
 			return `lstat failed on "${ancestor}": ${String(err)} — refusing to allow destructive operation on unverifiable path`;
@@ -409,12 +442,13 @@ export function dcValidateTargets(
 		// important data, then run "rm -rf node_modules". Without this check, the safe-target
 		// allowlist would permit the deletion — this is the K2.6 incident mechanism replayed
 		// with a safe-named junction.
-		const lstatBlock = dcLstatAncestorWalk(t, cwd);
+		const filesystemTarget = t.replace(/[\\/]+/g, path.sep);
+		const lstatBlock = dcLstatAncestorWalk(filesystemTarget, cwd);
 		if (lstatBlock) return lstatBlock;
 
 		// Safe bare-name targets (after lstat confirms no junction/symlink): skip path checks
-		const basename = path.basename(t);
-		if (t === basename && DC_SAFE_TARGETS.has(t)) {
+		const basename = path.basename(filesystemTarget);
+		if (dcPathComponents(t).length === 1 && DC_SAFE_TARGETS.has(basename)) {
 			continue; // Allowed — lstat confirmed no junction/symlink in ancestor chain
 		}
 
@@ -433,6 +467,206 @@ export function dcValidateTargets(
 		}
 	}
 	return null;
+}
+
+export interface DcVerifiedScope {
+	bindingId: string;
+	generationId: string;
+	files: string[];
+}
+
+export type DcRecursiveDeleteDecision =
+	| {
+			allowed: true;
+			kind: 'bare-safe-artifact' | 'scoped-nested-safe-artifact';
+			targets: string[];
+	  }
+	| {
+			allowed: false;
+			code:
+				| 'DESTRUCTIVE_TARGET_INVALID'
+				| 'DESTRUCTIVE_TARGET_PROTECTED'
+				| 'DESTRUCTIVE_TARGET_OUTSIDE_WORKSPACE'
+				| 'DESTRUCTIVE_TARGET_NOT_SAFE_ARTIFACT'
+				| 'DESTRUCTIVE_TARGET_SCOPE_REQUIRED'
+				| 'DESTRUCTIVE_TARGET_OUT_OF_SCOPE';
+			reason: string;
+	  };
+
+function dcIsUntrustedCodePoint(codePoint: number): boolean {
+	return (
+		codePoint <= 0x1f ||
+		(codePoint >= 0x7f && codePoint <= 0x9f) ||
+		(codePoint >= 0x202a && codePoint <= 0x202e) ||
+		(codePoint >= 0x2066 && codePoint <= 0x2069)
+	);
+}
+
+function dcHasUntrustedText(value: string): boolean {
+	return Array.from(value).some((character) =>
+		dcIsUntrustedCodePoint(character.codePointAt(0) ?? 0),
+	);
+}
+
+function dcSafeDiagnosticValue(value: string): string {
+	return value
+		.split('')
+		.map((character) =>
+			dcIsUntrustedCodePoint(character.codePointAt(0) ?? 0) ? '?' : character,
+		)
+		.join('')
+		.slice(0, 512);
+}
+
+function dcPathComponents(value: string): string[] {
+	return value.replace(/\\/g, '/').split('/').filter(Boolean);
+}
+
+function dcComponentEquals(left: string, right: string): boolean {
+	return process.platform === 'win32'
+		? left.toLowerCase() === right.toLowerCase()
+		: left === right;
+}
+
+function dcScopeContains(scopeEntry: string, target: string): boolean {
+	const normalize = (value: string): string => {
+		const normalized = path.posix
+			.normalize(value.replace(/\\/g, '/'))
+			.replace(/^\.\//, '')
+			.replace(/\/$/, '');
+		return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+	};
+	const scope = normalize(scopeEntry);
+	const candidate = normalize(target);
+	return candidate === scope || candidate.startsWith(`${scope}/`);
+}
+
+/**
+ * Evaluate recursive-delete targets as one atomic set.
+ *
+ * Bare safe artifact names remain statically allowable after common target
+ * validation. Nested targets require an allowlisted final component and a
+ * resolver-produced active binding identity covering the target. Arbitrary
+ * in-scope directories are never exempt, and `.git`/`.swarm` are protected at
+ * every depth.
+ */
+export function dcEvaluateRecursiveDeleteTargets(input: {
+	targets: string[];
+	cwd: string;
+	verifiedScope?: DcVerifiedScope;
+}): DcRecursiveDeleteDecision {
+	if (input.targets.length === 0) {
+		return {
+			allowed: false,
+			code: 'DESTRUCTIVE_TARGET_INVALID',
+			reason: 'BLOCKED: Recursive delete has no statically verifiable target.',
+		};
+	}
+
+	const commonBlock = dcValidateTargets(input.targets, input.cwd);
+	if (commonBlock) {
+		return {
+			allowed: false,
+			code: 'DESTRUCTIVE_TARGET_INVALID',
+			reason: commonBlock,
+		};
+	}
+
+	const normalizedTargets: string[] = [];
+	let hasNested = false;
+	for (const raw of input.targets) {
+		const target = raw.trim().replace(/^['"]|['"]$/g, '');
+		const safeTarget = dcSafeDiagnosticValue(target);
+		if (
+			!target ||
+			target === '.' ||
+			dcHasUntrustedText(target) ||
+			dcPathComponents(target).includes('..')
+		) {
+			return {
+				allowed: false,
+				code: 'DESTRUCTIVE_TARGET_INVALID',
+				reason: `BLOCKED: Recursive delete target "${safeTarget}" is empty, the workspace root, contains traversal, or contains control characters.`,
+			};
+		}
+
+		const components = dcPathComponents(target);
+		if (
+			components.some(
+				(component) =>
+					dcComponentEquals(component, '.git') ||
+					dcComponentEquals(component, '.swarm'),
+			)
+		) {
+			return {
+				allowed: false,
+				code: 'DESTRUCTIVE_TARGET_PROTECTED',
+				reason: `BLOCKED: Recursive delete target "${safeTarget}" contains protected .git or .swarm state.`,
+			};
+		}
+
+		// Shell syntax can carry either slash on every host (cmd commands may be
+		// inspected on POSIX and POSIX forms on Windows). Normalize both before
+		// filesystem operations so security decisions are host-independent.
+		const filesystemTarget = target.replace(/[\\/]+/g, path.sep);
+		const resolved = path.resolve(input.cwd, filesystemTarget);
+		const relative = path.relative(path.resolve(input.cwd), resolved);
+		if (
+			relative === '' ||
+			relative === '..' ||
+			relative.startsWith(`..${path.sep}`) ||
+			path.isAbsolute(relative)
+		) {
+			return {
+				allowed: false,
+				code: 'DESTRUCTIVE_TARGET_OUTSIDE_WORKSPACE',
+				reason: `BLOCKED: Recursive delete target "${safeTarget}" is not strictly contained by the workspace.`,
+			};
+		}
+
+		const basename = path.basename(resolved);
+		if (!DC_SAFE_TARGETS.has(basename)) {
+			return {
+				allowed: false,
+				code: 'DESTRUCTIVE_TARGET_NOT_SAFE_ARTIFACT',
+				reason: `BLOCKED: Recursive delete target "${safeTarget}" is not an allowlisted build/cache artifact.`,
+			};
+		}
+
+		const normalizedRelative = relative.replace(/\\/g, '/');
+		const isBare = components.length === 1;
+		if (!isBare) {
+			hasNested = true;
+			if (
+				!input.verifiedScope?.bindingId ||
+				!input.verifiedScope.generationId
+			) {
+				return {
+					allowed: false,
+					code: 'DESTRUCTIVE_TARGET_SCOPE_REQUIRED',
+					reason: `BLOCKED: Nested safe artifact "${safeTarget}" requires a verified active coder scope binding.`,
+				};
+			}
+			if (
+				!input.verifiedScope.files.some((entry) =>
+					dcScopeContains(entry, normalizedRelative),
+				)
+			) {
+				return {
+					allowed: false,
+					code: 'DESTRUCTIVE_TARGET_OUT_OF_SCOPE',
+					reason: `BLOCKED: Nested safe artifact "${safeTarget}" is outside the verified active coder scope.`,
+				};
+			}
+		}
+		normalizedTargets.push(normalizedRelative);
+	}
+
+	return {
+		allowed: true,
+		kind: hasNested ? 'scoped-nested-safe-artifact' : 'bare-safe-artifact',
+		targets: normalizedTargets,
+	};
 }
 
 /**

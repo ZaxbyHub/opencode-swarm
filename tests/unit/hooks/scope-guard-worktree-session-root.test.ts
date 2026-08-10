@@ -9,9 +9,8 @@ import {
 	clearScopeBindings,
 	createScopeBinding,
 	deriveChildScopeBinding,
-	registerScopeBinding,
 } from '../../../src/scope/scope-binding';
-import { writeScopeBindingToDisk } from '../../../src/scope/scope-persistence';
+import { persistAndRegisterScopeBinding } from '../../../src/scope/scope-persistence';
 import {
 	ensureAgentSession,
 	recordSessionWorkspaceRoot,
@@ -86,8 +85,8 @@ describe('scope guard resolves the executing session workspace root', () => {
 			childSessionId,
 			parentCallId: callId,
 		});
-		registerScopeBinding(child);
-		await writeScopeBindingToDisk(lane, child);
+		const published = await persistAndRegisterScopeBinding(lane, child);
+		if (!published.ok) throw new Error(published.message);
 
 		// ORDER IS LOAD-BEARING — mirrors worktree-isolation.ts exactly: the
 		// child session is registered with its real agent name FIRST via
@@ -168,7 +167,7 @@ describe('scope guard resolves the executing session workspace root', () => {
 				{ tool: 'write', sessionID: 'child-c', callID: 'w3' },
 				{ args: { path: '../src/allowed.ts', content: 'no' } },
 			),
-		).rejects.toThrow('SCOPE VIOLATION');
+		).rejects.toThrow('SCOPE_ROOT_ESCAPE');
 	});
 
 	test('one lane cannot borrow another lane binding', async () => {
@@ -186,7 +185,7 @@ describe('scope guard resolves the executing session workspace root', () => {
 					},
 				},
 			),
-		).rejects.toThrow('SCOPE VIOLATION');
+		).rejects.toThrow('SCOPE_ROOT_ESCAPE');
 	});
 
 	test('non-worktree coder behaviour is unchanged (no recorded root)', async () => {
@@ -201,14 +200,16 @@ describe('scope guard resolves the executing session workspace root', () => {
 			source: 'plan',
 		});
 		if (!pending) throw new Error('createScopeBinding returned null');
-		registerScopeBinding({
+		const active = {
 			...pending,
 			ownerSessionId: 'root-child',
 			ownerMessageId: 'root-call',
 			activation: 'active',
 			parentOwnerSessionId: 'root-parent',
 			parentCallId: 'root-call',
-		});
+		} as const;
+		const published = await persistAndRegisterScopeBinding(directory, active);
+		if (!published.ok) throw new Error(published.message);
 		// ensureAgentSession's own create path already sets swarmState.activeAgent
 		// to 'coder' — no manual repair needed.
 		const session = ensureAgentSession('root-child', 'coder');

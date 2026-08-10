@@ -1,8 +1,9 @@
-import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type { Plan } from '../../../src/config/plan-schema';
-import * as realExecutor from '../../../src/sandbox/executor';
+import { _internals as guardrailsInternals } from '../../../src/hooks/guardrails';
+import { ensureAgentSession, getAgentSession } from '../../../src/state';
+import { installActiveScopeBinding } from '../../helpers/active-scope-binding';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
 
 const failingExecutor = () => ({
@@ -13,86 +14,39 @@ const failingExecutor = () => ({
 	},
 	getEnvOverrides: () => ({}),
 });
-
-const getExecutorMock = mock(async () => failingExecutor());
-
-mock.module('../../../src/sandbox/executor', () => ({
-	...realExecutor,
-	getExecutor: getExecutorMock,
-}));
+const originalGetSandboxExecutor = guardrailsInternals.getSandboxExecutor;
 
 const { createGuardrailsHooks } = await import('../../../src/hooks/guardrails');
-const { claimScopeBindingForChild, createScopeBinding, registerScopeBinding } =
-	await import('../../../src/scope/scope-binding');
-const { getAgentSession, resetSwarmState, startAgentSession, swarmState } =
-	await import('../../../src/state');
+const { resetSwarmState, startAgentSession, swarmState } = await import(
+	'../../../src/state'
+);
 
 let directory: string;
 let cleanup: () => void;
 
 describe('guardrails sandbox-before circuit — regression: issue #1875', () => {
 	beforeEach(() => {
+		guardrailsInternals.getSandboxExecutor = async () => failingExecutor();
 		resetSwarmState();
 		const created = createSafeTestDir('sandbox-circuit-');
 		directory = created.dir;
 		cleanup = created.cleanup;
-		const plan: Plan = {
-			schema_version: '1.0.0',
-			title: 'Sandbox circuit',
-			swarm: 'test',
-			phases: [
-				{
-					id: 1,
-					name: 'Fix',
-					status: 'in_progress',
-					tasks: [
-						{
-							id: '1.1',
-							phase: 1,
-							status: 'pending',
-							size: 'small',
-							description: 'test',
-							depends: [],
-							files_touched: ['src'],
-						},
-					],
-				},
-			],
-		};
 		fs.mkdirSync(path.join(directory, '.swarm'), { recursive: true });
-		fs.writeFileSync(
-			path.join(directory, '.swarm', 'plan.json'),
-			JSON.stringify(plan),
-		);
-		getExecutorMock.mockImplementation(async () => failingExecutor());
-		startAgentSession('sandbox-before', 'coder', directory);
+		fs.mkdirSync(path.join(directory, 'src'), { recursive: true });
+		ensureAgentSession('sandbox-before', 'coder', directory);
 		swarmState.activeAgent.set('sandbox-before', 'coder');
-		const session = getAgentSession('sandbox-before');
-		if (!session) throw new Error('test session missing');
-		session.currentTaskId = '1.1';
-		session.declaredCoderScope = ['src'];
-		registerScopeBinding(
-			createScopeBinding({
-				directory,
-				plan,
-				taskId: '1.1',
-				files: ['src'],
-				ownerSessionId: 'sandbox-parent',
-				ownerMessageId: 'task-call',
-				dispatchCallId: 'task-call',
-				source: 'plan',
-			})!,
-		);
-		claimScopeBindingForChild({
+		installActiveScopeBinding({
 			directory,
-			parentSessionId: 'sandbox-parent',
 			childSessionId: 'sandbox-before',
-			dispatchCallId: 'task-call',
+			taskId: '1.1',
+			files: ['src/'],
+			parentSessionId: 'sandbox-parent',
+			dispatchCallId: 'wrapper-1',
 		});
 	});
 
 	afterEach(() => {
-		getExecutorMock.mockClear();
+		guardrailsInternals.getSandboxExecutor = originalGetSandboxExecutor;
 		resetSwarmState();
 		cleanup();
 	});
@@ -138,12 +92,12 @@ describe('guardrails sandbox-before circuit — regression: issue #1875', () => 
 	});
 
 	it('correlates a wrapped command result back to the sandbox failure category', async () => {
-		getExecutorMock.mockImplementation(async () => ({
+		guardrailsInternals.getSandboxExecutor = async () => ({
 			isAvailable: () => true,
 			mechanism: 'test-wrapper',
 			wrapCommand: () => 'wrapped-command',
 			getEnvOverrides: () => ({}),
-		}));
+		});
 		const hooks = createGuardrailsHooks(directory, {
 			enabled: true,
 			max_tool_calls: 200,
@@ -195,14 +149,14 @@ describe('guardrails sandbox-before circuit — regression: issue #1875', () => 
 	});
 
 	it('leaves unsupported shell args.env untouched because the wrapper owns its environment', async () => {
-		getExecutorMock.mockImplementation(async () => ({
+		guardrailsInternals.getSandboxExecutor = async () => ({
 			isAvailable: () => true,
 			mechanism: 'test-wrapper',
 			wrapCommand: () => 'wrapped-command',
 			getEnvOverrides: () => {
 				throw new Error('unsupported host args.env path must not be queried');
 			},
-		}));
+		});
 		const hooks = createGuardrailsHooks(directory, {
 			enabled: true,
 			max_tool_calls: 200,

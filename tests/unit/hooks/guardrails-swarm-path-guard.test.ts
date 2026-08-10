@@ -1,6 +1,5 @@
-import { beforeEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, realpathSync, symlinkSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { mkdirSync, rmSync, symlinkSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { GuardrailsConfig } from '../../../src/config/schema';
 import { createGuardrailsHooks } from '../../../src/hooks/guardrails';
@@ -10,10 +9,9 @@ import {
 	swarmState,
 } from '../../../src/state';
 import { installActiveScopeBinding } from '../../helpers/active-scope-binding';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
-const TEST_DIR = realpathSync(
-	mkdtempSync(join(tmpdir(), 'guardrail-swarm-path-')),
-);
+let TEST_DIR = '';
 
 function defaultConfig(
 	overrides?: Partial<GuardrailsConfig>,
@@ -42,9 +40,11 @@ function makeBashOutput(command: string) {
 
 describe('destructive command guard - .swarm path protection (sections 16-21)', () => {
 	beforeEach(() => {
+		TEST_DIR = canonicalMkdtemp('guardrail-swarm-path-');
 		resetSwarmState();
 		startAgentSession('test-session', 'architect');
 	});
+	afterEach(() => rmSync(TEST_DIR, { recursive: true, force: true }));
 
 	// ============================================================
 	// Section 16: POSIX mv targeting .swarm/ paths
@@ -625,7 +625,7 @@ describe('destructive command guard - .swarm path protection (sections 16-21)', 
 	describe('Section 22b: git worktree remove --force scope-exemption (#1708)', () => {
 		/** Creates a fresh worktree base dir + an in-base worktree that exists on disk. */
 		function makeWorktreeFixture(): { base: string; worktreePath: string } {
-			const base = realpathSync(mkdtempSync(join(tmpdir(), 'wt-base-')));
+			const base = canonicalMkdtemp('wt-base-');
 			const worktreePath = join(base, 'sess', 'lane-1');
 			mkdirSync(worktreePath, { recursive: true });
 			return { base, worktreePath };
@@ -701,9 +701,7 @@ describe('destructive command guard - .swarm path protection (sections 16-21)', 
 
 		test('--force on an in-base symlink/junction that resolves OUTSIDE → BLOCKED (fail closed)', async () => {
 			const { base } = makeWorktreeFixture();
-			const outsideReal = realpathSync(
-				mkdtempSync(join(tmpdir(), 'wt-escape-')),
-			);
+			const outsideReal = canonicalMkdtemp('wt-escape-');
 			const link = join(base, 'sess', 'escape-link');
 			mkdirSync(dirname(link), { recursive: true });
 			// 'junction' type is creatable by non-admin users on Windows and is

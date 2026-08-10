@@ -171,8 +171,9 @@ describe('identity-bound scope bindings', () => {
 		).toEqual(['src/a.ts', 'src/b.ts']);
 	});
 
-	test('pending bindings are bounded with FIFO eviction', () => {
+	test('live binding capacity fails closed without evicting authority', () => {
 		const root = workspace('scope-bounded-');
+		let overflow: ReturnType<typeof registerScopeBinding> | null = null;
 		for (let i = 0; i <= MAX_PENDING_SCOPE_BINDINGS; i++) {
 			const binding = createScopeBinding({
 				directory: root,
@@ -183,8 +184,12 @@ describe('identity-bound scope bindings', () => {
 				ownerMessageId: `message-${i}`,
 				source: 'declare_scope',
 			});
-			registerScopeBinding(binding!);
+			overflow = registerScopeBinding(binding!);
 		}
+		expect(overflow).toMatchObject({
+			ok: false,
+			code: 'SCOPE_BINDING_CAPACITY',
+		});
 		expect(
 			getScopeBinding({
 				directory: root,
@@ -192,7 +197,7 @@ describe('identity-bound scope bindings', () => {
 				taskId: '1.1',
 				ownerSessionId: 'session-0',
 			}),
-		).toBeNull();
+		).not.toBeNull();
 	});
 
 	test('explicit scope is authoritative while FILE and plan paths must be subsets', () => {
@@ -213,7 +218,13 @@ describe('identity-bound scope bindings', () => {
 				planFiles: ['src/a.ts', 'src/b.ts'],
 				fileDirectiveFiles: ['src/a.ts'],
 			}),
-		).toEqual({ ok: false, code: 'SCOPE_CONFLICT' });
+		).toMatchObject({
+			ok: false,
+			code: 'SCOPE_CONFLICT',
+			authoritativeSource: 'declare_scope',
+			conflictingSource: 'plan',
+			disagreement: ['src/b.ts'],
+		});
 	});
 
 	test('plan outranks a subset FILE list and complete FILE is last-resort scope', () => {
