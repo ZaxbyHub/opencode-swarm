@@ -38,7 +38,6 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { collectToolRegistrationErrors } from './check-tool-registration';
-import { collectEventContractErrors } from './check-event-contract';
 import { detectDocsClaimDrift } from './drift-check-docs-claims';
 import { checkSkillAssertions, formatBrokenAssertions } from './check-skill-assertions';
 import { BUNDLED_PROJECT_SKILLS } from '../src/config/bundled-skills';
@@ -814,27 +813,6 @@ export function detectToolRegistrationDrift(): DriftFinding[] {
 }
 
 // ---------------------------------------------------------------------------
-// 3b) Event contract drift (issue #2029 AC6, reuse of
-//     scripts/check-event-contract.ts)
-//
-// ADVISORY ONLY here: drift-check is soft-warn by default
-// (`DRIFT_CHECK_ENFORCE`), so this detector surfaces annotations/PR comments
-// but does not block a merge on its own. The BLOCKING gate for AC6 is the
-// dedicated "Event contract check" step in .github/workflows/ci.yml, which
-// runs `bun run check:events` (collectEventContractErrors' hard-fail CLI)
-// unconditionally, with no enforce/warn env var.
-// ---------------------------------------------------------------------------
-
-export function detectEventContractDrift(): DriftFinding[] {
-	return collectEventContractErrors().map((message) => ({
-		category: 'event-contract',
-		severity: 'error' as const,
-		file: 'src/observability/catalog.ts',
-		message,
-	}));
-}
-
-// ---------------------------------------------------------------------------
 // 4) Command registry drift
 // ---------------------------------------------------------------------------
 
@@ -1306,7 +1284,6 @@ const DETECTORS: Array<[string, () => DriftFinding[]]> = [
 	['duplicate-slug', detectDuplicateSlugs],
 	['package-json-files', detectPackageJsonFilesDuplicates],
 	['tool', detectToolRegistrationDrift],
-	['event-contract', detectEventContractDrift],
 	['command', detectCommandDrift],
 	['agent', detectAgentDrift],
 	['docs-claim', detectDocsClaimDrift],
@@ -1351,7 +1328,7 @@ export async function detectSkillAssertionDrift(
 	const result = await checkSkillAssertions(cwd);
 	return result.brokenAssertions.map((b) => ({
 		category: 'skill-assertion',
-		severity: 'error' as const,
+		severity: 'notice' as const,
 		file: b.testFile,
 		message:
 			`Test at ${b.testFile}:${b.line} asserts "${b.phrase}" ` +

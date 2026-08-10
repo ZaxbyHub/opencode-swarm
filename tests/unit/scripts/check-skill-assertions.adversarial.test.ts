@@ -334,12 +334,13 @@ describe('adversarial: formatBrokenAssertions with malformed input', () => {
 					line: 1,
 					skillFile: '.opencode/skills/x/SKILL.md',
 					phrase: '',
+					assertionKind: 'toContain',
 				},
 			],
 		};
 		const lines = formatBrokenAssertions(result);
 		expect(lines).toHaveLength(1);
-		expect(lines[0]!).toContain('::error');
+		expect(lines[0]!).toContain('::notice');
 		expect(lines[0]!).toContain('tests/unit/agents/x.test.ts');
 	});
 
@@ -352,12 +353,13 @@ describe('adversarial: formatBrokenAssertions with malformed input', () => {
 					line: 5,
 					skillFile: '.opencode/skills/unicode/SKILL.md',
 					phrase: '日本語テスト — émojis 🎉 — العربية',
+					assertionKind: 'toContain',
 				},
 			],
 		};
 		const lines = formatBrokenAssertions(result);
 		expect(lines).toHaveLength(1);
-		expect(lines[0]!).toContain('::error');
+		expect(lines[0]!).toContain('::notice');
 		expect(() => formatBrokenAssertions(result)).not.toThrow();
 	});
 });

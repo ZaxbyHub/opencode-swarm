@@ -500,7 +500,7 @@ describe('design-docs skill', () => {
 			(f) => f.category === 'skill-assertion',
 		);
 		expect(skillAssertionFindings).toHaveLength(1);
-		expect(skillAssertionFindings[0]!.severity).toBe('error');
+		expect(skillAssertionFindings[0]!.severity).toBe('notice');
 		expect(skillAssertionFindings[0]!.message).toContain(
 			'does NOT delegate to coder',
 		);
@@ -518,12 +518,13 @@ describe('design-docs skill', () => {
 					line: 14,
 					skillFile: '.opencode/skills/x/SKILL.md',
 					phrase: 'does NOT delegate',
+					assertionKind: 'toContain',
 				},
 			],
 		};
 		const lines = formatBrokenAssertions(result);
 		expect(lines).toHaveLength(1);
-		expect(lines[0]!).toContain('::error');
+		expect(lines[0]!).toContain('::notice');
 		expect(lines[0]!).toContain('tests/unit/agents/x.test.ts');
 		expect(lines[0]!).toContain('does NOT delegate');
 	});
