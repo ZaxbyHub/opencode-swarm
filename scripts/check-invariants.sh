@@ -194,7 +194,7 @@ echo "=== Check 4: mock.module allowlist growth ratchet (issue #1666) ==="
 # Diff-scoped ratchet: fails CI when scripts/mock-allowlist.txt grows relative
 # to the PR base, unless each newly added target has a matching standalone
 # marker line  # APPROVED-NEW: <normalized-target>  somewhere in the file.
-# Mirrors scripts/check-test-file-cap.sh's diff-scoped shape and the
+# Mirrors scripts/check-test-file-cap.ts's diff-scoped shape and the
 # MOCK_ALLOWLIST_ENFORCE truth table (default-enforce-when-unset, like
 # TEST_CAP_ENFORCE). Closes the remaining open item of issue #1666: the
 # membership check (Check 3) cannot detect growth when the allowlist is
@@ -207,7 +207,7 @@ ratchet_violations=0
 # only (set-difference against the PR base), so defaulting to enforce in CI
 # (where the var is unset) is correct.
 if [ -z "${MOCK_ALLOWLIST_ENFORCE+x}" ]; then
-  ratchet_enforce=1  # unset → enforce (mirror check-test-file-cap.sh:46)
+  ratchet_enforce=1  # unset → enforce (mirror check-test-file-cap.ts resolveEnforce)
 else
   case "$(echo "${MOCK_ALLOWLIST_ENFORCE}" | tr '[:upper:]' '[:lower:]')" in
     0|false|no|off) ratchet_enforce=0;;
@@ -215,7 +215,7 @@ else
   esac
 fi
 
-# --- Resolve base branch (mirror check-test-file-cap.sh:69-76) ---
+# --- Resolve base branch (mirror check-test-file-cap.ts resolveBaseBranch) ---
 ratchet_base_branch=""
 for branch in origin/main origin/master main master; do
   if git rev-parse "$branch" >/dev/null 2>&1; then
@@ -242,7 +242,7 @@ else
   # --- Read head entries from the working-tree allowlist ---
   # `tr -d '\r'` normalizes CRLF→LF so a Windows contributor with
   # core.autocrlf=true does not false-trigger "every entry is new" (issue
-  # #1781 re-critic B6 — same landmine as check-test-file-cap.sh:102).
+  # #1781 re-critic B6 — same landmine as check-test-file-cap.ts).
   head_entries=()
   while IFS= read -r pattern; do
     case "$pattern" in
@@ -311,7 +311,7 @@ else
   # --- For each added entry, require a matching approved marker ---
   # Only increment the script-level `violations` counter when enforce is on.
   # In soft-warn mode we still report each violation but do not fail the build
-  # (mirrors check-test-file-cap.sh:161-169's exit-decision gating).
+  # (mirrors check-test-file-cap.ts evaluateCap's exit-decision gating).
   for added in ${added_entries[@]+"${added_entries[@]}"}; do
     if array_contains "$added" ${approved_markers[@]+"${approved_markers[@]}"}; then
       continue

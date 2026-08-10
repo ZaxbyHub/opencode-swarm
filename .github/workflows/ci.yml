@@ -214,11 +214,20 @@ jobs:
       # Diff-scoped ratchet (FR-006): fails only on NEW test files over 500
       # lines or existing over-cap files that grew. Pre-existing violators
       # are non-blocking. Escape hatch: TEST_CAP_ENFORCE=0 soft-warns.
-      # (issue #1781 E1)
+      # (issue #1781 E1). Ported to TypeScript in issue #2078 so Windows
+      # contributors can run the identical gate locally with
+      # `bun run check:test-file-cap` — no Bash required.
       - name: Test file line-cap ratchet (FR-006)
         if: needs.detect-release.outputs.is-release != 'true'
-        shell: bash
-        run: chmod +x scripts/check-test-file-cap.sh && bash scripts/check-test-file-cap.sh
+        run: bun run check:test-file-cap
+      # Issue #2078 recurrence guardrail: a NEW Bash-only gate wired into any
+      # workflow is blocked, because Windows contributors cannot run it
+      # locally. Existing Bash gates are baselined in
+      # scripts/gate-portability-baseline.json; porting one must remove its
+      # entry (stale entries also fail).
+      - name: CI gate portability ratchet (issue #2078)
+        if: needs.detect-release.outputs.is-release != 'true'
+        run: bun run check:gate-portability
       # Line-scoped (not file-scoped): fails only on NEW/changed lines that add
       # a raw tmpdir() call not wrapped in realpathSync. Pre-existing raw calls
       # elsewhere in a touched file are not flagged (issue #1737 FR-011 scope

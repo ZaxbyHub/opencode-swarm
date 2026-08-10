@@ -1,9 +1,13 @@
 /**
  * Issue #1781 E1 — diff-scoped ratchet for the FR-006 500-line test-file cap.
+ * Issue #2078 — the gate is now `scripts/check-test-file-cap.ts`, invoked
+ * through `bun` so it runs on Windows hosts with no Bash in PATH.
  *
- * Each test spawns the real `scripts/check-test-file-cap.sh` in a temp git
- * repository so the diff-scoped logic (new-file vs ratchet vs pre-existing)
- * is exercised against real `git diff` output.
+ * Each test spawns the real TypeScript gate in a temp git repository so the
+ * diff-scoped logic (new-file vs ratchet vs pre-existing) is exercised against
+ * real `git diff` output — no Bash involved. The final case additionally
+ * asserts that the retained `check-test-file-cap.sh` shim produces byte-equal
+ * output, which is what makes the two entry points incapable of drifting.
  */
 
 import { afterEach, describe, expect, test } from 'bun:test';
@@ -12,7 +16,16 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { bashCommand } from '../../helpers/bash';
 
-const SCRIPT = path.resolve(process.cwd(), 'scripts', 'check-test-file-cap.sh');
+const TS_GATE = path.resolve(
+	process.cwd(),
+	'scripts',
+	'check-test-file-cap.ts',
+);
+const SH_SHIM = path.resolve(
+	process.cwd(),
+	'scripts',
+	'check-test-file-cap.sh',
+);
 
 interface SpawnResult {
 	exitCode: number;
@@ -20,9 +33,13 @@ interface SpawnResult {
 	stderr: string;
 }
 
-function runScript(repoDir: string, env?: Record<string, string>): SpawnResult {
+function spawn(
+	cmd: string[],
+	repoDir: string,
+	env?: Record<string, string>,
+): SpawnResult {
 	const proc = Bun.spawnSync({
-		cmd: bashCommand(SCRIPT),
+		cmd,
 		cwd: repoDir,
 		env: { ...process.env, ...env },
 		stdin: 'ignore',
@@ -35,6 +52,16 @@ function runScript(repoDir: string, env?: Record<string, string>): SpawnResult {
 		stdout: proc.stdout.toString(),
 		stderr: proc.stderr.toString(),
 	};
+}
+
+/** Run the real gate the way CI and contributors do — via bun, no shell. */
+function runScript(repoDir: string, env?: Record<string, string>): SpawnResult {
+	return spawn([process.execPath, 'run', TS_GATE], repoDir, env);
+}
+
+/** Run the retained Bash shim, which must delegate to the same TS gate. */
+function runShim(repoDir: string, env?: Record<string, string>): SpawnResult {
+	return spawn(bashCommand(SH_SHIM), repoDir, env);
 }
 
 function git(repoDir: string, ...args: string[]): void {
@@ -104,7 +131,7 @@ function track(repoDir: string): string {
 	return repoDir;
 }
 
-describe('check-test-file-cap.sh — diff-scoped ratchet (issue #1781 E1)', () => {
+describe('check-test-file-cap — diff-scoped ratchet (issues #1781 E1, #2078)', () => {
 	test('A. new 600-line test file in the diff FAILS (default enforce)', async () => {
 		const repo = track(makeRepo());
 		writeFile(repo, 'tests/foo.test.ts', 600);
@@ -206,10 +233,50 @@ describe('check-test-file-cap.sh — diff-scoped ratchet (issue #1781 E1)', () =
 
 		// Explicitly unset to simulate CI.
 		const result = await runScript(repo, { TEST_CAP_ENFORCE: '' });
-		// Note: passing '' sets the var to empty string, which the script
-		// treats as "set but empty" → enforce. To truly unset, we'd need to
-		// delete from env; the script's `${TEST_CAP_ENFORCE+x}` test handles
-		// both unset and set-empty as enforce.
+		// Note: passing '' sets the var to empty string, which the gate
+		// treats as "set but empty" → enforce, matching the original Bash
+		// `${TEST_CAP_ENFORCE+x}` semantics.
 		expect(result.exitCode).toBe(1);
+	});
+
+	test('J. issue #2078 — the .sh shim and the .ts gate agree exactly', () => {
+		const repo = track(makeRepo());
+		writeFile(repo, 'tests/foo.test.ts', 600);
+		git(repo, 'add', '-A');
+		git(repo, 'commit', '-q', '-m', 'add big test');
+
+		const direct = runScript(repo);
+		const shim = runShim(repo);
+		expect(shim.exitCode).toBe(direct.exitCode);
+		expect(shim.stdout).toBe(direct.stdout);
+		expect(direct.exitCode).toBe(1);
+	});
+
+	test('L. issue #2078 — running from a subdirectory gives the same verdict', () => {
+		const repo = track(makeRepo());
+		writeFile(repo, 'tests/foo.test.ts', 600);
+		writeFile(repo, 'src/nested/keep.ts', 1);
+		git(repo, 'add', '-A');
+		git(repo, 'commit', '-q', '-m', 'add big test');
+
+		const fromRoot = runScript(repo);
+		const fromSubdir = runScript(path.join(repo, 'src', 'nested'));
+		// Without repo-root resolution the subdirectory run silently reported
+		// "All test-file-cap checks passed" — a vacuous pass.
+		expect(fromSubdir.exitCode).toBe(1);
+		expect(fromSubdir.stdout).toBe(fromRoot.stdout);
+	});
+
+	test('K. issue #2078 — the shim carries no cap value or ratchet logic', () => {
+		const shimSource = fs.readFileSync(SH_SHIM, 'utf-8');
+		const body = shimSource
+			.split('\n')
+			.filter((line) => !line.trimStart().startsWith('#'))
+			.join('\n');
+		// A second cap constant is exactly the drift issue #2078 forbids.
+		expect(body).not.toInclude('500');
+		expect(body).not.toInclude('MAX_LINES');
+		expect(body).not.toInclude('TEST_CAP_ENFORCE');
+		expect(body).toInclude('check-test-file-cap.ts');
 	});
 });

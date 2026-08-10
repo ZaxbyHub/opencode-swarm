@@ -100,7 +100,7 @@ import { execFileSync } from 'node:child_process';
 ### Test File Size Limits
 
 To prevent monolithic test files that cause mock isolation issues and slow CI:
-- **Maximum 500 lines per test file** (enforced in CI by `scripts/check-test-file-cap.sh` as a diff-scoped ratchet: new over-cap files and existing over-cap files that grew fail the gate; pre-existing over-cap files untouched by the PR are non-blocking; `TEST_CAP_ENFORCE=0` soft-warns)
+- **Maximum 500 lines per test file** (enforced in CI by `scripts/check-test-file-cap.ts` as a diff-scoped ratchet: new over-cap files and existing over-cap files that grew fail the gate; pre-existing over-cap files untouched by the PR are non-blocking; `TEST_CAP_ENFORCE=0` soft-warns). Run the same gate locally on any platform, Windows included, with `bun run check:test-file-cap`.
 - `delegation-gate.test.ts` was split into 45 focused files (FR-006 SC-006.1) — all under 500 lines
 - When a test file exceeds 500 lines, split it by behavior/feature into focused files
 

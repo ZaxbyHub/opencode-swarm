@@ -266,7 +266,7 @@ All tests use `bun:test`. Do not use Jest, Vitest, or any other framework. See `
 
 ### Test file size limits
 
-- **Maximum 500 lines per test file** (FR-006 SC-006.1), enforced by `scripts/check-test-file-cap.sh` as a diff-scoped ratchet (new over-cap files and grown over-cap files fail CI; pre-existing violators are non-blocking). Escape hatch: `TEST_CAP_ENFORCE=0` soft-warns.
+- **Maximum 500 lines per test file** (FR-006 SC-006.1), enforced by `scripts/check-test-file-cap.ts` as a diff-scoped ratchet (new over-cap files and grown over-cap files fail CI; pre-existing violators are non-blocking). Escape hatch: `TEST_CAP_ENFORCE=0` soft-warns. Verify locally on any platform — Windows PowerShell included — with `bun run check:test-file-cap` (fetch `origin/main` first; the check is diff-scoped and reads committed changes).
 - `delegation-gate.test.ts` was the monolith — 2835 lines split into 45 focused files, each under 500 lines
 - When a test file exceeds 500 lines, split it by behavior/feature into focused files
 - SME tests (FR-008) use parameterization to keep files lean while maximizing coverage
