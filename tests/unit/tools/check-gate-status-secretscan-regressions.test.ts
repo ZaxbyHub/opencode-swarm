@@ -12,20 +12,17 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import type { ToolContext } from '@opencode-ai/plugin';
 // Import the tool
 import { check_gate_status } from '../../../src/tools/check-gate-status';
 import { freezeClock } from '../../helpers/test-clock.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 describe('check_gate_status secretscan feature', () => {
 	let restoreClock: (() => void) | undefined;
-	const TEST_DIR = path.join(
-		os.tmpdir(),
-		`check-gate-status-test-${Date.now()}`,
-	);
-	const EVIDENCE_DIR = path.join(TEST_DIR, '.swarm', 'evidence');
+	let TEST_DIR: string;
+	let EVIDENCE_DIR: string;
 
 	// Helper to create a gate-evidence file (at .swarm/evidence/{taskId}.json)
 	function createGateEvidence(
@@ -93,6 +90,8 @@ describe('check_gate_status secretscan feature', () => {
 			fixedNow: 1_700_000_000_000,
 			isoNow: '2023-11-14T22:13:20.000Z',
 		});
+		TEST_DIR = canonicalMkdtemp('check-gate-status-test-');
+		EVIDENCE_DIR = path.join(TEST_DIR, '.swarm', 'evidence');
 		// Create test directory structure
 		fs.mkdirSync(EVIDENCE_DIR, { recursive: true });
 	});

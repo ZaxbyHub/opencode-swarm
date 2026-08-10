@@ -1,16 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'fs';
-import { tmpdir } from 'os';
 import * as path from 'path';
 import { resetGlobalEventBus } from '../../../src/background/event-bus';
 import { runPreflight } from '../../../src/services/preflight-service';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 describe('Preflight Service', () => {
 	let testDir: string;
 
 	beforeEach(() => {
 		resetGlobalEventBus();
-		testDir = fs.mkdtempSync(path.join(tmpdir(), 'preflight-test-'));
+		testDir = canonicalMkdtemp('preflight-test-');
 	});
 
 	afterEach(() => {

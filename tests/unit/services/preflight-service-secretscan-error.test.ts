@@ -1,8 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
-import * as path from 'node:path';
 import { _internals } from '../../../src/services/preflight-service';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 let tempDir: string;
 const originals = {
@@ -10,7 +9,7 @@ const originals = {
 };
 
 beforeEach(() => {
-	tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'preflight-secrets-error-'));
+	tempDir = canonicalMkdtemp('preflight-secrets-error-');
 	_internals.runSecretscan = (async () => ({
 		error: 'scanner exploded',
 		scan_dir: '',

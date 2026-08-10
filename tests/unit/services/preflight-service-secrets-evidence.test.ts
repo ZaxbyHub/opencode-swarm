@@ -1,12 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'fs';
-import { tmpdir } from 'os';
 import * as path from 'path';
 import { resetGlobalEventBus } from '../../../src/background/event-bus';
 import {
 	_internals,
 	runPreflight,
 } from '../../../src/services/preflight-service';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const originalRunSecretscan = _internals.runSecretscan;
 
@@ -16,7 +16,7 @@ describe('Preflight Service', () => {
 	beforeEach(() => {
 		resetGlobalEventBus();
 		// Create a temporary test directory
-		testDir = fs.mkdtempSync(path.join(tmpdir(), 'preflight-test-'));
+		testDir = canonicalMkdtemp('preflight-test-');
 	});
 
 	afterEach(() => {
