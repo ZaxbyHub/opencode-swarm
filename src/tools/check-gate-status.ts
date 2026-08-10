@@ -256,16 +256,48 @@ export const check_gate_status: ReturnType<typeof tool> = createSwarmTool({
 					const lastSecretscan =
 						secretscanEntries[secretscanEntries.length - 1];
 					if (isSecretscanEvidence(lastSecretscan)) {
+						const incompleteFiles = lastSecretscan.incomplete_files;
+						const incompletePaths = lastSecretscan.incomplete_paths;
+						const findingsCount = lastSecretscan.findings_count ?? 0;
+						const hasIncompleteCoverage =
+							incompleteFiles > 0 || incompletePaths.length > 0;
+						const hasFindings = findingsCount > 0;
+						const hasZeroCoverage = lastSecretscan.files_scanned === 0;
 						if (
+							hasIncompleteCoverage ||
+							hasFindings ||
+							hasZeroCoverage ||
 							lastSecretscan.verdict === 'fail' ||
 							lastSecretscan.verdict === 'rejected'
 						) {
 							secretscanVerdict = 'fail';
-							missingGates.push('secretscan (BLOCKED — secrets detected)');
-							if (status === 'all_passed') {
-								status = 'incomplete';
+							if (hasIncompleteCoverage && !hasFindings) {
+								missingGates.push('secretscan (BLOCKED — incomplete coverage)');
+								if (status === 'all_passed') {
+									status = 'incomplete';
+								}
+								message = `BLOCKED: Secretscan incomplete coverage in prior scan. ${message}`;
+							} else if (hasFindings && hasIncompleteCoverage) {
+								missingGates.push(
+									'secretscan (BLOCKED — secrets detected; incomplete coverage)',
+								);
+								if (status === 'all_passed') {
+									status = 'incomplete';
+								}
+								message = `BLOCKED: Secretscan found secrets and incomplete coverage in prior scan. ${message}`;
+							} else if (hasFindings) {
+								missingGates.push('secretscan (BLOCKED — secrets detected)');
+								if (status === 'all_passed') {
+									status = 'incomplete';
+								}
+								message = `BLOCKED: Secretscan found secrets in prior scan. ${message}`;
+							} else {
+								missingGates.push('secretscan (BLOCKED — zero coverage)');
+								if (status === 'all_passed') {
+									status = 'incomplete';
+								}
+								message = `BLOCKED: Secretscan scanned zero files in prior scan. ${message}`;
 							}
-							message = `BLOCKED: Secretscan found secrets in prior scan. ${message}`;
 						} else if (
 							lastSecretscan.verdict === 'pass' ||
 							lastSecretscan.verdict === 'approved' ||
@@ -278,6 +310,11 @@ export const check_gate_status: ReturnType<typeof tool> = createSwarmTool({
 					message +=
 						' Advisory: No secretscan evidence found for this task. Consider running secretscan.';
 				}
+			} else if (evidenceResult.status === 'invalid_schema') {
+				secretscanVerdict = 'fail';
+				missingGates.push('secretscan (BLOCKED — invalid evidence)');
+				status = 'incomplete';
+				message = `BLOCKED: Secretscan evidence is invalid and cannot prove complete coverage. ${message}`;
 			}
 		} catch {
 			// Evidence loading failures should not break the tool

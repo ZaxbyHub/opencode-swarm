@@ -1206,9 +1206,11 @@ Read-only tool to query the gate status of a specific task. Reads `.swarm/eviden
 **Output**: JSON with `taskId`, `status` (all_passed|incomplete|no_evidence), `required_gates`, `passed_gates`, `missing_gates`, `gates` map, `message`, `todo_scan` (advisory TODO count if available), and `secretscan_verdict` (v6.33)
 
 **Secretscan verdict (v6.33)**: The tool now scans EvidenceBundle entries for `secretscan` type evidence using the `isSecretscanEvidence` type guard. When secretscan entries are found, it reports:
-- `pass` — No secrets found (verdict: pass, approved, or info)
-- `fail` — Secrets detected (verdict: fail or rejected), status becomes `incomplete` and task is BLOCKED
+- `pass` — No secrets found, no incomplete coverage, and no zero-coverage or count mismatch
+- `fail` — Secrets detected, or the scan was incomplete / zero-coverage / count-mismatched; status becomes `incomplete` and task is BLOCKED
 - `not_run` — No secretscan evidence found for this task
+
+When the verdict is blocked for incomplete coverage rather than findings, the message names the coverage failure instead of claiming secrets were found. The persisted secretscan evidence also carries bounded `incomplete_paths` entries so the gate can surface the affected paths and reasons without dumping an unbounded scan trace.
 
 **Safety**: Validates task ID format against three accepted patterns (canonical N.M or N.M.P numeric format, retrospective format retro-N, or internal tool IDs like sast_scan/quality_budget/syntax_check/placeholder_scan/sbom_generate/build/secretscan), enforces path containment within workspace `.swarm/evidence/` directory, reads-only (no writes)
 
@@ -1400,7 +1402,7 @@ The evidence system persists verifiable execution artifacts per task.
 | `diff` | files_changed[], additions, deletions | Code change summary |
 | `approval` | (base fields only) | Explicit approval record |
 | `note` | (base fields only) | Free-form annotation |
-| `secretscan` | findings_count, scan_directory, files_scanned, skipped_files | Secret scan results (v6.33) |
+| `secretscan` | findings_count, scan_directory, files_scanned, skipped_files, incomplete_files | Secret scan results and incomplete-coverage accounting |
 | `mutation-gate` | verdict, killRate, adjustedKillRate, summary, survivedMutants[] | Phase-close mutation testing gate results — written by `write_mutation_evidence` tool; blocks phase completion when verdict is `fail` (v6.68+) |
 
 ### Storage

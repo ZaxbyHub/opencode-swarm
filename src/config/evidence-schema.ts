@@ -323,6 +323,13 @@ export const SecretscanEvidenceSchema = BaseEvidenceSchema.extend({
 	scan_directory: z.string().optional(),
 	files_scanned: z.number().int().min(0).default(0),
 	skipped_files: z.number().int().min(0).default(0),
+	incomplete_files: z.number().int().min(0),
+	incomplete_paths: z.array(
+		z.object({
+			path: z.string(),
+			reason: z.string(),
+		}),
+	),
 });
 export type SecretscanEvidence = z.infer<typeof SecretscanEvidenceSchema>;
 

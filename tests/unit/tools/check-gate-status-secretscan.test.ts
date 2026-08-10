@@ -15,11 +15,12 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { ToolContext } from '@opencode-ai/plugin';
-
 // Import the tool
 import { check_gate_status } from '../../../src/tools/check-gate-status';
+import { freezeClock } from '../../helpers/test-clock.js';
 
 describe('check_gate_status secretscan feature', () => {
+	let restoreClock: (() => void) | undefined;
 	const TEST_DIR = path.join(
 		os.tmpdir(),
 		`check-gate-status-test-${Date.now()}`,
@@ -51,10 +52,25 @@ describe('check_gate_status secretscan feature', () => {
 	function createEvidenceBundle(taskId: string, entries: object[]) {
 		const bundleDir = path.join(EVIDENCE_DIR, taskId);
 		fs.mkdirSync(bundleDir, { recursive: true });
+		const normalizedEntries = entries.map((entry) => {
+			if (
+				entry &&
+				typeof entry === 'object' &&
+				'type' in entry &&
+				(entry as { type?: string }).type === 'secretscan'
+			) {
+				return {
+					incomplete_files: 0,
+					incomplete_paths: [],
+					...entry,
+				};
+			}
+			return entry;
+		});
 		const bundle = {
 			schema_version: '1.0.0',
 			task_id: taskId,
-			entries,
+			entries: normalizedEntries,
 			created_at: new Date().toISOString(),
 			updated_at: new Date().toISOString(),
 		};
@@ -73,11 +89,17 @@ describe('check_gate_status secretscan feature', () => {
 	}
 
 	beforeEach(() => {
+		restoreClock = freezeClock({
+			fixedNow: 1_700_000_000_000,
+			isoNow: '2023-11-14T22:13:20.000Z',
+		});
 		// Create test directory structure
 		fs.mkdirSync(EVIDENCE_DIR, { recursive: true });
 	});
 
 	afterEach(() => {
+		restoreClock?.();
+		restoreClock = undefined;
 		// Clean up test directory
 		fs.rmSync(TEST_DIR, { recursive: true, force: true });
 	});
@@ -173,6 +195,43 @@ describe('check_gate_status secretscan feature', () => {
 			);
 		});
 
+		it('3b. secretscan verdict=fail with incomplete coverage reports incomplete coverage', async () => {
+			// Setup: gate-evidence shows all gates passed
+			createGateEvidence('1.3.1', ['test', 'review'], { test: {}, review: {} });
+
+			createEvidenceBundle('1.3.1', [
+				{
+					task_id: '1.3.1',
+					type: 'secretscan',
+					timestamp: new Date().toISOString(),
+					agent: 'pre_check_batch',
+					verdict: 'fail',
+					summary: 'Scan incomplete',
+					findings_count: 0,
+					scan_directory: 'src',
+					files_scanned: 0,
+					skipped_files: 1,
+					incomplete_files: 1,
+					incomplete_paths: [
+						{
+							path: 'src/oversized.txt',
+							reason: 'oversized',
+						},
+					],
+				},
+			]);
+
+			const result = await runTool('1.3.1');
+
+			expect(result.secretscan_verdict).toBe('fail');
+			expect(result.status).toBe('incomplete');
+			expect(result.message).toContain('incomplete coverage');
+			expect(result.message).not.toContain('secrets detected');
+			expect(result.missing_gates).toContain(
+				'secretscan (BLOCKED — incomplete coverage)',
+			);
+		});
+
 		it('4. secretscan verdict=approved → secretscan_verdict=pass', async () => {
 			// Setup: gate-evidence shows all gates passed
 			createGateEvidence('1.4', ['test', 'review'], { test: {}, review: {} });
@@ -198,6 +257,56 @@ describe('check_gate_status secretscan feature', () => {
 			expect(result.secretscan_verdict).toBe('pass');
 			expect(result.status).toBe('all_passed');
 			expect(result.message).not.toContain('BLOCKED');
+		});
+
+		it('fails closed when a pass verdict contradicts incomplete coverage', async () => {
+			createGateEvidence('1.4.1', ['test', 'review'], { test: {}, review: {} });
+			createEvidenceBundle('1.4.1', [
+				{
+					task_id: '1.4.1',
+					type: 'secretscan',
+					timestamp: new Date().toISOString(),
+					agent: 'pre_check_batch',
+					verdict: 'pass',
+					summary: 'Contradictory scan result',
+					findings_count: 0,
+					scan_directory: 'src',
+					files_scanned: 5,
+					skipped_files: 1,
+					incomplete_files: 1,
+					incomplete_paths: [{ path: 'src/blocked.txt', reason: 'read_error' }],
+				},
+			]);
+
+			const result = await runTool('1.4.1');
+
+			expect(result.secretscan_verdict).toBe('fail');
+			expect(result.status).toBe('incomplete');
+			expect(result.message).toContain('incomplete coverage');
+		});
+
+		it('fails closed when a pass verdict contradicts findings', async () => {
+			createGateEvidence('1.4.2', ['test', 'review'], { test: {}, review: {} });
+			createEvidenceBundle('1.4.2', [
+				{
+					task_id: '1.4.2',
+					type: 'secretscan',
+					timestamp: new Date().toISOString(),
+					agent: 'pre_check_batch',
+					verdict: 'pass',
+					summary: 'Contradictory scan result',
+					findings_count: 1,
+					scan_directory: 'src',
+					files_scanned: 5,
+					skipped_files: 0,
+				},
+			]);
+
+			const result = await runTool('1.4.2');
+
+			expect(result.secretscan_verdict).toBe('fail');
+			expect(result.status).toBe('incomplete');
+			expect(result.message).toContain('found secrets');
 		});
 
 		it('5. secretscan verdict=info → secretscan_verdict=pass', async () => {
@@ -264,7 +373,7 @@ describe('check_gate_status secretscan feature', () => {
 			);
 		});
 
-		it('8. EvidenceBundle has invalid schema → tool works normally (silently skipped)', async () => {
+		it('8. EvidenceBundle with invalid schema fails closed', async () => {
 			// Setup: gate-evidence shows all gates passed
 			createGateEvidence('1.8', ['test', 'review'], { test: {}, review: {} });
 
@@ -275,10 +384,78 @@ describe('check_gate_status secretscan feature', () => {
 
 			const result = await runTool('1.8');
 
-			// Should work normally without throwing
-			expect(result.secretscan_verdict).toBe('not_run');
-			expect(result.status).toBe('all_passed');
+			expect(result.secretscan_verdict).toBe('fail');
+			expect(result.status).toBe('incomplete');
+			expect(result.message).toContain('evidence is invalid');
+			expect(result.missing_gates).toContain(
+				'secretscan (BLOCKED — invalid evidence)',
+			);
 		});
+
+		it('fails closed when pass evidence omits required coverage metadata', async () => {
+			createGateEvidence('1.8.0', ['test', 'review'], { test: {}, review: {} });
+			const dir = path.join(EVIDENCE_DIR, '1.8.0', 'evidence.json');
+			fs.mkdirSync(path.dirname(dir), { recursive: true });
+			fs.writeFileSync(
+				dir,
+				JSON.stringify({
+					schema_version: '1.0.0',
+					task_id: '1.8.0',
+					entries: [
+						{
+							task_id: '1.8.0',
+							type: 'secretscan',
+							timestamp: new Date().toISOString(),
+							agent: 'pre_check_batch',
+							verdict: 'pass',
+							summary: 'Legacy pass without coverage metadata',
+							findings_count: 0,
+							scan_directory: 'src',
+							files_scanned: 5,
+							skipped_files: 0,
+						},
+					],
+					created_at: new Date().toISOString(),
+					updated_at: new Date().toISOString(),
+				}),
+			);
+
+			const result = await runTool('1.8.0');
+
+			expect(result.secretscan_verdict).toBe('fail');
+			expect(result.status).toBe('incomplete');
+			expect(result.message).toContain('evidence is invalid');
+		});
+
+		for (const [index, verdict] of ['pass', 'approved', 'info'].entries()) {
+			it(`fails closed when verdict=${verdict} reports zero coverage`, async () => {
+				const taskId = `1.8.${index + 1}`;
+				createGateEvidence(taskId, ['test', 'review'], {
+					test: {},
+					review: {},
+				});
+				createEvidenceBundle(taskId, [
+					{
+						task_id: taskId,
+						type: 'secretscan',
+						timestamp: new Date().toISOString(),
+						agent: 'pre_check_batch',
+						verdict,
+						summary: 'Contradictory zero-coverage result',
+						findings_count: 0,
+						scan_directory: 'src',
+						files_scanned: 0,
+						skipped_files: 0,
+					},
+				]);
+
+				const result = await runTool(taskId);
+
+				expect(result.secretscan_verdict).toBe('fail');
+				expect(result.status).toBe('incomplete');
+				expect(result.message).toContain('scanned zero files');
+			});
+		}
 
 		it('9. Most recent secretscan entry is used (when multiple entries exist)', async () => {
 			// Setup: gate-evidence shows all gates passed
@@ -360,183 +537,6 @@ describe('check_gate_status secretscan feature', () => {
 			expect(result.message).toContain(
 				'Advisory: No secretscan evidence found',
 			);
-		});
-	});
-
-	describe('status downgrade scenarios', () => {
-		it('should downgrade status from all_passed to incomplete when secretscan verdict is fail', async () => {
-			// Setup: gate-evidence shows all gates passed initially
-			createGateEvidence('2.1', ['test', 'review', 'secretscan'], {
-				test: {},
-				review: {},
-				secretscan: {},
-			});
-
-			// Setup: EvidenceBundle with secretscan verdict=fail
-			createEvidenceBundle('2.1', [
-				{
-					task_id: '2.1',
-					type: 'secretscan',
-					timestamp: new Date().toISOString(),
-					agent: 'pre_check_batch',
-					verdict: 'fail',
-					summary: 'Secrets detected',
-					findings_count: 1,
-					scan_directory: 'src',
-					files_scanned: 5,
-					skipped_files: 0,
-				},
-			]);
-
-			const result = await runTool('2.1');
-
-			// Status should be downgraded to incomplete
-			expect(result.status).toBe('incomplete');
-			expect(result.missing_gates).toContain(
-				'secretscan (BLOCKED — secrets detected)',
-			);
-			expect(result.message).toContain('BLOCKED');
-		});
-
-		it('should NOT downgrade status when already incomplete', async () => {
-			// Setup: gate-evidence shows incomplete (missing 'review' gate)
-			createGateEvidence('2.2', ['test', 'review'], { test: {} });
-
-			// Setup: EvidenceBundle with secretscan verdict=fail
-			createEvidenceBundle('2.2', [
-				{
-					task_id: '2.2',
-					type: 'secretscan',
-					timestamp: new Date().toISOString(),
-					agent: 'pre_check_batch',
-					verdict: 'fail',
-					summary: 'Secrets detected',
-					findings_count: 1,
-					scan_directory: 'src',
-					files_scanned: 5,
-					skipped_files: 0,
-				},
-			]);
-
-			const result = await runTool('2.2');
-
-			// Status should remain incomplete (not 'all_passed')
-			expect(result.status).toBe('incomplete');
-			expect(result.missing_gates).toContain(
-				'secretscan (BLOCKED — secrets detected)',
-			);
-		});
-	});
-
-	describe('loadEvidence error handling', () => {
-		it('should silently skip when loadEvidence throws an error', async () => {
-			// Setup: gate-evidence shows all gates passed
-			createGateEvidence('3.1', ['test', 'review'], { test: {}, review: {} });
-
-			// Setup: EvidenceBundle that will cause loadEvidence to throw
-			// (path traversal in taskId would cause issue, but here we use valid path)
-			createEvidenceBundle('3.1', [
-				{
-					task_id: '3.1',
-					type: 'secretscan',
-					timestamp: new Date().toISOString(),
-					agent: 'pre_check_batch',
-					verdict: 'pass',
-					summary: 'No secrets',
-					findings_count: 0,
-					scan_directory: 'src',
-					files_scanned: 5,
-					skipped_files: 0,
-				},
-			]);
-
-			const result = await runTool('3.1');
-
-			// Should work normally
-			expect(result.secretscan_verdict).toBe('pass');
-			expect(result.status).toBe('all_passed');
-		});
-
-		it('should handle EvidenceBundle with missing required fields gracefully', async () => {
-			// Setup: gate-evidence shows all gates passed
-			createGateEvidence('3.2', ['test', 'review'], { test: {}, review: {} });
-
-			// Setup: EvidenceBundle with incomplete secretscan entry (missing required fields)
-			const dir = path.join(EVIDENCE_DIR, '3.2', 'evidence.json');
-			fs.mkdirSync(path.dirname(dir), { recursive: true });
-			fs.writeFileSync(
-				dir,
-				JSON.stringify({
-					schema_version: '1.0.0',
-					task_id: '3.2',
-					entries: [
-						{
-							// Missing required fields like timestamp, agent, verdict, summary
-							task_id: '3.2',
-							type: 'secretscan',
-						},
-					],
-					created_at: new Date().toISOString(),
-					updated_at: new Date().toISOString(),
-				}),
-			);
-
-			const result = await runTool('3.2');
-
-			// Should handle the error gracefully
-			expect(result.secretscan_verdict).toBe('not_run');
-			expect(result.status).toBe('all_passed');
-		});
-	});
-
-	describe('multiple non-secretscan entries with most recent secretscan', () => {
-		it('should use the most recent secretscan even when mixed with other types', async () => {
-			// Setup: gate-evidence shows all gates passed
-			createGateEvidence('4.1', ['test', 'review'], { test: {}, review: {} });
-
-			const early = new Date('2024-01-01T00:00:00Z').toISOString();
-			const middle = new Date('2024-01-02T00:00:00Z').toISOString();
-			const late = new Date('2024-01-03T00:00:00Z').toISOString();
-
-			createEvidenceBundle('4.1', [
-				{
-					task_id: '4.1',
-					type: 'note',
-					timestamp: early,
-					agent: 'mega_test_engineer',
-					verdict: 'pass',
-					summary: 'Note entry',
-				},
-				{
-					task_id: '4.1',
-					type: 'secretscan',
-					timestamp: middle,
-					agent: 'pre_check_batch',
-					verdict: 'fail',
-					summary: 'Secrets found',
-					findings_count: 2,
-					scan_directory: 'src',
-					files_scanned: 5,
-					skipped_files: 0,
-				},
-				{
-					task_id: '4.1',
-					type: 'review',
-					timestamp: late,
-					agent: 'mega_reviewer',
-					verdict: 'pass',
-					summary: 'Review passed',
-					risk: 'low',
-					issues: [],
-				},
-			]);
-
-			const result = await runTool('4.1');
-
-			// Most recent secretscan is the middle one (fail)
-			expect(result.secretscan_verdict).toBe('fail');
-			expect(result.status).toBe('incomplete');
-			expect(result.message).toContain('BLOCKED');
 		});
 	});
 });

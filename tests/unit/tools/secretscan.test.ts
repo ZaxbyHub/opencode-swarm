@@ -858,8 +858,7 @@ describe('secretscan tool', () => {
 			expect(parsed.skipped_files).toBeGreaterThan(0);
 		});
 
-		it('should skip lines that are too long', async () => {
-			// Create file with very long line containing a secret
+		it('should skip oversized lines in standalone scans', async () => {
 			const longLine =
 				'x'.repeat(15000) + 'password=longSecret' + 'y'.repeat(15000);
 			createTestFile(tempDir, 'longline.txt', longLine + '\n');
@@ -870,8 +869,9 @@ describe('secretscan tool', () => {
 			);
 			const parsed = parseResult(result);
 
-			// Should skip the line due to length
-			expect(parsed.findings).toEqual([]);
+			expect(
+				parsed.findings.some((finding) => finding.type === 'password'),
+			).toBe(false);
 		});
 
 		it('should handle multiple secrets on same line', async () => {

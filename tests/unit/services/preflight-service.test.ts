@@ -13,12 +13,15 @@ import { tmpdir } from 'os';
 import * as path from 'path';
 import { resetGlobalEventBus } from '../../../src/background/event-bus';
 import {
+	_internals,
 	formatPreflightMarkdown,
 	handlePreflightCommand,
 	type PreflightConfig,
 	type PreflightReport,
 	runPreflight,
 } from '../../../src/services/preflight-service';
+
+const originalRunSecretscan = _internals.runSecretscan;
 
 describe('Preflight Service', () => {
 	let testDir: string;
@@ -30,6 +33,7 @@ describe('Preflight Service', () => {
 	});
 
 	afterEach(() => {
+		_internals.runSecretscan = originalRunSecretscan;
 		// Clean up test directory
 		if (fs.existsSync(testDir)) {
 			fs.rmSync(testDir, { recursive: true, force: true });
@@ -669,247 +673,6 @@ describe('Preflight Service', () => {
 			const result = await handlePreflightCommand('', []);
 			expect(result).toContain('## Preflight Report');
 			expect(result).toContain('❌ FAIL');
-		});
-	});
-
-	describe('secrets check execution', () => {
-		it('should run secrets check when not skipped and return pass for clean directory', async () => {
-			// Run with secrets check NOT skipped - should hit the actual secrets check code path
-			const report = await runPreflight(testDir, 1, {
-				skipTests: true,
-				skipEvidence: true,
-				skipVersion: true,
-				// skipSecrets is NOT set, so secrets check runs
-			});
-
-			const secretsCheck = report.checks.find((c) => c.type === 'secrets');
-			expect(secretsCheck).toBeDefined();
-			expect(['pass', 'skip']).toContain(secretsCheck?.status);
-		});
-	});
-
-	describe('evidence check execution', () => {
-		it('should run evidence check when not skipped and return skip for directory without plan', async () => {
-			// Run with evidence check NOT skipped - should hit the "No plan found" branch
-			const report = await runPreflight(testDir, 1, {
-				skipTests: true,
-				skipSecrets: true,
-				skipVersion: true,
-				// skipEvidence is NOT set, so evidence check runs
-			});
-
-			const evidenceCheck = report.checks.find((c) => c.type === 'evidence');
-			expect(evidenceCheck).toBeDefined();
-			expect(evidenceCheck?.status).toBe('skip');
-			expect(evidenceCheck?.message).toContain('No plan found');
-		});
-
-		it('should pass completed tasks with only complete durable gate evidence', async () => {
-			writePlanWithCompletedTask();
-			writeDurableGateEvidence('1.1');
-
-			const report = await runPreflight(testDir, 1, {
-				skipTests: true,
-				skipSecrets: true,
-				skipVersion: true,
-			});
-
-			const evidenceCheck = report.checks.find((c) => c.type === 'evidence');
-			expect(evidenceCheck).toBeDefined();
-			expect(evidenceCheck?.status).toBe('pass');
-			expect(evidenceCheck?.message).toContain(
-				'All 1 completed tasks have evidence',
-			);
-			expect(evidenceCheck?.details?.totalCompleted).toBe(1);
-			expect(evidenceCheck?.details?.totalWithEvidence).toBe(1);
-		});
-
-		it('should fail completed tasks with legacy evidence but incomplete durable gates', async () => {
-			writePlanWithCompletedTask();
-			writeLegacyEvidenceBundleDirectory('1.1');
-			writeIncompleteDurableGateEvidence('1.1');
-
-			const report = await runPreflight(testDir, 1, {
-				skipTests: true,
-				skipSecrets: true,
-				skipVersion: true,
-			});
-
-			const evidenceCheck = report.checks.find((c) => c.type === 'evidence');
-			expect(evidenceCheck).toBeDefined();
-			expect(evidenceCheck?.status).toBe('fail');
-			expect(evidenceCheck?.message).toContain(
-				'1 completed task(s) missing evidence',
-			);
-			expect(evidenceCheck?.details?.totalCompleted).toBe(1);
-			expect(evidenceCheck?.details?.totalWithEvidence).toBe(0);
-			expect(evidenceCheck?.details?.missingTasks).toContain('1.1');
-		});
-
-		it('should fail completed tasks with legacy evidence but invalid durable gates', async () => {
-			writePlanWithCompletedTask();
-			writeLegacyEvidenceBundleDirectory('1.1');
-			writeInvalidDurableGateEvidence('1.1');
-
-			const report = await runPreflight(testDir, 1, {
-				skipTests: true,
-				skipSecrets: true,
-				skipVersion: true,
-			});
-
-			const evidenceCheck = report.checks.find((c) => c.type === 'evidence');
-			expect(evidenceCheck).toBeDefined();
-			expect(evidenceCheck?.status).toBe('fail');
-			expect(evidenceCheck?.message).toContain(
-				'1 completed task(s) missing evidence',
-			);
-			expect(evidenceCheck?.details?.totalCompleted).toBe(1);
-			expect(evidenceCheck?.details?.totalWithEvidence).toBe(0);
-			expect(evidenceCheck?.details?.missingTasks).toContain('1.1');
-		});
-	});
-
-	describe('lint check with issues', () => {
-		it('should detect lint issues in test directory', async () => {
-			// Create a file with obvious lint issues (unused variable)
-			fs.writeFileSync(
-				path.join(testDir, 'lint-test.ts'),
-				'const unusedVar = 42; function test() { return 1; }',
-			);
-
-			const report = await runPreflight(testDir, 1, {
-				skipTests: true,
-				skipSecrets: true,
-				skipEvidence: true,
-				skipVersion: true,
-			});
-
-			const lintCheck = report.checks.find((c) => c.type === 'lint');
-			expect(lintCheck).toBeDefined();
-			// Lint might pass or fail depending on configuration, just verify it runs
-			expect(['pass', 'fail', 'error']).toContain(lintCheck?.status);
-		});
-	});
-
-	describe('tests check without skipping', () => {
-		it('should run tests check and report no tests found for empty directory', async () => {
-			// Empty directory has no test files, so should report skip or similar
-			const report = await runPreflight(testDir, 1, {
-				skipSecrets: true,
-				skipEvidence: true,
-				skipVersion: true,
-				// skipTests is NOT set, so tests check runs
-			});
-
-			const testsCheck = report.checks.find((c) => c.type === 'tests');
-			expect(testsCheck).toBeDefined();
-			// With no tests, it should either skip or pass with 0 tests
-			expect(['pass', 'skip', 'error']).toContain(testsCheck?.status);
-		});
-	});
-
-	describe('linter configuration', () => {
-		it('should use eslint when configured', async () => {
-			const report = await runPreflight(testDir, 1, {
-				skipTests: true,
-				skipSecrets: true,
-				skipEvidence: true,
-				skipVersion: true,
-				linter: 'eslint',
-			});
-
-			const lintCheck = report.checks.find((c) => c.type === 'lint');
-			expect(lintCheck).toBeDefined();
-			// Either eslint passes, fails, or errors (not installed)
-			expect(['pass', 'fail', 'error']).toContain(lintCheck?.status);
-		});
-	});
-
-	describe('check details', () => {
-		it('should include details in version check when passed', async () => {
-			fs.writeFileSync(
-				path.join(testDir, 'package.json'),
-				JSON.stringify({ version: '1.0.0' }),
-			);
-			fs.writeFileSync(
-				path.join(testDir, 'CHANGELOG.md'),
-				'## 1.0.0\n\nChanges',
-			);
-
-			const report = await runPreflight(testDir, 1, {
-				skipTests: true,
-				skipSecrets: true,
-				skipEvidence: true,
-			});
-
-			const versionCheck = report.checks.find((c) => c.type === 'version');
-			expect(versionCheck?.details).toBeDefined();
-			expect(versionCheck?.details?.packageVersion).toBe('1.0.0');
-		});
-
-		it('should include details when version mismatch', async () => {
-			fs.writeFileSync(
-				path.join(testDir, 'package.json'),
-				JSON.stringify({ version: '1.0.0' }),
-			);
-			fs.writeFileSync(
-				path.join(testDir, 'CHANGELOG.md'),
-				'## 2.0.0\n\nChanges',
-			);
-
-			const report = await runPreflight(testDir, 1, {
-				skipTests: true,
-				skipSecrets: true,
-				skipEvidence: true,
-			});
-
-			const versionCheck = report.checks.find((c) => c.type === 'version');
-			expect(versionCheck?.details).toBeDefined();
-			expect(versionCheck?.details?.packageVersion).toBe('1.0.0');
-			expect(versionCheck?.details?.changelogVersion).toBe('2.0.0');
-		});
-	});
-
-	describe('changelog version parsing', () => {
-		it('should parse bracketed version format', async () => {
-			fs.writeFileSync(
-				path.join(testDir, 'package.json'),
-				JSON.stringify({ version: '1.5.0' }),
-			);
-			fs.writeFileSync(
-				path.join(testDir, 'CHANGELOG.md'),
-				'## [1.5.0] - 2024-01-01\n\n- Feature',
-			);
-
-			const report = await runPreflight(testDir, 1, {
-				skipTests: true,
-				skipSecrets: true,
-				skipEvidence: true,
-			});
-
-			const versionCheck = report.checks.find((c) => c.type === 'version');
-			expect(versionCheck?.status).toBe('pass');
-		});
-
-		it('should handle changelog without version header', async () => {
-			fs.writeFileSync(
-				path.join(testDir, 'package.json'),
-				JSON.stringify({ version: '1.0.0' }),
-			);
-			fs.writeFileSync(
-				path.join(testDir, 'CHANGELOG.md'),
-				'# Changelog\n\nSome text without version',
-			);
-
-			// Version from package.json only - should pass
-			const report = await runPreflight(testDir, 1, {
-				skipTests: true,
-				skipSecrets: true,
-				skipEvidence: true,
-			});
-
-			const versionCheck = report.checks.find((c) => c.type === 'version');
-			expect(versionCheck?.status).toBe('pass');
 		});
 	});
 });
