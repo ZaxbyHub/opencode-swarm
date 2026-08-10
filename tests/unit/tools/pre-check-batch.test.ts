@@ -10,8 +10,6 @@ import {
 	runPreCheckBatch,
 } from '../../../src/tools/pre-check-batch';
 
-// Mock the tool modules using mock.module()
-// Note: When files are provided, runLintOnFiles uses Bun.spawn instead of runLint
 const mockDetectAvailableLinter = mock(async () => 'biome');
 const mockRunLint = mock(async () => ({
 	success: true,
@@ -25,6 +23,8 @@ const mockRunLint = mock(async () => ({
 const mockRunSecretscan = mock(async () => ({
 	scan_dir: '.',
 	findings: [],
+	incomplete_files: 0,
+	incomplete_paths: [],
 	summary: {
 		files_scanned: 0,
 		secrets_found: 0,
@@ -46,6 +46,8 @@ const mockRunSecretscanOnFiles = mock(
 			count: findings.length,
 			files_scanned: files.length,
 			skipped_files: 0,
+			incomplete_files: 0,
+			incomplete_paths: [],
 		};
 	},
 );
@@ -105,9 +107,7 @@ mock.module('../../../src/utils', () => ({
 	warn: mock(() => {}),
 }));
 
-// Helper to create temp test directories
 function createTempDir(): string {
-	// Use realpathSync to resolve macOS /var→/private/var symlink so that
 	// process.cwd() (which resolves symlinks after chdir) matches tempDir.
 	return fs.realpathSync(
 		fs.mkdtempSync(path.join(os.tmpdir(), 'pre-check-batch-test-')),
@@ -300,13 +300,12 @@ describe('runPreCheckBatch', () => {
 		expect(result.quality_budget.result?.verdict).toBe('fail');
 	});
 
-	// ============ Test 3: All tools throw → gates_passed false ============
-
 	test('hard gate tool errors cause gates_passed false (fail closed)', async () => {
 		fs.writeFileSync(path.join(tempDir, 'test.ts'), 'export const x = 1;\n');
 
-		// Make hard gate tools throw
-		mockRunSecretscan.mockRejectedValueOnce(new Error('Secretscan error'));
+		mockRunSecretscanOnFiles.mockRejectedValueOnce(
+			new Error('Secretscan error'),
+		);
 		mockSastScan.mockRejectedValueOnce(new Error('SAST scan error'));
 
 		const input: PreCheckBatchInput = {
@@ -316,19 +315,16 @@ describe('runPreCheckBatch', () => {
 
 		const result = await runPreCheckBatch(input);
 
-		// Fail closed: any error in hard gates should result in gates_passed = false
 		expect(result.gates_passed).toBe(false);
-		// Error details may or may not be propagated depending on implementation
-		// Core requirement is that gates fail when hard gates error
+		expect(result.secretscan.error).toBe('Secretscan error');
 	});
-
-	// ============ Test 4: Tool timeout handling ============
 
 	test('hard gate timeout causes gates_passed false', async () => {
 		fs.writeFileSync(path.join(tempDir, 'test.ts'), 'export const x = 1;\n');
 
-		// Simulate timeout - need to make both hard gates fail to trigger fail-closed
-		mockRunSecretscan.mockRejectedValueOnce(new Error('Timeout after 60000ms'));
+		mockRunSecretscanOnFiles.mockRejectedValueOnce(
+			new Error('Timeout after 60000ms'),
+		);
 		mockSastScan.mockRejectedValueOnce(new Error('SAST timeout'));
 
 		const input: PreCheckBatchInput = {
@@ -338,9 +334,8 @@ describe('runPreCheckBatch', () => {
 
 		const result = await runPreCheckBatch(input);
 
-		// Timeout in hard gate should cause gates to fail
 		expect(result.gates_passed).toBe(false);
-		// Note: error property may not be set depending on implementation
+		expect(result.secretscan.error).toBe('Timeout after 60000ms');
 	});
 
 	// ============ Test 5: Parallelism verification ============
@@ -505,8 +500,7 @@ describe('runPreCheckBatch', () => {
 	test('both hard gates failing', async () => {
 		fs.writeFileSync(path.join(tempDir, 'test.ts'), 'export const x = 1;\n');
 
-		// Both secretscan and sast_scan fail
-		mockRunSecretscan.mockResolvedValueOnce({
+		mockRunSecretscanOnFiles.mockResolvedValueOnce({
 			scan_dir: '.',
 			findings: [
 				{
@@ -519,7 +513,11 @@ describe('runPreCheckBatch', () => {
 					context: 'export const x = 1;',
 				},
 			],
-			summary: { files_scanned: 1, secrets_found: 1, scan_time_ms: 100 },
+			count: 1,
+			files_scanned: 1,
+			skipped_files: 0,
+			incomplete_files: 0,
+			incomplete_paths: [],
 		});
 
 		mockSastScan.mockResolvedValueOnce({
