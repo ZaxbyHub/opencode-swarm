@@ -15,7 +15,7 @@ import {
 	type BackgroundDelegationRecord,
 	type BackgroundDelegationResult,
 	findByBatchId,
-	recordPendingDelegation,
+	recordPendingDelegationDetailed,
 } from '../background/pending-delegations.js';
 import {
 	PrReviewInlineTriggerRowSchema,
@@ -74,6 +74,55 @@ const MAX_COLLECT_TIMEOUT_MS = 60 * 60_000;
 const COLLECT_POLL_INTERVAL_MS = 500;
 const MAX_COLLECT_POLL_INTERVAL_MS = 10_000;
 const MAX_ZOD_ISSUES_LISTED = 20;
+const MAX_SESSION_CREATE_GENERATIONS = 2;
+const MAX_CREATE_FAILURE_WALK_NODES = 64;
+const MAX_CREATE_FAILURE_WALK_DEPTH = 6;
+const MAX_CREATE_FAILURE_SIGNAL_CHARS = 8_192;
+
+const TRANSIENT_CREATE_STATUS_CODES = new Set([
+	408, 429, 500, 502, 503, 504, 529,
+]);
+const TRANSIENT_CREATE_SIGNAL_PATTERN =
+	/\b(?:408|429|500|502|503|504|529)\b|rate.?limit|timeout|timed.?out|overloaded|temporarily.?unavailable|provider[_\s-]?unavailable|server.?error|network.?connection.?lost|connection.?(?:refused|reset|timeout|lost)|bad.?gateway|gateway.?timeout|internal.?server.?error|service.?unavailable|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|ENOTFOUND|broken.?pipe|dns(?:[\s_-]+(?:resolution)?)?[\s_-]+fail|name.?not.?resolved|EAI_AGAIN/i;
+const PERMANENT_CREATE_SIGNAL_PATTERN =
+	/authentication|unauthori[sz]ed|forbidden|invalid[_\s-]?(?:api[_\s-]?key|token|credential|configuration|config|agent|model)|unknown[_\s-]?(?:agent|model)|unsupported[_\s-]?(?:agent|model)|model.?not.?found|agent.?not.?found|permission.?denied|access.?denied|quota|usage.?limit|insufficient.?(?:quota|credits?)|payment.?required|credit.?balance|out of credits|billing.?(?:hard.?)?limit/i;
+const PERMANENT_CREATE_STATUS_CODES = new Set([
+	400, 401, 402, 403, 404, 405, 409, 410, 413, 422,
+]);
+const CREATE_FAILURE_FIELD_KEYS = [
+	'status',
+	'statusCode',
+	'status_code',
+	'httpStatus',
+	'http_status',
+	'code',
+	'errorCode',
+	'error_code',
+	'message',
+	'detail',
+	'reason',
+	'cause',
+	'error',
+	'response',
+	'data',
+	'body',
+	'details',
+	'errors',
+	'isRetryable',
+	'retryable',
+] as const;
+const CREATE_FAILURE_SCALAR_KEYS = new Set<string>(CREATE_FAILURE_FIELD_KEYS);
+const CREATE_FAILURE_STATUS_KEYS = new Set([
+	'status',
+	'statusCode',
+	'status_code',
+	'httpStatus',
+	'http_status',
+	'code',
+	'errorCode',
+	'error_code',
+	'response',
+]);
 
 const AGENT_NAME_SEPARATORS = ['_', '-', ' '] as const;
 
@@ -529,6 +578,8 @@ export interface DispatchLaneResult {
 	session_id?: string;
 	slot_id?: string;
 	run_id?: string;
+	/** One-based session.create attempt that produced this result. */
+	generation?: number;
 	started_at: string;
 	completed_at: string;
 	output?: string;
@@ -678,6 +729,7 @@ export const _test_exports = {
 	formatError,
 	nextCollectPollInterval,
 	promptHash,
+	isRetryableSessionCreateFailure,
 	DispatchLanesArgsSchema,
 	DispatchLanesAsyncArgsSchema,
 	DEFAULT_TIMEOUT_MS,
@@ -1466,6 +1518,259 @@ export async function executeCollectLaneResults(
 	return result;
 }
 
+type LaneSessionCreateOutcome =
+	| {
+			ok: true;
+			sessionId: string;
+			generation: number;
+			slotId: string;
+			runId: string;
+	  }
+	| {
+			ok: false;
+			error: string;
+			generation: number;
+			slotId?: string;
+			runId?: string;
+	  };
+
+/**
+ * Create a child session before any prompt can execute. Only this pre-execution
+ * operation is safe to retry. A failed attempt releases its dispatcher slot and
+ * synchronously reacquires before the second attempt, preserving the configured
+ * concurrency ceiling without introducing an unbounded waiter.
+ */
+async function createLaneSession(args: {
+	session: SessionOps;
+	dispatcher: ParallelDispatcher;
+	lane: DispatchLaneSpec;
+	directory: string;
+	timeoutMs: number;
+	context: DispatchLanesExecutionContext;
+}): Promise<LaneSessionCreateOutcome> {
+	let generation = 1;
+	let decision = args.dispatcher.dispatch(args.lane.id);
+	while (true) {
+		if (decision.action !== 'dispatch') {
+			return {
+				ok: false,
+				generation,
+				error: `dispatcher ${decision.action}: ${decision.reason}`,
+			};
+		}
+
+		const createTimeoutMessage = `Lane "${args.lane.id}" session.create timed out after ${args.timeoutMs}ms`;
+		let createPromise: ReturnType<SessionOps['create']>;
+		try {
+			createPromise = args.session.create(
+				buildLaneSessionCreateArgs(args.directory, args.lane, args.context),
+			);
+		} catch (error) {
+			createPromise = Promise.reject(error);
+		}
+		let createTimedOut = false;
+		createPromise
+			.then((result) => {
+				if (createTimedOut && result.data?.id) {
+					scheduleSessionCleanup(args.session, result.data.id);
+				}
+			})
+			.catch(() => undefined);
+
+		let failureSignal: unknown;
+		let failureMessage: string;
+		try {
+			const result = await withTimeout(
+				createPromise,
+				args.timeoutMs,
+				createTimeoutMessage,
+			);
+			if (result.data?.id) {
+				return {
+					ok: true,
+					sessionId: result.data.id,
+					generation,
+					slotId: decision.slot.slotId,
+					runId: decision.slot.runId,
+				};
+			}
+			failureSignal = result.error;
+			failureMessage =
+				result.error === undefined || result.error === null
+					? 'session.create failed: malformed response without a session id'
+					: `session.create failed: ${formatError(result.error)}`;
+		} catch (error) {
+			failureSignal = error;
+			failureMessage = formatError(error);
+			if (failureMessage === createTimeoutMessage) createTimedOut = true;
+		}
+
+		const retryable =
+			createTimedOut || isRetryableSessionCreateFailure(failureSignal);
+		if (retryable && generation < MAX_SESSION_CREATE_GENERATIONS) {
+			// No await may be inserted between these calls: the released capacity is
+			// immediately reclaimed for the same lane generation.
+			args.dispatcher.releaseSlot(decision.slot.slotId);
+			generation++;
+			decision = args.dispatcher.dispatch(args.lane.id);
+			continue;
+		}
+
+		return {
+			ok: false,
+			error: failureMessage,
+			generation,
+			slotId: decision.slot.slotId,
+			runId: decision.slot.runId,
+		};
+	}
+}
+
+function isRetryableSessionCreateFailure(error: unknown): boolean {
+	if (error === undefined || error === null) return false;
+	const seen = new WeakSet<object>();
+	const pending: Array<{ value: unknown; depth: number; key?: string }> = [
+		{ value: error, depth: 0 },
+	];
+	let visited = 0;
+	let signalChars = 0;
+	let transient = false;
+	let permanent = false;
+	let truncated = false;
+
+	while (pending.length > 0 && visited < MAX_CREATE_FAILURE_WALK_NODES) {
+		const current = pending.shift()!;
+		visited++;
+		const { value, depth, key } = current;
+		if ((key === 'isRetryable' || key === 'retryable') && value === false) {
+			permanent = true;
+		}
+
+		if (typeof value === 'number' && Number.isInteger(value)) {
+			if (key === undefined || CREATE_FAILURE_STATUS_KEYS.has(key)) {
+				if (TRANSIENT_CREATE_STATUS_CODES.has(value)) transient = true;
+				if (PERMANENT_CREATE_STATUS_CODES.has(value)) permanent = true;
+			}
+			continue;
+		}
+		if (typeof value === 'string') {
+			if (key !== undefined && !CREATE_FAILURE_SCALAR_KEYS.has(key)) continue;
+			if (
+				key !== undefined &&
+				CREATE_FAILURE_STATUS_KEYS.has(key) &&
+				/^\d+$/.test(value)
+			) {
+				const numericStatus = Number(value);
+				if (TRANSIENT_CREATE_STATUS_CODES.has(numericStatus)) transient = true;
+				if (PERMANENT_CREATE_STATUS_CODES.has(numericStatus)) permanent = true;
+			}
+			const remaining = MAX_CREATE_FAILURE_SIGNAL_CHARS - signalChars;
+			if (remaining <= 0) {
+				truncated = true;
+				continue;
+			}
+			const signal = value.slice(0, remaining);
+			if (signal.length < value.length) truncated = true;
+			signalChars += signal.length;
+			if (PERMANENT_CREATE_SIGNAL_PATTERN.test(signal)) permanent = true;
+			if (TRANSIENT_CREATE_SIGNAL_PATTERN.test(signal)) transient = true;
+			continue;
+		}
+		if (
+			(typeof value !== 'object' && typeof value !== 'function') ||
+			value === null
+		) {
+			continue;
+		}
+		const object = value as object;
+		if (seen.has(object)) continue;
+		seen.add(object);
+		if (depth >= MAX_CREATE_FAILURE_WALK_DEPTH) {
+			truncated = true;
+			continue;
+		}
+		let isArray = false;
+		try {
+			isArray = Array.isArray(object);
+		} catch {
+			truncated = true;
+			continue;
+		}
+		if (isArray) {
+			let arrayLength: number;
+			try {
+				const lengthDescriptor = Object.getOwnPropertyDescriptor(
+					object,
+					'length',
+				);
+				if (
+					!lengthDescriptor ||
+					!('value' in lengthDescriptor) ||
+					typeof lengthDescriptor.value !== 'number' ||
+					!Number.isSafeInteger(lengthDescriptor.value) ||
+					lengthDescriptor.value < 0
+				) {
+					truncated = true;
+					continue;
+				}
+				arrayLength = lengthDescriptor.value;
+			} catch {
+				truncated = true;
+				continue;
+			}
+			const remainingNodes = MAX_CREATE_FAILURE_WALK_NODES - visited;
+			const itemCount = Math.min(arrayLength, remainingNodes);
+			if (itemCount < arrayLength) truncated = true;
+			for (let index = 0; index < itemCount; index++) {
+				let descriptor: PropertyDescriptor | undefined;
+				try {
+					descriptor = Object.getOwnPropertyDescriptor(object, index);
+				} catch {
+					truncated = true;
+					continue;
+				}
+				if (!descriptor) continue;
+				if (!('value' in descriptor)) {
+					truncated = true;
+					continue;
+				}
+				pending.push({
+					value: descriptor.value,
+					depth: depth + 1,
+					key,
+				});
+			}
+			continue;
+		}
+		for (const propertyKey of CREATE_FAILURE_FIELD_KEYS) {
+			if (pending.length + visited >= MAX_CREATE_FAILURE_WALK_NODES) {
+				truncated = true;
+				break;
+			}
+			let descriptor: PropertyDescriptor | undefined;
+			try {
+				descriptor = Object.getOwnPropertyDescriptor(object, propertyKey);
+			} catch {
+				truncated = true;
+				continue;
+			}
+			if (!descriptor) continue;
+			if (!('value' in descriptor)) {
+				truncated = true;
+				continue;
+			}
+			pending.push({
+				value: descriptor.value,
+				depth: depth + 1,
+				key: propertyKey,
+			});
+		}
+	}
+
+	if (pending.length > 0) truncated = true;
+	return transient && !permanent && !truncated;
+}
+
 async function launchAsyncLane(args: {
 	session: SessionOps;
 	dispatcher: ParallelDispatcher;
@@ -1494,89 +1799,87 @@ async function launchAsyncLane(args: {
 			error: validation.error,
 		};
 	}
-	const decision = args.dispatcher.dispatch(args.lane.id);
-	if (decision.action !== 'dispatch') {
-		return {
-			id: args.lane.id,
-			agent: args.lane.agent,
-			role,
-			status: 'failed',
-			started_at: startedAt,
-			completed_at: isoNow(),
-			error: `dispatcher ${decision.action}: ${decision.reason}`,
-		};
-	}
+	const create = await createLaneSession({
+		session: args.session,
+		dispatcher: args.dispatcher,
+		lane: args.lane,
+		directory: args.directory,
+		timeoutMs: args.timeoutMs,
+		context: args.context,
+	});
 	try {
-		const createTimeoutMessage = `Lane "${args.lane.id}" session.create timed out after ${args.timeoutMs}ms`;
-		const createPromise = args.session.create(
-			buildLaneSessionCreateArgs(args.directory, args.lane, args.context),
-		);
-		let createTimedOut = false;
-		createPromise
-			.then((createResult) => {
-				if (createTimedOut && createResult.data?.id) {
-					scheduleSessionCleanup(args.session, createResult.data.id);
-				}
-			})
-			.catch(() => undefined);
-		const createResult = await withTimeout(
-			createPromise,
-			args.timeoutMs,
-			createTimeoutMessage,
-		).catch((error) => {
-			if (formatError(error) === createTimeoutMessage) {
-				createTimedOut = true;
-			}
-			throw error;
-		});
-		const sessionId = createResult.data?.id;
-		if (!sessionId) {
+		if (!create.ok) {
 			return failedLane(
 				args.lane,
 				role,
 				startedAt,
-				`session.create failed: ${formatError(createResult.error)}`,
-				decision.slot.slotId,
-				decision.slot.runId,
+				create.error,
+				create.slotId,
+				create.runId,
+				undefined,
+				create.generation,
 			);
 		}
+		const sessionId = create.sessionId;
 
-		const pendingRecord = await recordPendingDelegation(args.directory, {
-			correlationId: sessionId,
-			jobId: null,
-			subagentSessionId: sessionId,
-			parentSessionId:
-				args.context.sessionID?.trim() ||
-				`dispatch_lanes_async:${args.batchId}`,
-			callID: args.batchId,
-			normalizedAgent: role,
-			swarmPrefixedAgent: args.lane.agent,
-			planTaskId: null,
-			evidenceTaskId: null,
-			batchId: args.batchId,
-			laneId: args.lane.id,
-			mode: args.mode ?? 'advisory',
-			workflowLane: args.lane.workflow_lane,
-			ownedWorkflowLanes: args.lane.owned_workflow_lanes,
-			promptHash: promptHash(args.lane, args.directory, args.batchId),
-			workspace: {
-				directory: args.directory,
-				gitHead: args.gitHead ?? null,
-				dirtyHash: args.dirtyHash ?? null,
-				prHeadSha: args.prHeadSha ?? null,
-				scope: args.scope ?? null,
+		const pendingOutcome = await recordPendingDelegationDetailed(
+			args.directory,
+			{
+				correlationId: sessionId,
+				jobId: null,
+				subagentSessionId: sessionId,
+				parentSessionId:
+					args.context.sessionID?.trim() ||
+					`dispatch_lanes_async:${args.batchId}`,
+				callID: args.batchId,
+				normalizedAgent: role,
+				swarmPrefixedAgent: args.lane.agent,
+				planTaskId: null,
+				evidenceTaskId: null,
+				batchId: args.batchId,
+				laneId: args.lane.id,
+				mode: args.mode ?? 'advisory',
+				workflowLane: args.lane.workflow_lane,
+				ownedWorkflowLanes: args.lane.owned_workflow_lanes,
+				promptHash: promptHash(args.lane, args.directory, args.batchId),
+				workspace: {
+					directory: args.directory,
+					gitHead: args.gitHead ?? null,
+					dirtyHash: args.dirtyHash ?? null,
+					prHeadSha: args.prHeadSha ?? null,
+					scope: args.scope ?? null,
+				},
+				generation: create.generation,
 			},
-			generation: 1,
-		});
-		if (!pendingRecord) {
+		);
+		if (
+			pendingOutcome.status === 'duplicate' ||
+			pendingOutcome.status === 'conflict'
+		) {
+			return failedLane(
+				args.lane,
+				role,
+				startedAt,
+				pendingOutcome.status === 'duplicate'
+					? 'Async lane session.create returned an already-recorded correlation id'
+					: 'Async lane session.create returned a correlation id owned by a different background delegation',
+				create.slotId,
+				create.runId,
+				sessionId,
+				create.generation,
+			);
+		}
+		if (pendingOutcome.status === 'failed') {
 			cleanupAsyncLaunchSession(args.session, sessionId);
 			return failedLane(
 				args.lane,
 				role,
 				startedAt,
 				'Failed to record async lane in background delegation ledger',
-				decision.slot.slotId,
-				decision.slot.runId,
+				create.slotId,
+				create.runId,
+				sessionId,
+				create.generation,
 			);
 		}
 
@@ -1594,8 +1897,9 @@ async function launchAsyncLane(args: {
 			role,
 			status: 'pending',
 			session_id: sessionId,
-			slot_id: decision.slot.slotId,
-			run_id: decision.slot.runId,
+			slot_id: create.slotId,
+			run_id: create.runId,
+			generation: create.generation,
 			started_at: startedAt,
 			completed_at: isoNow(),
 		};
@@ -1605,11 +1909,13 @@ async function launchAsyncLane(args: {
 			role,
 			startedAt,
 			formatError(error),
-			decision.slot.slotId,
-			decision.slot.runId,
+			create.slotId,
+			create.runId,
+			create.ok ? create.sessionId : undefined,
+			create.generation,
 		);
 	} finally {
-		args.dispatcher.releaseSlot(decision.slot.slotId);
+		if (create.slotId) args.dispatcher.releaseSlot(create.slotId);
 	}
 }
 
@@ -1945,55 +2251,30 @@ async function runLane(
 		};
 	}
 
-	const decision = dispatcher.dispatch(lane.id);
-	if (decision.action !== 'dispatch') {
-		return {
-			id: lane.id,
-			agent: lane.agent,
-			role,
-			status: 'failed',
-			started_at: startedAt,
-			completed_at: isoNow(),
-			error: `dispatcher ${decision.action}: ${decision.reason}`,
-		};
-	}
-
 	const promptController = new AbortController();
-	let sessionId: string | undefined;
+	const create = await createLaneSession({
+		session,
+		dispatcher,
+		lane,
+		directory,
+		timeoutMs,
+		context,
+	});
+	let sessionId: string | undefined = create.ok ? create.sessionId : undefined;
 	try {
-		const createTimeoutMessage = `Lane "${lane.id}" session.create timed out after ${timeoutMs}ms`;
-		const createPromise = session.create(
-			buildLaneSessionCreateArgs(directory, lane, context),
-		);
-		let createTimedOut = false;
-		createPromise
-			.then((createResult) => {
-				if (createTimedOut && createResult.data?.id) {
-					scheduleSessionCleanup(session, createResult.data.id);
-				}
-			})
-			.catch(() => undefined);
-		const createResult = await withTimeout(
-			createPromise,
-			timeoutMs,
-			createTimeoutMessage,
-		).catch((error) => {
-			if (formatError(error) === createTimeoutMessage) {
-				createTimedOut = true;
-			}
-			throw error;
-		});
-		if (!createResult.data?.id) {
+		if (!create.ok) {
 			return failedLane(
 				lane,
 				role,
 				startedAt,
-				`session.create failed: ${formatError(createResult.error)}`,
-				decision.slot.slotId,
-				decision.slot.runId,
+				create.error,
+				create.slotId,
+				create.runId,
+				undefined,
+				create.generation,
 			);
 		}
-		sessionId = createResult.data.id;
+		sessionId = create.sessionId;
 
 		const promptResult = await withTimeout(
 			session.prompt({
@@ -2015,9 +2296,10 @@ async function runLane(
 				role,
 				startedAt,
 				`session.prompt failed: ${formatError(promptResult.error)}`,
-				decision.slot.slotId,
-				decision.slot.runId,
+				create.slotId,
+				create.runId,
 				sessionId,
+				create.generation,
 			);
 		}
 
@@ -2038,8 +2320,9 @@ async function runLane(
 			role,
 			status: 'completed',
 			session_id: sessionId,
-			slot_id: decision.slot.slotId,
-			run_id: decision.slot.runId,
+			slot_id: create.slotId,
+			run_id: create.runId,
+			generation: create.generation,
 			started_at: startedAt,
 			completed_at: isoNow(),
 			...laneOutput,
@@ -2050,12 +2333,13 @@ async function runLane(
 			role,
 			startedAt,
 			formatError(error),
-			decision.slot.slotId,
-			decision.slot.runId,
+			create.slotId,
+			create.runId,
 			sessionId,
+			create.generation,
 		);
 	} finally {
-		dispatcher.releaseSlot(decision.slot.slotId);
+		if (create.slotId) dispatcher.releaseSlot(create.slotId);
 		promptController.abort();
 		if (sessionId) {
 			scheduleSessionCleanup(session, sessionId);
@@ -2168,6 +2452,7 @@ function recordToLaneResult(
 		role: record.normalizedAgent,
 		status,
 		session_id: record.subagentSessionId,
+		generation: record.generation ?? 1,
 		started_at: new Date(record.createdAt).toISOString(),
 		completed_at: new Date(
 			record.completedAt ?? record.updatedAt,
@@ -2220,6 +2505,7 @@ function failedLane(
 	slotId?: string,
 	runId?: string,
 	sessionId?: string,
+	generation?: number,
 ): DispatchLaneResult {
 	return {
 		id: lane.id,
@@ -2229,6 +2515,7 @@ function failedLane(
 		session_id: sessionId,
 		slot_id: slotId,
 		run_id: runId,
+		generation,
 		started_at: startedAt,
 		completed_at: isoNow(),
 		error,

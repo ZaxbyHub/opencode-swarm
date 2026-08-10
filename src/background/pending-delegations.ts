@@ -26,6 +26,7 @@
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import { withEvidenceLock } from '../evidence/lock.js';
 import { validateSwarmPath } from '../hooks/utils.js';
@@ -41,6 +42,7 @@ export const MAX_LIVE_BACKGROUND_FALLBACKS = 256;
 export const MAX_LIVE_BACKGROUND_CODER_RESERVATIONS = 256;
 export const MAX_BACKGROUND_OBSERVED_FILES = 5_000;
 export const MAX_BACKGROUND_ADVISORY_CHARS = 4_000;
+const MAX_BACKGROUND_DELEGATION_GENERATION = 1_000_000;
 const MAX_RECOVERY_LEDGER_BYTES = 4 * 1024 * 1024;
 const MAX_RECOVERY_FALLBACK_BYTES = 1024 * 1024;
 
@@ -546,7 +548,12 @@ const RecordSchema = z
 		worktree: WorktreeDescriptorSchema.optional(),
 		coderReservationId: z.string().min(1).max(256).optional(),
 		prompt: PromptSchema.optional(),
-		generation: z.number().optional(),
+		generation: z
+			.number()
+			.int()
+			.positive()
+			.max(MAX_BACKGROUND_DELEGATION_GENERATION)
+			.optional(),
 		terminalResult: TerminalResultSchema.optional(),
 		coderSettlement: CoderSettlementSchema.optional(),
 		advisoryInbox: AdvisoryInboxSchema.optional(),
@@ -791,24 +798,70 @@ function buildPendingRecord(
 /**
  * Record a `pending` background delegation. Runs the stale sweep first (lazy maintenance,
  * no plugin-init cost), then appends the pending snapshot — all under one lock acquisition
- * so concurrent dispatches cannot interleave. Best-effort: returns null on lock timeout or
- * write failure. Async advisory launchers must treat null as a launch failure so they do
- * not create untracked background work.
+ * so concurrent dispatches cannot interleave. The discriminated outcome lets async
+ * launchers distinguish a safe duplicate from a write failure without disrupting
+ * the already-owned session.
  */
-export async function recordPendingDelegation(
+export type RecordPendingDelegationOutcome =
+	| { status: 'recorded'; record: BackgroundDelegationRecord }
+	| { status: 'duplicate'; record: BackgroundDelegationRecord }
+	| { status: 'conflict'; record: BackgroundDelegationRecord }
+	| { status: 'failed'; record: null };
+
+function pendingLaunchIdentity(record: BackgroundDelegationRecord): object {
+	return {
+		correlationId: record.correlationId,
+		jobId: record.jobId,
+		subagentSessionId: record.subagentSessionId,
+		parentSessionId: record.parentSessionId,
+		callID: record.callID,
+		normalizedAgent: record.normalizedAgent,
+		swarmPrefixedAgent: record.swarmPrefixedAgent,
+		planTaskId: record.planTaskId,
+		evidenceTaskId: record.evidenceTaskId,
+		batchId: record.batchId,
+		laneId: record.laneId,
+		mode: record.mode,
+		workflowLane: record.workflowLane,
+		ownedWorkflowLanes: record.ownedWorkflowLanes,
+		promptHash: record.promptHash,
+		workspace: record.workspace,
+		taskChangeContext: record.taskChangeContext,
+		worktree: record.worktree,
+		coderReservationId: record.coderReservationId,
+		prompt: record.prompt,
+		generation: record.generation ?? 1,
+	};
+}
+
+function samePendingLaunchIdentity(
+	left: BackgroundDelegationRecord,
+	right: BackgroundDelegationRecord,
+): boolean {
+	return isDeepStrictEqual(
+		pendingLaunchIdentity(left),
+		pendingLaunchIdentity(right),
+	);
+}
+
+export async function recordPendingDelegationDetailed(
 	directory: string,
 	input: RecordPendingInput,
 	options: { staleTimeoutMs?: number } = {},
-): Promise<BackgroundDelegationRecord | null> {
+): Promise<RecordPendingDelegationOutcome> {
 	const now = Date.now();
 	const record = buildPendingRecord(input, now);
 	const parsedRecord = RecordSchema.safeParse(record);
 	if (!parsedRecord.success) {
 		logger.warn('[background] recordPendingDelegation rejected invalid input');
-		return null;
+		return { status: 'failed', record: null };
 	}
 
 	try {
+		let outcome: RecordPendingDelegationOutcome = {
+			status: 'failed',
+			record: null,
+		};
 		await withEvidenceLock(
 			directory,
 			BACKGROUND_DELEGATIONS_FILE,
@@ -818,16 +871,52 @@ export async function recordPendingDelegation(
 				if (options.staleTimeoutMs && options.staleTimeoutMs > 0) {
 					sweepStaleLocked(directory, options.staleTimeoutMs, now);
 				}
+				// A correlation identifies one durable launch. Check while holding the
+				// ledger lock so concurrent pending writers cannot append a fresh
+				// snapshot over an already-running or terminal delegation.
+				const existing = findByCorrelationId(
+					directory,
+					parsedRecord.data.correlationId,
+				);
+				if (existing) {
+					outcome = {
+						status: samePendingLaunchIdentity(existing, parsedRecord.data)
+							? 'duplicate'
+							: 'conflict',
+						record: existing,
+					};
+					return;
+				}
 				appendRecord(directory, parsedRecord.data);
+				outcome = { status: 'recorded', record: parsedRecord.data };
 			},
 		);
-		return parsedRecord.data;
+		return outcome;
 	} catch (err) {
 		logger.warn(
 			`[background] recordPendingDelegation failed: ${err instanceof Error ? err.message : String(err)}`,
 		);
-		return null;
+		return { status: 'failed', record: null };
 	}
+}
+
+/**
+ * Idempotent compatibility wrapper. A duplicate returns the authoritative
+ * existing record so native Task replay does not create a fallback owner.
+ */
+export async function recordPendingDelegation(
+	directory: string,
+	input: RecordPendingInput,
+	options: { staleTimeoutMs?: number } = {},
+): Promise<BackgroundDelegationRecord | null> {
+	const outcome = await recordPendingDelegationDetailed(
+		directory,
+		input,
+		options,
+	);
+	return outcome.status === 'recorded' || outcome.status === 'duplicate'
+		? outcome.record
+		: null;
 }
 
 export function buildPromptSnapshot(

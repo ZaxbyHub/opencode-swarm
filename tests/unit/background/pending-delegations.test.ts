@@ -96,7 +96,7 @@ describe('pending-delegations store', () => {
 		expect(findByCorrelationId(dir, 'nope')).toBeNull();
 	});
 
-	it('folds to the latest snapshot per correlationId', async () => {
+	it('keeps the first pending snapshot authoritative for a correlationId', async () => {
 		await recordPendingDelegation(
 			dir,
 			input({
@@ -106,7 +106,7 @@ describe('pending-delegations store', () => {
 			}),
 		);
 		// Second snapshot for the same correlationId with a different task id.
-		await recordPendingDelegation(
+		const duplicate = await recordPendingDelegation(
 			dir,
 			input({
 				correlationId: 'ses_a',
@@ -117,9 +117,11 @@ describe('pending-delegations store', () => {
 		await recordPendingDelegation(dir, input({ correlationId: 'ses_b' }));
 
 		const folded = readDelegations(dir);
-		// Two distinct correlationIds; ses_a folded to the LATEST snapshot.
+		// Two distinct correlationIds; a duplicate pending launch cannot replace
+		// the first durable owner.
 		expect(folded).toHaveLength(2);
-		expect(findByCorrelationId(dir, 'ses_a')?.evidenceTaskId).toBe('9.9');
+		expect(duplicate).toBeNull();
+		expect(findByCorrelationId(dir, 'ses_a')?.evidenceTaskId).toBe('1.1');
 	});
 
 	it('sweeps overdue pendings to stale (deterministic via backdated record)', async () => {
