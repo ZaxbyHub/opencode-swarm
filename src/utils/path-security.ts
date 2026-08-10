@@ -59,9 +59,44 @@ export function containsControlChars(str: string): boolean {
 }
 
 /**
- * Validate a directory path for safety.
+ * Validate a **project/workspace root** for safety.
+ *
+ * Distinct from {@link validateDirectory}, which additionally rejects absolute
+ * paths and is therefore only correct for a *relative sub-path*. A workspace
+ * root is absolute by contract — `ctx.directory` injected by `createSwarmTool`
+ * is always an absolute project root (AGENTS.md invariant 4) — so applying
+ * `validateDirectory` to one rejects 100% of real inputs and silently kills
+ * whatever feature depends on it. That is exactly how `.swarm/run-memory.jsonl`
+ * came to have no producer and a consumer that threw on every call.
+ *
+ * This validator keeps the checks that are meaningful for a root (empty,
+ * traversal segments, control/bidi characters) and drops the absolute-path
+ * rejection. Containment of the actual file is NOT this function's job and is
+ * unchanged: `validateSwarmPath(directory, filename)` resolves the target under
+ * `<directory>/.swarm`, rejects any path that escapes it, and rejects a
+ * symlinked `.swarm` base.
+ *
+ * @param directory - The workspace root to validate
+ * @throws Error if the root is invalid
+ */
+export function validateWorkspaceRoot(directory: string): void {
+	if (!directory || directory.trim() === '') {
+		throw new Error('Invalid directory: empty');
+	}
+	if (containsPathTraversal(directory)) {
+		throw new Error('Invalid directory: path traversal detected');
+	}
+	if (containsControlChars(directory)) {
+		throw new Error('Invalid directory: control characters detected');
+	}
+}
+
+/**
+ * Validate a relative directory path for safety.
  * Rejects empty paths, paths with traversal, control characters, and absolute paths.
  * Throws an Error if the directory is invalid.
+ *
+ * Do NOT use this on a project/workspace root — see {@link validateWorkspaceRoot}.
  *
  * @param directory - The directory string to validate
  * @throws Error if directory is invalid

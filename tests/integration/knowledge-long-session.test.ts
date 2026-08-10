@@ -2,9 +2,10 @@
  * Integration test: knowledge injection through long session simulation.
  * Exercises the REAL hook path via createKnowledgeInjectorHook.
  *
- * Note: The hook internally calls getRunMemorySummary() which uses
- * validateDirectory() that rejects absolute paths. To work around this,
- * we create temp directories as relative paths under the project root.
+ * Note: temp directories are created as relative paths under the project root.
+ * That was once forced by getRunMemorySummary() rejecting absolute paths; it
+ * now validates a workspace root and accepts them. The relative paths remain
+ * because these fixtures were written against them, not as a constraint.
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
@@ -107,8 +108,8 @@ const config: KnowledgeConfig = {
 
 /**
  * Creates a relative temp directory under the project root (tmp/).
- * We must use a relative path because getRunMemorySummary's
- * validateDirectory() rejects absolute paths.
+ * A relative path is a choice, not a constraint: getRunMemorySummary now
+ * validates a workspace root (validateWorkspaceRoot) and accepts absolute ones.
  */
 function createRelativeTempDir(): string {
 	const baseDir = 'tmp';

@@ -111,8 +111,8 @@ const CONFIG: KnowledgeConfig = {
 // ---------------------------------------------------------------------------
 
 /**
- * Must use a relative path because validateDirectory() inside
- * getRunMemorySummary() rejects absolute paths.
+ * Uses a relative path. getRunMemorySummary() accepts an absolute workspace
+ * root (validateWorkspaceRoot); a relative one is also valid, so this stays.
  */
 function createRelativeTempDir(): string {
 	const baseDir = 'tmp';

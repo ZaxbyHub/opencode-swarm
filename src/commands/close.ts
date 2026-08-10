@@ -324,6 +324,10 @@ const ARCHIVE_ARTIFACTS = [
 	'close-lessons.md',
 	'knowledge.jsonl',
 	'knowledge-rejected.jsonl',
+	// Per-attempt task outcomes written by update_task_status. Plan-scoped (keyed
+	// by task IDs like "1.1"), so it is archived for forensics and then cleaned —
+	// carrying it into the next plan would label an unrelated task 1.1 as failed.
+	'run-memory.jsonl',
 	'repo-graph.json',
 	'doc-manifest.json',
 	'dark-matter.md',
@@ -407,6 +411,9 @@ const ACTIVE_STATE_TO_CLEAN = [
 	'handoff-consumed.md',
 	'escalation-report.md',
 	'knowledge-rejected.jsonl',
+	// Plan-scoped per-attempt outcomes — see the ARCHIVE_ARTIFACTS note above.
+	// Archived first, then cleaned so the next plan starts with no run memory.
+	'run-memory.jsonl',
 	'repo-graph.json',
 	'doc-manifest.json',
 	'dark-matter.md',

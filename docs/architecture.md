@@ -2156,6 +2156,7 @@ separating `.swarm/context.md` into distinct concerns:
 │   ├── retro-2/evidence.json   ← Phase 2 retrospective
 │   └── {task-id}/evidence.json ← Task-level evidence bundles
 ├── events.jsonl        ← Event log
+├── run-memory.jsonl    ← Per-attempt task outcomes (written by update_task_status)
 └── telemetry.jsonl     ← Session observability (JSONL, 10MB rotation)
 ```
 

@@ -275,7 +275,6 @@ mock.module('../../../src/services/run-memory.js', () => ({
 	getRunMemorySummary: mockGetRunMemorySummary,
 	// Stubs for ESM named-import resolution.
 	recordOutcome: async () => {},
-	getFailures: () => [],
 	getTaskHistory: () => [],
 	generateTaskFingerprint: () => '',
 	_internals: {},

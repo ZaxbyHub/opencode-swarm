@@ -2,8 +2,8 @@
  * Tests for handleCloseCommand — expanded artifact cleanup (Phase 1 sub-task 1.2).
  *
  * Verifies the flat-file and directory archiving/deletion behavior:
- *   - 23 flat files in ARCHIVE_ARTIFACTS are copied to the archive bundle
- *   - 19 flat files in ACTIVE_STATE_TO_CLEAN are removed from .swarm/ after archiving
+ *   - 24 flat files in ARCHIVE_ARTIFACTS are copied to the archive bundle
+ *   - 20 flat files in ACTIVE_STATE_TO_CLEAN are removed from .swarm/ after archiving
  *   - 4 active-state directories (evidence/, session/, scopes/, spec-archive/)
  *     are recursively copied to the archive and then deleted. (locks/ is
  *     intentionally excluded — per-run locks are managed via proper-lockfile,

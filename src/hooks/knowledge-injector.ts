@@ -1221,11 +1221,20 @@ export function createKnowledgeInjectorHook(
 				remaining -= lessonBlock.length;
 			}
 
-			// 2. Run memory
+			// 2. Run memory. The `remaining > 300` floor keeps a tiny leftover
+			// budget from being spent on a truncated block, but it is not a fit
+			// check: getRunMemorySummary is capped at ~500 tokens (~1500 chars),
+			// so a summary well over `remaining` would previously be pushed
+			// whole and overshoot the budget, driving `remaining` negative and
+			// starving every lower-priority section. Sanitize first (sanitizing
+			// can lengthen the text) and then require the final string to fit,
+			// mirroring the drift-preamble check below.
 			if (runMemory && remaining > 300) {
 				const sanitizedRunMemory = sanitizeContextText(runMemory);
-				parts.push(sanitizedRunMemory);
-				remaining -= sanitizedRunMemory.length;
+				if (sanitizedRunMemory.length <= remaining) {
+					parts.push(sanitizedRunMemory);
+					remaining -= sanitizedRunMemory.length;
+				}
 			}
 
 			// 3. Drift preamble (freshPreamble without curator briefing at reduced budgets)

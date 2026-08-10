@@ -17,6 +17,10 @@ import { tryAcquireLock } from '../parallel/file-locks.js';
 import { loadPlan, updateTaskStatus } from '../plan/manager';
 import { derivePlanId } from '../plan/utils.js';
 import {
+	recordTaskAttempt,
+	type TaskAttemptInput,
+} from '../services/run-memory.js';
+import {
 	advanceTaskState,
 	getTaskState,
 	hasActiveLeanTurbo,
@@ -53,7 +57,47 @@ export const _internals = {
 	verifyLeanTurboTaskCompletion,
 	hasPassedDurableGateEvidence,
 	emitReviewerGateDecision: telemetry.reviewerGateDecision,
+	recordTaskAttempt,
 };
+
+/**
+ * Record a task outcome to run memory without ever changing the tool's result.
+ *
+ * `recordTaskAttempt` is fail-open by contract, but this wrapper must not
+ * depend on that: it is reached through the `_internals` DI seam, which a test
+ * (or future caller) can replace with something that throws. Both remaining
+ * call sites are the gate-block paths below, and both sit outside any try
+ * block, so without this catch a throw would turn a clean "gate blocked"
+ * result into a rejected tool call. Terminal outcomes are not recorded here —
+ * see `plan/manager.updateTaskStatus`.
+ */
+async function recordRunMemoryOutcome(
+	directory: string,
+	input: TaskAttemptInput,
+): Promise<void> {
+	try {
+		await _internals.recordTaskAttempt(directory, input);
+	} catch {
+		// Advisory-only — run-memory bookkeeping never alters the tool result.
+	}
+}
+
+/**
+ * Resolve the task's `files_touched` from a loaded plan, for the run-memory
+ * fingerprint (so the same task ID against a different file set is
+ * distinguishable across plans). Used only by the gate-block paths below;
+ * terminal outcomes are recorded in `plan/manager.updateTaskStatus`.
+ */
+function resolveRunMemoryFileTargets(
+	plan: RuntimePlan | null,
+	taskId: string,
+): string[] {
+	return (
+		plan?.phases
+			.flatMap((phase) => phase.tasks)
+			.find((candidate) => candidate.id === taskId)?.files_touched ?? []
+	);
+}
 
 /**
  * Arguments for the update_task_status tool
@@ -1193,6 +1237,15 @@ export async function executeUpdateTaskStatus(
 		}
 	}
 
+	// Derive agent from swarmState session context, fallback to 'update-task-status'
+	// sentinel. Derived here (rather than at the lock step below) because the
+	// gate-block paths that record run-memory outcomes return before the lock.
+	let agentName = 'update-task-status';
+	for (const [, agent] of swarmState.activeAgent) {
+		agentName = agent;
+		break; // Use first active agent found
+	}
+
 	// State machine check: task must have reached tests_run or complete state
 	// Uses the validated directory for plan.json fallback resolution
 	if (args.status === 'completed') {
@@ -1232,6 +1285,15 @@ export async function executeUpdateTaskStatus(
 		// is surfaced; when council is active, skip the reviewer gate entirely.
 		const councilCheck = checkCouncilGate(directory, args.task_id);
 		if (councilCheck.blocked) {
+			// A blocked completion attempt is a real task failure with an in-band
+			// reason — the exact signal run memory exists to replay next session.
+			await recordRunMemoryOutcome(directory, {
+				taskId: args.task_id,
+				agent: agentName,
+				outcome: 'fail',
+				failureReason: `council gate: ${councilCheck.reason}`,
+				fileTargets: resolveRunMemoryFileTargets(loadedPlan, args.task_id),
+			});
 			return {
 				success: false,
 				message:
@@ -1249,6 +1311,13 @@ export async function executeUpdateTaskStatus(
 				fallbackDir,
 			);
 			if (reviewerCheck.blocked) {
+				await recordRunMemoryOutcome(directory, {
+					taskId: args.task_id,
+					agent: agentName,
+					outcome: 'fail',
+					failureReason: `QA gate: ${reviewerCheck.reason}`,
+					fileTargets: resolveRunMemoryFileTargets(loadedPlan, args.task_id),
+				});
 				return {
 					success: false,
 					message:
@@ -1263,12 +1332,6 @@ export async function executeUpdateTaskStatus(
 	// Step 4: Update the task status with file lock to prevent concurrent writes
 	const lockTaskId = `update-task-status-${args.task_id}-${Date.now()}`;
 	const planFilePath = 'plan.json';
-	// Derive agent from swarmState session context, fallback to 'update-task-status' sentinel
-	let agentName = 'update-task-status';
-	for (const [, agent] of swarmState.activeAgent) {
-		agentName = agent;
-		break; // Use first active agent found
-	}
 	let lockResult: Awaited<ReturnType<typeof tryAcquireLock>> | undefined;
 	try {
 		lockResult = await _internals.tryAcquireLock(
@@ -1325,6 +1388,24 @@ export async function executeUpdateTaskStatus(
 			}
 		}
 
+		// NOTE: the terminal outcome (completed -> pass, blocked -> fail) is NOT
+		// recorded here. It is recorded inside `plan/manager.updateTaskStatus`
+		// after savePlan succeeds, for the same reason the Rule 2 auto-commit
+		// lives there: `advanceTaskStateAndPersist` (src/state.ts, reached from
+		// the council APPROVE fast-path in delegation-gate.ts) completes tasks
+		// without ever calling this tool. Recording here would miss those and
+		// report completed tasks as "Still failing". Do NOT add a recording
+		// hook here as well.
+		//
+		// Centralizing prevents MISSED completions; it does not make duplicates
+		// impossible. `updateTaskStatus` is idempotent for an already-completed
+		// task and has no settled guard on completed->completed, so one logical
+		// completion can legitimately pass through it more than once — e.g. the
+		// council auto-completion followed by an architect tool call, or the
+		// delegation-gate `toolAfter` advance at delegation-gate.ts:3266. Each
+		// pass through appends another `pass`, inflating attemptNumber. The
+		// verdict stays correct; only the attempt count overstates. This is the
+		// documented invocation-counting limitation — see the release note.
 		return {
 			success: true,
 			message: 'Task status updated successfully',

@@ -32,7 +32,6 @@ import {
 } from '../../../src/services/context-budget-service';
 // Import services (after mock so transitive imports pick up the mock)
 import {
-	getFailures,
 	getRunMemorySummary,
 	getTaskHistory,
 	type RunMemoryEntry,
@@ -110,7 +109,7 @@ describe('ADVERSARIAL SECURITY TESTS - run-memory service', () => {
 
 			// These should NOT throw - should gracefully skip malformed lines
 			const history = await getTaskHistory(tmpDir, '1.1');
-			const failures = await getFailures(tmpDir);
+			const failures = await getTaskHistory(tmpDir, '1.2');
 			const summary = await getRunMemorySummary(tmpDir);
 
 			// Should return empty or skip malformed entries
@@ -210,7 +209,7 @@ describe('ADVERSARIAL SECURITY TESTS - run-memory service', () => {
 			// Should succeed (append-only)
 			await recordOutcome(tmpDir, entry);
 
-			const failures = await getFailures(tmpDir);
+			const failures = await getTaskHistory(tmpDir, '1.2');
 			expect(Array.isArray(failures)).toBe(true);
 			attackDetected = true;
 			expect(attackDetected).toBe(true);

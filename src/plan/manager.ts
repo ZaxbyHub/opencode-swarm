@@ -75,6 +75,7 @@ import {
 import { isGitRepo } from '../git/branch';
 import { getWorktreeMergeFailure } from '../hooks/delegation-gate/worktree-merge-status';
 import { readSwarmFileAsync } from '../hooks/utils';
+import { recordTaskAttempt } from '../services/run-memory.js';
 import { emit } from '../telemetry.js';
 import { isEpicModeActiveForProject } from '../turbo/epic/state.js';
 import { commitTaskCompletion } from '../turbo/epic/task-commit.js';
@@ -164,6 +165,7 @@ export const _internals: {
 	readTaskScopes: typeof readTaskScopes;
 	commitTaskCompletion: typeof commitTaskCompletion;
 	getWorktreeMergeFailure: typeof getWorktreeMergeFailure;
+	recordTaskAttempt: typeof recordTaskAttempt;
 } = {
 	loadPlan,
 	loadPlanJsonOnly,
@@ -173,6 +175,7 @@ export const _internals: {
 	readTaskScopes,
 	commitTaskCompletion,
 	getWorktreeMergeFailure,
+	recordTaskAttempt,
 };
 
 /** @internal Test seam for snapshot retry helper */
@@ -2144,6 +2147,49 @@ export async function updateTaskStatus(
 			await savePlan(directory, updatedPlan, {
 				preserveCompletedStatuses: false,
 			});
+
+			// Run memory: record the terminal outcome for this task. Centralized
+			// here for the same reason as the Rule 2 auto-commit below — BOTH
+			// writers of task status route through this function, and the
+			// `update_task_status` tool is NOT the only one. The council APPROVE
+			// fast-path completes a task via `advanceTaskStateAndPersist`
+			// (src/state.ts) from `delegation-gate.ts`, with no tool call at all.
+			// Recording in the tool alone logged the council gate's FAILURE but
+			// never its PASS, so `getRunMemorySummary` reported completed tasks as
+			// "Still failing" forever — worse than recording nothing.
+			if (status === 'completed' || status === 'blocked') {
+				const recordedTask = updatedPlan.phases
+					.flatMap((phase) => phase.tasks)
+					.find((candidate) => candidate.id === taskId);
+				try {
+					await _internals.recordTaskAttempt(directory, {
+						taskId,
+						// Deliberately a sentinel, not the live agent name: resolving
+						// that needs `swarmState`, and `src/state.ts` already imports
+						// this module, so importing it back would be circular.
+						// `summarizeTask` never renders `agent`, so nothing is lost.
+						agent: 'plan-status',
+						outcome: status === 'completed' ? 'pass' : 'fail',
+						failureReason:
+							status === 'blocked'
+								? (recordedTask?.blocked_reason ??
+									'task marked blocked (no blocked_reason recorded)')
+								: undefined,
+						fileTargets: recordedTask?.files_touched ?? [],
+					});
+				} catch (err) {
+					// The plan write already succeeded and is authoritative. Run memory
+					// is advisory, so a bookkeeping failure must not propagate out of
+					// the durable status update (AGENTS.md #5) — the same non-fatal
+					// contract Rule 2 relies on. Reached through the `_internals` seam,
+					// so do not depend on the callee's own fail-open behaviour.
+					warn(
+						`[plan/manager] run-memory record for ${taskId} failed: ${
+							err instanceof Error ? err.message : String(err)
+						}`,
+					);
+				}
+			}
 			// Rule 2 of the greenfield-smart redesign: auto-commit on task
 			// completion. Centralized here (rather than in the
 			// `update_task_status` tool) because BOTH callers route through

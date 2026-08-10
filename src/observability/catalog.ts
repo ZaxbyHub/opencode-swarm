@@ -177,7 +177,7 @@ function defineEntry(kind: string, input: CatalogEntryInput): CatalogEntry {
  * Producer lines were derived by reading the emit call sites, not by memory:
  * the 26 convenience helpers live at `src/telemetry.ts:397-759`, the six "dark"
  * kinds (documented at `src/telemetry.ts:39` as "emitted but no live parallel
- * paths") at `src/evidence/lock.ts:86,94,129`, `src/plan/manager.ts:329,1696`
+ * paths") at `src/evidence/lock.ts:86,94,129`, `src/plan/manager.ts:332,1699`
  * and `src/plan/ledger.ts:681`, and the force-cast kind at
  * `src/hooks/conflict-resolution.ts:73`.
  */
@@ -703,7 +703,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			severity: 'notice',
 			// Only an attempt counter, a hash PREFIX and a delay. No identifiers.
 			privacyClass: 'operational',
-			producer: 'src/plan/manager.ts:329',
+			producer: 'src/plan/manager.ts:332',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_PLAN_EVIDENCE_RETENTION,
@@ -717,7 +717,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			severity: 'warning',
 			// Carries `directory` and a free-text filesystem error.
 			privacyClass: 'sensitive',
-			producer: 'src/plan/manager.ts:1696',
+			producer: 'src/plan/manager.ts:1699',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_PLAN_EVIDENCE_RETENTION,
