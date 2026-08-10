@@ -81,7 +81,7 @@ a `CouncilMemberVerdict` with `verdict`, `confidence`, `findings[]`,
    dispatches all five members simultaneously. Each receives a role-scoped
    context plus the pre-declared criteria.
 3. **Synthesize.** The architect calls
-   `submit_council_verdicts(taskId, swarmId, verdicts[], roundNumber)`. The tool
+   `submit_council_verdicts(taskId, swarmId, verdicts[])`. The tool
    computes veto, conflict reconciliation, required-fix vs advisory
    classification, mandatory-criteria assessment, and builds a single
    `unifiedFeedbackMd` — the coder never sees contradictory instructions
@@ -92,7 +92,7 @@ a `CouncilMemberVerdict` with `verdict`, `confidence`, `findings[]`,
      non-blocking advisory (via `pushCouncilAdvisory`), then advance.
    - `REJECT` → block. Send `unifiedFeedbackMd` to the coder as a blocking
      advisory. Retry up to `maxRounds`.
-   - `roundNumber >= maxRounds && overallVerdict === 'REJECT'` → escalate
+   - `maxRoundsExhausted === true && overallVerdict === 'REJECT'` → escalate
      to the user. Do not auto-advance.
 
 ## 6. Verdict semantics
@@ -150,7 +150,8 @@ Council outcomes stamp into `.swarm/evidence/{taskId}.json` under
 
 - Standard fields — `sessionId`, `timestamp`, `agent` (always `'architect'`
   because the architect is the caller of `submit_council_verdicts`).
-- Council extras — `verdict`, `vetoedBy`, `roundNumber`, `allCriteriaMet`, `quorumSize`.
+- Council extras — `verdict`, `vetoedBy`, `roundNumber`, `allCriteriaMet`,
+  `quorumSize`, and the durable `attemptId` recovery marker.
 
 Pre-existing `gates[*]` entries and top-level keys are preserved across
 writes. This is the only integration point with the gate pipeline: the
@@ -175,19 +176,36 @@ In-memory state always wins over disk state: if a newer verdict exists
 in memory it supersedes any older entry on disk, preventing accidental
 downgrades after a restart.
 
+Every task, phase, and final submission attempt is also appended before any
+tool return to `.swarm/council/attempts/{scope}.jsonl`. The authoritative
+server-owned round snapshot lives under `.swarm/council/round-state/`. These
+paths and records are bounded and privacy-safe, and recovery reads only a
+validated tail; the append-only audit itself grows with attempts until close.
+Task IDs and final plan generations are hashed before becoming filenames or
+audit scope metadata. Final state is keyed by the current plan hash, so a plan
+change requires and permits a fresh final review. Gate consumers continue to
+read the existing evidence files above. `/swarm close` archives and clears the
+council directory so a later swarm in the same project starts at round one.
+
 ## 9. Retry protocol and `maxRounds`
 
-- `roundNumber` is 1-indexed and tracked by the architect across retries.
+- The server owns the 1-indexed current round. Callers normally omit
+  `roundNumber`; when supplied, it is only an expectation and a stale or future
+  value is rejected with `council_round_mismatch`.
 - The advisory queue dedups via `council:${taskId}:${roundNumber}` so that
   repeated pushes within the same round are no-ops. Different rounds push
   distinct entries, so the coder sees the latest feedback each retry.
+- Reward and advisory callbacks run best-effort and at most once after the
+  durable attempt commit. Their failure cannot change or replay the council
+  verdict; individual callbacks may log additional diagnostics.
 - On REJECT, the architect sends the blocking advisory, waits for the coder
-  to address `requiredFixes`, then re-dispatches and re-convenes with
-  `roundNumber + 1`.
-- When `roundNumber >= maxRounds` and the verdict is still REJECT, the
+  to address `requiredFixes`, then re-dispatches and re-convenes. The tool
+  advances the authoritative round after the blocking attempt is durably
+  recorded.
+- When `maxRoundsExhausted` is true and the verdict is still REJECT, the
   architect must escalate to the user rather than auto-advancing. This is
-  a hard rule — `update_task_status` will continue to block, and
-  `escalateOnMaxRounds` (if set) is reserved for a future webhook hand-off.
+  a hard rule — `update_task_status` will continue to block. The final round
+  remains corrigible and never advances beyond the configured limit.
 
 ## 10. Minimal working example
 
@@ -214,7 +232,7 @@ refuse synthesis when any member context fails to produce a verdict.
   `.swarm/evidence/{taskId}.json` under `gates.council`. If the key is
   absent, the council never ran — the architect must call `submit_council_verdicts`
   before retrying the transition. If `verdict === 'REJECT'`, resolve every
-  item in `requiredFixes` and re-convene with an incremented `roundNumber`.
+  item in `requiredFixes`, re-dispatch the required members, and re-convene.
 - **"Council tool returns `council feature is disabled`."** Verify
   `council.enabled: true` in either `.opencode/opencode-swarm.json` or
   `~/.config/opencode/opencode-swarm.json`. Config is strict; an unknown

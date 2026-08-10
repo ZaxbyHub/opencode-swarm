@@ -419,6 +419,7 @@ const KNOWLEDGE_FAMILY_ARTIFACTS = new Set([
  * swarms start clean. Each entry is a relative path under .swarm/.
  */
 const ACTIVE_STATE_DIRS_TO_CLEAN = [
+	'council',
 	'evidence',
 	'session',
 	'scopes',

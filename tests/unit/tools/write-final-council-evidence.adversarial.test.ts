@@ -213,7 +213,7 @@ describe('write_final_council_evidence adversarial security tests', () => {
 		expect(entry.requiredFixes[0].evidence).toContain('process.env.SECRET');
 	});
 
-	test('rapid sequential writes remain valid JSON and last write wins', async () => {
+	test('rapid sequential retries cannot overwrite a closed final council', async () => {
 		for (let i = 1; i <= 20; i++) {
 			const result = await executeWriteFinalCouncilEvidence(
 				{
@@ -223,13 +223,19 @@ describe('write_final_council_evidence adversarial security tests', () => {
 				},
 				tempDir,
 			);
-			expect(JSON.parse(result).success).toBe(true);
+			const parsed = JSON.parse(result);
+			if (i === 1) {
+				expect(parsed.success).toBe(true);
+			} else {
+				expect(parsed.success).toBe(false);
+				expect(parsed.reason).toBe('council_round_closed');
+			}
 		}
 
 		const evidence = await readEvidence(tempDir);
 		expect(evidence.entries).toHaveLength(1);
-		expect(evidence.entries[0].phase).toBe(20);
-		expect(evidence.entries[0].projectSummary).toBe('Project close attempt 20');
+		expect(evidence.entries[0].phase).toBe(1);
+		expect(evidence.entries[0].projectSummary).toBe('Project close attempt 1');
 		expect(evidence.entries[0].memberVerdicts).toHaveLength(5);
 	});
 });

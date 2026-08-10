@@ -15,7 +15,7 @@
  * any filesystem op.
  */
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
 import {
@@ -23,7 +23,6 @@ import {
 	taskEvidencePath,
 	withTaskEvidenceLock,
 } from '../evidence/task-file.js';
-import * as logger from '../utils/logger.js';
 import type { CouncilSynthesis } from './types';
 
 const EVIDENCE_DIR = '.swarm/evidence';
@@ -91,6 +90,7 @@ function safeAssignOwnProps(
 export async function writeCouncilEvidence(
 	workingDir: string,
 	synthesis: CouncilSynthesis,
+	attemptId?: string,
 ): Promise<void> {
 	// Defense in depth — library-level writer should not trust upstream validation.
 	if (!VALID_TASK_ID.test(synthesis.taskId)) {
@@ -157,6 +157,7 @@ export async function writeCouncilEvidence(
 				// distinct members. Old evidence files (pre-quorum) lack this field
 				// and are conservatively rehydrated as quorumSize: 1.
 				quorumSize: synthesis.quorumSize,
+				...(attemptId ? { attemptId } : {}),
 			};
 
 			const updated: Record<string, unknown> = Object.create(null);
@@ -172,27 +173,27 @@ export async function writeCouncilEvidence(
 			await atomicWriteFile(filePath, JSON.stringify(updated, null, 2));
 		},
 	);
+}
 
-	// ── Round-history audit log (non-blocking) ────────────────────────────
-	// Append-only log of every council round for multi-round tasks.
-	// Failures are logged but MUST NOT affect the primary evidence write above.
+export function hasCouncilEvidenceAttempt(
+	workingDir: string,
+	taskId: string,
+	attemptId: string,
+	roundNumber: number,
+): boolean {
+	if (!VALID_TASK_ID.test(taskId)) return false;
 	try {
-		const councilDir = join(workingDir, '.swarm', 'council');
-		mkdirSync(councilDir, { recursive: true });
-		const auditLine = JSON.stringify({
-			round: synthesis.roundNumber,
-			verdict: synthesis.overallVerdict,
-			timestamp: synthesis.timestamp,
-			vetoedBy: synthesis.vetoedBy,
-		});
-		appendFileSync(
-			join(councilDir, `${synthesis.taskId}.rounds.jsonl`),
-			`${auditLine}\n`,
+		const parsed = EvidenceFileSchema.parse(
+			JSON.parse(readFileSync(taskEvidencePath(workingDir, taskId), 'utf-8')),
 		);
-	} catch (auditError) {
-		// Audit log failure must not break the primary evidence write.
-		logger.log(
-			`writeCouncilEvidence: failed to append round-history audit log: ${auditError instanceof Error ? auditError.message : String(auditError)}`,
+		const gates = parsed.gates as Record<string, unknown> | undefined;
+		const council = gates?.[COUNCIL_GATE_NAME] as
+			| { attemptId?: unknown; roundNumber?: unknown }
+			| undefined;
+		return (
+			council?.attemptId === attemptId && council.roundNumber === roundNumber
 		);
+	} catch {
+		return false;
 	}
 }

@@ -1,18 +1,15 @@
-/**
- * Write final council evidence for the project-scoped final council gate.
- *
- * The final council is not General Council mode. It accepts the same
- * five-member CouncilMemberVerdict objects used by phase council, synthesized
- * at completed-project scope.
- */
-
 import fs from 'node:fs';
 import path from 'node:path';
 import type { ToolContext, ToolDefinition } from '@opencode-ai/plugin/tool';
 import { z } from 'zod';
 import { loadPluginConfig } from '../config/loader';
+import {
+	recordUnscopedCouncilAttempt,
+	runCouncilAttempt,
+} from '../council/council-round-state';
 import { synthesizeFinalCouncilAdvisory } from '../council/council-service';
-import type { CouncilAgent, CouncilMemberVerdict } from '../council/types';
+import type { CouncilMemberVerdict } from '../council/types';
+import { withEvidenceLock } from '../evidence/lock.js';
 import { validateSwarmPath } from '../hooks/utils';
 import { COUNCIL_VERDICT_REWARDS } from '../memory/config';
 import { createConfiguredMemoryProvider } from '../memory/gateway';
@@ -56,17 +53,10 @@ export const ArgsSchema = z.object({
 	verdicts: z.array(VerdictSchema).min(1).max(5),
 });
 
-/**
- * Arguments for the write_final_council_evidence tool.
- */
 export interface WriteFinalCouncilEvidenceArgs {
-	/** The phase number for the final council verdict */
 	phase: number;
-	/** Summary of the completed project being reviewed */
 	projectSummary: string;
-	/** 1-indexed final council round number */
 	roundNumber?: number;
-	/** Collected verdicts from critic, reviewer, sme, test_engineer, explorer */
 	verdicts: CouncilMemberVerdict[];
 }
 
@@ -83,10 +73,21 @@ function normalizeFinalVerdict(
 	return requiredFixesCount > 0 ? 'rejected' : 'concerns';
 }
 
-/**
- * Execute the write_final_council_evidence tool.
- * Validates input, synthesizes project-scoped council evidence, and writes it.
- */
+function invalidResponse(issues: z.ZodIssue[]): string {
+	return JSON.stringify(
+		{
+			success: false,
+			reason: 'invalid arguments',
+			errors: issues.map((issue) => ({
+				path: issue.path.join('.'),
+				message: issue.message,
+			})),
+		},
+		null,
+		2,
+	);
+}
+
 export async function executeWriteFinalCouncilEvidence(
 	args: unknown,
 	directory: string,
@@ -94,248 +95,279 @@ export async function executeWriteFinalCouncilEvidence(
 ): Promise<string> {
 	const parsed = ArgsSchema.safeParse(args);
 	if (!parsed.success) {
-		return JSON.stringify(
-			{
-				success: false,
-				reason: 'invalid arguments',
-				errors: parsed.error.issues.map((i) => ({
-					path: i.path.join('.'),
-					message: i.message,
-				})),
-			},
-			null,
-			2,
+		const failure = await recordUnscopedCouncilAttempt(
+			directory,
+			'final',
+			'invalid_arguments',
+			args,
+			parsed.error.issues.map((issue) => ({
+				path: issue.path,
+				code: issue.code,
+			})),
+			ctx?.sessionID,
 		);
+		return failure ?? invalidResponse(parsed.error.issues);
 	}
+
 	const input = parsed.data;
-
 	const config = loadPluginConfig(directory);
-	const requiredMembers = FINAL_COUNCIL_MEMBERS.length;
-	const distinctMembers = new Set<CouncilAgent>(
-		input.verdicts.map((v) => v.agent),
-	);
-	const membersVoted = [...distinctMembers];
+	let plan: Awaited<ReturnType<typeof loadPlan>> = null;
+	try {
+		plan = await loadPlan(directory);
+	} catch {
+		// The scoped attempt still records a deterministic plan-not-found result.
+	}
+	const planHash = plan ? computePlanHash(plan) : undefined;
+	const planId = plan ? derivePlanId(plan) : undefined;
+	const planIdentityHash = plan ? derivePlanIdentityHash(plan) : undefined;
+	const membersVoted = [...new Set(input.verdicts.map((v) => v.agent))];
 	const membersAbsent = FINAL_COUNCIL_MEMBERS.filter(
-		(m) => !distinctMembers.has(m),
+		(member) => !membersVoted.includes(member),
 	);
 
-	if (membersVoted.length < requiredMembers) {
-		return JSON.stringify(
-			{
-				success: false,
-				reason: 'insufficient_quorum',
-				message:
-					`Final council quorum not met: ${membersVoted.length} of ${requiredMembers} required members provided verdicts. ` +
-					`Members voted: [${membersVoted.join(', ')}]. ` +
-					`Members absent: [${membersAbsent.join(', ')}]. ` +
-					`Dispatch the absent council members with project-scoped context and collect their verdicts before calling write_final_council_evidence.`,
+	return runCouncilAttempt({
+		directory,
+		// Final approval is closed only for this exact plan generation. A later
+		// plan mutation gets a fresh authoritative round state and can be reviewed.
+		scope: { kind: 'final', generation: planHash ?? 'missing-plan' },
+		clientRound: input.roundNumber,
+		maxRounds: config.council?.maxRounds ?? 3,
+		sessionID: ctx?.sessionID,
+		request: input,
+		verdictCount: input.verdicts.length,
+		members: membersVoted,
+		probePendingEvidence: async (attemptId, round) =>
+			hasFinalEvidenceAttempt(directory, attemptId, round),
+		evaluate: async (authoritativeRound) => {
+			if (membersVoted.length < FINAL_COUNCIL_MEMBERS.length) {
+				return {
+					disposition: 'insufficient_quorum',
+					response: {
+						success: false,
+						reason: 'insufficient_quorum',
+						message:
+							`Final council quorum not met: ${membersVoted.length} of ${FINAL_COUNCIL_MEMBERS.length} required members provided verdicts. ` +
+							`Members voted: [${membersVoted.join(', ')}]. ` +
+							`Members absent: [${membersAbsent.join(', ')}]. ` +
+							'Dispatch the absent council members with project-scoped context and collect their verdicts before calling write_final_council_evidence.',
+						membersVoted,
+						membersAbsent,
+						quorumRequired: FINAL_COUNCIL_MEMBERS.length,
+					},
+					transition: 'stay',
+					gateEffect: 'none',
+				};
+			}
+
+			const synthesis = synthesizeFinalCouncilAdvisory(
+				input.projectSummary.trim(),
+				input.verdicts as CouncilMemberVerdict[],
+				authoritativeRound,
+				config.council,
+			);
+
+			if (
+				synthesis.overallVerdict === 'CONCERNS' &&
+				synthesis.blockingConcernsCount > 0
+			) {
+				return {
+					disposition: 'blocking_concerns_unresolved',
+					response: {
+						success: false,
+						reason: 'blocking_concerns_unresolved',
+						overallVerdict: synthesis.overallVerdict,
+						blockingConcernsCount: synthesis.blockingConcernsCount,
+						requiredFixes: synthesis.requiredFixes,
+						unifiedFeedbackMd: synthesis.unifiedFeedbackMd,
+						message: `Final council returned CONCERNS with ${synthesis.blockingConcernsCount} HIGH/CRITICAL finding(s) promoted to requiredFixes. These must be resolved before the project can close. Do NOT write evidence or proceed — address every requiredFix and resubmit.`,
+					},
+					transition: 'advance',
+					gateEffect: 'blocked',
+					verdict: synthesis.overallVerdict,
+					quorumSize: synthesis.quorumSize,
+				};
+			}
+
+			if (!plan) {
+				return {
+					disposition: 'plan_not_found',
+					response: {
+						success: false,
+						reason: 'plan_not_found',
+						message:
+							'Cannot write final council evidence: plan.json not found. The plan must be loaded and available before writing final council evidence.',
+						phase: input.phase,
+						plan_id: 'unknown',
+					},
+					transition: 'stay',
+					gateEffect: 'none',
+				};
+			}
+
+			const normalizedVerdict = normalizeFinalVerdict(
+				synthesis.overallVerdict,
+				synthesis.requiredFixes.length,
+			);
+			const evidenceEntry = {
+				type: 'final-council',
+				phase: input.phase,
+				plan_id: planId!,
+				plan_hash: planHash!,
+				plan_identity_hash: planIdentityHash!,
+				verdict: normalizedVerdict,
+				rawCouncilVerdict: synthesis.overallVerdict,
+				quorumSize: synthesis.quorumSize,
 				membersVoted,
 				membersAbsent,
-				quorumRequired: requiredMembers,
-			},
-			null,
-			2,
-		);
-	}
-
-	const synthesis = synthesizeFinalCouncilAdvisory(
-		input.projectSummary.trim(),
-		input.verdicts as CouncilMemberVerdict[],
-		input.roundNumber ?? 1,
-		config.council,
-	);
-
-	// ── Blocking concerns gate ────────────────────────────────────────
-	if (
-		synthesis.overallVerdict === 'CONCERNS' &&
-		synthesis.blockingConcernsCount > 0
-	) {
-		return JSON.stringify(
-			{
-				success: false,
-				reason: 'blocking_concerns_unresolved',
-				overallVerdict: synthesis.overallVerdict,
-				blockingConcernsCount: synthesis.blockingConcernsCount,
 				requiredFixes: synthesis.requiredFixes,
-				unifiedFeedbackMd: synthesis.unifiedFeedbackMd,
-				message: `Final council returned CONCERNS with ${synthesis.blockingConcernsCount} HIGH/CRITICAL finding(s) promoted to requiredFixes. These must be resolved before the project can close. Do NOT write evidence or proceed — address every requiredFix and resubmit.`,
-			},
-			null,
-			2,
-		);
-	}
-
-	const plan = await loadPlan(directory);
-	if (!plan) {
-		return JSON.stringify(
-			{
-				success: false,
-				reason: 'plan_not_found',
-				message:
-					'Cannot write final council evidence: plan.json not found. The plan must be loaded and available before writing final council evidence.',
-				phase: input.phase,
-				plan_id: 'unknown',
-			},
-			null,
-			2,
-		);
-	}
-	const planId = derivePlanId(plan);
-	const planHash = computePlanHash(plan);
-	const planIdentityHash = derivePlanIdentityHash(plan);
-	const normalizedVerdict = normalizeFinalVerdict(
-		synthesis.overallVerdict,
-		synthesis.requiredFixes.length,
-	);
-
-	const evidenceEntry = {
-		type: 'final-council',
-		phase: input.phase,
-		plan_id: planId,
-		plan_hash: planHash,
-		plan_identity_hash: planIdentityHash,
-		verdict: normalizedVerdict,
-		rawCouncilVerdict: synthesis.overallVerdict,
-		quorumSize: synthesis.quorumSize,
-		membersVoted,
-		membersAbsent,
-		requiredFixes: synthesis.requiredFixes,
-		advisoryFindings: synthesis.advisoryFindings,
-		advisoryNotes: synthesis.advisoryNotes,
-		unresolvedConflicts: synthesis.unresolvedConflicts,
-		roundNumber: synthesis.roundNumber,
-		allCriteriaMet: synthesis.allCriteriaMet,
-		memberVerdicts: synthesis.memberVerdicts,
-		unifiedFeedbackMd: synthesis.unifiedFeedbackMd,
-		projectSummary: synthesis.projectSummary,
-		timestamp: synthesis.timestamp,
-	};
-
-	const filename = 'final-council.json';
-	const relativePath = path.join('evidence', filename);
-	let validatedPath: string;
-	try {
-		validatedPath = validateSwarmPath(directory, relativePath);
-	} catch (error) {
-		return JSON.stringify(
-			{
-				success: false,
-				phase: input.phase,
-				message:
-					error instanceof Error ? error.message : 'Failed to validate path',
-			},
-			null,
-			2,
-		);
-	}
-
-	const evidenceContent = {
-		entries: [evidenceEntry],
-	};
-	const evidenceDir = path.dirname(validatedPath);
-
-	try {
-		await fs.promises.mkdir(evidenceDir, { recursive: true });
-		const tempPath = path.join(evidenceDir, `.${filename}.tmp`);
-		await fs.promises.writeFile(
-			tempPath,
-			JSON.stringify(evidenceContent, null, 2),
-			'utf-8',
-		);
-		await fs.promises.rename(tempPath, validatedPath);
-
-		// B.4 — reward the memories recalled during this run via the SAME shared
-		// mechanism A.4/B.3 use (applyCouncilReward), keyed on the VERIFIED
-		// `ctx.sessionID` supplied by the tool-call runtime — this tool has no
-		// model-suppliable session id field at all, so there is no analogous
-		// trust-gate bypass to guard against; the gate below exists purely to
-		// skip when the session is unlinkable or memory is disabled.
-		//
-		// unitId is intentionally omitted: a final verdict spans the ENTIRE
-		// project run, so there is no single task unitId to narrow by. Passing
-		// `undefined` engages B.2's run_id fallback, rewarding every DISTINCT
-		// memory recalled in this session — the correct semantics for a
-		// project-scoped final verdict.
-		//
-		// Graded reward: the full COUNCIL_VERDICT_REWARDS mapping applies
-		// (APPROVE 1.0 / CONCERNS 0.5 / REJECT 0.0), matching B.3's phase-level
-		// signal rather than a hardcoded APPROVE-only reward.
-		//
-		// No re-submission dedup guard: a final verdict is typically submitted
-		// once per run, and each EMA step is self-correcting/bounded — a
-		// duplicate resolution nudges q-values slightly rather than corrupting
-		// them. B.6 owns the authoritative negative-terminal finalize sweep;
-		// this is the verdict-time graded signal only.
-		//
-		// Non-blocking (SC-013 trust gate + isolation): any failure here
-		// (memory disabled, no sessionID, provider error) must NEVER change
-		// this tool's returned output or evidence — caught and logged, never
-		// rethrown, and never allowed to flip a successful write into a
-		// success:false response.
-		try {
-			const memoryConfig = config.memory;
-			if (memoryConfig?.enabled === true && ctx?.sessionID) {
-				const provider = createConfiguredMemoryProvider(
-					directory,
-					memoryConfig,
-				);
-				try {
-					await applyCouncilReward(provider, {
-						runId: ctx.sessionID,
-						unitId: undefined,
-						reward: COUNCIL_VERDICT_REWARDS[synthesis.overallVerdict],
-						eta: memoryConfig.qLearning.learningRate,
-						initialQValue: memoryConfig.qLearning.initialQValue,
-						qLearning: memoryConfig.qLearning,
-						timestamp: new Date().toISOString(),
-						verdictLabel: synthesis.overallVerdict,
-					});
-				} finally {
-					await provider.close?.();
-				}
-			}
-		} catch (rewardErr) {
-			logger.warn(
-				`[write-final-council-evidence] final council reward capture failed: ${rewardErr instanceof Error ? rewardErr.message : String(rewardErr)}`,
-			);
-		}
-
-		return JSON.stringify(
-			{
-				success: true,
-				phase: input.phase,
-				overallVerdict: synthesis.overallVerdict,
-				verdict: normalizedVerdict,
-				vetoedBy: synthesis.vetoedBy,
+				advisoryFindings: synthesis.advisoryFindings,
+				advisoryNotes: synthesis.advisoryNotes,
+				unresolvedConflicts: synthesis.unresolvedConflicts,
 				roundNumber: synthesis.roundNumber,
 				allCriteriaMet: synthesis.allCriteriaMet,
-				requiredFixesCount: synthesis.requiredFixes.length,
-				advisoryFindingsCount: synthesis.advisoryFindings.length,
-				unresolvedConflictsCount: synthesis.unresolvedConflicts.length,
-				advisoryNotes: synthesis.advisoryNotes,
-				membersVoted,
-				membersAbsent,
-				quorumSize: synthesis.quorumSize,
-				quorumMet: true,
-				evidencePath: synthesis.evidencePath,
+				memberVerdicts: synthesis.memberVerdicts,
 				unifiedFeedbackMd: synthesis.unifiedFeedbackMd,
-				message:
-					'Final council evidence written to .swarm/evidence/final-council.json',
-			},
-			null,
-			2,
-		);
-	} catch (error) {
-		return JSON.stringify(
-			{
-				success: false,
-				phase: input.phase,
-				message: error instanceof Error ? error.message : String(error),
-			},
-			null,
-			2,
-		);
-	}
+				projectSummary: synthesis.projectSummary,
+				timestamp: synthesis.timestamp,
+			};
+
+			let validatedPath: string;
+			try {
+				validatedPath = _internals.validateSwarmPath(
+					directory,
+					path.join('evidence', 'final-council.json'),
+				);
+			} catch (error) {
+				return {
+					disposition: 'invalid_evidence_path',
+					response: {
+						success: false,
+						phase: input.phase,
+						message:
+							error instanceof Error
+								? error.message
+								: 'Failed to validate path',
+					},
+					transition: 'stay',
+					gateEffect: 'none',
+				};
+			}
+
+			const evidenceDir = path.dirname(validatedPath);
+			const accepted =
+				synthesis.overallVerdict === 'APPROVE' ||
+				(synthesis.overallVerdict === 'CONCERNS' &&
+					synthesis.blockingConcernsCount === 0);
+
+			return {
+				disposition: `evaluated_${synthesis.overallVerdict.toLowerCase()}`,
+				response: {
+					success: true,
+					phase: input.phase,
+					overallVerdict: synthesis.overallVerdict,
+					verdict: normalizedVerdict,
+					vetoedBy: synthesis.vetoedBy,
+					roundNumber: synthesis.roundNumber,
+					allCriteriaMet: synthesis.allCriteriaMet,
+					requiredFixesCount: synthesis.requiredFixes.length,
+					advisoryFindingsCount: synthesis.advisoryFindings.length,
+					unresolvedConflictsCount: synthesis.unresolvedConflicts.length,
+					advisoryNotes: synthesis.advisoryNotes,
+					membersVoted,
+					membersAbsent,
+					quorumSize: synthesis.quorumSize,
+					quorumMet: true,
+					evidencePath: synthesis.evidencePath,
+					unifiedFeedbackMd: synthesis.unifiedFeedbackMd,
+					message:
+						'Final council evidence written to .swarm/evidence/final-council.json',
+				},
+				transition: accepted ? 'close' : 'advance',
+				gateEffect: accepted ? 'allowed' : 'blocked',
+				verdict: synthesis.overallVerdict,
+				quorumSize: synthesis.quorumSize,
+				evidence: {
+					reference: synthesis.evidencePath,
+					commit: async (attemptId) => {
+						await withEvidenceLock(
+							directory,
+							path.join('evidence', 'final-council.json'),
+							'write-final-council-evidence',
+							attemptId,
+							async () => {
+								// Generation locks are intentionally distinct. Re-check the
+								// current plan while holding this shared publication lock so an
+								// older generation can never overwrite newer final evidence.
+								const currentPlan = await loadPlan(directory);
+								if (!currentPlan || computePlanHash(currentPlan) !== planHash) {
+									throw new Error(
+										'final council plan changed before evidence publication',
+									);
+								}
+								await fs.promises.mkdir(evidenceDir, { recursive: true });
+								const tempPath = path.join(
+									evidenceDir,
+									`.final-council.${attemptId}.tmp`,
+								);
+								try {
+									await fs.promises.writeFile(
+										tempPath,
+										JSON.stringify(
+											{
+												entries: [
+													{
+														...evidenceEntry,
+														attemptId,
+													},
+												],
+											},
+											null,
+											2,
+										),
+										'utf-8',
+									);
+									await fs.promises.rename(tempPath, validatedPath);
+								} finally {
+									await fs.promises
+										.rm(tempPath, { force: true })
+										.catch(() => {});
+								}
+							},
+						);
+					},
+				},
+				afterCommit: async () => {
+					try {
+						const memoryConfig = config.memory;
+						if (memoryConfig?.enabled === true && ctx?.sessionID) {
+							const provider = createConfiguredMemoryProvider(
+								directory,
+								memoryConfig,
+							);
+							try {
+								await applyCouncilReward(provider, {
+									runId: ctx.sessionID,
+									unitId: undefined,
+									reward: COUNCIL_VERDICT_REWARDS[synthesis.overallVerdict],
+									eta: memoryConfig.qLearning.learningRate,
+									initialQValue: memoryConfig.qLearning.initialQValue,
+									qLearning: memoryConfig.qLearning,
+									timestamp: new Date().toISOString(),
+									verdictLabel: synthesis.overallVerdict,
+								});
+							} finally {
+								await provider.close?.();
+							}
+						}
+					} catch (rewardErr) {
+						logger.warn(
+							`[write-final-council-evidence] final council reward capture failed: ${rewardErr instanceof Error ? rewardErr.message : String(rewardErr)}`,
+						);
+					}
+				},
+			};
+		},
+	});
 }
 
 /**
@@ -361,7 +393,9 @@ export const write_final_council_evidence: ToolDefinition = createSwarmTool({
 			.min(1)
 			.max(10)
 			.optional()
-			.describe('1-indexed final council round number. Defaults to 1.'),
+			.describe(
+				'1-indexed final council round number. Defaults to the current server round.',
+			),
 		verdicts: z
 			.array(VerdictSchema)
 			.min(1)
@@ -370,26 +404,40 @@ export const write_final_council_evidence: ToolDefinition = createSwarmTool({
 				'Collected CouncilMemberVerdict objects from critic, reviewer, sme, test_engineer, and explorer.',
 			),
 	},
-	execute: async (args, directory, ctx) => {
-		const parsed = ArgsSchema.safeParse(args);
-		if (!parsed.success) {
-			return JSON.stringify(
-				{
-					success: false,
-					reason: 'invalid arguments',
-					errors: parsed.error.issues.map((i) => ({
-						path: i.path.join('.'),
-						message: i.message,
-					})),
-				},
-				null,
-				2,
-			);
-		}
-		return await executeWriteFinalCouncilEvidence(
-			parsed.data as WriteFinalCouncilEvidenceArgs,
-			directory,
-			ctx,
-		);
-	},
+	execute: async (args, directory, ctx) =>
+		executeWriteFinalCouncilEvidence(args, directory, ctx),
 });
+
+function hasFinalEvidenceAttempt(
+	directory: string,
+	attemptId: string,
+	round: number,
+): boolean {
+	try {
+		const evidencePath = validateSwarmPath(
+			directory,
+			path.join('evidence', 'final-council.json'),
+		);
+		const parsed = JSON.parse(fs.readFileSync(evidencePath, 'utf8')) as {
+			entries?: Array<{
+				type?: unknown;
+				attemptId?: unknown;
+				roundNumber?: unknown;
+			}>;
+		};
+		return Boolean(
+			parsed.entries?.some(
+				(entry) =>
+					entry.type === 'final-council' &&
+					entry.attemptId === attemptId &&
+					entry.roundNumber === round,
+			),
+		);
+	} catch {
+		return false;
+	}
+}
+
+export const _internals = {
+	validateSwarmPath,
+};

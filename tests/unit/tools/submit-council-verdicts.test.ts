@@ -23,11 +23,9 @@ const writeConfig = (dir: string, council: Record<string, unknown>): void => {
 const makeVerdict = (
 	agent: string,
 	verdict: 'APPROVE' | 'CONCERNS' | 'REJECT' = 'APPROVE',
-	verdictRound?: number,
 ): Record<string, unknown> => ({
 	agent,
 	verdict,
-	...(verdictRound !== undefined ? { verdictRound } : {}),
 	confidence: 1,
 	findings: [],
 	criteriaAssessed: [],
@@ -363,7 +361,7 @@ describe('submit_council_verdicts — quorum guard', () => {
 		}
 	});
 
-	test('round 2 requires prior-round dissenter to re-review', async () => {
+	test('nonblocking CONCERNS remains gate-eligible and closes round state', async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), 'submit-dissenter-round2-'));
 		const sessionID = `submit-council-${Date.now()}-b`;
 		try {
@@ -378,9 +376,9 @@ describe('submit_council_verdicts — quorum guard', () => {
 					swarmId: 'swarm-1',
 					roundNumber: 1,
 					verdicts: [
-						makeVerdict('critic', 'APPROVE', 1),
-						makeVerdict('reviewer', 'APPROVE', 1),
-						makeVerdict('sme', 'CONCERNS', 1),
+						makeVerdict('critic', 'APPROVE'),
+						makeVerdict('reviewer', 'APPROVE'),
+						makeVerdict('sme', 'CONCERNS'),
 					],
 					working_directory: tempDir,
 				},
@@ -393,11 +391,10 @@ describe('submit_council_verdicts — quorum guard', () => {
 				{
 					taskId: '2.2',
 					swarmId: 'swarm-1',
-					roundNumber: 2,
 					verdicts: [
-						makeVerdict('critic', 'APPROVE', 2),
-						makeVerdict('reviewer', 'APPROVE', 2),
-						makeVerdict('test_engineer', 'APPROVE', 2),
+						makeVerdict('critic', 'APPROVE'),
+						makeVerdict('reviewer', 'APPROVE'),
+						makeVerdict('test_engineer', 'APPROVE'),
 					],
 					working_directory: tempDir,
 				},
@@ -405,12 +402,9 @@ describe('submit_council_verdicts — quorum guard', () => {
 			);
 			const round2Parsed = JSON.parse(round2);
 			expect(round2Parsed.success).toBe(false);
-			expect(round2Parsed.reason).toBe('cherry_pick_detected');
-			expect(round2Parsed.stillMissingMembers).toEqual(['sme']);
+			expect(round2Parsed.reason).toBe('council_round_closed');
 		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
-	// Stale-verdict detection tests extracted to
-	// submit-council-verdicts-stale.test.ts for FR-006 line-cap compliance.
 });

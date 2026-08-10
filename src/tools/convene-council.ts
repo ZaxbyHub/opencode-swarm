@@ -1,24 +1,17 @@
-/**
- * Submit Council Verdicts — architect-only tool.
- *
- * Accepts pre-collected parallel verdicts from critic, reviewer, sme,
- * test_engineer, and explorer, then synthesizes them into a veto-aware
- * overall verdict with required fixes and a single unified feedback document.
- *
- * PREREQUISITE: The architect must dispatch each council member as a separate
- * Agent task and collect the resulting CouncilMemberVerdict objects BEFORE
- * calling this tool. This tool performs synthesis only — it does NOT dispatch,
- * invoke, or contact council members.
- *
- * Config-gated (council.enabled must be true) and architect-only via
- * AGENT_TOOL_MAP. Follows the check-gate-status.ts pattern.
- */
+/** Submit pre-collected task council verdicts with durable server-owned rounds. */
 
 import type { tool } from '@opencode-ai/plugin';
 import { z } from 'zod';
 import { loadPluginConfig } from '../config/loader';
 import { pushCouncilAdvisory } from '../council/council-advisory';
-import { writeCouncilEvidence } from '../council/council-evidence-writer';
+import {
+	hasCouncilEvidenceAttempt,
+	writeCouncilEvidence,
+} from '../council/council-evidence-writer';
+import {
+	recordUnscopedCouncilAttempt,
+	runCouncilAttempt,
+} from '../council/council-round-state';
 import { synthesizeCouncilVerdicts } from '../council/council-service';
 import { readCriteria } from '../council/criteria-store';
 import type { CouncilMemberVerdict } from '../council/types';
@@ -26,9 +19,14 @@ import { getAgentSession } from '../state';
 import { createSwarmTool } from './create-tool';
 import { resolveWorkingDirectory } from './resolve-working-directory';
 
-// ============ Internal validation schema ============
-// z declares the public args surface for the plugin host.
-// We additionally validate with zod for strict runtime safety and clear errors.
+const ALL_MEMBERS = [
+	'critic',
+	'reviewer',
+	'sme',
+	'test_engineer',
+	'explorer',
+] as const;
+
 const FindingSchema = z.object({
 	severity: z.enum(['CRITICAL', 'HIGH', 'MEDIUM', 'LOW']),
 	category: z.string().min(1),
@@ -38,9 +36,8 @@ const FindingSchema = z.object({
 });
 
 const VerdictSchema = z.object({
-	agent: z.enum(['critic', 'reviewer', 'sme', 'test_engineer', 'explorer']),
+	agent: z.enum(ALL_MEMBERS),
 	verdict: z.enum(['APPROVE', 'CONCERNS', 'REJECT']),
-	verdictRound: z.number().int().min(1).max(10).optional(),
 	confidence: z.number().min(0).max(1),
 	findings: z.array(FindingSchema),
 	criteriaAssessed: z.array(z.string()),
@@ -48,8 +45,6 @@ const VerdictSchema = z.object({
 	durationMs: z.number().nonnegative(),
 });
 
-// Task ID pattern matches the canonical STRICT_TASK_ID_PATTERN in src/validation/task-id.ts.
-// Leading zeros (e.g., "01.1") are accepted — consistent with the canonical validator.
 export const ArgsSchema = z.object({
 	taskId: z
 		.string()
@@ -59,323 +54,272 @@ export const ArgsSchema = z.object({
 			'Task ID must be in N.M or N.M.P format (e.g. "1.1")',
 		),
 	swarmId: z.string().min(1),
-	roundNumber: z.number().int().min(1).max(10).default(1),
+	roundNumber: z.number().int().min(1).max(10).optional(),
 	verdicts: z.array(VerdictSchema).min(1).max(5),
 	working_directory: z.string().optional(),
 });
+
+function invalidResponse(issues: z.ZodIssue[]): string {
+	return JSON.stringify(
+		{
+			success: false,
+			reason: 'invalid arguments',
+			errors: issues.map((issue) => ({
+				path: issue.path.join('.'),
+				message: issue.message,
+			})),
+		},
+		null,
+		2,
+	);
+}
 
 export const submit_council_verdicts: ReturnType<typeof tool> = createSwarmTool(
 	{
 		description:
 			'Submit pre-collected council member verdicts for synthesis. PREREQUISITE — ' +
-			'you MUST dispatch each council member (critic, reviewer, sme, test_engineer, ' +
-			'explorer) as separate Agent tasks and collect their verdict responses BEFORE ' +
-			'calling this tool. This tool performs synthesis only — it does NOT dispatch, ' +
-			'invoke, or contact council members. Calling this tool without first ' +
-			'collecting real verdicts from dispatched agents constitutes a council bypass. ' +
-			'Returns the synthesized verdict, required fixes, and a quorum report showing ' +
-			'which members voted and which were absent. Architect-only. Config-gated via ' +
-			'council.enabled.',
+			'dispatch critic, reviewer, sme, test_engineer, and explorer as separate Agent tasks, ' +
+			'then submit their real verdicts here. The server owns the current council round; ' +
+			'roundNumber is only an optional expectation. Architect-only and config-gated.',
 		args: {
-			taskId: z
-				.string()
-				.min(1)
-				.regex(/^\d+\.\d+(\.\d+)*$/, 'Task ID must be in N.M or N.M.P format')
-				.describe('Task ID being evaluated, e.g. "1.1", "1.2.3"'),
-			swarmId: z.string().min(1).describe('Swarm identifier, e.g. "mega"'),
-			roundNumber: z
-				.number()
-				.int()
-				.min(1)
-				.max(10)
-				.optional()
-				.describe('1-indexed round number. Defaults to 1.'),
-			verdicts: z
-				.array(
-					z.object({
-						agent: z.enum([
-							'critic',
-							'reviewer',
-							'sme',
-							'test_engineer',
-							'explorer',
-						]),
-						verdict: z.enum(['APPROVE', 'CONCERNS', 'REJECT']),
-						verdictRound: z.number().int().min(1).max(10).optional(),
-						confidence: z.number().min(0).max(1),
-						findings: z.array(
-							z.object({
-								severity: z.enum(['CRITICAL', 'HIGH', 'MEDIUM', 'LOW']),
-								category: z.string().min(1),
-								location: z.string(),
-								detail: z.string(),
-								evidence: z.string(),
-							}),
-						),
-						criteriaAssessed: z.array(z.string()),
-						criteriaUnmet: z.array(z.string()),
-						durationMs: z.number(),
-					}),
-				)
-				.min(1)
-				.max(5)
-				.describe(
-					'Array of CouncilMemberVerdict objects. Must include between 1 and 5 entries, one per participating member (critic, reviewer, sme, test_engineer, explorer).',
-				),
-			working_directory: z
-				.string()
-				.optional()
-				.describe(
-					'Explicit project root directory. When provided, .swarm/council/ and .swarm/evidence/ are resolved relative to this path instead of the plugin context directory.',
-				),
+			taskId: ArgsSchema.shape.taskId.describe('Task ID, e.g. "1.1"'),
+			swarmId: ArgsSchema.shape.swarmId.describe(
+				'Swarm identifier, e.g. "mega"',
+			),
+			roundNumber: ArgsSchema.shape.roundNumber.describe(
+				'Optional expected server round. Omit to use the authoritative current round.',
+			),
+			verdicts: ArgsSchema.shape.verdicts.describe(
+				'Collected CouncilMemberVerdict objects from dispatched council members.',
+			),
+			working_directory: ArgsSchema.shape.working_directory.describe(
+				'Explicit project root directory.',
+			),
 		},
 		async execute(
 			args: unknown,
 			directory: string,
 			ctx?: { sessionID?: string },
 		): Promise<string> {
-			// ── Validate args with zod ─────────────────────────────────────────
 			const parsed = ArgsSchema.safeParse(args);
 			if (!parsed.success) {
-				return JSON.stringify(
-					{
-						success: false,
-						reason: 'invalid arguments',
-						errors: parsed.error.issues.map((i) => ({
-							path: i.path.join('.'),
-							message: i.message,
-						})),
-					},
-					null,
-					2,
+				const failure = await recordUnscopedCouncilAttempt(
+					directory,
+					'task',
+					'invalid_arguments',
+					args,
+					parsed.error.issues.map((issue) => ({
+						path: issue.path,
+						code: issue.code,
+					})),
+					ctx?.sessionID,
 				);
+				return failure ?? invalidResponse(parsed.error.issues);
 			}
 			const input = parsed.data;
-
-			// ── Resolve effective working directory ───────────────────────────
-			const dirResult = resolveWorkingDirectory(
+			const resolved = resolveWorkingDirectory(
 				input.working_directory,
 				directory,
 			);
-			if (!dirResult.success) {
-				return JSON.stringify(
-					{ success: false, reason: dirResult.message },
-					null,
-					2,
+			if (!resolved.success) {
+				const failure = await recordUnscopedCouncilAttempt(
+					directory,
+					'task',
+					'invalid_working_directory',
+					input,
+					[],
+					ctx?.sessionID,
+				);
+				return (
+					failure ??
+					JSON.stringify({ success: false, reason: resolved.message }, null, 2)
 				);
 			}
-			const workingDir = dirResult.directory;
 
-			// ── Config gate ───────────────────────────────────────────────────
+			const workingDir = resolved.directory;
 			const config = loadPluginConfig(workingDir);
-			if (!config.council?.enabled) {
-				return JSON.stringify(
-					{
-						success: false,
-						reason:
-							'council feature is disabled — set council.enabled: true in .opencode/opencode-swarm.json to enable',
-					},
-					null,
-					2,
-				);
-			}
-
-			// ── Quorum gate ───────────────────────────────────────────────────
-			// requireAllMembers: true wins over minimumMembers. When unset,
-			// minimumMembers defaults to 3 — a single-verdict call can no longer
-			// synthesize an APPROVE.
-			const effectiveMinimum = config.council?.requireAllMembers
-				? 5
-				: (config.council?.minimumMembers ?? 3);
-			const ALL_MEMBERS = [
-				'critic',
-				'reviewer',
-				'sme',
-				'test_engineer',
-				'explorer',
-			] as const;
-			const distinctMembers = new Set<(typeof ALL_MEMBERS)[number]>(
-				input.verdicts.map((v) => v.agent),
+			const councilConfig = config.council;
+			const distinctMembers = new Set(
+				input.verdicts.map((verdict) => verdict.agent),
 			);
 			const membersVoted = [...distinctMembers];
-			const membersAbsent = ALL_MEMBERS.filter((m) => !distinctMembers.has(m));
-			const sessionID = ctx?.sessionID;
-			const session = sessionID ? getAgentSession(sessionID) : undefined;
-			const requirementKey = `${input.taskId}:${input.roundNumber}`;
-			if (session && !session.pendingCouncilRequirements) {
-				session.pendingCouncilRequirements = new Map();
-			}
-			const pendingRequirements =
-				session?.pendingCouncilRequirements?.get(requirementKey);
-			if (pendingRequirements && pendingRequirements.size > 0) {
-				const stillMissingMembers = [...pendingRequirements].filter(
-					(member) => !distinctMembers.has(member),
-				);
-				if (stillMissingMembers.length > 0) {
-					return JSON.stringify(
-						{
-							success: false,
-							reason: 'cherry_pick_detected',
-							message:
-								`Incomplete re-dispatch: ${stillMissingMembers.join(', ')} ` +
-								'were required from the previous insufficient_quorum response ' +
-								'but are still absent. Dispatch ALL absent members in one parallel batch.',
-							stillMissingMembers,
-							membersProvided: membersVoted,
-						},
-						null,
-						2,
-					);
-				}
-			}
-
-			if (membersVoted.length < effectiveMinimum) {
-				if (session?.pendingCouncilRequirements) {
-					session.pendingCouncilRequirements.set(
-						requirementKey,
-						new Set(membersAbsent),
-					);
-				}
-				return JSON.stringify(
-					{
-						success: false,
-						reason: 'insufficient_quorum',
-						message:
-							`Council quorum not met: ${membersVoted.length} of ${effectiveMinimum} required members provided verdicts. ` +
-							`Members voted: [${membersVoted.join(', ')}]. ` +
-							`Members absent: [${membersAbsent.join(', ')}]. ` +
-							`Dispatch the absent council members as Agent tasks and collect their verdicts before calling submit_council_verdicts.`,
-						membersVoted,
-						membersAbsent,
-						quorumRequired: effectiveMinimum,
-					},
-					null,
-					2,
-				);
-			}
-			// A verdict that omits verdictRound is untagged — it carries no round
-			// information. Default it to the CURRENT round, not 1, so fresh
-			// re-dispatched verdicts are accepted at round 2+ (issue #2020). The
-			// previous `?? 1` default deadlocked every round-2+ submission because
-			// no production code path stamps verdictRound onto collected verdicts
-			// (council member agents never emit it; the architect prompt does not
-			// list it; collect_lane_results has no concept of council rounds).
-			// Explicit stale values (verdictRound: 1 carried into roundNumber: 2)
-			// are still caught and rejected, preserving the anti-replay guarantee
-			// for the case that matters.
-			const staleVerdicts =
-				input.roundNumber > 1
-					? input.verdicts.filter(
-							(v) => (v.verdictRound ?? input.roundNumber) < input.roundNumber,
-						)
-					: [];
-			if (staleVerdicts.length > 0) {
-				return JSON.stringify(
-					{
-						success: false,
-						reason: 'stale_verdict_detected',
-						message:
-							`Round ${input.roundNumber} requires fresh verdicts. ` +
-							'One or more submitted verdicts are from an older round.',
-						staleVerdicts: staleVerdicts.map((v) => ({
-							agent: v.agent,
-							verdictRound: v.verdictRound,
-						})),
-					},
-					null,
-					2,
-				);
-			}
-
-			// ── Council evaluation ────────────────────────────────────────────
-			const criteria = readCriteria(workingDir, input.taskId);
-			const verdicts = input.verdicts as CouncilMemberVerdict[];
-			const synthesis = synthesizeCouncilVerdicts(
-				input.taskId,
-				input.swarmId,
-				verdicts,
-				criteria,
-				input.roundNumber,
-				config.council,
+			const membersAbsent = ALL_MEMBERS.filter(
+				(member) => !distinctMembers.has(member),
 			);
-			const dissenters = synthesis.memberVerdicts
-				.filter((v) => v.verdict === 'CONCERNS' || v.verdict === 'REJECT')
-				.map((v) => v.agent);
-			if (session?.pendingCouncilRequirements) {
-				session.pendingCouncilRequirements.delete(requirementKey);
-				if (dissenters.length > 0) {
-					const nextRoundKey = `${input.taskId}:${input.roundNumber + 1}`;
-					session.pendingCouncilRequirements.set(
-						nextRoundKey,
-						new Set(dissenters),
-					);
-				}
-			}
+			const session = ctx?.sessionID
+				? getAgentSession(ctx.sessionID)
+				: undefined;
 
-			// ── Blocking concerns gate ────────────────────────────────────────
-			if (
-				synthesis.overallVerdict === 'CONCERNS' &&
-				synthesis.blockingConcernsCount > 0
-			) {
-				return JSON.stringify(
-					{
-						success: false,
-						reason: 'blocking_concerns_unresolved',
-						overallVerdict: synthesis.overallVerdict,
-						blockingConcernsCount: synthesis.blockingConcernsCount,
-						requiredFixes: synthesis.requiredFixes,
-						unifiedFeedbackMd: synthesis.unifiedFeedbackMd,
-						message: `Council returned CONCERNS with ${synthesis.blockingConcernsCount} HIGH/CRITICAL finding(s) promoted to requiredFixes. These must be resolved before the task can advance. Do NOT write evidence or proceed — address every requiredFix and resubmit.`,
-					},
-					null,
-					2,
-				);
-			}
-
-			// ── Evidence write ────────────────────────────────────────────────
-			// Awaited: writeCouncilEvidence now acquires the shared evidence lock
-			// and writes atomically (#978). A lock-timeout throw is caught by the
-			// createSwarmTool wrapper and surfaced as a structured failure.
-			await writeCouncilEvidence(workingDir, synthesis);
-
-			// ── Architect self-echo advisory ──────────────────────────────────
-			// When the tool is invoked inside an architect session, push the
-			// unified feedback into the session's pending advisory queue so the
-			// next messagesTransform surfaces it as an [ADVISORIES] block. This
-			// is best-effort: missing sessionID, session not found, or a thrown
-			// error all silently skip — the advisory is never critical-path.
-			try {
-				if (sessionID) {
-					if (session) {
-						pushCouncilAdvisory(session, synthesis);
+			return runCouncilAttempt({
+				directory: workingDir,
+				scope: { kind: 'task', taskId: input.taskId },
+				clientRound: input.roundNumber,
+				maxRounds: councilConfig?.maxRounds ?? 3,
+				sessionID: ctx?.sessionID,
+				request: input,
+				verdictCount: input.verdicts.length,
+				members: membersVoted,
+				probePendingEvidence: async (attemptId, round) =>
+					hasCouncilEvidenceAttempt(workingDir, input.taskId, attemptId, round),
+				evaluate: async (authoritativeRound) => {
+					if (!councilConfig?.enabled) {
+						return {
+							disposition: 'council_disabled',
+							response: {
+								success: false,
+								reason:
+									'council feature is disabled — set council.enabled: true in .opencode/opencode-swarm.json to enable',
+							},
+							transition: 'stay',
+							gateEffect: 'none',
+						};
 					}
-				}
-			} catch {
-				// Advisory delivery is non-critical; never propagate.
-			}
 
-			return JSON.stringify(
-				{
-					success: true,
-					overallVerdict: synthesis.overallVerdict,
-					vetoedBy: synthesis.vetoedBy,
-					roundNumber: synthesis.roundNumber,
-					allCriteriaMet: synthesis.allCriteriaMet,
-					requiredFixesCount: synthesis.requiredFixes.length,
-					advisoryFindingsCount: synthesis.advisoryFindings.length,
-					unresolvedConflictsCount: synthesis.unresolvedConflicts.length,
-					// Quorum report — anti-hallucination signal. If membersAbsent is
-					// non-empty, the architect cannot legitimately claim "Council
-					// APPROVED unanimously".
-					membersVoted,
-					membersAbsent,
-					quorumSize: membersVoted.length,
-					quorumMet: true,
-					unifiedFeedbackMd: synthesis.unifiedFeedbackMd,
+					const effectiveMinimum = councilConfig.requireAllMembers
+						? 5
+						: (councilConfig.minimumMembers ?? 3);
+					const requirementKey = `${input.taskId}:${authoritativeRound}`;
+					if (session && !session.pendingCouncilRequirements) {
+						session.pendingCouncilRequirements = new Map();
+					}
+					const required =
+						session?.pendingCouncilRequirements?.get(requirementKey);
+					const stillMissingMembers = required
+						? [...required].filter((member) => !distinctMembers.has(member))
+						: [];
+					if (stillMissingMembers.length > 0) {
+						return {
+							disposition: 'cherry_pick_detected',
+							response: {
+								success: false,
+								reason: 'cherry_pick_detected',
+								message:
+									`Incomplete re-dispatch: ${stillMissingMembers.join(', ')} ` +
+									'were required from the previous insufficient_quorum response but are still absent. Dispatch ALL absent members in one parallel batch.',
+								stillMissingMembers,
+								membersProvided: membersVoted,
+							},
+							transition: 'stay',
+							gateEffect: 'none',
+						};
+					}
+					if (membersVoted.length < effectiveMinimum) {
+						session?.pendingCouncilRequirements?.set(
+							requirementKey,
+							new Set(membersAbsent),
+						);
+						return {
+							disposition: 'insufficient_quorum',
+							response: {
+								success: false,
+								reason: 'insufficient_quorum',
+								message:
+									`Council quorum not met: ${membersVoted.length} of ${effectiveMinimum} required members provided verdicts. ` +
+									`Members voted: [${membersVoted.join(', ')}]. Members absent: [${membersAbsent.join(', ')}]. ` +
+									'Dispatch the absent council members before resubmitting.',
+								membersVoted,
+								membersAbsent,
+								quorumRequired: effectiveMinimum,
+							},
+							transition: 'stay',
+							gateEffect: 'none',
+						};
+					}
+
+					const synthesis = synthesizeCouncilVerdicts(
+						input.taskId,
+						input.swarmId,
+						input.verdicts as CouncilMemberVerdict[],
+						readCriteria(workingDir, input.taskId),
+						authoritativeRound,
+						councilConfig,
+					);
+					const dissenters = synthesis.memberVerdicts
+						.filter(
+							(verdict) =>
+								verdict.verdict === 'CONCERNS' || verdict.verdict === 'REJECT',
+						)
+						.map((verdict) => verdict.agent);
+					const updateRequirements = (
+						transition: 'advance' | 'close',
+					): void => {
+						if (!session?.pendingCouncilRequirements) return;
+						session.pendingCouncilRequirements.delete(requirementKey);
+						if (transition === 'advance' && dissenters.length > 0) {
+							const nextRequiredRound = Math.min(
+								authoritativeRound + 1,
+								Math.max(authoritativeRound, councilConfig.maxRounds),
+							);
+							session.pendingCouncilRequirements.set(
+								`${input.taskId}:${nextRequiredRound}`,
+								new Set(dissenters),
+							);
+						}
+					};
+
+					if (
+						synthesis.overallVerdict === 'CONCERNS' &&
+						synthesis.blockingConcernsCount > 0
+					) {
+						return {
+							disposition: 'blocking_concerns_unresolved',
+							response: {
+								success: false,
+								reason: 'blocking_concerns_unresolved',
+								overallVerdict: synthesis.overallVerdict,
+								blockingConcernsCount: synthesis.blockingConcernsCount,
+								requiredFixes: synthesis.requiredFixes,
+								unifiedFeedbackMd: synthesis.unifiedFeedbackMd,
+								message: `Council returned CONCERNS with ${synthesis.blockingConcernsCount} blocking finding(s). Address every requiredFix and resubmit.`,
+							},
+							transition: 'advance',
+							gateEffect: 'blocked',
+							verdict: synthesis.overallVerdict,
+							quorumSize: membersVoted.length,
+							afterCommit: () => updateRequirements('advance'),
+						};
+					}
+
+					const transition =
+						synthesis.overallVerdict === 'REJECT' ? 'advance' : 'close';
+					return {
+						disposition: `evaluated_${synthesis.overallVerdict.toLowerCase()}`,
+						response: {
+							success: true,
+							overallVerdict: synthesis.overallVerdict,
+							vetoedBy: synthesis.vetoedBy,
+							roundNumber: synthesis.roundNumber,
+							allCriteriaMet: synthesis.allCriteriaMet,
+							requiredFixesCount: synthesis.requiredFixes.length,
+							advisoryFindingsCount: synthesis.advisoryFindings.length,
+							unresolvedConflictsCount: synthesis.unresolvedConflicts.length,
+							membersVoted,
+							membersAbsent,
+							quorumSize: membersVoted.length,
+							quorumMet: true,
+							unifiedFeedbackMd: synthesis.unifiedFeedbackMd,
+						},
+						transition,
+						gateEffect: transition === 'close' ? 'allowed' : 'blocked',
+						verdict: synthesis.overallVerdict,
+						quorumSize: membersVoted.length,
+						evidence: {
+							reference: `.swarm/evidence/${input.taskId}.json`,
+							commit: async (attemptId) =>
+								writeCouncilEvidence(workingDir, synthesis, attemptId),
+						},
+						afterCommit: async () => {
+							updateRequirements(transition);
+							try {
+								if (ctx?.sessionID && session)
+									pushCouncilAdvisory(session, synthesis);
+							} catch {
+								// Advisory delivery is non-critical.
+							}
+						},
+					};
 				},
-				null,
-				2,
-			);
+			});
 		},
 	},
 );

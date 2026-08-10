@@ -365,7 +365,7 @@ describe('executeWriteFinalCouncilEvidence', () => {
 		const renameTo = renameSpy.mock.calls[0][1] as string;
 
 		expect(tempPath).toContain('.swarm');
-		expect(tempPath).toContain('.final-council.json.tmp');
+		expect(tempPath).toMatch(/\.final-council\.[0-9a-f-]+\.tmp$/i);
 		expect(renameFrom).toBe(tempPath);
 		expect(renameTo).toBe(
 			path.join(tempDir, '.swarm', 'evidence', 'final-council.json'),

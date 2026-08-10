@@ -261,7 +261,11 @@ describe('handleCloseCommand — finalize lock (FR-012)', () => {
 
 	// ── Test: locks dir excluded from active-state cleanup ─────────────
 
-	describe('Active-state cleanup excludes locks', () => {
+	describe('Active-state cleanup directory contract', () => {
+		it('includes durable council state so a new swarm starts at round one', () => {
+			expect(closeInternals.ACTIVE_STATE_DIRS_TO_CLEAN).toContain('council');
+		});
+
 		it('does not include "locks" in ACTIVE_STATE_DIRS_TO_CLEAN', () => {
 			expect(closeInternals.ACTIVE_STATE_DIRS_TO_CLEAN).not.toContain('locks');
 		});

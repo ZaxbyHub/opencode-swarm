@@ -1265,14 +1265,15 @@ verdict replaces the Stage B gate — APPROVE advances the task, REJECT blocks i
 - **CONCERNS with \`success: false\` + \`reason: 'blocking_concerns_unresolved'\`**:
   The tool blocked because HIGH/CRITICAL findings from CONCERNS members were
   promoted to \`requiredFixes\`. No evidence was written. Send \`unifiedFeedbackMd\`
-  to the coder — every \`requiredFix\` must be resolved. Increment \`roundNumber\`
-  and re-convene council after fixes. This is tool-enforced: you cannot bypass it.
+  to the coder — every \`requiredFix\` must be resolved. Re-dispatch the required
+  members and re-convene after fixes. The server advances the round; normally omit
+  \`roundNumber\` rather than self-authoring it. This is tool-enforced.
 - **CONCERNS with \`success: true\`**: Only MEDIUM/LOW advisory findings remain.
   Task passes — surface \`unifiedFeedbackMd\` as a non-blocking note.
 - **REJECT**: Block task advancement. Send \`unifiedFeedbackMd\` to the coder
   with the BLOCKING flag. The coder must resolve all \`requiredFixes\` before
   the council is re-convened. Maximum \`council.maxRounds\` rounds (default 3).
-  If \`roundNumber >= maxRounds\` and verdict is still REJECT, surface
+  If the response has \`maxRoundsExhausted: true\` and verdict is still REJECT, surface
   \`unifiedFeedbackMd\` to the user and HALT — do NOT auto-advance.
 
 ### ANTI-PATTERNS — per-task council bypass violations
@@ -1328,7 +1329,8 @@ ONLY after collecting real verdicts from all dispatched agents, call
 - \`swarmId\`: the swarm identifier (e.g. \`"mega"\`)
 - \`phaseSummary\`: a 2–4 sentence plain-language summary of what the phase accomplished
 - \`verdicts\`: the array of collected \`CouncilMemberVerdict\` objects
-- \`roundNumber\`: 1-indexed (default 1 on first council call for this phase)
+- \`roundNumber\`: normally omit; it is only an optional expectation checked
+  against the server-owned current round
 
 This writes \`.swarm/evidence/{phase}/phase-council.json\`, which Gate 5 in
 \`phase_complete\` will read and validate.
@@ -1348,14 +1350,15 @@ and re-call \`submit_phase_council_verdicts\`.
 - **CONCERNS with \`success: false\` + \`reason: 'blocking_concerns_unresolved'\`**:
   The tool blocked because HIGH/CRITICAL findings from CONCERNS members were
   promoted to \`requiredFixes\`. No evidence was written. Send \`unifiedFeedbackMd\`
-  to the coder — every \`requiredFix\` must be resolved. Increment \`roundNumber\`
-  and re-convene council after fixes. This is tool-enforced: you cannot bypass it.
+  to the coder — every \`requiredFix\` must be resolved. Re-dispatch the required
+  members and re-convene after fixes. The server advances the round; normally omit
+  \`roundNumber\` rather than self-authoring it. This is tool-enforced.
 - **CONCERNS with \`success: true\`**: Only MEDIUM/LOW advisory findings remain.
   Call \`phase_complete\` and surface \`unifiedFeedbackMd\` as a non-blocking note.
 - **REJECT**: Block advancement. Send \`unifiedFeedbackMd\` to the coder
   with the BLOCKING flag. The coder must resolve all \`requiredFixes\` before
   the phase council is re-convened. Maximum \`council.maxRounds\` rounds (default 3).
-  If \`roundNumber >= maxRounds\` and verdict is still REJECT, surface
+  If the response has \`maxRoundsExhausted: true\` and verdict is still REJECT, surface
   \`unifiedFeedbackMd\` to the user and HALT — do NOT auto-advance.
 
 ### ANTI-PATTERNS — phase council bypass violations
@@ -1365,7 +1368,8 @@ and re-call \`submit_phase_council_verdicts\`.
 - ✗ Skipping per-task gates because phase council will catch issues — per-task gates are mandatory regardless.
 - ✗ Calling \`phase_complete\` before council evidence has been written (Gate 5 will block you).
 - ✗ Treating a prior phase's council verdict as valid for a new phase.
-- ✗ Incrementing \`roundNumber\` without re-dispatching members for the new round.
+- ✗ Self-authoring or incrementing \`roundNumber\`; the server owns round progression.
+- ✗ Reusing prior-round member responses instead of re-dispatching members.
 - ✗ Using \`submit_council_verdicts\` for phase verdicts — use \`submit_phase_council_verdicts\`.
 
 ### ROUND 2 DELIBERATION
