@@ -615,7 +615,21 @@ authority checks:
 
 ## FR-006: Test File Size Limit (500 lines)
 
-`scripts/check-test-file-cap.sh` enforces the **500-line cap** per test file (FR-006) as a **diff-scoped ratchet**: new test files over 500 lines and existing over-cap files that grew fail the quality gate and block PR merge. Pre-existing over-cap files not touched by the PR are non-blocking. Escape hatch: `TEST_CAP_ENFORCE=0` soft-warns (use only for a deliberate growth PR).
+`scripts/check-test-file-cap.ts` enforces the **500-line cap** per test file (FR-006) as a **diff-scoped ratchet**: new test files over 500 lines and existing over-cap files that grew fail the quality gate and block PR merge. Pre-existing over-cap files not touched by the PR are non-blocking. Escape hatch: `TEST_CAP_ENFORCE=0` soft-warns (use only for a deliberate growth PR).
+
+### Local validation (all platforms, including Windows)
+
+Run the **identical** gate CI runs — no Bash required (issue #2078):
+
+```
+bun run check:test-file-cap
+```
+
+- Works in Windows PowerShell, macOS, and Linux; `scripts/check-test-file-cap.sh` is a zero-logic shim that `exec`s the same TypeScript file, so the two entry points cannot report different results.
+- The gate is **diff-scoped**: it compares your branch against the first of `origin/main`, `origin/master`, `main`, `master` that resolves. Run `git fetch origin main` first — a stale or missing base makes the comparison stale, and with **no** base branch resolvable the gate has nothing to compare and reports zero violations (a vacuous pass, not a real one). A branch that is *behind* its base is the other stale-base trap: the diff then contains the base's own commits in reverse, so counts are meaningless until you rebase.
+- Directory-independent: the gate resolves the repository root itself, so running it from a subdirectory gives the same result as running it from the root.
+- Exit `1` means a violation and enforcement is on; exit `0` with printed `ERROR` lines means you set `TEST_CAP_ENFORCE=0` (soft-warn). Verify the summary counters, not just the exit code.
+- The gate reads files **from the working tree** but takes the changed-file list from `<base>..HEAD`, so a new over-cap test file that is not yet committed is invisible to it. Commit before trusting a green run.
 
 For the full splitting protocol (describe-block extraction, shared helper management, pure-function extraction, mock isolation verification, cascading-split detection), read `file:.swarm/bundled-skills/test-file-split/SKILL.md`.
 

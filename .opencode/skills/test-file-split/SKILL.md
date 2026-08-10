@@ -1,12 +1,12 @@
 ---
 name: test-file-split
 audience: swarm-plugin
-description: Protocol for splitting test files that approach or exceed the FR-006 500-line limit (enforced in CI by scripts/check-test-file-cap.sh as a diff-scoped ratchet). Covers describe-block extraction, shared helper management, pure-function extraction, mock isolation verification, and cascading-split detection. Load when a test file approaches or exceeds 500 lines.
+description: Protocol for splitting test files that approach or exceed the FR-006 500-line limit (enforced in CI by scripts/check-test-file-cap.ts as a diff-scoped ratchet). Covers describe-block extraction, shared helper management, pure-function extraction, mock isolation verification, and cascading-split detection. Load when a test file approaches or exceeds 500 lines.
 ---
 
 # Test File Split Protocol (FR-006)
 
-`scripts/check-test-file-cap.sh` enforces the **500-line cap** per test file (FR-006 / SC-006.1) as a **diff-scoped ratchet**: new test files over 500 lines and existing over-cap files that grew fail the quality gate and block PR merge. Pre-existing over-cap files not touched by the PR are non-blocking. Escape hatch: `TEST_CAP_ENFORCE=0` soft-warns. This skill covers the complete splitting protocol.
+`scripts/check-test-file-cap.ts` enforces the **500-line cap** per test file (FR-006 / SC-006.1) as a **diff-scoped ratchet**: new test files over 500 lines and existing over-cap files that grew fail the quality gate and block PR merge. Pre-existing over-cap files not touched by the PR are non-blocking. Escape hatch: `TEST_CAP_ENFORCE=0` soft-warns. This skill covers the complete splitting protocol.
 
 Read first: `.opencode/skills/writing-tests/SKILL.md` (or `.claude/skills/writing-tests/SKILL.md`) for bun:test framework rules, mock isolation patterns, and file placement conventions.
 
