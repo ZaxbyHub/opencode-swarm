@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.137.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.137.2...v7.137.3) (2026-08-10)
+
+
+### Bug Fixes
+
+* **close:** WAL-consistent SQLite archive via in-process VACUUM INTO ([#2030](https://github.com/ZaxbyHub/opencode-swarm/issues/2030)) ([12afd61](https://github.com/ZaxbyHub/opencode-swarm/commit/12afd6130b0a3a75fdde2771e5930fa358758262))
+
 ## [7.137.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.137.1...v7.137.2) (2026-08-10)
 
 
