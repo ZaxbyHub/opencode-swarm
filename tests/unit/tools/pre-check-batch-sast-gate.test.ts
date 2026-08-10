@@ -84,6 +84,8 @@ beforeEach(() => {
 			count: 0,
 			files_scanned: 1,
 			skipped_files: 0,
+			incomplete_files: 0,
+			incomplete_paths: [],
 		},
 		duration_ms: 0,
 	});
