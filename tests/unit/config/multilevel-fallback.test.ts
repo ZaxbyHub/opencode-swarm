@@ -24,7 +24,7 @@ type AgentOverrideConfig = z.infer<typeof AgentOverrideConfigSchema>;
 // Default config from src/cli/index.ts (lines 146-211)
 const DEFAULT_AGENTS: Record<string, AgentOverrideConfig> = {
 	coder: {
-		model: 'minimax-coding-plan/MiniMax-M3',
+		model: 'opencode/minimax-m2.5-free',
 		fallback_models: ['opencode/gpt-5-nano', 'opencode/big-pickle'],
 	},
 	reviewer: {
@@ -125,7 +125,7 @@ describe('Multi-Level Fallback Configuration', () => {
 
 	test('Coder agent has 2-level fallback (minimax → gpt-5-nano → big-pickle)', () => {
 		const config = DEFAULT_AGENTS.coder;
-		expect(config.model).toBe('minimax-coding-plan/MiniMax-M3');
+		expect(config.model).toBe('opencode/minimax-m2.5-free');
 		expect(config.fallback_models).toEqual([
 			'opencode/gpt-5-nano',
 			'opencode/big-pickle',
@@ -157,7 +157,7 @@ describe('Multi-Level Fallback Configuration', () => {
 		const allowedModels = new Set([
 			'opencode/big-pickle',
 			'opencode/gpt-5-nano',
-			'minimax-coding-plan/MiniMax-M3', // Only as primary, allowed as sometimes-available
+			'opencode/minimax-m2.5-free', // Only as primary, allowed as sometimes-available
 		]);
 
 		for (const [agent, config] of Object.entries(DEFAULT_AGENTS)) {
@@ -186,11 +186,11 @@ describe('Multi-Level Fallback Configuration', () => {
 	test('Fallback chains provide meaningful recovery', () => {
 		// Scenario 1: Coder primary unavailable
 		const coderChain = [
-			'minimax-coding-plan/MiniMax-M3',
+			'opencode/minimax-m2.5-free',
 			...(DEFAULT_AGENTS.coder.fallback_models || []),
 		];
 		const coderAvailableFallback = coderChain.find(
-			(m) => m !== 'minimax-coding-plan/MiniMax-M3',
+			(m) => m !== 'opencode/minimax-m2.5-free',
 		);
 		expect(coderAvailableFallback).toBeDefined();
 
