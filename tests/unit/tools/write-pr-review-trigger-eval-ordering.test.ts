@@ -29,6 +29,15 @@ import {
 	_internals as writerInternals,
 } from '../../../src/tools/write-pr-review-trigger-eval';
 
+// Split from write-pr-review-trigger-eval.test.ts (500-line cap): regression
+// coverage for FB item F-002. The writer now pairs frozen vs writer rows BY
+// ARRAY INDEX (write-pr-review-trigger-eval.ts:161-168) and grafts provenance
+// by index (:172-185). That is only safe because exactTriggerRows
+// (pr-review-trigger-contract.ts:236-259) re-orders BOTH ledgers into
+// canonical PR_REVIEW_REQUIRED_TRIGGER_IDS order before comparison. This test
+// supplies writer rows in REVERSED order relative to the frozen ledger and
+// asserts pairing is still correct per trigger_id, not per array position.
+
 const tempDirs: string[] = [];
 const SESSION_ID = 'trigger-eval-session';
 const HEAD_SHA = 'abc123';
@@ -61,7 +70,7 @@ function rows() {
 	return PR_REVIEW_TRIGGER_DEFINITIONS.map((definition, index) => ({
 		trigger_id: definition.id,
 		result: 'MATCHED' as const,
-		evidence: `mandatory review focus for ${definition.id}`,
+		evidence: `frozen distinct evidence for ${definition.id}`,
 		source_batch_id: `micro-batch-${Math.floor(index / 8)}`,
 		source_lane_id: `lane-${index}`,
 	}));
@@ -153,8 +162,6 @@ async function recordCompletedLane(
 async function establishBoundReviewGate(
 	root: string,
 	options: {
-		consolidatedMicro?: boolean;
-		matchedMicroIds?: readonly string[];
 		triggerLedger?: PrReviewInlineTriggerRow[];
 	} = {},
 ): Promise<void> {
@@ -194,35 +201,10 @@ async function establishBoundReviewGate(
 		SESSION_ID,
 		options.triggerLedger ?? inlineRows(),
 	);
-	if (options.consolidatedMicro) {
-		const sweepA = [...PR_REVIEW_REQUIRED_MICRO_LANE_IDS.slice(0, 6)];
-		const sweepB = [...PR_REVIEW_REQUIRED_MICRO_LANE_IDS.slice(6)];
-		await recordCompletedLane(root, {
-			batchId: 'micro-consolidated',
-			laneId: 'sweep-a',
-			workflowLane: sweepA[0],
-			ownedWorkflowLanes: sweepA,
-			mode: 'swarm-pr-review:micro',
-		});
-		await recordCompletedLane(root, {
-			batchId: 'micro-consolidated',
-			laneId: 'sweep-b',
-			workflowLane: sweepB[0],
-			ownedWorkflowLanes: sweepB,
-			mode: 'swarm-pr-review:micro',
-		});
-		return;
-	}
 	for (const [
 		index,
 		workflowLane,
 	] of PR_REVIEW_REQUIRED_MICRO_LANE_IDS.entries()) {
-		if (
-			options.matchedMicroIds &&
-			!options.matchedMicroIds.includes(workflowLane)
-		) {
-			continue;
-		}
 		await recordCompletedLane(root, {
 			batchId: `micro-batch-${Math.floor(index / 8)}`,
 			laneId: `lane-${index}`,
@@ -248,18 +230,26 @@ afterEach(() => {
 	}
 });
 
-describe('write_pr_review_trigger_eval', () => {
-	test('writes the exact canonical trigger set atomically under .swarm', async () => {
+describe('write_pr_review_trigger_eval — reversed writer-row ordering (F-002)', () => {
+	test('pairs writer rows by trigger identity, not array index, when writer rows arrive reversed', async () => {
 		const root = tempRoot();
 		const frozenRows = rows();
 		await establishBoundReviewGate(root, {
 			triggerLedger: inlineRows(frozenRows),
 		});
-		const writerRows = frozenRows.map(({ evidence: _evidence, ...row }) => row);
+
+		// Build writer rows in REVERSED order relative to the frozen ledger.
+		// Each writer row keeps its OWN trigger_id's source_batch_id/source_lane_id
+		// (as a real caller would), so a naive index-based graft would transplant
+		// provenance/evidence from the wrong trigger onto each row.
+		const writerRows = [...frozenRows]
+			.reverse()
+			.map(({ evidence: _evidence, ...row }) => row);
+
 		const response = JSON.parse(
 			await executeWritePrReviewTriggerEval(
 				{
-					run_id: 'review-1805',
+					run_id: 'review-reversed',
 					pr_head_sha: HEAD_SHA,
 					base_sha: 'def456',
 					base_ref: 'origin/main',
@@ -269,213 +259,34 @@ describe('write_pr_review_trigger_eval', () => {
 				{ sessionID: SESSION_ID },
 			),
 		);
-		expect(response).toMatchObject({
-			success: true,
-			matched_count: PR_REVIEW_TRIGGER_DEFINITIONS.length,
-			no_match_count: 0,
-			dispatched_micro_lane_count: PR_REVIEW_TRIGGER_DEFINITIONS.length,
-		});
-		const outputPath = artifactPath(root, 'review-1805');
+
+		expect(response.success).toBe(true);
+
+		const outputPath = artifactPath(root, 'review-reversed');
 		expect(existsSync(outputPath)).toBe(true);
 		const artifact = JSON.parse(readFileSync(outputPath, 'utf-8'));
 		expect(artifact.rows).toHaveLength(PR_REVIEW_TRIGGER_DEFINITIONS.length);
-		expect(artifact.rows[0]).toMatchObject({
-			trigger_id: PR_REVIEW_TRIGGER_DEFINITIONS[0].id,
-			scope: PR_REVIEW_TRIGGER_DEFINITIONS[0].scope,
-			trigger_row: PR_REVIEW_TRIGGER_DEFINITIONS[0].trigger_row,
-			micro_lane: PR_REVIEW_TRIGGER_DEFINITIONS[0].micro_lane,
-			result: 'MATCHED',
-			evidence: frozenRows[0].evidence,
-		});
-		expect(artifact).toMatchObject({
-			base_ref: 'origin/main',
-			base_sha: 'def456',
-		});
-	});
 
-	test('persists inapplicable families as provenance-free NOT_TRIGGERED rows', async () => {
-		const root = tempRoot();
-		const mixedRows = rows().map((row, index) =>
-			index < 3 || row.trigger_id === 'unclassified-risk'
-				? row
-				: {
-						trigger_id: row.trigger_id,
-						result: 'NOT_TRIGGERED' as const,
-						evidence: `diff contains no ${row.trigger_id} surface`,
-					},
-		);
-		await establishBoundReviewGate(root, {
-			matchedMicroIds: mixedRows
-				.filter((row) => row.result === 'MATCHED')
-				.map((row) => row.trigger_id),
-			triggerLedger: inlineRows(mixedRows),
-		});
-		const rewordedRows = mixedRows.map((row) => ({
-			...row,
-			evidence: `final summary reworded ${row.trigger_id}`,
-		}));
-		const response = JSON.parse(
-			await executeWritePrReviewTriggerEval(
-				{
-					run_id: 'review-2004-mixed',
-					pr_head_sha: HEAD_SHA,
-					base_sha: 'def456',
-					base_ref: 'origin/main',
-					rows: rewordedRows,
-				},
-				root,
-				{ sessionID: SESSION_ID },
-			),
-		);
-		expect(response).toMatchObject({
-			success: true,
-			matched_count: 4,
-			not_triggered_count: 7,
-			dispatched_micro_lane_count: 4,
-		});
-		const artifact = JSON.parse(
-			readFileSync(artifactPath(root, 'review-2004-mixed'), 'utf-8'),
-		);
-		const notTriggered = artifact.rows.filter(
-			(row: { result: string }) => row.result === 'NOT_TRIGGERED',
-		);
-		expect(notTriggered).toHaveLength(7);
+		const frozenById = new Map(frozenRows.map((row) => [row.trigger_id, row]));
+
+		// Load-bearing: every persisted row must carry the evidence and
+		// provenance frozen for ITS OWN trigger_id — not whatever landed at the
+		// same array index after reversal. In a naive index-paired world this
+		// would fail because reversing the writer rows shifts every index's
+		// counterpart to a different trigger_id (except any accidental
+		// palindromic midpoint), so a mismatch would surface across the set.
+		for (const persistedRow of artifact.rows) {
+			const expected = frozenById.get(persistedRow.trigger_id);
+			expect(expected).toBeDefined();
+			expect(persistedRow.evidence).toBe(expected?.evidence);
+			expect(persistedRow.source_batch_id).toBe(expected?.source_batch_id);
+			expect(persistedRow.source_lane_id).toBe(expected?.source_lane_id);
+		}
+
+		// Canonicalization is pinned: persisted rows follow
+		// PR_REVIEW_REQUIRED_TRIGGER_IDS order regardless of writer input order.
 		expect(
-			artifact.rows.map((row: { evidence: string }) => row.evidence),
-		).toEqual(mixedRows.map((row) => row.evidence));
-		expect(
-			notTriggered.every(
-				(row: Record<string, unknown>) =>
-					!('source_batch_id' in row) && !('source_lane_id' in row),
-			),
-		).toBe(true);
+			artifact.rows.map((row: { trigger_id: string }) => row.trigger_id),
+		).toEqual(PR_REVIEW_TRIGGER_DEFINITIONS.map((definition) => definition.id));
 	});
-
-	test('rejects a consolidated lane that owns a NOT_TRIGGERED family', async () => {
-		const root = tempRoot();
-		const matchedId = PR_REVIEW_REQUIRED_MICRO_LANE_IDS[0];
-		const contradictoryRows = PR_REVIEW_TRIGGER_DEFINITIONS.map((definition) =>
-			definition.id === matchedId || definition.id === 'unclassified-risk'
-				? {
-						trigger_id: definition.id,
-						result: 'MATCHED' as const,
-						evidence: `matched ${definition.id}`,
-						source_batch_id: 'micro-consolidated',
-						source_lane_id: definition.id === matchedId ? 'sweep-a' : 'sweep-b',
-					}
-				: {
-						trigger_id: definition.id,
-						result: 'NOT_TRIGGERED' as const,
-						evidence: `no ${definition.id} surface`,
-					},
-		);
-		await establishBoundReviewGate(root, {
-			consolidatedMicro: true,
-			triggerLedger: inlineRows(contradictoryRows),
-		});
-		const response = JSON.parse(
-			await executeWritePrReviewTriggerEval(
-				{
-					run_id: 'review-2004-ownership-mismatch',
-					pr_head_sha: HEAD_SHA,
-					base_sha: 'def456',
-					base_ref: 'origin/main',
-					rows: contradictoryRows,
-				},
-				root,
-				{ sessionID: SESSION_ID },
-			),
-		);
-
-		expect(response.success).toBe(false);
-		expect(response.message).toContain(
-			'cited lane ownership must equal the MATCHED trigger set',
-		);
-	});
-
-	test('rejects a claimed base SHA that is not the exact resolved merge base', async () => {
-		const root = tempRoot();
-		await establishBoundReviewGate(root);
-		const response = JSON.parse(
-			await executeWritePrReviewTriggerEval(
-				{
-					run_id: 'merge-base-mismatch',
-					pr_head_sha: HEAD_SHA,
-					base_sha: 'bad999',
-					base_ref: 'origin/main',
-					rows: rows(),
-				},
-				root,
-				{ sessionID: SESSION_ID },
-			),
-		);
-		expect(response.success).toBe(false);
-		expect(response.message).toContain('merge-base mismatch');
-		expect(existsSync(artifactPath(root, 'merge-base-mismatch'))).toBe(false);
-	});
-
-	test('rejects a live merge base that contradicts the durably bound review scope', async () => {
-		const root = tempRoot();
-		await establishBoundReviewGate(root);
-		writerInternals.resolveMergeBase = () => 'feed00';
-		const response = JSON.parse(
-			await executeWritePrReviewTriggerEval(
-				{
-					run_id: 'bound-base-mismatch',
-					pr_head_sha: HEAD_SHA,
-					base_sha: 'feed00',
-					base_ref: 'origin/rebased-main',
-					rows: rows(),
-				},
-				root,
-				{ sessionID: SESSION_ID },
-			),
-		);
-		expect(response.success).toBe(false);
-		expect(response.message).toContain('scope mismatch');
-		expect(existsSync(artifactPath(root, 'bound-base-mismatch'))).toBe(false);
-	});
-
-	for (const [name, establish, context] of [
-		['without a current session', async (_root: string) => {}, {}],
-		[
-			'without an active gate',
-			async (_root: string) => {},
-			{ sessionID: SESSION_ID },
-		],
-		[
-			'under PR_FEEDBACK',
-			async (root: string) => {
-				await activatePrWorkflow(root, SESSION_ID, 'PR_FEEDBACK');
-			},
-			{ sessionID: SESSION_ID },
-		],
-		[
-			'under an unbound PR_REVIEW gate',
-			async (root: string) => {
-				await activatePrWorkflow(root, SESSION_ID, 'PR_REVIEW');
-			},
-			{ sessionID: SESSION_ID },
-		],
-	] as const) {
-		test(`fails closed ${name} without writing an artifact`, async () => {
-			const root = tempRoot();
-			await establish(root);
-			const response = JSON.parse(
-				await executeWritePrReviewTriggerEval(
-					{
-						run_id: 'blocked-review',
-						pr_head_sha: HEAD_SHA,
-						base_sha: 'def456',
-						rows: rows(),
-					},
-					root,
-					context,
-				),
-			);
-			expect(response.success).toBe(false);
-			expect(response.message).toContain('active, bound PR_REVIEW gate');
-			expect(existsSync(artifactPath(root, 'blocked-review'))).toBe(false);
-		});
-	}
 });

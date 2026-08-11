@@ -128,11 +128,33 @@ export const PrReviewPersistedInputRowSchema = z.discriminatedUnion('result', [
 		.strict(),
 ]);
 
+export const PrReviewWriterInputRowSchema = z.discriminatedUnion('result', [
+	z
+		.object({
+			trigger_id: TriggerIdSchema,
+			result: z.literal('MATCHED'),
+			evidence: TriggerEvidenceSchema.optional(),
+			source_batch_id: z.string().trim().min(1),
+			source_lane_id: z.string().trim().min(1),
+		})
+		.strict(),
+	z
+		.object({
+			trigger_id: TriggerIdSchema,
+			result: z.literal('NOT_TRIGGERED'),
+			evidence: TriggerEvidenceSchema.optional(),
+		})
+		.strict(),
+]);
+
 export type PrReviewInlineTriggerRow = z.infer<
 	typeof PrReviewInlineTriggerRowSchema
 >;
 export type PrReviewPersistedInputRow = z.infer<
 	typeof PrReviewPersistedInputRowSchema
+>;
+export type PrReviewWriterInputRow = z.infer<
+	typeof PrReviewWriterInputRowSchema
 >;
 
 interface ValidatedTriggerLedger<TRow> {
@@ -296,6 +318,21 @@ export function validatePrReviewPersistedInputLedger(
 			input,
 			PrReviewPersistedInputRowSchema,
 			'Invalid persisted trigger ledger',
+		),
+	);
+}
+
+export function validatePrReviewWriterInputLedger(
+	input: unknown,
+): ValidatedTriggerLedger<PrReviewWriterInputRow> {
+	assertExactTriggerIdSet(input);
+	assertNoLegacyNoMatchResult(input);
+	assertMatchedRowsHaveProvenance(input);
+	return summarizeTriggerRows(
+		parseRows(
+			input,
+			PrReviewWriterInputRowSchema,
+			'Invalid final-writer trigger ledger',
 		),
 	);
 }
@@ -490,7 +527,7 @@ export interface ParsedPrReviewTriggerReceipt {
 }
 
 /**
- * Bind every micro dispatch and the final receipt to one semantic ledger.
+ * Bind every micro dispatch to one semantic ledger at bind time.
  * Callers pass rows after exact-set validation; the tuple representation makes
  * the identity stable and independent of post-dispatch provenance fields.
  */
