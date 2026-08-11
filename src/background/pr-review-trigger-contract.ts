@@ -527,7 +527,7 @@ export interface ParsedPrReviewTriggerReceipt {
 }
 
 /**
- * Bind every micro dispatch and the final receipt to one semantic ledger.
+ * Bind every micro dispatch to one semantic ledger at bind time.
  * Callers pass rows after exact-set validation; the tuple representation makes
  * the identity stable and independent of post-dispatch provenance fields.
  */
