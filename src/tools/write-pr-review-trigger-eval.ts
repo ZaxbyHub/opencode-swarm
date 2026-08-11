@@ -6,10 +6,10 @@ import { readLaneOutput } from '../background/lane-output-store.js';
 import { findByBatchId } from '../background/pending-delegations.js';
 import {
 	buildPrReviewTriggerReceiptV2,
-	PrReviewPersistedInputRowSchema,
-	prReviewTriggerLedgerDigest,
+	PrReviewWriterInputRowSchema,
 	validatePrReviewInlineTriggerLedger,
 	validatePrReviewPersistedInputLedger,
+	validatePrReviewWriterInputLedger,
 } from '../background/pr-review-trigger-contract.js';
 import {
 	resolveExactMergeBase,
@@ -77,7 +77,7 @@ const WritePrReviewTriggerEvalArgsSchema = z
 			.trim()
 			.regex(/^(?!-)[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$/)
 			.optional(),
-		rows: z.array(PrReviewPersistedInputRowSchema).min(1),
+		rows: z.array(PrReviewWriterInputRowSchema).min(1),
 	})
 	.strict();
 
@@ -95,9 +95,9 @@ export async function executeWritePrReviewTriggerEval(
 	directory: string,
 	context: { sessionID?: string } = {},
 ): Promise<string> {
-	let triggerLedger: ReturnType<typeof validatePrReviewPersistedInputLedger>;
+	let writerLedger: ReturnType<typeof validatePrReviewWriterInputLedger>;
 	try {
-		triggerLedger = validatePrReviewPersistedInputLedger(
+		writerLedger = validatePrReviewWriterInputLedger(
 			typeof args === 'object' && args !== null
 				? (args as { rows?: unknown }).rows
 				: undefined,
@@ -113,14 +113,6 @@ export async function executeWritePrReviewTriggerEval(
 				.join('; ')}`,
 		);
 	}
-
-	const validatedRows = triggerLedger.rows;
-
-	// One dispatch tuple may back several rows only when the dispatched lane
-	// declared consolidated ownership of exactly those families; the per-row
-	// record validation below enforces ownership containment and all-owned
-	// artifact attestation, so a lane can never lend provenance to a family it
-	// did not declare and fully attest.
 
 	const sessionID = context.sessionID?.trim();
 	if (!sessionID) {
@@ -166,14 +158,42 @@ export async function executeWritePrReviewTriggerEval(
 			}`,
 		);
 	}
-	if (
-		prReviewTriggerLedgerDigest(frozenLedger.rows) !==
-		prReviewTriggerLedgerDigest(validatedRows)
-	) {
+	const classificationDrift = frozenLedger.rows
+		.filter((row, index) => writerLedger.rows[index]?.result !== row.result)
+		.map((row) => row.trigger_id);
+	if (classificationDrift.length > 0) {
 		return failure(
-			'PR_REVIEW trigger evaluation differs from the canonical ledger frozen across micro dispatches',
+			`PR_REVIEW trigger classification drift from the canonical ledger frozen across micro dispatches: ${classificationDrift.join(', ')}`,
 		);
 	}
+	let triggerLedger: ReturnType<typeof validatePrReviewPersistedInputLedger>;
+	try {
+		triggerLedger = validatePrReviewPersistedInputLedger(
+			frozenLedger.rows.map((frozenRow, index) => {
+				const writerRow = writerLedger.rows[index];
+				if (frozenRow.result === 'NOT_TRIGGERED') return frozenRow;
+				if (!writerRow || writerRow.result !== 'MATCHED') {
+					throw new Error(
+						`missing MATCHED provenance for ${frozenRow.trigger_id}`,
+					);
+				}
+				return {
+					...frozenRow,
+					source_batch_id: writerRow.source_batch_id,
+					source_lane_id: writerRow.source_lane_id,
+				};
+			}),
+		);
+	} catch (error) {
+		return failure(error instanceof Error ? error.message : String(error));
+	}
+	const validatedRows = triggerLedger.rows;
+
+	// One dispatch tuple may back several rows only when the dispatched lane
+	// declared consolidated ownership of exactly those families; the per-row
+	// record validation below enforces ownership containment and all-owned
+	// artifact attestation, so a lane can never lend provenance to a family it
+	// did not declare and fully attest.
 	const currentRevisionDigest = await resolveCurrentRevisionDigest(
 		directory,
 		parsed.data.pr_head_sha,
@@ -409,7 +429,7 @@ export async function executeWritePrReviewTriggerEval(
 export const write_pr_review_trigger_eval: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
 		description:
-			'Persist the complete, exact-set PR-review trigger receipt after every MATCHED family has completed; NOT_TRIGGERED families remain provenance-free.',
+			'Persist the complete, exact-set PR-review trigger receipt after every MATCHED family has completed. Supply classifications and MATCHED provenance; evidence is optional and non-authoritative because the receipt reuses evidence frozen by the first micro dispatch. NOT_TRIGGERED families remain provenance-free.',
 		args: {
 			run_id: WritePrReviewTriggerEvalArgsSchema.shape.run_id,
 			pr_head_sha: WritePrReviewTriggerEvalArgsSchema.shape.pr_head_sha,

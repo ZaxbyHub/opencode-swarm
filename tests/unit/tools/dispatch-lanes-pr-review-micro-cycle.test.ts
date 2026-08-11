@@ -210,6 +210,9 @@ describe('PR-review trigger-evaluation and micro-dispatch cycle', () => {
 			),
 		);
 		expect(writerResult.success).toBe(false);
-		expect(writerResult.message).toContain('differs from the canonical ledger');
+		expect(writerResult.message).toContain('classification drift');
+		expect(writerResult.message).toContain(resultDrift[0].trigger_id);
+		const afterWriter = await readPrWorkflowGateState(tempDir, SESSION_ID);
+		expect(afterWriter?.prReviewTriggerEvalPath).toBeUndefined();
 	});
 });

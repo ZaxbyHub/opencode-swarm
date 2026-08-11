@@ -5,6 +5,7 @@ import {
 	PR_REVIEW_TRIGGER_DEFINITIONS,
 	parsePrReviewTriggerReceipt,
 	validatePrReviewInlineTriggerLedger,
+	validatePrReviewWriterInputLedger,
 } from '../../../src/background/pr-review-trigger-contract';
 
 function inlineRows() {
@@ -144,6 +145,67 @@ describe('inline PR-review trigger ledger', () => {
 		expect(() => validatePrReviewInlineTriggerLedger(unknown)).toThrow(
 			'unknown',
 		);
+	});
+});
+
+describe('final-writer PR-review trigger ledger', () => {
+	test('accepts omitted or reworded evidence while preserving classification rules', () => {
+		const rows = persistedRows();
+		const omitted = rows.map(({ evidence: _evidence, ...row }) => row);
+		expect(validatePrReviewWriterInputLedger(omitted).matchedIds).toHaveLength(
+			4,
+		);
+		expect(
+			validatePrReviewWriterInputLedger(
+				rows.map((row) => ({ ...row, evidence: `reworded ${row.trigger_id}` })),
+			).matchedIds,
+		).toHaveLength(4);
+	});
+
+	test('rejects fallback, exact-set, and provenance violations', () => {
+		const valid = persistedRows();
+		const fallback = valid.map((row) =>
+			row.trigger_id === 'unclassified-risk'
+				? { trigger_id: row.trigger_id, result: 'NOT_TRIGGERED' as const }
+				: row,
+		);
+		expect(() => validatePrReviewWriterInputLedger(fallback)).toThrow(
+			'unclassified-risk',
+		);
+		expect(() => validatePrReviewWriterInputLedger(valid.slice(1))).toThrow(
+			'missing',
+		);
+		const duplicate = structuredClone(valid);
+		duplicate[1] = { ...duplicate[0] };
+		expect(() => validatePrReviewWriterInputLedger(duplicate)).toThrow(
+			'duplicate',
+		);
+		const unknown = structuredClone(valid) as Array<Record<string, unknown>>;
+		unknown[0].trigger_id = 'unknown-family';
+		expect(() => validatePrReviewWriterInputLedger(unknown)).toThrow('unknown');
+		const missingProvenance = valid.map((row) =>
+			row.result === 'MATCHED' ? { ...row, source_batch_id: undefined } : row,
+		);
+		expect(() => validatePrReviewWriterInputLedger(missingProvenance)).toThrow(
+			'require source_batch_id',
+		);
+		const notTriggeredIndex = valid.findIndex(
+			(row) => row.result === 'NOT_TRIGGERED',
+		);
+		const forbiddenProvenance = structuredClone(valid) as Array<
+			Record<string, unknown>
+		>;
+		forbiddenProvenance[notTriggeredIndex].source_batch_id = 'forbidden';
+		expect(() =>
+			validatePrReviewWriterInputLedger(forbiddenProvenance),
+		).toThrow();
+		expect(() =>
+			validatePrReviewWriterInputLedger(
+				valid.map((row, index) =>
+					index === 0 ? { ...row, evidence: '' } : row,
+				),
+			),
+		).toThrow();
 	});
 });
 

@@ -251,7 +251,11 @@ afterEach(() => {
 describe('write_pr_review_trigger_eval', () => {
 	test('writes the exact canonical trigger set atomically under .swarm', async () => {
 		const root = tempRoot();
-		await establishBoundReviewGate(root);
+		const frozenRows = rows();
+		await establishBoundReviewGate(root, {
+			triggerLedger: inlineRows(frozenRows),
+		});
+		const writerRows = frozenRows.map(({ evidence: _evidence, ...row }) => row);
 		const response = JSON.parse(
 			await executeWritePrReviewTriggerEval(
 				{
@@ -259,7 +263,7 @@ describe('write_pr_review_trigger_eval', () => {
 					pr_head_sha: HEAD_SHA,
 					base_sha: 'def456',
 					base_ref: 'origin/main',
-					rows: rows(),
+					rows: writerRows,
 				},
 				root,
 				{ sessionID: SESSION_ID },
@@ -281,6 +285,7 @@ describe('write_pr_review_trigger_eval', () => {
 			trigger_row: PR_REVIEW_TRIGGER_DEFINITIONS[0].trigger_row,
 			micro_lane: PR_REVIEW_TRIGGER_DEFINITIONS[0].micro_lane,
 			result: 'MATCHED',
+			evidence: frozenRows[0].evidence,
 		});
 		expect(artifact).toMatchObject({
 			base_ref: 'origin/main',
@@ -305,6 +310,10 @@ describe('write_pr_review_trigger_eval', () => {
 				.map((row) => row.trigger_id),
 			triggerLedger: inlineRows(mixedRows),
 		});
+		const rewordedRows = mixedRows.map((row) => ({
+			...row,
+			evidence: `final summary reworded ${row.trigger_id}`,
+		}));
 		const response = JSON.parse(
 			await executeWritePrReviewTriggerEval(
 				{
@@ -312,7 +321,7 @@ describe('write_pr_review_trigger_eval', () => {
 					pr_head_sha: HEAD_SHA,
 					base_sha: 'def456',
 					base_ref: 'origin/main',
-					rows: mixedRows,
+					rows: rewordedRows,
 				},
 				root,
 				{ sessionID: SESSION_ID },
@@ -331,6 +340,9 @@ describe('write_pr_review_trigger_eval', () => {
 			(row: { result: string }) => row.result === 'NOT_TRIGGERED',
 		);
 		expect(notTriggered).toHaveLength(7);
+		expect(
+			artifact.rows.map((row: { evidence: string }) => row.evidence),
+		).toEqual(mixedRows.map((row) => row.evidence));
 		expect(
 			notTriggered.every(
 				(row: Record<string, unknown>) =>

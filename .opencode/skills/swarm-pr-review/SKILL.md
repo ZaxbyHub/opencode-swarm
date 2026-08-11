@@ -1057,7 +1057,11 @@ the complete ledger with `write_pr_review_trigger_eval`; its rows use the stable
 trigger IDs below. Every `MATCHED` row includes its returned `source_batch_id`
 and `source_lane_id`; every `NOT_TRIGGERED` row must omit both fields. Missing,
 extra, duplicate, malformed, or incorrectly provenanced rows make persistence
-fail and Phase 4 BLOCKED. The tool atomically writes
+fail and Phase 4 BLOCKED. Evidence is frozen by the first micro dispatch and is
+authoritative thereafter. The final writer may omit its duplicate `evidence`
+fields; if it includes reworded evidence, the writer ignores that copy and
+persists the frozen values. It still requires the exact frozen classifications,
+plus provenance for every `MATCHED` row. The tool atomically writes
 `.swarm/pr-review/<run_id>/trigger-eval.json`, separate from `findings.jsonl`;
 pass the exact reviewed merge-base as `base_sha`, the exact live base branch
 tip/ref used to compute it as `base_ref`, and the same `pr_head_sha` to the
