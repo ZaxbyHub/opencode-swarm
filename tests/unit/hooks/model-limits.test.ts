@@ -184,6 +184,26 @@ describe('model-limits.ts - resolveModelLimit', () => {
 
 			expect(result).toBe(NATIVE_MODEL_LIMITS['gemini-2.5-pro']);
 		});
+
+		test('MiniMax-M3 returns its native 1,000,000-token limit', () => {
+			const result = resolveModelLimit('MiniMax-M3', 'minimax', {});
+
+			expect(result).toBe(NATIVE_MODEL_LIMITS['MiniMax-M3']);
+			expect(result).toBe(1000000);
+		});
+
+		test('MiniMax-M2.7 returns its native 204,800-token limit', () => {
+			const result = resolveModelLimit('MiniMax-M2.7', 'minimax', {});
+
+			expect(result).toBe(NATIVE_MODEL_LIMITS['MiniMax-M2.7']);
+			expect(result).toBe(204800);
+		});
+
+		test('Prefix matching resolves a versioned MiniMax-M3 variant', () => {
+			const result = resolveModelLimit('MiniMax-M3-20260701', 'minimax', {});
+
+			expect(result).toBe(NATIVE_MODEL_LIMITS['MiniMax-M3']);
+		});
 	});
 });
 
