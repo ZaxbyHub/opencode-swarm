@@ -1,5 +1,14 @@
 # Changelog
 
+## [7.138.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.138.2...v7.138.3) (2026-08-11)
+
+
+### Bug Fixes
+
+* **model-limits:** add MiniMax-M3/M2.7 native context limits ([df924a9](https://github.com/ZaxbyHub/opencode-swarm/commit/df924a99284ec572fca66e6bf8b001dc88a75514))
+* **pr-review:** preserve frozen trigger evidence ([293b890](https://github.com/ZaxbyHub/opencode-swarm/commit/293b89077df1f05227f004ed095828c916ac17f6))
+* **pr-review:** preserve frozen trigger evidence ([5fe8c56](https://github.com/ZaxbyHub/opencode-swarm/commit/5fe8c5697a7df382a5e97f35aba9a82980952050))
+
 ## [7.138.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.138.1...v7.138.2) (2026-08-10)
 
 
