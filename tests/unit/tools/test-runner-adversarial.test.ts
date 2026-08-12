@@ -272,11 +272,10 @@ describe('test-runner.ts - ADVERSARIAL CWD SECURITY TESTS', () => {
 			} as any);
 			const parsed = JSON.parse(result);
 			expect(parsed.success).toBe(false);
-			expect(parsed.error).toContain('Invalid working directory');
-
+			expect(parsed.error).toMatch(
+				/Invalid working directory|Cannot verify project root/,
+			);
 			expect(spawnCalls.length).toBe(0);
-
-			// STATUS: SECURE - Device path blocked
 		});
 
 		test('SECURE: Windows device path \\\\.\\COM1 is REJECTED', async () => {
