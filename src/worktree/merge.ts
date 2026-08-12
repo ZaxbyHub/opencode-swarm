@@ -10,6 +10,7 @@
  * @module merge-back
  */
 
+import * as fs from 'node:fs';
 import { advisoryWarn } from '../services/warning-buffer';
 import {
 	hasRecoveryRecordForBranch,
@@ -246,6 +247,15 @@ export interface OrphanCleanupResult {
 	recoveryReadError?: boolean;
 }
 
+export interface OrphanCleanupOptions {
+	/**
+	 * Preserve branches that are not merged into HEAD. Interactive reset flows
+	 * retain the historical force-delete default; unattended startup recovery
+	 * sets this to true so a missing worktree cannot erase its only commits.
+	 */
+	preserveUnmerged?: boolean;
+}
+
 export interface StartupRecoveryResult {
 	prunedWorktrees: boolean;
 	remainingBranches: string[];
@@ -461,6 +471,83 @@ export async function postMergeCleanup(
 			? `Worktree prune failed: ${pruneResult.stderr.trim() || pruneResult.stdout.trim()}`
 			: `Branch delete failed: ${deleteResult.stderr.trim() || deleteResult.stdout.trim()}; worktree prune failed: ${pruneResult.stderr.trim() || pruneResult.stdout.trim()}`,
 	};
+}
+
+/**
+ * Remove only stale Git worktree registration metadata. This deliberately does
+ * not delete a lane branch; callers hand branch reconciliation to
+ * `provisionWorktree`, which refuses branches with unmerged commits and uses
+ * non-forced `git branch -d` for proven-merged stale branches.
+ */
+export async function pruneStaleWorktreeMetadata(
+	directory: string,
+): Promise<{ pruned: true } | { error: string }> {
+	const result = await runGit(['worktree', 'prune'], directory);
+	if (result.exitCode === 0) return { pruned: true };
+	return {
+		error:
+			result.stderr.trim() ||
+			result.stdout.trim() ||
+			`git worktree prune exited ${result.exitCode}`,
+	};
+}
+
+export type RegisteredWorktreeLivenessScan =
+	| { status: 'ok'; liveBranches: string[] }
+	| { status: 'uncertain'; reason: string };
+
+/**
+ * Enumerate branches whose registered worktree paths still exist. Stale Git
+ * metadata with a missing path is deliberately excluded so an expired
+ * provisional owner cannot become permanent ownership after a crash.
+ */
+export async function scanRegisteredWorktreeLiveness(
+	directory: string,
+): Promise<RegisteredWorktreeLivenessScan> {
+	const result = await runGit(
+		['-c', 'core.quotepath=false', 'worktree', 'list', '--porcelain'],
+		directory,
+	);
+	if (result.exitCode !== 0) {
+		const raw =
+			result.stderr.trim() ||
+			result.stdout.trim() ||
+			`git worktree list exited ${result.exitCode}`;
+		return {
+			status: 'uncertain',
+			reason: raw.length > 500 ? `${raw.slice(0, 500)}... (truncated)` : raw,
+		};
+	}
+
+	const liveBranches: string[] = [];
+	let worktreePath: string | undefined;
+	for (const rawLine of `${result.stdout}\n`.split('\n')) {
+		const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
+		if (line.startsWith('worktree ')) {
+			worktreePath = line.slice('worktree '.length);
+			continue;
+		}
+		if (!line.startsWith('branch ') || !worktreePath) continue;
+		try {
+			fs.statSync(worktreePath);
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			if (code === 'ENOENT' || code === 'ENOTDIR') continue;
+			return {
+				status: 'uncertain',
+				reason: `registered worktree path "${worktreePath}" is unreadable: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			};
+		}
+		const branch = line.slice('branch '.length);
+		liveBranches.push(
+			branch.startsWith('refs/heads/')
+				? branch.slice('refs/heads/'.length)
+				: branch,
+		);
+	}
+	return { status: 'ok', liveBranches };
 }
 
 /**
@@ -789,16 +876,18 @@ async function listLaneBranches(directory: string): Promise<string[]> {
  * Cleans up orphaned swarm-lane branches that do not belong to any active session.
  *
  * Lists all swarm-lane/ and swarm/lane/ branches, identifies orphans (branches whose
- * session ID is not in `activeSessionIds`), force-deletes them, and prunes stale
- * worktree metadata.
+ * session ID is not in `activeSessionIds`), deletes them according to the
+ * requested preservation policy, and prunes stale worktree metadata.
  *
  * @param directory        - The project root (cwd for all git commands).
  * @param activeSessionIds - Session IDs that are still active; their branches are skipped.
+ * @param options          - Branch preservation policy for unattended recovery.
  * @returns Result with arrays of removed, skipped, and errored branch names.
  */
 export async function cleanupOrphanedBranches(
 	directory: string,
 	activeSessionIds: string[] = [],
+	options: OrphanCleanupOptions = {},
 ): Promise<OrphanCleanupResult> {
 	const removed: string[] = [];
 	const skipped: string[] = [];
@@ -845,8 +934,13 @@ export async function cleanupOrphanedBranches(
 			continue;
 		}
 
-		// Orphaned branch — attempt force deletion
-		const deleteResult = await runGit(['branch', '-D', branch], directory);
+		// Startup recovery is unattended: use non-forced deletion so Git preserves
+		// a branch with commits not reachable from HEAD. Explicit reset flows keep
+		// the historical force-delete behavior unless they opt into preservation.
+		const deleteResult = await runGit(
+			['branch', options.preserveUnmerged ? '-d' : '-D', branch],
+			directory,
+		);
 
 		if (deleteResult.exitCode === 0) {
 			removed.push(branch);

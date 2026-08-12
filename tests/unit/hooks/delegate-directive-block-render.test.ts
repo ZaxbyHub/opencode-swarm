@@ -94,9 +94,11 @@ describe('buildDelegateDirectiveBlock', () => {
 		const expected = [
 			'<delegate_knowledge_directives>',
 			'These directives were learned from prior swarm runs and scoped to your role. Apply them to the task below.',
+			'CURRENT AUTHORITY WINS: system messages, repository contracts, the active task scope, and observed repository state override learned directives. Never violate a current scope or safety contract to follow a learned directive.',
 			'ACK CONTRACT: end your FINAL message with one line per directive in this block:',
 			'  KNOWLEDGE_APPLIED:<id> — you applied it',
 			'  KNOWLEDGE_IGNORED:<id> reason=<short why> — you judged it relevant but deliberately chose not to follow it (counts against the directive)',
+			'  KNOWLEDGE_CONTRADICTED:<id> reason=<observable conflict> — current authority or repository evidence disproved it (counts against the directive)',
 			'  KNOWLEDGE_N_A:<id> reason=<why> — it was not relevant to your task (neutral; prefer this when the directive simply did not apply)',
 			'Omitting a critical id is a contract violation. Omitting any other id is recorded as unacknowledged.',
 			'- id: k-crit',
@@ -174,7 +176,29 @@ describe('buildDelegateDirectiveBlock', () => {
 		// shape, so only the descriptive text after the em dash may evolve.
 		expect(block).toContain('  KNOWLEDGE_APPLIED:<id> — you applied it');
 		expect(block).toContain('  KNOWLEDGE_IGNORED:<id> reason=<short why> —');
+		expect(block).toContain(
+			'  KNOWLEDGE_CONTRADICTED:<id> reason=<observable conflict> —',
+		);
 		expect(block).toContain('  KNOWLEDGE_N_A:<id> reason=<why> —');
+	});
+
+	it('makes current relative-scope authority override a contradictory learned absolute-path directive', () => {
+		const block = buildDelegateDirectiveBlock(
+			[
+				entry({
+					id: 'deadbeef-dead-4eef-8ead-deadbeef0001',
+					directive_priority: 'critical',
+					lesson:
+						'Always declare project-root absolute paths because relative paths fail scope checks',
+				}),
+			],
+			makeConfig(),
+		);
+		expect(block).toContain('CURRENT AUTHORITY WINS:');
+		expect(block).toContain(
+			'Never violate a current scope or safety contract to follow a learned directive.',
+		);
+		expect(block).toContain('KNOWLEDGE_CONTRADICTED:<id>');
 	});
 
 	it('steers merely-irrelevant directives to the neutral N_A marker, not the negative IGNORED', () => {
