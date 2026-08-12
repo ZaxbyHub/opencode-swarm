@@ -12,6 +12,16 @@ import type {
 } from './types';
 
 /**
+ * Upper bound on distinct escalation ladders tracked per session (issue #2134).
+ *
+ * The ladder is keyed per `(pattern, target)` for a single-target pattern, and
+ * targets are unbounded, so this map would otherwise grow without limit on a
+ * long-running session. Matches `MAX_TRACKED_EPISODES` in `index.ts`, which
+ * bounds the episode ledger for the same reason.
+ */
+const MAX_TRACKED_LADDERS = 256;
+
+/**
  * Resolves the LADDER key for a match — the identity whose 1→2→3 strike count
  * this detection belongs to (issue #2134 follow-up).
  *
@@ -177,8 +187,24 @@ export class EscalationTracker {
 		const currentCount = this._state.patternCounts.get(ladderKey) ?? 0;
 		const newCount = currentCount + 1;
 
-		// Update the ladder count
+		// Bound the map. A per-target ladder mints a key per (pattern, target) and
+		// targets are unbounded — a long architect session with no tool-call budget
+		// would otherwise grow this without limit on a hot, per-tool-call object,
+		// with each key carrying a target string up to 200 chars. Map preserves
+		// insertion order, so dropping from the front evicts the least recently
+		// FIRST-SEEN ladder. Mirrors `MAX_TRACKED_EPISODES` in `index.ts`, which
+		// bounds the episode ledger for exactly this reason.
+		//
+		// Re-inserting the key just updated keeps a still-active ladder at the back
+		// of the eviction order, so the ladder an agent is actively tripping is the
+		// last thing evicted rather than the first.
+		this._state.patternCounts.delete(ladderKey);
 		this._state.patternCounts.set(ladderKey, newCount);
+		while (this._state.patternCounts.size > MAX_TRACKED_LADDERS) {
+			const oldest = this._state.patternCounts.keys().next().value;
+			if (oldest === undefined) break;
+			this._state.patternCounts.delete(oldest);
+		}
 
 		// Update last pattern detected
 		this._state.lastPatternDetected = match;
@@ -236,6 +262,19 @@ export class EscalationTracker {
 	 */
 	getState(): EscalationState {
 		return cloneEscalationState(this._state);
+	}
+
+	/**
+	 * Returns a defensive copy of just the ladder counts (issue #2134 follow-up).
+	 *
+	 * `src/prm/index.ts` mirrors these onto the session after every strike so a
+	 * tracker rebuilt mid-session restores the same keyspace it counts in. Using
+	 * `getState()` there deep-cloned the whole state — including `stepRange`,
+	 * `affectedAgents` and `affectedTargets` of the last match — on the
+	 * per-tool-call hot path, for one field.
+	 */
+	getLadderCounts(): Map<string, number> {
+		return new Map(this._state.patternCounts);
 	}
 
 	/**

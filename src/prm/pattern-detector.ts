@@ -145,10 +145,26 @@ export function detectRepetitionLoop(
 		const windowStart = Math.max(0, i - windowSize + 1);
 		const window = trajectory.slice(windowStart, i + 1);
 
-		// Count (agent, action, target) combinations
+		// Count (agent, action, target) combinations.
+		//
+		// Issue #2134: the tuple is CARRIED in the value, not recovered by
+		// splitting the key. The key is still a `|`-joined string for cheap Map
+		// lookup, but `key.split('|')` truncated any target containing a pipe at
+		// its first one — and since `extractTarget` now returns the whole shell
+		// command for a bash call, piped commands are routine. Three different
+		// commands (`bun test | head`, `| tail`, `| wc -l`) all recovered the
+		// target `bun test 2>&1`, merged onto one escalation ladder, and produced
+		// a hard stop in six steps: the exact false positive this issue is about.
 		const counts = new Map<
 			string,
-			{ count: number; startStep: number; endStep: number }
+			{
+				count: number;
+				startStep: number;
+				endStep: number;
+				agent: string;
+				action: string;
+				target: string;
+			}
 		>();
 
 		for (const entry of window) {
@@ -163,14 +179,17 @@ export function detectRepetitionLoop(
 					count: 1,
 					startStep: entry.step,
 					endStep: entry.step,
+					agent: entry.agent,
+					action: entry.action,
+					target: entry.target,
 				});
 			}
 		}
 
 		// Check for combinations meeting threshold
-		for (const [key, data] of counts) {
+		for (const data of counts.values()) {
 			if (data.count >= threshold) {
-				const [agent, action, target] = key.split('|');
+				const { agent, action, target } = data;
 				const severity: PatternSeverity = data.count >= 3 ? 'high' : 'medium';
 
 				matches.push({

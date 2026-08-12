@@ -59,7 +59,7 @@ import {
 	formatCourseCorrectionForInjection,
 	generateCourseCorrection,
 } from './course-correction';
-import { EscalationTracker } from './escalation';
+import { EscalationTracker, resolveLadderKey } from './escalation';
 import { detectPatterns, resolvePatternThreshold } from './pattern-detector';
 import { recordReplayEntry, startReplayRecording } from './replay';
 import {
@@ -589,7 +589,17 @@ export function createPrmHook(
 				// injection once a (pattern, level) advisory has been delivered,
 				// until escalation advances to a new level (distinct key). This does
 				// NOT gate recordDetection/counts/telemetry/replay below.
-				const prmDedupeKey = `prm:${match.pattern}:${escalationLevel}`;
+				//
+				// Issue #2134 follow-up: the key is scoped to the LADDER, not the
+				// pattern type, because the ladder is now per-target. With a
+				// pattern-scoped key and every target sitting at level 1, exactly ONE
+				// advisory was delivered per pattern for the whole session and every
+				// subsequent target's guidance was silently dropped — the agent was
+				// neither stopped (per-target ladders escalate independently) nor
+				// told. Measured: 40 distinct repeating files produced 1 advisory.
+				// Scoping by ladder means each distinct behaviour is reported once per
+				// level, which is the invariant this dedupe was always meant to have.
+				const prmDedupeKey = `prm:${resolveLadderKey(match)}:${escalationLevel}`;
 				// Defensive: the field is initialized by ensureAgentSession, but
 				// guard so a session object lacking it (e.g. a minimal test mock)
 				// does not throw and abort the unconditional match-processing.
@@ -612,7 +622,7 @@ export function createPrmHook(
 				// Issue #2134 follow-up: mirror the tracker's LADDER counts onto the
 				// session so a tracker rebuilt later in this session restores the same
 				// keyspace it counts in. `getState()` already returns a defensive copy.
-				session.prmLadderCounts = escalationTracker.getState().patternCounts;
+				session.prmLadderCounts = escalationTracker.getLadderCounts();
 				session.prmEscalationLevel = escalationLevel;
 				session.prmLastPatternDetected = match;
 				tickHardStop = tickHardStop || hardStopPending;
