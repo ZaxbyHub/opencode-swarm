@@ -752,6 +752,15 @@ it is a **new episode**, or when the episode it belongs to has grown by another
 full `pattern_thresholds` worth of occurrences since it last struck. A single tool
 call can never advance the ladder by more than one rung.
 
+Strikes are also counted per **behaviour**, not per pattern type. A pattern that
+names a single target — `repetition_loop`, `ping_pong`, `stuck_on_test` — gets its
+own 1→2→3 ladder for that target, so repeating yourself once each on three
+different files is three level-1 advisories rather than a hard stop; reaching the
+hard stop takes three strikes against *the same* target. Patterns that report a
+growing set of targets (`context_thrash`, `expansion_drift`) keep one ladder for
+the pattern, because a per-target ladder would restart on every tool call and they
+could never escalate at all.
+
 An agent that genuinely keeps going still reaches the hard stop, because the
 growth rung keeps firing. At default thresholds an unbroken `repetition_loop`
 strikes at 2, 4 and 6 occurrences; a `context_thrash` run strikes at 10, 20 and 30

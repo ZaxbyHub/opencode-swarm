@@ -19,7 +19,11 @@ export {
 	generateCourseCorrection,
 } from './course-correction';
 // Escalation
-export { createDefaultEscalationState, EscalationTracker } from './escalation';
+export {
+	createDefaultEscalationState,
+	EscalationTracker,
+	resolveLadderKey,
+} from './escalation';
 // Pattern detector
 export {
 	detectContextThrash,
@@ -64,7 +68,7 @@ import {
 	getInMemoryTrajectory,
 	readTrajectory,
 } from './trajectory-store';
-import type { PatternMatch, PatternType, PrmConfig } from './types';
+import type { PatternMatch, PrmConfig } from './types';
 
 /**
  * Test-only dependency-injection seam — see `gitignore-warning.ts:_internals`.
@@ -160,6 +164,8 @@ interface ResettablePrmSessionState {
 	prmInjectedAdvisoryKeys?: Set<string>;
 	/** Issue #2134 — episode ledger; reset with the trajectory cursor it indexes. */
 	prmStruckEpisodes?: Map<string, number>;
+	/** Issue #2134 follow-up — ladder counts; reset with the ledger. */
+	prmLadderCounts?: Map<string, number>;
 	replayArtifactPath?: string | null;
 }
 
@@ -187,6 +193,7 @@ export function resetPrmSessionState(
 	// high-water mark and suppress every subsequent strike — a reset intended to
 	// unwedge a session would instead disable its containment.
 	session.prmStruckEpisodes = new Map<string, number>();
+	session.prmLadderCounts = new Map<string, number>();
 	session.replayArtifactPath = null;
 
 	if (sessionId) {
@@ -505,12 +512,16 @@ export function createPrmHook(
 			if (!escalationTracker) {
 				// PRM escalation state is session-scoped and transient — resets on session start.
 				// This code reuses state from prior detections WITHIN the session, not across restarts.
+				// Issue #2134 follow-up: seeds from `prmLadderCounts`, NOT
+				// `prmPatternCounts`. The tracker counts by LADDER identity
+				// (`pattern|target`, or bare `pattern` for a growing target set) while
+				// `prmPatternCounts` stays keyed by pattern type as the observable
+				// tally. Seeding the ladder from pattern-type keys would restore every
+				// count under the wrong identity — silently resetting a target's real
+				// strike count to zero while inventing one for a key it never uses.
 				const initialState = session.prmLastPatternDetected
 					? {
-							patternCounts: new Map(session.prmPatternCounts.entries()) as Map<
-								PatternType,
-								number
-							>,
+							patternCounts: new Map(session.prmLadderCounts ?? []),
 							escalationLevel: session.prmEscalationLevel,
 							lastPatternDetected: session.prmLastPatternDetected,
 							hardStopPending: session.prmHardStopPending,
@@ -590,11 +601,18 @@ export function createPrmHook(
 					session.prmInjectedAdvisoryKeys.add(prmDedupeKey);
 				}
 
-				// Update session PRM state fields
+				// Update session PRM state fields. `prmPatternCounts` stays keyed by
+				// pattern TYPE — it is the observable per-pattern tally that telemetry
+				// and tests read, and is deliberately a different keyspace from the
+				// tracker's ladder counts mirrored just below.
 				session.prmPatternCounts.set(
 					match.pattern,
 					(session.prmPatternCounts.get(match.pattern) ?? 0) + 1,
 				);
+				// Issue #2134 follow-up: mirror the tracker's LADDER counts onto the
+				// session so a tracker rebuilt later in this session restores the same
+				// keyspace it counts in. `getState()` already returns a defensive copy.
+				session.prmLadderCounts = escalationTracker.getState().patternCounts;
 				session.prmEscalationLevel = escalationLevel;
 				session.prmLastPatternDetected = match;
 				tickHardStop = tickHardStop || hardStopPending;

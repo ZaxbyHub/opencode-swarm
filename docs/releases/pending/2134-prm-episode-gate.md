@@ -52,6 +52,20 @@ otherwise the test would still pass with those detectors fully disarmed.
 
 ## Also
 
+- **The ladder counts strikes per behaviour, not per pattern type.** It keyed on
+  `match.pattern` alone, so unrelated occurrences accumulated into one count: a
+  coder that read-then-re-read three *different* files scored three
+  `repetition_loop` strikes and hit the hard stop without having repeated itself
+  even twice on any single file. Measured on a realistic read → edit → run-test →
+  re-read → re-run-test loop across modules: hard stop at step 11. Now
+  `resolveLadderKey` gives a pattern that names a single target its own ladder for
+  that target, so the same trajectory never stops and stays at level 1, while
+  three strikes against *the same* target still hard-stops at step 6. Patterns
+  reporting a growing target set (`context_thrash`, `expansion_drift`) keep one
+  ladder for the pattern — a per-target ladder would restart every tool call and
+  they could never escalate, the same fail-open shape the per-detector containment
+  review caught earlier.
+
 - **Shell commands are no longer collapsed onto their first word.**
   `extractTarget` in `src/hooks/trajectory-logger.ts` returned a bash command's
   first word as the trajectory target, so `bun test src/a`, `bun run lint` and

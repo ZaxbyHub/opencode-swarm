@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
-import { EscalationTracker } from '../escalation';
+import { EscalationTracker, resolveLadderKey } from '../escalation';
 import { _internals, createPrmHook } from '../index';
 import type { PatternMatch, PrmConfig, TrajectoryEntry } from '../types';
 import { createTickingDetectPatterns } from './helpers/episodes';
@@ -613,11 +613,19 @@ describe('createPrmHook', () => {
 			const trajectory = createMockTrajectory();
 			const session = createMockSession(sessionId);
 
-			// Pre-populate PRM state as if session was being resumed
+			// Pre-populate PRM state as if session was being resumed.
+			//
+			// Issue #2134 follow-up: the tracker restores from `prmLadderCounts`,
+			// keyed by LADDER identity, NOT from `prmPatternCounts`, which stays
+			// keyed by pattern type as the observable tally. Seeding only the
+			// pattern-type map would restore nothing and this test would silently
+			// stop pinning restoration at all, so both are set and the ladder key is
+			// derived from the same match the hook will see.
+			const resumedMatch = createMockPatternMatch('repetition_loop');
 			session.prmPatternCounts = new Map([['repetition_loop', 2]]);
+			session.prmLadderCounts = new Map([[resolveLadderKey(resumedMatch), 2]]);
 			session.prmEscalationLevel = 2;
-			session.prmLastPatternDetected =
-				createMockPatternMatch('repetition_loop');
+			session.prmLastPatternDetected = resumedMatch;
 			session.prmHardStopPending = false;
 
 			_internals.getAgentSession = () => session;

@@ -124,8 +124,18 @@ export interface PrmConfig {
  * Per-session escalation tracking state
  */
 export interface EscalationState {
-	/** Pattern type to detection count mapping */
-	patternCounts: Map<PatternType, number>;
+	/**
+	 * Ladder identity to strike-count mapping.
+	 *
+	 * Keyed by `resolveLadderKey(match)` (issue #2134 follow-up), NOT by pattern
+	 * type: `pattern|target` for a single-target pattern, bare `pattern` for one
+	 * reporting a growing target set. Keying the ladder by pattern type alone let
+	 * unrelated occurrences on different files accumulate into a hard stop.
+	 *
+	 * Distinct from `AgentSessionState.prmPatternCounts`, which stays keyed by
+	 * pattern type as the observable per-pattern tally.
+	 */
+	patternCounts: Map<string, number>;
 	/** Current escalation level (0=none, 1=guidance, 2=strong guidance, 3=hard stop) */
 	escalationLevel: number;
 	/** Last pattern detected (if any) */

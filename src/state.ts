@@ -604,6 +604,19 @@ export interface AgentSessionState {
 	 */
 	prmStruckEpisodes?: Map<string, number>;
 	/**
+	 * Issue #2134 follow-up — mirror of the escalation tracker's LADDER counts,
+	 * keyed by `resolveLadderKey(match)` (`pattern|target`, or bare `pattern` for
+	 * a pattern reporting a growing target set).
+	 *
+	 * Deliberately separate from `prmPatternCounts`, which stays keyed by pattern
+	 * type as the observable per-pattern tally that telemetry and tests read. The
+	 * two are different keyspaces and must not be conflated: the tracker-rebuild
+	 * path below used to seed itself from `prmPatternCounts`, which would now
+	 * hand pattern-type keys to a ladder that counts by target and silently
+	 * mis-restore every count.
+	 */
+	prmLadderCounts?: Map<string, number>;
+	/**
 	 * Issue #2134 — dispatch identity of the delegation whose start already reset
 	 * this session's PRM state. Holds the Task tool `callID`, which is unique per
 	 * dispatch.
@@ -1730,6 +1743,9 @@ export function startAgentSession(
 		// Issue #2134: empty ledger — no episode has struck yet, so the first
 		// detection of any pattern type is always allowed to record strike 1.
 		prmStruckEpisodes: new Map<string, number>(),
+		// Issue #2134 follow-up: ladder counts start empty alongside the episode
+		// ledger they are advanced by.
+		prmLadderCounts: new Map<string, number>(),
 		// Issue #2063 B3/B5: no execution episode until this session actually
 		// attempts execution work.
 		executionEpisodeArmed: false,
@@ -2085,6 +2101,9 @@ export function ensureAgentSession(
 		}
 		if (!session.prmStruckEpisodes) {
 			session.prmStruckEpisodes = new Map<string, number>();
+		}
+		if (!session.prmLadderCounts) {
+			session.prmLadderCounts = new Map<string, number>();
 		}
 		if (session.executionEpisodeArmed === undefined) {
 			session.executionEpisodeArmed = false;

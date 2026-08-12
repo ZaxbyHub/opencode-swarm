@@ -12,6 +12,35 @@ import type {
 } from './types';
 
 /**
+ * Resolves the LADDER key for a match — the identity whose 1→2→3 strike count
+ * this detection belongs to (issue #2134 follow-up).
+ *
+ * The ladder used to be keyed by pattern TYPE alone, so unrelated occurrences
+ * accumulated into one count: a coder that read-then-re-read three different
+ * files produced three `repetition_loop` strikes on three different targets and
+ * hit the hard stop, even though it had not repeated itself even twice on any
+ * one of them. "Three strikes" has to mean "the same behaviour three times".
+ *
+ * A pattern reporting exactly ONE affected target gets a per-target ladder —
+ * `repetition_loop`, `ping_pong` and `stuck_on_test` all name the single file or
+ * target they are about, so that target IS the behaviour's identity.
+ *
+ * A pattern reporting a SET of targets keeps the per-pattern-type ladder.
+ * `context_thrash` and `expansion_drift` describe one ongoing episode over a
+ * growing collection of targets; keying those by target would mint a fresh
+ * ladder on every tool call and they could never escalate at all — the exact
+ * fail-open shape that the per-detector containment review caught the first time.
+ *
+ * Agents are deliberately not in the key. Escalation is about the work, not who
+ * did it, and `ping_pong` names two agents by construction.
+ */
+export function resolveLadderKey(match: PatternMatch): string {
+	return match.affectedTargets.length === 1
+		? `${match.pattern}|${match.affectedTargets[0]}`
+		: match.pattern;
+}
+
+/**
  * Creates a default EscalationState with all counters reset and flags cleared.
  * Exported for testing purposes.
  *
@@ -140,12 +169,16 @@ export class EscalationTracker {
 		correction: CourseCorrection | null;
 		hardStop: boolean;
 	} {
-		// Get current count for this pattern type
-		const currentCount = this._state.patternCounts.get(match.pattern) ?? 0;
+		// Get the current count for this match's LADDER identity — not for its
+		// pattern type. See `resolveLadderKey`: a single-target pattern gets a
+		// ladder per target, so repeating yourself once each on three different
+		// files is three level-1 advisories rather than a hard stop.
+		const ladderKey = resolveLadderKey(match);
+		const currentCount = this._state.patternCounts.get(ladderKey) ?? 0;
 		const newCount = currentCount + 1;
 
-		// Update the pattern count
-		this._state.patternCounts.set(match.pattern, newCount);
+		// Update the ladder count
+		this._state.patternCounts.set(ladderKey, newCount);
 
 		// Update last pattern detected
 		this._state.lastPatternDetected = match;
