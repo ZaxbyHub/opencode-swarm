@@ -11,9 +11,9 @@
  */
 import { afterEach, describe, expect, mock, test } from 'bun:test';
 import {
+	_internals,
 	DEFAULT_READ_ONLY_TOOLS,
 	dispatchEphemeralAgent,
-	_internals,
 } from '../../../src/evaluation/ephemeral-agent-dispatcher.js';
 
 const originalLog = _internals.log;
@@ -54,12 +54,11 @@ function fakeClient(opts?: { omitAbort?: boolean }) {
 		},
 	} as never;
 	if (!opts?.omitAbort) {
-		(client as { session: Record<string, unknown> }).session.abort = async (
-			args: { path: { id: string } },
-		) => {
-			calls.push(`abort:${args.path.id}`);
-			return { data: true };
-		};
+		(client as { session: Record<string, unknown> }).session.abort =
+			async (args: { path: { id: string } }) => {
+				calls.push(`abort:${args.path.id}`);
+				return { data: true };
+			};
 	}
 	return { client, calls };
 }

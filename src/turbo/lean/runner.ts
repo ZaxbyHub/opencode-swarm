@@ -33,8 +33,8 @@ import {
 } from '../../state';
 import { telemetry } from '../../telemetry';
 import { pushAdvisory } from '../../utils/advisory-queue';
-import { criticalWarn, log } from '../../utils/logger';
 import { teardownEphemeralSession } from '../../utils/ephemeral-session-teardown';
+import { criticalWarn, log } from '../../utils/logger';
 import {
 	dispatchWithModelFallback,
 	type ModelOverride,
@@ -790,10 +790,7 @@ export class LeanTurboRunner {
 									this._timedOutLanes.delete(lane.laneId);
 									// #2123: teardown awaits a graceful abort
 									// (flush) before the cascade-delete.
-									void teardownEphemeralSession(
-										session,
-										result.sessionId!,
-									);
+									void teardownEphemeralSession(session, result.sessionId!);
 									// Issue #2002 hardening (item 2b): a lane that timed out
 									// but later completed successfully in the background may
 									// already have a published scope binding + child

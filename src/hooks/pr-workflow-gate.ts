@@ -10,7 +10,6 @@ import {
 	candidateHeaderFamily,
 	normalizeCandidateArtifact,
 	type RowFormatFamily,
-	removeCandidateCodeFences,
 	selectCandidateHeader,
 	splitPipeFields,
 } from '../background/candidate-contract.js';

@@ -56,8 +56,8 @@ import {
 import type { ParallelDispatcher } from '../parallel/dispatcher/parallel-dispatcher.js';
 import { createParallelDispatcher } from '../parallel/dispatcher/parallel-dispatcher.js';
 import { swarmState } from '../state.js';
-import * as logger from '../utils/logger.js';
 import { teardownEphemeralSession } from '../utils/ephemeral-session-teardown.js';
+import * as logger from '../utils/logger.js';
 import { createSwarmTool } from './create-tool.js';
 
 const MAX_LANES = 8;

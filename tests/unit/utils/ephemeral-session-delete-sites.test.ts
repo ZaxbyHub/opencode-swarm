@@ -12,17 +12,19 @@
  * Modeled on the established source-scan pattern in
  * `tests/unit/build/bundle-portability.test.ts`.
  */
+
+import { describe, expect, test } from 'bun:test';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, sep } from 'node:path';
-import { describe, expect, test } from 'bun:test';
 
 const SRC_ROOT = join(import.meta.dir, '..', '..', '..', 'src');
 
 /** Files that OWN the session-delete primitive and may call it directly. */
 const ALLOWED_OWNERS = new Set(
-	['src/utils/ephemeral-session-teardown.ts', 'src/evaluation/ephemeral-agent-dispatcher.ts'].map(
-		(p) => p.split('/').join(sep),
-	),
+	[
+		'src/utils/ephemeral-session-teardown.ts',
+		'src/evaluation/ephemeral-agent-dispatcher.ts',
+	].map((p) => p.split('/').join(sep)),
 );
 
 /** Recursively collect every .ts file under a directory. */

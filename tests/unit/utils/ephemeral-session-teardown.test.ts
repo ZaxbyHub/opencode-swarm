@@ -14,8 +14,8 @@
 import { afterEach, describe, expect, mock, test } from 'bun:test';
 import {
 	_internals,
-	teardownEphemeralSession,
 	type EphemeralSessionLifecycle,
+	teardownEphemeralSession,
 } from '../../../src/utils/ephemeral-session-teardown.js';
 
 const originalLog = _internals.log;
@@ -141,7 +141,9 @@ describe('teardownEphemeralSession — best-effort (never throws)', () => {
 		const { value } = fakeLifecycle({
 			deleteImpl: () => Promise.reject(new Error('delete blew up')),
 		});
-		await expect(teardownEphemeralSession(value, 'ses-6')).resolves.toBeUndefined();
+		await expect(
+			teardownEphemeralSession(value, 'ses-6'),
+		).resolves.toBeUndefined();
 	});
 
 	test('does not throw when delete times out', async () => {
