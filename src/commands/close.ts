@@ -27,11 +27,15 @@ import {
 } from '../hooks/knowledge-store';
 import type { SwarmKnowledgeEntry } from '../hooks/knowledge-types';
 import { validateSwarmPath } from '../hooks/utils';
+import { getDrainCounters } from '../learning/drain-summary-accumulator.js';
 import { runFinalizeRewardSweep } from '../memory/finalize-reward-sweep';
 import { tryAcquireLock } from '../parallel/file-locks.js';
 import { closePlanTerminalState } from '../plan/manager';
 import { clearAllScopes } from '../scope/scope-persistence';
 import {
+	type ActionMenuItem,
+	readActionMenu,
+	_internals as reflectionInternals,
 	runSessionReflection,
 	type SessionReflectionResult,
 	writeSessionReflection,
@@ -47,6 +51,8 @@ import {
 	resetSwarmStatePreservingSingletons,
 	swarmState,
 } from '../state';
+import type { ApplyKnowledgeResult } from '../tools/knowledge-add';
+import { applyKnowledgeEntry } from '../tools/knowledge-add';
 import { executeWriteRetro } from '../tools/write-retro';
 import { mergeEnvForChild } from '../utils/bun-compat';
 import { log } from '../utils/logger';
@@ -118,6 +124,8 @@ export interface CloseStageContext {
 	sessionReflection: SessionReflectionResult | undefined;
 	hivePromoted: number;
 	sessionKnowledgeCreated: number;
+	/** Retro lessons deduped as already-known (FR-015 dedup) */
+	dedupDropCount: number;
 	fallbackKnowledgeCreated: number;
 	originalStatuses: Map<string, string>;
 	guaranteeResult: { closedPhaseIds: number[]; closedTaskIds: string[] };
@@ -185,6 +193,16 @@ async function runAbortableSkillReview(
 
 function normalizeLessonText(text: string): string {
 	return (text ?? '').trim().toLowerCase();
+}
+
+/** Compute the count of retro lessons dropped as already-known (FR-015 dedup). */
+function computeDedupDropCount(
+	retroLessons: string[],
+	existingLessonTexts: Set<string>,
+): number {
+	return retroLessons.filter((l) =>
+		existingLessonTexts.has(normalizeLessonText(l)),
+	).length;
 }
 
 function countSessionKnowledgeEntries(
@@ -654,11 +672,12 @@ export async function runFinalizeStage(ctx: CloseStageContext): Promise<void> {
 
 	// FR-015: exclude retro lessons already committed in the knowledge store
 	let dedupedRetroLessons = ctx.retroLessons;
+	let existingLessonTexts = new Set<string>();
 	try {
 		const existingEntries = await readKnowledge<SwarmKnowledgeEntry>(
 			resolveSwarmKnowledgePath(ctx.directory),
 		);
-		const existingLessonTexts = new Set(
+		existingLessonTexts = new Set(
 			existingEntries
 				.map((e) => normalizeLessonText(e.lesson))
 				.filter((t) => t.length > 0),
@@ -671,6 +690,11 @@ export async function runFinalizeStage(ctx: CloseStageContext): Promise<void> {
 	} catch {
 		dedupedRetroLessons = ctx.retroLessons; // fail-open
 	}
+
+	ctx.dedupDropCount = computeDedupDropCount(
+		ctx.retroLessons,
+		existingLessonTexts,
+	);
 
 	ctx.allLessons = [
 		...new Set([...ctx.explicitLessons, ...dedupedRetroLessons]),
@@ -808,16 +832,33 @@ export async function runFinalizeStage(ctx: CloseStageContext): Promise<void> {
 	// deterministic fallback otherwise. The architect report is surfaced directly
 	// in the finalize output so the user can act on it immediately.
 	try {
-		ctx.sessionReflection = await runAbortableReflection(
+		const drainCounters = ctx.options.sessionID
+			? getDrainCounters(ctx.options.sessionID)
+			: undefined;
+		ctx.sessionReflection = await _internals.runAbortableReflection(
 			{
 				directory: ctx.directory,
 				toolAggregates: swarmState.toolAggregates,
 				agentSessions: swarmState.agentSessions,
 				sessionId: ctx.options.sessionID,
+				sessionStart: ctx.sessionStart,
+				lessonsStored: ctx.curationResult?.stored ?? 0,
+				knowledgeCreated: ctx.sessionKnowledgeCreated,
+				dedupDropCount: ctx.dedupDropCount,
+				drainAdmitted: drainCounters?.admitted ?? 0,
+				drainReinforced: drainCounters?.reinforced ?? 0,
+				drainRejected: drainCounters?.rejected ?? 0,
+				dedupThreshold: ctx.config.dedup_threshold,
 			},
 			CLOSE_REFLECTION_TIMEOUT_MS,
 		);
 		await writeSessionReflection(ctx.directory, ctx.sessionReflection);
+		// FR-010: persist action menu to .swarm/memory/ so it survives finalize clean+align.
+		await reflectionInternals.persistActionMenu(
+			ctx.directory,
+			ctx.sessionReflection.data.assembledMenu ?? [],
+			ctx.options.sessionID,
+		);
 	} catch (reflectionErr) {
 		const msg =
 			reflectionErr instanceof Error
@@ -1780,8 +1821,260 @@ export async function runFinalizeDryRun(
 	return lines.join('\n');
 }
 
+// ─── --apply flag handler (FR-008) ───────────────────────────────
+
 /**
- * Handles /swarm close command - performs full terminal session finalization:
+ * Maximum age (ms) for a persisted action menu before it is considered expired.
+ * Exported for testability; same value as in session-reflection.ts.
+ */
+const APPLY_MENU_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+/**
+ * Extract a string array from an unknown value (menu item data field).
+ * Returns an empty array when the value is not a non-empty array of strings.
+ */
+function extractStringArray(v: unknown): string[] {
+	if (!Array.isArray(v)) return [];
+	const result: string[] = [];
+	for (const item of v) {
+		if (typeof item === 'string' && item.length > 0) {
+			result.push(item);
+		}
+	}
+	return result;
+}
+
+/**
+ * Handle the --apply flag: read the persisted action menu, apply selected
+ * knowledge_add items via applyKnowledgeEntry (writes to knowledge.jsonl),
+ * and produce routing commands for other tool targets.
+ *
+ * FR-008: Applying selected menu actions SHALL occur via a separate explicit
+ * invocation (--apply flag), routing to existing tools only.
+ * FR-011: No issue filing subprocess from finalize proper — filing via --apply
+ * is a separate explicit user-confirmed step.
+ * FR-013: Application writes persist to durable stores.
+ *
+ * @param directory - Project root directory
+ * @param selection - Comma-separated list of 1-based menu item numbers (e.g. "1,3,5")
+ * @param sessionID - Optional session ID for exact menu lookup
+ * @returns Summary text describing the selected actions
+ */
+/**
+ * Build an actionable routing command string for a menu item based on its targetTool.
+ * Returns a command the user can copy and run — either a valid registered CLI
+ * subcommand ("bunx opencode-swarm run <cmd>"), an interactive /swarm command
+ * for use inside an OpenCode session, or an external tool (e.g. gh).
+ *
+ * The routing table below maps tool names to their VALID registered equivalents.
+ * Invalid or non-existent CLI commands (e.g. "knowledge_add", "skill_improve",
+ * "skill_generate") are intentionally NOT generated — see COMMAND_REGISTRY in
+ * src/commands/registry.ts for the authoritative command list.
+ */
+function buildRoutingCommand(item: ActionMenuItem): string {
+	const data = item.data as Record<string, unknown>;
+
+	switch (item.targetTool) {
+		case 'knowledge_add': {
+			// knowledge_add is an OpenCode-internal tool, not a registered CLI
+			// command. Route to /swarm knowledge (list entries) so the user can
+			// review near-duplicates interactively in their OpenCode session.
+			return '/swarm knowledge';
+		}
+		case 'gh issue create': {
+			const title =
+				typeof data.title === 'string' ? data.title : 'Untitled issue';
+			const body = typeof data.body === 'string' ? data.body : '';
+			return `gh issue create --title '${title.replace(/'/g, "'\\''")}' --body '${body.replace(/'/g, "'\\''")}'`;
+		}
+		case 'skill_improve':
+			// "consolidate" is the registered CLI command that runs the
+			// skill-improver consolidation pass (proposal writing + hardening).
+			return 'bunx opencode-swarm run consolidate';
+		case 'skill_generate':
+			// "consolidate" with --evaluate also generates draft skills from
+			// mature knowledge clusters.
+			return 'bunx opencode-swarm run consolidate --evaluate';
+		default: {
+			// For unrecognized tool names, emit an interactive /swarm command
+			// rather than an invalid "bunx opencode-swarm run <tool>" that
+			// the CLI would reject with "Unknown command".
+			return `/swarm ${item.targetTool}`;
+		}
+	}
+}
+
+async function handleApplyFlag(
+	directory: string,
+	selection: string,
+	sessionID?: string,
+): Promise<string> {
+	const items = await _internals.readActionMenuFromPersist(
+		directory,
+		sessionID,
+	);
+
+	if (items === null) {
+		return `❌ No action menu found${sessionID ? ` for session ${sessionID}` : ''}. The menu may have expired (>24h old), or /swarm finalize has not yet been run. Run /swarm finalize first to generate an action menu.`;
+	}
+
+	// Parse comma-separated 1-based numbers.
+	// Only pure digit sequences (e.g. "1", "42") are accepted.
+	// Tokens containing letters, decimals, scientific notation, signs,
+	// or other non-digit characters are rejected as invalid.
+	const POSITIVE_INTEGER_RE = /^[1-9]\d*$/;
+	const parts = selection
+		.split(',')
+		.map((s) => s.trim())
+		.filter(Boolean);
+	const selectedIndices: number[] = [];
+	const invalidEntries: string[] = [];
+
+	for (const part of parts) {
+		if (!POSITIVE_INTEGER_RE.test(part)) {
+			invalidEntries.push(part);
+			continue;
+		}
+		const num = parseInt(part, 10);
+		if (num > items.length) {
+			invalidEntries.push(part);
+		} else {
+			selectedIndices.push(num - 1); // Convert to 0-based
+		}
+	}
+
+	if (selectedIndices.length === 0) {
+		return `❌ No valid items selected.${invalidEntries.length > 0 ? ` Invalid entries: ${invalidEntries.join(', ')}.` : ''} Menu has ${items.length} item(s). Provide 1-based numbers, e.g. --apply 1,3,5.`;
+	}
+
+	const lines: string[] = [];
+	lines.push('## Selected Actions (--apply)');
+	lines.push('');
+
+	const warnings: string[] = [];
+	if (invalidEntries.length > 0) {
+		warnings.push(`Skipped invalid entries: ${invalidEntries.join(', ')}`);
+	}
+
+	for (const idx of selectedIndices) {
+		const item = items[idx];
+		if (item.targetTool === 'knowledge_add') {
+			// FR-013: knowledge-capture actions use the shared validation
+			// pipeline (applyKnowledgeEntry from knowledge-add.ts).
+			try {
+				const data = item.data as Record<string, unknown>;
+				const lessonText =
+					typeof data.sessionEntryText === 'string'
+						? data.sessionEntryText
+						: String(item.description);
+
+				// Extract actionability fields from menu item data (FR-013)
+				const requiredActions = extractStringArray(data.required_actions);
+				const appliesToAgents = extractStringArray(data.applies_to_agents);
+				const appliesToTools = extractStringArray(data.applies_to_tools);
+				const forbiddenActions = extractStringArray(data.forbidden_actions);
+				const verificationChecks = extractStringArray(data.verification_checks);
+
+				const result: ApplyKnowledgeResult = await applyKnowledgeEntry(
+					directory,
+					lessonText,
+					'process',
+					{
+						tags: ['session-reflection', 'finalize-apply'],
+						scope: 'global',
+						auto_generated: true,
+						confidence: 0.6,
+						required_actions:
+							requiredActions.length > 0 ? requiredActions : undefined,
+						applies_to_agents:
+							appliesToAgents.length > 0 ? appliesToAgents : undefined,
+						applies_to_tools:
+							appliesToTools.length > 0 ? appliesToTools : undefined,
+						forbidden_actions:
+							forbiddenActions.length > 0 ? forbiddenActions : undefined,
+						verification_checks:
+							verificationChecks.length > 0 ? verificationChecks : undefined,
+					},
+				);
+
+				if (result.success && result.entry) {
+					// New entry written
+					lines.push(`Action ${item.number}: ${item.description}`);
+					lines.push(`  Applied: lesson written to knowledge.jsonl`);
+					lines.push('');
+				} else if (
+					result.success &&
+					result.reinforced !== undefined &&
+					result.duplicateId
+				) {
+					// Reinforced or idempotent duplicate
+					lines.push(`Action ${item.number}: ${item.description}`);
+					lines.push(
+						`  Skipped: ${result.reason ?? 'duplicate of existing entry'} (${result.duplicateId})`,
+					);
+					lines.push('');
+				} else if (result.inactiveDuplicate && result.duplicateId) {
+					// Inactive duplicate
+					lines.push(`Action ${item.number}: ${item.description}`);
+					lines.push(
+						`  Skipped: ${result.reason ?? 'duplicate of existing entry'} (${result.duplicateId})`,
+					);
+					lines.push('');
+				} else if (result.quarantined) {
+					lines.push(`Action ${item.number}: ${item.description}`);
+					lines.push(`  Quarantined: ${result.reason ?? 'unactionable'}`);
+					lines.push('');
+				} else {
+					lines.push(`Action ${item.number}: ${item.description}`);
+					lines.push(`  Skipped: ${result.reason ?? 'validation failed'}`);
+					lines.push('');
+				}
+			} catch (applyErr) {
+				const msg =
+					applyErr instanceof Error ? applyErr.message : String(applyErr);
+				lines.push(`Action ${item.number}: ${item.description}`);
+				lines.push(`  Failed to apply: ${msg}`);
+				lines.push(`  Run: /swarm knowledge`);
+				lines.push('');
+			}
+		} else {
+			const routingCommand = buildRoutingCommand(item);
+			lines.push(`Action ${item.number}: ${item.description}`);
+			lines.push(`  Run: ${routingCommand}`);
+			lines.push('');
+		}
+	}
+
+	if (warnings.length > 0) {
+		for (const w of warnings) {
+			lines.push(`⚠️ ${w}`);
+		}
+		lines.push('');
+	}
+
+	lines.push(
+		`_${selectedIndices.length} action(s) selected. Copy and run the commands above to apply._`,
+	);
+
+	return lines.join('\n');
+}
+
+/**
+ * Reads the persisted action menu, checking for staleness.
+ * DI seam for testing — delegates to reflectionInternals.readActionMenu
+ * but adds a staleness check via APPLY_MENU_MAX_AGE_MS.
+ */
+async function readActionMenuFromPersist(
+	directory: string,
+	sessionID?: string,
+): Promise<ActionMenuItem[] | null> {
+	const items = await readActionMenu(directory, sessionID);
+	return items;
+}
+
+// ─── handleCloseCommand ───────────────────────────────────────────
+
+/**
  * 0. Guarantee: mark all incomplete phases/tasks as closed
  * 1. Finalize: write retrospectives, produce terminal summary
  * 2. Archive: create timestamped bundle of swarm artifacts
@@ -1847,6 +2140,20 @@ export async function handleCloseCommand(
 			planData,
 			planExists,
 		);
+	}
+
+	// FR-008/FR-013: --apply: apply selected menu actions and return WITHOUT
+	// acquiring the finalize lock. knowledge_add items are written to
+	// knowledge.jsonl via applyKnowledgeEntry; other items produce routing
+	// commands for the user to run separately.
+	// Parse --apply <comma-separated-numbers> from args.
+	const applyIndex = args.indexOf('--apply');
+	if (applyIndex !== -1) {
+		if (applyIndex + 1 >= args.length || args[applyIndex + 1].trim() === '') {
+			return 'Error: --apply requires a selection (e.g., --apply 1,3,5). Run /swarm finalize first to generate the menu.';
+		}
+		const selection = args[applyIndex + 1];
+		return _internals.handleApplyFlag(directory, selection, options.sessionID);
 	}
 
 	// FR-012: acquire finalize lock before any destructive work
@@ -1940,6 +2247,7 @@ export async function handleCloseCommand(
 			sessionReflection: undefined,
 			hivePromoted: 0,
 			sessionKnowledgeCreated: 0,
+			dedupDropCount: 0,
 			fallbackKnowledgeCreated: 0,
 			originalStatuses: new Map(),
 			guaranteeResult: { closedPhaseIds: [], closedTaskIds: [] },
@@ -2168,16 +2476,7 @@ export async function handleCloseCommand(
 
 		let reflectionOutput = '';
 		if (ctx.sessionReflection) {
-			const d = ctx.sessionReflection.data;
-			const hasSignals =
-				d.totalToolFailures > 0 ||
-				d.gateFailures.length > 0 ||
-				d.lessonsFromRetros.length > 0 ||
-				Object.keys(d.errorTaxonomy).length > 0 ||
-				d.agentDispatches.length > 0;
-			if (hasSignals) {
-				reflectionOutput = `\n\n---\n\n**Architect Session Review** (${ctx.sessionReflection.source}):\n\n${ctx.sessionReflection.architectReport}`;
-			}
+			reflectionOutput = `\n\n---\n\n**Architect Session Review** (${ctx.sessionReflection.source}):\n\n${ctx.sessionReflection.architectReport}`;
 		}
 
 		if (ctx.planAlreadyDone) {
@@ -2216,9 +2515,11 @@ async function acquireFinalizeLock(
 
 export const _internals = {
 	ACTIVE_STATE_DIRS_TO_CLEAN,
+	APPLY_MENU_MAX_AGE_MS,
+	computeDedupDropCount,
 	countSessionKnowledgeEntries,
-	CLOSE_SKILL_REVIEW_TIMEOUT_MS,
 	CLOSE_REFLECTION_TIMEOUT_MS,
+	CLOSE_SKILL_REVIEW_TIMEOUT_MS,
 	guaranteeAllPlansComplete,
 	getGitRepositoryStatus,
 	resetToMainAfterMerge,
@@ -2232,12 +2533,15 @@ export const _internals = {
 	resetSwarmStatePreservingSingletons,
 	runFinalizeStage,
 	runFinalizeRewardSweep,
+	runAbortableReflection,
 	acquireFinalizeLock,
 	runArchiveStage,
 	runArchiveEvidenceRetention,
 	runCleanStage,
 	runAlignStage,
 	runFinalizeDryRun,
+	handleApplyFlag,
+	readActionMenuFromPersist,
 	archiveEvidence,
 	closePlanTerminalState,
 	endAgentSession,

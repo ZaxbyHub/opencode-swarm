@@ -128,6 +128,8 @@ import {
 	bumpKnowledgeGeneration,
 	createKnowledgeInjectorHook,
 } from './hooks/knowledge-injector.js';
+import type { MessageWithParts } from './hooks/knowledge-types.js';
+import type { Message as MessagesTransformMessage } from './hooks/messages-transform.js';
 import { microReflectorAfter } from './hooks/micro-reflector.js';
 import { normalizeToolName } from './hooks/normalize-tool-name';
 import { createPrAutoSubscribeHook } from './hooks/pr-auto-subscribe.js';
@@ -155,6 +157,7 @@ import {
 	recordDeniedToolCall,
 } from './hooks/trajectory-logger';
 import { realtimeAdmissionAfter } from './learning/admission.js';
+import { stashDrainSummary } from './learning/drain-summary-accumulator.js';
 import { createMemoryLifecycleHooks } from './memory';
 import { loadPlan } from './plan/manager.js';
 import { createPrmHook, resolvePrmPatternPersistenceOptions } from './prm';
@@ -2510,9 +2513,7 @@ async function initializeOpenCodeSwarm(
 						);
 						return knowledgeApplicationTransformScan(
 							ctx.directory,
-							output as {
-								messages?: import('./hooks/knowledge-types.js').MessageWithParts[];
-							},
+							output as { messages?: MessageWithParts[] },
 							mctx.sessionID,
 						);
 					} catch {
@@ -2531,9 +2532,7 @@ async function initializeOpenCodeSwarm(
 						);
 						return skillPropagationTransformScan(
 							ctx.directory,
-							output as {
-								messages?: import('./hooks/knowledge-types.js').MessageWithParts[];
-							},
+							output as { messages?: MessageWithParts[] },
 							mctx.sessionID,
 							skillPropagationConfig,
 						);
@@ -2546,9 +2545,7 @@ async function initializeOpenCodeSwarm(
 				// shape and the flat `{role,content}` shape (issue #1778 H1).
 				(
 					_input: unknown,
-					output: {
-						messages?: import('./hooks/messages-transform.js').Message[];
-					},
+					output: { messages?: MessagesTransformMessage[] },
 				): Promise<void> => {
 					if (output.messages) {
 						output.messages = consolidateSystemMessages(output.messages);
@@ -3126,6 +3123,11 @@ async function initializeOpenCodeSwarm(
 							sessionID: input.sessionID,
 							...summary,
 						});
+						try {
+							stashDrainSummary(input.sessionID, summary);
+						} catch {
+							// Fail-open: drain-count accumulation must never block the hot path
+						}
 					}
 				})(input, output);
 				// Reviewer receipt collection: persist a returning reviewer Task's
