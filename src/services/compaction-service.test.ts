@@ -10,6 +10,8 @@ import {
 } from '../state';
 import {
 	createCompactionService,
+	getCompactionMetrics,
+	MAX_TRACKED_COMPACTION_SESSIONS,
 	resetCompactionState,
 } from './compaction-service';
 
@@ -123,6 +125,39 @@ describe('compaction-service', () => {
 		await service.toolAfter({ tool: 'bash', sessionID: 's1' }, { output: {} });
 		expect(injectCalls).toHaveLength(1);
 		expect(injectCalls[0].sessionId).toBe('s1');
+	});
+
+	// -------------------------------------------------------------------------
+	// Test 3c: sessionStates FIFO cap (AGENTS.md invariant 8)
+	// -------------------------------------------------------------------------
+	test('sessionStates is FIFO-capped: the oldest session is evicted under churn', async () => {
+		// Seed a session with real (non-zero) hysteresis state so eviction is
+		// observable: an evicted session re-reads as a fresh state (count 0).
+		const injectMessage = makeInjectSpy();
+		const service = createCompactionService(
+			defaultConfig,
+			tempDir,
+			injectMessage,
+		);
+		setSessionBudget('s-first', 45, 100000);
+		await service.toolAfter(
+			{ tool: 'bash', sessionID: 's-first' },
+			{ output: {} },
+		);
+		expect(injectCalls).toHaveLength(1); // observation tier fired
+		expect(getCompactionMetrics('s-first').compactionCount).toBe(1);
+
+		// Drive more than the cap of unique sessions through the create-on-read
+		// path (getCompactionMetrics -> getSessionState). 's-first' is the oldest
+		// entry, so it is the first to be evicted once the cap overflows.
+		for (let i = 0; i <= MAX_TRACKED_COMPACTION_SESSIONS; i++) {
+			getCompactionMetrics(`churn-${i}`);
+		}
+
+		// 's-first' was evicted: re-reading it creates a fresh state (count 0),
+		// proving the map is bounded and the oldest session was dropped rather
+		// than the map growing unbounded.
+		expect(getCompactionMetrics('s-first').compactionCount).toBe(0);
 	});
 
 	// -------------------------------------------------------------------------
