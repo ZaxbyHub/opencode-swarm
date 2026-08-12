@@ -18,6 +18,7 @@ import {
 } from '../sbom/detectors/index';
 import { simpleGlobToRegex } from '../utils';
 import * as logger from '../utils/logger.js';
+import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache.js';
 import { createSwarmTool } from './create-tool';
 
 // ============ Constants ============
@@ -379,6 +380,7 @@ export const sbom_generate: ReturnType<typeof tool> = createSwarmTool({
 		const filename = generateSbomFilename();
 		const outputPath = path.join(outputDir, filename);
 		fs.writeFileSync(outputPath, bomJson, 'utf-8');
+		invalidateCachedArtifact(outputPath);
 
 		// Determine verdict
 		const verdict = processedFiles.length > 0 ? 'pass' : 'pass';

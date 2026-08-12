@@ -215,3 +215,33 @@ export function consolidateSystemMessages(messages: Message[]): Message[] {
 		return getRole(msg) !== 'system';
 	});
 }
+
+/**
+ * In-place variant of {@link consolidateSystemMessages} for use inside an
+ * `experimental.chat.messages.transform` handler.
+ *
+ * The OpenCode host invokes each plugin hook as `M(input, output)`, **discards
+ * the handler's return value**, and afterwards reads its OWN local message
+ * array (host binary offset ~100,667,665:
+ * `yield* d.trigger("experimental.chat.messages.transform",{},{messages:C})`
+ * followed by `Me.toModelMessagesEffect(C,Z)`). Therefore
+ * `output.messages = consolidateSystemMessages(output.messages)` is a *rebind*
+ * that the host never observes — it silently did nothing in production from the
+ * day it was written until issue #1619. Only mutating the array the host handed
+ * us is observable.
+ *
+ * The consolidated result is computed BEFORE the array is cleared, because
+ * `consolidateSystemMessages` reads the same array it is passed.
+ */
+export function consolidateSystemMessagesInPlace(messages: Message[]): void {
+	const consolidated = consolidateSystemMessages(messages);
+	messages.length = 0;
+	// Deliberately a loop, not `messages.push(...consolidated)`: chat history
+	// length is user-controlled and unbounded, and spreading a large array into
+	// an argument list can exceed the engine's argument limit
+	// (`RangeError: Maximum call stack size exceeded`). `splice(0, n, ...arr)`
+	// has the same ceiling and is avoided for the same reason.
+	for (const message of consolidated) {
+		messages.push(message);
+	}
+}

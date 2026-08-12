@@ -17,6 +17,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import {
 	mkdir,
 	mkdtemp,
+	readdir,
 	readFile,
 	rm,
 	stat,
@@ -319,17 +320,29 @@ describe('Agent Activity — Adversarial Security & Edge Cases', () => {
 	});
 
 	describe('Stale temp file attacks', () => {
-		it('should overwrite pre-existing .tmp file from crash', async () => {
+		it('should not let a pre-existing stale .tmp file corrupt the write', async () => {
+			// doFlush now writes through the shared `atomicWriteFile` helper
+			// (src/evidence/task-file.ts), which uses a per-write unique temp
+			// name (target path + `.tmp.` + a millisecond timestamp + a random
+			// suffix; the literal expression is spelled out in the helper) rather
+			// than a
+			// single fixed `${path}.tmp` name — this closes a concurrent-flush
+			// collision hazard (issue #1729 follow-up). A stale fixed-name
+			// `.tmp` file left behind by an OLD build's crash is therefore
+			// simply orphaned, unrelated garbage: it is never read, written,
+			// or renamed over by the current write, and must NOT corrupt the
+			// real write's own unique temp file / rename.
 			const contextPath = join(tempDir, '.swarm', 'context.md');
-			const tempPath = `${contextPath}.tmp`;
+			const staleFixedTempPath = `${contextPath}.tmp`;
 
-			// Create a stale .tmp file from a previous "crash"
-			await writeFile(tempPath, 'CORRUPTED DATA FROM CRASH\n');
+			// Create a stale .tmp file from a previous "crash" under the OLD
+			// fixed-name convention.
+			await writeFile(staleFixedTempPath, 'CORRUPTED DATA FROM CRASH\n');
 
 			// Create initial context.md
 			await writeFile(contextPath, '# Initial\n');
 
-			// Flush should overwrite the stale .tmp file
+			// Flush should succeed and ignore the unrelated stale file.
 			await _flushForTesting(tempDir);
 
 			// Verify final file is correct (not corrupted)
@@ -337,11 +350,13 @@ describe('Agent Activity — Adversarial Security & Edge Cases', () => {
 			expect(content).toContain('## Agent Activity');
 			expect(content).not.toContain('CORRUPTED DATA FROM CRASH');
 
-			// Verify .tmp file was cleaned up
-			const tempExists = await stat(tempPath)
-				.then(() => true)
-				.catch(() => false);
-			expect(tempExists).toBe(false);
+			// Verify the CURRENT write's own unique temp file was cleaned up
+			// (no `context.md.tmp.<timestamp>.<rand>` files linger).
+			const swarmFiles = await readdir(join(tempDir, '.swarm'));
+			const ownTempFiles = swarmFiles.filter((f) =>
+				/^context\.md\.tmp\.\d+\.\d+$/.test(f),
+			);
+			expect(ownTempFiles).toEqual([]);
 		});
 
 		it('should handle read-only .tmp file gracefully', async () => {
@@ -376,12 +391,13 @@ describe('Agent Activity — Adversarial Security & Edge Cases', () => {
 			warnSpy.mockRestore();
 		});
 
-		it('should handle stale .tmp file and ensure cleanup on error', async () => {
+		it('should handle a write failure gracefully and clean up its own temp file', async () => {
 			const contextPath = join(tempDir, '.swarm', 'context.md');
-			const tempPath = `${contextPath}.tmp`;
+			const staleFixedTempPath = `${contextPath}.tmp`;
 
-			// Create a stale .tmp file from a previous "crash"
-			await writeFile(tempPath, 'CORRUPTED DATA FROM CRASH\n');
+			// Unrelated stale .tmp file from an OLD build's crash (fixed-name
+			// convention) — must not interfere with error handling.
+			await writeFile(staleFixedTempPath, 'CORRUPTED DATA FROM CRASH\n');
 
 			// Create initial context.md
 			await writeFile(contextPath, '# Initial\n');
@@ -398,11 +414,14 @@ describe('Agent Activity — Adversarial Security & Edge Cases', () => {
 			const content = await Bun.file(contextPath).text();
 			expect(content).toBe('# Initial\n');
 
-			// Verify .tmp file was cleaned up (unlink in catch block)
-			const tempExists = await stat(tempPath)
-				.then(() => true)
-				.catch(() => false);
-			expect(tempExists).toBe(false);
+			// Verify the CURRENT write's own unique temp file was cleaned up
+			// by atomicWriteFile's finally-unlink, regardless of the unrelated
+			// stale fixed-name file.
+			const swarmFiles = await readdir(join(tempDir, '.swarm'));
+			const ownTempFiles = swarmFiles.filter((f) =>
+				/^context\.md\.tmp\.\d+\.\d+$/.test(f),
+			);
+			expect(ownTempFiles).toEqual([]);
 
 			writeSpy.mockRestore();
 		});

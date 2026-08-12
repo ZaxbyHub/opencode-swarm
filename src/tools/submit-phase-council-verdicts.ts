@@ -27,6 +27,7 @@ import {
 	truncateObjectForJson,
 } from '../memory/reward-capture';
 import * as logger from '../utils/logger';
+import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
 import { createSwarmTool } from './create-tool';
 import { resolveWorkingDirectory } from './resolve-working-directory';
 
@@ -437,6 +438,7 @@ async function writePhaseCouncilEvidence(
 	try {
 		writeFileSync(tempFile, JSON.stringify(content, null, 2), 'utf8');
 		renameSync(tempFile, evidenceFile);
+		invalidateCachedArtifact(evidenceFile);
 	} finally {
 		if (existsSync(tempFile)) unlinkSync(tempFile);
 	}

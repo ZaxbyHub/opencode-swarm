@@ -38,7 +38,6 @@ import { getLastHeartbeat } from '../telemetry';
 import { listRecoveryRecords } from '../turbo/lean/recovery';
 import { loadLeanTurboRunState } from '../turbo/lean/state';
 import { getCompactionMetrics } from './compaction-service';
-import { DEFAULT_CONTEXT_BUDGET_CONFIG } from './context-budget-service';
 
 /**
  * Dependency-injection seam for status-service.
@@ -110,6 +109,20 @@ export interface StatusData {
 	leanPauseReason?: string;
 	/** Last known context budget percentage (0-100), or null if not yet measured */
 	contextBudgetPct: number | null;
+	/**
+	 * The DENOMINATOR `contextBudgetPct` was measured against, in tokens, or
+	 * null when no budget report has run. Carried alongside the percentage
+	 * because the denominator is now derived per-model (`model.limit.context`)
+	 * rather than being a constant this renderer could assume. The renderer
+	 * previously back-computed the estimate from
+	 * `DEFAULT_CONTEXT_BUDGET_CONFIG.budgetTokens`, which was **40000** (not
+	 * 128000 — that was the schema default for `model_limits.default`, a
+	 * different constant on a different path). So the status line printed a
+	 * figure that did not match the percentage beside it for any user whose
+	 * warnings fired against anything other than 40000 — i.e. every user with a
+	 * `model_limits` override, and now everyone, since the live window is used.
+	 */
+	contextBudgetTokens?: number | null;
 	/** Number of context compaction events triggered this session */
 	compactionCount: number;
 	/** ISO timestamp of last compaction snapshot, or null if none */
@@ -272,6 +285,8 @@ export async function getStatusData(
 			turboMode: hasActiveTurboMode(),
 			contextBudgetPct:
 				swarmState.lastBudgetPct > 0 ? swarmState.lastBudgetPct : null,
+			contextBudgetTokens:
+				swarmState.lastBudgetTokens > 0 ? swarmState.lastBudgetTokens : null,
 			compactionCount: metrics.compactionCount,
 			lastSnapshotAt: metrics.lastSnapshotAt,
 		};
@@ -290,6 +305,8 @@ export async function getStatusData(
 				turboMode: hasActiveTurboMode(),
 				contextBudgetPct:
 					swarmState.lastBudgetPct > 0 ? swarmState.lastBudgetPct : null,
+				contextBudgetTokens:
+					swarmState.lastBudgetTokens > 0 ? swarmState.lastBudgetTokens : null,
 				compactionCount: metrics.compactionCount,
 				lastSnapshotAt: metrics.lastSnapshotAt,
 			};
@@ -311,6 +328,8 @@ export async function getStatusData(
 				turboMode: hasActiveTurboMode(),
 				contextBudgetPct:
 					swarmState.lastBudgetPct > 0 ? swarmState.lastBudgetPct : null,
+				contextBudgetTokens:
+					swarmState.lastBudgetTokens > 0 ? swarmState.lastBudgetTokens : null,
 				compactionCount: metrics.compactionCount,
 				lastSnapshotAt: metrics.lastSnapshotAt,
 			};
@@ -701,12 +720,29 @@ export function formatStatusMarkdown(status: StatusData): string {
 
 	if (status.contextBudgetPct !== null && status.contextBudgetPct > 0) {
 		const pct = status.contextBudgetPct.toFixed(1);
-		const budgetTokens = DEFAULT_CONTEXT_BUDGET_CONFIG.budgetTokens;
-		const est = Math.round((status.contextBudgetPct / 100) * budgetTokens);
-		lines.push(
-			'',
-			`**Context**: ${pct}% used (est. ${est.toLocaleString()} / ${budgetTokens.toLocaleString()} tokens)`,
-		);
+		// Render the token estimate ONLY against the denominator the percentage
+		// was actually measured with (`swarmState.lastBudgetTokens`, written by
+		// system-enhancer on the same statement as the pct). This used to
+		// back-compute from the hardcoded default, so a user on a 200k/1M model —
+		// or any user with a `model_limits` override — was shown a token figure
+		// and a window size that contradicted the percentage printed beside them.
+		// When the denominator is unknown (a synthetic snapshot; unreachable in
+		// production, where the pct and the denominator are written together) the
+		// percentage is shown alone rather than fabricated against a constant.
+		const budgetTokens = status.contextBudgetTokens;
+		if (
+			budgetTokens !== undefined &&
+			budgetTokens !== null &&
+			budgetTokens > 0
+		) {
+			const est = Math.round((status.contextBudgetPct / 100) * budgetTokens);
+			lines.push(
+				'',
+				`**Context**: ${pct}% used (est. ${est.toLocaleString()} / ${budgetTokens.toLocaleString()} tokens)`,
+			);
+		} else {
+			lines.push('', `**Context**: ${pct}% used`);
+		}
 		if (status.compactionCount > 0) {
 			lines.push(`**Compaction events**: ${status.compactionCount} triggered`);
 		}

@@ -36,6 +36,7 @@ import { advanceInlineFallback } from '../utils/inline-fallback-advancer';
 import * as logger from '../utils/logger';
 import type { ModelOverride } from '../utils/model-dispatch-fallback';
 import { isTransientProviderError } from '../utils/provider-error-classification';
+import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
 import {
 	type ParsedCriticResponse,
 	parseCriticResponseFields,
@@ -281,6 +282,7 @@ export async function writeFullAutoOversightEvidence(
 			path.posix.join('evidence', String(phase), fileName),
 		);
 		fs.writeFileSync(filePath, `${JSON.stringify(event, null, 2)}\n`, 'utf-8');
+		invalidateCachedArtifact(filePath);
 		return filePath;
 	} catch (error) {
 		const msg = error instanceof Error ? error.message : String(error);

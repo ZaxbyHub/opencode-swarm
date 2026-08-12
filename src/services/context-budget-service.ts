@@ -6,12 +6,16 @@
  * warnings when approaching budget limits.
  */
 
+import { DEFAULT_MODEL_CONTEXT_TOKENS } from '../config/schema';
 import { resolveSwarmKnowledgePath } from '../hooks/knowledge-store';
 import { readSwarmFileAsync, validateSwarmPath } from '../hooks/utils';
 import { bunFile, bunWrite } from '../utils/bun-compat';
 import * as logger from '../utils/logger.js';
-import { validateDirectory } from '../utils/path-security';
-import { readCachedTextFile } from '../utils/swarm-artifact-cache';
+import { validateProjectDirectory } from '../utils/path-security';
+import {
+	invalidateCachedArtifact,
+	readCachedTextFile,
+} from '../utils/swarm-artifact-cache';
 
 /**
  * Read a knowledge file's text by absolute (link-aware) path, returning '' on
@@ -84,7 +88,12 @@ export interface ContextBudgetReport {
 export interface ContextBudgetConfig {
 	/** Enable or disable budget monitoring */
 	enabled: boolean;
-	/** Maximum token budget (default: 40000) */
+	/**
+	 * The context-window denominator, in tokens. Production callers derive this
+	 * per-model via `resolveContextWindowTokens` (`src/config/context-window.ts`)
+	 * and never pass a constant; `DEFAULT_CONTEXT_BUDGET_CONFIG.budgetTokens`
+	 * below is only the no-information floor.
+	 */
 	budgetTokens: number;
 	/** Warning threshold percentage (default: 70) */
 	warningPct: number;
@@ -113,7 +122,15 @@ export interface BudgetState {
  */
 export const DEFAULT_CONTEXT_BUDGET_CONFIG: ContextBudgetConfig = {
 	enabled: true,
-	budgetTokens: 40000,
+	// LAST-RESORT floor only. Both system-enhancer budget blocks now overwrite
+	// this with the value `resolveContextWindowTokens`
+	// (`src/config/context-window.ts`) derives from the user's `model_limits`
+	// and the live `model.limit.context`, so in production this number is only
+	// reached when nothing is known about the model at all. It reads the shared
+	// constant because the two defaults previously drifted (40000 here vs
+	// 128000 in the schema), which made an unconfigured user measure the same
+	// swarm context against a 3.2x smaller denominator.
+	budgetTokens: DEFAULT_MODEL_CONTEXT_TOKENS,
 	warningPct: 70,
 	criticalPct: 90,
 	warningMode: 'once',
@@ -177,6 +194,14 @@ async function writeBudgetState(
 		);
 		const content = JSON.stringify(state, null, 2);
 		await bunWrite(resolvedPath, content);
+		// Only after a SUCCESSFUL write. `readBudgetState` above reads this exact
+		// path through the cached reader, and this is a per-turn, in-process
+		// read-modify-write whose edits are counter-only — i.e. frequently the
+		// SAME SIZE as the previous revision. The cache's stat stamp
+		// (mtime+ctime+size) cannot distinguish that from "unchanged" when both
+		// writes land inside one filesystem timestamp tick (issue #1729), so the
+		// next turn would re-read stale counters and re-emit the same warning.
+		invalidateCachedArtifact(resolvedPath);
 	} catch (error) {
 		logger.log(
 			'[context-budget] Failed to write budget state:',
@@ -251,7 +276,13 @@ export async function getContextBudgetReport(
 	assembledSystemPrompt: string,
 	config: ContextBudgetConfig,
 ): Promise<ContextBudgetReport> {
-	validateDirectory(directory);
+	// `directory` is the plugin-injected project root (system-enhancer passes
+	// its `directory`), so it is TRUSTED and always ABSOLUTE. It must therefore
+	// be checked with `validateProjectDirectory`, not `validateDirectory` —
+	// the latter is the validator for untrusted RELATIVE sub-paths and rejects
+	// every absolute path, which made this whole report throw on every real
+	// invocation behind a debug-gated catch (issue #1619 follow-up).
+	validateProjectDirectory(directory);
 	const timestamp = new Date().toISOString();
 
 	// Estimate tokens for each component
@@ -347,17 +378,23 @@ export async function formatBudgetWarning(
 	directory: string,
 	config: ContextBudgetConfig,
 ): Promise<string | null> {
-	validateDirectory(directory);
+	// Same trust model as `getContextBudgetReport` above: `directory` is the
+	// plugin-injected, always-absolute project root, so it needs the
+	// trusted-root validator. `validateDirectory` (untrusted RELATIVE sub-path
+	// input) rejects every absolute path and made this function throw on every
+	// real invocation.
+	validateProjectDirectory(directory);
 	// If status is ok, no warning needed
 	if (report.status === 'ok') {
 		return null;
 	}
 
-	// Directory is required for state persistence and suppression logic
-	if (!directory || directory.trim() === '') {
-		// If no directory provided, just return the warning without suppression
-		return formatWarningMessage(report);
-	}
+	// NOTE: the pre-#1619-follow-up code had an `if (!directory || directory.trim() === '')`
+	// early return here that returned an unsuppressed warning. It was unreachable
+	// then (the validator above already threw on empty) and is unreachable now
+	// (`validateProjectDirectory` still rejects empty), so it was removed rather
+	// than left as a branch no caller can enter. Every path below may rely on
+	// `directory` being a non-empty absolute root.
 
 	// Read current budget state
 	const budgetState = await readBudgetState(directory);

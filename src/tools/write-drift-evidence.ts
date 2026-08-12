@@ -19,6 +19,7 @@ import { takeSnapshotEvent } from '../plan/ledger';
 import { loadPlanJsonOnly } from '../plan/manager';
 import { derivePlanId } from '../plan/utils.js';
 import * as logger from '../utils/logger.js';
+import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache.js';
 import { createSwarmTool } from './create-tool';
 
 /**
@@ -153,6 +154,7 @@ export async function executeWriteDriftEvidence(
 			'utf-8',
 		);
 		await fs.promises.rename(tempPath, validatedPath);
+		invalidateCachedArtifact(validatedPath);
 
 		// On APPROVED: write an immutable plan snapshot to the append-only ledger
 		// tagged source='critic_approved'. This provides a durable fallback the
