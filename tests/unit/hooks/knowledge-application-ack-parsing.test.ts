@@ -77,6 +77,19 @@ KNOWLEDGE_VIOLATED: ${id} reason=scope breach`;
 		expect(acks[0].reason).toBe('directive not applicable to this context');
 	});
 
+	it('handles CONTRADICTED marker with observable evidence', () => {
+		const id = 'aaaaaaaa-aaaa-4aaa-9aaa-aaaaaaaaaaaa';
+		const text = `KNOWLEDGE_CONTRADICTED: ${id} reason=current scope requires workspace-relative paths`;
+		const acks = parseAcknowledgments(text);
+		expect(acks).toEqual([
+			{
+				id,
+				result: 'contradicted',
+				reason: 'current scope requires workspace-relative paths',
+			},
+		]);
+	});
+
 	it('matches ID at end of string without newline', () => {
 		const id = 'aaaaaaaa-aaaa-4aaa-9aaa-aaaaaaaaaaaa';
 		const text = `KNOWLEDGE_APPLIED: ${id}`;

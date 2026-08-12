@@ -1345,7 +1345,7 @@ All five tools follow strict security practices:
 
 The context pruning system now incorporates several new controls introduced in v6.14.12:
 
-- **Provider‑aware model limits** – token limits are looked up per model via `context_budget.model_limits` (e.g., a higher limit for Claude Sonnet). This allows the system to adapt the budget based on the active provider.
+- **Provider‑aware model limits** – the context window is resolved per model through the single derivation in `src/config/context-window.ts`: an explicit `context_budget.model_limits` override first, then the live `model.limit.context` the OpenCode host reports for the active provider/model pair, then a static fallback table, then a last-resort constant. Because the host's model catalog is keyed `providers[providerID].models[modelID]`, provider-specific caps are already reflected in the live value.
 - **Priority‑based pruning tiers** – messages are classified using the `MessagePriority` tiers (CRITICAL, HIGH, MEDIUM, LOW, DISPOSABLE). Lower‑priority messages are removed first when the token budget is exceeded.
 - **Agent‑switch enforcement** – when `enforce_on_agent_switch` is true, a hard context reset is triggered whenever the active agent changes (e.g., from `explorer` to `coder`).
 - **Tool‑output masking** – large tool outputs are masked/truncated once they exceed `tool_output_mask_threshold` tokens, preventing budget overruns.
@@ -1358,7 +1358,7 @@ Context pruning manages the architect's context window to prevent overflow.
 
 Registered on `experimental.chat.messages.transform` (composed with pipeline-tracker):
 1. Estimates total tokens across all message parts using `estimateTokens()`
-2. Looks up model-specific token limit from `context_budget.model_limits` config (default: 128,000)
+2. Resolves the model's context window via `resolveModelLimit` → `src/config/context-window.ts`: `context_budget.model_limits` override → the live `model.limit.context` recorded for the session by the `system.transform` hook → static fallback table → 128,000
 3. At `warn_threshold` (default 70%): injects `[CONTEXT WARNING]` message
 4. At `critical_threshold` (default 90%): injects `[CONTEXT CRITICAL]` message
 
@@ -2156,6 +2156,7 @@ separating `.swarm/context.md` into distinct concerns:
 │   ├── retro-2/evidence.json   ← Phase 2 retrospective
 │   └── {task-id}/evidence.json ← Task-level evidence bundles
 ├── events.jsonl        ← Event log
+├── run-memory.jsonl    ← Per-attempt task outcomes (written by update_task_status)
 └── telemetry.jsonl     ← Session observability (JSONL, 10MB rotation)
 ```
 

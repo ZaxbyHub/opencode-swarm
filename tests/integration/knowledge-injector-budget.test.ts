@@ -24,6 +24,7 @@ import type {
 // message. Fixtures set swarmState.activeAgent and stamp a consistent
 // sessionID on every message.
 import { swarmState } from '../../src/state';
+import { canonicalMkdtemp } from '../helpers/tmpdir.js';
 
 const SESSION_ID = 'budget-session';
 
@@ -111,15 +112,14 @@ const CONFIG: KnowledgeConfig = {
 // ---------------------------------------------------------------------------
 
 /**
- * Must use a relative path because validateDirectory() inside
- * getRunMemorySummary() rejects absolute paths.
+ * Absolute temp directory outside the repo — the production shape. This used to
+ * create a RELATIVE dir under the project root because getRunMemorySummary's
+ * validateDirectory() rejected absolute paths; that defect is fixed (it now uses
+ * validateProjectDirectory), so the workaround is gone and AGENTS.md invariant 7
+ * (the system temp root, never a hardcoded or in-repo path) is honoured again.
  */
-function createRelativeTempDir(): string {
-	const baseDir = 'tmp';
-	if (!fs.existsSync(baseDir)) {
-		fs.mkdirSync(baseDir, { recursive: true });
-	}
-	return fs.mkdtempSync(path.join(baseDir, 'ki-budget-test-'));
+function createTempDir(): string {
+	return canonicalMkdtemp('ki-budget-test-');
 }
 
 /**
@@ -161,7 +161,7 @@ describe('Knowledge injector budget regression', () => {
 	let tempDir: string;
 
 	beforeEach(() => {
-		tempDir = createRelativeTempDir();
+		tempDir = createTempDir();
 		const swarmDir = path.join(tempDir, '.swarm');
 		fs.mkdirSync(swarmDir, { recursive: true });
 		fs.writeFileSync(path.join(swarmDir, 'plan.json'), PLAN_JSON);

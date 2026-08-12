@@ -4,7 +4,8 @@
  * Two integration points:
  *
  *   1. `experimental.chat.messages.transform` — scans the latest
- *      architect-authored message for `KNOWLEDGE_APPLIED|IGNORED|VIOLATED`
+ *      architect-authored message for
+ *      `KNOWLEDGE_APPLIED|IGNORED|CONTRADICTED|VIOLATED`
  *      markers and records them via `recordAcknowledgmentDeduped`. This
  *      runs BEFORE the architect's next tool call so the toolBefore gate
  *      sees the ack.
@@ -137,9 +138,14 @@ export async function knowledgeApplicationGateBefore(
 	// Has an architect terminal ack landed in this session for any critical id?
 	const ackedIds = new Set<string>();
 	for (const id of cached.ids) {
-		// Applied, ignored, and violated all count as "acknowledged" for the
+		// Applied, ignored, contradicted, and violated all count as "acknowledged" for the
 		// purpose of the gate (the architect chose; we audit elsewhere).
-		for (const result of ['applied', 'ignored', 'violated'] as const) {
+		for (const result of [
+			'applied',
+			'ignored',
+			'contradicted',
+			'violated',
+		] as const) {
 			const key = buildAckDedupKey(sessionID, id, result);
 			if (swarmState.knowledgeAckDedup.has(key)) {
 				ackedIds.add(id);
@@ -230,7 +236,7 @@ export async function knowledgeApplicationGateBefore(
 
 		const ids = unacked.join(', ');
 		throw new Error(
-			`KNOWLEDGE_ENFORCE_GATE_DENY: ${toolName} blocked — critical knowledge directive(s) ${ids} require KNOWLEDGE_APPLIED:<id>, KNOWLEDGE_IGNORED:<id> reason=..., or KNOWLEDGE_VIOLATED:<id> reason=... before this action.`,
+			`KNOWLEDGE_ENFORCE_GATE_DENY: ${toolName} blocked — critical knowledge directive(s) ${ids} require KNOWLEDGE_APPLIED:<id>, KNOWLEDGE_IGNORED:<id> reason=..., KNOWLEDGE_CONTRADICTED:<id> reason=..., or KNOWLEDGE_VIOLATED:<id> reason=... before this action.`,
 		);
 	}
 

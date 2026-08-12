@@ -1,6 +1,6 @@
 /**
  * Knowledge application tracking — distinguishes shown / acknowledged / applied
- * / ignored / violated outcomes for injected knowledge directives.
+ * / ignored / contradicted / violated outcomes for injected knowledge directives.
  *
  * Writes one JSONL line per outcome to `.swarm/knowledge-application.jsonl`,
  * and updates per-entry retrieval-outcome counters on the source knowledge file.
@@ -48,17 +48,18 @@ export const MAX_LEGACY_APPLICATION_LOG_ENTRIES = 5000;
  * Recognised forms (case-insensitive, line-anchored or inline):
  *   KNOWLEDGE_APPLIED: <id>
  *   KNOWLEDGE_IGNORED: <id> reason=<reason>
+ *   KNOWLEDGE_CONTRADICTED: <id> reason=<observable conflict>
  *   KNOWLEDGE_VIOLATED: <id> reason=<reason>
  *   KNOWLEDGE_N_A: <id> reason=<reason>   (delegate contract, Change 1)
  */
 export interface ParsedAcknowledgment {
 	id: string;
-	result: 'applied' | 'ignored' | 'violated' | 'n_a';
+	result: 'applied' | 'ignored' | 'contradicted' | 'violated' | 'n_a';
 	reason?: string;
 }
 
 const ACK_PATTERN =
-	/KNOWLEDGE_(APPLIED|IGNORED|VIOLATED|N_A)\s*:\s*([0-9a-fA-F-]{8,64})(?:\s+reason\s*=\s*([^\n\r]+?)(?=$|[\n\r]|\s+KNOWLEDGE_))?(?=[^0-9a-fA-F-]|$)/g;
+	/KNOWLEDGE_(APPLIED|IGNORED|CONTRADICTED|VIOLATED|N_A)\s*:\s*([0-9a-fA-F-]{8,64})(?:\s+reason\s*=\s*([^\n\r]+?)(?=$|[\n\r]|\s+KNOWLEDGE_))?(?=[^0-9a-fA-F-]|$)/g;
 
 export function parseAcknowledgments(text: string): ParsedAcknowledgment[] {
 	if (!text || typeof text !== 'string') return [];
@@ -72,9 +73,11 @@ export function parseAcknowledgments(text: string): ParsedAcknowledgment[] {
 				? 'applied'
 				: verb === 'ignored'
 					? 'ignored'
-					: verb === 'n_a'
-						? 'n_a'
-						: 'violated';
+					: verb === 'contradicted'
+						? 'contradicted'
+						: verb === 'n_a'
+							? 'n_a'
+							: 'violated';
 		out.push({ id, result, reason });
 	}
 	return out;
@@ -129,6 +132,7 @@ type CounterField =
 	| 'acknowledged_count'
 	| 'applied_explicit_count'
 	| 'ignored_count'
+	| 'contradicted_count'
 	| 'violated_count';
 
 interface FieldBump {
@@ -253,7 +257,7 @@ export async function recordKnowledgeShown(
 	}
 }
 
-/** Record an explicit acknowledgment outcome (applied / ignored / violated).
+/** Record an explicit acknowledgment outcome (applied / ignored / contradicted / violated).
  *  Per-(sessionId, knowledgeId, result) dedup is enforced by the
  *  caller via swarmState.knowledgeAckDedup; this fn always records when
  *  invoked, so test code can trigger duplicates if needed. The runtime
@@ -283,13 +287,15 @@ export async function recordAcknowledgment(
 			result,
 			reason: ack.reason,
 		});
-		// Always bump acknowledged_count. For applied/ignored/violated also bump
+		// Always bump acknowledged_count. For applied/ignored/contradicted/violated also bump
 		// the matching outcome counter; `n_a` bumps acknowledged_count only.
 		const bumps: FieldBump[] = [{ ids: [ack.id], field: 'acknowledged_count' }];
 		if (ack.result === 'applied')
 			bumps.push({ ids: [ack.id], field: 'applied_explicit_count' });
 		else if (ack.result === 'ignored')
 			bumps.push({ ids: [ack.id], field: 'ignored_count' });
+		else if (ack.result === 'contradicted')
+			bumps.push({ ids: [ack.id], field: 'contradicted_count' });
 		else if (ack.result === 'violated')
 			bumps.push({ ids: [ack.id], field: 'violated_count' });
 		// Coalesce into a single read+write per file (F-008).
@@ -360,7 +366,7 @@ export interface ShownNotAppliedQuery {
 
 /**
  * Returns the subset of `knowledgeIds` that have at least one "shown" record
- * in the audit log without a subsequent "applied"/"ignored"/"violated" record
+ * in the audit log without a subsequent "applied"/"ignored"/"contradicted"/"violated" record
  * in the same task or phase scope.
  */
 export async function getShownButNotAcknowledged(
@@ -391,6 +397,7 @@ export async function getShownButNotAcknowledged(
 		if (
 			r.result === 'applied' ||
 			r.result === 'ignored' ||
+			r.result === 'contradicted' ||
 			r.result === 'violated' ||
 			r.result === 'acknowledged'
 		) {
@@ -458,7 +465,7 @@ export function gateKnowledgeApplication(args: {
 	const warnings: GateResult['warnings'] = [];
 	for (const id of criticalShownIds) {
 		if (!ackIds.has(id)) {
-			const reason = `critical directive ${id} requires KNOWLEDGE_APPLIED/IGNORED/VIOLATED ack`;
+			const reason = `critical directive ${id} requires KNOWLEDGE_APPLIED/IGNORED/CONTRADICTED/VIOLATED ack`;
 			if (config.mode === 'enforce' && config.critical_requires_ack) {
 				violations.push({ id, reason });
 			} else {

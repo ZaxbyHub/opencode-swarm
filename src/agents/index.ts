@@ -23,6 +23,7 @@ import {
 	advisoryWarn,
 } from '../services/warning-buffer.js';
 import { log } from '../utils/logger';
+import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
 import { type AgentDefinition, createArchitectAgent } from './architect';
 import { createCoderAgent } from './coder';
 import {
@@ -1427,6 +1428,7 @@ export function getAgentConfigs(
 		const sid = sessionId ?? `init-${Date.now()}`;
 		const evidenceDir = path.join(directory, '.swarm', 'evidence');
 		const filename = `agent-tools-${sid}.json`;
+		const snapshotPath = path.join(evidenceDir, filename);
 		const snapshotData = JSON.stringify(
 			{
 				sessionId: sid,
@@ -1437,7 +1439,10 @@ export function getAgentConfigs(
 			2,
 		);
 		void mkdir(evidenceDir, { recursive: true })
-			.then(() => writeFile(path.join(evidenceDir, filename), snapshotData))
+			.then(() => writeFile(snapshotPath, snapshotData))
+			.then(() => {
+				invalidateCachedArtifact(snapshotPath);
+			})
 			.catch(() => {});
 	}
 

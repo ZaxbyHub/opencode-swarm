@@ -558,9 +558,10 @@ The Context Budget Guard monitors how full the model's context window is getting
 ### Default Behavior
 
 - **Enabled automatically** — No setup required. Swarm starts tracking context usage right away.
-- **What it measures** — The estimated total tokens across **all** messages in the conversation (every text part of every message — your prompts, the model's responses, and injected content alike), divided by the model's context window. The window comes from `context_budget.model_limits` (default `128000`), resolved per model/provider. It does **not** measure only swarm-injected content, and it does **not** read `max_injection_tokens`.
-- **Warning threshold (0.7 ratio)** — When total conversation tokens reach 70% of the model context window (e.g. ~89,600 of 128,000), the architect receives a one-time advisory warning. This is informational — execution continues normally.
-- **Critical threshold (0.9 ratio)** — When total conversation tokens reach 90% of the model context window (e.g. ~115,200 of 128,000), the architect receives a critical alert with a recommendation to run `/swarm handoff`. This is also one-time only.
+- **What it measures** — The estimated total tokens across **all** messages in the conversation (every text part of every message — your prompts, the model's responses, and injected content alike), divided by the model's context window. It does **not** measure only swarm-injected content, and it does **not** read `max_injection_tokens`.
+- **Where the window comes from** — Your **live model**, not a constant. Resolution order: an explicit `context_budget.model_limits` entry (`"<provider>/<model>"`, then `"<model>"`, then `"default"`) → the context window the OpenCode host reports for the model you are running (`model.limit.context`, already provider-specific, so a Copilot entry and a first-party entry for the same model resolve differently) → a static fallback table → `128000` as a last resort when nothing else is known. Set a `model_limits` entry only if you want a **smaller working budget** than your model's real window.
+- **Warning threshold (0.7 ratio)** — When total conversation tokens reach 70% of the model context window (e.g. ~89,600 on a 128k model, ~700,000 on a 1M model), the architect receives a one-time advisory warning. This is informational — execution continues normally.
+- **Critical threshold (0.9 ratio)** — When total conversation tokens reach 90% of the model context window (e.g. ~115,200 on a 128k model, ~900,000 on a 1M model), the architect receives a critical alert with a recommendation to run `/swarm handoff`. This is also one-time only.
 - **Non-nagging** — Alerts fire once per session, not repeatedly. You won't be pestered every turn.
 - **Who sees warnings** — Only the architect receives these warnings. Other agents are unaware of the budget.
 
@@ -713,15 +714,15 @@ Every candidate passes a 3-gate pipeline before entering quarantine:
 |-----|------|---------|-------------|
 | `context_budget.enabled` | boolean | `true` | Enable or disable the context budget guard entirely |
 | `context_budget.max_injection_tokens` | number | `4000` | Separate per-turn cap on system-enhancer injection. It is NOT the guard's budget — the guard measures total conversation tokens against `model_limits`, not this value |
-| `context_budget.warn_threshold` | number | `0.7` | Ratio (0.0-1.0) of the model context window (`model_limits`, default `128000`) at which total conversation tokens trigger a warning advisory |
-| `context_budget.critical_threshold` | number | `0.9` | Ratio (0.0-1.0) of the model context window (`model_limits`, default `128000`) at which total conversation tokens trigger a critical alert with handoff recommendation |
+| `context_budget.warn_threshold` | number | `0.7` | Ratio (0.0-1.0) of the model context window at which total conversation tokens trigger a warning advisory |
+| `context_budget.critical_threshold` | number | `0.9` | Ratio (0.0-1.0) of the model context window at which total conversation tokens trigger a critical alert with handoff recommendation |
 | `context_budget.enforce` | boolean | `true` | When true, enforces budget limits and may trigger handoffs |
 | `context_budget.prune_target` | number | `0.7` | Ratio (0.0-1.0) of context to preserve when pruning occurs |
 | `context_budget.preserve_last_n_turns` | number | `4` | Number of recent turns to preserve when pruning |
 | `context_budget.recent_window` | number | `10` | Number of turns to consider as "recent" for scoring |
 | `context_budget.tracked_agents` | string[] | `['architect']` | Agents to track for context budget warnings |
 | `context_budget.enforce_on_agent_switch` | boolean | `true` | Enforce budget limits when switching agents |
-| `context_budget.model_limits` | record | `{ default: 128000 }` | Per-model token limits (model name -> max tokens) |
+| `context_budget.model_limits` | record | `{}` | Per-model token limit **overrides**, keyed by `"<provider>/<model>"`, `"<model>"`, or `"default"`. Empty by default so the live model's own context window is used; set an entry only to impose a smaller working budget |
 | `context_budget.unified_injection_tokens` | number | `undefined` | Opt-in unified ceiling (tokens) for combined system-enhancer + knowledge-injector injection per turn. When set, both hooks share this budget with proportional split |
 | `context_budget.tool_output_mask_threshold` | number | `2000` | Threshold for masking tool outputs (chars) |
 | `skills.enabled` | boolean | `false` | Gates the 7 skill-management tools (`skill_generate`, `skill_list`, `skill_apply`, `skill_inspect`, `skill_regenerate`, `skill_retire`, `skill_improve`) behind an opt-in flag. When `false` (default), these tools are hidden from the architect's tool map. |

@@ -5,21 +5,19 @@
  * injection attempts, null bytes, and extreme values
  */
 
-import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-// Mock validateDirectory to a no-op so Windows absolute temp paths work in tests.
-// Bun's mock.module re-parses factory source and mangles backslash escapes,
-// so the factory must be kept trivial with no regex or backslash literals.
-mock.module('../../../src/utils/path-security', () => ({
-	containsPathTraversal: () => false,
-	containsControlChars: () => false,
-	validateDirectory: () => {},
-}));
-
-afterEach(() => mock.restore());
+// No path-security mock. Both services now validate their trusted project root
+// with validateProjectDirectory, which ACCEPTS the absolute temp directories
+// these tests use. The previous no-op mock.module existed only because
+// validateDirectory (the untrusted-relative-input validator) rejected every
+// absolute path — which also forced the Attack Vector 1 blocks below to
+// re-implement the rejection regexes in the test instead of calling the
+// services. They now assert the services' real behaviour (issue #1619
+// follow-up).
 
 // Import validateSwarmPath to test path traversal directly
 import { validateSwarmPath } from '../../../src/hooks/utils';
@@ -32,12 +30,21 @@ import {
 } from '../../../src/services/context-budget-service';
 // Import services (after mock so transitive imports pick up the mock)
 import {
-	getFailures,
 	getRunMemorySummary,
 	getTaskHistory,
 	type RunMemoryEntry,
 	recordOutcome,
 } from '../../../src/services/run-memory';
+
+/** Shared valid entry — the subject under test is the DIRECTORY, not the entry. */
+const SAMPLE_ENTRY: RunMemoryEntry = {
+	timestamp: '2026-08-10T00:00:00.000Z',
+	taskId: '1.1',
+	taskFingerprint: 'abc12345',
+	agent: 'test',
+	outcome: 'pass',
+	attemptNumber: 1,
+};
 
 describe('ADVERSARIAL SECURITY TESTS - run-memory service', () => {
 	let tmpDir: string;
@@ -60,27 +67,27 @@ describe('ADVERSARIAL SECURITY TESTS - run-memory service', () => {
 	});
 
 	// ========== ATTACK VECTOR 1: Path Traversal in Directory Parameter ==========
-	// validateDirectory is mocked to a no-op (see top of file) so Windows temp
-	// dirs are accepted. These tests verify the real validation patterns directly.
+	// The real validator runs (no mock), so these call the services instead of
+	// re-implementing the rejection regexes in the test.
 	describe('Attack Vector 1: Path Traversal in directory parameter', () => {
-		it('should detect "../" path traversal pattern', () => {
-			const maliciousDir = `${tmpDir}/../../etc`;
-			expect(/\.\.[/\\]/.test(maliciousDir)).toBe(true);
-			attackDetected = true;
-			expect(attackDetected).toBe(true);
+		it('recordOutcome rejects a traversal-bearing project root', async () => {
+			await expect(
+				recordOutcome(`${tmpDir}/../../etc`, SAMPLE_ENTRY),
+			).rejects.toThrow('path traversal');
 		});
 
-		it('should detect absolute path pattern', () => {
-			expect('/etc/passwd'.startsWith('/')).toBe(true);
-			attackDetected = true;
-			expect(attackDetected).toBe(true);
+		it('getRunMemorySummary rejects a relative project root', async () => {
+			// A relative root would resolve .swarm/ against the host process cwd.
+			// (Was getFailures, which #2119 removed from run-memory.)
+			await expect(getRunMemorySummary('etc/passwd')).rejects.toThrow(
+				'absolute path',
+			);
 		});
 
-		it('should detect Windows absolute path pattern', () => {
-			const maliciousDir = 'C:\\Windows\\System32';
-			expect(/^[A-Za-z]:[/\\]/.test(maliciousDir)).toBe(true);
-			attackDetected = true;
-			expect(attackDetected).toBe(true);
+		it('getTaskHistory rejects a control-character project root', async () => {
+			await expect(getTaskHistory(`${tmpDir}\0evil`, '1.1')).rejects.toThrow(
+				'control characters',
+			);
 		});
 
 		it('validateSwarmPath should directly reject path traversal in filename', () => {
@@ -110,7 +117,7 @@ describe('ADVERSARIAL SECURITY TESTS - run-memory service', () => {
 
 			// These should NOT throw - should gracefully skip malformed lines
 			const history = await getTaskHistory(tmpDir, '1.1');
-			const failures = await getFailures(tmpDir);
+			const failures = await getTaskHistory(tmpDir, '1.2');
 			const summary = await getRunMemorySummary(tmpDir);
 
 			// Should return empty or skip malformed entries
@@ -210,7 +217,7 @@ describe('ADVERSARIAL SECURITY TESTS - run-memory service', () => {
 			// Should succeed (append-only)
 			await recordOutcome(tmpDir, entry);
 
-			const failures = await getFailures(tmpDir);
+			const failures = await getTaskHistory(tmpDir, '1.2');
 			expect(Array.isArray(failures)).toBe(true);
 			attackDetected = true;
 			expect(attackDetected).toBe(true);
@@ -307,20 +314,25 @@ describe('ADVERSARIAL SECURITY TESTS - context-budget service', () => {
 	});
 
 	// ========== ATTACK VECTOR 1: Path Traversal in directory parameter ==========
-	// validateDirectory is mocked to a no-op (see top of file), so verify
-	// the real validation patterns directly rather than through service calls.
+	// The real validator runs (no mock), so these call the service instead of
+	// re-implementing the rejection regexes in the test.
 	describe('Attack Vector 1: Path Traversal in directory parameter', () => {
-		it('should detect path traversal pattern in directory', () => {
-			const maliciousDir = `${tmpDir}/../../`;
-			expect(/\.\.[/\\]/.test(maliciousDir)).toBe(true);
+		it('getContextBudgetReport rejects a traversal-bearing project root', async () => {
+			await expect(
+				getContextBudgetReport(
+					`${tmpDir}/../../`,
+					'prompt',
+					getDefaultConfig(),
+				),
+			).rejects.toThrow('path traversal');
 			attackDetected = true;
 			expect(attackDetected).toBe(true);
 		});
 
-		it('should detect absolute path pattern in directory', () => {
-			expect('/var/tmp'.startsWith('/')).toBe(true);
-			attackDetected = true;
-			expect(attackDetected).toBe(true);
+		it('getContextBudgetReport rejects a relative project root', async () => {
+			await expect(
+				getContextBudgetReport('var/tmp', 'prompt', getDefaultConfig()),
+			).rejects.toThrow('absolute path');
 		});
 	});
 
@@ -702,32 +714,19 @@ describe('ADDITIONAL SECURITY BOUNDARY TESTS', () => {
 	});
 
 	it('run-memory: should not allow writing outside .swarm directory via traversal', async () => {
-		const entry: RunMemoryEntry = {
-			timestamp: new Date().toISOString(),
-			taskId: '1.1',
-			taskFingerprint: 'abc12345',
-			agent: 'test',
-			outcome: 'pass',
-			attemptNumber: 1,
-		};
-
 		// validateSwarmPath rejects filenames with path traversal
 		expect(() => validateSwarmPath(tmpDir, '../../../etc/passwd')).toThrow();
+
+		// ...and the write that DOES land stays under .swarm/ (invariant 4).
+		await recordOutcome(tmpDir, SAMPLE_ENTRY);
+		expect(await fs.readdir(tmpDir)).toEqual(['.swarm']);
 	});
 
-	it('run-memory: recordOutcome should validate directory is a valid path', () => {
-		// The real validateDirectory rejects empty strings.
-		// Since validateDirectory is mocked, verify the pattern directly.
-		const {
-			validateDirectory: realValidate,
-		} = require('../../../src/utils/path-security');
-		// The mock replaces it, so verify the real logic via pattern check
-		expect(() => {
-			const directory = '';
-			if (!directory || directory.trim() === '') {
-				throw new Error('Invalid directory: empty');
-			}
-		}).toThrow('Invalid directory: empty');
+	it('run-memory: recordOutcome rejects an empty project root', async () => {
+		// An empty root would make path.resolve('', '.swarm') land on the host
+		// process cwd. Asserted through the service, not by re-implementing the
+		// check in the test.
+		await expect(recordOutcome('', SAMPLE_ENTRY)).rejects.toThrow('empty');
 	});
 
 	it('context-budget: should not expose sensitive file contents on error', async () => {

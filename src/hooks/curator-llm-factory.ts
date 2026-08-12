@@ -2,6 +2,7 @@ import { getSwarmAgents, resolveFallbackModel } from '../agents/index.js';
 import { stripKnownSwarmPrefix } from '../config/schema.js';
 import { swarmState } from '../state.js';
 import { telemetry } from '../telemetry.js';
+import { teardownEphemeralSession } from '../utils/ephemeral-session-teardown.js';
 import { dispatchWithModelFallback } from '../utils/model-dispatch-fallback.js';
 import { isTransientProviderError } from '../utils/provider-error-classification.js';
 import { isAbortError } from './abort-utils.js';
@@ -138,12 +139,16 @@ export function createCuratorLLMDelegate(
 	): Promise<string> => {
 		let ephemeralSessionId: string | undefined;
 
-		/** Best-effort session cleanup — never throws. */
-		const cleanup = () => {
+		/**
+		 * Best-effort session teardown — never throws. Awaits a graceful
+		 * `session.abort()` (so opencode flushes the final part/message) before
+		 * the cascade-delete, closing the FOREIGN KEY constraint race (#2123).
+		 */
+		const cleanup = async (): Promise<void> => {
 			if (ephemeralSessionId) {
 				const id = ephemeralSessionId;
-				ephemeralSessionId = undefined; // prevent double-delete
-				client.session.delete({ path: { id } }).catch(() => {});
+				ephemeralSessionId = undefined; // prevent double-teardown
+				await teardownEphemeralSession(client.session, id);
 			}
 		};
 
@@ -277,7 +282,7 @@ export function createCuratorLLMDelegate(
 			}
 			throw err;
 		} finally {
-			cleanup();
+			await cleanup();
 		}
 	};
 }

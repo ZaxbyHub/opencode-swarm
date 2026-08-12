@@ -985,6 +985,9 @@ export function recomputeCounters(
 			case 'ignored':
 				r.ignored_count += 1;
 				break;
+			case 'contradicted':
+				r.contradicted_count += 1;
+				break;
 			case 'violated':
 				r.violated_count += 1;
 				r.violation_timestamps.push(rec.timestamp);

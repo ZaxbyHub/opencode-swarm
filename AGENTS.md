@@ -118,7 +118,8 @@ Every PR that touches a relevant area must list which of these invariants it tou
 ### 10. Chat / system-message hook contracts
 
 - Preserve OpenCode's expected message shape end-to-end. Multiple `output.system` entries are materialized into multiple `{ role: 'system' }` messages.
-- After swarm augmentation, collapse to a single system message (see v6.85.1 / `#608`). Local models (Qwen3.6, Gemma) require exactly one system message at index 0.
+- **A hook `output` property must be mutated IN PLACE for the two chat transform chains.** The host invokes each hook as `M(input, output)`, discards the return value, and afterwards reads its own local array — so `output.system = …` / `output.messages = …` inside `experimental.chat.system.transform` or `experimental.chat.messages.transform` is a silent no-op. Use `push` / `splice` / `length = 0` + refill. (`chat.params` / `chat.headers` *do* consume the returned object; do not over-generalize.) Two shipped fixes were dead for years because of this — see v6.85.1 below and `docs/engineering-invariants.md`. Enforced by `tests/unit/hooks/chat-transform-rebind-guard.test.ts`.
+- Consolidation to a single system message happens at the **message layer**: `consolidateSystemMessages` merges every `role: 'system'` entry of `output.messages` into index 0 and strips the rest, applied in place by the final `experimental.chat.messages.transform` handler. The `output.system` collapse that v6.85.1 / `#628` claimed never executed and has been removed (issue #1619). Local models (Qwen3.6, Gemma) want one system message at index 0; the guarantee is scoped to the transformed message array, since the host prepends its own system entries separately.
 - Do not emit diagnostic noise into chat-visible streams. Use the debug-gated logger (`src/utils/log.ts`) unless the message is an operational or security warning that must always be visible.
 
 ### 11. Tool registration + agent-map coherence

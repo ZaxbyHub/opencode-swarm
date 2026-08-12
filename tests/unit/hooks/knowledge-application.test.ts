@@ -27,6 +27,10 @@ import {
 	resolveApplicationLogPath,
 } from '../../../src/hooks/knowledge-application';
 import {
+	readLegacyApplicationRecords,
+	recomputeCounters,
+} from '../../../src/hooks/knowledge-events';
+import {
 	appendKnowledge,
 	resolveSwarmKnowledgePath,
 } from '../../../src/hooks/knowledge-store';
@@ -122,6 +126,33 @@ describe('recordKnowledgeShown vs recordAcknowledgment', () => {
 		);
 		expect(entries.retrieval_outcomes.ignored_count).toBe(1);
 		expect(entries.retrieval_outcomes.applied_explicit_count).toBe(0);
+	});
+
+	it('explicit KNOWLEDGE_CONTRADICTED is acknowledged and increments contradicted_count', async () => {
+		const id = 'eeeeeeee-eeee-4eee-9eee-eeeeeeeeeeee';
+		await seedEntry(id);
+		await recordKnowledgeShown(tmp, [id], { phase: 'Phase 1' });
+		await processArchitectText(
+			tmp,
+			`KNOWLEDGE_CONTRADICTED:${id} reason=current scope contract requires relative paths`,
+			{ phase: 'Phase 1' },
+		);
+		const entry = JSON.parse(
+			readFileSync(resolveSwarmKnowledgePath(tmp), 'utf-8').trim(),
+		);
+		expect(entry.retrieval_outcomes.contradicted_count).toBe(1);
+		expect(entry.retrieval_outcomes.acknowledged_count).toBe(1);
+		expect(
+			await getShownButNotAcknowledged(tmp, {
+				phase: 'Phase 1',
+				knowledgeIds: [id],
+			}),
+		).toEqual([]);
+		const rollup = recomputeCounters(
+			[],
+			await readLegacyApplicationRecords(tmp),
+		).get(id);
+		expect(rollup?.contradicted_count).toBe(1);
 	});
 
 	it('coalesces field bumps to a single rewrite per ack (F-008)', async () => {

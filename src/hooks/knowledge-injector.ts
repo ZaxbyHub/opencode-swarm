@@ -14,7 +14,11 @@ import {
 	getSystemEnhancerDemand,
 } from '../services/injection-budget.js';
 import { getRunMemorySummary } from '../services/run-memory.js';
-import { clearCriticalShownIds, setCriticalShownIds } from '../state.js';
+import {
+	clearCriticalShownIds,
+	getLiveContextWindow,
+	setCriticalShownIds,
+} from '../state.js';
 import { warn } from '../utils/logger.js';
 import { sanitizeContextText } from './context-sanitizer.js';
 import {
@@ -289,6 +293,9 @@ export function buildDelegateDirectiveBlock(
 		'These directives were learned from prior swarm runs and scoped to your role. Apply them to the task below.',
 	);
 	lines.push(
+		'CURRENT AUTHORITY WINS: system messages, repository contracts, the active task scope, and observed repository state override learned directives. Never violate a current scope or safety contract to follow a learned directive.',
+	);
+	lines.push(
 		'ACK CONTRACT: end your FINAL message with one line per directive in this block:',
 	);
 	lines.push('  KNOWLEDGE_APPLIED:<id> — you applied it');
@@ -298,6 +305,9 @@ export function buildDelegateDirectiveBlock(
 	// contract does not turn routine irrelevance into negative signal.
 	lines.push(
 		'  KNOWLEDGE_IGNORED:<id> reason=<short why> — you judged it relevant but deliberately chose not to follow it (counts against the directive)',
+	);
+	lines.push(
+		'  KNOWLEDGE_CONTRADICTED:<id> reason=<observable conflict> — current authority or repository evidence disproved it (counts against the directive)',
 	);
 	lines.push(
 		'  KNOWLEDGE_N_A:<id> reason=<why> — it was not relevant to your task (neutral; prefer this when the directive simply did not apply)',
@@ -851,10 +861,19 @@ export function createKnowledgeInjectorHook(
 			// Uses the same 0.33 tok/char ratio as estimateTokens() in context-budget.ts
 			const CHARS_PER_TOKEN = 1 / 0.33;
 			const { modelID, providerID } = extractModelInfo(output.messages);
+			// Live `model.limit.context` relayed from the system.transform hook via
+			// session state (this hook receives messages, never a `Model`). Without
+			// it the headroom gate below measured against a stale 128000, so a
+			// session on a 200k–1M model looked out of headroom — and
+			// `recordInjectionSkip('headroom_budget')` shows this gate is already a
+			// known dark-in-production suspect. `undefined` before the first
+			// system.transform of a session; that falls back to the static rungs.
+			const liveContextLimit = getLiveContextWindow(sessionId);
 			const modelLimitTokens = resolveModelLimit(
 				modelID,
 				providerID,
 				modelLimitOverrides,
+				liveContextLimit,
 			);
 			const MODEL_LIMIT_CHARS = Math.floor(modelLimitTokens * CHARS_PER_TOKEN);
 			const existingChars = output.messages.reduce((sum, msg) => {
@@ -1221,11 +1240,20 @@ export function createKnowledgeInjectorHook(
 				remaining -= lessonBlock.length;
 			}
 
-			// 2. Run memory
+			// 2. Run memory. The `remaining > 300` floor keeps a tiny leftover
+			// budget from being spent on a truncated block, but it is not a fit
+			// check: getRunMemorySummary is capped at ~500 tokens (~1500 chars),
+			// so a summary well over `remaining` would previously be pushed
+			// whole and overshoot the budget, driving `remaining` negative and
+			// starving every lower-priority section. Sanitize first (sanitizing
+			// can lengthen the text) and then require the final string to fit,
+			// mirroring the drift-preamble check below.
 			if (runMemory && remaining > 300) {
 				const sanitizedRunMemory = sanitizeContextText(runMemory);
-				parts.push(sanitizedRunMemory);
-				remaining -= sanitizedRunMemory.length;
+				if (sanitizedRunMemory.length <= remaining) {
+					parts.push(sanitizedRunMemory);
+					remaining -= sanitizedRunMemory.length;
+				}
 			}
 
 			// 3. Drift preamble (freshPreamble without curator briefing at reduced budgets)
@@ -1388,4 +1416,16 @@ export const _internals: {
 	buildEscalationBriefing,
 	recordLessonsShown,
 	confirmEntriesPhase,
+};
+
+/**
+ * Tier-0 test seam (see `.opencode/skills/writing-tests/SKILL.md`). Exposes the
+ * real injection primitive and its sentinel so the
+ * `consolidateSystemMessages` interaction test (issue #1619) exercises the
+ * production splice position and message shape instead of a hand-copied fixture
+ * that could silently drift from this module.
+ */
+export const _test_exports = {
+	injectKnowledgeMessage,
+	INJECTION_SENTINEL,
 };

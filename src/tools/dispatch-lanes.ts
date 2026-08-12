@@ -56,6 +56,7 @@ import {
 import type { ParallelDispatcher } from '../parallel/dispatcher/parallel-dispatcher.js';
 import { createParallelDispatcher } from '../parallel/dispatcher/parallel-dispatcher.js';
 import { swarmState } from '../state.js';
+import { teardownEphemeralSession } from '../utils/ephemeral-session-teardown.js';
 import * as logger from '../utils/logger.js';
 import { createSwarmTool } from './create-tool.js';
 
@@ -2924,17 +2925,19 @@ function findDuplicateLaneIds(lanes: DispatchLaneSpec[]): string[] {
 }
 
 function scheduleSessionCleanup(session: SessionOps, sessionId: string): void {
-	void session.delete({ path: { id: sessionId } }).catch(() => undefined);
+	// #2123: teardown awaits a graceful `session.abort()` (so opencode flushes
+	// the final part/message) before the cascade-delete, closing the FOREIGN KEY
+	// constraint race. Fire-and-forget — the ordering holds inside the unit.
+	void teardownEphemeralSession(session, sessionId);
 }
 
 function cleanupAsyncLaunchSession(
 	session: SessionOps,
 	sessionId: string,
 ): void {
-	if (typeof session.abort === 'function') {
-		void session.abort({ path: { id: sessionId } }).catch(() => undefined);
-	}
-	scheduleSessionCleanup(session, sessionId);
+	// teardown owns the awaited abort→delete ordering; the prior manual
+	// fire-and-forget abort let the delete race opencode's flush (#2123).
+	void teardownEphemeralSession(session, sessionId);
 }
 
 async function withCollectionDeadline<T>(

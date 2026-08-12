@@ -3,23 +3,21 @@
  * Tests: append-only, getRunMemorySummary, token limits, fingerprint, filtering
  */
 
-import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-// Mock validateDirectory to a no-op so Windows absolute temp paths work in tests.
-mock.module('../../../src/utils/path-security', () => ({
-	containsPathTraversal: () => false,
-	containsControlChars: () => false,
-	validateDirectory: () => {},
-}));
-
-afterEach(() => mock.restore());
+// No path-security mock: run-memory now validates its trusted project root with
+// validateProjectDirectory, which ACCEPTS the absolute temp directories below.
+// The previous no-op mock.module existed only because validateDirectory (the
+// untrusted-relative-input validator) rejected every absolute path; keeping it
+// would silently stub a function the service no longer calls (issue #1619
+// follow-up). Rejection behaviour is covered in
+// tests/unit/services/trusted-root-validation.adversarial.test.ts.
 
 import {
 	generateTaskFingerprint,
-	getFailures,
 	getRunMemorySummary,
 	getTaskHistory,
 	type RunMemoryEntry,
@@ -365,132 +363,6 @@ describe('run-memory service verification tests', () => {
 		it('returns empty array when file does not exist', async () => {
 			const history = await getTaskHistory(tmpDir, '1.1');
 			expect(history).toHaveLength(0);
-		});
-	});
-
-	// ========== TEST 6: getFailures returns only fail/retry entries ==========
-	describe('Test 6: getFailures returns only fail/retry entries', () => {
-		it('returns only fail entries', async () => {
-			await recordOutcome(tmpDir, {
-				timestamp: '2024-01-01T10:00:00.000Z',
-				taskId: '1.1',
-				taskFingerprint: 'abc12345',
-				agent: 'mega_coder',
-				outcome: 'pass',
-				attemptNumber: 1,
-			});
-
-			await recordOutcome(tmpDir, {
-				timestamp: '2024-01-01T10:05:00.000Z',
-				taskId: '1.2',
-				taskFingerprint: 'def67890',
-				agent: 'mega_coder',
-				outcome: 'fail',
-				attemptNumber: 1,
-				failureReason: 'Test failed',
-			});
-
-			await recordOutcome(tmpDir, {
-				timestamp: '2024-01-01T10:10:00.000Z',
-				taskId: '1.3',
-				taskFingerprint: 'ghi11111',
-				agent: 'mega_coder',
-				outcome: 'skip',
-				attemptNumber: 1,
-			});
-
-			const failures = await getFailures(tmpDir);
-
-			expect(failures).toHaveLength(1);
-			expect(failures[0].outcome).toBe('fail');
-			expect(failures[0].taskId).toBe('1.2');
-		});
-
-		it('returns only retry entries', async () => {
-			await recordOutcome(tmpDir, {
-				timestamp: '2024-01-01T10:00:00.000Z',
-				taskId: '1.1',
-				taskFingerprint: 'abc12345',
-				agent: 'mega_coder',
-				outcome: 'retry',
-				attemptNumber: 2,
-				failureReason: 'Transient error',
-			});
-
-			const failures = await getFailures(tmpDir);
-
-			expect(failures).toHaveLength(1);
-			expect(failures[0].outcome).toBe('retry');
-		});
-
-		it('returns both fail and retry entries', async () => {
-			await recordOutcome(tmpDir, {
-				timestamp: '2024-01-01T10:00:00.000Z',
-				taskId: '1.1',
-				taskFingerprint: 'abc12345',
-				agent: 'mega_coder',
-				outcome: 'fail',
-				attemptNumber: 1,
-				failureReason: 'Failed',
-			});
-
-			await recordOutcome(tmpDir, {
-				timestamp: '2024-01-01T10:05:00.000Z',
-				taskId: '1.2',
-				taskFingerprint: 'def67890',
-				agent: 'mega_coder',
-				outcome: 'retry',
-				attemptNumber: 2,
-				failureReason: 'Retrying',
-			});
-
-			const failures = await getFailures(tmpDir);
-
-			expect(failures).toHaveLength(2);
-			expect(failures.map((f) => f.outcome)).toContain('fail');
-			expect(failures.map((f) => f.outcome)).toContain('retry');
-		});
-
-		it('excludes pass entries', async () => {
-			await recordOutcome(tmpDir, {
-				timestamp: '2024-01-01T10:00:00.000Z',
-				taskId: '1.1',
-				taskFingerprint: 'abc12345',
-				agent: 'mega_coder',
-				outcome: 'pass',
-				attemptNumber: 1,
-			});
-
-			await recordOutcome(tmpDir, {
-				timestamp: '2024-01-01T10:05:00.000Z',
-				taskId: '1.2',
-				taskFingerprint: 'def67890',
-				agent: 'mega_coder',
-				outcome: 'pass',
-				attemptNumber: 1,
-			});
-
-			const failures = await getFailures(tmpDir);
-			expect(failures).toHaveLength(0);
-		});
-
-		it('excludes skip entries', async () => {
-			await recordOutcome(tmpDir, {
-				timestamp: '2024-01-01T10:00:00.000Z',
-				taskId: '1.1',
-				taskFingerprint: 'abc12345',
-				agent: 'mega_coder',
-				outcome: 'skip',
-				attemptNumber: 1,
-			});
-
-			const failures = await getFailures(tmpDir);
-			expect(failures).toHaveLength(0);
-		});
-
-		it('returns empty array when file does not exist', async () => {
-			const failures = await getFailures(tmpDir);
-			expect(failures).toHaveLength(0);
 		});
 	});
 

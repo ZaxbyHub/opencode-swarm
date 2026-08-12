@@ -26,6 +26,7 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { validateSwarmPath } from '../hooks/utils';
+import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
 import type { SastScanFinding } from './sast-scan';
 
 // ============ Constants ============
@@ -226,6 +227,18 @@ async function acquireLock(lockPath: string): Promise<() => void> {
 		try {
 			const fd = fs.openSync(lockPath, 'wx');
 			fs.closeSync(fd);
+			// The lock lives at .swarm/evidence/<phase>/sast-baseline.json.lock, so
+			// it falls inside the cached `evidence/**` class — the knowledge-curator
+			// reader's trigger filter is unrestricted below .swarm/evidence/, and
+			// the class deliberately OVER-approximates.
+			//
+			// Stated honestly: this is a satisfy-the-class invalidation, not a fix
+			// for a demonstrated stale read. Nothing reads this lock's contents, so
+			// no reader can be served a stale version of it. Invalidating one Map
+			// key on acquire is cheaper and less fragile than carving a lock-file
+			// exception into the directory class, which is why the guard's report
+			// (#1619 round 7) is answered this way rather than with an allowlist.
+			invalidateCachedArtifact(lockPath);
 			return () => {
 				try {
 					fs.unlinkSync(lockPath);
@@ -404,6 +417,7 @@ export async function captureOrMergeBaseline(
 			}
 			fs.writeFileSync(tempPath, json, 'utf-8');
 			fs.renameSync(tempPath, baselinePath);
+			invalidateCachedArtifact(baselinePath);
 
 			return {
 				status: 'merged',
@@ -445,6 +459,7 @@ export async function captureOrMergeBaseline(
 		}
 		fs.writeFileSync(tempPath, json, 'utf-8');
 		fs.renameSync(tempPath, baselinePath);
+		invalidateCachedArtifact(baselinePath);
 
 		return {
 			status: 'written',

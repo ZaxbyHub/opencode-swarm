@@ -643,4 +643,11 @@ type RequiredInternals = {
 };
 
 export type { ProposeMemoryInput, MemoryKind };
-export const _test_exports = { compactText, messagesContainRecall };
+// `recallMessageInsertIndex` is exposed so the issue #1619
+// consolidate-vs-injector interaction test uses this module's real insert
+// position instead of a hand-copied constant.
+export const _test_exports = {
+	compactText,
+	messagesContainRecall,
+	recallMessageInsertIndex,
+};

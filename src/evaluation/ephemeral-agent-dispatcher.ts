@@ -7,6 +7,14 @@ import type { ModelOverride } from '../utils/model-dispatch-fallback.js';
 
 export const DEFAULT_EPHEMERAL_TIMEOUT_MS = 120_000;
 export const DEFAULT_EPHEMERAL_CLEANUP_TIMEOUT_MS = 500;
+/**
+ * Bounded timeout for the graceful `session.abort()` step that precedes delete
+ * in the ephemeral teardown (#2123). opencode's `SessionProcessor.cleanup` can
+ * take up to ~250 ms under interruption (it awaits each pending tool-call
+ * deferred with a 250 ms timeout), so this must stay well above that or the
+ * abort would give up before the final part/message flush lands.
+ */
+export const DEFAULT_EPHEMERAL_ABORT_TIMEOUT_MS = 5_000;
 export const DEFAULT_EPHEMERAL_PROMPT_BYTE_LIMIT = 512 * 1024;
 export const MAX_EPHEMERAL_PROMPT_BYTE_LIMIT = 3 * 1024 * 1024;
 export const DEFAULT_EPHEMERAL_RESPONSE_BYTE_LIMIT = 64 * 1024;
@@ -115,6 +123,57 @@ async function awaitWithAbort<T>(
 	});
 }
 
+/**
+ * Bounded graceful abort of an ephemeral session. opencode's
+ * `POST /session/{id}/abort` resolves only after `Fiber.interrupt` on the
+ * run-loop fiber — which runs `SessionProcessor.cleanup` (the final
+ * `updatePart`/`updateMessage` flush) as a finalizer. Awaiting this BEFORE the
+ * delete is what closes the FOREIGN KEY constraint race (#2123). If the session
+ * is already idle, abort is a fast no-op. Best-effort: never throws.
+ */
+export async function boundedAbortEphemeralSession(
+	client: OpencodeClient,
+	sessionId: string,
+	timeoutMs = DEFAULT_EPHEMERAL_ABORT_TIMEOUT_MS,
+): Promise<void> {
+	if (typeof client.session.abort !== 'function') return;
+	const controller = new AbortController();
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		const outcome = await Promise.race([
+			client.session
+				.abort({
+					path: { id: sessionId },
+					signal: controller.signal,
+				})
+				.then(() => 'aborted' as const),
+			new Promise<'timed-out'>((resolve) => {
+				timer = setTimeout(
+					() => {
+						controller.abort();
+						resolve('timed-out');
+					},
+					Math.max(1, timeoutMs),
+				);
+			}),
+		]);
+		if (outcome === 'timed-out') {
+			_internals.log('ephemeral agent session abort timed out', {
+				sessionId,
+				timeoutMs,
+			});
+		}
+	} catch (error) {
+		_internals.log('ephemeral agent session abort failed', {
+			sessionId,
+			error: error instanceof Error ? error.message : String(error),
+		});
+	} finally {
+		if (timer) clearTimeout(timer);
+		controller.abort();
+	}
+}
+
 export async function boundedDeleteEphemeralSession(
 	client: OpencodeClient,
 	sessionId: string,
@@ -158,9 +217,11 @@ export async function boundedDeleteEphemeralSession(
 }
 
 export const _internals: {
+	boundedAbort: typeof boundedAbortEphemeralSession;
 	boundedDelete: typeof boundedDeleteEphemeralSession;
 	log: typeof log;
 } = {
+	boundedAbort: boundedAbortEphemeralSession,
 	boundedDelete: boundedDeleteEphemeralSession,
 	log,
 };
@@ -338,6 +399,12 @@ export async function dispatchEphemeralAgent(
 		request.abortSignal?.removeEventListener('abort', onCallerAbort);
 		controller.abort();
 		if (sessionId) {
+			// #2123: await a graceful server-side abort so opencode flushes the
+			// final part/message (`SessionProcessor.cleanup`, run as a
+			// `Fiber.interrupt` finalizer) BEFORE the cascade-delete — otherwise
+			// the late `updatePart`/`updateMessage` write hits a FOREIGN KEY
+			// constraint violation in opencode's log.
+			await _internals.boundedAbort(request.client, sessionId);
 			await _internals.boundedDelete(
 				request.client,
 				sessionId,

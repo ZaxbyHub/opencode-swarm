@@ -212,7 +212,7 @@ describe('knowledgeApplicationGateBefore', () => {
 				{ ...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG, mode: 'enforce' },
 			),
 		).rejects.toThrow(
-			/KNOWLEDGE_APPLIED.*KNOWLEDGE_IGNORED.*KNOWLEDGE_VIOLATED/,
+			/KNOWLEDGE_APPLIED.*KNOWLEDGE_IGNORED.*KNOWLEDGE_CONTRADICTED.*KNOWLEDGE_VIOLATED/,
 		);
 	});
 
@@ -242,6 +242,21 @@ describe('knowledgeApplicationGateBefore', () => {
 			{ ...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG, mode: 'enforce' },
 		);
 		// no throw
+	});
+
+	it('enforce mode allows when ack is "contradicted" by current authority', async () => {
+		swarmState.currentCriticalShownIds.set('s1', {
+			ids: [ID_A],
+			generatedAt: Date.now(),
+		});
+		swarmState.knowledgeAckDedup.add(
+			buildAckDedupKey('s1', ID_A, 'contradicted'),
+		);
+		await knowledgeApplicationGateBefore(
+			tmp,
+			{ tool: 'save_plan', agent: 'architect', sessionID: 's1' },
+			{ ...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG, mode: 'enforce' },
+		);
 	});
 
 	it('enforce mode allows when ack is "violated" (architect chose)', async () => {

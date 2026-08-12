@@ -17,6 +17,7 @@ import { getSwarmAgents, resolveFallbackModel } from '../agents/index.js';
 import { stripKnownSwarmPrefix } from '../config/schema.js';
 import { swarmState } from '../state.js';
 import { telemetry } from '../telemetry.js';
+import { teardownEphemeralSession } from '../utils/ephemeral-session-teardown.js';
 import { dispatchWithModelFallback } from '../utils/model-dispatch-fallback.js';
 import { isTransientProviderError } from '../utils/provider-error-classification.js';
 import { isAbortError } from './abort-utils.js';
@@ -95,11 +96,11 @@ export function createSkillImproverLLMDelegate(
 	): Promise<string> => {
 		let ephemeralSessionId: string | undefined;
 
-		const cleanup = () => {
+		const cleanup = async (): Promise<void> => {
 			if (ephemeralSessionId) {
 				const id = ephemeralSessionId;
 				ephemeralSessionId = undefined;
-				client.session.delete({ path: { id } }).catch(() => {});
+				await teardownEphemeralSession(client.session, id);
 			}
 		};
 
@@ -222,7 +223,7 @@ export function createSkillImproverLLMDelegate(
 			if (isAbortError(err)) throw new Error('SKILL_IMPROVER_LLM_TIMEOUT');
 			throw err;
 		} finally {
-			cleanup();
+			await cleanup();
 		}
 	};
 }

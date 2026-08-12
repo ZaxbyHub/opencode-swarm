@@ -30,6 +30,7 @@ import {
 import { readSwarmFileAsync, validateSwarmPath } from '../hooks/utils';
 import { warn } from '../utils';
 import { bunWrite } from '../utils/bun-compat';
+import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
 import {
 	type DocumentsRetentionResult,
 	pruneEvidenceDocuments,
@@ -376,6 +377,11 @@ export async function saveEvidence(
 				} catch {}
 				throw error;
 			}
+			// Invalidate only after a successful rename: a failed write must leave
+			// the cache pointing at the still-valid on-disk content (issue #1729
+			// defect class — same-size rewrite within one fs timestamp tick would
+			// otherwise let the next read observe stale pre-write content).
+			invalidateCachedArtifact(evidencePath);
 
 			return updatedBundle;
 		},
@@ -524,6 +530,7 @@ export async function loadEvidence(
 						try {
 							await bunWrite(tempPath, bundleJson);
 							await fs.rename(tempPath, evidencePath);
+							invalidateCachedArtifact(evidencePath);
 						} catch (writeError) {
 							try {
 								rmSync(tempPath, { force: true });
