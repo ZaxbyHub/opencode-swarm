@@ -13,6 +13,10 @@ import type { SecretscanEvidence } from '../config/evidence-schema.js';
 import { saveEvidence } from '../evidence/manager.js';
 import { warn } from '../utils';
 import { runExternalTool } from '../utils/external-tool-runner';
+import {
+	hasExplicitProjectBoundary,
+	isStrictPathDescendant,
+} from '../utils/project-boundary';
 import { createSwarmTool } from './create-tool';
 import type {
 	LintResult,
@@ -1536,7 +1540,7 @@ export const pre_check_batch: ReturnType<typeof tool> = createSwarmTool({
 		directory: z
 			.string()
 			.describe(
-				'Project root directory — must be the workspace root, subdirectories are rejected',
+				'Project root directory — ordinary workspace subdirectories are rejected; direct .git or .opencode project boundaries are accepted',
 			),
 		sast_threshold: z
 			.enum(['low', 'medium', 'high', 'critical'])
@@ -1642,8 +1646,8 @@ export const pre_check_batch: ReturnType<typeof tool> = createSwarmTool({
 
 		// Reject subdirectory: if arg resolves inside project root, hard-reject
 		if (
-			resolvedDirectory !== workspaceAnchor &&
-			resolvedDirectory.startsWith(workspaceAnchor + path.sep)
+			isStrictPathDescendant(resolvedDirectory, workspaceAnchor) &&
+			!hasExplicitProjectBoundary(resolvedDirectory)
 		) {
 			const subDirError = `directory "${typedArgs.directory}" is a subdirectory of the project root — pre_check_batch requires the project root directory "${workspaceAnchor}"`;
 			const subDirResult: PreCheckBatchResult = {

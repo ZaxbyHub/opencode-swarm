@@ -13,6 +13,10 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import {
+	hasExplicitProjectBoundary,
+	isStrictPathDescendant,
+} from '../utils/project-boundary';
 
 export interface ResolveResult {
 	success: true;
@@ -153,8 +157,14 @@ export function resolveWorkingDirectory(
 		// Reject only if working_directory is a subdirectory of fallback.
 		// Example: workingDir=/project/src, fallback=/project → src is a subdirectory of /project → REJECT
 		// Example: workingDir=/project, fallback=/tmp/wrong → /project is NOT a subdirectory of /tmp/wrong → TRUST
-		const isSubdirectory = resolvedDir.startsWith(resolvedFallback + path.sep);
+		const isSubdirectory = isStrictPathDescendant(
+			resolvedDir,
+			resolvedFallback,
+		);
 		if (isSubdirectory) {
+			if (hasExplicitProjectBoundary(resolvedDir)) {
+				return { success: true, directory: resolvedDir };
+			}
 			return {
 				success: false,
 				message:

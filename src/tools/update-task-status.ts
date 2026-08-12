@@ -37,6 +37,10 @@ import {
 } from '../telemetry.js';
 import { verifyLeanTurboTaskCompletion } from '../turbo/lean/task-completion';
 import * as logger from '../utils/logger.js';
+import {
+	hasExplicitProjectBoundary,
+	isStrictPathDescendant,
+} from '../utils/project-boundary';
 import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
 import { validateTaskIdFormat as _validateTaskIdFormat } from '../validation/task-id';
 import { createSwarmTool } from './create-tool';
@@ -1102,7 +1106,10 @@ export async function executeUpdateTaskStatus(
 	if (fallbackDir && directory !== fallbackDir) {
 		const canonicalDir = fs.realpathSync(path.resolve(directory));
 		const canonicalRoot = fs.realpathSync(path.resolve(fallbackDir));
-		if (canonicalDir.startsWith(canonicalRoot + path.sep)) {
+		if (
+			isStrictPathDescendant(canonicalDir, canonicalRoot) &&
+			!hasExplicitProjectBoundary(canonicalDir)
+		) {
 			return {
 				success: false,
 				message:

@@ -32,6 +32,10 @@ import { derivePlanId } from '../plan/utils.js';
 import { normalizeScopeFiles } from '../scope/scope-binding.js';
 import { readEffectiveSpecSync } from '../sdd/effective-spec';
 import { swarmState } from '../state';
+import {
+	hasExplicitProjectBoundary,
+	isStrictPathDescendant,
+} from '../utils/project-boundary';
 import { createSwarmTool } from './create-tool';
 import { extractRequirements } from './req-coverage';
 
@@ -406,20 +410,25 @@ export async function executeSavePlan(
 			// Reject only if working_directory is a subdirectory of fallback.
 			// Example: workingDir=/project/src, fallback=/project → src is a subdirectory of /project → REJECT
 			// Example: workingDir=/project, fallback=/tmp/wrong → /project is NOT a subdirectory of /tmp/wrong → TRUST
-			const isSubdirectory = resolvedTarget.startsWith(resolvedRoot + path.sep);
+			const isSubdirectory = isStrictPathDescendant(
+				resolvedTarget,
+				resolvedRoot,
+			);
 			if (isSubdirectory) {
-				return {
-					success: false,
-					message:
-						`working_directory must be the project root. ` +
-						`Got "${args.working_directory}" (resolves to "${resolvedTarget}"), ` +
-						`which is a subdirectory of fallback "${resolvedRoot}". ` +
-						`Omit working_directory or pass the project root explicitly.`,
-					errors: [
-						`working_directory "${resolvedTarget}" is a subdirectory of fallback "${resolvedRoot}"`,
-					],
-					recovery_guidance: `Pass working_directory: "${resolvedRoot}" or omit the field entirely.`,
-				};
+				if (!hasExplicitProjectBoundary(resolvedTarget)) {
+					return {
+						success: false,
+						message:
+							`working_directory must be the project root. ` +
+							`Got "${args.working_directory}" (resolves to "${resolvedTarget}"), ` +
+							`which is a subdirectory of fallback "${resolvedRoot}". ` +
+							`Omit working_directory or pass the project root explicitly.`,
+						errors: [
+							`working_directory "${resolvedTarget}" is a subdirectory of fallback "${resolvedRoot}"`,
+						],
+						recovery_guidance: `Pass working_directory: "${resolvedRoot}" or omit the field entirely.`,
+					};
+				}
 			}
 		}
 		// Trust explicit working_directory (fallback doesn't exist, or not a subdirectory)

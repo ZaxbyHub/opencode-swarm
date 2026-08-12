@@ -31,6 +31,7 @@ import {
 import { readSwarmFileAsync, validateSwarmPath } from '../hooks/utils';
 import { warn } from '../utils';
 import { bunWrite } from '../utils/bun-compat';
+import { hasExplicitProjectBoundary } from '../utils/project-boundary';
 import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
 import {
 	type DocumentsRetentionResult,
@@ -199,13 +200,26 @@ function hasAccessibleProjectIndicator(
 			continue;
 		}
 		try {
-			const indicatorStat = statSync(path.join(directory, indicator));
+			const indicatorStat = _internals.statSync(
+				path.join(directory, indicator),
+			);
 			if (indicatorStat.isFile() || indicatorStat.isDirectory()) {
 				return true;
 			}
-		} catch {}
+		} catch (error) {
+			if (!isMissingPathError(error)) {
+				// Ambiguous ancestor state cannot safely widen authority. Treat the
+				// indicator as present so the descendant is rejected.
+				return true;
+			}
+		}
 	}
 	return false;
+}
+
+function isMissingPathError(error: unknown): boolean {
+	const code = (error as NodeJS.ErrnoException | undefined)?.code;
+	return code === 'ENOENT' || code === 'ENOTDIR';
 }
 
 /**
@@ -219,7 +233,7 @@ function hasAccessibleProjectIndicator(
 export function validateProjectRoot(directory: string): void {
 	let resolved: string;
 	try {
-		resolved = realpathSync(directory);
+		resolved = _internals.realpathSync(directory);
 	} catch {
 		warn(
 			`[evidence] Cannot canonicalize directory "${directory}" — failing closed`,
@@ -227,6 +241,9 @@ export function validateProjectRoot(directory: string): void {
 		throw new Error(
 			`Cannot verify project root for "${directory}" — directory may not exist or is inaccessible`,
 		);
+	}
+	if (hasExplicitProjectBoundary(resolved)) {
+		return;
 	}
 	let current = resolved;
 	let depth = 0;
@@ -240,30 +257,33 @@ export function validateProjectRoot(directory: string): void {
 			continue;
 		}
 		const parentSwarm = path.join(parent, '.swarm');
+		let parentSwarmStat: ReturnType<typeof statSync>;
 		try {
-			if (statSync(parentSwarm).isDirectory()) {
-				if (
-					hasAccessibleProjectIndicator(parent, {
-						allowConfigOnly: !isWeakConfigContainerRoot(parent),
-					})
-				) {
-					warn(
-						`[evidence] Rejecting write to subdirectory "${resolved}" — parent "${parent}" already contains .swarm/`,
-					);
-					throw new Error(
-						`Cannot write evidence in "${resolved}" — parent directory "${parent}" already contains a .swarm/ folder. Evidence must be written to the project root.`,
-					);
-				}
-				// No project indicators found — treat as stray artifact, continue walking
-			}
+			parentSwarmStat = _internals.statSync(parentSwarm);
 		} catch (error) {
-			if (
-				error instanceof Error &&
-				error.message.startsWith('Cannot write evidence')
-			) {
-				throw error;
+			if (isMissingPathError(error)) {
+				current = parent;
+				continue;
 			}
-			// statSync failing means .swarm doesn't exist — continue walking
+			warn(
+				`[evidence] Cannot inspect ancestor state "${parentSwarm}" — failing closed`,
+			);
+			throw new Error(
+				`Cannot verify project root for "${resolved}" — ancestor state "${parentSwarm}" is inaccessible`,
+			);
+		}
+		if (
+			parentSwarmStat.isDirectory() &&
+			hasAccessibleProjectIndicator(parent, {
+				allowConfigOnly: !isWeakConfigContainerRoot(parent),
+			})
+		) {
+			warn(
+				`[evidence] Rejecting write to subdirectory "${resolved}" — parent "${parent}" already contains .swarm/`,
+			);
+			throw new Error(
+				`Cannot write evidence in "${resolved}" — parent directory "${parent}" already contains a .swarm/ folder. Evidence must be written to the project root.`,
+			);
 		}
 		current = parent;
 	}
@@ -885,6 +905,8 @@ export const _internals: {
 	saveEvidence: typeof saveEvidence;
 	deleteEvidence: typeof deleteEvidence;
 	pruneEvidenceDocuments: typeof pruneEvidenceDocuments;
+	realpathSync: typeof realpathSync;
+	statSync: typeof statSync;
 	now: () => Date;
 } = {
 	wrapFlatRetrospective,
@@ -895,5 +917,7 @@ export const _internals: {
 	saveEvidence,
 	deleteEvidence,
 	pruneEvidenceDocuments,
+	realpathSync,
+	statSync,
 	now: () => new Date(),
 } as const;
