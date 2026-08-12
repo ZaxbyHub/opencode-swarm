@@ -141,7 +141,9 @@ async function persistPrReviewBatch(
 	}
 }
 
-async function establishPrReviewPrerequisites(): Promise<void> {
+async function establishPrReviewPrerequisites(
+	runId: string = 'test-run',
+): Promise<void> {
 	await activatePrWorkflow(directory, SESSION_ID, 'PR_REVIEW', {
 		prHeadSha: HEAD_SHA,
 	});
@@ -182,11 +184,7 @@ async function establishPrReviewPrerequisites(): Promise<void> {
 			source_lane_id: `micro-lane-${index}`,
 		});
 	}
-	const triggerRelative = path.join(
-		'pr-review',
-		'test-run',
-		'trigger-eval.json',
-	);
+	const triggerRelative = path.join('pr-review', runId, 'trigger-eval.json');
 	const triggerAbsolute = path.join(directory, '.swarm', triggerRelative);
 	await fs.mkdir(path.dirname(triggerAbsolute), { recursive: true });
 	await fs.writeFile(
@@ -197,13 +195,14 @@ async function establishPrReviewPrerequisites(): Promise<void> {
 	await markPrReviewTriggerEvaluationComplete(
 		directory,
 		SESSION_ID,
+		runId,
 		triggerRelative,
 	);
 }
 
 describe('write_pr_review_artifact', () => {
 	test('ARTIFACT-ORDER regression: requires explorer, reviewer, then critic checkpoints', async () => {
-		await establishPrReviewPrerequisites();
+		await establishPrReviewPrerequisites('coverage-order');
 		const candidateIds = PR_REVIEW_BASE_DIMENSION_IDS.map(
 			(_dimension, index) => `C-${index}`,
 		);
@@ -241,7 +240,15 @@ describe('write_pr_review_artifact', () => {
 			),
 		).rejects.toThrow(/prior post_explorer checkpoint/i);
 		await expect(
-			fs.stat(path.join(directory, '.swarm', 'pr-review', 'coverage-order')),
+			fs.stat(
+				path.join(
+					directory,
+					'.swarm',
+					'pr-review',
+					'coverage-order',
+					'findings.jsonl',
+				),
+			),
 		).rejects.toThrow();
 		await expect(
 			executeWritePrReviewArtifact(
@@ -272,7 +279,7 @@ describe('write_pr_review_artifact', () => {
 	});
 
 	test('ARTIFACT-VERDICT regression: persists only reviewer and critic-authoritative dispositions', async () => {
-		await establishPrReviewPrerequisites();
+		await establishPrReviewPrerequisites('review-boundaries');
 		const candidateIds = PR_REVIEW_BASE_DIMENSION_IDS.map(
 			(_dimension, index) => `C-${index}`,
 		);
