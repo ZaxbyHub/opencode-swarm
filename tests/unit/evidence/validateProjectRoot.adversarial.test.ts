@@ -226,13 +226,8 @@ describe('BOUNDARY — MAX_DEPTH depth limit', () => {
 	});
 
 	it('fails closed beyond MAX_DEPTH when no project root can be established', () => {
-		if (envHasSwarmAncestor) {
-			// This environment already exercises ancestor rejection, so the isolated
-			// depth-exhaustion fixture cannot establish its intended precondition.
-			return;
-		}
-		// Build 25-level chain with no .swarm/ anywhere
-		// Depth exhaustion is ambiguous and must not grant write authority.
+		if (envHasSwarmAncestor) return;
+		// A 25-level markerless chain is ambiguous and must not grant authority.
 		const deepest = buildDeepChain(25);
 		expect(() => validateProjectRoot(deepest)).toThrow(
 			'ancestor search exceeded 20 levels',
@@ -252,8 +247,7 @@ describe('BOUNDARY — MAX_DEPTH depth limit', () => {
 		// Build 20-level chain downward from tempDir
 		const childDir = buildDeepChain(20); // level0 through level19
 
-		// From childDir: tempDir is at depth 20 and its stray .swarm/ does not
-		// establish a project root, so exhausting the bounded walk fails closed.
+		// A depth-20 stray .swarm does not establish a root; exhaustion fails closed.
 		expect(() => validateProjectRoot(childDir)).toThrow(
 			'ancestor search exceeded 20 levels',
 		);

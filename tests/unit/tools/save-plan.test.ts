@@ -4,7 +4,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -18,6 +18,7 @@ import {
 	save_plan,
 } from '../../../src/tools/save-plan';
 import { safeRmRecursive } from '../../helpers/safe-test-dir';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 describe('save-plan tool verification tests', () => {
 	let tmpDir: string;
@@ -909,8 +910,7 @@ describe('save-plan tool verification tests', () => {
 
 		beforeEach(() => {
 			// Create a temporary directory for each test
-			tmpDir = path.join(os.tmpdir(), 'save-plan-test-' + Date.now());
-			mkdirSync(tmpDir, { recursive: true });
+			tmpDir = canonicalMkdtemp('save-plan-test-');
 			mkdirSync(path.join(tmpDir, '.opencode'));
 			// Create .swarm/spec.md required by the spec gate
 			mkdirSync(path.join(tmpDir, '.swarm'), { recursive: true });
