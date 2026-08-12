@@ -12,7 +12,7 @@
  * was rendered as "12.5% used (est. 5,000 / 40,000 tokens)", numbers that
  * contradict the percentage printed beside them.
  *
- * The fix pairs `swarmState.lastBudgetTokens` with `swarmState.lastBudgetPct`
+ * The fix pairs the denominator with the pct in one per-session record
  * at the two statements that write the pct, and surfaces it on `StatusData`.
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
@@ -23,7 +23,11 @@ import {
 	getStatusData,
 	type StatusData,
 } from '../../../src/services/status-service';
-import { resetSwarmState, swarmState } from '../../../src/state';
+import {
+	resetSwarmState,
+	setSessionBudget,
+	swarmState,
+} from '../../../src/state';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 function baseStatus(overrides: Partial<StatusData> = {}): StatusData {
@@ -119,9 +123,8 @@ describe('getStatusData — denominator is carried from swarmState', () => {
 		rmSync(root, { recursive: true, force: true });
 	});
 
-	test('surfaces lastBudgetTokens alongside lastBudgetPct', async () => {
-		swarmState.lastBudgetPct = 37.5;
-		swarmState.lastBudgetTokens = 200000;
+	test('surfaces the denominator alongside the pct', async () => {
+		setSessionBudget('s-display', 37.5, 200000);
 		const status = await getStatusData(root, {});
 		expect(status.contextBudgetPct).toBe(37.5);
 		expect(status.contextBudgetTokens).toBe(200000);

@@ -169,7 +169,12 @@ import { buildDelegationCostFields } from './services/cost-accounting.js';
 import { scheduleVersionCheck } from './services/version-check.js';
 import { loadSnapshot } from './session/snapshot-reader.js';
 import { createSnapshotWriterHook } from './session/snapshot-writer.js';
-import { ensureAgentSession, getActiveWindow, swarmState } from './state';
+import {
+	ensureAgentSession,
+	getActiveWindow,
+	getSessionBudgetPct,
+	swarmState,
+} from './state';
 import { initTelemetry, startHeartbeatTracking, telemetry } from './telemetry';
 import { buildPluginToolObject } from './tools/plugin-registration';
 import { error, log, warn } from './utils';
@@ -2951,7 +2956,8 @@ async function initializeOpenCodeSwarm(
 				}
 
 				// v6.29: One-time 50% context pressure warning
-				if (swarmState.lastBudgetPct >= 50) {
+				const pressurePct = getSessionBudgetPct(input.sessionID);
+				if (pressurePct >= 50) {
 					const pressureSession = ensureAgentSession(
 						input.sessionID,
 						swarmState.activeAgent.get(input.sessionID) ?? ORCHESTRATOR_NAME,
@@ -2960,7 +2966,7 @@ async function initializeOpenCodeSwarm(
 						pressureSession.contextPressureWarningSent = true;
 						pushAdvisory(
 							pressureSession,
-							`CONTEXT PRESSURE: ${swarmState.lastBudgetPct.toFixed(1)}% of context window used. Prioritize completing the current task before starting new work.`,
+							`CONTEXT PRESSURE: ${pressurePct.toFixed(1)}% of context window used. Prioritize completing the current task before starting new work.`,
 						);
 					}
 				}

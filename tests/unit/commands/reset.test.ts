@@ -9,7 +9,11 @@ import { join } from 'node:path';
 // The reset command does not import state; this suite verifies the real singleton
 // remains intact without a process-global state mock.
 import { handleResetCommand } from '../../../src/commands/reset';
-import { swarmState } from '../../../src/state';
+import {
+	getSessionBudgetPct,
+	setSessionBudget,
+	swarmState,
+} from '../../../src/state';
 
 describe('handleResetCommand', () => {
 	let tempDir: string;
@@ -321,7 +325,7 @@ describe('handleResetCommand', () => {
 			specWriterAgentNames: swarmState.specWriterAgentNames,
 			generatedAgentNames: swarmState.generatedAgentNames,
 			pendingEvents: swarmState.pendingEvents,
-			lastBudgetPct: swarmState.lastBudgetPct,
+			lastBudgetPct: getSessionBudgetPct('s1'),
 		};
 		try {
 			swarmState.opencodeClient = sentinelClient as never;
@@ -332,7 +336,7 @@ describe('handleResetCommand', () => {
 			swarmState.specWriterAgentNames = ['reset_spec_z'];
 			swarmState.generatedAgentNames = ['reset_gen_1', 'reset_gen_2'];
 			swarmState.pendingEvents = 999;
-			swarmState.lastBudgetPct = 42;
+			setSessionBudget('s1', 42, 128000);
 			swarmState.activeToolCalls.set('reset-test-call', { tool: 'y' });
 
 			const result = await handleResetCommand(tempDir, ['--confirm']);

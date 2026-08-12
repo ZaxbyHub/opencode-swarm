@@ -816,19 +816,28 @@ export const swarmState = {
 	 */
 	generatedAgentNames: [] as string[],
 
-	/** Last known context budget percentage (0-100), updated by system-enhancer */
-	lastBudgetPct: 0,
-
 	/**
-	 * The DENOMINATOR `lastBudgetPct` was computed against, in tokens. Written
-	 * by system-enhancer at the same two statements that write `lastBudgetPct`,
-	 * because a percentage without its denominator cannot be turned back into a
-	 * token estimate. `/swarm status` used to reconstruct the estimate from a
-	 * hardcoded constant, so a user whose real denominator differed saw a token
-	 * figure that did not match the percentage next to it. 0 means "no budget
-	 * report has run yet".
+	 * Last known context budget per session — keyed by sessionID.
+	 *
+	 * `pct` is the budget percentage (0-100); `tokens` is the DENOMINATOR it was
+	 * computed against. They are stored together because a percentage without
+	 * its denominator cannot be turned back into a token estimate, and
+	 * `/swarm status` renders both — reading them from different sources would
+	 * show a token figure that does not match the percentage beside it.
+	 *
+	 * Keyed rather than global (AGENTS.md invariant 8). These were two bare
+	 * module-level scalars, which was harmless only while the budget check threw
+	 * on every call and left them pinned at 0. Now that the check runs, a bare
+	 * global leaks across sessions: a busy session reporting 85% would trip the
+	 * default-on compaction service's emergency tier — and the `>= 50%` CONTEXT
+	 * PRESSURE advisory — inside an unrelated small session. compaction-service
+	 * keys its *hysteresis* per session, so the wrong session's state machine
+	 * would advance on another session's number.
+	 *
+	 * Write via `setSessionBudget`, read via `getSessionBudgetPct` /
+	 * `getSessionBudgetTokens`; `/swarm status` uses `getDisplayBudget`.
 	 */
-	lastBudgetTokens: 0,
+	lastBudgetBySession: new Map<string, { pct: number; tokens: number }>(),
 
 	/**
 	 * Live `model.limit.context` per session — keyed by sessionID, recorded by
@@ -862,8 +871,7 @@ export function resetSwarmState(): void {
 	swarmState.activeAgent.clear();
 	swarmState.delegationChains.clear();
 	swarmState.pendingEvents = 0;
-	swarmState.lastBudgetPct = 0;
-	swarmState.lastBudgetTokens = 0;
+	swarmState.lastBudgetBySession.clear();
 	swarmState.liveContextWindows.clear();
 	swarmState.agentSessions.clear();
 	// Reset the opportunistic idle-sweep cooldown so a fresh process / test run
@@ -3246,6 +3254,7 @@ export function ensureSessionEnvironment(
 // "Module-level global state must have an explicit eviction strategy").
 // Values mirror MAX_TRACKED_SESSIONS in adversarial-detector.ts. The Map
 // preserves insertion order so `Map.keys().next()` is the FIFO oldest.
+export const MAX_TRACKED_BUDGET_SESSIONS = 500;
 export const MAX_TRACKED_CRITICAL_SHOWN = 500;
 export const MAX_TRACKED_KNOWLEDGE_ACKS = 5000;
 export const MAX_TRACKED_GATE_DENIALS = 500;
@@ -3291,6 +3300,55 @@ export function getLiveContextWindow(
 ): number | undefined {
 	if (!sessionID) return undefined;
 	return swarmState.liveContextWindows.get(sessionID);
+}
+
+/** Record this session's budget percentage and the denominator it was computed
+ *  against, FIFO-evicting the oldest entry if the cap is exceeded. The two are
+ *  written together so `/swarm status` can never pair a pct from one report
+ *  with a denominator from another. */
+export function setSessionBudget(
+	sessionID: string,
+	pct: number,
+	tokens: number,
+): void {
+	const map = swarmState.lastBudgetBySession;
+	if (map.has(sessionID)) map.delete(sessionID);
+	map.set(sessionID, { pct, tokens });
+	if (map.size > MAX_TRACKED_BUDGET_SESSIONS) {
+		const oldest = map.keys().next().value;
+		if (oldest !== undefined && oldest !== sessionID) {
+			map.delete(oldest);
+		}
+	}
+}
+
+/** This session's last budget percentage, or 0 if it has not been measured.
+ *  Consumers that ACT on a session (compaction, the context-pressure advisory)
+ *  MUST use this rather than any cross-session aggregate. */
+export function getSessionBudgetPct(sessionID: string | undefined): number {
+	if (!sessionID) return 0;
+	return swarmState.lastBudgetBySession.get(sessionID)?.pct ?? 0;
+}
+
+/** The denominator this session's percentage was computed against, or 0. */
+export function getSessionBudgetTokens(sessionID: string | undefined): number {
+	if (!sessionID) return 0;
+	return swarmState.lastBudgetBySession.get(sessionID)?.tokens ?? 0;
+}
+
+/** The most-pressured session's budget snapshot, for process-wide DISPLAY only
+ *  (`/swarm status` has no single session in scope). Returns the pct and its
+ *  OWN denominator as a pair, so the two figures shown side by side always come
+ *  from the same report. Null when nothing has been measured yet. Never use
+ *  this to decide whether to act on a particular session. */
+export function getDisplayBudget(): { pct: number; tokens: number } | null {
+	let best: { pct: number; tokens: number } | null = null;
+	for (const entry of swarmState.lastBudgetBySession.values()) {
+		if (entry.pct > 0 && (best === null || entry.pct > best.pct)) {
+			best = entry;
+		}
+	}
+	return best;
 }
 
 /** Set the critical shown ids for a session, FIFO-evicting the oldest entry
