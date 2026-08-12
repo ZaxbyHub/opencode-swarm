@@ -79,8 +79,32 @@ const DEFAULT_THRESHOLDS: Record<PatternType, number> = {
 	ping_pong: 2,
 	expansion_drift: 3,
 	stuck_on_test: 3,
-	context_thrash: 3,
+	// Issue #2134 (tuning): was 3. `detectContextThrash` flags a run of
+	// CONSECUTIVE steps that each introduce a brand-new target. Three such steps
+	// is indistinguishable from an agent simply reading three files, so the old
+	// default fired on essentially every healthy coder session and injected
+	// "Restrict file access" guidance at an agent that was doing nothing wrong.
+	// Ten consecutive new targets with zero revisits is the point at which
+	// "never converging on anything" becomes a real signal rather than noise.
+	// Keep in sync with `src/config/schema.ts` (`prm.pattern_thresholds`).
+	context_thrash: 10,
 };
+
+/**
+ * Resolves the configured occurrence threshold for a pattern type, falling back
+ * to the built-in default.
+ *
+ * Exported for the escalation ladder (issue #2134): the ladder re-strikes a
+ * still-running episode once it has grown by another threshold's worth of
+ * occurrences, so it must resolve the threshold exactly the way the detectors do
+ * or the two layers disagree about what "another occurrence" means.
+ */
+export function resolvePatternThreshold(
+	config: PrmConfig,
+	pattern: PatternType,
+): number {
+	return config.pattern_thresholds?.[pattern] ?? DEFAULT_THRESHOLDS[pattern];
+}
 
 /**
  * Detect repetition_loop pattern
@@ -527,6 +551,17 @@ export function detectPatterns(
 	// Deduplicate matches to prevent multiple escalation advances from a single toolAfter call.
 	// A trajectory with 3 identical entries would otherwise emit 3 matches (one per window position),
 	// causing escalation to jump multiple levels in a single invocation.
+	//
+	// Issue #2134: the key deliberately EXCLUDES `stepRange[1]`. It used to include
+	// it, which made the dedup a no-op for the exact case the comment above
+	// describes: `detectRepetitionLoop` slides a 10-entry window across every
+	// position, so one repetition episode emits `[1,2]`, `[1,3]`, `[1,4]`, … —
+	// four distinct keys under the old composition, four surviving matches, and
+	// four `recordDetection` calls that walked a first-ever occurrence straight to
+	// level 3 (hard stop) inside a single tool call, with no level-1 or level-2
+	// guidance ever delivered. The START step is the stable identity of an
+	// episode; the END step is a volatile "how far has it grown so far" cursor and
+	// must never participate in identity.
 	const severityRank: Record<PatternSeverity, number> = {
 		critical: 4,
 		high: 3,
@@ -536,19 +571,25 @@ export function detectPatterns(
 	const dedupedMatches = new Map<string, PatternMatch>();
 
 	for (const match of allMatches) {
-		// Create dedup key: pattern + affectedAgents + affectedTargets + stepRange
-		const key = `${match.pattern}-${match.affectedAgents.join(',')}-${match.affectedTargets.join(',')}-${match.stepRange[0]}-${match.stepRange[1]}`;
+		// Create dedup key: pattern + affectedAgents + affectedTargets + episode start
+		const key = `${match.pattern}-${match.affectedAgents.join(',')}-${match.affectedTargets.join(',')}-${match.stepRange[0]}`;
 		const existing = dedupedMatches.get(key);
 
 		if (!existing) {
 			dedupedMatches.set(key, match);
-		} else {
-			// Keep the more severe match when duplicates exist
-			const existingRank = severityRank[existing.severity] ?? 0;
-			const newRank = severityRank[match.severity] ?? 0;
-			if (newRank > existingRank) {
-				dedupedMatches.set(key, match);
-			}
+			continue;
+		}
+
+		// Keep the more severe match when duplicates exist; on equal severity keep
+		// the one covering the WIDER step range, so the surviving match reports the
+		// most complete view of the episode rather than an arbitrary window slice.
+		const existingRank = severityRank[existing.severity] ?? 0;
+		const newRank = severityRank[match.severity] ?? 0;
+		if (
+			newRank > existingRank ||
+			(newRank === existingRank && match.stepRange[1] > existing.stepRange[1])
+		) {
+			dedupedMatches.set(key, match);
 		}
 	}
 

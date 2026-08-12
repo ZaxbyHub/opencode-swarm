@@ -115,7 +115,19 @@ describe('PRM real trajectory pipeline', () => {
 		clearTrajectoryCache(sessionId);
 		await prmHook.toolAfter({ sessionID: sessionId });
 		expect(getInMemoryTrajectory(sessionId)).toHaveLength(2);
-		expect(session.pendingAdvisoryMessages).toHaveLength(1);
+		// Issue #2134: this call re-derives the SAME repetition_loop episode
+		// (stepRange [1,2]) that already struck two calls ago — only
+		// `prmTrajectoryStep` was reset above to force a cache-miss disk re-read
+		// ("lastProcessedStep dedupe"); `session.prmStruckEpisodes` (the episode
+		// ledger) was deliberately left untouched, exactly as a real cold-start
+		// re-read would leave a session's history intact. The episode gate
+		// recognizes this is not a new occurrence and correctly suppresses it:
+		// zero NEW advisories, even though the naive step-cursor filter alone
+		// would have let it through again. This is the fix working as intended —
+		// before #2134 this assertion was 1, silently documenting the very defect
+		// (a cursor reset re-walking escalation for an episode already reported)
+		// that the episode ledger now closes.
+		expect(session.pendingAdvisoryMessages).toHaveLength(0);
 	});
 
 	test('resetSwarmState clears PRM trajectory cache and trajectory step counters', async () => {

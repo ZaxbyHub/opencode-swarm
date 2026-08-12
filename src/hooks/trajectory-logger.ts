@@ -156,6 +156,27 @@ function deriveAction(tool: string): string {
 }
 
 /**
+ * Upper bound on a shell command used as a trajectory target (issue #2134).
+ *
+ * Matches `MAX_SANITIZED_LENGTH` in `src/prm/pattern-detector.ts`, which is what
+ * the detectors truncate a target to when rendering a course correction — so a
+ * target is never stored longer than the value that can be reported back.
+ */
+const MAX_COMMAND_TARGET_LENGTH = 200;
+
+/**
+ * Normalizes a shell command into a stable trajectory target: whitespace
+ * collapsed (so a heredoc or a line-continued command matches its single-line
+ * equivalent) and bounded in length.
+ */
+function normalizeCommandTarget(command: string): string {
+	const normalized = command.trim().replace(/\s+/g, ' ');
+	return normalized.length > MAX_COMMAND_TARGET_LENGTH
+		? `${normalized.slice(0, MAX_COMMAND_TARGET_LENGTH - 3)}...`
+		: normalized;
+}
+
+/**
  * Extracts the target from tool arguments.
  *
  * @param tool - Tool name
@@ -191,14 +212,24 @@ function extractTarget(tool: string, args?: Record<string, unknown>): string {
 		toolLower === 'execute' ||
 		toolLower === 'command'
 	) {
-		// Try to extract from command field
+		// Try to extract from command field.
+		//
+		// Issue #2134: this used to return the command's FIRST WORD ("git" from
+		// "git commit"). That collapsed every shell command sharing a driver onto
+		// one target, so `bun test src/a`, `bun run lint` and `bunx tsc --noEmit`
+		// were indistinguishable — and PRM's `repetition_loop` (default threshold
+		// 2, on the tuple `agent|action|target`) read a coder doing ordinary,
+		// entirely different work as the same action over and over. Measured on
+		// this repo: twelve distinct `bun …` commands drove the escalation ladder
+		// to a HARD STOP by the seventh call. On a Python project the same thing
+		// happens with `python` / `pytest` / `pip`, and with `git` anywhere.
+		//
+		// The whole normalized command is the correct target: an agent genuinely
+		// stuck re-running the SAME command still produces an identical target and
+		// is still detected, while distinct commands stay distinct.
 		const command = args.command;
-		if (typeof command === 'string' && command.length > 0) {
-			// Return first word of command as target (e.g., "git" from "git commit")
-			const firstWord = command.split(/\s+/)[0] || '';
-			if (firstWord.length > 0) {
-				return firstWord;
-			}
+		if (typeof command === 'string' && command.trim().length > 0) {
+			return normalizeCommandTarget(command);
 		}
 
 		// Try description field
@@ -210,13 +241,11 @@ function extractTarget(tool: string, args?: Record<string, unknown>): string {
 				: description;
 		}
 
-		// Try args field (generic fallback)
+		// Try args field (generic fallback). Same issue #2134 reasoning as the
+		// `command` field above — a first word collapses unrelated invocations.
 		const argsStr = args.args;
-		if (typeof argsStr === 'string' && argsStr.length > 0) {
-			const firstWord = argsStr.split(/\s+/)[0] || '';
-			if (firstWord.length > 0) {
-				return firstWord;
-			}
+		if (typeof argsStr === 'string' && argsStr.trim().length > 0) {
+			return normalizeCommandTarget(argsStr);
 		}
 	}
 
