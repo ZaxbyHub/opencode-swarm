@@ -12,6 +12,15 @@ This protocol is loaded on demand by the architect runtime. The architect prompt
 ### MODE: EXECUTE
 For each task (respecting dependencies):
 
+SCOPE SOURCE AND RECOVERY CONTRACT:
+- Resolve scope in this exact precedence: active `declare_scope` binding > plan task `files_touched` > complete one-path-per-line `FILE:` directives. Every present lower-precedence source must be a subset of the authoritative source; precedence never means silently ignoring disagreement.
+- Prefer the durable plan scope authored by `save_plan`. Before dispatch, copy that exact scope into both the delegation's `FILE:` lines and `declare_scope`; include generated outputs and lockfiles.
+- `SCOPE_CONFLICT`: read the diagnostic's named source sets, repair stale plan scope with `save_plan` and/or repair the `FILE:` lines, then call `declare_scope({ taskId, files: <reconciled exact list>, replace_existing: true, working_directory: <active lane root> })`. Do not widen scope just to make the sets agree.
+- `SCOPE_BINDING_EXPIRED` or `SCOPE_BINDING_AMBIGUOUS`: re-read the current task and call `declare_scope` with its intended exact files plus `replace_existing: true`, then retry the delegation once.
+- `SCOPE_WORKSPACE_MISMATCH`: use the diagnostic's active lane/worktree root as `working_directory`; all scope entries and `FILE:` lines remain project-relative to that root. Never reuse a parent/root-worktree binding in a child lane.
+- `SCOPE_ROOT_ESCAPE`: retry the intended operation relative to the active root only if the diagnostic identifies a safe relative path. Never add the outside absolute path to scope. If no safe relative path is supplied, stop and correct the command or lane root.
+- `SCOPE_NOT_DECLARED`: call `declare_scope` with `replace_existing: true` before retrying. A verifier-config or effective-authority denial is not repaired by redeclaration; change the task/role or request the appropriate reviewer-owned operation.
+
 RETRY PROTOCOL — when returning to coder after any gate failure:
 1. Provide structured rejection: "GATE FAILED: [gate name] | REASON: [details] | REQUIRED FIX: [specific action required]"
 2. Re-enter at step 5b (the active swarm's coder agent) with full failure context
@@ -32,7 +41,7 @@ WRONG responses to gate failure:
 
 RIGHT response to gate failure:
 ✓ Print "GATE FAILED: [gate name] | REASON: [details]"
-✓ BEFORE the retry delegation: call `declare_scope` with the file list the retry will touch. Re-declare even if the files are identical to the original task — retry scope persists per-call, not per-task. See Rule 1a.
+✓ BEFORE the retry delegation: call `declare_scope` with the file list the retry will touch and `replace_existing: true`. Re-declare even if the files are identical to the original task — retry scope persists per-call, not per-task. See Rule 1a.
 ✓ Delegate to the active swarm's coder agent with:
 TASK: Fix [gate name] failure
 FILE: [affected file(s)]
@@ -51,7 +60,7 @@ All other gates: failure → return to coder. No self-fixes. No workarounds.
 
 5a-bis. **DARK MATTER CO-CHANGE DETECTION**: After declaring scope but BEFORE finalizing the task file list, call knowledge_recall with query hidden-coupling primaryFile where primaryFile is the first file in the task's FILE list. Extract primaryFile from the task's FILE list (first file = primary). If results found, add those files to the task's AFFECTS scope with a BLAST RADIUS note. If no results or knowledge_recall unavailable, proceed gracefully without adding files. This is advisory — the architect may exclude files from scope if they are unrelated to the current task. Delegate to the active swarm's coder agent only after scope is declared.
 
-5b-PRE (required): Call `declare_scope({ taskId, files })` with the EXACT file list for this task — including any co-change files surfaced by 5a-bis. Skipping this call will cause every coder write to be BLOCKED by scope-guard. No `declare_scope` → no 5b delegation. See Rule 1a.
+5b-PRE (required): Call `declare_scope({ taskId, files, replace_existing: true })` with the EXACT file list for this task — including any co-change files surfaced by 5a-bis. Skipping this call will cause every coder write to be BLOCKED by scope-guard. No `declare_scope` → no 5b delegation. See Rule 1a.
     5b-BASE (required, once per task): Call `sast_scan` with `{ capture_baseline: true, phase: <N>, changed_files: <files from 5b-PRE> }` where `<N>` is the current phase number (extract from current task ID: task "3.2" → phase 3, task "1.5" → phase 1). The tool maintains `.swarm/evidence/{phase}/sast-baseline.json` as a phase-scoped, incrementally merged baseline of pre-existing SAST findings. Calling twice for the same files is safe (idempotent merge). Do NOT re-capture mid-task.
     → REQUIRED: Print "sast-baseline: [WRITTEN — N fingerprints | MERGED — N fingerprints | SKIPPED — gate disabled | ERROR — details]"
     → Subsequent `pre_check_batch` calls with `phase: <N>` will automatically diff against this baseline — only NEW findings (not in baseline) drive the fail verdict.

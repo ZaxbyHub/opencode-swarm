@@ -15,11 +15,22 @@ import * as path from 'node:path';
 import picomatch from 'picomatch';
 import QuickLRU from 'quick-lru';
 
+import type { AgentName } from '../../config/agent-names';
 import {
 	type AuthorityConfig,
 	stripKnownSwarmPrefix,
 } from '../../config/schema';
 import { classifyFile, type FileZone } from '../../context/zone-classifier';
+import {
+	getPathFlavor,
+	isOnDifferentPathRoot,
+	isPathIdentityWithin,
+	isPathWithinDeclaredScope,
+	type PathFlavor,
+	pathIdentitiesEqual,
+	sanitizeDiagnosticText,
+	unsafePathTextReason,
+} from '../../scope/path-identity';
 import { log, warn } from '../../utils';
 import {
 	boundedBunHash,
@@ -270,6 +281,54 @@ export type AgentRule = {
 	allowedCaseSensitiveGlobs?: string[];
 };
 
+export type AuthorityRoleCapability =
+	| 'native'
+	| 'direct-write'
+	| 'read-only'
+	| 'dedicated-tool-only';
+
+/**
+ * Exhaustive classification for every swarm role. Dedicated-tool roles may
+ * mutate state only through their purpose-built tools, never raw file writes.
+ */
+export const AUTHORITY_ROLE_CAPABILITIES = {
+	architect: 'direct-write',
+	coder: 'direct-write',
+	reviewer: 'direct-write',
+	critic: 'direct-write',
+	critic_oversight: 'dedicated-tool-only',
+	critic_finding_validator: 'dedicated-tool-only',
+	explorer: 'read-only',
+	sme: 'read-only',
+	researcher: 'read-only',
+	test_engineer: 'direct-write',
+	docs: 'direct-write',
+	docs_design: 'direct-write',
+	designer: 'direct-write',
+	critic_sounding_board: 'read-only',
+	critic_drift_verifier: 'read-only',
+	critic_hallucination_verifier: 'read-only',
+	critic_architecture_supervisor: 'read-only',
+	curator_init: 'dedicated-tool-only',
+	curator_phase: 'dedicated-tool-only',
+	curator_postmortem: 'dedicated-tool-only',
+	curator_consolidation: 'dedicated-tool-only',
+	council_generalist: 'read-only',
+	council_skeptic: 'read-only',
+	council_domain_expert: 'read-only',
+	skill_improver: 'dedicated-tool-only',
+	spec_writer: 'dedicated-tool-only',
+} as const satisfies Record<AgentName, AuthorityRoleCapability>;
+
+const NON_WRITING_SWARM_RULES = Object.fromEntries(
+	Object.entries(AUTHORITY_ROLE_CAPABILITIES)
+		.filter(
+			([, capability]) =>
+				capability === 'read-only' || capability === 'dedicated-tool-only',
+		)
+		.map(([agent]) => [agent, { readOnly: true } satisfies AgentRule]),
+) as Record<string, AgentRule>;
+
 export const DEFAULT_AGENT_AUTHORITY_RULES: Record<string, AgentRule> = {
 	// Opencode native built-in agents — pass through with no swarm write restrictions.
 	// Opencode's own permission system governs what these agents may write; the swarm
@@ -278,6 +337,7 @@ export const DEFAULT_AGENT_AUTHORITY_RULES: Record<string, AgentRule> = {
 	plan: {},
 	general: {},
 	explore: {},
+	...NON_WRITING_SWARM_RULES,
 
 	architect: {
 		blockedExact: ['.swarm/plan.md', '.swarm/plan.json'],
@@ -431,7 +491,13 @@ export function checkWriteTargetForSymlink(
 		const rel = path.relative(normalizedCwd, current);
 		// Stop at cwd (rel === '') or as soon as we leave cwd (starts with '..').
 		// Do NOT push cwd itself onto the ancestor list — see function docstring.
-		if (rel === '' || rel.startsWith('..')) break;
+		if (
+			rel === '' ||
+			rel === '..' ||
+			rel.startsWith(`..${path.sep}`) ||
+			path.isAbsolute(rel)
+		)
+			break;
 		ancestors.push(current);
 		const parent = path.dirname(current);
 		if (parent === current) break; // filesystem root
@@ -449,11 +515,53 @@ export function checkWriteTargetForSymlink(
 			return `WRITE BLOCKED: lstat failed on "${ancestor}": ${String(err)} — refusing write on unverifiable path`;
 		}
 		if (stat.isSymbolicLink()) {
-			return `WRITE BLOCKED: "${ancestor}" is a symlink — writing through a symlink could redirect the write outside the working directory`;
+			return `WRITE BLOCKED: "${ancestor}" is a symlink/junction — writing through a symlink or junction could redirect the write outside the working directory`;
 		}
 	}
 
 	return null; // all clear
+}
+
+/**
+ * Match configured authority prefixes using normalized lexical-prefix
+ * semantics. Thus `.env` covers `.env.local`; resolving both operands against
+ * one workspace root prevents sibling-workspace string collisions. Windows
+ * comparisons case-fold while POSIX comparisons remain case-sensitive.
+ */
+export function matchesAuthorityDenyPrefix(
+	candidate: string,
+	prefix: string,
+	cwd: string,
+	flavor: PathFlavor = getPathFlavor(),
+): boolean {
+	const pathImpl = flavor === 'win32' ? path.win32 : path.posix;
+	const normalizeInput = (value: string): string =>
+		flavor === 'win32' ? value.replace(/\//g, '\\') : value;
+	const normalizedPrefixInput = normalizeInput(prefix);
+	const requiresComponentBoundary = normalizedPrefixInput.endsWith(
+		pathImpl.sep,
+	);
+	const root = pathImpl.resolve(normalizeInput(cwd));
+	const target = pathImpl.resolve(root, normalizeInput(candidate));
+	const denied = pathImpl.resolve(root, normalizedPrefixInput);
+
+	// Universal prefixes are workspace-relative policy. Do not let a configured
+	// parent/sibling path collide with a target that merely shares its raw text.
+	if (
+		!isPathIdentityWithin(target, root, flavor) ||
+		!isPathIdentityWithin(denied, root, flavor)
+	) {
+		return false;
+	}
+
+	const identity = (value: string): string =>
+		flavor === 'win32' ? value.toLowerCase() : value;
+	const targetIdentity = identity(target);
+	const deniedIdentity = identity(denied);
+	return requiresComponentBoundary
+		? targetIdentity === deniedIdentity ||
+				targetIdentity.startsWith(`${deniedIdentity}${pathImpl.sep}`)
+		: targetIdentity.startsWith(deniedIdentity);
 }
 
 /**
@@ -512,39 +620,101 @@ export function isOnDifferentFilesystemRoot(
 	cwdAbsolute: string,
 	pathLib: Pick<typeof path, 'parse'> = path,
 ): boolean {
-	return pathLib.parse(targetAbsolute).root !== pathLib.parse(cwdAbsolute).root;
+	const flavor: PathFlavor =
+		pathLib === path.win32 || pathLib.parse('C:\\probe').root !== ''
+			? 'win32'
+			: 'posix';
+	return isOnDifferentPathRoot(targetAbsolute, cwdAbsolute, flavor);
 }
 
-/**
- * Checks whether the given filePath is within declared scope entries.
- * Handles both exact matches and directory containment.
- *
- * v6.70.0 gap-closure: on Windows (case-insensitive FS), compare lowercased
- * variants so scope `config/` correctly matches a write to `Config/foo.rb`.
- * POSIX filesystems stay case-sensitive.
- */
-function isInDeclaredScope(
-	filePath: string,
-	scopeEntries: string[],
-	cwd?: string,
-): boolean {
-	const dir = cwd ?? process.cwd();
-	const caseInsensitive = process.platform === 'win32';
-	const resolvedFileRaw = path.resolve(dir, filePath);
-	const resolvedFile = caseInsensitive
-		? resolvedFileRaw.toLowerCase()
-		: resolvedFileRaw;
-	return scopeEntries.some((scope) => {
-		const resolvedScopeRaw = path.resolve(dir, scope);
-		const resolvedScope = caseInsensitive
-			? resolvedScopeRaw.toLowerCase()
-			: resolvedScopeRaw;
-		// Exact match: file IS the scope entry
-		if (resolvedFile === resolvedScope) return true;
-		// Directory containment: file is inside a scope directory
-		const rel = path.relative(resolvedScope, resolvedFile);
-		return rel.length > 0 && !rel.startsWith('..') && !path.isAbsolute(rel);
-	});
+export const BUILT_IN_VERIFIER_CONFIG_GLOBS = [
+	'**/oxlintrc*',
+	'**/.oxlintrc*',
+	'**/.eslintrc*',
+	'**/eslint.config.*',
+	'**/.prettierrc*',
+	'**/prettier.config.*',
+	'**/biome.json',
+	'**/biome.jsonc',
+	'**/tsconfig*.json',
+	'**/.secretscanignore',
+	'**/.golangci*',
+] as const;
+
+export type AuthorityDecisionCode =
+	| 'AUTHORITY_INVALID_PATH'
+	| 'AUTHORITY_ROOT_ESCAPE'
+	| 'AUTHORITY_UNIVERSAL_DENY'
+	| 'AUTHORITY_PROTECTED_PATH'
+	| 'AUTHORITY_VERIFIER_CONFIG'
+	| 'AUTHORITY_ROLE_READ_ONLY'
+	| 'AUTHORITY_UNKNOWN_AGENT'
+	| 'AUTHORITY_POLICY_DENY';
+
+export type AuthorityDecisionLayer =
+	| 'path-validation'
+	| 'containment'
+	| 'universal-deny'
+	| 'protected-path'
+	| 'role-capability'
+	| 'declared-scope'
+	| 'role-policy';
+
+export type AuthorityRecoveryAction = 'declare_scope' | 'save_plan';
+
+export type AuthorityDecision =
+	| {
+			allowed: true;
+			layer: AuthorityDecisionLayer;
+			path: string;
+			agent: string;
+	  }
+	| {
+			allowed: false;
+			code: AuthorityDecisionCode;
+			layer: AuthorityDecisionLayer;
+			rule: string;
+			path: string;
+			agent: string;
+			reason: string;
+			recovery?: AuthorityRecoveryAction;
+			zone?: FileZone;
+	  };
+
+export interface AuthorityEvaluationOptions {
+	declaredScope?: string[] | null;
+	authorityEnabled?: boolean;
+	universalDenyPrefixes?: readonly string[];
+	verifierConfigPaths?: readonly string[];
+}
+
+type DenyDecisionInput = Omit<
+	Extract<AuthorityDecision, { allowed: false }>,
+	'allowed' | 'reason' | 'path' | 'agent'
+> & { detail: string };
+
+function denyAuthority(
+	agent: string,
+	normalizedPath: string,
+	input: DenyDecisionInput,
+): Extract<AuthorityDecision, { allowed: false }> {
+	const safeAgent = sanitizeDiagnosticText(agent, 96);
+	const safePath = sanitizeDiagnosticText(normalizedPath, 320);
+	const safeDetail = sanitizeDiagnosticText(input.detail, 640);
+	return {
+		allowed: false,
+		code: input.code,
+		layer: input.layer,
+		rule: sanitizeDiagnosticText(input.rule, 128),
+		path: safePath,
+		agent: safeAgent,
+		reason: sanitizeDiagnosticText(
+			`${input.code}: Path blocked: ${safeDetail} [agent=${safeAgent}; path=${safePath}]`,
+			1024,
+		),
+		recovery: input.recovery,
+		zone: input.zone,
+	};
 }
 
 /**
@@ -602,26 +772,20 @@ function formatAllowedHints(rules: AgentRule): string {
 }
 
 /**
- * Checks file path authority against a pre-computed rules map.
- * Implements DENY-first evaluation order:
- * 1. readOnly - blocks all writes
- * 2. blockedExact - exact path matches (fast path)
- * 3. blockedGlobs - glob pattern matches
- * 4. allowedExact - explicit allow for exact paths
- * 5. blockedZones - zone-based blocking (runs before allowedGlobs so that generated
- *    output dirs like dist/ and build/ cannot be bypassed by a glob pattern match)
- * 6. allowedGlobs - explicit allow for glob patterns (overrides blockedPrefix/allowedPrefix
- *    but NOT blockedZones, which is already decided in Step 5)
- * 7. blockedPrefix - prefix-based blocking (takes priority over allowedPrefix)
- * 8. allowedPrefix - prefix-based allow (whitelist)
+ * Checks file path authority against a pre-computed rules map. Evaluation is
+ * staged: safe path + workspace containment; universal and protected denies;
+ * immutable role capability; exact declared coder scope; then configurable
+ * role policy. Scope can therefore authorize config/generated deliverables but
+ * can never authorize `.swarm`, verifier config, universal denies, root escape,
+ * or raw writes from read-only/dedicated-tool roles.
  */
 export function checkFileAuthorityWithRules(
 	agentName: string,
 	filePath: string,
 	cwd: string,
 	effectiveRules: Record<string, AgentRule>,
-	options?: { declaredScope?: string[] | null },
-): { allowed: true } | { allowed: false; reason: string; zone?: FileZone } {
+	options: AuthorityEvaluationOptions = {},
+): AuthorityDecision {
 	const normalizedAgent = agentName.toLowerCase();
 	const strippedAgent = stripKnownSwarmPrefix(agentName).toLowerCase();
 
@@ -630,6 +794,15 @@ export function checkFileAuthorityWithRules(
 	// are correctly matched against relative prefixes like "src/". (Fix for #259)
 	// Also normalize using realpath for symlink resolution for ALL path checks
 	const dir = cwd || process.cwd();
+	const unsafePathReason = unsafePathTextReason(filePath);
+	if (unsafePathReason) {
+		return denyAuthority(agentName, filePath, {
+			code: 'AUTHORITY_INVALID_PATH',
+			layer: 'path-validation',
+			rule: 'safe-path-text',
+			detail: unsafePathReason,
+		});
+	}
 
 	// Single normalization call using normalizePathWithCache for consistent security
 	// This resolves symlinks and normalizes paths the same way for ALL checks
@@ -661,40 +834,141 @@ export function checkFileAuthorityWithRules(
 	// systems only have root `/`, so roots only differ when the target is
 	// on a different Windows drive.
 	if (isOnDifferentFilesystemRoot(resolvedTarget, dir)) {
-		return {
-			allowed: false,
-			reason: `Path blocked: ${filePath} is on a different drive/root than the working directory`,
-		};
+		return denyAuthority(agentName, normalizedPath, {
+			code: 'AUTHORITY_ROOT_ESCAPE',
+			layer: 'containment',
+			rule: 'same-filesystem-root',
+			detail: 'target is on a different drive or filesystem root',
+		});
 	}
 	if (normalizedPath === '..' || normalizedPath.startsWith('../')) {
-		return {
-			allowed: false,
-			reason: `Path blocked: ${normalizedPath} resolves outside the working directory`,
-		};
+		return denyAuthority(agentName, normalizedPath, {
+			code: 'AUTHORITY_ROOT_ESCAPE',
+			layer: 'containment',
+			rule: 'workspace-containment',
+			detail: 'target resolves outside the working directory',
+		});
 	}
 
 	const rules =
 		effectiveRules[normalizedAgent] ?? effectiveRules[strippedAgent];
 	if (!rules) {
-		return { allowed: false, reason: `Unknown agent: ${agentName}` };
+		return denyAuthority(agentName, normalizedPath, {
+			code: 'AUTHORITY_UNKNOWN_AGENT',
+			layer: 'role-capability',
+			rule: 'known-agent-role',
+			detail: 'Unknown agent: no authority classification exists',
+		});
+	}
+	const flavor = getPathFlavor();
+	const matchesPathPrefix = (candidate: string, prefix: string): boolean =>
+		isPathIdentityWithin(
+			path.resolve(dir, candidate),
+			path.resolve(dir, prefix),
+			flavor,
+		);
+	const matchesGlob = (glob: string): boolean =>
+		getGlobMatcher(glob)(normalizedPath);
+
+	for (const prefix of options.universalDenyPrefixes ?? []) {
+		if (matchesAuthorityDenyPrefix(normalizedPath, prefix, dir, flavor)) {
+			return denyAuthority(agentName, normalizedPath, {
+				code: 'AUTHORITY_UNIVERSAL_DENY',
+				layer: 'universal-deny',
+				rule: `universal:${prefix}`,
+				detail: `target is under universal deny prefix ${prefix}`,
+			});
+		}
 	}
 
-	// Step 1: readOnly - blocks all writes
+	const isCoderAgent = normalizedAgent === 'coder' || strippedAgent === 'coder';
+	if (isCoderAgent && matchesPathPrefix(normalizedPath, '.swarm')) {
+		return denyAuthority(agentName, normalizedPath, {
+			code: 'AUTHORITY_PROTECTED_PATH',
+			layer: 'protected-path',
+			rule: 'coder-swarm-state-protection',
+			detail: 'coder writes to .swarm are always protected',
+		});
+	}
+	const isSwarmRole = Object.hasOwn(AUTHORITY_ROLE_CAPABILITIES, strippedAgent);
+	if (isSwarmRole) {
+		const matchedVerifier = [
+			...BUILT_IN_VERIFIER_CONFIG_GLOBS,
+			...(options.verifierConfigPaths ?? []),
+		].find(matchesGlob);
+		if (matchedVerifier) {
+			return denyAuthority(agentName, normalizedPath, {
+				code: 'AUTHORITY_VERIFIER_CONFIG',
+				layer: 'protected-path',
+				rule: `verifier-config:${matchedVerifier}`,
+				detail: `Path blocked (glob ${matchedVerifier}): swarm roles cannot write verifier-owned configuration in the config zone`,
+			});
+		}
+	}
+
+	// Canonical non-writing capabilities are immutable hard policy. User config
+	// may further restrict direct-write roles, but cannot turn a read-only or
+	// dedicated-tool-only role into a raw writer (including prefixed roles).
+	const canonicalCapability =
+		AUTHORITY_ROLE_CAPABILITIES[strippedAgent as AgentName];
+	if (
+		canonicalCapability === 'read-only' ||
+		canonicalCapability === 'dedicated-tool-only'
+	) {
+		return denyAuthority(agentName, normalizedPath, {
+			code: 'AUTHORITY_ROLE_READ_ONLY',
+			layer: 'role-capability',
+			rule: `role-capability:${canonicalCapability}`,
+			detail:
+				canonicalCapability === 'dedicated-tool-only'
+					? 'role may mutate state only through dedicated tools'
+					: 'agent role is read-only',
+		});
+	}
+
+	// Configurable readOnly only narrows roles that otherwise have write ability.
 	if (rules.readOnly) {
+		return denyAuthority(agentName, normalizedPath, {
+			code: 'AUTHORITY_ROLE_READ_ONLY',
+			layer: 'role-capability',
+			rule: 'role-policy:read-only',
+			detail: 'agent role is read-only',
+		});
+	}
+
+	const pathIsInDeclaredScope =
+		isCoderAgent &&
+		options.declaredScope != null &&
+		options.declaredScope.length > 0 &&
+		isPathWithinDeclaredScope(normalizedPath, options.declaredScope, dir);
+	if (pathIsInDeclaredScope) {
 		return {
-			allowed: false,
-			reason: `Path blocked: ${normalizedPath} (agent ${normalizedAgent} is read-only)`,
+			allowed: true,
+			layer: 'declared-scope',
+			path: sanitizeDiagnosticText(normalizedPath, 320),
+			agent: sanitizeDiagnosticText(agentName, 96),
+		};
+	}
+	if (options.authorityEnabled === false) {
+		return {
+			allowed: true,
+			layer: 'role-policy',
+			path: sanitizeDiagnosticText(normalizedPath, 320),
+			agent: sanitizeDiagnosticText(agentName, 96),
 		};
 	}
 
 	// Step 2: blockedExact - exact path matches (fast path)
 	if (rules.blockedExact) {
 		for (const blocked of rules.blockedExact) {
-			if (normalizedPath === blocked) {
-				return {
-					allowed: false,
-					reason: `Path blocked (exact): ${normalizedPath}`,
-				};
+			if (pathIdentitiesEqual(normalizedPath, blocked, flavor)) {
+				return denyAuthority(agentName, normalizedPath, {
+					code: 'AUTHORITY_POLICY_DENY',
+					layer: 'role-policy',
+					rule: `blockedExact:${blocked}`,
+					detail: `path is blocked by exact role policy ${blocked}`,
+					recovery: isCoderAgent ? 'declare_scope' : undefined,
+				});
 			}
 		}
 	}
@@ -702,23 +976,30 @@ export function checkFileAuthorityWithRules(
 	// Step 3: blockedGlobs - glob pattern matches
 	if (rules.blockedGlobs && rules.blockedGlobs.length > 0) {
 		for (const glob of rules.blockedGlobs) {
-			const matcher = getGlobMatcher(glob);
-			if (matcher(normalizedPath)) {
-				return {
-					allowed: false,
-					reason: `Path blocked (glob ${glob}): ${normalizedPath}`,
-				};
+			if (matchesGlob(glob)) {
+				return denyAuthority(agentName, normalizedPath, {
+					code: 'AUTHORITY_POLICY_DENY',
+					layer: 'role-policy',
+					rule: `blockedGlob:${glob}`,
+					detail: `Path blocked (glob ${glob}) by role policy`,
+					recovery: isCoderAgent ? 'declare_scope' : undefined,
+				});
 			}
 		}
 	}
 
 	// Step 4: allowedExact - explicit allow for exact paths (overrides blocked rules)
 	if (rules.allowedExact && rules.allowedExact.length > 0) {
-		const isExplicitlyAllowed = rules.allowedExact.some(
-			(allowed) => normalizedPath === allowed,
+		const isExplicitlyAllowed = rules.allowedExact.some((allowed) =>
+			pathIdentitiesEqual(normalizedPath, allowed, flavor),
 		);
 		if (isExplicitlyAllowed) {
-			return { allowed: true };
+			return {
+				allowed: true,
+				layer: 'role-policy',
+				path: normalizedPath,
+				agent: agentName,
+			};
 		}
 	}
 
@@ -728,11 +1009,14 @@ export function checkFileAuthorityWithRules(
 	if (rules.blockedZones && rules.blockedZones.length > 0) {
 		const { zone } = classifyFile(normalizedPath);
 		if (rules.blockedZones.includes(zone)) {
-			return {
-				allowed: false,
-				reason: `Path blocked: ${normalizedPath} is in ${zone} zone`,
+			return denyAuthority(agentName, normalizedPath, {
+				code: 'AUTHORITY_POLICY_DENY',
+				layer: 'role-policy',
+				rule: `blockedZone:${zone}`,
+				detail: `path is in ${zone} zone`,
+				recovery: isCoderAgent ? 'declare_scope' : undefined,
 				zone,
-			};
+			});
 		}
 	}
 
@@ -744,12 +1028,14 @@ export function checkFileAuthorityWithRules(
 	// blocked directory like src/ (e.g. src/__tests__/, src/auth/login.test.ts)
 	// are explicitly re-allowed by the glob before blockedPrefix can deny them.
 	if (rules.allowedGlobs && rules.allowedGlobs.length > 0) {
-		const isGlobAllowed = rules.allowedGlobs.some((glob) => {
-			const matcher = getGlobMatcher(glob);
-			return matcher(normalizedPath);
-		});
+		const isGlobAllowed = rules.allowedGlobs.some(matchesGlob);
 		if (isGlobAllowed) {
-			return { allowed: true };
+			return {
+				allowed: true,
+				layer: 'role-policy',
+				path: normalizedPath,
+				agent: agentName,
+			};
 		}
 	}
 
@@ -766,7 +1052,12 @@ export function checkFileAuthorityWithRules(
 			},
 		);
 		if (isCaseSensitiveGlobAllowed) {
-			return { allowed: true };
+			return {
+				allowed: true,
+				layer: 'role-policy',
+				path: normalizedPath,
+				agent: agentName,
+			};
 		}
 	}
 
@@ -774,67 +1065,50 @@ export function checkFileAuthorityWithRules(
 	// explicit block rules take priority over allowlist rules)
 	if (rules.blockedPrefix && rules.blockedPrefix.length > 0) {
 		for (const prefix of rules.blockedPrefix) {
-			if (normalizedPath.startsWith(prefix)) {
-				return {
-					allowed: false,
-					reason: `Path blocked: ${normalizedPath} is under ${prefix}`,
-				};
+			if (matchesPathPrefix(normalizedPath, prefix)) {
+				return denyAuthority(agentName, normalizedPath, {
+					code: 'AUTHORITY_POLICY_DENY',
+					layer: 'role-policy',
+					rule: `blockedPrefix:${prefix}`,
+					detail: `path is under blocked role prefix ${prefix}`,
+					recovery: isCoderAgent ? 'declare_scope' : undefined,
+				});
 			}
 		}
 	}
 
-	// Step 8: allowedPrefix - prefix-based allow (whitelist model)
-	// If configured, only paths starting with these prefixes are allowed.
-	//
-	// v6.70.0 (#496): If the architect has declared an explicit scope via the
-	// `declare_scope` tool, paths inside that scope bypass the hardcoded
-	// allowedPrefix whitelist. This lets the architect authorise framework-agnostic
-	// paths (Rails `config/`, `app/`, `db/`; Python `module/`, `pyproject.toml`; etc.)
-	// without editing the default rule set.
-	//
-	// SECURITY: declaredScope ONLY relaxes allowedPrefix (Step 8). All DENY rules
-	// (readOnly, blockedExact, blockedGlobs, blockedPrefix, blockedZones) and
-	// universal_deny_prefixes (checked upstream in toolBefore) remain fully
-	// enforced. A declared scope cannot grant writes into .env, .git/, secrets/,
-	// or any blocked path.
-	//
-	// v6.70.0 post-Codex-review: declaredScope is the architect→coder hand-off
-	// channel ONLY. Honouring it for other roles (docs, designer, reviewer,
-	// test_engineer, critic) would let an architect's coder authorisation leak
-	// into other agents' write capabilities — e.g., declaring `src/foo.ts` for
-	// the coder would also let `docs` write into `src/`, breaking per-agent
-	// isolation. Restrict the bypass to coder agents (canonical or prefixed
-	// like `local_coder` / `paid_coder`).
-	const isCoderAgent = normalizedAgent === 'coder' || strippedAgent === 'coder';
-	const pathIsInDeclaredScope =
-		isCoderAgent &&
-		options?.declaredScope != null &&
-		options.declaredScope.length > 0 &&
-		isInDeclaredScope(normalizedPath, options.declaredScope, dir);
-	if (!pathIsInDeclaredScope) {
-		if (rules.allowedPrefix != null && rules.allowedPrefix.length > 0) {
-			const isAllowed = rules.allowedPrefix.some((prefix) =>
-				normalizedPath.startsWith(prefix),
-			);
-			if (!isAllowed) {
-				return {
-					allowed: false,
-					reason: `Path ${normalizedPath} not in allowed list for ${normalizedAgent}. ${formatAllowedHints(rules)}`,
-				};
-			}
-		} else if (
-			rules.allowedPrefix != null &&
-			rules.allowedPrefix.length === 0
-		) {
-			// Empty allowedPrefix means nothing is allowed by prefix
-			return {
-				allowed: false,
-				reason: `Path ${normalizedPath} not in allowed list for ${normalizedAgent}. ${formatAllowedHints(rules)}`,
-			};
+	// Ordinary allowedPrefix whitelist. The exact coder-scope grant was already
+	// evaluated before this configurable policy stage and never applies to other
+	// roles, so architect authorization cannot leak into docs/reviewer/etc.
+	if (rules.allowedPrefix != null && rules.allowedPrefix.length > 0) {
+		const isAllowed = rules.allowedPrefix.some((prefix) =>
+			matchesPathPrefix(normalizedPath, prefix),
+		);
+		if (!isAllowed) {
+			return denyAuthority(agentName, normalizedPath, {
+				code: 'AUTHORITY_POLICY_DENY',
+				layer: 'role-policy',
+				rule: 'allowedPrefix',
+				detail: `path is not in allowed list for this role. ${formatAllowedHints(rules)}`,
+				recovery: isCoderAgent ? 'declare_scope' : undefined,
+			});
 		}
+	} else if (rules.allowedPrefix != null && rules.allowedPrefix.length === 0) {
+		return denyAuthority(agentName, normalizedPath, {
+			code: 'AUTHORITY_POLICY_DENY',
+			layer: 'role-policy',
+			rule: 'allowedPrefix:empty',
+			detail: `path is not in allowed list because the role allowlist is empty. ${formatAllowedHints(rules)}`,
+			recovery: isCoderAgent ? 'declare_scope' : undefined,
+		});
 	}
 
-	return { allowed: true };
+	return {
+		allowed: true,
+		layer: 'role-policy',
+		path: normalizedPath,
+		agent: agentName,
+	};
 }
 
 /**
@@ -845,13 +1119,21 @@ export function checkFileAuthority(
 	filePath: string,
 	cwd: string,
 	authorityConfig?: AuthorityConfig,
-	options?: { declaredScope?: string[] | null },
-): { allowed: true } | { allowed: false; reason: string; zone?: FileZone } {
+	options: AuthorityEvaluationOptions = {},
+): AuthorityDecision {
 	return checkFileAuthorityWithRules(
 		agentName,
 		filePath,
 		cwd,
 		buildEffectiveRules(authorityConfig),
-		options,
+		{
+			...options,
+			authorityEnabled: authorityConfig?.enabled ?? options.authorityEnabled,
+			universalDenyPrefixes:
+				authorityConfig?.universal_deny_prefixes ??
+				options.universalDenyPrefixes,
+			verifierConfigPaths:
+				authorityConfig?.verifier_config_paths ?? options.verifierConfigPaths,
+		},
 	);
 }

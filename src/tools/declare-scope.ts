@@ -8,13 +8,20 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { ToolDefinition } from '@opencode-ai/plugin/tool';
 import { z } from 'zod';
+import { loadPluginConfigWithMeta } from '../config';
 import { PlanSchema } from '../config/plan-schema';
-import { checkWriteTargetForSymlink } from '../hooks/guardrails';
+import type { AuthorityConfig } from '../config/schema';
+import {
+	checkFileAuthority,
+	checkWriteTargetForSymlink,
+} from '../hooks/guardrails/file-authority';
+import { unsafePathTextReason } from '../scope/path-identity';
 import {
 	createScopeBinding,
-	registerScopeBinding,
+	MAX_SCOPE_FILES_BYTES,
+	MAX_SCOPE_PATH_BYTES,
 } from '../scope/scope-binding';
-import { writeScopeBindingToDisk } from '../scope/scope-persistence';
+import { replaceExistingScopeDeclaration } from '../scope/scope-persistence';
 import { ensureAgentSession } from '../state';
 import { validateTaskIdFormat as _validateTaskIdFormat } from '../validation/task-id';
 import { createSwarmTool } from './create-tool';
@@ -26,6 +33,7 @@ export interface DeclareScopeArgs {
 	taskId: string;
 	files: string[];
 	whitelist?: string[];
+	replace_existing?: boolean;
 	working_directory?: string;
 }
 
@@ -57,26 +65,41 @@ export function validateTaskIdFormat(taskId: string): string | undefined {
  */
 export function validateFiles(files: string[]): string[] {
 	const errors: string[] = [];
+	let totalBytes = 0;
 
 	for (const file of files) {
 		// Check for null bytes
 		if (file.includes('\0')) {
 			errors.push(`Invalid file "${file}": null bytes are not allowed`);
+			continue;
+		}
+
+		const unsafeReason = unsafePathTextReason(file);
+		if (unsafeReason) {
+			errors.push(`Invalid file path: ${unsafeReason}`);
+			continue;
 		}
 
 		// Check for path traversal
-		if (file.includes('..')) {
+		if (file.replace(/\\/g, '/').split('/').includes('..')) {
 			errors.push(
 				`Invalid file "${file}": path traversal sequences (..) are not allowed`,
 			);
 		}
 
 		// Check for length limit
-		if (file.length > 4096) {
+		const bytes = Buffer.byteLength(file, 'utf8');
+		totalBytes += bytes;
+		if (bytes > MAX_SCOPE_PATH_BYTES) {
 			errors.push(
-				`Invalid file "${file}": path exceeds maximum length of 4096 characters`,
+				`Invalid file "${file}": path exceeds maximum length of ${MAX_SCOPE_PATH_BYTES} UTF-8 bytes`,
 			);
 		}
+	}
+	if (totalBytes > MAX_SCOPE_FILES_BYTES) {
+		errors.push(
+			`Invalid scope: file paths exceed the aggregate limit of ${MAX_SCOPE_FILES_BYTES} UTF-8 bytes`,
+		);
 	}
 
 	return errors;
@@ -93,6 +116,7 @@ export async function executeDeclareScope(
 	args: DeclareScopeArgs,
 	fallbackDir?: string,
 	owner?: { sessionID: string; messageID: string; agentName?: string },
+	authorityConfig?: AuthorityConfig,
 ): Promise<DeclareScopeResult> {
 	// Step 1: Validate taskId format
 	const taskIdError = validateTaskIdFormat(args.taskId);
@@ -361,6 +385,26 @@ export async function executeDeclareScope(
 		};
 	}
 
+	// Step 7d: preflight every declaration through the same staged evaluator
+	// used by runtime writes. Supplying the candidate as declared scope models
+	// the authority it would actually grant without publishing any binding.
+	const authorityErrors: string[] = [];
+	for (const file of mergedFiles) {
+		const decision = checkFileAuthority('coder', file, dir, authorityConfig, {
+			declaredScope: [file],
+		});
+		if (!decision.allowed) {
+			authorityErrors.push(decision.reason);
+		}
+	}
+	if (authorityErrors.length > 0) {
+		return {
+			success: false,
+			message: 'Scope denied by effective coder authority',
+			errors: authorityErrors,
+		};
+	}
+
 	// Step 8: Bind authorization only to the authenticated caller. Direct
 	// test/CLI calls without ToolContext are validation-only and never persist.
 	if (owner?.sessionID && owner.messageID) {
@@ -380,7 +424,18 @@ export async function executeDeclareScope(
 				errors: ['Scope identity could not be validated'],
 			};
 		}
-		registerScopeBinding(binding);
+		const persistence = await replaceExistingScopeDeclaration({
+			directory: dir,
+			binding,
+			replaceExisting: args.replace_existing ?? false,
+		});
+		if (!persistence.ok) {
+			return {
+				success: false,
+				message: 'Failed to persist scope declaration',
+				errors: [`${persistence.code}: ${persistence.message}`],
+			};
+		}
 		const session = ensureAgentSession(
 			owner.sessionID,
 			owner.agentName ?? 'architect',
@@ -388,7 +443,6 @@ export async function executeDeclareScope(
 		);
 		session.declaredCoderScope = mergedFiles;
 		session.lastScopeViolation = null;
-		await writeScopeBindingToDisk(dir, binding);
 	}
 
 	// Ownerless calls intentionally do not persist authorization.
@@ -436,18 +490,30 @@ export const declare_scope: ToolDefinition = createSwarmTool({
 			.array(z.string().min(1).max(4096))
 			.optional()
 			.describe('Additional file paths to whitelist (merged with files)'),
+		replace_existing: z
+			.boolean()
+			.optional()
+			.describe(
+				"Set true to atomically revoke and replace this session's existing live declaration for the same task",
+			),
 		working_directory: z
 			.string()
 			.optional()
 			.describe('Working directory where the plan is located'),
 	},
 	execute: async (args: unknown, _directory: string, ctx) => {
+		const { config } = loadPluginConfigWithMeta(_directory);
 		return JSON.stringify(
-			await executeDeclareScope(args as DeclareScopeArgs, _directory, {
-				sessionID: ctx?.sessionID ?? '',
-				messageID: ctx?.messageID ?? '',
-				agentName: ctx?.agent,
-			}),
+			await executeDeclareScope(
+				args as DeclareScopeArgs,
+				_directory,
+				{
+					sessionID: ctx?.sessionID ?? '',
+					messageID: ctx?.messageID ?? '',
+					agentName: ctx?.agent,
+				},
+				config.authority,
+			),
 			null,
 			2,
 		);

@@ -3,14 +3,14 @@ import { HUMAN_ONLY_SWARM_COMMANDS } from '../commands/tool-policy.js';
 import { classifyFile, type FileZone } from '../context/zone-classifier.js';
 import { redactPath } from '../hooks/guardrails/audit-log.js';
 import {
-	DC_SAFE_TARGETS,
 	dcCheckJunctionCreation,
+	dcEvaluateRecursiveDeleteTargets,
 	dcExtractPowerShellTargets,
+	dcExtractRecursiveRmTargets,
 	dcExtractWindowsCmdTargets,
 	dcNormalizeCommand,
 	dcSplitSegments,
 	dcUnwrapWrappers,
-	dcValidateTargets,
 } from '../hooks/guardrails/destructive-command.js';
 import { checkFileAuthority } from '../hooks/guardrails/file-authority.js';
 import {
@@ -148,11 +148,9 @@ function resolveShellType(command: string): 'posix' | 'powershell' | 'cmd' {
 // Destructive-command dry-run (mirrors checkDestructiveCommand)
 // ---------------------------------------------------------------------------
 
-// TODO(#1274): checkDestructiveCommand is a nested closure in tool-before.ts:182
-// (captures cfg.block_destructive_commands, effectiveDirectory, resolveDeclaredScope) and
-// cannot be exported without refactoring the guardrail hot path. This block mirrors its
-// destructive-pattern detection; the heavy helpers (dc*, isInDeclaredScope, DC_SAFE_TARGETS)
-// are shared imports. Future refactor: extract a top-level evaluateDestructiveDecision().
+// Pattern extraction remains local, but every recursive target is decided by
+// the same shared evaluator as the live hook. CLI `--scope` is hypothetical and
+// never becomes verified active authority for a nested delete (#2096).
 
 /**
  * Evaluate the destructive-command decision for a shell command in dry-run mode.
@@ -201,44 +199,16 @@ function evaluateDestructiveDecision(
 			};
 		}
 
-		// POSIX rm — short flags (-rf, -fr, -r -f) and long flags
-		const rmShortMatch = seg.match(
-			/^rm\s+(-[rRfF]+(?:\s+-[rRfF]+)*|-r\s+-f|-f\s+-r)\s+(.+)$/,
-		);
-		const rmLongMatch = seg.match(
-			/^rm\s+(?:--(?:recursive|force)\s+){1,2}(.+)$/,
-		);
-		const rmAnyMatch = rmShortMatch ?? rmLongMatch;
-		if (rmAnyMatch) {
-			const targetPart = rmAnyMatch[rmShortMatch ? 2 : 1].trim();
-			const targets = targetPart.split(/\s+/);
-			const validateBlock = dcValidateTargets(targets, cwd);
-			if (validateBlock) {
+		// POSIX rm — use the exact live parser so explain cannot disagree with
+		// enforcement on stacked flags, long options, quoting, or multi-targets.
+		const targets = dcExtractRecursiveRmTargets(seg);
+		if (targets) {
+			const targetDecision = dcEvaluateRecursiveDeleteTargets({ targets, cwd });
+			if (!targetDecision.allowed) {
 				return {
 					decision: 'block',
-					firingRule: `destructive_block: rm with unsafe target: ${redactPath(targetPart)}`,
+					firingRule: `${targetDecision.code}: ${targetDecision.reason}`,
 				};
-			}
-			const allSafe = targets.every((t) =>
-				DC_SAFE_TARGETS.has(t.replace(/^["']|["']$/g, '').trim()),
-			);
-			if (!allSafe) {
-				const scopeExempt =
-					declaredScope != null &&
-					declaredScope.length > 0 &&
-					targets.every((t) =>
-						isInDeclaredScope(
-							t.replace(/^["']|["']$/g, '').trim(),
-							declaredScope,
-							cwd,
-						),
-					);
-				if (!scopeExempt) {
-					return {
-						decision: 'block',
-						firingRule: `destructive_block: rm recursive/force on unsafe path: ${redactPath(targetPart)}`,
-					};
-				}
 			}
 		}
 
@@ -252,25 +222,12 @@ function evaluateDestructiveDecision(
 						'destructive_block: Windows recursive directory delete (rmdir /s)',
 				};
 			}
-			const validateBlock = dcValidateTargets(targets, cwd);
-			if (validateBlock) {
+			const targetDecision = dcEvaluateRecursiveDeleteTargets({ targets, cwd });
+			if (!targetDecision.allowed) {
 				return {
 					decision: 'block',
-					firingRule: `destructive_block: rmdir /s unsafe: ${redactPath(targets.join(', '))}`,
+					firingRule: `${targetDecision.code}: ${targetDecision.reason}`,
 				};
-			}
-			const allSafe = targets.every((t) => DC_SAFE_TARGETS.has(t.trim()));
-			if (!allSafe) {
-				const scopeExempt =
-					declaredScope != null &&
-					declaredScope.length > 0 &&
-					targets.every((t) => isInDeclaredScope(t.trim(), declaredScope, cwd));
-				if (!scopeExempt) {
-					return {
-						decision: 'block',
-						firingRule: `destructive_block: rmdir /s on unsafe path: ${redactPath(targets.join(', '))}`,
-					};
-				}
 			}
 		}
 
@@ -278,27 +235,15 @@ function evaluateDestructiveDecision(
 		if (/^del(?:\.exe)?\s+.*\/[sS]/i.test(seg)) {
 			const targets = dcExtractWindowsCmdTargets(seg);
 			if (targets.length > 0) {
-				const validateBlock = dcValidateTargets(targets, cwd);
-				if (validateBlock) {
+				const targetDecision = dcEvaluateRecursiveDeleteTargets({
+					targets,
+					cwd,
+				});
+				if (!targetDecision.allowed) {
 					return {
 						decision: 'block',
-						firingRule: `destructive_block: del /s unsafe: ${redactPath(targets.join(', '))}`,
+						firingRule: `${targetDecision.code}: ${targetDecision.reason}`,
 					};
-				}
-				const allSafe = targets.every((t) => DC_SAFE_TARGETS.has(t.trim()));
-				if (!allSafe) {
-					const scopeExempt =
-						declaredScope != null &&
-						declaredScope.length > 0 &&
-						targets.every((t) =>
-							isInDeclaredScope(t.trim(), declaredScope, cwd),
-						);
-					if (!scopeExempt) {
-						return {
-							decision: 'block',
-							firingRule: `destructive_block: del /s on unsafe path: ${redactPath(targets.join(', '))}`,
-						};
-					}
 				}
 			}
 		}
@@ -310,27 +255,15 @@ function evaluateDestructiveDecision(
 		) {
 			const targets = dcExtractPowerShellTargets(seg);
 			if (targets.length > 0) {
-				const validateBlock = dcValidateTargets(targets, cwd);
-				if (validateBlock) {
+				const targetDecision = dcEvaluateRecursiveDeleteTargets({
+					targets,
+					cwd,
+				});
+				if (!targetDecision.allowed) {
 					return {
 						decision: 'block',
-						firingRule: `destructive_block: PowerShell recursive delete unsafe: ${redactPath(targets.join(', '))}`,
+						firingRule: `${targetDecision.code}: ${targetDecision.reason}`,
 					};
-				}
-				const allSafe = targets.every((t) => DC_SAFE_TARGETS.has(t.trim()));
-				if (!allSafe) {
-					const scopeExempt =
-						declaredScope != null &&
-						declaredScope.length > 0 &&
-						targets.every((t) =>
-							isInDeclaredScope(t.trim(), declaredScope, cwd),
-						);
-					if (!scopeExempt) {
-						return {
-							decision: 'block',
-							firingRule: `destructive_block: PowerShell recursive delete on unsafe path: ${redactPath(targets.join(', '))}`,
-						};
-					}
 				}
 			} else {
 				return {

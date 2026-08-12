@@ -1,9 +1,11 @@
-import { beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { rmSync } from 'node:fs';
 import type { GuardrailsConfig } from '../../../src/config/schema';
 import { createGuardrailsHooks } from '../../../src/hooks/guardrails';
 import { resetSwarmState, startAgentSession } from '../../../src/state';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
-const TEST_DIR = '/tmp';
+let TEST_DIR = '';
 
 function defaultConfig(
 	overrides?: Partial<GuardrailsConfig>,
@@ -32,13 +34,13 @@ function makeBashOutput(command: string) {
 
 describe('Windows cmd.exe destructive command guard (adversarial)', () => {
 	beforeEach(() => {
+		TEST_DIR = canonicalMkdtemp('destructive-windows-');
 		resetSwarmState();
 		startAgentSession('test-session', 'coder');
 	});
+	afterEach(() => rmSync(TEST_DIR, { recursive: true, force: true }));
 
-	// ----------------------------------------------------------------
 	// rmdir /s — canonical and adversarial variants
-	// ----------------------------------------------------------------
 	describe('rmdir /s /q — canonical and adversarial variants', () => {
 		test('rmdir /s /q C:\\target → BLOCKED', async () => {
 			const config = defaultConfig();
@@ -126,9 +128,7 @@ describe('Windows cmd.exe destructive command guard (adversarial)', () => {
 		});
 	});
 
-	// ----------------------------------------------------------------
 	// del /s /q /f — canonical and adversarial variants
-	// ----------------------------------------------------------------
 	describe('del /s /q /f — canonical and adversarial variants', () => {
 		test('del /s /q /f important_files → BLOCKED', async () => {
 			const config = defaultConfig();

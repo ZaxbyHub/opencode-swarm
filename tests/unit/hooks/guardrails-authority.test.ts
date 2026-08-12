@@ -1411,11 +1411,12 @@ describe('guardrails-authority - File Authority Enforcement', () => {
 					},
 				},
 			);
-			// With override, coder can now write to .swarm/
-			expect(result.allowed).toBe(true);
+			// Hard protection is not configurable.
+			expect(result.allowed).toBe(false);
+			if (!result.allowed) expect(result.code).toBe('AUTHORITY_PROTECTED_PATH');
 		});
 
-		it('user rules override readOnly for explorer', () => {
+		it('user rules cannot override canonical readOnly capability', () => {
 			const result = checkFileAuthority('explorer', 'notes.txt', tempDir, {
 				enabled: true,
 				rules: {
@@ -1425,8 +1426,8 @@ describe('guardrails-authority - File Authority Enforcement', () => {
 					},
 				},
 			});
-			// Explorer is no longer read-only with override
-			expect(result.allowed).toBe(true);
+			// Canonical capability is an immutable safety layer.
+			expect(result.allowed).toBe(false);
 		});
 
 		it('empty rules object preserves defaults', () => {
@@ -2709,7 +2710,7 @@ index 1234567..abcdefg 100644
 			).rejects.toThrow(/WRITE BLOCKED/i);
 		});
 
-		it('J2: Config sets blockedExact for coder → adjacent path is NOT blocked', async () => {
+		it('J2: Config cannot relax hard .swarm protection', async () => {
 			const sessionId = 'patch-j2-delegated';
 			ensureAgentSession(sessionId, 'coder');
 			swarmState.activeAgent.set(sessionId, 'coder');
@@ -2736,7 +2737,6 @@ index 1234567..abcdefg 100644
 				authorityConfig,
 			);
 
-			// Write to adjacent path (different filename) should NOT throw blockedExact
 			const patchContent =
 				frameNativePatch(`*** Update File: .swarm/context.md.bak
 --- a/.swarm/context.md.bak
@@ -2745,12 +2745,12 @@ index 1234567..abcdefg 100644
 -backup
 +updated`);
 
-			// Should NOT throw - .swarm/context.md.bak is NOT in blockedExact
-			// With blockedPrefix cleared and .swarm/ allowed, only blockedExact applies
-			await hooks.toolBefore(
-				{ tool: 'apply_patch', sessionID: sessionId, callID: 'call-j2' },
-				{ args: { input: patchContent } },
-			);
+			await expect(
+				hooks.toolBefore(
+					{ tool: 'apply_patch', sessionID: sessionId, callID: 'call-j2' },
+					{ args: { input: patchContent } },
+				),
+			).rejects.toThrow(/AUTHORITY_PROTECTED_PATH/);
 		});
 
 		it('J3: No blockedExact in config → path that would match is not blocked by blockedExact', async () => {

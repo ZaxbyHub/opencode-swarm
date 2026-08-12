@@ -1,11 +1,25 @@
+import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { Plan } from '../config/plan-schema';
 import { computePlanStructureHash } from '../plan/ledger';
 import { derivePlanId } from '../plan/utils';
+import {
+	getPathFlavor,
+	normalizePathIdentity,
+	sanitizeDiagnosticText,
+	unsafePathTextReason,
+} from './path-identity';
 
 export const MAX_PENDING_SCOPE_BINDINGS = 256;
-const DEFAULT_SCOPE_BINDING_TTL_MS = 60 * 60 * 1000;
+export const DEFAULT_SCOPE_BINDING_TTL_MS = 60 * 60 * 1000;
+export const MAX_SCOPE_BINDING_TOMBSTONES = 256;
+
+export type ScopeBindingLifecycleState =
+	| 'live'
+	| 'expired'
+	| 'revoked'
+	| 'superseded';
 
 export type ScopeBindingSource =
 	| 'declare_scope'
@@ -16,6 +30,13 @@ export type ScopeBindingSource =
 
 export interface ScopeBinding {
 	version: 2;
+	/** Stable logical authority identity across lifecycle generations. */
+	bindingId: string;
+	/** Exact immutable generation identity used by persistence and cleanup. */
+	generationId: string;
+	/** Monotonic CAS revision within one generation. */
+	revision: number;
+	lifecycleState: ScopeBindingLifecycleState;
 	workspaceIdentity: string;
 	planId: string;
 	planStructureHash: string;
@@ -27,16 +48,47 @@ export interface ScopeBinding {
 	activation: 'declaration' | 'pending_child' | 'active';
 	parentOwnerSessionId?: string;
 	parentCallId?: string;
+	predecessorGenerationId?: string;
+	childSessionId?: string;
 	/** PR_FEEDBACK bindings carry their parent workflow identity and revision. */
 	workflowSessionId?: string;
 	workflowRevisionDigest?: string;
 	source: ScopeBindingSource;
 	files: string[];
 	declaredAt: number;
+	updatedAt: number;
+	leaseStartedAt: number;
 	expiresAt: number;
 }
 
 const pendingScopeBindings = new Map<string, ScopeBinding>();
+const scopeBindingTombstones = new Map<string, ScopeBinding>();
+export const MAX_SCOPE_PATH_BYTES = 4096;
+export const MAX_SCOPE_FILES_BYTES = 1024 * 1024;
+
+export type ScopeBindingAdmissionResult =
+	| { ok: true; binding: ScopeBinding }
+	| {
+			ok: false;
+			code: 'SCOPE_BINDING_CAPACITY' | 'SCOPE_BINDING_STALE';
+			message: string;
+	  };
+
+export type ScopeBindingResolution =
+	| { status: 'found'; binding: ScopeBinding }
+	| { status: 'expired'; candidates: ScopeBinding[]; totalCandidates: number }
+	| { status: 'ambiguous'; candidates: ScopeBinding[]; totalCandidates: number }
+	| { status: 'not_declared' };
+
+function newIdentity(): string {
+	return randomUUID();
+}
+
+export function isScopeBindingIdentity(value: unknown): value is string {
+	return (
+		typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(value)
+	);
+}
 
 export function canonicalWorkspaceIdentity(directory: string): string | null {
 	try {
@@ -53,10 +105,14 @@ function isStrictTaskId(value: string): boolean {
 
 function normalizeScopePath(value: string): string | null {
 	if (typeof value !== 'string') return null;
+	// Scope is both persisted and rendered in denial messages. Reject every
+	// control/formatting class that can alter logs, terminals, or path display.
+	if (unsafePathTextReason(value)) return null;
 	const trimmed = value.trim().replace(/\\/g, '/');
 	if (
 		trimmed.length === 0 ||
 		trimmed.includes('\0') ||
+		trimmed.split('/').includes('..') ||
 		path.posix.isAbsolute(trimmed) ||
 		/^[A-Za-z]:\//.test(trimmed)
 	)
@@ -71,28 +127,22 @@ export function normalizeScopeFiles(files: readonly string[]): string[] | null {
 	if (!Array.isArray(files) || files.length === 0 || files.length > 10_000)
 		return null;
 	const normalized = new Set<string>();
+	let totalBytes = 0;
 	for (const file of files) {
 		const candidate = normalizeScopePath(file);
 		if (!candidate) return null;
+		const bytes = Buffer.byteLength(candidate, 'utf8');
+		totalBytes += bytes;
+		if (bytes > MAX_SCOPE_PATH_BYTES || totalBytes > MAX_SCOPE_FILES_BYTES) {
+			return null;
+		}
 		normalized.add(candidate);
 	}
 	return normalized.size > 0 ? [...normalized].sort() : null;
 }
 
-function bindingKey(binding: {
-	workspaceIdentity: string;
-	planStructureHash: string;
-	taskId: string;
-	ownerSessionId: string;
-	ownerMessageId?: string;
-}): string {
-	return [
-		binding.workspaceIdentity,
-		binding.planStructureHash,
-		binding.taskId,
-		binding.ownerSessionId,
-		binding.ownerMessageId ?? '',
-	].join('\0');
+function bindingKey(binding: { generationId: string }): string {
+	return binding.generationId;
 }
 
 export function createScopeBinding(input: {
@@ -120,6 +170,10 @@ export function createScopeBinding(input: {
 	const ttlMs = Math.max(1, input.ttlMs ?? DEFAULT_SCOPE_BINDING_TTL_MS);
 	return {
 		version: 2,
+		bindingId: newIdentity(),
+		generationId: newIdentity(),
+		revision: 1,
+		lifecycleState: 'live',
 		workspaceIdentity,
 		planId: derivePlanId(input.plan),
 		planStructureHash: computePlanStructureHash(input.plan),
@@ -133,43 +187,94 @@ export function createScopeBinding(input: {
 		source: input.source,
 		files,
 		declaredAt: now,
+		updatedAt: now,
+		leaseStartedAt: now,
 		expiresAt: now + ttlMs,
 	};
 }
 
 function sweepExpired(now = Date.now()): void {
 	for (const [key, binding] of pendingScopeBindings) {
-		if (binding.expiresAt <= now) pendingScopeBindings.delete(key);
+		if (binding.expiresAt <= now) {
+			pendingScopeBindings.delete(key);
+			const expired: ScopeBinding = {
+				...binding,
+				revision: binding.revision + 1,
+				lifecycleState: 'expired',
+				updatedAt: now,
+			};
+			scopeBindingTombstones.set(bindingKey(expired), expired);
+		}
+	}
+	while (scopeBindingTombstones.size > MAX_SCOPE_BINDING_TOMBSTONES) {
+		const oldest = scopeBindingTombstones.keys().next().value as
+			| string
+			| undefined;
+		if (!oldest) break;
+		scopeBindingTombstones.delete(oldest);
 	}
 }
 
-export function registerScopeBinding(binding: ScopeBinding): void {
+export function registerScopeBinding(
+	binding: ScopeBinding,
+): ScopeBindingAdmissionResult {
 	sweepExpired();
+	if (binding.lifecycleState !== 'live' || binding.expiresAt <= Date.now()) {
+		return {
+			ok: false,
+			code: 'SCOPE_BINDING_CAPACITY',
+			message: 'Only an unexpired live binding can be admitted.',
+		};
+	}
+	const exact = pendingScopeBindings.get(bindingKey(binding));
+	if (exact && exact.bindingId !== binding.bindingId) {
+		return {
+			ok: false,
+			code: 'SCOPE_BINDING_STALE',
+			message: 'The generation identity collides with a different binding.',
+		};
+	}
+	if (exact && exact.revision > binding.revision) {
+		return {
+			ok: false,
+			code: 'SCOPE_BINDING_STALE',
+			message: 'A newer revision of this generation is already admitted.',
+		};
+	}
 	if (
 		binding.activation === 'declaration' &&
 		binding.dispatchCallId === undefined
 	) {
 		for (const [existingKey, existing] of pendingScopeBindings) {
 			if (
+				existing.generationId !== binding.generationId &&
 				existing.activation === 'declaration' &&
 				existing.dispatchCallId === undefined &&
 				existing.workspaceIdentity === binding.workspaceIdentity &&
 				existing.taskId === binding.taskId &&
 				existing.ownerSessionId === binding.ownerSessionId
-			)
+			) {
 				pendingScopeBindings.delete(existingKey);
+				scopeBindingTombstones.set(existingKey, {
+					...existing,
+					revision: existing.revision + 1,
+					lifecycleState: 'superseded',
+					updatedAt: Date.now(),
+				});
+			}
 		}
+	}
+	if (!exact && pendingScopeBindings.size >= MAX_PENDING_SCOPE_BINDINGS) {
+		return {
+			ok: false,
+			code: 'SCOPE_BINDING_CAPACITY',
+			message: `Scope binding capacity ${MAX_PENDING_SCOPE_BINDINGS} is exhausted; complete or expire a live task before retrying.`,
+		};
 	}
 	const key = bindingKey(binding);
 	pendingScopeBindings.delete(key);
 	pendingScopeBindings.set(key, binding);
-	while (pendingScopeBindings.size > MAX_PENDING_SCOPE_BINDINGS) {
-		const oldest = pendingScopeBindings.keys().next().value as
-			| string
-			| undefined;
-		if (!oldest) break;
-		pendingScopeBindings.delete(oldest);
-	}
+	return { ok: true, binding };
 }
 
 /**
@@ -256,6 +361,10 @@ export function createPrFeedbackScopeBinding(input: {
 	const workflowIdentity = `pr-feedback:${input.workflowSessionId}`;
 	return {
 		version: 2,
+		bindingId: newIdentity(),
+		generationId: newIdentity(),
+		revision: 1,
+		lifecycleState: 'live',
 		workspaceIdentity,
 		planId: workflowIdentity,
 		planStructureHash: input.workflowRevisionDigest,
@@ -269,6 +378,8 @@ export function createPrFeedbackScopeBinding(input: {
 		source: 'pr_feedback',
 		files,
 		declaredAt: now,
+		updatedAt: now,
+		leaseStartedAt: now,
 		expiresAt: now + DEFAULT_SCOPE_BINDING_TTL_MS,
 		workflowSessionId: input.workflowSessionId,
 		workflowRevisionDigest: input.workflowRevisionDigest,
@@ -330,9 +441,22 @@ export function getAuthorizedScopeBindingByPlanIdentity(input: {
 	taskId: string;
 	activeSessionId: string;
 }): ScopeBinding | null {
+	const resolution = resolveAuthorizedScopeBindingByPlanIdentity(input);
+	return resolution.status === 'found' ? resolution.binding : null;
+}
+
+/** Resolve authorization without collapsing expired and ambiguous states. */
+export function resolveAuthorizedScopeBindingByPlanIdentity(input: {
+	directory: string;
+	planId: string;
+	planStructureHash: string;
+	taskId: string;
+	activeSessionId: string;
+}): ScopeBindingResolution {
 	sweepExpired();
 	const workspaceIdentity = canonicalWorkspaceIdentity(input.directory);
-	if (!workspaceIdentity || !isStrictTaskId(input.taskId)) return null;
+	if (!workspaceIdentity || !isStrictTaskId(input.taskId))
+		return { status: 'not_declared' };
 	const matches = [...pendingScopeBindings.values()].filter(
 		(binding) =>
 			binding.workspaceIdentity === workspaceIdentity &&
@@ -349,7 +473,30 @@ export function getAuthorizedScopeBindingByPlanIdentity(input: {
 			binding.ownerSessionId !== binding.parentOwnerSessionId &&
 			binding.parentCallId === binding.dispatchCallId,
 	);
-	return matches.length === 1 ? matches[0] : null;
+	if (matches.length > 1)
+		return {
+			status: 'ambiguous',
+			candidates: matches.slice(0, 8),
+			totalCandidates: matches.length,
+		};
+	if (matches.length === 1) return { status: 'found', binding: matches[0] };
+	const expired = [...scopeBindingTombstones.values()].filter(
+		(binding) =>
+			(binding.lifecycleState !== 'live' || binding.expiresAt <= Date.now()) &&
+			binding.workspaceIdentity === workspaceIdentity &&
+			binding.planId === input.planId &&
+			binding.planStructureHash === input.planStructureHash &&
+			binding.taskId === input.taskId &&
+			binding.ownerSessionId === input.activeSessionId &&
+			binding.activation === 'active',
+	);
+	return expired.length > 0
+		? {
+				status: 'expired',
+				candidates: expired.slice(0, 8),
+				totalCandidates: expired.length,
+			}
+		: { status: 'not_declared' };
 }
 
 /**
@@ -435,8 +582,8 @@ export function describeScopeWorkspaceMismatch(input: {
 	if (!first) return null;
 	return (
 		`SCOPE_WORKSPACE_MISMATCH: an active scope binding for session ` +
-		`"${input.activeSessionId}" (task ${first.taskId}, source ${first.source}) is rooted at ` +
-		`"${first.workspaceIdentity}", but this gate resolved "${workspaceIdentity}". ` +
+		`"${sanitizeDiagnosticText(input.activeSessionId)}" (task ${first.taskId}, source ${first.source}) is rooted at ` +
+		`"${sanitizeDiagnosticText(first.workspaceIdentity)}", but this gate resolved "${sanitizeDiagnosticText(workspaceIdentity)}". ` +
 		`The gate is using the wrong workspace root for this session.`
 	);
 }
@@ -448,6 +595,7 @@ export function clearScopeBindings(
 	if (!predicate) {
 		removed.push(...pendingScopeBindings.values());
 		pendingScopeBindings.clear();
+		scopeBindingTombstones.clear();
 		return removed;
 	}
 	for (const [key, binding] of pendingScopeBindings) {
@@ -457,6 +605,106 @@ export function clearScopeBindings(
 		}
 	}
 	return removed;
+}
+
+/** Remove one exact generation; sibling generations are never affected. */
+export function clearExactScopeBinding(input: {
+	bindingId: string;
+	generationId: string;
+}): ScopeBinding | null {
+	const candidate = pendingScopeBindings.get(input.generationId);
+	if (!candidate || candidate.bindingId !== input.bindingId) return null;
+	pendingScopeBindings.delete(input.generationId);
+	return candidate;
+}
+
+export function installScopeBindingTombstone(binding: ScopeBinding): void {
+	pendingScopeBindings.delete(binding.generationId);
+	scopeBindingTombstones.delete(binding.generationId);
+	scopeBindingTombstones.set(binding.generationId, binding);
+	while (scopeBindingTombstones.size > MAX_SCOPE_BINDING_TOMBSTONES) {
+		const oldest = scopeBindingTombstones.keys().next().value as
+			| string
+			| undefined;
+		if (!oldest) break;
+		scopeBindingTombstones.delete(oldest);
+	}
+}
+
+export function hasScopeBindingDenyOverlay(binding: ScopeBinding): boolean {
+	const tombstone = scopeBindingTombstones.get(binding.generationId);
+	return Boolean(
+		tombstone &&
+			tombstone.bindingId === binding.bindingId &&
+			tombstone.revision >= binding.revision &&
+			tombstone.lifecycleState !== 'live',
+	);
+}
+
+/** Fail-closed overlay used only when durable revocation cannot be verified. */
+export function installFailedRevocationOverlay(
+	binding: ScopeBinding,
+	reason: Exclude<ScopeBindingLifecycleState, 'live'>,
+): boolean {
+	const current = pendingScopeBindings.get(binding.generationId);
+	if (
+		!current ||
+		current.bindingId !== binding.bindingId ||
+		current.revision !== binding.revision
+	)
+		return false;
+	const now = Date.now();
+	installScopeBindingTombstone({
+		...current,
+		revision: current.revision + 1,
+		lifecycleState: reason,
+		updatedAt: now,
+		expiresAt: Math.min(current.expiresAt, now),
+	});
+	return true;
+}
+
+/**
+ * Installs an immediate generation-wide deny intent before durable retirement
+ * contends with refresh. Unlike the failure-only overlay, cleanup owns the
+ * whole exact generation and therefore deliberately follows a newer revision.
+ */
+export function installScopeBindingRetirementIntent(
+	binding: Pick<ScopeBinding, 'bindingId' | 'generationId'> &
+		Partial<ScopeBinding>,
+): ScopeBinding | null {
+	const current = pendingScopeBindings.get(binding.generationId);
+	const source =
+		current ?? (binding.version === 2 ? (binding as ScopeBinding) : null);
+	if (!source || source.bindingId !== binding.bindingId) return null;
+	const now = Date.now();
+	const tombstone: ScopeBinding = {
+		...source,
+		revision: source.revision + 1,
+		lifecycleState: 'revoked',
+		updatedAt: now,
+		expiresAt: Math.min(source.expiresAt, now),
+	};
+	installScopeBindingTombstone(tombstone);
+	return tombstone;
+}
+
+export function updateExactScopeBinding(
+	binding: ScopeBinding,
+): ScopeBindingAdmissionResult {
+	const current = pendingScopeBindings.get(binding.generationId);
+	if (
+		!current ||
+		current.bindingId !== binding.bindingId ||
+		binding.revision <= current.revision
+	)
+		return {
+			ok: false,
+			code: 'SCOPE_BINDING_CAPACITY',
+			message: 'The exact binding generation is stale or no longer active.',
+		};
+	pendingScopeBindings.set(binding.generationId, binding);
+	return { ok: true, binding };
 }
 
 /**
@@ -490,16 +738,42 @@ export function claimScopeBindingForChild(input: {
 	);
 	if (matches.length !== 1) return null;
 	const previous = matches[0];
+	const claimed = createClaimedScopeBinding(previous, {
+		parentSessionId: input.parentSessionId,
+		childSessionId: input.childSessionId,
+		dispatchCallId: input.dispatchCallId,
+	});
+	const admitted = registerScopeBinding(claimed);
+	if (!admitted.ok) return null;
 	pendingScopeBindings.delete(bindingKey(previous));
-	const claimed: ScopeBinding = {
-		...previous,
-		ownerSessionId: input.childSessionId,
-		parentOwnerSessionId: input.parentSessionId,
-		parentCallId: previous.dispatchCallId,
-		activation: 'active',
-	};
-	registerScopeBinding(claimed);
 	return { previous, claimed };
+}
+
+export function createClaimedScopeBinding(
+	previous: ScopeBinding,
+	input: {
+		parentSessionId: string;
+		childSessionId: string;
+		dispatchCallId: string;
+	},
+): ScopeBinding {
+	const now = Date.now();
+	return {
+		...previous,
+		generationId: newIdentity(),
+		revision: 1,
+		ownerSessionId: input.childSessionId,
+		childSessionId: input.childSessionId,
+		ownerMessageId: input.dispatchCallId,
+		dispatchCallId: input.dispatchCallId,
+		parentOwnerSessionId: input.parentSessionId,
+		parentCallId: input.dispatchCallId,
+		activation: 'active',
+		predecessorGenerationId: previous.generationId,
+		updatedAt: now,
+		leaseStartedAt: now,
+		expiresAt: now + DEFAULT_SCOPE_BINDING_TTL_MS,
+	};
 }
 
 export function deriveChildScopeBinding(
@@ -523,6 +797,8 @@ export function deriveChildScopeBinding(
 	const now = Date.now();
 	return {
 		...parent,
+		generationId: newIdentity(),
+		revision: 1,
 		workspaceIdentity,
 		ownerSessionId: input.childSessionId,
 		ownerMessageId: input.parentCallId,
@@ -530,9 +806,13 @@ export function deriveChildScopeBinding(
 		activation: 'active',
 		parentOwnerSessionId: parent.ownerSessionId,
 		parentCallId: input.parentCallId,
+		predecessorGenerationId: parent.generationId,
+		childSessionId: input.childSessionId,
 		source: 'worktree_derived',
 		declaredAt: now,
-		expiresAt: Math.min(parent.expiresAt, now + DEFAULT_SCOPE_BINDING_TTL_MS),
+		updatedAt: now,
+		leaseStartedAt: now,
+		expiresAt: now + DEFAULT_SCOPE_BINDING_TTL_MS,
 	};
 }
 
@@ -547,9 +827,21 @@ export function scopeContains(
 	scope: readonly string[],
 	candidate: string,
 ): boolean {
-	return scope.some(
-		(entry) => candidate === entry || candidate.startsWith(`${entry}/`),
+	const flavor = getPathFlavor();
+	const candidateIdentity = normalizePathIdentity(candidate, flavor).replace(
+		/\\/g,
+		'/',
 	);
+	return scope.some((entry) => {
+		const entryIdentity = normalizePathIdentity(entry, flavor).replace(
+			/\\/g,
+			'/',
+		);
+		return (
+			candidateIdentity === entryIdentity ||
+			candidateIdentity.startsWith(`${entryIdentity}/`)
+		);
+	});
 }
 
 function isSubset(
@@ -569,7 +861,21 @@ export function resolveCoderScopeSources(input: {
 			files: string[];
 			source: 'declare_scope' | 'plan' | 'file_directive';
 	  }
-	| { ok: false; code: 'SCOPE_NOT_DECLARED' | 'SCOPE_CONFLICT' } {
+	| {
+			ok: false;
+			code: 'SCOPE_NOT_DECLARED';
+			sources?: ScopeSourceSets;
+	  }
+	| {
+			ok: false;
+			code: 'SCOPE_CONFLICT';
+			authoritativeSource: 'declare_scope' | 'plan';
+			authoritativeFiles: string[];
+			conflictingSource: 'plan' | 'file_directive';
+			conflictingFiles: string[];
+			disagreement: string[];
+			sources: ScopeSourceSets;
+	  } {
 	const explicit =
 		input.explicitFiles && input.explicitFiles.length > 0
 			? normalizeScopeFiles(input.explicitFiles)
@@ -583,30 +889,91 @@ export function resolveCoderScopeSources(input: {
 			? normalizeScopeFiles(input.fileDirectiveFiles)
 			: null;
 	if (input.explicitFiles && input.explicitFiles.length > 0 && !explicit)
-		return { ok: false, code: 'SCOPE_NOT_DECLARED' };
+		return {
+			ok: false,
+			code: 'SCOPE_NOT_DECLARED',
+			sources: { explicit, plan, directives },
+		};
 	if (input.planFiles && input.planFiles.length > 0 && !plan)
-		return { ok: false, code: 'SCOPE_NOT_DECLARED' };
+		return {
+			ok: false,
+			code: 'SCOPE_NOT_DECLARED',
+			sources: { explicit, plan, directives },
+		};
 	if (
 		input.fileDirectiveFiles &&
 		input.fileDirectiveFiles.length > 0 &&
 		!directives
 	)
-		return { ok: false, code: 'SCOPE_NOT_DECLARED' };
+		return {
+			ok: false,
+			code: 'SCOPE_NOT_DECLARED',
+			sources: { explicit, plan, directives },
+		};
 
 	if (explicit) {
-		if (
-			(plan && !isSubset(plan, explicit)) ||
-			(directives && !isSubset(directives, explicit))
-		)
-			return { ok: false, code: 'SCOPE_CONFLICT' };
+		const conflict =
+			plan && !isSubset(plan, explicit)
+				? { source: 'plan' as const, files: plan }
+				: directives && !isSubset(directives, explicit)
+					? { source: 'file_directive' as const, files: directives }
+					: null;
+		if (conflict)
+			return {
+				ok: false,
+				code: 'SCOPE_CONFLICT',
+				authoritativeSource: 'declare_scope',
+				authoritativeFiles: explicit,
+				conflictingSource: conflict.source,
+				conflictingFiles: conflict.files,
+				disagreement: conflict.files.filter(
+					(file) => !scopeContains(explicit, file),
+				),
+				sources: { explicit, plan, directives },
+			};
 		return { ok: true, files: explicit, source: 'declare_scope' };
 	}
 	if (plan) {
 		if (directives && !isSubset(directives, plan))
-			return { ok: false, code: 'SCOPE_CONFLICT' };
+			return {
+				ok: false,
+				code: 'SCOPE_CONFLICT',
+				authoritativeSource: 'plan',
+				authoritativeFiles: plan,
+				conflictingSource: 'file_directive',
+				conflictingFiles: directives,
+				disagreement: directives.filter((file) => !scopeContains(plan, file)),
+				sources: { explicit, plan, directives },
+			};
 		return { ok: true, files: plan, source: 'plan' };
 	}
 	if (directives)
 		return { ok: true, files: directives, source: 'file_directive' };
 	return { ok: false, code: 'SCOPE_NOT_DECLARED' };
+}
+
+interface ScopeSourceSets {
+	explicit: string[] | null;
+	plan: string[] | null;
+	directives: string[] | null;
+}
+
+function renderSet(values: readonly string[] | null, max = 8): string {
+	if (!values) return '(none)';
+	const shown = values.slice(0, max).map((value) => JSON.stringify(value));
+	return `${shown.join(', ')}${values.length > max ? `, … +${values.length - max}` : ''}`;
+}
+
+/** One bounded renderer shared by normal and PR-feedback preflight paths. */
+export function formatCoderScopeConflict(
+	decision: Extract<ReturnType<typeof resolveCoderScopeSources>, { ok: false }>,
+): string {
+	if (decision.code !== 'SCOPE_CONFLICT')
+		return 'SCOPE_NOT_DECLARED: coder delegation has no complete, valid, non-empty scope.';
+	return (
+		`SCOPE_CONFLICT: ${decision.authoritativeSource} authority [${renderSet(decision.authoritativeFiles)}] ` +
+		`does not cover ${decision.conflictingSource} [${renderSet(decision.conflictingFiles)}]; ` +
+		`outside authority: [${renderSet(decision.disagreement)}]. ` +
+		'Architect: reconcile save_plan(files_touched), FILE directives, or declare_scope, then dispatch a new Task call.'
+	);
 }

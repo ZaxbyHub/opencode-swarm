@@ -92,7 +92,23 @@ export function safeRmRecursive(targetPath: string): void {
 		}
 	}
 
-	fs.rmSync(lexicalTarget, { recursive: true, force: true });
+	// Bun does not consistently honor fs.rmSync's maxRetries on Windows. Retry
+	// transient handle-release failures explicitly, bounded to two seconds.
+	const retryWait = new Int32Array(new SharedArrayBuffer(4));
+	for (let attempt = 0; ; attempt += 1) {
+		try {
+			fs.rmSync(lexicalTarget, { recursive: true, force: true });
+			return;
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			if (
+				attempt >= 20 ||
+				(code !== 'EBUSY' && code !== 'EPERM' && code !== 'ENOTEMPTY')
+			)
+				throw error;
+			Atomics.wait(retryWait, 0, 0, 100);
+		}
+	}
 }
 
 /**

@@ -77,7 +77,11 @@ describe('Codex P1 fix: declaredScope gated to coder agents only', () => {
 		);
 		expect(result.allowed).toBe(false);
 		if (!result.allowed) {
-			expect(result.reason).toContain('not in allowed list for docs');
+			expect(result.code).toBe('AUTHORITY_POLICY_DENY');
+			expect(result.reason).toContain(
+				'path is not in allowed list for this role.',
+			);
+			expect(result.reason).toContain('Allowed prefixes: docs/');
 		}
 	});
 
@@ -91,7 +95,11 @@ describe('Codex P1 fix: declaredScope gated to coder agents only', () => {
 		);
 		expect(result.allowed).toBe(false);
 		if (!result.allowed) {
-			expect(result.reason).toContain('not in allowed list for designer');
+			expect(result.code).toBe('AUTHORITY_POLICY_DENY');
+			expect(result.reason).toContain(
+				'path is not in allowed list for this role.',
+			);
+			expect(result.reason).toContain('Allowed prefixes: docs/');
 		}
 	});
 
@@ -106,7 +114,11 @@ describe('Codex P1 fix: declaredScope gated to coder agents only', () => {
 		);
 		expect(result.allowed).toBe(false);
 		if (!result.allowed) {
-			expect(result.reason).toContain('not in allowed list for critic');
+			expect(result.code).toBe('AUTHORITY_POLICY_DENY');
+			expect(result.reason).toContain(
+				'path is not in allowed list for this role.',
+			);
+			expect(result.reason).toContain('Allowed prefixes: .swarm/evidence/');
 		}
 	});
 
@@ -159,7 +171,11 @@ describe('Codex P1 fix: declaredScope gated to coder agents only', () => {
 		const result = checkFileAuthority('docs', 'src/foo.ts', TEST_CWD);
 		expect(result.allowed).toBe(false);
 		if (!result.allowed) {
-			expect(result.reason).toContain('not in allowed list for docs');
+			expect(result.code).toBe('AUTHORITY_POLICY_DENY');
+			expect(result.reason).toContain(
+				'path is not in allowed list for this role.',
+			);
+			expect(result.reason).toContain('Allowed prefixes: docs/');
 		}
 	});
 });
@@ -256,7 +272,8 @@ describe('Codex P1 fix: cross-drive / cross-root containment', () => {
 			);
 			expect(result.allowed).toBe(false);
 			if (!result.allowed) {
-				expect(result.reason).toContain('different drive/root');
+				expect(result.code).toBe('AUTHORITY_ROOT_ESCAPE');
+				expect(result.reason).toContain('different drive or filesystem root');
 			}
 		},
 	);

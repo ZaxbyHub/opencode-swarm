@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { canonicalWorkspaceIdentity, type ScopeBinding } from './scope-binding';
 import { clearScopeBindingFromDisk } from './scope-persistence';
 
 let workspace: string;
@@ -11,18 +11,45 @@ let external: string;
 function bindingFile(
 	directory: string,
 	taskId: string,
-	ownerSessionId: string,
+	bindingId: string,
+	generationId: string,
 ): string {
-	const ownerHash = createHash('sha256')
-		.update(ownerSessionId)
-		.digest('hex')
-		.slice(0, 24);
 	return path.join(
 		directory,
 		'.swarm',
 		'scopes',
-		`binding-${taskId}-${ownerHash}.json`,
+		`binding-${taskId}-${bindingId}-${generationId}.json`,
 	);
+}
+
+const bindingId = '11111111-1111-4111-a111-111111111111';
+const generationId = '22222222-2222-4222-a222-222222222222';
+
+function binding(directory: string): ScopeBinding {
+	const workspaceIdentity = canonicalWorkspaceIdentity(directory);
+	if (!workspaceIdentity) throw new Error('workspace fixture missing');
+	const now = Date.now();
+	return {
+		version: 2,
+		bindingId,
+		generationId,
+		revision: 1,
+		lifecycleState: 'live',
+		workspaceIdentity,
+		planId: 'plan-test',
+		planStructureHash: 'hash-test',
+		taskId: '1.1',
+		ownerSessionId: 'owner',
+		ownerMessageId: 'call',
+		dispatchCallId: 'call',
+		activation: 'pending_child',
+		source: 'plan',
+		files: ['src/a.ts'],
+		declaredAt: now,
+		updatedAt: now,
+		leaseStartedAt: now,
+		expiresAt: now + 60_000,
+	};
 }
 
 beforeEach(() => {
@@ -38,29 +65,43 @@ afterEach(() => {
 });
 
 describe('clearScopeBindingFromDisk containment', () => {
-	test('removes a regular binding from the canonical scopes directory', () => {
-		const target = bindingFile(workspace, '1.1', 'child-session');
+	test('retires a regular binding in the canonical scopes directory', () => {
+		const target = bindingFile(workspace, '1.1', bindingId, generationId);
 		fs.mkdirSync(path.dirname(target), { recursive: true });
-		fs.writeFileSync(target, '{}');
+		const active = binding(workspace);
+		fs.writeFileSync(target, JSON.stringify(active));
 
-		clearScopeBindingFromDisk({
+		const retired = clearScopeBindingFromDisk({
 			directory: workspace,
-			taskId: '1.1',
-			ownerSessionId: 'child-session',
+			binding: active,
 		});
+		expect(retired).toMatchObject({ ok: true });
 
-		expect(fs.existsSync(target)).toBe(false);
+		expect(JSON.parse(fs.readFileSync(target, 'utf8'))).toMatchObject({
+			lifecycleState: 'revoked',
+			revision: 2,
+		});
 	});
 
 	test('fails closed when scopes is swapped to a symlink or junction', () => {
-		const originalTarget = bindingFile(workspace, '1.1', 'child-session');
+		const originalTarget = bindingFile(
+			workspace,
+			'1.1',
+			bindingId,
+			generationId,
+		);
 		const scopesDir = path.dirname(originalTarget);
 		const displacedScopes = path.join(workspace, '.swarm', 'scopes-original');
 		fs.mkdirSync(scopesDir, { recursive: true });
 		fs.writeFileSync(originalTarget, 'original');
 		fs.renameSync(scopesDir, displacedScopes);
 
-		const externalTarget = bindingFile(external, '1.1', 'child-session');
+		const externalTarget = bindingFile(
+			external,
+			'1.1',
+			bindingId,
+			generationId,
+		);
 		fs.mkdirSync(path.dirname(externalTarget), { recursive: true });
 		fs.writeFileSync(externalTarget, 'outside');
 		fs.symlinkSync(
@@ -71,8 +112,7 @@ describe('clearScopeBindingFromDisk containment', () => {
 
 		clearScopeBindingFromDisk({
 			directory: workspace,
-			taskId: '1.1',
-			ownerSessionId: 'child-session',
+			binding: binding(workspace),
 		});
 
 		expect(fs.readFileSync(externalTarget, 'utf8')).toBe('outside');
@@ -85,7 +125,7 @@ describe('clearScopeBindingFromDisk containment', () => {
 	});
 
 	test('fails closed when the binding leaf is a symlink or junction', () => {
-		const target = bindingFile(workspace, '1.1', 'child-session');
+		const target = bindingFile(workspace, '1.1', bindingId, generationId);
 		const externalTarget = path.join(external, 'outside-binding');
 		fs.mkdirSync(path.dirname(target), { recursive: true });
 		fs.mkdirSync(externalTarget);
@@ -98,8 +138,7 @@ describe('clearScopeBindingFromDisk containment', () => {
 
 		clearScopeBindingFromDisk({
 			directory: workspace,
-			taskId: '1.1',
-			ownerSessionId: 'child-session',
+			binding: binding(workspace),
 		});
 
 		expect(

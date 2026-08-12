@@ -22,6 +22,8 @@ import {
 	stripKnownSwarmPrefix,
 } from '../../config/schema';
 import { loadPlan } from '../../plan/manager';
+import { getExecutor } from '../../sandbox/executor';
+import { createScopeLeaseRenewalTracker } from '../../scope/scope-lease-renewal';
 import {
 	advanceTaskState,
 	getActiveWindow,
@@ -50,6 +52,7 @@ import { classifyTaskResult } from '../task-result-classifier';
 import { dcCheckJunctionCreation } from './destructive-command';
 import { recordExecutionStallToolAfter } from './execution-stall';
 import { buildEffectiveRules } from './file-authority';
+import { isInDeclaredScope } from './helpers';
 import {
 	createMessagesTransformHandler,
 	getMostRecentAssistantText,
@@ -75,6 +78,7 @@ export const _internals = {
 	resolveFallbackModel,
 	dcCheckJunctionCreation,
 	extractErrorSignal,
+	getSandboxExecutor: getExecutor,
 	/**
 	 * Test/inspection seams for the no-op detector's bounded session state
 	 * (invariant 8). Production code does not call these; they exist so the
@@ -366,31 +370,6 @@ function isWriteTool(toolName: string): boolean {
 }
 
 /**
- * v6.21 Task 5.4: Check if a file path is within declared scope entries.
- */
-function isInDeclaredScope(
-	filePath: string,
-	scopeEntries: string[],
-	cwd?: string,
-): boolean {
-	const dir = cwd ?? process.cwd();
-	const caseInsensitive = process.platform === 'win32';
-	const resolvedFileRaw = path.resolve(dir, filePath);
-	const resolvedFile = caseInsensitive
-		? resolvedFileRaw.toLowerCase()
-		: resolvedFileRaw;
-	return scopeEntries.some((scope) => {
-		const resolvedScopeRaw = path.resolve(dir, scope);
-		const resolvedScope = caseInsensitive
-			? resolvedScopeRaw.toLowerCase()
-			: resolvedScopeRaw;
-		if (resolvedFile === resolvedScope) return true;
-		const rel = path.relative(resolvedScope, resolvedFile);
-		return rel.length > 0 && !rel.startsWith('..') && !path.isAbsolute(rel);
-	});
-}
-
-/**
  * Redacts sensitive values from a shell command string before audit logging.
  * Single-sourced from ./helpers (which additionally redacts home paths).
  */
@@ -584,6 +563,7 @@ export function createGuardrailsHooks(
 			file: string;
 		}>
 	>();
+	const scopeLeaseRenewal = createScopeLeaseRenewalTracker();
 	const rememberReviewerScopeWrite = (input: {
 		callID: string;
 		parentSessionID: string;
@@ -647,6 +627,8 @@ export function createGuardrailsHooks(
 		consecutiveNoToolTurns,
 		worktreeBaseDirOverrides,
 		rememberReviewerScopeWrite,
+		rememberScopeLeaseCandidate: scopeLeaseRenewal.remember,
+		getSandboxExecutor: _internals.getSandboxExecutor,
 	});
 
 	// Create messagesTransform handler via factory
@@ -674,6 +656,7 @@ export function createGuardrailsHooks(
 				correlatedExecution &&
 				!isToolExecutionCurrent(input.sessionID, correlatedExecution)
 			) {
+				await scopeLeaseRenewal.consume({ ...input, output: null });
 				return;
 			}
 			// OpenCode should provide a ToolResult-shaped object, but malformed or
@@ -684,6 +667,10 @@ export function createGuardrailsHooks(
 			const safeOutput = malformedOutput
 				? { title: '', output: '', metadata: null }
 				: output;
+			await scopeLeaseRenewal.consume({
+				...input,
+				output: malformedOutput ? null : safeOutput,
+			});
 			// v6.12: Gate completion tracking (moved above window check for architect sessions)
 			const session = swarmState.agentSessions.get(input.sessionID);
 			if (session) {

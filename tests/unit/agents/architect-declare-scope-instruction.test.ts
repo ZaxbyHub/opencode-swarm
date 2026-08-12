@@ -137,4 +137,46 @@ describe('architect prompt: declare_scope instruction at every coder delegation 
 		expect(slice).toContain('test_engineer');
 		expect(slice).toContain('declare_scope');
 	});
+
+	it('authors durable plan scope and states exact source precedence', () => {
+		expect(prompt).toContain('files_touched');
+		expect(prompt).toContain(
+			'active `declare_scope` binding is authoritative, otherwise plan `files_touched`, otherwise complete `FILE:` directives',
+		);
+		expect(prompt).toContain(
+			'passing `files_touched: []` explicitly clears it',
+		);
+	});
+
+	it('names callable recovery for conflict, expiry, ambiguity, workspace mismatch, and root escape', () => {
+		for (const code of [
+			'SCOPE_CONFLICT',
+			'SCOPE_BINDING_EXPIRED',
+			'SCOPE_BINDING_AMBIGUOUS',
+			'SCOPE_WORKSPACE_MISMATCH',
+			'SCOPE_ROOT_ESCAPE',
+		]) {
+			expect(prompt).toContain(code);
+		}
+		expect(prompt).toContain('replace_existing: true');
+		expect(prompt).toContain('active lane/worktree root');
+	});
+
+	it('uses replacement semantics for initial dispatches and retries', () => {
+		expect(prompt).toContain('{ taskId, files, replace_existing: true }');
+		expect(executeSkill).toContain(
+			'declare_scope({ taskId, files, replace_existing: true })',
+		);
+		expect(executeSkill).toMatch(
+			/BEFORE the retry delegation:[^\n]*replace_existing: true/,
+		);
+	});
+
+	it('execute protocol carries the same scope recovery contract', () => {
+		expect(executeSkill).toContain('SCOPE SOURCE AND RECOVERY CONTRACT');
+		expect(executeSkill).toContain(
+			'active `declare_scope` binding > plan task `files_touched` > complete one-path-per-line `FILE:` directives',
+		);
+		expect(executeSkill).toContain('replace_existing: true');
+	});
 });

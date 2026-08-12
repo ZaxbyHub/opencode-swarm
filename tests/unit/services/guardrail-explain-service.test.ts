@@ -394,7 +394,7 @@ describe('Guardrail explain accuracy — destructive commands', () => {
 		const decision = extractDecision(result);
 		expect(decision).toBe('block');
 		const firingRule = extractFiringRule(result);
-		expect(firingRule.toLowerCase()).toContain('rm');
+		expect(firingRule.toLowerCase()).toContain('filesystem root');
 	});
 
 	test('rm -rf build with --scope build → decision === allow (in-scope safe target)', async () => {

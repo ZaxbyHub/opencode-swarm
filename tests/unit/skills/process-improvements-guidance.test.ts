@@ -138,6 +138,22 @@ describe('process-improvement skill guidance', () => {
 		expect(codexLines).toBeLessThan(30);
 	});
 
+	test('swarm-implement teaches the durable scope retry and shell contract', () => {
+		const implement = readSkill('.opencode/skills/swarm-implement/SKILL.md');
+
+		expect(implement).toContain(
+			'declare_scope({ taskId, files, replace_existing: true })',
+		);
+		expect(implement).toContain(
+			'Direct and shell writes are both scope-enforced',
+		);
+		expect(implement).toContain('SCOPE_BINDING_EXPIRED');
+		expect(implement).toContain('SCOPE_BINDING_AMBIGUOUS');
+		expect(implement).toContain('SCOPE_WORKSPACE_MISMATCH');
+		expect(implement).not.toContain('bash-based writes');
+		expect(implement).not.toContain('bypass the check');
+	});
+
 	test('writing-tests keeps .opencode canonical with thin Claude/Codex adapters', () => {
 		const claudeAdapter = readSkill('.claude/skills/writing-tests/SKILL.md');
 		const codexAdapter = readSkill('.agents/skills/writing-tests/SKILL.md');

@@ -29,7 +29,9 @@ describe('.opencode/skills/execute/SKILL.md protocol content', () => {
 
 		it('keeps scope declaration and baseline rules', () => {
 			expect(skillContent).toContain('5b-PRE (required)');
-			expect(skillContent).toContain('declare_scope({ taskId, files })');
+			expect(skillContent).toContain(
+				'declare_scope({ taskId, files, replace_existing: true })',
+			);
 			expect(skillContent).toContain('5b-BASE (required, once per task)');
 			expect(skillContent).toContain('sast-baseline');
 		});

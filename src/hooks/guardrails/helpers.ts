@@ -9,6 +9,7 @@
 import * as path from 'node:path';
 import { WRITE_TOOL_NAMES } from '../../config/constants';
 import { classifyFile } from '../../context/zone-classifier';
+import { isPathWithinDeclaredScope } from '../../scope/path-identity';
 import { normalizeToolName } from '../normalize-tool-name';
 import { getGlobMatcher } from './file-authority';
 
@@ -131,21 +132,7 @@ export function isInDeclaredScope(
 	scopeEntries: string[],
 	cwd?: string,
 ): boolean {
-	const dir = cwd ?? process.cwd();
-	const caseInsensitive = process.platform === 'win32';
-	const resolvedFileRaw = path.resolve(dir, filePath);
-	const resolvedFile = caseInsensitive
-		? resolvedFileRaw.toLowerCase()
-		: resolvedFileRaw;
-	return scopeEntries.some((scope) => {
-		const resolvedScopeRaw = path.resolve(dir, scope);
-		const resolvedScope = caseInsensitive
-			? resolvedScopeRaw.toLowerCase()
-			: resolvedScopeRaw;
-		if (resolvedFile === resolvedScope) return true;
-		const rel = path.relative(resolvedScope, resolvedFile);
-		return rel.length > 0 && !rel.startsWith('..') && !path.isAbsolute(rel);
-	});
+	return isPathWithinDeclaredScope(filePath, scopeEntries, cwd);
 }
 
 /**

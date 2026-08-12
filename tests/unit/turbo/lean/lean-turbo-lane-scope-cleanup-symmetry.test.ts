@@ -40,6 +40,7 @@ import {
 	clearScopeBindings,
 	createScopeBinding,
 	deriveChildScopeBinding,
+	getAuthorizedScopeBinding,
 	registerScopeBinding,
 } from '../../../../src/scope/scope-binding';
 import { resolveAuthorizedScopeBinding } from '../../../../src/scope/scope-persistence';
@@ -202,8 +203,9 @@ describe('item 2a — _publishLaneScope throw path cleans up whatever was alread
 			async (input: PublishLeanTurboLaneScopeInput) => {
 				registerRealChildBinding(input, 'test-dispatch-pre-session');
 				bindingResolvedBeforeThrow =
-					resolveAuthorizedScopeBinding({
+					getAuthorizedScopeBinding({
 						directory: input.laneRoot,
+						plan: input.plan,
 						taskId: input.lane.taskIds[0] as string,
 						activeSessionId: input.childSessionId,
 					}) !== null;
@@ -247,8 +249,9 @@ describe('item 2a — _publishLaneScope throw path cleans up whatever was alread
 		// stayed live for up to its 1h TTL even though publication as a
 		// whole was treated as failed.
 		expect(
-			resolveAuthorizedScopeBinding({
+			getAuthorizedScopeBinding({
 				directory: tmpDir,
+				plan: PLAN as never,
 				taskId: '1.1',
 				activeSessionId: childSessionId,
 			}),
@@ -272,8 +275,9 @@ describe('item 2a — _publishLaneScope throw path cleans up whatever was alread
 				registerRealChildBinding(input, 'test-dispatch-post-session');
 				ensureAgentSession(input.childSessionId, 'coder', input.laneRoot);
 				bindingResolvedBeforeThrow =
-					resolveAuthorizedScopeBinding({
+					getAuthorizedScopeBinding({
 						directory: input.laneRoot,
+						plan: input.plan,
 						taskId: input.lane.taskIds[0] as string,
 						activeSessionId: input.childSessionId,
 					}) !== null;
@@ -320,8 +324,9 @@ describe('item 2a — _publishLaneScope throw path cleans up whatever was alread
 		// throw — pre-fix the binding stayed live up to 1h and the session up
 		// to 2h.
 		expect(
-			resolveAuthorizedScopeBinding({
+			getAuthorizedScopeBinding({
 				directory: tmpDir,
+				plan: PLAN as never,
 				taskId: '1.1',
 				activeSessionId: childSessionId,
 			}),

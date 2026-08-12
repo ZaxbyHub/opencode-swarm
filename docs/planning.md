@@ -32,28 +32,39 @@ Each model needs to know:
 - The Architect delegates all coding to the Coder — it never writes code itself
 - Each task runs through a full 15-step QA gate
 - Tasks must be atomic: one file, one concern, one logical change
-- Tasks need `FILE`, `TASK`, `CONSTRAINT`, and `ACCEPTANCE CRITERIA` fields
+- Tasks need `description`, `files_touched`, and verifiable `acceptance` fields; use `depends` and `fr_refs` when applicable
 - The Critic reviews the plan before implementation starts
 
 ---
 
 ## Task Field Reference
 
-Every task in `.swarm/plan.md` must define these four fields:
+Every task handed to the Architect should provide these `save_plan` fields. The Architect persists them; `.swarm/plan.md` is generated afterward.
 
 | Field | Required | Good Example | Bad Example |
 |---|---|---|---|
-| FILE | Yes | `src/auth/login.ts` | `src/auth/` (directory, not file) |
-| TASK | Yes | `Add email format validation to the login handler` | `Update login and add tests` (compound) |
-| CONSTRAINT | No | `Do not modify the session logic` | `Be careful` (not actionable) |
-| ACCEPTANCE CRITERIA | Yes | `Rejects emails missing @; existing tests pass` | `It works` (not verifiable) |
+| `files_touched` | Yes for coding tasks | `["src/auth/login.ts"]` | `[]` or an absolute path |
+| `description` | Yes | `Add email format validation to the login handler` | `Update login and add tests` (compound) |
+| `acceptance` | Recommended | `Rejects emails missing @; existing tests pass` | `It works` (not verifiable) |
+| `depends` | When needed | `["1.1", "1.2"]` | An undeclared or circular task ID |
 
 **Rules:**
-- `TASK` must be a single imperative sentence with no "and" connecting two actions.
-- `ACCEPTANCE CRITERIA` must be a bullet list specific enough for the test engineer to write a unit test.
-- `CONSTRAINT` is optional but recommended when the task touches shared code.
+- `description` must be a single imperative sentence with no "and" connecting two actions.
+- `acceptance` must be specific enough for the test engineer to write a verification test.
+- Put actionable constraints in the description or acceptance text; do not rely on a field the `save_plan` schema does not persist.
 
-> **`FILE:` has runtime significance beyond documentation.** Coder Task preflight requires one unambiguous plan task and a non-empty scope. A matching `declare_scope` binding is authoritative and `FILE:`/plan paths must be its subsets; otherwise plan `files_touched` is authoritative; only when both are absent may a complete list of one relative path per `FILE:` line define scope. Missing or malformed scope fails with `SCOPE_NOT_DECLARED`, and disagreement fails with `SCOPE_CONFLICT`, before the coder starts. Bindings are specific to the workspace, plan generation, task, parent session, and Task call; worktree lanes derive a child-root binding rather than reusing root authority.
+> **Task paths have runtime significance beyond documentation.** Author each coding task through `save_plan` with `files_touched: ["path/from/project/root"]`. Coder preflight resolves scope in the exact order active `declare_scope` binding > plan `files_touched` > complete `FILE:` lines; every lower-precedence source that is present must be a subset of the authoritative source. Missing scope fails with `SCOPE_NOT_DECLARED`, and disagreement fails with `SCOPE_CONFLICT`, before the coder starts. Bindings are specific to the workspace, plan generation, task, parent session, and Task call; worktree lanes derive fresh child-root authority.
+
+`files_touched` accepts normalized project-relative files or directories. Include generated outputs and lockfiles that the task will write. On a plan revision, omission preserves the existing task scope, while an explicit empty array clears it. `save_plan` rejects absolute paths, parent-traversal components, empty entries, control characters, entries over 4,096 UTF-8 bytes, and aggregate scope text over 1 MiB. The ledger remains authoritative; `.swarm/plan.md` only displays a safely quoted, deterministic projection of the saved list.
+
+When scope preflight fails:
+
+- `SCOPE_CONFLICT`: reconcile the named explicit/plan/`FILE:` sets, update stale plan data through `save_plan`, then redeclare the exact list with `replace_existing: true`.
+- `SCOPE_BINDING_EXPIRED` or `SCOPE_BINDING_AMBIGUOUS`: re-read the task and redeclare its exact intended list with `replace_existing: true`.
+- `SCOPE_BINDING_STORE_OVERLOADED`: finish or expire terminal tasks, then retry `declare_scope`; the runtime will not choose from an incompletely scanned store.
+- `SCOPE_WORKSPACE_MISMATCH`: use the reported lane/worktree root as `working_directory`; paths stay relative to that root.
+- `SCOPE_ROOT_ESCAPE`: retry with the diagnostic's safe relative path only; never authorize an outside absolute path.
+- Effective-authority or verifier-config denial: redeclaration cannot override it. Assign the operation to the correct role or change the task.
 
 ### Task Sizing
 
@@ -63,7 +74,7 @@ Every task in `.swarm/plan.md` must define these four fields:
 | MEDIUM | 1 file with multiple functions, or up to 2 files | Plan as-is |
 | LARGE | More than 2 files, or compound concern | **Must be split before adding to plan** |
 
-If you cannot write `TASK + FILE + CONSTRAINT` in three bullet points, the task is too large.
+If you cannot state one description, one bounded `files_touched` list, and one verifiable acceptance criterion, the task is too large.
 
 ---
 
@@ -86,16 +97,17 @@ Each task in the swarm follows a per-task state machine. The Architect advances 
 
 ### 3. Generate a Draft Plan
 
-Give one model your requirements + codebase snapshot. Ask for a full plan in the swarm's markdown format. This is your starting point, not the final product.
+Give one model your requirements + codebase snapshot. Ask for a structured draft matching the `save_plan` task fields. This is your starting point, not the final persisted plan.
 
 ```
 Here is my codebase [paste gitingest]. Here is the opencode-swarm README
 [paste README]. I need to implement [describe feature/change].
 
-Generate a complete implementation plan in the swarm's markdown format.
-Every task must include FILE, TASK, CONSTRAINT, and ACCEPTANCE CRITERIA.
+Generate a complete structured implementation plan for save_plan.
+Every coding task must include id, description, files_touched, and acceptance.
 Tasks must be atomic — one file, one concern. No task should touch more
-than 2 files. No compound verbs in TASK lines.
+than 2 primary source files. Include any generated outputs and lockfiles in
+files_touched. No compound verbs in descriptions.
 ```
 
 ### 4. Cross-Examine With Other Models
@@ -126,20 +138,20 @@ This usually takes 2-4 rounds. If you can't converge after 4-5 rounds, your requ
 
 Before handing off to the Architect:
 
-- [ ] Every task has `FILE:`, `TASK:`, `CONSTRAINT:`, `ACCEPTANCE CRITERIA:`
+- [ ] Every coding task has `id`, `description`, non-empty `files_touched`, and `acceptance`
 - [ ] No task touches more than 2 files
-- [ ] No `TASK:` line contains "and" connecting two separate actions
-- [ ] Dependencies are declared explicitly (`depends: X.Y`)
-- [ ] Phase structure matches `.swarm/plan.md` format (`## Phase N:`)
+- [ ] No task description contains "and" connecting two separate actions
+- [ ] Dependencies are declared explicitly (`depends: ["X.Y"]`)
+- [ ] Phase and task IDs match the `save_plan` schema
 - [ ] Acceptance criteria are specific enough for the test engineer to verify
 - [ ] Security-sensitive files (auth, crypto, config, env) are flagged so the security reviewer gate triggers
 
 ### 7. Hand Off
 
-Save as `.swarm/plan.md` and start the Architect:
+Give the reviewed task structure to the Architect and have it persist the plan through `save_plan` (including each coding task's `files_touched`). Do not hand-edit `.swarm/plan.md`; it is a derived view of the authoritative ledger.
 
 ```
-Implement the plan in .swarm/plan.md. Follow phases sequentially.
+Persist this reviewed plan with save_plan, then implement it. Follow phases sequentially.
 Run bun test after each phase. Report progress after each completed task.
 ```
 
@@ -184,7 +196,7 @@ Free tiers are fine for planning. 3-4 models is enough for most work; 5-6 for co
 
 [GitHub Spec Kit](https://github.com/github/spec-kit) automates a similar workflow (spec → plan → tasks) using AI agents in your editor. It's faster. The manual multi-model approach gives you more control and makes cross-model disagreements visible, which matters more for complex or security-sensitive work.
 
-Both produce the same output: a structured `.swarm/plan.md` the Architect can execute.
+Both produce the same input: a structured plan the Architect persists through `save_plan` before execution.
 
 ---
 

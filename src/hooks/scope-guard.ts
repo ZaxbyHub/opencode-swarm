@@ -13,14 +13,21 @@ import * as path from 'node:path';
 import { ORCHESTRATOR_NAME, WRITE_TOOL_NAMES } from '../config/constants';
 import { stripKnownSwarmPrefix } from '../config/schema';
 import {
+	isPathIdentityWithin,
+	sanitizeDiagnosticText,
+} from '../scope/path-identity';
+import {
 	describeScopeWorkspaceMismatch,
 	getAuthorizedPrFeedbackScopeBinding,
 } from '../scope/scope-binding';
 import {
 	resolveAuthorizedPrFeedbackScopeBindingFromDisk,
 	resolveAuthorizedScopeBinding,
+	resolveAuthorizedScopeBindingDetailed,
 	resolveAuthorizedScopeBindingForSession,
+	resolveAuthorizedScopeBindingForSessionDetailed,
 } from '../scope/scope-persistence';
+import { formatScopeResolutionDiagnostic } from '../scope/scope-resolution-diagnostic';
 import {
 	type AgentSessionState,
 	resolveSessionWorkspaceDirectory,
@@ -123,16 +130,29 @@ export function createScopeGuardHook(
 			// Resolve only an exact active child binding. If plugin memory restarted,
 			// recover one unique binding from disk against the current plan identity.
 			let taskId = _internals.resolveTaskId(session);
-			let binding = taskId
-				? _internals.resolveAuthorizedScopeBinding({
-						directory,
-						taskId,
-						activeSessionId: sessionId,
-					})
-				: _internals.resolveAuthorizedScopeBindingForSession({
-						directory,
-						activeSessionId: sessionId,
-					});
+			const seamBinding =
+				taskId &&
+				_internals.resolveAuthorizedScopeBinding !==
+					resolveAuthorizedScopeBinding
+					? _internals.resolveAuthorizedScopeBinding({
+							directory,
+							taskId,
+							activeSessionId: sessionId,
+						})
+					: null;
+			const resolution = seamBinding
+				? ({ status: 'found', binding: seamBinding } as const)
+				: taskId
+					? _internals.resolveAuthorizedScopeBindingDetailed({
+							directory,
+							taskId,
+							activeSessionId: sessionId,
+						})
+					: _internals.resolveAuthorizedScopeBindingForSessionDetailed({
+							directory,
+							activeSessionId: sessionId,
+						});
+			let binding = resolution.status === 'found' ? resolution.binding : null;
 			if (!binding) {
 				binding =
 					_internals.getAuthorizedPrFeedbackScopeBinding({
@@ -159,6 +179,19 @@ export function createScopeGuardHook(
 			}
 			const declaredScope = binding?.files ?? null;
 			if (!declaredScope || declaredScope.length === 0) {
+				const durableDiagnostic = formatScopeResolutionDiagnostic({
+					resolution,
+					taskId,
+					sessionId,
+				});
+				if (durableDiagnostic) {
+					denyWithArchitectAdvisory(
+						durableDiagnostic,
+						session,
+						injectAdvisory,
+						swarmState,
+					);
+				}
 				// Issue #2002 recurrence guardrail: if a valid active binding for
 				// THIS session exists but is rooted elsewhere, the gate is using the
 				// wrong workspace root. Say so precisely instead of emitting a
@@ -169,18 +202,44 @@ export function createScopeGuardHook(
 					taskId,
 				});
 				if (mismatch) {
-					throw new Error(
-						`${mismatch} ${agentName} cannot invoke ${toolName} for task ${taskId ?? 'unknown'}.`,
+					denyWithArchitectAdvisory(
+						`${mismatch} ${agentName} cannot invoke ${toolName} for task ${taskId ?? 'unknown'}. ACTION[architect]: redeclare the exact scope against the reported active lane root with replace_existing=true, then dispatch a new Task call.`,
+						session,
+						injectAdvisory,
+						swarmState,
 					);
 				}
-				throw new Error(
-					`SCOPE_NOT_DECLARED: ${agentName} cannot invoke ${toolName} without a validated scope for task ${taskId ?? 'unknown'}.`,
+				denyWithArchitectAdvisory(
+					`SCOPE_NOT_DECLARED: ${agentName} cannot invoke ${toolName} without a validated scope for task ${taskId ?? 'unknown'}. ACTION[architect]: call declare_scope with the exact workspace-relative paths and replace_existing=true, then dispatch a new Task call.`,
+					session,
+					injectAdvisory,
+					swarmState,
 				);
 			}
 
 			// Validate every resolved target from the shared registry.
 			for (const rawPath of targets.paths) {
 				const filePath = sanitizePath(rawPath);
+				const absoluteTarget = path.resolve(directory, filePath);
+				if (!isPathIdentityWithin(absoluteTarget, directory)) {
+					const fallbackRelative = isPathIdentityWithin(
+						absoluteTarget,
+						fallbackDirectory,
+					)
+						? path
+								.relative(fallbackDirectory, absoluteTarget)
+								.replace(/\\/g, '/')
+						: null;
+					const safeRetry = fallbackRelative
+						? `detected workspace-relative path ${JSON.stringify(sanitizeDiagnosticText(fallbackRelative))}; retry exactly that relative path under the active root`
+						: 'no safe workspace-relative retry was detected; stop and correct the command or lane root';
+					denyWithArchitectAdvisory(
+						`SCOPE_ROOT_ESCAPE: attempted target ${JSON.stringify(sanitizeDiagnosticText(filePath))} leaves active root ${JSON.stringify(sanitizeDiagnosticText(directory))}; ${safeRetry}. ACTION[architect]: verify the active lane root, redeclare only the exact relative path with replace_existing=true, and dispatch a new Task call.`,
+						session,
+						injectAdvisory,
+						swarmState,
+					);
+				}
 				if (!isFileInScope(filePath, declaredScope, directory)) {
 					reportScopeViolation(
 						agentName,
@@ -218,9 +277,7 @@ export function isFileInScope(
 		.filter((scope) => scope.length > 0)
 		.some((scope) => {
 			const resolvedScope = path.resolve(dir, scope);
-			if (resolvedFile === resolvedScope) return true;
-			const rel = path.relative(resolvedScope, resolvedFile);
-			return rel.length > 0 && !rel.startsWith('..') && !path.isAbsolute(rel);
+			return isPathIdentityWithin(resolvedFile, resolvedScope);
 		});
 }
 
@@ -263,6 +320,8 @@ function sanitizePath(raw: string): string {
 export const _internals = {
 	sanitizePath,
 	resolveWriteTargets,
+	resolveAuthorizedScopeBindingDetailed,
+	resolveAuthorizedScopeBindingForSessionDetailed,
 	resolveAuthorizedScopeBinding,
 	resolveAuthorizedScopeBindingForSession,
 	getAuthorizedPrFeedbackScopeBinding,
@@ -273,6 +332,32 @@ export const _internals = {
 	resolveTaskId: (session: AgentSessionState | undefined): string | null =>
 		session?.currentTaskId ?? null,
 };
+
+function denyWithArchitectAdvisory(
+	message: string,
+	session: AgentSessionState | undefined,
+	injectAdvisory: ((sessionId: string, message: string) => void) | undefined,
+	state: typeof swarmState,
+): never {
+	if (session) {
+		session.lastScopeViolation = message;
+		session.scopeViolationDetected = true;
+	}
+	if (injectAdvisory) {
+		for (const [architectSessionId, architectSession] of state.agentSessions) {
+			const role =
+				state.activeAgent.get(architectSessionId) ?? architectSession.agentName;
+			if (stripKnownSwarmPrefix(role) !== ORCHESTRATOR_NAME) continue;
+			try {
+				injectAdvisory(architectSessionId, `[SCOPE GUARD] ${message}`);
+			} catch {
+				/* Advisory delivery is non-blocking; the write still fails closed. */
+			}
+			break;
+		}
+	}
+	throw new Error(message);
+}
 
 /**
  * Report a scope violation for an out-of-scope file path.
@@ -298,30 +383,13 @@ function reportScopeViolation(
 	scopeEntries: string[],
 ): void {
 	const taskLabel = taskId ?? 'unknown';
-	const violationMessage = `SCOPE VIOLATION: ${agentName} attempted to modify '${filePath}' which is not in declared scope for task ${taskLabel}. Declared scope: [${scopeEntries.slice(0, 3).join(', ')}${scopeEntries.length > 3 ? '...' : ''}]`;
+	const safeAgentName = sanitizeDiagnosticText(agentName, 128);
+	const safeFilePath = sanitizeDiagnosticText(filePath, 256);
+	const safeScope = scopeEntries
+		.slice(0, 3)
+		.map((entry) => sanitizeDiagnosticText(entry, 128))
+		.join(', ');
+	const violationMessage = `SCOPE_VIOLATION: SCOPE VIOLATION: ${safeAgentName} attempted to modify '${safeFilePath}' which is not in declared scope for task ${taskLabel}. Declared scope: [${safeScope}${scopeEntries.length > 3 ? '...' : ''}]. Coder: correct a mistaken target; otherwise stop and ask the architect to expand declare_scope and dispatch a new Task call.`;
 
-	// Log violation to session
-	if (session) {
-		session.lastScopeViolation = violationMessage;
-		session.scopeViolationDetected = true;
-	}
-
-	// Inject advisory to architect session (if callback provided)
-	if (injectAdvisory) {
-		for (const [archSessionId, archSession] of state.agentSessions) {
-			const archAgent =
-				state.activeAgent.get(archSessionId) ?? archSession.agentName;
-			if (stripKnownSwarmPrefix(archAgent) === ORCHESTRATOR_NAME) {
-				try {
-					injectAdvisory(archSessionId, `[SCOPE GUARD] ${violationMessage}`);
-				} catch {
-					/* non-blocking */
-				}
-				break;
-			}
-		}
-	}
-
-	// BLOCK the tool call by throwing
-	throw new Error(violationMessage);
+	denyWithArchitectAdvisory(violationMessage, session, injectAdvisory, state);
 }

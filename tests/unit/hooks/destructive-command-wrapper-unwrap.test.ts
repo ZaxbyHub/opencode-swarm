@@ -1,9 +1,11 @@
-import { beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { rmSync } from 'node:fs';
 import type { GuardrailsConfig } from '../../../src/config/schema';
 import { createGuardrailsHooks } from '../../../src/hooks/guardrails';
 import { resetSwarmState, startAgentSession } from '../../../src/state';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
-const TEST_DIR = '/tmp';
+let TEST_DIR = '';
 
 function defaultConfig(
 	overrides?: Partial<GuardrailsConfig>,
@@ -48,13 +50,11 @@ async function expectAllowed(command: string): Promise<void> {
 
 describe('wrapper unwrapping and normalization — adversarial', () => {
 	beforeEach(() => {
+		TEST_DIR = canonicalMkdtemp('destructive-wrapper-');
 		resetSwarmState();
 		startAgentSession('test-session', 'coder');
 	});
-
-	// -------------------------------------------------------------------------
-	// cmd /c and cmd /k wrappers
-	// -------------------------------------------------------------------------
+	afterEach(() => rmSync(TEST_DIR, { recursive: true, force: true }));
 	describe('cmd /c wrapper — cmd.exe shell dispatch', () => {
 		test('cmd /c "rmdir /s /q C:\\target" → BLOCKED', async () => {
 			await expectBlocked('cmd /c "rmdir /s /q C:\\target"');

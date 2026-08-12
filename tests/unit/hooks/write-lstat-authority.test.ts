@@ -336,8 +336,8 @@ describe('universal_deny_prefixes', () => {
 		);
 	});
 
-	it('universal deny is case-insensitive (.ENV blocked by .env prefix)', async () => {
-		// Fix for adversarial finding: case-sensitive startsWith() allowed .ENV bypass
+	it('universal deny case-folds on Windows while POSIX remains case-sensitive', async () => {
+		const isWindows = process.platform === 'win32';
 		const hooks = makeHooks({ universal_deny_prefixes: ['.env'] });
 		coderSession('coder-deny-case');
 
@@ -346,7 +346,7 @@ describe('universal_deny_prefixes', () => {
 				{ tool: 'write', sessionID: 'coder-deny-case', callID: 'u6' },
 				{ args: { filePath: '.ENV' } },
 			),
-		).rejects.toThrow(/universal deny prefix/);
+		).rejects.toThrow(isWindows ? /UNIVERSAL_DENY/ : /POLICY_DENY/);
 	});
 
 	it('blocks paths using ../ traversal that normalize to a denied prefix', async () => {
@@ -614,7 +614,7 @@ describe('declared scope overrides allowedPrefix (#496)', () => {
 				{ tool: 'write', sessionID: id, callID: 's3' },
 				{ args: { filePath: '.swarm/plan.json' } },
 			),
-		).rejects.toThrow(/\.swarm\/plan\.json.*config zone|under \.swarm/);
+		).rejects.toThrow(/AUTHORITY_PROTECTED_PATH/);
 	});
 
 	it('BACKWARD COMPAT: without declare_scope, coder is constrained only by DENY rules', async () => {
@@ -635,7 +635,7 @@ describe('declared scope overrides allowedPrefix (#496)', () => {
 				{ tool: 'write', sessionID: id, callID: 's4a' },
 				{ args: { filePath: '.swarm/plan.json' } },
 			),
-		).rejects.toThrow(/\.swarm\/plan\.json.*config zone|under \.swarm/);
+		).rejects.toThrow(/AUTHORITY_PROTECTED_PATH/);
 
 		// blockedZones: ['generated', 'config'] still applies — a .yml file
 		// classifies as config zone.
@@ -673,9 +673,7 @@ describe('declared scope overrides allowedPrefix (#496)', () => {
 				{ tool: 'write', sessionID: id, callID: 's5' },
 				{ args: { filePath: '.swarm/plan.json' } },
 			),
-		).rejects.toThrow(
-			/WRITE BLOCKED.*\.swarm\/plan\.json.*config zone|WRITE BLOCKED.*under \.swarm/,
-		);
+		).rejects.toThrow(/AUTHORITY_PROTECTED_PATH/);
 	});
 
 	it('SECURITY: readOnly (explorer) still enforced even when path is in declared scope', async () => {
@@ -1036,7 +1034,7 @@ describe('coder transparency (#496)', () => {
 				{ tool: 'write', sessionID: id, callID: 'deny-swarm' },
 				{ args: { filePath: '.swarm/plan.json' } },
 			),
-		).rejects.toThrow(/\.swarm\/plan\.json.*config zone|under \.swarm/);
+		).rejects.toThrow(/AUTHORITY_PROTECTED_PATH/);
 	});
 
 	it('DENY: coder still cannot write through symlink app/x.rb → /etc/shadow', async () => {

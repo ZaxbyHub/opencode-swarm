@@ -17,6 +17,23 @@
 
 > **Migration note:** As of v7.x, SWARM_PLAN files live inside `.swarm/plan-export/` instead of the project root. The `/swarm close` and `/swarm reset --confirm` commands clean up all three locations (`.swarm/plan-export/`, flat `.swarm/`, and project root) during the transition window.
 
+## Durable task write scope (`files_touched`)
+
+Architects author a coding task's exact project-relative write scope with the optional `files_touched` array on `save_plan`. Non-empty arrays are canonicalized with the same path normalizer used by `declare_scope` (separator normalization, dot-segment collapse, deduplication, and stable sorting). Absolute paths, traversal components, empty entries, control characters, entries over 4,096 UTF-8 bytes, and aggregate scope text over 1 MiB fail before any plan write. On revision, omission preserves that task's existing scope; an explicit `[]` clears it.
+
+The field is lossless across the six planning surfaces:
+
+| Surface | `files_touched` contract |
+|---|---|
+| `save_plan` input | Optional per task; normalized once before persistence |
+| Ledger replay and snapshots | Full task data is embedded and replayed; the ledger remains authoritative |
+| `.swarm/plan.json` | Machine-readable derived projection preserves the normalized array |
+| `.swarm/plan.md` | Human-readable derived projection renders sorted JSON-quoted paths; never authoritative |
+| Checkpoint import/export | Full JSON round-trip preserves the array; checkpoint Markdown uses the same derived renderer |
+| `get_approved_plan` | Full mode returns the immutable approved task array; `summary_only` intentionally omits task details |
+
+At coder dispatch, scope-source precedence is active `declare_scope` binding, then plan `files_touched`, then complete `FILE:` directives. Any present lower-precedence set must be a subset of the authoritative set; conflicts fail closed rather than silently widening authority.
+
 ### Ledger append concurrency
 
 `appendLedgerEvent()` serializes its read -> validate -> rewrite sequence under
@@ -307,7 +324,7 @@ Unlike `execution_profile` (which IS included in `computePlanHash`), `fr_refs` i
 When Lean Turbo provisions a lane worktree, the task's declared scope is materialized at:
 
 ```
-<worktreePath>/.swarm/scopes/scope-{taskId}.json
+<worktreePath>/.swarm/scopes/binding-{taskId}-{bindingId}-{generationId}.json
 ```
 
 This enables:
@@ -315,17 +332,51 @@ This enables:
 - **Gitignore inheritance**: The worktree's `.gitignore` is set to include `.swarm/` paths from the host, preventing scope files from being committed to the lane branch.
 - **Cross-lane scope verification**: The scope file is readable by tooling that needs to verify task scope containment without accessing the primary session state.
 
-The scope file schema is the same as the primary `.swarm/scopes/scope-{taskId}.json`:
+Each exact generation uses the same identity-bound v2 schema as the primary workspace:
 ```json
 {
-  "taskId": "1.1",
-  "files": ["src/auth.ts", "src/auth.test.ts"],
-  "whitelist": [],
-  "createdAt": "ISO8601",
-  "expiresAt": "ISO8601",
-  "schemaVersion": "1.0"
+	"version": 2,
+	"bindingId": "0f5e7c0e-41dc-4e78-9a42-53794a5db601",
+	"generationId": "c2fd86ce-6a8e-4e7e-9b1d-2b5be04e4ea0",
+	"revision": 1,
+	"lifecycleState": "live",
+	"workspaceIdentity": "/project/worktree",
+	"taskId": "1.1",
+	"ownerSessionId": "coder-session",
+	"activation": "active",
+	"files": ["src/auth.ts", "src/auth.test.ts"],
+	"declaredAt": 1776024000000,
+	"updatedAt": 1776024000000,
+	"leaseStartedAt": 1776024000000,
+	"expiresAt": 1776027600000
 }
 ```
+
+### Active scope leases and recovery codes
+
+Declarations and pending dispatch records have a bounded inactivity lifetime. Claiming or deriving an active child starts a fresh bounded lease instead of inheriting the declaration's remaining deadline. After a write passes every identity, scope, containment, and authority check and the tool succeeds, the runtime refreshes that exact binding generation with a revision-checked update. A stale revision, different session/task/root, failed tool call, or already expired generation cannot renew authority.
+
+Expiry remains fail-closed. The runtime retains bounded expiry tombstones so restart recovery can identify the expired binding generation and report its `expiredAt` time. The architect must re-read the current task, call `declare_scope` with the exact workspace-relative list and `replace_existing: true`, then dispatch a new Task call. Cleanup and replacement retire only exact generations; ambiguity never selects an enumeration-order winner.
+
+Scope and effective-authority denials use stable recovery codes:
+
+| Code | Meaning and reachable recovery |
+|------|--------------------------------|
+| `SCOPE_NOT_DECLARED` | No exact active generation authorizes this session/task. The architect declares the exact task scope and dispatches a new Task call. |
+| `SCOPE_BINDING_EXPIRED` | The reported generation expired at the reported time. The architect replaces the declaration, then redispatches. |
+| `SCOPE_BINDING_AMBIGUOUS` | Multiple exact live generations match. The architect reconciles/replaces them; the runtime never picks one by order. |
+| `SCOPE_BINDING_PERSISTENCE_FAILED` | The durable write, verification, lock, or rollback transaction failed. Do not retry the write through another mechanism; fix the reported storage failure, then have the architect replace the declaration and redispatch. |
+| `SCOPE_BINDING_CAPACITY` | The bounded live-binding admission capacity is exhausted or the candidate is no longer admissible. Finish or expire terminal tasks, then have the architect declare and dispatch again. |
+| `SCOPE_BINDING_ALREADY_CLAIMED` | This exact Task dispatch already belongs to another child session. Continue with that child or have the architect create a new Task dispatch; never reuse the claimed dispatch identity. |
+| `SCOPE_BINDING_STORE_OVERLOADED` | The complete durable set exceeded its bounded scan/admission budget. Finish or expire terminal tasks before retrying declaration. |
+| `SCOPE_BINDING_STALE` | The generation identity or revision changed, was retired, or is no longer the exact active generation. Stop using the stale child; the architect re-reads current task state, replaces the declaration, and dispatches a new Task call. |
+| `SCOPE_WORKSPACE_MISMATCH` | An otherwise plausible binding belongs to another lane/root. Use the reported active root and workspace-relative paths. |
+| `SCOPE_ROOT_ESCAPE` | The target escapes the active root. Retry only the reported safe relative form; never authorize the outside absolute path. |
+| `SCOPE_CONFLICT` | Explicit, plan, and/or `FILE:` sources disagree. Reconcile the named sets, update stale plan data, and replace the declaration. |
+| `SCOPE_VIOLATION` | The target is outside the active exact scope. Correct the target or have the architect declare the exact intended path and redispatch. |
+| `AUTHORITY_INVALID_PATH` / `AUTHORITY_ROOT_ESCAPE` | Static path validation or authority containment failed. Correct the path/root; declaration cannot override this layer. |
+| `AUTHORITY_UNIVERSAL_DENY` / `AUTHORITY_PROTECTED_PATH` / `AUTHORITY_VERIFIER_CONFIG` | A hard protected policy denied the target. Assign the operation to the supported owner or change the task; scope cannot override it. |
+| `AUTHORITY_ROLE_READ_ONLY` / `AUTHORITY_UNKNOWN_AGENT` / `AUTHORITY_POLICY_DENY` | The acting role cannot perform the write under immutable capability or enabled role policy. Use the responsible writable role or revise policy/task intent. |
 
 ## Quick Reference
 

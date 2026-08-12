@@ -12,6 +12,7 @@ import {
 	registerScopeBinding,
 } from '../../../src/scope/scope-binding';
 import {
+	flushScopeBindingMaintenance,
 	readScopeBindingFromDisk,
 	writeScopeBindingToDisk,
 } from '../../../src/scope/scope-persistence';
@@ -64,8 +65,9 @@ describe('scope guard identity authorization', () => {
 		);
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
 		resetSwarmState();
+		await flushScopeBindingMaintenance(directory);
 		cleanup();
 	});
 
@@ -75,7 +77,7 @@ describe('scope guard identity authorization', () => {
 		swarmState.activeAgent.set(sessionID, 'coder');
 	}
 
-	function binding(sessionID: string) {
+	async function binding(sessionID: string) {
 		const callId = `task-${sessionID}`;
 		const parentSessionId = `parent-${sessionID}`;
 		registerScopeBinding(
@@ -90,18 +92,21 @@ describe('scope guard identity authorization', () => {
 				source: 'plan',
 			})!,
 		);
-		return claimScopeBindingForChild({
+		const claimed = claimScopeBindingForChild({
 			directory,
 			parentSessionId,
 			childSessionId: sessionID,
 			dispatchCallId: callId,
 		})!.claimed;
+		const persisted = await writeScopeBindingToDisk(directory, claimed);
+		if (!persisted.ok) throw new Error(persisted.message);
+		return persisted.value;
 	}
 
 	test('allows only the exact active session for the current plan and task', async () => {
 		coder('session-a');
 		coder('session-b');
-		binding('session-a');
+		await binding('session-a');
 		const hook = createScopeGuardHook({ enabled: true }, directory);
 		await expect(
 			hook.toolBefore(
@@ -120,8 +125,7 @@ describe('scope guard identity authorization', () => {
 	test('durable binding remains session-bound after memory loss', async () => {
 		coder('session-a');
 		coder('session-b');
-		const durable = binding('session-a');
-		await writeScopeBindingToDisk(directory, durable);
+		await binding('session-a');
 		clearScopeBindings();
 		const restarted = ensureAgentSession('session-a');
 		restarted.currentTaskId = null;
@@ -171,6 +175,9 @@ describe('scope guard identity authorization', () => {
 			parentCallId: 'worktree-call',
 		});
 		registerScopeBinding(active);
+		expect(await writeScopeBindingToDisk(worktree, active)).toMatchObject({
+			ok: true,
+		});
 		// Issue #2002: register the child, THEN record its lane root — the exact
 		// production ordering from worktree-isolation.ts. Previously this test
 		// constructed the hook with `worktree`, which silently assumed the gate

@@ -70,6 +70,7 @@ function defaultConfig(
 		max_repetitions: 10,
 		max_consecutive_errors: 5,
 		warning_threshold: 0.75,
+		shell_audit_log: false,
 		profiles: undefined,
 		...overrides,
 	};
@@ -176,7 +177,7 @@ describe('guardrails toolBefore resolves the executing session workspace root (#
 				{ tool: 'bash', sessionID: 'child-shell-oos', callID: 'sh2' },
 				{ args: { command: 'echo hi > src/forbidden.ts' } },
 			),
-		).rejects.toThrow('bash write detected outside declared scope:');
+		).rejects.toThrow(/WRITE BLOCKED: SCOPE_VIOLATION:/);
 	});
 
 	test('3. lane coder direct write with an absolute lane path is allowed when in scope', async () => {
@@ -250,7 +251,7 @@ describe('guardrails toolBefore resolves the executing session workspace root (#
 					},
 				},
 			),
-		).rejects.toThrow(/WRITE BLOCKED.*under \.swarm\//);
+		).rejects.toThrow(/AUTHORITY_PROTECTED_PATH/);
 	});
 
 	test('6a. BASELINE: non-worktree coder in-scope write is unchanged (no recorded root)', async () => {
@@ -291,7 +292,7 @@ describe('guardrails toolBefore resolves the executing session workspace root (#
 				{ tool: 'bash', sessionID: id, callID: 'sh3' },
 				{ args: { command: 'echo hi > src/forbidden.ts' } },
 			),
-		).rejects.toThrow('bash write detected outside declared scope:');
+		).rejects.toThrow(/WRITE BLOCKED: SCOPE_VIOLATION:/);
 	});
 
 	test('7a. BASELINE: direct write with no active agent registered fails closed', async () => {

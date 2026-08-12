@@ -47,9 +47,9 @@ describe('Issue #1984: actionable allowedPrefix block reason', () => {
 			);
 			expect(result.allowed).toBe(false);
 			if (isDenied(result)) {
-				// Legacy phrase preserved (regression guard).
+				expect(result.code).toBe('AUTHORITY_POLICY_DENY');
 				expect(result.reason).toContain(
-					'not in allowed list for test_engineer',
+					'path is not in allowed list for this role.',
 				);
 				// Allowed prefixes from DEFAULT_AGENT_AUTHORITY_RULES.test_engineer.
 				expect(result.reason).toContain(
@@ -419,7 +419,7 @@ describe('Issue #1984: toolBefore surfaces the actionable hint', () => {
 					{ args: { filePath: 'src/foo.ts' } },
 				),
 			).rejects.toThrow(
-				/not in allowed list for docs.*Allowed prefixes: docs\/, \.swarm\/outputs\//,
+				/path is not in allowed list for this role\..*Allowed prefixes: docs\/, \.swarm\/outputs\//,
 			);
 		} finally {
 			process.chdir(originalCwd);

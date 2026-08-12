@@ -873,8 +873,7 @@ export function resetSwarmState(): void {
 	for (const binding of clearScopeBindings()) {
 		clearScopeBindingFromDisk({
 			directory: binding.workspaceIdentity,
-			taskId: binding.taskId,
-			ownerSessionId: binding.ownerSessionId,
+			binding,
 		});
 	}
 	resetStandardWorktreeIsolationState();
@@ -1738,8 +1737,7 @@ export function endAgentSession(sessionId: string): void {
 	for (const binding of removedBindings) {
 		clearScopeBindingFromDisk({
 			directory: binding.workspaceIdentity,
-			taskId: binding.taskId,
-			ownerSessionId: binding.ownerSessionId,
+			binding,
 		});
 	}
 	swarmState.agentSessions.delete(sessionId);

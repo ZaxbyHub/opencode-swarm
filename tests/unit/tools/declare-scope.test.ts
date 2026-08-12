@@ -55,7 +55,7 @@ describe('validateFiles', () => {
 		const longPath = 'a'.repeat(4097);
 		const errors = validateFiles([longPath]);
 		expect(errors.length).toBe(1);
-		expect(errors[0]).toContain('exceeds maximum length of 4096 characters');
+		expect(errors[0]).toContain('exceeds maximum length of 4096 UTF-8 bytes');
 	});
 
 	test('returns multiple errors when multiple files fail', () => {

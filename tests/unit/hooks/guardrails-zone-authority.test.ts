@@ -153,8 +153,8 @@ describe('guardrails-zone-authority - Zone Authority Integration', () => {
 			const result = checkFileAuthority('coder', 'src/tsconfig.json', tempDir);
 			expect(result.allowed).toBe(false);
 			if (isDenied(result)) {
-				expect(result.reason).toContain('config');
-				expect(result.zone).toBe('config');
+				expect(result.code).toBe('AUTHORITY_VERIFIER_CONFIG');
+				expect(result.reason).toContain('tsconfig');
 			}
 		});
 
@@ -171,8 +171,8 @@ describe('guardrails-zone-authority - Zone Authority Integration', () => {
 			const result = checkFileAuthority('coder', 'src/biome.json', tempDir);
 			expect(result.allowed).toBe(false);
 			if (isDenied(result)) {
-				expect(result.reason).toContain('config');
-				expect(result.zone).toBe('config');
+				expect(result.code).toBe('AUTHORITY_VERIFIER_CONFIG');
+				expect(result.reason).toContain('biome.json');
 			}
 		});
 
@@ -462,8 +462,8 @@ describe('guardrails-zone-authority - Zone Authority Integration', () => {
 			const result = checkFileAuthority('architect', 'biome.json', tempDir);
 			expect(result.allowed).toBe(false);
 			if (isDenied(result)) {
-				expect(result.reason).toContain('config');
-				expect(result.zone).toBe('config');
+				expect(result.code).toBe('AUTHORITY_VERIFIER_CONFIG');
+				expect(result.reason).toContain('biome.json');
 			}
 		});
 
@@ -490,8 +490,8 @@ describe('guardrails-zone-authority - Zone Authority Integration', () => {
 			const result = checkFileAuthority('architect', 'tsconfig.json', tempDir);
 			expect(result.allowed).toBe(false);
 			if (isDenied(result)) {
-				expect(result.reason).toContain('config');
-				expect(result.zone).toBe('config');
+				expect(result.code).toBe('AUTHORITY_VERIFIER_CONFIG');
+				expect(result.reason).toContain('tsconfig');
 			}
 		});
 
