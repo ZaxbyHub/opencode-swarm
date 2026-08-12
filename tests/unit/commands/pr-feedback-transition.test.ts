@@ -25,7 +25,7 @@ import {
 } from '../hooks/pr-workflow-gate.test-fixtures.js';
 
 const PR_URL = 'https://github.com/owner/repo/pull/155';
-const RUN_ID = 'review-boundaries';
+const RUN_ID = 'test-run';
 
 beforeEach(setupPrWorkflowGateFixtures);
 afterEach(async () => {

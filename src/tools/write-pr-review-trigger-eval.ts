@@ -136,6 +136,25 @@ export async function executeWritePrReviewTriggerEval(
 			`PR_REVIEW trigger evaluation head mismatch: expected ${gateState.prHeadSha}, received ${parsed.data.pr_head_sha}`,
 		);
 	}
+	// Fail fast on a run_id that disagrees with an already-bound run, before the
+	// expensive classification/provenance validation. Mirrors the findings writer
+	// pre-check (`write-pr-review-artifact.ts`) and closes issue #2124.
+	if (
+		gateState.prReviewArtifactRunId &&
+		gateState.prReviewArtifactRunId !== parsed.data.run_id
+	) {
+		return failure(
+			`PR_REVIEW trigger evaluation run_id must match the findings artifact run "${gateState.prReviewArtifactRunId}"`,
+		);
+	}
+	if (
+		gateState.prReviewTriggerEvalRunId &&
+		gateState.prReviewTriggerEvalRunId !== parsed.data.run_id
+	) {
+		return failure(
+			`PR_REVIEW trigger evaluation is already bound to run "${gateState.prReviewTriggerEvalRunId}"`,
+		);
+	}
 	try {
 		await assertPrReviewBaseCoverageSettled(directory, sessionID);
 	} catch (error) {
@@ -385,6 +404,20 @@ export async function executeWritePrReviewTriggerEval(
 	} catch (error) {
 		return failure(error instanceof Error ? error.message : String(error));
 	}
+	// The receipt is a tamper-evident coverage proof consumed once per run. A
+	// repeat write for the same run_id must NOT silently replace the prior
+	// receipt: `fs.rename` clobbers an existing destination, so refuse an existing
+	// destination before writing. This guard closes the single-session retry
+	// threat (#2124's scope): tool calls within a session are serialized, so the
+	// check-then-rename has no intra-session race. A residual cross-session
+	// TOCTOU remains (two sessions writing the same path concurrently) — that is
+	// out of scope and is also bounded by the per-run binding above. Recovery is
+	// `abort_pr_workflow` (see "Aborting an unrecoverable review" in the skill).
+	if (fs.existsSync(destination)) {
+		return failure(
+			`PR_REVIEW trigger evaluation receipt already exists for run "${parsed.data.run_id}" and cannot be overwritten; abort the workflow with abort_pr_workflow to restart`,
+		);
+	}
 
 	const parent = path.dirname(destination);
 	const tempPath = path.join(parent, `.trigger-eval.${randomUUID()}.tmp`);
@@ -408,6 +441,7 @@ export async function executeWritePrReviewTriggerEval(
 	await markPrReviewTriggerEvaluationComplete(
 		directory,
 		sessionID,
+		parsed.data.run_id,
 		relativePath.split(path.sep).join('/'),
 	);
 

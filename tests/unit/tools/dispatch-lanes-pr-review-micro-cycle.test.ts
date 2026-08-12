@@ -175,6 +175,9 @@ describe('PR-review trigger-evaluation and micro-dispatch cycle', () => {
 		);
 		expect(driftedDispatch.success).toBe(false);
 		expect(driftedDispatch.message).toContain('exactly identical');
+		// #2126: the final-receipt clause was removed; only classifications must
+		// match at the receipt, so the message must not mention the final receipt.
+		expect(driftedDispatch.message).not.toContain('and the final receipt');
 
 		const evidenceDrift = structuredClone(ledger);
 		evidenceDrift[0].evidence = 'different evidence for the same result';
@@ -185,6 +188,7 @@ describe('PR-review trigger-evaluation and micro-dispatch cycle', () => {
 		);
 		expect(evidenceDispatch.success).toBe(false);
 		expect(evidenceDispatch.message).toContain('exactly identical');
+		expect(evidenceDispatch.message).not.toContain('and the final receipt');
 		expect(createdSessions).toBe(2);
 
 		const writerRows = resultDrift.map((row) =>

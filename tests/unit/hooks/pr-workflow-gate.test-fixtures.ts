@@ -363,6 +363,7 @@ export async function establishReviewPrerequisitesWithConsolidatedMicroLane(
 	await markPrReviewTriggerEvaluationComplete(
 		tempDir,
 		SESSION_ID,
+		'test-run',
 		triggerRelative,
 	);
 	return { consolidatedCandidateId, baseCandidateIds };
@@ -417,6 +418,7 @@ export async function establishReviewPrerequisites(): Promise<void> {
 	await markPrReviewTriggerEvaluationComplete(
 		tempDir,
 		SESSION_ID,
+		'test-run',
 		triggerRelative,
 	);
 }
@@ -555,6 +557,7 @@ export async function establishReviewPrerequisitesWithOverlappingBaseRetry(): Pr
 	await markPrReviewTriggerEvaluationComplete(
 		tempDir,
 		SESSION_ID,
+		'test-run',
 		triggerRelative,
 	);
 
@@ -693,6 +696,7 @@ export async function establishReviewPrerequisitesWithMislabeledSingletonLane():
 	await markPrReviewTriggerEvaluationComplete(
 		tempDir,
 		SESSION_ID,
+		'test-run',
 		triggerRelative,
 	);
 	return { normalCandidateIds, coveringCandidateId, mislabeledCandidateId };

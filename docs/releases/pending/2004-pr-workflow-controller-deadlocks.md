@@ -11,7 +11,9 @@
   from provenance-free `NOT_TRIGGERED` families. Only matched families launch
   micro lanes; strict schema-v2 counts and provenance are shared by dispatch,
   persistence, and gate readers. The first micro dispatch freezes the exact
-  ledger across later batches and the final receipt, while legacy
+  ledger (classifications and evidence) across every later micro dispatch; the
+  final receipt re-validates per-family classifications against the frozen
+  ledger but does not require byte-identical evidence, while legacy
   v1/unversioned reads remain preserved.
 - Candidate ingestion and workflow coverage now share one semantic row
   contract for exact marker headers and fields, fenced-content isolation,

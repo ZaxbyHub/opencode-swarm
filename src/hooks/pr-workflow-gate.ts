@@ -10,7 +10,6 @@ import {
 	candidateHeaderFamily,
 	normalizeCandidateArtifact,
 	type RowFormatFamily,
-	removeCandidateCodeFences,
 	selectCandidateHeader,
 	splitPipeFields,
 } from '../background/candidate-contract.js';
@@ -475,6 +474,13 @@ export interface PrWorkflowGateState {
 	/** Canonical ordered semantic ledger frozen by the first micro dispatch. */
 	prReviewTriggerLedger?: PrReviewInlineTriggerRow[];
 	prReviewTriggerEvalPath?: string;
+	/**
+	 * The run_id bound to the trigger-evaluation receipt at first consumption.
+	 * Mirrors `prReviewArtifactRunId`: once set, a subsequent receipt under a
+	 * different run_id is rejected, and it must agree with the findings artifact
+	 * run_id (both live under `.swarm/pr-review/<run_id>/`). Closes issue #2124.
+	 */
+	prReviewTriggerEvalRunId?: string;
 	prReviewValidationBatches?: PrReviewValidationBatchRecord[];
 	/** Keyed by validation batch id. See `PrReviewBatchCoherenceRecord`. */
 	prReviewBatchCoherence?: Record<string, PrReviewBatchCoherenceRecord>;
@@ -846,6 +852,7 @@ const PrWorkflowGateStateSchema = z
 			.length(PR_REVIEW_REQUIRED_TRIGGER_IDS.length)
 			.optional(),
 		prReviewTriggerEvalPath: z.string().min(1).optional(),
+		prReviewTriggerEvalRunId: z.string().min(1).optional(),
 		prReviewValidationBatches: z
 			.array(PrReviewValidationBatchRecordSchema)
 			.max(MAX_WORKFLOW_BATCHES)
@@ -3480,17 +3487,45 @@ async function assertPrFeedbackPublicationArmed(
 export async function markPrReviewTriggerEvaluationComplete(
 	directory: string,
 	sessionID: string,
+	runId: string,
 	artifactPath: string,
 ): Promise<PrWorkflowGateState> {
 	const state = await assertPrReviewBaseCoverageSettled(directory, sessionID);
+	const normalizedRunId = runId.trim();
+	if (!normalizedRunId) {
+		throw new Error('BLOCKED: PR_REVIEW trigger artifact run_id is required');
+	}
 	const normalizedPath = artifactPath.trim();
 	if (!normalizedPath) {
 		throw new Error('BLOCKED: PR_REVIEW trigger artifact path is required');
+	}
+	// The receipt is consumed once and bound to a single run_id for the session.
+	// Mirrors the `prReviewArtifactRunId` equality check used for the findings
+	// artifact at `assertPrReviewArtifactBoundary`, closing issue #2124.
+	if (
+		state.prReviewTriggerEvalRunId &&
+		state.prReviewTriggerEvalRunId !== normalizedRunId
+	) {
+		throw new Error(
+			`BLOCKED: PR_REVIEW trigger evaluation is already bound to run "${state.prReviewTriggerEvalRunId}"`,
+		);
+	}
+	// The trigger-eval receipt and the findings artifact share one
+	// `.swarm/pr-review/<run_id>/` directory, so their run_ids must agree once
+	// either is bound.
+	if (
+		state.prReviewArtifactRunId &&
+		state.prReviewArtifactRunId !== normalizedRunId
+	) {
+		throw new Error(
+			`BLOCKED: PR_REVIEW trigger evaluation run_id must match the findings artifact run "${state.prReviewArtifactRunId}"`,
+		);
 	}
 	const nextState: PrWorkflowGateState = {
 		...state,
 		updatedAt: isoNow(),
 		prReviewTriggerEvalPath: normalizedPath,
+		prReviewTriggerEvalRunId: normalizedRunId,
 	};
 	await persistState(directory, nextState);
 	return nextState;
@@ -3529,7 +3564,7 @@ export async function bindPrReviewTriggerLedger(
 			prReviewTriggerLedgerDigest(ledger.rows)
 		) {
 			throw new Error(
-				'BLOCKED: PR_REVIEW trigger_evaluation must remain exactly identical across every micro dispatch and the final receipt',
+				'BLOCKED: PR_REVIEW trigger_evaluation must remain exactly identical across every micro dispatch',
 			);
 		}
 		return state;
@@ -3620,6 +3655,17 @@ export async function assertPrReviewArtifactBoundary(
 	if (state.prReviewArtifactRunId && state.prReviewArtifactRunId !== runId) {
 		throw new Error(
 			`BLOCKED: PR_REVIEW artifacts are already bound to run "${state.prReviewArtifactRunId}"`,
+		);
+	}
+	// The findings artifact and the trigger-eval receipt share one
+	// `.swarm/pr-review/<run_id>/` directory; once the trigger-eval run_id is
+	// bound, findings must use the same run (issue #2124).
+	if (
+		state.prReviewTriggerEvalRunId &&
+		state.prReviewTriggerEvalRunId !== runId
+	) {
+		throw new Error(
+			`BLOCKED: PR_REVIEW findings must use the same run as the trigger evaluation "${state.prReviewTriggerEvalRunId}"`,
 		);
 	}
 	const expectedFindingIds = derivePrReviewCandidateInventory(
