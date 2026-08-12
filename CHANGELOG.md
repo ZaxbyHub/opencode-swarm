@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.139.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.138.4...v7.139.0) (2026-08-12)
+
+
+### Features
+
+* **run-memory:** record task outcomes so run-memory injection works ([d706ada](https://github.com/ZaxbyHub/opencode-swarm/commit/d706adad7bf72ea2178550f9c7ff3b0b3833baaa))
+* **run-memory:** record task outcomes so run-memory injection works ([ec29c74](https://github.com/ZaxbyHub/opencode-swarm/commit/ec29c74802d3a4039838882617ac5daa07f4448d))
+
 ## [7.138.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.138.3...v7.138.4) (2026-08-12)
 
 
