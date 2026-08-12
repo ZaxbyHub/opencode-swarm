@@ -256,24 +256,28 @@ once pre-check succeeds.
 | `max_concurrent_tasks` | integer 1–64 | `10` | Max simultaneous tasks when parallel is enabled |
 | `council_parallel` | boolean | `true` | Allows council review phases to parallelise |
 | `locked` | boolean | `false` | When true, profile is immutable (fail-closed enforcement) |
+| `auto_proceed` | boolean | `false` | Advances across phase boundaries without another prompt |
+| `commit_after_each_completed_task` | boolean | `false` | Requests a checkpoint after successful task completion and pre-commit gates |
 
 ### Invariants
 
 - **Locked profile is immutable**: any `save_plan` call that includes `execution_profile` while the current plan has a locked profile will be rejected.
 - **Fail-closed enforcement**: the delegation gate enforces a locked profile — `parallelization_enabled: false` blocks Stage B parallel dispatch regardless of global plugin config.
 - **Ledger authority**: profile changes are recorded as `execution_profile_set` / `execution_profile_locked` events. Replay rebuilds the profile deterministically from these events.
-- **Hash coverage**: `execution_profile` is included in `computePlanHash`, so profile changes are always reflected in the ledger's `plan_hash_after` chain.
+- **Hash coverage**: `execution_profile` is included in both ledger `computePlanHash` and Markdown `computePlanContentHash`, so profile-only changes update the ledger chain and invalidate a stale `plan.md` projection.
 - **All surfaces carry the profile**: snapshot events, checkpoint export (`.swarm/plan-export/SWARM_PLAN.json`), handoff data, export data, and `get_approved_plan` output all include `execution_profile`.
 
 ### Lifecycle
 
 ```
-1. Architect calls save_plan with execution_profile to set concurrency intent.
-2. Architect calls save_plan again with locked: true to lock it (or sets locked in step 1).
-3. Ledger records execution_profile_set and execution_profile_locked events.
-4. Delegation gate enforces the locked profile on every Stage B dispatch.
-5. Critic drift verifier checks for profile drift via get_approved_plan.
-6. To change a locked profile: use save_plan with reset_statuses: true to start fresh.
+1. Architect drafts task scopes and freezes the exact `swarm_id` plus plan title.
+2. Architect persists the QA profile with `set_qa_gates` against that identity before the first plan save.
+   Upgraded legacy recovery: when a durable plan still points at an unbound legacy QA row, rerun `set_qa_gates` with the same exact `swarm_id`, `plan_title`, and `adopt_legacy_binding_only: true` to exact-bind the existing profile without changing gates or the lock.
+3. Architect calls `save_plan` once with the same identity and the complete locked execution profile, including parallelism, auto-proceed, and checkpoint policy.
+4. Ledger records `execution_profile_set` and `execution_profile_locked` events.
+5. Delegation and execution protocols read the durable profile; transient `.swarm/context.md` sections are not an execution-policy authority.
+6. Critic drift verifier checks for profile drift via `get_approved_plan`.
+7. To change a locked profile: use `save_plan` with `reset_statuses: true` to start fresh.
 ```
 
 ### Round-trip surfaces
@@ -281,6 +285,7 @@ once pre-check succeeds.
 | Surface | Carries execution_profile? |
 |---------|--------------------------|
 | `plan.json` | ✅ Persisted in schema |
+| `plan.md` | ✅ Complete human-readable projection, content-hash protected |
 | Ledger replay | ✅ Via `execution_profile_set` events |
 | Snapshot events | ✅ Embedded in Plan payload |
 | `.swarm/plan-export/SWARM_PLAN.json` checkpoint | ✅ Via full Plan payload |

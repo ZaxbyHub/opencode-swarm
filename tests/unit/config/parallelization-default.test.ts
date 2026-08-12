@@ -19,6 +19,7 @@ let tempDir: string;
 let swarmDir: string;
 
 beforeEach(() => {
+	process.env.SWARM_SKIP_GATE_SELECTION = '1';
 	tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v8-parallel-default-'));
 	swarmDir = path.join(tempDir, '.swarm');
 	fs.mkdirSync(swarmDir, { recursive: true });
@@ -37,6 +38,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	delete process.env.SWARM_SKIP_GATE_SELECTION;
 	try {
 		fs.rmSync(tempDir, { recursive: true, force: true });
 	} catch {

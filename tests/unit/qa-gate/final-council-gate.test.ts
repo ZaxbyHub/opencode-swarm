@@ -1,21 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import {
-	mkdirSync,
-	mkdtempSync,
-	readFileSync,
-	rmSync,
-	writeFileSync,
-} from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { handleQaGatesCommand } from '../../../src/commands/qa-gates';
 import { closeProjectDb } from '../../../src/db/project-db';
-import { DEFAULT_QA_GATES, getProfile } from '../../../src/db/qa-gate-profile';
+import {
+	DEFAULT_QA_GATES,
+	getProfileForIdentity,
+} from '../../../src/db/qa-gate-profile';
 import type { SetQaGatesArgs } from '../../../src/tools/set-qa-gates';
 import {
 	executeSetQaGates,
 	set_qa_gates,
 } from '../../../src/tools/set-qa-gates';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 describe('final_council gate integration', () => {
 	function writeValidPlan(directory: string): void {
@@ -61,7 +58,7 @@ describe('final_council gate integration', () => {
 		it('ALL_GATE_NAMES includes final_council (verified via command error message)', async () => {
 			// Pass an invalid gate name; the error should list all valid gates
 			// which includes 'final_council'
-			const tempDir = mkdtempSync(join(tmpdir(), 'final-council-gate-test-'));
+			const tempDir = canonicalMkdtemp('final-council-gate-test-');
 			writeValidPlan(tempDir);
 			const result = await handleQaGatesCommand(
 				tempDir,
@@ -144,7 +141,7 @@ describe('final_council gate integration', () => {
 		let tempDir: string;
 
 		beforeEach(() => {
-			tempDir = mkdtempSync(join(tmpdir(), 'final-council-gate-test-'));
+			tempDir = canonicalMkdtemp('final-council-gate-test-');
 			writeValidPlan(tempDir);
 		});
 
@@ -156,7 +153,10 @@ describe('final_council gate integration', () => {
 		it('set_qa_gates persists final_council: true to profile', async () => {
 			const result = await executeSetQaGates({ final_council: true }, tempDir);
 			expect(result.success).toBe(true);
-			const profile = getProfile(tempDir, result.plan_id!);
+			const profile = getProfileForIdentity(tempDir, {
+				swarm: 'test-swarm',
+				title: 'Test Plan',
+			});
 			expect(profile).not.toBeNull();
 			expect(profile!.gates.final_council).toBe(true);
 		});

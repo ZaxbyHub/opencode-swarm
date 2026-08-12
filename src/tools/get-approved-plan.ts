@@ -17,7 +17,11 @@
 
 import type { tool } from '@opencode-ai/plugin';
 import { z } from 'zod';
-import { computeProfileHash, getProfile } from '../db/qa-gate-profile.js';
+import type { ExecutionProfile } from '../config/plan-schema';
+import {
+	computeProfileHash,
+	getProfileLookupForIdentity,
+} from '../db/qa-gate-profile.js';
 import {
 	type ApprovedSnapshotInfo,
 	computePlanHash,
@@ -49,12 +53,7 @@ interface ApprovedPlanPayload {
 	snapshot_timestamp: string;
 	payload_hash: string;
 	/** The execution_profile from the approved snapshot, if any. */
-	execution_profile?: {
-		parallelization_enabled: boolean;
-		max_concurrent_tasks: number;
-		council_parallel: boolean;
-		locked: boolean;
-	} | null;
+	execution_profile?: ExecutionProfile | null;
 }
 
 interface CurrentPlanPayload {
@@ -142,8 +141,11 @@ export async function executeGetApprovedPlan(
 	// Compute QA gate profile hash for drift detection. Null when no profile
 	// exists yet (e.g. brand-new plan). Profile hash is independent of plan
 	// content — tracked so the critic can detect silent gate mutations.
-	const profile = getProfile(directory, expectedPlanId);
-	const qaProfileHash = profile ? computeProfileHash(profile) : null;
+	const profileLookup = getProfileLookupForIdentity(directory, currentPlan);
+	const qaProfileHash =
+		profileLookup.kind === 'bound'
+			? computeProfileHash(profileLookup.profile)
+			: null;
 
 	// Step 3: Load the most recent critic-approved snapshot (identity-scoped)
 	const approved: ApprovedSnapshotInfo | null = await loadLastApprovedPlan(

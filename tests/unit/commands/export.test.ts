@@ -85,6 +85,30 @@ Working on Phase 1
 		expect(result).toContain('```');
 	});
 
+	test('structured export preserves the complete execution profile', async () => {
+		await writeFile(
+			join(tempDir, '.swarm', 'plan.json'),
+			JSON.stringify({
+				schema_version: '1.0.0',
+				title: 'Export profile',
+				swarm: 'export-profile',
+				phases: [{ id: 1, name: 'One', status: 'pending', tasks: [] }],
+				execution_profile: {
+					parallelization_enabled: true,
+					max_concurrent_tasks: 2,
+					council_parallel: false,
+					locked: true,
+					auto_proceed: true,
+					commit_after_each_completed_task: true,
+				},
+			}),
+		);
+
+		const result = await handleExportCommand(tempDir, []);
+		expect(result).toContain('"auto_proceed": true');
+		expect(result).toContain('"commit_after_each_completed_task": true');
+	});
+
 	test('Context missing', async () => {
 		// Create only plan.md
 		await writeFile(

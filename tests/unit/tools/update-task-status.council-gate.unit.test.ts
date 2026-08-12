@@ -3,7 +3,13 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { closeProjectDb } from '../../../src/db/project-db';
-import { getOrCreateProfile, setGates } from '../../../src/db/qa-gate-profile';
+import {
+	getOrCreateProfile,
+	lockProfile,
+	setGates,
+	setGatesForIdentity,
+} from '../../../src/db/qa-gate-profile';
+import { executeSetQaGates } from '../../../src/tools/set-qa-gates';
 import { checkCouncilGate } from '../../../src/tools/update-task-status';
 
 type CouncilGate = {
@@ -31,6 +37,7 @@ const TASK_ID = '1.1';
 const PLAN_SWARM = 'test-swarm';
 const PLAN_TITLE = 'test-plan';
 const PLAN_ID = `${PLAN_SWARM}-${PLAN_TITLE}`.replace(/[^a-zA-Z0-9-_]/g, '_');
+const PLAN_IDENTITY = { swarm: PLAN_SWARM, title: PLAN_TITLE };
 
 function writeFixture(opts: FixtureOptions): void {
 	// .opencode/opencode-swarm.json
@@ -49,17 +56,34 @@ function writeFixture(opts: FixtureOptions): void {
 	writeFileSync(
 		join(tempDir, '.swarm', 'plan.json'),
 		JSON.stringify({
+			schema_version: '1.0.0',
 			swarm: PLAN_SWARM,
 			title: PLAN_TITLE,
-			spec: '',
-			phases: [],
+			current_phase: 1,
+			phases: [
+				{
+					id: 1,
+					name: 'Phase 1',
+					status: 'pending',
+					tasks: [
+						{
+							id: TASK_ID,
+							phase: 1,
+							status: 'pending',
+							size: 'small',
+							description: 'Test task',
+							depends: [],
+							files_touched: [],
+						},
+					],
+				},
+			],
 		}),
 	);
 
 	// QA gate profile in the project DB — write council_mode if requested
 	if (opts.councilModeEnabled) {
-		getOrCreateProfile(tempDir, PLAN_ID);
-		setGates(tempDir, PLAN_ID, { council_mode: true });
+		setGatesForIdentity(tempDir, PLAN_IDENTITY, { council_mode: true });
 	}
 
 	// .swarm/evidence/1.1.json
@@ -190,11 +214,50 @@ describe('checkCouncilGate — council.enabled=true BUT council_mode=false (AND 
 
 	test('council_mode=false explicitly in profile, no evidence → NOT blocked', () => {
 		// Create profile but leave council_mode at its default (false)
-		getOrCreateProfile(tempDir, PLAN_ID);
+		setGatesForIdentity(tempDir, PLAN_IDENTITY, {});
 		writeFixture({ councilEnabled: true, councilGate: null });
 		const result = checkCouncilGate(tempDir, TASK_ID);
 		expect(result.blocked).toBe(false);
 		expect(result.reason).toBe('');
+	});
+
+	test('legacy unbound council_mode=true row blocks fail-closed with an exact-bind reason', () => {
+		writeFixture({ councilEnabled: true, councilGate: null });
+		getOrCreateProfile(tempDir, PLAN_ID);
+		setGates(tempDir, PLAN_ID, { council_mode: true });
+
+		const result = checkCouncilGate(tempDir, TASK_ID);
+		expect(result.blocked).toBe(true);
+		expect(result.reason).toMatch(/not exact-bound/i);
+	});
+
+	test('binding-only adoption lets a locked legacy council profile resume enforcement', async () => {
+		writeFixture({
+			councilEnabled: true,
+			councilGate: { verdict: 'APPROVE', quorumSize: 3 },
+		});
+		getOrCreateProfile(tempDir, PLAN_ID);
+		setGates(tempDir, PLAN_ID, { council_mode: true });
+		lockProfile(tempDir, PLAN_ID, 7);
+
+		const blocked = checkCouncilGate(tempDir, TASK_ID);
+		expect(blocked.blocked).toBe(true);
+		expect(blocked.reason).toContain('adopt_legacy_binding_only');
+
+		const adopted = await executeSetQaGates(
+			{
+				swarm_id: PLAN_SWARM,
+				plan_title: PLAN_TITLE,
+				adopt_legacy_binding_only: true,
+			},
+			tempDir,
+		);
+		expect(adopted.success).toBe(true);
+		expect(adopted.profile?.locked_by_snapshot_seq).toBe(7);
+
+		const resumed = checkCouncilGate(tempDir, TASK_ID);
+		expect(resumed.blocked).toBe(false);
+		expect(resumed.reason).toBe('');
 	});
 
 	test('council_mode=false, verdict=REJECT → NOT blocked (gate inactive)', () => {

@@ -1,9 +1,14 @@
 import * as child_process from 'node:child_process';
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { ToolDefinition } from '@opencode-ai/plugin/tool';
 import { z } from 'zod';
 import { loadPluginConfigWithMeta } from '../config';
+import { getProjectDb, projectDbExists } from '../db/project-db.js';
+import { tryAcquireLock } from '../parallel/file-locks.js';
+import { loadPlan } from '../plan/manager.js';
+import { derivePlanIdentityHash } from '../plan/utils.js';
 import {
 	isTransientSpawnError,
 	MAX_TRANSIENT_RETRIES,
@@ -11,20 +16,31 @@ import {
 } from '../utils/transient-retry.js';
 import { createSwarmTool } from './create-tool';
 
-// ============ Constants ============
 const CHECKPOINT_LOG_PATH = '.swarm/checkpoints.json';
+const CHECKPOINT_AGENT_NAME = 'checkpoint';
 const MAX_LABEL_LENGTH = 100;
 const GIT_TIMEOUT_MS = 30_000;
 const GIT_MAX_BUFFER_BYTES = 5 * 1024 * 1024;
+const CHECKPOINT_LOCK_MAX_ATTEMPTS = 20;
+const CHECKPOINT_LOCK_DELAY_MS = 250;
+const CHECKPOINT_LOCK_DEADLINE_MS = 45_000;
+const CHECKPOINT_RECEIPT_LOOKUP_LIMIT = 25;
+const TASK_COMPLETION_HASH_LENGTH = 16;
+const NON_SWARM_COMMIT_PATHSPEC = [
+	'.',
+	':(exclude,top).swarm',
+	':(exclude,top).swarm/**',
+] as const;
 
-// Shell metacharacters that could enable injection
 const SHELL_METACHARACTERS = /[;|&$`(){}<>!'"]/;
-
-// Safe characters for labels: ASCII alphanumeric, hyphens, underscores, literal spaces only
-// Excludes tabs, newlines, control chars, BOM, non-ASCII unicode, emoji, etc.
 const SAFE_LABEL_PATTERN = /^[a-zA-Z0-9_ -]+$/;
+// biome-ignore lint/suspicious/noControlCharactersInRegex: intentional security validation pattern
+const CONTROL_CHAR_PATTERN = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/;
+const NON_ASCII_PATTERN = /[^\x20-\x7E]/;
 
-// ============ Types ============
+type MutationAction = 'save' | 'restore' | 'delete' | 'save_task_completion';
+type TaskCheckpointReceiptState = 'pending' | 'committed' | 'logged';
+
 interface GitRepoProbe {
 	isRepo: boolean;
 	warning?: string;
@@ -48,20 +64,57 @@ interface RetentionEvent {
 	remaining_count: number;
 }
 
-// ============ Validation ============
+interface TaskCheckpointReceiptRow {
+	plan_identity_hash: string;
+	task_id: string;
+	label: string;
+	state: TaskCheckpointReceiptState;
+	sha: string | null;
+	created_at: string;
+	updated_at: string;
+}
 
-// Control characters to reject: tab, newline, carriage return, vertical tab, form feed, null, etc.
-// biome-ignore lint/suspicious/noControlCharactersInRegex: intentional security validation pattern
-const CONTROL_CHAR_PATTERN = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/;
+interface TaskCompletionCheckpointDescriptor {
+	planIdentityHash: string;
+	taskId: string;
+	label: string;
+	subject: string;
+}
 
-// BOM and non-ASCII unicode pattern (emoji, accented chars, etc.)
-const NON_ASCII_PATTERN = /[^\x20-\x7E]/;
+export const _internals: {
+	tryAcquireLock: typeof tryAcquireLock;
+	loadPlan: typeof loadPlan;
+	getProjectDb: typeof getProjectDb;
+	projectDbExists: typeof projectDbExists;
+	gitExec: typeof gitExec;
+	sleep: (ms: number) => Promise<void>;
+	findCommitByExactSubject: typeof findCommitByExactSubject;
+	stageAllExcludingSwarm: typeof stageAllExcludingSwarm;
+} = {
+	tryAcquireLock,
+	loadPlan,
+	getProjectDb,
+	projectDbExists,
+	gitExec,
+	sleep: (ms: number) => new Promise((resolve) => setTimeout(resolve, ms)),
+	findCommitByExactSubject,
+	stageAllExcludingSwarm,
+};
 
-/**
- * Explicit character-code based ASCII validation.
- * Rejects any character outside printable ASCII range 0x20..0x7E.
- * This provides deterministic rejection of non-ASCII labels (emoji, accented chars like café).
- */
+function serializeResult(
+	action: MutationAction | 'list' | 'unknown',
+	payload: Record<string, unknown>,
+): string {
+	return JSON.stringify(
+		{
+			action,
+			...payload,
+		},
+		null,
+		2,
+	);
+}
+
 function containsNonAsciiChars(label: string): boolean {
 	for (let i = 0; i < label.length; i++) {
 		const charCode = label.charCodeAt(i);
@@ -72,9 +125,6 @@ function containsNonAsciiChars(label: string): boolean {
 	return false;
 }
 
-/**
- * Validate checkpoint label - no shell metacharacters or path traversal
- */
 function validateLabel(label: string): string | null {
 	if (!label || label.length === 0) {
 		return 'label is required';
@@ -82,19 +132,15 @@ function validateLabel(label: string): string | null {
 	if (label.length > MAX_LABEL_LENGTH) {
 		return `label exceeds maximum length of ${MAX_LABEL_LENGTH}`;
 	}
-	// Reject git flag patterns (--prefix)
 	if (label.startsWith('--')) {
 		return 'label cannot start with "--" (git flag pattern)';
 	}
-	// Reject control characters
 	if (CONTROL_CHAR_PATTERN.test(label)) {
 		return 'label contains control characters';
 	}
-	// Reject BOM and non-ASCII characters (emoji, accented chars, etc.)
 	if (NON_ASCII_PATTERN.test(label)) {
 		return 'label contains non-ASCII or invalid characters';
 	}
-	// Explicit character-code check: reject any char outside printable ASCII 0x20..0x7E
 	if (containsNonAsciiChars(label)) {
 		return 'label contains non-ASCII characters (must be printable ASCII only)';
 	}
@@ -104,69 +150,116 @@ function validateLabel(label: string): string | null {
 	if (!SAFE_LABEL_PATTERN.test(label)) {
 		return 'label contains invalid characters (use alphanumeric, hyphen, underscore, space)';
 	}
-	// Reject whitespace-only labels (label must contain at least one non-space char)
 	if (!/[a-zA-Z0-9_]/.test(label)) {
 		return 'label cannot be whitespace-only';
 	}
-	// Check for path traversal
 	if (label.includes('..') || label.includes('/') || label.includes('\\')) {
 		return 'label contains path traversal sequence';
 	}
 	return null;
 }
 
-// ============ File Operations ============
-
-/**
- * Get the checkpoint log file path (absolute)
- */
 function getCheckpointLogPath(directory: string): string {
 	return path.join(directory, CHECKPOINT_LOG_PATH);
 }
 
-/**
- * Read existing checkpoint log or create empty one
- */
 function readCheckpointLog(directory: string): CheckpointLog {
 	const logPath = getCheckpointLogPath(directory);
 	try {
 		if (fs.existsSync(logPath)) {
 			const content = fs.readFileSync(logPath, 'utf-8');
 			const parsed = JSON.parse(content) as CheckpointLog;
-			// Validate structure
 			if (!parsed.checkpoints || !Array.isArray(parsed.checkpoints)) {
 				return { version: 1, checkpoints: [] };
 			}
 			return parsed;
 		}
 	} catch {
-		// If file is corrupted, return empty log
+		// Corrupted or unreadable log falls back to empty.
 	}
 	return { version: 1, checkpoints: [] };
 }
 
-/**
- * Write checkpoint log atomically
- */
 function writeCheckpointLog(log: CheckpointLog, directory: string): void {
 	const logPath = getCheckpointLogPath(directory);
 	const dir = path.dirname(logPath);
-	// Ensure .swarm directory exists
 	if (!fs.existsSync(dir)) {
 		fs.mkdirSync(dir, { recursive: true });
 	}
-	// Write atomically using temp file
 	const tempPath = `${logPath}.tmp`;
 	fs.writeFileSync(tempPath, JSON.stringify(log, null, 2), 'utf-8');
 	fs.renameSync(tempPath, logPath);
 }
 
-// ============ Git Operations ============
+function appendRetentionEvent(directory: string, event: RetentionEvent): void {
+	try {
+		const eventsPath = path.join(directory, '.swarm', 'events.jsonl');
+		const line = `${JSON.stringify({
+			...event,
+			timestamp: new Date().toISOString(),
+		})}\n`;
+		fs.appendFileSync(eventsPath, line);
+	} catch {
+		// Best-effort event logging only.
+	}
+}
 
-/**
- * Execute git command safely using spawnSync with argument array (no shell interpolation).
- * Retries bounded transient failures (ETIMEDOUT / timed-out spawn errors) with backoff.
- */
+function loadCheckpointConfig(directory: string): {
+	maxCheckpoints: number;
+	allowEmptyCommits: boolean;
+} {
+	let maxCheckpoints = 20;
+	let allowEmptyCommits = false;
+	try {
+		const { config } = loadPluginConfigWithMeta(directory);
+		maxCheckpoints = config.checkpoint?.max_retention ?? maxCheckpoints;
+		allowEmptyCommits = config.checkpoint?.allow_empty_commits === true;
+	} catch {
+		// Defaults are fine when config loading fails.
+	}
+	return { maxCheckpoints, allowEmptyCommits };
+}
+
+function appendCheckpointEntry(
+	directory: string,
+	log: CheckpointLog,
+	entry: CheckpointEntry,
+	maxCheckpoints: number,
+): void {
+	const existing = log.checkpoints.find(
+		(checkpoint) => checkpoint.label === entry.label,
+	);
+	if (existing) {
+		if (existing.sha !== entry.sha) {
+			throw new Error(
+				`checkpoint log conflict: label "${entry.label}" already exists with a different SHA`,
+			);
+		}
+		return;
+	}
+
+	log.checkpoints.push(entry);
+	if (log.checkpoints.length > maxCheckpoints) {
+		const evicted = log.checkpoints.splice(
+			0,
+			log.checkpoints.length - maxCheckpoints,
+		);
+		appendRetentionEvent(directory, {
+			event: 'checkpoint_retention_applied',
+			evicted_labels: evicted.map((checkpoint) => checkpoint.label),
+			evicted_count: evicted.length,
+			remaining_count: log.checkpoints.length,
+		});
+	}
+}
+
+function stageAllExcludingSwarm(directory: string): void {
+	_internals.gitExec(
+		['add', '--all', '--', ...NON_SWARM_COMMIT_PATHSPEC],
+		directory,
+	);
+}
+
 function gitExec(args: string[], cwd: string): string {
 	for (let attempt = 0; attempt < MAX_TRANSIENT_RETRIES; attempt++) {
 		const result = child_process.spawnSync('git', args, {
@@ -187,7 +280,7 @@ function gitExec(args: string[], cwd: string): string {
 
 			if (!isTransient || attempt >= MAX_TRANSIENT_RETRIES - 1) {
 				throw new Error(
-					`git failed to start: ${code ?? 'unknown'} — ${message}`,
+					`git failed to start: ${code ?? 'unknown'} - ${message}`,
 				);
 			}
 
@@ -199,7 +292,6 @@ function gitExec(args: string[], cwd: string): string {
 			return result.stdout ?? '';
 		}
 
-		// Non-zero exit status is a permanent git failure.
 		throw new Error(
 			result.stderr?.trim() || `git exited with code ${result.status}`,
 		);
@@ -208,28 +300,10 @@ function gitExec(args: string[], cwd: string): string {
 	throw new Error('git command failed after transient retries');
 }
 
-function appendRetentionEvent(directory: string, event: RetentionEvent): void {
-	try {
-		const eventsPath = path.join(directory, '.swarm', 'events.jsonl');
-		const line = `${JSON.stringify({ ...event, timestamp: new Date().toISOString() })}\n`;
-		fs.appendFileSync(eventsPath, line);
-	} catch {
-		// Event logging is best-effort — failures are silently ignored.
-	}
-}
-
-/**
- * Get current git SHA
- */
 function getCurrentSha(directory: string): string {
-	const output = gitExec(['rev-parse', 'HEAD'], directory);
-	return output.trim();
+	return gitExec(['rev-parse', 'HEAD'], directory).trim();
 }
 
-/**
- * Check if we're in a git repository.
- * Returns { isRepo: true } on success, or { isRepo: false, warning } on permanent failure.
- */
 function isGitRepo(directory: string): GitRepoProbe {
 	try {
 		gitExec(['rev-parse', '--git-dir'], directory);
@@ -244,59 +318,275 @@ function isGitRepo(directory: string): GitRepoProbe {
 			return {
 				isRepo: false,
 				warning:
-					'git probe failed after retry exhaustion — treating as not a git repository',
+					'git probe failed after retry exhaustion - treating as not a git repository',
 			};
 		}
 
 		return {
 			isRepo: false,
-			warning: 'git probe failed — directory may not be a git repository',
+			warning: 'git probe failed - directory may not be a git repository',
 		};
 	}
 }
 
-/**
- * Handle 'save' action - create checkpoint commit and log it
- */
-function handleSave(label: string, directory: string): string {
-	try {
-		// Read checkpoint config
-		let maxCheckpoints = 20; // sensible default (must match max_retention default(20) in CheckpointConfigSchema)
-		let allowEmptyCommits = false;
+function taskReceiptLabelSuffix(
+	planIdentityHash: string,
+	taskId: string,
+): string {
+	return createHash('sha256')
+		.update(JSON.stringify([planIdentityHash, taskId]), 'utf8')
+		.digest('hex')
+		.slice(0, TASK_COMPLETION_HASH_LENGTH);
+}
+
+function scrubTaskIdForCheckpointLabel(taskId: string): string {
+	const scrubbed = taskId.replace(/[^a-zA-Z0-9._-]/g, '_');
+	return scrubbed.length > 32 ? scrubbed.slice(0, 32) : scrubbed;
+}
+
+function buildTaskCompletionDescriptor(
+	plan: {
+		swarm: string;
+		title: string;
+	},
+	taskId: string,
+): TaskCompletionCheckpointDescriptor {
+	const planIdentityHash = derivePlanIdentityHash(plan);
+	const suffix = taskReceiptLabelSuffix(planIdentityHash, taskId);
+	const safeTaskId = scrubTaskIdForCheckpointLabel(taskId) || 'task';
+	return {
+		planIdentityHash,
+		taskId,
+		label: `task-${safeTaskId}-complete-${suffix}`,
+		subject: `checkpoint(task-complete ${suffix} plan ${planIdentityHash}): ${safeTaskId}`,
+	};
+}
+
+function readTaskCheckpointReceipt(
+	directory: string,
+	planIdentityHash: string,
+	taskId: string,
+): TaskCheckpointReceiptRow | null {
+	if (!_internals.projectDbExists(directory)) return null;
+	const db = _internals.getProjectDb(directory);
+	return (
+		db
+			.query<TaskCheckpointReceiptRow, [string, string]>(
+				'SELECT * FROM task_checkpoint_receipt WHERE plan_identity_hash = ? AND task_id = ?',
+			)
+			.get(planIdentityHash, taskId) ?? null
+	);
+}
+
+function ensurePendingTaskCheckpointReceipt(
+	directory: string,
+	descriptor: TaskCompletionCheckpointDescriptor,
+): TaskCheckpointReceiptRow {
+	const db = _internals.getProjectDb(directory);
+	db.transaction(() => {
+		db.run(
+			'INSERT OR IGNORE INTO task_checkpoint_receipt (plan_identity_hash, task_id, label, state, sha) VALUES (?, ?, ?, ?, NULL)',
+			[
+				descriptor.planIdentityHash,
+				descriptor.taskId,
+				descriptor.label,
+				'pending',
+			],
+		);
+	})();
+	const row = readTaskCheckpointReceipt(
+		directory,
+		descriptor.planIdentityHash,
+		descriptor.taskId,
+	);
+	if (!row) {
+		throw new Error(
+			`Failed to create or read task checkpoint receipt for ${descriptor.taskId}`,
+		);
+	}
+	if (row.label !== descriptor.label) {
+		throw new Error(
+			`Task checkpoint receipt label conflict for ${descriptor.taskId}: expected ${descriptor.label}, found ${row.label}`,
+		);
+	}
+	return row;
+}
+
+function updateTaskCheckpointReceipt(
+	directory: string,
+	descriptor: TaskCompletionCheckpointDescriptor,
+	state: TaskCheckpointReceiptState,
+	sha: string | null,
+): TaskCheckpointReceiptRow {
+	const db = _internals.getProjectDb(directory);
+	db.run(
+		"UPDATE task_checkpoint_receipt SET state = ?, sha = ?, updated_at = datetime('now') WHERE plan_identity_hash = ? AND task_id = ?",
+		[state, sha, descriptor.planIdentityHash, descriptor.taskId],
+	);
+	const row = readTaskCheckpointReceipt(
+		directory,
+		descriptor.planIdentityHash,
+		descriptor.taskId,
+	);
+	if (!row) {
+		throw new Error(
+			`Failed to re-read task checkpoint receipt for ${descriptor.taskId}`,
+		);
+	}
+	return row;
+}
+
+function findCommitByExactSubject(
+	directory: string,
+	subject: string,
+): string | null {
+	const output = _internals.gitExec(
+		[
+			'log',
+			'--all',
+			'--format=%H%x00%s',
+			'--fixed-strings',
+			`--grep=${subject}`,
+			'-n',
+			String(CHECKPOINT_RECEIPT_LOOKUP_LIMIT),
+		],
+		directory,
+	);
+	for (const line of output.split(/\r?\n/)) {
+		if (!line) continue;
+		const nulIndex = line.indexOf('\0');
+		if (nulIndex <= 0) continue;
+		const sha = line.slice(0, nulIndex).trim();
+		const candidateSubject = line.slice(nulIndex + 1);
+		if (
+			sha.length === 40 &&
+			/^[a-f0-9]{40}$/i.test(sha) &&
+			candidateSubject === subject
+		) {
+			return sha;
+		}
+	}
+	return null;
+}
+
+async function withCheckpointMutationLock(input: {
+	action: MutationAction;
+	directory: string;
+	operationKey: string;
+	run: () => Promise<string>;
+	onContendedAttempt?: () => string | null;
+}): Promise<string> {
+	const result = await withCheckpointMutationLockResult({
+		action: input.action,
+		directory: input.directory,
+		operationKey: input.operationKey,
+		run: input.run,
+		onContendedAttempt: input.onContendedAttempt,
+	});
+	return result;
+}
+
+async function withCheckpointMutationLockResult<T>(input: {
+	action: MutationAction;
+	directory: string;
+	operationKey: string;
+	run: () => Promise<T>;
+	onContendedAttempt?: () => T | null;
+	onBusy?: (attempts: number) => T;
+	onFailure?: (error: unknown) => T;
+}): Promise<T> {
+	const deadline = Date.now() + CHECKPOINT_LOCK_DEADLINE_MS;
+	let attempts = 0;
+
+	while (attempts < CHECKPOINT_LOCK_MAX_ATTEMPTS && Date.now() <= deadline) {
+		attempts++;
+		let lockResult: Awaited<ReturnType<typeof tryAcquireLock>>;
 		try {
-			const { config } = loadPluginConfigWithMeta(directory);
-			// max_retention controls how many checkpoints are kept (issue #1691).
-			// Previously misused auto_checkpoint_threshold (which controls
-			// completed-task-count auto-save trigger, not retention).
-			maxCheckpoints = config.checkpoint?.max_retention ?? maxCheckpoints;
-			allowEmptyCommits = config.checkpoint?.allow_empty_commits === true;
-		} catch {
-			// Config load failure — use defaults
+			lockResult = await _internals.tryAcquireLock(
+				input.directory,
+				CHECKPOINT_LOG_PATH,
+				CHECKPOINT_AGENT_NAME,
+				input.operationKey,
+			);
+		} catch (error) {
+			if (input.onFailure) {
+				return input.onFailure(error);
+			}
+			return serializeResult(input.action, {
+				success: false,
+				error: `${input.action} failed: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			}) as T;
 		}
 
-		// Check for duplicate label before saving
+		if (lockResult.acquired) {
+			try {
+				try {
+					return await input.run();
+				} catch (error) {
+					if (input.onFailure) {
+						return input.onFailure(error);
+					}
+					return serializeResult(input.action, {
+						success: false,
+						error: `${input.action} failed: ${
+							error instanceof Error ? error.message : String(error)
+						}`,
+					}) as T;
+				}
+			} finally {
+				if (lockResult.lock._release) {
+					try {
+						await lockResult.lock._release();
+					} catch {
+						// Release failure is advisory only.
+					}
+				}
+			}
+		}
+
+		const contended = input.onContendedAttempt?.();
+		if (contended) return contended;
+		if (
+			attempts >= CHECKPOINT_LOCK_MAX_ATTEMPTS ||
+			Date.now() + CHECKPOINT_LOCK_DELAY_MS > deadline
+		) {
+			break;
+		}
+		await _internals.sleep(CHECKPOINT_LOCK_DELAY_MS);
+	}
+
+	if (input.onBusy) {
+		return input.onBusy(attempts);
+	}
+	return serializeResult(input.action, {
+		success: false,
+		status: 'checkpoint_busy',
+		error:
+			'checkpoint_busy: checkpoint state is locked by another operation; retry after the current mutation completes',
+		retryable: true,
+		attempts,
+	}) as T;
+}
+
+function handleSave(label: string, directory: string): string {
+	try {
+		const { maxCheckpoints, allowEmptyCommits } =
+			loadCheckpointConfig(directory);
 		const log = readCheckpointLog(directory);
-		const existingCheckpoint = log.checkpoints.find((c) => c.label === label);
+		const existingCheckpoint = log.checkpoints.find(
+			(checkpoint) => checkpoint.label === label,
+		);
 		if (existingCheckpoint) {
-			return JSON.stringify(
-				{
-					action: 'save',
-					success: false,
-					error: `duplicate label: "${label}" already exists. Use a different label or delete the existing checkpoint first.`,
-				},
-				null,
-				2,
-			);
+			return serializeResult('save', {
+				success: false,
+				error: `duplicate label: "${label}" already exists. Use a different label or delete the existing checkpoint first.`,
+			});
 		}
 
 		const timestamp = new Date().toISOString();
-
-		// Stage all changes, excluding .swarm/ to avoid committing checkpoint metadata
-		// into project history. On timeout or permission error this throws, which
-		// propagates to the outer catch — safer than committing a partially-staged tree.
-		gitExec(['add', '--all', '--', ':!.swarm/'], directory);
-
-		// Check whether anything was staged (exit 0 = nothing staged, non-zero = changes)
+		_internals.stageAllExcludingSwarm(directory);
 		const hasStagedChanges = (() => {
 			try {
 				gitExec(['diff', '--cached', '--quiet'], directory);
@@ -309,380 +599,444 @@ function handleSave(label: string, directory: string): string {
 		if (hasStagedChanges) {
 			gitExec(['commit', '-m', `checkpoint: ${label}`], directory);
 		} else if (allowEmptyCommits) {
-			// Explicit opt-in: preserve legacy behaviour of creating a commit even
-			// when the working tree is clean.
 			gitExec(
 				['commit', '--allow-empty', '-m', `checkpoint: ${label}`],
 				directory,
 			);
 		}
-		// Otherwise: nothing to commit — checkpoint records current HEAD SHA without
-		// creating a new git commit. Two consecutive clean-tree saves will share the
-		// same SHA in the log; both restore correctly to the same HEAD position.
 
-		// Get SHA (equals _sha when no commit was made)
 		const newSha = getCurrentSha(directory);
-
-		// Append to log
-		log.checkpoints.push({
-			label,
-			sha: newSha,
-			timestamp,
-		});
-
-		// Enforce checkpoint retention limit — evict oldest checkpoints
-		if (log.checkpoints.length > maxCheckpoints) {
-			const evicted = log.checkpoints.splice(
-				0,
-				log.checkpoints.length - maxCheckpoints,
-			);
-			try {
-				appendRetentionEvent(directory, {
-					event: 'checkpoint_retention_applied',
-					evicted_labels: evicted.map((e) => e.label),
-					evicted_count: evicted.length,
-					remaining_count: log.checkpoints.length,
-				});
-			} catch {
-				// Event logging is best-effort, don't fail the save
-			}
-		}
-
-		writeCheckpointLog(log, directory);
-
-		return JSON.stringify(
+		appendCheckpointEntry(
+			directory,
+			log,
 			{
-				action: 'save',
-				success: true,
 				label,
 				sha: newSha,
-				message: `Checkpoint saved: "${label}"`,
+				timestamp,
 			},
-			null,
-			2,
+			maxCheckpoints,
 		);
+		writeCheckpointLog(log, directory);
+
+		return serializeResult('save', {
+			success: true,
+			label,
+			sha: newSha,
+			message: `Checkpoint saved: "${label}"`,
+		});
 	} catch (e) {
-		const errorMessage =
-			e instanceof Error
-				? `save failed: ${e.message}`
-				: 'save failed: unknown error';
-		return JSON.stringify(
-			{
-				action: 'save',
-				success: false,
-				error: errorMessage,
-			},
-			null,
-			2,
-		);
+		return serializeResult('save', {
+			success: false,
+			error:
+				e instanceof Error
+					? `save failed: ${e.message}`
+					: 'save failed: unknown error',
+		});
 	}
 }
 
-/**
- * Record a checkpoint without staging or committing changes.
- * Writes only to .swarm/checkpoints.json with the current HEAD SHA.
- * Used by spiral detection to avoid silently committing mid-flight user work.
- */
-export function saveCheckpointRecord(
+export async function saveCheckpointRecord(
 	label: string,
 	directory: string,
-): { success: boolean; sha?: string; error?: string; warning?: string } {
+): Promise<{
+	success: boolean;
+	sha?: string;
+	error?: string;
+	warning?: string;
+}> {
 	const labelError = validateLabel(label);
 	if (labelError) {
 		return { success: false, error: labelError };
 	}
-	try {
-		const log = readCheckpointLog(directory);
-		if (log.checkpoints.find((c) => c.label === label)) {
-			return { success: false, error: `duplicate label: "${label}"` };
-		}
-		let sha = '';
-		const repoProbe = isGitRepo(directory);
-		if (repoProbe.isRepo) {
-			try {
-				sha = getCurrentSha(directory);
-			} catch {
-				sha = '';
+	return withCheckpointMutationLockResult({
+		action: 'save',
+		directory,
+		operationKey: `save-record-${label}`,
+		run: async () => {
+			const log = readCheckpointLog(directory);
+			if (log.checkpoints.find((checkpoint) => checkpoint.label === label)) {
+				return { success: false, error: `duplicate label: "${label}"` };
 			}
-		}
-		log.checkpoints.push({
-			label,
-			sha,
-			timestamp: new Date().toISOString(),
-		});
-		writeCheckpointLog(log, directory);
-		const result: {
-			success: boolean;
-			sha?: string;
-			error?: string;
-			warning?: string;
-		} = {
-			success: true,
-			sha,
-		};
-		if (!sha) {
-			result.warning =
-				'no git restore target — checkpoint recorded without a SHA (directory may not be a git repository or HEAD is unavailable)';
-		}
-		return result;
-	} catch (e) {
-		return {
+			let sha = '';
+			const repoProbe = isGitRepo(directory);
+			if (repoProbe.isRepo) {
+				try {
+					sha = getCurrentSha(directory);
+				} catch {
+					sha = '';
+				}
+			}
+			appendCheckpointEntry(
+				directory,
+				log,
+				{
+					label,
+					sha,
+					timestamp: new Date().toISOString(),
+				},
+				loadCheckpointConfig(directory).maxCheckpoints,
+			);
+			writeCheckpointLog(log, directory);
+			const result: {
+				success: boolean;
+				sha?: string;
+				error?: string;
+				warning?: string;
+			} = { success: true, sha };
+			if (!sha) {
+				result.warning =
+					'no git restore target - checkpoint recorded without a SHA (directory may not be a git repository or HEAD is unavailable)';
+			}
+			return result;
+		},
+		onBusy: () => ({
 			success: false,
-			error: e instanceof Error ? e.message : 'unknown error',
-		};
-	}
+			error:
+				'checkpoint_busy: checkpoint state is locked by another operation; retry after the current mutation completes',
+		}),
+		onFailure: (error) => ({
+			success: false,
+			error: error instanceof Error ? error.message : 'unknown error',
+		}),
+	});
 }
 
-/**
- * Handle 'restore' action - hard reset tracked files to saved SHA
- */
 function handleRestore(label: string, directory: string): string {
 	try {
-		// Find the checkpoint
 		const log = readCheckpointLog(directory);
-		const checkpoint = log.checkpoints.find((c) => c.label === label);
-
+		const checkpoint = log.checkpoints.find(
+			(candidate) => candidate.label === label,
+		);
 		if (!checkpoint) {
-			return JSON.stringify(
-				{
-					action: 'restore',
-					success: false,
-					error: `checkpoint not found: "${label}"`,
-				},
-				null,
-				2,
-			);
+			return serializeResult('restore', {
+				success: false,
+				error: `checkpoint not found: "${label}"`,
+			});
 		}
 
-		// Preserve the runtime checkpoint log across the hard reset. .swarm/ is
-		// normally untracked, but a user commit can accidentally track it before a
-		// restore; reset --hard would then remove the active log if the target SHA
-		// predates that file.
 		const logBeforeReset = log;
-
-		// Restore tracked files to the checkpoint SHA.
 		gitExec(['reset', '--hard', checkpoint.sha], directory);
 		writeCheckpointLog(logBeforeReset, directory);
 
-		return JSON.stringify(
-			{
-				action: 'restore',
-				success: true,
-				label,
-				sha: checkpoint.sha,
-				message: `Restored to checkpoint: "${label}" (hard reset)`,
-			},
-			null,
-			2,
-		);
+		return serializeResult('restore', {
+			success: true,
+			label,
+			sha: checkpoint.sha,
+			message: `Restored to checkpoint: "${label}" (hard reset)`,
+		});
 	} catch (e) {
-		const errorMessage =
-			e instanceof Error
-				? `restore failed: ${e.message}`
-				: 'restore failed: unknown error';
-		return JSON.stringify(
-			{
-				action: 'restore',
-				success: false,
-				error: errorMessage,
-			},
-			null,
-			2,
-		);
+		return serializeResult('restore', {
+			success: false,
+			error:
+				e instanceof Error
+					? `restore failed: ${e.message}`
+					: 'restore failed: unknown error',
+		});
 	}
 }
 
-/**
- * Handle 'list' action - return all checkpoints
- */
 function handleList(directory: string): string {
 	const log = readCheckpointLog(directory);
-
-	// Sort by timestamp descending (most recent first) for display
 	const sorted = [...log.checkpoints].sort((a, b) =>
 		b.timestamp.localeCompare(a.timestamp),
 	);
-
-	return JSON.stringify(
-		{
-			action: 'list',
-			success: true,
-			count: sorted.length,
-			checkpoints: sorted,
-		},
-		null,
-		2,
-	);
+	return serializeResult('list', {
+		success: true,
+		count: sorted.length,
+		checkpoints: sorted,
+	});
 }
 
-/**
- * Handle 'delete' action - remove entry from log (git commit remains)
- */
 function handleDelete(label: string, directory: string): string {
 	try {
-		// Find the checkpoint
 		const log = readCheckpointLog(directory);
 		const initialLength = log.checkpoints.length;
-
-		// Filter out the checkpoint with matching label
-		log.checkpoints = log.checkpoints.filter((c) => c.label !== label);
-
+		log.checkpoints = log.checkpoints.filter(
+			(checkpoint) => checkpoint.label !== label,
+		);
 		if (log.checkpoints.length === initialLength) {
-			return JSON.stringify(
-				{
-					action: 'delete',
-					success: false,
-					error: `checkpoint not found: "${label}"`,
-				},
-				null,
-				2,
-			);
-		}
-
-		// Write updated log (git commit remains)
-		writeCheckpointLog(log, directory);
-
-		return JSON.stringify(
-			{
-				action: 'delete',
-				success: true,
-				label,
-				message: `Checkpoint deleted: "${label}"`,
-			},
-			null,
-			2,
-		);
-	} catch (e) {
-		const errorMessage =
-			e instanceof Error
-				? `delete failed: ${e.message}`
-				: 'delete failed: unknown error';
-		return JSON.stringify(
-			{
-				action: 'delete',
+			return serializeResult('delete', {
 				success: false,
-				error: errorMessage,
-			},
-			null,
-			2,
-		);
+				error: `checkpoint not found: "${label}"`,
+			});
+		}
+		writeCheckpointLog(log, directory);
+		return serializeResult('delete', {
+			success: true,
+			label,
+			message: `Checkpoint deleted: "${label}"`,
+		});
+	} catch (e) {
+		return serializeResult('delete', {
+			success: false,
+			error:
+				e instanceof Error
+					? `delete failed: ${e.message}`
+					: 'delete failed: unknown error',
+		});
 	}
 }
 
-// ============ Tool Definition ============
+async function handleSaveTaskCompletion(
+	taskId: string,
+	directory: string,
+): Promise<string> {
+	const plan = await _internals.loadPlan(directory);
+	if (!plan) {
+		return serializeResult('save_task_completion', {
+			success: false,
+			error:
+				'save_task_completion failed: no durable plan is available under .swarm/plan.json',
+		});
+	}
+
+	const task = plan.phases
+		.flatMap((phase) => phase.tasks)
+		.find((candidate) => candidate.id === taskId);
+	if (!task) {
+		return serializeResult('save_task_completion', {
+			success: false,
+			error: `save_task_completion failed: task "${taskId}" was not found in the current plan`,
+		});
+	}
+	if (task.status !== 'completed') {
+		return serializeResult('save_task_completion', {
+			success: false,
+			error: `save_task_completion failed: task "${taskId}" is ${task.status}, not completed`,
+		});
+	}
+
+	const descriptor = buildTaskCompletionDescriptor(
+		{ swarm: plan.swarm, title: plan.title },
+		task.id,
+	);
+	const operationKey = `save-task-completion-${taskReceiptLabelSuffix(
+		descriptor.planIdentityHash,
+		descriptor.taskId,
+	)}`;
+
+	return withCheckpointMutationLock({
+		action: 'save_task_completion',
+		directory,
+		operationKey,
+		onContendedAttempt: () => {
+			const receipt = readTaskCheckpointReceipt(
+				directory,
+				descriptor.planIdentityHash,
+				descriptor.taskId,
+			);
+			if (receipt?.state === 'logged') {
+				return serializeResult('save_task_completion', {
+					success: true,
+					idempotent: true,
+					label: receipt.label,
+					sha: receipt.sha,
+					receipt_state: receipt.state,
+					message: `Checkpoint task completion already logged for "${descriptor.taskId}"`,
+				});
+			}
+			return null;
+		},
+		run: async () => {
+			const receipt = ensurePendingTaskCheckpointReceipt(directory, descriptor);
+			if (receipt.state === 'logged') {
+				return serializeResult('save_task_completion', {
+					success: true,
+					idempotent: true,
+					label: receipt.label,
+					sha: receipt.sha,
+					receipt_state: receipt.state,
+					message: `Checkpoint task completion already logged for "${descriptor.taskId}"`,
+				});
+			}
+
+			let committedSha = receipt.sha;
+			if (receipt.state === 'pending') {
+				committedSha =
+					_internals.findCommitByExactSubject(directory, descriptor.subject) ??
+					null;
+				if (!committedSha) {
+					_internals.stageAllExcludingSwarm(directory);
+					// Keep the commit path-limited as well as the preceding add. An
+					// exclusion on `git add` does not unstage a force-added .swarm file;
+					// the pathspec commit excludes it while leaving its index entry intact.
+					_internals.gitExec(
+						[
+							'commit',
+							'--allow-empty',
+							'-m',
+							descriptor.subject,
+							'--',
+							...NON_SWARM_COMMIT_PATHSPEC,
+						],
+						directory,
+					);
+					committedSha = getCurrentSha(directory);
+				}
+				updateTaskCheckpointReceipt(
+					directory,
+					descriptor,
+					'committed',
+					committedSha,
+				);
+			}
+
+			if (!committedSha) {
+				throw new Error(
+					`save_task_completion failed: could not resolve commit SHA for task "${descriptor.taskId}"`,
+				);
+			}
+
+			const log = readCheckpointLog(directory);
+			appendCheckpointEntry(
+				directory,
+				log,
+				{
+					label: descriptor.label,
+					sha: committedSha,
+					timestamp: receipt.created_at,
+				},
+				loadCheckpointConfig(directory).maxCheckpoints,
+			);
+			writeCheckpointLog(log, directory);
+			const logged = updateTaskCheckpointReceipt(
+				directory,
+				descriptor,
+				'logged',
+				committedSha,
+			);
+
+			return serializeResult('save_task_completion', {
+				success: true,
+				label: logged.label,
+				sha: committedSha,
+				receipt_state: logged.state,
+				message: `Checkpoint task completion saved for "${descriptor.taskId}"`,
+			});
+		},
+	});
+}
 
 export const checkpoint: ToolDefinition = createSwarmTool({
 	description:
 		'Save, restore, list, and delete git checkpoints. ' +
 		'Use save to create a named snapshot, restore to return tracked files to a checkpoint, ' +
-		'list to see all checkpoints, and delete to remove a checkpoint from the log. ' +
+		'list to see all checkpoints, delete to remove a checkpoint from the log, and save_task_completion to record a retry-safe task completion checkpoint. ' +
 		'Git commits are preserved on delete.',
 	args: {
 		action: z
 			.string()
-			.describe('Action to perform: save, restore, list, or delete'),
+			.describe(
+				'Action to perform: save, restore, list, delete, or save_task_completion',
+			),
 		label: z
 			.string()
 			.optional()
 			.describe('Checkpoint label (required for save, restore, delete)'),
+		task_id: z
+			.string()
+			.optional()
+			.describe('Plan task ID (required for save_task_completion), e.g. "1.1"'),
 	},
 	execute: async (args, directory) => {
 		const repoProbe = isGitRepo(directory);
 		if (!repoProbe.isRepo) {
-			return JSON.stringify(
-				{
-					action: 'unknown',
-					success: false,
-					error: `${repoProbe.warning ?? 'not a git repository'} — checkpoint tools require a git repository`,
-				},
-				null,
-				2,
-			);
+			return serializeResult('unknown', {
+				success: false,
+				error: `${repoProbe.warning ?? 'not a git repository'} - checkpoint tools require a git repository`,
+			});
 		}
 
-		// Safe args extraction
 		let action: string;
 		let label: string | undefined;
+		let taskId: string | undefined;
 		try {
 			action = String(args.action);
 			label =
 				args.label !== undefined && args.label !== null
 					? String(args.label)
 					: undefined;
+			taskId =
+				args.task_id !== undefined && args.task_id !== null
+					? String(args.task_id)
+					: undefined;
 		} catch {
-			return JSON.stringify(
-				{
-					action: 'unknown',
-					success: false,
-					error: 'invalid arguments',
-				},
-				null,
-				2,
-			);
+			return serializeResult('unknown', {
+				success: false,
+				error: 'invalid arguments',
+			});
 		}
 
-		// Validate action
-		const validActions = ['save', 'restore', 'list', 'delete'];
+		const validActions = [
+			'save',
+			'restore',
+			'list',
+			'delete',
+			'save_task_completion',
+		];
 		if (!validActions.includes(action)) {
-			return JSON.stringify(
-				{
-					action,
-					success: false,
-					error: `invalid action: "${action}". Valid actions: ${validActions.join(', ')}`,
-				},
-				null,
-				2,
-			);
+			return serializeResult('unknown', {
+				success: false,
+				error: `invalid action: "${action}". Valid actions: ${validActions.join(', ')}`,
+			});
 		}
 
-		// Validate label for actions that require it
 		if (['save', 'restore', 'delete'].includes(action)) {
 			if (!label) {
-				return JSON.stringify(
-					{
-						action,
-						success: false,
-						error: `label is required for ${action} action`,
-					},
-					null,
-					2,
-				);
+				return serializeResult(action as MutationAction, {
+					success: false,
+					error: `label is required for ${action} action`,
+				});
 			}
 			const labelError = validateLabel(label);
 			if (labelError) {
-				return JSON.stringify(
-					{
-						action,
-						success: false,
-						error: `invalid label: ${labelError}`,
-					},
-					null,
-					2,
-				);
+				return serializeResult(action as MutationAction, {
+					success: false,
+					error: `invalid label: ${labelError}`,
+				});
 			}
 		}
 
-		// Execute the action
+		if (action === 'save_task_completion') {
+			if (!taskId || taskId.trim().length === 0) {
+				return serializeResult('save_task_completion', {
+					success: false,
+					error: 'task_id is required for save_task_completion action',
+				});
+			}
+		}
+
 		switch (action) {
 			case 'save':
-				return handleSave(label!, directory);
+				return withCheckpointMutationLock({
+					action: 'save',
+					directory,
+					operationKey: `save-${label!}`,
+					run: async () => handleSave(label!, directory),
+				});
 			case 'restore':
-				return handleRestore(label!, directory);
+				return withCheckpointMutationLock({
+					action: 'restore',
+					directory,
+					operationKey: `restore-${label!}`,
+					run: async () => handleRestore(label!, directory),
+				});
 			case 'list':
 				return handleList(directory);
 			case 'delete':
-				return handleDelete(label!, directory);
+				return withCheckpointMutationLock({
+					action: 'delete',
+					directory,
+					operationKey: `delete-${label!}`,
+					run: async () => handleDelete(label!, directory),
+				});
+			case 'save_task_completion':
+				return handleSaveTaskCompletion(taskId!, directory);
 			default:
-				// This should never happen due to validation above
-				return JSON.stringify(
-					{
-						action,
-						success: false,
-						error: 'unreachable',
-					},
-					null,
-					2,
-				);
+				return serializeResult('unknown', {
+					success: false,
+					error: 'unreachable',
+				});
 		}
 	},
 });

@@ -18,7 +18,7 @@ describe('save-plan adversarial tests', () => {
 	let tempDirs: string[] = [];
 
 	beforeEach(async () => {
-		// Create temp directory for each test
+		process.env.SWARM_SKIP_GATE_SELECTION = '1';
 		tempDir = await fs.mkdtemp(
 			path.join(os.tmpdir(), 'save-plan-adversarial-'),
 		);
@@ -37,7 +37,7 @@ describe('save-plan adversarial tests', () => {
 	});
 
 	afterEach(async () => {
-		// Clean up all temp directories
+		delete process.env.SWARM_SKIP_GATE_SELECTION;
 		for (const dir of tempDirs) {
 			try {
 				await fs.rm(dir, { recursive: true, force: true });

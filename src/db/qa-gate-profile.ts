@@ -8,6 +8,8 @@
  */
 
 import { createHash } from 'node:crypto';
+import { derivePlanId, derivePlanIdentityHash } from '../plan/utils.js';
+import { formatLegacyQaBindingRecovery } from '../qa-gate/recovery.js';
 import { getProjectDb, projectDbExists } from './project-db.js';
 
 /**
@@ -18,15 +20,33 @@ import { getProjectDb, projectDbExists } from './project-db.js';
  */
 export const _internals: {
 	getProfile: typeof getProfile;
+	getProfileLookupForIdentity: typeof getProfileLookupForIdentity;
+	getProfileForIdentity: typeof getProfileForIdentity;
 	getOrCreateProfile: typeof getOrCreateProfile;
+	getOrCreateProfileForIdentity: typeof getOrCreateProfileForIdentity;
 	setGates: typeof setGates;
+	setGatesForIdentity: typeof setGatesForIdentity;
+	lockProfileForIdentity: typeof lockProfileForIdentity;
 	getEffectiveGates: typeof getEffectiveGates;
 	computeProfileHash: typeof computeProfileHash;
 	hasAnyProfileWithEnabledGate: typeof hasAnyProfileWithEnabledGate;
+	afterSetGatesForIdentityRead?:
+		| ((context: {
+				directory: string;
+				identity: QaGateProfileIdentity;
+				profileId: number;
+				storagePlanId: string;
+		  }) => void)
+		| undefined;
 } = {
 	getProfile,
+	getProfileLookupForIdentity,
+	getProfileForIdentity,
 	getOrCreateProfile,
+	getOrCreateProfileForIdentity,
 	setGates,
+	setGatesForIdentity,
+	lockProfileForIdentity,
 	getEffectiveGates,
 	computeProfileHash,
 	hasAnyProfileWithEnabledGate,
@@ -77,6 +97,9 @@ export interface QaGateProfile {
 	gates: QaGates;
 	locked_at: string | null;
 	locked_by_snapshot_seq: number | null;
+	raw_swarm: string | null;
+	raw_title: string | null;
+	identity_hash: string | null;
 }
 
 interface QaGateProfileRow {
@@ -87,9 +110,106 @@ interface QaGateProfileRow {
 	gates: string;
 	locked_at: string | null;
 	locked_by_snapshot_seq: number | null;
+	raw_swarm: string | null;
+	raw_title: string | null;
+	identity_hash: string | null;
+}
+
+interface QaGateProfileIdentityBindingRow {
+	identity_hash: string;
+	profile_id: number;
+	raw_swarm: string;
+	raw_title: string;
+	readable_plan_id: string;
+}
+
+export interface QaGateProfileIdentity {
+	swarm: string;
+	title: string;
+	planId: string;
+	identityHash: string;
+}
+
+export type QaGateProfileLookupForIdentity =
+	| {
+			kind: 'bound';
+			identity: QaGateProfileIdentity;
+			profile: QaGateProfile;
+	  }
+	| {
+			kind: 'unbound_legacy';
+			identity: QaGateProfileIdentity;
+			profile: QaGateProfile;
+	  }
+	| {
+			kind: 'missing';
+			identity: QaGateProfileIdentity;
+	  };
+
+export interface SetGatesForIdentityOptions {
+	projectType?: string;
+	allowLegacyAdoption?: boolean;
+	allowLegacyCollisionCreate?: boolean;
+	legacyAdoptionIdentity?: {
+		swarm: string;
+		title: string;
+	};
+}
+
+export class QaGateProfileIdentityUnboundError extends Error {
+	readonly identity: QaGateProfileIdentity;
+
+	constructor(identity: QaGateProfileIdentity) {
+		super(
+			`QA gate profile exists for readable plan_id='${identity.planId}' but is not exact-bound to swarm_id='${identity.swarm}' and plan_title='${identity.title}'. ${formatLegacyQaBindingRecovery(identity, 'retry the blocked read-only or enforcement operation')}`,
+		);
+		this.name = 'QaGateProfileIdentityUnboundError';
+		this.identity = identity;
+	}
+}
+
+function buildProfileIdentity(identity: {
+	swarm: string;
+	title: string;
+}): QaGateProfileIdentity {
+	return {
+		swarm: identity.swarm,
+		title: identity.title,
+		planId: derivePlanId(identity),
+		identityHash: derivePlanIdentityHash(identity),
+	};
+}
+
+function withImmediateTransaction<T>(
+	db: ReturnType<typeof getProjectDb>,
+	fn: () => T,
+): T {
+	if (db.inTransaction) {
+		return db.transaction(fn)();
+	}
+	db.run('BEGIN IMMEDIATE');
+	try {
+		const result = fn();
+		db.run('COMMIT');
+		return result;
+	} catch (err) {
+		try {
+			db.run('ROLLBACK');
+		} catch {
+			// Ignore rollback failures; surface the original error below.
+		}
+		throw err;
+	}
 }
 
 function rowToProfile(row: QaGateProfileRow): QaGateProfile {
+	return rowToProfileWithBinding(row);
+}
+
+function rowToProfileWithBinding(
+	row: QaGateProfileRow,
+	binding?: QaGateProfileIdentityBindingRow,
+): QaGateProfile {
 	let parsed: Partial<QaGates> = {};
 	try {
 		const maybeGates = JSON.parse(row.gates);
@@ -124,13 +244,200 @@ function rowToProfile(row: QaGateProfileRow): QaGateProfile {
 	const gates: QaGates = { ...DEFAULT_QA_GATES, ...filteredParsed };
 	return {
 		id: row.id,
-		plan_id: row.plan_id,
+		plan_id: binding?.readable_plan_id ?? row.plan_id,
 		created_at: row.created_at,
 		project_type: row.project_type,
 		gates,
 		locked_at: row.locked_at,
 		locked_by_snapshot_seq: row.locked_by_snapshot_seq,
+		raw_swarm: binding?.raw_swarm ?? row.raw_swarm,
+		raw_title: binding?.raw_title ?? row.raw_title,
+		identity_hash: binding?.identity_hash ?? row.identity_hash,
 	};
+}
+
+function readProfileRowByPlanId(
+	db: ReturnType<typeof getProjectDb>,
+	planId: string,
+): QaGateProfileRow | null {
+	return (
+		db
+			.query<QaGateProfileRow, [string]>(
+				'SELECT * FROM qa_gate_profile WHERE plan_id = ?',
+			)
+			.get(planId) ?? null
+	);
+}
+
+function readProfileRowById(
+	db: ReturnType<typeof getProjectDb>,
+	id: number,
+): QaGateProfileRow | null {
+	return (
+		db
+			.query<QaGateProfileRow, [number]>(
+				'SELECT * FROM qa_gate_profile WHERE id = ?',
+			)
+			.get(id) ?? null
+	);
+}
+
+function readIdentityBindingByHash(
+	db: ReturnType<typeof getProjectDb>,
+	identityHash: string,
+): QaGateProfileIdentityBindingRow | null {
+	return (
+		db
+			.query<QaGateProfileIdentityBindingRow, [string]>(
+				'SELECT * FROM qa_gate_profile_identity WHERE identity_hash = ?',
+			)
+			.get(identityHash) ?? null
+	);
+}
+
+function readUnboundLegacyProfileRowByReadablePlanId(
+	db: ReturnType<typeof getProjectDb>,
+	readablePlanId: string,
+): QaGateProfileRow | null {
+	return (
+		db
+			.query<QaGateProfileRow, [string]>(
+				`SELECT p.*
+				FROM qa_gate_profile AS p
+				LEFT JOIN qa_gate_profile_identity AS qi
+					ON qi.profile_id = p.id
+				WHERE p.plan_id = ?
+					AND qi.profile_id IS NULL
+				LIMIT 1`,
+			)
+			.get(readablePlanId) ?? null
+	);
+}
+
+function buildExactStoragePlanId(identityHash: string): string {
+	return `qa2-${identityHash}`;
+}
+
+function hasAnyGatePatch(gates: Partial<QaGates>): boolean {
+	return Object.values(gates).some((value) => value !== undefined);
+}
+
+function verifyBoundIdentityBinding(
+	binding: QaGateProfileIdentityBindingRow,
+	identity: QaGateProfileIdentity,
+): void {
+	if (
+		binding.identity_hash !== identity.identityHash ||
+		binding.raw_swarm !== identity.swarm ||
+		binding.raw_title !== identity.title ||
+		binding.readable_plan_id !== identity.planId
+	) {
+		throw new Error(
+			`QA gate profile identity binding is corrupt for swarm_id='${identity.swarm}' and plan_title='${identity.title}'`,
+		);
+	}
+}
+
+function lookupProfileForIdentityTx(
+	db: ReturnType<typeof getProjectDb>,
+	identity: QaGateProfileIdentity,
+): QaGateProfileLookupForIdentity {
+	const binding = readIdentityBindingByHash(db, identity.identityHash);
+	if (binding) {
+		verifyBoundIdentityBinding(binding, identity);
+		const row = readProfileRowById(db, binding.profile_id);
+		if (!row) {
+			throw new Error(
+				`QA gate profile identity binding points to missing profile_id=${binding.profile_id}`,
+			);
+		}
+		return {
+			kind: 'bound',
+			identity,
+			profile: rowToProfileWithBinding(row, binding),
+		};
+	}
+
+	const legacyRow = readUnboundLegacyProfileRowByReadablePlanId(
+		db,
+		identity.planId,
+	);
+	if (legacyRow) {
+		return {
+			kind: 'unbound_legacy',
+			identity,
+			profile: rowToProfile(legacyRow),
+		};
+	}
+
+	return {
+		kind: 'missing',
+		identity,
+	};
+}
+
+function createExactIdentityBindingTx(
+	db: ReturnType<typeof getProjectDb>,
+	profileId: number,
+	identity: QaGateProfileIdentity,
+): void {
+	db.run(
+		'INSERT INTO qa_gate_profile_identity (identity_hash, profile_id, raw_swarm, raw_title, readable_plan_id) VALUES (?, ?, ?, ?, ?)',
+		[
+			identity.identityHash,
+			profileId,
+			identity.swarm,
+			identity.title,
+			identity.planId,
+		],
+	);
+}
+
+function createExactProfileTx(
+	db: ReturnType<typeof getProjectDb>,
+	identity: QaGateProfileIdentity,
+	projectType: string | undefined,
+	initialGates: Partial<QaGates>,
+): QaGateProfile {
+	const gatesJson = JSON.stringify({ ...DEFAULT_QA_GATES, ...initialGates });
+	db.run(
+		'INSERT INTO qa_gate_profile (plan_id, project_type, gates) VALUES (?, ?, ?)',
+		[
+			buildExactStoragePlanId(identity.identityHash),
+			projectType ?? null,
+			gatesJson,
+		],
+	);
+	const row = readProfileRowByPlanId(
+		db,
+		buildExactStoragePlanId(identity.identityHash),
+	);
+	if (!row) {
+		throw new Error(
+			`Failed to create QA gate profile row for exact identity plan_id=${identity.planId}`,
+		);
+	}
+	createExactIdentityBindingTx(db, row.id, identity);
+	const binding = readIdentityBindingByHash(db, identity.identityHash);
+	if (!binding) {
+		throw new Error(
+			`Failed to create QA gate profile identity binding for plan_id=${identity.planId}`,
+		);
+	}
+	return rowToProfileWithBinding(row, binding);
+}
+
+function shouldAdoptLegacyProfile(
+	identity: QaGateProfileIdentity,
+	options: SetGatesForIdentityOptions,
+): boolean {
+	if (options.allowLegacyAdoption !== true) {
+		return false;
+	}
+	return (
+		options.legacyAdoptionIdentity?.swarm === identity.swarm &&
+		options.legacyAdoptionIdentity?.title === identity.title
+	);
 }
 
 /**
@@ -149,12 +456,46 @@ export function getProfile(
 ): QaGateProfile | null {
 	if (!projectDbExists(directory)) return null;
 	const db = getProjectDb(directory);
-	const row = db
-		.query<QaGateProfileRow, [string]>(
-			'SELECT * FROM qa_gate_profile WHERE plan_id = ?',
-		)
-		.get(planId);
+	const row = readProfileRowByPlanId(db, planId);
 	return row ? rowToProfile(row) : null;
+}
+
+/**
+ * Fetch the profile bound to an exact raw swarm/title pair.
+ *
+ * New profiles persist a collision-resistant identity hash plus the exact raw
+ * strings. Legacy rows created before those columns existed fall back to the
+ * readable plan_id only, preserving backward compatibility without allowing a
+ * bound exact identity to be mistaken for a different raw pair that sanitizes
+ * to the same legacy plan_id.
+ */
+export function getProfileForIdentity(
+	directory: string,
+	identity: { swarm: string; title: string },
+): QaGateProfile | null {
+	const lookup = getProfileLookupForIdentity(directory, identity);
+	if (lookup.kind === 'bound') {
+		return lookup.profile;
+	}
+	if (lookup.kind === 'unbound_legacy') {
+		throw new QaGateProfileIdentityUnboundError(lookup.identity);
+	}
+	return null;
+}
+
+export function getProfileLookupForIdentity(
+	directory: string,
+	identity: { swarm: string; title: string },
+): QaGateProfileLookupForIdentity {
+	const exact = buildProfileIdentity(identity);
+	if (!projectDbExists(directory)) {
+		return {
+			kind: 'missing',
+			identity: exact,
+		};
+	}
+	const db = getProjectDb(directory);
+	return lookupProfileForIdentityTx(db, exact);
 }
 
 /**
@@ -186,19 +527,21 @@ export function hasAnyProfileWithEnabledGate(
 }
 
 /**
- * Return the existing profile for `planId`, or create a new one seeded with
- * `DEFAULT_QA_GATES` if none exists. Tolerates races on the UNIQUE index.
+ * Return the existing profile for `planId`, or atomically create one seeded
+ * with `DEFAULT_QA_GATES` overlaid by the initial selection. Tolerates races
+ * on the UNIQUE index; a loser re-reads and returns the winning row.
  */
 export function getOrCreateProfile(
 	directory: string,
 	planId: string,
 	projectType?: string,
+	initialGates: Partial<QaGates> = {},
 ): QaGateProfile {
 	const existing = _internals.getProfile(directory, planId);
 	if (existing) return existing;
 
 	const db = getProjectDb(directory);
-	const gatesJson = JSON.stringify(DEFAULT_QA_GATES);
+	const gatesJson = JSON.stringify({ ...DEFAULT_QA_GATES, ...initialGates });
 	const insert = db.transaction(() => {
 		db.run(
 			'INSERT INTO qa_gate_profile (plan_id, project_type, gates) VALUES (?, ?, ?)',
@@ -225,6 +568,36 @@ export function getOrCreateProfile(
 }
 
 /**
+ * Return the existing exact-identity profile, or atomically create one seeded
+ * with the exact raw swarm/title binding plus the initial gate selection.
+ *
+ * An unbound legacy row cannot prove which raw identity originally owned its
+ * readable plan_id. This create-only API therefore never adopts that row: it
+ * creates a collision-resistant `qa2-<identity-hash>` profile for the exact
+ * identity and leaves explicit legacy adoption to `setGatesForIdentity`.
+ */
+export function getOrCreateProfileForIdentity(
+	directory: string,
+	identity: { swarm: string; title: string },
+	projectType?: string,
+	initialGates: Partial<QaGates> = {},
+): QaGateProfile {
+	const db = getProjectDb(directory);
+	const exact = buildProfileIdentity(identity);
+
+	return withImmediateTransaction(db, () => {
+		const lookup = lookupProfileForIdentityTx(db, exact);
+		if (lookup.kind === 'bound') {
+			return lookup.profile;
+		}
+		if (lookup.kind === 'unbound_legacy') {
+			return createExactProfileTx(db, exact, projectType, initialGates);
+		}
+		return createExactProfileTx(db, exact, projectType, initialGates);
+	});
+}
+
+/**
  * Update gates for `planId`. Gates can only be ratcheted tighter —
  * attempting to disable a currently-enabled gate throws. Throws if the
  * profile is locked.
@@ -234,45 +607,132 @@ export function setGates(
 	planId: string,
 	gates: Partial<QaGates>,
 ): QaGateProfile {
-	const current = _internals.getProfile(directory, planId);
-	if (!current) {
-		throw new Error(
-			`No QA gate profile found for plan_id=${planId} — call getOrCreateProfile first`,
-		);
-	}
-	if (current.locked_at !== null) {
-		throw new Error(
-			'Cannot modify gates: QA gate profile is locked after critic approval',
-		);
-	}
-
-	const merged: QaGates = { ...current.gates };
-	for (const key of Object.keys(gates) as Array<keyof QaGates>) {
-		const incoming = gates[key];
-		if (incoming === undefined) continue;
-		if (incoming === false && current.gates[key] === true) {
+	const db = getProjectDb(directory);
+	return withImmediateTransaction(db, () => {
+		const currentRow = readProfileRowByPlanId(db, planId);
+		if (!currentRow) {
 			throw new Error(
-				`Cannot disable gate '${key}': sessions can only ratchet tighter`,
+				`No QA gate profile found for plan_id=${planId} — call getOrCreateProfile first`,
 			);
 		}
-		if (incoming === true) {
-			merged[key] = true;
+		const current = rowToProfile(currentRow);
+		if (current.locked_at !== null) {
+			throw new Error(
+				'Cannot modify gates: QA gate profile is locked after critic approval',
+			);
 		}
-	}
 
+		const merged: QaGates = { ...current.gates };
+		for (const key of Object.keys(gates) as Array<keyof QaGates>) {
+			const incoming = gates[key];
+			if (incoming === undefined) continue;
+			if (incoming === false && current.gates[key] === true) {
+				throw new Error(
+					`Cannot disable gate '${key}': sessions can only ratchet tighter`,
+				);
+			}
+			if (incoming === true) {
+				merged[key] = true;
+			}
+		}
+
+		db.run('UPDATE qa_gate_profile SET gates = ? WHERE id = ?', [
+			JSON.stringify(merged),
+			current.id,
+		]);
+
+		const updatedRow = readProfileRowById(db, current.id);
+		if (!updatedRow) {
+			throw new Error(
+				`Failed to re-read QA gate profile after update for plan_id=${planId}`,
+			);
+		}
+		return rowToProfile(updatedRow);
+	});
+}
+
+export function setGatesForIdentity(
+	directory: string,
+	identity: { swarm: string; title: string },
+	gates: Partial<QaGates>,
+	options: SetGatesForIdentityOptions = {},
+): QaGateProfile {
 	const db = getProjectDb(directory);
-	db.run('UPDATE qa_gate_profile SET gates = ? WHERE plan_id = ?', [
-		JSON.stringify(merged),
-		planId,
-	]);
+	const exact = buildProfileIdentity(identity);
 
-	const updated = _internals.getProfile(directory, planId);
-	if (!updated) {
-		throw new Error(
-			`Failed to re-read QA gate profile after update for plan_id=${planId}`,
-		);
-	}
-	return updated;
+	return withImmediateTransaction(db, () => {
+		let lookup = lookupProfileForIdentityTx(db, exact);
+		if (lookup.kind === 'missing') {
+			return createExactProfileTx(db, exact, options.projectType, gates);
+		}
+
+		if (lookup.kind === 'unbound_legacy') {
+			if (shouldAdoptLegacyProfile(exact, options)) {
+				createExactIdentityBindingTx(db, lookup.profile.id, exact);
+				lookup = lookupProfileForIdentityTx(db, exact);
+				if (lookup.kind !== 'bound') {
+					throw new Error(
+						`Failed to adopt legacy QA gate profile for exact identity plan_id=${exact.planId}`,
+					);
+				}
+			} else if (options.allowLegacyCollisionCreate === true) {
+				return createExactProfileTx(db, exact, options.projectType, gates);
+			} else {
+				throw new QaGateProfileIdentityUnboundError(lookup.identity);
+			}
+		}
+
+		const current = lookup.profile;
+		const currentRow = readProfileRowById(db, current.id);
+		if (!currentRow) {
+			throw new Error(
+				`Failed to read QA gate profile row for profile_id=${current.id}`,
+			);
+		}
+		_internals.afterSetGatesForIdentityRead?.({
+			directory,
+			identity: exact,
+			profileId: current.id,
+			storagePlanId: currentRow.plan_id,
+		});
+
+		if (current.locked_at !== null) {
+			if (!hasAnyGatePatch(gates)) {
+				return current;
+			}
+			throw new Error(
+				'Cannot modify gates: QA gate profile is locked after critic approval',
+			);
+		}
+
+		const merged: QaGates = { ...current.gates };
+		for (const key of Object.keys(gates) as Array<keyof QaGates>) {
+			const incoming = gates[key];
+			if (incoming === undefined) continue;
+			if (incoming === false && current.gates[key] === true) {
+				throw new Error(
+					`Cannot disable gate '${key}': sessions can only ratchet tighter`,
+				);
+			}
+			if (incoming === true) {
+				merged[key] = true;
+			}
+		}
+
+		db.run('UPDATE qa_gate_profile SET gates = ? WHERE id = ?', [
+			JSON.stringify(merged),
+			current.id,
+		]);
+
+		const updatedRow = readProfileRowById(db, current.id);
+		const binding = readIdentityBindingByHash(db, exact.identityHash);
+		if (!updatedRow || !binding) {
+			throw new Error(
+				`Failed to re-read QA gate profile after exact-identity update for plan_id=${exact.planId}`,
+			);
+		}
+		return rowToProfileWithBinding(updatedRow, binding);
+	});
 }
 
 /**
@@ -307,6 +767,41 @@ export function lockProfile(
 	return locked;
 }
 
+export function lockProfileForIdentity(
+	directory: string,
+	identity: { swarm: string; title: string },
+	snapshotSeq: number,
+): QaGateProfile {
+	const db = getProjectDb(directory);
+	const exact = buildProfileIdentity(identity);
+	return withImmediateTransaction(db, () => {
+		const lookup = lookupProfileForIdentityTx(db, exact);
+		if (lookup.kind === 'missing') {
+			throw new Error(
+				`No QA gate profile found for exact identity plan_id=${exact.planId} — cannot lock`,
+			);
+		}
+		if (lookup.kind === 'unbound_legacy') {
+			throw new QaGateProfileIdentityUnboundError(lookup.identity);
+		}
+		if (lookup.profile.locked_at !== null) {
+			return lookup.profile;
+		}
+		db.run(
+			"UPDATE qa_gate_profile SET locked_at = datetime('now'), locked_by_snapshot_seq = ? WHERE id = ?",
+			[snapshotSeq, lookup.profile.id],
+		);
+		const updatedRow = readProfileRowById(db, lookup.profile.id);
+		const binding = readIdentityBindingByHash(db, exact.identityHash);
+		if (!updatedRow || !binding) {
+			throw new Error(
+				`Failed to re-read locked QA gate profile for exact identity plan_id=${exact.planId}`,
+			);
+		}
+		return rowToProfileWithBinding(updatedRow, binding);
+	});
+}
+
 /**
  * Compute a SHA-256 hex digest over the stable identity of a profile.
  * Used by `get_approved_plan` for drift detection.
@@ -314,6 +809,7 @@ export function lockProfile(
 export function computeProfileHash(profile: QaGateProfile): string {
 	const payload = JSON.stringify({
 		plan_id: profile.plan_id,
+		identity_hash: profile.identity_hash,
 		gates: profile.gates,
 	});
 	return createHash('sha256').update(payload).digest('hex');

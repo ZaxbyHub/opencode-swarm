@@ -17,13 +17,13 @@ import {
 	computeProfileHash,
 	DEFAULT_QA_GATES,
 	getEffectiveGates,
-	getOrCreateProfile,
-	getProfile,
+	getProfileLookupForIdentity,
 	type QaGates,
-	setGates,
+	setGatesForIdentity,
 } from '../db/qa-gate-profile.js';
 import { loadPlanJsonOnly } from '../plan/manager.js';
 import { derivePlanId } from '../plan/utils.js';
+import { formatLegacyQaBindingOnlyCall } from '../qa-gate/recovery.js';
 import { getAgentSession } from '../state.js';
 
 const ALL_GATE_NAMES: ReadonlyArray<keyof QaGates> = [
@@ -65,16 +65,30 @@ export async function handleQaGatesCommand(
 	const gateArgs = args.slice(1);
 
 	if (!subcommand || subcommand === 'show' || subcommand === 'status') {
-		const profile = getProfile(directory, planId);
-		const spec = profile ? profile.gates : DEFAULT_QA_GATES;
+		const lookup = getProfileLookupForIdentity(directory, plan);
+		const profile = lookup.kind === 'bound' ? lookup.profile : null;
+		const spec =
+			lookup.kind === 'unbound_legacy'
+				? lookup.profile.gates
+				: profile
+					? profile.gates
+					: DEFAULT_QA_GATES;
 		const session = sessionID ? getAgentSession(sessionID) : null;
 		const overrides = session?.qaGateSessionOverrides ?? {};
 		const effective = profile
 			? getEffectiveGates(profile, overrides)
-			: { ...DEFAULT_QA_GATES, ...overrides };
+			: lookup.kind === 'unbound_legacy'
+				? getEffectiveGates(lookup.profile, overrides)
+				: { ...DEFAULT_QA_GATES, ...overrides };
 		const lines: string[] = [];
 		lines.push(`QA Gate Profile for plan_id=${planId}`);
-		if (!profile) {
+		if (lookup.kind === 'unbound_legacy') {
+			lines.push(
+				`  (legacy profile is present but not exact-bound — run ${formatLegacyQaBindingOnlyCall(
+					{ swarm: plan.swarm, title: plan.title },
+				)} to exact-bind it without changing gates or the lock)`,
+			);
+		} else if (!profile) {
 			lines.push('  (no profile persisted yet — showing defaults)');
 		} else {
 			lines.push(
@@ -105,13 +119,15 @@ export async function handleQaGatesCommand(
 		if (invalid.length > 0) {
 			return `Error: unknown gate(s): ${invalid.join(', ')}. Valid gates: ${ALL_GATE_NAMES.join(', ')}`;
 		}
-		getOrCreateProfile(directory, planId);
 		const patch: Partial<QaGates> = {};
 		for (const g of gateArgs) {
 			if (isGateName(g)) patch[g] = true;
 		}
 		try {
-			const updated = setGates(directory, planId, patch);
+			const updated = setGatesForIdentity(directory, plan, patch, {
+				allowLegacyAdoption: true,
+				legacyAdoptionIdentity: plan,
+			});
 			return [
 				`Enabled gates persisted for plan_id=${planId}:`,
 				formatGates(updated.gates),

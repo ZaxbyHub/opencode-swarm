@@ -57,6 +57,85 @@ const MIGRATIONS: Migration[] = [
 				SELECT RAISE(ABORT, 'qa_gate_profile row is locked and cannot be modified after critic approval');
 			END`,
 	},
+	{
+		version: 4,
+		name: 'add_qa_gate_profile_raw_swarm',
+		sql: 'ALTER TABLE qa_gate_profile ADD COLUMN raw_swarm TEXT',
+	},
+	{
+		version: 5,
+		name: 'add_qa_gate_profile_raw_title',
+		sql: 'ALTER TABLE qa_gate_profile ADD COLUMN raw_title TEXT',
+	},
+	{
+		version: 6,
+		name: 'add_qa_gate_profile_identity_hash',
+		sql: 'ALTER TABLE qa_gate_profile ADD COLUMN identity_hash TEXT',
+	},
+	{
+		version: 7,
+		name: 'create_qa_gate_profile_identity_hash_index',
+		sql: `CREATE UNIQUE INDEX IF NOT EXISTS idx_qa_gate_profile_identity_hash
+			ON qa_gate_profile(identity_hash)
+			WHERE identity_hash IS NOT NULL`,
+	},
+	{
+		version: 8,
+		name: 'create_qa_gate_profile_identity',
+		sql: `CREATE TABLE qa_gate_profile_identity (
+			identity_hash TEXT PRIMARY KEY,
+			profile_id INTEGER NOT NULL UNIQUE REFERENCES qa_gate_profile(id) ON DELETE CASCADE,
+			raw_swarm TEXT NOT NULL,
+			raw_title TEXT NOT NULL,
+			readable_plan_id TEXT NOT NULL
+		)`,
+	},
+	{
+		version: 9,
+		name: 'create_qa_gate_profile_identity_readable_plan_index',
+		sql: `CREATE INDEX idx_qa_gate_profile_identity_readable_plan_id
+			ON qa_gate_profile_identity(readable_plan_id)`,
+	},
+	{
+		version: 10,
+		name: 'backfill_qa_gate_profile_identity_from_legacy_columns',
+		sql: `INSERT INTO qa_gate_profile_identity (
+				identity_hash,
+				profile_id,
+				raw_swarm,
+				raw_title,
+				readable_plan_id
+			)
+			SELECT
+				identity_hash,
+				id,
+				raw_swarm,
+				raw_title,
+				plan_id
+			FROM qa_gate_profile
+			WHERE identity_hash IS NOT NULL
+				AND raw_swarm IS NOT NULL
+				AND raw_title IS NOT NULL
+				AND NOT EXISTS (
+					SELECT 1
+					FROM qa_gate_profile_identity AS qi
+					WHERE qi.profile_id = qa_gate_profile.id
+				)`,
+	},
+	{
+		version: 11,
+		name: 'create_task_checkpoint_receipt',
+		sql: `CREATE TABLE task_checkpoint_receipt (
+			plan_identity_hash TEXT NOT NULL,
+			task_id TEXT NOT NULL,
+			label TEXT NOT NULL,
+			state TEXT NOT NULL CHECK(state IN ('pending', 'committed', 'logged')),
+			sha TEXT,
+			created_at TEXT NOT NULL DEFAULT (datetime('now')),
+			updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+			PRIMARY KEY(plan_identity_hash, task_id)
+		)`,
+	},
 ];
 
 const _projectDbs: Map<string, Database> = new Map();

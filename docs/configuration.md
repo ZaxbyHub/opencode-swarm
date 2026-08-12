@@ -1450,7 +1450,7 @@ See [Modes Guide](modes.md#lean-turbo-lane-planning-engine) for the full Lean Tu
 
 ## Execution Profile
 
-The execution profile (per-plan, set during QA GATE SELECTION or via `save_plan`) controls phase-level execution preferences. Configure interactively via the gate-selection dialogue surfaced in MODE: SPECIFY step 5b, MODE: BRAINSTORM Phase 6, or the MODE: PLAN inline path.
+The execution profile controls plan-scoped execution preferences. MODE: PLAN drafts the task graph, freezes the exact `swarm_id` plus plan title, asks the unified QA/parallelism/commit/auto-proceed question, calls `set_qa_gates` against that identity before the first `save_plan`, then saves the full profile with the same identity. SPECIFY, BRAINSTORM, and issue ingestion defer these choices because they do not yet have final task scopes. If an upgraded plan reports that its QA profile is not exact-bound, recover by rerunning `set_qa_gates` with the same `swarm_id`, the same `plan_title`, and `adopt_legacy_binding_only: true`; this exact-binds the existing profile without mutating gates or the lock.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -1458,6 +1458,7 @@ The execution profile (per-plan, set during QA GATE SELECTION or via `save_plan`
 | `max_concurrent_tasks` | number | `10` | Maximum tasks that may run concurrently when `parallelization_enabled: true` (1–64) |
 | `council_parallel` | boolean | `true` | Allow council review phases to run council members in parallel |
 | `auto_proceed` | boolean | `false` | Skip the "Ready for Phase N+1?" prompt and advance automatically at phase boundaries |
+| `commit_after_each_completed_task` | boolean | `false` | Create an advisory, idempotent checkpoint after a task completes and all pre-commit gates pass |
 
 **Auto-proceed:** When `true`, the swarm advances from one phase to the next without asking for confirmation. The session override (`/swarm auto-proceed on|off`) always takes precedence over the plan default. The architect sees the effective value via an injected `AUTO PROCEED STATUS` banner. The first-boundary nudge offers to enable it once per session when the plan default is `false` and no session override is set.
 
@@ -1521,7 +1522,7 @@ Epic Mode auto-decides per plan whether to invoke Lean Turbo's parallel planner 
 
 ## QA gates reference
 
-The QA gate profile (per-plan, persisted in the project DB) controls which quality gates fire during a plan's execution. Configure interactively via the gate-selection dialogue surfaced in MODE: SPECIFY step 5b, MODE: BRAINSTORM Phase 6, or the MODE: PLAN inline path. Programmatic configuration via `set_qa_gates` (architect-only) or `/swarm qa-gates enable <gate>...`.
+The QA gate profile (per-plan, persisted in the project DB) controls which quality gates fire during a plan's execution. MODE: PLAN configures it through `set_qa_gates` using the frozen `swarm_id` and `plan_title` before the first plan save, eliminating any dependency on transient context files. Existing-plan administration remains available through `/swarm qa-gates enable <gate>...`. Upgraded legacy rows stay fail-closed until they are exact-bound; the supported recovery is `set_qa_gates({ swarm_id, plan_title, adopt_legacy_binding_only: true })`, which binds the current plan identity without changing gates or the lock.
 
 All gates are **ratchet-tighter** — once enabled they cannot be disabled until the profile is reset, and once locked (after critic approval) no changes are accepted at all.
 

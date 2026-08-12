@@ -22,9 +22,8 @@ describe('save-plan tool verification tests', () => {
 	let tmpDir: string;
 
 	beforeEach(async () => {
-		// Create a temporary directory for each test
+		process.env.SWARM_SKIP_GATE_SELECTION = '1';
 		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'save-plan-test-'));
-		// Ensure .swarm/ directory exists
 		await fs.mkdir(path.join(tmpDir, '.swarm'), { recursive: true });
 		// Create spec.md required by the spec gate
 		await fs.writeFile(path.join(tmpDir, '.swarm', 'spec.md'), '# Test Spec\n');
@@ -36,7 +35,7 @@ describe('save-plan tool verification tests', () => {
 	});
 
 	afterEach(async () => {
-		// Clean up the temporary directory
+		delete process.env.SWARM_SKIP_GATE_SELECTION;
 		try {
 			await fs.rm(tmpDir, { recursive: true, force: true });
 		} catch {

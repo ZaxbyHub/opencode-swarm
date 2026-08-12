@@ -104,6 +104,21 @@ describe('get_approved_plan tool', () => {
 	});
 
 	test('returns approved plan with full metadata', async () => {
+		plan = createTestPlan({
+			execution_profile: {
+				parallelization_enabled: true,
+				max_concurrent_tasks: 2,
+				council_parallel: false,
+				locked: true,
+				auto_proceed: true,
+				commit_after_each_completed_task: true,
+			},
+		});
+		writeFileSync(
+			join(dir, '.swarm', 'plan.json'),
+			JSON.stringify(plan, null, 2),
+			'utf-8',
+		);
 		const approvalMeta = {
 			phase: 1,
 			verdict: 'APPROVED',
@@ -122,6 +137,9 @@ describe('get_approved_plan tool', () => {
 		expect(result.approved_plan!.snapshot_seq).toBeGreaterThan(0);
 		expect(result.approved_plan!.snapshot_timestamp).toBeTruthy();
 		expect(result.approved_plan!.payload_hash).toBe(computePlanHash(plan));
+		expect(result.approved_plan!.execution_profile).toEqual(
+			plan.execution_profile,
+		);
 	});
 
 	test('drift_detected is false when current plan matches approved', async () => {

@@ -495,7 +495,6 @@ async function parsePlanJsonCached(directory: string): Promise<Plan | null> {
  *
  * F-06: Hash function difference from ledger.ts:
  * - This function uses Bun.hash (compact) vs SHA-256 (ledger.ts::computePlanHash)
- * - This function excludes execution_profile vs included in ledger hash
  * - Purpose: plan.md drift detection (short, readable) vs plan state integrity (cryptographic)
  * Both are intentional design choices for their respective use cases.
  */
@@ -507,6 +506,20 @@ function computePlanContentHash(plan: Plan): string {
 		swarm: plan.swarm,
 		current_phase: plan.current_phase,
 		migration_status: plan.migration_status,
+		execution_profile: plan.execution_profile
+			? {
+					parallelization_enabled:
+						plan.execution_profile.parallelization_enabled,
+					max_concurrent_tasks: plan.execution_profile.max_concurrent_tasks,
+					council_parallel: plan.execution_profile.council_parallel,
+					locked: plan.execution_profile.locked,
+					auto_proceed: plan.execution_profile.auto_proceed,
+					commit_after_each_completed_task:
+						plan.execution_profile.commit_after_each_completed_task === true
+							? true
+							: undefined,
+				}
+			: undefined,
 		phases: plan.phases
 			.map((phase) => ({
 				id: phase.id,
@@ -2337,6 +2350,17 @@ export function derivePlanMarkdown(plan: Plan): string {
 		statusMap[plan.phases[currentPhase - 1]?.status] || 'PENDING';
 
 	let markdown = `# ${plan.title}\nSwarm: ${plan.swarm}\nPhase: ${currentPhase} [${phaseStatus}] | Updated: ${now}\n`;
+
+	if (plan.execution_profile) {
+		const profile = plan.execution_profile;
+		markdown += '\n## Execution Profile\n';
+		markdown += `- Parallelization: ${profile.parallelization_enabled ? 'enabled' : 'disabled'}\n`;
+		markdown += `- Max Concurrent Tasks: ${profile.max_concurrent_tasks}\n`;
+		markdown += `- Council Parallel: ${profile.council_parallel ? 'yes' : 'no'}\n`;
+		markdown += `- Locked: ${profile.locked ? 'yes' : 'no'}\n`;
+		markdown += `- Auto Proceed: ${profile.auto_proceed ? 'yes' : 'no'}\n`;
+		markdown += `- Commit After Each Completed Task: ${profile.commit_after_each_completed_task ? 'yes' : 'no'}\n`;
+	}
 
 	// Sort phases deterministically by ID (ascending)
 	const sortedPhases = [...plan.phases].sort((a, b) => a.id - b.id);

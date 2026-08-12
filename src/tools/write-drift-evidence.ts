@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { ToolDefinition } from '@opencode-ai/plugin/tool';
 import { z } from 'zod';
-import { lockProfile } from '../db/qa-gate-profile.js';
+import { lockProfileForIdentity } from '../db/qa-gate-profile.js';
 import {
 	isAcceptedVerdict2,
 	normalizeVerdict2,
@@ -196,7 +196,11 @@ export async function executeWriteDriftEvidence(
 					// qa_profile_hash.
 					try {
 						const planId = derivePlanId(currentPlan);
-						const locked = lockProfile(directory, planId, snapshotEvent.seq);
+						const locked = lockProfileForIdentity(
+							directory,
+							currentPlan,
+							snapshotEvent.seq,
+						);
 						qaProfileLocked = {
 							plan_id: planId,
 							locked_at: locked.locked_at ?? '',

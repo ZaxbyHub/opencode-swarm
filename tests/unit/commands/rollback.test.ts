@@ -14,11 +14,13 @@ import {
 	rmSync,
 	writeFileSync,
 } from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
+import * as realHookUtils from '../../../src/hooks/utils.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 // Mock validateSwarmPath to return deterministic paths (avoids empty-filename bug on Windows)
 mock.module('../../../src/hooks/utils.js', () => ({
+	...realHookUtils,
 	validateSwarmPath: (directory: string, filename: string) =>
 		path.join(directory, '.swarm', filename),
 }));
@@ -63,9 +65,7 @@ function createCheckpointDir(phase: number, files: string[] = ['plan.md']) {
 }
 
 beforeEach(() => {
-	testDir = require('node:fs').realpathSync(
-		require('node:fs').mkdtempSync(path.join(os.tmpdir(), 'rollback-test-')),
-	);
+	testDir = canonicalMkdtemp('rollback-test-');
 	mkdirSync(getSwarmDir(), { recursive: true });
 });
 

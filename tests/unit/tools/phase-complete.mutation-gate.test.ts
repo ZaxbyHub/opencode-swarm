@@ -4,21 +4,26 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 import { closeAllProjectDbs } from '../../../src/db/project-db';
-import { getOrCreateProfile, setGates } from '../../../src/db/qa-gate-profile';
-import { derivePlanId } from '../../../src/plan/utils';
+import {
+	getOrCreateProfile,
+	lockProfile,
+	setGates,
+	setGatesForIdentity,
+} from '../../../src/db/qa-gate-profile';
 import {
 	ensureAgentSession,
 	recordPhaseAgentDispatch,
 	resetSwarmState,
 	swarmState,
 } from '../../../src/state';
+import { executeSetQaGates } from '../../../src/tools/set-qa-gates';
 
 const { phase_complete } = await import('../../../src/tools/phase-complete');
 
 // planId must match what loadPlan derives: "${swarm}-${title}".replace(...)
 const PLAN_SWARM = 'mega';
 const PLAN_TITLE = 'Test Plan';
-const PLAN_ID = derivePlanId({ swarm: PLAN_SWARM, title: PLAN_TITLE });
+const PLAN_IDENTITY = { swarm: PLAN_SWARM, title: PLAN_TITLE };
 
 function setupSwarmDir(dir: string): void {
 	fs.mkdirSync(path.join(dir, '.swarm', 'evidence'), { recursive: true });
@@ -146,6 +151,10 @@ function writeMutationEvidence(
 	);
 }
 
+function enableMutationGate(dir: string): void {
+	setGatesForIdentity(dir, PLAN_IDENTITY, { mutation_test: true });
+}
+
 describe('phase_complete — mutation gate (Gate 4)', () => {
 	let tempDir: string;
 	let originalCwd: string;
@@ -188,8 +197,7 @@ describe('phase_complete — mutation gate (Gate 4)', () => {
 	});
 
 	test('2. gate enabled + evidence missing (ENOENT) → blocked MUTATION_GATE_MISSING', async () => {
-		getOrCreateProfile(tempDir, PLAN_ID);
-		setGates(tempDir, PLAN_ID, { mutation_test: true });
+		enableMutationGate(tempDir);
 		writeDriftEvidence(tempDir, 1, 'approved');
 		// No mutation-gate.json written
 
@@ -203,8 +211,7 @@ describe('phase_complete — mutation gate (Gate 4)', () => {
 	});
 
 	test('3. gate enabled + pass verdict → phase completes', async () => {
-		getOrCreateProfile(tempDir, PLAN_ID);
-		setGates(tempDir, PLAN_ID, { mutation_test: true });
+		enableMutationGate(tempDir);
 		writeDriftEvidence(tempDir, 1, 'approved');
 		writeMutationEvidence(tempDir, 1, 'pass');
 
@@ -215,8 +222,7 @@ describe('phase_complete — mutation gate (Gate 4)', () => {
 	});
 
 	test('4. gate enabled + warn verdict → non-blocking, phase completes', async () => {
-		getOrCreateProfile(tempDir, PLAN_ID);
-		setGates(tempDir, PLAN_ID, { mutation_test: true });
+		enableMutationGate(tempDir);
 		writeDriftEvidence(tempDir, 1, 'approved');
 		writeMutationEvidence(tempDir, 1, 'warn');
 
@@ -227,8 +233,7 @@ describe('phase_complete — mutation gate (Gate 4)', () => {
 	});
 
 	test('5. gate enabled + skip verdict → phase completes', async () => {
-		getOrCreateProfile(tempDir, PLAN_ID);
-		setGates(tempDir, PLAN_ID, { mutation_test: true });
+		enableMutationGate(tempDir);
 		writeDriftEvidence(tempDir, 1, 'approved');
 		writeMutationEvidence(tempDir, 1, 'skip');
 
@@ -239,8 +244,7 @@ describe('phase_complete — mutation gate (Gate 4)', () => {
 	});
 
 	test('6. gate enabled + fail verdict → blocked MUTATION_GATE_FAIL', async () => {
-		getOrCreateProfile(tempDir, PLAN_ID);
-		setGates(tempDir, PLAN_ID, { mutation_test: true });
+		enableMutationGate(tempDir);
 		writeDriftEvidence(tempDir, 1, 'approved');
 		writeMutationEvidence(tempDir, 1, 'fail');
 
@@ -254,8 +258,7 @@ describe('phase_complete — mutation gate (Gate 4)', () => {
 	});
 
 	test('7. gate enabled + unrecognized verdict → blocked MUTATION_GATE_FAIL', async () => {
-		getOrCreateProfile(tempDir, PLAN_ID);
-		setGates(tempDir, PLAN_ID, { mutation_test: true });
+		enableMutationGate(tempDir);
 		writeDriftEvidence(tempDir, 1, 'approved');
 		// 'PASSED' is uppercase/unrecognized — fails closed
 		writeMutationEvidence(tempDir, 1, 'PASSED');
@@ -270,8 +273,7 @@ describe('phase_complete — mutation gate (Gate 4)', () => {
 	});
 
 	test('8. gate enabled + malformed JSON → blocked MUTATION_GATE_MISSING', async () => {
-		getOrCreateProfile(tempDir, PLAN_ID);
-		setGates(tempDir, PLAN_ID, { mutation_test: true });
+		enableMutationGate(tempDir);
 		writeDriftEvidence(tempDir, 1, 'approved');
 
 		const evidenceDir = path.join(tempDir, '.swarm', 'evidence', '1');
@@ -290,8 +292,7 @@ describe('phase_complete — mutation gate (Gate 4)', () => {
 	});
 
 	test('9. gate enabled + wrong entry type (substring match rejected) → blocked MUTATION_GATE_MISSING', async () => {
-		getOrCreateProfile(tempDir, PLAN_ID);
-		setGates(tempDir, PLAN_ID, { mutation_test: true });
+		enableMutationGate(tempDir);
 		writeDriftEvidence(tempDir, 1, 'approved');
 
 		const evidenceDir = path.join(tempDir, '.swarm', 'evidence', '1');
@@ -321,8 +322,7 @@ describe('phase_complete — mutation gate (Gate 4)', () => {
 	});
 
 	test('10. gate enabled + turbo mode → gate skipped, phase completes', async () => {
-		getOrCreateProfile(tempDir, PLAN_ID);
-		setGates(tempDir, PLAN_ID, { mutation_test: true });
+		enableMutationGate(tempDir);
 		writeDriftEvidence(tempDir, 1, 'approved');
 		// No mutation evidence — turbo should bypass
 
@@ -334,9 +334,45 @@ describe('phase_complete — mutation gate (Gate 4)', () => {
 		expect(result.success).toBe(true);
 	});
 
-	test('11. gate enabled via session override only (no DB profile gate) → blocked MUTATION_GATE_MISSING', async () => {
+	test('11. locked legacy unbound rows fail closed, then resume after binding-only adoption', async () => {
+		const legacyPlanId = `${PLAN_SWARM}-${PLAN_TITLE}`.replace(
+			/[^a-zA-Z0-9-_]/g,
+			'_',
+		);
+		getOrCreateProfile(tempDir, legacyPlanId);
+		setGates(tempDir, legacyPlanId, { mutation_test: true });
+		lockProfile(tempDir, legacyPlanId, 11);
+		writeDriftEvidence(tempDir, 1, 'approved');
+		writeMutationEvidence(tempDir, 1, 'pass');
+
+		const blocked = JSON.parse(
+			await phase_complete.execute({ phase: 1, sessionID: 'sess1' }),
+		);
+		expect(blocked.success).toBe(false);
+		expect(blocked.status).toBe('blocked');
+		expect(blocked.reason).toBe('DRIFT_VERIFICATION_IDENTITY_UNBOUND');
+		expect(blocked.message).toContain('adopt_legacy_binding_only');
+
+		const adopted = await executeSetQaGates(
+			{
+				swarm_id: PLAN_SWARM,
+				plan_title: PLAN_TITLE,
+				adopt_legacy_binding_only: true,
+			},
+			tempDir,
+		);
+		expect(adopted.success).toBe(true);
+		expect(adopted.profile?.locked_by_snapshot_seq).toBe(11);
+
+		const resumed = JSON.parse(
+			await phase_complete.execute({ phase: 1, sessionID: 'sess1' }),
+		);
+		expect(resumed.success).toBe(true);
+	});
+
+	test('12. gate enabled via session override only (no DB profile gate) → blocked MUTATION_GATE_MISSING', async () => {
 		// Spec-level gate is OFF (default)
-		const profile = getOrCreateProfile(tempDir, PLAN_ID);
+		const profile = setGatesForIdentity(tempDir, PLAN_IDENTITY, {});
 		expect(profile.gates.mutation_test).toBe(false);
 
 		writeDriftEvidence(tempDir, 1, 'approved');

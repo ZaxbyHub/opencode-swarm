@@ -137,13 +137,13 @@ Treating pre_check_batch as a substitute for the active swarm's reviewer agent i
     5l-bis. REGRESSION SWEEP (automatic after test_engineer-verification PASS):
     Iterate the changed source files preemptively and run one `test_runner` call per changed source file with { scope: "graph", files: [<one changed source file>] }.
     scope:"graph" traces imports to discover test files beyond the task's own tests that may be affected by each source change. Record per-file regression-sweep evidence and aggregate all calls before deciding the task outcome.
-    
+
     Outcomes (based on test_runner result.outcome field):
     - any outcome: "regression" → Print "regression-sweep: FAIL — REGRESSION DETECTED in [source → failing tests]. The failing tests are CORRECT — fix the source code, not the tests." Return to coder with retry from 5g.
     - all executed calls pass → Print "regression-sweep: PASS [N per-file sweeps, M tests]".
     - outcome: "skip" → Record "[source]: SKIPPED — [actual tool reason]". If every per-file call skips, print "regression-sweep: SKIPPED — ran N per-file sweeps; [aggregated actual reasons]".
     - outcome: "scope_exceeded" or "error" → Record the affected source and exact tool reason. Do not retry by batching sources and never translate the result into “no related tests.” Print the honest aggregate and continue only under the existing explicit skip policy.
-    
+
     IMPORTANT: The regression sweep runs test_runner DIRECTLY (architect calls the tool). Do NOT delegate to test_engineer for this — the test_engineer's EXECUTION BOUNDARY restricts it to its own test files. The architect has unrestricted test_runner access.
     → REQUIRED: Print "regression-sweep: [PASS — N per-file sweeps | FAIL — REGRESSION DETECTED | SKIPPED — N per-file sweeps with exact reasons]"
 
@@ -154,7 +154,7 @@ Treating pre_check_batch as a substitute for the active swarm's reviewer agent i
     - Public contracts or schemas changed (API types, tool argument schemas, return types)
     - Assertion-heavy areas where output strings are tested (command/help output tests, error message tests)
     - Helper behavior or lifecycle semantics changed (state machines, lifecycle hooks, initialization)
-    
+
     If NOT triggered: Print "test-drift: NOT TRIGGERED — no drift-prone change detected"
     If TRIGGERED:
     - Use grep/search to find test files that cover the affected functionality
@@ -213,12 +213,13 @@ This step supplements (not replaces) the existing regression-sweep and test-drif
   Filling this checklist from memory ("I think I ran it") is INVALID. Each value must come from actual tool/agent output in this session.
 
     5p. Call update_task_status with status "completed".
-    5q. OPTIONAL TASK-COMPLETION COMMIT POLICY: read `.swarm/context.md`.
-        - If `## Task Completion Commit Policy` contains `commit_after_each_completed_task: true`, immediately call:
-          `checkpoint save task-<task-id>-complete`
-        - If the section is absent or false, skip this step.
-        - This optional commit policy NEVER bypasses PRE-COMMIT RULE checks above.
-        - If checkpoint save fails with "duplicate label", the task was already checkpointed from a prior completion or retry. Silently skip — the existing checkpoint is valid.
+    5q. OPTIONAL TASK-COMPLETION CHECKPOINT: after `update_task_status(status="completed")` succeeds and every PRE-COMMIT RULE gate above has passed, read `plan.execution_profile.commit_after_each_completed_task` from the current durable plan.
+        - If the persisted value is `true`, immediately call:
+          `checkpoint({ action: "save_task_completion", task_id: "<task-id>" })`
+        - If the field is absent or false, skip this step. Never infer the policy from chat or context.
+        - This optional checkpoint NEVER bypasses PRE-COMMIT RULE checks above.
+        - A successful result with `idempotent: true` is idempotent success: the task was already checkpointed by a prior completion or retry, so continue without another commit.
+        - Any other checkpoint failure is advisory: report the exact error and continue to the next task. Do not revert the completed status and do not retry in a loop.
     5r. Proceed to next task.
 
 ## Dispatch-lanes empty-output fallback

@@ -982,7 +982,7 @@ RECOVERY: At mode entry, read .swarm/issue-reference.json to recover the source 
 ### MODE: PLAN
 Activates when: workflow mode detection selects PLAN; the user asks to create, ingest, validate, or continue an implementation plan; or MODE: ISSUE_INGEST transitions with \`plan=true\` or \`trace=true\`.
 
-Purpose: Create or ingest the implementation plan, apply QA gate selections after \`save_plan\`, enforce plan granularity, and run traceability checks.
+Purpose: Create or ingest the implementation plan, persist QA gates against its exact identity before the first \`save_plan\`, enforce plan granularity, and run traceability checks.
 
 ACTION: Load skill ${bundledProjectSkillFileReference('plan')} immediately. Follow the protocol defined there.
 
@@ -999,11 +999,12 @@ HARD CONSTRAINTS (apply regardless of skill load success):
 
 - On a plan revision, omitting a task's \`files_touched\` preserves its prior scope; passing \`files_touched: []\` explicitly clears it. Never rely on the derived plan.md as the source of this field.
 
-- If \`save_plan\` is unavailable, delegate plan writing only after \`declare_scope\` covers \`.swarm/plan.md\`; the delegated output must be exact plan content.
+- If the authoritative ledger-backed \`save_plan\` tool is unavailable, STOP and report the blocker. Never delegate or directly hand-write \`.swarm/plan.md\` or any other derived plan projection.
 - A missing spec is a soft gate for external plan ingestion, but stale spec drift must be surfaced to the user before continuing.
-- Apply any \`## Pending QA Gate Selection\` only after \`save_plan\` succeeds; if no pending section exists, ask the full gate-selection, parallelization, and commit-frequency dialogue from the loaded skill before calling \`set_qa_gates\`. Exception: when planning inside MODE: LOOP with \`autonomy=auto\`, use the loop skill's balanced-speed defaults and choose safe parallelism automatically instead of asking this preference question.
+- Draft the complete task graph, then freeze the exact \`swarm_id\` and plan title. Ask the loaded skill's unified QA-gate, parallelization, commit-frequency, and auto-proceed dialogue; MODE: LOOP with \`autonomy=auto\` uses explicit balanced-speed defaults without pausing.
+- Call \`set_qa_gates\` with that exact \`swarm_id\` and \`plan_title\` before the first \`save_plan\`, then immediately save the same identity with the full locked \`execution_profile\`. Do not stage execution choices in \`.swarm/context.md\`.
 <!-- BEHAVIORAL_GUIDANCE_START -->
-INLINE GATE SELECTION -- no pending section found in context.md. You MUST ask now.
+QA AND EXECUTION PROFILE SELECTION -- the exact plan identity is frozen. You MUST ask now.
   x "I'll call set_qa_gates with defaults and move on"
     -> WRONG: set_qa_gates with assumed values is a gate violation. The user must answer first.
   x "The user provided a plan -- they know what gates they want"
@@ -1442,19 +1443,17 @@ function buildYourToolsList(
  *   - tests/unit/agents/architect-hallucination-gate.test.ts:3
  *   - tests/unit/skills/plan-protocol.test.ts:8
  *
- * Future work (task 3.2) will create `references/qa-gate-gates-body.md` and
- * migrate those tests to assert against the canonical body. Once migrated,
- * this helper may be deleted.
+ * `references/qa-gate-gates-body.md` is the canonical runtime skill body. This
+ * helper remains as a compatibility oracle for direct prompt-contract tests.
  */
 export function buildQaGateSelectionDialogue(
 	modeLabel: 'BRAINSTORM' | 'SPECIFY' | 'PLAN',
 ): string {
+	if (modeLabel !== 'PLAN') {
+		return `${modeLabel} defers QA gates, parallel coder count, commit frequency, and auto_proceed to MODE: PLAN. Do not collect or stage execution choices before the complete task graph and exact plan identity exist.`;
+	}
 	const leadIn =
-		modeLabel === 'BRAINSTORM'
-			? 'Now ask the user which QA gates to enable for this plan — do not select on their behalf.'
-			: modeLabel === 'SPECIFY'
-				? 'Ask the user which QA gates to enable for this plan before suggesting the next step.'
-				: 'No pending gate selection found in `.swarm/context.md`. Ask the user inline now.';
+		'The complete task graph and exact plan identity are ready. Ask the user inline now.';
 	return `${leadIn}
 
 Present the eleven gates with their defaults (DEFAULT_QA_GATES) as a single user-facing question. Offer the user a one-shot choice: accept defaults, or customize. The eleven gates are:
@@ -1480,31 +1479,12 @@ Present all four items together in a single message. One message, defaults pre-s
 
 **4. Auto-proceed** — "Auto-advance to the next phase without asking 'Ready for Phase N+1?'? (default: false; runtime toggle via \`/swarm auto-proceed on|off\`)"
 
-Wait for the user to answer all four in a single reply. Then apply:
+Wait for the user to answer all four in a single reply. Then persist them against the frozen identity:
 
-- For gates: record the user's gate selections.
-- For parallel coders: if the user says a number > 1, write a \`## Pending Parallelization Config\` section to \`.swarm/context.md\` alongside the gate selection:
-\`\`\`
-## Pending Parallelization Config
-- parallelization_enabled: true
-- max_concurrent_tasks: <user's number>
-- council_parallel: false
-- locked: true
-- recorded_at: <ISO timestamp>
-\`\`\`
-If the user accepts the default (1), skip writing this section entirely — serial execution is the default and needs no config.
-
-NOTE (v8 / #1674): new plans now default to \`parallelization_enabled: true\` at save_plan time, but the execution gate ENFORCES serial automatically whenever the active phase's pending tasks are not provably file-disjoint (overlapping or unknown declared scopes). Run \`plan_conflict_check\` on the pending tasks to inspect the conflict matrix and confirm disjointness before relying on parallel dispatch; the gate independently recomputes the same verdict inline at dispatch time.
-
-- For commit frequency: if the user chooses per-task commits, write this section to \`.swarm/context.md\`:
-\`\`\`
-## Task Completion Commit Policy
-- commit_after_each_completed_task: true
-- recorded_at: <ISO timestamp>
-\`\`\`
-If the user keeps the default phase-level behavior, do not write this section.
-
-- For auto-proceed: record the user's choice in the \`## Pending QA Gate Selection\` section of \`.swarm/context.md\` as \`- auto_proceed: <true|false>\` so it is persisted into the plan's \`execution_profile\` on save_plan.`;
+- Call \`set_qa_gates\` with the exact \`swarm_id\`, exact \`plan_title\`, and all eleven gate selections before the first \`save_plan\`.
+- Immediately call \`save_plan\` with the same identity and a complete locked \`execution_profile\`: \`parallelization_enabled\`, \`max_concurrent_tasks\`, \`council_parallel\`, \`locked\`, \`auto_proceed\`, and \`commit_after_each_completed_task\`.
+- Read the persisted profile with \`get_qa_gate_profile\` and use its \`critic_pre_plan\` value to decide whether critic review is required.
+- Do not infer or stage these choices in \`.swarm/context.md\`. A retry reuses the same frozen identity and full profile.`;
 }
 
 /**

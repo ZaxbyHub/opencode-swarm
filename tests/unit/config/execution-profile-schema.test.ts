@@ -17,6 +17,7 @@ describe('ExecutionProfileSchema', () => {
 			expect(profile.council_parallel).toBe(true);
 			expect(profile.locked).toBe(false);
 			expect(profile.auto_proceed).toBe(false);
+			expect(profile.commit_after_each_completed_task).toBe(false);
 		});
 	});
 
@@ -76,6 +77,15 @@ describe('ExecutionProfileSchema', () => {
 			expect(result.data.auto_proceed).toBe(false);
 		});
 
+		it('accepts commit_after_each_completed_task: true', () => {
+			const result = ExecutionProfileSchema.safeParse({
+				commit_after_each_completed_task: true,
+			});
+			expect(result.success).toBe(true);
+			if (!result.success) return;
+			expect(result.data.commit_after_each_completed_task).toBe(true);
+		});
+
 		it('accepts a fully populated profile', () => {
 			const result = ExecutionProfileSchema.safeParse({
 				parallelization_enabled: true,
@@ -83,6 +93,7 @@ describe('ExecutionProfileSchema', () => {
 				council_parallel: true,
 				locked: true,
 				auto_proceed: true,
+				commit_after_each_completed_task: true,
 			});
 			expect(result.success).toBe(true);
 			if (!result.success) return;
@@ -91,6 +102,7 @@ describe('ExecutionProfileSchema', () => {
 			expect(result.data.council_parallel).toBe(true);
 			expect(result.data.locked).toBe(true);
 			expect(result.data.auto_proceed).toBe(true);
+			expect(result.data.commit_after_each_completed_task).toBe(true);
 		});
 	});
 

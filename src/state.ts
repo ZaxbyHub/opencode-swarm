@@ -22,7 +22,7 @@ import { stripKnownSwarmPrefix } from './config/schema';
 import type { CouncilAgent } from './council/types';
 import {
 	getEffectiveGates,
-	getProfile,
+	getProfileLookupForIdentity,
 	type QaGates,
 } from './db/qa-gate-profile.js';
 import {
@@ -2750,9 +2750,9 @@ export async function isCouncilGateActive(
 	}
 
 	const planId = derivePlanId(plan);
-	let profile: ReturnType<typeof getProfile> | null = null;
+	let lookup: ReturnType<typeof getProfileLookupForIdentity> | null = null;
 	try {
-		profile = getProfile(directory, planId);
+		lookup = getProfileLookupForIdentity(directory, plan);
 	} catch (err) {
 		// getProfile returns null on missing DB; it only throws on unexpected I/O or
 		// SQLite errors (EACCES, EBUSY, corrupt database). Log those so they're visible.
@@ -2763,11 +2763,15 @@ export async function isCouncilGateActive(
 				`[isCouncilGateActive] getProfile threw unexpectedly for plan ${planId}: ${msg}. Treating council as inactive.`,
 			);
 		}
-		profile = null;
+		lookup = null;
 	}
-	if (!profile) {
+	if (!lookup || lookup.kind === 'missing') {
 		return false;
 	}
+	if (lookup.kind === 'unbound_legacy') {
+		return enabled && lookup.profile.gates.council_mode === true;
+	}
+	const profile = lookup.profile;
 
 	const councilMode =
 		getEffectiveGates(profile, sessionOverrides).council_mode === true;

@@ -8,6 +8,7 @@ export const ExecutionProfileSchema = z.object({
 	council_parallel: z.boolean().default(true),
 	locked: z.boolean().default(false),
 	auto_proceed: z.boolean().default(false),
+	commit_after_each_completed_task: z.boolean().default(false),
 });
 export type ExecutionProfile = z.infer<typeof ExecutionProfileSchema>;
 

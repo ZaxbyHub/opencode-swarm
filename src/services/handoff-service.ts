@@ -5,6 +5,7 @@
  * Reads from .swarm files to gather current state for context-efficient handoffs.
  */
 
+import type { ExecutionProfile } from '../config/plan-schema';
 import { readSwarmFileAsync } from '../hooks/utils';
 import { loadPlanJsonOnly } from '../plan/manager';
 import { log } from '../utils';
@@ -126,12 +127,7 @@ export interface HandoffData {
 	/** Delegation state */
 	delegationState: DelegationState | null;
 	/** Locked execution_profile for this plan, if set. Resuming sessions must honour it. */
-	execution_profile?: {
-		parallelization_enabled: boolean;
-		max_concurrent_tasks: number;
-		council_parallel: boolean;
-		locked: boolean;
-	} | null;
+	execution_profile?: ExecutionProfile | null;
 }
 
 /**
@@ -568,6 +564,12 @@ export function formatHandoffMarkdown(data: HandoffData): string {
 		);
 		lines.push(
 			`- **Locked**: ${data.execution_profile.locked ? 'YES — profile is immutable' : 'no'}`,
+		);
+		lines.push(
+			`- **Auto Proceed**: ${data.execution_profile.auto_proceed ? 'yes' : 'no'}`,
+		);
+		lines.push(
+			`- **Commit After Each Completed Task**: ${data.execution_profile.commit_after_each_completed_task ? 'yes' : 'no'}`,
 		);
 		lines.push('');
 	}

@@ -58,11 +58,15 @@ describe('architect prompt: declare_scope instruction at every coder delegation 
 		expect(preceding).toContain('declare_scope');
 	});
 
-	it('MODE: PLAN save_plan fallback mentions declare_scope', () => {
-		const start = prompt.indexOf('If `save_plan` is unavailable');
+	it('MODE: PLAN save_plan failure stops instead of delegating a derived write', () => {
+		const start = prompt.indexOf(
+			'If the authoritative ledger-backed `save_plan` tool is unavailable',
+		);
 		expect(start).toBeGreaterThan(-1);
 		const slice = prompt.slice(start, start + 800);
-		expect(slice).toContain('declare_scope');
+		expect(slice).toContain('STOP and report the blocker');
+		expect(slice).toContain('Never delegate or directly hand-write');
+		expect(slice).not.toContain('declare_scope');
 	});
 
 	it('MODE: EXECUTE Step 5b is preceded by a declare_scope pre-step', () => {
@@ -115,9 +119,9 @@ describe('architect prompt: declare_scope instruction at every coder delegation 
 		}
 	});
 
-	it('declare_scope is mentioned at least 9 times in the prompt', () => {
+	it('declare_scope is mentioned at least 8 times in the prompt', () => {
 		const matches = prompt.match(/declare_scope/g) ?? [];
-		expect(matches.length).toBeGreaterThanOrEqual(9);
+		expect(matches.length).toBeGreaterThanOrEqual(8);
 	});
 
 	it('Rule 1a SCOPE DISCIPLINE covers test_engineer write delegations', () => {

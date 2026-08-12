@@ -442,7 +442,7 @@ export async function handleDebuggingSpiral(
 	const checkpointLabel = `spiral-${taskId}-${Date.now()}`;
 	try {
 		const { saveCheckpointRecord } = await import('../tools/checkpoint.js');
-		const result = saveCheckpointRecord(checkpointLabel, directory);
+		const result = await saveCheckpointRecord(checkpointLabel, directory);
 		checkpointCreated = result.success === true;
 	} catch {
 		checkpointCreated = false;

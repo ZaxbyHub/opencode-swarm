@@ -5,8 +5,8 @@
  * 1. phase_council and final_council as QA gates (default OFF, ratchet-tighter, persistence)
  * 2. Behavioral guidance markup is rendered into the architect prompt for SPECIFY,
  *    BRAINSTORM, and PLAN inline gate-selection paths.
- * 3. save_plan blocks with QA_GATE_SELECTION_REQUIRED when context.md has no
- *    `## Pending QA Gate Selection` section AND no existing QaGateProfile.
+ * 3. save_plan requires an exact, tool-owned QaGateProfile and never treats
+ *    context.md as proof that selection occurred.
  * 4. SWARM_SKIP_GATE_SELECTION=1 bypasses the new check.
  */
 
@@ -22,10 +22,12 @@ import {
 	DEFAULT_QA_GATES,
 	getEffectiveGates,
 	getOrCreateProfile,
+	getOrCreateProfileForIdentity,
 	getProfile,
 	setGates,
 } from '../db/qa-gate-profile.js';
 import { executeSavePlan } from '../tools/save-plan.js';
+import { executeSetQaGates } from '../tools/set-qa-gates.js';
 
 let tempDir: string;
 
@@ -98,17 +100,18 @@ describe('phase_council gate', () => {
 });
 
 describe('buildQaGateSelectionDialogue text', () => {
-	test('SPECIFY mode includes eleven gates and phase_council', () => {
+	test('SPECIFY mode defers the unified dialogue to PLAN', () => {
 		const text = buildQaGateSelectionDialogue('SPECIFY');
-		expect(text).toContain('eleven gates');
-		expect(text).toContain('phase_council');
-		expect(text).not.toContain('Present the nine gates');
+		expect(text).toContain('defers');
+		expect(text).toContain('MODE: PLAN');
+		expect(text).not.toContain('eleven gates');
 	});
 
-	test('BRAINSTORM mode includes eleven gates and phase_council', () => {
+	test('BRAINSTORM mode defers the unified dialogue to PLAN', () => {
 		const text = buildQaGateSelectionDialogue('BRAINSTORM');
-		expect(text).toContain('eleven gates');
-		expect(text).toContain('phase_council');
+		expect(text).toContain('defers');
+		expect(text).toContain('exact plan identity');
+		expect(text).not.toContain('eleven gates');
 	});
 
 	test('PLAN mode includes eleven gates and phase_council', () => {
@@ -118,37 +121,26 @@ describe('buildQaGateSelectionDialogue text', () => {
 	});
 
 	test('dialogue includes follow-up commit-frequency question and policy section', () => {
-		const text = buildQaGateSelectionDialogue('SPECIFY');
+		const text = buildQaGateSelectionDialogue('PLAN');
 		expect(text).toContain('Commit frequency for completed tasks?');
-		expect(text).toContain('## Task Completion Commit Policy');
-		expect(text).toContain('commit_after_each_completed_task: true');
+		expect(text).toContain('commit_after_each_completed_task');
 	});
 
 	test('dialogue presents parallel coders proactively with worktree concept', () => {
-		for (const mode of ['SPECIFY', 'BRAINSTORM', 'PLAN'] as const) {
-			const text = buildQaGateSelectionDialogue(mode);
-			// Preserve the question phrase asserted by the plan skill protocol test.
-			expect(text.toLowerCase()).toContain(
-				'how many coders should run in parallel',
-			);
-			// Teach the isolation mechanism and make the recommendation proactive.
-			expect(text).toContain('isolated git worktree');
-			expect(text).toMatch(/recommend/i);
-		}
+		const text = buildQaGateSelectionDialogue('PLAN');
+		expect(text.toLowerCase()).toContain(
+			'how many coders should run in parallel',
+		);
+		expect(text).toContain('isolated git worktree');
+		expect(text).toMatch(/recommend/i);
 	});
 
 	test('dialogue presents auto_proceed as the fourth item and persists it', () => {
-		for (const mode of ['SPECIFY', 'BRAINSTORM', 'PLAN'] as const) {
-			const text = buildQaGateSelectionDialogue(mode);
-			// The dialogue now presents four items, not three.
-			expect(text).toContain('all four');
-			// auto_proceed is the 4th item.
-			expect(text).toContain('Auto-proceed');
-			expect(text).toContain('auto_proceed');
-			// It is routed into the Pending QA Gate Selection section so it persists
-			// into execution_profile on save_plan (issue #1804 MODE-1+2).
-			expect(text).toContain('## Pending QA Gate Selection');
-		}
+		const text = buildQaGateSelectionDialogue('PLAN');
+		expect(text).toContain('all four');
+		expect(text).toContain('Auto-proceed');
+		expect(text).toContain('auto_proceed');
+		expect(text).toContain('complete locked `execution_profile`');
 	});
 });
 
@@ -162,28 +154,23 @@ describe('Architect prompt behavioral guidance markers', () => {
 		expect(renderedPrompt).toContain('QA gate dialogue');
 	});
 
-	test('PLAN inline path has INLINE GATE SELECTION marker', () => {
-		expect(renderedPrompt).toContain('INLINE GATE SELECTION');
+	test('PLAN hard constraint requires exact pre-save QA bootstrap', () => {
+		expect(renderedPrompt).toContain(
+			'Call `set_qa_gates` with that exact `swarm_id` and `plan_title` before the first `save_plan`',
+		);
 	});
 
-	test('buildQaGateSelectionDialogue includes phase_council', () => {
-		const specifyDialogue = buildQaGateSelectionDialogue('SPECIFY');
-		expect(specifyDialogue).toContain('phase_council');
-		const brainstormDialogue = buildQaGateSelectionDialogue('BRAINSTORM');
-		expect(brainstormDialogue).toContain('phase_council');
+	test('PLAN dialogue includes phase_council', () => {
+		expect(buildQaGateSelectionDialogue('PLAN')).toContain('phase_council');
 	});
 
-	test('buildQaGateSelectionDialogue includes final_council', () => {
-		const specifyDialogue = buildQaGateSelectionDialogue('SPECIFY');
-		expect(specifyDialogue).toContain('final_council');
-		const brainstormDialogue = buildQaGateSelectionDialogue('BRAINSTORM');
-		expect(brainstormDialogue).toContain('final_council');
+	test('PLAN dialogue includes final_council', () => {
+		expect(buildQaGateSelectionDialogue('PLAN')).toContain('final_council');
 	});
 
 	test('buildQaGateSelectionDialogue includes task-completion commit policy', () => {
-		const dialogue = buildQaGateSelectionDialogue('SPECIFY');
-		expect(dialogue).toContain('## Task Completion Commit Policy');
-		expect(dialogue).toContain('commit_after_each_completed_task: true');
+		const dialogue = buildQaGateSelectionDialogue('PLAN');
+		expect(dialogue).toContain('commit_after_each_completed_task');
 	});
 
 	test('architect prompt disambiguates worktree isolation from Lean Turbo (#1552)', () => {
@@ -224,7 +211,7 @@ describe('save_plan QA_GATE_SELECTION_CHECK', () => {
 		],
 	};
 
-	test('blocks with QA_GATE_SELECTION_REQUIRED when context.md absent and no profile', async () => {
+	test('blocks with actionable QA_GATE_SELECTION_REQUIRED when no profile exists', async () => {
 		const result = await executeSavePlan(
 			{ ...minimalPlan, working_directory: tempDir },
 			tempDir,
@@ -232,11 +219,14 @@ describe('save_plan QA_GATE_SELECTION_CHECK', () => {
 		expect(result.success).toBe(false);
 		expect(result.message).toContain('QA_GATE_SELECTION_REQUIRED');
 		expect(result.errors).toContain(
-			'Missing ## Pending QA Gate Selection in .swarm/context.md',
+			'No QA gate profile found for the exact plan identity',
 		);
+		expect(result.recovery_guidance).toContain('set_qa_gates');
+		expect(result.recovery_guidance).toContain(minimalPlan.swarm_id);
+		expect(result.recovery_guidance).toContain(minimalPlan.title);
 	});
 
-	test('proceeds when context.md has the section', async () => {
+	test('legacy context marker cannot bypass tool-owned selection', async () => {
 		fs.writeFileSync(
 			path.join(tempDir, '.swarm', 'context.md'),
 			'## Pending QA Gate Selection\n',
@@ -245,21 +235,81 @@ describe('save_plan QA_GATE_SELECTION_CHECK', () => {
 			{ ...minimalPlan, working_directory: tempDir },
 			tempDir,
 		);
-		// We don't assert success: downstream save_plan may still pass/fail on other
-		// criteria. We only assert that we got past the gate-selection check.
-		if (result.success === false) {
-			expect(result.message ?? '').not.toContain('QA_GATE_SELECTION_REQUIRED');
-		}
+		expect(result.success).toBe(false);
+		expect(result.message).toContain('QA_GATE_SELECTION_REQUIRED');
 	});
 
-	test('proceeds when an existing profile is found (replanning path)', async () => {
-		// Pre-create a profile matching the formula save-plan derives.
+	test('pre-plan set_qa_gates then save_plan succeeds for the exact identity', async () => {
+		const selection = await executeSetQaGates(
+			{
+				swarm_id: minimalPlan.swarm_id,
+				plan_title: minimalPlan.title,
+				reviewer: false,
+				critic_pre_plan: false,
+			} as Parameters<typeof executeSetQaGates>[0],
+			tempDir,
+		);
+		expect(selection.success).toBe(true);
+
+		const result = await executeSavePlan(
+			{ ...minimalPlan, working_directory: tempDir },
+			tempDir,
+		);
+		expect(result.success).toBe(true);
+	});
+
+	test('a title change after pre-plan selection remains isolated and fails closed', async () => {
+		const selection = await executeSetQaGates(
+			{
+				swarm_id: minimalPlan.swarm_id,
+				plan_title: minimalPlan.title,
+			} as Parameters<typeof executeSetQaGates>[0],
+			tempDir,
+		);
+		expect(selection.success).toBe(true);
+
+		const result = await executeSavePlan(
+			{
+				...minimalPlan,
+				title: `${minimalPlan.title} revised`,
+				working_directory: tempDir,
+			},
+			tempDir,
+		);
+		expect(result.success).toBe(false);
+		expect(result.message).toContain('QA_GATE_SELECTION_REQUIRED');
+		expect(result.recovery_guidance).toContain('revised');
+	});
+
+	test('a sanitization collision still requires the exact raw identity chosen pre-plan', async () => {
+		const selection = await executeSetQaGates(
+			{
+				swarm_id: 'mega one',
+				plan_title: 'Plan / 1',
+			} as Parameters<typeof executeSetQaGates>[0],
+			tempDir,
+		);
+		expect(selection.success).toBe(true);
+
+		const result = await executeSavePlan(
+			{
+				...minimalPlan,
+				swarm_id: 'mega?one',
+				title: 'Plan ? 1',
+				working_directory: tempDir,
+			},
+			tempDir,
+		);
+		expect(result.success).toBe(false);
+		expect(result.message).toContain('QA_GATE_SELECTION_REQUIRED');
+	});
+
+	test('rejects an unbound legacy profile on the read-only save_plan path', async () => {
 		const candidatePlanId =
 			`${minimalPlan.swarm_id}-${minimalPlan.title}`.replace(
 				/[^a-zA-Z0-9-_]/g,
 				'_',
 			);
-		// Initialize the project DB so getProfile sees something.
 		getProjectDb(tempDir);
 		getOrCreateProfile(tempDir, candidatePlanId);
 
@@ -267,27 +317,29 @@ describe('save_plan QA_GATE_SELECTION_CHECK', () => {
 			{ ...minimalPlan, working_directory: tempDir },
 			tempDir,
 		);
-		if (result.success === false) {
-			expect(result.message ?? '').not.toContain('QA_GATE_SELECTION_REQUIRED');
-		}
+		expect(result.success).toBe(false);
+		expect(result.message).toContain('QA_GATE_IDENTITY_UNBOUND');
 	});
 
-	test('SWARM_SKIP_GATE_SELECTION=1 bypasses the check entirely', async () => {
-		process.env.SWARM_SKIP_GATE_SELECTION = '1';
+	test('proceeds when an exact-bound profile is found (replanning path)', async () => {
+		getProjectDb(tempDir);
+		getOrCreateProfileForIdentity(tempDir, {
+			swarm: minimalPlan.swarm_id,
+			title: minimalPlan.title,
+		});
+
 		const result = await executeSavePlan(
 			{ ...minimalPlan, working_directory: tempDir },
 			tempDir,
 		);
 		if (result.success === false) {
 			expect(result.message ?? '').not.toContain('QA_GATE_SELECTION_REQUIRED');
+			expect(result.message ?? '').not.toContain('QA_GATE_IDENTITY_UNBOUND');
 		}
 	});
 
-	test('section with all gates explicitly false still passes (selection completed)', async () => {
-		fs.writeFileSync(
-			path.join(tempDir, '.swarm', 'context.md'),
-			'## Pending QA Gate Selection\n- reviewer: false\n- phase_council: false\n',
-		);
+	test('SWARM_SKIP_GATE_SELECTION=1 bypasses the check entirely', async () => {
+		process.env.SWARM_SKIP_GATE_SELECTION = '1';
 		const result = await executeSavePlan(
 			{ ...minimalPlan, working_directory: tempDir },
 			tempDir,

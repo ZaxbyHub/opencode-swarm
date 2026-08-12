@@ -9,6 +9,7 @@ import * as path from 'node:path';
 import type { EvidenceBundle } from '../../../config/evidence-schema';
 import { hasAnyProfileWithEnabledGate } from '../../../db/qa-gate-profile';
 import { derivePlanIdentityHash } from '../../../plan/utils';
+import { formatLegacyQaBindingRecovery } from '../../../qa-gate/recovery.js';
 import { swarmState } from '../../../state';
 import { resolveGatePreamble } from './gate-helpers';
 import type { GateContext, GateResult } from './types';
@@ -111,6 +112,19 @@ export async function runFinalCouncilGate(
 				preamble.plan.phases[preamble.plan.phases.length - 1]?.id;
 			if (lastPhaseId !== undefined && phase === lastPhaseId) {
 				if (preamble.effectiveGates?.final_council === true) {
+					if (preamble.identityBound === false) {
+						return {
+							blocked: true,
+							reason: 'FINAL_COUNCIL_IDENTITY_UNBOUND',
+							message: `Phase ${phase} (last phase) cannot be completed: final_council is enabled but the QA gate profile is not exact-bound to the current raw swarm_id/plan_title. ${formatLegacyQaBindingRecovery(
+								{ swarm: preamble.plan!.swarm, title: preamble.plan!.title },
+								'retry completing the project',
+							)}`,
+							agentsDispatched,
+							agentsMissing: [],
+							warnings: [],
+						};
+					}
 					finalCouncilEnabled = true;
 					const fcPath = path.join(
 						dir,

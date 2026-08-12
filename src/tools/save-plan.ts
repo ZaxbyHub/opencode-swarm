@@ -8,6 +8,7 @@ import * as path from 'node:path';
 import type { ToolDefinition } from '@opencode-ai/plugin/tool';
 import { z } from 'zod';
 import {
+	type ExecutionProfile,
 	ExecutionProfileSchema,
 	type Phase,
 	type Plan,
@@ -15,7 +16,7 @@ import {
 	type TaskStatus,
 } from '../config/plan-schema';
 // QA gate check — first save-plan integration with profile store
-import { getProfile } from '../db/qa-gate-profile.js';
+import { getProfileLookupForIdentity } from '../db/qa-gate-profile.js';
 import { tryAcquireLock } from '../parallel/file-locks.js';
 import { writeCheckpoint } from '../plan/checkpoint';
 import {
@@ -29,9 +30,9 @@ import {
 	savePlan,
 } from '../plan/manager';
 import { derivePlanId } from '../plan/utils.js';
+import { formatLegacyQaBindingRecovery } from '../qa-gate/recovery.js';
 import { normalizeScopeFiles } from '../scope/scope-binding.js';
 import { readEffectiveSpecSync } from '../sdd/effective-spec';
-import { swarmState } from '../state';
 import { createSwarmTool } from './create-tool';
 import { extractRequirements } from './req-coverage';
 
@@ -110,13 +111,7 @@ export interface SavePlanArgs {
 	 * save_plan calls that try to change it will be rejected (fail-closed).
 	 * Omit to leave the current profile unchanged.
 	 */
-	execution_profile?: {
-		parallelization_enabled?: boolean;
-		max_concurrent_tasks?: number;
-		council_parallel?: boolean;
-		locked?: boolean;
-		auto_proceed?: boolean;
-	};
+	execution_profile?: Partial<ExecutionProfile>;
 }
 
 /**
@@ -133,13 +128,7 @@ export interface SavePlanResult {
 	recovery_guidance?: string;
 	requirement_coverage?: RequirementCoverageResult;
 	/** The resolved execution_profile that was persisted, if any. */
-	execution_profile?: {
-		parallelization_enabled: boolean;
-		max_concurrent_tasks: number;
-		council_parallel: boolean;
-		locked: boolean;
-		auto_proceed?: boolean;
-	};
+	execution_profile?: ExecutionProfile;
 }
 
 interface RequirementCoverageEntry {
@@ -169,7 +158,8 @@ function executionProfilesEqual(
 		a.max_concurrent_tasks === b.max_concurrent_tasks &&
 		a.council_parallel === b.council_parallel &&
 		a.locked === b.locked &&
-		a.auto_proceed === b.auto_proceed
+		a.auto_proceed === b.auto_proceed &&
+		a.commit_after_each_completed_task === b.commit_after_each_completed_task
 	);
 }
 
@@ -464,61 +454,53 @@ export async function executeSavePlan(
 	}
 
 	// Step 2.y: QA GATE SELECTION CHECK
-	// Verify gate selection has occurred before allowing plan save.
-	// Mirrors the SPEC GATE pattern above. Bypass for CI: SWARM_SKIP_GATE_SELECTION=1.
-	// Only blocks when BOTH conditions are true: no `## Pending QA Gate Selection`
-	// section in context.md AND no existing QaGateProfile for this plan id.
+	// Gate selection is tool-owned state keyed to the exact future plan identity.
+	// A context.md marker is not proof that set_qa_gates completed.
+	// Bypass for CI: SWARM_SKIP_GATE_SELECTION=1.
 	if (process.env.SWARM_SKIP_GATE_SELECTION !== '1') {
-		const contextPath = path.join(
-			targetWorkspace as string,
-			'.swarm',
-			'context.md',
-		);
-		let contextContent = '';
+		let profileLookup: ReturnType<typeof getProfileLookupForIdentity>;
 		try {
-			contextContent = await fs.promises.readFile(contextPath, 'utf8');
-		} catch {
-			// context.md may not exist yet — treat as absent section
-		}
-		const hasPendingSection = contextContent.includes(
-			'## Pending QA Gate Selection',
-		);
-
-		if (!hasPendingSection) {
-			// Inline derivePlanId formula (matches canonical form in
-			// set-qa-gates.ts:27-29 and qa-gates.ts:39-41; plan.swarm === args.swarm_id
-			// at runtime because save_plan writes it that way at line 388).
-			const candidatePlanId = derivePlanId({
+			profileLookup = getProfileLookupForIdentity(targetWorkspace as string, {
 				swarm: args.swarm_id,
 				title: args.title,
 			});
-			let existingProfile = null;
-			try {
-				existingProfile = getProfile(
-					targetWorkspace as string,
-					candidatePlanId,
-				);
-			} catch {
-				// getProfile can throw on SQLITE_CORRUPT, disk full, migration errors
-				// (qa-gate-profile.ts:97-103). Treat as no profile — fail forward.
-			}
-			if (!existingProfile) {
-				return {
-					success: false,
-					message:
-						'QA_GATE_SELECTION_REQUIRED: QA gate selection has not been completed. ' +
-						'Present the gate selection question to the user (step 5b of MODE: SPECIFY ' +
-						'or Phase 6 of MODE: BRAINSTORM), write their response to .swarm/context.md ' +
-						'under "## Pending QA Gate Selection", then retry save_plan.',
-					errors: [
-						'Missing ## Pending QA Gate Selection in .swarm/context.md',
-						'No existing QaGateProfile found for this plan',
-					],
-					recovery_guidance:
-						'Do not call set_qa_gates with assumed values. Present the gate dialogue, ' +
-						"wait for the user's answer, write it to context.md, then retry save_plan.",
-				};
-			}
+		} catch (error) {
+			return {
+				success: false,
+				message:
+					'QA_GATE_PROFILE_UNAVAILABLE: save_plan could not verify the durable QA gate selection.',
+				errors: [
+					error instanceof Error
+						? `QA gate profile store read failed: ${error.message}`
+						: 'QA gate profile store read failed',
+				],
+				recovery_guidance:
+					'Repair access to .swarm/swarm.db, then retry get_qa_gate_profile and save_plan with the same swarm_id and title.',
+			};
+		}
+
+		if (profileLookup.kind === 'missing') {
+			return {
+				success: false,
+				message:
+					'QA_GATE_SELECTION_REQUIRED: no durable QA gate selection exists for this exact plan identity.',
+				errors: ['No QA gate profile found for the exact plan identity'],
+				recovery_guidance: `Present the PLAN gate dialogue, then call set_qa_gates with swarm_id=${JSON.stringify(args.swarm_id)} and plan_title=${JSON.stringify(args.title)} before retrying save_plan with the identical identity.`,
+			};
+		}
+		if (profileLookup.kind === 'unbound_legacy') {
+			return {
+				success: false,
+				message:
+					'QA_GATE_IDENTITY_UNBOUND: the current plan has a legacy QA gate profile row that is not exact-bound.',
+				errors: [
+					'QA gate profile exists for the readable plan id, but no exact swarm_id/plan_title binding has been adopted yet.',
+				],
+				recovery_guidance: formatLegacyQaBindingRecovery(
+					{ swarm: args.swarm_id, title: args.title },
+					'retry save_plan with the identical identity',
+				),
+			};
 		}
 	}
 
@@ -584,12 +566,14 @@ export async function executeSavePlan(
 			// unless explicitly confirmed (FR-001). Prevents accidental overwrite
 			// when an architect passes the wrong title or swarm_id.
 			if (args.confirm_identity_change !== true) {
-				const existingId = derivePlanId(existing);
-				const incomingId = derivePlanId({
-					swarm: args.swarm_id,
-					title: args.title,
-				});
-				if (existingId !== incomingId) {
+				const sameRawIdentity =
+					existing.swarm === args.swarm_id && existing.title === args.title;
+				if (!sameRawIdentity) {
+					const existingId = derivePlanId(existing);
+					const incomingId = derivePlanId({
+						swarm: args.swarm_id,
+						title: args.title,
+					});
 					return {
 						success: false,
 						message:
@@ -623,7 +607,7 @@ export async function executeSavePlan(
 							),
 							recovery_guidance:
 								'Check execution_profile fields: parallelization_enabled (boolean), ' +
-								'max_concurrent_tasks (integer 1-64), council_parallel (boolean), locked (boolean), auto_proceed (boolean).',
+								'max_concurrent_tasks (integer 1-64), council_parallel (boolean), locked (boolean), auto_proceed (boolean), commit_after_each_completed_task (boolean).',
 						};
 					}
 
@@ -687,7 +671,7 @@ export async function executeSavePlan(
 				),
 				recovery_guidance:
 					'Check execution_profile fields: parallelization_enabled (boolean), ' +
-					'max_concurrent_tasks (integer 1-64), council_parallel (boolean), locked (boolean).',
+					'max_concurrent_tasks (integer 1-64), council_parallel (boolean), locked (boolean), auto_proceed (boolean), commit_after_each_completed_task (boolean).',
 			};
 		}
 		resolvedProfile = parsed.data;
@@ -1003,23 +987,7 @@ export async function executeSavePlan(
 			} catch {
 				// Advisory only - marker write failure does not affect plan save
 			}
-			// Advisory: check if critic review has occurred in any session
 			const warnings: string[] = [];
-			let criticReviewFound = false;
-			for (const [, session] of swarmState.agentSessions) {
-				if (
-					session.phaseAgentsDispatched?.has('critic') ||
-					session.lastCompletedPhaseAgentsDispatched?.has('critic')
-				) {
-					criticReviewFound = true;
-					break;
-				}
-			}
-			if (!criticReviewFound) {
-				warnings.push(
-					'No critic review detected before plan save. Consider delegating to critic for plan validation.',
-				);
-			}
 			if (requirementCoverage?.status === 'override') {
 				const missingIds = requirementCoverage.blocking_missing
 					.map((requirement) => requirement.id)
@@ -1250,6 +1218,12 @@ export const save_plan: ToolDefinition = createSwarmTool({
 					.optional()
 					.describe(
 						'When true, the architect advances to the next phase automatically without asking for confirmation. Default false.',
+					),
+				commit_after_each_completed_task: z
+					.boolean()
+					.optional()
+					.describe(
+						'When true, execution creates a checkpoint commit after each successfully completed task. Default false.',
 					),
 			})
 			.optional()

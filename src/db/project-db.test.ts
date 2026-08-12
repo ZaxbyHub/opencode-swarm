@@ -79,6 +79,8 @@ describe('project-db', () => {
 		expect(tables).toContain('schema_migrations');
 		expect(tables).toContain('project_constraints');
 		expect(tables).toContain('qa_gate_profile');
+		expect(tables).toContain('qa_gate_profile_identity');
+		expect(tables).toContain('task_checkpoint_receipt');
 		db.close();
 	});
 
@@ -92,7 +94,7 @@ describe('project-db', () => {
 			)
 			.all()
 			.map((r) => r.version);
-		expect(versions).toEqual([1, 2, 3]);
+		expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
 		db.close();
 	});
 
@@ -103,6 +105,48 @@ describe('project-db', () => {
 		expect(() => {
 			db.run(
 				"INSERT INTO qa_gate_profile (plan_id, gates) VALUES ('p1', '{}')",
+			);
+		}).toThrow();
+		db.close();
+	});
+
+	test('qa_gate_profile.identity_hash is UNIQUE when present', () => {
+		const db = new Database(':memory:');
+		runProjectMigrations(db);
+		db.run(
+			"INSERT INTO qa_gate_profile (plan_id, identity_hash, gates) VALUES ('p1', 'hash-1', '{}')",
+		);
+		expect(() => {
+			db.run(
+				"INSERT INTO qa_gate_profile (plan_id, identity_hash, gates) VALUES ('p2', 'hash-1', '{}')",
+			);
+		}).toThrow();
+		db.close();
+	});
+
+	test('task_checkpoint_receipt primary key is plan-scoped', () => {
+		const db = new Database(':memory:');
+		runProjectMigrations(db);
+		db.run(
+			"INSERT INTO task_checkpoint_receipt (plan_identity_hash, task_id, label, state) VALUES ('plan-a', '1.1', 'checkpoint-a', 'pending')",
+		);
+		db.run(
+			"INSERT INTO task_checkpoint_receipt (plan_identity_hash, task_id, label, state) VALUES ('plan-b', '1.1', 'checkpoint-b', 'pending')",
+		);
+		expect(() => {
+			db.run(
+				"INSERT INTO task_checkpoint_receipt (plan_identity_hash, task_id, label, state) VALUES ('plan-a', '1.1', 'checkpoint-c', 'pending')",
+			);
+		}).toThrow();
+		db.close();
+	});
+
+	test('task_checkpoint_receipt rejects invalid states', () => {
+		const db = new Database(':memory:');
+		runProjectMigrations(db);
+		expect(() => {
+			db.run(
+				"INSERT INTO task_checkpoint_receipt (plan_identity_hash, task_id, label, state) VALUES ('plan-a', '1.1', 'checkpoint-a', 'invalid')",
 			);
 		}).toThrow();
 		db.close();

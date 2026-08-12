@@ -16,6 +16,14 @@ import type {
 } from '../../../src/tools/save-plan';
 import { executeSavePlan } from '../../../src/tools/save-plan';
 
+beforeEach(() => {
+	process.env.SWARM_SKIP_GATE_SELECTION = '1';
+});
+
+afterEach(() => {
+	delete process.env.SWARM_SKIP_GATE_SELECTION;
+});
+
 describe('Task 4.1: fallbackDir parameter behavior', () => {
 	let tmpDir1: string;
 	let tmpDir2: string;

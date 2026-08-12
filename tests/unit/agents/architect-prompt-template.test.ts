@@ -159,7 +159,9 @@ describe('architect-prompt-template: task 11.1 verification tests', () => {
 	// MODE:PLAN update verification tests
 	it('25. MODE:PLAN section includes save_plan tool usage', () => {
 		expect(prompt).toContain('save_plan');
-		expect(planSkill).toMatch(/Use the `save_plan` tool/);
+		expect(planSkill).toContain(
+			'QA AND EXECUTION PROFILE BOOTSTRAP (before first `save_plan`)',
+		);
 	});
 
 	it('26. MODE:PLAN section includes swarm_id as required parameter', () => {
@@ -167,11 +169,18 @@ describe('architect-prompt-template: task 11.1 verification tests', () => {
 		expect(planSkill).toMatch(/`swarm_id`: The swarm identifier/);
 	});
 
-	it('27. MODE:PLAN section includes fallback delegation pattern', () => {
-		expect(prompt).toContain('If `save_plan` is unavailable');
+	it('27. MODE:PLAN fails closed when save_plan is unavailable', () => {
+		expect(prompt).toContain(
+			'If the authoritative ledger-backed `save_plan` tool is unavailable, STOP and report the blocker.',
+		);
+		expect(prompt).toContain('Never delegate or directly hand-write');
 		expect(planSkill).toContain(
+			'If the authoritative ledger-backed `save_plan` tool is unavailable, STOP and report the blocker.',
+		);
+		expect(planSkill).not.toContain(
 			"delegate plan writing to the active swarm's coder agent",
 		);
+		expect(planSkill).toContain('Never ask a coder to hand-write');
 	});
 
 	it('28. MODE:PLAN section does NOT contain old direct instruction "Create .swarm/plan.md"', () => {
@@ -188,17 +197,19 @@ describe('architect-prompt-template: task 11.1 verification tests', () => {
 		}
 	});
 
-	it('29. MODE:PLAN section includes context.md creation instruction', () => {
-		expect(planSkill).toContain('Also create .swarm/context.md');
+	it('29. MODE:PLAN forbids direct context.md writes', () => {
 		expect(planSkill).toContain(
-			'decisions made, patterns identified, SME cache entries, and relevant file map',
+			'Do not create or hand-edit `.swarm/context.md` as part of PLAN.',
+		);
+		expect(planSkill).not.toContain('Also create .swarm/context.md');
+		expect(planSkill).not.toMatch(
+			/recorded as explicit assumptions in `.swarm\/context\.md`/,
 		);
 	});
 
-	it('30. MODE:PLAN section includes save_plan example call', () => {
-		expect(planSkill).toContain('Example call:');
+	it('30. MODE:PLAN section includes exact-identity save_plan call', () => {
 		expect(planSkill).toMatch(
-			/save_plan\(\{\s*title: "My Real Project",\s*swarm_id: "mega",/,
+			/save_plan\(\{\s*title: <exact plan_title>,\s*swarm_id: <exact swarm_id>,/,
 		);
 	});
 
