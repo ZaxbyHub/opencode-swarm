@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.139.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.139.1...v7.139.2) (2026-08-12)
+
+
+### Bug Fixes
+
+* **pr-review:** bind trigger-eval run_id and make receipt immutable ([94cf699](https://github.com/ZaxbyHub/opencode-swarm/commit/94cf699e2db7b6e548efbf9a5931b1b6ced46965))
+
 ## [7.139.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.139.0...v7.139.1) (2026-08-12)
 
 
