@@ -32,6 +32,7 @@ import {
 import { getAgentSession, swarmState } from '../../state';
 import { telemetry } from '../../telemetry';
 import { pushAdvisory } from '../../utils/advisory-queue';
+import { teardownEphemeralSession } from '../../utils/ephemeral-session-teardown';
 import {
 	dispatchWithModelFallback,
 	type ModelOverride,
@@ -623,7 +624,8 @@ Be specific and evidence-based. When safety concerns are present, err on the sid
 	} finally {
 		if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
 		promptController.abort();
-		client.session.delete({ path: { id: sessionId } }).catch(() => {});
+		// #2123: await a graceful abort (flush) before the cascade-delete.
+		await teardownEphemeralSession(client.session, sessionId);
 	}
 }
 

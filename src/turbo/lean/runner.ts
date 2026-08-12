@@ -33,6 +33,7 @@ import {
 } from '../../state';
 import { telemetry } from '../../telemetry';
 import { pushAdvisory } from '../../utils/advisory-queue';
+import { teardownEphemeralSession } from '../../utils/ephemeral-session-teardown';
 import { criticalWarn, log } from '../../utils/logger';
 import {
 	dispatchWithModelFallback,
@@ -92,6 +93,12 @@ interface SessionClient {
 		error: unknown;
 	}>;
 	delete(options: { path: { id: string } }): Promise<void>;
+	/**
+	 * Optional graceful abort. Present on the real opencode SDK session at
+	 * runtime (absent on minimal test fakes). Teardown awaits it before delete
+	 * so opencode flushes the final part/message (#2123).
+	 */
+	abort?(options: { path: { id: string } }): Promise<unknown>;
 }
 
 // ─── Result Types ───────────────────────────────────────────────────────────────────
@@ -781,9 +788,9 @@ export class LeanTurboRunner {
 								if (tracked !== undefined) {
 									// Timeout already fired — clean up orphan session
 									this._timedOutLanes.delete(lane.laneId);
-									session
-										.delete({ path: { id: result.sessionId } })
-										.catch(() => {});
+									// #2123: teardown awaits a graceful abort
+									// (flush) before the cascade-delete.
+									void teardownEphemeralSession(session, result.sessionId!);
 									// Issue #2002 hardening (item 2b): a lane that timed out
 									// but later completed successfully in the background may
 									// already have a published scope binding + child
@@ -912,7 +919,7 @@ export class LeanTurboRunner {
 
 			if (!promptResult.data) {
 				abortController?.abort();
-				session.delete({ path: { id: sessionId } }).catch(() => {});
+				void teardownEphemeralSession(session, sessionId);
 				// Issue #2002 (Lean Turbo half): `_publishLaneScope` may have already
 				// published this lane's write authority and created the child
 				// AgentSessionState before this dispatch failed. Mirror the standard
@@ -936,7 +943,7 @@ export class LeanTurboRunner {
 		} catch (err) {
 			if (sessionId) {
 				abortController?.abort();
-				session.delete({ path: { id: sessionId } }).catch(() => {});
+				void teardownEphemeralSession(session, sessionId);
 				// Same rationale as the session.prompt failure branch above: clear
 				// any lane scope binding + AgentSessionState published for this
 				// session before the exception aborted dispatch.
@@ -994,7 +1001,7 @@ export class LeanTurboRunner {
 			const reason =
 				scopeErr instanceof Error ? scopeErr.message : String(scopeErr);
 			abortController?.abort();
-			session.delete({ path: { id: childSessionId } }).catch(() => {});
+			void teardownEphemeralSession(session, childSessionId);
 			// Issue #2002 hardening (item 2a): `publishLeanTurboLaneScopeBinding`
 			// (`src/turbo/lean/lane-scope.ts`) calls `registerScopeBinding` before
 			// `writeScopeBindingToDisk`, and `ensureAgentSession` for the child
