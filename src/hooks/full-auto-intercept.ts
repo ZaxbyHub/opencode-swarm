@@ -38,6 +38,7 @@ import { _internals as stateInternals } from '../state.js';
 import { telemetry } from '../telemetry';
 import { sleep } from '../utils/bun-compat';
 import { advanceInlineFallback } from '../utils/inline-fallback-advancer.js';
+import { teardownEphemeralSession } from '../utils/ephemeral-session-teardown';
 import * as logger from '../utils/logger';
 import type { ModelOverride } from '../utils/model-dispatch-fallback.js';
 import { isTransientProviderError } from '../utils/provider-error-classification.js';
@@ -522,7 +523,8 @@ export async function dispatchCriticAndWriteEvent(
 		if (ephemeralSessionId) {
 			const id = ephemeralSessionId;
 			ephemeralSessionId = undefined;
-			client.session.delete({ path: { id } }).catch(() => {});
+			// #2123: teardown awaits a graceful abort (flush) before delete.
+			void teardownEphemeralSession(client.session, id);
 		}
 	};
 
@@ -554,7 +556,7 @@ export async function dispatchCriticAndWriteEvent(
 		if (ephemeralSessionId) {
 			const staleId = ephemeralSessionId;
 			ephemeralSessionId = undefined;
-			client.session.delete({ path: { id: staleId } }).catch(() => {});
+			void teardownEphemeralSession(client.session, staleId);
 		}
 
 		let lastError: unknown;
