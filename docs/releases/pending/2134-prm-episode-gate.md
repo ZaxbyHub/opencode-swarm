@@ -66,6 +66,25 @@ otherwise the test would still pass with those detectors fully disarmed.
   they could never escalate, the same fail-open shape the per-detector containment
   review caught earlier.
 
+  Three defects found reviewing that change are fixed with it. The advisory
+  dedupe key was still scoped to the pattern type, so with every target at level 1
+  exactly **one** advisory was delivered per pattern for the whole session and
+  every later target's guidance was dropped — the agent was neither stopped nor
+  told; it is now scoped to the ladder (40 distinct repeating files: 1 advisory
+  before, 40 after). `detectRepetitionLoop` recovered its `(agent, action, target)`
+  tuple with `key.split('|')`, truncating any target containing a pipe — and since
+  targets are now whole shell commands, `bun test 2>&1 | head`, `| tail` and
+  `| wc -l` all collapsed onto one ladder and hard-stopped in six steps; the tuple
+  is now carried rather than re-split. And the ladder map is bounded at 256 with
+  FIFO eviction, matching the episode ledger it mirrors.
+
+  **Known trade-off:** a pathology spread thinly across many targets no longer
+  reaches a hard stop. This is inherent to the precision/recall trade the issue
+  asks for — a benign eight-module coder loop and a distributed ping-pong are
+  numerically identical (16 vs 15 ladders, each struck once), so no spread
+  threshold separates them. The agent is advised per distinct behaviour instead of
+  being blocked.
+
 - **Shell commands are no longer collapsed onto their first word.**
   `extractTarget` in `src/hooks/trajectory-logger.ts` returned a bash command's
   first word as the trajectory target, so `bun test src/a`, `bun run lint` and
