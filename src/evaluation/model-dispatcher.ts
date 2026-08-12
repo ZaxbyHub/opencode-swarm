@@ -103,11 +103,19 @@ export function resolveEvaluationAgentName(
  * primitive remains the single owner of cleanup and logging behavior.
  */
 export const _internals: {
+	boundedAbort: typeof ephemeralDispatcherInternals.boundedAbort;
 	boundedDelete: typeof ephemeralDispatcherInternals.boundedDelete;
 	log: typeof ephemeralDispatcherInternals.log;
 } = Object.defineProperties(
 	{},
 	{
+		boundedAbort: {
+			enumerable: true,
+			get: () => ephemeralDispatcherInternals.boundedAbort,
+			set: (value) => {
+				ephemeralDispatcherInternals.boundedAbort = value;
+			},
+		},
 		boundedDelete: {
 			enumerable: true,
 			get: () => ephemeralDispatcherInternals.boundedDelete,
@@ -124,6 +132,7 @@ export const _internals: {
 		},
 	},
 ) as {
+	boundedAbort: typeof ephemeralDispatcherInternals.boundedAbort;
 	boundedDelete: typeof ephemeralDispatcherInternals.boundedDelete;
 	log: typeof ephemeralDispatcherInternals.log;
 };

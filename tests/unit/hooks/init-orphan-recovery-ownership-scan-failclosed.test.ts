@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test';
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import {
 	recordWorktreeProvisioningOwner,
@@ -13,6 +13,7 @@ import {
 } from '../../../src/hooks/init-orphan-recovery';
 import { tryAcquireLock } from '../../../src/parallel/file-locks';
 import { bunSpawn } from '../../../src/utils/bun-compat';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 async function runGit(directory: string, args: string[]): Promise<string> {
 	const proc = bunSpawn(['git', ...args], {
@@ -63,6 +64,9 @@ describe('init orphan recovery ownership scan fails closed', () => {
 	const realMergeScan = _internals.scanWorktreeMergeFailuresForRecovery;
 	const realProvisioningScan =
 		_internals.scanWorktreeProvisioningOwnersForRecovery;
+	const realRegisteredWorktreeScan = _internals.scanRegisteredWorktreeLiveness;
+	const realRemoveProvisioningOwner =
+		_internals.removeWorktreeProvisioningOwner;
 
 	afterEach(() => {
 		_internals.listOwnershipTagSessionIds = realListOwnershipTags;
@@ -70,15 +74,122 @@ describe('init orphan recovery ownership scan fails closed', () => {
 		_internals.scanDelegationFallbacksForRecovery = realFallbackScan;
 		_internals.scanWorktreeMergeFailuresForRecovery = realMergeScan;
 		_internals.scanWorktreeProvisioningOwnersForRecovery = realProvisioningScan;
+		_internals.scanRegisteredWorktreeLiveness = realRegisteredWorktreeScan;
+		_internals.removeWorktreeProvisioningOwner = realRemoveProvisioningOwner;
 		for (const root of roots.splice(0)) {
 			fs.rmSync(root, { recursive: true, force: true });
 		}
 	});
 
-	test('a nonzero Git scan skips destructive cleanup and writes a diagnostic', async () => {
-		const root = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'swarm-owner-scan-error-')),
+	function expireProvisioningOwner(project: string, callID: string): string {
+		const digest = createHash('sha256').update(callID).digest('hex');
+		const ownerPath = path.join(
+			project,
+			'.swarm',
+			'worktree-provisioning-owners',
+			`${digest}.json`,
 		);
+		const owner = JSON.parse(fs.readFileSync(ownerPath, 'utf8')) as Record<
+			string,
+			unknown
+		>;
+		owner.createdAt = 1;
+		fs.writeFileSync(ownerPath, `${JSON.stringify(owner)}\n`);
+		return ownerPath;
+	}
+
+	test('an expired owner without a live registered lane no longer protects an orphan forever', async () => {
+		const root = canonicalMkdtemp('swarm-expired-owner-');
+		roots.push(root);
+		const project = path.join(root, 'project');
+		await initGitRepo(project);
+		const sessionId = 'ses_stale';
+		const worktreePath = createOrphan(root, sessionId);
+		recordWorktreeProvisioningOwner(project, {
+			callID: 'expired-owner',
+			parentSessionId: sessionId,
+			worktreeSessionId: sessionId,
+			taskId: 'lane-1',
+		});
+		const ownerPath = expireProvisioningOwner(project, 'expired-owner');
+
+		const result = await runInitOrphanRecovery(project);
+
+		expect(result.attempted).toBe(true);
+		expect(result.removedWorktrees).toContain(worktreePath);
+		expect(fs.existsSync(worktreePath)).toBe(false);
+		expect(fs.existsSync(ownerPath)).toBe(false);
+	});
+
+	test('an expired owner remains protected while its registered lane path is live', async () => {
+		const root = canonicalMkdtemp('swarm-live-expired-owner-');
+		roots.push(root);
+		const project = path.join(root, 'project');
+		await initGitRepo(project);
+		const sessionId = 'ses_live';
+		const worktreePath = path.join(
+			root,
+			'.swarm-worktrees',
+			sessionId,
+			'lane-1',
+		);
+		await runGit(project, [
+			'worktree',
+			'add',
+			'-b',
+			`swarm/lane/${sessionId}/lane-1`,
+			worktreePath,
+			'HEAD',
+		]);
+		fs.writeFileSync(path.join(worktreePath, 'valuable.txt'), 'keep\n');
+		recordWorktreeProvisioningOwner(project, {
+			callID: 'expired-live-owner',
+			parentSessionId: sessionId,
+			worktreeSessionId: sessionId,
+			taskId: 'lane-1',
+		});
+		const ownerPath = expireProvisioningOwner(project, 'expired-live-owner');
+
+		const result = await runInitOrphanRecovery(project);
+
+		expect(result.attempted).toBe(true);
+		expect(result.removedWorktrees).not.toContain(worktreePath);
+		expect(
+			fs.readFileSync(path.join(worktreePath, 'valuable.txt'), 'utf8'),
+		).toBe('keep\n');
+		expect(fs.existsSync(ownerPath)).toBe(true);
+	});
+
+	test('registered-lane liveness uncertainty blocks expired-owner reclamation', async () => {
+		const root = canonicalMkdtemp('swarm-owner-live-scan-error-');
+		roots.push(root);
+		const project = path.join(root, 'project');
+		await initGitRepo(project);
+		const sessionId = 'ses_uncertain';
+		const worktreePath = createOrphan(root, sessionId);
+		recordWorktreeProvisioningOwner(project, {
+			callID: 'uncertain-owner',
+			parentSessionId: sessionId,
+			worktreeSessionId: sessionId,
+			taskId: 'lane-1',
+		});
+		expireProvisioningOwner(project, 'uncertain-owner');
+		_internals.scanRegisteredWorktreeLiveness = async () => ({
+			status: 'uncertain',
+			reason: 'git inventory unavailable',
+		});
+
+		const result = await runInitOrphanRecovery(project);
+
+		expect(result.attempted).toBe(false);
+		expect(result.diagnostic?.reason).toContain(
+			'registered worktree liveness is uncertain',
+		);
+		expect(fs.existsSync(path.join(worktreePath, 'valuable.txt'))).toBe(true);
+	});
+
+	test('a nonzero Git scan skips destructive cleanup and writes a diagnostic', async () => {
+		const root = canonicalMkdtemp('swarm-owner-scan-error-');
 		roots.push(root);
 		const project = path.join(root, 'project');
 		fs.mkdirSync(project, { recursive: true });
@@ -95,9 +206,7 @@ describe('init orphan recovery ownership scan fails closed', () => {
 	});
 
 	test('a scan timeout skips destructive cleanup', async () => {
-		const root = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'swarm-owner-scan-timeout-')),
-		);
+		const root = canonicalMkdtemp('swarm-owner-scan-timeout-');
 		roots.push(root);
 		const project = path.join(root, 'project');
 		fs.mkdirSync(project, { recursive: true });
@@ -115,9 +224,7 @@ describe('init orphan recovery ownership scan fails closed', () => {
 	});
 
 	test('an owner beyond the tag cap triggers overflow protection', async () => {
-		const root = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'swarm-owner-scan-overflow-')),
-		);
+		const root = canonicalMkdtemp('swarm-owner-scan-overflow-');
 		roots.push(root);
 		const project = path.join(root, 'project');
 		const head = await initGitRepo(project);
@@ -181,9 +288,7 @@ describe('init orphan recovery ownership scan fails closed', () => {
 			expected: 'merge ownership state is uncertain',
 		},
 	])('$label skips destructive cleanup', async ({ install, expected }) => {
-		const root = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'swarm-owner-store-error-')),
-		);
+		const root = canonicalMkdtemp('swarm-owner-store-error-');
 		roots.push(root);
 		const project = path.join(root, 'project');
 		fs.mkdirSync(project, { recursive: true });
@@ -198,9 +303,7 @@ describe('init orphan recovery ownership scan fails closed', () => {
 	});
 
 	test('scans fallback before primary so promotion cannot create an empty-owner window', async () => {
-		const root = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'swarm-owner-promotion-order-')),
-		);
+		const root = canonicalMkdtemp('swarm-owner-promotion-order-');
 		roots.push(root);
 		const project = path.join(root, 'project');
 		fs.mkdirSync(project, { recursive: true });
@@ -221,9 +324,7 @@ describe('init orphan recovery ownership scan fails closed', () => {
 	});
 
 	test('shared lifecycle lock serializes a new worktree after recovery snapshot', async () => {
-		const root = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'swarm-owner-lifecycle-race-')),
-		);
+		const root = canonicalMkdtemp('swarm-owner-lifecycle-race-');
 		roots.push(root);
 		const project = path.join(root, 'project');
 		fs.mkdirSync(project, { recursive: true });
@@ -340,9 +441,7 @@ describe('init orphan recovery ownership scan fails closed', () => {
 		setup,
 		expected,
 	}) => {
-		const root = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'swarm-owner-store-corrupt-')),
-		);
+		const root = canonicalMkdtemp('swarm-owner-store-corrupt-');
 		roots.push(root);
 		const project = path.join(root, 'project');
 		fs.mkdirSync(path.join(project, '.swarm'), { recursive: true });

@@ -1837,7 +1837,6 @@ describe('executeDispatchLanesAsync and executeCollectLaneResults', () => {
 			promptAsync: mock(async () => ({ error: 'provider offline' })),
 			abort: mock(async () => {
 				abortCalled.resolve();
-				return undefined;
 			}),
 			delete: mock(async () => undefined),
 		};
@@ -1859,6 +1858,7 @@ describe('executeDispatchLanesAsync and executeCollectLaneResults', () => {
 			}),
 		);
 		await abortCalled.promise;
+		await new Promise((resolve) => setTimeout(resolve, 0));
 		const records = findByBatchId(directory, 'batch-prompt-fails');
 		expect(records).toHaveLength(1);
 		expect(records[0]).toEqual(
@@ -1933,7 +1933,6 @@ describe('executeDispatchLanesAsync and executeCollectLaneResults', () => {
 			promptAsync: mock(async () => await new Promise<never>(() => undefined)),
 			abort: mock(async () => {
 				abortCalled.resolve();
-				return undefined;
 			}),
 			delete: mock(async () => undefined),
 		};
@@ -1956,6 +1955,7 @@ describe('executeDispatchLanesAsync and executeCollectLaneResults', () => {
 			}),
 		);
 		await abortCalled.promise;
+		await new Promise((resolve) => setTimeout(resolve, 0));
 		expect(ops.abort).toHaveBeenCalledWith({ path: { id: 'session-timeout' } });
 		expect(ops.delete).toHaveBeenCalledWith({
 			path: { id: 'session-timeout' },

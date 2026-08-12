@@ -5,12 +5,11 @@
  * Records timing, success/failure, and periodically flushes aggregated stats.
  */
 
-import { renameSync, unlinkSync } from 'node:fs';
 import * as nodePath from 'node:path';
 import type { PluginConfig } from '../config/schema';
+import { atomicWriteFile } from '../evidence/task-file';
 import { swarmState } from '../state';
 import { warn } from '../utils';
-import { bunWrite } from '../utils/bun-compat';
 import { recordRealtimeLearningToolCall } from './realtime-learning-nudge';
 import { readSwarmFileAsync } from './utils';
 
@@ -164,20 +163,12 @@ async function doFlush(directory: string): Promise<void> {
 		// Capture pending count before write (new events may arrive during I/O)
 		const flushedCount = swarmState.pendingEvents;
 
-		// Write back (atomic: write to temp then rename)
+		// Write back (atomic: write to temp then rename; invalidates the swarm
+		// artifact cache after a successful rename so the next read-modify-write
+		// of context.md — this function reads the same path at line ~151 — never
+		// observes stale content, issue #1729)
 		const path = nodePath.join(directory, '.swarm', 'context.md');
-		const tempPath = `${path}.tmp`;
-		try {
-			await bunWrite(tempPath, updated);
-			renameSync(tempPath, path);
-		} catch (writeError) {
-			try {
-				unlinkSync(tempPath);
-			} catch {
-				/* ignore cleanup errors */
-			}
-			throw writeError; // re-throw so the outer catch still handles it
-		}
+		await atomicWriteFile(path, updated);
 
 		// Subtract flushed count (preserves events that arrived during write)
 		swarmState.pendingEvents = Math.max(

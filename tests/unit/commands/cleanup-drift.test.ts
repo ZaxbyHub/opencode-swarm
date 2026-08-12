@@ -323,7 +323,18 @@ test('singleton preservation drift guard (FR-020) — new singleton in swarmStat
 	//    (in practice: the only allowed cleared-not-in-list are the two non-init module scalars;
 	//    any extra indicates a new singleton was added to swarmState + resetSwarmState but not
 	//    wired into the preserving helper / this list).
-	const expectedClearedOutside = ['pendingEvents', 'lastBudgetPct'];
+	// Per-turn runtime scalars that SHOULD be cleared by the preserving reset —
+	// they are not init-time singletons. `lastBudgetTokens` is the denominator
+	// `lastBudgetPct` was measured against; both are rewritten together by
+	// system-enhancer on the next budget report, so both must reset to 0 rather
+	// than survive a `/swarm close` (issue #1619). `liveContextWindows` is a Map
+	// and is `.clear()`ed rather than replaced, so it is not a cleared-sentinel
+	// value and does not appear here.
+	const expectedClearedOutside = [
+		'pendingEvents',
+		'lastBudgetPct',
+		'lastBudgetTokens',
+	];
 	if (clearedInPreserve.length > 0) {
 		throw new Error(
 			`DRIFT: preserved singleton(s) were cleared after resetSwarmStatePreservingSingletons: ${clearedInPreserve.join(', ')}`,

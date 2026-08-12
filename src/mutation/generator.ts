@@ -7,6 +7,7 @@
 
 import type { ToolContext } from '@opencode-ai/plugin';
 import { swarmState } from '../state.js';
+import { teardownEphemeralSession } from '../utils/ephemeral-session-teardown.js';
 import * as logger from '../utils/logger.js';
 import type { MutationPatch } from './engine.js';
 
@@ -81,15 +82,16 @@ export async function generateMutants(
 	let ephemeralSessionId: string | undefined;
 	const promptController = new AbortController();
 
-	/** Best-effort session cleanup — never throws.
-	 *  Aborts any in-flight prompt before deleting the session so OpenCode
-	 *  stops writing message rows before the session row is removed. */
-	const cleanup = () => {
+	/** Best-effort session teardown — never throws.
+	 *  Aborts any in-flight prompt fetch, then awaits a graceful server-side
+	 *  `session.abort()` (so OpenCode flushes the final part/message) before the
+	 *  cascade-delete (#2123). */
+	const cleanup = async (): Promise<void> => {
 		promptController.abort();
 		if (ephemeralSessionId) {
 			const id = ephemeralSessionId;
 			ephemeralSessionId = undefined;
-			client.session.delete({ path: { id } }).catch(() => {});
+			await teardownEphemeralSession(client.session, id);
 		}
 	};
 
@@ -226,6 +228,6 @@ Return ONLY a valid JSON array. No markdown, no code fences, no explanation. Sta
 		);
 		return [];
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 }

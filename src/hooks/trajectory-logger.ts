@@ -13,6 +13,7 @@ import * as path from 'node:path';
 import { sanitizeTaskId } from '../evidence/manager';
 import { appendTrajectoryEntry } from '../prm/trajectory-store';
 import { swarmState } from '../state';
+import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
 import { deriveGateDenialCode } from './gate-denial-tracker';
 import { normalizeToolNameLowerCase } from './normalize-tool-name';
 import {
@@ -124,6 +125,7 @@ export async function truncateTrajectoryFile(
 		const keepCount = Math.floor(maxLines / 2);
 		const keptLines = lines.slice(-keepCount);
 		await fs.writeFile(filePath, `${keptLines.join('\n')}\n`, 'utf-8');
+		invalidateCachedArtifact(filePath);
 	} catch {
 		/* non-blocking: truncate errors are swallowed */
 	}

@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import { readSwarmFileAsync, validateSwarmPath } from '../hooks/utils';
 import { warn } from '../utils';
 import { bunWrite } from '../utils/bun-compat';
+import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
 
 /**
  * Summary ID validation regex: S followed by one or more digits
@@ -120,9 +121,17 @@ export async function storeSummary(
 		summaryDir,
 		`${sanitizedId}.json.tmp.${Date.now()}.${process.pid}`,
 	);
+	// Re-storing the same summary id overwrites this exact path, and
+	// `loadFullOutput` / `cleanupSummaries` read it back through the stat-stamped
+	// swarm-artifact cache (`readSwarmFileAsync(directory, relativePath)`). A
+	// same-size rewrite inside one filesystem timestamp tick would otherwise
+	// serve the previous entry — issue #1729. Invalidate right after the rename
+	// SUCCEEDS; on failure the catch below removes the temp and rethrows, and the
+	// cached bytes still match what is on disk.
 	try {
 		await bunWrite(tempPath, entryJson);
 		renameSync(tempPath, summaryPath);
+		invalidateCachedArtifact(summaryPath);
 	} catch (error) {
 		// Clean up temp file on failure
 		try {

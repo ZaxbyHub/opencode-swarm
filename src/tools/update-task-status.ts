@@ -37,6 +37,7 @@ import {
 } from '../telemetry.js';
 import { verifyLeanTurboTaskCompletion } from '../turbo/lean/task-completion';
 import * as logger from '../utils/logger.js';
+import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
 import { validateTaskIdFormat as _validateTaskIdFormat } from '../validation/task-id';
 import { createSwarmTool } from './create-tool';
 import { resolveWorkingDirectory } from './resolve-working-directory';
@@ -1223,6 +1224,15 @@ export async function executeUpdateTaskStatus(
 				writeOk = true;
 			} finally {
 				fs.closeSync(fd);
+				invalidateCachedArtifact(evidencePath);
+				// The invalidation above: `.swarm/evidence/<taskId>.json` is read
+				// back through the cached readers, which decide freshness from a stat
+				// stamp alone. The `wx` open only ever CREATES, but this path can
+				// have been read, then unlinked (the !writeOk branch below, /swarm
+				// reset, a rollback), then re-created here with byte-identical
+				// content inside one filesystem timestamp tick — at which point the
+				// pre-delete entry is served. Unconditional: the failure branch
+				// unlinks, and a deleted path bypasses the cache anyway.
 				// Remove partial/empty file on write failure to avoid a permanently broken gate file
 				if (!writeOk) {
 					try {

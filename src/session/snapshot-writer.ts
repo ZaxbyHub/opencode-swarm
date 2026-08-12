@@ -14,6 +14,7 @@ import type {
 import { swarmState } from '../state';
 import { log } from '../utils';
 import { bunWrite } from '../utils/bun-compat';
+import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
 
 /**
  * v6.35.4: In-flight write guard.
@@ -340,6 +341,14 @@ export async function writeSnapshot(
 			// (e.g. tmpfs, ramdisk) shouldn't block the main path.
 		}
 		renameSync(tempPath, resolvedPath);
+		// Only after a SUCCESSFUL rename. `session/state.json` is read through the
+		// cached reader (`readSwarmFileAsync(directory, 'session/state.json')` at
+		// src/services/handoff-service.ts:376), and this writer runs on every
+		// tool.execute.after — a snapshot whose only delta is a counter or a
+		// timestamp field of identical width is the SAME SIZE as its predecessor,
+		// which the cache's stat stamp (mtime+ctime+size) cannot distinguish from
+		// "unchanged" inside one filesystem timestamp tick (issue #1729).
+		invalidateCachedArtifact(resolvedPath);
 	} catch (error) {
 		log('[snapshot-writer] write failed', {
 			error: error instanceof Error ? error.message : String(error),

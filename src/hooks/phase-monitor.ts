@@ -10,6 +10,7 @@ import * as path from 'node:path';
 import type { PreflightTriggerManager } from '../background/trigger';
 import { CuratorConfigSchema } from '../config/schema';
 import { loadPlan } from '../plan/manager';
+import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
 import {
 	type CuratorLLMDelegate,
 	runCuratorInit as defaultRunCuratorInit,
@@ -86,6 +87,14 @@ export function createPhaseMonitorHook(
 						const { mkdir, writeFile } = await import('node:fs/promises');
 						await mkdir(path.dirname(briefingPath), { recursive: true });
 						await writeFile(briefingPath, initResult.briefing, 'utf-8');
+						// Only after a SUCCESSFUL write. `curator-briefing.md` is read
+						// through the cached reader (`readSwarmFileAsync(directory,
+						// 'curator-briefing.md')` at src/hooks/knowledge-injector.ts:1043),
+						// and curator init can rewrite it within a session — a briefing
+						// that regenerates to the same length is indistinguishable from
+						// "unchanged" to the cache's stat stamp (mtime+ctime+size) inside
+						// one filesystem timestamp tick (issue #1729).
+						invalidateCachedArtifact(briefingPath);
 						// Persist init receipt for drift context (best-effort)
 						const { buildApprovedReceipt, persistReviewReceipt } = await import(
 							'./review-receipt.js'

@@ -8,6 +8,7 @@ import { derivePlanId } from '../plan/utils.js';
 import { checkpoint as checkpointTool } from '../tools/checkpoint.js';
 import type { ToolResult } from '../tools/create-tool';
 import { log } from '../utils/logger';
+import { resetSwarmArtifactCache } from '../utils/swarm-artifact-cache';
 
 type LegacyCheckpoint = { phase: number; label?: string; timestamp: string };
 type GitCheckpoint = { label: string; sha: string; timestamp: string };
@@ -225,8 +226,26 @@ export async function handleRollbackCommand(
 		return `Error: Checkpoint for phase ${targetPhase} is empty. Cannot rollback.`;
 	}
 
-	// Get absolute paths
-	const swarmDir = validateSwarmPath(directory, '');
+	// Get absolute paths.
+	//
+	// `validateSwarmPath` requires a NON-EMPTY filename: both platform branches
+	// test `resolved.startsWith(baseDir + path.sep)`, and with `filename === ''`
+	// the resolved path IS `baseDir`, so the test fails. Passing '' here — which
+	// this line did until #1619 round 7 — threw
+	// "Invalid filename: path escapes .swarm directory" on EVERY platform before a
+	// single file was copied, making the whole legacy phase-restore path dead in
+	// production. It looked covered because tests/unit/commands/rollback.test.ts
+	// and rollback-ledger-lock.test.ts both `mock.module` `validateSwarmPath` to a
+	// plain `path.join`, so the restore path was only ever exercised against a
+	// stub.
+	//
+	// Validating a real child and taking its parent is the fix. Scope of what
+	// that buys, stated exactly: when `.swarm` EXISTS the helper's symlink
+	// rejection and realpath containment both run; when it does not, the helper
+	// returns early at its ENOENT branch and those checks are skipped. Here it
+	// provably exists — the manifest and the checkpoint directory were both read
+	// out of it above — so the checks do run on this path.
+	const swarmDir = path.dirname(validateSwarmPath(directory, '.keep'));
 
 	// Copy files directly from checkpoint to .swarm/
 	const EXCLUDE_FILES = new Set([
@@ -254,6 +273,24 @@ export async function handleRollbackCommand(
 			failures.push({ file, error: (error as Error).message });
 		}
 	}
+
+	// The copy above replaces an ARBITRARY set of `.swarm/` files wholesale —
+	// plan.json, plan.md, context.md, session/state.json, summaries/, evidence/
+	// (recursive), curator-summary.json, spec-staleness.json, anything else the
+	// checkpoint happens to hold. Those are read back through the swarm-artifact
+	// cache, which decides freshness from a stat stamp (mtimeMs + ctimeMs + size)
+	// alone, so a checkpoint file restored at the same size inside one filesystem
+	// timestamp tick would keep serving the PRE-rollback value to every later hook
+	// read in this session. Per-file invalidation is not viable here: the set is
+	// whatever `readdirSync(checkpointDir)` yields, `cpSync` recurses into
+	// directories, and enumerating that tree would have to stay in sync with every
+	// future artifact layout. Clearing the whole cache is both simpler and
+	// obviously correct — the next read of anything repopulates from disk.
+	//
+	// Placed BEFORE the partial-failure return below on purpose: a rollback that
+	// copied some files and failed on others has still mutated `.swarm/`, and that
+	// path returns early.
+	resetSwarmArtifactCache();
 
 	if (failures.length > 0) {
 		return [

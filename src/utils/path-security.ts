@@ -70,25 +70,24 @@ export function containsControlChars(str: string): boolean {
  * came to have no producer and a consumer that threw on every call.
  *
  * This validator keeps the checks that are meaningful for a root (empty,
- * traversal segments, control/bidi characters) and drops the absolute-path
- * rejection. Containment of the actual file is NOT this function's job and is
- * unchanged: `validateSwarmPath(directory, filename)` resolves the target under
- * `<directory>/.swarm`, rejects any path that escapes it, and rejects a
- * symlinked `.swarm` base.
+ * traversal segments, control/bidi characters). Containment of the actual FILE
+ * is not this function's job and is unchanged: `validateSwarmPath(directory,
+ * filename)` resolves the target under `<directory>/.swarm`, rejects any path
+ * that escapes it, and rejects a symlinked `.swarm` base.
+ *
+ * It ALSO requires the root to be absolute and to not be a filesystem or system
+ * location — see `validateProjectDirectory` below, which this function
+ * delegates to, for why those two checks are load-bearing rather than
+ * defensive. In short: `validateSwarmPath` pins the write *inside* the root, so
+ * it cannot help when the root itself is `E:\` or `/etc`, and a RELATIVE root
+ * resolves `.swarm/` against the host process cwd — the same invariant-4 hazard
+ * as an empty root.
  *
  * @param directory - The workspace root to validate
  * @throws Error if the root is invalid
  */
 export function validateWorkspaceRoot(directory: string): void {
-	if (!directory || directory.trim() === '') {
-		throw new Error('Invalid directory: empty');
-	}
-	if (containsPathTraversal(directory)) {
-		throw new Error('Invalid directory: path traversal detected');
-	}
-	if (containsControlChars(directory)) {
-		throw new Error('Invalid directory: control characters detected');
-	}
+	validateProjectDirectory(directory);
 }
 
 /**
@@ -116,6 +115,184 @@ export function validateDirectory(directory: string): void {
 	}
 	if (/^[A-Za-z]:[/\\]/.test(directory)) {
 		throw new Error('Invalid directory: Windows absolute path');
+	}
+}
+
+/**
+ * Validate a TRUSTED, already-absolute project root directory.
+ *
+ * This is the trust-model counterpart to `validateDirectory` above, NOT a
+ * relaxation of it. `validateDirectory` guards UNTRUSTED, RELATIVE sub-path
+ * input and therefore rejects absolute paths by design. A project root that
+ * the plugin host injects (`ctx.directory`, or the documented direct-CLI /
+ * test `process.cwd()` fallback) is ALWAYS absolute, so handing one to
+ * `validateDirectory` throws unconditionally — the misapplication that made
+ * the context-budget and run-memory features dead on every real invocation
+ * (issue #1619 follow-up).
+ *
+ * What this still enforces — every check that is meaningful for a root:
+ * - Non-empty. An empty root makes `path.resolve('', '.swarm')` land on
+ *   whatever the host process cwd happens to be, which is an invariant-4
+ *   (`.swarm/` containment) violation, not a harmless no-op.
+ * - No traversal and no control / directional-format characters. A root
+ *   carrying `..`, a NUL byte, or a bidi override is never a legitimate
+ *   injected project root.
+ * - MUST be absolute. A relative root resolves against the host's process cwd
+ *   — the same invariant-4 hazard as the empty case, and the reason this is a
+ *   positive requirement rather than merely "absolute is tolerated".
+ *
+ * WHAT "ABSOLUTE" MEANS HERE IS PARTLY PLATFORM-DEPENDENT. The check is
+ * `path.isAbsolute(directory) || /^[A-Za-z]:[/\\]/.test(directory)`, and
+ * `path.isAbsolute` is bound to the host platform. Measured, not assumed
+ * (2026-08-10, issue #1619 review round 4, F5):
+ *
+ *   | root                        | POSIX host | Windows host |
+ *   | --------------------------- | ---------- | ------------ |
+ *   | `/srv/app`                  | accepted   | accepted     |
+ *   | `C:/app`, `C:\app`          | accepted   | accepted     |
+ *   | `//server/share/project`    | accepted   | accepted     |
+ *   | `\\server\share\project`    | REJECTED   | accepted     |
+ *   | `app/relative`              | rejected   | rejected     |
+ *
+ * So the drive-letter fallback is what makes Windows drive roots portable, and
+ * a POSIX root is absolute on Windows too (`path.win32.isAbsolute('/srv')` is
+ * true — a driveless rooted path passes there, resolving against the current
+ * drive). But the BACKSLASH UNC form is not portable: it is win32-absolute and
+ * not posix-absolute, and no fallback covers it, so it validates on Windows and
+ * throws on a Linux CI runner. Only the forward-slash UNC spelling is accepted
+ * on both.
+ *
+ * UNC paths are intentionally accepted ON WINDOWS: they are absolute there and
+ * can be a legitimate project root. Rejecting them would silently re-create the
+ * dead-feature class this function exists to fix, because every caller sits
+ * behind a debug-gated catch. Nothing is lost by the POSIX rejection — a
+ * `\\server\share` root is not a usable path on POSIX in the first place.
+ *
+ * NOT interchangeable with `validateProjectRoot` (src/evidence/manager.ts).
+ * That one is a filesystem-touching, fail-closed check that the directory is
+ * the OUTERMOST project root (no ancestor owns a `.swarm/`). It does I/O
+ * (realpathSync plus a bounded ancestor walk) on every call and it correctly
+ * REJECTS a linked git worktree whose parent checkout has a `.swarm/` — right
+ * for a one-shot evidence write, wrong for a per-turn chat-transform hook.
+ * Reserve it for writes that must be pinned to the outermost project root.
+ *
+ * @param directory - the injected, trusted project root
+ * @throws Error if the directory is not a usable absolute project root
+ */
+export function validateProjectDirectory(directory: string): void {
+	if (!directory || directory.trim() === '') {
+		throw new Error('Invalid project directory: empty');
+	}
+	if (containsPathTraversal(directory)) {
+		throw new Error('Invalid project directory: path traversal detected');
+	}
+	if (containsControlChars(directory)) {
+		throw new Error('Invalid project directory: control characters detected');
+	}
+	if (!path.isAbsolute(directory) && !/^[A-Za-z]:[/\\]/.test(directory)) {
+		throw new Error('Invalid project directory: must be an absolute path');
+	}
+	assertNotSystemLocation(directory);
+}
+
+/**
+ * Directory names that must never HOST a project root, checked as the first
+ * segment below the filesystem/drive root and denied together with everything
+ * under them.
+ *
+ * Both lists are applied on every platform, deliberately: a Windows host can be
+ * handed a driveless rooted path (`path.win32.isAbsolute('/etc')` is true) and a
+ * POSIX-shaped deny list evaluated only on POSIX would let `/etc` through there.
+ * Platform-independent evaluation also keeps the contract identical on a Linux
+ * CI runner and a Windows dev host, which is the property the UNC divergence
+ * above cost us.
+ *
+ * `var` is deliberately ABSENT: macOS `os.tmpdir()` is `/var/folders/...`, and
+ * denying that subtree would reject every temp-rooted test workspace.
+ */
+const DENIED_ROOT_SUBTREES = new Set([
+	// POSIX system hierarchy
+	'etc',
+	'usr',
+	'bin',
+	'sbin',
+	'lib',
+	'lib64',
+	'boot',
+	'dev',
+	'proc',
+	'sys',
+	// Windows system hierarchy, denied on ANY drive: the harm this prevents was
+	// observed at `E:\Windows`, not `C:\Windows` (issue #1619).
+	'windows',
+	'winnt',
+	'program files',
+	'program files (x86)',
+	'programdata',
+	'system volume information',
+]);
+
+/**
+ * Directory names that are denied only as an EXACT root child, not as a
+ * subtree. `C:\Users` is never a project root; `C:\Users\brett\repo` is the
+ * normal case and must keep working.
+ */
+const DENIED_EXACT_ROOT_CHILDREN = new Set(['users', 'home', 'root']);
+
+/**
+ * Reject a filesystem/drive root or a system location as a project root.
+ *
+ * WHY THIS EXISTS (issue #1619). `validateProjectDirectory` requires an
+ * absolute path, and absoluteness alone is not containment: every caller
+ * ultimately writes under `<root>/.swarm/`, so a root of `E:\` or `\Windows`
+ * produces real writes at a drive root. That is not hypothetical — running
+ * `tests/security/adversarial/services-path-traversal.test.ts` against the
+ * absolute-accepting validator created `E:\.swarm\session\budget-state.json`,
+ * `E:\Windows\` and `E:\Users\Brett\AppData\Local\` on the author's machine.
+ * The pre-#1619 assertions that "an absolute directory is rejected" were
+ * covering this, and reinstating the coverage — rather than the mechanism,
+ * which also made the features dead — is what keeps the fix honest.
+ *
+ * Purely lexical, like the rest of this function: no `realpathSync`, no
+ * ancestor walk, no I/O. Callers sit on a per-turn hot path behind a
+ * debug-gated catch, so an I/O-bound check here would be both a latency
+ * regression and a silent-failure risk. Canonical containment of the WRITE
+ * remains owned by `validateSwarmPath` / `validateSymlinkBoundary`.
+ */
+function assertNotSystemLocation(directory: string): void {
+	// Evaluated under BOTH parsers, never the host's `path`. `path.resolve` is
+	// bound to the running platform, and on POSIX a backslash is an ordinary
+	// filename character — so `path.resolve('C:\\Windows')` on Linux yields
+	// `<cwd>/C:\Windows`, whose first segment is `home`, and the deny list never
+	// sees `Windows`. That made the guard pass on a Windows dev host and fail on
+	// an ubuntu CI runner (PR #2129). Checking both parsers and rejecting if
+	// EITHER flags the path keeps the contract identical everywhere, which is the
+	// same property the UNC divergence above cost us.
+	for (const parser of [path.win32, path.posix]) {
+		if (!parser.isAbsolute(directory)) continue;
+
+		const normalized = parser.normalize(directory);
+		const { root } = parser.parse(normalized);
+		const segments = normalized
+			.slice(root.length)
+			.split(/[/\\]/)
+			.filter((segment) => segment.length > 0);
+
+		if (segments.length === 0) {
+			throw new Error(
+				`Invalid project directory: filesystem root is not a project root (${directory})`,
+			);
+		}
+
+		const first = (segments[0] ?? '').toLowerCase();
+		if (
+			DENIED_ROOT_SUBTREES.has(first) ||
+			(segments.length === 1 && DENIED_EXACT_ROOT_CHILDREN.has(first))
+		) {
+			throw new Error(
+				`Invalid project directory: system location is not a project root (${directory})`,
+			);
+		}
 	}
 }
 
@@ -347,6 +524,7 @@ export const _internals: {
 	containsPathTraversal: typeof containsPathTraversal;
 	containsControlChars: typeof containsControlChars;
 	validateDirectory: typeof validateDirectory;
+	validateProjectDirectory: typeof validateProjectDirectory;
 	validateSymlinkBoundary: typeof validateSymlinkBoundary;
 	isCanonicalPathWithinRoot: typeof isCanonicalPathWithinRoot;
 	validateTargetWithinRoot: typeof validateTargetWithinRoot;
@@ -355,6 +533,7 @@ export const _internals: {
 	containsPathTraversal,
 	containsControlChars,
 	validateDirectory,
+	validateProjectDirectory,
 	validateSymlinkBoundary,
 	isCanonicalPathWithinRoot,
 	validateTargetWithinRoot,

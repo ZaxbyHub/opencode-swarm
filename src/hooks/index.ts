@@ -40,9 +40,14 @@ export {
 	type MessagePriorityType,
 	type MessageWithParts,
 } from './message-priority';
-export { consolidateSystemMessages } from './messages-transform';
+export {
+	consolidateSystemMessages,
+	consolidateSystemMessagesInPlace,
+} from './messages-transform';
 export {
 	extractModelInfo,
+	extractSessionId,
+	lookupStaticModelLimit,
 	NATIVE_MODEL_LIMITS,
 	PROVIDER_CAPS,
 	resolveModelLimit,

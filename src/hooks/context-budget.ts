@@ -9,6 +9,7 @@
 import type { PluginConfig } from '../config';
 import { SUMMARIZER_EXEMPT_TOOL_NAMES } from '../config/constants';
 import { stripKnownSwarmPrefix } from '../config/schema';
+import { getLiveContextWindow } from '../state';
 import { log, warn } from '../utils';
 import {
 	classifyMessages,
@@ -18,7 +19,11 @@ import {
 	MessagePriority,
 	type MessagePriorityType,
 } from './message-priority';
-import { extractModelInfo, resolveModelLimit } from './model-limits';
+import {
+	extractModelInfo,
+	extractSessionId,
+	resolveModelLimit,
+} from './model-limits';
 import { estimateTokens } from './utils';
 
 // Module-level state to track last-seen agent for agent-switch detection (Task 4.1)
@@ -87,10 +92,22 @@ export function createContextBudgetHandler(config: PluginConfig) {
 
 		// Extract model and provider info from messages
 		const { modelID, providerID } = extractModelInfo(messages);
+		// The live `model.limit.context` recorded by the system.transform hook for
+		// this session. This hook only receives messages — the host hands the
+		// `Model` object to system.transform alone — so the live window has to be
+		// relayed through session state. It matters here more than anywhere else:
+		// below, `ratio >= criticalThreshold` triggers HARD PRUNING, so a
+		// denominator that is ~8x too small (the stale 128000 against a 1M window)
+		// deletes context that never needed deleting. `undefined` on the first
+		// turn of a session, before any system.transform has run for it — that
+		// degrades to the static rungs, i.e. the pre-existing behaviour, never
+		// worse.
+		const liveContextLimit = getLiveContextWindow(extractSessionId(messages));
 		const modelLimit = resolveModelLimit(
 			modelID,
 			providerID,
 			modelLimitsConfig,
+			liveContextLimit,
 		);
 
 		// Log on first use of each model/provider combination

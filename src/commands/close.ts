@@ -53,6 +53,7 @@ import {
 import { telemetry as telemetryEmit } from '../telemetry';
 import { executeWriteRetro } from '../tools/write-retro';
 import { log } from '../utils/logger';
+import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
 import { archiveSqliteSnapshot, type SqliteRowCounts } from './archive-sqlite';
 
 interface PlanPhase {
@@ -1780,6 +1781,7 @@ export async function runCleanStage(
 	try {
 		await fs.writeFile(contextTempPath, contextContent, 'utf-8');
 		fsSync.renameSync(contextTempPath, contextPath);
+		invalidateCachedArtifact(contextPath);
 	} catch (error) {
 		try {
 			fsSync.unlinkSync(contextTempPath);
@@ -2295,6 +2297,12 @@ export async function handleCloseCommand(
 		try {
 			await fs.writeFile(closeSummaryTempPath, summaryContent, 'utf-8');
 			fsSync.renameSync(closeSummaryTempPath, closeSummaryPath);
+			// Defensive, not currently load-bearing: no cached reader consumes
+			// close-summary.md today, so this is a no-op. It is kept so the file
+			// cannot become a stale-read hazard the moment someone routes a read
+			// through `readSwarmFileAsync`, matching every other temp+rename
+			// writer in this file.
+			invalidateCachedArtifact(closeSummaryPath);
 		} catch (error) {
 			try {
 				fsSync.unlinkSync(closeSummaryTempPath);

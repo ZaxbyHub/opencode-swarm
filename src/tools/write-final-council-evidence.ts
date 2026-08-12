@@ -18,6 +18,7 @@ import { computePlanHash } from '../plan/ledger.js';
 import { loadPlan } from '../plan/manager.js';
 import { derivePlanId, derivePlanIdentityHash } from '../plan/utils.js';
 import * as logger from '../utils/logger';
+import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
 import { createSwarmTool } from './create-tool';
 
 const FINAL_COUNCIL_MEMBERS = [
@@ -327,6 +328,7 @@ export async function executeWriteFinalCouncilEvidence(
 										'utf-8',
 									);
 									await fs.promises.rename(tempPath, validatedPath);
+									invalidateCachedArtifact(validatedPath);
 								} finally {
 									await fs.promises
 										.rm(tempPath, { force: true })
