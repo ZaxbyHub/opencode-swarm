@@ -819,6 +819,30 @@ export const swarmState = {
 	/** Last known context budget percentage (0-100), updated by system-enhancer */
 	lastBudgetPct: 0,
 
+	/**
+	 * The DENOMINATOR `lastBudgetPct` was computed against, in tokens. Written
+	 * by system-enhancer at the same two statements that write `lastBudgetPct`,
+	 * because a percentage without its denominator cannot be turned back into a
+	 * token estimate. `/swarm status` used to reconstruct the estimate from a
+	 * hardcoded constant, so a user whose real denominator differed saw a token
+	 * figure that did not match the percentage next to it. 0 means "no budget
+	 * report has run yet".
+	 */
+	lastBudgetTokens: 0,
+
+	/**
+	 * Live `model.limit.context` per session — keyed by sessionID and bound to
+	 * the reporting model/provider identity. Recorded by the
+	 * `experimental.chat.system.transform` hook (the only hook the host
+	 * gives a `Model` to) and read by the `experimental.chat.messages.transform`
+	 * consumers, which receive messages but no model object. Bounded via
+	 * {@link setLiveContextWindow} (AGENTS.md invariant 8).
+	 */
+	liveContextWindows: new Map<
+		string,
+		{ tokens?: number; modelID?: string; providerID?: string }
+	>(),
+
 	/** Per-session guardrail state — keyed by sessionID */
 	agentSessions: defaultRunContext.agentSessions,
 
@@ -843,6 +867,8 @@ export function resetSwarmState(): void {
 	swarmState.delegationChains.clear();
 	swarmState.pendingEvents = 0;
 	swarmState.lastBudgetPct = 0;
+	swarmState.lastBudgetTokens = 0;
+	swarmState.liveContextWindows.clear();
 	swarmState.agentSessions.clear();
 	// Reset the opportunistic idle-sweep cooldown so a fresh process / test run
 	// sweeps on first session activity (invariant 8: bounded global state with
@@ -3227,6 +3253,102 @@ export function ensureSessionEnvironment(
 export const MAX_TRACKED_CRITICAL_SHOWN = 500;
 export const MAX_TRACKED_KNOWLEDGE_ACKS = 5000;
 export const MAX_TRACKED_GATE_DENIALS = 500;
+export const MAX_TRACKED_CONTEXT_WINDOWS = 500;
+
+/**
+ * Record the live `model.limit.context` the host reported for `sessionID`,
+ * bound to the reporting model/provider identity and FIFO-evicting the oldest
+ * entry past {@link MAX_TRACKED_CONTEXT_WINDOWS}.
+ *
+ * Only accepts a finite number ≥ 1 — the caller (`src/config/context-window.ts`
+ * `isUsableContextWindow`) applies the real plausibility floor, and storing a
+ * junk value here would hand it to every `messages.transform` consumer. A
+ * rejected value leaves any previously recorded window in place rather than
+ * clobbering it, so one malformed turn does not blank a good reading.
+ */
+export function setLiveContextWindow(
+	sessionID: string | undefined,
+	tokens: unknown,
+	identity?: { modelID?: string; providerID?: string },
+): void {
+	if (!sessionID) return;
+	const map = swarmState.liveContextWindows;
+	const modelID = normalizeLiveContextIdentity(identity?.modelID);
+	const providerID = normalizeLiveContextIdentity(identity?.providerID);
+	const existing = map.get(sessionID);
+	const hasUsableTokens =
+		typeof tokens === 'number' && Number.isFinite(tokens) && tokens >= 1;
+	if (!hasUsableTokens) {
+		if (!identity || (!modelID && !providerID)) return;
+		if (
+			existing?.modelID === modelID &&
+			existing?.providerID === providerID &&
+			existing?.tokens !== undefined
+		) {
+			return;
+		}
+		if (map.has(sessionID)) map.delete(sessionID);
+		map.set(sessionID, { modelID, providerID });
+		evictOldestLiveContextWindow(map, sessionID);
+		return;
+	}
+	if (map.has(sessionID)) map.delete(sessionID);
+	map.set(sessionID, {
+		tokens: Math.floor(tokens as number),
+		modelID,
+		providerID,
+	});
+	evictOldestLiveContextWindow(map, sessionID);
+}
+
+/**
+ * Read the live context window recorded for `sessionID`, or `undefined` when
+ * no `system.transform` has run for it yet or the requested model/provider
+ * identity does not exactly match the reporter. Callers must degrade to the
+ * static resolution rungs rather than reuse a stale handoff denominator.
+ */
+export function getLiveContextWindow(
+	sessionID: string | undefined,
+	identity?: { modelID?: string; providerID?: string },
+): number | undefined {
+	if (!sessionID) return undefined;
+	const cached = swarmState.liveContextWindows.get(sessionID);
+	if (!cached) return undefined;
+	const modelID = normalizeLiveContextIdentity(identity?.modelID);
+	const providerID = normalizeLiveContextIdentity(identity?.providerID);
+	if (
+		identity &&
+		(cached.modelID !== modelID || cached.providerID !== providerID)
+	) {
+		return undefined;
+	}
+	return cached.tokens;
+}
+
+export function getLiveContextModelIdentity(
+	sessionID: string | undefined,
+): { modelID?: string; providerID?: string } | undefined {
+	if (!sessionID) return undefined;
+	const cached = swarmState.liveContextWindows.get(sessionID);
+	if (!cached) return undefined;
+	return { modelID: cached.modelID, providerID: cached.providerID };
+}
+
+function evictOldestLiveContextWindow(
+	map: typeof swarmState.liveContextWindows,
+	sessionID: string,
+): void {
+	if (map.size <= MAX_TRACKED_CONTEXT_WINDOWS) return;
+	const oldest = map.keys().next().value;
+	if (oldest !== undefined && oldest !== sessionID) map.delete(oldest);
+}
+
+function normalizeLiveContextIdentity(
+	value: string | undefined,
+): string | undefined {
+	const normalized = value?.trim().toLowerCase();
+	return normalized ? normalized : undefined;
+}
 
 /** Set the critical shown ids for a session, FIFO-evicting the oldest entry
  * if the cap is exceeded. Re-setting an existing key keeps insertion order

@@ -75,6 +75,7 @@ import {
 import { isGitRepo } from '../git/branch';
 import { getWorktreeMergeFailure } from '../hooks/delegation-gate/worktree-merge-status';
 import { readSwarmFileAsync } from '../hooks/utils';
+import { recordTaskAttempt } from '../services/run-memory.js';
 import { emit } from '../telemetry.js';
 import { isEpicModeActiveForProject } from '../turbo/epic/state.js';
 import { commitTaskCompletion } from '../turbo/epic/task-commit.js';
@@ -87,7 +88,10 @@ import {
 	isObligationPreserving,
 	isSpecStale,
 } from '../utils/spec-hash';
-import { readCachedParsedFile } from '../utils/swarm-artifact-cache';
+import {
+	invalidateCachedArtifact,
+	readCachedParsedFile,
+} from '../utils/swarm-artifact-cache';
 import {
 	appendLedgerEvent,
 	computeCurrentPlanHash,
@@ -164,6 +168,7 @@ export const _internals: {
 	readTaskScopes: typeof readTaskScopes;
 	commitTaskCompletion: typeof commitTaskCompletion;
 	getWorktreeMergeFailure: typeof getWorktreeMergeFailure;
+	recordTaskAttempt: typeof recordTaskAttempt;
 } = {
 	loadPlan,
 	loadPlanJsonOnly,
@@ -173,6 +178,7 @@ export const _internals: {
 	readTaskScopes,
 	commitTaskCompletion,
 	getWorktreeMergeFailure,
+	recordTaskAttempt,
 };
 
 /** @internal Test seam for snapshot retry helper */
@@ -621,6 +627,7 @@ export async function regeneratePlanMarkdown(
 			/* already renamed or never created */
 		}
 	}
+	invalidateCachedArtifact(mdPath);
 }
 
 /**
@@ -846,6 +853,23 @@ export async function loadPlan(
 								// Write spec-staleness.json (includes precomputed diff so
 								// system-enhancer can render the advisory without importing
 								// spec-hash at module-load time — avoids repro-704 T1 regression).
+								//
+								// #1619 F1 — why the write below is followed by
+								// invalidateCachedArtifact: system-enhancer reads this marker back
+								// through `readCachedParsedFileSync`
+								// (SPEC_STALENESS_CACHE_NAMESPACE, src/hooks/system-enhancer.ts:152)
+								// in the SAME turn that loadPlan writes it (:1002 -> :1009 -> :187,
+								// mirrored on Path B at :1854/:1861). That cache decides freshness
+								// from the stat stamp alone, and a rewrite whose only changed field
+								// is the fixed-width ISO `timestamp` is byte-identical in length —
+								// so inside one filesystem timestamp tick `sameStamp()` matches and
+								// the PREVIOUS turn's snapshot is served to the spec-drift advisory
+								// that gates save_plan / update_task_status / phase_complete. This
+								// path does NOT route through `atomicWriteFile`, so the invalidation
+								// is manual. Keep it INSIDE the try and directly after the await:
+								// only a successful write may drop the cache entry, and the G2 scan
+								// (tests/helpers/swarm-write-cache-scan.ts) only looks 25 lines
+								// forward from the write call.
 								try {
 									const diffInfo = computeSpecDiff(directory);
 									const specStalenessPath = path.join(
@@ -872,6 +896,8 @@ export async function loadPlan(
 										),
 										'utf-8',
 									);
+									// #1619 F1 — see the rationale above the enclosing try.
+									invalidateCachedArtifact(specStalenessPath);
 								} catch {
 									// Non-fatal: spec-staleness.json write failure does not block plan loading
 								}
@@ -1642,6 +1668,7 @@ export async function savePlan(
 			/* already renamed or never created */
 		}
 	}
+	invalidateCachedArtifact(planPath);
 
 	// Write in-progress marker right after plan.json rename so that
 	// PlanSyncWorker's checkForUnauthorizedWrite() can skip its mtime
@@ -1684,6 +1711,7 @@ export async function savePlan(
 				/* already renamed or never created */
 			}
 		}
+		invalidateCachedArtifact(mdPath);
 	} catch (mdError) {
 		const message =
 			mdError instanceof Error ? mdError.message : String(mdError);
@@ -1771,6 +1799,7 @@ export async function rebuildPlan(
 		}
 	}
 	renameSync(tempPlanPath, planPath);
+	invalidateCachedArtifact(planPath);
 
 	// Write in-progress marker right after plan.json rename.
 	try {
@@ -1803,6 +1832,7 @@ export async function rebuildPlan(
 		);
 		await bunWrite(tempMdPath, markdownWithHash);
 		renameSync(tempMdPath, mdPath);
+		invalidateCachedArtifact(mdPath);
 	} finally {
 		// Always reset the marker to in_progress: false, even if plan.md write failed,
 		// so PlanSyncWorker's unauthorized-write checks are not permanently disabled.
@@ -1949,6 +1979,7 @@ export async function closePlanTerminalState(
 	);
 	await bunWrite(tempPlanPath, JSON.stringify(validated, null, 2));
 	renameSync(tempPlanPath, planPath);
+	invalidateCachedArtifact(planPath);
 
 	// Write in-progress marker right after plan.json rename so that
 	// PlanSyncWorker's checkForUnauthorizedWrite() can skip its mtime
@@ -1982,6 +2013,7 @@ export async function closePlanTerminalState(
 		);
 		await bunWrite(mdTempPath, markdownWithHash);
 		renameSync(mdTempPath, mdPath);
+		invalidateCachedArtifact(mdPath);
 	} finally {
 		// Always reset the marker to in_progress: false, even if plan.md write failed,
 		// so PlanSyncWorker's unauthorized-write checks are not permanently disabled.
@@ -2144,6 +2176,49 @@ export async function updateTaskStatus(
 			await savePlan(directory, updatedPlan, {
 				preserveCompletedStatuses: false,
 			});
+
+			// Run memory: record the terminal outcome for this task. Centralized
+			// here for the same reason as the Rule 2 auto-commit below — BOTH
+			// writers of task status route through this function, and the
+			// `update_task_status` tool is NOT the only one. The council APPROVE
+			// fast-path completes a task via `advanceTaskStateAndPersist`
+			// (src/state.ts) from `delegation-gate.ts`, with no tool call at all.
+			// Recording in the tool alone logged the council gate's FAILURE but
+			// never its PASS, so `getRunMemorySummary` reported completed tasks as
+			// "Still failing" forever — worse than recording nothing.
+			if (status === 'completed' || status === 'blocked') {
+				const recordedTask = updatedPlan.phases
+					.flatMap((phase) => phase.tasks)
+					.find((candidate) => candidate.id === taskId);
+				try {
+					await _internals.recordTaskAttempt(directory, {
+						taskId,
+						// Deliberately a sentinel, not the live agent name: resolving
+						// that needs `swarmState`, and `src/state.ts` already imports
+						// this module, so importing it back would be circular.
+						// `summarizeTask` never renders `agent`, so nothing is lost.
+						agent: 'plan-status',
+						outcome: status === 'completed' ? 'pass' : 'fail',
+						failureReason:
+							status === 'blocked'
+								? (recordedTask?.blocked_reason ??
+									'task marked blocked (no blocked_reason recorded)')
+								: undefined,
+						fileTargets: recordedTask?.files_touched ?? [],
+					});
+				} catch (err) {
+					// The plan write already succeeded and is authoritative. Run memory
+					// is advisory, so a bookkeeping failure must not propagate out of
+					// the durable status update (AGENTS.md #5) — the same non-fatal
+					// contract Rule 2 relies on. Reached through the `_internals` seam,
+					// so do not depend on the callee's own fail-open behaviour.
+					warn(
+						`[plan/manager] run-memory record for ${taskId} failed: ${
+							err instanceof Error ? err.message : String(err)
+						}`,
+					);
+				}
+			}
 			// Rule 2 of the greenfield-smart redesign: auto-commit on task
 			// completion. Centralized here (rather than in the
 			// `update_task_status` tool) because BOTH callers route through

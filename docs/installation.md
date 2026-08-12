@@ -513,7 +513,7 @@ Context budget controls (full schema in `src/config/schema.ts`):
 | `enabled` | boolean | `true` | Enable token budget tracking and warnings |
 | `warn_threshold` | number | `0.7` | Inject warning message at this percentage of token limit |
 | `critical_threshold` | number | `0.9` | Inject critical warning at this percentage of token limit |
-| `model_limits` | object | `{ "default": 128000 }` | Token limits per model. Use `"default"` as fallback. |
+| `model_limits` | object | `{}` | Token limit OVERRIDES per model, keyed by `"<provider>/<model>"`, `"<model>"`, or `"default"`. Empty by default so the live model context window (`model.limit.context`, reported by the OpenCode host) is used; set an entry only to impose a SMALLER working budget than the real window. |
 | `max_injection_tokens` | number | `4000` | Maximum tokens for system prompt injection. Priority‑ordered: phase → task → decisions → agent context |
 | `tracked_agents` | string[] | `["architect"]` | List of agents whose messages count toward the budget |
 | `enforce` | boolean | `true` | When `true` the system will abort or truncate messages that exceed the critical threshold |
@@ -566,7 +566,7 @@ Monitor and warn about context window usage:
 | `enabled` | boolean | `true` | Enable token budget tracking and warnings |
 | `warn_threshold` | number | `0.7` | Inject warning message at this percentage of token limit |
 | `critical_threshold` | number | `0.9` | Inject critical warning at this percentage of token limit |
-| `model_limits` | object | `{ "default": 128000 }` | Token limits per model. Use `"default"` as fallback. |
+| `model_limits` | object | `{}` | Token limit OVERRIDES per model, keyed by `"<provider>/<model>"`, `"<model>"`, or `"default"`. Empty by default so the live model context window (`model.limit.context`, reported by the OpenCode host) is used; set an entry only to impose a SMALLER working budget than the real window. |
 | `max_injection_tokens` | number | `4000` | Maximum tokens for system prompt injection. Priority-ordered: phase → task → decisions → agent context |
 
 ### How It Works

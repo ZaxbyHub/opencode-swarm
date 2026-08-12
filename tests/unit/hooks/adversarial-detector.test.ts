@@ -290,7 +290,7 @@ describe('adversarial-detector hook', () => {
 		it('does not invent an unconfigured mega-prefixed target', () => {
 			const config = makeConfig();
 			expect(resolveAgentModel('mega_coder', config)).toBe(
-				DEFAULT_MODELS.default,
+				DEFAULT_MODELS.coder,
 			);
 			expect(resolveAgentModel('mega_reviewer', config)).toBe(
 				DEFAULT_MODELS.reviewer,
@@ -300,7 +300,7 @@ describe('adversarial-detector hook', () => {
 		it('does not invent an unconfigured local-prefixed target', () => {
 			const config = makeConfig();
 			expect(resolveAgentModel('local_coder', config)).toBe(
-				DEFAULT_MODELS.default,
+				DEFAULT_MODELS.coder,
 			);
 			expect(resolveAgentModel('local_reviewer', config)).toBe(
 				DEFAULT_MODELS.reviewer,
@@ -369,7 +369,7 @@ describe('adversarial-detector hook', () => {
 
 			expect(resolveAgentModel('fast_coder', config)).toBe('fast/model');
 			expect(resolveAgentModel('slow_coder', config)).toBe('slow/model');
-			expect(resolveAgentModel('coder', config)).toBe(DEFAULT_MODELS.default);
+			expect(resolveAgentModel('coder', config)).toBe(DEFAULT_MODELS.coder);
 		});
 
 		it('returns DEFAULT_MODELS.default for unknown agent', () => {

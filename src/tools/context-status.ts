@@ -16,7 +16,11 @@ import type { ToolContext } from '@opencode-ai/plugin';
 import { loadPluginConfig } from '../config';
 import { extractModelInfo, resolveModelLimit } from '../hooks/model-limits';
 import { estimateTokens } from '../hooks/utils';
-import { swarmState } from '../state';
+import {
+	getLiveContextModelIdentity,
+	getLiveContextWindow,
+	swarmState,
+} from '../state';
 import { createSwarmTool } from './create-tool';
 
 /**
@@ -108,6 +112,8 @@ export const _internals: {
  * @param warnThreshold - Usage ratio that triggers 'warn' state (default 0.7)
  * @param criticalThreshold - Usage ratio that triggers 'critical' state (default 0.9)
  * @param modelLimitsConfig - Model-specific limit overrides from config
+ * @param liveContextLimit - Live `model.limit.context` recorded for the session
+ *   by the system.transform hook; `undefined` when none has been seen yet
  * @returns Context status with token usage, limit, and threshold state
  */
 function computeContextHeadroom(
@@ -115,12 +121,26 @@ function computeContextHeadroom(
 	warnThreshold = 0.7,
 	criticalThreshold = 0.9,
 	modelLimitsConfig: Record<string, number> = {},
+	liveContextLimit?: unknown,
+	modelIdentity?: { modelID?: string; providerID?: string },
 ): ContextStatusResult {
-	// Extract model and provider from the most recent assistant message
-	const { modelID, providerID } = extractModelInfo(messages);
+	// The current live identity outranks historical assistant metadata during a
+	// first-turn handoff. Direct callers that do not have session state retain
+	// the original extraction behavior.
+	const { modelID, providerID } = modelIdentity ?? extractModelInfo(messages);
 
-	// Resolve the model's context limit (falls back to 128000 when unknown)
-	const modelLimit = resolveModelLimit(modelID, providerID, modelLimitsConfig);
+	// Resolve the model's context limit through the single derivation
+	// (src/config/context-window.ts): explicit `model_limits` entry → the live
+	// window the host reported for this session → the static fallback table →
+	// DEFAULT_MODEL_CONTEXT_TOKENS. This tool must agree with the live
+	// context-budget hook; reporting headroom against a different denominator
+	// than the one that actually prunes messages is worse than not reporting it.
+	const modelLimit = resolveModelLimit(
+		modelID,
+		providerID,
+		modelLimitsConfig,
+		liveContextLimit,
+	);
 
 	// Calculate total token usage across all text parts (mirrors context-budget.ts:94-106)
 	let totalTokens = 0;
@@ -199,11 +219,19 @@ export const context_status: ReturnType<typeof createSwarmTool> =
 				}
 			}
 
+			const { modelID, providerID } =
+				getLiveContextModelIdentity(ctx?.sessionID) ??
+				extractModelInfo(messages);
 			const headroom = computeContextHeadroom(
 				messages,
 				warnThreshold,
 				criticalThreshold,
 				modelLimitsConfig,
+				// Same live window the context-budget hook enforces against.
+				// `ctx.sessionID` is the tool-side key; `undefined` before the first
+				// system.transform of the session.
+				getLiveContextWindow(ctx?.sessionID, { modelID, providerID }),
+				{ modelID, providerID },
 			);
 
 			return JSON.stringify(headroom, null, 2);

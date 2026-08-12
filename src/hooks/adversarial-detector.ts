@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import type { PluginConfig } from '../config';
 import { resolveRegisteredAgentModel } from '../config/agent-model';
 import { DEFAULT_MODELS } from '../config/constants';
+import { stripKnownSwarmPrefix } from '../config/schema';
 import { boundedBunHash, coarseObjectDiscriminator } from '../utils/arg-hash';
 import { stableCanonicalStringify } from '../utils/stable-stringify';
 
@@ -14,8 +15,14 @@ export function resolveAgentModel(
 	agentName: string,
 	config: PluginConfig,
 ): string {
+	const baseAgentName = stripKnownSwarmPrefix(agentName).toLowerCase();
+	const roleDefault = Object.hasOwn(DEFAULT_MODELS, baseAgentName)
+		? DEFAULT_MODELS[baseAgentName]
+		: undefined;
 	return (
-		resolveRegisteredAgentModel(config, agentName) ?? DEFAULT_MODELS.default
+		resolveRegisteredAgentModel(config, agentName) ??
+		roleDefault ??
+		DEFAULT_MODELS.default
 	);
 }
 

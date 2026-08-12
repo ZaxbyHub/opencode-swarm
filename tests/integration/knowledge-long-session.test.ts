@@ -2,9 +2,9 @@
  * Integration test: knowledge injection through long session simulation.
  * Exercises the REAL hook path via createKnowledgeInjectorHook.
  *
- * Note: The hook internally calls getRunMemorySummary() which uses
- * validateDirectory() that rejects absolute paths. To work around this,
- * we create temp directories as relative paths under the project root.
+ * Uses absolute system-temp directories, matching production. (It previously
+ * used relative in-repo paths to dodge getRunMemorySummary's validateDirectory()
+ * absolute-path rejection; that defect is fixed.)
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
@@ -20,6 +20,7 @@ import type {
 // message. Fixtures set swarmState.activeAgent and stamp a consistent
 // sessionID on every message.
 import { swarmState } from '../../src/state';
+import { canonicalMkdtemp } from '../helpers/tmpdir.js';
 
 const SESSION_ID = 'long-session';
 
@@ -106,16 +107,14 @@ const config: KnowledgeConfig = {
 // ---------------------------------------------------------------------------
 
 /**
- * Creates a relative temp directory under the project root (tmp/).
- * We must use a relative path because getRunMemorySummary's
- * validateDirectory() rejects absolute paths.
+ * Absolute temp directory outside the repo — the production shape. This used to
+ * create a RELATIVE dir under the project root because getRunMemorySummary's
+ * validateDirectory() rejected absolute paths; that defect is fixed (it now uses
+ * validateProjectDirectory), so the workaround is gone and AGENTS.md invariant 7
+ * (the system temp root, never a hardcoded or in-repo path) is honoured again.
  */
-function createRelativeTempDir(): string {
-	const baseDir = 'tmp';
-	if (!fs.existsSync(baseDir)) {
-		fs.mkdirSync(baseDir, { recursive: true });
-	}
-	return fs.mkdtempSync(path.join(baseDir, 'ki-test-'));
+function createTempDir(): string {
+	return canonicalMkdtemp('ki-test-');
 }
 
 function createMessages(
@@ -152,7 +151,7 @@ describe('Knowledge injection long session integration', () => {
 	let tempDir: string;
 
 	beforeEach(() => {
-		tempDir = createRelativeTempDir();
+		tempDir = createTempDir();
 		const swarmDir = path.join(tempDir, '.swarm');
 		fs.mkdirSync(swarmDir, { recursive: true });
 		fs.writeFileSync(path.join(swarmDir, 'plan.json'), PLAN_JSON);

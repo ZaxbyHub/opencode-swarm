@@ -307,14 +307,45 @@ export const ScoringConfigSchema = z.object({
 
 export type ScoringConfig = z.infer<typeof ScoringConfigSchema>;
 
+/**
+ * LAST-RESORT context-budget denominator (tokens), used only when nothing
+ * better is available — rung 6 of the resolution order.
+ *
+ * DEFINED in `./context-window.ts` and re-exported here for the existing
+ * importers. It cannot live in this file: `context-window.ts` is loaded
+ * transitively by every context-budget consumer, and several test files replace
+ * `src/config/schema` with a non-spreading `mock.module` factory, so an import
+ * edge from `context-window.ts` into this module would make Bun throw
+ * `SyntaxError: Export named 'DEFAULT_MODEL_CONTEXT_TOKENS' not found` at
+ * import time. See the constant's own doc comment for the full history.
+ *
+ * A hardcoded denominator is wrong for any model whose window is not 128k. The
+ * budget denominator is derived from the live `model.limit.context` the host
+ * hands to `experimental.chat.system.transform`; this constant survives only as
+ * the no-information floor.
+ */
+export { DEFAULT_MODEL_CONTEXT_TOKENS } from './context-window';
+
 // Context budget configuration
 export const ContextBudgetConfigSchema = z.object({
 	enabled: z.boolean().default(true),
 	warn_threshold: z.number().min(0).max(1).default(0.7),
 	critical_threshold: z.number().min(0).max(1).default(0.9),
-	model_limits: z
-		.record(z.string(), z.number().min(1000))
-		.default({ default: 128000 }),
+	/**
+	 * User-authored context-window overrides, keyed by `<providerID>/<modelID>`,
+	 * `<modelID>`, or `default`.
+	 *
+	 * Defaults to `{}`, NOT `{ default: DEFAULT_MODEL_CONTEXT_TOKENS }`. An
+	 * explicit entry here outranks the live `model.limit.context` (rungs 1–3 vs
+	 * rung 4 in `src/config/context-window.ts`) because a user writing one is
+	 * asking for a smaller *working* budget than the physical window. A
+	 * zod-injected default is not user intent — with it present, every user who
+	 * had a `context_budget` block at all would have had a phantom 128 000
+	 * silently outrank their model's real window. Every reader already treats an
+	 * absent key as "no opinion", so `{}` is numerically identical to the old
+	 * default for anyone who never set one.
+	 */
+	model_limits: z.record(z.string(), z.number().min(1000)).default({}),
 	max_injection_tokens: z.number().min(100).max(50000).default(4000),
 	/** Unified ceiling (tokens) for combined system-enhancer + knowledge-injector injection per turn. FR-002. Opt-in: only activates when explicitly configured. */
 	unified_injection_tokens: z.number().min(100).max(50000).optional(),

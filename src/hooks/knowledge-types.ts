@@ -634,6 +634,7 @@ export type KnowledgeApplicationResult =
 	| 'acknowledged'
 	| 'applied'
 	| 'ignored'
+	| 'contradicted'
 	| 'violated';
 
 /** One line of .swarm/knowledge-application.jsonl. */

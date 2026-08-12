@@ -36,12 +36,17 @@ import {
 import { log } from '../utils/index.js';
 import { withTimeout } from '../utils/timeout.js';
 import { removeWorktree } from '../worktree/core';
-import { cleanupOrphanedBranches } from '../worktree/merge';
+import {
+	cleanupOrphanedBranches,
+	scanRegisteredWorktreeLiveness,
+} from '../worktree/merge';
 import { scanWorktreeMergeFailuresForRecovery } from './delegation-gate/worktree-merge-status';
 import { scanBackgroundWorktreeOwnershipTagsForRecovery } from './delegation-gate/worktree-ownership-tag';
 import {
+	removeWorktreeProvisioningOwner,
 	scanWorktreeProvisioningOwnersForRecovery,
 	WORKTREE_LIFECYCLE_LOCK_FILE,
+	WORKTREE_PROVISIONING_OWNER_LEASE_MS,
 } from './delegation-gate/worktree-provisioning-owner';
 
 const INIT_ORPHAN_RECOVERY_TIMEOUT_MS = 10_000;
@@ -84,6 +89,8 @@ export const _internals: {
 	scanDelegationFallbacksForRecovery: typeof scanDelegationFallbacksForRecovery;
 	scanWorktreeMergeFailuresForRecovery: typeof scanWorktreeMergeFailuresForRecovery;
 	scanWorktreeProvisioningOwnersForRecovery: typeof scanWorktreeProvisioningOwnersForRecovery;
+	scanRegisteredWorktreeLiveness: typeof scanRegisteredWorktreeLiveness;
+	removeWorktreeProvisioningOwner: typeof removeWorktreeProvisioningOwner;
 } = {
 	rmSync: fs.rmSync,
 	removeWorktree,
@@ -95,6 +102,8 @@ export const _internals: {
 	scanDelegationFallbacksForRecovery,
 	scanWorktreeMergeFailuresForRecovery,
 	scanWorktreeProvisioningOwnersForRecovery,
+	scanRegisteredWorktreeLiveness,
+	removeWorktreeProvisioningOwner,
 };
 
 export interface InitOrphanRecoveryResult {
@@ -413,7 +422,57 @@ export async function runInitOrphanRecovery(
 				`worktree provisioning ownership state is uncertain; destructive orphan cleanup skipped: ${provisioningOwnerScan.reason}`,
 			);
 		}
+		const registeredWorktrees =
+			provisioningOwnerScan.owners.length === 0
+				? { status: 'ok' as const, liveBranches: [] }
+				: await withTimeout(
+						_internals.scanRegisteredWorktreeLiveness(directory),
+						OWNERSHIP_TAG_SCAN_TIMEOUT_MS,
+						new Error(
+							'registered worktree liveness scan exceeded its bounded init budget',
+						),
+					);
+		if (registeredWorktrees.status === 'uncertain') {
+			throw new Error(
+				`registered worktree liveness is uncertain; destructive orphan cleanup skipped: ${registeredWorktrees.reason}`,
+			);
+		}
+		const liveBranches = new Set(registeredWorktrees.liveBranches);
+		const now = Date.now();
 		for (const owner of provisioningOwnerScan.owners) {
+			const leaseIsLive =
+				now - owner.createdAt <= WORKTREE_PROVISIONING_OWNER_LEASE_MS;
+			const sessionIds = new Set([
+				owner.parentSessionId,
+				owner.worktreeSessionId,
+			]);
+			const branchIsLive =
+				owner.schemaVersion === 2
+					? [...sessionIds].some(
+							(sessionId) =>
+								liveBranches.has(`swarm/lane/${sessionId}/${owner.taskId}`) ||
+								liveBranches.has(`swarm-lane/${sessionId}/${owner.taskId}`),
+						)
+					: [...liveBranches].some((branch) => {
+							const segments = branch.split('/');
+							const sessionId =
+								segments[0] === 'swarm' && segments.length >= 4
+									? segments[2]
+									: segments[0] === 'swarm-lane' && segments.length >= 3
+										? segments[1]
+										: undefined;
+							return sessionId !== undefined && sessionIds.has(sessionId);
+						});
+			if (!leaseIsLive && !branchIsLive) {
+				if (
+					!_internals.removeWorktreeProvisioningOwner(directory, owner.callID)
+				) {
+					throw new Error(
+						`expired worktree provisioning owner ${owner.callID} could not be removed; destructive orphan cleanup skipped`,
+					);
+				}
+				continue;
+			}
 			if (!activeSessionIds.includes(owner.worktreeSessionId)) {
 				activeSessionIds.push(owner.worktreeSessionId);
 			}
@@ -591,7 +650,9 @@ export async function runInitOrphanRecovery(
 
 		// Step 2: Clean up orphaned branches (remaining after worktree removal)
 		const cleanupResult = await withTimeout(
-			cleanupOrphanedBranches(directory, activeSessionIds),
+			cleanupOrphanedBranches(directory, activeSessionIds, {
+				preserveUnmerged: true,
+			}),
 			INIT_ORPHAN_RECOVERY_TIMEOUT_MS,
 			new Error(
 				`runInitOrphanRecovery exceeded ${INIT_ORPHAN_RECOVERY_TIMEOUT_MS}ms budget during branch cleanup; continuing without orphan reclamation`,

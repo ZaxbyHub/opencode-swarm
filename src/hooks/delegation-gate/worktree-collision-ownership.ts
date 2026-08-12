@@ -1,3 +1,4 @@
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
 	type BackgroundDelegationRecord,
@@ -7,7 +8,17 @@ import {
 } from '../../background/pending-delegations';
 import { scanWorktreeMergeFailuresForRecovery } from './worktree-merge-status';
 import { scanBackgroundWorktreeOwnershipTagsForRecovery } from './worktree-ownership-tag';
-import { scanWorktreeProvisioningOwnersForRecovery } from './worktree-provisioning-owner';
+import {
+	removeWorktreeProvisioningOwner,
+	scanWorktreeProvisioningOwnersForRecovery,
+	WORKTREE_PROVISIONING_OWNER_LEASE_MS,
+} from './worktree-provisioning-owner';
+
+/** File-operation seam for deterministic fail-closed recovery tests. */
+export const _internals = {
+	statSync: fs.statSync,
+	removeWorktreeProvisioningOwner,
+};
 
 export interface StandardWorktreeCollisionIdentity {
 	directory: string;
@@ -112,18 +123,49 @@ export async function inspectStandardWorktreeCollisionOwnership(
 		identity.directory,
 	);
 	if (provisioning.status === 'uncertain') return provisioning;
+	const now = Date.now();
 	for (const owner of provisioning.owners) {
 		const sameSession =
 			owner.parentSessionId === identity.parentSessionId ||
 			owner.worktreeSessionId === identity.parentSessionId;
 		if (!sameSession) continue;
 		if (owner.schemaVersion === 1 || owner.taskId === identity.taskId) {
+			const leaseIsLive =
+				now - owner.createdAt <= WORKTREE_PROVISIONING_OWNER_LEASE_MS;
+			if (!leaseIsLive) {
+				try {
+					_internals.statSync(identity.worktreePath);
+				} catch (error) {
+					const code = (error as NodeJS.ErrnoException).code;
+					if (code !== 'ENOENT' && code !== 'ENOTDIR') {
+						return {
+							status: 'uncertain',
+							reason: `expired provisioning owner ${owner.callID} lane liveness is unreadable: ${
+								error instanceof Error ? error.message : String(error)
+							}`,
+						};
+					}
+					if (
+						!_internals.removeWorktreeProvisioningOwner(
+							identity.directory,
+							owner.callID,
+						)
+					) {
+						return {
+							status: 'uncertain',
+							reason: `expired provisioning owner ${owner.callID} could not be removed`,
+						};
+					}
+					continue;
+				}
+			}
 			return {
 				status: 'protected',
 				ownerKind: 'provisioning',
 				lifecycle: 'active',
-				reason:
-					owner.schemaVersion === 1
+				reason: !leaseIsLive
+					? `provisioning owner ${owner.callID} lease expired, but its exact lane path still exists`
+					: owner.schemaVersion === 1
 						? `legacy provisioning owner ${owner.callID} cannot disprove ownership of this same-session lane`
 						: `provisioning owner ${owner.callID} is active for task ${identity.taskId}`,
 			};

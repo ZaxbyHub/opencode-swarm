@@ -31,10 +31,12 @@ import { tryAcquireLock } from '../parallel/file-locks.js';
 import { _internals as stateInternals } from '../state.js';
 import { telemetry } from '../telemetry';
 import { sleep } from '../utils/bun-compat';
+import { teardownEphemeralSession } from '../utils/ephemeral-session-teardown';
 import { advanceInlineFallback } from '../utils/inline-fallback-advancer';
 import * as logger from '../utils/logger';
 import type { ModelOverride } from '../utils/model-dispatch-fallback';
 import { isTransientProviderError } from '../utils/provider-error-classification';
+import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
 import {
 	type ParsedCriticResponse,
 	parseCriticResponseFields,
@@ -280,6 +282,7 @@ export async function writeFullAutoOversightEvidence(
 			path.posix.join('evidence', String(phase), fileName),
 		);
 		fs.writeFileSync(filePath, `${JSON.stringify(event, null, 2)}\n`, 'utf-8');
+		invalidateCachedArtifact(filePath);
 		return filePath;
 	} catch (error) {
 		const msg = error instanceof Error ? error.message : String(error);
@@ -388,7 +391,8 @@ export async function dispatchFullAutoOversight(
 		if (ephemeralSessionId) {
 			const id = ephemeralSessionId;
 			ephemeralSessionId = undefined;
-			client.session.delete({ path: { id } }).catch(() => {});
+			// #2123: teardown awaits a graceful abort (flush) before delete.
+			void teardownEphemeralSession(client.session, id);
 		}
 	};
 
@@ -456,7 +460,7 @@ export async function dispatchFullAutoOversight(
 		if (ephemeralSessionId) {
 			const staleId = ephemeralSessionId;
 			ephemeralSessionId = undefined;
-			client.session.delete({ path: { id: staleId } }).catch(() => {});
+			void teardownEphemeralSession(client.session, staleId);
 		}
 
 		let lastError: unknown;

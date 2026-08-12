@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
@@ -12,14 +12,21 @@ import {
 	updateCoderSettlement,
 	writeDelegationFallback,
 } from '../../../src/background/pending-delegations';
-import { inspectStandardWorktreeCollisionOwnership } from '../../../src/hooks/delegation-gate/worktree-collision-ownership';
+import {
+	inspectStandardWorktreeCollisionOwnership,
+	_internals as ownershipInternals,
+} from '../../../src/hooks/delegation-gate/worktree-collision-ownership';
 import {
 	initDurableStatusPath,
 	_internals as mergeStatusInternals,
 	recordWorktreeMergeFailure,
 } from '../../../src/hooks/delegation-gate/worktree-merge-status';
-import { recordWorktreeProvisioningOwner } from '../../../src/hooks/delegation-gate/worktree-provisioning-owner';
+import {
+	recordWorktreeProvisioningOwner,
+	WORKTREE_PROVISIONING_OWNER_LEASE_MS,
+} from '../../../src/hooks/delegation-gate/worktree-provisioning-owner';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
+import { withFrozenClockAsync } from '../../helpers/test-clock';
 
 function git(directory: string, args: string[]): string {
 	const result = spawnSync('git', ['-C', directory, ...args], {
@@ -40,6 +47,8 @@ describe('durable standard-worktree collision ownership', () => {
 	let cleanup: () => void;
 	const parentSessionId = 'parent-1';
 	const taskId = '1.1';
+	const realStatSync = ownershipInternals.statSync;
+	const realRemoveOwner = ownershipInternals.removeWorktreeProvisioningOwner;
 
 	beforeEach(() => {
 		({ dir: directory, cleanup } = createSafeTestDir('swarm-collision-owner-'));
@@ -47,6 +56,8 @@ describe('durable standard-worktree collision ownership', () => {
 	});
 
 	afterEach(() => {
+		ownershipInternals.statSync = realStatSync;
+		ownershipInternals.removeWorktreeProvisioningOwner = realRemoveOwner;
 		mergeStatusInternals.resetForTest();
 		cleanup();
 	});
@@ -59,6 +70,23 @@ describe('durable standard-worktree collision ownership', () => {
 			branchName: `swarm/lane/${parentSessionId}/${taskId}`,
 			worktreePath: path.join(directory, '.swarm-worktrees', taskId),
 		};
+	}
+
+	function rewriteOwnerCreatedAt(callID: string, createdAt: number): string {
+		const digest = createHash('sha256').update(callID).digest('hex');
+		const absolutePath = path.join(
+			directory,
+			'.swarm',
+			'worktree-provisioning-owners',
+			`${digest}.json`,
+		);
+		const owner = JSON.parse(fs.readFileSync(absolutePath, 'utf8')) as Record<
+			string,
+			unknown
+		>;
+		owner.createdAt = createdAt;
+		fs.writeFileSync(absolutePath, `${JSON.stringify(owner)}\n`);
+		return absolutePath;
 	}
 
 	function pendingInput(correlationId: string): RecordPendingInput {
@@ -186,6 +214,150 @@ describe('durable standard-worktree collision ownership', () => {
 			status: 'protected',
 			ownerKind: 'provisioning',
 			lifecycle: 'active',
+		});
+	});
+
+	test('releases an expired same-task marker only when the exact lane path is missing', async () => {
+		await withFrozenClockAsync(
+			async () => {
+				const callID = 'expired-missing';
+				recordWorktreeProvisioningOwner(directory, {
+					callID,
+					parentSessionId,
+					worktreeSessionId: parentSessionId,
+					taskId,
+				});
+				const absolutePath = rewriteOwnerCreatedAt(
+					callID,
+					Date.now() - WORKTREE_PROVISIONING_OWNER_LEASE_MS - 1,
+				);
+
+				expect(
+					await inspectStandardWorktreeCollisionOwnership(identity()),
+				).toEqual({
+					status: 'unowned',
+				});
+				expect(fs.existsSync(absolutePath)).toBe(false);
+			},
+			{ fixedNow: 1_000_000 },
+		);
+	});
+
+	test('keeps an expired marker protected while the exact lane path exists', async () => {
+		await withFrozenClockAsync(
+			async () => {
+				const callID = 'expired-live-path';
+				recordWorktreeProvisioningOwner(directory, {
+					callID,
+					parentSessionId,
+					worktreeSessionId: parentSessionId,
+					taskId,
+				});
+				rewriteOwnerCreatedAt(
+					callID,
+					Date.now() - WORKTREE_PROVISIONING_OWNER_LEASE_MS - 1,
+				);
+				fs.mkdirSync(identity().worktreePath, { recursive: true });
+
+				expect(
+					await inspectStandardWorktreeCollisionOwnership(identity()),
+				).toMatchObject({
+					status: 'protected',
+					ownerKind: 'provisioning',
+					lifecycle: 'active',
+				});
+			},
+			{ fixedNow: 1_000_000 },
+		);
+	});
+
+	test('treats a future-dated marker as a live lease', async () => {
+		await withFrozenClockAsync(
+			async () => {
+				const callID = 'future-marker';
+				recordWorktreeProvisioningOwner(directory, {
+					callID,
+					parentSessionId,
+					worktreeSessionId: parentSessionId,
+					taskId,
+				});
+				rewriteOwnerCreatedAt(callID, Date.now() + 60_000);
+
+				expect(
+					await inspectStandardWorktreeCollisionOwnership(identity()),
+				).toMatchObject({ status: 'protected', ownerKind: 'provisioning' });
+			},
+			{ fixedNow: 1_000_000 },
+		);
+	});
+
+	test.each([
+		{
+			name: 'same session but different v2 task',
+			parentSessionId,
+			worktreeSessionId: parentSessionId,
+			taskId: '2.1',
+		},
+		{
+			name: 'different session with the same task',
+			parentSessionId: 'other-parent',
+			worktreeSessionId: 'other-parent',
+			taskId,
+		},
+	])('does not claim a $name marker', async (marker) => {
+		recordWorktreeProvisioningOwner(directory, {
+			callID: marker.name,
+			parentSessionId: marker.parentSessionId,
+			worktreeSessionId: marker.worktreeSessionId,
+			taskId: marker.taskId,
+		});
+		expect(await inspectStandardWorktreeCollisionOwnership(identity())).toEqual(
+			{
+				status: 'unowned',
+			},
+		);
+	});
+
+	test('fails closed when expired-marker path liveness cannot be read', async () => {
+		const callID = 'stat-denied';
+		recordWorktreeProvisioningOwner(directory, {
+			callID,
+			parentSessionId,
+			worktreeSessionId: parentSessionId,
+			taskId,
+		});
+		rewriteOwnerCreatedAt(callID, 1);
+		ownershipInternals.statSync = mock(() => {
+			throw Object.assign(new Error('denied'), { code: 'EACCES' });
+		}) as never;
+
+		expect(
+			await inspectStandardWorktreeCollisionOwnership(identity()),
+		).toMatchObject({
+			status: 'uncertain',
+			reason: expect.stringContaining('liveness is unreadable'),
+		});
+	});
+
+	test('fails closed when an expired missing-path marker cannot be removed', async () => {
+		const callID = 'remove-denied';
+		recordWorktreeProvisioningOwner(directory, {
+			callID,
+			parentSessionId,
+			worktreeSessionId: parentSessionId,
+			taskId,
+		});
+		rewriteOwnerCreatedAt(callID, 1);
+		ownershipInternals.statSync = mock(() => {
+			throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+		}) as never;
+		ownershipInternals.removeWorktreeProvisioningOwner = mock(() => false);
+
+		expect(
+			await inspectStandardWorktreeCollisionOwnership(identity()),
+		).toMatchObject({
+			status: 'uncertain',
+			reason: expect.stringContaining('could not be removed'),
 		});
 	});
 

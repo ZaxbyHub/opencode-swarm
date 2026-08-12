@@ -67,6 +67,7 @@ import {
 import { swarmState } from '../state.js';
 import { bunWrite } from '../utils/bun-compat';
 import * as logger from '../utils/logger';
+import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
 import type {
 	ComplianceObservation,
 	CuratorConfig,
@@ -855,6 +856,15 @@ async function writeCuratorSummaryState(
 ): Promise<void> {
 	if (!state.summary) return;
 	await bunWrite(filePath, JSON.stringify(state.summary, null, 2));
+	// Only after a SUCCESSFUL write (`bunWrite` rejects on failure, so an
+	// unreachable statement here is the desired behaviour). `curator-summary.json`
+	// is read through the cached reader — `readCuratorSummaryState` below,
+	// src/hooks/curator-postmortem.ts and src/commands/curate.ts:102 — and this
+	// writer is the commit half of `transactCuratorSummary`, a read-modify-write
+	// that runs repeatedly within one session. The cache's stat stamp
+	// (mtime+ctime+size) cannot distinguish a same-size rewrite landing inside one
+	// filesystem timestamp tick (issue #1729).
+	invalidateCachedArtifact(filePath);
 }
 
 async function transactCuratorSummary<T>(
@@ -1745,6 +1755,7 @@ export async function runCuratorPhase(
 					findingsPath,
 					JSON.stringify({ findings: knowledgeApplicationFindings }, null, 2),
 				);
+				invalidateCachedArtifact(findingsPath);
 			} catch (err) {
 				logger.warn(
 					`[curator] failed to persist application findings: ${err instanceof Error ? err.message : String(err)}`,

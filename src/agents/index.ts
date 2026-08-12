@@ -6,6 +6,7 @@ import {
 	type PluginConfig,
 	type SwarmConfig,
 } from '../config';
+import { splitEmbeddedAgentVariant } from '../config/agent-model';
 import {
 	AGENT_TOOL_MAP,
 	ALL_AGENT_NAMES,
@@ -23,6 +24,7 @@ import {
 	advisoryWarn,
 } from '../services/warning-buffer.js';
 import { log } from '../utils/logger';
+import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
 import { type AgentDefinition, createArchitectAgent } from './architect';
 import { createCoderAgent } from './coder';
 import {
@@ -280,24 +282,6 @@ function getTemperatureOverride(
 }
 
 /**
- * Known reasoning-effort variant identifiers that OpenCode supports as a
- * third path segment in `provider/model/variant` notation.
- *
- * ONLY these short tokens are treated as embedded variants during auto-split.
- * Any other third segment (e.g. "qwen3.6-35b-a3b" in
- * "lmstudio/qwen/qwen3.6-35b-a3b") is part of the model path and must NOT
- * be stripped.
- */
-const KNOWN_VARIANT_VALUES = new Set([
-	'low',
-	'medium',
-	'high',
-	'max',
-	'xhigh',
-	'thinking',
-]);
-
-/**
  * Get variant (reasoning-effort) override for an agent.
  *
  * OpenCode reads the agent's reasoning effort from a top-level `variant` field
@@ -353,13 +337,12 @@ function applyOverrides(
 	// "lmstudio/qwen/qwen3.6-35b-a3b" are left intact because "qwen3.6-35b-a3b"
 	// is not a known variant token — stripping it would produce a wrong model
 	// path and raise ProviderModelNotFoundError.
-	const modelSegments = agent.config.model?.split('/') ?? [];
-	const lastSegment = modelSegments[modelSegments.length - 1] ?? '';
-	const hasEmbeddedVariant =
-		modelSegments.length >= 3 && KNOWN_VARIANT_VALUES.has(lastSegment);
-	if (hasEmbeddedVariant) {
-		const autoVariant = lastSegment;
-		const cleanedModel = modelSegments.slice(0, -1).join('/');
+	const embeddedModel = agent.config.model
+		? splitEmbeddedAgentVariant(agent.config.model)
+		: undefined;
+	if (embeddedModel?.variant) {
+		const autoVariant = embeddedModel.variant;
+		const cleanedModel = embeddedModel.model;
 		const effectiveVariant = variantOverride ?? autoVariant;
 		if (!quiet) {
 			advisoryWarn(
@@ -1427,6 +1410,7 @@ export function getAgentConfigs(
 		const sid = sessionId ?? `init-${Date.now()}`;
 		const evidenceDir = path.join(directory, '.swarm', 'evidence');
 		const filename = `agent-tools-${sid}.json`;
+		const snapshotPath = path.join(evidenceDir, filename);
 		const snapshotData = JSON.stringify(
 			{
 				sessionId: sid,
@@ -1437,7 +1421,10 @@ export function getAgentConfigs(
 			2,
 		);
 		void mkdir(evidenceDir, { recursive: true })
-			.then(() => writeFile(path.join(evidenceDir, filename), snapshotData))
+			.then(() => writeFile(snapshotPath, snapshotData))
+			.then(() => {
+				invalidateCachedArtifact(snapshotPath);
+			})
 			.catch(() => {});
 	}
 

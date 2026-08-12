@@ -16,6 +16,7 @@ import {
 } from '../session/snapshot-writer';
 import { swarmState } from '../state';
 import { bunWrite } from '../utils/bun-compat';
+import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
 
 const HANDOFF_SOURCE_SESSION_PREFIX =
 	'<!-- opencode-swarm-handoff-source-session:';
@@ -62,6 +63,13 @@ export async function handleHandoffCommand(
 			}
 			throw renameErr;
 		}
+		// Only after a SUCCESSFUL rename: `handoff.md` is read through the cached
+		// reader (`readSwarmFileAsync(directory, 'handoff.md')` at
+		// src/hooks/system-enhancer.ts:1021,1882 and
+		// src/services/context-budget-service.ts), and the cache's stat stamp
+		// (mtime+ctime+size) cannot distinguish a same-size rewrite landing inside
+		// one filesystem timestamp tick (issue #1729).
+		invalidateCachedArtifact(resolvedPath);
 
 		// Build continuation prompt from structured data
 		const continuationPrompt = formatContinuationPrompt(handoffData);

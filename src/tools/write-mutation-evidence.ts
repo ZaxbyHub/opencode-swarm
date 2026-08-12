@@ -17,6 +17,7 @@ import {
 	VERDICT_SET_4,
 } from '../evidence/normalize-verdict';
 import { validateSwarmPath } from '../hooks/utils';
+import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
 import { createSwarmTool } from './create-tool';
 
 /**
@@ -172,6 +173,7 @@ export async function executeWriteMutationEvidence(
 			'utf-8',
 		);
 		await fs.promises.rename(tempPath, validatedPath);
+		invalidateCachedArtifact(validatedPath);
 
 		return JSON.stringify(
 			{

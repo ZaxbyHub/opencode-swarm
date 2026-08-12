@@ -268,7 +268,19 @@ export function createRoleFilterSystemHook(
 			const filtered = filterByRole(entries, targetRole, undefined, {
 				filterTaggedSystem: true,
 			});
-			output.system = filtered.map(({ content }) => content);
+			// MUST mutate in place (issue #1619). The OpenCode host invokes each
+			// hook as `M(input, output)`, discards the return value, and afterwards
+			// reads its OWN local array (`LLMRequestPrep.prepare`), so
+			// `output.system = …` is a rebind the host never observes and the
+			// filtering would silently never happen. Enforced by
+			// tests/unit/hooks/chat-transform-rebind-guard.test.ts.
+			const kept = filtered.map(({ content }) => content);
+			output.system.length = 0;
+			// Loop rather than `push(...kept)`: the injected-fragment count is
+			// unbounded and spreading it can exceed the engine's argument limit.
+			for (const content of kept) {
+				output.system.push(content);
+			}
 		},
 	};
 }

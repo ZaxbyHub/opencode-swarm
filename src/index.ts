@@ -28,8 +28,8 @@ import {
 	loadPluginConfigWithMetaAsync,
 } from './config';
 import {
-	resolveConfiguredAgentModel,
 	resolveRegisteredAgentModel,
+	resolveRuntimeAgentModel,
 } from './config/agent-model.js';
 import { syncBundledProjectSkillsIfMissingAsync } from './config/bundled-skills.js';
 import {
@@ -67,7 +67,7 @@ import { createEvaluationModelDispatcher } from './evaluation/model-dispatcher.j
 import { tickAndMaybeDispatchCadence } from './full-auto/cadence.js';
 import {
 	composeHandlers,
-	consolidateSystemMessages,
+	consolidateSystemMessagesInPlace,
 	createAgentActivityHooks,
 	createCompactionCustomizerHook,
 	createContextBudgetHandler,
@@ -944,7 +944,12 @@ async function initializeOpenCodeSwarm(
 		ctx.directory,
 	);
 	const compactionHook = createCompactionCustomizerHook(config, ctx.directory);
-	const contextBudgetHandler = createContextBudgetHandler(config);
+	const resolveIncomingAgentModel = (agentName: string): string | undefined =>
+		resolveRuntimeAgentModel(config, agents, agentName);
+	const contextBudgetHandler = createContextBudgetHandler(
+		config,
+		resolveIncomingAgentModel,
+	);
 	const evaluationModelDispatcher = createEvaluationModelDispatcher(ctx.client);
 	const reviewModelDispatcher = createReviewModelDispatcher(ctx.client);
 	const findingValidationScheduler = createFindingValidationScheduler();
@@ -1094,7 +1099,7 @@ async function initializeOpenCodeSwarm(
 		guardrailsConfig,
 		authorityConfig,
 		worktreeBaseDirOverrides,
-		(agentName) => resolveConfiguredAgentModel(config, agentName),
+		resolveIncomingAgentModel,
 	);
 	const durableBackgroundAdvisoryMessagesTransform = async (
 		input: Record<string, never>,
@@ -1189,7 +1194,29 @@ async function initializeOpenCodeSwarm(
 					guardrailsSnapshot.lastProviderRecoveryFingerprint;
 				session.loopWarningPending = guardrailsSnapshot.loopWarningPending;
 			}
-			output.messages = messagesBefore;
+			// Restore IN PLACE (issue #1619). Rebinding `output.messages` here
+			// only redirected the *later* handlers in the composed chain — the
+			// host keeps its own reference to the array we were handed, so the
+			// half-inserted advisories from the failed attempt still reached the
+			// model while downstream hooks operated on the discarded clone.
+			if (Array.isArray(output.messages) && messagesBefore) {
+				output.messages.length = 0;
+				// Loop rather than `push(...messagesBefore)`: chat history length is
+				// unbounded and spreading it can exceed the argument limit.
+				for (const message of messagesBefore) {
+					output.messages.push(message);
+				}
+			} else {
+				// `output.messages` is not an array we can mutate in place (absent, or
+				// replaced by a non-host caller), so there is nothing to restore into.
+				// Fall back to the pre-#1619 assignment rather than skipping the
+				// rollback: the host ALWAYS supplies an array, so this branch is
+				// unreachable in production and reachable only from tests and non-host
+				// callers — where the assignment is the only thing that restores the
+				// pre-attempt value. Allowlisted in
+				// tests/unit/hooks/chat-transform-rebind-guard.test.ts.
+				output.messages = messagesBefore;
+			}
 			await backgroundCompletionObserver.releaseAdvisories(
 				mctx.sessionID,
 				prepared,
@@ -2503,7 +2530,8 @@ async function initializeOpenCodeSwarm(
 				memoryLifecycleHooks.messagesTransform,
 				knowledgeInjectorHook, // v6.17 knowledge injection
 				// v2: scan latest architect-authored message for KNOWLEDGE_APPLIED
-				// / KNOWLEDGE_IGNORED / KNOWLEDGE_VIOLATED markers and record
+				// / KNOWLEDGE_IGNORED / KNOWLEDGE_CONTRADICTED /
+				// KNOWLEDGE_VIOLATED markers and record
 				// each via the dedup-aware path. Best-effort; never throws.
 				(_input: unknown, output: unknown): Promise<void> => {
 					try {
@@ -2547,14 +2575,21 @@ async function initializeOpenCodeSwarm(
 				// Final transformation: consolidate multiple system messages into one.
 				// consolidateSystemMessages handles both the production `{info,parts}`
 				// shape and the flat `{role,content}` shape (issue #1778 H1).
+				//
+				// MUST mutate `output.messages` IN PLACE (issue #1619). The host
+				// discards this hook's return value and afterwards reads its own local
+				// message array, so the previous
+				// `output.messages = consolidateSystemMessages(output.messages)` was a
+				// rebind that never reached the model. See
+				// `consolidateSystemMessagesInPlace`.
 				(
 					_input: unknown,
 					output: {
 						messages?: import('./hooks/messages-transform.js').Message[];
 					},
 				): Promise<void> => {
-					if (output.messages) {
-						output.messages = consolidateSystemMessages(output.messages);
+					if (Array.isArray(output.messages)) {
+						consolidateSystemMessagesInPlace(output.messages);
 					}
 					if (process.env.DEBUG_SWARM)
 						// biome-ignore lint/suspicious/noConsole: DEBUG_SWARM diagnostic output — only fires when explicitly enabled
@@ -2625,12 +2660,18 @@ async function initializeOpenCodeSwarm(
 						: undefined,
 				swarmCommandSystemRuleHook,
 				roleFilterSystemHook['experimental.chat.system.transform'],
-				(_input: unknown, output: { system?: string[] }): Promise<void> => {
-					if (Array.isArray(output.system) && output.system.length > 1) {
-						output.system = [output.system.join('\n\n')];
-					}
-					return Promise.resolve();
-				},
+				// NOTE (#1619): there is deliberately no "collapse output.system to a
+				// single entry" handler here. One existed (added by c8ad147e for
+				// Qwen3.6/Gemma compatibility, #628) but it REBOUND `output.system`,
+				// and the host discards a hook's return value and afterwards reads its
+				// own local array — so a rebind is invisible and the collapse never
+				// took effect. Converting it to an in-place collapse is also wrong:
+				// the host marks prompt-cache breakpoints on the first two system
+				// messages, so folding the stable base prompt and the per-request
+				// swarm injections into one message moves the breakpoint behind
+				// varying content and defeats caching on every request. See
+				// docs/engineering-invariants.md § "v6.85.1 — Multiple system messages
+				// crashing local models".
 			].filter(Boolean) as Array<
 				(input: unknown, output: unknown) => Promise<void>
 			>),

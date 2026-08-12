@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import { getGlobalEventBus } from '../background/event-bus.js';
 import { readEffectiveSpecSync } from '../sdd/effective-spec';
 import * as logger from '../utils/logger';
+import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache.js';
 import type {
 	CriticDriftResult,
 	CuratorConfig,
@@ -85,12 +86,21 @@ export async function writeDriftReport(
 	const swarmDir = path.dirname(filePath);
 	await fs.promises.mkdir(swarmDir, { recursive: true });
 
+	// A same-phase re-run rewrites this exact path, and every field except the
+	// free-form strings is fixed-width (the ISO `timestamp` in particular), so the
+	// rewrite is routinely byte-identical in LENGTH. The swarm-artifact cache
+	// validates freshness by stat stamp alone (mtimeMs + ctimeMs + size), so
+	// within one filesystem timestamp tick `readPriorDriftReports` above would
+	// serve the pre-write record — issue #1729's stale-read hazard. Drop the
+	// entry immediately after a SUCCESSFUL write (never on the throw path, where
+	// the on-disk bytes are whatever the failed write left behind).
 	try {
 		await fs.promises.writeFile(
 			filePath,
 			JSON.stringify(report, null, 2),
 			'utf-8',
 		);
+		invalidateCachedArtifact(filePath);
 	} catch (err) {
 		throw new Error(
 			`[curator-drift] Failed to write drift report to ${filePath}: ${String(err)}`,

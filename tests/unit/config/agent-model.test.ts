@@ -1,10 +1,13 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { getAgentConfigs } from '../../../src/agents';
 import {
 	parseAgentModel,
 	resolveConfiguredAgentModel,
 	resolveRegisteredAgentModel,
+	resolveRuntimeAgentModel,
+	splitEmbeddedAgentVariant,
 } from '../../../src/config/agent-model';
 import { DEFAULT_MODELS } from '../../../src/config/constants';
 import type { PluginConfig } from '../../../src/config/schema';
@@ -94,6 +97,82 @@ describe('agent-model exact target resolution', () => {
 			DEFAULT_MODELS.reviewer,
 		);
 	});
+
+	test('resolves actual subagent models while preserving primary UI selection', () => {
+		const legacy = config({
+			agents: { coder: { model: 'runtime/fallback' } },
+		});
+		const registered = {
+			coder: { mode: 'subagent', model: 'factory/coder' },
+			curator_init: { mode: 'subagent', model: 'factory/explorer' },
+			architect: { mode: 'primary', model: 'factory/architect' },
+		};
+
+		expect(resolveRuntimeAgentModel(legacy, registered, 'Coder')).toBe(
+			'runtime/fallback',
+		);
+		expect(resolveRuntimeAgentModel(legacy, registered, 'curator_init')).toBe(
+			'factory/explorer',
+		);
+		expect(
+			resolveRuntimeAgentModel(legacy, registered, 'architect'),
+		).toBeUndefined();
+		expect(
+			resolveRuntimeAgentModel(legacy, registered, 'unknown_coder'),
+		).toBeUndefined();
+	});
+
+	test('reads a runtime fallback mutation before the registered factory model', () => {
+		const legacy = config({ agents: { coder: { model: 'primary/model' } } });
+		const registered = {
+			coder: { mode: 'subagent', model: 'primary/model' },
+		};
+
+		expect(resolveRuntimeAgentModel(legacy, registered, 'coder')).toBe(
+			'primary/model',
+		);
+		legacy.agents!.coder!.model = 'fallback/model';
+		expect(resolveRuntimeAgentModel(legacy, registered, 'coder')).toBe(
+			'fallback/model',
+		);
+	});
+
+	test('normalizes supported embedded variants to the registered model identity', () => {
+		const legacy = config({
+			agents: { coder: { model: 'provider/model/high' } },
+		});
+		const registered = {
+			coder: { mode: 'subagent', model: 'provider/model' },
+		};
+
+		expect(resolveConfiguredAgentModel(legacy, 'coder')).toBe('provider/model');
+		expect(resolveRuntimeAgentModel(legacy, registered, 'coder')).toBe(
+			'provider/model',
+		);
+		expect(
+			parseAgentModel(resolveRuntimeAgentModel(legacy, registered, 'coder')!),
+		).toEqual({
+			providerID: 'provider',
+			modelID: 'model',
+		});
+		expect(splitEmbeddedAgentVariant('lmstudio/qwen/model-path')).toEqual({
+			model: 'lmstudio/qwen/model-path',
+		});
+	});
+
+	test('uses factory defaults for real subagents but not real primary agents', () => {
+		const legacy = config();
+		const registered = getAgentConfigs(legacy);
+
+		expect(registered.coder.mode).toBe('subagent');
+		expect(resolveRuntimeAgentModel(legacy, registered, 'coder')).toBe(
+			registered.coder.model,
+		);
+		expect(registered.architect.mode).toBe('primary');
+		expect(
+			resolveRuntimeAgentModel(legacy, registered, 'architect'),
+		).toBeUndefined();
+	});
 });
 
 describe('parseAgentModel', () => {
@@ -145,10 +224,10 @@ describe('agent-model production wiring', () => {
 		expect(contextSource).toContain("from '../config/agent-model'");
 		expect(adversarialSource).toContain("from '../config/agent-model'");
 		expect(indexSource).toContain(
-			'(agentName) => resolveConfiguredAgentModel(config, agentName)',
+			'resolveRuntimeAgentModel(config, agents, agentName)',
 		);
 		expect(guardrailsTransformSource).toContain(
-			'ctx.resolveAgentModel?.(activeAgent)',
+			'ctx.resolveAgentModel?.(targetAgent)',
 		);
 		expect(indexSource).not.toContain('function resolveDelegationModel');
 		expect(indexSource).not.toContain('function inferSwarmID');

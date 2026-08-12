@@ -32,6 +32,7 @@ import {
 import { getAgentSession, swarmState } from '../../state';
 import { telemetry } from '../../telemetry';
 import { pushAdvisory } from '../../utils/advisory-queue';
+import { teardownEphemeralSession } from '../../utils/ephemeral-session-teardown';
 import {
 	dispatchWithModelFallback,
 	type ModelOverride,
@@ -40,6 +41,7 @@ import {
 	isQuotaError,
 	isTransientProviderError,
 } from '../../utils/provider-error-classification';
+import { invalidateCachedArtifact } from '../../utils/swarm-artifact-cache';
 import {
 	type LaneEvidence,
 	listLaneEvidence,
@@ -425,6 +427,7 @@ async function writeCriticEvidence(
 	try {
 		await fs.writeFile(tempPath, content, 'utf-8');
 		await fs.rename(tempPath, evidencePath);
+		invalidateCachedArtifact(evidencePath);
 	} catch (error) {
 		// Clean up temp file on failure
 		try {
@@ -623,7 +626,8 @@ Be specific and evidence-based. When safety concerns are present, err on the sid
 	} finally {
 		if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
 		promptController.abort();
-		client.session.delete({ path: { id: sessionId } }).catch(() => {});
+		// #2123: await a graceful abort (flush) before the cascade-delete.
+		await teardownEphemeralSession(client.session, sessionId);
 	}
 }
 

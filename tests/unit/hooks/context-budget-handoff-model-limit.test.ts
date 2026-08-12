@@ -221,13 +221,26 @@ describe('context-budget target model handoff enforcement (#2122)', () => {
 		await handler({}, output);
 
 		expectUnmasked(output);
+		expect(output.messages[4].parts[0].text).toContain('[CONTEXT WARNING');
 	});
 
-	test('preserves assistant metadata when target has no explicit model', async () => {
+	test('enforces the registered default for a subagent without an explicit model', async () => {
+		// Previous code returned undefined for this exact target and reused the
+		// outgoing assistant's large limit, reproducing #2122 for default models.
 		const handler = createContextBudgetHandler(
 			makeConfig({ agents: { architect: { model: 'provider/model-large' } } }),
+			(agentName) => (agentName === 'coder' ? DEFAULT_MODELS.coder : undefined),
 		);
 		const output = budgetOutput('coder', 'session-unconfigured');
+
+		await handler({}, output);
+
+		expectMasked(output);
+	});
+
+	test('preserves assistant metadata for a primary target controlled by the UI', async () => {
+		const handler = createContextBudgetHandler(makeConfig(), () => undefined);
+		const output = budgetOutput('coder', 'session-primary');
 
 		await handler({}, output);
 

@@ -18,6 +18,11 @@ import {
 	OPENCODE_NATIVE_AGENTS,
 	TURBO_MODE_BANNER,
 } from '../config/constants';
+import {
+	readModelContextLimit,
+	readModelIdentity,
+	resolveContextWindowTokens,
+} from '../config/context-window';
 import type { RetrospectiveEvidence } from '../config/evidence-schema';
 import type { RuntimePlan } from '../config/plan-schema';
 import {
@@ -35,6 +40,7 @@ import {
 	hasActiveFullAuto,
 	hasActiveLeanTurbo,
 	hasActiveTurboMode,
+	setLiveContextWindow,
 	swarmState,
 } from '../state';
 import {
@@ -204,6 +210,7 @@ function maybeAppendSpecDriftAdvisory(
 
 import {
 	analyzeDecisionDrift,
+	DEFAULT_CONTEXT_BUDGET_CONFIG,
 	formatBudgetWarning,
 	formatDriftForContext,
 	getContextBudgetReport,
@@ -243,6 +250,7 @@ import {
 	validateActionability,
 	validateLesson,
 } from './knowledge-validator.js';
+import { lookupStaticModelLimit } from './model-limits';
 import {
 	buildRealtimeLearningNudge,
 	getRealtimeLearningToolCallCount,
@@ -692,6 +700,20 @@ export function createSystemEnhancerHook(
 				// unified_injection_tokens ceiling.
 				let actualDemand = 0;
 				let unifiedBudget: number | undefined;
+				// The live context window for THIS turn's model. This hook is the
+				// only one the host hands a `Model` to, so it is also the only
+				// place the authoritative `limit.context` can be captured. Recorded
+				// before the try/catch (all reads below are typeof-guarded and
+				// cannot throw) so the `messages.transform` consumers still see it
+				// when the enhancer takes an early return or throws mid-assembly.
+				const liveModel = _input.model;
+				const liveContextLimit = readModelContextLimit(liveModel);
+				const liveModelID = readModelIdentity(liveModel, 'id');
+				const liveProviderID = readModelIdentity(liveModel, 'providerID');
+				setLiveContextWindow(_input.sessionID, liveContextLimit, {
+					modelID: liveModelID,
+					providerID: liveProviderID,
+				});
 				try {
 					// Skip swarm context injection for native opencode agents (build,
 					// plan, general, explore, compaction, title, summary). These agents
@@ -1658,15 +1680,26 @@ ${sanitizeContextText(scopedHandoff.body)}`;
 
 						// Context budget check - run after all other assembly, architect-only
 						const userConfig = config.context_budget;
-						const defaultConfig: typeof import('../services').DEFAULT_CONTEXT_BUDGET_CONFIG =
-							{
-								enabled: true,
-								budgetTokens: 40000,
-								warningPct: 70,
-								criticalPct: 90,
-								warningMode: 'once',
-								warningIntervalTurns: 20,
-							};
+						// Supplies the non-denominator defaults (thresholds, warning mode).
+						// Its `budgetTokens` is ALWAYS overwritten below — it used to be a
+						// re-declared 40000 literal here while the schema's
+						// model_limits.default was 128000, so a user with NO
+						// context_budget block got a 3.2x smaller denominator than one
+						// with an empty block.
+						const defaultConfig = DEFAULT_CONTEXT_BUDGET_CONFIG;
+						// The denominator is derived, never hardcoded: explicit
+						// `model_limits` entry → live `model.limit.context` → static
+						// table → DEFAULT_MODEL_CONTEXT_TOKENS. Computed for BOTH
+						// branches (config present or absent) so an unconfigured user
+						// still measures against their real model window instead of the
+						// 128k floor. See src/config/context-window.ts.
+						const budgetTokens = resolveContextWindowTokens({
+							userLimits: userConfig?.model_limits,
+							modelID: liveModelID,
+							providerID: liveProviderID,
+							liveContextLimit,
+							fallbackLookup: lookupStaticModelLimit,
+						});
 						// Map schema config to service config format
 						const contextBudgetConfig = userConfig
 							? {
@@ -1680,11 +1713,9 @@ ${sanitizeContextText(scopedHandoff.body)}`;
 									criticalPct: userConfig.critical_threshold
 										? userConfig.critical_threshold * 100
 										: defaultConfig.criticalPct,
-									budgetTokens:
-										userConfig.model_limits?.default ??
-										defaultConfig.budgetTokens,
+									budgetTokens,
 								}
-							: defaultConfig;
+							: { ...defaultConfig, budgetTokens };
 
 						if (contextBudgetConfig.enabled !== false) {
 							const assembledSystemPrompt = output.system.join('\n');
@@ -1694,28 +1725,39 @@ ${sanitizeContextText(scopedHandoff.body)}`;
 								contextBudgetConfig,
 							);
 							swarmState.lastBudgetPct = budgetReport.budgetPct;
+							// Paired with the pct on the SAME statement sequence: a
+							// percentage alone cannot be turned back into a token
+							// estimate, and `/swarm status` renders both.
+							swarmState.lastBudgetTokens = contextBudgetConfig.budgetTokens;
 							telemetry.budgetUpdated(
 								_input.sessionID ?? 'unknown',
 								budgetReport.budgetPct,
 								'architect',
 							);
-							const budgetWarning = await formatBudgetWarning(
-								budgetReport,
-								directory,
-								contextBudgetConfig,
-							);
+							// Resolve the architect check BEFORE calling formatBudgetWarning.
+							// formatBudgetWarning has a side effect: under warningMode
+							// 'once'/'interval' it PERSISTS suppression state to
+							// .swarm/session/budget-state.json. Calling it on a non-architect
+							// turn and discarding the result burned the one-shot warning, so
+							// the architect — the only agent that can act on it — could never
+							// see it. (Latent until the budget check started running at all;
+							// see validateProjectDirectory, issue #1619 follow-up.)
+							const sessionId_cb = _input.sessionID;
+							const activeAgent_cb = sessionId_cb
+								? swarmState.activeAgent.get(sessionId_cb)
+								: null;
+							const isArchitect_cb =
+								!activeAgent_cb ||
+								stripKnownSwarmPrefix(activeAgent_cb) === 'architect';
+							const budgetWarning = isArchitect_cb
+								? await formatBudgetWarning(
+										budgetReport,
+										directory,
+										contextBudgetConfig,
+									)
+								: null;
 							if (budgetWarning) {
-								// Check if architect
-								const sessionId_cb = _input.sessionID;
-								const activeAgent_cb = sessionId_cb
-									? swarmState.activeAgent.get(sessionId_cb)
-									: null;
-								const isArchitect_cb =
-									!activeAgent_cb ||
-									stripKnownSwarmPrefix(activeAgent_cb) === 'architect';
-								if (isArchitect_cb) {
-									output.system.push(`[FOR: architect]\n${budgetWarning}`);
-								}
+								output.system.push(`[FOR: architect]\n${budgetWarning}`);
 							}
 						}
 
@@ -2553,14 +2595,16 @@ ${sanitizeContextText(scopedHandoff.body)}`;
 
 					// Context budget check - run after all other assembly, architect-only
 					const userConfig_b = config.context_budget;
-					const defaultConfig_b = {
-						enabled: true,
-						budgetTokens: 40000,
-						warningPct: 70,
-						criticalPct: 90,
-						warningMode: 'once' as const,
-						warningIntervalTurns: 20,
-					};
+					// Shared default — see the note on the Path A copy above.
+					const defaultConfig_b = DEFAULT_CONTEXT_BUDGET_CONFIG;
+					// Same single derivation as Path A — see the note there.
+					const budgetTokens_b = resolveContextWindowTokens({
+						userLimits: userConfig_b?.model_limits,
+						modelID: liveModelID,
+						providerID: liveProviderID,
+						liveContextLimit,
+						fallbackLookup: lookupStaticModelLimit,
+					});
 					// Map schema config to service config format
 					const contextBudgetConfig_b = userConfig_b
 						? {
@@ -2574,11 +2618,9 @@ ${sanitizeContextText(scopedHandoff.body)}`;
 								criticalPct: userConfig_b.critical_threshold
 									? userConfig_b.critical_threshold * 100
 									: defaultConfig_b.criticalPct,
-								budgetTokens:
-									userConfig_b.model_limits?.default ??
-									defaultConfig_b.budgetTokens,
+								budgetTokens: budgetTokens_b,
 							}
-						: defaultConfig_b;
+						: { ...defaultConfig_b, budgetTokens: budgetTokens_b };
 
 					if (contextBudgetConfig_b.enabled !== false) {
 						const assembledSystemPrompt_b = output.system.join('\n');
@@ -2588,28 +2630,32 @@ ${sanitizeContextText(scopedHandoff.body)}`;
 							contextBudgetConfig_b,
 						);
 						swarmState.lastBudgetPct = budgetReport_b.budgetPct;
+						// Paired with the pct — see the Path A note.
+						swarmState.lastBudgetTokens = contextBudgetConfig_b.budgetTokens;
 						telemetry.budgetUpdated(
 							_input.sessionID ?? 'unknown',
 							budgetReport_b.budgetPct,
 							'architect',
 						);
-						const budgetWarning_b = await formatBudgetWarning(
-							budgetReport_b,
-							directory,
-							contextBudgetConfig_b,
-						);
+						// Architect check BEFORE the call — see the note on the Path A
+						// copy above: formatBudgetWarning persists suppression state, so
+						// calling it for a non-architect burns the one-shot warning.
+						const sessionId_cb_b = _input.sessionID;
+						const activeAgent_cb_b = sessionId_cb_b
+							? swarmState.activeAgent.get(sessionId_cb_b)
+							: null;
+						const isArchitect_cb_b =
+							!activeAgent_cb_b ||
+							stripKnownSwarmPrefix(activeAgent_cb_b) === 'architect';
+						const budgetWarning_b = isArchitect_cb_b
+							? await formatBudgetWarning(
+									budgetReport_b,
+									directory,
+									contextBudgetConfig_b,
+								)
+							: null;
 						if (budgetWarning_b) {
-							// Check if architect
-							const sessionId_cb_b = _input.sessionID;
-							const activeAgent_cb_b = sessionId_cb_b
-								? swarmState.activeAgent.get(sessionId_cb_b)
-								: null;
-							const isArchitect_cb_b =
-								!activeAgent_cb_b ||
-								stripKnownSwarmPrefix(activeAgent_cb_b) === 'architect';
-							if (isArchitect_cb_b) {
-								output.system.push(`[FOR: architect]\n${budgetWarning_b}`);
-							}
+							output.system.push(`[FOR: architect]\n${budgetWarning_b}`);
 						}
 					}
 

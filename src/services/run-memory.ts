@@ -9,7 +9,8 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import { sanitizeContextText } from '../hooks/context-sanitizer.js';
 import { readSwarmFileAsync, validateSwarmPath } from '../hooks/utils';
-import { validateDirectory } from '../utils/path-security';
+import { warn } from '../utils/logger.js';
+import { validateWorkspaceRoot } from '../utils/path-security';
 
 /**
  * Represents a single task execution outcome entry
@@ -23,7 +24,28 @@ export interface RunMemoryEntry {
 	taskFingerprint: string;
 	/** Which agent executed the task (e.g. "coder") */
 	agent: string;
-	/** Outcome of the task execution */
+	/**
+	 * Outcome of the task execution.
+	 *
+	 * PRODUCER COVERAGE (keep this note accurate — directive 2, no unwired code):
+	 * - `pass` / `fail` are produced today by TWO call sites, deliberately split:
+	 *   1. `plan/manager.updateTaskStatus` records the TERMINAL outcome after
+	 *      savePlan succeeds — `completed` -> pass, `blocked` -> fail. It lives
+	 *      there, not in the `update_task_status` tool, because the tool is only
+	 *      one of two writers: the council APPROVE fast-path completes tasks via
+	 *      `advanceTaskStateAndPersist` (src/state.ts) with no tool call.
+	 *   2. `update_task_status` records a `fail` when a council or QA gate
+	 *      BLOCKS a completion. That is a refusal, not a status transition, so
+	 *      it never reaches updateTaskStatus and must be recorded at the tool.
+	 * - `retry` has a CONSUMER (`summarizeTask` below treats it like `fail`) but
+	 *   no producer. It is deliberately retained for the guardrails
+	 *   transient-retry path (AGENTS.md invariant 9), which owns retry
+	 *   accounting and is out of scope here. Do not add a `retry` producer from
+	 *   the task-status path — a gate block is a real failure, not a retry.
+	 * - `skip` has neither producer nor consumer (`summarizeTask` ignores it).
+	 *   It is retained only so pre-existing `.swarm/run-memory.jsonl` lines
+	 *   written by hand or by older builds still parse.
+	 */
 	outcome: 'pass' | 'fail' | 'retry' | 'skip';
 	/** 1-indexed attempt number */
 	attemptNumber: number;
@@ -74,7 +96,7 @@ export async function recordOutcome(
 	directory: string,
 	entry: RunMemoryEntry,
 ): Promise<void> {
-	validateDirectory(directory);
+	validateWorkspaceRoot(directory);
 	const resolvedPath = validateSwarmPath(directory, RUN_MEMORY_FILENAME);
 	const line = `${JSON.stringify(entry)}\n`;
 
@@ -93,7 +115,7 @@ export async function getTaskHistory(
 	directory: string,
 	taskId: string,
 ): Promise<RunMemoryEntry[]> {
-	validateDirectory(directory);
+	validateWorkspaceRoot(directory);
 	const content = await readSwarmFileAsync(directory, RUN_MEMORY_FILENAME);
 	if (!content) {
 		return [];
@@ -118,36 +140,95 @@ export async function getTaskHistory(
 }
 
 /**
- * Get all failure and retry entries
+ * Input for {@link recordTaskAttempt}. `attemptNumber` and `taskFingerprint`
+ * are derived, not supplied — callers know the task, not its history.
+ */
+export interface TaskAttemptInput {
+	/** Plan.json task ID (e.g. "3.2") */
+	taskId: string;
+	/** Which agent executed the task (e.g. "coder") */
+	agent: string;
+	/** Outcome of this attempt */
+	outcome: RunMemoryEntry['outcome'];
+	/** One-line failure reason — required in practice for fail/retry to be useful */
+	failureReason?: string;
+	/** Plan `files_touched` for the task; feeds the fingerprint */
+	fileTargets?: string[];
+	/** Wall-clock time in milliseconds */
+	durationMs?: number;
+}
+
+/**
+ * Record one task attempt, deriving the attempt number from prior history.
+ *
+ * This is the single production producer for `.swarm/run-memory.jsonl`, which
+ * `getRunMemorySummary` reads back for cross-turn failure-pattern avoidance.
+ *
+ * Advisory-only and fail-open by contract: run memory is context enrichment,
+ * never a correctness gate, so a write failure must never surface to — or
+ * abort — the caller's primary operation (a task status update). The work is
+ * still awaited rather than fire-and-forget, so the entry is durable before the
+ * caller returns and a test can observe it.
  *
  * @param directory - The swarm workspace directory
- * @returns Array of fail/retry entries
+ * @param input - The attempt to record
  */
-export async function getFailures(
+export async function recordTaskAttempt(
 	directory: string,
-): Promise<RunMemoryEntry[]> {
-	validateDirectory(directory);
-	const content = await readSwarmFileAsync(directory, RUN_MEMORY_FILENAME);
-	if (!content) {
-		return [];
-	}
-
-	const entries: RunMemoryEntry[] = [];
-	const lines = content.split('\n');
-
-	for (const line of lines) {
-		if (!line.trim()) continue;
+	input: TaskAttemptInput,
+): Promise<void> {
+	try {
+		// Attempt number is 1-indexed over every prior entry for this task,
+		// regardless of outcome: attempt 2 follows attempt 1 whether attempt 1
+		// failed a gate or passed. Read history here rather than inside
+		// recordOutcome so recordOutcome stays a true append-only write.
+		//
+		// The read has its OWN catch: a transient history-read failure must not
+		// discard the entry we were asked to record. Losing a real gate failure
+		// (fail-closed on the data) is worse than an imprecise attempt number.
+		let history: RunMemoryEntry[] = [];
 		try {
-			const entry = JSON.parse(line) as RunMemoryEntry;
-			if (entry.outcome === 'fail' || entry.outcome === 'retry') {
-				entries.push(entry);
-			}
-		} catch {
-			// Skip malformed lines
+			history = await _internals.getTaskHistory(directory, input.taskId);
+		} catch (err) {
+			warn(
+				`[run-memory] history read for task ${input.taskId} failed; recording with attemptNumber 1: ${
+					err instanceof Error ? err.message : String(err)
+				}`,
+			);
 		}
+		const entry: RunMemoryEntry = {
+			timestamp: new Date().toISOString(),
+			taskId: input.taskId,
+			taskFingerprint: _internals.generateTaskFingerprint(
+				input.taskId,
+				input.fileTargets ?? [],
+			),
+			agent: input.agent,
+			outcome: input.outcome,
+			attemptNumber: history.length + 1,
+		};
+		if (input.failureReason) {
+			entry.failureReason = input.failureReason;
+		}
+		if (input.fileTargets && input.fileTargets.length > 0) {
+			entry.filesModified = input.fileTargets;
+		}
+		if (typeof input.durationMs === 'number') {
+			entry.durationMs = input.durationMs;
+		}
+		await _internals.recordOutcome(directory, entry);
+	} catch (err) {
+		// Advisory-only — never block the caller on run-memory bookkeeping.
+		// But never swallow SILENTLY either: this feature previously produced
+		// nothing for its entire life with no signal anywhere. Debug-gated so it
+		// stays out of chat-visible streams (invariant 10); the consumer side
+		// logs symmetrically at knowledge-injector.ts.
+		warn(
+			`[run-memory] failed to record ${input.outcome} for task ${input.taskId}: ${
+				err instanceof Error ? err.message : String(err)
+			}`,
+		);
 	}
-
-	return entries;
 }
 
 /**
@@ -174,32 +255,46 @@ function summarizeTask(
 	taskId: string,
 	entries: RunMemoryEntry[],
 ): string | null {
-	// Filter to only fail/retry entries
-	const failures = entries.filter(
-		(e) => e.outcome === 'fail' || e.outcome === 'retry',
-	);
-	const passes = entries.filter((e) => e.outcome === 'pass');
+	// Order by POSITION IN THE LOG, never by timestamp.
+	//
+	// `.swarm/run-memory.jsonl` is append-only, so array order (which is file
+	// order — groupByTaskId preserves it) is the authoritative sequence. The
+	// timestamps are ISO strings with millisecond resolution, and two entries
+	// recorded back-to-back routinely land in the SAME millisecond on a fast
+	// host: a pass followed by a regression then compared equal, and the task
+	// was reported as resolved. That is not hypothetical — it failed the
+	// ubuntu CI shard while passing on slower machines. Positions cannot tie
+	// and are immune to clock skew.
+	let lastFailure: RunMemoryEntry | undefined;
+	let lastFailureIndex = -1;
+	let lastPassIndex = -1;
+	let lastPass: RunMemoryEntry | undefined;
+	let failCount = 0;
+
+	entries.forEach((entry, index) => {
+		if (entry.outcome === 'fail' || entry.outcome === 'retry') {
+			failCount++;
+			lastFailure = entry;
+			lastFailureIndex = index;
+		} else if (entry.outcome === 'pass') {
+			lastPass = entry;
+			lastPassIndex = index;
+		}
+	});
 
 	// Skip tasks with only passes
-	if (failures.length === 0) {
+	if (!lastFailure) {
 		return null;
 	}
 
-	// Find the most recent failure
-	failures.sort(
-		(a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
-	);
-	const lastFailure = failures[0];
+	// The pass only resolves the failure if it actually came AFTER it.
+	// `completed -> blocked` is a permitted transition (the settled guards only
+	// protect `in_progress`), so a task can pass and later regress. Reporting
+	// "Passed on attempt N" for a currently-blocked task would tell the
+	// architect the opposite of the truth.
+	const passResolvesFailure = lastPassIndex > lastFailureIndex;
 
-	// Find the pass that followed (if any)
-	passes.sort(
-		(a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
-	);
-	const lastPass = passes[0];
-
-	const failCount = failures.length;
-
-	if (lastPass) {
+	if (lastPass && passResolvesFailure) {
 		// There's a passing attempt after failures
 		const passAttempt = lastPass.attemptNumber;
 		const failAttempt = lastFailure.attemptNumber;
@@ -221,7 +316,7 @@ function summarizeTask(
 export async function getRunMemorySummary(
 	directory: string,
 ): Promise<string | null> {
-	validateDirectory(directory);
+	validateWorkspaceRoot(directory);
 	const content = await readSwarmFileAsync(directory, RUN_MEMORY_FILENAME);
 	if (!content) {
 		return null;
@@ -305,16 +400,16 @@ export async function getRunMemorySummary(
 export const _internals: {
 	generateTaskFingerprint: typeof generateTaskFingerprint;
 	recordOutcome: typeof recordOutcome;
+	recordTaskAttempt: typeof recordTaskAttempt;
 	getTaskHistory: typeof getTaskHistory;
-	getFailures: typeof getFailures;
 	getRunMemorySummary: typeof getRunMemorySummary;
 	groupByTaskId: typeof groupByTaskId;
 	summarizeTask: typeof summarizeTask;
 } = {
 	generateTaskFingerprint,
 	recordOutcome,
+	recordTaskAttempt,
 	getTaskHistory,
-	getFailures,
 	getRunMemorySummary,
 	groupByTaskId,
 	summarizeTask,

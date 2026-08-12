@@ -1,5 +1,22 @@
 # Changelog
 
+## [7.139.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.139.0...v7.139.1) (2026-08-12)
+
+
+### Bug Fixes
+
+* **hooks:** mutate chat-transform outputs in place and invalidate cached .swarm artifacts ([59c3f76](https://github.com/ZaxbyHub/opencode-swarm/commit/59c3f76f1e4ddfb554bf87134bdd1c347dbfc7ee))
+* **session:** await server-side abort before deleting ephemeral sessions ([#2123](https://github.com/ZaxbyHub/opencode-swarm/issues/2123)) ([9f2ec90](https://github.com/ZaxbyHub/opencode-swarm/commit/9f2ec903b6ef5e6a9da159eda4b532359868ace6))
+* **worktree:** harden isolated coder scope recovery ([cf01f95](https://github.com/ZaxbyHub/opencode-swarm/commit/cf01f9581636711443c956774543450a955c30fe))
+
+## [7.139.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.138.4...v7.139.0) (2026-08-12)
+
+
+### Features
+
+* **run-memory:** record task outcomes so run-memory injection works ([d706ada](https://github.com/ZaxbyHub/opencode-swarm/commit/d706adad7bf72ea2178550f9c7ff3b0b3833baaa))
+* **run-memory:** record task outcomes so run-memory injection works ([ec29c74](https://github.com/ZaxbyHub/opencode-swarm/commit/ec29c74802d3a4039838882617ac5daa07f4448d))
+
 ## [7.138.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.138.3...v7.138.4) (2026-08-12)
 
 

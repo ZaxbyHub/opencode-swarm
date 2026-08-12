@@ -172,7 +172,14 @@ The compaction customizer controls how system messages are compressed. Context c
 
 ### `consolidateSystemMessages`
 
-After all hooks run, `consolidateSystemMessages` collapses multiple `output.system` entries into a single system message. Capsule parts are merged into this consolidated message. For local models (Qwen3.6, Gemma) that require exactly one system message at index 0, this consolidation ensures the capsule content appears in the correct position.
+After all hooks run, `consolidateSystemMessages` merges the `role: 'system'` messages found in `output.messages` into a single message at index 0 and strips any that remain at index > 0. It operates on the **message array**, not on `output.system` — an earlier version of this document claimed the latter, which was never true: the system-transform collapse it described rebound `output.system`, and the OpenCode host discards a hook's return value and reads its own array, so that code never executed (issue #1619; see `docs/engineering-invariants.md` § v6.85.1).
+
+Consequences to be aware of:
+
+- The consolidation is applied **in place** (`consolidateSystemMessagesInPlace`). A rebind is invisible to the host.
+- Any system message injected mid-history — capsule content, knowledge injection, memory recall, guardrail advisories, issue-trace mode directives — is **relocated to index 0** and merged there. Text content survives; its position does not. Three shapes are the exception and are dropped rather than merged: a system message classified as a misclassified tool result (one carrying `tool_call_id`/`name`), one whose `content` is neither a string nor a text-part array, and any non-text part (`file`/`image`) on the first system message, whose `parts` array is replaced by a single merged text part.
+- The guarantee is scoped to the transformed message array. The host prepends its own system entries separately, so the model can still see more than one system message.
+- **A second, undocumented host surface runs the same hook: session compaction.** The `experimental.chat.messages.transform` chain — the one `consolidateSystemMessagesInPlace` is wired into — fires not only on the live chat request but also inside `SessionCompaction.process` (host binary, offset ~100,620,534): `ze = structuredClone(P.head); yield* i.trigger("experimental.chat.messages.transform",{},{messages:ze})`. The host reads `ze` back afterward — `let to = ze.map(Ld).filter(Boolean).join("\n\n")` — so the in-place consolidation applies there too. `Ld` (offset ~100,615,010) renders every non-`user`-role message (including a consolidated `system` message) as `[Assistant]: <text>`. `to` is then **the whole transcript the summarizer sees**, not a prefix ahead of one: the host calls the summarizer with `system: []` and a single synthesized user message whose text is `[<prompt>, "The following is the conversation history:", to].join("\n\n")` (offset ~100,621,010). Net effect: injected system content is merged and moved to the head of the *compaction summary's* transcript, mislabelled `[Assistant]:`, in addition to whatever the live-chat surface does with it.
 
 ## Known Limitations
 

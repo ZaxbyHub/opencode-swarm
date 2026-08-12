@@ -32,6 +32,7 @@ import {
 	mergeInternals,
 	postMergeCleanup,
 	provisionWorktree,
+	pruneStaleWorktreeMetadata,
 	removeWorktree,
 	startupOrphanRecovery,
 } from '../../worktree';
@@ -771,40 +772,69 @@ export async function precreateStandardWorktreeSession(args: {
 				);
 			}
 
-			const preserveResult = await _internals.preserveDirtyWorktreeAtPath(
-				collision.worktreePath,
-				collision.existingBranch,
-				'denied',
-				args.directory,
-				worktreeConfig.worktree_dir,
-			);
-			if (preserveResult.outcome === 'preserve-failed') {
-				hardStopStandardWorktreeLifecycle(
-					args.parentSessionID,
-					`STANDARD_WORKTREE_PRESERVATION_FAILED_ABORT_CLEANUP: pre-provision collision for task ${args.taskId} could not be preserved (${preserveResult.error}). Cleanup and provisioning were blocked.`,
-				);
+			let collisionPathExists = true;
+			try {
+				await fs.stat(collision.worktreePath);
+			} catch (error) {
+				const code = (error as NodeJS.ErrnoException).code;
+				if (code === 'ENOENT' || code === 'ENOTDIR') {
+					collisionPathExists = false;
+				} else {
+					hardStopStandardWorktreeLifecycle(
+						args.parentSessionID,
+						`STANDARD_WORKTREE_COLLISION_PATH_STAT_FAILED: ${
+							error instanceof Error ? error.message : String(error)
+						}. Destructive cleanup and provisioning were blocked.`,
+					);
+				}
 			}
 
-			const removeResult = await _internals.removeWorktree(
-				collision.worktreePath,
-				args.directory,
-				{ force: true, worktreeDir: worktreeConfig.worktree_dir },
-			);
-			if ('error' in removeResult) {
-				hardStopStandardWorktreeLifecycle(
-					args.parentSessionID,
-					`STANDARD_WORKTREE_COLLISION_REMOVE_FAILED: ${removeResult.error}. Provisioning was blocked.`,
+			if (collisionPathExists) {
+				const preserveResult = await _internals.preserveDirtyWorktreeAtPath(
+					collision.worktreePath,
+					collision.existingBranch,
+					'denied',
+					args.directory,
+					worktreeConfig.worktree_dir,
 				);
-			}
-			const cleanupResult = await _internals.postMergeCleanup(
-				args.directory,
-				collision.existingBranch,
-			);
-			if ('error' in cleanupResult) {
-				hardStopStandardWorktreeLifecycle(
-					args.parentSessionID,
-					`STANDARD_WORKTREE_COLLISION_BRANCH_CLEANUP_FAILED: ${cleanupResult.error}. Provisioning was blocked.`,
+				if (preserveResult.outcome === 'preserve-failed') {
+					hardStopStandardWorktreeLifecycle(
+						args.parentSessionID,
+						`STANDARD_WORKTREE_PRESERVATION_FAILED_ABORT_CLEANUP: pre-provision collision for task ${args.taskId} could not be preserved (${preserveResult.error}). Cleanup and provisioning were blocked.`,
+					);
+				}
+
+				const removeResult = await _internals.removeWorktree(
+					collision.worktreePath,
+					args.directory,
+					{ force: true, worktreeDir: worktreeConfig.worktree_dir },
 				);
+				if ('error' in removeResult) {
+					hardStopStandardWorktreeLifecycle(
+						args.parentSessionID,
+						`STANDARD_WORKTREE_COLLISION_REMOVE_FAILED: ${removeResult.error}. Provisioning was blocked.`,
+					);
+				}
+				const cleanupResult = await _internals.postMergeCleanup(
+					args.directory,
+					collision.existingBranch,
+				);
+				if ('error' in cleanupResult) {
+					hardStopStandardWorktreeLifecycle(
+						args.parentSessionID,
+						`STANDARD_WORKTREE_COLLISION_BRANCH_CLEANUP_FAILED: ${cleanupResult.error}. Provisioning was blocked.`,
+					);
+				}
+			} else {
+				const pruneResult = await _internals.pruneStaleWorktreeMetadata(
+					args.directory,
+				);
+				if ('error' in pruneResult) {
+					hardStopStandardWorktreeLifecycle(
+						args.parentSessionID,
+						`STANDARD_WORKTREE_COLLISION_PRUNE_FAILED: ${pruneResult.error}. Provisioning was blocked without deleting the lane branch.`,
+					);
+				}
 			}
 
 			const verification = await _internals.preProvisionCollisionCheck(
@@ -881,6 +911,18 @@ export async function precreateStandardWorktreeSession(args: {
 		);
 		return;
 	}
+
+	const originalPrompt =
+		typeof args.outputArgs.prompt === 'string' ? args.outputArgs.prompt : '';
+	args.outputArgs.prompt = [
+		'<worktree_lane_context>',
+		`authoritative_lane_root: ${JSON.stringify(provisionResult.worktreePath)}`,
+		'All FILE declarations and scope-bound edit/write paths must be workspace-relative to authoritative_lane_root.',
+		'Do not declare project-root absolute paths; resolve and operate inside this lane root.',
+		'</worktree_lane_context>',
+		'',
+		originalPrompt,
+	].join('\n');
 
 	// FR-201 SC-124: Compute and materialize the lane runtime profile.
 	// Profile is computed AFTER provisioning so we have the real worktreePath.
@@ -1975,6 +2017,7 @@ export const _internals = {
 	removeWorktree,
 	attemptMergeBackFromDirty,
 	postMergeCleanup,
+	pruneStaleWorktreeMetadata,
 	/** FR-201: read lane runtime profile from disk for spawn injection. */
 	readLaneEnvFileFromDisk,
 	/** FR-104: exposes serializationStateBySessionID for test setup (SC-111/SC-112/SC-113). */

@@ -13,6 +13,7 @@ import {
 } from '../config/agent-model';
 import { SUMMARIZER_EXEMPT_TOOL_NAMES } from '../config/constants';
 import { stripKnownSwarmPrefix } from '../config/schema';
+import { getLiveContextModelIdentity, getLiveContextWindow } from '../state';
 import { log, warn } from '../utils';
 import {
 	classifyMessages,
@@ -22,7 +23,11 @@ import {
 	MessagePriority,
 	type MessagePriorityType,
 } from './message-priority';
-import { extractModelInfo, resolveModelLimit } from './model-limits';
+import {
+	extractModelInfo,
+	extractSessionId,
+	resolveModelLimit,
+} from './model-limits';
 import { estimateTokens } from './utils';
 
 const MAX_TRACKED_SESSIONS = 256;
@@ -61,7 +66,11 @@ interface MessageWithParts {
  * Injects warnings when context usage exceeds configured thresholds.
  * Only operates on messages for the architect agent.
  */
-export function createContextBudgetHandler(config: PluginConfig) {
+export function createContextBudgetHandler(
+	config: PluginConfig,
+	resolveAgentModel: (agentName: string) => string | undefined = (agentName) =>
+		resolveConfiguredAgentModel(config, agentName),
+) {
 	const enabled = config.context_budget?.enabled !== false;
 
 	if (!enabled) {
@@ -96,33 +105,44 @@ export function createContextBudgetHandler(config: PluginConfig) {
 		// the previous agent and can have a materially larger context window.
 		let agentName: string | undefined;
 		let baseAgent: string | undefined;
-		let sessionID: string | undefined;
 		for (let i = messages.length - 1; i >= 0; i--) {
 			const messageInfo = messages[i]?.info;
 			if (messageInfo?.role === 'user' && messageInfo.agent) {
 				agentName = messageInfo.agent;
 				baseAgent = stripKnownSwarmPrefix(agentName);
-				sessionID =
-					typeof messageInfo.sessionID === 'string' &&
-					messageInfo.sessionID.trim()
-						? messageInfo.sessionID
-						: undefined;
 				break;
 			}
 		}
 
 		const configuredTargetModel = agentName
-			? resolveConfiguredAgentModel(config, agentName)
+			? resolveAgentModel(agentName)
 			: undefined;
 		const targetModelInfo = configuredTargetModel
 			? parseAgentModel(configuredTargetModel)
 			: undefined;
+		const sessionID = extractSessionId(messages);
+		const liveModelInfo = getLiveContextModelIdentity(sessionID);
 		const { modelID, providerID } =
-			targetModelInfo ?? extractModelInfo(messages);
+			targetModelInfo ?? liveModelInfo ?? extractModelInfo(messages);
+		// The live `model.limit.context` recorded by the system.transform hook for
+		// this session. This hook only receives messages — the host hands the
+		// `Model` object to system.transform alone — so the live window has to be
+		// relayed through session state. It matters here more than anywhere else:
+		// below, `ratio >= criticalThreshold` triggers HARD PRUNING, so a
+		// denominator that is ~8x too small (the stale 128000 against a 1M window)
+		// deletes context that never needed deleting. `undefined` on the first
+		// turn of a session, before any system.transform has run for it — that
+		// degrades to the static rungs, i.e. the pre-existing behaviour, never
+		// worse.
+		const liveContextLimit = getLiveContextWindow(sessionID, {
+			modelID,
+			providerID,
+		});
 		const modelLimit = resolveModelLimit(
 			modelID,
 			providerID,
 			modelLimitsConfig,
+			liveContextLimit,
 		);
 
 		// Log on first use of each model/provider combination

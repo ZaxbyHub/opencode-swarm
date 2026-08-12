@@ -14,7 +14,37 @@ export interface ParsedAgentModel {
 	providerID?: string;
 }
 
+type RegisteredAgentModel = {
+	model?: unknown;
+	mode?: unknown;
+};
+
 const CANONICAL_AGENT_NAMES = new Set<string>(ALL_AGENT_NAMES);
+
+const KNOWN_EMBEDDED_VARIANTS = new Set([
+	'low',
+	'medium',
+	'high',
+	'max',
+	'xhigh',
+	'thinking',
+]);
+
+/** Split a supported legacy `provider/model/variant` value like registration does. */
+export function splitEmbeddedAgentVariant(model: string): {
+	model: string;
+	variant?: string;
+} {
+	const segments = model.split('/');
+	const lastSegment = segments[segments.length - 1] ?? '';
+	if (segments.length < 3 || !KNOWN_EMBEDDED_VARIANTS.has(lastSegment)) {
+		return { model };
+	}
+	return {
+		model: segments.slice(0, -1).join('/'),
+		variant: lastSegment,
+	};
+}
 
 function safeGet(
 	entries: Record<string, AgentModelOverride> | undefined,
@@ -84,7 +114,7 @@ export function resolveConfiguredAgentModel(
 	if (typeof configuredModel !== 'string') return undefined;
 
 	const trimmed = configuredModel.trim();
-	return trimmed || undefined;
+	return trimmed ? splitEmbeddedAgentVariant(trimmed).model : undefined;
 }
 
 /** Resolve the registered model for an exact generated agent target. */
@@ -100,6 +130,39 @@ export function resolveRegisteredAgentModel(
 		DEFAULT_MODELS[target.baseAgentName] ??
 		DEFAULT_MODELS.default
 	);
+}
+
+/**
+ * Resolve the model that an exact generated agent will actually receive.
+ *
+ * Primary agents intentionally omit their registered model so OpenCode's UI
+ * controls selection; their live assistant metadata remains authoritative.
+ * Subagents use a runtime-mutated explicit model (including guardrail fallback)
+ * before the factory-resolved registered model, which also preserves inherited
+ * role defaults such as curator -> explorer.
+ */
+export function resolveRuntimeAgentModel(
+	config: PluginConfig,
+	registeredAgents: Record<string, RegisteredAgentModel>,
+	exactAgentName: string,
+): string | undefined {
+	const normalizedTarget = exactAgentName.trim().toLowerCase();
+	if (!normalizedTarget) return undefined;
+
+	const registeredName = Object.keys(registeredAgents).find(
+		(name) => name.toLowerCase() === normalizedTarget,
+	);
+	if (!registeredName) return undefined;
+
+	const registeredAgent = registeredAgents[registeredName];
+	if (registeredAgent?.mode === 'primary') return undefined;
+
+	const configuredModel = resolveConfiguredAgentModel(config, registeredName);
+	if (configuredModel) return configuredModel;
+
+	if (typeof registeredAgent?.model !== 'string') return undefined;
+	const registeredModel = registeredAgent.model.trim();
+	return registeredModel || undefined;
 }
 
 /** Parse model-only or provider/model config values without partial fallback. */
