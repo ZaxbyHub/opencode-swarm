@@ -23,6 +23,7 @@ export const _internals: {
 	getEffectiveGates: typeof getEffectiveGates;
 	computeProfileHash: typeof computeProfileHash;
 	hasAnyProfileWithEnabledGate: typeof hasAnyProfileWithEnabledGate;
+	afterSetGatesRead: (profile: QaGateProfile) => void;
 } = {
 	getProfile,
 	getOrCreateProfile,
@@ -30,6 +31,7 @@ export const _internals: {
 	getEffectiveGates,
 	computeProfileHash,
 	hasAnyProfileWithEnabledGate,
+	afterSetGatesRead: () => {},
 };
 
 /**
@@ -89,6 +91,8 @@ interface QaGateProfileRow {
 	locked_by_snapshot_seq: number | null;
 }
 
+let qaGateProfileSavepointCounter = 0;
+
 function rowToProfile(row: QaGateProfileRow): QaGateProfile {
 	let parsed: Partial<QaGates> = {};
 	try {
@@ -112,12 +116,13 @@ function rowToProfile(row: QaGateProfileRow): QaGateProfile {
 		parsed.phase_council = true;
 		parsed.council_mode = false;
 	}
-	// Filter to known gate keys only — prevents legacy/removed gate fields
-	// (e.g. council_general_review) from leaking into the live gates object.
+	// Filter to known boolean gate keys only — prevents legacy/removed fields
+	// (e.g. council_general_review) and malformed persisted values from leaking
+	// into the live gates object. Invalid values fall back to the safe defaults.
 	const knownKeys = new Set(Object.keys(DEFAULT_QA_GATES));
 	const filteredParsed: Partial<QaGates> = {};
 	for (const key of Object.keys(parsed) as Array<keyof QaGates>) {
-		if (knownKeys.has(key)) {
+		if (knownKeys.has(key) && typeof parsed[key] === 'boolean') {
 			filteredParsed[key] = parsed[key];
 		}
 	}
@@ -187,18 +192,31 @@ export function hasAnyProfileWithEnabledGate(
 
 /**
  * Return the existing profile for `planId`, or create a new one seeded with
- * `DEFAULT_QA_GATES` if none exists. Tolerates races on the UNIQUE index.
+ * `DEFAULT_QA_GATES` plus the caller's initial gate selection if none exists.
+ *
+ * `initialGates` is applied only by the winning INSERT. A caller that loses a
+ * UNIQUE-index race receives the winner's profile unchanged and must still run
+ * `setGates` to apply the normal ratchet rules. This lets the first architect
+ * selection turn default-on gates off without giving a later/concurrent caller
+ * a way to loosen an already-persisted `true` gate.
  */
 export function getOrCreateProfile(
 	directory: string,
 	planId: string,
 	projectType?: string,
+	initialGates: Partial<QaGates> = {},
 ): QaGateProfile {
 	const existing = _internals.getProfile(directory, planId);
 	if (existing) return existing;
 
 	const db = getProjectDb(directory);
-	const gatesJson = JSON.stringify(DEFAULT_QA_GATES);
+	const seededGates: QaGates = { ...DEFAULT_QA_GATES };
+	for (const key of Object.keys(DEFAULT_QA_GATES) as Array<keyof QaGates>) {
+		if (typeof initialGates[key] === 'boolean') {
+			seededGates[key] = initialGates[key];
+		}
+	}
+	const gatesJson = JSON.stringify(seededGates);
 	const insert = db.transaction(() => {
 		db.run(
 			'INSERT INTO qa_gate_profile (plan_id, project_type, gates) VALUES (?, ?, ?)',
@@ -234,45 +252,75 @@ export function setGates(
 	planId: string,
 	gates: Partial<QaGates>,
 ): QaGateProfile {
-	const current = _internals.getProfile(directory, planId);
-	if (!current) {
-		throw new Error(
-			`No QA gate profile found for plan_id=${planId} — call getOrCreateProfile first`,
-		);
-	}
-	if (current.locked_at !== null) {
-		throw new Error(
-			'Cannot modify gates: QA gate profile is locked after critic approval',
-		);
-	}
-
-	const merged: QaGates = { ...current.gates };
-	for (const key of Object.keys(gates) as Array<keyof QaGates>) {
-		const incoming = gates[key];
-		if (incoming === undefined) continue;
-		if (incoming === false && current.gates[key] === true) {
+	const db = getProjectDb(directory);
+	const savepointName = `qa_gate_profile_set_${qaGateProfileSavepointCounter++}`;
+	const startedTransaction = !db.inTransaction;
+	db.run(startedTransaction ? 'BEGIN IMMEDIATE' : `SAVEPOINT ${savepointName}`);
+	try {
+		// Acquire the write lock before reading so concurrent writers cannot
+		// observe the same stale snapshot and later clobber one another.
+		const currentRow = db
+			.query<QaGateProfileRow, [string]>(
+				'SELECT * FROM qa_gate_profile WHERE plan_id = ?',
+			)
+			.get(planId);
+		if (!currentRow) {
 			throw new Error(
-				`Cannot disable gate '${key}': sessions can only ratchet tighter`,
+				`No QA gate profile found for plan_id=${planId} — call getOrCreateProfile first`,
 			);
 		}
-		if (incoming === true) {
-			merged[key] = true;
+
+		const current = rowToProfile(currentRow);
+		if (current.locked_at !== null) {
+			throw new Error(
+				'Cannot modify gates: QA gate profile is locked after critic approval',
+			);
 		}
-	}
+		_internals.afterSetGatesRead(current);
 
-	const db = getProjectDb(directory);
-	db.run('UPDATE qa_gate_profile SET gates = ? WHERE plan_id = ?', [
-		JSON.stringify(merged),
-		planId,
-	]);
+		const merged: QaGates = { ...current.gates };
+		for (const key of Object.keys(gates) as Array<keyof QaGates>) {
+			const incoming = gates[key];
+			if (incoming === undefined) continue;
+			if (incoming === false && current.gates[key] === true) {
+				throw new Error(
+					`Cannot disable gate '${key}': sessions can only ratchet tighter`,
+				);
+			}
+			if (incoming === true) {
+				merged[key] = true;
+			}
+		}
 
-	const updated = _internals.getProfile(directory, planId);
-	if (!updated) {
-		throw new Error(
-			`Failed to re-read QA gate profile after update for plan_id=${planId}`,
-		);
+		db.run('UPDATE qa_gate_profile SET gates = ? WHERE plan_id = ?', [
+			JSON.stringify(merged),
+			planId,
+		]);
+
+		const updatedRow = db
+			.query<QaGateProfileRow, [string]>(
+				'SELECT * FROM qa_gate_profile WHERE plan_id = ?',
+			)
+			.get(planId);
+		if (!updatedRow) {
+			throw new Error(
+				`Failed to re-read QA gate profile after update for plan_id=${planId}`,
+			);
+		}
+
+		db.run(startedTransaction ? 'COMMIT' : `RELEASE ${savepointName}`);
+		return rowToProfile(updatedRow);
+	} catch (err) {
+		try {
+			db.run(startedTransaction ? 'ROLLBACK' : `ROLLBACK TO ${savepointName}`);
+			if (!startedTransaction) {
+				db.run(`RELEASE ${savepointName}`);
+			}
+		} catch {
+			// Ignore rollback cleanup failures; surface the original error below.
+		}
+		throw err;
 	}
-	return updated;
 }
 
 /**
@@ -338,7 +386,8 @@ export function computeProfileHash(profile: QaGateProfile): string {
  * - council_mode — src/state.ts isCouncilGateActive + src/hooks/delegation-gate.ts
  *   (replaces per-task Stage B with full 5-member council via submit_council_verdicts).
  * - sme_enabled — consumed during MODE: BRAINSTORM/SPECIFY architect dialogue.
- * - critic_pre_plan — consumed by MODE: PLAN critic delegation before save_plan.
+ * - critic_pre_plan — src/hooks/delegation-gate.ts (blocks coder delegation
+ *   until plan-critic approval when the effective gate is enabled).
  * - sast_enabled — consumed inside pre_check_batch tool.
  * - hallucination_guard — src/tools/phase-complete.ts Gate 3 (blocks phase_complete
  *   until .swarm/evidence/{phase}/hallucination-guard.json has APPROVED verdict).

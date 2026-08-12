@@ -2,17 +2,19 @@
  * Tool to configure the QA gate profile for the current plan.
  *
  * Architect-only: invoked during the QA GATE SELECTION phase of brainstorm
- * mode (or equivalent). Ratchet-tighter only — cannot disable gates that are
- * already enabled. Rejects all writes once the profile is locked.
+ * mode (or equivalent). The initial selection may override defaults; after a
+ * profile exists, updates are ratchet-tighter and cannot disable enabled gates.
+ * Rejects all writes once the profile is locked.
  *
- * Creates the profile with defaults if missing, then applies the requested
- * partial update.
+ * Creates the profile with defaults plus the initial selection if missing,
+ * then always applies the requested partial update through the normal ratchet.
  */
 
 import type { tool } from '@opencode-ai/plugin';
 import { z } from 'zod';
 import {
 	computeProfileHash,
+	DEFAULT_QA_GATES,
 	getOrCreateProfile,
 	type QaGates,
 	setGates,
@@ -66,27 +68,16 @@ export async function executeSetQaGates(
 	}
 	const planId = derivePlanId(plan);
 
-	// Ensure the profile exists with defaults before applying changes.
-	getOrCreateProfile(directory, planId, args.project_type);
-
 	const partial: Partial<QaGates> = {};
-	for (const key of [
-		'reviewer',
-		'test_engineer',
-		'council_mode',
-		'sme_enabled',
-		'critic_pre_plan',
-		'hallucination_guard',
-		'sast_enabled',
-		'mutation_test',
-		'phase_council',
-		'drift_check',
-		'final_council',
-	] as Array<keyof QaGates>) {
+	for (const key of Object.keys(DEFAULT_QA_GATES) as Array<keyof QaGates>) {
 		if (args[key] !== undefined) partial[key] = args[key] as boolean;
 	}
 
 	try {
+		// The winning INSERT may persist the architect's initial false choices.
+		// Always follow with setGates: if another caller won the race with a true
+		// value, the ordinary ratchet rejects this caller's attempted loosening.
+		getOrCreateProfile(directory, planId, args.project_type, partial);
 		const updated = setGates(directory, planId, partial);
 		return {
 			success: true,
@@ -118,10 +109,10 @@ export async function executeSetQaGates(
 export const set_qa_gates: ReturnType<typeof tool> = createSwarmTool({
 	description:
 		'Configure the QA gate profile for the current plan. Architect-only. ' +
-		'Ratchet-tighter: can enable additional gates but cannot disable gates ' +
-		'that are already enabled. Rejects all writes once the profile is ' +
-		'locked (after critic approval). Creates the profile with defaults if ' +
-		'none exists. plan_id is derived automatically from plan.json.',
+		'The initial selection may override defaults. After creation, updates are ' +
+		'ratchet-tighter: additional gates may be enabled, but enabled gates cannot ' +
+		'be disabled. Rejects all writes once the profile is locked (after critic ' +
+		'approval). plan_id is derived automatically from plan.json.',
 	args: {
 		reviewer: z
 			.boolean()

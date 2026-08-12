@@ -23,6 +23,12 @@ import { ALL_AGENT_NAMES } from '../config/agent-names.js';
 import type { Phase, Plan, Task } from '../config/plan-schema';
 import { isKnownCanonicalRole, stripKnownSwarmPrefix } from '../config/schema';
 import {
+	DEFAULT_QA_GATES,
+	getEffectiveGates,
+	getProfile as getQaGateProfile,
+	type QaGates,
+} from '../db/qa-gate-profile.js';
+import {
 	isMarkdownOnlyDeclaredScope,
 	isMarkdownOnlyTaskChange,
 } from '../gate-evidence-classification.js';
@@ -1342,6 +1348,32 @@ async function assertPlanCriticApprovedForExecution(
 	}
 }
 
+/**
+ * Resolve the effective critic-pre-plan policy for coder execution.
+ *
+ * Missing or unreadable profiles preserve the historical default (`true`). A
+ * persisted `false` is honored, while session overrides can only ratchet it
+ * back to `true` through `getEffectiveGates`.
+ */
+function isPlanCriticRequiredForExecution(
+	directory: string,
+	plan: Plan,
+	sessionOverrides: Partial<QaGates> = {},
+): boolean {
+	try {
+		const profile = getQaGateProfile(directory, derivePlanId(plan));
+		if (!profile) return DEFAULT_QA_GATES.critic_pre_plan;
+		return getEffectiveGates(profile, sessionOverrides).critic_pre_plan;
+	} catch (error) {
+		logger.warn(
+			`[delegation-gate] failed to resolve critic_pre_plan profile; enforcing the gate: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		);
+		return true;
+	}
+}
+
 async function recordPlanCriticApprovalSnapshotIfApplicable(
 	directory: string,
 	input: { sessionID: string; callID: string },
@@ -1406,9 +1438,9 @@ async function recordPlanCriticApprovalSnapshotIfApplicable(
  * When the critic returns APPROVED but the mechanical snapshot recorder
  * ({@link recordPlanCriticApprovalSnapshotIfApplicable}) fails to persist it
  * (verdict-format mismatch, dispatch-signal miss, or a plan.json read race),
- * the gate permanently blocks ALL coder delegations because `critic_pre_plan`
- * defaults to `true` and cannot be disabled (ratchet-tighter). This records a
- * manual `plan_critic_gate` approval snapshot so the gate unblocks, with a
+ * the gate blocks coder delegations when the effective `critic_pre_plan`
+ * policy is enabled. This records a manual `plan_critic_gate` approval snapshot
+ * so the gate unblocks, with a
  * distinct `method: 'manual_override'` audit marker so a human or downstream
  * review can distinguish a manual approval from a mechanical critic approval.
  *
@@ -2935,7 +2967,15 @@ export function createDelegationGateHook(
 		// pending tasks to be provably disjoint.
 		const parallelModeActive =
 			standardWorktreeIsolationActive && scopeAllowsParallel;
-		await assertPlanCriticApprovedForExecution(directory, plan);
+		if (
+			isPlanCriticRequiredForExecution(
+				directory,
+				plan,
+				session.qaGateSessionOverrides ?? {},
+			)
+		) {
+			await assertPlanCriticApprovedForExecution(directory, plan);
+		}
 		const incomingCoderDeclaredFiles = preparedScope.declaredFiles;
 		const correlatedBinding = preparedScope.binding;
 

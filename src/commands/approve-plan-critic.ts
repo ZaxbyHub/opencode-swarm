@@ -5,8 +5,8 @@
  * gate (issue #2012). When the critic returns APPROVED but the mechanical
  * snapshot recorder fails to persist it (verdict-format mismatch, dispatch-
  * signal miss, or a plan.json read race), the gate permanently blocks ALL
- * coder delegations because `critic_pre_plan` defaults to `true` and cannot be
- * disabled. This records a manual `plan_critic_gate` approval snapshot so the
+ * coder delegations when the effective `critic_pre_plan` gate is enabled. This
+ * records a manual `plan_critic_gate` approval snapshot so the
  * gate unblocks, with a distinct `method: 'manual_override'` audit marker.
  *
  * The command is `toolPolicy: 'restricted'` — the agent cannot run it via

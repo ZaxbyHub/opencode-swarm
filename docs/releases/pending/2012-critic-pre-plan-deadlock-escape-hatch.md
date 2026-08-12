@@ -8,8 +8,9 @@ PR #1706). When the critic returned APPROVED but the mechanical snapshot
 recorder failed to persist the approval — because of a verdict-format
 mismatch, a dispatch-signal miss, or a plan.json read race — the gate
 permanently blocked ALL coder delegations. `critic_pre_plan` defaults to
-`true` and is ratchet-tighter (it cannot be disabled via `set_qa_gates`), so
-there was no recovery: re-running the critic produced the same mismatch, and
+`true`; before the initial-selection fix in #2087, it could not be disabled via
+`set_qa_gates`, so there was no recovery: re-running the critic produced the
+same mismatch, and
 the only documented escape was abandoning the session (the reporter's "the
 reset"). This was the same deadlock-pattern class already fixed for the
 PR_REVIEW gate (#1898) and the knowledge gate.

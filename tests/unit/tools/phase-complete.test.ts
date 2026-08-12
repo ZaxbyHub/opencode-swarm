@@ -1294,15 +1294,15 @@ describe('phase_complete tool', () => {
 			recordPhaseAgentDispatch('ctx-session', 'coder');
 			recordPhaseAgentDispatch('ctx-session', 'reviewer');
 			recordPhaseAgentDispatch('ctx-session', 'test_engineer');
-			recordPhaseAgentDispatch('ctx-session', 'docs');
 			writeRetroBundle(tempDir, 1, 'pass');
 
 			const ctx = mockCtx('ctx-session', tempDir);
 			const result = await phase_complete.execute({ phase: 1 }, ctx);
 			const parsed = JSON.parse(result);
 
-			// Should succeed: sessionID resolved from ctx, not from args
-			expect(parsed.success).toBe(true);
+			// The context session's agents resolve; only durable docs proof is absent.
+			expect(parsed.success).toBe(false);
+			expect(parsed.agentsMissing).toEqual(['docs']);
 			expect(parsed.phase).toBe(1);
 		});
 
@@ -1311,7 +1311,6 @@ describe('phase_complete tool', () => {
 			recordPhaseAgentDispatch('ctx-wins', 'coder');
 			recordPhaseAgentDispatch('ctx-wins', 'reviewer');
 			recordPhaseAgentDispatch('ctx-wins', 'test_engineer');
-			recordPhaseAgentDispatch('ctx-wins', 'docs');
 			writeRetroBundle(tempDir, 1, 'pass');
 
 			const ctx = mockCtx('ctx-wins', tempDir);
@@ -1321,9 +1320,9 @@ describe('phase_complete tool', () => {
 			);
 			const parsed = JSON.parse(result);
 
-			// Should succeed using ctx-wins session (not args-ignored)
-			// args-ignored was never registered as a session, but ctx-wins was
-			expect(parsed.success).toBe(true);
+			// ctx-wins is selected; args-ignored has no agents and would miss all four.
+			expect(parsed.success).toBe(false);
+			expect(parsed.agentsMissing).toEqual(['docs']);
 			expect(parsed.phase).toBe(1);
 		});
 	});

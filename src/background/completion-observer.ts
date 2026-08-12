@@ -9,6 +9,7 @@
 
 import { createHash } from 'node:crypto';
 import * as path from 'node:path';
+import { completeBackgroundPhaseParticipation } from '../evidence/phase-participation.js';
 import {
 	awaitingMergeByCallID,
 	finishStandardWorktreeDispatch,
@@ -120,7 +121,9 @@ export function createBackgroundCompletionObserver(opts: {
 			const envelope = parseTaskEnvelope(part.text);
 			if (
 				!envelope ||
-				(envelope.state !== 'completed' && envelope.state !== 'error')
+				(envelope.state !== 'completed' &&
+					envelope.state !== 'error' &&
+					envelope.state !== 'cancelled')
 			) {
 				return;
 			}
@@ -163,7 +166,7 @@ export function createBackgroundCompletionObserver(opts: {
 			}
 
 			const text =
-				envelope.state === 'error'
+				envelope.state === 'error' || envelope.state === 'cancelled'
 					? (envelope.errorText ?? '')
 					: (envelope.resultText ?? '');
 			const result: BackgroundDelegationResult = {
@@ -319,6 +322,25 @@ export function createBackgroundCompletionObserver(opts: {
 						'ingestion pending',
 					);
 					return;
+				}
+			}
+
+			if (record.normalizedAgent === 'docs') {
+				try {
+					const recorded = await completeBackgroundPhaseParticipation({
+						directory,
+						record,
+						resultText: text,
+					});
+					if (!recorded) {
+						logger.warn(
+							`[background] docs completion ${record.correlationId} did not satisfy its durable phase-participation binding`,
+						);
+					}
+				} catch (error) {
+					logger.warn(
+						`[background] docs completion ${record.correlationId} could not persist phase participation: ${error instanceof Error ? error.message : String(error)}`,
+					);
 				}
 			}
 

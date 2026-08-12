@@ -13,6 +13,8 @@ const completedEnvelope =
 	'<task id="ses_abc123" state="completed">\n<summary>Background task completed: review</summary>\n<task_result>looks good</task_result>\n</task>';
 const errorEnvelope =
 	'<task id="ses_xyz" state="error">\n<task_error>boom</task_error>\n</task>';
+const cancelledEnvelope =
+	'<task id="ses_cancelled" state="cancelled">\n<task_result>cancelled by parent</task_result>\n</task>';
 
 describe('parseTaskEnvelope', () => {
 	it('parses a running envelope', () => {
@@ -26,7 +28,7 @@ describe('parseTaskEnvelope', () => {
 		});
 	});
 
-	it('parses completed and error envelopes', () => {
+	it('parses completed, error, and cancelled envelopes', () => {
 		expect(parseTaskEnvelope(completedEnvelope)).toMatchObject({
 			sessionId: 'ses_abc123',
 			state: 'completed',
@@ -40,6 +42,13 @@ describe('parseTaskEnvelope', () => {
 			state: 'error',
 			errorText: 'boom',
 			resultChars: 4,
+			resultTruncated: false,
+		});
+		expect(parseTaskEnvelope(cancelledEnvelope)).toEqual({
+			sessionId: 'ses_cancelled',
+			state: 'cancelled',
+			errorText: 'cancelled by parent',
+			resultChars: 19,
 			resultTruncated: false,
 		});
 	});
@@ -64,6 +73,18 @@ describe('parseTaskEnvelope', () => {
 
 	it('rejects unknown state values (cannot masquerade as envelope)', () => {
 		expect(parseTaskEnvelope('<task id="x" state="bogus">')).toBeNull();
+	});
+
+	it('normalizes the upstream canceled spelling to cancelled', () => {
+		expect(
+			parseTaskEnvelope(
+				'<task id="x" state="canceled"><task_error>bye</task_error></task>',
+			),
+		).toMatchObject({
+			sessionId: 'x',
+			state: 'cancelled',
+			errorText: 'bye',
+		});
 	});
 
 	it('rejects empty id', () => {

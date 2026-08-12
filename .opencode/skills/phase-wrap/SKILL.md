@@ -98,11 +98,11 @@ The tool will automatically write the retrospective to \`.swarm/evidence/retro-{
 | `coder` | Always | Task implementation (coder) |
 | `reviewer` | Always | Task review (reviewer) |
 | `test_engineer` | When phase modifies source code/tests (unless explicitly waived) | Test verification (test_engineer) |
-| `docs` | When `require_docs: true` in QA gate profile | Documentation updates |
+| `docs` | When `phase_complete.require_docs: true` in plugin configuration | Documentation updates |
 
 If any required agent is missing, `phase_complete` returns `{ success: false, status: 'incomplete', message: 'Phase N incomplete: missing required agents: <list>', agentsMissing: [...] }` and the phase is not closed. Dispatch each agent during normal task execution (not only inside optional Phase/Final Councils in steps 5.65/5.7) so the closeout gate is satisfied.
 
-The `docs` agent is only required when `require_docs: true` in the effective QA gate profile (visible via `get_qa_gate_profile`). For most small plans and feedback cycles, `docs` is NOT required and can be skipped. For multi-task implementation plans, `docs` is typically required.
+The `docs` agent requirement is controlled by `phase_complete.require_docs` in plugin configuration, not by the QA gate profile returned by `get_qa_gate_profile`. It defaults to `true`. Set it to `false` only when the phase genuinely has no documentation obligation. A successful docs completion is persisted as plan- and phase-bound participation proof so `phase_complete` can recover it after a session restart; unrelated task-gate evidence does not count as docs participation.
 
 The `coder` and `test_engineer` agents are required because every phase that modifies source code or tests must have at least one implementation and one test-verification delegation. For pure documentation or retrospective phases, these may be waived by the user explicitly.
 
