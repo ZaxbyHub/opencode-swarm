@@ -28,6 +28,14 @@ runtime state can be written.
 All accepted runtime state remains contained under `<nested-root>/.swarm/`; it
 is never redirected into the outer project.
 
+Plan, scope, evidence, and evaluation persistence now repeat the canonical
+project-root assertion at every low-level mutation, including checkpoints,
+recovery/terminal writers, migration, deletion, retirement, retention/archive,
+and lock-target creation, so callers cannot bypass the tool-layer guard.
+Ambiguous ancestor project-indicator errors report that inaccessible state
+directly, and an exhausted bounded ancestor walk fails closed instead of
+granting authority.
+
 ## Migration
 
 No migration or configuration change is required. Existing project roots and

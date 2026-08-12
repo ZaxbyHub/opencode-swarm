@@ -83,6 +83,7 @@ import { readTaskScopes } from '../turbo/lean/conflicts.js';
 import type { SpecStaleDetectedEvent } from '../types/events';
 import { criticalWarn, warn } from '../utils';
 import { bunHash, bunWrite } from '../utils/bun-compat';
+import { assertProjectRoot } from '../utils/project-boundary';
 import {
 	computeSpecDiff,
 	isObligationPreserving,
@@ -607,6 +608,7 @@ export async function regeneratePlanMarkdown(
 	directory: string,
 	plan: Plan,
 ): Promise<void> {
+	assertProjectRoot(directory);
 	const swarmDir = path.resolve(directory, '.swarm');
 	const contentHash = computePlanContentHash(plan);
 	const markdown = derivePlanMarkdown(plan);
@@ -871,6 +873,7 @@ export async function loadPlan(
 								// (tests/helpers/swarm-write-cache-scan.ts) only looks 25 lines
 								// forward from the write call.
 								try {
+									assertProjectRoot(directory);
 									const diffInfo = computeSpecDiff(directory);
 									const specStalenessPath = path.join(
 										directory,
@@ -904,6 +907,7 @@ export async function loadPlan(
 
 								// Emit spec_stale_detected to events.jsonl
 								try {
+									assertProjectRoot(directory);
 									const eventsPath = path.join(
 										directory,
 										'.swarm',
@@ -1209,6 +1213,10 @@ export async function savePlan(
 	) {
 		throw new Error(`Invalid directory: directory must be a non-empty string`);
 	}
+
+	// Authoritative sink guard: every plan/ledger/checkpoint write must re-assert
+	// the canonical project root even when a caller's entry guard was bypassed.
+	assertProjectRoot(directory);
 
 	// Validate against schema
 	const validated = PlanSchema.parse(plan);
@@ -1764,6 +1772,7 @@ export async function rebuildPlan(
 	plan?: Plan,
 	options?: { reason?: string },
 ): Promise<Plan | null> {
+	assertProjectRoot(directory);
 	const targetPlan = plan ?? (await replayFromLedger(directory));
 	if (!targetPlan) return null;
 
@@ -1910,6 +1919,7 @@ export async function closePlanTerminalState(
 		originalStatuses?: Map<string, string>;
 	},
 ): Promise<void> {
+	assertProjectRoot(directory);
 	const planId = derivePlanId(plan);
 
 	// Step 1: Validate plan against PlanSchema BEFORE appending ledger events.
@@ -2084,6 +2094,7 @@ export async function updateTaskStatus(
 	status: TaskStatus,
 	options?: { force?: boolean },
 ): Promise<Plan> {
+	assertProjectRoot(directory);
 	const derivePhaseStatusFromTasks = (tasks: Task[]): Phase['status'] => {
 		if (
 			tasks.length > 0 &&

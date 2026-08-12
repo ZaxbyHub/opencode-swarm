@@ -43,10 +43,10 @@ Each entry below points at a release note in `docs/releases/` and the invariant(
 - **Fix applied:**
   - Added `MAX_DEPTH = 20` constant bounding the parent walk
   - Added `PROJECT_INDICATORS` array (11 items): `package.json`, `.git`, `.opencode`, `Cargo.toml`, `go.mod`, `pyproject.toml`, `Gemfile`, `composer.json`, `pom.xml`, `build.gradle`, `CMakeLists.txt`
-  - Stray `.swarm/` directories without a coexisting project indicator are ignored (fail-open at depth limit)
+  - Stray `.swarm/` directories without a coexisting project indicator are ignored while the bounded ancestor walk continues
   - Fail-closed on non-ENOENT indicator errors (EPERM, EBUSY → assume indicator present)
   - `realpathSync` for junction/symlink resolution
-- **Invariant established:** `validateProjectRoot` prevents unbounded traversal while distinguishing genuine parent projects (`.swarm/` + project indicator) from stray artifacts (`.swarm/` alone). Depth limit is fail-open; indicator errors are fail-closed.
+- **Invariant established:** `validateProjectRoot` prevents unbounded traversal while distinguishing genuine parent projects (`.swarm/` + project indicator) from stray artifacts (`.swarm/` alone). Issue #2127 subsequently strengthened the ambiguous depth-limit case to fail closed; indicator errors also fail closed.
 - **Maps to AGENTS.md:** invariant 4 (working directory and `.swarm/` containment).
 
 ### Issue #922 Phase 2 — Extended `.swarm/` containment to remaining tools
@@ -64,8 +64,8 @@ Each entry below points at a release note in `docs/releases/` and the invariant(
 
 - **Symptom:** an outer project's `.swarm/` caused nested Git repositories, linked worktrees, submodules, and intentionally nested OpenCode projects to be rejected as ordinary subdirectories. The rejection was duplicated across the shared resolver, evidence writer, and four tool-level root guards.
 - **Root cause:** containment classified project identity from ancestry alone. It never checked whether the selected target directly declared an independent project boundary.
-- **Invariant established:** a direct `.git` regular file/directory or direct `.opencode/` directory declares a nested directory to be its own project root. This is a local declaration, not Git-metadata validation: empty or malformed direct `.git` markers opt in. Marker symlinks/junctions and inaccessible/ambiguous target markers never grant an exemption. Ordinary descendants remain rejected. Ambiguous ancestor `.swarm` probes or project indicators fail closed.
-- **Implementation pattern:** `hasExplicitProjectBoundary` owns marker semantics and uses `lstatSync`; `isStrictPathDescendant` owns platform-correct descendant classification. `validateProjectRoot`, `resolveWorkingDirectory`, `save_plan`, `declare_scope`, `update_task_status`, and `pre_check_batch` must remain in parity.
+- **Invariant established:** a direct `.git` regular file/directory or direct `.opencode/` directory declares a nested directory to be its own project root. This is a local declaration, not Git-metadata validation: empty or malformed direct `.git` markers opt in. Marker symlinks/junctions and inaccessible/ambiguous target markers never grant an exemption. Ordinary descendants remain rejected. Ambiguous ancestor `.swarm` probes or project indicators and bounded-walk depth exhaustion fail closed.
+- **Implementation pattern:** `hasExplicitProjectBoundary` owns marker semantics and uses `lstatSync`; `isStrictPathDescendant` owns platform-correct descendant classification. `validateProjectRoot`, `resolveWorkingDirectory`, `save_plan`, `declare_scope`, `update_task_status`, and `pre_check_batch` must remain in parity. The shared canonical project-root assertion also runs at every low-level plan, scope, evidence, and evaluation mutation sink, including checkpoint/recovery/terminal writers, migration, deletion, retirement, retention/archive, and lock-target creation, so callers cannot bypass the tool-layer guard.
 - **Maps to AGENTS.md:** invariants 4 (`.swarm` containment) and 7 (public-path and error-seam regression coverage).
 
 ### v6.85.1 — Multiple system messages crashing local models

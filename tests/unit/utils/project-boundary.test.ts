@@ -6,6 +6,7 @@ import {
 	hasExplicitProjectBoundary,
 	isStrictPathDescendant,
 } from '../../../src/utils/project-boundary';
+import { safeRmRecursive } from '../../helpers/safe-test-dir';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 let root: string;
@@ -18,7 +19,7 @@ beforeEach(() => {
 
 afterEach(() => {
 	_internals.lstatSync = originalLstatSync;
-	fs.rmSync(root, { recursive: true, force: true });
+	safeRmRecursive(root);
 });
 
 describe('hasExplicitProjectBoundary — regression: nested roots rejected (#2127)', () => {

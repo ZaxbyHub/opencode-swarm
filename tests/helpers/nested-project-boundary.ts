@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { Plan } from '../../src/config/plan-schema';
+import { safeRmRecursive } from './safe-test-dir';
 import { canonicalMkdtemp } from './tmpdir';
 
 export interface NestedBoundaryFixture {
@@ -36,7 +37,7 @@ export function createNestedBoundaryFixture(
 export function removeNestedBoundaryFixture(
 	fixture: NestedBoundaryFixture,
 ): void {
-	fs.rmSync(fixture.root, { recursive: true, force: true });
+	safeRmRecursive(fixture.root);
 }
 
 export function makeNestedPlan(): Plan {

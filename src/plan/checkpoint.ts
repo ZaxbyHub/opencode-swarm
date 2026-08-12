@@ -24,6 +24,7 @@ import { appendLedgerEvent } from '../plan/ledger';
 import { derivePlanId } from '../plan/utils.js';
 import { advisoryWarn } from '../services/warning-buffer';
 import { log } from '../utils/logger';
+import { assertProjectRoot } from '../utils/project-boundary';
 import {
 	derivePlanMarkdown,
 	loadPlan,
@@ -37,6 +38,7 @@ import {
  */
 export async function writeCheckpoint(directory: string): Promise<void> {
 	try {
+		assertProjectRoot(directory);
 		const plan = await loadPlan(directory);
 		if (!plan) return;
 

@@ -33,6 +33,7 @@ import { normalizeScopeFiles } from '../scope/scope-binding.js';
 import { readEffectiveSpecSync } from '../sdd/effective-spec';
 import { swarmState } from '../state';
 import {
+	assertProjectRoot,
 	hasExplicitProjectBoundary,
 	isStrictPathDescendant,
 } from '../utils/project-boundary';
@@ -393,6 +394,22 @@ export async function executeSavePlan(
 	// Project root anchor check — prevent .swarm from being created in subdirectories (issue #577).
 	// If working_directory was explicitly provided, reject only if it is a subdirectory of fallbackDir.
 	// If fallbackDir doesn't exist (CWD mismatch), trust the explicit working_directory.
+	// Enforce the authoritative boundary before any spec snapshot, QA profile,
+	// ledger, or projection I/O. A fallback comparison cannot detect an ordinary
+	// descendant when the injected fallback is unrelated.
+	try {
+		assertProjectRoot(targetWorkspace as string);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		return {
+			success: false,
+			message,
+			errors: [message],
+			recovery_guidance:
+				'Pass the project root, or add an explicit local .git/.opencode project boundary before retrying save_plan.',
+		};
+	}
+
 	if (args.working_directory && fallbackDir) {
 		const resolvedTarget = path.resolve(args.working_directory);
 		const resolvedRoot = path.resolve(fallbackDir);

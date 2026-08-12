@@ -29,6 +29,7 @@
 
 import { mkdir, readFile } from 'node:fs/promises';
 import * as path from 'node:path';
+import { assertProjectRoot } from '../utils/project-boundary';
 import { withEvidenceLock } from './lock.js';
 import { atomicWriteFile } from './task-file.js';
 
@@ -99,6 +100,7 @@ export type WriteImmutableArtifactOptions<T> = {
 export async function writeImmutableArtifact<T>(
 	options: WriteImmutableArtifactOptions<T>,
 ): Promise<T> {
+	assertProjectRoot(options.directory);
 	await mkdir(path.dirname(options.filePath), { recursive: true });
 	return withEvidenceLock(
 		options.directory,

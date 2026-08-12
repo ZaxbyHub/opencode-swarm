@@ -3,6 +3,7 @@ import { appendFile, mkdir } from 'node:fs/promises';
 import * as path from 'node:path';
 import { validateSwarmPath } from '../hooks/utils';
 import { redactSecrets } from '../memory/redaction';
+import { assertProjectRoot } from '../utils/project-boundary';
 
 const EVIDENCE_CACHE_FILE = 'evidence-cache/documents.jsonl';
 const MAX_EVIDENCE_TEXT_LENGTH = 4000;
@@ -49,6 +50,7 @@ export async function writeEvidenceDocuments(
 	inputs: EvidenceDocumentInput[],
 	now: () => Date = () => new Date(),
 ): Promise<WriteEvidenceDocumentsResult> {
+	assertProjectRoot(directory);
 	const filePath = validateSwarmPath(directory, EVIDENCE_CACHE_FILE);
 	const capturedAt = now().toISOString();
 	const records = inputs

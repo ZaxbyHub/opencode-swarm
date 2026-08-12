@@ -17,6 +17,7 @@ import {
 	executeSavePlan,
 	save_plan,
 } from '../../../src/tools/save-plan';
+import { safeRmRecursive } from '../../helpers/safe-test-dir';
 
 describe('save-plan tool verification tests', () => {
 	let tmpDir: string;
@@ -24,6 +25,7 @@ describe('save-plan tool verification tests', () => {
 	beforeEach(async () => {
 		// Create a temporary directory for each test
 		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'save-plan-test-'));
+		await fs.mkdir(path.join(tmpDir, '.opencode'));
 		// Ensure .swarm/ directory exists
 		await fs.mkdir(path.join(tmpDir, '.swarm'), { recursive: true });
 		// Create spec.md required by the spec gate
@@ -35,13 +37,8 @@ describe('save-plan tool verification tests', () => {
 		);
 	});
 
-	afterEach(async () => {
-		// Clean up the temporary directory
-		try {
-			await fs.rm(tmpDir, { recursive: true, force: true });
-		} catch {
-			// Ignore cleanup errors
-		}
+	afterEach(() => {
+		safeRmRecursive(tmpDir);
 	});
 
 	// ========== GROUP 1: detectPlaceholderContent - positive rejection cases ==========
@@ -912,12 +909,9 @@ describe('save-plan tool verification tests', () => {
 
 		beforeEach(() => {
 			// Create a temporary directory for each test
-			tmpDir = mkdirSync(
-				path.join(os.tmpdir(), 'save-plan-test-' + Date.now()),
-				{
-					recursive: true,
-				},
-			) as string;
+			tmpDir = path.join(os.tmpdir(), 'save-plan-test-' + Date.now());
+			mkdirSync(tmpDir, { recursive: true });
+			mkdirSync(path.join(tmpDir, '.opencode'));
 			// Create .swarm/spec.md required by the spec gate
 			mkdirSync(path.join(tmpDir, '.swarm'), { recursive: true });
 			writeFileSync(path.join(tmpDir, '.swarm', 'spec.md'), '# Test Spec\n');
@@ -929,8 +923,7 @@ describe('save-plan tool verification tests', () => {
 		});
 
 		afterEach(() => {
-			// Clean up the temporary directory
-			rmSync(tmpDir, { recursive: true, force: true });
+			safeRmRecursive(tmpDir);
 		});
 
 		it('Phase ID = 0 returns success: false with recovery_guidance', async () => {

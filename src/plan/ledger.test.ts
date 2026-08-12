@@ -17,25 +17,22 @@ import {
 	type SnapshotEventPayload,
 	takeSnapshotEvent,
 } from '../../src/plan/ledger';
+import { createSafeTestDir } from '../../tests/helpers/safe-test-dir';
 
-// Test workspace directory
 let testDir: string;
+let cleanupTestDir: () => void;
 
 describe('ledger', () => {
 	beforeEach(() => {
-		// Create a temporary test directory
-		testDir = fs.mkdtempSync(path.join(__dirname, 'ledger-test-'));
-		// Create .swarm/ subdirectory for ledger tests
+		const fixture = createSafeTestDir('ledger-test-');
+		testDir = fixture.dir;
+		cleanupTestDir = fixture.cleanup;
+		fs.mkdirSync(path.join(testDir, '.opencode'));
 		fs.mkdirSync(path.join(testDir, '.swarm'), { recursive: true });
 	});
 
 	afterEach(() => {
-		// Clean up test directory
-		try {
-			fs.rmSync(testDir, { recursive: true, force: true });
-		} catch {
-			// Ignore cleanup errors
-		}
+		cleanupTestDir();
 	});
 
 	describe('computePlanHash', () => {

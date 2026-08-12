@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import { z } from 'zod';
 import { withEvidenceLock } from '../evidence/lock.js';
 import { atomicWriteFile } from '../evidence/task-file.js';
+import { assertProjectRoot } from '../utils/project-boundary.js';
 import { EvaluationIdentifierSchema, GateNameSchema } from './contracts.js';
 import { canonicalJson } from './hashing.js';
 
@@ -81,6 +82,7 @@ export async function saveGateGroundTruth(
 		throw new Error('gate ground truth run id does not match its storage path');
 	}
 	const target = absolutePath(directory, runId);
+	assertProjectRoot(directory);
 	await mkdir(path.dirname(target), { recursive: true });
 	return withEvidenceLock(
 		directory,

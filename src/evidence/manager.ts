@@ -7,7 +7,6 @@ import {
 	statSync,
 } from 'node:fs';
 import * as fs from 'node:fs/promises';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { ZodError } from 'zod';
 import {
@@ -31,7 +30,11 @@ import {
 import { readSwarmFileAsync, validateSwarmPath } from '../hooks/utils';
 import { warn } from '../utils';
 import { bunWrite } from '../utils/bun-compat';
-import { hasExplicitProjectBoundary } from '../utils/project-boundary';
+import {
+	assertProjectRoot,
+	MAX_PROJECT_ROOT_DEPTH,
+	PROJECT_ROOT_INDICATORS,
+} from '../utils/project-boundary';
 import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
 import {
 	type DocumentsRetentionResult,
@@ -156,71 +159,11 @@ import { sanitizeTaskId as _sanitizeTaskId } from '../validation/task-id';
 
 export const sanitizeTaskId = _sanitizeTaskId;
 
-/** Maximum depth to walk up the directory tree before stopping (fail-open). */
-export const MAX_DEPTH = 20;
+/** Maximum depth to walk up the directory tree before failing closed. */
+export const MAX_DEPTH = MAX_PROJECT_ROOT_DEPTH;
 
 /** File/directory names that indicate a real project root. */
-export const PROJECT_INDICATORS = [
-	'package.json',
-	'.git',
-	'.opencode',
-	'Cargo.toml',
-	'go.mod',
-	'pyproject.toml',
-	'Gemfile',
-	'composer.json',
-	'pom.xml',
-	'build.gradle',
-	'CMakeLists.txt',
-] as const;
-
-function isWeakConfigContainerRoot(directory: string): boolean {
-	try {
-		const resolved = realpathSync(directory);
-		return (
-			resolved === realpathSync(os.tmpdir()) ||
-			resolved === realpathSync(os.homedir())
-		);
-	} catch {
-		const resolved = path.resolve(directory);
-		return (
-			resolved === path.resolve(os.tmpdir()) ||
-			resolved === path.resolve(os.homedir())
-		);
-	}
-}
-
-function hasAccessibleProjectIndicator(
-	directory: string,
-	options: { allowConfigOnly?: boolean } = {},
-): boolean {
-	const allowConfigOnly = options.allowConfigOnly ?? true;
-	for (const indicator of PROJECT_INDICATORS) {
-		if (!allowConfigOnly && indicator === '.opencode') {
-			continue;
-		}
-		try {
-			const indicatorStat = _internals.statSync(
-				path.join(directory, indicator),
-			);
-			if (indicatorStat.isFile() || indicatorStat.isDirectory()) {
-				return true;
-			}
-		} catch (error) {
-			if (!isMissingPathError(error)) {
-				// Ambiguous ancestor state cannot safely widen authority. Treat the
-				// indicator as present so the descendant is rejected.
-				return true;
-			}
-		}
-	}
-	return false;
-}
-
-function isMissingPathError(error: unknown): boolean {
-	const code = (error as NodeJS.ErrnoException | undefined)?.code;
-	return code === 'ENOENT' || code === 'ENOTDIR';
-}
+export const PROJECT_INDICATORS = PROJECT_ROOT_INDICATORS;
 
 /**
  * Defense-in-depth: verify that `directory` is the project root and not a subdirectory
@@ -231,62 +174,14 @@ function isMissingPathError(error: unknown): boolean {
  * @throws Error if a parent directory contains both .swarm/ and a project indicator
  */
 export function validateProjectRoot(directory: string): void {
-	let resolved: string;
-	try {
-		resolved = _internals.realpathSync(directory);
-	} catch {
-		warn(
-			`[evidence] Cannot canonicalize directory "${directory}" — failing closed`,
-		);
-		throw new Error(
-			`Cannot verify project root for "${directory}" — directory may not exist or is inaccessible`,
-		);
-	}
-	if (hasExplicitProjectBoundary(resolved)) {
-		return;
-	}
-	let current = resolved;
-	let depth = 0;
-	while (true) {
-		if (depth >= MAX_DEPTH) break; // depth limit — fail open
-		depth++;
-		const parent = path.dirname(current);
-		if (parent === current) break; // reached filesystem root
-		if (path.dirname(parent) === parent) {
-			current = parent;
-			continue;
-		}
-		const parentSwarm = path.join(parent, '.swarm');
-		let parentSwarmStat: ReturnType<typeof statSync>;
-		try {
-			parentSwarmStat = _internals.statSync(parentSwarm);
-		} catch (error) {
-			if (isMissingPathError(error)) {
-				current = parent;
-				continue;
-			}
-			warn(
-				`[evidence] Cannot inspect ancestor state "${parentSwarm}" — failing closed`,
-			);
-			throw new Error(
-				`Cannot verify project root for "${resolved}" — ancestor state "${parentSwarm}" is inaccessible`,
-			);
-		}
-		if (
-			parentSwarmStat.isDirectory() &&
-			hasAccessibleProjectIndicator(parent, {
-				allowConfigOnly: !isWeakConfigContainerRoot(parent),
-			})
-		) {
-			warn(
-				`[evidence] Rejecting write to subdirectory "${resolved}" — parent "${parent}" already contains .swarm/`,
-			);
-			throw new Error(
-				`Cannot write evidence in "${resolved}" — parent directory "${parent}" already contains a .swarm/ folder. Evidence must be written to the project root.`,
-			);
-		}
-		current = parent;
-	}
+	assertProjectRoot(
+		directory,
+		{
+			realpathSync: _internals.realpathSync,
+			statSync: _internals.statSync,
+		},
+		'evidence',
+	);
 }
 
 /**
@@ -544,6 +439,10 @@ export async function loadEvidence(
 				return { status: 'found', bundle: validated };
 			}
 			try {
+				// The read path is intentionally available to callers below a project
+				// root, but the legacy migration is a write. Re-assert containment before
+				// the evidence lock can create state or the repaired bundle is persisted.
+				validateProjectRoot(directory);
 				await withEvidenceLock(
 					directory,
 					relativePath,
@@ -673,6 +572,13 @@ export async function deleteEvidence(
 ): Promise<boolean> {
 	// Validate task ID
 	const sanitizedTaskId = sanitizeTaskId(taskId);
+	try {
+		validateProjectRoot(directory);
+	} catch {
+		// Preserve the deletion contract: an unsafe or unverifiable root is a
+		// failed deletion, and no filesystem mutation is attempted.
+		return false;
+	}
 
 	// Construct and validate path
 	const relativePath = path.join('evidence', sanitizedTaskId);

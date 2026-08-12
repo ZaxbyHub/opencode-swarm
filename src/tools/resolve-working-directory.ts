@@ -14,6 +14,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
+	assertProjectRoot,
 	hasExplicitProjectBoundary,
 	isStrictPathDescendant,
 } from '../utils/project-boundary';
@@ -33,10 +34,10 @@ export interface ResolveError {
  *
  * NOTE: This function intentionally does NOT use realpathSync for the resolved path
  * to avoid Windows 8.3 short filename issues. Symlink-based subdirectory bypasses
- * through this coarse filter are caught by the write-time validateProjectRoot guard
- * in evidence/manager.ts, which DOES use realpathSync. These two functions form a
- * defense-in-depth pair: resolveWorkingDirectory is the fast entry filter,
- * validateProjectRoot is the authoritative canonical check at write time.
+ * through this coarse filter are caught by the shared canonical project-root
+ * assertion at evidence, plan, and scope persistence sinks. These checks form a
+ * defense-in-depth pair: resolveWorkingDirectory is the fast entry filter and the
+ * persistence assertion is authoritative at write time.
  *
  * Priority: explicit working_directory param > injected directory (from createSwarmTool).
  *
@@ -61,7 +62,17 @@ export function resolveWorkingDirectory(
 					'Invalid working_directory: no explicit working_directory was provided and fallbackDirectory is missing or not a string',
 			};
 		}
-		// No explicit override — use the injected directory from createSwarmTool
+		// No explicit override — use the injected directory from createSwarmTool,
+		// but do not trust it more than an explicit caller-controlled path. Some
+		// consumers write session or lock state immediately after this resolver.
+		try {
+			assertProjectRoot(fallbackDirectory);
+		} catch (error) {
+			return {
+				success: false,
+				message: error instanceof Error ? error.message : String(error),
+			};
+		}
 		return { success: true, directory: fallbackDirectory };
 	}
 
@@ -132,10 +143,22 @@ export function resolveWorkingDirectory(
 		};
 	}
 
+	// This resolver is shared by both readers and writers, and many consumers
+	// create `.swarm` state before reaching a lower-level persistence guard.
+	// Establish the authoritative boundary once before any successful return.
+	try {
+		assertProjectRoot(resolvedDir);
+	} catch (error) {
+		return {
+			success: false,
+			message: error instanceof Error ? error.message : String(error),
+		};
+	}
+
 	// Check if fallbackDirectory exists (used to detect CWD mismatch scenario).
 	// When no fallback root is provided the containment check below cannot run.
-	// This is intentional: containment is enforced at write-time by validateProjectRoot
-	// in evidence/manager.ts, which is the authoritative canonical guard.
+	// The canonical project-root assertion above remains authoritative even when
+	// no fallback comparison is possible.
 	if (typeof fallbackDirectory !== 'string' || fallbackDirectory === '') {
 		return { success: true, directory: resolvedDir };
 	}

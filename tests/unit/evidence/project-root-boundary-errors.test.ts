@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { _internals, validateProjectRoot } from '../../../src/evidence/manager';
+import { safeRmRecursive } from '../../helpers/safe-test-dir';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 let root: string;
@@ -23,7 +24,7 @@ beforeEach(() => {
 afterEach(() => {
 	_internals.statSync = originalStatSync;
 	_internals.realpathSync = originalRealpathSync;
-	fs.rmSync(root, { recursive: true, force: true });
+	safeRmRecursive(root);
 });
 
 function errno(code: string): NodeJS.ErrnoException {
@@ -33,11 +34,14 @@ function errno(code: string): NodeJS.ErrnoException {
 }
 
 describe('validateProjectRoot ambiguous ancestor state', () => {
-	it('fails closed when an ancestor .swarm probe is inaccessible', () => {
+	it.each([
+		'EPERM',
+		'EACCES',
+	])('fails closed when an ancestor .swarm probe returns %s', (code) => {
 		const parentSwarm = path.join(parent, '.swarm');
 		_internals.statSync = ((candidate: fs.PathLike) => {
 			if (path.resolve(String(candidate)) === path.resolve(parentSwarm)) {
-				throw errno('EPERM');
+				throw errno(code);
 			}
 			return originalStatSync(candidate);
 		}) as typeof fs.statSync;
@@ -56,7 +60,17 @@ describe('validateProjectRoot ambiguous ancestor state', () => {
 			return originalStatSync(candidate);
 		}) as typeof fs.statSync;
 
-		expect(() => validateProjectRoot(child)).toThrow('Cannot write evidence');
+		expect(() => validateProjectRoot(child)).toThrow(
+			'project indicators in ancestor',
+		);
+	});
+
+	it('ignores an ancestor .swarm regular file', () => {
+		fs.rmSync(path.join(parent, '.swarm'), { recursive: true });
+		fs.writeFileSync(path.join(parent, '.swarm'), 'not a state directory');
+		fs.writeFileSync(path.join(parent, 'package.json'), '{}');
+
+		expect(() => validateProjectRoot(child)).not.toThrow();
 	});
 
 	it('continues past ENOENT and ENOTDIR ancestor probes', () => {
@@ -78,6 +92,18 @@ describe('validateProjectRoot ambiguous ancestor state', () => {
 
 		expect(() => validateProjectRoot(child)).toThrow(
 			'Cannot verify project root',
+		);
+	});
+
+	it('fails closed when the ancestor search depth is exhausted', () => {
+		let deepChild = child;
+		for (let depth = 0; depth <= 20; depth++) {
+			deepChild = path.join(deepChild, `level-${depth}`);
+		}
+		fs.mkdirSync(deepChild, { recursive: true });
+
+		expect(() => validateProjectRoot(deepChild)).toThrow(
+			'ancestor search exceeded 20 levels',
 		);
 	});
 });

@@ -225,22 +225,25 @@ describe('BOUNDARY — MAX_DEPTH depth limit', () => {
 		);
 	});
 
-	it('accepts path beyond MAX_DEPTH when no .swarm/ exists in ancestors', () => {
+	it('fails closed beyond MAX_DEPTH when no project root can be established', () => {
 		if (envHasSwarmAncestor) {
-			// This environment has .swarm/ ancestor — skip "no throw" test
+			// This environment already exercises ancestor rejection, so the isolated
+			// depth-exhaustion fixture cannot establish its intended precondition.
 			return;
 		}
 		// Build 25-level chain with no .swarm/ anywhere
-		// Depth limit stops walk before finding any .swarm/
+		// Depth exhaustion is ambiguous and must not grant write authority.
 		const deepest = buildDeepChain(25);
-		expect(() => validateProjectRoot(deepest)).not.toThrow();
+		expect(() => validateProjectRoot(deepest)).toThrow(
+			'ancestor search exceeded 20 levels',
+		);
 	});
 
 	it('MAX_DEPTH constant is exactly 20', () => {
 		expect(MAX_DEPTH).toBe(20);
 	});
 
-	it('treats .swarm/ without indicators at depth 20 as stray artifact (fail-open)', () => {
+	it('fails closed after a stray depth-20 .swarm when root remains unproven', () => {
 		if (envHasSwarmAncestor) return;
 
 		// Place stray .swarm/ at tempDir level — 20 levels up from child
@@ -249,8 +252,11 @@ describe('BOUNDARY — MAX_DEPTH depth limit', () => {
 		// Build 20-level chain downward from tempDir
 		const childDir = buildDeepChain(20); // level0 through level19
 
-		// From childDir: tempDir is at depth 20, has stray .swarm/ but no indicators → fail-open
-		expect(() => validateProjectRoot(childDir)).not.toThrow();
+		// From childDir: tempDir is at depth 20 and its stray .swarm/ does not
+		// establish a project root, so exhausting the bounded walk fails closed.
+		expect(() => validateProjectRoot(childDir)).toThrow(
+			'ancestor search exceeded 20 levels',
+		);
 	});
 });
 

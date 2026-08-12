@@ -2,7 +2,10 @@ import { afterEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { ToolContext } from '@opencode-ai/plugin';
-import { pre_check_batch } from '../../../src/tools/pre-check-batch';
+import {
+	pre_check_batch,
+	_internals as preCheckInternals,
+} from '../../../src/tools/pre-check-batch';
 import { resolveWorkingDirectory } from '../../../src/tools/resolve-working-directory';
 import {
 	createNestedBoundaryFixture,
@@ -11,8 +14,10 @@ import {
 } from '../../helpers/nested-project-boundary';
 
 const fixtures: NestedBoundaryFixture[] = [];
+const originalRunLintWrapped = preCheckInternals.runLintWrapped;
 
 afterEach(() => {
+	preCheckInternals.runLintWrapped = originalRunLintWrapped;
 	for (const fixture of fixtures.splice(0)) {
 		removeNestedBoundaryFixture(fixture);
 	}
@@ -59,6 +64,17 @@ describe('nested project boundary tools — regression: parent .swarm poison (#2
 		if (!result.success) expect(result.message).toContain('project root');
 	});
 
+	it('rejects an ordinary descendant when fallback is absent or unrelated', () => {
+		const { ordinary } = fixture();
+		const { nested: unrelatedRoot } = fixture('opencode');
+
+		expect(resolveWorkingDirectory(ordinary, undefined).success).toBe(false);
+		expect(resolveWorkingDirectory(ordinary, unrelatedRoot).success).toBe(
+			false,
+		);
+		expect(resolveWorkingDirectory(undefined, ordinary).success).toBe(false);
+	});
+
 	it('classifies target-directory links by the direct markers at their canonical target', () => {
 		const { outer, nested, ordinary } = fixture();
 		const markedLink = path.join(outer, 'marked-link');
@@ -76,6 +92,15 @@ describe('nested project boundary tools — regression: parent .swarm poison (#2
 
 	it('registered pre_check_batch scans files in an explicitly nested root', async () => {
 		const { outer, nested } = fixture('git-directory');
+		let lintDirectory: string | undefined;
+		preCheckInternals.runLintWrapped = async (_files, directory) => {
+			lintDirectory = directory;
+			return {
+				ran: true,
+				result: { success: true, output: '', errors: [], warnings: [] },
+				duration_ms: 0,
+			};
+		};
 		fs.writeFileSync(
 			path.join(nested, 'nested.ts'),
 			'export const nested = 1;\n',
@@ -87,7 +112,8 @@ describe('nested project boundary tools — regression: parent .swarm poison (#2
 		);
 		const result = JSON.parse(raw);
 
-		expect(result.lint.error ?? '').not.toContain('subdirectory');
+		expect(result.lint.ran).toBe(true);
+		expect(lintDirectory).toBe(nested);
 		expect(result.secretscan.ran).toBe(true);
 		expect(result.sast_scan.ran).toBe(true);
 		expect(result.quality_budget.ran).toBe(true);

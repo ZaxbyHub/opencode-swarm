@@ -38,6 +38,7 @@ import {
 import { verifyLeanTurboTaskCompletion } from '../turbo/lean/task-completion';
 import * as logger from '../utils/logger.js';
 import {
+	assertProjectRoot,
 	hasExplicitProjectBoundary,
 	isStrictPathDescendant,
 } from '../utils/project-boundary';
@@ -1087,6 +1088,20 @@ export async function executeUpdateTaskStatus(
 		};
 	}
 	directory = resolveResult.directory;
+
+	// Enforce the authoritative boundary before reading plan state, mutating
+	// sessions, or creating gate evidence. A fallback comparison cannot identify
+	// descendants of an unrelated root.
+	try {
+		assertProjectRoot(directory);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		return {
+			success: false,
+			message,
+			errors: [message],
+		};
+	}
 
 	// Verify .swarm/plan.json exists (resolveWorkingDirectory checks directory
 	// existence but not plan file presence)
