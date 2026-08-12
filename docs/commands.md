@@ -855,7 +855,7 @@ See [Recovery Runbook](troubleshooting/recovery-guide.md) for manual recovery st
 
 ### `/swarm reset --confirm`
 
-DELETE active swarm state from `.swarm/`, including `plan.md`, `plan.json`, `SWARM_PLAN.*`, `checkpoints.json`, `context.md`, `events.jsonl`, and `summaries/`. Stops background automation and clears in-memory queues. **Requires `--confirm` â€” without it, shows a warning.** Before deleting, the state it removes is auto-backed up to `.swarm/reset-backups/<timestamp>/` (newest 5 kept); restore by copying the files back into `.swarm/`.
+DELETE active swarm state from `.swarm/`, including `plan.md`, `plan.json`, `SWARM_PLAN.*`, `checkpoints.json`, `context.md`, `events.jsonl`, `run-memory.jsonl`, and `summaries/`. Stops background automation and clears in-memory queues. **Requires `--confirm` â€” without it, shows a warning.** Before deleting, the state it removes is auto-backed up to `.swarm/reset-backups/<timestamp>/` (newest 5 kept); restore by copying the files back into `.swarm/`.
 
 ### `/swarm reset-session`
 
@@ -892,7 +892,8 @@ Use `--dry-run` to preview what finalize would archive, clean, and align — it 
 **Cleanup scope:** `knowledge.jsonl` is intentionally preserved across finalize
 cycles â€” cumulative project knowledge survives and is not deleted. Deleted files
 include `plan.json`, `plan.md`, `plan-ledger.jsonl`, `events.jsonl`, `handoff.*`,
-`escalation-report.md`, `knowledge-rejected.jsonl`, `repo-graph.json`,
+`escalation-report.md`, `knowledge-rejected.jsonl`, `run-memory.jsonl`,
+`repo-graph.json`,
 `doc-manifest.json`, `dark-matter.md`, `telemetry.jsonl`, `swarm.db`, generated
 `post-mortem-*.md` reports, `drift-report-phase-*.json`, and the `evidence/`,
 `session/`, `scopes/`, `spec-archive/` directories. The SQLite WAL sidecars
