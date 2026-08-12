@@ -1,19 +1,10 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { PluginConfig } from '../config';
+import { resolveRegisteredAgentModel } from '../config/agent-model';
 import { DEFAULT_MODELS } from '../config/constants';
-import { stripKnownSwarmPrefix } from '../config/schema';
 import { boundedBunHash, coarseObjectDiscriminator } from '../utils/arg-hash';
 import { stableCanonicalStringify } from '../utils/stable-stringify';
-
-// Safe property lookup — prevents prototype chain pollution
-function safeGet<T>(
-	obj: Record<string, T> | undefined,
-	key: string,
-): T | undefined {
-	if (!obj || !Object.hasOwn(obj, key)) return undefined;
-	return obj[key];
-}
 
 /**
  * Resolve the model for a given agent by checking config overrides,
@@ -23,23 +14,9 @@ export function resolveAgentModel(
 	agentName: string,
 	config: PluginConfig,
 ): string {
-	const baseName = stripKnownSwarmPrefix(agentName).toLowerCase();
-
-	// Check direct agent config override
-	const agentOverride = safeGet(config.agents, baseName)?.model;
-	if (agentOverride) return agentOverride;
-
-	// Check swarm agent configs
-	if (config.swarms) {
-		for (const swarm of Object.values(config.swarms)) {
-			const swarmModel = safeGet(swarm.agents, baseName)?.model;
-			if (swarmModel) return swarmModel;
-		}
-	}
-
-	// Fall back to defaults
-	const defaultModel = safeGet(DEFAULT_MODELS, baseName);
-	return defaultModel ?? DEFAULT_MODELS.default;
+	return (
+		resolveRegisteredAgentModel(config, agentName) ?? DEFAULT_MODELS.default
+	);
 }
 
 /**

@@ -174,8 +174,8 @@ describe('adversarial-detector - Adversarial Security Testing', () => {
 			};
 
 			const result = resolveAgentModel('coder', configWithWhitespace);
-			// Whitespace is truthy but not a valid model, should return the override value
-			expect(result).toBe('   ');
+			// Whitespace is not a valid model and must fall through safely.
+			expect(result).toBe(DEFAULT_MODELS.coder);
 		});
 
 		it('ATTACK 8c: Config override with object-like strings - BEHAVIOR: normalized to lowercase, falls through to default', () => {
@@ -341,7 +341,8 @@ describe('adversarial-detector - Adversarial Security Testing', () => {
 			};
 
 			const result = resolveAgentModel(longAgentName, configWithSwarm);
-			expect(result).toBe('fast-model');
+			// Arbitrary config keys are not registered canonical agent roles.
+			expect(result).toBe(DEFAULT_MODELS.default);
 		});
 
 		it('ATTACK 14c: Multiple swarms with legitimate agent named "constructor"', () => {
@@ -367,11 +368,9 @@ describe('adversarial-detector - Adversarial Security Testing', () => {
 				},
 			};
 
-			// This is NOT a prototype pollution attack - 'constructor' is explicitly set
-			// as a legitimate agent name in the config. safeGet() correctly allows this.
-			// Should use the first matching swarm config
+			// Unknown role keys cannot become registered agents or borrow the first swarm.
 			const result = resolveAgentModel('constructor', configWithMultipleSwarms);
-			expect(result).toBe('swarm1-model');
+			expect(result).toBe(DEFAULT_MODELS.default);
 		});
 	});
 

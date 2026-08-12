@@ -287,22 +287,20 @@ describe('adversarial-detector hook', () => {
 			);
 		});
 
-		it('normalizes mega_ prefix and resolves correctly', () => {
+		it('does not invent an unconfigured mega-prefixed target', () => {
 			const config = makeConfig();
-
 			expect(resolveAgentModel('mega_coder', config)).toBe(
-				DEFAULT_MODELS.coder,
+				DEFAULT_MODELS.default,
 			);
 			expect(resolveAgentModel('mega_reviewer', config)).toBe(
 				DEFAULT_MODELS.reviewer,
 			);
 		});
 
-		it('normalizes local_ prefix and resolves correctly', () => {
+		it('does not invent an unconfigured local-prefixed target', () => {
 			const config = makeConfig();
-
 			expect(resolveAgentModel('local_coder', config)).toBe(
-				DEFAULT_MODELS.coder,
+				DEFAULT_MODELS.default,
 			);
 			expect(resolveAgentModel('local_reviewer', config)).toBe(
 				DEFAULT_MODELS.reviewer,
@@ -322,24 +320,23 @@ describe('adversarial-detector hook', () => {
 			expect(resolveAgentModel('reviewer', config)).toBe('custom/model-y');
 		});
 
-		it('config.agents override takes precedence over swarm config', () => {
+		it('default swarm entry takes object-level precedence over top-level config', () => {
 			const config = makeConfig({
 				agents: {
 					coder: { model: 'override/model' },
 				},
 				swarms: {
-					fast: {
+					default: {
 						agents: {
 							coder: { model: 'fast/model' },
 						},
 					},
 				},
 			});
-
-			expect(resolveAgentModel('coder', config)).toBe('override/model');
+			expect(resolveAgentModel('coder', config)).toBe('fast/model');
 		});
 
-		it('returns swarm model when agents override is not present', () => {
+		it('returns the exact named swarm model', () => {
 			const config = makeConfig({
 				swarms: {
 					fast: {
@@ -350,12 +347,11 @@ describe('adversarial-detector hook', () => {
 					},
 				},
 			});
-
-			expect(resolveAgentModel('coder', config)).toBe('fast/model');
-			expect(resolveAgentModel('reviewer', config)).toBe('fast/reviewer');
+			expect(resolveAgentModel('fast_coder', config)).toBe('fast/model');
+			expect(resolveAgentModel('fast_reviewer', config)).toBe('fast/reviewer');
 		});
 
-		it('returns swarm model from first matching swarm', () => {
+		it('does not borrow the first matching swarm model', () => {
 			const config = makeConfig({
 				swarms: {
 					fast: {
@@ -371,9 +367,9 @@ describe('adversarial-detector hook', () => {
 				},
 			});
 
-			// Returns first matching swarm's model (order not guaranteed but deterministic)
-			const result = resolveAgentModel('coder', config);
-			expect(['fast/model', 'slow/model']).toContain(result);
+			expect(resolveAgentModel('fast_coder', config)).toBe('fast/model');
+			expect(resolveAgentModel('slow_coder', config)).toBe('slow/model');
+			expect(resolveAgentModel('coder', config)).toBe(DEFAULT_MODELS.default);
 		});
 
 		it('returns DEFAULT_MODELS.default for unknown agent', () => {
@@ -469,9 +465,9 @@ describe('adversarial-detector hook', () => {
 
 		it('handles prefixed agent names', () => {
 			const config = makeConfig({
-				agents: {
-					coder: { model: 'same/model' },
-					reviewer: { model: 'same/model' },
+				swarms: {
+					mega: { agents: { coder: { model: 'same/model' } } },
+					local: { agents: { reviewer: { model: 'same/model' } } },
 				},
 			});
 
@@ -622,7 +618,11 @@ describe('adversarial-detector hook', () => {
 				},
 			});
 
-			const sharedModel = detectAdversarialPair('coder', 'reviewer', config);
+			const sharedModel = detectAdversarialPair(
+				'cloud_coder',
+				'cloud_reviewer',
+				config,
+			);
 			expect(sharedModel).toBe('cloud/model');
 
 			const warning = formatAdversarialWarning(

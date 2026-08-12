@@ -41,9 +41,9 @@ describe('guardrails prompt trimming for low-capability models (Task 4.5)', () =
 	}
 
 	// Helper to create a user message
-	function makeUserMessage(text: string) {
+	function makeUserMessage(text: string, agent?: string) {
 		return {
-			info: { role: 'user' as const, sessionID: 'test-session' },
+			info: { role: 'user' as const, sessionID: 'test-session', agent },
 			parts: [{ type: 'text' as const, text }],
 		};
 	}
@@ -120,6 +120,36 @@ End`;
 			expect(resultText).toContain('<!-- BEHAVIORAL_GUIDANCE_START -->');
 			expect(resultText).toContain('<!-- BEHAVIORAL_GUIDANCE_END -->');
 			expect(resultText).toContain('Rule 1: Always delegate');
+		});
+
+		it('uses the incoming configured model on its first handoff turn', async () => {
+			const hooks = createGuardrailsHooks(
+				'.',
+				undefined,
+				defaultConfig(),
+				undefined,
+				undefined,
+				(agentName) =>
+					agentName === 'small_coder' ? 'provider/gpt-4o-mini' : undefined,
+			);
+			const systemText = `System prompt
+<!-- BEHAVIORAL_GUIDANCE_START -->
+Rule for a high-capability model
+<!-- BEHAVIORAL_GUIDANCE_END -->
+End`;
+			const messages = [
+				makeSystemMessage(systemText),
+				makeAssistantMessage('gpt-4o'),
+				makeUserMessage('take over', 'small_coder'),
+			];
+
+			await hooks.messagesTransform({}, { messages });
+
+			const resultText = (
+				messages[0].parts[0] as { type: string; text: string }
+			).text;
+			expect(resultText).not.toContain('Rule for a high-capability model');
+			expect(resultText).toContain('[Enforcement: programmatic gates active]');
 		});
 
 		it('No modelID → no trim', async () => {

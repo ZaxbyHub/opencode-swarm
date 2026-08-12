@@ -7,6 +7,10 @@
  */
 
 import type { PluginConfig } from '../config';
+import {
+	parseAgentModel,
+	resolveConfiguredAgentModel,
+} from '../config/agent-model';
 import { SUMMARIZER_EXEMPT_TOOL_NAMES } from '../config/constants';
 import { stripKnownSwarmPrefix } from '../config/schema';
 import { log, warn } from '../utils';
@@ -21,8 +25,7 @@ import {
 import { extractModelInfo, resolveModelLimit } from './model-limits';
 import { estimateTokens } from './utils';
 
-// Module-level state to track last-seen agent for agent-switch detection (Task 4.1)
-let lastSeenAgent: string | undefined;
+const MAX_TRACKED_SESSIONS = 256;
 
 interface MessageInfo {
 	role: string;
@@ -76,6 +79,9 @@ export function createContextBudgetHandler(config: PluginConfig) {
 
 	// Track first-call logging to avoid spam
 	const loggedLimits = new Set<string>();
+	// Agent-switch history is handler-local, session-keyed, exact-name-aware,
+	// and bounded so independent plugin sessions cannot contaminate one another.
+	const lastSeenAgentBySession = new Map<string, string>();
 
 	// Create the handler function
 	const handler = async (
@@ -85,8 +91,34 @@ export function createContextBudgetHandler(config: PluginConfig) {
 		const messages = output?.messages;
 		if (!messages || messages.length === 0) return;
 
-		// Extract model and provider info from messages
-		const { modelID, providerID } = extractModelInfo(messages);
+		// Resolve the incoming target before reading historical assistant metadata.
+		// On the first turn after a handoff, the latest assistant still describes
+		// the previous agent and can have a materially larger context window.
+		let agentName: string | undefined;
+		let baseAgent: string | undefined;
+		let sessionID: string | undefined;
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const messageInfo = messages[i]?.info;
+			if (messageInfo?.role === 'user' && messageInfo.agent) {
+				agentName = messageInfo.agent;
+				baseAgent = stripKnownSwarmPrefix(agentName);
+				sessionID =
+					typeof messageInfo.sessionID === 'string' &&
+					messageInfo.sessionID.trim()
+						? messageInfo.sessionID
+						: undefined;
+				break;
+			}
+		}
+
+		const configuredTargetModel = agentName
+			? resolveConfiguredAgentModel(config, agentName)
+			: undefined;
+		const targetModelInfo = configuredTargetModel
+			? parseAgentModel(configuredTargetModel)
+			: undefined;
+		const { modelID, providerID } =
+			targetModelInfo ?? extractModelInfo(messages);
 		const modelLimit = resolveModelLimit(
 			modelID,
 			providerID,
@@ -127,22 +159,15 @@ export function createContextBudgetHandler(config: PluginConfig) {
 
 		const usagePercent = totalTokens / modelLimit;
 
-		// Extract agent info from last user message for agent-switch detection
-		let baseAgent: string | undefined;
-		for (let i = messages.length - 1; i >= 0; i--) {
-			const msg = messages[i];
-			if (msg?.info?.role === 'user' && msg?.info?.agent) {
-				baseAgent = stripKnownSwarmPrefix(msg.info.agent);
-				break;
-			}
-		}
-
 		// Agent-switch detection (Task 4.1)
 		let ratio = usagePercent; // Declare early for agent-switch override
+		const lastSeenAgent = sessionID
+			? lastSeenAgentBySession.get(sessionID)
+			: undefined;
 		if (
 			lastSeenAgent !== undefined &&
-			baseAgent !== undefined &&
-			baseAgent !== lastSeenAgent
+			agentName !== undefined &&
+			agentName !== lastSeenAgent
 		) {
 			// Agent switch detected
 			const enforceOnSwitch =
@@ -153,10 +178,10 @@ export function createContextBudgetHandler(config: PluginConfig) {
 			) {
 				// Force enforcement regardless of critical threshold
 				warn(
-					`[swarm] Agent switch detected: ${lastSeenAgent} → ${baseAgent}, enforcing context budget`,
+					`[swarm] Agent switch detected: ${lastSeenAgent} → ${agentName}, enforcing context budget`,
 					{
 						from: lastSeenAgent,
-						to: baseAgent,
+						to: agentName,
 					},
 				);
 				// Set ratio to critical to trigger enforcement
@@ -164,8 +189,18 @@ export function createContextBudgetHandler(config: PluginConfig) {
 			}
 		}
 
-		// Update lastSeenAgent for next call
-		lastSeenAgent = baseAgent;
+		if (sessionID && agentName) {
+			if (
+				!lastSeenAgentBySession.has(sessionID) &&
+				lastSeenAgentBySession.size >= MAX_TRACKED_SESSIONS
+			) {
+				const oldestSessionID = lastSeenAgentBySession.keys().next().value;
+				if (oldestSessionID !== undefined) {
+					lastSeenAgentBySession.delete(oldestSessionID);
+				}
+			}
+			lastSeenAgentBySession.set(sessionID, agentName);
+		}
 
 		// HARD ENFORCEMENT: When ratio >= critical threshold, actively remove messages
 		if (ratio >= criticalThreshold) {

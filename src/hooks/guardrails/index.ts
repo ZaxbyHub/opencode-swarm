@@ -444,6 +444,7 @@ export function createGuardrailsHooks(
 	config?: GuardrailsConfig,
 	authorityConfig?: AuthorityConfig,
 	worktreeBaseDirOverrides?: string[],
+	resolveAgentModel?: (agentName: string) => string | undefined,
 ): {
 	toolBefore: (
 		input: { tool: string; sessionID: string; callID: string },
@@ -639,6 +640,7 @@ export function createGuardrailsHooks(
 		requireReviewerAndTestEngineer,
 		consecutiveNoToolTurns,
 		lastCountedAssistantMsgId,
+		resolveAgentModel,
 	});
 
 	return {
