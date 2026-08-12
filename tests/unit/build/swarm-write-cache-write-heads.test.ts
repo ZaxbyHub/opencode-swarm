@@ -203,6 +203,16 @@ describe('G2 — the write-head table (#1619 round 7)', () => {
 		expect(fire("const fd = fs.openSync(p, 'wx');")).toEqual(['p']);
 		expect(fire("const fd = fs.openSync(p, 'r+');")).toEqual(['p']);
 		expect(fire('const fd = fs.openSync(p, flags);')).toEqual(['p']);
+		expect(
+			fire(
+				'const fd = fs.openSync(p, fs.constants.O_RDONLY | ((fs.constants as { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0));',
+			),
+		).toEqual([]);
+		expect(
+			fire(
+				'const fd = fs.openSync(p, fs.constants.O_RDWR | ((fs.constants as { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0));',
+			),
+		).toEqual(['p']);
 		expect(fire("const fd = fs.openSync(p, 'r');")).toEqual([]);
 		expect(fire("const fd = fs.openSync(p, 'a');")).toEqual([]);
 		expect(fire("const fd = fs.openSync(p, 'a+');")).toEqual([]);

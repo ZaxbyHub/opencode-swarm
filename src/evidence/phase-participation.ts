@@ -26,6 +26,7 @@ import { computePlanStructureHash } from '../plan/ledger.js';
 import { loadPlan } from '../plan/manager.js';
 import { derivePlanId, derivePlanIdentityHash } from '../plan/utils.js';
 import { stableCanonicalStringify } from '../utils/stable-stringify.js';
+import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache.js';
 import { withEvidenceLock } from './lock.js';
 import { atomicWriteFile } from './task-file.js';
 
@@ -238,8 +239,11 @@ function readRawStore(
 		if (pathStat.size > MAX_PHASE_PARTICIPATION_BYTES) {
 			return { status: 'oversized', bytes: pathStat.size };
 		}
-		const noFollow = (fs.constants as { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0;
-		descriptor = fs.openSync(filePath, fs.constants.O_RDONLY | noFollow);
+		descriptor = fs.openSync(
+			filePath,
+			fs.constants.O_RDONLY |
+				((fs.constants as { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0),
+		);
 		const openedStat = fs.fstatSync(descriptor);
 		if (
 			!openedStat.isFile() ||
@@ -304,6 +308,7 @@ async function atomicWriteBytes(
 	try {
 		await fs.promises.writeFile(tempPath, bytes);
 		await fs.promises.rename(tempPath, filePath);
+		invalidateCachedArtifact(filePath);
 	} finally {
 		await fs.promises.unlink(tempPath).catch(() => undefined);
 	}
@@ -323,10 +328,10 @@ async function readBoundedRegularFile(
 			'bounded evidence artifact is not a permitted regular file',
 		);
 	}
-	const noFollow = (fs.constants as { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0;
 	const handle = await fs.promises.open(
 		filePath,
-		fs.constants.O_RDONLY | noFollow,
+		fs.constants.O_RDONLY |
+			((fs.constants as { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0),
 	);
 	try {
 		const openedStat = await handle.stat();
