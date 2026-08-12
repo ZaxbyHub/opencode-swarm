@@ -2,6 +2,12 @@ import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import { EscalationTracker } from '../escalation';
 import { _internals, createPrmHook } from '../index';
 import type { PatternMatch, PrmConfig, TrajectoryEntry } from '../types';
+import { createTickingDetectPatterns } from './helpers/episodes';
+import {
+	createMockConfig,
+	createMockPatternMatch,
+	createMockSession,
+} from './helpers/fixtures';
 
 // Original function references saved once at module load for save/restore
 const originalGetAgentSession = _internals.getAgentSession;
@@ -15,23 +21,6 @@ const originalCleanupOldTrajectoryFiles = _internals.cleanupOldTrajectoryFiles;
 const originalRecordReplayEntry = _internals.recordReplayEntry;
 const originalStartReplayRecording = _internals.startReplayRecording;
 const originalTelemetry = _internals.telemetry;
-
-function createMockConfig(overrides: Partial<PrmConfig> = {}): PrmConfig {
-	return {
-		enabled: true,
-		pattern_thresholds: {
-			repetition_loop: 2,
-			ping_pong: 4,
-			expansion_drift: 3,
-			stuck_on_test: 3,
-			context_thrash: 5,
-		},
-		max_trajectory_lines: 100,
-		escalation_enabled: true,
-		detection_timeout_ms: 5000,
-		...overrides,
-	};
-}
 
 function createMockTrajectory(): TrajectoryEntry[] {
 	return [
@@ -56,81 +45,6 @@ function createMockTrajectory(): TrajectoryEntry[] {
 			result: 'success',
 		},
 	];
-}
-
-function createMockPatternMatch(
-	pattern: PatternMatch['pattern'] = 'repetition_loop',
-	overrides: Partial<PatternMatch> = {},
-): PatternMatch {
-	return {
-		pattern,
-		severity: 'medium',
-		category: 'coordination_error',
-		stepRange: [1, 3],
-		description: 'Test pattern detected',
-		affectedAgents: ['coder'],
-		affectedTargets: ['src/foo.ts'],
-		occurrenceCount: 1,
-		...overrides,
-	};
-}
-
-function createMockSession(sessionId: string, delegationActive = true) {
-	return {
-		sessionId,
-		agentName: 'test-agent',
-		lastToolCallTime: Date.now(),
-		lastAgentEventTime: Date.now(),
-		delegationActive,
-		activeInvocationId: 1,
-		lastInvocationIdByAgent: {},
-		windows: {},
-		lastCompactionHint: 0,
-		architectWriteCount: 0,
-		lastCoderDelegationTaskId: null,
-		currentTaskId: '1.1',
-		gateLog: new Map(),
-		reviewerCallCount: new Map(),
-		lastGateFailure: null,
-		partialGateWarningsIssuedForTask: new Set<string>(),
-		selfFixAttempted: false,
-		selfCodingWarnedAtCount: 0,
-		catastrophicPhaseWarnings: new Set<number>(),
-		qaSkipCount: 0,
-		qaSkipTaskIds: [],
-		taskWorkflowStates: new Map(),
-		stageBCompletion: new Map(),
-		taskCouncilApproved: new Map(),
-		lastGateOutcome: null,
-		declaredCoderScope: null,
-		lastScopeViolation: null,
-		scopeViolationDetected: false,
-		modifiedFilesThisCoderTask: [],
-		turboMode: false,
-		qaGateSessionOverrides: {},
-		fullAutoMode: false,
-		fullAutoInteractionCount: 0,
-		fullAutoDeadlockCount: 0,
-		fullAutoLastQuestionHash: null,
-		model_fallback_index: 0,
-		modelFallbackExhausted: false,
-		coderRevisions: 0,
-		revisionLimitHit: false,
-		loopDetectionWindow: [],
-		pendingAdvisoryMessages: [],
-		sessionRehydratedAt: 0,
-		lastPhaseCompleteTimestamp: 0,
-		lastPhaseCompletePhase: 0,
-		phaseAgentsDispatched: new Set<string>(),
-		lastCompletedPhaseAgentsDispatched: new Set<string>(),
-		// PRM fields
-		prmPatternCounts: new Map(),
-		prmEscalationLevel: 0,
-		prmLastPatternDetected: null as PatternMatch | null,
-		prmTrajectoryStep: 0,
-		prmHardStopPending: false,
-		prmEscalationTracker: undefined,
-	};
 }
 
 /**
@@ -555,31 +469,16 @@ describe('createPrmHook', () => {
 		});
 
 		test('increments prmPatternCounts on subsequent detections', async () => {
-			// Issue #2134: two genuinely distinct, non-overlapping episodes. The
-			// episode gate requires a match's stepRange[0] to advance past the
-			// PRIOR struck episode's stepRange[1] before the same pattern can
-			// strike again — a repeated fixed stepRange would be recognized as a
-			// re-report of the already-struck episode and suppressed entirely
-			// (no count increment, no advisory), which is exactly the defect this
-			// gate exists to prevent for an ongoing single episode.
+			// Issue #2134: distinct, non-overlapping episodes per tick — see
+			// helpers/episodes.ts for why a repeated fixed stepRange won't do.
 			const config = createMockConfig({ enabled: true });
 			const trajectory = createMockTrajectory();
 			const session = createMockSession(sessionId);
 			_internals.getAgentSession = () => session;
 			_internals.readTrajectory = async () => trajectory;
-			let tick = 0;
-			_internals.detectPatterns = () => {
-				tick += 1;
-				return {
-					matches: [
-						createMockPatternMatch('repetition_loop', {
-							stepRange: tick === 1 ? [1, 3] : [4, 6],
-						}),
-					],
-					detectionTimeMs: 5,
-					patternsChecked: 5,
-				};
-			};
+			_internals.detectPatterns = createTickingDetectPatterns((overrides) =>
+				createMockPatternMatch('repetition_loop', overrides),
+			);
 			_internals.generateCourseCorrection = () => ({
 				alert: 'ALERT',
 				category: 'coordination_error',
@@ -600,28 +499,16 @@ describe('createPrmHook', () => {
 		});
 
 		test('updates prmEscalationLevel from escalation tracker', async () => {
-			// Issue #2134: three genuinely distinct, non-overlapping episodes so
-			// each tick clears the episode gate and strikes — a fixed, repeated
-			// stepRange would suppress the 2nd and 3rd ticks as re-reports of the
-			// same episode and the level would never advance past 1.
+			// Issue #2134: distinct, non-overlapping episodes per tick — see
+			// helpers/episodes.ts for why a repeated fixed stepRange won't do.
 			const config = createMockConfig({ enabled: true });
 			const trajectory = createMockTrajectory();
 			const session = createMockSession(sessionId);
 			_internals.getAgentSession = () => session;
 			_internals.readTrajectory = async () => trajectory;
-			let tick = 0;
-			_internals.detectPatterns = () => {
-				tick += 1;
-				return {
-					matches: [
-						createMockPatternMatch('repetition_loop', {
-							stepRange: [tick * 3 - 2, tick * 3],
-						}),
-					],
-					detectionTimeMs: 5,
-					patternsChecked: 5,
-				};
-			};
+			_internals.detectPatterns = createTickingDetectPatterns((overrides) =>
+				createMockPatternMatch('repetition_loop', overrides),
+			);
 			_internals.generateCourseCorrection = () => ({
 				alert: 'ALERT',
 				category: 'coordination_error',
@@ -686,28 +573,16 @@ describe('createPrmHook', () => {
 		});
 
 		test('sets prmHardStopPending on third detection', async () => {
-			// Issue #2134: three genuinely distinct, non-overlapping episodes so
-			// each tick clears the episode gate and strikes — a fixed, repeated
-			// stepRange would suppress the 2nd and 3rd ticks as re-reports of the
-			// same episode and the hard stop would never arm.
+			// Issue #2134: distinct, non-overlapping episodes per tick — see
+			// helpers/episodes.ts for why a repeated fixed stepRange won't do.
 			const config = createMockConfig({ enabled: true });
 			const trajectory = createMockTrajectory();
 			const session = createMockSession(sessionId);
 			_internals.getAgentSession = () => session;
 			_internals.readTrajectory = async () => trajectory;
-			let tick = 0;
-			_internals.detectPatterns = () => {
-				tick += 1;
-				return {
-					matches: [
-						createMockPatternMatch('repetition_loop', {
-							stepRange: [tick * 3 - 2, tick * 3],
-						}),
-					],
-					detectionTimeMs: 5,
-					patternsChecked: 5,
-				};
-			};
+			_internals.detectPatterns = createTickingDetectPatterns((overrides) =>
+				createMockPatternMatch('repetition_loop', overrides),
+			);
 			_internals.generateCourseCorrection = () => ({
 				alert: 'ALERT',
 				category: 'coordination_error',
@@ -981,28 +856,16 @@ describe('createPrmHook', () => {
 		});
 
 		test('error in toolAfter does not affect subsequent calls', async () => {
-			// Issue #2134: two genuinely distinct, non-overlapping episodes so
-			// both ticks clear the episode gate and push an advisory — a fixed,
-			// repeated stepRange would suppress the 2nd tick as a re-report of the
-			// same episode and only one advisory would ever be pushed.
+			// Issue #2134: distinct, non-overlapping episodes per tick — see
+			// helpers/episodes.ts for why a repeated fixed stepRange won't do.
 			const config = createMockConfig({ enabled: true });
 			const trajectory = createMockTrajectory();
 			const session = createMockSession(sessionId);
 			_internals.getAgentSession = () => session;
 			_internals.readTrajectory = async () => trajectory;
-			let tick = 0;
-			_internals.detectPatterns = () => {
-				tick += 1;
-				return {
-					matches: [
-						createMockPatternMatch('repetition_loop', {
-							stepRange: tick === 1 ? [1, 3] : [4, 6],
-						}),
-					],
-					detectionTimeMs: 5,
-					patternsChecked: 5,
-				};
-			};
+			_internals.detectPatterns = createTickingDetectPatterns((overrides) =>
+				createMockPatternMatch('repetition_loop', overrides),
+			);
 			_internals.generateCourseCorrection = () => ({
 				alert: 'ALERT',
 				category: 'coordination_error',

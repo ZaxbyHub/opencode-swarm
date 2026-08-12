@@ -1,6 +1,13 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import { _internals, createPrmHook } from '../index';
-import type { PatternMatch, PrmConfig, TrajectoryEntry } from '../types';
+import type { PatternMatch, TrajectoryEntry } from '../types';
+import { createTickingDetectPatterns, episodeAt } from './helpers/episodes';
+import {
+	createMockConfig,
+	createMockPatternMatch,
+	createMockSession,
+	setupEscalatingRepetitionMocks,
+} from './helpers/fixtures';
 
 // Original function references saved once at module load for save/restore
 const originalGetAgentSession = _internals.getAgentSession;
@@ -14,26 +21,6 @@ const originalCleanupOldTrajectoryFiles = _internals.cleanupOldTrajectoryFiles;
 const originalRecordReplayEntry = _internals.recordReplayEntry;
 const originalStartReplayRecording = _internals.startReplayRecording;
 const originalTelemetry = _internals.telemetry;
-
-/**
- * Helper: Create default PRM config
- */
-function createMockConfig(overrides: Partial<PrmConfig> = {}): PrmConfig {
-	return {
-		enabled: true,
-		pattern_thresholds: {
-			repetition_loop: 2,
-			ping_pong: 4,
-			expansion_drift: 3,
-			stuck_on_test: 3,
-			context_thrash: 5,
-		},
-		max_trajectory_lines: 100,
-		escalation_enabled: true,
-		detection_timeout_ms: 5000,
-		...overrides,
-	};
-}
 
 /**
  * Helper: Create mock trajectory with repeated pattern for repetition_loop detection
@@ -180,83 +167,6 @@ function createStuckOnTestTrajectory(): TrajectoryEntry[] {
 			result: 'success',
 		},
 	];
-}
-
-/**
- * Helper: Create mock pattern match
- */
-function createMockPatternMatch(
-	pattern: PatternMatch['pattern'] = 'repetition_loop',
-	overrides: Partial<PatternMatch> = {},
-): PatternMatch {
-	return {
-		pattern,
-		severity: 'medium',
-		category: 'coordination_error',
-		stepRange: [1, 3],
-		description: `Test ${pattern} pattern detected`,
-		affectedAgents: ['coder'],
-		affectedTargets: ['src/foo.ts'],
-		occurrenceCount: 1,
-		...overrides,
-	};
-}
-
-/**
- * Helper: Create mock session with PRM state
- */
-function createMockSession(sessionId: string, delegationActive = true) {
-	return {
-		sessionId,
-		agentName: 'test-agent',
-		lastToolCallTime: Date.now(),
-		lastAgentEventTime: Date.now(),
-		delegationActive,
-		activeInvocationId: 1,
-		lastInvocationIdByAgent: {},
-		windows: {},
-		lastCompactionHint: 0,
-		architectWriteCount: 0,
-		lastCoderDelegationTaskId: null,
-		currentTaskId: '1.1',
-		gateLog: new Map(),
-		reviewerCallCount: new Map(),
-		lastGateFailure: null,
-		partialGateWarningsIssuedForTask: new Set(),
-		selfFixAttempted: false,
-		selfCodingWarnedAtCount: 0,
-		catastrophicPhaseWarnings: new Set(),
-		qaSkipCount: 0,
-		qaSkipTaskIds: [],
-		taskWorkflowStates: new Map(),
-		stageBCompletion: new Map(),
-		taskCouncilApproved: new Map(),
-		lastGateOutcome: null,
-		declaredCoderScope: null,
-		lastScopeViolation: null,
-		scopeViolationDetected: false,
-		modifiedFilesThisCoderTask: [],
-		turboMode: false,
-		qaGateSessionOverrides: {},
-		fullAutoMode: false,
-		fullAutoInteractionCount: 0,
-		fullAutoDeadlockCount: 0,
-		fullAutoLastQuestionHash: null,
-		model_fallback_index: 0,
-		modelFallbackExhausted: false,
-		coderRevisions: 0,
-		revisionLimitHit: false,
-		loopDetectionWindow: [],
-		pendingAdvisoryMessages: [] as string[],
-		sessionRehydratedAt: 0,
-		// PRM fields
-		prmPatternCounts: new Map<string, number>(),
-		prmEscalationLevel: 0,
-		prmLastPatternDetected: null as PatternMatch | null,
-		prmTrajectoryStep: 0,
-		prmHardStopPending: false,
-		prmEscalationTracker: undefined,
-	};
 }
 
 describe('PRM Integration Tests', () => {
@@ -407,41 +317,15 @@ describe('PRM Integration Tests', () => {
 		});
 
 		test('processes multiple repetition loop cycles with escalating corrections', async () => {
-			// Issue #2134: three genuinely distinct, non-overlapping episodes —
-			// the episode gate caps a single occurrence at ONE strike, so three
-			// re-reports of a single ongoing episode (a fixed, repeated
-			// stepRange) would strike once and then be suppressed on ticks 2-3.
-			// Three real cycles are modeled as three ticks each carrying a match
-			// whose stepRange starts after the previous cycle's ended.
+			// Issue #2134: three real cycles modeled as three distinct,
+			// non-overlapping episodes — see helpers/episodes.ts.
 			const config = createMockConfig({ enabled: true });
 			const trajectory = createRepetitionLoopTrajectory();
-			const session = createMockSession(sessionId);
-			_internals.getAgentSession = () => session;
-			_internals.readTrajectory = async () => trajectory;
-			let tick = 0;
-			_internals.detectPatterns = () => {
-				tick += 1;
-				return {
-					matches: [
-						createMockPatternMatch('repetition_loop', {
-							stepRange: [tick * 3 - 2, tick * 3],
-						}),
-					],
-					detectionTimeMs: 5,
-					patternsChecked: 5,
-				};
-			};
-			_internals.generateCourseCorrection = () => ({
-				alert: 'TRAJECTORY ALERT: repetition_loop detected',
-				category: 'coordination_error',
-				guidance: 'Stop the repetitive loop',
-				action: 'Consolidate changes and change approach immediately.',
-				pattern: 'repetition_loop',
-				stepRange: [1, 3],
-			});
-			_internals.formatCourseCorrectionForInjection = (correction) => {
-				return `[TRAJECTORY ALERT] ${correction.alert}\n[CATEGORY] ${correction.category}\n[GUIDANCE] ${correction.guidance}\n[ACTION] ${correction.action}`;
-			};
+			const session = setupEscalatingRepetitionMocks(
+				_internals,
+				sessionId,
+				trajectory,
+			);
 
 			const { toolAfter } = createPrmHook(config, directory);
 
@@ -463,6 +347,10 @@ describe('PRM Integration Tests', () => {
 		});
 	});
 
+	// Issue #2134: `setupEscalatingRepetitionMocks` (see helpers/fixtures.ts)
+	// feeds each tick a distinct, non-overlapping episode — see
+	// helpers/episodes.ts. Required for every test below that expects N
+	// strikes across N `toolAfter` calls.
 	describe('Test 2: Escalation protocol - 3-strike hard stop', () => {
 		test('1st detection: guidance injected, escalation level = 1', async () => {
 			const config = createMockConfig({ enabled: true });
@@ -485,51 +373,14 @@ describe('PRM Integration Tests', () => {
 			);
 		});
 
-		/**
-		 * Issue #2134: the episode gate caps a single occurrence at ONE strike,
-		 * so each of these multi-tick tests needs each tick's match to be a
-		 * genuinely distinct, non-overlapping episode — not a re-report of the
-		 * same fixed stepRange, which the gate now recognizes as one episode and
-		 * suppresses after the first strike.
-		 */
-		function setupEscalatingRepetitionMocks(
-			sessId: string,
-			trajectory: TrajectoryEntry[],
-		) {
-			const session = createMockSession(sessId);
-			_internals.getAgentSession = () => session;
-			_internals.readTrajectory = async () => trajectory;
-			let tick = 0;
-			_internals.detectPatterns = () => {
-				tick += 1;
-				return {
-					matches: [
-						createMockPatternMatch('repetition_loop', {
-							stepRange: [tick * 3 - 2, tick * 3],
-						}),
-					],
-					detectionTimeMs: 5,
-					patternsChecked: 5,
-				};
-			};
-			_internals.generateCourseCorrection = () => ({
-				alert: 'TRAJECTORY ALERT: repetition_loop detected',
-				category: 'coordination_error',
-				guidance: 'Stop the repetitive loop',
-				action: 'Consolidate changes and change approach immediately.',
-				pattern: 'repetition_loop',
-				stepRange: [1, 3],
-			});
-			_internals.formatCourseCorrectionForInjection = (correction) => {
-				return `[TRAJECTORY ALERT] ${correction.alert}\n[CATEGORY] ${correction.category}\n[GUIDANCE] ${correction.guidance}\n[ACTION] ${correction.action}`;
-			};
-			return session;
-		}
-
 		test('2nd detection: stronger guidance, escalation level = 2', async () => {
 			const config = createMockConfig({ enabled: true });
 			const trajectory = createRepetitionLoopTrajectory();
-			const session = setupEscalatingRepetitionMocks(sessionId, trajectory);
+			const session = setupEscalatingRepetitionMocks(
+				_internals,
+				sessionId,
+				trajectory,
+			);
 
 			const { toolAfter } = createPrmHook(config, directory);
 
@@ -551,7 +402,11 @@ describe('PRM Integration Tests', () => {
 		test('3rd detection: hard stop triggered, prmHardStopPending = true', async () => {
 			const config = createMockConfig({ enabled: true });
 			const trajectory = createRepetitionLoopTrajectory();
-			const session = setupEscalatingRepetitionMocks(sessionId, trajectory);
+			const session = setupEscalatingRepetitionMocks(
+				_internals,
+				sessionId,
+				trajectory,
+			);
 
 			const { toolAfter } = createPrmHook(config, directory);
 
@@ -574,7 +429,11 @@ describe('PRM Integration Tests', () => {
 		test('hard stop telemetry only called on 3rd detection, not before', async () => {
 			const config = createMockConfig({ enabled: true });
 			const trajectory = createRepetitionLoopTrajectory();
-			const session = setupEscalatingRepetitionMocks(sessionId, trajectory);
+			const session = setupEscalatingRepetitionMocks(
+				_internals,
+				sessionId,
+				trajectory,
+			);
 
 			const { toolAfter } = createPrmHook(config, directory);
 
@@ -850,25 +709,15 @@ describe('PRM Integration Tests', () => {
 			// Simulate trajectory that triggers repetition_loop
 			_internals.readTrajectory = async () => createRepetitionLoopTrajectory();
 
-			// Issue #2134: three genuinely distinct, non-overlapping episodes —
-			// the episode gate caps a single occurrence at ONE strike, so a fixed,
-			// repeated stepRange would suppress ticks 2-3 as re-reports of the
-			// same episode.
-			let tick = 0;
-			_internals.detectPatterns = () => {
-				tick += 1;
-				return {
-					matches: [
-						createMockPatternMatch('repetition_loop', {
-							affectedAgents: ['coder'],
-							affectedTargets: ['src/foo.ts'],
-							stepRange: [tick * 3 - 2, tick * 3],
-						}),
-					],
-					detectionTimeMs: 5,
-					patternsChecked: 5,
-				};
-			};
+			// Issue #2134: distinct, non-overlapping episodes per tick — see
+			// helpers/episodes.ts.
+			_internals.detectPatterns = createTickingDetectPatterns((overrides) =>
+				createMockPatternMatch('repetition_loop', {
+					affectedAgents: ['coder'],
+					affectedTargets: ['src/foo.ts'],
+					...overrides,
+				}),
+			);
 			_internals.generateCourseCorrection = () => ({
 				alert: 'REPETITION LOOP DETECTED',
 				category: 'coordination_error',
@@ -918,13 +767,12 @@ describe('PRM Integration Tests', () => {
 			// (escalation counting/telemetry still run). Escalation to a new level
 			// (distinct key) still injects.
 			//
-			// Issue #2134: the two ticks use distinct, non-overlapping stepRanges —
-			// two genuinely separate episodes — so BOTH clear the episode gate and
-			// strike (pattern counting must advance on both). Escalation is
-			// disabled so the level stays 0 across both strikes, which is the
-			// condition this test exercises: the cross-turn ADVISORY dedupe
-			// (same pattern@level) suppressing re-injection even though the
-			// underlying episode gate allowed the second strike through.
+			// Issue #2134: distinct, non-overlapping episodes per tick (see
+			// helpers/episodes.ts) so both strikes clear the episode gate.
+			// Escalation is disabled so the level stays 0 across both strikes,
+			// which is the condition this test exercises: the cross-turn
+			// ADVISORY dedupe (same pattern@level) suppressing re-injection even
+			// though the underlying episode gate allowed the second strike through.
 			const config = createMockConfig({
 				enabled: true,
 				escalation_enabled: false, // hold level at 0 so the key stays constant
@@ -932,19 +780,9 @@ describe('PRM Integration Tests', () => {
 			const session = createMockSession('b1-cross-turn');
 			_internals.getAgentSession = () => session;
 			_internals.readTrajectory = async () => createRepetitionLoopTrajectory();
-			let tick = 0;
-			_internals.detectPatterns = () => {
-				tick += 1;
-				return {
-					matches: [
-						createMockPatternMatch('repetition_loop', {
-							stepRange: tick === 1 ? [1, 3] : [4, 6],
-						}),
-					],
-					detectionTimeMs: 1,
-					patternsChecked: 5,
-				};
-			};
+			_internals.detectPatterns = createTickingDetectPatterns((overrides) =>
+				createMockPatternMatch('repetition_loop', overrides),
+			);
 			_internals.generateCourseCorrection = () => ({
 				alert: 'ALERT',
 				category: 'coordination_error',
@@ -989,18 +827,13 @@ describe('PRM Integration Tests', () => {
 			};
 			_internals.readTrajectory = () =>
 				Promise.resolve(createRepetitionLoopTrajectory());
-			// Issue #2134: sessionA's two ticks need distinct, non-overlapping
-			// episodes so the second tick clears the episode gate and strikes —
-			// a fixed, repeated stepRange would suppress it as a re-report of the
-			// same episode and sessionA.prmEscalationLevel would stay at 1.
-			// `sessionACallCount` (incremented once per toolAfter call, by
-			// `getAgentSession` above) doubles as a monotonic tick counter, so
-			// deriving the stepRange from it keeps sessionA's two episodes
-			// distinct without affecting sessionB, whose ledger starts fresh.
+			// Issue #2134: `sessionACallCount` doubles as a monotonic tick, so
+			// episodeAt() keeps sessionA's two episodes distinct (see
+			// helpers/episodes.ts) without affecting sessionB's fresh ledger.
 			_internals.detectPatterns = () => ({
 				matches: [
 					createMockPatternMatch('repetition_loop', {
-						stepRange: [sessionACallCount * 3 - 2, sessionACallCount * 3],
+						stepRange: episodeAt(sessionACallCount),
 					}),
 				],
 				detectionTimeMs: 5,
