@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.138.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.138.3...v7.138.4) (2026-08-12)
+
+
+### Bug Fixes
+
+* **scope:** make coder authority durable ([0c3be73](https://github.com/ZaxbyHub/opencode-swarm/commit/0c3be73ad46040cffb1598ced652cb1af84d0521))
+
 ## [7.138.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.138.2...v7.138.3) (2026-08-11)
 
 
