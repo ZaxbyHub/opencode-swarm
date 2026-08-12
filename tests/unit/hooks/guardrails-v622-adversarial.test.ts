@@ -1,6 +1,9 @@
-import { beforeEach, describe, expect, it } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import type { GuardrailsConfig } from '../../../src/config/schema';
-import { createGuardrailsHooks } from '../../../src/hooks/guardrails';
+import {
+	_internals,
+	createGuardrailsHooks,
+} from '../../../src/hooks/guardrails';
 import {
 	getAgentSession,
 	resetSwarmState,
@@ -42,11 +45,12 @@ function makeAfterOutput(output: string = 'success') {
 describe('guardrails - v6.22 Task 2.1/2.2/2.3 adversarial tests', () => {
 	beforeEach(() => {
 		resetSwarmState();
+		_internals.allowUncorrelatedGateReceipts = true;
+	});
+	afterEach(() => {
+		_internals.allowUncorrelatedGateReceipts = false;
 	});
 
-	// ============================================================
-	// OBJECTIVE 1: Plan.json direct write block
-	// ============================================================
 	describe('OBJECTIVE 1: plan.json direct write block', () => {
 		it('write tool targeting .swarm/plan.json → throws PLAN STATE VIOLATION', async () => {
 			const config = defaultConfig();
@@ -109,9 +113,6 @@ describe('guardrails - v6.22 Task 2.1/2.2/2.3 adversarial tests', () => {
 		});
 	});
 
-	// ============================================================
-	// OBJECTIVE 2: Patch path extraction (git diff, traditional diff, 1MB limit)
-	// ============================================================
 	describe('OBJECTIVE 2: patch path extraction', () => {
 		const ORCHESTRATOR_NAME = 'architect';
 
@@ -318,9 +319,6 @@ index 1234567..89abcdef 100644
 		});
 	});
 
-	// ============================================================
-	// OBJECTIVE 3: pre_check_batch result → advanceTaskState with warn() on error
-	// ============================================================
 	describe('OBJECTIVE 3: pre_check_batch result handling with warn on error', () => {
 		it('gates_passed: true in pre_check_batch output → advanceTaskState called', async () => {
 			const config = defaultConfig();
@@ -335,7 +333,8 @@ index 1234567..89abcdef 100644
 			session!.currentTaskId = taskId;
 			session!.taskWorkflowStates.set(taskId, 'coder_delegated');
 
-			const outputJson = JSON.stringify({ gates_passed: true });
+			const outputJson =
+				'{"batch_status":"completed","gates_passed":true,"lint":{"ran":true,"duration_ms":1},"secretscan":{"ran":true,"duration_ms":1},"sast_scan":{"ran":true,"duration_ms":1},"quality_budget":{"ran":true,"duration_ms":1},"total_duration_ms":4}';
 			await hooks.toolAfter(
 				makeInput(sessionId, 'pre_check_batch', 'call-1'),
 				makeAfterOutput(outputJson),

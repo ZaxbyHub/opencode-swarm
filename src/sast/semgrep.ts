@@ -3,10 +3,12 @@
  * Provides optional Semgrep detection and invocation for advanced static analysis
  */
 
-import * as child_process from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import * as logger from '../utils/logger.js';
+import {
+	resolveExecutableFromPath,
+	runExternalTool,
+} from '../utils/external-tool-runner';
 import type { SastFinding } from './rules/index.js';
 
 /**
@@ -25,6 +27,8 @@ export interface SemgrepOptions {
 	lang?: string;
 	/** When true, use --config auto instead of local rulesDir (for profile-driven languages) */
 	useAutoConfig?: boolean;
+	/** Host/tool cancellation propagated to the shared subprocess runner. */
+	abortSignal?: AbortSignal;
 }
 
 /**
@@ -42,7 +46,8 @@ export interface SemgrepResult {
 }
 
 /**
- * Cached Semgrep availability status
+ * Cached Semgrep availability status.
+ * Null means "not probed yet using the bounded async path".
  */
 let semgrepAvailableCache: boolean | null = null;
 
@@ -55,21 +60,32 @@ const DEFAULT_RULES_DIR = '.swarm/semgrep-rules';
  * Default timeout for Semgrep execution (30 seconds)
  */
 const DEFAULT_TIMEOUT_MS = 30000;
+const SEMGREP_AVAILABILITY_TIMEOUT_MS = 5_000;
+const SEMGREP_AVAILABILITY_MAX_STDOUT_BYTES = 16 * 1024;
+const SEMGREP_AVAILABILITY_MAX_STDERR_BYTES = 16 * 1024;
 
 /**
  * Per-stream cap on accumulated stdout/stderr from the Semgrep subprocess.
- * AGENTS.md invariant 3 requires bounded stdio: a misbehaving binary must
- * not be able to exhaust memory by streaming unbounded output. Once a
- * stream exceeds this cap we stop accumulating and terminate the child.
+ * AGENTS.md invariant 3 requires bounded stdio.
  */
 const MAX_OUTPUT_BYTES = 10 * 1024 * 1024; // 10MB per stream
 
-/**
- * Grace window between SIGTERM and SIGKILL when force-terminating the child.
- * On Windows SIGTERM is best-effort; the SIGKILL escalation guarantees the
- * orphaned process is reaped (AGENTS.md invariant 3 — killable subprocesses).
- */
-const KILL_GRACE_MS = 2000;
+function resolveSemgrepBinary(): string | null {
+	// The Node subprocess API cannot directly launch Windows command shims.
+	// Semgrep's supported Windows installs provide a native executable; treat a
+	// shim-only PATH as unavailable instead of introducing a shell launcher.
+	return _internals.resolveExecutableFromPath(
+		process.platform === 'win32' ? ['semgrep.exe'] : ['semgrep'],
+	);
+}
+
+function getAvailabilityProbeCwd(): string {
+	try {
+		return fs.realpathSync(process.cwd());
+	} catch {
+		return path.resolve(process.cwd());
+	}
+}
 
 export const _internals: {
 	isSemgrepAvailable: typeof isSemgrepAvailable;
@@ -78,7 +94,10 @@ export const _internals: {
 	runSemgrep: typeof runSemgrep;
 	getRulesDirectory: typeof getRulesDirectory;
 	hasBundledRules: typeof hasBundledRules;
-	executeWithTimeout: typeof executeWithTimeout;
+	resolveExecutableFromPath: typeof resolveExecutableFromPath;
+	resolveSemgrepBinary: typeof resolveSemgrepBinary;
+	runExternalTool: typeof runExternalTool;
+	getAvailabilityProbeCwd: typeof getAvailabilityProbeCwd;
 } = {
 	isSemgrepAvailable,
 	checkSemgrepAvailable,
@@ -86,40 +105,65 @@ export const _internals: {
 	runSemgrep,
 	getRulesDirectory,
 	hasBundledRules,
-	executeWithTimeout,
+	resolveExecutableFromPath,
+	resolveSemgrepBinary,
+	runExternalTool,
+	getAvailabilityProbeCwd,
 } as const;
 
 /**
- * Check if Semgrep CLI is available on the system
- * Uses caching to avoid shelling out on every check
- * @returns true if Semgrep is available, false otherwise
+ * Synchronous compatibility surface.
+ * Returns the last confirmed async availability result when cached; otherwise
+ * falls back to a pure PATH-resolution heuristic without spawning.
  */
 export function isSemgrepAvailable(): boolean {
-	// Return cached result if available
+	if (semgrepAvailableCache !== null) {
+		return semgrepAvailableCache;
+	}
+	return _internals.resolveSemgrepBinary() !== null;
+}
+
+/**
+ * Bounded async availability probe used by the live batch path.
+ * Caches only the result of the real shared-runner probe.
+ */
+export async function checkSemgrepAvailable(
+	cwd?: string,
+	abortSignal?: AbortSignal,
+): Promise<boolean> {
 	if (semgrepAvailableCache !== null) {
 		return semgrepAvailableCache;
 	}
 
-	try {
-		// Try to run semgrep --version using execFileSync (safer than exec)
-		child_process.execFileSync('semgrep', ['--version'], {
-			encoding: 'utf-8',
-			stdio: 'pipe',
-		});
-		semgrepAvailableCache = true;
-		return true;
-	} catch {
+	const executable = _internals.resolveSemgrepBinary();
+	if (!executable) {
 		semgrepAvailableCache = false;
 		return false;
 	}
-}
 
-/**
- * Check if Semgrep is available (async version for consistency)
- * @returns Promise resolving to availability status
- */
-export async function checkSemgrepAvailable(): Promise<boolean> {
-	return _internals.isSemgrepAvailable();
+	const run = await _internals.runExternalTool({
+		executable,
+		args: ['--version'],
+		cwd: cwd ?? _internals.getAvailabilityProbeCwd(),
+		timeoutMs: SEMGREP_AVAILABILITY_TIMEOUT_MS,
+		maxStdoutBytes: SEMGREP_AVAILABILITY_MAX_STDOUT_BYTES,
+		maxStderrBytes: SEMGREP_AVAILABILITY_MAX_STDERR_BYTES,
+		abortSignal,
+	});
+
+	// Cancellation, timeout, spawn failure, and truncated output describe this
+	// probe attempt, not Semgrep's durable availability. Caching them would let
+	// one cancelled request disable Tier B for every later scan in the process.
+	if (
+		run.status === 'completed' &&
+		run.exitCode === 0 &&
+		!run.stdoutTruncated &&
+		!run.stderrTruncated
+	) {
+		semgrepAvailableCache = true;
+		return true;
+	}
+	return false;
 }
 
 /**
@@ -140,42 +184,106 @@ function parseSemgrepResults(semgrepOutput: string): SastFinding[] {
 	try {
 		const parsed = JSON.parse(semgrepOutput);
 
-		// Handle different Semgrep output formats
-		const results = parsed.results || parsed;
-
-		if (!Array.isArray(results)) {
-			return [];
+		// Handle the legacy bare-results array as well as Semgrep's structured
+		// object. A completed process can still report scan/parser failures in the
+		// top-level errors array, so those must invalidate the entire result.
+		let results: unknown;
+		if (Array.isArray(parsed)) {
+			results = parsed;
+		} else if (parsed && typeof parsed === 'object') {
+			const output = parsed as Record<string, unknown>;
+			if (output.errors !== undefined && !Array.isArray(output.errors)) {
+				throw new Error('invalid Semgrep errors shape');
+			}
+			if (Array.isArray(output.errors) && output.errors.length > 0) {
+				throw new SemgrepScanError(
+					`Semgrep reported ${output.errors.length} scan error${output.errors.length === 1 ? '' : 's'}`,
+				);
+			}
+			results = output.results;
 		}
+
+		if (!Array.isArray(results))
+			throw new Error('invalid Semgrep result shape');
 
 		for (const result of results) {
-			if (!result || typeof result !== 'object') continue;
-			const severity = mapSemgrepSeverity(
-				result.extra?.severity || result.severity,
-			);
+			if (!result || typeof result !== 'object' || Array.isArray(result)) {
+				throw new Error('invalid Semgrep result entry');
+			}
+			const entry = result as Record<string, unknown>;
+			const extra =
+				entry.extra &&
+				typeof entry.extra === 'object' &&
+				!Array.isArray(entry.extra)
+					? (entry.extra as Record<string, unknown>)
+					: null;
+			const start =
+				entry.start &&
+				typeof entry.start === 'object' &&
+				!Array.isArray(entry.start)
+					? (entry.start as Record<string, unknown>)
+					: null;
+			const ruleId = entry.check_id ?? entry.rule_id;
+			const file = entry.path ?? start?.filename ?? entry.file;
+			const line = start?.line ?? entry.line;
+			const column = start?.col ?? entry.column;
+			const severityValue = extra?.severity ?? entry.severity;
+			const message = extra?.message ?? entry.message;
+			const knownSeverities = new Set([
+				'error',
+				'critical',
+				'warning',
+				'high',
+				'medium',
+				'info',
+				'low',
+			]);
+			if (
+				typeof ruleId !== 'string' ||
+				ruleId.length === 0 ||
+				typeof file !== 'string' ||
+				file.length === 0 ||
+				file.includes('\0') ||
+				typeof line !== 'number' ||
+				!Number.isInteger(line) ||
+				line < 1 ||
+				(column !== undefined &&
+					(typeof column !== 'number' ||
+						!Number.isInteger(column) ||
+						column < 1)) ||
+				typeof severityValue !== 'string' ||
+				!knownSeverities.has(severityValue.toLowerCase()) ||
+				(message !== undefined && typeof message !== 'string') ||
+				(extra?.fix !== undefined && typeof extra.fix !== 'string') ||
+				(extra?.lines !== undefined && typeof extra.lines !== 'string') ||
+				(entry.lines !== undefined && typeof entry.lines !== 'string')
+			) {
+				throw new Error('invalid Semgrep result entry');
+			}
+			const severity = mapSemgrepSeverity(severityValue);
 
 			findings.push({
-				rule_id: result.check_id || result.rule_id || 'unknown',
+				rule_id: ruleId,
 				severity,
-				message:
-					result.extra?.message || result.message || 'Security issue detected',
+				message: message ?? 'Security issue detected',
 				location: {
-					file:
-						result.path || result.start?.filename || result.file || 'unknown',
-					line: result.start?.line || result.line || 1,
-					column: result.start?.col || result.column,
+					file,
+					line,
+					column: column as number | undefined,
 				},
-				remediation: result.extra?.fix,
-				excerpt: result.extra?.lines || result.lines || '',
+				remediation: extra?.fix as string | undefined,
+				excerpt: (extra?.lines ?? entry.lines ?? '') as string,
 			});
 		}
-	} catch {
-		// If JSON parsing fails, return empty findings
-		// This handles cases where Semgrep returns non-JSON output
-		return [];
+	} catch (error) {
+		if (error instanceof SemgrepScanError) throw error;
+		throw new Error('Semgrep returned invalid JSON output', { cause: error });
 	}
 
 	return findings;
 }
+
+class SemgrepScanError extends Error {}
 
 /**
  * Map Semgrep severity to our severity format
@@ -203,203 +311,6 @@ function mapSemgrepSeverity(
 }
 
 /**
- * Execute a command with timeout
- * @param command - Command to execute
- * @param args - Command arguments (safe array, no shell injection)
- * @param options - Execution options including timeout
- * @returns Promise resolving to command output
- */
-async function executeWithTimeout(
-	command: string,
-	args: string[],
-	options: {
-		cwd?: string;
-		timeoutMs: number;
-		maxOutputBytes?: number;
-		/**
-		 * Test-only hook invoked once with the spawned child's pid, immediately
-		 * after `spawn()` returns. Lets tests assert the child is actually
-		 * reaped (not just that a placeholder exit code was set) without
-		 * mocking `node:child_process` (which would leak across test files —
-		 * AGENTS.md invariant 7). No production caller passes this.
-		 */
-		onSpawn?: (pid: number | undefined) => void;
-	},
-): Promise<{
-	stdout: string;
-	stderr: string;
-	exitCode: number;
-	truncated: boolean;
-}> {
-	const maxOutputBytes = options.maxOutputBytes ?? MAX_OUTPUT_BYTES;
-	return new Promise((resolve) => {
-		// Use spawn with args array and NO shell to prevent command injection.
-		// stdin: 'ignore' (AGENTS.md invariant 3) — a never-closed stdin pipe
-		// under Bun on Windows can block the child from exiting.
-		const child = child_process.spawn(command, args, {
-			shell: false, // SECURITY FIX: prevent shell injection
-			cwd: options.cwd,
-			stdio: ['ignore', 'pipe', 'pipe'],
-		});
-		options.onSpawn?.(child.pid);
-
-		let stdout = '';
-		let stderr = '';
-		let stdoutBytes = 0;
-		let stderrBytes = 0;
-		let stdoutTruncated = false;
-		let stderrTruncated = false;
-		let settled = false;
-		let timeout: ReturnType<typeof setTimeout> | undefined;
-		let escalation: ReturnType<typeof setTimeout> | undefined;
-
-		/**
-		 * Resolve exactly once, always clearing the timeout and guaranteeing a
-		 * best-effort terminate of the child regardless of which event settled
-		 * the promise (AGENTS.md invariant 3: an outer timeout alone lets the
-		 * awaiter proceed but does not abort the child). If the child already
-		 * exited (close event) the kill calls are harmless no-ops.
-		 */
-		const settle = (result: {
-			stdout: string;
-			stderr: string;
-			exitCode: number;
-		}): void => {
-			if (settled) return;
-			settled = true;
-			if (timeout) clearTimeout(timeout);
-			// Clear any pending SIGKILL escalation timer. On first settle() call,
-			// escalation is undefined, so this is a no-op; but the defensive clear
-			// ensures safety if settle() were ever called from multiple paths (it isn't,
-			// due to the settled guard above, but this makes the intent explicit).
-			if (escalation) clearTimeout(escalation);
-			const truncated = stdoutTruncated || stderrTruncated;
-			if (child.exitCode === null && child.signalCode === null) {
-				try {
-					child.kill('SIGTERM');
-				} catch (e) {
-					// Only log non-ESRCH errors (ESRCH = process already gone, expected)
-					if (e instanceof Error && !e.message.includes('ESRCH')) {
-						logger.log('[semgrep] child.kill failed:', e.message);
-					}
-				}
-				escalation = setTimeout(() => {
-					try {
-						child.kill('SIGKILL');
-					} catch (e) {
-						// Only log non-ESRCH errors (ESRCH = process already gone, expected)
-						if (e instanceof Error && !e.message.includes('ESRCH')) {
-							logger.log('[semgrep] child.kill failed:', e.message);
-						}
-					}
-				}, KILL_GRACE_MS);
-				if (
-					typeof (escalation as { unref?: () => void }).unref === 'function'
-				) {
-					(escalation as { unref: () => void }).unref();
-				}
-			}
-			resolve({ ...result, truncated });
-		};
-
-		timeout = setTimeout(() => {
-			settle({
-				stdout,
-				stderr: 'Process timed out',
-				exitCode: 124, // Common timeout exit code
-			});
-		}, options.timeoutMs);
-		if (typeof (timeout as { unref?: () => void }).unref === 'function') {
-			(timeout as { unref: () => void }).unref();
-		}
-
-		child.stdout?.on('data', (data) => {
-			if (stdoutTruncated) return;
-			const chunk = data.toString();
-			const chunkBytes = Buffer.byteLength(chunk, 'utf8');
-			if (stdoutBytes + chunkBytes > maxOutputBytes) {
-				// Slice by characters to fit within the remaining byte budget.
-				// For ASCII-only output this is exact; for multibyte chars the
-				// result may be slightly under the cap, which is conservative
-				// and safe (F-003).
-				const remaining = Math.max(0, maxOutputBytes - stdoutBytes);
-				stdout += Buffer.from(chunk, 'utf8')
-					.subarray(0, remaining)
-					.toString('utf8');
-				stdoutBytes = maxOutputBytes;
-				stdoutTruncated = true;
-				// Runaway output — terminate so we stop accumulating. The close
-				// event then settles with the truncated buffer.
-				settle({
-					stdout,
-					stderr,
-					exitCode: -1, // Overflow termination
-				});
-				try {
-					child.kill('SIGTERM');
-				} catch (e) {
-					// Only log non-ESRCH errors (ESRCH = process already gone, expected)
-					if (e instanceof Error && !e.message.includes('ESRCH')) {
-						logger.log('[semgrep] child.kill failed:', e.message);
-					}
-				}
-			} else {
-				stdout += chunk;
-				stdoutBytes += chunkBytes;
-			}
-		});
-
-		child.stderr?.on('data', (data) => {
-			if (stderrTruncated) return;
-			const chunk = data.toString();
-			const chunkBytes = Buffer.byteLength(chunk, 'utf8');
-			if (stderrBytes + chunkBytes > maxOutputBytes) {
-				// Slice by bytes to fit within the remaining byte budget (F-003).
-				const remaining = Math.max(0, maxOutputBytes - stderrBytes);
-				stderr += Buffer.from(chunk, 'utf8')
-					.subarray(0, remaining)
-					.toString('utf8');
-				stderrBytes = maxOutputBytes;
-				stderrTruncated = true;
-				// Runaway stderr — terminate so we stop accumulating (F-001).
-				settle({
-					stdout,
-					stderr,
-					exitCode: -1, // Overflow termination
-				});
-				try {
-					child.kill('SIGTERM');
-				} catch (e) {
-					// Only log non-ESRCH errors (ESRCH = process already gone, expected)
-					if (e instanceof Error && !e.message.includes('ESRCH')) {
-						logger.log('[semgrep] child.kill failed:', e.message);
-					}
-				}
-			} else {
-				stderr += chunk;
-				stderrBytes += chunkBytes;
-			}
-		});
-
-		child.on('close', (code) => {
-			settle({
-				stdout,
-				stderr,
-				exitCode: code ?? 0,
-			});
-		});
-
-		child.on('error', (err) => {
-			settle({
-				stdout,
-				stderr: err.message,
-				exitCode: 1,
-			});
-		});
-	});
-}
-
-/**
  * Run Semgrep on specified files
  * @param options - Semgrep options
  * @returns Promise resolving to SemgrepResult
@@ -420,8 +331,17 @@ export async function runSemgrep(
 		};
 	}
 
-	// Check Semgrep availability
-	if (!_internals.isSemgrepAvailable()) {
+	if (
+		!(await _internals.checkSemgrepAvailable(options.cwd, options.abortSignal))
+	) {
+		if (options.abortSignal?.aborted) {
+			return {
+				available: true,
+				findings: [],
+				error: 'Semgrep execution cancelled',
+				engine: 'tier_a',
+			};
+		}
 		return {
 			available: false,
 			findings: [],
@@ -430,11 +350,20 @@ export async function runSemgrep(
 		};
 	}
 
-	// Build the Semgrep command arguments (safe array, no shell injection)
+	const executable = _internals.resolveSemgrepBinary();
+	if (!executable) {
+		return {
+			available: false,
+			findings: [],
+			error: 'Semgrep is not installed or not available on PATH',
+			engine: 'tier_a',
+		};
+	}
+
 	const args: string[] = [
 		options.useAutoConfig ? '--config=auto' : `--config=./${rulesDir}`,
 		'--json',
-		'--quiet', // Only output findings
+		'--quiet',
 	];
 	if (options.lang) {
 		args.push(`--lang=${options.lang}`);
@@ -442,16 +371,17 @@ export async function runSemgrep(
 	args.push(...files);
 
 	try {
-		const result = await executeWithTimeout('semgrep', args, {
+		const result = await _internals.runExternalTool({
+			executable,
+			args,
+			cwd: options.cwd ?? _internals.getAvailabilityProbeCwd(),
 			timeoutMs,
-			cwd: options.cwd,
+			maxStdoutBytes: MAX_OUTPUT_BYTES,
+			maxStderrBytes: MAX_OUTPUT_BYTES,
+			abortSignal: options.abortSignal,
 		});
 
-		// Output was capped mid-stream: the JSON is incomplete and would parse to
-		// zero findings. Surface that as an error (engine: tier_a) rather than
-		// silently reporting a clean scan — a SAST gate must never fail open
-		// because the scanner produced too much output.
-		if (result.truncated) {
+		if (result.stdoutTruncated || result.stderrTruncated) {
 			return {
 				available: true,
 				findings: [],
@@ -459,13 +389,21 @@ export async function runSemgrep(
 				engine: 'tier_a',
 			};
 		}
+		if (result.status !== 'completed') {
+			return {
+				available: true,
+				findings: [],
+				error:
+					result.message ??
+					(result.status === 'timeout'
+						? 'Semgrep process timed out'
+						: `Semgrep process ${result.status}`),
+				engine: 'tier_a',
+			};
+		}
 
 		if (result.exitCode !== 0) {
-			// Semgrep returned non-zero exit code
-			// This can happen when findings are detected (exit code 1)
-			// or when there's an actual error (exit code > 1)
 			if (result.exitCode === 1 && result.stdout) {
-				// Exit code 1 means findings were found - this is actually OK
 				const findings = parseSemgrepResults(result.stdout);
 				return {
 					available: true,
@@ -474,7 +412,6 @@ export async function runSemgrep(
 				};
 			}
 
-			// Other exit codes indicate errors
 			return {
 				available: true,
 				findings: [],
@@ -483,7 +420,6 @@ export async function runSemgrep(
 			};
 		}
 
-		// Parse results from stdout
 		const findings = parseSemgrepResults(result.stdout);
 
 		return {
@@ -492,7 +428,6 @@ export async function runSemgrep(
 			engine: 'tier_a+tier_b',
 		};
 	} catch (error) {
-		// Handle any unexpected errors gracefully
 		const errorMessage =
 			error instanceof Error ? error.message : 'Unknown error running Semgrep';
 

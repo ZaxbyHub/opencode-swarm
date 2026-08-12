@@ -14,7 +14,11 @@ import { saveEvidence } from '../evidence/manager';
 import { getProfileForFile } from '../lang/detector';
 import { getLanguageForExtension } from '../lang/registry';
 import { executeRulesSync } from '../sast/rules/index';
-import { isSemgrepAvailable, runSemgrep } from '../sast/semgrep';
+import {
+	checkSemgrepAvailable,
+	isSemgrepAvailable,
+	runSemgrep,
+} from '../sast/semgrep';
 import { warn } from '../utils';
 import { createSwarmTool } from './create-tool';
 import {
@@ -53,6 +57,8 @@ export interface SastScanInput {
 	 * baseline diff mode: only findings absent from the phase baseline fail.
 	 */
 	phase?: number;
+	/** Host/tool cancellation propagated to optional external scanners. */
+	abort_signal?: AbortSignal;
 }
 
 export interface SastScanResult {
@@ -248,6 +254,7 @@ export async function sastScan(
 		capture_baseline = false,
 		phase,
 		offline_only = false,
+		abort_signal,
 	} = input;
 
 	// Check feature flag
@@ -278,13 +285,18 @@ export async function sastScan(
 
 	// Offline evaluation must not even probe PATH for Semgrep. In particular,
 	// this keeps the profile-driven `--config=auto` path unreachable.
-	const semgrepAvailable = !offline_only && _internals.isSemgrepAvailable();
+	const semgrepAvailable =
+		!offline_only &&
+		(await _internals.checkSemgrepAvailable(directory, abort_signal));
 	const engine: 'tier_a' | 'tier_a+tier_b' = semgrepAvailable
 		? 'tier_a+tier_b'
 		: 'tier_a';
 
 	// Group files by language for Semgrep batch scanning
 	const filesByLanguage = new Map<string, string[]>();
+	let semgrepError: string | undefined = abort_signal?.aborted
+		? 'SAST scan cancelled'
+		: undefined;
 
 	// Process each file
 	for (const filePath of changed_files) {
@@ -391,6 +403,10 @@ export async function sastScan(
 	if (semgrepAvailable && filesByLanguage.size > 0) {
 		try {
 			for (const [bucketKey, bucketFiles] of filesByLanguage.entries()) {
+				if (abort_signal?.aborted) {
+					semgrepError = 'SAST scan cancelled';
+					break;
+				}
 				if (bucketFiles.length === 0) continue;
 
 				let semgrepResult: Awaited<ReturnType<typeof runSemgrep>>;
@@ -402,12 +418,20 @@ export async function sastScan(
 						files: bucketFiles,
 						lang,
 						useAutoConfig: true,
+						cwd: directory,
+						abortSignal: abort_signal,
 					});
 				} else {
 					// Existing local-rules mode
 					semgrepResult = await _internals.runSemgrep({
 						files: bucketFiles,
+						cwd: directory,
+						abortSignal: abort_signal,
 					});
+				}
+				if (semgrepResult.error) {
+					semgrepError = semgrepResult.error;
+					break;
 				}
 
 				if (semgrepResult.findings.length > 0) {
@@ -442,9 +466,36 @@ export async function sastScan(
 				}
 			}
 		} catch (error) {
-			// Graceful fallback to Tier A only
-			warn(`SAST Scan: Semgrep failed, falling back to Tier A: ${error}`);
+			semgrepError = error instanceof Error ? error.message : String(error);
 		}
+	}
+
+	if (semgrepError) {
+		const finalFindings = allFindings.slice(0, MAX_FINDINGS);
+		const summary = {
+			engine: 'tier_a' as const,
+			files_scanned: filesScanned,
+			findings_count: finalFindings.length,
+			findings_by_severity: countBySeverity(finalFindings),
+		};
+		warn(`SAST Scan: Semgrep execution failed closed: ${semgrepError}`);
+		await saveEvidence(directory, 'sast_scan', {
+			task_id: 'sast_scan',
+			type: 'sast',
+			timestamp: new Date().toISOString(),
+			agent: 'sast_scan',
+			verdict: 'fail',
+			summary: `Semgrep execution failed: ${semgrepError}`,
+			...summary,
+			findings: finalFindings,
+			baseline_used: false,
+		});
+		return {
+			verdict: 'fail',
+			error: `Semgrep execution failed: ${semgrepError}`,
+			findings: finalFindings,
+			summary,
+		};
 	}
 
 	// ── Capture mode ─────────────────────────────────────────────────────────
@@ -704,7 +755,7 @@ export const sast_scan: ToolDefinition = createSwarmTool({
 				'Current phase number (positive integer >= 1). Required with capture_baseline. Enables baseline diff when provided on non-capture scans.',
 			),
 	},
-	execute: async (args, directory) => {
+	execute: async (args, directory, ctx) => {
 		// Safe args extraction - guard against malformed args and malicious getters
 		let safeArgs: {
 			directory: string | undefined;
@@ -782,6 +833,7 @@ export const sast_scan: ToolDefinition = createSwarmTool({
 			severity_threshold: safeArgs.severity_threshold ?? 'medium',
 			capture_baseline: safeArgs.capture_baseline,
 			phase: safeArgs.phase,
+			abort_signal: ctx?.abort,
 		};
 
 		const result = await _internals.sastScan(input, directory);
@@ -796,11 +848,14 @@ export const sast_scan: ToolDefinition = createSwarmTool({
 export const _internals: {
 	sastScan: typeof sastScan;
 	sast_scan: typeof sast_scan;
+	checkSemgrepAvailable: typeof checkSemgrepAvailable;
 	isSemgrepAvailable: typeof isSemgrepAvailable;
 	runSemgrep: typeof runSemgrep;
 } = {
 	sastScan,
 	sast_scan,
+	checkSemgrepAvailable: (directory, abortSignal) =>
+		checkSemgrepAvailable(directory, abortSignal),
 	// Keep live imported bindings for legacy file-scoped module mocks while
 	// exposing a local DI seam for new isolation-safe tests.
 	isSemgrepAvailable: () => isSemgrepAvailable(),

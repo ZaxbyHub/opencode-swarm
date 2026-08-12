@@ -28,7 +28,27 @@ interface BoundedStreamResult {
 	truncated: boolean;
 }
 
+interface BoundedStreamReadHandle {
+	promise: Promise<BoundedStreamResult>;
+	cancel: () => Promise<void>;
+}
+
 const DEFAULT_WINDOWS_EXTENSIONS = ['.exe', '.cmd', '.bat'];
+const TERMINATION_GRACE_MS = 20;
+const TERMINATION_FORCE_MS = 20;
+const TERMINATION_CONFIRM_MS = 20;
+const TERMINATION_FALLBACK_BUFFER_MS = 1;
+const STREAM_DRAIN_MS = 50;
+const STREAM_CANCEL_MS = 50;
+const MAX_TIMEOUT_MS = 2_147_483_647;
+const TERMINATION_WINDOWS_MS =
+	TERMINATION_GRACE_MS +
+	TERMINATION_FORCE_MS +
+	TERMINATION_CONFIRM_MS +
+	TERMINATION_FALLBACK_BUFFER_MS;
+const MAX_RUNNER_TIMEOUT_MS = MAX_TIMEOUT_MS - TERMINATION_WINDOWS_MS;
+const UNCONFIRMED_TERMINATION_MESSAGE =
+	'external tool process termination could not be confirmed';
 
 type ExitRaceResult =
 	| { kind: 'exit'; exitCode: number }
@@ -76,12 +96,40 @@ export function resolveExecutableFromPath(
 	return null;
 }
 
-async function readBoundedStream(
+function clampTimeoutMs(timeoutMs: number): number {
+	if (!Number.isFinite(timeoutMs)) {
+		return MAX_RUNNER_TIMEOUT_MS;
+	}
+	return Math.min(Math.max(1, Math.floor(timeoutMs)), MAX_RUNNER_TIMEOUT_MS);
+}
+
+function addTimeoutMs(baseMs: number, deltaMs: number): number {
+	if (baseMs >= MAX_TIMEOUT_MS) {
+		return MAX_TIMEOUT_MS;
+	}
+	return Math.min(MAX_TIMEOUT_MS, baseMs + deltaMs);
+}
+
+function computeSpawnTimeoutMs(timeoutMs: number): number {
+	let total = clampTimeoutMs(timeoutMs);
+	for (const windowMs of [
+		TERMINATION_GRACE_MS,
+		TERMINATION_FORCE_MS,
+		TERMINATION_CONFIRM_MS,
+		TERMINATION_FALLBACK_BUFFER_MS,
+	]) {
+		total = addTimeoutMs(total, windowMs);
+	}
+	return total;
+}
+
+function startBoundedStreamRead(
 	stream: BunCompatSubprocess['stdout'],
 	maxBytes: number,
-): Promise<BoundedStreamResult> {
+): BoundedStreamReadHandle {
 	const reader = stream.getReader();
 	let lockReleased = false;
+	let cancelPromise: Promise<void> | undefined;
 	const releaseLock = () => {
 		if (lockReleased) return;
 		lockReleased = true;
@@ -91,60 +139,72 @@ async function readBoundedStream(
 			// best effort
 		}
 	};
-	const cancelAndRelease = async () => {
-		try {
-			await reader.cancel();
-		} catch {
-			// best effort
-		} finally {
-			releaseLock();
-		}
+	const cancel = async () => {
+		cancelPromise ??= (async () => {
+			try {
+				await reader.cancel();
+			} catch {
+				// best effort
+			} finally {
+				releaseLock();
+			}
+		})();
+		return cancelPromise;
 	};
 
 	if (maxBytes <= 0) {
-		await cancelAndRelease();
-		return { text: '', truncated: true };
+		return {
+			cancel,
+			promise: (async () => {
+				await cancel();
+				return { text: '', truncated: true };
+			})(),
+		};
 	}
 
-	const chunks: Uint8Array[] = [];
-	let total = 0;
-	let truncated = false;
+	const promise = (async (): Promise<BoundedStreamResult> => {
+		const chunks: Uint8Array[] = [];
+		let total = 0;
+		let truncated = false;
 
-	try {
-		for (;;) {
-			const { done, value } = await reader.read();
-			if (done) break;
-			if (!value) continue;
+		try {
+			for (;;) {
+				const { done, value } = await reader.read();
+				if (done) break;
+				if (!value) continue;
 
-			const remaining = maxBytes - total;
-			if (value.byteLength > remaining) {
-				if (remaining > 0) {
-					chunks.push(value.slice(0, remaining));
-					total += remaining;
+				const remaining = maxBytes - total;
+				if (value.byteLength > remaining) {
+					if (remaining > 0) {
+						chunks.push(value.slice(0, remaining));
+						total += remaining;
+					}
+					truncated = true;
+					void cancel();
+					break;
 				}
-				truncated = true;
-				await cancelAndRelease();
-				break;
+
+				chunks.push(value);
+				total += value.byteLength;
 			}
-
-			chunks.push(value);
-			total += value.byteLength;
+		} finally {
+			releaseLock();
 		}
-	} finally {
-		releaseLock();
-	}
 
-	const out = new Uint8Array(total);
-	let offset = 0;
-	for (const chunk of chunks) {
-		out.set(chunk, offset);
-		offset += chunk.byteLength;
-	}
+		const out = new Uint8Array(total);
+		let offset = 0;
+		for (const chunk of chunks) {
+			out.set(chunk, offset);
+			offset += chunk.byteLength;
+		}
 
-	return {
-		text: new TextDecoder().decode(out),
-		truncated,
-	};
+		return {
+			text: new TextDecoder().decode(out),
+			truncated,
+		};
+	})();
+
+	return { promise, cancel };
 }
 
 function timeoutKillSignal(platform: NodeJS.Platform): NodeJS.Signals {
@@ -157,6 +217,84 @@ function killProcess(proc: BunCompatSubprocess | undefined): void {
 	} catch {
 		// best effort
 	}
+}
+
+function requestTermination(
+	proc: BunCompatSubprocess | undefined,
+	signal: NodeJS.Signals,
+): void {
+	try {
+		proc?.kill(signal);
+	} catch {
+		// best effort
+	}
+}
+
+async function waitForExitWithin(
+	exitPromise: Promise<number>,
+	waitMs: number,
+): Promise<number | null> {
+	if (waitMs <= 0) {
+		return Promise.resolve(null);
+	}
+
+	let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race<number | null>([
+			exitPromise,
+			new Promise<null>((resolve) => {
+				timeoutHandle = _internals.setTimeout(() => resolve(null), waitMs);
+			}),
+		]);
+	} finally {
+		if (timeoutHandle !== undefined) {
+			_internals.clearTimeout(timeoutHandle);
+		}
+	}
+}
+
+async function waitForValueWithin<T>(
+	promise: Promise<T>,
+	waitMs: number,
+): Promise<{ completed: true; value: T } | { completed: false }> {
+	let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			promise.then((value) => ({ completed: true as const, value })),
+			new Promise<{ completed: false }>((resolve) => {
+				timeoutHandle = _internals.setTimeout(
+					() => resolve({ completed: false }),
+					waitMs,
+				);
+			}),
+		]);
+	} finally {
+		if (timeoutHandle !== undefined) {
+			_internals.clearTimeout(timeoutHandle);
+		}
+	}
+}
+
+async function collectBoundedStreams(
+	stdoutRead: BoundedStreamReadHandle,
+	stderrRead: BoundedStreamReadHandle,
+	proc: BunCompatSubprocess,
+): Promise<{
+	stdout: BoundedStreamResult;
+	stderr: BoundedStreamResult;
+} | null> {
+	const reads = Promise.all([stdoutRead.promise, stderrRead.promise]);
+	let collected = await waitForValueWithin(reads, STREAM_DRAIN_MS);
+	if (!collected.completed) {
+		// A descendant may have inherited the parent's pipes after the parent
+		// exited. Treat this as abnormal output cleanup, attempt tree termination,
+		// and bound reader cancellation as well.
+		requestTermination(proc, 'SIGKILL');
+		void Promise.allSettled([stdoutRead.cancel(), stderrRead.cancel()]);
+		collected = await waitForValueWithin(reads, STREAM_CANCEL_MS);
+	}
+	if (!collected.completed) return null;
+	return { stdout: collected.value[0], stderr: collected.value[1] };
 }
 
 export async function runExternalTool(
@@ -190,6 +328,9 @@ export async function runExternalTool(
 	let abortListener: (() => void) | undefined;
 	let exitSettled = false;
 	let settledExitCode: number | null = null;
+	const runnerTimeoutMs = clampTimeoutMs(options.timeoutMs);
+	const spawnTimeoutMs = computeSpawnTimeoutMs(runnerTimeoutMs);
+	const startedAtMs = _internals.now();
 
 	try {
 		proc = _internals.bunSpawn([options.executable, ...options.args], {
@@ -198,18 +339,20 @@ export async function runExternalTool(
 			stdin: 'ignore',
 			stdout: 'pipe',
 			stderr: 'pipe',
-			timeout: options.timeoutMs,
+			timeout: spawnTimeoutMs,
+			killProcessTree: true,
 		});
 
-		const exitPromise: Promise<ExitRaceResult> = proc.exited.then(
-			(exitCode) => {
-				exitSettled = true;
-				settledExitCode = exitCode;
-				return { kind: 'exit', exitCode };
-			},
+		const exitPromise = proc.exited.then((exitCode) => {
+			exitSettled = true;
+			settledExitCode = exitCode;
+			return exitCode;
+		});
+		const exitRacePromise: Promise<ExitRaceResult> = exitPromise.then(
+			(exitCode) => ({ kind: 'exit', exitCode }),
 		);
 		const timeout = new Promise<ExitRaceResult>((resolve) => {
-			timeoutHandle = setTimeout(() => {
+			timeoutHandle = _internals.setTimeout(() => {
 				if (exitSettled) {
 					resolve({
 						kind: 'exit',
@@ -217,9 +360,8 @@ export async function runExternalTool(
 					});
 					return;
 				}
-				killProcess(proc);
 				resolve({ kind: 'timeout' });
-			}, options.timeoutMs);
+			}, runnerTimeoutMs);
 		});
 		const cancelled = new Promise<ExitRaceResult>((resolve) => {
 			if (!options.abortSignal) return;
@@ -227,7 +369,6 @@ export async function runExternalTool(
 			abortListener = () => {
 				if (handled) return;
 				handled = true;
-				killProcess(proc);
 				resolve({ kind: 'cancelled' });
 			};
 			options.abortSignal.addEventListener('abort', abortListener, {
@@ -238,37 +379,123 @@ export async function runExternalTool(
 			if (options.abortSignal.aborted) abortListener();
 		});
 
-		const stdoutPromise = readBoundedStream(
+		const stdoutRead = startBoundedStreamRead(
 			proc.stdout,
 			options.maxStdoutBytes,
 		);
-		const stderrPromise = readBoundedStream(
+		const stderrRead = startBoundedStreamRead(
 			proc.stderr,
 			options.maxStderrBytes,
 		);
-		const exitResult = await Promise.race([exitPromise, timeout, cancelled]);
-		if (exitResult.kind === 'timeout') {
-			return {
-				status: 'timeout',
-				exitCode: proc.exitCode,
-				stdout: '',
-				stderr: '',
-				stdoutTruncated: false,
-				stderrTruncated: false,
-			};
-		}
-		if (exitResult.kind === 'cancelled') {
+		const exitResult = await Promise.race([
+			exitRacePromise,
+			timeout,
+			cancelled,
+		]);
+		if (exitResult.kind === 'timeout' || exitResult.kind === 'cancelled') {
+			requestTermination(proc, 'SIGTERM');
+			let confirmedExitCode = await waitForExitWithin(
+				exitPromise,
+				TERMINATION_GRACE_MS,
+			);
+			if (confirmedExitCode === null) {
+				requestTermination(proc, 'SIGKILL');
+				confirmedExitCode = await waitForExitWithin(
+					exitPromise,
+					TERMINATION_FORCE_MS,
+				);
+			}
+			if (confirmedExitCode === null) {
+				confirmedExitCode = await waitForExitWithin(
+					exitPromise,
+					TERMINATION_CONFIRM_MS,
+				);
+			}
+			if (confirmedExitCode === null) {
+				const elapsedMs = Math.max(0, _internals.now() - startedAtMs);
+				const remainingMs = Math.max(0, spawnTimeoutMs - elapsedMs);
+				confirmedExitCode = await waitForExitWithin(exitPromise, remainingMs);
+			}
+			void Promise.allSettled([stdoutRead.cancel(), stderrRead.cancel()]);
+			const streams = await collectBoundedStreams(stdoutRead, stderrRead, proc);
+			if (!streams) {
+				return {
+					status: 'spawn-error',
+					exitCode: confirmedExitCode ?? proc.exitCode,
+					stdout: '',
+					stderr: '',
+					stdoutTruncated: true,
+					stderrTruncated: true,
+					message: 'external tool output cleanup did not complete',
+				};
+			}
+			const { stdout, stderr } = streams;
+			if (confirmedExitCode === null) {
+				return {
+					status: 'spawn-error',
+					exitCode: proc.exitCode,
+					stdout: stdout.text,
+					stderr: stderr.text,
+					stdoutTruncated: stdout.truncated,
+					stderrTruncated: stderr.truncated,
+					message: UNCONFIRMED_TERMINATION_MESSAGE,
+				};
+			}
+			if (exitResult.kind === 'timeout') {
+				return {
+					status: 'timeout',
+					exitCode: confirmedExitCode,
+					stdout: stdout.text,
+					stderr: stderr.text,
+					stdoutTruncated: stdout.truncated,
+					stderrTruncated: stderr.truncated,
+				};
+			}
 			return {
 				status: 'cancelled',
-				exitCode: proc.exitCode,
-				stdout: '',
-				stderr: '',
-				stdoutTruncated: false,
-				stderrTruncated: false,
+				exitCode: confirmedExitCode,
+				stdout: stdout.text,
+				stderr: stderr.text,
+				stdoutTruncated: stdout.truncated,
+				stderrTruncated: stderr.truncated,
 				message: 'external tool execution cancelled',
 			};
 		}
-		const [stdout, stderr] = await Promise.all([stdoutPromise, stderrPromise]);
+		const streams = await collectBoundedStreams(stdoutRead, stderrRead, proc);
+		if (!streams) {
+			return {
+				status: 'spawn-error',
+				exitCode: exitResult.exitCode,
+				stdout: '',
+				stderr: '',
+				stdoutTruncated: true,
+				stderrTruncated: true,
+				message: 'external tool output cleanup did not complete',
+			};
+		}
+		const { stdout, stderr } = streams;
+		if (proc.spawnError) {
+			return {
+				status: 'spawn-error',
+				exitCode: proc.exitCode,
+				stdout: stdout.text,
+				stderr: stderr.text,
+				stdoutTruncated: stdout.truncated,
+				stderrTruncated: stderr.truncated,
+				message: proc.spawnError.message,
+			};
+		}
+		if (proc.signalCode) {
+			return {
+				status: 'spawn-error',
+				exitCode: exitResult.exitCode,
+				stdout: stdout.text,
+				stderr: stderr.text,
+				stdoutTruncated: stdout.truncated,
+				stderrTruncated: stderr.truncated,
+				message: `external tool terminated by signal ${proc.signalCode}`,
+			};
+		}
 
 		return {
 			status: 'completed',
@@ -289,24 +516,28 @@ export async function runExternalTool(
 			message: err instanceof Error ? err.message : String(err),
 		};
 	} finally {
-		if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+		if (timeoutHandle !== undefined) _internals.clearTimeout(timeoutHandle);
 		if (abortListener && options.abortSignal) {
 			options.abortSignal.removeEventListener('abort', abortListener);
 		}
-		if (proc) {
-			try {
-				proc.kill();
-			} catch {
-				// best effort
-			}
-		}
+		if (!exitSettled) killProcess(proc);
 	}
 }
 
 export const _internals: {
 	bunSpawn: typeof bunSpawn;
 	platform: () => NodeJS.Platform;
+	now: () => number;
+	setTimeout: typeof setTimeout;
+	clearTimeout: typeof clearTimeout;
+	clampTimeoutMs: typeof clampTimeoutMs;
+	computeSpawnTimeoutMs: typeof computeSpawnTimeoutMs;
 } = {
 	bunSpawn,
 	platform: () => process.platform,
+	now: () => Date.now(),
+	setTimeout,
+	clearTimeout,
+	clampTimeoutMs,
+	computeSpawnTimeoutMs,
 };

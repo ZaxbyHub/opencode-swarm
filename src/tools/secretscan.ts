@@ -595,8 +595,26 @@ type BoundedFileReadOutcome =
 	| { status: 'ok'; buffer: Buffer; truncated: boolean }
 	| { status: 'incomplete'; reason: 'oversized' | 'non_file' | 'read_error' };
 
-function readBoundedFile(filePath: string): BoundedFileReadOutcome {
-	let fd: number;
+function getStableFileIdentity(
+	stat: Pick<fs.BigIntStats, 'dev' | 'ino'>,
+): string | null {
+	const { dev, ino } = stat;
+	if (dev < 0n || ino < 0n || (dev === 0n && ino === 0n)) {
+		return null;
+	}
+	return `${dev}:${ino}`;
+}
+
+function readBoundedFile(
+	filePath: string,
+	expectedPathStat: fs.BigIntStats,
+): BoundedFileReadOutcome {
+	const expectedIdentity = getStableFileIdentity(expectedPathStat);
+	if (expectedIdentity === null) {
+		return { status: 'incomplete', reason: 'read_error' };
+	}
+
+	let fd: number | null = null;
 	try {
 		const flags =
 			fs.constants.O_RDONLY | (O_NOFOLLOW !== undefined ? O_NOFOLLOW : 0);
@@ -606,13 +624,23 @@ function readBoundedFile(filePath: string): BoundedFileReadOutcome {
 	}
 
 	let outcome: BoundedFileReadOutcome;
+	let closeFailed = false;
 	try {
 		const stat = _internals.fstatFile(fd);
+		const descriptorIdentity = getStableFileIdentity(stat);
 		const initialSize = stat.size;
 		if (!stat.isFile()) {
 			outcome = { status: 'incomplete', reason: 'non_file' };
+		} else if (
+			descriptorIdentity === null ||
+			descriptorIdentity !== expectedIdentity
+		) {
+			outcome = { status: 'incomplete', reason: 'read_error' };
 		} else {
-			const bufferLength = Math.min(initialSize + 1, MAX_FILE_SIZE_BYTES + 1);
+			const bufferLength =
+				initialSize >= BigInt(MAX_FILE_SIZE_BYTES)
+					? MAX_FILE_SIZE_BYTES + 1
+					: Number(initialSize) + 1;
 			const buffer = Buffer.allocUnsafe(bufferLength);
 			let bytesRead = 0;
 			while (bytesRead < buffer.length) {
@@ -627,11 +655,26 @@ function readBoundedFile(filePath: string): BoundedFileReadOutcome {
 				bytesRead += count;
 			}
 			const postStat = _internals.fstatFile(fd);
-			if (postStat.size !== initialSize) {
+			const postDescriptorIdentity = getStableFileIdentity(postStat);
+			const postPathStat = _internals.lstatFile(filePath);
+			const postPathIdentity = getStableFileIdentity(postPathStat);
+			if (
+				!postStat.isFile() ||
+				postDescriptorIdentity === null ||
+				postDescriptorIdentity !== descriptorIdentity ||
+				postPathStat.isSymbolicLink() ||
+				!postPathStat.isFile() ||
+				postPathIdentity === null ||
+				postPathIdentity !== descriptorIdentity
+			) {
+				outcome = { status: 'incomplete', reason: 'read_error' };
+			} else if (postStat.size !== initialSize) {
 				outcome = {
 					status: 'incomplete',
 					reason:
-						postStat.size > MAX_FILE_SIZE_BYTES ? 'oversized' : 'read_error',
+						postStat.size > BigInt(MAX_FILE_SIZE_BYTES)
+							? 'oversized'
+							: 'read_error',
 				};
 			} else {
 				outcome = {
@@ -643,13 +686,16 @@ function readBoundedFile(filePath: string): BoundedFileReadOutcome {
 		}
 	} catch {
 		outcome = { status: 'incomplete', reason: 'read_error' };
+	} finally {
+		if (fd !== null) {
+			try {
+				_internals.closeFile(fd);
+			} catch {
+				closeFailed = true;
+			}
+		}
 	}
-
-	try {
-		_internals.closeFile(fd);
-	} catch {
-		return { status: 'incomplete', reason: 'read_error' };
-	}
+	if (closeFailed) return { status: 'incomplete', reason: 'read_error' };
 	return outcome;
 }
 
@@ -661,7 +707,7 @@ function scanFileForSecrets(
 
 	try {
 		// Use lstat to check if file is a symlink (defense in depth)
-		const lstat = fs.lstatSync(filePath);
+		const lstat = _internals.lstatFile(filePath);
 		if (lstat.isSymbolicLink()) {
 			return mode === 'explicit'
 				? { status: 'incomplete', reason: 'symlink' }
@@ -674,7 +720,7 @@ function scanFileForSecrets(
 
 		// Open first, inspect the opened handle, and read at most one byte beyond
 		// the limit so growth/replacement races cannot cause unbounded allocation.
-		const readOutcome = readBoundedFile(filePath);
+		const readOutcome = readBoundedFile(filePath, lstat);
 		if (readOutcome.status === 'incomplete') return readOutcome;
 		const { buffer, truncated } = readOutcome;
 
@@ -1517,7 +1563,7 @@ export async function runSecretscanOnFiles(
 				continue;
 			}
 
-			let lstat: fs.Stats;
+			let lstat: fs.BigIntStats;
 			try {
 				lstat = _internals.lstatFile(resolvedPath);
 			} catch (error) {
@@ -1669,10 +1715,10 @@ export const _internals: {
 	now: () => number;
 	yieldToEventLoop: typeof yieldToEventLoop;
 	openFile: typeof fs.openSync;
-	fstatFile: typeof fs.fstatSync;
+	fstatFile: (fd: number) => fs.BigIntStats;
 	readFileChunk: typeof fs.readSync;
 	closeFile: typeof fs.closeSync;
-	lstatFile: typeof fs.lstatSync;
+	lstatFile: (path: fs.PathLike) => fs.BigIntStats;
 	closeDirectory: (directory: fs.Dir) => void;
 } = {
 	secretscan,
@@ -1682,9 +1728,9 @@ export const _internals: {
 	now: Date.now,
 	yieldToEventLoop,
 	openFile: fs.openSync,
-	fstatFile: fs.fstatSync,
+	fstatFile: (fd) => fs.fstatSync(fd, { bigint: true }),
 	readFileChunk: fs.readSync,
 	closeFile: fs.closeSync,
-	lstatFile: fs.lstatSync,
+	lstatFile: (path) => fs.lstatSync(path, { bigint: true }),
 	closeDirectory: (directory) => directory.closeSync(),
 } as const;

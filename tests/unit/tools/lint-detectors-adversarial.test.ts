@@ -1,70 +1,64 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { _internals, detectAdditionalLinter } from '../../../src/tools/lint';
 
-afterEach(() => {
-	mock.restore();
-});
-
-import * as realFs from 'node:fs';
-import { detectAdditionalLinter } from '../../../src/tools/lint';
-
-// Mock node:fs for filesystem operations
+const originalExistsSync = _internals.existsSync;
+const originalIsCommandAvailable = _internals.isCommandAvailable;
+const originalPlatform = _internals.platform;
+const originalReadFileSync = _internals.readFileSync;
+const originalReaddirSync = _internals.readdirSync;
 const mockExistsSync = mock();
+const mockIsCommandAvailable = mock();
 const mockReadFileSync = mock();
 const mockReaddirSync = mock();
-mock.module('node:fs', () => ({
-	...realFs,
-	existsSync: (...args: unknown[]) => mockExistsSync(...args),
-	readFileSync: (...args: unknown[]) => mockReadFileSync(...args),
-	readdirSync: (...args: unknown[]) => mockReaddirSync(...args),
-}));
 
-// Mock isCommandAvailable from build/discovery
-const mockIsCommandAvailable = mock();
-mock.module('../../../src/build/discovery', () => ({
-	isCommandAvailable: (...args: unknown[]) => mockIsCommandAvailable(...args),
-}));
+afterEach(() => {
+	_internals.existsSync = originalExistsSync;
+	_internals.isCommandAvailable = originalIsCommandAvailable;
+	_internals.platform = originalPlatform;
+	_internals.readFileSync = originalReadFileSync;
+	_internals.readdirSync = originalReaddirSync;
+	mock.restore();
+});
 
 describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 	beforeEach(() => {
 		mock.restore();
 		mock.clearAllMocks();
+		_internals.existsSync = mockExistsSync as typeof _internals.existsSync;
+		_internals.isCommandAvailable =
+			mockIsCommandAvailable as typeof _internals.isCommandAvailable;
+		_internals.platform = () => 'linux';
+		_internals.readFileSync =
+			mockReadFileSync as typeof _internals.readFileSync;
+		_internals.readdirSync = mockReaddirSync as typeof _internals.readdirSync;
 	});
 
 	describe('Path traversal / injection', () => {
 		it('should not crash on path traversal attempt - "../../etc/passwd"', () => {
 			mockExistsSync.mockImplementation(() => false);
 			mockReaddirSync.mockImplementation(() => []);
-
 			const result = detectAdditionalLinter('../../etc/passwd');
-
 			expect(result).toBeNull();
-			// readdirSync is called by detectDotnetFormat and detectKtlint, so it will be called
 		});
 
 		it('should not crash on complex path traversal - "/dev/null/../../../etc"', () => {
 			mockExistsSync.mockImplementation(() => false);
 			mockReaddirSync.mockImplementation(() => []);
-
 			const result = detectAdditionalLinter('/dev/null/../../../etc');
-
 			expect(result).toBeNull();
 		});
 
 		it('should not crash on empty string cwd', () => {
 			mockExistsSync.mockImplementation(() => false);
 			mockReaddirSync.mockImplementation(() => []);
-
 			const result = detectAdditionalLinter('');
-
 			expect(result).toBeNull();
 		});
 
 		it('should not crash on current dir "." (should behave normally)', () => {
 			mockExistsSync.mockImplementation(() => false);
 			mockReaddirSync.mockImplementation(() => []);
-
 			const result = detectAdditionalLinter('.');
-
 			expect(result).toBeNull();
 			expect(mockExistsSync).toHaveBeenCalled();
 		});
@@ -72,18 +66,14 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 		it('should not crash on null-byte injection', () => {
 			mockExistsSync.mockImplementation(() => false);
 			mockReaddirSync.mockImplementation(() => []);
-
 			const result = detectAdditionalLinter('path\x00injection');
-
 			expect(result).toBeNull();
 		});
 
 		it('should not crash on deeply nested path traversal', () => {
 			mockExistsSync.mockImplementation(() => false);
 			mockReaddirSync.mockImplementation(() => []);
-
 			const result = detectAdditionalLinter('../../../../../../../etc/passwd');
-
 			expect(result).toBeNull();
 		});
 	});
@@ -183,11 +173,7 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 			mockExistsSync.mockImplementation(() => false);
 			mockReaddirSync.mockImplementation(() => ['.kt']);
 			mockIsCommandAvailable.mockImplementation(() => true);
-
 			const result = detectAdditionalLinter('/test/path');
-
-			// .kt ends with .kt, so it would match the pattern
-			// Test that it doesn't crash
 			expect(result).toBe('ktlint');
 		});
 
@@ -261,9 +247,7 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 			mockExistsSync.mockImplementation(() => false);
 			mockReaddirSync.mockImplementation(() => ['test\n.kt', 'file\t.kts']);
 			mockIsCommandAvailable.mockImplementation(() => true);
-
 			const result = detectAdditionalLinter('/test/path');
-
 			expect(result).toBe('ktlint');
 		});
 
@@ -271,10 +255,7 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 			mockExistsSync.mockImplementation(() => false);
 			mockReaddirSync.mockImplementation(() => ['file.KT', 'file.Kts']);
 			mockIsCommandAvailable.mockImplementation(() => true);
-
 			const result = detectAdditionalLinter('/test/path');
-
-			// .endsWith is case-sensitive, so these shouldn't match
 			expect(result).toBeNull();
 		});
 	});
@@ -366,15 +347,17 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 		});
 
 		it('should detect via Gradle when both pom.xml and build.gradle exist, only gradlew available', () => {
+			_internals.platform = () => 'linux';
 			mockExistsSync.mockImplementation((path: string) => {
 				return (
 					path.includes('pom.xml') ||
 					path.includes('build.gradle') ||
+					path.includes('checkstyle.xml') ||
 					path.includes('gradlew')
 				);
 			});
 			mockIsCommandAvailable.mockImplementation((cmd: string) => {
-				return cmd === 'gradlew'; // gradlew is checked via existsSync, not isCommandAvailable
+				return cmd === 'other-tool';
 			});
 			mockReadFileSync.mockImplementation(() => 'plugins { id("checkstyle") }');
 
@@ -384,8 +367,13 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 		});
 
 		it('should return checkstyle when build.gradle exists, gradlew exists as file, no gradle binary', () => {
+			_internals.platform = () => 'linux';
 			mockExistsSync.mockImplementation((path: string) => {
-				return path.includes('build.gradle') || path.includes('gradlew');
+				return (
+					path.includes('build.gradle') ||
+					path.includes('checkstyle.xml') ||
+					path.includes('gradlew')
+				);
 			});
 			mockIsCommandAvailable.mockImplementation(() => false);
 			mockReadFileSync.mockImplementation(() => 'plugins { id("checkstyle") }');
@@ -562,8 +550,6 @@ describe('Lint Detectors - Adversarial Security/Edge-Case Tests', () => {
 			});
 			mockReaddirSync.mockImplementation(() => []);
 			mockIsCommandAvailable.mockImplementation(() => true);
-
-			// Should crash since existsSync is not wrapped in try-catch in detectors
 			expect(() => detectAdditionalLinter('/test/path')).toThrow('Disk error');
 		});
 

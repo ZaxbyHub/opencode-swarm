@@ -45,7 +45,12 @@ export interface SerializedAgentSession {
 	epicModeActive?: boolean;
 	gateLog: Record<string, string[]>;
 	reviewerCallCount: Record<string, number>;
-	lastGateFailure: { tool: string; taskId: string; timestamp: number } | null;
+	lastGateFailure: {
+		tool: string;
+		taskId: string;
+		timestamp: number;
+		code?: string;
+	} | null;
 	partialGateWarningsIssuedForTask: string[];
 	completionGateWarnedForTask: string[];
 	selfFixAttempted: boolean;

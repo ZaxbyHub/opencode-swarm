@@ -11,6 +11,16 @@ import {
 } from '../../../src/tools/pre-check-batch';
 
 const mockDetectAvailableLinter = mock(async () => 'biome');
+const mockDetectResolvedLinter = async (directory?: string) =>
+	(await mockDetectAvailableLinter(directory))
+		? {
+				linter: 'biome' as const,
+				executable: 'biome',
+				argsPrefix: [],
+				displayPrefix: ['biome'],
+				source: 'legacy-test-probe' as const,
+			}
+		: null;
 const mockRunLint = mock(async () => ({
 	success: true,
 	mode: 'check',
@@ -91,7 +101,9 @@ const mockQualityBudget = mock(async () => ({
 
 mock.module('../../../src/tools/lint', () => ({
 	detectAvailableLinter: mockDetectAvailableLinter,
+	detectResolvedLinter: mockDetectResolvedLinter,
 	runLint: mockRunLint,
+	_internals: { runResolvedLint: mockRunLint },
 }));
 
 mock.module('../../../src/tools/secretscan', () => ({
@@ -107,6 +119,8 @@ mock.module('../../../src/utils', () => ({
 	warn: mock(() => {}),
 }));
 
+_internals.detectResolvedLinter = mockDetectResolvedLinter;
+
 function createTempDir(): string {
 	// process.cwd() (which resolves symlinks after chdir) matches tempDir.
 	return fs.realpathSync(
@@ -118,25 +132,21 @@ describe('runPreCheckBatch', () => {
 	let tempDir: string;
 	let originalCwd: string;
 	const realQualityBudget = _internals.qualityBudget;
+	const realRunLintOnFiles = _internals.runLintOnFiles;
 
 	beforeEach(() => {
 		originalCwd = process.cwd();
 		tempDir = createTempDir();
 		process.chdir(tempDir);
 
-		// Create symlink to node_modules so biome/eslint is available when running in tempDir
-		// This is needed because runLintOnFiles uses Bun.spawn which looks for binaries in node_modules/.bin
 		try {
 			fs.symlinkSync(
 				path.join(originalCwd, 'node_modules'),
 				path.join(tempDir, 'node_modules'),
 				'junction',
 			);
-		} catch {
-			// Symlink might already exist or fail on some platforms
-		}
+		} catch {}
 
-		// Reset mock call counts
 		mockDetectAvailableLinter.mockClear();
 		mockRunLint.mockClear();
 		mockRunSecretscan.mockClear();
@@ -166,10 +176,12 @@ describe('runPreCheckBatch', () => {
 		}));
 		_internals.qualityBudget =
 			mockQualityBudget as typeof _internals.qualityBudget;
+		_internals.runLintOnFiles = mockRunLint as typeof _internals.runLintOnFiles;
 	});
 
 	afterEach(() => {
 		_internals.qualityBudget = realQualityBudget;
+		_internals.runLintOnFiles = realRunLintOnFiles;
 		process.chdir(originalCwd);
 		fs.rmSync(tempDir, { recursive: true, force: true });
 	});
@@ -373,9 +385,7 @@ describe('runPreCheckBatch', () => {
 
 		const result = await runPreCheckBatch(input);
 
-		// FAIL-CLOSED: When files is undefined, gates should be false
 		expect(result.gates_passed).toBe(false);
-		// All tools should not have run
 		expect(result.lint.ran).toBe(false);
 		expect(result.secretscan.ran).toBe(false);
 		expect(result.sast_scan.ran).toBe(false);
@@ -1612,11 +1622,6 @@ describe('SAST baseline diff mode', () => {
 	});
 });
 
-// ============ TASK 1.1: WORKSPACE ANCHOR VALIDATION TESTS ============
-// These tests verify that the workspace anchor (project root from createSwarmTool)
-// is used as the validation boundary instead of the user-supplied directory argument.
-// This prevents the self-validation bypass described in issue #922.
-
 describe('workspaceAnchor validation (Task 1.1)', () => {
 	let tempDir: string;
 	let originalCwd: string;
@@ -1649,10 +1654,6 @@ describe('workspaceAnchor validation (Task 1.1)', () => {
 	});
 
 	test('subdirectory as input.directory with project root as workspaceDir is rejected by runPreCheckBatch', async () => {
-		// When workspaceDir is the true project root and input.directory is a subdirectory,
-		// the execute function now rejects subdirectories at the tool level.
-		// At runPreCheckBatch level (which does NOT have the subdirectory guard),
-		// subdirectory is still accepted because it's within the workspace.
 		const srcDir = path.join(tempDir, 'src');
 		fs.mkdirSync(srcDir);
 		fs.writeFileSync(path.join(srcDir, 'test.ts'), 'export const x = 1;\n');
@@ -1664,14 +1665,15 @@ describe('workspaceAnchor validation (Task 1.1)', () => {
 
 		const result = await runPreCheckBatch(input, tempDir);
 
-		// runPreCheckBatch still accepts subdirectories (it validates containment, not identity)
-		expect(result.lint.ran).toBe(true);
+		expect(result.batch_status).toBe('invalid');
+		expect(result.gates_passed).toBe(false);
+		expect(result.lint.ran).toBe(false);
+		expect(result.lint.error).toContain('project root');
 	});
 
 	test('directory matching project root behaves unchanged', async () => {
 		fs.writeFileSync(path.join(tempDir, 'test.ts'), 'export const x = 1;\n');
 
-		// When input.directory == workspaceDir == project root, behavior is unchanged
 		const input: PreCheckBatchInput = {
 			files: ['test.ts'],
 			directory: tempDir,
@@ -1688,7 +1690,6 @@ describe('workspaceAnchor validation (Task 1.1)', () => {
 	test('relative "." directory with absolute workspaceDir resolves correctly', async () => {
 		fs.writeFileSync(path.join(tempDir, 'test.ts'), 'export const x = 1;\n');
 
-		// Simulate: user passes "." but workspaceDir is the absolute project root
 		const input: PreCheckBatchInput = {
 			files: ['test.ts'],
 			directory: '.',
@@ -1703,13 +1704,10 @@ describe('workspaceAnchor validation (Task 1.1)', () => {
 	test('subdirectory outside workspace is rejected when workspaceDir is set', async () => {
 		fs.writeFileSync(path.join(tempDir, 'test.ts'), 'export const x = 1;\n');
 
-		// Create a directory OUTSIDE the workspace
 		const outsideDir = path.join(path.dirname(tempDir), 'outside-workspace');
 		fs.mkdirSync(outsideDir, { recursive: true });
 		fs.writeFileSync(path.join(outsideDir, 'test.ts'), 'export const y = 2;\n');
 
-		// When workspaceDir is tempDir and input.directory is outside,
-		// validation should reject the traversal
 		const input: PreCheckBatchInput = {
 			files: ['test.ts'],
 			directory: outsideDir,
@@ -1721,7 +1719,7 @@ describe('workspaceAnchor validation (Task 1.1)', () => {
 		expect(result.gates_passed).toBe(false);
 	});
 
-	test('workspaceDir as second param is used as anchor (not input.directory)', async () => {
+	test('workspaceDir as second param rejects a subdirectory anchor bypass', async () => {
 		// This is the core test for the workspaceAnchor fix.
 		// Before the fix: execute set workspaceAnchor=resolvedDirectory (user arg).
 		// After the fix: execute sets workspaceAnchor=path.resolve(directory) (injected root).
@@ -1732,7 +1730,7 @@ describe('workspaceAnchor validation (Task 1.1)', () => {
 		fs.mkdirSync(subDir);
 
 		// workspaceDir = tempDir (project root), input.directory = subDir
-		// The subdirectory should be accepted because it's WITHIN the workspace
+		// Containment is insufficient: pre-check requires exact project-root identity.
 		const input: PreCheckBatchInput = {
 			files: ['../test.ts'], // relative from subDir to tempDir
 			directory: subDir,
@@ -1740,9 +1738,10 @@ describe('workspaceAnchor validation (Task 1.1)', () => {
 
 		const result = await runPreCheckBatch(input, tempDir);
 
-		// Validation should use tempDir as anchor, not subDir
-		// The file path "../test.ts" from subDir resolves to tempDir/test.ts — within workspace
-		expect(result.lint.ran).toBe(true);
+		expect(result.batch_status).toBe('invalid');
+		expect(result.gates_passed).toBe(false);
+		expect(result.lint.ran).toBe(false);
+		expect(result.lint.error).toContain('project root');
 	});
 });
 

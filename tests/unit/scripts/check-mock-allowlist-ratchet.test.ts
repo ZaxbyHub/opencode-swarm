@@ -374,6 +374,11 @@ describe('check-invariants.sh Check 4 — mock.module allowlist growth ratchet',
 			crlfContent,
 			'utf-8',
 		);
+		fs.mkdirSync(path.join(repoDir, 'tests'), { recursive: true });
+		fs.writeFileSync(
+			path.join(repoDir, 'tests', 'allowed.test.ts'),
+			"import { afterEach, mock } from 'bun:test';\nimport * as realFs from 'node:fs';\nafterEach(() => mock.restore());\nmock.module('node:fs', () => ({ ...realFs }));\n",
+		);
 		git(repoDir, 'add', '-A');
 		// Suppress CRLF→LF normalization on commit so the blob actually
 		// differs (otherwise git would normalize and mask the bug).

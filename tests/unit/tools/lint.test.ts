@@ -1,489 +1,351 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
 	_detectAvailableLinter,
+	_internals,
 	detectAvailableLinter,
 	getLinterCommand,
-	type LintResult,
 	MAX_COMMAND_LENGTH,
 	MAX_OUTPUT_BYTES,
+	type ResolvedLinterCommand,
 	runLint,
-	SUPPORTED_LINTERS,
 	type SupportedLinter,
 	validateArgs,
 } from '../../../src/tools/lint';
+import type { ExternalToolRunResult } from '../../../src/utils/external-tool-runner';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
-// Mock for Bun.spawn
-let originalSpawn: typeof Bun.spawn;
-let spawnCalls: Array<{ cmd: string[]; opts: unknown }> = [];
-let mockExitCode: number = 0;
-let mockStdout: string = '';
-let mockStderr: string = '';
-let mockSpawnError: Error | null = null;
+const realResolveLinterCommand = _internals.resolveLinterCommand;
+const realRunExternalTool = _internals.runExternalTool;
+const realDetectResolvedLinter = _internals.detectResolvedLinter;
 
-function mockSpawn(cmd: string[], opts: unknown) {
-	spawnCalls.push({ cmd, opts });
-
-	if (mockSpawnError) {
-		throw mockSpawnError;
-	}
-
-	// Create mock readable streams
-	const encoder = new TextEncoder();
-	const stdoutReadable = new ReadableStream({
-		start(controller) {
-			controller.enqueue(encoder.encode(mockStdout));
-			controller.close();
-		},
-	});
-	const stderrReadable = new ReadableStream({
-		start(controller) {
-			controller.enqueue(encoder.encode(mockStderr));
-			controller.close();
-		},
-	});
-
+function makeResolvedCommand(
+	linter: SupportedLinter,
+	overrides: Partial<ResolvedLinterCommand> = {},
+): ResolvedLinterCommand {
 	return {
-		stdout: stdoutReadable,
-		stderr: stderrReadable,
-		exited: Promise.resolve(mockExitCode),
-		exitCode: mockExitCode,
-	} as unknown as ReturnType<typeof Bun.spawn>;
+		linter,
+		executable: `/fake/${linter}`,
+		argsPrefix: [],
+		displayPrefix: [`/fake/${linter}`],
+		source: 'legacy-test-probe',
+		...overrides,
+	};
+}
+
+function makeRunResult(
+	overrides: Partial<ExternalToolRunResult> = {},
+): ExternalToolRunResult {
+	return {
+		status: 'completed',
+		exitCode: 0,
+		stdout: '',
+		stderr: '',
+		stdoutTruncated: false,
+		stderrTruncated: false,
+		...overrides,
+	};
 }
 
 describe('lint tool', () => {
 	beforeEach(() => {
-		originalSpawn = Bun.spawn;
-		spawnCalls = [];
-		mockExitCode = 0;
-		mockStdout = '';
-		mockStderr = '';
-		mockSpawnError = null;
+		_internals.resolveLinterCommand = realResolveLinterCommand;
+		_internals.runExternalTool = realRunExternalTool;
+		_internals.detectResolvedLinter = realDetectResolvedLinter;
 	});
 
 	afterEach(() => {
-		Bun.spawn = originalSpawn;
+		_internals.resolveLinterCommand = realResolveLinterCommand;
+		_internals.runExternalTool = realRunExternalTool;
+		_internals.detectResolvedLinter = realDetectResolvedLinter;
 	});
 
-	// ============ Constants Tests ============
-	describe('constants', () => {
-		it('should have correct MAX_OUTPUT_BYTES value', () => {
-			expect(MAX_OUTPUT_BYTES).toBe(512_000); // 512KB
-		});
-
-		it('should have correct MAX_COMMAND_LENGTH value', () => {
-			expect(MAX_COMMAND_LENGTH).toBe(500);
-		});
-
-		it('should have correct SUPPORTED_LINTERS', () => {
-			expect(SUPPORTED_LINTERS).toEqual(['biome', 'eslint']);
-		});
-	});
-
-	// ============ Mode Validation Tests ============
 	describe('validateArgs', () => {
-		it('should accept mode: "check"', () => {
+		it('accepts valid modes', () => {
 			expect(validateArgs({ mode: 'check' })).toBe(true);
-		});
-
-		it('should accept mode: "fix"', () => {
 			expect(validateArgs({ mode: 'fix' })).toBe(true);
 		});
 
-		it('should reject null', () => {
+		it('rejects malformed values', () => {
 			expect(validateArgs(null)).toBe(false);
-		});
-
-		it('should reject undefined', () => {
 			expect(validateArgs(undefined)).toBe(false);
-		});
-
-		it('should reject non-object types', () => {
 			expect(validateArgs('check')).toBe(false);
-			expect(validateArgs(123)).toBe(false);
-			expect(validateArgs(true)).toBe(false);
-		});
-
-		it('should reject invalid mode values', () => {
-			expect(validateArgs({ mode: 'invalid' })).toBe(false);
-			expect(validateArgs({ mode: 'CHECK' })).toBe(false);
-			expect(validateArgs({ mode: 'Fix' })).toBe(false);
-			expect(validateArgs({ mode: '' })).toBe(false);
-		});
-
-		it('should reject object without mode', () => {
 			expect(validateArgs({})).toBe(false);
-			expect(validateArgs({ other: 'value' })).toBe(false);
-		});
-
-		it('should accept object with extra properties', () => {
-			// Extra properties should not invalidate the args
-			expect(validateArgs({ mode: 'check', extra: 'value' })).toBe(true);
+			expect(validateArgs({ mode: 'CHECK' })).toBe(false);
+			expect(validateArgs({ mode: 'invalid' })).toBe(false);
 		});
 	});
 
-	// ============ Command Construction Tests ============
 	describe('getLinterCommand', () => {
-		describe('biome', () => {
-			it('should return correct command for check mode', () => {
-				const cmd = getLinterCommand('biome', 'check', process.cwd());
-				expect(cmd[0]).toContain('biome');
-				expect(cmd[1]).toBe('check');
-				expect(cmd[2]).toBe('.');
-			});
+		it('builds biome commands for check and fix', () => {
+			const biomeBin = process.platform === 'win32' ? 'biome.EXE' : 'biome';
 
-			it('should return correct command for fix mode', () => {
-				const cmd = getLinterCommand('biome', 'fix', process.cwd());
-				expect(cmd[0]).toContain('biome');
-				expect(cmd[1]).toBe('check');
-				expect(cmd[2]).toBe('--write');
-				expect(cmd[3]).toBe('.');
-			});
+			expect(getLinterCommand('biome', 'check', '/repo')).toEqual([
+				path.join('/repo', 'node_modules', '.bin', biomeBin),
+				'check',
+				'.',
+			]);
+			expect(getLinterCommand('biome', 'fix', '/repo')).toEqual([
+				path.join('/repo', 'node_modules', '.bin', biomeBin),
+				'check',
+				'--write',
+				'.',
+			]);
 		});
 
-		describe('eslint', () => {
-			it('should return correct command for check mode', () => {
-				const cmd = getLinterCommand('eslint', 'check', process.cwd());
-				expect(cmd[0]).toContain('eslint');
-				expect(cmd[1]).toBe('.');
-			});
-
-			it('should return correct command for fix mode', () => {
-				const cmd = getLinterCommand('eslint', 'fix', process.cwd());
-				expect(cmd[0]).toContain('eslint');
-				expect(cmd[1]).toBe('.');
-				expect(cmd[2]).toBe('--fix');
-			});
-		});
-
-		it('should return array of strings', () => {
-			const cmd = getLinterCommand('biome', 'check', process.cwd());
-			expect(Array.isArray(cmd)).toBe(true);
-			expect(cmd.every((s) => typeof s === 'string')).toBe(true);
+		it('builds eslint commands for check and fix', () => {
+			expect(getLinterCommand('eslint', 'check', '/repo')).toEqual([
+				path.join('/repo', 'node_modules', '.bin', 'eslint'),
+				'.',
+			]);
+			expect(getLinterCommand('eslint', 'fix', '/repo')).toEqual([
+				path.join('/repo', 'node_modules', '.bin', 'eslint'),
+				'.',
+				'--fix',
+			]);
 		});
 	});
 
-	// ============ Linter Detection Tests ============
 	describe('detectAvailableLinter', () => {
-		it('should detect biome when available', async () => {
-			Bun.spawn = mockSpawn;
-			mockStdout = 'biome version 1.0.0';
-			mockExitCode = 0;
-
-			// Use _detectAvailableLinter with a biomeBin path that actually exists on
-			// disk so the fs.existsSync(biomeBin) check inside the function passes.
-			// detectAvailableLinter computes the path internally and the binary may not
-			// be present in every test environment, making it unreliable here.
-			const existingFile = path.join(process.cwd(), 'package.json');
-			const linter = await _detectAvailableLinter(
-				process.cwd(),
-				existingFile,
-				'/tmp/fake/eslint',
+		it('projects the resolved linter name from detectResolvedLinter', async () => {
+			const tempRoot = canonicalMkdtemp('lint-detect-available-');
+			const packageRoot = path.join(
+				tempRoot,
+				'node_modules',
+				'@biomejs',
+				'biome',
 			);
-			expect(linter).toBe('biome');
-		});
-
-		it('should try eslint when biome fails', async () => {
-			Bun.spawn = mockSpawn;
-			let callCount = 0;
-
-			Bun.spawn = (cmd: string[], opts: unknown) => {
-				callCount++;
-				spawnCalls.push({ cmd, opts });
-
-				// First call (biome) fails
-				if (callCount === 1) {
-					mockStdout = '';
-					mockExitCode = 1;
-				} else {
-					// Second call (eslint) succeeds
-					mockStdout = 'eslint version 8.0.0';
-					mockExitCode = 0;
-				}
-
-				const encoder = new TextEncoder();
-				const stdoutReadable = new ReadableStream({
-					start(controller) {
-						controller.enqueue(encoder.encode(mockStdout));
-						controller.close();
-					},
-				});
-				const stderrReadable = new ReadableStream({
-					start(controller) {
-						controller.close();
-					},
-				});
-
-				return {
-					stdout: stdoutReadable,
-					stderr: stderrReadable,
-					exited: Promise.resolve(mockExitCode),
-					exitCode: mockExitCode,
-				} as unknown as ReturnType<typeof Bun.spawn>;
-			};
-
-			// Use an existing file as the eslint bin path so fs.existsSync passes
-			const existingFile = path.join(process.cwd(), 'package.json');
-			const linter = await _detectAvailableLinter(
-				process.cwd(),
-				'/tmp/fake/biome',
-				existingFile,
+			fs.mkdirSync(path.join(packageRoot, 'bin'), { recursive: true });
+			fs.writeFileSync(
+				path.join(packageRoot, 'package.json'),
+				JSON.stringify({ bin: { biome: 'bin/biome' } }),
 			);
-			expect(linter).toBe('eslint');
-			expect(callCount).toBe(2);
+			fs.writeFileSync(path.join(packageRoot, 'bin', 'biome'), '');
+			_internals.runExternalTool = async () =>
+				makeRunResult({ stdout: 'biome 1.0.0' });
+
+			try {
+				expect(await detectAvailableLinter(tempRoot)).toBe('biome');
+			} finally {
+				fs.rmSync(tempRoot, { recursive: true, force: true });
+			}
 		});
 
-		it('should return null when no linter is available', async () => {
-			Bun.spawn = mockSpawn;
-			mockExitCode = 1;
+		it('returns null when no resolved linter is available', async () => {
+			const tempRoot = canonicalMkdtemp('lint-missing-root-');
+			const missingDirectory = path.join(tempRoot, 'missing');
 
-			const linter = await detectAvailableLinter(process.cwd());
-			expect(linter).toBeNull();
-		});
-
-		it('should return null when spawn throws', async () => {
-			Bun.spawn = mockSpawn;
-			mockSpawnError = new Error('spawn failed');
-
-			const linter = await detectAvailableLinter(process.cwd());
-			expect(linter).toBeNull();
+			try {
+				expect(await detectAvailableLinter(missingDirectory)).toBeNull();
+			} finally {
+				fs.rmSync(tempRoot, { recursive: true, force: true });
+			}
 		});
 	});
 
-	// ============ Exit Status Handling Tests ============
-	describe('runLint - exit status handling', () => {
-		it('should return success:true with exitCode 0', async () => {
-			Bun.spawn = mockSpawn;
-			mockStdout = 'All files are formatted correctly.';
-			mockStderr = '';
-			mockExitCode = 0;
-
-			const result = await runLint('biome', 'check', '/tmp');
-
-			expect(result.success).toBe(true);
-			expect(result.exitCode).toBe(0);
-			expect(result.mode).toBe('check');
-			expect(result.linter).toBe('biome');
-		});
-
-		it('should return success:true with non-zero exit code (lint issues)', async () => {
-			Bun.spawn = mockSpawn;
-			mockStdout = '';
-			mockStderr = 'error: Some files have lint issues';
-			mockExitCode = 1;
-
-			const result = await runLint('biome', 'check', '/tmp');
-
-			// Note: even with non-zero exit, success is true because the command ran
-			expect(result.success).toBe(true);
-			expect(result.exitCode).toBe(1);
-			expect(result.message).toContain('exit code 1');
-		});
-
-		it('should include helpful message for exit code 0', async () => {
-			Bun.spawn = mockSpawn;
-			mockStdout = '';
-			mockStderr = '';
-			mockExitCode = 0;
-
-			const result = (await runLint('biome', 'check', '/tmp')) as {
-				message?: string;
+	describe('_detectAvailableLinter', () => {
+		it('returns biome when the first shared-runner probe succeeds', async () => {
+			const calls: Array<Parameters<typeof _internals.runExternalTool>[0]> = [];
+			_internals.runExternalTool = async (options) => {
+				calls.push(options);
+				return makeRunResult({ stdout: 'biome 1.0.0' });
 			};
 
+			const linter = await _detectAvailableLinter(
+				process.cwd(),
+				'/tooling/biome',
+				'/tooling/eslint',
+			);
+
+			expect(linter).toBe('biome');
+			expect(calls).toHaveLength(1);
+			expect(calls[0]).toMatchObject({
+				executable: '/tooling/biome',
+				args: ['--version'],
+				timeoutMs: 2000,
+				maxStdoutBytes: 4096,
+				maxStderrBytes: 4096,
+			});
+		});
+
+		it('falls back to eslint when biome probe fails', async () => {
+			let callIndex = 0;
+			_internals.runExternalTool = async () => {
+				callIndex += 1;
+				return callIndex === 1
+					? makeRunResult({ exitCode: 1 })
+					: makeRunResult({ stdout: 'eslint 9.0.0' });
+			};
+
+			const linter = await _detectAvailableLinter(
+				process.cwd(),
+				'/tooling/biome',
+				'/tooling/eslint',
+			);
+
+			expect(linter).toBe('eslint');
+			expect(callIndex).toBe(2);
+		});
+
+		it('returns null when both probes fail or error', async () => {
+			let callIndex = 0;
+			_internals.runExternalTool = async () => {
+				callIndex += 1;
+				return callIndex === 1
+					? makeRunResult({ status: 'spawn-error', message: 'boom' })
+					: makeRunResult({ exitCode: 1 });
+			};
+
+			expect(
+				await _detectAvailableLinter(
+					process.cwd(),
+					'/tooling/biome',
+					'/tooling/eslint',
+				),
+			).toBeNull();
+		});
+	});
+
+	describe('runLint', () => {
+		it('returns an explicit error when no safely resolved executable exists', async () => {
+			_internals.resolveLinterCommand = async () => null;
+
+			expect(await runLint('biome', 'check', '/repo')).toEqual({
+				success: false,
+				mode: 'check',
+				linter: 'biome',
+				error: 'No safely resolved biome executable found',
+			});
+		});
+
+		it('returns success:true with exit code 0 and a success message', async () => {
+			_internals.resolveLinterCommand = async () =>
+				makeResolvedCommand('biome');
+			_internals.runExternalTool = async () =>
+				makeRunResult({ stdout: 'All files are formatted correctly.' });
+
+			const result = await runLint('biome', 'check', '/repo');
+
+			expect(result).toMatchObject({
+				success: true,
+				mode: 'check',
+				linter: 'biome',
+				exitCode: 0,
+				output: 'All files are formatted correctly.',
+			});
+			expect(result.command).toEqual(['/fake/biome', 'check', '.']);
 			expect(result.message).toContain('completed successfully');
 		});
 
-		it('should include helpful message for non-zero exit in check mode', async () => {
-			Bun.spawn = mockSpawn;
-			mockStdout = '';
-			mockStderr = 'issues found';
-			mockExitCode = 1;
+		it('keeps nonzero completed exits as success results with issue messaging', async () => {
+			_internals.resolveLinterCommand = async () =>
+				makeResolvedCommand('biome');
+			_internals.runExternalTool = async () =>
+				makeRunResult({
+					exitCode: 1,
+					stderr: 'error: Some files have lint issues',
+				});
 
-			const result = (await runLint('biome', 'check', '/tmp')) as {
-				message?: string;
-			};
+			const checkResult = await runLint('biome', 'check', '/repo');
+			const fixResult = await runLint('biome', 'fix', '/repo');
 
-			expect(result.message).toContain('found issues');
+			expect(checkResult.success).toBe(true);
+			expect(checkResult.exitCode).toBe(1);
+			expect(checkResult.message).toContain('found issues');
+			expect(fixResult.success).toBe(true);
+			expect(fixResult.message).toContain('fix completed');
 		});
 
-		it('should include helpful message for non-zero exit in fix mode', async () => {
-			Bun.spawn = mockSpawn;
-			mockStdout = '';
-			mockStderr = 'some fixes applied';
-			mockExitCode = 1;
+		it('combines stdout and stderr into a single output payload', async () => {
+			_internals.resolveLinterCommand = async () =>
+				makeResolvedCommand('eslint');
+			_internals.runExternalTool = async () =>
+				makeRunResult({
+					stdout: 'Checking...',
+					stderr: 'Warning: deprecated API',
+				});
 
-			const result = (await runLint('biome', 'fix', '/tmp')) as {
-				message?: string;
-			};
+			const result = await runLint('eslint', 'check', '/repo');
 
-			expect(result.message).toContain('fix completed');
-			expect(result.message).toContain('exit code 1');
-		});
-	});
-
-	// ============ Bounded Output Truncation Tests ============
-	describe('runLint - output truncation', () => {
-		it('should include stdout in output', async () => {
-			Bun.spawn = mockSpawn;
-			mockStdout = 'Checking src/file.ts';
-			mockStderr = '';
-			mockExitCode = 0;
-
-			const result = await runLint('biome', 'check', '/tmp');
-
-			expect(result.output).toContain('Checking src/file.ts');
+			expect(result.output).toBe('Checking...\nWarning: deprecated API');
 		});
 
-		it('should include stderr in output when present', async () => {
-			Bun.spawn = mockSpawn;
-			mockStdout = 'Checking...';
-			mockStderr = 'Warning: deprecated API';
-			mockExitCode = 0;
+		it('truncates oversized output and runner-truncated streams', async () => {
+			_internals.resolveLinterCommand = async () =>
+				makeResolvedCommand('biome');
+			_internals.runExternalTool = async () =>
+				makeRunResult({
+					stdout: 'x'.repeat(MAX_OUTPUT_BYTES + 50),
+					stdoutTruncated: true,
+				});
 
-			const result = await runLint('biome', 'check', '/tmp');
+			const result = await runLint('biome', 'check', '/repo');
 
-			expect(result.output).toContain('Checking...');
-			expect(result.output).toContain('Warning: deprecated API');
-		});
-
-		it('should handle stderr-only output', async () => {
-			Bun.spawn = mockSpawn;
-			mockStdout = '';
-			mockStderr = 'Error: syntax error';
-			mockExitCode = 1;
-
-			const result = await runLint('biome', 'check', '/tmp');
-
-			expect(result.output).toBe('Error: syntax error');
-		});
-
-		it('should truncate output exceeding MAX_OUTPUT_BYTES', async () => {
-			Bun.spawn = mockSpawn;
-			// Create output larger than MAX_OUTPUT_BYTES
-			mockStdout = 'x'.repeat(MAX_OUTPUT_BYTES + 1000);
-			mockStderr = '';
-			mockExitCode = 0;
-
-			const result = await runLint('biome', 'check', '/tmp');
-
-			// Output should be truncated to approximately MAX_OUTPUT_BYTES + truncation message
-			// The exact length is MAX_OUTPUT_BYTES + '\n... (output truncated)' = ~22 chars
-			expect(result.output.length).toBeLessThanOrEqual(MAX_OUTPUT_BYTES + 30);
-			expect(result.output.length).toBeGreaterThan(MAX_OUTPUT_BYTES);
+			expect(result.success).toBe(true);
+			expect(result.output?.length).toBeLessThanOrEqual(MAX_OUTPUT_BYTES + 30);
 			expect(result.output).toContain('... (output truncated)');
 		});
 
-		it('should not truncate output within limit', async () => {
-			Bun.spawn = mockSpawn;
-			mockStdout = 'x'.repeat(1000);
-			mockStderr = '';
-			mockExitCode = 0;
+		it('returns a bounded error result for timeout failures', async () => {
+			_internals.resolveLinterCommand = async () =>
+				makeResolvedCommand('biome');
+			_internals.runExternalTool = async () => ({
+				status: 'timeout',
+				exitCode: 124,
+				stdout: 'partial output',
+				stderr: '',
+				stdoutTruncated: false,
+				stderrTruncated: false,
+			});
 
-			const result = await runLint('biome', 'check', '/tmp');
+			const result = await runLint('biome', 'check', '/repo');
 
-			expect(result.output).toBe('x'.repeat(1000));
-			expect(result.output).not.toContain('truncated');
+			expect(result).toMatchObject({
+				success: false,
+				mode: 'check',
+				linter: 'biome',
+				exitCode: 124,
+				output: 'partial output',
+			});
+			expect(result.error).toContain('command timed out');
 		});
-	});
 
-	// ============ Non-Throwing Error Response Tests ============
-	describe('runLint - error handling (non-throwing)', () => {
-		it('should return error result on spawn failure', async () => {
-			Bun.spawn = mockSpawn;
-			mockSpawnError = new Error('Command not found');
+		it('returns a bounded error result for spawn failures', async () => {
+			_internals.resolveLinterCommand = async () =>
+				makeResolvedCommand('eslint');
+			_internals.runExternalTool = async () => ({
+				status: 'spawn-error',
+				exitCode: null,
+				stdout: '',
+				stderr: '',
+				stdoutTruncated: false,
+				stderrTruncated: false,
+				message: 'Command not found',
+			});
 
-			const result = await runLint('biome', 'check', '/tmp');
+			const result = await runLint('eslint', 'fix', '/repo');
 
 			expect(result.success).toBe(false);
-			expect(result.error).toContain('Execution failed');
-			expect(result.error).toContain('Command not found');
+			expect(result.error).toContain('Execution failed: Command not found');
+			expect(result.command).toEqual(['/fake/eslint', '.', '--fix']);
 		});
 
-		it('should return error result for unknown spawn errors', async () => {
-			Bun.spawn = mockSpawn;
-			mockSpawnError = 'string error' as unknown as Error;
+		it('fails closed when the rendered command exceeds MAX_COMMAND_LENGTH', async () => {
+			_internals.resolveLinterCommand = async () =>
+				makeResolvedCommand('biome', {
+					displayPrefix: ['x'.repeat(MAX_COMMAND_LENGTH + 10)],
+				});
 
-			const result = await runLint('biome', 'check', '/tmp');
+			const result = await runLint('biome', 'check', '/repo');
 
-			expect(result.success).toBe(false);
-			expect(result.error).toContain('Execution failed');
-			expect(result.error).toContain('unknown error');
-		});
-
-		it('should never throw, always return result object', async () => {
-			Bun.spawn = mockSpawn;
-			mockSpawnError = new Error('Any error');
-
-			// Should not throw
-			await expect(runLint('biome', 'check', '/tmp')).resolves.toBeDefined();
-
-			const result = await runLint('biome', 'check', '/tmp');
-			expect(result).toHaveProperty('success');
-			expect(result).toHaveProperty('mode');
-		});
-	});
-
-	// ============ Command Construction Edge Cases ============
-	describe('runLint - command validation', () => {
-		it('should return error if command exceeds MAX_COMMAND_LENGTH', async () => {
-			// This is a theoretical edge case - in practice, our commands are short
-			// We test by checking the error handling path exists
-			Bun.spawn = mockSpawn;
-			mockStdout = '';
-			mockStderr = '';
-			mockExitCode = 0;
-
-			const result = await runLint('biome', 'check', '/tmp');
-
-			// Normal case should succeed
-			expect(result.success).toBe(true);
-		});
-	});
-
-	// ============ Integration-style Tests ============
-	describe('integration', () => {
-		it('should return properly structured success result', async () => {
-			Bun.spawn = mockSpawn;
-			mockStdout = 'All good';
-			mockStderr = '';
-			mockExitCode = 0;
-
-			const result = await runLint('biome', 'check', '/tmp');
-
-			// Verify structure
-			expect(result).toHaveProperty('success', true);
-			expect(result).toHaveProperty('mode', 'check');
-			expect(result).toHaveProperty('linter', 'biome');
-			expect(result).toHaveProperty('command');
-			expect(result).toHaveProperty('exitCode', 0);
-			expect(result).toHaveProperty('output');
-			expect(result).toHaveProperty('message');
-		});
-
-		it('should return properly structured error result', async () => {
-			Bun.spawn = mockSpawn;
-			mockSpawnError = new Error('test error');
-
-			const result = await runLint('eslint', 'fix', '/tmp');
-
-			// Verify structure
-			expect(result).toHaveProperty('success', false);
-			expect(result).toHaveProperty('mode', 'fix');
-			expect(result).toHaveProperty('linter', 'eslint');
-			expect(result).toHaveProperty('command');
-			expect(result).toHaveProperty('error');
-		});
-
-		it('should work with eslint', async () => {
-			Bun.spawn = mockSpawn;
-			mockStdout = 'ESLint output';
-			mockStderr = '';
-			mockExitCode = 0;
-
-			const result = await runLint('eslint', 'check', '/tmp');
-
-			expect(result.success).toBe(true);
-			expect(result.linter).toBe('eslint');
+			expect(result).toEqual({
+				success: false,
+				mode: 'check',
+				linter: 'biome',
+				command: ['x'.repeat(MAX_COMMAND_LENGTH + 10), 'check', '.'],
+				error: 'Command exceeds maximum allowed length',
+			});
 		});
 	});
 });

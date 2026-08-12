@@ -2,18 +2,13 @@
  * v6.12 Guardrails Remediation — ADVERSARIAL SECURITY TESTS
  *
  * This test suite probes ATTACK VECTORS only — no happy-path tests.
- * Tests verify that malicious inputs, race conditions, and boundary
- * violations are handled correctly by the v6.12 fixes.
  *
  * Attack vectors probed:
  * 1. Architect exemption bypass via activeAgent poisoning
  * 2. ORCHESTRATOR_NAME injection via config
  * 3. Race condition: activeAgent cleared between checks
- * 4. startAgentSession with ORCHESTRATOR_NAME
- * 5. startAgentSession with prefixed architect name
- * 6. Boundary: empty string agentName in startAgentSession
+ * 4. Session startup naming boundaries
  * 7. Boundary: null/undefined guardrails in fallback logic
- * 8. Double-disable: validation failure + explicit disable
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
@@ -30,7 +25,10 @@ import {
 	resolveGuardrailsConfig,
 	stripKnownSwarmPrefix,
 } from '../../../src/config/schema';
-import { createGuardrailsHooks } from '../../../src/hooks/guardrails';
+import {
+	_internals,
+	createGuardrailsHooks,
+} from '../../../src/hooks/guardrails';
 import {
 	beginInvocation,
 	ensureAgentSession,
@@ -50,6 +48,7 @@ describe('v6.1.2 Guardrails — ADVERSARIAL SECURITY TESTS', () => {
 		originalXDG = process.env.XDG_CONFIG_HOME;
 		process.env.XDG_CONFIG_HOME = tempDir;
 		resetSwarmState();
+		_internals.allowUncorrelatedGateReceipts = true;
 	});
 
 	afterEach(() => {
@@ -59,6 +58,7 @@ describe('v6.1.2 Guardrails — ADVERSARIAL SECURITY TESTS', () => {
 			process.env.XDG_CONFIG_HOME = originalXDG;
 		}
 		fs.rmSync(tempDir, { recursive: true, force: true });
+		_internals.allowUncorrelatedGateReceipts = false;
 	});
 
 	// ============================================================

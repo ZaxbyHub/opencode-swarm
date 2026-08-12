@@ -299,6 +299,13 @@ export interface BunCompatSubprocess {
 	readonly stderr: BunCompatStream;
 	readonly exited: Promise<number>;
 	exitCode: number | null;
+	readonly signalCode?: NodeJS.Signals | null;
+	/**
+	 * Asynchronous process-creation failure reported by Node's ChildProcess
+	 * `error` event (for example ENOENT). Bun reports equivalent failures by
+	 * throwing from `Bun.spawn`, so this is populated only by the Node fallback.
+	 */
+	readonly spawnError?: Error | null;
 	kill(signal?: NodeJS.Signals | number): void;
 }
 
@@ -648,6 +655,10 @@ export function bunSpawn(
 			get exitCode() {
 				return proc.exitCode;
 			},
+			get signalCode() {
+				return (proc as typeof proc & { signalCode?: NodeJS.Signals | null })
+					.signalCode;
+			},
 			kill(sig) {
 				killBunProcess(sig);
 			},
@@ -682,9 +693,17 @@ export function bunSpawn(
 	};
 
 	let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+	let observedSignal: NodeJS.Signals | null = null;
+	let observedSpawnError: Error | null = null;
 	const exited = new Promise<number>((resolve) => {
-		proc.on('exit', (code) => resolve(code ?? 0));
-		proc.on('error', () => resolve(1));
+		proc.on('exit', (code, signal) => {
+			observedSignal = signal;
+			resolve(code ?? -1);
+		});
+		proc.on('error', (error) => {
+			observedSpawnError = error;
+			resolve(1);
+		});
 		if (options?.timeout && options.timeout > 0) {
 			timeoutHandle = setTimeout(() => {
 				try {
@@ -708,7 +727,17 @@ export function bunSpawn(
 		stderr: streamFromNode(proc.stderr),
 		exited,
 		get exitCode(): number | null {
-			return proc.exitCode;
+			// Windows may expose the libuv spawn error (for example -4058 for
+			// ENOENT) through ChildProcess.exitCode even though no child ran.
+			// Keep the cross-runtime contract unambiguous: process-creation
+			// failures have no exit code and are described by spawnError.
+			return observedSpawnError ? null : proc.exitCode;
+		},
+		get signalCode(): NodeJS.Signals | null {
+			return observedSignal ?? proc.signalCode;
+		},
+		get spawnError(): Error | null {
+			return observedSpawnError;
 		},
 		kill(signal?: NodeJS.Signals | number) {
 			killChild(signal);

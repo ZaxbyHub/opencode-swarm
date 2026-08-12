@@ -12,10 +12,14 @@ import type { PluginConfig } from '../config';
 import type { SecretscanEvidence } from '../config/evidence-schema.js';
 import { saveEvidence } from '../evidence/manager.js';
 import { warn } from '../utils';
-import { bunSpawn } from '../utils/bun-compat';
+import { runExternalTool } from '../utils/external-tool-runner';
 import { createSwarmTool } from './create-tool';
-import type { LintResult, LintSuccessResult, SupportedLinter } from './lint';
-import { detectAvailableLinter, resolveLinterBinPath, runLint } from './lint';
+import type {
+	LintResult,
+	LintSuccessResult,
+	ResolvedLinterCommand,
+} from './lint';
+import { detectResolvedLinter, _internals as lintInternals } from './lint';
 import type { QualityBudgetResult } from './quality-budget';
 import { qualityBudget } from './quality-budget';
 import type { SastScanFinding, SastScanResult } from './sast-scan';
@@ -26,8 +30,15 @@ import { runSecretscan, runSecretscanOnFiles } from './secretscan';
 // ============ Constants ============
 const TOOL_TIMEOUT_MS = 60_000;
 const MAX_COMBINED_BYTES = 500_000; // 500KB
+const MAX_COMPACT_ERROR_BYTES = 4_096;
+const OUTPUT_OMITTED_MESSAGE =
+	'Detailed tool result omitted because the batch output exceeded its byte limit';
 const MAX_CONCURRENT = 4;
 const MAX_FILES = 100;
+const GIT_TIMEOUT_MS = 10_000;
+const GIT_MAX_OUTPUT_BYTES = 2_000_000;
+const ALL_LINES_CHANGED = -1;
+const MAX_CHANGED_LINE_ENTRIES = 200_000;
 
 export const _internals: {
 	qualityBudget: typeof qualityBudget;
@@ -35,16 +46,30 @@ export const _internals: {
 	runSecretscanWrapped: typeof runSecretscanWrapped;
 	runSastScanWrapped: typeof runSastScanWrapped;
 	runQualityBudgetWrapped: typeof runQualityBudgetWrapped;
+	runWithTimeout: typeof runWithTimeout;
 	getChangedLineRanges: typeof getChangedLineRanges;
 	saveEvidence: typeof saveEvidence;
+	runExternalTool: typeof runExternalTool;
+	detectResolvedLinter: typeof detectResolvedLinter;
+	runLintOnFiles: typeof runLintOnFiles;
+	platform: () => NodeJS.Platform;
+	serializePreCheckResult: typeof serializePreCheckResult;
+	MAX_COMBINED_BYTES: number;
 } = {
 	qualityBudget,
 	runLintWrapped,
 	runSecretscanWrapped,
 	runSastScanWrapped,
 	runQualityBudgetWrapped,
+	runWithTimeout,
 	getChangedLineRanges,
 	saveEvidence,
+	runExternalTool,
+	detectResolvedLinter,
+	runLintOnFiles,
+	platform: () => process.platform,
+	serializePreCheckResult,
+	MAX_COMBINED_BYTES,
 };
 
 // ============ Input/Output Types ============
@@ -172,6 +197,8 @@ function evaluateSecretscanGate(
 }
 
 export interface PreCheckBatchResult {
+	/** Structured producer status. Optional only for legacy serialized results. */
+	batch_status?: 'completed' | 'skipped' | 'invalid';
 	/** Overall gate status: true if all security gates pass */
 	gates_passed: boolean;
 	/** Lint tool result */
@@ -186,6 +213,58 @@ export interface PreCheckBatchResult {
 	total_duration_ms: number;
 	/** Pre-existing SAST findings on unchanged lines, requiring reviewer triage */
 	sast_preexisting_findings?: SastScanFinding[];
+}
+
+function truncateUtf8(value: string, maxBytes: number): string {
+	if (Buffer.byteLength(value, 'utf8') <= maxBytes) return value;
+	const marker = '... (truncated)';
+	const budget = Math.max(0, maxBytes - Buffer.byteLength(marker, 'utf8'));
+	let result = '';
+	let usedBytes = 0;
+	for (const character of value) {
+		const characterBytes = Buffer.byteLength(character, 'utf8');
+		if (usedBytes + characterBytes > budget) break;
+		result += character;
+		usedBytes += characterBytes;
+	}
+	return `${result}${marker}`;
+}
+
+function compactToolResult(toolResult: ToolResult<unknown>) {
+	const diagnostic =
+		toolResult.error ??
+		(toolResult.result !== undefined ? OUTPUT_OMITTED_MESSAGE : undefined);
+	return {
+		ran: toolResult.ran,
+		duration_ms: toolResult.duration_ms,
+		...(diagnostic !== undefined && {
+			error: truncateUtf8(diagnostic, MAX_COMPACT_ERROR_BYTES),
+		}),
+	};
+}
+
+/**
+ * Serialize the public result below the decoder's stricter byte ceiling. When
+ * detailed diagnostics exceed the aggregate budget, preserve every control
+ * field and replace optional payloads with bounded, UTF-8-safe summaries.
+ */
+function serializePreCheckResult(result: PreCheckBatchResult): string {
+	const serialized = JSON.stringify(result, null, 2);
+	if (Buffer.byteLength(serialized, 'utf8') <= MAX_COMBINED_BYTES) {
+		return serialized;
+	}
+
+	const compact = {
+		batch_status: result.batch_status,
+		gates_passed: result.gates_passed,
+		lint: compactToolResult(result.lint),
+		secretscan: compactToolResult(result.secretscan),
+		sast_scan: compactToolResult(result.sast_scan),
+		quality_budget: compactToolResult(result.quality_budget),
+		total_duration_ms: result.total_duration_ms,
+		output_truncated: true,
+	};
+	return JSON.stringify(compact, null, 2);
 }
 
 // ============ Security Validation ============
@@ -233,7 +312,9 @@ function validatePath(
 		resolved = path.resolve(baseDir, inputPath);
 	}
 
-	const workspaceResolved = path.resolve(workspaceDir);
+	const workspaceResolved = isWindowsAbsolutePath(workspaceDir)
+		? path.win32.resolve(workspaceDir)
+		: path.resolve(workspaceDir);
 
 	// CRITICAL: Do NOT allow path == workspace anchor as valid bypass
 	// This prevents attackers from using the workspace directory itself as their validation anchor
@@ -279,6 +360,18 @@ function validateDirectory(dir: string, workspaceDir: string): string | null {
 		return traversalCheck;
 	}
 
+	const platform = _internals.platform();
+	const resolveForComparison =
+		platform === 'win32' ? path.win32.resolve : path.resolve;
+	const directoryKey = resolveForComparison(dir).replace(/\\/g, '/');
+	const workspaceKey = resolveForComparison(workspaceDir).replace(/\\/g, '/');
+	if (
+		(platform === 'win32' ? directoryKey.toLowerCase() : directoryKey) !==
+		(platform === 'win32' ? workspaceKey.toLowerCase() : workspaceKey)
+	) {
+		return 'directory must resolve to the project root';
+	}
+
 	return null;
 }
 
@@ -288,17 +381,52 @@ function validateDirectory(dir: string, workspaceDir: string): string | null {
  * Run a function with timeout
  */
 async function runWithTimeout<T>(
-	promise: Promise<T>,
+	operation: (abortSignal: AbortSignal) => Promise<T>,
 	timeoutMs: number,
+	parentSignal?: AbortSignal,
+	waitForCancellationSettlement = false,
 ): Promise<T> {
-	const timeoutPromise = new Promise<never>((_, reject) => {
-		setTimeout(
-			() => reject(new Error(`Timeout after ${timeoutMs}ms`)),
-			timeoutMs,
-		);
+	const controller = new AbortController();
+	let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+	let parentAbortListener: (() => void) | undefined;
+	if (parentSignal?.aborted) throw new Error('Tool execution cancelled');
+	const parentAbortPromise = new Promise<never>((_, reject) => {
+		if (!parentSignal) return;
+		parentAbortListener = () => {
+			reject(new Error('Tool execution cancelled'));
+			controller.abort();
+		};
+		parentSignal.addEventListener('abort', parentAbortListener, { once: true });
+		if (parentSignal.aborted) parentAbortListener();
 	});
-
-	return Promise.race([promise, timeoutPromise]);
+	if (controller.signal.aborted) return await parentAbortPromise;
+	const operationPromise = operation(controller.signal);
+	try {
+		const timeoutPromise = new Promise<never>((_, reject) => {
+			timeoutHandle = setTimeout(() => {
+				reject(new Error(`Timeout after ${timeoutMs}ms`));
+				controller.abort();
+			}, timeoutMs);
+		});
+		return await Promise.race([
+			operationPromise,
+			timeoutPromise,
+			parentAbortPromise,
+		]);
+	} catch (error) {
+		if (controller.signal.aborted && waitForCancellationSettlement) {
+			await operationPromise.then(
+				() => undefined,
+				() => undefined,
+			);
+		}
+		throw error;
+	} finally {
+		if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+		if (parentAbortListener && parentSignal) {
+			parentSignal.removeEventListener('abort', parentAbortListener);
+		}
+	}
 }
 
 // ============ Wrapper Functions ============
@@ -310,13 +438,17 @@ async function runLintWrapped(
 	files: string[] | undefined,
 	directory: string,
 	_config?: PluginConfig,
+	abortSignal?: AbortSignal,
 ): Promise<ToolResult<LintResult>> {
 	const start = process.hrtime.bigint();
 
 	try {
-		const linter = await detectAvailableLinter(directory);
+		const resolvedLinter = await _internals.detectResolvedLinter(
+			directory,
+			abortSignal,
+		);
 
-		if (!linter) {
+		if (!resolvedLinter) {
 			return {
 				ran: false,
 				error: 'No linter found (biome or eslint)',
@@ -326,7 +458,12 @@ async function runLintWrapped(
 
 		// If files are provided, run lint on those specific files only
 		if (files && files.length > 0) {
-			const filteredResult = await runLintOnFiles(linter, files, directory);
+			const filteredResult = await _internals.runLintOnFiles(
+				resolvedLinter,
+				files,
+				directory,
+				abortSignal,
+			);
 			return {
 				ran: true,
 				result: filteredResult,
@@ -335,9 +472,11 @@ async function runLintWrapped(
 		}
 
 		// No files provided - run lint on entire directory (current behavior)
-		const result = await runWithTimeout(
-			runLint(linter, 'check', directory),
-			TOOL_TIMEOUT_MS,
+		const result = await lintInternals.runResolvedLint(
+			resolvedLinter,
+			'check',
+			directory,
+			abortSignal,
 		);
 
 		return {
@@ -358,10 +497,19 @@ async function runLintWrapped(
  * Run lint on specific files only
  */
 async function runLintOnFiles(
-	linter: SupportedLinter,
+	resolvedLinter: ResolvedLinterCommand,
 	files: string[],
 	workspaceDir: string,
+	abortSignal?: AbortSignal,
 ): Promise<LintResult> {
+	if (resolvedLinter.source === 'legacy-test-probe') {
+		return lintInternals.runResolvedLint(
+			resolvedLinter,
+			'check',
+			workspaceDir,
+			abortSignal,
+		);
+	}
 	// Security: Validate all resolved file paths before use
 	const validatedFiles: string[] = [];
 	for (const file of files) {
@@ -389,7 +537,7 @@ async function runLintOnFiles(
 		return {
 			success: false,
 			mode: 'check',
-			linter,
+			linter: resolvedLinter.linter,
 			command: [],
 			error: 'No valid files after security validation',
 		};
@@ -397,50 +545,55 @@ async function runLintOnFiles(
 
 	// Resolve binary using the same hierarchy as detectAvailableLinter
 	// (local → ancestor → PATH) so detection and execution are consistent.
-	const resolvedBin = resolveLinterBinPath(linter, workspaceDir);
-	let command: string[];
-	if (linter === 'biome') {
-		command = [resolvedBin, 'check', ...validatedFiles];
+	let args: string[];
+	if (resolvedLinter.linter === 'biome') {
+		args = [...resolvedLinter.argsPrefix, 'check', ...validatedFiles];
 	} else {
-		command = [resolvedBin, ...validatedFiles];
+		args = [...resolvedLinter.argsPrefix, ...validatedFiles];
 	}
+	const command = [...resolvedLinter.displayPrefix, ...args];
 
 	try {
-		const proc = bunSpawn(command, {
-			stdout: 'pipe',
-			stderr: 'pipe',
+		const execution = await _internals.runExternalTool({
+			executable: resolvedLinter.executable,
+			args,
 			cwd: workspaceDir,
+			timeoutMs: TOOL_TIMEOUT_MS,
+			maxStdoutBytes: 512_000,
+			maxStderrBytes: 512_000,
+			abortSignal,
 		});
-
-		const [stdout, stderr] = await Promise.all([
-			proc.stdout.text(),
-			proc.stderr.text(),
-		]);
-
-		const exitCode = await proc.exited;
-
-		let output = stdout;
-		if (stderr) {
-			output += (output ? '\n' : '') + stderr;
+		if (execution.status !== 'completed') {
+			return {
+				success: false,
+				mode: 'check',
+				linter: resolvedLinter.linter,
+				command,
+				error: execution.message ?? `Execution ${execution.status}`,
+			};
 		}
-
-		if (output.length > 512_000) {
-			output = `${output.slice(0, 512_000)}\n... (output truncated)`;
+		const exitCode = execution.exitCode ?? 1;
+		let output = execution.stdout;
+		if (execution.stderr) {
+			output += (output ? '\n' : '') + execution.stderr;
+		}
+		if (execution.stdoutTruncated || execution.stderrTruncated) {
+			output += '\n... (output truncated)';
 		}
 
 		const result: LintSuccessResult = {
 			success: true,
 			mode: 'check',
-			linter,
+			linter: resolvedLinter.linter,
 			command,
 			exitCode,
 			output,
 		};
 
 		if (exitCode === 0) {
-			result.message = `${linter} check completed successfully with no issues`;
+			result.message = `${resolvedLinter.linter} check completed successfully with no issues`;
 		} else {
-			result.message = `${linter} check found issues (exit code ${exitCode}).`;
+			result.message = `${resolvedLinter.linter} check found issues (exit code ${exitCode}).`;
 		}
 
 		return result;
@@ -448,7 +601,7 @@ async function runLintOnFiles(
 		return {
 			success: false,
 			mode: 'check',
-			linter,
+			linter: resolvedLinter.linter,
 			command,
 			error:
 				error instanceof Error
@@ -465,6 +618,7 @@ async function runSecretscanWrapped(
 	files: string[] | undefined,
 	directory: string,
 	_config?: PluginConfig,
+	abortSignal?: AbortSignal,
 ): Promise<ToolResult<SecretscanResult | SecretscanErrorResult>> {
 	const start = process.hrtime.bigint();
 
@@ -472,8 +626,9 @@ async function runSecretscanWrapped(
 		// If files are provided, run secretscan with explicit file scope
 		if (files && files.length > 0) {
 			const result = await runWithTimeout(
-				runSecretscanOnFiles(files, directory),
+				() => runSecretscanOnFiles(files, directory),
 				TOOL_TIMEOUT_MS,
+				abortSignal,
 			);
 			return {
 				ran: true,
@@ -484,8 +639,9 @@ async function runSecretscanWrapped(
 
 		// No files provided - scan entire directory (current behavior)
 		const result = await runWithTimeout(
-			runSecretscan(directory),
+			() => runSecretscan(directory),
 			TOOL_TIMEOUT_MS,
+			abortSignal,
 		);
 
 		return {
@@ -511,21 +667,26 @@ async function runSastScanWrapped(
 	severityThreshold: 'low' | 'medium' | 'high' | 'critical',
 	config?: PluginConfig,
 	phase?: number,
+	abortSignal?: AbortSignal,
 ): Promise<ToolResult<SastScanResult>> {
 	const start = process.hrtime.bigint();
 
 	try {
 		const result = await runWithTimeout(
-			sastScan(
-				{
-					changed_files: changedFiles,
-					severity_threshold: severityThreshold,
-					phase,
-				},
-				directory,
-				config,
-			),
+			(signal) =>
+				sastScan(
+					{
+						changed_files: changedFiles,
+						severity_threshold: severityThreshold,
+						phase,
+						abort_signal: signal,
+					},
+					directory,
+					config,
+				),
 			TOOL_TIMEOUT_MS,
+			abortSignal,
+			true,
 		);
 
 		return {
@@ -549,19 +710,22 @@ async function runQualityBudgetWrapped(
 	changedFiles: string[],
 	directory: string,
 	config?: PluginConfig,
+	abortSignal?: AbortSignal,
 ): Promise<ToolResult<QualityBudgetResult>> {
 	const start = process.hrtime.bigint();
 
 	try {
 		const result = await runWithTimeout(
-			_internals.qualityBudget(
-				{
-					changed_files: changedFiles,
-					config: config?.gates?.quality_budget,
-				},
-				directory,
-			),
+			() =>
+				_internals.qualityBudget(
+					{
+						changed_files: changedFiles,
+						config: config?.gates?.quality_budget,
+					},
+					directory,
+				),
 			TOOL_TIMEOUT_MS,
+			abortSignal,
 		);
 
 		return {
@@ -600,31 +764,102 @@ function meetsThresholdForTriage(
 	);
 }
 
-/**
- * Run a git diff command and return stdout, or null on failure.
- */
-async function runGitDiff(
+async function runGit(
 	args: string[],
 	directory: string,
+	abortSignal?: AbortSignal,
 ): Promise<string | null> {
-	try {
-		const proc = bunSpawn(['git', 'diff', ...args], {
-			cwd: directory,
-			stdout: 'pipe',
-			stderr: 'pipe',
-		});
-
-		const [exitCode, stdout] = await Promise.all([
-			proc.exited,
-			proc.stdout.text(),
-		]);
-
-		if (exitCode !== 0) return null;
-		const trimmed = stdout.trim();
-		return trimmed.length > 0 ? trimmed : null;
-	} catch {
+	const result = await _internals.runExternalTool({
+		executable: 'git',
+		args,
+		cwd: directory,
+		timeoutMs: GIT_TIMEOUT_MS,
+		maxStdoutBytes: GIT_MAX_OUTPUT_BYTES,
+		maxStderrBytes: 64_000,
+		abortSignal,
+	});
+	if (
+		result.status !== 'completed' ||
+		result.exitCode !== 0 ||
+		result.stdoutTruncated
+	) {
 		return null;
 	}
+	return result.stdout;
+}
+
+function decodeGitQuotedPath(value: string): string | null {
+	if (!value.startsWith('"')) return value;
+	if (!value.endsWith('"')) return null;
+	const bytes: number[] = [];
+	const appendText = (text: string) => {
+		bytes.push(...Buffer.from(text, 'utf8'));
+	};
+	for (let index = 1; index < value.length - 1; index++) {
+		const codePoint = value.codePointAt(index);
+		if (codePoint === undefined) return null;
+		const char = String.fromCodePoint(codePoint);
+		if (char !== '\\') {
+			appendText(char);
+			if (char.length === 2) index++;
+			continue;
+		}
+		index++;
+		if (index >= value.length - 1) return null;
+		const escaped = value[index];
+		const simple: Record<string, string> = {
+			'\\': '\\',
+			'"': '"',
+			t: '\t',
+			n: '\n',
+			r: '\r',
+			b: '\b',
+			f: '\f',
+			v: '\v',
+		};
+		if (simple[escaped] !== undefined) {
+			appendText(simple[escaped]);
+			continue;
+		}
+		if (/[0-7]/.test(escaped)) {
+			let octal = escaped;
+			for (let count = 0; count < 2; count++) {
+				const next = value[index + 1];
+				if (!next || !/[0-7]/.test(next)) break;
+				octal += next;
+				index++;
+			}
+			bytes.push(Number.parseInt(octal, 8));
+			continue;
+		}
+		return null;
+	}
+	return Buffer.from(bytes).toString('utf8');
+}
+
+function normalizeRepoPathKey(repoPath: string): string {
+	const normalized = repoPath.replace(/\\/g, '/');
+	return _internals.platform() === 'win32' || _internals.platform() === 'darwin'
+		? normalized.toLowerCase()
+		: normalized;
+}
+
+function normalizeDiffPath(rawPath: string): string | null {
+	const pathToken = rawPath.startsWith('"')
+		? rawPath
+		: rawPath.split('\t', 1)[0];
+	const decoded = decodeGitQuotedPath(pathToken);
+	if (
+		decoded === null ||
+		decoded === '/dev/null' ||
+		decoded.trim().length === 0
+	) {
+		return null;
+	}
+	// Every producer diff uses --no-prefix. A literal leading `a/` or `b/` is
+	// therefore part of the repository path and must never be stripped: doing so
+	// would make a newly changed security finding look pre-existing.
+	return normalizeRepoPathKey(decoded);
 }
 
 /**
@@ -634,91 +869,228 @@ async function runGitDiff(
 export function parseDiffLineRanges(
 	diffOutput: string,
 ): Map<string, Set<number>> {
+	return parseDiffLineRangesChecked(diffOutput, false) ?? new Map();
+}
+
+function parseDiffLineRangesChecked(
+	diffOutput: string,
+	requireGitFileHeaders: boolean,
+): Map<string, Set<number>> | null {
 	const result = new Map<string, Set<number>>();
 	let currentFile: string | null = null;
+	let inGitFile = false;
+	let expectingDestination = false;
+	let destinationSeen = false;
+	let destinationNeedsHunk = false;
+	let collectedLines = 0;
 
-	for (const line of diffOutput.split('\n')) {
-		// +++ b/src/foo.ts
-		if (line.startsWith('+++ b/')) {
-			currentFile = line.slice(6).trim();
+	for (const rawLine of diffOutput.split(/\r?\n/)) {
+		const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
+		if (line.startsWith('diff --git ')) {
+			if (expectingDestination || destinationNeedsHunk) return null;
+			inGitFile = true;
+			currentFile = null;
+			expectingDestination = false;
+			destinationSeen = false;
+			continue;
+		}
+		if (line.startsWith('--- ') && (inGitFile || !requireGitFileHeaders)) {
+			if (expectingDestination || destinationNeedsHunk) return null;
+			expectingDestination = true;
+			continue;
+		}
+		if (line.startsWith('+++ ')) {
+			if (requireGitFileHeaders && (!inGitFile || !expectingDestination)) {
+				return null;
+			}
+			const rawDestination = line.slice(4);
+			currentFile = normalizeDiffPath(rawDestination);
+			if (currentFile === null && rawDestination.trim() !== '/dev/null') {
+				return null;
+			}
+			expectingDestination = false;
+			destinationSeen = true;
+			destinationNeedsHunk = true;
+			if (!currentFile) continue;
 			if (!result.has(currentFile)) {
 				result.set(currentFile, new Set());
 			}
 			continue;
 		}
 		// @@ -old,count +new,count @@ — anchor regex to hunk header structure
-		if (line.startsWith('@@') && currentFile) {
-			const match = line.match(/^@@ [^+]*\+(\d+)(?:,(\d+))? @@/);
-			if (match) {
-				const start = parseInt(match[1], 10);
-				const count = match[2] !== undefined ? parseInt(match[2], 10) : 1;
-				const lines = result.get(currentFile)!;
-				for (let i = start; i < start + count; i++) {
-					lines.add(i);
-				}
-			}
+		if (!line.startsWith('@@')) continue;
+		if (
+			expectingDestination ||
+			(requireGitFileHeaders && (!inGitFile || !destinationSeen))
+		) {
+			return null;
 		}
+		const match = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(line);
+		if (!match) return null;
+		const start = Number.parseInt(match[1], 10);
+		const count = match[2] !== undefined ? Number.parseInt(match[2], 10) : 1;
+		if (
+			!Number.isSafeInteger(start) ||
+			!Number.isSafeInteger(count) ||
+			count < 0 ||
+			(count > 0 && start < 1) ||
+			count > MAX_CHANGED_LINE_ENTRIES ||
+			start + count - 1 > Number.MAX_SAFE_INTEGER ||
+			collectedLines + count > MAX_CHANGED_LINE_ENTRIES
+		) {
+			return null;
+		}
+		destinationNeedsHunk = false;
+		if (!currentFile) continue;
+		const lines = result.get(currentFile);
+		if (!lines) return null;
+		for (let index = 0; index < count; index++) {
+			lines.add(start + index);
+		}
+		collectedLines += count;
 	}
+	if (expectingDestination || destinationNeedsHunk) return null;
 
 	return result;
 }
 
+function mergeChangedLines(
+	target: Map<string, Set<number>>,
+	source: Map<string, Set<number>>,
+): void {
+	for (const [file, sourceLines] of source) {
+		const targetLines = target.get(file) ?? new Set<number>();
+		for (const line of sourceLines) targetLines.add(line);
+		target.set(file, targetLines);
+	}
+}
+
+function parseUntrackedStatus(output: string): string[] | null {
+	if (output.length > 0 && !output.endsWith('\0')) return null;
+
+	const untracked: string[] = [];
+	const records = output.split('\0');
+	for (let index = 0; index < records.length - 1; index++) {
+		const record = records[index];
+		if (!record || record.length < 4 || record[2] !== ' ') return null;
+
+		const status = record.slice(0, 2);
+		const filePath = record.slice(3);
+		if (!filePath || !isKnownPorcelainStatus(status)) return null;
+		if (status === '??') untracked.push(normalizeRepoPathKey(filePath));
+
+		if (/[RC]/.test(status)) {
+			const sourcePath = records[++index];
+			if (!sourcePath || looksLikePorcelainStatusRecord(sourcePath))
+				return null;
+		}
+	}
+	return untracked;
+}
+
+function isKnownPorcelainStatus(status: string): boolean {
+	if (status === '??' || status === '!!') return true;
+	if (/U/.test(status)) {
+		return new Set(['DD', 'AU', 'UD', 'UA', 'DU', 'AA', 'UU']).has(status);
+	}
+	return status !== '  ' && /^[ MTADRC]{2}$/.test(status);
+}
+
+function looksLikePorcelainStatusRecord(value: string): boolean {
+	return (
+		value.length >= 4 &&
+		value[2] === ' ' &&
+		isKnownPorcelainStatus(value.slice(0, 2))
+	);
+}
+
 /**
- * Get changed line ranges for the current branch vs its base.
- * Tries three strategies in order:
- * 1. merge-base diff against main/master (captures all branch changes, works after commit)
- * 2. HEAD~1 (single-commit diff, works after commit)
- * 3. HEAD (unstaged/staged changes, works before commit)
- * Returns null if git is unavailable or no changes found.
+ * Get the union of committed, staged, unstaged, and untracked changed lines.
+ * A known empty union is authoritative; null means a required Git source was
+ * unavailable or malformed and callers must classify findings fail-closed.
  */
 export async function getChangedLineRanges(
 	directory: string,
+	abortSignal?: AbortSignal,
 ): Promise<Map<string, Set<number>> | null> {
-	try {
-		// Strategy 1: diff against merge-base with main branch
-		// This captures all changes in the feature branch, even after multiple commits
-		for (const baseBranch of [
-			'origin/main',
-			'origin/master',
-			'main',
-			'master',
-		]) {
-			const mergeBaseProc = bunSpawn(
-				['git', 'merge-base', baseBranch, 'HEAD'],
-				{ cwd: directory, stdout: 'pipe', stderr: 'pipe' },
-			);
-			const [mbExit, mbOut] = await Promise.all([
-				mergeBaseProc.exited,
-				mergeBaseProc.stdout.text(),
-			]);
-			if (mbExit === 0 && mbOut.trim()) {
-				const mergeBase = mbOut.trim();
-				const diffOut = await runGitDiff(
-					['-U0', `${mergeBase}..HEAD`],
-					directory,
-				);
-				if (diffOut) {
-					return parseDiffLineRanges(diffOut);
-				}
-			}
+	let mergeBase: string | null = null;
+	for (const baseBranch of [
+		'zaxbyhub/main',
+		'upstream/main',
+		'origin/main',
+		'main',
+		'origin/master',
+		'master',
+	]) {
+		const output = await runGit(
+			['merge-base', baseBranch, 'HEAD'],
+			directory,
+			abortSignal,
+		);
+		const candidate = output?.trim();
+		if (candidate && /^[0-9a-f]{40,64}$/i.test(candidate)) {
+			mergeBase = candidate;
+			break;
 		}
+	}
+	if (!mergeBase) return null;
 
-		// Strategy 2: diff HEAD~1 (last commit)
-		const diffHead1 = await runGitDiff(['-U0', 'HEAD~1'], directory);
-		if (diffHead1) {
-			return parseDiffLineRanges(diffHead1);
-		}
-
-		// Strategy 3: unstaged/staged changes vs HEAD
-		const diffHead = await runGitDiff(['-U0', 'HEAD'], directory);
-		if (diffHead) {
-			return parseDiffLineRanges(diffHead);
-		}
-
-		return null;
-	} catch {
+	const commonDiffArgs = [
+		'-c',
+		'core.quotePath=false',
+		'diff',
+		'--no-ext-diff',
+		'--no-color',
+		'--no-prefix',
+		'-U0',
+	];
+	const [committed, staged, unstaged, status] = await Promise.all([
+		runGit(
+			[...commonDiffArgs, `${mergeBase}..HEAD`, '--'],
+			directory,
+			abortSignal,
+		),
+		runGit(
+			[...commonDiffArgs, '--cached', 'HEAD', '--'],
+			directory,
+			abortSignal,
+		),
+		runGit([...commonDiffArgs, '--'], directory, abortSignal),
+		runGit(
+			[
+				'-c',
+				'core.quotePath=false',
+				'status',
+				'--porcelain=v1',
+				'-z',
+				'--untracked-files=all',
+			],
+			directory,
+			abortSignal,
+		),
+	]);
+	if (
+		committed === null ||
+		staged === null ||
+		unstaged === null ||
+		status === null
+	) {
 		return null;
 	}
+
+	const committedLines = parseDiffLineRangesChecked(committed, true);
+	const stagedLines = parseDiffLineRangesChecked(staged, true);
+	const unstagedLines = parseDiffLineRangesChecked(unstaged, true);
+	if (!committedLines || !stagedLines || !unstagedLines) return null;
+
+	const result = new Map<string, Set<number>>();
+	mergeChangedLines(result, committedLines);
+	mergeChangedLines(result, stagedLines);
+	mergeChangedLines(result, unstagedLines);
+	const untracked = parseUntrackedStatus(status);
+	if (untracked === null) return null;
+	for (const file of untracked) result.set(file, new Set([ALL_LINES_CHANGED]));
+	return result;
 }
 
 /**
@@ -732,20 +1104,51 @@ export function classifySastFindings(
 	directory: string,
 ): { newFindings: SastScanFinding[]; preexistingFindings: SastScanFinding[] } {
 	// Fail-closed: if we can't determine changed lines, treat all as new
-	if (!changedLineRanges || changedLineRanges.size === 0) {
+	if (!changedLineRanges) {
 		return { newFindings: findings, preexistingFindings: [] };
 	}
 
 	const newFindings: SastScanFinding[] = [];
 	const preexistingFindings: SastScanFinding[] = [];
+	const platform = _internals.platform();
+	const pathApi = platform === 'win32' ? path.win32 : path.posix;
+	const resolvedDirectory = pathApi.resolve(directory);
 
 	for (const finding of findings) {
 		const filePath = finding.location.file;
-		// Normalise to forward-slash relative path for comparison
-		const normalised = path.relative(directory, filePath).replace(/\\/g, '/');
+		let normalised: string;
+		try {
+			if (
+				typeof filePath !== 'string' ||
+				filePath.length === 0 ||
+				filePath.includes('\0')
+			) {
+				newFindings.push(finding);
+				continue;
+			}
+			const resolvedFinding = pathApi.isAbsolute(filePath)
+				? pathApi.resolve(filePath)
+				: pathApi.resolve(resolvedDirectory, filePath);
+			const relative = pathApi.relative(resolvedDirectory, resolvedFinding);
+			if (
+				pathApi.isAbsolute(relative) ||
+				relative === '..' ||
+				relative.startsWith(`..${pathApi.sep}`)
+			) {
+				newFindings.push(finding);
+				continue;
+			}
+			normalised = normalizeRepoPathKey(relative);
+		} catch {
+			newFindings.push(finding);
+			continue;
+		}
 
 		const changedLines = changedLineRanges.get(normalised);
-		if (changedLines?.has(finding.location.line)) {
+		if (
+			changedLines?.has(ALL_LINES_CHANGED) ||
+			changedLines?.has(finding.location.line)
+		) {
 			newFindings.push(finding);
 		} else {
 			preexistingFindings.push(finding);
@@ -766,6 +1169,7 @@ export async function runPreCheckBatch(
 	input: PreCheckBatchInput,
 	workspaceDir?: string,
 	contextDir?: string,
+	abortSignal?: AbortSignal,
 ): Promise<PreCheckBatchResult> {
 	// Use provided workspaceDir or fall back to input directory, then plugin context directory
 	const effectiveWorkspaceDir = (workspaceDir ||
@@ -778,6 +1182,7 @@ export async function runPreCheckBatch(
 	if (dirError) {
 		warn(`pre_check_batch: Invalid directory: ${dirError}`);
 		return {
+			batch_status: 'invalid',
 			gates_passed: false,
 			lint: { ran: false, error: dirError, duration_ms: 0 },
 			secretscan: { ran: false, error: dirError, duration_ms: 0 },
@@ -793,6 +1198,7 @@ export async function runPreCheckBatch(
 			'pre_check_batch: No files provided, skipping all tools (fail-closed)',
 		);
 		return {
+			batch_status: 'invalid',
 			gates_passed: false,
 			lint: { ran: false, error: 'No files provided', duration_ms: 0 },
 			secretscan: { ran: false, error: 'No files provided', duration_ms: 0 },
@@ -832,6 +1238,7 @@ export async function runPreCheckBatch(
 			'pre_check_batch: No valid files after validation, skipping all tools (fail-closed)',
 		);
 		return {
+			batch_status: 'invalid',
 			gates_passed: false,
 			lint: { ran: false, error: 'No files provided', duration_ms: 0 },
 			secretscan: { ran: false, error: 'No files provided', duration_ms: 0 },
@@ -857,9 +1264,16 @@ export async function runPreCheckBatch(
 
 	const [lintResult, secretscanResult, sastScanResult, qualityBudgetResult] =
 		await Promise.all([
-			limit(() => _internals.runLintWrapped(changedFiles, directory, config)),
 			limit(() =>
-				_internals.runSecretscanWrapped(changedFiles, directory, config),
+				_internals.runLintWrapped(changedFiles, directory, config, abortSignal),
+			),
+			limit(() =>
+				_internals.runSecretscanWrapped(
+					changedFiles,
+					directory,
+					config,
+					abortSignal,
+				),
 			),
 			limit(() =>
 				_internals.runSastScanWrapped(
@@ -868,10 +1282,16 @@ export async function runPreCheckBatch(
 					sast_threshold,
 					config,
 					phase,
+					abortSignal,
 				),
 			),
 			limit(() =>
-				_internals.runQualityBudgetWrapped(changedFiles, directory, config),
+				_internals.runQualityBudgetWrapped(
+					changedFiles,
+					directory,
+					config,
+					abortSignal,
+				),
 			),
 		]);
 
@@ -946,7 +1366,12 @@ export async function runPreCheckBatch(
 	if (sastScanResult.ran && sastScanResult.result) {
 		const sastResult = sastScanResult.result;
 
-		if (sastResult.baseline_used) {
+		if (sastResult.error) {
+			gatesPassed = false;
+			warn(
+				`pre_check_batch: SAST scan error (${sastResult.error}) - GATE FAILED`,
+			);
+		} else if (sastResult.baseline_used) {
 			// Baseline diff mode: verdict is driven ONLY by new_findings in sastScan.
 			// Populate reviewer triage with pre_existing_findings (if any), regardless of verdict.
 			// Use sast_threshold as triage filter so mediums are not silently dropped when
@@ -978,8 +1403,10 @@ export async function runPreCheckBatch(
 			);
 
 			if (gateFindings.length > 0) {
-				const changedLineRanges =
-					await _internals.getChangedLineRanges(directory);
+				const changedLineRanges = await _internals.getChangedLineRanges(
+					directory,
+					abortSignal,
+				);
 				const { newFindings, preexistingFindings } = classifySastFindings(
 					gateFindings,
 					changedLineRanges,
@@ -1028,6 +1455,14 @@ export async function runPreCheckBatch(
 
 	// Build result
 	const result: PreCheckBatchResult = {
+		batch_status: [
+			lintResult,
+			secretscanResult,
+			sastScanResult,
+			qualityBudgetResult,
+		].every((toolResult) => toolResult.ran === false)
+			? 'skipped'
+			: 'completed',
 		gates_passed: gatesPassed,
 		lint: lintResult,
 		secretscan: secretscanResult,
@@ -1039,12 +1474,6 @@ export async function runPreCheckBatch(
 				sast_preexisting_findings: sastPreexistingFindings,
 			}),
 	};
-
-	// Log warning if output is large
-	const outputSize = JSON.stringify(result).length;
-	if (outputSize > MAX_COMBINED_BYTES) {
-		warn(`pre_check_batch: Large output (${outputSize} bytes)`);
-	}
 
 	return result;
 }
@@ -1085,10 +1514,11 @@ export const pre_check_batch: ReturnType<typeof tool> = createSwarmTool({
 				'Current phase number (positive integer >= 1). When provided, enables SAST baseline diffing: only findings absent from the phase-scoped baseline fail the gate.',
 			),
 	},
-	async execute(args: unknown, directory: string): Promise<string> {
+	async execute(args: unknown, directory: string, ctx): Promise<string> {
 		// Validate arguments
 		if (!args || typeof args !== 'object') {
 			const errorResult: PreCheckBatchResult = {
+				batch_status: 'invalid',
 				gates_passed: false,
 				lint: { ran: false, error: 'Invalid arguments', duration_ms: 0 },
 				secretscan: { ran: false, error: 'Invalid arguments', duration_ms: 0 },
@@ -1100,7 +1530,7 @@ export const pre_check_batch: ReturnType<typeof tool> = createSwarmTool({
 				},
 				total_duration_ms: 0,
 			};
-			return JSON.stringify(errorResult, null, 2);
+			return serializePreCheckResult(errorResult);
 		}
 
 		if (
@@ -1109,6 +1539,7 @@ export const pre_check_batch: ReturnType<typeof tool> = createSwarmTool({
 			directory.trim() === ''
 		) {
 			const errorResult: PreCheckBatchResult = {
+				batch_status: 'invalid',
 				gates_passed: false,
 				lint: {
 					ran: false,
@@ -1132,13 +1563,14 @@ export const pre_check_batch: ReturnType<typeof tool> = createSwarmTool({
 				},
 				total_duration_ms: 0,
 			};
-			return JSON.stringify(errorResult, null, 2);
+			return serializePreCheckResult(errorResult);
 		}
 
 		const typedArgs = args as PreCheckBatchInput;
 
 		if (!typedArgs.directory) {
 			const errorResult: PreCheckBatchResult = {
+				batch_status: 'invalid',
 				gates_passed: false,
 				lint: { ran: false, error: 'directory is required', duration_ms: 0 },
 				secretscan: {
@@ -1158,7 +1590,7 @@ export const pre_check_batch: ReturnType<typeof tool> = createSwarmTool({
 				},
 				total_duration_ms: 0,
 			};
-			return JSON.stringify(errorResult, null, 2);
+			return serializePreCheckResult(errorResult);
 		}
 
 		// Resolve directory to absolute path first to ensure consistent behavior
@@ -1176,6 +1608,7 @@ export const pre_check_batch: ReturnType<typeof tool> = createSwarmTool({
 		) {
 			const subDirError = `directory "${typedArgs.directory}" is a subdirectory of the project root — pre_check_batch requires the project root directory "${workspaceAnchor}"`;
 			const subDirResult: PreCheckBatchResult = {
+				batch_status: 'invalid',
 				gates_passed: false,
 				lint: { ran: false, error: subDirError, duration_ms: 0 },
 				secretscan: { ran: false, error: subDirError, duration_ms: 0 },
@@ -1183,13 +1616,14 @@ export const pre_check_batch: ReturnType<typeof tool> = createSwarmTool({
 				quality_budget: { ran: false, error: subDirError, duration_ms: 0 },
 				total_duration_ms: 0,
 			};
-			return JSON.stringify(subDirResult, null, 2);
+			return serializePreCheckResult(subDirResult);
 		}
 
 		// Validate directory using the resolved path against the true workspace anchor
 		const dirError = validateDirectory(resolvedDirectory, workspaceAnchor);
 		if (dirError) {
 			const errorResult: PreCheckBatchResult = {
+				batch_status: 'invalid',
 				gates_passed: false,
 				lint: { ran: false, error: dirError, duration_ms: 0 },
 				secretscan: { ran: false, error: dirError, duration_ms: 0 },
@@ -1197,7 +1631,7 @@ export const pre_check_batch: ReturnType<typeof tool> = createSwarmTool({
 				quality_budget: { ran: false, error: dirError, duration_ms: 0 },
 				total_duration_ms: 0,
 			};
-			return JSON.stringify(errorResult, null, 2);
+			return serializePreCheckResult(errorResult);
 		}
 
 		// Run pre-check batch
@@ -1220,13 +1654,15 @@ export const pre_check_batch: ReturnType<typeof tool> = createSwarmTool({
 				},
 				workspaceAnchor,
 				directory,
+				ctx?.abort,
 			);
 
-			return JSON.stringify(result, null, 2);
+			return serializePreCheckResult(result);
 		} catch (error) {
 			const errorMessage =
 				error instanceof Error ? error.message : 'Unknown error';
 			const errorResult: PreCheckBatchResult = {
+				batch_status: 'invalid',
 				gates_passed: false,
 				lint: { ran: false, error: errorMessage, duration_ms: 0 },
 				secretscan: { ran: false, error: errorMessage, duration_ms: 0 },
@@ -1234,7 +1670,7 @@ export const pre_check_batch: ReturnType<typeof tool> = createSwarmTool({
 				quality_budget: { ran: false, error: errorMessage, duration_ms: 0 },
 				total_duration_ms: 0,
 			};
-			return JSON.stringify(errorResult, null, 2);
+			return serializePreCheckResult(errorResult);
 		}
 	},
 });

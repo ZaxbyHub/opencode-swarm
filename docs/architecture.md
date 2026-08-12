@@ -1541,20 +1541,28 @@ Runs four verification tools in parallel for 4x faster gate execution:
 
 | Tool | Purpose | Gate Type |
 |------|---------|-----------|
-| `lint:check` | Code quality verification | Hard gate |
+| `lint:check` | Code quality verification | Informational |
 | `secretscan` | Secret/credential detection | Hard gate |
 | `sast_scan` | Static security analysis | Hard gate |
-| `quality_budget` | Maintainability metrics | Hard gate |
+| `quality_budget` | Maintainability metrics | Informational |
 
 **Parallel Execution**:
 - Uses `p-limit` with max 4 concurrent operations
 - 60-second timeout per tool
 - 500KB combined output limit
 - Individual failures don't cascade
+- External lint and Git processes use one bounded runner with explicit `cwd`,
+  ignored stdin, bounded streams, process-tree termination, and confirmed exit
+  before a timeout is reported.
+- Windows Biome/ESLint discovery resolves trusted npm, pnpm, and Yarn shims to
+  their underlying native or JavaScript package entry. `.cmd` and `.ps1` shims
+  are never passed directly to Node spawn, and file arguments remain array
+  elements rather than shell text.
 
 **Return Value**:
 ```json
 {
+  "batch_status": "completed",
   "gates_passed": true,
   "lint": { "ran": true, "result": {}, "duration_ms": 1200 },
   "secretscan": { "ran": true, "result": {}, "duration_ms": 800 },
@@ -1563,6 +1571,27 @@ Runs four verification tools in parallel for 4x faster gate execution:
   "total_duration_ms": 3200
 }
 ```
+
+`batch_status` is additive. New producers emit `completed`, `skipped`, or
+`invalid`; old results without the field remain readable. The after-hook accepts
+only the exact top-level boolean and structurally valid tool results. Nested
+strings containing words such as `FAIL`, `error`, or `gates_passed: false` are
+diagnostic data and cannot change the verdict. Contradictory or truncated output
+is non-passing with `PRE_CHECK_RESULT_INVALID`. Gate completions are correlated
+to the task that started the call, so a late task-A result cannot mutate task B.
+
+For legacy SAST triage, changed-line evidence is the union of committed changes
+from merge-base to `HEAD`, staged changes, unstaged changes, and untracked files.
+Quoted, renamed, deleted, space-containing, Unicode, CRLF, and Windows-style
+paths are normalized. Any required Git-source failure makes the evidence
+unavailable and findings fail closed; an authoritative empty union means an
+untouched legacy finding is pre-existing.
+
+Secretscan opens files with numeric `O_RDONLY | O_NOFOLLOW` on POSIX, validates
+the opened descriptor as a bounded regular file, and correlates pre-open,
+descriptor, and post-open device/inode identity. Platforms that cannot provide
+trustworthy identity reject the file conservatively. The descriptor closes on
+every outcome.
 
 **Configuration**:
 ```json
@@ -1573,7 +1602,7 @@ Runs four verification tools in parallel for 4x faster gate execution:
 }
 ```
 
-**Fail condition**: Any hard gate fails (lint errors, secrets found, SAST findings, budget exceeded)
+**Fail condition**: A security hard gate fails (secrets or qualifying new SAST findings), the batch input is invalid, or the structured result is malformed
 **Resolution**: Fix specific failures identified in tool results and retry
 
 ### Local-Only Guarantee

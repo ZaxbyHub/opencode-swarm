@@ -204,7 +204,7 @@ describe('detectAvailableLinter() — ADVERSARIAL PATH & GUARD TESTS', () => {
 				const result = getEslintBinPath(input);
 				const isWindows = process.platform === 'win32';
 				const endsWithBin = isWindows
-					? result.endsWith('node_modules\\.bin\\eslint.cmd')
+					? result.endsWith('node_modules\\.bin\\eslint')
 					: result.endsWith('node_modules/.bin/eslint');
 				expect(endsWithBin).toBe(true);
 			}

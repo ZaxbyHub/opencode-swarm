@@ -7,7 +7,6 @@ import {
 	mock,
 	spyOn,
 } from 'bun:test';
-import * as realFs from 'node:fs';
 import * as path from 'node:path';
 import type {
 	AdditionalLinter,
@@ -15,27 +14,19 @@ import type {
 	LintSuccessResult,
 } from '../../../src/tools/lint';
 import {
+	_internals,
 	getAdditionalLinterCommand,
 	MAX_OUTPUT_BYTES,
 	runAdditionalLint,
 } from '../../../src/tools/lint';
 
-// Mock node:fs
+const originalExistsSync = _internals.existsSync;
+const originalIsCommandAvailable = _internals.isCommandAvailable;
+const originalPlatform = _internals.platform;
+const originalRunExternalTool = _internals.runExternalTool;
 const mockExistsSync = mock();
-mock.module('node:fs', () => ({
-	...realFs,
-	existsSync: (...args: unknown[]) => mockExistsSync(...args),
-	default: {
-		...realFs,
-		existsSync: (...args: unknown[]) => mockExistsSync(...args),
-	},
-}));
-
-// Mock isCommandAvailable from build/discovery
 const mockIsCommandAvailable = mock(() => true);
-mock.module('../../../src/build/discovery', () => ({
-	isCommandAvailable: (...args: unknown[]) => mockIsCommandAvailable(...args),
-}));
+const mockRunExternalTool = mock();
 
 // Mock warn from utils
 const mockWarn = mock();
@@ -43,21 +34,22 @@ mock.module('../../../src/utils', () => ({
 	warn: (...args: unknown[]) => mockWarn(...args),
 }));
 
-// Helper to create a mock ReadableStream that works with Response()
-const makeStream = (content: string) =>
-	new ReadableStream({
-		start(controller) {
-			controller.enqueue(new TextEncoder().encode(content));
-			controller.close();
-		},
-	});
-
 describe('getAdditionalLinterCommand', () => {
 	beforeEach(() => {
 		mock.restore();
 		mock.clearAllMocks();
+		_internals.existsSync = mockExistsSync as typeof _internals.existsSync;
+		_internals.isCommandAvailable =
+			mockIsCommandAvailable as typeof _internals.isCommandAvailable;
+		_internals.platform = () => 'linux';
 		mockIsCommandAvailable.mockImplementation(() => true);
 		mockExistsSync.mockImplementation(() => false);
+	});
+
+	afterEach(() => {
+		_internals.existsSync = originalExistsSync;
+		_internals.isCommandAvailable = originalIsCommandAvailable;
+		_internals.platform = originalPlatform;
 	});
 
 	describe('ruff', () => {
@@ -106,14 +98,10 @@ describe('getAdditionalLinterCommand', () => {
 
 	describe('checkstyle', () => {
 		it('check mode with gradlew present returns gradlew checkstyleMain', () => {
-			// On Windows, the code checks for gradlew.bat, on Unix it checks for gradlew
-			// Since we're testing on Windows, we need to mock gradlew.bat, not gradlew
-			const isWindows = process.platform === 'win32';
-			const gradlewName = isWindows ? 'gradlew.bat' : 'gradlew';
-			const gradlewPath = path.join('/test', gradlewName);
+			_internals.platform = () => 'linux';
+			const gradlewPath = path.join('/test', 'gradlew');
 			mockExistsSync.mockImplementation((p: string) => {
-				// Match both gradlew (Unix) and gradlew.bat (Windows)
-				return p.endsWith('gradlew') || p.endsWith('gradlew.bat');
+				return p.endsWith('gradlew') || p.endsWith('checkstyle.xml');
 			});
 			mockIsCommandAvailable.mockImplementation(() => false);
 			const result = getAdditionalLinterCommand('checkstyle', 'check', '/test');
@@ -121,7 +109,9 @@ describe('getAdditionalLinterCommand', () => {
 		});
 
 		it('check mode with no gradlew but gradle available returns gradle checkstyleMain', () => {
-			mockExistsSync.mockImplementation(() => false);
+			mockExistsSync.mockImplementation((p: string) =>
+				p.endsWith('checkstyle.xml'),
+			);
 			mockIsCommandAvailable.mockImplementation(
 				(cmd: string) => cmd === 'gradle',
 			);
@@ -130,41 +120,27 @@ describe('getAdditionalLinterCommand', () => {
 		});
 
 		it('check mode with neither gradlew nor gradle returns mvn checkstyle:check', () => {
-			mockExistsSync.mockImplementation(() => false);
-			mockIsCommandAvailable.mockImplementation(() => false);
+			mockExistsSync.mockImplementation((p: string) => p.endsWith('pom.xml'));
+			mockIsCommandAvailable.mockImplementation((cmd: string) => cmd === 'mvn');
 			const result = getAdditionalLinterCommand('checkstyle', 'check', '/test');
 			expect(result).toEqual(['mvn', 'checkstyle:check']);
 		});
 
-		it('on Windows with gradlew.bat present returns gradlew.bat checkstyleMain', () => {
-			// Mock Windows platform
-			const originalPlatform = process.platform;
-			Object.defineProperty(process, 'platform', {
-				value: 'win32',
-				writable: true,
-			});
-
-			const gradlewBatPath = path.join('/test', 'gradlew.bat');
+		it('on Windows with gradlew.bat present returns null when no native tool is available', () => {
+			_internals.platform = () => 'win32';
 			mockExistsSync.mockImplementation((p: string) =>
 				p.endsWith('gradlew.bat'),
 			);
 			mockIsCommandAvailable.mockImplementation(() => false);
 			const result = getAdditionalLinterCommand('checkstyle', 'check', '/test');
-			expect(result).toEqual([gradlewBatPath, 'checkstyleMain']);
-
-			// Restore platform
-			Object.defineProperty(process, 'platform', {
-				value: originalPlatform,
-				writable: true,
-			});
+			expect(result).toBeNull();
 		});
 
 		it('fix mode with gradlew present returns gradlew checkstyleMain', () => {
-			const isWindows = process.platform === 'win32';
-			const gradlewName = isWindows ? 'gradlew.bat' : 'gradlew';
-			const gradlewPath = path.join('/test', gradlewName);
+			_internals.platform = () => 'linux';
+			const gradlewPath = path.join('/test', 'gradlew');
 			mockExistsSync.mockImplementation((p: string) => {
-				return p.endsWith('gradlew') || p.endsWith('gradlew.bat');
+				return p.endsWith('gradlew') || p.endsWith('checkstyle.xml');
 			});
 			mockIsCommandAvailable.mockImplementation(() => false);
 			const result = getAdditionalLinterCommand('checkstyle', 'fix', '/test');
@@ -262,13 +238,17 @@ describe('getAdditionalLinterCommand', () => {
 		});
 
 		it('check mode without bundle returns rubocop', () => {
-			mockIsCommandAvailable.mockImplementation(() => false);
+			mockIsCommandAvailable.mockImplementation(
+				(command: string) => command === 'rubocop',
+			);
 			const result = getAdditionalLinterCommand('rubocop', 'check', '/test');
 			expect(result).toEqual(['rubocop']);
 		});
 
 		it('fix mode without bundle returns rubocop -A', () => {
-			mockIsCommandAvailable.mockImplementation(() => false);
+			mockIsCommandAvailable.mockImplementation(
+				(command: string) => command === 'rubocop',
+			);
 			const result = getAdditionalLinterCommand('rubocop', 'fix', '/test');
 			expect(result).toEqual(['rubocop', '-A']);
 		});
@@ -276,27 +256,36 @@ describe('getAdditionalLinterCommand', () => {
 });
 
 describe('runAdditionalLint', () => {
-	let originalSpawn: typeof Bun.spawn;
-
 	beforeEach(() => {
 		mock.restore();
+		mock.clearAllMocks();
 		mockIsCommandAvailable.mockImplementation(() => true);
 		mockExistsSync.mockImplementation(() => false);
-		originalSpawn = Bun.spawn;
+		_internals.existsSync = mockExistsSync as typeof _internals.existsSync;
+		_internals.isCommandAvailable =
+			mockIsCommandAvailable as typeof _internals.isCommandAvailable;
+		_internals.platform = () => 'linux';
+		_internals.runExternalTool =
+			mockRunExternalTool as typeof _internals.runExternalTool;
 	});
 
 	afterEach(() => {
 		mock.restore();
-		Bun.spawn = originalSpawn;
+		_internals.existsSync = originalExistsSync;
+		_internals.isCommandAvailable = originalIsCommandAvailable;
+		_internals.platform = originalPlatform;
+		_internals.runExternalTool = originalRunExternalTool;
 	});
 
 	it('successful ruff check (exit 0) returns LintSuccessResult with success:true and success message', async () => {
-		const mockProc = {
-			stdout: makeStream('No issues found'),
-			stderr: makeStream(''),
-			exited: Promise.resolve(0),
-		};
-		Bun.spawn = mock(() => mockProc) as typeof Bun.spawn;
+		mockRunExternalTool.mockResolvedValue({
+			status: 'completed',
+			exitCode: 0,
+			stdout: 'No issues found',
+			stderr: '',
+			stdoutTruncated: false,
+			stderrTruncated: false,
+		});
 
 		const result = await runAdditionalLint('ruff', 'check', '/test');
 
@@ -309,12 +298,14 @@ describe('runAdditionalLint', () => {
 	});
 
 	it('ruff check with issues (exit 1) returns LintSuccessResult with success:true and check found issues message', async () => {
-		const mockProc = {
-			stdout: makeStream('Found 2 issues'),
-			stderr: makeStream(''),
-			exited: Promise.resolve(1),
-		};
-		Bun.spawn = mock(() => mockProc) as typeof Bun.spawn;
+		mockRunExternalTool.mockResolvedValue({
+			status: 'completed',
+			exitCode: 1,
+			stdout: 'Found 2 issues',
+			stderr: '',
+			stdoutTruncated: false,
+			stderrTruncated: false,
+		});
 
 		const result = await runAdditionalLint('ruff', 'check', '/test');
 
@@ -327,12 +318,14 @@ describe('runAdditionalLint', () => {
 	});
 
 	it('ruff fix (exit 0) returns LintSuccessResult with success message', async () => {
-		const mockProc = {
-			stdout: makeStream('Fixed 3 issues'),
-			stderr: makeStream(''),
-			exited: Promise.resolve(0),
-		};
-		Bun.spawn = mock(() => mockProc) as typeof Bun.spawn;
+		mockRunExternalTool.mockResolvedValue({
+			status: 'completed',
+			exitCode: 0,
+			stdout: 'Fixed 3 issues',
+			stderr: '',
+			stdoutTruncated: false,
+			stderrTruncated: false,
+		});
 
 		const result = await runAdditionalLint('ruff', 'fix', '/test');
 
@@ -344,10 +337,15 @@ describe('runAdditionalLint', () => {
 		expect((result as LintSuccessResult).exitCode).toBe(0);
 	});
 
-	it('command execution throws error returns LintErrorResult with success:false and Execution failed error', async () => {
-		Bun.spawn = mock(() => {
-			throw new Error('Command not found');
-		}) as typeof Bun.spawn;
+	it('typed spawn error returns LintErrorResult with success:false and Execution failed error', async () => {
+		mockRunExternalTool.mockResolvedValue({
+			status: 'spawn-error',
+			stdout: '',
+			stderr: '',
+			stdoutTruncated: false,
+			stderrTruncated: false,
+			message: 'Command not found',
+		});
 
 		const result = await runAdditionalLint('ruff', 'check', '/test');
 
@@ -358,12 +356,14 @@ describe('runAdditionalLint', () => {
 	it('output truncation: stdout > MAX_OUTPUT_BYTES results in output ending with truncation message', async () => {
 		// Create output that exceeds MAX_OUTPUT_BYTES
 		const largeOutput = 'x'.repeat(MAX_OUTPUT_BYTES + 1000);
-		const mockProc = {
-			stdout: makeStream(largeOutput),
-			stderr: makeStream(''),
-			exited: Promise.resolve(0),
-		};
-		Bun.spawn = mock(() => mockProc) as typeof Bun.spawn;
+		mockRunExternalTool.mockResolvedValue({
+			status: 'completed',
+			exitCode: 0,
+			stdout: largeOutput,
+			stderr: '',
+			stdoutTruncated: true,
+			stderrTruncated: false,
+		});
 
 		const result = await runAdditionalLint('ruff', 'check', '/test');
 
@@ -377,12 +377,14 @@ describe('runAdditionalLint', () => {
 	});
 
 	it('stderr is appended to stdout in output', async () => {
-		const mockProc = {
-			stdout: makeStream('stdout output'),
-			stderr: makeStream('stderr message'),
-			exited: Promise.resolve(0),
-		};
-		Bun.spawn = mock(() => mockProc) as typeof Bun.spawn;
+		mockRunExternalTool.mockResolvedValue({
+			status: 'completed',
+			exitCode: 0,
+			stdout: 'stdout output',
+			stderr: 'stderr message',
+			stdoutTruncated: false,
+			stderrTruncated: false,
+		});
 
 		const result = await runAdditionalLint('ruff', 'check', '/test');
 
@@ -392,25 +394,54 @@ describe('runAdditionalLint', () => {
 		);
 	});
 
-	it('passes cwd to Bun.spawn', async () => {
-		const mockProc = {
-			stdout: makeStream(''),
-			stderr: makeStream(''),
-			exited: Promise.resolve(0),
-		};
-		const mockSpawn = mock(() => mockProc);
-		Bun.spawn = mockSpawn as typeof Bun.spawn;
+	it('passes explicit cwd and bounded execution options to the shared runner', async () => {
+		mockRunExternalTool.mockResolvedValue({
+			status: 'completed',
+			exitCode: 0,
+			stdout: '',
+			stderr: '',
+			stdoutTruncated: false,
+			stderrTruncated: false,
+		});
 
 		await runAdditionalLint('ruff', 'check', '/custom/cwd');
 
-		expect(mockSpawn).toHaveBeenCalledWith(
-			['ruff', 'check', '.'],
+		expect(mockRunExternalTool).toHaveBeenCalledWith(
 			expect.objectContaining({
-				stdout: 'pipe',
-				stderr: 'pipe',
+				executable: 'ruff',
+				args: ['check', '.'],
 				cwd: '/custom/cwd',
+				maxStdoutBytes: MAX_OUTPUT_BYTES,
+				maxStderrBytes: MAX_OUTPUT_BYTES,
 			}),
 		);
+	});
+
+	it('does not send gradlew.bat to the shared runner on Windows when no native tool is available', async () => {
+		_internals.platform = () => 'win32';
+		_internals.runExternalTool =
+			mockRunExternalTool as typeof _internals.runExternalTool;
+		mockExistsSync.mockImplementation((p: string) => p.endsWith('gradlew.bat'));
+		mockIsCommandAvailable.mockImplementation(() => false);
+		mockRunExternalTool.mockResolvedValue({
+			status: 'completed',
+			exitCode: 0,
+			stdout: '',
+			stderr: '',
+			stdoutTruncated: false,
+			stderrTruncated: false,
+		});
+
+		const result = await runAdditionalLint('checkstyle', 'check', '/test');
+
+		expect(result).toEqual({
+			success: false,
+			mode: 'check',
+			linter: 'checkstyle',
+			error: 'No safely executable checkstyle command found',
+		});
+		expect(mockRunExternalTool).not.toHaveBeenCalled();
+		_internals.runExternalTool = originalRunExternalTool;
 	});
 });
 

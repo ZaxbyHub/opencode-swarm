@@ -162,10 +162,7 @@ const biomeExpectedBin =
 	process.platform === 'win32'
 		? path.join(TEST_DIR, 'node_modules', '.bin', 'biome.EXE')
 		: path.join(TEST_DIR, 'node_modules', '.bin', 'biome');
-const eslintExpectedBin =
-	process.platform === 'win32'
-		? path.join(TEST_DIR, 'node_modules', '.bin', 'eslint.cmd')
-		: path.join(TEST_DIR, 'node_modules', '.bin', 'eslint');
+const eslintExpectedBin = path.join(TEST_DIR, 'node_modules', '.bin', 'eslint');
 
 // ============ Adversarial: Command Length Boundary ============
 describe('ADVERSARIAL: Command Length Boundaries', () => {
@@ -366,10 +363,7 @@ describe('ISSUE #209: detectAvailableLinter path consistency', () => {
 
 	it('getEslintBinPath returns the same path getLinterCommand uses for eslint', () => {
 		const dir = '/my/project';
-		const expected =
-			process.platform === 'win32'
-				? path.join(dir, 'node_modules', '.bin', 'eslint.cmd')
-				: path.join(dir, 'node_modules', '.bin', 'eslint');
+		const expected = path.join(dir, 'node_modules', '.bin', 'eslint');
 		expect(getEslintBinPath(dir)).toBe(expected);
 		expect(getLinterCommand('eslint', 'check', dir)[0]).toBe(expected);
 		expect(getLinterCommand('eslint', 'fix', dir)[0]).toBe(expected);
