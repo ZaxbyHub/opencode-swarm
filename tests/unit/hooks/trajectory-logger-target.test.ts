@@ -24,7 +24,7 @@
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import { tmpdir } from 'node:os';
+
 import * as path from 'node:path';
 import {
 	_test_exports,
@@ -35,6 +35,7 @@ import {
 	startAgentSession,
 	swarmState,
 } from '../../../src/state';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const { extractTarget } = _test_exports;
 
@@ -276,10 +277,10 @@ describe('extractTarget — command target normalization (issue #2134)', () => {
 
 		beforeEach(() => {
 			resetSwarmState();
-			tempDir = path.join(
-				tmpdir(),
-				`test-trajectory-target-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-			);
+			// canonicalMkdtemp closes the macOS /var -> /private/var symlink gap
+			// (FR-011) and supplies its own uniqueness, so no clock or RNG is
+			// needed here.
+			tempDir = canonicalMkdtemp('test-trajectory-target-');
 			fs.mkdirSync(path.join(tempDir, '.swarm'), { recursive: true });
 		});
 
