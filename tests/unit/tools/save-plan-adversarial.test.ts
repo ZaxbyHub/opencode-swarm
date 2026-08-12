@@ -5,24 +5,24 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs/promises';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import {
 	detectPlaceholderContent,
 	executeSavePlan,
 	type SavePlanArgs,
 } from '../../../src/tools/save-plan';
+import { safeRmRecursive } from '../../helpers/safe-test-dir.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 describe('save-plan adversarial tests', () => {
 	let tempDir: string;
 	let tempDirs: string[] = [];
 
 	beforeEach(async () => {
-		// Create temp directory for each test
-		tempDir = await fs.mkdtemp(
-			path.join(os.tmpdir(), 'save-plan-adversarial-'),
-		);
+		// Create a canonical external project root for each test.
+		tempDir = canonicalMkdtemp('save-plan-adversarial-');
 		tempDirs.push(tempDir);
+		await fs.mkdir(path.join(tempDir, '.opencode'));
 		// Create .swarm/ and spec.md required by the spec gate
 		await fs.mkdir(path.join(tempDir, '.swarm'), { recursive: true });
 		await fs.writeFile(
@@ -36,14 +36,10 @@ describe('save-plan adversarial tests', () => {
 		);
 	});
 
-	afterEach(async () => {
+	afterEach(() => {
 		// Clean up all temp directories
 		for (const dir of tempDirs) {
-			try {
-				await fs.rm(dir, { recursive: true, force: true });
-			} catch (e) {
-				// Ignore cleanup errors
-			}
+			safeRmRecursive(dir);
 		}
 		tempDirs = [];
 	});

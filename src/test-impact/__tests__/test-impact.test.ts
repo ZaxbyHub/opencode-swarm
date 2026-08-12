@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'bun:test';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import type { ToolContext } from '@opencode-ai/plugin';
+import { safeRmRecursive } from '../../../tests/helpers/safe-test-dir.js';
+import { canonicalMkdtemp } from '../../../tests/helpers/tmpdir.js';
 import type { ToolResult } from '../../tools/create-tool';
 import { test_impact } from '../../tools/test-impact.js';
 
@@ -40,24 +41,25 @@ const mockAnalyzeImpact = analyzeImpact as ReturnType<typeof vi.fn>;
 
 describe('test_impact tool', () => {
 	const mockExecute = test_impact.execute;
+	let projectRoot: string;
+	let customDir: string | undefined;
 
 	beforeEach(() => {
 		vi.clearAllMocks();
+		projectRoot = canonicalMkdtemp('test-impact-project-');
+		fs.mkdirSync(path.join(projectRoot, '.opencode'));
 	});
 
-	let customDir: string | undefined;
-
 	afterEach(() => {
-		if (customDir) {
-			fs.rmSync(customDir, { recursive: true, force: true });
-			customDir = undefined;
-		}
+		if (customDir) safeRmRecursive(customDir);
+		customDir = undefined;
+		safeRmRecursive(projectRoot);
 	});
 
 	test('returns error when changedFiles is empty array', async () => {
 		const result = await mockExecute(
 			{ changedFiles: [] },
-			createMockCtx('/test/dir'),
+			createMockCtx(projectRoot),
 		);
 		const parsed = JSON.parse(resultToString(result));
 
@@ -70,7 +72,7 @@ describe('test_impact tool', () => {
 	test('returns error when changedFiles is not an array', async () => {
 		const result = await mockExecute(
 			{ changedFiles: 'not-an-array' } as unknown as Record<string, unknown>,
-			createMockCtx('/test/dir'),
+			createMockCtx(projectRoot),
 		);
 		const parsed = JSON.parse(resultToString(result));
 
@@ -83,7 +85,7 @@ describe('test_impact tool', () => {
 	test('returns error when changedFiles is missing', async () => {
 		const result = await mockExecute(
 			{} as unknown as Record<string, unknown>,
-			createMockCtx('/test/dir'),
+			createMockCtx(projectRoot),
 		);
 		const parsed = JSON.parse(resultToString(result));
 
@@ -107,7 +109,7 @@ describe('test_impact tool', () => {
 
 		const result = await mockExecute(
 			{ changedFiles: ['src/file1.ts', 'src/file2.ts'] },
-			createMockCtx('/test/dir'),
+			createMockCtx(projectRoot),
 		);
 		const parsed = JSON.parse(resultToString(result));
 
@@ -116,13 +118,13 @@ describe('test_impact tool', () => {
 		expect(parsed.untestedFiles).toEqual(['src/novo.test.ts']);
 		expect(mockAnalyzeImpact).toHaveBeenCalledWith(
 			['src/file1.ts', 'src/file2.ts'],
-			'/test/dir',
+			projectRoot,
 		);
 	});
 
 	test('uses working_directory when provided', async () => {
-		customDir = path.join(os.tmpdir(), 'test-impact-custom-dir');
-		fs.mkdirSync(customDir, { recursive: true });
+		customDir = canonicalMkdtemp('test-impact-custom-');
+		fs.mkdirSync(path.join(customDir, '.opencode'));
 
 		mockAnalyzeImpact.mockResolvedValue({
 			impactedTests: [],
@@ -133,7 +135,7 @@ describe('test_impact tool', () => {
 
 		await mockExecute(
 			{ changedFiles: ['src/file.ts'], working_directory: customDir },
-			createMockCtx('/default/dir'),
+			createMockCtx(projectRoot),
 		);
 
 		expect(mockAnalyzeImpact).toHaveBeenCalledWith(['src/file.ts'], customDir);
@@ -149,12 +151,12 @@ describe('test_impact tool', () => {
 
 		await mockExecute(
 			{ changedFiles: ['src/file.ts'] },
-			createMockCtx('/fallback/dir'),
+			createMockCtx(projectRoot),
 		);
 
 		expect(mockAnalyzeImpact).toHaveBeenCalledWith(
 			['src/file.ts'],
-			'/fallback/dir',
+			projectRoot,
 		);
 	});
 
@@ -163,7 +165,7 @@ describe('test_impact tool', () => {
 
 		const result = await mockExecute(
 			{ changedFiles: ['src/file.ts'] },
-			createMockCtx('/test/dir'),
+			createMockCtx(projectRoot),
 		);
 		const parsed = JSON.parse(resultToString(result));
 
@@ -176,7 +178,7 @@ describe('test_impact tool', () => {
 
 		const result = await mockExecute(
 			{ changedFiles: ['src/file.ts'] },
-			createMockCtx('/test/dir'),
+			createMockCtx(projectRoot),
 		);
 		const parsed = JSON.parse(resultToString(result));
 
@@ -195,7 +197,7 @@ describe('test_impact tool', () => {
 
 		const result = await mockExecute(
 			{ changedFiles: ['src/file.ts'] },
-			createMockCtx('/test/dir'),
+			createMockCtx(projectRoot),
 		);
 		const parsed = JSON.parse(resultToString(result));
 
@@ -218,7 +220,7 @@ describe('test_impact tool', () => {
 
 		const result = await mockExecute(
 			{ changedFiles: ['src/file.ts'] },
-			createMockCtx('/test/dir'),
+			createMockCtx(projectRoot),
 		);
 		const parsed = JSON.parse(resultToString(result));
 

@@ -89,6 +89,9 @@ describe('background coder Stage A provenance', () => {
 		);
 		const laneRoot = path.join(directory, '.swarm-worktrees', 'lane-child');
 		fs.mkdirSync(laneRoot, { recursive: true });
+		// provisionWorktree is stubbed below, so materialize the direct marker that
+		// a real linked worktree would provide at its independent project root.
+		fs.writeFileSync(path.join(laneRoot, '.git'), 'gitdir: ../mock-worktree\n');
 		const originalProvision = worktreeIsolationInternals.provisionWorktree;
 		worktreeIsolationInternals.provisionWorktree = async () => ({
 			worktreePath: laneRoot,
