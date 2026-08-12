@@ -149,6 +149,27 @@ function takeBinding(parentSessionId: string, callId: string): Binding | null {
 	return binding;
 }
 
+async function persistWithBindingRecovery(
+	directory: string,
+	binding: Binding,
+	operation: () => Promise<void>,
+): Promise<void> {
+	try {
+		await withEvidenceLock(
+			directory,
+			PHASE_PARTICIPATION_FILE,
+			'docs',
+			'phase-participation',
+			operation,
+		);
+	} catch (error) {
+		// The outer hook fails open after reporting persistence errors. Restore the
+		// exact bounded binding so replaying this result can retry the atomic write.
+		boundedPut(binding);
+		throw error;
+	}
+}
+
 function buildBinding(input: {
 	plan: Plan;
 	phase: number;
@@ -643,26 +664,20 @@ export async function observePhaseParticipationToolResult(input: {
 		const { subagentSessionId } = extractDispatchIds(input.output);
 		if (!subagentSessionId || subagentSessionId !== envelope.sessionId) return;
 		const pending: Pending = { ...binding, childSessionId: subagentSessionId };
-		await withEvidenceLock(
-			input.directory,
-			PHASE_PARTICIPATION_FILE,
-			'docs',
-			'phase-participation',
-			async () => {
-				const store = await loadWritableStoreUnderLock(input.directory);
-				store.pending = store.pending.filter(
-					(existing) =>
-						existing.childSessionId !== pending.childSessionId &&
-						!(
-							existing.parentSessionId === pending.parentSessionId &&
-							existing.callId === pending.callId
-						),
-				);
-				store.pending.push(pending);
-				store.pending = store.pending.slice(-MAX_PHASE_PARTICIPATION_PENDING);
-				await writeStore(input.directory, store);
-			},
-		);
+		await persistWithBindingRecovery(input.directory, binding, async () => {
+			const store = await loadWritableStoreUnderLock(input.directory);
+			store.pending = store.pending.filter(
+				(existing) =>
+					existing.childSessionId !== pending.childSessionId &&
+					!(
+						existing.parentSessionId === pending.parentSessionId &&
+						existing.callId === pending.callId
+					),
+			);
+			store.pending.push(pending);
+			store.pending = store.pending.slice(-MAX_PHASE_PARTICIPATION_PENDING);
+			await writeStore(input.directory, store);
+		});
 		return;
 	}
 	if (envelope && envelope.state !== 'completed') return;
@@ -695,17 +710,11 @@ export async function observePhaseParticipationToolResult(input: {
 			childSessionId ??
 			`unavailable:${sha256(correlationKey(input.parentSessionId, input.callId))}`,
 	};
-	await withEvidenceLock(
-		input.directory,
-		PHASE_PARTICIPATION_FILE,
-		'docs',
-		'phase-participation',
-		async () => {
-			const store = await loadWritableStoreUnderLock(input.directory);
-			addReceipt(store, pending, text, childSessionId !== null);
-			await writeStore(input.directory, store);
-		},
-	);
+	await persistWithBindingRecovery(input.directory, binding, async () => {
+		const store = await loadWritableStoreUnderLock(input.directory);
+		addReceipt(store, pending, text, childSessionId !== null);
+		await writeStore(input.directory, store);
+	});
 }
 
 export async function completeBackgroundPhaseParticipation(input: {
