@@ -16,6 +16,8 @@ import {
 } from '../../../src/evidence/phase-participation';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
 
+const FIXED_RECORD_TIMESTAMP_MS = 1_700_000_000_000;
+
 function writePlan(directory: string): Plan {
 	const plan: Plan = {
 		schema_version: '1.0.0',
@@ -127,15 +129,15 @@ describe('background completion observer docs participation', () => {
 			planTaskId: '1.1',
 			evidenceTaskId: '1.1',
 			status: 'pending',
-			createdAt: Date.now(),
-			updatedAt: Date.now(),
+			createdAt: FIXED_RECORD_TIMESTAMP_MS,
+			updatedAt: FIXED_RECORD_TIMESTAMP_MS,
 			workspace: captureWorkspaceSnapshot(directory),
 			ingestion: {
 				state: 'consumed',
 				attempt: 1,
 				claimToken: 'consumed-claim',
-				claimedAt: Date.now(),
-				updatedAt: Date.now(),
+				claimedAt: FIXED_RECORD_TIMESTAMP_MS,
+				updatedAt: FIXED_RECORD_TIMESTAMP_MS,
 			},
 		});
 
@@ -181,8 +183,8 @@ describe('background completion observer docs participation', () => {
 			planTaskId: '1.1',
 			evidenceTaskId: '1.1',
 			status: 'pending',
-			createdAt: Date.now(),
-			updatedAt: Date.now(),
+			createdAt: FIXED_RECORD_TIMESTAMP_MS,
+			updatedAt: FIXED_RECORD_TIMESTAMP_MS,
 			workspace: captureWorkspaceSnapshot(directory),
 		});
 

@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Plan } from '../../../src/config/plan-schema';
 import { closeProjectDb, getProjectDb } from '../../../src/db/project-db';
@@ -9,6 +8,7 @@ import { derivePlanId } from '../../../src/plan/utils';
 import { getScopeBindingForParentDispatch } from '../../../src/scope/scope-binding';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 import { executeSetQaGates } from '../../../src/tools/set-qa-gates';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 import {
 	createDelegationGateHook,
 	makeConfig,
@@ -78,7 +78,7 @@ describe('delegation gate critic_pre_plan policy', () => {
 
 	beforeEach(() => {
 		resetSwarmState();
-		directory = mkdtempSync(join(tmpdir(), 'critic-policy-'));
+		directory = canonicalMkdtemp('critic-policy-');
 		plan = makePlan();
 		writePlan(directory, plan);
 	});

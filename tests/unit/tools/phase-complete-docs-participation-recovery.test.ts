@@ -15,6 +15,8 @@ import {
 import { executePhaseComplete } from '../../../src/tools/phase-complete';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
 
+const FIXED_EVIDENCE_TIMESTAMP = '2026-01-01T00:00:00.000Z';
+
 function writeFixture(directory: string): Plan {
 	const plan: Plan = {
 		schema_version: '1.0.0',
@@ -57,13 +59,13 @@ function writeFixture(directory: string): Plan {
 		JSON.stringify({
 			schema_version: '1.0.0',
 			task_id: 'retro-1',
-			created_at: new Date().toISOString(),
-			updated_at: new Date().toISOString(),
+			created_at: FIXED_EVIDENCE_TIMESTAMP,
+			updated_at: FIXED_EVIDENCE_TIMESTAMP,
 			entries: [
 				{
 					task_id: 'retro-1',
 					type: 'retrospective',
-					timestamp: new Date().toISOString(),
+					timestamp: FIXED_EVIDENCE_TIMESTAMP,
 					agent: 'architect',
 					verdict: 'pass',
 					summary: 'Docs phase reviewed.',

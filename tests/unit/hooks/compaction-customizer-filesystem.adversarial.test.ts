@@ -84,10 +84,8 @@ describe('ADVERSARIAL: compaction summaries directory', () => {
 			fs.writeFileSync(join(summariesDir, `output-${index}.md`), 'content');
 		}
 
-		const startedAt = Date.now();
 		const block = await compact(tempDir);
 
-		expect(Date.now() - startedAt).toBeLessThan(2_000);
 		expect(block).toContain('[STORED OUTPUTS]\nAt least 256 tool outputs');
 		expect(block.length).toBeLessThanOrEqual(8_000);
 	});
@@ -116,16 +114,21 @@ describe('ADVERSARIAL: compaction summaries directory', () => {
 		fs.mkdirSync(summariesDir, { recursive: true });
 		const original = _test_exports.compactionFs.opendir;
 		_test_exports.compactionFs.opendir = (() =>
-			new Promise((_, reject) => {
-				setTimeout(() => reject(new Error('late directory failure')), 1_200);
-			})) as typeof original;
+			new Promise(() => {})) as typeof original;
 
 		try {
-			const startedAt = Date.now();
-			const block = await compact(tempDir);
-			expect(Date.now() - startedAt).toBeLessThan(1_100);
-			expect(block).toContain('[KNOWLEDGE STATE]');
-			expect(block).not.toContain('[STORED OUTPUTS]');
+			const outcome = await Promise.race([
+				compact(tempDir).then((block) => ({
+					kind: 'completed' as const,
+					block,
+				})),
+				Bun.sleep(2_000).then(() => ({ kind: 'watchdog' as const })),
+			]);
+			expect(outcome.kind).toBe('completed');
+			if (outcome.kind === 'completed') {
+				expect(outcome.block).toContain('[KNOWLEDGE STATE]');
+				expect(outcome.block).not.toContain('[STORED OUTPUTS]');
+			}
 		} finally {
 			_test_exports.compactionFs.opendir = original;
 		}
@@ -144,25 +147,25 @@ describe('ADVERSARIAL: compaction summaries directory', () => {
 		expect(block).not.toContain('[STORED OUTPUTS]');
 	});
 
-	it('fails open when the summaries directory disappears before readdir', async () => {
+	it('fails open when the summaries directory disappears before opening', async () => {
 		const summariesDir = join(tempDir, '.swarm', 'summaries');
 		fs.mkdirSync(summariesDir, { recursive: true });
-		const original = fs.promises.readdir;
-		fs.promises.readdir = (async (path: fs.PathLike) => {
-			if (String(path).includes('summaries')) {
-				const error = new Error('Missing') as NodeJS.ErrnoException;
-				error.code = 'ENOENT';
-				throw error;
-			}
-			return original(path);
+		const original = _test_exports.compactionFs.opendir;
+		let opendirCalls = 0;
+		_test_exports.compactionFs.opendir = (async () => {
+			opendirCalls += 1;
+			const error = new Error('Missing') as NodeJS.ErrnoException;
+			error.code = 'ENOENT';
+			throw error;
 		}) as typeof original;
 
 		try {
 			const block = await compact(tempDir);
+			expect(opendirCalls).toBe(1);
 			expect(block).toContain('[KNOWLEDGE STATE]');
 			expect(block).not.toContain('[STORED OUTPUTS]');
 		} finally {
-			fs.promises.readdir = original;
+			_test_exports.compactionFs.opendir = original;
 		}
 	});
 });

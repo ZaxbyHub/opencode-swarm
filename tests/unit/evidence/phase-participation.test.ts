@@ -64,7 +64,7 @@ function backgroundRecord(input: {
 	taskId: string | null;
 	ingestionConsumed?: boolean;
 }): BackgroundDelegationRecord {
-	const now = Date.now();
+	const now = 1_700_000_000_000;
 	return {
 		schemaVersion: 3,
 		correlationId: input.child,

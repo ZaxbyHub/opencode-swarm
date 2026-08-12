@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { closeProjectDb } from '../../../src/db/project-db';
 import {
@@ -13,6 +12,7 @@ import {
 import { derivePlanId } from '../../../src/plan/utils';
 import type { SetQaGatesArgs } from '../../../src/tools/set-qa-gates';
 import { executeSetQaGates } from '../../../src/tools/set-qa-gates';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const PLAN = {
 	schema_version: '1.0.0',
@@ -60,7 +60,7 @@ describe('set_qa_gates initial selection', () => {
 	let directory: string;
 
 	beforeEach(() => {
-		directory = mkdtempSync(join(tmpdir(), 'qa-initial-selection-'));
+		directory = canonicalMkdtemp('qa-initial-selection-');
 		writePlan(directory);
 	});
 
