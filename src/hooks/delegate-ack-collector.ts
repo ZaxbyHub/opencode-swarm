@@ -7,7 +7,7 @@
  * prompt) against the ack markers in the subagent's transcript:
  *
  *   - For every ack whose ID was actually shown, emit a receipt event of the
- *     matching type (applied / ignored / violated / n_a). Acks for IDs that were
+ *     matching type (applied / ignored / contradicted / violated / n_a). Acks for IDs that were
  *     never shown are DROPPED (anti-spoofing).
  *   - For every CRITICAL directive that was shown but never acknowledged, emit a
  *     `violated` event with reason `unacknowledged` and append an audit line to

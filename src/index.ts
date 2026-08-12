@@ -2532,7 +2532,8 @@ async function initializeOpenCodeSwarm(
 				memoryLifecycleHooks.messagesTransform,
 				knowledgeInjectorHook, // v6.17 knowledge injection
 				// v2: scan latest architect-authored message for KNOWLEDGE_APPLIED
-				// / KNOWLEDGE_IGNORED / KNOWLEDGE_VIOLATED markers and record
+				// / KNOWLEDGE_IGNORED / KNOWLEDGE_CONTRADICTED /
+				// KNOWLEDGE_VIOLATED markers and record
 				// each via the dedup-aware path. Best-effort; never throws.
 				(_input: unknown, output: unknown): Promise<void> => {
 					try {

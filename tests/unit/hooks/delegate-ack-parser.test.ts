@@ -25,6 +25,7 @@ const ID_APPLIED = '11111111-1111-4111-8111-111111111111';
 const ID_IGNORED = '22222222-2222-4222-8222-222222222222';
 const ID_CRITICAL = '33333333-3333-4333-8333-333333333333';
 const ID_NA = '44444444-4444-4444-8444-444444444444';
+const ID_CONTRADICTED = '55555555-5555-4555-8555-555555555555';
 const ID_NEVER_SHOWN = '99999999-9999-4999-8999-999999999999';
 
 function config(): KnowledgeConfig {
@@ -128,9 +129,14 @@ function receipts(
 ): Array<{ id: string; type: string; reason?: string }> {
 	return events
 		.filter((e) =>
-			['applied', 'ignored', 'violated', 'n_a', 'acknowledged'].includes(
-				e.type,
-			),
+			[
+				'applied',
+				'ignored',
+				'contradicted',
+				'violated',
+				'n_a',
+				'acknowledged',
+			].includes(e.type),
 		)
 		.map((e) => {
 			const r = e as { type: string; knowledge_id: string; reason?: string };
@@ -181,6 +187,33 @@ describe('collectDelegateAcks', () => {
 		expect(byId.get(ID_NA)).toBe('n_a');
 		expect(byId.get(ID_CRITICAL)).toBe('applied');
 		// No unacknowledged criticals — the critical was acked.
+		expect(result.unacknowledgedCriticals).toEqual([]);
+	});
+
+	it('records a shown contradictory directive as a contradicted event', async () => {
+		const prompt = `${buildDelegateDirectiveBlock(
+			[entry(ID_CONTRADICTED, 'critical')],
+			config(),
+			FIXED_TRACE_ID,
+		)}\n\nTASK_ID: task-42\nImplement the thing.`;
+		await seedRetrieved(dir, [ID_CONTRADICTED], { sessionId: 'sess-1' });
+
+		const result = await collectDelegateAcks({
+			directory: dir,
+			prompt,
+			transcript: `KNOWLEDGE_CONTRADICTED:${ID_CONTRADICTED} reason=current scope requires relative paths`,
+			agent: 'coder',
+			sessionId: 'sess-1',
+		});
+
+		expect(result.emitted).toEqual([
+			{ id: ID_CONTRADICTED, type: 'contradicted' },
+		]);
+		expect(receipts(await readKnowledgeEvents(dir))).toContainEqual({
+			id: ID_CONTRADICTED,
+			type: 'contradicted',
+			reason: 'current scope requires relative paths',
+		});
 		expect(result.unacknowledgedCriticals).toEqual([]);
 	});
 

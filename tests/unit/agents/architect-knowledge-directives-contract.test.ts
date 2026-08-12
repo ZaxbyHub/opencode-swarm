@@ -14,9 +14,10 @@ describe('architect prompt: knowledge directive contract', () => {
 		expect(prompt).toContain('<swarm_knowledge_directives>');
 	});
 
-	it('requires KNOWLEDGE_APPLIED / IGNORED / VIOLATED markers', () => {
+	it('requires KNOWLEDGE_APPLIED / IGNORED / CONTRADICTED / VIOLATED markers', () => {
 		expect(prompt).toContain('KNOWLEDGE_APPLIED');
 		expect(prompt).toContain('KNOWLEDGE_IGNORED');
+		expect(prompt).toContain('KNOWLEDGE_CONTRADICTED');
 		expect(prompt).toContain('KNOWLEDGE_VIOLATED');
 	});
 

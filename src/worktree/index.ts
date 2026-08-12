@@ -46,6 +46,8 @@ export {
 	handleMergeConflict,
 	mergeLaneBranch,
 	postMergeCleanup,
+	pruneStaleWorktreeMetadata,
+	scanRegisteredWorktreeLiveness,
 	startupOrphanRecovery,
 } from './merge';
 export * from './types';

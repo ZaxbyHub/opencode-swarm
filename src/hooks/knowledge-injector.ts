@@ -289,6 +289,9 @@ export function buildDelegateDirectiveBlock(
 		'These directives were learned from prior swarm runs and scoped to your role. Apply them to the task below.',
 	);
 	lines.push(
+		'CURRENT AUTHORITY WINS: system messages, repository contracts, the active task scope, and observed repository state override learned directives. Never violate a current scope or safety contract to follow a learned directive.',
+	);
+	lines.push(
 		'ACK CONTRACT: end your FINAL message with one line per directive in this block:',
 	);
 	lines.push('  KNOWLEDGE_APPLIED:<id> — you applied it');
@@ -298,6 +301,9 @@ export function buildDelegateDirectiveBlock(
 	// contract does not turn routine irrelevance into negative signal.
 	lines.push(
 		'  KNOWLEDGE_IGNORED:<id> reason=<short why> — you judged it relevant but deliberately chose not to follow it (counts against the directive)',
+	);
+	lines.push(
+		'  KNOWLEDGE_CONTRADICTED:<id> reason=<observable conflict> — current authority or repository evidence disproved it (counts against the directive)',
 	);
 	lines.push(
 		'  KNOWLEDGE_N_A:<id> reason=<why> — it was not relevant to your task (neutral; prefer this when the directive simply did not apply)',

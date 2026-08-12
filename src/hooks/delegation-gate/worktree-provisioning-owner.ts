@@ -6,6 +6,12 @@ import { validateSwarmPath } from '../utils';
 const PROVISIONING_OWNER_DIR = 'worktree-provisioning-owners';
 const MAX_PROVISIONING_OWNERS = 512;
 const MAX_PROVISIONING_OWNER_BYTES = 16 * 1024;
+/**
+ * A provisional marker covers the bounded gap before `git worktree add`
+ * materializes the exact lane path. Once that path exists, path liveness wins
+ * and the marker remains protected regardless of age.
+ */
+export const WORKTREE_PROVISIONING_OWNER_LEASE_MS = 5 * 60 * 1000;
 export const WORKTREE_LIFECYCLE_LOCK_FILE =
 	'.swarm/locks/init-orphan-recovery.lock';
 

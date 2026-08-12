@@ -9,7 +9,15 @@ import {
 } from '../../../src/background/pending-delegations';
 import type { PluginConfig } from '../../../src/config';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
-import { ensureAgentSession, resetSwarmState } from '../../../src/state';
+import {
+	resetStandardWorktreeIsolationState,
+	_internals as worktreeIsolationInternals,
+} from '../../../src/hooks/delegation-gate/worktree-isolation';
+import {
+	ensureAgentSession,
+	resetSwarmState,
+	swarmState,
+} from '../../../src/state';
 import { writeApprovedPlan } from '../../helpers/approved-plan';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
 import { writeDisjointScopes } from './_delegation-gate-helpers';
@@ -62,8 +70,88 @@ describe('background coder Stage A provenance', () => {
 	});
 
 	afterEach(() => {
+		resetStandardWorktreeIsolationState();
 		resetSwarmState();
 		cleanup();
+	});
+
+	test('persists the delivered lane-root prompt in the background dispatch snapshot', async () => {
+		await writeApprovedPlan(
+			directory,
+			[{ id: '1.1', files: ['src/feature.ts'] }],
+			{
+				executionProfile: {
+					parallelization_enabled: true,
+					max_concurrent_tasks: 2,
+					locked: true,
+				},
+			},
+		);
+		const laneRoot = path.join(directory, '.swarm-worktrees', 'lane-child');
+		fs.mkdirSync(laneRoot, { recursive: true });
+		const originalProvision = worktreeIsolationInternals.provisionWorktree;
+		worktreeIsolationInternals.provisionWorktree = async () => ({
+			worktreePath: laneRoot,
+			branchName: 'swarm/lane/parent/1.1',
+			purpose: 'lane',
+			id: '1.1',
+			sessionId: 'parent',
+		});
+		swarmState.opencodeClient = {
+			session: {
+				create: async () => ({ data: { id: 'coder-session-lane' } }),
+			},
+		} as never;
+		try {
+			const session = ensureAgentSession('parent', 'architect', directory);
+			session.currentTaskId = '1.1';
+			session.lastCoderDelegationTaskId = '1.1';
+			const hook = createDelegationGateHook(
+				{
+					...config,
+					worktree: { policy: 'auto', merge_strategy: 'merge' },
+				} as PluginConfig,
+				directory,
+			);
+			const args = {
+				subagent_type: 'coder',
+				background: true,
+				task_id: '1.1',
+				prompt:
+					'TASK: 1.1\nFILE: src/feature.ts\nACCEPTANCE: feature is implemented',
+			};
+
+			await hook.toolBefore(
+				{ tool: 'Task', sessionID: 'parent', callID: 'coder-lane-call' },
+				{ args },
+			);
+			expect(args.prompt).toContain(
+				`authoritative_lane_root: ${JSON.stringify(laneRoot)}`,
+			);
+			await hook.toolAfter(
+				{
+					tool: 'Task',
+					sessionID: 'parent',
+					callID: 'coder-lane-call',
+					args,
+				},
+				{
+					state: 'running',
+					output:
+						'<task id="coder-session-lane" state="running">Background task started</task>',
+					metadata: { background: true, jobId: 'coder-lane-job' },
+				},
+			);
+
+			const record = findByCorrelationId(directory, 'coder-session-lane');
+			expect(record?.prompt?.text).toContain(
+				`authoritative_lane_root: ${JSON.stringify(laneRoot)}`,
+			);
+			expect(record?.prompt?.text).toContain('FILE: src/feature.ts');
+		} finally {
+			worktreeIsolationInternals.provisionWorktree = originalProvision;
+			swarmState.opencodeClient = null;
+		}
 	});
 
 	test('ordinary code scope is durably captured before terminal completion', async () => {
