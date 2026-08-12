@@ -98,6 +98,17 @@ const DEFAULT_THRESHOLDS: Record<PatternType, number> = {
  * still-running episode once it has grown by another threshold's worth of
  * occurrences, so it must resolve the threshold exactly the way the detectors do
  * or the two layers disagree about what "another occurrence" means.
+ *
+ * The threshold is NOT in a single unit across detectors, and the ladder does not
+ * pretend otherwise — it is repeats for `repetition_loop`, run length for
+ * `context_thrash`, cycle count for `stuck_on_test`, alternating-entry count for
+ * `ping_pong` (whose `occurrenceCount` is ROUND TRIPS, i.e. half that unit, so it
+ * re-strikes at twice the nominal spacing), and a growth RATIO for
+ * `expansion_drift` (whose `occurrenceCount` is a float near 1.5–3.0, so the
+ * growth ground is effectively inert for it and its re-strikes come from the
+ * new-episode ground instead — its comparison window steps by `windowSize`, so
+ * its episode start step genuinely advances). Every one of the five is verified
+ * to still reach a hard stop; see `src/prm/__tests__/issue-2134-episode-gate.test.ts`.
  */
 export function resolvePatternThreshold(
 	config: PrmConfig,
