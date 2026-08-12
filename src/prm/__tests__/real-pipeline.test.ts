@@ -8,11 +8,21 @@ import {
 } from '../../hooks/trajectory-logger';
 import { resetSwarmState, swarmState } from '../../state';
 import { createPrmHook, _internals as prmInternals } from '../index';
+import { resolvePatternThreshold } from '../pattern-detector';
 import {
 	clearTrajectoryCache,
 	getInMemoryTrajectory,
 	readTrajectory,
 } from '../trajectory-store';
+import type { PrmConfig } from '../types';
+
+// PRR-011 (PR #2139 review): pins the shipped `context_thrash` default so a
+// future silent change to `DEFAULT_THRESHOLDS` in pattern-detector.ts (or to
+// its `src/config/schema.ts` mirror) fails a test instead of drifting
+// unnoticed. Issue #2134 tuning raised this from 3 to 10.
+test('resolvePatternThreshold falls back to the shipped context_thrash default of 10 when config omits it', () => {
+	expect(resolvePatternThreshold({} as PrmConfig, 'context_thrash')).toBe(10);
+});
 
 describe('PRM real trajectory pipeline', () => {
 	let tempDir: string;
@@ -72,7 +82,11 @@ describe('PRM real trajectory pipeline', () => {
 					ping_pong: 2,
 					expansion_drift: 3,
 					stuck_on_test: 3,
-					context_thrash: 3,
+					// PRR-011: was 3 (stale pre-#2134 value); shipped default is 10.
+					// This test's assertions exercise repetition_loop only, so the
+					// exact value is otherwise inert here — kept in sync with
+					// production for hygiene (see the pinning test above).
+					context_thrash: 10,
 				},
 				max_trajectory_lines: 500,
 				escalation_enabled: true,

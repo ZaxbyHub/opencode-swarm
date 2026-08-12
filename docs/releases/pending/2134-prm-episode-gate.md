@@ -114,6 +114,36 @@ otherwise the test would still pass with those detectors fully disarmed.
   three files, so the old default fired on essentially every healthy coder session
   and told an agent doing nothing wrong to "restrict file access".
 
+- **Trajectory entries no longer persist secrets in command values.** Widening
+  `target` from a first word to a whole 200-char command widened what
+  `.swarm/trajectories/*.jsonl` and evidence/replay store, and the existing
+  redaction only matched sensitive KEY names — useless for
+  `curl -H "Authorization: Bearer …"`, where the secret is the value. `target`,
+  `args_summary`, `intent` and the `description` fallback now all run the shared
+  `redactSecrets` detector plus a module-local URL-credential pattern, over a
+  bounded 4 KB scan window (the shared detector's lazy private-key pattern is
+  quadratic against repeated unterminated `BEGIN … PRIVATE KEY` markers, and this
+  runs on the per-tool-call path).
+
+  Ordering is load-bearing: the command is **bounded first, redacted second**.
+  Redacting first was a defect caught in review — a placeholder is longer than
+  the span it replaces, so redaction pushed a ~200-char command's tail past the
+  bound and truncation cut the part that made two commands *different*,
+  collapsing them onto one target even when the secret was not the differing
+  text. That is the same false-`repetition_loop` failure this issue exists to
+  close. When redaction still overflows the bound, the target carries a digest of
+  the bounded raw command so distinctness is preserved by construction.
+
+  The URL-credential pattern is deliberately local to the trajectory logger:
+  `SECRET_PATTERNS.length` in `src/memory/redaction.ts` feeds
+  `computeRedactionPolicyVersion`, a memory-cohort compatibility value that fails
+  closed, so growing that array would invalidate every already-linked cohort.
+
+- **Episode-ledger eviction is now least-recently-struck.** `Map.set` on an
+  existing key preserves its original position, so the 256-entry FIFO bound
+  evicted by oldest-first-seen and could drop the very episode an agent was
+  actively tripping. Delete-then-set moves a re-struck episode to the back.
+
 ## Docs
 
 `docs/configuration.md` now documents how the ladder counts, and how to clear a

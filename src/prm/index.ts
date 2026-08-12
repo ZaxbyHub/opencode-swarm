@@ -406,16 +406,21 @@ export function createPrmHook(
 			}
 
 			for (const match of strikeable) {
-				struckEpisodes.set(
-					`${match.pattern}|${match.stepRange[0]}`,
-					match.occurrenceCount,
-				);
+				const episodeKey = `${match.pattern}|${match.stepRange[0]}`;
+				// PRR-004 (PR #2139 review): delete-then-set, so an episode that
+				// strikes AGAIN moves to the back of the insertion order. `Map.set`
+				// on an existing key preserves its original position, which made the
+				// bound below evict by oldest-FIRST-SEEN rather than least-recently-
+				// struck — able to drop the very episode an agent is still tripping
+				// while keeping 255 inert ones. Mirrors the ladder bound in
+				// `escalation.ts`.
+				struckEpisodes.delete(episodeKey);
+				struckEpisodes.set(episodeKey, match.occurrenceCount);
 			}
 			// Bound the ledger. Episode keys are minted per distinct start step, so a
 			// very long session with a sliding detection window accumulates them
 			// steadily. Map preserves insertion order, so dropping from the front
-			// evicts the oldest episodes — the ones a still-running session can no
-			// longer re-detect anyway, because the trajectory itself is truncated.
+			// evicts the least recently struck episode.
 			while (struckEpisodes.size > MAX_TRACKED_EPISODES) {
 				const oldest = struckEpisodes.keys().next().value;
 				if (oldest === undefined) break;

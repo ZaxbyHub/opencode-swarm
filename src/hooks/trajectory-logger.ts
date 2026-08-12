@@ -11,6 +11,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { sanitizeTaskId } from '../evidence/manager';
+import { redactSecrets } from '../memory/redaction';
 import { appendTrajectoryEntry } from '../prm/trajectory-store';
 import { swarmState } from '../state';
 import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
@@ -156,6 +157,61 @@ function deriveAction(tool: string): string {
 }
 
 /**
+ * Credentials embedded in a URL authority (`https://user:pass@host/…`).
+ *
+ * Deliberately LOCAL to this module rather than added to `SECRET_PATTERNS` in
+ * `src/memory/redaction.ts`: that array's LENGTH feeds
+ * `computeRedactionPolicyVersion`, a memory-cohort compatibility value that
+ * fails closed on mismatch, so growing it would invalidate every already-linked
+ * cohort until the user re-ran `/swarm memory link`. The trajectory logger has
+ * no cohort coupling, so it can close the leak here at zero policy-version cost.
+ * A change that genuinely owns the cohort bump should move this into the shared
+ * list.
+ *
+ * The userinfo segment is replaced wholesale — the username is as identifying as
+ * the password for a leaked credential pair.
+ */
+const URL_CREDENTIALS_PATTERN =
+	/\b([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)[^\s/@:]+:[^\s/@]+@/g;
+
+/**
+ * How much of a string value is scanned for secrets.
+ *
+ * Comfortably above the 50-char slice `summarizeArgs` emits and the 100-char
+ * slice `extractIntent` emits, so the redacted output is identical to a full
+ * scan for any realistic input, while bounding the cost of running ~14 regexes
+ * over every string arg of every tool call.
+ */
+const REDACTION_SCAN_WINDOW = 4096;
+
+/**
+ * FNV-1a 32-bit, hex. Not a security primitive — it exists so a redacted target
+ * that had to be re-truncated still differs when the underlying commands differ.
+ * A cheap non-cryptographic hash is the right tool: this runs on the
+ * per-tool-call path, and a collision costs at most one conflated repetition
+ * ladder, never a correctness or safety property.
+ */
+function fnv1aHex(text: string): string {
+	let hash = 0x811c9dc5;
+	for (let i = 0; i < text.length; i++) {
+		hash ^= text.charCodeAt(i);
+		hash = Math.imul(hash, 0x01000193) >>> 0;
+	}
+	return hash.toString(16).padStart(8, '0');
+}
+
+/**
+ * Runs the shared secret detector plus this module's local URL-credential
+ * pattern over a command string.
+ */
+function redactCommandSecrets(text: string): string {
+	return redactSecrets(text).replace(
+		URL_CREDENTIALS_PATTERN,
+		'$1[REDACTED:url_credentials]@',
+	);
+}
+
+/**
  * Upper bound on a shell command used as a trajectory target (issue #2134).
  *
  * Matches `MAX_SANITIZED_LENGTH` in `src/prm/pattern-detector.ts`, which is what
@@ -165,15 +221,48 @@ function deriveAction(tool: string): string {
 const MAX_COMMAND_TARGET_LENGTH = 200;
 
 /**
- * Normalizes a shell command into a stable trajectory target: whitespace
- * collapsed (so a heredoc or a line-continued command matches its single-line
- * equivalent) and bounded in length.
+ * Normalizes a shell command into a stable trajectory target: inline secrets
+ * redacted, whitespace collapsed (so a heredoc or a line-continued command
+ * matches its single-line equivalent), and bounded in length.
+ *
+ * PRR-001 (PR #2139 review): `target` is persisted verbatim to
+ * `.swarm/trajectories/{sid}.jsonl`, `.swarm/evidence/{taskId}/trajectory.jsonl`
+ * and replay artifacts. `summarizeArgs` redacts by KEY name, which does nothing
+ * for a command whose secret is in the VALUE — `curl -H "Authorization: Bearer …"`.
+ * Widening the target from a first word to the whole command widened that
+ * exposure, so the shared `redactSecrets` detector runs over it here.
+ *
+ * ORDER IS LOAD-BEARING: bound FIRST, redact second. Redacting first was a
+ * defect (Stage-B review of this fix): a placeholder like
+ * `[REDACTED:env_secret]` (21 chars) is longer than the span it replaces, so
+ * redaction PUSHED the tail of a ~200-char command past the length bound and
+ * truncation then cut the part that made two commands different — collapsing
+ * them onto one target even when the secret was not the differing text. That is
+ * exactly the false-`repetition_loop` failure this issue exists to close, and it
+ * contradicts the invariant this function documents below. Bounding first means
+ * the identity window is the same 200 bytes it was before redaction existed.
+ *
+ * The residual: a secret straddling the 200-char bound has its head inside the
+ * window and no longer matches, so a partial fragment is stored. That is the
+ * same exposure every other truncated field here already carries (`args_summary`
+ * cuts at 50), and it is strictly better than the pre-redaction behaviour.
  */
 function normalizeCommandTarget(command: string): string {
 	const normalized = command.trim().replace(/\s+/g, ' ');
-	return normalized.length > MAX_COMMAND_TARGET_LENGTH
-		? `${normalized.slice(0, MAX_COMMAND_TARGET_LENGTH - 3)}...`
-		: normalized;
+	const bounded =
+		normalized.length > MAX_COMMAND_TARGET_LENGTH
+			? `${normalized.slice(0, MAX_COMMAND_TARGET_LENGTH - 3)}...`
+			: normalized;
+	const redacted = redactCommandSecrets(bounded);
+	if (redacted.length <= MAX_COMMAND_TARGET_LENGTH) return redacted;
+	// A placeholder is longer than the span it replaces, so redaction can push a
+	// command that fitted back over the bound. Truncating here would cut the tail
+	// that made two commands different — the E-2 collapse this ordering exists to
+	// prevent, and it bites hardest when the secret is NOT the differing text.
+	// Re-bound, but carry a digest of the BOUNDED RAW string so distinctness is
+	// preserved by construction rather than by luck of where the cut lands.
+	const digest = fnv1aHex(bounded);
+	return `${redacted.slice(0, MAX_COMMAND_TARGET_LENGTH - 1 - digest.length)}#${digest}`;
 }
 
 /**
@@ -236,9 +325,14 @@ function extractTarget(tool: string, args?: Record<string, unknown>): string {
 		const description = args.description;
 		if (typeof description === 'string' && description.length > 0) {
 			// Return first 30 chars as target to differentiate commands
-			return description.length > 30
-				? `${description.slice(0, 27)}...`
-				: description;
+			// PRR-001 residual (Stage-B review): this fallback lands in the same
+			// JSONL line as `target`, so it carries the same redaction posture.
+			const safeDescription = redactCommandSecrets(
+				description.slice(0, REDACTION_SCAN_WINDOW),
+			);
+			return safeDescription.length > 30
+				? `${safeDescription.slice(0, 27)}...`
+				: safeDescription;
 		}
 
 		// Try args field (generic fallback). Same issue #2134 reasoning as the
@@ -272,10 +366,14 @@ function extractIntent(tool: string, args?: Record<string, unknown>): string {
 				: typeof description === 'string'
 					? description
 					: '';
-		if (text.length > 100) {
-			return `${text.slice(0, 97)}...`;
+		// PRR-001 residual (Stage-B review): `intent` is written to the same
+		// trajectory line as `target` and `args_summary`, and a Task prompt is
+		// free-form text that can quote a credential.
+		const safeText = redactCommandSecrets(text.slice(0, REDACTION_SCAN_WINDOW));
+		if (safeText.length > 100) {
+			return `${safeText.slice(0, 97)}...`;
 		}
-		return text;
+		return safeText;
 	}
 
 	// Check for description or task fields
@@ -660,8 +758,22 @@ function summarizeArgs(
 		if (value === null || value === undefined) {
 			summaries.push(`${key}:null`);
 		} else if (typeof value === 'string') {
-			// Truncate long string values
-			const truncated = value.length > 50 ? `${value.slice(0, 50)}...` : value;
+			// PRR-001 (PR #2139 review): key-name redaction above cannot see a secret
+			// carried in the VALUE — `command: 'curl -H "Authorization: Bearer …"'`
+			// has a non-sensitive key.
+			//
+			// Only the scan WINDOW is redacted, not the whole value. This runs on the
+			// per-tool-call hot path for EVERY string arg — including `write.content`
+			// and `task.prompt`, which can be megabytes — and `private_key_block`'s
+			// lazy `[\s\S]*?` is quadratic against repeated unterminated
+			// `-----BEGIN … PRIVATE KEY-----` markers (measured: 1.7s at 8k markers).
+			// The value is sliced to 50 chars anyway, so scanning a bounded prefix
+			// gives identical output for every input that is not adversarially
+			// constructed, at O(1) cost.
+			const window = value.slice(0, REDACTION_SCAN_WINDOW);
+			const redacted = redactCommandSecrets(window);
+			const truncated =
+				redacted.length > 50 ? `${redacted.slice(0, 50)}...` : redacted;
 			summaries.push(`${key}:"${truncated}"`);
 		} else if (typeof value === 'number' || typeof value === 'boolean') {
 			summaries.push(`${key}:${String(value)}`);
