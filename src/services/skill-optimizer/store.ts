@@ -38,6 +38,7 @@ import {
 } from 'node:fs';
 import * as path from 'node:path';
 import { withEvidenceLock } from '../../evidence/lock.js';
+import { assertProjectRoot } from '../../utils/project-boundary.js';
 
 const STORE_SCHEMA_VERSION = '1';
 
@@ -275,6 +276,7 @@ export async function appendEvent(
 		'seq' | 'timestamp' | 'hashBefore' | 'hashAfter'
 	> & { timestamp?: string },
 ): Promise<SkillOptEvent> {
+	assertProjectRoot(directory);
 	if (!isValidSkillSlug(eventInput.skillSlug)) {
 		throw new Error(`invalid skill slug: ${eventInput.skillSlug}`);
 	}
@@ -286,8 +288,6 @@ export async function appendEvent(
 		eventInput.skillSlug,
 		eventInput.candidateId,
 	);
-	ensureCandidateDir(directory, eventInput.skillSlug, eventInput.candidateId);
-
 	return _internals.withEvidenceLock(
 		directory,
 		path.join(
@@ -301,6 +301,11 @@ export async function appendEvent(
 		'skill-opt-ledger',
 		'append-skill-opt-event',
 		async () => {
+			ensureCandidateDir(
+				directory,
+				eventInput.skillSlug,
+				eventInput.candidateId,
+			);
 			const existing = existsSync(filePath)
 				? readFileSync(filePath, 'utf8')
 				: '';
@@ -458,6 +463,7 @@ export function quarantineSuffix(
 	skillSlug: string,
 	badSuffix: string,
 ): string {
+	assertProjectRoot(directory);
 	const dir = path.join(directory, '.swarm', 'evolution', 'skills');
 	if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 	const hash = computeStateHash(badSuffix).slice(0, 12);
@@ -481,6 +487,7 @@ export function writeStateProjection(
 	candidateId: string,
 	replay: ReplayResult,
 ): void {
+	assertProjectRoot(directory);
 	const target = stateProjectionPath(directory, skillSlug, candidateId);
 	ensureCandidateDir(directory, skillSlug, candidateId);
 	const projection = {
@@ -509,6 +516,7 @@ export function writeArtifact(
 	fileName: string,
 	content: string,
 ): string {
+	assertProjectRoot(directory);
 	const dir = ensureCandidateDir(directory, skillSlug, candidateId);
 	const target = path.join(dir, fileName);
 	const tempPath = `${target}.tmp.${Date.now()}.${Math.floor(Math.random() * 1e9)}`;

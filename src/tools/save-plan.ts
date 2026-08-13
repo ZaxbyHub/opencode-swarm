@@ -33,6 +33,11 @@ import { derivePlanId } from '../plan/utils.js';
 import { formatLegacyQaBindingRecovery } from '../qa-gate/recovery.js';
 import { normalizeScopeFiles } from '../scope/scope-binding.js';
 import { readEffectiveSpecSync } from '../sdd/effective-spec';
+import {
+	assertProjectRoot,
+	hasExplicitProjectBoundary,
+	isStrictPathDescendant,
+} from '../utils/project-boundary';
 import { createSwarmTool } from './create-tool';
 import { extractRequirements } from './req-coverage';
 
@@ -379,6 +384,22 @@ export async function executeSavePlan(
 	// Project root anchor check — prevent .swarm from being created in subdirectories (issue #577).
 	// If working_directory was explicitly provided, reject only if it is a subdirectory of fallbackDir.
 	// If fallbackDir doesn't exist (CWD mismatch), trust the explicit working_directory.
+	// Enforce the authoritative boundary before any spec snapshot, QA profile,
+	// ledger, or projection I/O. A fallback comparison cannot detect an ordinary
+	// descendant when the injected fallback is unrelated.
+	try {
+		assertProjectRoot(targetWorkspace as string);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		return {
+			success: false,
+			message,
+			errors: [message],
+			recovery_guidance:
+				'Pass the project root, or add an explicit local .git/.opencode project boundary before retrying save_plan.',
+		};
+	}
+
 	if (args.working_directory && fallbackDir) {
 		const resolvedTarget = path.resolve(args.working_directory);
 		const resolvedRoot = path.resolve(fallbackDir);
@@ -396,20 +417,25 @@ export async function executeSavePlan(
 			// Reject only if working_directory is a subdirectory of fallback.
 			// Example: workingDir=/project/src, fallback=/project → src is a subdirectory of /project → REJECT
 			// Example: workingDir=/project, fallback=/tmp/wrong → /project is NOT a subdirectory of /tmp/wrong → TRUST
-			const isSubdirectory = resolvedTarget.startsWith(resolvedRoot + path.sep);
+			const isSubdirectory = isStrictPathDescendant(
+				resolvedTarget,
+				resolvedRoot,
+			);
 			if (isSubdirectory) {
-				return {
-					success: false,
-					message:
-						`working_directory must be the project root. ` +
-						`Got "${args.working_directory}" (resolves to "${resolvedTarget}"), ` +
-						`which is a subdirectory of fallback "${resolvedRoot}". ` +
-						`Omit working_directory or pass the project root explicitly.`,
-					errors: [
-						`working_directory "${resolvedTarget}" is a subdirectory of fallback "${resolvedRoot}"`,
-					],
-					recovery_guidance: `Pass working_directory: "${resolvedRoot}" or omit the field entirely.`,
-				};
+				if (!hasExplicitProjectBoundary(resolvedTarget)) {
+					return {
+						success: false,
+						message:
+							`working_directory must be the project root. ` +
+							`Got "${args.working_directory}" (resolves to "${resolvedTarget}"), ` +
+							`which is a subdirectory of fallback "${resolvedRoot}". ` +
+							`Omit working_directory or pass the project root explicitly.`,
+						errors: [
+							`working_directory "${resolvedTarget}" is a subdirectory of fallback "${resolvedRoot}"`,
+						],
+						recovery_guidance: `Pass working_directory: "${resolvedRoot}" or omit the field entirely.`,
+					};
+				}
 			}
 		}
 		// Trust explicit working_directory (fallback doesn't exist, or not a subdirectory)

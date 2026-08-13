@@ -17,6 +17,7 @@ import {
 import { withEvidenceLock } from '../evidence/lock.js';
 import { emit } from '../telemetry.js';
 import { criticalWarn, log } from '../utils/logger';
+import { assertProjectRoot } from '../utils/project-boundary';
 import { derivePlanId } from './utils';
 
 /**
@@ -443,6 +444,7 @@ export async function initLedger(
 	initialPlanHash?: string,
 	initialPlan?: Plan,
 ): Promise<void> {
+	assertProjectRoot(directory);
 	const ledgerPath = getLedgerPath(directory);
 	const planJsonPath = getPlanJsonPath(directory);
 
@@ -519,6 +521,7 @@ export async function appendLedgerEvent(
 		planHashAfter?: string;
 	},
 ): Promise<LedgerEvent> {
+	assertProjectRoot(directory);
 	return withEvidenceLock(
 		directory,
 		LEDGER_LOCK_PATH,
@@ -1226,6 +1229,7 @@ export async function quarantineLedgerSuffix(
 	}
 
 	try {
+		assertProjectRoot(directory);
 		// Unique, non-overwriting side path: timestamp for ordering + content hash
 		// for identity, so distinct corruptions never collide on the same filename.
 		const hash = crypto

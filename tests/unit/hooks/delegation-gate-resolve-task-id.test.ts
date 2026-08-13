@@ -15,6 +15,7 @@ import * as path from 'node:path';
 import { _internals as delegationGateInternals } from '../../../src/hooks/delegation-gate';
 import { _internals as hooksUtilsInternals } from '../../../src/hooks/utils';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
+import { safeRmRecursive } from '../../helpers/safe-test-dir';
 
 const {
 	resolveDelegatedPlanTaskId,
@@ -298,12 +299,7 @@ describe('resolveEvidenceTaskId — issue #1914 plan-critic item 3 (transitive b
 		// test just wrote and read .swarm/plan.json, so AV may still hold a
 		// brief handle when we tear down. (Node's fs.rmSync option is
 		// `retryDelay`, NOT `retryDelayMS`.)
-		fs.rmSync(directory, {
-			recursive: true,
-			force: true,
-			maxRetries: 5,
-			retryDelay: 50,
-		});
+		safeRmRecursive(directory);
 	});
 
 	test('reviewer dispatch with ses_ task_id + TASK: 2.1 attributes evidence to 2.1 (not session fallback)', async () => {

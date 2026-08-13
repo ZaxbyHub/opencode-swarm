@@ -5,8 +5,8 @@
  * is secure against path traversal, injection, and other attacks.
  *
  * SECURITY VALIDATION: These tests verify that the security fix properly
- * rejects malicious working directory values with the generic error message
- * "Invalid working directory".
+ * rejects malicious working directory values before any subprocess spawn,
+ * including at the canonical project-root preflight.
  *
  * ATTACK VECTORS TESTED:
  * 1. Path traversal via ToolContext.directory (NOW BLOCKED)
@@ -125,7 +125,7 @@ describe('test-runner.ts - ADVERSARIAL CWD SECURITY TESTS', () => {
 			} as any);
 			const parsed = JSON.parse(result);
 			expect(parsed.success).toBe(false);
-			expect(parsed.error).toContain('Invalid working directory');
+			expect(parsed.error).toContain('Cannot verify project root');
 
 			// Verify nothing was passed to spawn
 			expect(spawnCalls.length).toBe(0);
@@ -141,7 +141,7 @@ describe('test-runner.ts - ADVERSARIAL CWD SECURITY TESTS', () => {
 			} as any);
 			const parsed = JSON.parse(result);
 			expect(parsed.success).toBe(false);
-			expect(parsed.error).toContain('Invalid working directory');
+			expect(parsed.error).toContain('Cannot verify project root');
 
 			expect(spawnCalls.length).toBe(0);
 
@@ -157,7 +157,7 @@ describe('test-runner.ts - ADVERSARIAL CWD SECURITY TESTS', () => {
 			} as any);
 			const parsed = JSON.parse(result);
 			expect(parsed.success).toBe(false);
-			expect(parsed.error).toContain('Invalid working directory');
+			expect(parsed.error).toContain('Cannot verify project root');
 
 			// STATUS: SECURE - URL-encoded traversal blocked
 		});
@@ -187,7 +187,7 @@ describe('test-runner.ts - ADVERSARIAL CWD SECURITY TESTS', () => {
 			} as any);
 			const parsed = JSON.parse(result);
 			expect(parsed.success).toBe(false);
-			expect(parsed.error).toContain('Invalid working directory');
+			expect(parsed.error).toContain('Cannot verify project root');
 
 			// Verify nothing was passed to spawn
 			expect(spawnCalls.length).toBe(0);
@@ -203,7 +203,7 @@ describe('test-runner.ts - ADVERSARIAL CWD SECURITY TESTS', () => {
 			} as any);
 			const parsed = JSON.parse(result);
 			expect(parsed.success).toBe(false);
-			expect(parsed.error).toContain('Invalid working directory');
+			expect(parsed.error).toContain('Cannot verify project root');
 
 			expect(spawnCalls.length).toBe(0);
 
@@ -224,7 +224,7 @@ describe('test-runner.ts - ADVERSARIAL CWD SECURITY TESTS', () => {
 			} as any);
 			const parsed = JSON.parse(result);
 			expect(parsed.success).toBe(false);
-			expect(parsed.error).toContain('Invalid working directory');
+			expect(parsed.error).toContain('Cannot verify project root');
 
 			expect(spawnCalls.length).toBe(0);
 
@@ -241,7 +241,7 @@ describe('test-runner.ts - ADVERSARIAL CWD SECURITY TESTS', () => {
 			} as any);
 			const parsed = JSON.parse(result);
 			expect(parsed.success).toBe(false);
-			expect(parsed.error).toContain('Invalid working directory');
+			expect(parsed.error).toContain('Cannot verify project root');
 
 			expect(spawnCalls.length).toBe(0);
 
@@ -257,7 +257,7 @@ describe('test-runner.ts - ADVERSARIAL CWD SECURITY TESTS', () => {
 			} as any);
 			const parsed = JSON.parse(result);
 			expect(parsed.success).toBe(false);
-			expect(parsed.error).toContain('Invalid working directory');
+			expect(parsed.error).toContain('Cannot verify project root');
 
 			expect(spawnCalls.length).toBe(0);
 
@@ -272,11 +272,10 @@ describe('test-runner.ts - ADVERSARIAL CWD SECURITY TESTS', () => {
 			} as any);
 			const parsed = JSON.parse(result);
 			expect(parsed.success).toBe(false);
-			expect(parsed.error).toContain('Invalid working directory');
-
+			expect(parsed.error).toMatch(
+				/Invalid working directory|Cannot verify project root/,
+			);
 			expect(spawnCalls.length).toBe(0);
-
-			// STATUS: SECURE - Device path blocked
 		});
 
 		test('SECURE: Windows device path \\\\.\\COM1 is REJECTED', async () => {
@@ -287,7 +286,7 @@ describe('test-runner.ts - ADVERSARIAL CWD SECURITY TESTS', () => {
 			} as any);
 			const parsed = JSON.parse(result);
 			expect(parsed.success).toBe(false);
-			expect(parsed.error).toContain('Invalid working directory');
+			expect(parsed.error).toContain('Cannot verify project root');
 
 			expect(spawnCalls.length).toBe(0);
 
@@ -465,7 +464,7 @@ describe('test-runner.ts - ADVERSARIAL CWD SECURITY TESTS', () => {
 			} as any);
 			const parsed = JSON.parse(result);
 			expect(parsed.success).toBe(false);
-			expect(parsed.error).toContain('Invalid working directory');
+			expect(parsed.error).toContain('Cannot verify project root');
 
 			expect(spawnCalls.length).toBe(0);
 
@@ -481,7 +480,7 @@ describe('test-runner.ts - ADVERSARIAL CWD SECURITY TESTS', () => {
 			} as any);
 			const parsed = JSON.parse(result);
 			expect(parsed.success).toBe(false);
-			expect(parsed.error).toContain('Invalid working directory');
+			expect(parsed.error).toContain('Cannot verify project root');
 
 			expect(spawnCalls.length).toBe(0);
 
@@ -497,7 +496,7 @@ describe('test-runner.ts - ADVERSARIAL CWD SECURITY TESTS', () => {
 			} as any);
 			const parsed = JSON.parse(result);
 			expect(parsed.success).toBe(false);
-			expect(parsed.error).toContain('Invalid working directory');
+			expect(parsed.error).toContain('Cannot verify project root');
 
 			expect(spawnCalls.length).toBe(0);
 
@@ -661,7 +660,7 @@ describe('test-runner.ts - ADVERSARIAL CWD SECURITY TESTS', () => {
 			} as any);
 			const parsed = JSON.parse(result);
 			expect(parsed.success).toBe(false);
-			expect(parsed.error).toContain('Invalid working directory');
+			expect(parsed.error).toContain('Cannot verify project root');
 
 			// STATUS: SECURE - Control characters blocked
 		});
@@ -773,7 +772,7 @@ describe('test-runner.ts - ADVERSARIAL CWD SECURITY TESTS', () => {
 			} as any);
 			const parsed = JSON.parse(result);
 			expect(parsed.success).toBe(false);
-			expect(parsed.error).toContain('Invalid working directory');
+			expect(parsed.error).toContain('Cannot verify project root');
 
 			expect(spawnCalls.length).toBe(0);
 
@@ -781,7 +780,6 @@ describe('test-runner.ts - ADVERSARIAL CWD SECURITY TESTS', () => {
 		});
 
 		test('SECURE: Long path + traversal combination is REJECTED', async () => {
-			// Combined attack: long path + traversal
 			const combinedPath = '../'.repeat(100) + 'etc';
 
 			const result = await test_runner.execute({}, {
@@ -789,11 +787,11 @@ describe('test-runner.ts - ADVERSARIAL CWD SECURITY TESTS', () => {
 			} as any);
 			const parsed = JSON.parse(result);
 			expect(parsed.success).toBe(false);
-			expect(parsed.error).toContain('Invalid working directory');
+			expect(parsed.error).toMatch(
+				/Invalid working directory|Cannot verify project root/,
+			);
 
 			expect(spawnCalls.length).toBe(0);
-
-			// STATUS: SECURE - Combined attack blocked
 		});
 
 		test('SECURE: Unicode path traversal variants is REJECTED', async () => {

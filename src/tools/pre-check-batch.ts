@@ -13,6 +13,10 @@ import type { SecretscanEvidence } from '../config/evidence-schema.js';
 import { saveEvidence } from '../evidence/manager.js';
 import { warn } from '../utils';
 import { runExternalTool } from '../utils/external-tool-runner';
+import {
+	hasExplicitProjectBoundary,
+	isStrictPathDescendant,
+} from '../utils/project-boundary';
 import { createSwarmTool } from './create-tool';
 import type {
 	LintResult,
@@ -338,6 +342,32 @@ function validatePath(
 	return null;
 }
 
+function isAcceptedProjectRootForPlatform(
+	dir: string,
+	workspaceDir: string,
+	platform: NodeJS.Platform,
+	hasExplicitBoundary: boolean,
+): boolean {
+	const pathApi = platform === 'win32' ? path.win32 : path;
+	const directoryKey = pathApi.resolve(dir).replace(/\\/g, '/');
+	const workspaceKey = pathApi.resolve(workspaceDir).replace(/\\/g, '/');
+	const normalizedDirectoryKey =
+		platform === 'win32' ? directoryKey.toLowerCase() : directoryKey;
+	const normalizedWorkspaceKey =
+		platform === 'win32' ? workspaceKey.toLowerCase() : workspaceKey;
+	if (normalizedDirectoryKey === normalizedWorkspaceKey) return true;
+
+	const relative = pathApi.relative(workspaceDir, dir);
+	const isStrictDescendant =
+		relative !== '' &&
+		relative !== '..' &&
+		!relative.startsWith(`..${pathApi.sep}`) &&
+		!pathApi.isAbsolute(relative);
+	return isStrictDescendant && hasExplicitBoundary;
+}
+
+export const _test_exports = { isAcceptedProjectRootForPlatform };
+
 /**
  * Validate the directory input
  * @param dir - The directory to validate
@@ -361,13 +391,13 @@ function validateDirectory(dir: string, workspaceDir: string): string | null {
 	}
 
 	const platform = _internals.platform();
-	const resolveForComparison =
-		platform === 'win32' ? path.win32.resolve : path.resolve;
-	const directoryKey = resolveForComparison(dir).replace(/\\/g, '/');
-	const workspaceKey = resolveForComparison(workspaceDir).replace(/\\/g, '/');
 	if (
-		(platform === 'win32' ? directoryKey.toLowerCase() : directoryKey) !==
-		(platform === 'win32' ? workspaceKey.toLowerCase() : workspaceKey)
+		!isAcceptedProjectRootForPlatform(
+			dir,
+			workspaceDir,
+			platform,
+			hasExplicitProjectBoundary(dir),
+		)
 	) {
 		return 'directory must resolve to the project root';
 	}
@@ -1536,7 +1566,7 @@ export const pre_check_batch: ReturnType<typeof tool> = createSwarmTool({
 		directory: z
 			.string()
 			.describe(
-				'Project root directory — must be the workspace root, subdirectories are rejected',
+				'Project root directory — ordinary workspace subdirectories are rejected; direct .git or .opencode project boundaries are accepted',
 			),
 		sast_threshold: z
 			.enum(['low', 'medium', 'high', 'critical'])
@@ -1642,8 +1672,8 @@ export const pre_check_batch: ReturnType<typeof tool> = createSwarmTool({
 
 		// Reject subdirectory: if arg resolves inside project root, hard-reject
 		if (
-			resolvedDirectory !== workspaceAnchor &&
-			resolvedDirectory.startsWith(workspaceAnchor + path.sep)
+			isStrictPathDescendant(resolvedDirectory, workspaceAnchor) &&
+			!hasExplicitProjectBoundary(resolvedDirectory)
 		) {
 			const subDirError = `directory "${typedArgs.directory}" is a subdirectory of the project root — pre_check_batch requires the project root directory "${workspaceAnchor}"`;
 			const subDirResult: PreCheckBatchResult = {

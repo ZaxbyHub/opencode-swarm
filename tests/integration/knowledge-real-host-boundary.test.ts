@@ -20,15 +20,7 @@
  * Plus: the old {input:{tool,agent,args}} fixtures do NOT drive production.
  */
 
-import {
-	afterAll,
-	afterEach,
-	beforeAll,
-	beforeEach,
-	describe,
-	expect,
-	test,
-} from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { getStoredInputArgs } from '../../src/hooks/guardrails';
@@ -74,18 +66,12 @@ async function seedTrace(
 
 describe('issue #1849 — real-host boundary end-to-end through src/index.ts', () => {
 	let dir: string;
-	let cleanupIsolatedEnv: () => void;
 	let plugin: Awaited<ReturnType<typeof bootKnowledgeHost>>;
-
-	beforeAll(() => {
-		cleanupIsolatedEnv = createIsolatedTestEnv().cleanup;
-	});
-	afterAll(() => {
-		cleanupIsolatedEnv();
-	});
+	let cleanupIsolatedEnv: () => void;
 
 	beforeEach(async () => {
 		resetSwarmState();
+		cleanupIsolatedEnv = createIsolatedTestEnv().cleanup;
 		dir = createKnowledgeProject();
 		plugin = await bootKnowledgeHost(dir);
 	});
@@ -99,6 +85,7 @@ describe('issue #1849 — real-host boundary end-to-end through src/index.ts', (
 		} catch {
 			/* ignore — tmpdir is reaped by the OS */
 		}
+		cleanupIsolatedEnv();
 	});
 
 	test('1+2. messages.transform uses REAL SDK shape: agent recovered from chat.message, not a system message', async () => {

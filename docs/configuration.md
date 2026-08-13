@@ -723,7 +723,7 @@ guidance to the agent before a hard stop.
 | `pattern_thresholds.ping_pong` | number (≥ 1) | `2` | Occurrences before an alternating A→B→A delegation pattern targeting the same file is flagged. |
 | `pattern_thresholds.expansion_drift` | number (≥ 1) | `3` | Occurrences before successive plans whose unique-target scope grows by more than 50% are flagged. |
 | `pattern_thresholds.stuck_on_test` | number (≥ 1) | `3` | Occurrences before an edit → test-fail → edit-same-file cycle is flagged. |
-| `pattern_thresholds.context_thrash` | number (≥ 1) | `3` | Consecutive steps before a monotonically increasing unique-target set (no plateaus) is flagged. |
+| `pattern_thresholds.context_thrash` | number (≥ 1) | `10` | Consecutive steps before a monotonically increasing unique-target set (no plateaus) is flagged. Raised from `3` in #2134: three consecutive new targets is indistinguishable from an agent simply reading three files. |
 | `escalation_enabled` | boolean | `true` | Enable the count-based escalation ladder (advisory → hard stop) once a pattern's threshold is met repeatedly. |
 | `max_trajectory_lines` | number (≥ 10) | `1000` | Maximum trajectory entries retained per session before older entries are evicted. |
 | `detection_timeout_ms` | number (≥ 10) | `100` | Bounded time budget for a single pattern-detection pass; detection is skipped (fail-open) if it would exceed this. |
@@ -741,6 +741,53 @@ guidance to the agent before a hard stop.
   }
 }
 ```
+
+### How the escalation ladder counts (issue #2134)
+
+A strike is recorded per **occurrence**, not per detection. Detectors re-emit the
+same ongoing episode on every tool call with a growing end step — a coder reading
+one more file extends its single `context_thrash` run — so PRM keeps a per-session
+ledger of the episodes that have already struck. A match earns a strike only when
+it is a **new episode**, or when the episode it belongs to has grown by another
+full `pattern_thresholds` worth of occurrences since it last struck. A single tool
+call can never advance the ladder by more than one rung.
+
+Strikes are also counted per **behaviour**, not per pattern type. A pattern that
+names a single target — `repetition_loop`, `ping_pong`, `stuck_on_test` — gets its
+own 1→2→3 ladder for that target, so repeating yourself once each on three
+different files is three level-1 advisories rather than a hard stop; reaching the
+hard stop takes three strikes against *the same* target. Patterns that report a
+growing set of targets (`context_thrash`, `expansion_drift`) keep one ladder for
+the pattern, because a per-target ladder would restart on every tool call and they
+could never escalate at all.
+
+An agent that genuinely keeps going still reaches the hard stop, because the
+growth rung keeps firing. At default thresholds an unbroken `repetition_loop`
+strikes at 2, 4 and 6 occurrences; a `context_thrash` run strikes at 10, 20 and 30
+consecutive brand-new targets with no revisits. What can no longer happen is a
+hard stop earned by making tool calls rather than by repeating the behaviour.
+
+### Clearing a stuck escalation
+
+PRM escalation state is per session and entirely in memory — it is never written
+to `.swarm/session/state.json`, and a rehydrated session always starts at level 0.
+Two things clear it:
+
+- **A new delegation with a declared scope.** When a Task dispatch claims a coder
+  scope binding, the child session's PRM state is reset, so a coder never inherits
+  a previous delegation's escalation level or an armed hard-stop token. A dispatch
+  that never declares a scope (`SCOPE_NOT_DECLARED`) does not reach that reset.
+- **`/swarm reset-session`.** Clears escalation counts, both hard-stop tokens, the
+  trajectory cursor, and the episode ledger for every tracked agent session, while
+  preserving the plan, evidence, and knowledge stores.
+
+```bash
+/swarm reset-session
+```
+
+To disable the ladder entirely while leaving pattern detection and its telemetry
+in place, set `prm.escalation_enabled` to `false`; to turn PRM off altogether, set
+`prm.enabled` to `false`.
 
 ## Phase Complete Configuration
 

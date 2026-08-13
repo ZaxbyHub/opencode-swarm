@@ -1,6 +1,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { withEvidenceLock } from '../evidence/lock.js';
+import { assertProjectRoot } from '../utils/project-boundary';
 import { EvaluationRunV1Schema, GateAuditResultV1Schema } from './contracts.js';
 import { getProtectedEvaluationRunIds } from './store.js';
 
@@ -179,6 +180,7 @@ export async function archiveEvaluationArtifacts(args: {
 	dryRun?: boolean;
 	now?: Date;
 }): Promise<EvaluationRetentionResult> {
+	assertProjectRoot(args.directory);
 	return withEvidenceLock(
 		args.directory,
 		path.join('evolution', 'retention-index'),

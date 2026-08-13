@@ -5,6 +5,7 @@ import { loadPlanJsonOnly, savePlan } from '../plan/manager';
 import { readEffectiveSpecSync } from '../sdd/effective-spec';
 import type { SpecDriftAcknowledgedEvent } from '../types/events';
 import { log } from '../utils/logger';
+import { assertProjectRoot } from '../utils/project-boundary';
 import { computeSpecHash } from '../utils/spec-hash';
 
 interface SpecStalenessPayload {
@@ -38,6 +39,10 @@ export async function handleAcknowledgeSpecDriftCommand(
 	_args: string[],
 	acknowledgedBy: SpecDriftAcknowledgedBy = 'unknown',
 ): Promise<string> {
+	// This command can delete staleness state, refresh the spec snapshot, update
+	// plan projections, and append an audit event. Guard the command's mutation
+	// boundary before even the corrupted-state cleanup path can write.
+	assertProjectRoot(directory);
 	const specStalenessPath = validateSwarmPath(directory, 'spec-staleness.json');
 
 	let stalenessContent: string;

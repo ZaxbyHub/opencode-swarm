@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'bun:test';
-import { createDefaultEscalationState, EscalationTracker } from '../escalation';
+import {
+	createDefaultEscalationState,
+	EscalationTracker,
+	resolveLadderKey,
+} from '../escalation';
 import type { EscalationState, PatternMatch } from '../types';
 
 // Mock telemetry module - must use correct relative path from __tests__/
@@ -236,13 +240,17 @@ describe('EscalationTracker', () => {
 			const state2 = tracker.getState();
 
 			expect(state1).not.toBe(state2);
-			expect(state1.patternCounts.get('repetition_loop')).toBe(1);
-			state1.patternCounts.set('repetition_loop', 99);
+			// Issue #2134 follow-up: the ladder is keyed per TARGET for a
+			// single-target pattern, so derive the key rather than assuming the
+			// bare pattern type.
+			const ladderKey = resolveLadderKey(match);
+			expect(state1.patternCounts.get(ladderKey)).toBe(1);
+			state1.patternCounts.set(ladderKey, 99);
 			state1.lastPatternDetected?.affectedAgents.push('mutated-agent');
 			state1.lastPatternDetected?.affectedTargets.push('mutated-target');
 
 			const freshState = tracker.getState();
-			expect(freshState.patternCounts.get('repetition_loop')).toBe(1);
+			expect(freshState.patternCounts.get(ladderKey)).toBe(1);
 			expect(freshState.lastPatternDetected?.affectedAgents).toEqual([
 				'agent-a',
 			]);
@@ -259,7 +267,9 @@ describe('EscalationTracker', () => {
 			tracker.recordDetection(match);
 			tracker.recordDetection(match);
 
-			expect(tracker.getState().patternCounts.get('repetition_loop')).toBe(2);
+			expect(
+				tracker.getState().patternCounts.get(resolveLadderKey(match)),
+			).toBe(2);
 
 			tracker.reset();
 

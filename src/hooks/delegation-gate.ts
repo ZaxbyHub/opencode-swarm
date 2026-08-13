@@ -44,6 +44,7 @@ import {
 import { loadPlanJsonOnly, savePlan } from '../plan/manager';
 import { computeParallelVerdict } from '../plan/parallel-verdict';
 import { derivePlanId } from '../plan/utils.js';
+import { resetPrmSessionState } from '../prm/index.js';
 import {
 	canonicalWorkspaceIdentity,
 	clearExactScopeBinding,
@@ -2445,6 +2446,26 @@ export function createDelegationGateHook(
 			'coder',
 			directory,
 		);
+		// Issue #2134: a delegation start is a fresh coder run, so it starts from a
+		// clean PRM escalation ladder.
+		//
+		// `agentSessions` entries are never removed when a delegated session ends —
+		// `sessionEnded` below clears scope bindings only, and `endAgentSession` is
+		// reached solely from `/swarm close` and the Lean Turbo runner. A coder
+		// session that ended while `prmHardStopPending` was armed therefore left a
+		// live DENY token in the map; if that sessionID was reused, the next
+		// delegation's very FIRST tool call was denied with "Pattern escalation
+		// maximum reached" — the symptom reported in #2134, surviving restarts
+		// because it never depended on disk state at all.
+		//
+		// Guarded on the dispatch callID: `taskMetadata` is driven by
+		// `message.part.updated`, which fires repeatedly for the same Task part
+		// while the child runs. Resetting unconditionally would clear the ladder on
+		// every update and disarm PRM for the whole delegation.
+		if (childSession.prmDelegationCallId !== input.callID) {
+			childSession.prmDelegationCallId = input.callID;
+			resetPrmSessionState(childSession, input.childSessionID);
+		}
 		childSession.currentTaskId = claimed.taskId;
 		childSession.declaredCoderScope = [...claimed.files];
 	};

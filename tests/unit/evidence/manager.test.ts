@@ -7,13 +7,7 @@ import {
 	expect,
 	it,
 } from 'bun:test';
-import {
-	mkdirSync,
-	rmSync,
-	statSync,
-	symlinkSync,
-	writeFileSync,
-} from 'node:fs';
+import { mkdirSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type {
@@ -44,6 +38,7 @@ import {
 	VALID_EVIDENCE_TYPES,
 	validateProjectRoot,
 } from '../../../src/evidence/manager';
+import { safeRmRecursive } from '../../helpers/safe-test-dir';
 
 let tempDir: string;
 let savedValidateProjectRoot: typeof validateProjectRoot;
@@ -64,7 +59,7 @@ afterEach(() => {
 	// Restore the real validateProjectRoot
 	_internals.validateProjectRoot = savedValidateProjectRoot;
 
-	rmSync(tempDir, { recursive: true, force: true });
+	safeRmRecursive(tempDir);
 });
 
 function makeEvidence(overrides: Partial<Evidence> = {}): Evidence {
@@ -859,7 +854,7 @@ describe('validateProjectRoot (Task 1.2)', () => {
 				validateProjectRoot(join(standaloneRoot, 'child')),
 			).not.toThrow();
 		} finally {
-			rmSync(standaloneRoot, { recursive: true, force: true });
+			safeRmRecursive(standaloneRoot);
 		}
 	});
 
@@ -920,16 +915,9 @@ describe('validateProjectRoot (Task 1.2)', () => {
 		throw new Error('unreachable');
 	});
 
-	it('respects depth limit at MAX_DEPTH', () => {
-		let envHasSwarmAncestor = false;
-		try {
-			validateProjectRoot(tmpdir());
-		} catch {
-			envHasSwarmAncestor = true;
-		}
-		if (envHasSwarmAncestor) return;
-		// Create a directory tree 25 levels deep with no .swarm/ at any level.
-		// Verify the function does NOT throw (depth limit stops the walk).
+	it('fails closed when the ancestor search reaches MAX_DEPTH', () => {
+		// Create a directory tree beyond the bounded ancestor search. Even without
+		// a nearer marker, exhausted evidence is ambiguous and must fail closed.
 		const deepRoot = join(
 			tmpdir(),
 			`depth-limit-test-${Date.now()}-${Math.random().toString(36).slice(2)}`,
@@ -940,10 +928,11 @@ describe('validateProjectRoot (Task 1.2)', () => {
 		}
 		mkdirSync(current, { recursive: true });
 		try {
-			// No .swarm/ anywhere in the tree — should not throw regardless of depth
-			expect(() => validateProjectRoot(current)).not.toThrow();
+			expect(() => validateProjectRoot(current)).toThrow(
+				`ancestor search exceeded ${MAX_DEPTH} levels`,
+			);
 		} finally {
-			rmSync(deepRoot, { recursive: true, force: true });
+			safeRmRecursive(deepRoot);
 		}
 	});
 
@@ -1020,7 +1009,7 @@ describe('validateProjectRoot integration', () => {
 
 	afterAll(() => {
 		try {
-			rmSync(integrationBase, { recursive: true, force: true });
+			safeRmRecursive(integrationBase);
 		} catch {
 			// best-effort cleanup
 		}

@@ -4,11 +4,24 @@
  * Tests that check_gate_status is properly exposed via the plugin
  * without disrupting existing registrations.
  */
-import { describe, expect, it } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import type { ToolContext } from '@opencode-ai/plugin';
+import { safeRmRecursive } from '../../tests/helpers/safe-test-dir.js';
+import { canonicalMkdtemp } from '../../tests/helpers/tmpdir.js';
 import type { ToolResult } from './create-tool';
 
 describe('check_gate_status plugin registration verification', () => {
+	let projectRoot: string;
+
+	beforeEach(() => {
+		projectRoot = canonicalMkdtemp('check-gate-status-registration-');
+		fs.mkdirSync(path.join(projectRoot, '.opencode'));
+	});
+
+	afterEach(() => safeRmRecursive(projectRoot));
+
 	// Helper to extract string from ToolResult
 	function resultToString(result: ToolResult): string {
 		return typeof result === 'string' ? result : result.output;
@@ -17,7 +30,7 @@ describe('check_gate_status plugin registration verification', () => {
 	// Helper to call tool execute with proper context (bypasses strict type requirements for testing)
 	async function executeTool(
 		args: Record<string, unknown>,
-		directory: string,
+		directory = projectRoot,
 	): Promise<string> {
 		const { check_gate_status } = await import('./index');
 		const result = (await check_gate_status.execute(args, {
@@ -89,7 +102,7 @@ describe('check_gate_status plugin registration verification', () => {
 
 		it('check_gate_status execute accepts args and directory parameters', async () => {
 			// Test with invalid task_id to verify it returns proper error response
-			const result = await executeTool({ task_id: 'invalid' }, '/test/dir');
+			const result = await executeTool({ task_id: 'invalid' });
 			expect(typeof result).toBe('string');
 
 			// Result should be JSON
@@ -236,7 +249,7 @@ describe('check_gate_status plugin registration verification', () => {
 
 	describe('Task ID validation behavior', () => {
 		it('execute rejects missing task_id with error result', async () => {
-			const result = await executeTool({}, '/test/dir');
+			const result = await executeTool({});
 			const parsed = JSON.parse(result);
 
 			expect(parsed.status).toBe('no_evidence');
@@ -244,7 +257,7 @@ describe('check_gate_status plugin registration verification', () => {
 		});
 
 		it('execute rejects invalid task_id format', async () => {
-			const result = await executeTool({ task_id: 'invalid' }, '/test/dir');
+			const result = await executeTool({ task_id: 'invalid' });
 			const parsed = JSON.parse(result);
 
 			expect(parsed.status).toBe('no_evidence');
@@ -252,7 +265,7 @@ describe('check_gate_status plugin registration verification', () => {
 		});
 
 		it('execute accepts valid task_id format N.M', async () => {
-			const result = await executeTool({ task_id: '1.1' }, '/test/dir');
+			const result = await executeTool({ task_id: '1.1' });
 			const parsed = JSON.parse(result);
 
 			// Should return a valid result (no_evidence if file doesn't exist)
@@ -265,7 +278,7 @@ describe('check_gate_status plugin registration verification', () => {
 		});
 
 		it('execute accepts valid task_id format N.M.P', async () => {
-			const result = await executeTool({ task_id: '2.3.1' }, '/test/dir');
+			const result = await executeTool({ task_id: '2.3.1' });
 			const parsed = JSON.parse(result);
 
 			expect(parsed.taskId).toBe('2.3.1');

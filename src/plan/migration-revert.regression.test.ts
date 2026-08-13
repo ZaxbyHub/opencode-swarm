@@ -17,6 +17,8 @@ import {
 } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { safeRmRecursive } from '../../tests/helpers/safe-test-dir';
+import { canonicalMkdtemp } from '../../tests/helpers/tmpdir';
 import type { Plan } from '../config/plan-schema';
 import * as ledger from './ledger';
 import {
@@ -117,19 +119,14 @@ function readLedgerPlanId(dir: string): string | null {
 }
 
 beforeEach(() => {
-	testDir = fs.mkdtempSync(
-		path.join(__dirname, 'migration-revert-regression-'),
-	);
+	testDir = canonicalMkdtemp('migration-revert-regression-');
+	fs.mkdirSync(path.join(testDir, '.opencode'));
 });
 
 afterEach(() => {
 	mock.restore();
 	vi.restoreAllMocks();
-	try {
-		fs.rmSync(testDir, { recursive: true, force: true });
-	} catch {
-		// Ignore cleanup errors
-	}
+	safeRmRecursive(testDir);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -13,6 +13,8 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { safeRmRecursive } from '../../tests/helpers/safe-test-dir.js';
+import { canonicalMkdtemp } from '../../tests/helpers/tmpdir.js';
 import {
 	buildQaGateSelectionDialogue,
 	createArchitectAgent,
@@ -32,9 +34,8 @@ import { executeSetQaGates } from '../tools/set-qa-gates.js';
 let tempDir: string;
 
 beforeEach(() => {
-	tempDir = fs.realpathSync(
-		fs.mkdtempSync(path.join(process.cwd(), 'qa-gate-hardening-')),
-	);
+	tempDir = canonicalMkdtemp('qa-gate-hardening-');
+	fs.mkdirSync(path.join(tempDir, '.opencode'));
 	fs.mkdirSync(path.join(tempDir, '.swarm'), { recursive: true });
 	fs.writeFileSync(path.join(tempDir, '.swarm', 'spec.md'), '# Spec\n');
 });
@@ -42,11 +43,7 @@ beforeEach(() => {
 afterEach(() => {
 	closeAllProjectDbs();
 	delete process.env.SWARM_SKIP_GATE_SELECTION;
-	try {
-		fs.rmSync(tempDir, { recursive: true, force: true });
-	} catch {
-		// ignore
-	}
+	safeRmRecursive(tempDir);
 });
 
 describe('phase_council gate', () => {
