@@ -25,7 +25,11 @@ const tempDirs: string[] = [];
 function makeGitRepo(): string {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), 'attr-'));
 	const runGit = (args: string[]) =>
-		spawnSync('git', args, { cwd: root, stdio: 'ignore', timeout: GIT_TIMEOUT_MS });
+		spawnSync('git', args, {
+			cwd: root,
+			stdio: 'ignore',
+			timeout: GIT_TIMEOUT_MS,
+		});
 	runGit(['init', '-q']);
 	runGit(['config', 'user.email', 'test@test.com']);
 	runGit(['config', 'user.name', 'Test']);
@@ -65,8 +69,16 @@ describe('SC-005: precise target attribution', () => {
 			'# TEST\n\nskill content\n',
 		);
 
-		spawnSync('git', ['add', '.'], { cwd: repo, stdio: 'ignore', timeout: GIT_TIMEOUT_MS });
-		spawnSync('git', ['commit', '-q', '-m', 'add files'], { cwd: repo, stdio: 'ignore', timeout: GIT_TIMEOUT_MS });
+		spawnSync('git', ['add', '.'], {
+			cwd: repo,
+			stdio: 'ignore',
+			timeout: GIT_TIMEOUT_MS,
+		});
+		spawnSync('git', ['commit', '-q', '-m', 'add files'], {
+			cwd: repo,
+			stdio: 'ignore',
+			timeout: GIT_TIMEOUT_MS,
+		});
 
 		// Test file that reads both the architect prompt AND the skill content
 		mkdirSyncLocal(repo, 'tests/unit/agents/');
@@ -103,7 +115,9 @@ describe('two-vars', () => {
 		);
 
 		const result = await checkSkillAssertions(repo);
-		expect(result.changedSkillFiles).toContain('.opencode/skills/test/SKILL.md');
+		expect(result.changedSkillFiles).toContain(
+			'.opencode/skills/test/SKILL.md',
+		);
 		// SC-005: 'architect-only phrase' is asserted against `prompt`, not `skill`.
 		// It must NOT be reported as a broken assertion against the skill.
 		const promptPhraseBroken = result.brokenAssertions.find(

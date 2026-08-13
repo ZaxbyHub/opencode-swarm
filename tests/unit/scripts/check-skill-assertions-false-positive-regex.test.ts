@@ -26,7 +26,11 @@ const tempDirs: string[] = [];
 function makeGitRepo(): string {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), 'regex-assert-'));
 	const runGit = (args: string[]) =>
-		spawnSync('git', args, { cwd: root, stdio: 'ignore', timeout: GIT_TIMEOUT_MS });
+		spawnSync('git', args, {
+			cwd: root,
+			stdio: 'ignore',
+			timeout: GIT_TIMEOUT_MS,
+		});
 	runGit(['init', '-q']);
 	runGit(['config', 'user.email', 'test@test.com']);
 	runGit(['config', 'user.name', 'Test']);
@@ -56,8 +60,16 @@ describe('SC-002 / SC-003 / FR-002: regex semantic matching', () => {
 			'.opencode/skills/test/SKILL.md',
 			'# TEST\n\nbuild-123 release\n',
 		);
-		spawnSync('git', ['add', '.'], { cwd: repo, stdio: 'ignore', timeout: GIT_TIMEOUT_MS });
-		spawnSync('git', ['commit', '-q', '-m', 'add skill'], { cwd: repo, stdio: 'ignore', timeout: GIT_TIMEOUT_MS });
+		spawnSync('git', ['add', '.'], {
+			cwd: repo,
+			stdio: 'ignore',
+			timeout: GIT_TIMEOUT_MS,
+		});
+		spawnSync('git', ['commit', '-q', '-m', 'add skill'], {
+			cwd: repo,
+			stdio: 'ignore',
+			timeout: GIT_TIMEOUT_MS,
+		});
 
 		writeFile(
 			repo,
@@ -85,7 +97,9 @@ describe('regex', () => {
 		);
 
 		const result = await checkSkillAssertions(repo);
-		expect(result.changedSkillFiles).toContain('.opencode/skills/test/SKILL.md');
+		expect(result.changedSkillFiles).toContain(
+			'.opencode/skills/test/SKILL.md',
+		);
 		// FR-002: regex matches the content → zero broken assertions
 		expect(result.brokenAssertions).toHaveLength(0);
 	});
@@ -97,8 +111,16 @@ describe('regex', () => {
 			'.opencode/skills/test/SKILL.md',
 			'# TEST\n\nno digits here\n',
 		);
-		spawnSync('git', ['add', '.'], { cwd: repo, stdio: 'ignore', timeout: GIT_TIMEOUT_MS });
-		spawnSync('git', ['commit', '-q', '-m', 'add skill'], { cwd: repo, stdio: 'ignore', timeout: GIT_TIMEOUT_MS });
+		spawnSync('git', ['add', '.'], {
+			cwd: repo,
+			stdio: 'ignore',
+			timeout: GIT_TIMEOUT_MS,
+		});
+		spawnSync('git', ['commit', '-q', '-m', 'add skill'], {
+			cwd: repo,
+			stdio: 'ignore',
+			timeout: GIT_TIMEOUT_MS,
+		});
 
 		writeFile(
 			repo,
@@ -126,7 +148,9 @@ describe('regex', () => {
 		);
 
 		const result = await checkSkillAssertions(repo);
-		expect(result.changedSkillFiles).toContain('.opencode/skills/test/SKILL.md');
+		expect(result.changedSkillFiles).toContain(
+			'.opencode/skills/test/SKILL.md',
+		);
 		// FR-002: regex doesn't match → exactly one broken assertion
 		expect(result.brokenAssertions).toHaveLength(1);
 		expect(result.brokenAssertions[0]!.phrase).toBe('build-\\d+');
@@ -135,13 +159,17 @@ describe('regex', () => {
 
 	test('FR-002 malformed-regex fallback: /foo[/ produces assertionKind malformed-regex', async () => {
 		const repo = makeGitRepo();
-		writeFile(
-			repo,
-			'.opencode/skills/test/SKILL.md',
-			'# TEST\n\nfoo bar\n',
-		);
-		spawnSync('git', ['add', '.'], { cwd: repo, stdio: 'ignore', timeout: GIT_TIMEOUT_MS });
-		spawnSync('git', ['commit', '-q', '-m', 'add skill'], { cwd: repo, stdio: 'ignore', timeout: GIT_TIMEOUT_MS });
+		writeFile(repo, '.opencode/skills/test/SKILL.md', '# TEST\n\nfoo bar\n');
+		spawnSync('git', ['add', '.'], {
+			cwd: repo,
+			stdio: 'ignore',
+			timeout: GIT_TIMEOUT_MS,
+		});
+		spawnSync('git', ['commit', '-q', '-m', 'add skill'], {
+			cwd: repo,
+			stdio: 'ignore',
+			timeout: GIT_TIMEOUT_MS,
+		});
 
 		writeFile(
 			repo,
@@ -168,7 +196,9 @@ describe('regex', () => {
 		);
 
 		const result = await checkSkillAssertions(repo);
-		expect(result.changedSkillFiles).toContain('.opencode/skills/test/SKILL.md');
+		expect(result.changedSkillFiles).toContain(
+			'.opencode/skills/test/SKILL.md',
+		);
 		// FR-002 malformed: detector must not crash; if a finding is emitted,
 		// its assertionKind must be 'malformed-regex'
 		expect(result).toBeDefined();
