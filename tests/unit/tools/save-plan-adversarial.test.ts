@@ -5,24 +5,24 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs/promises';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import {
 	detectPlaceholderContent,
 	executeSavePlan,
 	type SavePlanArgs,
 } from '../../../src/tools/save-plan';
+import { safeRmRecursive } from '../../helpers/safe-test-dir.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 describe('save-plan adversarial tests', () => {
 	let tempDir: string;
 	let tempDirs: string[] = [];
 
 	beforeEach(async () => {
-		// Create temp directory for each test
-		tempDir = await fs.mkdtemp(
-			path.join(os.tmpdir(), 'save-plan-adversarial-'),
-		);
+		// Create a canonical external project root for each test.
+		tempDir = canonicalMkdtemp('save-plan-adversarial-');
 		tempDirs.push(tempDir);
+		await fs.mkdir(path.join(tempDir, '.opencode'));
 		// Create .swarm/ and spec.md required by the spec gate
 		await fs.mkdir(path.join(tempDir, '.swarm'), { recursive: true });
 		await fs.writeFile(
@@ -36,14 +36,10 @@ describe('save-plan adversarial tests', () => {
 		);
 	});
 
-	afterEach(async () => {
+	afterEach(() => {
 		// Clean up all temp directories
 		for (const dir of tempDirs) {
-			try {
-				await fs.rm(dir, { recursive: true, force: true });
-			} catch (e) {
-				// Ignore cleanup errors
-			}
+			safeRmRecursive(dir);
 		}
 		tempDirs = [];
 	});
@@ -824,50 +820,27 @@ describe('save-plan adversarial tests', () => {
 		});
 
 		it.skipIf(process.platform === 'win32')(
-			'should accept valid Windows-style workspace path with .swarm subdirectory',
+			'should reject a non-native Windows-style path on POSIX hosts',
 			async () => {
-				// On Linux/macOS: C:\projects\myworkspace is treated as a single directory
-				// name (backslash is a valid filename character), so the write succeeds.
-				// On Windows: this would attempt to write to the real C:\projects\ path,
-				// which requires admin permissions unavailable in CI.
-				// Skip spec gate and gate-selection check so this test focuses purely
-				// on path validation behavior.
-				const prevGate = process.env.SWARM_SKIP_SPEC_GATE;
-				const prevGateSel = process.env.SWARM_SKIP_GATE_SELECTION;
-				process.env.SWARM_SKIP_SPEC_GATE = '1';
-				process.env.SWARM_SKIP_GATE_SELECTION = '1';
-				try {
-					const args: SavePlanArgs = {
-						title: 'Test Plan',
-						swarm_id: 'test',
-						phases: [
-							{
-								id: 1,
-								name: 'Setup',
-								tasks: [{ id: '1.1', description: 'Valid description' }],
-							},
-						],
-						working_directory: 'C:\\projects\\myworkspace',
-					};
-					const result = await executeSavePlan(args);
-					// Valid workspace path should succeed
-					expect(result.success).toBe(true);
-				} finally {
-					if (prevGate === undefined) {
-						delete process.env.SWARM_SKIP_SPEC_GATE;
-					} else {
-						process.env.SWARM_SKIP_SPEC_GATE = prevGate;
-					}
-					if (prevGateSel === undefined) {
-						delete process.env.SWARM_SKIP_GATE_SELECTION;
-					} else {
-						process.env.SWARM_SKIP_GATE_SELECTION = prevGateSel;
-					}
-				}
+				const args: SavePlanArgs = {
+					title: 'Test Plan',
+					swarm_id: 'test',
+					phases: [
+						{
+							id: 1,
+							name: 'Setup',
+							tasks: [{ id: '1.1', description: 'Valid description' }],
+						},
+					],
+					working_directory: 'C:\\projects\\myworkspace',
+				};
+				const result = await executeSavePlan(args);
+				expect(result.success).toBe(false);
+				expect(result.errors?.[0]).toContain('Cannot verify project root');
 			},
 		);
 
-		it('should accept valid POSIX-style workspace path', async () => {
+		it('should accept a platform-native declared workspace path', async () => {
 			const args: SavePlanArgs = {
 				title: 'Test Plan',
 				swarm_id: 'test',

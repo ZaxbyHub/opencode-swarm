@@ -23,6 +23,7 @@ import {
 	taskEvidencePath,
 	withTaskEvidenceLock,
 } from '../evidence/task-file.js';
+import { assertProjectRoot } from '../utils/project-boundary.js';
 import type { CouncilSynthesis } from './types';
 
 const EVIDENCE_DIR = '.swarm/evidence';
@@ -100,6 +101,7 @@ export async function writeCouncilEvidence(
 	}
 
 	const dir = join(workingDir, EVIDENCE_DIR);
+	assertProjectRoot(workingDir);
 	mkdirSync(dir, { recursive: true });
 
 	const filePath = taskEvidencePath(workingDir, synthesis.taskId);

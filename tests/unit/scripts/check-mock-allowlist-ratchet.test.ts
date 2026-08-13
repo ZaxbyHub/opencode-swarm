@@ -354,13 +354,20 @@ describe('check-invariants.sh Check 4 — mock.module allowlist growth ratchet',
 		expect(result.exitCode, result.stdout + result.stderr).toBe(0);
 	});
 
-	test('CRLF head, LF base pass: Windows contributor with core.autocrlf=true does not false-fire', () => {
+	test('CRLF head, LF base pass: Check 3 matching and Check 4 growth do not false-fire', () => {
 		if (isWindows) return;
 		const repoDir = makeRepo(['node:fs', 'src/foo/bar']);
 		tempRoots.push(repoDir);
+		fs.mkdirSync(path.join(repoDir, 'tests'), { recursive: true });
+		fs.writeFileSync(
+			path.join(repoDir, 'tests', 'fixture.test.ts'),
+			'mock' + ".module('node:fs', () => ({}));\n",
+			'utf-8',
+		);
 		// Rewrite HEAD allowlist with CRLF line endings. The base (committed
-		// with LF) is unchanged; without `tr -d '\r'`, every head entry would
-		// carry a trailing '\r' and look "added" (issue #1781 re-critic B6).
+		// with LF) is unchanged; without `tr -d '\r'`, every head entry carries
+		// a trailing '\r'. Check 3 then rejects the valid node:fs mock, while
+		// Check 4 incorrectly reports every entry as added.
 		const crlfContent =
 			[
 				'# mock.module Allowlist — test fixture',
@@ -384,6 +391,9 @@ describe('check-invariants.sh Check 4 — mock.module allowlist growth ratchet',
 		// differs (otherwise git would normalize and mask the bug).
 		git(repoDir, 'commit', '-q', '-m', 'rewrite allowlist with CRLF');
 		const result = runScript(repoDir);
+		expect(result.stdout).not.toContain(
+			"mock.module target 'node:fs' not in allowlist",
+		);
 		expect(result.stdout).toContain('Added in this PR: 0');
 		expect(result.stdout).toContain('Unapproved: 0');
 		expect(result.exitCode, result.stdout + result.stderr).toBe(0);

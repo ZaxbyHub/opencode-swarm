@@ -51,6 +51,7 @@ import type { EvaluationModelDispatcher } from '../../evaluation/model-dispatche
 import { evaluateCandidateV1 } from '../../evaluation/public-api.js';
 import { tryAcquireLock } from '../../parallel/file-locks.js';
 import { emit as emitTelemetry } from '../../telemetry.js';
+import { assertProjectRoot } from '../../utils/project-boundary.js';
 import {
 	buildGeneratorInputs,
 	draftCandidate,
@@ -209,6 +210,7 @@ export const _internals = {
 async function acquireProjectLock(
 	directory: string,
 ): Promise<(() => Promise<void>) | null> {
+	assertProjectRoot(directory);
 	const result = await _internals.tryAcquireLock(
 		directory,
 		PROJECT_LOCK_PATH,
@@ -231,6 +233,7 @@ async function acquireSkillLock(
 	directory: string,
 	skillSlug: string,
 ): Promise<(() => Promise<void>) | null> {
+	assertProjectRoot(directory);
 	const lockPath = path.join(
 		'.swarm',
 		'evolution',
@@ -668,6 +671,7 @@ export function writeConvergenceState(
 	directory: string,
 	nonImprovements: number,
 ): void {
+	assertProjectRoot(directory);
 	const dir = path.dirname(path.join(directory, CONVERGENCE_FILE));
 	if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 	writeFileSync(

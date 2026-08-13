@@ -23,6 +23,10 @@ import {
 } from '../scope/scope-binding';
 import { replaceExistingScopeDeclaration } from '../scope/scope-persistence';
 import { ensureAgentSession } from '../state';
+import {
+	hasExplicitProjectBoundary,
+	isStrictPathDescendant,
+} from '../utils/project-boundary';
 import { validateTaskIdFormat as _validateTaskIdFormat } from '../validation/task-id';
 import { createSwarmTool } from './create-tool';
 
@@ -235,7 +239,10 @@ export async function executeDeclareScope(
 					path.resolve(normalizedDir),
 				);
 				const canonicalProjectRoot = fs.realpathSync(path.resolve(fallbackDir));
-				if (canonicalWorkingDir.startsWith(canonicalProjectRoot + path.sep)) {
+				if (
+					isStrictPathDescendant(canonicalWorkingDir, canonicalProjectRoot) &&
+					!hasExplicitProjectBoundary(canonicalWorkingDir)
+				) {
 					return {
 						success: false,
 						message: `working_directory "${normalizedDir}" is a subdirectory of the project root. Use the project root "${fallbackDir}" instead.`,

@@ -31,6 +31,7 @@ import {
 } from '../../src/hooks/knowledge-events';
 import { resetSwarmState, swarmState } from '../../src/state';
 import { knowledge_receipt } from '../../src/tools/knowledge-receipt';
+import { createIsolatedTestEnv } from '../helpers/isolated-test-env';
 import {
 	bootKnowledgeHost,
 	createKnowledgeProject,
@@ -66,9 +67,11 @@ async function seedTrace(
 describe('issue #1849 — real-host boundary end-to-end through src/index.ts', () => {
 	let dir: string;
 	let plugin: Awaited<ReturnType<typeof bootKnowledgeHost>>;
+	let cleanupIsolatedEnv: () => void;
 
 	beforeEach(async () => {
 		resetSwarmState();
+		cleanupIsolatedEnv = createIsolatedTestEnv().cleanup;
 		dir = createKnowledgeProject();
 		plugin = await bootKnowledgeHost(dir);
 	});
@@ -82,6 +85,7 @@ describe('issue #1849 — real-host boundary end-to-end through src/index.ts', (
 		} catch {
 			/* ignore — tmpdir is reaped by the OS */
 		}
+		cleanupIsolatedEnv();
 	});
 
 	test('1+2. messages.transform uses REAL SDK shape: agent recovered from chat.message, not a system message', async () => {

@@ -37,6 +37,11 @@ import {
 } from '../telemetry.js';
 import { verifyLeanTurboTaskCompletion } from '../turbo/lean/task-completion';
 import * as logger from '../utils/logger.js';
+import {
+	assertProjectRoot,
+	hasExplicitProjectBoundary,
+	isStrictPathDescendant,
+} from '../utils/project-boundary';
 import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
 import { validateTaskIdFormat as _validateTaskIdFormat } from '../validation/task-id';
 import { createSwarmTool } from './create-tool';
@@ -1084,6 +1089,20 @@ export async function executeUpdateTaskStatus(
 	}
 	directory = resolveResult.directory;
 
+	// Enforce the authoritative boundary before reading plan state, mutating
+	// sessions, or creating gate evidence. A fallback comparison cannot identify
+	// descendants of an unrelated root.
+	try {
+		assertProjectRoot(directory);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		return {
+			success: false,
+			message,
+			errors: [message],
+		};
+	}
+
 	// Verify .swarm/plan.json exists (resolveWorkingDirectory checks directory
 	// existence but not plan file presence)
 	const planPath = path.join(directory, '.swarm', 'plan.json');
@@ -1102,7 +1121,10 @@ export async function executeUpdateTaskStatus(
 	if (fallbackDir && directory !== fallbackDir) {
 		const canonicalDir = fs.realpathSync(path.resolve(directory));
 		const canonicalRoot = fs.realpathSync(path.resolve(fallbackDir));
-		if (canonicalDir.startsWith(canonicalRoot + path.sep)) {
+		if (
+			isStrictPathDescendant(canonicalDir, canonicalRoot) &&
+			!hasExplicitProjectBoundary(canonicalDir)
+		) {
 			return {
 				success: false,
 				message:

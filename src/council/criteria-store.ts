@@ -9,6 +9,7 @@ import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { atomicWriteFile } from '../evidence/task-file.js';
+import { assertProjectRoot } from '../utils/project-boundary.js';
 import type { CouncilCriteria, CouncilCriteriaItem } from './types';
 
 const COUNCIL_DIR = '.swarm/council';
@@ -34,6 +35,7 @@ export async function writeCriteria(
 	taskId: string,
 	criteria: CouncilCriteriaItem[],
 ): Promise<void> {
+	assertProjectRoot(workingDir);
 	const dir = join(workingDir, COUNCIL_DIR);
 	mkdirSync(dir, { recursive: true });
 	const payload: CouncilCriteria = {
