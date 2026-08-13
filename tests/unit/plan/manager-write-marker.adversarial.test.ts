@@ -201,11 +201,6 @@ describe('savePlan write-marker adversarial tests', () => {
 		);
 	});
 
-	/**
-	 * ADVERSARIAL TEST 3: Concurrent write race
-	 * Concurrent savePlan() calls must either serialize or reject a loser without
-	 * corrupting the durable projection.
-	 */
 	test('3. Concurrent writes - serialize or reject without corruption', async () => {
 		const testPlan = createTestPlan();
 
