@@ -1391,7 +1391,7 @@ export async function executeUpdateTaskStatus(
 			directory,
 			args.task_id,
 			args.status as TaskStatus,
-			{ force: args.force },
+			{ force: args.force, planLockAlreadyHeld: true },
 		);
 
 		if (args.status === 'completed') {

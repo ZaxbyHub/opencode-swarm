@@ -29,6 +29,7 @@ import {
 import { loadPlan } from '../plan/manager';
 import {
 	getActiveFullAutoSessionID,
+	getDisplayBudget,
 	hasActiveFullAuto,
 	hasActiveLeanTurbo,
 	hasActiveTurboMode,
@@ -283,10 +284,8 @@ export async function getStatusData(
 			agentCount,
 			isLegacy: false,
 			turboMode: hasActiveTurboMode(),
-			contextBudgetPct:
-				swarmState.lastBudgetPct > 0 ? swarmState.lastBudgetPct : null,
-			contextBudgetTokens:
-				swarmState.lastBudgetTokens > 0 ? swarmState.lastBudgetTokens : null,
+			contextBudgetPct: getDisplayBudget()?.pct ?? null,
+			contextBudgetTokens: getDisplayBudget()?.tokens ?? null,
 			compactionCount: metrics.compactionCount,
 			lastSnapshotAt: metrics.lastSnapshotAt,
 		};
@@ -303,10 +302,8 @@ export async function getStatusData(
 				agentCount: Object.keys(agents).length,
 				isLegacy: true,
 				turboMode: hasActiveTurboMode(),
-				contextBudgetPct:
-					swarmState.lastBudgetPct > 0 ? swarmState.lastBudgetPct : null,
-				contextBudgetTokens:
-					swarmState.lastBudgetTokens > 0 ? swarmState.lastBudgetTokens : null,
+				contextBudgetPct: getDisplayBudget()?.pct ?? null,
+				contextBudgetTokens: getDisplayBudget()?.tokens ?? null,
 				compactionCount: metrics.compactionCount,
 				lastSnapshotAt: metrics.lastSnapshotAt,
 			};
@@ -326,10 +323,8 @@ export async function getStatusData(
 				agentCount,
 				isLegacy: true,
 				turboMode: hasActiveTurboMode(),
-				contextBudgetPct:
-					swarmState.lastBudgetPct > 0 ? swarmState.lastBudgetPct : null,
-				contextBudgetTokens:
-					swarmState.lastBudgetTokens > 0 ? swarmState.lastBudgetTokens : null,
+				contextBudgetPct: getDisplayBudget()?.pct ?? null,
+				contextBudgetTokens: getDisplayBudget()?.tokens ?? null,
 				compactionCount: metrics.compactionCount,
 				lastSnapshotAt: metrics.lastSnapshotAt,
 			};
@@ -721,7 +716,7 @@ export function formatStatusMarkdown(status: StatusData): string {
 	if (status.contextBudgetPct !== null && status.contextBudgetPct > 0) {
 		const pct = status.contextBudgetPct.toFixed(1);
 		// Render the token estimate ONLY against the denominator the percentage
-		// was actually measured with (`swarmState.lastBudgetTokens`, written by
+		// was actually measured with (the per-session budget record, written by
 		// system-enhancer on the same statement as the pct). This used to
 		// back-compute from the hardcoded default, so a user on a 200k/1M model —
 		// or any user with a `model_limits` override — was shown a token figure

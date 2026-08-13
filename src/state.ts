@@ -821,28 +821,41 @@ export const swarmState = {
 	 */
 	generatedAgentNames: [] as string[],
 
-	/** Last known context budget percentage (0-100), updated by system-enhancer */
-	lastBudgetPct: 0,
-
 	/**
-	 * The DENOMINATOR `lastBudgetPct` was computed against, in tokens. Written
-	 * by system-enhancer at the same two statements that write `lastBudgetPct`,
-	 * because a percentage without its denominator cannot be turned back into a
-	 * token estimate. `/swarm status` used to reconstruct the estimate from a
-	 * hardcoded constant, so a user whose real denominator differed saw a token
-	 * figure that did not match the percentage next to it. 0 means "no budget
-	 * report has run yet".
+	 * Last known context budget per session — keyed by sessionID.
+	 *
+	 * `pct` is the budget percentage (0-100); `tokens` is the DENOMINATOR it was
+	 * computed against. They are stored together because a percentage without
+	 * its denominator cannot be turned back into a token estimate, and
+	 * `/swarm status` renders both — reading them from different sources would
+	 * show a token figure that does not match the percentage beside it.
+	 *
+	 * Keyed rather than global (AGENTS.md invariant 8). These were two bare
+	 * module-level scalars, which was harmless only while the budget check threw
+	 * on every call and left them pinned at 0. Now that the check runs, a bare
+	 * global leaks across sessions: a busy session reporting 85% would trip the
+	 * default-on compaction service's emergency tier — and the `>= 50%` CONTEXT
+	 * PRESSURE advisory — inside an unrelated small session. compaction-service
+	 * keys its *hysteresis* per session, so the wrong session's state machine
+	 * would advance on another session's number.
+	 *
+	 * Write via `setSessionBudget`, read via `getSessionBudgetPct` /
+	 * `getSessionBudgetTokens`; `/swarm status` uses `getDisplayBudget`.
 	 */
-	lastBudgetTokens: 0,
+	lastBudgetBySession: new Map<string, { pct: number; tokens: number }>(),
 
 	/**
-	 * Live `model.limit.context` per session — keyed by sessionID, recorded by
-	 * the `experimental.chat.system.transform` hook (the only hook the host
+	 * Live `model.limit.context` per session — keyed by sessionID and bound to
+	 * the reporting model/provider identity. Recorded by the
+	 * `experimental.chat.system.transform` hook (the only hook the host
 	 * gives a `Model` to) and read by the `experimental.chat.messages.transform`
 	 * consumers, which receive messages but no model object. Bounded via
 	 * {@link setLiveContextWindow} (AGENTS.md invariant 8).
 	 */
-	liveContextWindows: new Map<string, number>(),
+	liveContextWindows: new Map<
+		string,
+		{ tokens?: number; modelID?: string; providerID?: string }
+	>(),
 
 	/** Per-session guardrail state — keyed by sessionID */
 	agentSessions: defaultRunContext.agentSessions,
@@ -867,8 +880,7 @@ export function resetSwarmState(): void {
 	swarmState.activeAgent.clear();
 	swarmState.delegationChains.clear();
 	swarmState.pendingEvents = 0;
-	swarmState.lastBudgetPct = 0;
-	swarmState.lastBudgetTokens = 0;
+	swarmState.lastBudgetBySession.clear();
 	swarmState.liveContextWindows.clear();
 	swarmState.agentSessions.clear();
 	// Reset the opportunistic idle-sweep cooldown so a fresh process / test run
@@ -3255,6 +3267,7 @@ export function ensureSessionEnvironment(
 // "Module-level global state must have an explicit eviction strategy").
 // Values mirror MAX_TRACKED_SESSIONS in adversarial-detector.ts. The Map
 // preserves insertion order so `Map.keys().next()` is the FIFO oldest.
+export const MAX_TRACKED_BUDGET_SESSIONS = 500;
 export const MAX_TRACKED_CRITICAL_SHOWN = 500;
 export const MAX_TRACKED_KNOWLEDGE_ACKS = 5000;
 export const MAX_TRACKED_GATE_DENIALS = 500;
@@ -3262,7 +3275,8 @@ export const MAX_TRACKED_CONTEXT_WINDOWS = 500;
 
 /**
  * Record the live `model.limit.context` the host reported for `sessionID`,
- * FIFO-evicting the oldest entry past {@link MAX_TRACKED_CONTEXT_WINDOWS}.
+ * bound to the reporting model/provider identity and FIFO-evicting the oldest
+ * entry past {@link MAX_TRACKED_CONTEXT_WINDOWS}.
  *
  * Only accepts a finite number ≥ 1 — the caller (`src/config/context-window.ts`
  * `isUsableContextWindow`) applies the real plausibility floor, and storing a
@@ -3273,15 +3287,100 @@ export const MAX_TRACKED_CONTEXT_WINDOWS = 500;
 export function setLiveContextWindow(
 	sessionID: string | undefined,
 	tokens: unknown,
+	identity?: { modelID?: string; providerID?: string },
 ): void {
 	if (!sessionID) return;
-	if (typeof tokens !== 'number' || !Number.isFinite(tokens) || tokens < 1) {
+	const map = swarmState.liveContextWindows;
+	const modelID = normalizeLiveContextIdentity(identity?.modelID);
+	const providerID = normalizeLiveContextIdentity(identity?.providerID);
+	const existing = map.get(sessionID);
+	const hasUsableTokens =
+		typeof tokens === 'number' && Number.isFinite(tokens) && tokens >= 1;
+	if (!hasUsableTokens) {
+		if (!identity || (!modelID && !providerID)) return;
+		if (
+			existing?.modelID === modelID &&
+			existing?.providerID === providerID &&
+			existing?.tokens !== undefined
+		) {
+			return;
+		}
+		if (map.has(sessionID)) map.delete(sessionID);
+		map.set(sessionID, { modelID, providerID });
+		evictOldestLiveContextWindow(map, sessionID);
 		return;
 	}
-	const map = swarmState.liveContextWindows;
 	if (map.has(sessionID)) map.delete(sessionID);
-	map.set(sessionID, Math.floor(tokens));
-	if (map.size > MAX_TRACKED_CONTEXT_WINDOWS) {
+	map.set(sessionID, {
+		tokens: Math.floor(tokens as number),
+		modelID,
+		providerID,
+	});
+	evictOldestLiveContextWindow(map, sessionID);
+}
+
+/**
+ * Read the live context window recorded for `sessionID`, or `undefined` when
+ * no `system.transform` has run for it yet or the requested model/provider
+ * identity does not exactly match the reporter. Callers must degrade to the
+ * static resolution rungs rather than reuse a stale handoff denominator.
+ */
+export function getLiveContextWindow(
+	sessionID: string | undefined,
+	identity?: { modelID?: string; providerID?: string },
+): number | undefined {
+	if (!sessionID) return undefined;
+	const cached = swarmState.liveContextWindows.get(sessionID);
+	if (!cached) return undefined;
+	const modelID = normalizeLiveContextIdentity(identity?.modelID);
+	const providerID = normalizeLiveContextIdentity(identity?.providerID);
+	if (
+		identity &&
+		(cached.modelID !== modelID || cached.providerID !== providerID)
+	) {
+		return undefined;
+	}
+	return cached.tokens;
+}
+
+export function getLiveContextModelIdentity(
+	sessionID: string | undefined,
+): { modelID?: string; providerID?: string } | undefined {
+	if (!sessionID) return undefined;
+	const cached = swarmState.liveContextWindows.get(sessionID);
+	if (!cached) return undefined;
+	return { modelID: cached.modelID, providerID: cached.providerID };
+}
+
+function evictOldestLiveContextWindow(
+	map: typeof swarmState.liveContextWindows,
+	sessionID: string,
+): void {
+	if (map.size <= MAX_TRACKED_CONTEXT_WINDOWS) return;
+	const oldest = map.keys().next().value;
+	if (oldest !== undefined && oldest !== sessionID) map.delete(oldest);
+}
+
+function normalizeLiveContextIdentity(
+	value: string | undefined,
+): string | undefined {
+	const normalized = value?.trim().toLowerCase();
+	return normalized ? normalized : undefined;
+}
+
+/** Record this session's budget percentage and the denominator it was computed
+ *  against, FIFO-evicting the oldest entry if the cap is exceeded. The two are
+ *  written together so `/swarm status` can never pair a pct from one report
+ *  with a denominator from another. */
+export function setSessionBudget(
+	sessionID: string,
+	pct: number,
+	tokens: number,
+): void {
+	const map = swarmState.lastBudgetBySession;
+	if (map.has(sessionID)) map.delete(sessionID);
+	map.set(sessionID, { pct, tokens });
+	if (map.size > MAX_TRACKED_BUDGET_SESSIONS) {
 		const oldest = map.keys().next().value;
 		if (oldest !== undefined && oldest !== sessionID) {
 			map.delete(oldest);
@@ -3289,17 +3388,33 @@ export function setLiveContextWindow(
 	}
 }
 
-/**
- * Read the live context window recorded for `sessionID`, or `undefined` when
- * no `system.transform` has run for it yet (first turn of a session, or a
- * consumer that never sees a sessionID). Callers must degrade to the static
- * resolution rungs rather than assume a value.
- */
-export function getLiveContextWindow(
-	sessionID: string | undefined,
-): number | undefined {
-	if (!sessionID) return undefined;
-	return swarmState.liveContextWindows.get(sessionID);
+/** This session's last budget percentage, or 0 if it has not been measured.
+ *  Consumers that ACT on a session (compaction, the context-pressure advisory)
+ *  MUST use this rather than any cross-session aggregate. */
+export function getSessionBudgetPct(sessionID: string | undefined): number {
+	if (!sessionID) return 0;
+	return swarmState.lastBudgetBySession.get(sessionID)?.pct ?? 0;
+}
+
+/** The denominator this session's percentage was computed against, or 0. */
+export function getSessionBudgetTokens(sessionID: string | undefined): number {
+	if (!sessionID) return 0;
+	return swarmState.lastBudgetBySession.get(sessionID)?.tokens ?? 0;
+}
+
+/** The most-pressured session's budget snapshot, for process-wide DISPLAY only
+ *  (`/swarm status` has no single session in scope). Returns the pct and its
+ *  OWN denominator as a pair, so the two figures shown side by side always come
+ *  from the same report. Null when nothing has been measured yet. Never use
+ *  this to decide whether to act on a particular session. */
+export function getDisplayBudget(): { pct: number; tokens: number } | null {
+	let best: { pct: number; tokens: number } | null = null;
+	for (const entry of swarmState.lastBudgetBySession.values()) {
+		if (entry.pct > 0 && (best === null || entry.pct > best.pct)) {
+			best = entry;
+		}
+	}
+	return best;
 }
 
 /** Set the critical shown ids for a session, FIFO-evicting the oldest entry

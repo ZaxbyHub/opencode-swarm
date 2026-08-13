@@ -94,14 +94,14 @@ describe('project-db', () => {
 			)
 			.all()
 			.map((r) => r.version);
-		expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+		expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
 		db.close();
 	});
 
 	test('v12 preserves populated v11 receipts and initializes completion generation', () => {
 		const db = new Database(':memory:');
 		runProjectMigrations(db);
-		db.run('DELETE FROM schema_migrations WHERE version = 12');
+		db.run('DELETE FROM schema_migrations WHERE version >= 12');
 		db.run(`CREATE TABLE task_checkpoint_receipt_v11 (
 			plan_identity_hash TEXT NOT NULL,
 			task_id TEXT NOT NULL,
@@ -130,10 +130,12 @@ describe('project-db', () => {
 					sha: string;
 					generation: number;
 					completion_active: number;
+					completion_ledger_seq: number | null;
 				},
 				[]
 			>(
-				`SELECT label, state, sha, generation, completion_active
+				`SELECT label, state, sha, generation, completion_active,
+					completion_ledger_seq
 				 FROM task_checkpoint_receipt`,
 			)
 			.get();
@@ -143,6 +145,62 @@ describe('project-db', () => {
 			sha: 'abc123',
 			generation: 1,
 			completion_active: 1,
+			completion_ledger_seq: null,
+		});
+		db.close();
+	});
+
+	test('v13 preserves populated v12 receipts and leaves epoch binding nullable', () => {
+		const db = new Database(':memory:');
+		runProjectMigrations(db);
+		db.run('DELETE FROM schema_migrations WHERE version = 13');
+		db.run(`CREATE TABLE task_checkpoint_receipt_v12 (
+			plan_identity_hash TEXT NOT NULL,
+			task_id TEXT NOT NULL,
+			label TEXT NOT NULL,
+			state TEXT NOT NULL CHECK(state IN ('pending', 'committed', 'logged')),
+			sha TEXT,
+			created_at TEXT NOT NULL DEFAULT (datetime('now')),
+			updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+			generation INTEGER NOT NULL DEFAULT 1,
+			completion_active INTEGER NOT NULL DEFAULT 1
+				CHECK(completion_active IN (0, 1)),
+			PRIMARY KEY(plan_identity_hash, task_id)
+		)`);
+		db.run(`INSERT INTO task_checkpoint_receipt_v12
+			(plan_identity_hash, task_id, label, state, sha, generation, completion_active)
+			VALUES ('v12-hash', '2.1', 'v12-label', 'logged', 'def456', 4, 1)`);
+		db.run('DROP TABLE task_checkpoint_receipt');
+		db.run(
+			'ALTER TABLE task_checkpoint_receipt_v12 RENAME TO task_checkpoint_receipt',
+		);
+
+		runProjectMigrations(db);
+
+		const receipt = db
+			.query<
+				{
+					label: string;
+					state: string;
+					sha: string;
+					generation: number;
+					completion_active: number;
+					completion_ledger_seq: number | null;
+				},
+				[]
+			>(
+				`SELECT label, state, sha, generation, completion_active,
+					completion_ledger_seq
+				 FROM task_checkpoint_receipt`,
+			)
+			.get();
+		expect(receipt).toEqual({
+			label: 'v12-label',
+			state: 'logged',
+			sha: 'def456',
+			generation: 4,
+			completion_active: 1,
+			completion_ledger_seq: null,
 		});
 		db.close();
 	});
@@ -206,7 +264,7 @@ describe('project-db', () => {
 			)
 			.all()
 			.map((row) => row.version);
-		expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+		expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
 		const rows = db
 			.query<
 				{

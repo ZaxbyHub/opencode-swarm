@@ -23,7 +23,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { PluginConfig } from '../../../src/config';
 import { createSystemEnhancerHook } from '../../../src/hooks/system-enhancer';
-import { resetSwarmState, swarmState } from '../../../src/state';
+import {
+	getSessionBudgetPct,
+	getSessionBudgetTokens,
+	resetSwarmState,
+	swarmState,
+} from '../../../src/state';
+
+/** The sessionID runHook() defaults to; the budget record is keyed by it. */
+const SESSION = 'test-session';
 
 const BUDGET_TOKENS = 100_000;
 /** chars = tokens * 3.5 */
@@ -137,13 +145,13 @@ describe('System Enhancer Hook - Context Budget Wiring', () => {
 	});
 
 	it('publishes the measured percentage to swarmState for downstream consumers', async () => {
-		// swarmState.lastBudgetPct drives the CONTEXT PRESSURE advisory in
+		// getSessionBudgetPct(SESSION) drives the CONTEXT PRESSURE advisory in
 		// src/index.ts and the compaction service tiers. While the budget check
 		// threw, it stayed at 0 and both of those were dormant.
-		expect(swarmState.lastBudgetPct).toBe(0);
+		expect(getSessionBudgetPct(SESSION)).toBe(0);
 		await runHook(configWithBudget(), WARNING_PROMPT);
-		expect(swarmState.lastBudgetPct).toBeGreaterThan(70);
-		expect(swarmState.lastBudgetPct).toBeLessThan(90);
+		expect(getSessionBudgetPct(SESSION)).toBeGreaterThan(70);
+		expect(getSessionBudgetPct(SESSION)).toBeLessThan(90);
 	});
 
 	it('measures the budget AFTER the rest of the system prompt is assembled', async () => {
@@ -195,6 +203,6 @@ describe('System Enhancer Hook - Context Budget Wiring', () => {
 		expect(
 			budgetBlockOf(await runHook(config, CRITICAL_PROMPT)),
 		).toBeUndefined();
-		expect(swarmState.lastBudgetPct).toBe(0);
+		expect(getSessionBudgetPct(SESSION)).toBe(0);
 	});
 });

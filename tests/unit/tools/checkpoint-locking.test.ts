@@ -85,6 +85,7 @@ describe('checkpoint locking and exact-subject helpers', () => {
 		gitExec: checkpointInternals.gitExec,
 		findCommitByExactSubject: checkpointInternals.findCommitByExactSubject,
 		stageAllExcludingSwarm: checkpointInternals.stageAllExcludingSwarm,
+		afterTaskEligibilityRead: checkpointInternals.afterTaskEligibilityRead,
 	};
 
 	beforeEach(async () => {
@@ -107,6 +108,8 @@ describe('checkpoint locking and exact-subject helpers', () => {
 			originalInternals.findCommitByExactSubject;
 		checkpointInternals.stageAllExcludingSwarm =
 			originalInternals.stageAllExcludingSwarm;
+		checkpointInternals.afterTaskEligibilityRead =
+			originalInternals.afterTaskEligibilityRead;
 	});
 
 	afterEach(() => {
@@ -230,6 +233,9 @@ describe('checkpoint locking and exact-subject helpers', () => {
 		checkpointInternals.tryAcquireLock = mock(async () => {
 			return { acquired: false };
 		}) as unknown as typeof checkpointInternals.tryAcquireLock;
+		checkpointInternals.sleep = mock(
+			async () => {},
+		) as typeof checkpointInternals.sleep;
 
 		const result = JSON.parse(
 			await checkpoint.execute({
@@ -352,6 +358,36 @@ describe('checkpoint locking and exact-subject helpers', () => {
 
 		expect(result.success).toBe(false);
 		expect(result.error).toContain('is in_progress, not completed');
+	});
+
+	test('CS-003: manager-level plan writes cannot mutate eligibility while checkpoint publication holds the plan lock', async () => {
+		const reopenedPlan = makePlan('Locking Plan');
+		reopenedPlan.phases[0].status = 'in_progress';
+		reopenedPlan.phases[0].tasks[0].status = 'in_progress';
+		let writerError: unknown;
+		checkpointInternals.afterTaskEligibilityRead = async (directory) => {
+			try {
+				await savePlan(directory, reopenedPlan, {
+					preserveCompletedStatuses: false,
+				});
+			} catch (error) {
+				writerError = error;
+			}
+		};
+		fs.writeFileSync(path.join(tempDir, 'checkpoint-output.txt'), 'ready');
+
+		const result = JSON.parse(
+			await checkpoint.execute({
+				action: 'save_task_completion',
+				task_id: '1.1',
+			}),
+		);
+
+		expect(result.success).toBe(true);
+		expect(writerError).toBeInstanceOf(Error);
+		expect(String(writerError)).toContain('Plan write blocked');
+		const durable = await originalInternals.loadPlan(tempDir);
+		expect(durable?.phases[0].tasks[0].status).toBe('completed');
 	});
 
 	test('TF-003: real concurrent callers serialize through the plan and checkpoint locks', async () => {

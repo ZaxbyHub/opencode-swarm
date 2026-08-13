@@ -8,6 +8,7 @@
  */
 
 import { getSwarmAgents } from '../../agents/index';
+import { parseAgentModel } from '../../config/agent-model';
 import {
 	isLowCapabilityModel,
 	ORCHESTRATOR_NAME,
@@ -57,6 +58,8 @@ export interface MessagesTransformContext {
 	 * explanation for the silence.
 	 */
 	lastCountedAssistantMsgId: Map<string, string>;
+	/** Resolve an explicit model for the exact incoming agent, when available. */
+	resolveAgentModel?: (agentName: string) => string | undefined;
 }
 
 // ---- Module-level helpers used exclusively by the messagesTransform handler ----
@@ -268,10 +271,27 @@ export function createMessagesTransformHandler(ctx: MessagesTransformContext) {
 		if (!sessionId) {
 			return;
 		}
+		const session = swarmState.agentSessions.get(sessionId);
+		const activeAgent =
+			swarmState.activeAgent.get(sessionId) ?? session?.agentName;
+		const targetAgent = [...messages]
+			.reverse()
+			.find(
+				(message) =>
+					message.info?.role === 'user' &&
+					typeof message.info.agent === 'string' &&
+					message.info.agent.length > 0,
+			)?.info.agent;
 
 		// v6.21 Task 4.5: Tier-based behavioral prompt trimming for low-capability models
 		{
-			const { modelID } = extractModelInfo(messages);
+			const configuredModel = targetAgent
+				? ctx.resolveAgentModel?.(targetAgent)
+				: undefined;
+			const targetModel = configuredModel
+				? parseAgentModel(configuredModel)
+				: undefined;
+			const { modelID } = targetModel ?? extractModelInfo(messages);
 			if (modelID && isLowCapabilityModel(modelID)) {
 				for (const msg of messages) {
 					if (msg.info?.role !== 'system') continue;
@@ -297,8 +317,6 @@ export function createMessagesTransformHandler(ctx: MessagesTransformContext) {
 		}
 
 		// v6.12: Self-coding warning injection - now injected into SYSTEM messages only (model-only)
-		const session = swarmState.agentSessions.get(sessionId);
-		const activeAgent = swarmState.activeAgent.get(sessionId);
 		const isArchitectSession = activeAgent
 			? stripKnownSwarmPrefix(activeAgent) === ORCHESTRATOR_NAME
 			: session

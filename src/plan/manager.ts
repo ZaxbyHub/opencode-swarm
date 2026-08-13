@@ -79,6 +79,7 @@ import {
 import { isGitRepo } from '../git/branch';
 import { getWorktreeMergeFailure } from '../hooks/delegation-gate/worktree-merge-status';
 import { readSwarmFileAsync } from '../hooks/utils';
+import { tryAcquireLock } from '../parallel/file-locks.js';
 import { recordTaskAttempt } from '../services/run-memory.js';
 import { emit } from '../telemetry.js';
 import { isEpicModeActiveForProject } from '../turbo/epic/state.js';
@@ -1183,7 +1184,10 @@ export async function savePlanWithAutoAcknowledgedRemovals(
 	plan: Plan,
 	source: string,
 	reason: string,
-	options?: { preserveCompletedStatuses?: boolean },
+	options?: {
+		preserveCompletedStatuses?: boolean;
+		planLockAlreadyHeld?: boolean;
+	},
 ): Promise<{ removedCount: number }> {
 	const existing = await _internals.loadPlanJsonOnly(directory);
 	const newIds = new Set<string>();
@@ -1215,6 +1219,8 @@ export async function savePlan(
 	options?: {
 		preserveCompletedStatuses?: boolean;
 		acknowledged_removals?: AcknowledgedRemovals;
+		/** True only when the caller already owns the canonical plan.json lock. */
+		planLockAlreadyHeld?: boolean;
 	},
 ): Promise<void> {
 	// Fail-fast: reject blank or whitespace-only directory inputs before any I/O
@@ -1225,6 +1231,31 @@ export async function savePlan(
 		directory.trim().length === 0
 	) {
 		throw new Error(`Invalid directory: directory must be a non-empty string`);
+	}
+
+	if (!options?.planLockAlreadyHeld) {
+		const lockResult = await tryAcquireLock(
+			directory,
+			'plan.json',
+			'plan-manager',
+			`save-plan-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+		);
+		if (!lockResult.acquired) {
+			throw new PlanConcurrentModificationError(
+				`Plan write blocked: plan.json is locked by ${lockResult.existing?.agent ?? 'another agent'} (task: ${lockResult.existing?.taskId ?? 'unknown'})`,
+			);
+		}
+		try {
+			await savePlan(directory, plan, {
+				...options,
+				planLockAlreadyHeld: true,
+			});
+			return;
+		} finally {
+			if (lockResult.lock._release) {
+				await lockResult.lock._release().catch(() => {});
+			}
+		}
 	}
 
 	// Validate against schema
@@ -2150,7 +2181,7 @@ export async function updateTaskStatus(
 	directory: string,
 	taskId: string,
 	status: TaskStatus,
-	options?: { force?: boolean },
+	options?: { force?: boolean; planLockAlreadyHeld?: boolean },
 ): Promise<Plan> {
 	const derivePhaseStatusFromTasks = (tasks: Task[]): Phase['status'] => {
 		if (
@@ -2243,6 +2274,7 @@ export async function updateTaskStatus(
 			// 'completed', producing a false-positive success return.
 			await savePlan(directory, updatedPlan, {
 				preserveCompletedStatuses: false,
+				planLockAlreadyHeld: options?.planLockAlreadyHeld,
 			});
 
 			// Run memory: record the terminal outcome for this task. Centralized

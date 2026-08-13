@@ -5,14 +5,14 @@ import type { ToolDefinition } from '@opencode-ai/plugin/tool';
 import { z } from 'zod';
 import { loadPluginConfigWithMeta } from '../config';
 import {
-	activateTaskCheckpointReceipt,
 	buildTaskCompletionDescriptor,
 	ensureTaskCheckpointReceipt,
 	updateTaskCheckpointReceipt,
 } from '../db/task-checkpoint-receipt.js';
 import { tryAcquireLock } from '../parallel/file-locks.js';
+import { readLedgerEvents } from '../plan/ledger.js';
 import { loadPlan } from '../plan/manager.js';
-import { derivePlanIdentityHash } from '../plan/utils.js';
+import { derivePlanId, derivePlanIdentityHash } from '../plan/utils.js';
 import {
 	isTransientSpawnError,
 	MAX_TRANSIENT_RETRIES,
@@ -74,6 +74,10 @@ export const _internals: {
 	sleep: (ms: number) => Promise<void>;
 	findCommitByExactSubject: typeof findCommitByExactSubject;
 	stageAllExcludingSwarm: typeof stageAllExcludingSwarm;
+	afterTaskEligibilityRead?: (
+		directory: string,
+		taskId: string,
+	) => Promise<void>;
 } = {
 	tryAcquireLock,
 	loadPlan,
@@ -837,18 +841,59 @@ async function handleSaveTaskCompletion(
 					error: `save_task_completion failed: task "${taskId}" is ${task.status}, not completed`,
 				});
 			}
+			await _internals.afterTaskEligibilityRead?.(directory, task.id);
 
 			const planIdentityHash = derivePlanIdentityHash(plan);
-			let receipt = ensureTaskCheckpointReceipt(
+			const planId = derivePlanId(plan);
+			const ledgerEvents = await readLedgerEvents(directory);
+			const planEvents = ledgerEvents.filter(
+				(event) => event.plan_id === planId,
+			);
+			const anchor = planEvents.find(
+				(event) => event.event_type === 'plan_created',
+			);
+			const anchorPlan = anchor?.payload?.plan;
+			if (anchorPlan && typeof anchorPlan === 'object') {
+				const rawIdentity = anchorPlan as { swarm?: unknown; title?: unknown };
+				if (
+					typeof rawIdentity.swarm !== 'string' ||
+					typeof rawIdentity.title !== 'string' ||
+					derivePlanIdentityHash({
+						swarm: rawIdentity.swarm,
+						title: rawIdentity.title,
+					}) !== planIdentityHash
+				) {
+					throw new Error(
+						`save_task_completion failed: ledger identity does not match the current plan for task "${task.id}"`,
+					);
+				}
+			}
+			const latestTaskStatusEvent = [...planEvents]
+				.reverse()
+				.find(
+					(event) =>
+						event.event_type === 'task_status_changed' &&
+						event.task_id === task.id,
+				);
+			if (
+				latestTaskStatusEvent &&
+				latestTaskStatusEvent.to_status !== 'completed'
+			) {
+				throw new Error(
+					`save_task_completion failed: the authoritative ledger does not record task "${task.id}" as completed`,
+				);
+			}
+			// An initially-completed plan has no task_status_changed event. Its
+			// immutable plan_created sequence is the stable completion epoch; zero is
+			// reserved for legacy disk-only plans without a readable ledger anchor.
+			const completionLedgerSeq =
+				latestTaskStatusEvent?.seq ?? anchor?.seq ?? 0;
+			const receipt = ensureTaskCheckpointReceipt(
 				directory,
 				planIdentityHash,
 				task.id,
+				completionLedgerSeq,
 			);
-			if (receipt.completion_active === 0) {
-				receipt =
-					activateTaskCheckpointReceipt(directory, planIdentityHash, task.id) ??
-					receipt;
-			}
 			const descriptor = buildTaskCompletionDescriptor(
 				planIdentityHash,
 				task.id,

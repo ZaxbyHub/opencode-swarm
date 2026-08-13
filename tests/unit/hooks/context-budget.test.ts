@@ -970,12 +970,12 @@ describe('context-budget hook', () => {
 
 			const baseMessages = [
 				{
-					info: { role: 'user' },
+					info: { role: 'user', sessionID: 'rapid-switch' },
 					parts: [{ type: 'text', text: 'x'.repeat(100) }],
 				},
 				toolMsg('bash', 'y'.repeat(100)),
 				{
-					info: { role: 'user' },
+					info: { role: 'user', sessionID: 'rapid-switch' },
 					parts: [{ type: 'text', text: 'a'.repeat(100) }],
 				},
 				toolMsg('write', 'b'.repeat(100)),

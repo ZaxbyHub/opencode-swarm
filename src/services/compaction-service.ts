@@ -7,14 +7,15 @@
  *  - Reflection  (default 60%): re-summarise into tighter format
  *  - Emergency   (default 80%): hard truncation to system + current task + last N turns
  *
- * Consumes `swarmState.lastBudgetPct` (set by system-enhancer.ts after each budget calc).
+ * Consumes the per-session budget pct recorded by system-enhancer.ts after
+ * each budget calc (`getSessionBudgetPct`).
  * Never throws. Advisory system message injection via callback.
  */
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { CompactionConfig } from '../config/schema';
-import { swarmState } from '../state';
+import { getSessionBudgetPct } from '../state';
 export type { CompactionConfig };
 
 // ── Compaction state (module-level, resets on plugin reload) ─────────────────
@@ -45,11 +46,27 @@ function makeInitialState(): CompactionState {
 // Isolates hysteresis thresholds so concurrent sessions don't suppress each other's compaction.
 const sessionStates = new Map<string, CompactionState>();
 
+// FIFO cap (AGENTS.md invariant 8). Mirrors MAX_TRACKED_BUDGET_SESSIONS in
+// state.ts: the budget map and this hysteresis map are the two per-session
+// records that drive compaction, so they share one bounded-growth contract.
+// Without this, the create-on-read in getSessionState below grew unbounded
+// under session churn while the budget map (capped at 500) evicted — leaving
+// the two maps free to desync (hysteresis without a budget record, or a
+// budget record whose hysteresis was silently dropped).
+export const MAX_TRACKED_COMPACTION_SESSIONS = 500;
+
 function getSessionState(sessionId: string): CompactionState {
 	let state = sessionStates.get(sessionId);
-	if (!state) {
-		state = makeInitialState();
-		sessionStates.set(sessionId, state);
+	if (state) return state;
+	state = makeInitialState();
+	sessionStates.set(sessionId, state);
+	// `set` just made `sessionId` the newest entry, so the FIFO oldest can never
+	// be `sessionId` here — the guard is defensive and mirrors setSessionBudget.
+	if (sessionStates.size > MAX_TRACKED_COMPACTION_SESSIONS) {
+		const oldest = sessionStates.keys().next().value;
+		if (oldest !== undefined && oldest !== sessionId) {
+			sessionStates.delete(oldest);
+		}
 	}
 	return state;
 }
@@ -129,7 +146,9 @@ export function createCompactionService(
 			if (!config.enabled) return;
 
 			// Read last known budget from swarmState (set by system-enhancer)
-			const budgetPct = swarmState.lastBudgetPct ?? 0;
+			// Per-session: another session's pressure must never trigger compaction
+			// here (AGENTS.md invariant 8).
+			const budgetPct = getSessionBudgetPct(_input.sessionID);
 			if (budgetPct <= 0) return; // No budget data yet
 
 			const sessionId = _input.sessionID;

@@ -19,7 +19,6 @@ import {
 	TURBO_MODE_BANNER,
 } from '../config/constants';
 import {
-	isUsableContextWindow,
 	readModelContextLimit,
 	readModelIdentity,
 	resolveContextWindowTokens,
@@ -42,6 +41,7 @@ import {
 	hasActiveLeanTurbo,
 	hasActiveTurboMode,
 	setLiveContextWindow,
+	setSessionBudget,
 	swarmState,
 } from '../state';
 import {
@@ -711,9 +711,10 @@ export function createSystemEnhancerHook(
 				const liveContextLimit = readModelContextLimit(liveModel);
 				const liveModelID = readModelIdentity(liveModel, 'id');
 				const liveProviderID = readModelIdentity(liveModel, 'providerID');
-				if (isUsableContextWindow(liveContextLimit)) {
-					setLiveContextWindow(_input.sessionID, liveContextLimit);
-				}
+				setLiveContextWindow(_input.sessionID, liveContextLimit, {
+					modelID: liveModelID,
+					providerID: liveProviderID,
+				});
 				try {
 					// Skip swarm context injection for native opencode agents (build,
 					// plan, general, explore, compaction, title, summary). These agents
@@ -1718,46 +1719,67 @@ ${sanitizeContextText(scopedHandoff.body)}`;
 							: { ...defaultConfig, budgetTokens };
 
 						if (contextBudgetConfig.enabled !== false) {
-							const assembledSystemPrompt = output.system.join('\n');
-							const budgetReport = await getContextBudgetReport(
-								directory,
-								assembledSystemPrompt,
-								contextBudgetConfig,
-							);
-							swarmState.lastBudgetPct = budgetReport.budgetPct;
-							// Paired with the pct on the SAME statement sequence: a
-							// percentage alone cannot be turned back into a token
-							// estimate, and `/swarm status` renders both.
-							swarmState.lastBudgetTokens = contextBudgetConfig.budgetTokens;
-							telemetry.budgetUpdated(
-								_input.sessionID ?? 'unknown',
-								budgetReport.budgetPct,
-								'architect',
-							);
-							// Resolve the architect check BEFORE calling formatBudgetWarning.
-							// formatBudgetWarning has a side effect: under warningMode
-							// 'once'/'interval' it PERSISTS suppression state to
-							// .swarm/session/budget-state.json. Calling it on a non-architect
-							// turn and discarding the result burned the one-shot warning, so
-							// the architect — the only agent that can act on it — could never
-							// see it. (Latent until the budget check started running at all;
-							// see validateProjectDirectory, issue #1619 follow-up.)
-							const sessionId_cb = _input.sessionID;
-							const activeAgent_cb = sessionId_cb
-								? swarmState.activeAgent.get(sessionId_cb)
-								: null;
-							const isArchitect_cb =
-								!activeAgent_cb ||
-								stripKnownSwarmPrefix(activeAgent_cb) === 'architect';
-							const budgetWarning = isArchitect_cb
-								? await formatBudgetWarning(
-										budgetReport,
-										directory,
-										contextBudgetConfig,
-									)
-								: null;
-							if (budgetWarning) {
-								output.system.push(`[FOR: architect]\n${budgetWarning}`);
+							// Scoped try/catch, matching the two optional injections that
+							// follow. The budget report is advisory, so a failure here must
+							// cost only the budget warning — never the pre-flight binary
+							// advisory or the environment-profile injection below. Without
+							// it, a throw escapes to the hook-level catch and silently
+							// removes both from every turn.
+							try {
+								const assembledSystemPrompt = output.system.join('\n');
+								const budgetReport = await getContextBudgetReport(
+									directory,
+									assembledSystemPrompt,
+									contextBudgetConfig,
+								);
+								// Paired write, keyed by session. The pct and the denominator
+								// it was computed against must stay together, and a bare global
+								// would leak this session's pressure into every other session's
+								// compaction decision (AGENTS.md invariant 8).
+								setSessionBudget(
+									_input.sessionID ?? 'unknown',
+									budgetReport.budgetPct,
+									contextBudgetConfig.budgetTokens,
+								);
+								telemetry.budgetUpdated(
+									_input.sessionID ?? 'unknown',
+									budgetReport.budgetPct,
+									'architect',
+								);
+								// Resolve the architect check BEFORE calling formatBudgetWarning.
+								// formatBudgetWarning has a side effect: under warningMode
+								// 'once'/'interval' it PERSISTS suppression state to
+								// .swarm/session/budget-state.json. Calling it on a non-architect
+								// turn and discarding the result burned the one-shot warning, so
+								// the architect — the only agent that can act on it — could never
+								// see it. (Latent until the budget check started running at all;
+								// see validateProjectDirectory, issue #1619 follow-up.)
+								const sessionId_cb = _input.sessionID;
+								const activeAgent_cb = sessionId_cb
+									? swarmState.activeAgent.get(sessionId_cb)
+									: null;
+								const isArchitect_cb =
+									!activeAgent_cb ||
+									stripKnownSwarmPrefix(activeAgent_cb) === 'architect';
+								const budgetWarning = isArchitect_cb
+									? await formatBudgetWarning(
+											budgetReport,
+											directory,
+											contextBudgetConfig,
+										)
+									: null;
+								if (budgetWarning) {
+									// Deliberately NOT routed through tryInject: dropping an
+									// "out of budget" notice because you are over budget is the
+									// wrong failure mode. Its tokens are still added to
+									// actualDemand so the unified ledger stays honest — this is
+									// otherwise the one injection invisible to the budget it
+									// reports on.
+									actualDemand += estimateTokens(budgetWarning);
+									output.system.push(`[FOR: architect]\n${budgetWarning}`);
+								}
+							} catch (error) {
+								warn('Context budget check failed:', error);
 							}
 						}
 
@@ -2623,39 +2645,50 @@ ${sanitizeContextText(scopedHandoff.body)}`;
 						: { ...defaultConfig_b, budgetTokens: budgetTokens_b };
 
 					if (contextBudgetConfig_b.enabled !== false) {
-						const assembledSystemPrompt_b = output.system.join('\n');
-						const budgetReport_b = await getContextBudgetReport(
-							directory,
-							assembledSystemPrompt_b,
-							contextBudgetConfig_b,
-						);
-						swarmState.lastBudgetPct = budgetReport_b.budgetPct;
-						// Paired with the pct — see the Path A note.
-						swarmState.lastBudgetTokens = contextBudgetConfig_b.budgetTokens;
-						telemetry.budgetUpdated(
-							_input.sessionID ?? 'unknown',
-							budgetReport_b.budgetPct,
-							'architect',
-						);
-						// Architect check BEFORE the call — see the note on the Path A
-						// copy above: formatBudgetWarning persists suppression state, so
-						// calling it for a non-architect burns the one-shot warning.
-						const sessionId_cb_b = _input.sessionID;
-						const activeAgent_cb_b = sessionId_cb_b
-							? swarmState.activeAgent.get(sessionId_cb_b)
-							: null;
-						const isArchitect_cb_b =
-							!activeAgent_cb_b ||
-							stripKnownSwarmPrefix(activeAgent_cb_b) === 'architect';
-						const budgetWarning_b = isArchitect_cb_b
-							? await formatBudgetWarning(
-									budgetReport_b,
-									directory,
-									contextBudgetConfig_b,
-								)
-							: null;
-						if (budgetWarning_b) {
-							output.system.push(`[FOR: architect]\n${budgetWarning_b}`);
+						// Scoped try/catch — see the Path A block.
+						try {
+							const assembledSystemPrompt_b = output.system.join('\n');
+							const budgetReport_b = await getContextBudgetReport(
+								directory,
+								assembledSystemPrompt_b,
+								contextBudgetConfig_b,
+							);
+							// Paired, session-keyed write — see the Path A note.
+							setSessionBudget(
+								_input.sessionID ?? 'unknown',
+								budgetReport_b.budgetPct,
+								contextBudgetConfig_b.budgetTokens,
+							);
+							telemetry.budgetUpdated(
+								_input.sessionID ?? 'unknown',
+								budgetReport_b.budgetPct,
+								'architect',
+							);
+							// Architect check BEFORE the call — see the note on the Path A
+							// copy above: formatBudgetWarning persists suppression state, so
+							// calling it for a non-architect burns the one-shot warning.
+							const sessionId_cb_b = _input.sessionID;
+							const activeAgent_cb_b = sessionId_cb_b
+								? swarmState.activeAgent.get(sessionId_cb_b)
+								: null;
+							const isArchitect_cb_b =
+								!activeAgent_cb_b ||
+								stripKnownSwarmPrefix(activeAgent_cb_b) === 'architect';
+							const budgetWarning_b = isArchitect_cb_b
+								? await formatBudgetWarning(
+										budgetReport_b,
+										directory,
+										contextBudgetConfig_b,
+									)
+								: null;
+							if (budgetWarning_b) {
+								// See the Path A note: deliberately not routed through
+								// tryInject, but still counted into actualDemand.
+								actualDemand += estimateTokens(budgetWarning_b);
+								output.system.push(`[FOR: architect]\n${budgetWarning_b}`);
+							}
+						} catch (error) {
+							warn('Context budget check failed:', error);
 						}
 					}
 

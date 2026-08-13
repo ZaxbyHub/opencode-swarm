@@ -20,10 +20,17 @@ import { join } from 'node:path';
 import type { PluginConfig } from '../../../src/config';
 import { createSystemEnhancerHook } from '../../../src/hooks/system-enhancer';
 import {
+	getLiveContextModelIdentity,
 	getLiveContextWindow,
+	getSessionBudgetPct,
+	getSessionBudgetTokens,
 	resetSwarmState,
 	swarmState,
 } from '../../../src/state';
+
+/** The sessionID runHook() defaults to; the budget record is keyed by it. */
+const SESSION = 'model-window-session';
+
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 /** `estimateTokens` is chars/3.5, so this yields ~`tokens` estimated tokens. */
@@ -153,8 +160,8 @@ describe('system-enhancer: budget denominator derives from model.limit.context',
 			const smallBlock = budgetBlockOf(smallSystem);
 			expect(smallBlock).toBeDefined();
 			expect(smallBlock).toContain('CRITICAL');
-			const smallPct = swarmState.lastBudgetPct;
-			expect(swarmState.lastBudgetTokens).toBe(128000);
+			const smallPct = getSessionBudgetPct(SESSION);
+			expect(getSessionBudgetTokens(SESSION)).toBe(128000);
 
 			resetSwarmState();
 
@@ -164,10 +171,10 @@ describe('system-enhancer: budget denominator derives from model.limit.context',
 			);
 			// Same prompt, ~8x the window: no warning at all.
 			expect(budgetBlockOf(hugeSystem)).toBeUndefined();
-			expect(swarmState.lastBudgetTokens).toBe(1_000_000);
+			expect(getSessionBudgetTokens(SESSION)).toBe(1_000_000);
 			// The percentage itself moved with the model, not just the verdict.
-			expect(swarmState.lastBudgetPct).toBeLessThan(smallPct / 5);
-			expect(swarmState.lastBudgetPct).toBeGreaterThan(0);
+			expect(getSessionBudgetPct(SESSION)).toBeLessThan(smallPct / 5);
+			expect(getSessionBudgetPct(SESSION)).toBeGreaterThan(0);
 		});
 
 		it(`${path}: a Copilot-capped entry uses the host's 200000, not the stale 128000 table`, async () => {
@@ -175,7 +182,7 @@ describe('system-enhancer: budget denominator derives from model.limit.context',
 			// PROVIDER_CAPS still says github-copilot === 128000. The live catalog
 			// says 200000 for this exact provider/model pair, and the live value
 			// wins outright — it is never min-capped against the stale table.
-			expect(swarmState.lastBudgetTokens).toBe(200000);
+			expect(getSessionBudgetTokens(SESSION)).toBe(200000);
 		});
 
 		it(`${path}: an explicit model_limits value beats the live window`, async () => {
@@ -184,7 +191,7 @@ describe('system-enhancer: budget denominator derives from model.limit.context',
 				HUGE_WINDOW_MODEL,
 			);
 			// The user asked for a smaller WORKING budget than the physical window.
-			expect(swarmState.lastBudgetTokens).toBe(60000);
+			expect(getSessionBudgetTokens(SESSION)).toBe(60000);
 		});
 
 		it(`${path}: a malformed limit.context falls back without NaN/Infinity`, async () => {
@@ -196,18 +203,18 @@ describe('system-enhancer: budget denominator derives from model.limit.context',
 				modelOf('green-s', 'greenpt', 0),
 				promptOf(1000),
 			);
-			expect(swarmState.lastBudgetTokens).toBe(128000);
-			expect(Number.isFinite(swarmState.lastBudgetPct)).toBe(true);
-			expect(Number.isNaN(swarmState.lastBudgetPct)).toBe(false);
-			expect(swarmState.lastBudgetPct).toBeGreaterThan(0);
+			expect(getSessionBudgetTokens(SESSION)).toBe(128000);
+			expect(Number.isFinite(getSessionBudgetPct(SESSION))).toBe(true);
+			expect(Number.isNaN(getSessionBudgetPct(SESSION))).toBe(false);
+			expect(getSessionBudgetPct(SESSION)).toBeGreaterThan(0);
 		});
 
 		it(`${path}: an absent model object still produces a finite budget`, async () => {
 			// The plugin .d.ts declares `model` as non-optional, but this hook runs
 			// on the host boundary and must not throw if it does not arrive.
 			await runHook(configWith({}, scoring), undefined, promptOf(1000));
-			expect(swarmState.lastBudgetTokens).toBe(128000);
-			expect(Number.isFinite(swarmState.lastBudgetPct)).toBe(true);
+			expect(getSessionBudgetTokens(SESSION)).toBe(128000);
+			expect(Number.isFinite(getSessionBudgetPct(SESSION))).toBe(true);
 		});
 	}
 
@@ -218,27 +225,58 @@ describe('system-enhancer: budget denominator derives from model.limit.context',
 		expect(getLiveContextWindow('model-window-session')).toBeUndefined();
 		await runHook(configWith(), HUGE_WINDOW_MODEL, promptOf(1000));
 		expect(getLiveContextWindow('model-window-session')).toBe(1_000_000);
+		expect(
+			getLiveContextWindow('model-window-session', {
+				modelID: HUGE_WINDOW_MODEL.id,
+				providerID: HUGE_WINDOW_MODEL.providerID,
+			}),
+		).toBe(1_000_000);
+		expect(
+			getLiveContextWindow('model-window-session', {
+				modelID: 'different-model',
+				providerID: HUGE_WINDOW_MODEL.providerID,
+			}),
+		).toBeUndefined();
+		expect(
+			getLiveContextWindow('model-window-session', {
+				modelID: HUGE_WINDOW_MODEL.id,
+				providerID: 'different-provider',
+			}),
+		).toBeUndefined();
 	});
 
-	it('does not record an implausible live window, and keeps a good earlier one', async () => {
+	it('keeps a good earlier window only for the same model identity', async () => {
 		await runHook(configWith(), HUGE_WINDOW_MODEL, promptOf(1000));
+		await runHook(
+			configWith(),
+			modelOf(HUGE_WINDOW_MODEL.id, HUGE_WINDOW_MODEL.providerID, 0),
+			promptOf(1000),
+		);
+		// One malformed catalog turn for the same model must not blank a good reading.
+		expect(getLiveContextWindow('model-window-session')).toBe(1_000_000);
+
 		await runHook(
 			configWith(),
 			modelOf('green-s', 'greenpt', 0),
 			promptOf(1000),
 		);
-		// One malformed turn must not blank a reading the consumers depend on.
-		expect(getLiveContextWindow('model-window-session')).toBe(1_000_000);
+		// A different current model invalidates the old denominator even when its
+		// own catalog limit is malformed; consumers can still read its identity.
+		expect(getLiveContextWindow('model-window-session')).toBeUndefined();
+		expect(getLiveContextModelIdentity('model-window-session')).toEqual({
+			modelID: 'green-s',
+			providerID: 'greenpt',
+		});
 	});
 
 	it('pairs the denominator with the percentage on every budget update', async () => {
 		// `/swarm status` renders `est. X / Y tokens` from these two values. If
 		// only the pct is written, the estimate is reconstructed against a
 		// constant and contradicts the percentage printed beside it.
-		expect(swarmState.lastBudgetPct).toBe(0);
-		expect(swarmState.lastBudgetTokens).toBe(0);
+		expect(getSessionBudgetPct(SESSION)).toBe(0);
+		expect(getSessionBudgetTokens(SESSION)).toBe(0);
 		await runHook(configWith(), COPILOT_CLAUDE_MODEL, promptOf(150_000));
-		expect(swarmState.lastBudgetPct).toBeGreaterThan(0);
-		expect(swarmState.lastBudgetTokens).toBe(200000);
+		expect(getSessionBudgetPct(SESSION)).toBeGreaterThan(0);
+		expect(getSessionBudgetTokens(SESSION)).toBe(200000);
 	});
 });

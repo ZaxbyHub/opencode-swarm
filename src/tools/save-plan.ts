@@ -921,6 +921,7 @@ export async function executeSavePlan(
 			// silently restore 'completed' statuses — so we must also disable it here.
 			await savePlan(dir, plan, {
 				preserveCompletedStatuses: !args.reset_statuses,
+				planLockAlreadyHeld: true,
 				...(resolvedRemovedIds.length > 0
 					? {
 							acknowledged_removals: {

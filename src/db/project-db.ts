@@ -145,6 +145,13 @@ const MIGRATIONS: Migration[] = [
 			ADD COLUMN completion_active INTEGER NOT NULL DEFAULT 1
 			CHECK(completion_active IN (0, 1))`,
 	},
+	{
+		version: 13,
+		name: 'bind_task_checkpoint_receipt_to_completion_ledger_seq',
+		sql: `ALTER TABLE task_checkpoint_receipt
+			ADD COLUMN completion_ledger_seq INTEGER
+			CHECK(completion_ledger_seq IS NULL OR completion_ledger_seq >= 0)`,
+	},
 ];
 
 const _projectDbs: Map<string, Database> = new Map();

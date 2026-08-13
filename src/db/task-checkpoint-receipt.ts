@@ -11,6 +11,7 @@ export interface TaskCheckpointReceiptRow {
 	sha: string | null;
 	generation: number;
 	completion_active: number;
+	completion_ledger_seq: number | null;
 	created_at: string;
 	updated_at: string;
 }
@@ -89,16 +90,80 @@ export function ensureTaskCheckpointReceipt(
 	directory: string,
 	planIdentityHash: string,
 	taskId: string,
+	completionLedgerSeq: number,
 ): TaskCheckpointReceiptRow {
+	if (!Number.isSafeInteger(completionLedgerSeq) || completionLedgerSeq < 0) {
+		throw new Error(
+			`Invalid task checkpoint completion ledger seq: ${completionLedgerSeq}`,
+		);
+	}
 	const db = getProjectDb(directory);
 	const initial = buildTaskCompletionDescriptor(planIdentityHash, taskId, 1);
 	db.transaction(() => {
 		db.run(
 			`INSERT OR IGNORE INTO task_checkpoint_receipt
-				(plan_identity_hash, task_id, label, state, sha, generation, completion_active)
-			 VALUES (?, ?, ?, 'pending', NULL, 1, 1)`,
-			[planIdentityHash, taskId, initial.label],
+				(plan_identity_hash, task_id, label, state, sha, generation,
+				 completion_active, completion_ledger_seq)
+			 VALUES (?, ?, ?, 'pending', NULL, 1, 1, ?)`,
+			[planIdentityHash, taskId, initial.label, completionLedgerSeq],
 		);
+		const row = db
+			.query<TaskCheckpointReceiptRow, [string, string]>(
+				'SELECT * FROM task_checkpoint_receipt WHERE plan_identity_hash = ? AND task_id = ?',
+			)
+			.get(planIdentityHash, taskId);
+		if (!row) return;
+
+		if (row.completion_ledger_seq === null) {
+			// v12 receipts and lifecycle-advanced pending receipts have no durable
+			// epoch binding. Bind them in place: a migrated logged receipt must stay
+			// idempotent, while a pending reopened receipt already owns its generation.
+			db.run(
+				`UPDATE task_checkpoint_receipt
+				 SET completion_ledger_seq = ?, completion_active = 1,
+					updated_at = datetime('now')
+				 WHERE plan_identity_hash = ? AND task_id = ?
+					AND completion_ledger_seq IS NULL`,
+				[completionLedgerSeq, planIdentityHash, taskId],
+			);
+			return;
+		}
+
+		if (row.completion_ledger_seq !== completionLedgerSeq) {
+			const nextGeneration = row.generation + 1;
+			const descriptor = buildTaskCompletionDescriptor(
+				planIdentityHash,
+				taskId,
+				nextGeneration,
+			);
+			db.run(
+				`UPDATE task_checkpoint_receipt
+				 SET label = ?, state = 'pending', sha = NULL, generation = ?,
+					completion_active = 1, completion_ledger_seq = ?,
+					updated_at = datetime('now')
+				 WHERE plan_identity_hash = ? AND task_id = ?
+					AND completion_ledger_seq = ?`,
+				[
+					descriptor.label,
+					nextGeneration,
+					completionLedgerSeq,
+					planIdentityHash,
+					taskId,
+					row.completion_ledger_seq,
+				],
+			);
+			return;
+		}
+
+		if (row.completion_active === 0) {
+			db.run(
+				`UPDATE task_checkpoint_receipt
+				 SET completion_active = 1, updated_at = datetime('now')
+				 WHERE plan_identity_hash = ? AND task_id = ?
+					AND completion_ledger_seq = ? AND completion_active = 0`,
+				[planIdentityHash, taskId, completionLedgerSeq],
+			);
+		}
 	})();
 	const row = readTaskCheckpointReceipt(directory, planIdentityHash, taskId);
 	if (!row) {
@@ -162,7 +227,8 @@ export function advanceTaskCheckpointReceiptGeneration(
 		db.run(
 			`UPDATE task_checkpoint_receipt
 			 SET label = ?, state = 'pending', sha = NULL, generation = ?,
-				completion_active = 0, updated_at = datetime('now')
+				completion_active = 0, completion_ledger_seq = NULL,
+				updated_at = datetime('now')
 			 WHERE plan_identity_hash = ? AND task_id = ? AND completion_active = 1`,
 			[descriptor.label, nextGeneration, planIdentityHash, taskId],
 		);
