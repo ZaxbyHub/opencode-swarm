@@ -43,12 +43,6 @@
 	},
 	{
 		"file": "src/agents/explorer.ts",
-		"match": "src/utils/cache.ts",
-		"category": "illustrative-example",
-		"justification": "Worked example inside the CANDIDATE REPORTING MODE field-rules block demonstrating the file:line format."
-	},
-	{
-		"file": "src/agents/explorer.ts",
 		"match": "src/config/constants.ts",
 		"category": "illustrative-example",
 		"justification": "Worked example inside the INTEGRATION IMPACT ANALYSIS MODE output-format block (COMPATIBLE_CHANGES example line)."
