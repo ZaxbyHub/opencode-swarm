@@ -1,4 +1,6 @@
 import { describe, expect, test } from 'bun:test';
+import { getAgentConfigs } from '../../../src/agents';
+import { resolveRuntimeAgentModel } from '../../../src/config/agent-model';
 import { DEFAULT_MODELS } from '../../../src/config/constants';
 import type { PluginConfig } from '../../../src/config/schema';
 import { createContextBudgetHandler } from '../../../src/hooks/context-budget';
@@ -239,8 +241,19 @@ describe('context-budget target model handoff enforcement (#2122)', () => {
 	});
 
 	test('preserves assistant metadata for a primary target controlled by the UI', async () => {
-		const handler = createContextBudgetHandler(makeConfig(), () => undefined);
-		const output = budgetOutput('coder', 'session-primary');
+		const primaryConfig = makeConfig({
+			default_agent: 'architect',
+			agents: {
+				architect: { model: 'provider/model-small' },
+				coder: { model: 'provider/model-small' },
+			},
+		});
+		const registered = getAgentConfigs(primaryConfig);
+		expect(registered.architect.mode).toBe('primary');
+		const handler = createContextBudgetHandler(primaryConfig, (agentName) =>
+			resolveRuntimeAgentModel(primaryConfig, registered, agentName),
+		);
+		const output = budgetOutput('architect', 'session-primary');
 
 		await handler({}, output);
 

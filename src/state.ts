@@ -3287,23 +3287,34 @@ export function setLiveContextWindow(
 ): void {
 	if (!sessionID) return;
 	const map = swarmState.liveContextWindows;
-	const modelID = normalizeLiveContextIdentity(identity?.modelID);
-	const providerID = normalizeLiveContextIdentity(identity?.providerID);
+	// Preserve the host's spelling for case-sensitive model_limits lookup and
+	// diagnostics. Equality is normalized separately below so host casing drift
+	// does not make the same provider/model look like a handoff.
+	const modelID = trimLiveContextIdentity(identity?.modelID);
+	const providerID = trimLiveContextIdentity(identity?.providerID);
+	const hasIdentity = Boolean(modelID || providerID);
 	const existing = map.get(sessionID);
 	const hasUsableTokens =
 		typeof tokens === 'number' && Number.isFinite(tokens) && tokens >= 1;
 	if (!hasUsableTokens) {
-		if (!identity || (!modelID && !providerID)) return;
+		if (!hasIdentity) return;
 		if (
-			existing?.modelID === modelID &&
-			existing?.providerID === providerID &&
-			existing?.tokens !== undefined
+			existing &&
+			liveContextIdentityMatches(existing, { modelID, providerID }) &&
+			existing.tokens !== undefined
 		) {
 			return;
 		}
 		if (map.has(sessionID)) map.delete(sessionID);
 		map.set(sessionID, { modelID, providerID });
 		evictOldestLiveContextWindow(map, sessionID);
+		return;
+	}
+	// A numeric host sample without a usable identity is safe as an initial
+	// generic fallback, but it must not erase a prior exact binding. Otherwise a
+	// malformed system.transform turn can make messages.transform relay the new
+	// generic denominator as if it still belonged to the previous model.
+	if (!hasIdentity && existing && (existing.modelID || existing.providerID)) {
 		return;
 	}
 	if (map.has(sessionID)) map.delete(sessionID);
@@ -3328,12 +3339,7 @@ export function getLiveContextWindow(
 	if (!sessionID) return undefined;
 	const cached = swarmState.liveContextWindows.get(sessionID);
 	if (!cached) return undefined;
-	const modelID = normalizeLiveContextIdentity(identity?.modelID);
-	const providerID = normalizeLiveContextIdentity(identity?.providerID);
-	if (
-		identity &&
-		(cached.modelID !== modelID || cached.providerID !== providerID)
-	) {
+	if (identity && !liveContextIdentityMatches(cached, identity)) {
 		return undefined;
 	}
 	return cached.tokens;
@@ -3357,11 +3363,27 @@ function evictOldestLiveContextWindow(
 	if (oldest !== undefined && oldest !== sessionID) map.delete(oldest);
 }
 
-function normalizeLiveContextIdentity(
+function trimLiveContextIdentity(
 	value: string | undefined,
 ): string | undefined {
-	const normalized = value?.trim().toLowerCase();
-	return normalized ? normalized : undefined;
+	const trimmed = value?.trim();
+	return trimmed ? trimmed : undefined;
+}
+
+function normalizeLiveContextIdentity(value: string | undefined): string {
+	return trimLiveContextIdentity(value)?.toLowerCase() ?? '';
+}
+
+function liveContextIdentityMatches(
+	left: { modelID?: string; providerID?: string },
+	right: { modelID?: string; providerID?: string },
+): boolean {
+	return (
+		normalizeLiveContextIdentity(left.modelID) ===
+			normalizeLiveContextIdentity(right.modelID) &&
+		normalizeLiveContextIdentity(left.providerID) ===
+			normalizeLiveContextIdentity(right.providerID)
+	);
 }
 
 /** Record this session's budget percentage and the denominator it was computed
