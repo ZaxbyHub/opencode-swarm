@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
-import * as fsSync from 'node:fs';
+import * as realFs from 'node:fs';
 import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -99,7 +99,7 @@ describe('savePlan write-marker in_progress', () => {
 
 		// Mock fs for renameSync
 		mock.module('node:fs', () => ({
-			...fsSync,
+			...realFs,
 			renameSync: mock(() => {}),
 			readdirSync: () => [],
 		}));
@@ -153,7 +153,7 @@ describe('savePlan write-marker in_progress', () => {
 		}));
 
 		mock.module('node:fs', () => ({
-			...fsSync,
+			...realFs,
 			renameSync: mock(() => {}),
 			readdirSync: () => [],
 		}));
@@ -217,7 +217,7 @@ describe('rebuildPlan write-marker in_progress', () => {
 		}));
 
 		mock.module('node:fs', () => ({
-			...fsSync,
+			...realFs,
 			renameSync: mock(() => {}),
 		}));
 
@@ -257,7 +257,7 @@ describe('rebuildPlan write-marker in_progress', () => {
 		}));
 
 		mock.module('node:fs', () => ({
-			...fsSync,
+			...realFs,
 			renameSync: mock(() => {}),
 		}));
 
@@ -319,7 +319,7 @@ describe('closePlanTerminalState write-marker in_progress', () => {
 		}));
 
 		mock.module('node:fs', () => ({
-			...fsSync,
+			...realFs,
 			renameSync: mock(() => {}),
 		}));
 
