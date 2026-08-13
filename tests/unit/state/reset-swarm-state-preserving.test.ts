@@ -3,8 +3,10 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
+	getSessionBudgetPct,
 	resetSwarmState,
 	resetSwarmStatePreservingSingletons,
+	setSessionBudget,
 	startAgentSession,
 	swarmState,
 } from '../../../src/state';
@@ -175,12 +177,12 @@ describe('resetSwarmStatePreservingSingletons', () => {
 			expect(swarmState.agentSessions.size).toBe(0);
 		});
 
-		test('lastBudgetPct is reset to 0', () => {
-			swarmState.lastBudgetPct = 75;
+		test('the per-session budget record is cleared', () => {
+			setSessionBudget('s1', 75, 128000);
 
 			resetSwarmStatePreservingSingletons();
 
-			expect(swarmState.lastBudgetPct).toBe(0);
+			expect(getSessionBudgetPct('s1')).toBe(0);
 		});
 
 		test('opencodeClient is still preserved (not reset to null)', () => {

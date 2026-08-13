@@ -4,6 +4,15 @@
  * separately; these inert bindings keep unrelated hook modules loadable.
  */
 export const STATE_MOCK_TRANSITIVE_STUBS = {
+	// Per-session context budget. Reached transitively through index.ts and
+	// services/compaction-service.ts; a missing binding makes Bun throw
+	// "Export named 'getSessionBudgetPct' not found" at import time and fail
+	// the whole file before a single test runs.
+	getSessionBudgetPct: () => 0,
+	getSessionBudgetTokens: () => 0,
+	setSessionBudget: () => undefined,
+	getDisplayBudget: () => null,
+	MAX_TRACKED_BUDGET_SESSIONS: 500,
 	beginInvocation: () => undefined,
 	getActiveWindow: () => undefined,
 	advanceTaskState: () => undefined,

@@ -9,7 +9,11 @@ import {
 	resetCompactionState,
 } from '../../../src/services/compaction-service';
 import { getStatusData } from '../../../src/services/status-service';
-import { resetSwarmState, swarmState } from '../../../src/state';
+import {
+	resetSwarmState,
+	setSessionBudget,
+	swarmState,
+} from '../../../src/state';
 
 describe('compaction-metrics', () => {
 	const tempDir = path.join(os.tmpdir(), `swarm-compaction-test-${Date.now()}`);
@@ -40,7 +44,7 @@ describe('compaction-metrics', () => {
 
 	test('after observation tier fires, compactionCount increments and lastSnapshotAt is ISO string', async () => {
 		// Set budget above observation threshold (40%)
-		swarmState.lastBudgetPct = 45;
+		setSessionBudget('test-session', 45, 128000);
 
 		const hook = createCompactionService(
 			{
@@ -69,7 +73,7 @@ describe('compaction-metrics', () => {
 
 	test('getStatusData returns live compactionCount and lastSnapshotAt from getCompactionMetrics', async () => {
 		// Set budget above reflection threshold (60%)
-		swarmState.lastBudgetPct = 65;
+		setSessionBudget('test-session', 65, 128000);
 
 		const hook = createCompactionService(
 			{

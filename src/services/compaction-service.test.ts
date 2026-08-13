@@ -3,9 +3,15 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { CompactionConfig } from '../config/schema';
-import { resetSwarmState, swarmState } from '../state';
+import {
+	getSessionBudgetPct,
+	resetSwarmState,
+	setSessionBudget,
+} from '../state';
 import {
 	createCompactionService,
+	getCompactionMetrics,
+	MAX_TRACKED_COMPACTION_SESSIONS,
 	resetCompactionState,
 } from './compaction-service';
 
@@ -54,7 +60,7 @@ describe('compaction-service', () => {
 			tempDir,
 			injectMessage,
 		);
-		swarmState.lastBudgetPct = 35;
+		setSessionBudget('s1', 35, 100000);
 
 		await service.toolAfter({ tool: 'bash', sessionID: 's1' }, { output: {} });
 
@@ -71,7 +77,7 @@ describe('compaction-service', () => {
 			tempDir,
 			injectMessage,
 		);
-		swarmState.lastBudgetPct = 40;
+		setSessionBudget('s1', 40, 100000);
 
 		await service.toolAfter({ tool: 'bash', sessionID: 's1' }, { output: {} });
 
@@ -89,12 +95,69 @@ describe('compaction-service', () => {
 			tempDir,
 			injectMessage,
 		);
-		swarmState.lastBudgetPct = 60;
+		setSessionBudget('s1', 60, 100000);
 
 		await service.toolAfter({ tool: 'bash', sessionID: 's1' }, { output: {} });
 
 		expect(injectCalls).toHaveLength(1);
 		expect(injectCalls[0].message).toContain('REFLECTION TIER');
+	});
+
+	// -------------------------------------------------------------------------
+	// Test 3b: cross-session isolation (AGENTS.md invariant 8)
+	// -------------------------------------------------------------------------
+	test('one session at emergency does not compact a different session', async () => {
+		const injectMessage = makeInjectSpy();
+		const service = createCompactionService(
+			defaultConfig,
+			tempDir,
+			injectMessage,
+		);
+		// 's1' is under real pressure; 's2' is a fresh, small session. While the
+		// budget was a bare module global this injected an emergency-tier message
+		// into 's2' — and advanced 's2's own hysteresis on 's1's number.
+		setSessionBudget('s1', 85, 100000);
+
+		await service.toolAfter({ tool: 'bash', sessionID: 's2' }, { output: {} });
+		expect(injectCalls).toHaveLength(0);
+
+		// ...and 's1' still compacts on its own turn.
+		await service.toolAfter({ tool: 'bash', sessionID: 's1' }, { output: {} });
+		expect(injectCalls).toHaveLength(1);
+		expect(injectCalls[0].sessionId).toBe('s1');
+	});
+
+	// -------------------------------------------------------------------------
+	// Test 3c: sessionStates FIFO cap (AGENTS.md invariant 8)
+	// -------------------------------------------------------------------------
+	test('sessionStates is FIFO-capped: the oldest session is evicted under churn', async () => {
+		// Seed a session with real (non-zero) hysteresis state so eviction is
+		// observable: an evicted session re-reads as a fresh state (count 0).
+		const injectMessage = makeInjectSpy();
+		const service = createCompactionService(
+			defaultConfig,
+			tempDir,
+			injectMessage,
+		);
+		setSessionBudget('s-first', 45, 100000);
+		await service.toolAfter(
+			{ tool: 'bash', sessionID: 's-first' },
+			{ output: {} },
+		);
+		expect(injectCalls).toHaveLength(1); // observation tier fired
+		expect(getCompactionMetrics('s-first').compactionCount).toBe(1);
+
+		// Drive more than the cap of unique sessions through the create-on-read
+		// path (getCompactionMetrics -> getSessionState). 's-first' is the oldest
+		// entry, so it is the first to be evicted once the cap overflows.
+		for (let i = 0; i <= MAX_TRACKED_COMPACTION_SESSIONS; i++) {
+			getCompactionMetrics(`churn-${i}`);
+		}
+
+		// 's-first' was evicted: re-reading it creates a fresh state (count 0),
+		// proving the map is bounded and the oldest session was dropped rather
+		// than the map growing unbounded.
+		expect(getCompactionMetrics('s-first').compactionCount).toBe(0);
 	});
 
 	// -------------------------------------------------------------------------
@@ -107,7 +170,7 @@ describe('compaction-service', () => {
 			tempDir,
 			injectMessage,
 		);
-		swarmState.lastBudgetPct = 80;
+		setSessionBudget('s1', 80, 100000);
 
 		await service.toolAfter({ tool: 'bash', sessionID: 's1' }, { output: {} });
 
@@ -125,7 +188,7 @@ describe('compaction-service', () => {
 			tempDir,
 			injectMessage,
 		);
-		swarmState.lastBudgetPct = 85;
+		setSessionBudget('s1', 85, 100000);
 
 		await service.toolAfter({ tool: 'bash', sessionID: 's1' }, { output: {} });
 
@@ -145,7 +208,7 @@ describe('compaction-service', () => {
 			tempDir,
 			injectMessage,
 		);
-		swarmState.lastBudgetPct = 45;
+		setSessionBudget('s1', 45, 100000);
 
 		await service.toolAfter({ tool: 'bash', sessionID: 's1' }, { output: {} });
 
@@ -170,7 +233,7 @@ describe('compaction-service', () => {
 			tempDir,
 			injectMessage,
 		);
-		swarmState.lastBudgetPct = 45;
+		setSessionBudget('s1', 45, 100000);
 
 		await service.toolAfter({ tool: 'bash', sessionID: 's1' }, { output: {} });
 
@@ -191,7 +254,7 @@ describe('compaction-service', () => {
 			tempDir,
 			injectMessage,
 		);
-		swarmState.lastBudgetPct = 50;
+		setSessionBudget('s1', 50, 100000);
 
 		await service.toolAfter({ tool: 'bash', sessionID: 's1' }, { output: {} });
 
@@ -213,7 +276,7 @@ describe('compaction-service', () => {
 			tempDir,
 			injectMessage,
 		);
-		swarmState.lastBudgetPct = 85;
+		setSessionBudget('s1', 85, 100000);
 
 		await service.toolAfter({ tool: 'bash', sessionID: 's1' }, { output: {} });
 
@@ -232,7 +295,7 @@ describe('compaction-service', () => {
 		);
 
 		// First call at 40% — should fire
-		swarmState.lastBudgetPct = 40;
+		setSessionBudget('s1', 40, 100000);
 		await service.toolAfter({ tool: 'bash', sessionID: 's1' }, { output: {} });
 		expect(injectCalls).toHaveLength(1);
 		expect(injectCalls[0].message).toContain('OBSERVATION TIER');
@@ -254,12 +317,12 @@ describe('compaction-service', () => {
 		);
 
 		// First call at 40% — fires
-		swarmState.lastBudgetPct = 40;
+		setSessionBudget('s1', 40, 100000);
 		await service.toolAfter({ tool: 'bash', sessionID: 's1' }, { output: {} });
 		expect(injectCalls).toHaveLength(1);
 
 		// Second call at 46% — should fire again (46 > 40 + 5)
-		swarmState.lastBudgetPct = 46;
+		setSessionBudget('s1', 46, 100000);
 		await service.toolAfter({ tool: 'bash', sessionID: 's1' }, { output: {} });
 		expect(injectCalls).toHaveLength(2);
 	});
@@ -274,8 +337,8 @@ describe('compaction-service', () => {
 			tempDir,
 			injectMessage,
 		);
-		// swarmState.lastBudgetPct is already 0 from resetSwarmState()
-		expect(swarmState.lastBudgetPct).toBe(0);
+		// the per-session budget map is empty after resetSwarmState()
+		expect(getSessionBudgetPct('s1')).toBe(0);
 
 		await service.toolAfter({ tool: 'bash', sessionID: 's1' }, { output: {} });
 
@@ -292,7 +355,7 @@ describe('compaction-service', () => {
 			tempDir,
 			injectMessage,
 		);
-		swarmState.lastBudgetPct = -5;
+		setSessionBudget('s1', -5, 100000);
 
 		await service.toolAfter({ tool: 'bash', sessionID: 's1' }, { output: {} });
 
@@ -309,7 +372,7 @@ describe('compaction-service', () => {
 			tempDir,
 			injectMessage,
 		);
-		swarmState.lastBudgetPct = 70;
+		setSessionBudget('s1', 70, 100000);
 
 		await service.toolAfter({ tool: 'bash', sessionID: 's1' }, { output: {} });
 
@@ -328,7 +391,7 @@ describe('compaction-service', () => {
 			tempDir,
 			injectMessage,
 		);
-		swarmState.lastBudgetPct = 80;
+		setSessionBudget('s1', 80, 100000);
 
 		await service.toolAfter({ tool: 'bash', sessionID: 's1' }, { output: {} });
 
