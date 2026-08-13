@@ -97,10 +97,19 @@ describe('dispatch_lanes read-only tool permissions', () => {
 		expect(ops.prompt.mock.calls[0][0].body.tools).not.toHaveProperty('shell');
 		expect(ops.prompt.mock.calls[0][0].body.tools).not.toHaveProperty('bash');
 		const promptText = ops.prompt.mock.calls[0][0].body.parts[0].text;
-		expect(promptText).toContain('If a standard explorer finds zero issues');
-		expect(promptText).toContain('[CLEAN] | lane | coverage_scope | evidence');
+		// FB-001: the former assertion pinned prose removed by the controller-bound
+		// format contract. Assert the live identity and zero-findings protocol instead.
 		expect(promptText).toContain(
-			'[CLEAN] | micro_lane | coverage_scope | evidence',
+			'CONTROLLER-BOUND OUTPUT IDENTITY: every output row MUST use the exact lane value "scan"',
+		);
+		expect(promptText).toContain(
+			'Zero findings: [CLEAN] | lane | coverage_scope | evidence',
+		);
+		expect(promptText).toContain(
+			'Zero findings: [CLEAN] | micro_lane | coverage_scope | evidence',
+		);
+		expect(promptText).toContain(
+			'A [CLEAN] row has exactly 3 fields after the marker and NO',
 		);
 		expect(promptText).not.toContain(
 			'If a standard explorer finds zero issues, emit only the header row',
