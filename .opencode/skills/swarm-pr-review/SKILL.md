@@ -1851,6 +1851,21 @@ are:
    This is the recovery path when the wake budget has suspended and the
    architect cannot make further tool progress.
 
+A second, unrelated stranding class is **trigger-ledger drift**. This is not a
+fetch/checkout problem: it means a later micro-lane's trigger_evaluation
+disagrees with the canonical ledger frozen by the first micro dispatch. The run
+fails closed in two places, with different strictness — at ledger bind time
+`bindPrReviewTriggerLedger` rejects a trigger_evaluation whose frozen-row digest
+(`trigger_id`, `result`, and `evidence` together) differs from the first
+dispatch's, and at receipt finalize time `write_pr_review_trigger_eval` rejects
+rows whose per-family `result` (classification) differs from the frozen ledger.
+The finalize gate is deliberately narrower than the bind gate: evidence may be
+omitted or reworded at the receipt, but classifications must still agree. If a
+later dispatch genuinely cannot converge with the frozen ledger, the exits are
+the abort paths listed above (`abort_pr_workflow` or `/swarm abort-pr-workflow`),
+or re-dispatching the disagreeing lane so its trigger_evaluation converges with
+the frozen ledger before re-binding.
+
 Abort is a recovery tool, not a coverage shortcut. Use it only when the
 bind/checkout path is genuinely unreachable; never use it to skip a
 coverage obligation that is merely expensive or inconvenient.

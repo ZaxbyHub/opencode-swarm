@@ -253,6 +253,7 @@ async function establishReviewPrerequisites(): Promise<void> {
 	await markPrReviewTriggerEvaluationComplete(
 		directory,
 		SESSION_ID,
+		'run',
 		triggerRelative,
 	);
 }
