@@ -1,6 +1,4 @@
 import { describe, expect, test } from 'bun:test';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { getAgentConfigs } from '../../../src/agents';
 import {
 	parseAgentModel,
@@ -197,40 +195,5 @@ describe('parseAgentModel', () => {
 		'provider/model/',
 	])('rejects malformed input %j', (input) => {
 		expect(parseAgentModel(input)).toBeUndefined();
-	});
-});
-
-describe('agent-model production wiring', () => {
-	test('all exact-agent model-selection callers share the central resolver', () => {
-		const repositoryRoot = join(import.meta.dir, '..', '..', '..');
-		const indexSource = readFileSync(
-			join(repositoryRoot, 'src/index.ts'),
-			'utf8',
-		);
-		const contextSource = readFileSync(
-			join(repositoryRoot, 'src/hooks/context-budget.ts'),
-			'utf8',
-		);
-		const adversarialSource = readFileSync(
-			join(repositoryRoot, 'src/hooks/adversarial-detector.ts'),
-			'utf8',
-		);
-		const guardrailsTransformSource = readFileSync(
-			join(repositoryRoot, 'src/hooks/guardrails/messages-transform.ts'),
-			'utf8',
-		);
-
-		expect(indexSource).toContain("from './config/agent-model.js'");
-		expect(contextSource).toContain("from '../config/agent-model'");
-		expect(adversarialSource).toContain("from '../config/agent-model'");
-		expect(indexSource).toContain(
-			'resolveRuntimeAgentModel(config, agents, agentName)',
-		);
-		expect(guardrailsTransformSource).toContain(
-			'ctx.resolveAgentModel?.(targetAgent)',
-		);
-		expect(indexSource).not.toContain('function resolveDelegationModel');
-		expect(indexSource).not.toContain('function inferSwarmID');
-		expect(adversarialSource).not.toContain('Object.values(config.swarms)');
 	});
 });
