@@ -27,6 +27,10 @@ import {
 	getSafeDefaultConfigLoadResult,
 	loadPluginConfigWithMetaAsync,
 } from './config';
+import {
+	resolveRegisteredAgentModel,
+	resolveRuntimeAgentModel,
+} from './config/agent-model.js';
 import { syncBundledProjectSkillsIfMissingAsync } from './config/bundled-skills.js';
 import {
 	DEFAULT_MODELS,
@@ -46,7 +50,6 @@ import {
 	KnowledgeApplicationConfigSchema,
 	KnowledgeConfigSchema,
 	LearningConfigSchema,
-	type PluginConfig,
 	PrMonitorConfigSchema,
 	PrmConfigSchema,
 	RepoGraphConfigSchema,
@@ -516,39 +519,6 @@ function collectSessionIDs(raw: unknown): string[] {
 	return [...new Set(found)];
 }
 
-function resolveDelegationModel(
-	config: PluginConfig,
-	agentName: string,
-	baseAgentName: string,
-): string {
-	const topLevelModel =
-		config.agents?.[agentName]?.model ?? config.agents?.[baseAgentName]?.model;
-	if (topLevelModel) return topLevelModel;
-
-	const swarmID = inferSwarmID(agentName, baseAgentName);
-	const swarmAgents = swarmID ? config.swarms?.[swarmID]?.agents : undefined;
-	return (
-		swarmAgents?.[agentName]?.model ??
-		swarmAgents?.[baseAgentName]?.model ??
-		DEFAULT_MODELS[baseAgentName] ??
-		DEFAULT_MODELS.default
-	);
-}
-
-function inferSwarmID(
-	agentName: string,
-	baseAgentName: string,
-): string | undefined {
-	if (!agentName || agentName === baseAgentName) return undefined;
-	for (const separator of ['_', '-', ' ']) {
-		const suffix = `${separator}${baseAgentName}`;
-		if (agentName.endsWith(suffix) && agentName.length > suffix.length) {
-			return agentName.slice(0, -suffix.length);
-		}
-	}
-	return undefined;
-}
-
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -983,7 +953,12 @@ async function initializeOpenCodeSwarm(
 		ctx.directory,
 	);
 	const compactionHook = createCompactionCustomizerHook(config, ctx.directory);
-	const contextBudgetHandler = createContextBudgetHandler(config);
+	const resolveIncomingAgentModel = (agentName: string): string | undefined =>
+		resolveRuntimeAgentModel(config, agents, agentName);
+	const contextBudgetHandler = createContextBudgetHandler(
+		config,
+		resolveIncomingAgentModel,
+	);
 	const evaluationModelDispatcher = createEvaluationModelDispatcher(ctx.client);
 	const reviewModelDispatcher = createReviewModelDispatcher(ctx.client);
 	const findingValidationScheduler = createFindingValidationScheduler();
@@ -1133,6 +1108,7 @@ async function initializeOpenCodeSwarm(
 		guardrailsConfig,
 		authorityConfig,
 		worktreeBaseDirOverrides,
+		resolveIncomingAgentModel,
 	);
 	const durableBackgroundAdvisoryMessagesTransform = async (
 		input: Record<string, never>,
@@ -3491,11 +3467,10 @@ async function initializeOpenCodeSwarm(
 				const baseAgentName = stripKnownSwarmPrefix(agentName);
 				const preHandoffSession = swarmState.agentSessions.get(sessionId);
 				const activeWindow = getActiveWindow(sessionId);
-				const configuredModel = resolveDelegationModel(
-					config,
-					agentName,
-					baseAgentName,
-				);
+				const configuredModel =
+					resolveRegisteredAgentModel(config, agentName) ??
+					DEFAULT_MODELS[baseAgentName] ??
+					DEFAULT_MODELS.default;
 				const assistantUsage = consumeAssistantUsageForTask(sessionId, output);
 				const costFields = buildDelegationCostFields({
 					raw: { metadata: output.metadata, output, assistant: assistantUsage },

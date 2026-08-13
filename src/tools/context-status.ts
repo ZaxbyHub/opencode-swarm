@@ -16,7 +16,11 @@ import type { ToolContext } from '@opencode-ai/plugin';
 import { loadPluginConfig } from '../config';
 import { extractModelInfo, resolveModelLimit } from '../hooks/model-limits';
 import { estimateTokens } from '../hooks/utils';
-import { getLiveContextWindow, swarmState } from '../state';
+import {
+	getLiveContextModelIdentity,
+	getLiveContextWindow,
+	swarmState,
+} from '../state';
 import { createSwarmTool } from './create-tool';
 
 /**
@@ -118,9 +122,12 @@ function computeContextHeadroom(
 	criticalThreshold = 0.9,
 	modelLimitsConfig: Record<string, number> = {},
 	liveContextLimit?: unknown,
+	modelIdentity?: { modelID?: string; providerID?: string },
 ): ContextStatusResult {
-	// Extract model and provider from the most recent assistant message
-	const { modelID, providerID } = extractModelInfo(messages);
+	// The current live identity outranks historical assistant metadata during a
+	// first-turn handoff. Direct callers that do not have session state retain
+	// the original extraction behavior.
+	const { modelID, providerID } = modelIdentity ?? extractModelInfo(messages);
 
 	// Resolve the model's context limit through the single derivation
 	// (src/config/context-window.ts): explicit `model_limits` entry → the live
@@ -212,6 +219,9 @@ export const context_status: ReturnType<typeof createSwarmTool> =
 				}
 			}
 
+			const { modelID, providerID } =
+				getLiveContextModelIdentity(ctx?.sessionID) ??
+				extractModelInfo(messages);
 			const headroom = computeContextHeadroom(
 				messages,
 				warnThreshold,
@@ -220,7 +230,8 @@ export const context_status: ReturnType<typeof createSwarmTool> =
 				// Same live window the context-budget hook enforces against.
 				// `ctx.sessionID` is the tool-side key; `undefined` before the first
 				// system.transform of the session.
-				getLiveContextWindow(ctx?.sessionID),
+				getLiveContextWindow(ctx?.sessionID, { modelID, providerID }),
+				{ modelID, providerID },
 			);
 
 			return JSON.stringify(headroom, null, 2);

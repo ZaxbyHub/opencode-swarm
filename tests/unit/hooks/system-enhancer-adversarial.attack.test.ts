@@ -626,7 +626,7 @@ describe('system-enhancer: Adversarial Detection Attack Tests', () => {
 					coder: { model: 'google/gemini-2.5-flash' },
 					reviewer: { model: 'google/gemini-2.5-flash' },
 					explorer: { model: 'google/gemini-2.5-flash' },
-					planner: { model: 'google/gemini-2.5-flash' },
+					researcher: { model: 'google/gemini-2.5-flash' },
 				},
 				adversarial_detection: {
 					enabled: true,
@@ -634,7 +634,7 @@ describe('system-enhancer: Adversarial Detection Attack Tests', () => {
 					pairs: [
 						['coder', 'reviewer'],
 						['explorer', 'reviewer'],
-						['planner', 'reviewer'],
+						['researcher', 'reviewer'],
 					],
 				},
 			};

@@ -16,6 +16,7 @@ import {
 import { getRunMemorySummary } from '../services/run-memory.js';
 import {
 	clearCriticalShownIds,
+	getLiveContextModelIdentity,
 	getLiveContextWindow,
 	setCriticalShownIds,
 } from '../state.js';
@@ -860,7 +861,9 @@ export function createKnowledgeInjectorHook(
 			// Budget-residual check (BACM-style: evaluate headroom before appending)
 			// Uses the same 0.33 tok/char ratio as estimateTokens() in context-budget.ts
 			const CHARS_PER_TOKEN = 1 / 0.33;
-			const { modelID, providerID } = extractModelInfo(output.messages);
+			const liveModelInfo = getLiveContextModelIdentity(sessionId);
+			const { modelID, providerID } =
+				liveModelInfo ?? extractModelInfo(output.messages);
 			// Live `model.limit.context` relayed from the system.transform hook via
 			// session state (this hook receives messages, never a `Model`). Without
 			// it the headroom gate below measured against a stale 128000, so a
@@ -868,7 +871,10 @@ export function createKnowledgeInjectorHook(
 			// `recordInjectionSkip('headroom_budget')` shows this gate is already a
 			// known dark-in-production suspect. `undefined` before the first
 			// system.transform of a session; that falls back to the static rungs.
-			const liveContextLimit = getLiveContextWindow(sessionId);
+			const liveContextLimit = getLiveContextWindow(sessionId, {
+				modelID,
+				providerID,
+			});
 			const modelLimitTokens = resolveModelLimit(
 				modelID,
 				providerID,

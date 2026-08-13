@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'bun:test';
 import type { GuardrailsConfig } from '../../../src/config/schema';
 import { createGuardrailsHooks } from '../../../src/hooks/guardrails';
-import { resetSwarmState } from '../../../src/state';
+import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 
 function defaultConfig(
 	overrides?: Partial<GuardrailsConfig>,
@@ -41,9 +41,9 @@ describe('guardrails prompt trimming for low-capability models (Task 4.5)', () =
 	}
 
 	// Helper to create a user message
-	function makeUserMessage(text: string) {
+	function makeUserMessage(text: string, agent?: string) {
 		return {
-			info: { role: 'user' as const, sessionID: 'test-session' },
+			info: { role: 'user' as const, sessionID: 'test-session', agent },
 			parts: [{ type: 'text' as const, text }],
 		};
 	}
@@ -120,6 +120,71 @@ End`;
 			expect(resultText).toContain('<!-- BEHAVIORAL_GUIDANCE_START -->');
 			expect(resultText).toContain('<!-- BEHAVIORAL_GUIDANCE_END -->');
 			expect(resultText).toContain('Rule 1: Always delegate');
+		});
+
+		it('uses the incoming configured model on its first handoff turn', async () => {
+			const hooks = createGuardrailsHooks(
+				'.',
+				undefined,
+				defaultConfig(),
+				undefined,
+				undefined,
+				(agentName) =>
+					agentName === 'small_coder' ? 'provider/gpt-4o-mini' : undefined,
+			);
+			const systemText = `System prompt
+<!-- BEHAVIORAL_GUIDANCE_START -->
+Rule for a high-capability model
+<!-- BEHAVIORAL_GUIDANCE_END -->
+End`;
+			const messages = [
+				makeSystemMessage(systemText),
+				makeAssistantMessage('gpt-4o'),
+				makeUserMessage('take over', 'small_coder'),
+			];
+
+			await hooks.messagesTransform({}, { messages });
+
+			const resultText = (
+				messages[0].parts[0] as { type: string; text: string }
+			).text;
+			expect(resultText).not.toContain('Rule for a high-capability model');
+			expect(resultText).toContain('[Enforcement: programmatic gates active]');
+		});
+
+		it('does not trim when the incoming configured model is high-capability', async () => {
+			// Previous coverage only proved high capability via assistant metadata;
+			// this direction catches accidental over-trimming of the target resolver.
+			const hooks = createGuardrailsHooks(
+				'.',
+				undefined,
+				defaultConfig(),
+				undefined,
+				undefined,
+				(agentName) =>
+					agentName === 'large_coder' ? 'provider/gpt-4o' : undefined,
+			);
+			const systemText = `System prompt
+<!-- BEHAVIORAL_GUIDANCE_START -->
+Rule for a high-capability model
+<!-- BEHAVIORAL_GUIDANCE_END -->
+End`;
+			const messages = [
+				makeSystemMessage(systemText),
+				makeAssistantMessage('gpt-4o-mini'),
+				makeUserMessage('take over', 'large_coder'),
+			];
+			const session = ensureAgentSession('test-session', 'architect');
+			session.architectWriteCount = 1;
+
+			await hooks.messagesTransform({}, { messages });
+
+			const resultText = (
+				messages[0].parts[0] as { type: string; text: string }
+			).text;
+			expect(resultText).toContain('Rule for a high-capability model');
+			expect(resultText).toContain('<!-- BEHAVIORAL_GUIDANCE_START -->');
+			expect(resultText).toContain('SELF-CODING DETECTED');
 		});
 
 		it('No modelID → no trim', async () => {

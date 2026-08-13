@@ -20,6 +20,7 @@ import { join } from 'node:path';
 import type { PluginConfig } from '../../../src/config';
 import { createSystemEnhancerHook } from '../../../src/hooks/system-enhancer';
 import {
+	getLiveContextModelIdentity,
 	getLiveContextWindow,
 	getSessionBudgetPct,
 	getSessionBudgetTokens,
@@ -224,17 +225,48 @@ describe('system-enhancer: budget denominator derives from model.limit.context',
 		expect(getLiveContextWindow('model-window-session')).toBeUndefined();
 		await runHook(configWith(), HUGE_WINDOW_MODEL, promptOf(1000));
 		expect(getLiveContextWindow('model-window-session')).toBe(1_000_000);
+		expect(
+			getLiveContextWindow('model-window-session', {
+				modelID: HUGE_WINDOW_MODEL.id,
+				providerID: HUGE_WINDOW_MODEL.providerID,
+			}),
+		).toBe(1_000_000);
+		expect(
+			getLiveContextWindow('model-window-session', {
+				modelID: 'different-model',
+				providerID: HUGE_WINDOW_MODEL.providerID,
+			}),
+		).toBeUndefined();
+		expect(
+			getLiveContextWindow('model-window-session', {
+				modelID: HUGE_WINDOW_MODEL.id,
+				providerID: 'different-provider',
+			}),
+		).toBeUndefined();
 	});
 
-	it('does not record an implausible live window, and keeps a good earlier one', async () => {
+	it('keeps a good earlier window only for the same model identity', async () => {
 		await runHook(configWith(), HUGE_WINDOW_MODEL, promptOf(1000));
+		await runHook(
+			configWith(),
+			modelOf(HUGE_WINDOW_MODEL.id, HUGE_WINDOW_MODEL.providerID, 0),
+			promptOf(1000),
+		);
+		// One malformed catalog turn for the same model must not blank a good reading.
+		expect(getLiveContextWindow('model-window-session')).toBe(1_000_000);
+
 		await runHook(
 			configWith(),
 			modelOf('green-s', 'greenpt', 0),
 			promptOf(1000),
 		);
-		// One malformed turn must not blank a reading the consumers depend on.
-		expect(getLiveContextWindow('model-window-session')).toBe(1_000_000);
+		// A different current model invalidates the old denominator even when its
+		// own catalog limit is malformed; consumers can still read its identity.
+		expect(getLiveContextWindow('model-window-session')).toBeUndefined();
+		expect(getLiveContextModelIdentity('model-window-session')).toEqual({
+			modelID: 'green-s',
+			providerID: 'greenpt',
+		});
 	});
 
 	it('pairs the denominator with the percentage on every budget update', async () => {

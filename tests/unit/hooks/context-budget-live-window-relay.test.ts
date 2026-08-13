@@ -12,6 +12,7 @@
  * model still needed — a silent data-loss bug, not a cosmetic warning.
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { resolveRuntimeAgentModel } from '../../../src/config/agent-model';
 import { createContextBudgetHandler } from '../../../src/hooks/context-budget';
 import {
 	resetSwarmState,
@@ -144,7 +145,10 @@ describe('context-budget hook — live window relay (issue #1619)', () => {
 	});
 
 	test('with a 1M live window recorded, nothing is pruned and no advisory fires', async () => {
-		setLiveContextWindow(SESSION_ID, 1_000_000);
+		setLiveContextWindow(SESSION_ID, 1_000_000, {
+			modelID: 'claude-sonnet-4-5',
+			providerID: 'anthropic',
+		});
 		const messages = heavyConversation();
 		await createContextBudgetHandler(config)({}, { messages });
 
@@ -157,7 +161,10 @@ describe('context-budget hook — live window relay (issue #1619)', () => {
 		// small window must still trigger the destructive path, so "nothing was
 		// pruned" above is a consequence of the denominator, not of the fixture
 		// being harmless.
-		setLiveContextWindow(SESSION_ID, 100_000);
+		setLiveContextWindow(SESSION_ID, 100_000, {
+			modelID: 'claude-sonnet-4-5',
+			providerID: 'anthropic',
+		});
 		const messages = heavyConversation();
 		await createContextBudgetHandler(config)({}, { messages });
 
@@ -166,7 +173,10 @@ describe('context-budget hook — live window relay (issue #1619)', () => {
 	});
 
 	test('an explicit model_limits entry still outranks the live window', async () => {
-		setLiveContextWindow(SESSION_ID, 1_000_000);
+		setLiveContextWindow(SESSION_ID, 1_000_000, {
+			modelID: 'claude-sonnet-4-5',
+			providerID: 'anthropic',
+		});
 		const messages = heavyConversation();
 		await createContextBudgetHandler({
 			...config,
@@ -180,13 +190,55 @@ describe('context-budget hook — live window relay (issue #1619)', () => {
 	});
 
 	test('the relay is keyed per session — another session does not leak in', async () => {
-		setLiveContextWindow('some-other-session', 1_000_000);
+		setLiveContextWindow('some-other-session', 1_000_000, {
+			modelID: 'claude-sonnet-4-5',
+			providerID: 'anthropic',
+		});
 		const messages = heavyConversation();
 		await createContextBudgetHandler(config)({}, { messages });
 
 		// Falls back to the static rungs (200000 → 75% → warning, no pruning),
 		// not to the other session's 1M window.
 		expect(lastUserText(messages)).toContain('[CONTEXT WARNING');
+	});
+
+	test('a same-session handoff cannot reuse the outgoing model window', async () => {
+		setLiveContextWindow(SESSION_ID, 1_000_000, {
+			modelID: 'gpt-5',
+			providerID: 'openai',
+		});
+		const messages = heavyConversation();
+		await createContextBudgetHandler(
+			config,
+			() => 'anthropic/claude-sonnet-4-5',
+		)({}, { messages });
+
+		// The incoming target has no matching live reading, so its 200k static
+		// limit applies. Reusing the outgoing 1M window would suppress this warning.
+		expect(toolOutputWasDestroyed(messages)).toBe(false);
+		expect(lastUserText(messages)).toContain('[CONTEXT WARNING');
+	});
+
+	test('an embedded variant reuses the matching registered live window', async () => {
+		setLiveContextWindow(SESSION_ID, 1_000_000, {
+			modelID: 'model',
+			providerID: 'provider',
+		});
+		const messages = heavyConversation();
+		(messages[messages.length - 1] as any).info.agent = 'coder';
+		const variantConfig = {
+			...config,
+			agents: { coder: { model: 'provider/model/high' } },
+		};
+		const registered = {
+			coder: { mode: 'subagent', model: 'provider/model' },
+		};
+		await createContextBudgetHandler(variantConfig, (agentName) =>
+			resolveRuntimeAgentModel(variantConfig, registered, agentName),
+		)({}, { messages });
+
+		expect(toolOutputWasDestroyed(messages)).toBe(false);
+		expect(lastUserText(messages)).toBe('continue');
 	});
 
 	test('setLiveContextWindow rejects junk and is FIFO-bounded', async () => {
@@ -207,7 +259,7 @@ describe('context-budget hook — live window relay (issue #1619)', () => {
 			setLiveContextWindow(`s-${i}`, 200000);
 		}
 		expect(swarmState.liveContextWindows.size).toBeLessThanOrEqual(500);
-		expect(swarmState.liveContextWindows.get('s-599')).toBe(200000);
+		expect(swarmState.liveContextWindows.get('s-599')?.tokens).toBe(200000);
 		expect(swarmState.liveContextWindows.has('s-0')).toBe(false);
 	});
 });

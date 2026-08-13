@@ -19,7 +19,6 @@ import {
 	TURBO_MODE_BANNER,
 } from '../config/constants';
 import {
-	isUsableContextWindow,
 	readModelContextLimit,
 	readModelIdentity,
 	resolveContextWindowTokens,
@@ -712,9 +711,10 @@ export function createSystemEnhancerHook(
 				const liveContextLimit = readModelContextLimit(liveModel);
 				const liveModelID = readModelIdentity(liveModel, 'id');
 				const liveProviderID = readModelIdentity(liveModel, 'providerID');
-				if (isUsableContextWindow(liveContextLimit)) {
-					setLiveContextWindow(_input.sessionID, liveContextLimit);
-				}
+				setLiveContextWindow(_input.sessionID, liveContextLimit, {
+					modelID: liveModelID,
+					providerID: liveProviderID,
+				});
 				try {
 					// Skip swarm context injection for native opencode agents (build,
 					// plan, general, explore, compaction, title, summary). These agents

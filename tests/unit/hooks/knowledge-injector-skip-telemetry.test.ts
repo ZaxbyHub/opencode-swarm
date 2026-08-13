@@ -31,7 +31,7 @@ import {
 	createKnowledgeInjectorHook,
 } from '../../../src/hooks/knowledge-injector';
 import type { MessageWithParts } from '../../../src/hooks/knowledge-types';
-import { swarmState } from '../../../src/state';
+import { setLiveContextWindow, swarmState } from '../../../src/state';
 
 const baseConfig = KnowledgeConfigSchema.parse({});
 let tempDir: string;
@@ -53,6 +53,7 @@ beforeEach(() => {
 	mkdirSync(path.join(tempDir, '.swarm'), { recursive: true });
 	swarmState.currentCriticalShownIds.clear();
 	swarmState.activeAgent.delete(SESSION);
+	swarmState.liveContextWindows.delete(SESSION);
 	originalRecordEvent = _internals.recordKnowledgeEvent;
 	originalSearch = _internals.searchKnowledge;
 	originalRecordShown = _internals.recordKnowledgeShown;
@@ -68,6 +69,7 @@ afterEach(() => {
 	_internals.confirmEntriesPhase = originalConfirmEntriesPhase;
 	swarmState.currentCriticalShownIds.clear();
 	swarmState.activeAgent.delete(SESSION);
+	swarmState.liveContextWindows.delete(SESSION);
 	rmSync(tempDir, { recursive: true, force: true });
 });
 
@@ -131,6 +133,45 @@ describe('knowledge injector injection_skip telemetry (#1768/#1849)', () => {
 		// see knowledge-injector.ts headroom gate comment).
 		expect(skips[0].agent).toBe('architect');
 		expect(skips[0].session_id).toBe(SESSION);
+	});
+
+	test('headroom_budget: first-turn handoff uses the incoming live model identity', async () => {
+		const { events } = captureEvents();
+		swarmState.activeAgent.set(SESSION, 'architect');
+		setLiveContextWindow(SESSION, 1_000_000, {
+			modelID: 'incoming-million',
+			providerID: 'test-provider',
+		});
+		const hook = createKnowledgeInjectorHook(tempDir, {
+			...baseConfig,
+			enabled: true,
+			context_budget_threshold: 300,
+		});
+		await hook(
+			{},
+			output([
+				{
+					info: {
+						role: 'assistant',
+						modelID: 'claude-sonnet-4-5',
+						providerID: 'anthropic',
+						sessionID: SESSION,
+					},
+					parts: [{ type: 'text', text: 'x'.repeat(700_000) }],
+				},
+				{
+					info: { role: 'user', agent: 'architect', sessionID: SESSION },
+					parts: [{ type: 'text', text: 'continue' }],
+				},
+			]),
+		);
+		await new Promise((resolve) => setTimeout(resolve, 5));
+
+		// The outgoing assistant's 200k static limit would make headroom negative.
+		// The incoming 1M live window leaves ample room, so this gate must not fire.
+		expect(
+			skipEvents(events).some((event) => event.reason === 'headroom_budget'),
+		).toBe(false);
 	});
 
 	test('headroom_budget: still emits (fields absent, no regression) when identity is unrecoverable', async () => {
