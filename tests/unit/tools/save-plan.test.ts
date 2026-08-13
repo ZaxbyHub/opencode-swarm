@@ -31,11 +31,6 @@ describe('save-plan tool verification tests', () => {
 		await fs.mkdir(path.join(tmpDir, '.swarm'), { recursive: true });
 		// Create spec.md required by the spec gate
 		await fs.writeFile(path.join(tmpDir, '.swarm', 'spec.md'), '# Test Spec\n');
-		// Create context.md with the QA gate selection section required by the gate-selection check
-		await fs.writeFile(
-			path.join(tmpDir, '.swarm', 'context.md'),
-			'## Pending QA Gate Selection\n',
-		);
 	});
 
 	afterEach(() => {

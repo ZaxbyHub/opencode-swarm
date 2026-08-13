@@ -4,7 +4,10 @@
  * SC-006: detects a test that asserts a phrase no longer present in a changed
  *         skill file.
  * SC-007: completes in <5s on a single-file diff.
- * SC-008: the skill check is invoked from the existing drift-check entry point.
+ *
+ * SC-008 (drift-check entry point) lives in
+ * check-skill-assertions-entrypoint.test.ts — split out under FR-006's
+ * 500-line cap.
  *
  * These tests use real temp directories with real files (Tier 0 zero-mock pattern)
  * so they exercise the actual assertion-extraction and phrase-checking logic.
@@ -18,12 +21,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import {
-	checkSkillAssertions,
-	formatBrokenAssertions,
-	type SkillAssertionResult,
-} from '../../../scripts/check-skill-assertions';
-import { detectSkillAssertionDrift } from '../../../scripts/drift-check';
+import { checkSkillAssertions } from '../../../scripts/check-skill-assertions';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -441,98 +439,5 @@ describe('planner skill', () => {
 		const elapsed = Date.now() - start;
 
 		expect(elapsed).toBeLessThan(5000);
-	});
-});
-
-// ---------------------------------------------------------------------------
-// SC-008: skill check is invoked from existing drift-check entry point
-// ---------------------------------------------------------------------------
-
-describe('SC-008: skill check is part of drift-check.ts entry point', () => {
-	test('detectSkillAssertionDrift is called by runAllDetectors and returns findings', async () => {
-		// This test verifies that when drift-check.ts runs its full suite,
-		// it also calls the skill-assertion detector.  We test the exported
-		// detectSkillAssertionDrift directly since runAllDetectors requires
-		// the full repo context.
-		//
-		// We create a minimal scenario: a skill with a phrase, a test asserting
-		// it, then remove the phrase — and verify detectSkillAssertionDrift
-		// surfaces the broken assertion as a DriftFinding.
-
-		const repo = makeGitRepo();
-
-		writeFile(
-			repo,
-			'.opencode/skills/design-docs/SKILL.md',
-			'MODE: DESIGN_DOCS — this mode does NOT delegate to coder.',
-		);
-		runGit(['add', '.'], repo);
-		runGit(['commit', '-q', '-m', 'add skill'], repo);
-
-		writeFile(
-			repo,
-			'tests/unit/agents/design-docs.test.ts',
-			`
-import { describe, expect, test } from 'bun:test';
-import { readFileSync } from 'node:fs';
-const content = readFileSync(
-  join(process.cwd(), '.opencode/skills/design-docs/SKILL.md'),
-  'utf-8',
-);
-describe('design-docs skill', () => {
-  test('does NOT delegate to coder', () => {
-    expect(content).toContain('does NOT delegate to coder');
-  });
-});
-`,
-		);
-
-		// Remove the phrase
-		writeFile(
-			repo,
-			'.opencode/skills/design-docs/SKILL.md',
-			'MODE: DESIGN_DOCS — delegates freely.',
-		);
-
-		const findings = await detectSkillAssertionDrift(repo);
-
-		const skillAssertionFindings = findings.filter(
-			(f) => f.category === 'skill-assertion',
-		);
-		expect(skillAssertionFindings).toHaveLength(1);
-		expect(skillAssertionFindings[0]!.severity).toBe('error');
-		expect(skillAssertionFindings[0]!.message).toContain(
-			'does NOT delegate to coder',
-		);
-		expect(skillAssertionFindings[0]!.message).toContain(
-			'.opencode/skills/design-docs/SKILL.md',
-		);
-	});
-
-	test('formatBrokenAssertions produces valid GitHub Actions annotations', () => {
-		const result: SkillAssertionResult = {
-			changedSkillFiles: ['.opencode/skills/x/SKILL.md'],
-			brokenAssertions: [
-				{
-					testFile: 'tests/unit/agents/x.test.ts',
-					line: 14,
-					skillFile: '.opencode/skills/x/SKILL.md',
-					phrase: 'does NOT delegate',
-				},
-			],
-		};
-		const lines = formatBrokenAssertions(result);
-		expect(lines).toHaveLength(1);
-		expect(lines[0]!).toContain('::error');
-		expect(lines[0]!).toContain('tests/unit/agents/x.test.ts');
-		expect(lines[0]!).toContain('does NOT delegate');
-	});
-
-	test('formatBrokenAssertions returns empty array when no broken assertions', () => {
-		const result: SkillAssertionResult = {
-			changedSkillFiles: [],
-			brokenAssertions: [],
-		};
-		expect(formatBrokenAssertions(result)).toEqual([]);
 	});
 });
