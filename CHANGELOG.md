@@ -1,5 +1,19 @@
 # Changelog
 
+## [7.139.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.139.2...v7.139.3) (2026-08-13)
+
+
+### Bug Fixes
+
+* **context-budget:** key budget state by session and contain budget failures ([e6f63d2](https://github.com/ZaxbyHub/opencode-swarm/commit/e6f63d23b34220aef1068f8bae9810871a80a312))
+* **context:** enforce target model limits on handoff ([cb6d089](https://github.com/ZaxbyHub/opencode-swarm/commit/cb6d089f344e35166ea5d6265101533f53303eb9))
+* **pre-check:** [Guardrail remediation 2/12] make pre-check signals structured, portable, bounded, and race-safe ([b6ff598](https://github.com/ZaxbyHub/opencode-swarm/commit/b6ff598892b619cf285e4b0debb8a90fdab89b31))
+* **pre-check:** address review feedback ([1cc6c1f](https://github.com/ZaxbyHub/opencode-swarm/commit/1cc6c1f5b53ea512d2b1ccbac9e710f36f0ea329))
+* **recovery:** harden compaction and phase gates ([90835b2](https://github.com/ZaxbyHub/opencode-swarm/commit/90835b253435e16e7cd667e3a01b825f04857127))
+* **tests:** canonicalize cancellation temp roots ([1765500](https://github.com/ZaxbyHub/opencode-swarm/commit/1765500bf8c5c816b05a6712c7b6ffc47d98e568))
+* **tests:** refresh structured pre-check fixtures ([0973cf4](https://github.com/ZaxbyHub/opencode-swarm/commit/0973cf4f2624345f691359f82b9208280a66d53a))
+* **tests:** satisfy stability ratchets ([1509fd3](https://github.com/ZaxbyHub/opencode-swarm/commit/1509fd395660d4cbd23885c524cd1cc8cee51519))
+
 ## [7.139.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.139.1...v7.139.2) (2026-08-12)
 
 
