@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.139.6](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.139.5...v7.139.6) (2026-08-13)
+
+
+### Bug Fixes
+
+* **context:** harden handoff model feedback ([6ef0ad8](https://github.com/ZaxbyHub/opencode-swarm/commit/6ef0ad809ab0d3c9c272499d13d02f43bf43ef7b))
+* **plan:** unblock pre-save QA gate selection ([e0dad7e](https://github.com/ZaxbyHub/opencode-swarm/commit/e0dad7e5b6ff160d5be1f8ee0fdfb415b9ee63a1))
+
 ## [7.139.5](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.139.4...v7.139.5) (2026-08-13)
 
 
