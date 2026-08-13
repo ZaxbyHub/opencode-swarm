@@ -497,7 +497,7 @@ Control which hooks are active:
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `system_enhancer` | boolean | `true` | Inject current phase, task, and decisions into agent system prompts |
-| `compaction` | boolean | `true` | Enrich session compaction with plan.md and context.md data; injects optimization hints when stored tool outputs exist in `.swarm/summaries/` |
+| `compaction` | boolean | `true` | Enrich session compaction with bounded plan/context facts inside a summary-only, no-tools boundary; includes declarative stored-output facts when `.swarm/summaries/` is populated |
 | `agent_activity` | boolean | `true` | Track tool usage per agent, flush activity summary to context.md |
 | `delegation_tracker` | boolean | `false` | Log delegation chains in chat.message hook (diagnostic, opt-in) |
 | `agent_awareness_max_chars` | number | `300` | Max characters for cross-agent context injection in system prompts |

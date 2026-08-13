@@ -34,6 +34,7 @@ import * as logger from '../utils/logger.js';
 import type {
 	BackgroundDelegationRecord,
 	BackgroundDelegationResult,
+	BackgroundWorkspaceSnapshot,
 } from './pending-delegations.js';
 import {
 	captureWorkspaceSnapshot,
@@ -199,8 +200,23 @@ export function validateStageBWorkspace(
 		prHeadSha: record.workspace?.prHeadSha ?? null,
 		resolveCurrentPrHeadSha: record.workspace?.prHeadSha !== null,
 	});
-	const check = compareWorkspaceSnapshots(record.workspace, actualWorkspace);
+	const check = compareStageBWorkspace(record, actualWorkspace);
 	return { ...check, ok: !check.stale };
+}
+
+export function compareStageBWorkspace(
+	record: BackgroundDelegationRecord,
+	actualWorkspace: BackgroundWorkspaceSnapshot,
+): { stale: boolean; reason?: string } {
+	// Reviewer/test roles must observe the exact tree they were dispatched
+	// against. A docs agent is different: authoring documentation legitimately
+	// changes the dirty-tree digest. Bind it to the same project, Git HEAD, and
+	// PR head while allowing those expected uncommitted documentation edits.
+	const expectedWorkspace =
+		record.normalizedAgent === 'docs' && record.workspace
+			? { ...record.workspace, dirtyHash: null }
+			: record.workspace;
+	return compareWorkspaceSnapshots(expectedWorkspace, actualWorkspace);
 }
 
 export async function ingestBackgroundStageBCompletion(args: {

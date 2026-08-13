@@ -41,7 +41,9 @@ export async function bootKnowledgeHost(
 		JSON.stringify(
 			{
 				version_check: false,
-				knowledge: { enabled: true },
+				// Real-host fixtures must not depend on or mutate a developer's
+				// cross-project hive. Tests that need hive behavior configure it directly.
+				knowledge: { enabled: true, hive_enabled: false },
 				...configOverrides,
 			},
 			null,

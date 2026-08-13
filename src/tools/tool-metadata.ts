@@ -690,7 +690,7 @@ export const TOOL_METADATA = {
 	},
 	set_qa_gates: {
 		description:
-			'configure the QA gate profile for the current plan. Architect-only. Ratchet-tighter only — rejected once the profile is locked after critic approval. Supports: reviewer, test_engineer, sme_enabled, critic_pre_plan, sast_enabled, council_mode, hallucination_guard, mutation_test, phase_council, drift_check, final_council.',
+			'configure the QA gate profile for the current plan. Architect-only. The initial selection may override defaults; existing profiles are ratchet-tighter and rejected once locked after critic approval. Supports: reviewer, test_engineer, sme_enabled, critic_pre_plan, sast_enabled, council_mode, hallucination_guard, mutation_test, phase_council, drift_check, final_council.',
 		agents: ['architect'],
 	},
 	web_search: {

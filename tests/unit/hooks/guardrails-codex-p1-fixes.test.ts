@@ -243,7 +243,7 @@ describe('Codex P1 fix: cross-drive / cross-root containment', () => {
 		expect(result.allowed).toBe(false);
 		if (!result.allowed) {
 			expect(result.reason).toMatch(
-				/different drive\/root|outside the working directory/,
+				/different drive(?:\/root| or filesystem root)|outside the working directory/,
 			);
 		}
 	});

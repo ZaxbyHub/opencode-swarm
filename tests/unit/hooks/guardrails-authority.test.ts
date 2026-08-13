@@ -1037,7 +1037,7 @@ describe('guardrails-authority - File Authority Enforcement', () => {
 				// parse to different filesystem roots on Windows — the
 				// cross-drive wording. Both are valid containment blocks.
 				expect(coderAbs.reason).toMatch(
-					/resolves outside the working directory|different drive\/root/,
+					/resolves outside the working directory|different drive(?:\/root| or filesystem root)/,
 				);
 			}
 
@@ -1053,7 +1053,7 @@ describe('guardrails-authority - File Authority Enforcement', () => {
 				// Cross-platform: see the coder case above — POSIX "resolves
 				// outside" wording, or the Windows cross-drive wording.
 				expect(archAbs.reason).toMatch(
-					/resolves outside the working directory|different drive\/root/,
+					/resolves outside the working directory|different drive(?:\/root| or filesystem root)/,
 				);
 			}
 
