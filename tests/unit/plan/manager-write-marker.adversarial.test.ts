@@ -1,10 +1,13 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
-import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { chmod, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Plan } from '../../../src/config/plan-schema';
-import { savePlan } from '../../../src/plan/manager';
+import {
+	PlanConcurrentModificationError,
+	savePlan,
+} from '../../../src/plan/manager';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 function createTestPlan(overrides?: Partial<Plan>): Plan {
 	return {
@@ -38,7 +41,7 @@ describe('savePlan write-marker adversarial tests', () => {
 	let tempDir: string;
 
 	beforeEach(async () => {
-		tempDir = await mkdtemp(join(tmpdir(), 'opencode-adversarial-'));
+		tempDir = canonicalMkdtemp('opencode-adversarial-');
 	});
 
 	afterEach(async () => {
@@ -200,27 +203,22 @@ describe('savePlan write-marker adversarial tests', () => {
 
 	/**
 	 * ADVERSARIAL TEST 3: Concurrent write race
-	 * If savePlan() is called twice concurrently, both should succeed without throwing.
+	 * Concurrent savePlan() calls must either serialize or reject a loser without
+	 * corrupting the durable projection.
 	 */
-	test('3. Concurrent writes - both calls succeed without throwing', async () => {
+	test('3. Concurrent writes - serialize or reject without corruption', async () => {
 		const testPlan = createTestPlan();
 
-		let error1: Error | null = null;
-		let error2: Error | null = null;
-
-		// Run two saves concurrently
-		const promise1 = savePlan(tempDir, testPlan).catch((e) => {
-			error1 = e as Error;
-		});
-		const promise2 = savePlan(tempDir, testPlan).catch((e) => {
-			error2 = e as Error;
-		});
-
-		await Promise.all([promise1, promise2]);
-
-		// Neither should throw
-		expect(error1).toBeNull();
-		expect(error2).toBeNull();
+		const results = await Promise.allSettled([
+			savePlan(tempDir, testPlan),
+			savePlan(tempDir, testPlan),
+		]);
+		expect(results.some((result) => result.status === 'fulfilled')).toBe(true);
+		for (const result of results) {
+			if (result.status === 'rejected') {
+				expect(result.reason).toBeInstanceOf(PlanConcurrentModificationError);
+			}
+		}
 
 		// Plan files should exist
 		expect(existsSync(join(tempDir, '.swarm', 'plan.json'))).toBe(true);
@@ -230,11 +228,17 @@ describe('savePlan write-marker adversarial tests', () => {
 	test('3. Concurrent writes - marker exists after concurrent writes', async () => {
 		const testPlan = createTestPlan();
 
-		await Promise.all([
+		const results = await Promise.allSettled([
 			savePlan(tempDir, testPlan),
 			savePlan(tempDir, testPlan),
 			savePlan(tempDir, testPlan),
 		]);
+		expect(results.some((result) => result.status === 'fulfilled')).toBe(true);
+		for (const result of results) {
+			if (result.status === 'rejected') {
+				expect(result.reason).toBeInstanceOf(PlanConcurrentModificationError);
+			}
+		}
 
 		// Marker should exist (last write wins)
 		const markerPath = join(tempDir, '.swarm', '.plan-write-marker');
