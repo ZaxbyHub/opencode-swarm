@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import {
 	_internals,
 	quality_budget,
 	qualityBudget,
 } from '../../../src/tools/quality-budget';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const originalComputeQualityMetrics = _internals.computeQualityMetrics;
 const originalQualityBudget = _internals.qualityBudget;
@@ -22,9 +22,7 @@ afterEach(() => {
 
 describe('quality budget cancellation - regression F-004', () => {
 	test('public tool forwards the host cancellation signal', async () => {
-		const directory = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'quality-budget-tool-cancel-')),
-		);
+		const directory = canonicalMkdtemp('quality-budget-tool-cancel-');
 		tempDirs.push(directory);
 		const controller = new AbortController();
 		let observedSignal: AbortSignal | undefined;
@@ -52,9 +50,7 @@ describe('quality budget cancellation - regression F-004', () => {
 	});
 
 	test('does not persist evidence after cancellation during metric computation', async () => {
-		const directory = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'quality-budget-cancel-')),
-		);
+		const directory = canonicalMkdtemp('quality-budget-cancel-');
 		tempDirs.push(directory);
 		let releaseMetrics!: () => void;
 		const metricsReady = new Promise<void>((resolve) => {

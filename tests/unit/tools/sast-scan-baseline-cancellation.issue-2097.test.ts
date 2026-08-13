@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { _internals, sastScan } from '../../../src/tools/sast-scan';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const originalCheckSemgrepAvailable = _internals.checkSemgrepAvailable;
 const tempDirectories: string[] = [];
@@ -16,9 +16,7 @@ afterEach(() => {
 
 describe('SAST baseline cancellation', () => {
 	test('F-004 does not publish a baseline after cancellation during lock retry', async () => {
-		const directory = fs.mkdtempSync(
-			path.join(tmpdir(), 'sast-baseline-cancel-'),
-		);
+		const directory = canonicalMkdtemp('sast-baseline-cancel-');
 		tempDirectories.push(directory);
 		const sourceFile = path.join(directory, 'safe.ts');
 		fs.writeFileSync(sourceFile, 'export const safe = true;\n');
