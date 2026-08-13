@@ -31,8 +31,7 @@ import { runSecretscan, runSecretscanOnFiles } from './secretscan';
 const TOOL_TIMEOUT_MS = 60_000;
 const MAX_COMBINED_BYTES = 500_000; // 500KB
 const MAX_COMPACT_ERROR_BYTES = 4_096;
-const OUTPUT_OMITTED_MESSAGE =
-	'Detailed tool result omitted because the batch output exceeded its byte limit';
+const CANCELLATION_SETTLEMENT_GRACE_MS = 1_000;
 const MAX_CONCURRENT = 4;
 const MAX_FILES = 100;
 const GIT_TIMEOUT_MS = 10_000;
@@ -99,6 +98,8 @@ export interface ToolResult<T> {
 	result?: T;
 	/** Error message if failed */
 	error?: string;
+	/** Successful result payload was omitted from a compact serialized response. */
+	result_omitted?: boolean;
 	/** Duration in milliseconds */
 	duration_ms: number;
 }
@@ -231,15 +232,14 @@ function truncateUtf8(value: string, maxBytes: number): string {
 }
 
 function compactToolResult(toolResult: ToolResult<unknown>) {
-	const diagnostic =
-		toolResult.error ??
-		(toolResult.result !== undefined ? OUTPUT_OMITTED_MESSAGE : undefined);
 	return {
 		ran: toolResult.ran,
 		duration_ms: toolResult.duration_ms,
-		...(diagnostic !== undefined && {
-			error: truncateUtf8(diagnostic, MAX_COMPACT_ERROR_BYTES),
+		...(toolResult.error !== undefined && {
+			error: truncateUtf8(toolResult.error, MAX_COMPACT_ERROR_BYTES),
 		}),
+		...(toolResult.error === undefined &&
+			toolResult.result !== undefined && { result_omitted: true }),
 	};
 }
 
@@ -415,10 +415,23 @@ async function runWithTimeout<T>(
 		]);
 	} catch (error) {
 		if (controller.signal.aborted && waitForCancellationSettlement) {
-			await operationPromise.then(
-				() => undefined,
-				() => undefined,
-			);
+			let settlementTimer: ReturnType<typeof setTimeout> | undefined;
+			try {
+				await Promise.race([
+					operationPromise.then(
+						() => undefined,
+						() => undefined,
+					),
+					new Promise<void>((resolve) => {
+						settlementTimer = setTimeout(
+							resolve,
+							CANCELLATION_SETTLEMENT_GRACE_MS,
+						);
+					}),
+				]);
+			} finally {
+				if (settlementTimer !== undefined) clearTimeout(settlementTimer);
+			}
 		}
 		throw error;
 	} finally {
@@ -642,6 +655,7 @@ async function runSecretscanWrapped(
 			() => runSecretscan(directory),
 			TOOL_TIMEOUT_MS,
 			abortSignal,
+			true,
 		);
 
 		return {
@@ -716,16 +730,18 @@ async function runQualityBudgetWrapped(
 
 	try {
 		const result = await runWithTimeout(
-			() =>
+			(signal) =>
 				_internals.qualityBudget(
 					{
 						changed_files: changedFiles,
 						config: config?.gates?.quality_budget,
 					},
 					directory,
+					signal,
 				),
 			TOOL_TIMEOUT_MS,
 			abortSignal,
+			true,
 		);
 
 		return {
@@ -977,7 +993,9 @@ function parseUntrackedStatus(output: string): string[] | null {
 		const status = record.slice(0, 2);
 		const filePath = record.slice(3);
 		if (!filePath || !isKnownPorcelainStatus(status)) return null;
-		if (status === '??') untracked.push(normalizeRepoPathKey(filePath));
+		if (status === '??' || status === '!!') {
+			untracked.push(normalizeRepoPathKey(filePath));
+		}
 
 		if (/[RC]/.test(status)) {
 			const sourcePath = records[++index];
@@ -1012,6 +1030,7 @@ function looksLikePorcelainStatusRecord(value: string): boolean {
 export async function getChangedLineRanges(
 	directory: string,
 	abortSignal?: AbortSignal,
+	requestedFiles: string[] = [],
 ): Promise<Map<string, Set<number>> | null> {
 	let mergeBase: string | null = null;
 	for (const baseBranch of [
@@ -1044,6 +1063,21 @@ export async function getChangedLineRanges(
 		'--no-prefix',
 		'-U0',
 	];
+	const requestedPathspecs = requestedFiles
+		.map((file) => path.relative(directory, file).replace(/\\/g, '/'))
+		.filter(
+			(file) => file.length > 0 && file !== '..' && !file.startsWith('../'),
+		);
+	const statusArgs = [
+		'-c',
+		'core.quotePath=false',
+		'status',
+		'--porcelain=v1',
+		'-z',
+		'--untracked-files=all',
+		...(requestedPathspecs.length > 0 ? ['--ignored=matching'] : []),
+		...(requestedPathspecs.length > 0 ? ['--', ...requestedPathspecs] : []),
+	];
 	const [committed, staged, unstaged, status] = await Promise.all([
 		runGit(
 			[...commonDiffArgs, `${mergeBase}..HEAD`, '--'],
@@ -1056,18 +1090,7 @@ export async function getChangedLineRanges(
 			abortSignal,
 		),
 		runGit([...commonDiffArgs, '--'], directory, abortSignal),
-		runGit(
-			[
-				'-c',
-				'core.quotePath=false',
-				'status',
-				'--porcelain=v1',
-				'-z',
-				'--untracked-files=all',
-			],
-			directory,
-			abortSignal,
-		),
+		runGit(statusArgs, directory, abortSignal),
 	]);
 	if (
 		committed === null ||
@@ -1089,7 +1112,21 @@ export async function getChangedLineRanges(
 	mergeChangedLines(result, unstagedLines);
 	const untracked = parseUntrackedStatus(status);
 	if (untracked === null) return null;
-	for (const file of untracked) result.set(file, new Set([ALL_LINES_CHANGED]));
+	const requestedKeys = requestedPathspecs.map(normalizeRepoPathKey);
+	for (const file of untracked) {
+		result.set(file, new Set([ALL_LINES_CHANGED]));
+		// With --ignored=matching Git reports an ignored directory (for example
+		// `!! generated/`) instead of an explicitly requested descendant. Mark
+		// only the caller's exact requested files beneath that record as changed;
+		// otherwise a finding in an ignored file can be misclassified as old.
+		if (file.endsWith('/')) {
+			for (const requestedFile of requestedKeys) {
+				if (requestedFile.startsWith(file)) {
+					result.set(requestedFile, new Set([ALL_LINES_CHANGED]));
+				}
+			}
+		}
+	}
 	return result;
 }
 
@@ -1353,6 +1390,7 @@ export async function runPreCheckBatch(
 				directory,
 				'secretscan',
 				secretscanEvidence,
+				abortSignal,
 			);
 		} catch (e) {
 			warn(
@@ -1406,6 +1444,7 @@ export async function runPreCheckBatch(
 				const changedLineRanges = await _internals.getChangedLineRanges(
 					directory,
 					abortSignal,
+					changedFiles,
 				);
 				const { newFindings, preexistingFindings } = classifySastFindings(
 					gateFindings,

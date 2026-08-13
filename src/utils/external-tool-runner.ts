@@ -11,6 +11,8 @@ export interface ExternalToolRunOptions {
 	maxStderrBytes: number;
 	env?: Record<string, string | undefined>;
 	abortSignal?: AbortSignal;
+	/** Preserve an already-quoted Windows command line, such as constrained cmd.exe /c. */
+	windowsVerbatimArguments?: boolean;
 }
 
 export interface ExternalToolRunResult {
@@ -37,6 +39,10 @@ const DEFAULT_WINDOWS_EXTENSIONS = ['.exe', '.cmd', '.bat'];
 const TERMINATION_GRACE_MS = 20;
 const TERMINATION_FORCE_MS = 20;
 const TERMINATION_CONFIRM_MS = 20;
+// Windows taskkill is independently bounded at five seconds in bun-compat.
+// Leave a small scheduling margin so the runner can observe its settlement
+// before the lower-level spawn fallback becomes eligible to fire.
+const TREE_TERMINATION_CONFIRM_MS = 5_100;
 const TERMINATION_FALLBACK_BUFFER_MS = 1;
 const STREAM_DRAIN_MS = 50;
 const STREAM_CANCEL_MS = 50;
@@ -45,6 +51,7 @@ const TERMINATION_WINDOWS_MS =
 	TERMINATION_GRACE_MS +
 	TERMINATION_FORCE_MS +
 	TERMINATION_CONFIRM_MS +
+	TREE_TERMINATION_CONFIRM_MS +
 	TERMINATION_FALLBACK_BUFFER_MS;
 const MAX_RUNNER_TIMEOUT_MS = MAX_TIMEOUT_MS - TERMINATION_WINDOWS_MS;
 const UNCONFIRMED_TERMINATION_MESSAGE =
@@ -116,6 +123,7 @@ function computeSpawnTimeoutMs(timeoutMs: number): number {
 		TERMINATION_GRACE_MS,
 		TERMINATION_FORCE_MS,
 		TERMINATION_CONFIRM_MS,
+		TREE_TERMINATION_CONFIRM_MS,
 		TERMINATION_FALLBACK_BUFFER_MS,
 	]) {
 		total = addTimeoutMs(total, windowMs);
@@ -126,6 +134,7 @@ function computeSpawnTimeoutMs(timeoutMs: number): number {
 function startBoundedStreamRead(
 	stream: BunCompatSubprocess['stdout'],
 	maxBytes: number,
+	onLimitExceeded?: () => void,
 ): BoundedStreamReadHandle {
 	const reader = stream.getReader();
 	let lockReleased = false;
@@ -153,6 +162,7 @@ function startBoundedStreamRead(
 	};
 
 	if (maxBytes <= 0) {
+		onLimitExceeded?.();
 		return {
 			cancel,
 			promise: (async () => {
@@ -180,6 +190,7 @@ function startBoundedStreamRead(
 						total += remaining;
 					}
 					truncated = true;
+					onLimitExceeded?.();
 					void cancel();
 					break;
 				}
@@ -222,11 +233,19 @@ function killProcess(proc: BunCompatSubprocess | undefined): void {
 function requestTermination(
 	proc: BunCompatSubprocess | undefined,
 	signal: NodeJS.Signals,
-): void {
+): Promise<boolean> {
 	try {
-		proc?.kill(signal);
+		if (proc?.killTree) {
+			return proc.killTree(signal).then(
+				() => true,
+				() => false,
+			);
+		} else {
+			proc?.kill(signal);
+			return Promise.resolve(proc !== undefined);
+		}
 	} catch {
-		// best effort
+		return Promise.resolve(false);
 	}
 }
 
@@ -279,22 +298,42 @@ async function collectBoundedStreams(
 	stdoutRead: BoundedStreamReadHandle,
 	stderrRead: BoundedStreamReadHandle,
 	proc: BunCompatSubprocess,
-): Promise<{
-	stdout: BoundedStreamResult;
-	stderr: BoundedStreamResult;
-} | null> {
+	treeAlreadyConfirmed = false,
+): Promise<
+	| {
+			kind: 'collected';
+			stdout: BoundedStreamResult;
+			stderr: BoundedStreamResult;
+	  }
+	| { kind: 'cleanup-failed' }
+	| { kind: 'unconfirmed-termination' }
+> {
 	const reads = Promise.all([stdoutRead.promise, stderrRead.promise]);
 	let collected = await waitForValueWithin(reads, STREAM_DRAIN_MS);
 	if (!collected.completed) {
 		// A descendant may have inherited the parent's pipes after the parent
 		// exited. Treat this as abnormal output cleanup, attempt tree termination,
 		// and bound reader cancellation as well.
-		requestTermination(proc, 'SIGKILL');
+		const treeTermination = waitForValueWithin(
+			requestTermination(proc, 'SIGKILL'),
+			TREE_TERMINATION_CONFIRM_MS,
+		);
 		void Promise.allSettled([stdoutRead.cancel(), stderrRead.cancel()]);
 		collected = await waitForValueWithin(reads, STREAM_CANCEL_MS);
+		const terminationResult = await treeTermination;
+		if (
+			!treeAlreadyConfirmed &&
+			(!terminationResult.completed || !terminationResult.value)
+		) {
+			return { kind: 'unconfirmed-termination' };
+		}
 	}
-	if (!collected.completed) return null;
-	return { stdout: collected.value[0], stderr: collected.value[1] };
+	if (!collected.completed) return { kind: 'cleanup-failed' };
+	return {
+		kind: 'collected',
+		stdout: collected.value[0],
+		stderr: collected.value[1],
+	};
 }
 
 export async function runExternalTool(
@@ -326,11 +365,11 @@ export async function runExternalTool(
 	let proc: BunCompatSubprocess | undefined;
 	let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
 	let abortListener: (() => void) | undefined;
+	let overflowTreeTermination: Promise<boolean> | undefined;
 	let exitSettled = false;
 	let settledExitCode: number | null = null;
 	const runnerTimeoutMs = clampTimeoutMs(options.timeoutMs);
 	const spawnTimeoutMs = computeSpawnTimeoutMs(runnerTimeoutMs);
-	const startedAtMs = _internals.now();
 
 	try {
 		proc = _internals.bunSpawn([options.executable, ...options.args], {
@@ -341,6 +380,7 @@ export async function runExternalTool(
 			stderr: 'pipe',
 			timeout: spawnTimeoutMs,
 			killProcessTree: true,
+			windowsVerbatimArguments: options.windowsVerbatimArguments,
 		});
 
 		const exitPromise = proc.exited.then((exitCode) => {
@@ -379,13 +419,18 @@ export async function runExternalTool(
 			if (options.abortSignal.aborted) abortListener();
 		});
 
+		const terminateOnOverflow = () => {
+			overflowTreeTermination ??= requestTermination(proc, 'SIGKILL');
+		};
 		const stdoutRead = startBoundedStreamRead(
 			proc.stdout,
 			options.maxStdoutBytes,
+			terminateOnOverflow,
 		);
 		const stderrRead = startBoundedStreamRead(
 			proc.stderr,
 			options.maxStderrBytes,
+			terminateOnOverflow,
 		);
 		const exitResult = await Promise.race([
 			exitRacePromise,
@@ -393,13 +438,22 @@ export async function runExternalTool(
 			cancelled,
 		]);
 		if (exitResult.kind === 'timeout' || exitResult.kind === 'cancelled') {
-			requestTermination(proc, 'SIGTERM');
+			const gracefulTreeTermination = requestTermination(proc, 'SIGTERM');
 			let confirmedExitCode = await waitForExitWithin(
 				exitPromise,
 				TERMINATION_GRACE_MS,
 			);
+			// Parent exit is not process-group exit: a descendant may ignore
+			// SIGTERM and close inherited pipes. Always force the group after grace.
+			if (!overflowTreeTermination) {
+				overflowTreeTermination = requestTermination(proc, 'SIGKILL');
+			}
+			const forcedTreeTermination = overflowTreeTermination;
+			const treeTerminationResult = waitForValueWithin(
+				Promise.all([gracefulTreeTermination, forcedTreeTermination]),
+				TREE_TERMINATION_CONFIRM_MS,
+			);
 			if (confirmedExitCode === null) {
-				requestTermination(proc, 'SIGKILL');
 				confirmedExitCode = await waitForExitWithin(
 					exitPromise,
 					TERMINATION_FORCE_MS,
@@ -411,14 +465,17 @@ export async function runExternalTool(
 					TERMINATION_CONFIRM_MS,
 				);
 			}
-			if (confirmedExitCode === null) {
-				const elapsedMs = Math.max(0, _internals.now() - startedAtMs);
-				const remainingMs = Math.max(0, spawnTimeoutMs - elapsedMs);
-				confirmedExitCode = await waitForExitWithin(exitPromise, remainingMs);
-			}
+			const treeTermination = await treeTerminationResult;
+			const treeTerminationConfirmed =
+				treeTermination.completed && treeTermination.value.some(Boolean);
 			void Promise.allSettled([stdoutRead.cancel(), stderrRead.cancel()]);
-			const streams = await collectBoundedStreams(stdoutRead, stderrRead, proc);
-			if (!streams) {
+			const streams = await collectBoundedStreams(
+				stdoutRead,
+				stderrRead,
+				proc,
+				treeTerminationConfirmed,
+			);
+			if (streams.kind !== 'collected') {
 				return {
 					status: 'spawn-error',
 					exitCode: confirmedExitCode ?? proc.exitCode,
@@ -426,11 +483,14 @@ export async function runExternalTool(
 					stderr: '',
 					stdoutTruncated: true,
 					stderrTruncated: true,
-					message: 'external tool output cleanup did not complete',
+					message:
+						streams.kind === 'unconfirmed-termination'
+							? UNCONFIRMED_TERMINATION_MESSAGE
+							: 'external tool output cleanup did not complete',
 				};
 			}
 			const { stdout, stderr } = streams;
-			if (confirmedExitCode === null) {
+			if (confirmedExitCode === null || !treeTerminationConfirmed) {
 				return {
 					status: 'spawn-error',
 					exitCode: proc.exitCode,
@@ -462,7 +522,7 @@ export async function runExternalTool(
 			};
 		}
 		const streams = await collectBoundedStreams(stdoutRead, stderrRead, proc);
-		if (!streams) {
+		if (streams.kind !== 'collected') {
 			return {
 				status: 'spawn-error',
 				exitCode: exitResult.exitCode,
@@ -470,10 +530,30 @@ export async function runExternalTool(
 				stderr: '',
 				stdoutTruncated: true,
 				stderrTruncated: true,
-				message: 'external tool output cleanup did not complete',
+				message:
+					streams.kind === 'unconfirmed-termination'
+						? UNCONFIRMED_TERMINATION_MESSAGE
+						: 'external tool output cleanup did not complete',
 			};
 		}
 		const { stdout, stderr } = streams;
+		if (overflowTreeTermination) {
+			const overflowTermination = await waitForValueWithin(
+				overflowTreeTermination,
+				TREE_TERMINATION_CONFIRM_MS,
+			);
+			if (!overflowTermination.completed || !overflowTermination.value) {
+				return {
+					status: 'spawn-error',
+					exitCode: exitResult.exitCode,
+					stdout: stdout.text,
+					stderr: stderr.text,
+					stdoutTruncated: stdout.truncated,
+					stderrTruncated: stderr.truncated,
+					message: UNCONFIRMED_TERMINATION_MESSAGE,
+				};
+			}
+		}
 		if (proc.spawnError) {
 			return {
 				status: 'spawn-error',

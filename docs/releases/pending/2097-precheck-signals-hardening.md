@@ -10,7 +10,10 @@ All lint and Git subprocesses used by the batch now share one Bun/Node-compatibl
 bounded runner with ignored stdin, bounded output, confirmed process-tree
 termination, and cleanup on every path. Windows Biome and ESLint resolution uses
 native binaries or safely resolved npm, pnpm, and Yarn package entries without
-directly spawning command shims or enabling a broad shell.
+directly spawning command shims or enabling a broad shell. Auxiliary Windows
+linters also support validated `.cmd` and `.bat` wrappers through the system
+`cmd.exe`, with fixed arguments, project containment checks, and no `shell: true`.
+Package manifests and PATH shims are read through strict byte ceilings.
 
 Legacy SAST changed-line triage now unions committed, staged, unstaged, and
 untracked work, including quoted, renamed, deleted, space-containing, Unicode,
@@ -32,3 +35,10 @@ when it cannot, instead of failing with an opaque status-only error.
 No migration is required and there are no breaking changes. Semgrep remains an
 optional enhancement: when it is unavailable, SAST continues with the built-in
 Tier A scanner; failures after Semgrep availability is confirmed fail closed.
+Concurrent availability checks share one bounded probe, scanner diagnostics are
+redacted before public or durable output, and cancellation prevents late evidence
+writes, including baseline capture while its phase lock is contended. Structured
+gate contradictions now fail closed, legacy changed-line passes require every
+gate-level finding to match the producer's pre-existing classification, ignored
+requested files are treated as changed, and live gate receipts are bounded per
+session without cross-session eviction.

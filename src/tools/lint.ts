@@ -23,7 +23,14 @@ const LINTER_RUN_TIMEOUT_MS = 30_000;
 const OUTPUT_TRUNCATION_SUFFIX = '\n... (output truncated)';
 const NODE_MODULES = 'node_modules';
 const BIN_DIRECTORY = '.bin';
+const MAX_PACKAGE_MANIFEST_BYTES = 256 * 1024;
+const MAX_PATH_SHIM_BYTES = 64 * 1024;
 const UNSAFE_SHELL_WRAPPER_EXTENSIONS = new Set(['.bat', '.cmd', '.ps1']);
+const WINDOWS_BATCH_WRAPPER_EXTENSIONS = ['.cmd', '.bat'] as const;
+// Node quotes array-form cmd.exe tokens, keeping spaces and parentheses opaque.
+// Reject shell separators, quoting, expansion markers, and line breaks instead
+// of attempting to escape them into an executable command string.
+const WINDOWS_CMD_UNSAFE_TOKEN = /["%!^&|<>\r\n]/;
 
 const LINTER_PACKAGES: Record<SupportedLinter, string> = {
 	biome: '@biomejs/biome',
@@ -122,6 +129,55 @@ function isRegularFile(candidate: string): boolean {
 		return _internals.statSync(candidate).isFile();
 	} catch {
 		return false;
+	}
+}
+
+function readTextFileBounded(
+	filePath: string,
+	maxBytes: number,
+): string | null {
+	let fd: number | undefined;
+	try {
+		fd = _internals.openSync(filePath, 'r');
+		const stats = _internals.fstatSync(fd);
+		if (
+			!stats.isFile() ||
+			!Number.isSafeInteger(stats.size) ||
+			stats.size < 0 ||
+			stats.size > maxBytes
+		) {
+			return null;
+		}
+
+		const bytes = Buffer.alloc(stats.size);
+		let offset = 0;
+		while (offset < bytes.byteLength) {
+			const bytesRead = _internals.readSync(
+				fd,
+				bytes,
+				offset,
+				bytes.byteLength - offset,
+				null,
+			);
+			if (bytesRead === 0) break;
+			offset += bytesRead;
+		}
+
+		// Re-check through the same descriptor so growth after fstat cannot make a
+		// bounded metadata read silently accept a larger file.
+		const overflowProbe = Buffer.alloc(1);
+		if (_internals.readSync(fd, overflowProbe, 0, 1, null) > 0) return null;
+		return bytes.subarray(0, offset).toString('utf8');
+	} catch {
+		return null;
+	} finally {
+		if (fd !== undefined) {
+			try {
+				_internals.closeSync(fd);
+			} catch {
+				// best effort
+			}
+		}
 	}
 }
 
@@ -241,9 +297,12 @@ function resolvePackageBinEntry(
 	linter: SupportedLinter,
 ): string | null {
 	try {
-		const manifest = JSON.parse(
-			_internals.readFileSync(manifestPath, 'utf8'),
-		) as {
+		const contents = readTextFileBounded(
+			manifestPath,
+			MAX_PACKAGE_MANIFEST_BYTES,
+		);
+		if (contents === null) return null;
+		const manifest = JSON.parse(contents) as {
 			bin?: string | Record<string, string>;
 		};
 		if (typeof manifest.bin === 'string') {
@@ -416,12 +475,8 @@ function resolvePathShimTarget(
 	linter: SupportedLinter,
 	platform = _internals.platform(),
 ): string | null {
-	let contents: string;
-	try {
-		contents = _internals.readFileSync(shimPath, 'utf8');
-	} catch {
-		return null;
-	}
+	const contents = readTextFileBounded(shimPath, MAX_PATH_SHIM_BYTES);
+	if (contents === null) return null;
 
 	const ext = path.extname(shimPath).toLowerCase();
 	let relativeTarget: string | null = null;
@@ -722,13 +777,12 @@ export async function detectResolvedLinter(
 function detectRuff(cwd: string): boolean {
 	// ruff.toml OR pyproject.toml with [tool.ruff] section OR ruff binary present
 	if (_internals.existsSync(path.join(cwd, 'ruff.toml')))
-		return resolveAdditionalExecutable('ruff') !== null;
+		return hasAdditionalCommand('ruff');
 	try {
 		const pyproject = path.join(cwd, 'pyproject.toml');
 		if (_internals.existsSync(pyproject)) {
 			const content = _internals.readFileSync(pyproject, 'utf-8');
-			if (content.includes('[tool.ruff]'))
-				return resolveAdditionalExecutable('ruff') !== null;
+			if (content.includes('[tool.ruff]')) return hasAdditionalCommand('ruff');
 		}
 	} catch {
 		// ignore
@@ -741,7 +795,7 @@ function detectClippy(cwd: string): boolean {
 	// Cargo.toml exists AND cargo binary on PATH (clippy is a cargo subcommand)
 	return (
 		_internals.existsSync(path.join(cwd, 'Cargo.toml')) &&
-		resolveAdditionalExecutable('cargo') !== null
+		hasAdditionalCommand('cargo')
 	);
 }
 
@@ -750,7 +804,7 @@ function detectGolangciLint(cwd: string): boolean {
 	// go.mod exists AND golangci-lint binary on PATH
 	return (
 		_internals.existsSync(path.join(cwd, 'go.mod')) &&
-		resolveAdditionalExecutable('golangci-lint') !== null
+		hasAdditionalCommand('golangci-lint')
 	);
 }
 
@@ -774,9 +828,103 @@ function resolveAdditionalExecutable(name: string): string | null {
 	);
 }
 
+function resolveWindowsCommandInterpreter(): string | null {
+	const candidate = _internals.comSpec();
+	if (
+		!candidate ||
+		!path.isAbsolute(candidate) ||
+		path.basename(candidate).toLowerCase() !== 'cmd.exe' ||
+		!isRegularFile(candidate)
+	) {
+		return null;
+	}
+	try {
+		const canonical = _internals.realpathSync(candidate);
+		return path.basename(canonical).toLowerCase() === 'cmd.exe'
+			? canonical
+			: null;
+	} catch {
+		return null;
+	}
+}
+
+function buildWindowsBatchCommand(
+	wrapperPath: string,
+	args: string[],
+): string[] | null {
+	const interpreter = resolveWindowsCommandInterpreter();
+	if (!interpreter) return null;
+
+	let canonicalWrapper: string;
+	try {
+		canonicalWrapper = _internals.realpathSync(wrapperPath);
+	} catch {
+		return null;
+	}
+	if (
+		!isRegularFile(canonicalWrapper) ||
+		!WINDOWS_BATCH_WRAPPER_EXTENSIONS.includes(
+			path.extname(canonicalWrapper).toLowerCase() as '.cmd' | '.bat',
+		)
+	) {
+		return null;
+	}
+
+	const tokens = [canonicalWrapper, ...args];
+	if (tokens.some((token) => WINDOWS_CMD_UNSAFE_TOKEN.test(token))) return null;
+	const command = `call ${tokens.map((token) => `"${token}"`).join(' ')}`;
+	return [interpreter, '/d', '/s', '/v:off', '/c', command];
+}
+
+function resolveWindowsBatchCommandFromPath(
+	name: string,
+	args: string[],
+): string[] | null {
+	if (_internals.platform() !== 'win32') return null;
+	const wrapper = resolveExecutableFromPath(
+		WINDOWS_BATCH_WRAPPER_EXTENSIONS.map((extension) => `${name}${extension}`),
+		_internals.pathEnv(),
+		'win32',
+	);
+	return wrapper ? buildWindowsBatchCommand(wrapper, args) : null;
+}
+
+function resolveContainedWindowsBatchCommand(
+	cwd: string,
+	fileName: string,
+	args: string[],
+): string[] | null {
+	if (_internals.platform() !== 'win32') return null;
+	const candidate = path.join(cwd, fileName);
+	if (!isRegularFile(candidate)) return null;
+
+	let canonicalCwd: string;
+	let canonicalCandidate: string;
+	try {
+		canonicalCwd = _internals.realpathSync(cwd);
+		canonicalCandidate = _internals.realpathSync(candidate);
+	} catch {
+		return null;
+	}
+	const relative = path.relative(canonicalCwd, canonicalCandidate);
+	if (
+		relative === '' ||
+		relative.startsWith('..') ||
+		path.isAbsolute(relative)
+	) {
+		return null;
+	}
+	return buildWindowsBatchCommand(canonicalCandidate, args);
+}
+
 function buildAdditionalCommand(name: string, args: string[]): string[] | null {
 	const executable = resolveAdditionalExecutable(name);
-	return executable ? [executable, ...args] : null;
+	if (executable) return [executable, ...args];
+	return resolveWindowsBatchCommandFromPath(name, args);
+}
+
+function hasAdditionalCommand(name: string): boolean {
+	return buildAdditionalCommand(name, []) !== null;
 }
 
 function resolvePhpVendorCommand(cwd: string, name: string): string[] | null {
@@ -805,19 +953,28 @@ function resolveCheckstyleCommand(cwd: string): string[] | null {
 	const hasGradleSignal = hasCheckstyleGradleSignal(cwd);
 
 	if (hasGradleSignal) {
-		const gradlew = path.join(cwd, 'gradlew');
-		if (_internals.platform() !== 'win32' && _internals.existsSync(gradlew)) {
-			return [gradlew, 'checkstyleMain'];
+		if (_internals.platform() === 'win32') {
+			// F-005: the prior native-only resolver silently dropped standard
+			// gradlew.bat projects. Launch only the exact contained wrapper through
+			// a validated cmd.exe; the shared runner never receives a batch file as
+			// its executable.
+			const gradlew = resolveContainedWindowsBatchCommand(cwd, 'gradlew.bat', [
+				'checkstyleMain',
+			]);
+			if (gradlew) return gradlew;
+		} else {
+			const gradlew = path.join(cwd, 'gradlew');
+			if (_internals.existsSync(gradlew)) return [gradlew, 'checkstyleMain'];
 		}
-		const gradle = resolveAdditionalExecutable('gradle');
+		const gradle = buildAdditionalCommand('gradle', ['checkstyleMain']);
 		if (gradle) {
-			return [gradle, 'checkstyleMain'];
+			return gradle;
 		}
 	}
 
-	const maven = resolveAdditionalExecutable('mvn');
+	const maven = buildAdditionalCommand('mvn', ['checkstyle:check']);
 	if (hasMavenProject && maven) {
-		return [maven, 'checkstyle:check'];
+		return maven;
 	}
 
 	return null;
@@ -861,7 +1018,7 @@ function detectKtlint(cwd: string): boolean {
 		(_internals.existsSync(path.join(cwd, 'build.gradle')) &&
 			buildGradleHasKotlinSignal(cwd)) ||
 		hasRootKotlinFile(cwd);
-	return hasKotlin && resolveAdditionalExecutable('ktlint') !== null;
+	return hasKotlin && hasAdditionalCommand('ktlint');
 }
 
 /** Detect PHP linters from config + local Composer vendor binaries */
@@ -903,7 +1060,7 @@ function detectDotnetFormat(cwd: string): boolean {
 		const hasCsproj = files.some(
 			(f) => f.endsWith('.csproj') || f.endsWith('.sln'),
 		);
-		return hasCsproj && resolveAdditionalExecutable('dotnet') !== null;
+		return hasCsproj && hasAdditionalCommand('dotnet');
 	} catch {
 		return false;
 	}
@@ -913,7 +1070,7 @@ function detectDotnetFormat(cwd: string): boolean {
 function detectCppcheck(cwd: string): boolean {
 	// CMakeLists.txt is definitive; also scan root and common src/ subdirectory for C/C++ files
 	if (_internals.existsSync(path.join(cwd, 'CMakeLists.txt'))) {
-		return resolveAdditionalExecutable('cppcheck') !== null;
+		return hasAdditionalCommand('cppcheck');
 	}
 	try {
 		const dirsToCheck = [cwd, path.join(cwd, 'src')];
@@ -926,7 +1083,7 @@ function detectCppcheck(cwd: string): boolean {
 				return false;
 			}
 		});
-		return hasCpp && resolveAdditionalExecutable('cppcheck') !== null;
+		return hasCpp && hasAdditionalCommand('cppcheck');
 	} catch {
 		return false;
 	}
@@ -937,7 +1094,7 @@ function detectSwiftlint(cwd: string): boolean {
 	// Package.swift exists AND swiftlint binary on PATH
 	return (
 		_internals.existsSync(path.join(cwd, 'Package.swift')) &&
-		resolveAdditionalExecutable('swiftlint') !== null
+		hasAdditionalCommand('swiftlint')
 	);
 }
 
@@ -946,7 +1103,7 @@ function detectDartAnalyze(cwd: string): boolean {
 	// pubspec.yaml exists AND dart binary on PATH
 	return (
 		_internals.existsSync(path.join(cwd, 'pubspec.yaml')) &&
-		resolveAdditionalExecutable('dart') !== null
+		hasAdditionalCommand('dart')
 	);
 }
 
@@ -957,8 +1114,7 @@ function detectRubocop(cwd: string): boolean {
 		(_internals.existsSync(path.join(cwd, 'Gemfile')) ||
 			_internals.existsSync(path.join(cwd, 'gems.rb')) ||
 			_internals.existsSync(path.join(cwd, '.rubocop.yml'))) &&
-		(resolveAdditionalExecutable('rubocop') !== null ||
-			resolveAdditionalExecutable('bundle') !== null)
+		(hasAdditionalCommand('rubocop') || hasAdditionalCommand('bundle'))
 	);
 }
 
@@ -1145,10 +1301,15 @@ export function getAdditionalLinterCommand(
 				mode === 'fix' ? ['fix'] : ['analyze'],
 			);
 		case 'rubocop': {
-			// Prefer bundle exec rubocop if a native Bundler executable is available.
-			const bundle = resolveAdditionalExecutable('bundle');
+			// Prefer bundle exec rubocop when Bundler has any safely resolved native
+			// or constrained Windows wrapper command.
+			const bundle = buildAdditionalCommand('bundle', [
+				'exec',
+				'rubocop',
+				...(mode === 'fix' ? ['-A'] : []),
+			]);
 			if (bundle) {
-				return [bundle, 'exec', 'rubocop', ...(mode === 'fix' ? ['-A'] : [])];
+				return bundle;
 			}
 			return buildAdditionalCommand('rubocop', mode === 'fix' ? ['-A'] : []);
 		}
@@ -1241,6 +1402,9 @@ export async function runAdditionalLint(
 		maxStdoutBytes: MAX_OUTPUT_BYTES,
 		maxStderrBytes: MAX_OUTPUT_BYTES,
 		abortSignal,
+		windowsVerbatimArguments:
+			_internals.platform() === 'win32' &&
+			path.basename(executable).toLowerCase() === 'cmd.exe',
 	});
 
 	if (runResult.status !== 'completed') {
@@ -1352,16 +1516,23 @@ export const lint: ReturnType<typeof tool> = createSwarmTool({
  * Internal calls should use _internals.fn() instead of fn() directly.
  */
 export const _internals: {
+	MAX_PACKAGE_MANIFEST_BYTES: number;
+	MAX_PATH_SHIM_BYTES: number;
 	arch: () => string;
+	closeSync: typeof fs.closeSync;
+	comSpec: () => string | undefined;
 	detectAdditionalLinter: typeof detectAdditionalLinter;
 	detectAvailableLinter: typeof detectAvailableLinter;
 	detectResolvedLinter: typeof detectResolvedLinter;
 	execPath: () => string;
 	existsSync: typeof fs.existsSync;
+	fstatSync: typeof fs.fstatSync;
 	isCommandAvailable: typeof isCommandAvailable;
+	openSync: typeof fs.openSync;
 	pathEnv: () => string;
 	platform: () => NodeJS.Platform;
 	readFileSync: typeof fs.readFileSync;
+	readSync: typeof fs.readSync;
 	readdirSync: typeof fs.readdirSync;
 	realpathSync: typeof fs.realpathSync;
 	resolveLinterCommand: typeof resolveLinterCommand;
@@ -1373,16 +1544,23 @@ export const _internals: {
 	runResolvedLint: typeof runResolvedLint;
 	statSync: typeof fs.statSync;
 } = {
+	MAX_PACKAGE_MANIFEST_BYTES,
+	MAX_PATH_SHIM_BYTES,
 	arch: () => process.arch,
+	closeSync: fs.closeSync,
+	comSpec: () => process.env.ComSpec,
 	detectAdditionalLinter,
 	detectAvailableLinter,
 	detectResolvedLinter,
 	execPath: () => process.execPath,
 	existsSync: fs.existsSync,
+	fstatSync: fs.fstatSync,
 	isCommandAvailable,
+	openSync: fs.openSync,
 	pathEnv: () => process.env.PATH ?? '',
 	platform: () => process.platform,
 	readFileSync: fs.readFileSync,
+	readSync: fs.readSync,
 	readdirSync: fs.readdirSync,
 	realpathSync: fs.realpathSync,
 	resolveLinterCommand,

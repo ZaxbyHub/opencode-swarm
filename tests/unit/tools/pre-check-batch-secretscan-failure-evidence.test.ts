@@ -19,6 +19,7 @@ import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 const originals = { ..._internals };
 let tempDir: string;
 let savedEvidence: SecretscanEvidence[];
+let savedSignals: Array<AbortSignal | undefined>;
 
 function wrapped<T>(result: T): ToolResult<T> {
 	return { ran: true, result, duration_ms: 0 };
@@ -28,6 +29,7 @@ beforeEach(() => {
 	tempDir = canonicalMkdtemp('precheck-secret-evidence-');
 	fs.writeFileSync(path.join(tempDir, 'changed.txt'), 'clean\n');
 	savedEvidence = [];
+	savedSignals = [];
 
 	_internals.runLintWrapped = (async () =>
 		wrapped({ success: true })) as typeof _internals.runLintWrapped;
@@ -51,7 +53,10 @@ beforeEach(() => {
 		_directory: string,
 		_taskId: string,
 		evidence: SecretscanEvidence,
+		abortSignal?: AbortSignal,
 	) => {
+		savedSignals.push(abortSignal);
+		abortSignal?.throwIfAborted();
 		savedEvidence.push(evidence);
 		return {};
 	}) as typeof _internals.saveEvidence;
@@ -64,13 +69,40 @@ afterEach(() => {
 
 async function executeWith(
 	result: ToolResult<SecretscanResult | SecretscanErrorResult>,
+	abortSignal?: AbortSignal,
 ) {
 	_internals.runSecretscanWrapped = (async () =>
 		result) as typeof _internals.runSecretscanWrapped;
-	return runPreCheckBatch({ directory: tempDir, files: ['changed.txt'] });
+	return runPreCheckBatch(
+		{ directory: tempDir, files: ['changed.txt'] },
+		undefined,
+		undefined,
+		abortSignal,
+	);
 }
 
 describe('secretscan hard-gate evidence parity', () => {
+	test('does not persist secretscan evidence after host cancellation', async () => {
+		const controller = new AbortController();
+		controller.abort();
+
+		await executeWith(
+			wrapped({
+				scan_dir: tempDir,
+				findings: [],
+				count: 0,
+				files_scanned: 1,
+				skipped_files: 0,
+				incomplete_files: 0,
+				incomplete_paths: [],
+			}),
+			controller.signal,
+		);
+
+		expect(savedSignals).toEqual([controller.signal]);
+		expect(savedEvidence).toHaveLength(0);
+	});
+
 	test('persists a failed verdict for a structured scanner error', async () => {
 		const result = await executeWith(
 			wrapped({

@@ -18,8 +18,16 @@ function result(
 		batch_status: 'completed',
 		gates_passed: gatesPassed,
 		lint: toolResult(true),
-		secretscan: toolResult(true),
-		sast_scan: toolResult(true),
+		secretscan: toolResult(true, {
+			result: {
+				count: 0,
+				findings: [],
+				files_scanned: 1,
+				incomplete_files: 0,
+				incomplete_paths: [],
+			},
+		}),
+		sast_scan: toolResult(true, { result: { verdict: 'pass' } }),
 		quality_budget: toolResult(true),
 		total_duration_ms: 4,
 		...overrides,
@@ -41,6 +49,133 @@ describe('decodePreCheckResult', () => {
 			kind: 'fail',
 			code: 'PRE_CHECK_FAILED',
 		});
+	});
+
+	test.each([
+		[
+			'explicit hard-gate status',
+			{ secretscan: toolResult(true, { passed: false }) },
+		],
+		[
+			'hard-gate wrapper error',
+			{ sast_scan: toolResult(true, { error: 'scanner failed' }) },
+		],
+		[
+			'secretscan finding',
+			{
+				secretscan: toolResult(true, {
+					result: {
+						count: 1,
+						findings: [{}],
+						files_scanned: 1,
+						incomplete_files: 0,
+						incomplete_paths: [],
+					},
+				}),
+			},
+		],
+		[
+			'baseline SAST failure',
+			{
+				sast_scan: toolResult(true, {
+					result: { baseline_used: true, verdict: 'fail' },
+				}),
+			},
+		],
+		[
+			'malformed secretscan coverage',
+			{
+				secretscan: toolResult(true, {
+					result: { count: 0, findings: [], files_scanned: 1 },
+				}),
+			},
+		],
+		[
+			'unclassified legacy SAST failure',
+			{
+				sast_scan: toolResult(true, {
+					result: { baseline_used: false, verdict: 'fail' },
+				}),
+			},
+		],
+	] as const)('F-001 rejects a passing aggregate with contradictory %s', (_label, overrides) => {
+		// Prior bug: the final return trusted gates_passed=true without checking
+		// hard-gate control data, allowing an explicit failure to decode as pass.
+		expect(decodePreCheckResult(result(true, overrides))).toEqual({
+			kind: 'invalid',
+			code: 'PRE_CHECK_RESULT_INVALID',
+		});
+	});
+
+	test('preserves legacy SAST passes after changed-line classification', () => {
+		const preexistingFinding = {
+			rule_id: 'sast/js-eval',
+			severity: 'high',
+			message: 'pre-existing eval',
+			location: { file: 'src/old.ts', line: 7 },
+		};
+		expect(
+			decodePreCheckResult(
+				result(true, {
+					sast_scan: toolResult(true, {
+						result: {
+							baseline_used: false,
+							verdict: 'fail',
+							findings: [preexistingFinding],
+						},
+					}),
+					sast_preexisting_findings: [preexistingFinding],
+				}),
+			),
+		).toEqual({ kind: 'pass' });
+	});
+
+	test('F-001 rejects unrelated pre-existing evidence for a new SAST finding', () => {
+		const finding = (rule_id: string, file: string) => ({
+			rule_id,
+			severity: 'high',
+			message: rule_id,
+			location: { file, line: 1 },
+		});
+		expect(
+			decodePreCheckResult(
+				result(true, {
+					sast_scan: toolResult(true, {
+						result: {
+							baseline_used: false,
+							verdict: 'fail',
+							findings: [finding('new-high', 'src/new.ts')],
+						},
+					}),
+					sast_preexisting_findings: [finding('unrelated-old', 'src/old.ts')],
+				}),
+			),
+		).toEqual({ kind: 'invalid', code: 'PRE_CHECK_RESULT_INVALID' });
+	});
+
+	test('F-001 rejects a passing hard gate that ran without a result', () => {
+		expect(
+			decodePreCheckResult(result(true, { secretscan: toolResult(true) })),
+		).toEqual({ kind: 'invalid', code: 'PRE_CHECK_RESULT_INVALID' });
+	});
+
+	test('accepts missing hard-gate details only in an exact compact result', () => {
+		expect(
+			decodePreCheckResult(
+				result(true, {
+					output_truncated: true,
+					secretscan: toolResult(true, { result_omitted: true }),
+					sast_scan: toolResult(true, { result_omitted: true }),
+				}),
+			),
+		).toEqual({ kind: 'pass' });
+		expect(
+			decodePreCheckResult(
+				result(true, {
+					secretscan: toolResult(true, { result_omitted: true }),
+				}),
+			),
+		).toEqual({ kind: 'invalid', code: 'PRE_CHECK_RESULT_INVALID' });
 	});
 
 	test('accepts structurally consistent explicit and legacy skips', () => {

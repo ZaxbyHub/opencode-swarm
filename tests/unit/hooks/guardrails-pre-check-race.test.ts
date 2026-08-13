@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, test } from 'bun:test';
 import type { GuardrailsConfig } from '../../../src/config/schema';
-import { createGuardrailsHooks } from '../../../src/hooks/guardrails';
+import {
+	_internals,
+	createGuardrailsHooks,
+} from '../../../src/hooks/guardrails';
 import {
 	getAgentSession,
 	resetSwarmState,
@@ -20,6 +23,17 @@ const config: GuardrailsConfig = {
 
 function output(gatesPassed: boolean) {
 	const tool = { ran: true, duration_ms: 1 };
+	const secretscan = {
+		...tool,
+		result: {
+			count: 0,
+			findings: [],
+			files_scanned: 1,
+			incomplete_files: 0,
+			incomplete_paths: [],
+		},
+	};
+	const sastScan = { ...tool, result: { verdict: 'pass' } };
 	return {
 		title: 'pre-check',
 		metadata: {},
@@ -27,8 +41,8 @@ function output(gatesPassed: boolean) {
 			batch_status: 'completed',
 			gates_passed: gatesPassed,
 			lint: tool,
-			secretscan: tool,
-			sast_scan: tool,
+			secretscan,
+			sast_scan: sastScan,
 			quality_budget: tool,
 			total_duration_ms: 4,
 		}),
@@ -78,7 +92,7 @@ describe('pre-check task receipt correlation', () => {
 		expect(session.taskWorkflowStates.get('task-b')).toBe('coder_delegated');
 	});
 
-	test('missing and evicted receipts are non-mutating', async () => {
+	test('missing receipts are non-mutating', async () => {
 		const hooks = createGuardrailsHooks(config);
 		startAgentSession('session', 'coder');
 		const session = getAgentSession('session')!;
@@ -86,13 +100,43 @@ describe('pre-check task receipt correlation', () => {
 		session.taskWorkflowStates.set('task-a', 'coder_delegated');
 
 		await hooks.toolAfter(input('session', 'missing'), output(true));
-		for (let index = 0; index < 257; index++) {
-			await hooks.toolBefore(input('session', `call-${index}`), { args: {} });
-		}
-		await hooks.toolAfter(input('session', 'call-0'), output(true));
 
 		expect(session.taskWorkflowStates.get('task-a')).toBe('coder_delegated');
 		expect(session.lastGateFailure).toBeNull();
+	});
+
+	test('F-011 isolates live receipt capacity by session and fails closed at the per-session cap', async () => {
+		const hooks = createGuardrailsHooks(config);
+		startAgentSession('session-a', 'coder');
+		startAgentSession('session-b', 'coder');
+		const sessionA = getAgentSession('session-a')!;
+		const sessionB = getAgentSession('session-b')!;
+		sessionA.currentTaskId = 'task-a';
+		sessionB.currentTaskId = 'task-b';
+		sessionA.taskWorkflowStates.set('task-a', 'coder_delegated');
+		sessionB.taskWorkflowStates.set('task-b', 'coder_delegated');
+
+		await hooks.toolBefore(input('session-a', 'call-a'), { args: {} });
+		for (
+			let index = 0;
+			index < _internals.MAX_PENDING_GATE_RECEIPTS_PER_SESSION;
+			index++
+		) {
+			await hooks.toolBefore(input('session-b', `call-b-${index}`), {
+				args: {},
+			});
+		}
+
+		// Prior bug: session B's 256th receipt silently evicted session A's live
+		// receipt from one global FIFO, so A's valid completion was ignored.
+		await expect(
+			hooks.toolBefore(input('session-b', 'over-cap'), { args: {} }),
+		).rejects.toThrow('GATE_RECEIPT_CAPACITY');
+		await hooks.toolAfter(input('session-a', 'call-a'), output(true));
+
+		expect(sessionA.taskWorkflowStates.get('task-a')).toBe('pre_check_passed');
+		expect(sessionA.gateLog.get('task-a')).toContain('pre_check_batch');
+		expect(sessionB.taskWorkflowStates.get('task-b')).toBe('coder_delegated');
 	});
 
 	test('identical call IDs in concurrent sessions remain isolated', async () => {

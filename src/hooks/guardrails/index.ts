@@ -70,6 +70,9 @@ import { decodePreCheckResult } from './pre-check-result';
 import { getStoredInputArgs } from './stored-input-args';
 import { createToolBeforeHandler } from './tool-before';
 
+const MAX_PENDING_GATE_RECEIPTS_PER_SESSION = 256;
+const MAX_PENDING_GATE_RECEIPT_SESSIONS = 500;
+
 export const _internals = {
 	extractSwarmIdFromAgentName,
 	getSwarmAgents,
@@ -82,6 +85,8 @@ export const _internals = {
 	getSandboxExecutor: getExecutor,
 	/** Test-only compatibility for legacy direct-after hook tests. */
 	allowUncorrelatedGateReceipts: false,
+	MAX_PENDING_GATE_RECEIPTS_PER_SESSION,
+	MAX_PENDING_GATE_RECEIPT_SESSIONS,
 	/**
 	 * Test/inspection seams for the no-op detector's bounded session state
 	 * (invariant 8). Production code does not call these; they exist so the
@@ -558,12 +563,44 @@ export function createGuardrailsHooks(
 			file: string;
 		}>
 	>();
-	const pendingGateTasks = new Map<
+	const pendingGateTasksBySession = new Map<
 		string,
-		{ sessionID: string; taskId: string }
+		Map<string, { sessionID: string; taskId: string }>
 	>();
-	const gateReceiptKey = (sessionID: string, callID: string): string =>
-		`${sessionID}\0${callID}`;
+	const takePendingGateTask = (sessionID: string, callID: string) => {
+		const sessionTasks = pendingGateTasksBySession.get(sessionID);
+		const pending = sessionTasks?.get(callID);
+		if (sessionTasks) {
+			sessionTasks.delete(callID);
+			if (sessionTasks.size === 0) pendingGateTasksBySession.delete(sessionID);
+		}
+		return pending;
+	};
+	const rememberPendingGateTask = (
+		sessionID: string,
+		callID: string,
+		taskId: string,
+	): void => {
+		let sessionTasks = pendingGateTasksBySession.get(sessionID);
+		if (!sessionTasks) {
+			if (pendingGateTasksBySession.size >= MAX_PENDING_GATE_RECEIPT_SESSIONS) {
+				throw new Error(
+					'GATE_RECEIPT_CAPACITY: too many sessions have live gate calls; wait for a pending gate call to finish',
+				);
+			}
+			sessionTasks = new Map();
+			pendingGateTasksBySession.set(sessionID, sessionTasks);
+		}
+		if (
+			!sessionTasks.has(callID) &&
+			sessionTasks.size >= MAX_PENDING_GATE_RECEIPTS_PER_SESSION
+		) {
+			throw new Error(
+				'GATE_RECEIPT_CAPACITY: this session has too many live gate calls; wait for a pending gate call to finish',
+			);
+		}
+		sessionTasks.set(callID, { sessionID, taskId });
+	};
 	const scopeLeaseRenewal = createScopeLeaseRenewalTracker();
 	const rememberReviewerScopeWrite = (input: {
 		callID: string;
@@ -636,25 +673,17 @@ export function createGuardrailsHooks(
 		output,
 	) => {
 		if (isGateTool(input.tool)) {
-			const receiptKey = gateReceiptKey(input.sessionID, input.callID);
 			const taskId = swarmState.agentSessions.get(
 				input.sessionID,
 			)?.currentTaskId;
 			if (taskId) {
-				if (!pendingGateTasks.has(receiptKey) && pendingGateTasks.size >= 256) {
-					const oldest = pendingGateTasks.keys().next().value;
-					if (oldest !== undefined) pendingGateTasks.delete(oldest);
-				}
-				pendingGateTasks.set(receiptKey, {
-					sessionID: input.sessionID,
-					taskId,
-				});
+				rememberPendingGateTask(input.sessionID, input.callID, taskId);
 			}
 		}
 		try {
 			await baseToolBefore(input, output);
 		} catch (error) {
-			pendingGateTasks.delete(gateReceiptKey(input.sessionID, input.callID));
+			takePendingGateTask(input.sessionID, input.callID);
 			throw error;
 		}
 	};
@@ -673,7 +702,7 @@ export function createGuardrailsHooks(
 		toolBefore,
 		toolAfter: async (input, output) => {
 			const pendingGateTask =
-				pendingGateTasks.get(gateReceiptKey(input.sessionID, input.callID)) ??
+				takePendingGateTask(input.sessionID, input.callID) ??
 				(_internals.allowUncorrelatedGateReceipts
 					? (() => {
 							const testSession = swarmState.agentSessions.get(input.sessionID);
@@ -686,7 +715,6 @@ export function createGuardrailsHooks(
 								: undefined;
 						})()
 					: undefined);
-			pendingGateTasks.delete(gateReceiptKey(input.sessionID, input.callID));
 			const pendingReviewerScopeWrite = pendingReviewerScopeWrites.get(
 				input.callID,
 			);

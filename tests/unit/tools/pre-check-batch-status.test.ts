@@ -114,5 +114,9 @@ test('serializer measures multibyte diagnostics in UTF-8 bytes and preserves a p
 		_internals.MAX_COMBINED_BYTES,
 	);
 	expect(parsed.output_truncated).toBe(true);
+	const secretscan = parsed.secretscan as Record<string, unknown>;
+	// F-010 prior behavior mislabeled a successful omitted result as an error.
+	expect(secretscan.error).toBeUndefined();
+	expect(secretscan.result_omitted).toBe(true);
 	expect(decodePreCheckResult(serialized)).toEqual({ kind: 'pass' });
 });

@@ -90,6 +90,81 @@ describe('Semgrep Integration', () => {
 			expect(await checkSemgrepAvailable()).toBe(true);
 			expect(calls).toBe(2);
 		});
+
+		it('shares one in-flight probe across concurrent callers (F-012)', async () => {
+			let calls = 0;
+			let finishProbe: ((result: ExternalToolRunResult) => void) | undefined;
+			_internals.resolveExecutableFromPath = () => '/fake/semgrep';
+			// This stub covers the delayed-success branch only. Transient and
+			// cancellation branches are exercised by the adjacent focused tests.
+			_internals.runExternalTool = () => {
+				calls++;
+				return new Promise<ExternalToolRunResult>((resolve) => {
+					finishProbe = resolve;
+				});
+			};
+
+			// Previous code stored only the settled boolean cache, so both calls
+			// spawned `semgrep --version` before either result could populate it.
+			const first = checkSemgrepAvailable();
+			const second = checkSemgrepAvailable();
+			expect(calls).toBe(1);
+			finishProbe?.(completedRun({ stdout: '1.0.0' }));
+
+			expect(await Promise.all([first, second])).toEqual([true, true]);
+			expect(calls).toBe(1);
+		});
+
+		it('shares transient failure and retries without poisoning the cache (F-012)', async () => {
+			let calls = 0;
+			_internals.resolveExecutableFromPath = () => '/fake/semgrep';
+			// This stub covers one transient spawn failure followed by success;
+			// missing-binary and cancellation behavior are covered separately.
+			_internals.runExternalTool = async () => {
+				calls++;
+				return calls === 1
+					? completedRun({ status: 'spawn-error', exitCode: null })
+					: completedRun({ stdout: '1.0.0' });
+			};
+
+			const concurrent = await Promise.all([
+				checkSemgrepAvailable(),
+				checkSemgrepAvailable(),
+			]);
+			expect(concurrent).toEqual([false, false]);
+			expect(calls).toBe(1);
+
+			expect(await checkSemgrepAvailable()).toBe(true);
+			expect(calls).toBe(2);
+		});
+
+		it('keeps caller cancellation local to a shared probe (F-012)', async () => {
+			let calls = 0;
+			let finishProbe: ((result: ExternalToolRunResult) => void) | undefined;
+			const controller = new AbortController();
+			_internals.resolveExecutableFromPath = () => '/fake/semgrep';
+			// This stub covers delayed success only. Missing-binary and transient
+			// retry behavior remain covered by the other availability tests.
+			_internals.runExternalTool = () => {
+				calls++;
+				return new Promise<ExternalToolRunResult>((resolve) => {
+					finishProbe = resolve;
+				});
+			};
+
+			const cancelledCaller = checkSemgrepAvailable(
+				undefined,
+				controller.signal,
+			);
+			const activeCaller = checkSemgrepAvailable();
+			controller.abort();
+			expect(await cancelledCaller).toBe(false);
+
+			finishProbe?.(completedRun({ stdout: '1.0.0' }));
+			expect(await activeCaller).toBe(true);
+			expect(await checkSemgrepAvailable()).toBe(true);
+			expect(calls).toBe(1);
+		});
 	});
 
 	describe('runSemgrep()', () => {
@@ -208,6 +283,78 @@ describe('Semgrep Integration', () => {
 			expect(result.error).toContain('truncated');
 		});
 
+		it('does not expose raw stderr from a nonzero Semgrep exit (F-009)', async () => {
+			const sensitiveStderr = 'Authorization: Bearer secret-review-marker';
+			_internals.resolveExecutableFromPath = () => '/fake/semgrep';
+			// This stub covers version success and a completed nonzero scan. Other
+			// runner outcomes are covered by the surrounding runSemgrep tests.
+			_internals.runExternalTool = async (options) =>
+				options.args[0] === '--version'
+					? completedRun({ stdout: '1.0.0' })
+					: completedRun({ exitCode: 2, stderr: sensitiveStderr });
+
+			// Previous code copied result.stderr directly into SemgrepResult.error,
+			// exposing scanner output to tool responses and durable evidence.
+			const result = await runSemgrep({ files: ['src/f.ts'] });
+
+			expect(result.error).toBe('Semgrep exited with code 2');
+			expect(result.error).not.toContain(sensitiveStderr);
+		});
+
+		it('fails closed on stderr truncation without exposing its contents (F-013)', async () => {
+			const sensitiveStderr = 'secret-review-marker'.repeat(100);
+			_internals.resolveExecutableFromPath = () => '/fake/semgrep';
+			// This stub isolates the Semgrep boundary for a runner-enforced stderr
+			// cap. Real process termination is covered by the next regression test.
+			_internals.runExternalTool = async (options) =>
+				options.args[0] === '--version'
+					? completedRun({ stdout: '1.0.0' })
+					: completedRun({
+							stderr: sensitiveStderr,
+							stderrTruncated: true,
+						});
+
+			const result = await runSemgrep({ files: ['src/f.ts'] });
+
+			expect(result.engine).toBe('tier_a');
+			expect(result.error).toContain('truncated');
+			expect(result.error).not.toContain('secret-review-marker');
+		});
+
+		it('terminates the shared runner immediately on stderr overflow (F-013)', async () => {
+			const tempRoot = canonicalMkdtemp('semgrep-stderr-overflow-');
+			try {
+				const script = path.join(tempRoot, 'stderr-overflow.js');
+				fs.writeFileSync(
+					script,
+					[
+						'process.stderr.write("x".repeat(8192));',
+						'setTimeout(() => {}, 60000);',
+					].join('\n'),
+					'utf8',
+				);
+
+				// The removed helper test proved that overflow itself killed the child.
+				// A runner that merely waits for its timeout returns `timeout` here.
+				const result = await realRunExternalTool({
+					executable: process.execPath,
+					args: [script],
+					cwd: tempRoot,
+					timeoutMs: 5_000,
+					maxStdoutBytes: 1_024,
+					maxStderrBytes: 1_024,
+				});
+
+				expect(result.status).not.toBe('timeout');
+				expect(result.stderrTruncated).toBe(true);
+				expect(Buffer.byteLength(result.stderr, 'utf8')).toBeLessThanOrEqual(
+					1_024,
+				);
+			} finally {
+				fs.rmSync(tempRoot, { recursive: true, force: true });
+			}
+		});
+
 		it('does not reinterpret spawn-error stdout as a valid findings result', async () => {
 			_internals.resolveExecutableFromPath = () => '/fake/semgrep';
 			_internals.runExternalTool = async (options) => {
@@ -229,7 +376,9 @@ describe('Semgrep Integration', () => {
 
 			expect(result.engine).toBe('tier_a');
 			expect(result.findings).toEqual([]);
-			expect(result.error).toContain('termination could not be confirmed');
+			expect(result.error).toBe(
+				'Semgrep process failed to start or terminate safely',
+			);
 		});
 
 		it('fails closed when a completed Semgrep process emits malformed JSON', async () => {

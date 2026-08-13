@@ -231,6 +231,8 @@ describe('runAdditionalLint — shared runner DI', () => {
 			timeoutMs: 30_000,
 			maxStdoutBytes: MAX_OUTPUT_BYTES,
 			maxStderrBytes: MAX_OUTPUT_BYTES,
+			abortSignal: undefined,
+			windowsVerbatimArguments: false,
 		});
 		expect(result.success).toBe(true);
 		expect(result.command).toEqual([

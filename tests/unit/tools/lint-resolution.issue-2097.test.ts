@@ -45,6 +45,7 @@ function writeWindowsPowerShellShim(
 describe('lint resolution lane — issue #2097', () => {
 	const originalInternals = {
 		arch: _internals.arch,
+		comSpec: _internals.comSpec,
 		detectResolvedLinter: _internals.detectResolvedLinter,
 		existsSync: _internals.existsSync,
 		isCommandAvailable: _internals.isCommandAvailable,
@@ -61,6 +62,7 @@ describe('lint resolution lane — issue #2097', () => {
 		runnerCalls = [];
 		_internals.platform = () => 'win32';
 		_internals.arch = () => 'x64';
+		_internals.comSpec = () => undefined;
 		_internals.pathEnv = () => '';
 		_internals.runExternalTool = mock(
 			async (options: ExternalToolRunOptions) => {
@@ -79,6 +81,7 @@ describe('lint resolution lane — issue #2097', () => {
 
 	afterEach(() => {
 		_internals.arch = originalInternals.arch;
+		_internals.comSpec = originalInternals.comSpec;
 		_internals.detectResolvedLinter = originalInternals.detectResolvedLinter;
 		_internals.existsSync = originalInternals.existsSync;
 		_internals.isCommandAvailable = originalInternals.isCommandAvailable;
@@ -308,22 +311,65 @@ describe('lint resolution lane — issue #2097', () => {
 		});
 	});
 
-	it('rejects batch-only PATH linters whose unsafe extension is hidden by a bare name', async () => {
-		const pathBinDir = path.join(tempRoot, 'tools');
-		writeFile(path.join(pathBinDir, 'ruff.cmd'));
-		writeFile(path.join(pathBinDir, 'gradle.bat'));
-		writeFile(
-			path.join(tempRoot, 'build.gradle'),
-			'plugins { id("checkstyle") }',
+	describe('Windows wrapper compatibility — regression (F-005)', () => {
+		it('uses a validated cmd.exe for a PATH wrapper without spawning the batch file directly', async () => {
+			const pathBinDir = path.join(tempRoot, 'tools');
+			const cmdExecutable = path.join(pathBinDir, 'cmd.exe');
+			const projectDir = path.join(tempRoot, 'project (quoted)');
+			const maven = path.join(pathBinDir, 'mvn.cmd');
+			writeFile(cmdExecutable);
+			writeFile(maven, '@echo off\r\nexit /b 0\r\n');
+			writeFile(path.join(projectDir, 'pom.xml'));
+			_internals.comSpec = () => cmdExecutable;
+			_internals.pathEnv = () => pathBinDir;
+
+			// Previous code accepted only native *.exe files and reported a standard
+			// mvn.cmd-only Windows project as having no runnable Checkstyle command.
+			expect(detectAdditionalLinter(projectDir)).toBe('checkstyle');
+			const result = await runAdditionalLint('checkstyle', 'check', projectDir);
+
+			expect(result.success).toBe(true);
+			expect(runnerCalls).toHaveLength(1);
+			expect(runnerCalls[0]).toMatchObject({
+				executable: cmdExecutable,
+				args: [
+					'/d',
+					'/s',
+					'/v:off',
+					'/c',
+					`call "${maven}" "checkstyle:check"`,
+				],
+				cwd: projectDir,
+				windowsVerbatimArguments: true,
+			});
+		});
+
+		it.skipIf(process.platform !== 'win32')(
+			'executes the quoted wrapper with fixed arguments on Windows',
+			async () => {
+				const projectDir = path.join(tempRoot, 'real wrapper (project)');
+				writeFile(
+					path.join(projectDir, 'build.gradle'),
+					'plugins { id("checkstyle") }',
+				);
+				writeFile(
+					path.join(projectDir, 'gradlew.bat'),
+					'@echo off\r\necho %~1\r\nexit /b 0\r\n',
+				);
+				_internals.platform = () => process.platform;
+				_internals.comSpec = () => process.env.ComSpec;
+				_internals.runExternalTool = originalInternals.runExternalTool;
+
+				const result = await runAdditionalLint(
+					'checkstyle',
+					'check',
+					projectDir,
+				);
+				expect(result.success).toBe(true);
+				expect(result.exitCode).toBe(0);
+				expect(result.output).toContain('checkstyleMain');
+			},
 		);
-		_internals.pathEnv = () => pathBinDir;
-
-		const ruff = await runAdditionalLint('ruff', 'check', tempRoot);
-		const checkstyle = await runAdditionalLint('checkstyle', 'check', tempRoot);
-
-		expect(ruff.success).toBe(false);
-		expect(checkstyle.success).toBe(false);
-		expect(runnerCalls).toHaveLength(0);
 	});
 
 	it('passes the exact native Windows PATH executable to the shared runner', async () => {
@@ -371,6 +417,61 @@ describe('lint resolution lane — issue #2097', () => {
 		expect(runnerCalls).toHaveLength(1);
 		expect(runnerCalls[0]?.cwd).toBe(specialProjectDir);
 		expect(runnerCalls[0]?.args).toEqual(['check', '.']);
+	});
+
+	describe('bounded resolver metadata — regression (F-008)', () => {
+		it('rejects an oversized package manifest before parsing its valid bin entry', async () => {
+			const packageRoot = path.join(tempRoot, 'node_modules', 'eslint');
+			const manifestPath = path.join(packageRoot, 'package.json');
+			writeFile(path.join(packageRoot, 'bin', 'eslint.js'));
+			writeFile(
+				path.join(tempRoot, 'node_modules', '.bin', 'eslint.cmd'),
+				'@echo off',
+			);
+			writeFile(
+				manifestPath,
+				JSON.stringify({
+					bin: { eslint: 'bin/eslint.js' },
+					padding: 'x'.repeat(_internals.MAX_PACKAGE_MANIFEST_BYTES),
+				}),
+			);
+
+			// Previous code synchronously read and parsed the entire manifest, so this
+			// valid leading bin declaration remained reachable despite the size.
+			expect(fs.statSync(manifestPath).size).toBeGreaterThan(
+				_internals.MAX_PACKAGE_MANIFEST_BYTES,
+			);
+			expect(
+				await _internals.resolveLinterCommand('eslint', tempRoot),
+			).toBeNull();
+		});
+
+		it('rejects an oversized PATH shim before scanning its target syntax', async () => {
+			const pathBinDir = path.join(tempRoot, 'tools');
+			const shimPath = path.join(pathBinDir, 'eslint.cmd');
+			writeFile(
+				path.join(tempRoot, 'node_modules', 'eslint', 'bin', 'eslint.js'),
+			);
+			writeWindowsCmdShim(
+				shimPath,
+				'\\..\\node_modules\\eslint\\bin\\eslint.js',
+			);
+			fs.appendFileSync(
+				shimPath,
+				'x'.repeat(_internals.MAX_PATH_SHIM_BYTES),
+				'utf8',
+			);
+			_internals.pathEnv = () => pathBinDir;
+
+			// Previous code read the complete PATH shim before applying its trusted
+			// target grammar, allowing an arbitrarily large synchronous read.
+			expect(fs.statSync(shimPath).size).toBeGreaterThan(
+				_internals.MAX_PATH_SHIM_BYTES,
+			);
+			expect(
+				await _internals.resolveLinterCommand('eslint', tempRoot),
+			).toBeNull();
+		});
 	});
 
 	it('routes additional linters through the shared runner instead of direct spawn calls', async () => {

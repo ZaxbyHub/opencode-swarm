@@ -64,11 +64,20 @@ afterEach(() => {
 
 describe('Semgrep error propagation — issue #2097', () => {
 	test.each([
-		'Semgrep process timed out',
-		'Semgrep output exceeded the maximum size and was truncated',
-		'external tool process termination could not be confirmed',
-		'Semgrep returned invalid JSON output',
-	])('sastScan fails closed for %s', async (error) => {
+		['Semgrep process timed out', 'Semgrep process timed out'],
+		[
+			'Semgrep output exceeded the maximum size and was truncated',
+			'Semgrep output exceeded its bounded limit; results incomplete',
+		],
+		[
+			'external tool process termination could not be confirmed',
+			'Semgrep execution failed',
+		],
+		[
+			'Semgrep returned invalid JSON output',
+			'Semgrep returned invalid JSON output',
+		],
+	])('sastScan fails closed for %s', async (error, safeError) => {
 		sastInternals.runSemgrep = async () => ({
 			available: true,
 			findings: [],
@@ -82,8 +91,78 @@ describe('Semgrep error propagation — issue #2097', () => {
 		);
 
 		expect(result.verdict).toBe('fail');
-		expect(result.error).toContain(error);
+		expect(result.error).toBe(`Semgrep execution failed: ${safeError}`);
 		expect(result.summary.engine).toBe('tier_a');
+	});
+
+	test('redacts untrusted Semgrep diagnostics from results and evidence (F-009)', async () => {
+		const sensitiveDiagnostic =
+			'Authorization: Bearer secret-review-marker from scanner stderr';
+		// This seam covers an untrusted Semgrep error only. Finding conversion and
+		// successful Tier B results are covered by the profile and Semgrep suites.
+		sastInternals.runSemgrep = async () => ({
+			available: true,
+			findings: [],
+			error: sensitiveDiagnostic,
+			engine: 'tier_a',
+		});
+
+		// Previous code copied arbitrary scanner diagnostics into both the public
+		// result and `.swarm/evidence/sast_scan/evidence.json`.
+		const result = await sastScan(
+			{ changed_files: [path.join(directory, 'safe.js')] },
+			directory,
+		);
+		const evidence = fs.readFileSync(
+			path.join(directory, '.swarm', 'evidence', 'sast_scan', 'evidence.json'),
+			'utf8',
+		);
+
+		expect(result.error).toBe(
+			'Semgrep execution failed: Semgrep execution failed',
+		);
+		expect(result.error).not.toContain('secret-review-marker');
+		expect(evidence).not.toContain('secret-review-marker');
+		expect(evidence).toContain('Semgrep execution failed');
+	});
+
+	test('does not persist evidence after cancellation wins the Semgrep race (F-003)', async () => {
+		const controller = new AbortController();
+		// This seam covers cancellation immediately after the external scan settles.
+		// Pre-aborted and successful evidence paths are covered by adjacent suites.
+		sastInternals.runSemgrep = async () => {
+			controller.abort();
+			return {
+				available: true,
+				findings: [],
+				error: 'scanner diagnostic that must not persist',
+				engine: 'tier_a',
+			};
+		};
+
+		const result = await sastScan(
+			{
+				changed_files: [path.join(directory, 'safe.js')],
+				abort_signal: controller.signal,
+			},
+			directory,
+		);
+
+		expect(result).toMatchObject({
+			verdict: 'fail',
+			error: 'SAST scan cancelled',
+		});
+		expect(
+			fs.existsSync(
+				path.join(
+					directory,
+					'.swarm',
+					'evidence',
+					'sast_scan',
+					'evidence.json',
+				),
+			),
+		).toBe(false);
 	});
 
 	test('pre_check_batch blocks a completed Semgrep payload with structured scan errors', async () => {

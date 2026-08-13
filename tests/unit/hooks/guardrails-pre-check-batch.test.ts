@@ -43,7 +43,7 @@ function makeAfterOutput(output: string = 'success') {
 }
 
 const passingPreCheckResult =
-	'{"batch_status":"completed","gates_passed":true,"lint":{"ran":true,"duration_ms":1},"secretscan":{"ran":true,"duration_ms":1},"sast_scan":{"ran":true,"duration_ms":1},"quality_budget":{"ran":true,"duration_ms":1},"total_duration_ms":4}';
+	'{"batch_status":"completed","gates_passed":true,"lint":{"ran":true,"duration_ms":1},"secretscan":{"ran":true,"duration_ms":1,"result":{"count":0,"findings":[],"files_scanned":1,"incomplete_files":0,"incomplete_paths":[]}},"sast_scan":{"ran":true,"duration_ms":1,"result":{"verdict":"pass"}},"quality_budget":{"ran":true,"duration_ms":1},"total_duration_ms":4}';
 
 describe('guardrails - pre_check_batch state transition (v6.22 Task 2.1)', () => {
 	beforeEach(() => {

@@ -10,6 +10,7 @@ const originals = {
 	checkSemgrepAvailable: sastInternals.checkSemgrepAvailable,
 	runSemgrep: sastInternals.runSemgrep,
 	runExternalTool: batchInternals.runExternalTool,
+	qualityBudget: batchInternals.qualityBudget,
 	lintRunExternalTool: lintInternals.runExternalTool,
 };
 const tempDirs: string[] = [];
@@ -18,6 +19,7 @@ afterEach(() => {
 	sastInternals.checkSemgrepAvailable = originals.checkSemgrepAvailable;
 	sastInternals.runSemgrep = originals.runSemgrep;
 	batchInternals.runExternalTool = originals.runExternalTool;
+	batchInternals.qualityBudget = originals.qualityBudget;
 	lintInternals.runExternalTool = originals.lintRunExternalTool;
 	for (const dir of tempDirs.splice(0)) {
 		fs.rmSync(dir, { recursive: true, force: true });
@@ -50,6 +52,21 @@ describe('pre-check cancellation propagation — issue #2097', () => {
 			),
 		).rejects.toThrow('Timeout after 1ms');
 		expect(cleanupComplete).toBe(true);
+	});
+
+	test('F-003 bounds settlement for an operation that ignores cancellation', async () => {
+		const startedAt = Date.now();
+		await expect(
+			batchInternals.runWithTimeout(
+				async () => await new Promise<string>(() => undefined),
+				1,
+				undefined,
+				true,
+			),
+		).rejects.toThrow('Timeout after 1ms');
+
+		// Previous code awaited the non-cooperative promise forever.
+		expect(Date.now() - startedAt).toBeLessThan(1_500);
 	});
 
 	test('a pre-aborted parent prevents operation startup', async () => {
@@ -91,6 +108,38 @@ describe('pre-check cancellation propagation — issue #2097', () => {
 
 		expect(result.error).toBe('Tool execution cancelled');
 		expect(probes).toBe(0);
+	});
+
+	test('F-004 quality cancellation waits for cooperative persistence cleanup', async () => {
+		const controller = new AbortController();
+		let cleanupComplete = false;
+		batchInternals.qualityBudget = async (_input, _directory, signal) => {
+			await new Promise<void>((resolve) => {
+				signal?.addEventListener(
+					'abort',
+					() => {
+						setTimeout(() => {
+							cleanupComplete = true;
+							resolve();
+						}, 20);
+					},
+					{ once: true },
+				);
+			});
+			throw new Error('cancelled after cleanup');
+		};
+
+		const pending = batchInternals.runQualityBudgetWrapped(
+			['safe.ts'],
+			path.resolve('.'),
+			undefined,
+			controller.signal,
+		);
+		controller.abort();
+		const result = await pending;
+
+		expect(cleanupComplete).toBe(true);
+		expect(result.error).toBe('Tool execution cancelled');
 	});
 
 	test('host abort stops SAST before a later Semgrep bucket can launch', async () => {

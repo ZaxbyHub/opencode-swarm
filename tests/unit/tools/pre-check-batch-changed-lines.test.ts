@@ -294,4 +294,57 @@ describe('getChangedLineRanges union', () => {
 		expect(classified.newFindings).toHaveLength(1);
 		expect(classified.preexistingFindings).toHaveLength(0);
 	});
+
+	test('F-002 treats an explicitly requested ignored file as entirely changed', async () => {
+		const root = canonicalMkdtemp('precheck-ignored-lines-');
+		tempDirs.push(root);
+		git(root, ['init', '-b', 'main']);
+		git(root, ['config', 'user.email', 'test@example.com']);
+		git(root, ['config', 'user.name', 'Test']);
+		write(root, '.gitignore', 'ignored-security.ts\n');
+		write(root, 'tracked.ts', 'export const tracked = true;\n');
+		git(root, ['add', '.gitignore', 'tracked.ts']);
+		git(root, ['commit', '-m', 'base']);
+		git(root, ['checkout', '-b', 'feature']);
+		write(root, 'ignored-security.ts', 'dangerous();\n');
+
+		const ignoredPath = path.join(root, 'ignored-security.ts');
+		const ranges = await getChangedLineRanges(root, undefined, [ignoredPath]);
+		const classified = classifySastFindings(
+			[finding(root, 'ignored-security.ts', 99)],
+			ranges,
+			root,
+		);
+
+		// Previous code accepted an empty Git union and called this pre-existing.
+		expect(ranges?.get('ignored-security.ts')?.has(-1)).toBe(true);
+		expect(classified.newFindings).toHaveLength(1);
+		expect(classified.preexistingFindings).toHaveLength(0);
+	});
+
+	test('F-002 expands an ignored directory record to its requested descendant', async () => {
+		const root = canonicalMkdtemp('precheck-ignored-directory-lines-');
+		tempDirs.push(root);
+		git(root, ['init', '-b', 'main']);
+		git(root, ['config', 'user.email', 'test@example.com']);
+		git(root, ['config', 'user.name', 'Test']);
+		write(root, '.gitignore', 'ignored/\n');
+		write(root, 'tracked.ts', 'export const tracked = true;\n');
+		git(root, ['add', '.gitignore', 'tracked.ts']);
+		git(root, ['commit', '-m', 'base']);
+		git(root, ['checkout', '-b', 'feature']);
+		write(root, 'ignored/security.ts', 'dangerous();\n');
+
+		const ignoredPath = path.join(root, 'ignored', 'security.ts');
+		const ranges = await getChangedLineRanges(root, undefined, [ignoredPath]);
+		const classified = classifySastFindings(
+			[finding(root, 'ignored/security.ts', 99)],
+			ranges,
+			root,
+		);
+
+		expect(ranges?.get('ignored/security.ts')?.has(-1)).toBe(true);
+		expect(classified.newFindings).toHaveLength(1);
+		expect(classified.preexistingFindings).toHaveLength(0);
+	});
 });

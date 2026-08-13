@@ -305,6 +305,36 @@ describe('sast-baseline', () => {
 			}
 		});
 
+		it('F-004 aborts lock retry without writing a late baseline', async () => {
+			const file = path.join(tempDir, 'cancelled.js');
+			fs.writeFileSync(file, 'eval(x);');
+			const evidenceDir = path.join(tempDir, '.swarm', 'evidence', '1');
+			fs.mkdirSync(evidenceDir, { recursive: true });
+			fs.writeFileSync(
+				path.join(evidenceDir, 'sast-baseline.json.lock'),
+				'busy',
+			);
+			const controller = new AbortController();
+			setTimeout(() => controller.abort(), 10);
+
+			const result = await captureOrMergeBaseline(
+				tempDir,
+				1,
+				[makeFinding(file, 1)],
+				'tier_a',
+				[file],
+				{ abortSignal: controller.signal },
+			);
+
+			expect(result).toEqual({
+				status: 'error',
+				message: 'SAST baseline capture cancelled',
+			});
+			expect(fs.existsSync(path.join(evidenceDir, 'sast-baseline.json'))).toBe(
+				false,
+			);
+		});
+
 		it('second call with same files produces status:merged', async () => {
 			const file = path.join(tempDir, 'app.js');
 			fs.writeFileSync(file, 'eval(x);');

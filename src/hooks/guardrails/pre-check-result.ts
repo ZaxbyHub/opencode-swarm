@@ -13,12 +13,137 @@ const TOOL_KEYS = [
 	'quality_budget',
 ] as const;
 
+const HARD_GATE_KEYS = ['secretscan', 'sast_scan'] as const;
+const COMPACT_OUTPUT_OMITTED_MESSAGE =
+	'Detailed tool result omitted because the batch output exceeded its byte limit';
+
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function isFiniteDuration(value: unknown): value is number {
 	return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+}
+
+function sastFindingKey(value: unknown): string | null {
+	if (!isRecord(value) || !isRecord(value.location)) return null;
+	const { rule_id, severity, message, location } = value;
+	if (
+		typeof rule_id !== 'string' ||
+		typeof severity !== 'string' ||
+		typeof message !== 'string' ||
+		typeof location.file !== 'string' ||
+		typeof location.line !== 'number' ||
+		!Number.isSafeInteger(location.line) ||
+		location.line < 1 ||
+		!['critical', 'high', 'medium', 'low'].includes(severity) ||
+		(location.column !== undefined &&
+			(typeof location.column !== 'number' ||
+				!Number.isSafeInteger(location.column) ||
+				location.column < 1))
+	) {
+		return null;
+	}
+	return JSON.stringify([
+		rule_id,
+		severity,
+		message,
+		location.file,
+		location.line,
+		location.column ?? null,
+	]);
+}
+
+function everyGateFindingIsPreexisting(
+	result: Record<string, unknown>,
+	batchResult: Record<string, unknown>,
+): boolean {
+	if (
+		!Array.isArray(result.findings) ||
+		!Array.isArray(batchResult.sast_preexisting_findings)
+	) {
+		return false;
+	}
+	const findingKeys = result.findings.map(sastFindingKey);
+	if (findingKeys.some((key) => key === null)) return false;
+	const gateFindingKeys = result.findings
+		.filter(
+			(finding) =>
+				isRecord(finding) &&
+				(finding.severity === 'high' || finding.severity === 'critical'),
+		)
+		.map(sastFindingKey);
+	if (gateFindingKeys.length === 0) return false;
+	const remainingPreexisting =
+		batchResult.sast_preexisting_findings.map(sastFindingKey);
+	if (remainingPreexisting.some((key) => key === null)) return false;
+	for (const gateFindingKey of gateFindingKeys) {
+		const index = remainingPreexisting.indexOf(gateFindingKey);
+		if (index < 0) return false;
+		remainingPreexisting.splice(index, 1);
+	}
+	return true;
+}
+
+function hardGateExplicitlyFailed(
+	key: (typeof HARD_GATE_KEYS)[number],
+	toolResult: Record<string, unknown>,
+	batchResult: Record<string, unknown>,
+): boolean {
+	if (toolResult.ran === false || toolResult.passed === false) return true;
+	if (
+		typeof toolResult.error === 'string' &&
+		toolResult.error !== COMPACT_OUTPUT_OMITTED_MESSAGE
+	) {
+		return true;
+	}
+
+	const result = toolResult.result;
+	if (!isRecord(result)) {
+		return !(
+			result === undefined &&
+			batchResult.output_truncated === true &&
+			toolResult.result_omitted === true &&
+			toolResult.error === undefined
+		);
+	}
+	if (toolResult.result_omitted !== undefined) return true;
+	if (result.passed === false || typeof result.error === 'string') return true;
+
+	if (key === 'secretscan') {
+		if (
+			typeof result.count !== 'number' ||
+			!Number.isSafeInteger(result.count) ||
+			result.count < 0 ||
+			!Array.isArray(result.findings) ||
+			typeof result.files_scanned !== 'number' ||
+			!Number.isSafeInteger(result.files_scanned) ||
+			result.files_scanned < 0 ||
+			typeof result.incomplete_files !== 'number' ||
+			!Number.isSafeInteger(result.incomplete_files) ||
+			result.incomplete_files < 0 ||
+			!Array.isArray(result.incomplete_paths)
+		) {
+			return true;
+		}
+		return (
+			result.count > 0 ||
+			result.findings.length > 0 ||
+			result.incomplete_files > 0 ||
+			result.incomplete_paths.length > 0 ||
+			result.files_scanned === 0
+		);
+	}
+
+	if (result.verdict === 'pass') return false;
+	if (result.verdict !== 'fail') return true;
+	// A legacy SAST failure may aggregate to pass only when the producer also
+	// supplies the changed-line classification evidence proving every gate-level
+	// finding pre-existing. Baseline failures are always definitive.
+	return (
+		result.baseline_used === true ||
+		!everyGateFindingIsPreexisting(result, batchResult)
+	);
 }
 
 /**
@@ -46,6 +171,12 @@ export function decodePreCheckResult(output: unknown): PreCheckVerdict {
 	if (!isFiniteDuration(parsed.total_duration_ms)) {
 		return { kind: 'invalid', code: 'PRE_CHECK_RESULT_INVALID' };
 	}
+	if (
+		parsed.output_truncated !== undefined &&
+		typeof parsed.output_truncated !== 'boolean'
+	) {
+		return { kind: 'invalid', code: 'PRE_CHECK_RESULT_INVALID' };
+	}
 
 	const ranStates: boolean[] = [];
 	for (const key of TOOL_KEYS) {
@@ -54,7 +185,12 @@ export function decodePreCheckResult(output: unknown): PreCheckVerdict {
 			!isRecord(toolResult) ||
 			typeof toolResult.ran !== 'boolean' ||
 			!isFiniteDuration(toolResult.duration_ms) ||
-			(toolResult.error !== undefined && typeof toolResult.error !== 'string')
+			(toolResult.error !== undefined &&
+				typeof toolResult.error !== 'string') ||
+			(toolResult.result_omitted !== undefined &&
+				typeof toolResult.result_omitted !== 'boolean') ||
+			(toolResult.result_omitted === true &&
+				(toolResult.result !== undefined || toolResult.error !== undefined))
 		) {
 			return { kind: 'invalid', code: 'PRE_CHECK_RESULT_INVALID' };
 		}
@@ -91,6 +227,22 @@ export function decodePreCheckResult(output: unknown): PreCheckVerdict {
 	// all-tools-skipped result as neutral/unknown rather than manufacturing a
 	// pass or failure from nested text.
 	if (batchStatus === undefined && allSkipped) return { kind: 'skip' };
+
+	// F-001 prior bug: the aggregate boolean was trusted even when a hard gate
+	// carried an explicit failure. Reject only definitive contradictions so
+	// legacy SAST passes based on pre-existing-line classification remain valid.
+	if (
+		parsed.gates_passed &&
+		HARD_GATE_KEYS.some((key) =>
+			hardGateExplicitlyFailed(
+				key,
+				parsed[key] as Record<string, unknown>,
+				parsed,
+			),
+		)
+	) {
+		return { kind: 'invalid', code: 'PRE_CHECK_RESULT_INVALID' };
+	}
 
 	return parsed.gates_passed
 		? { kind: 'pass' }

@@ -50,6 +50,8 @@ export interface SemgrepResult {
  * Null means "not probed yet using the bounded async path".
  */
 let semgrepAvailableCache: boolean | null = null;
+let semgrepAvailabilityProbe: Promise<boolean> | null = null;
+let semgrepAvailabilityGeneration = 0;
 
 /**
  * Default rules directory
@@ -84,6 +86,70 @@ function getAvailabilityProbeCwd(): string {
 		return fs.realpathSync(process.cwd());
 	} catch {
 		return path.resolve(process.cwd());
+	}
+}
+
+async function runSemgrepAvailabilityProbe(
+	executable: string,
+	cwd: string,
+	generation: number,
+): Promise<boolean> {
+	try {
+		const run = await _internals.runExternalTool({
+			executable,
+			args: ['--version'],
+			cwd,
+			timeoutMs: SEMGREP_AVAILABILITY_TIMEOUT_MS,
+			maxStdoutBytes: SEMGREP_AVAILABILITY_MAX_STDOUT_BYTES,
+			maxStderrBytes: SEMGREP_AVAILABILITY_MAX_STDERR_BYTES,
+		});
+
+		const available =
+			run.status === 'completed' &&
+			run.exitCode === 0 &&
+			!run.stdoutTruncated &&
+			!run.stderrTruncated;
+		if (available && generation === semgrepAvailabilityGeneration) {
+			semgrepAvailableCache = true;
+		}
+		return available;
+	} catch {
+		// A thrown runner error is transient. Do not poison the process cache.
+		return false;
+	}
+}
+
+async function waitForAvailabilityProbe(
+	probe: Promise<boolean>,
+	abortSignal?: AbortSignal,
+): Promise<boolean> {
+	if (!abortSignal) return probe;
+	if (abortSignal.aborted) return false;
+
+	return new Promise<boolean>((resolve) => {
+		let settled = false;
+		const finish = (available: boolean): void => {
+			if (settled) return;
+			settled = true;
+			abortSignal.removeEventListener('abort', onAbort);
+			resolve(available);
+		};
+		const onAbort = (): void => finish(false);
+		abortSignal.addEventListener('abort', onAbort, { once: true });
+		void probe.then(finish, () => finish(false));
+	});
+}
+
+function describeExternalToolFailure(
+	status: 'timeout' | 'cancelled' | 'spawn-error',
+): string {
+	switch (status) {
+		case 'timeout':
+			return 'Semgrep process timed out';
+		case 'cancelled':
+			return 'Semgrep execution cancelled';
+		case 'spawn-error':
+			return 'Semgrep process failed to start or terminate safely';
 	}
 }
 
@@ -131,6 +197,7 @@ export async function checkSemgrepAvailable(
 	cwd?: string,
 	abortSignal?: AbortSignal,
 ): Promise<boolean> {
+	if (abortSignal?.aborted) return false;
 	if (semgrepAvailableCache !== null) {
 		return semgrepAvailableCache;
 	}
@@ -141,36 +208,41 @@ export async function checkSemgrepAvailable(
 		return false;
 	}
 
-	const run = await _internals.runExternalTool({
-		executable,
-		args: ['--version'],
-		cwd: cwd ?? _internals.getAvailabilityProbeCwd(),
-		timeoutMs: SEMGREP_AVAILABILITY_TIMEOUT_MS,
-		maxStdoutBytes: SEMGREP_AVAILABILITY_MAX_STDOUT_BYTES,
-		maxStderrBytes: SEMGREP_AVAILABILITY_MAX_STDERR_BYTES,
-		abortSignal,
-	});
-
-	// Cancellation, timeout, spawn failure, and truncated output describe this
-	// probe attempt, not Semgrep's durable availability. Caching them would let
-	// one cancelled request disable Tier B for every later scan in the process.
-	if (
-		run.status === 'completed' &&
-		run.exitCode === 0 &&
-		!run.stdoutTruncated &&
-		!run.stderrTruncated
-	) {
-		semgrepAvailableCache = true;
-		return true;
+	if (!semgrepAvailabilityProbe) {
+		const generation = semgrepAvailabilityGeneration;
+		const probe = runSemgrepAvailabilityProbe(
+			executable,
+			cwd ?? _internals.getAvailabilityProbeCwd(),
+			generation,
+		);
+		semgrepAvailabilityProbe = probe;
+		void probe.then(
+			() => {
+				if (semgrepAvailabilityProbe === probe) {
+					semgrepAvailabilityProbe = null;
+				}
+			},
+			() => {
+				if (semgrepAvailabilityProbe === probe) {
+					semgrepAvailabilityProbe = null;
+				}
+			},
+		);
 	}
-	return false;
+
+	// The shared probe is intentionally not owned by any caller's AbortSignal.
+	// One cancelled scan must not cancel or poison availability for other scans;
+	// each caller can still stop waiting immediately via this local race.
+	return waitForAvailabilityProbe(semgrepAvailabilityProbe, abortSignal);
 }
 
 /**
  * Reset the Semgrep availability cache (useful for testing)
  */
 export function resetSemgrepCache(): void {
+	semgrepAvailabilityGeneration++;
 	semgrepAvailableCache = null;
+	semgrepAvailabilityProbe = null;
 }
 
 /**
@@ -393,11 +465,7 @@ export async function runSemgrep(
 			return {
 				available: true,
 				findings: [],
-				error:
-					result.message ??
-					(result.status === 'timeout'
-						? 'Semgrep process timed out'
-						: `Semgrep process ${result.status}`),
+				error: describeExternalToolFailure(result.status),
 				engine: 'tier_a',
 			};
 		}
@@ -415,7 +483,9 @@ export async function runSemgrep(
 			return {
 				available: true,
 				findings: [],
-				error: result.stderr || `Semgrep exited with code ${result.exitCode}`,
+				// Never expose raw stderr: scanners and wrappers may echo source,
+				// environment values, credentials, or host paths into diagnostics.
+				error: `Semgrep exited with code ${result.exitCode}`,
 				engine: 'tier_a',
 			};
 		}
@@ -428,13 +498,16 @@ export async function runSemgrep(
 			engine: 'tier_a+tier_b',
 		};
 	} catch (error) {
-		const errorMessage =
-			error instanceof Error ? error.message : 'Unknown error running Semgrep';
-
+		const safeError =
+			error instanceof SemgrepScanError ||
+			(error instanceof Error &&
+				error.message === 'Semgrep returned invalid JSON output')
+				? error.message
+				: 'Semgrep execution failed unexpectedly';
 		return {
 			available: true,
 			findings: [],
-			error: errorMessage,
+			error: safeError,
 			engine: 'tier_a',
 		};
 	}
