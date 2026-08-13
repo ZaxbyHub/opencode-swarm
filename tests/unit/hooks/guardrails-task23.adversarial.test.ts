@@ -1,8 +1,6 @@
 /**
  * Task 2.3 — ADVERSARIAL SECURITY TESTS
  *
- * Adversarial tests for lastGateOutcome and advanceTaskState wiring in guardrails.ts
- *
  * Tests the guardrails hooks (toolBefore, toolAfter, messagesTransform) by directly
  * exercising real hook behavior with adversarial inputs. Uses proper tempDir isolation.
  *
@@ -101,12 +99,14 @@ describe('guardrails-task23 adversarial', () => {
 
 	beforeEach(() => {
 		resetSwarmState();
+		_internals.allowUncorrelatedGateReceipts = true;
 		const { dir, cleanup } = createSafeTestDir('guardrails-task23-');
 		tempDir = dir;
 		cleanupTempDir = cleanup;
 	});
 
 	afterEach(() => {
+		_internals.allowUncorrelatedGateReceipts = false;
 		cleanupTempDir();
 	});
 

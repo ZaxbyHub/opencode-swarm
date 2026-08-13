@@ -136,6 +136,15 @@ const MIGRATIONS: Migration[] = [
 			PRIMARY KEY(plan_identity_hash, task_id)
 		)`,
 	},
+	{
+		version: 12,
+		name: 'add_task_checkpoint_receipt_completion_generation',
+		sql: `ALTER TABLE task_checkpoint_receipt
+			ADD COLUMN generation INTEGER NOT NULL DEFAULT 1;
+		ALTER TABLE task_checkpoint_receipt
+			ADD COLUMN completion_active INTEGER NOT NULL DEFAULT 1
+			CHECK(completion_active IN (0, 1))`,
+	},
 ];
 
 const _projectDbs: Map<string, Database> = new Map();

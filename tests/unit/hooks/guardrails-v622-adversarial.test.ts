@@ -1,6 +1,9 @@
-import { beforeEach, describe, expect, it } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import type { GuardrailsConfig } from '../../../src/config/schema';
-import { createGuardrailsHooks } from '../../../src/hooks/guardrails';
+import {
+	_internals,
+	createGuardrailsHooks,
+} from '../../../src/hooks/guardrails';
 import {
 	getAgentSession,
 	resetSwarmState,
@@ -42,11 +45,12 @@ function makeAfterOutput(output: string = 'success') {
 describe('guardrails - v6.22 Task 2.1/2.2/2.3 adversarial tests', () => {
 	beforeEach(() => {
 		resetSwarmState();
+		_internals.allowUncorrelatedGateReceipts = true;
+	});
+	afterEach(() => {
+		_internals.allowUncorrelatedGateReceipts = false;
 	});
 
-	// ============================================================
-	// OBJECTIVE 1: Plan.json direct write block
-	// ============================================================
 	describe('OBJECTIVE 1: plan.json direct write block', () => {
 		it('write tool targeting .swarm/plan.json → throws PLAN STATE VIOLATION', async () => {
 			const config = defaultConfig();
@@ -109,9 +113,6 @@ describe('guardrails - v6.22 Task 2.1/2.2/2.3 adversarial tests', () => {
 		});
 	});
 
-	// ============================================================
-	// OBJECTIVE 2: Patch path extraction (git diff, traditional diff, 1MB limit)
-	// ============================================================
 	describe('OBJECTIVE 2: patch path extraction', () => {
 		const ORCHESTRATOR_NAME = 'architect';
 
@@ -318,9 +319,6 @@ index 1234567..89abcdef 100644
 		});
 	});
 
-	// ============================================================
-	// OBJECTIVE 3: pre_check_batch result → advanceTaskState with warn() on error
-	// ============================================================
 	describe('OBJECTIVE 3: pre_check_batch result handling with warn on error', () => {
 		it('gates_passed: true in pre_check_batch output → advanceTaskState called', async () => {
 			const config = defaultConfig();
@@ -335,7 +333,8 @@ index 1234567..89abcdef 100644
 			session!.currentTaskId = taskId;
 			session!.taskWorkflowStates.set(taskId, 'coder_delegated');
 
-			const outputJson = JSON.stringify({ gates_passed: true });
+			const outputJson =
+				'{"batch_status":"completed","gates_passed":true,"lint":{"ran":true,"duration_ms":1},"secretscan":{"ran":true,"duration_ms":1,"result":{"count":0,"findings":[],"files_scanned":1,"incomplete_files":0,"incomplete_paths":[]}},"sast_scan":{"ran":true,"duration_ms":1,"result":{"verdict":"pass"}},"quality_budget":{"ran":true,"duration_ms":1},"total_duration_ms":4}';
 			await hooks.toolAfter(
 				makeInput(sessionId, 'pre_check_batch', 'call-1'),
 				makeAfterOutput(outputJson),
@@ -359,15 +358,16 @@ index 1234567..89abcdef 100644
 			session!.currentTaskId = taskId;
 			session!.taskWorkflowStates.set(taskId, 'coder_delegated');
 
-			const outputJson = JSON.stringify({ gates_passed: false });
+			const outputJson =
+				'{"batch_status":"completed","gates_passed":false,"lint":{"ran":true,"duration_ms":1},"secretscan":{"ran":true,"duration_ms":1,"result":{"count":0,"findings":[],"files_scanned":1,"incomplete_files":0,"incomplete_paths":[]}},"sast_scan":{"ran":true,"duration_ms":1,"result":{"verdict":"pass"}},"quality_budget":{"ran":true,"duration_ms":1},"total_duration_ms":4}';
 			await hooks.toolAfter(
 				makeInput(sessionId, 'pre_check_batch', 'call-1'),
 				makeAfterOutput(outputJson),
 			);
 
-			// Verify state did NOT advance
 			const newState = session!.taskWorkflowStates.get(taskId);
 			expect(newState).toBe('coder_delegated');
+			expect(session!.lastGateFailure?.code).toBe('PRE_CHECK_FAILED');
 		});
 
 		it('malformed JSON in pre_check_batch output → no throw, isPassed = false', async () => {
@@ -395,7 +395,7 @@ index 1234567..89abcdef 100644
 			expect(newState).toBe('coder_delegated');
 		});
 
-		it('advanceTaskState failure → warn() called but no throw (non-fatal)', async () => {
+		it('already-passed task remains passed when state advancement is rejected', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(config);
 			const sessionId = 'test-session';
@@ -405,27 +405,25 @@ index 1234567..89abcdef 100644
 			const session = getAgentSession(sessionId);
 			expect(session).toBeDefined();
 
-			// Set currentTaskId to a task that's already at a terminal state that can't advance past
-			// pre_check_passed can't advance further (next is reviewer_run)
+			// Set an already-passed state so duplicate advancement is rejected.
 			session!.currentTaskId = taskId;
 			session!.taskWorkflowStates.set(taskId, 'pre_check_passed');
 
-			const outputJson = JSON.stringify({ gates_passed: true });
+			const outputJson =
+				'{"batch_status":"completed","gates_passed":true,"lint":{"ran":true,"duration_ms":1},"secretscan":{"ran":true,"duration_ms":1,"result":{"count":0,"findings":[],"files_scanned":1,"incomplete_files":0,"incomplete_paths":[]}},"sast_scan":{"ran":true,"duration_ms":1,"result":{"verdict":"pass"}},"quality_budget":{"ran":true,"duration_ms":1},"total_duration_ms":4}';
 
-			// Should NOT throw - warn is called but error is caught internally
-			// Note: pre_check_passed -> pre_check_passed is valid, so this may actually succeed
-			// We need a different approach - use a non-existent task ID
+			// The reverse/idempotent transition is rejected and caught internally.
 			await hooks.toolAfter(
 				makeInput(sessionId, 'pre_check_batch', 'call-1'),
 				makeAfterOutput(outputJson),
 			);
 
-			// State should remain pre_check_passed (or advance to pre_check_passed which is same)
+			// State remains pre_check_passed after the caught transition error.
 			const newState = session!.taskWorkflowStates.get(taskId);
 			expect(newState).toBe('pre_check_passed');
 		});
 
-		it('advanceTaskState with null currentTaskId → warn() called but no throw', async () => {
+		it('null currentTaskId skips state advancement', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(config);
 			const sessionId = 'test-session';
@@ -439,9 +437,10 @@ index 1234567..89abcdef 100644
 			session!.currentTaskId = null;
 			session!.taskWorkflowStates.set(taskId, 'coder_delegated');
 
-			const outputJson = JSON.stringify({ gates_passed: true });
+			const outputJson =
+				'{"batch_status":"completed","gates_passed":true,"lint":{"ran":true,"duration_ms":1},"secretscan":{"ran":true,"duration_ms":1,"result":{"count":0,"findings":[],"files_scanned":1,"incomplete_files":0,"incomplete_paths":[]}},"sast_scan":{"ran":true,"duration_ms":1,"result":{"verdict":"pass"}},"quality_budget":{"ran":true,"duration_ms":1},"total_duration_ms":4}';
 
-			// Should NOT throw - code checks session.currentTaskId before advancing
+			// No transition is attempted without a correlated current task.
 			await hooks.toolAfter(
 				makeInput(sessionId, 'pre_check_batch', 'call-1'),
 				makeAfterOutput(outputJson),

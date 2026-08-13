@@ -690,7 +690,7 @@ export const TOOL_METADATA = {
 	},
 	set_qa_gates: {
 		description:
-			'configure the QA gate profile for the current plan or bootstrap an exact future plan with swarm_id and plan_title. Architect-only. The first selection atomically overlays defaults; later changes are ratchet-tighter and rejected once locked. Supports: reviewer, test_engineer, sme_enabled, critic_pre_plan, sast_enabled, council_mode, hallucination_guard, mutation_test, phase_council, drift_check, final_council, plus adopt_legacy_binding_only for exact-binding recovery without mutating gates.',
+			'configure the QA gate profile for the current plan or bootstrap an exact future plan with swarm_id and plan_title. Architect-only. The initial selection may set explicit true/false values over defaults; later changes are ratchet-tighter and rejected once locked after critic approval. Supports: reviewer, test_engineer, sme_enabled, critic_pre_plan, sast_enabled, council_mode, hallucination_guard, mutation_test, phase_council, drift_check, final_council, plus adopt_legacy_binding_only for exact-binding recovery without mutating gates.',
 		agents: ['architect'],
 	},
 	web_search: {

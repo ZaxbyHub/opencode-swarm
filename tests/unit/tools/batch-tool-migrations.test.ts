@@ -64,6 +64,7 @@ mock.module('node:fs', () => ({
 // Mock semgrep
 mock.module('../../../src/sast/semgrep', () => ({
 	isSemgrepAvailable: mock(() => false),
+	checkSemgrepAvailable: mock(async () => false),
 	runSemgrep: mock().mockImplementation(async () => ({
 		available: false,
 		findings: [],

@@ -1,11 +1,15 @@
 import * as child_process from 'node:child_process';
-import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { ToolDefinition } from '@opencode-ai/plugin/tool';
 import { z } from 'zod';
 import { loadPluginConfigWithMeta } from '../config';
-import { getProjectDb, projectDbExists } from '../db/project-db.js';
+import {
+	activateTaskCheckpointReceipt,
+	buildTaskCompletionDescriptor,
+	ensureTaskCheckpointReceipt,
+	updateTaskCheckpointReceipt,
+} from '../db/task-checkpoint-receipt.js';
 import { tryAcquireLock } from '../parallel/file-locks.js';
 import { loadPlan } from '../plan/manager.js';
 import { derivePlanIdentityHash } from '../plan/utils.js';
@@ -17,6 +21,7 @@ import {
 import { createSwarmTool } from './create-tool';
 
 const CHECKPOINT_LOG_PATH = '.swarm/checkpoints.json';
+const PLAN_LOCK_PATH = 'plan.json';
 const CHECKPOINT_AGENT_NAME = 'checkpoint';
 const MAX_LABEL_LENGTH = 100;
 const GIT_TIMEOUT_MS = 30_000;
@@ -25,7 +30,6 @@ const CHECKPOINT_LOCK_MAX_ATTEMPTS = 20;
 const CHECKPOINT_LOCK_DELAY_MS = 250;
 const CHECKPOINT_LOCK_DEADLINE_MS = 45_000;
 const CHECKPOINT_RECEIPT_LOOKUP_LIMIT = 25;
-const TASK_COMPLETION_HASH_LENGTH = 16;
 const NON_SWARM_COMMIT_PATHSPEC = [
 	'.',
 	':(exclude,top).swarm',
@@ -39,7 +43,6 @@ const CONTROL_CHAR_PATTERN = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/;
 const NON_ASCII_PATTERN = /[^\x20-\x7E]/;
 
 type MutationAction = 'save' | 'restore' | 'delete' | 'save_task_completion';
-type TaskCheckpointReceiptState = 'pending' | 'committed' | 'logged';
 
 interface GitRepoProbe {
 	isRepo: boolean;
@@ -64,28 +67,9 @@ interface RetentionEvent {
 	remaining_count: number;
 }
 
-interface TaskCheckpointReceiptRow {
-	plan_identity_hash: string;
-	task_id: string;
-	label: string;
-	state: TaskCheckpointReceiptState;
-	sha: string | null;
-	created_at: string;
-	updated_at: string;
-}
-
-interface TaskCompletionCheckpointDescriptor {
-	planIdentityHash: string;
-	taskId: string;
-	label: string;
-	subject: string;
-}
-
 export const _internals: {
 	tryAcquireLock: typeof tryAcquireLock;
 	loadPlan: typeof loadPlan;
-	getProjectDb: typeof getProjectDb;
-	projectDbExists: typeof projectDbExists;
 	gitExec: typeof gitExec;
 	sleep: (ms: number) => Promise<void>;
 	findCommitByExactSubject: typeof findCommitByExactSubject;
@@ -93,8 +77,6 @@ export const _internals: {
 } = {
 	tryAcquireLock,
 	loadPlan,
-	getProjectDb,
-	projectDbExists,
 	gitExec,
 	sleep: (ms: number) => new Promise((resolve) => setTimeout(resolve, ms)),
 	findCommitByExactSubject,
@@ -253,6 +235,39 @@ function appendCheckpointEntry(
 	}
 }
 
+function upsertTaskCompletionCheckpointEntry(
+	directory: string,
+	log: CheckpointLog,
+	entry: CheckpointEntry,
+	maxCheckpoints: number,
+): void {
+	const existingIndex = log.checkpoints.findIndex(
+		(checkpoint) => checkpoint.label === entry.label,
+	);
+	if (existingIndex >= 0) {
+		const existing = log.checkpoints[existingIndex];
+		if (existing.sha === entry.sha) {
+			return;
+		}
+		log.checkpoints[existingIndex] = entry;
+		return;
+	}
+
+	log.checkpoints.push(entry);
+	if (log.checkpoints.length > maxCheckpoints) {
+		const evicted = log.checkpoints.splice(
+			0,
+			log.checkpoints.length - maxCheckpoints,
+		);
+		appendRetentionEvent(directory, {
+			event: 'checkpoint_retention_applied',
+			evicted_labels: evicted.map((checkpoint) => checkpoint.label),
+			evicted_count: evicted.length,
+			remaining_count: log.checkpoints.length,
+		});
+	}
+}
+
 function stageAllExcludingSwarm(directory: string): void {
 	_internals.gitExec(
 		['add', '--all', '--', ...NON_SWARM_COMMIT_PATHSPEC],
@@ -329,113 +344,6 @@ function isGitRepo(directory: string): GitRepoProbe {
 	}
 }
 
-function taskReceiptLabelSuffix(
-	planIdentityHash: string,
-	taskId: string,
-): string {
-	return createHash('sha256')
-		.update(JSON.stringify([planIdentityHash, taskId]), 'utf8')
-		.digest('hex')
-		.slice(0, TASK_COMPLETION_HASH_LENGTH);
-}
-
-function scrubTaskIdForCheckpointLabel(taskId: string): string {
-	const scrubbed = taskId.replace(/[^a-zA-Z0-9._-]/g, '_');
-	return scrubbed.length > 32 ? scrubbed.slice(0, 32) : scrubbed;
-}
-
-function buildTaskCompletionDescriptor(
-	plan: {
-		swarm: string;
-		title: string;
-	},
-	taskId: string,
-): TaskCompletionCheckpointDescriptor {
-	const planIdentityHash = derivePlanIdentityHash(plan);
-	const suffix = taskReceiptLabelSuffix(planIdentityHash, taskId);
-	const safeTaskId = scrubTaskIdForCheckpointLabel(taskId) || 'task';
-	return {
-		planIdentityHash,
-		taskId,
-		label: `task-${safeTaskId}-complete-${suffix}`,
-		subject: `checkpoint(task-complete ${suffix} plan ${planIdentityHash}): ${safeTaskId}`,
-	};
-}
-
-function readTaskCheckpointReceipt(
-	directory: string,
-	planIdentityHash: string,
-	taskId: string,
-): TaskCheckpointReceiptRow | null {
-	if (!_internals.projectDbExists(directory)) return null;
-	const db = _internals.getProjectDb(directory);
-	return (
-		db
-			.query<TaskCheckpointReceiptRow, [string, string]>(
-				'SELECT * FROM task_checkpoint_receipt WHERE plan_identity_hash = ? AND task_id = ?',
-			)
-			.get(planIdentityHash, taskId) ?? null
-	);
-}
-
-function ensurePendingTaskCheckpointReceipt(
-	directory: string,
-	descriptor: TaskCompletionCheckpointDescriptor,
-): TaskCheckpointReceiptRow {
-	const db = _internals.getProjectDb(directory);
-	db.transaction(() => {
-		db.run(
-			'INSERT OR IGNORE INTO task_checkpoint_receipt (plan_identity_hash, task_id, label, state, sha) VALUES (?, ?, ?, ?, NULL)',
-			[
-				descriptor.planIdentityHash,
-				descriptor.taskId,
-				descriptor.label,
-				'pending',
-			],
-		);
-	})();
-	const row = readTaskCheckpointReceipt(
-		directory,
-		descriptor.planIdentityHash,
-		descriptor.taskId,
-	);
-	if (!row) {
-		throw new Error(
-			`Failed to create or read task checkpoint receipt for ${descriptor.taskId}`,
-		);
-	}
-	if (row.label !== descriptor.label) {
-		throw new Error(
-			`Task checkpoint receipt label conflict for ${descriptor.taskId}: expected ${descriptor.label}, found ${row.label}`,
-		);
-	}
-	return row;
-}
-
-function updateTaskCheckpointReceipt(
-	directory: string,
-	descriptor: TaskCompletionCheckpointDescriptor,
-	state: TaskCheckpointReceiptState,
-	sha: string | null,
-): TaskCheckpointReceiptRow {
-	const db = _internals.getProjectDb(directory);
-	db.run(
-		"UPDATE task_checkpoint_receipt SET state = ?, sha = ?, updated_at = datetime('now') WHERE plan_identity_hash = ? AND task_id = ?",
-		[state, sha, descriptor.planIdentityHash, descriptor.taskId],
-	);
-	const row = readTaskCheckpointReceipt(
-		directory,
-		descriptor.planIdentityHash,
-		descriptor.taskId,
-	);
-	if (!row) {
-		throw new Error(
-			`Failed to re-read task checkpoint receipt for ${descriptor.taskId}`,
-		);
-	}
-	return row;
-}
-
 function findCommitByExactSubject(
 	directory: string,
 	subject: string,
@@ -443,7 +351,7 @@ function findCommitByExactSubject(
 	const output = _internals.gitExec(
 		[
 			'log',
-			'--all',
+			'HEAD',
 			'--format=%H%x00%s',
 			'--fixed-strings',
 			`--grep=${subject}`,
@@ -467,6 +375,126 @@ function findCommitByExactSubject(
 		}
 	}
 	return null;
+}
+
+async function withTaskCompletionLocksResult<T>(input: {
+	directory: string;
+	taskId: string;
+	run: () => Promise<T>;
+	onBusy?: (attempts: number) => T;
+	onFailure?: (error: unknown) => T;
+}): Promise<T> {
+	const deadline = Date.now() + CHECKPOINT_LOCK_DEADLINE_MS;
+	let attempts = 0;
+
+	while (attempts < CHECKPOINT_LOCK_MAX_ATTEMPTS && Date.now() <= deadline) {
+		attempts++;
+		let planLockResult: Awaited<ReturnType<typeof tryAcquireLock>>;
+		try {
+			planLockResult = await _internals.tryAcquireLock(
+				input.directory,
+				PLAN_LOCK_PATH,
+				CHECKPOINT_AGENT_NAME,
+				`save-task-completion-plan-${input.taskId}`,
+			);
+		} catch (error) {
+			if (input.onFailure) {
+				return input.onFailure(error);
+			}
+			return serializeResult('save_task_completion', {
+				success: false,
+				error: `save_task_completion failed: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			}) as T;
+		}
+
+		if (!planLockResult.acquired) {
+			if (
+				attempts >= CHECKPOINT_LOCK_MAX_ATTEMPTS ||
+				Date.now() + CHECKPOINT_LOCK_DELAY_MS > deadline
+			) {
+				break;
+			}
+			await _internals.sleep(CHECKPOINT_LOCK_DELAY_MS);
+			continue;
+		}
+
+		try {
+			let checkpointLockResult: Awaited<ReturnType<typeof tryAcquireLock>>;
+			try {
+				checkpointLockResult = await _internals.tryAcquireLock(
+					input.directory,
+					CHECKPOINT_LOG_PATH,
+					CHECKPOINT_AGENT_NAME,
+					`save-task-completion-checkpoint-${input.taskId}`,
+				);
+			} catch (error) {
+				if (input.onFailure) {
+					return input.onFailure(error);
+				}
+				return serializeResult('save_task_completion', {
+					success: false,
+					error: `save_task_completion failed: ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				}) as T;
+			}
+
+			if (!checkpointLockResult.acquired) {
+				if (
+					attempts >= CHECKPOINT_LOCK_MAX_ATTEMPTS ||
+					Date.now() + CHECKPOINT_LOCK_DELAY_MS > deadline
+				) {
+					break;
+				}
+				await _internals.sleep(CHECKPOINT_LOCK_DELAY_MS);
+				continue;
+			}
+
+			try {
+				return await input.run();
+			} catch (error) {
+				if (input.onFailure) {
+					return input.onFailure(error);
+				}
+				return serializeResult('save_task_completion', {
+					success: false,
+					error: `save_task_completion failed: ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				}) as T;
+			} finally {
+				if (checkpointLockResult.lock._release) {
+					try {
+						await checkpointLockResult.lock._release();
+					} catch {
+						// Release failure is advisory only.
+					}
+				}
+			}
+		} finally {
+			if (planLockResult.lock._release) {
+				try {
+					await planLockResult.lock._release();
+				} catch {
+					// Release failure is advisory only.
+				}
+			}
+		}
+	}
+
+	if (input.onBusy) {
+		return input.onBusy(attempts);
+	}
+	return serializeResult('save_task_completion', {
+		success: false,
+		status: 'checkpoint_busy',
+		error:
+			'checkpoint_busy: checkpoint or plan state is locked by another operation; retry after the current mutation completes',
+		retryable: true,
+		attempts,
+	}) as T;
 }
 
 async function withCheckpointMutationLock(input: {
@@ -781,64 +809,56 @@ async function handleSaveTaskCompletion(
 	taskId: string,
 	directory: string,
 ): Promise<string> {
-	const plan = await _internals.loadPlan(directory);
-	if (!plan) {
-		return serializeResult('save_task_completion', {
-			success: false,
-			error:
-				'save_task_completion failed: no durable plan is available under .swarm/plan.json',
-		});
-	}
-
-	const task = plan.phases
-		.flatMap((phase) => phase.tasks)
-		.find((candidate) => candidate.id === taskId);
-	if (!task) {
-		return serializeResult('save_task_completion', {
-			success: false,
-			error: `save_task_completion failed: task "${taskId}" was not found in the current plan`,
-		});
-	}
-	if (task.status !== 'completed') {
-		return serializeResult('save_task_completion', {
-			success: false,
-			error: `save_task_completion failed: task "${taskId}" is ${task.status}, not completed`,
-		});
-	}
-
-	const descriptor = buildTaskCompletionDescriptor(
-		{ swarm: plan.swarm, title: plan.title },
-		task.id,
-	);
-	const operationKey = `save-task-completion-${taskReceiptLabelSuffix(
-		descriptor.planIdentityHash,
-		descriptor.taskId,
-	)}`;
-
-	return withCheckpointMutationLock({
-		action: 'save_task_completion',
+	return withTaskCompletionLocksResult({
 		directory,
-		operationKey,
-		onContendedAttempt: () => {
-			const receipt = readTaskCheckpointReceipt(
-				directory,
-				descriptor.planIdentityHash,
-				descriptor.taskId,
-			);
-			if (receipt?.state === 'logged') {
+		taskId,
+		run: async () => {
+			const plan = await _internals.loadPlan(directory);
+			if (!plan) {
 				return serializeResult('save_task_completion', {
-					success: true,
-					idempotent: true,
-					label: receipt.label,
-					sha: receipt.sha,
-					receipt_state: receipt.state,
-					message: `Checkpoint task completion already logged for "${descriptor.taskId}"`,
+					success: false,
+					error:
+						'save_task_completion failed: no durable plan is available under .swarm/plan.json',
 				});
 			}
-			return null;
-		},
-		run: async () => {
-			const receipt = ensurePendingTaskCheckpointReceipt(directory, descriptor);
+
+			const task = plan.phases
+				.flatMap((phase) => phase.tasks)
+				.find((candidate) => candidate.id === taskId);
+			if (!task) {
+				return serializeResult('save_task_completion', {
+					success: false,
+					error: `save_task_completion failed: task "${taskId}" was not found in the current plan`,
+				});
+			}
+			if (task.status !== 'completed') {
+				return serializeResult('save_task_completion', {
+					success: false,
+					error: `save_task_completion failed: task "${taskId}" is ${task.status}, not completed`,
+				});
+			}
+
+			const planIdentityHash = derivePlanIdentityHash(plan);
+			let receipt = ensureTaskCheckpointReceipt(
+				directory,
+				planIdentityHash,
+				task.id,
+			);
+			if (receipt.completion_active === 0) {
+				receipt =
+					activateTaskCheckpointReceipt(directory, planIdentityHash, task.id) ??
+					receipt;
+			}
+			const descriptor = buildTaskCompletionDescriptor(
+				planIdentityHash,
+				task.id,
+				receipt.generation,
+			);
+			if (receipt.label !== descriptor.label) {
+				throw new Error(
+					`Task checkpoint receipt label conflict for ${task.id}: expected ${descriptor.label}, found ${receipt.label}`,
+				);
+			}
 			if (receipt.state === 'logged') {
 				return serializeResult('save_task_completion', {
 					success: true,
@@ -850,51 +870,52 @@ async function handleSaveTaskCompletion(
 				});
 			}
 
-			let committedSha = receipt.sha;
-			if (receipt.state === 'pending') {
-				committedSha =
-					_internals.findCommitByExactSubject(directory, descriptor.subject) ??
-					null;
-				if (!committedSha) {
-					_internals.stageAllExcludingSwarm(directory);
-					// Keep the commit path-limited as well as the preceding add. An
-					// exclusion on `git add` does not unstage a force-added .swarm file;
-					// the pathspec commit excludes it while leaving its index entry intact.
-					_internals.gitExec(
-						[
-							'commit',
-							'--allow-empty',
-							'-m',
-							descriptor.subject,
-							'--',
-							...NON_SWARM_COMMIT_PATHSPEC,
-						],
-						directory,
-					);
-					committedSha = getCurrentSha(directory);
-				}
-				updateTaskCheckpointReceipt(
-					directory,
-					descriptor,
-					'committed',
-					committedSha,
-				);
-			}
+			const recoveredSha = _internals.findCommitByExactSubject(
+				directory,
+				descriptor.subject,
+			);
+			let committedSha: string | null = null;
+			committedSha = recoveredSha ?? receipt.sha;
 
+			if (!committedSha) {
+				_internals.stageAllExcludingSwarm(directory);
+				// Keep the commit path-limited as well as the preceding add. An
+				// exclusion on `git add` does not unstage a force-added .swarm file;
+				// the pathspec commit excludes it while leaving its index entry intact.
+				_internals.gitExec(
+					[
+						'commit',
+						'--allow-empty',
+						'-m',
+						descriptor.subject,
+						'--',
+						...NON_SWARM_COMMIT_PATHSPEC,
+					],
+					directory,
+				);
+				committedSha = getCurrentSha(directory);
+			}
 			if (!committedSha) {
 				throw new Error(
 					`save_task_completion failed: could not resolve commit SHA for task "${descriptor.taskId}"`,
 				);
 			}
 
+			updateTaskCheckpointReceipt(
+				directory,
+				descriptor,
+				'committed',
+				committedSha,
+			);
+
 			const log = readCheckpointLog(directory);
-			appendCheckpointEntry(
+			upsertTaskCompletionCheckpointEntry(
 				directory,
 				log,
 				{
 					label: descriptor.label,
 					sha: committedSha,
-					timestamp: receipt.created_at,
+					timestamp: new Date().toISOString(),
 				},
 				loadCheckpointConfig(directory).maxCheckpoints,
 			);

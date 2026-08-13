@@ -142,15 +142,16 @@ describe('phase_complete integration — events.jsonl', () => {
 
 	describe('1. Full successful architect session', () => {
 		it('writes correct event with all agents dispatched', async () => {
-			// Use default config: required_agents: [coder, reviewer, test_engineer], require_docs: true
+			writeConfig({
+				phase_complete: { require_docs: false, policy: 'enforce' },
+			});
 			const sessionID = 'sess1';
 			ensureAgentSession(sessionID);
 
-			// Simulate: architect delegates to coder, reviewer, test_engineer, docs
+			// Simulate: architect delegates to the three configured roles.
 			recordPhaseAgentDispatch(sessionID, 'coder');
 			recordPhaseAgentDispatch(sessionID, 'reviewer');
 			recordPhaseAgentDispatch(sessionID, 'test_engineer');
-			recordPhaseAgentDispatch(sessionID, 'docs');
 
 			writeRetro(1);
 			writeGateEvidence(1);
@@ -170,7 +171,6 @@ describe('phase_complete integration — events.jsonl', () => {
 			expect(parsed.agentsDispatched).toContain('coder');
 			expect(parsed.agentsDispatched).toContain('reviewer');
 			expect(parsed.agentsDispatched).toContain('test_engineer');
-			expect(parsed.agentsDispatched).toContain('docs');
 			expect(parsed.agentsMissing).toEqual([]);
 
 			// Assert: events.jsonl has exactly 1 phase_complete event
@@ -185,7 +185,6 @@ describe('phase_complete integration — events.jsonl', () => {
 			expect(event.agents_dispatched).toContain('coder');
 			expect(event.agents_dispatched).toContain('reviewer');
 			expect(event.agents_dispatched).toContain('test_engineer');
-			expect(event.agents_dispatched).toContain('docs');
 			expect(event.agents_missing).toEqual([]);
 			expect(event.timestamp).toBeDefined();
 		});
@@ -234,12 +233,12 @@ describe('phase_complete integration — events.jsonl', () => {
 
 	describe('3. Sequential phase_complete calls — phase resets between calls', () => {
 		it('produces two separate event lines with correct phase numbers', async () => {
-			// Config: require all 4 agents, policy enforce
+			// Event sequencing is independent of the separately tested docs receipt.
 			writeConfig({
 				phase_complete: {
 					enabled: true,
 					required_agents: ['coder', 'reviewer', 'test_engineer'],
-					require_docs: true,
+					require_docs: false,
 					policy: 'enforce',
 				},
 			});
@@ -251,7 +250,6 @@ describe('phase_complete integration — events.jsonl', () => {
 			recordPhaseAgentDispatch(sessionID, 'coder');
 			recordPhaseAgentDispatch(sessionID, 'reviewer');
 			recordPhaseAgentDispatch(sessionID, 'test_engineer');
-			recordPhaseAgentDispatch(sessionID, 'docs');
 
 			writeRetro(1);
 			writeGateEvidence(1);
@@ -272,7 +270,6 @@ describe('phase_complete integration — events.jsonl', () => {
 			recordPhaseAgentDispatch(sessionID, 'coder');
 			recordPhaseAgentDispatch(sessionID, 'reviewer');
 			recordPhaseAgentDispatch(sessionID, 'test_engineer');
-			recordPhaseAgentDispatch(sessionID, 'docs');
 
 			writeRetro(2);
 			writeGateEvidence(2);

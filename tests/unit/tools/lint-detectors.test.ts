@@ -1,43 +1,41 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
-
-afterEach(() => {
-	mock.restore();
-});
-
-import * as realFs from 'node:fs';
 import {
+	_internals,
 	detectAdditionalLinter,
 	getAdditionalLinterCommand,
 } from '../../../src/tools/lint';
 
-// Mock node:fs
+const originalExistsSync = _internals.existsSync;
+const originalIsCommandAvailable = _internals.isCommandAvailable;
+const originalPlatform = _internals.platform;
+const originalReadFileSync = _internals.readFileSync;
+const originalReaddirSync = _internals.readdirSync;
 const mockExistsSync = mock();
+const mockIsCommandAvailable = mock();
 const mockReadFileSync = mock();
 const mockReaddirSync = mock();
 
-mock.module('node:fs', () => ({
-	...realFs,
-	existsSync: (...args: unknown[]) => mockExistsSync(...args),
-	readFileSync: (...args: unknown[]) => mockReadFileSync(...args),
-	readdirSync: (...args: unknown[]) => mockReaddirSync(...args),
-}));
-
-// Mock isCommandAvailable from build/discovery
-const mockIsCommandAvailable = mock();
-
-mock.module('../../../src/build/discovery', () => ({
-	isCommandAvailable: (...args: unknown[]) => mockIsCommandAvailable(...args),
-}));
+afterEach(() => {
+	_internals.existsSync = originalExistsSync;
+	_internals.isCommandAvailable = originalIsCommandAvailable;
+	_internals.platform = originalPlatform;
+	_internals.readFileSync = originalReadFileSync;
+	_internals.readdirSync = originalReaddirSync;
+	mock.restore();
+});
 
 describe('detectAdditionalLinter - Linter Detectors', () => {
 	const testCwd = '/test/project';
 
 	beforeEach(() => {
-		mock.restore();
-		mock.clearAllMocks();
-		// Default: no command available
+		_internals.existsSync = mockExistsSync as typeof _internals.existsSync;
+		_internals.isCommandAvailable =
+			mockIsCommandAvailable as typeof _internals.isCommandAvailable;
+		_internals.platform = () => 'linux';
+		_internals.readFileSync =
+			mockReadFileSync as typeof _internals.readFileSync;
+		_internals.readdirSync = mockReaddirSync as typeof _internals.readdirSync;
 		mockIsCommandAvailable.mockImplementation(() => false);
-		// Default: no files exist
 		mockExistsSync.mockImplementation(() => false);
 		mockReaddirSync.mockImplementation(() => []);
 	});
@@ -169,7 +167,9 @@ describe('detectAdditionalLinter - Linter Detectors', () => {
 			mockExistsSync.mockImplementation((p: string) => {
 				return (
 					typeof p === 'string' &&
-					(p.endsWith('build.gradle') || p.endsWith('gradlew'))
+					(p.endsWith('build.gradle') ||
+						p.endsWith('gradlew') ||
+						p.endsWith('checkstyle.xml'))
 				);
 			});
 			mockReadFileSync.mockImplementation(() => 'plugins { id("checkstyle") }');
@@ -590,7 +590,7 @@ describe('detectAdditionalLinter - Linter Detectors', () => {
 			expect(detectAdditionalLinter(testCwd)).toBe('dart-analyze');
 		});
 
-		it('returns "dart-analyze" for Flutter dart-analyze', () => {
+		it('does not select dart when only Flutter is executable', () => {
 			mockIsCommandAvailable.mockImplementation(
 				(cmd: string) => cmd === 'flutter',
 			);
@@ -599,7 +599,7 @@ describe('detectAdditionalLinter - Linter Detectors', () => {
 			);
 			mockReaddirSync.mockImplementation(() => []);
 
-			expect(detectAdditionalLinter(testCwd)).toBe('dart-analyze');
+			expect(detectAdditionalLinter(testCwd)).toBeNull();
 		});
 	});
 

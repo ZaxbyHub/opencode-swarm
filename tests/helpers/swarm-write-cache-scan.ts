@@ -686,7 +686,17 @@ function opensForWriting(args: readonly string[]): boolean {
 	const flagArg = args[1]?.trim();
 	if (!flagArg) return false;
 	const literal = readQuotedLiteral(flagArg);
-	return literal === null ? true : flagOverwrites(literal);
+	if (literal !== null) return flagOverwrites(literal);
+	// Keep the conservative non-literal default, but recognize the exact
+	// read-only/no-follow expression used by bounded evidence readers. The exact
+	// expression proves every bit is either O_RDONLY, O_NOFOLLOW, or zero. Do not
+	// generalize this to arbitrary bitmasks: O_RDWR/O_WRONLY combinations and
+	// opaque variables must continue to fail closed.
+	const compact = flagArg.replace(/\s+/g, '');
+	return (
+		compact !==
+		'fs.constants.O_RDONLY|((fs.constantsas{O_NOFOLLOW?:number}).O_NOFOLLOW??0)'
+	);
 }
 
 /**

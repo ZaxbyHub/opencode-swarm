@@ -72,6 +72,10 @@ import {
 	type Task,
 	type TaskStatus,
 } from '../config/plan-schema';
+import {
+	advanceTaskCheckpointReceiptGeneration,
+	repairTaskCheckpointReceiptForCompletion,
+} from '../db/task-checkpoint-receipt.js';
 import { isGitRepo } from '../git/branch';
 import { getWorktreeMergeFailure } from '../hooks/delegation-gate/worktree-merge-status';
 import { readSwarmFileAsync } from '../hooks/utils';
@@ -109,7 +113,7 @@ import {
 	takeSnapshotEvent,
 	takeSnapshotWithRetry,
 } from './ledger';
-import { derivePlanId } from './utils';
+import { derivePlanId, derivePlanIdentityHash } from './utils';
 
 // Track which workspaces have already had their startup ledger integrity check.
 // Keyed by resolved workspace directory so each workspace gets exactly one check
@@ -1761,6 +1765,57 @@ export async function savePlan(
 		await bunWrite(markerPath, marker);
 	} catch {
 		/* Advisory only - marker write failure does not affect plan save */
+	}
+
+	// Keep task-completion checkpoint receipts aligned with the durable plan
+	// lifecycle. A receipt represents one completion epoch, not the repository's
+	// current HEAD: unrelated commits must not make a logged receipt replayable.
+	// Advance its generation whenever a completed task is reopened/reset/removed,
+	// and activate the resulting epoch when that task becomes completed again.
+	// This runs after the authoritative plan.json rename. If SQLite bookkeeping is
+	// interrupted, the completion-side repair closes the crash window on the next
+	// non-completed -> completed transition.
+	if (currentPlan) {
+		try {
+			const oldIdentityHash = derivePlanIdentityHash(currentPlan);
+			const newIdentityHash = derivePlanIdentityHash(projectedPlan);
+			if (oldIdentityHash === newIdentityHash) {
+				const oldStatuses = new Map<string, TaskStatus>();
+				for (const phase of currentPlan.phases) {
+					for (const task of phase.tasks) oldStatuses.set(task.id, task.status);
+				}
+				const newStatuses = new Map<string, TaskStatus>();
+				for (const phase of projectedPlan.phases) {
+					for (const task of phase.tasks) newStatuses.set(task.id, task.status);
+				}
+				for (const [taskId, oldStatus] of oldStatuses) {
+					const newStatus = newStatuses.get(taskId);
+					if (oldStatus === 'completed' && newStatus !== 'completed') {
+						advanceTaskCheckpointReceiptGeneration(
+							directory,
+							oldIdentityHash,
+							taskId,
+						);
+					}
+				}
+				for (const [taskId, newStatus] of newStatuses) {
+					if (
+						newStatus === 'completed' &&
+						oldStatuses.get(taskId) !== 'completed'
+					) {
+						repairTaskCheckpointReceiptForCompletion(
+							directory,
+							newIdentityHash,
+							taskId,
+						);
+					}
+				}
+			}
+		} catch (receiptError) {
+			warn(
+				`[savePlan] task checkpoint receipt lifecycle sync failed (plan remains authoritative): ${receiptError instanceof Error ? receiptError.message : String(receiptError)}`,
+			);
+		}
 	}
 }
 

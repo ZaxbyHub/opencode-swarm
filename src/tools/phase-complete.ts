@@ -20,6 +20,10 @@ import {
 	stripKnownSwarmPrefix,
 } from '../config/schema';
 import { listEvidenceTaskIds, loadEvidence } from '../evidence/manager';
+import {
+	type ParticipationReadResult,
+	readPhaseParticipation,
+} from '../evidence/phase-participation.js';
 import { atomicWriteFile } from '../evidence/task-file.js';
 import { verifyFullAutoPhaseApproval } from '../full-auto/phase-approval';
 import { hasPassedAllGates } from '../gate-evidence';
@@ -150,7 +154,49 @@ interface PhaseCompleteResult {
 	agentsMissing: string[];
 	status: 'success' | 'incomplete' | 'warned' | 'disabled';
 	warnings: string[];
+	recovery_guidance?: string;
 	phase_council_required?: boolean;
+}
+
+function buildMissingAgentRecoveryGuidance(input: {
+	missing: string[];
+	docsAddedByConfig: boolean;
+	docsEvidenceStatus: ParticipationReadResult['status'] | null;
+	docsPlanReadable: boolean;
+	policy: PhaseCompleteConfig['policy'];
+}): string | undefined {
+	if (input.missing.length === 0) return undefined;
+	const steps = [
+		`Dispatch the missing required role${input.missing.length === 1 ? '' : 's'} (${input.missing.join(', ')}) and retry phase_complete after each Task returns a successful, non-empty result.`,
+	];
+	if (input.docsAddedByConfig && input.missing.includes('docs')) {
+		steps.push(
+			'If this phase genuinely has no documentation obligation, set phase_complete.require_docs to false in opencode-swarm configuration; that setting is independent of the QA gate profile.',
+		);
+	}
+	if (!input.docsPlanReadable && input.missing.includes('docs')) {
+		steps.push(
+			'A readable plan is required to bind durable docs participation. Restore or rebuild .swarm/plan.json/.swarm/plan.md (or recover from .swarm/plan-export/) before re-dispatching docs, then retry phase_complete.',
+		);
+	}
+	if (input.docsEvidenceStatus === 'corrupt') {
+		steps.push(
+			'The readable docs-participation projection is corrupt; a genuine docs re-dispatch will quarantine the original bytes and rebuild it safely.',
+		);
+	} else if (
+		input.docsEvidenceStatus === 'unreadable' ||
+		input.docsEvidenceStatus === 'oversized'
+	) {
+		steps.push(
+			'The docs-participation projection needs operator repair or archival before a re-dispatch can persist new proof.',
+		);
+	}
+	if (input.policy === 'warn') {
+		steps.push(
+			'The configured warn policy allows closure with a warning, but it does not create participation proof.',
+		);
+	}
+	return steps.join(' ');
 }
 
 /**
@@ -1376,21 +1422,52 @@ export async function executePhaseComplete(
 	// If the phase defines its own required_agents, use those instead of the global config.
 	// This allows non-code phases (acceptance, docs) to skip coder/reviewer/test_engineer requirements.
 	let phaseRequiredAgents: string[] | undefined;
+	let participationPlan: RuntimePlan | null = null;
 	try {
-		const planPath = validateSwarmPath(dir, 'plan.json');
-		const planRaw = fs.readFileSync(planPath, 'utf-8');
-		const plan: { phases: Array<{ id: number; required_agents?: string[] }> } =
-			JSON.parse(planRaw);
+		const plan = await loadPlan(dir);
+		if (!plan) throw new Error('plan unavailable');
+		participationPlan = plan;
 		const phaseObj = plan.phases.find((p) => p.id === phase);
 		phaseRequiredAgents = phaseObj?.required_agents;
 	} catch {
 		// plan.json missing or unreadable — fall through to config defaults
 	}
-	const effectiveRequired: string[] = [
+	const configuredRequired = [
 		...(phaseRequiredAgents ?? phaseCompleteConfig.required_agents),
 	];
+	const effectiveRequired: string[] = [...configuredRequired];
+	const docsAddedByConfig =
+		phaseCompleteConfig.require_docs && !configuredRequired.includes('docs');
 	if (phaseCompleteConfig.require_docs && !effectiveRequired.includes('docs')) {
 		effectiveRequired.push('docs');
+	}
+
+	let docsEvidenceStatus: ParticipationReadResult['status'] | null = null;
+	if (effectiveRequired.includes('docs')) {
+		// Chat-start dispatch tracking is useful for role visibility, but it does
+		// not prove the docs Task finished successfully. Required docs therefore
+		// fail closed unless an exact durable completion receipt can be rebound to
+		// a readable plan identity for this phase.
+		crossSessionResult.agents.delete('docs');
+		const staleDocsIndex = agentsDispatched.indexOf('docs');
+		if (staleDocsIndex !== -1) agentsDispatched.splice(staleDocsIndex, 1);
+		if (participationPlan) {
+			const docsParticipation = readPhaseParticipation(
+				dir,
+				participationPlan,
+				phase,
+				'docs',
+			);
+			docsEvidenceStatus = docsParticipation.status;
+			if (docsParticipation.found) {
+				crossSessionResult.agents.add('docs');
+				agentsDispatched.push('docs');
+				agentsDispatched.sort();
+				warnings.push(
+					`Recovered durable docs participation proof for phase ${phase}.`,
+				);
+			}
+		}
 	}
 
 	// Compute missing agents using cross-session aggregated agents
@@ -1431,6 +1508,13 @@ export async function executePhaseComplete(
 			// plan.json missing or unreadable — fall through to normal enforcement
 		}
 	}
+	const recoveryGuidance = buildMissingAgentRecoveryGuidance({
+		missing: agentsMissing,
+		docsAddedByConfig,
+		docsEvidenceStatus,
+		docsPlanReadable: participationPlan !== null,
+		policy: phaseCompleteConfig.policy,
+	});
 
 	// Detect potential auto-repair of retrospective bundle
 	// If loaded from a retro-N task ID with schema_version 1.0.0 and valid task_complexity,
@@ -1462,7 +1546,7 @@ export async function executePhaseComplete(
 		if (phaseCompleteConfig.policy === 'enforce') {
 			success = false;
 			status = 'incomplete';
-			message = `Phase ${phase} incomplete: missing required agents: ${agentsMissing.join(', ')}`;
+			message = `Phase ${phase} incomplete: missing required agents: ${agentsMissing.join(', ')}. ${recoveryGuidance}`;
 		} else {
 			status = 'warned';
 			warnings.push(
@@ -1481,6 +1565,7 @@ export async function executePhaseComplete(
 		agentsDispatched,
 		agentsMissing,
 		warnings,
+		...(recoveryGuidance ? { recovery_guidance: recoveryGuidance } : {}),
 	};
 
 	// Plan-free code-change enforcement (issue #1744): when there's no plan.json,

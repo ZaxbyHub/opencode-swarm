@@ -56,6 +56,10 @@ interface SetQaGatesResult {
 	};
 }
 
+export const _internals = {
+	setGatesForIdentity,
+};
+
 export async function executeSetQaGates(
 	args: SetQaGatesArgs,
 	directory: string,
@@ -143,14 +147,19 @@ export async function executeSetQaGates(
 	}
 
 	try {
-		const updated = setGatesForIdentity(directory, identity.identity, partial, {
-			projectType: args.project_type,
-			allowLegacyAdoption: currentPlanMatchesIdentity,
-			allowLegacyCollisionCreate: !currentPlanMatchesIdentity,
-			legacyAdoptionIdentity: plan
-				? { swarm: plan.swarm, title: plan.title }
-				: undefined,
-		});
+		const updated = _internals.setGatesForIdentity(
+			directory,
+			identity.identity,
+			partial,
+			{
+				projectType: args.project_type,
+				allowLegacyAdoption: currentPlanMatchesIdentity,
+				allowLegacyCollisionCreate: !currentPlanMatchesIdentity,
+				legacyAdoptionIdentity: plan
+					? { swarm: plan.swarm, title: plan.title }
+					: undefined,
+			},
+		);
 		return {
 			success: true,
 			plan_id: planId,

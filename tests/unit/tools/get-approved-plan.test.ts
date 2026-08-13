@@ -17,6 +17,11 @@ import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Plan } from '../../../src/config/plan-schema';
+import { closeProjectDb } from '../../../src/db/project-db';
+import {
+	getOrCreateProfile,
+	getOrCreateProfileForIdentity,
+} from '../../../src/db/qa-gate-profile';
 import {
 	computePlanHash,
 	initLedger,
@@ -92,7 +97,13 @@ describe('get_approved_plan tool', () => {
 
 	afterEach(async () => {
 		if (dir && existsSync(dir)) {
-			await rm(dir, { recursive: true, force: true });
+			closeProjectDb(dir);
+			await rm(dir, {
+				recursive: true,
+				force: true,
+				maxRetries: 5,
+				retryDelay: 100,
+			});
 		}
 	});
 
@@ -125,6 +136,10 @@ describe('get_approved_plan tool', () => {
 			summary: 'Phase 1 approved',
 			approved_at: new Date().toISOString(),
 		};
+		getOrCreateProfileForIdentity(dir, {
+			swarm: plan.swarm,
+			title: plan.title,
+		});
 		await takeSnapshotEvent(dir, plan, {
 			source: 'critic_approved',
 			approvalMetadata: approvalMeta,
@@ -140,6 +155,8 @@ describe('get_approved_plan tool', () => {
 		expect(result.approved_plan!.execution_profile).toEqual(
 			plan.execution_profile,
 		);
+		expect(result.qa_profile_status).toBe('bound');
+		expect(result.qa_profile_hash).toMatch(/^[a-f0-9]{64}$/);
 	});
 
 	test('drift_detected is false when current plan matches approved', async () => {
@@ -305,5 +322,36 @@ describe('get_approved_plan tool', () => {
 		});
 		// Current plan matches the latest approval
 		expect(result.drift_detected).toBe(false);
+	});
+
+	test('CD-002 reports a missing QA profile distinctly from an unbound legacy row', async () => {
+		await takeSnapshotEvent(dir, plan, {
+			source: 'critic_approved',
+			approvalMetadata: { phase: 1, verdict: 'APPROVED' },
+		});
+
+		const result = await executeGetApprovedPlan({}, dir);
+		expect(result.success).toBe(true);
+		expect(result.qa_profile_status).toBe('missing');
+		expect(result.qa_profile_hash).toBeNull();
+		expect(result.qa_profile_error).toBeUndefined();
+		expect(result.qa_profile_recovery_guidance).toBeUndefined();
+	});
+
+	test('CD-002 surfaces unbound_legacy QA profile state with null hash and recovery guidance', async () => {
+		getOrCreateProfile(dir, derivePlanId(plan), 'legacy');
+		await takeSnapshotEvent(dir, plan, {
+			source: 'critic_approved',
+			approvalMetadata: { phase: 1, verdict: 'APPROVED' },
+		});
+
+		const result = await executeGetApprovedPlan({}, dir);
+		expect(result.success).toBe(true);
+		expect(result.qa_profile_status).toBe('unbound_legacy');
+		expect(result.qa_profile_hash).toBeNull();
+		expect(result.qa_profile_error).toContain('QA_GATE_IDENTITY_UNBOUND');
+		expect(result.qa_profile_recovery_guidance).toContain(
+			'adopt_legacy_binding_only: true',
+		);
 	});
 });

@@ -222,8 +222,33 @@ export function assignOccurrenceIndices(
 
 // ============ File Lock ============
 
-async function acquireLock(lockPath: string): Promise<() => void> {
+async function waitForLockRetry(
+	delayMs: number,
+	abortSignal?: AbortSignal,
+): Promise<boolean> {
+	if (abortSignal?.aborted) return false;
+	return await new Promise<boolean>((resolve) => {
+		let settled = false;
+		const finish = (value: boolean) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timeout);
+			abortSignal?.removeEventListener('abort', onAbort);
+			resolve(value);
+		};
+		const onAbort = () => finish(false);
+		const timeout = setTimeout(() => finish(true), delayMs);
+		abortSignal?.addEventListener('abort', onAbort, { once: true });
+		if (abortSignal?.aborted) onAbort();
+	});
+}
+
+async function acquireLock(
+	lockPath: string,
+	abortSignal?: AbortSignal,
+): Promise<(() => void) | null> {
 	for (let attempt = 0; attempt <= LOCK_RETRY_DELAYS_MS.length; attempt++) {
+		if (abortSignal?.aborted) return null;
 		try {
 			const fd = fs.openSync(lockPath, 'wx');
 			fs.closeSync(fd);
@@ -248,9 +273,11 @@ async function acquireLock(lockPath: string): Promise<() => void> {
 			};
 		} catch {
 			if (attempt < LOCK_RETRY_DELAYS_MS.length) {
-				await new Promise((resolve) =>
-					setTimeout(resolve, LOCK_RETRY_DELAYS_MS[attempt]),
-				);
+				if (
+					!(await waitForLockRetry(LOCK_RETRY_DELAYS_MS[attempt], abortSignal))
+				) {
+					return null;
+				}
 			}
 		}
 	}
@@ -293,7 +320,7 @@ export async function captureOrMergeBaseline(
 	findings: SastScanFinding[],
 	engine: 'tier_a' | 'tier_a+tier_b',
 	scannedFiles: string[],
-	opts?: { force?: boolean },
+	opts?: { force?: boolean; abortSignal?: AbortSignal },
 ): Promise<CaptureResult> {
 	const phaseError = validatePhase(phase);
 	if (phaseError) return { status: 'error', message: phaseError };
@@ -319,10 +346,20 @@ export async function captureOrMergeBaseline(
 		};
 	}
 
+	if (opts?.abortSignal?.aborted) {
+		return { status: 'error', message: 'SAST baseline capture cancelled' };
+	}
 	fs.mkdirSync(path.dirname(baselinePath), { recursive: true });
 	fs.mkdirSync(path.dirname(tempPath), { recursive: true });
 
-	const releaseLock = await acquireLock(lockPath);
+	const releaseLock = await acquireLock(lockPath, opts?.abortSignal);
+	if (!releaseLock) {
+		return { status: 'error', message: 'SAST baseline capture cancelled' };
+	}
+	if (opts?.abortSignal?.aborted) {
+		releaseLock();
+		return { status: 'error', message: 'SAST baseline capture cancelled' };
+	}
 	try {
 		// Load existing baseline
 		let existing: SastBaselineFile | null = null;
@@ -415,7 +452,14 @@ export async function captureOrMergeBaseline(
 					message: `Baseline would exceed size cap (${json.length} bytes > ${MAX_BASELINE_BYTES})`,
 				};
 			}
+			if (opts?.abortSignal?.aborted) {
+				return { status: 'error', message: 'SAST baseline capture cancelled' };
+			}
 			fs.writeFileSync(tempPath, json, 'utf-8');
+			if (opts?.abortSignal?.aborted) {
+				fs.rmSync(tempPath, { force: true });
+				return { status: 'error', message: 'SAST baseline capture cancelled' };
+			}
 			fs.renameSync(tempPath, baselinePath);
 			invalidateCachedArtifact(baselinePath);
 
@@ -457,7 +501,14 @@ export async function captureOrMergeBaseline(
 				message: `Baseline would exceed size cap (${json.length} bytes > ${MAX_BASELINE_BYTES})`,
 			};
 		}
+		if (opts?.abortSignal?.aborted) {
+			return { status: 'error', message: 'SAST baseline capture cancelled' };
+		}
 		fs.writeFileSync(tempPath, json, 'utf-8');
+		if (opts?.abortSignal?.aborted) {
+			fs.rmSync(tempPath, { force: true });
+			return { status: 'error', message: 'SAST baseline capture cancelled' };
+		}
 		fs.renameSync(tempPath, baselinePath);
 		invalidateCachedArtifact(baselinePath);
 

@@ -4,12 +4,11 @@
 
 Five low-severity hardening gaps identified in the PR #1142 review are addressed. All 17 follow-up items from the PR #1194 review are also covered:
 
-- **F-001 / F-003 — `src/sast/semgrep.ts`:** The stderr truncation handler now calls
-  `child.kill('SIGTERM')` immediately upon cap breach (matching the existing stdout
-  path). Both stdout and stderr byte accounting now uses `Buffer.byteLength(chunk, 'utf8')`
-  instead of `string.length`, so the 10 MB per-stream cap is measured in bytes
-  rather than UTF-16 code units. Slicing uses `Buffer.subarray` to stay within the
-  byte budget for multibyte output.
+- **F-001 / F-003 — `src/sast/semgrep.ts` and `src/utils/external-tool-runner.ts`:**
+  Semgrep now runs through the shared bounded subprocess runner. Both output streams
+  are capped in UTF-8 bytes, an overflow triggers immediate process-tree termination,
+  and incomplete output fails closed. Raw scanner stderr is never returned to callers
+  or written into durable evidence; callers receive a stable classified diagnostic.
 
 - **F-004 — `src/lang/detector.ts`:** Glob-pattern matching (e.g. `*.csproj`) against
   directory entries now filters to regular files only via `Dirent.isDirectory()`,
@@ -24,8 +23,10 @@ Five low-severity hardening gaps identified in the PR #1142 review are addressed
 
 ## New tests
 
-- `tests/unit/sast/semgrep.test.ts`: three new cases — stderr cap parity (F-001), overflow-kill
-  immediate child termination, and SIGKILL escalation after SIGTERM grace period.
+- `src/sast/semgrep.test.ts`: focused regressions cover stderr cap parity, immediate
+  overflow termination through the real shared runner, redacted failure diagnostics,
+  and single-flight availability probing. `tests/unit/utils/external-tool-runner.test.ts`
+  covers the shared runner's bounded termination and signal-escalation state machine.
 - `tests/unit/tools/syntax-check.test.ts`: deep-nesting traversal test with 10,000
   levels of array nesting (DD-C018 — verifies explicit stack-based JSON traversal
   avoids recursive call-stack overflow on pathological input).

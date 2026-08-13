@@ -4,20 +4,20 @@
  * OpenCode background subagents (v1.16.2) render task dispatch/completion as a stable
  * XML-ish envelope via the upstream `renderOutput`:
  *
- *   <task id="<subagentSessionID>" state="running|completed|error">
+ *   <task id="<subagentSessionID>" state="running|completed|error|cancelled">
  *   <summary>...</summary>
- *   <task_result>...</task_result>   (or <task_error> for state="error")
+ *   <task_result>...</task_result>   (or <task_error> for terminal failure)
  *   </task>
  *
  * - The dispatch tool result carries `state="running"` and the subagent session id.
  * - The deferred completion arrives as a synthetic parent message part whose text is the
- *   same envelope with `state="completed"` or `state="error"`.
+ *   same envelope with `state="completed"`, `state="error"`, or `state="cancelled"`.
  *
  * These parsers are intentionally pure and defensive — they never throw — so they can be
  * used both at dispatch (tool.execute.after output) and at completion observation time.
  */
 
-export type TaskEnvelopeState = 'running' | 'completed' | 'error';
+export type TaskEnvelopeState = 'running' | 'completed' | 'error' | 'cancelled';
 
 export interface TaskEnvelope {
 	/** The subagent session id from `<task id="...">` — the cross-event correlation key. */
@@ -34,7 +34,7 @@ export interface TaskEnvelope {
 // `id` is captured non-greedily and must be non-empty; `state` is constrained to the
 // known set so unrelated `<task ...>` text cannot masquerade as an envelope.
 const TASK_ENVELOPE_RE =
-	/<task\s+id="([^"]+)"\s+state="(running|completed|error)"\s*>/;
+	/<task\s+id="([^"]+)"\s+state="(running|completed|error|cancelled|canceled)"\s*>/;
 const MAX_TASK_ENVELOPE_TEXT_CHARS = 20_000;
 
 /**
@@ -46,26 +46,34 @@ export function parseTaskEnvelope(text: unknown): TaskEnvelope | null {
 	const match = text.match(TASK_ENVELOPE_RE);
 	if (!match) return null;
 	const sessionId = match[1];
-	const state = match[2] as TaskEnvelopeState;
+	const rawState = match[2];
+	const state = (
+		rawState === 'canceled' ? 'cancelled' : rawState
+	) as TaskEnvelopeState;
 	if (!sessionId) return null;
 	const summary = extractTagText(text, 'summary');
 	const resultRaw =
-		state === 'error'
-			? extractTagText(text, 'task_error')
+		state === 'error' || state === 'cancelled'
+			? (extractTagText(text, 'task_error') ??
+				extractTagText(text, 'task_result'))
 			: extractTagText(text, 'task_result');
 	const bounded = boundEnvelopeText(resultRaw);
 	return {
 		sessionId,
 		state,
 		...(summary !== undefined ? { summary } : {}),
-		...(state === 'error' && bounded
+		...(state === 'error' || state === 'cancelled'
 			? {
-					errorText: bounded.text,
-					resultChars: bounded.chars,
-					resultTruncated: bounded.truncated,
+					...(bounded
+						? {
+								errorText: bounded.text,
+								resultChars: bounded.chars,
+								resultTruncated: bounded.truncated,
+							}
+						: {}),
 				}
 			: {}),
-		...(state !== 'error' && bounded
+		...(state !== 'error' && state !== 'cancelled' && bounded
 			? {
 					resultText: bounded.text,
 					resultChars: bounded.chars,

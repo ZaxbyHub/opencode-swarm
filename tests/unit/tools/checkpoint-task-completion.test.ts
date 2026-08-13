@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { execSync } from 'node:child_process';
+import * as childProcess from 'node:child_process';
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -12,6 +12,9 @@ import { savePlan } from '../../../src/plan/manager.js';
 import { derivePlanIdentityHash } from '../../../src/plan/utils.js';
 import { checkpoint } from '../../../src/tools/checkpoint.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
+
+const GIT_TIMEOUT_MS = 30_000;
+const GIT_MAX_BUFFER_BYTES = 5 * 1024 * 1024;
 
 function makePlan(title: string, taskId = '1.1'): Plan {
 	return {
@@ -41,35 +44,52 @@ function makePlan(title: string, taskId = '1.1'): Plan {
 	};
 }
 
-function setupGitRepo(directory: string): void {
-	execSync('git init', { cwd: directory, encoding: 'utf-8' });
-	execSync('git config --local commit.gpgsign false', {
+function runGit(directory: string, args: string[]): string {
+	const result = childProcess.spawnSync('git', args, {
 		cwd: directory,
 		encoding: 'utf-8',
+		timeout: GIT_TIMEOUT_MS,
+		stdio: ['ignore', 'pipe', 'pipe'],
+		windowsHide: true,
+		maxBuffer: GIT_MAX_BUFFER_BYTES,
 	});
-	execSync('git config user.email "test@test.com"', {
-		cwd: directory,
-		encoding: 'utf-8',
-	});
-	execSync('git config user.name "Test"', {
-		cwd: directory,
-		encoding: 'utf-8',
-	});
-	fs.writeFileSync(path.join(directory, 'initial.txt'), 'initial');
-	execSync('git add .', { cwd: directory, encoding: 'utf-8' });
-	execSync('git commit -m "initial"', { cwd: directory, encoding: 'utf-8' });
+	if (result.error) throw result.error;
+	if (result.status !== 0) {
+		throw new Error(result.stderr?.trim() || `git exited ${result.status}`);
+	}
+	return result.stdout ?? '';
 }
 
-function descriptorFor(plan: Plan, taskId: string) {
+function setupGitRepo(directory: string): void {
+	runGit(directory, ['init']);
+	runGit(directory, ['config', '--local', 'commit.gpgsign', 'false']);
+	runGit(directory, ['config', 'user.email', 'test@test.com']);
+	runGit(directory, ['config', 'user.name', 'Test']);
+	fs.writeFileSync(path.join(directory, 'initial.txt'), 'initial');
+	runGit(directory, ['add', '--', 'initial.txt']);
+	runGit(directory, ['commit', '-m', 'initial']);
+}
+
+function descriptorFor(plan: Plan, taskId: string, generation = 1) {
 	const planIdentityHash = derivePlanIdentityHash(plan);
 	const suffix = createHash('sha256')
-		.update(JSON.stringify([planIdentityHash, taskId]), 'utf8')
+		.update(
+			JSON.stringify(
+				generation === 1
+					? [planIdentityHash, taskId]
+					: [planIdentityHash, taskId, generation],
+			),
+			'utf8',
+		)
 		.digest('hex')
 		.slice(0, 16);
 	return {
 		planIdentityHash,
 		label: `task-${taskId}-complete-${suffix}`,
-		subject: `checkpoint(task-complete ${suffix} plan ${planIdentityHash}): ${taskId}`,
+		subject:
+			generation === 1
+				? `checkpoint(task-complete ${suffix} plan ${planIdentityHash}): ${taskId}`
+				: `checkpoint(task-complete ${suffix} gen ${generation} plan ${planIdentityHash}): ${taskId}`,
 	};
 }
 
@@ -99,28 +119,24 @@ describe('checkpoint save_task_completion', () => {
 		await savePlan(tempDir, plan, { preserveCompletedStatuses: false });
 		fs.writeFileSync(path.join(tempDir, 'task-file.txt'), 'task change');
 
-		const headBefore = execSync('git rev-parse HEAD', {
-			cwd: tempDir,
-			encoding: 'utf-8',
-		}).trim();
+		const headBefore = runGit(tempDir, ['rev-parse', 'HEAD']).trim();
 		const result = JSON.parse(
 			await checkpoint.execute({
 				action: 'save_task_completion',
 				task_id: '1.1',
 			}),
 		);
-		const headAfter = execSync('git rev-parse HEAD', {
-			cwd: tempDir,
-			encoding: 'utf-8',
-		}).trim();
+		const headAfter = runGit(tempDir, ['rev-parse', 'HEAD']).trim();
 
 		expect(result.success).toBe(true);
 		expect(result.receipt_state).toBe('logged');
 		expect(headAfter).not.toBe(headBefore);
-		const committedFiles = execSync('git show --name-only --format="" HEAD', {
-			cwd: tempDir,
-			encoding: 'utf-8',
-		});
+		const committedFiles = runGit(tempDir, [
+			'show',
+			'--name-only',
+			'--format=',
+			'HEAD',
+		]);
 		expect(committedFiles).toContain('task-file.txt');
 		expect(committedFiles).not.toContain('.swarm');
 
@@ -198,33 +214,25 @@ describe('checkpoint save_task_completion', () => {
 		await savePlan(tempDir, plan, { preserveCompletedStatuses: false });
 
 		const descriptor = descriptorFor(plan, '1.1');
-		execSync(`git commit --allow-empty -m "${descriptor.subject}"`, {
-			cwd: tempDir,
-			encoding: 'utf-8',
-		});
-		const existingSha = execSync('git rev-parse HEAD', {
-			cwd: tempDir,
-			encoding: 'utf-8',
-		}).trim();
+		runGit(tempDir, ['commit', '--allow-empty', '-m', descriptor.subject]);
+		const existingSha = runGit(tempDir, ['rev-parse', 'HEAD']).trim();
 		getProjectDb(tempDir).run(
 			'INSERT INTO task_checkpoint_receipt (plan_identity_hash, task_id, label, state, sha) VALUES (?, ?, ?, ?, NULL)',
 			[descriptor.planIdentityHash, '1.1', descriptor.label, 'pending'],
 		);
 
-		const countBefore = execSync('git rev-list --count HEAD', {
-			cwd: tempDir,
-			encoding: 'utf-8',
-		}).trim();
+		const countBefore = Number(
+			runGit(tempDir, ['rev-list', '--count', 'HEAD']).trim(),
+		);
 		const result = JSON.parse(
 			await checkpoint.execute({
 				action: 'save_task_completion',
 				task_id: '1.1',
 			}),
 		);
-		const countAfter = execSync('git rev-list --count HEAD', {
-			cwd: tempDir,
-			encoding: 'utf-8',
-		}).trim();
+		const countAfter = Number(
+			runGit(tempDir, ['rev-list', '--count', 'HEAD']).trim(),
+		);
 
 		expect(result.success).toBe(true);
 		expect(countAfter).toBe(countBefore);
@@ -243,14 +251,8 @@ describe('checkpoint save_task_completion', () => {
 		await savePlan(tempDir, plan, { preserveCompletedStatuses: false });
 
 		const descriptor = descriptorFor(plan, '1.1');
-		execSync(`git commit --allow-empty -m "${descriptor.subject}"`, {
-			cwd: tempDir,
-			encoding: 'utf-8',
-		});
-		const committedSha = execSync('git rev-parse HEAD', {
-			cwd: tempDir,
-			encoding: 'utf-8',
-		}).trim();
+		runGit(tempDir, ['commit', '--allow-empty', '-m', descriptor.subject]);
+		const committedSha = runGit(tempDir, ['rev-parse', 'HEAD']).trim();
 		getProjectDb(tempDir).run(
 			'INSERT INTO task_checkpoint_receipt (plan_identity_hash, task_id, label, state, sha) VALUES (?, ?, ?, ?, ?)',
 			[
@@ -267,20 +269,18 @@ describe('checkpoint save_task_completion', () => {
 			'utf-8',
 		);
 
-		const countBefore = execSync('git rev-list --count HEAD', {
-			cwd: tempDir,
-			encoding: 'utf-8',
-		}).trim();
+		const countBefore = Number(
+			runGit(tempDir, ['rev-list', '--count', 'HEAD']).trim(),
+		);
 		const result = JSON.parse(
 			await checkpoint.execute({
 				action: 'save_task_completion',
 				task_id: '1.1',
 			}),
 		);
-		const countAfter = execSync('git rev-list --count HEAD', {
-			cwd: tempDir,
-			encoding: 'utf-8',
-		}).trim();
+		const countAfter = Number(
+			runGit(tempDir, ['rev-list', '--count', 'HEAD']).trim(),
+		);
 
 		expect(result.success).toBe(true);
 		expect(result.sha).toBe(committedSha);
@@ -307,14 +307,8 @@ describe('checkpoint save_task_completion', () => {
 		await savePlan(tempDir, plan, { preserveCompletedStatuses: false });
 
 		const descriptor = descriptorFor(plan, '1.1');
-		execSync(`git commit --allow-empty -m "${descriptor.subject}"`, {
-			cwd: tempDir,
-			encoding: 'utf-8',
-		});
-		const committedSha = execSync('git rev-parse HEAD', {
-			cwd: tempDir,
-			encoding: 'utf-8',
-		}).trim();
+		runGit(tempDir, ['commit', '--allow-empty', '-m', descriptor.subject]);
+		const committedSha = runGit(tempDir, ['rev-parse', 'HEAD']).trim();
 		getProjectDb(tempDir).run(
 			'INSERT INTO task_checkpoint_receipt (plan_identity_hash, task_id, label, state, sha) VALUES (?, ?, ?, ?, ?)',
 			[
@@ -345,20 +339,18 @@ describe('checkpoint save_task_completion', () => {
 			'utf-8',
 		);
 
-		const countBefore = execSync('git rev-list --count HEAD', {
-			cwd: tempDir,
-			encoding: 'utf-8',
-		}).trim();
+		const countBefore = Number(
+			runGit(tempDir, ['rev-list', '--count', 'HEAD']).trim(),
+		);
 		const result = JSON.parse(
 			await checkpoint.execute({
 				action: 'save_task_completion',
 				task_id: '1.1',
 			}),
 		);
-		const countAfter = execSync('git rev-list --count HEAD', {
-			cwd: tempDir,
-			encoding: 'utf-8',
-		}).trim();
+		const countAfter = Number(
+			runGit(tempDir, ['rev-list', '--count', 'HEAD']).trim(),
+		);
 
 		expect(result.success).toBe(true);
 		expect(result.sha).toBe(committedSha);
@@ -416,5 +408,88 @@ describe('checkpoint save_task_completion', () => {
 		expect(rows).toHaveLength(2);
 		expect(new Set(rows.map((row) => row.plan_identity_hash)).size).toBe(2);
 		expect(rows.map((row) => row.task_id)).toEqual(['1.1', '1.1']);
+	});
+
+	test('IA-001: a logged receipt stays idempotent after an unrelated commit moves HEAD', async () => {
+		const plan = makePlan('Unrelated Commit Plan');
+		await savePlan(tempDir, plan, { preserveCompletedStatuses: false });
+
+		const first = JSON.parse(
+			await checkpoint.execute({
+				action: 'save_task_completion',
+				task_id: '1.1',
+			}),
+		);
+		expect(first.success).toBe(true);
+
+		fs.writeFileSync(path.join(tempDir, 'follow-up.txt'), 'follow-up work');
+		runGit(tempDir, ['add', '--', 'follow-up.txt']);
+		runGit(tempDir, ['commit', '-m', 'follow-up work']);
+		const headBeforeSecond = runGit(tempDir, ['rev-parse', 'HEAD']).trim();
+		const countBeforeSecond = Number(
+			runGit(tempDir, ['rev-list', '--count', 'HEAD']).trim(),
+		);
+
+		const second = JSON.parse(
+			await checkpoint.execute({
+				action: 'save_task_completion',
+				task_id: '1.1',
+			}),
+		);
+		const headAfterSecond = runGit(tempDir, ['rev-parse', 'HEAD']).trim();
+		const countAfterSecond = Number(
+			runGit(tempDir, ['rev-list', '--count', 'HEAD']).trim(),
+		);
+
+		expect(second.success).toBe(true);
+		expect(second.idempotent).toBe(true);
+		expect(headAfterSecond).toBe(headBeforeSecond);
+		expect(countAfterSecond).toBe(countBeforeSecond);
+		expect(second.sha).toBe(first.sha);
+		expect(second.label).toBe(first.label);
+	});
+
+	test('CS-002: pending receipts ignore an exact-subject commit that only exists on another branch', async () => {
+		const plan = makePlan('Non Ancestor Recovery Plan');
+		await savePlan(tempDir, plan, { preserveCompletedStatuses: false });
+
+		const descriptor = descriptorFor(plan, '1.1');
+		const primaryBranch = runGit(tempDir, ['branch', '--show-current']).trim();
+		runGit(tempDir, ['checkout', '-b', 'checkpoint-side-branch']);
+		runGit(tempDir, ['commit', '--allow-empty', '-m', descriptor.subject]);
+		const unrelatedSha = runGit(tempDir, ['rev-parse', 'HEAD']).trim();
+		runGit(tempDir, ['checkout', primaryBranch]);
+
+		fs.writeFileSync(path.join(tempDir, 'mainline.txt'), 'mainline change');
+		runGit(tempDir, ['add', '--', 'mainline.txt']);
+		runGit(tempDir, ['commit', '-m', 'mainline change']);
+		getProjectDb(tempDir).run(
+			'INSERT INTO task_checkpoint_receipt (plan_identity_hash, task_id, label, state, sha) VALUES (?, ?, ?, ?, NULL)',
+			[descriptor.planIdentityHash, '1.1', descriptor.label, 'pending'],
+		);
+
+		const countBefore = Number(
+			runGit(tempDir, ['rev-list', '--count', 'HEAD']).trim(),
+		);
+		const result = JSON.parse(
+			await checkpoint.execute({
+				action: 'save_task_completion',
+				task_id: '1.1',
+			}),
+		);
+		const countAfter = Number(
+			runGit(tempDir, ['rev-list', '--count', 'HEAD']).trim(),
+		);
+
+		expect(result.success).toBe(true);
+		expect(result.sha).not.toBe(unrelatedSha);
+		expect(countAfter).toBe(countBefore + 1);
+
+		const receipt = getProjectDb(tempDir)
+			.query<{ state: string; sha: string }, [string, string]>(
+				'SELECT state, sha FROM task_checkpoint_receipt WHERE plan_identity_hash = ? AND task_id = ?',
+			)
+			.get(descriptor.planIdentityHash, '1.1');
+		expect(receipt).toEqual({ state: 'logged', sha: result.sha });
 	});
 });

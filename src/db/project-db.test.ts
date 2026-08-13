@@ -94,7 +94,182 @@ describe('project-db', () => {
 			)
 			.all()
 			.map((r) => r.version);
-		expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+		expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+		db.close();
+	});
+
+	test('v12 preserves populated v11 receipts and initializes completion generation', () => {
+		const db = new Database(':memory:');
+		runProjectMigrations(db);
+		db.run('DELETE FROM schema_migrations WHERE version = 12');
+		db.run(`CREATE TABLE task_checkpoint_receipt_v11 (
+			plan_identity_hash TEXT NOT NULL,
+			task_id TEXT NOT NULL,
+			label TEXT NOT NULL,
+			state TEXT NOT NULL CHECK(state IN ('pending', 'committed', 'logged')),
+			sha TEXT,
+			created_at TEXT NOT NULL DEFAULT (datetime('now')),
+			updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+			PRIMARY KEY(plan_identity_hash, task_id)
+		)`);
+		db.run(`INSERT INTO task_checkpoint_receipt_v11
+			(plan_identity_hash, task_id, label, state, sha)
+			SELECT 'legacy-hash', '1.1', 'legacy-label', 'logged', 'abc123'`);
+		db.run('DROP TABLE task_checkpoint_receipt');
+		db.run(
+			'ALTER TABLE task_checkpoint_receipt_v11 RENAME TO task_checkpoint_receipt',
+		);
+
+		runProjectMigrations(db);
+
+		const receipt = db
+			.query<
+				{
+					label: string;
+					state: string;
+					sha: string;
+					generation: number;
+					completion_active: number;
+				},
+				[]
+			>(
+				`SELECT label, state, sha, generation, completion_active
+				 FROM task_checkpoint_receipt`,
+			)
+			.get();
+		expect(receipt).toEqual({
+			label: 'legacy-label',
+			state: 'logged',
+			sha: 'abc123',
+			generation: 1,
+			completion_active: 1,
+		});
+		db.close();
+	});
+
+	test('upgrades populated v3 QA profiles without changing legacy data or locks (TF-001)', () => {
+		const db = new Database(':memory:');
+		// Previous coverage migrated only an empty database from v0. Recreate the
+		// exact pre-PR v3 schema so additive upgrades cannot silently lose existing
+		// gate selections or weaken an already-approved row's lock.
+		db.run(`CREATE TABLE schema_migrations (
+			version INTEGER PRIMARY KEY,
+			name TEXT NOT NULL,
+			applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+		)`);
+		db.run(`CREATE TABLE project_constraints (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			constraint_type TEXT NOT NULL,
+			content TEXT NOT NULL,
+			created_at TEXT NOT NULL DEFAULT (datetime('now'))
+		)`);
+		db.run(`CREATE TABLE qa_gate_profile (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			plan_id TEXT NOT NULL UNIQUE,
+			created_at TEXT NOT NULL DEFAULT (datetime('now')),
+			project_type TEXT,
+			gates TEXT NOT NULL DEFAULT '{}',
+			locked_at TEXT,
+			locked_by_snapshot_seq INTEGER
+		)`);
+		db.run(`CREATE TRIGGER trg_qa_gate_profile_no_update_after_lock
+			BEFORE UPDATE ON qa_gate_profile
+			WHEN OLD.locked_at IS NOT NULL
+			BEGIN
+				SELECT RAISE(ABORT, 'qa_gate_profile row is locked and cannot be modified after critic approval');
+			END`);
+		for (const [version, name] of [
+			[1, 'create_project_constraints'],
+			[2, 'create_qa_gate_profile'],
+			[3, 'create_qa_gate_profile_immutability_trigger'],
+		] as const) {
+			db.run('INSERT INTO schema_migrations (version, name) VALUES (?, ?)', [
+				version,
+				name,
+			]);
+		}
+		db.run(
+			`INSERT INTO qa_gate_profile (plan_id, project_type, gates)
+			 VALUES ('legacy-open', 'ts', '{"reviewer":false,"drift_check":true}')`,
+		);
+		db.run(
+			`INSERT INTO qa_gate_profile
+			 (plan_id, project_type, gates, locked_at, locked_by_snapshot_seq)
+			 VALUES ('legacy-locked', 'rust', '{"reviewer":true}', '2026-01-02T03:04:05.000Z', 17)`,
+		);
+
+		runProjectMigrations(db);
+
+		const versions = db
+			.query<{ version: number }, []>(
+				'SELECT version FROM schema_migrations ORDER BY version',
+			)
+			.all()
+			.map((row) => row.version);
+		expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+		const rows = db
+			.query<
+				{
+					plan_id: string;
+					project_type: string;
+					gates: string;
+					locked_at: string | null;
+					locked_by_snapshot_seq: number | null;
+					raw_swarm: string | null;
+					raw_title: string | null;
+					identity_hash: string | null;
+				},
+				[]
+			>(
+				`SELECT plan_id, project_type, gates, locked_at,
+					locked_by_snapshot_seq, raw_swarm, raw_title, identity_hash
+				 FROM qa_gate_profile ORDER BY plan_id`,
+			)
+			.all();
+		expect(rows).toEqual([
+			{
+				plan_id: 'legacy-locked',
+				project_type: 'rust',
+				gates: '{"reviewer":true}',
+				locked_at: '2026-01-02T03:04:05.000Z',
+				locked_by_snapshot_seq: 17,
+				raw_swarm: null,
+				raw_title: null,
+				identity_hash: null,
+			},
+			{
+				plan_id: 'legacy-open',
+				project_type: 'ts',
+				gates: '{"reviewer":false,"drift_check":true}',
+				locked_at: null,
+				locked_by_snapshot_seq: null,
+				raw_swarm: null,
+				raw_title: null,
+				identity_hash: null,
+			},
+		]);
+		expect(
+			db
+				.query<{ count: number }, []>(
+					'SELECT COUNT(*) AS count FROM qa_gate_profile_identity',
+				)
+				.get()?.count,
+		).toBe(0);
+		expect(() => {
+			db.run(
+				`UPDATE qa_gate_profile SET gates = '{}' WHERE plan_id = 'legacy-locked'`,
+			);
+		}).toThrow(/locked/i);
+		db.run(
+			`UPDATE qa_gate_profile SET gates = '{"reviewer":true}' WHERE plan_id = 'legacy-open'`,
+		);
+		expect(
+			db
+				.query<{ gates: string }, []>(
+					"SELECT gates FROM qa_gate_profile WHERE plan_id = 'legacy-open'",
+				)
+				.get()?.gates,
+		).toBe('{"reviewer":true}');
 		db.close();
 	});
 

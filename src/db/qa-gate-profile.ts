@@ -30,6 +30,7 @@ export const _internals: {
 	getEffectiveGates: typeof getEffectiveGates;
 	computeProfileHash: typeof computeProfileHash;
 	hasAnyProfileWithEnabledGate: typeof hasAnyProfileWithEnabledGate;
+	afterSetGatesRead: (profile: QaGateProfile) => void;
 	afterSetGatesForIdentityRead?:
 		| ((context: {
 				directory: string;
@@ -50,6 +51,7 @@ export const _internals: {
 	getEffectiveGates,
 	computeProfileHash,
 	hasAnyProfileWithEnabledGate,
+	afterSetGatesRead: () => {},
 };
 
 /**
@@ -202,6 +204,8 @@ function withImmediateTransaction<T>(
 	}
 }
 
+let qaGateProfileSavepointCounter = 0;
+
 function rowToProfile(row: QaGateProfileRow): QaGateProfile {
 	return rowToProfileWithBinding(row);
 }
@@ -232,12 +236,13 @@ function rowToProfileWithBinding(
 		parsed.phase_council = true;
 		parsed.council_mode = false;
 	}
-	// Filter to known gate keys only — prevents legacy/removed gate fields
-	// (e.g. council_general_review) from leaking into the live gates object.
+	// Filter to known boolean gate keys only — prevents legacy/removed fields
+	// (e.g. council_general_review) and malformed persisted values from leaking
+	// into the live gates object. Invalid values fall back to the safe defaults.
 	const knownKeys = new Set(Object.keys(DEFAULT_QA_GATES));
 	const filteredParsed: Partial<QaGates> = {};
 	for (const key of Object.keys(parsed) as Array<keyof QaGates>) {
-		if (knownKeys.has(key)) {
+		if (knownKeys.has(key) && typeof parsed[key] === 'boolean') {
 			filteredParsed[key] = parsed[key];
 		}
 	}
@@ -528,8 +533,14 @@ export function hasAnyProfileWithEnabledGate(
 
 /**
  * Return the existing profile for `planId`, or atomically create one seeded
- * with `DEFAULT_QA_GATES` overlaid by the initial selection. Tolerates races
- * on the UNIQUE index; a loser re-reads and returns the winning row.
+ * with `DEFAULT_QA_GATES` plus the caller's initial gate selection if none
+ * exists.
+ *
+ * `initialGates` is applied only by the winning INSERT. A caller that loses a
+ * UNIQUE-index race receives the winner's profile unchanged and must still run
+ * `setGates` to apply the normal ratchet rules. This lets the first architect
+ * selection turn default-on gates off without giving a later/concurrent caller
+ * a way to loosen an already-persisted `true` gate.
  */
 export function getOrCreateProfile(
 	directory: string,
@@ -541,7 +552,13 @@ export function getOrCreateProfile(
 	if (existing) return existing;
 
 	const db = getProjectDb(directory);
-	const gatesJson = JSON.stringify({ ...DEFAULT_QA_GATES, ...initialGates });
+	const seededGates: QaGates = { ...DEFAULT_QA_GATES };
+	for (const key of Object.keys(DEFAULT_QA_GATES) as Array<keyof QaGates>) {
+		if (typeof initialGates[key] === 'boolean') {
+			seededGates[key] = initialGates[key];
+		}
+	}
+	const gatesJson = JSON.stringify(seededGates);
 	const insert = db.transaction(() => {
 		db.run(
 			'INSERT INTO qa_gate_profile (plan_id, project_type, gates) VALUES (?, ?, ?)',
@@ -608,8 +625,17 @@ export function setGates(
 	gates: Partial<QaGates>,
 ): QaGateProfile {
 	const db = getProjectDb(directory);
-	return withImmediateTransaction(db, () => {
-		const currentRow = readProfileRowByPlanId(db, planId);
+	const savepointName = `qa_gate_profile_set_${qaGateProfileSavepointCounter++}`;
+	const startedTransaction = !db.inTransaction;
+	db.run(startedTransaction ? 'BEGIN IMMEDIATE' : `SAVEPOINT ${savepointName}`);
+	try {
+		// Acquire the write lock before reading so concurrent writers cannot
+		// observe the same stale snapshot and later clobber one another.
+		const currentRow = db
+			.query<QaGateProfileRow, [string]>(
+				'SELECT * FROM qa_gate_profile WHERE plan_id = ?',
+			)
+			.get(planId);
 		if (!currentRow) {
 			throw new Error(
 				`No QA gate profile found for plan_id=${planId} — call getOrCreateProfile first`,
@@ -621,6 +647,7 @@ export function setGates(
 				'Cannot modify gates: QA gate profile is locked after critic approval',
 			);
 		}
+		_internals.afterSetGatesRead(current);
 
 		const merged: QaGates = { ...current.gates };
 		for (const key of Object.keys(gates) as Array<keyof QaGates>) {
@@ -636,19 +663,35 @@ export function setGates(
 			}
 		}
 
-		db.run('UPDATE qa_gate_profile SET gates = ? WHERE id = ?', [
+		db.run('UPDATE qa_gate_profile SET gates = ? WHERE plan_id = ?', [
 			JSON.stringify(merged),
-			current.id,
+			planId,
 		]);
 
-		const updatedRow = readProfileRowById(db, current.id);
+		const updatedRow = db
+			.query<QaGateProfileRow, [string]>(
+				'SELECT * FROM qa_gate_profile WHERE plan_id = ?',
+			)
+			.get(planId);
 		if (!updatedRow) {
 			throw new Error(
 				`Failed to re-read QA gate profile after update for plan_id=${planId}`,
 			);
 		}
+
+		db.run(startedTransaction ? 'COMMIT' : `RELEASE ${savepointName}`);
 		return rowToProfile(updatedRow);
-	});
+	} catch (err) {
+		try {
+			db.run(startedTransaction ? 'ROLLBACK' : `ROLLBACK TO ${savepointName}`);
+			if (!startedTransaction) {
+				db.run(`RELEASE ${savepointName}`);
+			}
+		} catch {
+			// Ignore rollback cleanup failures; surface the original error below.
+		}
+		throw err;
+	}
 }
 
 export function setGatesForIdentity(
@@ -659,11 +702,30 @@ export function setGatesForIdentity(
 ): QaGateProfile {
 	const db = getProjectDb(directory);
 	const exact = buildProfileIdentity(identity);
+	const savepointName = `qa_gate_profile_set_identity_${qaGateProfileSavepointCounter++}`;
+	const startedTransaction = !db.inTransaction;
+	const finishTransaction = (): void => {
+		db.run(startedTransaction ? 'COMMIT' : `RELEASE ${savepointName}`);
+	};
+	const rollbackTransaction = (): void => {
+		db.run(startedTransaction ? 'ROLLBACK' : `ROLLBACK TO ${savepointName}`);
+		if (!startedTransaction) {
+			db.run(`RELEASE ${savepointName}`);
+		}
+	};
 
-	return withImmediateTransaction(db, () => {
+	db.run(startedTransaction ? 'BEGIN IMMEDIATE' : `SAVEPOINT ${savepointName}`);
+	try {
 		let lookup = lookupProfileForIdentityTx(db, exact);
 		if (lookup.kind === 'missing') {
-			return createExactProfileTx(db, exact, options.projectType, gates);
+			const created = createExactProfileTx(
+				db,
+				exact,
+				options.projectType,
+				gates,
+			);
+			finishTransaction();
+			return created;
 		}
 
 		if (lookup.kind === 'unbound_legacy') {
@@ -676,7 +738,14 @@ export function setGatesForIdentity(
 					);
 				}
 			} else if (options.allowLegacyCollisionCreate === true) {
-				return createExactProfileTx(db, exact, options.projectType, gates);
+				const created = createExactProfileTx(
+					db,
+					exact,
+					options.projectType,
+					gates,
+				);
+				finishTransaction();
+				return created;
 			} else {
 				throw new QaGateProfileIdentityUnboundError(lookup.identity);
 			}
@@ -698,6 +767,7 @@ export function setGatesForIdentity(
 
 		if (current.locked_at !== null) {
 			if (!hasAnyGatePatch(gates)) {
+				finishTransaction();
 				return current;
 			}
 			throw new Error(
@@ -731,8 +801,17 @@ export function setGatesForIdentity(
 				`Failed to re-read QA gate profile after exact-identity update for plan_id=${exact.planId}`,
 			);
 		}
+
+		finishTransaction();
 		return rowToProfileWithBinding(updatedRow, binding);
-	});
+	} catch (err) {
+		try {
+			rollbackTransaction();
+		} catch {
+			// Ignore rollback cleanup failures; surface the original error below.
+		}
+		throw err;
+	}
 }
 
 /**
@@ -834,7 +913,8 @@ export function computeProfileHash(profile: QaGateProfile): string {
  * - council_mode — src/state.ts isCouncilGateActive + src/hooks/delegation-gate.ts
  *   (replaces per-task Stage B with full 5-member council via submit_council_verdicts).
  * - sme_enabled — consumed during MODE: BRAINSTORM/SPECIFY architect dialogue.
- * - critic_pre_plan — consumed by MODE: PLAN critic delegation before save_plan.
+ * - critic_pre_plan — src/hooks/delegation-gate.ts (blocks coder delegation
+ *   until plan-critic approval when the effective gate is enabled).
  * - sast_enabled — consumed inside pre_check_batch tool.
  * - hallucination_guard — src/tools/phase-complete.ts Gate 3 (blocks phase_complete
  *   until .swarm/evidence/{phase}/hallucination-guard.json has APPROVED verdict).

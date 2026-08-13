@@ -14,6 +14,7 @@ import { describe, expect, test } from 'bun:test';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
+	_internals,
 	classifySastFindings,
 	getChangedLineRanges,
 	parseDiffLineRanges,
@@ -23,6 +24,7 @@ import type { SastScanFinding } from '../../../src/tools/sast-scan';
 // ============ classifySastFindings unit tests ============
 
 describe('classifySastFindings', () => {
+	const originalPlatform = _internals.platform;
 	const makeFinding = (
 		file: string,
 		line: number,
@@ -119,7 +121,7 @@ describe('classifySastFindings', () => {
 		expect(preexistingFindings).toHaveLength(0);
 	});
 
-	test('empty changedLineRanges → fail-closed, all findings treated as new', () => {
+	test('authoritative empty changedLineRanges treats findings as pre-existing', () => {
 		const findings = [makeFinding('/workspace/src/foo.ts', 10)];
 
 		const { newFindings, preexistingFindings } = classifySastFindings(
@@ -128,8 +130,8 @@ describe('classifySastFindings', () => {
 			'/workspace',
 		);
 
-		expect(newFindings).toHaveLength(1);
-		expect(preexistingFindings).toHaveLength(0);
+		expect(newFindings).toHaveLength(0);
+		expect(preexistingFindings).toHaveLength(1);
 	});
 
 	test('windows-style paths normalised correctly', () => {
@@ -146,6 +148,65 @@ describe('classifySastFindings', () => {
 
 		expect(newFindings).toHaveLength(1);
 	});
+
+	test('relative finding paths resolve against the injected project root', () => {
+		const directory = path.resolve('project-root-distinct-from-host-cwd');
+		const changedRanges = new Map([['src/foo.ts', new Set([10])]]);
+
+		const { newFindings, preexistingFindings } = classifySastFindings(
+			[makeFinding('src/foo.ts', 10)],
+			changedRanges,
+			directory,
+		);
+
+		expect(newFindings).toHaveLength(1);
+		expect(preexistingFindings).toHaveLength(0);
+	});
+
+	test('outside and traversal finding paths fail closed as new', () => {
+		const directory = path.resolve('project-root');
+		const outside = path.resolve(directory, '..', 'outside.ts');
+		const findings = [
+			makeFinding(outside, 10),
+			makeFinding(path.join('..', 'outside.ts'), 11),
+		];
+
+		const { newFindings, preexistingFindings } = classifySastFindings(
+			findings,
+			new Map(),
+			directory,
+		);
+
+		expect(newFindings).toHaveLength(2);
+		expect(preexistingFindings).toHaveLength(0);
+	});
+
+	test('NUL-containing impossible finding paths fail closed as new', () => {
+		const { newFindings, preexistingFindings } = classifySastFindings(
+			[makeFinding('src/foo.ts\0', 10)],
+			new Map(),
+			'/workspace',
+		);
+
+		expect(newFindings).toHaveLength(1);
+		expect(preexistingFindings).toHaveLength(0);
+	});
+
+	test('matches changed paths case-insensitively on macOS', () => {
+		_internals.platform = () => 'darwin';
+		try {
+			const { newFindings, preexistingFindings } = classifySastFindings(
+				[makeFinding('/workspace/SRC/AUTH.TS', 10)],
+				new Map([['src/auth.ts', new Set([10])]]),
+				'/workspace',
+			);
+
+			expect(newFindings).toHaveLength(1);
+			expect(preexistingFindings).toHaveLength(0);
+		} finally {
+			_internals.platform = originalPlatform;
+		}
+	});
 });
 
 // ============ parseDiffLineRanges unit tests ============
@@ -153,10 +214,10 @@ describe('classifySastFindings', () => {
 describe('parseDiffLineRanges', () => {
 	test('parses single file with single hunk', () => {
 		const diff = [
-			'diff --git a/src/foo.ts b/src/foo.ts',
+			'diff --git src/foo.ts src/foo.ts',
 			'index abc1234..def5678 100644',
-			'--- a/src/foo.ts',
-			'+++ b/src/foo.ts',
+			'--- src/foo.ts',
+			'+++ src/foo.ts',
 			'@@ -10,3 +10,5 @@ function example() {',
 		].join('\n');
 
@@ -172,13 +233,13 @@ describe('parseDiffLineRanges', () => {
 
 	test('parses multiple files', () => {
 		const diff = [
-			'diff --git a/src/a.ts b/src/a.ts',
-			'--- a/src/a.ts',
-			'+++ b/src/a.ts',
+			'diff --git src/a.ts src/a.ts',
+			'--- src/a.ts',
+			'+++ src/a.ts',
 			'@@ -1,0 +1,2 @@',
-			'diff --git a/src/b.ts b/src/b.ts',
-			'--- a/src/b.ts',
-			'+++ b/src/b.ts',
+			'diff --git src/b.ts src/b.ts',
+			'--- src/b.ts',
+			'+++ src/b.ts',
 			'@@ -5,0 +5,3 @@',
 		].join('\n');
 
@@ -189,14 +250,14 @@ describe('parseDiffLineRanges', () => {
 	});
 
 	test('parses hunk with count 0 (pure deletion)', () => {
-		const diff = ['+++ b/src/foo.ts', '@@ -10,3 +10,0 @@'].join('\n');
+		const diff = ['+++ src/foo.ts', '@@ -10,3 +10,0 @@'].join('\n');
 
 		const result = parseDiffLineRanges(diff);
 		expect(result.get('src/foo.ts')!.size).toBe(0);
 	});
 
 	test('parses hunk with no count (single line change)', () => {
-		const diff = ['+++ b/src/foo.ts', '@@ -10 +20 @@'].join('\n');
+		const diff = ['+++ src/foo.ts', '@@ -10 +20 @@'].join('\n');
 
 		const result = parseDiffLineRanges(diff);
 		const lines = result.get('src/foo.ts')!;
@@ -206,7 +267,7 @@ describe('parseDiffLineRanges', () => {
 
 	test('handles trailing context text in hunk header without misparse', () => {
 		const diff = [
-			'+++ b/src/foo.ts',
+			'+++ src/foo.ts',
 			'@@ -10,3 +20,5 @@ function add(a, b) {',
 		].join('\n');
 
@@ -218,6 +279,17 @@ describe('parseDiffLineRanges', () => {
 
 	test('returns empty map for empty diff', () => {
 		const result = parseDiffLineRanges('');
+		expect(result.size).toBe(0);
+	});
+
+	test('decodes quoted UTF-8 octal paths and CRLF hunks', () => {
+		const diff = '+++ "src/space \\342\\230\\203.ts"\r\n@@ -0,0 +2,1 @@\r\n';
+		const result = parseDiffLineRanges(diff);
+		expect(result.get('src/space ☃.ts')).toEqual(new Set([2]));
+	});
+
+	test('ignores deleted destinations', () => {
+		const result = parseDiffLineRanges('+++ /dev/null\n@@ -1,1 +0,0 @@\n');
 		expect(result.size).toBe(0);
 	});
 });

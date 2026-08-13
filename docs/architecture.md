@@ -1161,7 +1161,7 @@ The hooks system is the foundation of v5.1.x+, extended in v6.0.0 with config-aw
 |-----------|---------|---------|
 | `experimental.chat.messages.transform` | `composeHandlers(pipelineTracker, contextBudget, ccCommandInterceptHook)` | Pipeline logging + token budget warnings; progressive task disclosure; deliberation preamble injection; tier-based behavioral prompt trimming; CC command interception (hard-block /reset, soft-correct /plan, log HIGH severity) |
 | `experimental.chat.system.transform` | `systemEnhancerHook` | Inject phase/task/decisions + cross-agent context; reviewer receives semantic AST diff summary with blast radius (consumers count) from `buildSemanticDiffBlock()` |
-| `experimental.session.compacting` | `compactionHook` | Enrich compaction with plan.md + context.md data |
+| `experimental.session.compacting` | `compactionHook` | Enrich compaction with bounded, summary-only structured-plan/context facts |
 | `command.execute.before` | `safeHook(commandHandler)` | Handle `/swarm` slash commands |
 | `tool.execute.before` | `safeHook(activityHooks.toolBefore)` | Track tool usage per agent; append written file paths to `modifiedFilesThisCoderTask`; reset tracking on coder delegation |
 | `tool.execute.after` | `safeHook(activityHooks.toolAfter)` | Record tool results + trigger flush; advance per-task state machine on gate completions; populate `lastGateOutcome`; check scope containment after coder task; set `lastScopeViolation` on drift |
@@ -1365,15 +1365,17 @@ Registered on `experimental.chat.messages.transform` (composed with pipeline-tra
 ### Compaction Enhancement
 
 Registered on `experimental.session.compacting`:
-- Reads `.swarm/plan.md`: extracts current phase + incomplete tasks
+- Reads the structured plan projection first, with `.swarm/plan.md` as a legacy fallback, and extracts the current phase + incomplete tasks
 - Reads `.swarm/context.md`: extracts decisions + patterns
-- Injects these as compaction context strings (max 500 chars each)
+- Escapes forged boundary text and appends one atomic `<swarm_compaction_facts>` block, bounded to 2,000 characters per fact and 8,000 characters total
+- Frames all enclosed plan/task/context text as quoted facts for summary generation only; the compaction turn must not call tools, delegate, change scope, or continue pending work
 - When `.swarm/summaries/` exists and contains files:
-  - Injects `[CONTEXT OPTIMIZATION]` hint: instructs LLM to replace large tool output blocks (bash, test_runner, lint, diff) with retrieve references, preserving tool name, exit status, and errors
-  - Injects `[STORED OUTPUTS]` count showing how many tool outputs are stored
+  - Records declarative optimization and stored-output facts for the summary
+  - Describes retrieval as a capability of the resumed agent, never an action for the tool-disabled summary turn
+  - Rejects symlinked summary directories and counts at most 256 entries under a bounded deadline
 - Dispatch lane artifacts are stored separately under `.swarm/lane-results/` and
   are retrieved with `retrieve_lane_output`, not `retrieve_summary`.
-- Guides OpenCode's built-in compaction to preserve swarm-relevant context
+- Preserves the host's prompt and existing context while guiding OpenCode's built-in compaction to retain swarm-relevant facts
 
 ### System Prompt Enhancement
 
@@ -1541,20 +1543,28 @@ Runs four verification tools in parallel for 4x faster gate execution:
 
 | Tool | Purpose | Gate Type |
 |------|---------|-----------|
-| `lint:check` | Code quality verification | Hard gate |
+| `lint:check` | Code quality verification | Informational |
 | `secretscan` | Secret/credential detection | Hard gate |
 | `sast_scan` | Static security analysis | Hard gate |
-| `quality_budget` | Maintainability metrics | Hard gate |
+| `quality_budget` | Maintainability metrics | Informational |
 
 **Parallel Execution**:
 - Uses `p-limit` with max 4 concurrent operations
 - 60-second timeout per tool
 - 500KB combined output limit
 - Individual failures don't cascade
+- External lint and Git processes use one bounded runner with explicit `cwd`,
+  ignored stdin, bounded streams, process-tree termination, and confirmed exit
+  before a timeout is reported.
+- Windows Biome/ESLint discovery resolves trusted npm, pnpm, and Yarn shims to
+  their underlying native or JavaScript package entry. `.cmd` and `.ps1` shims
+  are never passed directly to Node spawn, and file arguments remain array
+  elements rather than shell text.
 
 **Return Value**:
 ```json
 {
+  "batch_status": "completed",
   "gates_passed": true,
   "lint": { "ran": true, "result": {}, "duration_ms": 1200 },
   "secretscan": { "ran": true, "result": {}, "duration_ms": 800 },
@@ -1563,6 +1573,27 @@ Runs four verification tools in parallel for 4x faster gate execution:
   "total_duration_ms": 3200
 }
 ```
+
+`batch_status` is additive. New producers emit `completed`, `skipped`, or
+`invalid`; old results without the field remain readable. The after-hook accepts
+only the exact top-level boolean and structurally valid tool results. Nested
+strings containing words such as `FAIL`, `error`, or `gates_passed: false` are
+diagnostic data and cannot change the verdict. Contradictory or truncated output
+is non-passing with `PRE_CHECK_RESULT_INVALID`. Gate completions are correlated
+to the task that started the call, so a late task-A result cannot mutate task B.
+
+For legacy SAST triage, changed-line evidence is the union of committed changes
+from merge-base to `HEAD`, staged changes, unstaged changes, and untracked files.
+Quoted, renamed, deleted, space-containing, Unicode, CRLF, and Windows-style
+paths are normalized. Any required Git-source failure makes the evidence
+unavailable and findings fail closed; an authoritative empty union means an
+untouched legacy finding is pre-existing.
+
+Secretscan opens files with numeric `O_RDONLY | O_NOFOLLOW` on POSIX, validates
+the opened descriptor as a bounded regular file, and correlates pre-open,
+descriptor, and post-open device/inode identity. Platforms that cannot provide
+trustworthy identity reject the file conservatively. The descriptor closes on
+every outcome.
 
 **Configuration**:
 ```json
@@ -1573,7 +1604,7 @@ Runs four verification tools in parallel for 4x faster gate execution:
 }
 ```
 
-**Fail condition**: Any hard gate fails (lint errors, secrets found, SAST findings, budget exceeded)
+**Fail condition**: A security hard gate fails (secrets or qualifying new SAST findings), the batch input is invalid, or the structured result is malformed
 **Resolution**: Fix specific failures identified in tool results and retry
 
 ### Local-Only Guarantee

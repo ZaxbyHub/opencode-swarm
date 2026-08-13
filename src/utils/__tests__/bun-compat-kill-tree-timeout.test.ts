@@ -1,8 +1,17 @@
-import { describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, test } from 'bun:test';
+import { EventEmitter } from 'node:events';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { bunSpawn } from '../bun-compat';
+import { _internals, bunSpawn } from '../bun-compat';
+
+const originalPlatform = _internals.platform;
+const originalSpawnTaskkill = _internals.spawnTaskkill;
+
+afterEach(() => {
+	_internals.platform = originalPlatform;
+	_internals.spawnTaskkill = originalSpawnTaskkill;
+});
 
 function processIsAlive(pid: number): boolean {
 	try {
@@ -29,6 +38,38 @@ async function waitForProcessExit(pid: number, attempts = 20): Promise<void> {
 }
 
 describe('bunSpawn tree-aware timeout', () => {
+	test('retries Windows tree termination so SIGKILL survives a failed SIGTERM fallback', async () => {
+		let taskkillCalls = 0;
+		const directSignals: Array<NodeJS.Signals | number | undefined> = [];
+		_internals.platform = () => 'win32';
+		_internals.spawnTaskkill = (() => {
+			taskkillCalls++;
+			const child = new EventEmitter() as ReturnType<
+				typeof originalSpawnTaskkill
+			>;
+			child.kill = () => true;
+			queueMicrotask(() => child.emit('exit', 1));
+			return child;
+		}) as typeof originalSpawnTaskkill;
+
+		const killTree = _internals.createProcessTreeKiller(
+			123,
+			(signal) => directSignals.push(signal),
+			true,
+		);
+		await expect(killTree('SIGTERM')).rejects.toThrow(
+			'process-tree termination could not be confirmed',
+		);
+		await expect(killTree('SIGKILL')).rejects.toThrow(
+			'process-tree termination could not be confirmed',
+		);
+
+		// Previous code memoized the first failed taskkill promise, so the force
+		// request never reached either taskkill or the direct child fallback.
+		expect(taskkillCalls).toBe(2);
+		expect(directSignals).toEqual(['SIGTERM', 'SIGKILL']);
+	});
+
 	test('kills a real parent and descendant on the native platform', async () => {
 		const directory = mkdtempSync(join(tmpdir(), 'bun-kill-tree-'));
 		const pidFile = join(directory, 'descendant.pid');

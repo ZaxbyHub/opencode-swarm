@@ -17,3 +17,9 @@ execution profile. Checkpoint creation happens only after task completion via
 the exact `save_task_completion` checkpoint action and only after pre-commit
 gates pass. Duplicate labels are idempotent success, and other checkpoint
 failures stay advisory without undoing completed work.
+
+Approval persistence now verifies and locks the exact QA identity before it
+publishes a critic-approved ledger snapshot. Task-completion receipts carry a
+durable completion generation, so ordinary retries remain idempotent even
+after unrelated commits while an explicit reopen/recompletion or plan-status
+reset creates a fresh checkpoint instead of reusing the prior completion.

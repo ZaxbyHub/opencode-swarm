@@ -23,6 +23,8 @@ import os from 'node:os';
 import path from 'node:path';
 
 import type { Plan } from '../../../src/config/plan-schema';
+import { closeProjectDb } from '../../../src/db/project-db';
+import { getOrCreateProfileForIdentity } from '../../../src/db/qa-gate-profile';
 import {
 	initLedger,
 	loadLastApprovedPlan,
@@ -72,6 +74,21 @@ async function setupSwarmDirWithPlan(dir: string, plan: Plan): Promise<void> {
 	await initLedger(dir, derivePlanId(plan));
 }
 
+function createExactQaProfile(dir: string, plan: Plan): void {
+	getOrCreateProfileForIdentity(
+		dir,
+		{ swarm: plan.swarm, title: plan.title },
+		'ts',
+	);
+}
+
+async function setupApprovedPlanContext(dir: string): Promise<Plan> {
+	const plan = createTestPlan();
+	await setupSwarmDirWithPlan(dir, plan);
+	createExactQaProfile(dir, plan);
+	return plan;
+}
+
 describe('executeWriteDriftEvidence', () => {
 	let tempDir: string;
 
@@ -85,7 +102,13 @@ describe('executeWriteDriftEvidence', () => {
 	afterEach(async () => {
 		// Clean up temp directory
 		try {
-			await fs.promises.rm(tempDir, { recursive: true, force: true });
+			closeProjectDb(tempDir);
+			await fs.promises.rm(tempDir, {
+				recursive: true,
+				force: true,
+				maxRetries: 5,
+				retryDelay: 100,
+			});
 		} catch {
 			// Ignore cleanup errors
 		}
@@ -166,6 +189,7 @@ describe('executeWriteDriftEvidence', () => {
 
 	// Test 4: APPROVED verdict normalization to 'approved'
 	test('normalizes APPROVED verdict to approved', async () => {
+		await setupApprovedPlanContext(tempDir);
 		const result = await executeWriteDriftEvidence(
 			{ phase: 5, verdict: 'APPROVED', summary: 'All changes verified' },
 			tempDir,
@@ -192,6 +216,7 @@ describe('executeWriteDriftEvidence', () => {
 
 	// Test 6: Successful write with approved verdict
 	test('writes evidence file successfully with approved verdict', async () => {
+		await setupApprovedPlanContext(tempDir);
 		const result = await executeWriteDriftEvidence(
 			{
 				phase: 1,
@@ -267,6 +292,7 @@ describe('executeWriteDriftEvidence', () => {
 
 	// Test 8: Atomic write pattern (temp + rename)
 	test('uses atomic write pattern with temp file and rename', async () => {
+		await setupApprovedPlanContext(tempDir);
 		// Spy on fs.promises.writeFile and fs.promises.rename to verify atomic pattern
 		const writeFileSpy = spyOn(fs.promises, 'writeFile');
 		const renameSpy = spyOn(fs.promises, 'rename');
@@ -299,6 +325,7 @@ describe('executeWriteDriftEvidence', () => {
 	});
 
 	test('summary is trimmed in output', async () => {
+		await setupApprovedPlanContext(tempDir);
 		await executeWriteDriftEvidence(
 			{ phase: 1, verdict: 'APPROVED', summary: '  trimmed summary  ' },
 			tempDir,
@@ -320,6 +347,7 @@ describe('executeWriteDriftEvidence', () => {
 		test('takes a critic_approved snapshot on APPROVED verdict when plan.json exists', async () => {
 			const plan = createTestPlan();
 			await setupSwarmDirWithPlan(tempDir, plan);
+			createExactQaProfile(tempDir, plan);
 
 			const result = await executeWriteDriftEvidence(
 				{
@@ -380,68 +408,6 @@ describe('executeWriteDriftEvidence', () => {
 			);
 			expect(approved.length).toBe(0);
 		});
-
-		test('reports snapshotError when plan.json is missing but still succeeds', async () => {
-			// No plan.json, no ledger — the drift evidence write should still
-			// succeed, and snapshotError should be surfaced.
-			const result = await executeWriteDriftEvidence(
-				{
-					phase: 1,
-					verdict: 'APPROVED',
-					summary: 'Approved without a plan',
-				},
-				tempDir,
-			);
-			const parsed = JSON.parse(result);
-
-			expect(parsed.success).toBe(true);
-			expect(parsed.verdict).toBe('approved');
-			expect(parsed.approvedSnapshot).toBeUndefined();
-			expect(parsed.snapshotError).toBe('plan.json not available for snapshot');
-		});
-
-		test('drift evidence file write succeeds even when snapshot path throws', async () => {
-			// plan.json exists but the ledger is missing → initLedger was never
-			// called. takeSnapshotEvent will throw because ledger is not
-			// initialized. The drift evidence file should still be written.
-			await fs.promises.mkdir(path.join(tempDir, '.swarm'), {
-				recursive: true,
-			});
-			await fs.promises.writeFile(
-				path.join(tempDir, '.swarm', 'plan.json'),
-				JSON.stringify(createTestPlan(), null, 2),
-				'utf-8',
-			);
-
-			const result = await executeWriteDriftEvidence(
-				{
-					phase: 1,
-					verdict: 'APPROVED',
-					summary: 'Ledger unavailable scenario',
-				},
-				tempDir,
-			);
-			const parsed = JSON.parse(result);
-
-			expect(parsed.success).toBe(true);
-			expect(parsed.verdict).toBe('approved');
-			expect(parsed.approvedSnapshot).toBeUndefined();
-			expect(parsed.snapshotError).toMatch(/Ledger not initialized/);
-
-			// Evidence file must still exist
-			const evidencePath = path.join(
-				tempDir,
-				'.swarm',
-				'evidence',
-				'1',
-				'drift-verifier.json',
-			);
-			const fileExists = await fs.promises
-				.access(evidencePath)
-				.then(() => true)
-				.catch(() => false);
-			expect(fileExists).toBe(true);
-		});
 	});
 });
 
@@ -465,10 +431,17 @@ describe('write_drift_evidence provenance write-through', () => {
 	});
 
 	afterEach(() => {
-		rmSync(tempDir, { recursive: true, force: true });
+		closeProjectDb(tempDir);
+		rmSync(tempDir, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 100,
+		});
 	});
 
 	test('persists provenance fields when provided', async () => {
+		await setupApprovedPlanContext(tempDir);
 		const out = await run({
 			phase: 1,
 			verdict: 'APPROVED',
@@ -495,6 +468,7 @@ describe('write_drift_evidence provenance write-through', () => {
 	});
 
 	test('omits provenance when not provided', async () => {
+		await setupApprovedPlanContext(tempDir);
 		const out = await run({
 			phase: 1,
 			verdict: 'APPROVED',
@@ -512,6 +486,7 @@ describe('write_drift_evidence provenance write-through', () => {
 	});
 
 	test('persists provenance with only agent_name', async () => {
+		await setupApprovedPlanContext(tempDir);
 		const out = await run({
 			phase: 1,
 			verdict: 'APPROVED',
@@ -544,7 +519,13 @@ describe('write_drift_evidence delegates to shared normalize-verdict module', ()
 	});
 
 	afterEach(() => {
-		rmSync(tempDir, { recursive: true, force: true });
+		closeProjectDb(tempDir);
+		rmSync(tempDir, {
+			recursive: true,
+			force: true,
+			maxRetries: 5,
+			retryDelay: 100,
+		});
 	});
 
 	test('uses _internals.normalizeVerdict2 from shared module', async () => {
@@ -559,6 +540,7 @@ describe('write_drift_evidence delegates to shared normalize-verdict module', ()
 				callCount++;
 				return original(verdict);
 			};
+			await setupApprovedPlanContext(tempDir);
 
 			const out = await (
 				write_drift_evidence.execute as unknown as (

@@ -244,6 +244,9 @@ describe('Codex P1 fix: cross-drive / cross-root containment', () => {
 		if (!result.allowed) {
 			expect(result.code).toBe('AUTHORITY_ROOT_ESCAPE');
 			expect(result.layer).toBe('containment');
+			expect(result.reason).toMatch(
+				/different drive(?:\/root| or filesystem root)|outside the working directory/,
+			);
 		}
 	});
 

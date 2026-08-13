@@ -61,6 +61,10 @@ import {
 import { createRoleFilterSystemHook } from './context/role-filter.js';
 import { updateContextMapAfterAgent } from './context-map/post-agent-update.js';
 import { createEvaluationModelDispatcher } from './evaluation/model-dispatcher.js';
+import {
+	observePhaseParticipationToolResult,
+	reserveApprovedPhaseParticipation,
+} from './evidence/phase-participation.js';
 import { tickAndMaybeDispatchCadence } from './full-auto/cadence.js';
 import {
 	composeHandlers,
@@ -2985,6 +2989,19 @@ async function initializeOpenCodeSwarm(
 
 				await safeHook(activityHooks.toolBefore)(input, output);
 
+				// Bind durable phase-role participation only after every blocking and
+				// lifecycle-start operation approved the exact Task call. Foreground
+				// completions correlate by parent session + call ID; background calls
+				// promote that binding in tool.execute.after.
+				await reserveApprovedPhaseParticipation({
+					directory: ctx.directory,
+					tool: input.tool,
+					parentSessionId: input.sessionID,
+					callId: input.callID,
+					args: toolBeforeArgs,
+					policy: config.phase_complete,
+				});
+
 				// B1 (#2063): the WHOLE handler completed, so this tool call is
 				// actually going to run — the denial streak for it is genuinely over.
 				// Scoped to this tool so a successful `read` cannot erase an
@@ -3247,6 +3264,15 @@ async function initializeOpenCodeSwarm(
 					// biome-ignore lint/suspicious/noConsole: DEBUG_SWARM-gated diagnostic for tool execution flow
 					console.error(`[DIAG] toolAfter memory done tool=${_toolName}`);
 				await safeHook(delegationGateHooks.toolAfter)(input, output);
+				await safeHook(async () => {
+					await observePhaseParticipationToolResult({
+						directory: ctx.directory,
+						tool: input.tool,
+						parentSessionId: input.sessionID,
+						callId: input.callID,
+						output,
+					});
+				})(input, output);
 				if (_dbg)
 					// biome-ignore lint/suspicious/noConsole: DEBUG_SWARM-gated diagnostic for tool execution flow
 					console.error(

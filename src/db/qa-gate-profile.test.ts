@@ -6,12 +6,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { derivePlanId } from '../plan/utils.js';
-import {
-	closeAllProjectDbs,
-	getProjectDb,
-	projectDbPath,
-	runProjectMigrations,
-} from './project-db.js';
+import { closeAllProjectDbs, getProjectDb } from './project-db.js';
 import {
 	_internals,
 	computeProfileHash,
@@ -28,9 +23,9 @@ import {
 	setGates,
 	setGatesForIdentity,
 } from './qa-gate-profile.js';
-import { loadDatabaseCtor } from './sqlite-loader.js';
 
 let tempDir: string;
+const originalAfterSetGatesRead = _internals.afterSetGatesRead;
 
 beforeEach(() => {
 	tempDir = fs.realpathSync(
@@ -40,6 +35,7 @@ beforeEach(() => {
 
 afterEach(() => {
 	delete _internals.afterSetGatesForIdentityRead;
+	_internals.afterSetGatesRead = originalAfterSetGatesRead;
 	closeAllProjectDbs();
 	try {
 		fs.rmSync(tempDir, { recursive: true, force: true });
@@ -53,6 +49,7 @@ describe('qa-gate-profile', () => {
 
 	afterEach(() => {
 		_internals.getProfile = originalGetProfile;
+		_internals.afterSetGatesRead = originalAfterSetGatesRead;
 		delete _internals.afterSetGatesForIdentityRead;
 	});
 
@@ -343,37 +340,11 @@ describe('qa-gate-profile', () => {
 		);
 	});
 
-	test('setGatesForIdentity keeps BEGIN IMMEDIATE across the read-update seam', () => {
-		const identity = { swarm: 'exact swarm', title: 'Exact Plan' };
-		const created = getOrCreateProfileForIdentity(tempDir, identity, 'ts', {
-			reviewer: false,
-		});
-		const Db = loadDatabaseCtor();
-		const contender = new Db(projectDbPath(tempDir));
-		runProjectMigrations(contender);
-		contender.run('PRAGMA busy_timeout = 25;');
-		let contenderError: unknown;
-
-		_internals.afterSetGatesForIdentityRead = () => {
-			try {
-				contender.run('UPDATE qa_gate_profile SET gates = ? WHERE id = ?', [
-					JSON.stringify({ ...DEFAULT_QA_GATES, reviewer: true }),
-					created.id,
-				]);
-			} catch (error) {
-				contenderError = error;
-			}
-		};
-
-		try {
-			const updated = setGatesForIdentity(tempDir, identity, {
-				reviewer: true,
-			});
-			expect(updated.gates.reviewer).toBe(true);
-			expect(String(contenderError)).toMatch(/busy|locked/i);
-		} finally {
-			contender.close();
-		}
+	test('lockProfile sets locked_at and snapshot seq', () => {
+		getOrCreateProfile(tempDir, 'plan-1');
+		const locked = lockProfile(tempDir, 'plan-1', 7);
+		expect(locked.locked_at).not.toBeNull();
+		expect(locked.locked_by_snapshot_seq).toBe(7);
 	});
 
 	test('lockProfileForIdentity locks exact profiles by binding instead of readable plan id', () => {

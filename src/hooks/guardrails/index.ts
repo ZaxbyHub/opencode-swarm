@@ -66,8 +66,12 @@ import {
 	recordNonTransientFailure,
 	takeToolExecution,
 } from './nontransient-circuit';
+import { decodePreCheckResult } from './pre-check-result';
 import { getStoredInputArgs } from './stored-input-args';
 import { createToolBeforeHandler } from './tool-before';
+
+const MAX_PENDING_GATE_RECEIPTS_PER_SESSION = 256;
+const MAX_PENDING_GATE_RECEIPT_SESSIONS = 500;
 
 export const _internals = {
 	extractSwarmIdFromAgentName,
@@ -79,6 +83,10 @@ export const _internals = {
 	dcCheckJunctionCreation,
 	extractErrorSignal,
 	getSandboxExecutor: getExecutor,
+	/** Test-only compatibility for legacy direct-after hook tests. */
+	allowUncorrelatedGateReceipts: false,
+	MAX_PENDING_GATE_RECEIPTS_PER_SESSION,
+	MAX_PENDING_GATE_RECEIPT_SESSIONS,
 	/**
 	 * Test/inspection seams for the no-op detector's bounded session state
 	 * (invariant 8). Production code does not call these; they exist so the
@@ -424,14 +432,6 @@ function isAgentDelegation(
 }
 
 /**
- * v6.17 Task 9.3: Get the current task ID for a session.
- */
-function getCurrentTaskId(sessionId: string): string {
-	const session = swarmState.agentSessions.get(sessionId);
-	return session?.currentTaskId ?? `${sessionId}:unknown`;
-}
-
-/**
  * Creates guardrails hooks for circuit breaker protection
  * @param directory Working directory from plugin init context (required)
  * @param directoryOrConfig Guardrails configuration object (when passed as second arg, replaces legacy config param)
@@ -563,6 +563,44 @@ export function createGuardrailsHooks(
 			file: string;
 		}>
 	>();
+	const pendingGateTasksBySession = new Map<
+		string,
+		Map<string, { sessionID: string; taskId: string }>
+	>();
+	const takePendingGateTask = (sessionID: string, callID: string) => {
+		const sessionTasks = pendingGateTasksBySession.get(sessionID);
+		const pending = sessionTasks?.get(callID);
+		if (sessionTasks) {
+			sessionTasks.delete(callID);
+			if (sessionTasks.size === 0) pendingGateTasksBySession.delete(sessionID);
+		}
+		return pending;
+	};
+	const rememberPendingGateTask = (
+		sessionID: string,
+		callID: string,
+		taskId: string,
+	): void => {
+		let sessionTasks = pendingGateTasksBySession.get(sessionID);
+		if (!sessionTasks) {
+			if (pendingGateTasksBySession.size >= MAX_PENDING_GATE_RECEIPT_SESSIONS) {
+				throw new Error(
+					'GATE_RECEIPT_CAPACITY: too many sessions have live gate calls; wait for a pending gate call to finish',
+				);
+			}
+			sessionTasks = new Map();
+			pendingGateTasksBySession.set(sessionID, sessionTasks);
+		}
+		if (
+			!sessionTasks.has(callID) &&
+			sessionTasks.size >= MAX_PENDING_GATE_RECEIPTS_PER_SESSION
+		) {
+			throw new Error(
+				'GATE_RECEIPT_CAPACITY: this session has too many live gate calls; wait for a pending gate call to finish',
+			);
+		}
+		sessionTasks.set(callID, { sessionID, taskId });
+	};
 	const scopeLeaseRenewal = createScopeLeaseRenewalTracker();
 	const rememberReviewerScopeWrite = (input: {
 		callID: string;
@@ -615,7 +653,7 @@ export function createGuardrailsHooks(
 	};
 
 	// Create toolBefore handler via factory
-	const toolBefore = createToolBeforeHandler({
+	const baseToolBefore = createToolBeforeHandler({
 		effectiveDirectory,
 		cfg,
 		precomputedAuthorityRules,
@@ -630,6 +668,25 @@ export function createGuardrailsHooks(
 		rememberScopeLeaseCandidate: scopeLeaseRenewal.remember,
 		getSandboxExecutor: _internals.getSandboxExecutor,
 	});
+	const toolBefore: ReturnType<typeof createToolBeforeHandler> = async (
+		input,
+		output,
+	) => {
+		if (isGateTool(input.tool)) {
+			const taskId = swarmState.agentSessions.get(
+				input.sessionID,
+			)?.currentTaskId;
+			if (taskId) {
+				rememberPendingGateTask(input.sessionID, input.callID, taskId);
+			}
+		}
+		try {
+			await baseToolBefore(input, output);
+		} catch (error) {
+			takePendingGateTask(input.sessionID, input.callID);
+			throw error;
+		}
+	};
 
 	// Create messagesTransform handler via factory
 	const messagesTransform = createMessagesTransformHandler({
@@ -644,6 +701,20 @@ export function createGuardrailsHooks(
 	return {
 		toolBefore,
 		toolAfter: async (input, output) => {
+			const pendingGateTask =
+				takePendingGateTask(input.sessionID, input.callID) ??
+				(_internals.allowUncorrelatedGateReceipts
+					? (() => {
+							const testSession = swarmState.agentSessions.get(input.sessionID);
+							return testSession
+								? {
+										sessionID: input.sessionID,
+										taskId:
+											testSession.currentTaskId ?? `${input.sessionID}:unknown`,
+									}
+								: undefined;
+						})()
+					: undefined);
 			const pendingReviewerScopeWrite = pendingReviewerScopeWrites.get(
 				input.callID,
 			);
@@ -675,82 +746,73 @@ export function createGuardrailsHooks(
 			const session = swarmState.agentSessions.get(input.sessionID);
 			if (session) {
 				// Track gate tools
-				if (isGateTool(input.tool)) {
-					// v6.12: Use session-aware task ID to avoid cross-session collisions
-					const taskId = getCurrentTaskId(input.sessionID);
+				if (
+					isGateTool(input.tool) &&
+					pendingGateTask?.sessionID === input.sessionID &&
+					pendingGateTask.taskId ===
+						(session.currentTaskId ?? `${input.sessionID}:unknown`)
+				) {
+					const taskId = pendingGateTask.taskId;
 					if (!session.gateLog.has(taskId)) {
 						session.gateLog.set(taskId, new Set());
 					}
 					session.gateLog.get(taskId)?.add(input.tool);
 
-					// Track gate failures for Task 2.5
+					// Track gate failures for Task 2.5. The batch result has an
+					// exact structured contract; nested diagnostic text is data.
 					const outputStr =
 						typeof safeOutput.output === 'string' ? safeOutput.output : '';
-
-					// Check if this is a skip condition (all tools ran === false)
-					let isSkipCondition = false;
-					try {
-						const result = JSON.parse(outputStr);
-						if (
-							result.lint?.ran === false &&
-							result.secretscan?.ran === false &&
-							result.sast_scan?.ran === false &&
-							result.quality_budget?.ran === false
-						) {
-							isSkipCondition = true;
-						}
-					} catch {
-						// Not JSON or parse error - not a skip condition
-					}
-
-					const hasFailure =
-						!isSkipCondition &&
-						(safeOutput.output === null ||
-							safeOutput.output === undefined ||
-							outputStr.includes('FAIL') ||
-							outputStr.includes('error') ||
-							outputStr.toLowerCase().includes('gates_passed: false'));
-					if (hasFailure) {
-						session.lastGateFailure = {
-							tool: input.tool,
-							taskId,
-							timestamp: Date.now(),
-						};
-					} else {
-						session.lastGateFailure = null; // Clear on pass
-
-						// v6.22 Task 2.1: Advance workflow state when pre_check_batch passes
-						if (input.tool === 'pre_check_batch') {
-							const successStr =
-								typeof safeOutput.output === 'string' ? safeOutput.output : '';
-							let isPassed = false;
-							try {
-								const result = JSON.parse(successStr);
-								isPassed = result.gates_passed === true;
-							} catch (error) {
-								log('[Guardrails] pre_check_batch JSON parse failed', {
-									error: error instanceof Error ? error.message : String(error),
-								});
-								isPassed = false;
+					if (normalizeToolName(input.tool) === 'pre_check_batch') {
+						const verdict = decodePreCheckResult(safeOutput.output);
+						if (verdict.kind === 'fail' || verdict.kind === 'invalid') {
+							session.lastGateFailure = {
+								tool: input.tool,
+								taskId,
+								timestamp: Date.now(),
+								code: verdict.code,
+							};
+						} else if (verdict.kind === 'pass') {
+							if (
+								session.lastGateFailure?.taskId === taskId &&
+								normalizeToolName(session.lastGateFailure.tool) ===
+									'pre_check_batch'
+							) {
+								session.lastGateFailure = null;
 							}
-							if (isPassed && session.currentTaskId) {
+							if (session.currentTaskId === taskId) {
 								try {
-									advanceTaskState(
-										session,
-										session.currentTaskId,
-										'pre_check_passed',
-									);
+									advanceTaskState(session, taskId, 'pre_check_passed');
 								} catch (err) {
 									// Non-fatal: state may already be at or past pre_check_passed
 									warn(
 										'Failed to advance task state after pre_check_batch pass',
 										{
-											taskId: session.currentTaskId,
+											taskId,
 											error: String(err),
 										},
 									);
 								}
 							}
+						}
+					} else {
+						const hasFailure =
+							safeOutput.output === null ||
+							safeOutput.output === undefined ||
+							outputStr.includes('FAIL') ||
+							outputStr.includes('error') ||
+							outputStr.toLowerCase().includes('gates_passed: false');
+						if (hasFailure) {
+							session.lastGateFailure = {
+								tool: input.tool,
+								taskId,
+								timestamp: Date.now(),
+							};
+						} else if (
+							session.lastGateFailure?.taskId === taskId &&
+							normalizeToolName(session.lastGateFailure.tool) ===
+								normalizeToolName(input.tool)
+						) {
+							session.lastGateFailure = null;
 						}
 					}
 				}

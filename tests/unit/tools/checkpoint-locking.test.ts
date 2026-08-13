@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
-import { execSync } from 'node:child_process';
+import * as childProcess from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { Plan } from '../../../src/config/plan-schema';
@@ -16,6 +16,9 @@ import {
 } from '../../../src/tools/checkpoint.js';
 import { freezeClock, type Restore } from '../../helpers/test-clock.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
+
+const GIT_TIMEOUT_MS = 30_000;
+const GIT_MAX_BUFFER_BYTES = 5 * 1024 * 1024;
 
 function makePlan(title: string): Plan {
 	return {
@@ -45,23 +48,30 @@ function makePlan(title: string): Plan {
 	};
 }
 
+function runGit(directory: string, args: string[]): string {
+	const result = childProcess.spawnSync('git', args, {
+		cwd: directory,
+		encoding: 'utf-8',
+		timeout: GIT_TIMEOUT_MS,
+		stdio: ['ignore', 'pipe', 'pipe'],
+		windowsHide: true,
+		maxBuffer: GIT_MAX_BUFFER_BYTES,
+	});
+	if (result.error) throw result.error;
+	if (result.status !== 0) {
+		throw new Error(result.stderr?.trim() || `git exited ${result.status}`);
+	}
+	return result.stdout ?? '';
+}
+
 function setupGitRepo(directory: string): void {
-	execSync('git init', { cwd: directory, encoding: 'utf-8' });
-	execSync('git config --local commit.gpgsign false', {
-		cwd: directory,
-		encoding: 'utf-8',
-	});
-	execSync('git config user.email "test@test.com"', {
-		cwd: directory,
-		encoding: 'utf-8',
-	});
-	execSync('git config user.name "Test"', {
-		cwd: directory,
-		encoding: 'utf-8',
-	});
+	runGit(directory, ['init']);
+	runGit(directory, ['config', '--local', 'commit.gpgsign', 'false']);
+	runGit(directory, ['config', 'user.email', 'test@test.com']);
+	runGit(directory, ['config', 'user.name', 'Test']);
 	fs.writeFileSync(path.join(directory, 'initial.txt'), 'initial');
-	execSync('git add .', { cwd: directory, encoding: 'utf-8' });
-	execSync('git commit -m "initial"', { cwd: directory, encoding: 'utf-8' });
+	runGit(directory, ['add', '--', 'initial.txt']);
+	runGit(directory, ['commit', '-m', 'initial']);
 }
 
 describe('checkpoint locking and exact-subject helpers', () => {
@@ -71,6 +81,7 @@ describe('checkpoint locking and exact-subject helpers', () => {
 	const originalInternals = {
 		tryAcquireLock: checkpointInternals.tryAcquireLock,
 		sleep: checkpointInternals.sleep,
+		loadPlan: checkpointInternals.loadPlan,
 		gitExec: checkpointInternals.gitExec,
 		findCommitByExactSubject: checkpointInternals.findCommitByExactSubject,
 		stageAllExcludingSwarm: checkpointInternals.stageAllExcludingSwarm,
@@ -90,6 +101,7 @@ describe('checkpoint locking and exact-subject helpers', () => {
 		});
 		checkpointInternals.tryAcquireLock = originalInternals.tryAcquireLock;
 		checkpointInternals.sleep = originalInternals.sleep;
+		checkpointInternals.loadPlan = originalInternals.loadPlan;
 		checkpointInternals.gitExec = originalInternals.gitExec;
 		checkpointInternals.findCommitByExactSubject =
 			originalInternals.findCommitByExactSubject;
@@ -103,6 +115,7 @@ describe('checkpoint locking and exact-subject helpers', () => {
 		process.chdir(originalCwd);
 		checkpointInternals.tryAcquireLock = originalInternals.tryAcquireLock;
 		checkpointInternals.sleep = originalInternals.sleep;
+		checkpointInternals.loadPlan = originalInternals.loadPlan;
 		checkpointInternals.gitExec = originalInternals.gitExec;
 		checkpointInternals.findCommitByExactSubject =
 			originalInternals.findCommitByExactSubject;
@@ -132,7 +145,7 @@ describe('checkpoint locking and exact-subject helpers', () => {
 		expect(match).toBe('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb');
 		expect(capturedArgs).toEqual([
 			'log',
-			'--all',
+			'HEAD',
 			'--format=%H%x00%s',
 			'--fixed-strings',
 			`--grep=${subject}`,
@@ -201,7 +214,7 @@ describe('checkpoint locking and exact-subject helpers', () => {
 		expect(release).toHaveBeenCalledTimes(1);
 	});
 
-	test('save_task_completion returns idempotent success while contended once a logged receipt exists', async () => {
+	test('save_task_completion still reports checkpoint_busy under permanent lock contention even with a logged receipt', async () => {
 		const plan = makePlan('Locking Plan');
 		const planIdentityHash = derivePlanIdentityHash(plan);
 		getProjectDb(tempDir).run(
@@ -211,10 +224,7 @@ describe('checkpoint locking and exact-subject helpers', () => {
 				'1.1',
 				'task-1.1-complete-existing',
 				'logged',
-				execSync('git rev-parse HEAD', {
-					cwd: tempDir,
-					encoding: 'utf-8',
-				}).trim(),
+				runGit(tempDir, ['rev-parse', 'HEAD']).trim(),
 			],
 		);
 		checkpointInternals.tryAcquireLock = mock(async () => {
@@ -228,14 +238,17 @@ describe('checkpoint locking and exact-subject helpers', () => {
 			}),
 		);
 
-		expect(result.success).toBe(true);
-		expect(result.idempotent).toBe(true);
-		expect(result.receipt_state).toBe('logged');
+		expect(result.success).toBe(false);
+		expect(result.status).toBe('checkpoint_busy');
 	});
 
 	test('releases the mutation lock when save_task_completion fails after acquisition', async () => {
-		const release = mock(async () => {});
+		const planRelease = mock(async () => {});
+		const checkpointRelease = mock(async () => {});
+		let acquireCount = 0;
 		checkpointInternals.tryAcquireLock = mock(async () => {
+			acquireCount++;
+			const release = acquireCount === 1 ? planRelease : checkpointRelease;
 			return {
 				acquired: true,
 				lock: {
@@ -268,7 +281,8 @@ describe('checkpoint locking and exact-subject helpers', () => {
 
 		expect(result.success).toBe(false);
 		expect(result.error).toContain('forced commit failure');
-		expect(release).toHaveBeenCalledTimes(1);
+		expect(planRelease).toHaveBeenCalledTimes(1);
+		expect(checkpointRelease).toHaveBeenCalledTimes(1);
 	});
 
 	test('save_task_completion commit path does not pass --no-verify', async () => {
@@ -293,6 +307,101 @@ describe('checkpoint locking and exact-subject helpers', () => {
 		expect(commitArgs).toHaveLength(1);
 		expect(commitArgs[0]).toContain('--allow-empty');
 		expect(commitArgs[0]).not.toContain('--no-verify');
+	});
+
+	test('CS-003: revalidates task completion eligibility after waiting on the plan lock', async () => {
+		const reopenedPlan = makePlan('Locking Plan');
+		reopenedPlan.phases[0].status = 'in_progress';
+		reopenedPlan.phases[0].tasks[0].status = 'in_progress';
+
+		let releasePlanLockGate!: () => void;
+		const planLockGate = new Promise<void>((resolve) => {
+			releasePlanLockGate = resolve;
+		});
+		let gated = false;
+		checkpointInternals.tryAcquireLock = mock(
+			async (
+				directory: string,
+				filePath: string,
+				agent: string,
+				taskId: string,
+			) => {
+				if (!gated && filePath === 'plan.json') {
+					gated = true;
+					await planLockGate;
+				}
+				return originalInternals.tryAcquireLock(
+					directory,
+					filePath,
+					agent,
+					taskId,
+				);
+			},
+		) as unknown as typeof checkpointInternals.tryAcquireLock;
+
+		const pending = checkpoint.execute({
+			action: 'save_task_completion',
+			task_id: '1.1',
+		});
+		await savePlan(tempDir, reopenedPlan, {
+			preserveCompletedStatuses: false,
+		});
+		releasePlanLockGate();
+
+		const result = JSON.parse(await pending);
+
+		expect(result.success).toBe(false);
+		expect(result.error).toContain('is in_progress, not completed');
+	});
+
+	test('TF-003: real concurrent callers serialize through the plan and checkpoint locks', async () => {
+		let releaseFirstLoad!: () => void;
+		const firstLoadGate = new Promise<void>((resolve) => {
+			releaseFirstLoad = resolve;
+		});
+		let signalFirstLoadEntered!: () => void;
+		const firstLoadEntered = new Promise<void>((resolve) => {
+			signalFirstLoadEntered = resolve;
+		});
+		let firstLoadPending = true;
+		checkpointInternals.loadPlan = mock(async (directory: string) => {
+			const plan = await originalInternals.loadPlan(directory);
+			if (firstLoadPending) {
+				firstLoadPending = false;
+				signalFirstLoadEntered();
+				await firstLoadGate;
+			}
+			return plan;
+		}) as unknown as typeof checkpointInternals.loadPlan;
+
+		const first = checkpoint.execute({
+			action: 'save_task_completion',
+			task_id: '1.1',
+		});
+		await firstLoadEntered;
+		const second = checkpoint.execute({
+			action: 'save_task_completion',
+			task_id: '1.1',
+		});
+		releaseFirstLoad();
+
+		const [firstResult, secondResult] = (
+			await Promise.all([first, second])
+		).map((result) => JSON.parse(result));
+
+		expect(firstResult.success).toBe(true);
+		expect(secondResult.success).toBe(true);
+		expect(secondResult.idempotent).toBe(true);
+		expect(secondResult.sha).toBe(firstResult.sha);
+
+		const log = JSON.parse(
+			fs.readFileSync(
+				path.join(tempDir, '.swarm', 'checkpoints.json'),
+				'utf-8',
+			),
+		);
+		expect(log.checkpoints).toHaveLength(1);
+		expect(log.checkpoints[0].sha).toBe(firstResult.sha);
 	});
 
 	test('saveCheckpointRecord uses the shared lock path and reports busy contention', async () => {

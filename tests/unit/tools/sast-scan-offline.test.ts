@@ -4,11 +4,12 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { _internals, sastScan } from '../../../src/tools/sast-scan';
 
-const originalIsSemgrepAvailable = _internals.isSemgrepAvailable;
+const originalCheckSemgrepAvailable = _internals.checkSemgrepAvailable;
 const originalRunSemgrep = _internals.runSemgrep;
 
 let directory: string;
 let discoveryCalls: number;
+let discoveryDirectories: Array<string | undefined>;
 let semgrepRunCalls: number;
 
 beforeEach(() => {
@@ -16,9 +17,11 @@ beforeEach(() => {
 		fs.mkdtempSync(path.join(os.tmpdir(), 'sast-offline-')),
 	);
 	discoveryCalls = 0;
+	discoveryDirectories = [];
 	semgrepRunCalls = 0;
-	_internals.isSemgrepAvailable = () => {
+	_internals.checkSemgrepAvailable = async (cwd) => {
 		discoveryCalls++;
+		discoveryDirectories.push(cwd);
 		return true;
 	};
 	_internals.runSemgrep = async () => {
@@ -39,7 +42,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-	_internals.isSemgrepAvailable = originalIsSemgrepAvailable;
+	_internals.checkSemgrepAvailable = originalCheckSemgrepAvailable;
 	_internals.runSemgrep = originalRunSemgrep;
 	fs.rmSync(directory, { recursive: true, force: true });
 });
@@ -78,6 +81,7 @@ describe('sastScan offline_only', () => {
 		const result = await sastScan({ changed_files: [file] }, directory);
 
 		expect(discoveryCalls).toBe(1);
+		expect(discoveryDirectories).toEqual([directory]);
 		expect(semgrepRunCalls).toBe(1);
 		expect(result.summary.engine).toBe('tier_a+tier_b');
 		expect(

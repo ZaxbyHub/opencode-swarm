@@ -750,7 +750,7 @@ Controls phase completion gating and validation.
 |-------|------|---------|-------------|
 | `enabled` | boolean | `true` | Enable/disable phase completion validation |
 | `required_agents` | string[] | `["coder", "reviewer", "test_engineer"]` | Agents that must be dispatched before a phase can complete |
-| `require_docs` | boolean | `true` | Require the docs agent to be dispatched |
+| `require_docs` | boolean | `true` | Require a successful docs-agent completion. This belongs to `phase_complete`, not the QA gate profile. Successful participation is persisted against the exact plan structure and phase so it survives session restart. |
 | `policy` | `"enforce" \| "warn"` | `"enforce"` | When `"enforce"`: missing agents block phase completion. When `"warn"`: missing agents produce warnings only. |
 | `regression_sweep.enforce` | boolean | `false` | If `true`, phase_complete warns when no regression-sweep result is found for any task in the phase. Advisory only — does not block phase completion. |
 
@@ -768,6 +768,8 @@ Controls phase completion gating and validation.
   }
 }
 ```
+
+When required participation is missing, `phase_complete` returns `recovery_guidance`: dispatch the named role and retry. Docs proof is stored in the bounded `.swarm/evidence/phase-participation.json` projection; its policy digest is audit provenance, while proof validity is bound to the exact plan structure, phase, role, workspace identity, and successful completion. If docs was added only by `require_docs`, set `phase_complete.require_docs` to `false` only when documentation is genuinely unnecessary. `policy: "warn"` weakens enforcement for every missing role; it does not create participation proof. A readable corrupt docs-participation projection is quarantined on a genuine re-dispatch, while unreadable, oversized, or quarantine-capacity failures require operator repair.
 
 ## Repo Graph Configuration (`repo_graph`)
 
