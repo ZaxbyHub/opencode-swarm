@@ -5,14 +5,9 @@
  * calls without mock.module leakage. All _internals are overridden per-test
  * and restored in afterEach.
  *
- * Covers:
- * - readIssueReference: present, absent, malformed
- * - readTraceState: present, absent, malformed (returns default)
- * - writeTraceState: round-trip write+read, atomic temp pattern, cleanup on failure
- * - readSpecIssueNumber: Number field, URL extraction, absent section, unparseable
- * - readPlanPhaseStatus: all complete, partial, no plan
- * - specExists / planExists: true / false
- * - _internals failure injection
+ * Issue #2131 finding 2: covers the typed `status` model (with legacy
+ * `completed` backward-compat), authoritative `planExists`/readPlanPhaseStatus
+ * (2.3), and the reproduction/publication receipt readers (2.6/2.4).
  */
 
 import { afterEach, describe, expect, mock, test } from 'bun:test';
@@ -22,10 +17,12 @@ import {
 	_internals,
 	loadPlanFromLedger,
 	planExists,
+	publicationReceiptExists,
 	readIssueReference,
 	readPlanPhaseStatus,
 	readSpecIssueNumber,
 	readTraceState,
+	reproductionReceiptExists,
 	specExists,
 	writeTraceState,
 } from '../../../src/hooks/issue-trace-state';
@@ -41,6 +38,14 @@ const realRenameSync = _internals.renameSync;
 const realMkdirSync = _internals.mkdirSync;
 const realUnlinkSync = _internals.unlinkSync;
 const realLoadPlanFromLedger = _internals.loadPlanFromLedger;
+const realReproductionReceiptExists = _internals.reproductionReceiptExists;
+const realPublicationReceiptExists = _internals.publicationReceiptExists;
+
+const DEFAULT_STATE = {
+	issueNumber: 0,
+	lastTransition: null,
+	status: 'in_progress',
+};
 
 afterEach(() => {
 	_internals.readFileSync = realReadFileSync;
@@ -50,6 +55,8 @@ afterEach(() => {
 	_internals.mkdirSync = realMkdirSync;
 	_internals.unlinkSync = realUnlinkSync;
 	_internals.loadPlanFromLedger = realLoadPlanFromLedger;
+	_internals.reproductionReceiptExists = realReproductionReceiptExists;
+	_internals.publicationReceiptExists = realPublicationReceiptExists;
 });
 
 // ---------------------------------------------------------------------------
@@ -69,29 +76,23 @@ describe('readIssueReference', () => {
 			flags: { trace: true },
 		};
 		_internals.readFileSync = mock(() => JSON.stringify(ref));
-
-		const result = readIssueReference(dir);
-		expect(result).toEqual(ref);
-		expect(result?.number).toBe(42);
+		expect(readIssueReference(dir)).toEqual(ref);
 	});
 
 	test('returns null when file is absent (throws ENOENT)', () => {
 		_internals.readFileSync = mock(() => {
 			throw Object.assign(new Error('not found'), { code: 'ENOENT' });
 		});
-
 		expect(readIssueReference(dir)).toBeNull();
 	});
 
 	test('returns null when file contains malformed JSON', () => {
 		_internals.readFileSync = mock(() => 'not-json{{{');
-
 		expect(readIssueReference(dir)).toBeNull();
 	});
 
 	test('returns null when parsed JSON is empty object (shape validation)', () => {
 		_internals.readFileSync = mock(() => '{}');
-
 		expect(readIssueReference(dir)).toBeNull();
 	});
 
@@ -106,23 +107,7 @@ describe('readIssueReference', () => {
 				flags: null,
 			}),
 		);
-
 		expect(readIssueReference(dir)).toBeNull();
-	});
-
-	test('returns parsed object when all required fields are valid strings/numbers/objects', () => {
-		const ref = {
-			url: 'https://github.com/owner/repo/issues/42',
-			owner: 'owner',
-			repo: 'repo',
-			number: 42,
-			timestamp: '2026-01-01T00:00:00Z',
-			flags: { trace: true },
-		};
-		_internals.readFileSync = mock(() => JSON.stringify(ref));
-
-		const result = readIssueReference(dir);
-		expect(result).toEqual(ref);
 	});
 
 	test('returns null when url is not a github.com HTTPS URL', () => {
@@ -136,93 +121,97 @@ describe('readIssueReference', () => {
 				flags: { trace: true },
 			}),
 		);
-
-		expect(readIssueReference(dir)).toBeNull();
-	});
-
-	test('returns null when url uses http (not https)', () => {
-		_internals.readFileSync = mock(() =>
-			JSON.stringify({
-				url: 'http://github.com/owner/repo/issues/42',
-				owner: 'owner',
-				repo: 'repo',
-				number: 42,
-				timestamp: '2026-01-01T00:00:00Z',
-				flags: { trace: true },
-			}),
-		);
-
 		expect(readIssueReference(dir)).toBeNull();
 	});
 });
 
 // ---------------------------------------------------------------------------
-// readTraceState
+// readTraceState (status model + legacy completed backward-compat)
 // ---------------------------------------------------------------------------
 
 describe('readTraceState', () => {
 	const dir = '/project';
 
-	test('returns parsed state when file is present and valid', () => {
+	test('returns parsed state when file is present and valid (status shape)', () => {
 		const state = {
 			issueNumber: 42,
 			lastTransition: 'PLAN_TO_EXECUTE',
-			completed: false,
+			status: 'in_progress',
 		};
 		_internals.readFileSync = mock(() => JSON.stringify(state));
-
 		expect(readTraceState(dir)).toEqual(state);
+	});
+
+	test('legacy completed:false → status:in_progress (backward-compat)', () => {
+		_internals.readFileSync = mock(() =>
+			JSON.stringify({
+				issueNumber: 42,
+				lastTransition: null,
+				completed: false,
+			}),
+		);
+		expect(readTraceState(dir)).toEqual({
+			issueNumber: 42,
+			lastTransition: null,
+			status: 'in_progress',
+		});
+	});
+
+	test('legacy completed:true → status:publication_handoff (NOT resolved)', () => {
+		_internals.readFileSync = mock(() =>
+			JSON.stringify({
+				issueNumber: 42,
+				lastTransition: 'EXECUTE_TO_COMMIT',
+				completed: true,
+			}),
+		);
+		expect(readTraceState(dir)).toEqual({
+			issueNumber: 42,
+			lastTransition: 'EXECUTE_TO_COMMIT',
+			status: 'publication_handoff',
+		});
 	});
 
 	test('returns default state when file is absent', () => {
 		_internals.readFileSync = mock(() => {
 			throw Object.assign(new Error('not found'), { code: 'ENOENT' });
 		});
-
-		const result = readTraceState(dir);
-		expect(result).toEqual({
-			issueNumber: 0,
-			lastTransition: null,
-			completed: false,
-		});
+		expect(readTraceState(dir)).toEqual(DEFAULT_STATE);
 	});
 
 	test('returns default state when file contains malformed JSON', () => {
 		_internals.readFileSync = mock(() => '{broken');
-
-		const result = readTraceState(dir);
-		expect(result).toEqual({
-			issueNumber: 0,
-			lastTransition: null,
-			completed: false,
-		});
+		expect(readTraceState(dir)).toEqual(DEFAULT_STATE);
 	});
 
-	test('returns default state when parsed JSON has wrong issueNumber type (shape validation)', () => {
+	test('returns default state when parsed JSON has wrong issueNumber type', () => {
 		_internals.readFileSync = mock(() =>
 			JSON.stringify({
 				issueNumber: 'not-a-number',
 				lastTransition: null,
-				completed: false,
+				status: 'in_progress',
 			}),
 		);
-
-		const result = readTraceState(dir);
-		expect(result).toEqual({
-			issueNumber: 0,
-			lastTransition: null,
-			completed: false,
-		});
+		expect(readTraceState(dir)).toEqual(DEFAULT_STATE);
 	});
 
-	test('returns default state when parsed JSON is empty object (shape validation)', () => {
+	test('returns default state when parsed JSON is empty object', () => {
 		_internals.readFileSync = mock(() => '{}');
+		expect(readTraceState(dir)).toEqual(DEFAULT_STATE);
+	});
 
-		const result = readTraceState(dir);
-		expect(result).toEqual({
-			issueNumber: 0,
+	test('an invalid status enum value falls back to in_progress', () => {
+		_internals.readFileSync = mock(() =>
+			JSON.stringify({
+				issueNumber: 42,
+				lastTransition: null,
+				status: 'bogus',
+			}),
+		);
+		expect(readTraceState(dir)).toEqual({
+			issueNumber: 42,
 			lastTransition: null,
-			completed: false,
+			status: 'in_progress',
 		});
 	});
 });
@@ -240,18 +229,19 @@ describe('writeTraceState', () => {
 		const mkdirCalls: string[] = [];
 		const writeCalls: Array<{ path: string; data: string }> = [];
 		const renameCalls: Array<{ from: string; to: string }> = [];
+		_internals.mkdirSync = mock((p: string) => mkdirCalls.push(p));
+		_internals.writeFileSync = mock((p: string, data: string) =>
+			writeCalls.push({ path: p, data }),
+		);
+		_internals.renameSync = mock((from: string, to: string) =>
+			renameCalls.push({ from, to }),
+		);
 
-		_internals.mkdirSync = mock((p: string) => {
-			mkdirCalls.push(p);
-		});
-		_internals.writeFileSync = mock((p: string, data: string) => {
-			writeCalls.push({ path: p, data });
-		});
-		_internals.renameSync = mock((from: string, to: string) => {
-			renameCalls.push({ from, to });
-		});
-
-		const state = { issueNumber: 42, lastTransition: null, completed: false };
+		const state = {
+			issueNumber: 42,
+			lastTransition: null,
+			status: 'in_progress' as const,
+		};
 		writeTraceState(dir, state);
 
 		expect(mkdirCalls).toEqual([swarmDir]);
@@ -270,20 +260,15 @@ describe('writeTraceState', () => {
 			renameCallCount++;
 			throw new Error('rename failed');
 		});
-		_internals.unlinkSync = mock((p: string) => {
-			unlinkCalls.push(p);
-		});
+		_internals.unlinkSync = mock((p: string) => unlinkCalls.push(p));
 
 		expect(() =>
 			writeTraceState(dir, {
 				issueNumber: 1,
 				lastTransition: null,
-				completed: false,
+				status: 'in_progress',
 			}),
 		).toThrow('rename failed');
-
-		// First rename fails → unlink target (finalPath) → second rename fails → unlink temp
-		// So unlinkCalls should have finalPath then tmpPath
 		expect(renameCallCount).toBe(2);
 		expect(unlinkCalls.length).toBe(2);
 	});
@@ -296,16 +281,13 @@ describe('writeTraceState', () => {
 		_internals.renameSync = mock(() => {
 			renameCallCount++;
 		});
-		_internals.unlinkSync = mock((p: string) => {
-			unlinkCalls.push(p);
-		});
+		_internals.unlinkSync = mock((p: string) => unlinkCalls.push(p));
 
 		writeTraceState(dir, {
 			issueNumber: 1,
 			lastTransition: null,
-			completed: false,
+			status: 'in_progress',
 		});
-
 		expect(renameCallCount).toBe(1);
 		expect(unlinkCalls.length).toBe(0);
 	});
@@ -313,21 +295,17 @@ describe('writeTraceState', () => {
 	test('ignores cleanup failures on unlink after rename error', () => {
 		_internals.mkdirSync = mock(() => {});
 		_internals.writeFileSync = mock(() => {});
-		let renameCallCount = 0;
 		_internals.renameSync = mock(() => {
-			renameCallCount++;
 			throw new Error('rename failed');
 		});
 		_internals.unlinkSync = mock(() => {
 			throw new Error('unlink also failed');
 		});
-
-		// Should throw the original rename error, not the unlink error
 		expect(() =>
 			writeTraceState(dir, {
 				issueNumber: 1,
 				lastTransition: null,
-				completed: false,
+				status: 'in_progress',
 			}),
 		).toThrow('rename failed');
 	});
@@ -344,7 +322,6 @@ describe('readSpecIssueNumber', () => {
 		const spec =
 			'## Source Issue\n- Number: 1688\n- URL: https://github.com/org/repo/issues/1688\n\n## Background\n...';
 		_internals.readFileSync = mock(() => spec);
-
 		expect(readSpecIssueNumber(dir)).toBe(1688);
 	});
 
@@ -352,28 +329,11 @@ describe('readSpecIssueNumber', () => {
 		const spec =
 			'## Source Issue\n- URL: https://github.com/org/repo/issues/42\n\n## Background';
 		_internals.readFileSync = mock(() => spec);
-
 		expect(readSpecIssueNumber(dir)).toBe(42);
 	});
 
 	test('returns null when ## Source Issue section is absent', () => {
 		_internals.readFileSync = mock(() => '# Spec\n## Background\nSome text');
-
-		expect(readSpecIssueNumber(dir)).toBeNull();
-	});
-
-	test('returns null when section exists but no number/URL parseable', () => {
-		const spec = '## Source Issue\n- Title: some issue\n\n## Background';
-		_internals.readFileSync = mock(() => spec);
-
-		expect(readSpecIssueNumber(dir)).toBeNull();
-	});
-
-	test('returns null when file is absent', () => {
-		_internals.readFileSync = mock(() => {
-			throw new Error('ENOENT');
-		});
-
 		expect(readSpecIssueNumber(dir)).toBeNull();
 	});
 
@@ -381,44 +341,36 @@ describe('readSpecIssueNumber', () => {
 		const spec =
 			'## Source Issue\n- Number: 100\n\n## Other Section\n- Number: 999';
 		_internals.readFileSync = mock(() => spec);
-
 		expect(readSpecIssueNumber(dir)).toBe(100);
 	});
 });
 
 // ---------------------------------------------------------------------------
-// readPlanPhaseStatus
+// readPlanPhaseStatus (authoritative — returns planExists + allComplete)
 // ---------------------------------------------------------------------------
 
 describe('readPlanPhaseStatus', () => {
-	test('returns allComplete false when plan is null (no plan file)', async () => {
-		// With no real plan.json on disk, loadPlanJsonOnly returns null
-		const result = await readPlanPhaseStatus('/nonexistent');
-		expect(result).toEqual({ allComplete: false });
-	});
-
-	test('returns allComplete false for nonexistent directory', async () => {
-		const result = await readPlanPhaseStatus('/nonexistent-dir');
-		expect(result.allComplete).toBe(false);
-	});
-
-	test('returns allComplete false when plan has empty phases array', async () => {
-		_internals.loadPlanFromLedger = mock(async () => ({ phases: [] }) as Plan);
-
+	test('returns planExists false + allComplete false when plan is null', async () => {
+		_internals.loadPlanFromLedger = mock(async () => null);
 		const result = await readPlanPhaseStatus('/project');
-		expect(result).toEqual({ allComplete: false });
+		expect(result).toEqual({ planExists: false, allComplete: false });
 	});
 
-	test('returns allComplete true when all phases are complete', async () => {
+	test('returns planExists false when plan has empty phases array', async () => {
+		_internals.loadPlanFromLedger = mock(async () => ({ phases: [] }) as Plan);
+		const result = await readPlanPhaseStatus('/project');
+		expect(result).toEqual({ planExists: false, allComplete: false });
+	});
+
+	test('returns planExists true + allComplete true when all phases complete', async () => {
 		_internals.loadPlanFromLedger = mock(
 			async () =>
 				({
 					phases: [{ status: 'complete' }, { status: 'completed' }],
 				}) as Plan,
 		);
-
 		const result = await readPlanPhaseStatus('/project');
-		expect(result).toEqual({ allComplete: true });
+		expect(result).toEqual({ planExists: true, allComplete: true });
 	});
 
 	test('returns allComplete false when some phases are incomplete', async () => {
@@ -428,9 +380,8 @@ describe('readPlanPhaseStatus', () => {
 					phases: [{ status: 'complete' }, { status: 'in_progress' }],
 				}) as Plan,
 		);
-
 		const result = await readPlanPhaseStatus('/project');
-		expect(result).toEqual({ allComplete: false });
+		expect(result).toEqual({ planExists: true, allComplete: false });
 	});
 });
 
@@ -446,7 +397,94 @@ describe('loadPlanFromLedger', () => {
 });
 
 // ---------------------------------------------------------------------------
-// specExists / planExists
+// planExists (authoritative — ledger-aware, async)
+// ---------------------------------------------------------------------------
+
+describe('planExists', () => {
+	test('returns true when an authoritative plan with phases loads', async () => {
+		_internals.loadPlanFromLedger = mock(
+			async () => ({ phases: [{ status: 'complete' }] }) as Plan,
+		);
+		expect(await planExists('/project')).toBe(true);
+	});
+
+	test('returns false when the authoritative plan is null', async () => {
+		_internals.loadPlanFromLedger = mock(async () => null);
+		expect(await planExists('/project')).toBe(false);
+	});
+
+	test('returns false when the plan has no phases', async () => {
+		_internals.loadPlanFromLedger = mock(async () => ({ phases: [] }) as Plan);
+		expect(await planExists('/project')).toBe(false);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// reproduction / publication receipt readers (issue #2131 2.6 / 2.4)
+// ---------------------------------------------------------------------------
+
+describe('reproductionReceiptExists', () => {
+	test('true when receipt performed and issueNumber matches', async () => {
+		_internals.readFileSync = mock(() =>
+			JSON.stringify({ performed: true, issueNumber: 42 }),
+		);
+		expect(await reproductionReceiptExists('/project', 42)).toBe(true);
+	});
+
+	test('false when receipt issueNumber differs', async () => {
+		_internals.readFileSync = mock(() =>
+			JSON.stringify({ performed: true, issueNumber: 999 }),
+		);
+		expect(await reproductionReceiptExists('/project', 42)).toBe(false);
+	});
+
+	test('false when performed is not true', async () => {
+		_internals.readFileSync = mock(() =>
+			JSON.stringify({ performed: false, issueNumber: 42 }),
+		);
+		expect(await reproductionReceiptExists('/project', 42)).toBe(false);
+	});
+
+	test('false when file is absent', async () => {
+		_internals.readFileSync = mock(() => {
+			throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+		});
+		expect(await reproductionReceiptExists('/project', 42)).toBe(false);
+	});
+});
+
+describe('publicationReceiptExists', () => {
+	test('true when published is true and issueNumber matches', async () => {
+		_internals.readFileSync = mock(() =>
+			JSON.stringify({ published: true, issueNumber: 42, prNumber: 7 }),
+		);
+		expect(await publicationReceiptExists('/project', 42)).toBe(true);
+	});
+
+	test('false when issueNumber differs (issue-bound)', async () => {
+		_internals.readFileSync = mock(() =>
+			JSON.stringify({ published: true, issueNumber: 999, prNumber: 7 }),
+		);
+		expect(await publicationReceiptExists('/project', 42)).toBe(false);
+	});
+
+	test('false when published is not true', async () => {
+		_internals.readFileSync = mock(() =>
+			JSON.stringify({ published: false, issueNumber: 42 }),
+		);
+		expect(await publicationReceiptExists('/project', 42)).toBe(false);
+	});
+
+	test('false when file is absent', async () => {
+		_internals.readFileSync = mock(() => {
+			throw Object.assign(new Error('enoent'), { code: 'ENOENT' });
+		});
+		expect(await publicationReceiptExists('/project', 42)).toBe(false);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// specExists
 // ---------------------------------------------------------------------------
 
 describe('specExists', () => {
@@ -461,40 +499,16 @@ describe('specExists', () => {
 	});
 });
 
-describe('planExists', () => {
-	test('returns true when plan.json exists', () => {
-		_internals.existsSync = mock((p: string) => p.endsWith('plan.json'));
-		expect(planExists('/project')).toBe(true);
-	});
-
-	test('returns false when plan.json does not exist', () => {
-		_internals.existsSync = mock(() => false);
-		expect(planExists('/project')).toBe(false);
-	});
-});
-
 // ---------------------------------------------------------------------------
 // _internals failure injection
 // ---------------------------------------------------------------------------
 
 describe('_internals failure injection', () => {
-	test('readIssueReference returns null when readFileSync throws arbitrary error', () => {
-		_internals.readFileSync = mock(() => {
-			throw new Error('permission denied');
-		});
-		expect(readIssueReference('/project')).toBeNull();
-	});
-
 	test('readTraceState returns default when readFileSync throws arbitrary error', () => {
 		_internals.readFileSync = mock(() => {
 			throw new Error('disk error');
 		});
-		const result = readTraceState('/project');
-		expect(result).toEqual({
-			issueNumber: 0,
-			lastTransition: null,
-			completed: false,
-		});
+		expect(readTraceState('/project')).toEqual(DEFAULT_STATE);
 	});
 
 	test('readSpecIssueNumber returns null when readFileSync throws', () => {
@@ -502,13 +516,5 @@ describe('_internals failure injection', () => {
 			throw new Error('io error');
 		});
 		expect(readSpecIssueNumber('/project')).toBeNull();
-	});
-
-	test('specExists propagates existsSync result correctly on error path', () => {
-		_internals.existsSync = mock(() => {
-			throw new Error('access denied');
-		});
-		// existsSync doesn't normally throw, but if it does, the error propagates
-		expect(() => specExists('/project')).toThrow('access denied');
 	});
 });

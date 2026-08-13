@@ -182,6 +182,15 @@ describe('applyExplorerFormatSuffix', () => {
 		// confidence appended to CLEAN caused 4 of the real failures.
 		expect(lane.prompt).toContain('NO\nconfidence field');
 		expect(lane.prompt).toContain('never alongside');
+		// Issue #2131 finding 1b: CLEAN exclusivity is per-OBIGATION, not per-lane.
+		// A consolidated lane must be told it MAY mix [CLEAN] + [CANDIDATE] across
+		// different obligations (the collection routes one coverage check per owned
+		// lane, so per-obligation CLEAN rows parse correctly).
+		expect(lane.prompt).toContain('for the SAME obligation');
+		expect(lane.prompt).toContain('for DIFFERENT');
+		expect(lane.prompt).toMatch(
+			/every owned\s+obligation must receive exactly one/,
+		);
 		// The example id obeys the uniqueness rule stated below it, so a lane that
 		// copies it verbatim cannot collide at assertNoDuplicates.
 		expect(lane.prompt).toContain('example-lane-001 | example-lane');

@@ -4,6 +4,10 @@
  * Uses the `_internals` DI seam to override adapter functions,
  * avoiding `mock.module` leakage across test files (AGENTS.md invariant 7).
  *
+ * Issue #2131 finding 2: covers the typed `status` model, the reproduction
+ * gate (2.6), durable delivery ordering (2.5), and the authoritative
+ * plan-phase cache (2.3).
+ *
  * Under 500 lines (FR-006).
  */
 
@@ -15,6 +19,7 @@ import {
 	_internals,
 	createIssueTraceHook,
 	resetApprovalCache,
+	resetPhaseStatusCache,
 } from '../../../src/hooks/issue-trace';
 import type { TraceState } from '../../../src/hooks/issue-trace-reducer';
 
@@ -44,15 +49,23 @@ function readJson<T>(dir: string, filename: string): T | null {
 	}
 }
 
-/** Creates a valid issue-reference.json with trace=true. */
-function writeIssueRef(dir: string, number = 42): void {
+/**
+ * Creates a valid issue-reference.json with trace=true. `noRepro` defaults to
+ * true so the reproduction gate (issue #2131 2.6) permits the PLAN transition
+ * via the typed-waiver path; tests that exercise the gate set it to false.
+ */
+function writeIssueRef(
+	dir: string,
+	number = 42,
+	opts: { noRepro?: boolean } = {},
+): void {
 	writeJson(dir, 'issue-reference.json', {
 		url: `https://github.com/owner/repo/issues/${number}`,
 		owner: 'owner',
 		repo: 'repo',
 		number,
 		timestamp: '2026-01-01T00:00:00Z',
-		flags: { trace: true },
+		flags: { trace: true, noRepro: opts.noRepro ?? true },
 	});
 }
 
@@ -71,9 +84,19 @@ function writeTraceState(dir: string, state?: Partial<TraceState>): void {
 	const defaults: TraceState = {
 		issueNumber: 42,
 		lastTransition: null,
-		completed: false,
+		status: 'in_progress',
 	};
 	writeJson(dir, 'issue-trace-state.json', { ...defaults, ...state });
+}
+
+/** Writes a valid reproduction receipt bound to the given issue. */
+function writeReproReceipt(dir: string, number = 42): void {
+	writeJson(dir, 'reproduction.json', {
+		performed: true,
+		issueNumber: number,
+		timestamp: '2026-01-01T00:00:00Z',
+		commands: ['bun test x'],
+	});
 }
 
 /** Runs the hook's messagesTransform and returns the output messages. */
@@ -94,6 +117,7 @@ const originals = { ..._internals };
 afterEach(() => {
 	Object.assign(_internals, originals);
 	resetApprovalCache();
+	resetPhaseStatusCache();
 });
 
 // ── Tests ───────────────────────────────────────────────────────────
@@ -105,7 +129,6 @@ describe('issue-trace hook', () => {
 	});
 
 	test('noop when no issue-reference.json exists', async () => {
-		// No issue-reference.json → trace flag cannot be true
 		const messages = await runHook(tmpDir);
 		expect(messages).toHaveLength(0);
 	});
@@ -134,7 +157,6 @@ describe('issue-trace hook', () => {
 		writeIssueRef(tmpDir);
 		writeTraceState(tmpDir);
 		writeSpecWithIssue(tmpDir);
-		// No plan.json → planExists returns false
 
 		const messages = await runHook(tmpDir);
 		expect(messages).toHaveLength(1);
@@ -144,7 +166,7 @@ describe('issue-trace hook', () => {
 		});
 	});
 
-	test('state mutation: trace-state updated with new lastTransition', async () => {
+	test('state mutation: trace-state updated with new lastTransition + in_progress status', async () => {
 		writeIssueRef(tmpDir);
 		writeTraceState(tmpDir);
 		writeSpecWithIssue(tmpDir);
@@ -154,10 +176,13 @@ describe('issue-trace hook', () => {
 		const state = readJson<TraceState>(tmpDir, 'issue-trace-state.json');
 		expect(state).not.toBeNull();
 		expect(state?.lastTransition).toBe('ISSUE_INGEST_TO_PLAN');
-		expect(state?.completed).toBe(false);
+		expect(state?.status).toBe('in_progress');
 	});
 
-	test('WRITE-FAIL → no injection: override writeTraceState to throw', async () => {
+	test('WRITE-FAIL → directive still delivered, state NOT persisted (retry next cycle)', async () => {
+		// Issue #2131 finding 2.5: delivery happens BEFORE the state write, so a
+		// write failure does not lose the directive. The transition is not
+		// persisted, so the next cycle recomputes and re-emits it.
 		writeIssueRef(tmpDir);
 		writeTraceState(tmpDir);
 		writeSpecWithIssue(tmpDir);
@@ -167,9 +192,8 @@ describe('issue-trace hook', () => {
 		};
 
 		const messages = await runHook(tmpDir);
-		expect(messages).toHaveLength(0);
-
-		// State should be unchanged (write failed before rename)
+		expect(messages).toHaveLength(1);
+		// State unchanged (write failed before rename)
 		const state = readJson<TraceState>(tmpDir, 'issue-trace-state.json');
 		expect(state?.lastTransition).toBeNull();
 	});
@@ -186,7 +210,6 @@ describe('issue-trace hook', () => {
 	test('cross-issue fail-closed: spec issue number mismatch → no injection', async () => {
 		writeIssueRef(tmpDir, 42);
 		writeTraceState(tmpDir);
-		// Spec references issue #99, but issue-ref is #42
 		writeSpecWithIssue(tmpDir, 99);
 
 		const messages = await runHook(tmpDir);
@@ -197,28 +220,20 @@ describe('issue-trace hook', () => {
 		writeIssueRef(tmpDir);
 		writeTraceState(tmpDir);
 		writeSpecWithIssue(tmpDir);
-		// Create a plan so the reducer reaches row (f) or (g)
-		writeJson(tmpDir, 'plan.json', {
-			title: 'test',
-			swarm_id: 'test',
-			phases: [],
-		});
-
-		// Mock isPlanCriticApproved to hang forever
+		// An authoritative plan exists with an incomplete phase (so planExists is
+		// true and row g — plan exists, critic pending — applies).
+		_internals.readPlanPhaseStatus = () =>
+			Promise.resolve({ planExists: true, allComplete: false });
 		_internals.isPlanCriticApproved = () =>
 			new Promise<boolean>(() => {
 				// never resolves
 			});
 
-		// Must complete within a reasonable time (100ms timeout + overhead)
 		const start = Date.now();
 		const messages = await runHook(tmpDir, [], 100);
 		const elapsed = Date.now() - start;
-
-		// Should not hang — the boundedApprovalCheck uses a 100ms timeout
 		expect(elapsed).toBeLessThan(2000);
-
-		// With plan but no critic approval, reducer returns no-op (row f)
+		// With plan but no critic approval, reducer returns no-op (row g)
 		expect(messages).toHaveLength(0);
 	});
 
@@ -232,7 +247,6 @@ describe('issue-trace hook', () => {
 
 	test('trace issue number mismatch in trace state → no injection', async () => {
 		writeIssueRef(tmpDir, 42);
-		// Trace state references a different issue number
 		writeTraceState(tmpDir, { issueNumber: 99 });
 		writeSpecWithIssue(tmpDir, 42);
 
@@ -240,30 +254,26 @@ describe('issue-trace hook', () => {
 		expect(messages).toHaveLength(0);
 	});
 
-	test('trace already completed → noop', async () => {
+	test('trace already published (terminal) → noop', async () => {
 		writeIssueRef(tmpDir);
-		writeTraceState(tmpDir, { completed: true });
+		writeTraceState(tmpDir, { status: 'published' });
 		writeSpecWithIssue(tmpDir);
 
 		const messages = await runHook(tmpDir);
 		expect(messages).toHaveLength(0);
 	});
 
-	test('error in boundedApprovalCheck → noop (fail-closed)', async () => {
+	test('error in boundedApprovalCheck → noop (fail-closed) but PLAN still fires pre-plan', async () => {
 		writeIssueRef(tmpDir);
 		writeTraceState(tmpDir);
 		writeSpecWithIssue(tmpDir);
-		// Mock everything to exercise the async path
 		_internals.isPlanCriticApproved = () => {
 			throw new Error('approval check crashed');
 		};
 
-		// The catch in boundedApprovalCheck returns false,
-		// and the reducer still returns a result. The hook itself
-		// shouldn't throw — only the boundedApprovalCheck catch.
 		const messages = await runHook(tmpDir);
-		// With spec + no plan, this is row (e) — should still inject PLAN
-		// because critic approval is only checked after plan exists (row f)
+		// Spec + no plan (reproduction waived) → PLAN fires; critic approval is
+		// only consulted after a plan exists.
 		expect(messages).toHaveLength(1);
 		expect(messages[0]).toEqual({
 			role: 'system',
@@ -271,20 +281,30 @@ describe('issue-trace hook', () => {
 		});
 	});
 
-	test('output without messages array → safe no-op', async () => {
+	// Issue #2131 finding 2.5: durable delivery ordering.
+	test('output WITHOUT a messages array → transition NOT persisted (retry next cycle)', async () => {
 		writeIssueRef(tmpDir);
 		writeTraceState(tmpDir);
 		writeSpecWithIssue(tmpDir);
 
 		const hook = createIssueTraceHook({}, tmpDir, 100);
-		const output = {}; // no messages array
+		const output = {}; // no messages array — cannot durably deliver
 		await hook.messagesTransform({}, output);
-		// Should not throw, and state should still be written
+
+		// The PLAN transition must NOT be advanced, so the next cycle recomputes
+		// and re-emits it instead of being permanently suppressed by idempotency.
 		const state = readJson<TraceState>(tmpDir, 'issue-trace-state.json');
-		expect(state?.lastTransition).toBe('ISSUE_INGEST_TO_PLAN');
+		expect(state?.lastTransition).toBeNull();
+		expect(state?.status).toBe('in_progress');
+
+		// A subsequent call WITH a messages array then delivers + persists.
+		const messages = await runHook(tmpDir);
+		expect(messages).toHaveLength(1);
+		const state2 = readJson<TraceState>(tmpDir, 'issue-trace-state.json');
+		expect(state2?.lastTransition).toBe('ISSUE_INGEST_TO_PLAN');
 	});
 
-	test('all phases complete → COMMIT directive injected', async () => {
+	test('all phases complete → publication_handoff directive injected (NOT completed)', async () => {
 		writeIssueRef(tmpDir);
 		writeTraceState(tmpDir, { lastTransition: 'PLAN_TO_EXECUTE' });
 		writeSpecWithIssue(tmpDir);
@@ -295,7 +315,7 @@ describe('issue-trace hook', () => {
 		});
 		_internals.isPlanCriticApproved = () => Promise.resolve(true);
 		_internals.readPlanPhaseStatus = () =>
-			Promise.resolve({ allComplete: true });
+			Promise.resolve({ planExists: true, allComplete: true });
 
 		const messages = await runHook(tmpDir);
 		expect(messages).toHaveLength(1);
@@ -304,29 +324,124 @@ describe('issue-trace hook', () => {
 			content: [
 				{
 					type: 'text',
-					text: 'All phases complete. Compose commit-pr to publish the PR. Read .swarm/issue-reference.json for Closes #42.',
+					text: 'All implementation phases are complete. Compose commit-pr to publish the PR. Read .swarm/issue-reference.json for Closes #42. After the PR is created/updated, call record_issue_publication (with the PR number, URL, and HEAD sha) so this trace reaches its terminal published state — the trace is NOT complete until publication is confirmed.',
 				},
 			],
 		});
 
 		const state = readJson<TraceState>(tmpDir, 'issue-trace-state.json');
-		expect(state?.completed).toBe(true);
+		expect(state?.status).toBe('publication_handoff');
 		expect(state?.lastTransition).toBe('EXECUTE_TO_COMMIT');
+	});
+
+	test('publication receipt observed → published transition', async () => {
+		writeIssueRef(tmpDir);
+		writeTraceState(tmpDir, {
+			lastTransition: 'EXECUTE_TO_COMMIT',
+			status: 'publication_handoff',
+		});
+		writeSpecWithIssue(tmpDir);
+		writeJson(tmpDir, 'issue-publication.json', {
+			published: true,
+			issueNumber: 42,
+			prNumber: 7,
+			prUrl: 'https://github.com/owner/repo/pull/7',
+			publishedAt: '2026-01-01T00:00:00Z',
+		});
+
+		const messages = await runHook(tmpDir);
+		expect(messages).toHaveLength(1);
+		expect(messages[0]).toEqual({
+			role: 'system',
+			content: [
+				{
+					type: 'text',
+					text: 'Publication confirmed. The issue-trace workflow is complete.',
+				},
+			],
+		});
+		const state = readJson<TraceState>(tmpDir, 'issue-trace-state.json');
+		expect(state?.status).toBe('published');
+		expect(state?.lastTransition).toBe('PUBLISHED');
 	});
 
 	test('EXECUTE_TO_COMMIT idempotency → no duplicate directive', async () => {
 		writeIssueRef(tmpDir);
 		writeTraceState(tmpDir, {
 			lastTransition: 'EXECUTE_TO_COMMIT',
-			completed: true,
+			status: 'publication_handoff',
 		});
 		writeSpecWithIssue(tmpDir);
 
 		const messages = await runHook(tmpDir);
 		expect(messages).toHaveLength(0);
 	});
+
+	// Issue #2131 finding 2.6: reproduction gate.
+	describe('reproduction gate (issue #2131 2.6)', () => {
+		test('emits a ONE-SHOT reproduction-required directive when NOT permitted', async () => {
+			writeIssueRef(tmpDir, 42, { noRepro: false });
+			writeTraceState(tmpDir);
+			writeSpecWithIssue(tmpDir);
+
+			// First drive: one-shot directive + [MODE: ISSUE_INGEST], state → REPRO_GATE.
+			const messages = await runHook(tmpDir);
+			expect(messages).toHaveLength(2);
+			const state = readJson<TraceState>(tmpDir, 'issue-trace-state.json');
+			expect(state?.lastTransition).toBe('REPRO_GATE');
+
+			// Second drive: one-shot already fired → silent noop (no re-nagging).
+			const messages2 = await runHook(tmpDir);
+			expect(messages2).toHaveLength(0);
+		});
+
+		test('PLAN permitted by a reproduction receipt bound to the issue', async () => {
+			writeIssueRef(tmpDir, 42, { noRepro: false });
+			writeTraceState(tmpDir);
+			writeSpecWithIssue(tmpDir);
+			writeReproReceipt(tmpDir, 42);
+
+			const messages = await runHook(tmpDir);
+			expect(messages).toHaveLength(1);
+			expect(messages[0]).toEqual({
+				role: 'system',
+				content: [{ type: 'text', text: '[MODE: PLAN]' }],
+			});
+		});
+
+		test('reproduction receipt for a DIFFERENT issue does NOT permit PLAN', async () => {
+			writeIssueRef(tmpDir, 42, { noRepro: false });
+			writeTraceState(tmpDir);
+			writeSpecWithIssue(tmpDir);
+			writeReproReceipt(tmpDir, 999); // bound to a different issue
+
+			// The foreign receipt does not satisfy the gate, so the one-shot
+			// reproduction-required directive fires and PLAN does NOT.
+			await runHook(tmpDir);
+			const state = readJson<TraceState>(tmpDir, 'issue-trace-state.json');
+			expect(state?.lastTransition).toBe('REPRO_GATE');
+			expect(state?.status).toBe('in_progress');
+		});
+
+		test('PLAN permitted by a noReproWaiver', async () => {
+			writeJson(tmpDir, 'issue-reference.json', {
+				url: 'https://github.com/owner/repo/issues/42',
+				owner: 'owner',
+				repo: 'repo',
+				number: 42,
+				timestamp: '2026-01-01T00:00:00Z',
+				flags: { trace: true, noRepro: false },
+				noReproWaiver: {
+					waived: true,
+					reason: 'doc-only issue',
+					timestamp: '2026-01-01T00:00:00Z',
+				},
+			});
+			writeTraceState(tmpDir);
+			writeSpecWithIssue(tmpDir);
+
+			const messages = await runHook(tmpDir);
+			expect(messages).toHaveLength(1);
+		});
+	});
 });
-
-// ── Cleanup ────────────────────────────────────────────────────────
-
-// Temp dirs cleaned up by OS; no explicit cleanup needed for these tests.

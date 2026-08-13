@@ -106,13 +106,24 @@ harness name, and never guess:
 | OpenAI Codex | B | parallel subagents (fresh context) | ledger files in working notes | Pre-Synthesis Gate checklist |
 | ZCode | B | parallel subagents (fresh context) | ledger files in working notes | Pre-Synthesis Gate checklist |
 
+**Completion-gate assurance is NOT equivalent across profiles.** Only Profile A
+enforces completion MECHANICALLY: the controller's `complete_pr_workflow` receipt
+gate refuses synthesis unless base coverage, the 11-family trigger ledger, and the
+reviewer/critic artifacts are all present and head-bound. Profiles B and C rely on
+the operator executing the Pre-Synthesis Gate checklist themselves — there is no
+runtime receipt gate that refuses a partial synthesis. Treat B/C as PROCEDURAL
+assurance only; do not claim mechanical completion parity with Profile A for this
+repository unless a controller-equivalent receipt gate is added for those profiles.
+
 Verify each row against your own current tool list before relying on it; a
 harness may gain or lose capabilities between versions. OpenCode, Claude Code,
 Codex, and ZCode can all spawn fresh-context subagents in current versions —
 run Profile B wherever the session actually exposes that capability, and
 reserve Profile C for sessions that genuinely lack a subagent mechanism; never
 assign a harness to Profile C by name alone. The absence of the controller is
-NOT a BLOCKED condition — Profiles B and C are first-class execution paths, not degraded fallbacks.
+NOT a BLOCKED condition — Profiles B and C are legitimate execution paths whose
+completion gate is PROCEDURAL (see the completion-gate assurance note above), not
+the mechanically enforced receipt gate Profile A provides.
 BLOCKED is reserved for bypassing an active controller and for coverage gaps
 that remain unclosable after bounded retries on any profile.
 

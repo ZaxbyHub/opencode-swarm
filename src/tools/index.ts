@@ -189,6 +189,14 @@ export {
 	prepare_pr_workflow_checkout,
 } from './prepare-pr-workflow-checkout';
 export {
+	executeRecordIssuePublication,
+	record_issue_publication,
+} from './record-issue-publication';
+export {
+	executeRecordIssueReproduction,
+	record_issue_reproduction,
+} from './record-issue-reproduction';
+export {
 	executeRunPrFeedbackStageA,
 	run_pr_feedback_stage_a,
 } from './run-pr-feedback-stage-a';

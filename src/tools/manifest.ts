@@ -97,6 +97,8 @@ import { pre_check_batch } from './pre-check-batch';
 import { prepare_pr_feedback_scope } from './prepare-pr-feedback-scope';
 import { prepare_pr_workflow_checkout } from './prepare-pr-workflow-checkout';
 import { quality_budget } from './quality-budget';
+import { record_issue_publication } from './record-issue-publication';
+import { record_issue_reproduction } from './record-issue-reproduction';
 import { repo_map } from './repo-map';
 import { req_coverage } from './req-coverage';
 import { retrieve_lane_output } from './retrieve-lane-output';
@@ -179,6 +181,8 @@ export const TOOL_MANIFEST = defineHandlers({
 	abort_pr_workflow: () => abort_pr_workflow,
 	approve_plan_critic: () => approve_plan_critic,
 	prepare_pr_workflow_checkout: () => prepare_pr_workflow_checkout,
+	record_issue_publication: () => record_issue_publication,
+	record_issue_reproduction: () => record_issue_reproduction,
 	run_pr_feedback_stage_a: () => run_pr_feedback_stage_a,
 	submit_council_verdicts: () => submit_council_verdicts,
 	submit_phase_council_verdicts: () => submit_phase_council_verdicts,
