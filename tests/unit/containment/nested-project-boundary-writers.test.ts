@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { Evidence } from '../../../src/config/evidence-schema';
+import { closeProjectDb } from '../../../src/db/project-db.js';
+import { getOrCreateProfileForIdentity } from '../../../src/db/qa-gate-profile.js';
 import { saveEvidence } from '../../../src/evidence/manager';
 import { writeCheckpoint } from '../../../src/plan/checkpoint';
 import { initLedger, quarantineLedgerSuffix } from '../../../src/plan/ledger';
@@ -44,6 +46,9 @@ const fixtures: NestedBoundaryFixture[] = [];
 afterEach(() => {
 	resetSwarmState();
 	for (const fixture of fixtures.splice(0)) {
+		closeProjectDb(fixture.outer);
+		closeProjectDb(fixture.nested);
+		closeProjectDb(fixture.ordinary);
 		removeNestedBoundaryFixture(fixture);
 	}
 });
@@ -103,10 +108,10 @@ describe('nested project boundary writers — regression: parent .swarm poison (
 			path.join(nested, '.swarm', 'spec.md'),
 			'# Nested spec\nKeep plan state in this project.',
 		);
-		fs.writeFileSync(
-			path.join(nested, '.swarm', 'context.md'),
-			'## Pending QA Gate Selection\n',
-		);
+		getOrCreateProfileForIdentity(nested, {
+			swarm: 'nested-boundary',
+			title: 'Nested project plan',
+		});
 
 		const result = await executeSavePlan(savePlanArgs(nested), outer);
 

@@ -7,7 +7,7 @@
  * 3. Allows last phase when final_council enabled and evidence has approved verdict
  * 4. Blocks last phase when final_council enabled and evidence has invalid verdict (FINAL_COUNCIL_INVALID_VERDICT)
  * 5. Skips gate for intermediate (non-last) phases even when final_council enabled
- * 6. Skips gate when final_council is disabled (default)
+ * 6. Skips gate when final_council is disabled
  * 7. Skips gate when final_council enabled but phase is not the last phase
  */
 
@@ -23,7 +23,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PlanSchema } from '../../../src/config/plan-schema';
 import { closeProjectDb } from '../../../src/db/project-db';
-import { getOrCreateProfile, setGates } from '../../../src/db/qa-gate-profile';
+import { setGatesForIdentity } from '../../../src/db/qa-gate-profile';
 import { computePlanHash } from '../../../src/plan/ledger';
 import { derivePlanIdentityHash } from '../../../src/plan/utils';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
@@ -35,10 +35,6 @@ const PLAN_SWARM = 'test-swarm';
 const PLAN_TITLE = 'test-plan';
 const PLAN_ID = `${PLAN_SWARM}-${PLAN_TITLE}`.replace(/[^a-zA-Z0-9-_]/g, '_');
 const SESSION_ID = 'test-session-final-council';
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 function writePlan(
 	phases: Array<{
@@ -120,8 +116,11 @@ function writeRetroBundle(taskId: string, phase: number, timestamp: string) {
 }
 
 function enableFinalCouncil() {
-	getOrCreateProfile(tempDir, PLAN_ID);
-	setGates(tempDir, PLAN_ID, { final_council: true });
+	setGatesForIdentity(
+		tempDir,
+		{ swarm: PLAN_SWARM, title: PLAN_TITLE },
+		{ final_council: true },
+	);
 }
 
 function writeFinalCouncilEvidence(options: {

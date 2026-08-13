@@ -1,10 +1,10 @@
 #!/usr/bin/env bun
 /**
- * Sync the canonical QA-gate dialogue body into the three MODE skills.
+ * Sync the canonical QA-gate dialogue body into the PLAN skill.
  *
  * Reads `references/qa-gate-gates-body.md` and replaces the content between
  * `<!-- BEGIN QA_GATE_BODY -->` and `<!-- END QA_GATE_BODY -->` markers in each
- * of the 6 mirror files (3 MODE skills × 2 mirror trees). Writes both mirrors
+ * of the 2 mirror files (PLAN × 2 mirror trees). Writes both mirrors
  * byte-identical. Errors if a marker is missing. Idempotent.
  *
  * Usage:
@@ -18,8 +18,6 @@ const BEGIN_MARKER = "<!-- BEGIN QA_GATE_BODY -->";
 const END_MARKER = "<!-- END QA_GATE_BODY -->";
 
 const SKILL_PAIRS = [
-	{ name: "brainstorm", paths: [".claude/skills/brainstorm/SKILL.md", ".opencode/skills/brainstorm/SKILL.md"] },
-	{ name: "specify", paths: [".claude/skills/specify/SKILL.md", ".opencode/skills/specify/SKILL.md"] },
 	{ name: "plan", paths: [".claude/skills/plan/SKILL.md", ".opencode/skills/plan/SKILL.md"] },
 ] as const;
 

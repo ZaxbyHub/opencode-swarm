@@ -5,24 +5,60 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import fs from 'node:fs';
 import path from 'node:path';
+import { canonicalMkdtemp } from '../../tests/helpers/tmpdir';
+import type { Plan } from '../config/plan-schema';
+import { closeProjectDb } from '../db/project-db';
+import { getOrCreateProfileForIdentity } from '../db/qa-gate-profile';
+import { initLedger } from '../plan/ledger';
+import { derivePlanId } from '../plan/utils';
 import { executeWriteDriftEvidence } from '../tools/write-drift-evidence';
+
+const TEST_PLAN: Plan = {
+	schema_version: '1.0.0',
+	title: 'Requirement Coverage Test',
+	swarm: 'requirement-coverage-swarm',
+	current_phase: 1,
+	phases: [
+		{
+			id: 1,
+			name: 'Phase 1',
+			status: 'in_progress',
+			tasks: [
+				{
+					id: '1.1',
+					phase: 1,
+					status: 'pending',
+					size: 'small',
+					description: 'Verify requirement coverage',
+					depends: [],
+					files_touched: [],
+				},
+			],
+		},
+	],
+};
 
 describe('executeWriteDriftEvidence with requirementCoverage', () => {
 	let tempDir: string;
 
 	beforeEach(async () => {
-		// Create temp directory with .swarm subdirectory (required by validateSwarmPath)
-		tempDir = path.join(
-			import.meta.dir,
-			'tmp-requirement-coverage-test-' +
-				Date.now() +
-				'-' +
-				Math.random().toString(36).slice(2),
-		);
+		tempDir = canonicalMkdtemp('requirement-coverage-test-');
 		await fs.promises.mkdir(path.join(tempDir, '.swarm'), { recursive: true });
+		await fs.promises.writeFile(
+			path.join(tempDir, '.swarm', 'plan.json'),
+			JSON.stringify(TEST_PLAN),
+			'utf8',
+		);
+		await initLedger(tempDir, derivePlanId(TEST_PLAN));
+		getOrCreateProfileForIdentity(
+			tempDir,
+			{ swarm: TEST_PLAN.swarm, title: TEST_PLAN.title },
+			'ts',
+		);
 	});
 
 	afterEach(async () => {
+		closeProjectDb(tempDir);
 		// Clean up temp directory
 		try {
 			await fs.promises.rm(tempDir, { force: true, recursive: true });

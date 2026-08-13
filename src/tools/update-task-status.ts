@@ -10,12 +10,12 @@ import { z } from 'zod';
 import { loadPluginConfig } from '../config/loader';
 import type { RuntimePlan, TaskStatus } from '../config/plan-schema';
 import { stripKnownSwarmPrefix } from '../config/schema';
-import { getProfile } from '../db/qa-gate-profile.js';
+import { getProfileLookupForIdentity } from '../db/qa-gate-profile.js';
 import { readTaskEvidenceRaw } from '../gate-evidence.js';
 import { validateDiffScope } from '../hooks/diff-scope';
 import { tryAcquireLock } from '../parallel/file-locks.js';
 import { loadPlan, updateTaskStatus } from '../plan/manager';
-import { derivePlanId } from '../plan/utils.js';
+import { formatLegacyQaBindingRecovery } from '../qa-gate/recovery.js';
 import {
 	recordTaskAttempt,
 	type TaskAttemptInput,
@@ -966,9 +966,27 @@ export function checkCouncilGate(
 		const planRaw = fs.readFileSync(planPath, 'utf-8');
 		const planObj = JSON.parse(planRaw) as { swarm?: string; title?: string };
 		if (planObj.swarm && planObj.title) {
-			const planId = derivePlanId(planObj as { swarm: string; title: string });
-			const profile = getProfile(workingDirectory, planId);
-			if (!profile || !profile.gates.council_mode) {
+			const lookup = getProfileLookupForIdentity(
+				workingDirectory,
+				planObj as { swarm: string; title: string },
+			);
+			if (lookup.kind === 'bound') {
+				if (!lookup.profile.gates.council_mode) {
+					return { blocked: false, reason: '', active: false };
+				}
+			} else if (lookup.kind === 'unbound_legacy') {
+				if (lookup.profile.gates.council_mode) {
+					return {
+						blocked: true,
+						reason: `council gate required but the QA gate profile is not exact-bound to the current raw swarm_id/plan_title. ${formatLegacyQaBindingRecovery(
+							{ swarm: planObj.swarm, title: planObj.title },
+							'retry advancing this task',
+						)}`,
+						active: true,
+					};
+				}
+				return { blocked: false, reason: '', active: false };
+			} else {
 				return { blocked: false, reason: '', active: false };
 			}
 		}
@@ -1395,7 +1413,7 @@ export async function executeUpdateTaskStatus(
 			directory,
 			args.task_id,
 			args.status as TaskStatus,
-			{ force: args.force },
+			{ force: args.force, planLockAlreadyHeld: true },
 		);
 
 		if (args.status === 'completed') {

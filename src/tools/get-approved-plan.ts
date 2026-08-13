@@ -17,7 +17,11 @@
 
 import type { tool } from '@opencode-ai/plugin';
 import { z } from 'zod';
-import { computeProfileHash, getProfile } from '../db/qa-gate-profile.js';
+import type { ExecutionProfile } from '../config/plan-schema';
+import {
+	computeProfileHash,
+	getProfileLookupForIdentity,
+} from '../db/qa-gate-profile.js';
 import {
 	type ApprovedSnapshotInfo,
 	computePlanHash,
@@ -25,6 +29,7 @@ import {
 } from '../plan/ledger';
 import { loadPlanJsonOnly } from '../plan/manager';
 import { derivePlanId } from '../plan/utils.js';
+import { formatLegacyQaBindingRecovery } from '../qa-gate/recovery.js';
 import { createSwarmTool } from './create-tool';
 
 // ============ Types ============
@@ -40,6 +45,12 @@ interface GetApprovedPlanResult {
 	 *  or null when no profile exists for this plan. Used by the critic to
 	 *  detect silent gate mutations post-approval. */
 	qa_profile_hash?: string | null;
+	/** Exact-binding status of the current QA gate profile identity lookup. */
+	qa_profile_status?: 'bound' | 'missing' | 'unbound_legacy';
+	/** Present when the profile lookup is unsafe even though the read can continue. */
+	qa_profile_error?: string;
+	/** Remediation guidance for unsafe QA profile identity states. */
+	qa_profile_recovery_guidance?: string;
 }
 
 interface ApprovedPlanPayload {
@@ -49,12 +60,7 @@ interface ApprovedPlanPayload {
 	snapshot_timestamp: string;
 	payload_hash: string;
 	/** The execution_profile from the approved snapshot, if any. */
-	execution_profile?: {
-		parallelization_enabled: boolean;
-		max_concurrent_tasks: number;
-		council_parallel: boolean;
-		locked: boolean;
-	} | null;
+	execution_profile?: ExecutionProfile | null;
 }
 
 interface CurrentPlanPayload {
@@ -73,6 +79,42 @@ interface PlanSummary {
 		status: string;
 		task_count: number;
 	}>;
+}
+
+interface QaProfileMetadata {
+	qa_profile_hash: string | null;
+	qa_profile_status: 'bound' | 'missing' | 'unbound_legacy';
+	qa_profile_error?: string;
+	qa_profile_recovery_guidance?: string;
+}
+
+function buildQaProfileMetadata(
+	directory: string,
+	currentPlan: { swarm: string; title: string },
+): QaProfileMetadata {
+	const profileLookup = getProfileLookupForIdentity(directory, currentPlan);
+	if (profileLookup.kind === 'bound') {
+		return {
+			qa_profile_hash: computeProfileHash(profileLookup.profile),
+			qa_profile_status: 'bound',
+		};
+	}
+	if (profileLookup.kind === 'unbound_legacy') {
+		return {
+			qa_profile_hash: null,
+			qa_profile_status: 'unbound_legacy',
+			qa_profile_error:
+				'QA_GATE_IDENTITY_UNBOUND: the current plan has a legacy QA gate profile row that is not exact-bound.',
+			qa_profile_recovery_guidance: formatLegacyQaBindingRecovery(
+				currentPlan,
+				'retry get_approved_plan with the identical identity',
+			),
+		};
+	}
+	return {
+		qa_profile_hash: null,
+		qa_profile_status: 'missing',
+	};
 }
 
 // ============ Core Logic ============
@@ -139,11 +181,10 @@ export async function executeGetApprovedPlan(
 
 	const expectedPlanId = derivePlanId(currentPlan);
 
-	// Compute QA gate profile hash for drift detection. Null when no profile
-	// exists yet (e.g. brand-new plan). Profile hash is independent of plan
-	// content — tracked so the critic can detect silent gate mutations.
-	const profile = getProfile(directory, expectedPlanId);
-	const qaProfileHash = profile ? computeProfileHash(profile) : null;
+	// Compute QA gate profile metadata for drift detection. Unsafe legacy rows
+	// intentionally keep a null hash, but now surface their distinct status so
+	// critics can distinguish them from a genuinely missing profile.
+	const qaProfileMetadata = buildQaProfileMetadata(directory, currentPlan);
 
 	// Step 3: Load the most recent critic-approved snapshot (identity-scoped)
 	const approved: ApprovedSnapshotInfo | null = await loadLastApprovedPlan(
@@ -166,13 +207,13 @@ export async function executeGetApprovedPlan(
 					'Plan identity (swarm/title) was mutated after approval — ' +
 					`expected plan_id '${expectedPlanId}' but approved snapshot has a different identity. ` +
 					'This is a form of plan tampering.',
-				qa_profile_hash: qaProfileHash,
+				...qaProfileMetadata,
 			};
 		}
 		return {
 			success: false,
 			reason: 'no_approved_snapshot',
-			qa_profile_hash: qaProfileHash,
+			...qaProfileMetadata,
 		};
 	}
 
@@ -202,7 +243,7 @@ export async function executeGetApprovedPlan(
 		approved_plan: approvedPayload,
 		current_plan: currentPayload,
 		drift_detected: driftDetected,
-		qa_profile_hash: qaProfileHash,
+		...qaProfileMetadata,
 	};
 }
 

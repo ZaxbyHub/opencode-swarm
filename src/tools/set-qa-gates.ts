@@ -1,29 +1,32 @@
 /**
- * Tool to configure the QA gate profile for the current plan.
+ * Tool to configure a QA gate profile for the current or future plan.
  *
- * Architect-only: invoked during the QA GATE SELECTION phase of brainstorm
- * mode (or equivalent). The initial selection may override defaults; after a
- * profile exists, updates are ratchet-tighter and cannot disable enabled gates.
- * Rejects all writes once the profile is locked.
+ * Architect-only: invoked during PLAN's QA GATE SELECTION phase. The initial
+ * profile reflects explicit true/false choices; later writes are ratchet-tighter
+ * and cannot disable enabled gates. Rejects all writes once locked.
  *
- * Creates the profile with defaults plus the initial selection if missing,
- * then always applies the requested partial update through the normal ratchet.
+ * Creates the profile atomically from defaults plus the initial selection if
+ * missing, then applies the ordinary ratchet semantics.
  */
 
 import type { tool } from '@opencode-ai/plugin';
 import { z } from 'zod';
 import {
 	computeProfileHash,
-	DEFAULT_QA_GATES,
-	getOrCreateProfile,
+	getProfileLookupForIdentity,
+	QaGateProfileIdentityUnboundError,
 	type QaGates,
-	setGates,
+	setGatesForIdentity,
 } from '../db/qa-gate-profile.js';
 import { loadPlanJsonOnly } from '../plan/manager';
-import { derivePlanId } from '../plan/utils.js';
+import { formatLegacyQaBindingOnlyCall } from '../qa-gate/recovery.js';
 import { createSwarmTool } from './create-tool';
+import {
+	type QaGatePlanIdentityArgs,
+	resolveQaGatePlanIdentity,
+} from './qa-gate-plan-identity.js';
 
-export interface SetQaGatesArgs {
+export interface SetQaGatesArgs extends QaGatePlanIdentityArgs {
 	reviewer?: boolean;
 	test_engineer?: boolean;
 	council_mode?: boolean;
@@ -36,6 +39,7 @@ export interface SetQaGatesArgs {
 	drift_check?: boolean;
 	final_council?: boolean;
 	project_type?: string;
+	adopt_legacy_binding_only?: boolean;
 }
 
 interface SetQaGatesResult {
@@ -52,37 +56,116 @@ interface SetQaGatesResult {
 	};
 }
 
+export const _internals = {
+	setGatesForIdentity,
+};
+
 export async function executeSetQaGates(
 	args: SetQaGatesArgs,
 	directory: string,
 ): Promise<SetQaGatesResult> {
 	const plan = await loadPlanJsonOnly(directory);
-	if (!plan) {
+	const identity = resolveQaGatePlanIdentity(plan, args);
+	if (!identity.success) {
 		return {
 			success: false,
-			reason: 'plan_json_unavailable',
-			message:
-				'Cannot configure QA gates: plan.json is missing or invalid. ' +
-				'Create a plan first (e.g. via /swarm specify or save_plan).',
+			reason: identity.reason,
+			message: identity.message,
 		};
 	}
-	const planId = derivePlanId(plan);
+	const planId = identity.planId;
+	const currentPlanMatchesIdentity =
+		plan?.swarm === identity.identity.swarm &&
+		plan?.title === identity.identity.title;
 
 	const partial: Partial<QaGates> = {};
-	for (const key of Object.keys(DEFAULT_QA_GATES) as Array<keyof QaGates>) {
+	const gateKeys = [
+		'reviewer',
+		'test_engineer',
+		'council_mode',
+		'sme_enabled',
+		'critic_pre_plan',
+		'hallucination_guard',
+		'sast_enabled',
+		'mutation_test',
+		'phase_council',
+		'drift_check',
+		'final_council',
+	] as Array<keyof QaGates>;
+	for (const key of gateKeys) {
 		if (args[key] !== undefined) partial[key] = args[key] as boolean;
+	}
+	const bindingOnlyRequested = args.adopt_legacy_binding_only === true;
+	const hasGatePatch = Object.keys(partial).length > 0;
+
+	if (
+		bindingOnlyRequested &&
+		(hasGatePatch || args.project_type !== undefined)
+	) {
+		return {
+			success: false,
+			reason: 'binding_only_patch_conflict',
+			message:
+				'adopt_legacy_binding_only performs exact-binding recovery only. Omit all gate booleans and project_type when using it.',
+		};
+	}
+
+	if (bindingOnlyRequested && !currentPlanMatchesIdentity) {
+		return {
+			success: false,
+			reason: 'adopt_legacy_requires_current_plan',
+			message:
+				'adopt_legacy_binding_only may only target the exact current persisted plan identity. Re-run it from the active plan without replacing swarm_id or plan_title.',
+		};
+	}
+
+	if (bindingOnlyRequested) {
+		const lookup = getProfileLookupForIdentity(directory, identity.identity);
+		if (lookup.kind === 'missing') {
+			return {
+				success: false,
+				reason: 'no_profile',
+				plan_id: planId,
+				message:
+					'No legacy QA gate profile row exists for this exact current plan identity, so there is nothing to adopt.',
+			};
+		}
+		if (lookup.kind === 'bound') {
+			return {
+				success: true,
+				plan_id: planId,
+				message: `QA gate profile is already exact-bound for plan_id=${planId}; no gates or lock state changed.`,
+				profile: {
+					plan_id: lookup.profile.plan_id,
+					gates: { ...lookup.profile.gates },
+					locked_at: lookup.profile.locked_at,
+					locked_by_snapshot_seq: lookup.profile.locked_by_snapshot_seq,
+					profile_hash: computeProfileHash(lookup.profile),
+				},
+			};
+		}
 	}
 
 	try {
-		// The winning INSERT may persist the architect's initial false choices.
-		// Always follow with setGates: if another caller won the race with a true
-		// value, the ordinary ratchet rejects this caller's attempted loosening.
-		getOrCreateProfile(directory, planId, args.project_type, partial);
-		const updated = setGates(directory, planId, partial);
+		const updated = _internals.setGatesForIdentity(
+			directory,
+			identity.identity,
+			partial,
+			{
+				projectType: args.project_type,
+				allowLegacyAdoption: currentPlanMatchesIdentity,
+				allowLegacyCollisionCreate: !currentPlanMatchesIdentity,
+				legacyAdoptionIdentity: plan
+					? { swarm: plan.swarm, title: plan.title }
+					: undefined,
+			},
+		);
 		return {
 			success: true,
 			plan_id: planId,
-			message: `QA gates updated for plan_id=${planId}`,
+			message: bindingOnlyRequested
+				? `Legacy QA gate profile exact-bound for plan_id=${planId} without changing gates or lock state.`
+				: `QA gates updated for plan_id=${planId}`,
 			profile: {
 				plan_id: updated.plan_id,
 				gates: { ...updated.gates },
@@ -95,12 +178,21 @@ export async function executeSetQaGates(
 		const msg = err instanceof Error ? err.message : String(err);
 		const lower = msg.toLowerCase();
 		let reason = 'set_gates_failed';
+		if (err instanceof QaGateProfileIdentityUnboundError) {
+			reason = 'plan_identity_unbound';
+		}
 		if (lower.includes('locked')) reason = 'profile_locked';
 		else if (lower.includes('ratchet')) reason = 'ratchet_violation';
+		else if (bindingOnlyRequested) {
+			reason = 'binding_only_failed';
+		}
 		return {
 			success: false,
 			reason,
-			message: msg,
+			message:
+				err instanceof QaGateProfileIdentityUnboundError
+					? `${msg} ${formatLegacyQaBindingOnlyCall(identity.identity)} is the only supported adoption path for locked or upgraded legacy rows.`
+					: msg,
 			plan_id: planId,
 		};
 	}
@@ -108,16 +200,39 @@ export async function executeSetQaGates(
 
 export const set_qa_gates: ReturnType<typeof tool> = createSwarmTool({
 	description:
-		'Configure the QA gate profile for the current plan. Architect-only. ' +
-		'The initial selection may override defaults. After creation, updates are ' +
-		'ratchet-tighter: additional gates may be enabled, but enabled gates cannot ' +
-		'be disabled. Rejects all writes once the profile is locked (after critic ' +
-		'approval). plan_id is derived automatically from plan.json.',
+		'Configure the QA gate profile for the current or exact future plan. Architect-only. ' +
+		'The initial selection accepts explicit true and false values; later calls can ' +
+		'enable additional gates but cannot disable enabled gates. Rejects writes once ' +
+		'locked (after critic approval). Creates the initial profile atomically ' +
+		'from defaults plus the explicit selection. Uses plan.json identity by ' +
+		'default, or exact swarm_id + plan_title before a plan exists.',
 	args: {
+		swarm_id: z
+			.string()
+			.refine((value) => value.trim().length > 0, 'Must not be blank')
+			.optional()
+			.describe(
+				'Exact swarm identity for pre-plan QA selection. Must be provided with plan_title.',
+			),
+		plan_title: z
+			.string()
+			.refine((value) => value.trim().length > 0, 'Must not be blank')
+			.optional()
+			.describe(
+				'Exact future plan title for pre-plan QA selection. Must be provided with swarm_id.',
+			),
+		confirm_identity_change: z
+			.boolean()
+			.optional()
+			.describe(
+				'Confirm that an explicit swarm_id/plan_title pair intentionally replaces the current plan identity.',
+			),
 		reviewer: z
 			.boolean()
 			.optional()
-			.describe('Enable the reviewer gate (true) — cannot be disabled.'),
+			.describe(
+				'Select the reviewer gate; later calls cannot turn it off once enabled.',
+			),
 		test_engineer: z
 			.boolean()
 			.optional()
@@ -186,6 +301,12 @@ export const set_qa_gates: ReturnType<typeof tool> = createSwarmTool({
 			.optional()
 			.describe(
 				'Project type label (e.g. "ts", "python"). Only applied when the profile is being created for the first time.',
+			),
+		adopt_legacy_binding_only: z
+			.boolean()
+			.optional()
+			.describe(
+				'Operational recovery for upgraded legacy rows. When true, exact-binds the existing current-plan QA profile without changing any gates or its lock. Omit all gate booleans and project_type when using this action.',
 			),
 	},
 	execute: async (args: unknown, directory: string) => {

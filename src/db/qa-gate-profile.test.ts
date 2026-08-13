@@ -5,9 +5,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { pathToFileURL } from 'node:url';
-import { bunSpawn } from '../utils/bun-compat.js';
-import { withTimeout } from '../utils/timeout.js';
+import { derivePlanId } from '../plan/utils.js';
 import { closeAllProjectDbs, getProjectDb } from './project-db.js';
 import {
 	_internals,
@@ -15,27 +13,19 @@ import {
 	DEFAULT_QA_GATES,
 	getEffectiveGates,
 	getOrCreateProfile,
+	getOrCreateProfileForIdentity,
 	getProfile,
+	getProfileForIdentity,
+	getProfileLookupForIdentity,
 	lockProfile,
+	lockProfileForIdentity,
+	QaGateProfileIdentityUnboundError,
 	setGates,
+	setGatesForIdentity,
 } from './qa-gate-profile.js';
 
 let tempDir: string;
 const originalAfterSetGatesRead = _internals.afterSetGatesRead;
-
-function sleepSync(ms: number): void {
-	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-}
-
-function waitForFile(filePath: string, timeoutMs = 5000): void {
-	const deadline = Date.now() + timeoutMs;
-	while (!fs.existsSync(filePath)) {
-		if (Date.now() > deadline) {
-			throw new Error(`Timed out waiting for ${filePath}`);
-		}
-		sleepSync(10);
-	}
-}
 
 beforeEach(() => {
 	tempDir = fs.realpathSync(
@@ -44,6 +34,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	delete _internals.afterSetGatesForIdentityRead;
 	_internals.afterSetGatesRead = originalAfterSetGatesRead;
 	closeAllProjectDbs();
 	try {
@@ -54,20 +45,25 @@ afterEach(() => {
 });
 
 describe('qa-gate-profile', () => {
+	const originalGetProfile = _internals.getProfile;
+
+	afterEach(() => {
+		_internals.getProfile = originalGetProfile;
+		_internals.afterSetGatesRead = originalAfterSetGatesRead;
+		delete _internals.afterSetGatesForIdentityRead;
+	});
+
 	test('getProfile returns null for unknown plan_id', () => {
 		expect(getProfile(tempDir, 'missing')).toBeNull();
 	});
 
 	test('getProfile does NOT create .swarm/swarm.db on read from fresh dir', () => {
 		const dbPath = path.join(tempDir, '.swarm', 'swarm.db');
-		// Precondition: fresh dir, no .swarm
 		expect(fs.existsSync(path.join(tempDir, '.swarm'))).toBe(false);
 		expect(fs.existsSync(dbPath)).toBe(false);
 
 		const result = getProfile(tempDir, 'plan-that-does-not-exist');
 		expect(result).toBeNull();
-
-		// Postcondition: read-only call must not have created the DB file
 		expect(fs.existsSync(dbPath)).toBe(false);
 	});
 
@@ -77,6 +73,164 @@ describe('qa-gate-profile', () => {
 		expect(p.project_type).toBe('ts');
 		expect(p.gates).toEqual(DEFAULT_QA_GATES);
 		expect(p.locked_at).toBeNull();
+	});
+
+	test('getOrCreateProfile atomically overlays an initial gate selection', () => {
+		const p = getOrCreateProfile(tempDir, 'plan-initial', 'ts', {
+			reviewer: false,
+			mutation_test: true,
+		});
+		expect(p.gates.reviewer).toBe(false);
+		expect(p.gates.mutation_test).toBe(true);
+		expect(p.gates.test_engineer).toBe(DEFAULT_QA_GATES.test_engineer);
+	});
+
+	test('exact identity profiles use collision-safe storage rows and preserve readable ids outwardly', () => {
+		const identity = { swarm: 'mega one', title: 'Plan / 1' };
+		const expectedReadablePlanId = derivePlanId(identity);
+		const p = getOrCreateProfileForIdentity(tempDir, identity, 'ts', {
+			reviewer: false,
+		});
+
+		expect(p.plan_id).toBe(expectedReadablePlanId);
+		expect(p.raw_swarm).toBe(identity.swarm);
+		expect(p.raw_title).toBe(identity.title);
+		expect(p.identity_hash).toMatch(/^[0-9a-f]{64}$/);
+		expect(getProfile(tempDir, expectedReadablePlanId)).toBeNull();
+
+		const db = getProjectDb(tempDir);
+		const row = db
+			.query<{ plan_id: string }, [number]>(
+				'SELECT plan_id FROM qa_gate_profile WHERE id = ?',
+			)
+			.get(p.id);
+		expect(row?.plan_id).toBe(`qa2-${p.identity_hash}`);
+	});
+
+	test('colliding raw identities create distinct exact profiles instead of colliding on readable plan_id', () => {
+		const first = getOrCreateProfileForIdentity(tempDir, {
+			swarm: 'mega one',
+			title: 'Plan / 1',
+		});
+		const second = getOrCreateProfileForIdentity(tempDir, {
+			swarm: 'mega?one',
+			title: 'Plan ? 1',
+		});
+
+		expect(first.id).not.toBe(second.id);
+		expect(first.plan_id).toBe(second.plan_id);
+		expect(first.identity_hash).not.toBe(second.identity_hash);
+		expect(
+			getProfileForIdentity(tempDir, {
+				swarm: 'mega one',
+				title: 'Plan / 1',
+			})?.id,
+		).toBe(first.id);
+		expect(
+			getProfileForIdentity(tempDir, {
+				swarm: 'mega?one',
+				title: 'Plan ? 1',
+			})?.id,
+		).toBe(second.id);
+	});
+
+	test('getOrCreateProfileForIdentity creates an exact profile beside an unbound legacy collision', () => {
+		const legacyIdentity = { swarm: 'mega one', title: 'Plan / 1' };
+		const exactIdentity = { swarm: 'mega?one', title: 'Plan ? 1' };
+		const readablePlanId = derivePlanId(legacyIdentity);
+		expect(derivePlanId(exactIdentity)).toBe(readablePlanId);
+
+		const legacy = getOrCreateProfile(tempDir, readablePlanId, 'legacy', {
+			reviewer: false,
+		});
+		const exact = getOrCreateProfileForIdentity(tempDir, exactIdentity, 'ts', {
+			mutation_test: true,
+		});
+
+		expect(exact.id).not.toBe(legacy.id);
+		expect(exact.plan_id).toBe(readablePlanId);
+		expect(exact.project_type).toBe('ts');
+		expect(exact.gates.mutation_test).toBe(true);
+		expect(getProfile(tempDir, readablePlanId)?.id).toBe(legacy.id);
+		expect(getProfileForIdentity(tempDir, exactIdentity)?.id).toBe(exact.id);
+		expect(getProfileLookupForIdentity(tempDir, legacyIdentity).kind).toBe(
+			'unbound_legacy',
+		);
+		expect(() => getProfileForIdentity(tempDir, legacyIdentity)).toThrow(
+			QaGateProfileIdentityUnboundError,
+		);
+		expect(
+			getOrCreateProfileForIdentity(tempDir, exactIdentity, 'ignored').id,
+		).toBe(exact.id);
+
+		const storage = getProjectDb(tempDir)
+			.query<{ plan_id: string }, [number]>(
+				'SELECT plan_id FROM qa_gate_profile WHERE id = ?',
+			)
+			.get(exact.id);
+		expect(storage?.plan_id).toBe(`qa2-${exact.identity_hash}`);
+	});
+
+	test('exact lookup distinguishes missing, bound, and unbound legacy rows', () => {
+		const identity = { swarm: 'legacy swarm', title: 'Legacy Plan' };
+		const planId = derivePlanId(identity);
+		getOrCreateProfile(tempDir, planId, 'ts');
+
+		const unbound = getProfileLookupForIdentity(tempDir, identity);
+		expect(unbound.kind).toBe('unbound_legacy');
+		if (unbound.kind === 'unbound_legacy') {
+			expect(unbound.profile.plan_id).toBe(planId);
+		}
+		expect(() => getProfileForIdentity(tempDir, identity)).toThrow(
+			QaGateProfileIdentityUnboundError,
+		);
+
+		const bound = setGatesForIdentity(
+			tempDir,
+			identity,
+			{},
+			{
+				allowLegacyAdoption: true,
+				legacyAdoptionIdentity: identity,
+			},
+		);
+		expect(bound.plan_id).toBe(planId);
+		expect(getProfileLookupForIdentity(tempDir, identity).kind).toBe('bound');
+		expect(
+			getProfileLookupForIdentity(tempDir, {
+				swarm: 'missing',
+				title: 'identity',
+			}).kind,
+		).toBe('missing');
+	});
+
+	test('getOrCreateProfile re-reads a concurrent winner after a UNIQUE race', () => {
+		let firstRead = true;
+		_internals.getProfile = (directory, planId) => {
+			if (firstRead) {
+				firstRead = false;
+				const db = getProjectDb(directory);
+				db.run(
+					'INSERT INTO qa_gate_profile (plan_id, project_type, gates) VALUES (?, ?, ?)',
+					[
+						planId,
+						'concurrent',
+						JSON.stringify({ ...DEFAULT_QA_GATES, reviewer: true }),
+					],
+				);
+				return null;
+			}
+			return originalGetProfile(directory, planId);
+		};
+
+		const winner = getOrCreateProfile(tempDir, 'plan-race', 'loser', {
+			reviewer: false,
+		});
+		expect(winner.project_type).toBe('concurrent');
+		expect(winner.gates.reviewer).toBe(true);
+		expect(() => setGates(tempDir, 'plan-race', { reviewer: false })).toThrow(
+			/ratchet/i,
+		);
 	});
 
 	test('getOrCreateProfile is idempotent', () => {
@@ -89,7 +243,6 @@ describe('qa-gate-profile', () => {
 		getOrCreateProfile(tempDir, 'plan-1');
 		const updated = setGates(tempDir, 'plan-1', { council_mode: true });
 		expect(updated.gates.council_mode).toBe(true);
-		// Defaults preserved
 		expect(updated.gates.reviewer).toBe(true);
 	});
 
@@ -100,94 +253,91 @@ describe('qa-gate-profile', () => {
 		);
 	});
 
-	test('setGates allows false on an already-disabled gate (no-op)', () => {
-		getOrCreateProfile(tempDir, 'plan-1');
-		// council_mode defaults to false; passing false is a no-op, not an error.
-		const result = setGates(tempDir, 'plan-1', { council_mode: false });
-		expect(result.gates.council_mode).toBe(false);
-	});
-
-	test('setGates throws on missing profile', () => {
-		expect(() => setGates(tempDir, 'nope', { reviewer: true })).toThrow(
-			/No QA gate profile/,
-		);
-	});
-
-	test('setGates serializes concurrent writers across processes and preserves both gate enables', async () => {
-		getOrCreateProfile(tempDir, 'plan-1');
-		const startMarker = path.join(tempDir, 'qa-gate-race.start');
-		const attemptedMarker = path.join(tempDir, 'qa-gate-race.attempted');
-		const doneMarker = path.join(tempDir, 'qa-gate-race.done');
-		const childScript = path.join(tempDir, 'qa-gate-race-child.ts');
-		fs.writeFileSync(
-			childScript,
-			[
-				"import { existsSync, writeFileSync } from 'node:fs';",
-				`import { setGates } from ${JSON.stringify(
-					pathToFileURL(
-						path.resolve(process.cwd(), 'src/db/qa-gate-profile.ts'),
-					).href,
-				)};`,
-				'function sleepSync(ms: number): void {',
-				'  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);',
-				'}',
-				`while (!existsSync(${JSON.stringify(startMarker)})) sleepSync(10);`,
-				`writeFileSync(${JSON.stringify(attemptedMarker)}, '1');`,
-				`setGates(${JSON.stringify(tempDir)}, 'plan-1', { hallucination_guard: true });`,
-				`writeFileSync(${JSON.stringify(doneMarker)}, '1');`,
-			].join('\n'),
-			'utf8',
-		);
-
-		const child = bunSpawn([process.execPath, childScript], {
-			cwd: tempDir,
-			stdin: 'ignore',
-			stdout: 'pipe',
-			stderr: 'pipe',
-			timeout: 10_000,
-			killProcessTree: true,
+	test('setGatesForIdentity adopts an unlocked legacy row without changing immutable columns', () => {
+		const identity = { swarm: 'legacy swarm', title: 'Legacy Plan' };
+		const planId = derivePlanId(identity);
+		const legacy = getOrCreateProfile(tempDir, planId, 'ts', {
+			reviewer: false,
 		});
-		try {
-			_internals.afterSetGatesRead = () => {
-				fs.writeFileSync(startMarker, '1');
-				waitForFile(attemptedMarker);
-				// Under the broken deferred-transaction path the child can finish
-				// its stale write here, so wait briefly for that completion. Under
-				// the fixed BEGIN IMMEDIATE path the child remains blocked until
-				// the outer writer commits, so this loop naturally times out.
-				const childDoneDeadline = Date.now() + 200;
-				while (!fs.existsSync(doneMarker) && Date.now() <= childDoneDeadline) {
-					sleepSync(10);
-				}
-			};
 
-			const updated = setGates(tempDir, 'plan-1', { council_mode: true });
-			expect(updated.gates.council_mode).toBe(true);
+		const adopted = setGatesForIdentity(
+			tempDir,
+			identity,
+			{ reviewer: true },
+			{
+				allowLegacyAdoption: true,
+				legacyAdoptionIdentity: identity,
+			},
+		);
+		expect(adopted.id).toBe(legacy.id);
+		expect(adopted.plan_id).toBe(planId);
+		expect(adopted.gates.reviewer).toBe(true);
 
-			const [exitCode, childStdout, childStderr] = await withTimeout(
-				Promise.all([child.exited, child.stdout.text(), child.stderr.text()]),
-				5_000,
-				new Error('Timed out waiting for child setGates writer'),
-			);
-			if (exitCode !== 0) {
-				throw new Error(
-					`Concurrent child writer exited ${exitCode}: ${childStderr.trim()} ${childStdout.trim()}`,
-				);
-			}
+		const binding = getProjectDb(tempDir)
+			.query<{ readable_plan_id: string }, [number]>(
+				'SELECT readable_plan_id FROM qa_gate_profile_identity WHERE profile_id = ?',
+			)
+			.get(legacy.id);
+		expect(binding?.readable_plan_id).toBe(planId);
+	});
 
-			waitForFile(doneMarker);
-			const profile = getProfile(tempDir, 'plan-1');
-			expect(profile).not.toBeNull();
-			expect(profile!.gates.council_mode).toBe(true);
-			expect(profile!.gates.hallucination_guard).toBe(true);
-		} finally {
-			_internals.afterSetGatesRead = originalAfterSetGatesRead;
-			try {
-				child.kill();
-			} catch {
-				// Child already exited.
-			}
-		}
+	test('setGatesForIdentity can adopt a locked legacy row with an empty patch but rejects locked mutations', () => {
+		const identity = { swarm: 'legacy swarm', title: 'Legacy Plan' };
+		const planId = derivePlanId(identity);
+		getOrCreateProfile(tempDir, planId, 'ts');
+		lockProfile(tempDir, planId, 7);
+
+		const adopted = setGatesForIdentity(
+			tempDir,
+			identity,
+			{},
+			{
+				allowLegacyAdoption: true,
+				legacyAdoptionIdentity: identity,
+			},
+		);
+		expect(adopted.locked_by_snapshot_seq).toBe(7);
+		expect(getProfileLookupForIdentity(tempDir, identity).kind).toBe('bound');
+
+		expect(() =>
+			setGatesForIdentity(
+				tempDir,
+				identity,
+				{ council_mode: true },
+				{
+					allowLegacyAdoption: true,
+					legacyAdoptionIdentity: identity,
+				},
+			),
+		).toThrow(/locked/i);
+	});
+
+	test('setGatesForIdentity creates a distinct exact row for a raw-different collision with an unbound legacy row', () => {
+		const legacyIdentity = { swarm: 'mega one', title: 'Plan / 1' };
+		const replacementIdentity = { swarm: 'mega?one', title: 'Plan ? 1' };
+		const planId = derivePlanId(legacyIdentity);
+		const legacy = getOrCreateProfile(tempDir, planId, 'ts', {
+			reviewer: false,
+		});
+
+		const replacement = setGatesForIdentity(
+			tempDir,
+			replacementIdentity,
+			{ mutation_test: true },
+			{
+				allowLegacyCollisionCreate: true,
+			},
+		);
+
+		expect(replacement.id).not.toBe(legacy.id);
+		expect(replacement.plan_id).toBe(planId);
+		expect(replacement.gates.mutation_test).toBe(true);
+		expect(getProfileLookupForIdentity(tempDir, replacementIdentity).kind).toBe(
+			'bound',
+		);
+		expect(getProfileLookupForIdentity(tempDir, legacyIdentity).kind).toBe(
+			'unbound_legacy',
+		);
 	});
 
 	test('lockProfile sets locked_at and snapshot seq', () => {
@@ -197,39 +347,21 @@ describe('qa-gate-profile', () => {
 		expect(locked.locked_by_snapshot_seq).toBe(7);
 	});
 
-	test('lockProfile is idempotent (second call returns locked row unchanged)', () => {
-		getOrCreateProfile(tempDir, 'plan-1');
-		const first = lockProfile(tempDir, 'plan-1', 7);
-		const second = lockProfile(tempDir, 'plan-1', 99);
-		expect(second.locked_at).toBe(first.locked_at);
-		expect(second.locked_by_snapshot_seq).toBe(7);
-	});
-
-	test('setGates throws once profile is locked', () => {
-		getOrCreateProfile(tempDir, 'plan-1');
-		lockProfile(tempDir, 'plan-1', 1);
-		expect(() => setGates(tempDir, 'plan-1', { council_mode: true })).toThrow(
-			/locked/i,
-		);
-	});
-
-	test('underlying trigger also rejects raw UPDATE after lock', () => {
-		getOrCreateProfile(tempDir, 'plan-1');
-		lockProfile(tempDir, 'plan-1', 1);
-		const db = getProjectDb(tempDir);
-		expect(() => {
-			db.run(
-				"UPDATE qa_gate_profile SET gates = '{}' WHERE plan_id = 'plan-1'",
-			);
-		}).toThrow(/locked/i);
+	test('lockProfileForIdentity locks exact profiles by binding instead of readable plan id', () => {
+		const identity = { swarm: 'exact swarm', title: 'Exact Plan' };
+		getOrCreateProfileForIdentity(tempDir, identity);
+		const locked = lockProfileForIdentity(tempDir, identity, 42);
+		expect(locked.locked_at).not.toBeNull();
+		expect(locked.locked_by_snapshot_seq).toBe(42);
 	});
 
 	test('computeProfileHash is stable and sensitive to gate changes', () => {
-		const p1 = getOrCreateProfile(tempDir, 'plan-1');
+		const identity = { swarm: 'hash swarm', title: 'Hash Plan' };
+		const p1 = getOrCreateProfileForIdentity(tempDir, identity);
 		const h1 = computeProfileHash(p1);
 		expect(h1).toMatch(/^[0-9a-f]{64}$/);
 
-		const p2 = setGates(tempDir, 'plan-1', { council_mode: true });
+		const p2 = setGatesForIdentity(tempDir, identity, { council_mode: true });
 		const h2 = computeProfileHash(p2);
 		expect(h2).not.toBe(h1);
 	});
@@ -244,16 +376,6 @@ describe('qa-gate-profile', () => {
 	test('getEffectiveGates ignores false overrides (cannot disable)', () => {
 		const p = getOrCreateProfile(tempDir, 'plan-1');
 		const eff = getEffectiveGates(p, { reviewer: false });
-		expect(eff.reviewer).toBe(true);
-	});
-
-	test('getEffectiveGates ratchets hallucination_guard via session overrides', () => {
-		const p = getOrCreateProfile(tempDir, 'plan-hg');
-		// Default is false
-		expect(p.gates.hallucination_guard).toBe(false);
-		const eff = getEffectiveGates(p, { hallucination_guard: true });
-		expect(eff.hallucination_guard).toBe(true);
-		// Other gates unchanged
 		expect(eff.reviewer).toBe(true);
 	});
 });

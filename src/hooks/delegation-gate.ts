@@ -25,7 +25,7 @@ import { isKnownCanonicalRole, stripKnownSwarmPrefix } from '../config/schema';
 import {
 	DEFAULT_QA_GATES,
 	getEffectiveGates,
-	getProfile as getQaGateProfile,
+	getProfileForIdentity,
 	type QaGates,
 } from '../db/qa-gate-profile.js';
 import {
@@ -1362,7 +1362,10 @@ function isPlanCriticRequiredForExecution(
 	sessionOverrides: Partial<QaGates> = {},
 ): boolean {
 	try {
-		const profile = getQaGateProfile(directory, derivePlanId(plan));
+		const profile = getProfileForIdentity(directory, {
+			swarm: plan.swarm,
+			title: plan.title,
+		});
 		if (!profile) return DEFAULT_QA_GATES.critic_pre_plan;
 		return getEffectiveGates(profile, sessionOverrides).critic_pre_plan;
 	} catch (error) {

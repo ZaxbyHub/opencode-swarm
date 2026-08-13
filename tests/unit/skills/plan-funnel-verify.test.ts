@@ -113,7 +113,7 @@ describe('plan SKILL.md Clarification Funnel verification', () => {
 		const funnelIdx = opencodeContent.indexOf(
 			'### CLARIFICATION FUNNEL (pre-save_plan)',
 		);
-		const saveIdx = opencodeContent.indexOf('Use the `save_plan` tool');
+		const saveIdx = opencodeContent.indexOf('\nsave_plan({');
 		expect(funnelIdx).toBeGreaterThan(0);
 		expect(saveIdx).toBeGreaterThan(0);
 		expect(funnelIdx).toBeLessThan(saveIdx);
@@ -126,7 +126,7 @@ describe('plan SKILL.md Clarification Funnel verification', () => {
 		const opencodeFunnelIdx = opencodeContent.indexOf(
 			'### CLARIFICATION FUNNEL (pre-save_plan)',
 		);
-		const opencodeSaveIdx = opencodeContent.indexOf('Use the `save_plan` tool');
+		const opencodeSaveIdx = opencodeContent.indexOf('\nsave_plan({');
 
 		expect(opencodeCouncilIdx).toBeGreaterThan(0);
 		expect(claudeCouncilIdx).toBeGreaterThan(0);

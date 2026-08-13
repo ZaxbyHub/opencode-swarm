@@ -154,7 +154,7 @@ describe('executeUpdateTaskStatus locking behavior', () => {
 				tempDir,
 				'1.1',
 				'in_progress',
-				{ force: undefined },
+				{ force: undefined, planLockAlreadyHeld: true },
 			);
 		});
 

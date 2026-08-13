@@ -786,11 +786,9 @@ describe('architect-prompt-adversarial: attack vectors for task 11.1', () => {
 		});
 	});
 
-	// ATTACK VECTOR 13: Fallback abuse - coder delegation for .swarm/plan.md
-	// Ensure the fallback delegation can't be misused to write arbitrary content
-	describe('ATTACK VECTOR 13: Fallback delegation abuse prevention', () => {
+	// ATTACK VECTOR 13: Tool bypass via direct derived-file writes
+	describe('ATTACK VECTOR 13: ledger-backed tool bypass prevention', () => {
 		let modePlanSection: string;
-		let fallbackDelegation: string;
 
 		it('extract MODE:PLAN section', () => {
 			const modePlanStart = prompt.indexOf('### MODE: PLAN');
@@ -810,62 +808,25 @@ describe('architect-prompt-adversarial: attack vectors for task 11.1', () => {
 			modePlanSection = prompt.substring(modePlanStart, endOfPlan);
 		});
 
-		it('extract fallback delegation section', () => {
-			const fallbackStart = modePlanSection.indexOf('⚠️');
-			expect(fallbackStart).toBeGreaterThan(0);
-
-			// Find the end of this section (next heading or end of MODE:PLAN)
-			// Looking for TASK GRANULARITY RULES which follows the fallback section
-			const nextSectionStart = modePlanSection.indexOf(
-				'TASK GRANULARITY RULES',
-				fallbackStart,
+		it('fails closed when save_plan is unavailable', () => {
+			expect(modePlanSection).toContain(
+				'If the authoritative ledger-backed `save_plan` tool is unavailable, STOP',
 			);
-			fallbackDelegation = modePlanSection.substring(
-				fallbackStart,
-				nextSectionStart,
-			);
-
-			expect(fallbackDelegation).toContain("the active swarm's coder agent");
-			expect(fallbackDelegation).toContain('.swarm/plan.md');
+			expect(modePlanSection).not.toContain('delegate plan writing');
 		});
 
-		it('should clearly mark fallback as EXCEPTION path, not primary', () => {
-			expect(fallbackDelegation).toContain('unavailable');
-			expect(fallbackDelegation).toContain('⚠️');
-		});
-
-		it('should enforce EXACT content writing constraint', () => {
-			expect(fallbackDelegation).toContain('EXACTLY');
-			expect(fallbackDelegation).toContain(
-				'Do not modify, summarize, or interpret',
+		it('never delegates a derived plan projection write', () => {
+			expect(modePlanSection).toContain('Never ask a coder to hand-write');
+			expect(modePlanSection).not.toContain(
+				"delegate plan writing to the active swarm's coder agent",
 			);
 		});
 
-		it('should NOT allow coder to make decisions about plan content', () => {
-			expect(fallbackDelegation).not.toMatch(/write.*plan.*yourself/i);
-			expect(fallbackDelegation).not.toMatch(/generate.*plan/i);
-		});
-
-		it('should require INPUT parameter with complete plan', () => {
-			expect(fallbackDelegation).toContain('INPUT:');
-			expect(fallbackDelegation).toContain('provide the complete plan content');
-		});
-
-		it('should not be easily confused as the primary path', () => {
-			// Check that save_plan tool is mentioned first and is the primary recommendation
-			const savePlanIndex = modePlanSection.indexOf('save_plan');
-			const fallbackIndex = modePlanSection.indexOf(
-				'If `save_plan` is unavailable',
+		it('forbids direct context writes during PLAN', () => {
+			expect(modePlanSection).toContain(
+				'Do not create or hand-edit `.swarm/context.md` as part of PLAN.',
 			);
-
-			expect(savePlanIndex).toBeLessThan(fallbackIndex);
-		});
-
-		it('should have strong constraint language', () => {
-			const constraintSection = fallbackDelegation.substring(
-				fallbackDelegation.indexOf('CONSTRAINT:'),
-			);
-			expect(constraintSection).toMatch(/[A-Z]{4,}/); // Should have uppercase emphasis
+			expect(modePlanSection).not.toMatch(/record.*in `.swarm\/context\.md`/i);
 		});
 	});
 
@@ -955,8 +916,8 @@ describe('architect-prompt-adversarial: attack vectors for task 11.1', () => {
 			expect(modePlanSection).toContain('identifier');
 
 			// Should NOT suggest it's used for file paths
-			expect(modePlanSection).not.toMatch(/swarm_id.*path/i);
-			expect(modePlanSection).not.toMatch(/swarm_id.*file/i);
+			expect(modePlanSection).not.toMatch(/swarm_id[^\n]*\bpath\b/i);
+			expect(modePlanSection).not.toMatch(/swarm_id[^\n]*\bfile\b/i);
 		});
 
 		it('should use example values that are clearly identifiers', () => {
@@ -1010,7 +971,6 @@ describe('architect-prompt-adversarial: attack vectors for task 11.1', () => {
 				/\[task\].*REJECTED/, // Warning about forbidden pattern
 				/\[.*name\]/, // Generic placeholder patterns in warnings
 				/bracket.*\[.*\].*placeholder/, // Warning text about brackets
-				/INPUT:\s*\[.*\]/, // INPUT placeholder in fallback section
 				/\{\s*id:/, // Array/object notation in example (not square brackets alone)
 				/phases:\s*\[/, // phases array in example
 				/tasks:\s*\[/, // tasks array in example

@@ -72,9 +72,14 @@ import {
 	type Task,
 	type TaskStatus,
 } from '../config/plan-schema';
+import {
+	advanceTaskCheckpointReceiptGeneration,
+	repairTaskCheckpointReceiptForCompletion,
+} from '../db/task-checkpoint-receipt.js';
 import { isGitRepo } from '../git/branch';
 import { getWorktreeMergeFailure } from '../hooks/delegation-gate/worktree-merge-status';
 import { readSwarmFileAsync } from '../hooks/utils';
+import { tryAcquireLock } from '../parallel/file-locks.js';
 import { recordTaskAttempt } from '../services/run-memory.js';
 import { emit } from '../telemetry.js';
 import { isEpicModeActiveForProject } from '../turbo/epic/state.js';
@@ -110,7 +115,7 @@ import {
 	takeSnapshotEvent,
 	takeSnapshotWithRetry,
 } from './ledger';
-import { derivePlanId } from './utils';
+import { derivePlanId, derivePlanIdentityHash } from './utils';
 
 // Track which workspaces have already had their startup ledger integrity check.
 // Keyed by resolved workspace directory so each workspace gets exactly one check
@@ -496,7 +501,6 @@ async function parsePlanJsonCached(directory: string): Promise<Plan | null> {
  *
  * F-06: Hash function difference from ledger.ts:
  * - This function uses Bun.hash (compact) vs SHA-256 (ledger.ts::computePlanHash)
- * - This function excludes execution_profile vs included in ledger hash
  * - Purpose: plan.md drift detection (short, readable) vs plan state integrity (cryptographic)
  * Both are intentional design choices for their respective use cases.
  */
@@ -508,6 +512,20 @@ function computePlanContentHash(plan: Plan): string {
 		swarm: plan.swarm,
 		current_phase: plan.current_phase,
 		migration_status: plan.migration_status,
+		execution_profile: plan.execution_profile
+			? {
+					parallelization_enabled:
+						plan.execution_profile.parallelization_enabled,
+					max_concurrent_tasks: plan.execution_profile.max_concurrent_tasks,
+					council_parallel: plan.execution_profile.council_parallel,
+					locked: plan.execution_profile.locked,
+					auto_proceed: plan.execution_profile.auto_proceed,
+					commit_after_each_completed_task:
+						plan.execution_profile.commit_after_each_completed_task === true
+							? true
+							: undefined,
+				}
+			: undefined,
 		phases: plan.phases
 			.map((phase) => ({
 				id: phase.id,
@@ -1170,7 +1188,10 @@ export async function savePlanWithAutoAcknowledgedRemovals(
 	plan: Plan,
 	source: string,
 	reason: string,
-	options?: { preserveCompletedStatuses?: boolean },
+	options?: {
+		preserveCompletedStatuses?: boolean;
+		planLockAlreadyHeld?: boolean;
+	},
 ): Promise<{ removedCount: number }> {
 	const existing = await _internals.loadPlanJsonOnly(directory);
 	const newIds = new Set<string>();
@@ -1202,6 +1223,8 @@ export async function savePlan(
 	options?: {
 		preserveCompletedStatuses?: boolean;
 		acknowledged_removals?: AcknowledgedRemovals;
+		/** True only when the caller already owns the canonical plan.json lock. */
+		planLockAlreadyHeld?: boolean;
 	},
 ): Promise<void> {
 	// Fail-fast: reject blank or whitespace-only directory inputs before any I/O
@@ -1215,8 +1238,33 @@ export async function savePlan(
 	}
 
 	// Authoritative sink guard: every plan/ledger/checkpoint write must re-assert
-	// the canonical project root even when a caller's entry guard was bypassed.
+	// the canonical project root before the plan lock itself writes under .swarm/.
 	assertProjectRoot(directory);
+
+	if (!options?.planLockAlreadyHeld) {
+		const lockResult = await tryAcquireLock(
+			directory,
+			'plan.json',
+			'plan-manager',
+			`save-plan-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+		);
+		if (!lockResult.acquired) {
+			throw new PlanConcurrentModificationError(
+				`Plan write blocked: plan.json is locked by ${lockResult.existing?.agent ?? 'another agent'} (task: ${lockResult.existing?.taskId ?? 'unknown'})`,
+			);
+		}
+		try {
+			await savePlan(directory, plan, {
+				...options,
+				planLockAlreadyHeld: true,
+			});
+			return;
+		} finally {
+			if (lockResult.lock._release) {
+				await lockResult.lock._release().catch(() => {});
+			}
+		}
+	}
 
 	// Validate against schema
 	const validated = PlanSchema.parse(plan);
@@ -1757,6 +1805,57 @@ export async function savePlan(
 	} catch {
 		/* Advisory only - marker write failure does not affect plan save */
 	}
+
+	// Keep task-completion checkpoint receipts aligned with the durable plan
+	// lifecycle. A receipt represents one completion epoch, not the repository's
+	// current HEAD: unrelated commits must not make a logged receipt replayable.
+	// Advance its generation whenever a completed task is reopened/reset/removed,
+	// and activate the resulting epoch when that task becomes completed again.
+	// This runs after the authoritative plan.json rename. If SQLite bookkeeping is
+	// interrupted, the completion-side repair closes the crash window on the next
+	// non-completed -> completed transition.
+	if (currentPlan) {
+		try {
+			const oldIdentityHash = derivePlanIdentityHash(currentPlan);
+			const newIdentityHash = derivePlanIdentityHash(projectedPlan);
+			if (oldIdentityHash === newIdentityHash) {
+				const oldStatuses = new Map<string, TaskStatus>();
+				for (const phase of currentPlan.phases) {
+					for (const task of phase.tasks) oldStatuses.set(task.id, task.status);
+				}
+				const newStatuses = new Map<string, TaskStatus>();
+				for (const phase of projectedPlan.phases) {
+					for (const task of phase.tasks) newStatuses.set(task.id, task.status);
+				}
+				for (const [taskId, oldStatus] of oldStatuses) {
+					const newStatus = newStatuses.get(taskId);
+					if (oldStatus === 'completed' && newStatus !== 'completed') {
+						advanceTaskCheckpointReceiptGeneration(
+							directory,
+							oldIdentityHash,
+							taskId,
+						);
+					}
+				}
+				for (const [taskId, newStatus] of newStatuses) {
+					if (
+						newStatus === 'completed' &&
+						oldStatuses.get(taskId) !== 'completed'
+					) {
+						repairTaskCheckpointReceiptForCompletion(
+							directory,
+							newIdentityHash,
+							taskId,
+						);
+					}
+				}
+			}
+		} catch (receiptError) {
+			warn(
+				`[savePlan] task checkpoint receipt lifecycle sync failed (plan remains authoritative): ${receiptError instanceof Error ? receiptError.message : String(receiptError)}`,
+			);
+		}
+	}
 }
 
 /**
@@ -2092,7 +2191,7 @@ export async function updateTaskStatus(
 	directory: string,
 	taskId: string,
 	status: TaskStatus,
-	options?: { force?: boolean },
+	options?: { force?: boolean; planLockAlreadyHeld?: boolean },
 ): Promise<Plan> {
 	assertProjectRoot(directory);
 	const derivePhaseStatusFromTasks = (tasks: Task[]): Phase['status'] => {
@@ -2186,6 +2285,7 @@ export async function updateTaskStatus(
 			// 'completed', producing a false-positive success return.
 			await savePlan(directory, updatedPlan, {
 				preserveCompletedStatuses: false,
+				planLockAlreadyHeld: options?.planLockAlreadyHeld,
 			});
 
 			// Run memory: record the terminal outcome for this task. Centralized
@@ -2348,6 +2448,17 @@ export function derivePlanMarkdown(plan: Plan): string {
 		statusMap[plan.phases[currentPhase - 1]?.status] || 'PENDING';
 
 	let markdown = `# ${plan.title}\nSwarm: ${plan.swarm}\nPhase: ${currentPhase} [${phaseStatus}] | Updated: ${now}\n`;
+
+	if (plan.execution_profile) {
+		const profile = plan.execution_profile;
+		markdown += '\n## Execution Profile\n';
+		markdown += `- Parallelization: ${profile.parallelization_enabled ? 'enabled' : 'disabled'}\n`;
+		markdown += `- Max Concurrent Tasks: ${profile.max_concurrent_tasks}\n`;
+		markdown += `- Council Parallel: ${profile.council_parallel ? 'yes' : 'no'}\n`;
+		markdown += `- Locked: ${profile.locked ? 'yes' : 'no'}\n`;
+		markdown += `- Auto Proceed: ${profile.auto_proceed ? 'yes' : 'no'}\n`;
+		markdown += `- Commit After Each Completed Task: ${profile.commit_after_each_completed_task ? 'yes' : 'no'}\n`;
+	}
 
 	// Sort phases deterministically by ID (ascending)
 	const sortedPhases = [...plan.phases].sort((a, b) => a.id - b.id);

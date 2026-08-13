@@ -7,7 +7,6 @@
  * - Locked plan: result carries execution_profile
  * - Disk round-trip: profile persisted to .swarm/plan.json
  */
-
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -134,6 +133,7 @@ describe('execution_profile: locked profile rejection (fail-closed)', () => {
 			council_parallel: false,
 			locked: true,
 			auto_proceed: false,
+			commit_after_each_completed_task: true,
 		};
 		const firstResult = await executeSavePlan(
 			makeArgs({

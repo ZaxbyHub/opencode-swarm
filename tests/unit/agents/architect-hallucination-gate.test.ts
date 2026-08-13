@@ -89,7 +89,7 @@ describe('Architect prompt: hallucination_guard gate enforcement', () => {
 	});
 
 	describe('buildQaGateSelectionDialogue: behavioral-mandatory language', () => {
-		for (const mode of ['BRAINSTORM', 'SPECIFY', 'PLAN'] as const) {
+		for (const mode of ['PLAN'] as const) {
 			test(`${mode} dialogue contains hallucination_guard`, () => {
 				const dialogue = buildQaGateSelectionDialogue(mode);
 				expect(dialogue).toContain('hallucination_guard');

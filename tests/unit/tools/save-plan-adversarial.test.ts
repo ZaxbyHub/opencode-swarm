@@ -19,6 +19,7 @@ describe('save-plan adversarial tests', () => {
 	let tempDirs: string[] = [];
 
 	beforeEach(async () => {
+		process.env.SWARM_SKIP_GATE_SELECTION = '1';
 		// Create a canonical external project root for each test.
 		tempDir = canonicalMkdtemp('save-plan-adversarial-');
 		tempDirs.push(tempDir);
@@ -29,14 +30,10 @@ describe('save-plan adversarial tests', () => {
 			path.join(tempDir, '.swarm', 'spec.md'),
 			'# Test Spec\n',
 		);
-		// Create context.md with the QA gate selection section required by the gate-selection check
-		await fs.writeFile(
-			path.join(tempDir, '.swarm', 'context.md'),
-			'## Pending QA Gate Selection\n',
-		);
 	});
 
 	afterEach(() => {
+		delete process.env.SWARM_SKIP_GATE_SELECTION;
 		// Clean up all temp directories
 		for (const dir of tempDirs) {
 			safeRmRecursive(dir);

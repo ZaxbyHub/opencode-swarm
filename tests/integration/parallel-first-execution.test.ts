@@ -32,10 +32,7 @@ import {
 	resetSwarmState,
 	swarmState,
 } from '../../src/state';
-import {
-	recordPlanCriticApproval,
-	writeApprovedPlan,
-} from '../helpers/approved-plan';
+import { writeApprovedPlan } from '../helpers/approved-plan';
 import { withFrozenClock } from '../helpers/test-clock.js';
 
 function makeConfig(): PluginConfig {
@@ -63,20 +60,16 @@ async function writeParallelApprovedPlan(
 	directory: string,
 	tasks: Array<{ id: string; files: string[] }>,
 ): Promise<void> {
-	// writeApprovedPlan writes via savePlan (no execution_profile). We re-load,
-	// add the profile, and re-save + re-approve so the gate sees it.
-	const plan = await writeApprovedPlan(directory, tasks);
-	plan.execution_profile = {
-		parallelization_enabled: true,
-		max_concurrent_tasks: 4,
-		council_parallel: true,
-		locked: false,
-		auto_proceed: false,
-	};
-	// Re-write plan.json with the profile and re-record the approval snapshot.
-	const { savePlan } = await import('../../src/plan/manager');
-	await savePlan(directory, plan, { preserveCompletedStatuses: false });
-	await recordPlanCriticApproval(directory, plan);
+	await writeApprovedPlan(directory, tasks, {
+		executionProfile: {
+			parallelization_enabled: true,
+			max_concurrent_tasks: 4,
+			council_parallel: true,
+			locked: false,
+			auto_proceed: false,
+			commit_after_each_completed_task: false,
+		},
+	});
 }
 
 /** Write disjoint declared scope files for the given task ids. */

@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { canonicalMkdtemp } from '../../tests/helpers/tmpdir.js';
 import type { Plan } from '../config/plan-schema.js';
-import { closeAllProjectDbs, getProfile } from '../db/index.js';
+import { closeAllProjectDbs, getProfileForIdentity } from '../db/index.js';
 import { handleQaGatesCommand } from './qa-gates.js';
 
 let tempDir: string;
@@ -42,9 +43,7 @@ function writePlanJson(directory: string): void {
 }
 
 beforeEach(() => {
-	tempDir = fs.realpathSync(
-		fs.mkdtempSync(path.join(process.cwd(), 'qa-gates-cmd-test-')),
-	);
+	tempDir = canonicalMkdtemp('qa-gates-cmd-test-');
 });
 
 afterEach(() => {
@@ -82,8 +81,10 @@ describe('handleQaGatesCommand', () => {
 		expect(result).toContain('council_mode: on');
 
 		// Verify persistence in DB
-		const planId = 'test-swarm-Test_Plan';
-		const profile = getProfile(tempDir, planId);
+		const profile = getProfileForIdentity(tempDir, {
+			swarm: 'test-swarm',
+			title: 'Test Plan',
+		});
 		expect(profile).not.toBeNull();
 		expect(profile?.gates.council_mode).toBe(true);
 	});

@@ -17,6 +17,7 @@ describe('save_plan auto-checkpoint (Task 5.4)', () => {
 	let originalCwd: string;
 
 	beforeEach(() => {
+		process.env.SWARM_SKIP_GATE_SELECTION = '1';
 		// Create temp directory
 		tempDir = fs.realpathSync(
 			fs.mkdtempSync(path.join(os.tmpdir(), 'save-plan-auto-checkpoint-test-')),
@@ -46,6 +47,7 @@ describe('save_plan auto-checkpoint (Task 5.4)', () => {
 	});
 
 	afterEach(() => {
+		delete process.env.SWARM_SKIP_GATE_SELECTION;
 		process.chdir(originalCwd);
 		try {
 			fs.rmSync(tempDir, { recursive: true, force: true });

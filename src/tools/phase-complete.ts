@@ -1959,6 +1959,7 @@ export async function executePhaseComplete(
 									rebuilt,
 									'phase_complete_rebuild_from_ledger',
 									'phase-complete rebuild from ledger',
+									{ planLockAlreadyHeld: true },
 								);
 								// After successful phase completion, take a snapshot
 								try {
@@ -2005,7 +2006,10 @@ export async function executePhaseComplete(
 				);
 				if (phaseObj) {
 					phaseObj.status = 'complete';
-					await savePlan(dir, plan, { preserveCompletedStatuses: true });
+					await savePlan(dir, plan, {
+						preserveCompletedStatuses: true,
+						planLockAlreadyHeld: true,
+					});
 				}
 				// After successful phase completion, take a snapshot
 				try {
@@ -2034,6 +2038,7 @@ export async function executePhaseComplete(
 								rebuilt,
 								'phase_complete_rebuild_from_ledger',
 								'phase-complete rebuild from ledger',
+								{ planLockAlreadyHeld: true },
 							);
 							// After successful phase completion, take a snapshot
 							try {

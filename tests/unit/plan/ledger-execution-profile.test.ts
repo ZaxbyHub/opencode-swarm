@@ -166,6 +166,8 @@ describe('execution_profile_set event replay', () => {
 			max_concurrent_tasks: 3,
 			council_parallel: false,
 			locked: false,
+			auto_proceed: true,
+			commit_after_each_completed_task: true,
 		};
 
 		await appendLedgerEvent(
@@ -185,6 +187,10 @@ describe('execution_profile_set event replay', () => {
 		expect(replayed).not.toBeNull();
 		expect(replayed?.execution_profile?.parallelization_enabled).toBe(true);
 		expect(replayed?.execution_profile?.max_concurrent_tasks).toBe(3);
+		expect(replayed?.execution_profile?.auto_proceed).toBe(true);
+		expect(replayed?.execution_profile?.commit_after_each_completed_task).toBe(
+			true,
+		);
 	});
 
 	test('execution_profile_set with malformed payload is ignored (no crash)', async () => {

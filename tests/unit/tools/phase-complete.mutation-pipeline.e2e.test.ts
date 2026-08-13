@@ -21,16 +21,12 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { closeAllProjectDbs } from '../../../src/db/project-db.js';
-import {
-	getOrCreateProfile,
-	setGates,
-} from '../../../src/db/qa-gate-profile.js';
+import { setGatesForIdentity } from '../../../src/db/qa-gate-profile.js';
 import {
 	computeReport,
 	type MutationResult,
 } from '../../../src/mutation/engine.js';
 import { evaluateMutationGate } from '../../../src/mutation/gate.js';
-import { derivePlanId } from '../../../src/plan/utils.js';
 import {
 	ensureAgentSession,
 	recordPhaseAgentDispatch,
@@ -44,7 +40,6 @@ const { phase_complete } = await import('../../../src/tools/phase-complete.js');
 // planId must match what loadPlan derives: "${swarm}-${title}".replace(...)
 const PLAN_SWARM = 'mega';
 const PLAN_TITLE = 'E2E Pipeline Test';
-const PLAN_ID = derivePlanId({ swarm: PLAN_SWARM, title: PLAN_TITLE });
 
 // ─── Setup helpers (mirroring phase-complete.mutation-gate.test.ts pattern) ──
 
@@ -200,9 +195,12 @@ describe('mutation gate pipeline — E2E integration', () => {
 		recordPhaseAgentDispatch('sess-e2e', 'coder');
 		swarmState.agentSessions.get('sess-e2e')!.turboMode = false;
 
-		// Enable mutation gate in the QA profile
-		getOrCreateProfile(tempDir, PLAN_ID);
-		setGates(tempDir, PLAN_ID, { mutation_test: true });
+		// Enable mutation gate in the exact-bound QA profile
+		setGatesForIdentity(
+			tempDir,
+			{ swarm: PLAN_SWARM, title: PLAN_TITLE },
+			{ mutation_test: true },
+		);
 	});
 
 	afterEach(() => {

@@ -6,8 +6,7 @@
  *     → checkCouncilGate (reads evidence.gates.council and blocks/allows)
  *     → pushCouncilAdvisory (pushes into architect session advisory queue)
  *
- * Each component has its own unit tests; this file fills the integration gap
- * flagged by the round-3 test_engineer review.
+ * Each component has its own unit tests; this file fills the integration gap.
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
@@ -21,13 +20,12 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { closeProjectDb } from '../../../src/db/project-db';
-import { getOrCreateProfile, setGates } from '../../../src/db/qa-gate-profile';
+import { setGatesForIdentity } from '../../../src/db/qa-gate-profile';
 
 let tempDir: string;
 
 const PLAN_SWARM = 'test-swarm';
 const PLAN_TITLE = 'test-plan';
-const PLAN_ID = `${PLAN_SWARM}-${PLAN_TITLE}`.replace(/[^a-zA-Z0-9-_]/g, '_');
 
 function seedEnabledConfig(): void {
 	mkdirSync(join(tempDir, '.opencode'), { recursive: true });
@@ -48,9 +46,11 @@ function seedEnabledConfig(): void {
 		}),
 	);
 
-	// Activate council_mode in QA gate profile so checkCouncilGate proceeds to evidence check
-	getOrCreateProfile(tempDir, PLAN_ID);
-	setGates(tempDir, PLAN_ID, { council_mode: true });
+	setGatesForIdentity(
+		tempDir,
+		{ swarm: PLAN_SWARM, title: PLAN_TITLE },
+		{ council_mode: true },
+	);
 }
 
 beforeEach(() => {

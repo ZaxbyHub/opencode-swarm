@@ -203,7 +203,19 @@ export function computePlanHash(plan: Plan): string {
 		swarm: plan.swarm,
 		current_phase: plan.current_phase,
 		migration_status: plan.migration_status,
-		execution_profile: plan.execution_profile,
+		execution_profile: plan.execution_profile
+			? {
+					...plan.execution_profile,
+					// Backward compatibility: this field was added with a false default.
+					// Schema parsing therefore injects `false` into pre-upgrade plans.
+					// Omit that default from the hash so their persisted ledger hashes
+					// remain valid; opting in with `true` must still move the hash.
+					commit_after_each_completed_task:
+						plan.execution_profile.commit_after_each_completed_task === true
+							? true
+							: undefined,
+				}
+			: undefined,
 		phases: plan.phases.map((phase) => ({
 			id: phase.id,
 			name: phase.name,
@@ -263,7 +275,18 @@ export function computePlanStructureHash(plan: Plan): string {
 		swarm: plan.swarm,
 		current_phase: plan.current_phase,
 		migration_status: plan.migration_status,
-		execution_profile: plan.execution_profile,
+		execution_profile: plan.execution_profile
+			? {
+					...plan.execution_profile,
+					// Keep legacy critic approvals valid when PlanSchema injects the new
+					// default-false commit policy. Only an explicit opt-in changes the
+					// status-excluded structural hash.
+					commit_after_each_completed_task:
+						plan.execution_profile.commit_after_each_completed_task === true
+							? true
+							: undefined,
+				}
+			: undefined,
 		phases: plan.phases.map((phase) => ({
 			id: phase.id,
 			name: phase.name,

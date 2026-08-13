@@ -4,20 +4,6 @@ import { existsSync, readFileSync } from 'node:fs';
 
 const SKILL_PAIRS = [
 	{
-		name: 'brainstorm',
-		paths: [
-			'.claude/skills/brainstorm/SKILL.md',
-			'.opencode/skills/brainstorm/SKILL.md',
-		],
-	},
-	{
-		name: 'specify',
-		paths: [
-			'.claude/skills/specify/SKILL.md',
-			'.opencode/skills/specify/SKILL.md',
-		],
-	},
-	{
 		name: 'plan',
 		paths: ['.claude/skills/plan/SKILL.md', '.opencode/skills/plan/SKILL.md'],
 	},
@@ -69,7 +55,7 @@ describe('qa-gate-body sync (task 3.3 — #1690)', () => {
 			expect(block).toContain('- phase_council');
 			expect(block).toContain('- drift_check');
 			expect(block).toContain('- final_council');
-			// 3 shared sub-items
+			// 3 execution-profile sub-items
 			expect(block).toContain('Parallel coders');
 			expect(block).toContain('Commit frequency');
 			expect(block).toContain('auto_proceed');

@@ -12,15 +12,11 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { PluginConfig } from '../../../src/config';
 import type { Plan } from '../../../src/config/plan-schema';
-import { getOrCreateProfile, setGates } from '../../../src/db/qa-gate-profile';
+import { setGatesForIdentity } from '../../../src/db/qa-gate-profile';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 import { withFrozenClock } from '../../helpers/test-clock.js';
 import { recordPlanCriticApproval } from './_delegation-gate-helpers';
-
-function derivePlanId(plan: { swarm: string; title: string }): string {
-	return `${plan.swarm}-${plan.title}`.replace(/[^a-zA-Z0-9-_]/g, '_');
-}
 
 const PLAN_FIXTURE = {
 	schema_version: '1.0.0' as const,
@@ -46,7 +42,10 @@ const PLAN_FIXTURE = {
 		},
 	],
 };
-const PLAN_ID = derivePlanId(PLAN_FIXTURE);
+const PLAN_IDENTITY = {
+	swarm: PLAN_FIXTURE.swarm,
+	title: PLAN_FIXTURE.title,
+} as const;
 
 function makeConfig(
 	overrides?: Record<string, unknown>,
@@ -194,8 +193,9 @@ describe('delegation-gate: completion gate — QA gate enforcement (PR #961)', (
 
 		it('should throw when qa_gate_profile.reviewer is true but task not reviewed', async () => {
 			// Set reviewer gate
-			const profile = getOrCreateProfile(tempDir, PLAN_ID);
-			setGates(tempDir, PLAN_ID, { reviewer: true });
+			const profile = setGatesForIdentity(tempDir, PLAN_IDENTITY, {
+				reviewer: true,
+			});
 			profile.gates = { reviewer: true };
 
 			const hook = createDelegationGateHook(makeConfig(), tempDir);
@@ -216,8 +216,9 @@ describe('delegation-gate: completion gate — QA gate enforcement (PR #961)', (
 		});
 
 		it('should NOT throw when the task has advanced past coder_delegated into reviewer_run', async () => {
-			const profile = getOrCreateProfile(tempDir, PLAN_ID);
-			setGates(tempDir, PLAN_ID, { reviewer: true });
+			const profile = setGatesForIdentity(tempDir, PLAN_IDENTITY, {
+				reviewer: true,
+			});
 			profile.gates = { reviewer: true };
 
 			const hook = createDelegationGateHook(makeConfig(), tempDir);

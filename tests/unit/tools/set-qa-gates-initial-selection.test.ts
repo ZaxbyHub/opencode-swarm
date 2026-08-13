@@ -5,7 +5,7 @@ import { closeProjectDb } from '../../../src/db/project-db';
 import {
 	DEFAULT_QA_GATES,
 	getOrCreateProfile,
-	getProfile,
+	getProfileForIdentity,
 	type QaGates,
 	_internals as qaProfileInternals,
 } from '../../../src/db/qa-gate-profile';
@@ -81,7 +81,7 @@ describe('set_qa_gates initial selection', () => {
 		const result = await executeSetQaGates(selection, directory);
 
 		expect(result.success).toBe(true);
-		const profile = getProfile(directory, PLAN_ID);
+		const profile = getProfileForIdentity(directory, PLAN);
 		expect(profile).not.toBeNull();
 		for (const gate of defaultOnGates) {
 			expect(profile?.gates[gate]).toBe(false);
@@ -107,7 +107,9 @@ describe('set_qa_gates initial selection', () => {
 		);
 		expect(loosened.success).toBe(false);
 		expect(loosened.reason).toBe('ratchet_violation');
-		expect(getProfile(directory, PLAN_ID)?.gates.critic_pre_plan).toBe(true);
+		expect(getProfileForIdentity(directory, PLAN)?.gates.critic_pre_plan).toBe(
+			true,
+		);
 	});
 
 	it('does not loosen a true profile created by a concurrent winner', async () => {

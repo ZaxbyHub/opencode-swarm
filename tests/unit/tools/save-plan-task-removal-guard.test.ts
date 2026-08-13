@@ -24,6 +24,7 @@ import { executeSavePlan } from '../../../src/tools/save-plan';
 let tmpDir: string;
 
 beforeEach(async () => {
+	process.env.SWARM_SKIP_GATE_SELECTION = '1';
 	tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'save-plan-removal-'));
 	await fs.mkdir(path.join(tmpDir, '.swarm'), { recursive: true });
 	await fs.writeFile(path.join(tmpDir, '.swarm', 'spec.md'), '# Test Spec\n');
@@ -34,6 +35,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+	delete process.env.SWARM_SKIP_GATE_SELECTION;
 	try {
 		await fs.rm(tmpDir, { recursive: true, force: true });
 	} catch {

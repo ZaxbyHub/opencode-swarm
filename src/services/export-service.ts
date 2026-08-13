@@ -1,3 +1,4 @@
+import type { ExecutionProfile } from '../config/plan-schema';
 import { readSwarmFileAsync } from '../hooks/utils';
 import { loadPlanJsonOnly } from '../plan/manager';
 
@@ -10,12 +11,7 @@ export interface ExportData {
 	plan: unknown; // structured Plan object if available, else markdown string
 	context: string | null;
 	/** The plan's execution_profile, if set. Consumers must honour locked profiles. */
-	execution_profile?: {
-		parallelization_enabled: boolean;
-		max_concurrent_tasks: number;
-		council_parallel: boolean;
-		locked: boolean;
-	} | null;
+	execution_profile?: ExecutionProfile | null;
 }
 
 /**

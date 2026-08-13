@@ -30,6 +30,7 @@ describe('save_plan requirement coverage gate', () => {
 	let dir: string;
 
 	beforeEach(async () => {
+		process.env.SWARM_SKIP_GATE_SELECTION = '1';
 		dir = await mkdtemp(join(tmpdir(), 'save-plan-coverage-'));
 		await mkdir(join(dir, '.swarm'), { recursive: true });
 		await writeFile(
@@ -49,6 +50,7 @@ describe('save_plan requirement coverage gate', () => {
 	});
 
 	afterEach(async () => {
+		delete process.env.SWARM_SKIP_GATE_SELECTION;
 		if (dir && existsSync(dir)) {
 			await rm(dir, { recursive: true, force: true });
 		}

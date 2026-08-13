@@ -8,7 +8,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { ToolDefinition } from '@opencode-ai/plugin/tool';
 import { z } from 'zod';
-import { lockProfile } from '../db/qa-gate-profile.js';
+import {
+	getProfileLookupForIdentity,
+	lockProfileForIdentity,
+} from '../db/qa-gate-profile.js';
 import {
 	isAcceptedVerdict2,
 	normalizeVerdict2,
@@ -18,6 +21,7 @@ import { validateSwarmPath } from '../hooks/utils';
 import { takeSnapshotEvent } from '../plan/ledger';
 import { loadPlanJsonOnly } from '../plan/manager';
 import { derivePlanId } from '../plan/utils.js';
+import { formatLegacyQaBindingRecovery } from '../qa-gate/recovery.js';
 import * as logger from '../utils/logger.js';
 import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache.js';
 import { createSwarmTool } from './create-tool';
@@ -38,6 +42,29 @@ export interface WriteDriftEvidenceArgs {
 	provenanceAgentName?: string;
 	/** Session ID of the agent that produced this evidence (optional provenance) */
 	provenanceSessionId?: string;
+}
+
+interface ApprovalPreflightFailure {
+	reason: string;
+	message: string;
+	recovery_guidance: string;
+}
+
+function buildApprovedPreflightFailure(
+	phase: number,
+	failure: ApprovalPreflightFailure,
+): string {
+	return JSON.stringify(
+		{
+			success: false,
+			phase,
+			reason: failure.reason,
+			message: failure.message,
+			recovery_guidance: failure.recovery_guidance,
+		},
+		null,
+		2,
+	);
 }
 
 /**
@@ -94,6 +121,104 @@ export async function executeWriteDriftEvidence(
 
 	// Normalize verdict
 	const normalizedVerdict = _internals.normalizeVerdict2(args.verdict);
+
+	let approvedPlan: Awaited<ReturnType<typeof loadPlanJsonOnly>> | null = null;
+	let snapshotInfo:
+		| { seq: number; timestamp: string; locked_by_snapshot_seq: number }
+		| undefined;
+	let qaProfileLocked:
+		| { plan_id: string; locked_at: string; locked_by_snapshot_seq: number }
+		| undefined;
+
+	if (normalizedVerdict === 'approved') {
+		approvedPlan = await loadPlanJsonOnly(directory);
+		if (!approvedPlan) {
+			return buildApprovedPreflightFailure(phase, {
+				reason: 'plan_required_for_approval',
+				message:
+					'PLAN_REQUIRED_FOR_APPROVAL: plan.json must exist before APPROVED drift evidence can be persisted.',
+				recovery_guidance:
+					'Restore the current .swarm/plan.json and ensure the exact plan identity is available before retrying write_drift_evidence.',
+			});
+		}
+
+		const profileLookup = getProfileLookupForIdentity(directory, approvedPlan);
+		if (profileLookup.kind === 'missing') {
+			return buildApprovedPreflightFailure(phase, {
+				reason: 'qa_gate_selection_required',
+				message:
+					'QA_GATE_SELECTION_REQUIRED: no durable QA gate selection exists for this exact plan identity.',
+				recovery_guidance: `Call set_qa_gates with swarm_id=${JSON.stringify(approvedPlan.swarm)} and plan_title=${JSON.stringify(approvedPlan.title)} before retrying write_drift_evidence with the identical identity.`,
+			});
+		}
+		if (profileLookup.kind === 'unbound_legacy') {
+			return buildApprovedPreflightFailure(phase, {
+				reason: 'qa_gate_identity_unbound',
+				message:
+					'QA_GATE_IDENTITY_UNBOUND: the current plan has a legacy QA gate profile row that is not exact-bound.',
+				recovery_guidance: formatLegacyQaBindingRecovery(
+					{ swarm: approvedPlan.swarm, title: approvedPlan.title },
+					'retry write_drift_evidence with the identical identity',
+				),
+			});
+		}
+
+		try {
+			// Persist a non-approved content anchor before locking the immutable QA
+			// profile. Publishing the visible critic_approved marker first would leave
+			// a durable approval behind if the subsequent profile lock failed.
+			const lockAnchor = await takeSnapshotEvent(directory, approvedPlan, {
+				source: 'drift_approval_prelock',
+			});
+
+			const planId = derivePlanId(approvedPlan);
+			const locked = _internals.lockProfileForIdentity(
+				directory,
+				approvedPlan,
+				lockAnchor.seq,
+			);
+			const lockedBySnapshotSeq =
+				locked.locked_by_snapshot_seq ?? lockAnchor.seq;
+
+			const approvedSnapshot = await takeSnapshotEvent(
+				directory,
+				approvedPlan,
+				{
+					source: 'critic_approved',
+					approvalMetadata: {
+						phase,
+						verdict: 'APPROVED',
+						summary: summary.trim(),
+						approved_at: new Date().toISOString(),
+						locked_by_snapshot_seq: lockedBySnapshotSeq,
+					},
+				},
+			);
+			snapshotInfo = {
+				seq: approvedSnapshot.seq,
+				timestamp: approvedSnapshot.timestamp,
+				locked_by_snapshot_seq: lockedBySnapshotSeq,
+			};
+
+			qaProfileLocked = {
+				plan_id: planId,
+				locked_at: locked.locked_at ?? '',
+				locked_by_snapshot_seq: locked.locked_by_snapshot_seq ?? -1,
+			};
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			logger.log(
+				'[write_drift_evidence] critic-approved persistence failed:',
+				message,
+			);
+			return buildApprovedPreflightFailure(phase, {
+				reason: 'approval_persistence_failed',
+				message: `APPROVAL_PERSISTENCE_FAILED: QA gate profile lock or critic-approved snapshot failed: ${message}`,
+				recovery_guidance:
+					'Resolve the ledger or QA profile persistence failure, then rerun write_drift_evidence. A completed profile lock is idempotent, and no visible approval is published until both persistence steps succeed.',
+			});
+		}
+	}
 
 	// Build provenance if provided
 	const provenance =
@@ -156,76 +281,6 @@ export async function executeWriteDriftEvidence(
 		await fs.promises.rename(tempPath, validatedPath);
 		invalidateCachedArtifact(validatedPath);
 
-		// On APPROVED: write an immutable plan snapshot to the append-only ledger
-		// tagged source='critic_approved'. This provides a durable fallback the
-		// Architect can restore from, and a reference point the Critic can
-		// drift-check against. Snapshot errors are non-fatal — the drift evidence
-		// write has already succeeded.
-		let snapshotInfo: { seq: number; timestamp: string } | undefined;
-		let snapshotError: string | undefined;
-		let qaProfileLocked:
-			| { plan_id: string; locked_at: string; locked_by_snapshot_seq: number }
-			| undefined;
-		let qaProfileLockError: string | undefined;
-		if (normalizedVerdict === 'approved') {
-			try {
-				const currentPlan = await loadPlanJsonOnly(directory);
-				if (currentPlan) {
-					const snapshotEvent = await takeSnapshotEvent(
-						directory,
-						currentPlan,
-						{
-							source: 'critic_approved',
-							approvalMetadata: {
-								phase,
-								verdict: 'APPROVED',
-								summary: summary.trim(),
-								approved_at: new Date().toISOString(),
-							},
-						},
-					);
-					snapshotInfo = {
-						seq: snapshotEvent.seq,
-						timestamp: snapshotEvent.timestamp,
-					};
-
-					// Lock the QA gate profile to the approved snapshot. Non-fatal:
-					// snapshot + evidence write already succeeded. If no profile
-					// exists yet (approval before the architect touched gates), skip
-					// silently — the get_approved_plan drift check tolerates a null
-					// qa_profile_hash.
-					try {
-						const planId = derivePlanId(currentPlan);
-						const locked = lockProfile(directory, planId, snapshotEvent.seq);
-						qaProfileLocked = {
-							plan_id: planId,
-							locked_at: locked.locked_at ?? '',
-							locked_by_snapshot_seq: locked.locked_by_snapshot_seq ?? -1,
-						};
-					} catch (lockErr) {
-						const msg =
-							lockErr instanceof Error ? lockErr.message : String(lockErr);
-						// A missing profile is expected when gates were never configured.
-						if (!/No QA gate profile/i.test(msg)) {
-							qaProfileLockError = msg;
-							logger.log(
-								'[write_drift_evidence] QA gate profile lock failed:',
-								msg,
-							);
-						}
-					}
-				} else {
-					snapshotError = 'plan.json not available for snapshot';
-				}
-			} catch (err) {
-				snapshotError = err instanceof Error ? err.message : String(err);
-				logger.log(
-					'[write_drift_evidence] critic-approved snapshot failed:',
-					snapshotError,
-				);
-			}
-		}
-
 		return JSON.stringify(
 			{
 				success: true,
@@ -233,9 +288,7 @@ export async function executeWriteDriftEvidence(
 				verdict: normalizedVerdict,
 				message: `Drift evidence written to .swarm/evidence/${phase}/drift-verifier.json`,
 				approvedSnapshot: snapshotInfo,
-				snapshotError,
 				qaProfileLocked,
-				qaProfileLockError,
 			},
 			null,
 			2,
@@ -262,6 +315,7 @@ export const _internals = {
 	normalizeVerdict2,
 	VERDICT_SET_2,
 	isAcceptedVerdict2,
+	lockProfileForIdentity,
 };
 
 /**
