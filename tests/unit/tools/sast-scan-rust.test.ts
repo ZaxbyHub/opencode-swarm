@@ -37,6 +37,7 @@ let mockSemgrepAvailable = false;
 
 vi.mock('../../../src/sast/semgrep', () => ({
 	isSemgrepAvailable: () => mockSemgrepAvailable,
+	checkSemgrepAvailable: async () => mockSemgrepAvailable,
 	runSemgrep: vi.fn().mockResolvedValue({
 		available: mockSemgrepAvailable,
 		findings: [],

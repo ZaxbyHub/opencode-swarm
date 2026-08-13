@@ -270,6 +270,8 @@ export interface BunCompatSpawnOptions {
 	stdout?: 'inherit' | 'ignore' | 'pipe';
 	stderr?: 'inherit' | 'ignore' | 'pipe';
 	timeout?: number;
+	/** Preserve the caller's exact Windows argv quoting (required for cmd.exe /c). */
+	windowsVerbatimArguments?: boolean;
 	/**
 	 * When true, spawn the child as its own process-group leader (Node path:
 	 * `detached`) and kill the entire descendant tree on `kill()`/timeout
@@ -299,7 +301,16 @@ export interface BunCompatSubprocess {
 	readonly stderr: BunCompatStream;
 	readonly exited: Promise<number>;
 	exitCode: number | null;
+	readonly signalCode?: NodeJS.Signals | null;
+	/**
+	 * Asynchronous process-creation failure reported by Node's ChildProcess
+	 * `error` event (for example ENOENT). Bun reports equivalent failures by
+	 * throwing from `Bun.spawn`, so this is populated only by the Node fallback.
+	 */
+	readonly spawnError?: Error | null;
 	kill(signal?: NodeJS.Signals | number): void;
+	/** Awaitable best-effort descendant-tree termination for bounded runners. */
+	killTree?(signal?: NodeJS.Signals | number): Promise<void>;
 }
 
 /**
@@ -308,34 +319,48 @@ export interface BunCompatSubprocess {
  * detached (its own group leader) we signal the negative pid to reach the whole
  * group; otherwise we fall back to signalling the direct child.
  */
-function killProcessTreeImpl(
+async function killProcessTreeImpl(
 	pid: number | undefined,
 	signal: NodeJS.Signals | number | undefined,
-	directKill: () => void,
+	directKill: (signal?: NodeJS.Signals | number) => void,
 	wasDetached: boolean,
-): void {
+): Promise<void> {
 	if (typeof pid !== 'number' || pid <= 0) {
-		directKill();
+		directKill(signal);
 		return;
 	}
-	if (process.platform === 'win32') {
+	if (_internals.platform() === 'win32') {
+		let taskkill: ReturnType<typeof nodeSpawn> | undefined;
 		try {
-			const result = nodeSpawnSync(
-				'taskkill',
-				['/PID', String(pid), '/T', '/F'],
-				{
-					cwd: process.cwd(),
-					stdio: ['ignore', 'ignore', 'ignore'],
-					timeout: 5_000,
-					windowsHide: true,
-				},
-			);
-			if (!result.error && result.status === 0) return;
+			taskkill = _internals.spawnTaskkill(['/PID', String(pid), '/T', '/F'], {
+				cwd: _internals.cwd(),
+				stdio: ['ignore', 'ignore', 'ignore'],
+				timeout: 5_000,
+				killSignal: 'SIGKILL',
+				windowsHide: true,
+			});
+			const succeeded = await new Promise<boolean>((resolve) => {
+				let settled = false;
+				const finish = (value: boolean) => {
+					if (settled) return;
+					settled = true;
+					resolve(value);
+				};
+				taskkill?.once('error', () => finish(false));
+				taskkill?.once('exit', (code) => finish(code === 0));
+			});
+			if (succeeded) return;
 		} catch {
 			// taskkill unavailable; fall through to direct kill.
+		} finally {
+			try {
+				taskkill?.kill('SIGKILL');
+			} catch {
+				// already exited
+			}
 		}
-		directKill();
-		return;
+		directKill(signal);
+		throw new Error('Windows process-tree termination could not be confirmed');
 	}
 	if (wasDetached) {
 		try {
@@ -345,8 +370,26 @@ function killProcessTreeImpl(
 			// group gone or never created — fall through to direct kill
 		}
 	}
-	directKill();
+	directKill(signal);
 }
+
+function createProcessTreeKiller(
+	pid: number | undefined,
+	directKill: (signal?: NodeJS.Signals | number) => void,
+	wasDetached: boolean,
+): (signal?: NodeJS.Signals | number) => Promise<void> {
+	// Every escalation attempt is independent. In particular, a failed Windows
+	// taskkill/SIGTERM fallback must not consume a later SIGKILL request.
+	return (signal) => killProcessTreeImpl(pid, signal, directKill, wasDetached);
+}
+
+export const _internals = {
+	platform: () => process.platform,
+	cwd: () => process.cwd(),
+	spawnTaskkill: (args: string[], options: Parameters<typeof nodeSpawn>[2]) =>
+		nodeSpawn('taskkill', args, options),
+	createProcessTreeKiller,
+};
 
 function streamFromNode(
 	pipe: NodeJS.ReadableStream | null | undefined,
@@ -616,13 +659,15 @@ export function bunSpawn(
 			pid?: number;
 			kill: (sig?: NodeJS.Signals | number) => void;
 		};
-		const killBunProcess = (sig?: NodeJS.Signals | number) => {
-			if (options?.killProcessTree) {
-				killProcessTreeImpl(proc.pid, sig, () => proc.kill(sig), true);
-			} else {
-				proc.kill(sig);
-			}
-		};
+		const killBunTree = createProcessTreeKiller(
+			proc.pid,
+			(sig) => proc.kill(sig),
+			true,
+		);
+		const killBunProcess = (sig?: NodeJS.Signals | number): Promise<void> =>
+			options?.killProcessTree
+				? killBunTree(sig)
+				: Promise.resolve(proc.kill(sig));
 		let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
 		if (
 			options?.killProcessTree === true &&
@@ -631,7 +676,7 @@ export function bunSpawn(
 		) {
 			timeoutHandle = setTimeout(() => {
 				try {
-					killBunProcess('SIGKILL');
+					void killBunProcess('SIGKILL').catch(() => undefined);
 				} catch {
 					// Process may already have exited.
 				}
@@ -648,9 +693,14 @@ export function bunSpawn(
 			get exitCode() {
 				return proc.exitCode;
 			},
-			kill(sig) {
-				killBunProcess(sig);
+			get signalCode() {
+				return (proc as typeof proc & { signalCode?: NodeJS.Signals | null })
+					.signalCode;
 			},
+			kill(sig) {
+				void killBunProcess(sig).catch(() => undefined);
+			},
+			killTree: killBunProcess,
 		};
 	}
 	const [file, ...args] = cmd;
@@ -661,6 +711,7 @@ export function bunSpawn(
 		env: mergedEnv,
 		detached,
 		windowsHide: true,
+		windowsVerbatimArguments: options?.windowsVerbatimArguments,
 		stdio: [
 			mapStdio(options?.stdin),
 			mapStdio(options?.stdout),
@@ -668,27 +719,33 @@ export function bunSpawn(
 		],
 	});
 
-	const killChild = (signal?: NodeJS.Signals | number) => {
-		if (detached) {
-			killProcessTreeImpl(
-				proc.pid,
-				signal,
-				() => proc.kill(signal as NodeJS.Signals),
-				true,
-			);
-		} else {
-			proc.kill(signal as NodeJS.Signals);
-		}
+	const killChildTree = createProcessTreeKiller(
+		proc.pid,
+		(signal) => proc.kill(signal as NodeJS.Signals),
+		true,
+	);
+	const killChild = (signal?: NodeJS.Signals | number): Promise<void> => {
+		if (detached) return killChildTree(signal);
+		proc.kill(signal as NodeJS.Signals);
+		return Promise.resolve();
 	};
 
 	let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+	let observedSignal: NodeJS.Signals | null = null;
+	let observedSpawnError: Error | null = null;
 	const exited = new Promise<number>((resolve) => {
-		proc.on('exit', (code) => resolve(code ?? 0));
-		proc.on('error', () => resolve(1));
+		proc.on('exit', (code, signal) => {
+			observedSignal = signal;
+			resolve(code ?? -1);
+		});
+		proc.on('error', (error) => {
+			observedSpawnError = error;
+			resolve(1);
+		});
 		if (options?.timeout && options.timeout > 0) {
 			timeoutHandle = setTimeout(() => {
 				try {
-					killChild('SIGKILL');
+					void killChild('SIGKILL').catch(() => undefined);
 				} catch {
 					// ignore — process may already be gone
 				}
@@ -708,11 +765,22 @@ export function bunSpawn(
 		stderr: streamFromNode(proc.stderr),
 		exited,
 		get exitCode(): number | null {
-			return proc.exitCode;
+			// Windows may expose the libuv spawn error (for example -4058 for
+			// ENOENT) through ChildProcess.exitCode even though no child ran.
+			// Keep the cross-runtime contract unambiguous: process-creation
+			// failures have no exit code and are described by spawnError.
+			return observedSpawnError ? null : proc.exitCode;
+		},
+		get signalCode(): NodeJS.Signals | null {
+			return observedSignal ?? proc.signalCode;
+		},
+		get spawnError(): Error | null {
+			return observedSpawnError;
 		},
 		kill(signal?: NodeJS.Signals | number) {
-			killChild(signal);
+			void killChild(signal).catch(() => undefined);
 		},
+		killTree: killChild,
 	};
 }
 

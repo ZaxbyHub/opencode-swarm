@@ -303,7 +303,12 @@ export interface AgentSessionState {
 	/** Reviewer delegations per phase (phaseNumber → count) */
 	reviewerCallCount: Map<number, number>;
 	/** Last gate failure for self-fix detection */
-	lastGateFailure: { tool: string; taskId: string; timestamp: number } | null;
+	lastGateFailure: {
+		tool: string;
+		taskId: string;
+		timestamp: number;
+		code?: string;
+	} | null;
 	/** Task IDs for which partial gate warning has already been issued (prevents per-task spam) */
 	partialGateWarningsIssuedForTask: Set<string>;
 	/** Task IDs for which the completion-gate violation advisory has already been issued

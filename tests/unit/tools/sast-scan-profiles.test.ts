@@ -26,6 +26,7 @@ let mockGetLanguageForExtResult: any = null;
 
 mock.module('../../../src/sast/semgrep', () => ({
 	isSemgrepAvailable: () => mockSemgrepAvailable,
+	checkSemgrepAvailable: async () => mockSemgrepAvailable,
 	runSemgrep: async (opts: any) => {
 		mockRunSemgrepCalls.push(opts);
 		if (mockRunSemgrepShouldThrow) {

@@ -108,6 +108,17 @@ function deserializeModifiedFilesByTask(
 export function deserializeAgentSession(
 	s: SerializedAgentSession,
 ): AgentSessionState {
+	const lastGateFailure = s.lastGateFailure
+		? {
+				tool: s.lastGateFailure.tool,
+				taskId: s.lastGateFailure.taskId,
+				timestamp: s.lastGateFailure.timestamp,
+				...(typeof s.lastGateFailure.code === 'string' &&
+					/^[A-Z][A-Z0-9_]{0,63}$/.test(s.lastGateFailure.code) && {
+						code: s.lastGateFailure.code,
+					}),
+			}
+		: null;
 	const taskWorkflowStates = deserializeTaskWorkflowStates(
 		s.taskWorkflowStates,
 	);
@@ -206,7 +217,7 @@ export function deserializeAgentSession(
 		epicModeActive: s.epicModeActive ?? false,
 		gateLog,
 		reviewerCallCount,
-		lastGateFailure: s.lastGateFailure ?? null,
+		lastGateFailure,
 		partialGateWarningsIssuedForTask,
 		completionGateWarnedForTask,
 		selfFixAttempted: s.selfFixAttempted ?? false,

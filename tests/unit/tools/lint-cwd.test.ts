@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
+	_internals,
 	getLinterCommand,
 	type LintResult,
 	lint,
@@ -19,6 +20,7 @@ let mockExitCode: number = 0;
 let mockStdout: string = '';
 let mockStderr: string = '';
 let mockSpawnError: Error | null = null;
+const originalResolveLinterCommand = _internals.resolveLinterCommand;
 
 function mockSpawn(
 	cmd: string[],
@@ -63,10 +65,21 @@ describe('lint tool - cwd fix tests', () => {
 		mockStdout = '';
 		mockStderr = '';
 		mockSpawnError = null;
+		_internals.resolveLinterCommand = async (linter, directory) => {
+			const [executable] = getLinterCommand(linter, 'check', directory);
+			return {
+				linter,
+				executable,
+				argsPrefix: [],
+				displayPrefix: [executable],
+				source: 'legacy-test-probe',
+			};
+		};
 	});
 
 	afterEach(() => {
 		Bun.spawn = originalSpawn;
+		_internals.resolveLinterCommand = originalResolveLinterCommand;
 	});
 
 	// ============ EC-001: Fail-fast guard in execute() ============
@@ -187,7 +200,7 @@ describe('lint tool - cwd fix tests', () => {
 				projectDir,
 				'node_modules',
 				'.bin',
-				process.platform === 'win32' ? 'eslint.cmd' : 'eslint',
+				'eslint',
 			);
 			expect(cmd[0]).toBe(expectedEslintPath);
 		});

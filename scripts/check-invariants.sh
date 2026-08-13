@@ -114,7 +114,9 @@ else
       ''|\#*) continue ;;
     esac
     allowlist_patterns+=( "$pattern" )
-  done < "$ALLOWLIST_FILE"
+  # Normalize CRLF so Check 3 behaves like the Check 4 ratchet below on a
+  # Windows checkout with core.autocrlf=true.
+  done < <(tr -d '\r' < "$ALLOWLIST_FILE")
 
   allowlist_contains() {
     # Linear scan; portable to bash 3.2 (no associative arrays).

@@ -70,7 +70,9 @@ function validateInput(input: unknown): { valid: boolean; error?: string } {
 export async function qualityBudget(
 	input: QualityBudgetInput,
 	directory: string,
+	abortSignal?: AbortSignal,
 ): Promise<QualityBudgetResult> {
+	abortSignal?.throwIfAborted();
 	// Validate input
 	const validation = validateInput(input);
 	if (!validation.valid) {
@@ -118,11 +120,12 @@ export async function qualityBudget(
 	}
 
 	// Compute quality metrics
-	const metrics = await computeQualityMetrics(
+	const metrics = await _internals.computeQualityMetrics(
 		changedFiles,
 		thresholds,
 		directory,
 	);
+	abortSignal?.throwIfAborted();
 
 	// Analyze violations
 	const errorsCount = metrics.violations.filter(
@@ -136,33 +139,40 @@ export async function qualityBudget(
 	const verdict: 'pass' | 'fail' = errorsCount > 0 ? 'fail' : 'pass';
 
 	// Save evidence
-	await saveEvidence(directory, 'quality_budget', {
-		task_id: 'quality_budget',
-		type: 'quality_budget',
-		timestamp: new Date().toISOString(),
-		agent: 'quality_budget',
-		verdict,
-		summary: `Quality budget check: ${metrics.files_analyzed.length} files analyzed, ${metrics.violations.length} violation(s) found (${errorsCount} errors, ${warningsCount} warnings)`,
-		metrics: {
-			complexity_delta: metrics.complexity_delta,
-			public_api_delta: metrics.public_api_delta,
-			duplication_ratio: metrics.duplication_ratio,
-			test_to_code_ratio: metrics.test_to_code_ratio,
+	abortSignal?.throwIfAborted();
+	await saveEvidence(
+		directory,
+		'quality_budget',
+		{
+			task_id: 'quality_budget',
+			type: 'quality_budget',
+			timestamp: new Date().toISOString(),
+			agent: 'quality_budget',
+			verdict,
+			summary: `Quality budget check: ${metrics.files_analyzed.length} files analyzed, ${metrics.violations.length} violation(s) found (${errorsCount} errors, ${warningsCount} warnings)`,
+			metrics: {
+				complexity_delta: metrics.complexity_delta,
+				public_api_delta: metrics.public_api_delta,
+				duplication_ratio: metrics.duplication_ratio,
+				test_to_code_ratio: metrics.test_to_code_ratio,
+			},
+			thresholds: {
+				max_complexity_delta: thresholds.max_complexity_delta,
+				max_public_api_delta: thresholds.max_public_api_delta,
+				max_duplication_ratio: thresholds.max_duplication_ratio,
+				min_test_to_code_ratio: thresholds.min_test_to_code_ratio,
+			},
+			violations: metrics.violations.map((v) => ({
+				type: v.type,
+				message: v.message,
+				severity: v.severity,
+				files: v.files,
+			})),
+			files_analyzed: metrics.files_analyzed,
 		},
-		thresholds: {
-			max_complexity_delta: thresholds.max_complexity_delta,
-			max_public_api_delta: thresholds.max_public_api_delta,
-			max_duplication_ratio: thresholds.max_duplication_ratio,
-			min_test_to_code_ratio: thresholds.min_test_to_code_ratio,
-		},
-		violations: metrics.violations.map((v) => ({
-			type: v.type,
-			message: v.message,
-			severity: v.severity,
-			files: v.files,
-		})),
-		files_analyzed: metrics.files_analyzed,
-	});
+		abortSignal,
+	);
+	abortSignal?.throwIfAborted();
 
 	return {
 		verdict,
@@ -197,7 +207,7 @@ export const quality_budget: ReturnType<typeof tool> = createSwarmTool({
 			.optional()
 			.describe('Quality budget thresholds'),
 	},
-	async execute(args: unknown, directory: string): Promise<string> {
+	async execute(args: unknown, directory: string, ctx): Promise<string> {
 		const result = await _internals.qualityBudget(
 			args as {
 				changed_files: string[];
@@ -212,6 +222,7 @@ export const quality_budget: ReturnType<typeof tool> = createSwarmTool({
 				};
 			},
 			directory,
+			ctx?.abort,
 		);
 		return JSON.stringify(result);
 	},
@@ -223,6 +234,8 @@ export const quality_budget: ReturnType<typeof tool> = createSwarmTool({
  */
 export const _internals: {
 	qualityBudget: typeof qualityBudget;
+	computeQualityMetrics: typeof computeQualityMetrics;
 } = {
 	qualityBudget,
+	computeQualityMetrics,
 } as const;

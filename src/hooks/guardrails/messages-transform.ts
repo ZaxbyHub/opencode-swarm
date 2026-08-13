@@ -834,9 +834,12 @@ export function createMessagesTransformHandler(ctx: MessagesTransformContext) {
 					part.type === 'text' && typeof part.text === 'string',
 			);
 			if (textPart && !textPart.text.includes('SELF-FIX DETECTED')) {
+				const failureCode = session.lastGateFailure.code
+					? ` (${session.lastGateFailure.code})`
+					: '';
 				textPart.text =
 					`[MODEL_ONLY_GUIDANCE]\n` +
-					`⚠️ SELF-FIX DETECTED: Gate '${session.lastGateFailure.tool}' failed on task ${session.lastGateFailure.taskId}.\n` +
+					`⚠️ SELF-FIX DETECTED: Gate '${session.lastGateFailure.tool}' failed${failureCode} on task ${session.lastGateFailure.taskId}.\n` +
 					`You are now using a write tool instead of delegating to @coder.\n` +
 					`GATE FAILURE RESPONSE RULES require: return to coder with structured rejection.\n` +
 					`Do NOT fix gate failures yourself.\n` +

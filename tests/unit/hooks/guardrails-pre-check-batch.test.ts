@@ -1,6 +1,9 @@
-import { beforeEach, describe, expect, it } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import type { GuardrailsConfig } from '../../../src/config/schema';
-import { createGuardrailsHooks } from '../../../src/hooks/guardrails';
+import {
+	_internals,
+	createGuardrailsHooks,
+} from '../../../src/hooks/guardrails';
 import {
 	getAgentSession,
 	resetSwarmState,
@@ -39,9 +42,16 @@ function makeAfterOutput(output: string = 'success') {
 	return { title: 'Result', output, metadata: {} };
 }
 
+const passingPreCheckResult =
+	'{"batch_status":"completed","gates_passed":true,"lint":{"ran":true,"duration_ms":1},"secretscan":{"ran":true,"duration_ms":1,"result":{"count":0,"findings":[],"files_scanned":1,"incomplete_files":0,"incomplete_paths":[]}},"sast_scan":{"ran":true,"duration_ms":1,"result":{"verdict":"pass"}},"quality_budget":{"ran":true,"duration_ms":1},"total_duration_ms":4}';
+
 describe('guardrails - pre_check_batch state transition (v6.22 Task 2.1)', () => {
 	beforeEach(() => {
 		resetSwarmState();
+		_internals.allowUncorrelatedGateReceipts = true;
+	});
+	afterEach(() => {
+		_internals.allowUncorrelatedGateReceipts = false;
 	});
 
 	describe('toolAfter - pre_check_batch advances state to pre_check_passed', () => {
@@ -51,23 +61,19 @@ describe('guardrails - pre_check_batch state transition (v6.22 Task 2.1)', () =>
 			const sessionId = 'test-session';
 			const taskId = '1.2.3';
 
-			// Set up session with coder_delegated state
 			startAgentSession(sessionId, 'coder');
 			const session = getAgentSession(sessionId);
 			expect(session).toBeDefined();
 
-			// Set currentTaskId and initial state to coder_delegated
 			session!.currentTaskId = taskId;
 			session!.taskWorkflowStates.set(taskId, 'coder_delegated');
 
-			// Simulate pre_check_batch tool success with gates_passed: true
-			const outputJson = JSON.stringify({ gates_passed: true });
+			const outputJson = passingPreCheckResult;
 			await hooks.toolAfter(
 				makeInput(sessionId, 'pre_check_batch', 'call-1'),
 				makeAfterOutput(outputJson),
 			);
 
-			// Verify state advanced to pre_check_passed
 			const newState = session!.taskWorkflowStates.get(taskId);
 			expect(newState).toBe('pre_check_passed');
 		});
@@ -78,23 +84,19 @@ describe('guardrails - pre_check_batch state transition (v6.22 Task 2.1)', () =>
 			const sessionId = 'test-session';
 			const taskId = '1.2.3';
 
-			// Set up session with coder_delegated state
 			startAgentSession(sessionId, 'coder');
 			const session = getAgentSession(sessionId);
 			expect(session).toBeDefined();
 
-			// Set currentTaskId and initial state to coder_delegated
 			session!.currentTaskId = taskId;
 			session!.taskWorkflowStates.set(taskId, 'coder_delegated');
 
-			// Simulate pre_check_batch tool failure with gates_passed: false
 			const outputJson = JSON.stringify({ gates_passed: false });
 			await hooks.toolAfter(
 				makeInput(sessionId, 'pre_check_batch', 'call-1'),
 				makeAfterOutput(outputJson),
 			);
 
-			// Verify state did NOT advance - should still be coder_delegated
 			const newState = session!.taskWorkflowStates.get(taskId);
 			expect(newState).toBe('coder_delegated');
 		});
@@ -105,12 +107,10 @@ describe('guardrails - pre_check_batch state transition (v6.22 Task 2.1)', () =>
 			const sessionId = 'test-session';
 			const taskId = '1.2.3';
 
-			// Set up session with coder_delegated state
 			startAgentSession(sessionId, 'coder');
 			const session = getAgentSession(sessionId);
 			expect(session).toBeDefined();
 
-			// Set currentTaskId and initial state to coder_delegated
 			session!.currentTaskId = taskId;
 			session!.taskWorkflowStates.set(taskId, 'coder_delegated');
 
@@ -142,7 +142,7 @@ describe('guardrails - pre_check_batch state transition (v6.22 Task 2.1)', () =>
 			session!.taskWorkflowStates.set(taskId, 'coder_delegated');
 
 			// Simulate pre_check_batch with gates_passed: true but no currentTaskId
-			const outputJson = JSON.stringify({ gates_passed: true });
+			const outputJson = passingPreCheckResult;
 			await hooks.toolAfter(
 				makeInput(sessionId, 'pre_check_batch', 'call-1'),
 				makeAfterOutput(outputJson),
@@ -170,7 +170,7 @@ describe('guardrails - pre_check_batch state transition (v6.22 Task 2.1)', () =>
 
 			// Simulate a different gate tool (e.g., lint) with gates_passed: true
 			// This should NOT trigger state advance since it's not pre_check_batch
-			const outputJson = JSON.stringify({ gates_passed: true });
+			const outputJson = passingPreCheckResult;
 			await hooks.toolAfter(
 				makeInput(sessionId, 'lint', 'call-1'),
 				makeAfterOutput(outputJson),
@@ -225,7 +225,7 @@ describe('guardrails - pre_check_batch state transition (v6.22 Task 2.1)', () =>
 			// Don't set taskWorkflowStates - defaults to 'idle'
 
 			// Simulate pre_check_batch tool success with gates_passed: true
-			const outputJson = JSON.stringify({ gates_passed: true });
+			const outputJson = passingPreCheckResult;
 			await hooks.toolAfter(
 				makeInput(sessionId, 'pre_check_batch', 'call-1'),
 				makeAfterOutput(outputJson),
@@ -483,9 +483,9 @@ describe('guardrails - pre_check_batch state transition (v6.22 Task 2.1)', () =>
 				makeAfterOutput(outputJson),
 			);
 
-			// State advances if gates_passed: true is properly parsed
+			// Oversized control output is invalid and cannot advance.
 			const newState = session!.taskWorkflowStates.get(taskId);
-			expect(newState).toBe('pre_check_passed');
+			expect(newState).toBe('coder_delegated');
 		});
 
 		// Attack Vector 5: JSON array instead of object

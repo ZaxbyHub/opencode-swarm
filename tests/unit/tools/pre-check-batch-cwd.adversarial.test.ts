@@ -4,7 +4,7 @@
  * Tests security of workspaceDir/directory handling in runLintOnFiles:
  * - runLintOnFiles(linter, files, workspaceDir) builds binary path using
  *   path.join(workspaceDir, 'node_modules', '.bin', ...) and passes
- *   cwd: workspaceDir to Bun.spawn
+ *   cwd: workspaceDir to the shared external-tool runner
  *
  * ATTACK VECTORS TESTED:
  * 1. workspaceDir with path traversal: ../../etc/passwd, ..\\..\\Windows\\System32
@@ -787,87 +787,5 @@ describe('ADVERSARIAL: empty/null/undefined files array', () => {
 
 		// SECURITY: Should not bypass - must be array
 		expect(result.gates_passed).toBe(false);
-	});
-});
-
-describe('ADVERSARIAL: Bun.spawn cwd verification', () => {
-	let tempDir: string;
-	let differentDir: string;
-	let originalCwd: string;
-
-	beforeEach(() => {
-		originalCwd = process.cwd();
-		tempDir = createTempDir();
-		differentDir = createTempDir();
-		process.chdir(differentDir);
-		originalSpawn = Bun.spawn;
-		Bun.spawn = createMockSpawn();
-		spawnCalls = [];
-		fs.writeFileSync(path.join(tempDir, 'test.ts'), 'export const x = 1;\n');
-	});
-
-	afterEach(() => {
-		Bun.spawn = originalSpawn;
-		process.chdir(originalCwd);
-		fs.rmSync(tempDir, { recursive: true, force: true });
-		fs.rmSync(differentDir, { recursive: true, force: true });
-	});
-
-	/**
-	 * SECURITY: Verify Bun.spawn receives correct cwd
-	 * This is the core fix being tested - cwd MUST be workspaceDir, NOT process.cwd()
-	 */
-	it('VERIFIES: Bun.spawn receives cwd: workspaceDir (not process.cwd())', async () => {
-		// Process cwd is differentDir, but workspaceDir is tempDir
-		// If the fix is correct, cwd should be tempDir
-
-		await runPreCheckBatch(
-			{
-				files: ['test.ts'],
-				directory: tempDir,
-			},
-			tempDir, // workspaceDir
-		);
-
-		// Verify spawn was called
-		expect(spawnCalls.length).toBeGreaterThan(0);
-
-		// Critical: cwd MUST be tempDir (workspaceDir), NOT differentDir (process.cwd())
-		for (const call of spawnCalls) {
-			if (call.opts.cwd) {
-				// The cwd must be the workspaceDir, not process.cwd()
-				expect(call.opts.cwd).toBe(tempDir);
-				expect(call.opts.cwd).not.toBe(differentDir);
-			}
-		}
-	});
-
-	/**
-	 * SECURITY: Verify binary path uses workspaceDir, not process.cwd()
-	 *
-	 * Note: When node_modules doesn't exist in the workspace, the tool falls back to npx.
-	 * The key security check is that the cwd is correct - the command will execute
-	 * in the workspace directory regardless of how the binary is invoked.
-	 */
-	it('VERIFIES: binary runs in workspaceDir context (not process.cwd())', async () => {
-		// Process cwd is differentDir, but workspaceDir is tempDir
-
-		await runPreCheckBatch(
-			{
-				files: ['test.ts'],
-				directory: tempDir,
-			},
-			tempDir, // workspaceDir
-		);
-
-		// The critical check is that cwd is set to workspaceDir
-		// The command may use npx (when node_modules missing) but it runs in correct dir
-		for (const call of spawnCalls) {
-			if (call.opts.cwd) {
-				// The cwd must be the workspaceDir, not process.cwd()
-				expect(call.opts.cwd).toBe(tempDir);
-				expect(call.opts.cwd).not.toBe(differentDir);
-			}
-		}
 	});
 });

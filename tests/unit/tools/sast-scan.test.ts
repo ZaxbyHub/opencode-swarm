@@ -30,11 +30,11 @@ vi.mock('../../../src/evidence/manager', () => ({
 	saveEvidence: vi.fn().mockResolvedValue(undefined),
 }));
 
-// Mock isSemgrepAvailable to control Semgrep availability in tests
 let mockSemgrepAvailable = false;
 
 vi.mock('../../../src/sast/semgrep', () => ({
 	isSemgrepAvailable: () => mockSemgrepAvailable,
+	checkSemgrepAvailable: async () => mockSemgrepAvailable,
 	runSemgrep: vi.fn().mockResolvedValue({
 		available: mockSemgrepAvailable,
 		findings: [],

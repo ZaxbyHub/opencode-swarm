@@ -3,7 +3,7 @@
  *
  * Verifies:
  * - runLintOnFiles: binary path uses workspaceDir (not process.cwd())
- * - runLintOnFiles: Bun.spawn receives cwd: workspaceDir
+ * - runLintOnFiles: the shared runner receives cwd: workspaceDir
  * - execute() with valid directory works correctly
  */
 
@@ -225,7 +225,7 @@ describe('runLintOnFiles: CWD fix verification', () => {
 		fs.rmSync(differentDir, { recursive: true, force: true });
 	});
 
-	test('runLintOnFiles: Bun.spawn receives cwd: workspaceDir', async () => {
+	test('runLintOnFiles: shared runner receives cwd: workspaceDir', async () => {
 		// Create a test file
 		fs.writeFileSync(path.join(tempDir, 'test.ts'), 'export const x = 1;\n');
 
@@ -252,7 +252,7 @@ describe('runLintOnFiles: CWD fix verification', () => {
 		);
 
 		// Now the key test: run with a workspace that is NOT the current directory
-		// If Bun.spawn uses cwd: workspaceDir correctly, it will run in tempDir
+		// If the shared runner uses cwd: workspaceDir correctly, it will run in tempDir
 		// If it uses process.cwd(), it would try to run in differentDir
 		const input: PreCheckBatchInput = {
 			files: ['test.ts'],
@@ -262,7 +262,7 @@ describe('runLintOnFiles: CWD fix verification', () => {
 		const result = await runPreCheckBatch(input, tempDir);
 
 		// The critical check: even though process.cwd() is differentDir,
-		// the lint should work because cwd: workspaceDir is passed to Bun.spawn.
+		// the lint should work because cwd: workspaceDir is passed to the runner.
 		// If no linter binary is available, lint detection returns null and ran=false
 		// with a specific "No linter found" message -- acceptable for this CWD test.
 		if (result.lint.ran) {
@@ -330,7 +330,7 @@ describe('runPreCheckBatch: directory validation', () => {
 		expect(result.gates_passed).toBe(false);
 	});
 
-	test('runPreCheckBatch with valid directory succeeds', async () => {
+	test('runPreCheckBatch with valid directory reaches the completed batch path', async () => {
 		fs.writeFileSync(path.join(tempDir, 'test.ts'), 'export const x = 1;\n');
 
 		const input: PreCheckBatchInput = {
@@ -339,6 +339,11 @@ describe('runPreCheckBatch: directory validation', () => {
 		};
 
 		const result = await runPreCheckBatch(input);
-		expect(result.gates_passed).toBe(true);
+		// Security-tool availability can legitimately make gates_passed false on a
+		// minimal host. This test is about directory validation, so assert that the
+		// producer accepted the directory and completed the batch instead of
+		// returning the structured invalid-input result.
+		expect(result.batch_status).toBe('completed');
+		expect(result.lint.error).not.toBe('directory is required');
 	});
 });

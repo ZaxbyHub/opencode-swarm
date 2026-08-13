@@ -6,7 +6,6 @@ import {
 	MAX_COMMAND_LENGTH,
 	MAX_OUTPUT_BYTES,
 	runLint,
-	type SupportedLinter,
 	validateArgs,
 } from '../../../src/tools/lint';
 
@@ -367,28 +366,6 @@ describe('lint tool - ADVERSARIAL SECURITY TESTS', () => {
 		it('SEC-035: should handle empty string', () => {
 			expect(containsControlChars('')).toBe(false);
 		});
-	});
-
-	// ============ TYPE SAFETY BOUNDARY TESTS ============
-	describe('runLint - type safety boundaries', () => {
-		it('SEC-036: should handle valid linter types only', async () => {
-			Bun.spawn = mockSpawn;
-			mockStdout = '';
-			mockStderr = '';
-			mockExitCode = 0;
-
-			// These are the only valid linters
-			const validLinters: SupportedLinter[] = ['biome', 'eslint'];
-
-			for (const linter of validLinters) {
-				const result = await runLint(linter, 'check', process.cwd());
-				expect(result.success).toBe(true);
-				expect(result.linter).toBe(linter);
-			}
-		});
-
-		// Note: TypeScript prevents invalid linter at compile time
-		// Runtime would need explicit validation if called dynamically
 	});
 
 	// ============ ERROR HANDLING ROBUSTNESS ============

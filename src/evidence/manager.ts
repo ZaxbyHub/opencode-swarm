@@ -2,6 +2,7 @@ import {
 	mkdirSync,
 	readdirSync,
 	realpathSync,
+	renameSync,
 	rmSync,
 	statSync,
 } from 'node:fs';
@@ -278,7 +279,9 @@ export async function saveEvidence(
 	directory: string,
 	taskId: string,
 	evidence: Evidence,
+	abortSignal?: AbortSignal,
 ): Promise<EvidenceBundle> {
+	abortSignal?.throwIfAborted();
 	// Defense-in-depth: reject writes to subdirectories of projects that already have .swarm/
 	_internals.validateProjectRoot(directory);
 
@@ -299,12 +302,14 @@ export async function saveEvidence(
 		'evidence-manager',
 		sanitizedTaskId,
 		async () => {
+			abortSignal?.throwIfAborted();
 			const evidencePath = validateSwarmPath(directory, relativePath);
 			const evidenceDir = path.dirname(evidencePath);
 
 			// Load existing bundle or create new one
 			let bundle: EvidenceBundle;
 			const existingContent = await readSwarmFileAsync(directory, relativePath);
+			abortSignal?.throwIfAborted();
 
 			if (existingContent !== null) {
 				try {
@@ -369,7 +374,11 @@ export async function saveEvidence(
 			);
 			try {
 				await bunWrite(tempPath, bundleJson);
-				await fs.rename(tempPath, evidencePath);
+				abortSignal?.throwIfAborted();
+				// Commit synchronously after the abort check. An asynchronous rename
+				// leaves an uncancellable window where the caller can return cancelled
+				// before the durable target is published.
+				renameSync(tempPath, evidencePath);
 			} catch (error) {
 				// Clean up temp file on failure
 				try {

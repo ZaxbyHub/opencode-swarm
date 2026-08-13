@@ -129,6 +129,8 @@ describe('package-smoke generated evaluation probe subprocess safety', () => {
 			expect(call).toContain('timeout: 30_000');
 			expect(call).toContain("stdio: ['ignore', 'ignore', 'ignore']");
 		}
+		expect(script.slice(start, end)).toContain('maxTaskTimeMs: 10_000');
+		expect(script.slice(start, end)).not.toContain('maxTaskTimeMs: 1000');
 	});
 });
 
