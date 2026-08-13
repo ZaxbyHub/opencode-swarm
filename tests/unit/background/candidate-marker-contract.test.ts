@@ -96,34 +96,12 @@ describe('CANDIDATE marker contract (FR-007)', () => {
 		expect(CANDIDATE_FIELD_COUNT).toBe(9);
 	});
 
-	test('SC-019: base_explorer prompt declares 9 pipe-delimited fields', () => {
-		// explorer.ts line 113:
-		// [CANDIDATE] | candidate_id | lane | severity | category |
-		//   file:line | claim | evidence_summary | impact_context | confidence
-		// Count the pipes: 9 pipes = 10 fields... but candidate_id is the marker
-		// stripped before parsing, so the actual data fields = 9
-		const baseExplorerLine = explorerSrc
-			.split('\n')
-			.find((l) => l.includes('candidate_id') && l.includes('impact_context'));
-		expect(baseExplorerLine).toBeDefined();
-		const pipeCount = (baseExplorerLine!.match(/\|/g) || []).length;
-		// 9 pipes in the data row format (after [CANDIDATE] marker is stripped)
-		expect(pipeCount).toBe(9);
+	test('SC-019: base_explorer controller contract declares 9 pipe-delimited fields', () => {
+		expect((CANDIDATE_HEADERS.base_explorer.match(/\|/g) || []).length).toBe(9);
 	});
 
-	test('SC-019: micro_lane prompt declares 9 pipe-delimited fields', () => {
-		// explorer.ts line 136:
-		// [CANDIDATE] | candidate_id | micro_lane | severity | category |
-		//   file:line | claim | invariant_violated | evidence_summary | confidence
-		const microLaneLine = explorerSrc
-			.split('\n')
-			.find(
-				(l) => l.includes('candidate_id') && l.includes('invariant_violated'),
-			);
-		expect(microLaneLine).toBeDefined();
-		const pipeCount = (microLaneLine!.match(/\|/g) || []).length;
-		// 9 pipes in the data row format
-		expect(pipeCount).toBe(9);
+	test('SC-019: micro_lane controller contract declares 9 pipe-delimited fields', () => {
+		expect((CANDIDATE_HEADERS.micro_lane.match(/\|/g) || []).length).toBe(9);
 	});
 
 	test('SC-019: dispatch tool declares same 9-pipe formats as explorer prompt', () => {
@@ -163,11 +141,10 @@ describe('CANDIDATE marker contract (FR-007)', () => {
 		expect(CANDIDATE_FIELDS.micro_lane).toContain('invariant_violated');
 	});
 
-	test('explorer prompt distinguishes base_explorer and micro_lane by discriminator field', () => {
-		// explorer.ts line 113 uses impact_context for standard explorer
-		// explorer.ts line 136 uses invariant_violated for micro-lane
-		expect(explorerSrc).toContain('impact_context');
-		expect(explorerSrc).toContain('invariant_violated');
+	test('explorer system prompt defers the discriminator to one controller-owned family', () => {
+		expect(explorerSrc).not.toContain('impact_context');
+		expect(explorerSrc).not.toContain('invariant_violated');
+		expect(explorerSrc).toContain('single authoritative schema');
 	});
 
 	// -------------------------------------------------------------------------

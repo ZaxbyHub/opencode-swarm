@@ -273,6 +273,11 @@ describe('Architect Agent - Agent Delegation Patterns', () => {
 		expect(section).toContain('wait: true');
 		expect(section).toContain('EVALUATE ALL RISK FAMILIES');
 		expect(section).toContain('exact eleven-row `trigger_evaluation`');
+		expect(section).toContain('first micro dispatch MUST pass');
+		expect(section).toContain('subsequent same-session micro batch may omit');
+		expect(section).toContain(
+			'explicitly supplied copy must remain exactly identical',
+		);
 		expect(section).toContain('swarm-pr-review:micro');
 		expect(section).toContain('provenance-free `NOT_TRIGGERED`');
 		expect(section).toContain('`unclassified-risk` always remains `MATCHED`');

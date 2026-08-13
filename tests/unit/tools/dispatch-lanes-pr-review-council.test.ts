@@ -448,9 +448,7 @@ describe('PR review council mechanical dispatch', () => {
 		expect(council.pending).toBe(1);
 		expect(deliveredPrompts[0]).toContain(CANDIDATE_HEADERS.micro_lane);
 		expect(deliveredPrompts[0]).toContain(CLEAN_TEMPLATES.micro_lane);
-		expect(deliveredPrompts[0]).toContain(
-			'for swarm-pr-review:council discovery',
-		);
+		expect(deliveredPrompts[0]).toContain('MICRO WORKED EXAMPLE');
 		expect(deliveredPrompts[0]).toContain(
 			'put the exact workflow_lane only in the `micro_lane` field',
 		);

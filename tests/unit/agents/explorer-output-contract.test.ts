@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { CANDIDATE_HEADERS } from '../../../src/background/candidate-contract';
 
 // Read the source file directly since EXPLORER_PROMPT is not exported
 const EXPLORER_SOURCE = readFileSync(
@@ -69,20 +70,27 @@ describe('EXPLORER_PROMPT Output Contract Verification', () => {
 	});
 
 	describe('OUTPUT FORMAT section requirements', () => {
-		test('candidate mode uses one marker-bearing header and an explicit micro CLEAN sentinel', () => {
+		test('candidate mode defers the exact schema to one caller/controller-owned contract', () => {
 			const candidateSection = extractSection(
 				EXPLORER_PROMPT,
 				'CANDIDATE REPORTING MODE',
 			);
 			expect(candidateSection).not.toBeNull();
 			expect(candidateSection).toContain('one unprefixed data row per finding');
-			expect(candidateSection).toContain(
-				'[CLEAN] | lane | coverage_scope | evidence',
-			);
-			expect(candidateSection).toContain(
-				'[CLEAN] | micro_lane | coverage_scope | evidence',
-			);
+			expect(candidateSection).toContain('exact header supplied by the caller');
+			expect(candidateSection).toContain('Do not merge fields');
+			expect(candidateSection).not.toContain('impact_context');
+			expect(candidateSection).not.toContain('invariant_violated');
+			expect(candidateSection).not.toContain('[CLEAN] | lane');
+			expect(candidateSection).not.toContain('[CLEAN] | micro_lane');
 			expect(candidateSection).toContain('negative evidence');
+		});
+
+		test('a direct caller-owned base schema remains the only concrete family in the combined contract', () => {
+			const directPrompt = `Audit the diff. Return:\n${CANDIDATE_HEADERS.base_explorer}`;
+			const combined = `${EXPLORER_PROMPT}\n${directPrompt}`;
+			expect(combined.split(CANDIDATE_HEADERS.base_explorer)).toHaveLength(2);
+			expect(combined).not.toContain(CANDIDATE_HEADERS.micro_lane);
 		});
 
 		test('3. EXPLORER_PROMPT contains "OBSERVED CHANGES" section in OUTPUT FORMAT', () => {
