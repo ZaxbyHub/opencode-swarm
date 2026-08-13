@@ -177,10 +177,14 @@ const URL_CREDENTIALS_PATTERN =
 /**
  * How much of a string value is scanned for secrets.
  *
- * Comfortably above the 50-char slice `summarizeArgs` emits and the 100-char
- * slice `extractIntent` emits, so the redacted output is identical to a full
- * scan for any realistic input, while bounding the cost of running ~14 regexes
- * over every string arg of every tool call.
+ * Comfortably above the 50-char slice `summarizeArgs` emits and the 100/200-char
+ * slices `extractIntent` emits, so a secret that starts inside the emitted
+ * prefix is matched even when it extends well past it, while bounding the cost
+ * of running ~14 regexes over every string arg of every tool call.
+ *
+ * It is NOT equivalent to a full scan: a pattern that needs a terminator beyond
+ * the window (a >4 KB PEM in `write.content`) will not match. `redactCommandSecrets`
+ * handles that specific case by truncating at a surviving BEGIN marker.
  */
 const REDACTION_SCAN_WINDOW = 4096;
 
@@ -205,10 +209,19 @@ function fnv1aHex(text: string): string {
  * pattern over a command string.
  */
 function redactCommandSecrets(text: string): string {
-	return redactSecrets(text).replace(
+	const redacted = redactSecrets(text).replace(
 		URL_CREDENTIALS_PATTERN,
 		'$1[REDACTED:url_credentials]@',
 	);
+	// A key block whose END marker falls outside the scan window never matches
+	// the shared `private_key_block` pattern, so a surviving BEGIN marker means
+	// the material after it was NOT redacted — a 4.8 KB PEM in `write.content`
+	// leaves the header plus the first bytes of the key. Truncate from the
+	// marker: nothing after it in this window can be anything but key material.
+	const beginMarker = redacted.search(/-----BEGIN [A-Z ]*PRIVATE KEY-----/);
+	return beginMarker === -1
+		? redacted
+		: `${redacted.slice(0, beginMarker)}[REDACTED:private_key_block]`;
 }
 
 /**
@@ -254,15 +267,35 @@ function normalizeCommandTarget(command: string): string {
 			? `${normalized.slice(0, MAX_COMMAND_TARGET_LENGTH - 3)}...`
 			: normalized;
 	const redacted = redactCommandSecrets(bounded);
-	if (redacted.length <= MAX_COMMAND_TARGET_LENGTH) return redacted;
-	// A placeholder is longer than the span it replaces, so redaction can push a
-	// command that fitted back over the bound. Truncating here would cut the tail
-	// that made two commands different — the E-2 collapse this ordering exists to
-	// prevent, and it bites hardest when the secret is NOT the differing text.
-	// Re-bound, but carry a digest of the BOUNDED RAW string so distinctness is
-	// preserved by construction rather than by luck of where the cut lands.
-	const digest = fnv1aHex(bounded);
-	return `${redacted.slice(0, MAX_COMMAND_TARGET_LENGTH - 1 - digest.length)}#${digest}`;
+	if (redacted === bounded) return redacted;
+
+	// Redaction CHANGED the command, so the stored target is lossy and two
+	// different commands can now render identically. That is a collapse in the
+	// same false-`repetition_loop` family this issue exists to close, and it does
+	// not require a real credential: `env_secret` is case-insensitive, so
+	// `bun run build --cache_key=aaa` and `--cache_key=bbb` both become
+	// `bun run build --[REDACTED:env_secret]` and trip the detector at its
+	// default threshold of 2 on the second call.
+	//
+	// A digest of the pre-redaction (but post-bounding) string restores
+	// distinctness by construction, for every redacted target rather than only
+	// the ones that happened to overflow the length bound.
+	//
+	// It LEADS rather than trails because downstream truncation cuts tails:
+	// `sanitizeString` in `pattern-detector.ts` expands its input before
+	// length-checking it (`--bypass` becomes `--[REDACTED]`), so a trailing
+	// digest on a near-200-char target gets chopped and two distinct behaviours
+	// collapse onto one escalation ladder key.
+	//
+	// The deliberate trade: an agent re-running ONE command with a rotating
+	// credential no longer reads as a repetition. Those are genuinely different
+	// commands, and treating them as identical was an accident of redaction, not
+	// a signal worth keeping at the cost of false hard stops on ordinary work.
+	const prefix = `#${fnv1aHex(bounded)} `;
+	const room = MAX_COMMAND_TARGET_LENGTH - prefix.length;
+	const body =
+		redacted.length > room ? `${redacted.slice(0, room - 3)}...` : redacted;
+	return `${prefix}${body}`;
 }
 
 /**
@@ -376,12 +409,20 @@ function extractIntent(tool: string, args?: Record<string, unknown>): string {
 		return safeText;
 	}
 
-	// Check for description or task fields
+	// Check for description or task fields.
+	//
+	// Redacted for the same reason as the Task branch above: this lands in the
+	// SAME trajectory line as `target` and `args_summary`, so leaving it raw
+	// persisted verbatim what those two had just redacted — a `bash` call with
+	// `description: 'deploy using ghp_…'` wrote the token to
+	// `.swarm/trajectories/*.jsonl` while `args_summary` showed
+	// `[REDACTED:github_token]` on the same line.
 	const intentFields = ['description', 'task'];
 	for (const field of intentFields) {
 		const value = args[field];
 		if (typeof value === 'string' && value.length > 0) {
-			return value.length > 200 ? `${value.slice(0, 197)}...` : value;
+			const safe = redactCommandSecrets(value.slice(0, REDACTION_SCAN_WINDOW));
+			return safe.length > 200 ? `${safe.slice(0, 197)}...` : safe;
 		}
 	}
 

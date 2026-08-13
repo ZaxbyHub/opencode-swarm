@@ -271,7 +271,10 @@ describe('trajectory-logger secret redaction (PRR-001, issue #2134)', () => {
 		// another.
 		expect(target).toContain('https://');
 		expect(target).toContain('github.com/x/y.git');
-		expect(target).toBe(
+		// The digest PREFIX is present because redaction changed the string; the
+		// visible remainder is the redacted command verbatim.
+		expect(target).toMatch(/^#[0-9a-f]{8} /);
+		expect(target.replace(/^#[0-9a-f]{8} /, '')).toBe(
 			'git push https://[REDACTED:url_credentials]@github.com/x/y.git',
 		);
 	});
@@ -282,9 +285,10 @@ describe('trajectory-logger secret redaction (PRR-001, issue #2134)', () => {
 	// truncation cut plain text, two distinct commands whose only difference
 	// falls inside the cut region would collapse onto the same target — the
 	// exact false `repetition_loop` failure issue #2134 exists to prevent.
-	// The fix appends `#<8-hex fnv1a digest of the bounded RAW string>` so
-	// distinctness survives even when the visible (non-digest) text is
-	// byte-identical after the second truncation.
+	// The fix PREFIXES `#<8-hex fnv1a digest of the bounded RAW string>` to every
+	// target whose text redaction changed, so distinctness survives even when the
+	// visible (non-digest) text is byte-identical. It leads rather than trails
+	// because downstream truncation (`sanitizeString`) cuts tails.
 	//
 	// Fixture calibrated (empirically, against this build) so that:
 	//   - both raw commands exceed MAX_COMMAND_TARGET_LENGTH,
@@ -318,16 +322,16 @@ describe('trajectory-logger secret redaction (PRR-001, issue #2134)', () => {
 			expect(targetB.length).toBe(MAX_COMMAND_TARGET_LENGTH);
 			expect(targetA).not.toBe(targetB);
 
-			const digestSuffix = /#[0-9a-f]{8}$/;
-			expect(targetA).toMatch(digestSuffix);
-			expect(targetB).toMatch(digestSuffix);
+			const digestPrefix = /^#[0-9a-f]{8} /;
+			expect(targetA).toMatch(digestPrefix);
+			expect(targetB).toMatch(digestPrefix);
 
 			// The important assertion: strip the digest suffix and the visible
 			// text is identical — collapse is prevented ONLY by the digest, not
 			// by leftover plain-text differences that happened to survive the
 			// second truncation.
-			const withoutDigestA = targetA.replace(digestSuffix, '');
-			const withoutDigestB = targetB.replace(digestSuffix, '');
+			const withoutDigestA = targetA.replace(digestPrefix, '');
+			const withoutDigestB = targetB.replace(digestPrefix, '');
 			expect(withoutDigestA).toBe(withoutDigestB);
 
 			// No raw secret bytes and no raw tail bytes leak.
@@ -432,5 +436,63 @@ describe('trajectory-logger secret redaction (PRR-001, issue #2134)', () => {
 		// only the start of the placeholder is visible — but that start must
 		// be present, proving redaction ran rather than truncating raw text.
 		expect(target).toContain('[REDACTED:');
+	});
+	// Redacted-span collapse (closeout critic finding A). Redaction is lossy, so
+	// two DIFFERENT commands can render identically once their differing span
+	// becomes one placeholder — a collapse in the same false-`repetition_loop`
+	// family issue #2134 exists to close, and it needs no real credential: the
+	// shared `env_secret` pattern is case-insensitive, so `--cache_key=` matches.
+	// Every redacted target therefore carries a digest of its pre-redaction text.
+	describe('redacted-span collapse', () => {
+		test('commands differing only in a rotated bearer token stay distinct', () => {
+			const targets = [
+				'curl -H "Authorization: Bearer AAAAAAAAAAAAAAAAAAAAAA" https://api.x/v1',
+				'curl -H "Authorization: Bearer BBBBBBBBBBBBBBBBBBBBBB" https://api.x/v1',
+				'curl -H "Authorization: Bearer CCCCCCCCCCCCCCCCCCCCCC" https://api.x/v1',
+			].map((command) => extractTarget('bash', { command }));
+
+			expect(new Set(targets).size).toBe(3);
+			for (const target of targets) {
+				expect(target).not.toContain('Bearer AAAA');
+				expect(target).toContain('[REDACTED:authorization_bearer]');
+			}
+		});
+
+		test('ordinary --cache_key= builds are not conflated by env_secret redaction', () => {
+			// No credential is involved: `cache_key` is an ordinary build
+			// identifier that the case-insensitive `env_secret` pattern matches.
+			// Pre-fix both rendered as `bun run build --[REDACTED:env_secret]`
+			// and tripped repetition_loop at its default threshold of 2.
+			const a = extractTarget('bash', {
+				command: 'bun run build --cache_key=aaaaaaaa1111',
+			});
+			const b = extractTarget('bash', {
+				command: 'bun run build --cache_key=bbbbbbbb2222',
+			});
+			expect(a).not.toBe(b);
+		});
+
+		test('the digest LEADS, so a tail truncation cannot strip it', () => {
+			// `sanitizeString` in the detector expands its input before length
+			// checking it, so a trailing digest on a near-bound target is cut and
+			// two distinct behaviours collapse onto one escalation ladder key.
+			const target = extractTarget('bash', {
+				command: 'curl -H "Authorization: Bearer AAAAAAAAAAAAAAAAAAAAAA"',
+			});
+			expect(target).toMatch(/^#[0-9a-f]{8} /);
+		});
+
+		test('a benign command gets no digest and is byte-identical to its input', () => {
+			expect(extractTarget('bash', { command: 'bun run lint' })).toBe(
+				'bun run lint',
+			);
+		});
+
+		test('an identical redacted command is stable across calls', () => {
+			const command = 'curl -H "Authorization: Bearer ZZZZZZZZZZZZZZZZZZZZ"';
+			expect(extractTarget('bash', { command })).toBe(
+				extractTarget('bash', { command }),
+			);
+		});
 	});
 });
