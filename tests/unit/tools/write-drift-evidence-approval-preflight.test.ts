@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import fs, { existsSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { Plan } from '../../../src/config/plan-schema';
 import { closeProjectDb } from '../../../src/db/project-db';
@@ -16,6 +15,7 @@ import {
 	_internals,
 	executeWriteDriftEvidence,
 } from '../../../src/tools/write-drift-evidence';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 function createTestPlan(): Plan {
 	return {
@@ -66,11 +66,9 @@ describe('write_drift_evidence approval preflight', () => {
 	let tempDir: string;
 	let originalLockProfileForIdentity: typeof _internals.lockProfileForIdentity;
 
-	beforeEach(async () => {
+	beforeEach(() => {
 		originalLockProfileForIdentity = _internals.lockProfileForIdentity;
-		tempDir = await fs.promises.mkdtemp(
-			path.join(tmpdir(), 'drift-evidence-preflight-'),
-		);
+		tempDir = canonicalMkdtemp('drift-evidence-preflight-');
 	});
 
 	afterEach(async () => {
