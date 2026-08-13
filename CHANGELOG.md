@@ -1,5 +1,19 @@
 # Changelog
 
+## [7.139.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.139.3...v7.139.4) (2026-08-13)
+
+
+### Bug Fixes
+
+* **containment:** preserve nested pre-check roots ([a86dc3e](https://github.com/ZaxbyHub/opencode-swarm/commit/a86dc3e686b99cce2f1c78c8c596ec7f2547e0a5))
+* **containment:** support nested project boundaries ([cd34f6e](https://github.com/ZaxbyHub/opencode-swarm/commit/cd34f6eb1739bc7fe2cebf0fd981cbfdf91234b0))
+* **prm:** close closeout-critic findings on redaction collapse and intent leak ([2df1fbd](https://github.com/ZaxbyHub/opencode-swarm/commit/2df1fbd99130be45b829a260e3bc5ca62da64fac))
+* **prm:** close PR-review findings on secret leakage and ledger eviction ([#2134](https://github.com/ZaxbyHub/opencode-swarm/issues/2134)) ([f02a29a](https://github.com/ZaxbyHub/opencode-swarm/commit/f02a29acc8ccf660b42054edaebdf6483bc6f3a6))
+* **prm:** close three defects found reviewing the per-target ladder ([#2134](https://github.com/ZaxbyHub/opencode-swarm/issues/2134)) ([c4874be](https://github.com/ZaxbyHub/opencode-swarm/commit/c4874be07dd80e199cc28213da304c992c2b186b))
+* **prm:** count escalation strikes per behaviour, not per pattern type ([#2134](https://github.com/ZaxbyHub/opencode-swarm/issues/2134)) ([5c0b0f1](https://github.com/ZaxbyHub/opencode-swarm/commit/5c0b0f115ccfde56db7d11e85d2064abd9749256))
+* **prm:** count escalation strikes per occurrence, not per detection ([#2134](https://github.com/ZaxbyHub/opencode-swarm/issues/2134)) ([a723067](https://github.com/ZaxbyHub/opencode-swarm/commit/a7230673217454919ca526a195b0c695e6ee20fa))
+* **prm:** count escalation strikes per occurrence, not per detection ([#2134](https://github.com/ZaxbyHub/opencode-swarm/issues/2134)) ([a99be1d](https://github.com/ZaxbyHub/opencode-swarm/commit/a99be1daf23473f8ea032377124a8a041f3b138e))
+
 ## [7.139.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.139.2...v7.139.3) (2026-08-13)
 
 
