@@ -342,6 +342,32 @@ function validatePath(
 	return null;
 }
 
+function isAcceptedProjectRootForPlatform(
+	dir: string,
+	workspaceDir: string,
+	platform: NodeJS.Platform,
+	hasExplicitBoundary: boolean,
+): boolean {
+	const pathApi = platform === 'win32' ? path.win32 : path;
+	const directoryKey = pathApi.resolve(dir).replace(/\\/g, '/');
+	const workspaceKey = pathApi.resolve(workspaceDir).replace(/\\/g, '/');
+	const normalizedDirectoryKey =
+		platform === 'win32' ? directoryKey.toLowerCase() : directoryKey;
+	const normalizedWorkspaceKey =
+		platform === 'win32' ? workspaceKey.toLowerCase() : workspaceKey;
+	if (normalizedDirectoryKey === normalizedWorkspaceKey) return true;
+
+	const relative = pathApi.relative(workspaceDir, dir);
+	const isStrictDescendant =
+		relative !== '' &&
+		relative !== '..' &&
+		!relative.startsWith(`..${pathApi.sep}`) &&
+		!pathApi.isAbsolute(relative);
+	return isStrictDescendant && hasExplicitBoundary;
+}
+
+export const _test_exports = { isAcceptedProjectRootForPlatform };
+
 /**
  * Validate the directory input
  * @param dir - The directory to validate
@@ -365,13 +391,13 @@ function validateDirectory(dir: string, workspaceDir: string): string | null {
 	}
 
 	const platform = _internals.platform();
-	const resolveForComparison =
-		platform === 'win32' ? path.win32.resolve : path.resolve;
-	const directoryKey = resolveForComparison(dir).replace(/\\/g, '/');
-	const workspaceKey = resolveForComparison(workspaceDir).replace(/\\/g, '/');
 	if (
-		(platform === 'win32' ? directoryKey.toLowerCase() : directoryKey) !==
-		(platform === 'win32' ? workspaceKey.toLowerCase() : workspaceKey)
+		!isAcceptedProjectRootForPlatform(
+			dir,
+			workspaceDir,
+			platform,
+			hasExplicitProjectBoundary(dir),
+		)
 	) {
 		return 'directory must resolve to the project root';
 	}

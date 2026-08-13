@@ -5,6 +5,7 @@ import type { ToolContext } from '@opencode-ai/plugin';
 import {
 	pre_check_batch,
 	_internals as preCheckInternals,
+	_test_exports as preCheckTestExports,
 } from '../../../src/tools/pre-check-batch';
 import { resolveWorkingDirectory } from '../../../src/tools/resolve-working-directory';
 import {
@@ -134,5 +135,26 @@ describe('nested project boundary tools — regression: parent .swarm poison (#2
 
 		expect(result.gates_passed).toBe(false);
 		expect(result.lint.error).toContain('subdirectory');
+	});
+
+	it('rejects an explicitly marked root on an unrelated Windows drive', () => {
+		// The conflicted implementation accepted any marked root after path.win32.relative
+		// returned an absolute path for a cross-drive target.
+		expect(
+			preCheckTestExports.isAcceptedProjectRootForPlatform(
+				'D:\\external-project',
+				'C:\\workspace',
+				'win32',
+				true,
+			),
+		).toBe(false);
+		expect(
+			preCheckTestExports.isAcceptedProjectRootForPlatform(
+				'C:\\workspace\\nested-project',
+				'C:\\workspace',
+				'win32',
+				true,
+			),
+		).toBe(true);
 	});
 });
