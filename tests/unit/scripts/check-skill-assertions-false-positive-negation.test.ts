@@ -14,15 +14,15 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { checkSkillAssertions } from '../../../scripts/check-skill-assertions';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const GIT_TIMEOUT_MS = 15_000;
 const tempDirs: string[] = [];
 
 function makeGitRepo(): string {
-	const root = fs.mkdtempSync(path.join(os.tmpdir(), 'neg-assert-'));
+	const root = canonicalMkdtemp('neg-assert-');
 	const runGit = (args: string[]) =>
 		spawnSync('git', args, {
 			cwd: root,

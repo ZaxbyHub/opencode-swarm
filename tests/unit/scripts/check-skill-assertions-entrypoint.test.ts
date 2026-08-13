@@ -14,13 +14,13 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import {
 	formatBrokenAssertions,
 	type SkillAssertionResult,
 } from '../../../scripts/check-skill-assertions';
 import { detectSkillAssertionDrift } from '../../../scripts/drift-check';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -33,7 +33,7 @@ const tempDirs: string[] = [];
 
 /** Create an isolated git repo for testing git-diff operations. */
 function makeGitRepo(): string {
-	const root = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-assert-'));
+	const root = canonicalMkdtemp('skill-assert-');
 	// Init a bare git repo (required for `git diff HEAD` to work)
 	runGit(['init', '-q'], root);
 	// Set identity so git doesn't complain
