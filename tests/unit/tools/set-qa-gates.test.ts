@@ -221,6 +221,21 @@ describe('set-qa-gates tool', () => {
 			expect(disableResult.message).toContain('ratchet');
 		});
 
+		it('ratchet-tight: critic_pre_plan cannot be turned off once enabled (issue #2109)', async () => {
+			// critic_pre_plan defaults on for a fresh profile; an architect who
+			// later tries to persist false must be told the gate is ratchet-tight
+			// rather than silently keeping it enabled.
+			await executeSetQaGates({ critic_pre_plan: true }, tempDir);
+
+			const disableResult = await executeSetQaGates(
+				{ critic_pre_plan: false },
+				tempDir,
+			);
+			expect(disableResult.success).toBe(false);
+			expect(disableResult.reason).toBe('ratchet_violation');
+			expect(disableResult.message).toContain('ratchet');
+		});
+
 		it('ratchet-tight: setting same value is idempotent', async () => {
 			// Enable a gate
 			const result1 = await executeSetQaGates({ reviewer: true }, tempDir);
