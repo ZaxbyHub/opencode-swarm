@@ -8,11 +8,21 @@ import {
 } from '../../hooks/trajectory-logger';
 import { resetSwarmState, swarmState } from '../../state';
 import { createPrmHook, _internals as prmInternals } from '../index';
+import { resolvePatternThreshold } from '../pattern-detector';
 import {
 	clearTrajectoryCache,
 	getInMemoryTrajectory,
 	readTrajectory,
 } from '../trajectory-store';
+import type { PrmConfig } from '../types';
+
+// PRR-011 (PR #2139 review): pins the shipped `context_thrash` default so a
+// future silent change to `DEFAULT_THRESHOLDS` in pattern-detector.ts (or to
+// its `src/config/schema.ts` mirror) fails a test instead of drifting
+// unnoticed. Issue #2134 tuning raised this from 3 to 10.
+test('resolvePatternThreshold falls back to the shipped context_thrash default of 10 when config omits it', () => {
+	expect(resolvePatternThreshold({} as PrmConfig, 'context_thrash')).toBe(10);
+});
 
 describe('PRM real trajectory pipeline', () => {
 	let tempDir: string;
@@ -72,7 +82,11 @@ describe('PRM real trajectory pipeline', () => {
 					ping_pong: 2,
 					expansion_drift: 3,
 					stuck_on_test: 3,
-					context_thrash: 3,
+					// PRR-011: was 3 (stale pre-#2134 value); shipped default is 10.
+					// This test's assertions exercise repetition_loop only, so the
+					// exact value is otherwise inert here — kept in sync with
+					// production for hygiene (see the pinning test above).
+					context_thrash: 10,
 				},
 				max_trajectory_lines: 500,
 				escalation_enabled: true,
@@ -115,7 +129,19 @@ describe('PRM real trajectory pipeline', () => {
 		clearTrajectoryCache(sessionId);
 		await prmHook.toolAfter({ sessionID: sessionId });
 		expect(getInMemoryTrajectory(sessionId)).toHaveLength(2);
-		expect(session.pendingAdvisoryMessages).toHaveLength(1);
+		// Issue #2134: this call re-derives the SAME repetition_loop episode
+		// (stepRange [1,2]) that already struck two calls ago — only
+		// `prmTrajectoryStep` was reset above to force a cache-miss disk re-read
+		// ("lastProcessedStep dedupe"); `session.prmStruckEpisodes` (the episode
+		// ledger) was deliberately left untouched, exactly as a real cold-start
+		// re-read would leave a session's history intact. The episode gate
+		// recognizes this is not a new occurrence and correctly suppresses it:
+		// zero NEW advisories, even though the naive step-cursor filter alone
+		// would have let it through again. This is the fix working as intended —
+		// before #2134 this assertion was 1, silently documenting the very defect
+		// (a cursor reset re-walking escalation for an episode already reported)
+		// that the episode ledger now closes.
+		expect(session.pendingAdvisoryMessages).toHaveLength(0);
 	});
 
 	test('resetSwarmState clears PRM trajectory cache and trajectory step counters', async () => {

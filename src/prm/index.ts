@@ -19,7 +19,11 @@ export {
 	generateCourseCorrection,
 } from './course-correction';
 // Escalation
-export { createDefaultEscalationState, EscalationTracker } from './escalation';
+export {
+	createDefaultEscalationState,
+	EscalationTracker,
+	resolveLadderKey,
+} from './escalation';
 // Pattern detector
 export {
 	detectContextThrash,
@@ -28,6 +32,7 @@ export {
 	detectPingPong,
 	detectRepetitionLoop,
 	detectStuckOnTest,
+	resolvePatternThreshold,
 } from './pattern-detector';
 // Types
 export type {
@@ -54,8 +59,8 @@ import {
 	formatCourseCorrectionForInjection,
 	generateCourseCorrection,
 } from './course-correction';
-import { EscalationTracker } from './escalation';
-import { detectPatterns } from './pattern-detector';
+import { EscalationTracker, resolveLadderKey } from './escalation';
+import { detectPatterns, resolvePatternThreshold } from './pattern-detector';
 import { recordReplayEntry, startReplayRecording } from './replay';
 import {
 	cleanupOldTrajectoryFiles,
@@ -63,7 +68,7 @@ import {
 	getInMemoryTrajectory,
 	readTrajectory,
 } from './trajectory-store';
-import type { PatternType, PrmConfig } from './types';
+import type { PatternMatch, PrmConfig } from './types';
 
 /**
  * Test-only dependency-injection seam — see `gitignore-warning.ts:_internals`.
@@ -134,6 +139,18 @@ interface SessionPrmState {
 	replayArtifactPath?: string | null;
 }
 
+/**
+ * Upper bound on `session.prmStruckEpisodes` (issue #2134).
+ *
+ * Episode keys are minted per distinct start step, so a long-running session
+ * with a sliding detection window accumulates them steadily and the map would
+ * otherwise grow without limit on a hot, per-tool-call session object. Generous
+ * relative to the default `max_trajectory_lines` of 1000: the trajectory a
+ * session can still re-detect against is itself truncated, so evicted keys
+ * belong to episodes that can no longer reappear.
+ */
+const MAX_TRACKED_EPISODES = 256;
+
 interface ResettablePrmSessionState {
 	prmEscalationTracker?: EscalationTracker;
 	prmInitialized?: boolean;
@@ -145,6 +162,10 @@ interface ResettablePrmSessionState {
 	prmHardStopInjectPending?: boolean;
 	prmTrajectoryStep?: number;
 	prmInjectedAdvisoryKeys?: Set<string>;
+	/** Issue #2134 — episode ledger; reset with the trajectory cursor it indexes. */
+	prmStruckEpisodes?: Map<string, number>;
+	/** Issue #2134 follow-up — ladder counts; reset with the ledger. */
+	prmLadderCounts?: Map<string, number>;
 	replayArtifactPath?: string | null;
 }
 
@@ -166,6 +187,13 @@ export function resetPrmSessionState(
 	// Clear cross-turn injection-dedupe state so a reset re-evaluates patterns
 	// fresh (issue #1976 B1).
 	session.prmInjectedAdvisoryKeys = new Set();
+	// Issue #2134: the episode ledger holds trajectory STEP numbers and is only
+	// meaningful relative to `prmTrajectoryStep`, which this function just reset
+	// to 0. Leaving it populated would compare fresh step numbers against a stale
+	// high-water mark and suppress every subsequent strike — a reset intended to
+	// unwedge a session would instead disable its containment.
+	session.prmStruckEpisodes = new Map<string, number>();
+	session.prmLadderCounts = new Map<string, number>();
 	session.replayArtifactPath = null;
 
 	if (sessionId) {
@@ -289,6 +317,116 @@ export function createPrmHook(
 				return;
 			}
 
+			/**
+			 * Issue #2134 — EPISODE GATE. Everything below this point treats a match
+			 * as "the agent did the bad thing AGAIN"; this is the filter that makes
+			 * that true.
+			 *
+			 * A detector re-emits the SAME ongoing episode on every tool call with a
+			 * growing `stepRange[1]`: a coder reading one more file extends its single
+			 * `context_thrash` run. The trajectory cursor
+			 * (`detectPatterns(..., lastProcessedStep)`) cannot suppress that, because
+			 * the episode's end step always advances past the cursor. So the ladder
+			 * counted one ordinary episode three times and reached level 3 — the hard
+			 * stop — within three tool calls of perfectly healthy work.
+			 *
+			 * A match may strike on exactly two grounds:
+			 *
+			 *   (a) NEW EPISODE — no ledger entry for its episode key. The key is
+			 *       `pattern|startStep`, because the START step is an episode's stable
+			 *       identity while the end step is a volatile "how far has it grown"
+			 *       cursor. Agents and targets are deliberately NOT in the key:
+			 *       `detectContextThrash` and `detectExpansionDrift` report the target
+			 *       SET accumulated so far (`pattern-detector.ts` — `affectedTargets`
+			 *       is built from a growing slice), so a target-bearing key would mint
+			 *       a fresh identity on every tool call and reproduce the exact bug
+			 *       this gate exists to close.
+			 *
+			 *   (b) MATERIAL GROWTH — the same episode has gained another full
+			 *       threshold's worth of occurrences since it last struck. This rung
+			 *       is load-bearing, not belt-and-braces: only `detectRepetitionLoop`
+			 *       and `detectExpansionDrift` advance `stepRange[0]` as an episode
+			 *       runs. `detectPingPong` pins it at the first delegation
+			 *       (`pattern-detector.ts` `delegateEntries[0].step`), `detectStuckOnTest`
+			 *       assigns `cycleStart` once and never reassigns it, and
+			 *       `detectContextThrash` only moves `runStart` when the monotonic run
+			 *       BREAKS — which a sustained thrash by definition never does. Without
+			 *       (b) those three patterns would strike exactly once and could never
+			 *       reach level 2 or 3: a guardrail permanently disarmed against its
+			 *       own worst case.
+			 *
+			 * Containment therefore holds for all five detectors. Worked examples at
+			 * default thresholds: an unbroken `repetition_loop` strikes at 2, 4 and 6
+			 * occurrences (hard stop by step 6); a `context_thrash` run strikes at 10,
+			 * 20 and 30 consecutive brand-new targets with zero revisits. What can no
+			 * longer happen is a hard stop earned by making tool calls rather than by
+			 * repeating the behaviour.
+			 *
+			 * At most ONE strike per pattern type per tick, mirroring the intent
+			 * documented on the detector's dedup: a single tool call must never
+			 * advance the ladder by more than one rung. When several genuinely
+			 * distinct episodes of one type surface together the EARLIEST is taken,
+			 * and the rest are simply not counted — the cursor advance below can put
+			 * an already-complete co-occurring episode below `lastProcessedStep`, so
+			 * it may never be re-detected. That is deliberate: the ladder measures
+			 * how insistently ONE behaviour continues, and an episode that is still
+			 * running keeps earning rungs through the growth ground above. Losing a
+			 * second, already-finished episode delays escalation by a tick or two at
+			 * worst; counting both would restore the multi-rung jump per tool call
+			 * that this gate exists to prevent.
+			 */
+			session.prmStruckEpisodes ??= new Map<string, number>();
+			const struckEpisodes = session.prmStruckEpisodes;
+			const strikeable: PatternMatch[] = [];
+			const claimedThisTick = new Set<string>();
+			for (const match of [...detectionResult.matches].sort(
+				(a, b) => a.stepRange[0] - b.stepRange[0],
+			)) {
+				if (claimedThisTick.has(match.pattern)) continue;
+				const episodeKey = `${match.pattern}|${match.stepRange[0]}`;
+				const struckAtCount = struckEpisodes.get(episodeKey);
+				if (struckAtCount !== undefined) {
+					const threshold = resolvePatternThreshold(config, match.pattern);
+					if (match.occurrenceCount < struckAtCount + threshold) continue;
+				}
+				claimedThisTick.add(match.pattern);
+				strikeable.push(match);
+			}
+
+			if (strikeable.length === 0) {
+				// Every match was a re-report of an already-reported episode that has
+				// not yet grown enough to earn the next rung. Advance the cursor so the
+				// next tick does not re-derive the same suppressed set, and leave BOTH
+				// hard-stop tokens untouched — this tick observed no new occurrence, so
+				// it must neither arm nor disarm them.
+				if (trajectory.length > 0) {
+					session.prmTrajectoryStep = trajectory[trajectory.length - 1].step;
+				}
+				return;
+			}
+
+			for (const match of strikeable) {
+				const episodeKey = `${match.pattern}|${match.stepRange[0]}`;
+				// PRR-004 (PR #2139 review): delete-then-set, so an episode that
+				// strikes AGAIN moves to the back of the insertion order. `Map.set`
+				// on an existing key preserves its original position, which made the
+				// bound below evict by oldest-FIRST-SEEN rather than least-recently-
+				// struck — able to drop the very episode an agent is still tripping
+				// while keeping 255 inert ones. Mirrors the ladder bound in
+				// `escalation.ts`.
+				struckEpisodes.delete(episodeKey);
+				struckEpisodes.set(episodeKey, match.occurrenceCount);
+			}
+			// Bound the ledger. Episode keys are minted per distinct start step, so a
+			// very long session with a sliding detection window accumulates them
+			// steadily. Map preserves insertion order, so dropping from the front
+			// evicts the least recently struck episode.
+			while (struckEpisodes.size > MAX_TRACKED_EPISODES) {
+				const oldest = struckEpisodes.keys().next().value;
+				if (oldest === undefined) break;
+				struckEpisodes.delete(oldest);
+			}
+
 			// #1821 AC10: record pattern support for durable persistence.
 			// PLACEMENT IS LOAD-BEARING — this sits AFTER the no-match early return
 			// above, so the overwhelmingly common "tool call produced no pattern"
@@ -297,8 +435,14 @@ export function createPrmHook(
 			// Tallying is in-memory (no I/O, no lock, no knowledge-store access),
 			// but the persistable branch below DOES do a locked append. Support and
 			// cooldown gating keep that rare — see the comment on the append itself.
+			// Issue #2134: iterates the EPISODE-GATED set, not every re-emission.
+			// `recordPatternObservation` tallies support toward a durable insight
+			// candidate (default `min_support` 3), and a single continuing episode
+			// re-emitted on three consecutive tool calls used to reach that support
+			// on its own — promoting a "learned" pattern the agent had exhibited
+			// exactly once.
 			if (patternPersistence?.enabled) {
-				for (const match of detectionResult.matches) {
+				for (const match of strikeable) {
 					const observation = _internals.recordPatternObservation(
 						sessionID,
 						match,
@@ -373,12 +517,16 @@ export function createPrmHook(
 			if (!escalationTracker) {
 				// PRM escalation state is session-scoped and transient — resets on session start.
 				// This code reuses state from prior detections WITHIN the session, not across restarts.
+				// Issue #2134 follow-up: seeds from `prmLadderCounts`, NOT
+				// `prmPatternCounts`. The tracker counts by LADDER identity
+				// (`pattern|target`, or bare `pattern` for a growing target set) while
+				// `prmPatternCounts` stays keyed by pattern type as the observable
+				// tally. Seeding the ladder from pattern-type keys would restore every
+				// count under the wrong identity — silently resetting a target's real
+				// strike count to zero while inventing one for a key it never uses.
 				const initialState = session.prmLastPatternDetected
 					? {
-							patternCounts: new Map(session.prmPatternCounts.entries()) as Map<
-								PatternType,
-								number
-							>,
+							patternCounts: new Map(session.prmLadderCounts ?? []),
 							escalationLevel: session.prmEscalationLevel,
 							lastPatternDetected: session.prmLastPatternDetected,
 							hardStopPending: session.prmHardStopPending,
@@ -410,8 +558,8 @@ export function createPrmHook(
 			 */
 			let tickHardStop = false;
 
-			// Process each pattern match
-			for (const match of detectionResult.matches) {
+			// Process each pattern match that cleared the episode gate above.
+			for (const match of strikeable) {
 				// Generate course correction
 				const correction = _internals.generateCourseCorrection(
 					match,
@@ -446,7 +594,17 @@ export function createPrmHook(
 				// injection once a (pattern, level) advisory has been delivered,
 				// until escalation advances to a new level (distinct key). This does
 				// NOT gate recordDetection/counts/telemetry/replay below.
-				const prmDedupeKey = `prm:${match.pattern}:${escalationLevel}`;
+				//
+				// Issue #2134 follow-up: the key is scoped to the LADDER, not the
+				// pattern type, because the ladder is now per-target. With a
+				// pattern-scoped key and every target sitting at level 1, exactly ONE
+				// advisory was delivered per pattern for the whole session and every
+				// subsequent target's guidance was silently dropped — the agent was
+				// neither stopped (per-target ladders escalate independently) nor
+				// told. Measured: 40 distinct repeating files produced 1 advisory.
+				// Scoping by ladder means each distinct behaviour is reported once per
+				// level, which is the invariant this dedupe was always meant to have.
+				const prmDedupeKey = `prm:${resolveLadderKey(match)}:${escalationLevel}`;
 				// Defensive: the field is initialized by ensureAgentSession, but
 				// guard so a session object lacking it (e.g. a minimal test mock)
 				// does not throw and abort the unconditional match-processing.
@@ -458,11 +616,18 @@ export function createPrmHook(
 					session.prmInjectedAdvisoryKeys.add(prmDedupeKey);
 				}
 
-				// Update session PRM state fields
+				// Update session PRM state fields. `prmPatternCounts` stays keyed by
+				// pattern TYPE — it is the observable per-pattern tally that telemetry
+				// and tests read, and is deliberately a different keyspace from the
+				// tracker's ladder counts mirrored just below.
 				session.prmPatternCounts.set(
 					match.pattern,
 					(session.prmPatternCounts.get(match.pattern) ?? 0) + 1,
 				);
+				// Issue #2134 follow-up: mirror the tracker's LADDER counts onto the
+				// session so a tracker rebuilt later in this session restores the same
+				// keyspace it counts in. `getState()` already returns a defensive copy.
+				session.prmLadderCounts = escalationTracker.getLadderCounts();
 				session.prmEscalationLevel = escalationLevel;
 				session.prmLastPatternDetected = match;
 				tickHardStop = tickHardStop || hardStopPending;

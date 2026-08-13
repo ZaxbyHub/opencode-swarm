@@ -184,7 +184,12 @@ describe('recordDeniedToolCall', () => {
 		const entries = readEntries(prmStorePath(sessionId));
 		expect(entries[0].intent).toBe('denied: UNCLASSIFIED');
 		expect(entries[0].action).toBe('execute');
-		expect(entries[0].target).toBe('curl');
+		// Issue #2134: the target is the whole normalized command, not its first
+		// word. First-word extraction collapsed every `curl …` / `bun …` / `git …`
+		// invocation onto one target and made PRM's repetition_loop read ordinary
+		// distinct work as the same action repeated. Redaction — this test's actual
+		// subject — is unaffected and still asserted below.
+		expect(entries[0].target).toBe('curl api');
 		expect(entries[0].args_summary).toContain('api_key:[REDACTED]');
 		expect(entries[0].args_summary).not.toContain('sk-secret-value');
 	});
