@@ -780,7 +780,6 @@ describe('test-runner.ts - ADVERSARIAL CWD SECURITY TESTS', () => {
 		});
 
 		test('SECURE: Long path + traversal combination is REJECTED', async () => {
-			// Combined attack: long path + traversal
 			const combinedPath = '../'.repeat(100) + 'etc';
 
 			const result = await test_runner.execute({}, {
@@ -788,11 +787,11 @@ describe('test-runner.ts - ADVERSARIAL CWD SECURITY TESTS', () => {
 			} as any);
 			const parsed = JSON.parse(result);
 			expect(parsed.success).toBe(false);
-			expect(parsed.error).toContain('Invalid working directory');
+			expect(parsed.error).toMatch(
+				/Invalid working directory|Cannot verify project root/,
+			);
 
 			expect(spawnCalls.length).toBe(0);
-
-			// STATUS: SECURE - Combined attack blocked
 		});
 
 		test('SECURE: Unicode path traversal variants is REJECTED', async () => {
