@@ -101,7 +101,6 @@ describe('savePlan write-marker in_progress', () => {
 		mock.module('node:fs', () => ({
 			...fsSync,
 			renameSync: mock(() => {}),
-			existsSync: mock(() => true),
 			readdirSync: () => [],
 		}));
 
@@ -156,7 +155,6 @@ describe('savePlan write-marker in_progress', () => {
 		mock.module('node:fs', () => ({
 			...fsSync,
 			renameSync: mock(() => {}),
-			existsSync: mock(() => true),
 			readdirSync: () => [],
 		}));
 

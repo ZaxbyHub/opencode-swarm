@@ -176,6 +176,7 @@ describe('executeUpdateTaskStatus — ledger-replay staleness refusal (#1269 fin
 		expect(updateSpy).toHaveBeenCalledTimes(1);
 		expect(updateSpy).toHaveBeenCalledWith(tempDir, '1.1', 'in_progress', {
 			force: undefined,
+			planLockAlreadyHeld: true,
 		});
 		// The acquired lock is released even on the success path.
 		expect(releaseSpy).toHaveBeenCalledTimes(1);
