@@ -55,7 +55,7 @@ describe('pre-check cancellation propagation — issue #2097', () => {
 	});
 
 	test('F-003 bounds settlement for an operation that ignores cancellation', async () => {
-		const startedAt = Date.now();
+		const startedAt = performance.now();
 		await expect(
 			batchInternals.runWithTimeout(
 				async () => await new Promise<string>(() => undefined),
@@ -66,7 +66,7 @@ describe('pre-check cancellation propagation — issue #2097', () => {
 		).rejects.toThrow('Timeout after 1ms');
 
 		// Previous code awaited the non-cooperative promise forever.
-		expect(Date.now() - startedAt).toBeLessThan(1_500);
+		expect(performance.now() - startedAt).toBeLessThan(1_500);
 	});
 
 	test('a pre-aborted parent prevents operation startup', async () => {

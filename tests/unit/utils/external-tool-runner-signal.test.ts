@@ -97,7 +97,7 @@ describe('external tool signal termination', () => {
 			},
 		})) as typeof _internals.bunSpawn;
 
-		const startedAt = Date.now();
+		const startedAt = performance.now();
 		const result = await runExternalTool({
 			executable: 'fake-tool',
 			args: [],
@@ -109,7 +109,7 @@ describe('external tool signal termination', () => {
 
 		// Previous code returned as soon as the parent exited, while taskkill was
 		// still running and descendants could remain alive.
-		expect(Date.now() - startedAt).toBeLessThan(500);
+		expect(performance.now() - startedAt).toBeLessThan(500);
 		expect(result.status).toBe('timeout');
 		expect(treeSettled).toBe(true);
 		expect(signals).toEqual(['SIGTERM', 'SIGKILL']);
@@ -132,7 +132,7 @@ describe('external tool signal termination', () => {
 			},
 		})) as typeof _internals.bunSpawn;
 
-		const startedAt = Date.now();
+		const startedAt = performance.now();
 		const result = await runExternalTool({
 			executable: 'fake-tool',
 			args: [],
@@ -142,7 +142,7 @@ describe('external tool signal termination', () => {
 			maxStderrBytes: 1_024,
 		});
 
-		expect(Date.now() - startedAt).toBeLessThan(5_500);
+		expect(performance.now() - startedAt).toBeLessThan(5_500);
 		expect(result).toMatchObject({
 			status: 'spawn-error',
 			message: 'external tool process termination could not be confirmed',
