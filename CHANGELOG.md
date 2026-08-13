@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.139.5](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.139.4...v7.139.5) (2026-08-13)
+
+
+### Bug Fixes
+
+* **drift-check:** remediate skill-assertion detector false positives ([31e3d0c](https://github.com/ZaxbyHub/opencode-swarm/commit/31e3d0c2da32fa1bb1212a8743fa28823a997043))
+
 ## [7.139.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.139.3...v7.139.4) (2026-08-13)
 
 
