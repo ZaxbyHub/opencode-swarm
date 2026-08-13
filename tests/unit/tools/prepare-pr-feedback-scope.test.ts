@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdtempSync, realpathSync } from 'node:fs';
-import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { storeLaneOutput } from '../../../src/background/lane-output-store.js';
@@ -21,6 +20,7 @@ import {
 import { clearScopeBindings } from '../../../src/scope/scope-binding.js';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state.js';
 import { executePreparePrFeedbackScope } from '../../../src/tools/prepare-pr-feedback-scope.js';
+import { safeRmRecursive } from '../../helpers/safe-test-dir';
 import { installLegacyScopeGuardTargetSeam } from '../../helpers/scope-guard-binding-seam';
 import {
 	createDelegationGateHook,
@@ -73,7 +73,7 @@ beforeEach(() => {
 	];
 });
 
-afterEach(async () => {
+afterEach(() => {
 	_test_exports.resetTrackedStateCache();
 	clearScopeBindings();
 	resetSwarmState();
@@ -87,7 +87,9 @@ afterEach(async () => {
 		originalResolveCurrentUpstreamPushTargetAsync;
 	_test_exports.resolveRemoteRefsContainingHeadAsync =
 		originalResolveRemoteRefsContainingHeadAsync;
-	await fs.rm(directory, { recursive: true, force: true });
+	// CI-003: Windows can retain a transient handle after this integration-style
+	// scope flow. Use the bounded, containment-checked cleanup shared by tests.
+	safeRmRecursive(directory);
 });
 
 async function persistPrFeedbackBatch(

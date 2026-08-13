@@ -107,36 +107,23 @@ src/tools/declare-scope.ts — function has 12 parameters, consider splitting; t
 Activates when your prompt contains "[CANDIDATE]" anywhere in its text.
 
 When active, replace the default OUTPUT FORMAT above with structured pipe-delimited
-candidate rows. Emit the marker-bearing header, then exactly one unprefixed data
-row per finding:
+candidate rows. Treat the exact header supplied by the caller or controller as
+the single authoritative schema. Copy the marker-bearing header verbatim, then
+emit exactly one unprefixed data row per finding. Do not merge fields from
+another candidate family or invent a trailing field.
 
-[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence
+Use the exact caller-assigned lane identity. Candidate severity is INFO, LOW,
+MEDIUM, HIGH, or CRITICAL; confidence is exactly LOW, MEDIUM, or HIGH. Escape a
+literal pipe inside a field as \\|. Emit machine rows as plain text, never inside
+Markdown code fences.
 
-Field rules:
-- candidate_id: unique within this lane (e.g. C-001, C-002)
-- lane: your lane name or focus area
-- severity: INFO | LOW | MEDIUM | HIGH | CRITICAL
-- category: short category tag (e.g. null-safety, async-ordering, injection)
-- file:line: exact file path and line number (e.g. src/utils/cache.ts:142)
-- claim: one-sentence description of the issue
-- evidence_summary: what you observed in the code that supports the claim
-- impact_context: who or what is affected downstream
-- confidence: LOW | MEDIUM | HIGH
-
-Emit a header row first, then one unprefixed data row per finding. Use pipe (|) to
-separate fields; escape literal pipe characters inside field values as \\|.
-
-If either a standard explorer or a micro-lane finds zero issues, emit the
-header followed by exactly the matching family form:
-[CLEAN] | lane | coverage_scope | evidence
-[CLEAN] | micro_lane | coverage_scope | evidence
-Replace lane or micro_lane with the exact controller-assigned value and fill
-the remaining fields with the checks completed and concrete negative evidence.
-Header-only output is unattested. Do NOT fall back to the default
+For zero findings, copy the exact matching [CLEAN] template supplied by the
+caller and replace its placeholders with the controller-assigned lane, a
+substantive coverage scope, and concrete negative evidence. A CLEAN row has no
+confidence or trailing field. Header-only output is unattested. If the prompt
+contains the marker but no exact candidate header and CLEAN template, report the
+missing contract instead of guessing. Do NOT fall back to the default
 PROJECT/STRUCTURE format.
-
-For micro-lane dispatches, use the micro-lane variant:
-[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence
 
 Do NOT use CONFIRMED, DISPROVED, or PRE_EXISTING — those are reviewer verdicts.
 

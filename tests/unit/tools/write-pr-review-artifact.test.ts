@@ -212,7 +212,16 @@ describe('write_pr_review_artifact', () => {
 			file_line: 'src/index.ts:1',
 			evidence: 'discovery evidence',
 			next_action: 'route_to_reviewer' as const,
+			// Regression: parser-valid INFO findings were rejected by the writer schema.
+			severity: 'INFO' as const,
 		}));
+		const findingsPath = path.join(
+			directory,
+			'.swarm',
+			'pr-review',
+			'coverage-order',
+			'findings.jsonl',
+		);
 		await expect(
 			executeWritePrReviewArtifact(
 				{
@@ -239,17 +248,7 @@ describe('write_pr_review_artifact', () => {
 				{ sessionID: SESSION_ID },
 			),
 		).rejects.toThrow(/prior post_explorer checkpoint/i);
-		await expect(
-			fs.stat(
-				path.join(
-					directory,
-					'.swarm',
-					'pr-review',
-					'coverage-order',
-					'findings.jsonl',
-				),
-			),
-		).rejects.toThrow();
+		await expect(fs.stat(findingsPath)).rejects.toThrow();
 		await expect(
 			executeWritePrReviewArtifact(
 				{
@@ -263,6 +262,9 @@ describe('write_pr_review_artifact', () => {
 				{ sessionID: SESSION_ID },
 			),
 		).resolves.toContain('"success": true');
+		expect(await fs.readFile(findingsPath, 'utf8')).toContain(
+			'"severity":"INFO"',
+		);
 		await expect(
 			executeWritePrReviewArtifact(
 				{

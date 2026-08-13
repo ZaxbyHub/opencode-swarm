@@ -58,12 +58,12 @@ A response without this exact row is treated as a planning preamble and re-dispa
 
 ---
 
-# Explorer Prompt Template
+# Base Explorer Prompt Template
 
-Use this template when dispatching base explorer or micro-lane agents:
+Use this template when dispatching a base explorer:
 
 ```text
-You are an explorer. Optimize for recall, not final judgment.
+You are a base explorer. Optimize for recall, not final judgment.
 Return candidates only. Do not use CONFIRMED, DISPROVED, or PRE_EXISTING.
 
 Lane:
@@ -87,15 +87,53 @@ You must inspect or mark unavailable:
 7. Swarm artifacts/knowledge,
 8. the exact `base_sha...pr_head_sha` merge-base range and both endpoint revisions.
 
-For a base explorer, return:
+Return:
 [CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence
 
-For a micro-lane or council explorer, return:
+Emit the marker-bearing header once, then unprefixed data rows.
+For a clean base lane, emit `[CLEAN] | lane | coverage_scope | evidence`.
+Emit the final machine-readable header and rows as unfenced plain text. The
+Markdown fence around this prompt is documentation only; do not emit backticks.
+```
+
+---
+
+# Micro-Lane / Council Explorer Prompt Template
+
+Use this template when dispatching a micro-lane or council explorer:
+
+```text
+You are a micro-lane or council explorer. Optimize for recall, not final judgment.
+Return candidates only. Do not use CONFIRMED, DISPROVED, or PRE_EXISTING.
+
+Micro/council lane:
+Scope:
+base_ref:
+head_ref:
+Obligations:
+Changed files/hunks:
+Impact cone:
+Relevant deterministic signals:
+Relevant Swarm artifacts / knowledge:
+Checklist:
+
+You must inspect or mark unavailable:
+1. changed hunk,
+2. caller/consumer,
+3. callee/dependency,
+4. sibling implementation or prior pattern,
+5. nearest test or missing-test location,
+6. deterministic signals,
+7. Swarm artifacts/knowledge,
+8. the exact `base_sha...pr_head_sha` merge-base range and both endpoint revisions.
+
+Return:
 [CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence
 
 Emit the marker-bearing header once, then unprefixed data rows.
 For a clean micro-lane or council lane, emit `[CLEAN] | micro_lane | coverage_scope | evidence`.
-For a clean base lane, emit `[CLEAN] | lane | coverage_scope | evidence`.
+Emit the final machine-readable header and rows as unfenced plain text. The
+Markdown fence around this prompt is documentation only; do not emit backticks.
 ```
 
 Under Profile A the orchestrator extracts candidates from the full lane
