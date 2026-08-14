@@ -84,6 +84,29 @@ describe('self', () => {
 });
 `,
 		);
+		// PRR-006 positive control: an equivalent fixture OUTSIDE
+		// tests/unit/scripts/, whose assertion genuinely breaks. This proves the
+		// exclusion above is specific to the detector's own directory rather
+		// than the detector having stopped reporting anything at all.
+		mkdirSyncLocal(repo, 'tests/unit/agents/');
+		writeFile(
+			repo,
+			'tests/unit/agents/outside-detector-dir.test.ts',
+			`
+import { describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+const content = readFileSync(
+  join(process.cwd(), '.opencode/skills/test/SKILL.md'),
+  'utf-8',
+);
+describe('outside', () => {
+  test('real phrase', () => {
+    expect(content).toContain('real content');
+  });
+});
+`,
+		);
 		// Create a real skill file that the detector will look at
 		mkdirSyncLocal(repo, '.opencode/skills/test/');
 		writeFile(
@@ -103,12 +126,9 @@ describe('self', () => {
 			timeout: GIT_TIMEOUT_MS,
 		});
 
-		// Modify the skill so the detector runs
-		writeFile(
-			repo,
-			'.opencode/skills/test/SKILL.md',
-			'# TEST\n\nreal content updated\n',
-		);
+		// Modify the skill so the detector runs, removing 'real content' so the
+		// out-of-directory assertion genuinely breaks.
+		writeFile(repo, '.opencode/skills/test/SKILL.md', '# TEST\n\nreplaced\n');
 
 		const result = await checkSkillAssertions(repo);
 		// The fixture phrase from tests/unit/scripts/detector-self.test.ts
@@ -118,6 +138,14 @@ describe('self', () => {
 			(b) => b.phrase === fixturePhrase,
 		);
 		expect(brokenFixturePhrase).toBeUndefined();
+
+		// PRR-006 positive control: the identical-shape assertion living outside
+		// tests/unit/scripts/ MUST be reported.
+		const outsideBroken = result.brokenAssertions.find(
+			(b) => b.phrase === 'real content',
+		);
+		expect(outsideBroken).toBeDefined();
+		expect(outsideBroken!.testFile).toContain('outside-detector-dir.test.ts');
 	});
 
 	test('phrases inside string-literal regions of test files are NOT reported', async () => {
@@ -160,12 +188,9 @@ describe('lit', () => {
 			timeout: GIT_TIMEOUT_MS,
 		});
 
-		// Modify the skill so the detector runs
-		writeFile(
-			repo,
-			'.opencode/skills/test/SKILL.md',
-			'# TEST\n\nreal content updated\n',
-		);
+		// Modify the skill so the detector runs, removing 'real content' so the
+		// genuine assertion in the same file breaks.
+		writeFile(repo, '.opencode/skills/test/SKILL.md', '# TEST\n\nreplaced\n');
 
 		const result = await checkSkillAssertions(repo);
 		// 'fixture-only-phrase' is inside a string literal in the test file
@@ -174,6 +199,16 @@ describe('lit', () => {
 			(b) => b.phrase === 'fixture-only-phrase',
 		);
 		expect(fixtureOnlyPhrase).toBeUndefined();
+
+		// PRR-006 positive control: the REAL assertion in that same file — one
+		// line below the string literal — MUST still be reported, proving the
+		// string-literal filter is scoped to the literal and not swallowing the
+		// whole file.
+		const realBroken = result.brokenAssertions.find(
+			(b) => b.phrase === 'real content',
+		);
+		expect(realBroken).toBeDefined();
+		expect(realBroken!.assertionKind).toBe('toContain');
 	});
 });
 

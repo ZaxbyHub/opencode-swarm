@@ -49,7 +49,9 @@ function writeFile(root: string, relPath: string, content: string): void {
 
 afterEach(() => {
 	const d = tempDirs.pop();
-	if (d) spawnSync('rm', ['-rf', d], { stdio: 'ignore' });
+	// PRR-007: fs.rmSync, not `rm -rf` — the latter does not exist on Windows,
+	// so the temp repo would leak on the Windows CI shards.
+	if (d) fs.rmSync(d, { recursive: true, force: true });
 });
 
 describe('SC-002 / SC-003 / FR-002: regex semantic matching', () => {
@@ -199,11 +201,14 @@ describe('regex', () => {
 		expect(result.changedSkillFiles).toContain(
 			'.opencode/skills/test/SKILL.md',
 		);
-		// FR-002 malformed: detector must not crash; if a finding is emitted,
-		// its assertionKind must be 'malformed-regex'
-		expect(result).toBeDefined();
-		if (result.brokenAssertions.length > 0) {
-			expect(result.brokenAssertions[0]!.assertionKind).toBe('malformed-regex');
-		}
+		// FR-002 malformed: the detector must not crash, AND it must actually
+		// emit the finding. PRR-006: the previous form guarded this behind
+		// `if (brokenAssertions.length > 0)`, so it passed vacuously if the
+		// detector silently dropped malformed regexes instead of reporting them.
+		expect(result.brokenAssertions).toHaveLength(1);
+		expect(result.brokenAssertions[0]!.assertionKind).toBe('malformed-regex');
+		expect(result.brokenAssertions[0]!.skillFile).toBe(
+			'.opencode/skills/test/SKILL.md',
+		);
 	});
 });
