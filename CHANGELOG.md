@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.140.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.140.1...v7.140.2) (2026-08-14)
+
+
+### Bug Fixes
+
+* **pr-review:** recover runtime friction and restore checkout ([50033bc](https://github.com/ZaxbyHub/opencode-swarm/commit/50033bc1e0a0d943433701042fed90b2a791f7fe))
+* **pr-workflow:** close review recovery feedback ([034dae7](https://github.com/ZaxbyHub/opencode-swarm/commit/034dae71070c5b48d251967b47904e9de444bbef))
+
 ## [7.140.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.140.0...v7.140.1) (2026-08-14)
 
 
