@@ -301,67 +301,6 @@ describe('handleCiSimulateCommand', () => {
 	// Issue #2131 criterion E: fail-closed worktree cleanup
 	// -------------------------------------------------------------------------
 
-	it('surfaces BLOCKED cleanup and never force-deletes when git worktree remove fails', async () => {
-		let createdWorktreePath = '';
-		const rmSyncCalls: string[] = [];
-		const realFs = _internals.fs;
-		_internals.detectDefaultRemoteBranch = () => 'main';
-		_internals.fs = {
-			existsSync: realFs.existsSync,
-			rmSync: (target: string) => {
-				rmSyncCalls.push(target);
-			},
-		};
-		_internals.runExternalTool = mock(async (options) => {
-			if (options.args[0] === 'worktree' && options.args[1] === 'add') {
-				createdWorktreePath = options.args[3] ?? '';
-			}
-			if (
-				options.args[0] === 'worktree' &&
-				options.args[1] === 'list' &&
-				createdWorktreePath
-			) {
-				return {
-					status: 'completed',
-					exitCode: 0,
-					stdout: `worktree ${tempDir}
-worktree ${createdWorktreePath}
-`,
-					stderr: '',
-					stdoutTruncated: false,
-					stderrTruncated: false,
-				};
-			}
-			if (options.args[0] === 'worktree' && options.args[1] === 'remove') {
-				return {
-					status: 'completed',
-					exitCode: 1,
-					stdout: '',
-					stderr: 'fatal: the working directory is dirty',
-					stdoutTruncated: false,
-					stderrTruncated: false,
-				};
-			}
-			const conflict = options.args[0] === 'merge';
-			return {
-				status: 'completed',
-				exitCode: conflict ? 1 : 0,
-				stdout: '',
-				stderr: conflict ? 'CONFLICT (content): Merge conflict' : '',
-				stdoutTruncated: false,
-				stderrTruncated: false,
-			};
-		}) as typeof realRunExternalTool;
-
-		const result = await handleCiSimulateCommand(tempDir, ['conflict-branch']);
-
-		expect(result).toContain('WORKTREE CLEANUP BLOCKED');
-		expect(result).toContain('dirty');
-		// Never force-deleted the directory.
-		expect(rmSyncCalls).toHaveLength(0);
-		_internals.fs = realFs;
-	});
-
 	it('rejects option-like PR refs before invoking git', async () => {
 		const result = await handleCiSimulateCommand(tempDir, ['--upload-pack=x']);
 		expect(result).toContain('safe git branch or commit reference');

@@ -14,6 +14,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 import { mkdtempSync, realpathSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
@@ -47,9 +48,7 @@ let commitCountSince = 0;
 
 const snapshot = { ..._test_exports };
 beforeEach(() => {
-	directory = realpathSync(
-		mkdtempSync(path.join(os.tmpdir(), 'pr-gate-no-change-')),
-	);
+	directory = canonicalMkdtemp('pr-gate-no-change-');
 	currentHead = HEAD_SHA;
 	commitCountSince = 0;
 	settleRun += 1;

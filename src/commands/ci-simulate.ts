@@ -14,8 +14,10 @@
  * merge-queue kick-outs.
  *
  * Input contract:
- *   /swarm ci-simulate              → uses current HEAD branch
- *   /swarm ci-simulate <pr-ref>     → uses the specified branch/ref
+ *   /swarm ci-simulate                        → uses current HEAD branch
+ *   /swarm ci-simulate <pr-ref>               → uses the specified branch/ref
+ *   /swarm ci-simulate <pr-ref> --base <ref>  → validated explicit base for
+ *                                               stacked/release-branch PRs
  */
 
 import * as fs from 'node:fs';

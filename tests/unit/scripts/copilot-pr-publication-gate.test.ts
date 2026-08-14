@@ -2,11 +2,12 @@
  * Automated adversarial tests for scripts/copilot-pr-publication-gate.sh
  * (issue #2131 criterion D): the gate's rejection paths — stale HEAD, edited
  * body, wrong state, missing validation commands — must be proven by tests,
- * not claimed. Uses the precedented spawnSync('bash') + os.tmpdir() pattern
+ * not claimed. Uses the precedented spawnSync('bash') + canonical temp-dir pattern
  * (see check-invariants.test.ts / check-mock-allowlist-ratchet.test.ts).
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, realpathSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
@@ -30,9 +31,7 @@ const PUBLISH_PAYLOAD = JSON.stringify({
 let directory = '';
 
 beforeEach(() => {
-	directory = realpathSync(
-		mkdtempSync(path.join(os.tmpdir(), 'pub-gate-test-')),
-	);
+	directory = canonicalMkdtemp('pub-gate-test-');
 });
 
 afterEach(async () => {
