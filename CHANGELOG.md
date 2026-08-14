@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.140.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.140.0...v7.140.1) (2026-08-14)
+
+
+### Bug Fixes
+
+* **skills:** harden PR-review abort and issue-trace integrity ([#2131](https://github.com/ZaxbyHub/opencode-swarm/issues/2131) A + partial B) ([f3b1ea8](https://github.com/ZaxbyHub/opencode-swarm/commit/f3b1ea814142da0c46f4fed4d80b9b86c79a88ea))
+* **tests:** wrap mkdtempSync in realpathSync (check-test-tmpdir gate) ([fcf669c](https://github.com/ZaxbyHub/opencode-swarm/commit/fcf669c09d383e038bbf3a8b3738503802945530))
+
 ## [7.140.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.139.8...v7.140.0) (2026-08-14)
 
 
