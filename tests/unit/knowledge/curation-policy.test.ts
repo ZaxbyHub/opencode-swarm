@@ -2,8 +2,8 @@
  * #1848 §2: cohort-safe curation authorization policy tests.
  *
  * Covers the decision ladder: config-mismatch guard, owner path, unknown-owner
- * legacy protection, not-owner+local-evidence → proposal, cohort quorum, and
- * override. Uses `_internals` DI to inject worktree ids, cohort events, and
+ * legacy protection, not-owner+local-evidence → proposal, conservative cohort
+ * handling, and override. Uses `_internals` DI to inject worktree ids and
  * config fingerprints without touching the real filesystem or git.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
@@ -146,35 +146,14 @@ describe('authorizeCuration — not-owner local evidence', () => {
 });
 
 describe('authorizeCuration — cohort quorum', () => {
-	let eventReader: () => Promise<unknown[]>;
 	beforeEach(() => {
-		// Cohort quorum requires a linked cohort.
+		// Cohort-wide evidence requires a linked cohort, but project-local receipt
+		// authority cannot prove a cross-root quorum.
 		_internals.isLinked = () => true;
 		_internals.readCohortConfigFingerprint = async () => null;
-		_internals.readKnowledgeEvents = () => eventReader();
 	});
 
-	it('authorizes when cohort-wide evidence meets quorum', async () => {
-		eventReader = async () =>
-			Array.from({ length: 5 }, (_, i) => ({
-				type: 'violated',
-				knowledge_id: 'entry-1',
-				event_id: `ev-${i}`,
-			}));
-		const entry = ownedEntry('wt-A');
-		const result = await authorizeCuration(
-			baseInput('entry-1', {
-				actorWorktreeId: 'wt-B',
-				evidenceScope: 'cohort-wide',
-			}),
-			baseContext(entry),
-		);
-		expect(result.authorized).toBe(true);
-		if (result.authorized) expect(result.basis).toBe('quorum');
-	});
-
-	it('blocks when cohort-wide evidence is insufficient', async () => {
-		eventReader = async () => [{ type: 'violated', knowledge_id: 'entry-1' }];
+	it('does not authorize cohort-wide destruction from diagnostics', async () => {
 		const entry = ownedEntry('wt-A');
 		const result = await authorizeCuration(
 			baseInput('entry-1', {
@@ -184,18 +163,31 @@ describe('authorizeCuration — cohort quorum', () => {
 			baseContext(entry),
 		);
 		expect(result.authorized).toBe(false);
-		if (!result.authorized) expect(result.basis).toBe('quorum-insufficient');
+		if (!result.authorized) {
+			expect(result.basis).toBe('quorum-insufficient');
+			expect(result.detail).toContain('cannot authorize destructive action');
+		}
 	});
 
-	it('IR-1: does NOT count positive evidence (applied/shown) toward destructive quorum', async () => {
-		// 5 applied events — these are POSITIVE signals; they must NOT authorize
-		// a destructive action against the entry.
-		eventReader = async () =>
-			Array.from({ length: 5 }, (_, i) => ({
-				type: 'applied',
-				knowledge_id: 'entry-1',
-				event_id: `ev-${i}`,
-			}));
+	it('still allows an explicit audited override', async () => {
+		const entry = ownedEntry('wt-A');
+		const result = await authorizeCuration(
+			baseInput('entry-1', {
+				actorWorktreeId: 'wt-B',
+				evidenceScope: 'cohort-wide',
+				override: {
+					actor: 'manual-override',
+					reason: 'reviewed shared mutation',
+				},
+			}),
+			baseContext(entry),
+		);
+		expect(result.authorized).toBe(true);
+		if (result.authorized) expect(result.basis).toBe('override');
+	});
+
+	it('does not expose a diagnostic event reader as an authorization seam', async () => {
+		expect('readKnowledgeEvents' in _internals).toBe(false);
 		const entry = ownedEntry('wt-A');
 		const result = await authorizeCuration(
 			baseInput('entry-1', {

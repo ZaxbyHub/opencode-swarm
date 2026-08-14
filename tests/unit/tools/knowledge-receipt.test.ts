@@ -7,6 +7,7 @@ import {
 	type ReceiptEvent,
 	readKnowledgeEvents,
 } from '../../../src/hooks/knowledge-events';
+import { queryLiveMemberships } from '../../../src/hooks/knowledge-receipt-ledger.js';
 import {
 	readKnowledge,
 	resolveSwarmKnowledgePath,
@@ -60,6 +61,8 @@ describe('knowledge_receipt', () => {
 			type: 'retrieved',
 			trace_id: 'trace-xyz',
 			session_id: 'sess-1',
+			task_id: 'task-1',
+			phase: 'Phase 2',
 			agent: 'coder',
 			query: 'q',
 			retrieval_mode: 'auto_injection',
@@ -120,6 +123,22 @@ describe('knowledge_receipt', () => {
 
 		expect(byType.contradicted.knowledge_id).toBe('k-bad');
 		expect(byType.contradicted.reason).toContain('archive');
+
+		const authority = await queryLiveMemberships(dir, {
+			include_terminal: true,
+		});
+		if (!authority.ok) throw new Error(authority.detail);
+		const reasons = Object.fromEntries(
+			authority.memberships.map((membership) => [
+				membership.entry_id,
+				membership.terminal?.reason,
+			]),
+		);
+		expect(reasons).toEqual({
+			'k-applied': 'enforced the retry bound',
+			'k-ignored': 'stale: superseded by v2',
+			'k-bad': 'archive: current tests prove the opposite',
+		});
 	});
 
 	it('accepts a no_relevant_knowledge receipt and files one durable no_relevant terminal', async () => {

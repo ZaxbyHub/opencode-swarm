@@ -162,13 +162,14 @@ export const knowledge_receipt: ReturnType<typeof createSwarmTool> =
 			};
 
 			const recordedEventIds: string[] = [];
+			const diagnosticEventIds: string[] = [];
 			// (#PRR-001) emit returns the written event_id (or '' on write failure)
 			// so promotion-evidence pairing is exact per-item, not fragile tail-slice
 			// arithmetic that misaligns when a write fails or no_relevant precedes.
 			const emit = async (event: KnowledgeEventInput): Promise<string> => {
 				const written = await recordKnowledgeEvent(directory, event);
 				const id = written?.event_id ?? '';
-				if (id) recordedEventIds.push(id);
+				if (id) diagnosticEventIds.push(id);
 				return id;
 			};
 			// Map knowledge_id -> receipt_event_id for the accepted applied/violated/
@@ -182,18 +183,36 @@ export const knowledge_receipt: ReturnType<typeof createSwarmTool> =
 			// A lessons-only receipt (no items, no no_relevant, but new_lessons) is
 			// meaningful and skips items-validation — it just persists lessons.
 			const validationItems = [
-				...applied.map((i) => ({ id: i.id, outcome: 'applied' as const })),
-				...ignored.map((i) => ({ id: i.id, outcome: 'ignored' as const })),
+				...applied.map((i) => ({
+					id: i.id,
+					outcome: 'applied' as const,
+					reason: i.how,
+				})),
+				...ignored.map((i) => ({
+					id: i.id,
+					outcome: 'ignored' as const,
+					reason: i.note ? `${i.reason}: ${i.note}` : i.reason,
+				})),
 				...contradicted.map((i) => ({
 					id: i.id,
 					outcome: 'contradicted' as const,
+					reason: `${i.proposed_action}: ${i.evidence}`,
 				})),
 			];
 			const needsValidation = validationItems.length > 0 || noRelevant;
 			let acceptedIds = new Set<string>();
 			let closesNoRelevant = false;
 			let acceptedItems: ReceiptItem[] = [];
+			let authoritativeEventIds: Record<string, string> = {};
+			let cohortId: string | undefined;
+			let linkId: string | undefined;
 			if (needsValidation) {
+				try {
+					cohortId = await ensureCohortIdCached(directory, sessionId);
+					linkId = await readLinkPointerSafe(directory);
+				} catch {
+					// Cohort correlation is optional metadata; receipt authority remains local.
+				}
 				const validation = await validateReceipt({
 					directory,
 					trace_id: traceId,
@@ -201,6 +220,8 @@ export const knowledge_receipt: ReturnType<typeof createSwarmTool> =
 					task_id: taskId,
 					phase,
 					agent,
+					cohort_id: cohortId,
+					source_link_id: linkId,
 					items: validationItems,
 					no_relevant_knowledge: noRelevant,
 				});
@@ -219,6 +240,8 @@ export const knowledge_receipt: ReturnType<typeof createSwarmTool> =
 				acceptedIds = new Set(validation.accepted.map((i) => i.id));
 				closesNoRelevant = validation.closes_no_relevant;
 				acceptedItems = validation.accepted;
+				authoritativeEventIds = validation.authoritative_event_ids;
+				recordedEventIds.push(...Object.values(authoritativeEventIds));
 			}
 
 			// `no_relevant` terminal for an empty/real-empty trace.
@@ -232,7 +255,7 @@ export const knowledge_receipt: ReturnType<typeof createSwarmTool> =
 
 			for (const item of applied) {
 				if (!acceptedIds.has(item.id)) continue;
-				const eid = await emit({
+				await emit({
 					type: 'applied',
 					...base,
 					knowledge_id: item.id,
@@ -245,6 +268,7 @@ export const knowledge_receipt: ReturnType<typeof createSwarmTool> =
 							: undefined,
 					},
 				});
+				const eid = authoritativeEventIds[item.id];
 				if (eid) eventIdByKnowledgeId.set(item.id, eid);
 			}
 			for (const item of ignored) {
@@ -258,13 +282,14 @@ export const knowledge_receipt: ReturnType<typeof createSwarmTool> =
 			}
 			for (const item of contradicted) {
 				if (!acceptedIds.has(item.id)) continue;
-				const eid = await emit({
+				await emit({
 					type: 'contradicted',
 					...base,
 					knowledge_id: item.id,
 					reason: `${item.proposed_action}: ${item.evidence}`,
 					evidence: { summary: item.evidence },
 				});
+				const eid = authoritativeEventIds[item.id];
 				if (eid) eventIdByKnowledgeId.set(item.id, eid);
 			}
 
@@ -276,8 +301,6 @@ export const knowledge_receipt: ReturnType<typeof createSwarmTool> =
 			// at emit time), not fragile tail-slice cursor arithmetic.
 			if (acceptedItems.length > 0) {
 				try {
-					const cohortId = await ensureCohortIdCached(directory, sessionId);
-					const linkId = await readLinkPointerSafe(directory);
 					const now = new Date().toISOString();
 					const evidenceRecords: PromotionEvidenceRecord[] = [];
 					for (const item of acceptedItems) {
@@ -346,6 +369,7 @@ export const knowledge_receipt: ReturnType<typeof createSwarmTool> =
 				new_lessons: newLessonResults.length,
 				no_relevant_knowledge: noRelevant,
 				event_count: recordedEventIds.length,
+				diagnostic_event_count: diagnosticEventIds.length,
 			});
 
 			return JSON.stringify({

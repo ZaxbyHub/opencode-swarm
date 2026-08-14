@@ -281,12 +281,14 @@ export async function checkHivePromotions(
 	// It never throws (path fallback always succeeds).
 	const sourceCohort = await _internals.resolveCohortId(directory);
 
-	// (#1849) Validated terminal-application evidence is now produced by the
-	// knowledge_receipt tool + delegate-ack-collector (via validateReceipt) and
-	// persisted to .swarm/knowledge-promotion-evidence.jsonl. Loaded outside the
-	// lock. Legacy swarm entries with no evidence get NO synthetic credit — an
-	// empty list simply does not add to the count.
-	const evidence = await _internals.loadPromotionEvidence(directory);
+	// Authoritative terminal-application evidence comes from receipt-ledger
+	// history. The bounded promotion-evidence JSONL remains a rebuildable
+	// diagnostic projection only. Loaded outside the hive lock.
+	// Legacy entries and unavailable history receive no synthetic credit.
+	const evidence = await _internals.loadPromotionEvidence(
+		directory,
+		sourceCohort.cohortId,
+	);
 
 	const diagnostics: string[] = [];
 
@@ -797,13 +799,13 @@ export const _internals = {
 	// PRR-007: the shared curation policy the dedup-merge routes through (as an
 	// audited pass-through). DI seam so tests can assert the merge shares it.
 	authorizeCuration,
-	/** (#1849) Loads validated terminal-application evidence per swarm entry id
-	 *  from .swarm/knowledge-promotion-evidence.jsonl. Empty when no validated
-	 *  receipts exist yet (conservative: no synthetic credit). */
+	/** Loads authoritative terminal-application evidence per swarm entry id.
+	 *  Empty on receipt-ledger uncertainty (conservative: no synthetic credit). */
 	loadPromotionEvidence: async (
 		directory: string,
+		canonicalCohortId?: string,
 	): Promise<Record<string, PromotionEvidenceRecord[]>> =>
-		loadPromotionEvidenceByEntry(directory),
+		loadPromotionEvidenceByEntry(directory, canonicalCohortId),
 	/** Loads the default KnowledgeConfig (schema defaults) for manual promotion
 	 *  paths when the command did not load one. */
 	loadDefaultKnowledgeConfig: () => KnowledgeConfigSchema.parse({}),

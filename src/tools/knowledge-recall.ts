@@ -1,6 +1,12 @@
 import { z } from 'zod';
 import { loadPluginConfigWithMeta } from '../config';
 import { KnowledgeConfigSchema } from '../config/schema.js';
+import { recordKnowledgeEvent } from '../hooks/knowledge-events.js';
+import {
+	commitDisplayedMembership,
+	commitEmptyRetrieval,
+} from '../hooks/knowledge-receipt-ledger.js';
+import { isActiveStatus } from '../hooks/knowledge-types.js';
 import { searchKnowledge } from '../hooks/search-knowledge.js';
 import { computeKnowledgeDebug } from '../services/knowledge-diagnostics.js';
 import { log } from '../utils/logger.js';
@@ -112,6 +118,84 @@ export const knowledge_recall: ReturnType<typeof createSwarmTool> =
 				applyScopeFilter: false,
 				forceReadHive: true,
 				applyRoleScope: false,
+				emitEvent: false,
+			});
+
+			const sessionId = ctx?.sessionID ?? 'unknown';
+			if (results.length > 0) {
+				const membership = await commitDisplayedMembership(directory, {
+					trace_id,
+					session_id: sessionId,
+					exposure_kind: 'manual_recall',
+					agent: ctx?.agent ?? 'unknown',
+					grace_days: knowledgeConfig.receipt_close_grace_days,
+					entries: results.map((entry, index) => ({
+						entry_id: entry.id,
+						critical:
+							entry.directive_priority === 'critical' &&
+							isActiveStatus(entry.status),
+						rank: index + 1,
+						score: entry.finalScore,
+					})),
+				});
+				if (
+					!membership.ok ||
+					membership.memberships.some((item) => item.terminal)
+				) {
+					return JSON.stringify({
+						results: [],
+						total: 0,
+						unverifiable: true,
+						code: membership.ok ? 'terminal_trace_reuse' : membership.code,
+						error: membership.ok
+							? 'retrieval trace was already terminalized'
+							: membership.detail,
+					});
+				}
+			} else {
+				const empty = await commitEmptyRetrieval(directory, {
+					trace_id,
+					session_id: sessionId,
+					agent: ctx?.agent ?? 'unknown',
+					grace_days: knowledgeConfig.receipt_close_grace_days,
+				});
+				if (!empty.ok) {
+					return JSON.stringify({
+						results: [],
+						total: 0,
+						unverifiable: true,
+						code: empty.code,
+						error: empty.detail,
+					});
+				}
+				if (!empty.terminal_event_id) {
+					return JSON.stringify({
+						results: [],
+						total: 0,
+						unverifiable: true,
+						code: 'store_unavailable',
+						error: 'empty retrieval terminal did not commit',
+					});
+				}
+			}
+
+			// Best-effort diagnostic projection after authoritative commit.
+			const ranks = Object.fromEntries(
+				results.map((entry, index) => [entry.id, index + 1]),
+			);
+			const scores = Object.fromEntries(
+				results.map((entry) => [entry.id, entry.finalScore]),
+			);
+			await recordKnowledgeEvent(directory, {
+				type: 'retrieved',
+				trace_id,
+				session_id: sessionId,
+				agent: ctx?.agent ?? 'unknown',
+				query: queryInput,
+				retrieval_mode: 'manual',
+				result_ids: results.map((entry) => entry.id),
+				ranks,
+				scores,
 			});
 
 			const scored: ScoredEntry[] = results.map((e) => ({

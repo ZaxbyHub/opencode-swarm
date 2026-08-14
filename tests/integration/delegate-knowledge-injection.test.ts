@@ -204,6 +204,23 @@ describe('injectForDelegate — per-agent + per-tool retrieval', () => {
 		expect(ev.result_ids.sort()).toEqual(entries.map((e) => e.id).sort());
 	});
 
+	it('does not return directives when authoritative membership cannot persist', async () => {
+		fs.mkdirSync(path.join(tempDir, '.swarm', 'knowledge-receipts-v2.jsonl'));
+
+		const result = await injectForDelegate({
+			directory: tempDir,
+			agent: 'coder',
+			expectedTools: ['edit', 'write'],
+			taskTitle: 'Implement the feature',
+			sessionId: 'sess-store-failure',
+			config: CONFIG,
+		});
+
+		expect(result).toEqual({ entries: [], trace_id: '' });
+		const events = await readKnowledgeEvents(tempDir);
+		expect(events.some((event) => event.type === 'retrieved')).toBe(false);
+	});
+
 	it('respects a delegate_max_inject_count of 0 (no retrieval, no event)', async () => {
 		const { entries } = await injectForDelegate({
 			directory: tempDir,

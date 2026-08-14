@@ -1,233 +1,100 @@
-/**
- * Regression tests for specific bugs found during PR review of the
- * knowledge-application enforcement gate's deadlock escape hatches (see
- * knowledge-application-gate-escape-hatch.test.ts for the base escape-hatch
- * behavior tests, split out to stay under the repo's 500-line test file
- * limit — AGENTS.md invariant 7):
- *
- *  - Cross-directive leak: denials accrued against one unacknowledged
- *    critical directive must not carry over to an unrelated directive that
- *    replaces it via setCriticalShownIds (an ordinary phase/task-transition
- *    occurrence).
- *  - Re-injection stability: the injector re-stamps `generatedAt` on every
- *    cache-hit re-injection of the SAME directive set, so the denial-count
- *    identity key must be derived from the directive-id set, not the
- *    timestamp.
- *  - Session-teardown boundary: resetSwarmState (and by extension
- *    resetSwarmStatePreservingSingletons, the production `/swarm close`
- *    path) must clear the denial counter so a reused sessionID does not
- *    inherit a stale count.
- *  - Centralized clear pathway: the escape hatches must clear
- *    currentCriticalShownIds via the existing clearCriticalShownIds()
- *    helper, not a direct Map.delete().
- */
+/** Exact membership identity regressions for denial-count escape state. */
 
-import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
+import { DEFAULT_KNOWLEDGE_APPLICATION_CONFIG } from '../../../src/hooks/knowledge-application.js';
+import { knowledgeApplicationGateBefore } from '../../../src/hooks/knowledge-application-gate.js';
 import {
-	buildAckDedupKey,
-	DEFAULT_KNOWLEDGE_APPLICATION_CONFIG,
-} from '../../../src/hooks/knowledge-application';
-import { knowledgeApplicationGateBefore } from '../../../src/hooks/knowledge-application-gate';
-import { swarmState } from '../../../src/state';
+	commitApplicationMarkerBatch,
+	commitDisplayedMembership,
+} from '../../../src/hooks/knowledge-receipt-ledger.js';
+import { resetSwarmState, swarmState } from '../../../src/state.js';
 
-let tmp: string;
+const ENTRY = 'bbbbbbbb-bbbb-4bbb-9bbb-bbbbbbbbbbbb';
+let directory: string;
+
 beforeEach(() => {
-	mock.restore();
-	tmp = mkdtempSync(path.join(tmpdir(), 'swarm-gate-escape-regression-'));
-	swarmState.currentCriticalShownIds.clear();
-	swarmState.knowledgeAckDedup.clear();
-	swarmState.gateDenialCounts.clear();
+	directory = mkdtempSync(path.join(tmpdir(), 'application-denial-v2-'));
+	writeFileSync(path.join(directory, '.git'), 'gitdir: fixture');
+	resetSwarmState();
 });
+
 afterEach(() => {
-	rmSync(tmp, { recursive: true, force: true });
-	mock.restore();
+	rmSync(directory, { recursive: true, force: true });
+	resetSwarmState();
 });
 
-const ID_A = 'aaaaaaaa-aaaa-4aaa-9aaa-aaaaaaaaaaaa';
-const ID_B = 'bbbbbbbb-bbbb-4bbb-9bbb-bbbbbbbbbbbb';
+async function display(trace_id: string): Promise<void> {
+	const result = await commitDisplayedMembership(directory, {
+		trace_id,
+		session_id: 'session-a',
+		exposure_kind: 'architect_directive',
+		entries: [{ entry_id: ENTRY, critical: true }],
+	});
+	if (!result.ok) throw new Error(result.detail);
+}
 
-describe('gate escape hatch regressions (PR review findings)', () => {
-	it('regression: denials against an unacked directive do not carry over to a swapped-in unrelated directive', async () => {
-		// Reproduces the cross-directive leak found in PR review: a session
-		// accrues denials against directive A (never acked), then the
-		// critical-directive set is swapped to an unrelated directive B via
-		// setCriticalShownIds (the ordinary phase/task-transition path in
-		// knowledge-injector.ts) — B must get its own full max_gate_denials
-		// budget, not inherit A's stale count.
-		swarmState.currentCriticalShownIds.set('s1', {
-			ids: [ID_A],
-			generatedAt: Date.now(),
-		});
-		const cfg = {
-			...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG,
-			mode: 'enforce' as const,
-			max_gate_denials: 5,
-		};
+const input = {
+	tool: 'save_plan',
+	agent: 'architect',
+	sessionID: 'session-a',
+};
 
-		// Accrue 3 denials against A — never acked, never resolved.
-		for (let i = 0; i < 3; i++) {
-			await expect(
-				knowledgeApplicationGateBefore(
-					tmp,
-					{ tool: 'save_plan', agent: 'architect', sessionID: 's1' },
-					cfg,
-				),
-			).rejects.toThrow(/KNOWLEDGE_ENFORCE_GATE_DENY/);
-		}
+const config = {
+	...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG,
+	mode: 'enforce' as const,
+	max_gate_denials: 2,
+};
 
-		// Swap to an unrelated directive B without ever acking A (this is what
-		// setCriticalShownIds does on an ordinary phase/task transition).
-		swarmState.currentCriticalShownIds.set('s1', {
-			ids: [ID_B],
-			generatedAt: Date.now(),
-		});
+describe('application gate exact-pair denial identity', () => {
+	it('re-displaying the same exact pair does not reset its denial count', async () => {
+		await display('trace-same');
+		await expect(
+			knowledgeApplicationGateBefore(directory, input, config),
+		).rejects.toThrow();
+		await expect(
+			knowledgeApplicationGateBefore(directory, input, config),
+		).rejects.toThrow();
 
-		// B must require its OWN 5 denials before the escape hatch fires — it
-		// must NOT inherit A's 3 accrued denials. Assert it still throws for
-		// denials 4 through 8 overall (i.e. 1 through 5 against B).
-		for (let i = 0; i < 5; i++) {
-			await expect(
-				knowledgeApplicationGateBefore(
-					tmp,
-					{ tool: 'save_plan', agent: 'architect', sessionID: 's1' },
-					cfg,
-				),
-			).rejects.toThrow(/KNOWLEDGE_ENFORCE_GATE_DENY/);
-		}
+		await display('trace-same');
+		await knowledgeApplicationGateBefore(directory, input, config);
 
-		// Only now (6th denial against B specifically) should the hatch fire.
-		await knowledgeApplicationGateBefore(
-			tmp,
-			{ tool: 'save_plan', agent: 'architect', sessionID: 's1' },
-			cfg,
-		);
-		expect(
-			swarmState.knowledgeAckDedup.has(buildAckDedupKey('s1', ID_B, 'applied')),
-		).toBe(true);
+		expect(swarmState.gateDenialCounts.has('session-a')).toBe(false);
 	});
 
-	it('regression: re-injecting the same directive across turns does not reset the denial count', async () => {
-		// The knowledge-injector re-stamps generatedAt on every cache-hit
-		// re-injection of the SAME directive set, so the identity key must be
-		// derived from the ids themselves (not generatedAt) — otherwise the
-		// denial-count escape hatch would never accumulate past 1 in normal
-		// usage, defeating its purpose.
-		const cfg = {
-			...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG,
-			mode: 'enforce' as const,
-			max_gate_denials: 3,
-		};
+	it('a new trace for the same entry starts a fresh denial identity', async () => {
+		await display('trace-old');
+		await expect(
+			knowledgeApplicationGateBefore(directory, input, config),
+		).rejects.toThrow();
+		await expect(
+			knowledgeApplicationGateBefore(directory, input, config),
+		).rejects.toThrow();
 
-		for (let i = 0; i < 3; i++) {
-			// Simulate the injector re-injecting the identical directive set on
-			// each turn with a freshly stamped generatedAt.
-			swarmState.currentCriticalShownIds.set('s1', {
-				ids: [ID_A],
-				generatedAt: Date.now() + i,
-			});
-			await expect(
-				knowledgeApplicationGateBefore(
-					tmp,
-					{ tool: 'save_plan', agent: 'architect', sessionID: 's1' },
-					cfg,
-				),
-			).rejects.toThrow(/KNOWLEDGE_ENFORCE_GATE_DENY/);
-		}
-
-		// 4th denial against the same (re-stamped) directive set fires the hatch.
-		swarmState.currentCriticalShownIds.set('s1', {
-			ids: [ID_A],
-			generatedAt: Date.now() + 100,
+		const closed = await commitApplicationMarkerBatch(directory, {
+			trace_id: 'trace-old',
+			session_id: 'session-a',
+			items: [{ entry_id: ENTRY, outcome: 'applied' }],
 		});
-		await knowledgeApplicationGateBefore(
-			tmp,
-			{ tool: 'save_plan', agent: 'architect', sessionID: 's1' },
-			cfg,
-		);
-	});
-
-	it('regression: resetSwarmState clears the gate denial counter (session-teardown boundary)', async () => {
-		// Reproduces the unwired-reset gap found in PR review: /swarm close
-		// (resetSwarmStatePreservingSingletons -> resetSwarmState) must not
-		// leave a stale denial count for a sessionID that gets reused by a
-		// fresh incident.
-		const { resetSwarmState } = await import('../../../src/state');
-
-		swarmState.currentCriticalShownIds.set('s1', {
-			ids: [ID_A],
-			generatedAt: Date.now(),
-		});
-		const cfg = {
-			...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG,
-			mode: 'enforce' as const,
-			max_gate_denials: 5,
-		};
-
-		// Accrue denials near the max, then simulate session teardown.
-		for (let i = 0; i < 3; i++) {
-			await expect(
-				knowledgeApplicationGateBefore(
-					tmp,
-					{ tool: 'save_plan', agent: 'architect', sessionID: 's1' },
-					cfg,
-				),
-			).rejects.toThrow(/KNOWLEDGE_ENFORCE_GATE_DENY/);
-		}
-		expect(swarmState.gateDenialCounts.get('s1')?.count).toBe(3);
-
-		resetSwarmState();
-		expect(swarmState.gateDenialCounts.has('s1')).toBe(false);
-
-		// A fresh incident on the same (reused) sessionID must require the
-		// FULL configured max_gate_denials again, not just the remaining 2.
-		swarmState.currentCriticalShownIds.set('s1', {
-			ids: [ID_B],
-			generatedAt: Date.now(),
-		});
-		for (let i = 0; i < 5; i++) {
-			await expect(
-				knowledgeApplicationGateBefore(
-					tmp,
-					{ tool: 'save_plan', agent: 'architect', sessionID: 's1' },
-					cfg,
-				),
-			).rejects.toThrow(/KNOWLEDGE_ENFORCE_GATE_DENY/);
-		}
-		await knowledgeApplicationGateBefore(
-			tmp,
-			{ tool: 'save_plan', agent: 'architect', sessionID: 's1' },
-			cfg,
-		);
-	});
-
-	it('uses clearCriticalShownIds (not a direct Map.delete) so escape-hatch clears go through the centralized FIFO-cap pathway', async () => {
-		swarmState.currentCriticalShownIds.set('s1', {
-			ids: [ID_A],
-			generatedAt: Date.now(),
-		});
-		const cfg = {
-			...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG,
-			mode: 'enforce' as const,
-			max_gate_denials: 1,
-		};
+		if (!closed.ok) throw new Error(closed.detail);
+		await display('trace-new');
 
 		await expect(
-			knowledgeApplicationGateBefore(
-				tmp,
-				{ tool: 'save_plan', agent: 'architect', sessionID: 's1' },
-				cfg,
-			),
-		).rejects.toThrow(/KNOWLEDGE_ENFORCE_GATE_DENY/);
-		// 2nd call triggers the denial-limit escape hatch.
-		await knowledgeApplicationGateBefore(
-			tmp,
-			{ tool: 'save_plan', agent: 'architect', sessionID: 's1' },
-			cfg,
-		);
+			knowledgeApplicationGateBefore(directory, input, config),
+		).rejects.toThrow(/trace-new/);
+	});
 
-		expect(swarmState.currentCriticalShownIds.has('s1')).toBe(false);
+	it('session teardown clears denial counts', async () => {
+		await display('trace-reset');
+		await expect(
+			knowledgeApplicationGateBefore(directory, input, config),
+		).rejects.toThrow();
+		expect(swarmState.gateDenialCounts.has('session-a')).toBe(true);
+
+		resetSwarmState();
+
+		expect(swarmState.gateDenialCounts.has('session-a')).toBe(false);
 	});
 });

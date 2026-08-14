@@ -1,571 +1,355 @@
-import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
-import * as os from 'node:os';
+/** V2 exact-pair phase critical gate integration tests. */
+
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import * as path from 'node:path';
+import {
+	commitDisplayedMembership,
+	commitPhaseClosed,
+	queryLiveMemberships,
+	validateAndCommitTerminalBatch,
+} from '../../../src/hooks/knowledge-receipt-ledger.js';
 import {
 	evaluatePhaseCriticalDirectives,
 	formatDirectiveBlockMessage,
+	recordDirectiveOverrides,
 } from '../../../src/hooks/phase-complete-directive-gate.js';
 
-// ---------------------------------------------------------------------------
-// Helper types mirroring source
-// ---------------------------------------------------------------------------
-
-interface RetrievedEvent {
-	type: 'retrieved';
-	knowledge_id?: never;
-	trace_id: string;
-	session_id: string;
-	agent: string;
-	source: string;
-	result_ids: string[];
-	phase: string;
-	timestamp: string;
-	event_id?: string;
-}
-
-interface ReceiptEvent {
-	type: 'applied' | 'ignored' | 'n_a' | 'violated';
-	knowledge_id: string;
-	trace_id: string;
-	session_id: string;
-	agent: string;
-	source: string;
-	reason?: string;
-	timestamp: string;
-	event_id?: string;
-}
-
-type MockKnowledgeEvent = RetrievedEvent | ReceiptEvent;
-
-// ---------------------------------------------------------------------------
-// Mock factories
-// ---------------------------------------------------------------------------
-
-function makeReadKnowledgeEvents(events: MockKnowledgeEvent[]) {
-	return mock(() => Promise.resolve(events as any));
-}
-
-function makeCollectPhaseDirectiveIds(ids: string[]) {
-	return mock(() => Promise.resolve(ids));
-}
-
-function makeReadEntriesById(
-	entries: Map<
-		string,
-		{ id: string; directive_priority: string; status: string }
-	>,
-) {
-	return mock(() => Promise.resolve(entries as any));
-}
-
-// ---------------------------------------------------------------------------
-// Module-level mocks (restored via mock.restore())
-// ---------------------------------------------------------------------------
-
-// Real module captures — used in mock spread below
-import * as realKnowledgeEvents from '../../../src/hooks/knowledge-events.js';
-import * as realPhaseDirectives from '../../../src/hooks/phase-directives.js';
-
-let mockReadKnowledgeEvents: ReturnType<typeof mock>;
-let mockCollectPhaseDirectiveIds: ReturnType<typeof mock>;
-let mockReadEntriesById: ReturnType<typeof mock>;
+const PHASE = 'Canonical phase description';
+const ENTRY = 'critical-rule';
+let directory: string;
 
 beforeEach(() => {
-	mockReadKnowledgeEvents = makeReadKnowledgeEvents([]);
-	mockCollectPhaseDirectiveIds = makeCollectPhaseDirectiveIds([]);
-	mockReadEntriesById = makeReadEntriesById(new Map());
-
-	mock.module('../../../src/hooks/knowledge-events.js', () => ({
-		...realKnowledgeEvents,
-		readKnowledgeEvents: mockReadKnowledgeEvents,
-	}));
-
-	mock.module('../../../src/hooks/phase-directives.js', () => ({
-		...realPhaseDirectives,
-		collectPhaseDirectiveIds: mockCollectPhaseDirectiveIds,
-		readEntriesById: mockReadEntriesById,
-	}));
+	directory = mkdtempSync(path.join(tmpdir(), 'phase-critical-v2-'));
+	writeFileSync(path.join(directory, '.git'), 'gitdir: fixture');
 });
 
 afterEach(() => {
-	mock.restore();
+	rmSync(directory, { recursive: true, force: true });
 });
 
-// ---------------------------------------------------------------------------
-// formatDirectiveBlockMessage — pure function, no mocking needed
-// ---------------------------------------------------------------------------
+async function display(
+	trace_id: string,
+	entry_id = ENTRY,
+	critical = true,
+	session_id = 'session-a',
+): Promise<void> {
+	const result = await commitDisplayedMembership(directory, {
+		trace_id,
+		session_id,
+		phase: PHASE,
+		entries: [{ entry_id, critical }],
+	});
+	if (!result.ok) throw new Error(result.detail);
+}
+
+async function terminal(
+	trace_id: string,
+	outcome: 'applied' | 'ignored' | 'n_a' | 'violated' | 'contradicted',
+	reason?: string,
+): Promise<void> {
+	const result = await validateAndCommitTerminalBatch(directory, {
+		trace_id,
+		session_id: 'session-a',
+		items: [{ entry_id: ENTRY, outcome, reason }],
+	});
+	if (!result.ok || result.rejected.length > 0) {
+		throw new Error('terminal fixture failed');
+	}
+}
+
+describe('evaluatePhaseCriticalDirectives V2 authority', () => {
+	it('blocks an unresolved exact pair', async () => {
+		await display('trace-open');
+
+		const result = await evaluatePhaseCriticalDirectives({
+			directory,
+			sessionId: 'session-a',
+			phaseLabel: PHASE,
+		});
+
+		expect(result).toMatchObject({ blocked: true, failedClosed: false });
+		expect(result.unresolved).toEqual([
+			{ id: ENTRY, trace_id: 'trace-open', reason: 'no_verdict' },
+		]);
+	});
+
+	it('does not let a terminal on one trace hide the repeated entry on another', async () => {
+		await display('trace-closed');
+		await display('trace-open');
+		await terminal('trace-closed', 'applied');
+
+		const result = await evaluatePhaseCriticalDirectives({
+			directory,
+			sessionId: 'session-a',
+			phaseLabel: PHASE,
+		});
+
+		expect(result.unresolved).toEqual([
+			{ id: ENTRY, trace_id: 'trace-open', reason: 'no_verdict' },
+		]);
+	});
+
+	it('evaluates only the caller session when two sessions share a phase', async () => {
+		await display('trace-session-a');
+		await terminal('trace-session-a', 'applied');
+		await display('trace-session-b', ENTRY, true, 'session-b');
+
+		const sessionA = await evaluatePhaseCriticalDirectives({
+			directory,
+			sessionId: 'session-a',
+			phaseLabel: PHASE,
+		});
+		const sessionB = await evaluatePhaseCriticalDirectives({
+			directory,
+			sessionId: 'session-b',
+			phaseLabel: PHASE,
+		});
+
+		expect(sessionA).toMatchObject({ blocked: false, failedClosed: false });
+		expect(sessionB.unresolved).toEqual([
+			{ id: ENTRY, trace_id: 'trace-session-b', reason: 'no_verdict' },
+		]);
+	});
+
+	it('accepts applied and reasoned ignored/n_a terminals', async () => {
+		for (const [index, outcome] of ['applied', 'ignored', 'n_a'].entries()) {
+			const trace = `trace-${outcome}`;
+			await display(trace, `entry-${index}`);
+			const committed = await validateAndCommitTerminalBatch(directory, {
+				trace_id: trace,
+				session_id: 'session-a',
+				items: [
+					{
+						entry_id: `entry-${index}`,
+						outcome: outcome as 'applied' | 'ignored' | 'n_a',
+						reason: outcome === 'applied' ? undefined : 'explicit rationale',
+					},
+				],
+			});
+			if (!committed.ok) throw new Error(committed.detail);
+		}
+
+		const result = await evaluatePhaseCriticalDirectives({
+			directory,
+			sessionId: 'session-a',
+			phaseLabel: PHASE,
+		});
+		expect(result).toMatchObject({ blocked: false, failedClosed: false });
+	});
+
+	it('blocks violated and unreasoned neutral terminals', async () => {
+		await display('trace-violated');
+		await terminal('trace-violated', 'violated', 'reviewer found a defect');
+		await display('trace-neutral', 'neutral-entry');
+		const neutral = await validateAndCommitTerminalBatch(directory, {
+			trace_id: 'trace-neutral',
+			session_id: 'session-a',
+			items: [{ entry_id: 'neutral-entry', outcome: 'n_a' }],
+		});
+		if (!neutral.ok) throw new Error(neutral.detail);
+
+		const result = await evaluatePhaseCriticalDirectives({
+			directory,
+			sessionId: 'session-a',
+			phaseLabel: PHASE,
+		});
+		expect(result.unresolved).toEqual([
+			{
+				id: ENTRY,
+				trace_id: 'trace-violated',
+				reason: 'unremediated_violation',
+			},
+			{ id: 'neutral-entry', trace_id: 'trace-neutral', reason: 'no_verdict' },
+		]);
+	});
+
+	it('ignores noncritical memberships and filters by the canonical phase label', async () => {
+		await display('trace-noncritical', ENTRY, false);
+		const other = await commitDisplayedMembership(directory, {
+			trace_id: 'trace-other-phase',
+			session_id: 'session-a',
+			phase: 'Different phase',
+			entries: [{ entry_id: ENTRY, critical: true }],
+		});
+		if (!other.ok) throw new Error(other.detail);
+
+		const result = await evaluatePhaseCriticalDirectives({
+			directory,
+			sessionId: 'session-a',
+			phaseLabel: PHASE,
+		});
+		expect(result.blocked).toBe(false);
+	});
+
+	it('fails closed when authoritative receipt state is corrupt', async () => {
+		await display('trace-corrupt');
+		writeFileSync(
+			path.join(directory, '.swarm', 'knowledge-receipts-v2.jsonl'),
+			'corrupt\n',
+		);
+
+		const result = await evaluatePhaseCriticalDirectives({
+			directory,
+			sessionId: 'session-a',
+			phaseLabel: PHASE,
+		});
+		expect(result).toEqual({
+			blocked: true,
+			unresolved: [],
+			overridden: [],
+			failedClosed: true,
+		});
+	});
+
+	it('fails closed when the caller session is absent', async () => {
+		await display('trace-missing-session');
+
+		const result = await evaluatePhaseCriticalDirectives({
+			directory,
+			phaseLabel: PHASE,
+		});
+
+		expect(result).toEqual({
+			blocked: true,
+			unresolved: [],
+			overridden: [],
+			failedClosed: true,
+		});
+	});
+
+	it('does not let a force-closed prior lifecycle contaminate a later phase gate', async () => {
+		await display('trace-force-closed');
+		expect((await commitPhaseClosed(directory, PHASE)).ok).toBe(true);
+
+		const result = await evaluatePhaseCriticalDirectives({
+			directory,
+			sessionId: 'session-a',
+			phaseLabel: PHASE,
+		});
+		expect(result).toMatchObject({ blocked: false, failedClosed: false });
+	});
+});
+
+describe('recordDirectiveOverrides', () => {
+	it('persists the authorized transition before the gate accepts it', async () => {
+		await display('trace-override');
+		await terminal('trace-override', 'violated', 'known violation');
+
+		await recordDirectiveOverrides(
+			directory,
+			[ENTRY],
+			'Architect accepts this known phase risk',
+			'session-a',
+			PHASE,
+		);
+
+		const state = await queryLiveMemberships(directory, {
+			phase: PHASE,
+			include_terminal: true,
+		});
+		expect(
+			state.ok &&
+				state.memberships[0]?.terminal?.authorized_transition?.actor ===
+					'phase-override',
+		).toBe(true);
+		const gate = await evaluatePhaseCriticalDirectives({
+			directory,
+			sessionId: 'session-a',
+			phaseLabel: PHASE,
+		});
+		expect(gate).toMatchObject({
+			blocked: false,
+			overridden: [ENTRY],
+			failedClosed: false,
+		});
+	});
+
+	it('requires a written justification', async () => {
+		await display('trace-override');
+		await expect(
+			recordDirectiveOverrides(directory, [ENTRY], ' ', 'session-a', PHASE),
+		).rejects.toThrow(/written justification/);
+	});
+
+	it('fails closed instead of selecting a target without a caller session', async () => {
+		await display('trace-override');
+
+		await expect(
+			recordDirectiveOverrides(
+				directory,
+				[ENTRY],
+				'Architect supplies a substantive risk justification',
+				undefined,
+				PHASE,
+			),
+		).rejects.toThrow(/exact session and phase identity/);
+
+		const state = await queryLiveMemberships(directory, {
+			phase: PHASE,
+			session_id: 'session-a',
+			include_terminal: true,
+		});
+		expect(state.ok && state.memberships[0]?.terminal).toBeUndefined();
+	});
+
+	it('does not let one session override another session in the same phase', async () => {
+		await display('trace-session-b', ENTRY, true, 'session-b');
+		const violated = await validateAndCommitTerminalBatch(directory, {
+			trace_id: 'trace-session-b',
+			session_id: 'session-b',
+			items: [
+				{ entry_id: ENTRY, outcome: 'violated', reason: 'known violation' },
+			],
+		});
+		if (!violated.ok) throw new Error(violated.detail);
+
+		await expect(
+			recordDirectiveOverrides(
+				directory,
+				['trace-session-b/critical-rule'],
+				'Session A cannot accept session B risk',
+				'session-a',
+				PHASE,
+			),
+		).rejects.toThrow(/unknown directive override target/);
+
+		const state = await queryLiveMemberships(directory, {
+			phase: PHASE,
+			session_id: 'session-b',
+			include_terminal: true,
+		});
+		expect(state.ok && state.memberships[0]?.terminal?.outcome).toBe(
+			'violated',
+		);
+		expect(
+			state.ok &&
+				state.memberships[0]?.terminal?.authorized_transition === undefined,
+		).toBe(true);
+	});
+
+	it('rejects an unknown override target instead of silently accepting nothing', async () => {
+		await display('trace-known');
+		await expect(
+			recordDirectiveOverrides(
+				directory,
+				['missing-entry'],
+				'Architect supplies a substantive risk justification',
+				'session-a',
+				PHASE,
+			),
+		).rejects.toThrow(/unknown directive override target/);
+	});
+});
 
 describe('formatDirectiveBlockMessage', () => {
-	test('renders no_verdict entry with correct explanation', () => {
-		const unresolved = [{ id: 'K001', reason: 'no_verdict' as const }];
-		const msg = formatDirectiveBlockMessage(unresolved);
-		expect(msg).toContain('PHASE_COMPLETE_BLOCKED');
-		expect(msg).toContain('K001');
-		expect(msg).toContain('no terminal verdict');
-	});
-
-	test('renders unremediated_violation entry with correct explanation', () => {
-		const unresolved = [
-			{ id: 'K002', reason: 'unremediated_violation' as const },
-		];
-		const msg = formatDirectiveBlockMessage(unresolved);
-		expect(msg).toContain('K002');
-		expect(msg).toContain(
-			'violated with no subsequent applied/verified remediation',
-		);
-	});
-
-	test('renders multiple unresolved entries', () => {
-		const unresolved = [
-			{ id: 'K001', reason: 'no_verdict' as const },
-			{ id: 'K002', reason: 'unremediated_violation' as const },
-		];
-		const msg = formatDirectiveBlockMessage(unresolved);
-		expect(msg).toContain('K001');
-		expect(msg).toContain('K002');
-	});
-});
-
-// ---------------------------------------------------------------------------
-// evaluatePhaseCriticalDirectives — observable outcomes
-// ---------------------------------------------------------------------------
-
-describe('evaluatePhaseCriticalDirectives', () => {
-	const mockDir = path.join(os.tmpdir(), 'phase-directive-gate-test');
-
-	describe('blocked: true — required gates unmet', () => {
-		test('blocks when a critical directive has no verdict at all (no_verdict)', async () => {
-			const phaseLabel = '1';
-			const directiveId = 'K-critical-001';
-
-			// Phase has one retrieved event that surfaced the directive
-			mockReadKnowledgeEvents.mockImplementationOnce(
-				makeReadKnowledgeEvents([
-					{
-						type: 'retrieved',
-						trace_id: 't1',
-						session_id: 's1',
-						agent: 'reviewer',
-						source: 'reviewer',
-						result_ids: [directiveId],
-						phase: phaseLabel,
-						timestamp: '2024-01-01T10:00:00.000Z',
-					},
-				]),
-			);
-			mockCollectPhaseDirectiveIds.mockResolvedValueOnce([directiveId]);
-			mockReadEntriesById.mockResolvedValueOnce(
-				new Map([
-					[
-						directiveId,
-						{
-							id: directiveId,
-							directive_priority: 'critical',
-							status: 'established',
-						},
-					],
-				]) as any,
-			);
-
-			const result = await evaluatePhaseCriticalDirectives({
-				directory: mockDir,
-				phaseLabel,
-			});
-
-			expect(result.blocked).toBe(true);
-			expect(result.unresolved).toContainEqual({
-				id: directiveId,
-				reason: 'no_verdict',
-			});
-			expect(result.overridden).toHaveLength(0);
-			expect(result.failedClosed).toBe(false);
-		});
-
-		test('blocks when a critical directive is violated with no later applied/verified (unremediated_violation)', async () => {
-			const phaseLabel = '1';
-			const directiveId = 'K-critical-002';
-
-			// Phase window starts at first retrieved event
-			mockReadKnowledgeEvents.mockImplementationOnce(
-				makeReadKnowledgeEvents([
-					{
-						type: 'retrieved',
-						trace_id: 't1',
-						session_id: 's1',
-						agent: 'reviewer',
-						source: 'reviewer',
-						result_ids: [directiveId],
-						phase: phaseLabel,
-						timestamp: '2024-01-01T10:00:00.000Z',
-					},
-					{
-						type: 'violated',
-						knowledge_id: directiveId,
-						trace_id: 't2',
-						session_id: 's1',
-						agent: 'reviewer',
-						source: 'reviewer',
-						timestamp: '2024-01-01T11:00:00.000Z',
-					},
-					// No applied after the violation → unremediated
-				]),
-			);
-			mockCollectPhaseDirectiveIds.mockResolvedValueOnce([directiveId]);
-			mockReadEntriesById.mockResolvedValueOnce(
-				new Map([
-					[
-						directiveId,
-						{
-							id: directiveId,
-							directive_priority: 'critical',
-							status: 'established',
-						},
-					],
-				]) as any,
-			);
-
-			const result = await evaluatePhaseCriticalDirectives({
-				directory: mockDir,
-				phaseLabel,
-			});
-
-			expect(result.blocked).toBe(true);
-			expect(result.unresolved).toContainEqual({
-				id: directiveId,
-				reason: 'unremediated_violation',
-			});
-		});
-
-		test('fails-closed (blocked + failedClosed: true) when readKnowledgeEvents throws', async () => {
-			mockReadKnowledgeEvents.mockImplementationOnce(
-				mock(() => {
-					throw new Error('disk error');
-				}),
-			);
-
-			const result = await evaluatePhaseCriticalDirectives({
-				directory: mockDir,
-			});
-
-			expect(result.blocked).toBe(true);
-			expect(result.failedClosed).toBe(true);
-			expect(result.unresolved).toHaveLength(0);
-		});
-	});
-
-	describe('blocked: false — all gates pass', () => {
-		test('allows when critical directive has applied outcome dated after violation', async () => {
-			const phaseLabel = '2';
-			const directiveId = 'K-critical-003';
-			const violationTs = '2024-01-01T11:00:00.000Z';
-			const appliedTs = '2024-01-01T12:00:00.000Z';
-
-			mockReadKnowledgeEvents.mockImplementationOnce(
-				makeReadKnowledgeEvents([
-					{
-						type: 'retrieved',
-						trace_id: 't1',
-						session_id: 's1',
-						agent: 'reviewer',
-						source: 'reviewer',
-						result_ids: [directiveId],
-						phase: phaseLabel,
-						timestamp: '2024-01-01T10:00:00.000Z',
-					},
-					{
-						type: 'violated',
-						knowledge_id: directiveId,
-						trace_id: 't2',
-						session_id: 's1',
-						agent: 'reviewer',
-						source: 'reviewer',
-						timestamp: violationTs,
-					},
-					{
-						type: 'applied',
-						knowledge_id: directiveId,
-						trace_id: 't3',
-						session_id: 's1',
-						agent: 'architect',
-						source: 'reviewer',
-						timestamp: appliedTs,
-					},
-				]),
-			);
-			mockCollectPhaseDirectiveIds.mockResolvedValueOnce([directiveId]);
-			mockReadEntriesById.mockResolvedValueOnce(
-				new Map([
-					[
-						directiveId,
-						{
-							id: directiveId,
-							directive_priority: 'critical',
-							status: 'established',
-						},
-					],
-				]) as any,
-			);
-
-			const result = await evaluatePhaseCriticalDirectives({
-				directory: mockDir,
-				phaseLabel,
-			});
-
-			expect(result.blocked).toBe(false);
-			expect(result.unresolved).toHaveLength(0);
-		});
-
-		test('allows when critical directive has ignored outcome with reason and no later violation', async () => {
-			const phaseLabel = '2';
-			const directiveId = 'K-critical-004';
-
-			mockReadKnowledgeEvents.mockImplementationOnce(
-				makeReadKnowledgeEvents([
-					{
-						type: 'retrieved',
-						trace_id: 't1',
-						session_id: 's1',
-						agent: 'reviewer',
-						source: 'reviewer',
-						result_ids: [directiveId],
-						phase: phaseLabel,
-						timestamp: '2024-01-01T10:00:00.000Z',
-					},
-					{
-						type: 'ignored',
-						knowledge_id: directiveId,
-						trace_id: 't2',
-						session_id: 's1',
-						agent: 'architect',
-						source: 'reviewer',
-						reason: 'Not applicable to this phase scope',
-						timestamp: '2024-01-01T11:00:00.000Z',
-					},
-				]),
-			);
-			mockCollectPhaseDirectiveIds.mockResolvedValueOnce([directiveId]);
-			mockReadEntriesById.mockResolvedValueOnce(
-				new Map([
-					[
-						directiveId,
-						{
-							id: directiveId,
-							directive_priority: 'critical',
-							status: 'established',
-						},
-					],
-				]) as any,
-			);
-
-			const result = await evaluatePhaseCriticalDirectives({
-				directory: mockDir,
-				phaseLabel,
-			});
-
-			expect(result.blocked).toBe(false);
-			expect(result.unresolved).toHaveLength(0);
-		});
-
-		test('allows when critical directive has n_a outcome with reason', async () => {
-			const phaseLabel = '3';
-			const directiveId = 'K-critical-005';
-
-			mockReadKnowledgeEvents.mockImplementationOnce(
-				makeReadKnowledgeEvents([
-					{
-						type: 'retrieved',
-						trace_id: 't1',
-						session_id: 's1',
-						agent: 'reviewer',
-						source: 'reviewer',
-						result_ids: [directiveId],
-						phase: phaseLabel,
-						timestamp: '2024-01-01T10:00:00.000Z',
-					},
-					{
-						type: 'n_a',
-						knowledge_id: directiveId,
-						trace_id: 't2',
-						session_id: 's1',
-						agent: 'architect',
-						source: 'reviewer',
-						reason: 'Duplicate of K001',
-						timestamp: '2024-01-01T11:00:00.000Z',
-					},
-				]),
-			);
-			mockCollectPhaseDirectiveIds.mockResolvedValueOnce([directiveId]);
-			mockReadEntriesById.mockResolvedValueOnce(
-				new Map([
-					[
-						directiveId,
-						{
-							id: directiveId,
-							directive_priority: 'critical',
-							status: 'established',
-						},
-					],
-				]) as any,
-			);
-
-			const result = await evaluatePhaseCriticalDirectives({
-				directory: mockDir,
-				phaseLabel,
-			});
-
-			expect(result.blocked).toBe(false);
-			expect(result.unresolved).toHaveLength(0);
-		});
-
-		test('allows when there are no critical directives in phase', async () => {
-			mockReadKnowledgeEvents.mockResolvedValueOnce([]);
-			mockCollectPhaseDirectiveIds.mockResolvedValueOnce([]);
-
-			const result = await evaluatePhaseCriticalDirectives({
-				directory: mockDir,
-				phaseLabel: '99',
-			});
-
-			expect(result.blocked).toBe(false);
-			expect(result.unresolved).toHaveLength(0);
-			expect(result.overridden).toHaveLength(0);
-			expect(result.failedClosed).toBe(false);
-		});
-	});
-
-	describe('overridden — architect acceptViolations', () => {
-		test('moves directive to overridden list when its id is in acceptViolations', async () => {
-			const phaseLabel = '1';
-			const directiveId = 'K-critical-override-001';
-
-			mockReadKnowledgeEvents.mockImplementationOnce(
-				makeReadKnowledgeEvents([
-					{
-						type: 'retrieved',
-						trace_id: 't1',
-						session_id: 's1',
-						agent: 'reviewer',
-						source: 'reviewer',
-						result_ids: [directiveId],
-						phase: phaseLabel,
-						timestamp: '2024-01-01T10:00:00.000Z',
-					},
-					// Still violated, but architect overrides
-				]),
-			);
-			mockCollectPhaseDirectiveIds.mockResolvedValueOnce([directiveId]);
-			mockReadEntriesById.mockResolvedValueOnce(
-				new Map([
-					[
-						directiveId,
-						{
-							id: directiveId,
-							directive_priority: 'critical',
-							status: 'established',
-						},
-					],
-				]) as any,
-			);
-
-			const result = await evaluatePhaseCriticalDirectives({
-				directory: mockDir,
-				phaseLabel,
-				acceptViolations: [directiveId],
-			});
-
-			expect(result.blocked).toBe(false);
-			expect(result.overridden).toContain(directiveId);
-			expect(result.unresolved).toHaveLength(0);
-		});
-	});
-
-	describe('directive-blocked event / message fidelity', () => {
-		test('unresolved list is accurate — both reasons represented', async () => {
-			const phaseLabel = '1';
-			const idNoVerdict = 'K-nov-001';
-			const idUnremediated = 'K-unrem-001';
-
-			mockReadKnowledgeEvents.mockImplementationOnce(
-				makeReadKnowledgeEvents([
-					{
-						type: 'retrieved',
-						trace_id: 't1',
-						session_id: 's1',
-						agent: 'reviewer',
-						source: 'reviewer',
-						result_ids: [idNoVerdict],
-						phase: phaseLabel,
-						timestamp: '2024-01-01T10:00:00.000Z',
-					},
-					{
-						type: 'retrieved',
-						trace_id: 't2',
-						session_id: 's1',
-						agent: 'reviewer',
-						source: 'reviewer',
-						result_ids: [idUnremediated],
-						phase: phaseLabel,
-						timestamp: '2024-01-01T10:00:00.000Z',
-					},
-					{
-						type: 'violated',
-						knowledge_id: idUnremediated,
-						trace_id: 't3',
-						session_id: 's1',
-						agent: 'reviewer',
-						source: 'reviewer',
-						timestamp: '2024-01-01T11:00:00.000Z',
-					},
-				]),
-			);
-			mockCollectPhaseDirectiveIds.mockResolvedValueOnce([
-				idNoVerdict,
-				idUnremediated,
-			]);
-			mockReadEntriesById.mockResolvedValueOnce(
-				new Map([
-					[
-						idNoVerdict,
-						{
-							id: idNoVerdict,
-							directive_priority: 'critical',
-							status: 'established',
-						},
-					],
-					[
-						idUnremediated,
-						{
-							id: idUnremediated,
-							directive_priority: 'critical',
-							status: 'established',
-						},
-					],
-				]) as any,
-			);
-
-			const result = await evaluatePhaseCriticalDirectives({
-				directory: mockDir,
-				phaseLabel,
-			});
-
-			expect(result.blocked).toBe(true);
-			expect(result.unresolved).toContainEqual({
-				id: idNoVerdict,
-				reason: 'no_verdict',
-			});
-			expect(result.unresolved).toContainEqual({
-				id: idUnremediated,
-				reason: 'unremediated_violation',
-			});
-
-			// Verify the block message contains both IDs and correct explanations
-			const msg = formatDirectiveBlockMessage(result.unresolved);
-			expect(msg).toContain(idNoVerdict);
-			expect(msg).toContain(idUnremediated);
-			expect(msg).toContain('no terminal verdict');
-			expect(msg).toContain(
-				'violated with no subsequent applied/verified remediation',
-			);
-		});
+	it('renders both the entry and reason', () => {
+		const message = formatDirectiveBlockMessage([
+			{ id: ENTRY, trace_id: 'trace-a', reason: 'unremediated_violation' },
+		]);
+		expect(message).toContain(ENTRY);
+		expect(message).toContain('trace-a/');
+		expect(message).toContain('violated with no subsequent');
 	});
 });

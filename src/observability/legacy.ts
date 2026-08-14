@@ -233,6 +233,21 @@ export const KNOWN_TELEMETRY_KEYS: Readonly<Record<string, readonly string[]>> =
 			'resolutionPath',
 			'summary',
 		]),
+
+		// Best-effort projection only. receiptOutcome/receiptSource are domain
+		// values and do not populate the generic observability outcome.
+		knowledge_receipt_transition: Object.freeze([
+			'transition',
+			'reasonCode',
+			'schemaVersion',
+			'knowledgeTraceId',
+			'knowledgeEntryId',
+			'sessionId',
+			'taskId',
+			'phase',
+			'receiptOutcome',
+			'receiptSource',
+		]),
 	});
 
 const EMPTY_EXTRA: Record<string, unknown> = Object.freeze({});
@@ -379,9 +394,10 @@ function nonEmptyString(value: unknown): string | undefined {
  * Shallow, never throws, and NEVER synthesizes: an ID that is absent, empty, or
  * of the wrong type stays `undefined`. Only the mappings a producer actually
  * populates are implemented — `sessionId` to `hostSessionId`, `taskId`, `phase`
- * to `phaseId`, `laneId`, `batchId`. The remaining eight recognized IDs have no
- * current producer, and inventing an extraction for them would manufacture
- * exactly the joins issue #2029 item 2 forbids.
+ * to `phaseId`, `laneId`, `batchId`, plus the canonical receipt payload keys
+ * `knowledgeTraceId` and `knowledgeEntryId`. Unmapped IDs stay absent; inventing
+ * an extraction for them would manufacture exactly the joins issue #2029 item 2
+ * forbids.
  */
 export function extractWorkflowIds(data: unknown): WorkflowIds {
 	const ids: WorkflowIds = {};
@@ -400,6 +416,16 @@ export function extractWorkflowIds(data: unknown): WorkflowIds {
 
 		const batchId = nonEmptyString(record.batchId);
 		if (batchId !== undefined) ids.batchId = batchId;
+
+		const knowledgeTraceId = nonEmptyString(record.knowledgeTraceId);
+		if (knowledgeTraceId !== undefined) {
+			ids.knowledgeTraceId = knowledgeTraceId;
+		}
+
+		const knowledgeEntryId = nonEmptyString(record.knowledgeEntryId);
+		if (knowledgeEntryId !== undefined) {
+			ids.knowledgeEntryId = knowledgeEntryId;
+		}
 
 		// Phase 0 is a real phase, so numeric truthiness must not be used here.
 		const phase = record.phase;

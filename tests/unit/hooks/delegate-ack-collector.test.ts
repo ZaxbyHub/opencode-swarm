@@ -64,6 +64,7 @@ function knowledgeConfig(): KnowledgeConfig {
 		encounter_increment: 0.1,
 		max_encounter_score: 10,
 		default_max_phases: 10,
+		receipt_close_grace_days: 7,
 		todo_max_phases: 3,
 		sweep_enabled: true,
 	};
@@ -115,12 +116,13 @@ function buildPrompt(entries: RankedEntry[]): string {
 async function seedRetrieved(
 	directory: string,
 	resultIds: string[],
-	opts: { traceId?: string; sessionId?: string } = {},
+	opts: { traceId?: string; sessionId?: string; taskId?: string } = {},
 ): Promise<void> {
 	await appendKnowledgeEvent(directory, {
 		type: 'retrieved',
 		trace_id: opts.traceId ?? FIXED_TRACE_ID,
 		session_id: opts.sessionId ?? 'sess',
+		task_id: opts.taskId ?? 'task-42',
 		agent: 'coder',
 		query: 'delegate task',
 		retrieval_mode: 'delegate_inject',
@@ -169,10 +171,10 @@ describe('delegate-ack-collector', () => {
 		it('records one receipt per acked+shown directive with the correct type', async () => {
 			const transcript = [
 				'Done.',
-				`KNOWLEDGE_APPLIED:${ID_APPLIED}`,
-				`KNOWLEDGE_IGNORED:${ID_IGNORED} reason=not relevant here`,
-				`KNOWLEDGE_N_A:${ID_NA} reason=different subsystem`,
-				`KNOWLEDGE_APPLIED:${ID_CRITICAL}`,
+				`KNOWLEDGE_APPLIED:${FIXED_TRACE_ID}:${ID_APPLIED}`,
+				`KNOWLEDGE_IGNORED:${FIXED_TRACE_ID}:${ID_IGNORED} reason=not relevant here`,
+				`KNOWLEDGE_N_A:${FIXED_TRACE_ID}:${ID_NA} reason=different subsystem`,
+				`KNOWLEDGE_APPLIED:${FIXED_TRACE_ID}:${ID_CRITICAL}`,
 			].join('\n');
 
 			// (#1849) Seed the retrieved event the directive block's trace_id
@@ -208,8 +210,8 @@ describe('delegate-ack-collector', () => {
 
 		it('drops acks for IDs that were never shown (anti-spoofing)', async () => {
 			const transcript = [
-				`KNOWLEDGE_APPLIED:${ID_APPLIED}`,
-				`KNOWLEDGE_APPLIED:${ID_SPOOFED}`, // never in the directive block
+				`KNOWLEDGE_APPLIED:${FIXED_TRACE_ID}:${ID_APPLIED}`,
+				`KNOWLEDGE_APPLIED:${FIXED_TRACE_ID}:${ID_SPOOFED}`, // never in the directive block
 			].join('\n');
 
 			// (#1849) Seed the retrieved trace so the validator accepts the
@@ -252,8 +254,8 @@ describe('delegate-ack-collector', () => {
 				sessionId: 'sess-3',
 			});
 			const transcript = [
-				`KNOWLEDGE_APPLIED:${ID_APPLIED}`,
-				`KNOWLEDGE_VIOLATED:${ID_CRITICAL} reason=intentional violation`,
+				`KNOWLEDGE_APPLIED:${FIXED_TRACE_ID}:${ID_APPLIED}`,
+				`KNOWLEDGE_VIOLATED:${FIXED_TRACE_ID}:${ID_CRITICAL} reason=intentional violation`,
 			].join('\n');
 
 			const result = await collectDelegateAcks({
@@ -277,7 +279,7 @@ describe('delegate-ack-collector', () => {
 			// with KNOWLEDGE_APPLIED — the ok:false branch must preserve it in
 			// ackedIds so the unacknowledged-critical loop does NOT escalate it.
 			await seedRetrieved(dir, [ID_CRITICAL], { sessionId: 'other-session' });
-			const transcript = `KNOWLEDGE_APPLIED:${ID_CRITICAL}`;
+			const transcript = `KNOWLEDGE_APPLIED:${FIXED_TRACE_ID}:${ID_CRITICAL}`;
 			const result = await collectDelegateAcks({
 				directory: dir,
 				prompt: buildPrompt([rankedEntry(ID_CRITICAL, 'critical')]),
@@ -289,30 +291,8 @@ describe('delegate-ack-collector', () => {
 			expect(result.unacknowledgedCriticals).not.toContain(ID_CRITICAL);
 		});
 
-		it('(#PRR-003) writes a PromotionEvidenceRecord for a delegate applied ack', async () => {
-			// The delegate-ack path must write promotion evidence symmetrically
-			// with the knowledge_receipt tool. Seed a trace + ack ID_APPLIED →
-			// verify loadPromotionEvidenceByEntry returns a record.
-			await seedRetrieved(dir, [ID_APPLIED], { sessionId: 'sess-prr003' });
-			await collectDelegateAcks({
-				directory: dir,
-				prompt: buildPrompt([rankedEntry(ID_APPLIED, 'high')]),
-				transcript: `KNOWLEDGE_APPLIED:${ID_APPLIED}`,
-				agent: 'coder',
-				sessionId: 'sess-prr003',
-			});
-			const { loadPromotionEvidenceByEntry } = await import(
-				'../../../src/hooks/promotion-evidence-store'
-			);
-			const evidence = await loadPromotionEvidenceByEntry(dir);
-			const records = evidence[ID_APPLIED] ?? [];
-			expect(records.length).toBeGreaterThanOrEqual(1);
-			expect(records[0].entry_id).toBe(ID_APPLIED);
-			expect(records[0].receipt_outcome).toBe('applied');
-		});
-
 		it('extracts the task id from the prompt envelope when taskId is not provided', async () => {
-			const transcript = `KNOWLEDGE_APPLIED:${ID_APPLIED}`;
+			const transcript = `KNOWLEDGE_APPLIED:${FIXED_TRACE_ID}:${ID_APPLIED}`;
 
 			// (#1849) Seed the retrieved trace so the validator accepts the ack.
 			await seedRetrieved(dir, [ID_APPLIED], { sessionId: 'sess-4' });
@@ -340,6 +320,9 @@ describe('delegate-ack-collector', () => {
 
 	describe('Outcome 2 — times out unresponsive subagents', () => {
 		it('returns violated emitted event for unacknowledged critical when transcript is empty (timeout)', async () => {
+			await seedRetrieved(dir, [ID_CRITICAL], {
+				sessionId: 'sess-timeout-1',
+			});
 			const result = await collectDelegateAcks({
 				directory: dir,
 				prompt: buildPrompt([rankedEntry(ID_CRITICAL, 'critical')]),
@@ -357,6 +340,9 @@ describe('delegate-ack-collector', () => {
 		});
 
 		it('returns violated emitted event for unacknowledged critical when transcript is whitespace-only', async () => {
+			await seedRetrieved(dir, [ID_CRITICAL], {
+				sessionId: 'sess-timeout-2',
+			});
 			const result = await collectDelegateAcks({
 				directory: dir,
 				prompt: buildPrompt([rankedEntry(ID_CRITICAL, 'critical')]),
@@ -422,8 +408,8 @@ describe('delegate-ack-collector', () => {
 		it('returns correct emitted array and unacknowledgedCriticals for mixed acks', async () => {
 			// Only two of four directives were acknowledged; critical was not.
 			const transcript = [
-				`KNOWLEDGE_APPLIED:${ID_APPLIED}`,
-				`KNOWLEDGE_IGNORED:${ID_IGNORED} reason=handled differently`,
+				`KNOWLEDGE_APPLIED:${FIXED_TRACE_ID}:${ID_APPLIED}`,
+				`KNOWLEDGE_IGNORED:${FIXED_TRACE_ID}:${ID_IGNORED} reason=handled differently`,
 			].join('\n');
 
 			// (#1849) Seed the retrieved trace with all four shown IDs so the
@@ -431,6 +417,7 @@ describe('delegate-ack-collector', () => {
 			// still falls through to the auto-violated path).
 			await seedRetrieved(dir, [ID_APPLIED, ID_IGNORED, ID_CRITICAL, ID_NA], {
 				sessionId: 'sess-summary-1',
+				taskId: 'task-summary-1',
 			});
 
 			const result = await collectDelegateAcks({
@@ -467,11 +454,12 @@ describe('delegate-ack-collector', () => {
 		});
 
 		it('records events with correct sessionId, taskId, and agent in the event store', async () => {
-			const transcript = `KNOWLEDGE_APPLIED:${ID_APPLIED}`;
+			const transcript = `KNOWLEDGE_APPLIED:${FIXED_TRACE_ID}:${ID_APPLIED}`;
 
 			// (#1849) Seed the retrieved trace so the validator accepts the ack.
 			await seedRetrieved(dir, [ID_APPLIED], {
 				sessionId: 'sess-summary-2',
+				taskId: 'task-summary-2',
 			});
 
 			await collectDelegateAcks({
@@ -497,7 +485,10 @@ describe('delegate-ack-collector', () => {
 		});
 
 		it('writes unacknowledged-criticals.jsonl audit log when criticals are not acked', async () => {
-			const transcript = `KNOWLEDGE_APPLIED:${ID_APPLIED}`; // critical deliberately not acked
+			const transcript = `KNOWLEDGE_APPLIED:${FIXED_TRACE_ID}:${ID_APPLIED}`; // critical deliberately not acked
+			await seedRetrieved(dir, [ID_APPLIED, ID_CRITICAL], {
+				sessionId: 'sess-summary-3',
+			});
 
 			await collectDelegateAcks({
 				directory: dir,

@@ -8,8 +8,10 @@ import {
 	createKnowledgeInjectorHook,
 } from '../../../src/hooks/knowledge-injector';
 import type { RankedEntry } from '../../../src/hooks/knowledge-reader';
+import { validateAndCommitTerminalBatch } from '../../../src/hooks/knowledge-receipt-ledger';
 import type { MessageWithParts } from '../../../src/hooks/knowledge-types';
-import { swarmState } from '../../../src/state';
+import { loadPromotionEvidenceByEntry } from '../../../src/hooks/promotion-evidence-store';
+import { ensureAgentSession, swarmState } from '../../../src/state';
 
 const baseConfig = KnowledgeConfigSchema.parse({});
 const SESSION = 'session-1';
@@ -64,6 +66,7 @@ afterEach(() => {
 	_internals.recordKnowledgeShown = originalRecordShown;
 	swarmState.currentCriticalShownIds.clear();
 	swarmState.activeAgent.delete(SESSION);
+	swarmState.agentSessions.delete(SESSION);
 	rmSync(tempDir, { recursive: true, force: true });
 	rmSync('.tmp-tests', { recursive: true, force: true });
 });
@@ -359,5 +362,101 @@ describe('knowledge injector retrieved events', () => {
 		await hook({}, outputForUser('empty retrieval'));
 
 		expect(swarmState.currentCriticalShownIds.has('session-1')).toBe(false);
+	});
+
+	test('fails closed before displaying when authoritative membership cannot persist', async () => {
+		_internals.searchKnowledge = async () => ({
+			trace_id: 'trace-store-failure',
+			results: [rankedEntry('must-not-display')],
+		});
+		mkdirSync(path.join(tempDir, '.swarm', 'knowledge-receipts-v2.jsonl'));
+		const output = outputForUser('surface knowledge');
+
+		await createKnowledgeInjectorHook(tempDir, baseConfig)({}, output);
+
+		const text = output.messages
+			?.flatMap((message) => message.parts ?? [])
+			.map((part) => part.text ?? '')
+			.join('\n');
+		expect(text).not.toContain('must-not-display');
+		expect(swarmState.currentCriticalShownIds.has(SESSION)).toBe(false);
+	});
+
+	test('does not re-expose a cached directive after its exact pair terminalizes', async () => {
+		let searches = 0;
+		_internals.searchKnowledge = async () => {
+			searches++;
+			return {
+				trace_id: 'trace-cache-terminal',
+				results: [rankedEntry('terminalized-entry')],
+			};
+		};
+		const hook = createKnowledgeInjectorHook(tempDir, baseConfig);
+		await hook({}, outputForUser('same request'));
+		const terminal = await validateAndCommitTerminalBatch(tempDir, {
+			trace_id: 'trace-cache-terminal',
+			session_id: SESSION,
+			items: [
+				{
+					entry_id: 'terminalized-entry',
+					outcome: 'applied',
+					source: 'test',
+				},
+			],
+		});
+		expect(terminal.ok).toBe(true);
+
+		const repeated = outputForUser('same request');
+		await hook({}, repeated);
+
+		const repeatedText = repeated.messages
+			?.flatMap((message) => message.parts ?? [])
+			.map((part) => part.text ?? '')
+			.join('\n');
+		expect(searches).toBe(2);
+		expect(repeatedText).not.toContain('terminalized-entry');
+	});
+
+	test('preserves architect display lineage through a promotion-eligible terminal (#2031)', async () => {
+		// Regression finding #2031-W1. Falsification: removing either display-time
+		// lineage field makes the authoritative promotion reader return no record.
+		ensureAgentSession(SESSION, 'architect').cachedCohortId =
+			'cohort-architect';
+		writeFileSync(
+			path.join(tempDir, '.swarm', 'link.json'),
+			JSON.stringify({ version: 2, linkId: 'linked-worktree' }),
+		);
+		_internals.searchKnowledge = async () => ({
+			trace_id: 'trace-architect-lineage',
+			results: [rankedEntry('architect-lineage')],
+		});
+
+		await createKnowledgeInjectorHook(tempDir, baseConfig)(
+			{},
+			outputForUser('apply the directive'),
+		);
+		const terminal = await validateAndCommitTerminalBatch(tempDir, {
+			trace_id: 'trace-architect-lineage',
+			session_id: SESSION,
+			items: [
+				{
+					entry_id: 'architect-lineage',
+					outcome: 'applied',
+					source: 'architect_marker',
+				},
+			],
+		});
+		expect(terminal.ok).toBe(true);
+
+		const evidence = await loadPromotionEvidenceByEntry(
+			tempDir,
+			'cohort-architect',
+		);
+		expect(evidence['architect-lineage']?.[0]).toMatchObject({
+			cohort_id: 'cohort-architect',
+			source_link_id: 'linked-worktree',
+			retrieval_trace_id: 'trace-architect-lineage',
+			receipt_outcome: 'applied',
+		});
 	});
 });

@@ -14,14 +14,17 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
+	_internals,
 	ESCALATION_THRESHOLD,
 	ESCALATION_WINDOW_DAYS,
 	maybeEscalateOnViolation,
 } from '../../../src/hooks/knowledge-escalator.js';
 import { readKnowledgeEvents } from '../../../src/hooks/knowledge-events.js';
+import type { ReceiptMembership } from '../../../src/hooks/knowledge-receipt-ledger.js';
 
 const DAY = 24 * 60 * 60 * 1000;
 const NOW = new Date('2026-04-15T00:00:00.000Z');
+let historicalMemberships: ReceiptMembership[] = [];
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -72,6 +75,33 @@ function violatedLine(knowledgeId: string, timestampMs: number): string {
 /** Write multiple JSONL lines to a file. */
 function writeJsonl(filePath: string, lines: string[]): void {
 	fs.writeFileSync(filePath, `${lines.join('\n')}\n`);
+	if (path.basename(filePath) === 'knowledge-events.jsonl') {
+		historicalMemberships = lines.map((line, index) => {
+			const event = JSON.parse(line) as {
+				event_id: string;
+				trace_id: string;
+				knowledge_id: string;
+				timestamp: string;
+			};
+			return {
+				trace_id: `${event.trace_id}-${index}`,
+				entry_id: event.knowledge_id,
+				session_id: 'test',
+				critical: false,
+				committed_at: event.timestamp,
+				membership_event_id: `membership-${index}`,
+				grace_days: 7,
+				exposure_kind: 'legacy_unknown',
+				origin: 'v2',
+				terminal: {
+					outcome: 'violated',
+					source: 'test',
+					event_id: event.event_id,
+					committed_at: event.timestamp,
+				},
+			} satisfies ReceiptMembership;
+		});
+	}
 }
 
 // Lesson text constants. The near-duplicate pair has Jaccard bigram >= 0.6;
@@ -87,6 +117,7 @@ describe('maybeEscalateOnViolation — near-duplicate co-escalation', () => {
 	let swarmDir: string;
 	let knowledgePath: string;
 	let eventsPath: string;
+	const originalQueryHistoricalOutcomes = _internals.queryHistoricalOutcomes;
 
 	beforeEach(() => {
 		dir = fs.mkdtempSync(path.join(os.tmpdir(), 'escalator-near-dup-'));
@@ -94,9 +125,15 @@ describe('maybeEscalateOnViolation — near-duplicate co-escalation', () => {
 		fs.mkdirSync(swarmDir, { recursive: true });
 		knowledgePath = path.join(swarmDir, 'knowledge.jsonl');
 		eventsPath = path.join(swarmDir, 'knowledge-events.jsonl');
+		historicalMemberships = [];
+		_internals.queryHistoricalOutcomes = async () => ({
+			ok: true,
+			memberships: historicalMemberships,
+		});
 	});
 
 	afterEach(() => {
+		_internals.queryHistoricalOutcomes = originalQueryHistoricalOutcomes;
 		fs.rmSync(dir, { recursive: true, force: true });
 	});
 
@@ -221,7 +258,7 @@ describe('maybeEscalateOnViolation — near-duplicate co-escalation', () => {
 		expect(entryA.directive_priority).toBe('medium');
 	});
 
-	it('fail-open: falls back to exact-count when knowledge store is missing', async () => {
+	it('conservatively keeps exact authoritative count when near-duplicate lookup is unavailable', async () => {
 		const idA = randomUUID();
 
 		// Write events but do NOT create knowledge.jsonl — the near-dup

@@ -1,11 +1,13 @@
 /**
  * The event catalog (issue #2029).
  *
- * Exactly 40 entries, matching the `TelemetryEvent` union at
+ * Exactly 41 entries, matching the `TelemetryEvent` union at
  * `src/telemetry.ts:15-91`. Thirty-eight predate the #2029 contract; the 39th is
  * `agent_conflict_detected` (previously emitted through a force-cast past the
  * type system), and the 40th is `close_archive_result` (issue #2030 — the
- * structured close/archive result event). Both late additions are instances of
+ * structured close/archive result event). The 41st is the bounded diagnostic
+ * projection of authoritative knowledge-receipt transitions (issue #2031).
+ * These late additions are instances of
  * the defect class this contract exists to close: an event kind entering the
  * stream with no registration.
  *
@@ -67,7 +69,7 @@ export interface CatalogEntry {
 	/**
 	 * Whether an event of this kind must carry `trace.parentSpanId`.
 	 *
-	 * `false` for all 40 entries today, and that is a truthful statement about
+	 * `false` for all 41 entries today, and that is a truthful statement about
 	 * the current system rather than a placeholder: no producer supplies a
 	 * parent span, so `createObservation` never sets one. Setting this to `true`
 	 * for a kind whose producer cannot supply a parent would make every
@@ -778,6 +780,24 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_SINK,
+		},
+	],
+	[
+		'knowledge_receipt_transition',
+		{
+			category: 'knowledge',
+			severity: 'info',
+			// Optional trace/entry/session/task/phase IDs are pseudonymous. There
+			// is no prose, path, or non-transient circuit state in the payload.
+			privacyClass: 'pseudonymous',
+			producer: 'src/hooks/knowledge-receipt-observability.ts:155',
+			consumers: NO_CONSUMERS,
+			futureOwnerIssue: ISSUE_SINK,
+			retentionOwnerIssue: ISSUE_LIFECYCLE_RETENTION,
+			// Empty retrievals and uncertain legacy transitions truthfully lack
+			// some or all correlation IDs, so none is universally required.
+			requiredWorkflowIds: NO_WORKFLOW_IDS,
+			allowsLinks: false,
 		},
 	],
 ];
