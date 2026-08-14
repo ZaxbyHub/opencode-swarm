@@ -75,6 +75,11 @@ export async function handleResetCommand(
 		// so a survivor would attribute the old plan's failures to the new plan's
 		// identically-numbered tasks in the architect's injected run-memory block.
 		'run-memory.jsonl',
+		// Issue-trace per-issue receipts (issue #2131). They are issue-bound so a
+		// survivor cannot mis-satisfy a new trace's gates, but reset clears them so
+		// they do not accumulate across issues.
+		'reproduction.json',
+		'issue-publication.json',
 	];
 	const results: string[] = [];
 

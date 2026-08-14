@@ -895,8 +895,8 @@ End with a complete ledger mapping every original item to its outcome.
 If the verification bind is genuinely unreachable (the PR head cannot be
 fetched or checked out, or a compound `git fetch … && git checkout …` keeps
 being rejected — run them as TWO separate standalone commands first), call
-`abort_pr_workflow` with `mode: "PR_FEEDBACK"` and a one-line `reason`
-instead of looping. The tool refuses while PR workflow lanes are in flight
+`abort_pr_workflow` with `mode: "PR_FEEDBACK"`, `kind: "recovery"`, and a
+one-line `reason` instead of looping. The tool refuses while PR workflow lanes are in flight
 (collect their results with `collect_lane_results` first) AND refuses once
 the workflow is armed for publication (`prFeedbackReadyToPublish`) — after
 arming you MUST complete via `complete_pr_workflow` (or push the bound

@@ -53,7 +53,7 @@ describe('/swarm abort-pr-workflow command', () => {
 		expect(await readPrWorkflowGateState(directory, 'cmd-session')).toBeNull();
 	});
 
-	test('clears the active gate with no arguments (auto-detect mode)', async () => {
+	test('clears the active gate with no arguments (auto-detect mode, default force reason)', async () => {
 		await activatePrWorkflow(directory, 'auto-session', 'PR_FEEDBACK');
 		const result = await handleAbortPrWorkflowCommand(
 			directory,
@@ -61,7 +61,20 @@ describe('/swarm abort-pr-workflow command', () => {
 			'auto-session',
 		);
 		expect(result).toContain('Aborted active PR_FEEDBACK');
+		expect(result).toContain('(force)');
 		expect(await readPrWorkflowGateState(directory, 'auto-session')).toBeNull();
+		// The command supplies a default reason for the audit trail when none is
+		// given (issue #2131 finding 1a — the gate requires a non-empty reason).
+		const eventsPath = path.join(directory, '.swarm', 'events.jsonl');
+		const event = JSON.parse(
+			(await fs.readFile(eventsPath, 'utf-8'))
+				.trim()
+				.split('\n')
+				.pop() as string,
+		);
+		expect(event.kind).toBe('force');
+		expect(typeof event.reason).toBe('string');
+		expect(event.reason.length).toBeGreaterThan(0);
 	});
 
 	test('reports a usage error for an unknown mode token', async () => {

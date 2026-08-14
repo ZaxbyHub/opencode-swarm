@@ -257,7 +257,7 @@ export function handleIssueCommand(directory: string, args: string[]): string {
 	const traceState = {
 		issueNumber: issueInfo.number,
 		lastTransition: null as string | null,
-		completed: false,
+		status: 'in_progress' as const,
 	};
 
 	// Two-artifact transactional write with rollback

@@ -250,9 +250,15 @@ describe('swarm-pr-review deterministic async lane dispatch guidance', () => {
 		// Capability-profile model: the canonical skill must define all three
 		// profiles and must not treat controller absence as a BLOCKED condition.
 		expect(source).toContain('## Runtime Capability Profiles');
+		// Issue #2131 finding 1c: B/C are legitimate execution paths (controller
+		// absence is not BLOCKED), but their completion gate is PROCEDURAL, not the
+		// mechanical complete_pr_workflow receipt gate Profile A enforces. The skill
+		// must say both things and must not claim mechanical equivalence.
+		expect(source).toContain('legitimate execution paths whose');
 		expect(source).toContain(
-			'first-class execution paths, not degraded fallbacks',
+			'Completion-gate assurance is NOT equivalent across profiles',
 		);
+		expect(source).toContain('PROCEDURAL');
 		expect(source).toContain('Profile C — single context, no subagents');
 		expect(source).toContain(
 			'review comments, review summaries, requested changes',
