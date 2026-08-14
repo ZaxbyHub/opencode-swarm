@@ -15,6 +15,7 @@
  * All existing imports of this module continue to work unchanged.
  */
 
+export { _internals as _askInternals, askGraph } from './repo-graph/ask';
 export type {
 	RepoGraphInputMetadata,
 	RepoGraphInputWalkOptions,
@@ -82,6 +83,9 @@ export {
 	saveIfDirty,
 } from './repo-graph/storage';
 export type {
+	AskHit,
+	AskOptions,
+	AskResult,
 	BlastRadiusResult,
 	BuildWorkspaceGraphOptions,
 	CallerReference,
@@ -115,6 +119,7 @@ export type {
 export {
 	createEmptyGraph,
 	GRAPH_SCHEMA_VERSION,
+	inferPackageBoundary,
 	isSchemaVersionAtLeast,
 	normalizeGraphPath,
 	REPO_GRAPH_FILENAME,
