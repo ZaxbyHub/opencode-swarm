@@ -7,7 +7,7 @@
  * 4. buildDriftInjectionText throws synchronously → caught by try/catch
  * 5. readPriorDriftReports returns wrong type (empty string) → benign, no prepend
  * 6. cachedInjectionText is empty string "" → drift still prepended (not null check)
- * File-scoped mock.module fixtures are reset through their control mocks.
+ * file-scoped mock.module fixtures are reset through their control mocks.
  */
 
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';

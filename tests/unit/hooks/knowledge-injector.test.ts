@@ -15,7 +15,7 @@
  * - Idempotency
  * - No plan handling
  * - Unknown agent handling
- * File-scoped mock.module fixtures are reset through their control mocks.
+ * file-scoped mock.module fixtures are reset through their control mocks.
  */
 
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
