@@ -1212,6 +1212,13 @@ export async function clearPrWorkflowGateState(
  *      commit. The tool gate refuses armed abort too (defense in depth).
  *   4. Refuses while open `swarm-pr-*` delegations exist, matching
  *      `completePrWorkflow` — aborting mid-flight would orphan running lanes.
+ *   5. Issue #2131 finding 1a: a `recovery` abort of a BOUND gate (prHeadSha
+ *      set — checkout succeeded) is refused unless a controller-recorded
+ *      terminal recovery condition (`checkoutRecovery`) exists. Binding
+ *      succeeded, so "checkout unreachable" no longer justifies a recovery
+ *      abort; the architect must complete, or the user must authorize a
+ *      `force` abort. `force` may clear a bound gate without a recovery
+ *      condition (explicit user override).
  *
  * Records a non-fatal audit event into the existing `.swarm/events.jsonl`
  * (no new ledger file), then delegates to `clearPrWorkflowGateState`.
@@ -1219,7 +1226,11 @@ export async function clearPrWorkflowGateState(
 export async function abortPrWorkflow(
 	directory: string,
 	sessionID: string,
-	options: { expectedMode?: PrWorkflowMode; reason?: string } = {},
+	options: {
+		expectedMode?: PrWorkflowMode;
+		kind: 'recovery' | 'force';
+		reason: string;
+	} = { kind: 'recovery', reason: '' },
 ): Promise<{
 	mode: PrWorkflowMode;
 	prHeadSha?: string;
@@ -1250,18 +1261,41 @@ export async function abortPrWorkflow(
 			`BLOCKED: ${state.mode} abort refused while ${openLanes.length} PR workflow lane(s) are still in flight (lane ids: ${laneIds}). Collect their results or let them settle before aborting.`,
 		);
 	}
+	// Issue #2131 finding 1a: a recovery abort of a bound gate requires a
+	// controller-recorded terminal recovery condition. `checkoutRecovery` is
+	// stamped only by `markRecoveryRequired` when the Git state is genuinely
+	// recovery-required (UNMERGED_INDEX, GIT_OPERATION_IN_PROGRESS, …), so its
+	// presence is the honest signal that the bind path is unreachable even
+	// though a head was bound. A clean bind has none — recovery abort there
+	// would be a coverage shortcut and is refused (use force, user-authorized).
+	if (
+		options.kind === 'recovery' &&
+		state.prHeadSha &&
+		!state.checkoutRecovery
+	) {
+		throw new Error(
+			`BLOCKED: recovery abort of a bound ${state.mode} (pr_head_sha ${state.prHeadSha}) requires a controller-recorded terminal recovery condition (checkoutRecovery). Binding succeeded, so "checkout unreachable" no longer justifies a recovery abort — complete the workflow, resolve the Git recovery state, or use the user-authorized force abort (/swarm abort-pr-workflow) to override.`,
+		);
+	}
 	const sanitizedReason =
-		typeof options.reason === 'string'
+		typeof options.reason === 'string' && options.reason.trim().length > 0
 			? options.reason.trim().slice(0, 500)
 			: undefined;
+	if (sanitizedReason === undefined) {
+		throw new Error(
+			`BLOCKED: ${state.mode} abort requires a non-empty reason (recorded to the audit trail).`,
+		);
+	}
 	const abortEvent = {
 		type: 'pr_workflow_aborted',
 		timestamp: isoNow(),
 		sessionID: state.sessionID,
 		mode: state.mode,
+		kind: options.kind,
 		...(state.prHeadSha ? { prHeadSha: state.prHeadSha } : {}),
+		...(state.checkoutRecovery ? { hadTerminalRecovery: true } : {}),
 		openLanes: openLanes.length,
-		...(sanitizedReason ? { reason: sanitizedReason } : {}),
+		reason: sanitizedReason,
 	};
 	try {
 		const eventsPath = validateSwarmPath(directory, 'events.jsonl');
@@ -1330,6 +1364,13 @@ export async function bindPrWorkflowHead(
 				const nextState = {
 					...state,
 					prHeadSha: normalizedHead,
+					// Issue #2131 finding 1a: a successful bind means the checkout path
+					// was reachable, so any pre-bind checkoutRecovery marker is stale.
+					// Clearing it here prevents a recovery stamp from an earlier dirty-tree
+					// state from permanently re-enabling a recovery abort of this bound
+					// gate (which should require a fresh post-bind terminal condition, or a
+					// user force abort).
+					checkoutRecovery: undefined,
 					updatedAt: isoNow(),
 				};
 				await _test_exports.beforePrFeedbackTrackingPersist?.();

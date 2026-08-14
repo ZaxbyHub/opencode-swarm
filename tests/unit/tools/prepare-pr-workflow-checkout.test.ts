@@ -327,7 +327,10 @@ describe('prepare_pr_workflow_checkout', () => {
 			{ sessionID: SESSION_ID },
 		);
 		await stashStarted;
-		const abort = abortPrWorkflow(directory, SESSION_ID);
+		const abort = abortPrWorkflow(directory, SESSION_ID, {
+			kind: 'recovery',
+			reason: 'test',
+		});
 		const second = executePreparePrWorkflowCheckout(
 			{ paths: ['.opencode/opencode-swarm.json'] },
 			directory,

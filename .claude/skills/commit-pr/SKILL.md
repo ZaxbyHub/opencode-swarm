@@ -344,6 +344,13 @@ $prBodyPath = Join-Path ([System.IO.Path]::GetTempPath()) "pr_body.txt"
 gh pr create --title "<type>(<scope>): <description>" --body-file $prBodyPath --base main
 ```
 
+### Issue-trace publication receipt
+If this session is running an issue trace (`/swarm issue --trace`), call
+`record_issue_publication` with the issue number, PR number, URL, and HEAD sha immediately
+after `gh pr create` (or after `gh pr edit` / `gh pr ready` for an existing PR).
+This is what lets the issue-trace workflow reach its terminal `published` state —
+without it the trace stays at `publication_handoff` and is NOT considered resolved.
+
 ## Step 6a - PR monitoring subscription
 
 After PR creation, if the project uses PR monitoring (`pr_monitor.enabled: true`

@@ -176,6 +176,52 @@ describe('PR workflow exact checkout head', () => {
 		).resolves.toBeNull();
 	});
 
+	test('clears pre-existing checkoutRecovery on successful bind (ML-TI-001)', async () => {
+		const sessionID = 'clear-checkout-recovery';
+		_test_exports.resolveCurrentGitHead = () => HEAD_SHA;
+		await activatePrWorkflow(directory, sessionID, 'PR_REVIEW');
+		const statePath = path.join(
+			directory,
+			'.swarm',
+			_test_exports.workflowGateStateRelativePath(sessionID),
+		);
+		const existing = await readPrWorkflowGateState(directory, sessionID);
+		await fs.writeFile(
+			statePath,
+			JSON.stringify({
+				...existing!,
+				checkoutRecovery: {
+					code: 'GIT_STATE_INDETERMINATE',
+					retryable: false,
+					requiredAction: 'Resolve the indeterminate git state.',
+					evidence: {
+						worktreeRoot: directory,
+						gitDir: null,
+						operations: [],
+						unmergedCodes: [],
+						paths: [],
+						trackedCount: 0,
+						untrackedCount: 0,
+						pathsTruncated: false,
+					},
+					detectedAt: '2026-01-01T00:00:00Z',
+				},
+			}),
+			'utf-8',
+		);
+		_test_exports.resetTrackedStateCache();
+
+		// Precondition: checkoutRecovery must be present before bind to prove clearing.
+		const preBind = await readPrWorkflowGateState(directory, sessionID);
+		expect((preBind as Record<string, unknown>).checkoutRecovery).toBeDefined();
+
+		await bindPrWorkflowHead(directory, sessionID, HEAD_SHA);
+
+		const bound = await readPrWorkflowGateState(directory, sessionID);
+		expect(bound?.prHeadSha).toBe(HEAD_SHA);
+		expect((bound as Record<string, unknown>).checkoutRecovery).toBeUndefined();
+	});
+
 	test('reclaims a lock abandoned by a crashed process without removing a live owner lock', async () => {
 		const sessionID = 'abandoned-lock';
 		_test_exports.resolveCurrentGitHead = () => HEAD_SHA;

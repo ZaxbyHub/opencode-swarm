@@ -254,10 +254,15 @@ quoted or example material.`;
 
 const EXPLORER_CANDIDATE_COMMON_END = `
 A [CLEAN] row has exactly ${CLEAN_FIELD_COUNT - 1} fields after the marker and NO
-confidence field or trailing field. Emit it ONLY when the lane has zero findings
-— never alongside [CANDIDATE] rows. Write a substantive coverage_scope of at least 12
-characters and concrete evidence of at least 20 characters; bare
-header-only output is UNATTESTED for every PR-review lane.
+confidence field. A [CLEAN] attestation covers exactly ONE obligation (one lane or
+micro_lane identity) that has zero findings for it — never alongside [CANDIDATE] rows
+for the SAME obligation. A consolidated lane that owns multiple obligations MAY emit
+[CLEAN] alongside [CANDIDATE] rows when they are for DIFFERENT obligations: [CANDIDATE]
+rows for obligations where it found issues, and a distinct fully-populated [CLEAN]
+attestation for each remaining owned obligation that had zero findings; every owned
+obligation must receive exactly one of the two.
+Write a substantive coverage_scope of at least 12 characters and concrete evidence of at least 20
+characters; bare header-only output is UNATTESTED for every PR-review lane.
 Do NOT use the default PROJECT/STRUCTURE output format for this dispatch.`;
 
 export const BASE_EXPLORER_CANDIDATE_FORMAT_SUFFIX = `${EXPLORER_CANDIDATE_COMMON_RULES}

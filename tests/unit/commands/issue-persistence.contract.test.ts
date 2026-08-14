@@ -429,7 +429,7 @@ describe('issue persistence — rollback and atomic-write contracts', () => {
 		const tracePath = path.join(swarmDir, 'issue-trace-state.json');
 		const firstTrace = JSON.parse(fsSync.readFileSync(tracePath, 'utf-8'));
 		expect(firstTrace.issueNumber).toBe(42);
-		expect(firstTrace.completed).toBe(false);
+		expect(firstTrace.status).toBe('in_progress');
 
 		const firstRefPath = path.join(swarmDir, 'issue-reference.json');
 		const firstRef = JSON.parse(fsSync.readFileSync(firstRefPath, 'utf-8'));
@@ -447,7 +447,7 @@ describe('issue persistence — rollback and atomic-write contracts', () => {
 		const secondTrace = JSON.parse(fsSync.readFileSync(tracePath, 'utf-8'));
 		expect(secondTrace.issueNumber).toBe(99);
 		expect(secondTrace.lastTransition).toBe(null);
-		expect(secondTrace.completed).toBe(false);
+		expect(secondTrace.status).toBe('in_progress');
 
 		// issue-reference.json also updated
 		const secondRef = JSON.parse(fsSync.readFileSync(firstRefPath, 'utf-8'));

@@ -90,3 +90,10 @@ After the PR is open, watch its checks. If CI fails, read the logs, reproduce
 locally, fix the real cause, and push again. A PR is not done until its required
 checks are green and any review feedback is addressed. Do not merge over failing
 required checks or disable a check to go green.
+
+If this session is running an issue trace (`/swarm issue --trace`), call
+`record_issue_publication` (issue number, PR number, canonical PR URL, HEAD sha)
+right after the PR is opened so the issue-trace workflow can reach its terminal
+`published` state — without it the trace stays at `publication_handoff` and is NOT
+considered resolved.
+

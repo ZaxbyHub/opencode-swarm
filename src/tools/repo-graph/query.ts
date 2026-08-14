@@ -1,3 +1,4 @@
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
 	containsControlChars,
@@ -695,7 +696,12 @@ export function getContextPack(
 	graph: RepoGraph,
 	file: string,
 	symbol: string,
-	options: { maxDepth?: number; maxTokens?: number } = {},
+	options: {
+		maxDepth?: number;
+		maxTokens?: number;
+		includeSource?: boolean;
+		directory?: string;
+	} = {},
 ): ContextPackResult {
 	if (!isSchemaVersionAtLeast(graph.schema_version, '1.2.0')) {
 		return {
@@ -789,11 +795,27 @@ export function getContextPack(
 	const TOKENS_PER_SIGNATURE = 10;
 
 	// Build spans from exportRanges, attaching depth for ordering.
+	// Internal-symbol fallback: when a BFS-reached symbol has no exportRanges
+	// entry, emit a file-level signature pointer instead of silently dropping it.
 	const spansWithDepth: { span: ContextPackSpan; depth: number }[] = [];
 	for (const { file: symFile, symbol: sym, depth: d } of reached) {
 		const node = graph.nodes[symFile];
 		const range = node?.exportRanges?.[sym];
-		if (!range) continue;
+
+		if (!range) {
+			spansWithDepth.push({
+				span: {
+					file: symFile,
+					symbol: sym,
+					startLine: 1,
+					endLine: 1,
+					mode: 'signature',
+					note: 'internal symbol — span unavailable',
+				},
+				depth: d,
+			});
+			continue;
+		}
 
 		const mode: 'full' | 'signature' =
 			d === 0 ? 'full' : d < maxDepth ? 'full' : 'signature';
@@ -823,13 +845,17 @@ export function getContextPack(
 		return a.span.symbol.localeCompare(b.span.symbol);
 	});
 
+	const includeSource = options.includeSource ?? false;
+	const directory = options.directory ?? graph.workspaceRoot;
+	const MAX_SOURCE_LINES = 80;
+
 	// Apply token budget; keep at least the target span if present.
 	let estimatedTokens = 0;
 	const finalSpans: ContextPackSpan[] = [];
 	let truncated = false;
 
 	for (const { span } of spansWithDepth) {
-		const spanTokens =
+		let spanTokens =
 			span.mode === 'full'
 				? (span.endLine - span.startLine + 1) * TOKENS_PER_LINE
 				: TOKENS_PER_SIGNATURE;
@@ -839,17 +865,51 @@ export function getContextPack(
 			break;
 		}
 
+		if (includeSource && !span.note && span.mode === 'full') {
+			const absPath = path.isAbsolute(span.file)
+				? span.file
+				: path.resolve(directory, span.file);
+			const resolved = path.resolve(absPath);
+			const resolvedDir = path.resolve(directory);
+			if (
+				resolved.startsWith(resolvedDir + path.sep) ||
+				resolved === resolvedDir
+			) {
+				try {
+					const content = fs.readFileSync(resolved, 'utf-8');
+					const lines = content.split('\n');
+					const start = Math.max(0, span.startLine - 1);
+					const end = Math.min(
+						lines.length,
+						span.startLine - 1 + MAX_SOURCE_LINES,
+						span.endLine,
+					);
+					const slice = lines.slice(start, end);
+					span.text = slice.join('\n');
+					spanTokens = slice.length * TOKENS_PER_LINE;
+				} catch {
+					span.note = 'source read failed';
+				}
+			}
+		}
+
 		finalSpans.push(span);
 		estimatedTokens += spanTokens;
 	}
 
-	return {
+	const result: ContextPackResult = {
 		schemaSupported: true,
 		target: { file: targetFile, symbol },
 		spans: finalSpans,
 		truncated,
 		estimatedTokens,
 	};
+
+	if (includeSource) {
+		result.sourceIncluded = true;
+	}
+
+	return result;
 }
 
 function collectExternallyUsedSymbols(

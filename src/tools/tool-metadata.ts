@@ -243,6 +243,16 @@ export const TOOL_METADATA = {
 			'prepare an auditable PR workflow checkout or restore its exact original branch/HEAD and preserved stash after terminal cleanup',
 		agents: ['architect'],
 	},
+	record_issue_publication: {
+		description:
+			'record a publication receipt so the /swarm issue --trace workflow reaches its terminal published state after the PR is created/updated',
+		agents: ['architect'],
+	},
+	record_issue_reproduction: {
+		description:
+			'record the reproduction outcome for the current traced issue so the /swarm issue --trace workflow can satisfy its reproduction gate and transition to PLAN',
+		agents: ['architect'],
+	},
 	run_pr_feedback_stage_a: {
 		description:
 			'execute and persist mandatory PR-feedback Stage A checks on a content-bound revision',
