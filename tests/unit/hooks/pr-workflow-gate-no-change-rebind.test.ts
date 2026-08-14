@@ -14,7 +14,6 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 import { mkdtempSync, realpathSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
@@ -36,6 +35,7 @@ import {
 	recordPrFeedbackGateBatch,
 	recordPrFeedbackStageA,
 } from '../../../src/hooks/pr-workflow-gate.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const SESSION_ID = 'feedback-no-change';
 const HEAD_SHA = 'a'.repeat(40);

@@ -7,12 +7,12 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, realpathSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const GATE_SCRIPT = path.join(
 	import.meta.dir,
