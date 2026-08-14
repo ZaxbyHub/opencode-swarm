@@ -18,6 +18,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { PluginConfig } from '../../../src/config';
+import { resolveModelLimit } from '../../../src/hooks/model-limits';
 import { createSystemEnhancerHook } from '../../../src/hooks/system-enhancer';
 import {
 	getLiveContextModelIdentity,
@@ -266,6 +267,57 @@ describe('system-enhancer: budget denominator derives from model.limit.context',
 		expect(getLiveContextModelIdentity('model-window-session')).toEqual({
 			modelID: 'green-s',
 			providerID: 'greenpt',
+		});
+	});
+
+	it('preserves host identity casing while matching cache lookups case-insensitively', async () => {
+		await runHook(
+			configWith(),
+			modelOf('MiniMax-M3', 'MiniMax', 1_000_000),
+			promptOf(1000),
+		);
+
+		const identity = getLiveContextModelIdentity('model-window-session');
+		expect(identity).toEqual({
+			modelID: 'MiniMax-M3',
+			providerID: 'MiniMax',
+		});
+		expect(
+			getLiveContextWindow('model-window-session', {
+				modelID: 'minimax-m3',
+				providerID: 'minimax',
+			}),
+		).toBe(1_000_000);
+		expect(
+			resolveModelLimit(identity?.modelID, identity?.providerID, {
+				'MiniMax/MiniMax-M3': 1_000_000,
+			}),
+		).toBe(1_000_000);
+	});
+
+	it('does not let an identity-less window clobber an exact model binding', async () => {
+		await runHook(configWith(), HUGE_WINDOW_MODEL, promptOf(1000));
+		await runHook(configWith(), { limit: { context: 128000 } }, promptOf(1000));
+
+		expect(
+			getLiveContextWindow('model-window-session', {
+				modelID: HUGE_WINDOW_MODEL.id,
+				providerID: HUGE_WINDOW_MODEL.providerID,
+			}),
+		).toBe(1_000_000);
+		expect(getLiveContextModelIdentity('model-window-session')).toEqual({
+			modelID: HUGE_WINDOW_MODEL.id,
+			providerID: HUGE_WINDOW_MODEL.providerID,
+		});
+	});
+
+	it('retains an initial generic live window when no identity is available', async () => {
+		await runHook(configWith(), { limit: { context: 200000 } }, promptOf(1000));
+
+		expect(getLiveContextWindow('model-window-session')).toBe(200000);
+		expect(getLiveContextModelIdentity('model-window-session')).toEqual({
+			modelID: undefined,
+			providerID: undefined,
 		});
 	});
 

@@ -1,26 +1,22 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import {
-	existsSync,
-	mkdirSync,
-	mkdtempSync,
-	rmSync,
-	writeFileSync,
-} from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
 	readCriteria,
 	writeCriteria,
 } from '../../../src/council/criteria-store';
+import { safeRmRecursive } from '../../helpers/safe-test-dir';
 
 let tempDir: string;
 
 beforeEach(() => {
 	tempDir = mkdtempSync(join(tmpdir(), 'council-test-'));
+	mkdirSync(join(tempDir, '.opencode'));
 });
 
 afterEach(() => {
-	rmSync(tempDir, { recursive: true, force: true });
+	safeRmRecursive(tempDir);
 });
 
 describe('criteria-store round-trip', () => {

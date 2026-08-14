@@ -63,112 +63,19 @@ If `council.general.enabled` is true in the resolved opencode-swarm config AND a
 - Write the final spec to `.swarm/spec.md`.
 - Exit when reviewer signs off (or user explicitly accepts remaining disagreements).
 
-**Phase 6: QA GATE SELECTION, PARALLEL CODERS, AND COMMIT FREQUENCY (architect, dialogue only).**
-Auto-loop exception: when BRAINSTORM is running inside MODE: LOOP with
-`autonomy=auto`, do not ask this preference question. Write the balanced-speed
-default `## Pending QA Gate Selection` instead (reviewer, test_engineer,
-sme_enabled, critic_pre_plan, sast_enabled, drift_check ON; council_mode,
-hallucination_guard, mutation_test, phase_council, final_council OFF). Do not
-write `## Pending Parallelization Config` here because task scopes are not known
-until PLAN; MODE: PLAN will choose safe parallelism automatically. Keep commit
-frequency at phase-level only.
-Now ask the user which QA gates to enable for this plan, how many parallel coders to use, the commit frequency, and auto_proceed -- do not select on their behalf. Present all four items together as one unified exchange.
-
-<!-- BEGIN QA_GATE_BODY -->
-
-Present the eleven gates with their defaults (DEFAULT_QA_GATES), parallel coder count, commit frequency, and auto_proceed as a single user-facing section. Offer the user a one-shot choice: accept defaults, or customize. The eleven gates are:
-- reviewer (default: ON) - code review of coder output
-- test_engineer (default: ON) - test verification of coder output
-- sme_enabled (default: ON) - SME consultation during planning/clarification
-- critic_pre_plan (default: ON) - critic review before plan finalization
-- sast_enabled (default: ON) - static security scanning
-- council_mode (default: OFF) - replaces per-task Stage B (reviewer + test_engineer) with the full 5-member council (critic, reviewer, sme, test_engineer, explorer). Requires council.enabled: true in config.
-- hallucination_guard (default: OFF) - when enabled, mandatory per-phase API/signature/claim/citation verification at PHASE-WRAP; phase_complete will REJECT phase completion unless .swarm/evidence/{phase}/hallucination-guard.json exists with an APPROVED verdict.
-- mutation_test (default: OFF) - when enabled, runs mutation testing on source files touched this phase via generate_mutants + mutation_test + write_mutation_evidence at PHASE-WRAP; FAIL verdict blocks phase_complete; WARN is non-blocking.
-- phase_council (default: OFF) - full 5-member council reviews all work in a phase holistically at phase_complete time. Requires council.enabled: true in config.
-- drift_check (default: ON) - mandatory per-phase drift verification via critic_drift_verifier at PHASE-WRAP; hard-blocks phase_complete when spec.md exists and drift evidence is missing or REJECTED; advisory-only when no spec.md exists.
-- final_council (default: OFF) - when enabled, after all phases complete the architect dispatches the full 5-member council (critic, reviewer, sme, test_engineer, explorer) - NOT the General Council - at project scope, collects `CouncilMemberVerdict` objects, and calls `write_final_council_evidence`. This does not require `council.general.enabled`.
-
-Additionally, present these three sub-items as part of the same exchange:
-- Parallel coders (default: 1, range: 1-6) - how many coders should run in parallel. Parallel coders each run in an isolated git worktree (separate working dir + branch) and merge back automatically, so they never overwrite each other's files - safe and faster, but only for tasks whose declared file scopes do NOT overlap. The per-task file scopes that determine a safe parallel count are not known until the plan is finalized, so default to 1 (serial) here; the precise recommendation is made at plan time once the tasks and their scopes exist.
-  > COMMON MISCONCEPTION: worktree isolation is baseline for standard parallel coders, governed by the parallel execution profile plus top-level `worktree.policy`. It is not provided by Lean Turbo or Epic. Do not recommend Lean Turbo or Epic to obtain worktree isolation; recommend them only for what they add beyond baseline (Lean Turbo: lane planning, file locks, phase reviewer, integrated diff; Epic: co-change awareness and auto-decide). Worktrees also do not make overlapping scopes safe: dependency readiness, file-disjoint scopes, and merge-back ownership are still required.
-- Commit frequency (default: phase-level only) - optional per-task checkpoint commit after each task completion.
-- auto_proceed (boolean, default: false) - when true, auto-advance to the next phase without asking "Ready for Phase N+1?"; runtime toggle via /swarm auto-proceed on|off.
-
-<!-- END QA_GATE_BODY -->
-
-The user answers all four items (gates, parallel coders, commit frequency, auto_proceed) in one exchange. Wait for the user's response.
-
-If the user says parallel coders > 1, write a `## Pending Parallelization Config` section to `.swarm/context.md` alongside the gate selection:
-```
-## Pending Parallelization Config
-- parallelization_enabled: true
-- max_concurrent_tasks: <user's number>
-- council_parallel: false
-- locked: true
-- recorded_at: <ISO timestamp>
-```
-If the user accepts the default (1), skip writing this section entirely -- serial execution is the default and needs no config.
-
-If the user chooses per-task commits, write this section to `.swarm/context.md`:
-```
-## Task Completion Commit Policy
-- commit_after_each_completed_task: true
-- recorded_at: <ISO timestamp>
-```
-If the user keeps the default phase-level behavior, do not write this section.
-
-<!-- BEHAVIORAL_GUIDANCE_START -->
-GATE SELECTION IS MANDATORY — these thoughts are WRONG and must be ignored:
-  ✗ "I'll use the defaults — they're probably fine"
-    → WRONG: defaults are not the user's decision. The user must be asked every time.
-  ✗ "The user didn't mention gates, so defaults are fine"
-    → WRONG: silence is not consent. The gate dialogue is not optional.
-  ✗ "I'll handle it in MODE: PLAN after the spec is done"
-    → WRONG: ## Pending QA Gate Selection must exist in context.md BEFORE save_plan is called.
-      save_plan will reject with QA_GATE_SELECTION_REQUIRED if this section is absent.
-  ✗ "This feature is simple — gates are obvious"
-    → WRONG: complexity does not exempt this step. Gate selection is mandatory for ALL plans.
-  ✗ "I already know which gates are right for this project"
-    → WRONG: the architect does not configure gates. The user configures gates. Always ask.
-
-MANDATORY PAUSE: Do NOT write the spec summary (Phase 7 transition). Do NOT suggest next steps.
-Exception: MODE: LOOP with `autonomy=auto` uses the balanced-speed defaults
-above and does not pause for this preference exchange.
-You are BLOCKED until ALL THREE of these conditions are met:
-  (1) The unified gate/coders/commit/auto_proceed selection section has been presented to the user in a single message
-  (2) The user has responded (accept defaults OR customized list for all four items)
-  (3) The elected gates, parallel coder config, commit policy, and auto_proceed selection have been written to .swarm/context.md under "## Pending QA Gate Selection" (and related sections as applicable)
-<!-- BEHAVIORAL_GUIDANCE_END -->
-
-Do NOT call `set_qa_gates` yet — `plan.json` does not exist at this point. Once the user answers, write the elected gates to `.swarm/context.md` under a new section:
-```
-## Pending QA Gate Selection
-- reviewer: <true|false>
-- test_engineer: <true|false>
-- sme_enabled: <true|false>
-- critic_pre_plan: <true|false>
-- sast_enabled: <true|false>
-- council_mode: <true|false>
-- hallucination_guard: <true|false>
-- mutation_test: <true|false>
-- phase_council: <true|false>
-- drift_check: <true|false>
-- final_council: <true|false>
-- auto_proceed: <true|false>
-- recorded_at: <ISO timestamp>
-```
-MODE: PLAN applies these after `save_plan` succeeds via `set_qa_gates`.
-- Exit with the elected gates recorded in `.swarm/context.md` (NOT yet persisted to plan.json).
+**Phase 6: DEFER QA AND EXECUTION PROFILE SELECTION.**
+- BRAINSTORM does not collect, infer, or stage QA gates, parallel coder count, commit frequency, or `auto_proceed`.
+- MODE: PLAN owns the unified four-choice dialogue after it has drafted task scopes and frozen the exact plan identity (`swarm_id` plus title). MODE: LOOP with `autonomy=auto` also applies its balanced-speed defaults there without pausing.
+- Do not write execution choices to `.swarm/context.md`.
 
 **Phase 7: TRANSITION.**
-- Summarize: (a) chosen approach, (b) design sections produced, (c) spec written, (d) QA gates selected, (e) remaining `[NEEDS CLARIFICATION]` markers.
-- Offer the user two next steps: `PLAN` (go to MODE: PLAN and write plan.md) or `CLARIFY-SPEC` (resolve remaining markers first).
+- Summarize: (a) chosen approach, (b) design sections produced, (c) spec written, and (d) remaining `[NEEDS CLARIFICATION]` markers.
+- Offer the user two next steps: `PLAN` (go to MODE: PLAN and persist the plan via the authoritative ledger-backed `save_plan` tool; never write `.swarm/plan.md` directly) or `CLARIFY-SPEC` (resolve remaining markers first).
 - Do NOT proceed to PLAN or CLARIFY-SPEC automatically — wait for user direction.
 
 BRAINSTORM RULES:
 - No skipping phases. Each phase's exit condition must be met before moving on.
-- One question per message in DIALOGUE — never batch. Exception: the QA gate selection section (Phase 6) presents gates, parallel coders, and commit frequency together as one unified exchange.
+- One question per message in DIALOGUE — never batch. MODE: PLAN owns the later unified QA and execution-profile exchange.
 - Always offer an informed default for every question.
 - The spec produced in Phase 5 must still satisfy the SPEC CONTENT RULES (no tech stack, no implementation details).
-- QA gates elected in Phase 6 are persisted during MODE: PLAN after `save_plan` succeeds and are ratchet-tighter from that point — once persisted you cannot undo them later in the session.
+- QA gates are first selected and persisted during MODE: PLAN against the exact plan identity; they are ratchet-tighter from that point.

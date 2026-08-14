@@ -17,6 +17,7 @@ import {
 import { withEvidenceLock } from '../evidence/lock.js';
 import { emit } from '../telemetry.js';
 import { criticalWarn, log } from '../utils/logger';
+import { assertProjectRoot } from '../utils/project-boundary';
 import { derivePlanId } from './utils';
 
 /**
@@ -202,7 +203,19 @@ export function computePlanHash(plan: Plan): string {
 		swarm: plan.swarm,
 		current_phase: plan.current_phase,
 		migration_status: plan.migration_status,
-		execution_profile: plan.execution_profile,
+		execution_profile: plan.execution_profile
+			? {
+					...plan.execution_profile,
+					// Backward compatibility: this field was added with a false default.
+					// Schema parsing therefore injects `false` into pre-upgrade plans.
+					// Omit that default from the hash so their persisted ledger hashes
+					// remain valid; opting in with `true` must still move the hash.
+					commit_after_each_completed_task:
+						plan.execution_profile.commit_after_each_completed_task === true
+							? true
+							: undefined,
+				}
+			: undefined,
 		phases: plan.phases.map((phase) => ({
 			id: phase.id,
 			name: phase.name,
@@ -262,7 +275,18 @@ export function computePlanStructureHash(plan: Plan): string {
 		swarm: plan.swarm,
 		current_phase: plan.current_phase,
 		migration_status: plan.migration_status,
-		execution_profile: plan.execution_profile,
+		execution_profile: plan.execution_profile
+			? {
+					...plan.execution_profile,
+					// Keep legacy critic approvals valid when PlanSchema injects the new
+					// default-false commit policy. Only an explicit opt-in changes the
+					// status-excluded structural hash.
+					commit_after_each_completed_task:
+						plan.execution_profile.commit_after_each_completed_task === true
+							? true
+							: undefined,
+				}
+			: undefined,
 		phases: plan.phases.map((phase) => ({
 			id: phase.id,
 			name: phase.name,
@@ -420,6 +444,7 @@ export async function initLedger(
 	initialPlanHash?: string,
 	initialPlan?: Plan,
 ): Promise<void> {
+	assertProjectRoot(directory);
 	const ledgerPath = getLedgerPath(directory);
 	const planJsonPath = getPlanJsonPath(directory);
 
@@ -496,6 +521,7 @@ export async function appendLedgerEvent(
 		planHashAfter?: string;
 	},
 ): Promise<LedgerEvent> {
+	assertProjectRoot(directory);
 	return withEvidenceLock(
 		directory,
 		LEDGER_LOCK_PATH,
@@ -1203,6 +1229,7 @@ export async function quarantineLedgerSuffix(
 	}
 
 	try {
+		assertProjectRoot(directory);
 		// Unique, non-overwriting side path: timestamp for ordering + content hash
 		// for identity, so distinct corruptions never collide on the same filename.
 		const hash = crypto

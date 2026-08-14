@@ -2329,14 +2329,17 @@ export const PrmConfigSchema = z.object({
 			ping_pong: z.number().min(1).default(2),
 			expansion_drift: z.number().min(1).default(3),
 			stuck_on_test: z.number().min(1).default(3),
-			context_thrash: z.number().min(1).default(3),
+			// Issue #2134 (tuning): was 3, which fired on any agent that read three
+			// files in a row. Keep in sync with `DEFAULT_THRESHOLDS` in
+			// `src/prm/pattern-detector.ts`.
+			context_thrash: z.number().min(1).default(10),
 		})
 		.default(() => ({
 			repetition_loop: 2,
 			ping_pong: 2,
 			expansion_drift: 3,
 			stuck_on_test: 3,
-			context_thrash: 3,
+			context_thrash: 10,
 		})),
 	max_trajectory_lines: z.number().min(10).default(1000),
 	escalation_enabled: z.boolean().default(true),

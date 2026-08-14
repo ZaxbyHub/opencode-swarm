@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { safeRmRecursive } from '../../tests/helpers/safe-test-dir';
 import { executeSavePlan } from './save-plan';
 
 let tmpDir: string;
@@ -28,7 +29,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-	rmSync(tmpDir, { recursive: true, force: true });
+	safeRmRecursive(tmpDir);
 });
 
 describe('save_plan subdirectory rejection (issue #577 regression)', () => {
@@ -45,21 +46,18 @@ describe('save_plan subdirectory rejection (issue #577 regression)', () => {
 		expect(result.message).toContain('project root');
 	});
 
-	// ── 2. Completely different absolute path is NOT rejected by anchor check ──
+	// ── 2. An unrelated nonexistent absolute path fails closed ──
 
-	it('does not reject working_directory that is a completely different absolute path at anchor check', async () => {
-		const wrongDir = '/tmp/wrong-dir';
+	it('rejects an unrelated nonexistent working_directory without creating state', async () => {
+		const wrongDir = `${tmpDir}-unrelated-missing-root`;
 		const result = await executeSavePlan(
 			{ ...minimalPlan, working_directory: wrongDir },
 			tmpDir,
 		);
 
-		// Anchor check only rejects true subdirectories; explicit absolutes proceed.
-		// May fail later (e.g. SPEC_REQUIRED), but NOT due to the anchor check.
-		expect(result.message).not.toContain('project root');
-		expect(
-			result.errors?.some((e) => e.includes('not the project root')),
-		).not.toBe(true);
+		expect(result.success).toBe(false);
+		expect(result.message).toContain('project root');
+		expect(existsSync(wrongDir)).toBe(false);
 	});
 
 	// ── 3. working_directory matching fallbackDir exactly is NOT rejected by anchor check ──

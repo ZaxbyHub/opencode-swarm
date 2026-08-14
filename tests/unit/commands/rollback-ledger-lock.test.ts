@@ -1,17 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
-import * as fsSync from 'node:fs';
-import {
-	existsSync,
-	mkdirSync,
-	mkdtempSync,
-	rmSync,
-	writeFileSync,
-} from 'node:fs';
-import os from 'node:os';
+import * as realFs from 'node:fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import * as realHookUtils from '../../../src/hooks/utils.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 // Mock validateSwarmPath before importing rollback.ts (it binds at module load)
 mock.module('../../../src/hooks/utils.js', () => ({
+	...realHookUtils,
 	validateSwarmPath: (directory: string, filename: string) =>
 		path.join(directory, '.swarm', filename),
 }));
@@ -51,7 +47,7 @@ function createCheckpointDir(phase: number, files: string[] = ['plan.md']) {
 }
 
 beforeEach(() => {
-	testDir = mkdtempSync(path.join(os.tmpdir(), 'rollback-ledger-test-'));
+	testDir = canonicalMkdtemp('rollback-ledger-test-');
 	mkdirSync(getSwarmDir(), { recursive: true });
 });
 
@@ -69,7 +65,7 @@ describe('handleRollbackCommand — ledger EBUSY stale-warning (FR-006 SC-011)',
 		});
 
 		await mock.module('node:fs', () => ({
-			...fsSync,
+			...realFs,
 			unlinkSync: mock((p: string) => {
 				if (p.endsWith('plan-ledger.jsonl')) {
 					throw ebusiError;
@@ -107,7 +103,7 @@ describe('handleRollbackCommand — ledger EBUSY stale-warning (FR-006 SC-011)',
 		});
 
 		await mock.module('node:fs', () => ({
-			...fsSync,
+			...realFs,
 			unlinkSync: mock((p: string) => {
 				if (p.endsWith('plan-ledger.jsonl')) {
 					throw ebusiError;
@@ -144,7 +140,7 @@ describe('handleRollbackCommand — ledger EBUSY stale-warning (FR-006 SC-011)',
 		});
 
 		await mock.module('node:fs', () => ({
-			...fsSync,
+			...realFs,
 			unlinkSync: mock((p: string) => {
 				if (p.endsWith('plan-ledger.jsonl')) {
 					throw ebusiError;

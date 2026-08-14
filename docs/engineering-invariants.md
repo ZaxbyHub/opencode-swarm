@@ -43,10 +43,10 @@ Each entry below points at a release note in `docs/releases/` and the invariant(
 - **Fix applied:**
   - Added `MAX_DEPTH = 20` constant bounding the parent walk
   - Added `PROJECT_INDICATORS` array (11 items): `package.json`, `.git`, `.opencode`, `Cargo.toml`, `go.mod`, `pyproject.toml`, `Gemfile`, `composer.json`, `pom.xml`, `build.gradle`, `CMakeLists.txt`
-  - Stray `.swarm/` directories without a coexisting project indicator are ignored (fail-open at depth limit)
+  - Stray `.swarm/` directories without a coexisting project indicator are ignored while the bounded ancestor walk continues
   - Fail-closed on non-ENOENT indicator errors (EPERM, EBUSY → assume indicator present)
   - `realpathSync` for junction/symlink resolution
-- **Invariant established:** `validateProjectRoot` prevents unbounded traversal while distinguishing genuine parent projects (`.swarm/` + project indicator) from stray artifacts (`.swarm/` alone). Depth limit is fail-open; indicator errors are fail-closed.
+- **Invariant established:** `validateProjectRoot` prevents unbounded traversal while distinguishing genuine parent projects (`.swarm/` + project indicator) from stray artifacts (`.swarm/` alone). Issue #2127 subsequently strengthened the ambiguous depth-limit case to fail closed; indicator errors also fail closed.
 - **Maps to AGENTS.md:** invariant 4 (working directory and `.swarm/` containment).
 
 ### Issue #922 Phase 2 — Extended `.swarm/` containment to remaining tools
@@ -59,6 +59,14 @@ Each entry below points at a release note in `docs/releases/` and the invariant(
   - `test-impact` — `resolveWorkingDirectory` at tool entry; absolute-path guards in `analyzer.ts` and `history-store.ts`
 - **Invariant established:** all tools that may write runtime state under `.swarm/` must route through `resolveWorkingDirectory` (not `process.cwd()`) and enforce project-root anchoring. `realpathSync` canonicalization is required on platforms where symlinks may cause apparent project-root mismatch.
 - **Maps to AGENTS.md:** invariant 4 (working directory and `.swarm/` containment).
+
+### Issue #2127 — Explicit nested project boundaries
+
+- **Symptom:** an outer project's `.swarm/` caused nested Git repositories, linked worktrees, submodules, and intentionally nested OpenCode projects to be rejected as ordinary subdirectories. The rejection was duplicated across the shared resolver, evidence writer, and four tool-level root guards.
+- **Root cause:** containment classified project identity from ancestry alone. It never checked whether the selected target directly declared an independent project boundary.
+- **Invariant established:** a direct `.git` regular file/directory or direct `.opencode/` directory declares a nested directory to be its own project root. This is a local declaration, not Git-metadata validation: empty or malformed direct `.git` markers opt in. Marker symlinks/junctions and inaccessible/ambiguous target markers never grant an exemption. Ordinary descendants remain rejected. Ambiguous ancestor `.swarm` probes or project indicators and bounded-walk depth exhaustion fail closed.
+- **Implementation pattern:** `hasExplicitProjectBoundary` owns marker semantics and uses `lstatSync`; `isStrictPathDescendant` owns platform-correct descendant classification. `validateProjectRoot`, `resolveWorkingDirectory`, `save_plan`, `declare_scope`, `update_task_status`, and `pre_check_batch` must remain in parity. The shared canonical project-root assertion also runs at every low-level plan, scope, evidence, and evaluation mutation sink, including checkpoint/recovery/terminal writers, migration, deletion, retirement, retention/archive, and lock-target creation, so callers cannot bypass the tool-layer guard.
+- **Maps to AGENTS.md:** invariants 4 (`.swarm` containment) and 7 (public-path and error-seam regression coverage).
 
 ### v6.85.1 — Multiple system messages crashing local models
 
@@ -398,16 +406,34 @@ export const collectMetricsTool = createSwarmTool({
 });
 ```
 
-For tools that accept a user-supplied `working_directory`, anchor to project root:
+For tools that accept a user-supplied `working_directory`, anchor to a project root while recognizing direct nested declarations:
 
 ```ts
 const resolved = resolveWorkingDirectory(args.working_directory, ctx.directory);
 if (!resolved) return { success: false, error: 'working_directory must resolve to project root' };
+
+// Duplicate canonical guards use the same shared policy:
+if (
+  isStrictPathDescendant(canonicalTarget, canonicalContextRoot) &&
+  !hasExplicitProjectBoundary(canonicalTarget)
+) {
+  return { success: false, error: 'ordinary subdirectories are not project roots' };
+}
 ```
+
+`hasExplicitProjectBoundary` requires a non-empty absolute path and never probes
+the process CWD for invalid input. It uses `lstatSync`, so a direct `.git`
+file/directory or `.opencode/` directory opts in while marker symlinks and
+junctions do not. Do not replace it with `git rev-parse`, gitfile parsing, or a
+broader project-indicator heuristic: `.opencode/` is an intentional manual
+declaration, and generic files such as `package.json` must not reopen ordinary
+subdirectory fragmentation.
 
 **Verification:**
 
 - `grep -rn "process.cwd()" src/tools src/hooks` — every remaining match has a comment justifying it as a documented direct-CLI/test fallback.
+- `rg -n "hasExplicitProjectBoundary|isStrictPathDescendant" src` — the two shared helpers are wired through all six root guards, with no local marker policy.
+- `tests/unit/utils/project-boundary.test.ts`, `tests/unit/evidence/project-root-boundary-errors.test.ts`, `tests/unit/containment/nested-project-boundary-writers.test.ts`, and `tests/unit/tools/nested-project-boundary-tools.test.ts` — marker/error semantics and actual nested read/write/scan targets.
 
 **Evidence trust boundary:** Runtime JSON under `.swarm/`, including
 `.swarm/evidence/{taskId}.json`, is durable audit and recovery state for

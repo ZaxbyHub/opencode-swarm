@@ -6,6 +6,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { formatLegacyQaBindingRecovery } from '../../../qa-gate/recovery.js';
 import { readEffectiveSpecSync } from '../../../sdd/effective-spec';
 import { resolveGatePreamble } from './gate-helpers';
 import type { GateContext, GateResult } from './types';
@@ -26,6 +27,22 @@ export async function runDriftGate(ctx: GateContext): Promise<GateResult> {
 		const preamble = await resolveGatePreamble(dir, sessionID);
 		// When preamble resolves, use the profile flag; otherwise default true
 		if (preamble.resolved) {
+			if (
+				preamble.identityBound === false &&
+				preamble.effectiveGates?.drift_check === true
+			) {
+				return {
+					blocked: true,
+					reason: 'DRIFT_VERIFICATION_IDENTITY_UNBOUND',
+					message: `Phase ${phase} cannot be completed: drift_check is enabled but the QA gate profile is not exact-bound to the current raw swarm_id/plan_title. ${formatLegacyQaBindingRecovery(
+						{ swarm: preamble.plan!.swarm, title: preamble.plan!.title },
+						'retry completing the phase',
+					)}`,
+					agentsDispatched,
+					agentsMissing: [],
+					warnings: [],
+				};
+			}
 			driftCheckEnabled = preamble.effectiveGates?.drift_check === true;
 		}
 	} catch (gateLoadError) {

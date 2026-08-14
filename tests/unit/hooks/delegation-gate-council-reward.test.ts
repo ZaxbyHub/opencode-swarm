@@ -26,7 +26,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { PluginConfig } from '../../../src/config';
-import { getOrCreateProfile, setGates } from '../../../src/db/qa-gate-profile';
+import { setGatesForIdentity } from '../../../src/db/qa-gate-profile';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
 import {
 	computeMemoryContentHash,
@@ -35,7 +35,6 @@ import {
 	type MemoryRecord,
 	resolveMemoryConfig,
 } from '../../../src/memory';
-import { derivePlanId } from '../../../src/plan/utils';
 import {
 	ensureAgentSession,
 	getTaskState,
@@ -67,8 +66,6 @@ const PLAN_FIXTURE = {
 		},
 	],
 };
-const PLAN_ID = derivePlanId(PLAN_FIXTURE);
-
 function makeConfig(memory?: PluginConfig['memory']): PluginConfig {
 	return {
 		max_iterations: 5,
@@ -152,8 +149,11 @@ function writePlan(): void {
 }
 
 function enableCouncilGate(): void {
-	getOrCreateProfile(tmpDir, PLAN_ID);
-	setGates(tmpDir, PLAN_ID, { council_mode: true });
+	setGatesForIdentity(
+		tmpDir,
+		{ swarm: PLAN_FIXTURE.swarm, title: PLAN_FIXTURE.title },
+		{ council_mode: true },
+	);
 }
 
 beforeEach(() => {

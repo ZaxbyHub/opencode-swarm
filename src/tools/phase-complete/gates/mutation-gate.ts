@@ -5,6 +5,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { formatLegacyQaBindingRecovery } from '../../../qa-gate/recovery.js';
 import { resolveGatePreamble } from './gate-helpers';
 import type { GateContext, GateResult } from './types';
 
@@ -15,6 +16,19 @@ export async function runMutationGate(ctx: GateContext): Promise<GateResult> {
 		const preamble = await resolveGatePreamble(dir, sessionID);
 
 		if (preamble.resolved && preamble.effectiveGates?.mutation_test === true) {
+			if (preamble.identityBound === false) {
+				return {
+					blocked: true,
+					reason: 'MUTATION_GATE_IDENTITY_UNBOUND',
+					message: `Phase ${phase} cannot be completed: mutation_test is enabled but the QA gate profile is not exact-bound to the current raw swarm_id/plan_title. ${formatLegacyQaBindingRecovery(
+						{ swarm: preamble.plan!.swarm, title: preamble.plan!.title },
+						'retry completing the phase',
+					)}`,
+					agentsDispatched,
+					agentsMissing: [],
+					warnings: [],
+				};
+			}
 			const mgPath = path.join(
 				dir,
 				'.swarm',

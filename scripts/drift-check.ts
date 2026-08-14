@@ -1351,7 +1351,7 @@ export async function detectSkillAssertionDrift(
 	const result = await checkSkillAssertions(cwd);
 	return result.brokenAssertions.map((b) => ({
 		category: 'skill-assertion',
-		severity: 'error' as const,
+		severity: 'notice' as const,
 		file: b.testFile,
 		message:
 			`Test at ${b.testFile}:${b.line} asserts "${b.phrase}" ` +

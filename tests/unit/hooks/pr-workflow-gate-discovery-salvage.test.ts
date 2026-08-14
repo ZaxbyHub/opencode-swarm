@@ -343,16 +343,17 @@ describe('explorer output contract as rendered', () => {
 		expect(EXPLORER_CANDIDATE_FORMAT_SUFFIX).toContain('\\|');
 	});
 
-	test('leads with the canonical header and a worked example', () => {
+	test('keeps generic compatibility examples separated by row family', () => {
 		const headerIndex = EXPLORER_CANDIDATE_FORMAT_SUFFIX.indexOf(BASE_HEADER);
 		expect(headerIndex).toBeGreaterThan(-1);
 		expect(EXPLORER_CANDIDATE_FORMAT_SUFFIX).toContain('WORKED EXAMPLE');
-		// The worked example must precede the per-family reference blocks, because
-		// a header restated only as a format spec was measured at ~1/6 compliance.
 		expect(
-			EXPLORER_CANDIDATE_FORMAT_SUFFIX.indexOf('WORKED EXAMPLE'),
+			EXPLORER_CANDIDATE_FORMAT_SUFFIX.indexOf('BASE WORKED EXAMPLE'),
 		).toBeLessThan(
-			EXPLORER_CANDIDATE_FORMAT_SUFFIX.indexOf('Micro-lane format'),
+			EXPLORER_CANDIDATE_FORMAT_SUFFIX.indexOf('MICRO WORKED EXAMPLE'),
+		);
+		expect(EXPLORER_CANDIDATE_FORMAT_SUFFIX).toContain(
+			'Choose exactly one family',
 		);
 	});
 

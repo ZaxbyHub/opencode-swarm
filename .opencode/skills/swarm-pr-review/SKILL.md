@@ -127,6 +127,47 @@ the mechanically enforced receipt gate Profile A provides.
 BLOCKED is reserved for bypassing an active controller and for coverage gaps
 that remain unclosable after bounded retries on any profile.
 
+### Profile A controller quick reference
+
+This is the concise mechanical contract for an active structured controller.
+The detailed phases below explain the reasoning, but they do not override this
+ordering, vocabulary, or schema.
+
+- Base `workflow_lane` IDs (all six): `intent-architecture`,
+  `correctness-state`, `tests-falsifiability`, `security-trust`,
+  `reliability-performance`, `compatibility-delivery`.
+- Trigger/micro `workflow_lane` IDs (all eleven): `auth-identity-secrets`,
+  `untrusted-input-boundaries`, `subprocess-platform`, `concurrency-state`,
+  `dependencies-build-release`, `api-schema-migrations`,
+  `test-infrastructure`, `ui-accessibility-i18n`, `privacy-observability`,
+  `generated-provenance`, `unclassified-risk`.
+- Base candidate header:
+  `[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence`
+- Base clean attestation:
+  `[CLEAN] | lane | coverage_scope | evidence`
+- Micro/council candidate header:
+  `[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence`
+- Micro/council clean attestation:
+  `[CLEAN] | micro_lane | coverage_scope | evidence`
+- Severity is exactly `INFO | LOW | MEDIUM | HIGH | CRITICAL`; confidence is
+  exactly `LOW | MEDIUM | HIGH`.
+
+Controller order is exact: bind the immutable head/base range; dispatch,
+settle, and parse base lanes; evaluate every trigger row; dispatch micro lanes;
+settle and parse every matched micro family; persist the trigger evaluation;
+persist post-explorer findings; run reviewers; run critics; then persist the
+final artifact and complete the workflow. The **initial** micro dispatch MUST
+supply the complete trigger-evaluation ledger; that dispatch freezes it for the
+session.
+Any subsequent micro batch in that same session MAY omit `trigger_evaluation`
+and reuse the frozen ledger. If a subsequent batch explicitly supplies a copy,
+that copy MUST remain exactly identical to the frozen ledger.
+
+All machine-readable candidate headers, candidate rows, and clean attestations
+must be emitted as unfenced plain text. Markdown fences shown in this skill are
+documentation fences only; emitting the backticks causes the controller to
+ignore those rows as quoted/example material.
+
 ---
 
 ## Review Modes
@@ -986,6 +1027,9 @@ Every explorer must inspect or explicitly mark unavailable:
 Explorers emit structured candidate records. The parser reads the full lane
 artifact and extracts these records. The canonical record shape is:
 
+The fence below is documentation formatting only. Emit the header and all
+machine-readable rows as unfenced plain text; do not emit the backticks.
+
 ```text
 [CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence
 ```
@@ -1012,6 +1056,9 @@ Explorers must not use `CONFIRMED`, `DISPROVED`, or `PRE_EXISTING`.
 
 A base lane that finds no surviving candidates must emit exactly one fully
 populated clean row:
+
+The fence below is documentation formatting only. Emit the clean attestation
+as unfenced plain text; do not emit the backticks.
 
 ```text
 [CLEAN] | lane | coverage_scope | evidence
@@ -1059,10 +1106,14 @@ owned trigger ID and declare the complete `owned_workflow_lanes` set — every
 matched family owned exactly once across the dispatch, and every owned family
 attested in that lane's output, or the lane fails for all of them. Include
 the complete exact-set
-`trigger_evaluation` ledger and the same exact current `pr_head_sha` in every
-micro dispatch, in a separate batch from base lanes. The runtime rejects
-unrelated or duplicate micro-lanes within a batch, and final ledger persistence
-rejects any row whose completed owning-lane provenance is absent.
+`trigger_evaluation` ledger and the same exact current `pr_head_sha` in the
+initial micro dispatch, in a separate batch from base lanes. That first
+dispatch freezes the ledger for the session. A subsequent same-session micro
+batch may omit `trigger_evaluation` and reuse the frozen ledger; when it
+explicitly supplies a copy, the copy must remain exactly identical. The
+runtime rejects unrelated or duplicate micro-lanes within a batch, and final
+ledger persistence rejects any row whose completed owning-lane provenance is
+absent.
 Poll incrementally, then settle every launched lane. Persist
 the complete ledger with `write_pr_review_trigger_eval`; its rows use the stable
 trigger IDs below. Every `MATCHED` row includes its returned `source_batch_id`
@@ -1180,6 +1231,9 @@ family is always `MATCHED` to cover novel failure modes and classification gaps.
 | `unclassified-risk` | universal | any changed artifact or behavior not confidently classified by the rows above | Unclassified high-risk fallback | full change-path review, hidden trust boundaries, novel failure modes, missing specialist classification |
 
 Micro-lane output format:
+
+The fence below is documentation formatting only. Emit the header and all
+machine-readable rows as unfenced plain text; do not emit the backticks.
 
 ```text
 [CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence
@@ -1863,8 +1917,10 @@ are:
    architect cannot make further tool progress.
 
 A second, unrelated stranding class is **trigger-ledger drift**. This is not a
-fetch/checkout problem: it means a later micro-lane's trigger_evaluation
-disagrees with the canonical ledger frozen by the first micro dispatch. The run
+fetch/checkout problem: it means a later micro-lane explicitly supplied a
+`trigger_evaluation` that disagrees with the canonical ledger frozen by the
+first micro dispatch. A same-session retry may instead omit that argument and
+reuse the frozen ledger. When a later dispatch does supply a copy, the run
 fails closed in two places, with different strictness — at ledger bind time
 `bindPrReviewTriggerLedger` rejects a trigger_evaluation whose frozen-row digest
 (`trigger_id`, `result`, and `evidence` together) differs from the first

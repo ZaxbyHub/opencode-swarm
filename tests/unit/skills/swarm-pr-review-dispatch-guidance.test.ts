@@ -2,11 +2,15 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
+	CANDIDATE_CONFIDENCES,
 	CANDIDATE_HEADERS,
+	CANDIDATE_SEVERITIES,
 	CLEAN_TEMPLATES,
 	candidateHeaderFamily,
 	splitPipeFields,
 } from '../../../src/background/candidate-contract';
+import { PR_REVIEW_REQUIRED_TRIGGER_IDS } from '../../../src/background/pr-review-trigger-contract';
+import { PR_REVIEW_BASE_DIMENSION_IDS } from '../../../src/hooks/pr-workflow-gate';
 
 const CANONICAL_SKILL = '.opencode/skills/swarm-pr-review/SKILL.md';
 const PROMPT_TEMPLATES =
@@ -39,6 +43,61 @@ function sectionBetween(
 }
 
 describe('swarm-pr-review deterministic async lane dispatch guidance', () => {
+	test('early Profile A quick reference stays in runtime parity and fixes micro retry ordering', () => {
+		const source = readSkill(CANONICAL_SKILL);
+		const section = sectionBetween(
+			source,
+			'### Profile A controller quick reference',
+			'## Review Modes',
+		);
+		const sectionStartLine = source
+			.slice(0, source.indexOf('### Profile A controller quick reference'))
+			.split(/\r?\n/).length;
+
+		expect(sectionStartLine).toBeLessThan(150);
+		for (const id of PR_REVIEW_BASE_DIMENSION_IDS) {
+			expect(section).toContain(`\`${id}\``);
+		}
+		for (const id of PR_REVIEW_REQUIRED_TRIGGER_IDS) {
+			expect(section).toContain(`\`${id}\``);
+		}
+		for (const header of Object.values(CANDIDATE_HEADERS)) {
+			expect(section).toContain(header);
+		}
+		for (const clean of Object.values(CLEAN_TEMPLATES)) {
+			expect(section).toContain(clean);
+		}
+		for (const severity of CANDIDATE_SEVERITIES) {
+			expect(section).toContain(severity);
+		}
+		for (const confidence of CANDIDATE_CONFIDENCES) {
+			expect(section).toContain(confidence);
+		}
+
+		const orderedSteps = [
+			'bind the immutable head/base range',
+			'dispatch,\nsettle, and parse base lanes',
+			'evaluate every trigger row',
+			'dispatch micro lanes',
+			'persist the trigger evaluation',
+			'persist post-explorer findings',
+			'run reviewers',
+			'run critics',
+			'complete the workflow',
+		];
+		let priorIndex = -1;
+		for (const step of orderedSteps) {
+			const index = section.indexOf(step);
+			expect(index).toBeGreaterThan(priorIndex);
+			priorIndex = index;
+		}
+		expect(section).toContain('initial** micro dispatch MUST');
+		expect(section).toContain('MAY omit `trigger_evaluation`');
+		expect(section).toContain('MUST remain exactly identical');
+		expect(section).toContain('unfenced plain text');
+		expect(section).toContain('documentation fences only');
+	});
+
 	test('canonical .opencode skill uses async lane collection and documents the review handoff contract', () => {
 		const source = readSkill(CANONICAL_SKILL);
 		const handoffSection = sectionBetween(
@@ -256,12 +315,32 @@ describe('swarm-pr-review deterministic async lane dispatch guidance', () => {
 		);
 	});
 
-	test('canonical prompt templates use the runtime-owned CLEAN field names', () => {
+	test('canonical prompt templates split base from micro/council and stay runtime-owned', () => {
 		const source = readSkill(PROMPT_TEMPLATES);
-		expect(source).toContain(CANDIDATE_HEADERS.base_explorer);
-		expect(source).toContain(CANDIDATE_HEADERS.micro_lane);
-		expect(source).toContain(CLEAN_TEMPLATES.base_explorer);
-		expect(source).toContain(CLEAN_TEMPLATES.micro_lane);
+		const base = sectionBetween(
+			source,
+			'# Base Explorer Prompt Template',
+			'# Micro-Lane / Council Explorer Prompt Template',
+		);
+		const micro = sectionBetween(
+			source,
+			'# Micro-Lane / Council Explorer Prompt Template',
+			'Under Profile A',
+		);
+
+		expect(base).toContain(CANDIDATE_HEADERS.base_explorer);
+		expect(base).toContain(CLEAN_TEMPLATES.base_explorer);
+		expect(base).not.toContain(CANDIDATE_HEADERS.micro_lane);
+		expect(base).not.toContain(CLEAN_TEMPLATES.micro_lane);
+		expect(micro).toContain(CANDIDATE_HEADERS.micro_lane);
+		expect(micro).toContain(CLEAN_TEMPLATES.micro_lane);
+		expect(micro).not.toContain(CANDIDATE_HEADERS.base_explorer);
+		expect(micro).not.toContain(CLEAN_TEMPLATES.base_explorer);
+		for (const templateSection of [base, micro]) {
+			expect(templateSection).toContain('unfenced plain text');
+			expect(templateSection).toContain('documentation only');
+			expect(templateSection).toContain('do not emit backticks');
+		}
 		expect(source).not.toContain(STALE_CLEAN_TEMPLATE);
 	});
 

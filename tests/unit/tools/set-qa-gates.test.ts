@@ -6,7 +6,8 @@ import { closeProjectDb } from '../../../src/db/project-db';
 import {
 	DEFAULT_QA_GATES,
 	getProfile,
-	lockProfile,
+	getProfileForIdentity,
+	lockProfileForIdentity,
 } from '../../../src/db/qa-gate-profile';
 import type { SetQaGatesArgs } from '../../../src/tools/set-qa-gates';
 import { executeSetQaGates } from '../../../src/tools/set-qa-gates';
@@ -24,6 +25,11 @@ const ALL_GATE_NAMES = [
 	'drift_check',
 	'final_council',
 ] as const;
+
+const CURRENT_PLAN_IDENTITY = {
+	swarm: 'test-swarm',
+	title: 'Test Plan',
+} as const;
 
 function writePlanJson(
 	directory: string,
@@ -76,6 +82,12 @@ describe('set-qa-gates tool', () => {
 		rmSync(tempDir, { recursive: true, force: true });
 	});
 
+	function getExactProfile(
+		identity: { swarm: string; title: string } = CURRENT_PLAN_IDENTITY,
+	) {
+		return getProfileForIdentity(tempDir, identity);
+	}
+
 	// -------------------------------------------------------------------------
 	// QA GATE PROFILE UPDATES
 	// -------------------------------------------------------------------------
@@ -86,9 +98,8 @@ describe('set-qa-gates tool', () => {
 			expect(result.success).toBe(true);
 			expect(result.plan_id).toBeDefined();
 
-			const profile = getProfile(tempDir, result.plan_id!);
+			const profile = getExactProfile();
 			expect(profile).not.toBeNull();
-			// Defaults should be applied
 			expect(profile!.gates).toEqual(DEFAULT_QA_GATES);
 		});
 
@@ -96,7 +107,7 @@ describe('set-qa-gates tool', () => {
 			const result = await executeSetQaGates({ council_mode: true }, tempDir);
 			expect(result.success).toBe(true);
 
-			const profile = getProfile(tempDir, result.plan_id!);
+			const profile = getExactProfile();
 			expect(profile).not.toBeNull();
 			expect(profile!.gates.council_mode).toBe(true);
 			// Other defaults remain unchanged
@@ -112,7 +123,7 @@ describe('set-qa-gates tool', () => {
 			const result = await executeSetQaGates(args, tempDir);
 			expect(result.success).toBe(true);
 
-			const profile = getProfile(tempDir, result.plan_id!);
+			const profile = getExactProfile();
 			expect(profile).not.toBeNull();
 			expect(profile!.gates.council_mode).toBe(true);
 			expect(profile!.gates.sme_enabled).toBe(true);
@@ -132,7 +143,7 @@ describe('set-qa-gates tool', () => {
 			const result = await executeSetQaGates(args, tempDir);
 			expect(result.success).toBe(true);
 
-			const profile = getProfile(tempDir, result.plan_id!);
+			const profile = getExactProfile();
 			expect(profile).not.toBeNull();
 			for (const gate of ALL_GATE_NAMES) {
 				expect(profile!.gates[gate]).toBe(true);
@@ -148,14 +159,14 @@ describe('set-qa-gates tool', () => {
 			expect(result.profile!.locked_at).toBeNull();
 		});
 
-		it('returns plan_json_unavailable when plan.json is missing', async () => {
+		it('returns plan_identity_required when plan.json and explicit identity are missing', async () => {
 			// Remove the plan.json to trigger the error
 			rmSync(join(tempDir, '.swarm', 'plan.json'), { force: true });
 
 			const result = await executeSetQaGates({ reviewer: true }, tempDir);
 			expect(result.success).toBe(false);
-			expect(result.reason).toBe('plan_json_unavailable');
-			expect(result.message).toContain('plan.json');
+			expect(result.reason).toBe('plan_identity_required');
+			expect(result.message).toContain('swarm_id');
 		});
 
 		it('preserves project_type when profile is first created', async () => {
@@ -165,7 +176,7 @@ describe('set-qa-gates tool', () => {
 			);
 			expect(result.success).toBe(true);
 
-			const profile = getProfile(tempDir, result.plan_id!);
+			const profile = getExactProfile();
 			expect(profile).not.toBeNull();
 			expect(profile!.project_type).toBe('typescript');
 		});
@@ -177,12 +188,11 @@ describe('set-qa-gates tool', () => {
 			// Second call without project_type
 			await executeSetQaGates({ sme_enabled: true }, tempDir);
 
-			const profile = getProfile(tempDir, 'test-swarm-Test_Plan');
+			const profile = getExactProfile();
 			expect(profile).not.toBeNull();
 			expect(profile!.project_type).toBe('python');
 		});
 	});
-
 	// -------------------------------------------------------------------------
 	// LOCK SEMANTICS
 	// -------------------------------------------------------------------------
@@ -194,7 +204,7 @@ describe('set-qa-gates tool', () => {
 			expect(result.success).toBe(true);
 
 			// Lock the profile
-			lockProfile(tempDir, result.plan_id!, 1);
+			lockProfileForIdentity(tempDir, CURRENT_PLAN_IDENTITY, 1);
 
 			// Attempt to modify — should fail
 			const lockedResult = await executeSetQaGates(
@@ -221,6 +231,21 @@ describe('set-qa-gates tool', () => {
 			expect(disableResult.message).toContain('ratchet');
 		});
 
+		it('ratchet-tight: critic_pre_plan cannot be turned off once enabled (issue #2109)', async () => {
+			// critic_pre_plan defaults on for a fresh profile; an architect who
+			// later tries to persist false must be told the gate is ratchet-tight
+			// rather than silently keeping it enabled.
+			await executeSetQaGates({ critic_pre_plan: true }, tempDir);
+
+			const disableResult = await executeSetQaGates(
+				{ critic_pre_plan: false },
+				tempDir,
+			);
+			expect(disableResult.success).toBe(false);
+			expect(disableResult.reason).toBe('ratchet_violation');
+			expect(disableResult.message).toContain('ratchet');
+		});
+
 		it('ratchet-tight: setting same value is idempotent', async () => {
 			// Enable a gate
 			const result1 = await executeSetQaGates({ reviewer: true }, tempDir);
@@ -231,7 +256,7 @@ describe('set-qa-gates tool', () => {
 			expect(result2.success).toBe(true);
 
 			// Verify it's still enabled
-			const profile = getProfile(tempDir, result1.plan_id!);
+			const profile = getExactProfile();
 			expect(profile!.gates.reviewer).toBe(true);
 		});
 
@@ -256,7 +281,7 @@ describe('set-qa-gates tool', () => {
 			const result = await executeSetQaGates({ sme_enabled: true }, tempDir);
 			expect(result.success).toBe(true);
 
-			const profile = getProfile(tempDir, result.plan_id!);
+			const profile = getExactProfile();
 			expect(profile!.gates.council_mode).toBe(true);
 			expect(profile!.gates.sme_enabled).toBe(true);
 		});
@@ -277,7 +302,7 @@ describe('set-qa-gates tool', () => {
 			expect(r2.success).toBe(true);
 
 			// Both should be enabled
-			const profile = getProfile(tempDir, r1.plan_id!);
+			const profile = getExactProfile();
 			expect(profile!.gates.mutation_test).toBe(true);
 			expect(profile!.gates.drift_check).toBe(true);
 			// Default that was not overridden
@@ -295,7 +320,7 @@ describe('set-qa-gates tool', () => {
 			closeProjectDb(tempDir);
 
 			// Read the profile — should still reflect the changes
-			const profile = getProfile(tempDir, 'test-swarm-Test_Plan');
+			const profile = getExactProfile();
 			expect(profile).not.toBeNull();
 			expect(profile!.gates.final_council).toBe(true);
 			expect(profile!.gates.phase_council).toBe(true);
@@ -308,13 +333,11 @@ describe('set-qa-gates tool', () => {
 				tempDir,
 			);
 
-			const planId = 'test-swarm-Test_Plan';
-
 			// Close DB
 			closeProjectDb(tempDir);
 
 			// Re-read before tempDir cleanup
-			const profile = getProfile(tempDir, planId);
+			const profile = getExactProfile();
 			expect(profile).not.toBeNull();
 			expect(profile!.gates.sme_enabled).toBe(true);
 			expect(profile!.gates.hallucination_guard).toBe(true);
@@ -361,7 +384,7 @@ describe('set-qa-gates tool', () => {
 			);
 			expect(result.success).toBe(true);
 
-			const profile = getProfile(tempDir, result.plan_id!);
+			const profile = getExactProfile();
 			expect(profile).not.toBeNull();
 			// only 'reviewer' should be true; no extra gates
 			expect(Object.keys(profile!.gates)).toHaveLength(ALL_GATE_NAMES.length);

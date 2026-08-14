@@ -52,12 +52,15 @@ function createMockConfig(): PrmConfig {
 	};
 }
 
-function createMatch(pattern: PatternMatch['pattern']): PatternMatch {
+function createMatch(
+	pattern: PatternMatch['pattern'],
+	stepRange: [number, number] = [1, 3],
+): PatternMatch {
 	return {
 		pattern,
 		severity: 'medium',
 		category: 'coordination_error',
-		stepRange: [1, 3],
+		stepRange,
 		description: `${pattern} detected`,
 		affectedAgents: ['coder'],
 		affectedTargets: ['src/foo.ts'],
@@ -186,17 +189,30 @@ describe('PRM hard-stop tokens (issue #2063 C2)', () => {
 		// match, so the trailing ping_pong match (count 1 ⇒ level 1 ⇒
 		// hardStop:false) overwrote the repetition_loop hard stop set two
 		// assignments earlier and the escalation vanished within a single tick.
+		//
+		// Issue #2134: the episode gate caps a single tick at ONE strike per
+		// pattern, so the three repetition_loop strikes that drive the ladder to
+		// level 3 must now arrive as three genuinely distinct, non-overlapping
+		// episodes across three ticks — not three matches crammed into one tick,
+		// which the gate would collapse to a single strike. The THIRD tick still
+		// carries a trailing ping_pong match (a different pattern, so it is not
+		// claimed by the repetition_loop strike and survives the same-tick gate)
+		// with a LATER stepRange so it sorts and is processed after the
+		// repetition_loop match — reproducing the exact same-tick ordering the
+		// original defect required.
 		const session = createSession();
 		installMocks(session, [
+			[createMatch('repetition_loop', [1, 3])], // 1st ⇒ level 1
+			[createMatch('repetition_loop', [4, 6])], // 2nd ⇒ level 2
 			[
-				createMatch('repetition_loop'),
-				createMatch('repetition_loop'),
-				createMatch('repetition_loop'), // 3rd ⇒ level 3 ⇒ hardStop
-				createMatch('ping_pong'), // 1st ⇒ level 1 ⇒ hardStop false
+				createMatch('repetition_loop', [7, 9]), // 3rd ⇒ level 3 ⇒ hardStop
+				createMatch('ping_pong', [10, 12]), // 1st ⇒ level 1 ⇒ hardStop false
 			],
 		]);
 		const { toolAfter } = createPrmHook(createMockConfig(), DIRECTORY);
 
+		await toolAfter({ sessionID: SESSION_ID });
+		await toolAfter({ sessionID: SESSION_ID });
 		await toolAfter({ sessionID: SESSION_ID });
 
 		expect(session.prmHardStopPending).toBe(true);
@@ -207,11 +223,14 @@ describe('PRM hard-stop tokens (issue #2063 C2)', () => {
 	});
 
 	test('level-3 arms BOTH tokens; the inject token is set, not merely mirrored', async () => {
+		// Issue #2134: three genuinely distinct, non-overlapping episodes — a
+		// repeated stepRange would be recognized as a re-report of the same
+		// episode and suppressed by the episode gate after the first strike.
 		const session = createSession();
 		installMocks(session, [
-			[createMatch('repetition_loop')],
-			[createMatch('repetition_loop')],
-			[createMatch('repetition_loop')],
+			[createMatch('repetition_loop', [1, 3])],
+			[createMatch('repetition_loop', [4, 6])],
+			[createMatch('repetition_loop', [7, 9])],
 		]);
 		const { toolAfter } = createPrmHook(createMockConfig(), DIRECTORY);
 
@@ -256,12 +275,17 @@ describe('PRM hard-stop tokens (issue #2063 C2)', () => {
 		// above but fails here: the deny token is legitimately cleared by the
 		// level-1 tick, and a mirrored inject token would be cleared with it —
 		// so an agent that was denied would never be told why.
+		//
+		// Issue #2134: the first three repetition_loop ticks use distinct,
+		// non-overlapping stepRanges so each is a genuinely new episode that
+		// clears the episode gate and strikes; a repeated stepRange would be
+		// suppressed as a re-report of the same episode after the first strike.
 		const session = createSession();
 		installMocks(session, [
-			[createMatch('repetition_loop')],
-			[createMatch('repetition_loop')],
-			[createMatch('repetition_loop')], // level 3 ⇒ both tokens armed
-			[createMatch('ping_pong')], // level 1, different pattern
+			[createMatch('repetition_loop', [1, 3])],
+			[createMatch('repetition_loop', [4, 6])],
+			[createMatch('repetition_loop', [7, 9])], // level 3 ⇒ both tokens armed
+			[createMatch('ping_pong', [10, 12])], // level 1, different pattern
 		]);
 		const { toolAfter } = createPrmHook(createMockConfig(), DIRECTORY);
 

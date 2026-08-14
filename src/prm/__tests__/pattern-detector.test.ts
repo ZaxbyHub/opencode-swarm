@@ -11,6 +11,7 @@ import {
 	detectPingPong,
 	detectRepetitionLoop,
 	detectStuckOnTest,
+	resolvePatternThreshold,
 	sanitizeString,
 } from '../pattern-detector';
 import type { PrmConfig, TrajectoryEntry } from '../types';
@@ -19,9 +20,13 @@ import type { PrmConfig, TrajectoryEntry } from '../types';
 // Test Configuration & Helpers
 // =============================================================================
 
-/**
- * Default PRM config for tests
- */
+/** PRR-011: mirrors production's shipped default (no more hardcoded `3`). */
+const DEFAULT_CONTEXT_THRASH = resolvePatternThreshold(
+	{} as PrmConfig,
+	'context_thrash',
+);
+
+/** Default PRM config for tests. */
 function createDefaultConfig(overrides?: Partial<PrmConfig>): PrmConfig {
 	return {
 		enabled: true,
@@ -30,13 +35,24 @@ function createDefaultConfig(overrides?: Partial<PrmConfig>): PrmConfig {
 			ping_pong: 2,
 			expansion_drift: 3,
 			stuck_on_test: 3,
-			context_thrash: 3,
+			context_thrash: DEFAULT_CONTEXT_THRASH,
 		},
 		max_trajectory_lines: 1000,
 		escalation_enabled: true,
 		detection_timeout_ms: 5000,
 		...overrides,
 	};
+}
+
+/** Pre-#2134 boundary fixtures below intentionally pin a LOW threshold, not
+ * the shipped default (10) — kept local/explicit so the intent is obvious. */
+function withContextThrash(threshold: number): PrmConfig {
+	return createDefaultConfig({
+		pattern_thresholds: {
+			...createDefaultConfig().pattern_thresholds,
+			context_thrash: threshold,
+		},
+	});
 }
 
 /**
@@ -661,99 +677,31 @@ describe('detectExpansionDrift', () => {
 	});
 
 	test('handles trajectory with pending results', () => {
-		// Create trajectory with pending results that would otherwise trigger
-		const trajectory = createEntries([
-			{
-				agent: 'agent-a',
-				action: 'edit',
-				target: 'src/a.ts',
-				result: 'pending',
-			},
-			{
-				agent: 'agent-a',
-				action: 'edit',
-				target: 'src/b.ts',
-				result: 'pending',
-			},
-			{
-				agent: 'agent-a',
-				action: 'edit',
-				target: 'src/a.ts',
-				result: 'pending',
-			},
-			{
-				agent: 'agent-a',
-				action: 'edit',
-				target: 'src/b.ts',
-				result: 'pending',
-			},
-			{
-				agent: 'agent-a',
-				action: 'edit',
-				target: 'src/a.ts',
-				result: 'pending',
-			},
-			{
-				agent: 'agent-a',
-				action: 'edit',
-				target: 'src/c.ts',
-				result: 'pending',
-			},
-			{
-				agent: 'agent-a',
-				action: 'edit',
-				target: 'src/d.ts',
-				result: 'pending',
-			},
-			{
-				agent: 'agent-a',
-				action: 'edit',
-				target: 'src/e.ts',
-				result: 'pending',
-			},
-			{
-				agent: 'agent-a',
-				action: 'edit',
-				target: 'src/f.ts',
-				result: 'pending',
-			},
-			{
-				agent: 'agent-a',
-				action: 'edit',
-				target: 'src/f.ts',
-				result: 'pending',
-			},
-			{
-				agent: 'agent-a',
-				action: 'edit',
-				target: 'src/g.ts',
-				result: 'pending',
-			},
-			{
-				agent: 'agent-a',
-				action: 'edit',
-				target: 'src/h.ts',
-				result: 'pending',
-			},
-			{
-				agent: 'agent-a',
-				action: 'edit',
-				target: 'src/i.ts',
-				result: 'pending',
-			},
-			{
-				agent: 'agent-a',
-				action: 'edit',
-				target: 'src/j.ts',
-				result: 'pending',
-			},
-			{
-				agent: 'agent-a',
-				action: 'edit',
-				target: 'src/j.ts',
-				result: 'pending',
-			},
-		]);
+		// Create trajectory with pending results that would otherwise trigger.
+		// Same target sequence as the 'correctly reports step range' test above,
+		// just with every result set to 'pending' — built via .map() instead of
+		// 15 repeated object literals (behavior-preserving; see FR-006 note at
+		// the top of this file re: keeping this file from growing).
+		const letters = [
+			'a',
+			'b',
+			'a',
+			'b',
+			'a',
+			'c',
+			'd',
+			'e',
+			'f',
+			'f',
+			'g',
+			'h',
+			'i',
+			'j',
+			'j',
+		];
+		const trajectory = letters.map((l, i) =>
+			createEntry(i + 1, 'agent-a', 'edit', `src/${l}.ts`, 'pending'),
+		);
 		const config = createDefaultConfig();
 
 		const matches = detectExpansionDrift(trajectory, config);
@@ -1205,7 +1153,7 @@ describe('detectContextThrash', () => {
 			{ agent: 'agent-a', action: 'edit', target: 'src/f.ts' },
 			{ agent: 'agent-a', action: 'edit', target: 'src/g.ts' },
 		]);
-		const config = createDefaultConfig();
+		const config = withContextThrash(3);
 
 		const matches = detectContextThrash(trajectory, config);
 
@@ -1228,7 +1176,7 @@ describe('detectContextThrash', () => {
 			{ agent: 'agent-a', action: 'edit', target: 'src/a.ts' },
 			{ agent: 'agent-a', action: 'edit', target: 'src/b.ts' },
 		]);
-		const config = createDefaultConfig();
+		const config = withContextThrash(3);
 
 		const matches = detectContextThrash(trajectory, config);
 
@@ -1244,7 +1192,7 @@ describe('detectContextThrash', () => {
 			{ agent: 'agent-a', action: 'edit', target: 'src/b.ts' },
 			{ agent: 'agent-a', action: 'edit', target: 'src/a.ts' },
 		]);
-		const config = createDefaultConfig();
+		const config = withContextThrash(3);
 
 		const matches = detectContextThrash(trajectory, config);
 
@@ -1260,12 +1208,12 @@ describe('detectContextThrash', () => {
 			{ agent: 'agent-a', action: 'edit', target: 'src/c.ts' },
 			{ agent: 'agent-a', action: 'edit', target: 'src/a.ts' },
 		]);
-		const config = createDefaultConfig();
+		const config = withContextThrash(3);
 
 		const matches = detectContextThrash(trajectory, config);
 
 		// Trajectory: [a, b, a, c, a] -> unique counts [1, 2, 2, 3, 3]
-		// No monotonic run of 3+ consecutive increases
+		// Longest monotonic run is 2 entries (a->b, then a->c) — below threshold 3
 		expect(matches).toHaveLength(0);
 	});
 
@@ -1274,7 +1222,7 @@ describe('detectContextThrash', () => {
 			{ agent: 'agent-a', action: 'edit', target: 'src/a.ts' },
 			{ agent: 'agent-a', action: 'edit', target: 'src/b.ts' },
 		]);
-		const config = createDefaultConfig();
+		const config = withContextThrash(3);
 
 		const matches = detectContextThrash(trajectory, config);
 
@@ -1321,7 +1269,7 @@ describe('detectContextThrash', () => {
 			{ agent: 'agent-a', action: 'edit', target: 'src/f.ts' },
 			{ agent: 'agent-a', action: 'edit', target: 'src/g.ts' },
 		]);
-		const config = createDefaultConfig();
+		const config = withContextThrash(3);
 
 		const matches = detectContextThrash(trajectory, config);
 
@@ -1370,7 +1318,7 @@ describe('detectContextThrash', () => {
 				result: 'pending',
 			},
 		]);
-		const config = createDefaultConfig();
+		const config = withContextThrash(3);
 
 		const matches = detectContextThrash(trajectory, config);
 
@@ -1388,7 +1336,7 @@ describe('detectContextThrash', () => {
 			{ agent: 'agent-a', action: 'edit', target: 'src/d.ts' },
 			{ agent: 'agent-a', action: 'edit', target: 'src/e.ts' },
 		]);
-		const config = createDefaultConfig();
+		const config = withContextThrash(5);
 
 		const matches = detectContextThrash(trajectory, config);
 
@@ -1397,7 +1345,9 @@ describe('detectContextThrash', () => {
 	});
 
 	test('does not trigger below threshold boundary', () => {
-		// Only 4 consecutive increases (threshold = 5) should NOT trigger
+		// Only 2 entries -> unique counts [1, 2], a monotonic run of length 2.
+		// That is below every threshold this suite exercises (min 3), including
+		// the shipped default (10) used here via createDefaultConfig().
 		const trajectory = createEntries([
 			{ agent: 'agent-a', action: 'edit', target: 'src/a.ts' },
 			{ agent: 'agent-a', action: 'edit', target: 'src/b.ts' },
@@ -1406,7 +1356,6 @@ describe('detectContextThrash', () => {
 
 		const matches = detectContextThrash(trajectory, config);
 
-		// 2 unique targets (1 increase) is below threshold of 3
 		expect(matches).toHaveLength(0);
 	});
 });

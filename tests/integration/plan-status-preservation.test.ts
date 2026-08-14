@@ -91,6 +91,7 @@ describe('Plan status preservation: merge-mode save_plan regression', () => {
 	let tmpDir: string;
 
 	beforeEach(async () => {
+		process.env.SWARM_SKIP_GATE_SELECTION = '1';
 		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'plan-preserve-test-'));
 		await fs.mkdir(path.join(tmpDir, '.swarm'), { recursive: true });
 		await fs.writeFile(
@@ -105,6 +106,7 @@ describe('Plan status preservation: merge-mode save_plan regression', () => {
 	});
 
 	afterEach(async () => {
+		delete process.env.SWARM_SKIP_GATE_SELECTION;
 		try {
 			await fs.rm(tmpDir, { recursive: true, force: true });
 		} catch {

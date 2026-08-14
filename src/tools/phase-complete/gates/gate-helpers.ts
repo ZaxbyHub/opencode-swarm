@@ -13,7 +13,7 @@ import type { QaGates } from '../../../db/qa-gate-profile.js';
 import {
 	DEFAULT_QA_GATES,
 	getEffectiveGates,
-	getProfile,
+	getProfileLookupForIdentity,
 } from '../../../db/qa-gate-profile.js';
 import { computePlanHash } from '../../../plan/ledger';
 import { loadPlan } from '../../../plan/manager';
@@ -36,6 +36,7 @@ export interface GatePreambleResult {
 	planId?: string;
 	planHash?: string;
 	effectiveGates?: QaGates;
+	identityBound?: boolean;
 }
 
 /**
@@ -58,12 +59,12 @@ export async function resolveGatePreamble(
 	}
 	const planId = derivePlanId(plan);
 	const planHash = computePlanHash(plan);
-	const profile = getProfile(dir, planId);
+	const lookup = getProfileLookupForIdentity(dir, plan);
 	const session = sessionID
 		? swarmState.agentSessions.get(sessionID)
 		: undefined;
 	const overrides = session?.qaGateSessionOverrides ?? {};
-	if (!profile) {
+	if (lookup.kind === 'missing') {
 		const hasOverrides = Object.keys(overrides).length > 0;
 		return {
 			resolved: hasOverrides,
@@ -73,8 +74,17 @@ export async function resolveGatePreamble(
 			effectiveGates: hasOverrides
 				? ({ ...DEFAULT_QA_GATES, ...overrides } as QaGates)
 				: undefined,
+			identityBound: true,
 		};
 	}
+	const profile = lookup.profile;
 	const effective = getEffectiveGates(profile, overrides);
-	return { resolved: true, plan, planId, planHash, effectiveGates: effective };
+	return {
+		resolved: true,
+		plan,
+		planId,
+		planHash,
+		effectiveGates: effective,
+		identityBound: lookup.kind === 'bound',
+	};
 }

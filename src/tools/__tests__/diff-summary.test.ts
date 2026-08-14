@@ -1,8 +1,13 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'bun:test';
+import * as realChildProcess from 'node:child_process';
+import * as realFs from 'node:fs';
+import * as path from 'node:path';
 import type { ASTChange, ASTDiffResult } from '../../diff/ast-diff.js';
 import type { ClassifiedChange } from '../../diff/semantic-classifier.js';
 import type { SemanticDiffSummary } from '../../diff/summary-generator.js';
 import type { ToolResult } from '../create-tool';
+
+const PROJECT_ROOT = path.resolve(import.meta.dir, '../../..');
 
 // Helper to convert ToolResult to string
 function resultToString(result: ToolResult): string {
@@ -79,7 +84,7 @@ function makeSemanticDiffSummary(
 }
 
 // Helper to create tool context
-function createToolContext(directory: string) {
+function createToolContext(directory = PROJECT_ROOT) {
 	return { directory } as never;
 }
 
@@ -103,6 +108,7 @@ describe('diff_summary tool', () => {
 
 		// Mock the modules
 		vi.mock('node:child_process', () => ({
+			...realChildProcess,
 			execFileSync: mockExecFileSync,
 			execFile: (
 				command: string,
@@ -120,8 +126,10 @@ describe('diff_summary tool', () => {
 		}));
 
 		vi.mock('node:fs', () => ({
+			...realFs,
 			readFileSync: mockReadFileSync,
 			promises: {
+				...realFs.promises,
 				readFile: (filePath: string, encoding: BufferEncoding) => {
 					try {
 						return Promise.resolve(mockReadFileSync(filePath, encoding));
@@ -150,15 +158,12 @@ describe('diff_summary tool', () => {
 		vi.restoreAllMocks();
 	});
 
-	// =============================================================================
-	// TEST 1: Returns error when files array is empty
-	// =============================================================================
 	test('returns error when files array is empty', async () => {
 		const { diff_summary } = await import('../../tools/diff-summary.js');
 
 		const result = await diff_summary.execute(
 			{ files: [] },
-			createToolContext('/fake/dir'),
+			createToolContext(),
 		);
 
 		const parsed = JSON.parse(resultToString(result));
@@ -166,15 +171,12 @@ describe('diff_summary tool', () => {
 		expect(parsed.error).toBe('files must be a non-empty array of file paths');
 	});
 
-	// =============================================================================
-	// TEST 2: Returns error when files is not an array
-	// =============================================================================
 	test('returns error when files is not an array', async () => {
 		const { diff_summary } = await import('../../tools/diff-summary.js');
 
 		const result = await diff_summary.execute(
 			{ files: 'not-an-array' as unknown as [] },
-			createToolContext('/fake/dir'),
+			createToolContext(),
 		);
 
 		const parsed = JSON.parse(resultToString(result));
@@ -182,15 +184,12 @@ describe('diff_summary tool', () => {
 		expect(parsed.error).toBe('files must be a non-empty array of file paths');
 	});
 
-	// =============================================================================
-	// TEST 3: Returns error when files is undefined
-	// =============================================================================
 	test('returns error when files is undefined', async () => {
 		const { diff_summary } = await import('../../tools/diff-summary.js');
 
 		const result = await diff_summary.execute(
 			{ files: undefined } as unknown as { files: string[] },
-			createToolContext('/fake/dir'),
+			createToolContext(),
 		);
 
 		const parsed = JSON.parse(resultToString(result));
@@ -220,7 +219,7 @@ describe('diff_summary tool', () => {
 
 		const result = await diff_summary.execute(
 			{ files: ['test.ts'] },
-			createToolContext('/fake/dir'),
+			createToolContext(),
 		);
 
 		const parsed = JSON.parse(resultToString(result));
@@ -278,7 +277,7 @@ describe('diff_summary tool', () => {
 
 		const result = await diff_summary.execute(
 			{ files: ['src/api.ts'] },
-			createToolContext('/fake/dir'),
+			createToolContext(),
 		);
 
 		const parsed = JSON.parse(resultToString(result));
@@ -351,7 +350,7 @@ describe('diff_summary tool', () => {
 
 		const _result = await diff_summary.execute(
 			{ files: ['src/api.ts'], classification: 'SIGNATURE_CHANGE' },
-			createToolContext('/fake/dir'),
+			createToolContext(),
 		);
 
 		// Verify classifyChanges was called with all changes
@@ -407,7 +406,7 @@ describe('diff_summary tool', () => {
 
 		const _result = await diff_summary.execute(
 			{ files: ['src/api.ts'], riskLevel: 'Critical' },
-			createToolContext('/fake/dir'),
+			createToolContext(),
 		);
 
 		const generateSummaryCalls = mockGenerateSummary.mock.calls;
@@ -469,7 +468,7 @@ describe('diff_summary tool', () => {
 				classification: 'SIGNATURE_CHANGE',
 				riskLevel: 'Critical',
 			},
-			createToolContext('/fake/dir'),
+			createToolContext(),
 		);
 
 		const generateSummaryCalls = mockGenerateSummary.mock.calls;
@@ -543,7 +542,7 @@ describe('diff_summary tool', () => {
 
 		const result = await diff_summary.execute(
 			{ files: ['new-file.ts'] },
-			createToolContext('/fake/dir'),
+			createToolContext(),
 		);
 
 		const parsed = JSON.parse(resultToString(result));
@@ -621,7 +620,7 @@ describe('diff_summary tool', () => {
 
 		const result = await diff_summary.execute(
 			{ files: ['badge.tsx'] },
-			createToolContext('/fake/dir'),
+			createToolContext(),
 		);
 
 		const parsed = JSON.parse(resultToString(result));
@@ -645,7 +644,7 @@ describe('diff_summary tool', () => {
 
 		const result = await diff_summary.execute(
 			{ files: ['test.ts'] },
-			createToolContext('/fake/dir'),
+			createToolContext(),
 		);
 
 		const parsed = JSON.parse(resultToString(result));
@@ -678,7 +677,7 @@ describe('diff_summary tool', () => {
 
 		const result = await diff_summary.execute(
 			{ files: ['deleted-file.ts'] },
-			createToolContext('/fake/dir'),
+			createToolContext(),
 		);
 
 		const parsed = JSON.parse(resultToString(result));
@@ -704,7 +703,7 @@ describe('diff_summary tool', () => {
 
 		const result = await diff_summary.execute(
 			{ files: ['broken-syntax.ts'] },
-			createToolContext('/fake/dir'),
+			createToolContext(),
 		);
 
 		const parsed = JSON.parse(resultToString(result));
@@ -736,7 +735,7 @@ describe('diff_summary tool', () => {
 
 		const result = await diff_summary.execute(
 			{ files: ['deleted-file.ts'] },
-			createToolContext('/fake/dir'),
+			createToolContext(),
 		);
 
 		const parsed = JSON.parse(resultToString(result));
@@ -787,7 +786,7 @@ describe('diff_summary tool', () => {
 
 		const result = await diff_summary.execute(
 			{ files: ['broken.ts'] },
-			createToolContext('/fake/dir'),
+			createToolContext(),
 		);
 
 		const parsed = JSON.parse(resultToString(result));
@@ -853,7 +852,7 @@ describe('diff_summary tool', () => {
 
 		const result = await diff_summary.execute(
 			{ files: ['src/file1.ts', 'src/file2.ts'] },
-			createToolContext('/fake/dir'),
+			createToolContext(),
 		);
 
 		const parsed = JSON.parse(resultToString(result));
@@ -882,7 +881,7 @@ describe('diff_summary tool', () => {
 
 		const result = await diff_summary.execute(
 			{ files: ['test.ts'] },
-			createToolContext('/fake/dir'),
+			createToolContext(),
 		);
 
 		const parsed = JSON.parse(resultToString(result));

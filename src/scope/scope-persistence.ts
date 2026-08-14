@@ -56,6 +56,7 @@ import { type Plan, PlanSchema } from '../config/plan-schema';
 import { computePlanStructureHash } from '../plan/ledger';
 import { derivePlanId } from '../plan/utils';
 import { bunWrite } from '../utils/bun-compat';
+import { assertProjectRoot } from '../utils/project-boundary';
 import {
 	canonicalWorkspaceIdentity,
 	clearExactScopeBinding,
@@ -367,6 +368,14 @@ function hasDurableRetirementIntent(
 
 function ensureLockTargetSync(targetPath: string): boolean {
 	try {
+		const scopesDir = path.dirname(targetPath);
+		const swarmDir = path.dirname(scopesDir);
+		if (
+			path.basename(scopesDir) !== 'scopes' ||
+			path.basename(swarmDir) !== '.swarm'
+		)
+			return false;
+		assertProjectRoot(path.dirname(swarmDir));
 		fs.mkdirSync(path.dirname(targetPath), { recursive: true });
 		const nofollow = (fs.constants as { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0;
 		const fd = fs.openSync(
@@ -549,6 +558,11 @@ function migrateLegacyBindingsSync(
 	directory: string,
 	scanCapacity = bindingFileScanCapacity,
 ): boolean {
+	try {
+		assertProjectRoot(directory);
+	} catch {
+		return false;
+	}
 	const scopesDir = getScopesDir(directory);
 	if (!isScopesDirSafe(directory, scopesDir)) return false;
 	let names: string[];
@@ -699,6 +713,11 @@ export async function writeScopeToDisk(
 	if (!isSafeTaskId(taskId)) return;
 	if (!Array.isArray(files) || files.length === 0) return;
 	if (files.length > MAX_FILES_PER_SCOPE) return; // DoS cap
+	try {
+		assertProjectRoot(directory);
+	} catch {
+		return;
+	}
 
 	const scopesDir = getScopesDir(directory);
 	const scopePath = getScopeFilePath(directory, taskId);
@@ -765,6 +784,15 @@ export async function writeScopeBindingToDisk(
 	directory: string,
 	binding: ScopeBinding,
 ): Promise<ScopePersistenceResult> {
+	try {
+		// Authoritative sink guard: no caller may bypass project-root validation
+		// before this function creates or mutates the durable scope store.
+		assertProjectRoot(directory);
+	} catch (error) {
+		return persistenceFailure(
+			`Scope persistence project-root validation failed: ${error instanceof Error ? error.message : 'unknown validation error'}`,
+		);
+	}
 	if (!isSafeTaskId(binding.taskId) || binding.version !== 2)
 		return persistenceFailure('Invalid binding schema or task identity.');
 	const workspaceIdentity = canonicalWorkspaceIdentity(directory);
@@ -968,6 +996,13 @@ export function clearScopeBindingFromDisk(input: {
 	directory: string;
 	binding: ScopeBinding;
 }): ScopePersistenceResult {
+	try {
+		assertProjectRoot(input.directory);
+	} catch (error) {
+		return persistenceFailure(
+			`Scope retirement project-root validation failed: ${error instanceof Error ? error.message : 'unknown validation error'}`,
+		);
+	}
 	const localRetirement = installScopeBindingRetirementIntent(input.binding);
 	let release: (() => void) | undefined;
 	try {
@@ -1678,6 +1713,13 @@ export async function replaceExistingScopeDeclaration(input: {
 	binding: ScopeBinding;
 	replaceExisting: boolean;
 }): Promise<ScopePersistenceResult> {
+	try {
+		assertProjectRoot(input.directory);
+	} catch (error) {
+		return persistenceFailure(
+			`Scope declaration project-root validation failed: ${error instanceof Error ? error.message : 'unknown validation error'}`,
+		);
+	}
 	const { binding } = input;
 	if (
 		binding.activation !== 'declaration' ||
@@ -2427,6 +2469,7 @@ export function readPlanScope(
 export function clearScopeForTask(directory: string, taskId: string): void {
 	if (!isSafeTaskId(taskId)) return;
 	try {
+		assertProjectRoot(directory);
 		fs.unlinkSync(getScopeFilePath(directory, taskId));
 	} catch {
 		/* no-op */
@@ -2439,6 +2482,7 @@ export function clearScopeForTask(directory: string, taskId: string): void {
  */
 export function clearAllScopes(directory: string): void {
 	try {
+		assertProjectRoot(directory);
 		fs.rmSync(getScopesDir(directory), { recursive: true, force: true });
 	} catch {
 		/* no-op */

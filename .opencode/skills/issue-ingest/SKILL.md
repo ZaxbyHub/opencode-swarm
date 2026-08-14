@@ -57,7 +57,7 @@ Flags parsed from signal:
 4. If the issue is a bug: spec must describe the correct behavior, not the broken behavior.
 5. If the issue is a feature: spec must describe the user-facing outcome, not the implementation.
 6. Carry forward any `[NEEDS REPRO]` / `[NEEDS CLARIFICATION]` flags from Phase 1 into the spec as open questions; do not silently drop them.
-7. QA GATE SELECTION: Ask user which QA gates to enable (same dialogue as MODE: SPECIFY). Write to `.swarm/context.md` under `## Pending QA Gate Selection`.
+7. QA AND EXECUTION PROFILE SELECTION: Defer all four choices (QA gates, parallel coder count, commit frequency, and `auto_proceed`) to MODE: PLAN. PLAN first drafts task scopes and freezes the exact plan identity, then persists the choices before the first plan save. Do not stage execution choices in `.swarm/context.md`.
 
 #### Phase 4: TRANSITION
 Based on flags:

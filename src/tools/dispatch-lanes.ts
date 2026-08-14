@@ -235,34 +235,24 @@ const PR_WORKFLOW_LANE_CHECKLISTS: Readonly<Record<string, string>> = {
  * backslash is silently dropped and would instruct lanes to emit the exact
  * character that breaks row parsing.
  */
-export const EXPLORER_CANDIDATE_FORMAT_SUFFIX = `
+const EXPLORER_CANDIDATE_COMMON_RULES = `
 
 IMPORTANT — OUTPUT FORMAT REQUIREMENT:
-You MUST emit your findings as a pipe-delimited [CANDIDATE] table. The FIRST
-[CANDIDATE]-prefixed line is the literal column header, copied verbatim with the
-field NAMES as its values; data rows follow it.
+You MUST emit findings as a pipe-delimited [CANDIDATE] table. The FIRST
+[CANDIDATE]-prefixed line is the literal column header shown below, copied
+verbatim with field NAMES as its values; data rows follow it.
 
-WORKED EXAMPLE — copy this shape exactly. The first line is the header, not a finding:
-${CANDIDATE_HEADERS.base_explorer}
-[CANDIDATE] | example-lane-001 | example-lane | MEDIUM | correctness | src/a.ts:12 | claim without pipes | evidence without pipes | impact without pipes | HIGH
-
-Standard explorer format (use unless the prompt specifies micro-lane work):
-${CANDIDATE_HEADERS.base_explorer}
-
-Micro-lane format (use when the prompt references invariant checking or micro_lane, or for swarm-pr-review:council discovery):
-${CANDIDATE_HEADERS.micro_lane}
-
-Every data row has exactly ${CANDIDATE_FIELD_COUNT} fields after the marker. A
-literal pipe inside any field MUST be written as \\| — an unescaped | starts a
-new field, and the row is then rejected as malformed.
+Every candidate data row has exactly ${CANDIDATE_FIELD_COUNT} fields after the
+marker. A literal pipe inside any field MUST be written as \\| — an unescaped |
+starts a new field, and the row is rejected as malformed. The confidence value
+is the final data field and must be exactly one token: HIGH, MEDIUM, or LOW.
 
 Candidate IDs must be globally unique across the run; prefix them with the
-exact workflow_lane value from this dispatch.
+exact workflow_lane value from this dispatch. Emit the header and machine rows
+as plain text, never inside Markdown code fences; fenced rows are ignored as
+quoted or example material.`;
 
-If a standard explorer finds zero issues, emit its header followed by exactly:
-${CLEAN_TEMPLATES.base_explorer}
-If a micro-lane finds zero issues, emit its header followed by exactly:
-${CLEAN_TEMPLATES.micro_lane}
+const EXPLORER_CANDIDATE_COMMON_END = `
 A [CLEAN] row has exactly ${CLEAN_FIELD_COUNT - 1} fields after the marker and NO
 confidence field. A [CLEAN] attestation covers exactly ONE obligation (one lane or
 micro_lane identity) that has zero findings for it — never alongside [CANDIDATE] rows
@@ -274,6 +264,43 @@ obligation must receive exactly one of the two.
 Write a substantive coverage_scope of at least 12 characters and concrete evidence of at least 20
 characters; bare header-only output is UNATTESTED for every PR-review lane.
 Do NOT use the default PROJECT/STRUCTURE output format for this dispatch.`;
+
+export const BASE_EXPLORER_CANDIDATE_FORMAT_SUFFIX = `${EXPLORER_CANDIDATE_COMMON_RULES}
+
+BASE WORKED EXAMPLE — copy only this shape. The first line is the header, not a finding:
+${CANDIDATE_HEADERS.base_explorer}
+[CANDIDATE] | example-base-001 | example-base | MEDIUM | correctness | src/a.ts:12 | claim without pipes | evidence without pipes | impact without pipes | HIGH
+
+If this base explorer finds zero issues, emit its header followed by exactly:
+${CLEAN_TEMPLATES.base_explorer}
+${EXPLORER_CANDIDATE_COMMON_END}`;
+
+export const MICRO_EXPLORER_CANDIDATE_FORMAT_SUFFIX = `${EXPLORER_CANDIDATE_COMMON_RULES}
+
+MICRO WORKED EXAMPLE — copy only this shape. The first line is the header, not a finding:
+${CANDIDATE_HEADERS.micro_lane}
+[CANDIDATE] | example-micro-001 | example-micro | MEDIUM | correctness | src/a.ts:12 | claim without pipes | invariant without pipes | evidence without pipes | HIGH
+
+If this micro or council explorer finds zero issues, emit its header followed by exactly:
+${CLEAN_TEMPLATES.micro_lane}
+${EXPLORER_CANDIDATE_COMMON_END}`;
+
+/** Generic non-PR compatibility contract. PR-review modes use one family only. */
+export const EXPLORER_CANDIDATE_FORMAT_SUFFIX = `${EXPLORER_CANDIDATE_COMMON_RULES}
+
+Choose exactly one family from the dispatch context. Never combine fields from
+the two families.
+
+BASE WORKED EXAMPLE:
+${CANDIDATE_HEADERS.base_explorer}
+[CANDIDATE] | example-base-001 | example-base | MEDIUM | correctness | src/a.ts:12 | claim without pipes | evidence without pipes | impact without pipes | HIGH
+Zero findings: ${CLEAN_TEMPLATES.base_explorer}
+
+MICRO WORKED EXAMPLE:
+${CANDIDATE_HEADERS.micro_lane}
+[CANDIDATE] | example-micro-001 | example-micro | MEDIUM | correctness | src/a.ts:12 | claim without pipes | invariant without pipes | evidence without pipes | HIGH
+Zero findings: ${CLEAN_TEMPLATES.micro_lane}
+${EXPLORER_CANDIDATE_COMMON_END}`;
 
 const READ_ONLY_LANE_ROLES: ReadonlySet<string> = new Set([
 	'explorer',
@@ -465,7 +492,7 @@ const DispatchLanesAsyncArgsSchema = DispatchLanesArgsSchema.extend({
 		.min(1)
 		.optional()
 		.describe(
-			'Exact repository-agnostic trigger ledger required for swarm-pr-review:micro; MATCHED families are dispatched and inapplicable families are NOT_TRIGGERED',
+			'Complete repository-agnostic trigger ledger required for the first swarm-pr-review:micro dispatch. The first successful micro dispatch freezes it in same-session workflow state; any subsequent micro batch may omit this property and reuse that exact frozen ledger. If supplied later, it must remain exactly identical. MATCHED families are dispatched and inapplicable families are NOT_TRIGGERED.',
 		),
 	feedback_inventory: z
 		.array(z.string().trim().min(1).max(120))
@@ -510,7 +537,7 @@ function validatePrReviewMicroDispatch(
 	const evaluation = args.trigger_evaluation;
 	if (!evaluation) {
 		throw new Error(
-			'BLOCKED: PR_REVIEW micro dispatch requires the complete trigger_evaluation ledger',
+			'BLOCKED: initial PR_REVIEW micro dispatch requires the complete trigger_evaluation ledger; after the first successful same-session micro dispatch freezes it, a later micro batch may omit the property and reuse that exact ledger',
 		);
 	}
 	let validated: ReturnType<typeof validatePrReviewInlineTriggerLedger>;
@@ -1253,11 +1280,21 @@ export async function executeDispatchLanesAsync(
 							);
 						}
 					}
-					validatePrReviewMicroDispatch(parsed.data, depthTier);
+					const effectiveTriggerEvaluation =
+						parsed.data.trigger_evaluation !== undefined
+							? parsed.data.trigger_evaluation
+							: gateState.prReviewTriggerLedger;
+					validatePrReviewMicroDispatch(
+						{
+							...parsed.data,
+							trigger_evaluation: effectiveTriggerEvaluation,
+						},
+						depthTier,
+					);
 					gateState = await bindPrReviewTriggerLedger(
 						directory,
 						context.sessionID,
-						parsed.data.trigger_evaluation,
+						effectiveTriggerEvaluation,
 					);
 				} else if (
 					parsed.data.mode === 'swarm-pr-review:council' ||
@@ -2802,7 +2839,6 @@ function applyExplorerFormatSuffix(
 		const isPrReviewCouncilExplorer =
 			options.mode === 'swarm-pr-review:council' && role.startsWith('council_');
 		if (role !== 'explorer' && !isPrReviewCouncilExplorer) return lane;
-		if (lane.prompt.endsWith(EXPLORER_CANDIDATE_FORMAT_SUFFIX)) return lane;
 		const rowFamilyIdentity =
 			options.mode === 'swarm-pr-review:base'
 				? 'For this base explorer lane, use the base row family and put the exact workflow_lane only in the `lane` field.'
@@ -2821,9 +2857,45 @@ function applyExplorerFormatSuffix(
 						.join(
 							', ',
 						)}; every output row MUST use the exact lane value of the obligation it reports`;
+		const formatSuffix =
+			options.mode === 'swarm-pr-review:base'
+				? BASE_EXPLORER_CANDIDATE_FORMAT_SUFFIX
+				: options.mode === 'swarm-pr-review:micro' || isPrReviewCouncilExplorer
+					? MICRO_EXPLORER_CANDIDATE_FORMAT_SUFFIX
+					: EXPLORER_CANDIDATE_FORMAT_SUFFIX;
+		const controllerIdentity = `CONTROLLER-BOUND OUTPUT IDENTITY: ${identity}. Placeholder text such as "workflow_lane" is invalid. ${rowFamilyIdentity}`;
+		const knownSuffixes = [
+			EXPLORER_CANDIDATE_FORMAT_SUFFIX,
+			BASE_EXPLORER_CANDIDATE_FORMAT_SUFFIX,
+			MICRO_EXPLORER_CANDIDATE_FORMAT_SUFFIX,
+		];
+		const embeddedKnownSuffixes = knownSuffixes.filter((suffix) =>
+			lane.prompt.includes(suffix),
+		);
+		const expectedSuffixOccurrences =
+			lane.prompt.split(formatSuffix).length - 1;
+		if (
+			lane.prompt.endsWith(formatSuffix) &&
+			lane.prompt.includes(controllerIdentity) &&
+			embeddedKnownSuffixes.length === 1 &&
+			expectedSuffixOccurrences === 1
+		) {
+			return lane;
+		}
+		if (embeddedKnownSuffixes.length > 0) {
+			const diagnostic = `Lane "${lane.id}" prompt contains an incompatible, duplicate, or controller-unbound explorer output contract for mode "${options.mode ?? 'generic'}"`;
+			if (options.failClosed) {
+				errors.push(diagnostic);
+				return lane;
+			}
+			logger.log(
+				`[dispatch-lanes] applyExplorerFormatSuffix: ${diagnostic}; preserving the caller prompt for generic compatibility`,
+			);
+			return lane;
+		}
 		const prompt = `${lane.prompt}
 
-CONTROLLER-BOUND OUTPUT IDENTITY: ${identity}. Placeholder text such as "workflow_lane" is invalid. ${rowFamilyIdentity}${EXPLORER_CANDIDATE_FORMAT_SUFFIX}`;
+${controllerIdentity}${formatSuffix}`;
 		if (prompt.length > MAX_PROMPT_CHARS) {
 			const diagnostic = `Lane "${lane.id}" prompt plus mandatory explorer output contract is ${prompt.length} chars; max ${MAX_PROMPT_CHARS}`;
 			if (options.failClosed) {

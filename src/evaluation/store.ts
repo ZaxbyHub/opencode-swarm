@@ -7,6 +7,7 @@ import {
 } from '../evidence/immutable-store.js';
 import { withEvidenceLock } from '../evidence/lock.js';
 import { atomicWriteFile } from '../evidence/task-file.js';
+import { assertProjectRoot } from '../utils/project-boundary.js';
 import {
 	type EvaluationRunV1,
 	EvaluationRunV1Schema,
@@ -205,6 +206,7 @@ export async function admitEvaluationTask(
 	);
 	const admissionLock = TASK_SPLIT_REGISTRY_RELATIVE;
 	const filePath = swarmPath(directory, relative);
+	assertProjectRoot(directory);
 	await mkdir(path.dirname(filePath), { recursive: true });
 	return withEvidenceLock(
 		directory,
@@ -547,6 +549,7 @@ export async function claimHeldOutTest(
 ): Promise<TestConsumptionClaimV1> {
 	const claim = TestConsumptionClaimV1Schema.parse(input);
 	const filePath = swarmPath(directory, TEST_LEDGER_RELATIVE);
+	assertProjectRoot(directory);
 	await mkdir(path.dirname(filePath), { recursive: true });
 	return withEvidenceLock(
 		directory,

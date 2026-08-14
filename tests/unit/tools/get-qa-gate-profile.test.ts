@@ -17,8 +17,12 @@ import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { closeAllProjectDbs } from '../../../src/db/project-db';
 import {
+	getOrCreateProfile,
+	getOrCreateProfileForIdentity,
+	lockProfileForIdentity,
 	type QaGateProfile,
 	_internals as qaGateProfileInternals,
+	setGatesForIdentity,
 } from '../../../src/db/qa-gate-profile';
 import { derivePlanId } from '../../../src/plan/utils';
 import { executeGetQaGateProfile } from '../../../src/tools/get-qa-gate-profile';
@@ -87,8 +91,15 @@ function writePlanJson(
 	);
 }
 
-/** Create a QA gate profile directly in the DB via getOrCreateProfile. */
-function createProfile(
+function createExactProfile(
+	dir: string,
+	identity: { swarm: string; title: string },
+	projectType = 'ts',
+): QaGateProfile {
+	return getOrCreateProfileForIdentity(dir, identity, projectType);
+}
+
+function createLegacyProfile(
 	dir: string,
 	planId: string,
 	projectType = 'ts',
@@ -102,13 +113,142 @@ function createProfile(
 // -----------------------------------------------------------------------
 
 describe('get_qa_gate_profile — executeGetQaGateProfile', () => {
+	test('reads a pre-plan profile by exact identity', async () => {
+		const planId = derivePlanId({ swarm: 'local', title: 'Future Plan' });
+		getOrCreateProfileForIdentity(
+			testDir,
+			{ swarm: 'local', title: 'Future Plan' },
+			'ts',
+			{ reviewer: false },
+		);
+
+		const found = await executeGetQaGateProfile(
+			{ swarm_id: 'local', plan_title: 'Future Plan' },
+			testDir,
+		);
+		expect(found.success).toBe(true);
+		expect(found.plan_id).toBe(planId);
+		expect(found.profile?.gates.reviewer).toBe(false);
+
+		const missing = await executeGetQaGateProfile(
+			{ swarm_id: 'local', plan_title: 'Missing Plan' },
+			testDir,
+		);
+		expect(missing.success).toBe(false);
+		expect(missing.reason).toBe('no_profile');
+	});
+
+	test('rejects a legacy unbound profile on the read-only exact path', async () => {
+		const planId = derivePlanId({ swarm: 'local', title: 'Future Plan' });
+		createLegacyProfile(testDir, planId, 'ts');
+
+		const result = await executeGetQaGateProfile(
+			{ swarm_id: 'local', plan_title: 'Future Plan' },
+			testDir,
+		);
+		expect(result.success).toBe(false);
+		expect(result.reason).toBe('plan_identity_unbound');
+		expect(result.message).toContain('adopt_legacy_binding_only');
+	});
+
+	test('does not create persistence when a pre-plan exact identity has no profile', async () => {
+		const result = await executeGetQaGateProfile(
+			{ swarm_id: 'local', plan_title: 'Missing Plan' },
+			testDir,
+		);
+
+		expect(result.success).toBe(false);
+		expect(result.reason).toBe('no_profile');
+		expect(fs.existsSync(path.join(testDir, '.swarm', 'swarm.db'))).toBe(false);
+	});
+
+	test('requires a complete explicit identity before plan.json exists', async () => {
+		const missing = await executeGetQaGateProfile({}, testDir);
+		const partial = await executeGetQaGateProfile(
+			{ plan_title: 'Future Plan' },
+			testDir,
+		);
+
+		expect(missing.reason).toBe('plan_identity_required');
+		expect(partial.reason).toBe('plan_identity_incomplete');
+		expect(fs.existsSync(path.join(testDir, '.swarm', 'swarm.db'))).toBe(false);
+	});
+
+	test('rejects blank and partial explicit identity when a current plan exists', async () => {
+		writePlanJson(testDir);
+		const blank = await executeGetQaGateProfile(
+			{ swarm_id: ' ', plan_title: 'test_project' },
+			testDir,
+		);
+		const partial = await executeGetQaGateProfile(
+			{ swarm_id: 'mega' },
+			testDir,
+		);
+
+		expect(blank.reason).toBe('plan_identity_invalid');
+		expect(partial.reason).toBe('plan_identity_incomplete');
+	});
+
+	test('accepts an explicit identity that exactly matches the current plan', async () => {
+		writePlanJson(testDir);
+		const planId = derivePlanId({ swarm: 'mega', title: 'test_project' });
+		createExactProfile(testDir, { swarm: 'mega', title: 'test_project' });
+
+		const result = await executeGetQaGateProfile(
+			{ swarm_id: 'mega', plan_title: 'test_project' },
+			testDir,
+		);
+		expect(result.success).toBe(true);
+		expect(result.plan_id).toBe(planId);
+	});
+
+	test('requires confirmation before reading an identity that replaces the current plan', async () => {
+		writePlanJson(testDir);
+		const replacementId = derivePlanId({
+			swarm: 'mega',
+			title: 'replacement',
+		});
+		createExactProfile(testDir, { swarm: 'mega', title: 'replacement' });
+
+		const rejected = await executeGetQaGateProfile(
+			{ swarm_id: 'mega', plan_title: 'replacement' },
+			testDir,
+		);
+		expect(rejected.reason).toBe('plan_identity_mismatch');
+
+		const confirmed = await executeGetQaGateProfile(
+			{
+				swarm_id: 'mega',
+				plan_title: 'replacement',
+				confirm_identity_change: true,
+			},
+			testDir,
+		);
+		expect(confirmed.success).toBe(true);
+		expect(confirmed.plan_id).toBe(replacementId);
+	});
+
+	test('compares raw identity even when two identities sanitize to the same plan_id', async () => {
+		writePlanJson(testDir, { swarm: 'mega one', title: 'test_project' });
+		const result = await executeGetQaGateProfile(
+			{ swarm_id: 'mega?one', plan_title: 'test_project' },
+			testDir,
+		);
+
+		expect(derivePlanId({ swarm: 'mega one', title: 'test_project' })).toBe(
+			derivePlanId({ swarm: 'mega?one', title: 'test_project' }),
+		);
+		expect(result.success).toBe(false);
+		expect(result.reason).toBe('plan_identity_mismatch');
+	});
+
 	// -------------------------------------------------------------------------
 	// Outcome 1: plan_json_unavailable when no plan exists
 	// -------------------------------------------------------------------------
-	test('returns plan_json_unavailable when plan.json does not exist', async () => {
+	test('returns plan_identity_required when neither plan nor explicit identity exists', async () => {
 		const result = await executeGetQaGateProfile({}, testDir);
 		expect(result.success).toBe(false);
-		expect(result.reason).toBe('plan_json_unavailable');
+		expect(result.reason).toBe('plan_identity_required');
 		expect(result.plan_id).toBeUndefined();
 		expect(result.profile).toBeUndefined();
 	});
@@ -134,8 +274,10 @@ describe('get_qa_gate_profile — executeGetQaGateProfile', () => {
 		writePlanJson(testDir);
 		const planId = derivePlanId({ swarm: 'mega', title: 'test_project' });
 
-		// Create the profile via the DB directly
-		const profile = createProfile(testDir, planId);
+		const profile = createExactProfile(testDir, {
+			swarm: 'mega',
+			title: 'test_project',
+		});
 
 		const result = await executeGetQaGateProfile({}, testDir);
 		expect(result.success).toBe(true);
@@ -172,9 +314,7 @@ describe('get_qa_gate_profile — executeGetQaGateProfile', () => {
 	// -------------------------------------------------------------------------
 	test('returns null lock state for unlocked profile', async () => {
 		writePlanJson(testDir);
-		const planId = derivePlanId({ swarm: 'mega', title: 'test_project' });
-
-		createProfile(testDir, planId);
+		createExactProfile(testDir, { swarm: 'mega', title: 'test_project' });
 
 		const result = await executeGetQaGateProfile({}, testDir);
 		expect(result.success).toBe(true);
@@ -186,11 +326,13 @@ describe('get_qa_gate_profile — executeGetQaGateProfile', () => {
 		writePlanJson(testDir);
 		const planId = derivePlanId({ swarm: 'mega', title: 'test_project' });
 
-		createProfile(testDir, planId);
+		createExactProfile(testDir, { swarm: 'mega', title: 'test_project' });
 
-		// Lock the profile with a snapshot seq — import lockProfile directly
-		const { lockProfile } = await import('../../../src/db/qa-gate-profile');
-		const locked = lockProfile(testDir, planId, 42);
+		const locked = lockProfileForIdentity(
+			testDir,
+			{ swarm: 'mega', title: 'test_project' },
+			42,
+		);
 
 		expect(locked.locked_at).not.toBeNull();
 		expect(locked.locked_by_snapshot_seq).toBe(42);
@@ -206,9 +348,7 @@ describe('get_qa_gate_profile — executeGetQaGateProfile', () => {
 	// -------------------------------------------------------------------------
 	test('returns profile_hash as a valid SHA-256 hex string', async () => {
 		writePlanJson(testDir);
-		const planId = derivePlanId({ swarm: 'mega', title: 'test_project' });
-
-		createProfile(testDir, planId);
+		createExactProfile(testDir, { swarm: 'mega', title: 'test_project' });
 
 		const result = await executeGetQaGateProfile({}, testDir);
 		expect(result.success).toBe(true);
@@ -219,16 +359,16 @@ describe('get_qa_gate_profile — executeGetQaGateProfile', () => {
 
 	test('profile_hash changes when gates are updated', async () => {
 		writePlanJson(testDir);
-		const planId = derivePlanId({ swarm: 'mega', title: 'test_project' });
-
-		createProfile(testDir, planId);
+		createExactProfile(testDir, { swarm: 'mega', title: 'test_project' });
 
 		const beforeResult = await executeGetQaGateProfile({}, testDir);
 		const hashBefore = beforeResult.profile!.profile_hash;
 
-		// Enable hallucination_guard via setGates
-		const { setGates } = await import('../../../src/db/qa-gate-profile');
-		setGates(testDir, planId, { hallucination_guard: true });
+		setGatesForIdentity(
+			testDir,
+			{ swarm: 'mega', title: 'test_project' },
+			{ hallucination_guard: true },
+		);
 
 		const afterResult = await executeGetQaGateProfile({}, testDir);
 		const hashAfter = afterResult.profile!.profile_hash;
@@ -245,7 +385,7 @@ describe('get_qa_gate_profile — executeGetQaGateProfile', () => {
 		writePlanJson(testDir, { title: 'another_test' });
 		const planId = derivePlanId({ swarm: 'mega', title: 'another_test' });
 
-		createProfile(testDir, planId);
+		createExactProfile(testDir, { swarm: 'mega', title: 'another_test' });
 
 		const result = await executeGetQaGateProfile({}, testDir);
 		expect(result.success).toBe(true);
@@ -310,8 +450,8 @@ describe('get_qa_gate_profile — executeGetQaGateProfile', () => {
 			'utf-8',
 		);
 
-		createProfile(testDir, planIdA);
-		createProfile(resolvedDir2, planIdB);
+		createExactProfile(testDir, { swarm: 'mega', title: 'project_a' });
+		createExactProfile(resolvedDir2, { swarm: 'mega', title: 'project_b' });
 
 		const resultA = await executeGetQaGateProfile({}, testDir);
 		const resultB = await executeGetQaGateProfile({}, resolvedDir2);

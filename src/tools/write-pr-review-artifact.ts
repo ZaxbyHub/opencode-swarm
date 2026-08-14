@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { z } from 'zod';
+import { CANDIDATE_SEVERITIES } from '../background/candidate-contract.js';
 import {
 	assertPrReviewArtifactBoundary,
 	assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts,
@@ -32,7 +33,7 @@ const FindingSchema = z
 			'suppress_with_reason',
 			'handoff_to_feedback',
 		]),
-		severity: z.enum(['CRITICAL', 'HIGH', 'MEDIUM', 'LOW']).optional(),
+		severity: z.enum(CANDIDATE_SEVERITIES).optional(),
 		category: z.string().trim().min(1).max(128).optional(),
 	})
 	.strict();

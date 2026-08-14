@@ -15,6 +15,7 @@
 
 import { tryAcquireLock } from '../parallel/file-locks.js';
 import { emit } from '../telemetry.js';
+import { assertProjectRoot } from '../utils/project-boundary.js';
 
 export class EvidenceLockTimeoutError extends Error {
 	readonly directory: string;
@@ -72,6 +73,10 @@ export async function withEvidenceLock<T>(
 	fn: () => Promise<T>,
 	timeoutMs = 60_000,
 ): Promise<T> {
+	// The lock implementation creates durable state under `.swarm/locks` before
+	// the caller callback runs. Guard that lowest-level mutation boundary so a
+	// direct lock caller cannot bypass tool- or writer-layer root validation.
+	assertProjectRoot(directory);
 	const deadline = Date.now() + timeoutMs;
 	let attempt = 0;
 

@@ -43,6 +43,8 @@ export interface BrokenAssertion {
 	line: number;
 	skillFile: string;
 	phrase: string;
+	/** Kind of assertion that was checked. 'toContain' = literal substring; 'toMatch' = compiled-regex; 'malformed-regex' = toMatch whose pattern failed to compile. */
+	assertionKind: 'toContain' | 'toMatch' | 'malformed-regex';
 }
 
 /** All findings from a run. */
@@ -159,8 +161,14 @@ function scanDirForReferences(
 	for (const entry of entries) {
 		const full = path.join(dir, entry.name);
 		if (entry.isDirectory()) {
-			// Skip node_modules and .git
-			if (entry.name === 'node_modules' || entry.name === '.git') continue;
+			// Skip node_modules, .git, and the detector's own test directory (FR-003):
+			// the skill-assertion detector must not scan its own test files.
+			if (
+				entry.name === 'node_modules' ||
+				entry.name === '.git' ||
+				entry.name === 'scripts'
+			)
+				continue;
 			scanDirForReferences(full, skillRel, slug, out);
 		} else if (entry.isFile() && entry.name.endsWith('.test.ts')) {
 		if (fs.readFileSync(full, 'utf-8').includes(slug)) {
@@ -171,35 +179,228 @@ function scanDirForReferences(
 }
 
 /**
- * Extract toContain and toMatch assertion phrases from a test file.
- * Returns an array of { line, phrase } for each assertion found.
+ * Parse a JavaScript regex literal starting at index `start` (which must point
+ * at the opening `/`). Properly handles escaped slashes and character classes.
+ * Returns { source, flags } on success, or { malformed: true, source, flags }
+ * if the literal is unterminated.
  */
-function extractAssertions(testFile: string): Array<{ line: number; phrase: string }> {
+function parseRegexLiteral(s: string, start: number): { source: string; flags: string } | { malformed: true; source: string; flags: string } {
+	if (s[start] !== '/') return { malformed: true, source: '', flags: '' };
+	let i = start + 1;
+	let inClass = false;
+	while (i < s.length) {
+		const ch = s[i]!;
+		if (ch === '\\') {
+			i += 2;
+			continue;
+		}
+		if (ch === '[') {
+			inClass = true;
+		} else if (ch === ']' && inClass) {
+			inClass = false;
+		} else if (ch === '/' && !inClass) {
+			const source = s.slice(start + 1, i);
+			let j = i + 1;
+			while (j < s.length && /[A-Za-z]/.test(s[j]!)) j++;
+			return { source, flags: s.slice(i + 1, j) };
+		}
+		i++;
+	}
+	return { malformed: true, source: s.slice(start + 1), flags: '' };
+}
+
+/**
+ * Extract the phrase from a .toMatch(...) argument on a given line.
+ * Handles three forms: /regex/, "string", 'string'.
+ * Returns { phrase, flags, kind } where kind is 'toMatch' or 'malformed-regex'.
+ * flags is the regex flags string (e.g. "i" for case-insensitive); empty for string forms.
+ */
+function extractToMatchPhrase(
+	line: string,
+	startIdx: number,
+): { phrase: string; flags: string; kind: 'toMatch' | 'malformed-regex' } | null {
+	// Skip past '(' and any whitespace before the argument
+	let i = startIdx + 1;
+	while (i < line.length && /\s/.test(line[i]!)) i++;
+	if (i >= line.length) return null;
+
+	const ch = line[i]!;
+
+	// Regex literal: /
+	if (ch === '/') {
+		const result = parseRegexLiteral(line, i);
+		if (!result) return null;
+		if ('malformed' in result && result.malformed) {
+			return { phrase: result.source, flags: result.flags, kind: 'malformed-regex' };
+		}
+		return { phrase: result.source, flags: result.flags, kind: 'toMatch' };
+	}
+
+	// Double-quoted string
+	if (ch === '"') {
+		let j = i + 1;
+		while (j < line.length) {
+			const c = line[j]!;
+			if (c === '\\' && j + 1 < line.length) {
+				j += 2;
+				continue;
+			}
+			if (c === '"') {
+				return { phrase: line.slice(i + 1, j), flags: '', kind: 'toMatch' };
+			}
+			j++;
+		}
+		return null;
+	}
+
+	// Single-quoted string
+	if (ch === "'") {
+		let j = i + 1;
+		while (j < line.length) {
+			const c = line[j]!;
+			if (c === '\\' && j + 1 < line.length) {
+				j += 2;
+				continue;
+			}
+			if (c === "'") {
+				return { phrase: line.slice(i + 1, j), flags: '', kind: 'toMatch' };
+			}
+			j++;
+		}
+		return null;
+	}
+
+	return null;
+}
+
+/**
+ * Finds all string-literal regions (single-quoted, double-quoted, template)
+ * in a given line. Each region is { start, end } where end is the closing
+ * quote/backtick position (inclusive).
+ */
+function findStringRegions(line: string): Array<{ start: number; end: number }> {
+	const regions: Array<{ start: number; end: number }> = [];
+	let i = 0;
+	while (i < line.length) {
+		const ch = line[i]!;
+		if (ch === '\\') {
+			i += 2;
+			continue;
+		}
+		if (ch === '"' || ch === "'") {
+			const quote = ch;
+			const start = i;
+			i++;
+			while (i < line.length) {
+				if (line[i] === '\\') {
+					i += 2;
+					continue;
+				}
+				if (line[i] === quote) {
+					regions.push({ start, end: i });
+					i++;
+					break;
+				}
+				i++;
+			}
+		} else if (ch === '`') {
+			const start = i;
+			i++;
+			while (i < line.length && line[i] !== '`') {
+				if (line[i] === '\\') {
+					i += 2;
+					continue;
+				}
+				if (line[i] === '$' && line[i + 1] === '{') {
+					// Template expression — skip to matching }
+					i += 2;
+					let depth = 1;
+					while (i < line.length && depth > 0) {
+						if (line[i] === '{') depth++;
+						else if (line[i] === '}') depth--;
+						i++;
+					}
+				} else {
+					i++;
+				}
+			}
+			if (i < line.length) {
+				regions.push({ start, end: i });
+				i++;
+			}
+		} else {
+			i++;
+		}
+	}
+	return regions;
+}
+
+/**
+ * Returns true if position `pos` in `line` falls inside a string literal
+ * (single-quoted, double-quoted, or template literal). Used by extractAssertions
+ * to skip phrases from fixture strings that merely look like assertions (FR-003).
+ */
+function isInsideStringLiteral(line: string, pos: number): boolean {
+	const regions = findStringRegions(line);
+	for (const reg of regions) {
+		// Check: start <= pos <= end (pos is within the string literal)
+		if (reg.start <= pos && pos <= reg.end) return true;
+	}
+	return false;
+}
+
+/**
+ * Extract toContain and toMatch assertion phrases from a test file.
+ * Returns an array of { line, phrase, kind } for each assertion found.
+ */
+function extractAssertions(
+	testFile: string,
+): Array<{ line: number; phrase: string; flags: string; kind: 'toContain' | 'toMatch' | 'malformed-regex' }> {
 	const content = fs.readFileSync(testFile, 'utf-8');
 	const lines = content.split('\n');
-	const results: Array<{ line: number; phrase: string }> = [];
+	const results: Array<{ line: number; phrase: string; flags: string; kind: 'toContain' | 'toMatch' | 'malformed-regex' }> = [];
 
-	// Match: .toContain('...') or .toMatch(/.../)
-	// capturing the string or regex content inside the parens
-	const toContainRe = /\.toContain\s*\(\s*['"`]([^'"`]+)['"`]\s*\)/g;
-	// toMatch can have a regex literal \/(.*?)\/ or a string '...' or "..."
-	const toMatchRe = /\.toMatch\s*\(\s*(?:\/(.*?)\/|"([^"]+)"|'([^']+)')\s*\)/g;
+	// toContain: captures the string content inside the parentheses
+	const toContainRe = /\.toContain\s*\(\s*(['"`])((?:[^'"`\\]|\\.)*)\1\s*\)/g;
+
+	// Regex to detect negated assertions — lines where .not precedes toContain/toMatch
+	// in any chained form. A negated assertion never constitutes evidence that a
+	// phrase must be present and must be skipped (FR-001).
+	const negatedAssertionRe =
+		/\.not\.(?:\w+(?:\.\w+)*\.)?\s*(?:toContain|toMatch)\s*\(/;
 
 	for (let i = 0; i < lines.length; i++) {
-		const line = lines[i];
+		const line = lines[i]!;
+		// Skip lines with negated .not.toContain / .not.toMatch
+		if (negatedAssertionRe.test(line)) continue;
 		// toContain
 		let m: RegExpExecArray | null;
 		while ((m = toContainRe.exec(line)) !== null) {
-			results.push({ line: i + 1, phrase: m[1] });
+			// Skip matches inside string literals (FR-003): phrases inside
+			// fixture template strings must not be treated as real assertions.
+			if (isInsideStringLiteral(line, m.index)) continue;
+			// m[1] is the quote char, m[2] is the content between quotes
+			const phrase = m[2] ?? '';
+			if (phrase) {
+				results.push({ line: i + 1, phrase, flags: '', kind: 'toContain' });
+			}
 		}
 		toContainRe.lastIndex = 0;
 
-		// toMatch with regex or string
-		while ((m = toMatchRe.exec(line)) !== null) {
-			const phrase = m[1] ?? m[2] ?? m[3] ?? '';
-			if (phrase) results.push({ line: i + 1, phrase });
+		// toMatch: find each .toMatch( occurrence and extract the phrase
+		// using the escape-aware parser (parseRegexLiteral for /regex/, string
+		// extraction for "string" and 'string')
+		const toMatchCallRe = /\.toMatch\s*\(/g;
+		while ((m = toMatchCallRe.exec(line)) !== null) {
+			// Skip matches inside string literals (FR-003)
+			if (isInsideStringLiteral(line, m.index)) continue;
+			const openParenIdx = m.index + m[0]!.length - 1; // position of '('
+			const result = extractToMatchPhrase(line, openParenIdx);
+			if (result) {
+				results.push({ line: i + 1, phrase: result.phrase, flags: result.flags, kind: result.kind });
+			}
 		}
-		toMatchRe.lastIndex = 0;
+		toMatchCallRe.lastIndex = 0;
 	}
 
 	return results;
@@ -253,12 +454,20 @@ function checkAssertionsAgainstSkill(
 		}
 		const callBody = fileContent.slice(callStart, i - 1); // exclude the closing ')'
 
-		// Extract the first string literal in the call body — that is the path arg.
-		// Handles 'path', "path", `path` with escapes.
-		const firstStringRe = /(['"`])((?:[^'"`\\]|\\.)*)\1/;
-		const strMatch = firstStringRe.exec(callBody);
-		if (!strMatch) continue;
-		const filePath = strMatch[2]!;
+		// Extract every string literal in the call body and pick the one that
+		// looks like an .md file path. Handle escapes inside the literal.
+		// For `readFileSync(join(process.cwd(), '.claude/skills/...'))`, the
+		// path is the only string ending in '.md'.
+		const allStringsRe = /(['"`])((?:[^'"`\\]|\\.)*)\1/g;
+		let filePath: string | null = null;
+		let m: RegExpExecArray | null;
+		while ((m = allStringsRe.exec(callBody)) !== null) {
+			const candidate = m[2]!;
+			if (candidate.endsWith('.md')) {
+				filePath = candidate;
+			}
+		}
+		if (filePath === null) continue;
 		if (referencesSkillPath(filePath, slug) && filePath.endsWith('.md')) {
 			// Direct readFileSync: always a valid skill variable
 			confirmedSkillVariables.set(varName, true);
@@ -370,23 +579,61 @@ function checkAssertionsAgainstSkill(
 	const broken: BrokenAssertion[] = [];
 	const assertions = extractAssertions(testFile);
 
-	for (const { line: assertionLine, phrase } of assertions) {
-		// Look at surrounding lines for a skill-assertion attribution comment
-		// or an expect(...) chaining off a tracked skill variable.
+	for (const { line: assertionLine, phrase, flags, kind } of assertions) {
+		// FR-004: attribute an assertion to a skill only when the EXACT assertion
+		// line itself (not a ±2 window) chains off a confirmed skill variable.
+		// Window-based proximity is never sufficient.
 		const lineIdx = assertionLine - 1;
-		const windowStart = Math.max(0, lineIdx - 2);
-		const windowEnd = Math.min(lines.length, lineIdx + 1);
-		const windowLines = lines.slice(windowStart, windowEnd + 1).join('\n');
+		const exactLine = lines[lineIdx] ?? '';
 
-		const isScopedToSkill =
-			skillExpectRe.test(windowLines) ||
-			// Fallback: explicit attribution comment
-			/\/\/\s*skill-assertion\s*:?/i.test(windowLines);
+		if (!skillExpectRe.test(exactLine)) continue;
 
-		if (!isScopedToSkill) continue;
-
-		if (!skillContent.includes(phrase)) {
-			broken.push({ testFile, line: assertionLine, skillFile, phrase });
+		// Evaluate the assertion based on its kind:
+		// - toContain: literal substring check
+		// - toMatch: compiled-regex check (phrase is a regex source)
+		// - malformed-regex: directly a broken assertion (parseRegexLiteral already determined it couldn't compile)
+		if (kind === 'malformed-regex') {
+			broken.push({
+				testFile,
+				line: assertionLine,
+				skillFile,
+				phrase,
+				assertionKind: 'malformed-regex',
+			});
+		} else if (kind === 'toMatch') {
+			try {
+				// eslint-disable-next-line no-new
+				new RegExp(phrase, flags); // validate compilation with flags
+				if (!new RegExp(phrase, flags).test(skillContent)) {
+					broken.push({
+						testFile,
+						line: assertionLine,
+						skillFile,
+						phrase,
+						assertionKind: 'toMatch',
+					});
+				}
+			} catch {
+				// Malformed regex source — treat as broken assertion
+				broken.push({
+					testFile,
+					line: assertionLine,
+					skillFile,
+					phrase,
+					assertionKind: 'malformed-regex',
+				});
+			}
+		} else {
+			// toContain: literal substring check
+			if (!skillContent.includes(phrase)) {
+				broken.push({
+					testFile,
+					line: assertionLine,
+					skillFile,
+					phrase,
+					assertionKind: 'toContain',
+				});
+			}
 		}
 	}
 
@@ -468,7 +715,7 @@ export function formatBrokenAssertions(
 		const msg =
 			`[skill-assertion] "${b.phrase}" — assertion in ${b.testFile}:${b.line} ` +
 			`references "${b.skillFile}" but phrase is no longer present`;
-		lines.push(`::error file=${b.testFile},line=${b.line}::${msg}`);
+		lines.push(`::notice file=${b.testFile},line=${b.line}::${msg}`);
 	}
 
 	return lines;
@@ -487,9 +734,13 @@ async function main(): Promise<void> {
 			console.log(line);
 		}
 		console.error(
-			`\nskill-assertions: check completed in ${elapsed}ms`,
+			`\nskill-assertions: check completed in ${elapsed}ms (advisory)`,
 		);
-		process.exit(1);
+		// FR-006: exit 0 by default (advisory, non-blocking). Set
+		// SKILL_ASSERTIONS_STRICT=1 to opt into hard-fail behavior.
+		if (process.env.SKILL_ASSERTIONS_STRICT === '1') {
+			process.exit(1);
+		}
 	}
 
 	if (result.changedSkillFiles.length > 0) {

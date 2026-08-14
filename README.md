@@ -489,10 +489,10 @@ Configure via:
     "enabled": true,
     "pattern_thresholds": {
       "repetition_loop": 2,
-      "ping_pong": 4,
+      "ping_pong": 2,
       "expansion_drift": 3,
       "stuck_on_test": 3,
-      "context_thrash": 5
+      "context_thrash": 10
     }
   }
 }

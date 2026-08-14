@@ -11,7 +11,7 @@
  * 6. Malformed evidence JSON (not valid JSON) — should handle gracefully
  * 7. Evidence verdict is a number (42) not string — should block
  * 8. Single-phase plan (id=1) — fires for phase 1
- * 9. Missing plan.json entirely — gate should skip gracefully
+ * 9. Missing plan.json entirely
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
@@ -26,7 +26,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PlanSchema } from '../../../src/config/plan-schema';
 import { closeProjectDb } from '../../../src/db/project-db';
-import { getOrCreateProfile, setGates } from '../../../src/db/qa-gate-profile';
+import { setGatesForIdentity } from '../../../src/db/qa-gate-profile';
 import { computePlanHash } from '../../../src/plan/ledger';
 import { derivePlanIdentityHash } from '../../../src/plan/utils';
 import { executePhaseComplete } from '../../../src/tools/phase-complete';
@@ -37,10 +37,6 @@ const PLAN_SWARM = 'test-swarm';
 const PLAN_TITLE = 'test-plan';
 const PLAN_ID = `${PLAN_SWARM}-${PLAN_TITLE}`.replace(/[^a-zA-Z0-9-_]/g, '_');
 const SESSION_ID = 'test-session-fc-adversarial';
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 function writePlan(
 	phases: Array<{
@@ -113,8 +109,11 @@ function writeRetro(phase: number) {
 }
 
 function enableFinalCouncil() {
-	getOrCreateProfile(tempDir, PLAN_ID);
-	setGates(tempDir, PLAN_ID, { final_council: true });
+	setGatesForIdentity(
+		tempDir,
+		{ swarm: PLAN_SWARM, title: PLAN_TITLE },
+		{ final_council: true },
+	);
 }
 
 function readCurrentPlan() {

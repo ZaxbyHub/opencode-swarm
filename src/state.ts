@@ -22,7 +22,7 @@ import { stripKnownSwarmPrefix } from './config/schema';
 import type { CouncilAgent } from './council/types';
 import {
 	getEffectiveGates,
-	getProfile,
+	getProfileLookupForIdentity,
 	type QaGates,
 } from './db/qa-gate-profile.js';
 import {
@@ -580,6 +580,55 @@ export interface AgentSessionState {
 	 * fields, and this one is additive.
 	 */
 	prmHardStopInjectPending?: boolean;
+	/**
+	 * Issue #2134 — episode ledger for the escalation ladder.
+	 *
+	 * Maps an episode key (`patternType|startStep`) to the occurrence count that
+	 * episode had when it last recorded a strike. A detector re-emits the SAME
+	 * ongoing episode on every tool call with a growing `stepRange[1]` (a coder
+	 * reading more files extends one `context_thrash` run), and the trajectory
+	 * cursor cannot suppress that because the episode's end step always advances
+	 * past it. Counting each re-emission as a fresh strike walked ONE ordinary
+	 * episode from level 1 to level 3 in three tool calls and wedged healthy coder
+	 * sessions behind a hard stop.
+	 *
+	 * A match strikes when its episode is new, or when that episode has gained
+	 * another full threshold's worth of occurrences since it last struck. Both
+	 * rungs are needed: three of the five detectors never advance an episode's
+	 * start step while it runs, so without the growth rung they would strike
+	 * exactly once and could never reach level 2 or 3. See the EPISODE GATE
+	 * comment in `src/prm/index.ts` for the per-detector derivation.
+	 *
+	 * Optional for the same reason as `prmHardStopInjectPending`: ~25 existing
+	 * test/session literals enumerate the required PRM fields, and this is additive.
+	 */
+	prmStruckEpisodes?: Map<string, number>;
+	/**
+	 * Issue #2134 follow-up — mirror of the escalation tracker's LADDER counts,
+	 * keyed by `resolveLadderKey(match)` (`pattern|target`, or bare `pattern` for
+	 * a pattern reporting a growing target set).
+	 *
+	 * Deliberately separate from `prmPatternCounts`, which stays keyed by pattern
+	 * type as the observable per-pattern tally that telemetry and tests read. The
+	 * two are different keyspaces and must not be conflated: the tracker-rebuild
+	 * path below used to seed itself from `prmPatternCounts`, which would now
+	 * hand pattern-type keys to a ladder that counts by target and silently
+	 * mis-restore every count.
+	 */
+	prmLadderCounts?: Map<string, number>;
+	/**
+	 * Issue #2134 — dispatch identity of the delegation whose start already reset
+	 * this session's PRM state. Holds the Task tool `callID`, which is unique per
+	 * dispatch.
+	 *
+	 * The reset hook (`delegationGateHooks.taskMetadata`) is driven by
+	 * `message.part.updated`, which fires repeatedly for the SAME Task part as the
+	 * child runs. An unguarded reset there would clear the escalation ladder on
+	 * every part update and disarm PRM permanently — a fail-open far worse than
+	 * the wedge it is meant to prevent. Comparing against this field makes the
+	 * reset exactly once per dispatch.
+	 */
+	prmDelegationCallId?: string;
 	// NOTE (issue #2063 C2, reviewer round-4 REQUIRED 3): there is deliberately
 	// NO `prmHardStopDeliveredAt` field. A delivery timestamp was added here and
 	// stamped at the deny site, but it had zero readers and was never serialized,
@@ -1691,6 +1740,12 @@ export function startAgentSession(
 		// producer on every level-3 detection.
 		prmHardStopInjectPending: false,
 		prmInjectedAdvisoryKeys: new Set(),
+		// Issue #2134: empty ledger — no episode has struck yet, so the first
+		// detection of any pattern type is always allowed to record strike 1.
+		prmStruckEpisodes: new Map<string, number>(),
+		// Issue #2134 follow-up: ladder counts start empty alongside the episode
+		// ledger they are advanced by.
+		prmLadderCounts: new Map<string, number>(),
 		// Issue #2063 B3/B5: no execution episode until this session actually
 		// attempts execution work.
 		executionEpisodeArmed: false,
@@ -2043,6 +2098,12 @@ export function ensureAgentSession(
 		}
 		if (!session.prmInjectedAdvisoryKeys) {
 			session.prmInjectedAdvisoryKeys = new Set();
+		}
+		if (!session.prmStruckEpisodes) {
+			session.prmStruckEpisodes = new Map<string, number>();
+		}
+		if (!session.prmLadderCounts) {
+			session.prmLadderCounts = new Map<string, number>();
 		}
 		if (session.executionEpisodeArmed === undefined) {
 			session.executionEpisodeArmed = false;
@@ -2767,9 +2828,9 @@ export async function isCouncilGateActive(
 	}
 
 	const planId = derivePlanId(plan);
-	let profile: ReturnType<typeof getProfile> | null = null;
+	let lookup: ReturnType<typeof getProfileLookupForIdentity> | null = null;
 	try {
-		profile = getProfile(directory, planId);
+		lookup = getProfileLookupForIdentity(directory, plan);
 	} catch (err) {
 		// getProfile returns null on missing DB; it only throws on unexpected I/O or
 		// SQLite errors (EACCES, EBUSY, corrupt database). Log those so they're visible.
@@ -2780,11 +2841,15 @@ export async function isCouncilGateActive(
 				`[isCouncilGateActive] getProfile threw unexpectedly for plan ${planId}: ${msg}. Treating council as inactive.`,
 			);
 		}
-		profile = null;
+		lookup = null;
 	}
-	if (!profile) {
+	if (!lookup || lookup.kind === 'missing') {
 		return false;
 	}
+	if (lookup.kind === 'unbound_legacy') {
+		return enabled && lookup.profile.gates.council_mode === true;
+	}
+	const profile = lookup.profile;
 
 	const councilMode =
 		getEffectiveGates(profile, sessionOverrides).council_mode === true;
@@ -3287,23 +3352,34 @@ export function setLiveContextWindow(
 ): void {
 	if (!sessionID) return;
 	const map = swarmState.liveContextWindows;
-	const modelID = normalizeLiveContextIdentity(identity?.modelID);
-	const providerID = normalizeLiveContextIdentity(identity?.providerID);
+	// Preserve the host's spelling for case-sensitive model_limits lookup and
+	// diagnostics. Equality is normalized separately below so host casing drift
+	// does not make the same provider/model look like a handoff.
+	const modelID = trimLiveContextIdentity(identity?.modelID);
+	const providerID = trimLiveContextIdentity(identity?.providerID);
+	const hasIdentity = Boolean(modelID || providerID);
 	const existing = map.get(sessionID);
 	const hasUsableTokens =
 		typeof tokens === 'number' && Number.isFinite(tokens) && tokens >= 1;
 	if (!hasUsableTokens) {
-		if (!identity || (!modelID && !providerID)) return;
+		if (!hasIdentity) return;
 		if (
-			existing?.modelID === modelID &&
-			existing?.providerID === providerID &&
-			existing?.tokens !== undefined
+			existing &&
+			liveContextIdentityMatches(existing, { modelID, providerID }) &&
+			existing.tokens !== undefined
 		) {
 			return;
 		}
 		if (map.has(sessionID)) map.delete(sessionID);
 		map.set(sessionID, { modelID, providerID });
 		evictOldestLiveContextWindow(map, sessionID);
+		return;
+	}
+	// A numeric host sample without a usable identity is safe as an initial
+	// generic fallback, but it must not erase a prior exact binding. Otherwise a
+	// malformed system.transform turn can make messages.transform relay the new
+	// generic denominator as if it still belonged to the previous model.
+	if (!hasIdentity && existing && (existing.modelID || existing.providerID)) {
 		return;
 	}
 	if (map.has(sessionID)) map.delete(sessionID);
@@ -3328,12 +3404,7 @@ export function getLiveContextWindow(
 	if (!sessionID) return undefined;
 	const cached = swarmState.liveContextWindows.get(sessionID);
 	if (!cached) return undefined;
-	const modelID = normalizeLiveContextIdentity(identity?.modelID);
-	const providerID = normalizeLiveContextIdentity(identity?.providerID);
-	if (
-		identity &&
-		(cached.modelID !== modelID || cached.providerID !== providerID)
-	) {
+	if (identity && !liveContextIdentityMatches(cached, identity)) {
 		return undefined;
 	}
 	return cached.tokens;
@@ -3357,11 +3428,27 @@ function evictOldestLiveContextWindow(
 	if (oldest !== undefined && oldest !== sessionID) map.delete(oldest);
 }
 
-function normalizeLiveContextIdentity(
+function trimLiveContextIdentity(
 	value: string | undefined,
 ): string | undefined {
-	const normalized = value?.trim().toLowerCase();
-	return normalized ? normalized : undefined;
+	const trimmed = value?.trim();
+	return trimmed ? trimmed : undefined;
+}
+
+function normalizeLiveContextIdentity(value: string | undefined): string {
+	return trimLiveContextIdentity(value)?.toLowerCase() ?? '';
+}
+
+function liveContextIdentityMatches(
+	left: { modelID?: string; providerID?: string },
+	right: { modelID?: string; providerID?: string },
+): boolean {
+	return (
+		normalizeLiveContextIdentity(left.modelID) ===
+			normalizeLiveContextIdentity(right.modelID) &&
+		normalizeLiveContextIdentity(left.providerID) ===
+			normalizeLiveContextIdentity(right.providerID)
+	);
 }
 
 /** Record this session's budget percentage and the denominator it was computed

@@ -38,7 +38,7 @@ describe('.opencode/skills/plan/SKILL.md protocol content', () => {
 			const generalCouncilIdx = skillContent.indexOf(
 				'GENERAL COUNCIL ADVISORY OPTION (pre-save_plan)',
 			);
-			const savePlanIdx = skillContent.indexOf('Use the `save_plan` tool');
+			const savePlanIdx = skillContent.indexOf('\nsave_plan({');
 
 			expect(generalCouncilIdx).toBeGreaterThan(0);
 			expect(savePlanIdx).toBeGreaterThan(generalCouncilIdx);
@@ -48,21 +48,27 @@ describe('.opencode/skills/plan/SKILL.md protocol content', () => {
 			expect(skillContent).toContain('before any critic pre-plan review');
 		});
 
-		it('keeps save_plan requirements and example', () => {
-			expect(skillContent).toContain('Use the `save_plan` tool');
+		it('keeps plan requirements and exact-identity save example', () => {
+			expect(skillContent).toContain(
+				'Draft the complete implementation plan in memory first',
+			);
 			expect(skillContent).toContain('Required parameters:');
-			expect(skillContent).toContain('save_plan({ title: "My Real Project"');
+			expect(skillContent).toContain('title: <exact plan_title>');
+			expect(skillContent).toContain('swarm_id: <exact swarm_id>');
 		});
 
-		it('keeps post-save QA gate persistence and inline gate warning', () => {
-			expect(skillContent).toContain('POST-SAVE_PLAN: APPLY QA GATE SELECTION');
-			expect(skillContent).toContain('Pending QA Gate Selection');
+		it('keeps pre-save QA bootstrap and inline gate warning', () => {
+			expect(skillContent).toContain(
+				'QA AND EXECUTION PROFILE BOOTSTRAP (before first `save_plan`)',
+			);
+			expect(skillContent).toContain('exact raw plan identity');
 			expect(skillContent).not.toContain('{{QA_GATE_DIALOGUE_PLAN}}');
 			expect(skillContent).toContain('Present the eleven gates');
 			expect(skillContent).toContain('final_council (default: OFF)');
 			expect(skillContent).toMatch(/how many coders should run in parallel/i);
 			expect(skillContent).toMatch(/commit frequency/i);
-			expect(skillContent).toContain('INLINE GATE SELECTION');
+			expect(skillContent).toContain('get_qa_gate_profile');
+			expect(skillContent).not.toContain('Pending QA Gate Selection');
 		});
 
 		it('keeps planning quality controls', () => {
@@ -111,35 +117,14 @@ describe('.opencode/skills/plan/SKILL.md protocol content', () => {
 			}
 		});
 
-		// The specify/brainstorm skills also embed the parallel-coders question.
-		// They must teach the worktree concept (so the guidance does not drift away
-		// from the plan skill), but — because no plan exists yet at the SPECIFY /
-		// BRAINSTORM gate-selection step — they must defer the concrete count
-		// recommendation to plan time rather than telling the architect to inspect
-		// a plan that does not exist (F-006). A byte-identity check is intentionally
-		// avoided here because the brainstorm copies carry a pre-existing
-		// auto_proceed asymmetry unrelated to parallelization (F-005).
+		// SPECIFY/BRAINSTORM no longer ask the execution questions. They defer the
+		// entire exchange until PLAN can inspect task scopes and freeze identity.
 		for (const [label, relPath] of Object.entries(earlyModeSkills)) {
-			it(`${label} teaches worktrees and defers the recommendation to plan time`, () => {
+			it(`${label} defers the execution-profile dialogue to plan time`, () => {
 				const content = readFileSync(join(process.cwd(), relPath), 'utf-8');
-				const parallelCodersStart = content.indexOf(
-					'- Parallel coders (default: 1, range: 1-6)',
-				);
-				const commitFrequencyStart = content.indexOf(
-					'- Commit frequency',
-					parallelCodersStart,
-				);
-				const section = content.slice(
-					parallelCodersStart,
-					commitFrequencyStart,
-				);
-				expect(section).toContain('isolated git worktree');
-				expect(section).toMatch(/do NOT overlap/i);
-				expect(section).toContain('not known until the plan is finalized');
-				expect(section).toContain('COMMON MISCONCEPTION');
-				expect(section).toContain('worktree.policy');
-				expect(section).toMatch(/Do not recommend Lean Turbo or Epic/i);
-				expect(content).not.toContain('Inspect the plan and recommend a count');
+				expect(content).toMatch(/defer[\s\S]*MODE: PLAN/i);
+				expect(content).toContain('exact plan identity');
+				expect(content).not.toContain('Parallel coders (default:');
 			});
 		}
 	});

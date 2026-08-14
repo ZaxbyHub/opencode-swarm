@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { platform, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { resolveWorkingDirectory } from '../../../src/tools/resolve-working-directory';
+import { safeRmRecursive } from '../../helpers/safe-test-dir';
 
 describe('resolveWorkingDirectory', () => {
 	const isWindows = platform() === 'win32';
@@ -10,38 +11,34 @@ describe('resolveWorkingDirectory', () => {
 
 	beforeEach(() => {
 		testDir = mkdtempSync(join(tmpdir(), 'resolve-wd-test-'));
-		mkdirSync(testDir, { recursive: true });
+		mkdirSync(join(testDir, '.opencode'), { recursive: true });
 	});
 
 	afterEach(() => {
-		try {
-			rmSync(testDir, { recursive: true, force: true });
-		} catch {
-			// Ignore cleanup errors (EBUSY/EPERM on Windows)
-		}
+		safeRmRecursive(testDir);
 	});
 
 	test('returns fallback directory when working_directory is undefined', () => {
-		const result = resolveWorkingDirectory(undefined, '/fallback');
+		const result = resolveWorkingDirectory(undefined, testDir);
 		expect(result.success).toBe(true);
 		if (result.success) {
-			expect(result.directory).toBe('/fallback');
+			expect(result.directory).toBe(testDir);
 		}
 	});
 
 	test('returns fallback directory when working_directory is null', () => {
-		const result = resolveWorkingDirectory(null, '/fallback');
+		const result = resolveWorkingDirectory(null, testDir);
 		expect(result.success).toBe(true);
 		if (result.success) {
-			expect(result.directory).toBe('/fallback');
+			expect(result.directory).toBe(testDir);
 		}
 	});
 
 	test('returns fallback directory when working_directory is empty string', () => {
-		const result = resolveWorkingDirectory('', '/fallback');
+		const result = resolveWorkingDirectory('', testDir);
 		expect(result.success).toBe(true);
 		if (result.success) {
-			expect(result.directory).toBe('/fallback');
+			expect(result.directory).toBe(testDir);
 		}
 	});
 

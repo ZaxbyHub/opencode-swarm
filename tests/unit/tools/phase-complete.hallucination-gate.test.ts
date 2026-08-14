@@ -4,8 +4,11 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 import { closeAllProjectDbs } from '../../../src/db/project-db';
-import { getOrCreateProfile, setGates } from '../../../src/db/qa-gate-profile';
-import { derivePlanId } from '../../../src/plan/utils';
+import {
+	getOrCreateProfile,
+	setGates,
+	setGatesForIdentity,
+} from '../../../src/db/qa-gate-profile';
 import {
 	ensureAgentSession,
 	recordPhaseAgentDispatch,
@@ -18,7 +21,7 @@ const { phase_complete } = await import('../../../src/tools/phase-complete');
 // planId must match what loadPlan derives: "${swarm}-${title}".replace(...)
 const PLAN_SWARM = 'mega';
 const PLAN_TITLE = 'Test Plan';
-const PLAN_ID = derivePlanId({ swarm: PLAN_SWARM, title: PLAN_TITLE });
+const PLAN_IDENTITY = { swarm: PLAN_SWARM, title: PLAN_TITLE };
 
 function setupSwarmDir(dir: string): void {
 	fs.mkdirSync(path.join(dir, '.swarm', 'evidence'), { recursive: true });
@@ -144,6 +147,10 @@ function writeHallucinationEvidence(
 	);
 }
 
+function enableHallucinationGate(dir: string): void {
+	setGatesForIdentity(dir, PLAN_IDENTITY, { hallucination_guard: true });
+}
+
 describe('phase_complete — hallucination guard gate (Gate 3)', () => {
 	let tempDir: string;
 	let originalCwd: string;
@@ -188,8 +195,7 @@ describe('phase_complete — hallucination guard gate (Gate 3)', () => {
 	});
 
 	test('2. gate enabled + evidence missing → blocked HALLUCINATION_VERIFICATION_MISSING', async () => {
-		getOrCreateProfile(tempDir, PLAN_ID);
-		setGates(tempDir, PLAN_ID, { hallucination_guard: true });
+		enableHallucinationGate(tempDir);
 		writeDriftEvidence(tempDir, 1, 'approved');
 		// No hallucination-guard.json
 
@@ -203,8 +209,7 @@ describe('phase_complete — hallucination guard gate (Gate 3)', () => {
 	});
 
 	test('3. gate enabled + APPROVED evidence → phase completes', async () => {
-		getOrCreateProfile(tempDir, PLAN_ID);
-		setGates(tempDir, PLAN_ID, { hallucination_guard: true });
+		enableHallucinationGate(tempDir);
 		writeDriftEvidence(tempDir, 1, 'approved');
 		writeHallucinationEvidence(tempDir, 1, 'approved');
 
@@ -215,8 +220,7 @@ describe('phase_complete — hallucination guard gate (Gate 3)', () => {
 	});
 
 	test('4. gate enabled + rejected evidence → blocked HALLUCINATION_VERIFICATION_REJECTED', async () => {
-		getOrCreateProfile(tempDir, PLAN_ID);
-		setGates(tempDir, PLAN_ID, { hallucination_guard: true });
+		enableHallucinationGate(tempDir);
 		writeDriftEvidence(tempDir, 1, 'approved');
 		writeHallucinationEvidence(tempDir, 1, 'rejected');
 
@@ -229,8 +233,7 @@ describe('phase_complete — hallucination guard gate (Gate 3)', () => {
 	});
 
 	test('5. gate enabled + malformed JSON evidence → treated as missing, blocked', async () => {
-		getOrCreateProfile(tempDir, PLAN_ID);
-		setGates(tempDir, PLAN_ID, { hallucination_guard: true });
+		enableHallucinationGate(tempDir);
 		writeDriftEvidence(tempDir, 1, 'approved');
 
 		const evidenceDir = path.join(tempDir, '.swarm', 'evidence', '1');
@@ -248,8 +251,7 @@ describe('phase_complete — hallucination guard gate (Gate 3)', () => {
 	});
 
 	test('6. gate enabled + turbo mode → gate skipped, phase completes', async () => {
-		getOrCreateProfile(tempDir, PLAN_ID);
-		setGates(tempDir, PLAN_ID, { hallucination_guard: true });
+		enableHallucinationGate(tempDir);
 		writeDriftEvidence(tempDir, 1, 'approved');
 		// No hallucination evidence — turbo should bypass
 
@@ -261,9 +263,26 @@ describe('phase_complete — hallucination guard gate (Gate 3)', () => {
 		expect(result.success).toBe(true);
 	});
 
-	test('7. gate enabled via session override only → blocked', async () => {
+	test('7. legacy unbound rows fail closed before later gates run', async () => {
+		const legacyPlanId = `${PLAN_SWARM}-${PLAN_TITLE}`.replace(
+			/[^a-zA-Z0-9-_]/g,
+			'_',
+		);
+		getOrCreateProfile(tempDir, legacyPlanId);
+		setGates(tempDir, legacyPlanId, { hallucination_guard: true });
+		writeDriftEvidence(tempDir, 1, 'approved');
+
+		const result = JSON.parse(
+			await phase_complete.execute({ phase: 1, sessionID: 'sess1' }),
+		);
+		expect(result.success).toBe(false);
+		expect(result.reason).toBe('DRIFT_VERIFICATION_IDENTITY_UNBOUND');
+		expect(result.message).toMatch(/exact-bound/i);
+	});
+
+	test('8. gate enabled via session override only → blocked', async () => {
 		// Spec-level gate is OFF (default)
-		const profile = getOrCreateProfile(tempDir, PLAN_ID);
+		const profile = setGatesForIdentity(tempDir, PLAN_IDENTITY, {});
 		expect(profile.gates.hallucination_guard).toBe(false);
 
 		writeDriftEvidence(tempDir, 1, 'approved');
@@ -280,10 +299,9 @@ describe('phase_complete — hallucination guard gate (Gate 3)', () => {
 		expect(result.reason).toBe('HALLUCINATION_VERIFICATION_MISSING');
 	});
 
-	test('8. gate enabled + spec.md missing → still blocked (no spec.md exemption)', async () => {
+	test('9. gate enabled + spec.md missing → still blocked (no spec.md exemption)', async () => {
 		// Unlike drift-verifier, hallucination gate fires regardless of spec.md
-		getOrCreateProfile(tempDir, PLAN_ID);
-		setGates(tempDir, PLAN_ID, { hallucination_guard: true });
+		enableHallucinationGate(tempDir);
 		writeDriftEvidence(tempDir, 1, 'approved');
 		// No spec.md, no hallucination evidence
 

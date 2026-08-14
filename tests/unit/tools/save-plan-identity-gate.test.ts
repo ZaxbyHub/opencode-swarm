@@ -33,6 +33,7 @@ describe('save_plan identity verification gate (FR-001)', () => {
 	};
 
 	beforeEach(async () => {
+		process.env.SWARM_SKIP_GATE_SELECTION = '1';
 		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'identity-gate-test-'));
 		await fs.mkdir(path.join(tmpDir, '.swarm'), { recursive: true });
 		await fs.writeFile(path.join(tmpDir, '.swarm', 'spec.md'), '# Test Spec\n');
@@ -43,6 +44,7 @@ describe('save_plan identity verification gate (FR-001)', () => {
 	});
 
 	afterEach(async () => {
+		delete process.env.SWARM_SKIP_GATE_SELECTION;
 		try {
 			await fs.rm(tmpDir, { recursive: true, force: true });
 		} catch {
@@ -108,6 +110,30 @@ describe('save_plan identity verification gate (FR-001)', () => {
 	});
 
 	// Test 3: Match passthrough — same title + swarm_id
+	it('rejects raw identity changes even when the sanitized plan id would match', async () => {
+		const firstSave: SavePlanResult = await executeSavePlan({
+			...baseArgs,
+			swarm_id: 'mega one',
+			title: 'Plan / 1',
+			working_directory: tmpDir,
+		});
+		expect(firstSave.success).toBe(true);
+
+		const secondSave: SavePlanResult = await executeSavePlan({
+			...baseArgs,
+			swarm_id: 'mega?one',
+			title: 'Plan ? 1',
+			working_directory: tmpDir,
+		});
+
+		expect(secondSave.success).toBe(false);
+		expect(secondSave.message).toContain('PLAN_IDENTITY_MISMATCH');
+		expect(secondSave.errors?.join(' ')).toContain('mega one');
+		expect(secondSave.errors?.join(' ')).toContain('mega?one');
+		expect(secondSave.errors?.join(' ')).toContain('Plan / 1');
+		expect(secondSave.errors?.join(' ')).toContain('Plan ? 1');
+	});
+
 	it('succeeds when incoming title and swarm_id match the existing plan', async () => {
 		const firstSave: SavePlanResult = await executeSavePlan({
 			...baseArgs,

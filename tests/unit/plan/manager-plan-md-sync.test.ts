@@ -125,4 +125,37 @@ describe('isPlanMdInSync — FR-001 / F-11 substring-fallback tightening', () =>
 		// No plan.md written.
 		expect(await isPlanMdInSync(tempDir, plan)).toBe(false);
 	});
+
+	test('execution profile is fully projected and profile-only drift invalidates the hash', async () => {
+		const plan = createTestPlan({
+			execution_profile: {
+				parallelization_enabled: true,
+				max_concurrent_tasks: 3,
+				council_parallel: false,
+				locked: true,
+				auto_proceed: true,
+				commit_after_each_completed_task: true,
+			},
+		});
+		await regeneratePlanMarkdown(tempDir, plan);
+		const markdown = derivePlanMarkdown(plan);
+
+		expect(markdown).toContain('## Execution Profile');
+		expect(markdown).toContain('Parallelization: enabled');
+		expect(markdown).toContain('Max Concurrent Tasks: 3');
+		expect(markdown).toContain('Council Parallel: no');
+		expect(markdown).toContain('Locked: yes');
+		expect(markdown).toContain('Auto Proceed: yes');
+		expect(markdown).toContain('Commit After Each Completed Task: yes');
+		expect(await isPlanMdInSync(tempDir, plan)).toBe(true);
+
+		const profileOnlyChange: Plan = {
+			...plan,
+			execution_profile: {
+				...plan.execution_profile!,
+				commit_after_each_completed_task: false,
+			},
+		};
+		expect(await isPlanMdInSync(tempDir, profileOnlyChange)).toBe(false);
+	});
 });

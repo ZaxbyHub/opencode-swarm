@@ -1,17 +1,15 @@
 /**
- * Structural regression tests for ACCEPTANCE coverage in the PLAN and
- * SWARM-PR-FEEDBACK skills.
+ * Structural regression tests for PLAN fail-closed behavior and
+ * SWARM-PR-FEEDBACK ACCEPTANCE coverage.
  *
- * Background: the final critic (Kimi K3) iteration 3 found two more gated
- * coder Task dispatch construction sites that were silent on ACCEPTANCE:
- *   - `plan/SKILL.md` save_plan-unavailable fallback coder delegation template
- *     (a literal TASK:/OUTPUT:/INPUT:/CONSTRAINT: block with no ACCEPTANCE:).
+ * Background: an earlier critic found two coder Task construction paths:
+ *   - the legacy `plan/SKILL.md` save_plan-unavailable coder fallback, which is
+ *     forbidden now that plan projections are ledger-derived.
  *   - `swarm-pr-feedback/SKILL.md` direct-Task carve-out for 1-file feedback
  *     fixes (sanctions `Task(subagent_type="<coder>", ...)` with no ACCEPTANCE
  *     guidance).
  *
- * Both are gated at `src/hooks/delegation-gate.ts:2014` (the gate fires on
- * every canonical coder Task dispatch). These tests pin both sites.
+ * These tests pin both contracts.
  */
 
 import { describe, expect, it } from 'bun:test';
@@ -27,20 +25,15 @@ const FEEDBACK_PATH = join(
 );
 const feedbackContent = readFileSync(FEEDBACK_PATH, 'utf-8');
 
-describe('.opencode/skills/plan/SKILL.md ACCEPTANCE coverage (issue: architect-acceptance-criteria)', () => {
-	it('save_plan fallback coder delegation template carries an ACCEPTANCE line', () => {
-		// The fallback template is a literal TASK:/OUTPUT:/INPUT:/CONSTRAINT:
-		// block — a delegation-construction site gated by ACCEPTANCE_FIELD_REQUIRED.
-		const idx = planContent.indexOf(
+describe('.opencode/skills/plan/SKILL.md ledger-only plan writes', () => {
+	it('save_plan unavailability fails closed without a coder fallback', () => {
+		expect(planContent).toContain(
+			'If the authoritative ledger-backed `save_plan` tool is unavailable, STOP',
+		);
+		expect(planContent).toContain('Never ask a coder to hand-write');
+		expect(planContent).not.toContain(
 			"delegate plan writing to the active swarm's coder agent",
 		);
-		expect(idx).toBeGreaterThan(-1);
-		// Slice to the next non-template block (TASK GRANULARITY RULES).
-		const next = planContent.indexOf('TASK GRANULARITY RULES', idx);
-		expect(next).toBeGreaterThan(idx);
-		const block = planContent.slice(idx, next);
-		expect(block).toMatch(/^ACCEPTANCE:/m);
-		expect(block).toContain('ACCEPTANCE_FIELD_REQUIRED');
 	});
 });
 

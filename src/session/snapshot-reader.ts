@@ -271,6 +271,15 @@ export function deserializeAgentSession(
 		// PRM fields: reset on rehydrate so a resumed run re-evaluates patterns
 		// fresh (issue #1976 B1).
 		prmInjectedAdvisoryKeys: new Set(),
+		// (issue #2134) The episode ledger is keyed by trajectory STEP numbers,
+		// which restart from 0 for a rehydrated session (`prmTrajectoryStep: 0`
+		// above). Carrying it across a rehydrate would compare fresh step numbers
+		// against a stale high-water mark and silently suppress every strike for
+		// the rest of the run — PRM would go blind instead of merely resetting.
+		prmStruckEpisodes: new Map<string, number>(),
+		// (issue #2134 follow-up) Ladder counts are transient like the episode
+		// ledger they pair with; a resumed run re-earns its strikes.
+		prmLadderCounts: new Map<string, number>(),
 		// (issue #2063 B3/B5) Execution episodes are per-session by construction.
 		// A stale `in_progress` task carried in a snapshot must NOT arm a fresh
 		// session — arming requires an in-session execution attempt.

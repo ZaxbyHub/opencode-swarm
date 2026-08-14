@@ -1,7 +1,13 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
-import { EscalationTracker } from '../escalation';
+import { EscalationTracker, resolveLadderKey } from '../escalation';
 import { _internals, createPrmHook } from '../index';
 import type { PatternMatch, PrmConfig, TrajectoryEntry } from '../types';
+import { createTickingDetectPatterns } from './helpers/episodes';
+import {
+	createMockConfig,
+	createMockPatternMatch,
+	createMockSession,
+} from './helpers/fixtures';
 
 // Original function references saved once at module load for save/restore
 const originalGetAgentSession = _internals.getAgentSession;
@@ -15,23 +21,6 @@ const originalCleanupOldTrajectoryFiles = _internals.cleanupOldTrajectoryFiles;
 const originalRecordReplayEntry = _internals.recordReplayEntry;
 const originalStartReplayRecording = _internals.startReplayRecording;
 const originalTelemetry = _internals.telemetry;
-
-function createMockConfig(overrides: Partial<PrmConfig> = {}): PrmConfig {
-	return {
-		enabled: true,
-		pattern_thresholds: {
-			repetition_loop: 2,
-			ping_pong: 4,
-			expansion_drift: 3,
-			stuck_on_test: 3,
-			context_thrash: 5,
-		},
-		max_trajectory_lines: 100,
-		escalation_enabled: true,
-		detection_timeout_ms: 5000,
-		...overrides,
-	};
-}
 
 function createMockTrajectory(): TrajectoryEntry[] {
 	return [
@@ -56,81 +45,6 @@ function createMockTrajectory(): TrajectoryEntry[] {
 			result: 'success',
 		},
 	];
-}
-
-function createMockPatternMatch(
-	pattern: PatternMatch['pattern'] = 'repetition_loop',
-	overrides: Partial<PatternMatch> = {},
-): PatternMatch {
-	return {
-		pattern,
-		severity: 'medium',
-		category: 'coordination_error',
-		stepRange: [1, 3],
-		description: 'Test pattern detected',
-		affectedAgents: ['coder'],
-		affectedTargets: ['src/foo.ts'],
-		occurrenceCount: 1,
-		...overrides,
-	};
-}
-
-function createMockSession(sessionId: string, delegationActive = true) {
-	return {
-		sessionId,
-		agentName: 'test-agent',
-		lastToolCallTime: Date.now(),
-		lastAgentEventTime: Date.now(),
-		delegationActive,
-		activeInvocationId: 1,
-		lastInvocationIdByAgent: {},
-		windows: {},
-		lastCompactionHint: 0,
-		architectWriteCount: 0,
-		lastCoderDelegationTaskId: null,
-		currentTaskId: '1.1',
-		gateLog: new Map(),
-		reviewerCallCount: new Map(),
-		lastGateFailure: null,
-		partialGateWarningsIssuedForTask: new Set<string>(),
-		selfFixAttempted: false,
-		selfCodingWarnedAtCount: 0,
-		catastrophicPhaseWarnings: new Set<number>(),
-		qaSkipCount: 0,
-		qaSkipTaskIds: [],
-		taskWorkflowStates: new Map(),
-		stageBCompletion: new Map(),
-		taskCouncilApproved: new Map(),
-		lastGateOutcome: null,
-		declaredCoderScope: null,
-		lastScopeViolation: null,
-		scopeViolationDetected: false,
-		modifiedFilesThisCoderTask: [],
-		turboMode: false,
-		qaGateSessionOverrides: {},
-		fullAutoMode: false,
-		fullAutoInteractionCount: 0,
-		fullAutoDeadlockCount: 0,
-		fullAutoLastQuestionHash: null,
-		model_fallback_index: 0,
-		modelFallbackExhausted: false,
-		coderRevisions: 0,
-		revisionLimitHit: false,
-		loopDetectionWindow: [],
-		pendingAdvisoryMessages: [],
-		sessionRehydratedAt: 0,
-		lastPhaseCompleteTimestamp: 0,
-		lastPhaseCompletePhase: 0,
-		phaseAgentsDispatched: new Set<string>(),
-		lastCompletedPhaseAgentsDispatched: new Set<string>(),
-		// PRM fields
-		prmPatternCounts: new Map(),
-		prmEscalationLevel: 0,
-		prmLastPatternDetected: null as PatternMatch | null,
-		prmTrajectoryStep: 0,
-		prmHardStopPending: false,
-		prmEscalationTracker: undefined,
-	};
 }
 
 /**
@@ -555,17 +469,16 @@ describe('createPrmHook', () => {
 		});
 
 		test('increments prmPatternCounts on subsequent detections', async () => {
+			// Issue #2134: distinct, non-overlapping episodes per tick — see
+			// helpers/episodes.ts for why a repeated fixed stepRange won't do.
 			const config = createMockConfig({ enabled: true });
 			const trajectory = createMockTrajectory();
-			const match = createMockPatternMatch('repetition_loop');
 			const session = createMockSession(sessionId);
 			_internals.getAgentSession = () => session;
 			_internals.readTrajectory = async () => trajectory;
-			_internals.detectPatterns = () => ({
-				matches: [match],
-				detectionTimeMs: 5,
-				patternsChecked: 5,
-			});
+			_internals.detectPatterns = createTickingDetectPatterns((overrides) =>
+				createMockPatternMatch('repetition_loop', overrides),
+			);
 			_internals.generateCourseCorrection = () => ({
 				alert: 'ALERT',
 				category: 'coordination_error',
@@ -586,17 +499,16 @@ describe('createPrmHook', () => {
 		});
 
 		test('updates prmEscalationLevel from escalation tracker', async () => {
+			// Issue #2134: distinct, non-overlapping episodes per tick — see
+			// helpers/episodes.ts for why a repeated fixed stepRange won't do.
 			const config = createMockConfig({ enabled: true });
 			const trajectory = createMockTrajectory();
-			const match = createMockPatternMatch('repetition_loop');
 			const session = createMockSession(sessionId);
 			_internals.getAgentSession = () => session;
 			_internals.readTrajectory = async () => trajectory;
-			_internals.detectPatterns = () => ({
-				matches: [match],
-				detectionTimeMs: 5,
-				patternsChecked: 5,
-			});
+			_internals.detectPatterns = createTickingDetectPatterns((overrides) =>
+				createMockPatternMatch('repetition_loop', overrides),
+			);
 			_internals.generateCourseCorrection = () => ({
 				alert: 'ALERT',
 				category: 'coordination_error',
@@ -661,17 +573,16 @@ describe('createPrmHook', () => {
 		});
 
 		test('sets prmHardStopPending on third detection', async () => {
+			// Issue #2134: distinct, non-overlapping episodes per tick — see
+			// helpers/episodes.ts for why a repeated fixed stepRange won't do.
 			const config = createMockConfig({ enabled: true });
 			const trajectory = createMockTrajectory();
-			const match = createMockPatternMatch('repetition_loop');
 			const session = createMockSession(sessionId);
 			_internals.getAgentSession = () => session;
 			_internals.readTrajectory = async () => trajectory;
-			_internals.detectPatterns = () => ({
-				matches: [match],
-				detectionTimeMs: 5,
-				patternsChecked: 5,
-			});
+			_internals.detectPatterns = createTickingDetectPatterns((overrides) =>
+				createMockPatternMatch('repetition_loop', overrides),
+			);
 			_internals.generateCourseCorrection = () => ({
 				alert: 'ALERT',
 				category: 'coordination_error',
@@ -702,11 +613,19 @@ describe('createPrmHook', () => {
 			const trajectory = createMockTrajectory();
 			const session = createMockSession(sessionId);
 
-			// Pre-populate PRM state as if session was being resumed
+			// Pre-populate PRM state as if session was being resumed.
+			//
+			// Issue #2134 follow-up: the tracker restores from `prmLadderCounts`,
+			// keyed by LADDER identity, NOT from `prmPatternCounts`, which stays
+			// keyed by pattern type as the observable tally. Seeding only the
+			// pattern-type map would restore nothing and this test would silently
+			// stop pinning restoration at all, so both are set and the ladder key is
+			// derived from the same match the hook will see.
+			const resumedMatch = createMockPatternMatch('repetition_loop');
 			session.prmPatternCounts = new Map([['repetition_loop', 2]]);
+			session.prmLadderCounts = new Map([[resolveLadderKey(resumedMatch), 2]]);
 			session.prmEscalationLevel = 2;
-			session.prmLastPatternDetected =
-				createMockPatternMatch('repetition_loop');
+			session.prmLastPatternDetected = resumedMatch;
 			session.prmHardStopPending = false;
 
 			_internals.getAgentSession = () => session;
@@ -945,17 +864,16 @@ describe('createPrmHook', () => {
 		});
 
 		test('error in toolAfter does not affect subsequent calls', async () => {
+			// Issue #2134: distinct, non-overlapping episodes per tick — see
+			// helpers/episodes.ts for why a repeated fixed stepRange won't do.
 			const config = createMockConfig({ enabled: true });
 			const trajectory = createMockTrajectory();
-			const match = createMockPatternMatch('repetition_loop');
 			const session = createMockSession(sessionId);
 			_internals.getAgentSession = () => session;
 			_internals.readTrajectory = async () => trajectory;
-			_internals.detectPatterns = () => ({
-				matches: [match],
-				detectionTimeMs: 5,
-				patternsChecked: 5,
-			});
+			_internals.detectPatterns = createTickingDetectPatterns((overrides) =>
+				createMockPatternMatch('repetition_loop', overrides),
+			);
 			_internals.generateCourseCorrection = () => ({
 				alert: 'ALERT',
 				category: 'coordination_error',

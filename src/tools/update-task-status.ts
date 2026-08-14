@@ -10,12 +10,12 @@ import { z } from 'zod';
 import { loadPluginConfig } from '../config/loader';
 import type { RuntimePlan, TaskStatus } from '../config/plan-schema';
 import { stripKnownSwarmPrefix } from '../config/schema';
-import { getProfile } from '../db/qa-gate-profile.js';
+import { getProfileLookupForIdentity } from '../db/qa-gate-profile.js';
 import { readTaskEvidenceRaw } from '../gate-evidence.js';
 import { validateDiffScope } from '../hooks/diff-scope';
 import { tryAcquireLock } from '../parallel/file-locks.js';
 import { loadPlan, updateTaskStatus } from '../plan/manager';
-import { derivePlanId } from '../plan/utils.js';
+import { formatLegacyQaBindingRecovery } from '../qa-gate/recovery.js';
 import {
 	recordTaskAttempt,
 	type TaskAttemptInput,
@@ -37,6 +37,11 @@ import {
 } from '../telemetry.js';
 import { verifyLeanTurboTaskCompletion } from '../turbo/lean/task-completion';
 import * as logger from '../utils/logger.js';
+import {
+	assertProjectRoot,
+	hasExplicitProjectBoundary,
+	isStrictPathDescendant,
+} from '../utils/project-boundary';
 import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
 import { validateTaskIdFormat as _validateTaskIdFormat } from '../validation/task-id';
 import { createSwarmTool } from './create-tool';
@@ -961,9 +966,27 @@ export function checkCouncilGate(
 		const planRaw = fs.readFileSync(planPath, 'utf-8');
 		const planObj = JSON.parse(planRaw) as { swarm?: string; title?: string };
 		if (planObj.swarm && planObj.title) {
-			const planId = derivePlanId(planObj as { swarm: string; title: string });
-			const profile = getProfile(workingDirectory, planId);
-			if (!profile || !profile.gates.council_mode) {
+			const lookup = getProfileLookupForIdentity(
+				workingDirectory,
+				planObj as { swarm: string; title: string },
+			);
+			if (lookup.kind === 'bound') {
+				if (!lookup.profile.gates.council_mode) {
+					return { blocked: false, reason: '', active: false };
+				}
+			} else if (lookup.kind === 'unbound_legacy') {
+				if (lookup.profile.gates.council_mode) {
+					return {
+						blocked: true,
+						reason: `council gate required but the QA gate profile is not exact-bound to the current raw swarm_id/plan_title. ${formatLegacyQaBindingRecovery(
+							{ swarm: planObj.swarm, title: planObj.title },
+							'retry advancing this task',
+						)}`,
+						active: true,
+					};
+				}
+				return { blocked: false, reason: '', active: false };
+			} else {
 				return { blocked: false, reason: '', active: false };
 			}
 		}
@@ -1084,6 +1107,20 @@ export async function executeUpdateTaskStatus(
 	}
 	directory = resolveResult.directory;
 
+	// Enforce the authoritative boundary before reading plan state, mutating
+	// sessions, or creating gate evidence. A fallback comparison cannot identify
+	// descendants of an unrelated root.
+	try {
+		assertProjectRoot(directory);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		return {
+			success: false,
+			message,
+			errors: [message],
+		};
+	}
+
 	// Verify .swarm/plan.json exists (resolveWorkingDirectory checks directory
 	// existence but not plan file presence)
 	const planPath = path.join(directory, '.swarm', 'plan.json');
@@ -1102,7 +1139,10 @@ export async function executeUpdateTaskStatus(
 	if (fallbackDir && directory !== fallbackDir) {
 		const canonicalDir = fs.realpathSync(path.resolve(directory));
 		const canonicalRoot = fs.realpathSync(path.resolve(fallbackDir));
-		if (canonicalDir.startsWith(canonicalRoot + path.sep)) {
+		if (
+			isStrictPathDescendant(canonicalDir, canonicalRoot) &&
+			!hasExplicitProjectBoundary(canonicalDir)
+		) {
 			return {
 				success: false,
 				message:
@@ -1373,7 +1413,7 @@ export async function executeUpdateTaskStatus(
 			directory,
 			args.task_id,
 			args.status as TaskStatus,
-			{ force: args.force },
+			{ force: args.force, planLockAlreadyHeld: true },
 		);
 
 		if (args.status === 'completed') {

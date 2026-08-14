@@ -39,18 +39,14 @@ const SKILL_CONCEPTS = {
 	},
 	specifyQaGateSelection: {
 		required: [
-			/5b\.\s+\*\*QA GATE SELECTION/i,
-			/## Pending QA Gate Selection/i,
-			/Do NOT call `set_qa_gates` yet/i,
-			/reviewer/i,
-			/test_engineer/i,
-			/sme_enabled/i,
-			/critic_pre_plan/i,
-			/sast_enabled/i,
-			/council_mode/i,
-			/hallucination_guard/i,
-			/\.swarm\/context\.md/i,
-			/MODE: PLAN[\s\S]*set_qa_gates/i,
+			/5b\.\s+\*\*DEFER QA AND EXECUTION PROFILE SELECTION/i,
+			/MODE: PLAN/i,
+			/exact plan identity/i,
+		],
+		forbidden: [
+			/Pending QA Gate Selection/i,
+			/Pending Parallelization Config/i,
+			/Task Completion Commit Policy/i,
 		],
 	},
 } satisfies Record<string, SkillConcept>;

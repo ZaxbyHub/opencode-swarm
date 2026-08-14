@@ -5,6 +5,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { formatLegacyQaBindingRecovery } from '../../../qa-gate/recovery.js';
 import { resolveGatePreamble } from './gate-helpers';
 import type { GateContext, GateResult } from './types';
 
@@ -26,6 +27,19 @@ export async function runPhaseCouncilGate(
 			preamble.effectiveGates?.phase_council === true &&
 			pluginConfig.council?.enabled === true
 		) {
+			if (preamble.identityBound === false) {
+				return {
+					blocked: true,
+					reason: 'PHASE_COUNCIL_IDENTITY_UNBOUND',
+					message: `Phase ${phase} cannot be completed: phase_council is enabled but the QA gate profile is not exact-bound to the current raw swarm_id/plan_title. ${formatLegacyQaBindingRecovery(
+						{ swarm: preamble.plan!.swarm, title: preamble.plan!.title },
+						'retry completing the phase',
+					)}`,
+					agentsDispatched,
+					agentsMissing: [],
+					warnings: [],
+				};
+			}
 			councilModeEnabled = true;
 			const pcPath = path.join(
 				dir,

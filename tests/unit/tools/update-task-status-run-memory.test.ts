@@ -17,7 +17,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Plan, RuntimePlan } from '../../../src/config/plan-schema';
 import { closeProjectDb } from '../../../src/db/project-db';
-import { getOrCreateProfile, setGates } from '../../../src/db/qa-gate-profile';
+import { setGatesForIdentity } from '../../../src/db/qa-gate-profile';
 import {
 	recordAgentDispatch,
 	recordGateEvidence,
@@ -33,7 +33,7 @@ import { canonicalMkdtemp } from '../../helpers/tmpdir';
 const TASK_ID = '1.1';
 const PLAN_SWARM = 'test-swarm';
 const PLAN_TITLE = 'test-plan';
-const PLAN_ID = `${PLAN_SWARM}-${PLAN_TITLE}`.replace(/[^a-zA-Z0-9-_]/g, '_');
+const PLAN_IDENTITY = { swarm: PLAN_SWARM, title: PLAN_TITLE };
 
 let tempDir: string;
 const realInternals = { ..._internals };
@@ -145,8 +145,7 @@ describe('update_task_status records a FAILED attempt when a gate blocks', () =>
 		);
 		const plan = buildPlan();
 		writePlanFile(plan);
-		getOrCreateProfile(tempDir, PLAN_ID);
-		setGates(tempDir, PLAN_ID, { council_mode: true });
+		setGatesForIdentity(tempDir, PLAN_IDENTITY, { council_mode: true });
 		stubMutationPath(plan);
 
 		const result = await executeUpdateTaskStatus(

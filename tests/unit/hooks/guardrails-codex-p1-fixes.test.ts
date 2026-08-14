@@ -242,6 +242,8 @@ describe('Codex P1 fix: cross-drive / cross-root containment', () => {
 		const result = checkFileAuthority('architect', '/etc/passwd', TEST_CWD);
 		expect(result.allowed).toBe(false);
 		if (!result.allowed) {
+			expect(result.code).toBe('AUTHORITY_ROOT_ESCAPE');
+			expect(result.layer).toBe('containment');
 			expect(result.reason).toMatch(
 				/different drive(?:\/root| or filesystem root)|outside the working directory/,
 			);

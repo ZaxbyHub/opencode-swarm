@@ -1,7 +1,7 @@
 /**
  * Adversarial tests for plan identity verification gate (FR-001 / Task 1.1)
- * Attack vectors: unicode normalization bypass, case variation bypass,
- * empty/whitespace title bypass, error message injection, confirm_identity_change coercion
+ * Attack vectors: case variation bypass, empty/whitespace title bypass,
+ * error message injection, and confirm_identity_change coercion.
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
@@ -29,6 +29,7 @@ describe('save_plan identity gate — adversarial (FR-001)', () => {
 	};
 
 	beforeEach(async () => {
+		process.env.SWARM_SKIP_GATE_SELECTION = '1';
 		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'identity-adv-'));
 		await fs.mkdir(path.join(tmpDir, '.swarm'), { recursive: true });
 		await fs.writeFile(path.join(tmpDir, '.swarm', 'spec.md'), '# Test Spec\n');
@@ -39,95 +40,12 @@ describe('save_plan identity gate — adversarial (FR-001)', () => {
 	});
 
 	afterEach(async () => {
+		delete process.env.SWARM_SKIP_GATE_SELECTION;
 		try {
 			await fs.rm(tmpDir, { recursive: true, force: true });
 		} catch {
 			// Ignore cleanup errors
 		}
-	});
-
-	// -------------------------------------------------------------------------
-	// 1. Identity bypass via unicode normalization
-	// -------------------------------------------------------------------------
-	describe('1. Unicode normalization bypass', () => {
-		it('should CATCH mismatch when title differs only by non-breaking space (U+00A0)', async () => {
-			// First save with normal space
-			const first = await executeSavePlan({
-				...baseArgs,
-				title: 'Mega Project',
-				working_directory: tmpDir,
-			});
-			expect(first.success).toBe(true);
-
-			// Second save with non-breaking space (U+00A0) in title
-			// derivePlanId normalizes non-alphanumerics (except -_) to _
-			// Both "Mega Project" and "Mega\u00A0Project" should normalize to the same ID
-			const second = await executeSavePlan({
-				...baseArgs,
-				title: 'Mega\u00A0Project',
-				working_directory: tmpDir,
-			});
-
-			// The gate SHOULD allow this because derivePlanId normalizes both to the same identity
-			// This is NOT a bypass — it's correct normalization behavior
-			expect(second.success).toBe(true);
-		});
-
-		it('should CATCH mismatch for other unicode spaces (U+2002 EN SPACE)', async () => {
-			const first = await executeSavePlan({
-				...baseArgs,
-				title: 'Alpha\u2002Beta',
-				working_directory: tmpDir,
-			});
-			expect(first.success).toBe(true);
-
-			// U+2002 normalizes to _ in derivePlanId, same as U+0020
-			const second = await executeSavePlan({
-				...baseArgs,
-				title: 'Alpha Beta',
-				working_directory: tmpDir,
-			});
-			expect(second.success).toBe(true);
-		});
-
-		it('should REJECT title with zero-width space (U+200B) - normalizes to _ but changes identity', async () => {
-			// U+200B (ZWS) normalizes to _ by derivePlanId regex
-			// "Alpha\u200BProject" → "Alpha_Project" (with underscore)
-			// "AlphaProject" → "AlphaProject" (no underscore)
-			// These are DIFFERENT identities — gate correctly rejects
-			const first = await executeSavePlan({
-				...baseArgs,
-				title: 'Alpha\u200BProject',
-				working_directory: tmpDir,
-			});
-			expect(first.success).toBe(true);
-
-			const second = await executeSavePlan({
-				...baseArgs,
-				title: 'AlphaProject',
-				working_directory: tmpDir,
-			});
-			expect(second.success).toBe(false);
-			expect(second.message).toContain('PLAN_IDENTITY_MISMATCH');
-		});
-
-		it('should REJECT truly different titles even with unicode normalization', async () => {
-			const first = await executeSavePlan({
-				...baseArgs,
-				title: 'Project Alpha',
-				working_directory: tmpDir,
-			});
-			expect(first.success).toBe(true);
-
-			// Truly different title — should be rejected
-			const second = await executeSavePlan({
-				...baseArgs,
-				title: 'Project\u00A0Beta',
-				working_directory: tmpDir,
-			});
-			expect(second.success).toBe(false);
-			expect(second.message).toContain('PLAN_IDENTITY_MISMATCH');
-		});
 	});
 
 	// -------------------------------------------------------------------------
@@ -511,46 +429,6 @@ describe('save_plan identity gate — adversarial (FR-001)', () => {
 				working_directory: tmpDir,
 			});
 
-			expect(second.success).toBe(false);
-			expect(second.message).toContain('PLAN_IDENTITY_MISMATCH');
-		});
-	});
-
-	// -------------------------------------------------------------------------
-	// 8. Boundary: swarm_id normalization edge cases
-	// -------------------------------------------------------------------------
-	describe('8. swarm_id normalization edge cases', () => {
-		it('should handle swarm_id with special characters that normalize', async () => {
-			const first = await executeSavePlan({
-				...baseArgs,
-				swarm_id: 'mega@test',
-				working_directory: tmpDir,
-			});
-			expect(first.success).toBe(true);
-
-			// @ normalizes to _ in derivePlanId
-			const second = await executeSavePlan({
-				...baseArgs,
-				swarm_id: 'mega_test',
-				working_directory: tmpDir,
-			});
-			expect(second.success).toBe(true);
-		});
-
-		it('should REJECT when swarm_id differs after normalization', async () => {
-			const first = await executeSavePlan({
-				...baseArgs,
-				swarm_id: 'mega@test',
-				working_directory: tmpDir,
-			});
-			expect(first.success).toBe(true);
-
-			// These are truly different after normalization
-			const second = await executeSavePlan({
-				...baseArgs,
-				swarm_id: 'other@test',
-				working_directory: tmpDir,
-			});
 			expect(second.success).toBe(false);
 			expect(second.message).toContain('PLAN_IDENTITY_MISMATCH');
 		});

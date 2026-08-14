@@ -13,6 +13,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { assertProjectRoot } from '../utils/project-boundary.js';
 
 import {
 	containsControlCharacters,
@@ -226,6 +227,11 @@ export function handleIssueCommand(directory: string, args: string[]): string {
 	}
 
 	// Durable persistence: write issue reference and trace state before emitting signal
+	try {
+		assertProjectRoot(directory);
+	} catch (error) {
+		return `Error: Failed to persist issue reference durably: ${error instanceof Error ? error.message : String(error)}\n\n${USAGE}`;
+	}
 	const swarmDir = path.join(directory, '.swarm');
 
 	const issueReference: Record<string, unknown> = {

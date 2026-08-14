@@ -52,6 +52,7 @@ import * as fsp from 'node:fs/promises';
 import * as readline from 'node:readline';
 import { validateSwarmPath } from '../hooks/utils';
 import { warn } from '../utils';
+import { assertProjectRoot } from '../utils/project-boundary';
 
 const EVIDENCE_CACHE_FILE = 'evidence-cache/documents.jsonl';
 
@@ -376,6 +377,7 @@ async function rewriteAtomic(
 export async function pruneEvidenceDocuments(
 	args: PruneEvidenceDocumentsArgs,
 ): Promise<DocumentsRetentionResult> {
+	assertProjectRoot(args.directory);
 	const dryRun = args.dryRun === true;
 	const capsUnset =
 		(typeof args.maxBytes !== 'number' || args.maxBytes <= 0) &&

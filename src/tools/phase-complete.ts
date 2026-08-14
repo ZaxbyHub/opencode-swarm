@@ -195,6 +195,18 @@ function buildMissingAgentRecoveryGuidance(input: {
 		steps.push(
 			'The configured warn policy allows closure with a warning, but it does not create participation proof.',
 		);
+	} else {
+		steps.push(
+			'Last resort: if the missing role obligation genuinely cannot be satisfied in this environment, set phase_complete.policy to "warn" in opencode-swarm configuration. This weakens enforcement for every missing role and does NOT create durable participation proof, so only use it when the obligation cannot be met.',
+		);
+	}
+	if (
+		input.missing.includes('docs') &&
+		input.docsEvidenceStatus === 'missing'
+	) {
+		steps.push(
+			'No prior durable docs-participation receipt was found (this can happen after a plugin upgrade or a cleared evidence store). A fresh docs Task dispatch writes a new durable completion receipt and is the canonical recovery path.',
+		);
 	}
 	return steps.join(' ');
 }
@@ -1959,6 +1971,7 @@ export async function executePhaseComplete(
 									rebuilt,
 									'phase_complete_rebuild_from_ledger',
 									'phase-complete rebuild from ledger',
+									{ planLockAlreadyHeld: true },
 								);
 								// After successful phase completion, take a snapshot
 								try {
@@ -2005,7 +2018,10 @@ export async function executePhaseComplete(
 				);
 				if (phaseObj) {
 					phaseObj.status = 'complete';
-					await savePlan(dir, plan, { preserveCompletedStatuses: true });
+					await savePlan(dir, plan, {
+						preserveCompletedStatuses: true,
+						planLockAlreadyHeld: true,
+					});
 				}
 				// After successful phase completion, take a snapshot
 				try {
@@ -2034,6 +2050,7 @@ export async function executePhaseComplete(
 								rebuilt,
 								'phase_complete_rebuild_from_ledger',
 								'phase-complete rebuild from ledger',
+								{ planLockAlreadyHeld: true },
 							);
 							// After successful phase completion, take a snapshot
 							try {

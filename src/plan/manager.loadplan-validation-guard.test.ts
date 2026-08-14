@@ -14,6 +14,8 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { safeRmRecursive } from '../../tests/helpers/safe-test-dir';
+import { canonicalMkdtemp } from '../../tests/helpers/tmpdir';
 import type { Plan } from '../config/plan-schema';
 import { initLedger, takeSnapshotEvent } from './ledger';
 import { loadPlan, savePlan } from './manager';
@@ -49,15 +51,11 @@ function makeTestPlan(overrides?: Partial<Plan>): Plan {
 }
 
 beforeEach(() => {
-	testDir = fs.mkdtempSync(path.join(__dirname, 'loadplan-validation-guard-'));
+	testDir = canonicalMkdtemp('loadplan-validation-guard-');
 });
 
 afterEach(() => {
-	try {
-		fs.rmSync(testDir, { recursive: true, force: true });
-	} catch {
-		// Ignore cleanup errors
-	}
+	safeRmRecursive(testDir);
 });
 
 describe('loadPlan() validation-failure catch path: identity guard', () => {

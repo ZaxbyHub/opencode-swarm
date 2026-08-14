@@ -1,7 +1,12 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import {
+	CANDIDATE_HEADERS,
+	CLEAN_TEMPLATES,
+} from '../../../src/background/candidate-contract';
+import {
 	_internals,
 	_test_exports,
+	BASE_EXPLORER_CANDIDATE_FORMAT_SUFFIX,
 	MAX_PROMPT_CHARS,
 } from '../../../src/tools/dispatch-lanes';
 
@@ -13,8 +18,9 @@ afterEach(() => {
 
 function applyExplorerFormatSuffix(
 	lanes: Parameters<typeof _test_exports.applyExplorerFormatSuffix>[0],
+	options: Parameters<typeof _test_exports.applyExplorerFormatSuffix>[1] = {},
 ) {
-	const result = _test_exports.applyExplorerFormatSuffix(lanes);
+	const result = _test_exports.applyExplorerFormatSuffix(lanes, options);
 	expect(result.ok).toBe(true);
 	if (!result.ok) throw new Error(result.errors.join('; '));
 	return result.lanes;
@@ -55,8 +61,8 @@ describe('applyExplorerFormatSuffix', () => {
 		expect(result[0].prompt).toContain('CONTROLLER-BOUND OUTPUT IDENTITY');
 		expect(result[0].prompt).toContain('[CLEAN] | lane');
 		expect(result[0].prompt).toContain('[CLEAN] | micro_lane');
-		expect(result[0].prompt).toContain('for swarm-pr-review:council discovery');
-		expect(result[0].prompt).toContain('at least 12 characters');
+		expect(result[0].prompt).toContain('MICRO WORKED EXAMPLE');
+		expect(result[0].prompt).toMatch(/at least 12\s+characters/);
 		expect(result[0].prompt).toMatch(/at least 20\s+characters/);
 		expect(result[0].prompt).not.toContain(
 			'Fill every CLEAN field with the exact workflow_lane',
@@ -74,17 +80,116 @@ describe('applyExplorerFormatSuffix', () => {
 	});
 
 	test.each([
+		'swarm-pr-review:base',
+		'swarm-pr-review:micro',
+	] as const)('keeps the exact %s contract idempotent', (mode) => {
+		_internals.getGeneratedAgentNames = () => ['swarm_explorer'];
+		const lanes = [
+			{ id: 'L1', agent: 'swarm_explorer', prompt: 'inspect runtime' },
+		];
+		const once = applyExplorerFormatSuffix(lanes, {
+			failClosed: true,
+			mode,
+		});
+		const twice = applyExplorerFormatSuffix(once, {
+			failClosed: true,
+			mode,
+		});
+		expect(twice).toEqual(once);
+	});
+
+	test.each([
+		['generic', undefined, 'swarm-pr-review:micro'],
+		['base', 'swarm-pr-review:base', 'swarm-pr-review:micro'],
+		['micro', 'swarm-pr-review:micro', 'swarm-pr-review:base'],
+	] as const)('rejects a pre-applied %s contract when the controller requires another row family', (_label, initialMode, requiredMode) => {
+		_internals.getGeneratedAgentNames = () => ['swarm_explorer'];
+		const original = [
+			{ id: 'L1', agent: 'swarm_explorer', prompt: 'inspect runtime' },
+		];
+		const preformatted = applyExplorerFormatSuffix(
+			original,
+			initialMode === undefined ? {} : { failClosed: true, mode: initialMode },
+		);
+		const result = _test_exports.applyExplorerFormatSuffix(preformatted, {
+			failClosed: true,
+			mode: requiredMode,
+		});
+
+		expect(result.ok).toBe(false);
+		if (result.ok) throw new Error('expected fail-closed result');
+		expect(result.errors.join('; ')).toContain(
+			'incompatible, duplicate, or controller-unbound',
+		);
+	});
+
+	test('rejects an expected suffix that lacks the exact controller identity', () => {
+		_internals.getGeneratedAgentNames = () => ['swarm_explorer'];
+		const generic = applyExplorerFormatSuffix([
+			{ id: 'L1', agent: 'swarm_explorer', prompt: 'inspect runtime' },
+		]);
+		const promptWithoutIdentity = generic[0].prompt.replace(
+			/CONTROLLER-BOUND OUTPUT IDENTITY:[^\n]+/,
+			'',
+		);
+		const result = _test_exports.applyExplorerFormatSuffix(
+			[{ ...generic[0], prompt: promptWithoutIdentity }],
+			{ failClosed: true },
+		);
+
+		expect(result.ok).toBe(false);
+		if (result.ok) throw new Error('expected fail-closed result');
+		expect(result.errors.join('; ')).toContain('controller-unbound');
+	});
+
+	test('rejects a duplicated expected suffix even with the exact controller identity', () => {
+		_internals.getGeneratedAgentNames = () => ['swarm_explorer'];
+		const once = applyExplorerFormatSuffix(
+			[{ id: 'L1', agent: 'swarm_explorer', prompt: 'inspect runtime' }],
+			{ failClosed: true, mode: 'swarm-pr-review:base' },
+		);
+		const result = _test_exports.applyExplorerFormatSuffix(
+			[
+				{
+					...once[0],
+					prompt: `${once[0].prompt}${BASE_EXPLORER_CANDIDATE_FORMAT_SUFFIX}`,
+				},
+			],
+			{ failClosed: true, mode: 'swarm-pr-review:base' },
+		);
+
+		expect(result.ok).toBe(false);
+		if (result.ok) throw new Error('expected fail-closed result');
+		expect(result.errors.join('; ')).toContain('duplicate');
+	});
+
+	test.each([
 		{
 			mode: 'swarm-pr-review:base',
 			expected: 'exact workflow_lane only in the `lane` field',
+			header: CANDIDATE_HEADERS.base_explorer,
+			clean: CLEAN_TEMPLATES.base_explorer,
+			forbiddenHeader: CANDIDATE_HEADERS.micro_lane,
+			forbiddenField: 'invariant_violated',
+			example: 'example-base-001 | example-base',
 		},
 		{
 			mode: 'swarm-pr-review:micro',
 			expected: 'exact workflow_lane only in the `micro_lane` field',
+			header: CANDIDATE_HEADERS.micro_lane,
+			clean: CLEAN_TEMPLATES.micro_lane,
+			forbiddenHeader: CANDIDATE_HEADERS.base_explorer,
+			forbiddenField: 'impact_context',
+			example: 'example-micro-001 | example-micro',
 		},
 	] as const)('binds $mode to its exact row-family field', ({
 		mode,
 		expected,
+		header,
+		clean,
+		forbiddenHeader,
+		forbiddenField,
+		example,
 	}) => {
 		_internals.getGeneratedAgentNames = () => ['swarm_explorer'];
 		const result = _test_exports.applyExplorerFormatSuffix(
@@ -99,7 +204,39 @@ describe('applyExplorerFormatSuffix', () => {
 		);
 		expect(result.ok).toBe(true);
 		if (!result.ok) throw new Error(result.errors.join('; '));
-		expect(result.lanes[0].prompt).toContain(expected);
+		const prompt = result.lanes[0].prompt;
+		expect(prompt).toContain(expected);
+		expect(prompt).toContain(header);
+		expect(prompt).toContain(clean);
+		expect(prompt).toContain(example);
+		expect(prompt).not.toContain(forbiddenHeader);
+		expect(prompt).not.toContain(forbiddenField);
+		expect(prompt).toContain('final data field');
+		expect(prompt).toContain('HIGH, MEDIUM, or LOW');
+		expect(prompt).toContain('plain text');
+		expect(prompt).toContain('never inside Markdown code fences');
+	});
+
+	test('uses the micro-only contract for council explorer lanes', () => {
+		_internals.getGeneratedAgentNames = () => ['council_generalist'];
+		const result = _test_exports.applyExplorerFormatSuffix(
+			[
+				{
+					id: 'council',
+					agent: 'council_generalist',
+					prompt: 'challenge the candidates',
+					workflow_lane: 'council-generalist',
+				},
+			],
+			{ failClosed: true, mode: 'swarm-pr-review:council' },
+		);
+		expect(result.ok).toBe(true);
+		if (!result.ok) throw new Error(result.errors.join('; '));
+		expect(result.lanes[0].prompt).toContain(CANDIDATE_HEADERS.micro_lane);
+		expect(result.lanes[0].prompt).not.toContain(
+			CANDIDATE_HEADERS.base_explorer,
+		);
+		expect(result.lanes[0].prompt).not.toContain('impact_context');
 	});
 
 	test('appends the controller identity exactly once for a consolidated Tier-M lane', () => {
@@ -172,12 +309,11 @@ describe('applyExplorerFormatSuffix', () => {
 		// carry a literal backslash: `\|` in a template literal renders as a bare
 		// `|`, which would instruct lanes to emit the character that breaks a row.
 		expect(lane.prompt).toContain('\\|');
-		// 2. A worked example, placed before the per-family reference blocks. A
-		// header restated only as a format spec measured ~1/6 compliance.
+		// 2. Generic mode retains both explicitly separated worked families for
+		// non-PR callers that have not selected a controller-owned row family.
 		expect(lane.prompt).toContain('WORKED EXAMPLE');
-		expect(lane.prompt.indexOf('WORKED EXAMPLE')).toBeLessThan(
-			lane.prompt.indexOf('Micro-lane format'),
-		);
+		expect(lane.prompt).toContain('example-base-001 | example-base');
+		expect(lane.prompt).toContain('example-micro-001 | example-micro');
 		// 3. The [CLEAN] shape — no confidence field, zero-findings only. A
 		// confidence appended to CLEAN caused 4 of the real failures.
 		expect(lane.prompt).toContain('NO\nconfidence field');
@@ -193,6 +329,6 @@ describe('applyExplorerFormatSuffix', () => {
 		);
 		// The example id obeys the uniqueness rule stated below it, so a lane that
 		// copies it verbatim cannot collide at assertNoDuplicates.
-		expect(lane.prompt).toContain('example-lane-001 | example-lane');
+		expect(lane.prompt).toContain('Choose exactly one family');
 	});
 });

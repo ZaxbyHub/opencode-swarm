@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { closeProjectDb } from '../../../src/db/project-db';
-import { getOrCreateProfile, setGates } from '../../../src/db/qa-gate-profile';
+import { setGatesForIdentity } from '../../../src/db/qa-gate-profile';
 import { resetSwarmState } from '../../../src/state';
 import { executePhaseComplete } from '../../../src/tools/phase-complete';
 
@@ -11,7 +11,6 @@ let tempDir: string;
 
 const PLAN_SWARM = 'test-swarm';
 const PLAN_TITLE = 'test-plan';
-const PLAN_ID = `${PLAN_SWARM}-${PLAN_TITLE}`.replace(/[^a-zA-Z0-9-_]/g, '_');
 const SESSION_ID = 'test-session-1';
 
 function writePlan() {
@@ -98,8 +97,11 @@ function writeRetro() {
 }
 
 function enableCouncilMode() {
-	getOrCreateProfile(tempDir, PLAN_ID);
-	setGates(tempDir, PLAN_ID, { phase_council: true });
+	setGatesForIdentity(
+		tempDir,
+		{ swarm: PLAN_SWARM, title: PLAN_TITLE },
+		{ phase_council: true },
+	);
 }
 
 function writePhaseCouncil(options: {

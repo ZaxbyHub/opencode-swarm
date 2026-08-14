@@ -6,6 +6,7 @@ import { z } from 'zod';
 import {
 	analyzeCandidateFields,
 	CANDIDATE_HEADERS,
+	type CandidateSeverity,
 	CLEAN_TEMPLATES,
 	candidateHeaderFamily,
 	normalizeCandidateArtifact,
@@ -395,7 +396,7 @@ type PrReviewArtifactRecord = {
 		| 'report'
 		| 'suppress_with_reason'
 		| 'handoff_to_feedback';
-	severity?: 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW';
+	severity?: CandidateSeverity;
 };
 
 interface PrFeedbackScopeDeclarationRecord {

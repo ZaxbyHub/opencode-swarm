@@ -5,6 +5,7 @@ import * as path from 'node:path';
 
 import { closeAllProjectDbs } from '../../../src/db/project-db';
 import type { QaGateProfile } from '../../../src/db/qa-gate-profile';
+import * as realQaGateProfile from '../../../src/db/qa-gate-profile';
 import {
 	ensureAgentSession,
 	recordPhaseAgentDispatch,
@@ -24,19 +25,12 @@ function mockGetProfile(dir: string, planId: string): QaGateProfile | null {
 
 // Mock the qa-gate-profile module BEFORE importing phase_complete
 mock.module('../../../src/db/qa-gate-profile.js', () => ({
+	...realQaGateProfile,
 	getProfile: mockGetProfile,
-	getOrCreateProfile: mock((dir: string, planId: string) => {
-		// Import the real function for use in tests
-		const {
-			getOrCreateProfile: real,
-		} = require('../../../src/db/qa-gate-profile.js');
-		return real(dir, planId);
-	}),
-	setGates: mock(
-		(dir: string, planId: string, gates: Record<string, boolean>) => {
-			const { setGates: real } = require('../../../src/db/qa-gate-profile.js');
-			return real(dir, planId, gates);
-		},
+	getProfileLookupForIdentity: mock(() =>
+		mockProfileReturnValue
+			? { kind: 'bound' as const, profile: mockProfileReturnValue }
+			: { kind: 'missing' as const },
 	),
 }));
 

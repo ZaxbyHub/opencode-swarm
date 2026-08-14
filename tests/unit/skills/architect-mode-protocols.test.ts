@@ -41,7 +41,7 @@ const MODE_SKILLS = [
 		[
 			'SPEC GATE',
 			'GENERAL COUNCIL ADVISORY OPTION (pre-save_plan)',
-			'POST-SAVE_PLAN',
+			'QA AND EXECUTION PROFILE BOOTSTRAP',
 		],
 	],
 	[
@@ -105,7 +105,7 @@ describe('architect MODE protocol skills', () => {
 		});
 	}
 
-	it('expands static QA gate dialogue in extracted dialogue-mode skills', () => {
+	it('keeps the QA dialogue only in PLAN after identity is known', () => {
 		const skillContents = MODE_SKILLS.map(([, slug]) =>
 			readFileSync(
 				join(process.cwd(), '.opencode/skills', slug, 'SKILL.md'),
@@ -118,8 +118,11 @@ describe('architect MODE protocol skills', () => {
 		for (const skillContent of skillContents) {
 			expect(skillContent).not.toMatch(/\{\{QA_GATE_DIALOGUE_[A-Z_-]+\}\}/);
 		}
-		expect(brainstorm).toContain('Present the eleven gates');
-		expect(specify).toContain('Present the eleven gates');
+		const plan = skillContents[11];
+		expect(brainstorm).not.toContain('Present the eleven gates');
+		expect(specify).not.toContain('Present the eleven gates');
+		expect(plan).toContain('Present the eleven gates');
+		expect(plan).toContain('exact raw plan identity');
 	});
 
 	it('does not leave renderer placeholders in runtime-loaded skill files', () => {

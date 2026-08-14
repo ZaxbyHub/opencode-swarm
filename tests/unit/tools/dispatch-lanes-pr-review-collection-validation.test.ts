@@ -185,6 +185,41 @@ describe('PR-review discovery validation during collection', () => {
 
 	test.each([
 		{
+			name: 'hybrid ten-field micro candidate recorded in the failed run',
+			batch: 'production-hybrid-micro',
+			workflowLane: 'auth-identity-secrets',
+			text: `${MICRO_HEADER}\n[CANDIDATE] | auth-identity-secrets-001 | auth-identity-secrets | LOW | security | src/auth.ts:10 | authorization claim | least-privilege invariant | direct code evidence | downstream impact copied from the base schema | MEDIUM`,
+			expected: 'exactly 9 candidate fields',
+		},
+		{
+			name: 'CLEAN row with the recorded trailing confidence field',
+			batch: 'production-clean-confidence',
+			workflowLane: 'dependencies-build-release',
+			text: `${MICRO_HEADER}\n[CLEAN] | dependencies-build-release | complete dependency and release review | no unsafe dependency or release path found | HIGH`,
+			expected: 'Expected exactly 3 CLEAN fields after [CLEAN], received 4',
+		},
+	] as const)('keeps strict rejection for $name', async ({
+		batch,
+		workflowLane,
+		text,
+		expected,
+	}) => {
+		await recordLane({
+			batch,
+			lane: `${batch}-lane`,
+			mode: 'swarm-pr-review:micro',
+			workflowLane,
+			text,
+		});
+		const result = await collect(batch);
+		expect(result.success).toBe(false);
+		expect(result.failed).toBe(1);
+		expect(result.lane_results[0].status).toBe('failed');
+		expect(result.lane_results[0].error).toContain(expected);
+	});
+
+	test.each([
+		{
 			name: 'base candidate',
 			batch: 'valid-base',
 			mode: 'swarm-pr-review:base',

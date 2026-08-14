@@ -723,7 +723,7 @@ guidance to the agent before a hard stop.
 | `pattern_thresholds.ping_pong` | number (≥ 1) | `2` | Occurrences before an alternating A→B→A delegation pattern targeting the same file is flagged. |
 | `pattern_thresholds.expansion_drift` | number (≥ 1) | `3` | Occurrences before successive plans whose unique-target scope grows by more than 50% are flagged. |
 | `pattern_thresholds.stuck_on_test` | number (≥ 1) | `3` | Occurrences before an edit → test-fail → edit-same-file cycle is flagged. |
-| `pattern_thresholds.context_thrash` | number (≥ 1) | `3` | Consecutive steps before a monotonically increasing unique-target set (no plateaus) is flagged. |
+| `pattern_thresholds.context_thrash` | number (≥ 1) | `10` | Consecutive steps before a monotonically increasing unique-target set (no plateaus) is flagged. Raised from `3` in #2134: three consecutive new targets is indistinguishable from an agent simply reading three files. |
 | `escalation_enabled` | boolean | `true` | Enable the count-based escalation ladder (advisory → hard stop) once a pattern's threshold is met repeatedly. |
 | `max_trajectory_lines` | number (≥ 10) | `1000` | Maximum trajectory entries retained per session before older entries are evicted. |
 | `detection_timeout_ms` | number (≥ 10) | `100` | Bounded time budget for a single pattern-detection pass; detection is skipped (fail-open) if it would exceed this. |
@@ -741,6 +741,53 @@ guidance to the agent before a hard stop.
   }
 }
 ```
+
+### How the escalation ladder counts (issue #2134)
+
+A strike is recorded per **occurrence**, not per detection. Detectors re-emit the
+same ongoing episode on every tool call with a growing end step — a coder reading
+one more file extends its single `context_thrash` run — so PRM keeps a per-session
+ledger of the episodes that have already struck. A match earns a strike only when
+it is a **new episode**, or when the episode it belongs to has grown by another
+full `pattern_thresholds` worth of occurrences since it last struck. A single tool
+call can never advance the ladder by more than one rung.
+
+Strikes are also counted per **behaviour**, not per pattern type. A pattern that
+names a single target — `repetition_loop`, `ping_pong`, `stuck_on_test` — gets its
+own 1→2→3 ladder for that target, so repeating yourself once each on three
+different files is three level-1 advisories rather than a hard stop; reaching the
+hard stop takes three strikes against *the same* target. Patterns that report a
+growing set of targets (`context_thrash`, `expansion_drift`) keep one ladder for
+the pattern, because a per-target ladder would restart on every tool call and they
+could never escalate at all.
+
+An agent that genuinely keeps going still reaches the hard stop, because the
+growth rung keeps firing. At default thresholds an unbroken `repetition_loop`
+strikes at 2, 4 and 6 occurrences; a `context_thrash` run strikes at 10, 20 and 30
+consecutive brand-new targets with no revisits. What can no longer happen is a
+hard stop earned by making tool calls rather than by repeating the behaviour.
+
+### Clearing a stuck escalation
+
+PRM escalation state is per session and entirely in memory — it is never written
+to `.swarm/session/state.json`, and a rehydrated session always starts at level 0.
+Two things clear it:
+
+- **A new delegation with a declared scope.** When a Task dispatch claims a coder
+  scope binding, the child session's PRM state is reset, so a coder never inherits
+  a previous delegation's escalation level or an armed hard-stop token. A dispatch
+  that never declares a scope (`SCOPE_NOT_DECLARED`) does not reach that reset.
+- **`/swarm reset-session`.** Clears escalation counts, both hard-stop tokens, the
+  trajectory cursor, and the episode ledger for every tracked agent session, while
+  preserving the plan, evidence, and knowledge stores.
+
+```bash
+/swarm reset-session
+```
+
+To disable the ladder entirely while leaving pattern detection and its telemetry
+in place, set `prm.escalation_enabled` to `false`; to turn PRM off altogether, set
+`prm.enabled` to `false`.
 
 ## Phase Complete Configuration
 
@@ -1452,7 +1499,7 @@ See [Modes Guide](modes.md#lean-turbo-lane-planning-engine) for the full Lean Tu
 
 ## Execution Profile
 
-The execution profile (per-plan, set during QA GATE SELECTION or via `save_plan`) controls phase-level execution preferences. Configure interactively via the gate-selection dialogue surfaced in MODE: SPECIFY step 5b, MODE: BRAINSTORM Phase 6, or the MODE: PLAN inline path.
+The execution profile controls plan-scoped execution preferences. MODE: PLAN drafts the task graph, freezes the exact `swarm_id` plus plan title, asks the unified QA/parallelism/commit/auto-proceed question, calls `set_qa_gates` against that identity before the first `save_plan`, then saves the full profile with the same identity. SPECIFY, BRAINSTORM, and issue ingestion defer these choices because they do not yet have final task scopes. If an upgraded plan reports that its QA profile is not exact-bound, recover by rerunning `set_qa_gates` with the same `swarm_id`, the same `plan_title`, and `adopt_legacy_binding_only: true`; this exact-binds the existing profile without mutating gates or the lock.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -1460,6 +1507,7 @@ The execution profile (per-plan, set during QA GATE SELECTION or via `save_plan`
 | `max_concurrent_tasks` | number | `10` | Maximum tasks that may run concurrently when `parallelization_enabled: true` (1–64) |
 | `council_parallel` | boolean | `true` | Allow council review phases to run council members in parallel |
 | `auto_proceed` | boolean | `false` | Skip the "Ready for Phase N+1?" prompt and advance automatically at phase boundaries |
+| `commit_after_each_completed_task` | boolean | `false` | Create an advisory, idempotent checkpoint after a task completes and all pre-commit gates pass |
 
 **Auto-proceed:** When `true`, the swarm advances from one phase to the next without asking for confirmation. The session override (`/swarm auto-proceed on|off`) always takes precedence over the plan default. The architect sees the effective value via an injected `AUTO PROCEED STATUS` banner. The first-boundary nudge offers to enable it once per session when the plan default is `false` and no session override is set.
 
@@ -1523,9 +1571,16 @@ Epic Mode auto-decides per plan whether to invoke Lean Turbo's parallel planner 
 
 ## QA gates reference
 
-The QA gate profile (per-plan, persisted in the project DB) controls which quality gates fire during a plan's execution. Configure interactively via the gate-selection dialogue surfaced in MODE: SPECIFY step 5b, MODE: BRAINSTORM Phase 6, or the MODE: PLAN inline path. Programmatic configuration via `set_qa_gates` (architect-only) or `/swarm qa-gates enable <gate>...`.
+The QA gate profile (per-plan, persisted in the project DB) controls which quality gates fire during a plan's execution. MODE: PLAN configures it through `set_qa_gates` using the frozen `swarm_id` and `plan_title` before the first plan save, eliminating any dependency on transient context files. Existing-plan administration remains available through `/swarm qa-gates enable <gate>...`. Upgraded legacy rows stay fail-closed until they are exact-bound; the supported recovery is `set_qa_gates({ swarm_id, plan_title, adopt_legacy_binding_only: true })`, which binds the current plan identity without changing gates or the lock.
 
 All gates are **ratchet-tighter** — once enabled they cannot be disabled until the profile is reset, and once locked (after critic approval) no changes are accepted at all.
+
+> **Not a YAML config key.** Every gate below — including `critic_pre_plan` — is a
+> per-plan SQLite profile field, configured via the gate-selection dialogue or
+> `set_qa_gates` / `/swarm qa-gates`, **not** a key under `config.qa_gates` in your
+> OpenCode configuration file (`qa_gates` there is the unrelated guardrails config
+> holding `required_tools` and `require_reviewer_test_engineer`). Writing
+> `qa_gates.critic_pre_plan` in YAML has no effect; use `set_qa_gates` instead.
 
 `test_engineer` is exempted for a coder task only when both its immutable
 declared scope and the observed Git changes are non-empty, contain exact
