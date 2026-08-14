@@ -92,7 +92,10 @@ else
   elif command -v shasum >/dev/null 2>&1; then
     actual_body_sha="$(shasum -a 256 .swarm/evidence/pr_body.md 2>/dev/null | cut -d' ' -f1)"
   fi
-  if [[ -n "$actual_body_sha" && -n "$ev_body_sha" && "$ev_body_sha" != "$actual_body_sha" ]]; then
+  if [[ -z "$ev_body_sha" || -z "$actual_body_sha" ]]; then
+    echo "Blocked: publication-evidence.json body_sha256 could not be verified (receipt: ${ev_body_sha:-missing}, computed: ${actual_body_sha:-unavailable}). Ensure sha256sum or shasum is available and the body file exists."
+    missing=1
+  elif [[ "$ev_body_sha" != "$actual_body_sha" ]]; then
     echo "Blocked: publication-evidence.json body_sha256 does not match the current pr_body.md — the body changed after the receipt was written. Regenerate the receipt."
     missing=1
   fi

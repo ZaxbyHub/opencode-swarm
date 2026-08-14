@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import {
 	_test_exports,
+	allowedMutationsFor,
 	handleSddProjectCommand,
 	handleSddStatusCommand,
 	handleSddValidateCommand,
@@ -1074,5 +1075,76 @@ describe('/swarm sdd project — TOCTOU error propagation in --json mode', () =>
 		expect(out).toContain('Error:');
 		expect(out).toContain('.swarm/spec.md already exists');
 		expect(out).toContain('--overwrite');
+	});
+});
+
+describe('allowedMutationsFor', () => {
+	test('swarm source allows create/refine/archive mutations', () => {
+		expect(allowedMutationsFor('swarm')).toEqual([
+			'create',
+			'refine',
+			'archive',
+		]);
+	});
+
+	test('openspec_projection source is read-only', () => {
+		expect(allowedMutationsFor('openspec_projection')).toEqual([
+			'none (read-only input; refine in the source tool)',
+		]);
+	});
+
+	test('speckit_projection source is read-only', () => {
+		expect(allowedMutationsFor('speckit_projection')).toEqual([
+			'none (read-only input; refine in the source tool)',
+		]);
+	});
+
+	test('openspec_projection and speckit_projection share the identical read-only message', () => {
+		// Both non-swarm sources must present the same guidance so callers
+		// cannot accidentally imply projection-specific mutation support.
+		expect(allowedMutationsFor('openspec_projection')).toEqual(
+			allowedMutationsFor('speckit_projection'),
+		);
+	});
+
+	test('swarm mutations are strictly disjoint from projection sources', () => {
+		const swarmMutations = new Set(allowedMutationsFor('swarm'));
+		for (const projectionMutation of allowedMutationsFor(
+			'openspec_projection',
+		)) {
+			expect(swarmMutations.has(projectionMutation)).toBe(false);
+		}
+	});
+
+	test('wired into `/swarm sdd status` markdown for an openspec-projected effective spec', async () => {
+		// tempDir (from the outer beforeEach) has only openspec/ — no native
+		// .swarm/spec.md — so the effective spec source is openspec_projection.
+		const out = await handleSddStatusCommand(tempDir, []);
+		expect(out).toContain(
+			`allowed mutations: ${allowedMutationsFor('openspec_projection').join(', ')}`,
+		);
+		// Must not claim swarm-only mutation rights for a read-only projection.
+		expect(out).not.toContain('allowed mutations: create, refine, archive');
+	});
+
+	test('wired into `/swarm sdd status` markdown for a native swarm effective spec', async () => {
+		const nativeDir = fs.realpathSync(
+			fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-mutations-native-')),
+		);
+		try {
+			fs.mkdirSync(path.join(nativeDir, '.swarm'), { recursive: true });
+			fs.writeFileSync(
+				path.join(nativeDir, '.swarm', 'spec.md'),
+				'# Specification: Native\n\n## Requirements\n- FR-001 MUST use the native swarm spec.\n',
+				'utf-8',
+			);
+			const out = await handleSddStatusCommand(nativeDir, []);
+			expect(out).toContain('Provider: swarm');
+			expect(out).toContain(
+				`allowed mutations: ${allowedMutationsFor('swarm').join(', ')}`,
+			);
+		} finally {
+			fs.rmSync(nativeDir, { recursive: true, force: true });
+		}
 	});
 });

@@ -407,3 +407,149 @@ describe('handleCiSimulateCommand with origin/master default branch', () => {
 		expect(result).toContain('All checks passed');
 	});
 });
+
+// ---------------------------------------------------------------------------
+// realpathSync symlink/junction normalization (setupWorktree ~L181,
+// cleanupWorktree ~L238-270).
+//
+// Git itself resolves symlinked/junctioned paths: `git worktree add --detach
+// <path-through-junction> ...` registers the REAL (symlink-resolved) path
+// internally, so a subsequent `git worktree list --porcelain` reports the
+// real path, NOT the junction path that was passed in. If our own
+// containment/registration checks compare against the raw (non-realpath'd)
+// junction path, they will never match git's reported real path, and
+// cleanup fails closed with a spurious "not a registered git worktree" or
+// "refusing to clean up non-contained path" error even though the worktree
+// is exactly the one we created and it is safely within our temp base.
+//
+// This was verified empirically against real git behavior on Windows
+// (junction) before writing this test:
+//   git worktree add --detach <junctionDir>/wt1 HEAD
+//   git worktree list --porcelain  =>  worktree <realBase>/wt1   (NOT junctionDir)
+// ---------------------------------------------------------------------------
+
+describe('handleCiSimulateCommand with a symlinked/junctioned tmpdir (realpathSync fix)', () => {
+	let tempDir: string;
+	let reposDir: string;
+	let bareRepoPath: string;
+	let realBaseParent: string;
+	let junctionDir: string;
+	let junctionSupported = true;
+
+	beforeEach(() => {
+		tempDir = makeTempDir('ci-simulate-junction-test-');
+		reposDir = path.join(tempDir, 'repos');
+		fs.mkdirSync(reposDir, { recursive: true });
+
+		bareRepoPath = gitCreateBareRemote(reposDir, 'origin.git');
+
+		gitInit(tempDir);
+		gitSetRemote(tempDir, 'origin', bareRepoPath);
+
+		createMinimalProject(tempDir);
+		gitAddFile(
+			tempDir,
+			'package.json',
+			fs.readFileSync(path.join(tempDir, 'package.json'), 'utf-8'),
+		);
+		gitAddFile(
+			tempDir,
+			'example.test.ts',
+			fs.readFileSync(path.join(tempDir, 'example.test.ts'), 'utf-8'),
+		);
+		gitCommit(tempDir, 'initial commit with package.json');
+		gitPush(tempDir, 'origin', 'main');
+
+		// `realBaseParent` is a real, physical directory. `junctionDir` is a
+		// reparse point (Windows junction, or a plain symlink elsewhere) that
+		// *resolves to* realBaseParent but is textually a completely different
+		// path — exactly the shape of macOS's /var -> /private/var, or a
+		// Windows temp dir mounted through a junction.
+		realBaseParent = fs.mkdtempSync(
+			path.join(os.tmpdir(), 'ci-sim-realbase-'),
+		);
+		junctionDir = path.join(
+			os.tmpdir(),
+			`ci-sim-junction-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
+		);
+
+		try {
+			const linkType = process.platform === 'win32' ? 'junction' : 'dir';
+			fs.symlinkSync(realBaseParent, junctionDir, linkType);
+		} catch {
+			// Some sandboxed/CI environments disallow symlink creation even for
+			// non-admin junctions. Skip gracefully rather than failing spuriously
+			// on an unrelated permissions issue.
+			junctionSupported = false;
+		}
+
+		if (junctionSupported) {
+			_internals.osTmpdir = () => junctionDir;
+		}
+	});
+
+	afterEach(() => {
+		_internals.runExternalTool = realRunExternalTool;
+		_internals.getDefaultBaseBranch = realGetDefaultBaseBranch;
+		_internals.detectDefaultRemoteBranch = realDetectDefaultRemoteBranch;
+		_internals.osTmpdir = () => os.tmpdir();
+
+		try {
+			if (junctionSupported) fs.rmdirSync(junctionDir);
+		} catch {
+			// Best-effort cleanup
+		}
+		try {
+			fs.rmSync(realBaseParent, { recursive: true, force: true });
+		} catch {
+			// Best-effort cleanup
+		}
+		try {
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		} catch {
+			// Best-effort cleanup
+		}
+	});
+
+	it('sets up and cleans up the worktree when os.tmpdir() resolves through a symlink/junction', async () => {
+		if (!junctionSupported) {
+			// Environment cannot create symlinks/junctions; nothing to assert.
+			return;
+		}
+
+		gitCreateBranch(tempDir, 'feature-branch');
+		gitCheckout(tempDir, 'feature-branch');
+		gitAddFile(tempDir, 'passing.txt', 'this passes');
+		gitCommit(tempDir, 'add passing file');
+
+		const result = await handleCiSimulateCommand(tempDir, ['feature-branch']);
+
+		// The worktree it created must actually live under the REAL
+		// (post-junction) base, proving setupWorktree resolved rawBase via
+		// realpathSync before constructing the worktree path — not the raw
+		// junction path.
+		const worktreePathMatch = result.match(/Worktree: `([^`]+)`/);
+		expect(worktreePathMatch).not.toBeNull();
+		const worktreePath = worktreePathMatch?.[1] ?? '';
+		expect(worktreePath.startsWith(junctionDir)).toBe(false);
+		expect(worktreePath.startsWith(realBaseParent)).toBe(true);
+
+		// Cleanup must succeed: without realpathSync normalization, git's
+		// `worktree list --porcelain` (which reports the real, not junction,
+		// path) can never string-match our raw junction-rooted worktreePath,
+		// so the registration check would incorrectly conclude the worktree is
+		// unregistered / not contained and fail closed.
+		expect(result).not.toContain('WORKTREE CLEANUP BLOCKED');
+		expect(result).not.toContain('refusing to clean up non-contained path');
+		expect(result).not.toContain(
+			'exists but is not a registered git worktree',
+		);
+		expect(result).toContain('Worktree removed');
+		expect(result).toContain('All checks passed');
+
+		// And the worktree directory must actually be gone from disk (real,
+		// resolved location) — not merely "reported" removed while the real
+		// directory is orphaned because cleanup silently no-op'd.
+		expect(fs.existsSync(worktreePath)).toBe(false);
+	});
+});

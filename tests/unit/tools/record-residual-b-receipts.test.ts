@@ -269,6 +269,19 @@ describe('trace hook residual-B gates (issue #2131)', () => {
 			),
 		);
 		expect(state.lastTransition).toBe('RECURRENCE_GATE');
+
+		// One-shot: second cycle without the receipt is quiet (state persists,
+		// the directive does not re-fire on every turn).
+		const output2 = { messages: [] as unknown[] };
+		await hook.messagesTransform({}, output2);
+		expect(output2.messages).toHaveLength(0);
+		const state2 = JSON.parse(
+			fs.readFileSync(
+				path.join(dir, '.swarm', 'issue-trace-state.json'),
+				'utf-8',
+			),
+		);
+		expect(state2.lastTransition).toBe('RECURRENCE_GATE');
 	});
 
 	test('both receipts present → commit-pr handoff fires', async () => {

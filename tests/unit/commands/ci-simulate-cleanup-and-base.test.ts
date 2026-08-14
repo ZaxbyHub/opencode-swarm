@@ -57,6 +57,7 @@ describe('handleCiSimulateCommand cleanup + explicit base (issue #2131 E)', () =
 		_internals.detectDefaultRemoteBranch = () => 'main';
 		_internals.fs = {
 			existsSync: realFs.existsSync,
+			realpathSync: realFs.realpathSync,
 			rmSync: (target: string) => {
 				rmSyncCalls.push(target);
 			},

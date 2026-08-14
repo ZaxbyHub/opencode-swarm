@@ -156,7 +156,12 @@ describe('copilot-pr-publication-gate (issue #2131 criterion D)', () => {
 			'origin',
 			'https://github.com/example/repo.git',
 		]);
-		git(directory, ['commit', '-q', '--allow-empty', '-m', 'init']);
+		git(directory, [
+			'-c', 'user.name=test',
+			'-c', 'user.email=test@test.com',
+			'-c', 'commit.gpgsign=false',
+			'commit', '-q', '--allow-empty', '-m', 'init',
+		]);
 		const head = spawnSync('git', ['-C', directory, 'rev-parse', 'HEAD'], {
 			encoding: 'utf-8',
 		}).stdout.trim();
@@ -200,6 +205,21 @@ describe('copilot-pr-publication-gate (issue #2131 criterion D)', () => {
 		const { status, output } = runGate(PUBLISH_PAYLOAD);
 		expect(status).toBe(1);
 		expect(output).toContain('body_sha256 does not match');
+	});
+
+	test('empty/missing body_sha256 in the receipt is rejected (fail-closed)', async () => {
+		await writeValidBaselinePrBody();
+		git(directory, ['init', '-q']);
+		git(directory, [
+			'remote',
+			'add',
+			'origin',
+			'https://github.com/example/repo.git',
+		]);
+		await writeEvidence({ headSha: '0'.repeat(40), bodySha256: '' });
+		const { status, output } = runGate(PUBLISH_PAYLOAD);
+		expect(status).toBe(1);
+		expect(output).toContain('body_sha256 could not be verified');
 	});
 
 	test("state other than 'validated' is rejected", async () => {

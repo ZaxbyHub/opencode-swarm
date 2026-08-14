@@ -353,4 +353,48 @@ describe('rebindPrFeedbackHead (issue #2131 C2)', () => {
 			rebindPrFeedbackHead(directory, SESSION_ID, NEW_SHA),
 		).rejects.toThrow();
 	});
+
+	test('refuses rebind while a PR workflow lane is still in flight', async () => {
+		await settleFeedbackWorkflow('CONFIRMED');
+		// Record a swarm-pr-* lane that never transitions past 'pending' — unlike
+		// persistLaneArtifact (which immediately appends a 'completed'
+		// transition), this leaves the lane genuinely open so the
+		// still-in-flight refusal path (as opposed to the no-op/armed/checkout
+		// refusals covered above) is actually exercised.
+		const correlationId = 'in-flight-lane';
+		await recordPendingDelegation(directory, {
+			correlationId,
+			jobId: null,
+			subagentSessionId: correlationId,
+			parentSessionId: SESSION_ID,
+			callID: 'in-flight-batch',
+			normalizedAgent: 'reviewer',
+			swarmPrefixedAgent: 'reviewer',
+			planTaskId: null,
+			evidenceTaskId: null,
+			batchId: 'in-flight-batch',
+			laneId: 'in-flight',
+			mode: 'swarm-pr-feedback:in-flight',
+			workflowLane: 'in-flight',
+			workspace: {
+				directory,
+				gitHead: HEAD_SHA,
+				dirtyHash: REVISION,
+				prHeadSha: HEAD_SHA,
+				scope: null,
+			},
+		});
+		currentHead = NEW_SHA; // otherwise the checkout-mismatch refusal would fire first
+		// The exact count additionally proves the open-lanes filter matched only
+		// this one still-pending record and did not sweep in the four completed
+		// `persistLaneArtifact` lanes recorded by settleFeedbackWorkflow.
+		await expect(
+			rebindPrFeedbackHead(directory, SESSION_ID, NEW_SHA),
+		).rejects.toThrow(/1 PR workflow lane\(s\) are still in flight/);
+		// The gate must survive the refusal — nothing was mutated.
+		const state = await readPrWorkflowGateState(directory, SESSION_ID);
+		expect(state).not.toBeNull();
+		expect(state?.prHeadSha).toBe(HEAD_SHA);
+		expect(state?.prFeedbackRebindCount ?? 0).toBe(0);
+	});
 });

@@ -50,6 +50,7 @@ export const _internals: {
 	fs: {
 		existsSync: typeof fs.existsSync;
 		rmSync: typeof fs.rmSync;
+		realpathSync: typeof fs.realpathSync;
 	};
 } = {
 	runExternalTool,
@@ -60,6 +61,7 @@ export const _internals: {
 	fs: {
 		existsSync: fs.existsSync,
 		rmSync: fs.rmSync,
+		realpathSync: fs.realpathSync,
 	},
 };
 
@@ -176,12 +178,11 @@ async function setupWorktree(
 	baseBranch: string,
 	onWorktreeCreated: (worktreePath: string) => void,
 ): Promise<string> {
-	const worktreeBase = path.join(_internals.osTmpdir(), 'swarm-ci-simulate');
+	const rawBase = path.join(_internals.osTmpdir(), 'swarm-ci-simulate');
+	await fsPromises.mkdir(rawBase, { recursive: true });
+	const worktreeBase = _internals.fs.realpathSync(rawBase);
 	const worktreeName = `pr-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
 	const worktreePath = path.join(worktreeBase, worktreeName);
-
-	// Ensure the base directory exists
-	await fsPromises.mkdir(worktreeBase, { recursive: true });
 
 	// Create a detached worktree from the detected default branch
 	const addResult = await runGit(
@@ -234,8 +235,13 @@ async function cleanupWorktree(
 ): Promise<string | null> {
 	// Containment: only ever touch paths inside our own temp base. This guard
 	// makes it structurally impossible for a bad path to delete project files.
-	const worktreeBase = path.resolve(_internals.osTmpdir(), 'swarm-ci-simulate');
-	const resolved = path.resolve(worktreePath);
+	const rawBase = path.resolve(_internals.osTmpdir(), 'swarm-ci-simulate');
+	const worktreeBase = _internals.fs.existsSync(rawBase)
+		? _internals.fs.realpathSync(rawBase)
+		: rawBase;
+	const resolved = _internals.fs.existsSync(worktreePath)
+		? _internals.fs.realpathSync(worktreePath)
+		: path.resolve(worktreePath);
 	if (
 		resolved !== worktreeBase &&
 		!resolved.startsWith(`${worktreeBase}${path.sep}`)
@@ -254,11 +260,14 @@ async function cleanupWorktree(
 	}
 	const registered = listResult.stdout
 		.split(/\r?\n/)
-		.some(
-			(line) =>
-				line.startsWith('worktree ') &&
-				path.resolve(line.slice('worktree '.length).trim()) === resolved,
-		);
+		.some((line) => {
+			if (!line.startsWith('worktree ')) return false;
+			const raw = line.slice('worktree '.length).trim();
+			const canon = _internals.fs.existsSync(raw)
+				? _internals.fs.realpathSync(raw)
+				: path.resolve(raw);
+			return canon === resolved;
+		});
 	if (!registered) {
 		// Already gone or never registered: nothing to remove, not an error.
 		if (!_internals.fs.existsSync(resolved)) return null;
