@@ -370,8 +370,25 @@ export async function handleCiSimulateCommand(
 	directory: string,
 	args: string[],
 ): Promise<string> {
-	// Parse PR ref from args (first positional argument)
-	const prRef = args[0] ?? (await getCurrentBranchOrRef(directory));
+	// Parse args: first positional is the PR ref; an optional validated explicit
+	// base may be supplied as `--base <ref>` (issue #2131 criterion E — stacked
+	// or release-branch PRs must not be silently simulated against the default
+	// branch).
+	const baseFlagIndex = args.findIndex((token) => token === '--base');
+	let explicitBase: string | undefined;
+	let positional: string[];
+	if (baseFlagIndex !== -1) {
+		explicitBase = args[baseFlagIndex + 1];
+		if (!explicitBase || !isSafeGitRef(explicitBase)) {
+			return 'CI simulation failed: --base must be followed by a safe git branch or commit reference (e.g. --base origin/release-1.x).';
+		}
+		positional = args
+			.slice(0, baseFlagIndex)
+			.concat(args.slice(baseFlagIndex + 2));
+	} else {
+		positional = args;
+	}
+	const prRef = positional[0] ?? (await getCurrentBranchOrRef(directory));
 	if (!isSafeGitRef(prRef)) {
 		return 'CI simulation failed: PR ref must be a safe git branch or commit reference.';
 	}
@@ -400,23 +417,39 @@ export async function handleCiSimulateCommand(
 		// resolves we fail closed instead of guessing.
 		const detectedBranch = _internals.detectDefaultRemoteBranch(directory);
 		let baseBranch: string | null = null;
-		for (const candidate of [detectedBranch, 'main', 'master'].filter(
-			(branch): branch is string => Boolean(branch),
-		)) {
-			const candidateRef = `origin/${candidate}`;
-			if (!isSafeGitRef(candidateRef)) continue;
+		if (explicitBase) {
+			// A validated explicit base (issue #2131 criterion E): it must
+			// actually resolve in this repository before it is used.
 			const verify = await runGit(
-				['rev-parse', '--verify', '--quiet', candidateRef],
+				['rev-parse', '--verify', '--quiet', explicitBase],
 				directory,
 			);
-			if (verify.exitCode === 0) {
-				baseBranch = candidateRef;
-				break;
+			if (verify.exitCode !== 0) {
+				throw new Error(
+					`Explicit --base "${explicitBase}" does not resolve in this repository (git rev-parse --verify failed). Fetch it or correct the ref.`,
+				);
+			}
+			baseBranch = explicitBase;
+		}
+		if (!baseBranch) {
+			for (const candidate of [detectedBranch, 'main', 'master'].filter(
+				(branch): branch is string => Boolean(branch),
+			)) {
+				const candidateRef = `origin/${candidate}`;
+				if (!isSafeGitRef(candidateRef)) continue;
+				const verify = await runGit(
+					['rev-parse', '--verify', '--quiet', candidateRef],
+					directory,
+				);
+				if (verify.exitCode === 0) {
+					baseBranch = candidateRef;
+					break;
+				}
 			}
 		}
 		if (!baseBranch) {
 			throw new Error(
-				'Could not resolve an existing default remote branch (origin/HEAD, init.defaultBranch, origin/main, origin/master). Fetch first or merge the PR into a base you can name explicitly.',
+				'Could not resolve an existing default remote branch (origin/HEAD, init.defaultBranch, origin/main, origin/master). Fetch first, or pass an explicit validated base with --base <ref>.',
 			);
 		}
 
