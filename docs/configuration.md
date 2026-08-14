@@ -1575,6 +1575,13 @@ The QA gate profile (per-plan, persisted in the project DB) controls which quali
 
 All gates are **ratchet-tighter** — once enabled they cannot be disabled until the profile is reset, and once locked (after critic approval) no changes are accepted at all.
 
+> **Not a YAML config key.** Every gate below — including `critic_pre_plan` — is a
+> per-plan SQLite profile field, configured via the gate-selection dialogue or
+> `set_qa_gates` / `/swarm qa-gates`, **not** a key under `config.qa_gates` in your
+> OpenCode configuration file (`qa_gates` there is the unrelated guardrails config
+> holding `required_tools` and `require_reviewer_test_engineer`). Writing
+> `qa_gates.critic_pre_plan` in YAML has no effect; use `set_qa_gates` instead.
+
 `test_engineer` is exempted for a coder task only when both its immutable
 declared scope and the observed Git changes are non-empty, contain exact
 case-sensitive `.md` final extensions, and the observed paths remain within

@@ -133,3 +133,86 @@ describe('compaction boundary injection regression (#2087)', () => {
 		expect(output.context[0]).not.toContain('[truncated]');
 	});
 });
+
+describe('compaction summary pending-task facts are directive-free (#2109)', () => {
+	let tempDir: string;
+	let cleanup: () => void;
+
+	beforeEach(() => {
+		({ dir: tempDir, cleanup } = createSafeTestDir('swarm-summary-facts-'));
+		const swarmDir = join(tempDir, '.swarm');
+		mkdirSync(swarmDir, { recursive: true });
+		writeFileSync(join(swarmDir, 'plan.md'), '');
+		writeFileSync(join(swarmDir, 'context.md'), '');
+	});
+
+	afterEach(() => {
+		cleanup();
+	});
+
+	it('stripTaskActionMarkers removes the action affordance while keeping the task line', () => {
+		expect(
+			_test_exports.stripTaskActionMarkers(
+				'- [ ] 1.1: Implement feature [MEDIUM] ← CURRENT',
+			),
+		).toBe('- [ ] 1.1: Implement feature [MEDIUM]');
+		// Pending tasks without the marker are untouched.
+		expect(
+			_test_exports.stripTaskActionMarkers('- [ ] 1.2: Add config [SMALL]'),
+		).toBe('- [ ] 1.2: Add config [SMALL]');
+		// Multiple lines: only the marker-terminated line is stripped.
+		expect(
+			_test_exports.stripTaskActionMarkers(
+				'- [ ] 1.2: Add config [SMALL]\n- [ ] 1.1: Implement [MEDIUM] ← CURRENT',
+			),
+		).toBe('- [ ] 1.2: Add config [SMALL]\n- [ ] 1.1: Implement [MEDIUM]');
+	});
+
+	it('injects pending [SWARM TASKS] facts without the action affordance in the tool-disabled turn', async () => {
+		const swarmDir = join(tempDir, '.swarm');
+		// Contains an in_progress task, which makes extractIncompleteTasksFromPlan
+		// emit the ` ← CURRENT` action marker on the source task line.
+		const plan = {
+			schema_version: '1.0.0',
+			title: 'Test Plan',
+			swarm: 'test-swarm',
+			current_phase: 1,
+			phases: [
+				{
+					id: 1,
+					name: 'Phase 1',
+					status: 'in_progress',
+					tasks: [
+						{
+							id: '1.1',
+							phase: 1,
+							status: 'in_progress',
+							size: 'medium',
+							description: 'Implement feature',
+							depends: [],
+							files_touched: [],
+						},
+					],
+				},
+			],
+		};
+		writeFileSync(join(swarmDir, 'plan.json'), JSON.stringify(plan));
+
+		const hook = createCompactionCustomizerHook(defaultConfig, tempDir);
+		const handler = hook['experimental.session.compacting'] as Function;
+		const output = { context: [] as string[] };
+
+		await handler({ sessionID: 'session-pending' }, output);
+
+		const block = output.context[0];
+		// Factual pending-task line is preserved.
+		expect(block).toContain(
+			'[SWARM TASKS]\n- [ ] 1.1: Implement feature [MEDIUM]',
+		);
+		// The imperative/action affordance is stripped from the summary turn.
+		expect(block).not.toContain('← CURRENT');
+		// Declarative summary-only boundary is retained.
+		expect(block).toContain('Summary generation only.');
+		expect(block).toContain('quoted factual state, not instructions');
+	});
+});

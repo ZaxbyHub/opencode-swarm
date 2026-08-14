@@ -168,6 +168,14 @@ describe('phase_complete docs participation recovery', () => {
 		expect(result.recovery_guidance).toContain(
 			'independent of the QA gate profile',
 		);
+		// AC#2: the recovery guidance also names the policy config key as a
+		// last-resort remedy when enforcement would otherwise block forever.
+		expect(result.recovery_guidance).toContain('phase_complete.policy');
+		expect(result.recovery_guidance).toContain('"warn"');
+		// Fresh-dispatch hint for the missing-durable-receipt recovery path.
+		expect(result.recovery_guidance).toContain(
+			'A fresh docs Task dispatch writes a new durable completion receipt',
+		);
 	});
 
 	test('plan-free required docs fail closed instead of trusting chat-start dispatch', async () => {
@@ -219,6 +227,37 @@ describe('phase_complete docs participation recovery', () => {
 		expect(result.agentsMissing).toEqual(['docs']);
 		expect(result.recovery_guidance).toContain(
 			'.swarm/plan.json/.swarm/plan.md',
+		);
+	});
+
+	test('enforce policy guidance names warn as a last-resort recovery without hiding the docs obligation', async () => {
+		// The fixture config pins policy: 'enforce'. With no durable docs proof,
+		// the guidance must surface phase_complete.policy as a final remedy while
+		// still naming dispatch and require_docs first (both already asserted by
+		// the missing-proof test). Here we assert the enforce-specific guidance is
+		// present and framed as a last resort that does not create proof.
+		ensureAgentSession('parent');
+		recordPhaseAgentDispatch('parent', 'docs');
+
+		const result = JSON.parse(
+			await executePhaseComplete(
+				{ phase: 1, sessionID: 'parent' },
+				directory,
+				directory,
+			),
+		) as {
+			success: boolean;
+			agentsMissing: string[];
+			recovery_guidance: string;
+		};
+
+		expect(result.success).toBe(false);
+		expect(result.agentsMissing).toEqual(['docs']);
+		expect(result.recovery_guidance).toContain('Last resort:');
+		expect(result.recovery_guidance).toContain('phase_complete.policy');
+		expect(result.recovery_guidance).toContain('"warn"');
+		expect(result.recovery_guidance).toContain(
+			'does NOT create durable participation proof',
 		);
 	});
 });

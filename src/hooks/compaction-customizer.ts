@@ -31,6 +31,19 @@ const SUMMARY_ONLY_HEADER =
 const SUMMARY_ONLY_FOOTER =
 	'Execution resumes only after compaction; pending work remains pending for the resumed agent.';
 
+/**
+ * The summary-generation turn is tool-disabled, so an action affordance like
+ * ` ← CURRENT` ("do this next") would instruct the model to act where acting is
+ * forbidden. Strip it from on-disk task rendering while keeping the factual
+ * pending-task line. The marker is emitted by `extractIncompleteTasksFromPlan`
+ * (`- [ ] <id>: ... ← CURRENT`), and the legacy `extractIncompleteTasks` path
+ * relays it verbatim whenever plan.md was derived from or hand-written in the
+ * canonical ` ← CURRENT` format, so the strip is applied to both paths.
+ */
+function stripTaskActionMarkers(value: string): string {
+	return value.replace(/\s*←\s*CURRENT\s*$/gm, '');
+}
+
 interface CompactionFact {
 	label: string;
 	value: string;
@@ -172,7 +185,10 @@ export function createCompactionCustomizerHook(
 						MAX_COMPACTION_FACT_CHARS,
 					);
 					if (incompleteTasks) {
-						facts.push({ label: 'SWARM TASKS', value: incompleteTasks });
+						facts.push({
+							label: 'SWARM TASKS',
+							value: stripTaskActionMarkers(incompleteTasks),
+						});
 					}
 				} else {
 					// Legacy fallback.
@@ -187,7 +203,10 @@ export function createCompactionCustomizerHook(
 							MAX_COMPACTION_FACT_CHARS,
 						);
 						if (incompleteTasks) {
-							facts.push({ label: 'SWARM TASKS', value: incompleteTasks });
+							facts.push({
+								label: 'SWARM TASKS',
+								value: stripTaskActionMarkers(incompleteTasks),
+							});
 						}
 					}
 				}
@@ -257,6 +276,7 @@ export const _test_exports = {
 	buildCompactionFactsBlock,
 	compactionFs,
 	countStoredOutputs,
+	stripTaskActionMarkers,
 	MAX_COMPACTION_FACT_CHARS,
 	MAX_COMPACTION_CONTEXT_CHARS,
 	MAX_STORED_OUTPUTS_TO_COUNT,
