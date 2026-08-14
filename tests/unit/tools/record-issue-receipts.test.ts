@@ -25,7 +25,9 @@ import { executeRecordIssueReproduction } from '../../../src/tools/record-issue-
 import { TOOL_NAMES } from '../../../src/tools/tool-names.js';
 
 function makeTempDir(): string {
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'record-receipts-'));
+	const dir = fs.realpathSync(
+		fs.mkdtempSync(path.join(os.tmpdir(), 'record-receipts-')),
+	);
 	fs.mkdirSync(path.join(dir, '.swarm'), { recursive: true });
 	return dir;
 }
