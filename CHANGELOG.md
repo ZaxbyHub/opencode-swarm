@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.140.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.139.8...v7.140.0) (2026-08-14)
+
+
+### Features
+
+* **repo-map:** add zero-cost ask/orient action and upgrade context_pack ([9907619](https://github.com/ZaxbyHub/opencode-swarm/commit/9907619aa29b48347b59fe913d41582fbcb1677a))
+
 ## [7.139.8](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.139.7...v7.139.8) (2026-08-14)
 
 
