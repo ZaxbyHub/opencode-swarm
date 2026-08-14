@@ -8,19 +8,27 @@
  *
  * Uses the `_internals` DI seam pattern (AGENTS.md invariant 7) so
  * tests can override adapter functions without `mock.module` leakage.
+ *
+ * Issue #2131 finding 2.5: a transition is persisted ONLY AFTER its
+ * directive/mode message is durably appended to the host `output.messages`.
+ * If the host output lacks a mutable messages array the transition is NOT
+ * advanced, so the next cycle recomputes and retries — a lost directive can
+ * no longer be permanently suppressed by idempotency while state advances.
  */
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
+import { error as _logErrorImpl } from '../utils/logger.js';
 import { isPlanCriticApproved } from './delegation-gate';
 import { computeNextMode } from './issue-trace-reducer';
 import {
-	planExists,
+	publicationReceiptExists,
 	readIssueReference,
 	readPlanPhaseStatus,
 	readSpecIssueNumber,
 	readTraceState,
+	reproductionReceiptExists,
 	specExists,
 	writeTraceState,
 } from './issue-trace-state';
@@ -34,15 +42,26 @@ export const _internals = {
 	readSpecIssueNumber,
 	readPlanPhaseStatus,
 	specExists,
-	planExists,
+	reproductionReceiptExists,
+	publicationReceiptExists,
 	isPlanCriticApproved,
+	logError: _logErrorImpl,
 };
 
-// ── Session-level cache for critic approval ────────────────────────
-// Invalidated when the plan ledger file size changes.
+// ── Session-level caches ──────────────────────────────────────────
+// Invalidated when the underlying file size changes. Both caches are
+// per-directory and reset between tests via resetApprovalCache() /
+// resetPhaseStatusCache().
 
 let cachedApproval: { dir: string; size: number; result: boolean } | null =
 	null;
+
+let cachedPhaseStatus: {
+	dir: string;
+	planJsonSize: number;
+	planJsonMtime: number;
+	result: { planExists: boolean; allComplete: boolean };
+} | null = null;
 
 // ── Bounded approval check ────────────────────────────────────────
 
@@ -102,6 +121,50 @@ async function boundedApprovalCheck(
 	}
 }
 
+// ── Cached, authoritative plan phase-status ───────────────────────
+
+/**
+ * Reads plan presence + phase status through the AUTHORITATIVE loader, cached
+ * on `.swarm/plan.json` size+mtime so a long architect session does not re-enter
+ * the ledger-aware loader on every message cycle (issue #2131 finding 2.3). When
+ * the projection is unchanged the cached result is returned; otherwise the
+ * loader is re-run and the cache refreshed. Size+mtime is a tighter fingerprint
+ * than size alone (the loader value is ledger-derived, so an in-place rewrite
+ * that preserves byte length but advances a phase still invalidates the cache).
+ */
+async function cachedReadPlanPhaseStatus(directory: string): Promise<{
+	planExists: boolean;
+	allComplete: boolean;
+}> {
+	const planJsonPath = path.join(directory, '.swarm', 'plan.json');
+	let currentSize = -1;
+	let currentMtime = -1;
+	try {
+		const stat = fs.statSync(planJsonPath);
+		currentSize = stat.size;
+		currentMtime = stat.mtimeMs;
+	} catch {
+		// No plan.json — size/mtime stay -1; a cache populated at -1 still reflects
+		// "no projection", and is invalidated when plan.json appears.
+	}
+	if (
+		cachedPhaseStatus &&
+		cachedPhaseStatus.dir === directory &&
+		cachedPhaseStatus.planJsonSize === currentSize &&
+		cachedPhaseStatus.planJsonMtime === currentMtime
+	) {
+		return cachedPhaseStatus.result;
+	}
+	const result = await _internals.readPlanPhaseStatus(directory);
+	cachedPhaseStatus = {
+		dir: directory,
+		planJsonSize: currentSize,
+		planJsonMtime: currentMtime,
+		result,
+	};
+	return result;
+}
+
 // ── Hook factory ─────────────────────────────────────────────────
 
 export function createIssueTraceHook(
@@ -121,10 +184,12 @@ export function createIssueTraceHook(
 				// 2. Read trace state
 				const traceState = _internals.readTraceState(directory);
 
-				// 3. Determine workflow artifacts (sync)
+				// 3. Determine workflow artifacts
 				const _specExists = _internals.specExists(directory);
 				const _specIssueNumber = _internals.readSpecIssueNumber(directory);
-				const _planExists = _internals.planExists(directory);
+
+				// Authoritative plan presence + phase status (cached).
+				const phaseStatus = await cachedReadPlanPhaseStatus(directory);
 
 				// 4. Bounded await for critic approval (configurable timeout, fail-closed)
 				const _criticApproved = await boundedApprovalCheck(
@@ -132,32 +197,44 @@ export function createIssueTraceHook(
 					approvalTimeoutMs,
 				);
 
-				// 5. Plan phase status (async)
-				const phaseStatus = await _internals.readPlanPhaseStatus(directory);
-				const _allPhasesComplete = phaseStatus.allComplete;
+				// 4b. Reproduction gate + publication receipt (issue #2131 2.6 / 2.4).
+				const _reproReceipt = await _internals.reproductionReceiptExists(
+					directory,
+					issueRef.number,
+				);
+				const _reproductionPermitted =
+					issueRef.flags.noRepro === true ||
+					issueRef.noReproWaiver?.waived === true ||
+					_reproReceipt;
+				const _publicationObserved = await _internals.publicationReceiptExists(
+					directory,
+					issueRef.number,
+				);
 
-				// 6. Call reducer
+				// 5. Call reducer
 				const result = computeNextMode({
 					issueReference: issueRef,
 					traceState,
 					workflowArtifacts: {
 						specExists: _specExists,
 						specIssueNumber: _specIssueNumber,
-						planExists: _planExists,
+						planExists: phaseStatus.planExists,
 						criticApproved: _criticApproved,
-						allPhasesComplete: _allPhasesComplete,
+						allPhasesComplete: phaseStatus.allComplete,
+						reproductionPermitted: _reproductionPermitted,
+						publicationObserved: _publicationObserved,
 					},
 				});
 
-				// 7. Noop if nothing to do
+				// 6. Noop if nothing to do
 				if (result.nextMode === null && result.directive === null) return;
 
-				// 7a. Substitute #N placeholder with actual issue number
+				// 6a. Substitute #N placeholder with actual issue number
 				const finalDirective = result.directive
 					? result.directive.replace('#N', `#${issueRef.number}`)
 					: null;
 
-				// 8. PRECOMPUTE output messages BEFORE writeTraceState
+				// 7. PRECOMPUTE output messages BEFORE any state write
 				const messagesToAdd: {
 					role: string;
 					content: Array<{ type: string; text: string }>;
@@ -186,20 +263,27 @@ export function createIssueTraceHook(
 					});
 				}
 
-				// 9. Write trace state FIRST
+				// 8. DELIVER FIRST: append to the host output.messages in place. Only
+				// if a mutable messages array exists and the append happened do we
+				// persist the transition. If delivery is impossible, return WITHOUT
+				// advancing state so the next cycle recomputes and retries — a lost
+				// directive can no longer be suppressed permanently by idempotency.
+				const out = output as { messages?: unknown[] };
+				if (!Array.isArray(out.messages) || messagesToAdd.length === 0) {
+					return;
+				}
+				out.messages.push(...messagesToAdd);
+
+				// 9. ONLY after durable delivery: persist the trace state transition.
 				_internals.writeTraceState(directory, {
 					issueNumber: traceState.issueNumber,
 					lastTransition: result.nextLastTransition,
-					completed: result.nextCompleted,
+					status: result.nextStatus,
 				});
-
-				// 10. Only if write succeeds: append precomputed messages
-				const out = output as { messages?: unknown[] };
-				if (out.messages) {
-					out.messages.push(...messagesToAdd);
-				}
-			} catch {
-				// FAIL-CLOSED: any error → silent no-op
+			} catch (err) {
+				// FAIL-CLOSED: any error in the hook cycle is non-fatal; the next
+				// cycle recomputes and retries. Log so the failure is observable.
+				_internals.logError('[issue-trace] hook cycle failed:', err);
 			}
 		},
 	};
@@ -211,4 +295,11 @@ export function createIssueTraceHook(
  */
 export function resetApprovalCache(): void {
 	cachedApproval = null;
+}
+
+/**
+ * Reset the plan phase-status cache. Called by tests in afterEach.
+ */
+export function resetPhaseStatusCache(): void {
+	cachedPhaseStatus = null;
 }

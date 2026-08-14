@@ -9,6 +9,7 @@ import {
 } from '../utils/path-security';
 import { createSwarmTool } from './create-tool';
 import {
+	askGraph,
 	buildOntologyPreflightPacket,
 	buildWorkspaceGraphAsync,
 	type FreshnessOptions,
@@ -25,6 +26,7 @@ import {
 	getLocalizationContext,
 	getPackageBoundaries,
 	getSymbolConsumers,
+	inferPackageBoundary,
 	isGraphWideInputPath,
 	loadGraph,
 	normalizeGraphPath,
@@ -69,12 +71,14 @@ const VALID_ACTIONS = [
 	'dead_exports',
 	'context_pack',
 	'graph_health',
+	'ask',
 ] as const;
 
 type RepoMapAction = (typeof VALID_ACTIONS)[number];
 
 const MAX_FILE_PATH_LENGTH = 500;
 const MAX_SYMBOL_LENGTH = 256;
+const MAX_QUESTION_LENGTH = 500;
 const REPO_GRAPH_DISABLED_NOTICE =
 	'Repository graph is disabled by configuration (repo_graph.enabled=false).';
 
@@ -92,6 +96,8 @@ interface RepoMapArgs {
 	symbol?: string;
 	top_n?: number;
 	max_depth?: number;
+	question?: string;
+	include_source?: boolean;
 }
 
 function validateFile(p: string): string | null {
@@ -117,6 +123,15 @@ function validateSymbol(s: string): string | null {
 		return `symbol exceeds maximum length of ${MAX_SYMBOL_LENGTH}`;
 	}
 	if (containsControlChars(s)) return 'symbol contains control characters';
+	return null;
+}
+
+function validateQuestion(q: string): string | null {
+	if (!q || q.trim().length === 0) return 'question is empty';
+	if (q.length > MAX_QUESTION_LENGTH) {
+		return `question exceeds maximum length of ${MAX_QUESTION_LENGTH}`;
+	}
+	if (containsControlChars(q)) return 'question contains control characters';
 	return null;
 }
 
@@ -220,8 +235,9 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 		'"preflight_packet" (bounded ontology packet for planning), ' +
 		'"callers" (files that reference an exported symbol, call-site granularity; needs file+symbol), ' +
 		'"dead_exports" (advisory: exported symbols with no detected in-repo reference; results are review candidates, not delete directives), ' +
-		'"context_pack" (token-budgeted slice of source spans for a target symbol — definition + transitive callers/callees; advisory/conservative; needs file+symbol; uses max_depth for traversal depth, top_n for span cap), ' +
-		'"graph_health" (freshness and bounded extraction diagnostics; no file required). ' +
+		'"context_pack" (token-budgeted slice of source spans for a target symbol — definition + transitive callers/callees; advisory/conservative; needs file+symbol; uses max_depth for traversal depth, top_n for span cap; set include_source=true to embed source text in spans), ' +
+		'"graph_health" (freshness and bounded extraction diagnostics; no file required), ' +
+		'"ask" (zero-LLM file localization: pass a natural-language question to rank files by relevance via vocabulary expansion + IDF + PageRank; orientation only — read the located files before asserting anything about them). ' +
 		'Use this before refactoring shared modules to avoid breaking unseen consumers. ' +
 		'Note: "callers"/"dead_exports"/"context_pack" use conservative regex analysis (TS/JS/Python) and cannot see ' +
 		'dynamic dispatch or namespace/barrel re-export usage; "dead_exports" results are review candidates, not delete directives.',
@@ -241,9 +257,10 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 				'dead_exports',
 				'context_pack',
 				'graph_health',
+				'ask',
 			])
 			.describe(
-				'Query action: "build" | "importers" | "dependencies" | "blast_radius" | "localization" | "key_files" | "ontology" | "package_boundaries" | "preflight_packet" | "callers" | "dead_exports" | "context_pack" | "graph_health"',
+				'Query action: "build" | "importers" | "dependencies" | "blast_radius" | "localization" | "key_files" | "ontology" | "package_boundaries" | "preflight_packet" | "callers" | "dead_exports" | "context_pack" | "graph_health" | "ask"',
 			),
 		file: z
 			.string()
@@ -280,6 +297,18 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 			.optional()
 			.describe(
 				'For action="blast_radius": max BFS depth (default 3). For action="context_pack": traversal depth (default 2).',
+			),
+		question: z
+			.string()
+			.optional()
+			.describe(
+				'Natural-language question for action="ask". Orientation only — read the located files before asserting anything about them.',
+			),
+		include_source: z
+			.boolean()
+			.optional()
+			.describe(
+				'For action="context_pack": embed source text in spans (default false).',
 			),
 	},
 	async execute(
@@ -406,17 +435,29 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 		if (action === 'key_files') {
 			const topN = a.top_n ?? 10;
 			const nodes = getKeyFiles(graph, topN);
-			const reverseCounts = nodes.map((n) => ({
+			const totalFiles = Object.keys(graph.nodes).length;
+			const inDegrees = nodes.map(
+				(n) => getImporters(graph, n.moduleName).length,
+			);
+			const maxInDegree = Math.max(1, ...inDegrees);
+			const reverseCounts = nodes.map((n, i) => ({
 				file: n.moduleName,
 				language: n.language,
 				exports: n.exports.length,
 				roles: n.ontology?.roles ?? [],
 				findings: n.ontology?.findings.length ?? 0,
-				inDegree: getImporters(graph, n.moduleName).length,
+				inDegree: inDegrees[i],
+				hubScore: Math.round((inDegrees[i] / maxInDegree) * 1e4) / 1e4,
+				community:
+					n.ontology?.packageBoundary ?? inferPackageBoundary(n.moduleName),
 			}));
 			return ok(action, {
 				count: reverseCounts.length,
 				files: reverseCounts,
+				budget: {
+					returned: reverseCounts.length,
+					dropped: Math.max(0, totalFiles - reverseCounts.length),
+				},
 				...freshness,
 			});
 		}
@@ -424,16 +465,39 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 		if (action === 'package_boundaries') {
 			const topN = a.top_n ?? 10;
 			const boundaries = getPackageBoundaries(graph, topN);
+			const maxDepOnBy = Math.max(
+				1,
+				...boundaries.map((b) => b.dependedOnBy.length),
+			);
+			const enriched = boundaries.map((b) => ({
+				...b,
+				hubScore: Math.round((b.dependedOnBy.length / maxDepOnBy) * 1e4) / 1e4,
+				community: b.name,
+			}));
+			const totalBoundaries = new Set(
+				Object.values(graph.nodes).map(
+					(n) =>
+						n.ontology?.packageBoundary ?? inferPackageBoundary(n.moduleName),
+				),
+			).size;
 			return ok(action, {
-				count: boundaries.length,
-				boundaries,
+				count: enriched.length,
+				boundaries: enriched,
+				budget: {
+					returned: enriched.length,
+					dropped: Math.max(0, totalBoundaries - enriched.length),
+				},
 				...freshness,
 			});
 		}
 
 		if (action === 'dead_exports') {
 			const result = getDeadExports(graph, { maxCandidates: a.top_n ?? 100 });
-			return ok(action, { ...result, ...freshness });
+			return ok(action, {
+				...result,
+				budget: { returned: result.candidates.length },
+				...freshness,
+			});
 		}
 
 		if (action === 'preflight_packet') {
@@ -451,6 +515,15 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 				}),
 				...freshness,
 			});
+		}
+
+		if (action === 'ask') {
+			if (!a.question) return err(action, 'ask requires `question`');
+			const qErr = validateQuestion(a.question);
+			if (qErr) return err(action, `invalid question: ${qErr}`);
+			const topN = Math.min(a.top_n ?? 8, 25);
+			const result = askGraph(graph, a.question, { topN });
+			return ok(action, { ...result, ...freshness });
 		}
 
 		// Remaining actions need a file or files list.
@@ -526,6 +599,8 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 			const raw = getContextPack(graph, target, a.symbol, {
 				maxDepth: a.max_depth ?? 2,
 				maxTokens: 4000,
+				includeSource: a.include_source ?? false,
+				directory,
 			});
 			// Normalize absolute paths to workspace-relative (Phase 4 SME caveat).
 			// If the input is already relative (e.g. from a pre-1.2.0 graph fallback
@@ -556,9 +631,14 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 				spans: cappedSpans,
 				truncated,
 				estimatedTokens: raw.estimatedTokens,
+				budget: {
+					returned: cappedSpans.length,
+					dropped: Math.max(0, normalizedSpans.length - cappedSpans.length),
+				},
 				...freshness,
 				schemaSupported: raw.schemaSupported,
 				...(raw.note ? { note: raw.note } : {}),
+				...(raw.sourceIncluded ? { sourceIncluded: true } : {}),
 			});
 		}
 

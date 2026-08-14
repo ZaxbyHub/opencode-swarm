@@ -34,10 +34,25 @@ afterEach(async () => {
 	await fs.rm(directory, { recursive: true, force: true });
 });
 
-/** Write a raw gate-state record straight to disk for shapes the public
- * mutators cannot reach (e.g. an armed prFeedbackReadyToPublish record).
- * The runtime's validateSwarmPath prepends `.swarm/`, so the absolute path
- * is `<directory>/.swarm/<relative>`. */
+/** A valid controller-recorded terminal recovery condition. */
+const TERMINAL_RECOVERY = {
+	code: 'UNMERGED_INDEX',
+	retryable: false,
+	requiredAction: 'resolve the unmerged index manually',
+	evidence: {
+		worktreeRoot: null,
+		gitDir: null,
+		operations: ['merge'],
+		unmergedCodes: ['UU'],
+		paths: ['src/conflict.ts'],
+		trackedCount: 1,
+		untrackedCount: 0,
+		pathsTruncated: false,
+	},
+	detectedAt: '2026-07-19T00:00:00.000Z',
+} as const;
+
+/** Write a raw gate-state record straight to disk. */
 async function writeRawState(
 	sessionID: string,
 	partial: Partial<PrWorkflowGateState>,
@@ -61,16 +76,14 @@ async function writeRawState(
 }
 
 describe('abortPrWorkflow', () => {
-	test('clears an unbound active PR_REVIEW gate (the deadlock case)', async () => {
-		// Mirrors /swarm pr-review: activate without binding a PR head. Before
-		// the fix, no tool could clear this state because clearPrWorkflowGateState
-		// was only reachable via completePrWorkflow's terminal-success path.
+	test('recovery abort clears an UNBOUND active gate (the deadlock case)', async () => {
 		await activatePrWorkflow(directory, 'deadlocked-session', 'PR_REVIEW');
 		expect(
 			await readPrWorkflowGateState(directory, 'deadlocked-session'),
 		).not.toBeNull();
 
 		const summary = await abortPrWorkflow(directory, 'deadlocked-session', {
+			kind: 'recovery',
 			reason: 'compound git checkout rejected; could not bind PR head',
 		});
 
@@ -82,37 +95,123 @@ describe('abortPrWorkflow', () => {
 		).toBeNull();
 	});
 
-	test('clears a bound active PR_REVIEW gate and returns the bound head', async () => {
+	test('recovery abort of a BOUND review is REFUSED (issue #2131 finding 1a)', async () => {
 		await writeRawState('bound-session', {
 			mode: 'PR_REVIEW',
 			prHeadSha: 'abc123',
 			revision: 3,
 		});
-		const summary = await abortPrWorkflow(directory, 'bound-session');
+		await expect(
+			abortPrWorkflow(directory, 'bound-session', {
+				kind: 'recovery',
+				reason: 'trying to skip coverage',
+			}),
+		).rejects.toThrow(/recovery abort of a bound PR_REVIEW.*checkoutRecovery/i);
+		// Gate survives the refusal.
+		expect(
+			await readPrWorkflowGateState(directory, 'bound-session'),
+		).not.toBeNull();
+	});
+
+	test('recovery abort of a bound review SUCCEEDS when checkoutRecovery exists', async () => {
+		await writeRawState('terminal-session', {
+			mode: 'PR_REVIEW',
+			prHeadSha: 'abc123',
+			revision: 3,
+			checkoutRecovery: TERMINAL_RECOVERY,
+		});
+		const summary = await abortPrWorkflow(directory, 'terminal-session', {
+			kind: 'recovery',
+			reason: 'unmerged index after bind; checkout path unreachable',
+		});
+		expect(summary.mode).toBe('PR_REVIEW');
+		expect(
+			await readPrWorkflowGateState(directory, 'terminal-session'),
+		).toBeNull();
+	});
+
+	test('force abort clears a BOUND review (explicit user override)', async () => {
+		await writeRawState('bound-force', {
+			mode: 'PR_REVIEW',
+			prHeadSha: 'abc123',
+			revision: 3,
+		});
+		const summary = await abortPrWorkflow(directory, 'bound-force', {
+			kind: 'force',
+			reason: 'user-authorized force abort',
+		});
 		expect(summary).toEqual({
 			mode: 'PR_REVIEW',
 			prHeadSha: 'abc123',
 			openLanes: 0,
 		});
-		expect(
-			await readPrWorkflowGateState(directory, 'bound-session'),
-		).toBeNull();
+		expect(await readPrWorkflowGateState(directory, 'bound-force')).toBeNull();
+	});
+
+	test('recovery abort is REFUSED after base settlement but before trigger/micro receipts (criterion A literal scenario)', async () => {
+		// Issue #2131 criterion A names this exact scenario: a bound gate where
+		// base coverage has settled but no trigger-evaluation or micro-lane
+		// artifacts exist yet. Recovery abort must be refused so coverage cannot
+		// be shortcut; the user force path is the only override.
+		await writeRawState('base-settled', {
+			mode: 'PR_REVIEW',
+			prHeadSha: 'abc123',
+			revision: 4,
+			// Base coverage has settled (a base dispatch + dimensions recorded)...
+			prReviewBaseDispatch: {
+				batchId: 'base-1',
+				lanes: [
+					{
+						laneId: 'intent-architecture',
+						workflowLane: 'intent-architecture',
+					},
+				],
+				validatedAt: '2026-07-19T00:00:00.000Z',
+			},
+			prReviewBaseDispatches: [
+				{
+					batchId: 'base-1',
+					lanes: [
+						{
+							laneId: 'intent-architecture',
+							workflowLane: 'intent-architecture',
+						},
+					],
+					validatedAt: '2026-07-19T00:00:00.000Z',
+				},
+			],
+			// ...but NO prReviewTriggerEval / micro artifacts (trigger/micro receipts absent).
+		});
+		await expect(
+			abortPrWorkflow(directory, 'base-settled', {
+				kind: 'recovery',
+				reason: 'skip remaining coverage',
+			}),
+		).rejects.toThrow(/recovery abort of a bound PR_REVIEW.*checkoutRecovery/i);
+		// The bound gate survives — coverage cannot be shortcut via recovery.
+		const state = await readPrWorkflowGateState(directory, 'base-settled');
+		expect(state?.prHeadSha).toBe('abc123');
+		expect(state?.prReviewBaseDispatch).toBeDefined();
 	});
 
 	test('throws when no active gate exists for the session', async () => {
-		await expect(abortPrWorkflow(directory, 'no-gate-session')).rejects.toThrow(
-			/no active PR workflow gate/i,
-		);
+		await expect(
+			abortPrWorkflow(directory, 'no-gate-session', {
+				kind: 'recovery',
+				reason: 'x',
+			}),
+		).rejects.toThrow(/no active PR workflow gate/i);
 	});
 
 	test('throws on mode mismatch when expectedMode is supplied', async () => {
 		await activatePrWorkflow(directory, 'review-only', 'PR_REVIEW');
 		await expect(
 			abortPrWorkflow(directory, 'review-only', {
+				kind: 'recovery',
+				reason: 'x',
 				expectedMode: 'PR_FEEDBACK',
 			}),
 		).rejects.toThrow(/active in PR_REVIEW, not PR_FEEDBACK/i);
-		// The gate must still be intact after a failed abort.
 		expect(
 			await readPrWorkflowGateState(directory, 'review-only'),
 		).not.toBeNull();
@@ -133,10 +232,11 @@ describe('abortPrWorkflow', () => {
 		});
 		await expect(
 			abortPrWorkflow(directory, 'armed-session', {
+				kind: 'force',
+				reason: 'x',
 				expectedMode: 'PR_FEEDBACK',
 			}),
 		).rejects.toThrow(/armed for publication; abort is blocked/i);
-		// Defense in depth: the armed gate survives the refusal.
 		const state = await readPrWorkflowGateState(directory, 'armed-session');
 		expect(state?.prFeedbackReadyToPublish).toBeDefined();
 	});
@@ -165,47 +265,45 @@ describe('abortPrWorkflow', () => {
 				scope: null,
 			},
 		});
-		await expect(abortPrWorkflow(directory, 'lanes-session')).rejects.toThrow(
-			/in flight.*intent-architecture/i,
-		);
-		// Gate survives.
+		await expect(
+			abortPrWorkflow(directory, 'lanes-session', {
+				kind: 'recovery',
+				reason: 'x',
+			}),
+		).rejects.toThrow(/in flight.*intent-architecture/i);
 		expect(
 			await readPrWorkflowGateState(directory, 'lanes-session'),
 		).not.toBeNull();
 	});
 
-	test('appends a non-fatal audit event to .swarm/events.jsonl', async () => {
+	test('appends a non-fatal audit event with kind + reason to .swarm/events.jsonl', async () => {
 		await activatePrWorkflow(directory, 'audited-session', 'PR_REVIEW');
 		await abortPrWorkflow(directory, 'audited-session', {
+			kind: 'recovery',
 			reason: 'audit-trail check',
 		});
 		const eventsPath = path.join(directory, '.swarm', 'events.jsonl');
 		const contents = await fs.readFile(eventsPath, 'utf-8');
-		const lines = contents.trim().split('\n');
-		expect(lines.length).toBeGreaterThanOrEqual(1);
-		const event = JSON.parse(lines[lines.length - 1] as string);
+		const event = JSON.parse(contents.trim().split('\n').pop() as string);
 		expect(event).toMatchObject({
 			type: 'pr_workflow_aborted',
 			sessionID: 'audited-session',
 			mode: 'PR_REVIEW',
+			kind: 'recovery',
 			openLanes: 0,
 			reason: 'audit-trail check',
 		});
 	});
 
 	test('clears the gate even if the audit write would fail', async () => {
-		// Block ONLY the events.jsonl append by creating a directory at that
-		// path (appendFile rejects with EISDIR). The gate state file lives at
-		// a different path and stays readable, so this isolates audit-write
-		// failure from gate-read/clear paths.
 		await activatePrWorkflow(directory, 'resilient-session', 'PR_REVIEW');
 		const eventsPath = path.join(directory, '.swarm', 'events.jsonl');
 		await fs.mkdir(eventsPath, { recursive: true });
-
-		const summary = await abortPrWorkflow(directory, 'resilient-session');
+		const summary = await abortPrWorkflow(directory, 'resilient-session', {
+			kind: 'recovery',
+			reason: 'resilient',
+		});
 		expect(summary.mode).toBe('PR_REVIEW');
-		// The gate MUST clear regardless of the audit write failure — otherwise
-		// the deadlock persists because of an unrelated write error.
 		expect(
 			await readPrWorkflowGateState(directory, 'resilient-session'),
 		).toBeNull();
@@ -214,10 +312,46 @@ describe('abortPrWorkflow', () => {
 	test('sanitizes a long reason down to 500 characters', async () => {
 		await activatePrWorkflow(directory, 'long-reason', 'PR_REVIEW');
 		const longReason = 'x'.repeat(2000);
-		await abortPrWorkflow(directory, 'long-reason', { reason: longReason });
+		await abortPrWorkflow(directory, 'long-reason', {
+			kind: 'recovery',
+			reason: longReason,
+		});
 		const eventsPath = path.join(directory, '.swarm', 'events.jsonl');
 		const contents = await fs.readFile(eventsPath, 'utf-8');
 		const event = JSON.parse(contents.trim().split('\n').pop() as string);
 		expect(event.reason.length).toBe(500);
+	});
+
+	test('throws when reason is empty/missing', async () => {
+		await activatePrWorkflow(directory, 'no-reason', 'PR_REVIEW');
+		await expect(
+			abortPrWorkflow(directory, 'no-reason', { kind: 'recovery', reason: '' }),
+		).rejects.toThrow(/requires a non-empty reason/i);
+	});
+});
+
+describe('executeAbortPrWorkflow tool schema (issue #2131 finding 1a)', () => {
+	test('rejects an abort call without kind', async () => {
+		const { executeAbortPrWorkflow } = await import(
+			'../../../src/tools/abort-pr-workflow.js'
+		);
+		const result = await executeAbortPrWorkflow(
+			{ mode: 'PR_REVIEW', reason: 'x' },
+			directory,
+			{ sessionID: 'sch' },
+		);
+		expect(JSON.parse(result).success).toBe(false);
+	});
+
+	test('rejects an abort call without reason', async () => {
+		const { executeAbortPrWorkflow } = await import(
+			'../../../src/tools/abort-pr-workflow.js'
+		);
+		const result = await executeAbortPrWorkflow(
+			{ kind: 'recovery' },
+			directory,
+			{ sessionID: 'sch' },
+		);
+		expect(JSON.parse(result).success).toBe(false);
 	});
 });

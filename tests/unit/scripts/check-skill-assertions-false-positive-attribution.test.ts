@@ -48,7 +48,9 @@ function writeFile(root: string, relPath: string, content: string): void {
 
 afterEach(() => {
 	const d = tempDirs.pop();
-	if (d) spawnSync('rm', ['-rf', d], { stdio: 'ignore' });
+	// PRR-007: fs.rmSync, not `rm -rf` — the latter does not exist on Windows,
+	// so the temp repo would leak on the Windows CI shards.
+	if (d) fs.rmSync(d, { recursive: true, force: true });
 });
 
 describe('SC-005: precise target attribution', () => {
@@ -107,12 +109,9 @@ describe('two-vars', () => {
 `,
 		);
 
-		// Modify the skill so the detector runs
-		writeFile(
-			repo,
-			'.opencode/skills/test/SKILL.md',
-			'# TEST\n\nskill content updated\n',
-		);
+		// Modify the skill so the detector runs, removing 'skill content' so the
+		// assertion that DOES target the skill genuinely breaks.
+		writeFile(repo, '.opencode/skills/test/SKILL.md', '# TEST\n\nreplaced\n');
 
 		const result = await checkSkillAssertions(repo);
 		expect(result.changedSkillFiles).toContain(
@@ -124,6 +123,16 @@ describe('two-vars', () => {
 			(b) => b.phrase === 'architect-only phrase',
 		);
 		expect(promptPhraseBroken).toBeUndefined();
+
+		// PRR-006 positive control: the assertion that genuinely targets the skill
+		// MUST be reported. Without this, the negative assertion above would also
+		// pass if the detector silently stopped emitting anything at all.
+		const skillPhraseBroken = result.brokenAssertions.find(
+			(b) => b.phrase === 'skill content',
+		);
+		expect(skillPhraseBroken).toBeDefined();
+		expect(skillPhraseBroken!.assertionKind).toBe('toContain');
+		expect(skillPhraseBroken!.skillFile).toBe('.opencode/skills/test/SKILL.md');
 	});
 });
 

@@ -1,19 +1,14 @@
 /**
  * End-to-end integration test for the issue-trace full chain:
- *   ISSUE_INGEST → PLAN → EXECUTE → commit-pr
+ *   ISSUE_INGEST → PLAN → EXECUTE → publication_handoff (commit-pr) → published
  *
  * Proves idempotency at each transition and cross-issue fail-closed guard.
  * Uses real filesystem artifacts under a temp dir with `_internals` DI
  * seam overrides for the async adapters (critic approval, plan phase status).
  *
- * Mocked paths in this test:
- *   - _internals.isPlanCriticApproved → always true (approved plan)
- *   - _internals.readPlanPhaseStatus → controlled allComplete toggle
- * Untested branches (covered by issue-trace.test.ts and issue-trace-reducer.test.ts):
- *   - Critic rejection (row f noop)
- *   - Write failure (step 8 fail-closed)
- *   - Malformed JSON / missing files
- *   - Timeout / error in boundedApprovalCheck
+ * Issue #2131 finding 2: the chain now ends in `publication_handoff` (NOT a
+ * terminal "completed"), and reaches `published` only after a publication
+ * receipt is observed.
  *
  * Under 500 lines (FR-006).
  */
@@ -25,36 +20,37 @@ import * as path from 'node:path';
 import {
 	_internals,
 	createIssueTraceHook,
+	resetPhaseStatusCache,
 } from '../../../src/hooks/issue-trace';
 import type { TraceState } from '../../../src/hooks/issue-trace-reducer';
 
 // ── Helpers ────────────────────────────────────────────────────────
 
-/** Creates a temp dir under os.tmpdir() with .swarm/ subdirectory. */
 function makeTempDir(): string {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'issue-trace-e2e-'));
 	fs.mkdirSync(path.join(dir, '.swarm'), { recursive: true });
 	return dir;
 }
 
-/** Writes JSON to a file inside .swarm/. */
 function writeSwarmJson(dir: string, filename: string, data: unknown): void {
-	const filePath = path.join(dir, '.swarm', filename);
-	fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf-8');
+	fs.writeFileSync(
+		path.join(dir, '.swarm', filename),
+		JSON.stringify(data, null, 2),
+		'utf-8',
+	);
 }
 
-/** Reads and parses JSON from a file inside .swarm/. */
 function readSwarmJson<T>(dir: string, filename: string): T | null {
-	const filePath = path.join(dir, '.swarm', filename);
 	try {
-		const raw = fs.readFileSync(filePath, 'utf-8');
-		return JSON.parse(raw) as T;
+		return JSON.parse(
+			fs.readFileSync(path.join(dir, '.swarm', filename), 'utf-8'),
+		) as T;
 	} catch {
 		return null;
 	}
 }
 
-/** Creates issue-reference.json with trace=true for the given issue number. */
+/** issue-reference with trace=true and a noRepro waiver so the PLAN gate permits. */
 function writeIssueRef(dir: string, number = 42): void {
 	writeSwarmJson(dir, 'issue-reference.json', {
 		url: `https://github.com/owner/repo/issues/${number}`,
@@ -62,15 +58,13 @@ function writeIssueRef(dir: string, number = 42): void {
 		repo: 'repo',
 		number,
 		timestamp: '2026-01-01T00:00:00Z',
-		flags: { trace: true },
+		flags: { trace: true, noRepro: true },
 	});
 }
 
-/** Creates spec.md with a Source Issue section referencing the given number. */
 function writeSpec(dir: string, number = 42): void {
-	const filePath = path.join(dir, '.swarm', 'spec.md');
 	fs.writeFileSync(
-		filePath,
+		path.join(dir, '.swarm', 'spec.md'),
 		[
 			'# Spec',
 			'',
@@ -85,29 +79,15 @@ function writeSpec(dir: string, number = 42): void {
 	);
 }
 
-/** Creates issue-trace-state.json with the given overrides merged onto defaults. */
 function writeTraceState(dir: string, state?: Partial<TraceState>): void {
 	const defaults: TraceState = {
 		issueNumber: 42,
 		lastTransition: null,
-		completed: false,
+		status: 'in_progress',
 	};
 	writeSwarmJson(dir, 'issue-trace-state.json', { ...defaults, ...state });
 }
 
-/** Creates a minimal plan.json with one phase. */
-function writePlan(dir: string): void {
-	writeSwarmJson(dir, 'plan.json', {
-		title: 'test-plan',
-		swarm_id: 'test',
-		phases: [{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] }],
-	});
-}
-
-/**
- * Runs the hook's messagesTransform and returns the appended messages.
- * Uses a short approval timeout (100ms) to keep tests fast.
- */
 async function runHook(
 	dir: string,
 	existingMessages: unknown[] = [],
@@ -118,7 +98,6 @@ async function runHook(
 	return output.messages;
 }
 
-/** Asserts that a message list contains exactly one system message with the given text. */
 function expectSystemMessage(messages: unknown[], text: string): void {
 	expect(messages).toHaveLength(1);
 	expect(messages[0]).toEqual({
@@ -127,11 +106,10 @@ function expectSystemMessage(messages: unknown[], text: string): void {
 	});
 }
 
-// ── _internals restore ──────────────────────────────────────────────
-
 const originals = { ..._internals };
 afterEach(() => {
 	Object.assign(_internals, originals);
+	resetPhaseStatusCache();
 });
 
 // ── SCENARIO 1: Full Trace Chain ──────────────────────────────────
@@ -141,25 +119,21 @@ describe('issue-trace e2e — full chain', () => {
 
 	beforeEach(() => {
 		tmpDir = makeTempDir();
-		// Default: critic approved, phases not yet complete
 		_internals.isPlanCriticApproved = () => Promise.resolve(true);
-		_internals.readPlanPhaseStatus = () =>
-			Promise.resolve({ allComplete: false });
 	});
 
 	test('Step A: ISSUE_INGEST → injects [MODE: PLAN]', async () => {
 		writeIssueRef(tmpDir, 42);
 		writeTraceState(tmpDir);
 		writeSpec(tmpDir, 42);
-		// No plan.json → row (e) fires
+		// No plan → authoritative planExists is false → row (f) fires.
 
 		const messages = await runHook(tmpDir);
 		expectSystemMessage(messages, '[MODE: PLAN]');
 
 		const state = readSwarmJson<TraceState>(tmpDir, 'issue-trace-state.json');
-		expect(state).not.toBeNull();
 		expect(state!.lastTransition).toBe('ISSUE_INGEST_TO_PLAN');
-		expect(state!.completed).toBe(false);
+		expect(state!.status).toBe('in_progress');
 	});
 
 	test('Step A idempotency: second call → no duplicate PLAN injection', async () => {
@@ -175,35 +149,34 @@ describe('issue-trace e2e — full chain', () => {
 		writeIssueRef(tmpDir, 42);
 		writeTraceState(tmpDir, { lastTransition: 'ISSUE_INGEST_TO_PLAN' });
 		writeSpec(tmpDir, 42);
-		writePlan(tmpDir);
-		// criticApproved = true (set in beforeEach), allComplete = false
+		_internals.readPlanPhaseStatus = () =>
+			Promise.resolve({ planExists: true, allComplete: false });
 
 		const messages = await runHook(tmpDir);
 		expectSystemMessage(messages, '[MODE: EXECUTE]');
 
 		const state = readSwarmJson<TraceState>(tmpDir, 'issue-trace-state.json');
 		expect(state!.lastTransition).toBe('PLAN_TO_EXECUTE');
-		expect(state!.completed).toBe(false);
+		expect(state!.status).toBe('in_progress');
 	});
 
 	test('Step B idempotency: already at PLAN_TO_EXECUTE → no injection', async () => {
 		writeIssueRef(tmpDir, 42);
 		writeTraceState(tmpDir, { lastTransition: 'PLAN_TO_EXECUTE' });
 		writeSpec(tmpDir, 42);
-		writePlan(tmpDir);
+		_internals.readPlanPhaseStatus = () =>
+			Promise.resolve({ planExists: true, allComplete: false });
 
 		const messages = await runHook(tmpDir);
 		expect(messages).toHaveLength(0);
 	});
 
-	test('Step C: EXECUTE → COMMIT directive with Closes #42', async () => {
+	test('Step C: EXECUTE → publication_handoff directive with Closes #42', async () => {
 		writeIssueRef(tmpDir, 42);
 		writeTraceState(tmpDir, { lastTransition: 'PLAN_TO_EXECUTE' });
 		writeSpec(tmpDir, 42);
-		writePlan(tmpDir);
-		// Override: all phases now complete
 		_internals.readPlanPhaseStatus = () =>
-			Promise.resolve({ allComplete: true });
+			Promise.resolve({ planExists: true, allComplete: true });
 
 		const messages = await runHook(tmpDir);
 		expect(messages).toHaveLength(1);
@@ -211,21 +184,45 @@ describe('issue-trace e2e — full chain', () => {
 			.content[0].text;
 		expect(text).toContain('Closes #42');
 		expect(text).toContain('commit-pr');
+		expect(text).toContain('trace is NOT complete');
 
 		const state = readSwarmJson<TraceState>(tmpDir, 'issue-trace-state.json');
 		expect(state!.lastTransition).toBe('EXECUTE_TO_COMMIT');
-		expect(state!.completed).toBe(true);
+		expect(state!.status).toBe('publication_handoff');
 	});
 
-	test('Step C idempotency: already at EXECUTE_TO_COMMIT → no injection', async () => {
+	test('Step D: publication_handoff + receipt → published (terminal)', async () => {
 		writeIssueRef(tmpDir, 42);
 		writeTraceState(tmpDir, {
 			lastTransition: 'EXECUTE_TO_COMMIT',
-			completed: true,
+			status: 'publication_handoff',
+		});
+		writeSpec(tmpDir, 42);
+		writeSwarmJson(tmpDir, 'issue-publication.json', {
+			published: true,
+			issueNumber: 42,
+			prNumber: 7,
+		});
+
+		const messages = await runHook(tmpDir);
+		expectSystemMessage(
+			messages,
+			'Publication confirmed. The issue-trace workflow is complete.',
+		);
+		const state = readSwarmJson<TraceState>(tmpDir, 'issue-trace-state.json');
+		expect(state!.status).toBe('published');
+		expect(state!.lastTransition).toBe('PUBLISHED');
+	});
+
+	test('Step C idempotency: already at EXECUTE_TO_COMMIT (publication_handoff, no receipt) → no injection', async () => {
+		writeIssueRef(tmpDir, 42);
+		writeTraceState(tmpDir, {
+			lastTransition: 'EXECUTE_TO_COMMIT',
+			status: 'publication_handoff',
 		});
 		writeSpec(tmpDir, 42);
 		_internals.readPlanPhaseStatus = () =>
-			Promise.resolve({ allComplete: true });
+			Promise.resolve({ planExists: true, allComplete: true });
 
 		const messages = await runHook(tmpDir);
 		expect(messages).toHaveLength(0);
@@ -241,24 +238,22 @@ describe('issue-trace e2e — restart idempotency', () => {
 		tmpDir = makeTempDir();
 		_internals.isPlanCriticApproved = () => Promise.resolve(true);
 		_internals.readPlanPhaseStatus = () =>
-			Promise.resolve({ allComplete: true });
+			Promise.resolve({ planExists: true, allComplete: true });
 	});
 
-	test('completed trace survives hook re-invocation without side effects', async () => {
+	test('publication_handoff trace survives hook re-invocation without side effects', async () => {
 		writeIssueRef(tmpDir, 42);
 		writeTraceState(tmpDir, {
 			lastTransition: 'EXECUTE_TO_COMMIT',
-			completed: true,
+			status: 'publication_handoff',
 		});
 		writeSpec(tmpDir, 42);
-		writePlan(tmpDir);
 
 		const messages = await runHook(tmpDir);
 		expect(messages).toHaveLength(0);
 
-		// State must remain unchanged
 		const state = readSwarmJson<TraceState>(tmpDir, 'issue-trace-state.json');
-		expect(state!.completed).toBe(true);
+		expect(state!.status).toBe('publication_handoff');
 		expect(state!.lastTransition).toBe('EXECUTE_TO_COMMIT');
 	});
 });
@@ -272,27 +267,24 @@ describe('issue-trace e2e — cross-issue fail-closed', () => {
 		tmpDir = makeTempDir();
 		_internals.isPlanCriticApproved = () => Promise.resolve(true);
 		_internals.readPlanPhaseStatus = () =>
-			Promise.resolve({ allComplete: false });
+			Promise.resolve({ planExists: true, allComplete: false });
 	});
 
-	test('issue-reference #99 with spec #42 → no injection (row c)', async () => {
+	test('issue-reference #99 with spec #42 → no injection', async () => {
 		writeIssueRef(tmpDir, 99);
 		writeTraceState(tmpDir, { issueNumber: 99 });
 		writeSpec(tmpDir, 42);
-		// Row (c): specIssueNumber (42) !== issueReference.number (99)
 
 		const messages = await runHook(tmpDir);
 		expect(messages).toHaveLength(0);
-
 		const state = readSwarmJson<TraceState>(tmpDir, 'issue-trace-state.json');
 		expect(state!.lastTransition).toBeNull();
 	});
 
-	test('trace-state issueNumber mismatch → no injection (row c)', async () => {
+	test('trace-state issueNumber mismatch → no injection', async () => {
 		writeIssueRef(tmpDir, 42);
 		writeTraceState(tmpDir, { issueNumber: 99 });
 		writeSpec(tmpDir, 42);
-		// Row (c): traceState.issueNumber (99) !== issueReference.number (42)
 
 		const messages = await runHook(tmpDir);
 		expect(messages).toHaveLength(0);

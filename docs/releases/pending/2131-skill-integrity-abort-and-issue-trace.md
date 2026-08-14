@@ -1,0 +1,48 @@
+## fix(skills): harden PR-review abort and issue-trace integrity (criterion A + partial B of #2131)
+
+Child PR #1 of tracking issue #2131. Fully closes criterion A (findings 1a/1b/1c) and
+PARTIALLY closes criterion B (finding 2): it mechanically enforces reproduction-before-PLAN,
+the plan-critic gate, authoritative ledger reads, honest completion states, durable
+directive delivery, and an issue-bound publication receipt. Two criterion-B obligations
+are intentionally NOT yet composed into the trace path and remain tracked on #2131 for a
+follow-up child PR: the **independent implementation review** and the **recurrence sweep**
+(see the "Full-Resolution Contract mapping" section added to the `issue-ingest` skill).
+Criteria C–G also remain open for follow-up PRs.
+
+### Breaking changes
+- `abort_pr_workflow` now requires both `kind` (must be `"recovery"`) and a non-empty
+  `reason`; calls without both fields are rejected with a validation error.
+
+### PR-review integrity
+- **Abort is now typed and coverage-safe.** `abort_pr_workflow` requires a
+  `kind` (must be `recovery`) and a non-empty `reason`. The architect's
+  `recovery` abort is now REFUSED for a bound review (a PR head was successfully
+  checked out) unless a controller-recorded terminal recovery condition
+  (`checkoutRecovery`) exists — so recovery can no longer shortcut coverage. The
+  human-only `/swarm abort-pr-workflow` command funnels as `force` and may clear
+  a bound gate. A stale `checkoutRecovery` marker is cleared on successful bind.
+- **Consolidated micro-lane CLEAN contract fixed.** The per-lane "[CLEAN] never
+  alongside [CANDIDATE]" instruction now reads per-OBIGATION, so a consolidated
+  lane with findings for one owned family and CLEAN attestations for its sibling
+  families is no longer told to suppress required rows (which stalled Phase 4).
+- **Adapter profiles B/C are documented honestly** as procedural assurance only;
+  only Profile A mechanically enforces completion (`complete_pr_workflow`).
+
+### Issue-trace integrity (`/swarm issue --trace`)
+- **No more premature "completed".** Trace state is now a typed `status`
+  (`in_progress` → `publication_handoff` → `published`) instead of a boolean
+  `completed`; the commit-pr handoff sets `publication_handoff` (NOT "resolved"),
+  and `published` is reachable only via an issue-bound publication receipt.
+- **Authoritative plan reads.** The trace engine reads plan state through the
+  ledger-aware `loadPlan` (never `loadPlanJsonOnly`/projection existence), cached
+  per cycle.
+- **Durable delivery.** A transition is persisted only after its directive is
+  appended to the host output; a lost directive retries next cycle instead of
+  being permanently suppressed by idempotency.
+- **Reproduction gate.** Localization→PLAN requires reproduction evidence or a
+  typed `--no-repro` waiver; a one-shot directive tells the agent to call the new
+  `record_issue_reproduction` tool (which requires the actual commands + output).
+- **Untrusted-content boundary** added to the primary `issue-ingest` path.
+
+New tools: `record_issue_reproduction`, `record_issue_publication` (architect).
+Legacy `completed: boolean` trace-state records are read backward-compatibly.

@@ -139,7 +139,7 @@ describe('handleIssueCommand — durable persistence (issue.ts)', () => {
 		const trace = JSON.parse(fsSync.readFileSync(tracePath, 'utf-8'));
 		expect(trace.issueNumber).toBe(42);
 		expect(trace.lastTransition).toBe(null);
-		expect(trace.completed).toBe(false);
+		expect(trace.status).toBe('in_progress');
 	});
 
 	// =============================================================================

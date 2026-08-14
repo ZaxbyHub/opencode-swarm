@@ -440,9 +440,12 @@ describe('pr-workflow-gate base coverage', () => {
 			});
 
 			_test_exports.resetTrackedStateCache();
-			await expect(abortPrWorkflow(tempDir, SESSION_ID)).resolves.toMatchObject(
-				{ mode: 'PR_REVIEW' },
-			);
+			await expect(
+				abortPrWorkflow(tempDir, SESSION_ID, {
+					kind: 'force',
+					reason: 'test teardown',
+				}),
+			).resolves.toMatchObject({ mode: 'PR_REVIEW' });
 		} finally {
 			_test_exports.resolvePrReviewDiffStats = originalResolveDiffStats;
 		}

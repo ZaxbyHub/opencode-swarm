@@ -409,12 +409,19 @@ function extractAssertions(
 /**
  * Check assertions in a test file against the current content of a skill file.
  *
- * Scoping rule: only check an assertion if it is (a) chained off the variable
- * that was assigned from a readFileSync call that loaded THIS skill file, or
- * (b) explicitly attributed to the skill via a comment like `// skill-assertion:`.
+ * Scoping rule (FR-004, issue #2069): check an assertion only when the
+ * assertion's OWN line chains off a variable that was assigned from a
+ * readFileSync call loading THIS skill file. Proximity is never sufficient —
+ * neither the former ±2-line window nor the former `// skill-assertion:`
+ * comment fallback is honored; both were removed because they mis-attributed
+ * assertions and produced 68 false positives on a single PR.
  *
  * This prevents false positives when a test file mentions the skill slug in an
  * import/require but also has unrelated toContain/toMatch assertions.
+ *
+ * Known cost: an assertion split across lines (`expect(v)` on one line,
+ * `.toContain(...)` on the next) is not attributed and so is not reported.
+ * That trade-off is pinned by tests/unit/scripts/check-skill-assertions-recall.test.ts.
  */
 function checkAssertionsAgainstSkill(
 	testFile: string,

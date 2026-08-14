@@ -41,26 +41,45 @@ describe('abort_pr_workflow tool', () => {
 		// The createSwarmTool wrapper must expose the args surface so the
 		// architect can discover it.
 		expect(abort_pr_workflow.args.mode).toBeDefined();
+		expect(abort_pr_workflow.args.kind).toBeDefined();
 		expect(abort_pr_workflow.args.reason).toBeDefined();
 	});
 
 	test('rejects invalid arguments', async () => {
+		// kind and reason are required, so {} is a validation failure.
 		const result = JSON.parse(await executeAbortPrWorkflow({}, directory));
 		expect(result.success).toBe(false);
-		// mode/reason are both optional, so the strict schema still accepts {}.
-		// Force an actual validation error with an unknown key.
+		expect(result.message).toContain('Invalid PR workflow abort');
+		// An unknown key is also a strict-schema violation.
 		const strictViolation = JSON.parse(
-			await executeAbortPrWorkflow({ unexpected_field: true }, directory, {
-				sessionID: 's1',
-			}),
+			await executeAbortPrWorkflow(
+				{ unexpected_field: true, kind: 'recovery', reason: 'x' },
+				directory,
+				{ sessionID: 's1' },
+			),
 		);
 		expect(strictViolation.success).toBe(false);
 		expect(strictViolation.message).toContain('Invalid PR workflow abort');
 	});
 
+	test('rejects kind:force — force is not agent-callable (ST-001)', async () => {
+		const result = JSON.parse(
+			await executeAbortPrWorkflow(
+				{ mode: 'PR_REVIEW', kind: 'force', reason: 'try to bypass' },
+				directory,
+				{ sessionID: 's1' },
+			),
+		);
+		expect(result.success).toBe(false);
+		expect(result.message).toContain('Invalid PR workflow abort');
+	});
+
 	test('requires an active sessionID', async () => {
 		const result = JSON.parse(
-			await executeAbortPrWorkflow({ mode: 'PR_REVIEW' }, directory),
+			await executeAbortPrWorkflow(
+				{ mode: 'PR_REVIEW', kind: 'recovery', reason: 'cause' },
+				directory,
+			),
 		);
 		expect(result.success).toBe(false);
 		expect(result.message).toContain('requires an active sessionID');
@@ -68,9 +87,11 @@ describe('abort_pr_workflow tool', () => {
 
 	test('reports failure JSON when no gate is active', async () => {
 		const result = JSON.parse(
-			await executeAbortPrWorkflow({ mode: 'PR_REVIEW' }, directory, {
-				sessionID: 'no-gate',
-			}),
+			await executeAbortPrWorkflow(
+				{ mode: 'PR_REVIEW', kind: 'recovery', reason: 'cause' },
+				directory,
+				{ sessionID: 'no-gate' },
+			),
 		);
 		expect(result.success).toBe(false);
 		expect(result.message).toContain('no active PR workflow gate');
@@ -80,7 +101,11 @@ describe('abort_pr_workflow tool', () => {
 		await activatePrWorkflow(directory, 'deadlock', 'PR_REVIEW');
 		const result = JSON.parse(
 			await executeAbortPrWorkflow(
-				{ mode: 'PR_REVIEW', reason: 'compound checkout rejected' },
+				{
+					mode: 'PR_REVIEW',
+					kind: 'recovery',
+					reason: 'compound checkout rejected',
+				},
 				directory,
 				{ sessionID: 'deadlock' },
 			),
