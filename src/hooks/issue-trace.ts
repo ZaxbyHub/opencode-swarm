@@ -19,6 +19,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
+import { error as _logErrorImpl } from '../utils/logger.js';
 import { isPlanCriticApproved } from './delegation-gate';
 import { computeNextMode } from './issue-trace-reducer';
 import {
@@ -44,6 +45,7 @@ export const _internals = {
 	reproductionReceiptExists,
 	publicationReceiptExists,
 	isPlanCriticApproved,
+	logError: _logErrorImpl,
 };
 
 // ── Session-level caches ──────────────────────────────────────────
@@ -278,8 +280,10 @@ export function createIssueTraceHook(
 					lastTransition: result.nextLastTransition,
 					status: result.nextStatus,
 				});
-			} catch {
-				// FAIL-CLOSED: any error → silent no-op
+			} catch (err) {
+				// FAIL-CLOSED: any error in the hook cycle is non-fatal; the next
+				// cycle recomputes and retries. Log so the failure is observable.
+				_internals.logError('[issue-trace] hook cycle failed:', err);
 			}
 		},
 	};

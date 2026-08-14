@@ -11,7 +11,7 @@
  * Under 500 lines (FR-006).
  */
 
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -187,6 +187,10 @@ describe('issue-trace hook', () => {
 		writeTraceState(tmpDir);
 		writeSpecWithIssue(tmpDir);
 
+		const logErrorCalls: Array<[string, unknown]> = [];
+		_internals.logError = mock((msg: string, err: unknown) => {
+			logErrorCalls.push([msg, err]);
+		});
 		_internals.writeTraceState = () => {
 			throw new Error('disk full');
 		};
@@ -196,6 +200,10 @@ describe('issue-trace hook', () => {
 		// State unchanged (write failed before rename)
 		const state = readJson<TraceState>(tmpDir, 'issue-trace-state.json');
 		expect(state?.lastTransition).toBeNull();
+		// RP-001: the write failure is logged, not silently swallowed
+		expect(logErrorCalls).toHaveLength(1);
+		expect(logErrorCalls[0][0]).toBe('[issue-trace] hook cycle failed:');
+		expect(logErrorCalls[0][1]).toBeInstanceOf(Error);
 	});
 
 	test('idempotency: second call with same state → no duplicate injection', async () => {
@@ -324,7 +332,7 @@ describe('issue-trace hook', () => {
 			content: [
 				{
 					type: 'text',
-					text: 'All implementation phases are complete. Compose commit-pr to publish the PR. Read .swarm/issue-reference.json for Closes #42. After the PR is created/updated, call record_issue_publication (with the PR number, URL, and HEAD sha) so this trace reaches its terminal published state — the trace is NOT complete until publication is confirmed.',
+					text: 'All implementation phases are complete. Compose commit-pr to publish the PR. Read .swarm/issue-reference.json for Closes #42. After the PR is created/updated, call record_issue_publication (with the issue number, PR number, URL, and HEAD sha) so this trace reaches its terminal published state — the trace is NOT complete until publication is confirmed.',
 				},
 			],
 		});

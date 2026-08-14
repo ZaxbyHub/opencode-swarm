@@ -1850,8 +1850,8 @@ are:
    merge base with `git merge-base -- <base_ref> <pr_head_sha>` (single
    command) and retry the `swarm-pr-review:base` dispatch with the exact
    `pr_head_sha`, `base_sha`, and `base_ref`.
-2. **Call `abort_pr_workflow`** with `mode: "PR_REVIEW"` and a one-line
-   `reason` describing the blocker. The tool clears the durable gate state
+2. **Call `abort_pr_workflow`** with `mode: "PR_REVIEW"`, `kind: "recovery"`,
+   and a one-line `reason` describing the blocker. The tool clears the durable gate state
    and stops the auto-resume loop. It refuses while PR workflow lanes are
    still in flight (collect their results with `collect_lane_results`
    first) and refuses once a PR_FEEDBACK workflow is armed for publication

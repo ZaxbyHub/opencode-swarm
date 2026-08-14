@@ -9,9 +9,13 @@ follow-up child PR: the **independent implementation review** and the **recurren
 (see the "Full-Resolution Contract mapping" section added to the `issue-ingest` skill).
 Criteria C–G also remain open for follow-up PRs.
 
+### Breaking changes
+- `abort_pr_workflow` now requires both `kind` (must be `"recovery"`) and a non-empty
+  `reason`; calls without both fields are rejected with a validation error.
+
 ### PR-review integrity
 - **Abort is now typed and coverage-safe.** `abort_pr_workflow` requires a
-  `kind` (`recovery` | `force`) and a non-empty `reason`. The architect's
+  `kind` (must be `recovery`) and a non-empty `reason`. The architect's
   `recovery` abort is now REFUSED for a bound review (a PR head was successfully
   checked out) unless a controller-recorded terminal recovery condition
   (`checkoutRecovery`) exists — so recovery can no longer shortcut coverage. The

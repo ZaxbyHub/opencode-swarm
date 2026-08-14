@@ -62,6 +62,18 @@ describe('abort_pr_workflow tool', () => {
 		expect(strictViolation.message).toContain('Invalid PR workflow abort');
 	});
 
+	test('rejects kind:force — force is not agent-callable (ST-001)', async () => {
+		const result = JSON.parse(
+			await executeAbortPrWorkflow(
+				{ mode: 'PR_REVIEW', kind: 'force', reason: 'try to bypass' },
+				directory,
+				{ sessionID: 's1' },
+			),
+		);
+		expect(result.success).toBe(false);
+		expect(result.message).toContain('Invalid PR workflow abort');
+	});
+
 	test('requires an active sessionID', async () => {
 		const result = JSON.parse(
 			await executeAbortPrWorkflow(
