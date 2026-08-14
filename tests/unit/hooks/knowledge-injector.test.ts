@@ -37,16 +37,11 @@ import type {
 	KnowledgeConfig,
 	MessageWithParts,
 } from '../../../src/hooks/knowledge-types.js';
-// (#1849) Identity is recovered from swarmState.activeAgent (primary) or the
-// last user message's info.agent (fallback) — never from a role:'system'
-// message (the SDK Message union has no system variant). Fixtures set
-// swarmState.activeAgent and stamp a consistent sessionID on every message.
 import { swarmState } from '../../../src/state';
 import { installKnowledgeReceiptAuthorityStub } from '../../helpers/knowledge-receipt-authority.js';
 
 const SESSION_ID = 'ki-test-session';
 
-// ============================================================================
 // Mocks Setup
 // ============================================================================
 

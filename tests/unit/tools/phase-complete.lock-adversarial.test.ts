@@ -545,7 +545,6 @@ describe('phase_complete adversarial locking + path tests', () => {
 			);
 			const parsed = JSON.parse(result);
 
-			// Does not crash — fails gracefully at retro gate
 			expect(parsed.success).toBe(false);
 			expect(
 				parsed.reason === 'RETROSPECTIVE_MISSING' ||
