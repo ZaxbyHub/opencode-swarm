@@ -68,6 +68,7 @@ async function recordLane(args: {
 	mode?: string;
 	workflowLane?: string;
 	ownedWorkflowLanes?: string[];
+	agent?: string;
 	text: string;
 }): Promise<void> {
 	const session = `session-${args.batch}-${args.lane}`;
@@ -78,8 +79,8 @@ async function recordLane(args: {
 		subagentSessionId: session,
 		parentSessionId: PARENT,
 		callID: args.batch,
-		normalizedAgent: 'explorer',
-		swarmPrefixedAgent: 'explorer',
+		normalizedAgent: args.agent ?? 'explorer',
+		swarmPrefixedAgent: args.agent ?? 'explorer',
 		planTaskId: null,
 		evidenceTaskId: null,
 		batchId: args.batch,
@@ -281,6 +282,63 @@ describe('PR-review discovery validation during collection', () => {
 			'session-fenced-base-fenced-lane',
 		);
 		expect(record?.result?.salvagedWorkflowLanes).toEqual(['security-trust']);
+	});
+
+	test('persists validator-proven salvage for repaired council output', async () => {
+		const batch = 'repaired-council';
+		const lane = 'generalist-lane';
+		const workflowLane = 'council-generalist';
+		await recordLane({
+			batch,
+			lane,
+			mode: 'swarm-pr-review:council',
+			workflowLane,
+			agent: 'council_generalist',
+			text: `\`\`\`text\n${MICRO_HEADER}\n[CLEAN] | ${workflowLane} | complete council review scope | no candidate survived council checks | HIGH\n\`\`\``,
+		});
+
+		const result = await collect(batch);
+		expect(result.success).toBe(true);
+		expect(result.lane_results[0].status).toBe('completed');
+		const record = findByCorrelationId(directory, `session-${batch}-${lane}`);
+		expect(record?.result?.salvagedWorkflowLanes).toEqual([workflowLane]);
+	});
+
+	test('does not mark well-formed council output as salvaged', async () => {
+		const batch = 'well-formed-council';
+		const lane = 'skeptic-lane';
+		const workflowLane = 'council-skeptic';
+		await recordLane({
+			batch,
+			lane,
+			mode: 'swarm-pr-review:council',
+			workflowLane,
+			agent: 'council_skeptic',
+			text: `${MICRO_HEADER}\n[CLEAN] | ${workflowLane} | complete skeptical council review | no candidate survived skeptical checks`,
+		});
+
+		const result = await collect(batch);
+		expect(result.success).toBe(true);
+		expect(result.lane_results[0].status).toBe('completed');
+		const record = findByCorrelationId(directory, `session-${batch}-${lane}`);
+		expect(record?.result?.salvagedWorkflowLanes).toBeUndefined();
+	});
+
+	test('keeps council row ownership validation fail-closed', async () => {
+		const batch = 'wrong-council-owner';
+		await recordLane({
+			batch,
+			lane: 'owner-lane',
+			mode: 'swarm-pr-review:council',
+			workflowLane: 'council-generalist',
+			agent: 'council_generalist',
+			text: `${MICRO_HEADER}\n[CLEAN] | council-skeptic | complete council review scope | no candidate survived council checks`,
+		});
+
+		const result = await collect(batch);
+		expect(result.success).toBe(false);
+		expect(result.lane_results[0].status).toBe('failed');
+		expect(result.lane_results[0].error).toContain('discovery.row');
 	});
 
 	test('fails duplicate evidence in a consolidated discovery lane', async () => {

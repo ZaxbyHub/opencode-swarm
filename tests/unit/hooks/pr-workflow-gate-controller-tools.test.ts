@@ -145,20 +145,60 @@ describe('abort_pr_workflow controller-tool gating (defense in depth)', () => {
 		).rejects.toThrow(/git switch --detach <full_pr_head_sha>/i);
 	});
 
-	test('gh api --jq may contain a literal pipe inside the quoted jq expression', async () => {
+	test('gh api --jq may contain a literal pipe inside a double-quoted jq expression', async () => {
 		await activatePrWorkflow(directory, 'jq-pipe', 'PR_REVIEW');
 		await expect(
 			enforcePrWorkflowToolBefore(directory, 'jq-pipe', 'shell', {
 				command:
-					'gh api repos/octo-org/octo-repo/pulls/2160 --jq \'.[] | select(.state == "OPEN")\'',
+					'gh api repos/octo-org/octo-repo/pulls/2160 --jq ".[] | .state"',
 			}),
 		).resolves.toBeUndefined();
+	});
+
+	test('rejects single-quoted jq pipes under cross-platform cmd.exe semantics (SEC-2164-001)', async () => {
+		// Previous code treated apostrophes as shell quotes even though the
+		// Windows shell fallback passes them literally to cmd.exe. The right side
+		// of this apparent jq expression could therefore execute as a pipeline.
+		await activatePrWorkflow(directory, 'jq-cmd-pipe', 'PR_REVIEW');
 		await expect(
-			enforcePrWorkflowToolBefore(directory, 'jq-pipe', 'shell', {
+			enforcePrWorkflowToolBefore(directory, 'jq-cmd-pipe', 'shell', {
 				command:
-					'gh api repos/octo-org/octo-repo/pulls/2160 --jq ".[] | select(.state == \\"OPEN\\")"',
+					"gh api repos/octo-org/octo-repo/pulls/2160 --jq '.[] | echo PWNED '",
+			}),
+		).rejects.toThrow(/double-quoted.*cmd\.exe/i);
+		await expect(
+			enforcePrWorkflowToolBefore(directory, 'jq-cmd-pipe', 'shell', {
+				command:
+					'gh api repos/octo-org/octo-repo/pulls/2160 --jq ".[] | .state"',
 			}),
 		).resolves.toBeUndefined();
+	});
+
+	test('rejects backslash-quote ambiguity that exposes a cmd.exe pipeline (SEC-2164-001)', async () => {
+		await activatePrWorkflow(directory, 'jq-cmd-escaped-quote', 'PR_REVIEW');
+		await expect(
+			enforcePrWorkflowToolBefore(directory, 'jq-cmd-escaped-quote', 'shell', {
+				command:
+					'gh api repos/octo-org/octo-repo/pulls/2160 --jq "x \\" | echo PIPE_EXECUTED"',
+			}),
+		).rejects.toThrow(/escaped double quotes are ambiguous/i);
+	});
+
+	test('rejects escaped opening quotes that hide pipelines across POSIX and cmd.exe (SEC-2164-001)', async () => {
+		await activatePrWorkflow(directory, 'jq-escaped-open-quote', 'PR_REVIEW');
+		for (const command of [
+			'gh api repos/o/r --jq \\".[] | echo PIPE_EXECUTED # "',
+			'gh api repos/o/r --jq ^".[] | echo PIPE_EXECUTED^"',
+		]) {
+			await expect(
+				enforcePrWorkflowToolBefore(
+					directory,
+					'jq-escaped-open-quote',
+					'shell',
+					{ command },
+				),
+			).rejects.toThrow(/escaped double quotes are ambiguous/i);
+		}
 	});
 
 	test('rejects a real outer pipe even when gh api --jq is otherwise present', async () => {
@@ -192,7 +232,7 @@ describe('abort_pr_workflow controller-tool gating (defense in depth)', () => {
 		await expect(
 			enforcePrWorkflowToolBefore(directory, 'jq-mutating', 'shell', {
 				command:
-					'gh api -X POST repos/octo-org/octo-repo/pulls/2160 --jq \'.[] | select(.state == "OPEN")\'',
+					'gh api -X POST repos/octo-org/octo-repo/pulls/2160 --jq ".[] | select(.state == \\"OPEN\\")"',
 			}),
 		).rejects.toThrow(/read-only|unlisted gh form/i);
 	});

@@ -1070,7 +1070,7 @@ export async function executeDispatchLanesAsync(
 				// assertCurrentCheckoutHead.
 				if (!resolvedBase) {
 					throw new Error(
-						`BLOCKED: PR_REVIEW could not resolve a merge base for base_ref="${parsed.data.base_ref}" and pr_head_sha=${parsed.data.pr_head_sha} in "${directory}". The ref may not exist locally — the PR-review preflight fetches only refs/pull/<N>/head, not the base branch. Fetch it and pass the remote-tracking form, then verify with: git -C "${directory}" fetch origin <base-branch> && git -C "${directory}" merge-base -- origin/<base-branch> ${parsed.data.pr_head_sha}`,
+						`BLOCKED: PR_REVIEW could not resolve a merge base for base_ref="${parsed.data.base_ref}" and pr_head_sha=${parsed.data.pr_head_sha} in "${directory}". The ref may not exist locally — the PR-review preflight fetches only refs/pull/<N>/head, not the base branch. Fetch it and pass the remote-tracking form using two separate standalone commands. First run: git -C "${directory}" fetch origin <base-branch>. Then run: git -C "${directory}" merge-base -- origin/<base-branch> ${parsed.data.pr_head_sha}`,
 					);
 				}
 				if (resolvedBase.toLowerCase() !== parsed.data.base_sha.toLowerCase()) {
@@ -2085,7 +2085,8 @@ async function collectOnce(
 		let terminalStatus: 'completed' | 'error' = 'completed';
 		if (
 			record.mode === 'swarm-pr-review:base' ||
-			record.mode === 'swarm-pr-review:micro'
+			record.mode === 'swarm-pr-review:micro' ||
+			record.mode === 'swarm-pr-review:council'
 		) {
 			const artifact = output.output_ref
 				? (readLaneOutput(directory, output.output_ref)?.artifact ?? null)

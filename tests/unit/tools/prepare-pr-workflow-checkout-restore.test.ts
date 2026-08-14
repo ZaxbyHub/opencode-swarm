@@ -11,7 +11,6 @@ import {
 	executePreparePrWorkflowCheckout,
 	listPendingPrWorkflowCheckoutRestores,
 } from '../../../src/tools/prepare-pr-workflow-checkout.js';
-import { bunSpawn } from '../../../src/utils/bun-compat.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const SESSION_ID = 'checkout-restore';
@@ -21,28 +20,9 @@ const originalRunGit = _internals.runGit;
 const originalRemoveReceipt = _internals.removeCheckoutRestoreReceipt;
 
 async function git(args: string[]): Promise<string> {
-	const proc = bunSpawn(['git', ...args], {
-		cwd: directory,
-		stdin: 'ignore',
-		stdout: 'pipe',
-		stderr: 'pipe',
-		timeout: 30_000,
-	});
-	try {
-		const [exitCode, stdout, stderr] = await Promise.all([
-			proc.exited,
-			proc.stdout.text(),
-			proc.stderr.text(),
-		]);
-		if (exitCode !== 0) throw new Error(stderr || `git ${args[0]} failed`);
-		return stdout.trim();
-	} finally {
-		try {
-			proc.kill();
-		} catch {
-			// Git may already have exited.
-		}
-	}
+	const result = await originalRunGit(directory, args, { captureStdout: true });
+	if (result.exitCode !== 0) throw new Error(`git ${args[0]} failed`);
+	return result.stdout.trim();
 }
 
 async function prepareAndAbort(): Promise<{ stash_oid: string }> {
@@ -53,11 +33,15 @@ async function prepareAndAbort(): Promise<{ stash_oid: string }> {
 			sessionID: SESSION_ID,
 		}),
 	);
-	expect(prepared.success).toBe(true);
+	expect(prepared).toMatchObject({ success: true });
 	await git(['switch', '--detach', prHead]);
 	const aborted = JSON.parse(
 		await executeAbortPrWorkflow(
-			{ mode: 'PR_REVIEW', reason: 'bounded retry exhausted' },
+			{
+				mode: 'PR_REVIEW',
+				kind: 'recovery',
+				reason: 'bounded retry exhausted',
+			},
 			directory,
 			{ sessionID: SESSION_ID },
 		),
@@ -109,6 +93,7 @@ describe('prepare_pr_workflow_checkout restore operation', () => {
 				sessionID: SESSION_ID,
 			}),
 		);
+		expect(prepared).toMatchObject({ success: true });
 		const blocked = JSON.parse(
 			await executePreparePrWorkflowCheckout(
 				{ operation: 'restore' },
@@ -171,6 +156,9 @@ describe('prepare_pr_workflow_checkout restore operation', () => {
 			success: true,
 			restored: true,
 			stash_oid: prepared.stash_oid,
+			retained_stash_oids: [prepared.stash_oid],
+			stash_retained: true,
+			stash_retention_verified: true,
 		});
 		expect(await git(['branch', '--show-current'])).toBe('main');
 		expect(
@@ -179,7 +167,9 @@ describe('prepare_pr_workflow_checkout restore operation', () => {
 				'\n',
 			),
 		).toBe('{"dirty":true}\n');
-		expect(await git(['stash', 'list'])).toBe('');
+		expect(await git(['stash', 'list', '--format=%H'])).toContain(
+			prepared.stash_oid,
+		);
 		await expect(fs.stat(receiptPath)).rejects.toMatchObject({
 			code: 'ENOENT',
 		});
@@ -194,7 +184,7 @@ describe('prepare_pr_workflow_checkout restore operation', () => {
 		expect(repeated).toMatchObject({ success: true, already_restored: true });
 	});
 
-	test('refuses a dirty destination before switching or popping', async () => {
+	test('refuses a dirty destination before switching or applying', async () => {
 		const prepared = await prepareAndAbort();
 		await fs.writeFile(path.join(directory, 'unrelated.txt'), 'do not move\n');
 		const blocked = JSON.parse(
@@ -214,10 +204,17 @@ describe('prepare_pr_workflow_checkout restore operation', () => {
 		);
 	});
 
-	test('keeps the stash and receipt when stash pop fails', async () => {
+	test('keeps the stash and receipt when immutable stash apply fails (TINF-2164-002)', async () => {
 		const prepared = await prepareAndAbort();
+		const receiptPath = path.join(
+			directory,
+			'.swarm',
+			'pr-workflow-checkouts',
+			prWorkflowSessionFileStem(SESSION_ID),
+			`${prepared.stash_oid}.json`,
+		);
 		_internals.runGit = async (cwd, args, options) => {
-			if (args[0] === 'stash' && args[1] === 'pop') {
+			if (args[0] === 'stash' && args[1] === 'apply') {
 				return { exitCode: 1, stdout: '' };
 			}
 			return originalRunGit(cwd, args, options);
@@ -231,12 +228,15 @@ describe('prepare_pr_workflow_checkout restore operation', () => {
 		);
 		expect(blocked).toMatchObject({
 			success: false,
-			code: 'CHECKOUT_RESTORE_POP_FAILED',
+			code: 'CHECKOUT_RESTORE_APPLY_FAILED',
 		});
 		_internals.runGit = originalRunGit;
 		expect(await git(['stash', 'list', '--format=%H'])).toContain(
 			prepared.stash_oid,
 		);
+		expect(JSON.parse(await fs.readFile(receiptPath, 'utf8'))).toMatchObject({
+			stashOid: prepared.stash_oid,
+		});
 	});
 
 	test('restores a legacy receipt by deriving identity from the stash parent', async () => {
@@ -280,7 +280,7 @@ describe('prepare_pr_workflow_checkout restore operation', () => {
 			original_branch: 'main',
 		});
 		expect(await git(['branch', '--show-current'])).toBe('main');
-		expect(await git(['stash', 'list'])).toBe('');
+		expect(await git(['stash', 'list', '--format=%H'])).toContain(stashOid);
 		expect(
 			(await fs.readFile(path.join(directory, 'config.json'), 'utf8')).replace(
 				/\r\n/g,
@@ -308,13 +308,45 @@ describe('prepare_pr_workflow_checkout restore operation', () => {
 			receipt_cleanup_pending: true,
 		});
 		expect(await git(['branch', '--show-current'])).toBe('main');
-		expect(await git(['stash', 'list'])).toBe('');
+		expect(await git(['stash', 'list', '--format=%H'])).toContain(
+			prepared.stash_oid,
+		);
+		expect(
+			await listPendingPrWorkflowCheckoutRestores(directory, SESSION_ID),
+		).toEqual([{ stash_oid: prepared.stash_oid, stash_present: true }]);
+
+		// Simulate normal work after the successful restore. Applied-state receipt
+		// cleanup must not require the checkout identity to remain frozen.
+		await git(['add', 'config.json']);
+		await git(['commit', '-m', 'advance after restore']);
+		await git(['stash', 'drop', 'stash@{0}']);
 		expect(
 			await listPendingPrWorkflowCheckoutRestores(directory, SESSION_ID),
 		).toEqual([{ stash_oid: prepared.stash_oid, stash_present: false }]);
+
+		// Previous code left a phantom obligation forever after unlink contention.
+		_internals.removeCheckoutRestoreReceipt = originalRemoveReceipt;
+		const cleaned = JSON.parse(
+			await executePreparePrWorkflowCheckout(
+				{ operation: 'restore' },
+				directory,
+				{ sessionID: SESSION_ID },
+			),
+		);
+		expect(cleaned).toMatchObject({
+			success: true,
+			restored: true,
+			receipt_cleanup_pending: false,
+			retained_stash_oids: [],
+			stash_retained: false,
+			stash_retention_verified: true,
+		});
+		expect(
+			await listPendingPrWorkflowCheckoutRestores(directory, SESSION_ID),
+		).toEqual([]);
 	});
 
-	test('lists every exact stash oid when multiple receipts require selection', async () => {
+	test('rejects receipts whose schemaVersion is not exactly supported', async () => {
 		const receiptDirectory = path.join(
 			directory,
 			'.swarm',
@@ -322,12 +354,99 @@ describe('prepare_pr_workflow_checkout restore operation', () => {
 			prWorkflowSessionFileStem(SESSION_ID),
 		);
 		await fs.mkdir(receiptDirectory, { recursive: true });
-		const stashOids = ['a'.repeat(40), 'b'.repeat(40)];
-		for (const stashOid of stashOids) {
-			await fs.writeFile(
-				path.join(receiptDirectory, `${stashOid}.json`),
-				JSON.stringify({ schemaVersion: 1, sessionID: SESSION_ID, stashOid }),
-			);
+		const stashOid = 'a'.repeat(40);
+		await fs.writeFile(
+			path.join(receiptDirectory, `${stashOid}.json`),
+			JSON.stringify({ schemaVersion: 2, sessionID: SESSION_ID, stashOid }),
+		);
+		const blocked = JSON.parse(
+			await executePreparePrWorkflowCheckout(
+				{ operation: 'restore' },
+				directory,
+				{ sessionID: SESSION_ID },
+			),
+		);
+		expect(blocked).toMatchObject({
+			success: false,
+			code: 'CHECKOUT_RESTORE_RECEIPT_INVALID',
+		});
+	});
+
+	test('bounds receipt bytes and rejects oversized JSON before parsing', async () => {
+		const receiptDirectory = path.join(
+			directory,
+			'.swarm',
+			'pr-workflow-checkouts',
+			prWorkflowSessionFileStem(SESSION_ID),
+		);
+		await fs.mkdir(receiptDirectory, { recursive: true });
+		const stashOid = 'b'.repeat(40);
+		await fs.writeFile(
+			path.join(receiptDirectory, `${stashOid}.json`),
+			JSON.stringify({ padding: 'x'.repeat(70_000) }),
+		);
+		const blocked = JSON.parse(
+			await executePreparePrWorkflowCheckout(
+				{ operation: 'restore' },
+				directory,
+				{ sessionID: SESSION_ID },
+			),
+		);
+		expect(blocked).toMatchObject({
+			success: false,
+			code: 'CHECKOUT_RESTORE_RECEIPT_INVALID',
+		});
+	});
+
+	test('rejects non-string receipt paths at the durable boundary', async () => {
+		const receiptDirectory = path.join(
+			directory,
+			'.swarm',
+			'pr-workflow-checkouts',
+			prWorkflowSessionFileStem(SESSION_ID),
+		);
+		await fs.mkdir(receiptDirectory, { recursive: true });
+		const stashOid = 'c'.repeat(40);
+		const head = await git(['rev-parse', 'main']);
+		await fs.writeFile(
+			path.join(receiptDirectory, `${stashOid}.json`),
+			JSON.stringify({
+				schemaVersion: 1,
+				sessionID: SESSION_ID,
+				stashOid,
+				originalHead: head,
+				originalBranch: 'main',
+				paths: [42],
+				preparedAt: '2026-08-14T00:00:00.000Z',
+				mode: 'PR_REVIEW',
+				gateRevision: 1,
+				gateActivatedAt: '2026-08-14T00:00:00.000Z',
+			}),
+		);
+		const blocked = JSON.parse(
+			await executePreparePrWorkflowCheckout(
+				{ operation: 'restore' },
+				directory,
+				{ sessionID: SESSION_ID },
+			),
+		);
+		expect(blocked).toMatchObject({
+			success: false,
+			code: 'CHECKOUT_RESTORE_RECEIPT_INVALID',
+		});
+	});
+
+	test('caps the receipt inventory before echoing or parsing entries', async () => {
+		const receiptDirectory = path.join(
+			directory,
+			'.swarm',
+			'pr-workflow-checkouts',
+			prWorkflowSessionFileStem(SESSION_ID),
+		);
+		await fs.mkdir(receiptDirectory, { recursive: true });
+		for (let index = 0; index < 9; index++) {
+			const stashOid = index.toString(16).padStart(40, '0');
+			await fs.writeFile(path.join(receiptDirectory, `${stashOid}.json`), '{}');
 		}
 		const blocked = JSON.parse(
 			await executePreparePrWorkflowCheckout(
@@ -338,10 +457,35 @@ describe('prepare_pr_workflow_checkout restore operation', () => {
 		);
 		expect(blocked).toMatchObject({
 			success: false,
-			code: 'CHECKOUT_RESTORE_RECEIPT_AMBIGUOUS',
+			code: 'CHECKOUT_RESTORE_RECEIPT_LIMIT',
 		});
-		for (const stashOid of stashOids) {
-			expect(blocked.message).toContain(stashOid);
+		expect(blocked.message).not.toContain(
+			'0000000000000000000000000000000000000008',
+		);
+	});
+
+	test('bounds total receipt-directory entries before materializing invalid names', async () => {
+		const receiptDirectory = path.join(
+			directory,
+			'.swarm',
+			'pr-workflow-checkouts',
+			prWorkflowSessionFileStem(SESSION_ID),
+		);
+		await fs.mkdir(receiptDirectory, { recursive: true });
+		for (let index = 0; index < 65; index++) {
+			await fs.writeFile(path.join(receiptDirectory, `junk-${index}`), 'x');
 		}
+		const blocked = JSON.parse(
+			await executePreparePrWorkflowCheckout(
+				{ operation: 'restore' },
+				directory,
+				{ sessionID: SESSION_ID },
+			),
+		);
+		expect(blocked).toMatchObject({
+			success: false,
+			code: 'CHECKOUT_RESTORE_RECEIPT_LIMIT',
+		});
+		expect(blocked.message).toMatch(/64-entry bounded scan/i);
 	});
 });

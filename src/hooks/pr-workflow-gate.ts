@@ -153,7 +153,10 @@ export interface PrReviewDiscoveryLaneValidationInput {
 	result: BackgroundDelegationResult;
 	artifact: LaneOutputArtifact | null;
 	expected: {
-		mode: 'swarm-pr-review:base' | 'swarm-pr-review:micro';
+		mode:
+			| 'swarm-pr-review:base'
+			| 'swarm-pr-review:micro'
+			| 'swarm-pr-review:council';
 		workflowLane: string;
 		ownedWorkflowLanes?: readonly string[];
 		prHeadSha: string;
@@ -588,6 +591,7 @@ const STATE_MUTATION_LOCK_RETRY_DELAY_MS = 10;
 const STATE_MUTATION_LOCK_UNINITIALIZED_STALE_MS = 30_000;
 const MAX_COMPLETED_CHECKOUT_LOCK_OWNERS = 64;
 const CHECKOUT_MUTATION_ACTION_TIMEOUT_MS = 5 * 60_000;
+const MAX_PR_WORKFLOW_GATE_DIRECTORY_ENTRIES = MAX_TRACKED_SESSIONS * 2 + 1;
 const MAX_CANDIDATE_ISSUES_PER_ARTIFACT = 8;
 const MAX_BASE_COVERAGE_DIAGNOSTICS = 8;
 const MAX_BASE_COVERAGE_DIAGNOSTIC_CHARS = 1_000;
@@ -963,82 +967,121 @@ export async function activatePrWorkflow(
 	} = {},
 ): Promise<PrWorkflowGateState> {
 	const normalizedSessionID = normalizeSessionID(sessionID);
-	const existing = await readPrWorkflowGateState(
+	const initiallyActive = await readPrWorkflowGateState(
 		directory,
 		normalizedSessionID,
 	);
-	if (existing?.mode === mode) {
-		let activeState = existing;
-		if (mode === 'PR_FEEDBACK' && options.prUrl) {
-			const requestedTarget = canonicalGitHubPrUrl(options.prUrl);
-			if (!requestedTarget) {
+	// Git status must be sampled before the checkout lock file exists because a
+	// legacy project may not have `.swarm/` in its local exclude yet. Only the
+	// state publication is the activation event that restoration must serialize.
+	const checkoutPreflight =
+		!initiallyActive && options.requireCheckoutPreflight
+			? await _test_exports.classifyPrWorkflowGitStateAsync(directory)
+			: null;
+	// Checkout restoration must be atomic against a new gate in any session,
+	// not only against reactivation of the restoring session. Every activation
+	// therefore takes the project checkout lock before its one session lock.
+	return withPrWorkflowCheckoutMutationLock(directory, async () =>
+		withSessionStateMutation(directory, normalizedSessionID, async () => {
+			let existing = await readPrWorkflowGateStateFromDisk(
+				directory,
+				normalizedSessionID,
+			);
+			if (existing?.mode === mode) {
+				if (mode === 'PR_FEEDBACK' && options.prUrl) {
+					const requestedTarget = canonicalGitHubPrUrl(options.prUrl);
+					if (!requestedTarget) {
+						throw new Error(
+							'BLOCKED: PR_FEEDBACK target must be a canonical GitHub PR URL',
+						);
+					}
+					const existingTarget = existing.prFeedbackTargetUrl
+						? canonicalGitHubPrUrl(existing.prFeedbackTargetUrl)
+						: null;
+					if (existingTarget && requestedTarget !== existingTarget) {
+						throw new Error(
+							`BLOCKED: active PR_FEEDBACK targets a different GitHub pull request`,
+						);
+					}
+					if (!existingTarget) {
+						existing = await writeStateWhileLocked(directory, {
+							...existing,
+							prFeedbackTargetUrl: options.prUrl,
+							updatedAt: isoNow(),
+						});
+					}
+				}
+				return options.prHeadSha
+					? bindPrWorkflowHeadWhileLocked(
+							directory,
+							normalizedSessionID,
+							options.prHeadSha,
+						)
+					: existing;
+			}
+			if (existing) {
+				throw new Error(
+					`BLOCKED: session "${normalizedSessionID}" already has an active ${existing.mode} workflow; complete it before starting ${mode}`,
+				);
+			}
+			if (options.requireCheckoutPreflight) {
+				if (!checkoutPreflight) {
+					throw new Error(
+						'BLOCKED: PR workflow gate state changed during checkout preflight; retry activation against the current project state',
+					);
+				}
+				// Re-sample while the project checkout lock is held. Ignore only the two
+				// exact controller lock files created by this activation; every other
+				// `.swarm` path remains a fail-closed tracking error. This locked sample
+				// is authoritative against a restore that completed after initial intake.
+				const lockedCheckoutPreflight =
+					await _test_exports.classifyPrWorkflowGitStateAsync(directory, {
+						ignoredPaths: [
+							path.join('.swarm', workflowCheckoutMutationLockRelativePath()),
+							path.join(
+								'.swarm',
+								workflowGateStateLockRelativePath(normalizedSessionID),
+							),
+						],
+					});
+				if (
+					lockedCheckoutPreflight.kind === 'recovery-required' ||
+					lockedCheckoutPreflight.kind === 'indeterminate'
+				) {
+					throw new Error(formatCheckoutRecoveryBlock(lockedCheckoutPreflight));
+				}
+			}
+			const initialHead = options.prHeadSha
+				? await assertCurrentCheckoutHead(directory, options.prHeadSha, mode)
+				: undefined;
+			const timestamp = isoNow();
+			const feedbackTargetUrl =
+				mode === 'PR_FEEDBACK' && options.prUrl
+					? canonicalGitHubPrUrl(options.prUrl)
+						? options.prUrl
+						: null
+					: undefined;
+			if (feedbackTargetUrl === null) {
 				throw new Error(
 					'BLOCKED: PR_FEEDBACK target must be a canonical GitHub PR URL',
 				);
 			}
-			const existingTarget = existing.prFeedbackTargetUrl
-				? canonicalGitHubPrUrl(existing.prFeedbackTargetUrl)
-				: null;
-			if (existingTarget && requestedTarget !== existingTarget) {
-				throw new Error(
-					`BLOCKED: active PR_FEEDBACK targets a different GitHub pull request`,
-				);
-			}
-			if (!existingTarget) {
-				activeState = {
-					...existing,
-					prFeedbackTargetUrl: options.prUrl,
-					updatedAt: isoNow(),
-				};
-				await persistState(directory, activeState);
-			}
-		}
-		return options.prHeadSha
-			? bindPrWorkflowHead(directory, normalizedSessionID, options.prHeadSha)
-			: activeState;
-	}
-	if (existing) {
-		throw new Error(
-			`BLOCKED: session "${normalizedSessionID}" already has an active ${existing.mode} workflow; complete it before starting ${mode}`,
-		);
-	}
-	if (options.requireCheckoutPreflight) {
-		const checkoutState = await classifyPrWorkflowGitState(directory);
-		if (
-			checkoutState.kind === 'recovery-required' ||
-			checkoutState.kind === 'indeterminate'
-		) {
-			throw new Error(formatCheckoutRecoveryBlock(checkoutState));
-		}
-	}
-	const initialHead = options.prHeadSha
-		? await assertCurrentCheckoutHead(directory, options.prHeadSha, mode)
-		: undefined;
-	const timestamp = isoNow();
-	const feedbackTargetUrl =
-		mode === 'PR_FEEDBACK' && options.prUrl
-			? canonicalGitHubPrUrl(options.prUrl)
-				? options.prUrl
-				: null
-			: undefined;
-	if (feedbackTargetUrl === null) {
-		throw new Error(
-			'BLOCKED: PR_FEEDBACK target must be a canonical GitHub PR URL',
-		);
-	}
-	const nextState: PrWorkflowGateState = {
-		schemaVersion: GATE_SCHEMA_VERSION,
-		revision: 0,
-		workflowInstanceId: randomUUID(),
-		sessionID: normalizedSessionID,
-		mode,
-		activatedAt: timestamp,
-		updatedAt: timestamp,
-		...(initialHead ? { prHeadSha: initialHead } : {}),
-		...(feedbackTargetUrl ? { prFeedbackTargetUrl: feedbackTargetUrl } : {}),
-	};
-	await persistState(directory, nextState);
-	return nextState;
+			const nextState: PrWorkflowGateState = {
+				schemaVersion: GATE_SCHEMA_VERSION,
+				revision: 0,
+				workflowInstanceId: randomUUID(),
+				sessionID: normalizedSessionID,
+				mode,
+				activatedAt: timestamp,
+				updatedAt: timestamp,
+				...(initialHead ? { prHeadSha: initialHead } : {}),
+				...(feedbackTargetUrl
+					? { prFeedbackTargetUrl: feedbackTargetUrl }
+					: {}),
+			};
+			return writeStateWhileLocked(directory, nextState);
+		}),
+	);
 }
 
 export async function readPrWorkflowGateState(
@@ -1149,9 +1192,83 @@ export async function withInactivePrWorkflowCheckoutRestoreLock<T>(
 					'BLOCKED: checkout restoration is allowed only after complete_pr_workflow or abort_pr_workflow clears the active gate',
 				);
 			}
+			await assertNoActivePrWorkflowGateForCheckoutRestore(directory);
 			return action();
 		}),
 	);
+}
+
+/**
+ * Refuse a project-wide checkout restoration while any durable PR workflow is
+ * active. The caller already owns the project checkout lock, so a new session
+ * cannot activate between this scan and the restoration action. We do not take
+ * every other session lock: doing so would invert or multiply the established
+ * checkout-lock -> one-session-lock order and could deadlock terminal flows.
+ */
+async function assertNoActivePrWorkflowGateForCheckoutRestore(
+	directory: string,
+): Promise<void> {
+	const gateDirectory = validateSwarmPath(directory, WORKFLOW_GATE_DIR);
+	let handle: Awaited<ReturnType<typeof fsp.opendir>>;
+	try {
+		handle = await fsp.opendir(gateDirectory);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+		throw error;
+	}
+	let entriesRead = 0;
+	let scanError: unknown;
+	let closeError: unknown;
+	try {
+		for (;;) {
+			const entry = await handle.read();
+			if (!entry) break;
+			entriesRead += 1;
+			if (entriesRead > MAX_PR_WORKFLOW_GATE_DIRECTORY_ENTRIES) {
+				throw new Error(
+					'BLOCKED: PR workflow gate inventory exceeds the bounded checkout-restoration scan; clear stale workflow state before retrying',
+				);
+			}
+			if (!/\.json$/i.test(entry.name)) continue;
+			if (!entry.isFile()) {
+				throw new Error(
+					'BLOCKED: PR workflow gate inventory contains a non-regular state entry; checkout restoration cannot prove project inactivity',
+				);
+			}
+			const statePath = validateSwarmPath(
+				directory,
+				path.join(WORKFLOW_GATE_DIR, entry.name),
+			);
+			const state = await readPrWorkflowGateStateFileFromDisk(
+				statePath,
+				entry.name,
+			);
+			if (!state) continue;
+			const expectedName = path.basename(
+				workflowGateStateRelativePath(state.sessionID),
+			);
+			if (entry.name !== expectedName) {
+				throw new Error(
+					'BLOCKED: PR workflow gate inventory contains an ambiguous state filename; checkout restoration cannot prove project inactivity',
+				);
+			}
+			throw new Error(
+				`BLOCKED: checkout restoration cannot mutate this project while session "${state.sessionID}" has an active ${state.mode} workflow`,
+			);
+		}
+	} catch (error) {
+		scanError = error;
+	} finally {
+		try {
+			await handle.close();
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== 'ERR_DIR_CLOSED') {
+				closeError = error;
+			}
+		}
+	}
+	if (scanError !== undefined) throw scanError;
+	if (closeError !== undefined) throw closeError;
 }
 
 export async function clearPrWorkflowGateState(
@@ -1212,13 +1329,11 @@ export async function clearPrWorkflowGateState(
  *      commit. The tool gate refuses armed abort too (defense in depth).
  *   4. Refuses while open `swarm-pr-*` delegations exist, matching
  *      `completePrWorkflow` — aborting mid-flight would orphan running lanes.
- *   5. Issue #2131 finding 1a: a `recovery` abort of a BOUND gate (prHeadSha
- *      set — checkout succeeded) is refused unless a controller-recorded
- *      terminal recovery condition (`checkoutRecovery`) exists. Binding
- *      succeeded, so "checkout unreachable" no longer justifies a recovery
- *      abort; the architect must complete, or the user must authorize a
- *      `force` abort. `force` may clear a bound gate without a recovery
- *      condition (explicit user override).
+ *   5. A `recovery` abort may clear an unbound or bound gate once every lane
+ *      has settled. This is the bounded escape hatch for exhausted discovery,
+ *      validation, or checkout recovery; requiring a pre-bind
+ *      `checkoutRecovery` marker here would strand failures discovered only
+ *      after the head was bound. `force` remains the explicit user override.
  *
  * Records a non-fatal audit event into the existing `.swarm/events.jsonl`
  * (no new ledger file), then delegates to `clearPrWorkflowGateState`.
@@ -1259,22 +1374,6 @@ export async function abortPrWorkflow(
 			.join(', ');
 		throw new Error(
 			`BLOCKED: ${state.mode} abort refused while ${openLanes.length} PR workflow lane(s) are still in flight (lane ids: ${laneIds}). Collect their results or let them settle before aborting.`,
-		);
-	}
-	// Issue #2131 finding 1a: a recovery abort of a bound gate requires a
-	// controller-recorded terminal recovery condition. `checkoutRecovery` is
-	// stamped only by `markRecoveryRequired` when the Git state is genuinely
-	// recovery-required (UNMERGED_INDEX, GIT_OPERATION_IN_PROGRESS, …), so its
-	// presence is the honest signal that the bind path is unreachable even
-	// though a head was bound. A clean bind has none — recovery abort there
-	// would be a coverage shortcut and is refused (use force, user-authorized).
-	if (
-		options.kind === 'recovery' &&
-		state.prHeadSha &&
-		!state.checkoutRecovery
-	) {
-		throw new Error(
-			`BLOCKED: recovery abort of a bound ${state.mode} (pr_head_sha ${state.prHeadSha}) requires a controller-recorded terminal recovery condition (checkoutRecovery). Binding succeeded, so "checkout unreachable" no longer justifies a recovery abort — complete the workflow, resolve the Git recovery state, or use the user-authorized force abort (/swarm abort-pr-workflow) to override.`,
 		);
 	}
 	const sanitizedReason =
@@ -1327,57 +1426,60 @@ export async function bindPrWorkflowHead(
 	sessionID: string,
 	prHeadSha: string,
 ): Promise<PrWorkflowGateState> {
-	const normalizedHead = normalizePrHeadSha(prHeadSha);
+	const normalizedSessionID = normalizeSessionID(sessionID);
 	return withPrWorkflowCheckoutMutationLock(directory, async () =>
-		withSessionStateMutation(
-			directory,
-			normalizeSessionID(sessionID),
-			async () => {
-				const state = await readPrWorkflowGateStateFromDisk(
-					directory,
-					normalizeSessionID(sessionID),
-				);
-				if (!state) {
-					throw new Error(
-						`BLOCKED: no active PR workflow gate for session "${normalizeSessionID(sessionID)}". ` +
-							'The gate must be activated before the PR head can be bound.',
-					);
-				}
-				await assertCurrentCheckoutHead(directory, normalizedHead, state.mode);
-				if (state.prHeadSha && state.prHeadSha !== normalizedHead) {
-					throw new Error(
-						`BLOCKED: active ${state.mode} workflow is bound to PR head "${state.prHeadSha}"; received "${normalizedHead}"`,
-					);
-				}
-				if (!state.prHeadSha) {
-					await assertPrReviewCleanCheckout(directory, state.mode);
-				}
-				if (!state.prHeadSha && state.mode === 'PR_FEEDBACK') {
-					await assertPrFeedbackTrackingCheckout(directory, normalizedHead);
-				}
-				if (state.prHeadSha === normalizedHead) {
-					if (state.mode === 'PR_FEEDBACK') {
-						await assertPrFeedbackTrackingCheckout(directory, normalizedHead);
-					}
-					return state;
-				}
-				const nextState = {
-					...state,
-					prHeadSha: normalizedHead,
-					// Issue #2131 finding 1a: a successful bind means the checkout path
-					// was reachable, so any pre-bind checkoutRecovery marker is stale.
-					// Clearing it here prevents a recovery stamp from an earlier dirty-tree
-					// state from permanently re-enabling a recovery abort of this bound
-					// gate (which should require a fresh post-bind terminal condition, or a
-					// user force abort).
-					checkoutRecovery: undefined,
-					updatedAt: isoNow(),
-				};
-				await _test_exports.beforePrFeedbackTrackingPersist?.();
-				return writeStateWhileLocked(directory, nextState);
-			},
+		withSessionStateMutation(directory, normalizedSessionID, async () =>
+			bindPrWorkflowHeadWhileLocked(directory, normalizedSessionID, prHeadSha),
 		),
 	);
+}
+
+/** Bind a head while the project checkout and target session locks are held. */
+async function bindPrWorkflowHeadWhileLocked(
+	directory: string,
+	normalizedSessionID: string,
+	prHeadSha: string,
+): Promise<PrWorkflowGateState> {
+	const normalizedHead = normalizePrHeadSha(prHeadSha);
+	const state = await readPrWorkflowGateStateFromDisk(
+		directory,
+		normalizedSessionID,
+	);
+	if (!state) {
+		throw new Error(
+			`BLOCKED: no active PR workflow gate for session "${normalizedSessionID}". ` +
+				'The gate must be activated before the PR head can be bound.',
+		);
+	}
+	await assertCurrentCheckoutHead(directory, normalizedHead, state.mode);
+	if (state.prHeadSha && state.prHeadSha !== normalizedHead) {
+		throw new Error(
+			`BLOCKED: active ${state.mode} workflow is bound to PR head "${state.prHeadSha}"; received "${normalizedHead}"`,
+		);
+	}
+	if (!state.prHeadSha) {
+		await assertPrReviewCleanCheckout(directory, state.mode);
+	}
+	if (!state.prHeadSha && state.mode === 'PR_FEEDBACK') {
+		await assertPrFeedbackTrackingCheckout(directory, normalizedHead);
+	}
+	if (state.prHeadSha === normalizedHead) {
+		if (state.mode === 'PR_FEEDBACK') {
+			await assertPrFeedbackTrackingCheckout(directory, normalizedHead);
+		}
+		return state;
+	}
+	const nextState = {
+		...state,
+		prHeadSha: normalizedHead,
+		// A successful bind means any pre-bind checkout diagnostic is stale.
+		// Recovery abort authorization is independently bounded by settled lanes,
+		// pre-publication state, kind, reason, and the audit trail.
+		checkoutRecovery: undefined,
+		updatedAt: isoNow(),
+	};
+	await _test_exports.beforePrFeedbackTrackingPersist?.();
+	return writeStateWhileLocked(directory, nextState);
 }
 
 /** Bind an active PR_REVIEW workflow to one immutable merge-base scope. */
@@ -1450,7 +1552,7 @@ export async function assertCurrentCheckoutHead(
 				`This means Git could not resolve HEAD (the working directory may not be a Git repository, ` +
 				`HEAD may be unborn, the commit object may be missing in a shallow clone, the Git binary may not be on PATH, ` +
 				`or the bounded Git invocation may have timed out). ` +
-				`Verify with: git -C "${directory}" rev-parse --verify HEAD^{commit}`,
+				`Verify with two separate standalone commands. First run: git -C "${directory}" rev-parse --verify HEAD^0. Then run: git -C "${directory}" cat-file -t HEAD (which must print commit).`,
 		);
 	}
 	if (currentHead.toLowerCase() !== normalizedExpected.toLowerCase()) {
@@ -1461,7 +1563,7 @@ export async function assertCurrentCheckoutHead(
 		const remediation =
 			mode === 'PR_FEEDBACK'
 				? 'Check out the intended local tracking branch at that exact head (for example with a safe standalone `gh pr checkout <number-or-url>` or `git switch -c <local> --track <remote>/<branch>`), then retry the bind. Do not create a new detached feedback checkout.'
-				: `Run these bare, standalone commands from that directory: if the commit is not present locally, \`git fetch origin <pr-head-ref>\`; then \`git switch --detach ${normalizedExpected}\`. Do not prefix the switch with \`git -C\`; the read-only shell classifier refuses \`git -C ... switch\`.`;
+				: `Run bare, standalone commands from that directory. If the commit is not present locally, first run \`git fetch origin <pr-head-ref>\`. Then run \`git switch --detach ${normalizedExpected}\`. Do not prefix the switch with \`git -C\`; the read-only shell classifier refuses \`git -C ... switch\`.`;
 		throw new Error(
 			`BLOCKED: current checkout HEAD "${currentHead}" does not match PR head "${normalizedExpected}" ` +
 				`(working directory: "${directory}"). ${remediation}`,
@@ -4819,7 +4921,7 @@ export async function enforcePrWorkflowToolBefore(
 		) {
 			if (!state.prHeadSha && isShellCheckout) {
 				throw new Error(
-					'BLOCKED: PR_REVIEW checkout must use standalone commands: fetch the PR head, verify the full commit object with `git cat-file -e <full_pr_head_sha>^{commit}`, then run `git switch --detach <full_pr_head_sha>` and bind that exact head before dispatching explorer lanes. Do not use `--track FETCH_HEAD`.' +
+					'BLOCKED: PR_REVIEW checkout must use standalone commands: fetch the PR head, run `git rev-parse --verify <full_pr_head_sha>^0`, run `git cat-file -t <full_pr_head_sha>` (which must print `commit`), then run `git switch --detach <full_pr_head_sha>` and bind that exact head before dispatching explorer lanes. Do not use `--track FETCH_HEAD`.' +
 						blockedShellDiagnosis,
 				);
 			}
@@ -5129,6 +5231,7 @@ export const _test_exports = {
 		_test_exports.removeCheckoutLock = removeCheckoutLockFile;
 		_test_exports.checkoutMutationActionTimeoutMs =
 			CHECKOUT_MUTATION_ACTION_TIMEOUT_MS;
+		_test_exports.classifyPrWorkflowGitStateAsync = classifyPrWorkflowGitState;
 	},
 	beforeTerminalClear: undefined as (() => Promise<void>) | undefined,
 	beforePrFeedbackTransitionLock: undefined as
@@ -5152,6 +5255,7 @@ export const _test_exports = {
 	openCheckoutLock: openCheckoutLockFile,
 	removeCheckoutLock: removeCheckoutLockFile,
 	checkoutMutationActionTimeoutMs: CHECKOUT_MUTATION_ACTION_TIMEOUT_MS,
+	classifyPrWorkflowGitStateAsync: classifyPrWorkflowGitState,
 	resolveCurrentGitHead,
 	resolveCurrentGitHeadAsync,
 	resolveCurrentUpstreamPushTarget,
@@ -5812,6 +5916,7 @@ function describeBlockedPrReviewShellCommand(
 type PrWorkflowShellSyntaxReason =
 	| 'compound-syntax'
 	| 'unmatched-quote'
+	| 'ambiguous-escaped-quote'
 	| 'command-substitution'
 	| 'gh-api-jq-pipe';
 
@@ -5823,6 +5928,7 @@ interface PrWorkflowShellSyntaxVerdict {
 interface PrWorkflowShellToken {
 	value: string;
 	quoted: boolean;
+	pipeIsDoubleQuoted: boolean;
 }
 
 function classifyPrWorkflowShellSyntax(
@@ -5832,11 +5938,20 @@ function classifyPrWorkflowShellSyntax(
 	const compact = inner.replace(/\s+/g, ' ').trim();
 	if (!compact) return { unsafe: true, reason: 'compound-syntax' };
 	// Preserve the existing fail-closed treatment for every shell control form
-	// except the one narrowly admitted literal: `|` inside a quoted gh api --jq
-	// value. Quoting does not widen semicolons, redirection, interpolation, or
-	// command substitution.
+	// except the one narrowly admitted literal: `|` inside a double-quoted gh
+	// api --jq value. Apostrophes quote in POSIX shells but not in cmd.exe, so
+	// requiring double quotes keeps the accepted command safe for every executor
+	// that may sit behind OpenCode's cross-platform shell tool. Quoting does not
+	// widen semicolons, redirection, interpolation, or command substitution.
 	if (/\$\(|@\(/.test(inner)) {
 		return { unsafe: true, reason: 'command-substitution' };
+	}
+	// `\"` is a literal quote under POSIX but closes/opens quoting differently
+	// under cmd.exe; `^"` has the symmetric cmd.exe escape behavior. Reject both
+	// globally, including where our parser would otherwise treat the quote as an
+	// opening delimiter, so no executor can expose a parser-hidden pipeline.
+	if (/\\"|\^"/.test(inner)) {
+		return { unsafe: true, reason: 'ambiguous-escaped-quote' };
 	}
 	if (/[\r\n;&<>`]/.test(inner)) {
 		return { unsafe: true, reason: 'compound-syntax' };
@@ -5845,14 +5960,16 @@ function classifyPrWorkflowShellSyntax(
 	let current = '';
 	let quoted = false;
 	let quote: "'" | '"' | null = null;
+	let pipeIsDoubleQuoted = true;
 
 	const flush = (): void => {
 		if (current.length > 0 || quoted) {
-			tokens.push({ value: current, quoted });
+			tokens.push({ value: current, quoted, pipeIsDoubleQuoted });
 		}
 		current = '';
 		quoted = false;
 		quote = null;
+		pipeIsDoubleQuoted = true;
 	};
 
 	for (let index = 0; index < inner.length; index += 1) {
@@ -5885,6 +6002,7 @@ function classifyPrWorkflowShellSyntax(
 				quote = null;
 				continue;
 			}
+			if (ch === '|') pipeIsDoubleQuoted = false;
 			current += ch;
 			continue;
 		}
@@ -5893,13 +6011,12 @@ function classifyPrWorkflowShellSyntax(
 			quote = null;
 			continue;
 		}
-		if (
-			ch === '\\' &&
-			(inner[index + 1] === '"' || inner[index + 1] === '\\')
-		) {
-			current += inner[index + 1];
-			index += 1;
-			continue;
+		// A backslash-quote is an escape in some POSIX-oriented parsers but not
+		// in cmd.exe, where the quote closes and a following pipe becomes shell
+		// control syntax. Raw shell text cannot prove one interpretation across
+		// every supported executor, so fail closed instead of guessing.
+		if (ch === '\\' && inner[index + 1] === '"') {
+			return { unsafe: true, reason: 'ambiguous-escaped-quote' };
 		}
 		if (ch === '`') {
 			return { unsafe: true, reason: 'command-substitution' };
@@ -5920,7 +6037,11 @@ function classifyPrWorkflowShellSyntax(
 
 	const pipeTokens = tokens.filter((token) => token.value.includes('|'));
 	if (pipeTokens.length === 0) return { unsafe: false, reason: null };
-	if (pipeTokens.length !== 1 || !pipeTokens[0].quoted) {
+	if (
+		pipeTokens.length !== 1 ||
+		!pipeTokens[0].quoted ||
+		!pipeTokens[0].pipeIsDoubleQuoted
+	) {
 		return { unsafe: true, reason: 'gh-api-jq-pipe' };
 	}
 	const quotedPipeToken = pipeTokens[0];
@@ -5946,10 +6067,12 @@ function describeShellSyntaxViolation(command: string): string | null {
 	switch (verdict.reason) {
 		case 'unmatched-quote':
 			return 'Reason: unmatched quote in the shell command. Close the quote and retry with a single read-only command.';
+		case 'ambiguous-escaped-quote':
+			return 'Reason: backslash- or caret-escaped double quotes are ambiguous across cmd.exe, PowerShell, and POSIX shells. Use a jq filter that needs no nested double quotes, or use the bounded gh_evidence tool.';
 		case 'command-substitution':
 			return 'Reason: command-substitution syntax ($() or @()) is not allowed in this read-only gate.';
 		case 'gh-api-jq-pipe':
-			return 'Reason: literal `|` is only allowed inside a quoted `gh api --jq` value; outside that shape it is treated as compound shell syntax.';
+			return 'Reason: literal `|` is only allowed inside a double-quoted `gh api --jq` value; single quotes do not protect pipes under cmd.exe, and every other shape is treated as compound shell syntax.';
 		default:
 			return 'Reason: compound-syntax (;, &&, |, <, >, backtick, or $()/@()). Run ONE command per call; a single leading `cd <dir> &&` and a trailing `2>&1` are tolerated for reads only.';
 	}
@@ -8545,10 +8668,10 @@ function analyzePrReviewDiscoveryArtifact(
 }
 
 /**
- * Validate a just-collected base/micro discovery result before the delegation
- * ledger publishes it as completed. The caller supplies the prospective result
- * and the exact stored artifact, so this pure validator cannot accidentally
- * accept stale terminal state or a different output reference.
+ * Validate a just-collected base, micro, or council discovery result before the
+ * delegation ledger publishes it as completed. The caller supplies the
+ * prospective result and exact stored artifact, so this pure validator cannot
+ * accidentally accept stale terminal state or a different output reference.
  */
 export function validatePrReviewDiscoveryLaneCompletion(
 	input: PrReviewDiscoveryLaneValidationInput,
@@ -9486,6 +9609,13 @@ async function readPrWorkflowGateStateFromDisk(
 	sessionID: string,
 ): Promise<PrWorkflowGateState | null> {
 	const filePath = workflowGateStatePath(directory, sessionID);
+	return readPrWorkflowGateStateFileFromDisk(filePath, sessionID);
+}
+
+async function readPrWorkflowGateStateFileFromDisk(
+	filePath: string,
+	stateLabel: string,
+): Promise<PrWorkflowGateState | null> {
 	let raw: string;
 	try {
 		raw = await fsp.readFile(filePath, 'utf-8');
@@ -9498,13 +9628,13 @@ async function readPrWorkflowGateStateFromDisk(
 		parsedJson = JSON.parse(raw);
 	} catch {
 		throw new Error(
-			`BLOCKED: PR workflow gate state for session "${sessionID}" is not valid JSON`,
+			`BLOCKED: PR workflow gate state for session "${stateLabel}" is not valid JSON`,
 		);
 	}
 	const parsed = PrWorkflowGateStateSchema.safeParse(parsedJson);
 	if (!parsed.success) {
 		throw new Error(
-			`BLOCKED: PR workflow gate state for session "${sessionID}" is invalid`,
+			`BLOCKED: PR workflow gate state for session "${stateLabel}" is invalid`,
 		);
 	}
 	return parsed.data;
