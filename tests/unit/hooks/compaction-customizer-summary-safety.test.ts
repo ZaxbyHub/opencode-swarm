@@ -166,6 +166,13 @@ describe('compaction summary pending-task facts are directive-free (#2109)', () 
 				'- [ ] 1.2: Add config [SMALL]\n- [ ] 1.1: Implement [MEDIUM] ← CURRENT',
 			),
 		).toBe('- [ ] 1.2: Add config [SMALL]\n- [ ] 1.1: Implement [MEDIUM]');
+		// Extractor truncation suffix appended after the marker is also stripped
+		// (occurs when the task list is truncated at exactly the ← CURRENT boundary).
+		expect(
+			_test_exports.stripTaskActionMarkers(
+				'- [ ] 1.1: Implement feature [MEDIUM] ← CURRENT...',
+			),
+		).toBe('- [ ] 1.1: Implement feature [MEDIUM]');
 	});
 
 	it('injects pending [SWARM TASKS] facts without the action affordance in the tool-disabled turn', async () => {

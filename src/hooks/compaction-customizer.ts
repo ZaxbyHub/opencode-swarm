@@ -24,6 +24,12 @@ const COMPACTION_FACTS_OPEN = '<swarm_compaction_facts>';
 const COMPACTION_FACTS_CLOSE = '</swarm_compaction_facts>';
 const MAX_COMPACTION_FACT_CHARS = 2_000;
 const MAX_COMPACTION_CONTEXT_CHARS = 8_000;
+// Budget passed to task extractors before stripping action markers. Using
+// Number.MAX_SAFE_INTEGER means the extractor never truncates, so the
+// ← CURRENT marker is always complete when stripTaskActionMarkers runs.
+// truncateFact in buildCompactionFactsBlock then bounds the result to
+// MAX_COMPACTION_FACT_CHARS. This eliminates all partial-marker truncation.
+const TASK_EXTRACT_PRE_STRIP_CHARS = Number.MAX_SAFE_INTEGER;
 const MAX_STORED_OUTPUTS_TO_COUNT = 256;
 const TRUNCATION_MARKER = '\n[truncated]';
 const SUMMARY_ONLY_HEADER =
@@ -39,9 +45,17 @@ const SUMMARY_ONLY_FOOTER =
  * (`- [ ] <id>: ... ← CURRENT`), and the legacy `extractIncompleteTasks` path
  * relays it verbatim whenever plan.md was derived from or hand-written in the
  * canonical ` ← CURRENT` format, so the strip is applied to both paths.
+ *
+ * Callers must pass TASK_EXTRACT_PRE_STRIP_CHARS to the extractor so the full
+ * marker always fits before this function runs. `(?:\.\.\.)?` is defense-in-depth
+ * for hand-authored plan.md lines that end with `← CURRENT...` — the programmatic
+ * extractor never appends `...` when TASK_EXTRACT_PRE_STRIP_CHARS is MAX_SAFE_INTEGER.
+ *
+ * Uses `[^\S\r\n]*` (horizontal whitespace only) to avoid O(n²) regex backtracking
+ * across line boundaries that `\s*` would cause on large inputs.
  */
 function stripTaskActionMarkers(value: string): string {
-	return value.replace(/\s*←\s*CURRENT\s*$/gm, '');
+	return value.replace(/[^\S\r\n]*←[^\S\r\n]*CURRENT[^\S\r\n]*(?:\.\.\.)?[^\S\r\n]*$/gm, '');
 }
 
 interface CompactionFact {
@@ -135,10 +149,16 @@ function buildCompactionFactsBlock(facts: CompactionFact[]): string {
 		const sectionPrefix = `\n[${fact.label}]\n`;
 		if (remaining <= sectionPrefix.length) break;
 
-		const escaped = escapeCompactionBoundary(fact.value);
 		const valueBudget = Math.min(
 			MAX_COMPACTION_FACT_CHARS,
 			remaining - sectionPrefix.length,
+		);
+		// Slice before escape: escapeCompactionBoundary is O(n) but its regex
+		// can scan large strings when fact.value is unbounded. The escape is
+		// length-preserving, so slicing to valueBudget + TRUNCATION_MARKER.length
+		// gives truncateFact enough room to append the marker correctly.
+		const escaped = escapeCompactionBoundary(
+			fact.value.slice(0, valueBudget + TRUNCATION_MARKER.length),
 		);
 		const boundedValue = truncateFact(escaped, valueBudget);
 		sections.push(`${sectionPrefix}${boundedValue}`);
@@ -182,7 +202,7 @@ export function createCompactionCustomizerHook(
 					}
 					const incompleteTasks = extractIncompleteTasksFromPlan(
 						plan,
-						MAX_COMPACTION_FACT_CHARS,
+						TASK_EXTRACT_PRE_STRIP_CHARS,
 					);
 					if (incompleteTasks) {
 						facts.push({
@@ -200,7 +220,7 @@ export function createCompactionCustomizerHook(
 						}
 						const incompleteTasks = extractIncompleteTasks(
 							planContent,
-							MAX_COMPACTION_FACT_CHARS,
+							TASK_EXTRACT_PRE_STRIP_CHARS,
 						);
 						if (incompleteTasks) {
 							facts.push({
