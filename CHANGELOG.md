@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.139.7](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.139.6...v7.139.7) (2026-08-14)
+
+
+### Bug Fixes
+
+* **pr-review:** make micro retries recoverable ([6410528](https://github.com/ZaxbyHub/opencode-swarm/commit/6410528c7fbc535c9979db8e36e0a661e2ee8fb6))
+
 ## [7.139.6](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.139.5...v7.139.6) (2026-08-13)
 
 
