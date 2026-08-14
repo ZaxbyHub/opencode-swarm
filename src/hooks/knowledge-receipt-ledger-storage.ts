@@ -141,17 +141,34 @@ function samePath(left: string, right: string): boolean {
 	return normalize(left) === normalize(right);
 }
 
-async function validateMutationParent(filePath: string): Promise<string> {
+interface MutationParentDependencies {
+	lstat: typeof lstat;
+	realpath: typeof realpath;
+}
+
+async function validateMutationParent(
+	filePath: string,
+	dependencies: MutationParentDependencies = { lstat, realpath },
+): Promise<string> {
 	const parent = path.dirname(path.resolve(filePath));
-	const info = await lstat(parent);
+	const info = await dependencies.lstat(parent);
 	if (info.isSymbolicLink() || !info.isDirectory()) {
 		throw new ReceiptStoreError(
 			'store_unavailable',
 			'receipt artifact parent is not a real directory',
 		);
 	}
-	const canonical = await realpath(parent);
-	if (!samePath(canonical, parent)) {
+	const canonical = await dependencies.realpath(parent);
+	const canonicalInfo = await dependencies.lstat(canonical);
+	if (
+		canonicalInfo.isSymbolicLink() ||
+		!canonicalInfo.isDirectory() ||
+		(!samePath(canonical, parent) &&
+			!sameIdentity(
+				{ dev: info.dev, ino: info.ino },
+				{ dev: canonicalInfo.dev, ino: canonicalInfo.ino },
+			))
+	) {
 		throw new ReceiptStoreError(
 			'store_unavailable',
 			'receipt artifact parent identity changed before mutation',
@@ -597,4 +614,5 @@ export const _internals = {
 		_claimedPath: string,
 	): Promise<void> => {},
 	recoverLockIfSafe,
+	validateMutationParent,
 };
