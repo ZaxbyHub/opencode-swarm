@@ -149,6 +149,8 @@ export const submit_council_verdicts: ReturnType<typeof tool> = createSwarmTool(
 			const session = ctx?.sessionID
 				? getAgentSession(ctx.sessionID)
 				: undefined;
+			const councilWorkflowGeneration =
+				session?.taskCouncilWorkflowGeneration?.get(input.taskId);
 
 			return runCouncilAttempt({
 				directory: workingDir,
@@ -305,8 +307,19 @@ export const submit_council_verdicts: ReturnType<typeof tool> = createSwarmTool(
 						quorumSize: membersVoted.length,
 						evidence: {
 							reference: `.swarm/evidence/${input.taskId}.json`,
-							commit: async (attemptId) =>
-								writeCouncilEvidence(workingDir, synthesis, attemptId),
+							commit: async (attemptId) => {
+								if (councilWorkflowGeneration === undefined) {
+									throw new Error(
+										`TASK_COUNCIL_GENERATION_REQUIRED: dispatch council members for task ${input.taskId} before submitting their verdicts`,
+									);
+								}
+								await writeCouncilEvidence(
+									workingDir,
+									synthesis,
+									attemptId,
+									councilWorkflowGeneration,
+								);
+							},
 						},
 						afterCommit: async () => {
 							updateRequirements(transition);

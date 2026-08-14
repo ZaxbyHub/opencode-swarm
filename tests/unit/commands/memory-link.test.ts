@@ -35,14 +35,17 @@ describe('#1850 /swarm memory link + unlink commands', () => {
 	let dir: string;
 	let prevXdg: string | undefined;
 	let prevHome: string | undefined;
+	let prevLocalAppData: string | undefined;
 
 	beforeEach(() => {
 		prevXdg = process.env.XDG_DATA_HOME;
 		prevHome = process.env.HOME;
+		prevLocalAppData = process.env.LOCALAPPDATA;
 		const dataDir = makeTmp('memlink-cmd-data-');
 		dirs.push(dataDir);
 		process.env.XDG_DATA_HOME = dataDir;
 		process.env.HOME = dataDir;
+		process.env.LOCALAPPDATA = dataDir;
 		dir = makeTmp('memlink-cmd-');
 		dirs.push(dir);
 	});
@@ -50,6 +53,7 @@ describe('#1850 /swarm memory link + unlink commands', () => {
 	afterEach(() => {
 		process.env.XDG_DATA_HOME = prevXdg;
 		process.env.HOME = prevHome;
+		process.env.LOCALAPPDATA = prevLocalAppData;
 		clearPool();
 		for (const d of dirs.splice(0)) {
 			try {

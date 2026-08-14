@@ -6,6 +6,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test';
 import * as path from 'node:path';
+import { createIsolatedTestEnv } from '../../helpers/isolated-test-env';
 
 // ---------------------------------------------------------------------------
 // Test 1: Buffer is bounded to 50 entries max
@@ -209,19 +210,18 @@ describe('quiet mode behavior (quiet:true vs quiet:false)', () => {
 	});
 });
 
-// ---------------------------------------------------------------------------
 // Test 4: Diagnose output includes deferred warnings
-// ---------------------------------------------------------------------------
-
 describe('Diagnose output with deferred warnings', () => {
 	let warnSpy: ReturnType<typeof spyOn>;
-
+	let isolatedEnv: ReturnType<typeof createIsolatedTestEnv>;
 	beforeEach(() => {
+		isolatedEnv = createIsolatedTestEnv();
 		warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
 	});
 
 	afterEach(() => {
 		warnSpy.mockRestore();
+		isolatedEnv.cleanup();
 	});
 
 	it('includes Deferred Warnings check when buffer has warnings', async () => {

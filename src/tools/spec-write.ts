@@ -12,6 +12,8 @@ import * as path from 'node:path';
 import { z } from 'zod';
 import { loadPluginConfigWithMeta } from '../config';
 import { SpecWriterConfigSchema } from '../config/schema';
+import { tryAcquireLock } from '../parallel/file-locks.js';
+import { reconcileSpecDrift } from '../services/spec-drift-recovery.js';
 import { createSwarmTool } from './create-tool.js';
 
 const MAX_SPEC_BYTES = 256 * 1024; // 256 KiB
@@ -73,37 +75,85 @@ export const spec_write: ReturnType<typeof createSwarmTool> = createSwarmTool({
 			);
 		}
 
-		const target = path.join(directory, '.swarm', 'spec.md');
-		await mkdir(path.dirname(target), { recursive: true });
-		const tmp = `${target}.tmp-${process.pid}-${Date.now()}`;
-		let finalContent = content;
-		if (mode === 'append') {
-			try {
-				const fs = await import('node:fs/promises');
-				const prior = await fs.readFile(target, 'utf-8');
-				finalContent = `${prior.replace(/\s+$/, '')}\n\n${content}\n`;
-				if (finalContent.length > MAX_SPEC_BYTES) {
-					return JSON.stringify(
-						{
-							written: false,
-							reason:
-								'append would exceed max spec size (256 KiB); rewrite explicitly',
-						},
-						null,
-						2,
-					);
+		const specLock = await tryAcquireLock(
+			directory,
+			'spec.md',
+			'spec-write',
+			`spec-write-${Date.now()}`,
+		);
+		if (!specLock.acquired) {
+			return JSON.stringify(
+				{
+					written: false,
+					reason:
+						'another canonical spec write or drift recovery is in progress; retry shortly',
+				},
+				null,
+				2,
+			);
+		}
+		try {
+			const target = path.join(directory, '.swarm', 'spec.md');
+			await mkdir(path.dirname(target), { recursive: true });
+			const tmp = `${target}.tmp-${process.pid}-${Date.now()}`;
+			let finalContent = content;
+			if (mode === 'append') {
+				try {
+					const fs = await import('node:fs/promises');
+					const prior = await fs.readFile(target, 'utf-8');
+					finalContent = `${prior.replace(/\s+$/, '')}\n\n${content}\n`;
+					if (finalContent.length > MAX_SPEC_BYTES) {
+						return JSON.stringify(
+							{
+								written: false,
+								reason:
+									'append would exceed max spec size (256 KiB); rewrite explicitly',
+							},
+							null,
+							2,
+						);
+					}
+				} catch {
+					// no prior file; treat as replace
 				}
-			} catch {
-				// no prior file; treat as replace
+			}
+			await writeFile(tmp, finalContent, 'utf-8');
+			await rename(tmp, target);
+
+			let specDriftRecovery:
+				| Awaited<ReturnType<typeof reconcileSpecDrift>>
+				| undefined;
+			try {
+				specDriftRecovery = await reconcileSpecDrift(directory, {
+					mode: 'repair',
+					actor: 'spec_write',
+					specLockAlreadyHeld: true,
+				});
+			} catch (error) {
+				specDriftRecovery = {
+					status: 'failed',
+					mode: 'repair',
+					message: `Spec write succeeded, but spec drift recovery failed: ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				};
+			}
+
+			return JSON.stringify(
+				{
+					written: true,
+					path: target,
+					bytes: finalContent.length,
+					spec_drift_recovery: specDriftRecovery,
+				},
+				null,
+				2,
+			);
+		} finally {
+			if (specLock.lock._release) {
+				await specLock.lock._release().catch(() => {});
 			}
 		}
-		await writeFile(tmp, finalContent, 'utf-8');
-		await rename(tmp, target);
-		return JSON.stringify(
-			{ written: true, path: target, bytes: finalContent.length },
-			null,
-			2,
-		);
 	},
 });
 

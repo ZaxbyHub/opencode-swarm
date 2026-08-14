@@ -56,7 +56,7 @@ function input(sessionID: string, callID: string, tool = 'pre_check_batch') {
 describe('pre-check task receipt correlation', () => {
 	beforeEach(resetSwarmState);
 
-	test('late task A failure cannot overwrite task B state', async () => {
+	test('late task A failure remains bound to A after currentTaskId moves to B', async () => {
 		const hooks = createGuardrailsHooks(config);
 		startAgentSession('session', 'coder');
 		const session = getAgentSession('session')!;
@@ -68,11 +68,15 @@ describe('pre-check task receipt correlation', () => {
 		session.taskWorkflowStates.set('task-b', 'coder_delegated');
 		await hooks.toolAfter(input('session', 'call-a'), output(false));
 
-		expect(session.lastGateFailure).toBeNull();
+		expect(session.lastGateFailure).toMatchObject({
+			taskId: 'task-a',
+			code: 'PRE_CHECK_FAILED',
+		});
+		expect(session.taskWorkflowStates.get('task-a')).toBe('coder_delegated');
 		expect(session.taskWorkflowStates.get('task-b')).toBe('coder_delegated');
 	});
 
-	test('late task A pass cannot clear or advance task B', async () => {
+	test('late task A pass advances only A after currentTaskId moves to B', async () => {
 		const hooks = createGuardrailsHooks(config);
 		startAgentSession('session', 'coder');
 		const session = getAgentSession('session')!;
@@ -89,6 +93,7 @@ describe('pre-check task receipt correlation', () => {
 		await hooks.toolAfter(input('session', 'call-a'), output(true));
 
 		expect(session.lastGateFailure?.taskId).toBe('task-b');
+		expect(session.taskWorkflowStates.get('task-a')).toBe('pre_check_passed');
 		expect(session.taskWorkflowStates.get('task-b')).toBe('coder_delegated');
 	});
 

@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { safeRmRecursive } from '../../tests/helpers/safe-test-dir';
+import { closeProjectDb } from '../db/project-db';
 import { executeSavePlan } from './save-plan';
 
 let tmpDir: string;
@@ -29,6 +30,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	closeProjectDb(tmpDir);
 	safeRmRecursive(tmpDir);
 });
 

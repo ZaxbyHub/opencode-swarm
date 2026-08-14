@@ -14,8 +14,8 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
+import { closeGlobalDb } from '../../src/db/global-db';
 import {
 	appendKnowledge,
 	readKnowledge,
@@ -31,6 +31,7 @@ import {
 	listSkills,
 	regenerateSkill,
 } from '../../src/services/skill-generator';
+import { createIsolatedTestEnv } from '../helpers/isolated-test-env';
 
 // ---------------------------------------------------------------------------
 // Test slug
@@ -153,9 +154,12 @@ function recordUsage(
 // Fixtures
 // ---------------------------------------------------------------------------
 let tmp: string;
+let isolatedEnv: ReturnType<typeof createIsolatedTestEnv>;
 
 beforeEach(() => {
-	tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'swarm-skill-loop-'));
+	closeGlobalDb();
+	isolatedEnv = createIsolatedTestEnv();
+	tmp = isolatedEnv.configDir;
 	// Ensure the .swarm and .opencode/skills/generated directories exist
 	fs.mkdirSync(path.join(tmp, '.swarm'), { recursive: true });
 	fs.mkdirSync(path.join(tmp, '.opencode', 'skills', 'generated'), {
@@ -164,7 +168,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-	fs.rmSync(tmp, { recursive: true, force: true });
+	closeGlobalDb();
+	isolatedEnv.cleanup();
 });
 
 // ---------------------------------------------------------------------------

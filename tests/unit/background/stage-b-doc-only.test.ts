@@ -9,6 +9,7 @@ import { captureWorkspaceSnapshot } from '../../../src/background/workspace-snap
 import {
 	readTaskEvidence,
 	recordGateEvidence,
+	transitionTaskWorkflowEvidence,
 } from '../../../src/gate-evidence';
 import {
 	resetSwarmState,
@@ -80,7 +81,11 @@ describe('background doc-only gate evidence', () => {
 		const baseline = captureWorkspaceSnapshot(testDirectory);
 		fs.writeFileSync(path.join(testDirectory, 'README.md'), '# docs\n');
 		const coder = record('coder', '1.1', baseline);
-		coder.taskChangeContext = { declaredFiles: ['README.md'], baseline };
+		coder.taskChangeContext = {
+			declaredFiles: ['README.md'],
+			baseline,
+			workflowGeneration: 0,
+		};
 
 		expect(
 			(
@@ -91,12 +96,23 @@ describe('background doc-only gate evidence', () => {
 				})
 			).consumed,
 		).toBe(true);
+		await transitionTaskWorkflowEvidence(testDirectory, '1.1', {
+			type: 'stage_a_passed',
+			expectedGeneration: 1,
+			transitionId: 'stage-a:1.1',
+		});
 
 		const reviewer = record('reviewer', '1.1');
+		reviewer.workflowGeneration = 1;
 		await ingestBackgroundStageBCompletion({
 			directory: testDirectory,
 			record: reviewer,
-			result: { text: 'pass', chars: 4, truncated: false, digest: 'reviewer' },
+			result: {
+				text: '[REVIEWED] | task-1.1 | APPROVED | docs are correct',
+				chars: 54,
+				truncated: false,
+				digest: 'reviewer',
+			},
 		});
 		const evidence = await readTaskEvidence(testDirectory, '1.1');
 		expect(evidence?.required_gates).toEqual(['reviewer']);
@@ -110,11 +126,28 @@ describe('background doc-only gate evidence', () => {
 
 	test('prior non-coder evidence cannot suppress the full coder gates', async () => {
 		await recordGateEvidence(testDirectory, '1.5', 'critic', 'critic-session');
+		await transitionTaskWorkflowEvidence(testDirectory, '1.5', {
+			type: 'accepted_mutation',
+			agentType: 'coder',
+			expectedGeneration: 0,
+			transitionId: 'coder:1.5',
+		});
+		await transitionTaskWorkflowEvidence(testDirectory, '1.5', {
+			type: 'stage_a_passed',
+			expectedGeneration: 1,
+			transitionId: 'stage-a:1.5',
+		});
 		const reviewer = record('reviewer', '1.5');
+		reviewer.workflowGeneration = 1;
 		await ingestBackgroundStageBCompletion({
 			directory: testDirectory,
 			record: reviewer,
-			result: { text: 'pass', chars: 4, truncated: false, digest: 'reviewer' },
+			result: {
+				text: '[REVIEWED] | task-1.5 | APPROVED | implementation is correct',
+				chars: 61,
+				truncated: false,
+				digest: 'reviewer',
+			},
 		});
 
 		const evidence = await readTaskEvidence(testDirectory, '1.5');
@@ -150,15 +183,18 @@ describe('background doc-only gate evidence', () => {
 		}
 	});
 
-	test('legacy reviewer completion without coder provenance fails closed', async () => {
+	test('legacy reviewer completion without a launch generation fails closed', async () => {
 		const reviewer = record('reviewer', '1.2');
-		await ingestBackgroundStageBCompletion({
+		const result = await ingestBackgroundStageBCompletion({
 			directory: testDirectory,
 			record: reviewer,
 			result: { text: 'pass', chars: 4, truncated: false, digest: 'legacy' },
 		});
 		const evidence = await readTaskEvidence(testDirectory, '1.2');
-		expect(evidence?.required_gates).toEqual(['reviewer', 'test_engineer']);
+		expect(result.ok).toBe(false);
+		expect(result.consumed).toBe(false);
+		expect(result.reason).toContain('TASK_WORKFLOW_GENERATION_REQUIRED');
+		expect(evidence).toBeNull();
 	});
 
 	test('immutable code declaration cannot be downgraded by later plan changes', async () => {
@@ -168,9 +204,17 @@ describe('background doc-only gate evidence', () => {
 			path.join(testDirectory, '.swarm', 'plan.json'),
 			JSON.stringify({ files_touched: ['README.md'] }),
 		);
-		fs.writeFileSync(path.join(testDirectory, 'README.md'), '# docs\n');
+		fs.mkdirSync(path.join(testDirectory, 'src'), { recursive: true });
+		fs.writeFileSync(
+			path.join(testDirectory, 'src', 'code.ts'),
+			'export const immutable = true;\n',
+		);
 		const coder = record('coder', '1.3', baseline);
-		coder.taskChangeContext = { declaredFiles: ['src/code.ts'], baseline };
+		coder.taskChangeContext = {
+			declaredFiles: ['src/code.ts'],
+			baseline,
+			workflowGeneration: 0,
+		};
 
 		await ingestBackgroundStageBCompletion({
 			directory: testDirectory,
@@ -192,6 +236,7 @@ describe('background doc-only gate evidence', () => {
 		coder.taskChangeContext = {
 			declaredFiles: ['README.md', 'code.ts'],
 			baseline,
+			workflowGeneration: 0,
 		};
 
 		await ingestBackgroundStageBCompletion({
@@ -213,7 +258,11 @@ describe('background doc-only gate evidence', () => {
 			expect(baseline.changedFiles).toEqual(['README.md']);
 			fs.writeFileSync(path.join(testDirectory, 'README.md'), '# later docs\n');
 			const coder = record('coder', '1.7', baseline);
-			coder.taskChangeContext = { declaredFiles: ['README.md'], baseline };
+			coder.taskChangeContext = {
+				declaredFiles: ['README.md'],
+				baseline,
+				workflowGeneration: 0,
+			};
 
 			// A dirty baseline cannot attribute same-path changes to this coder. An
 			// exemption here would turn pre-existing workspace dirt into trusted proof.

@@ -15,10 +15,13 @@ import { getAgentSession, swarmState } from '../state';
 describe('handleFullAutoCommand', () => {
 	let testSessionId: string;
 	let tmpDir: string;
+	let originalXdg: string | undefined;
 
 	beforeEach(() => {
 		testSessionId = `full-auto-test-${Date.now()}`;
 		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'full-auto-cmd-'));
+		originalXdg = process.env.XDG_CONFIG_HOME;
+		process.env.XDG_CONFIG_HOME = path.join(tmpDir, 'user-config');
 		swarmState.agentSessions.set(testSessionId, {
 			agentName: 'architect',
 			lastToolCallTime: Date.now(),
@@ -68,6 +71,8 @@ describe('handleFullAutoCommand', () => {
 	});
 
 	afterEach(() => {
+		if (originalXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+		else process.env.XDG_CONFIG_HOME = originalXdg;
 		swarmState.agentSessions.delete(testSessionId);
 		try {
 			fs.rmSync(tmpDir, { recursive: true, force: true });

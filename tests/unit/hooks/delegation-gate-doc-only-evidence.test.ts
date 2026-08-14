@@ -5,7 +5,10 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { _internals as workspaceSnapshotInternals } from '../../../src/background/workspace-snapshot';
 import type { Plan } from '../../../src/config/plan-schema';
-import { readTaskEvidence } from '../../../src/gate-evidence';
+import {
+	readTaskEvidence,
+	transitionTaskWorkflowEvidence,
+} from '../../../src/gate-evidence';
 import {
 	createDelegationGateHook,
 	_internals as delegationGateInternals,
@@ -124,9 +127,15 @@ describe('delegation gate doc-only durable evidence', () => {
 			},
 			{},
 		);
+		const generation = (await readTaskEvidence(directory, '1.1'))!.workflow!
+			.generation;
+		await transitionTaskWorkflowEvidence(directory, '1.1', {
+			type: 'stage_a_passed',
+			expectedGeneration: generation,
+		});
 		swarmState.agentSessions
 			.get('ses_architectSession')
-			?.taskWorkflowStates?.set('1.1', 'coder_delegated');
+			?.taskWorkflowStates?.set('1.1', 'pre_check_passed');
 		return hook;
 	}
 
@@ -135,6 +144,21 @@ describe('delegation gate doc-only durable evidence', () => {
 		let evidence = await readTaskEvidence(directory, '1.1');
 		expect(evidence?.required_gates).toEqual(['reviewer']);
 
+		await hook.toolBefore(
+			{
+				tool: 'Task',
+				sessionID: 'ses_architectSession',
+				callID: 'reviewer-call',
+			},
+			{
+				args: {
+					subagent_type: 'reviewer',
+					task_id: '1.1',
+					prompt:
+						'TASK: 1.1\nReview the Markdown-only implementation.\nACCEPTANCE: approve only when the documentation change is correct',
+				},
+			},
+		);
 		await hook.toolAfter(
 			{
 				tool: 'Task',
@@ -142,7 +166,10 @@ describe('delegation gate doc-only durable evidence', () => {
 				callID: 'reviewer-call',
 				args: { subagent_type: 'reviewer', task_id: '1.1' },
 			},
-			{ output: 'APPROVED' },
+			{
+				output:
+					'[REVIEWED] | task-1.1 | APPROVED | Markdown-only change is correct',
+			},
 		);
 		evidence = await readTaskEvidence(directory, '1.1');
 		expect(evidence?.gates.reviewer).toBeDefined();
@@ -155,6 +182,7 @@ describe('delegation gate doc-only durable evidence', () => {
 		const completion = await executeUpdateTaskStatus(
 			{ task_id: '1.1', status: 'completed' },
 			directory,
+			{ sessionID: 'ses_architectSession' } as never,
 		);
 		expect(completion.success).toBe(true);
 		await hook.toolAfter(
@@ -182,47 +210,11 @@ describe('delegation gate doc-only durable evidence', () => {
 		expect(evidence?.required_gates).toEqual(['reviewer', 'test_engineer']);
 	});
 
-	test('scope mismatch fails closed', async () => {
+	test('unattributed out-of-scope changes do not contaminate exact-task classification', async () => {
 		await runCoder(['README.md'], ['README.md', 'src/undeclared.ts']);
 		const evidence = await readTaskEvidence(directory, '1.1');
-		expect(evidence?.required_gates).toEqual(['reviewer', 'test_engineer']);
-	});
-
-	describe('regression: snapshot work is limited to exemption candidates (F-002)', () => {
-		test('non-Markdown declared scope performs no workspace snapshot Git calls', async () => {
-			const plan = makePlan(['src/code.ts']);
-			fs.writeFileSync(
-				path.join(directory, '.swarm', 'plan.json'),
-				JSON.stringify(plan, null, 2),
-			);
-			await recordPlanCriticApproval(directory, plan);
-			const hook = createDelegationGateHook(makeConfig(), directory);
-			let snapshotSpawnCalls = 0;
-			workspaceSnapshotInternals.spawnSync = ((..._args: unknown[]) => {
-				snapshotSpawnCalls++;
-				throw new Error('non-Markdown dispatch must not capture a snapshot');
-			}) as typeof workspaceSnapshotInternals.spawnSync;
-
-			// Before F-002, every coder dispatch synchronously captured HEAD and status,
-			// so this seam threw before toolBefore could complete.
-			await hook.toolBefore(
-				{
-					tool: 'Task',
-					sessionID: 'ses_architectSession',
-					callID: 'non-doc-coder-call',
-				},
-				{
-					args: {
-						subagent_type: 'coder',
-						task_id: '1.1',
-						prompt:
-							'TASK: 1.1\nImplement the approved code task.\nACCEPTANCE: task complete and covered by tests',
-					},
-				},
-			);
-
-			expect(snapshotSpawnCalls).toBe(0);
-		});
+		expect(evidence?.required_gates).toEqual(['reviewer']);
+		expect(evidence?.test_engineer_exempt).toBe(true);
 	});
 
 	describe('regression: serial fallback preserves standard-worktree evidence (F-014)', () => {

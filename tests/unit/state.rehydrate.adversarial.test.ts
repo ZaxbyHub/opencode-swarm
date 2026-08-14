@@ -182,7 +182,7 @@ describe('rehydrateSessionFromDisk adversarial tests', () => {
 				rehydrateSessionFromDisk(tmpDir, session),
 			).resolves.toBeUndefined();
 			// Falls back to plan state
-			expect(session.taskWorkflowStates?.get('1.1')).toBe('coder_delegated');
+			expect(session.taskWorkflowStates?.get('1.1')).toBe('idle');
 		});
 
 		it('should skip evidence file with null content', async () => {
@@ -194,7 +194,7 @@ describe('rehydrateSessionFromDisk adversarial tests', () => {
 			await expect(
 				rehydrateSessionFromDisk(tmpDir, session),
 			).resolves.toBeUndefined();
-			expect(session.taskWorkflowStates?.get('1.1')).toBe('coder_delegated');
+			expect(session.taskWorkflowStates?.get('1.1')).toBe('idle');
 		});
 
 		it('should skip evidence file with array instead of object', async () => {
@@ -206,7 +206,7 @@ describe('rehydrateSessionFromDisk adversarial tests', () => {
 			await expect(
 				rehydrateSessionFromDisk(tmpDir, session),
 			).resolves.toBeUndefined();
-			expect(session.taskWorkflowStates?.get('1.1')).toBe('coder_delegated');
+			expect(session.taskWorkflowStates?.get('1.1')).toBe('idle');
 		});
 
 		it('should skip evidence file with wrong type for taskId (number)', async () => {
@@ -222,8 +222,8 @@ describe('rehydrateSessionFromDisk adversarial tests', () => {
 			await expect(
 				rehydrateSessionFromDisk(tmpDir, session),
 			).resolves.toBeUndefined();
-			// Should fall back to plan state (evidence skipped due to type mismatch)
-			expect(session.taskWorkflowStates?.get('1.1')).toBe('coder_delegated');
+			// Invalid evidence cannot promote the plan projection.
+			expect(session.taskWorkflowStates?.get('1.1')).toBe('idle');
 		});
 
 		it('should skip evidence file with wrong type for required_gates (string)', async () => {
@@ -239,7 +239,7 @@ describe('rehydrateSessionFromDisk adversarial tests', () => {
 			await expect(
 				rehydrateSessionFromDisk(tmpDir, session),
 			).resolves.toBeUndefined();
-			expect(session.taskWorkflowStates?.get('1.1')).toBe('coder_delegated');
+			expect(session.taskWorkflowStates?.get('1.1')).toBe('idle');
 		});
 
 		it('should skip evidence file with wrong type for required_gates (object)', async () => {
@@ -254,7 +254,7 @@ describe('rehydrateSessionFromDisk adversarial tests', () => {
 			await expect(
 				rehydrateSessionFromDisk(tmpDir, session),
 			).resolves.toBeUndefined();
-			expect(session.taskWorkflowStates?.get('1.1')).toBe('coder_delegated');
+			expect(session.taskWorkflowStates?.get('1.1')).toBe('idle');
 		});
 
 		it('should skip evidence file with wrong type for gates (array)', async () => {
@@ -269,7 +269,7 @@ describe('rehydrateSessionFromDisk adversarial tests', () => {
 			await expect(
 				rehydrateSessionFromDisk(tmpDir, session),
 			).resolves.toBeUndefined();
-			expect(session.taskWorkflowStates?.get('1.1')).toBe('coder_delegated');
+			expect(session.taskWorkflowStates?.get('1.1')).toBe('idle');
 		});
 	});
 
@@ -292,7 +292,7 @@ describe('rehydrateSessionFromDisk adversarial tests', () => {
 				rehydrateSessionFromDisk(tmpDir, session),
 			).resolves.toBeUndefined();
 			// Falls back to plan state
-			expect(session.taskWorkflowStates?.get('1.1')).toBe('coder_delegated');
+			expect(session.taskWorkflowStates?.get('1.1')).toBe('idle');
 		});
 
 		it('should skip evidence file with absolute path in taskId', async () => {
@@ -308,7 +308,7 @@ describe('rehydrateSessionFromDisk adversarial tests', () => {
 			await expect(
 				rehydrateSessionFromDisk(tmpDir, session),
 			).resolves.toBeUndefined();
-			expect(session.taskWorkflowStates?.get('1.1')).toBe('coder_delegated');
+			expect(session.taskWorkflowStates?.get('1.1')).toBe('idle');
 		});
 
 		it('should skip evidence file with shell metacharacters in taskId', async () => {
@@ -325,7 +325,7 @@ describe('rehydrateSessionFromDisk adversarial tests', () => {
 				rehydrateSessionFromDisk(tmpDir, session),
 			).resolves.toBeUndefined();
 			// Falls back to plan state because taskId doesn't match regex
-			expect(session.taskWorkflowStates?.get('1.1')).toBe('coder_delegated');
+			expect(session.taskWorkflowStates?.get('1.1')).toBe('idle');
 		});
 
 		it('should skip evidence file with backslash path in taskId', async () => {
@@ -341,7 +341,7 @@ describe('rehydrateSessionFromDisk adversarial tests', () => {
 			await expect(
 				rehydrateSessionFromDisk(tmpDir, session),
 			).resolves.toBeUndefined();
-			expect(session.taskWorkflowStates?.get('1.1')).toBe('coder_delegated');
+			expect(session.taskWorkflowStates?.get('1.1')).toBe('idle');
 		});
 
 		it('should skip evidence file with unicode in taskId', async () => {
@@ -357,7 +357,7 @@ describe('rehydrateSessionFromDisk adversarial tests', () => {
 			await expect(
 				rehydrateSessionFromDisk(tmpDir, session),
 			).resolves.toBeUndefined();
-			expect(session.taskWorkflowStates?.get('1.1')).toBe('coder_delegated');
+			expect(session.taskWorkflowStates?.get('1.1')).toBe('idle');
 		});
 
 		it('should skip evidence file with RTL override characters in taskId', async () => {
@@ -373,7 +373,7 @@ describe('rehydrateSessionFromDisk adversarial tests', () => {
 			await expect(
 				rehydrateSessionFromDisk(tmpDir, session),
 			).resolves.toBeUndefined();
-			expect(session.taskWorkflowStates?.get('1.1')).toBe('coder_delegated');
+			expect(session.taskWorkflowStates?.get('1.1')).toBe('idle');
 		});
 	});
 
@@ -405,7 +405,7 @@ describe('rehydrateSessionFromDisk adversarial tests', () => {
 				rehydrateSessionFromDisk(tmpDir, session),
 			).resolves.toBeUndefined();
 			// Should use plan state (evidence in wrong location ignored)
-			expect(session.taskWorkflowStates?.get('1.1')).toBe('coder_delegated');
+			expect(session.taskWorkflowStates?.get('1.1')).toBe('idle');
 		});
 
 		it('should skip evidence file with uppercase extension (.JSON)', async () => {
@@ -426,8 +426,8 @@ describe('rehydrateSessionFromDisk adversarial tests', () => {
 			await expect(
 				rehydrateSessionFromDisk(tmpDir, session),
 			).resolves.toBeUndefined();
-			// Should fall back to plan state (only .json lowercase is read)
-			expect(session.taskWorkflowStates?.get('1.1')).toBe('coder_delegated');
+			// Skipped evidence cannot promote the plan projection.
+			expect(session.taskWorkflowStates?.get('1.1')).toBe('idle');
 		});
 
 		it('should handle evidence file with no extension', async () => {
@@ -448,7 +448,7 @@ describe('rehydrateSessionFromDisk adversarial tests', () => {
 			await expect(
 				rehydrateSessionFromDisk(tmpDir, session),
 			).resolves.toBeUndefined();
-			expect(session.taskWorkflowStates?.get('1.1')).toBe('coder_delegated');
+			expect(session.taskWorkflowStates?.get('1.1')).toBe('idle');
 		});
 	});
 
@@ -510,8 +510,7 @@ describe('rehydrateSessionFromDisk adversarial tests', () => {
 			]);
 
 			// Evidence for a DIFFERENT taskId - should not affect 1.1
-			// Note: This evidence WILL be read for task 1.2
-			// When required_gates match gates exactly, state becomes 'complete'
+			// This legacy evidence is read for 1.2 but has no exact workflow authority.
 			writeEvidence(
 				'1.2',
 				{ reviewer: { sessionId: 'x', timestamp: 'y', agent: 'z' } },
@@ -522,8 +521,8 @@ describe('rehydrateSessionFromDisk adversarial tests', () => {
 
 			// 1.1 should remain complete (unchanged) - NOT downgraded
 			expect(session.taskWorkflowStates?.get('1.1')).toBe('complete');
-			// 1.2 has evidence with reviewer passed -> complete (all required_gates met)
-			expect(session.taskWorkflowStates?.get('1.2')).toBe('complete');
+			// 1.2 remains idle because legacy gates cannot establish completion.
+			expect(session.taskWorkflowStates?.get('1.2')).toBe('idle');
 		});
 
 		it('should preserve stronger state when evidence is corrupted', async () => {
@@ -569,7 +568,7 @@ describe('rehydrateSessionFromDisk adversarial tests', () => {
 			await expect(
 				rehydrateSessionFromDisk(tmpDir, session),
 			).resolves.toBeUndefined();
-			expect(session.taskWorkflowStates?.get('1.1')).toBe('coder_delegated');
+			expect(session.taskWorkflowStates?.get('1.1')).toBe('idle');
 		});
 
 		it('should handle huge array in evidence (DoS attempt)', async () => {
@@ -590,8 +589,8 @@ describe('rehydrateSessionFromDisk adversarial tests', () => {
 			await expect(
 				rehydrateSessionFromDisk(tmpDir, session),
 			).resolves.toBeUndefined();
-			// Should fall back to plan state (invalid required_gates type)
-			expect(session.taskWorkflowStates?.get('1.1')).toBe('coder_delegated');
+			// Invalid evidence cannot promote the plan projection.
+			expect(session.taskWorkflowStates?.get('1.1')).toBe('idle');
 		});
 
 		it('should handle very long string in evidence (DoS attempt)', async () => {
@@ -601,7 +600,7 @@ describe('rehydrateSessionFromDisk adversarial tests', () => {
 			const longString = 'x'.repeat(1024 * 1024);
 
 			// Use helper with correct signature: writeEvidence(taskId, gates, required_gates)
-			// When required_gates matches gates exactly, it becomes complete
+			// Matching legacy gates still lack exact workflow authority.
 			writeEvidence(
 				'1.1',
 				{ reviewer: { sessionId: longString, timestamp: 'y', agent: 'z' } },
@@ -612,9 +611,8 @@ describe('rehydrateSessionFromDisk adversarial tests', () => {
 			await expect(
 				rehydrateSessionFromDisk(tmpDir, session),
 			).resolves.toBeUndefined();
-			// Should handle gracefully - long strings are accepted
-			// When required_gates match, state is 'complete'
-			expect(session.taskWorkflowStates?.get('1.1')).toBe('complete');
+			// Long strings are tolerated, but legacy gates remain non-authoritative.
+			expect(session.taskWorkflowStates?.get('1.1')).toBe('idle');
 		});
 
 		it('should handle evidence with __proto__ in JSON (prototype pollution)', async () => {
@@ -622,7 +620,7 @@ describe('rehydrateSessionFromDisk adversarial tests', () => {
 
 			// JSON with __proto__ property - when parsed, should NOT pollute prototype
 			// Use helper with correct signature
-			// When required_gates matches gates exactly, it becomes complete
+			// Matching legacy gates still lack exact workflow authority.
 			writeEvidence(
 				'1.1',
 				{
@@ -638,16 +636,15 @@ describe('rehydrateSessionFromDisk adversarial tests', () => {
 			await expect(
 				rehydrateSessionFromDisk(tmpDir, session),
 			).resolves.toBeUndefined();
-			// Should work normally - __proto__ is just another property after JSON.parse
-			// When all required_gates pass, state is 'complete'
-			expect(session.taskWorkflowStates?.get('1.1')).toBe('complete');
+			// Prototype-like fields do not grant workflow authority.
+			expect(session.taskWorkflowStates?.get('1.1')).toBe('idle');
 		});
 
 		it('should handle evidence with null values', async () => {
 			writePlan([{ id: '1.1', status: 'in_progress' }]);
 
 			// Null in the gates object - use helper
-			// When required_gates matches gates exactly, it becomes complete
+			// Matching legacy gates still lack exact workflow authority.
 			writeEvidence(
 				'1.1',
 				{
@@ -660,8 +657,8 @@ describe('rehydrateSessionFromDisk adversarial tests', () => {
 			await expect(
 				rehydrateSessionFromDisk(tmpDir, session),
 			).resolves.toBeUndefined();
-			// When all required_gates pass, state is 'complete'
-			expect(session.taskWorkflowStates?.get('1.1')).toBe('complete');
+			// Null-bearing legacy gates do not grant workflow authority.
+			expect(session.taskWorkflowStates?.get('1.1')).toBe('idle');
 		});
 	});
 
@@ -807,7 +804,7 @@ describe('rehydrateSessionFromDisk adversarial tests', () => {
 			).resolves.toBeUndefined();
 			// Should initialize taskWorkflowStates
 			expect(session.taskWorkflowStates).toBeDefined();
-			expect(session.taskWorkflowStates?.get('1.1')).toBe('coder_delegated');
+			expect(session.taskWorkflowStates?.get('1.1')).toBe('idle');
 		});
 
 		it('should handle session where taskWorkflowStates is null', async () => {
@@ -859,8 +856,8 @@ describe('rehydrateSessionFromDisk adversarial tests', () => {
 			// Existing tasks should be preserved
 			expect(session.taskWorkflowStates?.get('1.0')).toBe('complete');
 			expect(session.taskWorkflowStates?.get('1.1')).toBe('tests_run');
-			// New task should be added
-			expect(session.taskWorkflowStates?.get('1.2')).toBe('coder_delegated');
+			// New projected task is added without synthesizing a coder generation.
+			expect(session.taskWorkflowStates?.get('1.2')).toBe('idle');
 		});
 	});
 
@@ -875,7 +872,7 @@ describe('rehydrateSessionFromDisk adversarial tests', () => {
 			const session = createTestSession();
 			await rehydrateSessionFromDisk(tmpDir, session);
 
-			expect(session.taskWorkflowStates?.get('01.01')).toBe('coder_delegated');
+			expect(session.taskWorkflowStates?.get('01.01')).toBe('idle');
 		});
 
 		it('should handle deeply nested phase structure', async () => {
@@ -891,16 +888,16 @@ describe('rehydrateSessionFromDisk adversarial tests', () => {
 			const session = createTestSession();
 			await rehydrateSessionFromDisk(tmpDir, session);
 
-			expect(session.taskWorkflowStates?.get('1.1')).toBe('coder_delegated');
+			expect(session.taskWorkflowStates?.get('1.1')).toBe('idle');
 			expect(session.taskWorkflowStates?.get('1.2')).toBe('complete');
-			expect(session.taskWorkflowStates?.get('2.1')).toBe('idle');
+			expect(session.taskWorkflowStates?.get('2.1')).toBe('blocked');
 		});
 
 		it('should handle evidence with extra unexpected fields', async () => {
 			writePlan([{ id: '1.1', status: 'in_progress' }]);
 
 			// Use helper with correct signature
-			// Note: When required_gates match gates, it becomes 'complete'
+			// Matching legacy gates still lack exact workflow authority.
 			writeEvidence(
 				'1.1',
 				{
@@ -913,8 +910,8 @@ describe('rehydrateSessionFromDisk adversarial tests', () => {
 			await expect(
 				rehydrateSessionFromDisk(tmpDir, session),
 			).resolves.toBeUndefined();
-			// When required_gates all pass, it becomes complete
-			expect(session.taskWorkflowStates?.get('1.1')).toBe('complete');
+			// Extra legacy fields cannot synthesize exact completion evidence.
+			expect(session.taskWorkflowStates?.get('1.1')).toBe('idle');
 		});
 	});
 });

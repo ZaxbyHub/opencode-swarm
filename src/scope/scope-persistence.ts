@@ -996,6 +996,11 @@ export function clearScopeBindingFromDisk(input: {
 	directory: string;
 	binding: ScopeBinding;
 }): ScopePersistenceResult {
+	// Deny this exact generation in memory before any filesystem validation or
+	// retirement I/O. Session teardown must fail closed even when the workspace
+	// can no longer be canonicalized (for example, an isolated lane root that
+	// disappeared concurrently) or durable cleanup cannot acquire its lock.
+	const localRetirement = installScopeBindingRetirementIntent(input.binding);
 	try {
 		assertProjectRoot(input.directory);
 	} catch (error) {
@@ -1003,7 +1008,6 @@ export function clearScopeBindingFromDisk(input: {
 			`Scope retirement project-root validation failed: ${error instanceof Error ? error.message : 'unknown validation error'}`,
 		);
 	}
-	const localRetirement = installScopeBindingRetirementIntent(input.binding);
 	let release: (() => void) | undefined;
 	try {
 		const resolvedWorkspace = fs.realpathSync(input.directory);

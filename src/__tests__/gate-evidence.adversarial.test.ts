@@ -33,9 +33,23 @@ afterEach(() => {
 describe('gate-evidence lock — concurrent recordGateEvidence', () => {
 	test('all 8 concurrent gate records land without corruption', async () => {
 		// Dynamic import after mocks are in place
-		const { recordGateEvidence } = await import('../../src/gate-evidence.js');
+		const {
+			getTaskWorkflowSnapshot,
+			recordAgentDispatch,
+			recordGateEvidence,
+			readTaskEvidence,
+			transitionTaskWorkflowEvidence,
+		} = await import('../../src/gate-evidence.js');
 
 		const taskId = '1.1';
+		await recordAgentDispatch(tempDir, taskId, 'coder');
+		const generation = getTaskWorkflowSnapshot(
+			await readTaskEvidence(tempDir, taskId),
+		).generation;
+		await transitionTaskWorkflowEvidence(tempDir, taskId, {
+			type: 'stage_a_passed',
+			expectedGeneration: generation,
+		});
 		const gates = [
 			'reviewer',
 			'test_engineer',
@@ -48,7 +62,10 @@ describe('gate-evidence lock — concurrent recordGateEvidence', () => {
 		];
 
 		const writers = gates.map((gate, i) =>
-			recordGateEvidence(tempDir, taskId, gate, `session-${i}`, false),
+			recordGateEvidence(tempDir, taskId, gate, `session-${i}`, false, {
+				expectedGeneration: generation,
+				transitionId: `concurrent-gate-${i}`,
+			}),
 		);
 
 		const results = await Promise.allSettled(writers);

@@ -17,16 +17,23 @@ import {
 import { readSupervisorReportRaw } from '../../../src/summaries/store';
 import { TOOL_NAME_SET } from '../../../src/tools/tool-names';
 import { write_architecture_supervisor_evidence } from '../../../src/tools/write-architecture-supervisor-evidence';
+import { createIsolatedTestEnv } from '../../helpers/isolated-test-env';
 
 let tempDir: string;
+let isolatedEnv: ReturnType<typeof createIsolatedTestEnv>;
 
 beforeEach(() => {
+	isolatedEnv = createIsolatedTestEnv();
 	tempDir = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'swarm-asev-')));
 	mkdirSync(path.join(tempDir, '.swarm'), { recursive: true });
 });
 
 afterEach(() => {
-	rmSync(tempDir, { recursive: true, force: true });
+	try {
+		rmSync(tempDir, { recursive: true, force: true });
+	} finally {
+		isolatedEnv.cleanup();
+	}
 });
 
 type ExecuteFn = (args: unknown, ctx: { directory: string }) => Promise<string>;

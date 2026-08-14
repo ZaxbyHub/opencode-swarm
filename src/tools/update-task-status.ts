@@ -11,7 +11,11 @@ import { loadPluginConfig } from '../config/loader';
 import type { RuntimePlan, TaskStatus } from '../config/plan-schema';
 import { stripKnownSwarmPrefix } from '../config/schema';
 import { getProfileLookupForIdentity } from '../db/qa-gate-profile.js';
-import { readTaskEvidenceRaw } from '../gate-evidence.js';
+import type { transitionTaskWorkflowEvidence } from '../gate-evidence.js';
+import {
+	getTaskWorkflowSnapshot,
+	readTaskEvidenceRaw,
+} from '../gate-evidence.js';
 import { validateDiffScope } from '../hooks/diff-scope';
 import { tryAcquireLock } from '../parallel/file-locks.js';
 import { loadPlan, updateTaskStatus } from '../plan/manager';
@@ -22,6 +26,7 @@ import {
 } from '../services/run-memory.js';
 import {
 	advanceTaskState,
+	ensureAgentSession,
 	getTaskState,
 	hasActiveLeanTurbo,
 	hasActiveTurboMode,
@@ -29,6 +34,7 @@ import {
 	recordStageBCompletion,
 	startAgentSession,
 	swarmState,
+	updateTaskWorkflowCache,
 } from '../state';
 import {
 	type ReviewerGateEvidenceKind,
@@ -42,8 +48,16 @@ import {
 	hasExplicitProjectBoundary,
 	isStrictPathDescendant,
 } from '../utils/project-boundary';
-import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
 import { validateTaskIdFormat as _validateTaskIdFormat } from '../validation/task-id';
+import { recoverCoderSettlement } from '../workflow/coder-settlement.js';
+import {
+	recoverPreparedTaskRepair,
+	repairTaskWorkflowUnderPlanLock,
+} from '../workflow/task-repair.js';
+import {
+	commitTaskTerminalUnderPlanLock,
+	recoverPreparedTaskTerminal,
+} from '../workflow/task-terminal.js';
 import { createSwarmTool } from './create-tool';
 import { resolveWorkingDirectory } from './resolve-working-directory';
 
@@ -83,7 +97,7 @@ async function recordRunMemoryOutcome(
 ): Promise<void> {
 	try {
 		await _internals.recordTaskAttempt(directory, input);
-	} catch {
+	} catch (_error) {
 		// Advisory-only — run-memory bookkeeping never alters the tool result.
 	}
 }
@@ -113,6 +127,11 @@ export interface UpdateTaskStatusArgs {
 	status: string;
 	working_directory?: string;
 	force?: boolean;
+	expected_state?: string;
+	expected_generation?: number;
+	target_state?: 'idle';
+	reason?: string;
+	transition_id?: string;
 }
 
 /**
@@ -171,6 +190,14 @@ export function validateTaskId(taskId: string): string | undefined {
 export interface ReviewerGateResult {
 	blocked: boolean;
 	reason: string;
+	requiredGates?: string[];
+	satisfiedGates?: string[];
+	missingGates?: string[];
+	source?: 'durable_exact_task' | 'legacy_compat' | 'turbo_policy';
+	corrupt?: boolean;
+	contradictorySignals?: string[];
+	generation?: number;
+	nextAction?: string;
 }
 
 /**
@@ -192,7 +219,7 @@ function reviewerGateDecision(
 			reasonCode,
 			evidenceKind,
 		);
-	} catch {
+	} catch (_error) {
 		// Reviewer-gate telemetry is observational and must remain fail-open.
 	}
 	return result;
@@ -270,7 +297,11 @@ export function checkReviewerGate(
 		// === Lean Turbo bypass check ===
 		// If Lean Turbo is active and task is in a completed lane, bypass Stage B
 		let skipStandardTurboBypass = false;
-		if (_internals.hasActiveLeanTurbo()) {
+		if (
+			!fallbackDir &&
+			!sessionID &&
+			_internals.hasActiveLeanTurbo(sessionID)
+		) {
 			const resolvedDir = workingDirectory!;
 			try {
 				const leanCheck = _internals.verifyLeanTurboTaskCompletion(
@@ -301,7 +332,12 @@ export function checkReviewerGate(
 				skipStandardTurboBypass = true;
 			}
 		}
-		if (!skipStandardTurboBypass && _internals.hasActiveTurboMode()) {
+		if (
+			!fallbackDir &&
+			!sessionID &&
+			!skipStandardTurboBypass &&
+			_internals.hasActiveTurboMode(sessionID)
+		) {
 			// === Standard Turbo Mode bypass check ===
 			// If Turbo Mode is active AND task does not touch Tier 3 patterns, bypass Stage B
 			const resolvedDir = workingDirectory!;
@@ -341,6 +377,168 @@ export function checkReviewerGate(
 				}
 			} catch {
 				// plan.json missing or unreadable — fall through to normal gate check
+			}
+		}
+
+		// Runtime decisions are exact-task and durable. Session maps and delegation
+		// chains remain diagnostics only and may not satisfy or poison this gate.
+		// The compatibility fallbacks below are reachable only for legacy direct
+		// callers that provide no resolvable workspace at all.
+		let authoritativeDir: string | undefined;
+		if (fallbackDir) {
+			const resolved = _internals.resolveWorkingDirectory(
+				workingDirectory,
+				fallbackDir,
+			);
+			authoritativeDir = resolved.success ? resolved.directory : fallbackDir;
+		} else if (workingDirectory) {
+			authoritativeDir = workingDirectory;
+		}
+		if (authoritativeDir) {
+			const legacyDirectCaller = Symbol('legacy-direct-reviewer-gate');
+			try {
+				const evidence = _internals.readTaskEvidenceRaw(
+					authoritativeDir,
+					taskId,
+				);
+				// Runtime completion always supplies fallbackDir and therefore always
+				// uses exact-task evidence. Preserve the historical direct helper API
+				// only for legacy tests/extensions until they write the workflow marker.
+				if (!fallbackDir && !sessionID && !evidence?.workflow)
+					throw legacyDirectCaller;
+				if (!evidence) {
+					return reviewerGateDecision(
+						taskId,
+						sessionID,
+						{
+							blocked: true,
+							reason: `Task ${taskId} has no exact-task QA evidence. Delegate the required Stage B agents, then retry completion.`,
+							requiredGates: [],
+							satisfiedGates: [],
+							missingGates: ['reviewer', 'test_engineer'],
+							source: 'durable_exact_task',
+							generation: 0,
+							nextAction:
+								'Delegate reviewer and test_engineer for this exact task generation.',
+						},
+						'required_gates_missing',
+						'block',
+					);
+				}
+				if (!evidence.workflow) {
+					return reviewerGateDecision(
+						taskId,
+						sessionID,
+						{
+							blocked: true,
+							reason: `Task ${taskId} has legacy QA evidence without an authoritative workflow generation. Run a fresh exact-task workflow transition before completion.`,
+							requiredGates: [...evidence.required_gates],
+							satisfiedGates: Object.keys(evidence.gates),
+							missingGates: [...evidence.required_gates],
+							source: 'durable_exact_task',
+							generation: 0,
+							nextAction:
+								'Re-run the exact-task coder/Stage A/Stage B workflow to migrate evidence.',
+						},
+						'required_gates_missing',
+						'block',
+					);
+				}
+				const workflow = getTaskWorkflowSnapshot(evidence);
+				const requiredGates = [...evidence.required_gates];
+				const satisfiedGates = requiredGates.filter(
+					(gate) => evidence.gates[gate] != null,
+				);
+				const missingGates = requiredGates.filter(
+					(gate) => evidence.gates[gate] == null,
+				);
+				if (evidence.gates.pre_check == null) missingGates.unshift('pre_check');
+				const contradictorySignals: string[] = [];
+				if (
+					(workflow.state === 'tests_run' || workflow.state === 'complete') &&
+					missingGates.length > 0
+				) {
+					contradictorySignals.push(
+						`workflow state ${workflow.state} claims completion readiness while required proof is missing`,
+					);
+				}
+				if (
+					workflow.state !== 'tests_run' &&
+					workflow.state !== 'complete' &&
+					evidence.gates.pre_check != null &&
+					requiredGates.length > 0 &&
+					missingGates.length === 0
+				) {
+					contradictorySignals.push(
+						`all required proof exists but workflow state is ${workflow.state}`,
+					);
+				}
+				const workflowComplete =
+					workflow.state === 'tests_run' || workflow.state === 'complete';
+				if (
+					requiredGates.length > 0 &&
+					missingGates.length === 0 &&
+					contradictorySignals.length === 0 &&
+					workflowComplete
+				) {
+					return reviewerGateDecision(
+						taskId,
+						sessionID,
+						{
+							blocked: false,
+							reason: '',
+							requiredGates,
+							satisfiedGates,
+							missingGates,
+							contradictorySignals,
+							source: 'durable_exact_task',
+							generation: workflow.generation,
+						},
+						'durable_evidence_complete',
+						'genuine',
+					);
+				}
+				return reviewerGateDecision(
+					taskId,
+					sessionID,
+					{
+						blocked: true,
+						reason: `Task ${taskId} generation ${workflow.generation} has not passed exact-task QA. State: ${workflow.state}. Missing gates: [${missingGates.join(', ')}]. Contradictions: [${contradictorySignals.join('; ')}].`,
+						requiredGates,
+						satisfiedGates,
+						missingGates,
+						contradictorySignals,
+						source: 'durable_exact_task',
+						generation: workflow.generation,
+						nextAction:
+							workflow.state === 'rework_required'
+								? 'Delegate the same task to coder for repair, then rerun Stage A and Stage B.'
+								: 'Complete the missing exact-task Stage A/Stage B transitions.',
+					},
+					'required_gates_missing',
+					'block',
+				);
+			} catch (error) {
+				if (error === legacyDirectCaller) {
+					// Continue into the bounded legacy compatibility path below.
+				} else {
+					return reviewerGateDecision(
+						taskId,
+						sessionID,
+						{
+							blocked: true,
+							reason: `Evidence file for task ${taskId} is corrupt or unreadable: ${error instanceof Error ? error.message : String(error)}`,
+							requiredGates: [],
+							satisfiedGates: [],
+							missingGates: ['reviewer', 'test_engineer'],
+							source: 'durable_exact_task',
+							corrupt: true,
+							nextAction: `Repair .swarm/evidence/${taskId}.json; corrupt evidence fails closed.`,
+						},
+						'corrupt_evidence',
+						'data_quality',
+					);
+				}
 			}
 		}
 
@@ -1011,13 +1209,25 @@ export function checkCouncilGate(
 	}
 
 	const councilGate = evidence?.gates?.council as
-		| { verdict?: string; quorumSize?: number }
+		| { verdict?: string; quorumSize?: number; workflowGeneration?: number }
 		| undefined;
 	if (!councilGate) {
 		return {
 			blocked: true,
 			reason:
 				'council gate required but not yet run — architect must call submit_council_verdicts before advancing this task',
+			active: true,
+		};
+	}
+	const councilWorkflow = getTaskWorkflowSnapshot(evidence);
+	if (
+		!councilWorkflow.authoritative ||
+		councilWorkflow.state !== 'pre_check_passed' ||
+		councilGate.workflowGeneration !== councilWorkflow.generation
+	) {
+		return {
+			blocked: true,
+			reason: `council gate evidence is stale or unbound: expected pre_check_passed@${councilWorkflow.generation}, recorded generation ${String(councilGate.workflowGeneration)}`,
 			active: true,
 		};
 	}
@@ -1156,6 +1366,81 @@ export async function executeUpdateTaskStatus(
 		}
 	}
 
+	const exactRepairRetry =
+		args.status === 'in_progress' &&
+		args.force === true &&
+		typeof args.transition_id === 'string';
+	try {
+		const recoveredCoder = await recoverCoderSettlement(
+			directory,
+			args.task_id,
+		);
+		if (recoveredCoder && ctx?.sessionID) {
+			const callerSession = ensureAgentSession(ctx.sessionID);
+			const workflow = getTaskWorkflowSnapshot(recoveredCoder.evidence);
+			callerSession.taskWorkflowStates.set(args.task_id, workflow.state);
+			callerSession.stageBCompletion?.delete(args.task_id);
+			updateTaskWorkflowCache(callerSession, args.task_id, workflow);
+		}
+	} catch (error) {
+		return {
+			success: false,
+			message:
+				'Task operation paused while recovering an interrupted coder settlement',
+			errors: [error instanceof Error ? error.message : String(error)],
+		};
+	}
+	try {
+		const recoveredTerminal = await recoverPreparedTaskTerminal(
+			directory,
+			args.task_id,
+			ctx?.sessionID ?? 'update-task-status',
+		);
+		if (recoveredTerminal && ctx?.sessionID) {
+			const callerSession = ensureAgentSession(ctx.sessionID);
+			const workflow = getTaskWorkflowSnapshot(recoveredTerminal.evidence);
+			callerSession.taskWorkflowStates.set(args.task_id, workflow.state);
+			callerSession.stageBCompletion?.delete(args.task_id);
+			callerSession.taskCouncilApproved?.delete(args.task_id);
+			callerSession.taskCouncilWorkflowGeneration?.delete(args.task_id);
+			updateTaskWorkflowCache(callerSession, args.task_id, workflow);
+		}
+	} catch (error) {
+		return {
+			success: false,
+			message:
+				'Task operation paused while recovering an interrupted terminal status transition',
+			errors: [error instanceof Error ? error.message : String(error)],
+		};
+	}
+	if (!exactRepairRetry) {
+		try {
+			const recoveredRepair = await recoverPreparedTaskRepair(
+				directory,
+				args.task_id,
+				ctx?.sessionID ?? 'update-task-status',
+			);
+			if (recoveredRepair && ctx?.sessionID) {
+				const callerSession = ensureAgentSession(ctx.sessionID);
+				const workflow = getTaskWorkflowSnapshot(
+					readTaskEvidenceRaw(directory, args.task_id),
+				);
+				callerSession.taskWorkflowStates.set(args.task_id, workflow.state);
+				callerSession.stageBCompletion?.delete(args.task_id);
+				callerSession.taskCouncilApproved?.delete(args.task_id);
+				callerSession.taskCouncilWorkflowGeneration?.delete(args.task_id);
+				updateTaskWorkflowCache(callerSession, args.task_id, workflow);
+			}
+		} catch (error) {
+			return {
+				success: false,
+				message:
+					'Task operation paused while recovering an interrupted task repair',
+				errors: [error instanceof Error ? error.message : String(error)],
+			};
+		}
+	}
+
 	// #1269 finding 2: consult the ledger-replay staleness signal BEFORE any mutation.
 	// loadPlan attaches `_ledgerReplayStale` when it fell back to a stale plan.json
 	// (plan.json hash mismatched the ledger, ledger replay threw, AND no critic-approved
@@ -1166,12 +1451,23 @@ export async function executeUpdateTaskStatus(
 	let loadedPlan: RuntimePlan | null = null;
 	try {
 		loadedPlan = await _internals.loadPlan(directory);
-	} catch {
+	} catch (error) {
 		// loadPlan failure is non-fatal here — the mutation path (updateTaskStatus) performs
 		// its own load and will surface a hard error; we only gate on a positive stale signal.
-		loadedPlan = null;
+		return {
+			success: false,
+			message: 'Failed to load plan for task validation',
+			errors: [error instanceof Error ? error.message : String(error)],
+		};
 	}
-	if (loadedPlan?._ledgerReplayStale === true) {
+	if (!loadedPlan) {
+		return {
+			success: false,
+			message: 'Failed to load plan for task validation',
+			errors: ['Plan could not be loaded'],
+		};
+	}
+	if (loadedPlan._ledgerReplayStale === true) {
 		const staleReason =
 			loadedPlan._ledgerReplayStaleReason ??
 			'plan.json is stale relative to the authoritative ledger (.swarm/plan-ledger.jsonl)';
@@ -1181,129 +1477,85 @@ export async function executeUpdateTaskStatus(
 			errors: [staleReason],
 			recovery_guidance:
 				'Plan state could not be reconciled with the authoritative ledger (.swarm/plan-ledger.jsonl). ' +
-				'Restore from a critic-approved snapshot or re-run plan recovery to rebuild plan.json from the ledger, then retry update_task_status.',
+				'Retry save_plan with the unchanged loaded plan so it can reconverge the projection/hash with the authoritative ledger, then retry update_task_status.',
 		};
 	}
 
-	// FR-005: Guard against re-opening settled tasks to in_progress.
+	const currentTask = loadedPlan.phases
+		.flatMap((phase) => phase.tasks)
+		.find((task) => task.id === args.task_id);
+	if (!currentTask) {
+		return {
+			success: false,
+			message: 'Failed to update task status',
+			errors: [`Task not found: ${args.task_id}`],
+		};
+	}
+
+	// Settled tasks may only move backward through the audited exact-CAS repair.
 	// A task is "settled" iff its status is neither 'pending' nor 'in_progress'.
 	// Reuse the already-loaded plan; do not add a second plan load.
-	if (args.status === 'in_progress' && args.force !== true) {
-		const currentTask = loadedPlan?.phases
-			.flatMap((p) => p.tasks)
-			.find((t) => t.id === args.task_id);
-		if (
-			currentTask &&
-			currentTask.status !== 'pending' &&
-			currentTask.status !== 'in_progress'
-		) {
+	if (
+		currentTask.status !== 'pending' &&
+		currentTask.status !== 'in_progress' &&
+		args.status !== currentTask.status
+	) {
+		if (args.status !== 'in_progress' || args.force !== true) {
 			return {
 				success: false,
-				message: `Task ${args.task_id} is settled (${currentTask.status}); cannot re-open to in_progress. Use force:true only for manual repair.`,
+				message: `Task ${args.task_id} is settled (${currentTask.status}); backward transitions require the audited in_progress repair path.`,
 				errors: [
-					`Task ${args.task_id} is settled (${currentTask.status}); cannot re-open to in_progress. Use force:true only for manual repair.`,
+					`Task ${args.task_id} is settled (${currentTask.status}); use force:true with exact CAS and audit fields to repair it to in_progress.`,
 				],
 			};
 		}
 	}
 
 	if (args.status === 'in_progress' && args.force === true) {
+		const repairFieldsValid =
+			typeof args.expected_state === 'string' &&
+			args.expected_state.length > 0 &&
+			Number.isInteger(args.expected_generation) &&
+			(args.expected_generation ?? -1) >= 0 &&
+			args.target_state === 'idle' &&
+			typeof args.reason === 'string' &&
+			args.reason.trim().length > 0 &&
+			typeof args.transition_id === 'string' &&
+			args.transition_id.trim().length > 0;
+		if (!repairFieldsValid) {
+			return {
+				success: false,
+				message:
+					'TASK_REPAIR_INVALID: force repair requires an exact CAS and audit identity',
+				errors: [
+					'Provide expected_state, expected_generation, target_state="idle", non-empty reason, and non-empty transition_id.',
+				],
+			};
+		}
 		logger.log(
 			`[update-task-status] Force-override: re-opening settled task ${args.task_id} to in_progress`,
 		);
 	}
 
-	// Seed the task state machine: when transitioning to in_progress, advance idle → coder_delegated
-	// Also synchronize session task identity fields so later gate recording uses the correct task
-	if (args.status === 'in_progress') {
-		for (const [_sessionId, session] of swarmState.agentSessions) {
-			const currentState = getTaskState(session, args.task_id);
-			if (currentState === 'idle') {
-				try {
-					advanceTaskState(session, args.task_id, 'coder_delegated');
-				} catch {
-					// Non-fatal: session may not support state advancement
-				}
-			}
-			// Synchronize active task identity for durable gate recording
-			session.currentTaskId = args.task_id;
-		}
-	}
-
-	// Write minimal gate-tracking evidence to persist across session restarts.
-	// Placed AFTER directory validation so we only write under the validated workspace.
-	// required_gates starts empty so that actual agent dispatches (recordAgentDispatch /
-	// recordGateEvidence called from toolAfter) determine which gates are required.
-	// Using [] prevents docs/review-only tasks from being permanently blocked by a
-	// hardcoded ['reviewer', 'test_engineer'] requirement when no test_engineer runs.
-	if (args.status === 'in_progress') {
-		try {
-			const evidencePath = path.join(
-				directory,
-				'.swarm',
-				'evidence',
-				`${args.task_id}.json`,
-			);
-			fs.mkdirSync(path.dirname(evidencePath), { recursive: true });
-			// Atomic create: use wx flag to fail if file already exists (no TOCTOU race)
-			const fd = fs.openSync(evidencePath, 'wx');
-			let writeOk = false;
-			try {
-				fs.writeSync(
-					fd,
-					JSON.stringify(
-						{
-							taskId: args.task_id,
-							required_gates: [],
-							gates: {},
-						},
-						null,
-						2,
-					),
-				);
-				writeOk = true;
-			} finally {
-				fs.closeSync(fd);
-				invalidateCachedArtifact(evidencePath);
-				// The invalidation above: `.swarm/evidence/<taskId>.json` is read
-				// back through the cached readers, which decide freshness from a stat
-				// stamp alone. The `wx` open only ever CREATES, but this path can
-				// have been read, then unlinked (the !writeOk branch below, /swarm
-				// reset, a rollback), then re-created here with byte-identical
-				// content inside one filesystem timestamp tick — at which point the
-				// pre-delete entry is served. Unconditional: the failure branch
-				// unlinks, and a deleted path bypasses the cache anyway.
-				// Remove partial/empty file on write failure to avoid a permanently broken gate file
-				if (!writeOk) {
-					try {
-						fs.unlinkSync(evidencePath);
-					} catch {
-						/* best-effort cleanup */
-					}
-				}
-			}
-		} catch {
-			/* Advisory only — EEXIST (file already exists) or other errors never block status update */
-		}
-	}
+	// Status alone is not coder mutation proof. Exact caller correlation is
+	// applied only after the authoritative plan write succeeds below.
 
 	// Derive agent from swarmState session context, fallback to 'update-task-status'
 	// sentinel. Derived here (rather than at the lock step below) because the
 	// gate-block paths that record run-memory outcomes return before the lock.
-	let agentName = 'update-task-status';
-	for (const [, agent] of swarmState.activeAgent) {
-		agentName = agent;
-		break; // Use first active agent found
-	}
+	const agentName =
+		(ctx?.sessionID ? swarmState.activeAgent.get(ctx.sessionID) : undefined) ??
+		'update-task-status';
 
 	// State machine check: task must have reached tests_run or complete state
 	// Uses the validated directory for plan.json fallback resolution
 	if (args.status === 'completed') {
-		// Recovery: reconcile task state with delegation history before gate check.
-		// This handles cases where the delegation-gate toolAfter hook did not
-		// advance the state (missing subagent_type, cross-session gaps, pure
-		// verification tasks without coder delegation, etc.).
-		recoverTaskStateFromDelegations(args.task_id, directory);
+		// Legacy direct-helper callers retain diagnostic recovery. Real tool
+		// execution is exact-evidence authoritative and must stay side-effect-free
+		// until the durable completion transaction succeeds.
+		if (!fallbackDir && !ctx?.sessionID) {
+			recoverTaskStateFromDelegations(args.task_id, directory);
+		}
 
 		// Check if the phase requires reviewer — non-code phases (acceptance, docs) may not
 		let phaseRequiresReviewer = true;
@@ -1358,7 +1610,7 @@ export async function executeUpdateTaskStatus(
 				args.task_id,
 				directory,
 				ctx?.sessionID,
-				fallbackDir,
+				ctx?.sessionID ? fallbackDir : undefined,
 			);
 			if (reviewerCheck.blocked) {
 				await recordRunMemoryOutcome(directory, {
@@ -1409,53 +1661,194 @@ export async function executeUpdateTaskStatus(
 		};
 	}
 	try {
-		const updatedPlan = await _internals.updateTaskStatus(
-			directory,
-			args.task_id,
-			args.status as TaskStatus,
-			{ force: args.force, planLockAlreadyHeld: true },
-		);
-
+		const lockedPlan = await _internals.loadPlan(directory);
+		if (lockedPlan?._ledgerReplayStale === true) {
+			return {
+				success: false,
+				message:
+					'Task status update refused: plan became ledger-stale while waiting for the lock',
+				errors: [
+					lockedPlan._ledgerReplayStaleReason ??
+						'plan.json is stale relative to the authoritative ledger',
+				],
+				recovery_guidance:
+					'Retry save_plan with the unchanged loaded plan to reconverge the projection/hash, then retry update_task_status.',
+			};
+		}
+		if (!lockedPlan) {
+			return {
+				success: false,
+				message: 'Failed to update task status',
+				errors: ['No approved plan is available under the plan lock'],
+			};
+		}
+		const lockedTask = lockedPlan?.phases
+			.flatMap((phase) => phase.tasks)
+			.find((task) => task.id === args.task_id);
+		if (!lockedTask) {
+			return {
+				success: false,
+				message: 'Failed to update task status',
+				errors: [`Task not found: ${args.task_id}`],
+			};
+		}
+		const forceRepair = args.status === 'in_progress' && args.force === true;
+		const repairResult = forceRepair
+			? await repairTaskWorkflowUnderPlanLock({
+					directory,
+					taskId: args.task_id,
+					actor: agentName,
+					reason: args.reason as string,
+					transitionId: args.transition_id as string,
+					expectedState: args.expected_state as string,
+					expectedGeneration: args.expected_generation as number,
+					currentPlanStatus: lockedTask.status,
+					currentPlan: lockedPlan,
+					updatePlan: () =>
+						_internals.updateTaskStatus(
+							directory,
+							args.task_id,
+							'in_progress',
+							{ force: true, planLockAlreadyHeld: true },
+						),
+				})
+			: null;
+		let updatedPlan: RuntimePlan;
+		let terminalEvidence: Awaited<
+			ReturnType<typeof transitionTaskWorkflowEvidence>
+		> | null = null;
 		if (args.status === 'completed') {
-			// Rule 2 auto-commit fires inside `plan/manager.updateTaskStatus`
-			// after savePlan succeeds (see plan/manager.ts for rationale).
-			// Centralizing it there covers both this tool entry AND the
-			// council/reviewer completion path in `delegation-gate.ts`, so do
-			// NOT add a duplicate commit hook here.
-			for (const [_sessionId, session] of swarmState.agentSessions) {
-				if (!(session.taskWorkflowStates instanceof Map)) {
-					continue;
-				}
-
-				const currentState = getTaskState(session, args.task_id);
-				if (currentState === 'tests_run') {
-					try {
-						advanceTaskState(session, args.task_id, 'complete');
-					} catch {
-						// Non-fatal: do not fail task status update on state sync issues
+			const lockedTaskPhase = lockedPlan.phases.find((phase) =>
+				phase.tasks.some((task) => task.id === args.task_id),
+			);
+			const lockedPhaseRequiresReviewer =
+				!lockedTaskPhase?.required_agents ||
+				lockedTaskPhase.required_agents.includes('reviewer');
+			const terminalResult = await commitTaskTerminalUnderPlanLock({
+				directory,
+				taskId: args.task_id,
+				actor: agentName,
+				transitionId: `plan-status:${args.task_id}:completed:${Date.now()}`,
+				currentPlanStatus: lockedTask.status,
+				targetStatus: 'completed',
+				qaExempt: !lockedPhaseRequiresReviewer,
+				currentPlan: lockedPlan,
+				validateEvidence: async () => {
+					const lockedGate = checkReviewerGate(
+						args.task_id,
+						directory,
+						false,
+						ctx?.sessionID,
+						fallbackDir ?? directory,
+					);
+					const lockedCouncil = checkCouncilGate(directory, args.task_id);
+					if (
+						lockedCouncil.blocked ||
+						(lockedPhaseRequiresReviewer &&
+							!lockedCouncil.active &&
+							lockedGate.blocked)
+					) {
+						throw new Error(
+							`TASK_COMPLETION_CAS_MISMATCH: ${lockedCouncil.blocked ? lockedCouncil.reason : lockedGate.reason}`,
+						);
 					}
+				},
+				updatePlan: async () => {
+					const next = await _internals.updateTaskStatus(
+						directory,
+						args.task_id,
+						'completed',
+						{ force: false, planLockAlreadyHeld: true },
+					);
+					const persisted = next.phases
+						.flatMap((phase) => phase.tasks)
+						.find((task) => task.id === args.task_id);
+					if (persisted?.status !== 'completed') {
+						throw new Error('TASK_STATUS_WRITE_NOT_APPLIED');
+					}
+					return next;
+				},
+			});
+			updatedPlan = terminalResult.plan;
+			terminalEvidence = terminalResult.evidence;
+		} else if (args.status === 'blocked') {
+			const terminalResult = await commitTaskTerminalUnderPlanLock({
+				directory,
+				taskId: args.task_id,
+				actor: agentName,
+				transitionId: `plan-status:${args.task_id}:blocked:${Date.now()}`,
+				currentPlanStatus: lockedTask.status,
+				targetStatus: 'blocked',
+				qaExempt: false,
+				currentPlan: lockedPlan,
+				updatePlan: async () => {
+					const next = await _internals.updateTaskStatus(
+						directory,
+						args.task_id,
+						'blocked',
+						{ force: false, planLockAlreadyHeld: true },
+					);
+					const persisted = next.phases
+						.flatMap((phase) => phase.tasks)
+						.find((task) => task.id === args.task_id);
+					if (persisted?.status !== 'blocked') {
+						throw new Error('TASK_STATUS_WRITE_NOT_APPLIED');
+					}
+					return next;
+				},
+			});
+			updatedPlan = terminalResult.plan;
+			terminalEvidence = terminalResult.evidence;
+		} else {
+			updatedPlan =
+				repairResult?.plan ??
+				(await _internals.updateTaskStatus(
+					directory,
+					args.task_id,
+					args.status as TaskStatus,
+					{ force: false, planLockAlreadyHeld: true },
+				));
+			const persisted = updatedPlan.phases
+				.flatMap((phase) => phase.tasks)
+				.find((task) => task.id === args.task_id);
+			if (persisted?.status !== args.status) {
+				throw new Error('TASK_STATUS_WRITE_NOT_APPLIED');
+			}
+		}
+
+		if (terminalEvidence) {
+			const terminal = getTaskWorkflowSnapshot(terminalEvidence);
+			const callerSession = ctx?.sessionID
+				? swarmState.agentSessions.get(ctx.sessionID)
+				: undefined;
+			if (callerSession) {
+				const session = callerSession;
+				session.taskWorkflowStates.set(args.task_id, terminal.state);
+				session.stageBCompletion?.delete(args.task_id);
+				updateTaskWorkflowCache(session, args.task_id, terminal);
+			}
+		}
+
+		if (args.status === 'in_progress') {
+			if (ctx?.sessionID)
+				ensureAgentSession(ctx.sessionID).currentTaskId = args.task_id;
+			if (repairResult) {
+				const callerSession = ctx?.sessionID
+					? swarmState.agentSessions.get(ctx.sessionID)
+					: undefined;
+				if (callerSession) {
+					const session = callerSession;
+					session.taskWorkflowStates.set(args.task_id, 'idle');
+					session.stageBCompletion?.delete(args.task_id);
+					session.taskCouncilApproved?.delete(args.task_id);
+					session.taskCouncilWorkflowGeneration?.delete(args.task_id);
+					updateTaskWorkflowCache(session, args.task_id, {
+						generation: repairResult.generation,
+					});
 				}
 			}
 		}
 
-		// NOTE: the terminal outcome (completed -> pass, blocked -> fail) is NOT
-		// recorded here. It is recorded inside `plan/manager.updateTaskStatus`
-		// after savePlan succeeds, for the same reason the Rule 2 auto-commit
-		// lives there: `advanceTaskStateAndPersist` (src/state.ts, reached from
-		// the council APPROVE fast-path in delegation-gate.ts) completes tasks
-		// without ever calling this tool. Recording here would miss those and
-		// report completed tasks as "Still failing". Do NOT add a recording
-		// hook here as well.
-		//
-		// Centralizing prevents MISSED completions; it does not make duplicates
-		// impossible. `updateTaskStatus` is idempotent for an already-completed
-		// task and has no settled guard on completed->completed, so one logical
-		// completion can legitimately pass through it more than once — e.g. the
-		// council auto-completion followed by an architect tool call, or the
-		// delegation-gate `toolAfter` advance at delegation-gate.ts:3266. Each
-		// pass through appends another `pass`, inflating attemptNumber. The
-		// verdict stays correct; only the attempt count overstates. This is the
-		// documented invocation-counting limitation — see the release note.
 		return {
 			success: true,
 			message: 'Task status updated successfully',
@@ -1509,7 +1902,33 @@ export const update_task_status: ToolDefinition = createSwarmTool({
 			.optional()
 			.default(false)
 			.describe(
-				'Force override to permit re-opening a settled task (completed/blocked/failed) to in_progress. Use only for manual repair.',
+				'Enable the audited backward-only repair contract. Requires expected_state, expected_generation, target_state="idle", reason, and transition_id.',
+			),
+		expected_state: z
+			.string()
+			.optional()
+			.describe('CAS workflow state expected by a force repair.'),
+		expected_generation: z
+			.number()
+			.int()
+			.min(0)
+			.optional()
+			.describe('ABA-safe workflow generation expected by a force repair.'),
+		target_state: z
+			.literal('idle')
+			.optional()
+			.describe('Backward-only repair target. The only valid target is idle.'),
+		reason: z
+			.string()
+			.min(1)
+			.optional()
+			.describe('Required human-readable audit reason for a force repair.'),
+		transition_id: z
+			.string()
+			.min(1)
+			.optional()
+			.describe(
+				'Caller-generated idempotency key for an audited force repair.',
 			),
 	},
 	execute: async (args: unknown, _directory: string, _ctx?: ToolContext) => {

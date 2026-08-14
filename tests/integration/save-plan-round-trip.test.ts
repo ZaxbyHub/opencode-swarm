@@ -163,7 +163,7 @@ describe('save_plan + update_task_status round-trip integration', () => {
 		expect(planMdExists).toBe(true);
 	});
 
-	it('evidence seed file is created on in_progress transition', async () => {
+	it('in_progress is ledger-backed without fabricating workflow evidence', async () => {
 		const plan: SavePlanArgs = {
 			title: 'Evidence Seed Test',
 			swarm_id: 'integration',
@@ -183,20 +183,30 @@ describe('save_plan + update_task_status round-trip integration', () => {
 			tmpDir,
 		);
 
-		// Verify evidence seed was created
+		// Status projection changes are not coder settlements and must not fabricate
+		// exact-task workflow evidence.
 		const evidenceExists = await fs
 			.access(path.join(tmpDir, '.swarm', 'evidence', '1.1.json'))
 			.then(() => true)
 			.catch(() => false);
-		expect(evidenceExists).toBe(true);
+		expect(evidenceExists).toBe(false);
 
-		const evidence = JSON.parse(
+		const ledgerEvents = (
 			await fs.readFile(
-				path.join(tmpDir, '.swarm', 'evidence', '1.1.json'),
+				path.join(tmpDir, '.swarm', 'plan-ledger.jsonl'),
 				'utf-8',
-			),
+			)
+		)
+			.trim()
+			.split('\n')
+			.map((line) => JSON.parse(line));
+		expect(ledgerEvents).toContainEqual(
+			expect.objectContaining({
+				event_type: 'task_status_changed',
+				task_id: '1.1',
+				from_status: 'pending',
+				to_status: 'in_progress',
+			}),
 		);
-		expect(evidence.taskId).toBe('1.1');
-		expect(evidence.required_gates).toEqual([]);
 	});
 });

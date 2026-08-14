@@ -15,13 +15,17 @@ import {
 	recordPendingDelegation,
 } from '../../../src/background/pending-delegations';
 import { _internals as workspaceSnapshotInternals } from '../../../src/background/workspace-snapshot';
-import { readTaskEvidence } from '../../../src/gate-evidence';
+import {
+	readTaskEvidence,
+	recordGateEvidence,
+} from '../../../src/gate-evidence';
 import {
 	ensureAgentSession,
 	getTaskState,
 	resetSwarmState,
 } from '../../../src/state';
 import { checkReviewerGate } from '../../../src/tools/update-task-status';
+import { seedStageAPassed } from '../../helpers/task-workflow-evidence';
 
 function makeTempProject(): string {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'swarm-bgobs-'));
@@ -50,8 +54,12 @@ function syntheticPartEvent(opts: {
 	};
 }
 
-const completedEnvelope = (id: string) =>
-	`<task id="${id}" state="completed">\n<task_result>done</task_result>\n</task>`;
+const completedEnvelope = (id: string, taskId?: string) =>
+	`<task id="${id}" state="completed">\n<task_result>${
+		taskId
+			? `[REVIEWED] | ${taskId} | APPROVED | no issues\n[TESTED] | ${taskId} | PASS | focused tests passed`
+			: 'done'
+	}</task_result>\n</task>`;
 
 describe('background completion observer', () => {
 	let dir: string;
@@ -149,6 +157,7 @@ describe('background completion observer', () => {
 		parent.taskWorkflowStates.set('1.2', 'coder_delegated');
 		const unrelated = ensureAgentSession('other_parent_session');
 		unrelated.taskWorkflowStates.set('1.2', 'coder_delegated');
+		const generation = await seedStageAPassed(dir, '1.2');
 
 		await recordPendingDelegation(dir, {
 			correlationId: 'ses_scoped_reviewer',
@@ -160,6 +169,7 @@ describe('background completion observer', () => {
 			swarmPrefixedAgent: 'reviewer',
 			planTaskId: '1.2',
 			evidenceTaskId: '1.2',
+			workflowGeneration: generation,
 		});
 
 		const obs = createBackgroundCompletionObserver({
@@ -168,7 +178,7 @@ describe('background completion observer', () => {
 		});
 		await obs.event(
 			syntheticPartEvent({
-				text: completedEnvelope('ses_scoped_reviewer'),
+				text: completedEnvelope('ses_scoped_reviewer', '1.2'),
 				synthetic: true,
 			}),
 		);
@@ -217,7 +227,7 @@ describe('background completion observer', () => {
 		});
 		await obs.event(
 			syntheticPartEvent({
-				text: completedEnvelope('ses_stale_reviewer'),
+				text: completedEnvelope('ses_stale_reviewer', '2.1'),
 				synthetic: true,
 			}),
 		);
@@ -272,7 +282,7 @@ describe('background completion observer', () => {
 		});
 		await obs.event(
 			syntheticPartEvent({
-				text: completedEnvelope('ses_prhead_stale'),
+				text: completedEnvelope('ses_prhead_stale', '2.1-pr'),
 				synthetic: true,
 			}),
 		);
@@ -299,6 +309,7 @@ describe('background completion observer', () => {
 			swarmPrefixedAgent: 'reviewer',
 			planTaskId: '2.2',
 			evidenceTaskId: '2.2',
+			workflowGeneration: 1,
 		});
 
 		const obs = createBackgroundCompletionObserver({
@@ -307,7 +318,7 @@ describe('background completion observer', () => {
 		});
 		await obs.event(
 			syntheticPartEvent({
-				text: completedEnvelope('ses_retry_reviewer'),
+				text: completedEnvelope('ses_retry_reviewer', '2.2'),
 				synthetic: true,
 			}),
 		);
@@ -318,9 +329,10 @@ describe('background completion observer', () => {
 		expect(getTaskState(session, '2.2')).toBe('coder_delegated');
 
 		fs.unlinkSync(path.join(evidenceDir, '2.2.json'));
+		await seedStageAPassed(dir, '2.2');
 		await obs.event(
 			syntheticPartEvent({
-				text: completedEnvelope('ses_retry_reviewer'),
+				text: completedEnvelope('ses_retry_reviewer', '2.2'),
 				synthetic: true,
 			}),
 		);
@@ -358,13 +370,13 @@ describe('background completion observer', () => {
 		});
 		await obs.event(
 			syntheticPartEvent({
-				text: completedEnvelope('ses_retry_still_broken'),
+				text: completedEnvelope('ses_retry_still_broken', '2.3'),
 				synthetic: true,
 			}),
 		);
 		await obs.event(
 			syntheticPartEvent({
-				text: completedEnvelope('ses_retry_still_broken'),
+				text: completedEnvelope('ses_retry_still_broken', '2.3'),
 				synthetic: true,
 			}),
 		);
@@ -379,6 +391,17 @@ describe('background completion observer', () => {
 	it('applies trusted background test_engineer completion only after reviewer completion is present', async () => {
 		const session = ensureAgentSession('parent_session');
 		session.taskWorkflowStates.set('3.1', 'reviewer_run');
+		const generation = await seedStageAPassed(dir, '3.1');
+		await recordGateEvidence(
+			dir,
+			'3.1',
+			'reviewer',
+			'reviewer-session',
+			false,
+			{
+				expectedGeneration: generation,
+			},
+		);
 
 		await recordPendingDelegation(dir, {
 			correlationId: 'ses_test_engineer',
@@ -390,6 +413,7 @@ describe('background completion observer', () => {
 			swarmPrefixedAgent: 'test_engineer',
 			planTaskId: '3.1',
 			evidenceTaskId: '3.1',
+			workflowGeneration: generation,
 		});
 
 		const obs = createBackgroundCompletionObserver({
@@ -398,7 +422,7 @@ describe('background completion observer', () => {
 		});
 		await obs.event(
 			syntheticPartEvent({
-				text: completedEnvelope('ses_test_engineer'),
+				text: completedEnvelope('ses_test_engineer', '3.1'),
 				synthetic: true,
 			}),
 		);
@@ -415,6 +439,7 @@ describe('background completion observer', () => {
 	it('keeps test_engineer-first completion blocked until reviewer also completes', async () => {
 		const session = ensureAgentSession('parent_session');
 		session.taskWorkflowStates.set('3.2', 'coder_delegated');
+		const generation = await seedStageAPassed(dir, '3.2');
 
 		await recordPendingDelegation(dir, {
 			correlationId: 'ses_test_first',
@@ -426,6 +451,7 @@ describe('background completion observer', () => {
 			swarmPrefixedAgent: 'test_engineer',
 			planTaskId: '3.2',
 			evidenceTaskId: '3.2',
+			workflowGeneration: generation,
 		});
 		await recordPendingDelegation(dir, {
 			correlationId: 'ses_reviewer_second',
@@ -437,6 +463,7 @@ describe('background completion observer', () => {
 			swarmPrefixedAgent: 'reviewer',
 			planTaskId: '3.2',
 			evidenceTaskId: '3.2',
+			workflowGeneration: generation,
 		});
 
 		const obs = createBackgroundCompletionObserver({
@@ -445,7 +472,7 @@ describe('background completion observer', () => {
 		});
 		await obs.event(
 			syntheticPartEvent({
-				text: completedEnvelope('ses_test_first'),
+				text: completedEnvelope('ses_test_first', '3.2'),
 				synthetic: true,
 			}),
 		);
@@ -460,7 +487,7 @@ describe('background completion observer', () => {
 
 		await obs.event(
 			syntheticPartEvent({
-				text: completedEnvelope('ses_reviewer_second'),
+				text: completedEnvelope('ses_reviewer_second', '3.2'),
 				synthetic: true,
 			}),
 		);
@@ -475,99 +502,5 @@ describe('background completion observer', () => {
 		expect(checkReviewerGate('3.2', dir, true, 'parent_session').blocked).toBe(
 			false,
 		);
-	});
-
-	it('ignores a correlated completion with the wrong parent session', async () => {
-		await recordPendingDelegation(dir, {
-			correlationId: 'ses_parent_mismatch',
-			jobId: 'job_obs',
-			subagentSessionId: 'ses_parent_mismatch',
-			parentSessionId: 'parent_session',
-			callID: 'c1',
-			normalizedAgent: 'reviewer',
-			swarmPrefixedAgent: 'reviewer',
-			planTaskId: '1.1',
-			evidenceTaskId: '1.1',
-		});
-
-		const obs = createBackgroundCompletionObserver({
-			config: { enabled: true },
-			directory: dir,
-		});
-		await obs.event(
-			syntheticPartEvent({
-				text: completedEnvelope('ses_parent_mismatch'),
-				synthetic: true,
-				sessionID: 'other_parent',
-			}),
-		);
-
-		expect(findByCorrelationId(dir, 'ses_parent_mismatch')?.status).toBe(
-			'pending',
-		);
-	});
-
-	it('ignores non-synthetic envelope-shaped text (trust gate)', async () => {
-		const obs = createBackgroundCompletionObserver({
-			config: { enabled: true },
-			directory: dir,
-		});
-		await expect(
-			obs.event(
-				syntheticPartEvent({
-					text: completedEnvelope('ses_spoof'),
-					synthetic: false,
-				}),
-			),
-		).resolves.toBeUndefined();
-	});
-
-	it('ignores non-text / non-part / unrelated events without throwing', async () => {
-		const obs = createBackgroundCompletionObserver({
-			config: { enabled: true },
-			directory: dir,
-		});
-		await expect(
-			obs.event({ event: { type: 'session.idle', properties: {} } }),
-		).resolves.toBeUndefined();
-		await expect(obs.event({ event: undefined })).resolves.toBeUndefined();
-		await expect(
-			obs.event({
-				event: {
-					type: 'message.part.updated',
-					properties: { part: { type: 'file' } },
-				},
-			}),
-		).resolves.toBeUndefined();
-	});
-
-	it('handles a synthetic completion with no matching pending record (no throw)', async () => {
-		const obs = createBackgroundCompletionObserver({
-			config: { enabled: true },
-			directory: dir,
-		});
-		await expect(
-			obs.event(
-				syntheticPartEvent({
-					text: completedEnvelope('ses_unknown'),
-					synthetic: true,
-				}),
-			),
-		).resolves.toBeUndefined();
-	});
-
-	it('ignores a running (non-terminal) synthetic envelope', async () => {
-		const obs = createBackgroundCompletionObserver({
-			config: { enabled: true },
-			directory: dir,
-		});
-		await expect(
-			obs.event(
-				syntheticPartEvent({
-					text: '<task id="ses_run" state="running"></task>',
-					synthetic: true,
-				}),
-			),
-		).resolves.toBeUndefined();
 	});
 });

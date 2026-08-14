@@ -465,7 +465,7 @@ appendLedgerEvent({ type: 'plan-updated', payload: { ... } });
 - `tests/unit/plan/*.test.ts` — replay round-trip + projection tests.
 - `docs/plan-durability.md` is updated when the schema changes.
 
-**Settled-task re-open guard (FR-005):** `update_task_status` (and the automated delegation path via `advanceTaskStateAndPersist`) must not silently re-open a settled task (`completed` / `blocked` / `closed`) to `in_progress`. `src/plan/manager.ts` implements a three-layer guard: the tool layer (`src/tools/update-task-status.ts`), the manager layer (`updateTaskStatus`), and the automated path all check the current task state before allowing `in_progress` transitions. An explicit `force: true` option permits manual repair. This prevents a session restart from silently overwriting completed work with a fresh `in_progress` state.
+**Settled-task re-open guard (FR-005):** `update_task_status` must not silently re-open a settled task (`completed` / `blocked` / `closed`) to `in_progress`. The tool and manager layers reject ordinary backward transitions; the only exception is the exact-task audited repair transaction with explicit force, reason, transition identity, expected state, and expected generation. The legacy `advanceTaskStateAndPersist` wrapper refuses coder and terminal boundaries so it cannot bypass that transaction.
 
 ### 6. test_runner safety
 

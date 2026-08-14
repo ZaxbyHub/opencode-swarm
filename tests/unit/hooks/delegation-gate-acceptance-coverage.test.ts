@@ -29,7 +29,10 @@ import {
 	normalizeAcceptanceText,
 } from '../../../src/hooks/delegation-gate';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
-import { recordPlanCriticApproval } from './_delegation-gate-helpers';
+import {
+	recordPlanCriticApproval,
+	seedAuthoritativeTaskWorkflow,
+} from './_delegation-gate-helpers';
 
 // ---------------------------------------------------------------------------
 // Shared spec fixture (mirrors the real spec.md bullet format:
@@ -378,6 +381,12 @@ describe('toolBefore ACCEPTANCE coverage gate (integration, F-007/#1687)', () =>
 
 	it('spec.md absent but fr_refs set => resolves (fail-open on missing spec)', async () => {
 		fs.rmSync(path.join(tempDir, '.swarm', 'spec.md'), { force: true });
+		await seedAuthoritativeTaskWorkflow(
+			tempDir,
+			'1.1',
+			'pre_check_passed',
+			'sess-cov-nospec',
+		);
 		const hooks = createDelegationGateHook(makeConfig(), tempDir);
 		ensureAgentSession('sess-cov-nospec', 'architect');
 		// Reviewer isolates the check from downstream coder-only gates; the mapped

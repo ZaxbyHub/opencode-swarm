@@ -18,6 +18,7 @@ describe('ExecutionProfileSchema', () => {
 			expect(profile.locked).toBe(false);
 			expect(profile.auto_proceed).toBe(false);
 			expect(profile.commit_after_each_completed_task).toBe(false);
+			expect(profile.planning_profile).toBeUndefined();
 		});
 	});
 
@@ -86,6 +87,24 @@ describe('ExecutionProfileSchema', () => {
 			expect(result.data.commit_after_each_completed_task).toBe(true);
 		});
 
+		it('accepts planning_profile: balanced', () => {
+			const result = ExecutionProfileSchema.safeParse({
+				planning_profile: 'balanced',
+			});
+			expect(result.success).toBe(true);
+			if (!result.success) return;
+			expect(result.data.planning_profile).toBe('balanced');
+		});
+
+		it('accepts planning_profile: strict', () => {
+			const result = ExecutionProfileSchema.safeParse({
+				planning_profile: 'strict',
+			});
+			expect(result.success).toBe(true);
+			if (!result.success) return;
+			expect(result.data.planning_profile).toBe('strict');
+		});
+
 		it('accepts a fully populated profile', () => {
 			const result = ExecutionProfileSchema.safeParse({
 				parallelization_enabled: true,
@@ -94,6 +113,7 @@ describe('ExecutionProfileSchema', () => {
 				locked: true,
 				auto_proceed: true,
 				commit_after_each_completed_task: true,
+				planning_profile: 'balanced',
 			});
 			expect(result.success).toBe(true);
 			if (!result.success) return;
@@ -103,6 +123,7 @@ describe('ExecutionProfileSchema', () => {
 			expect(result.data.locked).toBe(true);
 			expect(result.data.auto_proceed).toBe(true);
 			expect(result.data.commit_after_each_completed_task).toBe(true);
+			expect(result.data.planning_profile).toBe('balanced');
 		});
 	});
 
@@ -154,6 +175,13 @@ describe('ExecutionProfileSchema', () => {
 			const result = ExecutionProfileSchema.safeParse({ auto_proceed: null });
 			expect(result.success).toBe(false);
 		});
+
+		it('rejects unknown planning_profile', () => {
+			const result = ExecutionProfileSchema.safeParse({
+				planning_profile: 'ceremonial',
+			});
+			expect(result.success).toBe(false);
+		});
 	});
 
 	describe('PlanSchema integration', () => {
@@ -177,6 +205,7 @@ describe('ExecutionProfileSchema', () => {
 					council_parallel: false,
 					locked: false,
 					auto_proceed: true,
+					planning_profile: 'strict',
 				},
 			};
 			const result = PlanSchema.safeParse(planData);
@@ -185,6 +214,7 @@ describe('ExecutionProfileSchema', () => {
 			expect(result.data.execution_profile?.parallelization_enabled).toBe(true);
 			expect(result.data.execution_profile?.max_concurrent_tasks).toBe(2);
 			expect(result.data.execution_profile?.auto_proceed).toBe(true);
+			expect(result.data.execution_profile?.planning_profile).toBe('strict');
 		});
 
 		it('PlanSchema parses plan without execution_profile (optional)', () => {

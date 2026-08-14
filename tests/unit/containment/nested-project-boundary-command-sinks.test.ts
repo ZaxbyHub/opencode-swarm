@@ -94,8 +94,8 @@ describe('nested project boundaries — command mutation sinks', () => {
 				fs.writeFileSync(stalenessPath, '{ malformed');
 				expect(
 					await handleAcknowledgeSpecDriftCommand(root, [], 'user'),
-				).toContain('corrupted');
-				expect(fs.existsSync(stalenessPath)).toBe(false);
+				).toContain('corrupt');
+				expect(fs.existsSync(stalenessPath)).toBe(true);
 			}
 		});
 	});

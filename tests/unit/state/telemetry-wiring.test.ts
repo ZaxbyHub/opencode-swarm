@@ -15,6 +15,7 @@ import {
 	initTelemetry,
 	resetTelemetryForTesting,
 } from '../../../src/telemetry';
+import { seedAuthoritativeTaskWorkflow } from '../hooks/_delegation-gate-helpers';
 
 describe('telemetry wiring in state.ts', () => {
 	let sharedTempDir: string;
@@ -241,7 +242,15 @@ describe('telemetry wiring in state.ts', () => {
 			const gate = 'reviewer';
 			const taskId = '3.1';
 
-			await recordGateEvidence(tempDir, taskId, gate, sessionId);
+			const generation = await seedAuthoritativeTaskWorkflow(
+				tempDir,
+				taskId,
+				'pre_check_passed',
+				sessionId,
+			);
+			await recordGateEvidence(tempDir, taskId, gate, sessionId, false, {
+				expectedGeneration: generation,
+			});
 
 			const gateEvents = capturedEvents.filter(
 				(e) => e.event === 'gate_passed',
@@ -258,9 +267,30 @@ describe('telemetry wiring in state.ts', () => {
 		test('emits gate_passed with different gate names', async () => {
 			const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gate-evidence-'));
 
-			await recordGateEvidence(tempDir, '1.1', 'test_engineer', 'session-1');
+			const testGeneration = await seedAuthoritativeTaskWorkflow(
+				tempDir,
+				'1.1',
+				'pre_check_passed',
+				'session-1',
+			);
+			await recordGateEvidence(
+				tempDir,
+				'1.1',
+				'test_engineer',
+				'session-1',
+				false,
+				{ expectedGeneration: testGeneration },
+			);
 			await recordGateEvidence(tempDir, '1.2', 'lint', 'session-2');
-			await recordGateEvidence(tempDir, '1.3', 'reviewer', 'session-3');
+			const reviewerGeneration = await seedAuthoritativeTaskWorkflow(
+				tempDir,
+				'1.3',
+				'pre_check_passed',
+				'session-3',
+			);
+			await recordGateEvidence(tempDir, '1.3', 'reviewer', 'session-3', false, {
+				expectedGeneration: reviewerGeneration,
+			});
 
 			const gateEvents = capturedEvents.filter(
 				(e) => e.event === 'gate_passed',
@@ -280,7 +310,15 @@ describe('telemetry wiring in state.ts', () => {
 
 			// Should not throw even though telemetry is not initialized
 			// The emit() function has try/catch that prevents throwing
-			await recordGateEvidence(tempDir, '2.1', 'reviewer', 'session-x');
+			const generation = await seedAuthoritativeTaskWorkflow(
+				tempDir,
+				'2.1',
+				'pre_check_passed',
+				'session-x',
+			);
+			await recordGateEvidence(tempDir, '2.1', 'reviewer', 'session-x', false, {
+				expectedGeneration: generation,
+			});
 		});
 
 		test('creates evidence file with correct content', async () => {
@@ -289,7 +327,15 @@ describe('telemetry wiring in state.ts', () => {
 			const gate = 'reviewer';
 			const taskId = '4.2';
 
-			await recordGateEvidence(tempDir, taskId, gate, sessionId);
+			const generation = await seedAuthoritativeTaskWorkflow(
+				tempDir,
+				taskId,
+				'pre_check_passed',
+				sessionId,
+			);
+			await recordGateEvidence(tempDir, taskId, gate, sessionId, false, {
+				expectedGeneration: generation,
+			});
 
 			const evidencePath = path.join(
 				tempDir,

@@ -12,8 +12,10 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
+	readTaskEvidence,
 	recordAgentDispatch,
 	recordGateEvidence,
+	transitionTaskWorkflowEvidence,
 } from '../../../src/gate-evidence';
 import { resetSwarmState, swarmState } from '../../../src/state';
 import {
@@ -64,6 +66,32 @@ function evidencePath(tmpDir: string, taskId: string): string {
 	return path.join(tmpDir, '.swarm', 'evidence', `${taskId}.json`);
 }
 
+async function seedCodeTaskAtStageA(
+	directory: string,
+	taskId: string,
+): Promise<number> {
+	await recordAgentDispatch(directory, taskId, 'coder');
+	const generation = (await readTaskEvidence(directory, taskId))!.workflow!
+		.generation;
+	await transitionTaskWorkflowEvidence(directory, taskId, {
+		type: 'stage_a_passed',
+		expectedGeneration: generation,
+	});
+	return generation;
+}
+
+async function recordStageBGate(
+	directory: string,
+	taskId: string,
+	gate: 'reviewer' | 'test_engineer',
+	sessionId: string,
+	expectedGeneration: number,
+): Promise<void> {
+	await recordGateEvidence(directory, taskId, gate, sessionId, undefined, {
+		expectedGeneration,
+	});
+}
+
 // ---------------------------------------------------------------------------
 // Test suite
 // ---------------------------------------------------------------------------
@@ -91,8 +119,21 @@ describe('Gate restart-recovery: evidence-file durability', () => {
 
 	it('gate check passes after session restart when both reviewer and test_engineer gates are recorded', async () => {
 		// Record both required gates to the evidence file (durable on disk)
-		await recordGateEvidence(tmpDir, '1.1', 'reviewer', 'sess-reviewer');
-		await recordGateEvidence(tmpDir, '1.1', 'test_engineer', 'sess-te');
+		const generation = await seedCodeTaskAtStageA(tmpDir, '1.1');
+		await recordStageBGate(
+			tmpDir,
+			'1.1',
+			'reviewer',
+			'sess-reviewer',
+			generation,
+		);
+		await recordStageBGate(
+			tmpDir,
+			'1.1',
+			'test_engineer',
+			'sess-te',
+			generation,
+		);
 
 		// Simulate session restart — clears all in-memory state
 		resetSwarmState();
@@ -116,9 +157,15 @@ describe('Gate restart-recovery: evidence-file durability', () => {
 			{ task_id: '1.1', status: 'in_progress' },
 			tmpDir,
 		);
-		await recordAgentDispatch(tmpDir, '1.1', 'coder');
+		const generation = await seedCodeTaskAtStageA(tmpDir, '1.1');
 		// Record only reviewer — test_engineer is still absent from gates
-		await recordGateEvidence(tmpDir, '1.1', 'reviewer', 'sess-reviewer');
+		await recordStageBGate(
+			tmpDir,
+			'1.1',
+			'reviewer',
+			'sess-reviewer',
+			generation,
+		);
 		resetSwarmState();
 		// Establish minimal session so gate bypass doesn't trigger
 		swarmState.agentSessions.set('test-session', {
@@ -138,9 +185,15 @@ describe('Gate restart-recovery: evidence-file durability', () => {
 			{ task_id: '1.1', status: 'in_progress' },
 			tmpDir,
 		);
-		await recordAgentDispatch(tmpDir, '1.1', 'coder');
+		const generation = await seedCodeTaskAtStageA(tmpDir, '1.1');
 		// Record only test_engineer — reviewer is still absent from gates
-		await recordGateEvidence(tmpDir, '1.1', 'test_engineer', 'sess-te');
+		await recordStageBGate(
+			tmpDir,
+			'1.1',
+			'test_engineer',
+			'sess-te',
+			generation,
+		);
 		resetSwarmState();
 		// Establish minimal session so gate bypass doesn't trigger
 		swarmState.agentSessions.set('test-session', {
@@ -222,14 +275,14 @@ describe('Gate restart-recovery: evidence-file durability', () => {
 			tmpDir,
 		);
 		expect(result.success).toBe(false);
-		expect(result.errors?.join('\n')).toContain('has not passed QA gates');
+		expect(result.errors?.join('\n')).toContain('has not passed exact-task QA');
 	});
 
 	// -----------------------------------------------------------------------
 	// Seed evidence file created on in_progress transition
 	// -----------------------------------------------------------------------
 
-	it('executeUpdateTaskStatus creates seed evidence file on in_progress transition', async () => {
+	it('in_progress creates no workflow evidence before an accepted mutation', async () => {
 		const result = await executeUpdateTaskStatus(
 			{ task_id: '1.1', status: 'in_progress' },
 			tmpDir,
@@ -237,28 +290,16 @@ describe('Gate restart-recovery: evidence-file durability', () => {
 		expect(result.success).toBe(true);
 
 		const evidenceExists = fs.existsSync(evidencePath(tmpDir, '1.1'));
-		expect(evidenceExists).toBe(true);
-
-		const evidence = JSON.parse(
-			fs.readFileSync(evidencePath(tmpDir, '1.1'), 'utf-8'),
-		);
-		expect(evidence.taskId).toBe('1.1');
-		expect(Array.isArray(evidence.required_gates)).toBe(true);
-		expect(evidence.required_gates).toEqual([]);
+		expect(evidenceExists).toBe(false);
 	});
 
-	it('seed evidence file has empty gates object (no gates recorded yet)', async () => {
+	it('in_progress leaves the evidence directory untouched', async () => {
 		await executeUpdateTaskStatus(
 			{ task_id: '1.1', status: 'in_progress' },
 			tmpDir,
 		);
 
-		const evidence = JSON.parse(
-			fs.readFileSync(evidencePath(tmpDir, '1.1'), 'utf-8'),
-		);
-		// gates object exists but is empty — gates not yet recorded
-		expect(typeof evidence.gates).toBe('object');
-		expect(Object.keys(evidence.gates)).toHaveLength(0);
+		expect(fs.existsSync(evidencePath(tmpDir, '1.1'))).toBe(false);
 	});
 
 	it('seed write is skipped when evidence file already exists', async () => {
@@ -305,8 +346,21 @@ describe('Gate restart-recovery: evidence-file durability', () => {
 		);
 
 		// Step 2: Record required gates (as reviewer and test_engineer agents would)
-		await recordGateEvidence(tmpDir, '1.1', 'reviewer', 'sess-reviewer');
-		await recordGateEvidence(tmpDir, '1.1', 'test_engineer', 'sess-te');
+		const generation = await seedCodeTaskAtStageA(tmpDir, '1.1');
+		await recordStageBGate(
+			tmpDir,
+			'1.1',
+			'reviewer',
+			'sess-reviewer',
+			generation,
+		);
+		await recordStageBGate(
+			tmpDir,
+			'1.1',
+			'test_engineer',
+			'sess-te',
+			generation,
+		);
 
 		// Step 3: Simulate session restart — all in-memory state is lost
 		resetSwarmState();

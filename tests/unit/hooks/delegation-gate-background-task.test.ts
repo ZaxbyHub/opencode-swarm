@@ -211,8 +211,8 @@ describe('issue #1151 — background Task fail-closed guard', () => {
 		expect(getTaskState(session, '2.1')).toBe('coder_delegated');
 	});
 
-	// Regression guard: foreground reviewer STILL advances (unchanged path).
-	it('regression: foreground reviewer advances coder_delegated -> reviewer_run', async () => {
+	// An after-hook without its matching pre-dispatch generation is untrusted.
+	it('regression: unbound foreground reviewer cannot advance coder_delegated', async () => {
 		const hook = createDelegationGateHook(makeConfig(), process.cwd());
 		const sessionID = 'fg-after';
 		const session = ensureAgentSession(sessionID);
@@ -228,7 +228,7 @@ describe('issue #1151 — background Task fail-closed guard', () => {
 			{ state: 'completed', text: 'review done' },
 		);
 
-		expect(getTaskState(session, '3.1')).toBe('reviewer_run');
+		expect(getTaskState(session, '3.1')).toBe('coder_delegated');
 		// cleanup any stored args defensively
 		deleteStoredInputArgs('fg-call');
 	});

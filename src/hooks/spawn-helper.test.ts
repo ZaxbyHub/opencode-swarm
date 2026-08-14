@@ -1,7 +1,15 @@
 import { afterEach, describe, expect, it } from 'bun:test';
 import { EventEmitter } from 'node:events';
 import { tmpdir } from 'node:os';
+import * as path from 'node:path';
 import { _internals, spawnAsync } from './spawn-helper';
+
+const bunEval = (source: string, ...args: string[]): string[] => [
+	process.execPath,
+	'-e',
+	source,
+	...args,
+];
 
 /**
  * Build a fake `child_process.spawn` that records the resolved command name and
@@ -35,7 +43,11 @@ describe('spawn-helper', () => {
 	describe('spawnAsync', () => {
 		// Test 1: Normal exit returns { exitCode: 0, stdout, stderr }
 		it('returns exitCode 0 with stdout on successful command', async () => {
-			const result = await spawnAsync(['echo', 'hello'], testCwd, 5000);
+			const result = await spawnAsync(
+				bunEval('process.stdout.write("hello\\n")'),
+				testCwd,
+				5000,
+			);
 			expect(result).not.toBeNull();
 			expect(result!.exitCode).toBe(0);
 			expect(result!.stdout.trim()).toBe('hello');
@@ -44,8 +56,11 @@ describe('spawn-helper', () => {
 
 		// Test 2: Non-zero exit code returned correctly (exitCode: 1)
 		it('returns non-zero exitCode when command fails', async () => {
-			// On Linux: exit 1 via sh -c; on Windows use cmd /c exit /b 1
-			const result = await spawnAsync(['sh', '-c', 'exit 1'], testCwd, 5000);
+			const result = await spawnAsync(
+				bunEval('process.exit(1)'),
+				testCwd,
+				5000,
+			);
 			expect(result).not.toBeNull();
 			expect(result!.exitCode).toBe(1);
 		});
@@ -53,7 +68,11 @@ describe('spawn-helper', () => {
 		// Test 3: Timeout triggers kill and resolves null
 		it('returns null when command times out', async () => {
 			// Use a long-running command that will be killed
-			const result = await spawnAsync(['sleep', '10'], testCwd, 100);
+			const result = await spawnAsync(
+				bunEval('await Bun.sleep(10_000)'),
+				testCwd,
+				100,
+			);
 			expect(result).toBeNull();
 		});
 
@@ -71,7 +90,9 @@ describe('spawn-helper', () => {
 		it('collects both stdout and stderr correctly', async () => {
 			// Write to both stdout and stderr
 			const result = await spawnAsync(
-				['sh', '-c', 'echo stdout-msg && echo stderr-msg >&2'],
+				bunEval(
+					'process.stdout.write("stdout-msg\\n"); process.stderr.write("stderr-msg\\n")',
+				),
 				testCwd,
 				5000,
 			);
@@ -84,7 +105,7 @@ describe('spawn-helper', () => {
 		it('collects multi-line stdout correctly', async () => {
 			// Use sh -c with multiple echo commands to produce multi-line output
 			const result = await spawnAsync(
-				['sh', '-c', 'echo line1; echo line2; echo line3'],
+				bunEval('process.stdout.write("line1\\nline2\\nline3\\n")'),
 				testCwd,
 				5000,
 			);
@@ -94,7 +115,11 @@ describe('spawn-helper', () => {
 
 		// Additional: Empty stdout is handled
 		it('handles command with empty stdout', async () => {
-			const result = await spawnAsync(['sh', '-c', 'exit 0'], testCwd, 5000);
+			const result = await spawnAsync(
+				bunEval('process.exit(0)'),
+				testCwd,
+				5000,
+			);
 			expect(result).not.toBeNull();
 			expect(result!.exitCode).toBe(0);
 			expect(result!.stdout).toBe('');
@@ -117,7 +142,10 @@ describe('spawn-helper', () => {
 			// the 'rm' command would try to execute and likely fail with non-zero exit.
 			// Since spawn uses args array (no shell: true), echo receives ONE arg: 'hello; rm -rf /'
 			const result = await spawnAsync(
-				['echo', 'hello; rm -rf /'],
+				bunEval(
+					'process.stdout.write(process.argv.at(-1) ?? "")',
+					'hello; rm -rf /',
+				),
 				testCwd,
 				5000,
 			);
@@ -128,14 +156,8 @@ describe('spawn-helper', () => {
 
 		// Test A3: Very long stdout (100KB+) — should collect all without throwing
 		it('handles very large stdout (100KB+) without throwing', async () => {
-			// Generate ~150KB of output using a shell command
-			// seq is available on Linux/macOS; on Windows this command may differ
 			const result = await spawnAsync(
-				[
-					'sh',
-					'-c',
-					'for i in $(seq 1 10000); do echo "line-$i-abcdefghijklmnopqrstuvwxyz"; done',
-				],
+				bunEval('process.stdout.write("x".repeat(150 * 1024))'),
 				testCwd,
 				15000,
 			);
@@ -151,7 +173,11 @@ describe('spawn-helper', () => {
 		it('resolves null with negative timeout before slow command completes', async () => {
 			const start = Date.now();
 			// sleep 10 takes 10 seconds; timer fires after ~1ms, killing sleep
-			const result = await spawnAsync(['sleep', '10'], testCwd, -1000);
+			const result = await spawnAsync(
+				bunEval('await Bun.sleep(10_000)'),
+				testCwd,
+				-1000,
+			);
 			const elapsed = Date.now() - start;
 			// Timer fires after 1ms, killing sleep before it can complete
 			expect(elapsed).toBeLessThan(100);
@@ -164,7 +190,11 @@ describe('spawn-helper', () => {
 		it('resolves null with zero timeout before slow command completes', async () => {
 			const start = Date.now();
 			// sleep 10 takes 10 seconds; with timeout 0 (fires on next tick), timer wins
-			const result = await spawnAsync(['sleep', '10'], testCwd, 0);
+			const result = await spawnAsync(
+				bunEval('await Bun.sleep(10_000)'),
+				testCwd,
+				0,
+			);
 			const elapsed = Date.now() - start;
 			// Timer fires almost immediately, killing sleep before it can complete
 			expect(elapsed).toBeLessThan(100);
@@ -173,8 +203,15 @@ describe('spawn-helper', () => {
 
 		// Test A6: Non-existent cwd — should resolve null with ENOENT
 		it('resolves null when cwd does not exist', async () => {
-			const fakeCwd = '/nonexistent/path/that/cannot/exist/xyz123';
-			const result = await spawnAsync(['echo', 'hello'], fakeCwd, 5000);
+			const fakeCwd = path.join(
+				tmpdir(),
+				'nonexistent-spawn-helper-path-xyz123',
+			);
+			const result = await spawnAsync(
+				bunEval('process.stdout.write("hello")'),
+				fakeCwd,
+				5000,
+			);
 			expect(result).toBeNull();
 		});
 

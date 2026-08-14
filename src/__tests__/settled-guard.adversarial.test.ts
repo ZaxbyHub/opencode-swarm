@@ -3,7 +3,7 @@
  *
  * Tests the settled-task guard across THREE layers:
  *  (a) src/plan/manager.ts  isTaskSettled + updateTaskStatus centralized guard
- *  (b) src/state.ts          advanceTaskStateAndPersist preflight
+ *  (b) src/state.ts          advanceTaskStateAndPersist legacy boundary refusal
  *  (c) src/tools/update-task-status.ts  executeUpdateTaskStatus tool guard
  *
  * These tests do NOT repeat the 24 happy-path tests already covered by:
@@ -13,21 +13,18 @@
  * Adversarial focus:
  *  1. BYPASS — all 3 layers refuse settled→in_progress without force
  *  2. STATUS-COERCION — isTaskSettled with unexpected type values (null, undefined, '')
- *  3. FORCE-FORGERY — advanceTaskStateAndPersist passes {force:false}, cannot forge true
- *  4. TOCTOU — assess single-threaded JS; preflight+persist not separable
+ *  3. FORCE-FORGERY — the legacy wrapper has no plan writer or force channel
  *  5. ZERO-MUTATION — after refused transition, plan.json AND session state unchanged
  *  6. LEGITIMATE-FLOW — retry-after-failure (in_progress→in_progress) not blocked
  *  7. PLAN-LOAD FAILURE — isTaskSettled fails open (returns false) on corrupt/missing plan
  *
  * DI seams used:
  *  - plan/manager._internals.loadPlanJsonOnly  (for isTaskSettled corruption tests)
- *  - state._internals (for mocking plan/manager within state module)
  *  - tools/update-task-status._internals (for mocking tryAcquireLock, updateTaskStatus)
  *
  * Mock coverage gaps (documented per writing-tests SKILL.md):
- *  - state.ts imports isTaskSettled, loadPlanJsonOnly, updateTaskStatus directly from
- *    'src/plan/manager.js' — not behind a _internals seam. We mock the entire
- *    plan/manager module. Bun per-file isolation (--smol) prevents cross-file contamination.
+ *  - The legacy state wrapper is exercised directly. Its central-boundary
+ *    refusal occurs before any state mutation and it never calls plan manager.
  */
 
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
@@ -163,13 +160,9 @@ describe('ADVERSARIAL: BYPASS ATTEMPT — settled→in_progress without force', 
 		expect(before).toEqual(after);
 	});
 
-	// ── Layer (b): advanceTaskStateAndPersist preflight ─────────────────
-	// NOTE: We test this via the state._advanceTaskStateAndPersist direct call
-	// using the managerInternals._planManagerInternals seam to avoid mock.module
-	// pollution. state.ts imports isTaskSettled directly from plan/manager, so we
-	// mock plan/manager for the duration of each test and restore in afterEach.
+	// ── Layer (b): legacy wrapper refuses the durable coder boundary ──────
 
-	test('advanceTaskStateAndPersist: coder_delegated on settled task is REFUSED at preflight', async () => {
+	test('advanceTaskStateAndPersist: coder_delegated requires central transaction', async () => {
 		await writePlanJson(
 			tempDir,
 			makePlan([{ id: '1.1', status: 'completed' }]),
@@ -192,10 +185,9 @@ describe('ADVERSARIAL: BYPASS ATTEMPT — settled→in_progress without force', 
 
 		const { advanceTaskStateAndPersist } = await import('../../src/state.js');
 
-		// Must not throw — preflight refuses and returns early
 		await expect(
 			advanceTaskStateAndPersist(session, '1.1', 'coder_delegated', tempDir),
-		).resolves.toBeUndefined();
+		).rejects.toThrow('TASK_WORKFLOW_CENTRAL_TRANSACTION_REQUIRED');
 
 		// ZERO-MUTATION: session state not advanced
 		expect(session.taskWorkflowStates.get('1.1')).toBeUndefined();
@@ -464,10 +456,10 @@ describe('ADVERSARIAL: STATUS-COERCION — isTaskSettled with unexpected values'
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
-// VECTOR 3: FORCE-FORGERY — advanceTaskStateAndPersist hardcodes {force:false}
+// VECTOR 3: FORCE-FORGERY — legacy wrapper has no force channel
 // ══════════════════════════════════════════════════════════════════════════════
 
-describe('ADVERSARIAL: FORCE-FORGERY — advanceTaskStateAndPersist cannot forge force:true', () => {
+describe('ADVERSARIAL: FORCE-FORGERY — central transaction remains exclusive', () => {
 	let tempDir: string;
 	let mockRestore: (() => void) | undefined;
 
@@ -486,8 +478,7 @@ describe('ADVERSARIAL: FORCE-FORGERY — advanceTaskStateAndPersist cannot forge
 		}
 	});
 
-	test('advanceTaskStateAndPersist ALWAYS passes {force:false} to updateTaskStatus', async () => {
-		// Set up: task is NOT settled (pending), so preflight passes
+	test('advanceTaskStateAndPersist cannot route coder_delegated through plan manager', async () => {
 		await writePlanJson(tempDir, makePlan([{ id: '1.1', status: 'pending' }]));
 
 		const { mockFn: mockUpdateStatus, calls } = makeUpdateTaskStatusMock();
@@ -509,24 +500,15 @@ describe('ADVERSARIAL: FORCE-FORGERY — advanceTaskStateAndPersist cannot forge
 
 		const { advanceTaskStateAndPersist } = await import('../../src/state.js');
 
-		await advanceTaskStateAndPersist(
-			session,
-			'1.1',
-			'coder_delegated',
-			tempDir,
-		);
+		await expect(
+			advanceTaskStateAndPersist(session, '1.1', 'coder_delegated', tempDir),
+		).rejects.toThrow('TASK_WORKFLOW_CENTRAL_TRANSACTION_REQUIRED');
 
-		// Verify: updateTaskStatus was called with {force:false}
-		expect(calls.length).toBeGreaterThan(0);
-		for (const call of calls) {
-			// The automated delegation-gate path ALWAYS passes force:false
-			// There is NO code path in advanceTaskStateAndPersist that can set force:true
-			expect(call.options?.force).toBe(false);
-		}
+		expect(calls).toHaveLength(0);
+		expect(session.taskWorkflowStates.has('1.1')).toBe(false);
 	});
 
-	test('Only the tool args.force path can set force:true — internal callers cannot', async () => {
-		// Verify the updateTaskStatus guard itself: force:true on settled task IS permitted
+	test('bare force:true cannot bypass the audited repair CAS fields', async () => {
 		await writePlanJson(
 			tempDir,
 			makePlan([{ id: '1.1', status: 'completed' }]),
@@ -551,9 +533,9 @@ describe('ADVERSARIAL: FORCE-FORGERY — advanceTaskStateAndPersist cannot forge
 
 		const result = await executeUpdateTaskStatus(args, tempDir);
 
-		expect(result.success).toBe(true);
-		expect(calls.length).toBe(1);
-		expect(calls[0].options?.force).toBe(true);
+		expect(result.success).toBe(false);
+		expect(result.errors?.join(' ')).toContain('expected_state');
+		expect(calls).toHaveLength(0);
 
 		utsInternals.updateTaskStatus = origUTSUpdateStatus;
 		utsInternals.tryAcquireLock = origTryAcquireLock;
@@ -561,29 +543,21 @@ describe('ADVERSARIAL: FORCE-FORGERY — advanceTaskStateAndPersist cannot forge
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
-// VECTOR 4: TOCTOU — assess in single-threaded JS
+// VECTOR 4: CENTRAL BOUNDARY — terminal state cannot bypass exact-task WAL
 // ══════════════════════════════════════════════════════════════════════════════
 
-describe('ADVERSARIAL: TOCTOU — preflight+persist race condition assessment', () => {
-	test.skip('advanceTaskStateAndPersist: preflight and persist are not separable in JS single-thread', async () => {
-		// JavaScript is single-threaded. Between the preflight isTaskSettled check and
-		// the updateTaskStatus call, there is no yield point — no await, no setTimeout,
-		// no I/O — that would allow another task to interleave and change plan.json.
-		//
-		// The preflight isTaskSettled check (line 1427-1435 in state.ts) is:
-		//   const settled = await isTaskSettled(directory, taskId);
-		//   if (settled) { return; }
-		//   advanceTaskState(session, taskId, newState, ...);
-		//
-		// await isTaskSettled() does perform I/O (loadPlanJsonOnly → readSwarmFileAsync),
-		// but this is a read operation. Between the read completing and the subsequent
-		// updateTaskStatus write, no other JS execution context can modify plan.json
-		// in this process (single-threaded).
-		//
-		// CONCLUSION: No TOCTOU vulnerability exists in this architecture.
-		// This test documents the analysis rather than testing a fix, since
-		// there is no vulnerability to reproduce.
-		expect(true).toBe(true);
+describe('ADVERSARIAL: terminal central boundary', () => {
+	test('advanceTaskStateAndPersist refuses complete before session mutation', async () => {
+		resetSwarmState();
+		startAgentSession('terminal-boundary-session', 'test-agent');
+		const session = swarmState.agentSessions.get('terminal-boundary-session')!;
+		session.taskWorkflowStates.set('1.1', 'tests_run');
+
+		const { advanceTaskStateAndPersist } = await import('../../src/state.js');
+		await expect(
+			advanceTaskStateAndPersist(session, '1.1', 'complete', 'unused'),
+		).rejects.toThrow('TASK_WORKFLOW_CENTRAL_TRANSACTION_REQUIRED');
+		expect(session.taskWorkflowStates.get('1.1')).toBe('tests_run');
 	});
 });
 
@@ -814,10 +788,10 @@ describe('ADVERSARIAL: PLAN-LOAD FAILURE — isTaskSettled fails open (returns f
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
-// VECTOR ADDITIONAL: non-coder_delegated states bypass preflight (correct)
+// VECTOR ADDITIONAL: diagnostic intermediate states never touch plan manager
 // ══════════════════════════════════════════════════════════════════════════════
 
-describe('ADVERSARIAL: non-coder_delegated states bypass preflight (correct behavior)', () => {
+describe('ADVERSARIAL: diagnostic intermediate states remain session-only', () => {
 	let tempDir: string;
 	let mockRestore: (() => void) | undefined;
 
@@ -836,7 +810,7 @@ describe('ADVERSARIAL: non-coder_delegated states bypass preflight (correct beha
 		}
 	});
 
-	test('advanceTaskStateAndPersist: preflight isTaskSettled NOT called for non-coder_delegated states', async () => {
+	test('advanceTaskStateAndPersist advances pre_check_passed without plan-manager calls', async () => {
 		await writePlanJson(
 			tempDir,
 			makePlan([{ id: '1.1', status: 'completed' }]),
@@ -863,28 +837,27 @@ describe('ADVERSARIAL: non-coder_delegated states bypass preflight (correct beha
 
 		startAgentSession('other-state-session', 'test-agent');
 		const session = swarmState.agentSessions.get('other-state-session')!;
+		session.taskWorkflowStates.set('1.1', 'coder_delegated');
 
 		const { advanceTaskStateAndPersist } = await import('../../src/state.js');
 
-		// Use 'complete' → 'complete' (not coder_delegated) — preflight should NOT run
-		// But advanceTaskState itself may throw because 'complete' → 'complete' is not a valid forward transition
-		// We just verify isTaskSettled was NOT called
-		try {
-			await advanceTaskStateAndPersist(session, '1.1', 'complete', tempDir);
-		} catch {
-			// Expected: INVALID_TASK_STATE_TRANSITION
-		}
+		await advanceTaskStateAndPersist(
+			session,
+			'1.1',
+			'pre_check_passed',
+			tempDir,
+		);
 
-		// isTaskSettled should NOT have been called for 'complete' state
-		expect(isSettledCalls).not.toContain('1.1');
+		expect(isSettledCalls).toHaveLength(0);
+		expect(session.taskWorkflowStates.get('1.1')).toBe('pre_check_passed');
 	});
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
-// VECTOR ADDITIONAL: guard only triggers for status==='in_progress'
+// VECTOR ADDITIONAL: settled terminal transitions never bypass central policy
 // ══════════════════════════════════════════════════════════════════════════════
 
-describe("ADVERSARIAL: guard only triggers for status==='in_progress' — other statuses bypass", () => {
+describe('ADVERSARIAL: settled terminal transitions fail closed', () => {
 	let tempDir: string;
 
 	beforeEach(async () => {
@@ -901,9 +874,7 @@ describe("ADVERSARIAL: guard only triggers for status==='in_progress' — other 
 		}
 	});
 
-	test('executeUpdateTaskStatus: completed→completed WITHOUT force PROCEEDS (guard does not apply)', async () => {
-		// The guard only blocks 'in_progress' transitions on settled tasks
-		// completed→completed is allowed without force (no re-opening involved)
+	test('executeUpdateTaskStatus: completed→completed without exact evidence is rejected', async () => {
 		await writePlanJson(
 			tempDir,
 			makePlan([{ id: '1.1', status: 'completed' }]),
@@ -915,7 +886,7 @@ describe("ADVERSARIAL: guard only triggers for status==='in_progress' — other 
 			lock: { _release: async () => {} },
 		})) as typeof origTryAcquireLock;
 
-		const { mockFn: mockUpdateStatus } = makeUpdateTaskStatusMock();
+		const { mockFn: mockUpdateStatus, calls } = makeUpdateTaskStatusMock();
 		const origUTSUpdateStatus = utsInternals.updateTaskStatus;
 		utsInternals.updateTaskStatus =
 			mockUpdateStatus as typeof origUTSUpdateStatus;
@@ -925,14 +896,14 @@ describe("ADVERSARIAL: guard only triggers for status==='in_progress' — other 
 			tempDir,
 		);
 
-		// completed→completed is NOT blocked (the guard condition is status==='in_progress')
-		expect(result.success).toBe(true);
+		expect(result.success).toBe(false);
+		expect(calls).toHaveLength(0);
 
 		utsInternals.tryAcquireLock = origTryAcquireLock;
 		utsInternals.updateTaskStatus = origUTSUpdateStatus;
 	});
 
-	test('executeUpdateTaskStatus: completed→blocked WITHOUT force PROCEEDS (guard does not apply)', async () => {
+	test('executeUpdateTaskStatus: completed→blocked is rejected as a terminal rewrite', async () => {
 		await writePlanJson(
 			tempDir,
 			makePlan([{ id: '1.1', status: 'completed' }]),
@@ -944,7 +915,7 @@ describe("ADVERSARIAL: guard only triggers for status==='in_progress' — other 
 			lock: { _release: async () => {} },
 		})) as typeof origTryAcquireLock;
 
-		const { mockFn: mockUpdateStatus } = makeUpdateTaskStatusMock();
+		const { mockFn: mockUpdateStatus, calls } = makeUpdateTaskStatusMock();
 		const origUTSUpdateStatus = utsInternals.updateTaskStatus;
 		utsInternals.updateTaskStatus =
 			mockUpdateStatus as typeof origUTSUpdateStatus;
@@ -954,7 +925,8 @@ describe("ADVERSARIAL: guard only triggers for status==='in_progress' — other 
 			tempDir,
 		);
 
-		expect(result.success).toBe(true);
+		expect(result.success).toBe(false);
+		expect(calls).toHaveLength(0);
 
 		utsInternals.tryAcquireLock = origTryAcquireLock;
 		utsInternals.updateTaskStatus = origUTSUpdateStatus;
@@ -962,13 +934,10 @@ describe("ADVERSARIAL: guard only triggers for status==='in_progress' — other 
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
-// ISOLATED MOCK-MODULE BLOCK — advanceTaskStateAndPersist tests
-// All tests in this block use mock.module() which persists globally in Bun.
-// This block is placed LAST so its module mocks do not pollute other tests.
-// Each test has its own afterEach: mock.restore() for safety.
+// LEGACY WRAPPER REFUSAL — plan status cannot reopen the removed writer
 // ══════════════════════════════════════════════════════════════════════════════
 
-describe('ISOLATED: advanceTaskStateAndPersist mock-module isolation tests', () => {
+describe('LEGACY: advanceTaskStateAndPersist boundary is plan-status independent', () => {
 	let tempDir: string;
 
 	beforeEach(async () => {
@@ -986,7 +955,7 @@ describe('ISOLATED: advanceTaskStateAndPersist mock-module isolation tests', () 
 		}
 	});
 
-	test('advanceTaskStateAndPersist: coder_delegated on settled task is REFUSED at preflight', async () => {
+	test('advanceTaskStateAndPersist: coder_delegated on settled task requires central transaction', async () => {
 		// Mock isTaskSettled→true so preflight refuses; verify updateTaskStatus is never called
 		await writePlanJson(
 			tempDir,
@@ -1011,16 +980,15 @@ describe('ISOLATED: advanceTaskStateAndPersist mock-module isolation tests', () 
 
 		await expect(
 			advanceTaskStateAndPersist(session, '1.1', 'coder_delegated', tempDir),
-		).resolves.toBeUndefined();
+		).rejects.toThrow('TASK_WORKFLOW_CENTRAL_TRANSACTION_REQUIRED');
 
-		// updateTaskStatus was NOT called (preflight refused)
+		// The legacy wrapper refuses before any plan writer is reached.
 		expect(calls.length).toBe(0);
 		// Session state never advanced (no entry in taskWorkflowStates)
 		expect(session.taskWorkflowStates.has('1.1')).toBe(false);
 	});
 
-	test('advanceTaskStateAndPersist: pending→coder_delegated PROCEEDS (preflight passes)', async () => {
-		// Mock isTaskSettled→false so preflight passes; verify updateTaskStatus IS called
+	test('advanceTaskStateAndPersist: pending→coder_delegated still requires central transaction', async () => {
 		await writePlanJson(tempDir, makePlan([{ id: '1.1', status: 'pending' }]));
 
 		const { mockFn: mockUpdateStatus, calls } = makeUpdateTaskStatusMock();
@@ -1039,19 +1007,13 @@ describe('ISOLATED: advanceTaskStateAndPersist mock-module isolation tests', () 
 
 		const { advanceTaskStateAndPersist } = await import('../../src/state.js');
 
-		await advanceTaskStateAndPersist(
-			session,
-			'1.1',
-			'coder_delegated',
-			tempDir,
-		);
-
-		// updateTaskStatus WAS called (preflight passed)
-		expect(calls.length).toBeGreaterThan(0);
+		await expect(
+			advanceTaskStateAndPersist(session, '1.1', 'coder_delegated', tempDir),
+		).rejects.toThrow('TASK_WORKFLOW_CENTRAL_TRANSACTION_REQUIRED');
+		expect(calls).toHaveLength(0);
 	});
 
-	test('advanceTaskStateAndPersist: in_progress→coder_delegated PROCEEDS (retry not blocked)', async () => {
-		// Mock isTaskSettled→false so preflight passes; verify updateTaskStatus IS called
+	test('advanceTaskStateAndPersist: in_progress→coder_delegated still requires central transaction', async () => {
 		await writePlanJson(
 			tempDir,
 			makePlan([{ id: '1.1', status: 'in_progress' }]),
@@ -1073,15 +1035,10 @@ describe('ISOLATED: advanceTaskStateAndPersist mock-module isolation tests', () 
 
 		const { advanceTaskStateAndPersist } = await import('../../src/state.js');
 
-		await advanceTaskStateAndPersist(
-			session,
-			'1.1',
-			'coder_delegated',
-			tempDir,
-		);
-
-		// updateTaskStatus WAS called (preflight passed, retry is allowed)
-		expect(calls.length).toBeGreaterThan(0);
+		await expect(
+			advanceTaskStateAndPersist(session, '1.1', 'coder_delegated', tempDir),
+		).rejects.toThrow('TASK_WORKFLOW_CENTRAL_TRANSACTION_REQUIRED');
+		expect(calls).toHaveLength(0);
 	});
 
 	// ── blocked→coder_delegated: FC-2 remediation ───────────────────────────
@@ -1096,7 +1053,7 @@ describe('ISOLATED: advanceTaskStateAndPersist mock-module isolation tests', () 
 	// already covered by the in_progress→coder_delegated test above, so this
 	// test's mock intentionally narrows to the refused path only.
 
-	test('advanceTaskStateAndPersist: blocked→coder_delegated REFUSED at preflight (FC-2)', async () => {
+	test('advanceTaskStateAndPersist: blocked→coder_delegated requires central transaction', async () => {
 		await writePlanJson(tempDir, makePlan([{ id: '1.1', status: 'blocked' }]));
 
 		const { mockFn: mockUpdateStatus, calls } = makeUpdateTaskStatusMock();
@@ -1117,9 +1074,9 @@ describe('ISOLATED: advanceTaskStateAndPersist mock-module isolation tests', () 
 
 		await expect(
 			advanceTaskStateAndPersist(session, '1.1', 'coder_delegated', tempDir),
-		).resolves.toBeUndefined();
+		).rejects.toThrow('TASK_WORKFLOW_CENTRAL_TRANSACTION_REQUIRED');
 
-		// ZERO-MUTATION: updateTaskStatus was NOT called (preflight refused)
+		// ZERO-MUTATION: updateTaskStatus was NOT called.
 		expect(calls.length).toBe(0);
 		// Session state never advanced
 		expect(session.taskWorkflowStates.has('1.1')).toBe(false);

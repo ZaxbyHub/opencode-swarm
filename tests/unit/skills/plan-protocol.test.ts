@@ -28,8 +28,12 @@ describe('.opencode/skills/plan/SKILL.md protocol content', () => {
 	});
 
 	describe('planning protocol', () => {
-		it('keeps spec gate and external plan ingestion rules', () => {
-			expect(skillContent).toContain('SPEC GATE');
+		it('keeps profile-aware spec policy and external plan ingestion rules', () => {
+			expect(skillContent).toContain('SPEC POLICY');
+			expect(skillContent).toContain('soft gate only in `balanced`');
+			expect(skillContent).toContain(
+				'In `strict`, a missing effective spec is',
+			);
 			expect(skillContent).toContain('PLAN INGESTION DETECTION');
 			expect(skillContent).toContain('EXTERNAL PLAN IMPORT PATH');
 		});
@@ -57,13 +61,17 @@ describe('.opencode/skills/plan/SKILL.md protocol content', () => {
 			expect(skillContent).toContain('swarm_id: <exact swarm_id>');
 		});
 
-		it('keeps pre-save QA bootstrap and inline gate warning', () => {
+		it('keeps profile-aware pre-save QA bootstrap and inline gate warning', () => {
 			expect(skillContent).toContain(
 				'QA AND EXECUTION PROFILE BOOTSTRAP (before first `save_plan`)',
 			);
 			expect(skillContent).toContain('exact raw plan identity');
 			expect(skillContent).not.toContain('{{QA_GATE_DIALOGUE_PLAN}}');
 			expect(skillContent).toContain('Present the eleven gates');
+			expect(skillContent).toContain('`strict`: present the following');
+			expect(skillContent).toContain(
+				'`balanced`: skip this dialogue and continue with the durable defaults',
+			);
 			expect(skillContent).toContain('final_council (default: OFF)');
 			expect(skillContent).toMatch(/how many coders should run in parallel/i);
 			expect(skillContent).toMatch(/commit frequency/i);

@@ -18,6 +18,7 @@ type CouncilGate = {
 	timestamp?: string;
 	agent?: string;
 	quorumSize?: number;
+	workflowGeneration?: number;
 };
 
 type CouncilEnabledValue = boolean | undefined;
@@ -105,6 +106,7 @@ function writeFixture(opts: FixtureOptions): void {
 			sessionId: 'swarm-1',
 			timestamp: '2026-04-13T00:00:00.000Z',
 			agent: 'architect',
+			workflowGeneration: 1,
 			...opts.councilGate,
 		};
 	}
@@ -114,6 +116,17 @@ function writeFixture(opts: FixtureOptions): void {
 			taskId: TASK_ID,
 			required_gates: ['reviewer', 'test_engineer'],
 			gates,
+			workflow: {
+				schema: 'exact-task-v1',
+				generation: 1,
+				state: 'pre_check_passed',
+				retryCount: 0,
+				retryHistory: [],
+				retryEpoch: 0,
+				lastOutcome: 'stage_a_passed',
+				lastTransitionId: 'fixture-stage-a',
+				updatedAt: '2026-04-13T00:00:00.000Z',
+			},
 		}),
 	);
 }

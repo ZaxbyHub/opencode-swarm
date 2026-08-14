@@ -43,14 +43,20 @@ import {
 	getAuthorizedScopeBinding,
 	registerScopeBinding,
 } from '../../../../src/scope/scope-binding';
-import { resolveAuthorizedScopeBinding } from '../../../../src/scope/scope-persistence';
+import {
+	clearScopeBindingFromDisk,
+	resolveAuthorizedScopeBinding,
+} from '../../../../src/scope/scope-persistence';
 import {
 	ensureAgentSession,
 	resetSwarmState,
 	startAgentSession,
 	swarmState,
 } from '../../../../src/state';
-import type { PublishLeanTurboLaneScopeInput } from '../../../../src/turbo/lean/lane-scope';
+import {
+	type PublishLeanTurboLaneScopeInput,
+	publishLeanTurboLaneScopeBinding,
+} from '../../../../src/turbo/lean/lane-scope';
 import {
 	LANE_SCOPE_DENIED_CODE,
 	LeanTurboRunner,
@@ -190,6 +196,38 @@ afterEach(() => {
 });
 
 describe('item 2a — _publishLaneScope throw path cleans up whatever was already published', () => {
+	test('an unavailable lane root still installs an exact-generation deny before durable cleanup fails', async () => {
+		const childSessionId = 'lane-child-unavailable-root';
+		const binding = await publishLeanTurboLaneScopeBinding({
+			primaryDirectory: tmpDir,
+			laneRoot: tmpDir,
+			isolated: false,
+			plan: PLAN as never,
+			lane: {
+				laneId: 'lane-unavailable-root',
+				taskIds: ['1.1'],
+				files: ['src/a.ts'],
+			},
+			parentSessionId: SESSION_ID,
+			childSessionId,
+		});
+		expect(binding).not.toBeNull();
+		if (!binding) throw new Error('test setup: binding was not published');
+
+		const retired = clearScopeBindingFromDisk({
+			directory: path.join(tmpDir, 'missing-lane-root'),
+			binding,
+		});
+		expect(retired.ok).toBe(false);
+		expect(
+			resolveAuthorizedScopeBinding({
+				directory: tmpDir,
+				taskId: '1.1',
+				activeSessionId: childSessionId,
+			}),
+		).toBeNull();
+	});
+
 	test('a throw before the child session is registered still clears the in-memory binding', async () => {
 		const childSessionId = 'lane-child-publish-throw-pre-session';
 		let bindingResolvedBeforeThrow = false;

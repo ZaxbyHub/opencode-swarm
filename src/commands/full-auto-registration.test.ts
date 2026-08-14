@@ -72,6 +72,7 @@ describe('Full-Auto Command Registration', () => {
 	describe('Switch Case Routing', () => {
 		let testSessionId: string;
 		let projectDir: string;
+		let originalXdg: string | undefined;
 
 		beforeEach(() => {
 			// '/test-project' is a fictional filesystem-root path: full-auto
@@ -81,6 +82,8 @@ describe('Full-Auto Command Registration', () => {
 			projectDir = fs.mkdtempSync(
 				path.join(os.tmpdir(), 'full-auto-reg-test-'),
 			);
+			originalXdg = process.env.XDG_CONFIG_HOME;
+			process.env.XDG_CONFIG_HOME = path.join(projectDir, 'user-config');
 			testSessionId = `full-auto-reg-test-${Date.now()}`;
 			// Enable config-level full-auto so command activation succeeds
 			swarmState.fullAutoEnabledInConfig = true;
@@ -133,6 +136,8 @@ describe('Full-Auto Command Registration', () => {
 		});
 
 		afterEach(() => {
+			if (originalXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+			else process.env.XDG_CONFIG_HOME = originalXdg;
 			swarmState.agentSessions.delete(testSessionId);
 			fs.rmSync(projectDir, { recursive: true, force: true });
 		});

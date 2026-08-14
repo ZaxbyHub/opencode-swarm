@@ -39,7 +39,7 @@ const MODE_SKILLS = [
 		'PLAN',
 		'plan',
 		[
-			'SPEC GATE',
+			'SPEC POLICY',
 			'GENERAL COUNCIL ADVISORY OPTION (pre-save_plan)',
 			'QA AND EXECUTION PROFILE BOOTSTRAP',
 		],

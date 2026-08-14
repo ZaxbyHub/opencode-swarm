@@ -9,6 +9,9 @@ export const ExecutionProfileSchema = z.object({
 	locked: z.boolean().default(false),
 	auto_proceed: z.boolean().default(false),
 	commit_after_each_completed_task: z.boolean().default(false),
+	// Optional for backward compatibility: legacy plans resolve missing strictness
+	// through the planning-profile resolver instead of a schema default.
+	planning_profile: z.enum(['balanced', 'strict']).optional(),
 });
 export type ExecutionProfile = z.infer<typeof ExecutionProfileSchema>;
 

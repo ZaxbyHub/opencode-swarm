@@ -21,6 +21,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { ToolContext } from '@opencode-ai/plugin';
+import { closeProjectDb } from '../../../src/db/project-db';
 
 // ========== STACK TRACE LEAKAGE PATTERNS ==========
 const STACK_TRACE_PATTERNS = [
@@ -29,9 +30,7 @@ const STACK_TRACE_PATTERNS = [
 	'src/session/prompt.ts',
 	'dist/index.js',
 ] as const;
-
 type StackTracePattern = (typeof STACK_TRACE_PATTERNS)[number];
-
 /**
  * Check if text contains any stack trace leakage pattern.
  * Returns the pattern that was found, or null if clean.
@@ -44,12 +43,10 @@ function findStackTraceLeak(text: string): StackTracePattern | null {
 	}
 	return null;
 }
-
 // Helper to call tool execute with proper context
 function createToolContext(directory: string): ToolContext {
 	return { directory } as unknown as ToolContext;
 }
-
 // ========== GROUP 1: createSwarmTool centralized wrapper ==========
 describe('createSwarmTool error sanitization', () => {
 	test('thrown Error from wrapped tool returns sanitized JSON with only the message', async () => {
@@ -234,6 +231,7 @@ describe('update_task_status error sanitization', () => {
 
 	afterEach(() => {
 		process.chdir(originalCwd);
+		closeProjectDb(tempDir);
 		fs.rmSync(tempDir, { recursive: true, force: true });
 	});
 
@@ -376,6 +374,7 @@ describe('save-plan error sanitization', () => {
 
 	afterEach(() => {
 		process.chdir(originalCwd);
+		closeProjectDb(tempDir);
 		fs.rmSync(tempDir, { recursive: true, force: true });
 	});
 
@@ -922,6 +921,7 @@ describe('full tool pipeline sanitization', () => {
 	});
 
 	afterEach(() => {
+		closeProjectDb(tempDir);
 		fs.rmSync(tempDir, { recursive: true, force: true });
 	});
 

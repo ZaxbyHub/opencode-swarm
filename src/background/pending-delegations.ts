@@ -114,6 +114,8 @@ export interface BackgroundDelegationRecord {
 	workspace?: BackgroundWorkspaceSnapshot;
 	/** Immutable pre-coder provenance for doc-only gate classification. */
 	taskChangeContext?: BackgroundTaskChangeContext;
+	/** Exact-task workflow generation captured before a Stage B dispatch. */
+	workflowGeneration?: number;
 	/** Complete isolated-worktree recovery coordinates captured before handoff. */
 	worktree?: BackgroundWorktreeDescriptor;
 	/** Stable pre-launch background-coder capacity reservation. */
@@ -144,6 +146,8 @@ export interface BackgroundWorkspaceSnapshot {
 export interface BackgroundTaskChangeContext {
 	declaredFiles: string[] | null;
 	baseline: BackgroundWorkspaceSnapshot;
+	/** Exact-task workflow generation captured before coder dispatch. */
+	workflowGeneration?: number;
 }
 
 export interface BackgroundWorktreeDescriptor {
@@ -336,6 +340,7 @@ const TaskChangeContextSchema = z
 	.object({
 		declaredFiles: z.array(z.string()).nullable(),
 		baseline: WorkspaceSchema,
+		workflowGeneration: z.number().int().nonnegative().optional(),
 	})
 	.strict();
 
@@ -591,6 +596,7 @@ const RecordSchema = z
 		promptHash: z.string().optional(),
 		workspace: WorkspaceSchema.optional(),
 		taskChangeContext: TaskChangeContextSchema.optional(),
+		workflowGeneration: z.number().int().nonnegative().optional(),
 		worktree: WorktreeDescriptorSchema.optional(),
 		coderReservationId: z.string().min(1).max(256).optional(),
 		prompt: PromptSchema.optional(),
@@ -796,6 +802,7 @@ export interface RecordPendingInput {
 	promptHash?: string;
 	workspace?: BackgroundWorkspaceSnapshot;
 	taskChangeContext?: BackgroundTaskChangeContext;
+	workflowGeneration?: number;
 	worktree?: BackgroundWorktreeDescriptor;
 	coderReservationId?: string;
 	prompt?: BackgroundPromptSnapshot;
@@ -831,6 +838,9 @@ function buildPendingRecord(
 		...(input.workspace ? { workspace: input.workspace } : {}),
 		...(input.taskChangeContext
 			? { taskChangeContext: input.taskChangeContext }
+			: {}),
+		...(input.workflowGeneration !== undefined
+			? { workflowGeneration: input.workflowGeneration }
 			: {}),
 		...(input.worktree ? { worktree: input.worktree } : {}),
 		...(input.coderReservationId
@@ -873,6 +883,7 @@ function pendingLaunchIdentity(record: BackgroundDelegationRecord): object {
 		promptHash: record.promptHash,
 		workspace: record.workspace,
 		taskChangeContext: record.taskChangeContext,
+		workflowGeneration: record.workflowGeneration,
 		worktree: record.worktree,
 		coderReservationId: record.coderReservationId,
 		prompt: record.prompt,

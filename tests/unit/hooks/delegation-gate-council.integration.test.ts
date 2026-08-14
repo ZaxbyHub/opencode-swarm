@@ -14,6 +14,7 @@ import type { Plan } from '../../../src/config/plan-schema';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 import { withFrozenClock } from '../../helpers/test-clock.js';
+import { seedAuthoritativeTaskWorkflow } from './_delegation-gate-helpers';
 
 function makeConfig(council?: { enabled?: boolean }): PluginConfig {
 	return {
@@ -159,6 +160,12 @@ describe('delegation-gate: council mode integration', () => {
 	});
 
 	it('should handle reviewer subagent delegation', async () => {
+		await seedAuthoritativeTaskWorkflow(
+			tempDir,
+			'1.1',
+			'pre_check_passed',
+			'test-session',
+		);
 		const hook = createDelegationGateHook(
 			makeConfig({ enabled: true }),
 			tempDir,
@@ -185,6 +192,7 @@ describe('delegation-gate: council mode integration', () => {
 		);
 		const session = ensureAgentSession('test-session');
 		session.taskWorkflowStates.set('1.1', 'tests_run');
+		await seedAuthoritativeTaskWorkflow(tempDir, '1.1', 'tests_run');
 
 		let threw = false;
 		try {
@@ -206,6 +214,7 @@ describe('delegation-gate: council mode integration', () => {
 		);
 		const session = ensureAgentSession('test-session');
 		session.taskWorkflowStates.set('1.1', 'tests_run');
+		await seedAuthoritativeTaskWorkflow(tempDir, '1.1', 'tests_run');
 
 		let threw = false;
 		try {
@@ -251,6 +260,7 @@ describe('delegation-gate: council mode disabled', () => {
 		);
 		const session = ensureAgentSession('test-session');
 		session.taskWorkflowStates.set('1.1', 'tests_run');
+		await seedAuthoritativeTaskWorkflow(tempDir, '1.1', 'tests_run');
 
 		let threw = false;
 		try {

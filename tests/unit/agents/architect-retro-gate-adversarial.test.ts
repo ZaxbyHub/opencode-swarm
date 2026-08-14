@@ -152,7 +152,8 @@ describe('architect.ts — RETROSPECTIVE GATE Adversarial Tests', () => {
 			const agent = createArchitectAgent('test-model', customPrompt);
 
 			// The agent should use the custom prompt, not ARCHITECT_PROMPT
-			expect(agent.config.prompt).toBe(customPrompt);
+			expect(agent.config.prompt).toStartWith(customPrompt);
+			expect(agent.config.prompt).toContain('[PLANNING PROFILE DEFAULT');
 			expect(agent.config.prompt).not.toBe(ARCHITECT_PROMPT);
 		});
 	});

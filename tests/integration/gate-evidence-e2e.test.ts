@@ -14,9 +14,8 @@ import {
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
-	hasPassedAllGates,
+	getTaskWorkflowSnapshot,
 	readTaskEvidence,
-	recordAgentDispatch,
 	recordGateEvidence,
 } from '../../src/gate-evidence';
 import { loadPlan, savePlan } from '../../src/plan/manager';
@@ -26,12 +25,14 @@ import {
 	startAgentSession,
 } from '../../src/state';
 import { executeUpdateTaskStatus } from '../../src/tools/update-task-status';
+import { seedAuthoritativeTaskWorkflow } from '../unit/hooks/_delegation-gate-helpers';
 
 let tmpDir: string;
 
 function writePlan(
 	dir: string,
 	tasks: Array<{ id: string; status: string }>,
+	requiredAgents?: string[],
 ): void {
 	const planJson = JSON.stringify({
 		schema_version: '1.0.0',
@@ -43,6 +44,7 @@ function writePlan(
 				id: 1,
 				name: 'Phase 1',
 				status: 'in_progress',
+				...(requiredAgents ? { required_agents: requiredAgents } : {}),
 				tasks: tasks.map((t) => ({
 					id: t.id,
 					phase: 1,
@@ -82,9 +84,12 @@ describe('Scenario A — Happy path (code task)', () => {
 
 		writePlan(tmpDir, [{ id: '1.1', status: 'in_progress' }]);
 
-		await recordAgentDispatch(tmpDir, '1.1', 'coder');
-		await recordGateEvidence(tmpDir, '1.1', 'reviewer', 'sess-a');
-		await recordGateEvidence(tmpDir, '1.1', 'test_engineer', 'sess-a');
+		const generation = await seedAuthoritativeTaskWorkflow(
+			tmpDir,
+			'1.1',
+			'tests_run',
+			'sess-a',
+		);
 
 		const result = await executeUpdateTaskStatus({
 			task_id: '1.1',
@@ -97,6 +102,11 @@ describe('Scenario A — Happy path (code task)', () => {
 		const plan = await loadPlan(tmpDir);
 		const task = plan!.phases[0].tasks.find((t) => t.id === '1.1');
 		expect(task!.status).toBe('completed');
+		const evidence = await readTaskEvidence(tmpDir, '1.1');
+		expect(getTaskWorkflowSnapshot(evidence)).toMatchObject({
+			generation,
+			state: 'complete',
+		});
 	});
 });
 
@@ -107,7 +117,7 @@ describe('Scenario B — Happy path (docs task)', () => {
 		const session = ensureAgentSession('sess-b');
 		session.currentTaskId = '1.2';
 
-		writePlan(tmpDir, [{ id: '1.2', status: 'in_progress' }]);
+		writePlan(tmpDir, [{ id: '1.2', status: 'in_progress' }], ['docs']);
 
 		await recordGateEvidence(tmpDir, '1.2', 'docs', 'sess-b');
 
@@ -117,6 +127,9 @@ describe('Scenario B — Happy path (docs task)', () => {
 			working_directory: tmpDir,
 		});
 		expect(result.success).toBe(true);
+		expect(
+			getTaskWorkflowSnapshot(await readTaskEvidence(tmpDir, '1.2')).state,
+		).toBe('complete');
 	});
 });
 
@@ -135,7 +148,12 @@ describe('Scenario C — Gate expansion (docs → code)', () => {
 		expect(evidence!.required_gates).toEqual(['docs']);
 
 		// Coder dispatch expands gates
-		await recordAgentDispatch(tmpDir, '1.3', 'coder');
+		const generation = await seedAuthoritativeTaskWorkflow(
+			tmpDir,
+			'1.3',
+			'pre_check_passed',
+			'sess-c',
+		);
 		evidence = await readTaskEvidence(tmpDir, '1.3');
 		expect(evidence!.required_gates).toEqual([
 			'docs',
@@ -150,11 +168,15 @@ describe('Scenario C — Gate expansion (docs → code)', () => {
 			working_directory: tmpDir,
 		});
 		expect(blocked.success).toBe(false);
-		expect(blocked.errors?.join('')).toContain('missing required gates');
+		expect(blocked.errors?.join('')).toContain('Missing gates');
 
 		// Record remaining gates
-		await recordGateEvidence(tmpDir, '1.3', 'reviewer', 'sess-c');
-		await recordGateEvidence(tmpDir, '1.3', 'test_engineer', 'sess-c');
+		await recordGateEvidence(tmpDir, '1.3', 'reviewer', 'sess-c', false, {
+			expectedGeneration: generation,
+		});
+		await recordGateEvidence(tmpDir, '1.3', 'test_engineer', 'sess-c', false, {
+			expectedGeneration: generation,
+		});
 
 		const ok = await executeUpdateTaskStatus({
 			task_id: '1.3',
@@ -167,30 +189,8 @@ describe('Scenario C — Gate expansion (docs → code)', () => {
 
 describe('Scenario D — Cross-session recovery', () => {
 	it('evidence file persists across session restart, task can complete with fresh state', async () => {
-		// Write evidence file directly (simulating prior session)
-		mkdirSync(path.join(tmpDir, '.swarm', 'evidence'), { recursive: true });
-		const evidenceData = {
-			taskId: '1.1',
-			required_gates: ['reviewer', 'test_engineer'],
-			gates: {
-				reviewer: {
-					sessionId: 'old-sess-1',
-					timestamp: '2026-01-01T00:00:00Z',
-					agent: 'reviewer',
-				},
-				test_engineer: {
-					sessionId: 'old-sess-2',
-					timestamp: '2026-01-01T00:01:00Z',
-					agent: 'test_engineer',
-				},
-			},
-		};
-		writeFileSync(
-			path.join(tmpDir, '.swarm', 'evidence', '1.1.json'),
-			JSON.stringify(evidenceData),
-		);
-
 		writePlan(tmpDir, [{ id: '1.1', status: 'in_progress' }]);
+		await seedAuthoritativeTaskWorkflow(tmpDir, '1.1', 'tests_run', 'old-sess');
 
 		// Fresh state — no in-memory sessions
 		resetSwarmState();
@@ -214,17 +214,16 @@ describe('Scenario E — Task isolation', () => {
 			{ id: '1.2', status: 'in_progress' },
 		]);
 
-		// Only reviewer for task 1.1 (code task missing test_engineer)
-		await recordGateEvidence(tmpDir, '1.1', 'reviewer', 'sess-e');
-
-		// Both gates for task 1.2
-		await recordGateEvidence(tmpDir, '1.2', 'reviewer', 'sess-e');
-		await recordGateEvidence(tmpDir, '1.2', 'test_engineer', 'sess-e');
-
-		// 1.1 should be BLOCKED (missing test_engineer for required_gates=["reviewer"])
-		// Note: reviewer-direct dispatch sets required_gates: ["reviewer"] which is already met,
-		// so we need to ensure coder dispatch was recorded to expand required_gates
-		await recordAgentDispatch(tmpDir, '1.1', 'coder');
+		const generation = await seedAuthoritativeTaskWorkflow(
+			tmpDir,
+			'1.1',
+			'pre_check_passed',
+			'sess-e',
+		);
+		await recordGateEvidence(tmpDir, '1.1', 'reviewer', 'sess-e', false, {
+			expectedGeneration: generation,
+		});
+		await seedAuthoritativeTaskWorkflow(tmpDir, '1.2', 'tests_run', 'sess-e');
 
 		const blocked = await executeUpdateTaskStatus({
 			task_id: '1.1',

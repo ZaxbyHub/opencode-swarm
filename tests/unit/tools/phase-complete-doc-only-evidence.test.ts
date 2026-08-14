@@ -2,12 +2,10 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import {
-	recordAgentDispatch,
-	recordGateEvidence,
-} from '../../../src/gate-evidence';
+import { recordGateEvidence } from '../../../src/gate-evidence';
 import { swarmState } from '../../../src/state';
 import { _test_exports } from '../../../src/tools/phase-complete';
+import { seedStageAPassed } from '../../helpers/task-workflow-evidence';
 
 describe('phase_complete doc-only durable fallback', () => {
 	let directory: string;
@@ -48,10 +46,17 @@ describe('phase_complete doc-only durable fallback', () => {
 	});
 
 	test('accepts completed reviewer-only doc evidence after restart', async () => {
-		await recordAgentDispatch(directory, '1.1', 'coder', false, {
+		const generation = await seedStageAPassed(directory, '1.1', {
 			testEngineerExempt: true,
 		});
-		await recordGateEvidence(directory, '1.1', 'reviewer', 'review-session');
+		await recordGateEvidence(
+			directory,
+			'1.1',
+			'reviewer',
+			'review-session',
+			false,
+			{ expectedGeneration: generation },
+		);
 
 		expect(
 			await _test_exports.allCompletedTasksHavePassedGateEvidence(directory, [
@@ -61,8 +66,15 @@ describe('phase_complete doc-only durable fallback', () => {
 	});
 
 	test('rejects completed code evidence missing test_engineer', async () => {
-		await recordAgentDispatch(directory, '1.2', 'coder');
-		await recordGateEvidence(directory, '1.2', 'reviewer', 'review-session');
+		const generation = await seedStageAPassed(directory, '1.2');
+		await recordGateEvidence(
+			directory,
+			'1.2',
+			'reviewer',
+			'review-session',
+			false,
+			{ expectedGeneration: generation },
+		);
 
 		expect(
 			await _test_exports.allCompletedTasksHavePassedGateEvidence(directory, [

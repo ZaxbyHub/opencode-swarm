@@ -18,16 +18,14 @@ import { join } from 'node:path';
 import type { Plan, RuntimePlan } from '../../../src/config/plan-schema';
 import { closeProjectDb } from '../../../src/db/project-db';
 import { setGatesForIdentity } from '../../../src/db/qa-gate-profile';
-import {
-	recordAgentDispatch,
-	recordGateEvidence,
-} from '../../../src/gate-evidence';
+import { recordGateEvidence } from '../../../src/gate-evidence';
 import type { RunMemoryEntry } from '../../../src/services/run-memory';
 import { resetSwarmState, swarmState } from '../../../src/state';
 import {
 	_internals,
 	executeUpdateTaskStatus,
 } from '../../../src/tools/update-task-status';
+import { seedStageAPassed } from '../../helpers/task-workflow-evidence';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const TASK_ID = '1.1';
@@ -89,7 +87,14 @@ async function readRunMemory(): Promise<RunMemoryEntry[]> {
 /** Stub the plan mutation + lock so the test exercises outcome recording only. */
 function stubMutationPath(resultPlan: Plan): void {
 	_internals.loadPlan = async () => resultPlan as RuntimePlan;
-	_internals.updateTaskStatus = async () => resultPlan;
+	_internals.updateTaskStatus = async (_directory, taskId, status) => {
+		const updated = structuredClone(resultPlan);
+		const task = updated.phases
+			.flatMap((phase) => phase.tasks)
+			.find((candidate) => candidate.id === taskId);
+		if (task) task.status = status;
+		return updated;
+	};
 	_internals.tryAcquireLock = (async () => ({
 		acquired: true,
 		lock: { _release: async () => {} },
@@ -109,8 +114,15 @@ async function seedBlockingReviewerGate(): Promise<void> {
 		{ task_id: TASK_ID, status: 'in_progress', working_directory: tempDir },
 		tempDir,
 	);
-	await recordAgentDispatch(tempDir, TASK_ID, 'coder');
-	await recordGateEvidence(tempDir, TASK_ID, 'reviewer', 'sess-reviewer');
+	const generation = await seedStageAPassed(tempDir, TASK_ID);
+	await recordGateEvidence(
+		tempDir,
+		TASK_ID,
+		'reviewer',
+		'sess-reviewer',
+		false,
+		{ expectedGeneration: generation },
+	);
 	resetSwarmState();
 	swarmState.agentSessions.set('test-session', {
 		id: 'test-session',

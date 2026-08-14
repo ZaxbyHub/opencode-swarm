@@ -19,6 +19,7 @@ import {
 	readTaskEvidenceRaw,
 	recordAgentDispatch,
 	recordGateEvidence,
+	transitionTaskWorkflowEvidence,
 } from './gate-evidence';
 
 let tmpDir: string;
@@ -35,6 +36,28 @@ afterEach(() => {
 		/* best effort */
 	}
 });
+
+async function seedCodeTaskAtStageA(taskId: string): Promise<number> {
+	await recordAgentDispatch(tmpDir, taskId, 'coder');
+	const generation = (await readTaskEvidence(tmpDir, taskId))!.workflow!
+		.generation;
+	await transitionTaskWorkflowEvidence(tmpDir, taskId, {
+		type: 'stage_a_passed',
+		expectedGeneration: generation,
+	});
+	return generation;
+}
+
+async function recordStageBGate(
+	taskId: string,
+	gate: 'reviewer' | 'test_engineer',
+	sessionId: string,
+	expectedGeneration: number,
+): Promise<void> {
+	await recordGateEvidence(tmpDir, taskId, gate, sessionId, undefined, {
+		expectedGeneration,
+	});
+}
 
 // ── pure functions ──────────────────────────────────────────────────────────
 
@@ -86,20 +109,22 @@ describe('expandRequiredGates', () => {
 // ── recordGateEvidence ──────────────────────────────────────────────────────
 
 describe('recordGateEvidence', () => {
-	it('8. creates dir + file from scratch with correct required_gates', async () => {
-		await recordGateEvidence(tmpDir, '1.1', 'reviewer', 'session-1');
+	it('8. records reviewer only after an accepted mutation and Stage A pass', async () => {
+		const generation = await seedCodeTaskAtStageA('1.1');
+		await recordStageBGate('1.1', 'reviewer', 'session-1', generation);
 		const evidence = await readTaskEvidence(tmpDir, '1.1');
 		expect(evidence).not.toBeNull();
 		expect(evidence!.taskId).toBe('1.1');
-		expect(evidence!.required_gates).toEqual(['reviewer']);
+		expect(evidence!.required_gates).toEqual(['reviewer', 'test_engineer']);
 		expect(evidence!.gates.reviewer).toBeDefined();
 		expect(evidence!.gates.reviewer.sessionId).toBe('session-1');
 		expect(evidence!.gates.reviewer.agent).toBe('reviewer');
 	});
 
 	it('9. merges second gate into existing file without overwriting first', async () => {
-		await recordGateEvidence(tmpDir, '1.1', 'reviewer', 'session-1');
-		await recordGateEvidence(tmpDir, '1.1', 'test_engineer', 'session-2');
+		const generation = await seedCodeTaskAtStageA('1.1');
+		await recordStageBGate('1.1', 'reviewer', 'session-1', generation);
+		await recordStageBGate('1.1', 'test_engineer', 'session-2', generation);
 		const evidence = await readTaskEvidence(tmpDir, '1.1');
 		expect(evidence!.gates.reviewer).toBeDefined();
 		expect(evidence!.gates.test_engineer).toBeDefined();
@@ -192,7 +217,8 @@ describe('readTaskEvidence', () => {
 	});
 
 	it('13. returns correct data after recording', async () => {
-		await recordGateEvidence(tmpDir, '2.1', 'reviewer', 'sess-abc');
+		const generation = await seedCodeTaskAtStageA('2.1');
+		await recordStageBGate('2.1', 'reviewer', 'sess-abc', generation);
 		const result = await readTaskEvidence(tmpDir, '2.1');
 		expect(result).not.toBeNull();
 		expect(result!.taskId).toBe('2.1');
@@ -204,9 +230,8 @@ describe('readTaskEvidence', () => {
 
 describe('hasPassedAllGates', () => {
 	it('14. returns false with only reviewer (code task also needs test_engineer)', async () => {
-		// coder dispatch → required_gates: [reviewer, test_engineer]
-		await recordAgentDispatch(tmpDir, '1.4', 'coder');
-		await recordGateEvidence(tmpDir, '1.4', 'reviewer', 'sess-1');
+		const generation = await seedCodeTaskAtStageA('1.4');
+		await recordStageBGate('1.4', 'reviewer', 'sess-1', generation);
 		expect(await hasPassedAllGates(tmpDir, '1.4')).toBe(false);
 	});
 
@@ -216,8 +241,9 @@ describe('hasPassedAllGates', () => {
 	});
 
 	it('16. returns true for code task with both reviewer + test_engineer', async () => {
-		await recordGateEvidence(tmpDir, '1.6', 'reviewer', 'sess-1');
-		await recordGateEvidence(tmpDir, '1.6', 'test_engineer', 'sess-2');
+		const generation = await seedCodeTaskAtStageA('1.6');
+		await recordStageBGate('1.6', 'reviewer', 'sess-1', generation);
+		await recordStageBGate('1.6', 'test_engineer', 'sess-2', generation);
 		expect(await hasPassedAllGates(tmpDir, '1.6')).toBe(true);
 	});
 
@@ -284,9 +310,10 @@ describe('taskId validation', () => {
 
 describe('concurrency', () => {
 	it("19. concurrent writes don't corrupt — both gates present after parallel writes", async () => {
+		const generation = await seedCodeTaskAtStageA('3.1');
 		await Promise.all([
-			recordGateEvidence(tmpDir, '3.1', 'reviewer', 'sess-A'),
-			recordGateEvidence(tmpDir, '3.1', 'test_engineer', 'sess-B'),
+			recordStageBGate('3.1', 'reviewer', 'sess-A', generation),
+			recordStageBGate('3.1', 'test_engineer', 'sess-B', generation),
 		]);
 		const evidence = await readTaskEvidence(tmpDir, '3.1');
 		expect(evidence).not.toBeNull();
@@ -326,7 +353,8 @@ describe('corruption handling', () => {
 	describe('recordGateEvidence', () => {
 		it('21. truncated JSON → throws, file unchanged', async () => {
 			// Create a valid evidence file first
-			await recordGateEvidence(tmpDir, '1.1', 'reviewer', 'session-2');
+			const generation = await seedCodeTaskAtStageA('1.1');
+			await recordStageBGate('1.1', 'reviewer', 'session-2', generation);
 
 			// Overwrite with truncated JSON
 			const evidencePath = getEvidencePath('1.1');
@@ -334,7 +362,7 @@ describe('corruption handling', () => {
 
 			// Call recordGateEvidence - should throw
 			await expect(
-				recordGateEvidence(tmpDir, '1.1', 'reviewer', 'session-2'),
+				recordStageBGate('1.1', 'reviewer', 'session-2', generation),
 			).rejects.toThrow();
 
 			// Assert: file is UNCHANGED (still truncated JSON)
