@@ -81,6 +81,8 @@
 		".opencode/skills/parallel-work-check",
 		".opencode/skills/ci-fix-monitor",
 		".opencode/skills/issue-tracer",
+		".opencode/skills/orchestrating-subagents",
+		".opencode/skills/durable-session-state",
 		"tests/fixtures/memory-recall",
 		"README.md",
 		"LICENSE"

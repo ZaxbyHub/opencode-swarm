@@ -26,8 +26,8 @@ check set is complete and includes all known failed checks in `failedChecks`.
    `commit-pr` skill for the commit message, PR body/invariant-audit/test-plan
    discipline, and the push protocol. The batching goal is ONE push cycle
    (collect all → fix all → push once), not literally one commit — a single new
-   commit containing all batched fixes satisfies the goal. Guardrail facts
-   (verified in `src/hooks/guardrails/tool-before.ts`): bare `git push --force`
+   commit containing all batched fixes satisfies the goal. Guardrail facts (verified in the
+   tool-before push guardrail): bare `git push --force`
    and `-f` are deny-pattern-blocked; `--force-with-lease` is EXEMPT because it
    refuses to overwrite remote work gained since your last fetch — commit-pr
    mandates it for fork/rebase flows. Even so, prefer a normal new fix commit

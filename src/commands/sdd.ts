@@ -60,6 +60,20 @@ interface ParsedSddArgs {
  * Shared by both --change and --feature so the same rejection logic is reused
  * (task 2.2 explicit requirement; matches the pre-task baseline).
  */
+/**
+ * Issue #2131 criterion G: the allowed-mutations policy derived from the
+ * effective spec's source kind. Only a native swarm spec may be created,
+ * refined, or archived through the swarm tooling; projected sources
+ * (openspec / speckit) are read-only inputs — refine them in their own tool.
+ */
+export function allowedMutationsFor(
+	source: 'swarm' | 'openspec_projection' | 'speckit_projection',
+): string[] {
+	return source === 'swarm'
+		? ['create', 'refine', 'archive']
+		: ['none (read-only input; refine in the source tool)'];
+}
+
 function isUnsafeId(value: string): boolean {
 	return (
 		value.includes('/') ||
@@ -256,7 +270,7 @@ export async function handleSddStatusCommand(
 		'',
 		'### Effective Spec',
 		status.effectiveSpec
-			? `- source: ${status.effectiveSpec.source}\n- hash: ${status.effectiveSpec.hash}\n- sources: ${status.effectiveSpec.sourcePaths.length}`
+			? `- source: ${status.effectiveSpec.source}\n- hash: ${status.effectiveSpec.hash}\n- path(s): ${status.effectiveSpec.sourcePaths.join(', ')}\n- allowed mutations: ${allowedMutationsFor(status.effectiveSpec.source).join(', ')}`
 			: '- none',
 		status.errors.length > 0
 			? `\n### Errors\n${formatList(status.errors)}`
