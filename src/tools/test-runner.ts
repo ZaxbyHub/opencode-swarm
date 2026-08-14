@@ -97,6 +97,7 @@ export type TestFramework = (typeof SUPPORTED_FRAMEWORKS)[number] | 'none';
 export interface TestRunnerArgs {
 	scope?: 'all' | 'convention' | 'graph' | 'impact';
 	files?: string[];
+	targets?: string[];
 	coverage?: boolean;
 	timeout_ms?: number;
 	bail?: boolean;
@@ -218,6 +219,22 @@ function validateArgs(args: unknown): args is TestRunnerArgs {
 			if (containsControlChars(f)) return false;
 			// Check for PowerShell metacharacters that could enable injection
 			if (containsPowerShellMetacharacters(f)) return false;
+		}
+	}
+
+	// Validate targets
+	if (obj.targets !== undefined) {
+		if (!Array.isArray(obj.targets)) return false;
+		for (const t of obj.targets) {
+			if (typeof t !== 'string') return false;
+			// Reject absolute paths just in case (targets shouldn't be paths)
+			if (isAbsolutePath(t)) return false;
+			// Check for path traversal attempts (including encoded)
+			if (containsPathTraversal(t)) return false;
+			// Check for control characters (including LF/CR)
+			if (containsControlChars(t)) return false;
+			// Check for PowerShell metacharacters that could enable injection
+			if (containsPowerShellMetacharacters(t)) return false;
 		}
 	}
 
@@ -442,6 +459,7 @@ export async function buildTestCommandViaDispatch(
 	coverage: boolean,
 	baseDir: string,
 	bail: boolean,
+	targets?: string[],
 ): Promise<string[] | null> {
 	if (framework === 'none') return null;
 	try {
@@ -452,6 +470,7 @@ export async function buildTestCommandViaDispatch(
 				scope,
 				coverage,
 				bail,
+				targets,
 			});
 			if (cmd) return cmd;
 		}
@@ -1144,6 +1163,7 @@ function buildTestCommand(
 	coverage: boolean,
 	baseDir: string,
 	bail: boolean,
+	targets?: string[],
 ): string[] | null {
 	switch (framework) {
 		case 'bun': {
@@ -1204,7 +1224,9 @@ function buildTestCommand(
 		case 'cargo': {
 			const args: string[] = ['cargo', 'test'];
 			// cargo has no bail support — silently ignore
-			if (scope !== 'all' && files.length > 0) {
+			if (targets && targets.length > 0) {
+				args.push(...targets);
+			} else if (scope !== 'all' && files.length > 0) {
 				// Cargo test can accept test names
 				args.push(...files);
 			}
@@ -1232,26 +1254,50 @@ function buildTestCommand(
 			}
 			return ['pwsh', '-Command', 'Invoke-Pester'];
 		}
-		case 'go-test':
+		case 'go-test': {
 			// go-test has no bail support — silently ignore
 			// Note: 'files' param not forwarded — go test does not support arbitrary file paths;
 			// use package paths (./...) for full suite
-			return ['go', 'test', './...'];
-		case 'maven':
+			const args: string[] = ['go', 'test'];
+			if (targets && targets.length > 0) {
+				args.push('-run', targets.join('|'));
+			}
+			args.push('./...');
+			return args;
+		}
+		case 'maven': {
 			// maven has no bail support — silently ignore
-			return ['mvn', 'test'];
+			const args: string[] = ['mvn', 'test'];
+			if (targets && targets.length > 0) {
+				args.push(`-Dtest=${targets.join(',')}`);
+			}
+			return args;
+		}
 		case 'gradle': {
 			// gradle has no bail support — silently ignore
 			const isWindows = process.platform === 'win32';
 			const hasGradlewBat = fs.existsSync(path.join(baseDir, 'gradlew.bat'));
 			const hasGradlew = fs.existsSync(path.join(baseDir, 'gradlew'));
-			if (hasGradlewBat && isWindows) return ['gradlew.bat', 'test'];
-			if (hasGradlew) return ['./gradlew', 'test'];
-			return ['gradle', 'test'];
+			const args: string[] = [];
+			if (hasGradlewBat && isWindows) args.push('gradlew.bat');
+			else if (hasGradlew) args.push('./gradlew');
+			else args.push('gradle');
+			args.push('test');
+			if (targets && targets.length > 0) {
+				for (const target of targets) {
+					args.push('--tests', target);
+				}
+			}
+			return args;
 		}
-		case 'dotnet-test':
+		case 'dotnet-test': {
 			// dotnet-test has no bail support — silently ignore
-			return ['dotnet', 'test'];
+			const args: string[] = ['dotnet', 'test'];
+			if (targets && targets.length > 0) {
+				args.push('--filter', targets.join('|'));
+			}
+			return args;
+		}
 		case 'ctest': {
 			// ctest has no bail support — silently ignore
 			// Detect actual build directory by looking for CMakeCache.txt in common locations
@@ -1267,12 +1313,23 @@ function buildTestCommand(
 				buildDirCandidates.find((d) =>
 					fs.existsSync(path.join(baseDir, d, 'CMakeCache.txt')),
 				) ?? 'build';
-			return ['ctest', '--test-dir', actualBuildDir];
+			const args: string[] = ['ctest', '--test-dir', actualBuildDir];
+			if (targets && targets.length > 0) {
+				args.push('-R', targets.join('|'));
+			}
+			return args;
 		}
-		case 'swift-test':
+		case 'swift-test': {
 			// swift-test has no bail support — silently ignore
 			// Note: 'files' param not forwarded — swift test does not support arbitrary file paths
-			return ['swift', 'test'];
+			const args: string[] = ['swift', 'test'];
+			if (targets && targets.length > 0) {
+				for (const target of targets) {
+					args.push('--filter', target);
+				}
+			}
+			return args;
+		}
 		case 'dart-test':
 			// dart-test has no bail support — silently ignore
 			// Prefer flutter test for Flutter projects; fall back to dart test
@@ -1841,8 +1898,9 @@ export async function runTests(
 	timeout_ms: number,
 	cwd: string,
 	bail: boolean,
+	targets?: string[],
 ): Promise<TestResult> {
-	if (scope !== 'all' && files.length > 0) {
+	if (scope !== 'all' && files.length > 0 && !(targets && targets.length > 0)) {
 		const unsupportedReason = getTargetedExecutionUnsupportedReason(framework);
 		if (unsupportedReason) {
 			return {
@@ -1870,8 +1928,9 @@ export async function runTests(
 				coverage,
 				cwd,
 				bail,
-			)) ?? buildTestCommand(framework, scope, files, coverage, cwd, bail))
-		: buildTestCommand(framework, scope, files, coverage, cwd, bail);
+				targets,
+			)) ?? buildTestCommand(framework, scope, files, coverage, cwd, bail, targets))
+		: buildTestCommand(framework, scope, files, coverage, cwd, bail, targets);
 
 	if (!command) {
 		return {
@@ -2852,6 +2911,7 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 			timeout_ms,
 			workingDir,
 			bail,
+			args.targets,
 		);
 
 		// Record results to history and analyze failures

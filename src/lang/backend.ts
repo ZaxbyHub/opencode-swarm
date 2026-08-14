@@ -97,6 +97,7 @@ export interface BuildTestCommandOpts {
 	scope?: TestScope;
 	coverage?: boolean;
 	bail?: boolean;
+	targets?: string[];
 }
 
 /**

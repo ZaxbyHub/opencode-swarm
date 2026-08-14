@@ -1480,6 +1480,97 @@ describe('test-runner.ts — targeted framework safeguards', () => {
 	});
 });
 
+describe('test-runner.ts — targets support', () => {
+	test('allows targeted execution for go-test when targets are provided', async () => {
+		const originalSpawn = Bun.spawn;
+		const encoder = new TextEncoder();
+		let spawnArgs: string[] = [];
+		Bun.spawn = ((cmd: string[], options?: any) => {
+			spawnArgs = cmd;
+			return {
+				stdout: new ReadableStream({
+					start(controller) {
+						controller.enqueue(encoder.encode('ok  	pkg	0.001s'));
+						controller.close();
+					},
+				}),
+				stderr: new ReadableStream({
+					start(controller) {
+						controller.close();
+					},
+				}),
+				exited: Promise.resolve(0),
+				exitCode: 0,
+				kill: () => {},
+			};
+		}) as unknown as typeof Bun.spawn;
+
+		try {
+			const result = await runTests(
+				'go-test',
+				'convention',
+				['pkg/foo_test.go'], // This alone would fail without targets
+				false,
+				60_000,
+				process.cwd(),
+				false,
+				['TestFoo'], // The actual target
+			);
+			
+			expect(result.success).toBe(true);
+			// Should invoke: go test -run TestFoo ./...
+			expect(spawnArgs).toEqual(['go', 'test', '-run', 'TestFoo', './...']);
+		} finally {
+			Bun.spawn = originalSpawn;
+		}
+	});
+
+	test('allows targeted execution for ctest when targets are provided', async () => {
+		const originalSpawn = Bun.spawn;
+		const encoder = new TextEncoder();
+		let spawnArgs: string[] = [];
+		Bun.spawn = ((cmd: string[], options?: any) => {
+			spawnArgs = cmd;
+			return {
+				stdout: new ReadableStream({
+					start(controller) {
+						controller.enqueue(encoder.encode('100% tests passed, 0 tests failed out of 1'));
+						controller.close();
+					},
+				}),
+				stderr: new ReadableStream({
+					start(controller) {
+						controller.close();
+					},
+				}),
+				exited: Promise.resolve(0),
+				exitCode: 0,
+				kill: () => {},
+			};
+		}) as unknown as typeof Bun.spawn;
+
+		try {
+			const result = await runTests(
+				'ctest',
+				'convention',
+				['tests/foo.cc'], // This would normally fail since ctest wants test names, not files
+				false,
+				60_000,
+				process.cwd(),
+				false,
+				['auto-src-controller-stateManager'], // The ctest target
+			);
+			
+			expect(result.success).toBe(true);
+			expect(spawnArgs).toContain('ctest');
+			expect(spawnArgs).toContain('-R');
+			expect(spawnArgs).toContain('auto-src-controller-stateManager');
+		} finally {
+			Bun.spawn = originalSpawn;
+		}
+	});
+});
+
 /**
  * MAX_SAFE_SOURCE_FILES guard tests (issue #864)
  *
