@@ -1,4 +1,20 @@
-import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test';
+import {
+	afterAll,
+	afterEach,
+	beforeAll,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	spyOn,
+} from 'bun:test';
+import * as path from 'node:path';
+import { createIsolatedTestEnv } from '../helpers/isolated-test-env.js';
+import { createSafeTestDir } from '../helpers/safe-test-dir.js';
+import {
+	captureFileBytes,
+	expectFileBytesUnchanged,
+} from '../helpers/test-isolation.js';
 import {
 	COMMAND_REGISTRY,
 	VALID_COMMANDS,
@@ -10,11 +26,41 @@ import OpenCodeSwarm from '../../src/index';
 const mockPluginInput = {
 	client: {} as any,
 	project: {} as any,
-	directory: process.cwd(),
-	worktree: process.cwd(),
+	directory: '',
+	worktree: '',
 	serverUrl: new URL('http://localhost:3000'),
 	$: {} as any,
 };
+
+let envCleanup = () => {};
+let tempDirCleanup = () => {};
+const trackedConfigPath = path.join(
+	import.meta.dir,
+	'../../.opencode/opencode-swarm.json',
+);
+let trackedProjectConfigBefore: Buffer;
+
+beforeAll(() => {
+	trackedProjectConfigBefore = captureFileBytes(trackedConfigPath);
+});
+
+beforeEach(() => {
+	const isolatedEnv = createIsolatedTestEnv();
+	const safeDir = createSafeTestDir();
+	mockPluginInput.directory = safeDir.dir;
+	mockPluginInput.worktree = safeDir.dir;
+	envCleanup = isolatedEnv.cleanup;
+	tempDirCleanup = safeDir.cleanup;
+});
+
+afterEach(() => {
+	envCleanup();
+	tempDirCleanup();
+});
+
+afterAll(() => {
+	expectFileBytesUnchanged(trackedConfigPath, trackedProjectConfigBefore);
+});
 
 describe('Swarm subcommand registration', () => {
 	it('should initialize plugin successfully', async () => {

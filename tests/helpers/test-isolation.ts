@@ -11,6 +11,7 @@
  * Use `createIsolatedTestEnv`, `createSafeTestDir`, or `freezeClock` directly
  * when you only need one.
  */
+import * as fs from 'node:fs';
 import { createIsolatedTestEnv } from './isolated-test-env.js';
 import { createSafeTestDir } from './safe-test-dir.js';
 import {
@@ -35,6 +36,33 @@ export interface IsolatedState {
 	restoreClock: Restore | null;
 	/** Tear everything down: restore env, restore clock, remove temp dir. */
 	cleanup: () => void;
+}
+
+/**
+ * Captures the exact bytes in a file so tests can assert a later operation did
+ * not mutate that file on disk. This is especially important for project-owned
+ * tracked files like `.opencode/opencode-swarm.json`.
+ */
+export function captureFileBytes(filePath: string): Buffer {
+	return fs.readFileSync(filePath);
+}
+
+/**
+ * Fails if a previously-captured file's bytes changed. Use in afterAll to catch
+ * silent mutations that would otherwise leave a dirty working tree.
+ */
+export function expectFileBytesUnchanged(
+	filePath: string,
+	originalBytes: Buffer | Uint8Array,
+): void {
+	const current = fs.readFileSync(filePath);
+	const expected = Buffer.from(originalBytes);
+	if (!current.equals(expected)) {
+	  throw new Error(
+	    `Tracked file mutated: ${filePath}\n` +
+	      `expected ${expected.length} bytes, saw ${current.length} bytes`,
+	  );
+	}
 }
 
 /**

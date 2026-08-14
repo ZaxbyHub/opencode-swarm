@@ -1,6 +1,12 @@
-import { describe, expect, it } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { createIsolatedTestEnv } from '../../tests/helpers/isolated-test-env.js';
+import { createSafeTestDir } from '../../tests/helpers/safe-test-dir.js';
+import {
+	captureFileBytes,
+	expectFileBytesUnchanged,
+} from '../../tests/helpers/test-isolation.js';
 import OpenCodeSwarm from '../index';
 import {
 	COMMAND_REGISTRY,
@@ -35,22 +41,43 @@ async function getIndexSource(): Promise<string> {
  * This avoids the circular reconstruction that compared the test's own
  * derived string against itself.
  */
+const trackedConfigPath = path.join(
+	import.meta.dir,
+	'../../.opencode/opencode-swarm.json',
+);
+let trackedProjectConfigBefore: Buffer;
+
+beforeAll(() => {
+	trackedProjectConfigBefore = captureFileBytes(trackedConfigPath);
+});
+
+afterAll(() => {
+	expectFileBytesUnchanged(trackedConfigPath, trackedProjectConfigBefore);
+});
+
 async function getActualSwarmDescription(): Promise<string> {
-	const plugin = await OpenCodeSwarm.server({
-		client: {} as any,
-		project: {} as any,
-		directory: process.cwd(),
-		worktree: process.cwd(),
-		serverUrl: new URL('http://localhost:3000'),
-		$: {} as any,
-	});
-	const mockConfig: Record<string, unknown> = {};
-	await plugin.config?.(mockConfig);
-	const commands = mockConfig.command as Record<
-		string,
-		{ template: string; description: string }
-	>;
-	return commands.swarm.description;
+	const safeDir = createSafeTestDir();
+	const isolatedEnv = createIsolatedTestEnv();
+	try {
+		const plugin = await OpenCodeSwarm.server({
+			client: {} as any,
+			project: {} as any,
+			directory: safeDir.dir,
+			worktree: safeDir.dir,
+			serverUrl: new URL('http://localhost:3000'),
+			$: {} as any,
+		});
+		const mockConfig: Record<string, unknown> = {};
+		await plugin.config?.(mockConfig);
+		const commands = mockConfig.command as Record<
+			string,
+			{ template: string; description: string }
+		>;
+		return commands.swarm.description;
+	} finally {
+		isolatedEnv.cleanup();
+		safeDir.cleanup();
+	}
 }
 
 /**

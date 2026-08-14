@@ -7,7 +7,12 @@ import { afterEach, describe, expect, mock, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { setupIsolatedState, withIsolatedState } from './test-isolation.js';
+import {
+  captureFileBytes,
+  expectFileBytesUnchanged,
+  setupIsolatedState,
+  withIsolatedState,
+} from './test-isolation.js';
 
 afterEach(() => {
 	mock.restore();
@@ -98,6 +103,23 @@ describe('setupIsolatedState', () => {
 			state.cleanup();
 		}
 		expect(fs.existsSync(dir as string)).toBe(false);
+	});
+
+	test('captureFileBytes and expectFileBytesUnchanged detect silent mutation', () => {
+		const state = setupIsolatedState({ prefix: 'iso-bytes-' });
+		try {
+			const file = path.join(state.dir, 'tracked.json');
+			const original = Buffer.from('{"value":1}\n');
+			fs.writeFileSync(file, original);
+			const snapshot = captureFileBytes(file);
+			fs.writeFileSync(file, Buffer.from('{"value":2}\n'));
+			expect(() => expectFileBytesUnchanged(file, snapshot)).toThrow(
+			  /Tracked file mutated/i,
+			);
+			fs.writeFileSync(file, snapshot);
+		} finally {
+			state.cleanup();
+		}
 	});
 });
 
