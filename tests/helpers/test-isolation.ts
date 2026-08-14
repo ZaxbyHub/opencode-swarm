@@ -43,9 +43,14 @@ export interface IsolatedState {
  * not mutate that file on disk. This is especially important for project-owned
  * tracked files like `.opencode/opencode-swarm.json`.
  */
-export function captureFileBytes(filePath: string): Buffer {
+export function captureFileBytes(filePath: string): Buffer | null {
+	if (!fs.existsSync(filePath)) {
+		return null;
+	}
 	return fs.readFileSync(filePath);
 }
+
+const FILE_PREVIEW_BYTES = 96;
 
 /**
  * Fails if a previously-captured file's bytes changed. Use in afterAll to catch
@@ -53,15 +58,28 @@ export function captureFileBytes(filePath: string): Buffer {
  */
 export function expectFileBytesUnchanged(
 	filePath: string,
-	originalBytes: Buffer | Uint8Array,
+	originalBytes: Buffer | Uint8Array | null,
 ): void {
+	if (originalBytes === null) {
+		if (fs.existsSync(filePath)) {
+			throw new Error(`Tracked file unexpectedly appeared: ${filePath}`);
+		}
+		return;
+	}
+	if (!fs.existsSync(filePath)) {
+		throw new Error(`Tracked file was deleted: ${filePath}`);
+	}
 	const current = fs.readFileSync(filePath);
 	const expected = Buffer.from(originalBytes);
 	if (!current.equals(expected)) {
-	  throw new Error(
-	    `Tracked file mutated: ${filePath}\n` +
-	      `expected ${expected.length} bytes, saw ${current.length} bytes`,
-	  );
+		const truncate = (bytes: Buffer) =>
+			bytes.subarray(0, FILE_PREVIEW_BYTES).toString('utf8');
+		throw new Error(
+			`Tracked file mutated: ${filePath}\n` +
+				`expected ${expected.length} bytes, saw ${current.length} bytes\n` +
+				`expected prefix: ${truncate(expected)}\n` +
+				`actual prefix: ${truncate(current)}`,
+		);
 	}
 }
 

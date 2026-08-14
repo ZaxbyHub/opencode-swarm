@@ -38,24 +38,55 @@ const trackedConfigPath = path.join(
 	import.meta.dir,
 	'../../.opencode/opencode-swarm.json',
 );
-let trackedProjectConfigBefore: Buffer;
+let trackedProjectConfigBefore: Buffer | null = null;
 
 beforeAll(() => {
 	trackedProjectConfigBefore = captureFileBytes(trackedConfigPath);
 });
 
 beforeEach(() => {
-	const isolatedEnv = createIsolatedTestEnv();
-	const safeDir = createSafeTestDir();
-	mockPluginInput.directory = safeDir.dir;
-	mockPluginInput.worktree = safeDir.dir;
-	envCleanup = isolatedEnv.cleanup;
-	tempDirCleanup = safeDir.cleanup;
+	envCleanup = () => {};
+	tempDirCleanup = () => {};
+	let isolatedEnv: ReturnType<typeof createIsolatedTestEnv> | undefined;
+	let safeDir: ReturnType<typeof createSafeTestDir> | undefined;
+	try {
+		isolatedEnv = createIsolatedTestEnv();
+		safeDir = createSafeTestDir();
+		mockPluginInput.directory = safeDir.dir;
+		mockPluginInput.worktree = safeDir.dir;
+		envCleanup = isolatedEnv.cleanup;
+		tempDirCleanup = safeDir.cleanup;
+	} catch (error) {
+		let firstError: unknown = error;
+		try {
+			safeDir?.cleanup();
+		} catch (cleanupError) {
+			firstError ??= cleanupError;
+		}
+		try {
+			isolatedEnv?.cleanup();
+		} catch (cleanupError) {
+			firstError ??= cleanupError;
+		}
+		throw firstError;
+	}
 });
 
 afterEach(() => {
-	envCleanup();
-	tempDirCleanup();
+	let firstError: unknown;
+	try {
+		envCleanup();
+	} catch (error) {
+		firstError = error;
+	}
+	try {
+		tempDirCleanup();
+	} catch (error) {
+		firstError ??= error;
+	}
+	if (firstError) {
+		throw firstError;
+	}
 });
 
 afterAll(() => {

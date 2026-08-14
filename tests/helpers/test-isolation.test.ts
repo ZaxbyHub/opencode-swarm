@@ -8,10 +8,10 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
-  captureFileBytes,
-  expectFileBytesUnchanged,
-  setupIsolatedState,
-  withIsolatedState,
+	captureFileBytes,
+	expectFileBytesUnchanged,
+	setupIsolatedState,
+	withIsolatedState,
 } from './test-isolation.js';
 
 afterEach(() => {
@@ -112,9 +112,13 @@ describe('setupIsolatedState', () => {
 			const original = Buffer.from('{"value":1}\n');
 			fs.writeFileSync(file, original);
 			const snapshot = captureFileBytes(file);
+			expect(snapshot).not.toBeNull();
+			if (snapshot === null) {
+				return;
+			}
 			fs.writeFileSync(file, Buffer.from('{"value":2}\n'));
 			expect(() => expectFileBytesUnchanged(file, snapshot)).toThrow(
-			  /Tracked file mutated/i,
+				/Tracked file mutated/i,
 			);
 			fs.writeFileSync(file, snapshot);
 		} finally {

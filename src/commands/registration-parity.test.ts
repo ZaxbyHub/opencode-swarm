@@ -45,7 +45,7 @@ const trackedConfigPath = path.join(
 	import.meta.dir,
 	'../../.opencode/opencode-swarm.json',
 );
-let trackedProjectConfigBefore: Buffer;
+let trackedProjectConfigBefore: Buffer | null = null;
 
 beforeAll(() => {
 	trackedProjectConfigBefore = captureFileBytes(trackedConfigPath);
@@ -56,9 +56,11 @@ afterAll(() => {
 });
 
 async function getActualSwarmDescription(): Promise<string> {
-	const safeDir = createSafeTestDir();
-	const isolatedEnv = createIsolatedTestEnv();
+	let safeDir: ReturnType<typeof createSafeTestDir> | undefined;
+	let isolatedEnv: ReturnType<typeof createIsolatedTestEnv> | undefined;
 	try {
+		safeDir = createSafeTestDir();
+		isolatedEnv = createIsolatedTestEnv();
 		const plugin = await OpenCodeSwarm.server({
 			client: {} as any,
 			project: {} as any,
@@ -75,8 +77,20 @@ async function getActualSwarmDescription(): Promise<string> {
 		>;
 		return commands.swarm.description;
 	} finally {
-		isolatedEnv.cleanup();
-		safeDir.cleanup();
+		let firstError: unknown;
+		try {
+			isolatedEnv?.cleanup();
+		} catch (error) {
+			firstError = error;
+		}
+		try {
+			safeDir?.cleanup();
+		} catch (error) {
+			firstError ??= error;
+		}
+		if (firstError) {
+			throw firstError;
+		}
 	}
 }
 
