@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { repo_map } from '../../../src/tools/repo-map';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 let tmp: string;
 
@@ -17,7 +17,7 @@ function call(args: Record<string, unknown>): Promise<string> {
 }
 
 beforeEach(() => {
-	tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'repo-map-ask-'));
+	tmp = canonicalMkdtemp('repo-map-ask-');
 	const src = path.join(tmp, 'src');
 	fs.mkdirSync(src, { recursive: true });
 	fs.writeFileSync(
