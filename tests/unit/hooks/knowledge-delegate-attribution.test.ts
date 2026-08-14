@@ -20,6 +20,7 @@ import {
 	injectForDelegate,
 } from '../../../src/hooks/knowledge-injector';
 import type { RankedEntry } from '../../../src/hooks/knowledge-reader';
+import { queryLiveMemberships } from '../../../src/hooks/knowledge-receipt-ledger.js';
 import type { KnowledgeConfig } from '../../../src/hooks/knowledge-types';
 
 const baseConfig = KnowledgeConfigSchema.parse({});
@@ -140,13 +141,19 @@ describe('delegate injection outcome attribution (#1768)', () => {
 		await injectForDelegate({
 			directory: tempDir,
 			agent: 'coder',
-			taskTitle: 'some task',
+			taskTitle: 'fix_bug',
 			sessionId: 's',
 			// no phase
 			config: baseConfig as KnowledgeConfig,
 		});
 
 		expect(lessonsSpy).not.toHaveBeenCalled();
+		const live = await queryLiveMemberships(tempDir, {
+			session_id: 's',
+		});
+		if (!live.ok) throw new Error(live.detail);
+		expect(live.memberships).toHaveLength(1);
+		expect(live.memberships[0].phase).toBeUndefined();
 	});
 
 	test('calls confirmEntriesPhase with the resolved phase number', async () => {

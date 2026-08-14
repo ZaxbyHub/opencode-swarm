@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { collectDelegateAcks } from '../../../src/hooks/delegate-ack-collector.js';
 import { buildDelegateDirectiveBlock } from '../../../src/hooks/knowledge-injector.js';
@@ -8,13 +7,14 @@ import type { RankedEntry } from '../../../src/hooks/knowledge-reader.js';
 import { commitDisplayedMembership } from '../../../src/hooks/knowledge-receipt-ledger.js';
 import type { KnowledgeConfig } from '../../../src/hooks/knowledge-types.js';
 import { loadPromotionEvidenceByEntry } from '../../../src/hooks/promotion-evidence-store.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const ENTRY_ID = '11111111-1111-4111-8111-111111111111';
 const TRACE_ID = 'trace-fixed-1849-0001';
 let directory: string;
 
 beforeEach(() => {
-	directory = mkdtempSync(join(tmpdir(), 'delegate-ack-promotion-'));
+	directory = canonicalMkdtemp('delegate-ack-promotion-');
 	mkdirSync(join(directory, '.git'));
 });
 

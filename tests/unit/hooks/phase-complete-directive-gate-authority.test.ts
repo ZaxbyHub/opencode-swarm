@@ -1,24 +1,34 @@
 /** #2031 regression: legacy diagnostic FIFO churn cannot erase V2 gate authority. */
 
 import { afterEach, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { rmSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 import {
 	commitDisplayedMembership,
 	validateAndCommitTerminalBatch,
 } from '../../../src/hooks/knowledge-receipt-ledger.js';
 import { evaluatePhaseCriticalDirectives } from '../../../src/hooks/phase-complete-directive-gate.js';
+import { freezeClock } from '../../helpers/test-clock.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 let directory: string | undefined;
+const FIXED_NOW_MS = Date.parse('2026-01-01T00:00:00.000Z');
+const FIXED_NOW_ISO = '2026-01-01T00:00:00.000Z';
+let restoreClock: (() => void) | undefined;
 
 afterEach(() => {
+	restoreClock?.();
+	restoreClock = undefined;
 	if (directory) rmSync(directory, { recursive: true, force: true });
 	directory = undefined;
 });
 
 test('blocks after more than 5,000 diagnostics, then passes only after exact terminal', async () => {
-	directory = mkdtempSync(path.join(tmpdir(), 'phase-gate-fifo-v2-'));
+	restoreClock = freezeClock({
+		fixedNow: FIXED_NOW_MS,
+		isoNow: FIXED_NOW_ISO,
+	});
+	directory = canonicalMkdtemp('phase-gate-fifo-v2-');
 	writeFileSync(path.join(directory, '.git'), 'gitdir: fixture');
 	const phase = 'Canonical FIFO phase';
 	const displayed = await commitDisplayedMembership(directory, {

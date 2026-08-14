@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { mkdirSync, rmSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -154,6 +154,37 @@ describe('knowledge_receipt', () => {
 		expect(parsed.event_ids).toHaveLength(1);
 		const events = await readKnowledgeEvents(dir);
 		expect(events.some((e) => e.type === 'no_relevant')).toBe(true);
+	});
+
+	it('threads configured receipt grace into an empty authoritative trace', async () => {
+		const configDir = join(dir, '.opencode');
+		mkdirSync(configDir, { recursive: true });
+		writeFileSync(
+			join(configDir, 'opencode-swarm.json'),
+			JSON.stringify({ knowledge: { receipt_close_grace_days: 0 } }),
+		);
+
+		const raw = await knowledge_receipt.execute(
+			{ trace_id: 'none', no_relevant_knowledge: true } as never,
+			ctx(dir),
+		);
+		expect(JSON.parse(raw).recorded).toBe(true);
+
+		const journal = readFileSync(
+			join(dir, '.swarm', 'knowledge-receipts-v2.jsonl'),
+			'utf8',
+		)
+			.trim()
+			.split('\n')
+			.map((line) => JSON.parse(line) as Record<string, unknown>);
+		const emptyCommit = journal.find(
+			(record) => record.kind === 'empty_retrieval_committed',
+		);
+		expect(emptyCommit).toBeDefined();
+		expect(
+			(emptyCommit?.payload as { trace: { grace_days: number } }).trace
+				.grace_days,
+		).toBe(0);
 	});
 
 	it('persists new_lessons through the knowledge_add path', async () => {

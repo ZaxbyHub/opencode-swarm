@@ -14,6 +14,8 @@
  */
 
 import { z } from 'zod';
+import { loadPluginConfigWithMeta } from '../config/index.js';
+import { KnowledgeConfigSchema } from '../config/schema.js';
 import { ensureCohortIdCached } from '../hooks/cohort-cache.js';
 import {
 	type KnowledgeEventInput,
@@ -100,7 +102,7 @@ export const knowledge_receipt: ReturnType<typeof createSwarmTool> =
 				.describe(
 					"trace_id from a prior knowledge_recall/injection, or 'none' if no retrieval occurred",
 				),
-			task_id: z.string().optional(),
+			task_id: z.string().min(1).optional(),
 			phase: z.string().optional(),
 			applied: z.array(appliedItem).optional(),
 			ignored: z.array(ignoredItem).optional(),
@@ -127,7 +129,10 @@ export const knowledge_receipt: ReturnType<typeof createSwarmTool> =
 					error: 'trace_id is required (use "none" if no retrieval occurred)',
 				});
 			}
-			const taskId = typeof a.task_id === 'string' ? a.task_id : undefined;
+			const taskId =
+				typeof a.task_id === 'string' && a.task_id.trim()
+					? a.task_id.trim()
+					: undefined;
 			const phase = typeof a.phase === 'string' ? a.phase : undefined;
 			const applied = Array.isArray(a.applied) ? a.applied : [];
 			const ignored = Array.isArray(a.ignored) ? a.ignored : [];
@@ -153,6 +158,13 @@ export const knowledge_receipt: ReturnType<typeof createSwarmTool> =
 
 			const sessionId = ctx?.sessionID ?? 'unknown';
 			const agent = ctx?.agent ?? 'unknown';
+			let knowledgeConfig = KnowledgeConfigSchema.parse({});
+			try {
+				const { config } = loadPluginConfigWithMeta(directory);
+				knowledgeConfig = KnowledgeConfigSchema.parse(config.knowledge ?? {});
+			} catch {
+				// Invalid/unavailable optional config falls back to schema defaults.
+			}
 			const base = {
 				trace_id: traceId,
 				session_id: sessionId,
@@ -224,6 +236,7 @@ export const knowledge_receipt: ReturnType<typeof createSwarmTool> =
 					source_link_id: linkId,
 					items: validationItems,
 					no_relevant_knowledge: noRelevant,
+					grace_days: knowledgeConfig.receipt_close_grace_days,
 				});
 
 				if (!validation.ok) {
@@ -242,6 +255,9 @@ export const knowledge_receipt: ReturnType<typeof createSwarmTool> =
 				acceptedItems = validation.accepted;
 				authoritativeEventIds = validation.authoritative_event_ids;
 				recordedEventIds.push(...Object.values(authoritativeEventIds));
+				if (validation.no_relevant_event_id) {
+					recordedEventIds.push(validation.no_relevant_event_id);
+				}
 			}
 
 			// `no_relevant` terminal for an empty/real-empty trace.

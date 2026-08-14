@@ -1,22 +1,22 @@
 /** Exact membership identity regressions for denial-count escape state. */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { rmSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 import { DEFAULT_KNOWLEDGE_APPLICATION_CONFIG } from '../../../src/hooks/knowledge-application.js';
 import { knowledgeApplicationGateBefore } from '../../../src/hooks/knowledge-application-gate.js';
 import {
-	commitApplicationMarkerBatch,
 	commitDisplayedMembership,
+	_internals as ledgerInternals,
 } from '../../../src/hooks/knowledge-receipt-ledger.js';
 import { resetSwarmState, swarmState } from '../../../src/state.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const ENTRY = 'bbbbbbbb-bbbb-4bbb-9bbb-bbbbbbbbbbbb';
 let directory: string;
 
 beforeEach(() => {
-	directory = mkdtempSync(path.join(tmpdir(), 'application-denial-v2-'));
+	directory = canonicalMkdtemp('application-denial-v2-');
 	writeFileSync(path.join(directory, '.git'), 'gitdir: fixture');
 	resetSwarmState();
 });
@@ -73,11 +73,14 @@ describe('application gate exact-pair denial identity', () => {
 			knowledgeApplicationGateBefore(directory, input, config),
 		).rejects.toThrow();
 
-		const closed = await commitApplicationMarkerBatch(directory, {
-			trace_id: 'trace-old',
-			session_id: 'session-a',
-			items: [{ entry_id: ENTRY, outcome: 'applied' }],
-		});
+		const closed = await ledgerInternals.commitApplicationMarkerBatch(
+			directory,
+			{
+				trace_id: 'trace-old',
+				session_id: 'session-a',
+				items: [{ entry_id: ENTRY, outcome: 'applied' }],
+			},
+		);
 		if (!closed.ok) throw new Error(closed.detail);
 		await display('trace-new');
 

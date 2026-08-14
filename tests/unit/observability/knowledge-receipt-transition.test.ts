@@ -38,7 +38,7 @@ describe('knowledge receipt transition observation', () => {
 			knowledgeEntryId: 'entry-1',
 			sessionId: 'session-1',
 			taskId: 'task-1',
-			phase: 'review',
+			phase: 'phase_review',
 			receiptOutcome: 'applied',
 			receiptSource: 'delegate_ack',
 		});
@@ -54,7 +54,7 @@ describe('knowledge receipt transition observation', () => {
 					knowledgeEntryId: 'entry-1',
 					sessionId: 'session-1',
 					taskId: 'task-1',
-					phase: 'review',
+					phase: 'phase_review',
 					receiptOutcome: 'applied',
 					receiptSource: 'delegate_ack',
 				},
@@ -80,6 +80,34 @@ describe('knowledge receipt transition observation', () => {
 			reasonCode: 'legacy_unverifiable',
 			schemaVersion: 2,
 		});
+	});
+
+	test('drops prose phases while preserving bounded phase codes (PRIV-01)', () => {
+		// Previously, any non-empty phase was copied into this pseudonymous event,
+		// allowing raw user prose and path-like values to escape the receipt ledger.
+		emitKnowledgeReceiptTransition({
+			transition: 'membership_committed',
+			reasonCode: 'committed',
+			schemaVersion: 2,
+			phase: 'Review the user notes at C:\\Users\\example\\private-plan.md',
+		});
+		emitKnowledgeReceiptTransition({
+			transition: 'membership_committed',
+			reasonCode: 'committed',
+			schemaVersion: 2,
+			phase: 'phase_2-review',
+		});
+		emitKnowledgeReceiptTransition({
+			transition: 'membership_committed',
+			reasonCode: 'committed',
+			schemaVersion: 2,
+			phase: 'fix_bug',
+		});
+
+		expect(emitted).toHaveLength(3);
+		expect(emitted[0]?.payload).not.toHaveProperty('phase');
+		expect(emitted[1]?.payload.phase).toBe('phase_2-review');
+		expect(emitted[2]?.payload).not.toHaveProperty('phase');
 	});
 
 	test('rejects unbounded transition/reason codes and invalid schema versions', () => {

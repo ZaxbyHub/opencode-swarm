@@ -9,10 +9,10 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { readKnowledgeEvents } from '../../src/hooks/knowledge-events.js';
 import { executePhaseComplete } from '../../src/tools/phase-complete.js';
+import { canonicalMkdtemp } from '../helpers/tmpdir.js';
 
 const PHASE = 'Phase 2';
 
@@ -70,7 +70,7 @@ function events(id: string): string {
 }
 
 function createTempProjectDir(): string {
-	return fs.mkdtempSync(path.join(os.tmpdir(), 'pc-spoof-'));
+	return canonicalMkdtemp('pc-spoof-');
 }
 
 describe('phase_complete override spoofing', () => {

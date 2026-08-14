@@ -1,8 +1,6 @@
 /**
  * Best-effort observability projection for authoritative receipt transitions.
- *
- * The V2 receipt journal is authoritative: telemetry failure must never change
- * whether a transition commits, and telemetry must only run after that commit.
+ * The V2 journal remains authoritative; telemetry runs best-effort after commit.
  */
 import { emit } from '../telemetry.js';
 import type { ReceiptOutcome } from './knowledge-receipt-validator.js';
@@ -99,9 +97,19 @@ const RECEIPT_OUTCOMES = new Set<ReceiptOutcome>([
 	'no_relevant',
 ]);
 
-// Keeps source extensible until #2032 normalizes domain semantics while still
-// forbidding whitespace, prose, paths, and unbounded attacker-controlled text.
+// Extensible until #2032, but forbids whitespace, prose, paths, and long text.
 const BOUNDED_CODE = /^[a-z][a-z0-9_-]{0,63}$/;
+
+function boundedCode(value: unknown): string | undefined {
+	return typeof value === 'string' && BOUNDED_CODE.test(value)
+		? value
+		: undefined;
+}
+
+function boundedPhase(value: unknown): string | undefined {
+	const code = boundedCode(value);
+	return code && /^phase(?:[_-][a-z0-9_-]+)?$/.test(code) ? code : undefined;
+}
 
 function addIdentifier(
 	payload: Record<string, unknown>,
@@ -111,10 +119,7 @@ function addIdentifier(
 	if (typeof value === 'string' && value.length > 0) payload[key] = value;
 }
 
-/**
- * Emit a bounded diagnostic projection after an authoritative transition.
- * Invalid input or telemetry failure is fail-open and produces no exception.
- */
+/** Emit bounded diagnostics fail-open after an authoritative transition. */
 export function emitKnowledgeReceiptTransition(
 	observation: KnowledgeReceiptTransitionObservation,
 ): void {
@@ -137,7 +142,7 @@ export function emitKnowledgeReceiptTransition(
 		addIdentifier(payload, 'knowledgeEntryId', observation.knowledgeEntryId);
 		addIdentifier(payload, 'sessionId', observation.sessionId);
 		addIdentifier(payload, 'taskId', observation.taskId);
-		addIdentifier(payload, 'phase', observation.phase);
+		addIdentifier(payload, 'phase', boundedPhase(observation.phase));
 
 		if (
 			observation.receiptOutcome !== undefined &&

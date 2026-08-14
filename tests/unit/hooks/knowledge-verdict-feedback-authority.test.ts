@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { applyKnowledgeVerdictFeedback } from '../../../src/hooks/knowledge-events.js';
 import {
@@ -12,11 +11,12 @@ import {
 	readKnowledge,
 	resolveSwarmKnowledgePath,
 } from '../../../src/hooks/knowledge-store.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 let directory: string;
 
 beforeEach(() => {
-	directory = mkdtempSync(join(tmpdir(), 'verdict-feedback-authority-'));
+	directory = canonicalMkdtemp('verdict-feedback-authority-');
 	mkdirSync(join(directory, '.git'));
 	mkdirSync(join(directory, '.swarm'));
 });

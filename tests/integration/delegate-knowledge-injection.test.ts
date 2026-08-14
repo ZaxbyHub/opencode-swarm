@@ -15,6 +15,7 @@ import { readKnowledgeEvents } from '../../src/hooks/knowledge-events.js';
 import { injectForDelegate } from '../../src/hooks/knowledge-injector.js';
 import type { KnowledgeConfig } from '../../src/hooks/knowledge-types.js';
 import { rebuildSynonymMap } from '../../src/services/synonym-map.js';
+import { canonicalMkdtemp } from '../helpers/tmpdir.js';
 
 const CONFIG: KnowledgeConfig = {
 	enabled: true,
@@ -133,9 +134,7 @@ function buildCorpus(): string {
 }
 
 function createRelativeTempDir(): string {
-	const baseDir = 'tmp';
-	if (!fs.existsSync(baseDir)) fs.mkdirSync(baseDir, { recursive: true });
-	return fs.mkdtempSync(path.join(baseDir, 'delegate-inject-'));
+	return canonicalMkdtemp('delegate-inject-');
 }
 
 function isInScopeForCoder(id: string): boolean {

@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, expect, mock, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import {
 	type CloseStageContext,
@@ -9,6 +8,7 @@ import {
 	runFinalizeStage,
 } from '../../../src/commands/close.js';
 import { KnowledgeConfigSchema } from '../../../src/config/schema.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const realClosePlanTerminalState = closeInternals.closePlanTerminalState;
 const realCurateAndStoreSwarm = closeInternals.curateAndStoreSwarm;
@@ -111,7 +111,7 @@ function makeContext(): CloseStageContext {
 }
 
 beforeEach(() => {
-	directory = mkdtempSync(path.join(tmpdir(), 'close-receipt-lifecycle-'));
+	directory = canonicalMkdtemp('close-receipt-lifecycle-');
 	mkdirSync(path.join(directory, '.swarm'));
 	closeInternals.curateAndStoreSwarm = mock(async () => ({
 		stored: 0,

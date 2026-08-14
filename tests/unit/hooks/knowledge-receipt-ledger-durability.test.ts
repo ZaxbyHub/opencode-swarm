@@ -14,14 +14,20 @@ import {
 } from '../../../src/hooks/knowledge-receipt-ledger.js';
 import { receiptRecordHash } from '../../../src/hooks/knowledge-receipt-ledger-storage.js';
 import { createSafeTestDir } from '../../helpers/safe-test-dir.js';
+import { freezeClock } from '../../helpers/test-clock.js';
 
 const cleanups: Array<() => void> = [];
 const originalWriteSnapshot = _internals.writeSnapshot;
 const originalAtomicWrite = _internals.atomicWriteFsynced;
 const originalMaxArchiveRecords = _internals.maxArchiveRecords;
 const originalMaxArchiveBytes = _internals.maxArchiveBytes;
+const FIXED_NOW_MS = Date.parse('2026-01-01T00:00:00.000Z');
+const FIXED_NOW_ISO = '2026-01-01T00:00:00.000Z';
+let restoreClock: (() => void) | undefined;
 
 afterEach(() => {
+	restoreClock?.();
+	restoreClock = undefined;
 	_internals.writeSnapshot = originalWriteSnapshot;
 	_internals.atomicWriteFsynced = originalAtomicWrite;
 	_internals.maxArchiveRecords = originalMaxArchiveRecords;
@@ -65,14 +71,11 @@ describe('knowledge receipt ledger durability regressions', () => {
 		expect(live.memberships.map((item) => item.entry_id)).toEqual([
 			'entry-snapshot',
 		]);
-		const snapshot = JSON.parse(
-			fs.readFileSync(
+		expect(
+			fs.existsSync(
 				path.join(directory, '.swarm', 'knowledge-receipts-v2.snapshot.json'),
-				'utf8',
 			),
-		) as Record<string, unknown>;
-		expect(snapshot.authoritative).toBe(false);
-		expect(snapshot.rebuildable).toBe(true);
+		).toBe(false);
 	});
 
 	test('reloads multiple terminalized traces without poisoning the strict schema', async () => {
@@ -157,6 +160,10 @@ describe('knowledge receipt ledger durability regressions', () => {
 	});
 
 	test('types an evicted pre-cutover trace uncertain even after V2 activity starts', async () => {
+		restoreClock = freezeClock({
+			fixedNow: FIXED_NOW_MS,
+			isoNow: FIXED_NOW_ISO,
+		});
 		const directory = project('receipt-legacy-evicted-');
 		fs.mkdirSync(path.join(directory, '.swarm'));
 		fs.writeFileSync(
@@ -189,6 +196,10 @@ describe('knowledge receipt ledger durability regressions', () => {
 	});
 
 	test('drains the explicit imported trace registry after archival', async () => {
+		restoreClock = freezeClock({
+			fixedNow: FIXED_NOW_MS,
+			isoNow: FIXED_NOW_ISO,
+		});
 		const directory = project('receipt-legacy-drain-');
 		fs.mkdirSync(path.join(directory, '.swarm'));
 		const timestamp = new Date().toISOString();
@@ -358,6 +369,7 @@ describe('knowledge receipt ledger durability regressions', () => {
 			'entry-late',
 			'entry-ready',
 		]);
+		unwrap(await ensureLegacyCutover(directory, 1));
 		expect(unwrap(await queryLiveMemberships(directory)).memberships).toEqual(
 			[],
 		);
@@ -399,6 +411,10 @@ describe('knowledge receipt ledger durability regressions', () => {
 	});
 
 	test('fails closed when a hash-valid journal row contains an unknown nested field', async () => {
+		restoreClock = freezeClock({
+			fixedNow: FIXED_NOW_MS,
+			isoNow: FIXED_NOW_ISO,
+		});
 		const directory = project('receipt-schema-poison-');
 		unwrap(
 			await commitDisplayedMembership(directory, {

@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { rmSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 import { DEFAULT_KNOWLEDGE_APPLICATION_CONFIG } from '../../../src/hooks/knowledge-application.js';
 import {
@@ -8,20 +7,21 @@ import {
 	knowledgeApplicationGateBefore,
 } from '../../../src/hooks/knowledge-application-gate.js';
 import {
-	commitApplicationMarkerBatch,
 	commitDisplayedMembership,
 	commitPhaseClosed,
+	_internals as ledgerInternals,
 	type ReceiptExposureKind,
 	type ReceiptMembership,
 } from '../../../src/hooks/knowledge-receipt-ledger.js';
 import { swarmState } from '../../../src/state.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const SESSION = 'scope-session';
 const ENTRY = 'aaaaaaaa-aaaa-4aaa-9aaa-aaaaaaaaaaaa';
 let directory: string;
 
 beforeEach(() => {
-	directory = mkdtempSync(path.join(tmpdir(), 'application-gate-scope-'));
+	directory = canonicalMkdtemp('application-gate-scope-');
 	writeFileSync(path.join(directory, '.git'), 'gitdir: fixture');
 	swarmState.knowledgeAckDedup.clear();
 	swarmState.gateDenialCounts.clear();
@@ -97,11 +97,14 @@ describe('knowledge application gate scope', () => {
 			task: 'current-task',
 			kind: 'architect_directive',
 		});
-		const marked = await commitApplicationMarkerBatch(directory, {
-			trace_id: 'current-task-trace',
-			session_id: SESSION,
-			items: [{ entry_id: ENTRY, outcome: 'applied', source: 'test' }],
-		});
+		const marked = await ledgerInternals.commitApplicationMarkerBatch(
+			directory,
+			{
+				trace_id: 'current-task-trace',
+				session_id: SESSION,
+				items: [{ entry_id: ENTRY, outcome: 'applied', source: 'test' }],
+			},
+		);
 		expect(marked.ok && marked.rejected.length === 0).toBe(true);
 
 		await knowledgeApplicationGateBefore(

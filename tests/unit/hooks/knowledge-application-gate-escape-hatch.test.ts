@@ -1,8 +1,7 @@
 /** V2-authoritative deadlock escape-hatch tests. */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 import {
 	buildAckDedupKey,
@@ -10,17 +9,18 @@ import {
 } from '../../../src/hooks/knowledge-application.js';
 import { knowledgeApplicationGateBefore } from '../../../src/hooks/knowledge-application-gate.js';
 import {
-	commitApplicationMarkerBatch,
 	commitDisplayedMembership,
+	_internals as ledgerInternals,
 	queryLiveMemberships,
 } from '../../../src/hooks/knowledge-receipt-ledger.js';
 import { swarmState } from '../../../src/state.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const ENTRY = 'aaaaaaaa-aaaa-4aaa-9aaa-aaaaaaaaaaaa';
 let directory: string;
 
 beforeEach(() => {
-	directory = mkdtempSync(path.join(tmpdir(), 'application-escape-v2-'));
+	directory = canonicalMkdtemp('application-escape-v2-');
 	writeFileSync(path.join(directory, '.git'), 'gitdir: fixture');
 	swarmState.currentCriticalShownIds.clear();
 	swarmState.knowledgeAckDedup.clear();
@@ -134,11 +134,14 @@ describe('knowledge application V2 escape hatches', () => {
 		).rejects.toThrow(/KNOWLEDGE_ENFORCE_GATE_DENY/);
 		expect(swarmState.gateDenialCounts.has('session-a')).toBe(true);
 
-		const terminal = await commitApplicationMarkerBatch(directory, {
-			trace_id: 'trace-terminal',
-			session_id: 'session-a',
-			items: [{ entry_id: ENTRY, outcome: 'applied' }],
-		});
+		const terminal = await ledgerInternals.commitApplicationMarkerBatch(
+			directory,
+			{
+				trace_id: 'trace-terminal',
+				session_id: 'session-a',
+				items: [{ entry_id: ENTRY, outcome: 'applied' }],
+			},
+		);
 		if (!terminal.ok) throw new Error(terminal.detail);
 		await knowledgeApplicationGateBefore(directory, input, config);
 

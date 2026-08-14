@@ -1,8 +1,7 @@
 /** V2 exact-pair phase critical gate integration tests. */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { rmSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 import {
 	commitDisplayedMembership,
@@ -15,13 +14,14 @@ import {
 	formatDirectiveBlockMessage,
 	recordDirectiveOverrides,
 } from '../../../src/hooks/phase-complete-directive-gate.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const PHASE = 'Canonical phase description';
 const ENTRY = 'critical-rule';
 let directory: string;
 
 beforeEach(() => {
-	directory = mkdtempSync(path.join(tmpdir(), 'phase-critical-v2-'));
+	directory = canonicalMkdtemp('phase-critical-v2-');
 	writeFileSync(path.join(directory, '.git'), 'gitdir: fixture');
 });
 

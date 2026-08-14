@@ -1,14 +1,7 @@
 /** V2-authoritative knowledge application gate integration tests. */
 
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
-import {
-	existsSync,
-	mkdtempSync,
-	readFileSync,
-	rmSync,
-	writeFileSync,
-} from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 import {
 	buildAckDedupKey,
@@ -20,20 +13,21 @@ import {
 	knowledgeApplicationTransformScan,
 } from '../../../src/hooks/knowledge-application-gate.js';
 import {
-	commitApplicationMarkerBatch,
 	commitDisplayedMembership,
+	_internals as ledgerInternals,
 	queryLiveMemberships,
 	validateAndCommitTerminalBatch,
 } from '../../../src/hooks/knowledge-receipt-ledger.js';
 import type { MessageWithParts } from '../../../src/hooks/knowledge-types.js';
 import { swarmState } from '../../../src/state.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const ENTRY = 'aaaaaaaa-aaaa-4aaa-9aaa-aaaaaaaaaaaa';
 let directory: string;
 
 beforeEach(() => {
 	mock.restore();
-	directory = mkdtempSync(path.join(tmpdir(), 'application-gate-v2-'));
+	directory = canonicalMkdtemp('application-gate-v2-');
 	writeFileSync(path.join(directory, '.git'), 'gitdir: fixture');
 	swarmState.currentCriticalShownIds.clear();
 	swarmState.knowledgeAckDedup.clear();
@@ -80,7 +74,7 @@ async function marker(
 	entry_id = ENTRY,
 	session_id = 'session-a',
 ): Promise<void> {
-	const result = await commitApplicationMarkerBatch(directory, {
+	const result = await ledgerInternals.commitApplicationMarkerBatch(directory, {
 		trace_id,
 		session_id,
 		items: [{ entry_id, outcome: 'applied', source: 'test-marker' }],

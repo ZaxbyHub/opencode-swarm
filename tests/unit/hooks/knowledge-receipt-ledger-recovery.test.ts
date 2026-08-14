@@ -14,10 +14,16 @@ import {
 } from '../../../src/hooks/knowledge-receipt-ledger.js';
 import { resolveReceiptLedgerPaths } from '../../../src/hooks/knowledge-receipt-ledger-storage.js';
 import { createSafeTestDir } from '../../helpers/safe-test-dir.js';
+import { freezeClock } from '../../helpers/test-clock.js';
 
 const cleanups: Array<() => void> = [];
+const FIXED_NOW_MS = Date.parse('2026-01-01T00:00:00.000Z');
+const FIXED_NOW_ISO = '2026-01-01T00:00:00.000Z';
+let restoreClock: (() => void) | undefined;
 
 afterEach(() => {
+	restoreClock?.();
+	restoreClock = undefined;
 	while (cleanups.length > 0) cleanups.pop()?.();
 });
 
@@ -186,7 +192,7 @@ describe('knowledge receipt ledger recovery and isolation', () => {
 			trace_id: 'trace-a',
 			entry_id: 'entry-a',
 		});
-		expect(() => JSON.parse(fs.readFileSync(snapshot, 'utf8'))).not.toThrow();
+		expect(fs.readFileSync(snapshot, 'utf8')).toBe('{corrupt snapshot');
 	});
 
 	test('never serializes nonTransientCircuit into journal, snapshot, or archive', async () => {
@@ -223,6 +229,7 @@ describe('knowledge receipt ledger recovery and isolation', () => {
 	});
 
 	test('returns typed lock_timeout and never falls back to unlocked reads', async () => {
+		restoreClock = freezeClock({ fixedNow: FIXED_NOW_MS });
 		const directory = project('receipt-ledger-lock-');
 		unwrap(await ensureLegacyCutover(directory));
 		const paths = resolveReceiptLedgerPaths(directory);
@@ -251,6 +258,7 @@ describe('knowledge receipt ledger recovery and isolation', () => {
 	});
 
 	test('recovers a dead owner lock but rejects a reparse-point swarm directory', async () => {
+		restoreClock = freezeClock({ fixedNow: FIXED_NOW_MS });
 		const deadOwnerDirectory = project('receipt-ledger-dead-lock-');
 		const deadPaths = resolveReceiptLedgerPaths(deadOwnerDirectory);
 		fs.mkdirSync(deadPaths.swarmDir);
@@ -335,6 +343,10 @@ describe('knowledge receipt ledger recovery and isolation', () => {
 	});
 
 	test('marks linked legacy state unverifiable and does not import it', async () => {
+		restoreClock = freezeClock({
+			fixedNow: FIXED_NOW_MS,
+			isoNow: FIXED_NOW_ISO,
+		});
 		const directory = project('receipt-ledger-linked-legacy-');
 		const swarmDir = path.join(directory, '.swarm');
 		fs.mkdirSync(swarmDir);
@@ -369,6 +381,10 @@ describe('knowledge receipt ledger recovery and isolation', () => {
 	});
 
 	test('imports a fully terminalized correlated legacy trace and preserves its identity', async () => {
+		restoreClock = freezeClock({
+			fixedNow: FIXED_NOW_MS,
+			isoNow: FIXED_NOW_ISO,
+		});
 		const directory = project('receipt-ledger-legacy-terminal-');
 		const swarmDir = path.join(directory, '.swarm');
 		fs.mkdirSync(swarmDir);

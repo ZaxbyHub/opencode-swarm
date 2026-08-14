@@ -16,9 +16,12 @@ import { validateSwarmPath } from './utils.js';
 
 export const RECEIPT_SCHEMA_VERSION = 2;
 export const RECEIPT_CUTOVER_VERSION = 1;
-const LOCK_RETRIES = 20;
 const LOCK_RETRY_MS = 25;
+const LOCK_TIMEOUT_MS = 500;
+// One elapsed deadline covers stale-owner inspection, bounded Linux zombie
+// probes, and retry waits. Individual probes cannot multiply the lock budget.
 const UNINITIALIZED_LOCK_STALE_MS = 30_000;
+const PROC_STATE_READ_TIMEOUT_MS = 25;
 
 export interface ReceiptLedgerPaths {
 	root: string;
@@ -225,12 +228,46 @@ async function writeAll(
 	}
 }
 
-function isProcessAlive(pid: number): boolean {
+async function readLinuxProcStat(
+	pid: number,
+	signal: AbortSignal,
+): Promise<string> {
+	return await readFile(`/proc/${pid}/stat`, { encoding: 'utf8', signal });
+}
+
+async function isProcessAlive(pid: number): Promise<boolean> {
 	try {
-		process.kill(pid, 0);
-		return true;
+		_internals.killProcess(pid);
 	} catch (error) {
 		return (error as NodeJS.ErrnoException).code !== 'ESRCH';
+	}
+	if (_internals.platform() !== 'linux') return true;
+
+	const controller = new AbortController();
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		const procRead = _internals
+			.readLinuxProcStat(pid, controller.signal)
+			.catch(() => null);
+		const timedOut = new Promise<null>((resolve) => {
+			timer = setTimeout(() => {
+				controller.abort();
+				resolve(null);
+			}, _internals.procStateReadTimeoutMs);
+		});
+		const statLine = await Promise.race([procRead, timedOut]);
+		if (statLine === null) return true;
+		// /proc/<pid>/stat is `pid (comm) state ...`; comm may contain spaces or
+		// parentheses, so parse the state after the final closing parenthesis.
+		const commandEnd = statLine.lastIndexOf(')');
+		if (commandEnd < 0) return true;
+		const state = statLine
+			.slice(commandEnd + 1)
+			.trimStart()
+			.charAt(0);
+		return state !== 'Z';
+	} finally {
+		if (timer !== undefined) clearTimeout(timer);
 	}
 }
 
@@ -264,10 +301,17 @@ async function readLockOwner(
 	}
 }
 
-async function recoverLockIfSafe(
-	lockPath: string,
-	expectedRoot: string,
-): Promise<void> {
+async function recoverLockIfSafe(paths: ReceiptLedgerPaths): Promise<void> {
+	const lockPath = paths.lockTarget;
+	const expectedRoot = paths.root;
+	const recoveryOwner: LockOwner = {
+		owner_token: randomUUID(),
+		pid: process.pid,
+		created_at_ms: Date.now(),
+		root_identity: expectedRoot,
+	};
+	const parent = await validateMutationParent(lockPath);
+	let claimedPath: string | undefined;
 	let info: Awaited<ReturnType<typeof stat>>;
 	try {
 		info = await stat(lockPath);
@@ -276,21 +320,47 @@ async function recoverLockIfSafe(
 		throw error;
 	}
 	const owner = await readLockOwner(lockPath, expectedRoot);
-	if (owner && isProcessAlive(owner.pid)) return;
+	if (owner && (await _internals.isProcessAlive(owner.pid))) return;
 	if (!owner && Date.now() - info.mtimeMs < UNINITIALIZED_LOCK_STALE_MS) return;
-	// Re-read immediately before removal so a recovered/replaced owner is never stolen.
-	const current = await readLockOwner(lockPath, expectedRoot);
-	if (owner) {
-		if (
-			!current ||
-			current.owner_token !== owner.owner_token ||
-			isProcessAlive(owner.pid)
-		)
-			return;
-	} else if (current) {
+
+	// Rename is the recovery CAS: it atomically claims the exact inode we
+	// inspected. We only ever delete the claimed path, never lockPath, so a
+	// successor created after the rename cannot be removed by this recovery.
+	claimedPath = `${lockPath}.${recoveryOwner.owner_token}.recovering`;
+	try {
+		await _internals.rename(lockPath, claimedPath);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+		throw error;
+	}
+	await _internals.afterRecoveryRename(paths, claimedPath);
+
+	const claimedInfo = await stat(claimedPath);
+	const claimedOwner = await readLockOwner(claimedPath, expectedRoot);
+	const sameObservedOwner = owner
+		? claimedOwner?.owner_token === owner.owner_token
+		: claimedOwner === null;
+	const stillRecoverable = owner
+		? sameObservedOwner && !(await _internals.isProcessAlive(owner.pid))
+		: sameObservedOwner &&
+			Date.now() - claimedInfo.mtimeMs >= UNINITIALIZED_LOCK_STALE_MS;
+	if (stillRecoverable) {
+		await _internals.rm(claimedPath, { force: true });
+		claimedPath = undefined;
+		await syncParentDirectory(parent);
 		return;
 	}
-	await rm(lockPath, { force: true });
+
+	if (!fs.existsSync(lockPath)) {
+		await _internals.rename(claimedPath, lockPath);
+		claimedPath = undefined;
+		await syncParentDirectory(parent);
+		return;
+	}
+	throw new ReceiptStoreError(
+		'store_unavailable',
+		'receipt recovery claim changed while a successor lock exists',
+	);
 }
 
 async function acquireReceiptLock(
@@ -303,7 +373,11 @@ async function acquireReceiptLock(
 		created_at_ms: Date.now(),
 		root_identity: paths.root,
 	};
-	for (let attempt = 0; attempt <= LOCK_RETRIES; attempt++) {
+	// Use a monotonic clock for the elapsed contention budget. Receipt tests and
+	// callers may freeze wall-clock time for deterministic lifecycle timestamps;
+	// that must never disable the correctness-lock timeout.
+	const deadline = performance.now() + LOCK_TIMEOUT_MS;
+	for (;;) {
 		let handle: Awaited<ReturnType<typeof open>> | undefined;
 		try {
 			const parent = await validateMutationParent(lockPath);
@@ -326,9 +400,12 @@ async function acquireReceiptLock(
 		} catch (error) {
 			await handle?.close().catch(() => undefined);
 			if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-			await recoverLockIfSafe(lockPath, paths.root);
-			if (attempt === LOCK_RETRIES) break;
-			await new Promise((resolve) => setTimeout(resolve, LOCK_RETRY_MS));
+			await _internals.recoverLockIfSafe(paths);
+			const remainingMs = deadline - performance.now();
+			if (remainingMs <= 0) break;
+			await new Promise((resolve) =>
+				setTimeout(resolve, Math.min(LOCK_RETRY_MS, remainingMs)),
+			);
 		}
 	}
 	throw new ReceiptStoreError(
@@ -504,3 +581,20 @@ export async function fileMtimeMs(filePath: string): Promise<number | null> {
 		throw error;
 	}
 }
+
+export const _internals = {
+	platform: (): NodeJS.Platform => process.platform,
+	killProcess: (pid: number): void => {
+		process.kill(pid, 0);
+	},
+	readLinuxProcStat,
+	procStateReadTimeoutMs: PROC_STATE_READ_TIMEOUT_MS,
+	isProcessAlive,
+	rename,
+	rm,
+	afterRecoveryRename: async (
+		_paths: ReceiptLedgerPaths,
+		_claimedPath: string,
+	): Promise<void> => {},
+	recoverLockIfSafe,
+};

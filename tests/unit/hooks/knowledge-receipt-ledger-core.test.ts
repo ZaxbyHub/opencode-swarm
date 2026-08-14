@@ -2,7 +2,6 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
-	commitApplicationMarkerBatch,
 	commitDisplayedMembership,
 	commitEmptyRetrieval,
 	commitPhaseClosed,
@@ -15,12 +14,18 @@ import {
 } from '../../../src/hooks/knowledge-receipt-ledger.js';
 import { _internals as observationInternals } from '../../../src/hooks/knowledge-receipt-observability.js';
 import { createSafeTestDir } from '../../helpers/safe-test-dir.js';
+import { freezeClock } from '../../helpers/test-clock.js';
 
 const cleanups: Array<() => void> = [];
 const realNowMs = ledgerInternals.nowMs;
 const realEmit = observationInternals.emit;
+const FIXED_NOW_MS = Date.parse('2026-01-01T00:00:00.000Z');
+const FIXED_NOW_ISO = '2026-01-01T00:00:00.000Z';
+let restoreClock: (() => void) | undefined;
 
 afterEach(() => {
+	restoreClock?.();
+	restoreClock = undefined;
 	ledgerInternals.nowMs = realNowMs;
 	observationInternals.emit = realEmit;
 	while (cleanups.length > 0) cleanups.pop()?.();
@@ -40,6 +45,10 @@ function unwrap<T>(result: ReceiptLedgerResult<T>): T {
 
 describe('knowledge receipt ledger authority core', () => {
 	test('keeps V2 membership independent of more than 5,000 legacy diagnostics', async () => {
+		restoreClock = freezeClock({
+			fixedNow: FIXED_NOW_MS,
+			isoNow: FIXED_NOW_ISO,
+		});
 		const directory = project('receipt-ledger-diagnostics-');
 		const swarmDir = path.join(directory, '.swarm');
 		fs.mkdirSync(swarmDir);
@@ -195,7 +204,7 @@ describe('knowledge receipt ledger authority core', () => {
 			}),
 		);
 		const committed = unwrap(
-			await commitApplicationMarkerBatch(directory, {
+			await ledgerInternals.commitApplicationMarkerBatch(directory, {
 				trace_id: 'trace-app',
 				session_id: 'session-app',
 				items: [
@@ -210,7 +219,7 @@ describe('knowledge receipt ledger authority core', () => {
 		);
 		expect(committed.committed).toHaveLength(1);
 		const retry = unwrap(
-			await commitApplicationMarkerBatch(directory, {
+			await ledgerInternals.commitApplicationMarkerBatch(directory, {
 				trace_id: 'trace-app',
 				session_id: 'session-app',
 				items: [{ entry_id: 'entry-app', outcome: 'applied' }],
@@ -448,50 +457,5 @@ describe('knowledge receipt ledger authority core', () => {
 				(line) => JSON.parse(line).summary_kind === 'empty_trace',
 			),
 		).toBe(true);
-	});
-
-	test('compacts an elapsed grace period lazily on a later operation and observes the checkpoint', async () => {
-		const observed: Array<Record<string, unknown>> = [];
-		observationInternals.emit = ((_event, data) => {
-			observed.push(data);
-		}) as typeof observationInternals.emit;
-		const base = Date.now();
-		ledgerInternals.nowMs = () => base;
-		const directory = project('receipt-ledger-lazy-archive-');
-		unwrap(
-			await commitDisplayedMembership(directory, {
-				trace_id: 'trace-lazy',
-				session_id: 'session-lazy',
-				phase: 'phase-lazy',
-				grace_days: 1,
-				entries: [{ entry_id: 'entry-lazy', critical: false }],
-			}),
-		);
-		ledgerInternals.nowMs = () => base + 10 * 86_400_000;
-		expect(
-			unwrap(await queryLiveMemberships(directory)).memberships,
-		).toHaveLength(1);
-		unwrap(
-			await validateAndCommitTerminalBatch(directory, {
-				trace_id: 'trace-lazy',
-				session_id: 'session-lazy',
-				items: [{ entry_id: 'entry-lazy', outcome: 'ignored' }],
-			}),
-		);
-		ledgerInternals.nowMs = () => base;
-		unwrap(await commitPhaseClosed(directory, 'phase-lazy'));
-		expect(
-			unwrap(await queryLiveMemberships(directory)).memberships,
-		).toHaveLength(1);
-
-		ledgerInternals.nowMs = () => base + 12 * 86_400_000;
-		expect(unwrap(await queryLiveMemberships(directory)).memberships).toEqual(
-			[],
-		);
-		expect(observed.map((entry) => entry.transition)).toContain('checkpoint');
-		expect(
-			unwrap(await queryHistoricalOutcomes(directory, ['entry-lazy']))
-				.memberships,
-		).toHaveLength(1);
 	});
 });

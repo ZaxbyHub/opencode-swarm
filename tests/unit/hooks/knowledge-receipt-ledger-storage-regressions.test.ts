@@ -10,10 +10,15 @@ import {
 	validateAndCommitTerminalBatch,
 } from '../../../src/hooks/knowledge-receipt-ledger.js';
 import { createSafeTestDir } from '../../helpers/safe-test-dir.js';
+import { freezeClock } from '../../helpers/test-clock.js';
 
 const cleanups: Array<() => void> = [];
+const FIXED_NOW_MS = Date.parse('2026-01-01T00:00:00.000Z');
+let restoreClock: (() => void) | undefined;
 
 afterEach(() => {
+	restoreClock?.();
+	restoreClock = undefined;
 	while (cleanups.length > 0) cleanups.pop()?.();
 });
 
@@ -144,8 +149,14 @@ describe('knowledge receipt storage final-critic regressions', () => {
 	});
 
 	test('imports a structurally complete unresolved multi-day legacy trace', async () => {
+		restoreClock = freezeClock({ fixedNow: FIXED_NOW_MS });
 		const directory = project('receipt-legacy-multiday-');
 		fs.mkdirSync(path.join(directory, '.swarm'));
+		fs.mkdirSync(path.join(directory, '.opencode'));
+		fs.writeFileSync(
+			path.join(directory, '.opencode', 'opencode-swarm.json'),
+			JSON.stringify({ knowledge: { receipt_close_grace_days: 3 } }),
+		);
 		fs.writeFileSync(
 			path.join(directory, '.swarm', 'knowledge-events.jsonl'),
 			`${JSON.stringify({
@@ -162,6 +173,8 @@ describe('knowledge receipt storage final-critic regressions', () => {
 
 		// Previous code treated age >30 minutes as proof the live phase had ended.
 		unwrap(await ensureLegacyCutover(directory));
+		const imported = unwrap(await queryLiveMemberships(directory));
+		expect(imported.memberships[0]?.grace_days).toBe(3);
 		const terminal = unwrap(
 			await validateAndCommitTerminalBatch(directory, {
 				trace_id: 'legacy-multiday-trace',

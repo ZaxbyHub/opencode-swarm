@@ -1,8 +1,7 @@
 /** Tool-facing smoke coverage for the V2 phase directive gate. */
 
 import { afterEach, beforeEach, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { rmSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 import {
 	commitDisplayedMembership,
@@ -12,13 +11,14 @@ import {
 	evaluatePhaseCriticalDirectives,
 	recordDirectiveOverrides,
 } from '../../../src/hooks/phase-complete-directive-gate.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const PHASE = 'Implementation and verification';
 const ENTRY = 'critical-tool-rule';
 let directory: string;
 
 beforeEach(async () => {
-	directory = mkdtempSync(path.join(tmpdir(), 'phase-tool-gate-v2-'));
+	directory = canonicalMkdtemp('phase-tool-gate-v2-');
 	writeFileSync(path.join(directory, '.git'), 'gitdir: fixture');
 	const displayed = await commitDisplayedMembership(directory, {
 		trace_id: 'trace-tool',

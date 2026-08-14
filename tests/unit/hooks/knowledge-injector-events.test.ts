@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 import { KnowledgeConfigSchema } from '../../../src/config/schema';
 import type { KnowledgeEventInput } from '../../../src/hooks/knowledge-events';
@@ -12,6 +12,7 @@ import { validateAndCommitTerminalBatch } from '../../../src/hooks/knowledge-rec
 import type { MessageWithParts } from '../../../src/hooks/knowledge-types';
 import { loadPromotionEvidenceByEntry } from '../../../src/hooks/promotion-evidence-store';
 import { ensureAgentSession, swarmState } from '../../../src/state';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const baseConfig = KnowledgeConfigSchema.parse({});
 const SESSION = 'session-1';
@@ -50,8 +51,7 @@ function rankedEntry(
 }
 
 beforeEach(() => {
-	mkdirSync('.tmp-tests', { recursive: true });
-	tempDir = mkdtempSync(path.join('.tmp-tests', 'swarm-kinj-'));
+	tempDir = canonicalMkdtemp('swarm-kinj-');
 	mkdirSync(path.join(tempDir, '.swarm'), { recursive: true });
 	swarmState.currentCriticalShownIds.clear();
 	swarmState.activeAgent.delete(SESSION);
@@ -68,7 +68,6 @@ afterEach(() => {
 	swarmState.activeAgent.delete(SESSION);
 	swarmState.agentSessions.delete(SESSION);
 	rmSync(tempDir, { recursive: true, force: true });
-	rmSync('.tmp-tests', { recursive: true, force: true });
 });
 
 describe('knowledge injector retrieved events', () => {

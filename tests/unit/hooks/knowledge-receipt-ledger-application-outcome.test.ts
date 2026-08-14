@@ -1,19 +1,19 @@
 import { afterEach, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import {
-	commitApplicationMarkerBatch,
 	commitApplicationOutcomeBatch,
 	commitDisplayedMembership,
+	_internals as ledgerInternals,
 	queryLiveMemberships,
 	validateAndCommitTerminalBatch,
 } from '../../../src/hooks/knowledge-receipt-ledger.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const directories: string[] = [];
 
 function project(): string {
-	const directory = mkdtempSync(path.join(tmpdir(), 'receipt-app-outcome-'));
+	const directory = canonicalMkdtemp('receipt-app-outcome-');
 	writeFileSync(path.join(directory, '.git'), 'gitdir: fixture');
 	directories.push(directory);
 	return directory;
@@ -109,7 +109,7 @@ test('does not leave a marker behind when terminal validation rejects', async ()
 test('repairs a legacy marker-only pair without replacing its marker', async () => {
 	const directory = project();
 	await display(directory);
-	const marker = await commitApplicationMarkerBatch(directory, {
+	const marker = await ledgerInternals.commitApplicationMarkerBatch(directory, {
 		trace_id: 'trace-app',
 		session_id: 'session-app',
 		items: [

@@ -30,12 +30,16 @@ import {
 	readKnowledge,
 	resolveSwarmKnowledgePath,
 } from '../../../src/hooks/knowledge-store.js';
+import { freezeClock } from '../../helpers/test-clock.js';
 
 // ============================================================================
 // Helpers
 // ============================================================================
 
 let historicalMemberships: ReceiptMembership[] = [];
+const FIXED_NOW_MS = Date.parse('2026-06-01T12:00:00.000Z');
+const FIXED_NOW_ISO = '2026-06-01T12:00:00.000Z';
+let restoreClock: (() => void) | undefined;
 
 function makeTempDir(): string {
 	return mkdtempSync(join(tmpdir(), 'verdict-feedback-test-'));
@@ -166,6 +170,10 @@ describe('applyKnowledgeVerdictFeedback', () => {
 	const originalQueryHistoricalOutcomes = _internals.queryHistoricalOutcomes;
 
 	beforeEach(() => {
+		restoreClock = freezeClock({
+			fixedNow: FIXED_NOW_MS,
+			isoNow: FIXED_NOW_ISO,
+		});
 		dir = makeTempDir();
 		historicalMemberships = [];
 		_internals.queryHistoricalOutcomes = async () => ({
@@ -175,6 +183,8 @@ describe('applyKnowledgeVerdictFeedback', () => {
 	});
 
 	afterEach(() => {
+		restoreClock?.();
+		restoreClock = undefined;
 		_internals.queryHistoricalOutcomes = originalQueryHistoricalOutcomes;
 		rmSync(dir, { recursive: true, force: true });
 	});

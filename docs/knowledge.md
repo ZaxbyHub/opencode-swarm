@@ -486,11 +486,27 @@ late, and reordered outcomes are idempotent or explicitly rejected. Best-effort
 legacy, counter, promotion, and observability writes occur only after the
 correctness lock is released.
 
-The journal retains live membership without an event-count cap. Resolved state
-remains protected until its phase is durably closed and
+The journal never evicts live membership because of an event-count cap. Its
+2,000-record threshold triggers a self-contained checkpoint rewrite; it is not
+a retention limit. Resolved state remains protected until its phase is durably closed and
 `knowledge.receipt_close_grace_days` has elapsed. Eligible closed summaries move
 to the separate project-local receipt archive; a bounded audit tail and a
 rebuildable snapshot do not share the diagnostic event budget.
+
+#### Receipt-ledger recovery
+
+An unterminated final journal line is treated as a crash tail: the plugin first
+preserves it in a quarantine file, then rewrites the last valid hash-chained
+prefix. Interior corruption, a hash mismatch, an unsupported schema, an
+unwritable quarantine, or a full disk intentionally fails receipt gates closed;
+the plugin does not guess which later authority is safe to discard.
+
+Before recovery, back up all project-local
+`.swarm/knowledge-receipts-v2*.jsonl` files. Do not hand-edit or truncate the
+authoritative journal. Free disk space when writes fail, then retry. For interior
+corruption, restore the journal and archive from a trusted project-local backup
+or reopen them with a plugin version that supports their schema. The snapshot is
+explicitly rebuildable and is never a substitute for the journal or archive.
 
 Operational knowledge observations continue to be appended to:
 

@@ -9,13 +9,13 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { collectDelegateAcksAfter } from '../../src/hooks/delegate-ack-collector.js';
 import { injectDelegateDirectivesBefore } from '../../src/hooks/delegate-directive-injection.js';
 import { readKnowledgeEvents } from '../../src/hooks/knowledge-events.js';
 import { DELEGATE_DIRECTIVE_BLOCK_TAG } from '../../src/hooks/knowledge-injector.js';
 import type { KnowledgeConfig } from '../../src/hooks/knowledge-types.js';
+import { canonicalMkdtemp } from '../helpers/tmpdir.js';
 
 const CRIT_A = 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa';
 const CRIT_B = 'bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb';
@@ -83,7 +83,7 @@ function criticalCoderEntry(id: string, lesson: string): string {
 }
 
 function createRelativeTempDir(): string {
-	return fs.mkdtempSync(path.join(os.tmpdir(), 'deleg-e2e-'));
+	return canonicalMkdtemp('deleg-e2e-');
 }
 
 function traceIdFromPrompt(prompt: string): string {

@@ -1,9 +1,10 @@
 /**
- * Unit tests for the shared receipt validator (issue #1849).
+ * Unit tests for the authoritative V2 receipt validator (issue #1849).
  *
- * Uses a REAL temp `.swarm` directory and writes real knowledge-events.jsonl
- * lines, so the validator exercises its real `readKnowledgeEvents` path. No
- * `mock.module` — the validator is a pure function of (ctx, events-on-disk).
+ * Uses a real temp `.swarm` project and durable on-disk receipt/legacy-event
+ * files, so the validator exercises its real V2-ledger authority and
+ * pre-cutover fallback paths. No `mock.module` — the validator is a pure
+ * function of (ctx, durable receipt state on disk).
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';

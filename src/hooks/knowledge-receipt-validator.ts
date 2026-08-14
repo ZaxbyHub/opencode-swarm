@@ -37,6 +37,7 @@ export interface ReceiptValidationContext {
 	agent: string;
 	cohort_id?: string;
 	source_link_id?: string;
+	grace_days?: number;
 	items: ReceiptItem[];
 	no_relevant_knowledge: boolean;
 }
@@ -64,6 +65,7 @@ export type ReceiptValidationResult =
 			trace: RetrievedEvent | null;
 			closes_no_relevant: boolean;
 			authoritative_event_ids: Record<string, string>;
+			no_relevant_event_id?: string;
 			rejected_items?: Array<{
 				item: ReceiptItem;
 				reason: ReceiptRejectReason;
@@ -136,6 +138,7 @@ export async function validateReceipt(
 			phase: ctx.phase,
 			task_id: ctx.task_id,
 			agent: ctx.agent,
+			grace_days: ctx.grace_days,
 		});
 		if (!empty.ok) {
 			return reject(empty.code as ReceiptRejectReason, empty.detail);
@@ -146,9 +149,8 @@ export async function validateReceipt(
 			idempotent_skips: [],
 			trace: null,
 			closes_no_relevant: true,
-			authoritative_event_ids: {
-				__no_relevant__: empty.terminal_event_id,
-			},
+			authoritative_event_ids: {},
+			no_relevant_event_id: empty.terminal_event_id,
 		};
 	}
 
@@ -160,6 +162,7 @@ export async function validateReceipt(
 		agent: ctx.agent,
 		cohort_id: ctx.cohort_id,
 		source_link_id: ctx.source_link_id,
+		grace_days: ctx.grace_days,
 		items: items.map((item) => ({
 			entry_id: item.id,
 			outcome: item.outcome,
@@ -212,6 +215,7 @@ export async function validateReceipt(
 	const queried = await queryLiveMemberships(ctx.directory, {
 		session_id: ctx.session_id,
 		include_terminal: true,
+		grace_days: ctx.grace_days,
 	});
 	const memberships = queried.ok
 		? queried.memberships.filter(
@@ -252,14 +256,12 @@ export async function validateReceipt(
 		idempotent_skips,
 		trace,
 		closes_no_relevant: committed.closes_no_relevant,
-		authoritative_event_ids: Object.fromEntries([
-			...committed.accepted.map(
-				(item) => [item.entry_id, item.event_id] as const,
-			),
-			...(committed.terminal_event_id
-				? ([['__no_relevant__', committed.terminal_event_id]] as const)
-				: []),
-		]),
+		authoritative_event_ids: Object.fromEntries(
+			committed.accepted.map((item) => [item.entry_id, item.event_id] as const),
+		),
+		...(committed.terminal_event_id
+			? { no_relevant_event_id: committed.terminal_event_id }
+			: {}),
 		...(rejected_items.length ? { rejected_items } : {}),
 	};
 }

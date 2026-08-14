@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
 	appendKnowledgeEventsBatch,
@@ -10,11 +9,12 @@ import {
 	commitDisplayedMembership,
 	validateAndCommitTerminalBatch,
 } from '../../../src/hooks/knowledge-receipt-ledger.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 let directory: string;
 
 beforeEach(() => {
-	directory = mkdtempSync(join(tmpdir(), 'knowledge-rollup-authority-'));
+	directory = canonicalMkdtemp('knowledge-rollup-authority-');
 	writeFileSync(join(directory, '.git'), 'gitdir: fixture');
 });
 

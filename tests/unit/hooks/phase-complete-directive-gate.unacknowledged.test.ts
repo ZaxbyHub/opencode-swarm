@@ -1,8 +1,7 @@
 /** Legacy `unacknowledged` diagnostics never satisfy a V2 critical receipt. */
 
 import { afterEach, beforeEach, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { rmSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 import { appendKnowledgeEvent } from '../../../src/hooks/knowledge-events.js';
 import {
@@ -10,13 +9,14 @@ import {
 	validateAndCommitTerminalBatch,
 } from '../../../src/hooks/knowledge-receipt-ledger.js';
 import { evaluatePhaseCriticalDirectives } from '../../../src/hooks/phase-complete-directive-gate.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const PHASE = 'Canonical phase';
 const ENTRY = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
 let directory: string;
 
 beforeEach(async () => {
-	directory = mkdtempSync(path.join(tmpdir(), 'phase-unack-v2-'));
+	directory = canonicalMkdtemp('phase-unack-v2-');
 	writeFileSync(path.join(directory, '.git'), 'gitdir: fixture');
 	const displayed = await commitDisplayedMembership(directory, {
 		trace_id: 'trace-unack',

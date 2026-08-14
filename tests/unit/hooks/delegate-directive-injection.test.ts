@@ -11,8 +11,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import * as os from 'node:os';
+import { rmSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 import type { DirectiveToVerify } from '../../../src/agents/reviewer-directive-compliance.js';
 import type { DelegateInjectionInput } from '../../../src/hooks/delegate-directive-injection.js';
@@ -22,6 +21,7 @@ import {
 	DELEGATE_DIRECTIVE_BLOCK_TAG,
 } from '../../../src/hooks/knowledge-injector.js';
 import type { RankedEntry } from '../../../src/hooks/knowledge-reader.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 import {
 	makeConfig,
 	makeEntry,
@@ -38,7 +38,7 @@ describe('injectDelegateDirectivesBefore — FR-012 behavioral tests', () => {
 	let originalRecordKnowledgeEvent: typeof import('../../../src/hooks/knowledge-injector.js')._internals.recordKnowledgeEvent;
 
 	beforeEach(async () => {
-		testDir = mkdtempSync(path.join(os.tmpdir(), 'delegate-directive-test-'));
+		testDir = canonicalMkdtemp('delegate-directive-test-');
 		writeFileSync(path.join(testDir, '.git'), 'gitdir: fixture');
 		const ki = await import('../../../src/hooks/knowledge-injector.js');
 		originalSearchKnowledge = ki._internals.searchKnowledge;

@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
+import { loadPluginConfigWithMeta } from '../config/index.js';
+import { KnowledgeConfigSchema } from '../config/schema.js';
 import {
 	appendFsynced,
 	atomicWriteFsynced,
@@ -149,6 +151,7 @@ interface JournalRecord {
 
 interface LedgerState {
 	memberships: Map<string, ReceiptMembership>;
+	traceIds: Set<string>;
 	emptyTraces: Map<string, EmptyTrace>;
 	cutoverCompleted: boolean;
 	legacyUnverifiable: boolean;
@@ -179,6 +182,7 @@ const MAX_JOURNAL_BYTES = 32 * 1024 * 1024;
 const MAX_ARCHIVE_RECORDS = 10_000;
 const MAX_ARCHIVE_BYTES = 16 * 1024 * 1024;
 const MAX_LEGACY_BYTES = 32 * 1024 * 1024;
+const DEFAULT_RECEIPT_GRACE_DAYS = 7;
 const keyOf = (traceId: string, entryId: string): string =>
 	`${traceId.length}:${traceId}${entryId}`;
 const emptyKeyOf = (traceId: string, sessionId: string): string =>
@@ -188,13 +192,30 @@ const phaseLifecycleKey = (
 	sessionId: string,
 	taskId?: string,
 ): string =>
-	`${sessionId.length}:${sessionId}${phase.length}:${phase}${taskId ?? ''}`;
+	`${sessionId.length}:${sessionId}${phase.length}:${phase}${
+		taskId === undefined ? 'u:' : `s:${taskId.length}:${taskId}`
+	}`;
+
+function nowIso(): string {
+	return new Date(_internals.nowMs()).toISOString();
+}
+
+function configuredGraceDays(directory: string): number {
+	try {
+		const { config } = loadPluginConfigWithMeta(directory);
+		return KnowledgeConfigSchema.parse(config.knowledge ?? {})
+			.receipt_close_grace_days;
+	} catch {
+		return DEFAULT_RECEIPT_GRACE_DAYS;
+	}
+}
 
 function emptyState(
 	observations: KnowledgeReceiptTransitionObservation[] = [],
 ): LedgerState {
 	return {
 		memberships: new Map(),
+		traceIds: new Set(),
 		emptyTraces: new Map(),
 		cutoverCompleted: false,
 		legacyUnverifiable: false,
@@ -714,6 +735,7 @@ function applyRecord(state: LedgerState, record: JournalRecord): void {
 	const memberships = record.payload.memberships;
 	if (record.kind === 'checkpoint') {
 		state.memberships.clear();
+		state.traceIds.clear();
 		state.emptyTraces.clear();
 		state.legacyTraceRegistry.clear();
 		state.legacyUnverifiableTraceIds.clear();
@@ -723,6 +745,7 @@ function applyRecord(state: LedgerState, record: JournalRecord): void {
 			for (const value of memberships) {
 				const membership = parseMembership(value);
 				if (membership) {
+					state.traceIds.add(membership.trace_id);
 					state.memberships.set(
 						keyOf(membership.trace_id, membership.entry_id),
 						membership,
@@ -786,6 +809,7 @@ function applyRecord(state: LedgerState, record: JournalRecord): void {
 			for (const value of memberships) {
 				const membership = parseMembership(value);
 				if (membership) {
+					state.traceIds.add(membership.trace_id);
 					state.memberships.set(
 						keyOf(membership.trace_id, membership.entry_id),
 						membership,
@@ -1238,7 +1262,7 @@ async function loadState(
 				await atomicWriteFsynced(
 					paths.quarantine,
 					`${JSON.stringify({
-						recovered_at: new Date().toISOString(),
+						recovered_at: nowIso(),
 						partial_tail: line.slice(0, 1024 * 1024),
 					})}\n`,
 				);
@@ -1269,7 +1293,7 @@ function makeRecord(
 		seq: state.lastSeq + 1,
 		prev_hash: state.lastHash,
 		event_id: eventId,
-		timestamp: new Date().toISOString(),
+		timestamp: nowIso(),
 		kind,
 		payload,
 	};
@@ -1690,22 +1714,66 @@ function isLegacyUnverifiableTrace(
 	);
 }
 
+function hasAuthoritativeEventId(state: LedgerState, eventId: string): boolean {
+	for (const membership of state.memberships.values()) {
+		if (
+			membership.membership_event_id === eventId ||
+			membership.application_marker?.event_id === eventId ||
+			membership.terminal?.event_id === eventId ||
+			membership.terminal_history?.some(
+				(terminal) => terminal.event_id === eventId,
+			)
+		) {
+			return true;
+		}
+	}
+	for (const trace of state.emptyTraces.values()) {
+		if (
+			trace.empty_event_id === eventId ||
+			trace.terminal_event_id === eventId
+		) {
+			return true;
+		}
+	}
+	for (const lifecycle of state.phaseLifecycle.values()) {
+		if (
+			lifecycle.intent_event_id === eventId ||
+			lifecycle.closed_event_id === eventId
+		) {
+			return true;
+		}
+	}
+	return state.auditTail.some((summary) => summary.event_id === eventId);
+}
+
 async function runLocked<T>(
 	directory: string,
-	graceDays: number,
-	action: (paths: ReceiptLedgerPaths, state: LedgerState) => Promise<T>,
+	graceDays: number | undefined,
+	action: (
+		paths: ReceiptLedgerPaths,
+		state: LedgerState,
+		resolvedGraceDays: number,
+	) => Promise<T>,
+	options: { compact?: boolean; writeSnapshot?: boolean } = {},
 ): Promise<ReceiptLedgerResult<T>> {
 	const observations: KnowledgeReceiptTransitionObservation[] = [];
 	try {
 		const result = await withReceiptLedgerLock(directory, async (paths) => {
 			const state = await loadState(paths, observations);
-			await ensureCutoverLocked(paths, state, graceDays);
-			await compactIfNeeded(paths, state);
-			const result = await action(paths, state);
+			const resolvedGraceDays =
+				graceDays ??
+				(state.cutoverCompleted
+					? DEFAULT_RECEIPT_GRACE_DAYS
+					: configuredGraceDays(directory));
+			await ensureCutoverLocked(paths, state, resolvedGraceDays);
+			if (options.compact !== false) await compactIfNeeded(paths, state);
+			const result = await action(paths, state, resolvedGraceDays);
 			// The journal is authoritative and has already been fsynced. A derived
 			// snapshot failure must never turn that commit into an apparent failure or
 			// suppress an exposure whose membership is now durable.
-			await _internals.writeSnapshot(paths, state).catch(() => undefined);
+			if (options.writeSnapshot !== false) {
+				await _internals.writeSnapshot(paths, state).catch(() => undefined);
+			}
 			return { ok: true as const, ...result };
 		});
 		for (const observation of observations) {
@@ -1745,97 +1813,105 @@ export async function commitDisplayedMembership(
 ): Promise<
 	ReceiptLedgerResult<{ event_id: string; memberships: ReceiptMembership[] }>
 > {
-	return runLocked(directory, input.grace_days ?? 7, async (paths, state) => {
-		if (!input.trace_id || !input.session_id || input.entries.length === 0)
-			throw new ReceiptStoreError(
-				'store_unavailable',
-				'invalid displayed membership',
-			);
-		const eventId = randomUUID();
-		const committedAt = new Date().toISOString();
-		const exposureKind = normalizeExposureKind(input.exposure_kind);
-		const memberships: ReceiptMembership[] = [];
-		const newMemberships: ReceiptMembership[] = [];
-		for (const entry of input.entries) {
-			const existing = state.memberships.get(
-				keyOf(input.trace_id, entry.entry_id),
-			);
-			if (existing) {
-				if (
-					existing.session_id !== input.session_id ||
-					existing.phase !== input.phase ||
-					existing.task_id !== input.task_id ||
-					existing.critical !== entry.critical ||
-					existing.cohort_id !== input.cohort_id ||
-					existing.source_link_id !== input.source_link_id ||
-					existing.exposure_kind !== exposureKind
-				) {
-					throw new ReceiptStoreError(
-						'store_unavailable',
-						`conflicting immutable membership for ${input.trace_id}/${entry.entry_id}`,
-					);
-				}
-				memberships.push({
-					...existing,
-					terminal: existing.terminal ? { ...existing.terminal } : undefined,
-				});
-				continue;
-			}
-			const closedLifecycle =
-				state.phaseLifecycle.get(
-					phaseLifecycleKey(input.phase ?? '', input.session_id, input.task_id),
-				) ??
-				(input.task_id !== undefined
-					? state.phaseLifecycle.get(
-							phaseLifecycleKey(input.phase ?? '', input.session_id),
-						)
-					: undefined);
-			if (input.phase && closedLifecycle?.closed_event_id) {
+	return runLocked(
+		directory,
+		input.grace_days,
+		async (paths, state, graceDays) => {
+			if (!input.trace_id || !input.session_id || input.entries.length === 0)
 				throw new ReceiptStoreError(
 					'store_unavailable',
-					`cannot add receipt membership to closed lifecycle ${input.session_id}/${input.phase}`,
+					'invalid displayed membership',
+				);
+			const eventId = randomUUID();
+			const committedAt = nowIso();
+			const exposureKind = normalizeExposureKind(input.exposure_kind);
+			const memberships: ReceiptMembership[] = [];
+			const newMemberships: ReceiptMembership[] = [];
+			for (const entry of input.entries) {
+				const existing = state.memberships.get(
+					keyOf(input.trace_id, entry.entry_id),
+				);
+				if (existing) {
+					if (
+						existing.session_id !== input.session_id ||
+						existing.phase !== input.phase ||
+						existing.task_id !== input.task_id ||
+						existing.critical !== entry.critical ||
+						existing.cohort_id !== input.cohort_id ||
+						existing.source_link_id !== input.source_link_id ||
+						existing.exposure_kind !== exposureKind
+					) {
+						throw new ReceiptStoreError(
+							'store_unavailable',
+							`conflicting immutable membership for ${input.trace_id}/${entry.entry_id}`,
+						);
+					}
+					memberships.push({
+						...existing,
+						terminal: existing.terminal ? { ...existing.terminal } : undefined,
+					});
+					continue;
+				}
+				const closedLifecycle =
+					state.phaseLifecycle.get(
+						phaseLifecycleKey(
+							input.phase ?? '',
+							input.session_id,
+							input.task_id,
+						),
+					) ??
+					(input.task_id !== undefined
+						? state.phaseLifecycle.get(
+								phaseLifecycleKey(input.phase ?? '', input.session_id),
+							)
+						: undefined);
+				if (input.phase && closedLifecycle?.closed_event_id) {
+					throw new ReceiptStoreError(
+						'store_unavailable',
+						`cannot add receipt membership to closed lifecycle ${input.session_id}/${input.phase}`,
+					);
+				}
+				const membership: ReceiptMembership = {
+					trace_id: input.trace_id,
+					entry_id: entry.entry_id,
+					session_id: input.session_id,
+					phase: input.phase,
+					task_id: input.task_id,
+					agent: input.agent,
+					critical: entry.critical,
+					rank: entry.rank,
+					score: entry.score,
+					committed_at: committedAt,
+					membership_event_id: eventId,
+					grace_days: graceDays,
+					cohort_id: input.cohort_id,
+					source_link_id: input.source_link_id,
+					exposure_kind: exposureKind,
+					origin: 'v2',
+				};
+				memberships.push(membership);
+				newMemberships.push(membership);
+			}
+			if (newMemberships.length) {
+				await appendRecord(
+					paths,
+					state,
+					makeRecord(
+						state,
+						'membership_committed',
+						{ memberships: newMemberships },
+						eventId,
+					),
 				);
 			}
-			const membership: ReceiptMembership = {
-				trace_id: input.trace_id,
-				entry_id: entry.entry_id,
-				session_id: input.session_id,
-				phase: input.phase,
-				task_id: input.task_id,
-				agent: input.agent,
-				critical: entry.critical,
-				rank: entry.rank,
-				score: entry.score,
-				committed_at: committedAt,
-				membership_event_id: eventId,
-				grace_days: input.grace_days ?? 7,
-				cohort_id: input.cohort_id,
-				source_link_id: input.source_link_id,
-				exposure_kind: exposureKind,
-				origin: 'v2',
+			return {
+				event_id: newMemberships.length
+					? eventId
+					: memberships[0].membership_event_id,
+				memberships,
 			};
-			memberships.push(membership);
-			newMemberships.push(membership);
-		}
-		if (newMemberships.length) {
-			await appendRecord(
-				paths,
-				state,
-				makeRecord(
-					state,
-					'membership_committed',
-					{ memberships: newMemberships },
-					eventId,
-				),
-			);
-		}
-		return {
-			event_id: newMemberships.length
-				? eventId
-				: memberships[0].membership_event_id,
-			memberships,
-		};
-	});
+		},
+	);
 }
 
 export async function commitEmptyRetrieval(
@@ -1844,64 +1920,68 @@ export async function commitEmptyRetrieval(
 ): Promise<
 	ReceiptLedgerResult<{ event_id: string; terminal_event_id: string }>
 > {
-	return runLocked(directory, input.grace_days ?? 7, async (paths, state) => {
-		const existing = state.emptyTraces.get(
-			emptyKeyOf(input.trace_id, input.session_id),
-		);
-		if (existing) {
-			if (
-				existing.phase !== input.phase ||
-				existing.task_id !== input.task_id ||
-				existing.grace_days !== (input.grace_days ?? 7)
-			) {
-				throw new ReceiptStoreError(
-					'store_unavailable',
-					`conflicting immutable empty retrieval for ${input.trace_id}/${input.session_id}`,
-				);
+	return runLocked(
+		directory,
+		input.grace_days,
+		async (paths, state, graceDays) => {
+			const existing = state.emptyTraces.get(
+				emptyKeyOf(input.trace_id, input.session_id),
+			);
+			if (existing) {
+				if (
+					existing.phase !== input.phase ||
+					existing.task_id !== input.task_id ||
+					existing.grace_days !== graceDays
+				) {
+					throw new ReceiptStoreError(
+						'store_unavailable',
+						`conflicting immutable empty retrieval for ${input.trace_id}/${input.session_id}`,
+					);
+				}
+				if (!existing.terminal_event_id) {
+					const terminal = makeRecord(state, 'terminal_committed', {
+						empty_trace_id: input.trace_id,
+						empty_trace_session_id: input.session_id,
+					});
+					await appendRecord(paths, state, terminal);
+				}
+				return {
+					event_id: existing.empty_event_id,
+					terminal_event_id: existing.terminal_event_id as string,
+				};
 			}
-			if (!existing.terminal_event_id) {
-				const terminal = makeRecord(state, 'terminal_committed', {
-					empty_trace_id: input.trace_id,
-					empty_trace_session_id: input.session_id,
-				});
-				await appendRecord(paths, state, terminal);
-			}
-			return {
-				event_id: existing.empty_event_id,
-				terminal_event_id: existing.terminal_event_id as string,
+			const eventId = randomUUID();
+			const terminalEventId = randomUUID();
+			const trace: EmptyTrace = {
+				trace_id: input.trace_id,
+				session_id: input.session_id,
+				phase: input.phase,
+				task_id: input.task_id,
+				committed_at: nowIso(),
+				empty_event_id: eventId,
+				grace_days: graceDays,
 			};
-		}
-		const eventId = randomUUID();
-		const terminalEventId = randomUUID();
-		const trace: EmptyTrace = {
-			trace_id: input.trace_id,
-			session_id: input.session_id,
-			phase: input.phase,
-			task_id: input.task_id,
-			committed_at: new Date().toISOString(),
-			empty_event_id: eventId,
-			grace_days: input.grace_days ?? 7,
-		};
-		await appendRecord(
-			paths,
-			state,
-			makeRecord(state, 'empty_retrieval_committed', { trace }, eventId),
-		);
-		await appendRecord(
-			paths,
-			state,
-			makeRecord(
+			await appendRecord(
+				paths,
 				state,
-				'terminal_committed',
-				{
-					empty_trace_id: input.trace_id,
-					empty_trace_session_id: input.session_id,
-				},
-				terminalEventId,
-			),
-		);
-		return { event_id: eventId, terminal_event_id: terminalEventId };
-	});
+				makeRecord(state, 'empty_retrieval_committed', { trace }, eventId),
+			);
+			await appendRecord(
+				paths,
+				state,
+				makeRecord(
+					state,
+					'terminal_committed',
+					{
+						empty_trace_id: input.trace_id,
+						empty_trace_session_id: input.session_id,
+					},
+					terminalEventId,
+				),
+			);
+			return { event_id: eventId, terminal_event_id: terminalEventId };
+		},
+	);
 }
 
 export interface TerminalBatchInput {
@@ -1912,6 +1992,7 @@ export interface TerminalBatchInput {
 	agent?: string;
 	cohort_id?: string;
 	source_link_id?: string;
+	grace_days?: number;
 	items?: Array<{
 		entry_id: string;
 		outcome: ReceiptOutcome;
@@ -1964,7 +2045,7 @@ export async function validateAndCommitTerminalBatch(
 		terminal_event_id?: string;
 	}>
 > {
-	return runLocked(directory, 7, async (paths, state) => {
+	return runLocked(directory, input.grace_days, async (paths, state) => {
 		const items = input.items ?? input.terminals ?? [];
 		if (
 			items.some(
@@ -2037,10 +2118,9 @@ export async function validateAndCommitTerminalBatch(
 			cohort_id?: string;
 			source_link_id?: string;
 		}> = [];
-		const traceExists = [...state.memberships.values()].some(
-			(membership) => membership.trace_id === input.trace_id,
-		);
+		const traceExists = state.traceIds.has(input.trace_id);
 		const stagedOutcomes = new Map<string, ReceiptOutcome>();
+		const reservedEventIds = new Set<string>();
 		let authorized = false;
 		for (const item of items) {
 			const membership = state.memberships.get(
@@ -2141,14 +2221,10 @@ export async function validateAndCommitTerminalBatch(
 			}
 			const requestedEventId = item.event_id?.trim();
 			if (requestedEventId) {
-				const collision = [...state.memberships.values()].find(
-					(candidate) =>
-						candidate.terminal?.event_id === requestedEventId ||
-						candidate.terminal_history?.some(
-							(terminal) => terminal.event_id === requestedEventId,
-						),
-				);
-				if (collision) {
+				if (
+					hasAuthoritativeEventId(state, requestedEventId) ||
+					reservedEventIds.has(requestedEventId)
+				) {
 					rejected.push({
 						entry_id: item.entry_id,
 						reason: 'event_id_conflict',
@@ -2157,6 +2233,7 @@ export async function validateAndCommitTerminalBatch(
 				}
 			}
 			const eventId = requestedEventId || randomUUID();
+			reservedEventIds.add(eventId);
 			transitions.push({
 				trace_id: input.trace_id,
 				entry_id: item.entry_id,
@@ -2166,7 +2243,7 @@ export async function validateAndCommitTerminalBatch(
 					reason: item.reason,
 					predicate_check: item.predicate_check,
 					event_id: eventId,
-					committed_at: new Date().toISOString(),
+					committed_at: nowIso(),
 					...(input.authorization
 						? {
 								authorized_transition: {
@@ -2230,7 +2307,7 @@ export async function validateAndCommitTerminalBatch(
 	});
 }
 
-export interface ApplicationMarkerBatchInput {
+interface ApplicationMarkerBatchInput {
 	trace_id: string;
 	session_id: string;
 	items?: Array<{
@@ -2247,7 +2324,7 @@ export interface ApplicationMarkerBatchInput {
 	}>;
 }
 
-export async function commitApplicationMarkerBatch(
+async function commitApplicationMarkerBatch(
 	directory: string,
 	input: ApplicationMarkerBatchInput,
 ): Promise<
@@ -2261,7 +2338,7 @@ export async function commitApplicationMarkerBatch(
 		rejected: Array<{ entry_id: string; reason: string }>;
 	}>
 > {
-	return runLocked(directory, 7, async (paths, state) => {
+	return runLocked(directory, undefined, async (paths, state) => {
 		const items = input.items ?? input.markers ?? [];
 		const committed: Array<{
 			entry_id: string;
@@ -2275,9 +2352,7 @@ export async function commitApplicationMarkerBatch(
 			entry_id: string;
 			marker: ReceiptApplicationMarker;
 		}> = [];
-		const traceExists = [...state.memberships.values()].some(
-			(membership) => membership.trace_id === input.trace_id,
-		);
+		const traceExists = state.traceIds.has(input.trace_id);
 		const staged = new Map<string, ReceiptOutcome>();
 		for (const item of items) {
 			const membership = state.memberships.get(
@@ -2327,7 +2402,7 @@ export async function commitApplicationMarkerBatch(
 				source: item.source ?? 'unknown',
 				reason: item.reason,
 				event_id: eventId,
-				committed_at: new Date().toISOString(),
+				committed_at: nowIso(),
 			};
 			transitions.push({
 				trace_id: input.trace_id,
@@ -2356,6 +2431,7 @@ export async function commitApplicationMarkerBatch(
 export interface ApplicationOutcomeBatchInput {
 	trace_id: string;
 	session_id: string;
+	grace_days?: number;
 	items: Array<{
 		entry_id: string;
 		outcome: ReceiptOutcome;
@@ -2390,7 +2466,7 @@ export async function commitApplicationOutcomeBatch(
 		rejected: Array<{ entry_id: string; reason: string }>;
 	}>
 > {
-	return runLocked(directory, 7, async (paths, state) => {
+	return runLocked(directory, input.grace_days, async (paths, state) => {
 		const committed: Array<{
 			entry_id: string;
 			outcome: ReceiptOutcome;
@@ -2409,9 +2485,7 @@ export async function commitApplicationOutcomeBatch(
 			entry_id: string;
 			terminal: ReceiptTerminal;
 		}> = [];
-		const traceExists = [...state.memberships.values()].some(
-			(membership) => membership.trace_id === input.trace_id,
-		);
+		const traceExists = state.traceIds.has(input.trace_id);
 		const staged = new Map<string, ReceiptOutcome>();
 		const stagedResults = new Map<string, (typeof committed)[number]>();
 		for (const item of input.items) {
@@ -2459,7 +2533,7 @@ export async function commitApplicationOutcomeBatch(
 				continue;
 			}
 
-			const now = new Date().toISOString();
+			const now = nowIso();
 			const source = item.source ?? 'unknown';
 			const marker =
 				membership.application_marker ??
@@ -2529,66 +2603,77 @@ export async function queryLiveMemberships(
 		include_terminal?: boolean;
 		include_phase_closed?: boolean;
 		exposure_kind?: ReceiptExposureKind;
+		grace_days?: number;
 	} = {},
 ): Promise<ReceiptLedgerResult<{ memberships: ReceiptMembership[] }>> {
-	return runLocked(directory, 7, async (_paths, state) => ({
-		memberships: [...state.memberships.values()]
-			.filter(
-				(m) =>
-					(!filters.phase || m.phase === filters.phase) &&
-					(!filters.task_id || m.task_id === filters.task_id) &&
-					(!filters.session_id || m.session_id === filters.session_id) &&
-					(filters.include_terminal !== false || !m.terminal) &&
-					(filters.include_phase_closed !== false || !m.phase_closed_at) &&
-					(!filters.exposure_kind || m.exposure_kind === filters.exposure_kind),
-			)
-			.map((m) => ({
-				...m,
-				terminal: m.terminal ? { ...m.terminal } : undefined,
-			})),
-	}));
+	return runLocked(
+		directory,
+		filters.grace_days,
+		async (_paths, state) => ({
+			memberships: [...state.memberships.values()]
+				.filter(
+					(m) =>
+						(!filters.phase || m.phase === filters.phase) &&
+						(!filters.task_id || m.task_id === filters.task_id) &&
+						(!filters.session_id || m.session_id === filters.session_id) &&
+						(filters.include_terminal !== false || !m.terminal) &&
+						(filters.include_phase_closed !== false || !m.phase_closed_at) &&
+						(!filters.exposure_kind ||
+							m.exposure_kind === filters.exposure_kind),
+				)
+				.map((m) => ({
+					...m,
+					terminal: m.terminal ? { ...m.terminal } : undefined,
+				})),
+		}),
+		{ compact: false, writeSnapshot: false },
+	);
 }
-
-export const queryPhaseReceiptState = queryLiveMemberships;
 
 export async function queryHistoricalOutcomes(
 	directory: string,
 	entryIds?: string[],
+	graceDays?: number,
 ): Promise<ReceiptLedgerResult<{ memberships: ReceiptMembership[] }>> {
-	return runLocked(directory, 7, async (paths, state) => {
-		const wanted = entryIds ? new Set(entryIds) : null;
-		const memberships = new Map<string, ReceiptMembership>();
-		for (const membership of state.memberships.values()) {
-			if (!wanted || wanted.has(membership.entry_id)) {
-				memberships.set(archiveKey(membership), membership);
-			}
-		}
-		const raw = await readUtf8IfPresent(paths.archive, MAX_ARCHIVE_BYTES);
-		if (raw) {
-			for (const line of raw.split('\n').filter(Boolean)) {
-				let summary: ArchiveSummary | null = null;
-				try {
-					summary = parseArchiveSummary(JSON.parse(line));
-				} catch {
-					// handled below
-				}
-				if (!summary) {
-					throw new ReceiptStoreError(
-						'store_corrupt',
-						'receipt archive contains an invalid authoritative summary',
-					);
-				}
-				if (
-					'entry_id' in summary &&
-					(!wanted || wanted.has(summary.entry_id))
-				) {
-					const key = archiveKey(summary);
-					if (!memberships.has(key)) memberships.set(key, summary);
+	return runLocked(
+		directory,
+		graceDays,
+		async (paths, state) => {
+			const wanted = entryIds ? new Set(entryIds) : null;
+			const memberships = new Map<string, ReceiptMembership>();
+			for (const membership of state.memberships.values()) {
+				if (!wanted || wanted.has(membership.entry_id)) {
+					memberships.set(archiveKey(membership), membership);
 				}
 			}
-		}
-		return { memberships: [...memberships.values()] };
-	});
+			const raw = await readUtf8IfPresent(paths.archive, MAX_ARCHIVE_BYTES);
+			if (raw) {
+				for (const line of raw.split('\n').filter(Boolean)) {
+					let summary: ArchiveSummary | null = null;
+					try {
+						summary = parseArchiveSummary(JSON.parse(line));
+					} catch {
+						// handled below
+					}
+					if (!summary) {
+						throw new ReceiptStoreError(
+							'store_corrupt',
+							'receipt archive contains an invalid authoritative summary',
+						);
+					}
+					if (
+						'entry_id' in summary &&
+						(!wanted || wanted.has(summary.entry_id))
+					) {
+						const key = archiveKey(summary);
+						if (!memberships.has(key)) memberships.set(key, summary);
+					}
+				}
+			}
+			return { memberships: [...memberships.values()] };
+		},
+		{ compact: false, writeSnapshot: false },
+	);
 }
 
 async function phaseTransition(
@@ -2597,8 +2682,9 @@ async function phaseTransition(
 	kind: 'phase_close_intent' | 'phase_closed',
 	sessionId?: string,
 	taskId?: string,
+	graceDays?: number,
 ): Promise<ReceiptLedgerResult<{ event_id: string }>> {
-	return runLocked(directory, 7, async (paths, state) => {
+	return runLocked(directory, graceDays, async (paths, state) => {
 		if (!phase.trim()) {
 			throw new ReceiptStoreError('store_unavailable', 'phase is required');
 		}
@@ -2731,15 +2817,16 @@ async function compactIfNeeded(
 	}
 	const retainedArchive = [...archiveById.values()];
 	let archiveContent = serializeArchive(retainedArchive);
+	let archiveBytes = Buffer.byteLength(archiveContent, 'utf8');
 	let archiveChanged = false;
 	const retainIfCapacity = (summary: ArchiveSummary): void => {
 		const key = archiveKey(summary);
 		if (archiveById.has(key)) return;
-		const candidate = [...retainedArchive, summary];
-		const content = serializeArchive(candidate);
+		const line = `${JSON.stringify(summary)}\n`;
+		const lineBytes = Buffer.byteLength(line, 'utf8');
 		if (
-			candidate.length > _internals.maxArchiveRecords ||
-			Buffer.byteLength(content, 'utf8') > _internals.maxArchiveBytes
+			retainedArchive.length + 1 > _internals.maxArchiveRecords ||
+			archiveBytes + lineBytes > _internals.maxArchiveBytes
 		) {
 			// Capacity pressure never discards prior authority. This summary remains
 			// live and protected until archive capacity becomes available.
@@ -2747,7 +2834,8 @@ async function compactIfNeeded(
 		}
 		archiveById.set(key, summary);
 		retainedArchive.push(summary);
-		archiveContent = content;
+		archiveContent += line;
+		archiveBytes += lineBytes;
 		archiveChanged = true;
 	};
 	for (const membership of eligible) retainIfCapacity(membership);
@@ -2779,6 +2867,9 @@ async function compactIfNeeded(
 		);
 		if (!stillLive) state.legacyTraceRegistry.delete(traceId);
 	}
+	state.traceIds = new Set(
+		[...state.memberships.values()].map((membership) => membership.trace_id),
+	);
 	const fresh = emptyState(state.observations);
 	fresh.cutoverCompleted = state.cutoverCompleted;
 	fresh.legacyUnverifiable = state.legacyUnverifiable;
@@ -2814,7 +2905,7 @@ function serializeArchive(summaries: ArchiveSummary[]): string {
 
 export async function ensureLegacyCutover(
 	directory: string,
-	graceDays = 7,
+	graceDays?: number,
 ): Promise<ReceiptLedgerResult<{ completed: true }>> {
 	return runLocked(directory, graceDays, async () => ({
 		completed: true as const,
@@ -2825,6 +2916,8 @@ export const _internals = {
 	nowMs: (): number => Date.now(),
 	writeSnapshot,
 	atomicWriteFsynced,
+	/** Test-only migration fixture for pre-atomic marker-only state. */
+	commitApplicationMarkerBatch,
 	maxJournalRecords: MAX_JOURNAL_RECORDS,
 	maxArchiveRecords: MAX_ARCHIVE_RECORDS,
 	maxArchiveBytes: MAX_ARCHIVE_BYTES,
