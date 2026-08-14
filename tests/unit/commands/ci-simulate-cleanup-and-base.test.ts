@@ -6,8 +6,8 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const { _internals, handleCiSimulateCommand } = await import(
 	'../../../src/commands/ci-simulate.js'
@@ -15,10 +15,6 @@ const { _internals, handleCiSimulateCommand } = await import(
 const realRunExternalTool = _internals.runExternalTool;
 const realDetectDefaultRemoteBranch = _internals.detectDefaultRemoteBranch;
 const realFs = _internals.fs;
-
-function makeTempDir(prefix: string): string {
-	return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
-}
 
 function runGit(dir: string, args: string[]): void {
 	execFileSync('git', args, {
@@ -39,7 +35,7 @@ describe('handleCiSimulateCommand cleanup + explicit base (issue #2131 E)', () =
 	let tempDir: string;
 
 	beforeEach(() => {
-		tempDir = makeTempDir('ci-simulate-cleanup-');
+		tempDir = canonicalMkdtemp('ci-simulate-cleanup-');
 		gitInit(tempDir);
 		runGit(tempDir, ['commit', '--allow-empty', '-m', 'initial commit']);
 	});
@@ -116,10 +112,7 @@ describe('handleCiSimulateCommand cleanup + explicit base (issue #2131 E)', () =
 		_internals.detectDefaultRemoteBranch = () => 'main';
 		const verifiedRefs: string[] = [];
 		_internals.runExternalTool = mock(async (options) => {
-			if (
-				options.args[0] === 'rev-parse' &&
-				options.args[1] === '--verify'
-			) {
+			if (options.args[0] === 'rev-parse' && options.args[1] === '--verify') {
 				const target = options.args[options.args.length - 1];
 				verifiedRefs.push(target);
 				// Only origin/main resolves; origin/release-9x does not.

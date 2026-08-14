@@ -4,7 +4,6 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -29,9 +28,10 @@ import {
 	record_recurrence_sweep,
 } from '../../../src/tools/record-recurrence-sweep';
 import { TOOL_NAMES } from '../../../src/tools/tool-names.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 function makeTempDir(): string {
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'residual-b-'));
+	const dir = canonicalMkdtemp('residual-b-');
 	fs.mkdirSync(path.join(dir, '.swarm'), { recursive: true });
 	return dir;
 }
