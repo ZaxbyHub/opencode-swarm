@@ -8,7 +8,6 @@
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { AGENT_TOOL_MAP } from '../../../src/config/constants.js';
 import {
@@ -23,11 +22,10 @@ import { TOOL_MANIFEST } from '../../../src/tools/manifest.js';
 import { executeRecordIssuePublication } from '../../../src/tools/record-issue-publication';
 import { executeRecordIssueReproduction } from '../../../src/tools/record-issue-reproduction';
 import { TOOL_NAMES } from '../../../src/tools/tool-names.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 function makeTempDir(): string {
-	const dir = fs.realpathSync(
-		fs.mkdtempSync(path.join(os.tmpdir(), 'record-receipts-')),
-	);
+	const dir = canonicalMkdtemp('record-receipts-');
 	fs.mkdirSync(path.join(dir, '.swarm'), { recursive: true });
 	return dir;
 }
