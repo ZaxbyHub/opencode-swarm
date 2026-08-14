@@ -20,9 +20,8 @@ Read and follow `../../../.opencode/skills/swarm-pr-review/SKILL.md` as the cano
 - `PR_REVIEW` is read-only with respect to the PR branch: fetch refs, inspect metadata,
   check out its head after verifying a clean tree; do not fix, commit, push, rebase, or reset.
 - Before dispatching explorer lanes, fetch the PR head and verify it with
-  `git rev-parse --verify <full_pr_head_sha>^0` and `git cat-file -t
-  <full_pr_head_sha>` (must print `commit`); detach at and bind that exact HEAD.
-  Do not use `--track FETCH_HEAD`.
+  `git rev-parse --verify <full_pr_head_sha>^0` and `git cat-file -t <full_pr_head_sha>` (must print `commit`);
+  run `git switch --detach <full_pr_head_sha>`, bind that exact HEAD, and do not use `--track FETCH_HEAD`.
 - Ingest every review signal before explorer lanes: PR comments, review
   summaries, requested changes, bot findings, CI/check failures,
   mergeability/conflicts, stale branch/base drift, PR body claims, linked
