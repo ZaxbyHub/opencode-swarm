@@ -131,6 +131,42 @@ describe('activatePrWorkflow checkout preflight', () => {
 		});
 	});
 
+	test('re-samples terminal Git state while holding the checkout lock', async () => {
+		await initializeRepository();
+		const originalClassify = _test_exports.classifyPrWorkflowGitStateAsync;
+		let calls = 0;
+		_test_exports.classifyPrWorkflowGitStateAsync = async (root) => {
+			calls += 1;
+			if (calls === 1) return originalClassify(root);
+			return {
+				kind: 'recovery-required',
+				code: 'GIT_OPERATION_IN_PROGRESS',
+				retryable: false,
+				requiredAction: 'Resolve the raced Git operation.',
+				evidence: {
+					worktreeRoot: directory,
+					gitDir: path.join(directory, '.git'),
+					operations: ['merge'],
+					unmergedCodes: [],
+					paths: [],
+					trackedCount: 0,
+					untrackedCount: 0,
+					pathsTruncated: false,
+				},
+			};
+		};
+
+		await expect(
+			activatePrWorkflow(directory, 'preflight-race', 'PR_REVIEW', {
+				requireCheckoutPreflight: true,
+			}),
+		).rejects.toThrow(/GIT_OPERATION_IN_PROGRESS/);
+		expect(calls).toBe(2);
+		expect(
+			await readPrWorkflowGateState(directory, 'preflight-race'),
+		).toBeNull();
+	});
+
 	test('persists checkout recovery once and blocks non-recovery tools on retry', async () => {
 		await initializeRepository();
 		await activatePrWorkflow(directory, 'recovery-session', 'PR_REVIEW');

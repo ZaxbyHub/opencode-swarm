@@ -105,6 +105,8 @@ describe('prepare_pr_workflow_checkout', () => {
 			'prepare_pr_workflow_checkout',
 		);
 		expect(prepare_pr_workflow_checkout.args.paths).toBeDefined();
+		expect(prepare_pr_workflow_checkout.args.operation).toBeDefined();
+		expect(prepare_pr_workflow_checkout.args.stash_oid).toBeDefined();
 
 		await activatePrWorkflow(directory, SESSION_ID, 'PR_REVIEW');
 		await expect(
@@ -160,9 +162,9 @@ describe('prepare_pr_workflow_checkout', () => {
 		});
 		expect(renameAttempts).toBe(3);
 		expect(result.stash_oid).toMatch(/^[0-9a-f]{40,64}$/i);
-		expect(result.recovery).toContain(
-			`git stash apply --index ${result.stash_oid}`,
-		);
+		expect(result.recovery).toContain('operation=restore');
+		expect(result.recovery).toContain(`stash_oid=${result.stash_oid}`);
+		expect(result.recovery).not.toContain('git stash apply');
 		expect(
 			(
 				await expectGitSuccess([

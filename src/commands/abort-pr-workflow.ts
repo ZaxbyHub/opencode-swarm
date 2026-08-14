@@ -24,9 +24,9 @@ const USAGE = [
 	'Usage: /swarm abort-pr-workflow [PR_REVIEW|PR_FEEDBACK] <reason...>',
 	'',
 	'Clear an active PR_REVIEW or PR_FEEDBACK mechanical gate for the current session',
-	'and stop the auto-resume loop. This is the human-only FORCE escape hatch: it may',
-	'clear a BOUND gate (one whose PR head was successfully checked out) without a',
-	"recovery condition, which the agent's own recovery abort is refused for. Use when",
+	'and stop the auto-resume loop. This is the human-only FORCE escape hatch, usable',
+	'even when the architect cannot call its audited recovery abort. Both paths may clear',
+	'a BOUND gate after lanes settle; the force path does not require agent cooperation. Use when',
 	'a PR review or feedback workflow is unrecoverably stuck (e.g. the working tree',
 	'cannot reach the PR head, a compound shell command was rejected, or the wake',
 	'budget is suspended).',
@@ -84,7 +84,7 @@ export async function handleAbortPrWorkflowCommand(
 		const headLine = summary.prHeadSha
 			? ` (was bound to PR head ${summary.prHeadSha})`
 			: ' (was not bound to a PR head)';
-		return `Aborted active ${summary.mode} mechanical gate for session ${sessionID}${headLine} (force). The durable gate state has been cleared and the auto-resume loop will stop. An audit event was appended to .swarm/events.jsonl.`;
+		return `Aborted active ${summary.mode} mechanical gate for session ${sessionID}${headLine} (force). The durable gate state has been cleared and the auto-resume loop will stop. An audit event was appended to .swarm/events.jsonl. If checkout preparation preserved changes, continue with prepare_pr_workflow_checkout operation=restore (or follow the preserved receipt manually).`;
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		return `Error: ${message}\n\n${USAGE}`;

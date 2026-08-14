@@ -240,7 +240,7 @@ export const TOOL_METADATA = {
 	},
 	prepare_pr_workflow_checkout: {
 		description:
-			'preserve explicit dirty tracked files before an unbound PR workflow checkout with an auditable recovery receipt',
+			'prepare an auditable PR workflow checkout or restore its exact original branch/HEAD and preserved stash after terminal cleanup',
 		agents: ['architect'],
 	},
 	record_issue_publication: {
