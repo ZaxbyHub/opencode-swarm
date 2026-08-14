@@ -47,14 +47,11 @@ export async function evaluatePhaseCriticalDirectives(params: {
 	acceptViolations?: string[];
 }): Promise<DirectiveGateResult> {
 	try {
-		if (!params.sessionId?.trim() || !params.phaseLabel?.trim()) {
-			throw new Error(
-				'directive gate requires exact session and phase identity',
-			);
-		}
+		if (!params.phaseLabel?.trim())
+			throw new Error('directive gate requires exact phase identity');
 		const state = await queryLiveMemberships(params.directory, {
 			phase: params.phaseLabel,
-			session_id: params.sessionId,
+			session_id: params.sessionId?.trim() || undefined,
 			include_terminal: true,
 			include_phase_closed: false,
 		});
@@ -62,6 +59,12 @@ export async function evaluatePhaseCriticalDirectives(params: {
 		const criticals = state.memberships.filter(
 			(membership) => membership.critical,
 		);
+		// Missing session identity is harmless only when there is no durable
+		// critical obligation to attribute. Once any critical membership exists,
+		// accepting an unscoped terminal would risk cross-session satisfaction.
+		if (!params.sessionId?.trim() && criticals.length > 0) {
+			throw new Error('directive gate requires exact session identity');
+		}
 		if (criticals.length === 0) {
 			return {
 				blocked: false,

@@ -219,6 +219,20 @@ describe('evaluatePhaseCriticalDirectives V2 authority', () => {
 		});
 	});
 
+	it('allows a sessionless caller when no critical receipt obligation exists', async () => {
+		const result = await evaluatePhaseCriticalDirectives({
+			directory,
+			phaseLabel: PHASE,
+		});
+
+		expect(result).toEqual({
+			blocked: false,
+			unresolved: [],
+			overridden: [],
+			failedClosed: false,
+		});
+	});
+
 	it('does not let a force-closed prior lifecycle contaminate a later phase gate', async () => {
 		await display('trace-force-closed');
 		expect((await commitPhaseClosed(directory, PHASE)).ok).toBe(true);

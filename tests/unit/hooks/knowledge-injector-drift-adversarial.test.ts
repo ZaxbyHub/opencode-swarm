@@ -22,6 +22,7 @@ import type {
 // message. Fixtures set swarmState.activeAgent and stamp a consistent
 // sessionID on every message.
 import { swarmState } from '../../../src/state';
+import { installKnowledgeReceiptAuthorityStub } from '../../helpers/knowledge-receipt-authority.js';
 
 const SESSION_ID = 'drift-adv-session';
 
@@ -275,8 +276,10 @@ const realRecordKnowledgeEvent = injectorInternals.recordKnowledgeEvent;
 const realRecordKnowledgeShown = injectorInternals.recordKnowledgeShown;
 const realReadRecentEscalations = injectorInternals.readRecentEscalations;
 const realBuildEscalationBriefing = injectorInternals.buildEscalationBriefing;
+let restoreReceiptAuthority = () => {};
 
 afterEach(() => {
+	restoreReceiptAuthority();
 	injectorInternals.searchKnowledge = realSearchKnowledge;
 	injectorInternals.recordKnowledgeEvent = realRecordKnowledgeEvent;
 	injectorInternals.recordKnowledgeShown = realRecordKnowledgeShown;
@@ -291,6 +294,8 @@ function setSearchResults(results: RankedEntry[]): void {
 }
 
 function resetMocks(): void {
+	restoreReceiptAuthority =
+		installKnowledgeReceiptAuthorityStub(injectorInternals);
 	mock.clearAllMocks();
 	searchResults = [];
 	injectorInternals.searchKnowledge =

@@ -549,6 +549,7 @@ describe('phase_complete adversarial locking + path tests', () => {
 			expect(parsed.success).toBe(false);
 			expect(
 				parsed.reason === 'RETROSPECTIVE_MISSING' ||
+					parsed.reason === 'directive_gate_failed_closed' ||
 					parsed.message.includes('path traversal'),
 			).toBe(true);
 		});

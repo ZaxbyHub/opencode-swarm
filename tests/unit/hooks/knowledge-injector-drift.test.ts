@@ -13,11 +13,15 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 
 afterEach(() => {
+	restoreReceiptAuthority();
 	swarmState.activeAgent.clear();
 	mock.restore();
 });
 
-import { createKnowledgeInjectorHook } from '../../../src/hooks/knowledge-injector.js';
+import {
+	createKnowledgeInjectorHook,
+	_internals as injectorInternals,
+} from '../../../src/hooks/knowledge-injector.js';
 import type { RankedEntry } from '../../../src/hooks/knowledge-reader.js';
 import type {
 	KnowledgeConfig,
@@ -28,8 +32,15 @@ import type {
 // message. Fixtures set swarmState.activeAgent and stamp a consistent
 // sessionID on every message.
 import { swarmState } from '../../../src/state';
+import { installKnowledgeReceiptAuthorityStub } from '../../helpers/knowledge-receipt-authority.js';
 
 const SESSION_ID = 'drift-session';
+let restoreReceiptAuthority = () => {};
+
+beforeEach(() => {
+	restoreReceiptAuthority =
+		installKnowledgeReceiptAuthorityStub(injectorInternals);
+});
 
 // ============================================================================
 // Mocks Setup

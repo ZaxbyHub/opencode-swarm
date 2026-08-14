@@ -2676,6 +2676,17 @@ export async function queryHistoricalOutcomes(
 	);
 }
 
+/**
+ * Compact the authoritative receipt journal under its dedicated lock.
+ * Read-only queries intentionally never rewrite receipt state, so maintenance
+ * callers and focused recovery tests use this explicit mutation boundary.
+ */
+export async function compactKnowledgeReceiptLedger(
+	directory: string,
+): Promise<ReceiptLedgerResult<{ compacted: true }>> {
+	return runLocked(directory, undefined, async () => ({ compacted: true }));
+}
+
 async function phaseTransition(
 	directory: string,
 	phase: string,

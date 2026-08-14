@@ -33,6 +33,7 @@ import type {
 // message. Fixtures set swarmState.activeAgent and stamp a consistent
 // sessionID on every message.
 import { swarmState } from '../../../src/state';
+import { installKnowledgeReceiptAuthorityStub } from '../../helpers/knowledge-receipt-authority.js';
 
 const SESSION_ID = 'adv-session';
 
@@ -316,8 +317,11 @@ const realRecordKnowledgeEvent = injectorInternals.recordKnowledgeEvent;
 const realRecordKnowledgeShown = injectorInternals.recordKnowledgeShown;
 const mockRecordKnowledgeEvent = mock(async () => {});
 const mockRecordKnowledgeShown = mock(async () => {});
+let restoreReceiptAuthority = () => {};
 
 beforeEach(() => {
+	restoreReceiptAuthority =
+		installKnowledgeReceiptAuthorityStub(injectorInternals);
 	injectorInternals.recordKnowledgeEvent =
 		mockRecordKnowledgeEvent as typeof realRecordKnowledgeEvent;
 	injectorInternals.recordKnowledgeShown =
@@ -325,6 +329,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	restoreReceiptAuthority();
 	injectorInternals.recordKnowledgeEvent = realRecordKnowledgeEvent;
 	injectorInternals.recordKnowledgeShown = realRecordKnowledgeShown;
 	swarmState.activeAgent.clear();

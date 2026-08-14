@@ -2163,10 +2163,10 @@ export async function executePhaseComplete(
 						durableReceiptPhase.status,
 					))
 			) {
-				result.success = false;
-				result.status = 'incomplete';
-				result.message =
-					'Receipt lifecycle closure was withheld because durable plan state does not show the phase as complete; retry phase_complete.';
+				// The plan mutation result remains authoritative for this tool call.
+				// Withhold only the receipt phase_closed transition when the durable
+				// plan cannot confirm completion; keeping the receipt lifecycle open is
+				// fail-safe and can be reconciled by a later phase_complete or close.
 				warnings.push(
 					`Receipt phase-close commit withheld: durable phase ${phase} is not complete.`,
 				);

@@ -1052,6 +1052,16 @@ export async function runFinalizeStage(ctx: CloseStageContext): Promise<void> {
 					ctx.options.sessionID,
 				);
 			if (!intent.ok) {
+				// A direct `/swarm close` may not carry a host session ID. When the
+				// phase has no receipt membership at all, there is no receipt lifecycle
+				// to close and terminal plan persistence must continue. Ambiguous or
+				// unreadable receipt state still fails closed below.
+				if (
+					intent.detail ===
+					'no exact receipt lifecycle scope exists for phase closure'
+				) {
+					continue;
+				}
 				ctx.warnings.push(
 					`Receipt phase-close intent failed for phase ${phase.id}: ${intent.detail}. Plan terminalization was not attempted.`,
 				);

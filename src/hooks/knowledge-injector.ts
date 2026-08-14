@@ -527,9 +527,12 @@ export async function injectForDelegate(
 				ranks[e.id] = idx + 1;
 				scores[e.id] = e.finalScore;
 			});
-			const cohortId = await ensureCohortIdCached(directory, sessionId);
-			const sourceLinkId = readLinkPointer(directory)?.linkId;
-			const membership = await commitDisplayedMembership(directory, {
+			const cohortId = await _internals.ensureCohortIdCached(
+				directory,
+				sessionId,
+			);
+			const sourceLinkId = _internals.readLinkPointer(directory)?.linkId;
+			const membership = await _internals.commitDisplayedMembership(directory, {
 				trace_id: search.trace_id,
 				session_id: sessionId,
 				exposure_kind: 'delegate_directive',
@@ -613,7 +616,7 @@ export async function injectForDelegate(
 		// Empty retrieval uses a trace-level V2 lifecycle without inventing a pair.
 		if (capped.length === 0) {
 			try {
-				const empty = await commitEmptyRetrieval(directory, {
+				const empty = await _internals.commitEmptyRetrieval(directory, {
 					trace_id: search.trace_id,
 					session_id: sessionId,
 					phase: params.phase,
@@ -1072,7 +1075,7 @@ export function createKnowledgeInjectorHook(
 				// Same context, cached text available — re-inject (handles compaction).
 				let cacheVerifiable = cachedShownIds.length === 0;
 				if (cachedShownIds.length > 0 && cachedTraceId) {
-					const live = await queryLiveMemberships(directory, {
+					const live = await _internals.queryLiveMemberships(directory, {
 						session_id: sessionId,
 						include_terminal: false,
 					});
@@ -1187,7 +1190,7 @@ export function createKnowledgeInjectorHook(
 					sessionId: sessionID,
 					phase: currentPhase,
 				});
-				const empty = await commitEmptyRetrieval(directory, {
+				const empty = await _internals.commitEmptyRetrieval(directory, {
 					trace_id: search.trace_id,
 					session_id: sessionId,
 					phase: retrievalCtx.currentPhase,
@@ -1419,25 +1422,31 @@ export function createKnowledgeInjectorHook(
 				// Issue #2031: lineage is display-time truth. Capture it on the
 				// membership before the directive reaches chat so a later architect
 				// application terminal remains eligible for cohort-scoped promotion.
-				const cohortId = await ensureCohortIdCached(directory, sessionId);
-				const sourceLinkId = readLinkPointer(directory)?.linkId;
-				const membership = await commitDisplayedMembership(directory, {
-					trace_id: search.trace_id,
-					session_id: sessionId,
-					exposure_kind: 'architect_directive',
-					phase: retrievalCtx.currentPhase,
-					task_id: retrievalCtx.taskId,
-					agent: 'architect',
-					cohort_id: cohortId,
-					source_link_id: sourceLinkId,
-					grace_days: config.receipt_close_grace_days,
-					entries: cachedShownIds.map((id, index) => ({
-						entry_id: id,
-						critical: criticalIds.includes(id),
-						rank: index + 1,
-						score: byId.get(id)?.finalScore,
-					})),
-				});
+				const cohortId = await _internals.ensureCohortIdCached(
+					directory,
+					sessionId,
+				);
+				const sourceLinkId = _internals.readLinkPointer(directory)?.linkId;
+				const membership = await _internals.commitDisplayedMembership(
+					directory,
+					{
+						trace_id: search.trace_id,
+						session_id: sessionId,
+						exposure_kind: 'architect_directive',
+						phase: retrievalCtx.currentPhase,
+						task_id: retrievalCtx.taskId,
+						agent: 'architect',
+						cohort_id: cohortId,
+						source_link_id: sourceLinkId,
+						grace_days: config.receipt_close_grace_days,
+						entries: cachedShownIds.map((id, index) => ({
+							entry_id: id,
+							critical: criticalIds.includes(id),
+							rank: index + 1,
+							score: byId.get(id)?.finalScore,
+						})),
+					},
+				);
 				if (
 					!membership.ok ||
 					membership.memberships.some((item) => item.terminal)
@@ -1557,6 +1566,11 @@ export const _internals: {
 	buildEscalationBriefing: typeof buildEscalationBriefing;
 	recordLessonsShown: typeof recordLessonsShown;
 	confirmEntriesPhase: typeof confirmEntriesPhase;
+	commitDisplayedMembership: typeof commitDisplayedMembership;
+	commitEmptyRetrieval: typeof commitEmptyRetrieval;
+	queryLiveMemberships: typeof queryLiveMemberships;
+	ensureCohortIdCached: typeof ensureCohortIdCached;
+	readLinkPointer: typeof readLinkPointer;
 } = {
 	searchKnowledge,
 	recordKnowledgeEvent,
@@ -1565,6 +1579,11 @@ export const _internals: {
 	buildEscalationBriefing,
 	recordLessonsShown,
 	confirmEntriesPhase,
+	commitDisplayedMembership,
+	commitEmptyRetrieval,
+	queryLiveMemberships,
+	ensureCohortIdCached,
+	readLinkPointer,
 };
 
 /**

@@ -182,3 +182,23 @@ test('does not reconcile phase_closed when durable plan persistence fails', asyn
 		'Failed to persist terminal plan state: disk unavailable',
 	);
 });
+
+test('terminalizes a plan when no receipt lifecycle exists to close', async () => {
+	const persist = mock(async () => {});
+	closeReceiptLifecycleInternals.recordPhaseCloseIntent = mock(async () => ({
+		ok: false,
+		code: 'trace_not_found',
+		detail: 'no exact receipt lifecycle scope exists for phase closure',
+	})) as never;
+	closeInternals.closePlanTerminalState = persist as never;
+	closeReceiptLifecycleInternals.reconcilePhaseClose = mock(async () => ({
+		ok: true,
+		reconciled: false,
+	}));
+	const ctx = makeContext();
+
+	await runFinalizeStage(ctx);
+
+	expect(persist).toHaveBeenCalledTimes(1);
+	expect(ctx.warnings).toEqual([]);
+});

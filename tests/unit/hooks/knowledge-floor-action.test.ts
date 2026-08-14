@@ -18,14 +18,19 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-
+import {
+	commitDisplayedMembership,
+	validateAndCommitTerminalBatch,
+} from '../../../src/hooks/knowledge-receipt-ledger.js';
 import {
 	bumpKnowledgeConfidenceBatch,
 	resolveSwarmKnowledgePath,
 } from '../../../src/hooks/knowledge-store.js';
 
 function makeTempDir(): string {
-	return realpathSync(mkdtempSync(join(tmpdir(), 'floor-action-test-')));
+	const dir = realpathSync(mkdtempSync(join(tmpdir(), 'floor-action-test-')));
+	mkdirSync(join(dir, '.git'));
+	return dir;
 }
 
 function eventsPath(dir: string): string {
@@ -54,13 +59,47 @@ function makeReceiptEvent(o: {
 	});
 }
 
-function writeEvents(
+async function writeEvents(
 	dir: string,
 	events: Array<{ type: string; knowledge_id: string; timestamp?: string }>,
-): void {
+): Promise<void> {
 	const fp = ensureSwarmDir(dir);
 	const content = events.map((e) => makeReceiptEvent(e)).join('\n') + '\n';
 	writeFileSync(fp, content, 'utf-8');
+	for (const [index, event] of events.entries()) {
+		if (
+			!['applied', 'ignored', 'violated', 'contradicted', 'n_a'].includes(
+				event.type,
+			)
+		) {
+			continue;
+		}
+		const traceId = `floor-${event.knowledge_id}-${index}`;
+		const displayed = await commitDisplayedMembership(dir, {
+			trace_id: traceId,
+			session_id: 'test-session',
+			agent: 'test-agent',
+			entries: [{ entry_id: event.knowledge_id, critical: false }],
+		});
+		if (!displayed.ok) throw new Error(displayed.detail);
+		const terminal = await validateAndCommitTerminalBatch(dir, {
+			trace_id: traceId,
+			session_id: 'test-session',
+			agent: 'test-agent',
+			items: [
+				{
+					entry_id: event.knowledge_id,
+					outcome: event.type as
+						| 'applied'
+						| 'ignored'
+						| 'violated'
+						| 'contradicted'
+						| 'n_a',
+				},
+			],
+		});
+		if (!terminal.ok) throw new Error(terminal.detail);
+	}
 }
 
 function writeEntry(
@@ -123,7 +162,7 @@ describe('G2 confidence-floor action (#1715)', () => {
 		const id = randomUUID();
 		writeEntry(dir, { id, confidence: 0.15 }); // one small decay will clamp to 0.1
 		// 4 violated events → net-negative signal, ≥3 outcomes (min default)
-		writeEvents(dir, [
+		await writeEvents(dir, [
 			{ type: 'violated', knowledge_id: id },
 			{ type: 'violated', knowledge_id: id },
 			{ type: 'violated', knowledge_id: id },
@@ -140,7 +179,7 @@ describe('G2 confidence-floor action (#1715)', () => {
 		const id = randomUUID();
 		writeEntry(dir, { id, confidence: 0.15 });
 		// only 2 violated → below default min 3
-		writeEvents(dir, [
+		await writeEvents(dir, [
 			{ type: 'violated', knowledge_id: id },
 			{ type: 'violated', knowledge_id: id },
 		]);
@@ -154,7 +193,7 @@ describe('G2 confidence-floor action (#1715)', () => {
 		const id = randomUUID();
 		writeEntry(dir, { id, confidence: 0.15 });
 		// 5 applied vs 1 violated → net-positive
-		writeEvents(dir, [
+		await writeEvents(dir, [
 			{ type: 'applied', knowledge_id: id },
 			{ type: 'applied', knowledge_id: id },
 			{ type: 'applied', knowledge_id: id },
@@ -196,7 +235,7 @@ describe('G2 confidence-floor action (#1715)', () => {
 	test('floorAction:"none" preserves legacy dead-end behavior (no flag)', async () => {
 		const id = randomUUID();
 		writeEntry(dir, { id, confidence: 0.15 });
-		writeEvents(dir, [
+		await writeEvents(dir, [
 			{ type: 'violated', knowledge_id: id },
 			{ type: 'violated', knowledge_id: id },
 			{ type: 'violated', knowledge_id: id },
@@ -213,7 +252,7 @@ describe('G2 confidence-floor action (#1715)', () => {
 	test('idempotent: re-running the same delta re-sets the flag harmlessly', async () => {
 		const id = randomUUID();
 		writeEntry(dir, { id, confidence: 0.15 });
-		writeEvents(dir, [
+		await writeEvents(dir, [
 			{ type: 'violated', knowledge_id: id },
 			{ type: 'violated', knowledge_id: id },
 			{ type: 'violated', knowledge_id: id },
@@ -231,7 +270,7 @@ describe('G2 confidence-floor action (#1715)', () => {
 		const id = randomUUID();
 		writeEntry(dir, { id, confidence: 0.15 });
 		// 4 violated events → net-negative signal, ≥3 outcomes (min default)
-		writeEvents(dir, [
+		await writeEvents(dir, [
 			{ type: 'violated', knowledge_id: id },
 			{ type: 'violated', knowledge_id: id },
 			{ type: 'violated', knowledge_id: id },

@@ -5,6 +5,7 @@ import {
 	_internals,
 	commitDisplayedMembership,
 	commitEmptyRetrieval,
+	compactKnowledgeReceiptLedger,
 	queryLiveMemberships,
 	type ReceiptLedgerResult,
 	recordPhaseCloseIntent,
@@ -115,7 +116,7 @@ describe('knowledge receipt checkpoint audit and empty identity', () => {
 		unwrap(await recordPhaseCloseIntent(directory, 'audit-phase'));
 
 		_internals.maxJournalRecords = 1;
-		unwrap(await queryLiveMemberships(directory));
+		unwrap(await compactKnowledgeReceiptLedger(directory));
 		const rows = journalRows(directory);
 		expect(rows).toHaveLength(1);
 		const checkpoint = rows[0];

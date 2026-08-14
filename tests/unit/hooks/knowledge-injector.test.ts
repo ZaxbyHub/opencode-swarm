@@ -21,6 +21,7 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 
 afterEach(() => {
+	restoreReceiptAuthority();
 	injectorInternals.recordKnowledgeEvent = realRecordKnowledgeEvent;
 	injectorInternals.recordKnowledgeShown = realRecordKnowledgeShown;
 	swarmState.activeAgent.clear();
@@ -41,6 +42,7 @@ import type {
 // message (the SDK Message union has no system variant). Fixtures set
 // swarmState.activeAgent and stamp a consistent sessionID on every message.
 import { swarmState } from '../../../src/state';
+import { installKnowledgeReceiptAuthorityStub } from '../../helpers/knowledge-receipt-authority.js';
 
 const SESSION_ID = 'ki-test-session';
 
@@ -57,8 +59,11 @@ const mockRecordKnowledgeEvent = mock(async () => {});
 const mockRecordKnowledgeShown = mock(async () => {});
 const realRecordKnowledgeEvent = injectorInternals.recordKnowledgeEvent;
 const realRecordKnowledgeShown = injectorInternals.recordKnowledgeShown;
+let restoreReceiptAuthority = () => {};
 
 beforeEach(() => {
+	restoreReceiptAuthority =
+		installKnowledgeReceiptAuthorityStub(injectorInternals);
 	injectorInternals.recordKnowledgeEvent =
 		mockRecordKnowledgeEvent as typeof realRecordKnowledgeEvent;
 	injectorInternals.recordKnowledgeShown =
