@@ -21,13 +21,11 @@ Read and follow `../../../.opencode/skills/swarm-pr-review/SKILL.md` as the cano
   separated sequential role passes (candidates → reviewer → critic) only when
   the session genuinely lacks a subagent mechanism, and disclose that
   procedural independence in the provenance.
-- `PR_REVIEW` is read-only with respect to the PR branch: fetch refs, inspect
-  metadata, and check out the PR head after verifying a clean working tree,
-  but do not fix code, resolve conflicts, commit, push, rebase, or reset.
+- `PR_REVIEW` is read-only with respect to the PR branch: fetch refs, inspect metadata,
+  check out its head after verifying a clean tree; do not fix, commit, push, rebase, or reset.
 - Before dispatching explorer lanes, fetch the PR head and verify it with
-  `git rev-parse --verify <full_pr_head_sha>^0` followed by
-  `git cat-file -t <full_pr_head_sha>` (which must print `commit`); run
-  `git switch --detach <full_pr_head_sha>`, confirm and bind that exact HEAD.
+  `git rev-parse --verify <full_pr_head_sha>^0` and `git cat-file -t
+  <full_pr_head_sha>` (must print `commit`); detach at and bind that exact HEAD.
   Do not use `--track FETCH_HEAD`.
 - Ingest every review signal before explorer lanes: PR comments, review
   summaries, requested changes, bot findings, CI/check failures,
@@ -57,6 +55,5 @@ Read and follow `../../../.opencode/skills/swarm-pr-review/SKILL.md` as the cano
   whose `owned_workflow_lanes` partition all six dimensions at tiers S/M —
   the controller computes the tier from the bound diff. While it is active a
   different dispatch path is not equivalent — never bypass the controller.
-- If actionable findings remain, write the canonical handoff and ask to continue with
-  `/swarm pr-feedback <PR_URL> continue from .swarm/pr-review/<run_id>/feedback-handoff.json`.
+- If actionable findings remain, write the canonical handoff and ask to continue with `/swarm pr-feedback <PR_URL> continue from .swarm/pr-review/<run_id>/feedback-handoff.json`.
   On Profile A this is a mechanical transition; preserve finding IDs and provenance.

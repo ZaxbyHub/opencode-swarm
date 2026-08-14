@@ -865,7 +865,18 @@ async function countOutstandingReceipts(
 	directory: string,
 	sessionID: string,
 ): Promise<number> {
-	return (await listCheckoutReceiptPaths(directory, sessionID)).length;
+	const receipts = await listCheckoutReceiptPaths(directory, sessionID);
+	if (receipts.length === 0) return 0;
+	let activeStashOids: Set<string>;
+	try {
+		activeStashOids = await readCurrentStashOids(directory);
+	} catch {
+		throw new Error(
+			'BLOCKED: unable to inspect checkout-preparation receipts safely',
+		);
+	}
+	return receipts.filter((receipt) => activeStashOids.has(receipt.stashOid))
+		.length;
 }
 
 async function readCurrentStashOids(directory: string): Promise<Set<string>> {
