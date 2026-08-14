@@ -9,6 +9,7 @@ import {
 	activatePrWorkflow,
 	bindPrWorkflowHead,
 	type PrWorkflowCheckoutMutationTimeoutError,
+	withInactivePrWorkflowCheckoutRestoreLock,
 	withPrWorkflowCheckoutMutationLock,
 	withPrWorkflowCheckoutPreparationLock,
 } from '../../../src/hooks/pr-workflow-gate';
@@ -310,6 +311,40 @@ describe('project-scoped checkout mutation lock', () => {
 			),
 		).resolves.toBe('second-entered');
 		await expect(fs.stat(lockPath)).rejects.toMatchObject({ code: 'ENOENT' });
+	});
+
+	test('serializes an inactive restore window against same-session activation', async () => {
+		let releaseRestore!: () => void;
+		let restoreEntered!: () => void;
+		const entered = new Promise<void>((resolve) => {
+			restoreEntered = resolve;
+		});
+		const release = new Promise<void>((resolve) => {
+			releaseRestore = resolve;
+		});
+		const restore = withInactivePrWorkflowCheckoutRestoreLock(
+			directory,
+			'restore-race',
+			async () => {
+				restoreEntered();
+				await release;
+			},
+		);
+		await entered;
+		let activated = false;
+		const activation = activatePrWorkflow(
+			directory,
+			'restore-race',
+			'PR_REVIEW',
+		).then(() => {
+			activated = true;
+		});
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(activated).toBe(false);
+		releaseRestore();
+		await Promise.all([restore, activation]);
+		expect(activated).toBe(true);
 	});
 
 	test('rejects a live cross-process contender before entering its action', async () => {

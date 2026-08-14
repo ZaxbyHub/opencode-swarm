@@ -105,6 +105,8 @@ describe('prepare_pr_workflow_checkout', () => {
 			'prepare_pr_workflow_checkout',
 		);
 		expect(prepare_pr_workflow_checkout.args.paths).toBeDefined();
+		expect(prepare_pr_workflow_checkout.args.operation).toBeDefined();
+		expect(prepare_pr_workflow_checkout.args.stash_oid).toBeDefined();
 
 		await activatePrWorkflow(directory, SESSION_ID, 'PR_REVIEW');
 		await expect(

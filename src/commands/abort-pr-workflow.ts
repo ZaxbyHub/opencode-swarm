@@ -67,7 +67,7 @@ export async function handleAbortPrWorkflowCommand(
 		const headLine = summary.prHeadSha
 			? ` (was bound to PR head ${summary.prHeadSha})`
 			: ' (was not bound to a PR head)';
-		return `Aborted active ${summary.mode} mechanical gate for session ${sessionID}${headLine}. The durable gate state has been cleared and the auto-resume loop will stop. An audit event was appended to .swarm/events.jsonl.`;
+		return `Aborted active ${summary.mode} mechanical gate for session ${sessionID}${headLine}. The durable gate state has been cleared and the auto-resume loop will stop. An audit event was appended to .swarm/events.jsonl. If checkout preparation preserved changes, continue with prepare_pr_workflow_checkout operation=restore (or follow the preserved receipt manually).`;
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		return `Error: ${message}\n\n${USAGE}`;

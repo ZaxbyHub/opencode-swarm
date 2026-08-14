@@ -176,7 +176,8 @@ tree:
   before binding (Profile A). Omit `paths` to auto-discover and atomically
   preserve every dirty path, including untracked files; pass explicit `paths`
   only for an exact bounded tracked-file set. It creates an auditable stash
-  receipt and recovery command. Do not issue `git stash` through shell.
+  receipt containing the original branch/HEAD and recovery command. Do not
+  issue `git stash` through shell.
   Without the controller, surface dirty state to the user or abort the checkout
   — do not blind-stash.
 - Treat `recovery-required` and `indeterminate` controller results as terminal
@@ -872,7 +873,13 @@ open. While the gate remains active, the runtime prepends a workflow-active
 banner to architect text (the model's text is preserved below it) and normally re-wakes an
 idle parent session. A user interruption pauses automatic wakes until a later
 explicit user turn settles; the durable gate remains available to continue or
-abort.
+abort. When the terminal response reports `checkout_restore_required`, call
+`prepare_pr_workflow_checkout` with `operation: "restore"` before returning to
+the user. If `checkout_restore_receipts` lists multiple entries, restore each
+using its exact `stash_oid`. The restore refuses dirty, ambiguous, missing-stash,
+invalid-receipt, or drifted state without reset/clean and preserves recovery
+evidence on failure. Legacy receipts derive their original commit from the
+preserved stash and select a uniquely matching local branch when available.
 
 Under Profiles B/C, no mechanical gate exists: emit the final response only
 after the closure ledger accounts for every original item and the pushed
@@ -903,5 +910,7 @@ arming you MUST complete via `complete_pr_workflow` (or push the bound
 commit first), because aborting an armed gate would drop the immutable-
 commit binding and leave a half-published commit. The user can also run
 `/swarm abort-pr-workflow` once the wake budget suspends. Abort is a
-recovery tool, not a gate-skip shortcut. On Profiles B/C there is no durable
+recovery tool, not a gate-skip shortcut. When abort reports
+`checkout_restore_required`, call `prepare_pr_workflow_checkout` with
+`operation: "restore"` before returning. On Profiles B/C there is no durable
 gate to abort: report the blocker to the user and stop.

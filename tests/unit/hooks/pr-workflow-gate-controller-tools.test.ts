@@ -144,4 +144,72 @@ describe('abort_pr_workflow controller-tool gating (defense in depth)', () => {
 			}),
 		).rejects.toThrow(/git switch --detach <full_pr_head_sha>/i);
 	});
+
+	test('gh api --jq may contain a literal pipe inside the quoted jq expression', async () => {
+		await activatePrWorkflow(directory, 'jq-pipe', 'PR_REVIEW');
+		await expect(
+			enforcePrWorkflowToolBefore(directory, 'jq-pipe', 'shell', {
+				command:
+					'gh api repos/octo-org/octo-repo/pulls/2160 --jq \'.[] | select(.state == "OPEN")\'',
+			}),
+		).resolves.toBeUndefined();
+		await expect(
+			enforcePrWorkflowToolBefore(directory, 'jq-pipe', 'shell', {
+				command:
+					'gh api repos/octo-org/octo-repo/pulls/2160 --jq ".[] | select(.state == \\"OPEN\\")"',
+			}),
+		).resolves.toBeUndefined();
+	});
+
+	test('rejects a real outer pipe even when gh api --jq is otherwise present', async () => {
+		await activatePrWorkflow(directory, 'jq-outer-pipe', 'PR_REVIEW');
+		await expect(
+			enforcePrWorkflowToolBefore(directory, 'jq-outer-pipe', 'shell', {
+				command:
+					'gh api repos/octo-org/octo-repo/pulls/2160 --jq \'.[] | select(.state == "OPEN")\' | cat',
+			}),
+		).rejects.toThrow('compound-syntax');
+	});
+
+	test('rejects unmatched quotes and command substitution in gh api --jq', async () => {
+		await activatePrWorkflow(directory, 'jq-bad-syntax', 'PR_REVIEW');
+		await expect(
+			enforcePrWorkflowToolBefore(directory, 'jq-bad-syntax', 'shell', {
+				command:
+					'gh api repos/octo-org/octo-repo/pulls/2160 --jq \'.[] | select(.state == "OPEN")',
+			}),
+		).rejects.toThrow('unmatched quote');
+		await expect(
+			enforcePrWorkflowToolBefore(directory, 'jq-bad-syntax', 'shell', {
+				command:
+					'gh api repos/octo-org/octo-repo/pulls/2160 --jq ".[] | select(.state == OPEN && $(touch pwned))"',
+			}),
+		).rejects.toThrow('command-substitution syntax');
+	});
+
+	test('rejects mutating gh api forms even when jq syntax is otherwise quoted', async () => {
+		await activatePrWorkflow(directory, 'jq-mutating', 'PR_REVIEW');
+		await expect(
+			enforcePrWorkflowToolBefore(directory, 'jq-mutating', 'shell', {
+				command:
+					'gh api -X POST repos/octo-org/octo-repo/pulls/2160 --jq \'.[] | select(.state == "OPEN")\'',
+			}),
+		).rejects.toThrow(/read-only|unlisted gh form/i);
+	});
+
+	test('the jq exception does not widen any other shell control syntax', async () => {
+		await activatePrWorkflow(directory, 'jq-narrow-only', 'PR_REVIEW');
+		for (const command of [
+			'gh api repos/octo/repo --jq ".[] | select(.ok)" && git status',
+			'gh api repos/octo/repo --jq ".[] | select(.ok); halt"',
+			'gh api repos/octo/repo --jq ".[] | select(.ok)" > result.json',
+			'gh api repos/octo/repo --jq ".[] | select(.ok)" "also | quoted"',
+		]) {
+			await expect(
+				enforcePrWorkflowToolBefore(directory, 'jq-narrow-only', 'shell', {
+					command,
+				}),
+			).rejects.toThrow(/compound|literal `\|`/i);
+		}
+	});
 });

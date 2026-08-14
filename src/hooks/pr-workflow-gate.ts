@@ -6,6 +6,7 @@ import { z } from 'zod';
 import {
 	analyzeCandidateFields,
 	CANDIDATE_HEADERS,
+	type CandidateArtifactRepairKind,
 	type CandidateSeverity,
 	CLEAN_TEMPLATES,
 	candidateHeaderFamily,
@@ -1121,6 +1122,34 @@ export async function withPrWorkflowCheckoutPreparationLock<T>(
 					return persisted;
 				},
 			});
+		}),
+	);
+}
+
+/**
+ * Serialize post-terminal checkout restoration against both checkout mutations
+ * and same-session gate activation. Holding the session-state lock while the
+ * caller restores makes the inactive-gate check atomic with respect to a new
+ * activatePrWorkflow/persistState call.
+ */
+export async function withInactivePrWorkflowCheckoutRestoreLock<T>(
+	directory: string,
+	sessionID: string,
+	action: () => Promise<T>,
+): Promise<T> {
+	const normalizedSessionID = normalizeSessionID(sessionID);
+	return withPrWorkflowCheckoutMutationLock(directory, async () =>
+		withSessionStateMutation(directory, normalizedSessionID, async () => {
+			const state = await readPrWorkflowGateStateFromDisk(
+				directory,
+				normalizedSessionID,
+			);
+			if (state) {
+				throw new Error(
+					'BLOCKED: checkout restoration is allowed only after complete_pr_workflow or abort_pr_workflow clears the active gate',
+				);
+			}
+			return action();
 		}),
 	);
 }
@@ -5637,7 +5666,7 @@ function isAllowedPrWorkflowReadOnlyShell(
 	// individual command. This deliberately fails closed for unknown syntax.
 	// Runs against the post-wrapper-strip remainder (`inner`) so a chained
 	// command hidden after the tolerated `cd <dir> &&` wrapper is still caught.
-	if (/[\r\n;&|<>`]/.test(inner) || /\$\(|@\(/.test(inner)) return false;
+	if (hasUnsafeShellControlSyntax(command)) return false;
 
 	// A stripped `cd <dir> &&` prefix must never smuggle a state transition past
 	// the bare-form requirement those verbs carry (mirror of the `git -C` ban,
@@ -5701,9 +5730,9 @@ function describeBlockedPrReviewShellCommand(
 	const pointer =
 		' Observe HEAD/branch/dirty/remotes/gate state read-only with the pr_workflow_status tool.';
 	let detail: string;
-	if (/[\r\n;&|<>`]/.test(inner) || /\$\(|@\(/.test(inner)) {
-		detail =
-			'Reason: compound-syntax (;, &&, |, <, >, backtick, or $()/@()). Run ONE command per call; a single leading `cd <dir> &&` and a trailing `2>&1` are tolerated for reads only.';
+	const syntaxViolation = describeShellSyntaxViolation(command);
+	if (syntaxViolation) {
+		detail = syntaxViolation;
 	} else if (
 		strippedCdPrefix &&
 		(/^git (?:fetch|checkout|switch|branch)(?:\s|$)/i.test(normalized) ||
@@ -5739,8 +5768,150 @@ function describeBlockedPrReviewShellCommand(
 	return detail + pointer;
 }
 
+type PrWorkflowShellSyntaxReason =
+	| 'compound-syntax'
+	| 'unmatched-quote'
+	| 'command-substitution'
+	| 'gh-api-jq-pipe';
+
+interface PrWorkflowShellSyntaxVerdict {
+	unsafe: boolean;
+	reason: PrWorkflowShellSyntaxReason | null;
+}
+
+interface PrWorkflowShellToken {
+	value: string;
+	quoted: boolean;
+}
+
+function classifyPrWorkflowShellSyntax(
+	command: string,
+): PrWorkflowShellSyntaxVerdict {
+	const { normalized: inner } = normalizePrWorkflowShellCommand(command);
+	const compact = inner.replace(/\s+/g, ' ').trim();
+	if (!compact) return { unsafe: true, reason: 'compound-syntax' };
+	// Preserve the existing fail-closed treatment for every shell control form
+	// except the one narrowly admitted literal: `|` inside a quoted gh api --jq
+	// value. Quoting does not widen semicolons, redirection, interpolation, or
+	// command substitution.
+	if (/\$\(|@\(/.test(inner)) {
+		return { unsafe: true, reason: 'command-substitution' };
+	}
+	if (/[\r\n;&<>`]/.test(inner)) {
+		return { unsafe: true, reason: 'compound-syntax' };
+	}
+	const tokens: PrWorkflowShellToken[] = [];
+	let current = '';
+	let quoted = false;
+	let quote: "'" | '"' | null = null;
+
+	const flush = (): void => {
+		if (current.length > 0 || quoted) {
+			tokens.push({ value: current, quoted });
+		}
+		current = '';
+		quoted = false;
+		quote = null;
+	};
+
+	for (let index = 0; index < inner.length; index += 1) {
+		const ch = inner[index];
+		if (quote === null) {
+			if (/\s/.test(ch)) {
+				flush();
+				continue;
+			}
+			if (ch === "'" || ch === '"') {
+				quoted = true;
+				quote = ch;
+				continue;
+			}
+			if (ch === ';' || ch === '<' || ch === '>' || ch === '`' || ch === '|') {
+				return { unsafe: true, reason: 'compound-syntax' };
+			}
+			if (ch === '$' && inner[index + 1] === '(') {
+				return { unsafe: true, reason: 'command-substitution' };
+			}
+			if (ch === '@' && inner[index + 1] === '(') {
+				return { unsafe: true, reason: 'command-substitution' };
+			}
+			current += ch;
+			continue;
+		}
+
+		if (quote === "'") {
+			if (ch === "'") {
+				quote = null;
+				continue;
+			}
+			current += ch;
+			continue;
+		}
+
+		if (ch === '"') {
+			quote = null;
+			continue;
+		}
+		if (
+			ch === '\\' &&
+			(inner[index + 1] === '"' || inner[index + 1] === '\\')
+		) {
+			current += inner[index + 1];
+			index += 1;
+			continue;
+		}
+		if (ch === '`') {
+			return { unsafe: true, reason: 'command-substitution' };
+		}
+		if (ch === '$' && inner[index + 1] === '(') {
+			return { unsafe: true, reason: 'command-substitution' };
+		}
+		if (ch === '@' && inner[index + 1] === '(') {
+			return { unsafe: true, reason: 'command-substitution' };
+		}
+		current += ch;
+	}
+
+	if (quote !== null) {
+		return { unsafe: true, reason: 'unmatched-quote' };
+	}
+	flush();
+
+	const pipeTokens = tokens.filter((token) => token.value.includes('|'));
+	if (pipeTokens.length === 0) return { unsafe: false, reason: null };
+	if (pipeTokens.length !== 1 || !pipeTokens[0].quoted) {
+		return { unsafe: true, reason: 'gh-api-jq-pipe' };
+	}
+	const quotedPipeToken = pipeTokens[0];
+	if (!/^gh\s+api(?:\s|$)/i.test(compact)) {
+		return { unsafe: true, reason: 'gh-api-jq-pipe' };
+	}
+	for (let index = 0; index < tokens.length; index += 1) {
+		const token = tokens[index];
+		if (token.value === '--jq' && tokens[index + 1] === quotedPipeToken) {
+			return { unsafe: false, reason: null };
+		}
+	}
+	return { unsafe: true, reason: 'gh-api-jq-pipe' };
+}
+
 function hasUnsafeShellControlSyntax(command: string): boolean {
-	return /[;&|<>`\r\n]/.test(command) || /\$\(/.test(command);
+	return classifyPrWorkflowShellSyntax(command).unsafe;
+}
+
+function describeShellSyntaxViolation(command: string): string | null {
+	const verdict = classifyPrWorkflowShellSyntax(command);
+	if (!verdict.unsafe) return null;
+	switch (verdict.reason) {
+		case 'unmatched-quote':
+			return 'Reason: unmatched quote in the shell command. Close the quote and retry with a single read-only command.';
+		case 'command-substitution':
+			return 'Reason: command-substitution syntax ($() or @()) is not allowed in this read-only gate.';
+		case 'gh-api-jq-pipe':
+			return 'Reason: literal `|` is only allowed inside a quoted `gh api --jq` value; outside that shape it is treated as compound shell syntax.';
+		default:
+			return 'Reason: compound-syntax (;, &&, |, <, >, backtick, or $()/@()). Run ONE command per call; a single leading `cd <dir> &&` and a trailing `2>&1` are tolerated for reads only.';
+	}
 }
 
 function isSafeStandaloneGitCommit(command: string): boolean {
@@ -8165,11 +8336,12 @@ interface PrReviewDiscoveryCoverageAnalysis {
 	evidence: string | null;
 	issues: string[];
 	/**
-	 * True when coverage required a synthesized canonical header. Surfaced so a
-	 * repaired artifact is auditable rather than silently indistinguishable from
-	 * a well-formed one.
+	 * True when coverage required any explicit normalization repair. Surfaced so
+	 * a repaired artifact is auditable rather than silently indistinguishable
+	 * from a well-formed one.
 	 */
 	salvaged: boolean;
+	repairKinds: readonly CandidateArtifactRepairKind[];
 	failurePredicate?: Extract<
 		PrReviewLaneValidationPredicate,
 		'discovery.header' | 'discovery.row' | 'discovery.coverage'
@@ -8191,7 +8363,8 @@ function analyzePrReviewDiscoveryArtifact(
 	const issues: string[] = [];
 	const normalized = normalizeCandidateArtifact(text, fallbackFamily);
 	const canonicalText = normalized.text;
-	const salvaged = normalized.synthesizedHeader;
+	const repairKinds = normalized.repairKinds;
+	const salvaged = repairKinds.length > 0;
 	const header = selectCandidateHeader(canonicalText.split(/\r?\n/));
 	if (
 		header === null ||
@@ -8207,6 +8380,7 @@ function analyzePrReviewDiscoveryArtifact(
 			evidence: null,
 			issues,
 			salvaged,
+			repairKinds,
 			failurePredicate: 'discovery.header',
 		};
 	}
@@ -8274,6 +8448,7 @@ function analyzePrReviewDiscoveryArtifact(
 			evidence: null,
 			issues,
 			salvaged,
+			repairKinds,
 			failurePredicate: 'discovery.row',
 		};
 	}
@@ -8298,6 +8473,7 @@ function analyzePrReviewDiscoveryArtifact(
 			].join('\0'),
 			issues,
 			salvaged,
+			repairKinds,
 		};
 	}
 	const clean = parsed.clean_attestation;
@@ -8312,6 +8488,7 @@ function analyzePrReviewDiscoveryArtifact(
 			evidence: `${clean.coverage_scope}\0${clean.evidence}`,
 			issues,
 			salvaged,
+			repairKinds,
 		};
 	}
 	return {
@@ -8319,6 +8496,7 @@ function analyzePrReviewDiscoveryArtifact(
 		evidence: null,
 		issues,
 		salvaged,
+		repairKinds,
 		// Preserve today's predicate: a row-level defect is still reported as
 		// such once it turns out no valid row could establish coverage.
 		failurePredicate: hasParseFailure ? 'discovery.row' : 'discovery.coverage',
@@ -8394,9 +8572,10 @@ export function validatePrReviewDiscoveryLaneCompletion(
 		if (!analysis.covered) continue;
 		if (!analysis.salvaged && analysis.issues.length === 0) continue;
 		salvagedLanes.push(workflowLane);
-		const reason = analysis.salvaged
-			? `canonical ${resolvePrReviewRowFamily(workflowLane, input.expected.mode)} header was absent and was synthesized from valid marker rows`
-			: 'one or more rows were dropped as malformed or out-of-ownership';
+		const reason =
+			analysis.repairKinds.length > 0
+				? `structural repairs applied: ${analysis.repairKinds.join(', ')}`
+				: 'one or more rows were dropped as malformed or out-of-ownership';
 		warn(
 			`[pr-workflow-gate] discovery artifact salvaged: batch=${input.record.batchId ?? '(missing)'} lane=${input.record.laneId ?? '(missing)'} workflow_lane=${workflowLane} — ${reason}; retained coverage from the valid rows. Dropped-row diagnostics: ${analysis.issues.join('; ') || '(none)'}`,
 		);

@@ -317,4 +317,32 @@ describe('candidate parser Phase 4 contract', () => {
 		expect(boundary.candidates).toHaveLength(1);
 		expect(boundary.candidates[0].candidate_id).toBe('M-1');
 	});
+
+	test('parseAndPersist shares terminal-fence and CLEAN-confidence recovery', () => {
+		const fenced = [
+			'Final protocol:',
+			'```text',
+			microHeader,
+			`[CLEAN] | subprocess | ${cleanScope} | ${cleanEvidence} | HIGH`,
+			'```',
+		].join('\n');
+		const parserFlags = flags({
+			expected_family: 'micro_lane',
+			expected_micro_lane: 'subprocess',
+		});
+
+		// The pure parser remains strict and isolates all fenced content.
+		expect(parseCandidates(input(fenced), parserFlags).clean_attestation).toBe(
+			undefined,
+		);
+
+		const boundaryRoot = canonicalMkdtemp('phase4-terminal-repair-');
+		tempDirs.push(boundaryRoot);
+		const boundary = parseAndPersist(input(fenced), parserFlags, {
+			projectRoot: boundaryRoot,
+		});
+		expect(boundary.error).toBeUndefined();
+		expect(boundary.clean_attestation?.micro_lane).toBe('subprocess');
+		expect(boundary.clean_attestation?.evidence).toBe(cleanEvidence);
+	});
 });

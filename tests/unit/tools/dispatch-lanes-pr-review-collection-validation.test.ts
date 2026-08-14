@@ -183,39 +183,41 @@ describe('PR-review discovery validation during collection', () => {
 		expect(error).toContain(CLEAN_TEMPLATES.micro_lane);
 	});
 
-	test.each([
-		{
-			name: 'hybrid ten-field micro candidate recorded in the failed run',
-			batch: 'production-hybrid-micro',
-			workflowLane: 'auth-identity-secrets',
-			text: `${MICRO_HEADER}\n[CANDIDATE] | auth-identity-secrets-001 | auth-identity-secrets | LOW | security | src/auth.ts:10 | authorization claim | least-privilege invariant | direct code evidence | downstream impact copied from the base schema | MEDIUM`,
-			expected: 'exactly 9 candidate fields',
-		},
-		{
-			name: 'CLEAN row with the recorded trailing confidence field',
-			batch: 'production-clean-confidence',
-			workflowLane: 'dependencies-build-release',
-			text: `${MICRO_HEADER}\n[CLEAN] | dependencies-build-release | complete dependency and release review | no unsafe dependency or release path found | HIGH`,
-			expected: 'Expected exactly 3 CLEAN fields after [CLEAN], received 4',
-		},
-	] as const)('keeps strict rejection for $name', async ({
-		batch,
-		workflowLane,
-		text,
-		expected,
-	}) => {
+	test('keeps strict rejection for a hybrid ten-field micro candidate', async () => {
+		const batch = 'production-hybrid-micro';
+		const workflowLane = 'auth-identity-secrets';
 		await recordLane({
 			batch,
 			lane: `${batch}-lane`,
 			mode: 'swarm-pr-review:micro',
 			workflowLane,
-			text,
+			text: `${MICRO_HEADER}\n[CANDIDATE] | auth-identity-secrets-001 | auth-identity-secrets | LOW | security | src/auth.ts:10 | authorization claim | least-privilege invariant | direct code evidence | downstream impact copied from the base schema | MEDIUM`,
 		});
 		const result = await collect(batch);
 		expect(result.success).toBe(false);
 		expect(result.failed).toBe(1);
 		expect(result.lane_results[0].status).toBe('failed');
-		expect(result.lane_results[0].error).toContain(expected);
+		expect(result.lane_results[0].error).toContain(
+			'exactly 9 candidate fields',
+		);
+	});
+
+	test('recovers the recorded trailing CLEAN confidence and records salvage', async () => {
+		const batch = 'production-clean-confidence';
+		const lane = `${batch}-lane`;
+		const workflowLane = 'dependencies-build-release';
+		await recordLane({
+			batch,
+			lane,
+			mode: 'swarm-pr-review:micro',
+			workflowLane,
+			text: `${MICRO_HEADER}\n[CLEAN] | dependencies-build-release | complete dependency and release review | no unsafe dependency or release path found | HIGH`,
+		});
+		const result = await collect(batch);
+		expect(result.success).toBe(true);
+		expect(result.lane_results[0].status).toBe('completed');
+		const record = findByCorrelationId(directory, `session-${batch}-${lane}`);
+		expect(record?.result?.salvagedWorkflowLanes).toEqual([workflowLane]);
 	});
 
 	test.each([
@@ -263,7 +265,7 @@ describe('PR-review discovery validation during collection', () => {
 		expect(result.lane_results[0].error).toBeUndefined();
 	});
 
-	test('rejects candidate rows hidden inside a code fence', async () => {
+	test('recovers a strict terminal protocol fence and records salvage', async () => {
 		await recordLane({
 			batch: 'fenced-base',
 			lane: 'fenced-lane',
@@ -272,9 +274,13 @@ describe('PR-review discovery validation during collection', () => {
 			text: `\`\`\`text\n${BASE_HEADER}\nC-3 | security-trust | HIGH | security | src/a.ts:1 | claim text | evidence summary text | impact context text | HIGH\n\`\`\``,
 		});
 		const result = await collect('fenced-base');
-		expect(result.success).toBe(false);
-		expect(result.lane_results[0].status).toBe('failed');
-		expect(result.lane_results[0].error).toMatch(/candidate|header/i);
+		expect(result.success).toBe(true);
+		expect(result.lane_results[0].status).toBe('completed');
+		const record = findByCorrelationId(
+			directory,
+			'session-fenced-base-fenced-lane',
+		);
+		expect(record?.result?.salvagedWorkflowLanes).toEqual(['security-trust']);
 	});
 
 	test('fails duplicate evidence in a consolidated discovery lane', async () => {
