@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.139.8](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.139.7...v7.139.8) (2026-08-14)
+
+
+### Bug Fixes
+
+* **recovery:** close residual advertised-contract gaps from [#2109](https://github.com/ZaxbyHub/opencode-swarm/issues/2109) ([29209b4](https://github.com/ZaxbyHub/opencode-swarm/commit/29209b46560d9af76375380665eb592ed84e3398))
+
 ## [7.139.7](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.139.6...v7.139.7) (2026-08-14)
 
 
