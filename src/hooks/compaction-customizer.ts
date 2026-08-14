@@ -55,7 +55,10 @@ const SUMMARY_ONLY_FOOTER =
  * across line boundaries that `\s*` would cause on large inputs.
  */
 function stripTaskActionMarkers(value: string): string {
-	return value.replace(/[^\S\r\n]*←[^\S\r\n]*CURRENT[^\S\r\n]*(?:\.\.\.)?[^\S\r\n]*$/gm, '');
+	return value.replace(
+		/[^\S\r\n]*←[^\S\r\n]*CURRENT[^\S\r\n]*(?:\.\.\.)?[^\S\r\n]*$/gm,
+		'',
+	);
 }
 
 interface CompactionFact {
