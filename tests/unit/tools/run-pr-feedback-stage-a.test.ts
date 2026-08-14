@@ -194,6 +194,7 @@ const validChecks = [
 				feedback_item_id: 'FB-001',
 				target: 'tests/targeted-regression.test.ts',
 				expected_behavior: 'targeted regression passes after the feedback fix',
+				proof_kind: 'defect',
 			},
 		],
 	},
@@ -408,6 +409,7 @@ describe('run_pr_feedback_stage_a', () => {
 								feedback_item_id: 'FB-999',
 								target: 'tests/targeted-regression.test.ts',
 								expected_behavior: 'unrelated test passes after some other fix',
+								proof_kind: 'defect',
 							},
 						],
 					}

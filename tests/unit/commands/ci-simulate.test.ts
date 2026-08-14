@@ -20,6 +20,7 @@ const { _internals, handleCiSimulateCommand } = await import(
 );
 const realRunExternalTool = _internals.runExternalTool;
 const realGetDefaultBaseBranch = _internals.getDefaultBaseBranch;
+const realDetectDefaultRemoteBranch = _internals.detectDefaultRemoteBranch;
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -150,6 +151,7 @@ describe('handleCiSimulateCommand', () => {
 	afterEach(() => {
 		_internals.runExternalTool = realRunExternalTool;
 		_internals.getDefaultBaseBranch = realGetDefaultBaseBranch;
+		_internals.detectDefaultRemoteBranch = realDetectDefaultRemoteBranch;
 		// Clean up temp directory
 		try {
 			fs.rmSync(tempDir, { recursive: true, force: true });
@@ -243,9 +245,29 @@ describe('handleCiSimulateCommand', () => {
 
 	it('SC-012: cleans up after a deterministic merge conflict', async () => {
 		const calls: string[][] = [];
-		_internals.getDefaultBaseBranch = () => 'origin/main';
+		let createdWorktreePath = '';
+		_internals.detectDefaultRemoteBranch = () => 'main';
 		_internals.runExternalTool = mock(async (options) => {
 			calls.push(options.args);
+			// Capture the worktree path from `worktree add --detach <path> <base>`
+			// so the cleanup's registration check can answer for it.
+			if (options.args[0] === 'worktree' && options.args[1] === 'add') {
+				createdWorktreePath = options.args[3] ?? '';
+			}
+			if (
+				options.args[0] === 'worktree' &&
+				options.args[1] === 'list' &&
+				createdWorktreePath
+			) {
+				return {
+					status: 'completed',
+					exitCode: 0,
+					stdout: `worktree ${tempDir}\nworktree ${createdWorktreePath}\n`,
+					stderr: '',
+					stdoutTruncated: false,
+					stderrTruncated: false,
+				};
+			}
 			const conflict = options.args[0] === 'merge';
 			return {
 				status: 'completed',
@@ -267,9 +289,77 @@ describe('handleCiSimulateCommand', () => {
 			'--',
 			'conflict-branch',
 		]);
-		expect(
-			calls.some((args) => args[0] === 'worktree' && args[1] === 'remove'),
-		).toBe(true);
+		// Non-force removal (no --force flag) is attempted after the conflict.
+		const removeCall = calls.find(
+			(args) => args[0] === 'worktree' && args[1] === 'remove',
+		);
+		expect(removeCall).toBeDefined();
+		expect(removeCall).not.toContain('--force');
+	});
+
+	// -------------------------------------------------------------------------
+	// Issue #2131 criterion E: fail-closed worktree cleanup
+	// -------------------------------------------------------------------------
+
+	it('surfaces BLOCKED cleanup and never force-deletes when git worktree remove fails', async () => {
+		let createdWorktreePath = '';
+		const rmSyncCalls: string[] = [];
+		const realFs = _internals.fs;
+		_internals.detectDefaultRemoteBranch = () => 'main';
+		_internals.fs = {
+			existsSync: realFs.existsSync,
+			rmSync: (target: string) => {
+				rmSyncCalls.push(target);
+			},
+		};
+		_internals.runExternalTool = mock(async (options) => {
+			if (options.args[0] === 'worktree' && options.args[1] === 'add') {
+				createdWorktreePath = options.args[3] ?? '';
+			}
+			if (
+				options.args[0] === 'worktree' &&
+				options.args[1] === 'list' &&
+				createdWorktreePath
+			) {
+				return {
+					status: 'completed',
+					exitCode: 0,
+					stdout: `worktree ${tempDir}
+worktree ${createdWorktreePath}
+`,
+					stderr: '',
+					stdoutTruncated: false,
+					stderrTruncated: false,
+				};
+			}
+			if (options.args[0] === 'worktree' && options.args[1] === 'remove') {
+				return {
+					status: 'completed',
+					exitCode: 1,
+					stdout: '',
+					stderr: 'fatal: the working directory is dirty',
+					stdoutTruncated: false,
+					stderrTruncated: false,
+				};
+			}
+			const conflict = options.args[0] === 'merge';
+			return {
+				status: 'completed',
+				exitCode: conflict ? 1 : 0,
+				stdout: '',
+				stderr: conflict ? 'CONFLICT (content): Merge conflict' : '',
+				stdoutTruncated: false,
+				stderrTruncated: false,
+			};
+		}) as typeof realRunExternalTool;
+
+		const result = await handleCiSimulateCommand(tempDir, ['conflict-branch']);
+
+		expect(result).toContain('WORKTREE CLEANUP BLOCKED');
+		expect(result).toContain('dirty');
+		// Never force-deleted the directory.
+		expect(rmSyncCalls).toHaveLength(0);
+		_internals.fs = realFs;
 	});
 
 	it('rejects option-like PR refs before invoking git', async () => {
@@ -280,7 +370,7 @@ describe('handleCiSimulateCommand', () => {
 	it('reports when bounded child output is truncated', async () => {
 		const calls: Array<{ maxStderrBytes?: number; maxStdoutBytes?: number }> =
 			[];
-		_internals.getDefaultBaseBranch = () => 'origin/main';
+		_internals.detectDefaultRemoteBranch = () => 'main';
 		_internals.runExternalTool = mock(async (options) => {
 			calls.push(options);
 			const isValidation = options.executable === 'bun';

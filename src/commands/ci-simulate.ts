@@ -22,7 +22,10 @@ import * as fs from 'node:fs';
 import * as fsPromises from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { getDefaultBaseBranch } from '../git/branch.js';
+import {
+	detectDefaultRemoteBranch,
+	getDefaultBaseBranch,
+} from '../git/branch.js';
 import {
 	type ExternalToolRunResult,
 	runExternalTool,
@@ -39,6 +42,7 @@ const OUTPUT_LIMIT_BYTES = 12_000;
 export const _internals: {
 	runExternalTool: typeof runExternalTool;
 	getDefaultBaseBranch: typeof getDefaultBaseBranch;
+	detectDefaultRemoteBranch: typeof detectDefaultRemoteBranch;
 	platform: string;
 	osTmpdir: () => string;
 	fs: {
@@ -48,6 +52,7 @@ export const _internals: {
 } = {
 	runExternalTool,
 	getDefaultBaseBranch,
+	detectDefaultRemoteBranch,
 	platform: process.platform,
 	osTmpdir: () => os.tmpdir(),
 	fs: {
@@ -208,33 +213,70 @@ async function setupWorktree(
 }
 
 /**
- * Removes the temporary worktree and its directory.
+ * Removes the temporary worktree NON-FORCE and fails closed when removal is
+ * blocked (issue #2131 criterion E).
+ *
+ * Contract (merge-queue-readiness skill): prefer non-force `git worktree
+ * remove`; verify the path is a REGISTERED worktree we created (containment
+ * under the swarm-ci-simulate temp base) before touching it; if removal fails,
+ * run `git worktree prune`, surface the block to the user, and DO NOT
+ * force-delete the directory — a blocked removal means the worktree state
+ * needs human attention (dirty files, locked, or in use).
+ *
+ * Returns an error message when cleanup is blocked (the caller surfaces it in
+ * the report and fails the simulation), or null on success.
  */
 async function cleanupWorktree(
 	worktreePath: string,
 	projectRoot: string,
-): Promise<void> {
-	// Try git worktree remove first
-	const removeResult = await runGit(
-		['worktree', 'remove', '--force', worktreePath],
-		projectRoot,
-	);
-
-	// Always clean up the directory itself
-	try {
-		if (_internals.fs.existsSync(worktreePath)) {
-			_internals.fs.rmSync(worktreePath, { recursive: true, force: true });
-		}
-	} catch {
-		// Best-effort cleanup
+): Promise<string | null> {
+	// Containment: only ever touch paths inside our own temp base. This guard
+	// makes it structurally impossible for a bad path to delete project files.
+	const worktreeBase = path.resolve(_internals.osTmpdir(), 'swarm-ci-simulate');
+	const resolved = path.resolve(worktreePath);
+	if (
+		resolved !== worktreeBase &&
+		!resolved.startsWith(`${worktreeBase}${path.sep}`)
+	) {
+		return `[ci-simulate] refusing to clean up non-contained path ${worktreePath}`;
 	}
 
-	// If git worktree remove failed, log a warning but don't throw
+	// Registration: the path must be a worktree Git knows about. An
+	// unregistered path is not ours to remove.
+	const listResult = await runGit(
+		['worktree', 'list', '--porcelain'],
+		projectRoot,
+	);
+	if (listResult.exitCode !== 0) {
+		return `[ci-simulate] could not verify worktree registration: ${listResult.stderr.trim() || listResult.stdout.trim()}`;
+	}
+	const registered = listResult.stdout
+		.split(/\r?\n/)
+		.some(
+			(line) =>
+				line.startsWith('worktree ') &&
+				path.resolve(line.slice('worktree '.length).trim()) === resolved,
+		);
+	if (!registered) {
+		// Already gone or never registered: nothing to remove, not an error.
+		if (!_internals.fs.existsSync(resolved)) return null;
+		return `[ci-simulate] path ${worktreePath} exists but is not a registered git worktree; remove it manually`;
+	}
+
+	// Non-force removal. A dirty or locked worktree fails here — by design.
+	const removeResult = await runGit(
+		['worktree', 'remove', worktreePath],
+		projectRoot,
+	);
 	if (removeResult.exitCode !== 0) {
+		// Best-effort metadata prune, then fail closed. Never force-delete.
+		await runGit(['worktree', 'prune'], projectRoot);
 		log(
 			`[ci-simulate] git worktree remove failed: ${removeResult.stderr.trim() || removeResult.stdout.trim()}`,
 		);
+		return `[ci-simulate] worktree removal BLOCKED for ${worktreePath}: ${removeResult.stderr.trim() || removeResult.stdout.trim()}. The directory was left in place intentionally — resolve the block (dirty files or lock) and remove it manually with 'git worktree remove'.`;
 	}
+	return null;
 }
 
 /**
@@ -349,10 +391,33 @@ export async function handleCiSimulateCommand(
 	};
 
 	try {
-		// Detect the default remote branch (handles origin/main, origin/master, etc.)
-		const baseBranch = _internals.getDefaultBaseBranch(directory);
-		if (!isSafeGitRef(baseBranch)) {
-			throw new Error('Detected default branch is not a safe git reference.');
+		// Resolve the default remote branch from Git metadata (issue #2131
+		// criterion E): origin/HEAD symbolic ref → init.defaultBranch →
+		// origin/main → origin/master, then VERIFY the resolved remote ref
+		// actually exists (init.defaultBranch can disagree with the real
+		// remote). This handles contributor forks and non-main default
+		// branches the old main/master-only probe missed; when nothing
+		// resolves we fail closed instead of guessing.
+		const detectedBranch = _internals.detectDefaultRemoteBranch(directory);
+		let baseBranch: string | null = null;
+		for (const candidate of [detectedBranch, 'main', 'master'].filter(
+			(branch): branch is string => Boolean(branch),
+		)) {
+			const candidateRef = `origin/${candidate}`;
+			if (!isSafeGitRef(candidateRef)) continue;
+			const verify = await runGit(
+				['rev-parse', '--verify', '--quiet', candidateRef],
+				directory,
+			);
+			if (verify.exitCode === 0) {
+				baseBranch = candidateRef;
+				break;
+			}
+		}
+		if (!baseBranch) {
+			throw new Error(
+				'Could not resolve an existing default remote branch (origin/HEAD, init.defaultBranch, origin/main, origin/master). Fetch first or merge the PR into a base you can name explicitly.',
+			);
 		}
 
 		// Step 1: Create worktree and merge
@@ -460,8 +525,18 @@ export async function handleCiSimulateCommand(
 			lines.push('---');
 			lines.push('');
 			lines.push('*Cleaning up temporary worktree...*');
-			await cleanupWorktree(worktreePath, directory);
-			lines.push(`Worktree removed: \`${worktreePath}\``);
+			const cleanupError = await cleanupWorktree(worktreePath, directory);
+			if (cleanupError) {
+				// Fail closed (issue #2131 criterion E): surface the blocked
+				// cleanup prominently instead of silently force-deleting.
+				lines.push('');
+				lines.push(`## ⚠️ WORKTREE CLEANUP BLOCKED`);
+				lines.push('');
+				lines.push(cleanupError);
+				result.success = false;
+			} else {
+				lines.push(`Worktree removed: \`${worktreePath}\``);
+			}
 		}
 	}
 

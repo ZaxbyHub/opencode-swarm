@@ -468,7 +468,7 @@ export interface ResetToRemoteBranchResult {
 /**
  * Detect the default remote branch using multiple fallback methods
  */
-function detectDefaultRemoteBranch(cwd: string): string | null {
+export function detectDefaultRemoteBranch(cwd: string): string | null {
 	// Method 1: git symbolic-ref refs/remotes/origin/HEAD
 	try {
 		const output = gitExec(['symbolic-ref', 'refs/remotes/origin/HEAD'], cwd);

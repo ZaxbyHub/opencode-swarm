@@ -21,7 +21,17 @@ check set is complete and includes all known failed checks in `failedChecks`.
    - For each: `gh run view <run-id> --log-failed`
    - Build a complete failure ledger
 4. **Fix ALL failures in one changeset:** Cluster by root cause, fix each cluster, verify locally
-5. **Push the fixes in one cycle.** Amend the commit and push. NOTE: `git push --force` / `--force-with-lease` is deny-pattern-blocked by the guardrail in guarded sessions (no orchestrator exemption). If force-push is blocked, push a normal new fix commit instead — the batching goal is ONE push cycle (collect all → fix all → push once), not literally one commit. A single new commit containing all batched fixes satisfies the goal.
+5. **Publish through `commit-pr`.** This skill owns diagnosis and fix-planning
+   ONLY (issue #2131 criterion E): before any commit or push, compose the
+   `commit-pr` skill for the commit message, PR body/invariant-audit/test-plan
+   discipline, and the push protocol. The batching goal is ONE push cycle
+   (collect all → fix all → push once), not literally one commit — a single new
+   commit containing all batched fixes satisfies the goal. Guardrail facts
+   (verified in `src/hooks/guardrails/tool-before.ts`): bare `git push --force`
+   and `-f` are deny-pattern-blocked; `--force-with-lease` is EXEMPT because it
+   refuses to overwrite remote work gained since your last fetch — commit-pr
+   mandates it for fork/rebase flows. Even so, prefer a normal new fix commit
+   over amending an already-pushed commit.
 6. **Only re-push if NEW failures surface** that were not in the original batch.
 
 ## Why this matters
