@@ -1751,7 +1751,9 @@ function extractTaskFileDirectives(args: Record<string, unknown>): {
 		for (const line of field.split(/\r?\n/)) {
 			if (!/^\s*FILE\s*:/i.test(line)) continue;
 			present = true;
-			const value = line.replace(/^\s*FILE\s*:\s*/i, '').trim();
+			let value = line.replace(/^\s*FILE\s*:\s*/i, '').trim();
+			// Strip trailing parenthetical annotations like " (test file)"
+			value = value.replace(/\s+\([^)]+\)$/, '').trim();
 			if (!value || /[,;|]/.test(value)) return { present: true, files: null };
 			files.add(value);
 		}
@@ -2259,6 +2261,7 @@ export const _internals = {
 	resolveEvidenceTaskId,
 	resolveDelegatedPlanTaskId,
 	describeCoderScopeFailure,
+	extractTaskFileDirectives,
 	parsePerTaskVerdicts,
 	buildParallelExecutionGuidance,
 	loadPlanJsonOnly,
@@ -4659,7 +4662,9 @@ export function createDelegationGateHook(
 				const fileDirPattern = /^FILE:\s*(.+)$/gm;
 				const declaredFiles: string[] = [];
 				for (const match of text.matchAll(fileDirPattern)) {
-					const filePath = match[1].trim();
+					let filePath = match[1].trim();
+					// Strip trailing parenthetical annotations like " (test file)"
+					filePath = filePath.replace(/\s+\([^)]+\)$/, '').trim();
 					if (filePath.length > 0 && !declaredFiles.includes(filePath)) {
 						declaredFiles.push(filePath);
 					}
