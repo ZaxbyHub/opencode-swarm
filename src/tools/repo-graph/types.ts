@@ -323,6 +323,8 @@ export interface ContextPackSpan {
 	startLine: number;
 	endLine: number;
 	mode: 'full' | 'signature';
+	text?: string;
+	note?: string;
 }
 
 /**
@@ -342,6 +344,27 @@ export interface ContextPackResult {
 	estimatedTokens: number;
 	/** Optional human-readable note about scope or limitations. */
 	note?: string;
+	/** Whether source text was embedded in spans (only present when include_source was requested). */
+	sourceIncluded?: boolean;
+}
+
+export interface AskHit {
+	file: string;
+	score: number;
+	matchedTerms: string[];
+	topExports: string[];
+	role: string;
+	community: string;
+}
+
+export interface AskOptions {
+	topN?: number;
+}
+
+export interface AskResult {
+	hits: AskHit[];
+	expandedTerms: string[];
+	budget: { requested: number; returned: number; dropped: number };
 }
 
 /**
