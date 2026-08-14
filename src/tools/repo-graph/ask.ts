@@ -60,15 +60,44 @@ function buildVocabulary(graph: RepoGraph): Set<string> {
 			.replace(/^.*[/\\]/, '')
 			.replace(/\.[^.]+$/, '');
 		vocab.add(baseName.toLowerCase());
+		// Add path segments so directory names are searchable (e.g. "agents", "hooks")
+		for (const seg of node.moduleName.split(/[/\\]/)) {
+			if (seg.length > 1) vocab.add(seg.toLowerCase());
+		}
 		for (const exp of node.exports) {
 			vocab.add(exp.toLowerCase());
 			for (const sub of splitCompound(exp)) vocab.add(sub.toLowerCase());
 		}
+	}
+	// Add ontology roles only when they'd score (nonzero IDF via substring match
+	// in moduleName/exports/imports). Roles with no overlap would produce
+	// misleading uniform-PageRank with empty matchedTerms.
+	const nodes = Object.values(graph.nodes);
+	const distinctRoles = new Set<string>();
+	for (const node of nodes) {
 		if (node.ontology) {
-			for (const role of node.ontology.roles) vocab.add(role.toLowerCase());
+			for (const role of node.ontology.roles)
+				distinctRoles.add(role.toLowerCase());
 		}
 	}
+	for (const r of distinctRoles) {
+		if (!vocab.has(r) && wouldScore(r, nodes)) vocab.add(r);
+	}
 	return vocab;
+}
+
+function wouldScore(term: string, nodes: GraphNode[]): boolean {
+	for (const node of nodes) {
+		const m = node.moduleName.toLowerCase();
+		if (
+			m.includes(term) ||
+			node.exports.some((e) => e.toLowerCase().includes(term)) ||
+			node.imports.some((i) => i.toLowerCase().includes(term))
+		) {
+			return true;
+		}
+	}
+	return false;
 }
 
 function expandTerms(tokens: string[], vocab: Set<string>): string[] {

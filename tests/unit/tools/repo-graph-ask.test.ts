@@ -210,9 +210,9 @@ describe('askGraph', () => {
 		const testIdx = result.hits.findIndex(
 			(h) => h.file === 'tests/storage.test.ts',
 		);
-		if (testIdx >= 0) {
-			expect(storageIdx).toBeLessThan(testIdx);
-		}
+		expect(storageIdx).toBeGreaterThanOrEqual(0);
+		expect(testIdx).toBeGreaterThanOrEqual(0);
+		expect(storageIdx).toBeLessThan(testIdx);
 	});
 
 	test('empty question returns empty hits', () => {
@@ -230,9 +230,8 @@ describe('askGraph', () => {
 		const result = askGraph(graph, 'types graph node', { topN: 2 });
 		expect(result.budget.requested).toBe(2);
 		expect(result.budget.returned).toBeLessThanOrEqual(2);
-		if (result.budget.returned === 2) {
-			expect(result.budget.dropped).toBeGreaterThanOrEqual(0);
-		}
+		expect(result.budget.returned).toBeGreaterThan(0);
+		expect(result.budget.dropped).toBeGreaterThan(0);
 	});
 
 	test('top_n is clamped to 25', () => {
@@ -252,6 +251,30 @@ describe('askGraph', () => {
 	test('expandedTerms populated', () => {
 		const result = askGraph(graph, 'saveGraph builder');
 		expect(result.expandedTerms.length).toBeGreaterThan(0);
+	});
+
+	test('path segments are searchable (directory names enter vocab)', () => {
+		const dirGraph = makeGraph([
+			{
+				key: '/workspace/src/agents/runner.ts',
+				moduleName: 'src/agents/runner.ts',
+				exports: ['start', 'stop'],
+				roles: ['agent'],
+			},
+			{
+				key: '/workspace/src/utils/math.ts',
+				moduleName: 'src/utils/math.ts',
+				exports: ['sum'],
+			},
+		]);
+		// Plural query matches path segment directly
+		const plural = askGraph(dirGraph, 'agents');
+		expect(plural.hits.length).toBeGreaterThan(0);
+		expect(plural.hits[0].file).toBe('src/agents/runner.ts');
+		// Singular role "agent" also matches via substring in moduleName
+		const singular = askGraph(dirGraph, 'agent');
+		expect(singular.hits.length).toBeGreaterThan(0);
+		expect(singular.hits[0].file).toBe('src/agents/runner.ts');
 	});
 
 	test('asset edges excluded from adjacency', () => {
