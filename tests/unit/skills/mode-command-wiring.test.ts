@@ -60,6 +60,10 @@ const NON_COMMAND_SKILLS = new Set([
 	// Invoked directly by name/description trigger (Read/Skill), not via a
 	// /swarm <cmd> architect MODE signal — same shape as ci-fix-monitor.
 	'issue-tracer',
+	// Propagation/support skills promoted to first-class bundled .opencode
+	// skills (criterion F) — not architect MODE commands.
+	'orchestrating-subagents',
+	'durable-session-state',
 ]);
 
 /**

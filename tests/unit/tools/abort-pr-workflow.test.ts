@@ -115,6 +115,8 @@ describe('abort_pr_workflow tool', () => {
 			mode: 'PR_REVIEW',
 			open_lanes: 0,
 			gate_cleared: true,
+			checkout_restore_required: false,
+			checkout_restore_receipts: [],
 		});
 		// pr_head_sha is omitted on the deadlock path (no binding).
 		expect(result.pr_head_sha).toBeUndefined();

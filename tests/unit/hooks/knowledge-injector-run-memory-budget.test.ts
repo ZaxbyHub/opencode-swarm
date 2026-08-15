@@ -13,6 +13,7 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 
 afterEach(() => {
+	restoreReceiptAuthority();
 	swarmState.activeAgent.clear();
 	mock.clearAllMocks();
 	// Required by scripts/check-mock-cleanup.sh Check 1 (AGENTS.md invariant 7):
@@ -22,15 +23,25 @@ afterEach(() => {
 	mock.restore();
 });
 
-import { createKnowledgeInjectorHook } from '../../../src/hooks/knowledge-injector.js';
+import {
+	createKnowledgeInjectorHook,
+	_internals as injectorInternals,
+} from '../../../src/hooks/knowledge-injector.js';
 import type { RankedEntry } from '../../../src/hooks/knowledge-reader.js';
 import type {
 	KnowledgeConfig,
 	MessageWithParts,
 } from '../../../src/hooks/knowledge-types.js';
 import { swarmState } from '../../../src/state';
+import { installKnowledgeReceiptAuthorityStub } from '../../helpers/knowledge-receipt-authority.js';
 
 const SESSION_ID = 'ki-run-memory-budget-session';
+let restoreReceiptAuthority = () => {};
+
+beforeEach(() => {
+	restoreReceiptAuthority =
+		installKnowledgeReceiptAuthorityStub(injectorInternals);
+});
 
 // Spread-real-exports pattern (AGENTS.md invariant 7). Replacing a module with
 // a partial object leaks into every other file in Bun's shared test-runner

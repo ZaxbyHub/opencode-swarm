@@ -19,7 +19,7 @@ import * as path from 'node:path';
 import { BUNDLED_PROJECT_SKILLS } from '../config/bundled-skills.js';
 import {
 	effectiveRetrievalOutcomes,
-	readKnowledgeCounterRollups,
+	readAuthoritativeKnowledgeCounterRollups,
 } from '../hooks/knowledge-events.js';
 import {
 	computeOutcomeSignal,
@@ -219,7 +219,8 @@ export async function selectCandidateEntries(
 		? await readKnowledge<HiveKnowledgeEntry>(hivePath)
 		: [];
 	const all: KnowledgeEntryBase[] = [...swarm, ...hive];
-	const counterRollups = await readKnowledgeCounterRollups(directory);
+	const counterRollups =
+		await readAuthoritativeKnowledgeCounterRollups(directory);
 	const selected: KnowledgeEntryBase[] = [];
 	for (const e of all) {
 		if (e.status === 'archived') continue;
@@ -654,7 +655,9 @@ export async function generateSkills(
 		// selectCandidateEntries:133) so downstream singleton/strong-outcome checks
 		// read the same merged values as the default path, not the raw entry
 		// counters. Defensive consistency for issue #1477's outcome accrual.
-		const rollups = await readKnowledgeCounterRollups(req.directory);
+		const rollups = await readAuthoritativeKnowledgeCounterRollups(
+			req.directory,
+		);
 		pool = [...swarm, ...hive]
 			.filter((e) => idSet.has(e.id) && isActiveStatus(e.status))
 			.sort((a, b) => (idOrder.get(a.id) ?? 0) - (idOrder.get(b.id) ?? 0))

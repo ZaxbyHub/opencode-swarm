@@ -1,7 +1,7 @@
 /** Core storage layer for the opencode-swarm v6.17 two-tier knowledge system. */
 
 import { createHash } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { appendFile, mkdir, readFile } from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -1246,10 +1246,18 @@ const CONFIDENCE_CEILING = 1.0;
  */
 export async function bumpKnowledgeConfidenceBatch(
 	directory: string,
-	deltas: Array<{ id: string; delta: number }>,
+	deltas: Array<{
+		id: string;
+		delta: number;
+		receipt_events?: Array<{
+			event_id: string;
+			timestamp: string;
+			outcome: 'applied' | 'violated' | 'ignored';
+		}>;
+	}>,
 	options?: ConfidenceFloorOptions,
-): Promise<void> {
-	if (deltas.length === 0) return;
+): Promise<number> {
+	if (deltas.length === 0) return 0;
 
 	const swarmPath = resolveSwarmKnowledgePath(directory);
 	const hivePath = resolveHiveKnowledgePath();
@@ -1258,8 +1266,20 @@ export async function bumpKnowledgeConfidenceBatch(
 	const touchedHive: KnowledgeEntryBase[] = [];
 
 	try {
+		const canonicalDirectory = realpathSync.native(directory);
+		const feedbackScope = createHash('sha256')
+			.update(
+				process.platform === 'win32'
+					? canonicalDirectory.toLowerCase()
+					: canonicalDirectory,
+			)
+			.digest('hex')
+			.slice(0, 16);
+
 		// --- Swarm pass ---
-		touchedSwarm.push(...(await applyConfidenceDeltas(swarmPath, deltas)));
+		touchedSwarm.push(
+			...(await applyConfidenceDeltas(swarmPath, deltas, feedbackScope)),
+		);
 
 		// --- Hive pass (only for IDs not found in swarm) ---
 		const swarmIds = new Set(touchedSwarm.map((e) => e.id));
@@ -1268,7 +1288,9 @@ export async function bumpKnowledgeConfidenceBatch(
 		// a delta but the id set we care about is the deltas we tried to apply).
 		const hiveOnly = deltas.filter((d) => !swarmIds.has(d.id));
 		if (hiveOnly.length > 0) {
-			touchedHive.push(...(await applyConfidenceDeltas(hivePath, hiveOnly)));
+			touchedHive.push(
+				...(await applyConfidenceDeltas(hivePath, hiveOnly, feedbackScope)),
+			);
 		}
 
 		// --- G2: confidence-floor action (post-bump sweep) ---
@@ -1285,11 +1307,13 @@ export async function bumpKnowledgeConfidenceBatch(
 				err instanceof Error ? err.message : String(err),
 			);
 		});
+		return touchedSwarm.length + touchedHive.length;
 	} catch (err) {
 		logger.log(
 			'[knowledge-store] bumpKnowledgeConfidenceBatch failed (fail-open):',
 			err instanceof Error ? err.message : String(err),
 		);
+		return 0;
 	}
 }
 
@@ -1330,9 +1354,11 @@ async function applyConfidenceFloorAction(
 	// Read the events rollup ONCE (the expensive re-read) — keyed by entry id.
 	// Dynamic import avoids a static store↔events cycle (events already
 	// dynamic-imports store for the bump itself; this mirrors that precedent).
-	const { readKnowledgeCounterRollups, effectiveRetrievalOutcomes } =
-		await import('./knowledge-events.js');
-	const rollups = await readKnowledgeCounterRollups(directory);
+	const {
+		readAuthoritativeKnowledgeCounterRollups,
+		effectiveRetrievalOutcomes,
+	} = await import('./knowledge-events.js');
+	const rollups = await readAuthoritativeKnowledgeCounterRollups(directory);
 
 	// Helper: persist the confidence_floor_demoted flag flip on a single entry
 	// via a tiny locked transaction. Re-uses transactKnowledge for safety.
@@ -1497,12 +1523,33 @@ export interface ConfidenceFloorOptions {
  */
 async function applyConfidenceDeltas(
 	filePath: string,
-	deltas: Array<{ id: string; delta: number }>,
+	deltas: Array<{
+		id: string;
+		delta: number;
+		receipt_events?: Array<{
+			event_id: string;
+			timestamp: string;
+			outcome: 'applied' | 'violated' | 'ignored';
+		}>;
+	}>,
+	feedbackScope: string,
 ): Promise<KnowledgeEntryBase[]> {
-	const idDeltaMap = new Map<string, number>();
+	const idDeltaMap = new Map<
+		string,
+		{
+			delta: number;
+			receipt_events: NonNullable<(typeof deltas)[number]['receipt_events']>;
+		}
+	>();
 	for (const d of deltas) {
 		const existing = idDeltaMap.get(d.id);
-		idDeltaMap.set(d.id, existing !== undefined ? existing + d.delta : d.delta);
+		idDeltaMap.set(d.id, {
+			delta: (existing?.delta ?? 0) + d.delta,
+			receipt_events: [
+				...(existing?.receipt_events ?? []),
+				...(d.receipt_events ?? []),
+			],
+		});
 	}
 
 	const touched: KnowledgeEntryBase[] = [];
@@ -1522,8 +1569,39 @@ async function applyConfidenceDeltas(
 		let mutated = false;
 
 		for (const entry of entries) {
-			const delta = idDeltaMap.get(entry.id);
-			if (delta === undefined) continue;
+			const pending = idDeltaMap.get(entry.id);
+			if (!pending) continue;
+			let delta = pending.delta;
+			if (pending.receipt_events.length > 0) {
+				const cursor = entry.receipt_feedback_cursors?.[feedbackScope];
+				const afterCursor = pending.receipt_events
+					.filter(
+						(event) =>
+							!cursor ||
+							event.timestamp > cursor.timestamp ||
+							(event.timestamp === cursor.timestamp &&
+								event.event_id > cursor.event_id),
+					)
+					.sort((a, b) =>
+						a.timestamp === b.timestamp
+							? a.event_id.localeCompare(b.event_id)
+							: a.timestamp.localeCompare(b.timestamp),
+					);
+				if (afterCursor.length === 0) continue;
+				const positives = afterCursor.filter(
+					(event) => event.outcome === 'applied',
+				).length;
+				const negatives = afterCursor.length - positives;
+				delta = positives > negatives ? 0.03 : -0.05;
+				const last = afterCursor[afterCursor.length - 1];
+				entry.receipt_feedback_cursors = {
+					...(entry.receipt_feedback_cursors ?? {}),
+					[feedbackScope]: {
+						timestamp: last.timestamp,
+						event_id: last.event_id,
+					},
+				};
+			}
 
 			entry.confidence = Math.max(
 				CONFIDENCE_FLOOR,

@@ -19,9 +19,21 @@ import {
 } from '../git/branch';
 import { createCuratorLLMDelegate } from '../hooks/curator-llm-factory';
 import { runCuratorPostMortem } from '../hooks/curator-postmortem';
+import { extractCurrentPhaseFromPlan } from '../hooks/extractors.js';
 import { checkHivePromotions } from '../hooks/hive-promoter';
 import { curateAndStoreSwarm } from '../hooks/knowledge-curator';
 import { isLinked } from '../hooks/knowledge-link';
+import {
+	reconcilePhaseClose,
+	recordPhaseCloseIntent,
+} from '../hooks/knowledge-receipt-ledger.js';
+
+/** Narrow seam for receipt/plan ordering tests. */
+export const closeReceiptLifecycleInternals = {
+	recordPhaseCloseIntent,
+	reconcilePhaseClose,
+};
+
 import {
 	readKnowledge,
 	resolveSwarmKnowledgePath,
@@ -325,6 +337,11 @@ const ARCHIVE_ARTIFACTS = [
 	'close-lessons.md',
 	'knowledge.jsonl',
 	'knowledge-rejected.jsonl',
+	// Project-local receipt authority is copied for forensics but deliberately
+	// omitted from ACTIVE_STATE_TO_CLEAN: live/within-grace state survives close.
+	'knowledge-receipts-v2.jsonl',
+	'knowledge-receipts-v2.snapshot.json',
+	'knowledge-receipts-v2-archive.jsonl',
 	// Per-attempt task outcomes written by update_task_status. Plan-scoped (keyed
 	// by task IDs like "1.1"), so it is archived for forensics and then cleaned —
 	// carrying it into the next plan would label an unrelated task 1.1 as failed.
@@ -1020,6 +1037,38 @@ export async function runFinalizeStage(ctx: CloseStageContext): Promise<void> {
 		const closedPhasesLenBefore = ctx.closedPhases.length;
 		const closedTasksLenBefore = ctx.closedTasks.length;
 
+		const receiptPhaseLabels = new Map<number, string>();
+		for (const phase of ctx.planData.phases ?? []) {
+			const label =
+				extractCurrentPhaseFromPlan({
+					...(ctx.planData as Plan),
+					current_phase: phase.id,
+				}) ?? `Phase ${phase.id}`;
+			receiptPhaseLabels.set(phase.id, label);
+			const intent =
+				await closeReceiptLifecycleInternals.recordPhaseCloseIntent(
+					ctx.directory,
+					label,
+					ctx.options.sessionID,
+				);
+			if (!intent.ok) {
+				// A direct `/swarm close` may not carry a host session ID. When the
+				// phase has no receipt membership at all, there is no receipt lifecycle
+				// to close and terminal plan persistence must continue. Ambiguous or
+				// unreadable receipt state still fails closed below.
+				if (
+					intent.detail ===
+					'no exact receipt lifecycle scope exists for phase closure'
+				) {
+					continue;
+				}
+				ctx.warnings.push(
+					`Receipt phase-close intent failed for phase ${phase.id}: ${intent.detail}. Plan terminalization was not attempted.`,
+				);
+				return;
+			}
+		}
+
 		ctx.guaranteeResult = guaranteeAllPlansComplete(ctx.planData);
 		// Only track newly closed phases/tasks by identity
 		for (const phaseId of ctx.guaranteeResult.closedPhaseIds) {
@@ -1034,6 +1083,7 @@ export async function runFinalizeStage(ctx: CloseStageContext): Promise<void> {
 		}
 
 		// Persist the terminal plan state
+		let terminalPlanPersisted = ctx.planAlreadyDone;
 		if (
 			!ctx.planAlreadyDone ||
 			ctx.guaranteeResult.closedPhaseIds.length > 0 ||
@@ -1049,6 +1099,7 @@ export async function runFinalizeStage(ctx: CloseStageContext): Promise<void> {
 						originalStatuses: ctx.originalStatuses,
 					},
 				);
+				terminalPlanPersisted = true;
 			} catch (error) {
 				const msg = error instanceof Error ? error.message : String(error);
 				ctx.warnings.push(`Failed to persist terminal plan state: ${msg}`);
@@ -1059,6 +1110,23 @@ export async function runFinalizeStage(ctx: CloseStageContext): Promise<void> {
 				ctx.planData = planDataSnapshot;
 				ctx.closedPhases.length = closedPhasesLenBefore;
 				ctx.closedTasks.length = closedTasksLenBefore;
+			}
+		}
+
+		for (const phase of terminalPlanPersisted
+			? (ctx.planData.phases ?? [])
+			: []) {
+			const reconciled =
+				await closeReceiptLifecycleInternals.reconcilePhaseClose(
+					ctx.directory,
+					receiptPhaseLabels.get(phase.id) ?? `Phase ${phase.id}`,
+					true,
+					ctx.options.sessionID,
+				);
+			if (!reconciled.ok) {
+				ctx.warnings.push(
+					`Receipt phase-close reconciliation remains pending for phase ${phase.id}: ${reconciled.detail}`,
+				);
 			}
 		}
 	}

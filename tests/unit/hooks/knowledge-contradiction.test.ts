@@ -3,8 +3,8 @@
  *
  * Previously `contradicted_count` (incremented only via knowledge_receipt) and
  * curator `flag_contradiction` (tag-only) were disconnected. Now the curator
- * emits `contradicted` events post-transaction AND threshold-based quarantine
- * fires via maybeQuarantineOnContradiction.
+ * emits diagnostic `contradicted` events post-transaction, while destructive
+ * quarantine counts authoritative contradicted receipt terminals only.
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
@@ -12,8 +12,12 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { applyCuratorKnowledgeUpdates } from '../../../src/hooks/curator.js';
-import { maybeQuarantineOnContradiction } from '../../../src/hooks/knowledge-escalator.js';
+import {
+	_internals,
+	maybeQuarantineOnContradiction,
+} from '../../../src/hooks/knowledge-escalator.js';
 import { readKnowledgeEvents } from '../../../src/hooks/knowledge-events.js';
+import type { ReceiptMembership } from '../../../src/hooks/knowledge-receipt-ledger.js';
 import {
 	readKnowledge,
 	resolveSwarmKnowledgePath,
@@ -27,7 +31,7 @@ import {
  * Time in this file, and why `freezeClock` is deliberately NOT used.
  *
  * `maybeQuarantineOnContradiction` takes its reference instant as a parameter
- * (`now: Date = new Date()`) and compares `Date.parse(event.timestamp)` against
+ * (`now: Date = new Date()`) and compares terminal commit timestamps against
  * `now.getTime() - windowDays`. It never calls `Date.now()`, so `freezeClock`'s
  * `fixedNow` spy cannot reach it, and its `isoNow` spy would corrupt the
  * `new Date(x).toISOString()` fixtures below. The correct seam is therefore the
@@ -43,6 +47,7 @@ import {
  */
 const FROZEN_NOW = Date.parse('2026-07-01T00:00:00.000Z');
 const FROZEN_ISO = new Date(FROZEN_NOW).toISOString();
+let historicalMemberships: ReceiptMembership[] = [];
 
 /**
  * A wall-clock stamp, used ONLY by the two curator-driven tests. Their events
@@ -83,6 +88,26 @@ function writeEvents(
 	const fp = ensureSwarmDir(dir);
 	const content = events.map((e) => makeEvent(e)).join('\n') + '\n';
 	writeFileSync(fp, content, 'utf-8');
+	historicalMemberships = events.map((event, index) => {
+		const timestamp = event.timestamp ?? FROZEN_ISO;
+		return {
+			trace_id: `trace-${index}`,
+			entry_id: event.knowledge_id,
+			session_id: 'test-session',
+			critical: false,
+			committed_at: timestamp,
+			membership_event_id: `membership-${index}`,
+			grace_days: 7,
+			exposure_kind: 'legacy_unknown',
+			origin: 'v2',
+			terminal: {
+				outcome: event.type as 'contradicted',
+				source: 'test',
+				event_id: `terminal-${index}`,
+				committed_at: timestamp,
+			},
+		} satisfies ReceiptMembership;
+	});
 }
 
 function writeEntry(
@@ -163,11 +188,22 @@ describe('G3 contradiction unification (#1715)', () => {
 	// see the note at the top of the file for why freezing would not help.
 	let state: IsolatedState;
 	let dir: string;
+	const originalQueryHistoricalOutcomes = _internals.queryHistoricalOutcomes;
 	beforeEach(() => {
 		state = setupIsolatedState({ prefix: 'contradiction-test-' });
 		dir = state.dir;
+		historicalMemberships = [];
+		_internals.queryHistoricalOutcomes = async (_directory, entryIds) => ({
+			ok: true,
+			memberships: entryIds
+				? historicalMemberships.filter((m) => entryIds.includes(m.entry_id))
+				: historicalMemberships,
+		});
 	});
-	afterEach(() => state.cleanup());
+	afterEach(() => {
+		_internals.queryHistoricalOutcomes = originalQueryHistoricalOutcomes;
+		state.cleanup();
+	});
 
 	test('curator flag_contradiction emits a contradicted event post-transaction', async () => {
 		const id = randomUUID();
@@ -314,6 +350,20 @@ describe('G3 contradiction unification (#1715)', () => {
 		expect(await readEntryStatus(dir, id)).toBe('established');
 	});
 
+	test('ledger uncertainty cannot authorize quarantine', async () => {
+		const id = randomUUID();
+		writeEntry(dir, { id });
+		_internals.queryHistoricalOutcomes = async () => ({
+			ok: false,
+			code: 'store_corrupt',
+			detail: 'corrupt',
+			uncertainty: 'corrupt',
+		});
+		const result = await maybeQuarantineOnContradiction(dir, id, 1, 30);
+		expect(result).toEqual({ quarantined: false, entryId: id });
+		expect(await readEntryStatus(dir, id)).toBe('established');
+	});
+
 	test('maybeQuarantineOnContradiction is idempotent on already-quarantined entry', async () => {
 		const id = randomUUID();
 		writeEntry(dir, { id, status: 'quarantined' });
@@ -354,10 +404,9 @@ describe('G3 contradiction unification (#1715)', () => {
 		expect(result.quarantined).toBe(false);
 	});
 
-	test('curator quarantine action fires when threshold crossed after flag_contradiction', async () => {
-		// Seed 2 prior contradicted events, then run a curator flag_contradiction
-		// (which emits a 3rd) with contradiction_threshold_action='quarantine'.
-		// The threshold check should fire and quarantine the entry.
+	test('curator diagnostic contradiction cannot satisfy an authoritative quarantine threshold', async () => {
+		// Seed two authoritative contradicted terminals, then run a curator
+		// flag_contradiction, which emits a third diagnostic observation only.
 		const id = randomUUID();
 		writeEntry(dir, { id });
 		// Live stamps: the curator emits its own event with `new Date()` and
@@ -378,13 +427,11 @@ describe('G3 contradiction unification (#1715)', () => {
 			],
 			defaultConfig,
 		);
-		// 2 prior + 1 curator-emitted = 3 → threshold crossed → quarantined.
-		// quarantineEntry moves the entry to knowledge-quarantined.jsonl, so it
-		// is no longer in the active swarm file.
-		expect(await readEntryStatus(dir, id)).toBeUndefined();
+		// Two authoritative terminals stay below the threshold. The diagnostic
+		// FIFO row cannot authorize a destructive quarantine.
+		expect(await readEntryStatus(dir, id)).toBe('established');
 		const quarantinePath = join(dir, '.swarm', 'knowledge-quarantined.jsonl');
-		expect(existsSync(quarantinePath)).toBe(true);
-		expect(readFileSync(quarantinePath, 'utf-8')).toContain(id);
+		expect(existsSync(quarantinePath)).toBe(false);
 	});
 
 	test('curator tag_only config preserves legacy behavior (no quarantine)', async () => {

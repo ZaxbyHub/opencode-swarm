@@ -3,11 +3,16 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import {
+	existsSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
-import { appendKnowledgeEvent } from '../../../src/hooks/knowledge-events';
 import { resolveSwarmKnowledgePath } from '../../../src/hooks/knowledge-store';
 import type { SwarmKnowledgeEntry } from '../../../src/hooks/knowledge-types';
 import {
@@ -25,6 +30,7 @@ import {
 	selectCandidateEntries,
 } from '../../../src/services/skill-generator';
 import { createIsolatedTestEnv } from '../../helpers/isolated-test-env';
+import { seedReceiptHistory } from '../../helpers/knowledge-receipt-fixtures';
 
 let tmp: string;
 let isolatedEnv: ReturnType<typeof createIsolatedTestEnv>;
@@ -32,6 +38,7 @@ beforeEach(() => {
 	mock.restore();
 	isolatedEnv = createIsolatedTestEnv();
 	tmp = mkdtempSync(path.join(tmpdir(), 'swarm-skill-gen-'));
+	writeFileSync(path.join(tmp, '.git'), 'gitdir: fixture');
 });
 afterEach(() => {
 	try {
@@ -145,17 +152,7 @@ describe('selectCandidateEntries', () => {
 				directive_priority: 'high',
 			}),
 		]);
-		for (let i = 0; i < 4; i++) {
-			await appendKnowledgeEvent(tmp, {
-				type: 'applied',
-				event_id: `applied-${i}`,
-				trace_id: `trace-${i}`,
-				knowledge_id: id,
-				timestamp: `2026-01-01T00:00:0${i}.000Z`,
-				session_id: 's',
-				agent: 'coder',
-			});
-		}
+		await seedReceiptHistory(tmp, id, 'applied', 4, 'strong');
 
 		const cands = await selectCandidateEntries(tmp, {
 			minConfidence: 0.85,
@@ -184,10 +181,9 @@ describe('selectCandidateEntries', () => {
 	});
 	it('blocks a high-priority entry whose failure events produce a net-negative signal (F-007b)', async () => {
 		// Verify the negative-outcome block works end-to-end through
-		// selectCandidateEntries with event-sourced 'outcome' events (not just
-		// inline retrieval_outcomes on the entry). This exercises the additive
-		// merge path: entry counts = 0 (new-style entry), rollup counts built
-		// from emitted 'outcome' events, effectiveRetrievalOutcomes merges them.
+		// selectCandidateEntries with V2 receipt terminals (not just inline
+		// retrieval_outcomes on the entry). This exercises the authoritative
+		// merge path with a new-style entry whose stored counters are zero.
 		await seed([
 			makeEntry('high-prio-failing', {
 				confidence: 0.65,
@@ -202,17 +198,13 @@ describe('selectCandidateEntries', () => {
 			}),
 		]);
 		// Emit 3 failure outcomes — enough to drive outcome signal negative.
-		for (let i = 0; i < 3; i++) {
-			await appendKnowledgeEvent(tmp, {
-				type: 'outcome',
-				trace_id: `fail-trace-${i}`,
-				knowledge_id: 'high-prio-failing',
-				outcome: 'failure',
-				evidence_summary: `phase ${i + 1} failed`,
-				session_id: 's',
-				agent: 'coder',
-			} as Parameters<typeof appendKnowledgeEvent>[1]);
-		}
+		await seedReceiptHistory(
+			tmp,
+			'high-prio-failing',
+			'violated',
+			3,
+			'failing',
+		);
 
 		const cands = await selectCandidateEntries(tmp, {
 			minConfidence: 0.6,
@@ -270,17 +262,7 @@ describe('generateSkills draft mode', () => {
 				directive_priority: 'high',
 			}),
 		]);
-		for (let i = 0; i < 4; i++) {
-			await appendKnowledgeEvent(tmp, {
-				type: 'applied',
-				event_id: `singleton-applied-${i}`,
-				trace_id: `singleton-trace-${i}`,
-				knowledge_id: id,
-				timestamp: `2026-01-02T00:00:0${i}.000Z`,
-				session_id: 's',
-				agent: 'coder',
-			});
-		}
+		await seedReceiptHistory(tmp, id, 'applied', 4, 'singleton');
 
 		const result = await generateSkills({
 			directory: tmp,

@@ -1,3 +1,4 @@
+import path from 'node:path';
 import type { ToolDefinition } from '@opencode-ai/plugin/tool';
 import { z } from 'zod';
 import {
@@ -89,6 +90,10 @@ const RUN_FIELD_ALLOWLIST = new Set([
 	'updatedAt',
 ]);
 
+const PR_FIELD_ALIASES = new Map<string, string>([
+	['changed_files', 'changedFiles'],
+]);
+
 interface GhEvidenceResult {
 	target: 'pr' | 'issue' | 'run';
 	number: number;
@@ -111,8 +116,43 @@ interface GhEvidenceError {
 	message: string;
 }
 
+interface GhBinaryCandidateOptions {
+	env?: Pick<
+		NodeJS.ProcessEnv,
+		'ProgramFiles' | 'ProgramFiles(x86)' | 'LOCALAPPDATA'
+	>;
+	platform?: NodeJS.Platform;
+}
+
+export function resolveGhBinaryCandidates(
+	options: GhBinaryCandidateOptions = {},
+): string[] {
+	const platform = options.platform ?? process.platform;
+	if (platform !== 'win32') return ['gh'];
+
+	const env = options.env ?? process.env;
+	const candidates = ['gh'];
+	const pushCandidate = (...parts: string[]): void => {
+		const candidate = path.join(...parts);
+		if (!candidates.includes(candidate)) candidates.push(candidate);
+	};
+
+	if (env.ProgramFiles) {
+		pushCandidate(env.ProgramFiles, 'GitHub CLI', 'gh.exe');
+	}
+	if (env['ProgramFiles(x86)']) {
+		pushCandidate(env['ProgramFiles(x86)'], 'GitHub CLI', 'gh.exe');
+	}
+	if (env.LOCALAPPDATA) {
+		pushCandidate(env.LOCALAPPDATA, 'GitHub CLI', 'gh.exe');
+		pushCandidate(env.LOCALAPPDATA, 'Programs', 'GitHub CLI', 'gh.exe');
+	}
+
+	return candidates;
+}
+
 function resolveGhBinary(): string | null {
-	return _internals.resolveExecutableFromPath(['gh']);
+	return _internals.resolveExecutableFromPath(resolveGhBinaryCandidates());
 }
 
 function normalizeRepo(value: unknown): string | undefined | GhEvidenceError {
@@ -157,13 +197,17 @@ function normalizeFields(
 			message: 'fields must be a comma-separated string or string array',
 		};
 	}
+	const canonicalizeField = (field: string): string =>
+		target === 'pr' ? (PR_FIELD_ALIASES.get(field) ?? field) : field;
 	const allowlist =
 		target === 'pr'
 			? PR_FIELD_ALLOWLIST
 			: target === 'issue'
 				? ISSUE_FIELD_ALLOWLIST
 				: RUN_FIELD_ALLOWLIST;
-	const fields = Array.from(new Set(raw.map((f) => f.trim()).filter(Boolean)));
+	const fields = Array.from(
+		new Set(raw.map((f) => canonicalizeField(f.trim())).filter(Boolean)),
+	);
 	const allowedList = Array.from(allowlist).sort().join(', ');
 	if (fields.length === 0) {
 		return {
@@ -487,10 +531,12 @@ export const gh_evidence: ToolDefinition = createSwarmTool({
 });
 
 export const _internals: {
+	resolveGhBinaryCandidates: typeof resolveGhBinaryCandidates;
 	resolveExecutableFromPath: typeof resolveExecutableFromPath;
 	resolveGhBinary: typeof resolveGhBinary;
 	runExternalTool: typeof runExternalTool;
 } = {
+	resolveGhBinaryCandidates,
 	resolveExecutableFromPath,
 	resolveGhBinary,
 	runExternalTool,

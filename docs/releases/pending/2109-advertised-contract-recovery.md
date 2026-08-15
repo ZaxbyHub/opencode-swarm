@@ -17,3 +17,12 @@ issue: 2109
   dialogue, not a key under the YAML `qa_gates` object (which is the unrelated
   guardrails config), and added a ratchet test proving `critic_pre_plan` cannot be
   silently turned off once enabled.
+- Fixed a residual contract gap: the compaction hook now extracts the full task list
+  before stripping end-of-line ` ← CURRENT` markers, eliminating partial-marker
+  truncation; previously the marker could be cut mid-token when the list exceeded the
+  extraction budget.
+- Fixed ordering in missing-agent recovery guidance: the easy-fix dispatch hint now
+  appears before the last-resort warn-policy suggestion; a test asserts the ordering
+  invariant.
+- Added test coverage for the warn-policy recovery path and hardened both test suites
+  against ambient user config leakage via `XDG_CONFIG_HOME` isolation.

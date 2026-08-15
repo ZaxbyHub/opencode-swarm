@@ -23,11 +23,13 @@ import { error as _logErrorImpl } from '../utils/logger.js';
 import { isPlanCriticApproved } from './delegation-gate';
 import { computeNextMode } from './issue-trace-reducer';
 import {
+	implementationReviewReceiptExists,
 	publicationReceiptExists,
 	readIssueReference,
 	readPlanPhaseStatus,
 	readSpecIssueNumber,
 	readTraceState,
+	recurrenceSweepReceiptExists,
 	reproductionReceiptExists,
 	specExists,
 	writeTraceState,
@@ -44,6 +46,8 @@ export const _internals = {
 	specExists,
 	reproductionReceiptExists,
 	publicationReceiptExists,
+	recurrenceSweepReceiptExists,
+	implementationReviewReceiptExists,
 	isPlanCriticApproved,
 	logError: _logErrorImpl,
 };
@@ -210,6 +214,19 @@ export function createIssueTraceHook(
 					directory,
 					issueRef.number,
 				);
+				// Residual-B receipts (issue #2131): independent implementation
+				// review + recurrence sweep must both be recorded before the trace
+				// may hand off to commit-pr.
+				const _implementationReviewVerified =
+					await _internals.implementationReviewReceiptExists(
+						directory,
+						issueRef.number,
+					);
+				const _recurrenceSweepVerified =
+					await _internals.recurrenceSweepReceiptExists(
+						directory,
+						issueRef.number,
+					);
 
 				// 5. Call reducer
 				const result = computeNextMode({
@@ -223,6 +240,8 @@ export function createIssueTraceHook(
 						allPhasesComplete: phaseStatus.allComplete,
 						reproductionPermitted: _reproductionPermitted,
 						publicationObserved: _publicationObserved,
+						implementationReviewVerified: _implementationReviewVerified,
+						recurrenceSweepVerified: _recurrenceSweepVerified,
 					},
 				});
 

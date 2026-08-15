@@ -30,7 +30,6 @@ import { parseAcknowledgments } from './knowledge-application.js';
 import { escalateViolatedEntries } from './knowledge-escalator.js';
 import {
 	type KnowledgeEventInput,
-	newTraceId,
 	recordKnowledgeEvent,
 	recordKnowledgeEventsBatch,
 } from './knowledge-events.js';
@@ -39,6 +38,7 @@ import {
 	parseDelegateDirectiveTraceId,
 } from './knowledge-injector.js';
 import { readLinkPointer } from './knowledge-link.js';
+import { validateAndCommitTerminalBatch } from './knowledge-receipt-ledger.js';
 import {
 	type ReceiptItem,
 	validateReceipt,
@@ -104,6 +104,11 @@ export interface CollectDelegateAcksResult {
 	 * promotion evidence.
 	 */
 	unacknowledgedNonCritical: string[];
+	/** Typed authority failure: no V2 mutation was attempted. */
+	unverifiable?: {
+		code: 'missing_session_id';
+		detail: string;
+	};
 }
 
 /**
@@ -135,7 +140,14 @@ export async function collectDelegateAcks(params: {
 		const acks = parseAcknowledgments(params.transcript);
 		const ackedIds = new Set<string>();
 		const violatedIds = new Set<string>();
-		const sessionId = params.sessionId ?? 'unknown';
+		const sessionId = params.sessionId;
+		if (!sessionId) {
+			result.unverifiable = {
+				code: 'missing_session_id',
+				detail: 'Delegate acknowledgments require a real host session id',
+			};
+			return result;
+		}
 		const taskId = params.taskId ?? extractTaskId(params.prompt);
 		// (#1849 RC-4/R2) Recover the ORIGINAL retrieval trace_id from the
 		// directive block instead of minting an untied one. This links ack events
@@ -143,7 +155,7 @@ export async function collectDelegateAcks(params: {
 		// receipt validator requires (trace-existence + cited-ID membership). Fall
 		// back to a fresh trace only for legacy prompts without the trace header.
 		const recoveredTraceId = parseDelegateDirectiveTraceId(params.prompt);
-		const traceId = recoveredTraceId ?? newTraceId();
+		const traceId = recoveredTraceId ?? 'legacy-unverifiable';
 		// (#PRR-008) Legacy prompts (no trace_id header) have no matching `retrieved`
 		// event, so validateReceipt would ALWAYS return trace_not_found and drop
 		// every ack — then the unacknowledged-critical loop would falsely escalate
@@ -151,6 +163,14 @@ export async function collectDelegateAcks(params: {
 		// emit acks directly (the pre-#1849 behavior). Validation only applies when
 		// a real directive-block trace_id was recovered.
 		const isLegacyPrompt = recoveredTraceId === undefined;
+		let cohortId: string | undefined;
+		let linkId: string | undefined;
+		try {
+			cohortId = await ensureCohortIdCached(params.directory, sessionId);
+			linkId = readLinkPointer(params.directory)?.linkId;
+		} catch {
+			// Cohort correlation is optional; receipt authority remains project-local.
+		}
 
 		// (#1849 R2) Build the candidate items (one per acknowledged shown
 		// directive) and route them through the SHARED validator so the ack path
@@ -165,6 +185,12 @@ export async function collectDelegateAcks(params: {
 		for (const ack of acks) {
 			// Anti-spoofing: only honor acks for directives that were actually shown.
 			if (!shownById.has(ack.id)) continue;
+			// Preserve explicit-ACK mitigation even when correlation is malformed:
+			// silence must not be fabricated for an ID the delegate did mention.
+			// Authority is stricter: a V2 terminal is eligible only when the marker
+			// cites the exact trace carried by this prompt.
+			ackedIds.add(ack.id);
+			if (!isLegacyPrompt && ack.trace_id !== traceId) continue;
 			// Only terminal outcomes the validator accepts are routed; others
 			// (e.g. 'acknowledged') fall through to direct emit below for compat.
 			if (
@@ -184,25 +210,13 @@ export async function collectDelegateAcks(params: {
 		const eventIdByKnowledgeId = new Map<string, string>();
 
 		if (isLegacyPrompt) {
-			// (#PRR-008) Legacy path: emit acks directly without validation
-			// (no trace to validate against). Anti-spoofing (shownById) still holds.
+			// Issue #2031: a legacy prompt has no provable retrieval membership.
+			// Preserve explicit ACK presence so it is not mislabeled unacknowledged,
+			// but do not fabricate a trace, terminal, or promotion credit.
 			for (const ack of acks) {
 				if (!shownById.has(ack.id)) continue;
 				if (!ackByItemId.has(ack.id)) continue;
 				ackedIds.add(ack.id);
-				const written = await recordKnowledgeEvent(params.directory, {
-					type: ack.result,
-					trace_id: traceId,
-					knowledge_id: ack.id,
-					session_id: sessionId,
-					task_id: taskId,
-					agent: params.agent,
-					reason: ack.reason,
-				});
-				if (written?.event_id)
-					eventIdByKnowledgeId.set(ack.id, written.event_id);
-				if (ack.result === 'violated') violatedIds.add(ack.id);
-				result.emitted.push({ id: ack.id, type: ack.result });
 			}
 		} else {
 			const validation = await validateReceipt({
@@ -211,6 +225,8 @@ export async function collectDelegateAcks(params: {
 				session_id: sessionId,
 				task_id: taskId,
 				agent: params.agent,
+				cohort_id: cohortId,
+				source_link_id: linkId,
 				items: ackItems,
 				no_relevant_knowledge: false,
 			});
@@ -220,7 +236,7 @@ export async function collectDelegateAcks(params: {
 					const ack = ackByItemId.get(item.id);
 					if (!ack) continue;
 					ackedIds.add(item.id);
-					const written = await recordKnowledgeEvent(params.directory, {
+					await recordKnowledgeEvent(params.directory, {
 						type: item.outcome,
 						trace_id: traceId,
 						knowledge_id: item.id,
@@ -229,8 +245,11 @@ export async function collectDelegateAcks(params: {
 						agent: params.agent,
 						reason: ack.reason,
 					});
-					if (written?.event_id)
-						eventIdByKnowledgeId.set(item.id, written.event_id);
+					const authoritativeEventId =
+						validation.authoritative_event_ids[item.id];
+					if (authoritativeEventId) {
+						eventIdByKnowledgeId.set(item.id, authoritativeEventId);
+					}
 					if (item.outcome === 'violated') violatedIds.add(item.id);
 					result.emitted.push({ id: item.id, type: item.outcome });
 				}
@@ -268,8 +287,6 @@ export async function collectDelegateAcks(params: {
 		// knowledge_receipt tool so the dominant delegate-application path feeds
 		// evaluatePromotionPolicy. Cohort id resolved once-bounded + cached.
 		try {
-			const cohortId = await ensureCohortIdCached(params.directory, sessionId);
-			const linkId = readLinkPointer(params.directory)?.linkId;
 			const now = new Date().toISOString();
 			const evidenceRecords: PromotionEvidenceRecord[] = [];
 			for (const [kid, eid] of eventIdByKnowledgeId) {
@@ -301,9 +318,33 @@ export async function collectDelegateAcks(params: {
 		}
 
 		// Any critical that was shown but never acknowledged is a contract
-		// violation: record it as violated/unacknowledged and audit it.
-		for (const id of criticalIds) {
-			if (ackedIds.has(id)) continue;
+		// violation. Persist the authoritative V2 batch first; only committed
+		// pairs receive diagnostics, promotion/escalation, or audit projections.
+		const missingCriticalIds = criticalIds.filter((id) => !ackedIds.has(id));
+		let committedMissingCriticalIds = new Set<string>();
+		if (!isLegacyPrompt && missingCriticalIds.length > 0) {
+			const committed = await validateAndCommitTerminalBatch(params.directory, {
+				trace_id: traceId,
+				session_id: sessionId,
+				task_id: taskId,
+				agent: params.agent,
+				cohort_id: cohortId,
+				source_link_id: linkId,
+				items: missingCriticalIds.map((entry_id) => ({
+					entry_id,
+					outcome: 'violated' as const,
+					source: 'delegate',
+					reason: 'unacknowledged',
+				})),
+			});
+			if (committed.ok) {
+				committedMissingCriticalIds = new Set(
+					committed.committed.map((item) => item.entry_id),
+				);
+			}
+		}
+		for (const id of missingCriticalIds) {
+			if (!committedMissingCriticalIds.has(id)) continue;
 			result.unacknowledgedCriticals.push(id);
 			await recordKnowledgeEvent(params.directory, {
 				type: 'violated',

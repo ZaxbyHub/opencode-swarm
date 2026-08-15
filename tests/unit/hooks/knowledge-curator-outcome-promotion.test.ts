@@ -12,7 +12,10 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { KnowledgeConfigSchema } from '../../../src/config/schema';
 import { runAutoPromotion } from '../../../src/hooks/knowledge-curator';
-import { appendKnowledgeEvent } from '../../../src/hooks/knowledge-events';
+import {
+	commitDisplayedMembership,
+	validateAndCommitTerminalBatch,
+} from '../../../src/hooks/knowledge-receipt-ledger';
 import {
 	readKnowledge,
 	resolveSwarmKnowledgePath,
@@ -113,16 +116,21 @@ describe('runAutoPromotion outcome gate', () => {
 		expect(result.get('good')?.status).toBe('established');
 	});
 
-	test('blocks promotion using event-derived receipt counters when stored counters are stale', async () => {
+	test('blocks promotion using authoritative receipt counters when stored counters are stale', async () => {
 		const kp = resolveSwarmKnowledgePath(tempDir);
 		await rewriteKnowledge(kp, [entry('event-bad', 'candidate')]);
 		for (let i = 0; i < 8; i++) {
-			await appendKnowledgeEvent(tempDir, {
-				type: 'contradicted',
-				trace_id: `t-${i}`,
-				knowledge_id: 'event-bad',
+			const trace_id = `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`;
+			await commitDisplayedMembership(tempDir, {
+				trace_id,
 				session_id: 's',
 				agent: 'architect',
+				entries: [{ entry_id: 'event-bad', critical: false }],
+			});
+			await validateAndCommitTerminalBatch(tempDir, {
+				trace_id,
+				session_id: 's',
+				items: [{ entry_id: 'event-bad', outcome: 'contradicted' }],
 			});
 		}
 

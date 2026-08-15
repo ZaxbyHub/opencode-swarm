@@ -14,15 +14,20 @@
  * merge-queue kick-outs.
  *
  * Input contract:
- *   /swarm ci-simulate              → uses current HEAD branch
- *   /swarm ci-simulate <pr-ref>     → uses the specified branch/ref
+ *   /swarm ci-simulate                        → uses current HEAD branch
+ *   /swarm ci-simulate <pr-ref>               → uses the specified branch/ref
+ *   /swarm ci-simulate <pr-ref> --base <ref>  → validated explicit base for
+ *                                               stacked/release-branch PRs
  */
 
 import * as fs from 'node:fs';
 import * as fsPromises from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { getDefaultBaseBranch } from '../git/branch.js';
+import {
+	detectDefaultRemoteBranch,
+	getDefaultBaseBranch,
+} from '../git/branch.js';
 import {
 	type ExternalToolRunResult,
 	runExternalTool,
@@ -39,20 +44,24 @@ const OUTPUT_LIMIT_BYTES = 12_000;
 export const _internals: {
 	runExternalTool: typeof runExternalTool;
 	getDefaultBaseBranch: typeof getDefaultBaseBranch;
+	detectDefaultRemoteBranch: typeof detectDefaultRemoteBranch;
 	platform: string;
 	osTmpdir: () => string;
 	fs: {
 		existsSync: typeof fs.existsSync;
 		rmSync: typeof fs.rmSync;
+		realpathSync: (p: fs.PathLike) => string;
 	};
 } = {
 	runExternalTool,
 	getDefaultBaseBranch,
+	detectDefaultRemoteBranch,
 	platform: process.platform,
 	osTmpdir: () => os.tmpdir(),
 	fs: {
 		existsSync: fs.existsSync,
 		rmSync: fs.rmSync,
+		realpathSync: fs.realpathSync.native,
 	},
 };
 
@@ -169,12 +178,11 @@ async function setupWorktree(
 	baseBranch: string,
 	onWorktreeCreated: (worktreePath: string) => void,
 ): Promise<string> {
-	const worktreeBase = path.join(_internals.osTmpdir(), 'swarm-ci-simulate');
+	const rawBase = path.join(_internals.osTmpdir(), 'swarm-ci-simulate');
+	await fsPromises.mkdir(rawBase, { recursive: true });
+	const worktreeBase = _internals.fs.realpathSync(rawBase);
 	const worktreeName = `pr-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
 	const worktreePath = path.join(worktreeBase, worktreeName);
-
-	// Ensure the base directory exists
-	await fsPromises.mkdir(worktreeBase, { recursive: true });
 
 	// Create a detached worktree from the detected default branch
 	const addResult = await runGit(
@@ -208,33 +216,84 @@ async function setupWorktree(
 }
 
 /**
- * Removes the temporary worktree and its directory.
+ * Removes the temporary worktree NON-FORCE and fails closed when removal is
+ * blocked (issue #2131 criterion E).
+ *
+ * Contract (merge-queue-readiness skill): prefer non-force `git worktree
+ * remove`; verify the path is a REGISTERED worktree we created (containment
+ * under the swarm-ci-simulate temp base) before touching it; if removal fails,
+ * run `git worktree prune`, surface the block to the user, and DO NOT
+ * force-delete the directory — a blocked removal means the worktree state
+ * needs human attention (dirty files, locked, or in use).
+ *
+ * Returns an error message when cleanup is blocked (the caller surfaces it in
+ * the report and fails the simulation), or null on success.
  */
 async function cleanupWorktree(
 	worktreePath: string,
 	projectRoot: string,
-): Promise<void> {
-	// Try git worktree remove first
-	const removeResult = await runGit(
-		['worktree', 'remove', '--force', worktreePath],
-		projectRoot,
-	);
-
-	// Always clean up the directory itself
-	try {
-		if (_internals.fs.existsSync(worktreePath)) {
-			_internals.fs.rmSync(worktreePath, { recursive: true, force: true });
-		}
-	} catch {
-		// Best-effort cleanup
+): Promise<string | null> {
+	// Containment: only ever touch paths inside our own temp base. This guard
+	// makes it structurally impossible for a bad path to delete project files.
+	const rawBase = path.resolve(_internals.osTmpdir(), 'swarm-ci-simulate');
+	const worktreeBase = _internals.fs.existsSync(rawBase)
+		? _internals.fs.realpathSync(rawBase)
+		: rawBase;
+	const resolved = _internals.fs.existsSync(worktreePath)
+		? _internals.fs.realpathSync(worktreePath)
+		: path.resolve(worktreePath);
+	const pathEq =
+		_internals.platform === 'win32'
+			? (a: string, b: string) => a.toLowerCase() === b.toLowerCase()
+			: (a: string, b: string) => a === b;
+	const pathStartsWith =
+		_internals.platform === 'win32'
+			? (a: string, b: string) => a.toLowerCase().startsWith(b.toLowerCase())
+			: (a: string, b: string) => a.startsWith(b);
+	if (
+		!pathEq(resolved, worktreeBase) &&
+		!pathStartsWith(resolved, `${worktreeBase}${path.sep}`)
+	) {
+		return `[ci-simulate] refusing to clean up non-contained path ${worktreePath}`;
 	}
 
-	// If git worktree remove failed, log a warning but don't throw
+	// Registration: the path must be a worktree Git knows about. An
+	// unregistered path is not ours to remove.
+	const listResult = await runGit(
+		['worktree', 'list', '--porcelain'],
+		projectRoot,
+	);
+	if (listResult.exitCode !== 0) {
+		return `[ci-simulate] could not verify worktree registration: ${listResult.stderr.trim() || listResult.stdout.trim()}`;
+	}
+	const registered = listResult.stdout.split(/\r?\n/).some((line) => {
+		if (!line.startsWith('worktree ')) return false;
+		const raw = line.slice('worktree '.length).trim();
+		const canon = _internals.fs.existsSync(raw)
+			? _internals.fs.realpathSync(raw)
+			: path.resolve(raw);
+		return pathEq(canon, resolved);
+	});
+	if (!registered) {
+		// Already gone or never registered: nothing to remove, not an error.
+		if (!_internals.fs.existsSync(resolved)) return null;
+		return `[ci-simulate] path ${worktreePath} exists but is not a registered git worktree; remove it manually`;
+	}
+
+	// Non-force removal. A dirty or locked worktree fails here — by design.
+	const removeResult = await runGit(
+		['worktree', 'remove', worktreePath],
+		projectRoot,
+	);
 	if (removeResult.exitCode !== 0) {
+		// Best-effort metadata prune, then fail closed. Never force-delete.
+		await runGit(['worktree', 'prune'], projectRoot);
 		log(
 			`[ci-simulate] git worktree remove failed: ${removeResult.stderr.trim() || removeResult.stdout.trim()}`,
 		);
+		return `[ci-simulate] worktree removal BLOCKED for ${worktreePath}: ${removeResult.stderr.trim() || removeResult.stdout.trim()}. The directory was left in place intentionally — resolve the block (dirty files or lock) and remove it manually with 'git worktree remove'.`;
 	}
+	return null;
 }
 
 /**
@@ -328,8 +387,25 @@ export async function handleCiSimulateCommand(
 	directory: string,
 	args: string[],
 ): Promise<string> {
-	// Parse PR ref from args (first positional argument)
-	const prRef = args[0] ?? (await getCurrentBranchOrRef(directory));
+	// Parse args: first positional is the PR ref; an optional validated explicit
+	// base may be supplied as `--base <ref>` (issue #2131 criterion E — stacked
+	// or release-branch PRs must not be silently simulated against the default
+	// branch).
+	const baseFlagIndex = args.findIndex((token) => token === '--base');
+	let explicitBase: string | undefined;
+	let positional: string[];
+	if (baseFlagIndex !== -1) {
+		explicitBase = args[baseFlagIndex + 1];
+		if (!explicitBase || !isSafeGitRef(explicitBase)) {
+			return 'CI simulation failed: --base must be followed by a safe git branch or commit reference (e.g. --base origin/release-1.x).';
+		}
+		positional = args
+			.slice(0, baseFlagIndex)
+			.concat(args.slice(baseFlagIndex + 2));
+	} else {
+		positional = args;
+	}
+	const prRef = positional[0] ?? (await getCurrentBranchOrRef(directory));
 	if (!isSafeGitRef(prRef)) {
 		return 'CI simulation failed: PR ref must be a safe git branch or commit reference.';
 	}
@@ -349,10 +425,49 @@ export async function handleCiSimulateCommand(
 	};
 
 	try {
-		// Detect the default remote branch (handles origin/main, origin/master, etc.)
-		const baseBranch = _internals.getDefaultBaseBranch(directory);
-		if (!isSafeGitRef(baseBranch)) {
-			throw new Error('Detected default branch is not a safe git reference.');
+		// Resolve the default remote branch from Git metadata (issue #2131
+		// criterion E): origin/HEAD symbolic ref → init.defaultBranch →
+		// origin/main → origin/master, then VERIFY the resolved remote ref
+		// actually exists (init.defaultBranch can disagree with the real
+		// remote). This handles contributor forks and non-main default
+		// branches the old main/master-only probe missed; when nothing
+		// resolves we fail closed instead of guessing.
+		const detectedBranch = _internals.detectDefaultRemoteBranch(directory);
+		let baseBranch: string | null = null;
+		if (explicitBase) {
+			// A validated explicit base (issue #2131 criterion E): it must
+			// actually resolve in this repository before it is used.
+			const verify = await runGit(
+				['rev-parse', '--verify', '--quiet', explicitBase],
+				directory,
+			);
+			if (verify.exitCode !== 0) {
+				throw new Error(
+					`Explicit --base "${explicitBase}" does not resolve in this repository (git rev-parse --verify failed). Fetch it or correct the ref.`,
+				);
+			}
+			baseBranch = explicitBase;
+		}
+		if (!baseBranch) {
+			for (const candidate of [detectedBranch, 'main', 'master'].filter(
+				(branch): branch is string => Boolean(branch),
+			)) {
+				const candidateRef = `origin/${candidate}`;
+				if (!isSafeGitRef(candidateRef)) continue;
+				const verify = await runGit(
+					['rev-parse', '--verify', '--quiet', candidateRef],
+					directory,
+				);
+				if (verify.exitCode === 0) {
+					baseBranch = candidateRef;
+					break;
+				}
+			}
+		}
+		if (!baseBranch) {
+			throw new Error(
+				'Could not resolve an existing default remote branch (origin/HEAD, init.defaultBranch, origin/main, origin/master). Fetch first, or pass an explicit validated base with --base <ref>.',
+			);
 		}
 
 		// Step 1: Create worktree and merge
@@ -460,8 +575,18 @@ export async function handleCiSimulateCommand(
 			lines.push('---');
 			lines.push('');
 			lines.push('*Cleaning up temporary worktree...*');
-			await cleanupWorktree(worktreePath, directory);
-			lines.push(`Worktree removed: \`${worktreePath}\``);
+			const cleanupError = await cleanupWorktree(worktreePath, directory);
+			if (cleanupError) {
+				// Fail closed (issue #2131 criterion E): surface the blocked
+				// cleanup prominently instead of silently force-deleting.
+				lines.push('');
+				lines.push(`## ⚠️ WORKTREE CLEANUP BLOCKED`);
+				lines.push('');
+				lines.push(cleanupError);
+				result.success = false;
+			} else {
+				lines.push(`Worktree removed: \`${worktreePath}\``);
+			}
 		}
 	}
 

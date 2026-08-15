@@ -278,8 +278,11 @@ Before launching explorers (Phase 3), perform this exact standalone sequence:
    rejected dispatch: the merge base is recomputed against `base_ref`, and a
    local `main`/`refs/heads/main` that was never refreshed resolves to a
    different commit than `origin/main` for the same `base_sha`.
-4. Prove the full commit exists locally with
-   `git cat-file -e <full_pr_head_sha>^{commit}`.
+4. Prove the full commit exists locally with two portable standalone commands:
+   `git rev-parse --verify <full_pr_head_sha>^0`, then
+   `git cat-file -t <full_pr_head_sha>`. The second command must print
+   `commit`. This avoids shell/wrapper parsing differences around the
+   `^{commit}` suffix on Windows.
 5. Check out the exact PR filesystem with
    `git switch --detach <full_pr_head_sha>`. Do not use `--track FETCH_HEAD`:
    `FETCH_HEAD` is not a remote-tracking branch.
@@ -298,7 +301,11 @@ If refs cannot be fetched or checked out, state the limitation in the context pa
 ### Shell rules under the PR_REVIEW gate
 
 The gate accepts one command per tool call — never compose commands with
-`&&`, `;`, `|`, redirects (`>`, `>>`, `<`), or `$(...)`/`` ` `` substitution.
+`&&`, `;`, shell pipelines, redirects (`>`, `>>`, `<`), or `$(...)`/`` ` ``
+substitution. The only literal-pipe exception is inside one closed
+double-quoted `gh api --jq` argument with no backslash-escaped nested double
+quotes; that escape is ambiguous under `cmd.exe`. The exception does not
+permit an outer pipeline or any other control syntax.
 A single leading `cd <dir> &&` prefix and a trailing `2>&1` suffix are
 tolerated, but only on read-only commands. State-transition verbs — `git
 fetch`, `git checkout`, `git switch`, `git branch`, and `gh pr checkout` —
@@ -366,6 +373,12 @@ This intake includes:
 - PR body claims, linked issues, acceptance criteria, and test-plan claims,
 - commit messages and app/bot commits on the PR branch.
 
+When multiple CI/check runs have the same name, reconcile them by head SHA and
+time: the latest run for the exact bound head SHA supersedes an older same-check
+run on that same head. Keep an older failure only as historical diagnostic
+evidence; do not report it as the current PR state after a newer same-head run
+has completed successfully.
+
 When thread resolution state matters, prefer GraphQL review-thread inspection.
 If GraphQL is unavailable, keep the signal and mark
 `resolution_state: UNKNOWN`; do not drop it from scope.
@@ -389,8 +402,10 @@ gh api --paginate repos/{owner}/{repo}/pulls/{PR_NUMBER}/reviews
 ```
 
 `--paginate` requests every REST page. These three calls are gate-allowed as
-written; do not pipe any of them through `--jq`, `jq`, or another filter under
-the PR_REVIEW gate — piped commands are blocked (fail-closed on `|`). To
+written. A literal jq filter passed as one closed double-quoted `gh api --jq`
+argument is also allowed when it needs no backslash-escaped nested double
+quotes; use `gh_evidence` when a portable filter cannot meet that shape. A real
+shell pipeline to `jq` or another command remains blocked. To
 separate bot/automated reviews (Copilot, Codex, CodeRabbit, etc.) from human
 ones, apply the same predicate in context to the JSON already returned above
 — `user.type == "Bot"` or a `user.login` match against
@@ -590,7 +605,13 @@ PARALLEL WORK CHECK (pre-fix):
 
 ## Phase 0: Context Pack and Review Signal Collection
 
-Before launching explorers, build a compact `swarm-pr-review-context` in scratch or as a local artifact if file writes are allowed.
+Before launching explorers, build a compact `swarm-pr-review-context`. Under
+Profile A, do not create a scratch context-pack file after the controller gate
+activates: PR_REVIEW intentionally blocks arbitrary writes. Put the bounded
+shared scope, obligations, deterministic signals, and impact hints in
+`common_prompt`, and require every lane to inspect the exact bound diff itself.
+Under Profiles B/C, keep the context in working notes or a local artifact only
+when that runtime permits the write.
 
 The context pack must include, when available:
 
@@ -904,6 +925,13 @@ For ANY lane that failed (either mode):
 1. **Retry** (max 2 attempts) with materially different parameters — different session or prompt decomposition, while preserving the required structured async mode and exact head provenance.
 2. If a base lane fails under Profile A, retry only the failed `workflow_lane` identifiers with `dispatch_lanes_async`, `mode: "swarm-pr-review:base"`, the same exact `pr_head_sha`, and explorer agents. The durable gate joins successful provenance across the initial wave and retry batches. While that controller is active, blocking `dispatch_lanes` and direct Task dispatch are not equivalent because they cannot satisfy the structured provenance gate. Under Profiles B/C, retry only the failed `workflow_lane` identifiers with a fresh subagent or pass, the same exact `pr_head_sha`, and a materially different prompt decomposition.
 3. If no equivalent alternative can be verified, **STOP and surface the lane failure to the user as BLOCKED** with the lane id, scope, failure mode, retry attempts, and why equivalence could not be proven. Do not present partial findings, do not issue a review verdict, and do not synthesize from successful lanes. A low-quality partial review is worse than no review.
+4. Under Profile A: After the second failed retry, collect every lane to a
+   terminal state, do not probe downstream writers or micro lanes, call
+   `abort_pr_workflow` with `mode: "PR_REVIEW"`, `kind: "recovery"`, and a
+   non-empty one-line `reason` naming the failed lane and exhausted retries.
+   Then call `prepare_pr_workflow_checkout` with `operation: "restore"`.
+   Report the preserved failure only after the gate is cleared and the checkout
+   restoration either succeeds or returns a concrete manual-recovery diagnostic.
 
 ### Contract-failure diagnosis and recovery
 
@@ -1870,6 +1898,19 @@ parts, are left untouched) and re-wakes an idle parent session. A
 user interruption pauses every automatic wake path until a later explicit user
 turn settles; the durable gate remains available to continue or abort. Only
 emit the final report after the completion tool confirms that the gate cleared.
+If it reports `checkout_restore_required`, call
+`prepare_pr_workflow_checkout` with `operation: "restore"` before returning to
+the user. When `checkout_restore_receipts` lists multiple entries, one restore
+call reapplies all receipts that share the recorded destination; an optional
+listed `stash_oid` is an exact inventory assertion, not a selector that leaves
+the other receipts pending. Successfully applied stashes remain in Git as
+explicit safety backups and are listed in `retained_stash_oids`; the controller
+never drops a mutable `stash@{n}` selector. Restoration is
+conservative: a dirty/conflicted checkout, mixed destinations, another active
+PR session, a missing stash, or an invalid recovery receipt returns a
+manual-recovery diagnostic without resetting or dropping preserved state.
+Legacy receipts derive the exact original commit from the stash and restore a
+uniquely matching local branch when one exists (otherwise detached).
 
 Under Profiles B/C, no mechanical response gate exists: the Pre-Synthesis Gate
 checklist is the completion gate. Emit the final report only after every
@@ -1897,8 +1938,9 @@ when diagnosing why a review stopped resuming. Either way, the only exits
 are:
 
 1. **Diagnose and retry the canonical standalone sequence.** Run
-   `git fetch origin refs/pull/<N>/head`, verify
-   `git cat-file -e <full_pr_head_sha>^{commit}`, then run
+   `git fetch origin refs/pull/<N>/head`, verify with
+   `git rev-parse --verify <full_pr_head_sha>^0` and
+   `git cat-file -t <full_pr_head_sha>` (which must print `commit`), then run
    `git switch --detach <full_pr_head_sha>`. Do not use `--track FETCH_HEAD`.
    Confirm `git rev-parse HEAD` equals the authoritative PR head, then recompute the exact
    merge base with `git merge-base -- <base_ref> <pr_head_sha>` (single
@@ -1908,9 +1950,12 @@ are:
    and a one-line `reason` describing the blocker. The tool clears the durable gate state
    and stops the auto-resume loop. It refuses while PR workflow lanes are
    still in flight (collect their results with `collect_lane_results`
-   first) and refuses once a PR_FEEDBACK workflow is armed for publication
-   — in PR_REVIEW those refusals do not apply because there is no armed
-   publication state. An audit event is appended to `.swarm/events.jsonl`.
+   first). It accepts both unbound and bound PR_REVIEW workflows so exhausted
+   post-bind discovery or validation cannot strand the gate. An audit event is
+   appended to `.swarm/events.jsonl`.
+   When the tool reports `checkout_restore_required`, immediately call
+   `prepare_pr_workflow_checkout` with `operation: "restore"`; do not leave the
+   user detached from their original checkout with a hidden preserved stash.
 3. **Ask the user to run `/swarm abort-pr-workflow`** (a human-only
    restricted command; the agent cannot invoke it via `swarm_command`).
    This is the recovery path when the wake budget has suspended and the
@@ -1934,8 +1979,10 @@ or re-dispatching the disagreeing lane so its trigger_evaluation converges with
 the frozen ledger before re-binding.
 
 Abort is a recovery tool, not a coverage shortcut. Use it only when the
-bind/checkout path is genuinely unreachable; never use it to skip a
-coverage obligation that is merely expensive or inconvenient.
+bind/checkout path is genuinely unreachable or bounded structural recovery or
+retries are genuinely exhausted; never use it to skip a coverage obligation
+that is still recoverable, merely expensive, or inconvenient.
 
 On Profiles B/C there is no durable gate or auto-resume loop to clear: if the
-head bind is genuinely unreachable, report the blocker to the user and stop.
+head bind is genuinely unreachable or bounded lane recovery is exhausted,
+report the blocker to the user and stop.

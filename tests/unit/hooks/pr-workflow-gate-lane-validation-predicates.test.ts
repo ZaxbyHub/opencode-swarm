@@ -263,7 +263,7 @@ describe('PR review lane-local validation predicates', () => {
 		if (!result.ok) expect(result.failure.predicate).toBe('record.mode');
 	});
 
-	test('accepts prose framing but rejects a candidate table hidden in a fence', () => {
+	test('accepts prose framing and a strict terminal protocol fence', () => {
 		const framed = validInput();
 		framed.artifact!.text = `Summary before the contract.\n${TEXT}`;
 		expect(validatePrReviewDiscoveryLaneCompletion(framed)).toEqual({
@@ -273,8 +273,7 @@ describe('PR review lane-local validation predicates', () => {
 		const fenced = validInput();
 		fenced.artifact!.text = `\`\`\`text\n${TEXT}\n\`\`\``;
 		const result = validatePrReviewDiscoveryLaneCompletion(fenced);
-		expect(result.ok).toBe(false);
-		if (!result.ok) expect(result.failure.predicate).toBe('discovery.header');
+		expect(result).toEqual({ ok: true, salvaged: [LANE] });
 	});
 
 	test('rejects duplicate evidence across a consolidated lane', () => {

@@ -143,9 +143,9 @@ describe('prepare_pr_workflow_checkout — discovery mode', () => {
 		expect(result.included_untracked).toBe(false);
 		expect(result.paths_truncated).toBe(false);
 		expect(result.stash_oid).toMatch(/^[0-9a-f]{40,64}$/i);
-		expect(result.recovery).toContain(
-			`git stash apply --index ${result.stash_oid}`,
-		);
+		expect(result.recovery).toContain('operation=restore');
+		expect(result.recovery).toContain(`stash_oid=${result.stash_oid}`);
+		expect(result.recovery).not.toContain('git stash apply');
 		// The tree is clean after the stash.
 		expect((await expectGitSuccess(['status', '--porcelain'])).trim()).toBe('');
 		expect(await readReceipt()).toMatchObject({

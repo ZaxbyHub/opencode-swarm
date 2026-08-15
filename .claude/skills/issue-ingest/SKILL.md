@@ -84,17 +84,23 @@ its receipt gates ARE the mechanical implementation for the parts it owns):
 - **Plan-critic gate before EXECUTE** — the reducer will not advance to EXECUTE until the
   plan-critic approval is observed.
 - **Authoritative plan state** — read through the ledger-aware loader, never the projection.
+- **Independent implementation review before commit-pr handoff** — fresh-context reviewer
+  AND critic passes must both approve the diff; record them with
+  `record_implementation_review` (else the engine emits a one-shot review directive). The
+  receipt is an agent self-attestation of the fresh-context discipline; under
+  PR-review/feedback modes the mechanically authenticated reviewer gates remain the
+  PR-workflow machinery.
+- **Recurrence sweep before commit-pr handoff** — the defect class must be characterized,
+  searched with explicit predicates, every hit dispositioned, and a guardrail installed
+  with proof it catches the original defect (or the "no defect class" fast path recorded);
+  record it with `record_recurrence_sweep` (else the engine emits a one-shot sweep directive).
 - **Honest completion** — `publication_handoff` is NOT "resolved"; terminal `published` needs
   an issue-bound publication receipt.
 - **Durable delivery** — a transition persists only after its directive is delivered.
 
-The following Contract obligations are NOT mechanically enforced by the trace engine and
-remain the responsibility of the agent / owning skills (tracked as residual criterion-B
-work on issue #2131, not yet composed into this path): the **independent implementation
-review** (separate reviewer/critic contexts on the diff — when run under PR-review/feedback
-modes those are enforced by the PR-workflow gates, not by this trace engine) and the
-**recurrence sweep** (checking for related prior fixes of the same root cause). Surface
-both honestly in the trace's evidence; do not claim the Contract is fully composed here.
+With these receipts the Full-Resolution Contract is mechanically composed into this trace
+path end to end; the receipts are issue-bound and survive until the next `/swarm issue` or
+`/swarm reset`.
 
 RULES:
 - One question per message in INTAKE dialogue (max 6 questions)

@@ -18,7 +18,7 @@ This skill was originally written for desktop Claude Code (Windows) with `gh`
 CLI. In the **remote execution / GitHub MCP** environment, use the equivalent
 MCP tools instead:
 
-| Desktop / `gh` CLI | Remote MCP equivalent |
+| Capability needed | `gh` CLI | Example remote-MCP shape (resolve the real names via ToolSearch) |
 |---|---|
 | `gh pr checks <number>` | `mcp__github__pull_request_read` method `get_check_runs` |
 | `gh pr view <number> --json checks` | `mcp__github__pull_request_read` method `get_check_runs` |
@@ -26,9 +26,11 @@ MCP tools instead:
 | `gh pr edit --title` | `mcp__github__update_pull_request` with `title` |
 | `gh pr view --json mergeable` | `mcp__github__pull_request_read` method `get` |
 
-> MCP tool names are injected by the runtime harness and not guaranteed to be
-> stable across environments. Use `ToolSearch` to verify availability before
-> calling any `mcp__github__*` tool for the first time in a session.
+> MCP tool names are injected by the runtime harness and are NOT stable across
+> environments. Treat the right-hand column as an example SHAPE only: resolve
+> the actual tools by CAPABILITY (PR read with check-run support, job-log read,
+> PR update) via `ToolSearch` before first use in a session — never assume a
+> specific `mcp__github__*` name exists (issue #2131 finding 9).
 
 ## Step 1 — Fetch current status
 

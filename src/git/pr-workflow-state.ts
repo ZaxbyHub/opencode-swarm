@@ -141,6 +141,7 @@ async function activeOperations(gitDir: string): Promise<string[]> {
  */
 export async function classifyPrWorkflowGitState(
 	directory: string,
+	options: { ignoredPaths?: readonly string[] } = {},
 ): Promise<PrWorkflowGitState> {
 	const [statusResult, rootResult, gitDirResult] = await Promise.all([
 		_internals.runGitCapture(directory, [
@@ -171,8 +172,8 @@ export async function classifyPrWorkflowGitState(
 	}
 	const worktreeRoot = rootResult.stdout.trim();
 	const gitDir = gitDirResult.stdout.trim();
-	const parsed = parsePorcelainV2Snapshot(statusResult.stdout);
-	if (!worktreeRoot || !gitDir || !parsed) {
+	const parsedRaw = parsePorcelainV2Snapshot(statusResult.stdout);
+	if (!worktreeRoot || !gitDir || !parsedRaw) {
 		return {
 			kind: 'indeterminate',
 			code: 'GIT_STATE_INDETERMINATE',
@@ -180,7 +181,7 @@ export async function classifyPrWorkflowGitState(
 			requiredAction:
 				'Resolve the malformed or incomplete Git status before starting the PR workflow.',
 			evidence: evidence(
-				parsed,
+				parsedRaw,
 				worktreeRoot || null,
 				gitDir || null,
 				[],
@@ -188,6 +189,18 @@ export async function classifyPrWorkflowGitState(
 			),
 		};
 	}
+	const ignoredPaths = new Set(
+		(options.ignoredPaths ?? []).map((value) => value.replace(/\\/g, '/')),
+	);
+	const keepPath = (value: string): boolean =>
+		!ignoredPaths.has(value.replace(/\\/g, '/'));
+	const parsed: PorcelainV2Snapshot = {
+		...parsedRaw,
+		dirtyTrackedPaths: parsedRaw.dirtyTrackedPaths.filter(keepPath),
+		untrackedPaths: parsedRaw.untrackedPaths.filter(keepPath),
+		unmergedPaths: parsedRaw.unmergedPaths.filter(keepPath),
+		dirtySubmodulePaths: parsedRaw.dirtySubmodulePaths.filter(keepPath),
+	};
 
 	let operations: string[];
 	try {

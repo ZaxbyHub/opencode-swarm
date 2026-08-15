@@ -1,35 +1,34 @@
 /**
  * Verification tests for drift injection feature in src/hooks/knowledge-injector.ts
- *
- * Tests cover:
- * - Drift text prepended when reports exist and cachedInjectionText is populated
- * - No drift prepend when readPriorDriftReports returns empty array
- * - No drift prepend when buildDriftInjectionText returns empty string
- * - Error swallowing when readPriorDriftReports throws
- * - LAST report (highest phase) used when multiple reports exist
- * - No drift prepend when cachedInjectionText is null
  */
 
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 
 afterEach(() => {
+	restoreReceiptAuthority();
 	swarmState.activeAgent.clear();
 	mock.restore();
 });
 
-import { createKnowledgeInjectorHook } from '../../../src/hooks/knowledge-injector.js';
+import {
+	createKnowledgeInjectorHook,
+	_internals as injectorInternals,
+} from '../../../src/hooks/knowledge-injector.js';
 import type { RankedEntry } from '../../../src/hooks/knowledge-reader.js';
 import type {
 	KnowledgeConfig,
 	MessageWithParts,
 } from '../../../src/hooks/knowledge-types.js';
-// (#1849) Identity is recovered from swarmState.activeAgent (primary) or the
-// last user message's info.agent (fallback) — never from a role:'system'
-// message. Fixtures set swarmState.activeAgent and stamp a consistent
-// sessionID on every message.
 import { swarmState } from '../../../src/state';
+import { installKnowledgeReceiptAuthorityStub } from '../../helpers/knowledge-receipt-authority.js';
 
 const SESSION_ID = 'drift-session';
+let restoreReceiptAuthority = () => {};
+
+beforeEach(() => {
+	restoreReceiptAuthority =
+		installKnowledgeReceiptAuthorityStub(injectorInternals);
+});
 
 // ============================================================================
 // Mocks Setup

@@ -108,6 +108,22 @@ const StageACheckSchema = z
 						feedback_item_id: z.string().trim().min(1).max(120),
 						target: z.string().trim().min(1).max(500),
 						expected_behavior: z.string().trim().min(8).max(1_000),
+						/**
+						 * Issue #2131 criterion C4: the typed kind of proof this
+						 * mapping provides for the item. The mapping remains
+						 * structural (target must be selected by the executed
+						 * command), but the KIND declares what class of evidence it
+						 * is, replacing the old claim of one generic item-causal
+						 * reproduction.
+						 */
+						proof_kind: z.enum([
+							'defect',
+							'metadata',
+							'source-proof',
+							'conflict',
+							'ci',
+							'user-decision',
+						]),
 					})
 					.strict(),
 			)
@@ -2301,6 +2317,7 @@ export async function executeRunPrFeedbackStageA(
 								feedbackItemId: mapping.feedback_item_id,
 								target: mapping.target,
 								expectedBehavior: mapping.expected_behavior,
+								proofKind: mapping.proof_kind,
 							})),
 						}
 					: {}),

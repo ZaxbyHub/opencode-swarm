@@ -54,6 +54,8 @@ const requiredProjectSkillSlugs = [
 	'parallel-work-check',
 	'ci-fix-monitor',
 	'issue-tracer',
+	'orchestrating-subagents',
+	'durable-session-state',
 ];
 
 const expectedProjectSkillFiles = [

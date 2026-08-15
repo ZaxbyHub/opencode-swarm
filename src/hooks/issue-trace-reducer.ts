@@ -53,6 +53,10 @@ export interface WorkflowArtifacts {
 	reproductionPermitted: boolean;
 	/** A verifiable publication receipt has been observed (issue #2131 2.4). */
 	publicationObserved: boolean;
+	/** A valid recurrence-sweep receipt exists (issue #2131 residual B). */
+	recurrenceSweepVerified: boolean;
+	/** Fresh reviewer + critic APPROVE verdicts recorded (issue #2131 residual B). */
+	implementationReviewVerified: boolean;
 }
 
 export interface TransitionResult {
@@ -85,7 +89,9 @@ export interface ComputeNextModeParams {
  *   (f-block) Spec exists, no plan, reproduction NOT permitted → no-op
  *   (g) Plan exists but critic not approved              → no-op
  *   (h) Critic approved, phases incomplete, not yet PLAN_TO_EXECUTE → EXECUTE
- *   (i) All phases complete, not yet EXECUTE_TO_COMMIT   → publication_handoff + COMMIT directive
+ *   (i-pre1) Phases complete, impl-review receipt missing → one-shot REVIEW_GATE directive
+ *   (i-pre2) Impl-review ok, recurrence-sweep receipt missing → one-shot RECURRENCE_GATE directive
+ *   (i) All phases complete + both gates verified, not yet EXECUTE_TO_COMMIT → publication_handoff + COMMIT directive
  *
  * Idempotency: rows (f), (h), (i) return no-op when
  * `traceState.lastTransition` already equals the target transition value.
@@ -200,8 +206,50 @@ export function computeNextMode(
 		};
 	}
 
-	// Row (i): all phases complete → publication_handoff + COMMIT directive
+	// Rows (i-pre): all phases complete — issue #2131 residual B gates. Before
+	// the trace may hand off to commit-pr, the independent implementation
+	// review AND the recurrence sweep must be recorded. Each missing gate emits
+	// a ONE-SHOT directive (distinct sentinel) so the engine is never silently
+	// idle waiting for evidence; once fired it waits quietly for the receipt.
 	if (!workflowArtifacts.planExists) {
+		return noop;
+	}
+	if (
+		!workflowArtifacts.implementationReviewVerified &&
+		traceState.lastTransition !== 'REVIEW_GATE' &&
+		traceState.lastTransition !== 'RECURRENCE_GATE' &&
+		traceState.lastTransition !== 'EXECUTE_TO_COMMIT'
+	) {
+		return {
+			nextMode: 'EXECUTE',
+			directive:
+				'All implementation phases are complete, but the independent implementation review is not yet recorded. Dispatch a FRESH-context reviewer and then a FRESH-context critic over the implementation diff (separate contexts from the implementer); when both approve, call record_implementation_review (issueNumber, reviewerVerdict APPROVE, criticVerdict APPROVE, the reviewed diff base/head, and notes). The trace will not hand off to commit-pr until this receipt exists.',
+			nextLastTransition: 'REVIEW_GATE',
+			nextStatus: 'in_progress',
+		};
+	}
+	if (
+		workflowArtifacts.implementationReviewVerified &&
+		!workflowArtifacts.recurrenceSweepVerified &&
+		traceState.lastTransition !== 'RECURRENCE_GATE' &&
+		traceState.lastTransition !== 'EXECUTE_TO_COMMIT'
+	) {
+		return {
+			nextMode: 'EXECUTE',
+			directive:
+				'The implementation review is approved, but the recurrence sweep is not yet recorded. Characterize the defect class, search the repository with explicit predicates, disposition every hit (FIX / FALSE_POSITIVE / OUT_OF_CLASS / DEFERRED_WITH_USER_APPROVAL), and install a guardrail that provably catches the original defect — or record the "no defect class" fast path with a one-line justification. Then call record_recurrence_sweep. The trace will not hand off to commit-pr until this receipt exists.',
+			nextLastTransition: 'RECURRENCE_GATE',
+			nextStatus: 'in_progress',
+		};
+	}
+
+	// Row (i): all phases complete + both residual-B gates verified →
+	// publication_handoff + COMMIT directive. While either gate receipt is
+	// still missing, wait quietly (the one-shot directive above already fired).
+	if (
+		!workflowArtifacts.implementationReviewVerified ||
+		!workflowArtifacts.recurrenceSweepVerified
+	) {
 		return noop;
 	}
 	if (traceState.lastTransition === 'EXECUTE_TO_COMMIT') {

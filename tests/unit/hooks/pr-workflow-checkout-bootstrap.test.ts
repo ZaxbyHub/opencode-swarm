@@ -100,7 +100,12 @@ describe('PR workflow checkout bootstrap', () => {
 		).resolves.toBeUndefined();
 		await expect(
 			enforcePrWorkflowToolBefore(directory, 'review-bootstrap', 'shell', {
-				command: `git cat-file -e ${sha}^{commit}`,
+				command: `git rev-parse --verify ${sha}^0`,
+			}),
+		).resolves.toBeUndefined();
+		await expect(
+			enforcePrWorkflowToolBefore(directory, 'review-bootstrap', 'shell', {
+				command: `git cat-file -t ${sha}`,
 			}),
 		).resolves.toBeUndefined();
 		await expect(
@@ -120,11 +125,19 @@ describe('PR workflow checkout bootstrap', () => {
 			'git checkout main',
 			'gh pr checkout 1911',
 		]) {
-			await expect(
-				enforcePrWorkflowToolBefore(directory, 'review-guidance', 'shell', {
-					command,
-				}),
-			).rejects.toThrow('git switch --detach <full_pr_head_sha>');
+			const blocked = enforcePrWorkflowToolBefore(
+				directory,
+				'review-guidance',
+				'shell',
+				{ command },
+			);
+			await expect(blocked).rejects.toThrow(
+				'rev-parse --verify <full_pr_head_sha>^0',
+			);
+			await expect(blocked).rejects.toThrow('cat-file -t <full_pr_head_sha>');
+			await expect(blocked).rejects.toThrow(
+				'git switch --detach <full_pr_head_sha>',
+			);
 		}
 	});
 
@@ -328,13 +341,23 @@ describe('PR workflow checkout bootstrap', () => {
 			git(checkout, ['fetch', 'origin', 'refs/heads/pr-head']).status,
 		).toBe(0);
 
-		const verify = `git cat-file -e ${sha}^{commit}`;
+		const verify = `git rev-parse --verify ${sha}^0`;
 		await expect(
 			enforcePrWorkflowToolBefore(checkout, 'real-review', 'shell', {
 				command: verify,
 			}),
 		).resolves.toBeUndefined();
-		expect(git(checkout, ['cat-file', '-e', `${sha}^{commit}`]).status).toBe(0);
+		expect(
+			git(checkout, ['rev-parse', '--verify', `${sha}^0`]).stdout.trim(),
+		).toBe(sha);
+
+		const objectType = `git cat-file -t ${sha}`;
+		await expect(
+			enforcePrWorkflowToolBefore(checkout, 'real-review', 'shell', {
+				command: objectType,
+			}),
+		).resolves.toBeUndefined();
+		expect(git(checkout, ['cat-file', '-t', sha]).stdout.trim()).toBe('commit');
 
 		const switchCommand = `git switch --detach ${sha}`;
 		await expect(

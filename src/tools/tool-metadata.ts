@@ -240,7 +240,12 @@ export const TOOL_METADATA = {
 	},
 	prepare_pr_workflow_checkout: {
 		description:
-			'preserve explicit dirty tracked files before an unbound PR workflow checkout with an auditable recovery receipt',
+			'prepare an auditable PR workflow checkout or restore its exact original branch/HEAD and preserved stash after terminal cleanup',
+		agents: ['architect'],
+	},
+	record_implementation_review: {
+		description:
+			'record fresh-context reviewer + critic APPROVE verdicts for the implementation diff so the /swarm issue --trace workflow can satisfy its review gate before commit-pr handoff',
 		agents: ['architect'],
 	},
 	record_issue_publication: {
@@ -251,6 +256,16 @@ export const TOOL_METADATA = {
 	record_issue_reproduction: {
 		description:
 			'record the reproduction outcome for the current traced issue so the /swarm issue --trace workflow can satisfy its reproduction gate and transition to PLAN',
+		agents: ['architect'],
+	},
+	record_recurrence_sweep: {
+		description:
+			'record the recurrence sweep (defect class, predicates, hit dispositions, guardrail proof) so the /swarm issue --trace workflow can satisfy its recurrence gate before commit-pr handoff',
+		agents: ['architect'],
+	},
+	rebind_pr_feedback_head: {
+		description:
+			'rebind a PR_FEEDBACK workflow to a new verified remote PR head after merge/rebase/conflict repair, invalidating ancestry-bound receipts so the mechanical ladder re-runs',
 		agents: ['architect'],
 	},
 	run_pr_feedback_stage_a: {

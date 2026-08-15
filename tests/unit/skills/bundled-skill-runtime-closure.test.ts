@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import {
 	BUNDLED_PROJECT_SKILL_ROOT,
 	BUNDLED_PROJECT_SKILLS,
@@ -161,6 +161,79 @@ describe('bundled skill runtime dependency closure', () => {
 			expect(
 				statSync(
 					join(ROOT, '.opencode', 'skills', dependency, 'SKILL.md'),
+				).isFile(),
+			).toBe(true);
+		}
+	});
+
+	test('bare and relative skill references inside bundled skills resolve to the packaged closure (issue #2131 F)', () => {
+		// A skill name "exists" if any native tree ships a directory of that
+		// slug. A bundled skill that references such a name MUST have it in the
+		// packaged .opencode tree (and the registry) — otherwise the packaged
+		// runtime silently references a skill consumers never receive (the
+		// issue #2131 finding-6 class: swarm → orchestrating-subagents /
+		// durable-session-state that used to live only in .claude).
+		const knownSkillSlugs = new Set<string>();
+		for (const root of [
+			'.opencode/skills',
+			'.claude/skills',
+			'.agents/skills',
+		]) {
+			const dir = join(ROOT, ...root.split('/'));
+			if (!existsSync(dir)) continue;
+			for (const entry of readdirSync(dir)) {
+				if (statSync(join(dir, entry)).isDirectory())
+					knownSkillSlugs.add(entry);
+			}
+		}
+		expect(knownSkillSlugs.size).toBeGreaterThan(10);
+
+		const unresolvedBare: string[] = [];
+		const unresolvedRelative: string[] = [];
+		for (const slug of BUNDLED_PROJECT_SKILLS) {
+			for (const file of bundledSkillFiles(slug)) {
+				const source = readFileSync(file, 'utf8');
+				for (const match of source.matchAll(/`([a-z0-9][a-z0-9-]*)`/g)) {
+					const referencedSlug = match[1];
+					if (!knownSkillSlugs.has(referencedSlug)) continue;
+					if (!existsSync(join(ROOT, '.opencode', 'skills', referencedSlug))) {
+						unresolvedBare.push(
+							`${file}: bare reference \`${referencedSlug}\` exists in a native tree but is not packaged in .opencode/skills`,
+						);
+					}
+				}
+				for (const match of source.matchAll(
+					/(\.\.\/)+([a-z0-9._/-]+)\/SKILL\.md/g,
+				)) {
+					// Resolve against the referencing file's directory, and also
+					// try the repo-root-relative display convention used by the
+					// adapter-shim shape (`../../../.opencode/skills/<slug>/SKILL.md`
+					// is written to be read from the repository root).
+					const resolvedFromReferrer = resolve(dirname(file), match[0]);
+					const resolvedFromRepoRoot = match[2].startsWith('.')
+						? resolve(ROOT, match[2], 'SKILL.md')
+						: resolve(join(ROOT, '.opencode', 'skills'), match[2], 'SKILL.md');
+					if (
+						!existsSync(resolvedFromReferrer) &&
+						!existsSync(resolvedFromRepoRoot)
+					) {
+						unresolvedRelative.push(`${file}: ${match[0]}`);
+					}
+				}
+			}
+		}
+
+		expect(unresolvedBare).toEqual([]);
+		expect(unresolvedRelative).toEqual([]);
+		// The finding-6 dependencies are now genuinely packaged.
+		for (const required of [
+			'orchestrating-subagents',
+			'durable-session-state',
+		]) {
+			expect(BUNDLED_SET.has(required)).toBe(true);
+			expect(
+				statSync(
+					join(ROOT, '.opencode', 'skills', required, 'SKILL.md'),
 				).isFile(),
 			).toBe(true);
 		}

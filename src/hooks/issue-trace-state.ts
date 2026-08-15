@@ -86,6 +86,95 @@ async function _defaultPublicationReceiptExists(
 	}
 }
 
+async function _defaultRecurrenceSweepReceiptExists(
+	directory: string,
+	issueNumber: number,
+): Promise<boolean> {
+	try {
+		const filePath = path.join(directory, '.swarm', 'recurrence-sweep.json');
+		const raw = _internals.readFileSync(filePath, 'utf-8');
+		const parsed: unknown = JSON.parse(raw);
+		if (typeof parsed !== 'object' || parsed === null) return false;
+		const o = parsed as Record<string, unknown>;
+		if (
+			o.issueNumber !== issueNumber ||
+			typeof o.defectClass !== 'string' ||
+			o.defectClass.trim().length === 0
+		) {
+			return false;
+		}
+		const noDefectClass = o.defectClass === 'no defect class';
+		// Issue-tracer Phase 4.2 contract: a sweep over a real defect class must
+		// record its search predicates, a disposition for every hit, and a
+		// guardrail with proof it catches the original defect. The "no defect
+		// class" fast path (a change that corrects no incorrect behavior) needs
+		// only the one-line justification.
+		if (!noDefectClass) {
+			const predicates = o.predicates;
+			const dispositions = o.dispositions;
+			const guardrail = o.guardrail;
+			const validPredicates =
+				Array.isArray(predicates) &&
+				predicates.length > 0 &&
+				predicates.every((p) => typeof p === 'string' && p.trim().length > 0);
+			const validDispositions =
+				Array.isArray(dispositions) &&
+				dispositions.every(
+					(d) =>
+						typeof d === 'object' &&
+						d !== null &&
+						typeof (d as Record<string, unknown>).ref === 'string' &&
+						[
+							'FIX',
+							'FALSE_POSITIVE',
+							'OUT_OF_CLASS',
+							'DEFERRED_WITH_USER_APPROVAL',
+						].includes(String((d as Record<string, unknown>).disposition)),
+				);
+			const validGuardrail =
+				typeof guardrail === 'object' &&
+				guardrail !== null &&
+				typeof (guardrail as Record<string, unknown>).kind === 'string' &&
+				typeof (guardrail as Record<string, unknown>).proof === 'string';
+			if (!validPredicates || !validDispositions || !validGuardrail) {
+				return false;
+			}
+		} else if (
+			typeof o.justification !== 'string' ||
+			o.justification.trim().length === 0
+		) {
+			return false;
+		}
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+async function _defaultImplementationReviewReceiptExists(
+	directory: string,
+	issueNumber: number,
+): Promise<boolean> {
+	try {
+		const filePath = path.join(
+			directory,
+			'.swarm',
+			'implementation-review.json',
+		);
+		const raw = _internals.readFileSync(filePath, 'utf-8');
+		const parsed: unknown = JSON.parse(raw);
+		if (typeof parsed !== 'object' || parsed === null) return false;
+		const o = parsed as Record<string, unknown>;
+		return (
+			o.issueNumber === issueNumber &&
+			o.reviewerVerdict === 'APPROVE' &&
+			o.criticVerdict === 'APPROVE'
+		);
+	} catch {
+		return false;
+	}
+}
+
 export const _internals = {
 	readFileSync,
 	writeFileSync,
@@ -96,6 +185,8 @@ export const _internals = {
 	loadPlanFromLedger: _defaultLoadPlanFromLedger,
 	reproductionReceiptExists: _defaultReproductionReceiptExists,
 	publicationReceiptExists: _defaultPublicationReceiptExists,
+	recurrenceSweepReceiptExists: _defaultRecurrenceSweepReceiptExists,
+	implementationReviewReceiptExists: _defaultImplementationReviewReceiptExists,
 };
 
 // ── Helpers ────────────────────────────────────────────────────────
@@ -356,4 +447,30 @@ export async function publicationReceiptExists(
 	issueNumber: number,
 ): Promise<boolean> {
 	return _internals.publicationReceiptExists(directory, issueNumber);
+}
+
+/**
+ * Returns whether a valid recurrence-sweep receipt exists for the given issue
+ * (issue #2131 residual criterion B). Modeled on issue-tracer Phase 4.2: for a
+ * real defect class it must record search predicates, a typed disposition for
+ * every hit, and a guardrail with proof it catches the original defect; the
+ * "no defect class" fast path requires a one-line justification.
+ */
+export async function recurrenceSweepReceiptExists(
+	directory: string,
+	issueNumber: number,
+): Promise<boolean> {
+	return _internals.recurrenceSweepReceiptExists(directory, issueNumber);
+}
+
+/**
+ * Returns whether a valid independent implementation-review receipt exists for
+ * the given issue (issue #2131 residual criterion B): fresh reviewer AND critic
+ * contexts both recorded APPROVE verdicts for the implementation diff.
+ */
+export async function implementationReviewReceiptExists(
+	directory: string,
+	issueNumber: number,
+): Promise<boolean> {
+	return _internals.implementationReviewReceiptExists(directory, issueNumber);
 }

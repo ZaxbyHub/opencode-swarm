@@ -176,7 +176,9 @@ tree:
   before binding (Profile A). Omit `paths` to auto-discover and atomically
   preserve every dirty path, including untracked files; pass explicit `paths`
   only for an exact bounded tracked-file set. It creates an auditable stash
-  receipt and recovery command. Do not issue `git stash` through shell.
+  receipt containing the original branch/HEAD and a structured
+  `operation: "restore"` recovery instruction. Do not issue `git stash`
+  through shell.
   Without the controller, surface dirty state to the user or abort the checkout
   — do not blind-stash.
 - Treat `recovery-required` and `indeterminate` controller results as terminal
@@ -617,9 +619,31 @@ settle on the Stage-A digest. After they settle, only one standalone `git commit
 command may create the reviewed commit; push and remote publication remain
 blocked until that exact commit is armed. The first completion requires a clean
 index/worktree and a non-merge direct child commit whose sole parent is the
-immutable intake head, so zero commits, multiple commits, merge commits,
+immutable intake head, so multiple commits, merge commits,
 amend/non-descendant histories,
 `--allow-empty`, and partially committed reviewed content fail closed. There is no speed, efficiency, token, or time exception.
+
+**Verified no-change terminal (issue #2131 C1).** When the ENTIRE immutable
+inventory is verified as a no-change outcome — every `FB-###` item classified
+`DISPROVED`, `PRE_EXISTING`, `NEEDS_MORE_EVIDENCE`, or `NEEDS_USER_DECISION`
+in the settled verification lanes — a correct workflow needs NO content commit.
+After every ordered gate settles, call `complete_pr_workflow` with the intake
+`pr_head_sha` while HEAD still equals that intake head and the tree is clean:
+it returns `verified-no-change` and clears the gate terminally (nothing to
+publish; an empty or `--allow-empty` commit is still forbidden). Any item
+classified `CONFIRMED`/`PARTIAL` requires the ordinary exactly-one-reviewed-
+commit path above.
+
+**Base-sync/rebind (issue #2131 C2).** When base drift or merge conflicts force
+a merge/rebase, the repaired history is no longer a direct child of the intake
+head and the ordinary publication path can never be satisfied. Do NOT abort
+ad-hoc: finish the repair, fetch the new authoritative PR head, check it out,
+then call `rebind_pr_feedback_head` with the new full PR head SHA. It moves the
+immutable intake head to the new head, preserves the immutable inventory, and
+invalidates every ancestry-bound receipt (Stage A, verification, ordered
+gates) — re-run the entire mechanical ladder on the new ancestry. It refuses a
+no-op rebind, refuses while publication is armed, and refuses while lanes are
+in flight.
 
 **Without the controller (Profiles B/C).** The same gates run in the same
 order with the same one-row-per-feedback-ID verdict contracts; what changes is
@@ -689,9 +713,13 @@ because a name such as `test` or `build` can hide a no-op. A
 reproduction must also return non-empty machine-observable runner output.
 The reproduction check also supplies one `feedback_targets` row per immutable
 feedback ID, in inventory order: exact `feedback_item_id`, one executed `target`,
-and concrete `expected_behavior`. Missing, duplicate, invented, or target-less
-mappings block Stage B; the controller persists that exact per-item mapping
-rather than stamping an unrelated test onto the whole inventory.
+concrete `expected_behavior`, and a typed `proof_kind` (`defect`, `metadata`,
+`source-proof`, `conflict`, `ci`, or `user-decision`). Missing, duplicate,
+invented, target-less, or kind-less mappings block Stage B; the controller
+persists that exact per-item mapping. This is a STRUCTURAL mapping with a typed
+proof kind — it proves each item maps to a target the executed command actually
+selects, not that the target is causally decisive for that item; the Stage B
+reviewer lane owns that judgement (issue #2131 C4).
 No-op/help/list/dry-run,
 fix/update, package publication/deployment, Git mutation, remote client,
 shell/eval/wrapper, and credentialed publication surfaces fail closed. The
@@ -872,7 +900,18 @@ open. While the gate remains active, the runtime prepends a workflow-active
 banner to architect text (the model's text is preserved below it) and normally re-wakes an
 idle parent session. A user interruption pauses automatic wakes until a later
 explicit user turn settles; the durable gate remains available to continue or
-abort.
+abort. When the terminal response reports `checkout_restore_required`, call
+`prepare_pr_workflow_checkout` with `operation: "restore"` before returning to
+the user. When `checkout_restore_receipts` lists multiple entries, one restore
+call reapplies all receipts that share the recorded destination; an optional
+listed `stash_oid` is an exact inventory assertion, not a selector that leaves
+the other receipts pending. Successfully applied stashes remain in Git as
+explicit safety backups and are listed in `retained_stash_oids`; the controller
+never drops a mutable `stash@{n}` selector. The restore refuses
+dirty, mixed-destination, missing-stash, invalid-receipt, cross-session, or
+divergent state without reset/clean and preserves recovery evidence on failure.
+Legacy receipts derive their original commit from the preserved stash and
+select a uniquely matching local branch when available.
 
 Under Profiles B/C, no mechanical gate exists: emit the final response only
 after the closure ledger accounts for every original item and the pushed
@@ -903,5 +942,8 @@ arming you MUST complete via `complete_pr_workflow` (or push the bound
 commit first), because aborting an armed gate would drop the immutable-
 commit binding and leave a half-published commit. The user can also run
 `/swarm abort-pr-workflow` once the wake budget suspends. Abort is a
-recovery tool, not a gate-skip shortcut. On Profiles B/C there is no durable
+recovery tool for unbound or bound pre-publication workflows after bounded
+recovery is exhausted, not a gate-skip shortcut. When abort reports
+`checkout_restore_required`, call `prepare_pr_workflow_checkout` with
+`operation: "restore"` before returning. On Profiles B/C there is no durable
 gate to abort: report the blocker to the user and stop.

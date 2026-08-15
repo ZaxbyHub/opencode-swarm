@@ -9,6 +9,7 @@ import {
 	activatePrWorkflow,
 	bindPrWorkflowHead,
 	type PrWorkflowCheckoutMutationTimeoutError,
+	withInactivePrWorkflowCheckoutRestoreLock,
 	withPrWorkflowCheckoutMutationLock,
 	withPrWorkflowCheckoutPreparationLock,
 } from '../../../src/hooks/pr-workflow-gate';
@@ -310,6 +311,111 @@ describe('project-scoped checkout mutation lock', () => {
 			),
 		).resolves.toBe('second-entered');
 		await expect(fs.stat(lockPath)).rejects.toMatchObject({ code: 'ENOENT' });
+	});
+
+	test('serializes an inactive restore window against same-session activation', async () => {
+		let releaseRestore!: () => void;
+		let restoreEntered!: () => void;
+		const entered = new Promise<void>((resolve) => {
+			restoreEntered = resolve;
+		});
+		const release = new Promise<void>((resolve) => {
+			releaseRestore = resolve;
+		});
+		const restore = withInactivePrWorkflowCheckoutRestoreLock(
+			directory,
+			'restore-race',
+			async () => {
+				restoreEntered();
+				await release;
+			},
+		);
+		await entered;
+		let activated = false;
+		const activation = activatePrWorkflow(
+			directory,
+			'restore-race',
+			'PR_REVIEW',
+		).then(() => {
+			activated = true;
+		});
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(activated).toBe(false);
+		releaseRestore();
+		await Promise.all([restore, activation]);
+		expect(activated).toBe(true);
+	});
+
+	describe('checkout restore regression: cross-session active gates (CS-2164-001)', () => {
+		test('allows restoration when the project has no active gate', async () => {
+			let entered = false;
+			await expect(
+				withInactivePrWorkflowCheckoutRestoreLock(
+					directory,
+					'inactive-restore',
+					async () => {
+						entered = true;
+					},
+				),
+			).resolves.toBeUndefined();
+			expect(entered).toBe(true);
+		});
+
+		test('rejects before mutation when another session has an active gate', async () => {
+			// Previous code inspected only the restoring session, so a different
+			// active session could have its checkout changed underneath it.
+			await activatePrWorkflow(directory, 'other-active', 'PR_REVIEW');
+			let entered = false;
+			await expect(
+				withInactivePrWorkflowCheckoutRestoreLock(
+					directory,
+					'inactive-restore',
+					async () => {
+						entered = true;
+					},
+				),
+			).rejects.toThrow(/other-active.*active PR_REVIEW workflow/i);
+			expect(entered).toBe(false);
+		});
+
+		test('serializes a different-session activation after restoration', async () => {
+			// Previous code let this activation persist while the project checkout
+			// was being restored because the two session locks were independent.
+			let releaseRestore!: () => void;
+			let restoreEntered!: () => void;
+			const entered = new Promise<void>((resolve) => {
+				restoreEntered = resolve;
+			});
+			const release = new Promise<void>((resolve) => {
+				releaseRestore = resolve;
+			});
+			const restore = withInactivePrWorkflowCheckoutRestoreLock(
+				directory,
+				'inactive-restore',
+				async () => {
+					restoreEntered();
+					await release;
+				},
+			);
+			await entered;
+
+			let activated = false;
+			const activation = activatePrWorkflow(
+				directory,
+				'other-session',
+				'PR_REVIEW',
+			).then(() => {
+				activated = true;
+			});
+			await Promise.resolve();
+			await Promise.resolve();
+			expect(activated).toBe(false);
+
+			releaseRestore();
+			await Promise.all([restore, activation]);
+			expect(activated).toBe(true);
+		});
 	});
 
 	test('rejects a live cross-process contender before entering its action', async () => {
