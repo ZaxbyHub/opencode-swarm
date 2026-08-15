@@ -18,7 +18,7 @@ describe('allowedMutationsFor', () => {
 
 	beforeEach(() => {
 		tempDir = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-mutations-')),
+			fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'sdd-mutations-')),
 		);
 		// Create openspec fixture so handleSddStatusCommand has an effective spec
 		fs.mkdirSync(path.join(tempDir, 'openspec'), { recursive: true });
@@ -82,7 +82,9 @@ describe('allowedMutationsFor', () => {
 
 	test('wired into `/swarm sdd status` markdown for a native swarm effective spec', async () => {
 		const nativeDir = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'sdd-mutations-native-')),
+			fs.mkdtempSync(
+				path.join(fs.realpathSync(os.tmpdir()), 'sdd-mutations-native-'),
+			),
 		);
 		try {
 			fs.mkdirSync(path.join(nativeDir, '.swarm'), { recursive: true });

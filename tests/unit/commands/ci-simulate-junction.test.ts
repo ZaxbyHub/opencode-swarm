@@ -151,7 +151,9 @@ describe('handleCiSimulateCommand with a symlinked/junctioned tmpdir (realpathSy
 		gitPush(tempDir, 'origin', 'main');
 
 		realBaseParent = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'ci-sim-realbase-')),
+			fs.mkdtempSync(
+				path.join(fs.realpathSync(os.tmpdir()), 'ci-sim-realbase-'),
+			),
 		);
 		junctionDir = path.join(
 			fs.realpathSync(os.tmpdir()),
@@ -193,7 +195,7 @@ describe('handleCiSimulateCommand with a symlinked/junctioned tmpdir (realpathSy
 		}
 	});
 
-	it('sets up and cleans up the worktree when os.tmpdir() resolves through a symlink/junction', async () => {
+	it('sets up and cleans up the worktree when the temp dir resolves through a symlink/junction', async () => {
 		if (!junctionSupported) {
 			return;
 		}
