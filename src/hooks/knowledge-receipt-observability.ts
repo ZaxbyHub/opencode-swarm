@@ -5,6 +5,25 @@
 import { emit } from '../telemetry.js';
 import type { ReceiptOutcome } from './knowledge-receipt-validator.js';
 
+/**
+ * Semantic version of the outcome/source MEANING contract (issue #2032).
+ * 1 = pre-#2032 producer semantics (outcome words meant different things per
+ * producer; delegate terminals carried no source). 2 = the #2032 atomic
+ * semantics: one typed outcome/source vocabulary, delegate terminals stamped
+ * `source: 'delegate'`, `n_a` neutral everywhere, legacy ambiguity `unknown`.
+ * Distinct from the journal `RECEIPT_SCHEMA_VERSION` (a hard format gate).
+ * Bump this whenever a producer or consumer changes what an outcome or source
+ * MEANS, so health/reports consumers can distinguish producer behavior and
+ * migration uncertainty.
+ */
+export const RECEIPT_SEMANTICS_VERSION = 2;
+
+/**
+ * Outcomes observable on a transition. Terminal outcomes plus the trace-level
+ * `no_relevant` tombstone that closes an empty retrieval (not a terminal).
+ */
+export type ReceiptObservationOutcome = ReceiptOutcome | 'no_relevant';
+
 export type KnowledgeReceiptObservedTransition =
 	| 'membership_committed'
 	| 'empty_retrieval_committed'
@@ -48,9 +67,15 @@ export interface KnowledgeReceiptTransitionObservation {
 	taskId?: string;
 	phase?: string;
 	/** Domain value only; never projected to the generic observability outcome. */
-	receiptOutcome?: ReceiptOutcome;
+	receiptOutcome?: ReceiptObservationOutcome;
 	/** Bounded domain code only; arbitrary prose is deliberately rejected. */
 	receiptSource?: string;
+	/**
+	 * Outcome/source semantics contract version. Optional so existing ledger
+	 * observation constructors need no churn; the emitter defaults it to
+	 * {@link RECEIPT_SEMANTICS_VERSION}.
+	 */
+	receiptSemantics?: number;
 }
 
 const TRANSITIONS = new Set<KnowledgeReceiptObservedTransition>([
@@ -88,7 +113,7 @@ const REASON_CODES = new Set<KnowledgeReceiptObservationReasonCode>([
 	'unauthorized_transition',
 ]);
 
-const RECEIPT_OUTCOMES = new Set<ReceiptOutcome>([
+const RECEIPT_OUTCOMES = new Set<ReceiptObservationOutcome>([
 	'applied',
 	'ignored',
 	'contradicted',
@@ -97,7 +122,8 @@ const RECEIPT_OUTCOMES = new Set<ReceiptOutcome>([
 	'no_relevant',
 ]);
 
-// Extensible until #2032, but forbids whitespace, prose, paths, and long text.
+// BOUNDED_CODE is the post-#2032 stable contract for receiptSource; further
+// extensions require a RECEIPT_SEMANTICS_VERSION bump.
 const BOUNDED_CODE = /^[a-z][a-z0-9_-]{0,63}$/;
 
 function boundedCode(value: unknown): string | undefined {
@@ -138,6 +164,14 @@ export function emitKnowledgeReceiptTransition(
 			reasonCode: observation.reasonCode,
 			schemaVersion: observation.schemaVersion,
 		};
+		const semanticsVersion =
+			observation.receiptSemantics ?? RECEIPT_SEMANTICS_VERSION;
+		if (
+			Number.isSafeInteger(semanticsVersion) &&
+			semanticsVersion >= 1
+		) {
+			payload.receiptSemantics = semanticsVersion;
+		}
 		addIdentifier(payload, 'knowledgeTraceId', observation.knowledgeTraceId);
 		addIdentifier(payload, 'knowledgeEntryId', observation.knowledgeEntryId);
 		addIdentifier(payload, 'sessionId', observation.sessionId);

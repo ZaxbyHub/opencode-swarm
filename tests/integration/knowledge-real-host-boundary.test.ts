@@ -273,7 +273,7 @@ describe('issue #1849 — real-host boundary end-to-end through src/index.ts', (
 		);
 		expect(wrongOut.recorded).toBe(false);
 
-		// Conflicting: file applied, then ignored for same (trace, id).
+		// Conflicting: file applied, then n_a for same (trace, id).
 		await knowledge_receipt.execute(
 			{
 				trace_id: traceId,
@@ -284,7 +284,7 @@ describe('issue #1849 — real-host boundary end-to-end through src/index.ts', (
 		const conflict = await knowledge_receipt.execute(
 			{
 				trace_id: traceId,
-				ignored: [{ id: 'k1', reason: 'not_relevant' }],
+				n_a: [{ id: 'k1', reason: 'changed my mind — not applicable' }],
 			} as never,
 			toolCtx,
 		);

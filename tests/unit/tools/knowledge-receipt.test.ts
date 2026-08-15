@@ -13,7 +13,7 @@ import {
 	resolveSwarmKnowledgePath,
 } from '../../../src/hooks/knowledge-store';
 import type { SwarmKnowledgeEntry } from '../../../src/hooks/knowledge-types';
-import { knowledge_receipt } from '../../../src/tools/knowledge-receipt';
+import { _internals, knowledge_receipt } from '../../../src/tools/knowledge-receipt';
 
 const ctx = (directory: string): any => ({
 	directory,
@@ -218,6 +218,134 @@ describe('knowledge_receipt', () => {
 		);
 		expect(
 			entries.some((e) => e.lesson.includes('Bound every subprocess')),
+		).toBe(true);
+	});
+
+	it('regression: accepts reasoned n_a items as neutral terminals with delegate source (#2032)', async () => {
+		// Previous behavior: the tool had no n_a channel, so a not-applicable
+		// entry could only be filed through the NEGATIVE ignored path (whose
+		// enum even contained 'not_relevant'). Irrelevance damaged ranking.
+		await appendKnowledgeEvent(dir, {
+			type: 'retrieved',
+			trace_id: 'trace-na',
+			session_id: 'sess-1',
+			agent: 'coder',
+			query: 'q',
+			retrieval_mode: 'auto_injection',
+			result_ids: ['k-na'],
+			ranks: { 'k-na': 1 },
+			scores: { 'k-na': 1 },
+			timestamp: new Date().toISOString(),
+		});
+		const raw = await knowledge_receipt.execute(
+			{
+				trace_id: 'trace-na',
+				n_a: [{ id: 'k-na', reason: 'directive targets web routing; task is CLI-only' }],
+			} as never,
+			ctx(dir),
+		);
+		const parsed = JSON.parse(raw);
+		expect(parsed.recorded).toBe(true);
+		expect(parsed.n_a).toBe(1);
+
+		const events = (await readKnowledgeEvents(dir)).filter(
+			(e): e is ReceiptEvent => e.type === 'n_a',
+		);
+		expect(events).toHaveLength(1);
+		expect(events[0].knowledge_id).toBe('k-na');
+		expect(events[0].reason).toContain('CLI-only');
+		expect(events[0].source).toBe('delegate');
+
+		const authority = await queryLiveMemberships(dir, {
+			include_terminal: true,
+		});
+		if (!authority.ok) throw new Error(authority.detail);
+		const terminal = authority.memberships.find(
+			(m) => m.entry_id === 'k-na',
+		)?.terminal;
+		expect(terminal?.outcome).toBe('n_a');
+		expect(terminal?.source).toBe('delegate');
+	});
+
+	it('stamps the caller-class source on diagnostic events (prefixed agent variants included) (#2032)', async () => {
+		await appendKnowledgeEvent(dir, {
+			type: 'retrieved',
+			trace_id: 'trace-rev',
+			session_id: 'sess-1',
+			agent: 'reviewer',
+			query: 'q',
+			retrieval_mode: 'auto_injection',
+			result_ids: ['k-rev'],
+			ranks: { 'k-rev': 1 },
+			scores: { 'k-rev': 1 },
+			timestamp: new Date().toISOString(),
+		});
+		const reviewerCtx = { ...ctx(dir), agent: 'mega_reviewer' };
+		const raw = await knowledge_receipt.execute(
+			{
+				trace_id: 'trace-rev',
+				applied: [{ id: 'k-rev', how: 'verified the bound' }],
+			} as never,
+			reviewerCtx,
+		);
+		expect(JSON.parse(raw).recorded).toBe(true);
+		const events = (await readKnowledgeEvents(dir)).filter(
+			(e): e is ReceiptEvent => e.type === 'applied',
+		);
+		expect(events).toHaveLength(1);
+		expect(events[0].agent).toBe('mega_reviewer');
+		expect(events[0].source).toBe('reviewer');
+
+		const authority = await queryLiveMemberships(dir, {
+			include_terminal: true,
+		});
+		if (!authority.ok) throw new Error(authority.detail);
+		const terminal = authority.memberships.find(
+			(m) => m.entry_id === 'k-rev',
+		)?.terminal;
+		expect(terminal?.source).toBe('reviewer');
+	});
+
+	it('receiptSourceForAgent allowlist: verifier roles map to their class, all other roles to delegate (#2032)', () => {
+		const map = _internals.receiptSourceForAgent;
+		expect(map('reviewer')).toBe('reviewer');
+		expect(map('mega_reviewer')).toBe('reviewer');
+		expect(map('test_engineer')).toBe('test_engineer');
+		expect(map('local_test_engineer')).toBe('test_engineer');
+		expect(map('architect')).toBe('architect');
+		expect(map('mega_architect')).toBe('architect');
+		expect(map('coder')).toBe('delegate');
+		expect(map('spec_writer')).toBe('delegate');
+		expect(map('sme')).toBe('delegate');
+		expect(map('custom_planner')).toBe('delegate');
+		expect(map('unknown')).toBe('unknown');
+		expect(map('')).toBe('unknown');
+	});
+
+	it('ignored reason enum no longer accepts not_relevant; n_a requires a reason (#2032)', () => {
+		// Atomic semantic migration: mere irrelevance must file n_a, so the
+		// zod arg contract (enforced by the OpenCode host from these schemas)
+		// rejects the old escape hatch loudly.
+		expect(
+			_internals.ignoredItemSchema.safeParse({
+				id: 'k1',
+				reason: 'not_relevant',
+			}).success,
+		).toBe(false);
+		expect(
+			_internals.ignoredItemSchema.safeParse({ id: 'k1', reason: 'stale' })
+				.success,
+		).toBe(true);
+		// Reasoned n_a: an empty reason is rejected (no silent evasion channel).
+		expect(
+			_internals.notApplicableItemSchema.safeParse({ id: 'k1', reason: '' })
+				.success,
+		).toBe(false);
+		expect(
+			_internals.notApplicableItemSchema.safeParse({
+				id: 'k1',
+				reason: 'different subsystem',
+			}).success,
 		).toBe(true);
 	});
 });

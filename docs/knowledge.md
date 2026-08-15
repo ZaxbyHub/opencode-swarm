@@ -12,8 +12,9 @@ When an architect receives a new message, entries from both stores are merged an
 > `applies_to_agents`, `directive_priority`, `generated_skill_path`). The
 > Architect receives these as a structured `<swarm_knowledge_directives>`
 > block and must acknowledge each applicable directive (`KNOWLEDGE_APPLIED`)
-> or explicitly close it as skipped or violated (`KNOWLEDGE_IGNORED reason=...`
-> / `KNOWLEDGE_VIOLATED reason=...`). See [Actionable directives](#actionable-directives-v2) and
+> or explicitly close it as not-applicable, skipped, or violated
+> (`KNOWLEDGE_N_A reason=...` / `KNOWLEDGE_IGNORED reason=...` /
+> `KNOWLEDGE_VIOLATED reason=...`). See [Actionable directives](#actionable-directives-v2) and
 > [Knowledge application contract](#knowledge-application-contract-v2) below.
 
 ---
@@ -377,7 +378,8 @@ Retrieval-outcome counters now distinguish:
 - `shown_count` — included in an injection block.
 - `acknowledged_count` — any explicit ack received.
 - `applied_explicit_count` — explicit `KNOWLEDGE_APPLIED`.
-- `ignored_count` — explicit `KNOWLEDGE_IGNORED`.
+- `ignored_count` — explicit `KNOWLEDGE_IGNORED` (relevant but deliberately not followed).
+- `n_a_count` — explicit `KNOWLEDGE_N_A` (not applicable; neutral, audit-only).
 - `violated_count` — explicit `KNOWLEDGE_VIOLATED` (or runtime-inferred).
 - `succeeded_after_shown_count` — phase succeeded after this entry was shown.
 - `failed_after_shown_count` — phase failed after this entry was shown.
@@ -460,14 +462,55 @@ The Architect prompt requires inspecting this block before:
 For each applicable directive, the Architect emits:
 
 - `KNOWLEDGE_APPLIED: <id>` — directive observed in the next compliant action.
-- `KNOWLEDGE_IGNORED: <id> reason=<short>` — does not apply this turn.
+- `KNOWLEDGE_N_A: <id> reason=<short>` — does not apply this turn (neutral).
+- `KNOWLEDGE_IGNORED: <id> reason=<short>` — judged relevant but deliberately not followed (counts against the directive).
 - `KNOWLEDGE_VIOLATED: <id> reason=<short>` — runtime evidence shows it was breached.
 
-Chat-text markers (KNOWLEDGE_APPLIED/IGNORED/VIOLATED) are the sole mechanism that
+Chat-text markers (KNOWLEDGE_APPLIED/N_A/IGNORED/VIOLATED) are the sole mechanism that
 satisfies the knowledge-application enforcement gate. The `knowledge_receipt` tool
 (which replaced the former `knowledge_ack`) records knowledge-usage receipts for
-audit — including applied/ignored/contradicted outcomes and new-lesson persistence
+audit — including applied/ignored/n_a/contradicted outcomes and new-lesson persistence
 — but does NOT satisfy the enforcement gate.
+
+### Outcome and source semantics (issue #2032)
+
+Every producer and consumer of knowledge terminals shares one typed contract
+(`ReceiptOutcome` + `ReceiptSourceCode`, declared once in
+`src/hooks/knowledge-receipt-ledger.ts`):
+
+| Outcome | Meaning | Outcome signal | Gate obligation |
+| --- | --- | --- | --- |
+| `applied` | the directive was followed | positive | clears |
+| `ignored` | judged relevant but deliberately not followed | negative | clears only with a reason |
+| `n_a` | not applicable to the current action | neutral | clears only with a reason |
+| `contradicted` | current authority or evidence disproves it | negative | blocks phase until remediated |
+| `violated` | runtime evidence shows a breach | negative | blocks phase until remediated |
+
+`n_a` clears ONLY the acknowledgement/applicability obligation. It never
+proves application, never produces promotion evidence, and never satisfies
+high-risk acceptance on its own; delegate self-report remains non-independent,
+with reviewer adjudication and deterministic test/evidence as the independent
+verification roles. `unacknowledged` (silent non-critical exposure) and
+`no_relevant` (empty-trace tombstone) are audit-only event types, never
+terminal outcomes.
+
+`source` records WHO produced a terminal as a provenance class, distinct from
+the `agent` identity field: `delegate` (the exposed agent's own self-report —
+stamped on every delegate terminal in both the V2 ledger and the diagnostic
+event log), `reviewer` (independent verdict), `architect` /
+`architect_marker`, `test_engineer`, `phase_override`,
+`application_gate_staleness_clear` / `application_gate_denial_limit_clear`
+(system escape hatches), `manual`, `migration`, and `unknown`. Legacy records
+with an absent or ambiguous source stay `unknown` — never coerced to
+`delegate`, `ignored`, or zero. The `knowledge_receipt_transition`
+observability payload carries `receiptSemantics` (currently `2`) versioning
+this meaning contract.
+
+One documented asymmetry is preserved by design: the V2 ledger and the
+diagnostic event log store `n_a` verbatim, while the legacy
+`knowledge-application.jsonl` audit log has no `n_a` result value and
+down-converts it to `acknowledged` (knowledge-application.ts). Historical
+records are never rewritten.
 
 ### Receipt authority and diagnostic log
 
@@ -519,9 +562,11 @@ validation, application/phase gates, promotion evidence, escalation, or
 curation decisions. Linked stores may still redirect this diagnostic stream,
 but can never redirect or satisfy project-local V2 receipt authority.
 
-Issue #2032 owns normalization of outcome and source meanings. V2 preserves
-the producer's current typed value and records `unknown` when the producer has
-no stronger source; it does not reinterpret those semantics.
+Issue #2032 normalized outcome and source meanings into one typed contract
+(see [Outcome and source semantics](#outcome-and-source-semantics-issue-2032)
+above). V2 preserves the producer's typed value and records `unknown` when
+the producer has no stronger source; it never reinterprets or coerces legacy
+semantics — historical records keep the meanings they were written with.
 
 ### Enforcement modes
 
@@ -541,7 +586,8 @@ no stronger source; it does not reinterpret those semantics.
 In `enforce` mode the gate (`knowledgeApplicationGateBefore` in
 `src/hooks/knowledge-application-gate.ts`) blocks high-risk actions when a
 critical directive was shown but received no terminal acknowledgment
-(`KNOWLEDGE_APPLIED`, `KNOWLEDGE_IGNORED`, or `KNOWLEDGE_VIOLATED`) — bounded by
+(`KNOWLEDGE_APPLIED`, `KNOWLEDGE_N_A`, `KNOWLEDGE_IGNORED`, or
+`KNOWLEDGE_VIOLATED`) — bounded by
 two escape hatches so the gate cannot deadlock a session forever:
 
 - **`max_gate_denials`** (default `5`) — after this many consecutive denials

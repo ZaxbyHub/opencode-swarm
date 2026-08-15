@@ -20,12 +20,71 @@ import {
 	type KnowledgeReceiptTransitionObservation,
 } from './knowledge-receipt-observability.js';
 
+/**
+ * Canonical terminal-outcome vocabulary for the authoritative receipt ledger
+ * (issue #2032). This is the single declaration every producer and consumer
+ * imports; the shared validator, the collectors, the gates, the rollups, the
+ * scoring signal, the curator, and the diagnostics all switch on exactly this
+ * set. Semantics: `applied` = followed (positive signal; reviewer VERIFIED
+ * maps here); `ignored` = judged relevant but deliberately not followed
+ * (negative signal, policy consequences retained); `contradicted` = current
+ * authority disproves (negative); `violated` = runtime violation (negative,
+ * blocks phase completion until remediated); `n_a` = not applicable to the
+ * current action (neutral — clears only the acknowledgement/applicability
+ * obligation, never proves application, never feeds promotion evidence).
+ */
 export type ReceiptOutcome =
 	| 'applied'
 	| 'ignored'
 	| 'contradicted'
 	| 'violated'
 	| 'n_a';
+
+/** Runtime set form of {@link ReceiptOutcome} — derive, never redeclare. */
+export const RECEIPT_TERMINAL_OUTCOMES: ReadonlySet<ReceiptOutcome> =
+	new Set<ReceiptOutcome>([
+		'applied',
+		'ignored',
+		'contradicted',
+		'violated',
+		'n_a',
+	]);
+
+/**
+ * Canonical terminal-source taxonomy (issue #2032). `source` answers WHO
+ * produced the terminal as a provenance class, while the separate `agent`
+ * field records the agent identity. Storage stays permissive (`string`) for
+ * legacy tolerance: a legacy record with an absent or ambiguous source is
+ * preserved as `'unknown'` and is never coerced to delegate, ignored, or any
+ * other class. New producers must stamp one of the closed values below.
+ */
+export type ReceiptSourceCode =
+	| 'delegate'
+	| 'reviewer'
+	| 'architect'
+	| 'architect_marker'
+	| 'test_engineer'
+	| 'phase_override'
+	| 'application_gate_staleness_clear'
+	| 'application_gate_denial_limit_clear'
+	| 'manual'
+	| 'migration'
+	| 'unknown';
+
+/** Closed set form of {@link ReceiptSourceCode}. */
+export const CANONICAL_RECEIPT_SOURCES: ReadonlySet<string> = new Set([
+	'delegate',
+	'reviewer',
+	'architect',
+	'architect_marker',
+	'test_engineer',
+	'phase_override',
+	'application_gate_staleness_clear',
+	'application_gate_denial_limit_clear',
+	'manual',
+	'migration',
+	'unknown',
+]);
 
 export interface ReceiptPredicateCheck {
 	predicate: string;

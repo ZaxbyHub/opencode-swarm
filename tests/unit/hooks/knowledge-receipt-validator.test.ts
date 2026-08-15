@@ -15,6 +15,7 @@ import {
 	appendKnowledgeEvent,
 	newTraceId,
 } from '../../../src/hooks/knowledge-events';
+import { queryLiveMemberships } from '../../../src/hooks/knowledge-receipt-ledger';
 import {
 	NO_TRACE_SENTINEL,
 	type ReceiptItem,
@@ -75,13 +76,16 @@ function ctx(
 	dir: string,
 	traceId: string,
 	items: ReceiptItem[],
-	opts: { no_relevant?: boolean; session?: string } = {},
+	opts: { no_relevant?: boolean; session?: string; source?: string } = {},
 ) {
 	return {
 		directory: dir,
 		trace_id: traceId,
 		session_id: opts.session ?? SESSION,
 		agent: 'coder',
+		// #2032: callers state their provenance class explicitly; tests default
+		// to the delegate class (the collector's value).
+		source: opts.source ?? 'delegate',
 		items,
 		no_relevant_knowledge: opts.no_relevant ?? false,
 	};
@@ -108,6 +112,73 @@ describe('receipt validator', () => {
 		expect(r.accepted[0].id).toBe('k1');
 		expect(r.idempotent_skips).toHaveLength(0);
 		expect(r.trace?.trace_id).toBe(traceId);
+	});
+
+	test('regression: stamps the caller-declared source class, never the agent identity (#2032)', async () => {
+		// Previous behavior: validateReceipt mapped the committed terminal's
+		// source to ctx.agent || 'unknown', so a delegate filing as agent
+		// 'coder' produced a terminal with source 'coder' — an agent identity,
+		// not a provenance class — while unacknowledged events carried
+		// 'delegate'. Source-based rollups/policy were impossible.
+		const traceId = newTraceId();
+		await seedTrace(dir, traceId, ['k1']);
+		const r = await validateReceipt(
+			ctx(dir, traceId, [{ id: 'k1', outcome: 'applied' }]),
+		);
+		expect(r.ok).toBe(true);
+		const state = await queryLiveMemberships(dir, {
+			session_id: SESSION,
+			include_terminal: true,
+		});
+		expect(state.ok).toBe(true);
+		if (!state.ok) return;
+		const terminal = state.memberships.find(
+			(m) => m.trace_id === traceId && m.entry_id === 'k1',
+		)?.terminal;
+		expect(terminal?.outcome).toBe('applied');
+		expect(terminal?.source).toBe('delegate');
+		expect(terminal?.source).not.toBe('coder');
+	});
+
+	test('stamps an explicit non-delegate source when the caller declares one (#2032)', async () => {
+		const traceId = newTraceId();
+		await seedTrace(dir, traceId, ['k1']);
+		const r = await validateReceipt(
+			ctx(dir, traceId, [{ id: 'k1', outcome: 'n_a', reason: 'other subsystem' }], {
+				source: 'reviewer',
+			}),
+		);
+		expect(r.ok).toBe(true);
+		const state = await queryLiveMemberships(dir, {
+			session_id: SESSION,
+			include_terminal: true,
+		});
+		expect(state.ok).toBe(true);
+		if (!state.ok) return;
+		const terminal = state.memberships.find(
+			(m) => m.trace_id === traceId && m.entry_id === 'k1',
+		)?.terminal;
+		expect(terminal?.outcome).toBe('n_a');
+		expect(terminal?.source).toBe('reviewer');
+	});
+
+	test('falls back to unknown only when the caller declares no source (#2032)', async () => {
+		const traceId = newTraceId();
+		await seedTrace(dir, traceId, ['k1']);
+		const r = await validateReceipt(
+			ctx(dir, traceId, [{ id: 'k1', outcome: 'applied' }], { source: '' }),
+		);
+		expect(r.ok).toBe(true);
+		const state = await queryLiveMemberships(dir, {
+			session_id: SESSION,
+			include_terminal: true,
+		});
+		expect(state.ok).toBe(true);
+		if (!state.ok) return;
+		const terminal = state.memberships.find(
+			(m) => m.trace_id === traceId && m.entry_id === 'k1',
+		)?.terminal;
+		expect(terminal?.source).toBe('unknown');
 	});
 
 	test('fails closed when a pre-cutover trace cannot be proven to exist', async () => {

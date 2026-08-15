@@ -50,6 +50,9 @@ describe('knowledge receipt transition observation', () => {
 					transition: 'terminal_committed',
 					reasonCode: 'committed',
 					schemaVersion: 2,
+					// #2032: the outcome/source meaning-contract version is a
+					// canonical fact on every transition, defaulted at the emitter.
+					receiptSemantics: 2,
 					knowledgeTraceId: 'trace-1',
 					knowledgeEntryId: 'entry-1',
 					sessionId: 'session-1',
@@ -79,6 +82,7 @@ describe('knowledge receipt transition observation', () => {
 			transition: 'legacy_unverifiable',
 			reasonCode: 'legacy_unverifiable',
 			schemaVersion: 2,
+			receiptSemantics: 2,
 		});
 	});
 
