@@ -70,6 +70,7 @@ export const _internals: {
 	loadPluginConfigWithMeta: typeof loadPluginConfigWithMeta;
 } = { loadPluginConfigWithMeta };
 export type {
+	ExecutionProfile,
 	MigrationStatus,
 	Phase,
 	PhaseStatus,
@@ -79,6 +80,7 @@ export type {
 	TaskStatus,
 } from './plan-schema';
 export {
+	ExecutionProfileSchema,
 	MigrationStatusSchema,
 	PhaseSchema,
 	PhaseStatusSchema,

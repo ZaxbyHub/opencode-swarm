@@ -87,8 +87,8 @@ describe('rehydrateSessionFromDisk', () => {
 		resetSwarmState();
 	});
 
-	// Happy path: plan.json with in_progress task
-	it('should rehydrate task from plan.json when task is in_progress', async () => {
+	// An in-progress projection cannot prove that an exact coder generation exists.
+	it('should keep in_progress plan tasks idle without exact evidence', async () => {
 		await writePlan({
 			...defaultPlanBase,
 			phases: [
@@ -111,7 +111,7 @@ describe('rehydrateSessionFromDisk', () => {
 
 		await rehydrateSessionFromDisk(testDir, session);
 
-		expect(session.taskWorkflowStates?.get('1.1')).toBe('coder_delegated');
+		expect(session.taskWorkflowStates?.get('1.1')).toBe('idle');
 	});
 
 	// Happy path: plan.json with completed task
@@ -169,7 +169,7 @@ describe('rehydrateSessionFromDisk', () => {
 	});
 
 	// Happy path: evidence with reviewer gate passed
-	it('should use evidence over plan when evidence exists', async () => {
+	it('should reject legacy gate evidence as workflow authority', async () => {
 		await writePlan({
 			...defaultPlanBase,
 			phases: [
@@ -204,12 +204,12 @@ describe('rehydrateSessionFromDisk', () => {
 
 		await rehydrateSessionFromDisk(testDir, session);
 
-		// Evidence with reviewer passed should result in reviewer_run state
-		expect(session.taskWorkflowStates?.get('1.1')).toBe('reviewer_run');
+		// Legacy gate fields lack exact generation authority.
+		expect(session.taskWorkflowStates?.get('1.1')).toBe('idle');
 	});
 
 	// Happy path: evidence with test_engineer gate passed
-	it('should use evidence with test_engineer gate to set tests_run state', async () => {
+	it('should not infer tests_run from a legacy test_engineer gate', async () => {
 		await writePlan({
 			...defaultPlanBase,
 			phases: [
@@ -244,12 +244,12 @@ describe('rehydrateSessionFromDisk', () => {
 
 		await rehydrateSessionFromDisk(testDir, session);
 
-		// Evidence with only test_engineer passed (reviewer still pending) should result in tests_run state
-		expect(session.taskWorkflowStates?.get('1.1')).toBe('tests_run');
+		// Legacy gate fields lack exact generation authority.
+		expect(session.taskWorkflowStates?.get('1.1')).toBe('idle');
 	});
 
 	// Happy path: all required gates passed results in complete
-	it('should set complete state when all required gates are passed', async () => {
+	it('should not infer completion from legacy required gates', async () => {
 		await writePlan({
 			...defaultPlanBase,
 			phases: [
@@ -289,8 +289,8 @@ describe('rehydrateSessionFromDisk', () => {
 
 		await rehydrateSessionFromDisk(testDir, session);
 
-		// All required gates passed should result in complete state
-		expect(session.taskWorkflowStates?.get('1.1')).toBe('complete');
+		// Legacy gate fields cannot synthesize a terminal workflow state.
+		expect(session.taskWorkflowStates?.get('1.1')).toBe('idle');
 	});
 
 	// Edge case: Missing .swarm directory - should be non-fatal
@@ -367,8 +367,8 @@ describe('rehydrateSessionFromDisk', () => {
 
 		await rehydrateSessionFromDisk(testDir, session);
 
-		// Should use plan state
-		expect(session.taskWorkflowStates?.get('1.1')).toBe('coder_delegated');
+		// The plan projection alone is not execution authority.
+		expect(session.taskWorkflowStates?.get('1.1')).toBe('idle');
 	});
 
 	// Edge case: Malformed plan.json - should be non-fatal
@@ -413,8 +413,8 @@ describe('rehydrateSessionFromDisk', () => {
 			rehydrateSessionFromDisk(testDir, session),
 		).resolves.toBeUndefined();
 
-		// Should fall back to plan state
-		expect(session.taskWorkflowStates?.get('1.1')).toBe('coder_delegated');
+		// A malformed record cannot make the plan projection authoritative.
+		expect(session.taskWorkflowStates?.get('1.1')).toBe('idle');
 	});
 
 	// Edge case: Invalid taskId format in evidence (path traversal prevention)
@@ -458,8 +458,8 @@ describe('rehydrateSessionFromDisk', () => {
 
 		await rehydrateSessionFromDisk(testDir, session);
 
-		// Should fall back to plan state (invalid evidence should be skipped)
-		expect(session.taskWorkflowStates?.get('1.1')).toBe('coder_delegated');
+		// Invalid evidence is skipped and the plan projection remains non-authoritative.
+		expect(session.taskWorkflowStates?.get('1.1')).toBe('idle');
 	});
 
 	// Edge case: Evidence file without taskId field - should be skipped
@@ -492,8 +492,8 @@ describe('rehydrateSessionFromDisk', () => {
 
 		await rehydrateSessionFromDisk(testDir, session);
 
-		// Should fall back to plan state
-		expect(session.taskWorkflowStates?.get('1.1')).toBe('coder_delegated');
+		// The plan projection alone is not execution authority.
+		expect(session.taskWorkflowStates?.get('1.1')).toBe('idle');
 	});
 
 	// Edge case: Evidence file without required_gates - should be skipped
@@ -526,8 +526,8 @@ describe('rehydrateSessionFromDisk', () => {
 
 		await rehydrateSessionFromDisk(testDir, session);
 
-		// Should fall back to plan state
-		expect(session.taskWorkflowStates?.get('1.1')).toBe('coder_delegated');
+		// The plan projection alone is not execution authority.
+		expect(session.taskWorkflowStates?.get('1.1')).toBe('idle');
 	});
 
 	// State mutation: Should NOT downgrade existing in-memory state
@@ -535,7 +535,7 @@ describe('rehydrateSessionFromDisk', () => {
 		// Pre-set a stronger state in memory
 		session.taskWorkflowStates?.set('1.1', 'tests_run');
 
-		// Plan says task is still in_progress (coder_delegated)
+		// Plan says task is still in_progress (a projection only).
 		await writePlan({
 			...defaultPlanBase,
 			phases: [
@@ -562,12 +562,12 @@ describe('rehydrateSessionFromDisk', () => {
 		expect(session.taskWorkflowStates?.get('1.1')).toBe('tests_run');
 	});
 
-	// State mutation: Should upgrade weaker in-memory state
-	it('should upgrade weaker in-memory workflow state', async () => {
+	// State mutation: projections cannot upgrade execution state
+	it('should not upgrade memory from an in_progress plan projection', async () => {
 		// Pre-set a weaker state in memory
 		session.taskWorkflowStates?.set('1.1', 'idle');
 
-		// Plan says task is in_progress (coder_delegated)
+		// Plan says task is in_progress (a projection only).
 		await writePlan({
 			...defaultPlanBase,
 			phases: [
@@ -590,12 +590,12 @@ describe('rehydrateSessionFromDisk', () => {
 
 		await rehydrateSessionFromDisk(testDir, session);
 
-		// In-memory state should be upgraded
-		expect(session.taskWorkflowStates?.get('1.1')).toBe('coder_delegated');
+		// No exact generation was established.
+		expect(session.taskWorkflowStates?.get('1.1')).toBe('idle');
 	});
 
 	// State mutation: Evidence should win over in-memory state
-	it('should use evidence over existing in-memory state', async () => {
+	it('should not use legacy evidence to upgrade in-memory state', async () => {
 		// Pre-set a weaker state in memory
 		session.taskWorkflowStates?.set('1.1', 'coder_delegated');
 
@@ -634,8 +634,8 @@ describe('rehydrateSessionFromDisk', () => {
 
 		await rehydrateSessionFromDisk(testDir, session);
 
-		// Evidence should win - state should be reviewer_run (stronger than coder_delegated)
-		expect(session.taskWorkflowStates?.get('1.1')).toBe('reviewer_run');
+		// Legacy gate fields cannot upgrade the existing projection.
+		expect(session.taskWorkflowStates?.get('1.1')).toBe('coder_delegated');
 	});
 
 	// State mutation: Evidence should not downgrade in-memory complete state
@@ -728,16 +728,16 @@ describe('rehydrateSessionFromDisk', () => {
 		await rehydrateSessionFromDisk(testDir, session);
 
 		expect(session.taskWorkflowStates?.get('1.1')).toBe('complete');
-		expect(session.taskWorkflowStates?.get('1.2')).toBe('coder_delegated');
+		expect(session.taskWorkflowStates?.get('1.2')).toBe('idle');
 		expect(session.taskWorkflowStates?.get('2.1')).toBe('idle');
 	});
 
-	// Priority: Evidence > Plan > Existing memory (upgrade only)
-	it('should respect priority: evidence > plan > existing memory', async () => {
+	// Exact workflow evidence outranks projections; legacy gate fields do not.
+	it('should keep legacy gate evidence below exact workflow authority', async () => {
 		// Pre-set idle state in memory
 		session.taskWorkflowStates?.set('1.1', 'idle');
 
-		// Plan says in_progress (coder_delegated)
+		// Plan says in_progress (a projection only).
 		await writePlan({
 			...defaultPlanBase,
 			phases: [
@@ -778,8 +778,8 @@ describe('rehydrateSessionFromDisk', () => {
 
 		await rehydrateSessionFromDisk(testDir, session);
 
-		// Evidence should win - all gates passed means complete
-		expect(session.taskWorkflowStates?.get('1.1')).toBe('complete');
+		// Legacy gate fields cannot establish exact completion authority.
+		expect(session.taskWorkflowStates?.get('1.1')).toBe('idle');
 	});
 
 	// Edge case: taskWorkflowStates is undefined in session
@@ -811,11 +811,11 @@ describe('rehydrateSessionFromDisk', () => {
 
 		// Should have initialized taskWorkflowStates
 		expect(session.taskWorkflowStates).toBeDefined();
-		expect(session.taskWorkflowStates?.get('1.1')).toBe('coder_delegated');
+		expect(session.taskWorkflowStates?.get('1.1')).toBe('idle');
 	});
 
 	// Edge case: blocked task in plan
-	it('should map blocked task status to idle', async () => {
+	it('should preserve blocked task status', async () => {
 		await writePlan({
 			...defaultPlanBase,
 			phases: [
@@ -838,6 +838,6 @@ describe('rehydrateSessionFromDisk', () => {
 
 		await rehydrateSessionFromDisk(testDir, session);
 
-		expect(session.taskWorkflowStates?.get('1.1')).toBe('idle');
+		expect(session.taskWorkflowStates?.get('1.1')).toBe('blocked');
 	});
 });

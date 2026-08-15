@@ -110,11 +110,14 @@ import {
 	ledgerExists,
 	loadLastApprovedPlan,
 	readLedgerEvents,
+	readLedgerEventsWithIntegrity,
+	replaceTruncatedLedgerWithRecoveryRoot,
 	replayFromLedger,
 	replayFromLedgerWithStatus,
 	takeSnapshotEvent,
 	takeSnapshotWithRetry,
 } from './ledger';
+import { normalizeExecutionProfileForHash } from './planning-profile';
 import { derivePlanId, derivePlanIdentityHash } from './utils';
 
 // Track which workspaces have already had their startup ledger integrity check.
@@ -512,20 +515,7 @@ function computePlanContentHash(plan: Plan): string {
 		swarm: plan.swarm,
 		current_phase: plan.current_phase,
 		migration_status: plan.migration_status,
-		execution_profile: plan.execution_profile
-			? {
-					parallelization_enabled:
-						plan.execution_profile.parallelization_enabled,
-					max_concurrent_tasks: plan.execution_profile.max_concurrent_tasks,
-					council_parallel: plan.execution_profile.council_parallel,
-					locked: plan.execution_profile.locked,
-					auto_proceed: plan.execution_profile.auto_proceed,
-					commit_after_each_completed_task:
-						plan.execution_profile.commit_after_each_completed_task === true
-							? true
-							: undefined,
-				}
-			: undefined,
+		execution_profile: normalizeExecutionProfileForHash(plan.execution_profile),
 		phases: plan.phases
 			.map((phase) => ({
 				id: phase.id,
@@ -1225,6 +1215,15 @@ export async function savePlan(
 		acknowledged_removals?: AcknowledgedRemovals;
 		/** True only when the caller already owns the canonical plan.json lock. */
 		planLockAlreadyHeld?: boolean;
+		/**
+		 * Narrow recovery mode for a semantically unreadable ledger tail. The
+		 * caller must bind the exact tail observed while validating an unchanged
+		 * `_ledgerReplayStale` projection.
+		 */
+		staleProjectionReconcile?: {
+			expectedSeq: number;
+			expectedLedgerHash: string;
+		};
 	},
 ): Promise<void> {
 	// Fail-fast: reject blank or whitespace-only directory inputs before any I/O
@@ -1268,6 +1267,13 @@ export async function savePlan(
 
 	// Validate against schema
 	const validated = PlanSchema.parse(plan);
+	const requestedForStaleProjectionReconcile =
+		options?.staleProjectionReconcile !== undefined
+			? PlanSchema.parse(plan)
+			: null;
+	if (requestedForStaleProjectionReconcile) {
+		derivePhaseStatusesInPlace(requestedForStaleProjectionReconcile);
+	}
 
 	// Protect completed tasks from regression (root cause #4):
 	// If any task was 'completed' in the current plan.json, preserve that status
@@ -1483,6 +1489,62 @@ export async function savePlan(
 			} catch {
 				/* readdir failure is non-blocking */
 			}
+		}
+	}
+
+	if (options?.staleProjectionReconcile) {
+		if (!currentPlan) {
+			throw new Error(
+				'RECONCILE_LEDGER_PROJECTION_MISMATCH: no current plan.json projection exists.',
+			);
+		}
+		const comparableCurrent = PlanSchema.parse(currentPlan);
+		derivePhaseStatusesInPlace(comparableCurrent);
+		if (
+			JSON.stringify(comparableCurrent) !==
+			JSON.stringify(requestedForStaleProjectionReconcile)
+		) {
+			throw new Error(
+				'RECONCILE_LEDGER_PROJECTION_MISMATCH: manager rejected content that is not the exact unchanged plan.json projection.',
+			);
+		}
+
+		const events = await readLedgerEvents(directory);
+		const tail = events[events.length - 1];
+		const expected = options.staleProjectionReconcile;
+		if (
+			!tail ||
+			tail.seq !== expected.expectedSeq ||
+			tail.plan_hash_after !== expected.expectedLedgerHash ||
+			events[0]?.plan_id !== planId
+		) {
+			throw new PlanConcurrentModificationError(
+				'RECONCILE_LEDGER_PROJECTION_STALE: the ledger identity or tail changed before the recovery snapshot could be appended.',
+			);
+		}
+
+		try {
+			const integrity = await readLedgerEventsWithIntegrity(directory);
+			if (integrity.truncated) {
+				await replaceTruncatedLedgerWithRecoveryRoot(directory, validated, {
+					seq: expected.expectedSeq,
+					ledgerHash: expected.expectedLedgerHash,
+				});
+			} else {
+				await takeSnapshotEvent(directory, validated, {
+					planHashAfter: computePlanHash(validated),
+					source: 'save_plan_stale_projection_reconcile',
+					expectedSeq: expected.expectedSeq,
+					expectedLedgerHash: expected.expectedLedgerHash,
+				});
+			}
+		} catch (error) {
+			if (error instanceof LedgerStaleWriterError) {
+				throw new PlanConcurrentModificationError(
+					`RECONCILE_LEDGER_PROJECTION_STALE: ${error.message}`,
+				);
+			}
+			throw error;
 		}
 	}
 
@@ -2222,19 +2284,20 @@ export async function updateTaskStatus(
 	// "Settled" = status is neither 'pending' nor 'in_progress'.
 	// Legitimate retry-after-failure flows keep the task in 'in_progress' across
 	// retries, so re-persisting in_progress→in_progress is NOT blocked.
-	if (status === 'in_progress' && options?.force !== true) {
+	{
 		const currentPlan = await _internals.loadPlanJsonOnly(directory);
 		if (currentPlan) {
 			const currentTask = currentPlan.phases
 				.flatMap((p) => p.tasks)
 				.find((t) => t.id === taskId);
-			if (
+			const settled =
 				currentTask &&
 				currentTask.status !== 'pending' &&
-				currentTask.status !== 'in_progress'
-			) {
+				currentTask.status !== 'in_progress';
+			const auditedRepair = status === 'in_progress' && options?.force === true;
+			if (settled && status !== currentTask.status && !auditedRepair) {
 				warn(
-					`[updateTaskStatus] refusing to re-open settled task ${taskId} (${currentTask.status}) to in_progress without force`,
+					`[updateTaskStatus] refusing backward transition of settled task ${taskId} (${currentTask.status}) to ${status} without audited repair`,
 				);
 				return currentPlan;
 			}
@@ -2458,6 +2521,9 @@ export function derivePlanMarkdown(plan: Plan): string {
 		markdown += `- Locked: ${profile.locked ? 'yes' : 'no'}\n`;
 		markdown += `- Auto Proceed: ${profile.auto_proceed ? 'yes' : 'no'}\n`;
 		markdown += `- Commit After Each Completed Task: ${profile.commit_after_each_completed_task ? 'yes' : 'no'}\n`;
+		if (profile.planning_profile) {
+			markdown += `- Planning Profile: ${profile.planning_profile}\n`;
+		}
 	}
 
 	// Sort phases deterministically by ID (ascending)

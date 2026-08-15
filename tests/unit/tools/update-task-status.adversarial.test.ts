@@ -25,6 +25,7 @@ import {
 	createWorkflowTestSessionWithPassedTask,
 	createWorkflowTestSessionWithTaskAtState,
 } from '../../helpers/workflow-session-factory';
+import { seedAuthoritativeTaskWorkflow } from '../hooks/_delegation-gate-helpers';
 
 describe('update-task-status adversarial tests', () => {
 	let tempDir: string;
@@ -414,6 +415,7 @@ describe('update-task-status adversarial tests', () => {
 				path.join(otherDir, '.swarm', 'plan.json'),
 				JSON.stringify(otherPlan, null, 2),
 			);
+			await seedAuthoritativeTaskWorkflow(otherDir, '1.1', 'tests_run');
 
 			// Change cwd to tempDir but specify otherDir in args
 			const originalCwd = process.cwd();
@@ -483,31 +485,10 @@ describe('update-task-status adversarial tests', () => {
 
 	// ========== GROUP 7: Rapid Consecutive Updates ==========
 	describe('Group 7: Rapid consecutive updates to same task', () => {
-		// Pre-seed evidence with gates passed so rapid-update tests can reach 'completed'
-		// without needing to run through the full reviewer/test_engineer workflow.
+		// Pre-seed an exact, generation-bound Stage A/B workflow so rapid-update
+		// tests can reach completion without relying on session-only state.
 		beforeEach(async () => {
-			await fs.mkdir(path.join(tempDir, '.swarm', 'evidence'), {
-				recursive: true,
-			});
-			await fs.writeFile(
-				path.join(tempDir, '.swarm', 'evidence', '1.1.json'),
-				JSON.stringify({
-					taskId: '1.1',
-					required_gates: ['reviewer', 'test_engineer'],
-					gates: {
-						reviewer: {
-							sessionId: 'test-session',
-							timestamp: new Date().toISOString(),
-							agent: 'reviewer',
-						},
-						test_engineer: {
-							sessionId: 'test-session',
-							timestamp: new Date().toISOString(),
-							agent: 'test_engineer',
-						},
-					},
-				}),
-			);
+			await seedAuthoritativeTaskWorkflow(tempDir, '1.1', 'tests_run');
 		});
 
 		it('handles rapid status changes from pending to in_progress', async () => {
@@ -551,10 +532,10 @@ describe('update-task-status adversarial tests', () => {
 		it('handles rapid consecutive updates without data corruption', async () => {
 			const statuses = [
 				'in_progress',
-				'completed',
-				'blocked',
+				'pending',
 				'in_progress',
-				'completed',
+				'pending',
+				'blocked',
 			];
 
 			for (const status of statuses) {
@@ -563,10 +544,6 @@ describe('update-task-status adversarial tests', () => {
 					status,
 					working_directory: tempDir,
 				};
-				if (status === 'in_progress') {
-					args.force = true;
-				}
-
 				const result = await executeUpdateTaskStatus(args);
 				expect(result.success).toBe(true);
 				expect(result.new_status).toBe(status);
@@ -576,7 +553,7 @@ describe('update-task-status adversarial tests', () => {
 			const plan = JSON.parse(
 				await fs.readFile(path.join(tempDir, '.swarm', 'plan.json'), 'utf-8'),
 			);
-			expect(plan.phases[0].tasks[0].status).toBe('completed');
+			expect(plan.phases[0].tasks[0].status).toBe('blocked');
 		});
 
 		it('handles concurrent updates to the same task', async () => {
@@ -1064,9 +1041,10 @@ describe('update-task-status adversarial tests', () => {
 				expect(result.errors?.[0]).toContain('QA gates');
 			});
 
-			it('allows completed status when task reaches tests_run state', async () => {
+			it('allows completed status when exact durable evidence reaches tests_run', async () => {
 				const session = createWorkflowTestSessionWithPassedTask('1.1');
 				swarmState.agentSessions.set('gate-pass-session', session);
+				await seedAuthoritativeTaskWorkflow(tempDir, '1.1', 'tests_run');
 
 				const args: UpdateTaskStatusArgs = {
 					task_id: '1.1',

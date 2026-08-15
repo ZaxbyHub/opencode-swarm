@@ -19,6 +19,7 @@ import {
 	findUserMessage,
 	makeConfig,
 	makeMessages,
+	seedAuthoritativeTaskWorkflow,
 } from './_delegation-gate-helpers';
 
 function makeTempProject(prefix: string): string {
@@ -190,6 +191,7 @@ describe('Task 1.5: [NEXT] Guidance — Core', () => {
 				const hook = createDelegationGateHook(config, tempDir);
 				const session = ensureAgentSession('completion-next-session');
 				session.taskWorkflowStates.set('1.1', 'tests_run');
+				await seedAuthoritativeTaskWorkflow(tempDir, '1.1', 'tests_run');
 				session.lastGateOutcome = {
 					gate: 'test_engineer',
 					taskId: '1.1',

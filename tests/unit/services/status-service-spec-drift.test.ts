@@ -73,6 +73,7 @@ describe('formatStatusMarkdown spec drift line', () => {
 		expect(md).toContain('**Spec drift detected**');
 		expect(md).toContain('stored: def456');
 		expect(md).toContain('current: abc123');
+		expect(md).toContain('Clarify alone does not clear drift');
 		expect(md).toContain('/swarm clarify');
 		expect(md).toContain('/swarm acknowledge-spec-drift');
 	});
@@ -86,6 +87,7 @@ describe('handleStatusCommand spec drift fallback (PR #855 follow-up)', () => {
 		expect(md).toContain('**Spec drift detected**');
 		expect(md).toContain('stored: def456');
 		expect(md).toContain('current: abc123');
+		expect(md).toContain('Clarify alone does not clear drift');
 		expect(md).toContain('/swarm clarify');
 		expect(md).toContain('/swarm acknowledge-spec-drift');
 	});

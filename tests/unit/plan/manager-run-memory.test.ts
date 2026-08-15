@@ -1,14 +1,11 @@
 /**
  * Run-memory recording is centralized in `plan/manager.updateTaskStatus`.
  *
- * WHY HERE AND NOT IN THE TOOL: there are two production writers of task
- * status, and `update_task_status` is only one of them. The council APPROVE
- * fast-path completes a task via `advanceTaskStateAndPersist` (src/state.ts),
- * reached from `delegation-gate.ts`, with no tool call at all. An earlier
- * revision of this feature recorded in the tool, which logged the council
- * gate's FAILURE but never its PASS — so `getRunMemorySummary` reported
- * completed tasks as "Still failing" forever. That is worse than recording
- * nothing, and these tests exist to keep it from coming back.
+ * WHY HERE AND NOT IN THE TOOL: the exact-task `update_task_status` terminal
+ * transaction/WAL delegates its plan projection to manager.updateTaskStatus.
+ * Keeping run-memory recording at that shared lower layer means a recovered WAL
+ * commit records the same outcome as the initial attempt. The legacy
+ * advanceTaskStateAndPersist wrapper cannot write coder or terminal boundaries.
  *
  * Uses real temp dirs and the real run-memory store; only the git/Epic seams
  * are stubbed so Rule 2 auto-commit stays out of the way.
@@ -132,8 +129,8 @@ describe('updateTaskStatus records terminal outcomes', () => {
 	});
 });
 
-describe('regression: the council path must record its PASS (H1)', () => {
-	it('a gate FAIL followed by a council auto-completion renders as passed, not "Still failing"', async () => {
+describe('regression: the central terminal projection records its PASS (H1)', () => {
+	it('a gate FAIL followed by the terminal projection renders as passed, not "Still failing"', async () => {
 		// 1. A gate blocked an earlier completion attempt — recorded by the tool.
 		await recordTaskAttempt(dir, {
 			taskId: '1.1',
@@ -142,9 +139,9 @@ describe('regression: the council path must record its PASS (H1)', () => {
 			failureReason: 'council gate: council gate required for task 1.1',
 		});
 
-		// 2. Council approves. delegation-gate.ts completes the task through
-		//    advanceTaskStateAndPersist -> plan/manager.updateTaskStatus, with NO
-		//    update_task_status tool call anywhere in the path.
+		// 2. The exact-task central transaction reaches its manager projection.
+		//    The transaction/WAL integration itself is covered in
+		//    update-task-status-terminal-wal-2098.test.ts.
 		await updateTaskStatus(dir, '1.1', 'completed');
 
 		const summary = await getRunMemorySummary(dir);
@@ -154,19 +151,18 @@ describe('regression: the council path must record its PASS (H1)', () => {
 		expect(summary).not.toContain('Still failing');
 	});
 
-	it('advanceTaskStateAndPersist (the tool-free writer) records a pass', async () => {
-		// Exercise the actual delegation-gate entry point rather than a stand-in,
-		// so a future refactor that bypasses updateTaskStatus is caught here.
+	it('legacy advanceTaskStateAndPersist cannot create a terminal pass', async () => {
 		const session = {
 			id: 'sess-council',
 			taskWorkflowStates: new Map([['1.1', 'tests_run']]),
 			currentTaskId: '1.1',
 		} as unknown as Parameters<typeof advanceTaskStateAndPersist>[0];
 
-		await advanceTaskStateAndPersist(session, '1.1', 'complete', dir);
+		await expect(
+			advanceTaskStateAndPersist(session, '1.1', 'complete', dir),
+		).rejects.toThrow('TASK_WORKFLOW_CENTRAL_TRANSACTION_REQUIRED');
 
 		const history = await getTaskHistory(dir, '1.1');
-		expect(history).toHaveLength(1);
-		expect(history[0].outcome).toBe('pass');
+		expect(history).toHaveLength(0);
 	});
 });

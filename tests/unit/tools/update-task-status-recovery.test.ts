@@ -28,6 +28,7 @@ import {
 	executeUpdateTaskStatus,
 	recoverTaskStateFromDelegations,
 } from '../../../src/tools/update-task-status';
+import { buildExactTaskEvidence } from '../../helpers/update-task-status-fixtures';
 
 const PLAN_JSON = JSON.stringify({
 	schema_version: '1.0.0',
@@ -94,22 +95,15 @@ describe('recoverTaskStateFromDelegations evidence-file fallback (Task 1.1)', ()
 		expect(swarmState.agentSessions.size).toBe(0);
 
 		// Write evidence file showing both gates passed
-		writeEvidence(tmpDir, '1.1', {
-			taskId: '1.1',
-			required_gates: ['reviewer', 'test_engineer'],
-			gates: {
-				reviewer: {
-					sessionId: 'sess-1',
-					agent: 'reviewer',
-					timestamp: '2025-01-01T00:00:00.000Z',
-				},
-				test_engineer: {
-					sessionId: 'sess-2',
-					agent: 'test_engineer',
-					timestamp: '2025-01-01T00:00:00.000Z',
-				},
-			},
-		});
+		writeEvidence(
+			tmpDir,
+			'1.1',
+			buildExactTaskEvidence(
+				'1.1',
+				{ pre_check: {}, reviewer: {}, test_engineer: {} },
+				['pre_check', 'reviewer', 'test_engineer'],
+			),
+		);
 
 		recoverTaskStateFromDelegations('1.1', tmpDir);
 
@@ -144,8 +138,13 @@ describe('recoverTaskStateFromDelegations evidence-file fallback (Task 1.1)', ()
 		// We verify this by checking that evidence file's presence doesn't affect outcome
 		writeEvidence(tmpDir, '1.1', {
 			taskId: '1.1',
-			required_gates: ['reviewer', 'test_engineer'],
+			required_gates: ['pre_check', 'reviewer', 'test_engineer'],
 			gates: {
+				pre_check: {
+					sessionId: 'pre-check-sess-crash',
+					agent: 'pre_check',
+					timestamp: '2025-01-01T00:00:00.000Z',
+				},
 				reviewer: {
 					sessionId: 'sess-1',
 					agent: 'reviewer',
@@ -765,22 +764,15 @@ describe('evidence-only crash recovery (Task 1.4, SC-001)', () => {
 
 		// Write a complete evidence file with both reviewer-APPROVED and
 		// test_engineer-PASS entries using the full evidence schema
-		writeEvidence(tmpDir, '1.1', {
-			taskId: '1.1',
-			required_gates: ['reviewer', 'test_engineer'],
-			gates: {
-				reviewer: {
-					sessionId: 'reviewer-sess-crash',
-					agent: 'reviewer',
-					timestamp: '2025-01-01T00:00:00.000Z',
-				},
-				test_engineer: {
-					sessionId: 'te-sess-crash',
-					agent: 'test_engineer',
-					timestamp: '2025-01-01T00:01:00.000Z',
-				},
-			},
-		});
+		writeEvidence(
+			tmpDir,
+			'1.1',
+			buildExactTaskEvidence(
+				'1.1',
+				{ pre_check: {}, reviewer: {}, test_engineer: {} },
+				['pre_check', 'reviewer', 'test_engineer'],
+			),
+		);
 
 		// CRITICAL: do NOT call recoverTaskStateFromDelegations first.
 		// This test proves the evidence-only gate path works when swarmState
@@ -866,7 +858,7 @@ describe('SC-001: crash-recovery integration', () => {
 		fs.rmSync(tmpDir, { recursive: true, force: true });
 	});
 
-	it('advances task to completed after crash with only evidence files', async () => {
+	it('fails closed after crash when evidence lacks workflow generation metadata', async () => {
 		// Step 1: Pre-condition — simulate a crash: no sessions, no delegation chains
 		expect(swarmState.delegationChains.size).toBe(0);
 		expect(swarmState.agentSessions.size).toBe(0);
@@ -898,11 +890,11 @@ describe('SC-001: crash-recovery integration', () => {
 
 		const result = await executeUpdateTaskStatus(args, tmpDir);
 
-		// Step 4: Assert result.success === true
-		expect(result.success).toBe(true);
-
-		// Step 5: Assert recovery actually occurred from evidence files — sessions were rehydrated
-		expect(swarmState.agentSessions.size).toBeGreaterThan(0);
+		// Legacy gate rows cannot prove a passed exact-task generation.
+		expect(result.success).toBe(false);
+		expect(result.errors?.join(' ')).toContain(
+			'legacy QA evidence without an authoritative workflow generation',
+		);
 
 		// Step 6: Assert task status in plan is 'completed'
 		const planPath = path.join(tmpDir, '.swarm', 'plan.json');
@@ -910,6 +902,6 @@ describe('SC-001: crash-recovery integration', () => {
 		const task = planContent.phases[0].tasks.find(
 			(t: { id: string }) => t.id === '1.1',
 		);
-		expect(task.status).toBe('completed');
+		expect(task.status).not.toBe('completed');
 	});
 });

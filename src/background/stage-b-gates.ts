@@ -1,7 +1,8 @@
 import {
+	getTaskWorkflowSnapshot,
 	readTaskEvidence,
-	recordAgentDispatch,
 	recordGateEvidence,
+	transitionTaskWorkflowEvidence,
 } from '../gate-evidence.js';
 import { isMarkdownOnlyTaskChange } from '../gate-evidence-classification.js';
 import {
@@ -17,7 +18,6 @@ import {
 import {
 	type AgentSessionState,
 	advanceTaskState,
-	advanceTaskStateAndPersist,
 	getReviewerScopeGenerationForCoderCall,
 	getReviewerScopeOwnershipHistory,
 	getTaskState,
@@ -29,6 +29,7 @@ import {
 	recordStageBCompletion,
 	reviewerScopeGenerationHasDeclaredOverlap,
 	swarmState,
+	updateTaskWorkflowCache,
 } from '../state.js';
 import * as logger from '../utils/logger.js';
 import type {
@@ -59,6 +60,27 @@ const GATE_EVIDENCE_ROLES = new Set([
 // set above records gate evidence for other gate-bearing background roles.
 
 type StageBStateRole = 'reviewer' | 'test_engineer';
+
+function structuredStageBVerdict(
+	role: StageBStateRole,
+	text: string,
+	taskId: string,
+): 'pass' | 'fail' | null {
+	const escapedTaskId = taskId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+	const pattern =
+		role === 'reviewer'
+			? new RegExp(
+					`^\\[REVIEWED\\]\\s*\\|\\s*(?:task-)?${escapedTaskId}\\s*\\|\\s*(APPROVED|REJECTED|CONCERNS)\\s*\\|`,
+					'im',
+				)
+			: new RegExp(
+					`^\\[TESTED\\]\\s*\\|\\s*(?:task-)?${escapedTaskId}\\s*\\|\\s*(PASS|FAIL|SKIPPED)\\s*\\|`,
+					'im',
+				);
+	const match = pattern.exec(text);
+	if (!match) return null;
+	return match[1] === 'APPROVED' || match[1] === 'PASS' ? 'pass' : 'fail';
+}
 
 function normalizeAttributionPath(file: string): string | null {
 	const normalized = file
@@ -398,38 +420,75 @@ export async function ingestBackgroundStageBCompletion(args: {
 			);
 			if (parentSession) {
 				const state = getTaskState(parentSession, taskId);
-				if (state !== 'idle' && state !== 'coder_delegated') {
+				if (
+					state !== 'idle' &&
+					state !== 'coder_delegated' &&
+					state !== 'rework_required'
+				) {
 					return {
 						ok: false,
 						consumed: false,
 						reason: `background coder completion is late for task ${taskId}: current state is ${state}`,
 					};
 				}
-				if (
-					!recordModifiedFilesForTask(parentSession, taskId, attributedFiles)
-				) {
-					return {
-						ok: false,
-						consumed: false,
-						reason: `background coder file-attribution capacity is exhausted for task ${taskId}`,
-					};
-				}
-				if (state === 'idle') {
-					await advanceTaskStateAndPersist(
-						parentSession,
-						taskId,
-						'coder_delegated',
+			}
+			const accepted = attributedFiles.length > 0;
+			const expectedGeneration =
+				args.record.taskChangeContext?.workflowGeneration ?? 0;
+			const transitionId = `background-coder:${args.record.correlationId}`;
+			const existingEvidence = await readTaskEvidence(args.directory, taskId);
+			const existingWorkflow = getTaskWorkflowSnapshot(existingEvidence);
+			const alreadyApplied =
+				existingWorkflow.authoritative &&
+				existingWorkflow.lastTransitionId === transitionId &&
+				existingWorkflow.lastOutcome ===
+					(accepted ? 'accepted_mutation' : 'dispatch_no_mutation') &&
+				existingWorkflow.generation === expectedGeneration + (accepted ? 1 : 0);
+			const updated = alreadyApplied
+				? existingEvidence!
+				: await transitionTaskWorkflowEvidence(
 						args.directory,
-						{ telemetrySessionId: args.record.parentSessionId },
+						taskId,
+						accepted
+							? {
+									type: 'accepted_mutation',
+									agentType: 'coder',
+									context: {
+										testEngineerExempt: isMarkdownOnlyTaskChange(
+											taskChangeContext?.declaredFiles,
+											attributedFiles,
+										),
+									},
+									expectedGeneration,
+									transitionId,
+								}
+							: {
+									type: 'dispatch_no_mutation',
+									agentType: 'coder',
+									expectedGeneration,
+									transitionId,
+								},
 					);
+			if (accepted) {
+				const workflow = getTaskWorkflowSnapshot(updated);
+				const parentSession = swarmState.agentSessions.get(
+					args.record.parentSessionId,
+				);
+				if (parentSession) {
+					if (
+						!recordModifiedFilesForTask(parentSession, taskId, attributedFiles)
+					) {
+						logger.warn(
+							`[background] durable coder mutation for ${taskId} exceeded session file-attribution capacity`,
+						);
+					}
+					parentSession.taskWorkflowStates.set(taskId, 'coder_delegated');
+					parentSession.stageBCompletion?.delete(taskId);
+					parentSession.taskCouncilApproved?.delete(taskId);
+					parentSession.taskCouncilWorkflowGeneration?.delete(taskId);
+					updateTaskWorkflowCache(parentSession, taskId, workflow);
 				}
 			}
-			await recordAgentDispatch(args.directory, taskId, 'coder', undefined, {
-				testEngineerExempt: isMarkdownOnlyTaskChange(
-					taskChangeContext?.declaredFiles,
-					attributedFiles,
-				),
-			});
 			if (
 				args.reviewerReceiptOptions?.config?.enabled === true &&
 				!markReviewerScopeGenerationReady({
@@ -472,15 +531,54 @@ export async function ingestBackgroundStageBCompletion(args: {
 	}
 
 	try {
+		if (args.record.workflowGeneration === undefined) {
+			return {
+				ok: false,
+				consumed: false,
+				reason: `stage-b ingestion failed: TASK_WORKFLOW_GENERATION_REQUIRED for ${taskId}`,
+			};
+		}
 		const existingEvidence = await readTaskEvidence(args.directory, taskId);
-		if (existingEvidence?.test_engineer_exempt !== true) {
-			// Legacy/missing coder provenance fails closed to the full Stage B pair.
-			await recordAgentDispatch(
+		const isStageBRole =
+			args.record.normalizedAgent === 'reviewer' ||
+			args.record.normalizedAgent === 'test_engineer';
+		const stageBRole = isStageBRole
+			? (args.record.normalizedAgent as StageBStateRole)
+			: null;
+		const verdict = stageBRole
+			? structuredStageBVerdict(stageBRole, args.result.text ?? '', taskId)
+			: null;
+		if (stageBRole && verdict !== 'pass') {
+			const rejected = await transitionTaskWorkflowEvidence(
 				args.directory,
 				taskId,
-				stageBRequiredGateAgent(args.record.normalizedAgent),
-				hasActiveTurboMode(args.record.parentSessionId),
+				{
+					type: 'stage_b_failed',
+					gate: stageBRole,
+					expectedGeneration: args.record.workflowGeneration,
+					transitionId: `background-gate-failed:${args.record.correlationId}`,
+				},
 			);
+			const parentSession = swarmState.agentSessions.get(
+				args.record.parentSessionId,
+			);
+			if (parentSession) {
+				parentSession.taskWorkflowStates.set(taskId, 'rework_required');
+				parentSession.stageBCompletion?.delete(taskId);
+				updateTaskWorkflowCache(
+					parentSession,
+					taskId,
+					getTaskWorkflowSnapshot(rejected),
+				);
+			}
+			return {
+				ok: false,
+				consumed: true,
+				reason:
+					verdict === 'fail'
+						? `background ${stageBRole} rejected task ${taskId}`
+						: `background ${stageBRole} returned no valid structured verdict for task ${taskId}`,
+			};
 		}
 		await recordGateEvidence(
 			args.directory,
@@ -488,6 +586,13 @@ export async function ingestBackgroundStageBCompletion(args: {
 			args.record.normalizedAgent,
 			args.record.subagentSessionId,
 			hasActiveTurboMode(args.record.parentSessionId),
+			{
+				expectedGeneration: args.record.workflowGeneration,
+				transitionId: `background-gate:${args.record.correlationId}`,
+				// Missing/non-exempt provenance is conservative: require the full
+				// Stage B pair without fabricating a new coder mutation/generation.
+				ensureDefaultStageB: existingEvidence?.test_engineer_exempt !== true,
+			},
 		);
 
 		if (args.record.normalizedAgent === 'reviewer') {
@@ -530,10 +635,6 @@ export async function ingestBackgroundStageBCompletion(args: {
 			reason: `stage-b ingestion failed: ${message}`,
 		};
 	}
-}
-
-function stageBRequiredGateAgent(agent: string): string {
-	return agent === 'reviewer' || agent === 'test_engineer' ? 'coder' : agent;
 }
 
 function candidateSessions(parentSessionId: string): AgentSessionState[] {

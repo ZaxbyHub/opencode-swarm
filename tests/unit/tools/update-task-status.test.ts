@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { transitionTaskWorkflowEvidence } from '../../../src/gate-evidence';
 import {
 	advanceTaskState,
 	ensureAgentSession,
@@ -21,6 +22,37 @@ import {
 	createWorkflowTestSessionWithPassedTask,
 	createWorkflowTestSessionWithTaskAtState,
 } from '../../helpers/workflow-session-factory';
+
+async function seedReadyEvidence(
+	directory: string,
+	taskId = '1.1',
+): Promise<void> {
+	await transitionTaskWorkflowEvidence(directory, taskId, {
+		type: 'accepted_mutation',
+		agentType: 'coder',
+		expectedGeneration: 0,
+		transitionId: `${taskId}:accepted`,
+	});
+	await transitionTaskWorkflowEvidence(directory, taskId, {
+		type: 'stage_a_passed',
+		expectedGeneration: 1,
+		transitionId: `${taskId}:stage-a`,
+	});
+	await transitionTaskWorkflowEvidence(directory, taskId, {
+		type: 'stage_b_completed',
+		gate: 'reviewer',
+		sessionId: 'test-reviewer',
+		expectedGeneration: 1,
+		transitionId: `${taskId}:reviewer`,
+	});
+	await transitionTaskWorkflowEvidence(directory, taskId, {
+		type: 'stage_b_completed',
+		gate: 'test_engineer',
+		sessionId: 'test-engineer',
+		expectedGeneration: 1,
+		transitionId: `${taskId}:test-engineer`,
+	});
+}
 
 describe('validateStatus', () => {
 	test('returns undefined for valid statuses', () => {
@@ -140,6 +172,7 @@ describe('executeUpdateTaskStatus', () => {
 	});
 
 	test('updates task to completed status', async () => {
+		await seedReadyEvidence(tempDir);
 		const args: UpdateTaskStatusArgs = {
 			task_id: '1.1',
 			status: 'completed',
@@ -275,29 +308,7 @@ describe('executeUpdateTaskStatus', () => {
 				JSON.stringify(completedPlan, null, 2),
 			);
 
-			// Write evidence file to satisfy hasPassedDurableGateEvidence
-			fs.mkdirSync(path.join(tempDir, '.swarm', 'evidence'), {
-				recursive: true,
-			});
-			fs.writeFileSync(
-				path.join(tempDir, '.swarm', 'evidence', '1.1.json'),
-				JSON.stringify({
-					taskId: '1.1',
-					required_gates: ['reviewer', 'test_engineer'],
-					gates: {
-						reviewer: {
-							sessionId: 'test',
-							timestamp: '2025-01-01T00:00:00.000Z',
-							agent: 'reviewer',
-						},
-						test_engineer: {
-							sessionId: 'test',
-							timestamp: '2025-01-01T00:00:00.000Z',
-							agent: 'test_engineer',
-						},
-					},
-				}),
-			);
+			await seedReadyEvidence(tempDir);
 
 			// Create a session but keep task state at idle (simulates session restart)
 			ensureAgentSession('test-idle-session');
@@ -584,9 +595,10 @@ describe('executeUpdateTaskStatus with reviewer gate', () => {
 	});
 
 	test('proceeds normally when status is completed and reviewer gate passes', async () => {
-		// Set up a session with task in tests_run state (will pass)
+		// Session state remains diagnostic; exact durable evidence authorizes completion.
 		const session = createWorkflowTestSessionWithPassedTask('1.1');
 		swarmState.agentSessions.set('session-pass', session);
+		await seedReadyEvidence(tempDir);
 
 		const args: UpdateTaskStatusArgs = {
 			task_id: '1.1',
@@ -852,7 +864,7 @@ describe('executeUpdateTaskStatus in_progress state machine seeding (Task 2.3)',
 
 		// Assert the task is now at 'coder_delegated' using getTaskState
 		const finalState = getTaskState(session, '1.1');
-		expect(finalState).toBe('coder_delegated');
+		expect(finalState).toBe('idle');
 	});
 
 	test('update_task_status(in_progress) synchronizes session currentTaskId for gate recording', async () => {
@@ -875,7 +887,7 @@ describe('executeUpdateTaskStatus in_progress state machine seeding (Task 2.3)',
 		expect(result.success).toBe(true);
 
 		// Assert the session's currentTaskId is now set to the task_id
-		expect(session.currentTaskId).toBe('1.1');
+		expect(session.currentTaskId).toBeNull();
 	});
 });
 
@@ -977,7 +989,7 @@ describe('executeUpdateTaskStatus Task 1.2 regression: in_progress activation sy
 		fs.rmSync(tempDir, { recursive: true, force: true });
 	});
 
-	test('moving new task to in_progress synchronizes currentTaskId for later durable evidence', async () => {
+	test('moving a task to in_progress does not guess a session identity', async () => {
 		// Step 1: Set up a session with prior task 1.1 in workflow state
 		const session = createWorkflowTestSessionWithCompletedTask('1.1');
 		swarmState.agentSessions.set('test-session', session);
@@ -1001,33 +1013,13 @@ describe('executeUpdateTaskStatus Task 1.2 regression: in_progress activation sy
 		expect(result.new_status).toBe('in_progress');
 
 		// Step 3: Verify the new task's workflow state was advanced
-		expect(getTaskState(session, '1.2')).toBe('coder_delegated');
+		expect(getTaskState(session, '1.2')).toBe('idle');
 
-		// Step 4: CRITICAL - Verify session's currentTaskId is now set to the NEW task (1.2)
-		// This is the key fix: task identity synchronization so later gate recording uses correct task
-		expect(session.currentTaskId).toBe('1.2');
+		// No ToolContext session was supplied, so no unrelated session is claimed.
+		expect(session.currentTaskId).toBeNull();
 
-		// Step 5: Simulate durable evidence for the NEW task (1.2) - should satisfy completion
-		const newTaskEvidence = {
-			taskId: '1.2',
-			required_gates: ['reviewer', 'test_engineer'],
-			gates: {
-				reviewer: {
-					sessionId: 'test-session',
-					timestamp: new Date().toISOString(),
-					agent: 'reviewer',
-				},
-				test_engineer: {
-					sessionId: 'test-session',
-					timestamp: new Date().toISOString(),
-					agent: 'test_engineer',
-				},
-			},
-		};
-		fs.writeFileSync(
-			path.join(tempDir, '.swarm', 'evidence', '1.2.json'),
-			JSON.stringify(newTaskEvidence, null, 2),
-		);
+		// Step 5: Persist the exact generation-bound workflow for the new task.
+		await seedReadyEvidence(tempDir, '1.2');
 
 		// Step 6: Verify checkReviewerGate passes for the NEW task (1.2) using durable evidence
 		const gateResult = checkReviewerGate('1.2', tempDir);
@@ -1049,7 +1041,7 @@ describe('executeUpdateTaskStatus Task 1.2 regression: in_progress activation sy
 		expect(completeResult.new_status).toBe('completed');
 	});
 
-	test('prior task identity is preserved when switching to new task in_progress', async () => {
+	test('a bare in_progress update preserves another task identity and workflow', async () => {
 		// Set up a session with prior task 1.1 already tracked
 		const session = createWorkflowTestSessionWithCompletedTask('1.1');
 
@@ -1072,15 +1064,14 @@ describe('executeUpdateTaskStatus Task 1.2 regression: in_progress activation sy
 		// Should succeed
 		expect(result.success).toBe(true);
 
-		// CRITICAL: session's currentTaskId should now point to the NEW task (1.2)
-		// This ensures later gate recording uses the correct task identity
-		expect(session.currentTaskId).toBe('1.2');
+		// Without an exact caller session, the update must not rewrite identity.
+		expect(session.currentTaskId).toBe('1.1');
 
 		// Verify prior task state is still intact (not corrupted)
 		expect(getTaskState(session, '1.1')).toBe('complete');
 
-		// Verify new task is now at coder_delegated
-		expect(getTaskState(session, '1.2')).toBe('coder_delegated');
+		// Starting plan work does not claim that a coder mutation was accepted.
+		expect(getTaskState(session, '1.2')).toBe('idle');
 	});
 });
 
@@ -1433,7 +1424,7 @@ describe('checkReviewerGate — adversarial warn', () => {
 		// Should fire the corrupt-evidence diagnostic once (now debug-gated via logger.log).
 		expect(
 			logCalls.filter((m) => m.includes('corrupt or unreadable')).length,
-		).toBe(1);
+		).toBe(0);
 	});
 
 	// ====== Attack Vector 3: taskId is empty string ======
@@ -1544,7 +1535,7 @@ describe('checkReviewerGate — adversarial warn', () => {
 		// now debug-gated via logger.log.
 		expect(
 			logCalls.filter((m) => m.includes('corrupt or unreadable')).length,
-		).toBe(2);
+		).toBe(0);
 	});
 
 	// ====== Additional edge case: Zero sessions should not warn ======
@@ -2372,7 +2363,7 @@ describe('Durable evidence seed on in_progress transition', () => {
 		fs.rmSync(tempDir, { recursive: true, force: true });
 	});
 
-	test('creates evidence seed file when transitioning to in_progress', async () => {
+	test('does not create QA evidence merely by transitioning to in_progress', async () => {
 		const result = await executeUpdateTaskStatus(
 			{ task_id: '1.1', status: 'in_progress' },
 			tempDir,
@@ -2381,12 +2372,7 @@ describe('Durable evidence seed on in_progress transition', () => {
 		expect(result.success).toBe(true);
 
 		const evidencePath = path.join(tempDir, '.swarm', 'evidence', '1.1.json');
-		expect(fs.existsSync(evidencePath)).toBe(true);
-
-		const evidence = JSON.parse(fs.readFileSync(evidencePath, 'utf-8'));
-		expect(evidence.taskId).toBe('1.1');
-		expect(evidence.required_gates).toEqual([]);
-		expect(evidence.gates).toEqual({});
+		expect(fs.existsSync(evidencePath)).toBe(false);
 	});
 
 	test('does not overwrite existing evidence file', async () => {
@@ -2426,7 +2412,7 @@ describe('Durable evidence seed on in_progress transition', () => {
 		expect(evidence.gates.reviewer.sessionId).toBe('session-1');
 	});
 
-	test('does not create evidence seed for non-in_progress transitions', async () => {
+	test('records terminal workflow evidence for a non-in_progress transition', async () => {
 		const result = await executeUpdateTaskStatus(
 			{ task_id: '1.2', status: 'blocked' },
 			tempDir,
@@ -2435,10 +2421,10 @@ describe('Durable evidence seed on in_progress transition', () => {
 		expect(result.success).toBe(true);
 
 		const evidencePath = path.join(tempDir, '.swarm', 'evidence', '1.2.json');
-		expect(fs.existsSync(evidencePath)).toBe(false);
+		expect(fs.existsSync(evidencePath)).toBe(true);
 	});
 
-	test('creates evidence directory if it does not exist', async () => {
+	test('does not create an evidence directory for a bare in_progress transition', async () => {
 		// Ensure evidence directory does NOT exist
 		const evidenceDir = path.join(tempDir, '.swarm', 'evidence');
 		expect(fs.existsSync(evidenceDir)).toBe(false);
@@ -2449,8 +2435,8 @@ describe('Durable evidence seed on in_progress transition', () => {
 		);
 
 		expect(result.success).toBe(true);
-		expect(fs.existsSync(evidenceDir)).toBe(true);
-		expect(fs.existsSync(path.join(evidenceDir, '1.1.json'))).toBe(true);
+		expect(fs.existsSync(evidenceDir)).toBe(false);
+		expect(fs.existsSync(path.join(evidenceDir, '1.1.json'))).toBe(false);
 	});
 
 	test('does not write evidence seed when working_directory validation fails', async () => {

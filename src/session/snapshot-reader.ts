@@ -56,7 +56,9 @@ const VALID_TASK_WORKFLOW_STATES: TaskWorkflowState[] = [
 	'pre_check_passed',
 	'reviewer_run',
 	'tests_run',
+	'rework_required',
 	'complete',
+	'blocked',
 ];
 
 /**
@@ -328,7 +330,7 @@ export async function readSnapshot(
 
 		// Validate version — quarantine incompatible snapshots so they are not
 		// re-read on every subsequent restart.
-		if (parsed.version !== 1 && parsed.version !== 2) {
+		if (parsed.version !== 1 && parsed.version !== 2 && parsed.version !== 3) {
 			try {
 				const quarantinePath = validateSwarmPath(
 					directory,
@@ -416,6 +418,11 @@ export async function rehydrateState(
 				continue;
 			}
 			const session = deserializeAgentSession(serializedSession);
+			// Workflow/session barrier projections are never authoritative, even in
+			// v3 snapshots. Rebuild them from exact durable evidence + plan state.
+			session.taskWorkflowStates = new Map();
+			session.taskWorkflowCache = new Map();
+			session.stageBCompletion = new Map();
 
 			// ── Timestamps ────────────────────────────────────────────────
 			// Refresh timestamps so the stale eviction sweep in startAgentSession

@@ -174,8 +174,8 @@ afterEach(() => {
 	}
 });
 
-describe('delegation-gate: A.4 council reward capture — dedup across re-submission (F-A.4-6)', () => {
-	it('rewards a memory only once even when the SAME task completes via council APPROVE a second time', async () => {
+describe('delegation-gate: council verdicts defer terminal rewards to the central transaction', () => {
+	it('does not reward or complete from repeated council APPROVE submissions', async () => {
 		writePlan();
 		enableCouncilGate();
 		const memoryConfig = resolveMemoryConfig({
@@ -205,8 +205,8 @@ describe('delegation-gate: A.4 council reward capture — dedup across re-submis
 			timestamp: '2026-06-01T00:00:00.000Z',
 		});
 
-		// First APPROVE resolution: task advances pre_check_passed -> complete
-		// and the recalled memory earns its first (and only expected) EMA step.
+		// A verdict records approval and emits guidance only. update_task_status
+		// owns the durable terminal plan/evidence transaction and its reward.
 		await submitVerdict(
 			hook,
 			sessionID,
@@ -214,15 +214,15 @@ describe('delegation-gate: A.4 council reward capture — dedup across re-submis
 			approveOutput(),
 			'call-dedup-1',
 		);
-		expect(getTaskState(session, '1.1')).toBe('complete');
+		expect(getTaskState(session, '1.1')).toBe('pre_check_passed');
 
 		const readerAfterFirst = new LocalJsonlMemoryProvider(tmpDir, memoryConfig);
 		const eventsAfterFirst = await readerAfterFirst.listRewardEvents({
 			memoryId: memory.id,
 		});
-		expect(eventsAfterFirst).toHaveLength(1);
+		expect(eventsAfterFirst).toHaveLength(0);
 		const recordAfterFirst = await readerAfterFirst.get(memory.id);
-		expect(recordAfterFirst?.metadata.qValue).toBeCloseTo(0.55, 10);
+		expect(recordAfterFirst?.metadata.qValue).toBeUndefined();
 
 		// Simulate the task being reopened for a redo round (e.g. a later
 		// CONCERNS elsewhere in the plan sends this task through another
@@ -239,7 +239,7 @@ describe('delegation-gate: A.4 council reward capture — dedup across re-submis
 			approveOutput({ roundNumber: 2 }),
 			'call-dedup-2',
 		);
-		expect(getTaskState(session, '1.1')).toBe('complete');
+		expect(getTaskState(session, '1.1')).toBe('pre_check_passed');
 
 		const readerAfterSecond = new LocalJsonlMemoryProvider(
 			tmpDir,
@@ -251,15 +251,14 @@ describe('delegation-gate: A.4 council reward capture — dedup across re-submis
 		// A broken dedup (e.g. `rewarded: false` hardcoded instead of carrying
 		// `priorRewarded` forward) would append a SECOND reward event here and
 		// drive qValue to a second compounded EMA step (0.55 -> 0.595).
-		expect(eventsAfterSecond).toHaveLength(1);
+		expect(eventsAfterSecond).toHaveLength(0);
 		const recordAfterSecond = await readerAfterSecond.get(memory.id);
-		expect(recordAfterSecond?.metadata.qValue).toBeCloseTo(0.55, 10);
-		expect(recordAfterSecond?.metadata.qValue).not.toBeCloseTo(0.595, 6);
+		expect(recordAfterSecond?.metadata.qValue).toBeUndefined();
 	});
 });
 
 describe('delegation-gate: A.4 council reward capture — memory disabled is a no-op (F-A.4-7)', () => {
-	it('APPROVE -> complete does not attempt reward capture and does not error when memory.enabled is false', async () => {
+	it('APPROVE remains non-terminal and does not attempt reward capture when memory is disabled', async () => {
 		writePlan();
 		enableCouncilGate();
 		// makeConfig() with no memory argument leaves `config.memory` undefined,
@@ -315,9 +314,7 @@ describe('delegation-gate: A.4 council reward capture — memory disabled is a n
 		}
 
 		expect(thrown).toBeUndefined();
-		// Task still completes normally — memory being disabled must not
-		// interfere with the council fast-path advancement.
-		expect(getTaskState(session, '1.1')).toBe('complete');
+		expect(getTaskState(session, '1.1')).toBe('pre_check_passed');
 
 		const reader = new LocalJsonlMemoryProvider(tmpDir, memoryConfigForSeeding);
 		const events = await reader.listRewardEvents({ memoryId: memory.id });
@@ -486,8 +483,7 @@ describe('delegation-gate: A.4 council reward capture — isolation (F-A.4-9)', 
 
 		// The gate must swallow the reward-capture failure entirely.
 		expect(thrown).toBeUndefined();
-		// And the task must still be complete — a reward-capture failure
-		// must never roll back or block the completion it followed.
-		expect(getTaskState(session, '1.1')).toBe('complete');
+		// Verdict submission never enters the terminal reward path directly.
+		expect(getTaskState(session, '1.1')).toBe('pre_check_passed');
 	});
 });

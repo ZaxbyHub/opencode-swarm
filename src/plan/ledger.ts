@@ -18,6 +18,7 @@ import { withEvidenceLock } from '../evidence/lock.js';
 import { emit } from '../telemetry.js';
 import { criticalWarn, log } from '../utils/logger';
 import { assertProjectRoot } from '../utils/project-boundary';
+import { normalizeExecutionProfileForHash } from './planning-profile';
 import { derivePlanId } from './utils';
 
 /**
@@ -170,7 +171,7 @@ function getPlanJsonPath(directory: string): string {
 function writeFileFsyncedThenRename(
 	tempPath: string,
 	targetPath: string,
-	data: string,
+	data: string | Uint8Array,
 ): void {
 	const fd = fs.openSync(tempPath, 'w');
 	try {
@@ -180,6 +181,57 @@ function writeFileFsyncedThenRename(
 		fs.closeSync(fd);
 	}
 	fs.renameSync(tempPath, targetPath);
+}
+
+function fsyncRecoveryDirectory(directory: string): void {
+	let fd: number | undefined;
+	try {
+		fd = fs.openSync(directory, 'r');
+		fs.fsyncSync(fd);
+	} catch (error) {
+		// Windows does not consistently permit directory handles through openSync.
+		// The archive file itself is still fsynced before rename; only the directory
+		// metadata barrier is unavailable on that platform. POSIX failures are not
+		// safe to ignore because recovery must not replace canonical before the
+		// archive rename is durable.
+		const code = (error as NodeJS.ErrnoException).code;
+		const unsupportedOnWindows =
+			process.platform === 'win32' &&
+			['EPERM', 'EACCES', 'EINVAL', 'EBADF', 'EISDIR', 'ENOTSUP'].includes(
+				code ?? '',
+			);
+		if (unsupportedOnWindows) {
+			log(
+				`[ledger] Directory fsync unavailable for recovery archive ${directory}: ${error instanceof Error ? error.message : String(error)}`,
+			);
+			return;
+		}
+		throw new Error(
+			`Failed to fsync recovery archive directory before canonical replacement: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	} finally {
+		if (fd !== undefined) fs.closeSync(fd);
+	}
+}
+
+function findRawMalformedSuffix(content: Buffer): Buffer {
+	const decoder = new TextDecoder('utf-8', { fatal: true });
+	let lineStart = 0;
+	for (let index = 0; index <= content.length; index++) {
+		if (index < content.length && content[index] !== 0x0a) continue;
+		let lineEnd = index;
+		if (lineEnd > lineStart && content[lineEnd - 1] === 0x0d) lineEnd--;
+		const line = content.subarray(lineStart, lineEnd);
+		if (line.length > 0) {
+			try {
+				JSON.parse(decoder.decode(line));
+			} catch {
+				return content.subarray(lineStart);
+			}
+		}
+		lineStart = index + 1;
+	}
+	return Buffer.alloc(0);
 }
 
 /**
@@ -203,19 +255,7 @@ export function computePlanHash(plan: Plan): string {
 		swarm: plan.swarm,
 		current_phase: plan.current_phase,
 		migration_status: plan.migration_status,
-		execution_profile: plan.execution_profile
-			? {
-					...plan.execution_profile,
-					// Backward compatibility: this field was added with a false default.
-					// Schema parsing therefore injects `false` into pre-upgrade plans.
-					// Omit that default from the hash so their persisted ledger hashes
-					// remain valid; opting in with `true` must still move the hash.
-					commit_after_each_completed_task:
-						plan.execution_profile.commit_after_each_completed_task === true
-							? true
-							: undefined,
-				}
-			: undefined,
+		execution_profile: normalizeExecutionProfileForHash(plan.execution_profile),
 		phases: plan.phases.map((phase) => ({
 			id: phase.id,
 			name: phase.name,
@@ -275,18 +315,7 @@ export function computePlanStructureHash(plan: Plan): string {
 		swarm: plan.swarm,
 		current_phase: plan.current_phase,
 		migration_status: plan.migration_status,
-		execution_profile: plan.execution_profile
-			? {
-					...plan.execution_profile,
-					// Keep legacy critic approvals valid when PlanSchema injects the new
-					// default-false commit policy. Only an explicit opt-in changes the
-					// status-excluded structural hash.
-					commit_after_each_completed_task:
-						plan.execution_profile.commit_after_each_completed_task === true
-							? true
-							: undefined,
-				}
-			: undefined,
+		execution_profile: normalizeExecutionProfileForHash(plan.execution_profile),
 		phases: plan.phases.map((phase) => ({
 			id: phase.id,
 			name: phase.name,
@@ -518,6 +547,13 @@ export async function appendLedgerEvent(
 	options?: {
 		expectedSeq?: number;
 		expectedHash?: string;
+		/**
+		 * CAS against the durable ledger tail rather than plan.json. This is used
+		 * only by stale-projection reconciliation, where plan.json intentionally
+		 * differs from the ledger and a snapshot adopts that exact projection as
+		 * the new authoritative state.
+		 */
+		expectedLedgerHash?: string;
 		planHashAfter?: string;
 	},
 ): Promise<LedgerEvent> {
@@ -529,11 +565,30 @@ export async function appendLedgerEvent(
 		'append-ledger-event',
 		async () => {
 			const ledgerPath = getLedgerPath(directory);
+			if (
+				options?.expectedLedgerHash !== undefined &&
+				options.expectedSeq === undefined
+			) {
+				throw new Error(
+					'expectedLedgerHash requires expectedSeq so stale-projection recovery is bound to one exact ledger tail',
+				);
+			}
 
 			// Get current state while holding the ledger write lock so concurrent
 			// writers cannot observe the same seq and both rewrite the canonical file.
 			const latestSeq = await getLatestLedgerSeq(directory);
 			const nextSeq = latestSeq + 1;
+			let ledgerHashBefore: string | undefined;
+			if (options?.expectedLedgerHash !== undefined) {
+				const events = await readLedgerEvents(directory);
+				const tail = events[events.length - 1];
+				if (!tail || tail.plan_hash_after !== options.expectedLedgerHash) {
+					throw new LedgerStaleWriterError(
+						`Stale writer: expected ledger hash ${options.expectedLedgerHash} but found ${tail?.plan_hash_after ?? '<missing>'}`,
+					);
+				}
+				ledgerHashBefore = tail.plan_hash_after;
+			}
 
 			// Compute plan_hash_before from current plan.json
 			const planHashBefore = computeCurrentPlanHash(directory);
@@ -566,7 +621,7 @@ export async function appendLedgerEvent(
 				...eventInput,
 				seq: nextSeq,
 				timestamp: new Date().toISOString(),
-				plan_hash_before: planHashBefore,
+				plan_hash_before: ledgerHashBefore ?? planHashBefore,
 				plan_hash_after: planHashAfter,
 				schema_version: LEDGER_SCHEMA_VERSION,
 			};
@@ -748,6 +803,10 @@ export async function takeSnapshotEvent(
 		source?: string;
 		approvalMetadata?: Record<string, unknown>;
 		payloadHashOverride?: string;
+		/** CAS binding for stale-projection recovery snapshots. */
+		expectedSeq?: number;
+		/** Previous durable hash used to preserve the ledger hash chain. */
+		expectedLedgerHash?: string;
 	},
 ): Promise<LedgerEvent> {
 	const payloadHash = options?.payloadHashOverride ?? computePlanHash(plan);
@@ -769,7 +828,161 @@ export async function takeSnapshotEvent(
 			plan_id: planId,
 			payload: snapshotPayload as unknown as Record<string, unknown>,
 		},
-		{ planHashAfter: options?.planHashAfter },
+		{
+			planHashAfter: options?.planHashAfter,
+			expectedSeq: options?.expectedSeq,
+			expectedLedgerHash: options?.expectedLedgerHash,
+		},
+	);
+}
+
+export interface TruncatedLedgerRecoveryResult {
+	archivePath: string;
+	archiveSha256: string;
+	recoveryRoot: LedgerEvent;
+}
+
+/**
+ * Recover an explicitly verified stale projection from a malformed ledger.
+ *
+ * A snapshot appended after an unparsable line is not durable recovery because
+ * integrity replay stops at that line after restart. This transaction first
+ * writes and fsyncs a byte-for-byte archive of the complete canonical ledger,
+ * then atomically replaces the canonical file with a new `plan_created` root
+ * that embeds the verified projection and links to the preserved archive.
+ * A crash therefore leaves either the old canonical ledger or the new complete
+ * root; it never creates a missing-ledger window or silently discards history.
+ */
+export async function replaceTruncatedLedgerWithRecoveryRoot(
+	directory: string,
+	plan: Plan,
+	expected: { seq: number; ledgerHash: string },
+): Promise<TruncatedLedgerRecoveryResult> {
+	assertProjectRoot(directory);
+	const validated = PlanSchema.parse(plan);
+	return withEvidenceLock(
+		directory,
+		LEDGER_LOCK_PATH,
+		'plan-ledger',
+		'reconcile-truncated-ledger',
+		async () => {
+			const ledgerPath = getLedgerPath(directory);
+			if (!fs.existsSync(ledgerPath)) {
+				throw new LedgerStaleWriterError(
+					'Stale writer: canonical ledger disappeared before truncated-ledger recovery',
+				);
+			}
+
+			const events = await readLedgerEvents(directory);
+			const tail = events[events.length - 1];
+			if (
+				!tail ||
+				tail.seq !== expected.seq ||
+				tail.plan_hash_after !== expected.ledgerHash ||
+				events[0]?.plan_id !== derivePlanId(validated)
+			) {
+				throw new LedgerStaleWriterError(
+					'Stale writer: ledger identity or tail changed before truncated-ledger recovery',
+				);
+			}
+
+			const integrity = await readLedgerEventsWithIntegrity(directory);
+			if (!integrity.truncated || integrity.badSuffix === null) {
+				throw new LedgerStaleWriterError(
+					'Stale writer: ledger is no longer truncated; retry against its current tail',
+				);
+			}
+
+			const originalBytes = fs.readFileSync(ledgerPath);
+			const archiveSha256 = crypto
+				.createHash('sha256')
+				.update(originalBytes)
+				.digest('hex');
+			const swarmDir = path.dirname(ledgerPath);
+			const archiveSuffix = `.${archiveSha256.slice(0, 12)}.jsonl`;
+			let archiveName = `plan-ledger.reconcile-archive.${Date.now()}.${Math.floor(Math.random() * 1e9)}${archiveSuffix}`;
+			let archivePath = path.join(swarmDir, archiveName);
+			let archiveNeedsWrite = true;
+			for (const candidate of fs.readdirSync(swarmDir)) {
+				if (
+					!candidate.startsWith('plan-ledger.reconcile-archive.') ||
+					!candidate.endsWith(archiveSuffix)
+				) {
+					continue;
+				}
+				const candidatePath = path.join(swarmDir, candidate);
+				if (fs.readFileSync(candidatePath).equals(originalBytes)) {
+					archiveName = candidate;
+					archivePath = candidatePath;
+					archiveNeedsWrite = false;
+					break;
+				}
+			}
+			const archiveTempPath = `${archivePath}.tmp`;
+			const canonicalTempPath = `${ledgerPath}.reconcile.${Date.now()}.${Math.floor(Math.random() * 1e9)}.tmp`;
+
+			const planHash = computePlanHash(validated);
+			const rawBadSuffix = findRawMalformedSuffix(originalBytes);
+			if (rawBadSuffix.length === 0) {
+				throw new LedgerStaleWriterError(
+					'Stale writer: raw ledger bytes no longer contain the malformed suffix detected during replay',
+				);
+			}
+			const badSuffixSha256 = crypto
+				.createHash('sha256')
+				.update(rawBadSuffix)
+				.digest('hex');
+			const recoveryRoot: LedgerEvent = {
+				seq: 1,
+				timestamp: new Date().toISOString(),
+				plan_id: derivePlanId(validated),
+				event_type: 'plan_created',
+				source: 'save_plan_truncated_ledger_reconcile',
+				plan_hash_before: '',
+				plan_hash_after: planHash,
+				schema_version: LEDGER_SCHEMA_VERSION,
+				payload: {
+					plan: validated,
+					payload_hash: planHash,
+					recovery: {
+						kind: 'truncated_ledger_reconcile',
+						archived_ledger: `.swarm/${archiveName}`,
+						archived_sha256: archiveSha256,
+						bad_suffix_sha256: badSuffixSha256,
+						prior_tail_seq: expected.seq,
+						prior_tail_hash: expected.ledgerHash,
+					},
+				},
+			};
+
+			try {
+				// Archive durability precedes canonical replacement. If the process
+				// stops here, the original canonical file is still untouched.
+				if (archiveNeedsWrite) {
+					_internals.writeFileFsyncedThenRename(
+						archiveTempPath,
+						archivePath,
+						originalBytes,
+					);
+				}
+				_internals.fsyncRecoveryDirectory(swarmDir);
+				_internals.writeFileFsyncedThenRename(
+					canonicalTempPath,
+					ledgerPath,
+					`${JSON.stringify(recoveryRoot)}\n`,
+				);
+			} finally {
+				for (const tempPath of [archiveTempPath, canonicalTempPath]) {
+					try {
+						fs.unlinkSync(tempPath);
+					} catch {
+						/* renamed or never created */
+					}
+				}
+			}
+
+			return { archivePath, archiveSha256, recoveryRoot };
+		},
 	);
 }
 
@@ -1461,4 +1674,6 @@ export const _internals = {
 	loadLastPlanCriticApprovedSnapshot,
 	getLedgerPath,
 	getPlanJsonPath,
+	writeFileFsyncedThenRename,
+	fsyncRecoveryDirectory,
 };

@@ -1,5 +1,12 @@
-import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test';
-import * as os from 'node:os';
+import {
+	afterAll,
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	spyOn,
+} from 'bun:test';
 import * as path from 'node:path';
 import type { GuardrailsConfig } from '../../../src/config/schema';
 import {
@@ -15,8 +22,13 @@ import {
 	swarmState,
 } from '../../../src/state';
 import * as utilsModule from '../../../src/utils';
+import { createSafeTestDir } from '../../helpers/safe-test-dir';
 
-const TEST_DIR = os.tmpdir();
+const { dir: TEST_DIR, cleanup: cleanupTestDir } = createSafeTestDir(
+	'guardrails-config-logging-',
+);
+
+afterAll(cleanupTestDir);
 
 function defaultConfig(
 	overrides?: Partial<GuardrailsConfig>,

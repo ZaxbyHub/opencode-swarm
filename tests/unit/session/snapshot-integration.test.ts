@@ -84,7 +84,7 @@ describe('Snapshot Integration', () => {
 			const parsed = JSON.parse(content);
 
 			expect(parsed).toBeDefined();
-			expect(parsed.version).toBe(2);
+			expect(parsed.version).toBe(3);
 			expect(parsed.toolAggregates.read).toBeDefined();
 			expect(parsed.activeAgent['session-2']).toBe('reviewer');
 			expect(parsed.agentSessions[sessionId]).toBeDefined();
@@ -264,7 +264,7 @@ describe('Snapshot Integration', () => {
 
 			const content = await file.text();
 			const parsed = JSON.parse(content);
-			expect(parsed.version).toBe(2);
+			expect(parsed.version).toBe(3);
 			expect(parsed.toolAggregates).toEqual({});
 			expect(parsed.activeAgent).toEqual({});
 			expect(parsed.delegationChains).toEqual({});
@@ -360,7 +360,7 @@ describe('Snapshot Integration', () => {
 			expect(await file.exists()).toBe(true);
 			const content = await file.text();
 			const parsed = JSON.parse(content);
-			expect(parsed.version).toBe(2);
+			expect(parsed.version).toBe(3);
 		});
 
 		it('should maintain valid JSON after multiple writes', async () => {

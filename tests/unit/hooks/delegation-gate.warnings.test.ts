@@ -221,10 +221,10 @@ describe('zero-coder-delegation detection', () => {
 });
 
 // ============================================
-// State machine wiring tests
+// State projection fencing tests
 // ============================================
-describe('Task 2.2 — state machine wiring', () => {
-	it('when a coder delegation is processed in messagesTransform, getTaskState(session, taskId) returns coder_delegated afterward', async () => {
+describe('Task 2.2 — message transforms cannot publish workflow state', () => {
+	it('keeps task state idle when coder-shaped text is only observed in messagesTransform', async () => {
 		const config = makeConfig();
 		const hook = createDelegationGateHook(config, process.cwd());
 		const sessionID = 'test-session-state-1';
@@ -238,18 +238,18 @@ describe('Task 2.2 — state machine wiring', () => {
 
 		await hook.messagesTransform({}, messages);
 
-		// Verify task state was advanced to 'coder_delegated'
+		// Durable settlement, not chat text, is authoritative.
 		const session = ensureAgentSession(sessionID);
 		const taskState = getTaskState(session, '2.1');
-		expect(taskState).toBe('coder_delegated');
+		expect(taskState).toBe('idle');
 	});
 
-	it('when advanceTaskState would throw (already at coder_delegated state), the delegation still proceeds successfully - no error thrown, no rejection', async () => {
+	it('repeated coder-shaped messages remain non-authoritative and non-throwing', async () => {
 		const config = makeConfig();
 		const hook = createDelegationGateHook(config, process.cwd());
 		const sessionID = 'test-session-state-2';
 
-		// First delegation: advance to coder_delegated
+		// Neither observation may manufacture accepted-mutation evidence.
 		const messages1 = makeMessages(
 			'coder\nTASK: 2.1\nFILE: src/feature.ts',
 			'architect',
@@ -257,9 +257,9 @@ describe('Task 2.2 — state machine wiring', () => {
 		);
 		await hook.messagesTransform({}, messages1);
 
-		// Verify first delegation advanced the state
+		// The first observation leaves the workflow idle.
 		let session = ensureAgentSession(sessionID);
-		expect(getTaskState(session, '2.1')).toBe('coder_delegated');
+		expect(getTaskState(session, '2.1')).toBe('idle');
 
 		// Second delegation to same task: should NOT throw even though advanceTaskState would fail
 		// The code catches the error and continues
@@ -273,9 +273,9 @@ describe('Task 2.2 — state machine wiring', () => {
 		// Call directly without expect() to verify it doesn't throw
 		await hook.messagesTransform({}, messages2);
 
-		// State should remain at coder_delegated (not regress)
+		// State remains idle until a Task settlement commits durable evidence.
 		session = ensureAgentSession(sessionID);
-		expect(getTaskState(session, '2.1')).toBe('coder_delegated');
+		expect(getTaskState(session, '2.1')).toBe('idle');
 	});
 
 	it('when isCoderDelegation is false (delegating to reviewer, not coder), getTaskState is NOT advanced to coder_delegated', async () => {
@@ -320,7 +320,7 @@ describe('Task 2.2 — state machine wiring', () => {
 		expect(taskState).toBe('idle');
 	});
 
-	it('state machine works with various coder variants (mega_coder, local_coder)', async () => {
+	it('prefixed coder text also cannot publish workflow state', async () => {
 		const config = makeConfig();
 		const hook = createDelegationGateHook(config, process.cwd());
 		const sessionID = 'test-session-state-5';
@@ -334,9 +334,9 @@ describe('Task 2.2 — state machine wiring', () => {
 
 		await hook.messagesTransform({}, messages);
 
-		// Verify task state was advanced
+		// Agent-name variants do not bypass exact settlement attribution.
 		const session = ensureAgentSession(sessionID);
 		const taskState = getTaskState(session, '3.1');
-		expect(taskState).toBe('coder_delegated');
+		expect(taskState).toBe('idle');
 	});
 });

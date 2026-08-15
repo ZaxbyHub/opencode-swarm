@@ -636,7 +636,7 @@ export function formatStatusMarkdown(status: StatusData): string {
 		lines.push(
 			'',
 			`**Spec drift detected**: ${reason} (stored: ${stored}, current: ${current})`,
-			'Run `/swarm clarify` to update the spec or `/swarm acknowledge-spec-drift` to dismiss.',
+			'Run `/swarm clarify` to enter spec repair mode. Clarify alone does not clear drift: rewrite the spec so recovery can reconcile it, or run `/swarm acknowledge-spec-drift` to dismiss.',
 		);
 	}
 
@@ -872,7 +872,7 @@ export async function handleStatusCommand(
 				'No active swarm plan found.',
 				'',
 				`**Spec drift detected**: ${reason} (stored: ${stored}, current: ${current})`,
-				'Run `/swarm clarify` to update the spec or `/swarm acknowledge-spec-drift` to dismiss.',
+				'Run `/swarm clarify` to enter spec repair mode. Clarify alone does not clear drift: rewrite the spec so recovery can reconcile it, or run `/swarm acknowledge-spec-drift` to dismiss.',
 			].join('\n');
 		}
 		return 'No active swarm plan found.';

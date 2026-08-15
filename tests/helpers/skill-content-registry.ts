@@ -17,13 +17,9 @@ const SKILL_CONCEPTS = {
 	},
 	softSpecGateNonBlocking: {
 		required: [
-			/proceed to the steps below exactly as before|do NOT modify any planning behavior/i,
-		],
-		forbidden: [
-			/cannot proceed/i,
-			/must have spec/i,
-			/planning is blocked/i,
-			/blocked until/i,
+			/balanced[\s\S]*soft gate/i,
+			/proceed to the steps below exactly as before|continue with the steps below unchanged/i,
+			/strict[\s\S]*hard prerequisite/i,
 		],
 	},
 	planTraceability: {

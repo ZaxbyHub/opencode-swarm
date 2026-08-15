@@ -7,10 +7,12 @@
  */
 
 import { describe, expect, test } from 'bun:test';
+import { randomUUID } from 'node:crypto';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { startAgentSession } from '../../../src/state';
+import { seedCouncilLaunch } from '../../helpers/task-workflow-evidence';
 
 const writeConfig = (dir: string, council: Record<string, unknown>): void => {
 	mkdirSync(join(dir, '.opencode'), { recursive: true });
@@ -70,8 +72,10 @@ describe('submit_council_verdicts — quorum guard', () => {
 
 	test('3 distinct verdicts with minimumMembers=3 → success with quorum metadata', async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), 'submit-quorum-3of3-'));
+		const sessionID = `submit-council-${randomUUID()}-3of3`;
 		try {
 			writeConfig(tempDir, { enabled: true });
+			await seedCouncilLaunch(tempDir, '1.1', sessionID);
 			const { submit_council_verdicts } = await import(
 				'../../../src/tools/convene-council'
 			);
@@ -87,7 +91,7 @@ describe('submit_council_verdicts — quorum guard', () => {
 					],
 					working_directory: tempDir,
 				},
-				{ directory: tempDir },
+				{ directory: tempDir, sessionID },
 			);
 			const parsed = JSON.parse(result);
 			expect(parsed.success).toBe(true);
@@ -194,8 +198,10 @@ describe('submit_council_verdicts — quorum guard', () => {
 
 	test('requireAllMembers=true + 5 verdicts → success with quorumSize=5', async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), 'submit-require-5-'));
+		const sessionID = `submit-council-${randomUUID()}-5of5`;
 		try {
 			writeConfig(tempDir, { enabled: true, requireAllMembers: true });
+			await seedCouncilLaunch(tempDir, '1.1', sessionID);
 			const { submit_council_verdicts } = await import(
 				'../../../src/tools/convene-council'
 			);
@@ -213,7 +219,7 @@ describe('submit_council_verdicts — quorum guard', () => {
 					],
 					working_directory: tempDir,
 				},
-				{ directory: tempDir },
+				{ directory: tempDir, sessionID },
 			);
 			const parsed = JSON.parse(result);
 			expect(parsed.success).toBe(true);
@@ -227,8 +233,10 @@ describe('submit_council_verdicts — quorum guard', () => {
 
 	test('minimumMembers=1 disables quorum enforcement (1 verdict succeeds)', async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), 'submit-min-1-'));
+		const sessionID = `submit-council-${randomUUID()}-min1`;
 		try {
 			writeConfig(tempDir, { enabled: true, minimumMembers: 1 });
+			await seedCouncilLaunch(tempDir, '1.1', sessionID);
 			const { submit_council_verdicts } = await import(
 				'../../../src/tools/convene-council'
 			);
@@ -240,7 +248,7 @@ describe('submit_council_verdicts — quorum guard', () => {
 					verdicts: [makeVerdict('reviewer')],
 					working_directory: tempDir,
 				},
-				{ directory: tempDir },
+				{ directory: tempDir, sessionID },
 			);
 			const parsed = JSON.parse(result);
 			expect(parsed.success).toBe(true);
@@ -281,8 +289,10 @@ describe('submit_council_verdicts — quorum guard', () => {
 
 	test('success response shape includes membersVoted, membersAbsent, quorumSize, quorumMet', async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), 'submit-success-shape-'));
+		const sessionID = `submit-council-${randomUUID()}-shape`;
 		try {
 			writeConfig(tempDir, { enabled: true });
+			await seedCouncilLaunch(tempDir, '1.1', sessionID);
 			const { submit_council_verdicts } = await import(
 				'../../../src/tools/convene-council'
 			);
@@ -298,7 +308,7 @@ describe('submit_council_verdicts — quorum guard', () => {
 					],
 					working_directory: tempDir,
 				},
-				{ directory: tempDir },
+				{ directory: tempDir, sessionID },
 			);
 			const parsed = JSON.parse(result);
 			expect(parsed.success).toBe(true);
@@ -313,10 +323,11 @@ describe('submit_council_verdicts — quorum guard', () => {
 
 	test('rejects cherry-picked re-dispatch after insufficient_quorum in same round', async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), 'submit-quorum-cherry-pick-'));
-		const sessionID = `submit-council-${Date.now()}-a`;
+		const sessionID = `submit-council-${randomUUID()}-a`;
 		try {
 			writeConfig(tempDir, { enabled: true });
 			startAgentSession(sessionID, 'architect', undefined, tempDir);
+			await seedCouncilLaunch(tempDir, '2.2', sessionID);
 			const { submit_council_verdicts } = await import(
 				'../../../src/tools/convene-council'
 			);
@@ -363,10 +374,11 @@ describe('submit_council_verdicts — quorum guard', () => {
 
 	test('nonblocking CONCERNS remains gate-eligible and closes round state', async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), 'submit-dissenter-round2-'));
-		const sessionID = `submit-council-${Date.now()}-b`;
+		const sessionID = `submit-council-${randomUUID()}-b`;
 		try {
 			writeConfig(tempDir, { enabled: true });
 			startAgentSession(sessionID, 'architect', undefined, tempDir);
+			await seedCouncilLaunch(tempDir, '2.2', sessionID);
 			const { submit_council_verdicts } = await import(
 				'../../../src/tools/convene-council'
 			);

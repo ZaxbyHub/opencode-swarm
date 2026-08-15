@@ -21,6 +21,7 @@ import {
 } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { canonicalTmpDir } from '../../tests/helpers/tmpdir.js';
 import { readTaskEvidence } from '../gate-evidence';
 import {
 	ensureAgentSession,
@@ -756,50 +757,45 @@ describe('ADVERSARIAL: getEvidenceTaskId plan.json fallback security', () => {
 	});
 
 	describe('symlink and filesystem attacks', () => {
-		it('handles plan.json as symlink to external file', async () => {
-			// Create an external directory with a "malicious" plan.json
-			const externalDir = path.join(os.tmpdir(), `dg-external-${Date.now()}`);
-			mkdirSync(externalDir, { recursive: true });
-			writeFileSync(
-				path.join(externalDir, 'plan.json'),
-				JSON.stringify({
-					phases: [{ tasks: [{ id: '99.99', status: 'in_progress' }] }],
-				}),
-			);
-
-			// Create symlink from .swarm/plan.json to external file
-			symlinkSync(
-				path.join(externalDir, 'plan.json'),
-				path.join(tmpDir, '.swarm', 'plan.json'),
-			);
-
-			const hook = createDelegationGateHook(testConfig, tmpDir);
-
-			startAgentSession('sess-symlink', 'architect');
-			const session = ensureAgentSession('sess-symlink');
-			session.currentTaskId = null;
-			session.lastCoderDelegationTaskId = null;
-			session.taskWorkflowStates = new Map();
-
-			let threw = false;
-			try {
-				await hook.toolAfter(
-					{
-						tool: 'Task',
-						sessionID: 'sess-symlink',
-						callID: 'call-1',
-						args: { subagent_type: 'reviewer' },
-					},
-					{},
+		it.skipIf(process.platform === 'win32')(
+			'handles plan.json as symlink to external file',
+			async () => {
+				const externalDir = path.join(canonicalTmpDir(), `dg-${Date.now()}`);
+				mkdirSync(externalDir, { recursive: true });
+				writeFileSync(
+					path.join(externalDir, 'plan.json'),
+					JSON.stringify({
+						phases: [{ tasks: [{ id: '99.99', status: 'in_progress' }] }],
+					}),
 				);
-			} catch {
-				threw = true;
-			}
-			expect(threw).toBe(false);
-
-			// Cleanup
-			rmSync(externalDir, { recursive: true, force: true });
-		});
+				symlinkSync(
+					path.join(externalDir, 'plan.json'),
+					path.join(tmpDir, '.swarm', 'plan.json'),
+				);
+				const hook = createDelegationGateHook(testConfig, tmpDir);
+				startAgentSession('sess-symlink', 'architect');
+				const session = ensureAgentSession('sess-symlink');
+				session.currentTaskId = null;
+				session.lastCoderDelegationTaskId = null;
+				session.taskWorkflowStates = new Map();
+				let threw = false;
+				try {
+					await hook.toolAfter(
+						{
+							tool: 'Task',
+							sessionID: 'sess-symlink',
+							callID: 'call-1',
+							args: { subagent_type: 'reviewer' },
+						},
+						{},
+					);
+				} catch {
+					threw = true;
+				}
+				expect(threw).toBe(false);
+				rmSync(externalDir, { recursive: true, force: true });
+			},
+		);
 
 		it('handles .swarm directory as symlink', async () => {
 			// Create external .swarm directory
@@ -815,9 +811,12 @@ describe('ADVERSARIAL: getEvidenceTaskId plan.json fallback security', () => {
 				}),
 			);
 
-			// Remove original .swarm and create symlink
 			rmSync(path.join(tmpDir, '.swarm'), { recursive: true });
-			symlinkSync(externalSwarm, path.join(tmpDir, '.swarm'), 'dir');
+			symlinkSync(
+				externalSwarm,
+				path.join(tmpDir, '.swarm'),
+				process.platform === 'win32' ? 'junction' : 'dir',
+			);
 
 			const hook = createDelegationGateHook(testConfig, tmpDir);
 

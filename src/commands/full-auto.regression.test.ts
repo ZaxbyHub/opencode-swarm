@@ -19,6 +19,7 @@ import { handleFullAutoCommand } from './full-auto';
 describe('Full-Auto Mode Regression Tests', () => {
 	let testSessionId: string;
 	let tmpDir: string;
+	let originalXdg: string | undefined;
 
 	beforeEach(() => {
 		testSessionId = `full-auto-regression-${Date.now()}`;
@@ -72,9 +73,13 @@ describe('Full-Auto Mode Regression Tests', () => {
 		});
 
 		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'full-auto-regression-'));
+		originalXdg = process.env.XDG_CONFIG_HOME;
+		process.env.XDG_CONFIG_HOME = path.join(tmpDir, 'user-config');
 	});
 
 	afterEach(() => {
+		if (originalXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+		else process.env.XDG_CONFIG_HOME = originalXdg;
 		swarmState.agentSessions.delete(testSessionId);
 		try {
 			fs.rmSync(tmpDir, { recursive: true, force: true });

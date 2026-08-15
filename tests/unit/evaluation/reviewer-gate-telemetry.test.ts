@@ -74,6 +74,11 @@ function completeEvidence(): TaskEvidence {
 		taskId: '1.1',
 		required_gates: ['reviewer', 'test_engineer'],
 		gates: {
+			pre_check: {
+				sessionId: 'pre-check-session',
+				timestamp: '2026-01-01T00:00:00.000Z',
+				agent: 'pre_check',
+			},
 			reviewer: {
 				sessionId: 'review-session',
 				timestamp: '2026-01-01T00:00:00.000Z',
@@ -85,6 +90,15 @@ function completeEvidence(): TaskEvidence {
 				agent: 'test_engineer',
 			},
 		},
+		workflow: {
+			schema: 'exact-task-v1',
+			state: 'tests_run',
+			generation: 1,
+			retryCount: 0,
+			lastOutcome: 'stage_b_completed',
+			lastTransitionId: 'stage-b-complete',
+			updatedAt: '2026-01-01T00:00:00.000Z',
+		},
 	};
 }
 
@@ -94,7 +108,8 @@ function expectDecision(
 	reasonCode: ReviewerGateReasonCode,
 	evidenceKind: ReviewerGateEvidenceKind,
 ): void {
-	expect(result).toEqual(expectedResult);
+	expect(result.blocked).toBe(expectedResult.blocked);
+	if (expectedResult.reason) expect(result.reason).toBe(expectedResult.reason);
 	expect(decisions).toEqual([
 		{
 			sessionId: 'caller-session',
@@ -188,7 +203,7 @@ describe('reviewer gate decision telemetry', () => {
 		]);
 	});
 
-	test('classifies Lean and standard Turbo bypasses without changing reasons', () => {
+	test('does not let session Turbo modes bypass missing exact-task evidence', () => {
 		gateInternals.hasActiveLeanTurbo = () => true;
 		gateInternals.verifyLeanTurboTaskCompletion = () => ({
 			ok: true,
@@ -197,9 +212,9 @@ describe('reviewer gate decision telemetry', () => {
 		});
 		expectDecision(
 			checkReviewerGate('1.1', directory, false, 'caller-session'),
-			{ blocked: false, reason: 'Lean Turbo bypass: lane complete' },
-			'lean_turbo_completed_lane',
-			'fallback',
+			{ blocked: true, reason: '' },
+			'required_gates_missing',
+			'block',
 		);
 
 		decisions = [];
@@ -207,9 +222,9 @@ describe('reviewer gate decision telemetry', () => {
 		gateInternals.hasActiveTurboMode = () => true;
 		expectDecision(
 			checkReviewerGate('1.1', directory, false, 'caller-session'),
-			{ blocked: false, reason: 'Turbo Mode bypass' },
-			'standard_turbo_non_tier3',
-			'fallback',
+			{ blocked: true, reason: '' },
+			'required_gates_missing',
+			'block',
 		);
 	});
 
@@ -232,9 +247,9 @@ describe('reviewer gate decision telemetry', () => {
 		advanceTaskState(workflow, '1.1', 'tests_run');
 		expectDecision(
 			checkReviewerGate('1.1', directory, false, 'caller-session'),
-			{ blocked: false, reason: '' },
-			'workflow_state_complete',
-			'genuine',
+			{ blocked: true, reason: '' },
+			'required_gates_missing',
+			'block',
 		);
 
 		resetSwarmState();
@@ -245,18 +260,18 @@ describe('reviewer gate decision telemetry', () => {
 		recordStageBCompletion(barrier, '1.1', 'test_engineer');
 		expectDecision(
 			checkReviewerGate('1.1', directory, true, 'caller-session'),
-			{ blocked: false, reason: '' },
-			'stage_b_parallel_complete',
-			'genuine',
+			{ blocked: true, reason: '' },
+			'required_gates_missing',
+			'block',
 		);
 	});
 
 	test('distinguishes no active sessions from zero valid workflow states', () => {
 		expectDecision(
 			checkReviewerGate('1.1', directory, false, 'caller-session'),
-			{ blocked: false, reason: '' },
-			'no_active_sessions',
-			'fallback',
+			{ blocked: true, reason: '' },
+			'required_gates_missing',
+			'block',
 		);
 
 		decisions = [];
@@ -266,9 +281,9 @@ describe('reviewer gate decision telemetry', () => {
 			null;
 		expectDecision(
 			checkReviewerGate('1.1', directory, false, 'caller-session'),
-			{ blocked: false, reason: '' },
-			'zero_valid_sessions',
-			'data_quality',
+			{ blocked: true, reason: '' },
+			'required_gates_missing',
+			'block',
 		);
 	});
 
@@ -278,9 +293,9 @@ describe('reviewer gate decision telemetry', () => {
 		startAgentSession('restart-session', 'architect');
 		expectDecision(
 			checkReviewerGate('1.1', directory, false, 'caller-session'),
-			{ blocked: false, reason: '' },
-			'restart_recovery_complete',
-			'genuine',
+			{ blocked: true, reason: '' },
+			'required_gates_missing',
+			'block',
 		);
 
 		writePlan('pending');
@@ -297,9 +312,9 @@ describe('reviewer gate decision telemetry', () => {
 		]);
 		expectDecision(
 			checkReviewerGate('1.1', directory, false, 'caller-session'),
-			{ blocked: false, reason: '' },
-			'scoped_delegation_complete',
-			'genuine',
+			{ blocked: true, reason: '' },
+			'required_gates_missing',
+			'block',
 		);
 
 		resetSwarmState();
@@ -311,9 +326,9 @@ describe('reviewer gate decision telemetry', () => {
 		]);
 		expectDecision(
 			checkReviewerGate('1.1', directory, false, 'caller-session'),
-			{ blocked: false, reason: '' },
-			'unscoped_delegation_complete',
-			'genuine',
+			{ blocked: true, reason: '' },
+			'required_gates_missing',
+			'block',
 		);
 	});
 
@@ -346,7 +361,7 @@ describe('reviewer gate decision telemetry', () => {
 			'caller-session',
 		);
 		expect(blockedResult.blocked).toBe(true);
-		expect(blockedResult.reason).toContain('has not passed QA gates');
+		expect(blockedResult.reason).toContain('no exact-task QA evidence');
 		expect(decisions[0]?.reasonCode).toBe('required_gates_missing');
 		expect(decisions[0]?.evidenceKind).toBe('block');
 
@@ -363,9 +378,9 @@ describe('reviewer gate decision telemetry', () => {
 		swarmState.agentSessions.set('throwing-session', throwingSession as never);
 		expectDecision(
 			checkReviewerGate('1.1', directory, false, 'caller-session'),
-			{ blocked: false, reason: '' },
-			'inspection_error',
-			'fallback',
+			{ blocked: true, reason: '' },
+			'required_gates_missing',
+			'block',
 		);
 	});
 
@@ -375,7 +390,7 @@ describe('reviewer gate decision telemetry', () => {
 		};
 
 		expect(
-			checkReviewerGate('1.1', directory, false, 'caller-session'),
-		).toEqual({ blocked: false, reason: '' });
+			checkReviewerGate('1.1', directory, false, 'caller-session').blocked,
+		).toBe(true);
 	});
 });

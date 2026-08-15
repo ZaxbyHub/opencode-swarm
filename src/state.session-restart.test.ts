@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { writeExactTaskEvidence } from '../tests/helpers/update-task-status-fixtures';
 import type { AgentSessionState } from './state';
 import {
 	rehydrateSessionFromDisk,
@@ -83,15 +84,7 @@ function writeEvidence(
 	gates: Record<string, unknown>,
 	required_gates: string[],
 ): void {
-	const evidence = {
-		taskId,
-		required_gates,
-		gates,
-	};
-	writeFileSync(
-		path.join(tmpDir, '.swarm', 'evidence', `${taskId}.json`),
-		JSON.stringify(evidence),
-	);
+	writeExactTaskEvidence(tmpDir, taskId, gates, required_gates);
 }
 
 describe('ADVERSARIAL: Session restart rehydration security tests', () => {
@@ -483,9 +476,8 @@ describe('ADVERSARIAL: Session restart rehydration security tests', () => {
 				rehydrateSessionFromDisk(tmpDir, session),
 			).resolves.toBeUndefined();
 
-			// Should have processed normally - reviewer gate exists and required_gates only has reviewer
-			// So it becomes 'complete' (all required gates passed)
-			expect(session.taskWorkflowStates?.get('1.1')).toBe('complete');
+			// The malformed gate record is ignored; plan intent alone remains idle.
+			expect(session.taskWorkflowStates?.get('1.1')).toBe('idle');
 		});
 
 		it('rejects task ID with path traversal pattern in evidence filename', async () => {
@@ -514,8 +506,8 @@ describe('ADVERSARIAL: Session restart rehydration security tests', () => {
 				rehydrateSessionFromDisk(tmpDir, session),
 			).resolves.toBeUndefined();
 
-			// Valid evidence should still be processed
-			expect(session.taskWorkflowStates?.get('1.1')).toBe('complete');
+			// Valid exact evidence should still be processed.
+			expect(session.taskWorkflowStates?.get('1.1')).toBe('reviewer_run');
 		});
 	});
 

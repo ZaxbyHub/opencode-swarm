@@ -8,7 +8,9 @@
 import { Database } from 'bun:sqlite';
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
+import { canonicalTmpDir } from '../../tests/helpers/tmpdir.js';
 import {
 	closeGlobalDb,
 	getGlobalDb,
@@ -17,13 +19,19 @@ import {
 
 let tempDir: string;
 let origXdg: string | undefined;
+let origLocalAppData: string | undefined;
+let origHome: string | undefined;
 
 beforeEach(() => {
 	tempDir = fs.realpathSync(
-		fs.mkdtempSync(path.join(process.cwd(), 'global-db-test-')),
+		fs.mkdtempSync(path.join(canonicalTmpDir(), 'global-db-test-')),
 	);
 	origXdg = process.env.XDG_CONFIG_HOME;
+	origLocalAppData = process.env.LOCALAPPDATA;
+	origHome = process.env.HOME;
 	process.env.XDG_CONFIG_HOME = tempDir;
+	process.env.LOCALAPPDATA = tempDir;
+	process.env.HOME = tempDir;
 	closeGlobalDb();
 });
 
@@ -34,6 +42,10 @@ afterEach(() => {
 	} else {
 		process.env.XDG_CONFIG_HOME = origXdg;
 	}
+	if (origLocalAppData === undefined) delete process.env.LOCALAPPDATA;
+	else process.env.LOCALAPPDATA = origLocalAppData;
+	if (origHome === undefined) delete process.env.HOME;
+	else process.env.HOME = origHome;
 	try {
 		fs.rmSync(tempDir, { recursive: true, force: true });
 	} catch {
@@ -47,12 +59,18 @@ describe('global-db', () => {
 		expect(db).toBeDefined();
 		// Linux path: $XDG_CONFIG_HOME/opencode-swarm/global-rules.db
 		const expectedPath =
-			process.platform === 'linux'
-				? path.join(tempDir, 'opencode-swarm', 'global-rules.db')
-				: null;
-		if (expectedPath) {
-			expect(fs.existsSync(expectedPath)).toBe(true);
-		}
+			process.platform === 'win32'
+				? path.join(tempDir, 'opencode-swarm', 'config', 'global-rules.db')
+				: process.platform === 'darwin'
+					? path.join(
+							tempDir,
+							'Library',
+							'Application Support',
+							'opencode-swarm',
+							'global-rules.db',
+						)
+					: path.join(tempDir, 'opencode-swarm', 'global-rules.db');
+		expect(fs.existsSync(expectedPath)).toBe(true);
 	});
 
 	test('getGlobalDb returns the same singleton on repeat calls', () => {

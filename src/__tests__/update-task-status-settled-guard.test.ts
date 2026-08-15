@@ -1,22 +1,16 @@
 /**
- * Tests for the FR-005 settled-task guard across three entry points:
- *  1. advanceTaskStateAndPersist preflight  (src/state.ts)
- *  2. executeUpdateTaskStatus tool guard     (src/tools/update-task-status.ts)
+ * Tests for the FR-005 settled-task guard across two compatibility surfaces:
+ *  1. advanceTaskStateAndPersist legacy boundary refusal (src/state.ts)
+ *  2. executeUpdateTaskStatus tool guard                 (src/tools/update-task-status.ts)
  *
  * Mock strategy:
- *  - advanceTaskStateAndPersist tests: mock.module('src/plan/manager.js')
- *    to intercept isTaskSettled and updateTaskStatus. Uses startAgentSession()
- *    to create proper AgentSessionState objects. Bun's per-file isolation
- *    (--smol) prevents cross-file mock contamination.
+ *  - advanceTaskStateAndPersist tests use the real legacy wrapper. It has no
+ *    plan-manager writer: coder and terminal durability boundaries are refused.
  *  - executeUpdateTaskStatus tests: mock the existing _internals seam
  *    (utsInternals.tryAcquireLock, utsInternals.updateTaskStatus) with per-test
  *    save/restore.
  *
  * Mock coverage gaps (per writing-tests "Mock Coverage Documentation"):
- *  - state.ts imports isTaskSettled, loadPlanJsonOnly, updateTaskStatus directly
- *    from 'src/plan/manager.js' — not behind a _internals seam. We mock the
- *    entire plan/manager module. Bun's per-file isolation (--smol) prevents
- *    cross-file contamination.
  *  - executeUpdateTaskStatus depends on swarmState and session identity.
  *    We mock the _internals seam only and use real function for guard logic.
  */
@@ -29,6 +23,7 @@ import { join } from 'node:path';
 import type { Plan } from '../../src/config/plan-schema';
 import { resetStartupLedgerCheck } from '../../src/plan/manager';
 import {
+	advanceTaskStateAndPersist,
 	resetSwarmState,
 	startAgentSession,
 	swarmState,
@@ -94,11 +89,10 @@ function makeUpdateTaskStatusMock() {
 	return { mockFn, calls };
 }
 
-// ── advanceTaskStateAndPersist preflight tests ──────────────────────────────────
+// ── Legacy workflow wrapper boundary tests ──────────────────────────────────
 
-describe('advanceTaskStateAndPersist preflight — FR-005 settled-task guard', () => {
+describe('advanceTaskStateAndPersist — central transaction boundary', () => {
 	let tempDir: string;
-	let mockRestore: (() => void) | undefined;
 
 	beforeEach(async () => {
 		resetStartupLedgerCheck();
@@ -112,156 +106,62 @@ describe('advanceTaskStateAndPersist preflight — FR-005 settled-task guard', (
 	});
 
 	afterEach(async () => {
-		mockRestore?.();
 		resetSwarmState();
-		if (existsSync(tempDir)) {
+		if (existsSync(tempDir))
 			await rm(tempDir, { recursive: true, force: true });
-		}
 	});
 
-	test('newState=coder_delegated on SETTLED task: NEITHER in-memory advance NOR durable persist occurs', async () => {
-		const { mockFn: mockUpdateStatus, calls: updateCalls } =
-			makeUpdateTaskStatusMock();
-		const isSettledCalls: string[] = [];
-
-		const mod = await import('../../src/plan/manager.js');
-		const origLoadPlanJsonOnly = mod.loadPlanJsonOnly;
-
-		mock.module('../../src/plan/manager.js', () => ({
-			...mod,
-			isTaskSettled: mock(async (_dir: string, taskId: string) => {
-				isSettledCalls.push(taskId);
-				return true; // Always settled
-			}),
-			loadPlanJsonOnly: origLoadPlanJsonOnly,
-			updateTaskStatus: mockUpdateStatus,
-		}));
-
-		mockRestore = () => mock.restore();
-
-		// Use startAgentSession to create a proper AgentSessionState
+	test('refuses coder_delegated with zero session or plan mutation', async () => {
 		startAgentSession('test-session', 'test-agent');
 		const session = swarmState.agentSessions.get('test-session')!;
+		const planPath = join(tempDir, '.swarm', 'plan.json');
+		const before = await readFile(planPath, 'utf8');
 
-		const { advanceTaskStateAndPersist } = await import('../../src/state.js');
-
-		await advanceTaskStateAndPersist(
-			session,
-			'1.1',
-			'coder_delegated',
-			tempDir,
-		);
-
-		// isTaskSettled was called with correct args
-		expect(isSettledCalls).toEqual(['1.1']);
-
-		// ZERO-MUTATION: in-memory state must NOT be advanced
-		expect(session.taskWorkflowStates.get('1.1')).toBeUndefined();
-
-		// ZERO-MUTATION: updateTaskStatus must NOT have been called
-		expect(updateCalls).toHaveLength(0);
-	});
-
-	test('newState=coder_delegated on SETTLED task returns EARLY before advanceTaskState', async () => {
-		const mod = await import('../../src/plan/manager.js');
-		const origLoadPlanJsonOnly = mod.loadPlanJsonOnly;
-
-		mock.module('../../src/plan/manager.js', () => ({
-			...mod,
-			isTaskSettled: mock(async () => true),
-			loadPlanJsonOnly: origLoadPlanJsonOnly,
-			// updateTaskStatus would throw if called — but it must NOT be called
-			updateTaskStatus: mock(async () => {
-				throw new Error('updateTaskStatus should not have been called');
-			}),
-		}));
-
-		mockRestore = () => mock.restore();
-
-		startAgentSession('test-session-2', 'test-agent');
-		const session = swarmState.agentSessions.get('test-session-2')!;
-
-		const { advanceTaskStateAndPersist } = await import('../../src/state.js');
-
-		// Should return without throwing (early exit path)
 		await expect(
 			advanceTaskStateAndPersist(session, '1.1', 'coder_delegated', tempDir),
-		).resolves.toBeUndefined();
+		).rejects.toThrow('TASK_WORKFLOW_CENTRAL_TRANSACTION_REQUIRED');
 
-		// Session state is still idle (not advanced)
 		expect(session.taskWorkflowStates.get('1.1')).toBeUndefined();
+		expect(await readFile(planPath, 'utf8')).toBe(before);
 	});
 
-	test('newState=coder_delegated on PENDING task PROCEEDS normally (retry NOT blocked)', async () => {
-		await writePlanJson(tempDir, makePlan([{ id: '1.1', status: 'pending' }]));
+	test('refuses complete even from tests_run with zero session or plan mutation', async () => {
+		startAgentSession('test-session-2', 'test-agent');
+		const session = swarmState.agentSessions.get('test-session-2')!;
+		session.taskWorkflowStates.set('1.1', 'tests_run');
+		const planPath = join(tempDir, '.swarm', 'plan.json');
+		const before = await readFile(planPath, 'utf8');
 
-		const { mockFn: mockUpdateStatus, calls: updateCalls } =
-			makeUpdateTaskStatusMock();
+		await expect(
+			advanceTaskStateAndPersist(session, '1.1', 'complete', tempDir),
+		).rejects.toThrow('TASK_WORKFLOW_CENTRAL_TRANSACTION_REQUIRED');
 
-		const mod = await import('../../src/plan/manager.js');
-		const origLoadPlanJsonOnly = mod.loadPlanJsonOnly;
-
-		mock.module('../../src/plan/manager.js', () => ({
-			...mod,
-			isTaskSettled: mock(async () => false), // Not settled → proceeds
-			loadPlanJsonOnly: origLoadPlanJsonOnly,
-			updateTaskStatus: mockUpdateStatus,
-		}));
-
-		mockRestore = () => mock.restore();
-
-		startAgentSession('test-session-3', 'test-agent');
-		const session = swarmState.agentSessions.get('test-session-3')!;
-
-		const { advanceTaskStateAndPersist } = await import('../../src/state.js');
-
-		// Session starts at 'idle' (default); advanceTaskState moves idle → coder_delegated
-		await advanceTaskStateAndPersist(
-			session,
-			'1.1',
-			'coder_delegated',
-			tempDir,
-		);
-
-		expect(updateCalls.length).toBeGreaterThan(0);
-		expect(updateCalls[0].taskId).toBe('1.1');
+		expect(session.taskWorkflowStates.get('1.1')).toBe('tests_run');
+		expect(await readFile(planPath, 'utf8')).toBe(before);
 	});
 
-	test('newState=coder_delegated on IN_PROGRESS task PROCEEDS normally', async () => {
+	test('applies diagnostic intermediate states in memory without persisting plan', async () => {
 		await writePlanJson(
 			tempDir,
 			makePlan([{ id: '1.1', status: 'in_progress' }]),
 		);
+		startAgentSession('test-session-3', 'test-agent');
+		const session = swarmState.agentSessions.get('test-session-3')!;
+		session.taskWorkflowStates.set('1.1', 'coder_delegated');
+		const planPath = join(tempDir, '.swarm', 'plan.json');
+		const before = await readFile(planPath, 'utf8');
 
-		const { mockFn: mockUpdateStatus, calls: updateCalls } =
-			makeUpdateTaskStatusMock();
-
-		const mod = await import('../../src/plan/manager.js');
-		const origLoadPlanJsonOnly = mod.loadPlanJsonOnly;
-
-		mock.module('../../src/plan/manager.js', () => ({
-			...mod,
-			isTaskSettled: mock(async () => false), // Not settled → proceeds
-			loadPlanJsonOnly: origLoadPlanJsonOnly,
-			updateTaskStatus: mockUpdateStatus,
-		}));
-
-		mockRestore = () => mock.restore();
-
-		startAgentSession('test-session-4', 'test-agent');
-		const session = swarmState.agentSessions.get('test-session-4')!;
-
-		const { advanceTaskStateAndPersist } = await import('../../src/state.js');
-
-		// Session starts at 'idle'; advanceTaskState moves idle → coder_delegated
 		await advanceTaskStateAndPersist(
 			session,
 			'1.1',
-			'coder_delegated',
+			'pre_check_passed',
 			tempDir,
 		);
+		await advanceTaskStateAndPersist(session, '1.1', 'reviewer_run', tempDir);
+		await advanceTaskStateAndPersist(session, '1.1', 'tests_run', tempDir);
 
-		expect(updateCalls.length).toBeGreaterThan(0);
+		expect(session.taskWorkflowStates.get('1.1')).toBe('tests_run');
+		expect(await readFile(planPath, 'utf8')).toBe(before);
 	});
 });
 
@@ -325,7 +225,7 @@ describe('executeUpdateTaskStatus — FR-005 tool guard', () => {
 		expect(updateCalls).toHaveLength(0);
 	});
 
-	test('in_progress on a COMPLETED task WITH force:true is PERMITTED', async () => {
+	test('in_progress on a COMPLETED task rejects bare force:true without CAS audit fields', async () => {
 		await writePlanJson(
 			tempDir,
 			makePlan([{ id: '1.1', status: 'completed' }]),
@@ -357,9 +257,9 @@ describe('executeUpdateTaskStatus — FR-005 tool guard', () => {
 
 		const result = await executeUpdateTaskStatus(args, tempDir);
 
-		expect(result.success).toBe(true);
-		expect(updateCalls.length).toBe(1);
-		expect(updateCalls[0].options?.force).toBe(true);
+		expect(result.success).toBe(false);
+		expect(result.errors?.join(' ')).toContain('expected_state');
+		expect(updateCalls.length).toBe(0);
 	});
 
 	test('in_progress on a BLOCKED task WITHOUT force is REJECTED', async () => {

@@ -17,9 +17,12 @@ import { swarmState } from '../state';
 describe('Full-Auto discoverability', () => {
 	let testSessionId: string;
 	let tmpDir: string;
+	let originalXdg: string | undefined;
 
 	beforeEach(() => {
 		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'full-auto-disc-'));
+		originalXdg = process.env.XDG_CONFIG_HOME;
+		process.env.XDG_CONFIG_HOME = path.join(tmpDir, 'user-config');
 		testSessionId = `discoverability-test-${Date.now()}`;
 		swarmState.agentSessions.set(testSessionId, {
 			agentName: 'architect',
@@ -71,6 +74,8 @@ describe('Full-Auto discoverability', () => {
 	});
 
 	afterEach(() => {
+		if (originalXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+		else process.env.XDG_CONFIG_HOME = originalXdg;
 		swarmState.agentSessions.delete(testSessionId);
 		try {
 			fs.rmSync(tmpDir, { recursive: true, force: true });

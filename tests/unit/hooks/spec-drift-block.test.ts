@@ -97,6 +97,13 @@ describe('enforceSpecDriftGate', () => {
 		}
 	});
 
+	test('explains that clarify alone does not clear drift', async () => {
+		await writeStalenessFile();
+		expect(() => enforceSpecDriftGate(tmpDir, 'save_plan')).toThrow(
+			/Clarify alone does not clear drift/,
+		);
+	});
+
 	test('does NOT throw for non-blocked tools even when staleness file exists', async () => {
 		await writeStalenessFile();
 		for (const tool of NON_BLOCKED_TOOLS) {

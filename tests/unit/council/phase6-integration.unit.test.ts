@@ -21,19 +21,17 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { closeProjectDb } from '../../../src/db/project-db';
 import { setGatesForIdentity } from '../../../src/db/qa-gate-profile';
+import { seedCouncilLaunch } from '../../helpers/task-workflow-evidence';
 
 let tempDir: string;
-
 const PLAN_SWARM = 'test-swarm';
 const PLAN_TITLE = 'test-plan';
-
 function seedEnabledConfig(): void {
 	mkdirSync(join(tempDir, '.opencode'), { recursive: true });
 	writeFileSync(
 		join(tempDir, '.opencode', 'opencode-swarm.json'),
 		JSON.stringify({ council: { enabled: true } }),
 	);
-
 	// plan.json required for council_mode check in checkCouncilGate
 	mkdirSync(join(tempDir, '.swarm'), { recursive: true });
 	writeFileSync(
@@ -45,18 +43,15 @@ function seedEnabledConfig(): void {
 			phases: [],
 		}),
 	);
-
 	setGatesForIdentity(
 		tempDir,
 		{ swarm: PLAN_SWARM, title: PLAN_TITLE },
 		{ council_mode: true },
 	);
 }
-
 beforeEach(() => {
 	tempDir = mkdtempSync(join(tmpdir(), 'phase6-integration-'));
 });
-
 afterEach(() => {
 	// Close project DB before deleting temp dir to avoid EBUSY on Windows
 	closeProjectDb(tempDir);
@@ -75,7 +70,6 @@ describe('Phase 6 integration — declare → convene → gate', () => {
 		const { checkCouncilGate } = await import(
 			'../../../src/tools/update-task-status'
 		);
-
 		// 1. Declare criteria
 		const declareResult = await declare_council_criteria.execute(
 			{
@@ -110,6 +104,8 @@ describe('Phase 6 integration — declare → convene → gate', () => {
 			criteriaUnmet: [],
 			durationMs: 10,
 		}));
+		const sessionID = 'phase6-approve';
+		await seedCouncilLaunch(tempDir, '1.1', sessionID);
 		const conveneResult = await submit_council_verdicts.execute(
 			{
 				taskId: '1.1',
@@ -118,22 +114,19 @@ describe('Phase 6 integration — declare → convene → gate', () => {
 				verdicts,
 				working_directory: tempDir,
 			},
-			{ directory: tempDir },
+			{ directory: tempDir, sessionID },
 		);
 		const parsed = JSON.parse(conveneResult);
 		expect(parsed.success).toBe(true);
 		expect(parsed.overallVerdict).toBe('APPROVE');
-
 		// 3. Evidence file exists with gates.council
 		const evidencePath = join(tempDir, '.swarm', 'evidence', '1.1.json');
 		const evidence = JSON.parse(readFileSync(evidencePath, 'utf-8'));
 		expect(evidence.gates.council.verdict).toBe('APPROVE');
-
 		// 4. Gate check reads the evidence and allows advancement
 		const gate = checkCouncilGate(tempDir, '1.1');
 		expect(gate.blocked).toBe(false);
 	});
-
 	test('declare criteria, convene REJECT, gate blocks advancement', async () => {
 		seedEnabledConfig();
 		const { declare_council_criteria } = await import(
@@ -158,6 +151,8 @@ describe('Phase 6 integration — declare → convene → gate', () => {
 		);
 
 		// explorer REJECTs — veto under default vetoPriority=true
+		const sessionID = 'phase6-reject';
+		await seedCouncilLaunch(tempDir, '1.1', sessionID);
 		const conveneResult = await submit_council_verdicts.execute(
 			{
 				taskId: '1.1',
@@ -220,7 +215,7 @@ describe('Phase 6 integration — declare → convene → gate', () => {
 				],
 				working_directory: tempDir,
 			},
-			{ directory: tempDir },
+			{ directory: tempDir, sessionID },
 		);
 		const parsed = JSON.parse(conveneResult);
 		expect(parsed.overallVerdict).toBe('REJECT');
@@ -231,7 +226,6 @@ describe('Phase 6 integration — declare → convene → gate', () => {
 		expect(gate.blocked).toBe(true);
 		expect(gate.reason).toMatch(/council gate blocked/i);
 	});
-
 	test('pre-declared criteria are read back at synthesis time', async () => {
 		seedEnabledConfig();
 		const { declare_council_criteria } = await import(
@@ -263,6 +257,8 @@ describe('Phase 6 integration — declare → convene → gate', () => {
 		);
 
 		// Convene — critic marks C1 unmet. allCriteriaMet should be false.
+		const sessionID = 'phase6-criteria';
+		await seedCouncilLaunch(tempDir, '1.1', sessionID);
 		const result = await submit_council_verdicts.execute(
 			{
 				taskId: '1.1',
@@ -317,7 +313,7 @@ describe('Phase 6 integration — declare → convene → gate', () => {
 				],
 				working_directory: tempDir,
 			},
-			{ directory: tempDir },
+			{ directory: tempDir, sessionID },
 		);
 		const parsed = JSON.parse(result);
 		expect(parsed.allCriteriaMet).toBe(false);
@@ -336,6 +332,7 @@ describe('Phase 6 integration — submit_council_verdicts pushes architect advis
 		resetSwarmState();
 		const sessionID = 'test-arch-session-1';
 		startAgentSession(sessionID, 'architect', tempDir);
+		await seedCouncilLaunch(tempDir, '1.1', sessionID);
 
 		await submit_council_verdicts.execute(
 			{
@@ -393,7 +390,6 @@ describe('Phase 6 integration — submit_council_verdicts pushes architect advis
 		expect(advisory).toContain('blocking=true');
 		resetSwarmState();
 	});
-
 	test('APPROVE with no findings does not push (no-op)', async () => {
 		seedEnabledConfig();
 		const { submit_council_verdicts } = await import(
@@ -405,6 +401,7 @@ describe('Phase 6 integration — submit_council_verdicts pushes architect advis
 		resetSwarmState();
 		const sessionID = 'test-arch-session-2';
 		startAgentSession(sessionID, 'architect', tempDir);
+		await seedCouncilLaunch(tempDir, '2.1', sessionID);
 
 		const agents = [
 			'critic',
@@ -436,8 +433,7 @@ describe('Phase 6 integration — submit_council_verdicts pushes architect advis
 		expect(session?.pendingAdvisoryMessages?.length ?? 0).toBe(0);
 		resetSwarmState();
 	});
-
-	test('missing sessionID does not throw (best-effort advisory)', async () => {
+	test('missing sessionID fails closed before evidence publication', async () => {
 		seedEnabledConfig();
 		const { submit_council_verdicts } = await import(
 			'../../../src/tools/convene-council'
@@ -464,10 +460,13 @@ describe('Phase 6 integration — submit_council_verdicts pushes architect advis
 			},
 			{ directory: tempDir },
 		);
-		expect(JSON.parse(result).success).toBe(true);
+		const parsed = JSON.parse(result);
+		expect(parsed.success).toBe(false);
+		expect(JSON.stringify(parsed)).toContain(
+			'TASK_COUNCIL_GENERATION_REQUIRED',
+		);
 	});
-
-	test('sessionID pointing to non-existent session does not throw', async () => {
+	test('sessionID pointing to non-existent session fails closed', async () => {
 		seedEnabledConfig();
 		const { submit_council_verdicts } = await import(
 			'../../../src/tools/convene-council'
@@ -495,7 +494,11 @@ describe('Phase 6 integration — submit_council_verdicts pushes architect advis
 			},
 			{ directory: tempDir, sessionID: 'nonexistent-session-id' },
 		);
-		expect(JSON.parse(result).success).toBe(true);
+		const parsed = JSON.parse(result);
+		expect(parsed.success).toBe(false);
+		expect(JSON.stringify(parsed)).toContain(
+			'TASK_COUNCIL_GENERATION_REQUIRED',
+		);
 	});
 });
 
@@ -513,7 +516,6 @@ describe('Phase 6 integration — checkCouncilGate corrupt evidence', () => {
 		// Corrupt evidence should surface as "gate required" (same as absent).
 		expect(gate.reason).toMatch(/council gate required|not yet run/i);
 	});
-
 	test('missing evidence file is treated as gate-required', async () => {
 		seedEnabledConfig();
 		const { checkCouncilGate } = await import(
@@ -544,7 +546,6 @@ describe('Phase 6 integration — index.ts wire-up', () => {
 		const prompt = agent.config.prompt ?? '';
 		expect(prompt).toContain('COUNCIL WORKFLOW');
 	});
-
 	test('createArchitectAgent with undefined council renders no workflow block', async () => {
 		const { createArchitectAgent } = await import(
 			'../../../src/agents/architect'
@@ -557,7 +558,6 @@ describe('Phase 6 integration — index.ts wire-up', () => {
 		// that only appears in the workflow block itself.
 		expect(prompt).not.toContain('Phase 0 — Pre-declare criteria');
 	});
-
 	test('src/agents/index.ts file actually passes pluginConfig?.council', async () => {
 		// Static assertion: the wire-up line exists in the source so future
 		// regressions that drop it would be caught here rather than silently

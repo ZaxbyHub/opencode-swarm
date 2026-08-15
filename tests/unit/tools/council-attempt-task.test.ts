@@ -10,7 +10,8 @@ import {
 } from 'node:fs';
 import { join } from 'node:path';
 import { councilRoundStatePaths } from '../../../src/council/council-round-state.js';
-import { type AgentSessionState, swarmState } from '../../../src/state.js';
+import { ensureAgentSession, swarmState } from '../../../src/state.js';
+import { seedCouncilLaunch } from '../../helpers/task-workflow-evidence.js';
 import { canonicalTmpDir } from '../../helpers/tmpdir.js';
 
 function writeConfig(dir: string): void {
@@ -218,10 +219,7 @@ describe('submit_council_verdicts — issue #2022 task attempt durability', () =
 			await execute('3.1', [makeVerdict('critic')]);
 			expect(finalizedForTask(tempDir, '3.1')).toContain('council_disabled');
 			writeConfig(tempDir);
-			swarmState.agentSessions.set(sessionID, {
-				pendingCouncilRequirements: new Map(),
-			} as AgentSessionState);
-
+			ensureAgentSession(sessionID);
 			await execute('3.2', [makeVerdict('critic')]);
 			expect(finalizedForTask(tempDir, '3.2')).toContain('insufficient_quorum');
 			await execute('3.2', [makeVerdict('critic')]);
@@ -244,6 +242,7 @@ describe('submit_council_verdicts — issue #2022 task attempt durability', () =
 							: {},
 					),
 				);
+				await seedCouncilLaunch(tempDir, taskId, sessionID);
 				await execute(taskId, verdicts);
 				expect(finalizedForTask(tempDir, taskId)).toContain(expected);
 			}

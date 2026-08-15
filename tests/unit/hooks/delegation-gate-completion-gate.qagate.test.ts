@@ -16,7 +16,10 @@ import { setGatesForIdentity } from '../../../src/db/qa-gate-profile';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 import { withFrozenClock } from '../../helpers/test-clock.js';
-import { recordPlanCriticApproval } from './_delegation-gate-helpers';
+import {
+	recordPlanCriticApproval,
+	seedAuthoritativeTaskWorkflow,
+} from './_delegation-gate-helpers';
 
 const PLAN_FIXTURE = {
 	schema_version: '1.0.0' as const,
@@ -177,6 +180,7 @@ describe('delegation-gate: completion gate — QA gate enforcement (PR #961)', (
 			const hook = createDelegationGateHook(makeConfig(), tempDir);
 			const session = ensureAgentSession('test-session');
 			session.taskWorkflowStates.set('1.1', 'tests_run');
+			await seedAuthoritativeTaskWorkflow(tempDir, '1.1', 'tests_run');
 
 			let threw = false;
 			try {
@@ -201,6 +205,7 @@ describe('delegation-gate: completion gate — QA gate enforcement (PR #961)', (
 			const hook = createDelegationGateHook(makeConfig(), tempDir);
 			const session = ensureAgentSession('test-session');
 			session.taskWorkflowStates.set('1.1', 'tests_run');
+			await seedAuthoritativeTaskWorkflow(tempDir, '1.1', 'tests_run');
 
 			let threw = false;
 			try {
@@ -304,6 +309,7 @@ describe('delegation-gate: update_task_status from tests_run state', () => {
 		const session = ensureAgentSession('test-session');
 		// 1.1 is in tests_run (blocking)
 		session.taskWorkflowStates.set('1.1', 'tests_run');
+		await seedAuthoritativeTaskWorkflow(tempDir, '1.1', 'tests_run');
 		// Updating task 1.2 status
 		session.taskWorkflowStates.set('1.2', 'pending');
 

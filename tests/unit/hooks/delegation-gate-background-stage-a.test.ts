@@ -212,7 +212,7 @@ describe('delegation-gate background flag (Stage A)', () => {
 	});
 
 	// ── Regression: foreground still advances under both flag states ─────────
-	it('flag ON: foreground reviewer still advances coder_delegated -> reviewer_run', async () => {
+	it('flag ON: an unbound foreground reviewer cannot advance coder_delegated', async () => {
 		const hook = createDelegationGateHook(makeConfig(true), dir);
 		const session = ensureAgentSession('s6');
 		session.taskWorkflowStates.set('5.1', 'coder_delegated');
@@ -227,7 +227,7 @@ describe('delegation-gate background flag (Stage A)', () => {
 			{ state: 'completed', text: 'done' },
 		);
 
-		expect(getTaskState(session, '5.1')).toBe('reviewer_run');
+		expect(getTaskState(session, '5.1')).toBe('coder_delegated');
 		expect(readDelegations(dir)).toHaveLength(0);
 	});
 });

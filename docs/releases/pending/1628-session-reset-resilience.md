@@ -13,20 +13,20 @@ When a session resets mid-phase and resumes (or when a new session picks up an e
 
 ### FR-005 — Settled-task re-open guard
 
-`update_task_status` (and the automated delegation path via `advanceTaskStateAndPersist`) can no longer silently re-open a settled task (`completed` / `blocked` / `closed`) back to `in_progress`. An explicit `force: true` option exists for manual repair scenarios.
+`update_task_status` can no longer silently re-open a settled task (`completed` / `blocked` / `closed`) back to `in_progress`. Reopen is an audited exact-task repair transaction requiring `force: true`, a reason, transition identity, expected settled status, and expected workflow generation. The legacy `advanceTaskStateAndPersist` compatibility wrapper refuses both `coder_delegated` and `complete`, so it cannot bypass that transaction.
 
 - **`src/plan/manager.ts`** — `updateTaskStatus` now checks current task state before allowing `in_progress` transitions. If the task is settled and `options.force` is not `true`, the update is refused and the current plan state is returned unchanged.
-- **`src/tools/update-task-status.ts`** — The tool accepts a `force?: boolean` argument (defaults to `false`). When a settled task would be re-opened without force, returns an error with guidance: "Use force:true only for manual repair."
+- **`src/tools/update-task-status.ts`** — The tool accepts audited repair fields and rejects bare `force: true`. Plan and exact-task evidence are updated under the repair transaction/WAL, with generation CAS preventing stale or repeated reopen requests.
 
 ## Why
 
 FR-004: A session that resets mid-phase and resumes would collide with stale worktrees/branches from the interrupted run, causing provisioning failures or git state corruption. The idempotent approach (adopt stale / error on active collision) makes resume and reset safe to run at any point in a phase.
 
-FR-005: The automated delegation path could re-open a task that was already marked `completed` or `blocked` when a session restarted mid-phase, silently overwriting completed work with a fresh `in_progress` state. The guard makes this class of silent data loss impossible without an explicit override.
+FR-005: The automated delegation path could re-open a task that was already marked `completed` or `blocked` when a session restarted mid-phase, silently overwriting completed work with a fresh `in_progress` state. The legacy writer is now incapable of crossing that boundary, and the central audited repair transaction makes the exceptional reopen recoverable and ABA-safe.
 
 ## Migration steps
 
-None for existing users. The settled-task guard is transparent — it only blocks an impossible operation, never changes behavior for legitimate flows.
+Normal task execution needs no migration. Manual repair callers that previously sent bare `force: true` must supply the documented reason, transition ID, expected status, and expected workflow generation.
 
 ## Tests
 
