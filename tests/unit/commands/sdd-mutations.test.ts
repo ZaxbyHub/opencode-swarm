@@ -20,12 +20,26 @@ describe('allowedMutationsFor', () => {
 		tempDir = fs.realpathSync(
 			fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'sdd-mutations-')),
 		);
-		// Create openspec fixture so handleSddStatusCommand has an effective spec
-		fs.mkdirSync(path.join(tempDir, 'openspec'), { recursive: true });
-		fs.writeFileSync(
-			path.join(tempDir, 'openspec', 'spec.md'),
-			'# Specification: Test\n\n## Requirements\n- FR-001 MUST test.\n',
-			'utf-8',
+		const write = (rel: string, content: string) => {
+			const abs = path.join(tempDir, rel);
+			fs.mkdirSync(path.dirname(abs), { recursive: true });
+			fs.writeFileSync(abs, content, 'utf-8');
+		};
+		write(
+			path.join('openspec', 'specs', 'auth', 'spec.md'),
+			'## Requirements\n### Requirement: Login\nThe system MUST let users sign in.\n#### Scenario: Successful login\n- **WHEN** the user submits valid credentials\n- **THEN** the system signs them in.\n',
+		);
+		write(
+			path.join('openspec', 'changes', 'add-reset', 'proposal.md'),
+			'# Add reset\n',
+		);
+		write(
+			path.join('openspec', 'changes', 'add-reset', 'tasks.md'),
+			'- [ ] Implement reset\n',
+		);
+		write(
+			path.join('openspec', 'changes', 'add-reset', 'specs', 'auth', 'spec.md'),
+			'## ADDED Requirements\n### Requirement: Reset\nThe system SHOULD reset passwords.\n#### Scenario: Successful reset\n- **WHEN** the user requests reset\n- **THEN** the system sends reset instructions.\n',
 		);
 	});
 
