@@ -144,9 +144,14 @@ describe('receipt validator', () => {
 		const traceId = newTraceId();
 		await seedTrace(dir, traceId, ['k1']);
 		const r = await validateReceipt(
-			ctx(dir, traceId, [{ id: 'k1', outcome: 'n_a', reason: 'other subsystem' }], {
-				source: 'reviewer',
-			}),
+			ctx(
+				dir,
+				traceId,
+				[{ id: 'k1', outcome: 'n_a', reason: 'other subsystem' }],
+				{
+					source: 'reviewer',
+				},
+			),
 		);
 		expect(r.ok).toBe(true);
 		const state = await queryLiveMemberships(dir, {

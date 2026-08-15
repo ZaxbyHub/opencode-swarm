@@ -166,10 +166,7 @@ export function emitKnowledgeReceiptTransition(
 		};
 		const semanticsVersion =
 			observation.receiptSemantics ?? RECEIPT_SEMANTICS_VERSION;
-		if (
-			Number.isSafeInteger(semanticsVersion) &&
-			semanticsVersion >= 1
-		) {
+		if (Number.isSafeInteger(semanticsVersion) && semanticsVersion >= 1) {
 			payload.receiptSemantics = semanticsVersion;
 		}
 		addIdentifier(payload, 'knowledgeTraceId', observation.knowledgeTraceId);

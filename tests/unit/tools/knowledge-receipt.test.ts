@@ -13,7 +13,10 @@ import {
 	resolveSwarmKnowledgePath,
 } from '../../../src/hooks/knowledge-store';
 import type { SwarmKnowledgeEntry } from '../../../src/hooks/knowledge-types';
-import { _internals, knowledge_receipt } from '../../../src/tools/knowledge-receipt';
+import {
+	_internals,
+	knowledge_receipt,
+} from '../../../src/tools/knowledge-receipt';
 
 const ctx = (directory: string): any => ({
 	directory,
@@ -240,7 +243,12 @@ describe('knowledge_receipt', () => {
 		const raw = await knowledge_receipt.execute(
 			{
 				trace_id: 'trace-na',
-				n_a: [{ id: 'k-na', reason: 'directive targets web routing; task is CLI-only' }],
+				n_a: [
+					{
+						id: 'k-na',
+						reason: 'directive targets web routing; task is CLI-only',
+					},
+				],
 			} as never,
 			ctx(dir),
 		);

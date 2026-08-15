@@ -12,9 +12,7 @@ import { describe, expect, it } from 'bun:test';
 import { createArchitectAgent } from '../../../src/agents/architect';
 import { createCoderAgent } from '../../../src/agents/coder';
 import { createReviewerAgent } from '../../../src/agents/reviewer';
-import {
-	createSpecWriterAgent,
-} from '../../../src/agents/spec-writer';
+import { createSpecWriterAgent } from '../../../src/agents/spec-writer';
 import { createTestEngineerAgent } from '../../../src/agents/test-engineer';
 
 describe('role prompts: knowledge N_A guidance (#2032)', () => {
@@ -52,6 +50,8 @@ describe('role prompts: knowledge N_A guidance (#2032)', () => {
 
 	it('architect prompt still carries the full marker contract (guard against factory drift)', () => {
 		const agent = createArchitectAgent('opencode/big-pickle');
-		expect(agent.config.prompt).toContain('KNOWLEDGE_N_A:<trace_id>:<entry_id>');
+		expect(agent.config.prompt).toContain(
+			'KNOWLEDGE_N_A:<trace_id>:<entry_id>',
+		);
 	});
 });

@@ -12,16 +12,16 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { collectDelegateAcks } from '../../../src/hooks/delegate-ack-collector.js';
 import {
 	appendKnowledgeEvent,
 	type KnowledgeEvent,
 	readKnowledgeEvents,
 } from '../../../src/hooks/knowledge-events.js';
 import { buildDelegateDirectiveBlock } from '../../../src/hooks/knowledge-injector.js';
-import { queryLiveMemberships } from '../../../src/hooks/knowledge-receipt-ledger.js';
 import type { RankedEntry } from '../../../src/hooks/knowledge-reader.js';
+import { queryLiveMemberships } from '../../../src/hooks/knowledge-receipt-ledger.js';
 import type { KnowledgeConfig } from '../../../src/hooks/knowledge-types.js';
-import { collectDelegateAcks } from '../../../src/hooks/delegate-ack-collector.js';
 
 const FIXED_TRACE_ID = 'trace-fixed-2032-0001';
 const SESSION = 'sess-src-2032';
@@ -97,7 +97,10 @@ function buildPrompt(entries: RankedEntry[]): string {
 	return `${block}\n\nTASK_ID: task-src\nDelegated work here.`;
 }
 
-async function seedRetrieved(directory: string, resultIds: string[]): Promise<void> {
+async function seedRetrieved(
+	directory: string,
+	resultIds: string[],
+): Promise<void> {
 	await appendKnowledgeEvent(directory, {
 		type: 'retrieved',
 		trace_id: FIXED_TRACE_ID,
@@ -144,8 +147,9 @@ describe('delegate terminal source attribution (#2032)', () => {
 			sessionId: SESSION,
 		});
 		expect(result.emitted).toHaveLength(4);
-		const receipts = (await readKnowledgeEvents(dir)).filter((e: KnowledgeEvent) =>
-			['applied', 'ignored', 'violated', 'n_a'].includes(e.type),
+		const receipts = (await readKnowledgeEvents(dir)).filter(
+			(e: KnowledgeEvent) =>
+				['applied', 'ignored', 'violated', 'n_a'].includes(e.type),
 		);
 		expect(receipts.length).toBeGreaterThanOrEqual(4);
 		for (const event of receipts) {
