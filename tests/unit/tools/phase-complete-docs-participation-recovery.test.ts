@@ -90,9 +90,14 @@ function writeFixture(directory: string): Plan {
 describe('phase_complete docs participation recovery', () => {
 	let directory: string;
 	let cleanup: () => void;
+	let savedXdgConfigHome: string | undefined;
 
 	beforeEach(() => {
 		({ dir: directory, cleanup } = createSafeTestDir('phase-complete-docs-'));
+		// Prevent the user's global opencode config from being merged into the
+		// fixture — same rationale as the warn-policy describe block below.
+		savedXdgConfigHome = process.env.XDG_CONFIG_HOME;
+		process.env.XDG_CONFIG_HOME = directory;
 		writeFixture(directory);
 		resetSwarmState();
 		resetPhaseParticipationForTests();
@@ -101,6 +106,11 @@ describe('phase_complete docs participation recovery', () => {
 	afterEach(() => {
 		resetSwarmState();
 		resetPhaseParticipationForTests();
+		if (savedXdgConfigHome === undefined) {
+			delete process.env.XDG_CONFIG_HOME;
+		} else {
+			process.env.XDG_CONFIG_HOME = savedXdgConfigHome;
+		}
 		cleanup();
 	});
 
@@ -259,5 +269,117 @@ describe('phase_complete docs participation recovery', () => {
 		expect(result.recovery_guidance).toContain(
 			'does NOT create durable participation proof',
 		);
+		// Ordering: easy-fix dispatch hint must precede the nuclear last-resort option.
+		const docsIdx = result.recovery_guidance.indexOf('canonical recovery path');
+		const lastResortIdx = result.recovery_guidance.indexOf('Last resort:');
+		expect(docsIdx).toBeGreaterThan(-1);
+		expect(lastResortIdx).toBeGreaterThan(-1);
+		expect(docsIdx).toBeLessThan(lastResortIdx);
+	});
+});
+
+describe('phase_complete warn-policy recovery guidance', () => {
+	let directory: string;
+	let cleanup: () => void;
+	let savedXdgConfigHome: string | undefined;
+
+	beforeEach(() => {
+		({ dir: directory, cleanup } = createSafeTestDir('phase-complete-warn-'));
+		// Prevent the user's global opencode config from being merged into the
+		// fixture: loadPluginConfig reads XDG_CONFIG_HOME/opencode/CONFIG_FILENAME
+		// as the "user" layer and deep-merges it with the project config. Pointing
+		// XDG_CONFIG_HOME at the (freshly created, otherwise-empty) temp dir
+		// makes that lookup a no-op.
+		savedXdgConfigHome = process.env.XDG_CONFIG_HOME;
+		process.env.XDG_CONFIG_HOME = directory;
+		const swarmDir = path.join(directory, '.swarm');
+		fs.mkdirSync(path.join(directory, '.opencode'), { recursive: true });
+		fs.mkdirSync(swarmDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(directory, '.opencode', 'opencode-swarm.json'),
+			JSON.stringify({
+				phase_complete: {
+					enabled: true,
+					required_agents: ['coder'],
+					require_docs: false,
+					policy: 'warn',
+				},
+				knowledge: { enabled: false },
+				curator: { enabled: false },
+				skill_improver: { enabled: false },
+			}),
+		);
+		const plan = {
+			schema_version: '1.0.0',
+			title: 'Warn Policy Test',
+			swarm: 'test',
+			current_phase: 1,
+			phases: [{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] }],
+		};
+		fs.writeFileSync(
+			path.join(swarmDir, 'plan.json'),
+			JSON.stringify(plan, null, 2),
+		);
+		const retroDir = path.join(swarmDir, 'evidence', 'retro-1');
+		fs.mkdirSync(retroDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(retroDir, 'evidence.json'),
+			JSON.stringify({
+				schema_version: '1.0.0',
+				task_id: 'retro-1',
+				created_at: FIXED_EVIDENCE_TIMESTAMP,
+				updated_at: FIXED_EVIDENCE_TIMESTAMP,
+				entries: [
+					{
+						task_id: 'retro-1',
+						type: 'retrospective',
+						timestamp: FIXED_EVIDENCE_TIMESTAMP,
+						agent: 'architect',
+						verdict: 'pass',
+						summary: 'Phase reviewed.',
+						phase_number: 1,
+						total_tool_calls: 1,
+						coder_revisions: 0,
+						reviewer_rejections: 0,
+						test_failures: 0,
+						security_findings: 0,
+						integration_issues: 0,
+						task_count: 1,
+						task_complexity: 'simple',
+						top_rejection_reasons: [],
+						lessons_learned: [],
+					},
+				],
+			}),
+		);
+		resetSwarmState();
+		resetPhaseParticipationForTests();
+	});
+
+	afterEach(() => {
+		resetSwarmState();
+		resetPhaseParticipationForTests();
+		if (savedXdgConfigHome === undefined) {
+			delete process.env.XDG_CONFIG_HOME;
+		} else {
+			process.env.XDG_CONFIG_HOME = savedXdgConfigHome;
+		}
+		cleanup();
+	});
+
+	test('warn policy names warn-allows-closure in recovery_guidance', async () => {
+		ensureAgentSession('parent');
+		// coder is required but not dispatched — warn policy allows success with a warning
+
+		const result = JSON.parse(
+			await executePhaseComplete(
+				{ phase: 1, sessionID: 'parent' },
+				directory,
+				directory,
+			),
+		) as { success: boolean; recovery_guidance: string };
+
+		expect(result.success).toBe(true);
+		expect(result.recovery_guidance).toContain('warn policy allows closure');
 	});
 });

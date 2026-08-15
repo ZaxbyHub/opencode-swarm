@@ -7,9 +7,11 @@ import {
 	activatePrWorkflow,
 	prWorkflowSessionFileStem,
 } from '../../../src/hooks/pr-workflow-gate.js';
+import { executeAbortPrWorkflow } from '../../../src/tools/abort-pr-workflow.js';
 import {
 	_internals as checkoutInternals,
 	executePreparePrWorkflowCheckout,
+	listPendingPrWorkflowCheckoutRestores,
 } from '../../../src/tools/prepare-pr-workflow-checkout.js';
 import { bunSpawn } from '../../../src/utils/bun-compat.js';
 
@@ -61,6 +63,45 @@ async function gitOutput(args: string[]): Promise<string> {
 	}
 }
 
+async function readOnlyReceipt(): Promise<{
+	text: string;
+	receipt: Record<string, unknown>;
+}> {
+	const receiptRoot = path.join(directory, '.swarm', 'pr-workflow-checkouts');
+	const [sessionReceiptDirectory] = await fs.readdir(receiptRoot);
+	const sessionRoot = path.join(receiptRoot, sessionReceiptDirectory);
+	const [receiptName] = await fs.readdir(sessionRoot);
+	const text = await fs.readFile(path.join(sessionRoot, receiptName), 'utf8');
+	return { text, receipt: JSON.parse(text) };
+}
+
+async function writeValidReceipt(
+	receiptDirectory: string,
+	stashOid: string,
+	overrides: Record<string, unknown> = {},
+): Promise<void> {
+	const originalHead =
+		typeof overrides.originalHead === 'string'
+			? overrides.originalHead
+			: (await gitOutput(['rev-parse', 'HEAD'])).trim();
+	await fs.writeFile(
+		path.join(receiptDirectory, `${stashOid}.json`),
+		JSON.stringify({
+			schemaVersion: 1,
+			sessionID: SESSION_ID,
+			stashOid,
+			originalHead,
+			originalBranch: 'main',
+			paths: ['.opencode/opencode-swarm.json'],
+			preparedAt: '2026-08-14T00:00:00.000Z',
+			mode: 'PR_REVIEW',
+			gateRevision: 1,
+			gateActivatedAt: '2026-08-14T00:00:00.000Z',
+			...overrides,
+		}),
+	);
+}
+
 beforeEach(async () => {
 	directory = realpathSync(
 		mkdtempSync(path.join(os.tmpdir(), 'pr-workflow-checkout-receipts-')),
@@ -87,9 +128,90 @@ afterEach(async () => {
 	await fs.rm(directory, { recursive: true, force: true });
 });
 
-test('PRR-BOOTSTRAP-EDGE-001: ignores historical receipts whose stashes were dropped', async () => {
-	// Prior behavior counted retained receipts forever, so a session that restored
-	// and dropped eight old stashes could no longer prepare a newly dirty checkout.
+test('fits plugin-produced discovery receipts within its own 64 KiB restore boundary', async () => {
+	await fs.writeFile(path.join(directory, 'newfile.txt'), 'fresh\n', 'utf-8');
+	await activatePrWorkflow(directory, SESSION_ID, 'PR_REVIEW');
+	let statusCalls = 0;
+	checkoutInternals.runGit = async (cwd, args, options) => {
+		if (args.join(' ') === 'status --porcelain=v1 -z --untracked-files=all') {
+			statusCalls += 1;
+			if (statusCalls === 1) {
+				const expansionHeavyPaths = Array.from(
+					{ length: 64 },
+					(_, index) => `?? path-${index}-${'\\'.repeat(4_080)}\0`,
+				).join('');
+				return { exitCode: 0, stdout: expansionHeavyPaths };
+			}
+		}
+		return originalRunGit(cwd, args, options);
+	};
+
+	const result = JSON.parse(
+		await executePreparePrWorkflowCheckout({}, directory, {
+			sessionID: SESSION_ID,
+		}),
+	);
+	expect(result).toMatchObject({
+		success: true,
+		discovered: true,
+		paths_truncated: true,
+	});
+	const { text, receipt } = await readOnlyReceipt();
+	expect(Buffer.byteLength(text, 'utf8')).toBeLessThanOrEqual(64 * 1024);
+	expect(receipt.paths).toBeArray();
+	expect((receipt.paths as unknown[]).length).toBeLessThan(64);
+	expect(
+		await listPendingPrWorkflowCheckoutRestores(directory, SESSION_ID),
+	).toEqual([{ stash_oid: result.stash_oid, stash_present: true }]);
+	await executeAbortPrWorkflow(
+		{
+			mode: 'PR_REVIEW',
+			kind: 'recovery',
+			reason: 'exercise lifecycle receipt budget',
+		},
+		directory,
+		{ sessionID: SESSION_ID },
+	);
+	const restored = JSON.parse(
+		await executePreparePrWorkflowCheckout(
+			{ operation: 'restore' },
+			directory,
+			{ sessionID: SESSION_ID },
+		),
+	);
+	expect(restored).toMatchObject({ success: true, restored: true });
+});
+
+test('flags truncation when one discovered path exceeds the per-path receipt bound', async () => {
+	await fs.writeFile(path.join(directory, 'newfile.txt'), 'fresh\n', 'utf-8');
+	await activatePrWorkflow(directory, SESSION_ID, 'PR_REVIEW');
+	let statusCalls = 0;
+	checkoutInternals.runGit = async (cwd, args, options) => {
+		if (args.join(' ') === 'status --porcelain=v1 -z --untracked-files=all') {
+			statusCalls += 1;
+			if (statusCalls === 1) {
+				return { exitCode: 0, stdout: `?? ${'x'.repeat(5_000)}\0` };
+			}
+		}
+		return originalRunGit(cwd, args, options);
+	};
+
+	const result = JSON.parse(
+		await executePreparePrWorkflowCheckout({}, directory, {
+			sessionID: SESSION_ID,
+		}),
+	);
+	expect(result).toMatchObject({
+		success: true,
+		discovered: true,
+		paths_truncated: true,
+	});
+	const { receipt } = await readOnlyReceipt();
+	expect(receipt.paths).toEqual(['x'.repeat(4_096)]);
+	expect(receipt.pathsTruncated).toBe(true);
+});
+
+test('PRR-BOOTSTRAP-EDGE-001: rejects malformed historical receipts before creating a ninth obligation', async () => {
 	await fs.writeFile(
 		path.join(directory, '.opencode', 'opencode-swarm.json'),
 		'{"enabled":false}\n',
@@ -114,7 +236,76 @@ test('PRR-BOOTSTRAP-EDGE-001: ignores historical receipts whose stashes were dro
 			{ sessionID: SESSION_ID },
 		),
 	);
-	expect(result.success).toBe(true);
+	expect(result).toMatchObject({ success: false });
+	expect(result.message).toMatch(/receipt failed identity validation/i);
+	expect(await gitOutput(['stash', 'list'])).toBe('');
+	expect((await fs.readdir(receiptDirectory)).length).toBe(8);
+});
+
+test('rejects a valid pending receipt whose preserved stash is missing before mutation', async () => {
+	await fs.writeFile(
+		path.join(directory, '.opencode', 'opencode-swarm.json'),
+		'{"enabled":false}\n',
+	);
+	const receiptDirectory = path.join(
+		directory,
+		'.swarm',
+		'pr-workflow-checkouts',
+		prWorkflowSessionFileStem(SESSION_ID),
+	);
+	await fs.mkdir(receiptDirectory, { recursive: true });
+	const missingOid = 'a'.repeat(40);
+	await writeValidReceipt(receiptDirectory, missingOid);
+	await activatePrWorkflow(directory, SESSION_ID, 'PR_REVIEW');
+
+	const result = JSON.parse(
+		await executePreparePrWorkflowCheckout(
+			{ paths: ['.opencode/opencode-swarm.json'] },
+			directory,
+			{ sessionID: SESSION_ID },
+		),
+	);
+	expect(result).toMatchObject({ success: false });
+	expect(result.message).toMatch(/reference missing preserved stashes/i);
+	expect(await gitOutput(['stash', 'list'])).toBe('');
+	expect((await fs.readdir(receiptDirectory)).length).toBe(1);
+});
+
+test('counts applied-state cleanup receipts even after their safety stashes are gone', async () => {
+	await fs.writeFile(
+		path.join(directory, '.opencode', 'opencode-swarm.json'),
+		'{"enabled":false}\n',
+	);
+	const receiptDirectory = path.join(
+		directory,
+		'.swarm',
+		'pr-workflow-checkouts',
+		prWorkflowSessionFileStem(SESSION_ID),
+	);
+	await fs.mkdir(receiptDirectory, { recursive: true });
+	const originalHead = (await gitOutput(['rev-parse', 'HEAD'])).trim();
+	for (let index = 1; index <= 8; index++) {
+		const absentOid = index.toString(16).repeat(40);
+		await writeValidReceipt(receiptDirectory, absentOid, {
+			originalHead,
+			restoreState: 'applied',
+			restoreAppliedAt: '2026-08-14T00:01:00.000Z',
+			restoredHead: originalHead,
+			restoredBranch: 'main',
+		});
+	}
+	await activatePrWorkflow(directory, SESSION_ID, 'PR_REVIEW');
+
+	const result = JSON.parse(
+		await executePreparePrWorkflowCheckout(
+			{ paths: ['.opencode/opencode-swarm.json'] },
+			directory,
+			{ sessionID: SESSION_ID },
+		),
+	);
+	expect(result).toMatchObject({ success: false });
+	expect(result.message).toMatch(/preparation limit reached/i);
+	expect(await gitOutput(['stash', 'list'])).toBe('');
 });
 
 test('PRR-BOOTSTRAP-EDGE-002: preserves a tracked Unicode filename with spaces', async () => {
@@ -252,10 +443,7 @@ test('a stash-inventory read failure while receipts exist is reported, not silen
 		prWorkflowSessionFileStem(SESSION_ID),
 	);
 	await fs.mkdir(receiptDirectory, { recursive: true });
-	await fs.writeFile(
-		path.join(receiptDirectory, `${'a'.repeat(40)}.json`),
-		'{}',
-	);
+	await writeValidReceipt(receiptDirectory, 'a'.repeat(40));
 	await activatePrWorkflow(directory, SESSION_ID, 'PR_REVIEW');
 	// countOutstandingReceipts runs before assertExactDirtyPathSet, so the named
 	// path never needs to actually be dirty here — the receipt-inventory failure

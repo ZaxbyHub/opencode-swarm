@@ -95,22 +95,20 @@ describe('abortPrWorkflow', () => {
 		).toBeNull();
 	});
 
-	test('recovery abort of a BOUND review is REFUSED (issue #2131 finding 1a)', async () => {
+	test('recovery abort clears a settled BOUND review', async () => {
 		await writeRawState('bound-session', {
 			mode: 'PR_REVIEW',
 			prHeadSha: 'abc123',
 			revision: 3,
 		});
-		await expect(
-			abortPrWorkflow(directory, 'bound-session', {
-				kind: 'recovery',
-				reason: 'trying to skip coverage',
-			}),
-		).rejects.toThrow(/recovery abort of a bound PR_REVIEW.*checkoutRecovery/i);
-		// Gate survives the refusal.
+		const summary = await abortPrWorkflow(directory, 'bound-session', {
+			kind: 'recovery',
+			reason: 'bounded discovery recovery exhausted',
+		});
+		expect(summary.prHeadSha).toBe('abc123');
 		expect(
 			await readPrWorkflowGateState(directory, 'bound-session'),
-		).not.toBeNull();
+		).toBeNull();
 	});
 
 	test('recovery abort of a bound review SUCCEEDS when checkoutRecovery exists', async () => {
@@ -148,11 +146,9 @@ describe('abortPrWorkflow', () => {
 		expect(await readPrWorkflowGateState(directory, 'bound-force')).toBeNull();
 	});
 
-	test('recovery abort is REFUSED after base settlement but before trigger/micro receipts (criterion A literal scenario)', async () => {
-		// Issue #2131 criterion A names this exact scenario: a bound gate where
-		// base coverage has settled but no trigger-evaluation or micro-lane
-		// artifacts exist yet. Recovery abort must be refused so coverage cannot
-		// be shortcut; the user force path is the only override.
+	test('recovery abort clears a bound gate after exhausted base settlement', async () => {
+		// This is the liveness-critical scenario: base coverage settled, but a
+		// failed lane exhausted its retries before trigger/micro artifacts exist.
 		await writeRawState('base-settled', {
 			mode: 'PR_REVIEW',
 			prHeadSha: 'abc123',
@@ -182,16 +178,12 @@ describe('abortPrWorkflow', () => {
 			],
 			// ...but NO prReviewTriggerEval / micro artifacts (trigger/micro receipts absent).
 		});
-		await expect(
-			abortPrWorkflow(directory, 'base-settled', {
-				kind: 'recovery',
-				reason: 'skip remaining coverage',
-			}),
-		).rejects.toThrow(/recovery abort of a bound PR_REVIEW.*checkoutRecovery/i);
-		// The bound gate survives — coverage cannot be shortcut via recovery.
-		const state = await readPrWorkflowGateState(directory, 'base-settled');
-		expect(state?.prHeadSha).toBe('abc123');
-		expect(state?.prReviewBaseDispatch).toBeDefined();
+		const summary = await abortPrWorkflow(directory, 'base-settled', {
+			kind: 'recovery',
+			reason: 'base lane retries exhausted before trigger evaluation',
+		});
+		expect(summary.prHeadSha).toBe('abc123');
+		expect(await readPrWorkflowGateState(directory, 'base-settled')).toBeNull();
 	});
 
 	test('throws when no active gate exists for the session', async () => {

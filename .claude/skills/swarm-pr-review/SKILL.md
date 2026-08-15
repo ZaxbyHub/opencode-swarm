@@ -17,19 +17,18 @@ Read and follow `../../../.opencode/skills/swarm-pr-review/SKILL.md` as the cano
   because controller tools are absent — dispatch the review through the
   `Agent`/`Task` subagent tool, following the canonical phases, role
   boundaries, row contracts, and join barriers.
-- `PR_REVIEW` is read-only with respect to the PR branch: fetch refs, inspect
-  metadata, and check out the PR head after verifying a clean working tree,
-  but do not fix code, resolve conflicts, commit, push, rebase, or reset.
-- Before dispatching explorer lanes, fetch the PR head and verify `git cat-file -e
-  <full_pr_head_sha>^{commit}`; run `git switch --detach <full_pr_head_sha>`, confirm and bind that exact HEAD. Do not use `--track FETCH_HEAD`.
+- `PR_REVIEW` is read-only with respect to the PR branch: fetch refs, inspect metadata,
+  check out its head after verifying a clean tree; do not fix, commit, push, rebase, or reset.
+- Before dispatching explorer lanes, fetch the PR head and verify it with
+  `git rev-parse --verify <full_pr_head_sha>^0` and `git cat-file -t <full_pr_head_sha>` (must print `commit`);
+  run `git switch --detach <full_pr_head_sha>`, bind that exact HEAD, and do not use `--track FETCH_HEAD`.
 - Ingest every review signal before explorer lanes: PR comments, review
   summaries, requested changes, bot findings, CI/check failures,
   mergeability/conflicts, stale branch/base drift, PR body claims, linked
   issues, and commit messages — each a claim until reviewer validation proves
   or disproves it with file:line evidence.
-- If the repository defines a PR publication contract in local docs, templates,
-  skills, or CI, ingest it as an obligation source; do not assume this repo's
-  title/body sections elsewhere.
+- If the repository defines a PR publication contract in local docs, templates, skills,
+  or CI, ingest it as an obligation source; do not assume this repo's title/body sections.
 - Prefer GitHub connector/MCP tools when available, or `gh`, to inspect PR
   metadata, comments, review threads, checks, conflicts, and head SHA.
 - Profile B accounting: classify the depth tier (S/M/L); cover all six base

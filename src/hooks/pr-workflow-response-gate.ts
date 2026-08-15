@@ -262,7 +262,7 @@ function blockedText(
 	const lines: string[] = [
 		`[${mode} WORKFLOW ACTIVE]`,
 		`The ${mode} workflow gate is still active. Continue with the required structured lanes, evidence, and controller tools until \`complete_pr_workflow\` succeeds.`,
-		`If the bind/checkout path is unreachable — for example a compound \`git fetch && git checkout\` was rejected as read-only shell syntax, the PR head cannot be fetched, or the working tree is on the wrong branch — call \`abort_pr_workflow\` (mode: "${mode}", kind: "recovery", reason: "<one-line cause>") to clear the gate, or ask the user to run \`/swarm abort-pr-workflow\` (a force abort that may clear a bound gate).`,
+		`If bounded recovery is exhausted — for example the bind/checkout path is unreachable or settled discovery lanes cannot satisfy their contract — call \`abort_pr_workflow\` (mode: "${mode}", kind: "recovery", reason: "<one-line cause>") to clear an unbound or bound pre-publication gate, or ask the user to run \`/swarm abort-pr-workflow\` for the human force path.`,
 	];
 	if (options.suspended) {
 		if (options.suspendedReason === 'total') {

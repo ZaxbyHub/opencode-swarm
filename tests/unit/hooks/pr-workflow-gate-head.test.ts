@@ -82,7 +82,9 @@ describe('PR workflow exact checkout head', () => {
 			`cannot resolve the current Git HEAD in "${directory}"`,
 		);
 		await expect(promise).rejects.toThrow('git -C');
-		await expect(promise).rejects.toThrow('rev-parse --verify HEAD^{commit}');
+		await expect(promise).rejects.toThrow('rev-parse --verify HEAD^0');
+		await expect(promise).rejects.toThrow('cat-file -t HEAD');
+		await expect(promise).rejects.not.toThrow('HEAD^{commit}');
 		// Must enumerate at least one real cause so the caller knows where
 		// to look (unborn HEAD, shallow clone, missing binary, timeout, non-repo).
 		await expect(promise).rejects.toThrow(
