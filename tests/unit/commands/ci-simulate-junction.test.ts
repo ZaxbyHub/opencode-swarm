@@ -175,7 +175,7 @@ describe('handleCiSimulateCommand with a symlinked/junctioned tmpdir (realpathSy
 		_internals.runExternalTool = realRunExternalTool;
 		_internals.getDefaultBaseBranch = realGetDefaultBaseBranch;
 		_internals.detectDefaultRemoteBranch = realDetectDefaultRemoteBranch;
-		_internals.osTmpdir = () => os.tmpdir();
+		_internals.osTmpdir = os.tmpdir.bind(os);
 
 		try {
 			if (junctionSupported) fs.rmdirSync(junctionDir);
