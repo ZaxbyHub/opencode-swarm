@@ -28,6 +28,7 @@ import {
 	recomputeCounters,
 } from '../../../src/hooks/knowledge-events';
 import {
+	CANONICAL_RECEIPT_SOURCES,
 	commitApplicationOutcomeBatch,
 	queryLiveMemberships,
 	RECEIPT_TERMINAL_OUTCOMES,
@@ -177,6 +178,28 @@ describe('knowledge outcome/source semantic matrix (#2032)', () => {
 		// If ReceiptOutcome ever gains or loses a member, this fails loudly
 		// instead of the matrix silently skipping (or ghost-testing) it.
 		expect([...RECEIPT_TERMINAL_OUTCOMES].sort()).toEqual([...OUTCOMES].sort());
+	});
+
+	test('canonical source taxonomy stays closed and drift-pinned (#2032)', () => {
+		// CANONICAL_RECEIPT_SOURCES must stay exactly this closed set: it is
+		// the reference for what a terminal `source` may mean. A silent
+		// divergence between ReceiptSourceCode and this runtime set is the
+		// same failure class the outcome pin above prevents.
+		expect([...CANONICAL_RECEIPT_SOURCES].sort()).toEqual(
+			[
+				'delegate',
+				'reviewer',
+				'architect',
+				'architect_marker',
+				'test_engineer',
+				'phase_override',
+				'application_gate_staleness_clear',
+				'application_gate_denial_limit_clear',
+				'manual',
+				'migration',
+				'unknown',
+			].sort(),
+		);
 	});
 
 	for (const outcome of OUTCOMES) {

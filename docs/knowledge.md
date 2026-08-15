@@ -464,9 +464,10 @@ For each applicable directive, the Architect emits:
 - `KNOWLEDGE_APPLIED: <id>` — directive observed in the next compliant action.
 - `KNOWLEDGE_N_A: <id> reason=<short>` — does not apply this turn (neutral).
 - `KNOWLEDGE_IGNORED: <id> reason=<short>` — judged relevant but deliberately not followed (counts against the directive).
+- `KNOWLEDGE_CONTRADICTED: <id> reason=<short>` — current authority or repository evidence disproves it.
 - `KNOWLEDGE_VIOLATED: <id> reason=<short>` — runtime evidence shows it was breached.
 
-Chat-text markers (KNOWLEDGE_APPLIED/N_A/IGNORED/VIOLATED) are the sole mechanism that
+Chat-text markers (KNOWLEDGE_APPLIED/N_A/IGNORED/CONTRADICTED/VIOLATED) are the sole mechanism that
 satisfies the knowledge-application enforcement gate. The `knowledge_receipt` tool
 (which replaced the former `knowledge_ack`) records knowledge-usage receipts for
 audit — including applied/ignored/n_a/contradicted outcomes and new-lesson persistence
