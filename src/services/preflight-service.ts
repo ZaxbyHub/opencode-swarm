@@ -14,6 +14,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { z } from 'zod';
 import { getDurableGateEvidenceStatusForTask } from '../evidence/gate-bridge.js';
 import {
 	checkRequirementCoverage,
@@ -719,6 +720,28 @@ async function runEvidenceCheck(dir: string): Promise<PreflightCheckResult> {
 }
 
 /**
+ * Schema for the req-coverage report written by the req_coverage tool
+ * (`src/tools/req-coverage.ts`) to `.swarm/evidence/req-coverage-phase-{N}.json`.
+ * Kept minimal and structural-only: it pins the writer's already-computed
+ * count fields so the gate fails on an unusable/incomplete report without
+ * re-deriving requirements from the effective spec (issue #1662: the gate
+ * previously passed on file existence alone and asserted nothing about
+ * content).
+ */
+const ReqCoverageReportSchema = z.object({
+	success: z.boolean(),
+	phase: z.number(),
+	totalRequirements: z.number(),
+	coveredCount: z.number(),
+	missingCount: z.number(),
+	requirements: z.array(z.unknown()),
+});
+
+/** Read cap for the report file — the writer's output is a small bounded
+ * JSON document; anything larger is treated as invalid rather than read. */
+const REQ_COVERAGE_MAX_JSON_BYTES = 500 * 1024; // 500KB, matches EVIDENCE_MAX_JSON_BYTES
+
+/**
  * Run requirement coverage check
  */
 async function runRequirementCoverageCheck(
@@ -742,21 +765,121 @@ async function runRequirementCoverageCheck(
 		// Check if coverage file exists for current phase
 		const coverage = await checkRequirementCoverage(currentPhase, dir);
 
-		if (coverage.exists) {
+		if (!coverage.exists) {
 			return {
 				type: 'req_coverage',
-				status: 'pass',
-				message: 'Requirement coverage report found',
+				status: 'fail',
+				message:
+					'Requirement coverage report missing but effective spec exists',
+				details: { expectedPath: coverage.path },
+				durationMs: Date.now() - startTime,
+			};
+		}
+
+		// The report exists — validate its content. Existence alone proves
+		// nothing: an empty file, unparseable JSON, a wrong-shape document, or
+		// a report with uncovered/zero requirements must all fail the gate
+		// (#1662). The count fields are the writer's own output; they are
+		// read back here rather than re-derived from the effective spec.
+		let raw: string;
+		try {
+			const stat = await fs.promises.stat(coverage.path);
+			if (stat.size > REQ_COVERAGE_MAX_JSON_BYTES) {
+				return {
+					type: 'req_coverage',
+					status: 'fail',
+					message: `Requirement coverage report exceeds ${REQ_COVERAGE_MAX_JSON_BYTES} byte cap and cannot be validated`,
+					details: { path: coverage.path, sizeBytes: stat.size },
+					durationMs: Date.now() - startTime,
+				};
+			}
+			raw = await fs.promises.readFile(coverage.path, 'utf-8');
+		} catch (readError) {
+			return {
+				type: 'req_coverage',
+				status: 'fail',
+				message: `Requirement coverage report unreadable: ${
+					readError instanceof Error ? readError.message : String(readError)
+				}`,
 				details: { path: coverage.path },
+				durationMs: Date.now() - startTime,
+			};
+		}
+
+		const trimmed = raw.trim();
+		if (trimmed.length === 0) {
+			return {
+				type: 'req_coverage',
+				status: 'fail',
+				message: 'Requirement coverage report is empty',
+				details: { path: coverage.path },
+				durationMs: Date.now() - startTime,
+			};
+		}
+
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(trimmed);
+		} catch {
+			return {
+				type: 'req_coverage',
+				status: 'fail',
+				message: 'Requirement coverage report is not valid JSON',
+				details: { path: coverage.path },
+				durationMs: Date.now() - startTime,
+			};
+		}
+
+		const report = ReqCoverageReportSchema.safeParse(parsed);
+		if (!report.success) {
+			return {
+				type: 'req_coverage',
+				status: 'fail',
+				message:
+					'Requirement coverage report does not match the expected report shape',
+				details: { path: coverage.path },
+				durationMs: Date.now() - startTime,
+			};
+		}
+
+		const { totalRequirements, coveredCount, missingCount } = report.data;
+
+		if (totalRequirements === 0) {
+			return {
+				type: 'req_coverage',
+				status: 'fail',
+				message:
+					'Requirement coverage report contains no requirements (totalRequirements is 0) but effective spec exists',
+				details: { path: coverage.path, totalRequirements },
+				durationMs: Date.now() - startTime,
+			};
+		}
+
+		if (missingCount > 0) {
+			return {
+				type: 'req_coverage',
+				status: 'fail',
+				message: `Requirement coverage report has ${missingCount} uncovered requirement(s)`,
+				details: {
+					path: coverage.path,
+					totalRequirements,
+					coveredCount,
+					missingCount,
+				},
 				durationMs: Date.now() - startTime,
 			};
 		}
 
 		return {
 			type: 'req_coverage',
-			status: 'fail',
-			message: 'Requirement coverage report missing but effective spec exists',
-			details: { expectedPath: coverage.path },
+			status: 'pass',
+			message: `Requirement coverage report found: ${coveredCount}/${totalRequirements} requirement(s) covered`,
+			details: {
+				path: coverage.path,
+				totalRequirements,
+				coveredCount,
+				missingCount,
+			},
 			durationMs: Date.now() - startTime,
 		};
 	} catch (error) {
