@@ -80,6 +80,8 @@ export async function handleResetCommand(
 		// they do not accumulate across issues.
 		'reproduction.json',
 		'issue-publication.json',
+		'recurrence-sweep.json',
+		'implementation-review.json',
 	];
 	const results: string[] = [];
 

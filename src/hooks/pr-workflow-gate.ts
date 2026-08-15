@@ -346,6 +346,8 @@ export interface PrFeedbackStageACheckReceipt {
 		feedbackItemId: string;
 		target: string;
 		expectedBehavior: string;
+		/** Typed proof kind (issue #2131 criterion C4); optional for records persisted before it existed. */
+		proofKind?: string;
 	}>;
 	durationMs: number;
 }
@@ -383,7 +385,10 @@ interface PrFeedbackReadyToPublishRecord {
 	validatedAt: string;
 }
 
-export type PrWorkflowCompletionStatus = 'completed' | 'ready-to-publish';
+export type PrWorkflowCompletionStatus =
+	| 'completed'
+	| 'ready-to-publish'
+	| 'verified-no-change';
 
 export type PrReviewValidationPhase = 'council' | 'reviewer' | 'critic';
 export type PrReviewArtifactBoundary =
@@ -536,6 +541,14 @@ export interface PrWorkflowGateState {
 	prFeedbackStageA?: PrFeedbackStageARecord;
 	prFeedbackGateBatches?: PrFeedbackGateBatchRecord[];
 	prFeedbackReadyToPublish?: PrFeedbackReadyToPublishRecord;
+	/**
+	 * Issue #2131 criterion C2: count of controlled base-sync/rebind transitions.
+	 * Each rebind moves the immutable intake head to a new verified remote PR
+	 * head after merge/rebase/conflict repair and invalidates every
+	 * ancestry-bound receipt (Stage A, verification, gate batches) so the full
+	 * mechanical ladder re-runs on the new ancestry.
+	 */
+	prFeedbackRebindCount?: number;
 	prFeedbackScopes?: PrFeedbackScopeDeclarationRecord[];
 }
 
@@ -674,6 +687,16 @@ const PrFeedbackStageACheckReceiptSchema = z
 						feedbackItemId: z.string().min(1),
 						target: z.string().min(1),
 						expectedBehavior: z.string().min(8),
+						proofKind: z
+							.enum([
+								'defect',
+								'metadata',
+								'source-proof',
+								'conflict',
+								'ci',
+								'user-decision',
+							])
+							.optional(),
 					})
 					.strict(),
 			)
@@ -909,6 +932,7 @@ const PrWorkflowGateStateSchema = z
 			.max(MAX_WORKFLOW_BATCHES)
 			.optional(),
 		prFeedbackReadyToPublish: PrFeedbackReadyToPublishRecordSchema.optional(),
+		prFeedbackRebindCount: z.number().int().nonnegative().optional(),
 		prFeedbackScopes: z
 			.array(PrFeedbackScopeDeclarationRecordSchema)
 			.max(MAX_WORKFLOW_BATCHES)
@@ -1480,6 +1504,93 @@ async function bindPrWorkflowHeadWhileLocked(
 	};
 	await _test_exports.beforePrFeedbackTrackingPersist?.();
 	return writeStateWhileLocked(directory, nextState);
+}
+
+/**
+ * Controlled base-sync/rebind transition for PR_FEEDBACK (issue #2131
+ * criterion C2). After a merge/rebase used to resolve base drift or conflicts,
+ * the local history is no longer a direct child of the original intake head and
+ * the ordinary publication path can never be satisfied. Instead of an ad-hoc
+ * abort, this transition moves the immutable intake head to a NEW verified
+ * remote PR head and invalidates every ancestry-bound receipt (Stage A,
+ * verification batches, ordered gates), forcing the full mechanical ladder to
+ * re-run against the new ancestry.
+ *
+ * Fail-closed semantics:
+ *   1. Only an active PR_FEEDBACK gate bound to a head may rebind.
+ *   2. Refuses while publication is armed — an armed gate must complete (the
+ *      immutable-commit binding must not be dropped silently).
+ *   3. Refuses while PR workflow lanes are in flight.
+ *   4. The new head must differ from the current intake head (a no-op rebind
+ *      would silently launder receipts).
+ *   5. The current checkout must equal the new head, and the PR-feedback
+ *      tracking-checkout discipline is re-asserted for it.
+ *   6. The immutable feedback inventory is preserved (item ownership
+ *      continuity); only ancestry-bound receipts are invalidated.
+ */
+export async function rebindPrFeedbackHead(
+	directory: string,
+	sessionID: string,
+	prHeadSha: string,
+): Promise<PrWorkflowGateState> {
+	const state = await requireBoundState(directory, sessionID, 'PR_FEEDBACK');
+	const normalizedHead = normalizePrHeadSha(prHeadSha);
+	if (state.prFeedbackReadyToPublish) {
+		throw new Error(
+			'BLOCKED: PR_FEEDBACK rebind is refused while publication is armed; complete the workflow (or push the bound commit) before rebinding.',
+		);
+	}
+	const openLanes = readDelegations(directory).filter(
+		(record) =>
+			record.parentSessionId === state.sessionID &&
+			record.mode?.startsWith('swarm-pr-') &&
+			(record.status === 'pending' || record.status === 'running'),
+	);
+	if (openLanes.length > 0) {
+		throw new Error(
+			`BLOCKED: PR_FEEDBACK rebind refused while ${openLanes.length} PR workflow lane(s) are still in flight; collect their results first.`,
+		);
+	}
+	if (normalizedHead === state.prHeadSha) {
+		throw new Error(
+			`BLOCKED: PR_FEEDBACK rebind to the current intake head "${normalizedHead}" is a no-op; a rebind must move to a genuinely new verified PR head after merge/rebase repair.`,
+		);
+	}
+	await assertCurrentCheckoutHead(directory, normalizedHead, state.mode);
+	await assertPrFeedbackTrackingCheckout(directory, normalizedHead);
+	const nextState: PrWorkflowGateState = {
+		...state,
+		prHeadSha: normalizedHead,
+		// Invalidate every ancestry-bound receipt: the entire mechanical ladder
+		// (Stage A → verification → ordered gates) must re-run on the new
+		// ancestry. The immutable inventory and retired item ownership survive
+		// so item-set continuity is preserved across the repair.
+		prFeedbackStageA: undefined,
+		prFeedbackVerifications: undefined,
+		prFeedbackGateBatches: undefined,
+		prFeedbackRebindCount: (state.prFeedbackRebindCount ?? 0) + 1,
+		updatedAt: isoNow(),
+	};
+	try {
+		const eventsPath = validateSwarmPath(directory, 'events.jsonl');
+		await fsp.appendFile(
+			eventsPath,
+			`${JSON.stringify({
+				type: 'pr_feedback_rebound',
+				timestamp: isoNow(),
+				sessionID: state.sessionID,
+				previousPrHeadSha: state.prHeadSha,
+				prHeadSha: normalizedHead,
+				rebindCount: nextState.prFeedbackRebindCount,
+			})}\n`,
+			'utf-8',
+		);
+	} catch {
+		// Non-fatal audit trail.
+	}
+	return withSessionStateMutation(directory, state.sessionID, async () =>
+		writeStateWhileLocked(directory, nextState),
+	);
 }
 
 /** Bind an active PR_REVIEW workflow to one immutable merge-base scope. */
@@ -5118,6 +5229,67 @@ export async function completePrWorkflow(
 				state.prHeadSha!,
 				localHead,
 			);
+			if (commitCount === 0) {
+				// Issue #2131 criterion C1: a fully verified no-change inventory
+				// (every item DISPROVED / PRE_EXISTING / NEEDS_MORE_EVIDENCE /
+				// NEEDS_USER_DECISION in the settled verification lanes) is a
+				// legitimate terminal outcome with nothing to publish — the old
+				// contract dead-ended it by demanding an empty commit. HEAD must
+				// equal the immutable intake head (zero descendants AND no
+				// divergence) and the tree must be clean.
+				if (localHead !== state.prHeadSha) {
+					throw new Error(
+						'BLOCKED: PR_FEEDBACK zero-descendant completion requires HEAD to equal the immutable intake head (history diverged; resolve it or rebind via rebind_pr_feedback_head)',
+					);
+				}
+				if (
+					(await _test_exports.resolveIsWorkingTreeCleanAsync(directory)) !==
+					true
+				) {
+					throw new Error(
+						'BLOCKED: PR_FEEDBACK zero-descendant completion requires a clean index and working tree',
+					);
+				}
+				const classifications = readSettledFeedbackClassifications(
+					directory,
+					readyState,
+				);
+				const inventory = readyState.prFeedbackInventory ?? [];
+				const offenders = inventory.filter(
+					(itemId) =>
+						!classifications.has(itemId) ||
+						!FEEDBACK_NO_CHANGE_CLASSIFICATIONS.has(
+							classifications.get(itemId)!,
+						),
+				);
+				if (offenders.length > 0) {
+					throw new Error(
+						`BLOCKED: PR_FEEDBACK zero-commit completion requires every inventory item verified as a no-change outcome (DISPROVED, PRE_EXISTING, NEEDS_MORE_EVIDENCE, or NEEDS_USER_DECISION); offending items: ${offenders.slice(0, 10).join(', ')}. Items with confirmed content changes must follow the exactly-one-reviewed-commit path.`,
+					);
+				}
+				try {
+					const eventsPath = validateSwarmPath(directory, 'events.jsonl');
+					await fsp.appendFile(
+						eventsPath,
+						`${JSON.stringify({
+							type: 'pr_feedback_verified_no_change',
+							timestamp: isoNow(),
+							sessionID: state.sessionID,
+							prHeadSha: state.prHeadSha,
+							items: inventory.length,
+						})}\n`,
+						'utf-8',
+					);
+				} catch {
+					// Non-fatal audit trail (same discipline as abort).
+				}
+				await clearPrWorkflowGateState(
+					directory,
+					sessionID,
+					readyState.revision,
+				);
+				return 'verified-no-change';
+			}
 			if (commitCount !== 1) {
 				throw new Error(
 					'BLOCKED: PR_FEEDBACK publication requires exactly one descendant commit after the immutable intake head',
@@ -8835,6 +9007,18 @@ const FEEDBACK_CLASSIFICATIONS = new Set([
 	'NEEDS_MORE_EVIDENCE',
 	'NEEDS_USER_DECISION',
 ]);
+/**
+ * Issue #2131 criterion C1: a fully verified no-change inventory is one where
+ * EVERY item's settled verification classification is a no-change outcome.
+ * Any CONFIRMED/PARTIAL item requires real content changes, so the ordinary
+ * exactly-one-reviewed-commit path still applies.
+ */
+const FEEDBACK_NO_CHANGE_CLASSIFICATIONS = new Set([
+	'DISPROVED',
+	'PRE_EXISTING',
+	'NEEDS_MORE_EVIDENCE',
+	'NEEDS_USER_DECISION',
+]);
 
 interface ReviewerVerdict {
 	classification: string;
@@ -9017,6 +9201,45 @@ function feedbackArtifactCoversItems(
 			FEEDBACK_CLASSIFICATIONS.has(matches[0][2])
 		);
 	});
+}
+
+/**
+ * Read the settled verification classification of every inventory item from the
+ * settled verification batches' lane outputs (issue #2131 criterion C1). An
+ * item missing from the map has no settled verified classification.
+ */
+function readSettledFeedbackClassifications(
+	directory: string,
+	state: PrWorkflowGateState,
+): Map<string, string> {
+	const classifications = new Map<string, string>();
+	for (const record of state.prFeedbackVerifications ?? []) {
+		for (const ownership of record.ownership) {
+			const delegation = findByBatchId(directory, record.batchId, {
+				parentSessionId: state.sessionID,
+			}).find((candidate) => candidate.laneId === ownership.laneId);
+			const ref = delegation?.result?.outputRef?.trim();
+			const loaded = ref ? readLaneOutput(directory, ref) : null;
+			if (!loaded) continue;
+			for (const line of loaded.artifact.text.split(/\r?\n/)) {
+				const fields = pipeFields(line);
+				if (
+					fields[0] !== '[FEEDBACK-VERIFIED]' ||
+					fields.length !== 4 ||
+					!fields.slice(1, 4).every(Boolean) ||
+					!FEEDBACK_CLASSIFICATIONS.has(fields[2])
+				) {
+					continue;
+				}
+				// A duplicate conflicting classification for one item is a
+				// contract violation; keep the first occurrence deterministic.
+				if (!classifications.has(fields[1])) {
+					classifications.set(fields[1], fields[2]);
+				}
+			}
+		}
+	}
+	return classifications;
 }
 
 async function persistState(

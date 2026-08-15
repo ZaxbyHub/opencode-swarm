@@ -619,9 +619,31 @@ settle on the Stage-A digest. After they settle, only one standalone `git commit
 command may create the reviewed commit; push and remote publication remain
 blocked until that exact commit is armed. The first completion requires a clean
 index/worktree and a non-merge direct child commit whose sole parent is the
-immutable intake head, so zero commits, multiple commits, merge commits,
+immutable intake head, so multiple commits, merge commits,
 amend/non-descendant histories,
 `--allow-empty`, and partially committed reviewed content fail closed. There is no speed, efficiency, token, or time exception.
+
+**Verified no-change terminal (issue #2131 C1).** When the ENTIRE immutable
+inventory is verified as a no-change outcome — every `FB-###` item classified
+`DISPROVED`, `PRE_EXISTING`, `NEEDS_MORE_EVIDENCE`, or `NEEDS_USER_DECISION`
+in the settled verification lanes — a correct workflow needs NO content commit.
+After every ordered gate settles, call `complete_pr_workflow` with the intake
+`pr_head_sha` while HEAD still equals that intake head and the tree is clean:
+it returns `verified-no-change` and clears the gate terminally (nothing to
+publish; an empty or `--allow-empty` commit is still forbidden). Any item
+classified `CONFIRMED`/`PARTIAL` requires the ordinary exactly-one-reviewed-
+commit path above.
+
+**Base-sync/rebind (issue #2131 C2).** When base drift or merge conflicts force
+a merge/rebase, the repaired history is no longer a direct child of the intake
+head and the ordinary publication path can never be satisfied. Do NOT abort
+ad-hoc: finish the repair, fetch the new authoritative PR head, check it out,
+then call `rebind_pr_feedback_head` with the new full PR head SHA. It moves the
+immutable intake head to the new head, preserves the immutable inventory, and
+invalidates every ancestry-bound receipt (Stage A, verification, ordered
+gates) — re-run the entire mechanical ladder on the new ancestry. It refuses a
+no-op rebind, refuses while publication is armed, and refuses while lanes are
+in flight.
 
 **Without the controller (Profiles B/C).** The same gates run in the same
 order with the same one-row-per-feedback-ID verdict contracts; what changes is
@@ -691,9 +713,13 @@ because a name such as `test` or `build` can hide a no-op. A
 reproduction must also return non-empty machine-observable runner output.
 The reproduction check also supplies one `feedback_targets` row per immutable
 feedback ID, in inventory order: exact `feedback_item_id`, one executed `target`,
-and concrete `expected_behavior`. Missing, duplicate, invented, or target-less
-mappings block Stage B; the controller persists that exact per-item mapping
-rather than stamping an unrelated test onto the whole inventory.
+concrete `expected_behavior`, and a typed `proof_kind` (`defect`, `metadata`,
+`source-proof`, `conflict`, `ci`, or `user-decision`). Missing, duplicate,
+invented, target-less, or kind-less mappings block Stage B; the controller
+persists that exact per-item mapping. This is a STRUCTURAL mapping with a typed
+proof kind — it proves each item maps to a target the executed command actually
+selects, not that the target is causally decisive for that item; the Stage B
+reviewer lane owns that judgement (issue #2131 C4).
 No-op/help/list/dry-run,
 fix/update, package publication/deployment, Git mutation, remote client,
 shell/eval/wrapper, and credentialed publication surfaces fail closed. The

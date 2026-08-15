@@ -88,6 +88,25 @@ function writeTraceState(dir: string, state?: Partial<TraceState>): void {
 	writeSwarmJson(dir, 'issue-trace-state.json', { ...defaults, ...state });
 }
 
+/** Writes both residual-B receipts (implementation review + recurrence sweep). */
+function writeResidualBReceipts(dir: string, number = 42): void {
+	writeSwarmJson(dir, 'implementation-review.json', {
+		issueNumber: number,
+		reviewerVerdict: 'APPROVE',
+		criticVerdict: 'APPROVE',
+		diffBase: 'abc1234',
+		diffHead: 'def5678',
+		notes: 'fresh reviewer and critic both approved',
+		timestamp: '2026-01-01T00:00:00Z',
+	});
+	writeSwarmJson(dir, 'recurrence-sweep.json', {
+		issueNumber: number,
+		defectClass: 'no defect class',
+		justification: 'docs-only change corrects no behavior',
+		timestamp: '2026-01-01T00:00:00Z',
+	});
+}
+
 async function runHook(
 	dir: string,
 	existingMessages: unknown[] = [],
@@ -177,6 +196,7 @@ describe('issue-trace e2e — full chain', () => {
 		writeSpec(tmpDir, 42);
 		_internals.readPlanPhaseStatus = () =>
 			Promise.resolve({ planExists: true, allComplete: true });
+		writeResidualBReceipts(tmpDir);
 
 		const messages = await runHook(tmpDir);
 		expect(messages).toHaveLength(1);

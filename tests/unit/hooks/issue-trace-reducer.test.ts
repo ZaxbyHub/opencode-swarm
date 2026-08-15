@@ -43,6 +43,8 @@ function makeArt(
 		allPhasesComplete: false,
 		reproductionPermitted: true,
 		publicationObserved: false,
+		implementationReviewVerified: true,
+		recurrenceSweepVerified: true,
 		...overrides,
 	};
 }

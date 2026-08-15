@@ -242,6 +242,7 @@ describe('Stage A coalesced validator contract authorization', () => {
 						feedback_item_id: 'FB-001',
 						target: 'tests/targeted-regression.test.ts',
 						expected_behavior: 'targeted regression proves the fixed behavior',
+						proof_kind: 'defect',
 					},
 				],
 			},
@@ -348,6 +349,7 @@ describe('Stage A coalesced validator contract authorization', () => {
 										target: 'tests/targeted-regression.test.ts',
 										expected_behavior:
 											'targeted package-manager regression proves the fix',
+										proof_kind: 'defect',
 									},
 								],
 							},
@@ -410,6 +412,7 @@ describe('Stage A coalesced validator contract authorization', () => {
 									target: 'tests/targeted-regression.test.ts',
 									expected_behavior:
 										'targeted regression proves the blocked contract does not execute',
+									proof_kind: 'defect',
 								},
 							],
 						},

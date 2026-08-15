@@ -64,7 +64,10 @@ export async function executeCompletePrWorkflow(
 			pr_head_sha: parsed.data.pr_head_sha,
 			status,
 			ready_to_publish: status === 'ready-to-publish',
-			gate_cleared: status === 'completed',
+			// 'verified-no-change' is also a terminal clearing (issue #2131
+			// criterion C1): the gate is cleared with nothing to publish.
+			verified_no_change: status === 'verified-no-change',
+			gate_cleared: status === 'completed' || status === 'verified-no-change',
 			checkout_restore_required: checkoutRestoreRequired,
 			checkout_restore_receipts: checkoutRestoreReceipts,
 		});

@@ -394,7 +394,15 @@ describe('PR workflow terminal completion', () => {
 			).rejects.toThrow('standalone shell commands');
 		}
 		_test_exports.resolveCurrentGitHead = () => POST_COMMIT_SHA;
-		for (const commitCount of [0, 2, null]) {
+		// Issue #2131 C1 evolved the zero-commit contract: count 0 now routes
+		// to the verified-no-change terminal, whose guards fail closed first (a
+		// diverged HEAD gets the precise remediation message). Counts 2/null
+		// still hit the exactly-one-commit rule.
+		_test_exports.resolveCommitCountSince = () => 0;
+		await expect(
+			completePrWorkflow(directory, SESSION_ID, 'PR_FEEDBACK', HEAD_SHA),
+		).rejects.toThrow('history diverged');
+		for (const commitCount of [2, null]) {
 			_test_exports.resolveCommitCountSince = () => commitCount;
 			await expect(
 				completePrWorkflow(directory, SESSION_ID, 'PR_FEEDBACK', HEAD_SHA),
