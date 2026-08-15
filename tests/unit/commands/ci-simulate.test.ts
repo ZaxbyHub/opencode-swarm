@@ -465,9 +465,7 @@ describe('handleCiSimulateCommand with a symlinked/junctioned tmpdir (realpathSy
 		// *resolves to* realBaseParent but is textually a completely different
 		// path — exactly the shape of macOS's /var -> /private/var, or a
 		// Windows temp dir mounted through a junction.
-		realBaseParent = fs.mkdtempSync(
-			path.join(os.tmpdir(), 'ci-sim-realbase-'),
-		);
+		realBaseParent = fs.mkdtempSync(path.join(os.tmpdir(), 'ci-sim-realbase-'));
 		junctionDir = path.join(
 			os.tmpdir(),
 			`ci-sim-junction-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
@@ -541,9 +539,7 @@ describe('handleCiSimulateCommand with a symlinked/junctioned tmpdir (realpathSy
 		// unregistered / not contained and fail closed.
 		expect(result).not.toContain('WORKTREE CLEANUP BLOCKED');
 		expect(result).not.toContain('refusing to clean up non-contained path');
-		expect(result).not.toContain(
-			'exists but is not a registered git worktree',
-		);
+		expect(result).not.toContain('exists but is not a registered git worktree');
 		expect(result).toContain('Worktree removed');
 		expect(result).toContain('All checks passed');
 

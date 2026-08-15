@@ -157,10 +157,17 @@ describe('copilot-pr-publication-gate (issue #2131 criterion D)', () => {
 			'https://github.com/example/repo.git',
 		]);
 		git(directory, [
-			'-c', 'user.name=test',
-			'-c', 'user.email=test@test.com',
-			'-c', 'commit.gpgsign=false',
-			'commit', '-q', '--allow-empty', '-m', 'init',
+			'-c',
+			'user.name=test',
+			'-c',
+			'user.email=test@test.com',
+			'-c',
+			'commit.gpgsign=false',
+			'commit',
+			'-q',
+			'--allow-empty',
+			'-m',
+			'init',
 		]);
 		const head = spawnSync('git', ['-C', directory, 'rev-parse', 'HEAD'], {
 			encoding: 'utf-8',
