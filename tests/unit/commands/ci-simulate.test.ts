@@ -468,7 +468,7 @@ describe('handleCiSimulateCommand with a symlinked/junctioned tmpdir (realpathSy
 		realBaseParent = fs.mkdtempSync(path.join(os.tmpdir(), 'ci-sim-realbase-'));
 		junctionDir = path.join(
 			os.tmpdir(),
-			`ci-sim-junction-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
+			`ci-sim-junction-${process.hrtime.bigint()}`,
 		);
 
 		try {
