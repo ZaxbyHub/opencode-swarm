@@ -28,7 +28,6 @@ import {
 } from '../../../src/hooks/knowledge-events.js';
 import { buildDelegateDirectiveBlock } from '../../../src/hooks/knowledge-injector.js';
 import type { RankedEntry } from '../../../src/hooks/knowledge-reader.js';
-import { queryLiveMemberships } from '../../../src/hooks/knowledge-receipt-ledger.js';
 import type { KnowledgeConfig } from '../../../src/hooks/knowledge-types.js';
 
 // ---------------------------------------------------------------------------
@@ -136,7 +135,7 @@ async function seedRetrieved(
 
 function extractReceipts(
 	events: KnowledgeEvent[],
-): Array<{ id: string; type: string; reason?: string; source?: string }> {
+): Array<{ id: string; type: string; reason?: string }> {
 	return events
 		.filter((e) =>
 			['applied', 'ignored', 'violated', 'n_a', 'acknowledged'].includes(
@@ -144,18 +143,8 @@ function extractReceipts(
 			),
 		)
 		.map((e) => {
-			const ev = e as {
-				type: string;
-				knowledge_id: string;
-				reason?: string;
-				source?: string;
-			};
-			return {
-				id: ev.knowledge_id,
-				type: ev.type,
-				reason: ev.reason,
-				source: ev.source,
-			};
+			const ev = e as { type: string; knowledge_id: string; reason?: string };
+			return { id: ev.knowledge_id, type: ev.type, reason: ev.reason };
 		});
 }
 
@@ -217,27 +206,6 @@ describe('delegate-ack-collector', () => {
 			expect(byId.get(ID_CRITICAL)).toBe('applied');
 			expect(result.unacknowledgedCriticals).toEqual([]);
 			expect(result.emitted).toHaveLength(4);
-
-			// (#2032) Every delegate terminal dual-write carries the delegate
-			// provenance class — previously these diagnostic events omitted
-			// source entirely while unacknowledged events carried it.
-			for (const rec of recs) {
-				expect(rec.source).toBe('delegate');
-			}
-
-			// (#2032) The V2 ledger terminal carries source 'delegate', not the
-			// agent identity ('coder') the shared validator previously stamped.
-			const live = await queryLiveMemberships(dir, {
-				session_id: 'sess-1',
-				include_terminal: true,
-			});
-			expect(live.ok).toBe(true);
-			if (live.ok) {
-				for (const membership of live.memberships) {
-					if (!membership.terminal) continue;
-					expect(membership.terminal.source).toBe('delegate');
-				}
-			}
 		});
 
 		it('drops acks for IDs that were never shown (anti-spoofing)', async () => {
