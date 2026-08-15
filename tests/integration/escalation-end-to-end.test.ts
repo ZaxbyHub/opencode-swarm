@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { readKnowledgeEvents } from '../../src/hooks/knowledge-events.js';
+import { commitDisplayedMembership } from '../../src/hooks/knowledge-receipt-ledger.js';
 import { reconcileReviewerVerdicts } from '../../src/hooks/reviewer-verdict-parser.js';
 
 function entryLine(id: string, priority: string): string {
@@ -47,6 +48,7 @@ function createRelativeTempDir(): string {
 describe('repeat-violation escalation (e2e)', () => {
 	let dir: string;
 	let swarmDir: string;
+	let violationIndex: number;
 
 	function readEntry(id: string): Record<string, unknown> | undefined {
 		const content = fs.readFileSync(
@@ -62,16 +64,31 @@ describe('repeat-violation escalation (e2e)', () => {
 	}
 
 	async function violate(): Promise<void> {
+		const traceId = `violation-trace-${++violationIndex}`;
+		await commitDisplayedMembership(dir, {
+			trace_id: traceId,
+			session_id: 's',
+			phase: 'Phase 1',
+			entries: [{ entry_id: 'd-med', critical: false }],
+		});
 		await reconcileReviewerVerdicts({
 			directory: dir,
-			transcript: 'VIOLATED:d-med evidence=reintroduced the bug',
-			directivesToVerify: [{ id: 'd-med', priority: 'medium' }],
+			transcript: `VIOLATED:${traceId}:d-med evidence=reintroduced the bug`,
+			directivesToVerify: [
+				{
+					trace_id: traceId,
+					entry_id: 'd-med',
+					session_id: 's',
+					priority: 'medium',
+				},
+			],
 			sessionId: 's',
 			phase: 'Phase 1',
 		});
 	}
 
 	beforeEach(() => {
+		violationIndex = 0;
 		dir = createRelativeTempDir();
 		swarmDir = path.join(dir, '.swarm');
 		fs.mkdirSync(swarmDir, { recursive: true });

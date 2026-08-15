@@ -10,11 +10,48 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { maybeEscalateOnViolation } from '../../../src/hooks/knowledge-escalator.js';
+import {
+	_internals,
+	maybeEscalateOnViolation,
+} from '../../../src/hooks/knowledge-escalator.js';
 import { readKnowledgeEvents } from '../../../src/hooks/knowledge-events.js';
+import type {
+	ReceiptMembership,
+	ReceiptTerminal,
+} from '../../../src/hooks/knowledge-receipt-ledger.js';
 
 const DAY = 24 * 60 * 60 * 1000;
 const NOW = new Date('2026-03-01T00:00:00.000Z');
+let historicalMemberships: ReceiptMembership[] = [];
+
+function membershipFromViolation(
+	line: string,
+	index: number,
+): ReceiptMembership {
+	const event = JSON.parse(line) as {
+		event_id: string;
+		trace_id: string;
+		knowledge_id: string;
+		timestamp: string;
+	};
+	return {
+		trace_id: `${event.trace_id}-${index}`,
+		entry_id: event.knowledge_id,
+		session_id: 's',
+		critical: false,
+		committed_at: event.timestamp,
+		membership_event_id: `membership-${index}`,
+		grace_days: 7,
+		exposure_kind: 'legacy_unknown',
+		origin: 'v2',
+		terminal: {
+			outcome: 'violated',
+			source: 'test',
+			event_id: event.event_id,
+			committed_at: event.timestamp,
+		},
+	};
+}
 
 function entryLine(id: string, priority: string): string {
 	return JSON.stringify({
@@ -55,8 +92,10 @@ function violatedLine(id: string, ms: number): string {
 describe('maybeEscalateOnViolation', () => {
 	let dir: string;
 	let swarmDir: string;
+	const originalQueryHistoricalOutcomes = _internals.queryHistoricalOutcomes;
 
 	function writeEvents(lines: string[]): void {
+		historicalMemberships = lines.map(membershipFromViolation);
 		fs.writeFileSync(
 			path.join(swarmDir, 'knowledge-events.jsonl'),
 			`${lines.join('\n')}\n`,
@@ -64,6 +103,9 @@ describe('maybeEscalateOnViolation', () => {
 	}
 
 	function appendEvent(line: string): void {
+		historicalMemberships.push(
+			membershipFromViolation(line, historicalMemberships.length),
+		);
 		fs.appendFileSync(
 			path.join(swarmDir, 'knowledge-events.jsonl'),
 			`${line}\n`,
@@ -91,9 +133,15 @@ describe('maybeEscalateOnViolation', () => {
 			path.join(swarmDir, 'knowledge.jsonl'),
 			entryLine('c1', 'medium'),
 		);
+		historicalMemberships = [];
+		_internals.queryHistoricalOutcomes = async () => ({
+			ok: true,
+			memberships: historicalMemberships,
+		});
 	});
 
 	afterEach(() => {
+		_internals.queryHistoricalOutcomes = originalQueryHistoricalOutcomes;
 		fs.rmSync(dir, { recursive: true, force: true });
 	});
 
@@ -102,6 +150,18 @@ describe('maybeEscalateOnViolation', () => {
 		const r = await maybeEscalateOnViolation(dir, 'c1', NOW);
 		expect(r.escalated).toBe(false);
 		expect(r.violationsInWindow).toBe(1);
+		expect(readEntry('c1')?.directive_priority).toBe('medium');
+	});
+
+	it('does not escalate when authoritative receipt history is unavailable', async () => {
+		_internals.queryHistoricalOutcomes = async () => ({
+			ok: false,
+			code: 'store_unavailable',
+			detail: 'unavailable',
+			uncertainty: 'unavailable',
+		});
+		const result = await maybeEscalateOnViolation(dir, 'c1', NOW);
+		expect(result).toEqual({ escalated: false, entryId: 'c1' });
 		expect(readEntry('c1')?.directive_priority).toBe('medium');
 	});
 
@@ -131,6 +191,37 @@ describe('maybeEscalateOnViolation', () => {
 		expect(esc).toHaveLength(1);
 		expect(esc[0].entry_id).toBe('c1');
 		expect(esc[0].to).toBe('critical');
+	});
+
+	it('retains prior violations after an authorized remediation replaces the current terminal', async () => {
+		const current = membershipFromViolation(
+			violatedLine('c1', NOW.getTime()),
+			0,
+		) as ReceiptMembership & { terminal_history?: ReceiptTerminal[] };
+		current.terminal = {
+			...current.terminal!,
+			outcome: 'applied',
+			event_id: 'authorized-applied',
+		};
+		current.terminal_history = [
+			{
+				outcome: 'violated',
+				source: 'delegate',
+				event_id: 'violation-1',
+				committed_at: new Date(NOW.getTime() - 5 * DAY).toISOString(),
+			} as ReceiptTerminal,
+			{
+				outcome: 'violated',
+				source: 'reviewer',
+				event_id: 'violation-2',
+				committed_at: new Date(NOW.getTime() - DAY).toISOString(),
+			} as ReceiptTerminal,
+		];
+		historicalMemberships = [current];
+
+		const result = await maybeEscalateOnViolation(dir, 'c1', NOW);
+		expect(result.escalated).toBe(true);
+		expect(result.violationsInWindow).toBe(2);
 	});
 
 	it('does NOT escalate violations outside the 30-day window', async () => {

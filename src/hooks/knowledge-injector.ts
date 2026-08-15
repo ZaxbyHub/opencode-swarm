@@ -21,6 +21,7 @@ import {
 	setCriticalShownIds,
 } from '../state.js';
 import { warn } from '../utils/logger.js';
+import { ensureCohortIdCached } from './cohort-cache.js';
 import { sanitizeContextText } from './context-sanitizer.js';
 import {
 	buildDriftInjectionText,
@@ -34,8 +35,14 @@ import {
 	readRecentEscalations,
 } from './knowledge-escalator.js';
 import { recordKnowledgeEvent } from './knowledge-events.js';
+import { readLinkPointer } from './knowledge-link.js';
 import type { RankedEntry } from './knowledge-reader.js';
 import { recordLessonsShown } from './knowledge-reader.js';
+import {
+	commitDisplayedMembership,
+	commitEmptyRetrieval,
+	queryLiveMemberships,
+} from './knowledge-receipt-ledger.js';
 import { confirmEntriesPhase, readRejectedLessons } from './knowledge-store.js';
 import type {
 	DirectivePriority,
@@ -185,6 +192,7 @@ function buildDirectiveBlock(
 	entries: RankedEntry[],
 	charBudget: number,
 	cfg: KnowledgeConfig,
+	traceId: string,
 ): BuiltBlock {
 	if (entries.length === 0) return { block: null, renderedIds: [] };
 	const maxDisplay = cfg.max_lesson_display_chars ?? 120;
@@ -218,7 +226,7 @@ function buildDirectiveBlock(
 		const lesson = sanitizeLessonForContext(e.lesson).slice(0, maxDisplay);
 		// Each directive is one record. Keep YAML-ish for parser-friendliness.
 		const rec: string[] = [];
-		rec.push(`- id: ${e.id}`);
+		rec.push(`- id: ${encodeURIComponent(e.id)}`);
 		rec.push(`  confidence: ${Number(e.confidence).toFixed(2)}`);
 		rec.push(`  priority: ${priority}`);
 		rec.push(`  lesson: ${lesson}`);
@@ -231,6 +239,7 @@ function buildDirectiveBlock(
 	}
 	let block = [
 		'<swarm_knowledge_directives>',
+		`trace_id: ${encodeURIComponent(traceId)}`,
 		...records.flatMap((r) => r.lines),
 		'</swarm_knowledge_directives>',
 	].join('\n');
@@ -239,6 +248,7 @@ function buildDirectiveBlock(
 		records.pop();
 		block = [
 			'<swarm_knowledge_directives>',
+			`trace_id: ${encodeURIComponent(traceId)}`,
 			...records.flatMap((r) => r.lines),
 			'</swarm_knowledge_directives>',
 		].join('\n');
@@ -299,19 +309,20 @@ export function buildDelegateDirectiveBlock(
 	lines.push(
 		'ACK CONTRACT: end your FINAL message with one line per directive in this block:',
 	);
-	lines.push('  KNOWLEDGE_APPLIED:<id> — you applied it');
+	const ackPair = traceId ? '<trace_id>:<id>' : '<id>';
+	lines.push(`  KNOWLEDGE_APPLIED:${ackPair} — you applied it`);
 	// IGNORED is a NEGATIVE outcome signal (it counts against the directive in
 	// ranking and quarantine evidence); N_A is neutral. The descriptions below
 	// steer merely-irrelevant directives to N_A so the widened all-priority
 	// contract does not turn routine irrelevance into negative signal.
 	lines.push(
-		'  KNOWLEDGE_IGNORED:<id> reason=<short why> — you judged it relevant but deliberately chose not to follow it (counts against the directive)',
+		`  KNOWLEDGE_IGNORED:${ackPair} reason=<short why> — you judged it relevant but deliberately chose not to follow it (counts against the directive)`,
 	);
 	lines.push(
-		'  KNOWLEDGE_CONTRADICTED:<id> reason=<observable conflict> — current authority or repository evidence disproved it (counts against the directive)',
+		`  KNOWLEDGE_CONTRADICTED:${ackPair} reason=<observable conflict> — current authority or repository evidence disproved it (counts against the directive)`,
 	);
 	lines.push(
-		'  KNOWLEDGE_N_A:<id> reason=<why> — it was not relevant to your task (neutral; prefer this when the directive simply did not apply)',
+		`  KNOWLEDGE_N_A:${ackPair} reason=<why> — it was not relevant to your task (neutral; prefer this when the directive simply did not apply)`,
 	);
 	lines.push(
 		'Omitting a critical id is a contract violation. Omitting any other id is recorded as unacknowledged.',
@@ -402,6 +413,7 @@ export interface InjectForDelegateParams {
 	agent: string;
 	expectedTools?: string[];
 	taskTitle?: string;
+	taskId?: string;
 	sessionId?: string;
 	config: KnowledgeConfig;
 	/**
@@ -458,6 +470,9 @@ export async function injectForDelegate(
 	params: InjectForDelegateParams,
 ): Promise<InjectForDelegateResult> {
 	const { directory, agent, taskTitle, sessionId, config } = params;
+	// V2 receipt authority is session-bound. Without a real host session there is
+	// no truthful membership to persist, so optional delegate injection is skipped.
+	if (!sessionId) return { entries: [], trace_id: '' };
 	const cap = config.delegate_max_inject_count ?? 8;
 	const expectedTools =
 		params.expectedTools && params.expectedTools.length > 0
@@ -503,7 +518,8 @@ export async function injectForDelegate(
 		);
 		const capped = scoped.slice(0, cap);
 
-		// Emit a single delegate_inject retrieval event with the IDs actually shown.
+		// Persist the exact final displayed set before returning it to the caller.
+		// Failure skips optional injection; no unverifiable directive is exposed.
 		if (capped.length > 0) {
 			const ranks: Record<string, number> = {};
 			const scores: Record<string, number> = {};
@@ -511,11 +527,53 @@ export async function injectForDelegate(
 				ranks[e.id] = idx + 1;
 				scores[e.id] = e.finalScore;
 			});
+			const cohortId = await _internals.ensureCohortIdCached(
+				directory,
+				sessionId,
+			);
+			const sourceLinkId = _internals.readLinkPointer(directory)?.linkId;
+			const membership = await _internals.commitDisplayedMembership(directory, {
+				trace_id: search.trace_id,
+				session_id: sessionId,
+				exposure_kind: 'delegate_directive',
+				phase: params.phase,
+				task_id: params.taskId,
+				agent,
+				cohort_id: cohortId,
+				source_link_id: sourceLinkId,
+				grace_days: config.receipt_close_grace_days,
+				entries: capped.map((entry, index) => ({
+					entry_id: entry.id,
+					critical:
+						entry.directive_priority === 'critical' &&
+						isActiveStatus(entry.status),
+					rank: index + 1,
+					score: entry.finalScore,
+				})),
+			});
+			if (
+				!membership.ok ||
+				membership.memberships.some((item) => item.terminal)
+			) {
+				recordInjectionSkip(
+					directory,
+					membership.ok ? 'terminal_trace_reuse' : membership.code,
+					{
+						agent,
+						sessionId,
+						extra: { trace_id: search.trace_id },
+					},
+				);
+				return { entries: [], trace_id: '' };
+			}
+
+			// Diagnostic dual-write occurs only after V2 commit and lock release.
 			await _internals.recordKnowledgeEvent(directory, {
 				type: 'retrieved',
 				trace_id: search.trace_id,
-				session_id: sessionId ?? 'unknown',
-				phase: params.phase ?? taskTitle,
+				session_id: sessionId,
+				phase: params.phase,
+				task_id: params.taskId,
 				agent,
 				query: taskTitle ?? '',
 				retrieval_mode: 'delegate_inject',
@@ -555,16 +613,23 @@ export async function injectForDelegate(
 				}
 			}
 		}
-		// (#1849 R1) Empty delegate retrieval: emit a retrieved event with empty
-		// result_ids (carrying the trace_id) + a no_relevant terminal so the
-		// delegate cycle is accountable. Fail-open.
+		// Empty retrieval uses a trace-level V2 lifecycle without inventing a pair.
 		if (capped.length === 0) {
 			try {
+				const empty = await _internals.commitEmptyRetrieval(directory, {
+					trace_id: search.trace_id,
+					session_id: sessionId,
+					phase: params.phase,
+					agent,
+					grace_days: config.receipt_close_grace_days,
+				});
+				if (!empty.ok || !empty.terminal_event_id)
+					return { entries: [], trace_id: '' };
 				await _internals.recordKnowledgeEvent(directory, {
 					type: 'retrieved',
 					trace_id: search.trace_id,
-					session_id: sessionId ?? 'unknown',
-					phase: params.phase ?? taskTitle,
+					session_id: sessionId,
+					phase: params.phase,
 					agent,
 					query: taskTitle ?? '',
 					retrieval_mode: 'delegate_inject',
@@ -575,8 +640,8 @@ export async function injectForDelegate(
 				await _internals.recordKnowledgeEvent(directory, {
 					type: 'no_relevant',
 					trace_id: search.trace_id,
-					session_id: sessionId ?? 'unknown',
-					phase: params.phase ?? taskTitle,
+					session_id: sessionId,
+					phase: params.phase,
 					agent,
 					reason: 'empty delegate retrieval',
 				});
@@ -836,6 +901,7 @@ export function createKnowledgeInjectorHook(
 	let cachedInjectionText: string | null = null;
 	let cachedShownIds: string[] = [];
 	let cachedCriticalIds: string[] = [];
+	let cachedTraceId: string | null = null;
 
 	return safeHook(
 		async (
@@ -857,6 +923,12 @@ export function createKnowledgeInjectorHook(
 			const mctx = resolveMessageTransformContext(output);
 			const agentName = mctx.agent;
 			const sessionId = mctx.sessionID;
+			if (!sessionId) {
+				recordInjectionSkip(directory, 'missing_session_id', {
+					agent: agentName,
+				});
+				return;
+			}
 
 			// Budget-residual check (BACM-style: evaluate headroom before appending)
 			// Uses the same 0.33 tok/char ratio as estimateTokens() in context-budget.ts
@@ -1001,9 +1073,25 @@ export function createKnowledgeInjectorHook(
 			const cacheKey = buildContextCacheKey(currentPhase, retrievalCtx);
 			if (cacheKey === lastSeenCacheKey && cachedInjectionText !== null) {
 				// Same context, cached text available — re-inject (handles compaction).
-				injectKnowledgeMessage(output, cachedInjectionText);
+				let cacheVerifiable = cachedShownIds.length === 0;
+				if (cachedShownIds.length > 0 && cachedTraceId) {
+					const live = await _internals.queryLiveMemberships(directory, {
+						session_id: sessionId,
+						include_terminal: false,
+					});
+					if (live.ok) {
+						const liveIds = new Set(
+							live.memberships
+								.filter((membership) => membership.trace_id === cachedTraceId)
+								.map((membership) => membership.entry_id),
+						);
+						cacheVerifiable = cachedShownIds.every((id) => liveIds.has(id));
+					}
+				}
+				if (cacheVerifiable)
+					injectKnowledgeMessage(output, cachedInjectionText);
 				const sessionID = sessionId;
-				if (sessionID) {
+				if (sessionID && cacheVerifiable) {
 					if (cachedCriticalIds.length > 0) {
 						setCriticalShownIds(sessionID, {
 							ids: cachedCriticalIds,
@@ -1014,12 +1102,13 @@ export function createKnowledgeInjectorHook(
 						clearCriticalShownIds(sessionID);
 					}
 				}
-				return;
+				if (cacheVerifiable) return;
 			}
 			lastSeenCacheKey = cacheKey;
 			cachedInjectionText = null;
 			cachedShownIds = [];
 			cachedCriticalIds = [];
+			cachedTraceId = null;
 
 			// Retrieve action-aware ranked entries (uses triggers/applies_to/priority).
 			const searchFn =
@@ -1035,6 +1124,7 @@ export function createKnowledgeInjectorHook(
 				sessionId: sessionId,
 				emitEvent: false,
 			});
+			cachedTraceId = search.trace_id;
 			// Change 5 (Task 6.1): the ≥0.8 hard confidence pre-filter is REMOVED.
 			// Confidence already participates in the hybrid score (the metadata
 			// signal in search-knowledge.ts), so a hard pre-filter on top of it
@@ -1100,6 +1190,15 @@ export function createKnowledgeInjectorHook(
 					sessionId: sessionID,
 					phase: currentPhase,
 				});
+				const empty = await _internals.commitEmptyRetrieval(directory, {
+					trace_id: search.trace_id,
+					session_id: sessionId,
+					phase: retrievalCtx.currentPhase,
+					task_id: retrievalCtx.taskId,
+					agent: 'architect',
+					grace_days: config.receipt_close_grace_days,
+				});
+				const emptyCommitted = empty.ok && Boolean(empty.terminal_event_id);
 				// (#1849 R1) Every retrieval attempt — including an empty one — must
 				// leave one durable terminal accounting path. Emit a `retrieved`
 				// event with empty result_ids (carrying the real trace_id) so a
@@ -1107,20 +1206,21 @@ export function createKnowledgeInjectorHook(
 				// when there is genuinely nothing to inject (no drift/briefing
 				// fallback either). Fail-open: recording errors never block injection.
 				try {
-					await _internals.recordKnowledgeEvent(directory, {
-						type: 'retrieved',
-						trace_id: search.trace_id,
-						session_id: sessionID ?? 'unknown',
-						phase: retrievalCtx.currentPhase,
-						task_id: retrievalCtx.taskId,
-						agent: 'architect',
-						query:
-							retrievalCtx.lastUserMessage ?? retrievalCtx.currentPhase ?? '',
-						retrieval_mode: 'auto_injection',
-						result_ids: [],
-						ranks: {},
-						scores: {},
-					});
+					if (emptyCommitted)
+						await _internals.recordKnowledgeEvent(directory, {
+							type: 'retrieved',
+							trace_id: search.trace_id,
+							session_id: sessionId,
+							phase: retrievalCtx.currentPhase,
+							task_id: retrievalCtx.taskId,
+							agent: 'architect',
+							query:
+								retrievalCtx.lastUserMessage ?? retrievalCtx.currentPhase ?? '',
+							retrieval_mode: 'auto_injection',
+							result_ids: [],
+							ranks: {},
+							scores: {},
+						});
 				} catch {
 					/* non-blocking — diagnostics only */
 				}
@@ -1128,15 +1228,16 @@ export function createKnowledgeInjectorHook(
 					// Real empty retrieval: file a `no_relevant` terminal so the cycle
 					// is accountable in diagnostics and the trace is closeable.
 					try {
-						await _internals.recordKnowledgeEvent(directory, {
-							type: 'no_relevant',
-							trace_id: search.trace_id,
-							session_id: sessionID ?? 'unknown',
-							phase: retrievalCtx.currentPhase,
-							task_id: retrievalCtx.taskId,
-							agent: 'architect',
-							reason: 'empty auto-injection retrieval',
-						});
+						if (emptyCommitted)
+							await _internals.recordKnowledgeEvent(directory, {
+								type: 'no_relevant',
+								trace_id: search.trace_id,
+								session_id: sessionId,
+								phase: retrievalCtx.currentPhase,
+								task_id: retrievalCtx.taskId,
+								agent: 'architect',
+								reason: 'empty auto-injection retrieval',
+							});
 					} catch {
 						/* non-blocking */
 					}
@@ -1184,6 +1285,7 @@ export function createKnowledgeInjectorHook(
 				directiveEntries,
 				directiveBudget,
 				config,
+				search.trace_id,
 			);
 			const directiveBlock = directiveBuilt.block;
 
@@ -1307,6 +1409,65 @@ export function createKnowledgeInjectorHook(
 			}
 
 			cachedInjectionText = parts.join('\n\n');
+			const criticalIds = filteredEntries
+				.filter((e) => renderedDirectiveIdSet.has(e.id))
+				.filter(
+					(e) =>
+						e.directive_priority === 'critical' && isActiveStatus(e.status),
+				)
+				.map((e) => e.id);
+
+			if (cachedShownIds.length > 0) {
+				const byId = new Map(filteredEntries.map((entry) => [entry.id, entry]));
+				// Issue #2031: lineage is display-time truth. Capture it on the
+				// membership before the directive reaches chat so a later architect
+				// application terminal remains eligible for cohort-scoped promotion.
+				const cohortId = await _internals.ensureCohortIdCached(
+					directory,
+					sessionId,
+				);
+				const sourceLinkId = _internals.readLinkPointer(directory)?.linkId;
+				const membership = await _internals.commitDisplayedMembership(
+					directory,
+					{
+						trace_id: search.trace_id,
+						session_id: sessionId,
+						exposure_kind: 'architect_directive',
+						phase: retrievalCtx.currentPhase,
+						task_id: retrievalCtx.taskId,
+						agent: 'architect',
+						cohort_id: cohortId,
+						source_link_id: sourceLinkId,
+						grace_days: config.receipt_close_grace_days,
+						entries: cachedShownIds.map((id, index) => ({
+							entry_id: id,
+							critical: criticalIds.includes(id),
+							rank: index + 1,
+							score: byId.get(id)?.finalScore,
+						})),
+					},
+				);
+				if (
+					!membership.ok ||
+					membership.memberships.some((item) => item.terminal)
+				) {
+					cachedInjectionText = '';
+					cachedShownIds = [];
+					cachedCriticalIds = [];
+					if (sessionId) clearCriticalShownIds(sessionId);
+					recordInjectionSkip(
+						directory,
+						membership.ok ? 'terminal_trace_reuse' : membership.code,
+						{
+							agent: agentName,
+							sessionId,
+							phase: currentPhase,
+							extra: { trace_id: search.trace_id },
+						},
+					);
+					return;
+				}
+			}
 			injectKnowledgeMessage(output, cachedInjectionText);
 
 			// v2: Populate in-memory currentCriticalShownIds so the toolBefore
@@ -1314,15 +1475,6 @@ export function createKnowledgeInjectorHook(
 			// Keyed by sessionID — the gate consults this exact key.
 			const sessionID = sessionId;
 			if (sessionID) {
-				const criticalIds = filteredEntries
-					.filter((e) => renderedDirectiveIdSet.has(e.id))
-					.filter(
-						(e) =>
-							// G4 (#1716): canonical inactive check — also excludes
-							// `quarantined` and `quarantined_unactionable` directives.
-							e.directive_priority === 'critical' && isActiveStatus(e.status),
-					)
-					.map((e) => e.id);
 				cachedCriticalIds = criticalIds;
 				if (criticalIds.length > 0) {
 					setCriticalShownIds(sessionID, {
@@ -1352,7 +1504,7 @@ export function createKnowledgeInjectorHook(
 				await _internals.recordKnowledgeEvent(directory, {
 					type: 'retrieved',
 					trace_id: search.trace_id,
-					session_id: sessionId ?? 'unknown',
+					session_id: sessionId,
 					phase: retrievalCtx.currentPhase,
 					task_id: retrievalCtx.taskId,
 					agent: 'architect',
@@ -1414,6 +1566,11 @@ export const _internals: {
 	buildEscalationBriefing: typeof buildEscalationBriefing;
 	recordLessonsShown: typeof recordLessonsShown;
 	confirmEntriesPhase: typeof confirmEntriesPhase;
+	commitDisplayedMembership: typeof commitDisplayedMembership;
+	commitEmptyRetrieval: typeof commitEmptyRetrieval;
+	queryLiveMemberships: typeof queryLiveMemberships;
+	ensureCohortIdCached: typeof ensureCohortIdCached;
+	readLinkPointer: typeof readLinkPointer;
 } = {
 	searchKnowledge,
 	recordKnowledgeEvent,
@@ -1422,6 +1579,11 @@ export const _internals: {
 	buildEscalationBriefing,
 	recordLessonsShown,
 	confirmEntriesPhase,
+	commitDisplayedMembership,
+	commitEmptyRetrieval,
+	queryLiveMemberships,
+	ensureCohortIdCached,
+	readLinkPointer,
 };
 
 /**

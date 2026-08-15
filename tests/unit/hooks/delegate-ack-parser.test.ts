@@ -114,6 +114,7 @@ async function seedRetrieved(
 		type: 'retrieved',
 		trace_id: FIXED_TRACE_ID,
 		session_id: opts.sessionId ?? 'sess',
+		task_id: 'task-42',
 		agent: 'coder',
 		query: 'delegate task',
 		retrieval_mode: 'delegate_inject',
@@ -158,10 +159,10 @@ describe('collectDelegateAcks', () => {
 	it('records one receipt per acked+shown directive with the correct type', async () => {
 		const transcript = [
 			'Done with the work.',
-			`KNOWLEDGE_APPLIED:${ID_APPLIED}`,
-			`KNOWLEDGE_IGNORED:${ID_IGNORED} reason=not relevant here`,
-			`KNOWLEDGE_N_A:${ID_NA} reason=different subsystem`,
-			`KNOWLEDGE_APPLIED:${ID_CRITICAL}`,
+			`KNOWLEDGE_APPLIED:${FIXED_TRACE_ID}:${ID_APPLIED}`,
+			`KNOWLEDGE_IGNORED:${FIXED_TRACE_ID}:${ID_IGNORED} reason=not relevant here`,
+			`KNOWLEDGE_N_A:${FIXED_TRACE_ID}:${ID_NA} reason=different subsystem`,
+			`KNOWLEDGE_APPLIED:${FIXED_TRACE_ID}:${ID_CRITICAL}`,
 		].join('\n');
 
 		// (#1849) Seed the retrieved event the directive block's trace_id
@@ -201,7 +202,7 @@ describe('collectDelegateAcks', () => {
 		const result = await collectDelegateAcks({
 			directory: dir,
 			prompt,
-			transcript: `KNOWLEDGE_CONTRADICTED:${ID_CONTRADICTED} reason=current scope requires relative paths`,
+			transcript: `KNOWLEDGE_CONTRADICTED:${FIXED_TRACE_ID}:${ID_CONTRADICTED} reason=current scope requires relative paths`,
 			agent: 'coder',
 			sessionId: 'sess-1',
 		});
@@ -219,8 +220,8 @@ describe('collectDelegateAcks', () => {
 
 	it('synthesizes a violated/unacknowledged event for shown criticals with no ack', async () => {
 		const transcript = [
-			`KNOWLEDGE_APPLIED:${ID_APPLIED}`,
-			`KNOWLEDGE_IGNORED:${ID_IGNORED} reason=not applicable`,
+			`KNOWLEDGE_APPLIED:${FIXED_TRACE_ID}:${ID_APPLIED}`,
+			`KNOWLEDGE_IGNORED:${FIXED_TRACE_ID}:${ID_IGNORED} reason=not applicable`,
 			// ID_CRITICAL deliberately NOT acknowledged.
 		].join('\n');
 
@@ -264,9 +265,9 @@ describe('collectDelegateAcks', () => {
 
 	it('drops acks for IDs that were never shown (anti-spoofing)', async () => {
 		const transcript = [
-			`KNOWLEDGE_APPLIED:${ID_APPLIED}`,
-			`KNOWLEDGE_APPLIED:${ID_NEVER_SHOWN}`, // spoofed — never in the block
-			`KNOWLEDGE_N_A:${ID_CRITICAL} reason=out of scope`,
+			`KNOWLEDGE_APPLIED:${FIXED_TRACE_ID}:${ID_APPLIED}`,
+			`KNOWLEDGE_APPLIED:${FIXED_TRACE_ID}:${ID_NEVER_SHOWN}`, // spoofed — never in the block
+			`KNOWLEDGE_N_A:${FIXED_TRACE_ID}:${ID_CRITICAL} reason=out of scope`,
 		].join('\n');
 
 		// (#1849) Seed the retrieved trace so the validator accepts the shown-ID
@@ -304,7 +305,7 @@ describe('collectDelegateAcks', () => {
 		await collectDelegateAcks({
 			directory: dir,
 			prompt: buildPrompt(),
-			transcript: `KNOWLEDGE_APPLIED:${ID_CRITICAL}`,
+			transcript: `KNOWLEDGE_APPLIED:${FIXED_TRACE_ID}:${ID_CRITICAL}`,
 			agent: 'coder',
 			sessionId: 'sess-4',
 		});
@@ -313,6 +314,40 @@ describe('collectDelegateAcks', () => {
 			| { task_id?: string }
 			| undefined;
 		expect(applied?.task_id).toBe('task-42');
+	});
+
+	it('does not terminalize a mismatched trace but preserves explicit-ack mitigation (#2031)', async () => {
+		// Regression finding #2031-W2. Falsification: removing exact trace
+		// correlation emits applied; removing mitigation fabricates unacknowledged.
+		await seedRetrieved(dir, [ID_CRITICAL], { sessionId: 'sess-trace' });
+		const prompt = `${buildDelegateDirectiveBlock(
+			[entry(ID_CRITICAL, 'critical')],
+			config(),
+			FIXED_TRACE_ID,
+		)}\nTASK_ID: task-trace`;
+		const result = await collectDelegateAcks({
+			directory: dir,
+			prompt,
+			transcript: `KNOWLEDGE_APPLIED:wrong-trace:${ID_CRITICAL}`,
+			agent: 'coder',
+			sessionId: 'sess-trace',
+		});
+
+		expect(result.emitted).toEqual([]);
+		expect(result.unacknowledgedCriticals).toEqual([]);
+		expect(receipts(await readKnowledgeEvents(dir))).toEqual([]);
+	});
+
+	it('returns typed unverifiable state when the host session id is absent', async () => {
+		const result = await collectDelegateAcks({
+			directory: dir,
+			prompt: buildPrompt(),
+			transcript: `KNOWLEDGE_APPLIED:${FIXED_TRACE_ID}:${ID_CRITICAL}`,
+			agent: 'coder',
+		});
+
+		expect(result.unverifiable?.code).toBe('missing_session_id');
+		expect(await readKnowledgeEvents(dir)).toEqual([]);
 	});
 
 	it('is a no-op when the prompt has no delegate directive block', async () => {

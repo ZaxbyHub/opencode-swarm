@@ -1022,7 +1022,8 @@ auto-activate skills.
       "enabled": true,
       "first_after_tool_calls": 10,
       "repeat_after_tool_calls": 25
-    }
+    },
+    "receipt_close_grace_days": 7
   }
 }
 ```
@@ -1032,7 +1033,16 @@ auto-activate skills.
 | `knowledge.realtime_learning_nudge.enabled` | boolean | `true` | Enables the architect-only in-session learning nudge when knowledge is enabled. |
 | `knowledge.realtime_learning_nudge.first_after_tool_calls` | number | `10` | First total session tool-call count that can trigger the nudge. |
 | `knowledge.realtime_learning_nudge.repeat_after_tool_calls` | number | `25` | Minimum additional tool calls before the same session can be nudged again. |
+| `knowledge.receipt_close_grace_days` | integer | `7` | Retains resolved V2 receipt membership for this many days after durable phase closure before archival/compaction eligibility. Accepts `0`-`3650`; live or unresolved membership is never age-evicted. |
 | `knowledge.promotion_require_actionable` | boolean | `true` | Enforces the actionability floor on **every** hive-promotion path — automatic promotion, `/swarm promote <text>`, and `/swarm promote --from-swarm <id>`. A lesson is promotable only if it carries at least one predicate (`required_actions`, `forbidden_actions`, `verification_checks`) **and** at least one scope (`applies_to_tools`, `applies_to_agents`). See [the promote command](./commands.md#swarm-promote---category-cat---from-swarm-id-actionability-flags-text) for the flags that supply them. |
+
+Receipt authority is stored only under the canonical project's `.swarm/`
+directory. It is not redirected by knowledge links, hive configuration, or a
+cohort label. `knowledge-events.jsonl` remains a bounded diagnostic projection;
+its presence, absence, or eviction never changes a receipt or gate decision.
+Receipt migration runs lazily on the first V2 operation, not during plugin
+initialization, and incomplete legacy membership remains typed
+`legacy_unverifiable` rather than being inferred.
 
 > **`knowledge.promotion_require_actionable` is default-ON and is a behavior change (issue #1821).** Before
 > this, a lesson could reach hive knowledge as un-actionable prose that no agent could act on. Now such a

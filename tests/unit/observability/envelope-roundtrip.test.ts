@@ -232,6 +232,18 @@ const FIXTURES: Record<string, Record<string, unknown>> = {
 			},
 		],
 	},
+	knowledge_receipt_transition: {
+		transition: 'terminal_committed',
+		reasonCode: 'committed',
+		schemaVersion: 2,
+		knowledgeTraceId: 'trace-1',
+		knowledgeEntryId: 'entry-1',
+		sessionId: 'sess-1',
+		taskId: '1.1',
+		phase: 'review',
+		receiptOutcome: 'applied',
+		receiptSource: 'delegate_ack',
+	},
 };
 
 describe('envelope roundtrip — AC1 positive', () => {

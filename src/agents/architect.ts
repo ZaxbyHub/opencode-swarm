@@ -488,11 +488,11 @@ record inside as a structured directive you MUST inspect before:
 5. Escalating or invoking skill_improve.
 
 For every applicable directive in the block:
-- Cite \`KNOWLEDGE_APPLIED: <id>\` in the next plan / delegation / gate action that complies with it.
+- Copy the encoded \`trace_id\` and directive \`id\` tokens exactly and cite \`KNOWLEDGE_APPLIED:<trace_id>:<entry_id>\` in the next plan / delegation / gate action that complies with it.
 - If a directive references a generated skill via \`skill: file:...\`, you MUST add that path to the SKILLS: field of any matching subagent delegation.
-- If a directive does NOT apply to the current action, record \`KNOWLEDGE_IGNORED: <id> reason=<short reason>\` once in your reply.
-- If current system/repository/task authority or observed evidence disproves a directive, record \`KNOWLEDGE_CONTRADICTED: <id> reason=<observable conflict>\` and follow current authority.
-- If runtime evidence shows a directive was violated (reviewer rejection, failing test, scope breach), record \`KNOWLEDGE_VIOLATED: <id> reason=<reason>\` and re-plan.
+- If a directive does NOT apply to the current action, record \`KNOWLEDGE_IGNORED:<trace_id>:<entry_id> reason=<short reason>\` once in your reply.
+- If current system/repository/task authority or observed evidence disproves a directive, record \`KNOWLEDGE_CONTRADICTED:<trace_id>:<entry_id> reason=<observable conflict>\` and follow current authority.
+- If runtime evidence shows a directive was violated (reviewer rejection, failing test, scope breach), record \`KNOWLEDGE_VIOLATED:<trace_id>:<entry_id> reason=<reason>\` and re-plan.
 - NEVER silently ignore a \`priority: critical\` directive. The knowledge_application gate may run in 'enforce' mode; in that mode an omitted ack on a critical directive blocks the action for a bounded number of retries and time window (\`max_gate_denials\`, \`gate_staleness_ms\`), after which it auto-clears and logs the bypass — do not attempt out-of-band workarounds (editing .swarm/ state files, restarting sessions) to escape it; retry the ack with a correctly-terminated marker instead.
 
 Chat-text markers (KNOWLEDGE_APPLIED/IGNORED/CONTRADICTED/VIOLATED) are the sole mechanism that satisfies the knowledge-application enforcement gate. The \`knowledge_receipt\` tool records knowledge-usage receipts for audit but does NOT satisfy the gate.

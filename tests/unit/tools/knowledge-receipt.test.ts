@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { mkdirSync, rmSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -7,6 +7,7 @@ import {
 	type ReceiptEvent,
 	readKnowledgeEvents,
 } from '../../../src/hooks/knowledge-events';
+import { queryLiveMemberships } from '../../../src/hooks/knowledge-receipt-ledger.js';
 import {
 	readKnowledge,
 	resolveSwarmKnowledgePath,
@@ -60,6 +61,8 @@ describe('knowledge_receipt', () => {
 			type: 'retrieved',
 			trace_id: 'trace-xyz',
 			session_id: 'sess-1',
+			task_id: 'task-1',
+			phase: 'Phase 2',
 			agent: 'coder',
 			query: 'q',
 			retrieval_mode: 'auto_injection',
@@ -120,6 +123,22 @@ describe('knowledge_receipt', () => {
 
 		expect(byType.contradicted.knowledge_id).toBe('k-bad');
 		expect(byType.contradicted.reason).toContain('archive');
+
+		const authority = await queryLiveMemberships(dir, {
+			include_terminal: true,
+		});
+		if (!authority.ok) throw new Error(authority.detail);
+		const reasons = Object.fromEntries(
+			authority.memberships.map((membership) => [
+				membership.entry_id,
+				membership.terminal?.reason,
+			]),
+		);
+		expect(reasons).toEqual({
+			'k-applied': 'enforced the retry bound',
+			'k-ignored': 'stale: superseded by v2',
+			'k-bad': 'archive: current tests prove the opposite',
+		});
 	});
 
 	it('accepts a no_relevant_knowledge receipt and files one durable no_relevant terminal', async () => {
@@ -135,6 +154,37 @@ describe('knowledge_receipt', () => {
 		expect(parsed.event_ids).toHaveLength(1);
 		const events = await readKnowledgeEvents(dir);
 		expect(events.some((e) => e.type === 'no_relevant')).toBe(true);
+	});
+
+	it('threads configured receipt grace into an empty authoritative trace', async () => {
+		const configDir = join(dir, '.opencode');
+		mkdirSync(configDir, { recursive: true });
+		writeFileSync(
+			join(configDir, 'opencode-swarm.json'),
+			JSON.stringify({ knowledge: { receipt_close_grace_days: 0 } }),
+		);
+
+		const raw = await knowledge_receipt.execute(
+			{ trace_id: 'none', no_relevant_knowledge: true } as never,
+			ctx(dir),
+		);
+		expect(JSON.parse(raw).recorded).toBe(true);
+
+		const journal = readFileSync(
+			join(dir, '.swarm', 'knowledge-receipts-v2.jsonl'),
+			'utf8',
+		)
+			.trim()
+			.split('\n')
+			.map((line) => JSON.parse(line) as Record<string, unknown>);
+		const emptyCommit = journal.find(
+			(record) => record.kind === 'empty_retrieval_committed',
+		);
+		expect(emptyCommit).toBeDefined();
+		expect(
+			(emptyCommit?.payload as { trace: { grace_days: number } }).trace
+				.grace_days,
+		).toBe(0);
 	});
 
 	it('persists new_lessons through the knowledge_add path', async () => {

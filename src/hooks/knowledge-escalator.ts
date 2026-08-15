@@ -14,11 +14,14 @@
 
 import { existsSync } from 'node:fs';
 import {
-	countEntryContradictionsInWindow,
-	countEntryViolationsInWindow,
 	readKnowledgeEvents,
 	recordKnowledgeEvent,
 } from './knowledge-events.js';
+import {
+	queryHistoricalOutcomes,
+	type ReceiptMembership,
+	type ReceiptTerminal,
+} from './knowledge-receipt-ledger.js';
 import {
 	jaccardBigram,
 	readKnowledge,
@@ -60,9 +63,52 @@ function isFullyEscalated(e: KnowledgeEntryBase): boolean {
 	);
 }
 
+function terminalHistory(membership: ReceiptMembership): ReceiptTerminal[] {
+	const compatible = membership as ReceiptMembership & {
+		terminal_history?: ReceiptTerminal[];
+		historical_terminals?: ReceiptTerminal[];
+	};
+	return [
+		...(compatible.terminal_history ?? []),
+		...(compatible.historical_terminals ?? []),
+		...(membership.terminal ? [membership.terminal] : []),
+	];
+}
+
+function countTerminalOutcomesInWindow(
+	memberships: ReceiptMembership[],
+	entryIds: ReadonlySet<string>,
+	outcome: 'violated' | 'contradicted',
+	windowDays: number,
+	now: Date,
+): number {
+	const cutoff = now.getTime() - windowDays * 24 * 60 * 60 * 1000;
+	const upper = now.getTime();
+	const seenEvents = new Set<string>();
+	let count = 0;
+	for (const membership of memberships) {
+		if (!entryIds.has(membership.entry_id)) continue;
+		for (const terminal of terminalHistory(membership)) {
+			if (terminal.outcome !== outcome || seenEvents.has(terminal.event_id)) {
+				continue;
+			}
+			const timestamp = Date.parse(terminal.committed_at);
+			if (
+				!Number.isNaN(timestamp) &&
+				timestamp >= cutoff &&
+				timestamp <= upper
+			) {
+				seenEvents.add(terminal.event_id);
+				count += 1;
+			}
+		}
+	}
+	return count;
+}
+
 /**
  * Evaluate and (if warranted) apply a repeat-violation escalation to a single
- * entry. Call AFTER the triggering `violated` event has been persisted.
+ * entry. Call AFTER the triggering authoritative `violated` terminal commits.
  */
 export async function maybeEscalateOnViolation(
 	directory: string,
@@ -70,9 +116,12 @@ export async function maybeEscalateOnViolation(
 	now: Date = new Date(),
 ): Promise<EscalationResult> {
 	try {
-		let count = await countEntryViolationsInWindow(
-			directory,
-			entryId,
+		const history = await _internals.queryHistoricalOutcomes(directory);
+		if (!history.ok) return { escalated: false, entryId };
+		let count = countTerminalOutcomesInWindow(
+			history.memberships,
+			new Set([entryId]),
+			'violated',
 			ESCALATION_WINDOW_DAYS,
 			now,
 		);
@@ -95,27 +144,28 @@ export async function maybeEscalateOnViolation(
 				}
 				const target = allEntries.find((e) => e.id === entryId);
 				if (target) {
-					const seen = new Set<string>([entryId]);
+					const equivalentIds = new Set<string>([entryId]);
 					const targetBigrams = wordBigrams(target.lesson);
 					for (const e of allEntries) {
-						if (seen.has(e.id)) continue;
-						seen.add(e.id);
+						if (equivalentIds.has(e.id)) continue;
 						if (
 							jaccardBigram(targetBigrams, wordBigrams(e.lesson)) >=
 							NEAR_DUPLICATE_THRESHOLD
 						) {
-							count += await countEntryViolationsInWindow(
-								directory,
-								e.id,
-								ESCALATION_WINDOW_DAYS,
-								now,
-							);
-							if (count >= ESCALATION_THRESHOLD) break;
+							equivalentIds.add(e.id);
 						}
 					}
+					count = countTerminalOutcomesInWindow(
+						history.memberships,
+						equivalentIds,
+						'violated',
+						ESCALATION_WINDOW_DAYS,
+						now,
+					);
 				}
 			} catch {
-				// fail-open: near-dup co-counting is best-effort
+				// Conservative: exact authoritative evidence can still decide, but
+				// near-duplicate discovery never invents additional credit.
 			}
 		}
 
@@ -294,10 +344,9 @@ export interface ContradictionQuarantineResult {
 /**
  * G3 (#1715): if an entry's `contradicted` count within `windowDays` crosses
  * `threshold`, auto-quarantine it. Mirrors {@link maybeEscalateOnViolation}
- * (counts from the RAW event log via {@link countEntryContradictionsInWindow}
- * — NOT the rollup cache, which is mtime-keyed and can be stale immediately
- * after an append). Idempotent: already-quarantined/archived entries are
- * skipped. Never throws.
+ * Counts exact authoritative receipt terminals, never the diagnostic FIFO or
+ * rollup cache. Idempotent: already-quarantined/archived entries are skipped.
+ * Receipt-ledger uncertainty is conservative and never quarantines.
  */
 export async function maybeQuarantineOnContradiction(
 	directory: string,
@@ -307,9 +356,14 @@ export async function maybeQuarantineOnContradiction(
 	now: Date = new Date(),
 ): Promise<ContradictionQuarantineResult> {
 	try {
-		const count = await countEntryContradictionsInWindow(
-			directory,
+		const history = await _internals.queryHistoricalOutcomes(directory, [
 			entryId,
+		]);
+		if (!history.ok) return { quarantined: false, entryId };
+		const count = countTerminalOutcomesInWindow(
+			history.memberships,
+			new Set([entryId]),
+			'contradicted',
 			windowDays,
 			now,
 		);
@@ -374,3 +428,6 @@ export async function maybeQuarantineOnContradiction(
 		return { quarantined: false, entryId };
 	}
 }
+
+/** Dependency seam for authoritative-history tests; restore after each test. */
+export const _internals = { queryHistoricalOutcomes };

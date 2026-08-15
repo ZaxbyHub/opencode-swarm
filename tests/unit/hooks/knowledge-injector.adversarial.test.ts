@@ -28,16 +28,12 @@ import type {
 	KnowledgeConfig,
 	MessageWithParts,
 } from '../../../src/hooks/knowledge-types.js';
-// (#1849) Identity is recovered from swarmState.activeAgent (primary) or the
-// last user message's info.agent (fallback) — never from a role:'system'
-// message. Fixtures set swarmState.activeAgent and stamp a consistent
-// sessionID on every message.
 import { swarmState } from '../../../src/state';
+import { installKnowledgeReceiptAuthorityStub } from '../../helpers/knowledge-receipt-authority.js';
 
 const SESSION_ID = 'adv-session';
 
 // ============================================================================
-// MOCK CONVERSION NOTES
 // ============================================================================
 // These tests use mock.module() for cross-module mocks because the source
 // modules (knowledge-reader, knowledge-store, plan/manager, extractors,
@@ -316,8 +312,11 @@ const realRecordKnowledgeEvent = injectorInternals.recordKnowledgeEvent;
 const realRecordKnowledgeShown = injectorInternals.recordKnowledgeShown;
 const mockRecordKnowledgeEvent = mock(async () => {});
 const mockRecordKnowledgeShown = mock(async () => {});
+let restoreReceiptAuthority = () => {};
 
 beforeEach(() => {
+	restoreReceiptAuthority =
+		installKnowledgeReceiptAuthorityStub(injectorInternals);
 	injectorInternals.recordKnowledgeEvent =
 		mockRecordKnowledgeEvent as typeof realRecordKnowledgeEvent;
 	injectorInternals.recordKnowledgeShown =
@@ -325,6 +324,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	restoreReceiptAuthority();
 	injectorInternals.recordKnowledgeEvent = realRecordKnowledgeEvent;
 	injectorInternals.recordKnowledgeShown = realRecordKnowledgeShown;
 	swarmState.activeAgent.clear();

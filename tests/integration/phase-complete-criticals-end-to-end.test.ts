@@ -8,67 +8,25 @@
  * gate does not block on directive grounds).
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { readKnowledgeEvents } from '../../src/hooks/knowledge-events.js';
-import { executePhaseComplete } from '../../src/tools/phase-complete.js';
+import {
+	commitDisplayedMembership,
+	validateAndCommitTerminalBatch,
+} from '../../src/hooks/knowledge-receipt-ledger.js';
+import {
+	executePhaseComplete,
+	phaseCompleteReceiptInternals,
+} from '../../src/tools/phase-complete.js';
+import {
+	createConfig,
+	writeGateEvidence,
+	writeRetroBundle,
+} from '../unit/tools/_phase-complete-test-helpers.js';
 
 const PHASE = 'Phase 2';
-
-function entryLine(id: string, priority: string): string {
-	return JSON.stringify({
-		id,
-		tier: 'swarm',
-		lesson: `lesson ${id}`,
-		category: 'process',
-		tags: [],
-		scope: 'global',
-		confidence: 0.9,
-		status: 'established',
-		confirmed_by: [],
-		retrieval_outcomes: {
-			applied_count: 0,
-			succeeded_after_count: 0,
-			failed_after_count: 0,
-		},
-		schema_version: 2,
-		created_at: '2026-01-01T00:00:00.000Z',
-		updated_at: '2026-01-01T00:00:00.000Z',
-		project_name: 'test',
-		directive_priority: priority,
-	});
-}
-
-function retrievedLine(ids: string[]): string {
-	return JSON.stringify({
-		type: 'retrieved',
-		event_id: 'r-1',
-		trace_id: 't',
-		timestamp: '2026-02-01T00:00:00.000Z',
-		session_id: 's',
-		phase: PHASE,
-		agent: 'coder',
-		query: 'q',
-		retrieval_mode: 'delegate_inject',
-		result_ids: ids,
-		ranks: {},
-		scores: {},
-	});
-}
-
-function violatedLine(id: string): string {
-	return JSON.stringify({
-		type: 'violated',
-		event_id: `v-${id}`,
-		trace_id: 't',
-		knowledge_id: id,
-		timestamp: '2026-02-01T00:02:00.000Z',
-		session_id: 's',
-		agent: 'coder',
-		reason: 'introduced forbidden pattern',
-	});
-}
 
 function createRelativeTempDir(): string {
 	const baseDir = 'tmp';
@@ -76,14 +34,34 @@ function createRelativeTempDir(): string {
 	return fs.mkdtempSync(path.join(baseDir, 'pc-e2e-'));
 }
 
-function seed(dir: string, entries: string[], events: string[]): void {
-	const swarmDir = path.join(dir, '.swarm');
-	fs.mkdirSync(swarmDir, { recursive: true });
-	fs.writeFileSync(path.join(swarmDir, 'knowledge.jsonl'), entries.join('\n'));
-	fs.writeFileSync(
-		path.join(swarmDir, 'knowledge-events.jsonl'),
-		`${events.join('\n')}\n`,
-	);
+async function seed(
+	dir: string,
+	entryId: string,
+	critical: boolean,
+	violated = false,
+): Promise<void> {
+	fs.writeFileSync(path.join(dir, '.git'), 'gitdir: fixture');
+	const displayed = await commitDisplayedMembership(dir, {
+		trace_id: 'trace-e2e',
+		session_id: 'sess-e2e',
+		phase: PHASE,
+		entries: [{ entry_id: entryId, critical }],
+	});
+	if (!displayed.ok) throw new Error(displayed.detail);
+	if (violated) {
+		const terminal = await validateAndCommitTerminalBatch(dir, {
+			trace_id: 'trace-e2e',
+			session_id: 'sess-e2e',
+			items: [
+				{
+					entry_id: entryId,
+					outcome: 'violated',
+					reason: 'introduced forbidden pattern',
+				},
+			],
+		});
+		if (!terminal.ok) throw new Error(terminal.detail);
+	}
 }
 
 describe('phase_complete critical-directive gate (e2e)', () => {
@@ -98,11 +76,7 @@ describe('phase_complete critical-directive gate (e2e)', () => {
 	});
 
 	it('BLOCKS the phase when a critical directive has an unremediated violation', async () => {
-		seed(
-			dir,
-			[entryLine('c1', 'critical')],
-			[retrievedLine(['c1']), violatedLine('c1')],
-		);
+		await seed(dir, 'c1', true, true);
 		const out = await executePhaseComplete(
 			{ phase: 2, sessionID: 'sess-e2e', callerAgent: 'architect' },
 			dir,
@@ -116,11 +90,7 @@ describe('phase_complete critical-directive gate (e2e)', () => {
 	});
 
 	it('rejects an override without a justification', async () => {
-		seed(
-			dir,
-			[entryLine('c1', 'critical')],
-			[retrievedLine(['c1']), violatedLine('c1')],
-		);
+		await seed(dir, 'c1', true, true);
 		const out = await executePhaseComplete(
 			{
 				phase: 2,
@@ -136,11 +106,7 @@ describe('phase_complete critical-directive gate (e2e)', () => {
 	});
 
 	it('honors an architect override (with justification): logs an override event and clears the directive block', async () => {
-		seed(
-			dir,
-			[entryLine('c1', 'critical')],
-			[retrievedLine(['c1']), violatedLine('c1')],
-		);
+		await seed(dir, 'c1', true, true);
 		const out = await executePhaseComplete(
 			{
 				phase: 2,
@@ -170,7 +136,7 @@ describe('phase_complete critical-directive gate (e2e)', () => {
 	});
 
 	it('does not block on directive grounds when there are no critical directives', async () => {
-		seed(dir, [entryLine('h1', 'high')], [retrievedLine(['h1'])]);
+		await seed(dir, 'h1', false);
 		const out = await executePhaseComplete(
 			{ phase: 2, sessionID: 'sess-e2e', callerAgent: 'architect' },
 			dir,
@@ -179,5 +145,92 @@ describe('phase_complete critical-directive gate (e2e)', () => {
 		const parsed = JSON.parse(out);
 		expect(parsed.reason).not.toBe('unresolved_critical_directives');
 		expect(parsed.reason).not.toBe('directive_gate_failed_closed');
+	});
+
+	it('uses one canonical phase label and closes receipts only after durable plan completion', async () => {
+		fs.writeFileSync(path.join(dir, '.git'), 'gitdir: fixture');
+		fs.mkdirSync(path.join(dir, '.opencode'), { recursive: true });
+		fs.writeFileSync(
+			path.join(dir, '.opencode', 'opencode-swarm.json'),
+			createConfig(),
+		);
+		fs.mkdirSync(path.join(dir, '.swarm'), { recursive: true });
+		fs.writeFileSync(
+			path.join(dir, '.swarm', 'plan.json'),
+			JSON.stringify({
+				title: 'Lifecycle plan',
+				swarm: 'default',
+				schema_version: '1.0.0',
+				current_phase: 2,
+				phases: [
+					{
+						id: 2,
+						name: 'Canonical lifecycle',
+						status: 'in_progress',
+						tasks: [
+							{
+								id: '2.1',
+								phase: 2,
+								status: 'completed',
+								size: 'small',
+								description: 'Completed lifecycle work',
+								depends: [],
+								files_touched: [],
+							},
+						],
+					},
+				],
+			}),
+		);
+		writeRetroBundle(dir, 2);
+		writeGateEvidence(dir, 2);
+
+		const originalIntent = phaseCompleteReceiptInternals.recordPhaseCloseIntent;
+		const originalClosed = phaseCompleteReceiptInternals.commitPhaseClosed;
+		const calls: Array<{ kind: string; label: string; status: string }> = [];
+		phaseCompleteReceiptInternals.recordPhaseCloseIntent = mock(
+			async (_directory, label) => {
+				const plan = JSON.parse(
+					fs.readFileSync(path.join(dir, '.swarm', 'plan.json'), 'utf8'),
+				);
+				calls.push({ kind: 'intent', label, status: plan.phases[0].status });
+				return { ok: true, event_id: 'intent-event' };
+			},
+		) as typeof originalIntent;
+		phaseCompleteReceiptInternals.commitPhaseClosed = mock(
+			async (_directory, label) => {
+				const plan = JSON.parse(
+					fs.readFileSync(path.join(dir, '.swarm', 'plan.json'), 'utf8'),
+				);
+				calls.push({ kind: 'closed', label, status: plan.phases[0].status });
+				return { ok: true, event_id: 'closed-event' };
+			},
+		) as typeof originalClosed;
+
+		try {
+			const output = JSON.parse(
+				await executePhaseComplete(
+					{ phase: 2, sessionID: 'sess-lifecycle', callerAgent: 'architect' },
+					dir,
+					dir,
+				),
+			);
+			expect(output.success).toBe(true);
+			expect(calls).toEqual([
+				{
+					kind: 'intent',
+					label: 'Phase 2: Canonical lifecycle [IN PROGRESS]',
+					status: 'in_progress',
+				},
+				{
+					kind: 'closed',
+					label: 'Phase 2: Canonical lifecycle [IN PROGRESS]',
+					status: 'complete',
+				},
+			]);
+		} finally {
+			phaseCompleteReceiptInternals.recordPhaseCloseIntent = originalIntent;
+			phaseCompleteReceiptInternals.commitPhaseClosed = originalClosed;
+		}
 	});
 });
