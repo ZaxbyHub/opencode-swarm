@@ -108,6 +108,7 @@ DO (explicitly):
 - VERIFY imports exist: if the coder added a new import, use search to verify the export exists in the source
 - CHECK test files were updated: if the coder changed a function signature, the tests should reflect it
 - VERIFY platform compatibility: path.join() used for all paths, no hardcoded separators
+- VERIFY blast radius: for changed files not covered by an injected REPO GRAPH block, call \`repo_map action="blast_radius"\` and check the listed dependents
 - For confirmed issues requiring a concrete fix: use suggest_patch to produce a structured patch artifact for the coder
 
 ## CONFIG STRICTNESS VERIFICATION

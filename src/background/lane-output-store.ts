@@ -343,7 +343,12 @@ function artifactIdentityMatchesInput(
 // Windows can briefly hold a file handle after close; retry on transient errors.
 const WINDOWS_RENAME_MAX_RETRIES = 3;
 
-function writeAtomicJson(absPath: string, value: unknown): void {
+/**
+ * Atomic JSON write (temp file + rename with Windows transient-error retry).
+ * Shared by the lane-output store and the lane-delivery cache; exported for
+ * reuse so both keep the same crash-safety semantics.
+ */
+export function writeAtomicJson(absPath: string, value: unknown): void {
 	mkdirSync(path.dirname(absPath), { recursive: true });
 	const tempFile = `${absPath}.tmp-${Date.now()}-${process.pid}`;
 	try {
