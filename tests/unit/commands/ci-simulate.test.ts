@@ -465,9 +465,11 @@ describe('handleCiSimulateCommand with a symlinked/junctioned tmpdir (realpathSy
 		// *resolves to* realBaseParent but is textually a completely different
 		// path — exactly the shape of macOS's /var -> /private/var, or a
 		// Windows temp dir mounted through a junction.
-		realBaseParent = fs.mkdtempSync(path.join(os.tmpdir(), 'ci-sim-realbase-'));
+		realBaseParent = fs.realpathSync(
+			fs.mkdtempSync(path.join(os.tmpdir(), 'ci-sim-realbase-')),
+		);
 		junctionDir = path.join(
-			os.tmpdir(),
+			fs.realpathSync(os.tmpdir()),
 			`ci-sim-junction-${process.hrtime.bigint()}`,
 		);
 
