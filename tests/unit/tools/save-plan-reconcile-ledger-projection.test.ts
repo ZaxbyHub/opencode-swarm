@@ -22,6 +22,7 @@ import {
 	isPureLedgerProjectionReconcileRequest,
 	type SavePlanArgs,
 } from '../../../src/tools/save-plan';
+import { canonicalTmpDir } from '../../helpers/tmpdir.js';
 
 function makePlan(taskStatus: Plan['phases'][0]['tasks'][0]['status']): Plan {
 	return {
@@ -220,7 +221,7 @@ function makeArgs(dir: string, description = 'Task one'): SavePlanArgs {
 let tmpDir: string;
 
 beforeEach(async () => {
-	tmpDir = await mkdtemp(join(tmpdir(), 'save-plan-reconcile-'));
+	tmpDir = await mkdtemp(join(canonicalTmpDir(), 'save-plan-reconcile-'));
 	resetStartupLedgerCheck();
 	await mkdir(join(tmpDir, '.swarm'), { recursive: true });
 	await writeFile(join(tmpDir, '.swarm', 'spec.md'), '# Spec\n', 'utf8');

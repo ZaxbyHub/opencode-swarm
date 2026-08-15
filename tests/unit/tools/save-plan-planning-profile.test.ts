@@ -16,6 +16,7 @@ import {
 	executeSavePlan,
 	type SavePlanArgs,
 } from '../../../src/tools/save-plan';
+import { canonicalTmpDir } from '../../helpers/tmpdir.js';
 
 function makeArgs(overrides?: Partial<SavePlanArgs>): SavePlanArgs {
 	return {
@@ -79,7 +80,7 @@ describe('save_plan planning_profile', () => {
 	let directory: string;
 
 	beforeEach(async () => {
-		directory = await mkdtemp(join(tmpdir(), 'save-plan-profile-'));
+		directory = await mkdtemp(join(canonicalTmpDir(), 'save-plan-profile-'));
 		await mkdir(join(directory, '.swarm'), { recursive: true });
 		await writeFile(join(directory, '.swarm', 'spec.md'), '# Spec\n');
 		process.env.SWARM_SKIP_SPEC_GATE = '1';

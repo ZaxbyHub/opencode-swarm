@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { canonicalTmpDir } from '../../tests/helpers/tmpdir.js';
 import type { PluginConfig } from '../config';
 import {
 	getTaskWorkflowSnapshot,
@@ -24,7 +25,7 @@ let tmpDir: string;
 
 beforeEach(() => {
 	resetSwarmState();
-	tmpDir = mkdtempSync(path.join(os.tmpdir(), 'dg-seed-state-'));
+	tmpDir = mkdtempSync(path.join(canonicalTmpDir(), 'dg-seed-state-'));
 });
 
 afterEach(() => {

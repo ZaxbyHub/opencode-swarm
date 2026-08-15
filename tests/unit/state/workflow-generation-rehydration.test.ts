@@ -8,6 +8,7 @@ import {
 	rehydrateSessionFromDisk,
 	resetSwarmState,
 } from '../../../src/state';
+import { canonicalTmpDir } from '../../helpers/tmpdir.js';
 
 function writePlan(
 	directory: string,
@@ -47,7 +48,7 @@ describe('state rehydration workflow generations', () => {
 
 	beforeEach(() => {
 		resetSwarmState();
-		tempDir = mkdtempSync(path.join(os.tmpdir(), 'state-rehydrate-gen-'));
+		tempDir = mkdtempSync(path.join(canonicalTmpDir(), 'state-rehydrate-gen-'));
 	});
 
 	afterEach(() => {

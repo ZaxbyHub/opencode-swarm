@@ -17,6 +17,7 @@ import {
 	executeSavePlan,
 	type SavePlanArgs,
 } from '../../../src/tools/save-plan';
+import { canonicalTmpDir } from '../../helpers/tmpdir.js';
 
 function makePlan(status: 'pending' | 'completed'): Plan {
 	return {
@@ -126,7 +127,7 @@ describe('reconcile_ledger_projection raw-byte durability', () => {
 	let tmpDir: string;
 
 	beforeEach(async () => {
-		tmpDir = await mkdtemp(join(tmpdir(), 'save-plan-raw-reconcile-'));
+		tmpDir = await mkdtemp(join(canonicalTmpDir(), 'save-plan-raw-reconcile-'));
 		await mkdir(join(tmpDir, '.swarm'), { recursive: true });
 		await writeFile(join(tmpDir, '.swarm', 'spec.md'), '# Spec\n', 'utf8');
 		process.env.SWARM_SKIP_SPEC_GATE = '1';

@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readEffectiveSpecSync } from '../../../src/sdd/effective-spec';
 import { spec_write } from '../../../src/tools/spec-write';
+import { canonicalTmpDir } from '../../helpers/tmpdir.js';
 
 function buildPlan(specHash: string) {
 	return {
@@ -23,7 +24,7 @@ describe('spec_write spec drift recovery', () => {
 	let tempDir: string;
 
 	beforeEach(async () => {
-		tempDir = join(tmpdir(), `spec-write-recovery-${randomUUID()}`);
+		tempDir = join(canonicalTmpDir(), `spec-write-recovery-${randomUUID()}`);
 		await mkdir(join(tempDir, '.swarm'), { recursive: true });
 	});
 

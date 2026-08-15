@@ -11,6 +11,7 @@ import {
 	resetSwarmState,
 	swarmState,
 } from '../../../src/state';
+import { canonicalTmpDir } from '../../helpers/tmpdir.js';
 
 const TEST_TIME = 1_700_000_000_000;
 
@@ -19,7 +20,9 @@ describe('snapshot workflow marker', () => {
 
 	beforeEach(() => {
 		resetSwarmState();
-		tempDir = mkdtempSync(path.join(os.tmpdir(), 'snapshot-workflow-marker-'));
+		tempDir = mkdtempSync(
+			path.join(canonicalTmpDir(), 'snapshot-workflow-marker-'),
+		);
 	});
 
 	afterEach(() => {

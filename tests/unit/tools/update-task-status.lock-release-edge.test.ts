@@ -7,6 +7,7 @@ import {
 	_internals,
 	executeUpdateTaskStatus,
 } from '../../../src/tools/update-task-status';
+import { canonicalTmpDir } from '../../helpers/tmpdir.js';
 import { readPlanWithTaskStatus } from '../../helpers/update-task-status-fixtures';
 
 describe('executeUpdateTaskStatus guaranteed lock release', () => {
@@ -19,7 +20,7 @@ describe('executeUpdateTaskStatus guaranteed lock release', () => {
 
 	beforeEach(() => {
 		tempDir = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'update-task-lock-release-')),
+			fs.mkdtempSync(path.join(canonicalTmpDir(), 'update-task-lock-release-')),
 		);
 		fs.mkdirSync(path.join(tempDir, '.swarm'), { recursive: true });
 		fs.writeFileSync(

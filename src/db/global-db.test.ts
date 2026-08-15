@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { canonicalTmpDir } from '../../tests/helpers/tmpdir.js';
 import {
 	closeGlobalDb,
 	getGlobalDb,
@@ -23,7 +24,7 @@ let origHome: string | undefined;
 
 beforeEach(() => {
 	tempDir = fs.realpathSync(
-		fs.mkdtempSync(path.join(os.tmpdir(), 'global-db-test-')),
+		fs.mkdtempSync(path.join(canonicalTmpDir(), 'global-db-test-')),
 	);
 	origXdg = process.env.XDG_CONFIG_HOME;
 	origLocalAppData = process.env.LOCALAPPDATA;

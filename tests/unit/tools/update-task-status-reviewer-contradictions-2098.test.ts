@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { checkReviewerGate } from '../../../src/tools/update-task-status';
+import { canonicalTmpDir } from '../../helpers/tmpdir.js';
 
 describe('issue #2098 reviewer decision contradictions', () => {
 	let directory: string | undefined;
@@ -14,7 +15,9 @@ describe('issue #2098 reviewer decision contradictions', () => {
 
 	test('fails closed when workflow claims tests_run but Stage A proof is absent', () => {
 		directory = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'reviewer-contradiction-2098-')),
+			fs.mkdtempSync(
+				path.join(canonicalTmpDir(), 'reviewer-contradiction-2098-'),
+			),
 		);
 		const evidenceDirectory = path.join(directory, '.swarm', 'evidence');
 		fs.mkdirSync(evidenceDirectory, { recursive: true });
@@ -64,7 +67,7 @@ describe('issue #2098 reviewer decision contradictions', () => {
 
 	test('fails closed when evidence filename and payload task identities differ', () => {
 		directory = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'reviewer-identity-2098-')),
+			fs.mkdtempSync(path.join(canonicalTmpDir(), 'reviewer-identity-2098-')),
 		);
 		const evidenceDirectory = path.join(directory, '.swarm', 'evidence');
 		fs.mkdirSync(evidenceDirectory, { recursive: true });

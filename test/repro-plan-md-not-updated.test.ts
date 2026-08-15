@@ -37,6 +37,7 @@ import {
 	startAgentSession,
 	swarmState,
 } from '../src/state';
+import { canonicalTmpDir } from '../tests/helpers/tmpdir.js';
 
 let TEST_BASE_DIR: string;
 const SWARM_ID = 'repro-swarm';
@@ -97,7 +98,7 @@ function cleanup() {
 
 beforeEach(() => {
 	resetSwarmState();
-	TEST_BASE_DIR = mkdtempSync(path.join(tmpdir(), 'repro-plan-md-'));
+	TEST_BASE_DIR = mkdtempSync(path.join(canonicalTmpDir(), 'repro-plan-md-'));
 });
 
 afterEach(() => {

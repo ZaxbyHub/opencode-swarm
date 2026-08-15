@@ -10,6 +10,7 @@ import {
 	_internals as statusInternals,
 } from '../../../src/tools/update-task-status';
 import { _internals as terminalInternals } from '../../../src/workflow/task-terminal';
+import { canonicalTmpDir } from '../../helpers/tmpdir.js';
 
 function seedReadyTask(directory: string): void {
 	fs.mkdirSync(path.join(directory, '.swarm', 'evidence'), { recursive: true });
@@ -84,7 +85,7 @@ describe('issue #2098 terminal status WAL', () => {
 	beforeEach(() => {
 		resetSwarmState();
 		directory = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'task-terminal-wal-2098-')),
+			fs.mkdtempSync(path.join(canonicalTmpDir(), 'task-terminal-wal-2098-')),
 		);
 		seedReadyTask(directory);
 		originalApply = terminalInternals.applyTerminalEvidence;

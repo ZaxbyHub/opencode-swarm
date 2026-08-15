@@ -7,6 +7,7 @@ import type { ExecutionProfile, Plan } from '../../../src/config/plan-schema';
 import { createSystemEnhancerHook } from '../../../src/hooks/system-enhancer';
 import { resetStartupLedgerCheck } from '../../../src/plan/manager';
 import { resetSwarmState, swarmState } from '../../../src/state';
+import { canonicalTmpDir } from '../../helpers/tmpdir.js';
 
 function executionProfile(
 	planningProfile?: 'balanced' | 'strict',
@@ -73,7 +74,9 @@ describe('system-enhancer planning-profile runtime injection', () => {
 	let directory: string;
 
 	beforeEach(async () => {
-		directory = await mkdtemp(join(tmpdir(), 'planning-profile-prompt-'));
+		directory = await mkdtemp(
+			join(canonicalTmpDir(), 'planning-profile-prompt-'),
+		);
 		resetSwarmState();
 		resetStartupLedgerCheck();
 		await mkdir(join(directory, '.swarm'), { recursive: true });

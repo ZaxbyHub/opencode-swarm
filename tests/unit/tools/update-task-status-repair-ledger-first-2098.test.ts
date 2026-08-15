@@ -7,6 +7,7 @@ import {
 	_internals,
 	executeUpdateTaskStatus,
 } from '../../../src/tools/update-task-status';
+import { canonicalTmpDir } from '../../helpers/tmpdir.js';
 
 describe('issue #2098 repair WAL ledger-first recovery', () => {
 	let directory: string | undefined;
@@ -18,7 +19,7 @@ describe('issue #2098 repair WAL ledger-first recovery', () => {
 
 	test('replays ledger directly after startup replay was already consumed', async () => {
 		directory = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'repair-ledger-first-2098-')),
+			fs.mkdtempSync(path.join(canonicalTmpDir(), 'repair-ledger-first-2098-')),
 		);
 		fs.mkdirSync(path.join(directory, '.swarm', 'evidence'), {
 			recursive: true,

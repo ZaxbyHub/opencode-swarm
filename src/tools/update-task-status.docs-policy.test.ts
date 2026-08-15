@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { canonicalTmpDir } from '../../tests/helpers/tmpdir.js';
 import { recordGateEvidence } from '../gate-evidence';
 import { resetSwarmState } from '../state';
 import { executeUpdateTaskStatus } from './update-task-status';
@@ -11,7 +12,9 @@ describe('update_task_status docs phase policy', () => {
 
 	beforeEach(() => {
 		resetSwarmState();
-		tempDir = mkdtempSync(path.join(os.tmpdir(), 'update-task-docs-policy-'));
+		tempDir = mkdtempSync(
+			path.join(canonicalTmpDir(), 'update-task-docs-policy-'),
+		);
 		mkdirSync(path.join(tempDir, '.git'), { recursive: true });
 		mkdirSync(path.join(tempDir, '.swarm'), { recursive: true });
 	});

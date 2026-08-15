@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'bun:test';
 import { EventEmitter } from 'node:events';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
+import { canonicalTmpDir } from '../../tests/helpers/tmpdir.js';
 import { _internals, spawnAsync } from './spawn-helper';
 
 const bunEval = (source: string, ...args: string[]): string[] => [
@@ -204,7 +205,7 @@ describe('spawn-helper', () => {
 		// Test A6: Non-existent cwd — should resolve null with ENOENT
 		it('resolves null when cwd does not exist', async () => {
 			const fakeCwd = path.join(
-				tmpdir(),
+				canonicalTmpDir(),
 				'nonexistent-spawn-helper-path-xyz123',
 			);
 			const result = await spawnAsync(

@@ -3,13 +3,16 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { canRunWhileTaskAwaitsCompletion } from '../../../src/hooks/delegation-gate';
+import { canonicalTmpDir } from '../../helpers/tmpdir.js';
 
 describe('issue #2098 completion recovery capabilities', () => {
 	let directory: string;
 
 	beforeEach(() => {
 		directory = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'completion-capabilities-2098-')),
+			fs.mkdtempSync(
+				path.join(canonicalTmpDir(), 'completion-capabilities-2098-'),
+			),
 		);
 		fs.mkdirSync(path.join(directory, '.swarm'), { recursive: true });
 		fs.writeFileSync(

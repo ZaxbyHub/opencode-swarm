@@ -21,6 +21,7 @@ import {
 } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { canonicalTmpDir } from '../../tests/helpers/tmpdir.js';
 import { readTaskEvidence } from '../gate-evidence';
 import {
 	ensureAgentSession,
@@ -759,7 +760,7 @@ describe('ADVERSARIAL: getEvidenceTaskId plan.json fallback security', () => {
 		it.skipIf(process.platform === 'win32')(
 			'handles plan.json as symlink to external file',
 			async () => {
-				const externalDir = path.join(os.tmpdir(), `dg-external-${Date.now()}`);
+				const externalDir = path.join(canonicalTmpDir(), `dg-${Date.now()}`);
 				mkdirSync(externalDir, { recursive: true });
 				writeFileSync(
 					path.join(externalDir, 'plan.json'),

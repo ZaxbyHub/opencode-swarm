@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { canonicalTmpDir } from '../../tests/helpers/tmpdir.js';
 import { ensureAgentSession, resetSwarmState } from '../state';
 import { _internals } from './delegation-gate';
 
@@ -15,7 +16,7 @@ let tmpDir: string;
 
 beforeEach(() => {
 	resetSwarmState();
-	tmpDir = mkdtempSync(path.join(os.tmpdir(), 'dg-resolve-test-'));
+	tmpDir = mkdtempSync(path.join(canonicalTmpDir(), 'dg-resolve-test-'));
 	mkdirSync(path.join(tmpDir, '.swarm'), { recursive: true });
 });
 

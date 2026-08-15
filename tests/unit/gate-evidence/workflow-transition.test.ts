@@ -7,12 +7,13 @@ import {
 	transitionTaskWorkflowEvidence,
 	withTaskEvidenceTransaction,
 } from '../../../src/gate-evidence';
+import { canonicalTmpDir } from '../../helpers/tmpdir.js';
 
 describe('gate-evidence workflow transitions', () => {
 	let tempDir: string;
 
 	beforeEach(() => {
-		tempDir = mkdtempSync(path.join(os.tmpdir(), 'workflow-evidence-'));
+		tempDir = mkdtempSync(path.join(canonicalTmpDir(), 'workflow-evidence-'));
 	});
 
 	afterEach(() => {

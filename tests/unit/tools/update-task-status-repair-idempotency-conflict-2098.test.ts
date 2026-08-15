@@ -7,6 +7,7 @@ import { resetStartupLedgerCheck } from '../../../src/plan/manager';
 import { resetSwarmState } from '../../../src/state';
 import { executeUpdateTaskStatus } from '../../../src/tools/update-task-status';
 import { resetSwarmArtifactCache } from '../../../src/utils/swarm-artifact-cache';
+import { canonicalTmpDir } from '../../helpers/tmpdir.js';
 
 const TASK_ID = '1.1';
 const REPAIR_ARGS = {
@@ -124,7 +125,7 @@ describe('issue #2098 repair transition payload immutability', () => {
 		resetSwarmArtifactCache();
 		resetSwarmState();
 		directory = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'repair-idempotency-2098-')),
+			fs.mkdtempSync(path.join(canonicalTmpDir(), 'repair-idempotency-2098-')),
 		);
 		seedSettledRepairState(directory);
 	});

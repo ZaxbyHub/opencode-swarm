@@ -8,6 +8,7 @@ import {
 	recordPendingDelegation,
 } from '../../../src/background/pending-delegations';
 import { resetSwarmState } from '../../../src/state';
+import { canonicalTmpDir } from '../../helpers/tmpdir.js';
 
 function syntheticPartEvent(opts: {
 	text: string;
@@ -38,7 +39,7 @@ describe('background completion observer trust boundary', () => {
 	beforeEach(() => {
 		resetSwarmState();
 		directory = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'swarm-bgobs-trust-')),
+			fs.mkdtempSync(path.join(canonicalTmpDir(), 'swarm-bgobs-trust-')),
 		);
 		fs.mkdirSync(path.join(directory, '.swarm'), { recursive: true });
 	});

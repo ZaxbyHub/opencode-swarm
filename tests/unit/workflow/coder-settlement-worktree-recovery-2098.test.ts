@@ -28,6 +28,7 @@ import {
 	settleCoderDispatch,
 } from '../../../src/workflow/coder-settlement';
 import type { MergeOperationProvenance } from '../../../src/worktree/merge';
+import { canonicalTmpDir } from '../../helpers/tmpdir.js';
 
 const TASK_ID = '1.1';
 
@@ -61,7 +62,7 @@ function createFixture(
 	canonicalDirectoryScope = false,
 ): Fixture {
 	const root = fs.realpathSync(
-		fs.mkdtempSync(path.join(os.tmpdir(), `coder-wt-recovery-${label}-`)),
+		fs.mkdtempSync(path.join(canonicalTmpDir(), `coder-wt-recovery-${label}-`)),
 	);
 	const repo = path.join(root, 'repo');
 	const worktree = path.join(root, 'lane');

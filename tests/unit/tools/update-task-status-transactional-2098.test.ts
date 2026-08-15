@@ -13,6 +13,7 @@ import {
 	_internals,
 	executeUpdateTaskStatus,
 } from '../../../src/tools/update-task-status';
+import { canonicalTmpDir } from '../../helpers/tmpdir.js';
 
 function planFixture() {
 	return {
@@ -120,7 +121,7 @@ describe('issue #2098 transactional update_task_status', () => {
 	beforeEach(() => {
 		resetSwarmState();
 		directory = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'uts-transactional-2098-')),
+			fs.mkdtempSync(path.join(canonicalTmpDir(), 'uts-transactional-2098-')),
 		);
 		fs.mkdirSync(path.join(directory, '.swarm'), { recursive: true });
 		fs.writeFileSync(

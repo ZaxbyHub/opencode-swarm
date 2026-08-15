@@ -6,6 +6,7 @@ import type { PluginConfig } from '../../../src/config';
 import type { Plan } from '../../../src/config/plan-schema';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
 import { resetSwarmState } from '../../../src/state';
+import { canonicalTmpDir } from '../../helpers/tmpdir.js';
 import { recordPlanCriticApproval } from './_delegation-gate-helpers';
 
 const config = {
@@ -64,7 +65,9 @@ describe('issue #2098 exact completion capability selection', () => {
 	beforeEach(async () => {
 		resetSwarmState();
 		directory = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'completion-exact-task-2098-')),
+			fs.mkdtempSync(
+				path.join(canonicalTmpDir(), 'completion-exact-task-2098-'),
+			),
 		);
 		fs.mkdirSync(path.join(directory, '.swarm', 'evidence'), {
 			recursive: true,

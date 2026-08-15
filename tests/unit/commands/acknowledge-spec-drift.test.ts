@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { handleAcknowledgeSpecDriftCommand } from '../../../src/commands/acknowledge-spec-drift';
 import { readEffectiveSpecSync } from '../../../src/sdd/effective-spec';
+import { canonicalTmpDir } from '../../helpers/tmpdir.js';
 
 function buildPlan(specHash?: string) {
 	return {
@@ -39,7 +40,7 @@ describe('handleAcknowledgeSpecDriftCommand', () => {
 	let tempDir: string;
 
 	beforeEach(async () => {
-		tempDir = join(tmpdir(), `ack-spec-drift-${randomUUID()}`);
+		tempDir = join(canonicalTmpDir(), `ack-spec-drift-${randomUUID()}`);
 		await mkdir(join(tempDir, '.swarm'), { recursive: true });
 	});
 
