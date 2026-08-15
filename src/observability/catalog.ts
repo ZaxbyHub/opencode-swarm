@@ -790,7 +790,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			// Optional trace/entry/session/task/phase IDs are pseudonymous. There
 			// is no prose, path, or non-transient circuit state in the payload.
 			privacyClass: 'pseudonymous',
-			producer: 'src/hooks/knowledge-receipt-observability.ts:194',
+			producer: 'src/hooks/knowledge-receipt-observability.ts:191',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_LIFECYCLE_RETENTION,
