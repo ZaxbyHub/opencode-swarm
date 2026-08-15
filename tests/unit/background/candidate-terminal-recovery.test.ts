@@ -115,14 +115,36 @@ describe('candidate artifact terminal protocol recovery', () => {
 		expect(parsed.error).toBeUndefined();
 		expect(parsed.clean_attestation?.lane).toBe('security-trust');
 
-		for (const rejected of [
+		// Recoverability contract change (PR-review deadlock fix): extra trailing
+		// pipe segments on a [CLEAN] row are tail-merged into the free-text
+		// evidence field instead of rejecting the row. Previously-shipped behavior
+		// rejected these shapes outright; the captured PR #2177 run showed
+		// frontier-model prose (regex chars like `,;|`) reliably trips them.
+		for (const salvaged of [
 			`${BASE_HEADER}\n[CLEAN] | security-trust | ${SCOPE} | ${EVIDENCE} | CERTAIN`,
 			`${BASE_HEADER}\n[CLEAN] | security-trust | ${SCOPE} | ${EVIDENCE} | HIGH | EXTRA`,
 		]) {
+			const result = parseNormalized(
+				salvaged,
+				'base_explorer',
+				'security-trust',
+			);
+			expect(result.error).toBeUndefined();
+			expect(result.clean_attestation?.lane).toBe('security-trust');
+			expect(result.clean_attestation?.evidence).toContain(EVIDENCE);
 			expect(
-				parseNormalized(rejected, 'base_explorer', 'security-trust').error,
-			).toBeDefined();
+				normalizeCandidateArtifact(salvaged, 'base_explorer').repairKinds,
+			).toContain('clean-evidence-pipe-tail-merge');
 		}
+		// Structurally broken rows stay rejected: evidence below the minimum
+		// length is not a pipe defect and must not be salvaged.
+		expect(
+			parseNormalized(
+				`${BASE_HEADER}\n[CLEAN] | security-trust | ${SCOPE} | too short`,
+				'base_explorer',
+				'security-trust',
+			).error,
+		).toBeDefined();
 	});
 
 	test('recovers the equivalent micro-lane terminal protocol', () => {

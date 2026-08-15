@@ -153,7 +153,9 @@ export interface NormalizedCandidateArtifact {
 export type CandidateArtifactRepairKind =
 	| 'synthesized-header'
 	| 'terminal-protocol-fence'
-	| 'redundant-clean-confidence';
+	| 'redundant-clean-confidence'
+	| 'clean-evidence-pipe-tail-merge'
+	| 'summary-row-dropped';
 
 interface MarkdownFenceBlock {
 	openingLine: number;
@@ -244,6 +246,88 @@ function repairRedundantCleanConfidence(
 	let repaired = false;
 	const lines = text.split(/\r?\n/).map((line) => {
 		const result = repairRedundantCleanConfidenceLine(line, family);
+		repaired ||= result.repaired;
+		return result.line;
+	});
+	return { text: lines.join('\n'), repaired };
+}
+
+/**
+ * A lane's trailing self-summary or aside rows (``[LANE_SUMMARY]``, ``[NOTE]``,
+ * ``[DONE]``, …) carry a bracket marker token in their first pipe field. They
+ * are not part of the candidate contract, yet their pipe-delimited shape was
+ * previously misclassified as malformed short candidate rows, voiding an
+ * otherwise-valid CLEAN attestation via the zero-malformed-rows rule. Only
+ * pipe-bearing marker lines are dropped: a pipe-free line (even one starting
+ * with a bracket token) is harmless prose today and may be a continuation
+ * fragment, so it is preserved. Marker lines for the contract's own rows
+ * ([CANDIDATE]/[CLEAN]) are never dropped. The match is deliberately
+ * UPPERCASE-ONLY: the machine contract's markers are uppercase by convention
+ * ([LANE_SUMMARY], [NOTE], [DONE]), and a lowercase bracket token is likelier
+ * prose than a marker row.
+ */
+const NON_CONTRACT_MARKER_LINE =
+	/^\[(?!(?:CANDIDATE|CLEAN)\])[A-Z][A-Z0-9_-]*\]/;
+
+function dropNonContractMarkerRows(text: string): {
+	text: string;
+	dropped: boolean;
+} {
+	const lines = text.split(/\r?\n/);
+	const kept = lines.filter((line) => {
+		if (!line.includes('|')) return true;
+		const firstField = splitPipeFields(line.trim())[0]?.trim() ?? '';
+		return !NON_CONTRACT_MARKER_LINE.test(firstField);
+	});
+	return {
+		text: kept.join('\n'),
+		dropped: kept.length !== lines.length,
+	};
+}
+
+/**
+ * Escape unescaped pipe separators beyond the CLEAN field count so free-text
+ * evidence containing literal pipes (regex character classes, `,;|`, shell
+ * snippets) re-merges into the trailing evidence field instead of splitting
+ * the row past `CLEAN_FIELD_COUNT`. Deterministic: evidence is the trailing
+ * field, so extra unescaped separators can only belong to it. Runs before the
+ * other line repairs so downstream repairs see canonical field counts.
+ */
+function repairCleanEvidencePipesLine(line: string): {
+	line: string;
+	repaired: boolean;
+} {
+	if (splitPipeFields(line)[0]?.trim() !== CLEAN_MARKER) {
+		return { line, repaired: false };
+	}
+	let separatorCount = 0;
+	let out = '';
+	for (let index = 0; index < line.length; index += 1) {
+		const char = line[index];
+		if (char === '\\' && line[index + 1] === '|') {
+			out += '\\|';
+			index += 1;
+			continue;
+		}
+		if (char === '|') {
+			separatorCount += 1;
+			out += separatorCount <= CLEAN_FIELD_COUNT - 1 ? '|' : '\\|';
+			continue;
+		}
+		out += char;
+	}
+	return separatorCount > CLEAN_FIELD_COUNT - 1
+		? { line: out, repaired: true }
+		: { line, repaired: false };
+}
+
+function repairCleanEvidencePipes(text: string): {
+	text: string;
+	repaired: boolean;
+} {
+	let repaired = false;
+	const lines = text.split(/\r?\n/).map((line) => {
+		const result = repairCleanEvidencePipesLine(line);
 		repaired ||= result.repaired;
 		return result.line;
 	});
@@ -350,14 +434,26 @@ export function normalizeCandidateArtifact(
 	fallbackFamily: RowFormatFamily,
 ): NormalizedCandidateArtifact {
 	const repairKinds: CandidateArtifactRepairKind[] = [];
-	const recoveredFence = recoverTerminalProtocolFence(rawText, fallbackFamily);
+	// Marker-row drop runs first (it is shape-only), then the pre-existing
+	// repairs in their historical order, then the pipe tail-merge LAST: the
+	// redundant-confidence repair must see a 5-field row before the tail-merge
+	// folds the trailing token into evidence, while the tail-merge is the final
+	// fallback for prose pipes that no earlier repair addresses.
+	const summaryDrop = dropNonContractMarkerRows(rawText);
+	if (summaryDrop.dropped) repairKinds.push('summary-row-dropped');
+	const recoveredFence = recoverTerminalProtocolFence(
+		summaryDrop.text,
+		fallbackFamily,
+	);
 	if (recoveredFence !== null) repairKinds.push('terminal-protocol-fence');
 	const cleanRepair = repairRedundantCleanConfidence(
-		recoveredFence ?? removeCandidateCodeFences(rawText),
+		recoveredFence ?? removeCandidateCodeFences(summaryDrop.text),
 		fallbackFamily,
 	);
 	if (cleanRepair.repaired) repairKinds.push('redundant-clean-confidence');
-	const text = cleanRepair.text;
+	const pipeRepair = repairCleanEvidencePipes(cleanRepair.text);
+	if (pipeRepair.repaired) repairKinds.push('clean-evidence-pipe-tail-merge');
+	const text = pipeRepair.text;
 	const header = selectCandidateHeader(text.split(/\r?\n/));
 	if (header?.markerBearing && header.family !== null) {
 		return { text, synthesizedHeader: false, repairKinds };
@@ -372,9 +468,10 @@ export function normalizeCandidateArtifact(
 	// be read. Honour the family it declared: if that disagrees with the expected
 	// family the artifact must still fail closed, but if it agrees there is
 	// nothing to protect and refusing would discard the lane's findings for no
-	// reason.
+	// reason. The declaration must be read from the PRE-strip source — the
+	// stripped text no longer contains the fenced header that declares it.
 	if (
-		declaredCanonicalFamilies(rawText).some(
+		declaredCanonicalFamilies(summaryDrop.text).some(
 			(family) => family !== fallbackFamily,
 		)
 	) {
