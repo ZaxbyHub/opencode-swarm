@@ -210,8 +210,9 @@ describe('handleCiSimulateCommand with a symlinked/junctioned tmpdir (realpathSy
 		const worktreePathMatch = result.match(/Worktree: `([^`]+)`/);
 		expect(worktreePathMatch).not.toBeNull();
 		const worktreePath = worktreePathMatch?.[1] ?? '';
-		expect(worktreePath.startsWith(junctionDir)).toBe(false);
-		expect(worktreePath.startsWith(realBaseParent)).toBe(true);
+		const ci = (s: string) => s.toLowerCase();
+		expect(ci(worktreePath).startsWith(ci(junctionDir))).toBe(false);
+		expect(ci(worktreePath).startsWith(ci(realBaseParent))).toBe(true);
 
 		expect(result).not.toContain('WORKTREE CLEANUP BLOCKED');
 		expect(result).not.toContain('refusing to clean up non-contained path');
