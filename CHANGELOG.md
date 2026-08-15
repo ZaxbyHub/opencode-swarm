@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.140.6](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.140.5...v7.140.6) (2026-08-15)
+
+
+### Bug Fixes
+
+* **pr-review:** repair benign lane-output shape defects and record degraded coverage instead of aborting ([4778eec](https://github.com/ZaxbyHub/opencode-swarm/commit/4778eec92595c95da090666eed65fdf4324d9e13))
+
 ## [7.140.5](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.140.4...v7.140.5) (2026-08-15)
 
 
