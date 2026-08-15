@@ -24,6 +24,7 @@ import {
 	taskEvidencePath,
 	withTaskEvidenceLock,
 } from './evidence/task-file.js';
+import { validateSwarmPath } from './hooks/utils.js';
 import type { TaskWorkflowState } from './state';
 import { telemetry } from './telemetry.js';
 import { assertStrictTaskId, isStrictTaskId } from './validation/task-id';
@@ -108,11 +109,7 @@ export function assertTaskEvidenceWriteAllowed(
 		kind: 'coder-settlements' | 'task-repairs' | 'task-terminals',
 		corruptCode: string,
 	): Record<string, unknown> | null => {
-		const walPath = path.join(
-			path.resolve(directory, '.swarm'),
-			kind,
-			`${taskId}.json`,
-		);
+		const walPath = validateSwarmPath(directory, `${kind}/${taskId}.json`);
 		let raw: string;
 		try {
 			raw = readFileSync(walPath, 'utf-8');
@@ -122,8 +119,12 @@ export function assertTaskEvidenceWriteAllowed(
 		}
 		try {
 			return JSON.parse(raw) as Record<string, unknown>;
-		} catch {
-			throw new Error(corruptCode);
+		} catch (error) {
+			throw new Error(
+				`${corruptCode}: ${walPath} is not valid JSON (${
+					error instanceof Error ? error.message : String(error)
+				}). Delete this file to allow the task to be repaired again.`,
+			);
 		}
 	};
 
@@ -252,7 +253,6 @@ export type TaskWorkflowTransitionEvent =
 export interface TaskEvidenceTransaction {
 	taskId: string;
 	read(): TaskEvidence | null;
-	write(nextEvidence: TaskEvidence): Promise<TaskEvidence>;
 	transition(event: TaskWorkflowTransitionEvent): Promise<TaskEvidence>;
 }
 
@@ -890,10 +890,6 @@ export async function withTaskEvidenceTransaction<T>(
 		return callback({
 			taskId,
 			read: () => current,
-			write: (nextEvidence) => {
-				assertTaskEvidenceWriteAllowed(directory, taskId);
-				return persist(nextEvidence);
-			},
 			transition: async (event) => {
 				assertTaskEvidenceWriteAllowed(directory, taskId, event);
 				const nextEvidence = updateEvidenceForTransition(current, event);

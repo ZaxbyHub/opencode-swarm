@@ -2983,11 +2983,30 @@ export function createDelegationGateHook(
 					);
 					updateTaskWorkflowCache(recoveredSession, requestedTaskId, workflow);
 				}
-				const recoveredRepair = await recoverPreparedTaskRepair(
-					directory,
-					requestedTaskId,
-					input.sessionID,
-				);
+				// A COMMITTED-but-unaudited repair WAL makes recoverPreparedTaskRepair
+				// retry its audit-event write on every call for this task (the WAL is
+				// never deleted); transient events.jsonl lock contention must degrade
+				// this opportunistic recovery, not hard-block toolBefore for every
+				// tool call touching the task.
+				let recoveredRepair: Awaited<
+					ReturnType<typeof recoverPreparedTaskRepair>
+				> = null;
+				try {
+					recoveredRepair = await recoverPreparedTaskRepair(
+						directory,
+						requestedTaskId,
+						input.sessionID,
+					);
+				} catch (error) {
+					// Always-emitted: a swallowed failure here means the force-repair
+					// audit event may not be durably recorded yet, and warn() is
+					// silenced outside OPENCODE_SWARM_DEBUG=1.
+					logger.criticalWarn(
+						`[delegation-gate] task-repair recovery deferred for ${requestedTaskId}: ${
+							error instanceof Error ? error.message : String(error)
+						}`,
+					);
+				}
 				if (recoveredRepair) {
 					const recoveredSession = ensureAgentSession(input.sessionID);
 					const workflow = getTaskWorkflowSnapshot(

@@ -1432,12 +1432,27 @@ export async function executeUpdateTaskStatus(
 				updateTaskWorkflowCache(callerSession, args.task_id, workflow);
 			}
 		} catch (error) {
-			return {
-				success: false,
-				message:
-					'Task operation paused while recovering an interrupted task repair',
-				errors: [error instanceof Error ? error.message : String(error)],
-			};
+			// A COMMITTED-but-unaudited repair WAL (the WAL is never deleted) makes
+			// this lazy recovery retry its audit-event write on every call for the
+			// task. Transient events.jsonl lock contention must not hard-block an
+			// unrelated update_task_status call — the audit write itself has
+			// already durably committed the workflow/plan transition and will be
+			// retried opportunistically on a later call.
+			if (
+				error instanceof Error &&
+				error.message.startsWith('TASK_REPAIR_AUDIT_LOCKED')
+			) {
+				logger.criticalWarn(
+					`[update-task-status] task-repair audit recovery deferred for ${args.task_id}: ${error.message}`,
+				);
+			} else {
+				return {
+					success: false,
+					message:
+						'Task operation paused while recovering an interrupted task repair',
+					errors: [error instanceof Error ? error.message : String(error)],
+				};
+			}
 		}
 	}
 
@@ -1520,15 +1535,17 @@ export async function executeUpdateTaskStatus(
 			args.target_state === 'idle' &&
 			typeof args.reason === 'string' &&
 			args.reason.trim().length > 0 &&
+			args.reason.length <= 2000 &&
 			typeof args.transition_id === 'string' &&
-			args.transition_id.trim().length > 0;
+			args.transition_id.trim().length > 0 &&
+			args.transition_id.length <= 200;
 		if (!repairFieldsValid) {
 			return {
 				success: false,
 				message:
 					'TASK_REPAIR_INVALID: force repair requires an exact CAS and audit identity',
 				errors: [
-					'Provide expected_state, expected_generation, target_state="idle", non-empty reason, and non-empty transition_id.',
+					'Provide expected_state, expected_generation, target_state="idle", a non-empty reason (max 2000 chars), and a non-empty transition_id (max 200 chars).',
 				],
 			};
 		}
@@ -1921,11 +1938,13 @@ export const update_task_status: ToolDefinition = createSwarmTool({
 		reason: z
 			.string()
 			.min(1)
+			.max(2000)
 			.optional()
 			.describe('Required human-readable audit reason for a force repair.'),
 		transition_id: z
 			.string()
 			.min(1)
+			.max(200)
 			.optional()
 			.describe(
 				'Caller-generated idempotency key for an audited force repair.',

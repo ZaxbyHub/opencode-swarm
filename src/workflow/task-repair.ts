@@ -49,13 +49,21 @@ export async function recoverPreparedTaskRepair(
 	NonNullable<Awaited<ReturnType<typeof loadPlanJsonOnly>>>
 > | null> {
 	const walPath = validateSwarmPath(directory, `task-repairs/${taskId}.json`);
+	const eventsPath = validateSwarmPath(directory, 'events.jsonl');
 	const raw = await readText(walPath);
 	if (raw === null) return null;
-	const observedWal = parseWal(raw);
+	const observedWal = parseWal(raw, walPath);
 	if (observedWal.taskId !== taskId)
 		throw new Error('TASK_REPAIR_WAL_TASK_MISMATCH');
-	if (observedWal.state === 'COMMITTED' || observedWal.state === 'ABORTED')
+	if (observedWal.state === 'ABORTED') return null;
+	if (observedWal.state === 'COMMITTED') {
+		// The WAL committed but the audit event may not have (a prior
+		// ensureAuditEvent attempt could have hit lock contention or a crash).
+		// This retry is idempotent per transitionId, so it is safe to attempt
+		// on every lazy recovery until it succeeds.
+		await ensureAuditEvent(directory, eventsPath, observedWal);
 		return null;
+	}
 
 	const lock = await tryAcquireLock(
 		directory,
@@ -71,9 +79,13 @@ export async function recoverPreparedTaskRepair(
 	try {
 		const lockedRaw = await readText(walPath);
 		if (lockedRaw === null) return null;
-		const wal = parseWal(lockedRaw);
+		const wal = parseWal(lockedRaw, walPath);
 		if (wal.taskId !== taskId) throw new Error('TASK_REPAIR_WAL_TASK_MISMATCH');
-		if (wal.state !== 'PREPARED') return null;
+		if (wal.state === 'ABORTED') return null;
+		if (wal.state === 'COMMITTED') {
+			await ensureAuditEvent(directory, eventsPath, wal);
+			return null;
+		}
 		const replay = await replayFromLedgerWithStatus(directory);
 		if (replay.truncated) throw new Error('TASK_REPAIR_LEDGER_TRUNCATED');
 		const plan = replay.plan ?? (await loadPlanJsonOnly(directory));
@@ -131,8 +143,17 @@ async function readText(filePath: string): Promise<string | null> {
 	}
 }
 
-function parseWal(raw: string): TaskRepairWal {
-	const parsed = JSON.parse(raw) as Partial<TaskRepairWal>;
+function parseWal(raw: string, walPath: string): TaskRepairWal {
+	let parsed: Partial<TaskRepairWal>;
+	try {
+		parsed = JSON.parse(raw) as Partial<TaskRepairWal>;
+	} catch (error) {
+		throw new Error(
+			`TASK_REPAIR_WAL_UNREADABLE: ${walPath} is not valid JSON (${
+				error instanceof Error ? error.message : String(error)
+			}). Delete this file to allow the task to be repaired again.`,
+		);
+	}
 	if (
 		parsed.version !== 1 ||
 		(parsed.state !== 'PREPARED' &&
@@ -150,7 +171,9 @@ function parseWal(raw: string): TaskRepairWal {
 		!Number.isInteger(parsed.oldGeneration) ||
 		typeof parsed.recordedAt !== 'string'
 	) {
-		throw new Error('TASK_REPAIR_WAL_CORRUPT');
+		throw new Error(
+			`TASK_REPAIR_WAL_UNREADABLE: ${walPath} is not a valid v1 repair WAL (unexpected shape or version). Delete this file to allow the task to be repaired again.`,
+		);
 	}
 	return parsed as TaskRepairWal;
 }
@@ -160,54 +183,92 @@ async function writeWal(filePath: string, wal: TaskRepairWal): Promise<void> {
 	await atomicWriteFile(filePath, `${JSON.stringify(wal, null, 2)}\n`);
 }
 
+function parseAuditEventLine(line: string): Record<string, unknown> | null {
+	try {
+		return JSON.parse(line) as Record<string, unknown>;
+	} catch {
+		// A malformed/truncated line elsewhere in the shared events.jsonl file
+		// must never block audit-event dedup or verification for this task.
+		return null;
+	}
+}
+
+function findRepairEvent(
+	content: string | null,
+	transitionId: string,
+): boolean {
+	if (!content) return false;
+	// Cheap pre-filter: this function runs on every lazy-recovery call for a
+	// COMMITTED-but-unaudited-checked task (the WAL is never deleted), so avoid
+	// paying a full JSON.parse per line of a growing, unrotated events.jsonl
+	// when the transitionId cannot possibly be present. Search for the
+	// JSON-string-escaped form (matching how it is serialized by
+	// JSON.stringify below) so a transitionId containing a quote, backslash,
+	// or control character can't produce a false negative here.
+	const needle = JSON.stringify(transitionId).slice(1, -1);
+	if (!content.includes(needle)) return false;
+	for (const line of content.split('\n')) {
+		if (!line.trim()) continue;
+		const event = parseAuditEventLine(line);
+		if (!event) continue;
+		if (
+			event.type === 'task_workflow_repaired' &&
+			event.transitionId === transitionId
+		) {
+			return true;
+		}
+	}
+	return false;
+}
+
 async function ensureAuditEvent(
+	directory: string,
 	eventsPath: string,
 	wal: TaskRepairWal,
 ): Promise<void> {
-	const existing = await readText(eventsPath);
-	if (existing) {
-		for (const line of existing.split('\n')) {
-			if (!line.trim()) continue;
-			const event = JSON.parse(line) as Record<string, unknown>;
-			if (
-				event.type === 'task_workflow_repaired' &&
-				event.transitionId === wal.transitionId
-			) {
-				return;
-			}
-		}
-	}
+	// Steady-state check: once the audit event is durably present, every later
+	// lazy-recovery call for this task (the COMMITTED WAL is never deleted)
+	// must be able to confirm that cheaply and lock-free, rather than paying
+	// the shared events.jsonl lock on every subsequent, unrelated tool call.
+	if (findRepairEvent(await readText(eventsPath), wal.transitionId)) return;
 
-	await appendFile(
-		eventsPath,
-		`${JSON.stringify({
-			type: 'task_workflow_repaired',
-			timestamp: new Date().toISOString(),
-			taskId: wal.taskId,
-			transitionId: wal.transitionId,
-			reason: wal.reason,
-			actor: wal.actor,
-			oldPlanStatus: wal.oldPlanStatus,
-			newPlanStatus: wal.newPlanStatus,
-			oldWorkflowState: wal.oldWorkflowState,
-			newWorkflowState: wal.newWorkflowState,
-			generation: wal.generation,
-		})}\n`,
-		'utf-8',
+	const lock = await tryAcquireLock(
+		directory,
+		'events.jsonl',
+		'task-repair-audit',
+		`task-repair:${wal.taskId}:${wal.transitionId}`,
 	);
+	if (!lock.acquired) {
+		throw new Error('TASK_REPAIR_AUDIT_LOCKED');
+	}
+	try {
+		const existing = await readText(eventsPath);
+		if (findRepairEvent(existing, wal.transitionId)) return;
 
-	const verified = await readText(eventsPath);
-	if (
-		!verified?.split('\n').some((line) => {
-			if (!line.trim()) return false;
-			const event = JSON.parse(line) as Record<string, unknown>;
-			return (
-				event.type === 'task_workflow_repaired' &&
-				event.transitionId === wal.transitionId
-			);
-		})
-	) {
-		throw new Error('TASK_REPAIR_AUDIT_UNVERIFIED');
+		await appendFile(
+			eventsPath,
+			`${JSON.stringify({
+				type: 'task_workflow_repaired',
+				timestamp: new Date().toISOString(),
+				taskId: wal.taskId,
+				transitionId: wal.transitionId,
+				reason: wal.reason,
+				actor: wal.actor,
+				oldPlanStatus: wal.oldPlanStatus,
+				newPlanStatus: wal.newPlanStatus,
+				oldWorkflowState: wal.oldWorkflowState,
+				newWorkflowState: wal.newWorkflowState,
+				generation: wal.generation,
+			})}\n`,
+			'utf-8',
+		);
+
+		const verified = await readText(eventsPath);
+		if (!findRepairEvent(verified, wal.transitionId)) {
+			throw new Error('TASK_REPAIR_AUDIT_UNVERIFIED');
+		}
+	} finally {
+		if (lock.lock._release) await lock.lock._release().catch(() => {});
 	}
 }
 
@@ -256,7 +317,7 @@ export async function repairTaskWorkflowUnderPlanLock<TPlan>(options: {
 			let evidence = transaction.read();
 			let snapshot = getTaskWorkflowSnapshot(evidence);
 			const walRaw = await readText(walPath);
-			let existingWal = walRaw === null ? null : parseWal(walRaw);
+			let existingWal = walRaw === null ? null : parseWal(walRaw, walPath);
 			if (existingWal?.state === 'ABORTED') existingWal = null;
 
 			if (existingWal && existingWal.taskId !== options.taskId) {
@@ -288,7 +349,7 @@ export async function repairTaskWorkflowUnderPlanLock<TPlan>(options: {
 				options.currentPlanStatus === 'in_progress' &&
 				workflowMatchesCommittedRepair(evidence, existingWal)
 			) {
-				await ensureAuditEvent(eventsPath, existingWal);
+				await ensureAuditEvent(options.directory, eventsPath, existingWal);
 				return {
 					plan: options.currentPlan,
 					alreadyApplied: true,
@@ -366,8 +427,14 @@ export async function repairTaskWorkflowUnderPlanLock<TPlan>(options: {
 				}
 			}
 
-			await ensureAuditEvent(eventsPath, wal);
+			// Commit the WAL before the audit event so a transient events.jsonl
+			// lock contention in ensureAuditEvent cannot leave this task fenced
+			// behind a permanently PREPARED WAL (see assertTaskEvidenceWriteAllowed).
+			// A retry after a lock-contention throw here lands on the
+			// alreadyApplied fast path above and only needs to re-attempt the
+			// audit event, which is itself idempotent per transitionId.
 			await writeWal(walPath, { ...wal, state: 'COMMITTED' });
+			await ensureAuditEvent(options.directory, eventsPath, wal);
 
 			return {
 				plan,

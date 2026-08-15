@@ -18,6 +18,13 @@
 - Reviewer decisions now prefer durable exact-task generation evidence, and
   the persisted `critic_pre_plan` policy and balanced/strict planning profile
   are resolved consistently across save, runtime, prompts, and handoff output.
+- The audited task-repair path is hardened against review feedback: a
+  malformed line elsewhere in `events.jsonl` can no longer block a repair's
+  audit trail, corrupt/version-mismatched WAL files now name the offending
+  path and remediation, a dead `TaskEvidenceTransaction.write()` bypass was
+  removed, force-repair `reason`/`transition_id` are length-bounded, and
+  transient audit-log contention degrades to an always-emitted diagnostic
+  instead of blocking the task's tool surface.
 - Spec drift repair now verifies plan, snapshot, and idempotent audit state
   before deleting its marker; clarification mode alone is no longer described
   as clearing drift.
