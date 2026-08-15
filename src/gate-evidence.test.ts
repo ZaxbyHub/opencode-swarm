@@ -145,7 +145,7 @@ describe('recordGateEvidence', () => {
 
 		try {
 			await expect(
-				recordGateEvidence(tmpDir, '1.9', 'reviewer', 'session-1'),
+				recordStageBGate('1.9', 'reviewer', 'session-1', 0),
 			).rejects.toThrow(/escapes \.swarm boundary/);
 			expect(existsSync(path.join(attackerDir, '1.9.json'))).toBe(false);
 		} finally {
