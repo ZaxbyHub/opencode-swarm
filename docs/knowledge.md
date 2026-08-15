@@ -130,11 +130,11 @@ Every entry is a JSON line with these fields (see `src/hooks/knowledge-types.ts`
   "id": "lesson-abc123",
   "tier": "swarm",
   "lesson": "Prefer stream.Readable.from(generator) over async iterators for backpressure.",
-  "category": "pattern",
+  "category": "architecture",
   "tags": ["node", "streams"],
   "scope": "global",
   "confidence": 0.9,
-  "status": "active",
+  "status": "established",
   "confirmed_by": ["..."],
   "retrieval_outcomes": [],
   "phases_alive": 0,
@@ -284,12 +284,13 @@ from counters or inferred from cohort data. V2 is read first throughout cutover,
 and legacy access is restricted to the explicit imported pre-cutover trace set
 until that set drains to zero.
 
-Legacy sections mapped into the new schema:
+Legacy sections imported (each bullet's category is inferred from its text into a current
+`KnowledgeCategory` — see `inferCategoryFromText` in `src/hooks/knowledge-migrator.ts`):
 
-- `lessons-learned` → category `lesson`
-- `patterns` → category `pattern`
-- `sme-cache` → category `domain`
-- `decisions` → category `decision`
+- `lessons-learned`
+- `patterns`
+- `sme-cache`
+- `decisions`
 
 Entries that fail schema validation are dropped. Near-duplicates are collapsed via the dedup threshold.
 
