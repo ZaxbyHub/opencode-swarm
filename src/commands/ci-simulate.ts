@@ -50,7 +50,7 @@ export const _internals: {
 	fs: {
 		existsSync: typeof fs.existsSync;
 		rmSync: typeof fs.rmSync;
-		realpathSync: typeof fs.realpathSync;
+		realpathSync: (p: fs.PathLike) => string;
 	};
 } = {
 	runExternalTool,
@@ -61,7 +61,7 @@ export const _internals: {
 	fs: {
 		existsSync: fs.existsSync,
 		rmSync: fs.rmSync,
-		realpathSync: fs.realpathSync,
+		realpathSync: fs.realpathSync.native,
 	},
 };
 
@@ -242,9 +242,17 @@ async function cleanupWorktree(
 	const resolved = _internals.fs.existsSync(worktreePath)
 		? _internals.fs.realpathSync(worktreePath)
 		: path.resolve(worktreePath);
+	const pathEq =
+		_internals.platform === 'win32'
+			? (a: string, b: string) => a.toLowerCase() === b.toLowerCase()
+			: (a: string, b: string) => a === b;
+	const pathStartsWith =
+		_internals.platform === 'win32'
+			? (a: string, b: string) => a.toLowerCase().startsWith(b.toLowerCase())
+			: (a: string, b: string) => a.startsWith(b);
 	if (
-		resolved !== worktreeBase &&
-		!resolved.startsWith(`${worktreeBase}${path.sep}`)
+		!pathEq(resolved, worktreeBase) &&
+		!pathStartsWith(resolved, `${worktreeBase}${path.sep}`)
 	) {
 		return `[ci-simulate] refusing to clean up non-contained path ${worktreePath}`;
 	}
@@ -264,7 +272,7 @@ async function cleanupWorktree(
 		const canon = _internals.fs.existsSync(raw)
 			? _internals.fs.realpathSync(raw)
 			: path.resolve(raw);
-		return canon === resolved;
+		return pathEq(canon, resolved);
 	});
 	if (!registered) {
 		// Already gone or never registered: nothing to remove, not an error.
