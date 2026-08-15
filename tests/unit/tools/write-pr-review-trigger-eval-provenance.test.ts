@@ -323,7 +323,7 @@ describe('write_pr_review_trigger_eval provenance and ownership', () => {
 		);
 		expect(duplicateResult.success).toBe(false);
 		expect(duplicateResult.message).toContain(
-			'does not reference a completed non-degraded micro-lane artifact',
+			'does not reference a verifiable micro-lane provenance chain',
 		);
 	});
 
@@ -426,7 +426,7 @@ describe('write_pr_review_trigger_eval provenance and ownership', () => {
 		);
 		expect(result.success).toBe(false);
 		expect(result.message).toContain(
-			'does not reference a completed non-degraded micro-lane artifact',
+			'does not reference a verifiable micro-lane provenance chain',
 		);
 	});
 

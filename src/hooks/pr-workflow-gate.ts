@@ -5379,6 +5379,10 @@ export const _test_exports = {
 	extractCandidateIds,
 	parseCanonicalCandidateRows,
 	resolvePrReviewRowFamily,
+	// Exposed to pin the verdict-row pipe tolerance's fidelity boundary: the
+	// capped merge is content-preserving only when the extra pipes sit in the
+	// trailing (free-text) field.
+	pipeFieldsCapped,
 	workflowGateStateRelativePath,
 	workflowGateStateLockRelativePath,
 	workflowCheckoutMutationLockRelativePath,
@@ -6974,6 +6978,7 @@ function derivePrReviewCandidateInventory(
 			}
 		}
 	}
+	const degradedSourceKeys = new Set<string>();
 	if (state.prReviewTriggerEvalPath) {
 		const triggerPath = validateSwarmPath(
 			directory,
@@ -7005,6 +7010,16 @@ function derivePrReviewCandidateInventory(
 				workflowLane: row.trigger_id,
 			});
 		}
+		// Dispatch tuples whose micro lane was accepted with a recorded coverage
+		// degradation (write_pr_review_trigger_eval). If such a lane's retained
+		// artifact still cannot contribute a covered row, the family is skipped
+		// below — the degradation is already durably disclosed on the receipt —
+		// instead of re-creating the trigger-eval dead-end at the inventory.
+		for (const degradation of receipt.coverageDegradations) {
+			degradedSourceKeys.add(
+				`${degradation.source_batch_id}\0${degradation.source_lane_id}`,
+			);
+		}
 	}
 	const candidateIds: string[] = [];
 	// A consolidated lane can be the provenance source for several sources
@@ -7019,15 +7034,18 @@ function derivePrReviewCandidateInventory(
 		for (const record of findByBatchId(directory, source.batchId, {
 			parentSessionId: state.sessionID,
 		})) {
+			// Identity checks stay hard (lane, mode, exact head). Coverage-quality
+			// flags (status, degraded output) deliberately do NOT skip here: a
+			// micro lane that ended degraded after retries was already accepted by
+			// write_pr_review_trigger_eval with a recorded coverage degradation —
+			// re-blocking here would re-create the trigger-eval dead-end this
+			// inventory feeds. A degraded lane simply contributes whatever covered
+			// rows its retained artifact holds (possibly none).
 			if (
 				record.laneId !== source.laneId ||
 				record.mode !== source.mode ||
-				record.status !== 'completed' ||
 				record.workspace?.prHeadSha !== state.prHeadSha ||
-				record.workspace?.gitHead !== state.prHeadSha ||
-				record.result?.outputDegraded === true ||
-				record.result?.transcriptIncomplete === true ||
-				record.result?.truncated === true
+				record.workspace?.gitHead !== state.prHeadSha
 			)
 				continue;
 			const ref = record.result?.outputRef?.trim();
@@ -7078,6 +7096,12 @@ function derivePrReviewCandidateInventory(
 			}
 		}
 		if (source.mode === 'swarm-pr-review:micro' && !resolvedArtifact) {
+			if (degradedSourceKeys.has(`${source.batchId}\0${source.laneId}`)) {
+				// Accepted-with-disclosure at trigger-eval time: the receipt already
+				// records why this family's lane could not contribute. Skipping it
+				// here is the documented degraded path, not a silent waiver.
+				continue;
+			}
 			throw new Error(
 				`BLOCKED: PR_REVIEW mandatory micro-lane provenance is missing or invalid for ${source.workflowLane ?? source.laneId}`,
 			);
@@ -9032,7 +9056,7 @@ function parseReviewerVerdictFields(
 ): string[] | null {
 	const rows = text
 		.split(/\r?\n/)
-		.map(pipeFields)
+		.map((line) => pipeFieldsCapped(line, 10))
 		.filter((fields) => fields[0] === '[REVIEWED]' && fields[1] === itemId);
 	if (rows.length !== 1) return null;
 	const fields = rows[0];
@@ -9113,7 +9137,7 @@ function parseCriticVerdict(
 ): { status: string; severity: string } | null {
 	const rows = text
 		.split(/\r?\n/)
-		.map(pipeFields)
+		.map((line) => pipeFieldsCapped(line, 6))
 		.filter((fields) => fields[0] === '[CRITIC]' && fields[1] === itemId);
 	if (rows.length !== 1) return null;
 	const fields = rows[0];
@@ -9157,9 +9181,11 @@ function artifactHasExactPositiveVerdictRow(
 	itemId: string,
 	positiveVerdict: string,
 ): boolean {
+	// Same trailing-field pipe tolerance as feedbackArtifactCoversItems: the
+	// fourth field is free-text and may legitimately contain literal pipes.
 	const rows = text
 		.split(/\r?\n/)
-		.map(pipeFields)
+		.map((line) => pipeFieldsCapped(line, 4))
 		.filter((fields) => fields[0] === marker && fields[1] === itemId);
 	return (
 		rows.length === 1 &&
@@ -9172,6 +9198,33 @@ function artifactHasExactPositiveVerdictRow(
 function pipeFields(line: string): string[] {
 	if (!line.includes('|')) return [];
 	return line.split('|').map((field) => field.trim());
+}
+
+/**
+ * `pipeFields` capped at the row's canonical field count: separators beyond the
+ * expected count merge back into the trailing (free-text) field. Verdict rows
+ * ([REVIEWED], [CRITIC], [FEEDBACK-VERIFIED]) carry prose evidence in their
+ * last field, and prose containing literal pipes (regex text, `,;|`, shell
+ * snippets) otherwise splits the row past its strict field-count check and the
+ * whole verdict becomes unparseable. Deterministic: the enumerated leading
+ * fields are never merged.
+ */
+function pipeFieldsCapped(line: string, expectedFieldCount: number): string[] {
+	const fields = pipeFields(line);
+	if (fields.length <= expectedFieldCount) return fields;
+	const capped = [
+		...fields.slice(0, expectedFieldCount - 1),
+		fields.slice(expectedFieldCount - 1).join('|'),
+	];
+	// The enumerated leading fields are untouched, so machine-checked positions
+	// (classification, severity, file:line) stay correct. But the pipe may have
+	// originated in a NON-trailing prose field, in which case the trailing prose
+	// fields are re-arranged rather than preserved. Fidelity-safe only for
+	// trailing-field pipes; this warn (debug-gated) is the only trace.
+	warn(
+		`[pr-workflow-gate] verdict row pipe tail-merge applied (expected ${expectedFieldCount} fields, received ${fields.length}); leading machine fields preserved, trailing prose fields merged: ${line.slice(0, 120)}`,
+	);
+	return capped;
 }
 
 function feedbackArtifactCoversItems(
@@ -9189,7 +9242,7 @@ function feedbackArtifactCoversItems(
 	if (!loaded) return false;
 	const rows = loaded.artifact.text
 		.split(/\r?\n/)
-		.map(pipeFields)
+		.map((line) => pipeFieldsCapped(line, 4))
 		.filter((fields) => fields[0] === '[FEEDBACK-VERIFIED]');
 	if (rows.length !== itemIds.length) return false;
 	return itemIds.every((itemId) => {

@@ -601,6 +601,26 @@ function parseText(input: ArtifactInput, flags: ParseFlags): ParseResult {
 			const cleanAnalysis = cleanFamily
 				? analyzeCleanFields(cleanFields, cleanFamily, cleanLane)
 				: undefined;
+			// A consolidated lane may emit one [CLEAN] attestation per owned lane.
+			// Scoped (expected-lane) callers never reach this branch for a sibling
+			// lane's row — the out-of-scope skip above already handled it — because
+			// analyzeCleanFields marks any non-expected lane invalid. This branch
+			// covers UNSCOPED parses (no expected_lane flags), where every lane's
+			// row validates: the artifact's singular attestation slot is already
+			// filled by a DIFFERENT lane's valid attestation, so the later row is
+			// skipped instead of failing the whole artifact. A duplicate
+			// attestation for the SAME lane still falls through and errors below.
+			if (
+				pendingClean !== undefined &&
+				cleanAnalysis?.valid === true &&
+				cleanAnalysis.lane !== null &&
+				cleanAnalysis.lane !==
+					(pendingClean.row_format_family === 'base_explorer'
+						? pendingClean.lane
+						: pendingClean.micro_lane)
+			) {
+				continue;
+			}
 			if (pendingClean !== undefined) {
 				cleanErrorCode = 'invalid-clean-attestation';
 				cleanErrorMessage =
@@ -900,14 +920,29 @@ function parseText(input: ArtifactInput, flags: ParseFlags): ParseResult {
 		}
 	}
 
-	if (pendingClean && candidates.length > 0) {
-		cleanErrorCode = 'conflicting-clean-attestation';
-		cleanErrorMessage = 'CLEAN attestation cannot appear with candidate rows';
-		parseErrorDetails.push({
-			row_index: headerIndex,
-			field: 'clean_attestation',
-			message: cleanErrorMessage,
-		});
+	// Per-obligation conflict (the #2131 prompt contract): a [CLEAN] attestation
+	// contradicts [CANDIDATE] rows only for the SAME lane. Candidates for other
+	// lanes of a consolidated artifact are legitimate siblings and must not void
+	// this lane's zero-findings attestation.
+	const pendingCleanLane = pendingClean
+		? pendingClean.row_format_family === 'base_explorer'
+			? pendingClean.lane
+			: pendingClean.micro_lane
+		: null;
+	if (pendingClean && pendingCleanLane !== null) {
+		const conflictingCandidate = candidates.find(
+			(candidate) =>
+				(candidate.lane ?? candidate.micro_lane) === pendingCleanLane,
+		);
+		if (conflictingCandidate) {
+			cleanErrorCode = 'conflicting-clean-attestation';
+			cleanErrorMessage = `CLEAN attestation cannot appear with candidate rows for the same lane (${pendingCleanLane})`;
+			parseErrorDetails.push({
+				row_index: headerIndex,
+				field: 'clean_attestation',
+				message: cleanErrorMessage,
+			});
+		}
 	}
 	if (
 		pendingClean &&
@@ -924,10 +959,11 @@ function parseText(input: ArtifactInput, flags: ParseFlags): ParseResult {
 		});
 	}
 
+	// `!cleanErrorCode` already encodes "no same-lane candidate conflict" (set
+	// above), so candidates for OTHER lanes of a consolidated artifact no longer
+	// suppress this lane's zero-findings attestation.
 	const cleanAttestation: CleanAttestationRecord | undefined =
-		pendingClean && !cleanErrorCode && candidates.length === 0
-			? pendingClean
-			: undefined;
+		pendingClean && !cleanErrorCode ? pendingClean : undefined;
 	if (cleanAttestation) {
 		formatFamiliesDetected.add(cleanAttestation.row_format_family);
 	}
@@ -936,7 +972,8 @@ function parseText(input: ArtifactInput, flags: ParseFlags): ParseResult {
 	// candidate rows: every candidate here was independently validated by
 	// analyzeCandidateFields. Discarding them made one malformed trailing row
 	// destroy an entire lane's findings. The attestation itself stays gated
-	// below on `!cleanErrorCode && candidates.length === 0`.
+	// above on `!cleanErrorCode`; the only candidate-related rejection is the
+	// per-obligation same-lane conflict, scoped per the #2131 prompt contract.
 	const acceptedCandidates = candidates;
 	const parseErrors = parseErrorDetails.length;
 
