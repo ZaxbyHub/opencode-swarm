@@ -310,15 +310,15 @@ export async function executeWritePrReviewTriggerEval(
 		// families are each checked by their own citing row (ownership==matched-set
 		// is enforced below), so stamping a lane-wide uncovered list here would
 		// misattribute degradations to covered families on a consolidated lane —
-		// the exact shape that motivated this recoverability path.
-		const rowFamilyUncovered = recordOwnedLanes.includes(row.trigger_id)
-			? !prReviewDiscoveryArtifactCoversLane(
-					outputArtifact!.artifact.text,
-					row.trigger_id,
-					recordOwnedLanes,
-					record!.mode,
-				)
-			: true;
+		// the exact shape that motivated this recoverability path. The
+		// provenanceFailure gate above already guarantees the row's family is
+		// owned by the cited lane, so the ownership check is not repeated here.
+		const rowFamilyUncovered = !prReviewDiscoveryArtifactCoversLane(
+			outputArtifact!.artifact.text,
+			row.trigger_id,
+			recordOwnedLanes,
+			record!.mode,
+		);
 		if (rowFamilyUncovered) {
 			degradationReasons.push(
 				`no covered candidate or clean row for: ${row.trigger_id}`,

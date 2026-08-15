@@ -151,7 +151,10 @@ async function persistLaneArtifact(
 
 /** Fabricate a fully settled PR_FEEDBACK gate for [FB-001] with the given
  * verification classification and a typed Stage A reproduction mapping. */
-async function settleFeedbackWorkflow(classification: string): Promise<void> {
+async function settleFeedbackWorkflow(
+	classification: string,
+	evidence = 'evidence text here',
+): Promise<void> {
 	await activatePrWorkflow(directory, SESSION_ID, 'PR_FEEDBACK');
 	await declarePrFeedbackInventory(directory, SESSION_ID, ['FB-001'], {
 		prHeadSha: HEAD_SHA,
@@ -167,7 +170,7 @@ async function settleFeedbackWorkflow(classification: string): Promise<void> {
 		'verify',
 		'swarm-pr-feedback:verification',
 		'reviewer',
-		`[FEEDBACK-VERIFIED] | FB-001 | ${classification} | evidence text here`,
+		`[FEEDBACK-VERIFIED] | FB-001 | ${classification} | ${evidence}`,
 	);
 	await recordPrFeedbackStageA(directory, SESSION_ID, REVISION, [
 		{ category: 'build', command: ['build'], durationMs: 1 },
@@ -259,6 +262,25 @@ describe('verified-no-change terminal (issue #2131 C1)', () => {
 			'utf-8',
 		);
 		expect(events).toContain('pr_feedback_verified_no_change');
+	});
+
+	test('pipe-bearing verification evidence still settles the zero-commit terminal (PR #2182 UIB-002)', async () => {
+		// The evidence field is free-text prose; a literal pipe in it previously
+		// passed coverage (capped splitter) but was skipped by the settled read
+		// (raw splitter), blocking a verified no-change item with an impossible
+		// remedy. Both readers must agree.
+		await settleFeedbackWorkflow(
+			'DISPROVED',
+			'no defect found; the guard checks the class `,;|` chars and a | b',
+		);
+		const status = await completePrWorkflow(
+			directory,
+			SESSION_ID,
+			'PR_FEEDBACK',
+			HEAD_SHA,
+		);
+		expect(status).toBe('verified-no-change');
+		expect(await readPrWorkflowGateState(directory, SESSION_ID)).toBeNull();
 	});
 
 	test.each([

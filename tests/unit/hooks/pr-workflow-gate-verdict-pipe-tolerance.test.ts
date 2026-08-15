@@ -44,6 +44,43 @@ describe('verdict row pipe tolerance', () => {
 		expect(capped[9]).toBe('reviewer notes mentioning `,;|` and a|b');
 	});
 
+	test('pipeFieldsCapped n=6 [CRITIC] identity: trailing-pipe merge preserves fields 0-4 exactly', () => {
+		const row =
+			'[CRITIC] | it-1 | UPHELD | HIGH | the gate rejects injection chars | final prose mentioning a | b';
+		const capped = gateInternals.pipeFieldsCapped(row, 6);
+		expect(capped).toHaveLength(6);
+		expect(capped.slice(0, 5)).toEqual(
+			row
+				.split('|')
+				.map((f) => f.trim())
+				.slice(0, 5),
+		);
+		expect(capped[5]).toBe('final prose mentioning a|b');
+	});
+
+	test('digest binds to the canonical capped view, stable across re-reads', () => {
+		const row =
+			'[REVIEWED] | C-0 | CONFIRMED | STRUCTURALLY_PROVEN | HIGH | YES | file.ts:1 | rationale | probe | reviewer notes mentioning a | b';
+		// reviewerVerdictRowDigest is what binds critic claims to reviewer rows;
+		// its input is the canonical capped field view, so repeated parses of the
+		// same retained artifact yield the identical digest (binding holds), and
+		// the digest demonstrably follows the canonical view rather than the raw
+		// split (a mid-row pipe re-arranges trailing prose; machine fields are
+		// unchanged).
+		const digestA = gateInternals.reviewerVerdictRowDigest(
+			gateInternals.pipeFieldsCapped(row, 10),
+		);
+		const digestB = gateInternals.reviewerVerdictRowDigest(
+			gateInternals.pipeFieldsCapped(row, 10),
+		);
+		expect(digestA).toBe(digestB);
+		expect(digestA).not.toBe(
+			gateInternals.reviewerVerdictRowDigest(
+				row.split('|').map((field) => field.trim()),
+			),
+		);
+	});
+
 	test('pipeFieldsCapped preserves machine fields when the pipe is mid-row', () => {
 		// Documented boundary: a pipe in a NON-trailing prose field re-arranges
 		// the trailing prose fields, but the enumerated machine positions

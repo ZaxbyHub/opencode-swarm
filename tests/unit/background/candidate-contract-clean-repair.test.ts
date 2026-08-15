@@ -98,6 +98,31 @@ describe('clean-evidence-pipe-tail-merge repair', () => {
 		expect(result.diagnostics.malformed_rows).toBe(0);
 	});
 
+	test('backslash boundary: a pre-existing escaped pipe survives the tail-merge', () => {
+		// Input evidence containing an escaped pipe (single backslash before
+		// the pipe) ahead of later unescaped pipes must repair without losing
+		// the row. The parser-view evidence canonicalizes every pipe to a
+		// literal pipe with surrounding spacing preserved (ground-truthed
+		// against the parser); longer backslash runs collapse the same way,
+		// consistent with splitPipeFields escape handling.
+		const line =
+			'[CLEAN] | some-lane | coverage scope text long enough | alpha \\| beta | gamma | delta | epsilon';
+		const normalized = normalizeCandidateArtifact(
+			`${microHeader}
+${line}`,
+			'micro_lane',
+		);
+		expect(normalized.repairKinds).toContain('clean-evidence-pipe-tail-merge');
+		const result = parseCandidates(
+			input(normalized.text),
+			microFlags('some-lane'),
+		);
+		expect(result.error_code).toBeUndefined();
+		expect(result.clean_attestation?.evidence).toBe(
+			'alpha | beta | gamma | delta | epsilon',
+		);
+	});
+
 	test('leaves well-formed and non-CLEAN rows untouched', () => {
 		const fine = [
 			microHeader,

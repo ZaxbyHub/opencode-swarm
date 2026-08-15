@@ -5383,6 +5383,9 @@ export const _test_exports = {
 	// capped merge is content-preserving only when the extra pipes sit in the
 	// trailing (free-text) field.
 	pipeFieldsCapped,
+	// Exposed so the digest-stability test can hash the same canonical field
+	// view the critic-claim binding hashes.
+	reviewerVerdictRowDigest,
 	workflowGateStateRelativePath,
 	workflowGateStateLockRelativePath,
 	workflowCheckoutMutationLockRelativePath,
@@ -9275,7 +9278,12 @@ function readSettledFeedbackClassifications(
 			const loaded = ref ? readLaneOutput(directory, ref) : null;
 			if (!loaded) continue;
 			for (const line of loaded.artifact.text.split(/\r?\n/)) {
-				const fields = pipeFields(line);
+				// Same trailing-field pipe tolerance as feedbackArtifactCoversItems:
+				// the fourth field is free-text and may legitimately contain literal
+				// pipes. Parsing it raw here let coverage accept a row the settled
+				// read then skipped, blocking a verified no-change item (PR #2182
+				// review finding UIB-002).
+				const fields = pipeFieldsCapped(line, 4);
 				if (
 					fields[0] !== '[FEEDBACK-VERIFIED]' ||
 					fields.length !== 4 ||

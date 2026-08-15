@@ -261,7 +261,10 @@ function repairRedundantCleanConfidence(
  * pipe-bearing marker lines are dropped: a pipe-free line (even one starting
  * with a bracket token) is harmless prose today and may be a continuation
  * fragment, so it is preserved. Marker lines for the contract's own rows
- * ([CANDIDATE]/[CLEAN]) are never dropped.
+ * ([CANDIDATE]/[CLEAN]) are never dropped. The match is deliberately
+ * UPPERCASE-ONLY: the machine contract's markers are uppercase by convention
+ * ([LANE_SUMMARY], [NOTE], [DONE]), and a lowercase bracket token is likelier
+ * prose than a marker row.
  */
 const NON_CONTRACT_MARKER_LINE =
 	/^\[(?!(?:CANDIDATE|CLEAN)\])[A-Z][A-Z0-9_-]*\]/;

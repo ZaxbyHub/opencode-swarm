@@ -132,6 +132,9 @@ describe('candidate artifact terminal protocol recovery', () => {
 			expect(result.error).toBeUndefined();
 			expect(result.clean_attestation?.lane).toBe('security-trust');
 			expect(result.clean_attestation?.evidence).toContain(EVIDENCE);
+			expect(
+				normalizeCandidateArtifact(salvaged, 'base_explorer').repairKinds,
+			).toContain('clean-evidence-pipe-tail-merge');
 		}
 		// Structurally broken rows stay rejected: evidence below the minimum
 		// length is not a pipe defect and must not be salvaged.

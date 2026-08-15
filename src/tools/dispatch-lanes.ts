@@ -1220,7 +1220,7 @@ export async function executeDispatchLanesAsync(
 								)
 							) {
 								throw new Error(
-									`BLOCKED: initial PR_REVIEW base dispatch requires exactly six lanes and max_concurrent: 6 at depth tier L (consolidated owned_workflow_lanes are allowed only at tiers S and M); each lane owns exactly one dimension; valid dimensions: ${PR_REVIEW_BASE_DIMENSION_IDS.join(', ')}`,
+									`BLOCKED: initial PR_REVIEW base dispatch requires exactly six lanes and max_concurrent: 6 at depth tier L (consolidated owned_workflow_lanes are allowed only at tiers S and M); each lane owns exactly one dimension and may set workflow_lane to it, omitting owned_workflow_lanes; valid dimensions: ${PR_REVIEW_BASE_DIMENSION_IDS.join(', ')}`,
 								);
 							}
 						} else if (

@@ -451,6 +451,8 @@ describe('write_pr_review_trigger_eval recorded degradation path', () => {
 			),
 		);
 		expect(result.success).toBe(true);
+		// Exactly one degradation entry total: the uncovered family only.
+		expect(result.coverage_degradation_count).toBe(1);
 		const receipt = JSON.parse(
 			readFileSync(receiptPath(root, 'review-consol-partial'), 'utf-8'),
 		);

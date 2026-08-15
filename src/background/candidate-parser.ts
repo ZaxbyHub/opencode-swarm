@@ -613,7 +613,8 @@ function parseText(input: ArtifactInput, flags: ParseFlags): ParseResult {
 			if (
 				pendingClean !== undefined &&
 				cleanAnalysis?.valid === true &&
-				cleanAnalysis.lane !== null &&
+				// analyzeCleanFields marks a null lane invalid, so a valid
+				// analysis always carries one.
 				cleanAnalysis.lane !==
 					(pendingClean.row_format_family === 'base_explorer'
 						? pendingClean.lane
