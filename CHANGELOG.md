@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.140.5](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.140.4...v7.140.5) (2026-08-15)
+
+
+### Bug Fixes
+
+* **workflow:** harden task-repair audit trail against review feedback ([f6623d6](https://github.com/ZaxbyHub/opencode-swarm/commit/f6623d62de9e8c59731c928814781a2a892d6dff))
+* **workflow:** make task transitions transactional and recoverable ([54a3a63](https://github.com/ZaxbyHub/opencode-swarm/commit/54a3a6380cab2d3c2a142676b6ecbdea465a1556))
+
 ## [7.140.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.140.3...v7.140.4) (2026-08-15)
 
 
