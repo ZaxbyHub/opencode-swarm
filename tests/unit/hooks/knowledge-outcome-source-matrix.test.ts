@@ -30,6 +30,7 @@ import {
 import {
 	commitApplicationOutcomeBatch,
 	queryLiveMemberships,
+	RECEIPT_TERMINAL_OUTCOMES,
 	type ReceiptOutcome,
 	validateAndCommitTerminalBatch,
 } from '../../../src/hooks/knowledge-receipt-ledger';
@@ -170,6 +171,12 @@ describe('knowledge outcome/source semantic matrix (#2032)', () => {
 	});
 	afterEach(() => {
 		rmrf(dir);
+	});
+
+	test('matrix enumerates the complete canonical terminal outcome set', () => {
+		// If ReceiptOutcome ever gains or loses a member, this fails loudly
+		// instead of the matrix silently skipping (or ghost-testing) it.
+		expect([...RECEIPT_TERMINAL_OUTCOMES].sort()).toEqual([...OUTCOMES].sort());
 	});
 
 	for (const outcome of OUTCOMES) {

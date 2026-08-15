@@ -43,7 +43,8 @@ export interface ReceiptValidationContext {
 	 * agent-class value for the knowledge_receipt tool. This is deliberately
 	 * NOT derived from `agent` — agent identity and source are different
 	 * facts, and conflating them is how delegate terminals lost their
-	 * provenance.
+	 * provenance. Type-required, but fail-open at runtime: a falsy value
+	 * stamps the honest 'unknown' class rather than rejecting the receipt.
 	 */
 	source: string;
 	cohort_id?: string;
