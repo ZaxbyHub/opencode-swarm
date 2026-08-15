@@ -1740,6 +1740,34 @@ function describeCoderScopeFailure(
 	return `no plan task id could be resolved. Include a TASK: <N.M> line or plan-task-shaped task_id arg. Explicit task_id field: ${explicitFieldShape}. TASK: line detected: ${taskLineDetected ? 'yes' : 'no'}. Known plan task ids: ${known}.`;
 }
 
+function normalizeFileDirectiveValue(rawValue: string): string | null {
+	const value = rawValue.trim();
+	if (!value) return null;
+
+	const quote = value[0];
+	if (quote === '"' || quote === "'") {
+		const closingQuoteIndex = value.indexOf(quote, 1);
+		if (closingQuoteIndex === -1) return null;
+
+		const filePath = value.slice(1, closingQuoteIndex);
+		if (!filePath) return null;
+
+		const suffix = value.slice(closingQuoteIndex + 1);
+		if (suffix.length > 0 && !/^\s+\([^()]*\)\s*$/.test(suffix)) {
+			return null;
+		}
+		return filePath;
+	}
+
+	// A parenthetical is commentary only when it is a balanced, non-nested,
+	// whitespace-separated terminal suffix. Internal, nested, and unbalanced
+	// parentheses remain part of the path so downstream scope validation fails
+	// closed instead of silently changing the declared target.
+	const normalized = value.replace(/\s+\([^()]*\)\s*$/, '').trimEnd();
+	if (!normalized || /[,;|]/.test(normalized)) return null;
+	return normalized;
+}
+
 function extractTaskFileDirectives(args: Record<string, unknown>): {
 	present: boolean;
 	files: string[] | null;
@@ -1751,8 +1779,10 @@ function extractTaskFileDirectives(args: Record<string, unknown>): {
 		for (const line of field.split(/\r?\n/)) {
 			if (!/^\s*FILE\s*:/i.test(line)) continue;
 			present = true;
-			const value = line.replace(/^\s*FILE\s*:\s*/i, '').trim();
-			if (!value || /[,;|]/.test(value)) return { present: true, files: null };
+			const value = normalizeFileDirectiveValue(
+				line.replace(/^\s*FILE\s*:\s*/i, ''),
+			);
+			if (!value) return { present: true, files: null };
 			files.add(value);
 		}
 	}
@@ -2261,6 +2291,7 @@ export const _internals = {
 	describeCoderScopeFailure,
 	parsePerTaskVerdicts,
 	buildParallelExecutionGuidance,
+	extractTaskFileDirectives,
 	loadPlanJsonOnly,
 	recordPendingDelegationForBackground,
 	writeDelegationFallbackForBackground,
@@ -4656,16 +4687,8 @@ export function createDelegationGateHook(
 				session.lastCoderDelegationTaskId = currentTaskId;
 
 				// v6.21 Task 5.3: Extract FILE: directive values → declaredCoderScope
-				const fileDirPattern = /^FILE:\s*(.+)$/gm;
-				const declaredFiles: string[] = [];
-				for (const match of text.matchAll(fileDirPattern)) {
-					const filePath = match[1].trim();
-					if (filePath.length > 0 && !declaredFiles.includes(filePath)) {
-						declaredFiles.push(filePath);
-					}
-				}
-				session.declaredCoderScope =
-					declaredFiles.length > 0 ? declaredFiles : null;
+				const directives = extractTaskFileDirectives({ prompt: text });
+				session.declaredCoderScope = directives.files;
 
 				// OBSERVE-ONLY (Phase 2): Record coder delegation in task state machine for telemetry.
 				// Error swallowing is intentional — Phase 3 enforcement gates will check state directly

@@ -18,6 +18,7 @@ import type {
 	BuildTestCommandOpts,
 	FrameworkSelection,
 	LanguageBackend,
+	NativeTestTarget,
 	TestFrameworkSelection,
 	TestRunSummary,
 } from './backend';
@@ -148,6 +149,11 @@ export function defaultBuildTestCommand(
 	const scope = opts.scope ?? 'all';
 	const coverage = opts.coverage ?? false;
 	const bail = opts.bail ?? false;
+	const nativeTarget = opts.nativeTarget;
+	if (nativeTarget) {
+		if (nativeTarget.framework !== framework) return null;
+		return buildNativeTargetCommand(nativeTarget);
+	}
 
 	switch (framework) {
 		case 'bun': {
@@ -298,6 +304,33 @@ export function defaultBuildTestCommand(
 			return [...argv, ...files];
 		}
 	}
+}
+
+function escapeRegexLiteral(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+export function buildNativeTargetCommand(target: NativeTestTarget): string[] {
+	if (target.framework === 'ctest') {
+		return [
+			'ctest',
+			'--test-dir',
+			target.path,
+			'-R',
+			`^${escapeRegexLiteral(target.name)}$`,
+		];
+	}
+	const selector = target.name
+		.split('/')
+		.map((part) => `^${escapeRegexLiteral(part)}$`)
+		.join('/');
+	const packagePath =
+		target.path === '.'
+			? '.'
+			: target.path.startsWith('./')
+				? target.path
+				: `./${target.path.replace(/\\/g, '/')}`;
+	return ['go', 'test', '-v', '-run', selector, packagePath];
 }
 
 function phpVendorBin(name: string): string {

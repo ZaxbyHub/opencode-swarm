@@ -1,4 +1,6 @@
 import { type ToolContext, tool } from '@opencode-ai/plugin';
+import { z } from 'zod';
+import { resolveWorkingDirectory } from './resolve-working-directory';
 
 /**
  * ToolResult can be string | {output: string; metadata?: any}
@@ -66,15 +68,59 @@ export function createSwarmTool<Args extends Record<string, unknown>>(
 ): ReturnType<typeof tool> {
 	type ToolArgs = Parameters<typeof tool>[0]['args'];
 	type ToolExecuteArgs = Parameters<Parameters<typeof tool>[0]['execute']>[0];
+	const ownsWorkingDirectory = Object.hasOwn(opts.args, 'working_directory');
+	const toolArgs = ownsWorkingDirectory
+		? opts.args
+		: {
+				...opts.args,
+				working_directory: z
+					.string()
+					.optional()
+					.describe('Project or linked-worktree root for this tool invocation'),
+			};
 
 	return tool({
 		description: opts.description,
-		args: opts.args as unknown as ToolArgs,
+		args: toolArgs as unknown as ToolArgs,
 		execute: async (args: ToolExecuteArgs, ctx?: ToolContext) => {
 			// process.cwd() fallback is intentional: used when tool is invoked directly (CLI) without plugin runtime context
-			const directory = ctx?.directory ?? process.cwd();
+			const fallbackDirectory = ctx?.directory ?? process.cwd();
 			try {
-				const result = await opts.execute(args as Args, directory, ctx);
+				let effectiveArgs = args as Args;
+				let effectiveDirectory = fallbackDirectory;
+				let effectiveContext = ctx;
+
+				if (
+					!ownsWorkingDirectory &&
+					typeof args === 'object' &&
+					args !== null &&
+					Object.hasOwn(args, 'working_directory')
+				) {
+					const { working_directory: workingDirectory, ...executorArgs } =
+						args as Record<string, unknown>;
+					effectiveArgs = executorArgs as Args;
+
+					if (workingDirectory !== undefined) {
+						const resolved = resolveWorkingDirectory(
+							workingDirectory as string | null,
+							fallbackDirectory,
+						);
+						if (!resolved.success) throw new Error(resolved.message);
+
+						effectiveDirectory = resolved.directory;
+						effectiveContext = {
+							...ctx,
+							directory: resolved.directory,
+							worktree: resolved.directory,
+						} as ToolContext;
+					}
+				}
+
+				const result = await opts.execute(
+					effectiveArgs,
+					effectiveDirectory,
+					effectiveContext,
+				);
 				// ToolResult can be string | {output: string; metadata?: any}
 				// If result is a string, return it directly
 				// Otherwise return the result object as-is

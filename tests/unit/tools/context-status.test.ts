@@ -56,8 +56,10 @@ describe('context_status tool surface', () => {
 
 	it('should have an args schema with no required fields', () => {
 		expect(context_status.args).toBeDefined();
-		// After fix: args schema is empty (no messages required)
-		expect(Object.keys(context_status.args)).toHaveLength(0);
+		expect(Object.keys(context_status.args)).toEqual(['working_directory']);
+		expect(
+			context_status.args.working_directory.safeParse(undefined).success,
+		).toBe(true);
 	});
 });
 

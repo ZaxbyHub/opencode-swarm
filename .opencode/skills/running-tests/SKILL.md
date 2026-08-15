@@ -82,6 +82,13 @@ Do you need to run tests?
 
 **Rule of thumb:** Pass exactly one source file to `test_runner`. For multiple files, use a shell loop.
 
+For one named Go or CTest test, bypass file discovery with an exact native selector:
+
+- Go: `{ scope: "target", native_target: { framework: "go-test", name: "TestName[/Subtest]", path: "relative/package" } }`
+- CTest: `{ scope: "target", native_target: { framework: "ctest", name: "ExactTestName", path: "relative/build-dir" } }`
+
+The target name is treated literally, the directory must stay within the project root, and the runner never falls back to a broader package or build-tree sweep.
+
 ---
 
 ## Per-File Isolation Loops
