@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.140.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.140.2...v7.140.3) (2026-08-15)
+
+
+### Bug Fixes
+
+* **compaction:** close residual feedback gaps from [#2154](https://github.com/ZaxbyHub/opencode-swarm/issues/2154) review ([b38fa8f](https://github.com/ZaxbyHub/opencode-swarm/commit/b38fa8fc5531037f6163c2ffe98c53055a9f4dad))
+
 ## [7.140.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.140.1...v7.140.2) (2026-08-14)
 
 
