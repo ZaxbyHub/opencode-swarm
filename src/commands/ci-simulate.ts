@@ -258,16 +258,14 @@ async function cleanupWorktree(
 	if (listResult.exitCode !== 0) {
 		return `[ci-simulate] could not verify worktree registration: ${listResult.stderr.trim() || listResult.stdout.trim()}`;
 	}
-	const registered = listResult.stdout
-		.split(/\r?\n/)
-		.some((line) => {
-			if (!line.startsWith('worktree ')) return false;
-			const raw = line.slice('worktree '.length).trim();
-			const canon = _internals.fs.existsSync(raw)
-				? _internals.fs.realpathSync(raw)
-				: path.resolve(raw);
-			return canon === resolved;
-		});
+	const registered = listResult.stdout.split(/\r?\n/).some((line) => {
+		if (!line.startsWith('worktree ')) return false;
+		const raw = line.slice('worktree '.length).trim();
+		const canon = _internals.fs.existsSync(raw)
+			? _internals.fs.realpathSync(raw)
+			: path.resolve(raw);
+		return canon === resolved;
+	});
 	if (!registered) {
 		// Already gone or never registered: nothing to remove, not an error.
 		if (!_internals.fs.existsSync(resolved)) return null;
