@@ -22,8 +22,8 @@ const realDetectDefaultRemoteBranch = _internals.detectDefaultRemoteBranch;
 // ---------------------------------------------------------------------------
 
 function makeTempDir(prefix: string): string {
-	const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
-	return dir;
+	const tmp = fs.realpathSync.native(os.tmpdir());
+	return fs.realpathSync.native(fs.mkdtempSync(path.join(tmp, prefix)));
 }
 
 function runGit(dir: string, args: string[]): void {
@@ -150,13 +150,12 @@ describe('handleCiSimulateCommand with a symlinked/junctioned tmpdir (realpathSy
 		gitCommit(tempDir, 'initial commit with package.json');
 		gitPush(tempDir, 'origin', 'main');
 
-		realBaseParent = fs.realpathSync(
-			fs.mkdtempSync(
-				path.join(fs.realpathSync(os.tmpdir()), 'ci-sim-realbase-'),
-			),
+		const tmpBase = fs.realpathSync.native(os.tmpdir());
+		realBaseParent = fs.realpathSync.native(
+			fs.mkdtempSync(path.join(tmpBase, 'ci-sim-realbase-')),
 		);
 		junctionDir = path.join(
-			fs.realpathSync(os.tmpdir()),
+			tmpBase,
 			`ci-sim-junction-${process.hrtime.bigint()}`,
 		);
 
@@ -176,7 +175,7 @@ describe('handleCiSimulateCommand with a symlinked/junctioned tmpdir (realpathSy
 		_internals.runExternalTool = realRunExternalTool;
 		_internals.getDefaultBaseBranch = realGetDefaultBaseBranch;
 		_internals.detectDefaultRemoteBranch = realDetectDefaultRemoteBranch;
-		_internals.osTmpdir = () => fs.realpathSync(os.tmpdir());
+		_internals.osTmpdir = () => os.tmpdir();
 
 		try {
 			if (junctionSupported) fs.rmdirSync(junctionDir);
