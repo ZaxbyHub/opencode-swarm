@@ -84,7 +84,7 @@ const SIGNAL_SIGN: Record<ReceiptOutcome, number> = {
 };
 
 function tmpSwarmDir(): string {
-	const d = fs.mkdtempSync(path.join(os.tmpdir(), 'swarm-matrix-'));
+	const d = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'swarm-matrix-')));
 	fs.mkdirSync(path.join(d, '.swarm'), { recursive: true });
 	return d;
 }
