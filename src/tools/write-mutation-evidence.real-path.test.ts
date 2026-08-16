@@ -153,7 +153,11 @@ describe('write_mutation_evidence — real path validation (no mocks)', () => {
 		const escapedFile = path.join(escapeTarget, 'secret.txt');
 		fs.writeFileSync(escapedFile, 'secret');
 		const linkPath = path.join(swarmDir, 'escape-link');
-		fs.symlinkSync(escapeTarget, linkPath, 'dir');
+		fs.symlinkSync(
+			escapeTarget,
+			linkPath,
+			process.platform === 'win32' ? 'junction' : 'dir',
+		);
 
 		expect(() =>
 			validateSwarmPath(tempDir, path.join('escape-link', 'secret.txt')),

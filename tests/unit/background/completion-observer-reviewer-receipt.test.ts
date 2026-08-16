@@ -20,7 +20,10 @@ import {
 	_internals as workspaceSnapshotInternals,
 } from '../../../src/background/workspace-snapshot';
 import { resolveAutoReviewConfig } from '../../../src/config/schema';
-import { readTaskEvidence } from '../../../src/gate-evidence';
+import {
+	readTaskEvidence,
+	transitionTaskWorkflowEvidence,
+} from '../../../src/gate-evidence';
 import { readAllReceipts } from '../../../src/hooks/review-receipt';
 import { _internals as receiptCollectorInternals } from '../../../src/hooks/review-receipt-collector';
 import { captureReviewerScopeFileFingerprint } from '../../../src/hooks/reviewer-scope-file-fingerprint';
@@ -40,6 +43,7 @@ import {
 } from '../../../src/state';
 import { checkReviewerGate } from '../../../src/tools/update-task-status';
 import { installActiveScopeBinding } from '../../helpers/active-scope-binding';
+import { seedStageAPassed } from '../../helpers/task-workflow-evidence';
 
 function makeTempProject(): string {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'swarm-bgobs-receipt-'));
@@ -110,6 +114,7 @@ describe('background completion observer reviewer receipts', () => {
 	it('applies trusted Stage B completion to workflow evidence and the resolved-scope receipt', async () => {
 		const session = ensureAgentSession('parent_session');
 		session.taskWorkflowStates.set('1.1', 'coder_delegated');
+		const generation = await seedStageAPassed(dir, '1.1');
 
 		await recordPendingDelegation(dir, {
 			correlationId: 'ses_reviewer',
@@ -121,6 +126,7 @@ describe('background completion observer reviewer receipts', () => {
 			swarmPrefixedAgent: 'reviewer',
 			planTaskId: '1.1',
 			evidenceTaskId: '1.1',
+			workflowGeneration: generation,
 			prompt: {
 				text: 'TASK: 1.1\nCHECK: [security, correctness]',
 				chars: 40,
@@ -139,7 +145,7 @@ describe('background completion observer reviewer receipts', () => {
 		await observer.event(
 			syntheticPartEvent(
 				'<task id="ses_reviewer" state="completed">\n' +
-					'<task_result>VERDICT: APPROVED\nRISK: LOW\nISSUES: none\nFIXES: none</task_result>\n' +
+					'<task_result>[REVIEWED] | 1.1 | APPROVED | no issues\nVERDICT: APPROVED\nRISK: LOW\nISSUES: none\nFIXES: none</task_result>\n' +
 					'</task>',
 			),
 		);
@@ -164,6 +170,7 @@ describe('background completion observer reviewer receipts', () => {
 		// could persist reviewer evidence and receipts for one completion.
 		const session = ensureAgentSession('parent_session');
 		session.taskWorkflowStates.set('1.1', 'coder_delegated');
+		const generation = await seedStageAPassed(dir, '1.1');
 		await recordPendingDelegation(dir, {
 			correlationId: 'ses_duplicate',
 			jobId: 'job_duplicate',
@@ -174,6 +181,7 @@ describe('background completion observer reviewer receipts', () => {
 			swarmPrefixedAgent: 'reviewer',
 			planTaskId: '1.1',
 			evidenceTaskId: '1.1',
+			workflowGeneration: generation,
 			prompt: {
 				text: 'TASK: 1.1\nCHECK: [correctness]',
 				chars: 30,
@@ -190,7 +198,7 @@ describe('background completion observer reviewer receipts', () => {
 		});
 		const event = syntheticPartEvent(
 			'<task id="ses_duplicate" state="completed">\n' +
-				'<task_result>VERDICT: APPROVED\nRISK: LOW\nISSUES: none\nFIXES: none</task_result>\n' +
+				'<task_result>[REVIEWED] | 1.1 | APPROVED | no issues\nVERDICT: APPROVED\nRISK: LOW\nISSUES: none\nFIXES: none</task_result>\n' +
 				'</task>',
 		);
 
@@ -294,6 +302,11 @@ describe('background completion observer reviewer receipts', () => {
 				coderCallID: 'coder-bg-call',
 			})?.status,
 		).toBe('ready');
+		await transitionTaskWorkflowEvidence(dir, '1.1', {
+			type: 'stage_a_passed',
+			expectedGeneration: 1,
+			transitionId: 'reviewer-receipt-stage-a',
+		});
 
 		const reviewerArgs = {
 			subagent_type: 'reviewer',
@@ -318,6 +331,7 @@ describe('background completion observer reviewer receipts', () => {
 			swarmPrefixedAgent: 'reviewer',
 			planTaskId: '1.1',
 			evidenceTaskId: '1.1',
+			workflowGeneration: 1,
 			prompt: {
 				text: reviewerArgs.prompt,
 				chars: reviewerArgs.prompt.length,
@@ -328,7 +342,7 @@ describe('background completion observer reviewer receipts', () => {
 		});
 		await observer.event(
 			syntheticPartEvent(
-				'<task id="ses_reviewer_bg" state="completed">\n<task_result>VERDICT: APPROVED\nRISK: LOW\nISSUES: none\nFIXES: none</task_result>\n</task>',
+				'<task id="ses_reviewer_bg" state="completed">\n<task_result>[REVIEWED] | 1.1 | APPROVED | no issues\nVERDICT: APPROVED\nRISK: LOW\nISSUES: none\nFIXES: none</task_result>\n</task>',
 			),
 		);
 		expect(findByCorrelationId(dir, 'ses_reviewer_bg')?.status).toBe(

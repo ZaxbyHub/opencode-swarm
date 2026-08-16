@@ -21,6 +21,11 @@ import {
 	type GuardrailsConfig,
 	stripKnownSwarmPrefix,
 } from '../../config/schema';
+import {
+	getTaskWorkflowSnapshot,
+	readTaskEvidence,
+	transitionTaskWorkflowEvidence,
+} from '../../gate-evidence.js';
 import { loadPlan } from '../../plan/manager';
 import { getExecutor } from '../../sandbox/executor';
 import { createScopeLeaseRenewalTracker } from '../../scope/scope-lease-renewal';
@@ -30,6 +35,7 @@ import {
 	getReviewerScopeGenerationForCoderCall,
 	recordReviewerScopeGenerationFileFingerprint,
 	swarmState,
+	updateTaskWorkflowCache,
 } from '../../state';
 import { telemetry } from '../../telemetry.js';
 import { log, warn } from '../../utils';
@@ -41,6 +47,7 @@ import {
 	TRANSIENT_STATUS_CODES,
 } from '../../utils/provider-error-classification';
 import { computeSpecDiff } from '../../utils/spec-hash';
+import { isStrictTaskId } from '../../validation/task-id.js';
 import { resolveAgentConflict } from '../conflict-resolution';
 import { extractCurrentPhaseFromPlan } from '../extractors';
 import { normalizeToolName } from '../normalize-tool-name';
@@ -132,7 +139,7 @@ export function enforceSpecDriftGate(
 
 		let message =
 			`SPEC_DRIFT_BLOCK: tool "${toolName}" is blocked because .swarm/spec-staleness.json exists. ` +
-			'Run /swarm clarify to update the spec, or /swarm acknowledge-spec-drift to dismiss, then retry.';
+			'Run /swarm clarify to enter spec repair mode. Clarify alone does not clear drift: rewrite the spec so recovery can reconcile it, or run /swarm acknowledge-spec-drift to dismiss, then retry.';
 
 		if (diffInfo) {
 			const sectionSummary =
@@ -566,7 +573,7 @@ export function createGuardrailsHooks(
 	>();
 	const pendingGateTasksBySession = new Map<
 		string,
-		Map<string, { sessionID: string; taskId: string }>
+		Map<string, { sessionID: string; taskId: string; generation: number }>
 	>();
 	const takePendingGateTask = (sessionID: string, callID: string) => {
 		const sessionTasks = pendingGateTasksBySession.get(sessionID);
@@ -581,6 +588,7 @@ export function createGuardrailsHooks(
 		sessionID: string,
 		callID: string,
 		taskId: string,
+		generation: number,
 	): void => {
 		let sessionTasks = pendingGateTasksBySession.get(sessionID);
 		if (!sessionTasks) {
@@ -600,7 +608,7 @@ export function createGuardrailsHooks(
 				'GATE_RECEIPT_CAPACITY: this session has too many live gate calls; wait for a pending gate call to finish',
 			);
 		}
-		sessionTasks.set(callID, { sessionID, taskId });
+		sessionTasks.set(callID, { sessionID, taskId, generation });
 	};
 	const scopeLeaseRenewal = createScopeLeaseRenewalTracker();
 	const rememberReviewerScopeWrite = (input: {
@@ -678,7 +686,17 @@ export function createGuardrailsHooks(
 				input.sessionID,
 			)?.currentTaskId;
 			if (taskId) {
-				rememberPendingGateTask(input.sessionID, input.callID, taskId);
+				const workflow = isStrictTaskId(taskId)
+					? getTaskWorkflowSnapshot(
+							await readTaskEvidence(effectiveDirectory, taskId),
+						)
+					: null;
+				rememberPendingGateTask(
+					input.sessionID,
+					input.callID,
+					taskId,
+					workflow?.generation ?? 0,
+				);
 			}
 		}
 		try {
@@ -713,6 +731,13 @@ export function createGuardrailsHooks(
 										sessionID: input.sessionID,
 										taskId:
 											testSession.currentTaskId ?? `${input.sessionID}:unknown`,
+										generation:
+											testSession.currentTaskId &&
+											isStrictTaskId(testSession.currentTaskId)
+												? (testSession.taskWorkflowCache?.get(
+														testSession.currentTaskId,
+													)?.generation ?? 0)
+												: 0,
 									}
 								: undefined;
 						})()
@@ -750,9 +775,7 @@ export function createGuardrailsHooks(
 				// Track gate tools
 				if (
 					isGateTool(input.tool) &&
-					pendingGateTask?.sessionID === input.sessionID &&
-					pendingGateTask.taskId ===
-						(session.currentTaskId ?? `${input.sessionID}:unknown`)
+					pendingGateTask?.sessionID === input.sessionID
 				) {
 					const taskId = pendingGateTask.taskId;
 					if (!session.gateLog.has(taskId)) {
@@ -773,6 +796,26 @@ export function createGuardrailsHooks(
 								timestamp: Date.now(),
 								code: verdict.code,
 							};
+							if (verdict.kind === 'fail' && isStrictTaskId(taskId))
+								try {
+									const updated = await transitionTaskWorkflowEvidence(
+										effectiveDirectory,
+										taskId,
+										{
+											type: 'stage_a_failed',
+											expectedGeneration: pendingGateTask.generation,
+											transitionId: `pre-check:${input.callID}`,
+										},
+									);
+									const next = getTaskWorkflowSnapshot(updated);
+									session.taskWorkflowStates.set(taskId, next.state);
+									updateTaskWorkflowCache(session, taskId, next);
+								} catch (err) {
+									warn('Failed to persist Stage A failure', {
+										taskId,
+										error: String(err),
+									});
+								}
 						} else if (verdict.kind === 'pass') {
 							if (
 								session.lastGateFailure?.taskId === taskId &&
@@ -781,19 +824,31 @@ export function createGuardrailsHooks(
 							) {
 								session.lastGateFailure = null;
 							}
-							if (session.currentTaskId === taskId) {
-								try {
-									advanceTaskState(session, taskId, 'pre_check_passed');
-								} catch (err) {
-									// Non-fatal: state may already be at or past pre_check_passed
-									warn(
-										'Failed to advance task state after pre_check_batch pass',
-										{
-											taskId,
-											error: String(err),
-										},
-									);
-								}
+							if (!isStrictTaskId(taskId)) {
+								advanceTaskState(session, taskId, 'pre_check_passed');
+							}
+							try {
+								const updated = await transitionTaskWorkflowEvidence(
+									effectiveDirectory,
+									taskId,
+									{
+										type: 'stage_a_passed',
+										expectedGeneration: pendingGateTask.generation,
+										transitionId: `pre-check:${input.callID}`,
+									},
+								);
+								const next = getTaskWorkflowSnapshot(updated);
+								session.taskWorkflowStates.set(taskId, next.state);
+								updateTaskWorkflowCache(session, taskId, next);
+							} catch (err) {
+								// Non-fatal: state may already be at or past pre_check_passed
+								warn(
+									'Failed to advance task state after pre_check_batch pass',
+									{
+										taskId,
+										error: String(err),
+									},
+								);
 							}
 						}
 					} else {

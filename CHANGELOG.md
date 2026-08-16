@@ -1,5 +1,70 @@
 # Changelog
 
+## [7.141.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.140.6...v7.141.0) (2026-08-16)
+
+
+### Features
+
+* **context:** wire graph delivery into agent prompts, lane dispatch, and skills ([0f35ecd](https://github.com/ZaxbyHub/opencode-swarm/commit/0f35ecd793507470f8eafbf07247fc7ff546c69a))
+* **context:** wire graph delivery into agent prompts, lane dispatch, and skills ([a97040c](https://github.com/ZaxbyHub/opencode-swarm/commit/a97040cfe2432577137df80ecfd4dad80c1966bb))
+* **test-runner:** add exact native targets and worktree-safe tools ([f6f543f](https://github.com/ZaxbyHub/opencode-swarm/commit/f6f543f3803dab123583b2807eb2ce1b2a24c7c3))
+
+
+### Bug Fixes
+
+* **context:** reserve suffix headroom in orientation overflow guard and close review findings ([d676e02](https://github.com/ZaxbyHub/opencode-swarm/commit/d676e024628686308ee3b93b21a4fd706a0976c7))
+* **knowledge:** enforce canonical source taxonomy and promotion independence (review F-001/F-003) ([eed5206](https://github.com/ZaxbyHub/opencode-swarm/commit/eed5206b0fb78816d678528e1a4c4da21be09e86))
+* **knowledge:** normalize outcome and source semantics end to end ([ce5c97a](https://github.com/ZaxbyHub/opencode-swarm/commit/ce5c97a04d146d3474e354ae5189732685513f13))
+* **knowledge:** normalize outcome and source semantics end to end ([9415c58](https://github.com/ZaxbyHub/opencode-swarm/commit/9415c58d9c21f486ed0b007d6702057b17d3e006))
+* **knowledge:** pin canonical source set in matrix; docs enumeration includes CONTRADICTED ([434a4cd](https://github.com/ZaxbyHub/opencode-swarm/commit/434a4cd6c35faebe6549602cf352b16f13fbd174))
+* **observability:** repoint knowledge_receipt_transition producer citation to post-format line ([9b69140](https://github.com/ZaxbyHub/opencode-swarm/commit/9b69140f9bed6068dbcddc1b22784da49b2de447))
+* **test-runner:** close review feedback and sync main ([92628d8](https://github.com/ZaxbyHub/opencode-swarm/commit/92628d85695145bccfe856a60ca0b3b145ef813d))
+
+## [7.140.6](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.140.5...v7.140.6) (2026-08-15)
+
+
+### Bug Fixes
+
+* **pr-review:** repair benign lane-output shape defects and record degraded coverage instead of aborting ([4778eec](https://github.com/ZaxbyHub/opencode-swarm/commit/4778eec92595c95da090666eed65fdf4324d9e13))
+
+## [7.140.5](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.140.4...v7.140.5) (2026-08-15)
+
+
+### Bug Fixes
+
+* **workflow:** harden task-repair audit trail against review feedback ([f6623d6](https://github.com/ZaxbyHub/opencode-swarm/commit/f6623d62de9e8c59731c928814781a2a892d6dff))
+* **workflow:** make task transitions transactional and recoverable ([54a3a63](https://github.com/ZaxbyHub/opencode-swarm/commit/54a3a6380cab2d3c2a142676b6ecbdea465a1556))
+
+## [7.140.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.140.3...v7.140.4) (2026-08-15)
+
+
+### Bug Fixes
+
+* **#2131:** sdd-mutations test fixture — use full openspec structure ([fd9053d](https://github.com/ZaxbyHub/opencode-swarm/commit/fd9053dae657be5647f9910c96c4c3e11433d3f6))
+* **#2131:** update progressive-disclosure ratchet baselines ([69b3c63](https://github.com/ZaxbyHub/opencode-swarm/commit/69b3c6358c84811224c9873c41c7f6e45c487d75))
+* **#2131:** use realpathSync.native + case-insensitive paths on Windows ([c16d2b2](https://github.com/ZaxbyHub/opencode-swarm/commit/c16d2b22184f494a3fdef8dde5ce0bbe4c9a3d9b))
+* **knowledge:** make receipt state authoritative ([7b4d6f4](https://github.com/ZaxbyHub/opencode-swarm/commit/7b4d6f4fef1dc91cb27ecfc8742b51f8e48ea803))
+* **skills:** close deferred [#2131](https://github.com/ZaxbyHub/opencode-swarm/issues/2131) hardening (C, D, E, F, G-drift + residual B) ([defc922](https://github.com/ZaxbyHub/opencode-swarm/commit/defc9223255c666b7f379b86085ccf83495c6459))
+* **test:** avoid bare tmpdir() in afterEach reset (FR-011 gate) ([190e280](https://github.com/ZaxbyHub/opencode-swarm/commit/190e2806ca956bf76345790fb20bb66adba1baa0))
+* **test:** case-insensitive path comparison in junction test ([b0bb46d](https://github.com/ZaxbyHub/opencode-swarm/commit/b0bb46daa0b826fe1ea4159f9a1ce32103f11a7a))
+* **test:** remove double .native deref in cleanup test mock ([a381605](https://github.com/ZaxbyHub/opencode-swarm/commit/a381605b3fcb279a98fc793baef94ca338e8324e))
+* **test:** use realpathSync.native in junction test for Windows 8.3 ([7a1f7ea](https://github.com/ZaxbyHub/opencode-swarm/commit/7a1f7ea7ccd7490bb1387eda9de45ff0ae9a9e43))
+
+## [7.140.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.140.2...v7.140.3) (2026-08-15)
+
+
+### Bug Fixes
+
+* **compaction:** close residual feedback gaps from [#2154](https://github.com/ZaxbyHub/opencode-swarm/issues/2154) review ([b38fa8f](https://github.com/ZaxbyHub/opencode-swarm/commit/b38fa8fc5531037f6163c2ffe98c53055a9f4dad))
+
+## [7.140.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.140.1...v7.140.2) (2026-08-14)
+
+
+### Bug Fixes
+
+* **pr-review:** recover runtime friction and restore checkout ([50033bc](https://github.com/ZaxbyHub/opencode-swarm/commit/50033bc1e0a0d943433701042fed90b2a791f7fe))
+* **pr-workflow:** close review recovery feedback ([034dae7](https://github.com/ZaxbyHub/opencode-swarm/commit/034dae71070c5b48d251967b47904e9de444bbef))
+
 ## [7.140.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.140.0...v7.140.1) (2026-08-14)
 
 

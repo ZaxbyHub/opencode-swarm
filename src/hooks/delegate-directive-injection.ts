@@ -193,12 +193,16 @@ export async function injectDelegateDirectivesBefore(
 			? (extractCurrentPhaseFromPlan(plan) ??
 				`Phase ${plan.current_phase ?? 1}`)
 			: undefined;
+		const taskId = /\btask[_-]?id\s*[:=]\s*([A-Za-z0-9._-]{1,80})/i.exec(
+			promptRaw,
+		)?.[1];
 
 		const { entries, trace_id } = await injectForDelegate({
 			directory,
 			agent: targetAgent,
 			expectedTools: defaultExpectedToolsForAgent(targetAgent),
 			taskTitle: promptRaw.slice(0, 800),
+			taskId,
 			sessionId,
 			phase: phaseLabel,
 			config,

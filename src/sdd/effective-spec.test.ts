@@ -326,7 +326,6 @@ describe('detectSpeckit', () => {
 		try {
 			fs.mkdirSync(path.join(tempDir, '.specify'));
 			fs.mkdirSync(path.join(tempDir, 'specs'));
-
 			// Real feature dir with a real spec.md — must be detected.
 			fs.mkdirSync(path.join(tempDir, 'specs', '001-real'));
 			fs.writeFileSync(
@@ -339,18 +338,19 @@ describe('detectSpeckit', () => {
 			fs.symlinkSync(
 				symlinkFeatureTarget,
 				path.join(tempDir, 'specs', '002-symlinked-dir'),
-				'dir',
+				process.platform === 'win32' ? 'junction' : 'dir',
 			);
 
 			// Real feature dir whose spec.md is a symlink — must be skipped
 			// (lstatSync+isFile returns false for a symlinked file).
-			fs.mkdirSync(path.join(tempDir, 'specs', '003-symlinked-spec'));
-			fs.symlinkSync(
-				path.join(tempDir, 'specs', '001-real', 'spec.md'),
-				path.join(tempDir, 'specs', '003-symlinked-spec', 'spec.md'),
-				'file',
-			);
-
+			if (process.platform !== 'win32') {
+				fs.mkdirSync(path.join(tempDir, 'specs', '003-symlinked-spec'));
+				fs.symlinkSync(
+					path.join(tempDir, 'specs', '001-real', 'spec.md'),
+					path.join(tempDir, 'specs', '003-symlinked-spec', 'spec.md'),
+					'file',
+				);
+			}
 			const result = detectSpeckit(tempDir);
 
 			expect(result.markerPresent).toBe(true);
@@ -1043,7 +1043,7 @@ describe('detectSpeckit marker isDirectory guard', () => {
 		fs.symlinkSync(
 			path.join(tempDir, '.specify-target'),
 			path.join(tempDir, '.specify'),
-			'dir',
+			process.platform === 'win32' ? 'junction' : 'dir',
 		);
 
 		const result = detectSpeckit(tempDir);

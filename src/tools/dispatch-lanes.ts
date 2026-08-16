@@ -8,6 +8,11 @@ import {
 	CLEAN_TEMPLATES,
 } from '../background/candidate-contract.js';
 import {
+	hasLaneOutputBeenDelivered,
+	markLaneOutputDelivered,
+	resetLaneDeliveryStoreForTests,
+} from '../background/lane-delivery-store.js';
+import {
 	buildLaneOutputPreview,
 	readLaneOutput,
 	storeLaneOutput,
@@ -53,6 +58,7 @@ import {
 	recordPrReviewValidationBatch,
 	validatePrReviewDiscoveryLaneCompletion,
 } from '../hooks/pr-workflow-gate.js';
+import { buildLaneOrientationBlock } from '../hooks/repo-graph-injection.js';
 import type { ParallelDispatcher } from '../parallel/dispatcher/parallel-dispatcher.js';
 import { createParallelDispatcher } from '../parallel/dispatcher/parallel-dispatcher.js';
 import { swarmState } from '../state.js';
@@ -130,42 +136,26 @@ const CREATE_FAILURE_STATUS_KEYS = new Set([
 const AGENT_NAME_SEPARATORS = ['_', '-', ' '] as const;
 
 /**
- * Bound on how many "already delivered lane output" keys we remember
- * (invariant 8: module-level state must have an explicit eviction strategy).
+ * Lane-output redelivery dedupe (issue #1988 C7, plan §7.4).
  * `collect_lane_results` is polled repeatedly by the PR-review protocol; once
  * a settled lane's output has been delivered once, re-delivering the same
  * bounded preview on every subsequent poll is the dominant controller-context
- * driver behind PR-review compaction loops (see S1.1). This Set tracks which
- * `${batchId}\0${laneId}\0${digest}` keys have already been sent so later
- * polls can omit the `output` field (setting `output_omitted_repeat: true`
- * instead) while still returning every other metadata field unchanged.
+ * driver behind PR-review compaction loops (see S1.1). Delivery state is
+ * tracked per `${batchId}\0${laneId}\0${digest}` key so later polls can omit
+ * the `output` field (setting `output_omitted_repeat: true` instead) while
+ * still returning every other metadata field unchanged.
  *
- * This is in-memory by design: a process restart re-delivers each preview
- * once more, which is harmless because `output` is only ever suppressed
- * when BOTH a digest AND a durable ref (`output_ref`, recoverable via
- * `retrieve_lane_output`) are present. If either is missing — e.g. the
- * artifact write failed (disk full, permission error) or the text was too
- * large to store — this falls open and keeps delivering `output` inline on
- * every poll, since there would otherwise be no way to recover the text.
- *
- * Cross-session caveat: When two sessions in different directories reuse the
- * same `batch_id`, `laneId`, and produce byte-identical output (identical
- * digest), the second session's first inline delivery may be suppressed as
- * though already delivered; subsequent polls correctly return metadata and
- * `output_ref`. This is degraded-not-broken because `output_ref` is always
- * returned and `retrieve_lane_output` recovers the full text.
+ * The state lives in `src/background/lane-delivery-store.ts`: keyed by the
+ * collecting session and persisted to `.swarm/lane-delivery-cache.json`
+ * (bounded 1024 keys, cross-session FIFO, best-effort write, fail-open load)
+ * so dedupe survives plugin restarts and compaction cycles within a session.
+ * Session keying also removes the old global-Set cross-session false
+ * suppression (two sessions reusing batch_id/laneId/digest). `output` is only
+ * ever suppressed when BOTH a digest AND a durable ref (`output_ref`,
+ * recoverable via `retrieve_lane_output`) are present; if either is missing
+ * — e.g. the artifact write failed — delivery falls open and keeps returning
+ * the text inline, since there would otherwise be no way to recover it.
  */
-const MAX_TRACKED_DELIVERED_LANE_OUTPUTS = 1024;
-const deliveredLaneOutputs = new Set<string>();
-
-/** FIFO-evict the oldest delivered-output key when the set exceeds the bound. */
-function evictDeliveredLaneOutputsIfOverBound(): void {
-	while (deliveredLaneOutputs.size > MAX_TRACKED_DELIVERED_LANE_OUTPUTS) {
-		const oldestKey = deliveredLaneOutputs.values().next().value;
-		if (oldestKey === undefined) break;
-		deliveredLaneOutputs.delete(oldestKey);
-	}
-}
 
 /**
  * Formats a Zod issue list for error output, bounded to the first
@@ -434,6 +424,12 @@ const DispatchLanesArgsSchema = z.object({
 		.optional()
 		.describe(
 			'Per-lane timeout in milliseconds. For blocking dispatch this covers session create and prompt execution; for async dispatch this covers launch only, never lane runtime.',
+		),
+	orientation: z
+		.boolean()
+		.optional()
+		.describe(
+			'Prepend a bounded, deterministic repo-graph orientation block (mission-relevant files, repo hubs, freshness line) to common_prompt when the repo graph is fresh and relevant. No schema default: availability depends on graph state, resolved at execute time (omitted ⇒ attempted, skipped when no fresh graph exists). Explicitly false disables the block entirely.',
 		),
 });
 
@@ -775,6 +771,7 @@ export const _test_exports = {
 	applyCommonPrompt,
 	applyExplorerFormatSuffix,
 	applyPrWorkflowPromptContract,
+	augmentCommonPromptWithOrientation,
 	buildCollectResult,
 	buildReadOnlyTools,
 	buildLaneSessionCreateArgs,
@@ -790,12 +787,13 @@ export const _test_exports = {
 	DEFAULT_ASYNC_STALE_TIMEOUT_MS,
 	DEFAULT_COLLECT_TIMEOUT_MS,
 	/**
-	 * Clears the module-level `deliveredLaneOutputs` de-dupe set (see
-	 * S1.1) so tests can assert first-poll vs. repeat-poll behavior without
-	 * cross-test bleed-through.
+	 * Clears the lane-output delivery de-dupe state (see S1.1) so tests can
+	 * assert first-poll vs. repeat-poll behavior without cross-test
+	 * bleed-through. Delegates to the persistent lane-delivery store's
+	 * in-memory reset; disk state is untouched.
 	 */
 	resetDeliveredLaneOutputs: () => {
-		deliveredLaneOutputs.clear();
+		resetLaneDeliveryStoreForTests();
 	},
 	// Test-only export seam: lets tests exercise the S1.1 output-delivery
 	// de-duplication logic directly against in-memory record literals,
@@ -864,10 +862,14 @@ export async function executeDispatchLanes(
 		});
 	}
 
-	const common = applyCommonPrompt(
+	const orientedCommonPrompt = await augmentCommonPromptWithOrientation(
+		directory,
 		parsed.data.lanes,
 		parsed.data.common_prompt,
+		parsed.data.orientation,
+		context.sessionID,
 	);
+	const common = applyCommonPrompt(parsed.data.lanes, orientedCommonPrompt);
 	if (!common.ok) {
 		return failureResult({
 			failure_class: 'invalid_args',
@@ -963,10 +965,14 @@ export async function executeDispatchLanesAsync(
 		});
 	}
 
-	const common = applyCommonPrompt(
+	const orientedCommonPrompt = await augmentCommonPromptWithOrientation(
+		directory,
 		parsed.data.lanes,
 		parsed.data.common_prompt,
+		parsed.data.orientation,
+		context.sessionID,
 	);
+	const common = applyCommonPrompt(parsed.data.lanes, orientedCommonPrompt);
 	if (!common.ok) {
 		return asyncFailureResult({
 			failure_class: 'invalid_args',
@@ -1070,7 +1076,7 @@ export async function executeDispatchLanesAsync(
 				// assertCurrentCheckoutHead.
 				if (!resolvedBase) {
 					throw new Error(
-						`BLOCKED: PR_REVIEW could not resolve a merge base for base_ref="${parsed.data.base_ref}" and pr_head_sha=${parsed.data.pr_head_sha} in "${directory}". The ref may not exist locally — the PR-review preflight fetches only refs/pull/<N>/head, not the base branch. Fetch it and pass the remote-tracking form, then verify with: git -C "${directory}" fetch origin <base-branch> && git -C "${directory}" merge-base -- origin/<base-branch> ${parsed.data.pr_head_sha}`,
+						`BLOCKED: PR_REVIEW could not resolve a merge base for base_ref="${parsed.data.base_ref}" and pr_head_sha=${parsed.data.pr_head_sha} in "${directory}". The ref may not exist locally — the PR-review preflight fetches only refs/pull/<N>/head, not the base branch. Fetch it and pass the remote-tracking form using two separate standalone commands. First run: git -C "${directory}" fetch origin <base-branch>. Then run: git -C "${directory}" merge-base -- origin/<base-branch> ${parsed.data.pr_head_sha}`,
 					);
 				}
 				if (resolvedBase.toLowerCase() !== parsed.data.base_sha.toLowerCase()) {
@@ -1220,7 +1226,7 @@ export async function executeDispatchLanesAsync(
 								)
 							) {
 								throw new Error(
-									'BLOCKED: initial PR_REVIEW base dispatch requires exactly six lanes and max_concurrent: 6 at depth tier L (consolidated owned_workflow_lanes are allowed only at tiers S and M)',
+									`BLOCKED: initial PR_REVIEW base dispatch requires exactly six lanes and max_concurrent: 6 at depth tier L (consolidated owned_workflow_lanes are allowed only at tiers S and M); each lane owns exactly one dimension and may set workflow_lane to it, omitting owned_workflow_lanes; valid dimensions: ${PR_REVIEW_BASE_DIMENSION_IDS.join(', ')}`,
 								);
 							}
 						} else if (
@@ -1231,7 +1237,7 @@ export async function executeDispatchLanesAsync(
 							parsed.data.max_concurrent !== parsed.data.lanes.length
 						) {
 							throw new Error(
-								`BLOCKED: initial PR_REVIEW base dispatch at depth tier ${depthTier} requires between ${PR_REVIEW_BASE_LANE_FLOORS[depthTier]} and ${PR_REVIEW_BASE_DIMENSION_IDS.length} lanes whose owned_workflow_lanes partition all six dimensions exactly once, with max_concurrent equal to the lane count`,
+								`BLOCKED: initial PR_REVIEW base dispatch at depth tier ${depthTier} requires between ${PR_REVIEW_BASE_LANE_FLOORS[depthTier]} and ${PR_REVIEW_BASE_DIMENSION_IDS.length} lanes whose owned_workflow_lanes partition all six dimensions exactly once, with max_concurrent equal to the lane count; valid dimensions: ${PR_REVIEW_BASE_DIMENSION_IDS.join(', ')}; a lane with one dimension may set workflow_lane to it and omit owned_workflow_lanes`,
 							);
 						}
 					}
@@ -1572,6 +1578,7 @@ export async function executeCollectLaneResults(
 		parsed.data.batch_id,
 		records,
 		parsed.data.include_pending ?? parsed.data.wait !== true,
+		{ directory, sessionID: context.sessionID },
 	);
 	if (hostTimeouts.size > 0) {
 		result.message =
@@ -2085,7 +2092,8 @@ async function collectOnce(
 		let terminalStatus: 'completed' | 'error' = 'completed';
 		if (
 			record.mode === 'swarm-pr-review:base' ||
-			record.mode === 'swarm-pr-review:micro'
+			record.mode === 'swarm-pr-review:micro' ||
+			record.mode === 'swarm-pr-review:council'
 		) {
 			const artifact = output.output_ref
 				? (readLaneOutput(directory, output.output_ref)?.artifact ?? null)
@@ -2440,6 +2448,7 @@ function buildCollectResult(
 	batchId: string,
 	records: BackgroundDelegationRecord[],
 	includePending: boolean,
+	deliveryContext?: { directory?: string; sessionID?: string },
 ): CollectLaneResultsResult {
 	const laneResults = records
 		.filter(
@@ -2449,7 +2458,7 @@ function buildCollectResult(
 					record.status !== 'running' &&
 					record.status !== 'ingesting'),
 		)
-		.map((record) => recordToLaneResult(record, batchId));
+		.map((record) => recordToLaneResult(record, batchId, deliveryContext));
 	const completed = records.filter((record) => record.status === 'completed');
 	const failed = records.filter(
 		(record) =>
@@ -2486,6 +2495,7 @@ function buildCollectResult(
 function recordToLaneResult(
 	record: BackgroundDelegationRecord,
 	batchId: string,
+	deliveryContext?: { directory?: string; sessionID?: string },
 ): DispatchLaneResult {
 	const status =
 		record.status === 'error'
@@ -2509,10 +2519,17 @@ function recordToLaneResult(
 		outputRef
 	) {
 		const key = `${batchId}\0${laneId}\0${digest}`;
-		alreadyDelivered = deliveredLaneOutputs.has(key);
+		alreadyDelivered = hasLaneOutputBeenDelivered(
+			deliveryContext?.directory,
+			deliveryContext?.sessionID,
+			key,
+		);
 		if (!alreadyDelivered) {
-			deliveredLaneOutputs.add(key);
-			evictDeliveredLaneOutputsIfOverBound();
+			markLaneOutputDelivered(
+				deliveryContext?.directory,
+				deliveryContext?.sessionID,
+				key,
+			);
 		}
 	}
 	return {
@@ -2807,6 +2824,86 @@ type ApplyCommonPromptResult =
  * when no `commonPrompt` is provided, or shallow-copied lanes with rewritten
  * prompts when it is. Callers may treat the returned array as their own.
  */
+interface OrientationAugmentDeps {
+	buildBlock?: typeof buildLaneOrientationBlock;
+}
+
+/**
+ * Conservative headroom reserved inside the orientation overflow check for the
+ * LATER prompt-size appends (applyExplorerFormatSuffix and
+ * applyPrWorkflowPromptContract), each of which independently hard-fails the
+ * dispatch on MAX_PROMPT_CHARS. Without this reserve, a PR-review lane whose
+ * common_prompt + prompt + suffixes fit before could hard-fail purely because
+ * a fresh graph made an orientation block available (review finding F-09).
+ */
+const ORIENTATION_SUFFIX_RESERVE_CHARS = 5_000;
+
+/**
+ * Resolve the `orientation` arg into an augmented common_prompt (issue #1988 C2).
+ *
+ * Execute-time resolution (no zod default — a schema default cannot depend on
+ * graph state): `false` skips entirely; `true` or undefined attempts the block,
+ * and buildLaneOrientationBlock itself returns null unless a fresh graph
+ * exists, so undefined degrades to "false when no fresh graph".
+ *
+ * Overflow rule: the drop decision runs ONCE here, at the common+lane stage —
+ * max over lanes of (common_prompt + orientation + separator + lane.prompt +
+ * ORIENTATION_SUFFIX_RESERVE_CHARS) versus MAX_PROMPT_CHARS — BEFORE
+ * appending. If any lane would exceed the cap the block is dropped (debug
+ * log) rather than truncating content or failing dispatch. The reserve keeps
+ * typical suffix appends (fixed worst case ≈3.2k chars) out of failure
+ * territory they would not have reached without the block; extreme but
+ * schema-valid configurations (maxed item-id/owned-lane arrays) can exceed
+ * the reserve, and anything beyond it remains the caller's own size
+ * responsibility, as before this feature.
+ *
+ * Fail-open: any builder error degrades to the un-augmented common_prompt.
+ */
+async function augmentCommonPromptWithOrientation(
+	directory: string,
+	lanes: readonly { prompt: string }[],
+	commonPrompt: string | undefined,
+	orientation: boolean | undefined,
+	sessionID: string | undefined,
+	deps?: OrientationAugmentDeps,
+): Promise<string | undefined> {
+	if (orientation === false) return commonPrompt;
+	const buildBlock = deps?.buildBlock ?? buildLaneOrientationBlock;
+	let block: string | null = null;
+	try {
+		block = await buildBlock(
+			directory,
+			lanes.map((lane) => lane.prompt),
+			sessionID ? { sessionID } : undefined,
+		);
+	} catch (error) {
+		logger.log('lane orientation block failed open', {
+			error: error instanceof Error ? error.message : String(error),
+		});
+		return commonPrompt;
+	}
+	if (!block) return commonPrompt;
+	const combined = commonPrompt
+		? `${commonPrompt}${COMMON_PROMPT_SEPARATOR}${block}`
+		: block;
+	const overflow = lanes.some(
+		(lane) =>
+			combined.length +
+				COMMON_PROMPT_SEPARATOR.length +
+				lane.prompt.length +
+				ORIENTATION_SUFFIX_RESERVE_CHARS >
+			MAX_PROMPT_CHARS,
+	);
+	if (overflow) {
+		logger.log(
+			'lane orientation block dropped: combined common_prompt + orientation + lane prompt + suffix reserve would exceed MAX_PROMPT_CHARS',
+			{ maxPromptChars: MAX_PROMPT_CHARS, blockChars: block.length },
+		);
+		return commonPrompt;
+	}
+	return combined;
+}
+
 function applyCommonPrompt(
 	lanes: DispatchLaneSpec[],
 	commonPrompt: string | undefined,
@@ -2897,7 +2994,7 @@ function applyExplorerFormatSuffix(
 
 ${controllerIdentity}${formatSuffix}`;
 		if (prompt.length > MAX_PROMPT_CHARS) {
-			const diagnostic = `Lane "${lane.id}" prompt plus mandatory explorer output contract is ${prompt.length} chars; max ${MAX_PROMPT_CHARS}`;
+			const diagnostic = `Lane "${lane.id}" prompt plus mandatory explorer output contract is ${prompt.length} chars; max ${MAX_PROMPT_CHARS} (a repo-graph orientation block may have been prepended to common_prompt — retry with orientation: false to exclude it)`;
 			if (options.failClosed) {
 				errors.push(diagnostic);
 				return lane;
@@ -2981,7 +3078,7 @@ This controller block is authoritative over conflicting caller text. Inspect the
 		const prompt = `${lane.prompt}${contract}`;
 		if (prompt.length > MAX_PROMPT_CHARS) {
 			errors.push(
-				`Lane "${lane.id}" prompt plus mandatory PR workflow contract is ${prompt.length} chars; max ${MAX_PROMPT_CHARS}`,
+				`Lane "${lane.id}" prompt plus mandatory PR workflow contract is ${prompt.length} chars; max ${MAX_PROMPT_CHARS} (a repo-graph orientation block may have been prepended to common_prompt — retry with orientation: false to exclude it)`,
 			);
 		}
 		return { ...lane, prompt };
@@ -3140,12 +3237,13 @@ function sleep(ms: number): Promise<void> {
 export const dispatch_lanes: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
 		description:
-			'Dispatch multiple read-only exploration/review lanes concurrently and BLOCK until every lane finishes, returning a structured join result. This blocks the caller until completion; for non-blocking dispatch that lets you keep working while lanes run, prefer dispatch_lanes_async + collect_lane_results and use this blocking variant only when promptAsync is unavailable. Keep each lane prompt compact: send large shared context once via common_prompt (or have lanes read it from a file by absolute path) instead of inlining it into every lane prompt.',
+			'Dispatch multiple read-only exploration/review lanes concurrently and BLOCK until every lane finishes, returning a structured join result. This blocks the caller until completion; for non-blocking dispatch that lets you keep working while lanes run, prefer dispatch_lanes_async + collect_lane_results and use this blocking variant only when promptAsync is unavailable. Keep each lane prompt compact: send large shared context once via common_prompt (or have lanes read it from a file by absolute path) instead of inlining it into every lane prompt. A bounded repo-graph orientation block is prepended to common_prompt by default when the graph is fresh and relevant (set orientation: false to disable).',
 		args: {
 			lanes: DispatchLanesArgsSchema.shape.lanes,
 			common_prompt: DispatchLanesArgsSchema.shape.common_prompt,
 			max_concurrent: DispatchLanesArgsSchema.shape.max_concurrent,
 			timeout_ms: DispatchLanesArgsSchema.shape.timeout_ms,
+			orientation: DispatchLanesArgsSchema.shape.orientation,
 		},
 		execute: async (args: unknown, directory: string, ctx): Promise<string> => {
 			const result = await executeDispatchLanes(args, directory, {
@@ -3159,7 +3257,7 @@ export const dispatch_lanes: ReturnType<typeof createSwarmTool> =
 export const dispatch_lanes_async: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
 		description:
-			'Launch multiple read-only advisory lanes with OpenCode promptAsync and return IMMEDIATELY with a batch id and lane session handles (non-blocking). launch_timeout_ms only bounds session creation and promptAsync acceptance; it is NOT a lane runtime timeout. After launching, keep working on non-dependent investigation while lanes run — poll incrementally with collect_lane_results (wait omitted or false) to process settled lanes as they complete, or use wait: true only at workflow boundaries where all results are needed. Keep each lane prompt compact: send large shared context once via common_prompt (or have lanes read it from a file by absolute path) instead of inlining it into every lane prompt, which can produce oversized or malformed tool-call JSON.',
+			'Launch multiple read-only advisory lanes with OpenCode promptAsync and return IMMEDIATELY with a batch id and lane session handles (non-blocking). launch_timeout_ms only bounds session creation and promptAsync acceptance; it is NOT a lane runtime timeout. After launching, keep working on non-dependent investigation while lanes run — poll incrementally with collect_lane_results (wait omitted or false) to process settled lanes as they complete, or use wait: true only at workflow boundaries where all results are needed. Keep each lane prompt compact: send large shared context once via common_prompt (or have lanes read it from a file by absolute path) instead of inlining it into every lane prompt, which can produce oversized or malformed tool-call JSON. A bounded repo-graph orientation block is prepended to common_prompt by default when the graph is fresh and relevant (set orientation: false to disable).',
 		args: {
 			lanes: DispatchLanesAsyncArgsSchema.shape.lanes,
 			common_prompt: DispatchLanesAsyncArgsSchema.shape.common_prompt,
@@ -3174,6 +3272,7 @@ export const dispatch_lanes_async: ReturnType<typeof createSwarmTool> =
 			scope: DispatchLanesAsyncArgsSchema.shape.scope,
 			trigger_evaluation: DispatchLanesAsyncArgsSchema.shape.trigger_evaluation,
 			feedback_inventory: DispatchLanesAsyncArgsSchema.shape.feedback_inventory,
+			orientation: DispatchLanesAsyncArgsSchema.shape.orientation,
 		},
 		execute: async (args: unknown, directory: string, ctx): Promise<string> => {
 			const result = await executeDispatchLanesAsync(args, directory, {

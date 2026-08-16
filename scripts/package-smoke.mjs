@@ -52,6 +52,8 @@ export const REQUIRED_PROJECT_SKILL_SLUGS = [
 	'parallel-work-check',
 	'ci-fix-monitor',
 	'issue-tracer',
+	'orchestrating-subagents',
+	'durable-session-state',
 ];
 
 export const REQUIRED_EVALUATION_FIXTURE_IDS = [

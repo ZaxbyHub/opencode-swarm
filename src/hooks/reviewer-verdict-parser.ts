@@ -3,43 +3,53 @@
  * Change 2 / Task 2.3).
  *
  * Parses a reviewer's `DIRECTIVE_COMPLIANCE` block (VERIFIED / VIOLATED / N/A
- * lines) and reconciles it against the set of directives the reviewer was asked
- * to verify, emitting one receipt event per directive (tagged source:'reviewer'):
+ * lines) and reconciles it against the exact retrieval memberships the reviewer
+ * was asked to verify, committing one authoritative terminal per pair:
  *
- *   VERIFIED:<id>  → type:'applied'   (verified === honored)
- *   VIOLATED:<id>  → type:'violated'  (+ run any verification_predicate)
- *   N/A:<id>       → type:'n_a'        (neutral)
+ *   VERIFIED:<trace_id>:<entry_id> -> outcome:'applied'
+ *   VIOLATED:<trace_id>:<entry_id> -> outcome:'violated'
+ *   N/A:<trace_id>:<entry_id>      -> outcome:'n_a'
  *
- * Anti-spoofing: verdicts for IDs that were not in the verify-set are dropped.
- * A CRITICAL directive the reviewer never addressed gets a synthetic
- * `violated` / `reviewer_omitted` event. Fail-open: never throws.
+ * Anti-spoofing: verdicts for pairs that were not in the verify-set are dropped.
+ * An omitted CRITICAL pair gets a `violated` / `reviewer_omitted` terminal.
+ * Authority failures return typed uncertainty and never fabricate success.
  */
 
 import {
 	type DirectiveToVerify,
+	decodeDirectiveCorrelationId,
 	parseDirectivesToVerifyBlock,
 } from '../agents/reviewer-directive-compliance.js';
 import { stripKnownSwarmPrefix } from '../config/schema.js';
 import { runDirectivePredicate } from '../services/directive-predicate-runner.js';
 import { escalateViolatedEntries } from './knowledge-escalator.js';
-import { newTraceId, recordKnowledgeEvent } from './knowledge-events.js';
+import { recordKnowledgeEvent } from './knowledge-events.js';
+import { validateAndCommitTerminalBatch } from './knowledge-receipt-ledger.js';
 import { parseDelegationArgs } from './skill-propagation-gate.js';
+
+/** Narrow dependency seam for isolated reconciliation ordering tests. */
+export const _internals = {
+	validateAndCommitTerminalBatch,
+	recordKnowledgeEvent,
+	runDirectivePredicate,
+	escalateViolatedEntries,
+};
 
 export type ReviewerVerdict = 'verified' | 'violated' | 'n_a';
 
 export interface ParsedReviewerVerdict {
-	id: string;
+	trace_id: string;
+	entry_id: string;
 	verdict: ReviewerVerdict;
 	/** evidence=... (VERIFIED/VIOLATED) or reason=... (N/A). */
 	evidence?: string;
 }
 
-// VERIFIED:<id> evidence=...
-// VIOLATED:<id> evidence=...
-// N/A:<id> reason=...
-// IDs are permissive (UUIDs or human ids); evidence/reason runs to end-of-line.
+// Correlation tokens are URI-encoded by the prompt renderer, so ':' remains a
+// safe pair delimiter even when either underlying identifier contains one.
+// Evidence/reason runs to end-of-line or the next verdict on the same line.
 const VERDICT_PATTERN =
-	/\b(VERIFIED|VIOLATED|N\/A)\s*:\s*([A-Za-z0-9._-]{1,80})(?:\s+(?:evidence|reason)\s*=\s*([^\n\r]+?))?(?=$|[\n\r]|\s+(?:VERIFIED|VIOLATED|N\/A)\b)/gi;
+	/\b(VERIFIED|VIOLATED|N\/A)\s*:\s*([^:\s]{1,512})\s*:\s*([^:\s]{1,512})(?:\s+(?:evidence|reason)\s*=\s*([^\n\r]+?))?(?=$|[\n\r]|\s+(?:VERIFIED|VIOLATED|N\/A)\b)/gi;
 
 /** Parse a reviewer transcript's DIRECTIVE_COMPLIANCE verdict lines. */
 export function parseReviewerDirectiveCompliance(
@@ -49,15 +59,17 @@ export function parseReviewerDirectiveCompliance(
 	const out: ParsedReviewerVerdict[] = [];
 	for (const m of text.matchAll(VERDICT_PATTERN)) {
 		const verb = m[1].toUpperCase();
-		const id = m[2];
-		const evidence = m[3]?.trim().slice(0, 280);
+		const traceId = decodeDirectiveCorrelationId(m[2]);
+		const entryId = decodeDirectiveCorrelationId(m[3]);
+		if (!traceId || !entryId) continue;
+		const evidence = m[4]?.trim().slice(0, 280);
 		const verdict: ReviewerVerdict =
 			verb === 'VERIFIED'
 				? 'verified'
 				: verb === 'VIOLATED'
 					? 'violated'
 					: 'n_a';
-		out.push({ id, verdict, evidence });
+		out.push({ trace_id: traceId, entry_id: entryId, verdict, evidence });
 	}
 	return out;
 }
@@ -80,9 +92,37 @@ export interface ReconcileReviewerVerdictsParams {
 }
 
 export interface ReconcileReviewerVerdictsResult {
-	emitted: Array<{ id: string; type: string; source: 'reviewer' }>;
-	omittedCriticals: string[];
+	emitted: Array<{
+		trace_id: string;
+		entry_id: string;
+		/** Legacy diagnostic alias. */
+		id: string;
+		type: string;
+		source: 'reviewer';
+	}>;
+	omittedCriticals: Array<{ trace_id: string; entry_id: string }>;
+	uncertainties: Array<{
+		trace_id: string;
+		entry_id?: string;
+		code: string;
+		uncertainty?: unknown;
+	}>;
 }
+
+function pairKey(traceId: string, entryId: string): string {
+	return JSON.stringify([traceId, entryId]);
+}
+
+type PendingTerminal = {
+	directive: DirectiveToVerify;
+	type: 'applied' | 'violated' | 'n_a';
+	reason?: string;
+	predicate_check?: {
+		predicate: string;
+		result: 'pass' | 'fail' | 'error';
+		detail: string;
+	};
+};
 
 /**
  * Reconcile reviewer verdicts against the verify-set and emit receipt events.
@@ -95,90 +135,232 @@ export async function reconcileReviewerVerdicts(
 	const result: ReconcileReviewerVerdictsResult = {
 		emitted: [],
 		omittedCriticals: [],
+		uncertainties: [],
 	};
-	try {
-		const verifyById = new Map(params.directivesToVerify.map((d) => [d.id, d]));
-		if (verifyById.size === 0) return result;
+	const verifyByPair = new Map(
+		params.directivesToVerify.map((d) => [pairKey(d.trace_id, d.entry_id), d]),
+	);
+	if (verifyByPair.size === 0) return result;
 
-		const verdicts = parseReviewerDirectiveCompliance(params.transcript);
-		const addressed = new Set<string>();
-		const violatedIds = new Set<string>();
-		const traceId = newTraceId();
-		const sessionId = params.sessionId ?? 'unknown';
-		const agent = params.agent ?? 'reviewer';
+	const verdictsByPair = new Map<string, ParsedReviewerVerdict[]>();
+	for (const verdict of parseReviewerDirectiveCompliance(params.transcript)) {
+		const key = pairKey(verdict.trace_id, verdict.entry_id);
+		if (!verifyByPair.has(key)) continue;
+		const existing = verdictsByPair.get(key) ?? [];
+		existing.push(verdict);
+		verdictsByPair.set(key, existing);
+	}
 
-		for (const v of verdicts) {
-			const directive = verifyById.get(v.id);
-			// Anti-spoofing: only honor verdicts for directives in the verify-set.
-			if (!directive) continue;
-			addressed.add(v.id);
-			const type = verdictToEventType(v.verdict);
+	const pending: PendingTerminal[] = [];
+	for (const [key, directive] of verifyByPair) {
+		const matching = verdictsByPair.get(key) ?? [];
+		if (matching.length > 1) {
+			result.uncertainties.push({
+				trace_id: directive.trace_id,
+				entry_id: directive.entry_id,
+				code: 'duplicate_verdict',
+				uncertainty:
+					'Reviewer emitted more than one verdict for the exact pair',
+			});
+			continue;
+		}
+		if (matching.length === 0) {
+			if (directive.priority !== 'critical') continue;
+			result.omittedCriticals.push({
+				trace_id: directive.trace_id,
+				entry_id: directive.entry_id,
+			});
+			pending.push({
+				directive,
+				type: 'violated',
+				reason: 'reviewer_omitted',
+			});
+			continue;
+		}
 
-			let predicateCheck:
-				| {
-						predicate: string;
-						result: 'pass' | 'fail' | 'error';
-						detail: string;
-				  }
-				| undefined;
-			// When the reviewer reports a violation and the directive ships a
-			// predicate, execute it and persist the machine result alongside.
-			if (v.verdict === 'violated' && directive.verification_predicate) {
-				const outcome = await runDirectivePredicate(
+		const verdict = matching[0];
+		if (verdict.verdict === 'verified' && !verdict.evidence?.trim()) {
+			// Issue #2031: VERIFIED is an authoritative applied terminal, so the
+			// reviewer's contract requires concrete, bounded evidence. Preserve the
+			// uncertainty and fail a critical pair closed instead of granting credit.
+			result.uncertainties.push({
+				trace_id: directive.trace_id,
+				entry_id: directive.entry_id,
+				code: 'reviewer_missing_evidence',
+				uncertainty: 'VERIFIED requires nonempty evidence',
+			});
+			if (directive.priority === 'critical') {
+				result.omittedCriticals.push({
+					trace_id: directive.trace_id,
+					entry_id: directive.entry_id,
+				});
+				pending.push({
+					directive,
+					type: 'violated',
+					reason: 'reviewer_missing_evidence',
+				});
+			}
+			continue;
+		}
+		const item: PendingTerminal = {
+			directive,
+			type: verdictToEventType(verdict.verdict),
+			reason: verdict.evidence,
+		};
+		if (verdict.verdict === 'violated' && directive.verification_predicate) {
+			try {
+				const outcome = await _internals.runDirectivePredicate(
 					directive.verification_predicate,
 					params.directory,
 				);
-				predicateCheck = {
+				item.predicate_check = {
 					predicate: directive.verification_predicate,
 					result: outcome.result,
 					detail: outcome.detail,
 				};
+			} catch (error) {
+				item.predicate_check = {
+					predicate: directive.verification_predicate,
+					result: 'error',
+					detail: error instanceof Error ? error.message : String(error),
+				};
 			}
+		}
+		pending.push(item);
+	}
 
-			await recordKnowledgeEvent(params.directory, {
-				type,
-				trace_id: traceId,
-				knowledge_id: v.id,
-				session_id: sessionId,
-				task_id: params.taskId,
-				phase: params.phase,
-				agent,
-				source: 'reviewer',
-				reason: v.evidence,
-				predicate_check: predicateCheck,
+	const groups = new Map<string, PendingTerminal[]>();
+	for (const item of pending) {
+		const groupKey = JSON.stringify([
+			item.directive.trace_id,
+			item.directive.session_id,
+			item.directive.cohort_id,
+			item.directive.source_link_id,
+			item.directive.prior_terminal_outcome,
+			item.directive.prior_terminal_event_id,
+		]);
+		const group = groups.get(groupKey) ?? [];
+		group.push(item);
+		groups.set(groupKey, group);
+	}
+
+	const violatedIds = new Set<string>();
+	const agent = params.agent ?? 'reviewer';
+	for (const group of groups.values()) {
+		const first = group[0].directive;
+		const remediationAuthorization =
+			first.prior_terminal_outcome === 'violated' &&
+			first.prior_terminal_event_id &&
+			group.some((item) => item.type !== 'violated')
+				? {
+						actor: 'reviewer-remediation' as const,
+						reason: 'reviewer_verified_remediation',
+						expected_event_id: first.prior_terminal_event_id,
+						expected_outcome: first.prior_terminal_outcome,
+					}
+				: undefined;
+		let committedEntries: Set<string>;
+		try {
+			const committed = await _internals.validateAndCommitTerminalBatch(
+				params.directory,
+				{
+					trace_id: first.trace_id,
+					session_id: first.session_id,
+					cohort_id: first.cohort_id,
+					source_link_id: first.source_link_id,
+					authorization: remediationAuthorization,
+					items: group.map((item) => ({
+						entry_id: item.directive.entry_id,
+						outcome: item.type,
+						source: 'reviewer',
+						reason: item.reason,
+					})),
+				},
+			);
+			if (!committed.ok) {
+				for (const item of group) {
+					result.uncertainties.push({
+						trace_id: item.directive.trace_id,
+						entry_id: item.directive.entry_id,
+						code: committed.code,
+						uncertainty: committed.detail,
+					});
+				}
+				continue;
+			}
+			committedEntries = new Set(
+				committed.accepted.map((terminal) => terminal.entry_id),
+			);
+			for (const rejected of committed.rejected) {
+				result.uncertainties.push({
+					trace_id: first.trace_id,
+					entry_id: rejected.entry_id || undefined,
+					code: rejected.reason,
+					uncertainty: 'Authoritative ledger rejected reviewer terminal',
+				});
+			}
+		} catch (error) {
+			for (const item of group) {
+				result.uncertainties.push({
+					trace_id: item.directive.trace_id,
+					entry_id: item.directive.entry_id,
+					code: 'ledger_exception',
+					uncertainty: error instanceof Error ? error.message : String(error),
+				});
+			}
+			continue;
+		}
+
+		// The authoritative batch call has returned and released its lock before
+		// any best-effort legacy diagnostic event is appended.
+		for (const item of group) {
+			if (!committedEntries.has(item.directive.entry_id)) continue;
+			try {
+				await _internals.recordKnowledgeEvent(params.directory, {
+					type: item.type,
+					trace_id: item.directive.trace_id,
+					knowledge_id: item.directive.entry_id,
+					session_id: item.directive.session_id,
+					task_id: params.taskId,
+					phase: params.phase,
+					agent,
+					source: 'reviewer',
+					reason: item.reason,
+					predicate_check: item.predicate_check,
+				});
+				result.emitted.push({
+					trace_id: item.directive.trace_id,
+					entry_id: item.directive.entry_id,
+					id: item.directive.entry_id,
+					type: item.type,
+					source: 'reviewer',
+				});
+				if (item.type === 'violated') {
+					violatedIds.add(item.directive.entry_id);
+				}
+			} catch (error) {
+				result.uncertainties.push({
+					trace_id: item.directive.trace_id,
+					entry_id: item.directive.entry_id,
+					code: 'diagnostic_event_failed',
+					uncertainty: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}
+	}
+
+	if (violatedIds.size > 0) {
+		try {
+			await _internals.escalateViolatedEntries(params.directory, [
+				...violatedIds,
+			]);
+		} catch (error) {
+			result.uncertainties.push({
+				trace_id: '',
+				code: 'escalation_failed',
+				uncertainty: error instanceof Error ? error.message : String(error),
 			});
-			if (type === 'violated') violatedIds.add(v.id);
-			result.emitted.push({ id: v.id, type, source: 'reviewer' });
 		}
-
-		// A CRITICAL directive the reviewer never addressed is a verdict gap:
-		// synthesize a violated/reviewer_omitted event so the gate sees it.
-		for (const d of params.directivesToVerify) {
-			if (d.priority !== 'critical') continue;
-			if (addressed.has(d.id)) continue;
-			result.omittedCriticals.push(d.id);
-			await recordKnowledgeEvent(params.directory, {
-				type: 'violated',
-				trace_id: traceId,
-				knowledge_id: d.id,
-				session_id: sessionId,
-				task_id: params.taskId,
-				phase: params.phase,
-				agent,
-				source: 'reviewer',
-				reason: 'reviewer_omitted',
-			});
-			violatedIds.add(d.id);
-			result.emitted.push({ id: d.id, type: 'violated', source: 'reviewer' });
-		}
-
-		// Repeat-mistake escalation (Change 3): escalate any directive that
-		// crossed the repeat-violation threshold after these verdicts.
-		if (violatedIds.size > 0) {
-			await escalateViolatedEntries(params.directory, [...violatedIds]);
-		}
-	} catch {
-		// fail-open
 	}
 	return result;
 }

@@ -1,14 +1,13 @@
 /**
  * Adversarial tests for drift injection feature in src/hooks/knowledge-injector.ts
  *
- * Tests cover attack vectors and edge cases for the drift injection block:
  * 1. readPriorDriftReports returns malformed/undefined structure → caught by try/catch
  * 2. buildDriftInjectionText returns oversized string (10,000 chars) → still prepended
  * 3. readPriorDriftReports returns array with null entry → handled safely
  * 4. buildDriftInjectionText throws synchronously → caught by try/catch
  * 5. readPriorDriftReports returns wrong type (empty string) → benign, no prepend
  * 6. cachedInjectionText is empty string "" → drift still prepended (not null check)
- * 7. Context budget stressed (totalChars > 75,000) → early return before drift injection
+ * file-scoped mock.module fixtures are reset through their control mocks.
  */
 
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
@@ -17,11 +16,8 @@ import type {
 	KnowledgeConfig,
 	MessageWithParts,
 } from '../../../src/hooks/knowledge-types.js';
-// (#1849) Identity is recovered from swarmState.activeAgent (primary) or the
-// last user message's info.agent (fallback) — never from a role:'system'
-// message. Fixtures set swarmState.activeAgent and stamp a consistent
-// sessionID on every message.
 import { swarmState } from '../../../src/state';
+import { installKnowledgeReceiptAuthorityStub } from '../../helpers/knowledge-receipt-authority.js';
 
 const SESSION_ID = 'drift-adv-session';
 
@@ -275,8 +271,10 @@ const realRecordKnowledgeEvent = injectorInternals.recordKnowledgeEvent;
 const realRecordKnowledgeShown = injectorInternals.recordKnowledgeShown;
 const realReadRecentEscalations = injectorInternals.readRecentEscalations;
 const realBuildEscalationBriefing = injectorInternals.buildEscalationBriefing;
+let restoreReceiptAuthority = () => {};
 
 afterEach(() => {
+	restoreReceiptAuthority();
 	injectorInternals.searchKnowledge = realSearchKnowledge;
 	injectorInternals.recordKnowledgeEvent = realRecordKnowledgeEvent;
 	injectorInternals.recordKnowledgeShown = realRecordKnowledgeShown;
@@ -291,6 +289,8 @@ function setSearchResults(results: RankedEntry[]): void {
 }
 
 function resetMocks(): void {
+	restoreReceiptAuthority =
+		installKnowledgeReceiptAuthorityStub(injectorInternals);
 	mock.clearAllMocks();
 	searchResults = [];
 	injectorInternals.searchKnowledge =

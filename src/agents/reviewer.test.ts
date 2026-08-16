@@ -182,3 +182,26 @@ describe('REVIEWER_PROMPT — ACCEPTANCE field (issue #1687 task 2.2)', () => {
 		);
 	});
 });
+
+describe('REVIEWER_PROMPT — repo_map blast radius directive (issue #1988 C1)', () => {
+	const agent = createReviewerAgent('test-model');
+	const prompt = agent.config.prompt ?? '';
+
+	it('DO (explicitly) directs repo_map blast_radius for uncovered changed files', () => {
+		const doStart = prompt.indexOf('DO (explicitly):');
+		const configStart = prompt.indexOf('## CONFIG STRICTNESS VERIFICATION');
+		const doSection = prompt.substring(doStart, configStart);
+		expect(doSection).toContain('repo_map action="blast_radius"');
+		expect(doSection).toContain('not covered by an injected REPO GRAPH block');
+	});
+
+	it('blast radius directive is positioned after the platform-compatibility check', () => {
+		const platformIndex = prompt.indexOf('VERIFY platform compatibility');
+		const blastIndex = prompt.indexOf('repo_map action="blast_radius"');
+		expect(blastIndex).toBeGreaterThan(platformIndex);
+	});
+
+	it('directive requires checking the listed dependents', () => {
+		expect(prompt).toContain('check the listed dependents');
+	});
+});

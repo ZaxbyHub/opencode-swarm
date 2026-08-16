@@ -955,9 +955,9 @@ describe('architect-prompt-adversarial: attack vectors for task 11.1', () => {
 
 		it('should scan for suspicious bracket patterns in instructions', () => {
 			const lines = modePlanSection.split('\n');
-
 			// Valid bracket patterns that ARE allowed (format tokens, examples, warnings)
 			const validPatterns = [
+				/\[PLANNING PROFILE DEFAULT[^\]]*\]/,
 				/\[COMPLETE\]/,
 				/\[IN PROGRESS\]/,
 				/\[BLOCKED\]/,

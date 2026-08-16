@@ -24,8 +24,18 @@ describe('buildSpecDriftAdvisory', () => {
 		expect(text).toContain('Stored spec hash: def456');
 		expect(text).toContain('Current spec hash: abc123');
 		expect(text).toContain('surface this warning to the user');
-		expect(text).toContain('/swarm clarify');
+		expect(text).not.toContain('/swarm clarify');
 		expect(text).toContain('/swarm acknowledge-spec-drift');
+	});
+
+	test('runtime drift guidance never claims clarification clears the block', () => {
+		const guardrailSource = fs.readFileSync(
+			path.resolve(__dirname, '../../../src/hooks/guardrails/tool-before.ts'),
+			'utf8',
+		);
+		expect(guardrailSource).not.toContain(
+			'/swarm clarify or /swarm acknowledge-spec-drift',
+		);
 	});
 
 	test('renders "(spec.md missing)" when currentHash is null', () => {

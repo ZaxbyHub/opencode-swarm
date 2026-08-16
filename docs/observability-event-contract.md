@@ -3,9 +3,9 @@
 Companion to `docs/evidence-and-telemetry.md` (evidence bundles + the legacy
 telemetry stream from a user's point of view) and `docs/engineering-invariants.md`
 (the invariant this PR establishes). This document is the contract definition for
-`src/observability/`: the canonical event envelope, the 40-entry event catalog,
+`src/observability/`: the canonical event envelope, the 41-entry event catalog,
 the legacy adapter, sampling/cardinality rules, the OTel mapping pin, and the
-exhaustive producer/consumer matrix across all sixteen known observability
+exhaustive producer/consumer matrix across all seventeen known observability
 stores in the repository.
 
 Issue: #2029. This is PR 01 of 23 in the observability sequence (#2029–#2051).
@@ -16,7 +16,7 @@ Issue: #2029. This is PR 01 of 23 in the observability sequence (#2029–#2051).
 
 **What this PR defines.** A single canonical `ObservabilityEvent` envelope
 (`src/observability/envelope.ts`), a discriminated catalog of every event kind
-the codebase emits today (`src/observability/catalog.ts`, 40 entries), a
+the codebase emits today (`src/observability/catalog.ts`, 41 entries), a
 relationship-validation function, a legacy-payload adapter, deterministic
 sampling and bounded-cardinality helpers, and a versioned OTel/OpenInference
 attribute-mapping table. It wires the envelope into the one live production
@@ -75,7 +75,7 @@ in production stops anything or is visible anywhere today — it is not.
 
 Defined in `src/observability/envelope.ts` as a zod schema (`z.infer`d for the
 `ObservabilityEvent` type). The schema is safe-parsed by the tests
-(`tests/unit/observability/envelope-roundtrip.test.ts`, all 40 kinds). It is **not** parsed by the
+(`tests/unit/observability/envelope-roundtrip.test.ts`, all 41 kinds). It is **not** parsed by the
 CI contract check, and **not** parsed on the `emit()` hot path; `createObservation` builds a plain
 object and never calls `.parse()`, because parsing would reallocate on every
 emit and would clone or reject `legacy.raw` (see §4).
@@ -182,13 +182,14 @@ those inputs before this change.
 
 ---
 
-## 5. The 40-entry catalog
+## 5. The 41-entry catalog
 
-Source: `src/observability/catalog.ts`. Exactly 40 entries = the 38 pre-existing members of
+Source: `src/observability/catalog.ts`. Exactly 41 entries = the 38 pre-existing members of
 `TelemetryEvent` (`src/telemetry.ts:15-91`) plus `agent_conflict_detected`
 (emitted in production via a force-cast past the type system before #2029)
 plus `close_archive_result` (issue #2030 — the structured close/archive
-result event).
+result event) plus `knowledge_receipt_transition` (issue #2031, the bounded
+diagnostic projection of authoritative receipt transitions).
 
 Legend: **Owner** is `futureOwnerIssue` when `consumers` is empty (permitted
 only together with an owner — an empty consumer list with no owner is a CI
@@ -465,13 +466,37 @@ row content, no session/task identifiers — so `operational` is the truthful
 privacy class. PR 16 will alarm on `archive_valid=false`; PR 20 will report the
 health facts.
 
+#### knowledge_receipt_transition
+Category `knowledge`, severity `info`, privacy `pseudonymous`. Producer
+`src/hooks/knowledge-receipt-observability.ts` after an authoritative V2 journal
+transition commits. Consumers: none; owner **#2047**. Retention: **#2045**.
+No workflow ID is always required: empty retrievals and uncertain legacy
+transitions may truthfully hold no trace, entry, session, task, or phase ID.
+When held, those IDs are copied without synthesis. The payload contains only a
+closed transition kind (including distinct application-marker commits), closed
+`reasonCode`, positive `schemaVersion`, positive `receiptSemantics` (issue
+#2032: the outcome/source meaning-contract version, currently `2` — distinct
+from the journal `schemaVersion` format gate, so health/reports consumers can
+distinguish producer behavior and migration uncertainty). An ABSENT
+`receiptSemantics` means the transition was emitted before this contract
+existed (pre-#2032): consumers MUST treat such events' outcome/source
+semantics as unknown, never default them to the current version. Optional
+IDs, and bounded `receiptOutcome`/`receiptSource` domain codes drawn from the
+canonical outcome/source taxonomy of `src/hooks/knowledge-receipt-ledger.ts`
+(`receiptSource: 'delegate'` marks every new delegate terminal; legacy missing
+source projects as `unknown`, never coerced). Those receipt
+domain values deliberately do not populate the canonical generic `outcome`.
+Arbitrary reason text and `nonTransientCircuit` are never accepted. This event
+is diagnostic FIFO data only; the canonical-root V2 receipt journal remains the
+sole authority. No live reader exists yet, so #2047 owns the future sink.
+
 ---
 
-## 6. The exhaustive producer/consumer matrix (16 rows)
+## 6. The exhaustive producer/consumer matrix (17 rows)
 
 **Every row carries a `file:line` citation, but those citations are
 UNGATED and go stale on any rebase that shifts a cited file.**
-`scripts/check-event-contract.ts` mechanically validates the 40-entry
+`scripts/check-event-contract.ts` mechanically validates the 41-entry
 *catalog* in §5 (catalog ↔ `TelemetryEvent` union parity, per-entry
 completeness) — it does not and cannot check this prose matrix. Treat a
 citation here as "verified as of `origin/main` `0060f48d`", not as a standing
@@ -494,7 +519,8 @@ deliberately different instruments: the catalog covers one store
 observability store in the repository at store granularity, including the ten
 this PR does not touch. Rows 1–12 come from a four-lane explorer sweep with a
 fifth-lane re-verification pass (`.agents/issue-traces/2029-observability-event-contract/03-localization-log.md`);
-rows 13–16 were added after a plan-critic round flagged them as missing.
+rows 13–16 were added after a plan-critic round flagged them as missing, and
+row 17 records the authoritative knowledge-receipt partition added by #2031.
 
 | # | Store | Writer (file:line) | Reader(s) (file:line) | Discriminator | Clock | Schema ver. | Correlation carried | Correlation MISSING | Close/archive | State class | Owner |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -502,8 +528,8 @@ rows 13–16 were added after a plan-critic round flagged them as missing.
 | 2 | `.swarm/context-telemetry.jsonl` | `src/context-map/telemetry.ts:154` | `src/context-map/telemetry.ts:181,225` → `src/commands/context-map-stats.ts:6,11` (sole non-test consumer, verified) | none (uniform shape) | ISO string | none | `task_id` only | `session_id`, agent identity beyond a free-text `agent_role` | **no** | operational | **#2037** |
 | 3 | `.swarm/skill-usage.jsonl` | `src/hooks/skill-usage-log.ts:233` | `readSkillUsageEntries:321`, `readSkillUsageEntriesTail:389`, `applySkillUsageFeedback:760` → `bumpKnowledgeConfidenceBatch` | `type` (marker variant only) | ISO string | none (`skillVersion` versions the *skill*, not the record) | `sessionID`, `agentName`, `taskID`, `skillPath` | no trace/span | **no** | derived | **#2038** |
 | 4 | `.swarm/events.jsonl` | ~30 call sites | `src/services/context-budget-service.ts:195` (line-count proxy for turn count — does NOT parse JSON); `src/hooks/curator.ts:1524` | **`event` OR `type`** (split across writers: `src/context/role-filter.ts:147`/`src/tools/phase-complete.ts:1571` use `event:`; `src/hooks/curator.ts:1759`/`src/hooks/full-auto-intercept.ts:269` use `type:`) | ISO string | none | inconsistent per writer | `sessionID` absent on `phase_complete`, `auto_oversight`, `context_filtered` | yes — `close.ts:275` | operational | **#2039** |
-| 5 | `<knowledgeStore>/knowledge-events.jsonl` | `src/hooks/knowledge-events.ts:384` | `curator-postmortem.ts:147`, `knowledge-receipt-validator.ts:162`, `knowledge-escalator.ts:232`, `phase-directives.ts:32`, `phase-complete-directive-gate.ts:108`, `knowledge-diagnostics.ts:313`, `learning-metrics.ts:160`, `curation-policy.ts:265` | `type` | ISO string | `schema_version` = 1 (richest producer on main) | `event_id`, `trace_id`, `session_id`, `task_id`, `phase`, `agent` | none material | yes — via `knowledge.jsonl` path, skipped when worktree is linked, `close.ts:1070` | governed content | **#2031**, #2032 |
-| 6 | `<knowledgeStore>/knowledge-application.jsonl` (legacy v2) | `src/hooks/knowledge-application.ts:87` | via knowledge store consumers | none | ISO string | none | `sessionId?`, `taskId?`, `phase?`, `knowledgeId` | `event_id`, `trace_id`; lossy — `n_a` is stored as `acknowledged` (`:267-271`) | via knowledge store | governed content | **#2031** |
+| 5 | `<knowledgeStore>/knowledge-events.jsonl` | `src/hooks/knowledge-events.ts` | `curator-postmortem.ts`, `knowledge-escalator.ts` (display-only escalation history), `knowledge-diagnostics.ts`, `learning-metrics.ts`; **no correctness reader** | `type` | ISO string | `schema_version` = 1 | `event_id`, `trace_id`, `session_id`, `task_id`, `phase`, `agent` | not authoritative; rows may be evicted and source values remain #2032-owned | follows the linked knowledge store; bounded FIFO | operational | #2032 (outcome/source normalization) |
+| 6 | `<knowledgeStore>/knowledge-application.jsonl` (legacy v2) | `src/hooks/knowledge-application.ts` | compatibility/diagnostic consumers only; gates consume row 17 | none | ISO string | none | `sessionId?`, `taskId?`, `phase?`, `knowledgeId` | `event_id`, `trace_id`; lossy — `n_a` is stored as `acknowledged` | via knowledge store | derived | #2032 |
 | 7 | `.swarm/evidence/{taskId}/trajectory.jsonl` | `src/hooks/trajectory-logger.ts:385` | `src/hooks/micro-reflector.ts:262`, `src/services/trajectory-cluster.ts:99` | none | ISO string | none | `agent`, `step` | `task_id`/`session_id`/`trace_id` **only in the path**, never the record body | yes — `evidence/` dir | derived | **#2036** (retention registry; #2041 owns *PRM session* trajectories, not this task-scoped store) |
 | 8 | `.swarm/trajectories/{sessionId}.jsonl` | `src/prm/trajectory-store.ts:80` | `src/prm/index.ts:275,279`, `src/consensus/corpus.ts:641` | none | ISO string | none | `agent`, `step` | `session_id` **only in the filename** | **no** | derived | **#2041** |
 | 9 | `.swarm/background-delegations.jsonl` | `src/background/pending-delegations.ts:716` | `pr-workflow-session-resolver.ts`, `pr-workflow-gate.ts`, `init-orphan-recovery.ts`, `delegation-gate/worktree-collision-ownership.ts` | `status` | **epoch-ms number** | `schemaVersion` 1\|2\|3 | `correlationId`, `parentSessionId`, `callID`, `jobId`, `planTaskId`, `evidenceTaskId`, `batchId`, `laneId`, `workflowLane`, `worktreeId` | no swarm-run id distinct from `parentSessionId` | **no — neither archived nor cleaned** | authoritative | **#2034** |
@@ -514,6 +540,7 @@ rows 13–16 were added after a plan-critic round flagged them as missing.
 | 14 | SQLite `memory_recall_usage` | `src/memory/sqlite-provider.ts:209-214` | memory-provider internal readers | `bundle_id` column | `timestamp` column, ISO string | none (migration-versioned schema, not row-versioned) | `bundle_id`, `run_id` (added migration v9) | no `session_id`/`task_id` column | **no** | derived | **#2036**, #2048 |
 | 15 | SQLite `memory_reward_events` | `src/memory/sqlite-provider.ts:286` | memory-provider internal readers | `verdict` column | `timestamp` column, ISO string | none | `memory_id`, `run_id`, `unit_id` | no `session_id`/`task_id` column | **no** | derived | **#2036**, #2048 |
 | 16 | `.swarm/pr-monitor/subscriptions.jsonl` | `src/background/pr-subscriptions.ts:26` (path constant `PR_SUBSCRIPTIONS_FILE`); writes serialized under `withEvidenceLock` | background PR-monitor poller (reads fold to latest snapshot per `correlationId`, lock-free) | full-record snapshot per line, folded by `correlationId` | ISO string (implementation-supplied) | none observed at the constant/module-doc level | `correlationId` | no explicit `sessionID`/`taskId` columns beyond `correlationId` | not itemized as archived by `/swarm close` in the localization sweep | operational | **#2042** |
+| 17 | canonical project `.swarm/knowledge-receipts-v2.jsonl` + rebuildable snapshot + closed-summary archive | `src/hooks/knowledge-receipt-ledger.ts` (`commitDisplayedMembership`, `validateAndCommitTerminalBatch`, phase-close/cutover transitions) | receipt validator/tool, architect/delegate/reviewer acknowledgment paths, application and phase gates, promotion, escalation/quarantine, verdict feedback, and destructive-policy checks | versioned transition `kind` | ISO lifecycle clocks plus monotonic sequence | V2 schema + explicit cutover version | exact `trace_id` + `entry_id`, session/phase/task IDs, criticality, terminal event/source/reason, truthful promotion correlation | absent legacy membership is explicitly `legacy_unverifiable`; no synthesized join | `/swarm close` may copy for forensics but never deletes live or within-grace authority; eligible closed summaries compact separately | authoritative | **#2031** |
 
 State classification legend: **authoritative** (the record IS the domain fact —
 plan, evidence, background-delegation ownership, council verdict);

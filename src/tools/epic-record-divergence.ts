@@ -168,6 +168,7 @@ export async function executeEpicRecordDivergence(
 }
 
 export const epic_record_divergence: ToolDefinition = createSwarmTool({
+	allowWorkingDirectoryOverride: true,
 	description:
 		'Record divergence between a completed task\'s declared scope and the files actually modified, for Epic Mode calibration (Capability D). Call this immediately after update_task_status sets status="completed". Appends one line to .swarm/epic/divergence.jsonl. Best-effort — never fails the calling agent. Use only when /swarm epic is on for the session.',
 	args: {

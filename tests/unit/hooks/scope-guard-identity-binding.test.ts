@@ -58,6 +58,7 @@ describe('scope guard identity authorization', () => {
 		const created = createSafeTestDir('scope-guard-identity-');
 		directory = created.dir;
 		cleanup = created.cleanup;
+		fs.mkdirSync(path.join(directory, '.git'), { recursive: true });
 		fs.mkdirSync(path.join(directory, '.swarm'), { recursive: true });
 		fs.writeFileSync(
 			path.join(directory, '.swarm', 'plan.json'),
@@ -145,6 +146,7 @@ describe('scope guard identity authorization', () => {
 			),
 		).rejects.toThrow('SCOPE_NOT_DECLARED');
 		endAgentSession('session-a');
+		await flushScopeBindingMaintenance(directory);
 		expect(
 			readScopeBindingFromDisk({
 				directory,
@@ -159,6 +161,7 @@ describe('scope guard identity authorization', () => {
 	test('worktree child requires authoritative current plan materialization', async () => {
 		const worktree = path.join(directory, 'isolated-worktree');
 		fs.mkdirSync(worktree, { recursive: true });
+		fs.mkdirSync(path.join(worktree, '.git'), { recursive: true });
 		const pending = createScopeBinding({
 			directory,
 			plan,

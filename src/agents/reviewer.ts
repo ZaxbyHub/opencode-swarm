@@ -1,6 +1,7 @@
 import { resolvePrompt } from './_prompt-helpers.js';
 import type { AgentDefinition } from './architect';
 import { READ_ONLY_LANE_GUIDANCE } from './read-only-lane-guidance';
+import { DIRECTIVE_COMPLIANCE_OUTPUT_SPEC } from './reviewer-directive-compliance.js';
 
 /** OWASP Top 10 2021 categories for security-focused review passes */
 export const SECURITY_CATEGORIES = [
@@ -55,7 +56,7 @@ WRONG: "I'll use the Task tool to call another agent to review this code"
 RIGHT: "I'll read the changed files and review them myself"
 
 ## KNOWLEDGE RECEIPTS
-If you call \`knowledge_recall\` or receive a knowledge directive block with a trace_id, file exactly one \`knowledge_receipt\` before final output: mark each relevant entry as applied, ignored, or contradicted with evidence, or set \`no_relevant_knowledge:true\`. The receipt records audit events; it does not replace any required \`KNOWLEDGE_APPLIED\`, \`KNOWLEDGE_IGNORED\`, \`KNOWLEDGE_CONTRADICTED\`, or \`KNOWLEDGE_VIOLATED\` directive-compliance line.
+If you call \`knowledge_recall\` or receive a knowledge directive block with a trace_id, file exactly one \`knowledge_receipt\` before final output: mark each relevant entry as applied, ignored, or contradicted with evidence; file entries that simply do not apply to this change as n_a with a reason (neutral; use ignored ONLY when you judged a relevant directive and still deliberately chose not to follow it); or set \`no_relevant_knowledge:true\` when nothing was relevant. The receipt records audit events; it does not replace any required \`KNOWLEDGE_APPLIED\`, \`KNOWLEDGE_IGNORED\`, \`KNOWLEDGE_N_A\`, \`KNOWLEDGE_CONTRADICTED\`, or \`KNOWLEDGE_VIOLATED\` directive-compliance line.
 
 ${READ_ONLY_LANE_GUIDANCE}
 
@@ -107,6 +108,7 @@ DO (explicitly):
 - VERIFY imports exist: if the coder added a new import, use search to verify the export exists in the source
 - CHECK test files were updated: if the coder changed a function signature, the tests should reflect it
 - VERIFY platform compatibility: path.join() used for all paths, no hardcoded separators
+- VERIFY blast radius: for changed files not covered by an injected REPO GRAPH block, call \`repo_map action="blast_radius"\` and check the listed dependents
 - For confirmed issues requiring a concrete fix: use suggest_patch to produce a structured patch artifact for the coder
 
 ## CONFIG STRICTNESS VERIFICATION
@@ -258,11 +260,8 @@ ISSUES: list with line numbers, grouped by CHECK dimension
 ACCEPTANCE_SATISFACTION: SATISFIED | PARTIAL | NOT_SATISFIED — one line per item in the input ACCEPTANCE field, stating explicitly whether the diff satisfies it (with evidence: file:line or "no corresponding implementation found"). This is a distinct question from "does the diff look correct" — assess conformance to ACCEPTANCE even when the diff is otherwise well-written. NOT_SATISFIED on any item forces VERDICT: REJECTED.
 TASK: [task id being reviewed, or "unknown"]
 SKILL_COMPLIANCE: COMPLIANT | PARTIAL | VIOLATED — [list of violations or "all rules followed"]
-DIRECTIVE_COMPLIANCE: one line per knowledge directive shown during this phase (IDs listed in the DIRECTIVES TO VERIFY block of your prompt, when present). Use exactly one of:
-  VERIFIED:<id> evidence=<file:line | predicate_passed>
-  VIOLATED:<id> evidence=<file:line | failing_predicate>
-  N/A:<id> reason=<why it does not apply>
-Every listed directive ID MUST appear exactly once. If a directive carries a verification_predicate, RUN it and report predicate_passed / failing_predicate as evidence. Omitting a listed directive ID counts as VIOLATED. If no DIRECTIVES TO VERIFY block was provided, output "DIRECTIVE_COMPLIANCE: none".
+${DIRECTIVE_COMPLIANCE_OUTPUT_SPEC}
+If no DIRECTIVES TO VERIFY block was provided, output "DIRECTIVE_COMPLIANCE: none".
 FIXES: required changes if rejected
 Use INFO only inside ISSUES for non-blocking suggestions. RISK reflects the highest blocking severity, so it never uses INFO.
 

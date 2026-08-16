@@ -1,11 +1,13 @@
 /**
- * Event-sourced knowledge lifecycle for opencode-swarm.
+ * Bounded diagnostic knowledge lifecycle stream for opencode-swarm.
  *
  * `.swarm/knowledge-events.jsonl` records meaningful knowledge interactions
  * (retrieval, receipt, outcome, archival). Recent lines stay in the event log;
  * old lines are folded into `.swarm/knowledge-counter-baseline.json` when the
- * log exceeds the cap. The event log plus baseline are the authoritative
- * history for derived per-entry counters (`retrieval_outcomes.*`).
+ * log exceeds the cap. The event log plus baseline remain the source for
+ * best-effort aggregate metrics (`retrieval_outcomes.*`), but are not receipt,
+ * membership, gate, promotion, escalation, or destructive-action authority.
+ * Correctness state lives in the canonical project-local V2 receipt ledger.
  *
  * Design contracts:
  * - Append-first, bounded retention. New events use OS-level atomic append; trim
@@ -29,6 +31,12 @@ import { atomicWriteFile } from '../evidence/task-file.js';
 import { resolveHiveEventsPath as resolveHiveEventsPathImpl } from '../knowledge/hive-paths.js';
 import { warn } from '../utils/logger.js';
 import { resolveKnowledgeStoreDir } from './knowledge-link.js';
+import {
+	queryHistoricalOutcomes,
+	type ReceiptMembership,
+	type ReceiptSourceCode,
+	type ReceiptTerminal,
+} from './knowledge-receipt-ledger.js';
 // Type-only import: erased at runtime, so it does NOT create a dependency that
 // would break the test-mocking pattern (see comment at L247 below). The runtime
 // import of knowledge-store is dynamic, inside applyKnowledgeVerdictFeedback.
@@ -150,8 +158,11 @@ export interface ReceiptEvent {
 	 * (`'reviewer'`) from delegate self-acks (`'delegate'`) without changing the
 	 * `type`, so existing counter rollups (which switch on `type`) stay intact.
 	 * A reviewer VERIFIED maps to type:'applied' with source:'reviewer'.
+	 * Canonical closed set: `ReceiptSourceCode` (issue #2032); the `| string`
+	 * tail keeps legacy records with unrecognized source values loadable, and
+	 * a MISSING legacy source is never inferred — it stays absent/`'unknown'`.
 	 */
-	source?: 'delegate' | 'reviewer' | string;
+	source?: ReceiptSourceCode | (string & {});
 	/** Result of executing a directive's verification_predicate (Change 2). */
 	predicate_check?: {
 		predicate: string;
@@ -1105,9 +1116,9 @@ export async function countEntryContradictionsInWindow(
 }
 
 /**
- * Fail-open rollup reader for hot paths. Search and promotion use this instead
- * of stale persisted counters so `knowledge_receipt` feedback affects ranking
- * and safety gates immediately.
+ * Fail-open diagnostic rollup reader. This preserves legacy metrics and
+ * postmortem views, but correctness-affecting consumers must use
+ * {@link readAuthoritativeKnowledgeCounterRollups} instead.
  */
 export async function readKnowledgeCounterRollups(
 	directory: string,
@@ -1136,6 +1147,68 @@ export async function readKnowledgeCounterRollups(
 		);
 		return new Map();
 	}
+}
+
+/**
+ * Build correctness-affecting retrieval/outcome counters exclusively from the
+ * project-local receipt authority. The bounded knowledge-events FIFO remains a
+ * diagnostics/metrics source and must never influence ranking, curation,
+ * confidence floors, promotion, or generated-skill eligibility.
+ */
+export async function readAuthoritativeKnowledgeCounterRollups(
+	directory: string,
+): Promise<Map<string, CounterRollup>> {
+	const history = await queryHistoricalOutcomes(directory);
+	if (!history.ok) return new Map();
+	const rollups = new Map<string, CounterRollup>();
+	for (const membership of history.memberships) {
+		const rollup = get(rollups, membership.entry_id);
+		rollup.shown_count += 1;
+		if (membership.application_marker) {
+			rollup.acknowledged_count += 1;
+			rollup.last_acknowledged_at = maxIso(
+				rollup.last_acknowledged_at,
+				membership.application_marker.committed_at,
+			);
+		}
+		const compatible = membership as ReceiptMembership & {
+			terminal_history?: ReceiptTerminal[];
+			historical_terminals?: ReceiptTerminal[];
+		};
+		const seen = new Set<string>();
+		for (const terminal of [
+			...(compatible.terminal_history ?? []),
+			...(compatible.historical_terminals ?? []),
+			...(membership.terminal ? [membership.terminal] : []),
+		]) {
+			if (seen.has(terminal.event_id)) continue;
+			seen.add(terminal.event_id);
+			switch (terminal.outcome) {
+				case 'applied':
+					rollup.applied_explicit_count += 1;
+					rollup.last_applied_at = maxIso(
+						rollup.last_applied_at,
+						terminal.committed_at,
+					);
+					break;
+				case 'ignored':
+					rollup.ignored_count += 1;
+					break;
+				case 'violated':
+					rollup.violated_count += 1;
+					rollup.violation_timestamps.push(terminal.committed_at);
+					break;
+				case 'contradicted':
+					rollup.contradicted_count += 1;
+					break;
+				case 'n_a':
+					rollup.n_a_count += 1;
+					break;
+			}
+		}
+		normalizeRollupTimestamps(rollup);
+	}
+	return rollups;
 }
 
 /** Merge event-derived rollups over stored outcome counters for scoring only. */
@@ -1187,8 +1260,9 @@ const VERDICT_CONFIDENCE_BOOST = 0.03;
 const VERDICT_CONFIDENCE_DECAY = 0.05;
 
 /**
- * Read receipt events (applied/violated/ignored), aggregate per knowledge entry,
- * and apply bounded confidence deltas via `bumpKnowledgeConfidenceBatch`.
+ * Read authoritative receipt terminals (applied/violated/ignored), aggregate
+ * per knowledge entry, and apply bounded confidence deltas via
+ * `bumpKnowledgeConfidenceBatch`.
  *
  * Complements `applySkillUsageFeedback` (skill-usage-log.ts) which bridges
  * skill compliance → confidence. This function bridges raw knowledge verdict
@@ -1212,7 +1286,45 @@ export async function applyKnowledgeVerdictFeedback(
 	lastProcessedEventId?: string;
 }> {
 	try {
-		const events = await readKnowledgeEvents(directory);
+		const history = await _internals.queryHistoricalOutcomes(directory);
+		if (!history.ok) return { processed: 0, bumps: 0 };
+		const seenEventIds = new Set<string>();
+		const events = history.memberships
+			.flatMap((membership) => {
+				const compatible = membership as ReceiptMembership & {
+					terminal_history?: ReceiptTerminal[];
+					historical_terminals?: ReceiptTerminal[];
+				};
+				const terminals = [
+					...(compatible.terminal_history ?? []),
+					...(compatible.historical_terminals ?? []),
+					...(membership.terminal ? [membership.terminal] : []),
+				];
+				return terminals.flatMap((terminal) => {
+					if (
+						(terminal.outcome !== 'applied' &&
+							terminal.outcome !== 'violated' &&
+							terminal.outcome !== 'ignored') ||
+						seenEventIds.has(terminal.event_id)
+					) {
+						return [];
+					}
+					seenEventIds.add(terminal.event_id);
+					return [
+						{
+							type: terminal.outcome,
+							event_id: terminal.event_id,
+							knowledge_id: membership.entry_id,
+							timestamp: terminal.committed_at,
+						},
+					];
+				});
+			})
+			.sort((a, b) =>
+				a.timestamp === b.timestamp
+					? a.event_id.localeCompare(b.event_id)
+					: a.timestamp.localeCompare(b.timestamp),
+			);
 		const markerIndex =
 			options?.sinceTimestamp && options.sinceEventId
 				? events.findIndex(
@@ -1222,24 +1334,11 @@ export async function applyKnowledgeVerdictFeedback(
 					)
 				: -1;
 
-		const actionable = events.filter((e, index): e is ReceiptEvent => {
-			if (
-				e.type !== 'applied' &&
-				e.type !== 'violated' &&
-				e.type !== 'ignored'
-			) {
+		const actionable = events.filter((e, index) => {
+			if (options?.sinceTimestamp && e.timestamp < options.sinceTimestamp) {
 				return false;
 			}
-			if (
-				options?.sinceTimestamp &&
-				(e as ReceiptEvent).timestamp < options.sinceTimestamp
-			) {
-				return false;
-			}
-			if (
-				options?.sinceTimestamp &&
-				(e as ReceiptEvent).timestamp === options.sinceTimestamp
-			) {
+			if (options?.sinceTimestamp && e.timestamp === options.sinceTimestamp) {
 				if (!options.sinceEventId) {
 					return false;
 				}
@@ -1255,10 +1354,7 @@ export async function applyKnowledgeVerdictFeedback(
 			return { processed: 0, bumps: 0 };
 		}
 
-		const groups = new Map<
-			string,
-			{ applied: number; violated: number; ignored: number }
-		>();
+		const groups = new Map<string, typeof actionable>();
 		let lastProcessedTimestamp: string | undefined;
 		let lastProcessedEventId: string | undefined;
 		for (const event of actionable) {
@@ -1271,30 +1367,47 @@ export async function applyKnowledgeVerdictFeedback(
 			}
 			const kid = event.knowledge_id;
 			if (!kid) continue;
-			const g = groups.get(kid) ?? { applied: 0, violated: 0, ignored: 0 };
-			if (event.type === 'applied') g.applied++;
-			else if (event.type === 'violated') g.violated++;
-			else if (event.type === 'ignored') g.ignored++;
-			groups.set(kid, g);
+			const group = groups.get(kid) ?? [];
+			group.push(event);
+			groups.set(kid, group);
 		}
 
-		const deltas: Array<{ id: string; delta: number }> = [];
-		for (const [id, counts] of groups) {
-			const positives = counts.applied;
-			const negatives = counts.violated + counts.ignored;
+		const deltas: Array<{
+			id: string;
+			delta: number;
+			receipt_events: Array<{
+				event_id: string;
+				timestamp: string;
+				outcome: 'applied' | 'violated' | 'ignored';
+			}>;
+		}> = [];
+		for (const [id, group] of groups) {
+			const positives = group.filter(
+				(event) => event.type === 'applied',
+			).length;
+			const negatives = group.length - positives;
 			if (positives === 0 && negatives === 0) continue;
 			const delta =
 				positives > negatives
 					? VERDICT_CONFIDENCE_BOOST
 					: -VERDICT_CONFIDENCE_DECAY;
-			deltas.push({ id, delta });
+			deltas.push({
+				id,
+				delta,
+				receipt_events: group.map((event) => ({
+					event_id: event.event_id,
+					timestamp: event.timestamp,
+					outcome: event.type,
+				})),
+			});
 		}
 
+		let bumps = 0;
 		if (deltas.length > 0) {
 			const { bumpKnowledgeConfidenceBatch } = await import(
 				'./knowledge-store.js'
 			);
-			await bumpKnowledgeConfidenceBatch(
+			bumps = await bumpKnowledgeConfidenceBatch(
 				directory,
 				deltas,
 				options?.floorOptions,
@@ -1303,7 +1416,7 @@ export async function applyKnowledgeVerdictFeedback(
 
 		return {
 			processed: groups.size,
-			bumps: deltas.length,
+			bumps,
 			lastProcessedTimestamp,
 			lastProcessedEventId,
 		};
@@ -1327,9 +1440,11 @@ export const _internals: {
 	appendKnowledgeEvent: typeof appendKnowledgeEvent;
 	recordKnowledgeEvent: typeof recordKnowledgeEvent;
 	readKnowledgeEvents: typeof readKnowledgeEvents;
+	queryHistoricalOutcomes: typeof queryHistoricalOutcomes;
 	readCounterBaseline: typeof readCounterBaseline;
 	readLegacyApplicationRecords: typeof readLegacyApplicationRecords;
 	readKnowledgeCounterRollups: typeof readKnowledgeCounterRollups;
+	readAuthoritativeKnowledgeCounterRollups: typeof readAuthoritativeKnowledgeCounterRollups;
 	effectiveRetrievalOutcomes: typeof effectiveRetrievalOutcomes;
 	recomputeCounters: typeof recomputeCounters;
 	applyKnowledgeVerdictFeedback: typeof applyKnowledgeVerdictFeedback;
@@ -1349,9 +1464,11 @@ export const _internals: {
 	appendKnowledgeEvent,
 	recordKnowledgeEvent,
 	readKnowledgeEvents,
+	queryHistoricalOutcomes,
 	readCounterBaseline,
 	readLegacyApplicationRecords,
 	readKnowledgeCounterRollups,
+	readAuthoritativeKnowledgeCounterRollups,
 	effectiveRetrievalOutcomes,
 	recomputeCounters,
 	applyKnowledgeVerdictFeedback,

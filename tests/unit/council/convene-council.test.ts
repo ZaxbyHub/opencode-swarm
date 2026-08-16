@@ -4,6 +4,7 @@ import {
 	COUNCIL_AGENT_TOOL_MAP,
 } from '../../../src/config/constants';
 import { TOOL_NAME_SET, TOOL_NAMES } from '../../../src/tools/tool-names';
+import { seedCouncilLaunch } from '../../helpers/task-workflow-evidence';
 
 describe('submit_council_verdicts — registration', () => {
 	test('submit_council_verdicts is in TOOL_NAMES', () => {
@@ -136,6 +137,8 @@ describe('submit_council_verdicts — happy path with enabled config', () => {
 				join(tempDir, '.opencode', 'opencode-swarm.json'),
 				JSON.stringify({ council: { enabled: true } }),
 			);
+			const sessionID = 'convene-council-happy';
+			await seedCouncilLaunch(tempDir, '1.1', sessionID);
 
 			const { submit_council_verdicts } = await import(
 				'../../../src/tools/convene-council'
@@ -185,7 +188,7 @@ describe('submit_council_verdicts — happy path with enabled config', () => {
 					],
 					working_directory: tempDir,
 				},
-				{ directory: tempDir },
+				{ directory: tempDir, sessionID },
 			);
 			const parsed = JSON.parse(result);
 			expect(parsed.success).toBe(true);

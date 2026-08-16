@@ -64,6 +64,7 @@ describe('execution_profile: setting a profile on a new plan', () => {
 		expect(result.execution_profile?.parallelization_enabled).toBe(true);
 		expect(result.execution_profile?.max_concurrent_tasks).toBe(4);
 		expect(result.execution_profile?.locked).toBe(false);
+		expect(result.execution_profile?.planning_profile).toBe('balanced');
 	});
 
 	test('accepts partial execution_profile and applies defaults', async () => {
@@ -77,6 +78,7 @@ describe('execution_profile: setting a profile on a new plan', () => {
 		expect(result.execution_profile?.parallelization_enabled).toBe(true);
 		expect(result.execution_profile?.max_concurrent_tasks).toBe(10);
 		expect(result.execution_profile?.locked).toBe(false);
+		expect(result.execution_profile?.planning_profile).toBe('balanced');
 	});
 
 	test('sets and locks profile in a single call', async () => {
@@ -91,6 +93,7 @@ describe('execution_profile: setting a profile on a new plan', () => {
 		const result = await executeSavePlan(args);
 		expect(result.success).toBe(true);
 		expect(result.execution_profile?.locked).toBe(true);
+		expect(result.execution_profile?.planning_profile).toBe('balanced');
 	});
 });
 
@@ -134,6 +137,7 @@ describe('execution_profile: locked profile rejection (fail-closed)', () => {
 			locked: true,
 			auto_proceed: false,
 			commit_after_each_completed_task: true,
+			planning_profile: 'balanced' as const,
 		};
 		const firstResult = await executeSavePlan(
 			makeArgs({
@@ -178,6 +182,7 @@ describe('execution_profile: locked profile rejection (fail-closed)', () => {
 		expect(secondResult.success).toBe(true);
 		expect(secondResult.execution_profile?.locked).toBe(true);
 		expect(secondResult.execution_profile?.parallelization_enabled).toBe(false);
+		expect(secondResult.execution_profile?.planning_profile).toBe('balanced');
 	});
 
 	test('second call without execution_profile on a locked plan succeeds', async () => {
@@ -230,6 +235,7 @@ describe('execution_profile: locked profile rejection (fail-closed)', () => {
 		expect(result.success).toBe(true);
 		expect(result.execution_profile?.locked).toBe(false);
 		expect(result.execution_profile?.parallelization_enabled).toBe(false);
+		expect(result.execution_profile?.planning_profile).toBe('balanced');
 	});
 
 	test('reset_statuses without execution_profile applies the fresh v8 default', async () => {
@@ -269,6 +275,7 @@ describe('execution_profile: locked profile rejection (fail-closed)', () => {
 		};
 		expect(planData.execution_profile).toMatchObject({
 			parallelization_enabled: true,
+			planning_profile: 'balanced',
 		});
 	});
 });

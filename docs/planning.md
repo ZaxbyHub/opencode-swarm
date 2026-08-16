@@ -85,13 +85,17 @@ Each task in the swarm follows a per-task state machine. The Architect advances 
 | State | Meaning | How It's Entered |
 |---|---|---|
 | `idle` | Task not yet started | Default state |
-| `coder_delegated` | Coder has been given the task | Architect dispatches `Task` to coder |
+| `coder_delegated` | An accepted coder mutation created fresh verification debt | A coder settlement proves an in-scope mutation and rotates the workflow generation |
 | `pre_check_passed` | Automated gates passed | `pre_check_batch` returns `gates_passed: true` |
 | `reviewer_run` | Human-style review complete | Reviewer delegation returns APPROVED |
 | `tests_run` | Verification tests passed | Test engineer delegation returns PASS |
+| `rework_required` | Current-generation verification failed and same-task repair is required | Stage A fails, or reviewer/test engineer returns a negative or malformed verdict |
+| `blocked` | Task ended without completion and no verification debt remains | `update_task_status(status: 'blocked')` commits the terminal transaction |
 | `complete` | Task fully complete | `update_task_status(status: 'completed')` called |
 
-**Enforcement rule:** `update_task_status` with `status: 'completed'` will be **rejected** unless the task's state is `tests_run` or `complete`. Calling it immediately after the coder returns (skipping reviewer and test gates) returns a structured error naming the missing gate. This means your acceptance criteria should match the gate sequence — not just the code change.
+**Enforcement rule:** `update_task_status` with `status: 'completed'` is decided from durable evidence for the exact task and workflow generation. Session state and delegation history are diagnostic only. An empty/no-mutation coder attempt creates no review debt. Any safely attributed mutation rotates the generation and invalidates prior Stage A/B proof, including partial edits left by a failed or cancelled shared-root settlement; that failure enters `rework_required`. Stage A failure also moves the task to `rework_required`, where same-task repair remains callable.
+
+`execution_profile.planning_profile` selects planning ceremony. `balanced` is the normal default: durable QA/execution defaults are persisted and the architect asks only about material ambiguity or high-risk authorization. `strict` retains the full questionnaire, spec prerequisite, and checklist. Repositories with strict execution default to strict; locked legacy profiles without the field also resolve conservatively to strict. Locked plans may ratchet from balanced to strict, never the reverse. Explicit `balanced` and `strict` values remain distinct in plan hashes and Markdown; only the runtime resolver interprets an omitted locked legacy value as strict. On each architect turn, the persisted plan resolution supersedes the repository-default directive baked into the base prompt.
 
 ---
 
@@ -230,7 +234,7 @@ If you prefer to plan inside OpenCode rather than in a separate tool, the swarm 
 
 **Starting from scratch:**
 1. `/swarm specify <feature description>` → architect generates spec.md
-2. If spec has `[NEEDS CLARIFICATION]` markers → `/swarm clarify` to resolve them
+2. If spec has `[NEEDS CLARIFICATION]` markers → `/swarm clarify` enters clarification mode; persist accepted answers through canonical `spec_write`. Clarify mode alone does not clear spec drift.
 3. Tell the architect to start planning → PLAN mode reads spec.md, optionally offers General Council advisory input when `council.general.enabled` is configured, and cross-references FR-### automatically
 4. Optionally `/swarm analyze` after planning to verify coverage
 

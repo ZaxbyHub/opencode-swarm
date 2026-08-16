@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { seedAuthoritativeTaskWorkflow } from '../../tests/unit/hooks/_delegation-gate-helpers';
 import { recordGateEvidence } from '../gate-evidence';
 import {
 	advanceTaskState,
@@ -33,6 +34,20 @@ afterEach(() => {
 	}
 });
 
+async function seedCodeTaskAtStageA(taskId: string): Promise<number> {
+	return seedAuthoritativeTaskWorkflow(tmpDir, taskId, 'pre_check_passed');
+}
+
+async function recordStageBGate(
+	taskId: string,
+	gate: 'reviewer' | 'test_engineer',
+	sessionId: string,
+	expectedGeneration: number,
+): Promise<void> {
+	await recordGateEvidence(tmpDir, taskId, gate, sessionId, undefined, {
+		expectedGeneration,
+	});
+}
 describe('checkReviewerGate', () => {
 	it('allows completion when task state is tests_run', () => {
 		startAgentSession('session-1', 'architect');
@@ -77,8 +92,9 @@ describe('checkReviewerGate', () => {
 	// ── evidence-first checks ──────────────────────────────────────────────
 
 	it('passes when evidence file has all required gates (code task)', async () => {
-		await recordGateEvidence(tmpDir, '3.1', 'reviewer', 'sess-1');
-		await recordGateEvidence(tmpDir, '3.1', 'test_engineer', 'sess-2');
+		const generation = await seedCodeTaskAtStageA('3.1');
+		await recordStageBGate('3.1', 'reviewer', 'sess-1', generation);
+		await recordStageBGate('3.1', 'test_engineer', 'sess-2', generation);
 
 		// Session state alone is idle (would block), but evidence wins
 		startAgentSession('session-1', 'architect');
@@ -87,29 +103,28 @@ describe('checkReviewerGate', () => {
 		expect(result.blocked).toBe(false);
 	});
 
-	it('passes when evidence file has all required gates (docs task — only docs gate)', async () => {
+	it('does not treat a docs receipt as Stage B completion', async () => {
 		await recordGateEvidence(tmpDir, '3.2', 'docs', 'sess-1');
 
 		startAgentSession('session-1', 'architect');
 
 		const result = checkReviewerGate('3.2', tmpDir);
-		expect(result.blocked).toBe(false);
+		expect(result.blocked).toBe(true);
+		expect(result.reason).toContain('State: idle');
+		expect(result.reason).toContain('pre_check');
 	});
 
 	it('blocks with specific error when evidence is missing some gates', async () => {
-		await recordGateEvidence(tmpDir, '3.3', 'reviewer', 'sess-1');
-		// test_engineer not yet recorded — required_gates comes from reviewer default
+		const generation = await seedCodeTaskAtStageA('3.3');
+		await recordStageBGate('3.3', 'reviewer', 'sess-1', generation);
+		// test_engineer not yet recorded.
 
 		startAgentSession('session-1', 'architect');
-
-		// Force required_gates to include both by doing a coder dispatch first
-		const { recordAgentDispatch } = await import('../gate-evidence');
-		await recordAgentDispatch(tmpDir, '3.3', 'coder');
 
 		const result = checkReviewerGate('3.3', tmpDir);
 		expect(result.blocked).toBe(true);
 		expect(result.reason).toContain('test_engineer');
-		expect(result.reason).toContain('missing required gates');
+		expect(result.reason).toContain('not passed exact-task QA');
 	});
 
 	it('falls through to session state when no evidence file', () => {
@@ -153,8 +168,9 @@ describe('checkReviewerGate', () => {
 		});
 		writeFileSync(path.join(tmpDir, '.swarm', 'plan.json'), planJson);
 
-		await recordGateEvidence(tmpDir, '1.1', 'reviewer', 'sess-1');
-		await recordGateEvidence(tmpDir, '1.1', 'test_engineer', 'sess-2');
+		const generation = await seedCodeTaskAtStageA('1.1');
+		await recordStageBGate('1.1', 'reviewer', 'sess-1', generation);
+		await recordStageBGate('1.1', 'test_engineer', 'sess-2', generation);
 
 		const result = await executeUpdateTaskStatus({
 			task_id: '1.1',
@@ -191,8 +207,9 @@ describe('checkReviewerGate', () => {
 		});
 		writeFileSync(path.join(tmpDir, '.swarm', 'plan.json'), planJson);
 
-		await recordGateEvidence(tmpDir, '2.1', 'reviewer', 'sess-r');
-		await recordGateEvidence(tmpDir, '2.1', 'test_engineer', 'sess-te');
+		const generation = await seedCodeTaskAtStageA('2.1');
+		await recordStageBGate('2.1', 'reviewer', 'sess-r', generation);
+		await recordStageBGate('2.1', 'test_engineer', 'sess-te', generation);
 
 		const result = await executeUpdateTaskStatus({
 			task_id: '2.1',
@@ -209,11 +226,13 @@ describe('checkReviewerGate', () => {
 			title: 'Test',
 			swarm: 'test-swarm',
 			current_phase: 1,
+			execution_profile: { locked: true },
 			phases: [
 				{
 					id: 1,
 					name: 'Phase 1',
 					status: 'in_progress',
+					required_agents: ['docs'],
 					tasks: [
 						{
 							id: '2.2',
@@ -241,9 +260,8 @@ describe('checkReviewerGate', () => {
 	});
 
 	it('error message includes names of missing gates', async () => {
-		const { recordAgentDispatch } = await import('../gate-evidence');
-		await recordAgentDispatch(tmpDir, '3.9', 'coder');
-		await recordGateEvidence(tmpDir, '3.9', 'reviewer', 'sess-r');
+		const generation = await seedCodeTaskAtStageA('3.9');
+		await recordStageBGate('3.9', 'reviewer', 'sess-r', generation);
 		// test_engineer missing
 
 		startAgentSession('session-1', 'architect');
@@ -487,28 +505,11 @@ describe('checkReviewerGate', () => {
 		expect(result.blocked).toBe(true);
 	});
 
-	it('docs task: passes when docs + reviewer gates are recorded (no test_engineer needed)', async () => {
-		// Regression: previously, in_progress hardcoded ['reviewer', 'test_engineer'],
-		// which caused docs tasks to be permanently blocked because test_engineer never runs.
-		// Fix: in_progress now seeds with required_gates: []; recordGateEvidence sets the
-		// actual required gates based on the agents that ran.
-		// In production, docs IS a gate agent, so toolAfter calls recordGateEvidence('docs').
-		await recordGateEvidence(tmpDir, '6.2', 'docs', 'sess-docs'); // creates required_gates: ['docs']
-		await recordGateEvidence(tmpDir, '6.2', 'reviewer', 'sess-r'); // expands to: ['docs', 'reviewer']
-		// test_engineer deliberately not recorded — not needed for docs tasks
-
-		startAgentSession('session-1', 'architect');
-
-		const result = checkReviewerGate('6.2', tmpDir);
-		expect(result.blocked).toBe(false);
-	});
-
 	it('code task: still blocks when coder dispatch sets required_gates and test_engineer has not run', async () => {
 		// Coder dispatch correctly sets required_gates: ['reviewer', 'test_engineer'].
 		// Reviewer ran, but test_engineer has NOT. Gate must block.
-		const { recordAgentDispatch } = await import('../gate-evidence');
-		await recordAgentDispatch(tmpDir, '6.3', 'coder'); // sets required_gates: ['reviewer', 'test_engineer']
-		await recordGateEvidence(tmpDir, '6.3', 'reviewer', 'sess-r'); // reviewer ran
+		const generation = await seedCodeTaskAtStageA('6.3');
+		await recordStageBGate('6.3', 'reviewer', 'sess-r', generation);
 		// test_engineer deliberately NOT recorded
 
 		startAgentSession('session-1', 'architect');
@@ -548,9 +549,8 @@ describe('checkReviewerGate', () => {
 		});
 		writeFileSync(path.join(tmpDir, '.swarm', 'plan.json'), planJson);
 
-		const { recordAgentDispatch } = await import('../gate-evidence');
-		await recordAgentDispatch(tmpDir, '6.4', 'coder'); // reviewer + test_engineer required
-		await recordGateEvidence(tmpDir, '6.4', 'reviewer', 'sess-r'); // reviewer ran
+		const generation = await seedCodeTaskAtStageA('6.4');
+		await recordStageBGate('6.4', 'reviewer', 'sess-r', generation);
 		// test_engineer NOT recorded
 
 		const result = await executeUpdateTaskStatus({

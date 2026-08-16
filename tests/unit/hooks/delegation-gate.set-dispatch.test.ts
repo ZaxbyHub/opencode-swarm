@@ -5,23 +5,26 @@
  * test_engineer covers multiple tasks in a single dispatch (set-dispatch).
  *
  * SC-022: reviewer covering 3 tasks with parseable verdicts attributes per-task
- * SC-023: unparseable output falls back to single-task attribution
- * SC-024: verdicts use documented structured format
+ * SC-023: unparseable output fails closed for the exact dispatched task
+ * SC-024 parser coverage lives in the focused sibling parser test file
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'os';
 import * as path from 'path';
-import { _internals } from '../../../src/hooks/delegation-gate';
+import {
+	readTaskEvidence,
+	recordAgentDispatch,
+	recordGateEvidence,
+	transitionTaskWorkflowEvidence,
+} from '../../../src/gate-evidence';
 import {
 	ensureAgentSession,
 	resetSwarmState,
 	startAgentSession,
 } from '../../../src/state';
 import { createDelegationGateHook } from './_delegation-gate-helpers';
-
-const { parsePerTaskVerdicts } = _internals;
 
 function makeTempProject(prefix: string): string {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -47,114 +50,87 @@ function makeConfig() {
 	} as import('../../../src/config').PluginConfig;
 }
 
-describe('parsePerTaskVerdicts', () => {
-	it('SC-024.1: parses [REVIEWED] verdict line with task- prefix', () => {
-		const output = `
-Some review content here.
+function writePlan(directory: string, taskIds: string[]): void {
+	fs.writeFileSync(
+		path.join(directory, '.swarm', 'plan.json'),
+		JSON.stringify({
+			schema_version: '1.0.0',
+			title: 'Set-dispatch test',
+			swarm: 'test',
+			current_phase: 1,
+			phases: [
+				{
+					id: 1,
+					name: 'Implementation',
+					status: 'in_progress',
+					tasks: taskIds.map((id) => ({
+						id,
+						phase: 1,
+						status: 'in_progress',
+						size: 'small',
+						description: `Implement ${id}`,
+						depends: [],
+						files_touched: [],
+					})),
+				},
+			],
+		}),
+	);
+}
 
-[REVIEWED] | task-2.1 | APPROVED | No issues found in src/foo.ts
-`;
-		const verdicts = parsePerTaskVerdicts(output);
-		expect(verdicts.size).toBe(1);
-		expect(verdicts.get('2.1')).toBe('APPROVED');
-	});
+async function seedStageA(
+	directory: string,
+	taskIds: string[],
+): Promise<Map<string, number>> {
+	writePlan(directory, taskIds);
+	const generations = new Map<string, number>();
+	for (const taskId of taskIds) {
+		await recordAgentDispatch(directory, taskId, 'coder');
+		const generation = (await readTaskEvidence(directory, taskId))!.workflow!
+			.generation;
+		await transitionTaskWorkflowEvidence(directory, taskId, {
+			type: 'stage_a_passed',
+			expectedGeneration: generation,
+		});
+		generations.set(taskId, generation);
+	}
+	return generations;
+}
 
-	it('SC-024.2: parses [REVIEWED] verdict line with bare task ID', () => {
-		const output = `
-[REVIEWED] | 2.2 | REJECTED | Missing null check at line 42
-`;
-		const verdicts = parsePerTaskVerdicts(output);
-		expect(verdicts.size).toBe(1);
-		expect(verdicts.get('2.2')).toBe('REJECTED');
-	});
-
-	it('SC-024.3: parses multiple [REVIEWED] verdict lines from single output', () => {
-		const output = `
-[REVIEWED] | task-2.1 | APPROVED | No issues found
-[REVIEWED] | task-2.2 | APPROVED | Minor suggestion only
-[REVIEWED] | task-2.3 | REJECTED | Critical bug at line 88
-`;
-		const verdicts = parsePerTaskVerdicts(output);
-		expect(verdicts.size).toBe(3);
-		expect(verdicts.get('2.1')).toBe('APPROVED');
-		expect(verdicts.get('2.2')).toBe('APPROVED');
-		expect(verdicts.get('2.3')).toBe('REJECTED');
-	});
-
-	it('SC-024.4: parses [TESTED] verdict lines', () => {
-		const output = `
-[TESTED] | task-2.1 | PASS | 10/10 tests passed
-[TESTED] | task-2.2 | FAIL | 8/10 tests passed — bar.test.ts missing error path
-`;
-		const verdicts = parsePerTaskVerdicts(output);
-		expect(verdicts.size).toBe(2);
-		expect(verdicts.get('2.1')).toBe('PASS');
-		expect(verdicts.get('2.2')).toBe('FAIL');
-	});
-
-	it('SC-024.5: parses [TESTED] with SKIPPED verdict', () => {
-		const output = `
-[TESTED] | task-3.1 | SKIPPED | Test file does not exist
-`;
-		const verdicts = parsePerTaskVerdicts(output);
-		expect(verdicts.size).toBe(1);
-		expect(verdicts.get('3.1')).toBe('SKIPPED');
-	});
-
-	it('SC-024.6: ignores lines that do not match verdict pattern', () => {
-		const output = `
-This is just some review text.
-VERDICT: APPROVED
-TASK: 2.1
-But no structured verdict line here.
-[REVIEWED] | task-2.1 | APPROVED | This is valid
-Random line without format.
-`;
-		const verdicts = parsePerTaskVerdicts(output);
-		expect(verdicts.size).toBe(1);
-		expect(verdicts.get('2.1')).toBe('APPROVED');
-	});
-
-	it('SC-024.7: ignores invalid task ID formats', () => {
-		const output = `
-[REVIEWED] | task-invalid | APPROVED | Should be ignored
-[REVIEWED] | task-2 | APPROVED | Should be ignored (missing patch number)
-[REVIEWED] | task-2.1.3.4.5 | APPROVED | Valid (deeper nesting)
-`;
-		const verdicts = parsePerTaskVerdicts(output);
-		expect(verdicts.size).toBe(1);
-		expect(verdicts.has('invalid')).toBe(false);
-		expect(verdicts.has('2')).toBe(false);
-		expect(verdicts.get('2.1.3.4.5')).toBe('APPROVED');
-	});
-
-	it('SC-024.8: handles empty output gracefully', () => {
-		const verdicts = parsePerTaskVerdicts('');
-		expect(verdicts.size).toBe(0);
-	});
-
-	it('SC-024.9: handles output with no verdict lines', () => {
-		const verdicts = parsePerTaskVerdicts(
-			'Just some regular output without any verdict markers.',
+async function seedReviewer(
+	directory: string,
+	taskIds: string[],
+): Promise<Map<string, number>> {
+	const generations = await seedStageA(directory, taskIds);
+	for (const taskId of taskIds) {
+		await recordGateEvidence(
+			directory,
+			taskId,
+			'reviewer',
+			'seed-reviewer',
+			undefined,
+			{ expectedGeneration: generations.get(taskId)! },
 		);
-		expect(verdicts.size).toBe(0);
-	});
+	}
+	return generations;
+}
 
-	it('SC-024.10: case-insensitive tag matching', () => {
-		const output = `
-[reviewed] | task-2.1 | APPROVED | lowercase tag
-[Reviewed] | task-2.2 | APPROVED | Mixed case tag
-[TESTED] | task-2.3 | PASS | Uppercase tag
-[tested] | task-2.4 | PASS | Lowercase tag
-`;
-		const verdicts = parsePerTaskVerdicts(output);
-		expect(verdicts.size).toBe(4);
-		expect(verdicts.get('2.1')).toBe('APPROVED');
-		expect(verdicts.get('2.2')).toBe('APPROVED');
-		expect(verdicts.get('2.3')).toBe('PASS');
-		expect(verdicts.get('2.4')).toBe('PASS');
-	});
-});
+async function runGateDispatch(
+	hook: ReturnType<typeof createDelegationGateHook>,
+	sessionID: string,
+	callID: string,
+	agent: 'reviewer' | 'test_engineer',
+	taskIds: string[],
+	output: string,
+): Promise<void> {
+	const args = {
+		subagent_type: agent,
+		task_id: taskIds[0],
+		prompt: `TASK: ${taskIds[0]}\nTASKS: ${taskIds.join(', ')}\nACCEPTANCE: ${agent} must report an exact structured verdict for every listed task`,
+	};
+	await hook.toolBefore({ tool: 'Task', sessionID, callID }, { args });
+	await hook.toolAfter({ tool: 'Task', sessionID, callID, args }, { output });
+}
 
 describe('FR-007 set-dispatch per-task attribution', () => {
 	let tempDir: string;
@@ -180,10 +156,10 @@ describe('FR-007 set-dispatch per-task attribution', () => {
 		startAgentSession('sess-sc22-1', 'architect');
 		const session = ensureAgentSession('sess-sc22-1');
 
-		// Set up 3 tasks in coder_delegated state
-		session.taskWorkflowStates.set('2.1', 'coder_delegated');
-		session.taskWorkflowStates.set('2.2', 'coder_delegated');
-		session.taskWorkflowStates.set('2.3', 'coder_delegated');
+		await seedStageA(tempDir, ['2.1', '2.2', '2.3']);
+		session.taskWorkflowStates.set('2.1', 'pre_check_passed');
+		session.taskWorkflowStates.set('2.2', 'pre_check_passed');
+		session.taskWorkflowStates.set('2.3', 'pre_check_passed');
 		session.currentTaskId = '2.1';
 
 		// Simulate a set-dispatch output with per-task verdicts
@@ -193,23 +169,20 @@ describe('FR-007 set-dispatch per-task attribution', () => {
 [REVIEWED] | task-2.3 | REJECTED | Critical bug found`,
 		};
 
-		await hook.toolAfter(
-			{
-				tool: 'Task',
-				sessionID: 'sess-sc22-1',
-				callID: 'call-sc22-1',
-				args: { subagent_type: 'reviewer' },
-			},
-			output,
+		await runGateDispatch(
+			hook,
+			'sess-sc22-1',
+			'call-sc22-1',
+			'reviewer',
+			['2.1', '2.2', '2.3'],
+			output.output,
 		);
 
 		// Verify recordStageBCompletion was called per-task (not over-attributed to every task)
 		// Each task should have exactly 1 completion recorded for reviewer
-		for (const taskId of ['2.1', '2.2', '2.3']) {
-			const state = session.taskWorkflowStates.get(taskId);
-			// State should have advanced appropriately based on barrier
-			expect(state).toBeDefined();
-		}
+		expect(session.taskWorkflowStates.get('2.1')).toBe('reviewer_run');
+		expect(session.taskWorkflowStates.get('2.2')).toBe('reviewer_run');
+		expect(session.taskWorkflowStates.get('2.3')).toBe('rework_required');
 	});
 
 	it('SC-022.2: test_engineer covering 3 tasks with parseable verdicts attributes per-task', async () => {
@@ -219,7 +192,7 @@ describe('FR-007 set-dispatch per-task attribution', () => {
 		startAgentSession('sess-sc22-2', 'architect');
 		const session = ensureAgentSession('sess-sc22-2');
 
-		// Set up 3 tasks in reviewer_run state (ready for test_engineer)
+		await seedReviewer(tempDir, ['2.1', '2.2', '2.3']);
 		session.taskWorkflowStates.set('2.1', 'reviewer_run');
 		session.taskWorkflowStates.set('2.2', 'reviewer_run');
 		session.taskWorkflowStates.set('2.3', 'reviewer_run');
@@ -231,32 +204,29 @@ describe('FR-007 set-dispatch per-task attribution', () => {
 [TESTED] | task-2.3 | FAIL | 6/10 tests passed — missing error path tests`,
 		};
 
-		await hook.toolAfter(
-			{
-				tool: 'Task',
-				sessionID: 'sess-sc22-2',
-				callID: 'call-sc22-2',
-				args: { subagent_type: 'test_engineer' },
-			},
-			output,
+		await runGateDispatch(
+			hook,
+			'sess-sc22-2',
+			'call-sc22-2',
+			'test_engineer',
+			['2.1', '2.2', '2.3'],
+			output.output,
 		);
 
-		// All tasks should have advanced to tests_run since reviewer was already run
-		for (const taskId of ['2.1', '2.2', '2.3']) {
-			const state = session.taskWorkflowStates.get(taskId);
-			expect(state).toBe('tests_run');
-		}
+		expect(session.taskWorkflowStates.get('2.1')).toBe('tests_run');
+		expect(session.taskWorkflowStates.get('2.2')).toBe('tests_run');
+		expect(session.taskWorkflowStates.get('2.3')).toBe('rework_required');
 	});
 
-	it('SC-023.1: unparseable output falls back to single-task attribution (no per-task verdicts)', async () => {
+	it('SC-023.1: unparseable output fails closed for the exact task', async () => {
 		const config = makeConfig();
 		const hook = createDelegationGateHook(config, tempDir);
 
 		startAgentSession('sess-sc23-1', 'architect');
 		const session = ensureAgentSession('sess-sc23-1');
 
-		// Set up a single task in coder_delegated state
-		session.taskWorkflowStates.set('1.1', 'coder_delegated');
+		await seedStageA(tempDir, ['1.1']);
+		session.taskWorkflowStates.set('1.1', 'pre_check_passed');
 		session.currentTaskId = '1.1';
 
 		// Output without structured verdict lines — should fall back to single-task
@@ -265,44 +235,40 @@ describe('FR-007 set-dispatch per-task attribution', () => {
 Reviewed the code. No issues found.`,
 		};
 
-		await hook.toolAfter(
-			{
-				tool: 'Task',
-				sessionID: 'sess-sc23-1',
-				callID: 'call-sc23-1',
-				args: { subagent_type: 'reviewer' },
-			},
-			output,
+		await runGateDispatch(
+			hook,
+			'sess-sc23-1',
+			'call-sc23-1',
+			'reviewer',
+			['1.1'],
+			output.output,
 		);
 
-		// Should have advanced to reviewer_run (single-task fallback behavior)
-		expect(session.taskWorkflowStates.get('1.1')).toBe('reviewer_run');
+		expect(session.taskWorkflowStates.get('1.1')).toBe('rework_required');
 	});
 
-	it('SC-023.2: empty output falls back to existing taskWorkflowStates iteration', async () => {
+	it('SC-023.2: empty output fails closed for the exact task', async () => {
 		const config = makeConfig();
 		const hook = createDelegationGateHook(config, tempDir);
 
 		startAgentSession('sess-sc23-2', 'architect');
 		const session = ensureAgentSession('sess-sc23-2');
 
-		// Set up task in coder_delegated state
-		session.taskWorkflowStates.set('1.1', 'coder_delegated');
+		await seedStageA(tempDir, ['1.1']);
+		session.taskWorkflowStates.set('1.1', 'pre_check_passed');
 		session.currentTaskId = '1.1';
 
 		// Empty output — should fall back
-		await hook.toolAfter(
-			{
-				tool: 'Task',
-				sessionID: 'sess-sc23-2',
-				callID: 'call-sc23-2',
-				args: { subagent_type: 'reviewer' },
-			},
-			{ output: '' },
+		await runGateDispatch(
+			hook,
+			'sess-sc23-2',
+			'call-sc23-2',
+			'reviewer',
+			['1.1'],
+			'',
 		);
 
-		// Should still advance (fallback path)
-		expect(session.taskWorkflowStates.get('1.1')).toBe('reviewer_run');
+		expect(session.taskWorkflowStates.get('1.1')).toBe('rework_required');
 	});
 
 	it('SC-023.3: mixed output — parseable verdicts take precedence over fallback', async () => {
@@ -312,9 +278,9 @@ Reviewed the code. No issues found.`,
 		startAgentSession('sess-sc23-3', 'architect');
 		const session = ensureAgentSession('sess-sc23-3');
 
-		// Set up 2 tasks in coder_delegated state
-		session.taskWorkflowStates.set('2.1', 'coder_delegated');
-		session.taskWorkflowStates.set('2.2', 'coder_delegated');
+		await seedStageA(tempDir, ['2.1', '2.2']);
+		session.taskWorkflowStates.set('2.1', 'pre_check_passed');
+		session.taskWorkflowStates.set('2.2', 'pre_check_passed');
 		session.currentTaskId = '2.1';
 
 		// Output has ONE structured verdict line and some regular text
@@ -326,14 +292,13 @@ Reviewed the code. No issues found.`,
 The code looks good overall.`,
 		};
 
-		await hook.toolAfter(
-			{
-				tool: 'Task',
-				sessionID: 'sess-sc23-3',
-				callID: 'call-sc23-3',
-				args: { subagent_type: 'reviewer' },
-			},
-			output,
+		await runGateDispatch(
+			hook,
+			'sess-sc23-3',
+			'call-sc23-3',
+			'reviewer',
+			['2.1', '2.2'],
+			output.output,
 		);
 
 		// Only task 2.1 should have reviewer recorded (per-task attribution from parseable verdict)
@@ -344,9 +309,7 @@ The code looks good overall.`,
 
 		// 2.1 should advance (has reviewer completion + parseable verdict)
 		expect(state2_1).toBe('reviewer_run');
-		// 2.2 might advance via fallback iteration if it's also eligible
-		// The key is we're not over-attributing the completion record
-		expect(state2_2).toBeDefined();
+		expect(state2_2).toBe('pre_check_passed');
 	});
 
 	it('SC-022.3: reviewer set-dispatch creates per-task evidence entries', async () => {
@@ -356,9 +319,9 @@ The code looks good overall.`,
 		startAgentSession('sess-sc22-3', 'architect');
 		const session = ensureAgentSession('sess-sc22-3');
 
-		// Set up 2 tasks in coder_delegated state
-		session.taskWorkflowStates.set('2.1', 'coder_delegated');
-		session.taskWorkflowStates.set('2.2', 'coder_delegated');
+		await seedStageA(tempDir, ['2.1', '2.2']);
+		session.taskWorkflowStates.set('2.1', 'pre_check_passed');
+		session.taskWorkflowStates.set('2.2', 'pre_check_passed');
 		session.currentTaskId = '2.1';
 
 		const output = {
@@ -366,14 +329,13 @@ The code looks good overall.`,
 [REVIEWED] | task-2.2 | APPROVED | Minor refactor needed`,
 		};
 
-		await hook.toolAfter(
-			{
-				tool: 'Task',
-				sessionID: 'sess-sc22-3',
-				callID: 'call-sc22-3',
-				args: { subagent_type: 'reviewer' },
-			},
-			output,
+		await runGateDispatch(
+			hook,
+			'sess-sc22-3',
+			'call-sc22-3',
+			'reviewer',
+			['2.1', '2.2'],
+			output.output,
 		);
 
 		// Both tasks should have advanced to reviewer_run
@@ -381,15 +343,15 @@ The code looks good overall.`,
 		expect(session.taskWorkflowStates.get('2.2')).toBe('reviewer_run');
 	});
 
-	it('SC-023.4: backward-compat — single-task dispatch still works without structured verdicts', async () => {
+	it('SC-023.4: legacy single-task verdict text fails closed', async () => {
 		const config = makeConfig();
 		const hook = createDelegationGateHook(config, tempDir);
 
 		startAgentSession('sess-sc23-backward', 'architect');
 		const session = ensureAgentSession('sess-sc23-backward');
 
-		// Single task setup
-		session.taskWorkflowStates.set('1.1', 'coder_delegated');
+		await seedStageA(tempDir, ['1.1']);
+		session.taskWorkflowStates.set('1.1', 'pre_check_passed');
 		session.currentTaskId = '1.1';
 
 		// Regular reviewer output without structured verdict format
@@ -398,27 +360,16 @@ The code looks good overall.`,
 Reviewed the code. No issues found.`,
 		};
 
-		await hook.toolAfter(
-			{
-				tool: 'Task',
-				sessionID: 'sess-sc23-backward',
-				callID: 'call-sc23-backward',
-				args: { subagent_type: 'reviewer' },
-			},
-			output,
+		await runGateDispatch(
+			hook,
+			'sess-sc23-backward',
+			'call-sc23-backward',
+			'reviewer',
+			['1.1'],
+			output.output,
 		);
 
-		// Should work as before — single-task advancement
-		expect(session.taskWorkflowStates.get('1.1')).toBe('reviewer_run');
-	});
-
-	it('SC-022.4: complex three-digit task IDs are parsed correctly', () => {
-		const output = `
-[REVIEWED] | task-10.1.2 | APPROVED | Valid
-[TESTED] | task-10.1.2 | PASS | All tests pass
-`;
-		const verdicts = parsePerTaskVerdicts(output);
-		expect(verdicts.get('10.1.2')).toBe('PASS');
+		expect(session.taskWorkflowStates.get('1.1')).toBe('rework_required');
 	});
 
 	it('SC-022.REGRESSION: reviewer verdict for task-2.1 only does NOT over-attribute to 2.2 or 2.3', async () => {
@@ -431,10 +382,10 @@ Reviewed the code. No issues found.`,
 		startAgentSession('sess-sc22-regression', 'architect');
 		const session = ensureAgentSession('sess-sc22-regression');
 
-		// Set up 3 tasks in coder_delegated state
-		session.taskWorkflowStates.set('2.1', 'coder_delegated');
-		session.taskWorkflowStates.set('2.2', 'coder_delegated');
-		session.taskWorkflowStates.set('2.3', 'coder_delegated');
+		await seedStageA(tempDir, ['2.1', '2.2', '2.3']);
+		session.taskWorkflowStates.set('2.1', 'pre_check_passed');
+		session.taskWorkflowStates.set('2.2', 'pre_check_passed');
+		session.taskWorkflowStates.set('2.3', 'pre_check_passed');
 		session.currentTaskId = '2.1';
 
 		// Output contains verdict ONLY for task-2.1
@@ -442,14 +393,13 @@ Reviewed the code. No issues found.`,
 			output: `[REVIEWED] | task-2.1 | APPROVED | No issues found in the implementation`,
 		};
 
-		await hook.toolAfter(
-			{
-				tool: 'Task',
-				sessionID: 'sess-sc22-regression',
-				callID: 'call-sc22-regression',
-				args: { subagent_type: 'reviewer' },
-			},
-			output,
+		await runGateDispatch(
+			hook,
+			'sess-sc22-regression',
+			'call-sc22-regression',
+			'reviewer',
+			['2.1', '2.2', '2.3'],
+			output.output,
 		);
 
 		// 2.1 should have reviewer recorded (has parseable verdict)
@@ -467,9 +417,9 @@ Reviewed the code. No issues found.`,
 
 		// State machine: only 2.1 should advance (has completion)
 		expect(session.taskWorkflowStates.get('2.1')).toBe('reviewer_run');
-		// 2.2 and 2.3 should remain in coder_delegated (no completion recorded)
-		expect(session.taskWorkflowStates.get('2.2')).toBe('coder_delegated');
-		expect(session.taskWorkflowStates.get('2.3')).toBe('coder_delegated');
+		// 2.2 and 2.3 remain at Stage A (no completion recorded).
+		expect(session.taskWorkflowStates.get('2.2')).toBe('pre_check_passed');
+		expect(session.taskWorkflowStates.get('2.3')).toBe('pre_check_passed');
 	});
 
 	it('SC-023.REGRESSION: test_engineer verdict for task-2.1 only does NOT over-attribute to 2.2', async () => {
@@ -480,7 +430,7 @@ Reviewed the code. No issues found.`,
 		startAgentSession('sess-sc23-regression', 'architect');
 		const session = ensureAgentSession('sess-sc23-regression');
 
-		// Set up 2 tasks in reviewer_run state (ready for test_engineer)
+		await seedReviewer(tempDir, ['2.1', '2.2']);
 		session.taskWorkflowStates.set('2.1', 'reviewer_run');
 		session.taskWorkflowStates.set('2.2', 'reviewer_run');
 		session.currentTaskId = '2.1';
@@ -490,14 +440,13 @@ Reviewed the code. No issues found.`,
 			output: `[TESTED] | task-2.1 | PASS | 10/10 tests passed`,
 		};
 
-		await hook.toolAfter(
-			{
-				tool: 'Task',
-				sessionID: 'sess-sc23-regression',
-				callID: 'call-sc23-regression',
-				args: { subagent_type: 'test_engineer' },
-			},
-			output,
+		await runGateDispatch(
+			hook,
+			'sess-sc23-regression',
+			'call-sc23-regression',
+			'test_engineer',
+			['2.1', '2.2'],
+			output.output,
 		);
 
 		// 2.1 should have test_engineer recorded

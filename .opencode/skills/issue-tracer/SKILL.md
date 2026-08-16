@@ -74,7 +74,7 @@ Use these sources in this order.
 Before meaningful work, discover the repository's own contract in this order. Do not assume one project's conventions apply to another.
 
 1. Read the repo-root agent instruction files (`AGENTS.md` and any runtime-specific root instruction file your agent loads).
-2. Read the repo's contributing/commit/test skills or docs if present (e.g. a `contributing` guide, a `writing-tests` skill, a `commit-pr` skill).
+2. Read the repo's contributing/commit/test skills or docs if present (e.g. a contributing guide, a `writing-tests` skill, a `commit-pr` skill).
 3. Inspect manifests (package/build metadata), test configs, and CI configs to learn the verification commands — from files, not memory.
 4. Only if an invariants/architecture-contract doc exists, perform the invariant audit against it and record touched-invariant evidence in the PR body. If none exists, state "no invariant doc found" in the PR body — never fabricate an audit.
 

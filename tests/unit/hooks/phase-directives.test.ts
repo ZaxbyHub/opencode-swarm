@@ -6,14 +6,15 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
+import { appendKnowledgeEvent } from '../../../src/hooks/knowledge-events';
 import {
-	appendKnowledgeEvent,
-	resolveKnowledgeEventsPath,
-} from '../../../src/hooks/knowledge-events';
+	commitDisplayedMembership,
+	validateAndCommitTerminalBatch,
+} from '../../../src/hooks/knowledge-receipt-ledger';
 import {
 	appendKnowledge,
 	resolveSwarmKnowledgePath,
@@ -62,10 +63,13 @@ describe('phase-directives', () => {
 	let prevHome: string | undefined;
 	let prevLocalAppData: string | undefined;
 	let prevXdgDataHome: string | undefined;
+	let traceSequence: number;
 
 	beforeEach(() => {
 		mock.restore();
 		dir = mkdtempSync(path.join(tmpdir(), 'swarm-phase-directives-'));
+		writeFileSync(path.join(dir, '.git'), 'gitdir: fixture');
+		traceSequence = 0;
 		// Isolate resolveHiveKnowledgePath to an empty temp so hive reads are
 		// deterministic. resolveHiveKnowledgePath reads HOME (linux/darwin) and
 		// LOCALAPPDATA (win32); override all to prevent real-profile touches.
@@ -95,13 +99,6 @@ describe('phase-directives', () => {
 	// -------------------------------------------------------------------------
 	// Helper: seed retrieved events for a phase
 	// -------------------------------------------------------------------------
-	// Ensure the .swarm directory exists under dir before writing files
-	async function ensureSwarmDir(): Promise<string> {
-		const swarmDir = path.join(dir, '.swarm');
-		await mkdir(swarmDir, { recursive: true });
-		return swarmDir;
-	}
-
 	async function seedRetrievedEvents(
 		phase: string,
 		resultIds: string[],
@@ -110,24 +107,24 @@ describe('phase-directives', () => {
 			knowledge_id?: string;
 			phase?: string;
 		}>,
+		traceId?: string,
 	): Promise<void> {
-		const events = [
-			{
-				type: 'retrieved' as const,
-				trace_id: 'trace-1',
-				session_id: 'session-1',
-				agent: 'architect',
-				query: 'test query',
-				retrieval_mode: 'manual' as const,
-				result_ids: resultIds,
-				ranks: Object.fromEntries(resultIds.map((id, i) => [id, i + 1])),
-				scores: Object.fromEntries(
-					resultIds.map((id, i) => [id, 1.0 - i * 0.1]),
-				),
-				phase,
-			},
-			...(extraEvents ?? []),
-		];
+		const resolvedTraceId = traceId ?? `trace-${++traceSequence}`;
+		const entries = await readEntriesById(dir);
+		const displayed = await commitDisplayedMembership(dir, {
+			trace_id: resolvedTraceId,
+			session_id: 'session-1',
+			agent: 'architect',
+			phase,
+			entries: resultIds.map((entryId, index) => ({
+				entry_id: entryId,
+				critical: entries.get(entryId)?.directive_priority === 'critical',
+				rank: index + 1,
+				score: 1.0 - index * 0.1,
+			})),
+		});
+		if (!displayed.ok) throw new Error(displayed.detail);
+		const events = [...(extraEvents ?? [])];
 		for (const event of events) {
 			await appendKnowledgeEvent(dir, event);
 		}
@@ -239,7 +236,11 @@ describe('phase-directives', () => {
 			const directives = await readPhaseDirectivesToVerify(dir, 'Phase 1');
 
 			expect(directives).toHaveLength(1);
-			expect(directives[0].id).toBe(id1);
+			expect(directives[0]).toMatchObject({
+				trace_id: 'trace-1',
+				entry_id: id1,
+				session_id: 'session-1',
+			});
 			expect(directives[0].priority).toBe('high');
 			expect(directives[0].lesson).toBe(entry.lesson);
 		});
@@ -258,6 +259,61 @@ describe('phase-directives', () => {
 			expect(directives).toHaveLength(2);
 		});
 
+		it('preserves the same entry retrieved under distinct traces', async () => {
+			const id = 'directive-shared-across-traces';
+			await appendKnowledge(
+				resolveSwarmKnowledgePath(dir),
+				makeEntry(id, 'established', 'high'),
+			);
+			await seedRetrievedEvents('Phase 1', [id], undefined, 'trace-a');
+			await seedRetrievedEvents('Phase 1', [id], undefined, 'trace-b');
+
+			const directives = await readPhaseDirectivesToVerify(dir, 'Phase 1');
+
+			expect(
+				directives.map(({ trace_id, entry_id }) => ({ trace_id, entry_id })),
+			).toEqual([
+				{ trace_id: 'trace-a', entry_id: id },
+				{ trace_id: 'trace-b', entry_id: id },
+			]);
+		});
+
+		it('re-enumerates violated terminals for remediation but excludes resolved terminals', async () => {
+			const violatedId = 'directive-violated-remediation';
+			const appliedId = 'directive-already-applied';
+			const kp = resolveSwarmKnowledgePath(dir);
+			await appendKnowledge(
+				kp,
+				makeEntry(violatedId, 'established', 'critical'),
+			);
+			await appendKnowledge(
+				kp,
+				makeEntry(appliedId, 'established', 'critical'),
+			);
+			await seedRetrievedEvents('Phase 1', [violatedId], undefined, 'trace-v');
+			await seedRetrievedEvents('Phase 1', [appliedId], undefined, 'trace-a');
+			for (const [trace_id, entry_id, outcome] of [
+				['trace-v', violatedId, 'violated'],
+				['trace-a', appliedId, 'applied'],
+			] as const) {
+				const terminal = await validateAndCommitTerminalBatch(dir, {
+					trace_id,
+					session_id: 'session-1',
+					items: [{ entry_id, outcome }],
+				});
+				if (!terminal.ok) throw new Error(terminal.detail);
+			}
+
+			const directives = await readPhaseDirectivesToVerify(dir, 'Phase 1');
+			expect(directives).toHaveLength(1);
+			expect(directives[0]).toMatchObject({
+				trace_id: 'trace-v',
+				entry_id: violatedId,
+				prior_terminal_outcome: 'violated',
+			});
+			expect(directives[0]?.prior_terminal_event_id).toBeString();
+		});
+
 		it('excludes archived entries from returned directives', async () => {
 			const id1 = 'directive-active-001';
 			const id2 = 'directive-archived-002';
@@ -269,7 +325,7 @@ describe('phase-directives', () => {
 			const directives = await readPhaseDirectivesToVerify(dir, 'Phase 1');
 
 			expect(directives).toHaveLength(1);
-			expect(directives[0].id).toBe(id1);
+			expect(directives[0].entry_id).toBe(id1);
 		});
 
 		it('excludes quarantined entries from returned directives', async () => {
@@ -283,7 +339,7 @@ describe('phase-directives', () => {
 			const directives = await readPhaseDirectivesToVerify(dir, 'Phase 1');
 
 			expect(directives).toHaveLength(1);
-			expect(directives[0].id).toBe(id1);
+			expect(directives[0].entry_id).toBe(id1);
 		});
 
 		it('returns empty array when no retrieved events exist for the phase', async () => {
@@ -405,7 +461,12 @@ describe('phase-directives', () => {
 			);
 			// Same directive retrieved in two different phase contexts
 			await seedRetrievedEvents('Phase 1', [idShared]);
-			await seedRetrievedEvents('Phase 1 — complete', [idShared]);
+			await seedRetrievedEvents(
+				'Phase 1 — complete',
+				[idShared],
+				undefined,
+				'trace-2',
+			);
 
 			const startIds = await collectPhaseDirectiveIds(dir, 'Phase 1');
 			const endIds = await collectPhaseDirectiveIds(dir, 'Phase 1 — complete');

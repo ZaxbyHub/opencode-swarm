@@ -25,15 +25,22 @@ import {
 	parseDraftFrontmatter,
 	renderSkillMarkdown,
 } from '../../../src/services/skill-generator';
+import { createIsolatedTestEnv } from '../../helpers/isolated-test-env';
 
 let tmp: string;
+let isolatedEnv: ReturnType<typeof createIsolatedTestEnv>;
 beforeEach(() => {
 	mock.restore();
+	isolatedEnv = createIsolatedTestEnv();
 	tmp = mkdtempSync(path.join(tmpdir(), 'swarm-skill-lifecycle-'));
 });
 afterEach(() => {
-	rmSync(tmp, { recursive: true, force: true });
-	mock.restore();
+	try {
+		rmSync(tmp, { recursive: true, force: true });
+	} finally {
+		isolatedEnv.cleanup();
+		mock.restore();
+	}
 });
 
 function makeEntry(id: string): SwarmKnowledgeEntry {

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { KnowledgeConfigSchema } from '../../../src/config/schema.js';
@@ -56,23 +56,27 @@ function makeEntry(
 }
 
 describe('knowledge injector linked-store regression', () => {
-	let platformSpy: ReturnType<typeof spyOn> | undefined;
-	let prevXdg: string | undefined;
+	let dataEnvKey: 'HOME' | 'LOCALAPPDATA' | 'XDG_DATA_HOME';
+	let previousDataEnv: string | undefined;
 	let dataCleanup: () => void;
 
 	beforeEach(() => {
 		invalidateKnowledgeStoreDirCache();
-		platformSpy = spyOn(process, 'platform', 'get').mockReturnValue('linux');
-		prevXdg = process.env.XDG_DATA_HOME;
 		const data = createSafeTestDir('knowledge-injector-link-data-');
 		dataCleanup = data.cleanup;
-		process.env.XDG_DATA_HOME = data.dir;
+		dataEnvKey =
+			process.platform === 'win32'
+				? 'LOCALAPPDATA'
+				: process.platform === 'darwin'
+					? 'HOME'
+					: 'XDG_DATA_HOME';
+		previousDataEnv = process.env[dataEnvKey];
+		process.env[dataEnvKey] = data.dir;
 	});
 
 	afterEach(() => {
-		platformSpy?.mockRestore();
-		if (prevXdg === undefined) delete process.env.XDG_DATA_HOME;
-		else process.env.XDG_DATA_HOME = prevXdg;
+		if (previousDataEnv === undefined) delete process.env[dataEnvKey];
+		else process.env[dataEnvKey] = previousDataEnv;
 		invalidateKnowledgeStoreDirCache();
 		swarmState.activeAgent.delete(SESSION_ID);
 		dataCleanup?.();
@@ -83,6 +87,7 @@ describe('knowledge injector linked-store regression', () => {
 		const b = createSafeTestDir('knowledge-injector-link-b-');
 		try {
 			for (const dir of [a.dir, b.dir]) {
+				fs.mkdirSync(path.join(dir, '.git'));
 				await writeLinkPointer(dir, {
 					version: 1,
 					linkId: 'team-lessons',
@@ -148,6 +153,16 @@ describe('knowledge injector linked-store regression', () => {
 			expect(fs.existsSync(path.join(b.dir, '.swarm', 'knowledge.jsonl'))).toBe(
 				false,
 			);
+			expect(
+				fs.existsSync(
+					path.join(b.dir, '.swarm', 'knowledge-receipts-v2.jsonl'),
+				),
+			).toBe(true);
+			expect(
+				fs.existsSync(
+					path.join(a.dir, '.swarm', 'knowledge-receipts-v2.jsonl'),
+				),
+			).toBe(false);
 		} finally {
 			a.cleanup();
 			b.cleanup();

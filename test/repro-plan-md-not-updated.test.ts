@@ -6,25 +6,27 @@
  * Layer 2 (durable):   plan.json task.status, projected to plan.md via
  *   derivePlanMarkdown. Mutated by savePlan/updateTaskStatus.
  *
- * The bug was that the two layers had no bridge: advanceTaskState would
- * reach 'complete' on council APPROVE but plan.md stayed at [ ]. The fix
- * is advanceTaskStateAndPersist, which advances Layer 1 and persists the
- * meaningful workflow boundaries to Layer 2.
+ * The former compatibility bridge was an unsafe second durable writer. The
+ * exact-task update_task_status transaction/WAL now owns terminal persistence;
+ * advanceTaskStateAndPersist remains only for diagnostic intermediate state.
  *
  * What this file asserts:
  *   1. updateTaskStatus alone updates plan.json + plan.md (control).
  *   2. advanceTaskState alone is intentionally Layer-1-only (contract).
- *   3. advanceTaskStateAndPersist updates both layers (the fix).
+ *   3. advanceTaskStateAndPersist refuses coder/terminal boundaries and never
+ *      writes plan projections.
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import {
 	existsSync,
 	mkdirSync,
+	mkdtempSync,
 	readFileSync,
 	rmSync,
 	writeFileSync,
 } from 'node:fs';
+import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import type { Plan } from '../src/config/plan-schema';
 import { loadPlan, updateTaskStatus } from '../src/plan/manager';
@@ -35,8 +37,9 @@ import {
 	startAgentSession,
 	swarmState,
 } from '../src/state';
+import { canonicalTmpDir } from '../tests/helpers/tmpdir.js';
 
-const TEST_BASE_DIR = path.join(process.cwd(), '.test-repro-plan-md');
+let TEST_BASE_DIR: string;
 const SWARM_ID = 'repro-swarm';
 const TASK_ID = '1.1';
 
@@ -94,8 +97,8 @@ function cleanup() {
 }
 
 beforeEach(() => {
-	cleanup();
-	mkdirSync(TEST_BASE_DIR, { recursive: true });
+	resetSwarmState();
+	TEST_BASE_DIR = mkdtempSync(path.join(canonicalTmpDir(), 'repro-plan-md-'));
 });
 
 afterEach(() => {
@@ -152,82 +155,54 @@ describe('Plan persistence — Layer 1 contract (advanceTaskState is in-memory o
 	});
 });
 
-describe('Plan persistence — Layer 1↔2 bridge (advanceTaskStateAndPersist)', () => {
-	it('coder_delegated advances Layer 1 AND marks task in_progress on disk', async () => {
+describe('Plan persistence — legacy wrapper cannot write durable boundaries', () => {
+	it('coder_delegated requires the exact-task central transaction', async () => {
 		writePlanJson(TEST_BASE_DIR, makePlan());
+		startAgentSession('legacy-coder', 'architect', 7200000, undefined);
+		const session = swarmState.agentSessions.get('legacy-coder')!;
 
-		const sessionId = 'bridge-session-coder';
-		startAgentSession(sessionId, 'architect', 7200000, undefined);
-		const session = swarmState.agentSessions.get(sessionId);
-		if (!session) throw new Error('session not created');
+		await expect(
+			advanceTaskStateAndPersist(
+				session,
+				TASK_ID,
+				'coder_delegated',
+				TEST_BASE_DIR,
+			),
+		).rejects.toThrow('TASK_WORKFLOW_CENTRAL_TRANSACTION_REQUIRED');
 
-		await advanceTaskStateAndPersist(
-			session,
-			TASK_ID,
-			'coder_delegated',
-			TEST_BASE_DIR,
+		expect(session.taskWorkflowStates.has(TASK_ID)).toBe(false);
+		expect(readPlanJson(TEST_BASE_DIR).phases[0].tasks[0].status).toBe(
+			'pending',
 		);
-
-		expect(session.taskWorkflowStates.get(TASK_ID)).toBe('coder_delegated');
-
-		const plan = readPlanJson(TEST_BASE_DIR);
-		expect(plan.phases[0].tasks[0].status).toBe('in_progress');
 	});
 
-	it('complete advances Layer 1 AND marks task completed on disk + [x] in plan.md', async () => {
+	it('complete requires the exact-task terminal WAL transaction', async () => {
 		writePlanJson(TEST_BASE_DIR, makePlan());
+		startAgentSession('legacy-complete', 'architect', 7200000, undefined);
+		const session = swarmState.agentSessions.get('legacy-complete')!;
+		session.taskWorkflowStates.set(TASK_ID, 'tests_run');
 
-		const sessionId = 'bridge-session-complete';
-		startAgentSession(sessionId, 'architect', 7200000, undefined);
-		const session = swarmState.agentSessions.get(sessionId);
-		if (!session) throw new Error('session not created');
+		await expect(
+			advanceTaskStateAndPersist(session, TASK_ID, 'complete', TEST_BASE_DIR),
+		).rejects.toThrow('TASK_WORKFLOW_CENTRAL_TRANSACTION_REQUIRED');
 
-		// Walk the state machine the full distance (intermediate states are
-		// in-memory only — that's the contract).
-		await advanceTaskStateAndPersist(
-			session,
-			TASK_ID,
-			'coder_delegated',
-			TEST_BASE_DIR,
+		expect(session.taskWorkflowStates.get(TASK_ID)).toBe('tests_run');
+		expect(readPlanJson(TEST_BASE_DIR).phases[0].tasks[0].status).toBe(
+			'pending',
 		);
-		advanceTaskState(session, TASK_ID, 'pre_check_passed');
-		advanceTaskState(session, TASK_ID, 'reviewer_run');
-		advanceTaskState(session, TASK_ID, 'tests_run');
-		await advanceTaskStateAndPersist(
-			session,
-			TASK_ID,
-			'complete',
-			TEST_BASE_DIR,
+		expect(existsSync(path.join(TEST_BASE_DIR, '.swarm', 'plan.md'))).toBe(
+			false,
 		);
-
-		expect(session.taskWorkflowStates.get(TASK_ID)).toBe('complete');
-
-		const plan = readPlanJson(TEST_BASE_DIR);
-		expect(plan.phases[0].tasks[0].status).toBe('completed');
-
-		const mdPath = path.join(TEST_BASE_DIR, '.swarm', 'plan.md');
-		expect(existsSync(mdPath)).toBe(true);
-		const md = readFileSync(mdPath, 'utf-8');
-		expect(md).toMatch(/- \[x\][^\n]*1\.1/);
 	});
 
-	it('intermediate states pass through advanceTaskStateAndPersist without disk writes', async () => {
-		writePlanJson(TEST_BASE_DIR, makePlan());
+	it('diagnostic intermediate states remain in memory only', async () => {
+		const inProgress = makePlan();
+		inProgress.phases[0].tasks[0].status = 'in_progress';
+		writePlanJson(TEST_BASE_DIR, inProgress);
+		startAgentSession('legacy-intermediate', 'architect', 7200000, undefined);
+		const session = swarmState.agentSessions.get('legacy-intermediate')!;
+		session.taskWorkflowStates.set(TASK_ID, 'coder_delegated');
 
-		const sessionId = 'bridge-session-intermediate';
-		startAgentSession(sessionId, 'architect', 7200000, undefined);
-		const session = swarmState.agentSessions.get(sessionId);
-		if (!session) throw new Error('session not created');
-
-		// Bring it through coder_delegated so disk shows in_progress.
-		await advanceTaskStateAndPersist(
-			session,
-			TASK_ID,
-			'coder_delegated',
-			TEST_BASE_DIR,
-		);
-		// Intermediate states via the helper must be a no-op on disk
-		// (the task is already in_progress; only complete should re-write).
 		await advanceTaskStateAndPersist(
 			session,
 			TASK_ID,
@@ -247,27 +222,10 @@ describe('Plan persistence — Layer 1↔2 bridge (advanceTaskStateAndPersist)',
 			TEST_BASE_DIR,
 		);
 
-		const plan = readPlanJson(TEST_BASE_DIR);
-		// Status remained in_progress through all intermediate transitions.
-		expect(plan.phases[0].tasks[0].status).toBe('in_progress');
-	});
-
-	it('persistence error does not break the in-memory transition', async () => {
-		// No plan.json on disk — updateTaskStatus will throw "Plan not found".
-		// The bridge must swallow that and still advance Layer 1.
-		const sessionId = 'bridge-session-resilient';
-		startAgentSession(sessionId, 'architect', 7200000, undefined);
-		const session = swarmState.agentSessions.get(sessionId);
-		if (!session) throw new Error('session not created');
-
-		await advanceTaskStateAndPersist(
-			session,
-			TASK_ID,
-			'coder_delegated',
-			TEST_BASE_DIR,
+		expect(session.taskWorkflowStates.get(TASK_ID)).toBe('tests_run');
+		expect(readPlanJson(TEST_BASE_DIR).phases[0].tasks[0].status).toBe(
+			'in_progress',
 		);
-
-		expect(session.taskWorkflowStates.get(TASK_ID)).toBe('coder_delegated');
 	});
 });
 

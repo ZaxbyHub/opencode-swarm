@@ -189,6 +189,14 @@ export {
 	prepare_pr_workflow_checkout,
 } from './prepare-pr-workflow-checkout';
 export {
+	executeRebindPrFeedbackHead,
+	rebind_pr_feedback_head,
+} from './rebind-pr-feedback-head';
+export {
+	executeRecordImplementationReview,
+	record_implementation_review,
+} from './record-implementation-review';
+export {
 	executeRecordIssuePublication,
 	record_issue_publication,
 } from './record-issue-publication';
@@ -196,6 +204,10 @@ export {
 	executeRecordIssueReproduction,
 	record_issue_reproduction,
 } from './record-issue-reproduction';
+export {
+	executeRecordRecurrenceSweep,
+	record_recurrence_sweep,
+} from './record-recurrence-sweep';
 export {
 	executeRunPrFeedbackStageA,
 	run_pr_feedback_stage_a,

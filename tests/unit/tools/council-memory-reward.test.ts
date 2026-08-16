@@ -10,6 +10,7 @@ import {
 } from '../../../src/memory';
 import { clearPool } from '../../../src/memory/provider-pool';
 import { resetSwarmState } from '../../../src/state';
+import { seedCouncilLaunch } from '../../helpers/task-workflow-evidence';
 
 let tmpDir: string;
 let originalXdgConfigHome: string | undefined;
@@ -100,6 +101,7 @@ describe('phase council memory reward wiring', () => {
 			'../../../src/tools/convene-council'
 		);
 		const record = await seedRecall('session-council');
+		await seedCouncilLaunch(tmpDir, '1.1', 'session-council');
 
 		const raw = await submit_council_verdicts.execute(
 			{

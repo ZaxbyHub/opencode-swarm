@@ -16,6 +16,7 @@ import {
 	readKnowledgeEvents,
 	recomputeCounters,
 } from '../../src/hooks/knowledge-events.js';
+import { commitDisplayedMembership } from '../../src/hooks/knowledge-receipt-ledger.js';
 import { reconcileReviewerVerdicts } from '../../src/hooks/reviewer-verdict-parser.js';
 
 describe('reconcileReviewerVerdicts', () => {
@@ -37,25 +38,62 @@ describe('reconcileReviewerVerdicts', () => {
 	});
 
 	const directives: DirectiveToVerify[] = [
-		{ id: 'd1', priority: 'critical' },
 		{
-			id: 'd2',
+			trace_id: 'trace-r',
+			entry_id: 'd1',
+			session_id: 'sess-r',
+			priority: 'critical',
+		},
+		{
+			trace_id: 'trace-r',
+			entry_id: 'd2',
+			session_id: 'sess-r',
 			priority: 'high',
 			verification_predicate: 'grep:asyncIteratorBad:src/**/*.ts',
 		},
-		{ id: 'd3', priority: 'medium' },
-		{ id: 'd4', priority: 'critical' }, // omitted in transcript
-		{ id: 'd5', priority: 'low' },
+		{
+			trace_id: 'trace-r',
+			entry_id: 'd3',
+			session_id: 'sess-r',
+			priority: 'medium',
+		},
+		{
+			trace_id: 'trace-r',
+			entry_id: 'd4',
+			session_id: 'sess-r',
+			priority: 'critical',
+		}, // omitted in transcript
+		{
+			trace_id: 'trace-r',
+			entry_id: 'd5',
+			session_id: 'sess-r',
+			priority: 'low',
+		},
 	];
 
+	async function seedMemberships(items: DirectiveToVerify[]): Promise<void> {
+		const first = items[0];
+		if (!first) return;
+		await commitDisplayedMembership(dir, {
+			trace_id: first.trace_id,
+			session_id: first.session_id,
+			phase: 'Phase 2',
+			entries: items.map((item) => ({
+				entry_id: item.entry_id,
+				critical: item.priority === 'critical',
+			})),
+		});
+	}
+
 	it('records 5 events with correct counters, predicate result, and omitted-critical synthesis', async () => {
+		await seedMemberships(directives);
 		const transcript = [
 			'VERDICT: REJECTED',
 			'DIRECTIVE_COMPLIANCE:',
-			'VERIFIED:d1 evidence=src/foo.ts:10',
-			'VIOLATED:d2 evidence=found forbidden pattern',
-			'N/A:d3 reason=not applicable',
-			'VERIFIED:d5 evidence=src/bar.ts:3',
+			'VERIFIED:trace-r:d1 evidence=src/foo.ts:10',
+			'VIOLATED:trace-r:d2 evidence=found forbidden pattern',
+			'N/A:trace-r:d3 reason=not applicable',
+			'VERIFIED:trace-r:d5 evidence=src/bar.ts:3',
 			// d4 (critical) deliberately omitted.
 		].join('\n');
 
@@ -70,7 +108,9 @@ describe('reconcileReviewerVerdicts', () => {
 
 		// 5 emitted events: d1 applied, d2 violated, d3 n_a, d5 applied, d4 violated(omitted).
 		expect(result.emitted).toHaveLength(5);
-		expect(result.omittedCriticals).toEqual(['d4']);
+		expect(result.omittedCriticals).toEqual([
+			{ trace_id: 'trace-r', entry_id: 'd4' },
+		]);
 
 		const events = await readKnowledgeEvents(dir);
 		const byId = new Map(
@@ -110,14 +150,23 @@ describe('reconcileReviewerVerdicts', () => {
 	});
 
 	it('drops verdicts for IDs not in the verify-set (anti-spoofing)', async () => {
+		const only = [
+			{
+				trace_id: 'trace-a',
+				entry_id: 'd1',
+				session_id: 's',
+				priority: 'high' as const,
+			},
+		];
+		await seedMemberships(only);
 		const transcript = [
-			'VERIFIED:d1 evidence=ok',
-			'VERIFIED:not-a-real-directive evidence=spoofed',
+			'VERIFIED:trace-a:d1 evidence=ok',
+			'VERIFIED:trace-a:not-a-real-directive evidence=spoofed',
 		].join('\n');
 		const result = await reconcileReviewerVerdicts({
 			directory: dir,
 			transcript,
-			directivesToVerify: [{ id: 'd1', priority: 'high' }],
+			directivesToVerify: only,
 			sessionId: 's',
 		});
 		expect(result.emitted.map((e) => e.id)).toEqual(['d1']);

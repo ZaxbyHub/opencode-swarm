@@ -18,6 +18,7 @@ import type {
 	BuildTestCommandOpts,
 	FrameworkSelection,
 	LanguageBackend,
+	NativeTestTarget,
 	TestFrameworkSelection,
 	TestRunSummary,
 } from './backend';
@@ -149,6 +150,11 @@ export function defaultBuildTestCommand(
 	const coverage = opts.coverage ?? false;
 	const bail = opts.bail ?? false;
 	const targets = opts.targets;
+	const nativeTarget = opts.nativeTarget;
+	if (nativeTarget) {
+		if (nativeTarget.framework !== framework) return null;
+		return buildNativeTargetCommand(nativeTarget);
+	}
 
 	switch (framework) {
 		case 'bun': {
@@ -340,6 +346,33 @@ export function defaultBuildTestCommand(
 	}
 }
 
+function escapeRegexLiteral(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+export function buildNativeTargetCommand(target: NativeTestTarget): string[] {
+	if (target.framework === 'ctest') {
+		return [
+			'ctest',
+			'--test-dir',
+			target.path,
+			'-R',
+			`^${escapeRegexLiteral(target.name)}$`,
+		];
+	}
+	const selector = target.name
+		.split('/')
+		.map((part) => `^${escapeRegexLiteral(part)}$`)
+		.join('/');
+	const packagePath =
+		target.path === '.'
+			? '.'
+			: target.path.startsWith('./')
+				? target.path
+				: `./${target.path.replace(/\\/g, '/')}`;
+	return ['go', 'test', '-v', '-run', selector, packagePath];
+}
+
 function phpVendorBin(name: string): string {
 	return path.join(
 		'vendor',
@@ -510,16 +543,24 @@ export function defaultParseTestOutput(
 			break;
 		}
 		case 'ctest': {
+			const disabledCount = [
+				...output.matchAll(/\*{3}Not Run\s+\(Disabled\)/gi),
+			].length;
+			skipped = disabledCount;
 			const ctestMatch = output.match(/(\d+) tests? failed out of (\d+)/);
 			if (ctestMatch) {
 				failed = parseInt(ctestMatch[1], 10);
-				total = parseInt(ctestMatch[2], 10);
-				passed = total - failed;
+				const executedTotal = parseInt(ctestMatch[2], 10);
+				total = executedTotal + disabledCount;
+				passed = executedTotal - failed;
 			} else {
 				const allPassMatch = output.match(/100% tests passed.*?(\d+) tests?/);
 				if (allPassMatch) {
-					total = parseInt(allPassMatch[1], 10);
-					passed = total;
+					const executedTotal = parseInt(allPassMatch[1], 10);
+					total = executedTotal + disabledCount;
+					passed = executedTotal;
+				} else if (disabledCount > 0) {
+					total = disabledCount;
 				}
 			}
 			break;

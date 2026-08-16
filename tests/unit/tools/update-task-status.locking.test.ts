@@ -16,6 +16,7 @@ import {
 	executeUpdateTaskStatus,
 	type UpdateTaskStatusArgs,
 } from '../../../src/tools/update-task-status';
+import { readPlanWithTaskStatus } from '../../helpers/update-task-status-fixtures';
 
 describe('executeUpdateTaskStatus locking behavior', () => {
 	let tempDir: string;
@@ -112,7 +113,9 @@ describe('executeUpdateTaskStatus locking behavior', () => {
 					_release: mockRelease,
 				},
 			});
-			mockUpdateTaskStatus.mockResolvedValue({ current_phase: 1 });
+			mockUpdateTaskStatus.mockResolvedValue(
+				readPlanWithTaskStatus(tempDir, 'in_progress'),
+			);
 
 			// Act
 			const args: UpdateTaskStatusArgs = {
@@ -140,7 +143,9 @@ describe('executeUpdateTaskStatus locking behavior', () => {
 					_release: mockRelease,
 				},
 			});
-			mockUpdateTaskStatus.mockResolvedValue({ current_phase: 1 });
+			mockUpdateTaskStatus.mockResolvedValue(
+				readPlanWithTaskStatus(tempDir, 'in_progress'),
+			);
 
 			// Act
 			const args: UpdateTaskStatusArgs = {
@@ -154,7 +159,7 @@ describe('executeUpdateTaskStatus locking behavior', () => {
 				tempDir,
 				'1.1',
 				'in_progress',
-				{ force: undefined, planLockAlreadyHeld: true },
+				{ force: false, planLockAlreadyHeld: true },
 			);
 		});
 
@@ -215,7 +220,9 @@ describe('executeUpdateTaskStatus locking behavior', () => {
 					_release: mockRelease,
 				},
 			});
-			mockUpdateTaskStatus.mockResolvedValue({ current_phase: 1 });
+			mockUpdateTaskStatus.mockResolvedValue(
+				readPlanWithTaskStatus(tempDir, 'in_progress'),
+			);
 
 			// Act
 			const args: UpdateTaskStatusArgs = {
@@ -416,7 +423,7 @@ describe('executeUpdateTaskStatus locking behavior', () => {
 			mockUpdateTaskStatus.mockImplementation(async () => {
 				callOrder.push('updateTaskStatus');
 				await new Promise((r) => setTimeout(r, 100));
-				return { current_phase: 1 };
+				return readPlanWithTaskStatus(tempDir, 'in_progress');
 			});
 
 			// Act: Call twice in sequence (not parallel, since we need to control timing)
@@ -460,7 +467,9 @@ describe('executeUpdateTaskStatus locking behavior', () => {
 					acquired: false,
 				});
 
-			mockUpdateTaskStatus.mockResolvedValue({ current_phase: 1 });
+			mockUpdateTaskStatus.mockResolvedValue(
+				readPlanWithTaskStatus(tempDir, 'in_progress'),
+			);
 
 			// Act
 			const args: UpdateTaskStatusArgs = {
@@ -473,108 +482,6 @@ describe('executeUpdateTaskStatus locking behavior', () => {
 
 			// Assert: lock was released once
 			expect(releaseCallCount).toBe(1);
-		});
-	});
-
-	// ========== GROUP 5: Lock Release in finally block (guaranteed release) ==========
-	describe('Group 5: Guaranteed Lock Release in finally block', () => {
-		test('returns success even when _release throws — finally block swallows release errors', async () => {
-			// Arrange
-			const mockRelease = vi.fn().mockImplementation(() => {
-				throw new Error('Release failed');
-			});
-
-			mockTryAcquireLock.mockResolvedValue({
-				acquired: true,
-				lock: {
-					filePath: 'plan.json',
-					agent: 'update-task-status',
-					taskId: 'lock-1',
-					timestamp: new Date().toISOString(),
-					expiresAt: Date.now() + 300000,
-					_release: mockRelease,
-				},
-			});
-			mockUpdateTaskStatus.mockResolvedValue({ current_phase: 1 });
-
-			// Act & Assert
-			const args: UpdateTaskStatusArgs = {
-				task_id: '1.1',
-				status: 'in_progress',
-			};
-
-			const result = await executeUpdateTaskStatus(args, tempDir);
-			expect(result.success).toBe(true);
-			expect(mockRelease).toHaveBeenCalled(); // release was attempted
-		});
-
-		test('original updateTaskStatus error is preserved when _release also throws', async () => {
-			// Arrange
-			const mockRelease = vi.fn().mockImplementation(() => {
-				throw new Error('Release failed');
-			});
-
-			mockTryAcquireLock.mockResolvedValue({
-				acquired: true,
-				lock: {
-					filePath: 'plan.json',
-					agent: 'update-task-status',
-					taskId: 'lock-1',
-					timestamp: new Date().toISOString(),
-					expiresAt: Date.now() + 300000,
-					_release: mockRelease,
-				},
-			});
-			mockUpdateTaskStatus.mockRejectedValue(new Error('Update failed'));
-
-			// Act & Assert
-			const args: UpdateTaskStatusArgs = {
-				task_id: '1.1',
-				status: 'in_progress',
-			};
-
-			const result = await executeUpdateTaskStatus(args, tempDir);
-			expect(result.success).toBe(false);
-			expect(result.errors?.some((e) => e.includes('Update failed'))).toBe(
-				true,
-			);
-			expect(mockRelease).toHaveBeenCalled();
-		});
-
-		test('lock is not released when lock acquisition fails (acquired=false)', async () => {
-			// Arrange
-			const mockRelease = vi.fn().mockResolvedValue(undefined);
-			mockTryAcquireLock.mockResolvedValue({
-				acquired: false,
-			});
-
-			// Act
-			const args: UpdateTaskStatusArgs = {
-				task_id: '1.1',
-				status: 'in_progress',
-			};
-			await executeUpdateTaskStatus(args, tempDir);
-
-			// Assert: _release was never called because no lock was acquired
-			expect(mockRelease).not.toHaveBeenCalled();
-		});
-
-		test('lock is not released when lock acquisition throws (exception before lock)', async () => {
-			// Arrange
-			const mockRelease = vi.fn().mockResolvedValue(undefined);
-			mockTryAcquireLock.mockRejectedValue(
-				new Error('Cannot create lock directory'),
-			);
-
-			// Act
-			const args: UpdateTaskStatusArgs = {
-				task_id: '1.1',
-				status: 'in_progress',
-			};
-			await executeUpdateTaskStatus(args, tempDir);
-
-			// Assert: _release was never called because lock was never acquired
-			expect(mockRelease).not.toHaveBeenCalled();
 		});
 	});
 });

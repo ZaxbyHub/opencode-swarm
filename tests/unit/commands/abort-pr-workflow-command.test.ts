@@ -50,6 +50,8 @@ describe('/swarm abort-pr-workflow command', () => {
 		);
 		expect(result).toContain('Aborted active PR_REVIEW');
 		expect(result).toContain('cmd-session');
+		expect(result).toContain('(force)');
+		expect(result).toContain('prepare_pr_workflow_checkout operation=restore');
 		expect(await readPrWorkflowGateState(directory, 'cmd-session')).toBeNull();
 	});
 

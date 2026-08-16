@@ -18,18 +18,25 @@ import {
 	resolveQuotaPath,
 } from '../../../src/services/skill-improver-quota';
 import { type AgentSessionState, swarmState } from '../../../src/state';
+import { createIsolatedTestEnv } from '../../helpers/isolated-test-env';
 
 let tmp: string;
+let isolatedEnv: ReturnType<typeof createIsolatedTestEnv>;
 beforeEach(() => {
 	// Clear any module mocks leaked by prior test files (mock.module isolation
 	// is unreliable in Bun --smol; this is best-effort cleanup per the
 	// writing-tests skill rule #3).
 	mock.restore();
+	isolatedEnv = createIsolatedTestEnv();
 	tmp = mkdtempSync(path.join(tmpdir(), 'swarm-skill-improve-'));
 });
 afterEach(() => {
-	rmSync(tmp, { recursive: true, force: true });
-	mock.restore();
+	try {
+		rmSync(tmp, { recursive: true, force: true });
+	} finally {
+		isolatedEnv.cleanup();
+		mock.restore();
+	}
 });
 
 const baseConfig = {

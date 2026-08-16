@@ -1,9 +1,10 @@
 /**
- * Unit tests for the shared receipt validator (issue #1849).
+ * Unit tests for the authoritative V2 receipt validator (issue #1849).
  *
- * Uses a REAL temp `.swarm` directory and writes real knowledge-events.jsonl
- * lines, so the validator exercises its real `readKnowledgeEvents` path. No
- * `mock.module` — the validator is a pure function of (ctx, events-on-disk).
+ * Uses a real temp `.swarm` project and durable on-disk receipt/legacy-event
+ * files, so the validator exercises its real V2-ledger authority and
+ * pre-cutover fallback paths. No `mock.module` — the validator is a pure
+ * function of (ctx, durable receipt state on disk).
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
@@ -14,9 +15,9 @@ import {
 	appendKnowledgeEvent,
 	newTraceId,
 } from '../../../src/hooks/knowledge-events';
+import { queryLiveMemberships } from '../../../src/hooks/knowledge-receipt-ledger';
 import {
 	NO_TRACE_SENTINEL,
-	RECEIPT_VALIDITY_MS,
 	type ReceiptItem,
 	validateReceipt,
 } from '../../../src/hooks/knowledge-receipt-validator';
@@ -75,13 +76,16 @@ function ctx(
 	dir: string,
 	traceId: string,
 	items: ReceiptItem[],
-	opts: { no_relevant?: boolean; session?: string } = {},
+	opts: { no_relevant?: boolean; session?: string; source?: string } = {},
 ) {
 	return {
 		directory: dir,
 		trace_id: traceId,
 		session_id: opts.session ?? SESSION,
 		agent: 'coder',
+		// #2032: callers state their provenance class explicitly; tests default
+		// to the delegate class (the collector's value).
+		source: opts.source ?? 'delegate',
 		items,
 		no_relevant_knowledge: opts.no_relevant ?? false,
 	};
@@ -110,13 +114,85 @@ describe('receipt validator', () => {
 		expect(r.trace?.trace_id).toBe(traceId);
 	});
 
-	test('rejects a receipt for a trace that does not exist', async () => {
+	test('regression: stamps the caller-declared source class, never the agent identity (#2032)', async () => {
+		// Previous behavior: validateReceipt mapped the committed terminal's
+		// source to ctx.agent || 'unknown', so a delegate filing as agent
+		// 'coder' produced a terminal with source 'coder' — an agent identity,
+		// not a provenance class — while unacknowledged events carried
+		// 'delegate'. Source-based rollups/policy were impossible.
+		const traceId = newTraceId();
+		await seedTrace(dir, traceId, ['k1']);
+		const r = await validateReceipt(
+			ctx(dir, traceId, [{ id: 'k1', outcome: 'applied' }]),
+		);
+		expect(r.ok).toBe(true);
+		const state = await queryLiveMemberships(dir, {
+			session_id: SESSION,
+			include_terminal: true,
+		});
+		expect(state.ok).toBe(true);
+		if (!state.ok) return;
+		const terminal = state.memberships.find(
+			(m) => m.trace_id === traceId && m.entry_id === 'k1',
+		)?.terminal;
+		expect(terminal?.outcome).toBe('applied');
+		expect(terminal?.source).toBe('delegate');
+		expect(terminal?.source).not.toBe('coder');
+	});
+
+	test('stamps an explicit non-delegate source when the caller declares one (#2032)', async () => {
+		const traceId = newTraceId();
+		await seedTrace(dir, traceId, ['k1']);
+		const r = await validateReceipt(
+			ctx(
+				dir,
+				traceId,
+				[{ id: 'k1', outcome: 'n_a', reason: 'other subsystem' }],
+				{
+					source: 'reviewer',
+				},
+			),
+		);
+		expect(r.ok).toBe(true);
+		const state = await queryLiveMemberships(dir, {
+			session_id: SESSION,
+			include_terminal: true,
+		});
+		expect(state.ok).toBe(true);
+		if (!state.ok) return;
+		const terminal = state.memberships.find(
+			(m) => m.trace_id === traceId && m.entry_id === 'k1',
+		)?.terminal;
+		expect(terminal?.outcome).toBe('n_a');
+		expect(terminal?.source).toBe('reviewer');
+	});
+
+	test('falls back to unknown only when the caller declares no source (#2032)', async () => {
+		const traceId = newTraceId();
+		await seedTrace(dir, traceId, ['k1']);
+		const r = await validateReceipt(
+			ctx(dir, traceId, [{ id: 'k1', outcome: 'applied' }], { source: '' }),
+		);
+		expect(r.ok).toBe(true);
+		const state = await queryLiveMemberships(dir, {
+			session_id: SESSION,
+			include_terminal: true,
+		});
+		expect(state.ok).toBe(true);
+		if (!state.ok) return;
+		const terminal = state.memberships.find(
+			(m) => m.trace_id === traceId && m.entry_id === 'k1',
+		)?.terminal;
+		expect(terminal?.source).toBe('unknown');
+	});
+
+	test('fails closed when a pre-cutover trace cannot be proven to exist', async () => {
 		const r = await validateReceipt(
 			ctx(dir, newTraceId(), [{ id: 'k1', outcome: 'applied' }]),
 		);
 		expect(r.ok).toBe(false);
 		if (r.ok) return;
-		expect(r.reason).toBe('trace_not_found');
+		expect(r.reason).toBe('legacy_unverifiable');
 	});
 
 	test('rejects an id NOT returned by the trace (forged application)', async () => {
@@ -143,18 +219,16 @@ describe('receipt validator', () => {
 		expect(r.reason).toBe('wrong_session');
 	});
 
-	test('rejects an expired receipt (older than RECEIPT_VALIDITY_MS)', async () => {
+	test('imports a complete multi-day pre-cutover membership that is not proven closed', async () => {
 		const traceId = newTraceId();
-		await seedTrace(dir, traceId, ['k1'], RECEIPT_VALIDITY_MS + 60_000);
+		await seedTrace(dir, traceId, ['k1'], 3 * 86_400_000);
 		const r = await validateReceipt(
 			ctx(dir, traceId, [{ id: 'k1', outcome: 'applied' }]),
 		);
-		expect(r.ok).toBe(false);
-		if (r.ok) return;
-		expect(r.reason).toBe('expired');
+		expect(r.ok).toBe(true);
 	});
 
-	test('(#PRR-009) rejects a receipt with a malformed/unparseable trace timestamp (fail-closed)', async () => {
+	test('reports malformed pre-cutover membership time as unverifiable', async () => {
 		const traceId = newTraceId();
 		// Seed a trace with a garbage timestamp directly via appendKnowledgeEvent.
 		await appendKnowledgeEvent(dir, {
@@ -174,8 +248,7 @@ describe('receipt validator', () => {
 		);
 		expect(r.ok).toBe(false);
 		if (r.ok) return;
-		expect(r.reason).toBe('expired');
-		expect(r.detail).toContain('unparseable');
+		expect(r.reason).toBe('legacy_unverifiable');
 	});
 
 	test('(#PRR-007) intra-receipt duplicate id in applied+ignored is a conflicting-terminal rejection', async () => {
@@ -310,7 +383,7 @@ describe('receipt validator', () => {
 		expect(r.rejected_items?.[0].reason).toBe('id_not_in_trace');
 	});
 
-	test('fresh log (no events file): a receipt for an unknown trace is trace_not_found', async () => {
+	test('fresh pre-cutover log cannot prove an unknown trace was never evicted', async () => {
 		// readKnowledgeEvents returns [] when the file is absent, so the validator
 		// sees no trace — the correct, non-fail-open outcome. (Fail-open only
 		// triggers on a genuine readFile I/O exception, which readKnowledgeEvents
@@ -320,7 +393,7 @@ describe('receipt validator', () => {
 		);
 		expect(r.ok).toBe(false);
 		if (r.ok) return;
-		expect(r.reason).toBe('trace_not_found');
+		expect(r.reason).toBe('legacy_unverifiable');
 	});
 
 	test('the "none" no_relevant terminal is accepted on a fresh log (no trace lookup needed)', async () => {

@@ -80,34 +80,25 @@ describe('updateTaskStatus phase status derivation', () => {
 		expect(reloaded?.phases[0].status).toBe('pending');
 	});
 
-	// Regression test: downgrading completed → pending must actually persist.
-	//
-	// Root cause: updateTaskStatus previously called savePlan with
-	// preserveCompletedStatuses:true, which caused savePlan to re-read disk,
-	// see the task as 'completed', and silently override the caller's explicit
-	// request back to 'completed'.  The function returned success (with the
-	// requested status in its return value) but disk still had 'completed',
-	// producing a silent false-positive that confused LLM agents trying to
-	// reset task status for re-planning.
-	it('regression: downgrading completed → pending is persisted to disk (not silently overridden)', async () => {
+	// The compatibility manager is also a fail-closed mutation sink: callers
+	// cannot turn terminal state back into unaudited plan intent.
+	it('refuses an unaudited completed → pending backward transition', async () => {
 		// Mark both tasks completed so phase becomes complete
 		await updateTaskStatus(tempDir, '1.1', 'completed');
 		await updateTaskStatus(tempDir, '1.2', 'completed');
 
-		// Downgrade task 1.1 back to pending
+		// Terminal state cannot be reopened without the audited repair path.
 		const returned = await updateTaskStatus(tempDir, '1.1', 'pending');
 
-		// The returned plan must reflect the new status
+		// Both the return value and the projection remain settled.
 		const task11Returned = returned.phases[0].tasks.find((t) => t.id === '1.1');
-		expect(task11Returned?.status).toBe('pending');
+		expect(task11Returned?.status).toBe('completed');
 
-		// CRITICAL: disk must also reflect the new status — not silently remain 'completed'
 		const reloaded = await loadPlan(tempDir);
 		const task11OnDisk = reloaded?.phases[0].tasks.find((t) => t.id === '1.1');
-		expect(task11OnDisk?.status).toBe('pending');
+		expect(task11OnDisk?.status).toBe('completed');
 
-		// Phase is 'pending': task 1.1 is pending, task 1.2 is completed, none are in_progress
-		expect(reloaded?.phases[0].status).toBe('pending');
+		expect(reloaded?.phases[0].status).toBe('complete');
 	});
 
 	// Regression test: forced downgrade completed → in_progress must persist.

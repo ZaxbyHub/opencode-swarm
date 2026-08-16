@@ -1,9 +1,10 @@
 /**
  * Promotion-evidence store (issue #1849 §B2).
  *
- * Append-only, FIFO-bounded JSONL store for {@link PromotionEvidenceRecord}s
- * produced when a validated terminal receipt (applied/violated/contradicted) is
- * filed. This is the wiring that finally feeds #1847's
+ * Append-only, FIFO-bounded, rebuildable projection of
+ * {@link PromotionEvidenceRecord}s produced when an authoritative V2 terminal
+ * receipt (applied/violated/contradicted) is filed. V2 receipt history remains
+ * the authority if this projection write fails. This is the wiring that feeds #1847's
  * {@link evaluatePromotionPolicy} consumer (previously inert "until #1849
  * produces real receipts").
  *
@@ -24,6 +25,11 @@ import {
 } from 'node:fs/promises';
 import * as path from 'node:path';
 import { log } from '../utils/logger.js';
+import {
+	queryHistoricalOutcomes,
+	type ReceiptMembership,
+	type ReceiptTerminal,
+} from './knowledge-receipt-ledger.js';
 import type { PromotionEvidenceRecord } from './knowledge-types.js';
 import { validateSwarmPath } from './utils.js';
 
@@ -34,30 +40,27 @@ import { validateSwarmPath } from './utils.js';
  */
 const MAX_PROMOTION_EVIDENCE_ENTRIES = 2000;
 
+function terminalHistory(membership: ReceiptMembership): ReceiptTerminal[] {
+	const compatible = membership as ReceiptMembership & {
+		terminal_history?: ReceiptTerminal[];
+		historical_terminals?: ReceiptTerminal[];
+	};
+	const candidates = [
+		...(compatible.terminal_history ?? []),
+		...(compatible.historical_terminals ?? []),
+		...(membership.terminal ? [membership.terminal] : []),
+	];
+	const seen = new Set<string>();
+	return candidates.filter((terminal) => {
+		if (seen.has(terminal.event_id)) return false;
+		seen.add(terminal.event_id);
+		return true;
+	});
+}
+
 /** Resolve the promotion-evidence log path under the project-root `.swarm/`. */
 export function resolvePromotionEvidencePath(directory: string): string {
 	return validateSwarmPath(directory, 'knowledge-promotion-evidence.jsonl');
-}
-
-function parseRecord(line: string): PromotionEvidenceRecord | null {
-	try {
-		const o = JSON.parse(line) as Partial<PromotionEvidenceRecord>;
-		if (
-			typeof o.cohort_id === 'string' &&
-			typeof o.entry_id === 'string' &&
-			typeof o.retrieval_trace_id === 'string' &&
-			(o.receipt_outcome === 'applied' ||
-				o.receipt_outcome === 'violated' ||
-				o.receipt_outcome === 'contradicted') &&
-			typeof o.receipt_event_id === 'string' &&
-			typeof o.timestamp === 'string'
-		) {
-			return o as PromotionEvidenceRecord;
-		}
-	} catch {
-		/* skip malformed line */
-	}
-	return null;
 }
 
 /**
@@ -102,33 +105,62 @@ async function trimIfOversized(filePath: string): Promise<void> {
 }
 
 /**
- * Load all promotion-evidence records, grouped by entry_id. This is the loader
- * that replaces the inert stub at `hive-promoter.ts:loadPromotionEvidence`.
- * Returns an empty object when the file is absent (no evidence yet — the
- * conservative default). Never throws.
+ * Load authoritative receipt terminals as promotion evidence, grouped by
+ * entry_id. The FIFO file above remains a derived projection and is never read.
+ * Ledger uncertainty or missing truthful cohort lineage conservatively returns
+ * no evidence. Never throws.
  */
 export async function loadPromotionEvidenceByEntry(
 	directory: string,
+	canonicalCohortId?: string,
 ): Promise<Record<string, PromotionEvidenceRecord[]>> {
-	const filePath = resolvePromotionEvidencePath(directory);
-	let content: string;
 	try {
-		content = await readFile(filePath, 'utf-8');
+		const history = await _internals.queryHistoricalOutcomes(directory);
+		if (!history.ok) return {};
+		const out: Record<string, PromotionEvidenceRecord[]> = {};
+		for (const membership of history.memberships) {
+			// Promotion is cohort-scoped correctness state. Never assign historical
+			// evidence to whichever cohort happens to be current at read time: the
+			// cohort must have been truthfully captured with the displayed receipt.
+			if (
+				typeof membership.cohort_id !== 'string' ||
+				membership.cohort_id.length === 0 ||
+				(canonicalCohortId !== undefined &&
+					membership.cohort_id !== canonicalCohortId)
+			) {
+				continue;
+			}
+			for (const terminal of terminalHistory(membership)) {
+				if (
+					terminal.outcome !== 'applied' &&
+					terminal.outcome !== 'violated' &&
+					terminal.outcome !== 'contradicted'
+				) {
+					continue;
+				}
+				const record: PromotionEvidenceRecord = {
+					cohort_id: membership.cohort_id,
+					source_link_id: membership.source_link_id,
+					entry_id: membership.entry_id,
+					retrieval_trace_id: membership.trace_id,
+					receipt_outcome: terminal.outcome,
+					// (#2032 F-003) Preserve the terminal's provenance class so
+					// the promotion gate can honor the independence guarantee.
+					receipt_source: terminal.source,
+					receipt_event_id: terminal.event_id,
+					phase: membership.phase,
+					timestamp: terminal.committed_at,
+				};
+				const bucket = out[record.entry_id];
+				if (bucket) bucket.push(record);
+				else out[record.entry_id] = [record];
+			}
+		}
+		return out;
 	} catch {
 		return {};
 	}
-	const out: Record<string, PromotionEvidenceRecord[]> = {};
-	for (const line of content.split('\n')) {
-		const trimmed = line.trim();
-		if (!trimmed) continue;
-		const rec = parseRecord(trimmed);
-		if (!rec) continue;
-		const bucket = out[rec.entry_id];
-		if (bucket) {
-			bucket.push(rec);
-		} else {
-			out[rec.entry_id] = [rec];
-		}
-	}
-	return out;
 }
+
+/** Dependency seam for authoritative-reader failure and mapping tests. */
+export const _internals = { queryHistoricalOutcomes };

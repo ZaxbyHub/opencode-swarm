@@ -87,7 +87,13 @@ export interface TestRunSummary {
  * can accept them in `buildTestCommand` without a circular import back to
  * `src/tools/test-runner.ts`.
  */
-export type TestScope = 'all' | 'convention' | 'graph' | 'impact';
+export type TestScope = 'all' | 'convention' | 'graph' | 'impact' | 'target';
+
+export interface NativeTestTarget {
+	framework: 'go-test' | 'ctest';
+	name: string;
+	path: string;
+}
 
 /**
  * Options influencing build-command construction. Backends may ignore
@@ -98,6 +104,7 @@ export interface BuildTestCommandOpts {
 	coverage?: boolean;
 	bail?: boolean;
 	targets?: string[];
+	nativeTarget?: NativeTestTarget;
 }
 
 /**

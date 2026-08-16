@@ -1554,6 +1554,7 @@ export async function runPreCheckBatch(
  * Returns unified result with gates_passed status
  */
 export const pre_check_batch: ReturnType<typeof tool> = createSwarmTool({
+	allowWorkingDirectoryOverride: true,
 	description:
 		'Run multiple verification tools in parallel: lint, secretscan, SAST scan, and quality budget. Returns unified result with gates_passed status. Security tools (secretscan, sast_scan) are HARD GATES - failures block merging.',
 	args: {

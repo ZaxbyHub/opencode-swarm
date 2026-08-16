@@ -1508,8 +1508,8 @@ describe('save-plan tool verification tests', () => {
 					},
 				],
 				working_directory: specTmpDir,
+				execution_profile: { planning_profile: 'strict' },
 			});
-
 			expect(result.success).toBe(false);
 			expect(result.message).toBeDefined();
 			expect(typeof result.message).toBe('string');

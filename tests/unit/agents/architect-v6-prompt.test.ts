@@ -142,10 +142,12 @@ describe('Architect Agent - Key Structural Elements', () => {
 		expect(p.indexOf('priority 0')).toBeGreaterThan(-1);
 	});
 
-	it('SPEC GATE in PLAN mode', () => {
+	it('profile-aware SPEC POLICY in PLAN mode', () => {
 		const planIdx = p.indexOf('### MODE: PLAN');
 		expect(planIdx).toBeGreaterThan(-1);
-		expect(PLAN_SKILL.indexOf('SPEC GATE')).toBeGreaterThan(-1);
+		expect(PLAN_SKILL.indexOf('SPEC POLICY')).toBeGreaterThan(-1);
+		expect(PLAN_SKILL).toContain('soft gate only in `balanced`');
+		expect(PLAN_SKILL).toContain('`strict`');
 	});
 
 	it('PLAN INGESTION DETECTION and STALE SPEC DETECTION', () => {

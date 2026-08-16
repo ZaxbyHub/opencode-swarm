@@ -84,11 +84,11 @@ export type TelemetryEvent =
 	// `.swarm/telemetry.jsonl` that no type, catalog, or consumer knew about.
 	// That is the exact defect class this issue targets; the cast is now gone.
 	| 'agent_conflict_detected'
-	// Close/archive observability (issue #2030): one structured event shared by
-	// user-facing prose and the telemetry stream, carrying per-artifact
+	// Close/archive observability (issue #2030): structured event carrying per-artifact
 	// requiredness/attempt/validation/source_disposition plus aggregate
 	// archive_valid/archive_empty health facts (counts only, no row content).
-	| 'close_archive_result';
+	| 'close_archive_result'
+	| 'knowledge_receipt_transition'; // Diagnostic projection only; the V2 journal is authoritative.
 
 /** Stable classification for how a reviewer-gate decision was established. */
 export type ReviewerGateEvidenceKind =

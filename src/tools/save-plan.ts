@@ -12,23 +12,31 @@ import {
 	ExecutionProfileSchema,
 	type Phase,
 	type Plan,
+	PlanSchema,
+	type RuntimePlan,
 	type Task,
 	type TaskStatus,
 } from '../config/plan-schema';
 // QA gate check — first save-plan integration with profile store
-import { getProfileLookupForIdentity } from '../db/qa-gate-profile.js';
+import {
+	getOrCreateProfileForIdentity,
+	getProfileLookupForIdentity,
+} from '../db/qa-gate-profile.js';
 import { tryAcquireLock } from '../parallel/file-locks.js';
 import { writeCheckpoint } from '../plan/checkpoint';
 import {
 	appendLedgerEvent,
 	computePlanHash,
+	readLedgerEvents,
 	takeSnapshotWithRetry,
 } from '../plan/ledger';
 import {
+	loadPlan,
 	loadPlanJsonOnly,
 	PlanTaskRemovalNotAcknowledgedError,
 	savePlan,
 } from '../plan/manager';
+import { resolvePlanningProfile } from '../plan/planning-profile';
 import { derivePlanId } from '../plan/utils.js';
 import { formatLegacyQaBindingRecovery } from '../qa-gate/recovery.js';
 import { normalizeScopeFiles } from '../scope/scope-binding.js';
@@ -117,6 +125,12 @@ export interface SavePlanArgs {
 	 * Omit to leave the current profile unchanged.
 	 */
 	execution_profile?: Partial<ExecutionProfile>;
+	/**
+	 * Narrow recovery mode for stale plan.json projections whose ledger replay
+	 * previously failed. When true, save_plan will only accept an unchanged
+	 * semantic re-save that reconverges plan.json with the authoritative ledger.
+	 */
+	reconcile_ledger_projection?: boolean;
 }
 
 /**
@@ -164,7 +178,138 @@ function executionProfilesEqual(
 		a.council_parallel === b.council_parallel &&
 		a.locked === b.locked &&
 		a.auto_proceed === b.auto_proceed &&
-		a.commit_after_each_completed_task === b.commit_after_each_completed_task
+		a.commit_after_each_completed_task === b.commit_after_each_completed_task &&
+		a.planning_profile === b.planning_profile
+	);
+}
+
+type LedgerTailCapture = { seq: number; plan_hash_after: string };
+
+export function isLedgerProjectionReconcileRequest(
+	args: Pick<SavePlanArgs, 'reconcile_ledger_projection'>,
+): boolean {
+	return args.reconcile_ledger_projection === true;
+}
+
+export function isPureLedgerProjectionReconcileRequest(
+	args: SavePlanArgs,
+): boolean {
+	return (
+		isLedgerProjectionReconcileRequest(args) &&
+		args.reset_statuses !== true &&
+		(args.removed_task_ids?.length ?? 0) === 0 &&
+		(args.removal_reason?.trim().length ?? 0) === 0 &&
+		args.confirm_destructive_reset !== true &&
+		args.confirm_identity_change !== true &&
+		args.confirm_requirement_coverage_gaps !== true
+	);
+}
+
+function derivePhaseStatusesForComparison(plan: Plan): void {
+	for (const phase of plan.phases) {
+		const tasks = phase.tasks;
+		if (
+			tasks.length > 0 &&
+			tasks.every((task) => task.status === 'completed')
+		) {
+			phase.status = 'complete';
+		} else if (tasks.some((task) => task.status === 'in_progress')) {
+			phase.status = 'in_progress';
+		} else if (tasks.some((task) => task.status === 'blocked')) {
+			phase.status = 'blocked';
+		} else {
+			phase.status = 'pending';
+		}
+	}
+}
+
+function normalizePlanForReconcileComparison(
+	plan: Plan,
+): Record<string, unknown> {
+	return {
+		schema_version: plan.schema_version,
+		title: plan.title,
+		swarm: plan.swarm,
+		current_phase: plan.current_phase,
+		migration_status: plan.migration_status,
+		execution_profile: plan.execution_profile
+			? {
+					parallelization_enabled:
+						plan.execution_profile.parallelization_enabled,
+					max_concurrent_tasks: plan.execution_profile.max_concurrent_tasks,
+					council_parallel: plan.execution_profile.council_parallel,
+					locked: plan.execution_profile.locked,
+					auto_proceed: plan.execution_profile.auto_proceed,
+					commit_after_each_completed_task:
+						plan.execution_profile.commit_after_each_completed_task,
+					...(plan.execution_profile.planning_profile !== undefined
+						? {
+								planning_profile: plan.execution_profile.planning_profile,
+							}
+						: {}),
+				}
+			: undefined,
+		phases: plan.phases.map((phase) => ({
+			id: phase.id,
+			name: phase.name,
+			status: phase.status,
+			tasks: phase.tasks.map((task) => ({
+				id: task.id,
+				phase: task.phase,
+				status: task.status,
+				size: task.size,
+				description: task.description,
+				depends: task.depends,
+				acceptance: task.acceptance,
+				files_touched: task.files_touched,
+				fr_refs: task.fr_refs,
+			})),
+		})),
+	};
+}
+
+async function readLedgerTailCapture(
+	directory: string,
+): Promise<LedgerTailCapture | null> {
+	const events = await readLedgerEvents(directory);
+	const tail = events[events.length - 1];
+	if (!tail) {
+		return null;
+	}
+	return { seq: tail.seq, plan_hash_after: tail.plan_hash_after };
+}
+
+function materializeResolvedExecutionProfile(
+	profile: ExecutionProfile,
+	persistedPlanningProfile: ExecutionProfile['planning_profile'],
+): ExecutionProfile {
+	if (persistedPlanningProfile === undefined) {
+		const { planning_profile: _planningProfile, ...withoutPlanningProfile } =
+			profile;
+		return withoutPlanningProfile;
+	}
+	return {
+		...profile,
+		planning_profile: persistedPlanningProfile,
+	};
+}
+
+function canRatchetLockedPlanningProfile(
+	existingProfile: NonNullable<Plan['execution_profile']>,
+	requestedProfile: NonNullable<Plan['execution_profile']>,
+): boolean {
+	return (
+		existingProfile.planning_profile === 'balanced' &&
+		requestedProfile.planning_profile === 'strict' &&
+		existingProfile.parallelization_enabled ===
+			requestedProfile.parallelization_enabled &&
+		existingProfile.max_concurrent_tasks ===
+			requestedProfile.max_concurrent_tasks &&
+		existingProfile.council_parallel === requestedProfile.council_parallel &&
+		existingProfile.locked === requestedProfile.locked &&
+		existingProfile.auto_proceed === requestedProfile.auto_proceed &&
+		existingProfile.commit_after_each_completed_task ===
+			requestedProfile.commit_after_each_completed_task
 	);
 }
 
@@ -441,15 +586,135 @@ export async function executeSavePlan(
 		// Trust explicit working_directory (fallback doesn't exist, or not a subdirectory)
 	}
 
+	const dir = targetWorkspace as string;
+	const reconcileLedgerProjection = isLedgerProjectionReconcileRequest(args);
+	if (
+		reconcileLedgerProjection &&
+		!isPureLedgerProjectionReconcileRequest(args)
+	) {
+		return {
+			success: false,
+			message:
+				'RECONCILE_LEDGER_PROJECTION_INVALID: reconcile_ledger_projection only permits an unchanged semantic re-save.',
+			errors: [
+				'Remove reset_statuses, task-removal acknowledgements, identity overrides, and requirement-coverage overrides before retrying reconcile_ledger_projection.',
+			],
+			recovery_guidance:
+				'Retry with reconcile_ledger_projection: true only when save_plan is re-saving the same identity, task graph, statuses, and execution_profile to reconverge a stale projection.',
+		};
+	}
+
+	const existingStatusMap: Map<string, TaskStatus> = new Map();
+	const existingFilesMap: Map<string, string[]> = new Map();
+	const priorTaskIds = new Set<string>();
+	let preservedExecutionProfile: Plan['execution_profile'];
+	let existingPlan: Awaited<ReturnType<typeof loadPlanJsonOnly>> = null;
+	try {
+		existingPlan = await loadPlanJsonOnly(dir);
+	} catch {
+		// First plan write or unreadable — proceed with defaults
+	}
+	if (existingPlan) {
+		for (const phase of existingPlan.phases) {
+			for (const task of phase.tasks) {
+				priorTaskIds.add(task.id);
+				existingFilesMap.set(task.id, [...task.files_touched]);
+			}
+		}
+		if (!args.reset_statuses) {
+			for (const phase of existingPlan.phases) {
+				for (const task of phase.tasks) {
+					existingStatusMap.set(task.id, task.status);
+				}
+			}
+		}
+		preservedExecutionProfile = existingPlan.execution_profile;
+	}
+
+	const reconcileLedgerTailCapture = reconcileLedgerProjection
+		? await readLedgerTailCapture(dir).catch(() => null)
+		: null;
+
 	// Step 2.x: SPEC GATE - verify an effective spec exists and capture its hash/mtime.
 	// .swarm/spec.md remains preferred. If absent, an OpenSpec-compatible
 	// projection may satisfy the same canonical plan gate.
-	let specMtime: string | undefined;
-	let specHash: string | undefined;
+	let specMtime: string | undefined = reconcileLedgerProjection
+		? existingPlan?.specMtime
+		: undefined;
+	let specHash: string | undefined = reconcileLedgerProjection
+		? existingPlan?.specHash
+		: undefined;
 	let specContent: string | undefined;
-	if (process.env.SWARM_SKIP_SPEC_GATE !== '1') {
+	const planningProfileResolution = resolvePlanningProfile({
+		directory: dir,
+		incomingExecutionProfile: args.execution_profile,
+		existingExecutionProfile: preservedExecutionProfile,
+		resetStatuses: args.reset_statuses,
+	});
+	const effectivePlanningProfile = planningProfileResolution.effective;
+	const persistedPlanningProfile = planningProfileResolution.persisted;
+
+	// Locked-profile authorization is a preflight, not a late validation step.
+	// Reject before spec snapshots, QA-profile exact binding, or any other durable
+	// mutation so a forbidden profile change is transactionally side-effect free.
+	if (
+		existingPlan?.execution_profile?.locked &&
+		args.execution_profile !== undefined &&
+		!args.reset_statuses
+	) {
+		const requestedProfile = ExecutionProfileSchema.safeParse({
+			...existingPlan.execution_profile,
+			...args.execution_profile,
+		});
+		if (!requestedProfile.success) {
+			return {
+				success: false,
+				message: 'Invalid execution_profile: schema validation failed',
+				errors: requestedProfile.error.issues.map(
+					(issue) => `${issue.path.join('.')}: ${issue.message}`,
+				),
+				recovery_guidance:
+					'Check execution_profile fields: parallelization_enabled (boolean), ' +
+					'max_concurrent_tasks (integer 1-64), council_parallel (boolean), locked (boolean), auto_proceed (boolean), commit_after_each_completed_task (boolean), planning_profile ("balanced" | "strict").',
+			};
+		}
+
+		const requestedMaterializedProfile = materializeResolvedExecutionProfile(
+			requestedProfile.data,
+			persistedPlanningProfile,
+		);
+		if (
+			executionProfilesEqual(
+				existingPlan.execution_profile,
+				requestedMaterializedProfile,
+			)
+		) {
+			preservedExecutionProfile = existingPlan.execution_profile;
+		} else if (
+			canRatchetLockedPlanningProfile(
+				existingPlan.execution_profile,
+				requestedMaterializedProfile,
+			)
+		) {
+			preservedExecutionProfile = requestedMaterializedProfile;
+		} else {
+			return {
+				success: false,
+				message:
+					'EXECUTION_PROFILE_LOCKED: The execution_profile for this plan is locked and cannot be changed.',
+				errors: [
+					'execution_profile.locked is true — only a balanced→strict planning_profile ratchet is allowed without reset_statuses. All other profile changes are rejected.',
+				],
+				recovery_guidance:
+					'Remove the execution_profile field from this save_plan call to preserve the locked profile, ' +
+					'or use reset_statuses: true to start fresh (this clears the lock). ' +
+					'Never modify execution_profile directly in plan.json.',
+			};
+		}
+	}
+	if (!reconcileLedgerProjection && process.env.SWARM_SKIP_SPEC_GATE !== '1') {
 		const spec = readEffectiveSpecSync(targetWorkspace as string);
-		if (!spec) {
+		if (!spec && effectivePlanningProfile === 'strict') {
 			return {
 				success: false,
 				message:
@@ -461,21 +726,23 @@ export async function executeSavePlan(
 					'Obtain explicit user consent, then run /swarm sdd project (agent-invocable) to materialize an effective spec from SDD sources. If .swarm/spec.md already exists, pass --overwrite after consent. Alternatively, run /swarm specify to author a native spec. Never write .swarm/plan.json or .swarm/plan.md directly.',
 			};
 		}
-		specMtime = spec.mtime ?? undefined;
-		specHash = spec.hash;
-		specContent = spec.content;
-		// Persist spec content snapshot for future drift diffing (FR-001).
-		// Uses a separate snapshot file to avoid bloating plan.json/plan-ledger.
-		// Best-effort: failure does not affect plan save.
-		try {
-			const snapshotPath = path.join(
-				targetWorkspace as string,
-				'.swarm',
-				'spec-snapshot.md',
-			);
-			await fs.promises.writeFile(snapshotPath, spec.content, 'utf-8');
-		} catch {
-			// Non-fatal: snapshot write failure does not affect plan save
+		if (spec) {
+			specMtime = spec.mtime ?? undefined;
+			specHash = spec.hash;
+			specContent = spec.content;
+			// Persist spec content snapshot for future drift diffing (FR-001).
+			// Uses a separate snapshot file to avoid bloating plan.json/plan-ledger.
+			// Best-effort: failure does not affect plan save.
+			try {
+				const snapshotPath = path.join(
+					targetWorkspace as string,
+					'.swarm',
+					'spec-snapshot.md',
+				);
+				await fs.promises.writeFile(snapshotPath, spec.content, 'utf-8');
+			} catch {
+				// Non-fatal: snapshot write failure does not affect plan save
+			}
 		}
 	}
 
@@ -483,7 +750,10 @@ export async function executeSavePlan(
 	// Gate selection is tool-owned state keyed to the exact future plan identity.
 	// A context.md marker is not proof that set_qa_gates completed.
 	// Bypass for CI: SWARM_SKIP_GATE_SELECTION=1.
-	if (process.env.SWARM_SKIP_GATE_SELECTION !== '1') {
+	if (
+		!reconcileLedgerProjection &&
+		process.env.SWARM_SKIP_GATE_SELECTION !== '1'
+	) {
 		let profileLookup: ReturnType<typeof getProfileLookupForIdentity>;
 		try {
 			profileLookup = getProfileLookupForIdentity(targetWorkspace as string, {
@@ -506,32 +776,76 @@ export async function executeSavePlan(
 		}
 
 		if (profileLookup.kind === 'missing') {
-			return {
-				success: false,
-				message:
-					'QA_GATE_SELECTION_REQUIRED: no durable QA gate selection exists for this exact plan identity.',
-				errors: ['No QA gate profile found for the exact plan identity'],
-				recovery_guidance: `Present the PLAN gate dialogue, then call set_qa_gates with swarm_id=${JSON.stringify(args.swarm_id)} and plan_title=${JSON.stringify(args.title)} before retrying save_plan with the identical identity.`,
-			};
-		}
-		if (profileLookup.kind === 'unbound_legacy') {
-			return {
-				success: false,
-				message:
-					'QA_GATE_IDENTITY_UNBOUND: the current plan has a legacy QA gate profile row that is not exact-bound.',
-				errors: [
-					'QA gate profile exists for the readable plan id, but no exact swarm_id/plan_title binding has been adopted yet.',
-				],
-				recovery_guidance: formatLegacyQaBindingRecovery(
-					{ swarm: args.swarm_id, title: args.title },
-					'retry save_plan with the identical identity',
-				),
-			};
+			if (effectivePlanningProfile === 'balanced') {
+				try {
+					getOrCreateProfileForIdentity(dir, {
+						swarm: args.swarm_id,
+						title: args.title,
+					});
+				} catch (error) {
+					return {
+						success: false,
+						message:
+							'QA_GATE_PROFILE_UNAVAILABLE: save_plan could not create the default balanced QA profile.',
+						errors: [
+							error instanceof Error
+								? `QA gate profile bootstrap failed: ${error.message}`
+								: 'QA gate profile bootstrap failed',
+						],
+						recovery_guidance:
+							'Repair access to .swarm/swarm.db, then retry save_plan with the same swarm_id and title.',
+					};
+				}
+			} else {
+				return {
+					success: false,
+					message:
+						'QA_GATE_SELECTION_REQUIRED: no durable QA gate selection exists for this exact plan identity.',
+					errors: ['No QA gate profile found for the exact plan identity'],
+					recovery_guidance: `Present the PLAN gate dialogue, then call set_qa_gates with swarm_id=${JSON.stringify(args.swarm_id)} and plan_title=${JSON.stringify(args.title)} before retrying save_plan with the identical identity.`,
+				};
+			}
+		} else if (profileLookup.kind === 'unbound_legacy') {
+			if (effectivePlanningProfile === 'balanced') {
+				try {
+					getOrCreateProfileForIdentity(dir, {
+						swarm: args.swarm_id,
+						title: args.title,
+					});
+				} catch (error) {
+					return {
+						success: false,
+						message:
+							'QA_GATE_PROFILE_UNAVAILABLE: save_plan could not exact-bind the balanced QA profile.',
+						errors: [
+							error instanceof Error
+								? `QA gate profile exact-bind failed: ${error.message}`
+								: 'QA gate profile exact-bind failed',
+						],
+						recovery_guidance:
+							'Repair access to .swarm/swarm.db, then retry save_plan with the same swarm_id and title.',
+					};
+				}
+			} else {
+				return {
+					success: false,
+					message:
+						'QA_GATE_IDENTITY_UNBOUND: the current plan has a legacy QA gate profile row that is not exact-bound.',
+					errors: [
+						'QA gate profile exists for the readable plan id, but no exact swarm_id/plan_title binding has been adopted yet.',
+					],
+					recovery_guidance: formatLegacyQaBindingRecovery(
+						{ swarm: args.swarm_id, title: args.title },
+						'retry save_plan with the identical identity',
+					),
+				};
+			}
 		}
 	}
 
 	const requirementCoverage = evaluateRequirementCoverage(specContent, args);
 	if (
+		!reconcileLedgerProjection &&
 		requirementCoverage?.status === 'failed' &&
 		args.confirm_requirement_coverage_gaps !== true
 	) {
@@ -550,44 +864,12 @@ export async function executeSavePlan(
 		};
 	}
 
-	// Step 2.5: Read current plan for status preservation (merge mode) and
-	// locked execution_profile enforcement.
+	// Step 2.5: Read current plan for status preservation (merge mode).
 	// Status merge: ensures all task statuses are preserved across plan revisions.
 	// When args.reset_statuses is true the map is intentionally left empty.
-	// Profile enforcement: if the existing plan has a locked execution_profile,
-	// reject any attempt to change it (fail-closed).
-	const dir = targetWorkspace as string;
-	const existingStatusMap: Map<string, TaskStatus> = new Map();
-	const existingFilesMap: Map<string, string[]> = new Map();
-	// Captured regardless of reset_statuses so the task-removal acknowledgement
-	// check below can compare incoming task IDs against the prior plan
-	// (issue #853).
-	const priorTaskIds = new Set<string>();
-	let preservedExecutionProfile: Plan['execution_profile'];
 	{
-		let existing: Awaited<ReturnType<typeof loadPlanJsonOnly>> = null;
-		try {
-			existing = await loadPlanJsonOnly(dir);
-		} catch {
-			// First plan write or unreadable — proceed with defaults
-		}
-
+		const existing = existingPlan;
 		if (existing) {
-			for (const phase of existing.phases) {
-				for (const task of phase.tasks) {
-					priorTaskIds.add(task.id);
-					existingFilesMap.set(task.id, [...task.files_touched]);
-				}
-			}
-			// Status map (skip when resetting)
-			if (!args.reset_statuses) {
-				for (const phase of existing.phases) {
-					for (const task of phase.tasks) {
-						existingStatusMap.set(task.id, task.status);
-					}
-				}
-			}
-
 			// Step 2.6: Plan identity verification — reject mismatched identity
 			// unless explicitly confirmed (FR-001). Prevents accidental overwrite
 			// when an architect passes the wrong title or swarm_id.
@@ -615,58 +897,6 @@ export async function executeSavePlan(
 							'Never write .swarm/plan.json or .swarm/plan.md directly.',
 					};
 				}
-			}
-
-			// Locked execution_profile enforcement — fail closed (unless reset_statuses clears it)
-			if (existing.execution_profile?.locked) {
-				if (args.execution_profile !== undefined && !args.reset_statuses) {
-					const requestedProfile = ExecutionProfileSchema.safeParse({
-						...existing.execution_profile,
-						...args.execution_profile,
-					});
-					if (!requestedProfile.success) {
-						return {
-							success: false,
-							message: 'Invalid execution_profile: schema validation failed',
-							errors: requestedProfile.error.issues.map(
-								(i) => `${i.path.join('.')}: ${i.message}`,
-							),
-							recovery_guidance:
-								'Check execution_profile fields: parallelization_enabled (boolean), ' +
-								'max_concurrent_tasks (integer 1-64), council_parallel (boolean), locked (boolean), auto_proceed (boolean), commit_after_each_completed_task (boolean).',
-						};
-					}
-
-					if (
-						executionProfilesEqual(
-							existing.execution_profile,
-							requestedProfile.data,
-						)
-					) {
-						preservedExecutionProfile = existing.execution_profile;
-					} else {
-						// Caller is trying to change a locked profile without reset → reject
-						return {
-							success: false,
-							message:
-								'EXECUTION_PROFILE_LOCKED: The execution_profile for this plan is locked and cannot be changed.',
-							errors: [
-								'execution_profile.locked is true — to change the profile you must first unlock it via a separate plan revision that explicitly sets locked: false, or reset the plan with reset_statuses.',
-							],
-							recovery_guidance:
-								'Remove the execution_profile field from this save_plan call to preserve the locked profile, ' +
-								'or use reset_statuses: true to start fresh (this clears the lock). ' +
-								'Never modify execution_profile directly in plan.json.',
-						};
-					}
-				} else if (!args.reset_statuses) {
-					preservedExecutionProfile = existing.execution_profile;
-				}
-				// When reset_statuses is true, clear the lock (fresh start).
-				// Otherwise preserve the locked profile unchanged.
-			} else {
-				// Profile is not locked — carry it forward if no new one provided
-				preservedExecutionProfile = existing.execution_profile;
 			}
 		}
 	}
@@ -697,10 +927,13 @@ export async function executeSavePlan(
 				),
 				recovery_guidance:
 					'Check execution_profile fields: parallelization_enabled (boolean), ' +
-					'max_concurrent_tasks (integer 1-64), council_parallel (boolean), locked (boolean), auto_proceed (boolean), commit_after_each_completed_task (boolean).',
+					'max_concurrent_tasks (integer 1-64), council_parallel (boolean), locked (boolean), auto_proceed (boolean), commit_after_each_completed_task (boolean), planning_profile ("balanced" | "strict").',
 			};
 		}
-		resolvedProfile = parsed.data;
+		resolvedProfile = materializeResolvedExecutionProfile(
+			parsed.data,
+			persistedPlanningProfile,
+		);
 	}
 
 	// Step 3.1 (v8 / #1674): new-plan-only parallelization default.
@@ -721,6 +954,17 @@ export async function executeSavePlan(
 		resolvedProfile = {
 			...ExecutionProfileSchema.parse({}),
 			parallelization_enabled: true,
+			...(persistedPlanningProfile !== undefined
+				? { planning_profile: persistedPlanningProfile }
+				: {}),
+		};
+	} else if (
+		resolvedProfile.planning_profile === undefined &&
+		persistedPlanningProfile !== undefined
+	) {
+		resolvedProfile = {
+			...resolvedProfile,
+			planning_profile: persistedPlanningProfile,
 		};
 	}
 
@@ -882,29 +1126,45 @@ export async function executeSavePlan(
 		schema_version: '1.0.0',
 		title: args.title,
 		swarm: args.swarm_id,
-		migration_status: 'native',
-		current_phase: args.phases[0]?.id,
+		migration_status: reconcileLedgerProjection
+			? existingPlan?.migration_status
+			: 'native',
+		current_phase: reconcileLedgerProjection
+			? existingPlan?.current_phase
+			: args.phases[0]?.id,
 		specMtime,
 		specHash,
 		...(resolvedProfile !== undefined
 			? { execution_profile: resolvedProfile }
 			: {}),
 		phases: args.phases.map((phase): Phase => {
+			const existingPhase = reconcileLedgerProjection
+				? existingPlan?.phases.find((candidate) => candidate.id === phase.id)
+				: undefined;
 			return {
 				id: phase.id,
 				name: phase.name,
 				status: 'pending',
+				type: existingPhase?.type,
+				required_agents: existingPhase?.required_agents
+					? [...existingPhase.required_agents]
+					: undefined,
 				tasks: phase.tasks.map((task): Task => {
+					const existingTask = existingPhase?.tasks.find(
+						(candidate) => candidate.id === task.id,
+					);
 					return {
 						id: task.id,
 						phase: phase.id,
 						status: existingStatusMap.get(task.id) ?? 'pending',
-						size: task.size ?? 'small',
+						size: task.size ?? existingTask?.size ?? 'small',
 						description: task.description,
-						depends: task.depends ?? [],
-						acceptance: task.acceptance,
+						depends: task.depends ?? existingTask?.depends ?? [],
+						acceptance: task.acceptance ?? existingTask?.acceptance,
 						files_touched: resolvedFilesByTask.get(task.id) ?? [],
-						fr_refs: task.fr_refs,
+						evidence_path: existingTask?.evidence_path,
+						blocked_reason: existingTask?.blocked_reason,
+						fr_refs: task.fr_refs ?? existingTask?.fr_refs,
 					};
 				}),
 			};
@@ -940,6 +1200,70 @@ export async function executeSavePlan(
 			};
 		}
 		try {
+			if (reconcileLedgerProjection) {
+				const lockedRuntimePlan: RuntimePlan | null = await loadPlan(dir).catch(
+					() => null,
+				);
+				if (lockedRuntimePlan?._ledgerReplayStale !== true) {
+					return {
+						success: false,
+						message:
+							'RECONCILE_LEDGER_PROJECTION_NOT_STALE: reconcile_ledger_projection is only allowed when loadPlan reports a stale projection.',
+						errors: [
+							lockedRuntimePlan
+								? 'The current plan projection is not marked _ledgerReplayStale.'
+								: 'The current plan could not be loaded for stale-projection reconciliation.',
+						],
+						recovery_guidance:
+							'Use reconcile_ledger_projection only to reconverge a workspace whose plan.json still hash-mismatches the ledger after replay failure.',
+					};
+				}
+				const lockedTailCapture = await readLedgerTailCapture(dir).catch(
+					() => null,
+				);
+				if (
+					reconcileLedgerTailCapture === null ||
+					lockedTailCapture === null ||
+					reconcileLedgerTailCapture.seq !== lockedTailCapture.seq ||
+					reconcileLedgerTailCapture.plan_hash_after !==
+						lockedTailCapture.plan_hash_after
+				) {
+					return {
+						success: false,
+						message:
+							'RECONCILE_LEDGER_PROJECTION_STALE: the ledger tail changed before save_plan acquired the lock.',
+						errors: [
+							'Re-read the stale plan and retry reconcile_ledger_projection against the latest ledger tail.',
+						],
+						recovery_guidance:
+							'Retry reconcile_ledger_projection only when the incoming plan still matches the current stale projection exactly.',
+					};
+				}
+				const comparableIncomingPlan = PlanSchema.parse(
+					JSON.parse(JSON.stringify(plan)),
+				);
+				derivePhaseStatusesForComparison(comparableIncomingPlan);
+				const comparableLoadedPlan = PlanSchema.parse(lockedRuntimePlan);
+				if (
+					JSON.stringify(
+						normalizePlanForReconcileComparison(comparableIncomingPlan),
+					) !==
+					JSON.stringify(
+						normalizePlanForReconcileComparison(comparableLoadedPlan),
+					)
+				) {
+					return {
+						success: false,
+						message:
+							'RECONCILE_LEDGER_PROJECTION_MISMATCH: reconcile_ledger_projection may not change plan semantics.',
+						errors: [
+							'Incoming save_plan content does not exactly match the loaded stale projection (identity, task graph, statuses, or execution_profile changed).',
+						],
+						recovery_guidance:
+							'Remove semantic edits and retry reconcile_ledger_projection with the exact stale plan content, or retry save_plan without reconcile_ledger_projection for a normal plan revision.',
+					};
+				}
+			}
 			// When reset_statuses is requested, bypass the preserveCompletedStatuses
 			// guard in savePlan so that the caller's intent (all tasks → pending) is
 			// fully honoured.  The existingStatusMap was already left empty above, but
@@ -948,6 +1272,14 @@ export async function executeSavePlan(
 			await savePlan(dir, plan, {
 				preserveCompletedStatuses: !args.reset_statuses,
 				planLockAlreadyHeld: true,
+				...(reconcileLedgerProjection && reconcileLedgerTailCapture
+					? {
+							staleProjectionReconcile: {
+								expectedSeq: reconcileLedgerTailCapture.seq,
+								expectedLedgerHash: reconcileLedgerTailCapture.plan_hash_after,
+							},
+						}
+					: {}),
 				...(resolvedRemovedIds.length > 0
 					? {
 							acknowledged_removals: {
@@ -1252,11 +1584,23 @@ export const save_plan: ToolDefinition = createSwarmTool({
 					.describe(
 						'When true, execution creates a checkpoint commit after each successfully completed task. Default false.',
 					),
+				planning_profile: z
+					.enum(['balanced', 'strict'])
+					.optional()
+					.describe(
+						'Planning-policy profile. balanced auto-seeds durable defaults and minimizes ceremony; strict requires the full QA questionnaire and an effective spec.',
+					),
 			})
 			.optional()
 			.describe(
 				'Architect-facing concurrency controls. Once locked, cannot be changed without resetting. ' +
 					'Omit to preserve the existing profile.',
+			),
+		reconcile_ledger_projection: z
+			.boolean()
+			.optional()
+			.describe(
+				'Narrow stale-ledger recovery mode. When true, save_plan only permits an unchanged semantic re-save that reconverges a _ledgerReplayStale plan.json with the authoritative ledger.',
 			),
 	},
 	execute: async (args: unknown, _directory: string) => {

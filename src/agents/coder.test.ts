@@ -96,6 +96,29 @@ describe('CODER_PROMPT — REUSE_SCAN in DONE template', () => {
 	});
 });
 
+describe('CODER_PROMPT — repo_map localization directive (issue #1988 C1)', () => {
+	const agent = createCoderAgent('test-model');
+	const prompt = agent.config.prompt ?? '';
+
+	it('RULES direct repo_map localization before editing shared files', () => {
+		const rulesStart = prompt.indexOf('RULES:');
+		const worktreeIndex = prompt.indexOf('WORKTREE ISOLATION');
+		const rulesSection = prompt.substring(rulesStart, worktreeIndex);
+		expect(rulesSection).toContain('repo_map action="localization"');
+		expect(rulesSection).toContain('shared or cross-imported file');
+	});
+
+	it('directive is positioned after "Read target file before editing"', () => {
+		const readIndex = prompt.indexOf('Read target file before editing');
+		const directiveIndex = prompt.indexOf('repo_map action="localization"');
+		expect(directiveIndex).toBeGreaterThan(readIndex);
+	});
+
+	it('directive explains it covers the undeclared-scope case', () => {
+		expect(prompt).toContain('including when no scope was declared');
+	});
+});
+
 describe('CODER_PROMPT — ACCEPTANCE field (issue #1687 task 2.1)', () => {
 	const agent = createCoderAgent('test-model');
 	const prompt = agent.config.prompt ?? '';

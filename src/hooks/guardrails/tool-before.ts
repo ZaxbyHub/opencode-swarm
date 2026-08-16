@@ -880,7 +880,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 						throw new Error(
 							'BLOCKED: shell command targeting .swarm/spec-staleness.json detected. ' +
 								'This file is system-managed and gates plan-mutating tools while spec drift is unresolved. ' +
-								'Present the drift to the user and ask them to run /swarm clarify or /swarm acknowledge-spec-drift.',
+								'Present the drift to the user and ask them to run /swarm acknowledge-spec-drift.',
 						);
 					}
 				}
@@ -1797,7 +1797,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				throw new Error(
 					'SPEC_DRIFT_VIOLATION: Direct writes to .swarm/spec-staleness.json are blocked. ' +
 						'This file is system-managed and gates plan-mutating tools while spec drift is unresolved. ' +
-						'Present the drift to the user and ask them to run /swarm clarify or /swarm acknowledge-spec-drift.',
+						'Present the drift to the user and ask them to run /swarm acknowledge-spec-drift.',
 				);
 			}
 			const content =
@@ -1852,7 +1852,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					throw new Error(
 						'SPEC_DRIFT_VIOLATION: Direct writes to .swarm/spec-staleness.json are blocked. ' +
 							'This file is system-managed and gates plan-mutating tools while spec drift is unresolved. ' +
-							'Present the drift to the user and ask them to run /swarm clarify or /swarm acknowledge-spec-drift.',
+							'Present the drift to the user and ask them to run /swarm acknowledge-spec-drift.',
 					);
 				}
 				if (

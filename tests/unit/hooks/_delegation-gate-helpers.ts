@@ -3,6 +3,13 @@ import * as path from 'node:path';
 import type { PluginConfig } from '../../../src/config';
 import type { Plan } from '../../../src/config/plan-schema';
 import {
+	getTaskWorkflowSnapshot,
+	readTaskEvidence,
+	recordAgentDispatch,
+	recordGateEvidence,
+	transitionTaskWorkflowEvidence,
+} from '../../../src/gate-evidence';
+import {
 	computePlanStructureHash,
 	initLedger,
 	ledgerExists,
@@ -14,6 +21,7 @@ import {
 	getTaskState,
 	resetSwarmState,
 	swarmState,
+	type TaskWorkflowState,
 } from '../../../src/state';
 
 // Re-export everything from the main test file for consumers
@@ -50,6 +58,53 @@ export async function recordPlanCriticApproval(
 		approvalMetadata: { verdict: 'APPROVED', source: 'plan_critic_gate' },
 		payloadHashOverride: computePlanStructureHash(plan),
 	});
+}
+
+/**
+ * Seed the durable exact-task workflow introduced by issue #2098.
+ *
+ * Session maps are projections only; tests that exercise completion or Stage B
+ * gates must establish the corresponding generation-bound evidence first.
+ */
+export async function seedAuthoritativeTaskWorkflow(
+	dir: string,
+	taskId: string,
+	state: Exclude<TaskWorkflowState, 'rework_required'>,
+	sessionId = 'test-session',
+): Promise<number> {
+	if (state === 'idle') return 0;
+
+	await recordAgentDispatch(dir, taskId, 'coder');
+	const generation = getTaskWorkflowSnapshot(
+		await readTaskEvidence(dir, taskId),
+	).generation;
+	if (state === 'coder_delegated') return generation;
+
+	await transitionTaskWorkflowEvidence(dir, taskId, {
+		type: 'stage_a_passed',
+		expectedGeneration: generation,
+		transitionId: `test-stage-a:${taskId}`,
+	});
+	if (state === 'pre_check_passed') return generation;
+
+	await recordGateEvidence(dir, taskId, 'reviewer', sessionId, false, {
+		expectedGeneration: generation,
+		transitionId: `test-reviewer:${taskId}`,
+	});
+	if (state === 'reviewer_run') return generation;
+
+	await recordGateEvidence(dir, taskId, 'test_engineer', sessionId, false, {
+		expectedGeneration: generation,
+		transitionId: `test-test-engineer:${taskId}`,
+	});
+	if (state === 'tests_run') return generation;
+
+	await transitionTaskWorkflowEvidence(dir, taskId, {
+		type: state === 'blocked' ? 'task_blocked' : 'task_completed',
+		expectedGeneration: generation,
+		transitionId: `test-terminal:${taskId}`,
+	});
+	return generation;
 }
 
 export function makeConfig(overrides?: Record<string, unknown>): PluginConfig {

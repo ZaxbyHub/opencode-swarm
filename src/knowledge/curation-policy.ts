@@ -28,7 +28,6 @@
 
 import { appendFile, mkdir, readFile } from 'node:fs/promises';
 import * as path from 'node:path';
-import { readKnowledgeEvents } from '../hooks/knowledge-events.js';
 import {
 	isLinked,
 	readLinkPointer,
@@ -260,42 +259,22 @@ export async function authorizeCuration(
 		};
 	}
 
-	// --- Step 5: cohort quorum ---
+	// --- Step 5: cohort-wide evidence remains non-authoritative ---
 	if (input.evidenceScope === 'cohort-wide') {
-		const events = await _internals.readKnowledgeEvents(directory);
-		// IR-1 fix: count only NEGATIVE-outcome events (violated/contradicted)
-		// toward the destructive quorum. Positive evidence (applied/shown/
-		// acknowledged) must NOT authorize a destructive action — an entry that
-		// was successfully applied 3 times should not become archivable by a
-		// sibling worktree. Only negative cohort-wide evidence justifies a
-		// shared destructive decision (criterion #4).
-		const NEGATIVE_EVENT_TYPES = new Set(['violated', 'contradicted']);
-		const entryEvents = events.filter(
-			(e) =>
-				'type' in e &&
-				NEGATIVE_EVENT_TYPES.has((e as { type?: string }).type ?? '') &&
-				'knowledge_id' in e &&
-				(e as { knowledge_id?: string }).knowledge_id === entryId,
-		);
-		const cohortEvidence = entryEvents.length;
-		if (cohortEvidence >= quorum.minCohortEvidence) {
-			return {
-				authorized: true,
-				basis: 'quorum',
-				detail:
-					`Cohort quorum met for entry ${entryId}: ${cohortEvidence} ` +
-					`cohort-wide evidence events (≥ ${quorum.minCohortEvidence} required).`,
-				expectedRevision: entry.revision,
-				expectedContentHash: entry.content_hash,
-			};
-		}
+		// Issue #2031: V2 receipt authority is canonical-root-only. The linked
+		// knowledge event stream is diagnostic and cannot prove distinct roots.
+		// Counting it would let FIFO churn or a sibling diagnostic writer authorize
+		// a destructive shared-store mutation. Owner and explicit override paths
+		// above remain available.
 		persistProposal(proposal);
 		return {
 			authorized: false,
 			basis: 'quorum-insufficient',
 			detail:
-				`Cohort quorum NOT met for entry ${entryId}: ${cohortEvidence} ` +
-				`cohort-wide evidence events (< ${quorum.minCohortEvidence} required).`,
+				`Cohort-wide diagnostics cannot authorize destructive action for entry ${entryId}. ` +
+				`The project-local receipt ledger cannot prove a cross-root quorum; ` +
+				`the producer or an explicit audited override must authorize it ` +
+				`(configured threshold ${quorum.minCohortEvidence}).`,
 			proposal,
 		};
 	}
@@ -376,7 +355,6 @@ export async function readCohortConfigFingerprint(
  */
 export const _internals = {
 	resolveWorktreeId,
-	readKnowledgeEvents,
 	cohortConfigFingerprint,
 	readCohortConfigFingerprint,
 	readFile,

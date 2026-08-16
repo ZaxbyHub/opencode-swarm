@@ -19,7 +19,10 @@ import type { Plan } from '../../../src/config/plan-schema';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 import { withFrozenClock } from '../../helpers/test-clock.js';
-import { recordPlanCriticApproval } from './_delegation-gate-helpers';
+import {
+	recordPlanCriticApproval,
+	seedAuthoritativeTaskWorkflow,
+} from './_delegation-gate-helpers';
 
 function makeConfig(overrides?: Record<string, unknown>): PluginConfig {
 	return {
@@ -424,6 +427,7 @@ describe('resolveDelegatedPlanTaskId — plan-aware filtering (PR #961 tighten)'
 			const hook = createDelegationGateHook(makeConfig(), tempDir);
 			const session = ensureAgentSession('test-session');
 			session.taskWorkflowStates.set('1.1', 'tests_run');
+			await seedAuthoritativeTaskWorkflow(tempDir, '1.1', 'tests_run');
 
 			// Task 1.2 (different) with version 3.4
 			// 3.4 filtered, only 1.2 remains → requestedTaskId=1.2

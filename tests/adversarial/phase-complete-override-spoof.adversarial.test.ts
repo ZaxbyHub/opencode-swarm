@@ -12,6 +12,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { readKnowledgeEvents } from '../../src/hooks/knowledge-events.js';
 import { executePhaseComplete } from '../../src/tools/phase-complete.js';
+import { canonicalMkdtemp } from '../helpers/tmpdir.js';
 
 const PHASE = 'Phase 2';
 
@@ -68,17 +69,16 @@ function events(id: string): string {
 	].join('\n');
 }
 
-function createRelativeTempDir(): string {
-	const baseDir = 'tmp';
-	if (!fs.existsSync(baseDir)) fs.mkdirSync(baseDir, { recursive: true });
-	return fs.mkdtempSync(path.join(baseDir, 'pc-spoof-'));
+function createTempProjectDir(): string {
+	return canonicalMkdtemp('pc-spoof-');
 }
 
 describe('phase_complete override spoofing', () => {
 	let dir: string;
 
 	beforeEach(() => {
-		dir = createRelativeTempDir();
+		dir = createTempProjectDir();
+		fs.mkdirSync(path.join(dir, '.git'));
 		const swarmDir = path.join(dir, '.swarm');
 		fs.mkdirSync(swarmDir, { recursive: true });
 		fs.writeFileSync(path.join(swarmDir, 'knowledge.jsonl'), entryLine('c1'));
@@ -130,7 +130,11 @@ describe('phase_complete override spoofing', () => {
 		const out = await executePhaseComplete(
 			{
 				phase: 2,
-				sessionID: 'sess-ok',
+				// The retrieval fixture belongs to session `s`. Exact session binding
+				// is part of the authoritative receipt key, so the positive control
+				// must exercise the same session rather than relying on the legacy
+				// entry-only join that issue #2031 removed.
+				sessionID: 's',
 				callerAgent: 'architect',
 				acceptViolations: ['c1'],
 				acceptViolationsJustification: 'tracked follow-up',
@@ -140,6 +144,7 @@ describe('phase_complete override spoofing', () => {
 		);
 		const parsed = JSON.parse(out);
 		expect(parsed.reason).not.toBe('override_denied_non_architect');
+		expect(parsed.reason).not.toBe('directive_gate_failed_closed');
 		expect(parsed.reason).not.toBe('unresolved_critical_directives');
 		const evs = await readKnowledgeEvents(dir);
 		expect(evs.filter((e) => e.type === 'override').length).toBe(1);

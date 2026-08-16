@@ -15,6 +15,7 @@ import { injectDelegateDirectivesBefore } from '../../src/hooks/delegate-directi
 import { readKnowledgeEvents } from '../../src/hooks/knowledge-events.js';
 import { DELEGATE_DIRECTIVE_BLOCK_TAG } from '../../src/hooks/knowledge-injector.js';
 import type { KnowledgeConfig } from '../../src/hooks/knowledge-types.js';
+import { canonicalMkdtemp } from '../helpers/tmpdir.js';
 
 const CRIT_A = 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa';
 const CRIT_B = 'bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb';
@@ -82,9 +83,13 @@ function criticalCoderEntry(id: string, lesson: string): string {
 }
 
 function createRelativeTempDir(): string {
-	const baseDir = 'tmp';
-	if (!fs.existsSync(baseDir)) fs.mkdirSync(baseDir, { recursive: true });
-	return fs.mkdtempSync(path.join(baseDir, 'deleg-e2e-'));
+	return canonicalMkdtemp('deleg-e2e-');
+}
+
+function traceIdFromPrompt(prompt: string): string {
+	const traceId = /trace_id:\s*(\S+)/.exec(prompt)?.[1];
+	if (!traceId) throw new Error('injected directive lacks trace_id');
+	return traceId;
 }
 
 describe('Change 1 end-to-end: inject → ack → events', () => {
@@ -132,11 +137,12 @@ describe('Change 1 end-to-end: inject → ack → events', () => {
 		expect(args.prompt).toContain(DELEGATE_DIRECTIVE_BLOCK_TAG);
 		expect(args.prompt).toContain(CRIT_A);
 		expect(args.prompt).toContain(CRIT_B);
+		const traceId = traceIdFromPrompt(args.prompt);
 
 		// Subagent returns: applies CRIT_A, never mentions CRIT_B.
 		const transcript = [
 			'I implemented the loop with a plain for-loop.',
-			`KNOWLEDGE_APPLIED:${CRIT_A}`,
+			`KNOWLEDGE_APPLIED:${encodeURIComponent(traceId)}:${encodeURIComponent(CRIT_A)}`,
 		].join('\n');
 
 		// 1.5 — after-hook ack collection
@@ -176,11 +182,12 @@ describe('Change 1 end-to-end: inject → ack → events', () => {
 			args,
 		};
 		await injectDelegateDirectivesBefore(dir, input, CONFIG);
+		const traceId = traceIdFromPrompt(args.prompt);
 
 		const transcript = [
 			'Implemented carefully.',
-			`KNOWLEDGE_APPLIED:${CRIT_A}`,
-			`KNOWLEDGE_N_A:${CRIT_B} reason=no untrusted input in this task`,
+			`KNOWLEDGE_APPLIED:${encodeURIComponent(traceId)}:${encodeURIComponent(CRIT_A)}`,
+			`KNOWLEDGE_N_A:${encodeURIComponent(traceId)}:${encodeURIComponent(CRIT_B)} reason=no untrusted input in this task`,
 		].join('\n');
 		await collectDelegateAcksAfter(dir, input, { output: transcript });
 

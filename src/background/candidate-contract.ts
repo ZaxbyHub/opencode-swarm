@@ -146,6 +146,251 @@ export interface NormalizedCandidateArtifact {
 	text: string;
 	/** True when a canonical header was supplied by this normalizer. */
 	synthesizedHeader: boolean;
+	/** Narrow, auditable repairs applied before the unchanged strict parser runs. */
+	repairKinds: CandidateArtifactRepairKind[];
+}
+
+export type CandidateArtifactRepairKind =
+	| 'synthesized-header'
+	| 'terminal-protocol-fence'
+	| 'redundant-clean-confidence'
+	| 'clean-evidence-pipe-tail-merge'
+	| 'summary-row-dropped';
+
+interface MarkdownFenceBlock {
+	openingLine: number;
+	closingLine: number;
+	content: string[];
+}
+
+function parseClosedMarkdownFences(text: string): {
+	lines: string[];
+	blocks: MarkdownFenceBlock[];
+	unfencedLines: string[];
+} | null {
+	const lines = text.split(/\r?\n/);
+	const blocks: MarkdownFenceBlock[] = [];
+	const fencedLineIndexes = new Set<number>();
+	let openingLine = -1;
+	let openingWidth = 0;
+	for (let index = 0; index < lines.length; index += 1) {
+		const line = lines[index];
+		if (openingLine < 0) {
+			const opening = line.match(/^\s{0,3}(`{3,})([^`]*)$/);
+			if (!opening) continue;
+			openingLine = index;
+			openingWidth = opening[1].length;
+			continue;
+		}
+		const closing = line.match(/^\s{0,3}(`{3,})\s*$/);
+		if (!closing || closing[1].length < openingWidth) continue;
+		const content = lines.slice(openingLine + 1, index);
+		blocks.push({ openingLine, closingLine: index, content });
+		for (let fenced = openingLine; fenced <= index; fenced += 1) {
+			fencedLineIndexes.add(fenced);
+		}
+		openingLine = -1;
+		openingWidth = 0;
+	}
+	if (openingLine >= 0) return null;
+	return {
+		lines,
+		blocks,
+		unfencedLines: lines.filter((_, index) => !fencedLineIndexes.has(index)),
+	};
+}
+
+function lineCarriesCandidateProtocol(line: string): boolean {
+	const fields = splitPipeFields(line.trim()).map((field) => field.trim());
+	return (
+		fields[0] === CANDIDATE_MARKER ||
+		fields[0] === CLEAN_MARKER ||
+		candidateHeaderFamily(fields) !== null
+	);
+}
+
+function lastUnescapedPipeIndex(line: string): number {
+	let last = -1;
+	for (let index = 0; index < line.length; index += 1) {
+		if (line[index] === '\\' && line[index + 1] === '|') {
+			index += 1;
+			continue;
+		}
+		if (line[index] === '|') last = index;
+	}
+	return last;
+}
+
+function repairRedundantCleanConfidenceLine(
+	line: string,
+	family: RowFormatFamily,
+): { line: string; repaired: boolean } {
+	const fields = splitPipeFields(line).map((field) => field.trim());
+	if (
+		fields.length !== CLEAN_FIELD_COUNT + 1 ||
+		fields[0] !== CLEAN_MARKER ||
+		!isCandidateConfidence(fields[CLEAN_FIELD_COUNT]) ||
+		!analyzeCleanFields(fields.slice(0, CLEAN_FIELD_COUNT), family).valid
+	) {
+		return { line, repaired: false };
+	}
+	const delimiter = lastUnescapedPipeIndex(line);
+	if (delimiter < 0) return { line, repaired: false };
+	return { line: line.slice(0, delimiter).trimEnd(), repaired: true };
+}
+
+function repairRedundantCleanConfidence(
+	text: string,
+	family: RowFormatFamily,
+): { text: string; repaired: boolean } {
+	let repaired = false;
+	const lines = text.split(/\r?\n/).map((line) => {
+		const result = repairRedundantCleanConfidenceLine(line, family);
+		repaired ||= result.repaired;
+		return result.line;
+	});
+	return { text: lines.join('\n'), repaired };
+}
+
+/**
+ * A lane's trailing self-summary or aside rows (``[LANE_SUMMARY]``, ``[NOTE]``,
+ * ``[DONE]``, …) carry a bracket marker token in their first pipe field. They
+ * are not part of the candidate contract, yet their pipe-delimited shape was
+ * previously misclassified as malformed short candidate rows, voiding an
+ * otherwise-valid CLEAN attestation via the zero-malformed-rows rule. Only
+ * pipe-bearing marker lines are dropped: a pipe-free line (even one starting
+ * with a bracket token) is harmless prose today and may be a continuation
+ * fragment, so it is preserved. Marker lines for the contract's own rows
+ * ([CANDIDATE]/[CLEAN]) are never dropped. The match is deliberately
+ * UPPERCASE-ONLY: the machine contract's markers are uppercase by convention
+ * ([LANE_SUMMARY], [NOTE], [DONE]), and a lowercase bracket token is likelier
+ * prose than a marker row.
+ */
+const NON_CONTRACT_MARKER_LINE =
+	/^\[(?!(?:CANDIDATE|CLEAN)\])[A-Z][A-Z0-9_-]*\]/;
+
+function dropNonContractMarkerRows(text: string): {
+	text: string;
+	dropped: boolean;
+} {
+	const lines = text.split(/\r?\n/);
+	const kept = lines.filter((line) => {
+		if (!line.includes('|')) return true;
+		const firstField = splitPipeFields(line.trim())[0]?.trim() ?? '';
+		return !NON_CONTRACT_MARKER_LINE.test(firstField);
+	});
+	return {
+		text: kept.join('\n'),
+		dropped: kept.length !== lines.length,
+	};
+}
+
+/**
+ * Escape unescaped pipe separators beyond the CLEAN field count so free-text
+ * evidence containing literal pipes (regex character classes, `,;|`, shell
+ * snippets) re-merges into the trailing evidence field instead of splitting
+ * the row past `CLEAN_FIELD_COUNT`. Deterministic: evidence is the trailing
+ * field, so extra unescaped separators can only belong to it. Runs before the
+ * other line repairs so downstream repairs see canonical field counts.
+ */
+function repairCleanEvidencePipesLine(line: string): {
+	line: string;
+	repaired: boolean;
+} {
+	if (splitPipeFields(line)[0]?.trim() !== CLEAN_MARKER) {
+		return { line, repaired: false };
+	}
+	let separatorCount = 0;
+	let out = '';
+	for (let index = 0; index < line.length; index += 1) {
+		const char = line[index];
+		if (char === '\\' && line[index + 1] === '|') {
+			out += '\\|';
+			index += 1;
+			continue;
+		}
+		if (char === '|') {
+			separatorCount += 1;
+			out += separatorCount <= CLEAN_FIELD_COUNT - 1 ? '|' : '\\|';
+			continue;
+		}
+		out += char;
+	}
+	return separatorCount > CLEAN_FIELD_COUNT - 1
+		? { line: out, repaired: true }
+		: { line, repaired: false };
+}
+
+function repairCleanEvidencePipes(text: string): {
+	text: string;
+	repaired: boolean;
+} {
+	let repaired = false;
+	const lines = text.split(/\r?\n/).map((line) => {
+		const result = repairCleanEvidencePipesLine(line);
+		repaired ||= result.repaired;
+		return result.line;
+	});
+	return { text: lines.join('\n'), repaired };
+}
+
+function isStrictProtocolDataLine(
+	line: string,
+	family: RowFormatFamily,
+): boolean {
+	const clean = repairRedundantCleanConfidenceLine(line, family).line;
+	const fields = splitPipeFields(clean).map((field) => field.trim());
+	if (fields[0] === CLEAN_MARKER) {
+		return analyzeCleanFields(fields, family).valid;
+	}
+	if (fields[0] === CANDIDATE_MARKER) {
+		return analyzeCandidateFields(fields.slice(1), family).valid;
+	}
+	return analyzeCandidateFields(fields, family).valid;
+}
+
+function recoverTerminalProtocolFence(
+	rawText: string,
+	family: RowFormatFamily,
+): string | null {
+	const parsed = parseClosedMarkdownFences(rawText);
+	if (!parsed || parsed.blocks.length === 0) return null;
+	if (parsed.unfencedLines.some(lineCarriesCandidateProtocol)) return null;
+
+	let lastNonblankLine = parsed.lines.length - 1;
+	while (
+		lastNonblankLine >= 0 &&
+		parsed.lines[lastNonblankLine].trim().length === 0
+	) {
+		lastNonblankLine -= 1;
+	}
+	const terminal = parsed.blocks.at(-1)!;
+	if (terminal.closingLine !== lastNonblankLine) return null;
+	// Earlier quoted examples are harmless only when they contain no candidate
+	// protocol at all. A second fenced protocol frame is ambiguous and stays out.
+	if (
+		parsed.blocks
+			.slice(0, -1)
+			.some((block) => block.content.some(lineCarriesCandidateProtocol))
+	) {
+		return null;
+	}
+
+	const content = terminal.content.slice().map((line) => line.trimEnd());
+	while (content[0]?.trim() === '') content.shift();
+	while (content.at(-1)?.trim() === '') content.pop();
+	if (content[0]?.trim() !== CANDIDATE_HEADERS[family]) return null;
+	const rows = content.slice(1).filter((line) => line.trim() !== '');
+	if (
+		rows.length === 0 ||
+		!rows.every((line) => isStrictProtocolDataLine(line, family))
+	) {
+		return null;
+	}
+
+	const outside = parsed.unfencedLines.join('\n').trimEnd();
+	const protocol = content.join('\n');
+	return outside ? `${outside}\n${protocol}` : protocol;
 }
 
 /** Every canonical header family declared on any line of `source`. */
@@ -188,28 +433,49 @@ export function normalizeCandidateArtifact(
 	rawText: string,
 	fallbackFamily: RowFormatFamily,
 ): NormalizedCandidateArtifact {
-	const text = removeCandidateCodeFences(rawText);
+	const repairKinds: CandidateArtifactRepairKind[] = [];
+	// Marker-row drop runs first (it is shape-only), then the pre-existing
+	// repairs in their historical order, then the pipe tail-merge LAST: the
+	// redundant-confidence repair must see a 5-field row before the tail-merge
+	// folds the trailing token into evidence, while the tail-merge is the final
+	// fallback for prose pipes that no earlier repair addresses.
+	const summaryDrop = dropNonContractMarkerRows(rawText);
+	if (summaryDrop.dropped) repairKinds.push('summary-row-dropped');
+	const recoveredFence = recoverTerminalProtocolFence(
+		summaryDrop.text,
+		fallbackFamily,
+	);
+	if (recoveredFence !== null) repairKinds.push('terminal-protocol-fence');
+	const cleanRepair = repairRedundantCleanConfidence(
+		recoveredFence ?? removeCandidateCodeFences(summaryDrop.text),
+		fallbackFamily,
+	);
+	if (cleanRepair.repaired) repairKinds.push('redundant-clean-confidence');
+	const pipeRepair = repairCleanEvidencePipes(cleanRepair.text);
+	if (pipeRepair.repaired) repairKinds.push('clean-evidence-pipe-tail-merge');
+	const text = pipeRepair.text;
 	const header = selectCandidateHeader(text.split(/\r?\n/));
 	if (header?.markerBearing && header.family !== null) {
-		return { text, synthesizedHeader: false };
+		return { text, synthesizedHeader: false, repairKinds };
 	}
 	// A canonical header that survives fence-stripping but does not lead is a
 	// genuine contract violation: a later valid header still cannot rescue a
 	// malformed first marker.
 	if (declaredCanonicalFamilies(text).length > 0) {
-		return { text, synthesizedHeader: false };
+		return { text, synthesizedHeader: false, repairKinds };
 	}
 	// A header that existed only inside a code fence was deleted before it could
 	// be read. Honour the family it declared: if that disagrees with the expected
 	// family the artifact must still fail closed, but if it agrees there is
 	// nothing to protect and refusing would discard the lane's findings for no
-	// reason.
+	// reason. The declaration must be read from the PRE-strip source — the
+	// stripped text no longer contains the fenced header that declares it.
 	if (
-		declaredCanonicalFamilies(rawText).some(
+		declaredCanonicalFamilies(summaryDrop.text).some(
 			(family) => family !== fallbackFamily,
 		)
 	) {
-		return { text, synthesizedHeader: false };
+		return { text, synthesizedHeader: false, repairKinds };
 	}
 	// A lane proves it did the work with EITHER a valid candidate row or a valid
 	// zero-findings [CLEAN] attestation. Triggering only on candidate rows would
@@ -223,7 +489,8 @@ export function normalizeCandidateArtifact(
 		if (fields[0] !== CLEAN_MARKER) return false;
 		return analyzeCleanFields(fields, fallbackFamily).valid;
 	});
-	if (!hasSalvageableRow) return { text, synthesizedHeader: false };
+	if (!hasSalvageableRow)
+		return { text, synthesizedHeader: false, repairKinds };
 	// The INSERTION POINT is the first marker-bearing line, valid or not —
 	// deliberately not the first *valid* row. selectCandidateHeader takes the
 	// first marker-bearing line as authoritative, so inserting after a malformed
@@ -243,6 +510,7 @@ export function normalizeCandidateArtifact(
 	// where every prose line is counted as a malformed row — which both inflates
 	// the diagnostics and trips the CLEAN attestation's zero-malformed-rows rule,
 	// defeating the repair it was supposed to enable.
+	repairKinds.push('synthesized-header');
 	return {
 		text: [
 			...lines.slice(0, firstSalvageableIndex),
@@ -250,6 +518,7 @@ export function normalizeCandidateArtifact(
 			...lines.slice(firstSalvageableIndex),
 		].join('\n'),
 		synthesizedHeader: true,
+		repairKinds,
 	};
 }
 

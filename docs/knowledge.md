@@ -12,8 +12,9 @@ When an architect receives a new message, entries from both stores are merged an
 > `applies_to_agents`, `directive_priority`, `generated_skill_path`). The
 > Architect receives these as a structured `<swarm_knowledge_directives>`
 > block and must acknowledge each applicable directive (`KNOWLEDGE_APPLIED`)
-> or explicitly close it as skipped or violated (`KNOWLEDGE_IGNORED reason=...`
-> / `KNOWLEDGE_VIOLATED reason=...`). See [Actionable directives](#actionable-directives-v2) and
+> or explicitly close it as not-applicable, skipped, or violated
+> (`KNOWLEDGE_N_A reason=...` / `KNOWLEDGE_IGNORED reason=...` /
+> `KNOWLEDGE_VIOLATED reason=...`). See [Actionable directives](#actionable-directives-v2) and
 > [Knowledge application contract](#knowledge-application-contract-v2) below.
 
 ---
@@ -25,7 +26,13 @@ When an architect receives a new message, entries from both stores are merged an
 ```
 .swarm/knowledge.jsonl            # active entries
 .swarm/knowledge-rejected.jsonl   # entries that failed validation
+.swarm/knowledge-receipts-v2.jsonl          # authoritative receipt journal
+.swarm/knowledge-receipts-v2.snapshot.json  # rebuildable live-state checkpoint
+.swarm/knowledge-receipts-v2-archive.jsonl  # closed receipt summaries
 ```
+
+The V2 receipt files are always anchored to this canonical project root. They
+never follow a knowledge link and never move to the hive or a cohort store.
 
 ### Hive (cross-project)
 
@@ -87,6 +94,7 @@ When linked, the following files are **redirected** to the shared store:
 The following remain **per-worktree** (not redirected):
 
 - `.knowledge-shown.json`
+- V2 receipt journal, snapshot, archive, and receipt lock
 - Plan (`.swarm/plan.json`, `.swarm/plan.md`)
 - Evidence (`.swarm/evidence/`)
 
@@ -254,6 +262,7 @@ All keys live under `knowledge.*` in your config (see `src/config/schema.ts:1043
 | `evergreen_utility` | float | 0.8 | Utility score for evergreen |
 | `low_utility_threshold` | float | 0.3 | Flag for removal at or below |
 | `min_retrievals_for_utility` | int | 3 | Retrievals before utility scoring |
+| `receipt_close_grace_days` | int | 7 | Days to retain resolved receipt membership after its phase closes (`0`-`3650`) |
 | `default_max_phases` | int | 10 | General TTL |
 | `todo_max_phases` | int | 3 | TODO-category TTL |
 | `same_project_weight` | float | 1.0 | Encounter score (source project) |
@@ -266,6 +275,15 @@ All keys live under `knowledge.*` in your config (see `src/config/schema.ts:1043
 ## Migration
 
 `/swarm knowledge migrate` imports from legacy `.swarm/context.md` into `.swarm/knowledge.jsonl`. Idempotent — a sentinel file `.swarm/.knowledge-migrated` prevents re-runs.
+
+Receipt migration is separate and automatic. The first receipt-ledger operation
+performs a lazy, lock-protected cutover; plugin initialization does no migration
+I/O. Only complete, still-live retrievals from this project's local legacy event
+file are imported. Missing, evicted, linked, malformed, or partial legacy state
+is recorded as typed `legacy_unverifiable` uncertainty and is never reconstructed
+from counters or inferred from cohort data. V2 is read first throughout cutover,
+and legacy access is restricted to the explicit imported pre-cutover trace set
+until that set drains to zero.
 
 Legacy sections mapped into the new schema:
 
@@ -360,7 +378,10 @@ Retrieval-outcome counters now distinguish:
 - `shown_count` — included in an injection block.
 - `acknowledged_count` — any explicit ack received.
 - `applied_explicit_count` — explicit `KNOWLEDGE_APPLIED`.
-- `ignored_count` — explicit `KNOWLEDGE_IGNORED`.
+- `ignored_count` — explicit `KNOWLEDGE_IGNORED` (relevant but deliberately not followed).
+- `n_a_count` — explicit `KNOWLEDGE_N_A` (not applicable; neutral, event-log
+  only — intentionally stripped before per-entry `retrieval_outcomes`, so it
+  is never persisted on entries and never reaches the outcome signal).
 - `violated_count` — explicit `KNOWLEDGE_VIOLATED` (or runtime-inferred).
 - `succeeded_after_shown_count` — phase succeeded after this entry was shown.
 - `failed_after_shown_count` — phase failed after this entry was shown.
@@ -415,7 +436,9 @@ and within a turn (e.g., after message compaction).
 
 ## Knowledge application contract (v2)
 
-The Architect now receives a structured directive block:
+The Architect now receives a structured directive block. Its receipt metadata
+also carries the originating retrieval trace so acknowledgments join the exact
+`(trace_id, entry_id)` pair rather than an entry ID from another display:
 
 ```
 <swarm_knowledge_directives>
@@ -441,26 +464,112 @@ The Architect prompt requires inspecting this block before:
 For each applicable directive, the Architect emits:
 
 - `KNOWLEDGE_APPLIED: <id>` — directive observed in the next compliant action.
-- `KNOWLEDGE_IGNORED: <id> reason=<short>` — does not apply this turn.
+- `KNOWLEDGE_N_A: <id> reason=<short>` — does not apply this turn (neutral).
+- `KNOWLEDGE_IGNORED: <id> reason=<short>` — judged relevant but deliberately not followed (counts against the directive).
+- `KNOWLEDGE_CONTRADICTED: <id> reason=<short>` — current authority or repository evidence disproves it.
 - `KNOWLEDGE_VIOLATED: <id> reason=<short>` — runtime evidence shows it was breached.
 
-Chat-text markers (KNOWLEDGE_APPLIED/IGNORED/VIOLATED) are the sole mechanism that
+Chat-text markers (KNOWLEDGE_APPLIED/N_A/IGNORED/CONTRADICTED/VIOLATED) are the sole mechanism that
 satisfies the knowledge-application enforcement gate. The `knowledge_receipt` tool
 (which replaced the former `knowledge_ack`) records knowledge-usage receipts for
-audit — including applied/ignored/contradicted outcomes and new-lesson persistence
+audit — including applied/ignored/n_a/contradicted outcomes and new-lesson persistence
 — but does NOT satisfy the enforcement gate.
 
-### Audit log
+### Outcome and source semantics (issue #2032)
 
-Every outcome is appended as a JSONL line to:
+Every producer and consumer of knowledge terminals shares one typed contract
+(`ReceiptOutcome` + `ReceiptSourceCode`, declared once in
+`src/hooks/knowledge-receipt-ledger.ts`):
+
+| Outcome | Meaning | Outcome signal | Gate obligation |
+| --- | --- | --- | --- |
+| `applied` | the directive was followed | positive | clears |
+| `ignored` | judged relevant but deliberately not followed | negative | clears only with a reason |
+| `n_a` | not applicable to the current action | neutral | clears only with a reason |
+| `contradicted` | current authority or evidence disproves it | negative | blocks phase until remediated |
+| `violated` | runtime evidence shows a breach | negative | blocks phase until remediated |
+
+`n_a` clears ONLY the acknowledgement/applicability obligation. It never
+proves application, never produces promotion evidence, and never satisfies
+high-risk acceptance on its own; delegate self-report remains non-independent,
+with reviewer adjudication and deterministic test/evidence as the independent
+verification roles. `unacknowledged` (silent non-critical exposure) and
+`no_relevant` (empty-trace tombstone) are audit-only event types, never
+terminal outcomes.
+
+`source` records WHO produced a terminal as a provenance class, distinct from
+the `agent` identity field: `delegate` (the exposed agent's own self-report —
+stamped on every delegate terminal in both the V2 ledger and the diagnostic
+event log), `reviewer` (independent verdict), `architect` /
+`architect_marker`, `test_engineer`, `phase_override`,
+`application_gate_staleness_clear` / `application_gate_denial_limit_clear`
+(system escape hatches), `manual`, `migration`, and `unknown`. Legacy records
+with an absent or ambiguous source stay `unknown` — never coerced to
+`delegate`, `ignored`, or zero. The `knowledge_receipt_transition`
+observability payload carries `receiptSemantics` (currently `2`) versioning
+this meaning contract.
+
+One documented asymmetry is preserved by design: the V2 ledger and the
+diagnostic event log store `n_a` verbatim, while the legacy
+`knowledge-application.jsonl` audit log has no `n_a` result value and
+down-converts it to `acknowledged` (knowledge-application.ts). Historical
+records are never rewritten.
+
+### Receipt authority and diagnostic log
+
+Correctness-critical receipt state is committed to the canonical project's V2
+journal before a directive is displayed or a terminal is accepted:
+
+```
+.swarm/knowledge-receipts-v2.jsonl
+```
+
+Only the exact final displayed set becomes retrieval membership; candidates
+removed by ranking, filtering, or caps create no obligation. If optional
+injection membership cannot be committed, the block is not displayed. Terminal
+validation and commit are one cross-process-locked transition, so duplicate,
+late, and reordered outcomes are idempotent or explicitly rejected. Best-effort
+legacy, counter, promotion, and observability writes occur only after the
+correctness lock is released.
+
+The journal never evicts live membership because of an event-count cap. Its
+2,000-record threshold triggers a self-contained checkpoint rewrite; it is not
+a retention limit. Resolved state remains protected until its phase is durably closed and
+`knowledge.receipt_close_grace_days` has elapsed. Eligible closed summaries move
+to the separate project-local receipt archive; a bounded audit tail and a
+rebuildable snapshot do not share the diagnostic event budget.
+
+#### Receipt-ledger recovery
+
+An unterminated final journal line is treated as a crash tail: the plugin first
+preserves it in a quarantine file, then rewrites the last valid hash-chained
+prefix. Interior corruption, a hash mismatch, an unsupported schema, an
+unwritable quarantine, or a full disk intentionally fails receipt gates closed;
+the plugin does not guess which later authority is safe to discard.
+
+Before recovery, back up all project-local
+`.swarm/knowledge-receipts-v2*.jsonl` files. Do not hand-edit or truncate the
+authoritative journal. Free disk space when writes fail, then retry. For interior
+corruption, restore the journal and archive from a trusted project-local backup
+or reopen them with a plugin version that supports their schema. The snapshot is
+explicitly rebuildable and is never a substitute for the journal or archive.
+
+Operational knowledge observations continue to be appended to:
 
 ```
 .swarm/knowledge-events.jsonl
 ```
 
-with `{timestamp, phase, taskId, action, tool, targetAgent, knowledgeId,
-result: "shown"|"acknowledged"|"applied"|"ignored"|"violated", reason,
-generatedSkillPath, sessionId}`.
+This FIFO is diagnostics only. Churn or eviction in it cannot change receipt
+validation, application/phase gates, promotion evidence, escalation, or
+curation decisions. Linked stores may still redirect this diagnostic stream,
+but can never redirect or satisfy project-local V2 receipt authority.
+
+Issue #2032 normalized outcome and source meanings into one typed contract
+(see [Outcome and source semantics](#outcome-and-source-semantics-issue-2032)
+above). V2 preserves the producer's typed value and records `unknown` when
+the producer has no stronger source; it never reinterprets or coerces legacy
+semantics — historical records keep the meanings they were written with.
 
 ### Enforcement modes
 
@@ -480,7 +589,8 @@ generatedSkillPath, sessionId}`.
 In `enforce` mode the gate (`knowledgeApplicationGateBefore` in
 `src/hooks/knowledge-application-gate.ts`) blocks high-risk actions when a
 critical directive was shown but received no terminal acknowledgment
-(`KNOWLEDGE_APPLIED`, `KNOWLEDGE_IGNORED`, or `KNOWLEDGE_VIOLATED`) — bounded by
+(`KNOWLEDGE_APPLIED`, `KNOWLEDGE_N_A`, `KNOWLEDGE_IGNORED`, or
+`KNOWLEDGE_VIOLATED`) — bounded by
 two escape hatches so the gate cannot deadlock a session forever:
 
 - **`max_gate_denials`** (default `5`) — after this many consecutive denials

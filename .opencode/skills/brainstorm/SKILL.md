@@ -60,7 +60,7 @@ If `council.general.enabled` is true in the resolved opencode-swarm config AND a
     → REQUIRED: The reviewer Task dispatch MUST contain a literal `ACCEPTANCE:` line. This is a pre-plan spec review (no fr_refs yet), so resolve per ACCEPTANCE FIELD RESOLUTION in your system prompt using a one-line task-derived DONE restatement, e.g. "DONE = reviewer flags HOW-encoded requirements, untestable requirements, missing edge cases, and silent assumptions in the draft spec." A missing line is BLOCKED by ACCEPTANCE_FIELD_REQUIRED.
 - Apply reviewer feedback. If reviewer rejects, iterate once and re-review. After two rounds, surface remaining disagreements to the user.
 - Before writing `.swarm/spec.md`, apply the FR-002 non-shadowing check: if a non-native spec already exists, do not shadow it (see MODE: SPECIFY step 1b).
-- Write the final spec to `.swarm/spec.md`.
+- Resolve the effective spec first via `/swarm sdd status` (issue #2131 finding 9): write `.swarm/spec.md` ONLY when no non-native effective spec (openspec / speckit projection) is active — those sources are read-only inputs (see the status output's `allowed mutations` line); refine them in their own tool instead of shadowing them.
 - Exit when reviewer signs off (or user explicitly accepts remaining disagreements).
 
 **Phase 6: DEFER QA AND EXECUTION PROFILE SELECTION.**

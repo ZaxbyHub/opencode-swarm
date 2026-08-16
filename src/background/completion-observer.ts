@@ -10,7 +10,9 @@
 import { createHash } from 'node:crypto';
 import * as path from 'node:path';
 import { completeBackgroundPhaseParticipation } from '../evidence/phase-participation.js';
+import { transitionTaskWorkflowEvidence } from '../gate-evidence.js';
 import {
+	abortStandardWorktreeDispatch,
 	awaitingMergeByCallID,
 	finishStandardWorktreeDispatch,
 	type StandardWorktreeDispatch,
@@ -207,8 +209,76 @@ export function createBackgroundCompletionObserver(opts: {
 					// on first processing; just return without re-discarding.
 					return;
 				}
-				if (record.normalizedAgent === 'coder' && !record.worktree) {
-					await releaseCoderReservation(directory, record, 'recovered');
+				if (record.normalizedAgent === 'coder') {
+					if (record.planTaskId) {
+						const expectedGeneration =
+							record.taskChangeContext?.workflowGeneration;
+						if (expectedGeneration === undefined) {
+							logger.warn(
+								`[background] failed coder ${record.correlationId} has no launch generation for task ${record.planTaskId}`,
+							);
+						} else {
+							try {
+								await transitionTaskWorkflowEvidence(
+									directory,
+									record.planTaskId,
+									{
+										type: 'dispatch_no_mutation',
+										agentType: 'coder',
+										expectedGeneration,
+										transitionId: `background-coder-terminal:${terminal.eventId}`,
+									},
+								);
+							} catch (error) {
+								logger.warn(
+									`[background] failed coder retry accounting was fenced for ${record.planTaskId}: ${error instanceof Error ? error.message : String(error)}`,
+								);
+							}
+						}
+					}
+					try {
+						await releaseCoderReservation(directory, record, 'recovered');
+					} catch (error) {
+						logger.warn(
+							`[background] failed coder reservation cleanup will be retried by admission reconciliation: ${error instanceof Error ? error.message : String(error)}`,
+						);
+					}
+					if (record.worktree) {
+						const descriptor = record.worktree;
+						if (!standardWorktreeByCallID.has(record.callID)) {
+							standardWorktreeByCallID.set(record.callID, {
+								callID: descriptor.callID,
+								parentSessionID: descriptor.parentSessionId,
+								taskId: descriptor.taskId,
+								...(descriptor.planTaskId
+									? { planTaskId: descriptor.planTaskId }
+									: {}),
+								handle: {
+									worktreePath: descriptor.worktreePath,
+									branchName: descriptor.branchName,
+									purpose: 'lane',
+									id: descriptor.worktreeId,
+									sessionId: descriptor.worktreeSessionId,
+								},
+								mergeStrategy: descriptor.mergeStrategy,
+								laneIndex: descriptor.laneIndex,
+								...(descriptor.worktreeDir
+									? { worktree_dir: descriptor.worktreeDir }
+									: {}),
+							});
+						}
+						try {
+							await abortStandardWorktreeDispatch(
+								record.callID,
+								'cancelled',
+								directory,
+							);
+						} catch (error) {
+							logger.warn(
+								`[background] failed coder worktree cleanup preserved the lane for manual recovery: ${error instanceof Error ? error.message : String(error)}`,
+							);
+						}
+					}
 				}
 				discardScopeForRecord(record);
 				await publishAdvisory(

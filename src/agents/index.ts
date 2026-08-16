@@ -19,6 +19,7 @@ import {
 	TURBO_AGENT_TOOL_MAP,
 } from '../config/constants';
 import { stripKnownSwarmPrefix } from '../config/schema';
+import { resolvePlanningProfile } from '../plan/planning-profile';
 import {
 	addDeferredWarning,
 	advisoryWarn,
@@ -471,6 +472,12 @@ function createSwarmAgents(
 			pluginConfig?.external_skills?.curation_enabled === true,
 			pluginConfig?.turbo !== undefined,
 			pluginConfig?.skills?.enabled === true,
+			resolvePlanningProfile({
+				directory: '',
+				config: {
+					execution_mode: pluginConfig?.execution_mode ?? 'balanced',
+				},
+			}),
 		);
 		architect.name = prefixName('architect');
 

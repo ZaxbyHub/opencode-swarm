@@ -124,8 +124,9 @@ describe('analyzeImpact — adversarial inputs', () => {
 		// Create circular symlinks
 		const linkA = path.join(dirA, 'linkToB');
 		const linkB = path.join(dirB, 'linkToA');
-		fs.symlinkSync(dirB, linkA);
-		fs.symlinkSync(dirA, linkB);
+		const symlinkType = process.platform === 'win32' ? 'junction' : 'dir';
+		fs.symlinkSync(dirB, linkA, symlinkType);
+		fs.symlinkSync(dirA, linkB, symlinkType);
 
 		// This should not hang or crash
 		const startTime = Date.now();

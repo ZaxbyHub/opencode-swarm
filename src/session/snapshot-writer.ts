@@ -5,6 +5,7 @@
 
 import { closeSync, fsyncSync, mkdirSync, openSync, renameSync } from 'node:fs';
 import * as path from 'node:path';
+import { TASK_WORKFLOW_SCHEMA_MARKER } from '../gate-evidence.js';
 import { validateSwarmPath } from '../hooks/utils';
 import type {
 	AgentSessionState,
@@ -132,8 +133,9 @@ export interface SerializedInvocationWindow {
  * Snapshot data structure written to disk
  */
 export interface SnapshotData {
-	version: 1 | 2;
+	version: 1 | 2 | 3;
 	writtenAt: number;
+	workflowSchema?: typeof TASK_WORKFLOW_SCHEMA_MARKER;
 	toolAggregates: Record<string, ToolAggregate>;
 	activeAgent: Record<string, string>;
 	delegationChains: Record<string, DelegationEntry[]>;
@@ -301,8 +303,9 @@ export async function writeSnapshot(
 	try {
 		// Build SnapshotData object from state
 		const snapshot: SnapshotData = {
-			version: 2,
+			version: 3,
 			writtenAt: Date.now(),
+			workflowSchema: TASK_WORKFLOW_SCHEMA_MARKER,
 			toolAggregates: Object.fromEntries(state.toolAggregates),
 			activeAgent: Object.fromEntries(state.activeAgent),
 			delegationChains: Object.fromEntries(state.delegationChains),

@@ -88,6 +88,7 @@ export async function executeGetQaGateProfile(
 }
 
 export const get_qa_gate_profile: ReturnType<typeof tool> = createSwarmTool({
+	allowWorkingDirectoryOverride: true,
 	description:
 		'Retrieve the QA gate profile for the current plan. Returns the spec-level ' +
 		'gates, lock state, and a SHA-256 profile hash. Read-only — does not ' +

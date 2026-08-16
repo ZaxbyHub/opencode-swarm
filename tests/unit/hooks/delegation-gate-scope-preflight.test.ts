@@ -286,7 +286,7 @@ describe('coder scope preflight', () => {
 		).toBeNull();
 	});
 
-	test('Task completion revokes the exact published binding', async () => {
+	test('Task completion revokes binding even when settlement attribution fails closed', async () => {
 		await writePlan(['src/index.ts']);
 		const hook = createDelegationGateHook(makeConfig(), directory);
 		const input = {
@@ -312,7 +312,9 @@ describe('coder scope preflight', () => {
 				activeSessionId: 'completed-child',
 			}),
 		).not.toBeNull();
-		await hook.toolAfter({ ...input, args }, { output: 'done' });
+		await expect(
+			hook.toolAfter({ ...input, args }, { output: 'done' }),
+		).rejects.toThrow('CODER_SETTLEMENT_ATTRIBUTION_UNCERTAIN');
 		expect(
 			getAuthorizedScopeBinding({
 				directory,
@@ -447,7 +449,9 @@ describe('coder scope preflight', () => {
 			parentSessionID: input.sessionID,
 			childSessionID: 'failed-bg-child',
 		});
-		await hook.toolAfter({ ...input, args }, { state: 'error' });
+		await expect(
+			hook.toolAfter({ ...input, args }, { state: 'error' }),
+		).rejects.toThrow('CODER_SETTLEMENT_ATTRIBUTION_UNCERTAIN');
 		expect(
 			getAuthorizedScopeBinding({
 				directory,
@@ -458,7 +462,7 @@ describe('coder scope preflight', () => {
 		).toBeNull();
 	});
 
-	test('architect task completion revokes an active child binding', async () => {
+	test('an architect status-hook observation cannot revoke an active child binding', async () => {
 		await writePlan(['src/index.ts']);
 		const hook = createDelegationGateHook(makeConfig(), directory);
 		const input = { tool: 'Task', sessionID: 'parent', callID: 'status-call' };
@@ -488,7 +492,7 @@ describe('coder scope preflight', () => {
 				taskId: '1.1',
 				activeSessionId: 'status-child',
 			}),
-		).toBeNull();
-		expect(ensureAgentSession('status-child').currentTaskId).toBeNull();
+		).not.toBeNull();
+		expect(ensureAgentSession('status-child').currentTaskId).toBe('1.1');
 	});
 });

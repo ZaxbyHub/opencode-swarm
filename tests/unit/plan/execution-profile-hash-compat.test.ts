@@ -62,6 +62,19 @@ function withCommitPolicy(plan: Plan, enabled: boolean): Plan {
 	};
 }
 
+function withPlanningProfile(
+	plan: Plan,
+	planningProfile: 'balanced' | 'strict',
+): Plan {
+	return {
+		...plan,
+		execution_profile: {
+			...plan.execution_profile!,
+			planning_profile: planningProfile,
+		},
+	};
+}
+
 describe('execution profile hash compatibility — regression: default-false field (critic F1)', () => {
 	test('missing and explicit false are equivalent, while true changes both ledger hashes', () => {
 		// Previous code serialized the schema-injected false value, so merely
@@ -80,6 +93,27 @@ describe('execution profile hash compatibility — regression: default-false fie
 		);
 	});
 
+	test('missing, explicit strict, and explicit balanced are three distinct ledger identities', () => {
+		const legacy = createLegacyPlan();
+		const explicitStrict = withPlanningProfile(legacy, 'strict');
+		const explicitBalanced = withPlanningProfile(legacy, 'balanced');
+
+		expect(computePlanHash(explicitStrict)).not.toBe(computePlanHash(legacy));
+		expect(computePlanHash(explicitBalanced)).not.toBe(computePlanHash(legacy));
+		expect(computePlanHash(explicitStrict)).not.toBe(
+			computePlanHash(explicitBalanced),
+		);
+		expect(computePlanStructureHash(explicitStrict)).not.toBe(
+			computePlanStructureHash(legacy),
+		);
+		expect(computePlanStructureHash(explicitBalanced)).not.toBe(
+			computePlanStructureHash(legacy),
+		);
+		expect(computePlanStructureHash(explicitStrict)).not.toBe(
+			computePlanStructureHash(explicitBalanced),
+		);
+	});
+
 	test('missing and explicit false share a plan.md hash, while true invalidates it', async () => {
 		// Previous computePlanContentHash serialized false, regenerating plan.md
 		// solely because PlanSchema materialized a new default.
@@ -94,6 +128,30 @@ describe('execution profile hash compatibility — regression: default-false fie
 				false,
 			);
 		}, 'execution-profile-content-hash-');
+	});
+
+	test('missing, explicit strict, and explicit balanced have distinct plan.md projections', async () => {
+		await withSafeTestDir(async (dir) => {
+			const legacy = createLegacyPlan();
+			await regeneratePlanMarkdown(dir, legacy);
+
+			expect(
+				await isPlanMdInSync(dir, withPlanningProfile(legacy, 'strict')),
+			).toBe(false);
+			expect(
+				await isPlanMdInSync(dir, withPlanningProfile(legacy, 'balanced')),
+			).toBe(false);
+
+			await regeneratePlanMarkdown(dir, withPlanningProfile(legacy, 'strict'));
+			const strictMarkdown = readFileSync(
+				join(dir, '.swarm', 'plan.md'),
+				'utf8',
+			);
+			expect(strictMarkdown).toContain('- Planning Profile: strict');
+			expect(
+				await isPlanMdInSync(dir, withPlanningProfile(legacy, 'balanced')),
+			).toBe(false);
+		}, 'planning-profile-content-hash-');
 	});
 
 	test('pre-upgrade ledger stays stable across repeated fresh loads', async () => {

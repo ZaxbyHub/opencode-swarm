@@ -21,10 +21,13 @@ messages:
 
 - **HEAD cannot be resolved** (git failed, unborn HEAD, shallow clone,
   missing binary, timeout, non-repo directory): the error names the
-  `directory`, enumerates the real causes, and includes the exact command
-  `git -C "<directory>" rev-parse --verify HEAD^{commit}` for self-diagnosis.
+  `directory`, enumerates the real causes, and includes the portable commands
+  `git -C "<directory>" rev-parse --verify HEAD^0` and
+  `git -C "<directory>" cat-file -t HEAD` for self-diagnosis.
 - **HEAD does not match**: the error now also names the `directory` and
-  includes the exact command `git -C "<directory>" switch --detach <sha>`.
+  instructs the caller to run the bare standalone command
+  `git switch --detach <sha>` from that directory; `git -C ... switch` remains
+  rejected as a state transition by the read-only shell classifier.
 
 All five callers inherit the improvement automatically:
 `dispatch_lanes_async`, `run_pr_feedback_stage_a`, `activatePrWorkflow`,

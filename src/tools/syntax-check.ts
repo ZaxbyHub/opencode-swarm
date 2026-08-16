@@ -356,6 +356,7 @@ export async function syntaxCheck(
 }
 
 export const syntax_check: ReturnType<typeof tool> = createSwarmTool({
+	allowWorkingDirectoryOverride: true,
 	description:
 		'Check syntax of source files using tree-sitter parsers. Supports JS/TS, Python, Go, Rust, Java, C/C++, C#, PHP, Ruby. Returns JSON with syntax errors found per file.',
 	args: {

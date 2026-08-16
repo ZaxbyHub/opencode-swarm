@@ -14,6 +14,7 @@ import type { Plan } from '../../../src/config/plan-schema';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 import { withFrozenClock } from '../../helpers/test-clock.js';
+import { seedAuthoritativeTaskWorkflow } from './_delegation-gate-helpers';
 
 function makeConfig(council?: { enabled?: boolean }): PluginConfig {
 	return {
@@ -140,6 +141,12 @@ describe('delegation-gate: council verdict enforcement', () => {
 	});
 
 	it('should handle multiple council members in parallel', async () => {
+		await seedAuthoritativeTaskWorkflow(
+			tempDir,
+			'1.1',
+			'pre_check_passed',
+			'session-mega_reviewer',
+		);
 		const hook = createDelegationGateHook(
 			makeConfig({ enabled: true }),
 			tempDir,
@@ -169,6 +176,7 @@ describe('delegation-gate: council verdict enforcement', () => {
 		);
 		const session = ensureAgentSession('test-session');
 		session.taskWorkflowStates.set('1.1', 'tests_run');
+		await seedAuthoritativeTaskWorkflow(tempDir, '1.1', 'tests_run');
 
 		let threw = false;
 		try {
@@ -190,6 +198,7 @@ describe('delegation-gate: council verdict enforcement', () => {
 		);
 		const session = ensureAgentSession('test-session');
 		session.taskWorkflowStates.set('1.1', 'tests_run');
+		await seedAuthoritativeTaskWorkflow(tempDir, '1.1', 'tests_run');
 
 		let threw = false;
 		try {

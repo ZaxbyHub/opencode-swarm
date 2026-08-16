@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import type { PluginConfig } from '../../../src/config';
-import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
+import {
+	_internals,
+	createDelegationGateHook,
+} from '../../../src/hooks/delegation-gate';
+import { resolveCoderScopeSources } from '../../../src/scope/scope-binding';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 
 function makeConfig(overrides?: Record<string, unknown>): PluginConfig {
@@ -204,20 +208,28 @@ describe('delegation-gate: declaredCoderScope extraction (Task 5.3)', () => {
 			expect(session.declaredCoderScope).toBeNull();
 		});
 
-		it('should NOT match indented FILE: (regex requires start of line)', async () => {
+		it('FB-005 retains valid normalized scope entries for observe-only telemetry while strict extraction fails closed', async () => {
 			const config = makeConfig();
 			const hook = createDelegationGateHook(config, process.cwd());
+			const prompt =
+				'mega_coder\r\nTASK: 1.1\r\n  FILE: src/indented.ts (implementation target)\r\nFILE: src/indented.ts\r\nFILE: src/ambiguous.ts (annotation one) (annotation two)\r\nINPUT: do stuff';
 
-			// Indented FILE: at start of line should NOT match (regex /^FILE: requires start of line)
-			const messages = makeMessages(
-				'mega_coder\nTASK: 1.1\n  FILE: src/indented.ts\nINPUT: do stuff',
-				'architect',
-			);
+			expect(_internals.extractTaskFileDirectives({ prompt })).toEqual({
+				present: true,
+				files: null,
+			});
+			expect(
+				_internals.extractTaskFileDirectives({ prompt }, 'observe'),
+			).toEqual({
+				present: true,
+				files: ['src/indented.ts'],
+			});
+
+			const messages = makeMessages(prompt, 'architect');
 			await hook.messagesTransform({}, messages);
 
 			const session = ensureAgentSession('test-session');
-			// Indented FILE: should NOT be matched because regex uses ^ which requires start of line
-			expect(session.declaredCoderScope).toBeNull();
+			expect(session.declaredCoderScope).toEqual(['src/indented.ts']);
 		});
 
 		it('should match FILE: at start of multiline string', async () => {
@@ -232,6 +244,99 @@ describe('delegation-gate: declaredCoderScope extraction (Task 5.3)', () => {
 
 			const session = ensureAgentSession('test-session');
 			expect(session.declaredCoderScope).toEqual(['src/a.ts', 'src/b.ts']);
+		});
+	});
+
+	describe('FILE directive grammar', () => {
+		it('normalizes an annotation to the authoritative scope without conflict', () => {
+			const directives = _internals.extractTaskFileDirectives({
+				prompt: 'FILE: src/foo.ts (implementation target, issue #2176)',
+			});
+			expect(directives).toEqual({ present: true, files: ['src/foo.ts'] });
+			expect(
+				resolveCoderScopeSources({
+					explicitFiles: null,
+					planFiles: ['src/foo.ts'],
+					fileDirectiveFiles: directives.files,
+				}),
+			).toEqual({ ok: true, files: ['src/foo.ts'], source: 'plan' });
+		});
+
+		it('strips only a whitespace-separated terminal annotation', () => {
+			expect(
+				_internals.extractTaskFileDirectives({
+					prompt: 'FILE: src/foo (v2).ts (implementation target, issue #2176)',
+				}),
+			).toEqual({ present: true, files: ['src/foo (v2).ts'] });
+		});
+
+		it('preserves commas and terminal parentheses inside a quoted whole path', () => {
+			expect(
+				_internals.extractTaskFileDirectives({
+					prompt: 'FILE: "src/report, final (v2).ts" (implementation target)',
+				}),
+			).toEqual({
+				present: true,
+				files: ['src/report, final (v2).ts'],
+			});
+			expect(
+				_internals.extractTaskFileDirectives({
+					prompt: "FILE: 'src/report (final).ts'",
+				}),
+			).toEqual({ present: true, files: ['src/report (final).ts'] });
+		});
+
+		it('keeps internal parentheses and malformed terminal suffixes literal', () => {
+			expect(
+				_internals.extractTaskFileDirectives({
+					prompt: 'FILE: src/foo (v2).ts',
+				}),
+			).toEqual({ present: true, files: ['src/foo (v2).ts'] });
+			expect(
+				_internals.extractTaskFileDirectives({
+					prompt: 'FILE: src/foo.ts ((nested))',
+				}),
+			).toEqual({ present: true, files: ['src/foo.ts ((nested))'] });
+			expect(
+				_internals.extractTaskFileDirectives({
+					prompt: 'FILE: src/foo.ts (unbalanced',
+				}),
+			).toEqual({ present: true, files: ['src/foo.ts (unbalanced'] });
+		});
+
+		it('FB-009 rejects repeated unquoted annotation groups without breaking quoted terminal parentheses', () => {
+			expect(
+				_internals.extractTaskFileDirectives({
+					prompt: 'FILE: "src/foo.ts" trailing prose',
+				}),
+			).toEqual({ present: true, files: null });
+			expect(
+				_internals.extractTaskFileDirectives({
+					prompt: 'FILE: src/foo.ts, src/bar.ts',
+				}),
+			).toEqual({ present: true, files: null });
+			expect(
+				_internals.extractTaskFileDirectives({
+					prompt: 'FILE: src/foo.ts (annotation one) (annotation two)',
+				}),
+			).toEqual({ present: true, files: null });
+			expect(
+				_internals.extractTaskFileDirectives({
+					prompt: 'FILE: "src/report (v1) (final)" (implementation target)',
+				}),
+			).toEqual({
+				present: true,
+				files: ['src/report (v1) (final)'],
+			});
+		});
+
+		it('deduplicates normalized directives', () => {
+			expect(
+				_internals.extractTaskFileDirectives({
+					prompt:
+						'FILE: src/foo.ts\n  FILE: src/foo.ts (same implementation target)',
+				}),
+			).toEqual({ present: true, files: ['src/foo.ts'] });
 		});
 	});
 

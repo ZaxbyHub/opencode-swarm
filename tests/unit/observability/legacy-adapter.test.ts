@@ -23,6 +23,18 @@ describe('adaptLegacyTelemetryPayload — AC2', () => {
 		expect(Object.hasOwn(ids, 'hostSessionId')).toBe(false);
 	});
 
+	test('extracts canonical knowledge receipt workflow IDs without coercion', () => {
+		const ids = extractWorkflowIds({
+			knowledgeTraceId: 'trace-uuid',
+			knowledgeEntryId: 'entry-uuid',
+		});
+		expect(ids.knowledgeTraceId).toBe('trace-uuid');
+		expect(ids.knowledgeEntryId).toBe('entry-uuid');
+		expect(
+			extractWorkflowIds({ knowledgeTraceId: '', knowledgeEntryId: 42 }),
+		).toEqual({});
+	});
+
 	test('unknown cost: a `delegation_end` payload missing cost_usd lists it in unknown, does NOT default to 0', () => {
 		const knownKeys = KNOWN_TELEMETRY_KEYS.delegation_end;
 		const payload = {

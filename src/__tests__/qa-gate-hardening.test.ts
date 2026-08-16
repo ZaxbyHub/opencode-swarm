@@ -153,7 +153,10 @@ describe('Architect prompt behavioral guidance markers', () => {
 
 	test('PLAN hard constraint requires exact pre-save QA bootstrap', () => {
 		expect(renderedPrompt).toContain(
-			'Call `set_qa_gates` with that exact `swarm_id` and `plan_title` before the first `save_plan`',
+			'In strict mode, call `set_qa_gates` with that exact `swarm_id` and `plan_title` before the first `save_plan`',
+		);
+		expect(renderedPrompt).toContain(
+			'In balanced mode, let `save_plan` exact-bind the durable default profile',
 		);
 	});
 
@@ -199,6 +202,7 @@ describe('save_plan QA_GATE_SELECTION_CHECK', () => {
 	const minimalPlan = {
 		title: 'Hardening Test',
 		swarm_id: 'hardening-test',
+		execution_profile: { planning_profile: 'strict' as const },
 		phases: [
 			{
 				id: 1,

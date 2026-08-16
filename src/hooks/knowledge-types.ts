@@ -305,6 +305,16 @@ export interface KnowledgeEntryBase extends ActionableDirectiveFields {
 	 * (rewrite/demote/confidence-delta). Prevents compounding under concurrent
 	 * cohort postmortems that claim the same batch. */
 	last_curated_generation?: number;
+	/**
+	 * Exact-once checkpoint for receipt-driven confidence feedback. Stored in the
+	 * same atomic knowledge-entry rewrite as the confidence delta so a crash
+	 * before the external projection cursor is written cannot apply the same V2
+	 * terminal twice.
+	 */
+	receipt_feedback_cursors?: Record<
+		string,
+		{ timestamp: string; event_id: string }
+	>;
 }
 
 /**
@@ -397,6 +407,15 @@ export interface PromotionEvidenceRecord {
 	retrieval_trace_id: string;
 	/** Terminal receipt outcome. */
 	receipt_outcome: 'applied' | 'violated' | 'contradicted';
+	/**
+	 * Provenance class of the terminal this evidence was derived from
+	 * (#2032 review F-003). `'delegate'` evidence is a self-report and stays
+	 * non-independent: the promotion gate only counts evidence whose source is
+	 * present and not `'delegate'` toward `promotion_min_terminal_applications`.
+	 * Absent on records written before #2032 — such records fail closed (they
+	 * do not count as independent).
+	 */
+	receipt_source?: string;
 	/** Id of the ReceiptEvent this evidence was derived from. */
 	receipt_event_id: string;
 	phase?: string;
@@ -514,6 +533,8 @@ export interface KnowledgeConfig {
 	max_encounter_score: number;
 	/** Default N-phase TTL for knowledge entries. Default: 10 */
 	default_max_phases: number;
+	/** Days to retain closed authoritative receipt state before archival. Default: 7 */
+	receipt_close_grace_days: number;
 	/** N-phase TTL for 'todo' category entries. Default: 3 */
 	todo_max_phases: number;
 	/** Enable age-based sweep of knowledge entries. Default: true */

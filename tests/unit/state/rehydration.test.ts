@@ -8,6 +8,7 @@ import {
 	rehydrateSessionFromDisk,
 	resetSwarmState,
 } from '../../../src/state';
+import { seedAuthoritativeTaskWorkflow } from '../hooks/_delegation-gate-helpers';
 
 function writePlan(dir: string, taskIds: string[]): void {
 	const swarmDir = path.join(dir, '.swarm');
@@ -140,7 +141,15 @@ describe('readGateEvidenceFromDisk', () => {
 
 	it('round-trips with recordGateEvidence output', async () => {
 		writePlan(tempDir, ['3.1']);
-		await recordGateEvidence(tempDir, '3.1', 'reviewer', 'sess-1');
+		const generation = await seedAuthoritativeTaskWorkflow(
+			tempDir,
+			'3.1',
+			'pre_check_passed',
+			'sess-1',
+		);
+		await recordGateEvidence(tempDir, '3.1', 'reviewer', 'sess-1', false, {
+			expectedGeneration: generation,
+		});
 
 		const session = ensureAgentSession('test-session', 'architect');
 		await rehydrateSessionFromDisk(tempDir, session);

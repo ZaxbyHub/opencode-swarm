@@ -1121,7 +1121,7 @@ export const COMMAND_REGISTRY = {
 			'Clear a stuck PR_REVIEW/PR_FEEDBACK mechanical gate and stop the auto-resume loop [mode] [reason]',
 		args: '[PR_REVIEW|PR_FEEDBACK] [reason...]',
 		details:
-			'Human-only escape hatch for an unrecoverable PR_REVIEW or PR_FEEDBACK mechanical gate. When the architect cannot reach complete_pr_workflow — for example a compound `git fetch && git checkout` was rejected as read-only shell syntax, the PR head cannot be fetched, or the working tree is on the wrong branch — running this clears the durable gate state for the current session and stops the auto-resume loop without depending on the trapped model. The agent itself cannot run this command; it must call the abort_pr_workflow tool (or ask you to run this command). Both paths funnel into the same fail-closed abortPrWorkflow hook, which refuses while the workflow is armed for publication or while PR workflow lanes are still in flight. An audit event is appended to .swarm/events.jsonl.',
+			'Human-only escape hatch for an unrecoverable PR_REVIEW or PR_FEEDBACK mechanical gate. When the architect cannot reach complete_pr_workflow — for example a compound `git fetch && git checkout` was rejected as read-only shell syntax, the PR head cannot be fetched, or the working tree is on the wrong branch — running this clears the durable gate state for the current session and stops the auto-resume loop without depending on the trapped model. The agent itself cannot run this command; it must call the abort_pr_workflow tool (or ask you to run this command). Both paths funnel into the same fail-closed abortPrWorkflow hook, which refuses while the workflow is armed for publication or while PR workflow lanes are still in flight. When checkout preparation preserved a stash, the result instructs the caller to run prepare_pr_workflow_checkout operation=restore after the clear. An audit event is appended to .swarm/events.jsonl.',
 		category: 'utility',
 		toolPolicy: 'restricted',
 	},
@@ -1252,9 +1252,9 @@ export const COMMAND_REGISTRY = {
 		handler: (ctx) => handleCiSimulateCommand(ctx.directory, ctx.args),
 		description:
 			'Create a temporary merge-result worktree and run CI before merge queue entry',
-		args: '[--base origin/main] [--head <ref>]',
+		args: '[pr-ref] [--base <ref>]',
 		details:
-			'Creates a detached temporary worktree under .swarm/ci-simulate from the base ref, merges the current worktree HEAD (or --head ref), runs fixed local CI gates (typecheck, Biome CI, build, unit/integration/security/smoke tests, drift check), then removes the worktree and prunes metadata. Intended as a pre-queue merge_group simulation helper.',
+			'Creates a detached temporary worktree under the OS temp dir (swarm-ci-simulate) from the base — an explicit validated --base <ref> when given (stacked/release-branch PRs), otherwise the detected default remote branch (origin/HEAD, init.defaultBranch, origin/main, origin/master, verified to exist) — merges the given PR ref (or the current ref), runs fixed local CI gates (typecheck, lint, build, test), then removes the worktree non-force and prunes metadata. Worktree removal is fail-closed: a blocked or dirty worktree is surfaced, never force-deleted. Intended as a pre-queue merge_group simulation helper.',
 		category: 'agent',
 		toolPolicy: 'agent',
 	},

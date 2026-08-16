@@ -5,20 +5,20 @@
  *
  *   1. `experimental.chat.messages.transform` — scans the latest
  *      architect-authored message for
- *      `KNOWLEDGE_APPLIED|IGNORED|CONTRADICTED|VIOLATED`
+ *      `KNOWLEDGE_APPLIED|IGNORED|N_A|CONTRADICTED|VIOLATED`
  *      markers and records them via `recordAcknowledgmentDeduped`. This
  *      runs BEFORE the architect's next tool call so the toolBefore gate
  *      sees the ack.
  *
  *   2. `tool.execute.before` (FAIL-CLOSED chain at src/index.ts) — when a
  *      high-risk tool fires and the calling agent is the architect,
- *      consults `swarmState.currentCriticalShownIds` and the audit log to
- *      assemble the set of critical directives that have been shown but
+ *      consults the authoritative receipt ledger for critical architect
+ *      directives in the current active phase/task that have been shown but
  *      not acknowledged. In `mode: 'enforce'` it THROWS to block the
  *      action (per the FAIL-CLOSED contract — `output.error` is NOT a
  *      write API at toolBefore time) — UNLESS one of two bounded escape
  *      hatches has fired first (a per-directive denial-count limit, or a
- *      staleness TTL since the directive was shown; see
+ *      per-exact-pair staleness TTL since the directive was shown; see
  *      `incrementGateDenialCount`/`buildGateDenialDirectiveKey` in
  *      `../state.js`), in which case the pending directives are
  *      auto-acknowledged and an audit event is durably written before the
@@ -53,6 +53,11 @@ import {
 	type RecordContext,
 	recordAcknowledgment,
 } from './knowledge-application.js';
+import {
+	commitApplicationOutcomeBatch,
+	queryLiveMemberships,
+	type ReceiptMembership,
+} from './knowledge-receipt-ledger.js';
 import type { MessageWithParts } from './knowledge-types.js';
 
 /** Tools that require knowledge-directive acknowledgment before execution. */
@@ -73,6 +78,60 @@ export interface GateInput {
 	tool: unknown;
 	agent?: unknown;
 	sessionID?: unknown;
+}
+
+function selectCurrentArchitectDirectiveMemberships(
+	memberships: ReceiptMembership[],
+): ReceiptMembership[] {
+	const activeArchitect = memberships.filter(
+		(membership) =>
+			membership.exposure_kind === 'architect_directive' &&
+			!membership.phase_closed_at,
+	);
+	let latest: ReceiptMembership | undefined;
+	let latestAt = Number.NEGATIVE_INFINITY;
+	for (const membership of activeArchitect) {
+		const committedAt = Date.parse(membership.committed_at);
+		const comparableAt = Number.isFinite(committedAt)
+			? committedAt
+			: Number.NEGATIVE_INFINITY;
+		// Map/journal iteration order is authoritative when two commits share a
+		// millisecond, so the later encountered scope wins the tie.
+		if (!latest || comparableAt >= latestAt) {
+			latest = membership;
+			latestAt = comparableAt;
+		}
+	}
+	if (!latest) return [];
+	return activeArchitect.filter(
+		(membership) =>
+			membership.phase === latest.phase &&
+			membership.task_id === latest.task_id,
+	);
+}
+
+function selectStaleUnmarkedMemberships(
+	memberships: ReceiptMembership[],
+	now: number,
+	stalenessMs: number,
+): ReceiptMembership[] {
+	return memberships.filter((membership) => {
+		if (membership.application_marker) return false;
+		const committedAt = Date.parse(membership.committed_at);
+		return Number.isFinite(committedAt) && now - committedAt > stalenessMs;
+	});
+}
+
+function groupMembershipsByTrace(
+	memberships: ReceiptMembership[],
+): Map<string, ReceiptMembership[]> {
+	const byTrace = new Map<string, ReceiptMembership[]>();
+	for (const membership of memberships) {
+		const group = byTrace.get(membership.trace_id) ?? [];
+		group.push(membership);
+		byTrace.set(membership.trace_id, group);
+	}
+	return byTrace;
 }
 
 /**
@@ -129,52 +188,99 @@ export async function knowledgeApplicationGateBefore(
 		return;
 	}
 
-	const cached = swarmState.currentCriticalShownIds.get(sessionID);
-	if (!cached || cached.ids.length === 0) {
-		clearGateDenialCount(sessionID);
-		return;
-	}
-
-	// Has an architect terminal ack landed in this session for any critical id?
-	const ackedIds = new Set<string>();
-	for (const id of cached.ids) {
-		// Applied, ignored, contradicted, and violated all count as "acknowledged" for the
-		// purpose of the gate (the architect chose; we audit elsewhere).
-		for (const result of [
-			'applied',
-			'ignored',
-			'contradicted',
-			'violated',
-		] as const) {
-			const key = buildAckDedupKey(sessionID, id, result);
-			if (swarmState.knowledgeAckDedup.has(key)) {
-				ackedIds.add(id);
-				break;
-			}
+	const receiptState = await queryLiveMemberships(directory, {
+		session_id: sessionID,
+		include_terminal: true,
+		include_phase_closed: false,
+		exposure_kind: 'architect_directive',
+	});
+	if (!receiptState.ok) {
+		if (config.mode === 'enforce') {
+			throw new Error(
+				`KNOWLEDGE_ENFORCE_GATE_DENY: receipt authority unavailable (${receiptState.code}); refusing to infer acknowledgment from diagnostics`,
+			);
 		}
+		void writeWarnEvent(directory, {
+			timestamp: new Date().toISOString(),
+			event: 'knowledge_application_gate_warn',
+			tool: toolName,
+			agent: agentRaw,
+			sessionID,
+			reason: receiptState.code,
+		});
+		return;
 	}
-
-	const unacked = cached.ids.filter((id) => !ackedIds.has(id));
-	if (unacked.length === 0) {
+	const currentMemberships = selectCurrentArchitectDirectiveMemberships(
+		receiptState.memberships,
+	);
+	const criticalMemberships = currentMemberships.filter(
+		(membership) => membership.critical,
+	);
+	if (criticalMemberships.length === 0) {
+		clearGateDenialCount(sessionID);
+		return;
+	}
+	let unackedMemberships = criticalMemberships.filter(
+		(membership) => !membership.application_marker,
+	);
+	if (unackedMemberships.length === 0) {
 		clearGateDenialCount(sessionID);
 		return;
 	}
 
-	// Synthesise the gate result format expected by gateKnowledgeApplication
-	// (the helper itself takes recentArchitectText, but here we pre-decided
-	// who is acked via the dedup set; do not re-parse text).
+	// The receipt ledger is the gate authority. Diagnostic logs and the
+	// compatibility dedup cache never widen this pending exact-pair set.
 	if (config.mode === 'enforce' && config.critical_requires_ack) {
 		const maxDenials = config.max_gate_denials ?? DEFAULT_MAX_GATE_DENIALS;
 		const stalenessMs = config.gate_staleness_ms ?? DEFAULT_GATE_STALENESS_MS;
 
-		// Escape hatch 1: staleness — if the directive has been pending longer
-		// than the configured TTL, auto-clear and allow the action.
-		const age = Date.now() - cached.generatedAt;
-		if (age > stalenessMs) {
-			for (const id of unacked) {
-				addKnowledgeAckDedup(buildAckDedupKey(sessionID, id, 'applied'));
+		// Escape hatch 1: clear only exact pairs older than the configured TTL.
+		// Fresh pairs remain pending and continue through the denial path below.
+		const now = Date.now();
+		const staleMemberships = selectStaleUnmarkedMemberships(
+			unackedMemberships,
+			now,
+			stalenessMs,
+		);
+		if (staleMemberships.length > 0) {
+			for (const [traceId, memberships] of groupMembershipsByTrace(
+				staleMemberships,
+			)) {
+				const committed = await commitApplicationOutcomeBatch(directory, {
+					trace_id: traceId,
+					session_id: sessionID,
+					items: memberships.map((membership) => ({
+						entry_id: membership.entry_id,
+						outcome: 'applied' as const,
+						source: 'application_gate_staleness_clear',
+						reason: 'configured staleness escape hatch',
+					})),
+				});
+				if (!committed.ok || committed.rejected.length > 0) {
+					throw new Error(
+						'KNOWLEDGE_ENFORCE_GATE_DENY: could not durably record staleness clear',
+					);
+				}
 			}
-			clearCriticalShownIds(sessionID);
+			const stalePairs = new Set(
+				staleMemberships.map(
+					(membership) => `${membership.trace_id}/${membership.entry_id}`,
+				),
+			);
+			unackedMemberships = unackedMemberships.filter(
+				(membership) =>
+					!stalePairs.has(`${membership.trace_id}/${membership.entry_id}`),
+			);
+			const staleIds = [
+				...new Set(staleMemberships.map((membership) => membership.entry_id)),
+			];
+			for (const id of staleIds) {
+				if (
+					!unackedMemberships.some((membership) => membership.entry_id === id)
+				) {
+					addKnowledgeAckDedup(buildAckDedupKey(sessionID, id, 'applied'));
+				}
+			}
 			clearGateDenialCount(sessionID);
 			// Awaited (not fire-and-forget): the bypass state above is already
 			// committed, so the audit write is the only remaining evidence of
@@ -187,8 +293,13 @@ export async function knowledgeApplicationGateBefore(
 				tool: toolName,
 				agent: agentRaw,
 				sessionID,
-				cleared_ids: unacked,
-				age_ms: age,
+				cleared_ids: staleIds,
+				cleared_pairs: [...stalePairs],
+				age_ms: Math.max(
+					...staleMemberships.map(
+						(membership) => now - Date.parse(membership.committed_at),
+					),
+				),
 				staleness_threshold_ms: stalenessMs,
 			}).catch((err: unknown) => {
 				warn(
@@ -197,7 +308,10 @@ export async function knowledgeApplicationGateBefore(
 					}`,
 				);
 			});
-			return;
+			if (unackedMemberships.length === 0) {
+				clearCriticalShownIds(sessionID);
+				return;
+			}
 		}
 
 		// Escape hatch 2: denial count — if this session has been denied more
@@ -207,9 +321,34 @@ export async function knowledgeApplicationGateBefore(
 		// (an ordinary phase/task-transition occurrence via
 		// setCriticalShownIds) starts a fresh count instead of inheriting a
 		// stale one accrued against an unrelated, earlier directive.
-		const directiveKey = buildGateDenialDirectiveKey(cached.ids);
+		const unackedPairs = unackedMemberships.map(
+			(membership) => `${membership.trace_id}/${membership.entry_id}`,
+		);
+		const unacked = [
+			...new Set(unackedMemberships.map((membership) => membership.entry_id)),
+		];
+		const directiveKey = buildGateDenialDirectiveKey(unackedPairs);
 		const denials = incrementGateDenialCount(sessionID, directiveKey);
 		if (denials > maxDenials) {
+			for (const [traceId, memberships] of groupMembershipsByTrace(
+				unackedMemberships,
+			)) {
+				const committed = await commitApplicationOutcomeBatch(directory, {
+					trace_id: traceId,
+					session_id: sessionID,
+					items: memberships.map((membership) => ({
+						entry_id: membership.entry_id,
+						outcome: 'applied' as const,
+						source: 'application_gate_denial_limit_clear',
+						reason: 'configured denial-count escape hatch',
+					})),
+				});
+				if (!committed.ok || committed.rejected.length > 0) {
+					throw new Error(
+						'KNOWLEDGE_ENFORCE_GATE_DENY: could not durably record denial-limit clear',
+					);
+				}
+			}
 			for (const id of unacked) {
 				addKnowledgeAckDedup(buildAckDedupKey(sessionID, id, 'applied'));
 			}
@@ -234,11 +373,17 @@ export async function knowledgeApplicationGateBefore(
 			return;
 		}
 
-		const ids = unacked.join(', ');
+		const ids = unackedPairs.join(', ');
 		throw new Error(
-			`KNOWLEDGE_ENFORCE_GATE_DENY: ${toolName} blocked — critical knowledge directive(s) ${ids} require KNOWLEDGE_APPLIED:<id>, KNOWLEDGE_IGNORED:<id> reason=..., KNOWLEDGE_CONTRADICTED:<id> reason=..., or KNOWLEDGE_VIOLATED:<id> reason=... before this action.`,
+			`KNOWLEDGE_ENFORCE_GATE_DENY: ${toolName} blocked — critical knowledge membership(s) ${ids} require exact-pair KNOWLEDGE_APPLIED:<trace_id>:<entry_id>, KNOWLEDGE_N_A:<trace_id>:<entry_id> reason=... (does not apply; neutral), KNOWLEDGE_IGNORED:<trace_id>:<entry_id> reason=... (relevant but deliberately not followed), KNOWLEDGE_CONTRADICTED:<trace_id>:<entry_id> reason=..., or KNOWLEDGE_VIOLATED:<trace_id>:<entry_id> reason=... before this action.`,
 		);
 	}
+	const unacked = [
+		...new Set(unackedMemberships.map((membership) => membership.entry_id)),
+	];
+	const unackedPairs = unackedMemberships.map(
+		(membership) => `${membership.trace_id}/${membership.entry_id}`,
+	);
 
 	// warn mode → events.jsonl audit
 	void writeWarnEvent(directory, {
@@ -248,6 +393,7 @@ export async function knowledgeApplicationGateBefore(
 		agent: agentRaw,
 		sessionID,
 		unacknowledged_critical_ids: unacked,
+		unacknowledged_critical_pairs: unackedPairs,
 	}).catch(() => {
 		/* never block tool path */
 	});
@@ -299,10 +445,64 @@ export async function knowledgeApplicationTransformScan(
 	if (acks.length === 0) return;
 
 	const ctx: RecordContext = { sessionId: sessionID };
+	const live = await queryLiveMemberships(directory, {
+		session_id: sessionID,
+		include_terminal: true,
+		include_phase_closed: false,
+		exposure_kind: 'architect_directive',
+	});
+	if (!live.ok) {
+		warn(
+			`[knowledge-application-gate] receipt authority unavailable: ${live.code}`,
+		);
+		return;
+	}
 	for (const ack of acks) {
-		const key = buildAckDedupKey(sessionID, ack.id, ack.result);
+		// Architect markers must bind to one exact retrieval membership. Legacy
+		// entry-only markers remain parseable for delegates but cannot satisfy this
+		// application gate or affect a sibling trace.
+		if (!ack.trace_id) continue;
+		const key = buildAckDedupKey(
+			sessionID,
+			JSON.stringify([ack.trace_id, ack.id]),
+			ack.result,
+		);
 		if (swarmState.knowledgeAckDedup.has(key)) continue;
+		const memberships = live.memberships.filter(
+			(membership) =>
+				membership.trace_id === ack.trace_id &&
+				membership.entry_id === ack.id &&
+				!membership.application_marker,
+		);
+		if (memberships.length === 0) continue;
+		const byTrace = new Map<string, typeof memberships>();
+		for (const membership of memberships) {
+			const group = byTrace.get(membership.trace_id) ?? [];
+			group.push(membership);
+			byTrace.set(membership.trace_id, group);
+		}
+		let committedAll = true;
+		let newlyCommitted = false;
+		for (const [traceId, group] of byTrace) {
+			const committed = await commitApplicationOutcomeBatch(directory, {
+				trace_id: traceId,
+				session_id: sessionID,
+				items: group.map((membership) => ({
+					entry_id: membership.entry_id,
+					outcome: ack.result,
+					source: 'architect_marker',
+					reason: ack.reason,
+				})),
+			});
+			if (!committed.ok || committed.rejected.length > 0) {
+				committedAll = false;
+				break;
+			}
+			if (committed.committed.length > 0) newlyCommitted = true;
+		}
+		if (!committedAll) continue;
 		addKnowledgeAckDedup(key);
+		if (!newlyCommitted) continue;
 		try {
 			await recordAcknowledgment(directory, ack, ctx);
 		} catch (err) {
@@ -320,4 +520,6 @@ export const _internals = {
 	knowledgeApplicationTransformScan,
 	HIGH_RISK_TOOLS,
 	writeWarnEvent,
+	selectCurrentArchitectDirectiveMemberships,
+	selectStaleUnmarkedMemberships,
 };

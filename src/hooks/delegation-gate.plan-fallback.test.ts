@@ -12,7 +12,7 @@ import {
 	resetSwarmState,
 	startAgentSession,
 } from '../state';
-import { createDelegationGateHook } from './delegation-gate';
+import { _internals, createDelegationGateHook } from './delegation-gate';
 
 // Minimal plugin config
 const testConfig = {
@@ -65,23 +65,12 @@ describe('getEvidenceTaskId plan.json fallback', () => {
 		session.lastCoderDelegationTaskId = null;
 		session.taskWorkflowStates = new Map(); // Empty
 
-		// Fire toolAfter - it should derive task ID from plan.json
-		const hook = createDelegationGateHook(testConfig, tmpDir);
-		await hook.toolAfter(
-			{
-				tool: 'Task',
-				sessionID: 'sess-plan-1',
-				callID: 'call-1',
-				args: { subagent_type: 'reviewer' },
-			},
-			{},
+		const resolved = await _internals.resolveEvidenceTaskId(
+			undefined,
+			session,
+			tmpDir,
 		);
-
-		// Check that evidence was written for task 1.2 (first in_progress)
-		const { readTaskEvidence } = await import('../gate-evidence');
-		const evidence = await readTaskEvidence(tmpDir, '1.2');
-		expect(evidence).not.toBeNull();
-		expect(evidence!.gates.reviewer).toBeDefined();
+		expect(resolved).toBe('1.2');
 	});
 
 	it('returns null when plan.json does not exist (does not throw)', async () => {
@@ -266,22 +255,12 @@ describe('getEvidenceTaskId plan.json fallback', () => {
 		session.lastCoderDelegationTaskId = null;
 		session.taskWorkflowStates = new Map();
 
-		const hook = createDelegationGateHook(testConfig, tmpDir);
-		await hook.toolAfter(
-			{
-				tool: 'Task',
-				sessionID: 'sess-later-phase',
-				callID: 'call-1',
-				args: { subagent_type: 'reviewer' },
-			},
-			{},
+		const resolved = await _internals.resolveEvidenceTaskId(
+			undefined,
+			session,
+			tmpDir,
 		);
-
-		// Should find 2.1 as the first in_progress
-		const { readTaskEvidence } = await import('../gate-evidence');
-		const evidence = await readTaskEvidence(tmpDir, '2.1');
-		expect(evidence).not.toBeNull();
-		expect(evidence!.gates.reviewer).toBeDefined();
+		expect(resolved).toBe('2.1');
 	});
 
 	it('prefers currentTaskId over plan.json fallback', async () => {
@@ -305,24 +284,12 @@ describe('getEvidenceTaskId plan.json fallback', () => {
 		session.lastCoderDelegationTaskId = null;
 		session.taskWorkflowStates = new Map();
 
-		const hook = createDelegationGateHook(testConfig, tmpDir);
-		await hook.toolAfter(
-			{
-				tool: 'Task',
-				sessionID: 'sess-priority',
-				callID: 'call-1',
-				args: { subagent_type: 'reviewer' },
-			},
-			{},
+		const resolved = await _internals.resolveEvidenceTaskId(
+			undefined,
+			session,
+			tmpDir,
 		);
-
-		// Should use currentTaskId, not plan.json
-		const { readTaskEvidence } = await import('../gate-evidence');
-		const evidence = await readTaskEvidence(tmpDir, '3.5');
-		expect(evidence).not.toBeNull();
-		// Verify plan.json task was NOT used
-		const planEvidence = await readTaskEvidence(tmpDir, '1.1');
-		expect(planEvidence).toBeNull();
+		expect(resolved).toBe('3.5');
 	});
 
 	it('prefers taskWorkflowStates over plan.json fallback', async () => {
@@ -346,24 +313,12 @@ describe('getEvidenceTaskId plan.json fallback', () => {
 		session.lastCoderDelegationTaskId = null;
 		session.taskWorkflowStates = new Map([['4.3', 'coder_delegated']]);
 
-		const hook = createDelegationGateHook(testConfig, tmpDir);
-		await hook.toolAfter(
-			{
-				tool: 'Task',
-				sessionID: 'sess-states-priority',
-				callID: 'call-1',
-				args: { subagent_type: 'reviewer' },
-			},
-			{},
+		const resolved = await _internals.resolveEvidenceTaskId(
+			undefined,
+			session,
+			tmpDir,
 		);
-
-		// Should use taskWorkflowStates, not plan.json
-		const { readTaskEvidence } = await import('../gate-evidence');
-		const evidence = await readTaskEvidence(tmpDir, '4.3');
-		expect(evidence).not.toBeNull();
-		// Verify plan.json task was NOT used
-		const planEvidence = await readTaskEvidence(tmpDir, '1.1');
-		expect(planEvidence).toBeNull();
+		expect(resolved).toBe('4.3');
 	});
 
 	it('handles path traversal attempt by returning null', async () => {

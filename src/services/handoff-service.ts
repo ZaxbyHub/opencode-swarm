@@ -571,6 +571,11 @@ export function formatHandoffMarkdown(data: HandoffData): string {
 		lines.push(
 			`- **Commit After Each Completed Task**: ${data.execution_profile.commit_after_each_completed_task ? 'yes' : 'no'}`,
 		);
+		if (data.execution_profile.planning_profile) {
+			lines.push(
+				`- **Planning Profile**: ${data.execution_profile.planning_profile}`,
+			);
+		}
 		lines.push('');
 	}
 
