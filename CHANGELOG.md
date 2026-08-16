@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.141.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.141.0...v7.141.1) (2026-08-16)
+
+
+### Bug Fixes
+
+* **test-runner:** wire targets parameter through Zod schema and fix validation ([5c85aed](https://github.com/ZaxbyHub/opencode-swarm/commit/5c85aed48bf093b9482b5294e4346bd04bffef51))
+* **test-runner:** wire targets parameter through Zod schema and fix validation ([ec78d0f](https://github.com/ZaxbyHub/opencode-swarm/commit/ec78d0f9d841d2a69f1d831f974abcdd9869e68d))
+
 ## [7.141.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.140.6...v7.141.0) (2026-08-16)
 
 
