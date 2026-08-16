@@ -1534,7 +1534,9 @@ describe('test-runner.ts — targets support', () => {
 			return {
 				stdout: new ReadableStream({
 					start(controller) {
-						controller.enqueue(encoder.encode('100% tests passed, 0 tests failed out of 1'));
+						controller.enqueue(
+							encoder.encode('100% tests passed, 0 tests failed out of 1'),
+						);
 						controller.close();
 					},
 				}),

@@ -2163,7 +2163,12 @@ export async function runTests(
 		resolvedNativeTarget = resolvedTarget.target;
 		executionCwd = resolvedTarget.executionDirectory;
 	}
-	if (scope !== 'all' && scope !== 'target' && files.length > 0 && !(targets && targets.length > 0)) {
+	if (
+		scope !== 'all' &&
+		scope !== 'target' &&
+		files.length > 0 &&
+		!(targets && targets.length > 0)
+	) {
 		const unsupportedReason = getTargetedExecutionUnsupportedReason(framework);
 		if (unsupportedReason) {
 			return {
@@ -2755,7 +2760,7 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 			.array(z.string())
 			.optional()
 			.describe(
-				'Framework-native test names or patterns to filter which tests run. Supported by cargo, go-test, maven, gradle, dotnet-test, ctest, and swift-test. Each entry is passed as-is to the framework\'s native filter flag.',
+				"Framework-native test names or patterns to filter which tests run. Supported by cargo, go-test, maven, gradle, dotnet-test, ctest, and swift-test. Each entry is passed as-is to the framework's native filter flag.",
 			),
 		coverage: z
 			.boolean()
@@ -3253,7 +3258,12 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 		// Guard: Reject when source files resolve to zero test files (prevents accidental full-suite run)
 		// Skip for scope 'all' — full-suite execution deliberately has no file filter
 		// Skip when targets are provided — framework-native filters handle test selection
-		if (scope !== 'all' && scope !== 'target' && testFiles.length === 0 && !(args.targets && args.targets.length > 0)) {
+		if (
+			scope !== 'all' &&
+			scope !== 'target' &&
+			testFiles.length === 0 &&
+			!(args.targets && args.targets.length > 0)
+		) {
 			const baseMessage =
 				'No matching test files found for the provided source files. Check that test files exist with matching naming conventions (.spec.*, .test.*, .Tests.ps1, __tests__/, tests/, test/, spec/).';
 			const errorResult: TestErrorResult = {
