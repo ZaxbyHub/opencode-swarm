@@ -1516,7 +1516,7 @@ describe('test-runner.ts — targets support', () => {
 				false,
 				['TestFoo'], // The actual target
 			);
-			
+
 			expect(result.success).toBe(true);
 			// Should invoke: go test -run TestFoo ./...
 			expect(spawnArgs).toEqual(['go', 'test', '-run', 'TestFoo', './...']);
@@ -1560,7 +1560,7 @@ describe('test-runner.ts — targets support', () => {
 				false,
 				['auto-src-controller-stateManager'], // The ctest target
 			);
-			
+
 			expect(result.success).toBe(true);
 			expect(spawnArgs).toContain('ctest');
 			expect(spawnArgs).toContain('-R');
