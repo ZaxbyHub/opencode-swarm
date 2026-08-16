@@ -147,11 +147,21 @@ describe('test-runner feedback regressions', () => {
 					path: 'pkg',
 				}),
 			() =>
-				runTests('go-test', 'target', [], false, 1_000, root, false, undefined, {
-					framework: 'go-test',
-					name: 'TestOnly',
-					path: path.join(root, 'pkg'),
-				}),
+				runTests(
+					'go-test',
+					'target',
+					[],
+					false,
+					1_000,
+					root,
+					false,
+					undefined,
+					{
+						framework: 'go-test',
+						name: 'TestOnly',
+						path: path.join(root, 'pkg'),
+					},
+				),
 		]) {
 			expect(await invocation()).toMatchObject({
 				success: false,

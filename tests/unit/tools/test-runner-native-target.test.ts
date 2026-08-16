@@ -278,11 +278,21 @@ describe('test_runner native targets', () => {
 					},
 				),
 			() =>
-				runTests('ctest', 'target', [], false, 1_000, process.cwd(), false, undefined, {
-					framework: 'go-test',
-					name: 'TestOnly',
-					path: '.',
-				}),
+				runTests(
+					'ctest',
+					'target',
+					[],
+					false,
+					1_000,
+					process.cwd(),
+					false,
+					undefined,
+					{
+						framework: 'go-test',
+						name: 'TestOnly',
+						path: '.',
+					},
+				),
 		]) {
 			expect(await invocation()).toMatchObject({
 				success: false,
