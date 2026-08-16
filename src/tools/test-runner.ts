@@ -99,6 +99,7 @@ export type TestFramework = (typeof SUPPORTED_FRAMEWORKS)[number] | 'none';
 export interface TestRunnerArgs {
 	scope?: TestScope;
 	files?: string[];
+	targets?: string[];
 	native_target?: NativeTestTarget;
 	coverage?: boolean;
 	timeout_ms?: number;
@@ -192,6 +193,16 @@ function containsPowerShellMetacharacters(str: string): boolean {
 	return POWERSHELL_METACHARACTERS.test(str);
 }
 
+// Shell metacharacters that enable command injection via subprocess argv.
+// Intentionally more permissive than POWERSHELL_METACHARACTERS: allows regex
+// chars (*, ?, |, [], .) that frameworks use as native test-name filters.
+// biome-ignore lint/suspicious/noControlCharactersInRegex: intentional security validation pattern
+const SHELL_METACHARACTERS = /[;&`$(){}<>"'\x00-\x1f]/;
+
+function containsShellMetacharacters(str: string): boolean {
+	return SHELL_METACHARACTERS.test(str);
+}
+
 function validateArgs(args: unknown): args is TestRunnerArgs {
 	if (typeof args !== 'object' || args === null) return false;
 	const obj = args as Record<string, unknown>;
@@ -250,6 +261,19 @@ function validateArgs(args: unknown): args is TestRunnerArgs {
 			if (containsControlChars(f)) return false;
 			// Check for PowerShell metacharacters that could enable injection
 			if (containsPowerShellMetacharacters(f)) return false;
+		}
+	}
+
+	// Validate targets
+	if (obj.targets !== undefined) {
+		if (!Array.isArray(obj.targets)) return false;
+		for (const t of obj.targets) {
+			if (typeof t !== 'string') return false;
+			if (t.length === 0) return false;
+			if (isAbsolutePath(t)) return false;
+			if (containsPathTraversal(t)) return false;
+			if (containsControlChars(t)) return false;
+			if (containsShellMetacharacters(t)) return false;
 		}
 	}
 
@@ -601,6 +625,7 @@ export async function buildTestCommandViaDispatch(
 	coverage: boolean,
 	baseDir: string,
 	bail: boolean,
+	targets?: string[],
 	nativeTarget?: NativeTestTarget,
 ): Promise<string[] | null> {
 	if (framework === 'none') return null;
@@ -612,6 +637,7 @@ export async function buildTestCommandViaDispatch(
 				scope,
 				coverage,
 				bail,
+				targets,
 				nativeTarget,
 			});
 			if (cmd) return cmd;
@@ -1305,6 +1331,7 @@ function buildTestCommand(
 	coverage: boolean,
 	baseDir: string,
 	bail: boolean,
+	targets?: string[],
 	nativeTarget?: NativeTestTarget,
 ): string[] | null {
 	if (nativeTarget) {
@@ -1371,7 +1398,9 @@ function buildTestCommand(
 		case 'cargo': {
 			const args: string[] = ['cargo', 'test'];
 			// cargo has no bail support — silently ignore
-			if (scope !== 'all' && files.length > 0) {
+			if (targets && targets.length > 0) {
+				args.push('--', ...targets);
+			} else if (scope !== 'all' && files.length > 0) {
 				// Cargo test can accept test names
 				args.push(...files);
 			}
@@ -1399,26 +1428,50 @@ function buildTestCommand(
 			}
 			return ['pwsh', '-Command', 'Invoke-Pester'];
 		}
-		case 'go-test':
+		case 'go-test': {
 			// go-test has no bail support — silently ignore
 			// Note: 'files' param not forwarded — go test does not support arbitrary file paths;
 			// use package paths (./...) for full suite
-			return ['go', 'test', './...'];
-		case 'maven':
+			const args: string[] = ['go', 'test'];
+			if (targets && targets.length > 0) {
+				args.push('-run', targets.join('|'));
+			}
+			args.push('./...');
+			return args;
+		}
+		case 'maven': {
 			// maven has no bail support — silently ignore
-			return ['mvn', 'test'];
+			const args: string[] = ['mvn', 'test'];
+			if (targets && targets.length > 0) {
+				args.push(`-Dtest=${targets.join(',')}`);
+			}
+			return args;
+		}
 		case 'gradle': {
 			// gradle has no bail support — silently ignore
 			const isWindows = process.platform === 'win32';
 			const hasGradlewBat = fs.existsSync(path.join(baseDir, 'gradlew.bat'));
 			const hasGradlew = fs.existsSync(path.join(baseDir, 'gradlew'));
-			if (hasGradlewBat && isWindows) return ['gradlew.bat', 'test'];
-			if (hasGradlew) return ['./gradlew', 'test'];
-			return ['gradle', 'test'];
+			const args: string[] = [];
+			if (hasGradlewBat && isWindows) args.push('gradlew.bat');
+			else if (hasGradlew) args.push('./gradlew');
+			else args.push('gradle');
+			args.push('test');
+			if (targets && targets.length > 0) {
+				for (const target of targets) {
+					args.push('--tests', target);
+				}
+			}
+			return args;
 		}
-		case 'dotnet-test':
+		case 'dotnet-test': {
 			// dotnet-test has no bail support — silently ignore
-			return ['dotnet', 'test'];
+			const args: string[] = ['dotnet', 'test'];
+			if (targets && targets.length > 0) {
+				args.push('--filter', targets.join('|'));
+			}
+			return args;
+		}
 		case 'ctest': {
 			// ctest has no bail support — silently ignore
 			// Detect actual build directory by looking for CMakeCache.txt in common locations
@@ -1434,12 +1487,23 @@ function buildTestCommand(
 				buildDirCandidates.find((d) =>
 					fs.existsSync(path.join(baseDir, d, 'CMakeCache.txt')),
 				) ?? 'build';
-			return ['ctest', '--test-dir', actualBuildDir];
+			const args: string[] = ['ctest', '--test-dir', actualBuildDir];
+			if (targets && targets.length > 0) {
+				args.push('-R', targets.join('|'));
+			}
+			return args;
 		}
-		case 'swift-test':
+		case 'swift-test': {
 			// swift-test has no bail support — silently ignore
 			// Note: 'files' param not forwarded — swift test does not support arbitrary file paths
-			return ['swift', 'test'];
+			const args: string[] = ['swift', 'test'];
+			if (targets && targets.length > 0) {
+				for (const target of targets) {
+					args.push('--filter', target);
+				}
+			}
+			return args;
+		}
 		case 'dart-test':
 			// dart-test has no bail support — silently ignore
 			// Prefer flutter test for Flutter projects; fall back to dart test
@@ -2043,6 +2107,7 @@ export async function runTests(
 	timeout_ms: number,
 	cwd: string,
 	bail: boolean,
+	targets?: string[],
 	nativeTarget?: NativeTestTarget,
 ): Promise<TestResult> {
 	let executionCwd = cwd;
@@ -2098,7 +2163,12 @@ export async function runTests(
 		resolvedNativeTarget = resolvedTarget.target;
 		executionCwd = resolvedTarget.executionDirectory;
 	}
-	if (scope !== 'all' && scope !== 'target' && files.length > 0) {
+	if (
+		scope !== 'all' &&
+		scope !== 'target' &&
+		files.length > 0 &&
+		!(targets && targets.length > 0)
+	) {
 		const unsupportedReason = getTargetedExecutionUnsupportedReason(framework);
 		if (unsupportedReason) {
 			return {
@@ -2126,6 +2196,7 @@ export async function runTests(
 				coverage,
 				executionCwd,
 				bail,
+				targets,
 				resolvedNativeTarget,
 			)) ??
 			buildTestCommand(
@@ -2135,6 +2206,7 @@ export async function runTests(
 				coverage,
 				executionCwd,
 				bail,
+				targets,
 				resolvedNativeTarget,
 			))
 		: buildTestCommand(
@@ -2144,6 +2216,7 @@ export async function runTests(
 				coverage,
 				executionCwd,
 				bail,
+				targets,
 				resolvedNativeTarget,
 			);
 
@@ -2659,7 +2732,7 @@ function analyzeFailures(workingDir: string): TestHistoryReport {
 // ============ Tool Definition ============
 export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 	description:
-		'Run project tests with automatic framework detection for bun, vitest, jest, mocha, pytest, cargo, pester, go test, maven, gradle, dotnet test, ctest, swift test, dart test, rspec, minitest, pest, phpunit, or php-artisan. Returns JSON with success, framework, scope, command, timeout_ms, duration_ms, totals, outcome, and optional coveragePercent, rawOutput, testCases, and message fields. Scope "target" runs one exact Go test/subtest or CTest name via native_target using a workspace-relative package/build directory, with no broad fallback, coverage, or bail.',
+		'Run project tests with automatic framework detection for bun, vitest, jest, mocha, pytest, cargo, pester, go test, maven, gradle, dotnet test, ctest, swift test, dart test, rspec, minitest, pest, phpunit, or php-artisan. Returns JSON with success, framework, scope, command, timeout_ms, duration_ms, totals, outcome, and optional coveragePercent, rawOutput, testCases, and message fields. Scope "target" runs one exact Go test/subtest or CTest name via native_target using a workspace-relative package/build directory, with no broad fallback, coverage, or bail. The "targets" array passes framework-native test name patterns to cargo, go-test, maven, gradle, dotnet-test, ctest, and swift-test.',
 	args: {
 		scope: z
 			.enum(['all', 'convention', 'graph', 'impact', 'target'])
@@ -2682,6 +2755,12 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 			.optional()
 			.describe(
 				'Specific files to test. For "convention", pass source files or direct test files. For "graph" and "impact", pass source files only.',
+			),
+		targets: z
+			.array(z.string())
+			.optional()
+			.describe(
+				"Framework-native test names or patterns to filter which tests run. Supported by cargo, go-test, maven, gradle, dotnet-test, ctest, and swift-test. Each entry is passed as-is to the framework's native filter flag.",
 			),
 		coverage: z
 			.boolean()
@@ -2778,7 +2857,7 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 				scope: 'all',
 				error: 'Invalid arguments',
 				message:
-					'scope must be "all", "convention", "graph", "impact", or "target"; target scope requires one valid native_target and cannot be combined with files, coverage, or bail',
+					'scope must be "all", "convention", "graph", "impact", or "target"; files and targets must be string arrays with safe values; target scope requires one valid native_target and cannot be combined with files, coverage, or bail',
 				outcome: 'error',
 			};
 			return JSON.stringify(errorResult, null, 2);
@@ -2838,19 +2917,20 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 			// Allow through — env opt-in confirmed
 		}
 
-		// Hard guard: convention, graph, and impact scopes require explicit files to prevent unsafe full-project discovery
+		// Hard guard: convention, graph, and impact scopes require explicit files (or targets) to prevent unsafe full-project discovery
 		if (
 			(scope === 'convention' || scope === 'graph' || scope === 'impact') &&
-			(!args.files || args.files.length === 0)
+			(!args.files || args.files.length === 0) &&
+			(!args.targets || args.targets.length === 0)
 		) {
 			const errorResult: TestErrorResult = {
 				success: false,
 				framework: 'none',
 				scope,
 				error:
-					'scope "convention" and "graph" require explicit files array - omitting files causes unsafe full-project discovery',
+					'scope "convention" and "graph" require explicit files or targets array - omitting both causes unsafe full-project discovery',
 				message:
-					'When using scope "convention" or "graph", you must provide a non-empty "files" array. Use scope "all" for full project test suite without specifying files.',
+					'When using scope "convention" or "graph", you must provide a non-empty "files" or "targets" array. Use scope "all" for full project test suite without specifying files.',
 				outcome: 'error',
 			};
 			return JSON.stringify(errorResult, null, 2);
@@ -3177,7 +3257,13 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 
 		// Guard: Reject when source files resolve to zero test files (prevents accidental full-suite run)
 		// Skip for scope 'all' — full-suite execution deliberately has no file filter
-		if (scope !== 'all' && scope !== 'target' && testFiles.length === 0) {
+		// Skip when targets are provided — framework-native filters handle test selection
+		if (
+			scope !== 'all' &&
+			scope !== 'target' &&
+			testFiles.length === 0 &&
+			!(args.targets && args.targets.length > 0)
+		) {
 			const baseMessage =
 				'No matching test files found for the provided source files. Check that test files exist with matching naming conventions (.spec.*, .test.*, .Tests.ps1, __tests__/, tests/, test/, spec/).';
 			const errorResult: TestErrorResult = {
@@ -3224,6 +3310,7 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 			timeout_ms,
 			nativeExecutionDirectory,
 			bail,
+			args.targets,
 			nativeTarget,
 		);
 

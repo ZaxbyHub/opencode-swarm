@@ -163,6 +163,7 @@ describe('test_runner native targets', () => {
 				1_000,
 				root,
 				false,
+				undefined,
 				{ framework: 'go-test', name: 'TestA/sub.*', path: 'pkg/a' },
 			);
 			expect(result.success).toBe(true);
@@ -202,6 +203,7 @@ describe('test_runner native targets', () => {
 				1_000,
 				root,
 				false,
+				undefined,
 				{ framework: 'ctest', name: 'suite[1].case', path: 'build' },
 			);
 			expect(result.success).toBe(true);
@@ -243,6 +245,7 @@ describe('test_runner native targets', () => {
 				1_000,
 				root,
 				false,
+				undefined,
 				testCase,
 			);
 			expect(result).toMatchObject({
@@ -267,6 +270,7 @@ describe('test_runner native targets', () => {
 					1_000,
 					process.cwd(),
 					false,
+					undefined,
 					{
 						framework: 'go-test',
 						name: 'TestOnly',
@@ -274,11 +278,21 @@ describe('test_runner native targets', () => {
 					},
 				),
 			() =>
-				runTests('ctest', 'target', [], false, 1_000, process.cwd(), false, {
-					framework: 'go-test',
-					name: 'TestOnly',
-					path: '.',
-				}),
+				runTests(
+					'ctest',
+					'target',
+					[],
+					false,
+					1_000,
+					process.cwd(),
+					false,
+					undefined,
+					{
+						framework: 'go-test',
+						name: 'TestOnly',
+						path: '.',
+					},
+				),
 		]) {
 			expect(await invocation()).toMatchObject({
 				success: false,
@@ -292,7 +306,7 @@ describe('test_runner native targets', () => {
 		const root = makeGoRoot();
 		const normalKills = { direct: 0, tree: 0 };
 		installSpawnStub([], '--- PASS: TestOnly (0.00s)', normalKills);
-		await runTests('go-test', 'target', [], false, 50, root, false, {
+		await runTests('go-test', 'target', [], false, 50, root, false, undefined, {
 			framework: 'go-test',
 			name: 'TestOnly',
 			path: '.',
@@ -309,6 +323,7 @@ describe('test_runner native targets', () => {
 			5,
 			root,
 			false,
+			undefined,
 			{ framework: 'go-test', name: 'TestOnly', path: '.' },
 		);
 		expect(timedOut).toMatchObject({
@@ -334,6 +349,7 @@ describe('test_runner native targets', () => {
 			100,
 			root,
 			false,
+			undefined,
 			{ framework: 'go-test', name: 'TestOnly', path: '.' },
 		);
 		expect(result).toMatchObject({
@@ -453,45 +469,4 @@ describe('test_runner native targets', () => {
 		});
 		expect(calls).toHaveLength(0);
 	});
-
-	for (const workspace of ['nested-module', 'root-go-work'] as const) {
-		it(`runs a Go package from a ${workspace}`, async () => {
-			const root = makeRoot();
-			const moduleRoot = path.join(root, 'services', 'api');
-			const packageDir = path.join(moduleRoot, 'pkg');
-			fs.mkdirSync(packageDir, { recursive: true });
-			fs.writeFileSync(
-				path.join(moduleRoot, 'go.mod'),
-				'module example.test/api\n',
-			);
-			if (workspace === 'root-go-work') {
-				fs.writeFileSync(
-					path.join(root, 'go.work'),
-					'go 1.22\nuse ./services/api\n',
-				);
-			}
-			_internals.isCommandAvailable = (() =>
-				true) as typeof _internals.isCommandAvailable;
-			const calls: Array<{ cmd: string[]; options: unknown }> = [];
-			installSpawnStub(calls);
-			const raw = await test_runner.execute(
-				{
-					scope: 'target',
-					native_target: {
-						framework: 'go-test',
-						name: 'TestOnly',
-						path: 'services/api/pkg',
-					},
-				},
-				{ directory: root } as never,
-			);
-			expect(JSON.parse(raw as string).success).toBe(true);
-			expect(calls[0].options).toMatchObject({
-				cwd: workspace === 'root-go-work' ? root : moduleRoot,
-			});
-			expect(calls[0].cmd.at(-1)).toBe(
-				workspace === 'root-go-work' ? './services/api/pkg' : './pkg',
-			);
-		});
-	}
 });

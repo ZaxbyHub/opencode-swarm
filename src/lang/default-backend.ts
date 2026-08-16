@@ -149,6 +149,7 @@ export function defaultBuildTestCommand(
 	const scope = opts.scope ?? 'all';
 	const coverage = opts.coverage ?? false;
 	const bail = opts.bail ?? false;
+	const targets = opts.targets;
 	const nativeTarget = opts.nativeTarget;
 	if (nativeTarget) {
 		if (nativeTarget.framework !== framework) return null;
@@ -202,7 +203,11 @@ export function defaultBuildTestCommand(
 		}
 		case 'cargo': {
 			const args: string[] = ['cargo', 'test'];
-			if (scope !== 'all' && files.length > 0) args.push(...files);
+			if (targets && targets.length > 0) {
+				args.push('--', ...targets);
+			} else if (scope !== 'all' && files.length > 0) {
+				args.push(...files);
+			}
 			return args;
 		}
 		case 'pester': {
@@ -217,22 +222,46 @@ export function defaultBuildTestCommand(
 			}
 			return ['pwsh', '-Command', 'Invoke-Pester'];
 		}
-		case 'go-test':
+		case 'go-test': {
 			// files param not forwarded — go test does not support arbitrary
 			// file paths.
-			return ['go', 'test', './...'];
-		case 'maven':
-			return ['mvn', 'test'];
+			const args: string[] = ['go', 'test'];
+			if (targets && targets.length > 0) {
+				args.push('-run', targets.join('|'));
+			}
+			args.push('./...');
+			return args;
+		}
+		case 'maven': {
+			const args: string[] = ['mvn', 'test'];
+			if (targets && targets.length > 0) {
+				args.push(`-Dtest=${targets.join(',')}`);
+			}
+			return args;
+		}
 		case 'gradle': {
 			const isWindows = process.platform === 'win32';
 			const hasGradlewBat = fs.existsSync(path.join(dir, 'gradlew.bat'));
 			const hasGradlew = fs.existsSync(path.join(dir, 'gradlew'));
-			if (hasGradlewBat && isWindows) return ['gradlew.bat', 'test'];
-			if (hasGradlew) return ['./gradlew', 'test'];
-			return ['gradle', 'test'];
+			const args: string[] = [];
+			if (hasGradlewBat && isWindows) args.push('gradlew.bat');
+			else if (hasGradlew) args.push('./gradlew');
+			else args.push('gradle');
+			args.push('test');
+			if (targets && targets.length > 0) {
+				for (const target of targets) {
+					args.push('--tests', target);
+				}
+			}
+			return args;
 		}
-		case 'dotnet-test':
-			return ['dotnet', 'test'];
+		case 'dotnet-test': {
+			const args: string[] = ['dotnet', 'test'];
+			if (targets && targets.length > 0) {
+				args.push('--filter', targets.join('|'));
+			}
+			return args;
+		}
 		case 'ctest': {
 			const buildDirCandidates = [
 				'build',
@@ -245,10 +274,21 @@ export function defaultBuildTestCommand(
 				buildDirCandidates.find((d) =>
 					fs.existsSync(path.join(dir, d, 'CMakeCache.txt')),
 				) ?? 'build';
-			return ['ctest', '--test-dir', actualBuildDir];
+			const args: string[] = ['ctest', '--test-dir', actualBuildDir];
+			if (targets && targets.length > 0) {
+				args.push('-R', targets.join('|'));
+			}
+			return args;
 		}
-		case 'swift-test':
-			return ['swift', 'test'];
+		case 'swift-test': {
+			const args: string[] = ['swift', 'test'];
+			if (targets && targets.length > 0) {
+				for (const target of targets) {
+					args.push('--filter', target);
+				}
+			}
+			return args;
+		}
 		case 'dart-test':
 			return isCommandAvailable('flutter')
 				? ['flutter', 'test', ...files]

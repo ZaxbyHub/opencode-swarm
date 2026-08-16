@@ -96,6 +96,7 @@ describe('test-runner feedback regressions', () => {
 			5,
 			root,
 			false,
+			undefined,
 			{ framework: 'go-test', name: 'TestOnly', path: '.' },
 		);
 
@@ -126,6 +127,7 @@ describe('test-runner feedback regressions', () => {
 					1_000,
 					root,
 					false,
+					undefined,
 					{
 						framework: 'go-test',
 						name: 'TestOnly',
@@ -133,23 +135,33 @@ describe('test-runner feedback regressions', () => {
 					},
 				),
 			() =>
-				runTests('go-test', 'target', [], true, 1_000, root, false, {
+				runTests('go-test', 'target', [], true, 1_000, root, false, undefined, {
 					framework: 'go-test',
 					name: 'TestOnly',
 					path: 'pkg',
 				}),
 			() =>
-				runTests('go-test', 'target', [], false, 1_000, root, true, {
+				runTests('go-test', 'target', [], false, 1_000, root, true, undefined, {
 					framework: 'go-test',
 					name: 'TestOnly',
 					path: 'pkg',
 				}),
 			() =>
-				runTests('go-test', 'target', [], false, 1_000, root, false, {
-					framework: 'go-test',
-					name: 'TestOnly',
-					path: path.join(root, 'pkg'),
-				}),
+				runTests(
+					'go-test',
+					'target',
+					[],
+					false,
+					1_000,
+					root,
+					false,
+					undefined,
+					{
+						framework: 'go-test',
+						name: 'TestOnly',
+						path: path.join(root, 'pkg'),
+					},
+				),
 		]) {
 			expect(await invocation()).toMatchObject({
 				success: false,
@@ -210,6 +222,7 @@ describe('test-runner feedback regressions', () => {
 			1_000,
 			root,
 			false,
+			undefined,
 			{ framework: 'go-test', name: 'TestOnly', path: 'linked-pkg' },
 		);
 
@@ -238,6 +251,7 @@ describe('test-runner feedback regressions', () => {
 			1_000,
 			root,
 			false,
+			undefined,
 			{ framework: 'go-test', name: 'TestOnly', path: '.' },
 		);
 
@@ -274,6 +288,7 @@ describe('test-runner feedback regressions', () => {
 				1_000,
 				root,
 				false,
+				undefined,
 				{ framework: 'ctest', name: 'DisabledCase', path: 'build' },
 			);
 
@@ -320,4 +335,45 @@ describe('test-runner feedback regressions', () => {
 			'Absolute paths, traversal, coverage, bail, and broad fallback are rejected',
 		);
 	});
+
+	for (const workspace of ['nested-module', 'root-go-work'] as const) {
+		it(`runs a Go package from a ${workspace}`, async () => {
+			const root = makeRoot(`swarm-runner-go-ws-${workspace}-`);
+			const moduleRoot = path.join(root, 'services', 'api');
+			const packageDir = path.join(moduleRoot, 'pkg');
+			fs.mkdirSync(packageDir, { recursive: true });
+			fs.writeFileSync(
+				path.join(moduleRoot, 'go.mod'),
+				'module example.test/api\n',
+			);
+			if (workspace === 'root-go-work') {
+				fs.writeFileSync(
+					path.join(root, 'go.work'),
+					'go 1.22\nuse ./services/api\n',
+				);
+			}
+			_internals.isCommandAvailable = (() =>
+				true) as typeof _internals.isCommandAvailable;
+			const calls: Array<{ cmd: string[]; options: unknown }> = [];
+			installSpawnStub(calls);
+			const raw = await test_runner.execute(
+				{
+					scope: 'target',
+					native_target: {
+						framework: 'go-test',
+						name: 'TestOnly',
+						path: 'services/api/pkg',
+					},
+				},
+				{ directory: root } as never,
+			);
+			expect(JSON.parse(raw as string).success).toBe(true);
+			expect(calls[0].options).toMatchObject({
+				cwd: workspace === 'root-go-work' ? root : moduleRoot,
+			});
+			expect(calls[0].cmd.at(-1)).toBe(
+				workspace === 'root-go-work' ? './services/api/pkg' : './pkg',
+			);
+		});
+	}
 });

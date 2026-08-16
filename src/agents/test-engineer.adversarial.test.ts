@@ -241,7 +241,9 @@ describe('SECURITY CONTROL VERIFICATION', () => {
 
 	it('should tell the agent to stop when targeted execution is unsupported', () => {
 		const agent = createTestEngineerAgent('gpt-4');
-		expect(agent.config.prompt).toContain('has no safe targeted mode');
+		expect(agent.config.prompt).toContain(
+			'does not support targeted test-file execution',
+		);
 		expect(agent.config.prompt).toContain('report SKIPPED');
 	});
 });
