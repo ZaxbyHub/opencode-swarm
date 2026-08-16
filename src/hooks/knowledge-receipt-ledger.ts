@@ -20,12 +20,88 @@ import {
 	type KnowledgeReceiptTransitionObservation,
 } from './knowledge-receipt-observability.js';
 
+/**
+ * Canonical terminal-outcome vocabulary for the authoritative receipt ledger
+ * (issue #2032). This is the single declaration the outcome-aware consumers
+ * import and derive from: the shared validator (`VALID_OUTCOMES`), the
+ * collectors, the application and phase gates, the counter rollups, the
+ * scoring signal, and the diagnostics. (The curator consumes outcomes only
+ * through the derived signal and counter rollups — it does not switch on
+ * this set directly.) Semantics: `applied` = followed (positive signal;
+ * reviewer VERIFIED maps here); `ignored` = judged relevant but deliberately
+ * not followed (negative signal, policy consequences retained);
+ * `contradicted` = current authority disproves (negative); `violated` =
+ * runtime violation (negative, blocks phase completion until remediated);
+ * `n_a` = not applicable to the current action (neutral — clears only the
+ * acknowledgement/applicability obligation, never proves application, never
+ * feeds promotion evidence).
+ */
 export type ReceiptOutcome =
 	| 'applied'
 	| 'ignored'
 	| 'contradicted'
 	| 'violated'
 	| 'n_a';
+
+/** Runtime set form of {@link ReceiptOutcome} — derive, never redeclare. */
+export const RECEIPT_TERMINAL_OUTCOMES: ReadonlySet<ReceiptOutcome> =
+	new Set<ReceiptOutcome>([
+		'applied',
+		'ignored',
+		'contradicted',
+		'violated',
+		'n_a',
+	]);
+
+/**
+ * Canonical terminal-source taxonomy (issue #2032). `source` answers WHO
+ * produced the terminal as a provenance class, while the separate `agent`
+ * field records the agent identity. Storage stays permissive (`string`) for
+ * legacy tolerance: a legacy record with an absent or ambiguous source is
+ * preserved as `'unknown'` and is never coerced to delegate, ignored, or any
+ * other class. New producers must stamp one of the closed values below.
+ */
+export type ReceiptSourceCode =
+	| 'delegate'
+	| 'reviewer'
+	| 'architect'
+	| 'architect_marker'
+	| 'test_engineer'
+	| 'phase_override'
+	| 'application_gate_staleness_clear'
+	| 'application_gate_denial_limit_clear'
+	| 'manual'
+	| 'migration'
+	| 'unknown';
+
+/** Closed set form of {@link ReceiptSourceCode}. */
+export const CANONICAL_RECEIPT_SOURCES: ReadonlySet<string> = new Set([
+	'delegate',
+	'reviewer',
+	'architect',
+	'architect_marker',
+	'test_engineer',
+	'phase_override',
+	'application_gate_staleness_clear',
+	'application_gate_denial_limit_clear',
+	'manual',
+	'migration',
+	'unknown',
+]);
+
+/**
+ * Normalize a would-be terminal source to the canonical taxonomy (issue
+ * #2032 review F-001): a canonical value passes through verbatim; anything
+ * else (absent, whitespace, out-of-taxonomy string such as a legacy agent
+ * name) becomes the honest `'unknown'` class. Deliberately NOT a hard
+ * reject — storage stays permissive for legacy tolerance, and reads of the
+ * historical journal remain unchanged; only NEW commit boundaries normalize.
+ */
+export function normalizeReceiptSource(value: unknown): string {
+	if (typeof value !== 'string') return 'unknown';
+	const trimmed = value.trim();
+	return CANONICAL_RECEIPT_SOURCES.has(trimmed) ? trimmed : 'unknown';
+}
 
 export interface ReceiptPredicateCheck {
 	predicate: string;
@@ -1608,10 +1684,10 @@ async function ensureCutoverLocked(
 						}
 						terminal = {
 							outcome: terminalEvent.type as ReceiptOutcome,
-							source:
-								typeof terminalEvent.source === 'string'
-									? terminalEvent.source
-									: 'unknown',
+							// Legacy cutover: an out-of-taxonomy legacy source (e.g.
+							// the pre-#2032 agent-name strings) is legacy ambiguity —
+							// typed 'unknown', never inferred (#2032 review F-001).
+							source: normalizeReceiptSource(terminalEvent.source),
 							reason:
 								typeof terminalEvent.reason === 'string'
 									? terminalEvent.reason
@@ -2239,7 +2315,7 @@ export async function validateAndCommitTerminalBatch(
 				entry_id: item.entry_id,
 				terminal: {
 					outcome: item.outcome,
-					source: item.source ?? 'unknown',
+					source: normalizeReceiptSource(item.source),
 					reason: item.reason,
 					predicate_check: item.predicate_check,
 					event_id: eventId,
@@ -2399,7 +2475,7 @@ async function commitApplicationMarkerBatch(
 			const eventId = randomUUID();
 			const marker: ReceiptApplicationMarker = {
 				outcome: item.outcome,
-				source: item.source ?? 'unknown',
+				source: normalizeReceiptSource(item.source),
 				reason: item.reason,
 				event_id: eventId,
 				committed_at: nowIso(),
@@ -2534,7 +2610,7 @@ export async function commitApplicationOutcomeBatch(
 			}
 
 			const now = nowIso();
-			const source = item.source ?? 'unknown';
+			const source = normalizeReceiptSource(item.source);
 			const marker =
 				membership.application_marker ??
 				({

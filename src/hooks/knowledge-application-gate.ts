@@ -5,7 +5,7 @@
  *
  *   1. `experimental.chat.messages.transform` — scans the latest
  *      architect-authored message for
- *      `KNOWLEDGE_APPLIED|IGNORED|CONTRADICTED|VIOLATED`
+ *      `KNOWLEDGE_APPLIED|IGNORED|N_A|CONTRADICTED|VIOLATED`
  *      markers and records them via `recordAcknowledgmentDeduped`. This
  *      runs BEFORE the architect's next tool call so the toolBefore gate
  *      sees the ack.
@@ -375,7 +375,7 @@ export async function knowledgeApplicationGateBefore(
 
 		const ids = unackedPairs.join(', ');
 		throw new Error(
-			`KNOWLEDGE_ENFORCE_GATE_DENY: ${toolName} blocked — critical knowledge membership(s) ${ids} require exact-pair KNOWLEDGE_APPLIED:<trace_id>:<entry_id>, KNOWLEDGE_IGNORED:<trace_id>:<entry_id> reason=..., KNOWLEDGE_CONTRADICTED:<trace_id>:<entry_id> reason=..., or KNOWLEDGE_VIOLATED:<trace_id>:<entry_id> reason=... before this action.`,
+			`KNOWLEDGE_ENFORCE_GATE_DENY: ${toolName} blocked — critical knowledge membership(s) ${ids} require exact-pair KNOWLEDGE_APPLIED:<trace_id>:<entry_id>, KNOWLEDGE_N_A:<trace_id>:<entry_id> reason=... (does not apply; neutral), KNOWLEDGE_IGNORED:<trace_id>:<entry_id> reason=... (relevant but deliberately not followed), KNOWLEDGE_CONTRADICTED:<trace_id>:<entry_id> reason=..., or KNOWLEDGE_VIOLATED:<trace_id>:<entry_id> reason=... before this action.`,
 		);
 	}
 	const unacked = [

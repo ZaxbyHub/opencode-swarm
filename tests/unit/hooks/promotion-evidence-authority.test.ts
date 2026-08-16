@@ -94,6 +94,11 @@ describe('promotion evidence authority', () => {
 		expect(
 			evidence['entry-1']?.map((record) => record.receipt_event_id),
 		).toEqual(['prior-violation', 'terminal-1']);
+		// (#2032 F-003) The terminal's provenance class survives the mapping so
+		// the promotion gate can honor the independence guarantee.
+		expect(evidence['entry-1']?.map((record) => record.receipt_source)).toEqual(
+			['delegate', 'reviewer'],
+		);
 		expect(evidence['entry-2']?.[0]?.receipt_outcome).toBe('contradicted');
 		expect(evidence['entry-2']?.[0]?.cohort_id).toBe('canonical-cohort');
 		expect(evidence['entry-3']).toBeUndefined();

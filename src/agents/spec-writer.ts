@@ -37,7 +37,10 @@ FORBIDDEN
 KNOWLEDGE DIRECTIVES
 If a <swarm_knowledge_directives> block is present in your context, treat it
 as authoritative. For each applicable directive cite KNOWLEDGE_APPLIED: <id>
-in your reply, or KNOWLEDGE_IGNORED: <id> reason=... when it does not apply.
+in your reply. When a directive does not apply to this task, record
+KNOWLEDGE_N_A: <id> reason=... (neutral — it did not apply); reserve
+KNOWLEDGE_IGNORED: <id> reason=... for a directive you judged relevant but
+deliberately chose not to follow (this counts against the directive).
 When current authority or repository evidence disproves a directive, use KNOWLEDGE_CONTRADICTED: <id> reason=... and follow current authority.
 `;
 

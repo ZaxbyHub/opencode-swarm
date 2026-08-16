@@ -11,20 +11,22 @@ import type { KnowledgeEvent, RetrievedEvent } from './knowledge-events.js';
 import {
 	commitEmptyRetrieval,
 	queryLiveMemberships,
+	RECEIPT_TERMINAL_OUTCOMES,
+	type ReceiptOutcome,
 	validateAndCommitTerminalBatch,
 } from './knowledge-receipt-ledger.js';
 
-export type ReceiptOutcome =
-	| 'applied'
-	| 'ignored'
-	| 'contradicted'
-	| 'violated'
-	| 'n_a'
-	| 'no_relevant';
+/**
+ * Canonical terminal outcome — single declaration lives in the authoritative
+ * ledger (issue #2032). Re-exported here for existing import sites; do NOT
+ * redeclare. The trace-level `no_relevant` tombstone is NOT a terminal
+ * outcome and never appears on a `ReceiptItem`.
+ */
+export type { ReceiptOutcome };
 
 export interface ReceiptItem {
 	id: string;
-	outcome: Exclude<ReceiptOutcome, 'no_relevant'>;
+	outcome: ReceiptOutcome;
 	reason?: string;
 }
 
@@ -35,6 +37,16 @@ export interface ReceiptValidationContext {
 	task_id?: string;
 	phase?: string;
 	agent: string;
+	/**
+	 * Provenance class for the committed terminals (issue #2032): who is
+	 * reporting, e.g. 'delegate' for the delegate-ack collector or the
+	 * agent-class value for the knowledge_receipt tool. This is deliberately
+	 * NOT derived from `agent` — agent identity and source are different
+	 * facts, and conflating them is how delegate terminals lost their
+	 * provenance. Type-required, but fail-open at runtime: a falsy value
+	 * stamps the honest 'unknown' class rather than rejecting the receipt.
+	 */
+	source: string;
 	cohort_id?: string;
 	source_link_id?: string;
 	grace_days?: number;
@@ -83,13 +95,7 @@ export type ReceiptValidationResult =
 	  };
 
 export const NO_TRACE_SENTINEL = 'none';
-const VALID_OUTCOMES: ReadonlySet<string> = new Set([
-	'applied',
-	'ignored',
-	'contradicted',
-	'violated',
-	'n_a',
-]);
+const VALID_OUTCOMES: ReadonlySet<string> = RECEIPT_TERMINAL_OUTCOMES;
 
 function reject(
 	reason: ReceiptRejectReason,
@@ -167,7 +173,11 @@ export async function validateReceipt(
 			entry_id: item.id,
 			outcome: item.outcome,
 			reason: item.reason,
-			source: ctx.agent || 'unknown',
+			// Trim before the fail-open fallback (#2032 review PRR-004): a
+			// whitespace-only source must stamp the honest 'unknown' class,
+			// never persist an unbounded-code string the telemetry layer would
+			// then silently drop (ledger/telemetry divergence).
+			source: ctx.source.trim() || 'unknown',
 		})),
 		no_relevant_knowledge: noRelevant,
 	});
@@ -279,9 +289,7 @@ function findTrace(
 }
 
 function isTerminalReceipt(event: KnowledgeEvent): boolean {
-	return ['applied', 'ignored', 'contradicted', 'violated', 'n_a'].includes(
-		event.type,
-	);
+	return (RECEIPT_TERMINAL_OUTCOMES as ReadonlySet<string>).has(event.type);
 }
 
 export const _internals = { findTrace, isTerminalReceipt, VALID_OUTCOMES };

@@ -211,7 +211,9 @@ describe('knowledge receipt ledger authority core', () => {
 					{
 						entry_id: 'entry-app',
 						outcome: 'applied',
-						source: 'executor',
+						// (#2032 F-001) canonical source — out-of-taxonomy values
+						// now normalize to 'unknown' at commit boundaries.
+						source: 'architect_marker',
 						reason: 'done',
 					},
 				],
@@ -231,7 +233,7 @@ describe('knowledge receipt ledger authority core', () => {
 		expect(membership?.terminal).toBeUndefined();
 		expect(membership?.application_marker).toMatchObject({
 			outcome: 'applied',
-			source: 'executor',
+			source: 'architect_marker',
 		});
 	});
 
