@@ -16,7 +16,6 @@
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { parseAcknowledgments } from '../../../src/hooks/knowledge-application';
 import {
@@ -49,6 +48,7 @@ import {
 	evaluatePhaseCriticalDirectives,
 	recordDirectiveOverrides,
 } from '../../../src/hooks/phase-complete-directive-gate';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const SESSION = 'sess-matrix';
 const PHASE = 'Phase 1';
@@ -84,9 +84,7 @@ const SIGNAL_SIGN: Record<ReceiptOutcome, number> = {
 };
 
 function tmpSwarmDir(): string {
-	const d = fs.realpathSync(
-		fs.mkdtempSync(path.join(os.tmpdir(), 'swarm-matrix-')),
-	);
+	const d = canonicalMkdtemp('swarm-matrix-');
 	fs.mkdirSync(path.join(d, '.swarm'), { recursive: true });
 	return d;
 }

@@ -10,7 +10,6 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { collectDelegateAcks } from '../../../src/hooks/delegate-ack-collector.js';
 import {
@@ -22,6 +21,7 @@ import { buildDelegateDirectiveBlock } from '../../../src/hooks/knowledge-inject
 import type { RankedEntry } from '../../../src/hooks/knowledge-reader.js';
 import { queryLiveMemberships } from '../../../src/hooks/knowledge-receipt-ledger.js';
 import type { KnowledgeConfig } from '../../../src/hooks/knowledge-types.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const FIXED_TRACE_ID = 'trace-fixed-2032-0001';
 const SESSION = 'sess-src-2032';
@@ -121,9 +121,7 @@ const FIXED_NOW_ISO = new Date(0).toISOString();
 describe('delegate terminal source attribution (#2032)', () => {
 	let dir: string;
 	beforeEach(() => {
-		dir = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-ack-source-')),
-		);
+		dir = canonicalMkdtemp('delegate-ack-source-');
 	});
 	afterEach(() => {
 		fs.rmSync(dir, { recursive: true, force: true });
