@@ -401,3 +401,23 @@ describe('explorer-role-boundary', () => {
 		});
 	});
 });
+
+describe('repo_map graph-first directive role-boundary (issue #1988 C1)', () => {
+	// The graph-first ACTIONS directive must not smuggle in verdict,
+	// enforcement, or routing language — it is a discovery-strategy
+	// directive only.
+	test('graph-first directive present in ACTIONS without verdict/imperative language', () => {
+		const actionsSection = EXPLORER_PROMPT.substring(
+			EXPLORER_PROMPT.indexOf('ACTIONS:'),
+			EXPLORER_PROMPT.indexOf('RULES:'),
+		);
+		expect(actionsSection).toContain('repo_map action="ask"');
+		expect(actionsSection).not.toMatch(/\bVERDICT\b/);
+		expect(actionsSection).not.toMatch(/\bapprove\b/i);
+		expect(actionsSection).not.toMatch(/\breject\b/i);
+		expect(actionsSection).not.toMatch(/\benforce\b/i);
+		expect(actionsSection).not.toMatch(/\bmandate\b/i);
+		expect(actionsSection).not.toMatch(/\bshall\b/i);
+		expect(actionsSection).not.toMatch(/\bmust\b/i);
+	});
+});
