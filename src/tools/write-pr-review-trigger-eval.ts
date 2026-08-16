@@ -512,6 +512,7 @@ export async function executeWritePrReviewTriggerEval(
 
 export const write_pr_review_trigger_eval: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
+		allowWorkingDirectoryOverride: true,
 		description:
 			'Persist the complete, exact-set PR-review trigger receipt after every MATCHED family has completed. Supply classifications and MATCHED provenance; evidence is optional and non-authoritative because the receipt reuses evidence frozen by the first micro dispatch. NOT_TRIGGERED families remain provenance-free.',
 		args: {

@@ -608,6 +608,7 @@ export async function executeWriteRetro(
  * Tool definition for write_retro
  */
 export const write_retro: ToolDefinition = createSwarmTool({
+	allowWorkingDirectoryOverride: true,
 	description:
 		'Write a retrospective evidence bundle for a completed phase. ' +
 		'Accepts flat retro fields and writes a correctly-wrapped EvidenceBundle to ' +

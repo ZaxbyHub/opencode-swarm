@@ -199,6 +199,7 @@ export async function executeSetQaGates(
 }
 
 export const set_qa_gates: ReturnType<typeof tool> = createSwarmTool({
+	allowWorkingDirectoryOverride: true,
 	description:
 		'Configure the QA gate profile for the current or exact future plan. Architect-only. ' +
 		'The initial selection accepts explicit true and false values; later calls can ' +

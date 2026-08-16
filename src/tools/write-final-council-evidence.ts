@@ -376,6 +376,7 @@ export async function executeWriteFinalCouncilEvidence(
  * Tool definition for write_final_council_evidence.
  */
 export const write_final_council_evidence: ToolDefinition = createSwarmTool({
+	allowWorkingDirectoryOverride: true,
 	description:
 		'Write final council evidence for a completed project. This is not General Council mode and does not use convene_general_council. PREREQUISITE: dispatch critic, reviewer, sme, test_engineer, and explorer as project-scoped Agent tasks, collect their CouncilMemberVerdict JSON, then call this tool to synthesize and persist .swarm/evidence/final-council.json.',
 	args: {

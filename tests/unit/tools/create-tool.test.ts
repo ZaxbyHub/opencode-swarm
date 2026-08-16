@@ -184,7 +184,7 @@ describe('createSwarmTool', () => {
 			expect(receivedArgs[2].directory).toBe('/dir3');
 		});
 
-		it('Description and args are passed correctly to tool()', () => {
+		it('Description and declared args are passed through unchanged by default', () => {
 			const description = 'Test tool description';
 			const args = { foo: z.string(), bar: z.number() };
 
@@ -195,7 +195,22 @@ describe('createSwarmTool', () => {
 			});
 
 			expect(toolConfig.description).toBe(description);
-			expect(toolConfig.args).toEqual(args);
+			const configuredArgs = toolConfig.args as Record<string, z.ZodTypeAny>;
+			expect(configuredArgs.foo).toBe(args.foo);
+			expect(configuredArgs.bar).toBe(args.bar);
+			expect(configuredArgs.working_directory).toBeUndefined();
+		});
+
+		it('publishes working_directory only when explicitly opted in', () => {
+			const toolConfig = createSwarmTool({
+				description: 'opted-in tool',
+				allowWorkingDirectoryOverride: true,
+				args: { foo: z.string() },
+				execute: async () => 'result',
+			});
+
+			const configuredArgs = toolConfig.args as Record<string, z.ZodTypeAny>;
+			expect(configuredArgs.working_directory).toBeDefined();
 		});
 
 		it('Empty args object is handled correctly', async () => {

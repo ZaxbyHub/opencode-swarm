@@ -81,6 +81,7 @@ function strArray(v: unknown): string[] | undefined {
 
 export const knowledge_add: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
+		allowWorkingDirectoryOverride: true,
 		description:
 			'Store a new lesson in the knowledge base for future reference. The lesson will be available for retrieval via knowledge_recall.',
 		args: {

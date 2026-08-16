@@ -135,6 +135,7 @@ function receiptSourceForAgent(agent: string): string {
 
 export const knowledge_receipt: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
+		allowWorkingDirectoryOverride: true,
 		description:
 			'File a receipt for knowledge surfaced by a retrieval (by trace_id): which entries were applied (with evidence), ignored with a reason (relevant but deliberately not followed — counts against the entry), marked n_a with a reason (not applicable to this task — neutral), or contradicted (with proposed remediation), plus any new lessons. Each item is recorded as an immutable knowledge event. Set no_relevant_knowledge:true when a retrieval surfaced nothing useful.',
 		args: {

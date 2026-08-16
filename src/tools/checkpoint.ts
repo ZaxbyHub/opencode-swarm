@@ -984,6 +984,7 @@ async function handleSaveTaskCompletion(
 }
 
 export const checkpoint: ToolDefinition = createSwarmTool({
+	allowWorkingDirectoryOverride: true,
 	description:
 		'Save, restore, list, and delete git checkpoints. ' +
 		'Use save to create a named snapshot, restore to return tracked files to a checkpoint, ' +
