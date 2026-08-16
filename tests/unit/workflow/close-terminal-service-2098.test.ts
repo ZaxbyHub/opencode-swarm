@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Plan } from '../../../src/config/plan-schema';
 import {
@@ -11,6 +10,7 @@ import { loadPlanJsonOnly, savePlan } from '../../../src/plan/manager';
 import { reconcileCloseTerminalState } from '../../../src/workflow/close-terminal';
 import { _internals as terminalInternals } from '../../../src/workflow/task-terminal';
 import { seedStageBGates } from '../../helpers/task-workflow-evidence';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 function plan(status: 'closed' | 'completed' | 'in_progress'): Plan {
 	return {
@@ -86,9 +86,7 @@ describe('issue #2098 close terminal service', () => {
 	let directory: string;
 
 	beforeEach(async () => {
-		directory = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'close-terminal-service-2098-')),
-		);
+		directory = canonicalMkdtemp('close-terminal-service-2098-');
 		fs.mkdirSync(path.join(directory, '.git'));
 		await savePlan(directory, plan('in_progress'));
 	});

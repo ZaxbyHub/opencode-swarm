@@ -1,20 +1,18 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import {
 	readTaskEvidenceRaw,
 	transitionTaskWorkflowEvidence,
 } from '../../../src/gate-evidence';
 import { repairTaskWorkflowUnderPlanLock } from '../../../src/workflow/task-repair';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 describe('issue #2098 truthful close repair', () => {
 	let directory: string;
 
 	beforeEach(async () => {
-		directory = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'task-repair-closed-2098-')),
-		);
+		directory = canonicalMkdtemp('task-repair-closed-2098-');
 		fs.mkdirSync(path.join(directory, '.swarm'), { recursive: true });
 		await transitionTaskWorkflowEvidence(directory, '1.1', {
 			type: 'task_closed',

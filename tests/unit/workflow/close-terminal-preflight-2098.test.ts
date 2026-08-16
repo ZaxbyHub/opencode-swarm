@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import type {
 	BackgroundTaskChangeContext,
@@ -22,6 +21,7 @@ import {
 } from '../../../src/workflow/coder-settlement';
 import { writeWorkflowWalFile } from '../../../src/workflow/workflow-wal-file';
 import type { TaskRepairWal } from '../../../src/workflow/workflow-wal-schema';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 function plan(status: 'closed' | 'in_progress'): Plan {
 	return {
@@ -90,9 +90,7 @@ describe('issue #2098 close terminal preflight', () => {
 	let directory: string;
 
 	beforeEach(async () => {
-		directory = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'close-terminal-preflight-2098-')),
-		);
+		directory = canonicalMkdtemp('close-terminal-preflight-2098-');
 		fs.mkdirSync(path.join(directory, '.git'));
 		await savePlan(directory, plan('in_progress'));
 	});
@@ -154,9 +152,7 @@ describe('issue #2098 close terminal preflight', () => {
 	});
 
 	test('completes pending coder-settlement cleanup before close terminalization', async () => {
-		const root = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'close-terminal-coder-cleanup-')),
-		);
+		const root = canonicalMkdtemp('close-terminal-coder-cleanup-');
 		const repo = path.join(root, 'repo');
 		const worktree = path.join(root, 'lane');
 		try {

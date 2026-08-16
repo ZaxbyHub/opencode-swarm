@@ -1,8 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Plan } from '../../../src/config/plan-schema';
 import {
@@ -16,6 +15,7 @@ import {
 	replayFromLedger,
 } from '../../../src/plan/ledger';
 import { derivePlanId, derivePlanIdentityHash } from '../../../src/plan/utils';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 function makePlan(): Plan {
 	return {
@@ -51,7 +51,7 @@ function eventHash(event: LedgerEvent): string {
 }
 
 async function createLegacyLedger(plan: Plan): Promise<string> {
-	const directory = await mkdtemp(join(tmpdir(), 'ledger-plan-epoch-adopt-'));
+	const directory = canonicalMkdtemp('ledger-plan-epoch-adopt-');
 	await mkdir(join(directory, '.swarm'), { recursive: true });
 	fs.writeFileSync(
 		join(directory, '.swarm', 'plan.json'),

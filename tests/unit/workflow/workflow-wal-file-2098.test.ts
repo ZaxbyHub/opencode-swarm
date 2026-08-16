@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import {
 	_internals,
@@ -9,6 +8,7 @@ import {
 	writeWorkflowWalFile,
 } from '../../../src/workflow/workflow-wal-file';
 import type { TaskTerminalWal } from '../../../src/workflow/workflow-wal-schema';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 function terminalWal(taskId = '1.1'): TaskTerminalWal {
 	return {
@@ -52,9 +52,7 @@ describe('issue #2098 shared workflow WAL trust boundary', () => {
 	const originalInternals = { ..._internals };
 
 	beforeEach(() => {
-		directory = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'workflow-wal-file-2098-')),
-		);
+		directory = canonicalMkdtemp('workflow-wal-file-2098-');
 	});
 
 	afterEach(() => {

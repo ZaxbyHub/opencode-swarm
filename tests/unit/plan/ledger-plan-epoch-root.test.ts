@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { writeFileSync } from 'node:fs';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Plan } from '../../../src/config/plan-schema';
 import {
@@ -15,6 +14,7 @@ import {
 } from '../../../src/plan/ledger';
 import { derivePlanId, derivePlanIdentityHash } from '../../../src/plan/utils';
 import { freezeClock, type Restore } from '../../helpers/test-clock.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 function makePlan(overrides: Partial<Plan> = {}): Plan {
 	return {
@@ -45,7 +45,7 @@ function makePlan(overrides: Partial<Plan> = {}): Plan {
 }
 
 async function createWorkspace(plan: Plan): Promise<string> {
-	const directory = await mkdtemp(join(tmpdir(), 'ledger-plan-epoch-root-'));
+	const directory = canonicalMkdtemp('ledger-plan-epoch-root-');
 	await mkdir(join(directory, '.swarm'), { recursive: true });
 	writeFileSync(
 		join(directory, '.swarm', 'plan.json'),

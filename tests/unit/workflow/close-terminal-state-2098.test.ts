@@ -1,6 +1,5 @@
 import { describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import {
 	reduceTaskWorkflowSnapshot,
@@ -14,6 +13,7 @@ import {
 	resetSwarmState,
 } from '../../../src/state';
 import { commitTaskTerminalUnderPlanLock } from '../../../src/workflow/task-terminal';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 function snapshot(state: TaskWorkflowSnapshot['state']): TaskWorkflowSnapshot {
 	return {
@@ -85,9 +85,7 @@ describe('issue #2098 truthful close workflow terminal', () => {
 	});
 
 	test('closed accepts only the identical task_closed transition retry', async () => {
-		const directory = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'close-terminal-idempotency-')),
-		);
+		const directory = canonicalMkdtemp('close-terminal-idempotency-');
 		try {
 			const event = {
 				type: 'task_closed' as const,
@@ -119,9 +117,7 @@ describe('issue #2098 truthful close workflow terminal', () => {
 	});
 
 	test('plan-bound close commits v2 WAL and exact closed evidence', async () => {
-		const directory = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'close-terminal-state-2098-')),
-		);
+		const directory = canonicalMkdtemp('close-terminal-state-2098-');
 		try {
 			fs.mkdirSync(path.join(directory, '.swarm'), { recursive: true });
 			const result = await commitTaskTerminalUnderPlanLock({

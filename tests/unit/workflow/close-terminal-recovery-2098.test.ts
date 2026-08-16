@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Plan } from '../../../src/config/plan-schema';
 import {
@@ -21,6 +20,7 @@ import {
 import { writeWorkflowWalFile } from '../../../src/workflow/workflow-wal-file';
 import type { TaskTerminalWal } from '../../../src/workflow/workflow-wal-schema';
 import { seedStageBGates } from '../../helpers/task-workflow-evidence';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 function plan(): Plan {
 	return {
@@ -56,9 +56,7 @@ describe('issue #2098 close terminal v2 recovery', () => {
 	let originalApply: typeof terminalInternals.applyTerminalEvidence;
 
 	beforeEach(async () => {
-		directory = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'close-terminal-recovery-2098-')),
-		);
+		directory = canonicalMkdtemp('close-terminal-recovery-2098-');
 		fs.mkdirSync(path.join(directory, '.git'));
 		await savePlan(directory, plan());
 		const generation = await seedStageBGates(directory, '1.1');
