@@ -2,17 +2,16 @@
  * Automated adversarial tests for scripts/copilot-pr-publication-gate.sh
  * (issue #2131 criterion D): the gate's rejection paths — stale HEAD, edited
  * body, wrong state, missing validation commands — must be proven by tests,
- * not claimed. Uses the precedented spawnSync('bash') + canonical temp-dir pattern
- * (see check-invariants.test.ts / check-mock-allowlist-ratchet.test.ts).
+ * not claimed. Uses the shared Git-Bash resolver plus canonical temp-dir
+ * pattern so the shell coverage executes on Windows too.
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, realpathSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
-import * as os from 'node:os';
 import * as path from 'node:path';
+import { bashCommand } from '../../helpers/bash.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const GATE_SCRIPT = path.join(
@@ -28,7 +27,6 @@ const PUBLISH_PAYLOAD = JSON.stringify({
 	tool: 'shell',
 	command: 'gh pr create --title t --body-file b',
 });
-const isWindows = process.platform === 'win32';
 
 let directory = '';
 
@@ -41,12 +39,31 @@ afterEach(async () => {
 });
 
 function git(cwd: string, args: string[]): void {
-	const result = spawnSync('git', ['-C', cwd, ...args], { encoding: 'utf-8' });
+	const result = spawnSync('git', ['-C', cwd, ...args], {
+		encoding: 'utf-8',
+		stdin: 'ignore',
+		timeout: 10_000,
+	});
 	if (result.status !== 0) {
 		throw new Error(
 			`git ${args.join(' ')} failed: ${result.stderr ?? result.stdout}`,
 		);
 	}
+}
+
+function withAssertions(
+	expected: number,
+	run: (assertExpect: typeof expect) => Promise<void> | void,
+): Promise<void> {
+	let assertionCount = 0;
+	const countedExpect = ((actual: unknown, message?: string) => {
+		assertionCount += 1;
+		return expect(actual, message);
+	}) as typeof expect;
+
+	return Promise.resolve(run(countedExpect)).then(() => {
+		expect(assertionCount).toBe(expected);
+	});
 }
 
 interface EvidenceOptions {
@@ -118,11 +135,18 @@ async function writeEvidence(options: EvidenceOptions = {}): Promise<string> {
 }
 
 function runGate(payload: string): { status: number; output: string } {
-	const result = spawnSync('bash', [GATE_SCRIPT], {
+	const [shell, ...args] = bashCommand(GATE_SCRIPT);
+	const result = spawnSync(shell, args, {
 		cwd: directory,
 		input: payload,
 		encoding: 'utf-8',
-		env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null' },
+		stdin: 'pipe',
+		timeout: 10_000,
+		env: {
+			...process.env,
+			GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null',
+			GIT_CONFIG_SYSTEM: process.platform === 'win32' ? 'NUL' : '/dev/null',
+		},
 	});
 	return {
 		status: result.status ?? -1,
@@ -132,158 +156,169 @@ function runGate(payload: string): { status: number; output: string } {
 
 describe('copilot-pr-publication-gate (issue #2131 criterion D)', () => {
 	test('non-publish payloads pass through ungated', async () => {
-		if (isWindows) return;
-		await writeValidBaselinePrBody();
-		await writeEvidence();
-		const { status } = runGate(
-			JSON.stringify({ command: 'bun test tests/unit/foo.test.ts' }),
-		);
-		expect(status).toBe(0);
+		await withAssertions(1, async (assertExpect) => {
+			await writeValidBaselinePrBody();
+			await writeEvidence();
+			const { status } = runGate(
+				JSON.stringify({ command: 'bun test tests/unit/foo.test.ts' }),
+			);
+			assertExpect(status).toBe(0);
+		});
 	});
 
 	test('missing publication-evidence.json blocks publish', async () => {
-		if (isWindows) return;
-		await writeValidBaselinePrBody();
-		const { status, output } = runGate(PUBLISH_PAYLOAD);
-		expect(status).toBe(1);
-		expect(output).toContain(
-			'missing .swarm/evidence/publication-evidence.json',
-		);
+		await withAssertions(2, async (assertExpect) => {
+			await writeValidBaselinePrBody();
+			const { status, output } = runGate(PUBLISH_PAYLOAD);
+			assertExpect(status).toBe(1);
+			assertExpect(output).toContain(
+				'missing .swarm/evidence/publication-evidence.json',
+			);
+		});
 	});
 
 	test('matching evidence passes (git repo with matching HEAD and origin)', async () => {
-		if (isWindows) return;
-		await writeValidBaselinePrBody();
-		git(directory, ['init', '-q']);
-		git(directory, [
-			'remote',
-			'add',
-			'origin',
-			'https://github.com/example/repo.git',
-		]);
-		git(directory, [
-			'-c',
-			'user.name=test',
-			'-c',
-			'user.email=test@test.com',
-			'-c',
-			'commit.gpgsign=false',
-			'commit',
-			'-q',
-			'--allow-empty',
-			'-m',
-			'init',
-		]);
-		const head = spawnSync('git', ['-C', directory, 'rev-parse', 'HEAD'], {
-			encoding: 'utf-8',
-		}).stdout.trim();
-		await writeEvidence({ headSha: head });
-		const { status, output } = runGate(PUBLISH_PAYLOAD);
-		expect(output).toBe('');
-		expect(status).toBe(0);
+		await withAssertions(2, async (assertExpect) => {
+			await writeValidBaselinePrBody();
+			git(directory, ['init', '-q']);
+			git(directory, [
+				'remote',
+				'add',
+				'origin',
+				'https://github.com/example/repo.git',
+			]);
+			git(directory, [
+				'-c',
+				'user.name=test',
+				'-c',
+				'user.email=test@test.com',
+				'-c',
+				'commit.gpgsign=false',
+				'commit',
+				'-q',
+				'--allow-empty',
+				'-m',
+				'init',
+			]);
+			const head = spawnSync('git', ['-C', directory, 'rev-parse', 'HEAD'], {
+				encoding: 'utf-8',
+				stdin: 'ignore',
+				timeout: 10_000,
+			}).stdout.trim();
+			await writeEvidence({ headSha: head });
+			const { status, output } = runGate(PUBLISH_PAYLOAD);
+			assertExpect(output).toBe('');
+			assertExpect(status).toBe(0);
+		});
 	});
 
 	test('stale head_sha is rejected', async () => {
-		if (isWindows) return;
-		await writeValidBaselinePrBody();
-		git(directory, ['init', '-q']);
-		git(directory, [
-			'remote',
-			'add',
-			'origin',
-			'https://github.com/example/repo.git',
-		]);
-		await writeEvidence({ headSha: 'f'.repeat(40) });
-		const { status, output } = runGate(PUBLISH_PAYLOAD);
-		expect(status).toBe(1);
-		expect(output).toContain('does not match current HEAD');
+		await withAssertions(2, async (assertExpect) => {
+			await writeValidBaselinePrBody();
+			git(directory, ['init', '-q']);
+			git(directory, [
+				'remote',
+				'add',
+				'origin',
+				'https://github.com/example/repo.git',
+			]);
+			await writeEvidence({ headSha: 'f'.repeat(40) });
+			const { status, output } = runGate(PUBLISH_PAYLOAD);
+			assertExpect(status).toBe(1);
+			assertExpect(output).toContain('does not match current HEAD');
+		});
 	});
 
 	test('body edited after the receipt is rejected (sha256 mismatch)', async () => {
-		if (isWindows) return;
-		await writeValidBaselinePrBody();
-		git(directory, ['init', '-q']);
-		git(directory, [
-			'remote',
-			'add',
-			'origin',
-			'https://github.com/example/repo.git',
-		]);
-		await writeEvidence({ headSha: '0'.repeat(40) });
-		// Tamper with the body AFTER the receipt was written.
-		await fs.appendFile(
-			path.join(directory, '.swarm', 'evidence', 'pr_body.md'),
-			'\nlate edit\n',
-			'utf-8',
-		);
-		const { status, output } = runGate(PUBLISH_PAYLOAD);
-		expect(status).toBe(1);
-		expect(output).toContain('body_sha256 does not match');
+		await withAssertions(2, async (assertExpect) => {
+			await writeValidBaselinePrBody();
+			git(directory, ['init', '-q']);
+			git(directory, [
+				'remote',
+				'add',
+				'origin',
+				'https://github.com/example/repo.git',
+			]);
+			await writeEvidence({ headSha: '0'.repeat(40) });
+			// Tamper with the body AFTER the receipt was written.
+			await fs.appendFile(
+				path.join(directory, '.swarm', 'evidence', 'pr_body.md'),
+				'\nlate edit\n',
+				'utf-8',
+			);
+			const { status, output } = runGate(PUBLISH_PAYLOAD);
+			assertExpect(status).toBe(1);
+			assertExpect(output).toContain('body_sha256 does not match');
+		});
 	});
 
 	test('empty/missing body_sha256 in the receipt is rejected (fail-closed)', async () => {
-		if (isWindows) return;
-		await writeValidBaselinePrBody();
-		git(directory, ['init', '-q']);
-		git(directory, [
-			'remote',
-			'add',
-			'origin',
-			'https://github.com/example/repo.git',
-		]);
-		await writeEvidence({ headSha: '0'.repeat(40), bodySha256: '' });
-		const { status, output } = runGate(PUBLISH_PAYLOAD);
-		expect(status).toBe(1);
-		expect(output).toContain('body_sha256 could not be verified');
+		await withAssertions(2, async (assertExpect) => {
+			await writeValidBaselinePrBody();
+			git(directory, ['init', '-q']);
+			git(directory, [
+				'remote',
+				'add',
+				'origin',
+				'https://github.com/example/repo.git',
+			]);
+			await writeEvidence({ headSha: '0'.repeat(40), bodySha256: '' });
+			const { status, output } = runGate(PUBLISH_PAYLOAD);
+			assertExpect(status).toBe(1);
+			assertExpect(output).toContain('body_sha256 could not be verified');
+		});
 	});
 
 	test("state other than 'validated' is rejected", async () => {
-		if (isWindows) return;
-		await writeValidBaselinePrBody();
-		git(directory, ['init', '-q']);
-		git(directory, [
-			'remote',
-			'add',
-			'origin',
-			'https://github.com/example/repo.git',
-		]);
-		await writeEvidence({ state: 'draft' });
-		const { status, output } = runGate(PUBLISH_PAYLOAD);
-		expect(status).toBe(1);
-		expect(output).toContain("state is not 'validated'");
+		await withAssertions(2, async (assertExpect) => {
+			await writeValidBaselinePrBody();
+			git(directory, ['init', '-q']);
+			git(directory, [
+				'remote',
+				'add',
+				'origin',
+				'https://github.com/example/repo.git',
+			]);
+			await writeEvidence({ state: 'draft' });
+			const { status, output } = runGate(PUBLISH_PAYLOAD);
+			assertExpect(status).toBe(1);
+			assertExpect(output).toContain("state is not 'validated'");
+		});
 	});
 
 	test('missing validation_commands is rejected', async () => {
-		if (isWindows) return;
-		await writeValidBaselinePrBody();
-		git(directory, ['init', '-q']);
-		git(directory, [
-			'remote',
-			'add',
-			'origin',
-			'https://github.com/example/repo.git',
-		]);
-		await writeEvidence({ validationCommands: false });
-		const { status, output } = runGate(PUBLISH_PAYLOAD);
-		expect(status).toBe(1);
-		expect(output).toContain('missing validation_commands');
+		await withAssertions(2, async (assertExpect) => {
+			await writeValidBaselinePrBody();
+			git(directory, ['init', '-q']);
+			git(directory, [
+				'remote',
+				'add',
+				'origin',
+				'https://github.com/example/repo.git',
+			]);
+			await writeEvidence({ validationCommands: false });
+			const { status, output } = runGate(PUBLISH_PAYLOAD);
+			assertExpect(status).toBe(1);
+			assertExpect(output).toContain('missing validation_commands');
+		});
 	});
 
 	test('a receipt bound to a different repository is rejected', async () => {
-		if (isWindows) return;
-		await writeValidBaselinePrBody();
-		git(directory, ['init', '-q']);
-		git(directory, [
-			'remote',
-			'add',
-			'origin',
-			'https://github.com/example/repo.git',
-		]);
-		await writeEvidence({
-			repository: 'https://github.com/other/repo.git',
+		await withAssertions(2, async (assertExpect) => {
+			await writeValidBaselinePrBody();
+			git(directory, ['init', '-q']);
+			git(directory, [
+				'remote',
+				'add',
+				'origin',
+				'https://github.com/example/repo.git',
+			]);
+			await writeEvidence({
+				repository: 'https://github.com/other/repo.git',
+			});
+			const { status, output } = runGate(PUBLISH_PAYLOAD);
+			assertExpect(status).toBe(1);
+			assertExpect(output).toContain('does not match this origin');
 		});
-		const { status, output } = runGate(PUBLISH_PAYLOAD);
-		expect(status).toBe(1);
-		expect(output).toContain('does not match this origin');
 	});
 });
