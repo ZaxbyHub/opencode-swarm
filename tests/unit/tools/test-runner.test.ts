@@ -1569,6 +1569,57 @@ describe('test-runner.ts — targets support', () => {
 			Bun.spawn = originalSpawn;
 		}
 	});
+
+	test('targets parameter survives Zod schema validation through tool execute path', async () => {
+		const result = await test_runner.execute(
+			{
+				scope: 'all',
+				targets: ['TestFoo', 'TestBar'],
+			},
+			{} as any,
+		);
+		const parsed = JSON.parse(result);
+		// With scope "all" and no real framework, we get a framework error — not "Invalid arguments"
+		// This proves targets passed through Zod without being stripped
+		expect(parsed.error).not.toBe('Invalid arguments');
+	});
+
+	test('empty string targets are rejected by validation', async () => {
+		const result = await test_runner.execute(
+			{
+				scope: 'all',
+				targets: [''],
+			},
+			{} as any,
+		);
+		const parsed = JSON.parse(result);
+		expect(parsed.error).toBe('Invalid arguments');
+	});
+
+	test('targets with shell metacharacters are rejected', async () => {
+		const result = await test_runner.execute(
+			{
+				scope: 'all',
+				targets: ['TestFoo; rm -rf /'],
+			},
+			{} as any,
+		);
+		const parsed = JSON.parse(result);
+		expect(parsed.error).toBe('Invalid arguments');
+	});
+
+	test('targets with regex metacharacters are allowed', async () => {
+		const result = await test_runner.execute(
+			{
+				scope: 'all',
+				targets: ['TestFoo.*', 'Test?Bar', 'A|B'],
+			},
+			{} as any,
+		);
+		const parsed = JSON.parse(result);
+		// Valid regex metacharacters should not trigger "Invalid arguments"
+		expect(parsed.error).not.toBe('Invalid arguments');
+	});
 });
 
 /**

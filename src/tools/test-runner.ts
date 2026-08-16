@@ -193,6 +193,16 @@ function containsPowerShellMetacharacters(str: string): boolean {
 	return POWERSHELL_METACHARACTERS.test(str);
 }
 
+// Shell metacharacters that enable command injection via subprocess argv.
+// Intentionally more permissive than POWERSHELL_METACHARACTERS: allows regex
+// chars (*, ?, |, [], .) that frameworks use as native test-name filters.
+// biome-ignore lint/suspicious/noControlCharactersInRegex: intentional security validation pattern
+const SHELL_METACHARACTERS = /[;&`$(){}<>"'\x00-\x1f]/;
+
+function containsShellMetacharacters(str: string): boolean {
+	return SHELL_METACHARACTERS.test(str);
+}
+
 function validateArgs(args: unknown): args is TestRunnerArgs {
 	if (typeof args !== 'object' || args === null) return false;
 	const obj = args as Record<string, unknown>;
@@ -259,14 +269,11 @@ function validateArgs(args: unknown): args is TestRunnerArgs {
 		if (!Array.isArray(obj.targets)) return false;
 		for (const t of obj.targets) {
 			if (typeof t !== 'string') return false;
-			// Reject absolute paths just in case (targets shouldn't be paths)
+			if (t.length === 0) return false;
 			if (isAbsolutePath(t)) return false;
-			// Check for path traversal attempts (including encoded)
 			if (containsPathTraversal(t)) return false;
-			// Check for control characters (including LF/CR)
 			if (containsControlChars(t)) return false;
-			// Check for PowerShell metacharacters that could enable injection
-			if (containsPowerShellMetacharacters(t)) return false;
+			if (containsShellMetacharacters(t)) return false;
 		}
 	}
 
@@ -1392,7 +1399,7 @@ function buildTestCommand(
 			const args: string[] = ['cargo', 'test'];
 			// cargo has no bail support — silently ignore
 			if (targets && targets.length > 0) {
-				args.push(...targets);
+				args.push('--', ...targets);
 			} else if (scope !== 'all' && files.length > 0) {
 				// Cargo test can accept test names
 				args.push(...files);
@@ -2720,7 +2727,7 @@ function analyzeFailures(workingDir: string): TestHistoryReport {
 // ============ Tool Definition ============
 export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 	description:
-		'Run project tests with automatic framework detection for bun, vitest, jest, mocha, pytest, cargo, pester, go test, maven, gradle, dotnet test, ctest, swift test, dart test, rspec, minitest, pest, phpunit, or php-artisan. Returns JSON with success, framework, scope, command, timeout_ms, duration_ms, totals, outcome, and optional coveragePercent, rawOutput, testCases, and message fields. Scope "target" runs one exact Go test/subtest or CTest name via native_target using a workspace-relative package/build directory, with no broad fallback, coverage, or bail.',
+		'Run project tests with automatic framework detection for bun, vitest, jest, mocha, pytest, cargo, pester, go test, maven, gradle, dotnet test, ctest, swift test, dart test, rspec, minitest, pest, phpunit, or php-artisan. Returns JSON with success, framework, scope, command, timeout_ms, duration_ms, totals, outcome, and optional coveragePercent, rawOutput, testCases, and message fields. Scope "target" runs one exact Go test/subtest or CTest name via native_target using a workspace-relative package/build directory, with no broad fallback, coverage, or bail. The "targets" array passes framework-native test name patterns to cargo, go-test, maven, gradle, dotnet-test, ctest, and swift-test.',
 	args: {
 		scope: z
 			.enum(['all', 'convention', 'graph', 'impact', 'target'])
@@ -2743,6 +2750,12 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 			.optional()
 			.describe(
 				'Specific files to test. For "convention", pass source files or direct test files. For "graph" and "impact", pass source files only.',
+			),
+		targets: z
+			.array(z.string())
+			.optional()
+			.describe(
+				'Framework-native test names or patterns to filter which tests run. Supported by cargo, go-test, maven, gradle, dotnet-test, ctest, and swift-test. Each entry is passed as-is to the framework\'s native filter flag.',
 			),
 		coverage: z
 			.boolean()
@@ -2839,7 +2852,7 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 				scope: 'all',
 				error: 'Invalid arguments',
 				message:
-					'scope must be "all", "convention", "graph", "impact", or "target"; target scope requires one valid native_target and cannot be combined with files, coverage, or bail',
+					'scope must be "all", "convention", "graph", "impact", or "target"; files and targets must be string arrays with safe values; target scope requires one valid native_target and cannot be combined with files, coverage, or bail',
 				outcome: 'error',
 			};
 			return JSON.stringify(errorResult, null, 2);
@@ -2899,19 +2912,20 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 			// Allow through — env opt-in confirmed
 		}
 
-		// Hard guard: convention, graph, and impact scopes require explicit files to prevent unsafe full-project discovery
+		// Hard guard: convention, graph, and impact scopes require explicit files (or targets) to prevent unsafe full-project discovery
 		if (
 			(scope === 'convention' || scope === 'graph' || scope === 'impact') &&
-			(!args.files || args.files.length === 0)
+			(!args.files || args.files.length === 0) &&
+			(!args.targets || args.targets.length === 0)
 		) {
 			const errorResult: TestErrorResult = {
 				success: false,
 				framework: 'none',
 				scope,
 				error:
-					'scope "convention" and "graph" require explicit files array - omitting files causes unsafe full-project discovery',
+					'scope "convention" and "graph" require explicit files or targets array - omitting both causes unsafe full-project discovery',
 				message:
-					'When using scope "convention" or "graph", you must provide a non-empty "files" array. Use scope "all" for full project test suite without specifying files.',
+					'When using scope "convention" or "graph", you must provide a non-empty "files" or "targets" array. Use scope "all" for full project test suite without specifying files.',
 				outcome: 'error',
 			};
 			return JSON.stringify(errorResult, null, 2);
@@ -3238,7 +3252,8 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 
 		// Guard: Reject when source files resolve to zero test files (prevents accidental full-suite run)
 		// Skip for scope 'all' — full-suite execution deliberately has no file filter
-		if (scope !== 'all' && scope !== 'target' && testFiles.length === 0) {
+		// Skip when targets are provided — framework-native filters handle test selection
+		if (scope !== 'all' && scope !== 'target' && testFiles.length === 0 && !(args.targets && args.targets.length > 0)) {
 			const baseMessage =
 				'No matching test files found for the provided source files. Check that test files exist with matching naming conventions (.spec.*, .test.*, .Tests.ps1, __tests__/, tests/, test/, spec/).';
 			const errorResult: TestErrorResult = {

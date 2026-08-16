@@ -96,6 +96,7 @@ describe('test-runner feedback regressions', () => {
 			5,
 			root,
 			false,
+			undefined,
 			{ framework: 'go-test', name: 'TestOnly', path: '.' },
 		);
 
@@ -126,6 +127,7 @@ describe('test-runner feedback regressions', () => {
 					1_000,
 					root,
 					false,
+					undefined,
 					{
 						framework: 'go-test',
 						name: 'TestOnly',
@@ -133,19 +135,19 @@ describe('test-runner feedback regressions', () => {
 					},
 				),
 			() =>
-				runTests('go-test', 'target', [], true, 1_000, root, false, {
+				runTests('go-test', 'target', [], true, 1_000, root, false, undefined, {
 					framework: 'go-test',
 					name: 'TestOnly',
 					path: 'pkg',
 				}),
 			() =>
-				runTests('go-test', 'target', [], false, 1_000, root, true, {
+				runTests('go-test', 'target', [], false, 1_000, root, true, undefined, {
 					framework: 'go-test',
 					name: 'TestOnly',
 					path: 'pkg',
 				}),
 			() =>
-				runTests('go-test', 'target', [], false, 1_000, root, false, {
+				runTests('go-test', 'target', [], false, 1_000, root, false, undefined, {
 					framework: 'go-test',
 					name: 'TestOnly',
 					path: path.join(root, 'pkg'),
@@ -210,6 +212,7 @@ describe('test-runner feedback regressions', () => {
 			1_000,
 			root,
 			false,
+			undefined,
 			{ framework: 'go-test', name: 'TestOnly', path: 'linked-pkg' },
 		);
 
@@ -238,6 +241,7 @@ describe('test-runner feedback regressions', () => {
 			1_000,
 			root,
 			false,
+			undefined,
 			{ framework: 'go-test', name: 'TestOnly', path: '.' },
 		);
 
@@ -274,6 +278,7 @@ describe('test-runner feedback regressions', () => {
 				1_000,
 				root,
 				false,
+				undefined,
 				{ framework: 'ctest', name: 'DisabledCase', path: 'build' },
 			);
 

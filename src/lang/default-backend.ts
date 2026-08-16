@@ -204,7 +204,7 @@ export function defaultBuildTestCommand(
 		case 'cargo': {
 			const args: string[] = ['cargo', 'test'];
 			if (targets && targets.length > 0) {
-				args.push(...targets);
+				args.push('--', ...targets);
 			} else if (scope !== 'all' && files.length > 0) {
 				args.push(...files);
 			}

@@ -163,6 +163,7 @@ describe('test_runner native targets', () => {
 				1_000,
 				root,
 				false,
+				undefined,
 				{ framework: 'go-test', name: 'TestA/sub.*', path: 'pkg/a' },
 			);
 			expect(result.success).toBe(true);
@@ -202,6 +203,7 @@ describe('test_runner native targets', () => {
 				1_000,
 				root,
 				false,
+				undefined,
 				{ framework: 'ctest', name: 'suite[1].case', path: 'build' },
 			);
 			expect(result.success).toBe(true);
@@ -243,6 +245,7 @@ describe('test_runner native targets', () => {
 				1_000,
 				root,
 				false,
+				undefined,
 				testCase,
 			);
 			expect(result).toMatchObject({
@@ -267,6 +270,7 @@ describe('test_runner native targets', () => {
 					1_000,
 					process.cwd(),
 					false,
+					undefined,
 					{
 						framework: 'go-test',
 						name: 'TestOnly',
@@ -274,7 +278,7 @@ describe('test_runner native targets', () => {
 					},
 				),
 			() =>
-				runTests('ctest', 'target', [], false, 1_000, process.cwd(), false, {
+				runTests('ctest', 'target', [], false, 1_000, process.cwd(), false, undefined, {
 					framework: 'go-test',
 					name: 'TestOnly',
 					path: '.',
@@ -292,7 +296,7 @@ describe('test_runner native targets', () => {
 		const root = makeGoRoot();
 		const normalKills = { direct: 0, tree: 0 };
 		installSpawnStub([], '--- PASS: TestOnly (0.00s)', normalKills);
-		await runTests('go-test', 'target', [], false, 50, root, false, {
+		await runTests('go-test', 'target', [], false, 50, root, false, undefined, {
 			framework: 'go-test',
 			name: 'TestOnly',
 			path: '.',
@@ -309,6 +313,7 @@ describe('test_runner native targets', () => {
 			5,
 			root,
 			false,
+			undefined,
 			{ framework: 'go-test', name: 'TestOnly', path: '.' },
 		);
 		expect(timedOut).toMatchObject({
@@ -334,6 +339,7 @@ describe('test_runner native targets', () => {
 			100,
 			root,
 			false,
+			undefined,
 			{ framework: 'go-test', name: 'TestOnly', path: '.' },
 		);
 		expect(result).toMatchObject({
