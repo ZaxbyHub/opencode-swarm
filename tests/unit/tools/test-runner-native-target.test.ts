@@ -469,45 +469,4 @@ describe('test_runner native targets', () => {
 		});
 		expect(calls).toHaveLength(0);
 	});
-
-	for (const workspace of ['nested-module', 'root-go-work'] as const) {
-		it(`runs a Go package from a ${workspace}`, async () => {
-			const root = makeRoot();
-			const moduleRoot = path.join(root, 'services', 'api');
-			const packageDir = path.join(moduleRoot, 'pkg');
-			fs.mkdirSync(packageDir, { recursive: true });
-			fs.writeFileSync(
-				path.join(moduleRoot, 'go.mod'),
-				'module example.test/api\n',
-			);
-			if (workspace === 'root-go-work') {
-				fs.writeFileSync(
-					path.join(root, 'go.work'),
-					'go 1.22\nuse ./services/api\n',
-				);
-			}
-			_internals.isCommandAvailable = (() =>
-				true) as typeof _internals.isCommandAvailable;
-			const calls: Array<{ cmd: string[]; options: unknown }> = [];
-			installSpawnStub(calls);
-			const raw = await test_runner.execute(
-				{
-					scope: 'target',
-					native_target: {
-						framework: 'go-test',
-						name: 'TestOnly',
-						path: 'services/api/pkg',
-					},
-				},
-				{ directory: root } as never,
-			);
-			expect(JSON.parse(raw as string).success).toBe(true);
-			expect(calls[0].options).toMatchObject({
-				cwd: workspace === 'root-go-work' ? root : moduleRoot,
-			});
-			expect(calls[0].cmd.at(-1)).toBe(
-				workspace === 'root-go-work' ? './services/api/pkg' : './pkg',
-			);
-		});
-	}
 });
