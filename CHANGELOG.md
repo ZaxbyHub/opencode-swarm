@@ -1,5 +1,25 @@
 # Changelog
 
+## [7.141.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.140.6...v7.141.0) (2026-08-16)
+
+
+### Features
+
+* **context:** wire graph delivery into agent prompts, lane dispatch, and skills ([0f35ecd](https://github.com/ZaxbyHub/opencode-swarm/commit/0f35ecd793507470f8eafbf07247fc7ff546c69a))
+* **context:** wire graph delivery into agent prompts, lane dispatch, and skills ([a97040c](https://github.com/ZaxbyHub/opencode-swarm/commit/a97040cfe2432577137df80ecfd4dad80c1966bb))
+* **test-runner:** add exact native targets and worktree-safe tools ([f6f543f](https://github.com/ZaxbyHub/opencode-swarm/commit/f6f543f3803dab123583b2807eb2ce1b2a24c7c3))
+
+
+### Bug Fixes
+
+* **context:** reserve suffix headroom in orientation overflow guard and close review findings ([d676e02](https://github.com/ZaxbyHub/opencode-swarm/commit/d676e024628686308ee3b93b21a4fd706a0976c7))
+* **knowledge:** enforce canonical source taxonomy and promotion independence (review F-001/F-003) ([eed5206](https://github.com/ZaxbyHub/opencode-swarm/commit/eed5206b0fb78816d678528e1a4c4da21be09e86))
+* **knowledge:** normalize outcome and source semantics end to end ([ce5c97a](https://github.com/ZaxbyHub/opencode-swarm/commit/ce5c97a04d146d3474e354ae5189732685513f13))
+* **knowledge:** normalize outcome and source semantics end to end ([9415c58](https://github.com/ZaxbyHub/opencode-swarm/commit/9415c58d9c21f486ed0b007d6702057b17d3e006))
+* **knowledge:** pin canonical source set in matrix; docs enumeration includes CONTRADICTED ([434a4cd](https://github.com/ZaxbyHub/opencode-swarm/commit/434a4cd6c35faebe6549602cf352b16f13fbd174))
+* **observability:** repoint knowledge_receipt_transition producer citation to post-format line ([9b69140](https://github.com/ZaxbyHub/opencode-swarm/commit/9b69140f9bed6068dbcddc1b22784da49b2de447))
+* **test-runner:** close review feedback and sync main ([92628d8](https://github.com/ZaxbyHub/opencode-swarm/commit/92628d85695145bccfe856a60ca0b3b145ef813d))
+
 ## [7.140.6](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.140.5...v7.140.6) (2026-08-15)
 
 
