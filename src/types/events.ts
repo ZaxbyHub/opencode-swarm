@@ -52,6 +52,8 @@ export interface CoderRetryCircuitBreakerEvent {
 	type: 'coder_retry_circuit_breaker';
 	timestamp: string;
 	taskId: string;
+	generation?: number;
+	retryEpoch: number;
 	rejectionCount: number;
 	rejectionHistory: string[];
 	phase: number;
@@ -112,6 +114,34 @@ export interface SpecDriftAcknowledgedEvent {
 	acknowledgedBy: string;
 	previousHash: string;
 	newHash: string | null;
+	markerHash: string;
+	transitionId: string;
+}
+
+export interface SpecDriftRepairedEvent {
+	type: 'spec_drift_repaired';
+	timestamp: string;
+	phase: number;
+	planTitle: string;
+	repairedBy: string;
+	previousHash: string;
+	newHash: string | null;
+	markerHash: string;
+	transitionId: string;
+}
+
+export interface TaskWorkflowRepairedEvent {
+	type: 'task_workflow_repaired';
+	timestamp: string;
+	taskId: string;
+	transitionId: string;
+	reason: string;
+	actor: string;
+	oldPlanStatus: string;
+	newPlanStatus: 'in_progress';
+	oldWorkflowState: string;
+	newWorkflowState: 'idle';
+	generation: number;
 }
 
 /**
@@ -196,6 +226,8 @@ export type V619Event =
 	| AuthorityHandoffResolvedEvent
 	| SpecStaleDetectedEvent
 	| SpecDriftAcknowledgedEvent
+	| SpecDriftRepairedEvent
+	| TaskWorkflowRepairedEvent
 	| TaskRemovedEvent
 	| PrmPatternDetectedEvent
 	| PrmCourseCorrectionInjectedEvent

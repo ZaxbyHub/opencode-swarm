@@ -46,41 +46,72 @@ export const MAX_LEGACY_APPLICATION_LOG_ENTRIES = 5000;
 /**
  * Parse explicit knowledge-acknowledgment markers from architect/delegate text.
  * Recognised forms (case-insensitive, line-anchored or inline):
- *   KNOWLEDGE_APPLIED: <id>
- *   KNOWLEDGE_IGNORED: <id> reason=<reason>
- *   KNOWLEDGE_CONTRADICTED: <id> reason=<observable conflict>
- *   KNOWLEDGE_VIOLATED: <id> reason=<reason>
- *   KNOWLEDGE_N_A: <id> reason=<reason>   (delegate contract, Change 1)
+ *   KNOWLEDGE_APPLIED: <trace_id>:<entry_id>
+ *   KNOWLEDGE_IGNORED: <trace_id>:<entry_id> reason=<reason>
+ *   KNOWLEDGE_CONTRADICTED: <trace_id>:<entry_id> reason=<observable conflict>
+ *   KNOWLEDGE_VIOLATED: <trace_id>:<entry_id> reason=<reason>
+ *   KNOWLEDGE_N_A: <trace_id>:<entry_id> reason=<reason>
+ * Legacy one-token delegate markers remain parseable, but architect application
+ * reconciliation requires the exact trace token.
  */
 export interface ParsedAcknowledgment {
 	id: string;
+	trace_id?: string;
 	result: 'applied' | 'ignored' | 'contradicted' | 'violated' | 'n_a';
 	reason?: string;
 }
 
-const ACK_PATTERN =
-	/KNOWLEDGE_(APPLIED|IGNORED|CONTRADICTED|VIOLATED|N_A)\s*:\s*([0-9a-fA-F-]{8,64})(?:\s+reason\s*=\s*([^\n\r]+?)(?=$|[\n\r]|\s+KNOWLEDGE_))?(?=[^0-9a-fA-F-]|$)/g;
+const EXACT_ACK_PATTERN =
+	/KNOWLEDGE_(APPLIED|IGNORED|CONTRADICTED|VIOLATED|N_A)\s*:\s*([^:\s]{1,512})\s*:\s*([^:\s]{1,512})(?:\s+reason\s*=\s*([^\n\r]+?)(?=$|[\n\r]|\s+KNOWLEDGE_))?/gi;
+const LEGACY_ACK_PATTERN =
+	/KNOWLEDGE_(APPLIED|IGNORED|CONTRADICTED|VIOLATED|N_A)\s*:\s*([0-9a-fA-F-]{8,64})(?:\s+reason\s*=\s*([^\n\r]+?)(?=$|[\n\r]|\s+KNOWLEDGE_))?(?=[^0-9a-fA-F-]|$)/gi;
+
+function decodeAckToken(token: string): string | undefined {
+	try {
+		const decoded = decodeURIComponent(token);
+		return decoded.length > 0 && decoded.length <= 512 ? decoded : undefined;
+	} catch {
+		return undefined;
+	}
+}
 
 export function parseAcknowledgments(text: string): ParsedAcknowledgment[] {
 	if (!text || typeof text !== 'string') return [];
-	const out: ParsedAcknowledgment[] = [];
-	for (const m of text.matchAll(ACK_PATTERN)) {
+	const indexed: Array<{ index: number; ack: ParsedAcknowledgment }> = [];
+	const parseResult = (verb: string): ParsedAcknowledgment['result'] =>
+		verb === 'applied'
+			? 'applied'
+			: verb === 'ignored'
+				? 'ignored'
+				: verb === 'contradicted'
+					? 'contradicted'
+					: verb === 'n_a'
+						? 'n_a'
+						: 'violated';
+	for (const m of text.matchAll(EXACT_ACK_PATTERN)) {
 		const verb = m[1].toLowerCase();
-		const id = m[2];
-		const reason = m[3]?.trim().slice(0, 280);
-		const result =
-			verb === 'applied'
-				? 'applied'
-				: verb === 'ignored'
-					? 'ignored'
-					: verb === 'contradicted'
-						? 'contradicted'
-						: verb === 'n_a'
-							? 'n_a'
-							: 'violated';
-		out.push({ id, result, reason });
+		const traceId = decodeAckToken(m[2]);
+		const id = decodeAckToken(m[3]);
+		if (!id || !traceId) continue;
+		const reason = m[4]?.trim().slice(0, 280);
+		indexed.push({
+			index: m.index ?? 0,
+			ack: { id, trace_id: traceId, result: parseResult(verb), reason },
+		});
 	}
-	return out;
+	for (const m of text.matchAll(LEGACY_ACK_PATTERN)) {
+		const end = (m.index ?? 0) + m[0].length;
+		if (text.slice(end).trimStart().startsWith(':')) continue;
+		indexed.push({
+			index: m.index ?? 0,
+			ack: {
+				id: m[2],
+				result: parseResult(m[1].toLowerCase()),
+				reason: m[3]?.trim().slice(0, 280),
+			},
+		});
+	}
+	return indexed.sort((a, b) => a.index - b.index).map(({ ack }) => ack);
 }
 
 // ============================================================================

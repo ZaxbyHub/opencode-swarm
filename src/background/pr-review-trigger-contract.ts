@@ -364,6 +364,26 @@ const V2NotTriggeredRowSchema = z
 
 const V2RowSchema = z.union([V2MatchedRowSchema, V2NotTriggeredRowSchema]);
 
+/**
+ * Disclosure record for a MATCHED family whose cited micro lane could not
+ * produce a non-degraded, fully-covering artifact after retries. The run
+ * proceeds; the receipt — and therefore every consumer of it — can see exactly
+ * which families are degraded and why. Provenance (identity, ownership, exact
+ * head) is still enforced for these rows; only coverage QUALITY is relaxed.
+ */
+export const TriggerCoverageDegradationSchema = z
+	.object({
+		trigger_id: TriggerIdSchema,
+		source_batch_id: z.string().trim().min(1),
+		source_lane_id: z.string().trim().min(1),
+		reason: z.string().trim().min(1),
+	})
+	.strict();
+
+export type TriggerCoverageDegradation = z.infer<
+	typeof TriggerCoverageDegradationSchema
+>;
+
 const ReceiptEnvelopeSchema = z.object({
 	run_id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/),
 	pr_head_sha: z
@@ -389,6 +409,7 @@ const V2ReceiptSchema = ReceiptEnvelopeSchema.extend({
 	not_triggered_count: z.number().int().min(0),
 	no_match_count: z.number().int().min(0),
 	rows: z.array(V2RowSchema),
+	coverage_degradations: z.array(TriggerCoverageDegradationSchema).default([]),
 }).strict();
 
 function assertCanonicalDefinitionFields(
@@ -428,6 +449,8 @@ export interface BuildPrReviewTriggerReceiptV2Args {
 	evaluated_at: string;
 	dispatched_micro_lane_count: number;
 	rows: unknown;
+	/** Receipt-level degradation disclosure; ledger rows stay untouched so the frozen-ledger digest is unaffected. */
+	coverage_degradations?: TriggerCoverageDegradation[];
 }
 
 function dispatchedMicroLaneCount(
@@ -480,6 +503,7 @@ export function buildPrReviewTriggerReceiptV2(
 		not_triggered_count: validated.notTriggeredIds.length,
 		no_match_count: 0,
 		rows,
+		coverage_degradations: input.coverage_degradations ?? [],
 	});
 }
 
@@ -524,6 +548,8 @@ export interface ParsedPrReviewTriggerReceipt {
 		PrReviewPersistedInputRow,
 		{ result: 'NOT_TRIGGERED' }
 	>[];
+	/** Empty for pre-v2.2 receipts. Present entries mean the family's cited lane is provenance-valid but coverage-degraded. */
+	coverageDegradations: TriggerCoverageDegradation[];
 }
 
 /**
@@ -549,6 +575,7 @@ export function prReviewTriggerLedgerDigest(
 function parsedReceipt(
 	schemaVersion: 0 | 1 | 2,
 	rows: PrReviewPersistedInputRow[],
+	coverageDegradations: TriggerCoverageDegradation[] = [],
 ): ParsedPrReviewTriggerReceipt {
 	return {
 		schemaVersion,
@@ -565,6 +592,7 @@ function parsedReceipt(
 				{ result: 'NOT_TRIGGERED' }
 			> => row.result === 'NOT_TRIGGERED',
 		),
+		coverageDegradations,
 	};
 }
 
@@ -604,7 +632,7 @@ export function parsePrReviewTriggerReceipt(
 				);
 			}
 		}
-		return parsedReceipt(2, validated.rows);
+		return parsedReceipt(2, validated.rows, receipt.coverage_degradations);
 	}
 
 	if (schemaVersion !== undefined && schemaVersion !== 1) {

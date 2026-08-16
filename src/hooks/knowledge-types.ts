@@ -305,6 +305,16 @@ export interface KnowledgeEntryBase extends ActionableDirectiveFields {
 	 * (rewrite/demote/confidence-delta). Prevents compounding under concurrent
 	 * cohort postmortems that claim the same batch. */
 	last_curated_generation?: number;
+	/**
+	 * Exact-once checkpoint for receipt-driven confidence feedback. Stored in the
+	 * same atomic knowledge-entry rewrite as the confidence delta so a crash
+	 * before the external projection cursor is written cannot apply the same V2
+	 * terminal twice.
+	 */
+	receipt_feedback_cursors?: Record<
+		string,
+		{ timestamp: string; event_id: string }
+	>;
 }
 
 /**
@@ -514,6 +524,8 @@ export interface KnowledgeConfig {
 	max_encounter_score: number;
 	/** Default N-phase TTL for knowledge entries. Default: 10 */
 	default_max_phases: number;
+	/** Days to retain closed authoritative receipt state before archival. Default: 7 */
+	receipt_close_grace_days: number;
 	/** N-phase TTL for 'todo' category entries. Default: 3 */
 	todo_max_phases: number;
 	/** Enable age-based sweep of knowledge entries. Default: true */

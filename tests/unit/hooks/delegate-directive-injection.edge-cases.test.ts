@@ -13,6 +13,7 @@ import type { DirectiveToVerify } from '../../../src/agents/reviewer-directive-c
 import type { DelegateInjectionInput } from '../../../src/hooks/delegate-directive-injection.js';
 import { injectDelegateDirectivesBefore } from '../../../src/hooks/delegate-directive-injection.js';
 import { DELEGATE_DIRECTIVE_BLOCK_TAG } from '../../../src/hooks/knowledge-injector.js';
+import { installKnowledgeReceiptAuthorityStub } from '../../helpers/knowledge-receipt-authority.js';
 import {
 	makeConfig,
 	makeEntry,
@@ -25,9 +26,13 @@ describe('injectDelegateDirectivesBefore — malformed payload edge cases', () =
 	// Save original _internals from knowledge-injector
 	let originalSearchKnowledge: typeof import('../../../src/hooks/knowledge-injector.js')._internals.searchKnowledge;
 	let originalRecordKnowledgeEvent: typeof import('../../../src/hooks/knowledge-injector.js')._internals.recordKnowledgeEvent;
+	let restoreReceiptAuthority = () => {};
 
 	beforeEach(async () => {
 		const ki = await import('../../../src/hooks/knowledge-injector.js');
+		restoreReceiptAuthority = installKnowledgeReceiptAuthorityStub(
+			ki._internals,
+		);
 		originalSearchKnowledge = ki._internals.searchKnowledge;
 		originalRecordKnowledgeEvent = ki._internals.recordKnowledgeEvent;
 		ki._internals.recordKnowledgeEvent = mock(async () => {});
@@ -37,6 +42,7 @@ describe('injectDelegateDirectivesBefore — malformed payload edge cases', () =
 		const ki = await import('../../../src/hooks/knowledge-injector.js');
 		ki._internals.searchKnowledge = originalSearchKnowledge;
 		ki._internals.recordKnowledgeEvent = originalRecordKnowledgeEvent;
+		restoreReceiptAuthority();
 		mock.restore();
 	});
 

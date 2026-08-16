@@ -503,16 +503,24 @@ export function defaultParseTestOutput(
 			break;
 		}
 		case 'ctest': {
+			const disabledCount = [
+				...output.matchAll(/\*{3}Not Run\s+\(Disabled\)/gi),
+			].length;
+			skipped = disabledCount;
 			const ctestMatch = output.match(/(\d+) tests? failed out of (\d+)/);
 			if (ctestMatch) {
 				failed = parseInt(ctestMatch[1], 10);
-				total = parseInt(ctestMatch[2], 10);
-				passed = total - failed;
+				const executedTotal = parseInt(ctestMatch[2], 10);
+				total = executedTotal + disabledCount;
+				passed = executedTotal - failed;
 			} else {
 				const allPassMatch = output.match(/100% tests passed.*?(\d+) tests?/);
 				if (allPassMatch) {
-					total = parseInt(allPassMatch[1], 10);
-					passed = total;
+					const executedTotal = parseInt(allPassMatch[1], 10);
+					total = executedTotal + disabledCount;
+					passed = executedTotal;
+				} else if (disabledCount > 0) {
+					total = disabledCount;
 				}
 			}
 			break;

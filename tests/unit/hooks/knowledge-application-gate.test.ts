@@ -1,460 +1,324 @@
-/**
- * Tests for the v2 knowledge-application enforcement gate as wired into
- * runtime via knowledgeApplicationGateBefore + knowledgeApplicationTransformScan.
- *
- * Notes:
- *  - The gate consults swarmState.currentCriticalShownIds and
- *    swarmState.knowledgeAckDedup. Tests prime/clear them between cases.
- *  - In `enforce` mode the gate throws KNOWLEDGE_ENFORCE_GATE_DENY.
- *  - In `warn` mode the gate appends to .swarm/events.jsonl and returns.
- *
- * Deadlock escape-hatch behavior (denial-count limit + staleness TTL) is
- * covered in knowledge-application-gate-escape-hatch.test.ts and
- * knowledge-application-gate-escape-hatch-regression.test.ts (split out to
- * stay under the repo's 500-line test file limit — AGENTS.md invariant 7).
- */
+/** V2-authoritative knowledge application gate integration tests. */
 
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { mkdir } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 import {
 	buildAckDedupKey,
 	DEFAULT_KNOWLEDGE_APPLICATION_CONFIG,
 	resolveApplicationLogPath,
-} from '../../../src/hooks/knowledge-application';
+} from '../../../src/hooks/knowledge-application.js';
 import {
-	_internals,
 	knowledgeApplicationGateBefore,
 	knowledgeApplicationTransformScan,
-} from '../../../src/hooks/knowledge-application-gate';
-import type { MessageWithParts } from '../../../src/hooks/knowledge-types';
-import { swarmState } from '../../../src/state';
-import { knowledge_receipt } from '../../../src/tools/knowledge-receipt';
-import { withFrozenClock } from '../../helpers/test-clock.js';
+} from '../../../src/hooks/knowledge-application-gate.js';
+import {
+	commitDisplayedMembership,
+	_internals as ledgerInternals,
+	queryLiveMemberships,
+	validateAndCommitTerminalBatch,
+} from '../../../src/hooks/knowledge-receipt-ledger.js';
+import type { MessageWithParts } from '../../../src/hooks/knowledge-types.js';
+import { swarmState } from '../../../src/state.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
-let tmp: string;
+const ENTRY = 'aaaaaaaa-aaaa-4aaa-9aaa-aaaaaaaaaaaa';
+let directory: string;
+
 beforeEach(() => {
 	mock.restore();
-	tmp = mkdtempSync(path.join(tmpdir(), 'swarm-gate-'));
+	directory = canonicalMkdtemp('application-gate-v2-');
+	writeFileSync(path.join(directory, '.git'), 'gitdir: fixture');
 	swarmState.currentCriticalShownIds.clear();
 	swarmState.knowledgeAckDedup.clear();
 	swarmState.gateDenialCounts.clear();
 });
+
 afterEach(() => {
-	rmSync(tmp, { recursive: true, force: true });
+	rmSync(directory, { recursive: true, force: true });
 	mock.restore();
 });
 
-const ID_A = 'aaaaaaaa-aaaa-4aaa-9aaa-aaaaaaaaaaaa';
-const ID_B = 'bbbbbbbb-bbbb-4bbb-9bbb-bbbbbbbbbbbb';
-
-describe('knowledgeApplicationGateBefore', () => {
-	it('does nothing when disabled', async () => {
-		swarmState.currentCriticalShownIds.set('s1', {
-			ids: [ID_A],
-			// generatedAt is fixture data here, never asserted against — frozen
-			// deterministically per repo test-stability convention (issue #1782).
-			generatedAt: withFrozenClock(() => Date.now()),
-		});
-		await knowledgeApplicationGateBefore(
-			tmp,
-			{ tool: 'save_plan', agent: 'architect', sessionID: 's1' },
-			{
-				...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG,
-				enabled: false,
-				mode: 'enforce',
-			},
-		);
-		// no throw
+async function display(
+	trace_id: string,
+	entry_id = ENTRY,
+	session_id = 'session-a',
+): Promise<void> {
+	const result = await commitDisplayedMembership(directory, {
+		trace_id,
+		session_id,
+		exposure_kind: 'architect_directive',
+		phase: 'Canonical phase',
+		entries: [{ entry_id, critical: true }],
 	});
+	if (!result.ok) throw new Error(result.detail);
+}
 
-	it('does nothing for non-high-risk tool', async () => {
-		swarmState.currentCriticalShownIds.set('s1', {
-			ids: [ID_A],
-			generatedAt: Date.now(),
-		});
-		await knowledgeApplicationGateBefore(
-			tmp,
-			{ tool: 'search', agent: 'architect', sessionID: 's1' },
-			{ ...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG, mode: 'enforce' },
-		);
-		// no throw
+async function terminal(
+	trace_id: string,
+	entry_id = ENTRY,
+	session_id = 'session-a',
+): Promise<void> {
+	const result = await validateAndCommitTerminalBatch(directory, {
+		trace_id,
+		session_id,
+		items: [{ entry_id, outcome: 'applied', source: 'knowledge_receipt' }],
 	});
+	if (!result.ok || result.rejected.length > 0) {
+		throw new Error('terminal fixture failed');
+	}
+}
 
-	it('does nothing for non-architect agents', async () => {
-		swarmState.currentCriticalShownIds.set('s1', {
-			ids: [ID_A],
-			generatedAt: Date.now(),
-		});
-		await knowledgeApplicationGateBefore(
-			tmp,
-			{ tool: 'save_plan', agent: 'coder', sessionID: 's1' },
-			{ ...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG, mode: 'enforce' },
-		);
-		// no throw — only architect is gated
+async function marker(
+	trace_id: string,
+	entry_id = ENTRY,
+	session_id = 'session-a',
+): Promise<void> {
+	const result = await ledgerInternals.commitApplicationMarkerBatch(directory, {
+		trace_id,
+		session_id,
+		items: [{ entry_id, outcome: 'applied', source: 'test-marker' }],
 	});
+	if (!result.ok || result.rejected.length > 0) {
+		throw new Error('marker fixture failed');
+	}
+}
 
-	it('does nothing when there are no shown critical ids in scope', async () => {
-		await knowledgeApplicationGateBefore(
-			tmp,
-			{ tool: 'save_plan', agent: 'architect', sessionID: 's1' },
-			{ ...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG, mode: 'enforce' },
-		);
-		// no throw
-	});
+function architectMessage(text: string, agent = 'architect'): MessageWithParts {
+	return {
+		info: { role: 'assistant', agent },
+		parts: [{ type: 'text', text }],
+	};
+}
 
-	it('throws in enforce mode when sessionID is missing (contract violation)', async () => {
-		swarmState.currentCriticalShownIds.set('s1', {
-			ids: [ID_A],
-			generatedAt: Date.now(),
-		});
+const enforce = {
+	...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG,
+	mode: 'enforce' as const,
+};
+
+describe('knowledgeApplicationGateBefore V2 authority', () => {
+	it('blocks an exact pending critical pair and identifies its trace', async () => {
+		await display('trace-pending');
+
 		await expect(
 			knowledgeApplicationGateBefore(
-				tmp,
+				directory,
+				{ tool: 'save_plan', agent: 'architect', sessionID: 'session-a' },
+				enforce,
+			),
+		).rejects.toThrow(new RegExp(`trace-pending/${ENTRY}`));
+	});
+
+	it('does not let one trace terminal hide the same entry on another trace', async () => {
+		await display('trace-closed');
+		await display('trace-open');
+		await terminal('trace-closed');
+
+		await expect(
+			knowledgeApplicationGateBefore(
+				directory,
+				{ tool: 'Task', agent: 'paid_architect', sessionID: 'session-a' },
+				enforce,
+			),
+		).rejects.toThrow(new RegExp(`trace-open/${ENTRY}`));
+	});
+
+	it('does not let a knowledge_receipt terminal satisfy the architect marker gate', async () => {
+		await display('trace-terminal');
+		await terminal('trace-terminal');
+		await expect(
+			knowledgeApplicationGateBefore(
+				directory,
+				{ tool: 'phase_complete', agent: 'architect', sessionID: 'session-a' },
+				enforce,
+			),
+		).rejects.toThrow(/trace-terminal/);
+		await marker('trace-terminal');
+
+		await knowledgeApplicationGateBefore(
+			directory,
+			{ tool: 'phase_complete', agent: 'architect', sessionID: 'session-a' },
+			enforce,
+		);
+	});
+
+	it('isolates memberships by session', async () => {
+		await display('other-session-trace', ENTRY, 'session-b');
+
+		await knowledgeApplicationGateBefore(
+			directory,
+			{ tool: 'save_plan', agent: 'architect', sessionID: 'session-a' },
+			enforce,
+		);
+	});
+
+	it('fails closed when receipt authority is corrupt', async () => {
+		await display('trace-corrupt');
+		writeFileSync(
+			path.join(directory, '.swarm', 'knowledge-receipts-v2.jsonl'),
+			'not-json\n',
+		);
+
+		await expect(
+			knowledgeApplicationGateBefore(
+				directory,
+				{ tool: 'save_plan', agent: 'architect', sessionID: 'session-a' },
+				enforce,
+			),
+		).rejects.toThrow(/receipt authority unavailable/);
+	});
+
+	it('warn mode writes both exact pairs and compatibility ids', async () => {
+		await display('trace-warn');
+
+		await knowledgeApplicationGateBefore(
+			directory,
+			{ tool: 'save_plan', agent: 'architect', sessionID: 'session-a' },
+			{ ...enforce, mode: 'warn' },
+		);
+		await Bun.sleep(25);
+
+		const body = readFileSync(
+			path.join(directory, '.swarm', 'events.jsonl'),
+			'utf8',
+		);
+		expect(body).toContain(`trace-warn/${ENTRY}`);
+		expect(body).toContain('unacknowledged_critical_ids');
+	});
+
+	it('fails closed on a missing session contract in enforce mode', async () => {
+		await expect(
+			knowledgeApplicationGateBefore(
+				directory,
 				{ tool: 'save_plan', agent: 'architect' },
-				{ ...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG, mode: 'enforce' },
+				enforce,
 			),
-		).rejects.toThrow(/KNOWLEDGE_ENFORCE_GATE_DENY.*missing sessionID/);
-	});
-
-	it('throws in enforce mode when sessionID is an empty string', async () => {
-		swarmState.currentCriticalShownIds.set('s1', {
-			ids: [ID_A],
-			generatedAt: Date.now(),
-		});
-		await expect(
-			knowledgeApplicationGateBefore(
-				tmp,
-				{ tool: 'save_plan', agent: 'architect', sessionID: '' },
-				{ ...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG, mode: 'enforce' },
-			),
-		).rejects.toThrow(/KNOWLEDGE_ENFORCE_GATE_DENY.*missing sessionID/);
-	});
-
-	it('returns silently in warn mode when sessionID is missing AND writes a warning event', async () => {
-		const { _internals } = await import(
-			'../../../src/hooks/knowledge-application-gate'
-		);
-		const origWriteWarnEvent = _internals.writeWarnEvent;
-		const writeSpy = mock(() => Promise.resolve());
-		_internals.writeWarnEvent = writeSpy;
-		try {
-			swarmState.currentCriticalShownIds.set('s1', {
-				ids: [ID_A],
-				generatedAt: Date.now(),
-			});
-			await knowledgeApplicationGateBefore(
-				tmp,
-				{ tool: 'save_plan', agent: 'architect' },
-				{ ...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG, mode: 'warn' },
-			);
-			// gate must NOT throw
-			expect(writeSpy).toHaveBeenCalledTimes(1);
-			const call = writeSpy.mock.calls[0]!;
-			expect(call[0]).toBe(tmp);
-			expect(call[1]).toMatchObject({
-				event: 'knowledge_application_gate_warn',
-				tool: 'save_plan',
-				reason: 'missing_sessionID',
-			});
-		} finally {
-			// restore original so other tests are unaffected
-			_internals.writeWarnEvent = origWriteWarnEvent;
-			mock.restore();
-		}
-	});
-
-	it('warn mode does not throw and writes events.jsonl', async () => {
-		swarmState.currentCriticalShownIds.set('s1', {
-			ids: [ID_A, ID_B],
-			generatedAt: Date.now(),
-		});
-		await mkdir(path.join(tmp, '.swarm'), { recursive: true });
-		await knowledgeApplicationGateBefore(
-			tmp,
-			{ tool: 'save_plan', agent: 'architect', sessionID: 's1' },
-			{ ...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG, mode: 'warn' },
-		);
-		// give the fire-and-forget write a moment
-		await new Promise((r) => setTimeout(r, 30));
-		const eventsPath = path.join(tmp, '.swarm', 'events.jsonl');
-		expect(existsSync(eventsPath)).toBe(true);
-		const body = readFileSync(eventsPath, 'utf-8');
-		expect(body).toContain('knowledge_application_gate_warn');
-		expect(body).toContain(ID_A);
-	});
-
-	it('enforce mode throws KNOWLEDGE_ENFORCE_GATE_DENY', async () => {
-		swarmState.currentCriticalShownIds.set('s1', {
-			ids: [ID_A],
-			generatedAt: Date.now(),
-		});
-		await expect(
-			knowledgeApplicationGateBefore(
-				tmp,
-				{ tool: 'save_plan', agent: 'architect', sessionID: 's1' },
-				{ ...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG, mode: 'enforce' },
-			),
-		).rejects.toThrow(/KNOWLEDGE_ENFORCE_GATE_DENY/);
-	});
-
-	it('enforce denial text lists all accepted terminal ack markers', async () => {
-		swarmState.currentCriticalShownIds.set('s1', {
-			ids: [ID_A],
-			generatedAt: Date.now(),
-		});
-		await expect(
-			knowledgeApplicationGateBefore(
-				tmp,
-				{ tool: 'save_plan', agent: 'architect', sessionID: 's1' },
-				{ ...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG, mode: 'enforce' },
-			),
-		).rejects.toThrow(
-			/KNOWLEDGE_APPLIED.*KNOWLEDGE_IGNORED.*KNOWLEDGE_CONTRADICTED.*KNOWLEDGE_VIOLATED/,
-		);
-	});
-
-	it('enforce mode allows when dedup set already records an ack for the id', async () => {
-		swarmState.currentCriticalShownIds.set('s1', {
-			ids: [ID_A],
-			generatedAt: Date.now(),
-		});
-		swarmState.knowledgeAckDedup.add(buildAckDedupKey('s1', ID_A, 'applied'));
-		await knowledgeApplicationGateBefore(
-			tmp,
-			{ tool: 'save_plan', agent: 'architect', sessionID: 's1' },
-			{ ...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG, mode: 'enforce' },
-		);
-		// no throw
-	});
-
-	it('enforce mode allows when ack is "ignored" (architect chose)', async () => {
-		swarmState.currentCriticalShownIds.set('s1', {
-			ids: [ID_A],
-			generatedAt: Date.now(),
-		});
-		swarmState.knowledgeAckDedup.add(buildAckDedupKey('s1', ID_A, 'ignored'));
-		await knowledgeApplicationGateBefore(
-			tmp,
-			{ tool: 'phase_complete', agent: 'architect', sessionID: 's1' },
-			{ ...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG, mode: 'enforce' },
-		);
-		// no throw
-	});
-
-	it('enforce mode allows when ack is "contradicted" by current authority', async () => {
-		swarmState.currentCriticalShownIds.set('s1', {
-			ids: [ID_A],
-			generatedAt: Date.now(),
-		});
-		swarmState.knowledgeAckDedup.add(
-			buildAckDedupKey('s1', ID_A, 'contradicted'),
-		);
-		await knowledgeApplicationGateBefore(
-			tmp,
-			{ tool: 'save_plan', agent: 'architect', sessionID: 's1' },
-			{ ...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG, mode: 'enforce' },
-		);
-	});
-
-	it('enforce mode allows when ack is "violated" (architect chose)', async () => {
-		swarmState.currentCriticalShownIds.set('s1', {
-			ids: [ID_A],
-			generatedAt: Date.now(),
-		});
-		swarmState.knowledgeAckDedup.add(buildAckDedupKey('s1', ID_A, 'violated'));
-		await knowledgeApplicationGateBefore(
-			tmp,
-			{ tool: 'phase_complete', agent: 'architect', sessionID: 's1' },
-			{ ...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG, mode: 'enforce' },
-		);
-		// no throw
-	});
-
-	it('regression GATE-002: prior-day ack still satisfies same-session gate', async () => {
-		swarmState.currentCriticalShownIds.set('s1', {
-			ids: [ID_A],
-			generatedAt: Date.now(),
-		});
-		swarmState.knowledgeAckDedup.add(
-			buildAckDedupKey('s1', ID_A, 'applied', new Date('2024-01-01T00:00:00Z')),
-		);
-
-		await knowledgeApplicationGateBefore(
-			tmp,
-			{ tool: 'save_plan', agent: 'architect', sessionID: 's1' },
-			{ ...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG, mode: 'enforce' },
-		);
-		// no throw
-	});
-
-	it('enforce mode blocks when SOME but not all critical ids are acked', async () => {
-		swarmState.currentCriticalShownIds.set('s1', {
-			ids: [ID_A, ID_B],
-			generatedAt: Date.now(),
-		});
-		swarmState.knowledgeAckDedup.add(buildAckDedupKey('s1', ID_A, 'applied'));
-		// ID_B is not acked
-		await expect(
-			knowledgeApplicationGateBefore(
-				tmp,
-				{ tool: 'update_task_status', agent: 'architect', sessionID: 's1' },
-				{ ...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG, mode: 'enforce' },
-			),
-		).rejects.toThrow(new RegExp(ID_B));
-	});
-
-	it('respects swarm-prefixed architect names', async () => {
-		swarmState.currentCriticalShownIds.set('s1', {
-			ids: [ID_A],
-			generatedAt: Date.now(),
-		});
-		await expect(
-			knowledgeApplicationGateBefore(
-				tmp,
-				{ tool: 'save_plan', agent: 'paid_architect', sessionID: 's1' },
-				{ ...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG, mode: 'enforce' },
-			),
-		).rejects.toThrow(/KNOWLEDGE_ENFORCE_GATE_DENY/);
-	});
-
-	it('gates Task delegations as well', async () => {
-		swarmState.currentCriticalShownIds.set('s1', {
-			ids: [ID_A],
-			generatedAt: Date.now(),
-		});
-		await expect(
-			knowledgeApplicationGateBefore(
-				tmp,
-				{ tool: 'Task', agent: 'architect', sessionID: 's1' },
-				{ ...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG, mode: 'enforce' },
-			),
-		).rejects.toThrow(/KNOWLEDGE_ENFORCE_GATE_DENY/);
-	});
-
-	it('uses config.high_risk_tools when provided instead of default set', async () => {
-		swarmState.currentCriticalShownIds.set('s1', {
-			ids: [ID_A],
-			generatedAt: Date.now(),
-		});
-		// Custom config: only 'custom_tool' is high-risk — NOT 'save_plan'
-		const customConfig = {
-			...DEFAULT_KNOWLEDGE_APPLICATION_CONFIG,
-			mode: 'enforce',
-			high_risk_tools: ['custom_tool'],
-		};
-		// Gate MUST throw for 'custom_tool' (it's in the custom set)
-		await expect(
-			knowledgeApplicationGateBefore(
-				tmp,
-				{
-					tool: 'custom_tool',
-					agent: 'architect',
-					sessionID: 's1',
-				},
-				customConfig,
-			),
-		).rejects.toThrow(/KNOWLEDGE_ENFORCE_GATE_DENY/);
-		// Gate must NOT throw for 'save_plan' (it's NOT in the custom set)
-		await knowledgeApplicationGateBefore(
-			tmp,
-			{
-				tool: 'save_plan',
-				agent: 'architect',
-				sessionID: 's1',
-			},
-			customConfig,
-		);
+		).rejects.toThrow(/missing sessionID/);
 	});
 });
 
-describe('knowledgeApplicationTransformScan', () => {
-	function archMessage(text: string, agent = 'architect'): MessageWithParts {
-		return {
-			info: { role: 'assistant', agent },
-			parts: [{ type: 'text', text }],
+describe('knowledgeApplicationTransformScan V2 authority', () => {
+	it('atomically commits one exact pair without affecting its sibling trace', async () => {
+		await display('trace-one');
+		await display('trace-two');
+		const output = {
+			messages: [architectMessage(`KNOWLEDGE_APPLIED:trace-one:${ENTRY}`)],
 		};
-	}
 
-	it('records inline acks and bumps dedup set', async () => {
-		const out = {
-			messages: [
-				archMessage(
-					`KNOWLEDGE_APPLIED: ${ID_A}\nKNOWLEDGE_IGNORED: ${ID_B} reason=not relevant`,
+		await knowledgeApplicationTransformScan(directory, output, 'session-a');
+
+		const state = await queryLiveMemberships(directory, {
+			session_id: 'session-a',
+			include_terminal: true,
+		});
+		if (!state.ok) throw new Error(state.detail);
+		const acknowledged = state.memberships.find(
+			(item) => item.trace_id === 'trace-one',
+		);
+		const sibling = state.memberships.find(
+			(item) => item.trace_id === 'trace-two',
+		);
+		expect(acknowledged?.application_marker?.outcome).toBe('applied');
+		expect(acknowledged?.terminal?.outcome).toBe('applied');
+		expect(sibling?.application_marker).toBeUndefined();
+		expect(sibling?.terminal).toBeUndefined();
+		expect(
+			swarmState.knowledgeAckDedup.has(
+				buildAckDedupKey(
+					'session-a',
+					JSON.stringify(['trace-one', ENTRY]),
+					'applied',
 				),
-			],
-		};
-		await knowledgeApplicationTransformScan(tmp, out, 's1');
-		const dedup = swarmState.knowledgeAckDedup;
-		expect(dedup.has(buildAckDedupKey('s1', ID_A, 'applied'))).toBe(true);
-		expect(dedup.has(buildAckDedupKey('s1', ID_B, 'ignored'))).toBe(true);
-		// audit log written
-		expect(existsSync(resolveApplicationLogPath(tmp))).toBe(true);
-	});
-
-	it('does not double-record on a second transform pass with same text', async () => {
-		const out = {
-			messages: [archMessage(`KNOWLEDGE_APPLIED: ${ID_A}`)],
-		};
-		await knowledgeApplicationTransformScan(tmp, out, 's1');
-		await knowledgeApplicationTransformScan(tmp, out, 's1');
-		const log = readFileSync(resolveApplicationLogPath(tmp), 'utf-8')
+			),
+		).toBe(true);
+		const diagnostics = readFileSync(
+			resolveApplicationLogPath(directory),
+			'utf8',
+		)
 			.trim()
 			.split('\n');
-		expect(log.length).toBe(1);
+		expect(diagnostics).toHaveLength(1);
+	});
+
+	it('is idempotent and does not duplicate the diagnostic', async () => {
+		await display('trace-idempotent');
+		const output = {
+			messages: [
+				architectMessage(`KNOWLEDGE_APPLIED:trace-idempotent:${ENTRY}`),
+			],
+		};
+
+		await knowledgeApplicationTransformScan(directory, output, 'session-a');
+		await knowledgeApplicationTransformScan(directory, output, 'session-a');
+
+		expect(
+			readFileSync(resolveApplicationLogPath(directory), 'utf8')
+				.trim()
+				.split('\n'),
+		).toHaveLength(1);
+	});
+
+	it.each([
+		['IGNORED', 'ignored', 'not relevant to this plan'],
+		['N_A', 'n_a', 'different subsystem'],
+	] as const)('propagates %s reasons to both authoritative projections', async (verb, outcome, reason) => {
+		const traceId = `trace-${outcome}`;
+		await display(traceId);
+		await knowledgeApplicationTransformScan(
+			directory,
+			{
+				messages: [
+					architectMessage(
+						`KNOWLEDGE_${verb}:${traceId}:${ENTRY} reason=${reason}`,
+					),
+				],
+			},
+			'session-a',
+		);
+		const state = await queryLiveMemberships(directory, {
+			session_id: 'session-a',
+			include_terminal: true,
+		});
+		if (!state.ok) throw new Error(state.detail);
+		expect(state.memberships[0]?.application_marker).toMatchObject({
+			outcome,
+			reason,
+		});
+		expect(state.memberships[0]?.terminal).toMatchObject({ outcome, reason });
+	});
+
+	it('does not dedup or diagnose when authority is unavailable', async () => {
+		await display('trace-corrupt');
+		writeFileSync(
+			path.join(directory, '.swarm', 'knowledge-receipts-v2.jsonl'),
+			'not-json\n',
+		);
+
+		await knowledgeApplicationTransformScan(
+			directory,
+			{
+				messages: [
+					architectMessage(`KNOWLEDGE_APPLIED:trace-corrupt:${ENTRY}`),
+				],
+			},
+			'session-a',
+		);
+
+		expect(swarmState.knowledgeAckDedup.size).toBe(0);
+		expect(existsSync(resolveApplicationLogPath(directory))).toBe(false);
 	});
 
 	it('ignores non-architect messages', async () => {
-		const out = {
-			messages: [archMessage(`KNOWLEDGE_APPLIED: ${ID_A}`, 'coder')],
-		};
-		await knowledgeApplicationTransformScan(tmp, out, 's1');
-		expect(existsSync(resolveApplicationLogPath(tmp))).toBe(false);
-	});
-
-	it('handles swarm-prefixed architect agent', async () => {
-		const out = {
-			messages: [archMessage(`KNOWLEDGE_APPLIED: ${ID_A}`, 'paid_architect')],
-		};
-		await knowledgeApplicationTransformScan(tmp, out, 's1');
-		expect(
-			swarmState.knowledgeAckDedup.has(buildAckDedupKey('s1', ID_A, 'applied')),
-		).toBe(true);
-	});
-
-	it('no-op when sessionID missing', async () => {
-		const out = { messages: [archMessage(`KNOWLEDGE_APPLIED: ${ID_A}`)] };
-		await knowledgeApplicationTransformScan(tmp, out, undefined);
-		expect(swarmState.knowledgeAckDedup.size).toBe(0);
-	});
-
-	describe('knowledge_receipt does NOT satisfy the enforcement gate', () => {
-		it('does not populate knowledgeAckDedup when recording a receipt', async () => {
-			const baselineSize = swarmState.knowledgeAckDedup.size;
-			await knowledge_receipt.execute(
-				{
-					trace_id: 'trace-receipt-gate-test',
-					applied: [
-						{
-							id: ID_A,
-							how: 'used in plan review',
-							evidence_files: ['src/agents/architect.ts'],
-							verified_by: 'reviewer',
-						},
-					],
-				} as never,
-				{ directory: tmp, sessionID: 's1', agent: 'architect' },
-			);
-			// knowledge_receipt writes audit events only; it must NOT touch the
-			// dedup set that the enforcement gate consults.
-			expect(swarmState.knowledgeAckDedup.size).toBe(baselineSize);
-			expect(
-				swarmState.knowledgeAckDedup.has(
-					buildAckDedupKey('s1', ID_A, 'applied'),
-				),
-			).toBe(false);
-		});
+		await display('trace-coder');
+		await knowledgeApplicationTransformScan(
+			directory,
+			{
+				messages: [
+					architectMessage(`KNOWLEDGE_APPLIED:trace-coder:${ENTRY}`, 'coder'),
+				],
+			},
+			'session-a',
+		);
+		expect(existsSync(resolveApplicationLogPath(directory))).toBe(false);
 	});
 });

@@ -3,33 +3,26 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { PluginConfig } from '../../src/config';
+import { transitionTaskWorkflowEvidence } from '../../src/gate-evidence';
 import { createDelegationGateHook } from '../../src/hooks/delegation-gate';
-import type { DelegationEntry } from '../../src/state';
-import {
-	advanceTaskState,
-	ensureAgentSession,
-	hasActiveTurboMode,
-	resetSwarmState,
-	swarmState,
-} from '../../src/state';
+import { ensureAgentSession, resetSwarmState } from '../../src/state';
 import { writeApprovedPlan } from '../helpers/approved-plan';
-import { withFrozenClock } from '../helpers/test-clock.js';
 
 /**
  * Simulate a coder delegation by adding a delegation chain entry.
  * The delegation-gate checks for this to determine if coder_delegated state
  * is from the current session (not stale from a prior session).
  */
-function simulateCoderDelegation(sessionId: string): void {
-	const existing = swarmState.delegationChains.get(sessionId) ?? [];
-	const entry: DelegationEntry = {
-		from: 'architect',
-		to: 'coder',
-		timestamp: withFrozenClock(() => Date.now(), {
-			fixedNow: 1_700_000_000_000,
-		}),
-	};
-	swarmState.delegationChains.set(sessionId, [...existing, entry]);
+async function seedAcceptedMutation(
+	directory: string,
+	taskId: string,
+): Promise<void> {
+	await transitionTaskWorkflowEvidence(directory, taskId, {
+		type: 'accepted_mutation',
+		agentType: 'coder',
+		expectedGeneration: 0,
+		transitionId: `accepted-${taskId}`,
+	});
 }
 
 function makeConfig(): PluginConfig {
@@ -69,12 +62,11 @@ describe('runtime reviewer gate', () => {
 		const hooks = createDelegationGateHook(config, testDir);
 		const sessionId = 'session-reviewer-gate-1';
 
-		const session = ensureAgentSession(sessionId, 'architect', testDir);
+		ensureAgentSession(sessionId, 'architect', testDir);
 		// Set task 1.1 to coder_delegated (coder already ran, no reviewer)
-		advanceTaskState(session, '1.1', 'coder_delegated');
+		await seedAcceptedMutation(testDir, '1.1');
 		// Simulate that the coder delegation happened in this session
 		// (delegation-gate resets stale coder_delegated state if no delegation entry exists)
-		simulateCoderDelegation(sessionId);
 
 		const input = {
 			tool: 'Task',
@@ -90,7 +82,7 @@ describe('runtime reviewer gate', () => {
 		};
 
 		await expect(hooks.toolBefore(input, output)).rejects.toThrow(
-			'REVIEWER_GATE_VIOLATION',
+			'STAGE_A_REQUIRED',
 		);
 	});
 
@@ -124,10 +116,21 @@ describe('runtime reviewer gate', () => {
 		const hooks = createDelegationGateHook(config, testDir);
 		const sessionId = 'session-reviewer-gate-3';
 
-		const session = ensureAgentSession(sessionId, 'architect', testDir);
+		ensureAgentSession(sessionId, 'architect', testDir);
 		// Advance through states: idle → coder_delegated → reviewer_run
-		advanceTaskState(session, '1.1', 'coder_delegated');
-		advanceTaskState(session, '1.1', 'reviewer_run');
+		await seedAcceptedMutation(testDir, '1.1');
+		await transitionTaskWorkflowEvidence(testDir, '1.1', {
+			type: 'stage_a_passed',
+			expectedGeneration: 1,
+			transitionId: 'stage-a-1.1',
+		});
+		await transitionTaskWorkflowEvidence(testDir, '1.1', {
+			type: 'stage_b_completed',
+			gate: 'reviewer',
+			sessionId,
+			expectedGeneration: 1,
+			transitionId: 'reviewer-1.1',
+		});
 
 		const input = {
 			tool: 'Task',
@@ -152,7 +155,7 @@ describe('runtime reviewer gate', () => {
 		const sessionId = 'session-reviewer-gate-4';
 
 		const session = ensureAgentSession(sessionId, 'architect', testDir);
-		advanceTaskState(session, '1.1', 'coder_delegated');
+		await seedAcceptedMutation(testDir, '1.1');
 
 		// Enable turbo mode
 		session.turboMode = true;
@@ -181,9 +184,8 @@ describe('runtime reviewer gate', () => {
 
 		const session = ensureAgentSession(sessionId, 'architect', testDir);
 		// Task 3.1 is a Tier 3 task
-		advanceTaskState(session, '3.1', 'coder_delegated');
+		await seedAcceptedMutation(testDir, '3.1');
 		// Simulate that the coder delegation happened in this session
-		simulateCoderDelegation(sessionId);
 
 		// Enable turbo mode
 		session.turboMode = true;
@@ -203,7 +205,7 @@ describe('runtime reviewer gate', () => {
 
 		// Should throw even in turbo mode for Tier 3 tasks
 		await expect(hooks.toolBefore(input, output)).rejects.toThrow(
-			'REVIEWER_GATE_VIOLATION',
+			'STAGE_A_REQUIRED',
 		);
 	});
 });

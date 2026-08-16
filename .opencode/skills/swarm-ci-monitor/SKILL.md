@@ -55,14 +55,16 @@ ci-fix-monitor; do not re-derive it here.
 The canonical uses the `gh` CLI. In remote/MCP environments, use the equivalent
 MCP tools and verify availability first:
 
-| `gh` CLI | Remote MCP equivalent |
+| Capability needed | `gh` CLI | Example remote-MCP shape (resolve the real names via ToolSearch) |
 |---|---|
 | `gh pr checks <N>` | `mcp__github__pull_request_read` method `get_check_runs` |
 | `gh pr view <N> --json mergeable,mergeStateStatus,reviewDecision` | `mcp__github__pull_request_read` method `get` |
 | `gh run view <run> --log` | `mcp__github__get_job_logs` with `job_id`, `return_content: true` |
 
-> MCP tool names are injected by the harness and not stable across
-> environments. Use `ToolSearch` to verify before first use in a session.
+> MCP tool names are injected by the harness and are NOT stable across
+> environments. The right-hand column is an example SHAPE only: resolve tools
+> by CAPABILITY (PR read, job-log read) via `ToolSearch` before first use —
+> never assume a specific `mcp__github__*` name exists (issue #2131 finding 9).
 
 ## Step 1 — Pre-flight gates (run ONCE, before entering the loop)
 

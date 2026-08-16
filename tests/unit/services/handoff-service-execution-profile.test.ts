@@ -20,11 +20,13 @@ describe('formatHandoffMarkdown execution profile', () => {
 				locked: true,
 				auto_proceed: true,
 				commit_after_each_completed_task: true,
+				planning_profile: 'strict',
 			},
 		};
 
 		const markdown = formatHandoffMarkdown(data);
 		expect(markdown).toContain('Auto Proceed');
 		expect(markdown).toContain('Commit After Each Completed Task');
+		expect(markdown).toContain('Planning Profile');
 	});
 });

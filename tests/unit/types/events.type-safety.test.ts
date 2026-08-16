@@ -54,12 +54,12 @@ describe('src/types/events.ts - ADVERSARIAL TESTS', () => {
 				type: 'coder_retry_circuit_breaker',
 				timestamp: '2024-01-01T00:00:00Z',
 				taskId: 'task-123',
+				retryEpoch: 1,
 				rejectionCount: 3,
 				rejectionHistory: ['error1', 'error2', 'error3'],
 				phase: 1,
 				action: 'sounding_board_consultation',
 			};
-
 			expect(validEvent.action).toBe('sounding_board_consultation');
 
 			// Verify all valid actions are constrained
@@ -220,12 +220,12 @@ describe('src/types/events.ts - ADVERSARIAL TESTS', () => {
 				type: 'coder_retry_circuit_breaker',
 				timestamp: '2024-01-01T00:00:00Z',
 				taskId: 'task-123',
+				retryEpoch: 1,
 				rejectionCount: 3,
 				rejectionHistory: ['error1', 'error2', 'error3'],
 				phase: 1,
 				action: 'user_escalation',
 			};
-
 			expect([event1, event2, event3, event4, event5]).toHaveLength(5);
 		});
 
@@ -284,13 +284,13 @@ describe('src/types/events.ts - ADVERSARIAL TESTS', () => {
 					type: 'coder_retry_circuit_breaker',
 					timestamp: '2024-01-01T00:00:00Z',
 					taskId: 'task-123',
+					retryEpoch: 1,
 					rejectionCount: 3,
 					rejectionHistory: ['error1'],
 					phase: 1,
 					action: 'sounding_board_consultation',
 				},
 			];
-
 			expect(allEvents).toHaveLength(5);
 		});
 	});
@@ -357,6 +357,7 @@ describe('src/types/events.ts - ADVERSARIAL TESTS', () => {
 				type: 'coder_retry_circuit_breaker',
 				timestamp: '2024-01-01T00:00:00Z',
 				taskId: 'task-123',
+				retryEpoch: 1,
 				rejectionCount: 3,
 				rejectionHistory: ['error1', 'error2'],
 				phase: 1,
@@ -364,7 +365,6 @@ describe('src/types/events.ts - ADVERSARIAL TESTS', () => {
 				overrideAction: 'malicious_override', // Should be rejected
 			};
 		});
-
 		test('Extra fields cannot be injected into nested checklistResults', () => {
 			// @ts-expect-error - Extra fields in nested object should be rejected
 			const pollutedEvent: CoderSelfAuditEvent = {
@@ -479,12 +479,12 @@ describe('src/types/events.ts - ADVERSARIAL TESTS', () => {
 				type: 'coder_retry_circuit_breaker',
 				timestamp: '2024-01-01T00:00:00Z',
 				taskId: 'task-123',
+				retryEpoch: 1,
 				rejectionCount: 3,
 				rejectionHistory: ['error1', 'error2'],
 				phase: 1,
 				action: 'user_escalation',
 			};
-
 			expect(validRetry.rejectionHistory).toBeArray();
 		});
 

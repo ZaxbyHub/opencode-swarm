@@ -80,10 +80,46 @@ function writeEvidence(
 	gates: Record<string, unknown>,
 	required_gates: string[],
 ): void {
+	const normalizedGates = Object.fromEntries(
+		Object.entries(gates).map(([gate, value]) => [
+			gate,
+			{
+				sessionId: `session-${gate}`,
+				timestamp: '2026-08-14T00:00:00.000Z',
+				agent: gate,
+				...(typeof value === 'object' && value !== null ? value : {}),
+			},
+		]),
+	) as Record<string, Record<string, unknown>>;
+	const gateNames = new Set(Object.keys(normalizedGates));
+	const generation = gateNames.size > 0 ? 1 : 0;
+	const state: TaskWorkflowState = gateNames.has('council')
+		? 'pre_check_passed'
+		: gateNames.has('test_engineer')
+			? 'tests_run'
+			: gateNames.has('reviewer')
+				? 'reviewer_run'
+				: gateNames.has('coder')
+					? 'coder_delegated'
+					: 'idle';
+	if (normalizedGates.council) {
+		normalizedGates.council.workflowGeneration = generation;
+	}
 	const evidence = {
 		taskId,
 		required_gates,
-		gates,
+		gates: normalizedGates,
+		workflow: {
+			schema: 'exact-task-v1',
+			generation,
+			state,
+			retryCount: 0,
+			retryHistory: [],
+			retryEpoch: 0,
+			lastOutcome: state === 'idle' ? 'none' : 'gate_recorded',
+			lastTransitionId: null,
+			updatedAt: '2026-08-14T00:00:00.000Z',
+		},
 	};
 	writeFileSync(
 		path.join(tmpDir, '.swarm', 'evidence', `${taskId}.json`),
@@ -121,8 +157,8 @@ describe('rehydrateSessionFromDisk', () => {
 		// Act
 		await rehydrateSessionFromDisk(tmpDir, session);
 
-		// Assert: in_progress -> coder_delegated, completed -> complete, pending -> idle
-		expect(session.taskWorkflowStates!.get('1.1')).toBe('coder_delegated');
+		// Plan intent alone does not prove an accepted coder mutation.
+		expect(session.taskWorkflowStates!.get('1.1')).toBe('idle');
 		expect(session.taskWorkflowStates!.get('1.2')).toBe('complete');
 		expect(session.taskWorkflowStates!.get('1.3')).toBe('idle');
 	});
@@ -168,11 +204,11 @@ describe('rehydrateSessionFromDisk', () => {
 		// Act
 		await rehydrateSessionFromDisk(tmpDir, session);
 
-		// Assert: evidence wins -> complete (all required gates present)
-		expect(session.taskWorkflowStates!.get('1.1')).toBe('complete');
+		// Stage B evidence is non-terminal until the central terminal transaction.
+		expect(session.taskWorkflowStates!.get('1.1')).toBe('tests_run');
 	});
 
-	it('4. evidence with all required gates results in complete state', async () => {
+	it('4. all required Stage B gates rehydrate as tests_run, not terminal', async () => {
 		// Arrange: plan says pending, evidence shows all gates passed
 		writePlan([{ id: '1.1', status: 'pending' }]);
 		writeEvidence(
@@ -193,8 +229,8 @@ describe('rehydrateSessionFromDisk', () => {
 		// Act
 		await rehydrateSessionFromDisk(tmpDir, session);
 
-		// Assert: all required gates passed -> complete
-		expect(session.taskWorkflowStates!.get('1.1')).toBe('complete');
+		// Passing gates reaches tests_run; completion is a separate transaction.
+		expect(session.taskWorkflowStates!.get('1.1')).toBe('tests_run');
 	});
 
 	// ── NO DOWNGRADE OF IN-MEMORY STATE ───────────────────────────────────────
@@ -235,7 +271,7 @@ describe('rehydrateSessionFromDisk', () => {
 
 	it('7. in-memory complete is preserved even if disk shows earlier state', async () => {
 		// Arrange: session has complete, disk has coder_delegated
-		writePlan([{ id: '1.1', status: 'in_progress' }]); // -> coder_delegated
+		writePlan([{ id: '1.1', status: 'in_progress' }]); // plan intent -> idle
 
 		const session = createTestSession();
 		session.taskWorkflowStates!.set('1.1', 'complete');
@@ -270,8 +306,8 @@ describe('rehydrateSessionFromDisk', () => {
 		// Act
 		await rehydrateSessionFromDisk(tmpDir, session);
 
-		// Assert: should use plan state
-		expect(session.taskWorkflowStates!.get('1.1')).toBe('coder_delegated');
+		// Plan state is intent only; no durable accepted mutation exists.
+		expect(session.taskWorkflowStates!.get('1.1')).toBe('idle');
 	});
 
 	it('10. malformed plan.json is non-fatal', async () => {
@@ -300,8 +336,8 @@ describe('rehydrateSessionFromDisk', () => {
 		// Act
 		await rehydrateSessionFromDisk(tmpDir, session);
 
-		// Assert: should fall back to plan state
-		expect(session.taskWorkflowStates!.get('1.1')).toBe('coder_delegated');
+		// Assert: should fall back to non-authoritative plan intent.
+		expect(session.taskWorkflowStates!.get('1.1')).toBe('idle');
 	});
 
 	it('12. evidence file without required_gates is skipped', async () => {
@@ -317,8 +353,8 @@ describe('rehydrateSessionFromDisk', () => {
 		// Act
 		await rehydrateSessionFromDisk(tmpDir, session);
 
-		// Assert: should fall back to plan state
-		expect(session.taskWorkflowStates!.get('1.1')).toBe('coder_delegated');
+		// Assert: should fall back to non-authoritative plan intent.
+		expect(session.taskWorkflowStates!.get('1.1')).toBe('idle');
 	});
 
 	it('13. evidence file with invalid taskId format is skipped', async () => {
@@ -334,8 +370,8 @@ describe('rehydrateSessionFromDisk', () => {
 		// Act
 		await rehydrateSessionFromDisk(tmpDir, session);
 
-		// Assert: should use plan state for 1.1
-		expect(session.taskWorkflowStates!.get('1.1')).toBe('coder_delegated');
+		// Assert: should use plan intent for 1.1.
+		expect(session.taskWorkflowStates!.get('1.1')).toBe('idle');
 	});
 
 	// ── EDGE CASES ─────────────────────────────────────────────────────────────
@@ -358,10 +394,10 @@ describe('rehydrateSessionFromDisk', () => {
 		await rehydrateSessionFromDisk(tmpDir, session);
 
 		// Assert: all tasks should be present
-		expect(session.taskWorkflowStates!.get('1.1')).toBe('coder_delegated');
+		expect(session.taskWorkflowStates!.get('1.1')).toBe('idle');
 		expect(session.taskWorkflowStates!.get('1.2')).toBe('complete');
 		expect(session.taskWorkflowStates!.get('2.1')).toBe('idle');
-		expect(session.taskWorkflowStates!.get('2.2')).toBe('coder_delegated');
+		expect(session.taskWorkflowStates!.get('2.2')).toBe('idle');
 	});
 
 	it('15. taskWorkflowStates is initialized if missing', async () => {
@@ -425,8 +461,8 @@ describe('rehydrateSessionFromDisk', () => {
 		// Act
 		await rehydrateSessionFromDisk(tmpDir, session);
 
-		// Assert: only plan state should be used
-		expect(session.taskWorkflowStates!.get('1.1')).toBe('coder_delegated');
+		// Assert: only non-authoritative plan intent should be used.
+		expect(session.taskWorkflowStates!.get('1.1')).toBe('idle');
 	});
 
 	it('19. empty gates object in evidence results in idle state', async () => {
@@ -462,7 +498,7 @@ describe('rehydrateSessionFromDisk', () => {
 		await rehydrateSessionFromDisk(tmpDir, session);
 
 		// Assert: only tasks in plan should be processed; .txt files ignored
-		expect(session.taskWorkflowStates!.get('1.1')).toBe('coder_delegated');
+		expect(session.taskWorkflowStates!.get('1.1')).toBe('idle');
 		// Task 1.2 is not in plan, so should not exist in workflow states
 		expect(session.taskWorkflowStates!.has('1.2')).toBe(false);
 	});
@@ -572,7 +608,7 @@ describe('council verdict rehydration', () => {
 		expect(session.taskCouncilApproved!.has('1.1')).toBe(false);
 	});
 
-	it('5. in-memory verdict wins over disk evidence (not overwritten)', async () => {
+	it('5. authoritative disk verdict replaces stale in-memory verdict', async () => {
 		// Arrange
 		writePlan([{ id: '1.1', status: 'in_progress' }]);
 		writeCouncilEvidence('1.1', { verdict: 'APPROVE', roundNumber: 2 });
@@ -588,11 +624,11 @@ describe('council verdict rehydration', () => {
 		// Act
 		await rehydrateSessionFromDisk(tmpDir, session);
 
-		// Assert: in-memory REJECT should be preserved, not overwritten by APPROVE from disk
+		// Durable exact-generation evidence is authoritative after restart.
 		expect(session.taskCouncilApproved!.get('1.1')).toEqual({
-			verdict: 'REJECT',
-			roundNumber: 1,
-			quorumSize: 3,
+			verdict: 'APPROVE',
+			roundNumber: 2,
+			quorumSize: 1,
 		});
 	});
 
@@ -829,7 +865,7 @@ describe('council verdict rehydration', () => {
 
 	it('18. taskWorkflowStates also rehydrated alongside council verdicts', async () => {
 		// Arrange: verify both workflow state (via plan status) and council verdict are rehydrated
-		writePlan([{ id: '1.1', status: 'in_progress' }]); // plan says in_progress -> coder_delegated
+		writePlan([{ id: '1.1', status: 'in_progress' }]); // council evidence supplies exact state
 		writeEvidence(
 			'1.1',
 			{ council: { verdict: 'APPROVE', roundNumber: 1 } },
@@ -842,7 +878,7 @@ describe('council verdict rehydration', () => {
 		await rehydrateSessionFromDisk(tmpDir, session);
 
 		// Assert: plan-derived workflow state AND council verdict are both rehydrated
-		expect(session.taskWorkflowStates!.get('1.1')).toBe('coder_delegated');
+		expect(session.taskWorkflowStates!.get('1.1')).toBe('pre_check_passed');
 		expect(session.taskCouncilApproved!.get('1.1')).toEqual({
 			verdict: 'APPROVE',
 			roundNumber: 1,
@@ -885,25 +921,13 @@ describe('council verdict rehydration', () => {
 			expect(session.taskCouncilApproved!.get('1.1')?.quorumSize).toBe(1);
 		});
 
-		it('evidence with non-numeric quorumSize defaults to 1', async () => {
+		it('exact evidence with non-numeric quorumSize defaults to 1', async () => {
 			writePlan([{ id: '1.1', status: 'in_progress' }]);
-			// Manually write to bypass the helper's typing
-			const dir = path.join(tmpDir, '.swarm', 'evidence');
-			mkdirSync(dir, { recursive: true });
-			writeFileSync(
-				path.join(dir, '1.1.json'),
-				JSON.stringify({
-					taskId: '1.1',
-					required_gates: ['council'],
-					gates: {
-						council: {
-							verdict: 'APPROVE',
-							roundNumber: 1,
-							quorumSize: 'invalid',
-						},
-					},
-				}),
-			);
+			writeCouncilEvidence('1.1', {
+				verdict: 'APPROVE',
+				roundNumber: 1,
+				quorumSize: 'invalid' as unknown as number,
+			});
 			const session = createTestSession();
 			await rehydrateSessionFromDisk(tmpDir, session);
 			expect(session.taskCouncilApproved!.get('1.1')?.quorumSize).toBe(1);
@@ -994,12 +1018,8 @@ describe('adversarial council verdict rehydration', () => {
 		// Act
 		await rehydrateSessionFromDisk(tmpDir, session);
 
-		// Assert: verdict should be set correctly, no prototype pollution
-		expect(session.taskCouncilApproved!.get('1.1')).toEqual({
-			verdict: 'APPROVE',
-			roundNumber: 1,
-			quorumSize: 1,
-		});
+		// Legacy/unbound evidence is rejected before council rehydration.
+		expect(session.taskCouncilApproved!.get('1.1')).toBeUndefined();
 		// Verify no prototype pollution
 		expect(Object.hasOwn({}, 'isEvil')).toBe(false);
 	});
@@ -1029,12 +1049,8 @@ describe('adversarial council verdict rehydration', () => {
 		// Act
 		await rehydrateSessionFromDisk(tmpDir, session);
 
-		// Assert: verdict should be set correctly, no constructor pollution
-		expect(session.taskCouncilApproved!.get('1.1')).toEqual({
-			verdict: 'REJECT',
-			roundNumber: 2,
-			quorumSize: 1,
-		});
+		// Legacy/unbound evidence is rejected before council rehydration.
+		expect(session.taskCouncilApproved!.get('1.1')).toBeUndefined();
 		// Verify no constructor prototype pollution
 		expect(Object.hasOwn({}, 'isAdmin')).toBe(false);
 	});
@@ -1140,7 +1156,7 @@ describe('adversarial council verdict rehydration', () => {
 
 	// ── ATTACK VECTOR 7: roundNumber as MAX_SAFE_INTEGER + 1 ──────────────
 
-	it('7. roundNumber as MAX_SAFE_INTEGER + 1 is preserved (JavaScript can represent it)', async () => {
+	it('7. unbound evidence with MAX_SAFE_INTEGER round is rejected', async () => {
 		// Arrange: MAX_SAFE_INTEGER + 1 is still finite and representable in JS
 		writePlan([{ id: '1.1', status: 'in_progress' }]);
 		const largeButFinite = Number.MAX_SAFE_INTEGER + 1; // 9007199254740992
@@ -1160,13 +1176,7 @@ describe('adversarial council verdict rehydration', () => {
 		// Act
 		await rehydrateSessionFromDisk(tmpDir, session);
 
-		// Assert: MAX_SAFE_INTEGER + 1 IS finite, so it's preserved (not defaulted to 1)
-		// This is safe behavior - no crash, no prototype pollution
-		expect(session.taskCouncilApproved!.get('1.1')).toEqual({
-			verdict: 'APPROVE',
-			roundNumber: 9007199254740992,
-			quorumSize: 1,
-		});
+		expect(session.taskCouncilApproved!.get('1.1')).toBeUndefined();
 	});
 
 	// ── ATTACK VECTOR 8: Null byte injection in verdict ────────────────────
@@ -1315,7 +1325,7 @@ describe('adversarial council verdict rehydration', () => {
 		expect(session.taskCouncilApproved!.has('1.1')).toBe(false);
 	});
 
-	it('14. roundNumber as negative large number is stored (code only checks finiteness)', async () => {
+	it('14. unbound evidence with a negative round is rejected', async () => {
 		// Arrange: negative roundNumber - code only checks isFinite, not positivity
 		writePlan([{ id: '1.1', status: 'in_progress' }]);
 		writeFileSync(
@@ -1334,16 +1344,10 @@ describe('adversarial council verdict rehydration', () => {
 		// Act
 		await rehydrateSessionFromDisk(tmpDir, session);
 
-		// Assert: negative number is stored (finite, so passes isFinite check)
-		// Safe behavior: no crash, no prototype pollution
-		expect(session.taskCouncilApproved!.get('1.1')).toEqual({
-			verdict: 'APPROVE',
-			roundNumber: -999999999,
-			quorumSize: 1,
-		});
+		expect(session.taskCouncilApproved!.get('1.1')).toBeUndefined();
 	});
 
-	it('15. roundNumber as very large negative (beyond safe integer) is stored', async () => {
+	it('15. unbound evidence with a very large negative round is rejected', async () => {
 		// Arrange
 		writePlan([{ id: '1.1', status: 'in_progress' }]);
 		writeFileSync(
@@ -1365,12 +1369,7 @@ describe('adversarial council verdict rehydration', () => {
 		// Act
 		await rehydrateSessionFromDisk(tmpDir, session);
 
-		// Assert: negative number is stored (finite, so passes isFinite check)
-		expect(session.taskCouncilApproved!.get('1.1')).toEqual({
-			verdict: 'APPROVE',
-			roundNumber: -Number.MAX_SAFE_INTEGER,
-			quorumSize: 1,
-		});
+		expect(session.taskCouncilApproved!.get('1.1')).toBeUndefined();
 	});
 
 	it('16. verdict string with HTML/script injection patterns is safely rejected', async () => {
@@ -1489,12 +1488,7 @@ describe('adversarial council verdict rehydration', () => {
 		// Act
 		await rehydrateSessionFromDisk(tmpDir, session);
 
-		// Assert: verdict should be set correctly, no pollution
-		expect(session.taskCouncilApproved!.get('1.1')).toEqual({
-			verdict: 'APPROVE',
-			roundNumber: 1,
-			quorumSize: 1,
-		});
+		expect(session.taskCouncilApproved!.get('1.1')).toBeUndefined();
 		expect(Object.hasOwn({}, 'isAdmin')).toBe(false);
 	});
 
@@ -1568,7 +1562,7 @@ describe('adversarial council verdict rehydration', () => {
 		expect(session.taskCouncilApproved!.has('1.1')).toBe(false);
 	});
 
-	it('25. roundNumber as floating point number is preserved if valid finite', async () => {
+	it('25. unbound evidence with a floating-point round is rejected', async () => {
 		// Arrange: roundNumber is a valid floating point number
 		writePlan([{ id: '1.1', status: 'in_progress' }]);
 		writeFileSync(
@@ -1587,15 +1581,10 @@ describe('adversarial council verdict rehydration', () => {
 		// Act
 		await rehydrateSessionFromDisk(tmpDir, session);
 
-		// Assert: 1.5 is finite and should be preserved
-		expect(session.taskCouncilApproved!.get('1.1')).toEqual({
-			verdict: 'APPROVE',
-			roundNumber: 1.5,
-			quorumSize: 1,
-		});
+		expect(session.taskCouncilApproved!.get('1.1')).toBeUndefined();
 	});
 
-	it('26. negative zero roundNumber is stored as 0 (JS semantics: -0 === 0)', async () => {
+	it('26. unbound evidence with negative-zero round is rejected', async () => {
 		// Arrange: roundNumber is -0
 		writePlan([{ id: '1.1', status: 'in_progress' }]);
 		writeFileSync(
@@ -1614,13 +1603,7 @@ describe('adversarial council verdict rehydration', () => {
 		// Act
 		await rehydrateSessionFromDisk(tmpDir, session);
 
-		// Assert: -0 equals 0 in JavaScript (Object.is(-0, 0) === false but -0 == 0 === true)
-		// The stored value will be 0 (JSON doesn't preserve -0 distinction)
-		expect(session.taskCouncilApproved!.get('1.1')).toEqual({
-			verdict: 'APPROVE',
-			roundNumber: 0,
-			quorumSize: 1,
-		});
+		expect(session.taskCouncilApproved!.get('1.1')).toBeUndefined();
 	});
 
 	it('27. taskCouncilApproved Map is initialized even when all evidence is malicious', async () => {
@@ -1683,7 +1666,7 @@ describe('council verdict rehydration does NOT bypass Stage-A', () => {
 		const session = createTestSession();
 		await rehydrateSessionFromDisk(tmpDir, session);
 		// Without explicit Stage-A evidence, must NOT jump to complete
-		expect(session.taskWorkflowStates!.get('1.1')).toBe('reviewer_run');
+		expect(session.taskWorkflowStates!.get('1.1')).toBe('pre_check_passed');
 		// But council verdict IS still recovered
 		expect(session.taskCouncilApproved!.get('1.1')).toEqual({
 			verdict: 'APPROVE',
@@ -1703,7 +1686,7 @@ describe('council verdict rehydration does NOT bypass Stage-A', () => {
 		});
 		const session = createTestSession();
 		await rehydrateSessionFromDisk(tmpDir, session);
-		expect(session.taskWorkflowStates!.get('1.1')).toBe('tests_run');
+		expect(session.taskWorkflowStates!.get('1.1')).toBe('pre_check_passed');
 		expect(session.taskCouncilApproved!.get('1.1')).toEqual({
 			verdict: 'APPROVE',
 			roundNumber: 1,
@@ -1718,7 +1701,7 @@ describe('council verdict rehydration does NOT bypass Stage-A', () => {
 		});
 		const session = createTestSession();
 		await rehydrateSessionFromDisk(tmpDir, session);
-		expect(session.taskWorkflowStates!.get('1.1')).toBe('coder_delegated');
+		expect(session.taskWorkflowStates!.get('1.1')).toBe('pre_check_passed');
 		expect(session.taskCouncilApproved!.get('1.1')).toEqual({
 			verdict: 'APPROVE',
 			roundNumber: 1,
@@ -1739,7 +1722,7 @@ describe('council verdict rehydration does NOT bypass Stage-A', () => {
 		const session = createTestSession();
 		await rehydrateSessionFromDisk(tmpDir, session);
 		// Even with multiple gates, no fast-path to complete
-		expect(session.taskWorkflowStates!.get('1.1')).toBe('tests_run');
+		expect(session.taskWorkflowStates!.get('1.1')).toBe('pre_check_passed');
 		expect(session.taskCouncilApproved!.get('1.1')).toEqual({
 			verdict: 'APPROVE',
 			roundNumber: 1,
@@ -1747,7 +1730,7 @@ describe('council verdict rehydration does NOT bypass Stage-A', () => {
 		});
 	});
 
-	it('5. in-memory complete is preserved when disk has APPROVE + reviewer', async () => {
+	it('5. authoritative council generation replaces stale in-memory complete', async () => {
 		writePlan([{ id: '1.1', status: 'in_progress' }]);
 		writeCouncilWithOtherGates('1.1', 'APPROVE', true, {
 			reviewer: { sessionId: 's1', timestamp: 't1', agent: 'reviewer' },
@@ -1755,7 +1738,7 @@ describe('council verdict rehydration does NOT bypass Stage-A', () => {
 		const session = createTestSession();
 		session.taskWorkflowStates!.set('1.1', 'complete');
 		await rehydrateSessionFromDisk(tmpDir, session);
-		// In-memory complete is preserved (never downgrade)
-		expect(session.taskWorkflowStates!.get('1.1')).toBe('complete');
+		// A newer authoritative generation replaces stale in-memory state.
+		expect(session.taskWorkflowStates!.get('1.1')).toBe('pre_check_passed');
 	});
 });

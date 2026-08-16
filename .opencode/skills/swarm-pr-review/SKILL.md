@@ -947,7 +947,7 @@ build a minimal correct single-lane reproduction using the same workflow mode,
 lane identity, exact head, and canonical row. Before retrying, distinguish the
 three independent input layers: the header schema, data-row values, and tool
 argument shape. A correct header does not repair an invalid severity or lane
-value, and correct row data does not repair malformed dispatch JSON.
+value, and correct row data does not repair malformed dispatch JSON. Benign shape defects (evidence pipes, marker rows, verdict-row pipes) are auto-repaired and recorded as salvage — never a retry reason alone (contract and fidelity boundaries: `references/lane-output-recoverability.md`).
 
 Classify the incident from actual user-visible harm and the first failed
 predicate, not from the number of retries or the eventual result. A successful
@@ -1157,9 +1157,7 @@ pass the exact reviewed merge-base as `base_sha`, the exact live base branch
 tip/ref used to compute it as `base_ref`, and the same `pr_head_sha` to the
 writer. The writer runs bounded `git merge-base -- <base_ref> <pr_head_sha>` and
 rejects any claimed `base_sha` that is not the exact result. It accepts only an
-exact eleven-row v2 receipt: `MATCHED` rows are backed by completed,
-non-degraded, exact-head artifacts from lanes that declared and attested their
-families; `NOT_TRIGGERED` rows are provenance-free. Counts are recomputed and
+exact eleven-row v2 receipt backed by verifiable provenance (identity, ownership, digest, retained artifact); a coverage-QUALITY failure is disclosed on the receipt as `coverage_degradations` and the run proceeds, with synthesis disclosing degraded families (`references/lane-output-recoverability.md`). `NOT_TRIGGERED` rows are provenance-free. Counts are recomputed and
 must agree. It never uses keyword or path classification alone as absence
 evidence. Any head mismatch makes persistence fail. Historical unversioned and
 schema-v1 all-`MATCHED` receipts remain readable, but new writes are strict v2.

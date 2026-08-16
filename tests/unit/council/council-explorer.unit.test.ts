@@ -9,6 +9,7 @@ import type {
 	CouncilMemberVerdict,
 } from '../../../src/council/types';
 import { ArgsSchema } from '../../../src/tools/convene-council';
+import { seedCouncilLaunch } from '../../helpers/task-workflow-evidence';
 
 const makeVerdict = (
 	agent: CouncilMemberVerdict['agent'],
@@ -252,6 +253,8 @@ describe('submit_council_verdicts — requireAllMembers config enforcement', () 
 		const tempDir = mkdtempSync(join(tmpdir(), 'council-require-all-5-'));
 		try {
 			writeConfig(tempDir, { enabled: true, requireAllMembers: true });
+			const sessionID = 'council-require-all-5';
+			await seedCouncilLaunch(tempDir, '1.1', sessionID);
 
 			const { submit_council_verdicts } = await import(
 				'../../../src/tools/convene-council'
@@ -270,7 +273,7 @@ describe('submit_council_verdicts — requireAllMembers config enforcement', () 
 					],
 					working_directory: tempDir,
 				},
-				{ directory: tempDir },
+				{ directory: tempDir, sessionID },
 			);
 			const parsed = JSON.parse(result);
 			expect(parsed.success).toBe(true);

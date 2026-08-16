@@ -236,6 +236,42 @@ Each entry below points at a release note in `docs/releases/` and the invariant(
   registry-completeness discipline `check-tool-registration.ts` enforces for
   tools now applies to event kinds via `check-event-contract.ts`).
 
+### Issue #2031 — Diagnostic FIFO eviction changed receipt and gate correctness
+
+- **Symptom:** retrieval membership and terminal outcomes shared the bounded
+  `knowledge-events.jsonl` budget with high-volume operational diagnostics.
+  More than 5,000 unrelated observations could evict a live retrieval, make an
+  honest receipt fail with `trace_not_found`, starve promotion evidence, and
+  remove a critical phase obligation after it had already been displayed.
+- **Fix applied:** correctness state now lives in the hash-chained,
+  canonical-project-root-only `.swarm/knowledge-receipts-v2.jsonl` journal,
+  with a rebuildable snapshot and separate closed-summary archive. The exact
+  final displayed membership is committed before exposure; terminal validation
+  and commit are one fail-closed cross-process-locked transition; the lock is
+  released before best-effort diagnostic and legacy projections. Receipt paths
+  derive from the injected project root, reject symlink/junction/reparse
+  redirection, and never follow a knowledge link, hive path, cohort store, or
+  `process.cwd()`.
+- **Lifecycle and cutover:** live membership has no event-count cap. Resolved
+  pairs remain protected until durable phase closure plus the bounded
+  `knowledge.receipt_close_grace_days` interval (default seven days). Migration
+  is lazy first-use work, never plugin initialization work, and imports only
+  complete live records from the canonical project's local legacy log.
+  Missing, evicted, linked, or malformed legacy membership is the typed
+  `legacy_unverifiable` state; counters and diagnostic baselines never infer it.
+- **Authority boundary:** `knowledge-events.jsonl`, application logs, promotion
+  projections, counters, and canonical observations are diagnostics or
+  rebuildable derivatives. Receipt validation, application/phase gates,
+  promotion, escalation, feedback, and destructive policy do not consume them
+  as authority. A project-local ledger cannot prove cohort-wide destructive
+  quorum, so linked diagnostic rows conservatively cannot authorize it.
+  Outcome/source normalization remains owned by #2032; V2 preserves current
+  typed producer meanings and uses `unknown` only when a source is absent.
+- **Maps to AGENTS.md:** invariants 2 (portable journal implementation), 4
+  (canonical `.swarm/` containment), 7 (cross-platform crash/concurrency tests),
+  8 (restart-safe session separation), 9 (fail-closed transition semantics),
+  10 (membership before chat exposure), and 12 (pending release fragment).
+
 ## Invariants — anti-pattern, required pattern, verification
 
 ### Skill ownership and audience routing
@@ -465,7 +501,7 @@ appendLedgerEvent({ type: 'plan-updated', payload: { ... } });
 - `tests/unit/plan/*.test.ts` — replay round-trip + projection tests.
 - `docs/plan-durability.md` is updated when the schema changes.
 
-**Settled-task re-open guard (FR-005):** `update_task_status` (and the automated delegation path via `advanceTaskStateAndPersist`) must not silently re-open a settled task (`completed` / `blocked` / `closed`) to `in_progress`. `src/plan/manager.ts` implements a three-layer guard: the tool layer (`src/tools/update-task-status.ts`), the manager layer (`updateTaskStatus`), and the automated path all check the current task state before allowing `in_progress` transitions. An explicit `force: true` option permits manual repair. This prevents a session restart from silently overwriting completed work with a fresh `in_progress` state.
+**Settled-task re-open guard (FR-005):** `update_task_status` must not silently re-open a settled task (`completed` / `blocked` / `closed`) to `in_progress`. The tool and manager layers reject ordinary backward transitions; the only exception is the exact-task audited repair transaction with explicit force, reason, transition identity, expected state, and expected generation. The legacy `advanceTaskStateAndPersist` wrapper refuses coder and terminal boundaries so it cannot bypass that transaction.
 
 ### 6. test_runner safety
 

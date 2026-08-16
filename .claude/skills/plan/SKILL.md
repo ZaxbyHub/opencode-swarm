@@ -11,16 +11,41 @@ This protocol is loaded on demand by the architect runtime. The architect prompt
 
 ### MODE: PLAN
 
-SPEC GATE (soft — check before planning):
+PLANNING PROFILE (authoritative): obey the runtime-injected `[PLANNING PROFILE
+— AUTHORITATIVE]` directive, which is produced by the same resolver used by
+`save_plan`. Select exactly one path:
+
+- `balanced`: use durable QA/execution defaults and do not pause for the full
+  questionnaire, spec ceremony, or complete clarification funnel. Ask only for
+  unresolved material ambiguity, destructive/high-risk authorization, or a
+  decision only the user can make. `save_plan` exact-binds the default QA
+  profile. Persist `planning_profile: "balanced"`.
+- `strict` (including locked legacy profiles with no stored field): require an
+  effective spec, run the complete clarification funnel, present the unified
+  QA/execution questionnaire, and wait for the user's answers before saving.
+  Persist `planning_profile: "strict"` only when the field is already explicit
+  or this is a new/unlocked plan; do not materialize it into a locked legacy
+  profile.
+
+A locked profile may ratchet `balanced` to `strict`; it never moves `strict` to
+`balanced`.
+
+SPEC POLICY (profile-dependent — check before planning):
 
 An effective spec exists iff `/swarm sdd status` reports a resolved spec (it reflects `readEffectiveSpecSync`, which returns null for no sources, multiple competing sources, multi-feature Spec-Kit without a selected feature, or any unresolvable state). Do NOT enumerate these cases — defer to `/swarm sdd status`.
 
 - If NO effective spec exists (confirmed via `/swarm sdd status`):
+  - `strict`: stop and enter MODE: SPECIFY (or materialize a selected SDD source
+    with explicit consent). Strict planning cannot save without an effective
+    spec.
+  - `balanced`: a spec is optional. Offer the choices below only when a spec
+    would materially resolve ambiguity; otherwise proceed directly.
+  - The remaining no-spec choices in this section apply only to `balanced`.
   - PLAN INGESTION DETECTION: Check if the user is providing an external plan (indicators: markdown content with Phase/Task structure, or phrases like "ingest this plan", "implement this plan", "prepare for implementation", "here is a plan", "here's the plan"):
     - If plan ingestion is detected AND no effective spec exists: offer this choice FIRST before any planning:
       1. "Generate spec from this plan first" → enter EXTERNAL PLAN IMPORT PATH in MODE: SPECIFY to reverse-engineer a spec.md from the provided plan, then return to planning
       2. "Skip spec and proceed with the provided plan" → proceed directly to plan ingestion and planning without creating a spec
-    - This is a SOFT gate — option 2 always lets the user proceed without a spec
+    - In `balanced`, this is a SOFT gate — option 2 lets the user proceed without a spec.
   - If no plan ingestion detected: Warn: "No effective spec found. A spec helps ensure the plan covers all requirements and gives the critic something to verify against. Would you like to create one first?"
     - Offer two options:
       1. "Create a spec first" → transition to MODE: SPECIFY
@@ -28,20 +53,21 @@ An effective spec exists iff `/swarm sdd status` reports a resolved spec (it ref
 - If an effective spec EXISTS:
   - NOTE: Stale detection is intentionally heuristic (compare headings) — false positives are acceptable because this is a SOFT gate. When in doubt, ask the user.
   - Read the spec (using the effective spec path reported by `/swarm sdd status`) and compare its first heading (or feature description) against the current planning context (the user's request and any existing plan.md title/phase names)
-  - STALE SPEC DETECTION: If the spec heading or feature description does NOT match the current work being planned (e.g., spec describes "user authentication" but user is asking to plan "payment integration"), treat the spec as potentially stale and offer three options:
+  - STALE SPEC DETECTION: If the spec heading or feature description does NOT match the current work being planned (e.g., spec describes "user authentication" but user is asking to plan "payment integration"), treat the spec as potentially stale. In `strict`, offer options 1 and 2 only. In `balanced`, offer all three options:
     1. **Archive and create new spec** → attempt to rename .swarm/spec.md to .swarm/spec-archive/spec-{YYYY-MM-DD}.md (create the directory if needed); if archival succeeds: enter MODE: SPECIFY and skip the "spec already exists" prompt; if archival fails: inform user of the failure and offer: retry archival, or proceed with option 2, or proceed with option 3
     2. **Keep existing spec** → use the effective spec as-is and proceed with planning below
-    3. **Skip spec entirely** → proceed to planning below ignoring the existing spec
+    3. **Skip spec entirely** (`balanced` only) → proceed to planning below ignoring the existing spec
   - If the spec appears current (heading matches the work being planned) OR user chose option 2 above, proceed with spec:
     - Read it and use it as the primary input for planning
     - Cross-reference requirements (FR-###) when decomposing tasks
     - Ensure every FR-### maps to at least one task
     - If a task has no corresponding FR-###, flag it as a potential gold-plating risk
-  - If user chose option 3 above, proceed without spec: skip all spec-based steps and proceed directly to planning
+  - If a `balanced` user chose option 3 above, proceed without spec: skip all spec-based steps and proceed directly to planning
 
-This is a SOFT gate. When the user chooses "Skip and plan directly", proceed to the steps below exactly as before — do NOT modify any planning behavior.
+This is a soft gate only in `balanced`. In `strict`, a missing effective spec is
+a hard prerequisite and `save_plan` will return `SPEC_REQUIRED`.
 
-**SAVE_PLAN SPEC_REQUIRED RECOVERY:**
+**STRICT-ONLY SAVE_PLAN SPEC_REQUIRED RECOVERY:**
 When `save_plan` returns a SPEC_REQUIRED rejection (no effective spec found), the architect MUST:
 1. DIAGNOSE: run `/swarm sdd status` to determine why no effective spec resolved.
    - (a) If `/swarm sdd status` shows NO sources → transition to MODE: SPECIFY.
@@ -54,7 +80,7 @@ Run CODEBASE REALITY CHECK scoped to codebase elements referenced in the effecti
 
 ### GENERAL COUNCIL ADVISORY OPTION (pre-save_plan)
 
-Before drafting or saving the plan, the architect MUST offer General Council advisory input when `council.general.enabled` is true in the resolved opencode-swarm config and a search API key is configured.
+In `strict`, before drafting or saving the plan, the architect MUST offer General Council advisory input when `council.general.enabled` is true in the resolved opencode-swarm config and a search API key is configured. In `balanced`, offer it only when current external facts could materially change the plan; do not introduce a pause merely because the feature is configured.
 
 - Ask the user: "Use General Council advisory input before I write the plan? The 3-agent council (generalist, skeptic, domain expert) will gather current external context and provide perspectives that I will fold into the plan before critic review. (default: no)"
 - If the user declines, proceed to the clarification funnel and planning normally.
@@ -70,7 +96,7 @@ General Council is advisory and distinct from `council_mode`, `phase_council`, a
 
 ### CLARIFICATION FUNNEL (pre-save_plan)
 
-Before calling `save_plan` — whether creating a new plan or finalizing an external plan ingestion — the architect MUST run this four-stage clarification funnel. The goal is to limit unnecessary user interruption, not planning completeness.
+In `strict`, before calling `save_plan` — whether creating a new plan or finalizing an external plan ingestion — the architect MUST run this four-stage clarification funnel. In `balanced`, use the same classification concepts internally but surface only unresolved material ambiguity, destructive/high-risk authorization, or decisions only the user can make; do not run the full funnel as ceremony.
 
 #### Stage 1: Inventory All Material Uncertainties
 
@@ -113,6 +139,8 @@ For each item classified as `research_needed` or `user_decision` in Stage 2, sen
 
 **Hard constraint:** Items in the Always-Surface Categories list (below) MUST NOT receive `UNNECESSARY`/`DROP` from the critic — only `REPHRASE` or `APPROVED`/`ASK_USER` are allowed. If the critic attempts to `UNNECESSARY`/`DROP` an always-surface item, override to `APPROVED`/`ASK_USER`.
 
+This always-surface protection remains mandatory in every planning profile.
+
 **Overconfidence guard:** If the critic attempts to self-resolve an item by supplying an answer (verdict `RESOLVE`) but the underlying default is not directly supported by user request, spec, or recorded context, the architect MUST classify the item as `user_decision` rather than `self_resolved`. Unsupported defaults must not be silently accepted.
 
 Update classifications based on critic response:
@@ -124,7 +152,7 @@ Update classifications based on critic response:
 
 The architect MUST update the plan's assumptions with all resolved items before proceeding to Stage 4.
 
-Exception: QA gate selection questions are already mandatory user decisions (enforced by the save_plan tool itself) and do NOT need to go through the funnel. QA gate selection is always a direct user dialogue.
+Strict-only exception: QA gate selection questions are direct user decisions and do NOT need to go through the funnel. Balanced uses the durable default profile and does not present this dialogue.
 
 #### Stage 4: Surface User Decision Packet
 
@@ -182,7 +210,7 @@ Draft the complete implementation plan in memory first. Required parameters:
 
 1. Finish drafting the title, swarm identifier, phases, tasks, dependencies, and `files_touched` scopes. Freeze the exact raw plan identity as `swarm_id` plus `plan_title` (the same title passed to `save_plan`). Do not normalize, shorten, or rename either value between profile creation and plan save. An intentional identity replacement must use `confirm_identity_change: true`; never silently create a second profile because wording changed.
 2. Inspect dependency-ready tasks and their file scopes before recommending parallelism. File-disjoint task groups may run concurrently in isolated worktrees; overlapping or unknown scopes require serial execution.
-3. Present the following unified four-choice dialogue in one message and wait for one complete answer. Silence is not consent.
+3. `strict`: present the following unified four-choice dialogue in one message and wait for one complete answer. Silence is not consent. `balanced`: skip this dialogue and continue with the durable defaults.
 
 <!-- BEGIN QA_GATE_BODY -->
 
@@ -208,7 +236,7 @@ Additionally, present these three sub-items as part of the same exchange:
 <!-- END QA_GATE_BODY -->
 
 4. MODE: LOOP exception: when `autonomy=auto`, do not pause. Use the loop skill's balanced-speed defaults: reviewer, test_engineer, sme_enabled, critic_pre_plan, sast_enabled, and drift_check ON; council_mode, hallucination_guard, mutation_test, phase_council, and final_council OFF. Choose the largest safe parallel count from the drafted scopes (1 when overlap or uncertainty exists), keep phase-level commits (`commit_after_each_completed_task: false`), and set `auto_proceed: true`.
-5. Before the first `save_plan`, persist all eleven gate booleans with `set_qa_gates({ swarm_id: <exact swarm_id>, plan_title: <exact title>, ...gates })`. If it fails, stop and resolve the profile error; do not save a plan without the matching profile.
+5. `strict`: before the first `save_plan`, persist all eleven gate booleans with `set_qa_gates({ swarm_id: <exact swarm_id>, plan_title: <exact title>, ...gates })`. If it fails, stop and resolve the profile error. `balanced`: do not call `set_qa_gates` merely to reproduce defaults; `save_plan` creates and exact-binds them.
    Recovery for upgraded legacy plans: if `get_qa_gate_profile`, `save_plan`, or an execution gate reports that the QA profile is not exact-bound, run `set_qa_gates({ swarm_id: <exact swarm_id>, plan_title: <exact title>, adopt_legacy_binding_only: true })`. This exact-binds the existing profile without changing gates or its lock, then you retry the blocked read/save/enforcement step.
 6. Immediately call `save_plan` with the same exact identity, the full drafted phases, and the complete locked profile:
 

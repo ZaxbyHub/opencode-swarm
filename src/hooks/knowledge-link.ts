@@ -123,7 +123,7 @@ const WINDOWS_RESERVED_NAMES = new Set([
 /**
  * Resolution cache TTL. A pointer rarely changes; within a single phase/operation
  * it never does. Caching avoids a sync `link.json` read on the hot retrieval path
- * (`readKnowledge`, `readKnowledgeCounterRollups`). Cross-process changes are
+ * (`readKnowledge`, diagnostic `readKnowledgeCounterRollups`). Cross-process changes are
  * picked up within the TTL; in-process changes call `invalidateKnowledgeStoreDirCache`.
  */
 const CACHE_TTL_MS = 2_000;

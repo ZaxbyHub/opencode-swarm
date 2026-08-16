@@ -405,17 +405,17 @@ export const ADDITIONAL_SKILL_MIRROR_CONTRACTS: Array<{
 	},
 	{
 		slug: 'orchestrating-subagents',
-		kind: 'agents-only',
-		extraIdenticalPaths: ['.claude/skills/orchestrating-subagents/SKILL.md'],
+		kind: 'identical',
+		canonical: '.opencode',
 		reason:
-			'Orphaned .claude-only skill: .claude/skills/orchestrating-subagents/SKILL.md exists; .agents/skills/orchestrating-subagents/ does not exist. No .opencode counterpart.',
+			'Promoted to first-class bundled skill (criterion F): .opencode is canonical, .claude is a byte-identical mirror. No .agents counterpart.',
 	},
 	{
 		slug: 'durable-session-state',
-		kind: 'agents-only',
-		extraIdenticalPaths: ['.claude/skills/durable-session-state/SKILL.md'],
+		kind: 'identical',
+		canonical: '.opencode',
 		reason:
-			'Orphaned .claude-only skill: .claude/skills/durable-session-state/SKILL.md exists; .agents/skills/durable-session-state/ does not exist. No .opencode counterpart.',
+			'Promoted to first-class bundled skill (criterion F): .opencode is canonical, .claude is a byte-identical mirror. No .agents counterpart.',
 	},
 	{
 		slug: 'rust-crate-ci',

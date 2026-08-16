@@ -1,327 +1,71 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdir, readFile, rm, unlink, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { handleAcknowledgeSpecDriftCommand } from '../commands/acknowledge-spec-drift';
 
-describe('handleAcknowledgeSpecDriftCommand', () => {
+describe('handleAcknowledgeSpecDriftCommand smoke', () => {
 	let tempDir: string;
 
 	beforeEach(async () => {
 		tempDir = join(
 			tmpdir(),
-			'acknowledge-spec-drift-test-' +
-				Date.now() +
-				'-' +
-				Math.random().toString(36).slice(2),
+			`ack-spec-drift-smoke-${Date.now()}-${Math.random().toString(36).slice(2)}`,
 		);
 		await mkdir(join(tempDir, '.swarm'), { recursive: true });
 	});
 
 	afterEach(async () => {
-		try {
-			await rm(tempDir, { force: true, recursive: true });
-		} catch {
-			// Ignore cleanup errors
-		}
+		await rm(tempDir, { recursive: true, force: true }).catch(() => {});
 	});
 
-	describe('ENOENT case', () => {
-		test('returns "No spec drift detected." when spec-staleness.json does not exist', async () => {
-			// Don't create spec-staleness.json - it should not exist
-			const result = await handleAcknowledgeSpecDriftCommand(tempDir, []);
+	test('preserves a corrupt marker', async () => {
+		const markerPath = join(tempDir, '.swarm', 'spec-staleness.json');
+		await writeFile(markerPath, '{ invalid json');
 
-			expect(result).toBe('No spec drift detected.');
-		});
+		const result = await handleAcknowledgeSpecDriftCommand(tempDir, []);
+
+		expect(result).toContain('Spec drift marker is corrupt');
+		expect(existsSync(markerPath)).toBe(true);
 	});
 
-	describe('malformed JSON case', () => {
-		test('deletes corrupted spec-staleness.json and returns error message', async () => {
-			const specStalenessPath = join(tempDir, '.swarm', 'spec-staleness.json');
-			await writeFile(specStalenessPath, '{ invalid json content }');
-
-			const result = await handleAcknowledgeSpecDriftCommand(tempDir, []);
-
-			expect(result).toBe(
-				'Spec staleness file was corrupted. It has been removed.',
-			);
-
-			// Verify file was deleted
-			await expect(unlink(specStalenessPath)).rejects.toThrow();
-		});
-
-		test('handles empty file as malformed JSON', async () => {
-			const specStalenessPath = join(tempDir, '.swarm', 'spec-staleness.json');
-			await writeFile(specStalenessPath, '');
-
-			const result = await handleAcknowledgeSpecDriftCommand(tempDir, []);
-
-			expect(result).toBe(
-				'Spec staleness file was corrupted. It has been removed.',
-			);
-		});
-	});
-
-	describe('valid JSON case', () => {
-		test('deletes spec-staleness.json and appends event to events.jsonl', async () => {
-			const specStalenessPath = join(tempDir, '.swarm', 'spec-staleness.json');
-			const eventsPath = join(tempDir, '.swarm', 'events.jsonl');
-
-			const validPayload = {
-				planTitle: 'Test Plan',
-				phase: 3,
-				specHash_plan: 'abc123',
-				specHash_current: 'def456',
-				reason: 'spec modified',
-				timestamp: '2024-01-01T00:00:00.000Z',
-			};
-			await writeFile(specStalenessPath, JSON.stringify(validPayload));
-
-			const result = await handleAcknowledgeSpecDriftCommand(tempDir, []);
-
-			// Verify the response contains expected content
-			expect(result).toContain(
-				'Spec drift acknowledged for plan "Test Plan" (phase 3)',
-			);
-			expect(result).toContain('Warning: Spec drift was acknowledged');
-
-			// Verify spec-staleness.json was deleted
-			await expect(unlink(specStalenessPath)).rejects.toThrow();
-
-			// Verify events.jsonl was created with the acknowledgment event
-			const eventsContent = await readFile(eventsPath, 'utf-8');
-			const eventLines = eventsContent.trim().split('\n');
-			expect(eventLines).toHaveLength(1);
-
-			const event = JSON.parse(eventLines[0]);
-			expect(event.type).toBe('spec_drift_acknowledged');
-			expect(event.phase).toBe(3);
-			expect(event.planTitle).toBe('Test Plan');
-			// Issue #890: actor is now caller-supplied; default is 'unknown'
-			expect(event.acknowledgedBy).toBe('unknown');
-			expect(event.timestamp).toBeDefined();
-		});
-
-		test('returns confirmation with warning message', async () => {
-			const specStalenessPath = join(tempDir, '.swarm', 'spec-staleness.json');
-
-			const validPayload = {
-				planTitle: 'My Awesome Project',
-				phase: 7,
-				specHash_plan: 'hash123',
-				specHash_current: null,
-				reason: 'spec deleted',
-				timestamp: '2024-06-15T12:00:00.000Z',
-			};
-			await writeFile(specStalenessPath, JSON.stringify(validPayload));
-
-			const result = await handleAcknowledgeSpecDriftCommand(tempDir, []);
-
-			expect(result).toBe(
-				'Spec drift acknowledged for plan "My Awesome Project" (phase 7).\n\n⚠️  Warning: Spec drift was acknowledged — verify that the implementation still matches the spec before proceeding.',
-			);
-		});
-
-		test('appends to existing events.jsonl', async () => {
-			const specStalenessPath = join(tempDir, '.swarm', 'spec-staleness.json');
-			const eventsPath = join(tempDir, '.swarm', 'events.jsonl');
-
-			// Create existing events
-			const existingEvent = {
-				type: 'some_existing_event',
-				timestamp: '2024-01-01T00:00:00.000Z',
-			};
-			await writeFile(eventsPath, `${JSON.stringify(existingEvent)}\n`);
-
-			const validPayload = {
-				planTitle: 'Append Test',
-				phase: 2,
-				specHash_plan: 'xyz',
-				specHash_current: 'xyz',
-				reason: 'spec unchanged',
-				timestamp: '2024-01-02T00:00:00.000Z',
-			};
-			await writeFile(specStalenessPath, JSON.stringify(validPayload));
-
-			await handleAcknowledgeSpecDriftCommand(tempDir, []);
-
-			// Verify events.jsonl has both events
-			const eventsContent = await readFile(eventsPath, 'utf-8');
-			const eventLines = eventsContent.trim().split('\n');
-			expect(eventLines).toHaveLength(2);
-
-			const firstEvent = JSON.parse(eventLines[0]);
-			expect(firstEvent.type).toBe('some_existing_event');
-
-			const secondEvent = JSON.parse(eventLines[1]);
-			expect(secondEvent.type).toBe('spec_drift_acknowledged');
-			expect(secondEvent.planTitle).toBe('Append Test');
-		});
-
-		test('non-fatal when events.jsonl append fails', async () => {
-			const specStalenessPath = join(tempDir, '.swarm', 'spec-staleness.json');
-
-			// Make .swarm read-only so appendFile will fail
-			await writeFile(
-				specStalenessPath,
-				JSON.stringify({
-					planTitle: 'Test',
-					phase: 1,
-					specHash_plan: 'hash',
-					specHash_current: 'hash',
-					reason: 'test',
-					timestamp: '2024-01-01T00:00:00.000Z',
-				}),
-			);
-
-			// The command should still succeed (non-fatal) even if event logging fails
-			// because the spec-staleness.json is deleted
-			const result = await handleAcknowledgeSpecDriftCommand(tempDir, []);
-
-			expect(result).toContain('Spec drift acknowledged');
-			// spec-staleness.json should still be deleted
-			await expect(unlink(specStalenessPath)).rejects.toThrow();
-		});
-	});
-
-	// Issue #890: caller-supplied actor for forensic audit trail.
-	describe('acknowledgedBy actor parameter (issue #890)', () => {
-		test('records "user" when invoked via chat slash command', async () => {
-			const specStalenessPath = join(tempDir, '.swarm', 'spec-staleness.json');
-			const eventsPath = join(tempDir, '.swarm', 'events.jsonl');
-			await writeFile(
-				specStalenessPath,
-				JSON.stringify({
-					planTitle: 'P',
-					phase: 1,
-					specHash_plan: 'h',
-					specHash_current: 'h',
-					reason: 'r',
-					timestamp: '2024-01-01T00:00:00.000Z',
-				}),
-			);
-			await handleAcknowledgeSpecDriftCommand(tempDir, [], 'user');
-			const event = JSON.parse(
-				(await readFile(eventsPath, 'utf-8')).trim().split('\n').pop() ?? '{}',
-			);
-			expect(event.acknowledgedBy).toBe('user');
-		});
-
-		test('records "cli" when invoked via CLI run dispatch', async () => {
-			const specStalenessPath = join(tempDir, '.swarm', 'spec-staleness.json');
-			const eventsPath = join(tempDir, '.swarm', 'events.jsonl');
-			await writeFile(
-				specStalenessPath,
-				JSON.stringify({
-					planTitle: 'P',
-					phase: 1,
-					specHash_plan: 'h',
-					specHash_current: 'h',
-					reason: 'r',
-					timestamp: '2024-01-01T00:00:00.000Z',
-				}),
-			);
-			await handleAcknowledgeSpecDriftCommand(tempDir, [], 'cli');
-			const event = JSON.parse(
-				(await readFile(eventsPath, 'utf-8')).trim().split('\n').pop() ?? '{}',
-			);
-			expect(event.acknowledgedBy).toBe('cli');
-		});
-	});
-
-	// ─────────────────────────────────────────────────────────────
-	// TEST 11: snapshot refresh after acknowledgment (FR-001)
-	// After acknowledge, `.swarm/spec-snapshot.md` is refreshed to current content.
-	// ─────────────────────────────────────────────────────────────
-	describe('spec-snapshot.md refresh (FR-001)', () => {
-		test('11. after acknowledge, spec-snapshot.md matches current spec.md content', async () => {
-			const specStalenessPath = join(tempDir, '.swarm', 'spec-staleness.json');
-			const snapshotPath = join(tempDir, '.swarm', 'spec-snapshot.md');
-			const specPath = join(tempDir, '.swarm', 'spec.md');
-			const planPath = join(tempDir, '.swarm', 'plan.json');
-
-			// Set up spec.md with current content
-			const currentSpecContent = '## Install\n\nStep 1: bun install.\n';
-			await writeFile(specPath, currentSpecContent);
-
-			// Set up plan.json with a specHash matching the current spec (required for acknowledgment)
-			// computeSpecHash reads spec.md and hashes it
-			const plan = {
+	test('records the caller identity on a successful acknowledgment', async () => {
+		await writeFile(
+			join(tempDir, '.swarm', 'plan.json'),
+			JSON.stringify({
 				schema_version: '1.0.0',
-				title: 'Refresh Test',
-				swarm: 'test',
-				specHash: 'abc123', // must match staleness file's specHash_plan
-				phases: [{ id: 1, name: 'Phase 1', tasks: [] }],
-			};
-			await writeFile(planPath, JSON.stringify(plan, null, 2));
+				title: 'Smoke Plan',
+				swarm: 'test-swarm',
+				current_phase: 1,
+				phases: [{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] }],
+				migration_status: 'native',
+				specHash: 'oldhash123',
+			}),
+		);
+		await writeFile(join(tempDir, '.swarm', 'spec.md'), '# Spec\n\nSmoke.\n');
+		await writeFile(
+			join(tempDir, '.swarm', 'spec-staleness.json'),
+			JSON.stringify({
+				planTitle: 'Smoke Plan',
+				phase: 1,
+				specHash_plan: 'oldhash123',
+				specHash_current: 'newhash456',
+				reason: 'spec.md changed since plan saved',
+				timestamp: '2026-08-14T13:00:00.000Z',
+			}),
+		);
 
-			// Set up spec-snapshot.md with OLD content (different from spec.md)
-			const oldSnapshotContent = '## Install\n\nStep 1: npm install.\n';
-			await writeFile(snapshotPath, oldSnapshotContent);
+		await handleAcknowledgeSpecDriftCommand(tempDir, [], 'cli');
 
-			// Set up staleness file with planHash matching plan.json's specHash
-			await writeFile(
-				specStalenessPath,
-				JSON.stringify({
-					planTitle: 'Refresh Test',
-					phase: 1,
-					specHash_plan: 'abc123', // matches plan.json's specHash
-					specHash_current: 'def456',
-					reason: 'spec modified',
-					timestamp: new Date().toISOString(),
-				}),
-			);
-
-			await handleAcknowledgeSpecDriftCommand(tempDir, []);
-
-			// Verify spec-snapshot.md was REFRESHED to current spec.md content
-			const refreshedSnapshot = await readFile(snapshotPath, 'utf-8');
-			expect(refreshedSnapshot).toBe(currentSpecContent);
-
-			// Verify spec-staleness.json was deleted
-			await expect(unlink(specStalenessPath)).rejects.toThrow();
-		});
-
-		test('11b. snapshot refresh is best-effort (non-fatal when spec.md is absent)', async () => {
-			const specStalenessPath = join(tempDir, '.swarm', 'spec-staleness.json');
-			const snapshotPath = join(tempDir, '.swarm', 'spec-snapshot.md');
-			const planPath = join(tempDir, '.swarm', 'plan.json');
-
-			// No spec.md — readEffectiveSpecSync returns null
-
-			// Set up plan.json
-			const plan = {
-				schema_version: '1.0.0',
-				title: 'No Spec',
-				swarm: 'test',
-				specHash: 'abc123',
-				phases: [{ id: 1, name: 'Phase 1', tasks: [] }],
-			};
-			await writeFile(planPath, JSON.stringify(plan, null, 2));
-
-			// Set up old snapshot
-			await writeFile(snapshotPath, '## Old\n\nOld content.\n');
-
-			// Set up staleness
-			await writeFile(
-				specStalenessPath,
-				JSON.stringify({
-					planTitle: 'No Spec',
-					phase: 1,
-					specHash_plan: 'abc123',
-					specHash_current: null,
-					reason: 'spec deleted',
-					timestamp: new Date().toISOString(),
-				}),
-			);
-
-			// Should succeed even though snapshot can't be refreshed
-			const result = await handleAcknowledgeSpecDriftCommand(tempDir, []);
-			expect(result).toContain('Spec drift acknowledged');
-
-			// Snapshot file should remain unchanged (refresh failed silently)
-			const unchangedSnapshot = await readFile(snapshotPath, 'utf-8');
-			expect(unchangedSnapshot).toBe('## Old\n\nOld content.\n');
-		});
+		const events = (
+			await readFile(join(tempDir, '.swarm', 'events.jsonl'), 'utf-8')
+		)
+			.trim()
+			.split('\n');
+		const event = JSON.parse(events[0]);
+		expect(event.type).toBe('spec_drift_acknowledged');
+		expect(event.acknowledgedBy).toBe('cli');
+		expect(event.transitionId).toEqual(expect.any(String));
 	});
 });

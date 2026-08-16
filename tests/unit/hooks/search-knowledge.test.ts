@@ -3,11 +3,11 @@ import { mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { KnowledgeConfigSchema } from '../../../src/config/schema';
+import { readKnowledgeEvents } from '../../../src/hooks/knowledge-events';
 import {
-	appendKnowledgeEvent,
-	type RetrievedEvent,
-	readKnowledgeEvents,
-} from '../../../src/hooks/knowledge-events';
+	commitDisplayedMembership,
+	validateAndCommitTerminalBatch,
+} from '../../../src/hooks/knowledge-receipt-ledger';
 import {
 	appendKnowledge,
 	resolveHiveKnowledgePath,
@@ -70,7 +70,7 @@ describe('searchKnowledge (unified retrieval)', () => {
 		rmSync(dir, { recursive: true, force: true });
 	});
 
-	it('ranks text-relevant entries first and emits a manual retrieved event with trace_id', async () => {
+	it('ranks text-relevant entries first without exposing candidate search as a receipt', async () => {
 		await appendKnowledge(
 			kp,
 			makeEntry({
@@ -95,18 +95,10 @@ describe('searchKnowledge (unified retrieval)', () => {
 		expect(trace_id.length).toBeGreaterThan(0);
 		expect(results[0].id).toBe('k1');
 
-		const retrieved = (await readKnowledgeEvents(dir)).filter(
-			(e): e is RetrievedEvent => e.type === 'retrieved',
-		);
-		expect(retrieved).toHaveLength(1);
-		expect(retrieved[0].retrieval_mode).toBe('manual');
-		expect(retrieved[0].result_ids[0]).toBe('k1');
-		expect(retrieved[0].ranks.k1).toBe(1);
+		expect(await readKnowledgeEvents(dir)).toHaveLength(0);
 	});
 
 	it('boosts entries with a positive track record over contradicted ones', async () => {
-		// Same entry + same query: only the event-sourced outcome history differs,
-		// isolating the outcome ranking term.
 		const base = {
 			id: 'tracked',
 			lesson: 'run the full test suite before declaring a phase complete',
@@ -140,8 +132,6 @@ describe('searchKnowledge (unified retrieval)', () => {
 		const positiveScore = positive.results.find(
 			(r) => r.id === 'tracked',
 		)?.finalScore;
-
-		// Reseed the identical entry with a negative track record.
 		rmSync(kp, { force: true });
 		await appendKnowledge(
 			kp,
@@ -161,13 +151,12 @@ describe('searchKnowledge (unified retrieval)', () => {
 		const negativeScore = negative.results.find(
 			(r) => r.id === 'tracked',
 		)?.finalScore;
-
 		expect(positiveScore).toBeDefined();
 		expect(negativeScore).toBeDefined();
 		expect(positiveScore as number).toBeGreaterThan(negativeScore as number);
 	});
 
-	it('uses event-derived receipt counters instead of stale stored counters when ranking', async () => {
+	it('uses authoritative receipt counters instead of stale stored counters when ranking', async () => {
 		await appendKnowledge(
 			kp,
 			makeEntry({
@@ -190,23 +179,34 @@ describe('searchKnowledge (unified retrieval)', () => {
 				updated_at: '2024-02-01T00:00:00.000Z',
 			}),
 		);
-
 		for (let i = 0; i < 8; i++) {
-			await appendKnowledgeEvent(dir, {
-				type: 'applied',
-				trace_id: `tp-${i}`,
-				knowledge_id: 'positive',
+			const trace_id = `00000000-0000-4000-8001-${String(i).padStart(12, '0')}`;
+			await commitDisplayedMembership(dir, {
+				trace_id,
 				session_id: 's',
 				agent: 'architect',
+				entries: [{ entry_id: 'positive', critical: false }],
+			});
+			await validateAndCommitTerminalBatch(dir, {
+				trace_id,
+				session_id: 's',
+				items: [{ entry_id: 'positive', outcome: 'applied' }],
 			});
 		}
 		for (let i = 0; i < 7; i++) {
-			await appendKnowledgeEvent(dir, {
-				type: 'ignored',
-				trace_id: `tn-${i}`,
-				knowledge_id: 'negative',
+			const trace_id = `00000000-0000-4000-8002-${String(i).padStart(12, '0')}`;
+			await commitDisplayedMembership(dir, {
+				trace_id,
 				session_id: 's',
 				agent: 'architect',
+				entries: [{ entry_id: 'negative', critical: false }],
+			});
+			await validateAndCommitTerminalBatch(dir, {
+				trace_id,
+				session_id: 's',
+				items: [
+					{ entry_id: 'negative', outcome: 'ignored', reason: 'not used' },
+				],
 			});
 		}
 

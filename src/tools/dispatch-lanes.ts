@@ -1220,7 +1220,7 @@ export async function executeDispatchLanesAsync(
 								)
 							) {
 								throw new Error(
-									'BLOCKED: initial PR_REVIEW base dispatch requires exactly six lanes and max_concurrent: 6 at depth tier L (consolidated owned_workflow_lanes are allowed only at tiers S and M)',
+									`BLOCKED: initial PR_REVIEW base dispatch requires exactly six lanes and max_concurrent: 6 at depth tier L (consolidated owned_workflow_lanes are allowed only at tiers S and M); each lane owns exactly one dimension and may set workflow_lane to it, omitting owned_workflow_lanes; valid dimensions: ${PR_REVIEW_BASE_DIMENSION_IDS.join(', ')}`,
 								);
 							}
 						} else if (
@@ -1231,7 +1231,7 @@ export async function executeDispatchLanesAsync(
 							parsed.data.max_concurrent !== parsed.data.lanes.length
 						) {
 							throw new Error(
-								`BLOCKED: initial PR_REVIEW base dispatch at depth tier ${depthTier} requires between ${PR_REVIEW_BASE_LANE_FLOORS[depthTier]} and ${PR_REVIEW_BASE_DIMENSION_IDS.length} lanes whose owned_workflow_lanes partition all six dimensions exactly once, with max_concurrent equal to the lane count`,
+								`BLOCKED: initial PR_REVIEW base dispatch at depth tier ${depthTier} requires between ${PR_REVIEW_BASE_LANE_FLOORS[depthTier]} and ${PR_REVIEW_BASE_DIMENSION_IDS.length} lanes whose owned_workflow_lanes partition all six dimensions exactly once, with max_concurrent equal to the lane count; valid dimensions: ${PR_REVIEW_BASE_DIMENSION_IDS.join(', ')}; a lane with one dimension may set workflow_lane to it and omit owned_workflow_lanes`,
 							);
 						}
 					}

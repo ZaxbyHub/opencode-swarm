@@ -268,6 +268,7 @@ export async function runBuildCheck(
 // ============ Tool Definition ============
 
 export const build_check: ReturnType<typeof tool> = createSwarmTool({
+	allowWorkingDirectoryOverride: true,
 	description:
 		'Discover and run build commands for various ecosystems in a project directory. Supports build, typecheck, and test commands.',
 	args: {

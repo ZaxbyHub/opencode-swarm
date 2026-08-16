@@ -7,6 +7,7 @@ import { findByBatchId } from '../background/pending-delegations.js';
 import {
 	buildPrReviewTriggerReceiptV2,
 	PrReviewWriterInputRowSchema,
+	type TriggerCoverageDegradation,
 	validatePrReviewInlineTriggerLedger,
 	validatePrReviewPersistedInputLedger,
 	validatePrReviewWriterInputLedger,
@@ -228,6 +229,7 @@ export async function executeWritePrReviewTriggerEval(
 	// overlap would let both artifacts legitimately back the same family,
 	// duplicating (or reintroducing stale) content for it downstream.
 	const citedLaneOwnership = new Map<string, string[]>();
+	const coverageDegradations: TriggerCoverageDegradation[] = [];
 	for (const row of validatedRows) {
 		if (row.result !== 'MATCHED') continue;
 		const records = findByBatchId(directory, row.source_batch_id!, {
@@ -249,15 +251,14 @@ export async function executeWritePrReviewTriggerEval(
 		const outputArtifact = outputRef
 			? readLaneOutput(directory, outputRef)
 			: null;
-		if (
+		// Provenance failures stay fail-closed: the cited lane must exist, be a
+		// micro lane that declared ownership of this family, and the retained
+		// artifact must be the exact, identity-checked output for this run's head.
+		// Without this chain any text could back a MATCHED row.
+		const provenanceFailure =
 			!record ||
 			record.mode !== 'swarm-pr-review:micro' ||
 			!recordOwnedLanes.includes(row.trigger_id) ||
-			record.status !== 'completed' ||
-			record.result?.outputDegraded === true ||
-			record.result?.transcriptIncomplete === true ||
-			record.result?.truncated === true ||
-			(record.result?.chars ?? 0) <= 0 ||
 			!record.result?.digest?.trim() ||
 			!record.result?.outputRef?.trim() ||
 			!outputArtifact ||
@@ -275,20 +276,61 @@ export async function executeWritePrReviewTriggerEval(
 			outputArtifact.artifact.revisionDigest !== currentRevisionDigest ||
 			outputArtifact.artifact.digest !== record.result?.digest ||
 			outputArtifact.artifact.chars !== record.result?.chars ||
-			!recordOwnedLanes.every((ownedFamily) =>
-				prReviewDiscoveryArtifactCoversLane(
-					outputArtifact.artifact.text,
-					ownedFamily,
-					recordOwnedLanes,
-					record.mode,
-				),
-			) ||
 			record.workspace?.prHeadSha !== parsed.data.pr_head_sha ||
-			record.workspace?.gitHead !== parsed.data.pr_head_sha
-		) {
+			record.workspace?.gitHead !== parsed.data.pr_head_sha;
+		if (provenanceFailure) {
 			return failure(
-				`MATCHED trigger ${row.trigger_id} does not reference a completed non-degraded micro-lane artifact`,
+				`MATCHED trigger ${row.trigger_id} does not reference a verifiable micro-lane provenance chain`,
 			);
+		}
+		// Coverage-quality failures are tolerated and DISCLOSED on the durable
+		// receipt instead of dead-ending the whole review (retries remain the
+		// first resort per the skill's COVERAGE GATE). A lane that completed but
+		// could not be parsed into covered rows, or that ended failed/cancelled
+		// after exhausting retries, still leaves its retained artifact as usable
+		// negative context — the synthesis phase must surface every entry
+		// recorded here in the final review report.
+		const degradationReasons: string[] = [];
+		if (record!.status !== 'completed') {
+			degradationReasons.push(`lane status ${record!.status}`);
+		}
+		if (record!.result?.outputDegraded === true) {
+			degradationReasons.push('output degraded');
+		}
+		if (record!.result?.transcriptIncomplete === true) {
+			degradationReasons.push('transcript incomplete');
+		}
+		if (record!.result?.truncated === true) {
+			degradationReasons.push('output truncated');
+		}
+		if ((record!.result?.chars ?? 0) <= 0) {
+			degradationReasons.push('empty output');
+		}
+		// Coverage is checked for THIS row's family only. The lane's other owned
+		// families are each checked by their own citing row (ownership==matched-set
+		// is enforced below), so stamping a lane-wide uncovered list here would
+		// misattribute degradations to covered families on a consolidated lane —
+		// the exact shape that motivated this recoverability path. The
+		// provenanceFailure gate above already guarantees the row's family is
+		// owned by the cited lane, so the ownership check is not repeated here.
+		const rowFamilyUncovered = !prReviewDiscoveryArtifactCoversLane(
+			outputArtifact!.artifact.text,
+			row.trigger_id,
+			recordOwnedLanes,
+			record!.mode,
+		);
+		if (rowFamilyUncovered) {
+			degradationReasons.push(
+				`no covered candidate or clean row for: ${row.trigger_id}`,
+			);
+		}
+		for (const reason of degradationReasons) {
+			coverageDegradations.push({
+				trigger_id: row.trigger_id,
+				source_batch_id: row.source_batch_id!,
+				source_lane_id: row.source_lane_id!,
+				reason,
+			});
 		}
 	}
 	const citedLaneEntries = [...citedLaneOwnership.entries()];
@@ -391,6 +433,7 @@ export async function executeWritePrReviewTriggerEval(
 		evaluated_at: new Date().toISOString(),
 		dispatched_micro_lane_count: dispatchedMicroLaneCount,
 		rows: validatedRows,
+		coverage_degradations: coverageDegradations,
 	});
 
 	const relativePath = path.join(
@@ -454,6 +497,13 @@ export async function executeWritePrReviewTriggerEval(
 			not_triggered_count: artifact.not_triggered_count,
 			no_match_count: artifact.no_match_count,
 			dispatched_micro_lane_count: dispatchedMicroLaneCount,
+			coverage_degradation_count: coverageDegradations.length,
+			...(coverageDegradations.length > 0
+				? {
+						coverage_degradations: coverageDegradations,
+						note: 'degraded families recorded on the receipt; disclose them in the final review report',
+					}
+				: {}),
 		},
 		null,
 		2,
@@ -462,6 +512,7 @@ export async function executeWritePrReviewTriggerEval(
 
 export const write_pr_review_trigger_eval: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
+		allowWorkingDirectoryOverride: true,
 		description:
 			'Persist the complete, exact-set PR-review trigger receipt after every MATCHED family has completed. Supply classifications and MATCHED provenance; evidence is optional and non-authoritative because the receipt reuses evidence frozen by the first micro dispatch. NOT_TRIGGERED families remain provenance-free.',
 		args: {

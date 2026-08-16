@@ -1252,9 +1252,9 @@ export const COMMAND_REGISTRY = {
 		handler: (ctx) => handleCiSimulateCommand(ctx.directory, ctx.args),
 		description:
 			'Create a temporary merge-result worktree and run CI before merge queue entry',
-		args: '[--base origin/main] [--head <ref>]',
+		args: '[pr-ref] [--base <ref>]',
 		details:
-			'Creates a detached temporary worktree under .swarm/ci-simulate from the base ref, merges the current worktree HEAD (or --head ref), runs fixed local CI gates (typecheck, Biome CI, build, unit/integration/security/smoke tests, drift check), then removes the worktree and prunes metadata. Intended as a pre-queue merge_group simulation helper.',
+			'Creates a detached temporary worktree under the OS temp dir (swarm-ci-simulate) from the base — an explicit validated --base <ref> when given (stacked/release-branch PRs), otherwise the detected default remote branch (origin/HEAD, init.defaultBranch, origin/main, origin/master, verified to exist) — merges the given PR ref (or the current ref), runs fixed local CI gates (typecheck, lint, build, test), then removes the worktree non-force and prunes metadata. Worktree removal is fail-closed: a blocked or dirty worktree is surfaced, never force-deleted. Intended as a pre-queue merge_group simulation helper.',
 		category: 'agent',
 		toolPolicy: 'agent',
 	},

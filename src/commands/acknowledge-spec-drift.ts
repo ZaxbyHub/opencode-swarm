@@ -1,21 +1,5 @@
-import { promises as fsPromises } from 'node:fs';
-import * as path from 'node:path';
-import { validateSwarmPath } from '../hooks/utils';
-import { loadPlanJsonOnly, savePlan } from '../plan/manager';
-import { readEffectiveSpecSync } from '../sdd/effective-spec';
-import type { SpecDriftAcknowledgedEvent } from '../types/events';
-import { log } from '../utils/logger';
+import { reconcileSpecDrift } from '../services/spec-drift-recovery.js';
 import { assertProjectRoot } from '../utils/project-boundary';
-import { computeSpecHash } from '../utils/spec-hash';
-
-interface SpecStalenessPayload {
-	planTitle: string;
-	phase: number;
-	specHash_plan: string;
-	specHash_current: string | null;
-	reason: string;
-	timestamp: string;
-}
 
 /**
  * Caller identification for spec-drift acknowledgment audit trail.
@@ -24,142 +8,43 @@ interface SpecStalenessPayload {
  * the resulting event mis-attributed the action. Callers now pass an
  * explicit actor so events.jsonl can distinguish the legitimate paths
  * ('user' from chat slash command, 'cli' from a real terminal) from any
- * unidentified caller ('unknown'). The Bash guardrail
- * (`src/hooks/guardrails.ts` section 23) blocks the agent-shell bypass at
- * the runtime layer; this parameter exists for forensic clarity.
+ * unidentified caller ('unknown').
  */
 export type SpecDriftAcknowledgedBy = 'user' | 'cli' | 'unknown';
 
 /**
- * Handle /swarm acknowledge-spec-drift command
- * Acknowledges and clears a previously detected spec drift staleness warning
+ * Handle /swarm acknowledge-spec-drift command.
+ * Acknowledges a previously detected spec-drift marker after reconciling
+ * plan hash, snapshot, and audit state in a retry-safe order.
  */
 export async function handleAcknowledgeSpecDriftCommand(
 	directory: string,
 	_args: string[],
 	acknowledgedBy: SpecDriftAcknowledgedBy = 'unknown',
 ): Promise<string> {
-	// This command can delete staleness state, refresh the spec snapshot, update
-	// plan projections, and append an audit event. Guard the command's mutation
-	// boundary before even the corrupted-state cleanup path can write.
 	assertProjectRoot(directory);
-	const specStalenessPath = validateSwarmPath(directory, 'spec-staleness.json');
 
-	let stalenessContent: string;
-	try {
-		stalenessContent = await fsPromises.readFile(specStalenessPath, 'utf-8');
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') {
+	const result = await reconcileSpecDrift(directory, {
+		mode: 'acknowledge',
+		actor: acknowledgedBy,
+	});
+
+	switch (result.status) {
+		case 'no_marker':
 			return 'No spec drift detected.';
-		}
-		throw error;
+		case 'applied':
+			return (
+				`${result.message}\n\n` +
+				'Warning: Spec drift was acknowledged; verify that the implementation still matches the current spec before proceeding.'
+			);
+		case 'cleanup_pending':
+			return (
+				`${result.message}\n\n` +
+				'Warning: Acknowledgment is already committed, but the drift marker still exists until cleanup succeeds. Retry the command to finish cleanup.'
+			);
+		case 'retry_later':
+		case 'corrupt_marker':
+		case 'failed':
+			return result.message;
 	}
-
-	let stalenessData: SpecStalenessPayload;
-	try {
-		stalenessData = JSON.parse(stalenessContent);
-	} catch {
-		// If the file exists but is malformed, delete it and report
-		await fsPromises.unlink(specStalenessPath).catch(() => {});
-		return 'Spec staleness file was corrupted. It has been removed.';
-	}
-
-	const { planTitle, phase } = stalenessData;
-
-	// Update plan.specHash to current spec hash after acknowledgment
-	let currentHash: string | null = null;
-	let planUpdateSkipped = false;
-	try {
-		const plan = await loadPlanJsonOnly(directory);
-		if (plan?.specHash) {
-			// F-07: Verify staleness file's specHash still matches current plan
-			// If spec changed again since staleness detection, reject acknowledgment
-			if (stalenessData.specHash_plan !== plan.specHash) {
-				return `Spec drift acknowledgment rejected: The spec has changed since the staleness was detected. 
-Current plan specHash: ${plan.specHash}
-Staleness file specHash: ${stalenessData.specHash_plan}
-Please re-run the relevant phase to detect current drift status.`;
-			}
-			currentHash = await computeSpecHash(directory);
-			// Convert null to undefined since plan.specHash is string | undefined
-			plan.specHash = currentHash ?? undefined;
-			await savePlan(directory, plan);
-			// Refresh spec snapshot to current content so future drift diffs
-			// start from the acknowledged baseline (FR-001).
-			try {
-				const currentSpec = readEffectiveSpecSync(directory);
-				if (currentSpec) {
-					const snapshotPath = path.join(
-						directory,
-						'.swarm',
-						'spec-snapshot.md',
-					);
-					await fsPromises.writeFile(
-						snapshotPath,
-						currentSpec.content,
-						'utf-8',
-					);
-				}
-			} catch {
-				// Non-fatal: snapshot refresh failure
-			}
-		}
-	} catch (planError) {
-		// Non-fatal: spec drift was acknowledged but plan update failed
-		log(
-			'[acknowledge-spec-drift] Failed to update plan specHash:',
-			planError instanceof Error ? planError.message : String(planError),
-		);
-		planUpdateSkipped = true;
-	}
-
-	// Only delete spec-staleness.json after plan.specHash update succeeds
-	if (!planUpdateSkipped) {
-		await fsPromises.unlink(specStalenessPath);
-	}
-
-	// Append acknowledgment event to events.jsonl
-	const eventsPath = validateSwarmPath(directory, 'events.jsonl');
-	const acknowledgmentEvent: SpecDriftAcknowledgedEvent = {
-		type: 'spec_drift_acknowledged',
-		timestamp: new Date().toISOString(),
-		phase,
-		planTitle,
-		acknowledgedBy,
-		previousHash: stalenessData.specHash_plan,
-		newHash: currentHash,
-	};
-
-	let eventWriteFailed = false;
-	try {
-		await fsPromises.appendFile(
-			eventsPath,
-			`${JSON.stringify(acknowledgmentEvent)}\n`,
-			'utf-8',
-		);
-	} catch (appendError) {
-		// Non-fatal: the spec drift was acknowledged but event logging failed
-		log(
-			'[acknowledge-spec-drift] Failed to write acknowledgment event:',
-			appendError instanceof Error ? appendError.message : String(appendError),
-		);
-		eventWriteFailed = true;
-	}
-
-	const warnings: string[] = [];
-	if (planUpdateSkipped) {
-		warnings.push('Plan specHash update was skipped due to an error.');
-	}
-	if (eventWriteFailed) {
-		warnings.push('Event logging failed — audit trail may be incomplete.');
-	}
-
-	const baseMessage = `Spec drift acknowledged for plan "${planTitle}" (phase ${phase}).`;
-	const warningMessage =
-		warnings.length > 0
-			? `\n\n⚠️  Warnings:\n${warnings.map((w) => `  - ${w}`).join('\n')}`
-			: '';
-	const cautionMessage =
-		'\n\n⚠️  Warning: Spec drift was acknowledged — verify that the implementation still matches the spec before proceeding.';
-	return baseMessage + warningMessage + cautionMessage;
 }

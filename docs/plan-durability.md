@@ -125,6 +125,34 @@ Three independent layers surface `.swarm/spec-staleness.json` proactively:
   `update_task_status`, `phase_complete`, `lean_turbo_run_phase`,
   `lean_turbo_acquire_locks`) while the staleness file exists. No cache
   — `/swarm acknowledge-spec-drift` is reflected immediately.
+
+Spec reconciliation is crash-recoverable. Canonical `spec_write` (or the
+separate human acknowledgement command) writes a PREPARED recovery record,
+updates the ledger-backed plan hash, verifies the spec snapshot, appends one
+idempotent audit event, commits the recovery record, and deletes the staleness
+marker last. A retry resumes the same transition. `/swarm clarify` only enters
+the dialogue mode; it does not mutate the plan hash or clear drift by itself.
+
+## Exact-task workflow recovery
+
+Task QA evidence carries an `exact-task-v1` workflow record with state,
+generation, retry count, outcome, and transition identity. Accepted coder
+mutations increment the generation and atomically invalidate prior pre-check,
+reviewer, and test-engineer proof. Empty/no-mutation attempts only increment
+bounded retry diagnostics. A failed or cancelled shared-root settlement that
+left a safely attributed mutation still rotates the generation and enters
+`rework_required`, so partial edits cannot retain stale QA proof. Durable
+exact-task evidence is authoritative; session maps are bounded caches and
+delegation chains cannot satisfy a completion gate.
+
+Settled-task reopen is deliberately narrow. Architect-only
+`update_task_status(force: true)` requires `expected_state`,
+`expected_generation`, `target_state: "idle"`, a non-empty reason, and a caller
+transition ID. Under plan-lock then task-evidence-lock ordering it writes a
+PREPARED task-repair record before moving the ledger projection, clears only
+that task's QA proof, appends one audited event, and commits. Retrying the same
+transition lazily resumes that exact task; plugin initialization never scans
+repair records.
 - **Layer C** (`src/services/status-service.ts`): `/swarm status` renders
   a `**Spec drift detected**` line with stored/current hashes and the
   resolution commands.
@@ -258,22 +286,23 @@ once pre-check succeeds.
 | `locked` | boolean | `false` | When true, profile is immutable (fail-closed enforcement) |
 | `auto_proceed` | boolean | `false` | Advances across phase boundaries without another prompt |
 | `commit_after_each_completed_task` | boolean | `false` | Requests a checkpoint after successful task completion and pre-commit gates |
+| `planning_profile` | `balanced` \| `strict` | repository policy | Selects balanced defaults or strict planning ceremony |
 
 ### Invariants
 
-- **Locked profile is immutable**: any `save_plan` call that includes `execution_profile` while the current plan has a locked profile will be rejected.
+- **Locked profile is immutable except for one safety ratchet**: `planning_profile` may move from `balanced` to `strict`; `strict` to `balanced` and every other locked-profile change are rejected. Locked legacy profiles without `planning_profile` resolve conservatively to effective `strict`.
 - **Fail-closed enforcement**: the delegation gate enforces a locked profile — `parallelization_enabled: false` blocks Stage B parallel dispatch regardless of global plugin config.
 - **Ledger authority**: profile changes are recorded as `execution_profile_set` / `execution_profile_locked` events. Replay rebuilds the profile deterministically from these events.
-- **Hash coverage**: `execution_profile` is included in both ledger `computePlanHash` and Markdown `computePlanContentHash`, so profile-only changes update the ledger chain and invalidate a stale `plan.md` projection.
+- **Hash coverage**: `execution_profile` is included in ledger, structure, and Markdown content hashes, so profile-only changes update the ledger chain and invalidate stale projections. An explicit `planning_profile: strict` remains distinct from an omitted legacy field (and from explicit `balanced`) in every hash and projection. Backward compatibility for a locked legacy omission is applied only by the planning-profile resolver; it never erases a real `balanced` → `strict` change from durable identity.
 - **All surfaces carry the profile**: snapshot events, checkpoint export (`.swarm/plan-export/SWARM_PLAN.json`), handoff data, export data, and `get_approved_plan` output all include `execution_profile`.
 
 ### Lifecycle
 
 ```
 1. Architect drafts task scopes and freezes the exact `swarm_id` plus plan title.
-2. Architect persists the QA profile with `set_qa_gates` against that identity before the first plan save.
+2. In `strict`, the architect presents the unified questionnaire and persists the selected QA profile with `set_qa_gates` against that identity before the first plan save. In `balanced`, it skips that ceremony and lets `save_plan` exact-bind the durable defaults.
    Upgraded legacy recovery: when a durable plan still points at an unbound legacy QA row, rerun `set_qa_gates` with the same exact `swarm_id`, `plan_title`, and `adopt_legacy_binding_only: true` to exact-bind the existing profile without changing gates or the lock.
-3. Architect calls `save_plan` once with the same identity and the complete locked execution profile, including parallelism, auto-proceed, and checkpoint policy.
+3. Architect calls `save_plan` once with the same identity and the complete locked execution profile, including the resolved `planning_profile`, parallelism, auto-proceed, and checkpoint policy.
 4. Ledger records `execution_profile_set` and `execution_profile_locked` events.
 5. Delegation and execution protocols read the durable profile; transient `.swarm/context.md` sections are not an execution-policy authority.
 6. Critic drift verifier checks for profile drift via `get_approved_plan`.

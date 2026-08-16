@@ -663,6 +663,7 @@ export async function executeEpicRunPhase(
  * the concurrent coder agents.
  */
 export const epic_decide_phase: ToolDefinition = createSwarmTool({
+	allowWorkingDirectoryOverride: true,
 	description:
 		"Compute the Epic Mode verdict for a phase. Runs a scope-graph preflight, rolls the calibration loop forward over any new divergence records, computes the plan-wide coupling coefficient `p`, gates on three checks (p-threshold, hot-module, greenfield), persists the decision to .swarm/evidence/epic-promotions.jsonl, and returns the verdict (promote/demote/error). This tool does NOT dispatch coders; on a `promote` verdict the architect pairs it with `epic_plan_waves` to obtain the wave plan, then for each wave issues one `Task(subagent_type='coder', ...)` per taskId — all in one assistant message — so each concurrent coder appears as a visible subagent. On a `demote` verdict the architect falls back to per-task serial. Use only when /swarm epic is on for the session.",
 	args: {

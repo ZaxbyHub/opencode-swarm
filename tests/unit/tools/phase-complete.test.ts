@@ -9,13 +9,12 @@ import {
 	resetSwarmState,
 	swarmState,
 } from '../../../src/state';
+import { seedStageBGates } from '../../helpers/task-workflow-evidence';
 
 // Import the tool after setting up environment
 const { phase_complete, executePhaseComplete } = await import(
 	'../../../src/tools/phase-complete'
 );
-const { recordGateEvidence } = await import('../../../src/gate-evidence');
-
 /**
  * Helper function to write a valid retro bundle for a phase
  */
@@ -1669,10 +1668,9 @@ describe('phase_complete tool', () => {
 				JSON.stringify(planJson, null, 2),
 			);
 
-			await recordGateEvidence(tempDir, '1.1', 'reviewer', 'reviewer-sess');
-			await recordGateEvidence(tempDir, '1.1', 'test_engineer', 'test-sess');
-			await recordGateEvidence(tempDir, '1.2', 'reviewer', 'reviewer-sess');
-			await recordGateEvidence(tempDir, '1.2', 'test_engineer', 'test-sess');
+			for (const taskId of ['1.1', '1.2']) {
+				await seedStageBGates(tempDir, taskId);
+			}
 
 			// Set up session with NO agents dispatched, as after a session restart.
 			ensureAgentSession('sess1');
@@ -2076,8 +2074,7 @@ describe('phase_complete tool', () => {
 				path.join(tempDir, '.swarm', 'plan.json'),
 				JSON.stringify(planJson, null, 2),
 			);
-			await recordGateEvidence(tempDir, '1.1', 'reviewer', 'reviewer-sess');
-			await recordGateEvidence(tempDir, '1.1', 'test_engineer', 'test-sess');
+			await seedStageBGates(tempDir, '1.1');
 
 			// Set up session with NO agents dispatched
 			ensureAgentSession('sess1');

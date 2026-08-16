@@ -237,9 +237,9 @@ mock.module('../../../src/state.js', () => {
 		getActiveFullAutoSessionID: () => undefined,
 		hasActiveLeanTurbo: () => false,
 		hasActiveEpicMode: () => false,
+		updateTaskWorkflowCache: () => {},
 	};
 });
-
 mock.module('../../../src/plan/checkpoint.js', () => ({
 	writeCheckpoint: async () => {},
 }));

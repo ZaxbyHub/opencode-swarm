@@ -19,6 +19,7 @@ export type ToolResult = string | { output: string; metadata?: unknown };
 export interface SwarmToolOptions<Args extends Record<string, unknown>> {
 	description: string;
 	args: Args;
+	allowWorkingDirectoryOverride?: boolean;
 	execute: (
 		args: Args,
 		directory: string,
@@ -51,8 +52,10 @@ function classifyToolError(error: unknown): ToolFailureClass {
 }
 
 /**
- * Creates a swarm tool with automatic working directory injection.
- * Wraps the @opencode-ai/plugin/tool factory to always inject `directory` and `ctx` into tool execute callbacks.
+ * Creates a swarm tool with optional working_directory override injection.
+ * Wraps the @opencode-ai/plugin/tool factory to always inject `directory` and `ctx`
+ * into tool execute callbacks, and to expose a caller-controlled
+ * `working_directory` only for tools that explicitly opt into that override.
  *
  * Registration contract (issue #1781 E4): every `export const NAME = createSwarmTool({...})`
  * in `src/tools/**` MUST have a corresponding entry in `TOOL_METADATA`
@@ -69,15 +72,17 @@ export function createSwarmTool<Args extends Record<string, unknown>>(
 	type ToolArgs = Parameters<typeof tool>[0]['args'];
 	type ToolExecuteArgs = Parameters<Parameters<typeof tool>[0]['execute']>[0];
 	const ownsWorkingDirectory = Object.hasOwn(opts.args, 'working_directory');
-	const toolArgs = ownsWorkingDirectory
-		? opts.args
-		: {
+	const allowsWorkingDirectoryOverride =
+		opts.allowWorkingDirectoryOverride === true && !ownsWorkingDirectory;
+	const toolArgs = allowsWorkingDirectoryOverride
+		? {
 				...opts.args,
 				working_directory: z
 					.string()
 					.optional()
 					.describe('Project or linked-worktree root for this tool invocation'),
-			};
+			}
+		: opts.args;
 
 	return tool({
 		description: opts.description,
@@ -93,26 +98,38 @@ export function createSwarmTool<Args extends Record<string, unknown>>(
 				if (
 					!ownsWorkingDirectory &&
 					typeof args === 'object' &&
-					args !== null &&
-					Object.hasOwn(args, 'working_directory')
+					args !== null
 				) {
-					const { working_directory: workingDirectory, ...executorArgs } =
-						args as Record<string, unknown>;
-					effectiveArgs = executorArgs as Args;
-
-					if (workingDirectory !== undefined) {
-						const resolved = resolveWorkingDirectory(
-							workingDirectory as string | null,
-							fallbackDirectory,
+					if (
+						!allowsWorkingDirectoryOverride &&
+						Object.hasOwn(args, 'working_directory')
+					) {
+						throw new Error(
+							'Invalid working_directory: this tool does not allow working_directory overrides',
 						);
-						if (!resolved.success) throw new Error(resolved.message);
+					}
+					if (
+						allowsWorkingDirectoryOverride &&
+						Object.hasOwn(args, 'working_directory')
+					) {
+						const { working_directory: workingDirectory, ...executorArgs } =
+							args as Record<string, unknown>;
+						effectiveArgs = executorArgs as Args;
 
-						effectiveDirectory = resolved.directory;
-						effectiveContext = {
-							...ctx,
-							directory: resolved.directory,
-							worktree: resolved.directory,
-						} as ToolContext;
+						if (workingDirectory !== undefined) {
+							const resolved = resolveWorkingDirectory(
+								workingDirectory as string | null,
+								fallbackDirectory,
+							);
+							if (!resolved.success) throw new Error(resolved.message);
+
+							effectiveDirectory = resolved.directory;
+							effectiveContext = {
+								...ctx,
+								directory: resolved.directory,
+								worktree: resolved.directory,
+							} as ToolContext;
+						}
 					}
 				}
 

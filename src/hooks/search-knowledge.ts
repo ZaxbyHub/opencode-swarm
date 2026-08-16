@@ -32,7 +32,7 @@ import {
 	effectiveRetrievalOutcomes,
 	newTraceId,
 	type RetrievalEventMode,
-	readKnowledgeCounterRollups,
+	readAuthoritativeKnowledgeCounterRollups,
 	recordKnowledgeEvent,
 } from './knowledge-events.js';
 import {
@@ -264,7 +264,9 @@ export async function searchKnowledge(
 		agent = 'unknown',
 		sessionId = 'unknown',
 		tier = 'all',
-		emitEvent = true,
+		// Search candidates are not receipt obligations. Final exposure boundaries
+		// commit V2 membership and only then emit diagnostic retrieval rows.
+		emitEvent = false,
 		applyScopeFilter = true,
 		forceReadHive = false,
 		applyRoleScope = true,
@@ -310,7 +312,8 @@ export async function searchKnowledge(
 				skipScopeFilter: !applyScopeFilter,
 			},
 		);
-		const counterRollups = await readKnowledgeCounterRollups(directory);
+		const counterRollups =
+			await readAuthoritativeKnowledgeCounterRollups(directory);
 
 		// Tier post-filter (hive-only) + inactive-status exclusion.
 		// G4 (#1716): use the canonical `isActiveStatus` helper so any future

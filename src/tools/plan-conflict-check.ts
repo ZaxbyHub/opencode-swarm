@@ -163,6 +163,7 @@ export async function executePlanConflictCheck(
 }
 
 export const plan_conflict_check: ReturnType<typeof tool> = createSwarmTool({
+	allowWorkingDirectoryOverride: true,
 	description:
 		'Read-only advisory check (#1656): compute a pairwise file-conflict matrix for N proposed parallel task groups ' +
 		'using declared scopes (`.swarm/scopes/scope-<taskId>.json`) and optional git co-change signal. Returns a ' +

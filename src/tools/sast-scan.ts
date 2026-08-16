@@ -804,6 +804,7 @@ export async function sastScan(
  * - Tier B: Semgrep (optional, if available on PATH)
  */
 export const sast_scan: ToolDefinition = createSwarmTool({
+	allowWorkingDirectoryOverride: true,
 	description:
 		'Static Application Security Testing (SAST) scan. Scans files for security vulnerabilities using built-in rules (Tier A) and optional Semgrep (Tier B). Supports phase-scoped baseline diffing: set capture_baseline:true before first coder delegation to snapshot pre-existing findings; subsequent scans with the same phase only fail on NEW findings.',
 	args: {

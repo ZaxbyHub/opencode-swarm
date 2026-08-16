@@ -18,10 +18,13 @@ import { getAgentSession, swarmState } from '../state';
 describe('handleFullAutoCommand — first-class toggle & locked guard', () => {
 	let testSessionId: string;
 	let tmpDir: string;
+	let originalXdg: string | undefined;
 
 	beforeEach(() => {
 		testSessionId = `config-guard-test-${Date.now()}`;
 		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'full-auto-guard-'));
+		originalXdg = process.env.XDG_CONFIG_HOME;
+		process.env.XDG_CONFIG_HOME = path.join(tmpDir, 'user-config');
 		swarmState.agentSessions.set(testSessionId, {
 			agentName: 'architect',
 			lastToolCallTime: Date.now(),
@@ -75,6 +78,8 @@ describe('handleFullAutoCommand — first-class toggle & locked guard', () => {
 	afterEach(() => {
 		swarmState.agentSessions.delete(testSessionId);
 		swarmState.fullAutoEnabledInConfig = false;
+		if (originalXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+		else process.env.XDG_CONFIG_HOME = originalXdg;
 		try {
 			fs.rmSync(tmpDir, { recursive: true, force: true });
 		} catch {

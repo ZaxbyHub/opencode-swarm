@@ -15,7 +15,10 @@ import type { Plan } from '../../../src/config/plan-schema';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 import { withFrozenClock } from '../../helpers/test-clock.js';
-import { recordPlanCriticApproval } from './_delegation-gate-helpers';
+import {
+	recordPlanCriticApproval,
+	seedAuthoritativeTaskWorkflow,
+} from './_delegation-gate-helpers';
 
 function makeConfig(overrides?: Record<string, unknown>): PluginConfig {
 	return {
@@ -165,6 +168,7 @@ describe('delegation-gate: state machine adversarial — injection attempts', ()
 		const hook = createDelegationGateHook(makeConfig(), tempDir);
 		const session = ensureAgentSession('test-session');
 		session.taskWorkflowStates.set('1.1', 'tests_run');
+		await seedAuthoritativeTaskWorkflow(tempDir, '1.1', 'tests_run');
 
 		await expect(
 			callToolBefore(hook, 'Task', 'test-session', {
@@ -179,6 +183,7 @@ describe('delegation-gate: state machine adversarial — injection attempts', ()
 		const hook = createDelegationGateHook(makeConfig(), tempDir);
 		const session = ensureAgentSession('test-session');
 		session.taskWorkflowStates.set('1.1', 'tests_run');
+		await seedAuthoritativeTaskWorkflow(tempDir, '1.1', 'tests_run');
 
 		await expect(
 			callToolBefore(hook, 'Task', 'test-session', {
@@ -228,6 +233,7 @@ describe('delegation-gate: state machine adversarial — stress tests', () => {
 			const state = states[i % states.length];
 			session.taskWorkflowStates.set(`1.${i}`, state);
 		}
+		await seedAuthoritativeTaskWorkflow(tempDir, '1.3', 'tests_run');
 
 		let threw = false;
 		try {
@@ -261,6 +267,7 @@ describe('delegation-gate: state machine adversarial — stress tests', () => {
 		}
 
 		session.taskWorkflowStates.set('1.1', 'tests_run');
+		await seedAuthoritativeTaskWorkflow(tempDir, '1.1', 'tests_run');
 
 		let threw = false;
 		try {

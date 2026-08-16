@@ -11,16 +11,13 @@ import {
 
 describe('Agent Creation Functions', () => {
 	const testModel = 'test-model';
-
 	describe('createArchitectAgent', () => {
 		const agent = createArchitectAgent(testModel);
-
 		test('returns correct agent definition structure', () => {
 			expect(agent).toHaveProperty('name', 'architect');
 			expect(agent).toHaveProperty('description');
 			expect(agent).toHaveProperty('config');
 		});
-
 		test('has correct model', () => {
 			expect(agent.config.model).toBe(testModel);
 		});
@@ -53,7 +50,8 @@ describe('Agent Creation Functions', () => {
 		test('handles custom prompt correctly', () => {
 			const customPrompt = 'custom prompt';
 			const agentWithCustom = createArchitectAgent(testModel, customPrompt);
-			expect(agentWithCustom.config.prompt).toBe(customPrompt);
+			expect(agentWithCustom.config.prompt).toStartWith(customPrompt);
+			expect(agentWithCustom.config.prompt).toMatch(/PROFILE DEFAULT/);
 		});
 
 		test('handles append prompt correctly', () => {
@@ -70,7 +68,9 @@ describe('Agent Creation Functions', () => {
 			const custom = 'custom';
 			const append = 'append';
 			const agentWithBoth = createArchitectAgent(testModel, custom, append);
-			expect(agentWithBoth.config.prompt).toBe(custom);
+			expect(agentWithBoth.config.prompt).toStartWith(custom);
+			expect(agentWithBoth.config.prompt).toMatch(/PROFILE DEFAULT/);
+			expect(agentWithBoth.config.prompt).not.toContain(append);
 		});
 	});
 

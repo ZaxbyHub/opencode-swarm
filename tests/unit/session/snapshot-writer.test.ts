@@ -433,8 +433,7 @@ describe('writeSnapshot', () => {
 		const content = await Bun.file(filePath).text();
 		expect(() => JSON.parse(content)).not.toThrow();
 	});
-
-	it('writes JSON with version: 2', async () => {
+	it('writes JSON with version: 3', async () => {
 		const state = {
 			toolAggregates: new Map(),
 			activeAgent: new Map(),
@@ -450,7 +449,7 @@ describe('writeSnapshot', () => {
 		const content = await Bun.file(filePath).text();
 		const parsed = JSON.parse(content) as SnapshotData;
 
-		expect(parsed.version).toBe(2);
+		expect(parsed.version).toBe(3);
 	});
 
 	it('creates .swarm/session/ directory if it does not exist', async () => {
@@ -552,7 +551,8 @@ describe('writeSnapshot', () => {
 		const parsed = JSON.parse(content) as SnapshotData;
 
 		expect(parsed).toEqual({
-			version: 2,
+			version: 3,
+			workflowSchema: 'exact-task-v1',
 			writtenAt: expect.any(Number),
 			toolAggregates: {},
 			activeAgent: {},
@@ -681,7 +681,7 @@ describe('writeSnapshot - fsyncSync (FR-004)', () => {
 		expect(existsSync(filePath)).toBe(true);
 		const content = await Bun.file(filePath).text();
 		const parsed = JSON.parse(content) as SnapshotData;
-		expect(parsed.version).toBe(2);
+		expect(parsed.version).toBe(3);
 		expect(parsed.toolAggregates).toEqual({});
 	});
 
@@ -714,7 +714,7 @@ describe('writeSnapshot - fsyncSync (FR-004)', () => {
 		expect(existsSync(filePath)).toBe(true);
 		const content = await Bun.file(filePath).text();
 		const parsed = JSON.parse(content) as SnapshotData;
-		expect(parsed.version).toBe(2);
+		expect(parsed.version).toBe(3);
 		expect(parsed.toolAggregates).toEqual({
 			read: {
 				tool: 'read',
@@ -815,7 +815,7 @@ describe('createSnapshotWriterHook', () => {
 		expect(() => JSON.parse(content)).not.toThrow();
 
 		const parsed = JSON.parse(content) as SnapshotData;
-		expect(parsed.version).toBe(2);
+		expect(parsed.version).toBe(3);
 	});
 });
 

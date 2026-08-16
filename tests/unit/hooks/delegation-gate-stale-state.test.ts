@@ -1,10 +1,9 @@
 /**
  * Tests for stale coder_delegated state detection in delegation-gate.ts
  *
- * Bug B: When sessions resume from disk (state rehydration), stale coder_delegated
- * entries from dead sessions would permanently block the gate. The fix detects
- * stale state by checking whether the current session's delegation chains contain
- * evidence of a coder delegation, and resets stale entries to 'idle'.
+ * Issue #2098 makes exact-task evidence authoritative. Legacy in-memory entries
+ * outside the active plan are inert projections: delegation-chain timestamps do
+ * not promote them into workflow authority or let them block new work.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
@@ -121,7 +120,7 @@ describe('delegation-gate: stale coder_delegated detection (Bug B)', () => {
 		}
 	});
 
-	it('resets stale coder_delegated state when no delegation chains exist for session', async () => {
+	it('ignores an out-of-plan projection when no delegation chains exist', async () => {
 		const config = makeConfig();
 		const hook = createDelegationGateHook(config, tempDir);
 
@@ -136,11 +135,10 @@ describe('delegation-gate: stale coder_delegated detection (Bug B)', () => {
 			hook.toolBefore(...makeToolBeforeArgs(SESSION_ID, 'coder')),
 		).resolves.toBeUndefined();
 
-		// Verify the stale state was reset to idle
-		expect(session.taskWorkflowStates.get('1.5')).toBe('idle');
+		expect(session.taskWorkflowStates.get('1.5')).toBe('coder_delegated');
 	});
 
-	it('resets stale coder_delegated when delegation chains exist but have no coder entries', async () => {
+	it('does not rewrite an out-of-plan projection from unrelated chain entries', async () => {
 		const config = makeConfig();
 		const hook = createDelegationGateHook(config, tempDir);
 
@@ -160,10 +158,10 @@ describe('delegation-gate: stale coder_delegated detection (Bug B)', () => {
 			hook.toolBefore(...makeToolBeforeArgs(SESSION_ID, 'coder', 'call-2')),
 		).resolves.toBeUndefined();
 
-		expect(session.taskWorkflowStates.get('2.1')).toBe('idle');
+		expect(session.taskWorkflowStates.get('2.1')).toBe('coder_delegated');
 	});
 
-	it('resets stale coder_delegated when coder delegation is older than lastPhaseCompleteTimestamp', async () => {
+	it('does not use an old chain entry as durable workflow authority', async () => {
 		const config = makeConfig();
 		const hook = createDelegationGateHook(config, tempDir);
 
@@ -180,10 +178,10 @@ describe('delegation-gate: stale coder_delegated detection (Bug B)', () => {
 			hook.toolBefore(...makeToolBeforeArgs(SESSION_ID, 'coder', 'call-3')),
 		).resolves.toBeUndefined();
 
-		expect(session.taskWorkflowStates.get('1.3')).toBe('idle');
+		expect(session.taskWorkflowStates.get('1.3')).toBe('coder_delegated');
 	});
 
-	it('blocks when coder_delegated state is current (delegation chain has fresh coder entry)', async () => {
+	it('a fresh chain entry cannot make an out-of-plan projection blocking', async () => {
 		const config = makeConfig();
 		const hook = createDelegationGateHook(config, tempDir);
 
@@ -196,16 +194,15 @@ describe('delegation-gate: stale coder_delegated detection (Bug B)', () => {
 			{ from: 'architect', to: 'coder', timestamp: 2000 },
 		]);
 
-		// Tier 3 task (3.x) — even turbo can't bypass
 		await expect(
 			hook.toolBefore(...makeToolBeforeArgs(SESSION_ID, 'coder', 'call-4')),
-		).rejects.toThrow('REVIEWER_GATE_VIOLATION');
+		).resolves.toBeUndefined();
 
 		// State should NOT have been reset
 		expect(session.taskWorkflowStates.get('3.1')).toBe('coder_delegated');
 	});
 
-	it('error message includes recovery instruction for stale state', async () => {
+	it('does not emit stale-state recovery for an untrusted projection', async () => {
 		const config = makeConfig();
 		const hook = createDelegationGateHook(config, tempDir);
 
@@ -217,20 +214,12 @@ describe('delegation-gate: stale coder_delegated detection (Bug B)', () => {
 			{ from: 'architect', to: 'coder', timestamp: 2000 },
 		]);
 
-		try {
-			await hook.toolBefore(
-				...makeToolBeforeArgs(SESSION_ID, 'coder', 'call-5'),
-			);
-			// Should not reach here
-			expect(true).toBe(false);
-		} catch (err: unknown) {
-			const msg = (err as Error).message;
-			expect(msg).toContain('/swarm reset-session');
-			expect(msg).toContain('stale state from a prior session');
-		}
+		await expect(
+			hook.toolBefore(...makeToolBeforeArgs(SESSION_ID, 'coder', 'call-5')),
+		).resolves.toBeUndefined();
 	});
 
-	it('resets multiple stale tasks and allows delegation', async () => {
+	it('leaves multiple out-of-plan projections inert while allowing delegation', async () => {
 		const config = makeConfig();
 		const hook = createDelegationGateHook(config, tempDir);
 
@@ -245,8 +234,8 @@ describe('delegation-gate: stale coder_delegated detection (Bug B)', () => {
 			hook.toolBefore(...makeToolBeforeArgs(SESSION_ID, 'coder', 'call-6')),
 		).resolves.toBeUndefined();
 
-		expect(session.taskWorkflowStates.get('1.1')).toBe('idle');
-		expect(session.taskWorkflowStates.get('1.2')).toBe('idle');
+		expect(session.taskWorkflowStates.get('1.1')).toBe('coder_delegated');
+		expect(session.taskWorkflowStates.get('1.2')).toBe('coder_delegated');
 		expect(session.taskWorkflowStates.get('1.3')).toBe('idle');
 	});
 
@@ -257,16 +246,16 @@ describe('delegation-gate: stale coder_delegated detection (Bug B)', () => {
 		const session = ensureAgentSession(SESSION_ID);
 		session.taskWorkflowStates.set('1.5', 'coder_delegated');
 
-		// Delegating to reviewer should not trigger the stale check at all
+		// A non-Stage-B agent isolates the stale-projection behavior.
 		await expect(
-			hook.toolBefore(...makeToolBeforeArgs(SESSION_ID, 'reviewer', 'call-7')),
+			hook.toolBefore(...makeToolBeforeArgs(SESSION_ID, 'explorer', 'call-7')),
 		).resolves.toBeUndefined();
 
 		// State should be unchanged (not reset, since we're not going through the coder path)
 		expect(session.taskWorkflowStates.get('1.5')).toBe('coder_delegated');
 	});
 
-	it('handles prefixed agent names via stripKnownSwarmPrefix', async () => {
+	it('prefixed chain names still cannot manufacture workflow authority', async () => {
 		const config = makeConfig();
 		const hook = createDelegationGateHook(config, tempDir);
 
@@ -279,11 +268,9 @@ describe('delegation-gate: stale coder_delegated detection (Bug B)', () => {
 			{ from: 'architect', to: 'paid_coder', timestamp: 2000 },
 		]);
 
-		// This is a legitimate current delegation (prefixed name resolves to 'coder')
-		// For a non-Tier-3 task without turbo, it should block
 		await expect(
 			hook.toolBefore(...makeToolBeforeArgs(SESSION_ID, 'coder', 'call-8')),
-		).rejects.toThrow('REVIEWER_GATE_VIOLATION');
+		).resolves.toBeUndefined();
 	});
 
 	it('detects stale state after rehydration even when delegation chains are restored', async () => {
@@ -309,11 +296,10 @@ describe('delegation-gate: stale coder_delegated detection (Bug B)', () => {
 			hook.toolBefore(...makeToolBeforeArgs(SESSION_ID, 'coder', 'call-9')),
 		).resolves.toBeUndefined();
 
-		// State should be reset to idle
-		expect(session.taskWorkflowStates.get('1.5')).toBe('idle');
+		expect(session.taskWorkflowStates.get('1.5')).toBe('coder_delegated');
 	});
 
-	it('blocks after rehydration when a NEW coder delegation is made post-rehydration', async () => {
+	it('a post-rehydration chain entry still cannot authorize an out-of-plan projection', async () => {
 		const config = makeConfig();
 		const hook = createDelegationGateHook(config, tempDir);
 
@@ -326,10 +312,9 @@ describe('delegation-gate: stale coder_delegated detection (Bug B)', () => {
 			{ from: 'architect', to: 'coder', timestamp: 15000 },
 		]);
 
-		// Tier 3 task — should block (legitimate current delegation)
 		await expect(
 			hook.toolBefore(...makeToolBeforeArgs(SESSION_ID, 'coder', 'call-10')),
-		).rejects.toThrow('REVIEWER_GATE_VIOLATION');
+		).resolves.toBeUndefined();
 
 		expect(session.taskWorkflowStates.get('3.1')).toBe('coder_delegated');
 	});
@@ -352,6 +337,6 @@ describe('delegation-gate: stale coder_delegated detection (Bug B)', () => {
 			hook.toolBefore(...makeToolBeforeArgs(SESSION_ID, 'coder', 'call-11')),
 		).resolves.toBeUndefined();
 
-		expect(session.taskWorkflowStates.get('2.1')).toBe('idle');
+		expect(session.taskWorkflowStates.get('2.1')).toBe('coder_delegated');
 	});
 });

@@ -31,6 +31,7 @@ import {
 } from '../../../src/hooks/knowledge-events.js';
 import { buildDelegateDirectiveBlock } from '../../../src/hooks/knowledge-injector.js';
 import type { RankedEntry } from '../../../src/hooks/knowledge-reader.js';
+import { commitDisplayedMembership } from '../../../src/hooks/knowledge-receipt-ledger.js';
 import type { KnowledgeConfig } from '../../../src/hooks/knowledge-types.js';
 import { loadPromotionEvidenceByEntry } from '../../../src/hooks/promotion-evidence-store.js';
 
@@ -126,6 +127,22 @@ async function seedRetrieved(
 	resultIds: string[],
 	sessionId: string,
 ): Promise<void> {
+	const membership = await commitDisplayedMembership(directory, {
+		trace_id: FIXED_TRACE_ID,
+		session_id: sessionId,
+		task_id: 'task-42',
+		agent: 'coder',
+		exposure_kind: 'delegate_directive',
+		entries: resultIds.map((entryId, rank) => ({
+			entry_id: entryId,
+			critical: entryId === ID_CRITICAL,
+			rank: rank + 1,
+			score: 1,
+		})),
+	});
+	if (!membership.ok) {
+		throw new Error(`${membership.code}: ${membership.detail}`);
+	}
 	await appendKnowledgeEvent(directory, {
 		type: 'retrieved',
 		trace_id: FIXED_TRACE_ID,
@@ -167,6 +184,7 @@ describe('delegate-ack-collector — non-critical silence', () => {
 
 	beforeEach(() => {
 		dir = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-ack-unack-'));
+		fs.mkdirSync(path.join(dir, '.git'));
 	});
 
 	afterEach(() => {
@@ -256,8 +274,8 @@ describe('delegate-ack-collector — non-critical silence', () => {
 				rankedEntry(ID_MEDIUM, 'medium'),
 			]),
 			transcript: [
-				`KNOWLEDGE_APPLIED:${ID_HIGH}`,
-				`KNOWLEDGE_N_A:${ID_MEDIUM} reason=different subsystem`,
+				`KNOWLEDGE_APPLIED:${FIXED_TRACE_ID}:${ID_HIGH}`,
+				`KNOWLEDGE_N_A:${FIXED_TRACE_ID}:${ID_MEDIUM} reason=different subsystem`,
 			].join('\n'),
 			agent: 'coder',
 			sessionId,
@@ -321,7 +339,7 @@ describe('delegate-ack-collector — non-critical silence', () => {
 				rankedEntry(ID_LOW, 'low'),
 			]),
 			// Critical unacked; ID_HIGH acked; ID_LOW silently dropped.
-			transcript: `Work complete.\nKNOWLEDGE_APPLIED:${ID_HIGH}`,
+			transcript: `Work complete.\nKNOWLEDGE_APPLIED:${FIXED_TRACE_ID}:${ID_HIGH}`,
 			agent: 'reviewer',
 			sessionId,
 		});
@@ -392,8 +410,8 @@ describe('delegate-ack-collector — non-critical silence', () => {
 				rankedEntry(ID_MEDIUM, 'medium'),
 			]),
 			transcript: [
-				`KNOWLEDGE_APPLIED:${ID_HIGH}`,
-				`KNOWLEDGE_APPLIED:${ID_MEDIUM}`,
+				`KNOWLEDGE_APPLIED:${FIXED_TRACE_ID}:${ID_HIGH}`,
+				`KNOWLEDGE_APPLIED:${FIXED_TRACE_ID}:${ID_MEDIUM}`,
 			].join('\n'),
 			agent: 'coder',
 			sessionId,
@@ -429,8 +447,8 @@ describe('delegate-ack-collector — non-critical silence', () => {
 				rankedEntry(ID_MEDIUM, 'medium'),
 			]),
 			transcript: [
-				`KNOWLEDGE_APPLIED:${ID_CRITICAL}`,
-				`KNOWLEDGE_APPLIED:${ID_MEDIUM}`,
+				`KNOWLEDGE_APPLIED:${FIXED_TRACE_ID}:${ID_CRITICAL}`,
+				`KNOWLEDGE_APPLIED:${FIXED_TRACE_ID}:${ID_MEDIUM}`,
 			].join('\n'),
 			agent: 'coder',
 			sessionId,
@@ -461,7 +479,7 @@ describe('delegate-ack-collector — non-critical silence', () => {
 		const result = await collectDelegateAcks({
 			directory: dir,
 			prompt: buildPrompt([rankedEntry(ID_MEDIUM, 'medium')]),
-			transcript: `KNOWLEDGE_IGNORED:${ID_MEDIUM} reason=conflicts with the task spec`,
+			transcript: `KNOWLEDGE_IGNORED:${FIXED_TRACE_ID}:${ID_MEDIUM} reason=conflicts with the task spec`,
 			agent: 'coder',
 			sessionId,
 		});

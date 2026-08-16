@@ -10,6 +10,21 @@ import { KnowledgeApplicationConfigSchema } from '../../../src/config/schema';
 import { parseAcknowledgments } from '../../../src/hooks/knowledge-application';
 
 describe('parseAcknowledgments', () => {
+	it('decodes exact trace-entry markers without conflating sibling traces', () => {
+		const entry = 'shared entry';
+		const acks = parseAcknowledgments(
+			`KNOWLEDGE_IGNORED:trace%3Aone:${encodeURIComponent(entry)} reason=not applicable`,
+		);
+		expect(acks).toEqual([
+			{
+				trace_id: 'trace:one',
+				id: entry,
+				result: 'ignored',
+				reason: 'not applicable',
+			},
+		]);
+	});
+
 	it('extracts applied/ignored/violated markers with reasons', () => {
 		const id = 'aaaaaaaa-aaaa-4aaa-9aaa-aaaaaaaaaaaa';
 		const text = `KNOWLEDGE_APPLIED: ${id}

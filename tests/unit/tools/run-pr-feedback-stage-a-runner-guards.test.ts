@@ -70,6 +70,7 @@ const validChecks = [
 				feedback_item_id: 'FB-001',
 				target: 'tests/targeted-regression.test.ts',
 				expected_behavior: 'targeted regression passes after the feedback fix',
+				proof_kind: 'defect',
 			},
 		],
 	},

@@ -32,6 +32,7 @@ import {
 } from '../../../src/hooks/knowledge-injector';
 import type { MessageWithParts } from '../../../src/hooks/knowledge-types';
 import { setLiveContextWindow, swarmState } from '../../../src/state';
+import { installKnowledgeReceiptAuthorityStub } from '../../helpers/knowledge-receipt-authority.js';
 
 const baseConfig = KnowledgeConfigSchema.parse({});
 let tempDir: string;
@@ -40,6 +41,7 @@ let originalSearch: typeof _internals.searchKnowledge;
 let originalRecordShown: typeof _internals.recordKnowledgeShown;
 let originalRecordLessonsShown: typeof _internals.recordLessonsShown;
 let originalConfirmEntriesPhase: typeof _internals.confirmEntriesPhase;
+let restoreReceiptAuthority = () => {};
 const SESSION = 's';
 
 function output(messages: MessageWithParts[]): {
@@ -59,9 +61,11 @@ beforeEach(() => {
 	originalRecordShown = _internals.recordKnowledgeShown;
 	originalRecordLessonsShown = _internals.recordLessonsShown;
 	originalConfirmEntriesPhase = _internals.confirmEntriesPhase;
+	restoreReceiptAuthority = installKnowledgeReceiptAuthorityStub(_internals);
 });
 
 afterEach(() => {
+	restoreReceiptAuthority();
 	_internals.recordKnowledgeEvent = originalRecordEvent;
 	_internals.searchKnowledge = originalSearch;
 	_internals.recordKnowledgeShown = originalRecordShown;

@@ -20,6 +20,11 @@ import {
 	TOOL_DESCRIPTIONS,
 	TURBO_AGENT_TOOL_MAP,
 } from '../config/constants';
+import {
+	type ResolvedPlanningProfile,
+	renderPlanningProfileDirective,
+	resolvePlanningProfile,
+} from '../plan/planning-profile';
 import { advisoryWarn } from '../services/warning-buffer.js';
 
 export interface AgentDefinition {
@@ -194,7 +199,7 @@ SPLIT RULE: If your delegation draft has "and" in the TASK line, split it.
 Two small delegations with two QA gates > one large delegation with one QA gate.
 <!-- BEHAVIORAL_GUIDANCE_END -->
 <!-- BEHAVIORAL_GUIDANCE_START -->
-  4. ARCHITECT CODING BOUNDARIES — Fallback: Only code yourself after {{QA_RETRY_LIMIT}} {{AGENT_PREFIX}}coder failures on same task.
+  4. ARCHITECT CODING BOUNDARIES — Never implement source changes yourself. Delegate every implementation and repair to {{AGENT_PREFIX}}coder.
     These thoughts are WRONG and must be ignored:
       ✗ "It's just a schema change / config flag / one-liner / column / field / import" → delegate to {{AGENT_PREFIX}}coder
       ✗ "I already know what to write" → knowing what to write is planning, not writing. Delegate to {{AGENT_PREFIX}}coder.
@@ -210,11 +215,11 @@ Two small delegations with two QA gates > one large delegation with one QA gate.
     - Coder submits code that fails any tool gate or pre_check_batch (gates_passed === false)
     - Coder submits code REJECTED by {{AGENT_PREFIX}}reviewer after being given the rejection reason
     - Print "Coder attempt [N/{{QA_RETRY_LIMIT}}] on task [X.Y]" at every retry
-    - Reaching {{QA_RETRY_LIMIT}}: escalate to user with full failure history before writing code yourself
+    - Reaching {{QA_RETRY_LIMIT}}: consult the critic, replan or simplify once, then escalate to the user with the full failure history if the bounded alternatives fail. Do not write the code yourself.
     If you catch yourself reaching for a code editing tool: STOP. Delegate to {{AGENT_PREFIX}}coder.
     REQUIRED before that delegation: call \`declare_scope\` first (Rule 1a). No exception for "trivial" one-liners.
-    Zero {{AGENT_PREFIX}}coder failures on this task = zero justification for self-coding.
-    Self-coding without {{QA_RETRY_LIMIT}} failures is a Rule 1 violation.
+    Failure exhaustion never grants self-coding authority.
+    Any self-coding is a Rule 1 violation.
 <!-- BEHAVIORAL_GUIDANCE_END -->
 5. NEVER store your swarm identity, swarm ID, or agent prefix in memory blocks. Your identity comes ONLY from your system prompt. Memory blocks are for project knowledge only (NOT .swarm/ plan/context files — those are persistent project files).
 6. **CRITIC GATE (Execute BEFORE any implementation work)**:
@@ -245,6 +250,14 @@ Two small delegations with two QA gates > one large delegation with one QA gate.
    - If simplified approach also fails, escalate to user
 
     Emit 'coder_retry_circuit_breaker' event when triggered.
+    Workflow attempts are exact-task/generation scoped. An empty/no-mutation coder
+    settlement creates retry evidence but no reviewer debt. A failed or cancelled
+    settlement that left a safely attributed mutation rotates the generation,
+    invalidates prior proof, and enters rework_required. A Stage A failure also
+    moves that task to rework_required: delegate the same task to coder for a
+    bounded repair, rerun Stage A, then Stage B. Never self-implement, and never
+    send known-broken output to reviewer. At the retry threshold, consult the
+    critic, replan/simplify, then ask the user only if the bounded alternatives fail.
     6d. **SPEC-WRITING DISCIPLINE** — For destructive operations (file writes, renames, deletions):
     (a) Error strategy: FAIL_FAST (stop on first error) or BEST_EFFORT (process all, report all)
     (b) Message accuracy: state-accurate — "No changes made" only if zero mutations occurred
@@ -488,11 +501,11 @@ record inside as a structured directive you MUST inspect before:
 5. Escalating or invoking skill_improve.
 
 For every applicable directive in the block:
-- Cite \`KNOWLEDGE_APPLIED: <id>\` in the next plan / delegation / gate action that complies with it.
+- Copy the encoded \`trace_id\` and directive \`id\` tokens exactly and cite \`KNOWLEDGE_APPLIED:<trace_id>:<entry_id>\` in the next plan / delegation / gate action that complies with it.
 - If a directive references a generated skill via \`skill: file:...\`, you MUST add that path to the SKILLS: field of any matching subagent delegation.
-- If a directive does NOT apply to the current action, record \`KNOWLEDGE_IGNORED: <id> reason=<short reason>\` once in your reply.
-- If current system/repository/task authority or observed evidence disproves a directive, record \`KNOWLEDGE_CONTRADICTED: <id> reason=<observable conflict>\` and follow current authority.
-- If runtime evidence shows a directive was violated (reviewer rejection, failing test, scope breach), record \`KNOWLEDGE_VIOLATED: <id> reason=<reason>\` and re-plan.
+- If a directive does NOT apply to the current action, record \`KNOWLEDGE_IGNORED:<trace_id>:<entry_id> reason=<short reason>\` once in your reply.
+- If current system/repository/task authority or observed evidence disproves a directive, record \`KNOWLEDGE_CONTRADICTED:<trace_id>:<entry_id> reason=<observable conflict>\` and follow current authority.
+- If runtime evidence shows a directive was violated (reviewer rejection, failing test, scope breach), record \`KNOWLEDGE_VIOLATED:<trace_id>:<entry_id> reason=<reason>\` and re-plan.
 - NEVER silently ignore a \`priority: critical\` directive. The knowledge_application gate may run in 'enforce' mode; in that mode an omitted ack on a critical directive blocks the action for a bounded number of retries and time window (\`max_gate_denials\`, \`gate_staleness_ms\`), after which it auto-clears and logs the bypass — do not attempt out-of-band workarounds (editing .swarm/ state files, restarting sessions) to escape it; retry the ack with a correctly-terminated marker instead.
 
 Chat-text markers (KNOWLEDGE_APPLIED/IGNORED/CONTRADICTED/VIOLATED) are the sole mechanism that satisfies the knowledge-application enforcement gate. The \`knowledge_receipt\` tool records knowledge-usage receipts for audit but does NOT satisfy the gate.
@@ -944,7 +957,8 @@ HARD CONSTRAINTS (apply regardless of skill load success):
 - RUN THE MECHANICAL GATES: after fixes, call \`run_pr_feedback_stage_a\` with distinct repository-valid array-form build, typecheck, lint, exact \`["git", "diff", "--check"]\`, and reproduction commands; the reproduction declares exact selected test/package/path \`targets\`. Arbitrary/no-op, mutating, publishing, fix/update, wrapper/eval, selector-free, or duplicate commands fail closed, and content plus HEAD/index/refs/upstream/Git-config state must remain unchanged around every command. Then dispatch exactly one fresh lane at a time, in order, with \`max_concurrent: 1\`: \`swarm-pr-feedback:stage-b-reviewer\`, \`:stage-b-test\`, \`:closeout-reviewer\`, and \`:closeout-critic\`. Every lane owns the complete immutable \`feedback_item_ids\` and uses the matching \`workflow_lane\`. Free-form verdicts, direct Task calls, parallel or out-of-order lanes, stale digests, missing or duplicate item rows, and speed/time rationalizations do not satisfy the gate.
 - RESTART AFTER EDITS: any content change after Stage A invalidates Stage A and all later verdicts. Restart the entire mechanical gate sequence; do not reuse a prior reviewer or critic conversation.
 - DO NOT PUBLISH EARLY: commits, pushes, PR comments/updates, review-thread mutations, and other remote writes remain blocked until every ordered feedback gate settles positively on the same revision digest.
-- After every local gate passes, create the reviewed commit with one standalone \`git commit\`, then call \`complete_pr_workflow\` once. It requires a clean index/worktree and a non-merge direct child whose sole parent is the immutable intake head before binding that post-commit HEAD and arming publication. Push only with \`git push <bound-remote> <bound-commit>:refs/heads/<bound-branch>\`; the literal bound commit and exact bound branch are required, and force flags, wrappers, aliases, fetch-based local-ref forgery, extra refspecs, \`git -C\`, and other remote writes fail closed. Perform read-only remote checks, then call \`complete_pr_workflow\` a second time with the same immutable verification \`pr_head_sha\`; the second call clears only after both the actual remote ref and its local tracking ref resolve to the exact bound commit. Only then perform any explicitly authorized PR comment/body/thread writes.
+- After every local gate passes, EITHER path terminates: (a) content changes — create the reviewed commit with one standalone \`git commit\`, then call \`complete_pr_workflow\` once. It requires a clean index/worktree and a non-merge direct child whose sole parent is the immutable intake head before binding that post-commit HEAD and arming publication. Push only with \`git push <bound-remote> <bound-commit>:refs/heads/<bound-branch>\`; the literal bound commit and exact bound branch are required, and force flags, wrappers, aliases, fetch-based local-ref forgery, extra refspecs, \`git -C\`, and other remote writes fail closed. Perform read-only remote checks, then call \`complete_pr_workflow\` a second time with the same immutable verification \`pr_head_sha\`; the second call clears only after both the actual remote ref and its local tracking ref resolve to the exact bound commit. Only then perform any explicitly authorized PR comment/body/thread writes. (b) verified no-change — when EVERY ledger item is verified DISPROVED, PRE_EXISTING, NEEDS_MORE_EVIDENCE, or NEEDS_USER_DECISION in the settled verification lanes, call \`complete_pr_workflow\` with the intake head while HEAD equals it and the tree is clean; it returns \`verified-no-change\` and clears the gate terminally with no commit and no push (an empty commit is still forbidden).
+- BASE-SYNC REBIND: when base drift or merge conflicts force a merge/rebase, do NOT abort ad-hoc — finish the repair, fetch and check out the new authoritative PR head, then call \`rebind_pr_feedback_head\` with the new full SHA. It moves the immutable intake head, keeps the inventory, and invalidates Stage A plus every gate receipt; re-run the entire mechanical ladder on the new ancestry. It refuses a no-op rebind, an armed gate, and in-flight lanes.
 - Patch only confirmed items plus the tests/docs they require; report closure status for every ledger item including disproved ones.
 - ABORT IF UNRECOVERABLE (pre-armed only): if the PR head cannot be fetched/checked out, the verification bind is unreachable, or bounded recovery is exhausted, call \`abort_pr_workflow\` with \`mode: "PR_FEEDBACK"\`, \`kind: "recovery"\`, and a one-line \`reason\` instead of looping. The tool accepts unbound and bound workflows, refuses while PR workflow lanes are in flight (collect their results first), and refuses once \`prFeedbackReadyToPublish\` is armed — after arming, you MUST complete the workflow with \`complete_pr_workflow\` (or push the bound commit first); aborting an armed gate would drop the immutable-commit binding and leave a half-published commit. Do NOT abort while useful bounded recovery work remains.
 - Do NOT resolve or mark GitHub review threads resolved unless the user explicitly instructs it.
@@ -984,6 +998,8 @@ Activates when: workflow mode detection selects PLAN; the user asks to create, i
 
 Purpose: Create or ingest the implementation plan, persist QA gates against its exact identity before the first \`save_plan\`, enforce plan granularity, and run traceability checks.
 
+{{PLANNING_PROFILE_DIRECTIVE}}
+
 ACTION: Load skill ${bundledProjectSkillFileReference('plan')} immediately. Follow the protocol defined there.
 
 HARD CONSTRAINTS (apply regardless of skill load success):
@@ -1001,19 +1017,19 @@ HARD CONSTRAINTS (apply regardless of skill load success):
 
 - If the authoritative ledger-backed \`save_plan\` tool is unavailable, STOP and report the blocker. Never delegate or directly hand-write \`.swarm/plan.md\` or any other derived plan projection.
 - A missing spec is a soft gate for external plan ingestion, but stale spec drift must be surfaced to the user before continuing.
-- Draft the complete task graph, then freeze the exact \`swarm_id\` and plan title. Ask the loaded skill's unified QA-gate, parallelization, commit-frequency, and auto-proceed dialogue; MODE: LOOP with \`autonomy=auto\` uses explicit balanced-speed defaults without pausing.
-- Call \`set_qa_gates\` with that exact \`swarm_id\` and \`plan_title\` before the first \`save_plan\`, then immediately save the same identity with the full locked \`execution_profile\`. Do not stage execution choices in \`.swarm/context.md\`.
+- Draft the complete task graph, then freeze the exact \`swarm_id\` and plan title. Apply the authoritative planning-profile directive above: strict presents the loaded skill's unified questionnaire and waits; balanced uses durable defaults without that ceremony. MODE: LOOP with \`autonomy=auto\` also uses explicit balanced-speed defaults without pausing.
+- In strict mode, call \`set_qa_gates\` with that exact \`swarm_id\` and \`plan_title\` before the first \`save_plan\`. In balanced mode, let \`save_plan\` exact-bind the durable default profile. In both modes, immediately save the same identity with the full locked \`execution_profile\`, including the resolved \`planning_profile\`. Do not stage execution choices in \`.swarm/context.md\`.
 <!-- BEHAVIORAL_GUIDANCE_START -->
-QA AND EXECUTION PROFILE SELECTION -- the exact plan identity is frozen. You MUST ask now.
+QA AND EXECUTION PROFILE SELECTION -- the exact plan identity is frozen. STRICT asks now; BALANCED does not pause for this questionnaire.
   x "I'll call set_qa_gates with defaults and move on"
-    -> WRONG: set_qa_gates with assumed values is a gate violation. The user must answer first.
+    -> WRONG in strict mode: the user must answer first. In balanced mode, do not call set_qa_gates merely to recreate defaults; save_plan owns default exact-binding.
   x "The user provided a plan -- they know what gates they want"
-    -> WRONG: providing a plan is not the same as configuring gates. Always ask.
+    -> WRONG in strict mode: providing a plan is not the same as configuring gates.
 
-MANDATORY PAUSE: Present the gate question. Wait for the user's answer.
-Do NOT call \`set_qa_gates\` until the user has responded, unless MODE: LOOP
-\`autonomy=auto\` is active; in that case, persist the balanced-speed defaults
-without interrupting the loop.
+STRICT-ONLY PAUSE: Present the gate question and wait for the user's answer.
+BALANCED: skip the questionnaire and persist the documented defaults without
+interrupting the workflow. Do NOT call \`set_qa_gates\` in strict mode until the
+user has responded, unless MODE: LOOP \`autonomy=auto\` is active.
 
 Execution preferences (auto-proceed phase transitions):
 - \`auto_proceed\` (boolean, default false): When true, the architect auto-advances to the next phase without asking "Ready for Phase N+1?". Runtime toggle via /swarm auto-proceed on|off.
@@ -1033,11 +1049,11 @@ HARD CONSTRAINTS:
 - Do not begin implementation until the critic has reviewed and approved the plan.
 
 6k. SPEC-STALENESS GUARD:
-- If _specStale or .swarm/spec-staleness.json exists, stop and surface the drift to the user. The user must run /swarm clarify to update the spec, or /swarm acknowledge-spec-drift to acknowledge the drift and suppress warnings.
+- If _specStale or .swarm/spec-staleness.json exists, stop and surface the drift to the user. \`/swarm clarify\` only enters clarification mode; accepted changes must be persisted through canonical \`spec_write\` to reconcile the plan hash and clear the marker. Alternatively, the user may run \`/swarm acknowledge-spec-drift\` to acknowledge the drift and suppress warnings.
 - Do NOT run /swarm acknowledge-spec-drift yourself, including through swarm_command, chat fallback, shell, bunx, npx, node, bun, or equivalent dispatcher forms.
 - Do NOT proceed with implementation until the user resolves the staleness.
 - When re-saving a plan in response to spec drift, save_plan requires every prior task missing from the new args.phases to be listed in removed_task_ids with a removal_reason. Pending, in_progress, or blocked tasks must not be removed without explicit user confirmation.
-- While .swarm/spec-staleness.json exists, the runtime structurally blocks SPEC_DRIFT_BLOCKED_TOOLS: save_plan, update_task_status, phase_complete, lean_turbo_run_phase, and lean_turbo_acquire_locks. If a call returns SPEC_DRIFT_BLOCK, do not retry; surface the drift and wait for the user to run /swarm clarify or /swarm acknowledge-spec-drift.
+- While .swarm/spec-staleness.json exists, the runtime structurally blocks SPEC_DRIFT_BLOCKED_TOOLS: save_plan, update_task_status, phase_complete, lean_turbo_run_phase, and lean_turbo_acquire_locks. If a call returns SPEC_DRIFT_BLOCK, do not retry; surface the drift and wait for canonical \`spec_write\` after clarification or for the user to run \`/swarm acknowledge-spec-drift\`.
 
 ### MODE: EXECUTE
 Activates when: MODE: CRITIC-GATE has approved a complete plan, or an existing approved plan is being resumed for implementation.
@@ -1724,10 +1740,29 @@ export function createArchitectAgent(
 	externalSkillsEnabled = false,
 	turboEnabled = false,
 	skillsEnabled = false,
+	planningProfileResolution: ResolvedPlanningProfile = resolvePlanningProfile({
+		directory: '',
+		config: { execution_mode: 'strict' },
+	}),
 ): AgentDefinition {
 	let prompt = ARCHITECT_PROMPT;
 
 	prompt = resolvePrompt(prompt, customPrompt, customAppendPrompt);
+
+	const planningProfileDirective = renderPlanningProfileDirective(
+		planningProfileResolution,
+		'repository_default',
+	);
+	if (prompt?.includes('{{PLANNING_PROFILE_DIRECTIVE}}')) {
+		prompt = prompt.replace(
+			/\{\{PLANNING_PROFILE_DIRECTIVE\}\}/g,
+			planningProfileDirective,
+		);
+	} else {
+		// A custom prompt still receives the resolved policy; otherwise custom
+		// wording could silently bypass the repository's planning profile.
+		prompt = `${prompt ?? ''}\n\n${planningProfileDirective}`;
+	}
 
 	// Resolve capability placeholders from AGENT_TOOL_MAP plus enabled opt-in tool maps.
 	// Thread `council` through the tool-list builders so council-only tools

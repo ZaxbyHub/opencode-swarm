@@ -15,12 +15,13 @@
  * - Idempotency
  * - No plan handling
  * - Unknown agent handling
- * - Prompt injection sanitization
+ * file-scoped mock.module fixtures are reset through their control mocks.
  */
 
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 
 afterEach(() => {
+	restoreReceiptAuthority();
 	injectorInternals.recordKnowledgeEvent = realRecordKnowledgeEvent;
 	injectorInternals.recordKnowledgeShown = realRecordKnowledgeShown;
 	swarmState.activeAgent.clear();
@@ -36,15 +37,11 @@ import type {
 	KnowledgeConfig,
 	MessageWithParts,
 } from '../../../src/hooks/knowledge-types.js';
-// (#1849) Identity is recovered from swarmState.activeAgent (primary) or the
-// last user message's info.agent (fallback) — never from a role:'system'
-// message (the SDK Message union has no system variant). Fixtures set
-// swarmState.activeAgent and stamp a consistent sessionID on every message.
 import { swarmState } from '../../../src/state';
+import { installKnowledgeReceiptAuthorityStub } from '../../helpers/knowledge-receipt-authority.js';
 
 const SESSION_ID = 'ki-test-session';
 
-// ============================================================================
 // Mocks Setup
 // ============================================================================
 
@@ -57,8 +54,11 @@ const mockRecordKnowledgeEvent = mock(async () => {});
 const mockRecordKnowledgeShown = mock(async () => {});
 const realRecordKnowledgeEvent = injectorInternals.recordKnowledgeEvent;
 const realRecordKnowledgeShown = injectorInternals.recordKnowledgeShown;
+let restoreReceiptAuthority = () => {};
 
 beforeEach(() => {
+	restoreReceiptAuthority =
+		installKnowledgeReceiptAuthorityStub(injectorInternals);
 	injectorInternals.recordKnowledgeEvent =
 		mockRecordKnowledgeEvent as typeof realRecordKnowledgeEvent;
 	injectorInternals.recordKnowledgeShown =

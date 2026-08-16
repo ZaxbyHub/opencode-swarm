@@ -128,7 +128,7 @@ describe('PR_FEEDBACK dedicated coder scope controller', () => {
 					},
 				},
 			),
-		).rejects.toThrow(/already consumed/i);
+		).rejects.toThrow(/CODER_DISPATCH_IN_PROGRESS/i);
 		const redeclared = JSON.parse(
 			await executePreparePrFeedbackScope(
 				{ task_id: '1.1', files: ['src/other.ts'] },

@@ -107,7 +107,7 @@ describe('Stage B helpers — edge cases', () => {
 		expect(getTaskState(session, '1.1')).toBe('tests_run');
 	});
 
-	it('EC-3: parallel barrier with reviewer only — stays at reviewer_run, not tests_run', async () => {
+	it('EC-3: reviewer settlement without a launch generation stays coder_delegated', async () => {
 		const config = makeConfig();
 		const hook = createDelegationGateHook(config, process.cwd());
 
@@ -127,8 +127,8 @@ describe('Stage B helpers — edge cases', () => {
 			{},
 		);
 
-		// Barrier not satisfied: state should advance only to reviewer_run.
-		expect(getTaskState(session, '1.1')).toBe('reviewer_run');
+		// No toolBefore launch binding exists, so the settlement is ignored.
+		expect(getTaskState(session, '1.1')).toBe('coder_delegated');
 	});
 
 	it('EC-3b: explicit terminal reviewer failure never advances Stage B', async () => {

@@ -75,6 +75,28 @@ function makeRoot(): string {
 	return root;
 }
 
+function makeGoRoot(packagePath = '.'): string {
+	const root = makeRoot();
+	fs.writeFileSync(path.join(root, 'go.mod'), 'module example.test/native\n');
+	if (packagePath !== '.')
+		fs.mkdirSync(path.join(root, packagePath), { recursive: true });
+	_internals.isCommandAvailable = (() =>
+		true) as typeof _internals.isCommandAvailable;
+	return root;
+}
+
+function makeCTestRoot(buildPath = 'build'): string {
+	const root = makeRoot();
+	fs.mkdirSync(path.join(root, buildPath), { recursive: true });
+	fs.writeFileSync(
+		path.join(root, buildPath, 'CMakeCache.txt'),
+		'# test cache\n',
+	);
+	_internals.isCommandAvailable = (() =>
+		true) as typeof _internals.isCommandAvailable;
+	return root;
+}
+
 describe('test_runner native targets', () => {
 	afterEach(() => {
 		delete process.env.SWARM_LANG_BACKEND;
@@ -124,6 +146,7 @@ describe('test_runner native targets', () => {
 
 	for (const mode of ['dispatch', 'legacy'] as const) {
 		it(`executes the exact Go selector in ${mode} mode with bounded spawn options`, async () => {
+			const root = makeGoRoot('pkg/a');
 			const calls: Array<{ cmd: string[]; options: unknown }> = [];
 			const kills = { direct: 0, tree: 0 };
 			installSpawnStub(
@@ -138,7 +161,7 @@ describe('test_runner native targets', () => {
 				[],
 				false,
 				1_000,
-				process.cwd(),
+				root,
 				false,
 				{ framework: 'go-test', name: 'TestA/sub.*', path: 'pkg/a' },
 			);
@@ -153,7 +176,7 @@ describe('test_runner native targets', () => {
 				'./pkg/a',
 			]);
 			expect(calls[0].options).toMatchObject({
-				cwd: process.cwd(),
+				cwd: root,
 				stdin: 'ignore',
 				stdout: 'pipe',
 				stderr: 'pipe',
@@ -164,6 +187,7 @@ describe('test_runner native targets', () => {
 		});
 
 		it(`executes the exact CTest selector in ${mode} mode`, async () => {
+			const root = makeCTestRoot();
 			const calls: Array<{ cmd: string[]; options: unknown }> = [];
 			installSpawnStub(
 				calls,
@@ -176,7 +200,7 @@ describe('test_runner native targets', () => {
 				[],
 				false,
 				1_000,
-				process.cwd(),
+				root,
 				false,
 				{ framework: 'ctest', name: 'suite[1].case', path: 'build' },
 			);
@@ -207,6 +231,8 @@ describe('test_runner native targets', () => {
 				output: 'No tests were found!!!',
 			},
 		]) {
+			const root =
+				testCase.framework === 'go-test' ? makeGoRoot() : makeCTestRoot();
 			const calls: Array<{ cmd: string[]; options: unknown }> = [];
 			installSpawnStub(calls, testCase.output);
 			const result = await runTests(
@@ -215,7 +241,7 @@ describe('test_runner native targets', () => {
 				[],
 				false,
 				1_000,
-				process.cwd(),
+				root,
 				false,
 				testCase,
 			);
@@ -262,10 +288,11 @@ describe('test_runner native targets', () => {
 		expect(calls).toHaveLength(0);
 	});
 
-	it('kills a timed-out process tree but never kills a normally exited process', async () => {
+	it('classifies only the pending stub as timed out and never kills a normally exited stub', async () => {
+		const root = makeGoRoot();
 		const normalKills = { direct: 0, tree: 0 };
 		installSpawnStub([], '--- PASS: TestOnly (0.00s)', normalKills);
-		await runTests('go-test', 'target', [], false, 50, process.cwd(), false, {
+		await runTests('go-test', 'target', [], false, 50, root, false, {
 			framework: 'go-test',
 			name: 'TestOnly',
 			path: '.',
@@ -280,7 +307,7 @@ describe('test_runner native targets', () => {
 			[],
 			false,
 			5,
-			process.cwd(),
+			root,
 			false,
 			{ framework: 'go-test', name: 'TestOnly', path: '.' },
 		);
@@ -292,7 +319,8 @@ describe('test_runner native targets', () => {
 		expect(timeoutKills.tree).toBe(1);
 	});
 
-	it('integrates with bun-compat as the single timeout kill owner', async () => {
+	it('classifies bun-compat timeouts without issuing an extra local kill', async () => {
+		const root = makeGoRoot();
 		_internals.bunSpawn = ((_cmd, options) =>
 			originalSpawn(
 				[process.execPath, '-e', 'setTimeout(() => {}, 10000)'],
@@ -304,7 +332,7 @@ describe('test_runner native targets', () => {
 			[],
 			false,
 			100,
-			process.cwd(),
+			root,
 			false,
 			{ framework: 'go-test', name: 'TestOnly', path: '.' },
 		);
@@ -346,7 +374,7 @@ describe('test_runner native targets', () => {
 			.map((line) => JSON.parse(line));
 		expect(records).toHaveLength(1);
 		expect(records[0]).toMatchObject({
-			testFile: 'native:go-test:pkg#TestOnly',
+			testFile: 'native:go-test:path=pkg#name=TestOnly',
 			testName: '(aggregate)',
 			changedFiles: [],
 		});

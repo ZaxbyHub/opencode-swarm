@@ -34,6 +34,10 @@ import { listEvidenceTaskIds, loadEvidence } from '../evidence/manager';
 import { getProfileForFile } from '../lang/detector';
 import { loadPlan } from '../plan/manager';
 import {
+	renderPlanningProfileDirective,
+	resolvePlanningProfile,
+} from '../plan/planning-profile';
+import {
 	getAgentSession,
 	getResolvedAutoProceed,
 	hasActiveEpicMode,
@@ -115,7 +119,7 @@ export function buildSpecDriftAdvisory(args: {
 		'Action: surface this warning to the user at your next user-facing reply. ' +
 			'Do NOT proceed with destructive plan operations (save_plan with removals, ' +
 			'update_task_status, phase_complete, lean_turbo_run_phase, ' +
-			'lean_turbo_acquire_locks) until the user runs /swarm clarify or ' +
+			'lean_turbo_acquire_locks) until the user runs ' +
 			'/swarm acknowledge-spec-drift.',
 	];
 	if (args.midLoadRemovals) {
@@ -993,10 +997,9 @@ export function createSystemEnhancerHook(
 						config.context_budget?.scoring?.enabled === true;
 
 					if (!scoringEnabled) {
-						// FR-006: The non-scoring branch below contains frozen legacy code (Path A).
-						// This duplication exists because the two paths diverged during a phased rollout.
-						// Path A is intentionally frozen and should not be modified. See .swarm/spec.md FR-006.
-						// Path A: EXACT LEGACY CODE - do not change
+						// FR-006: Path A remains frozen except for policy injections that must stay
+						// behaviorally identical across scoring modes. See .swarm/spec.md FR-006.
+						// Path A: LEGACY CODE — keep non-policy behavior unchanged.
 						// Priority 0: Minimal phase header
 						let plan = null;
 						try {
@@ -1004,6 +1007,23 @@ export function createSystemEnhancerHook(
 						} catch (error) {
 							warn(
 								`Failed to load plan: ${error instanceof Error ? error.message : String(error)}`,
+							);
+						}
+						const activePlanningAgent = _input.sessionID
+							? swarmState.activeAgent.get(_input.sessionID)
+							: undefined;
+						if (
+							!activePlanningAgent ||
+							stripKnownSwarmPrefix(activePlanningAgent) === 'architect'
+						) {
+							tryInject(
+								renderPlanningProfileDirective(
+									resolvePlanningProfile({
+										directory,
+										existingExecutionProfile: plan?.execution_profile,
+										config,
+									}),
+								),
 							);
 						}
 						// Issue #853 Layer A: surface spec drift to the model.
@@ -1877,6 +1897,23 @@ ${sanitizeContextText(scopedHandoff.body)}`;
 					} catch (error) {
 						warn(
 							`Failed to load plan: ${error instanceof Error ? error.message : String(error)}`,
+						);
+					}
+					const activePlanningAgent_b = _input.sessionID
+						? swarmState.activeAgent.get(_input.sessionID)
+						: undefined;
+					if (
+						!activePlanningAgent_b ||
+						stripKnownSwarmPrefix(activePlanningAgent_b) === 'architect'
+					) {
+						tryInject(
+							renderPlanningProfileDirective(
+								resolvePlanningProfile({
+									directory,
+									existingExecutionProfile: plan?.execution_profile,
+									config,
+								}),
+							),
 						);
 					}
 					// Issue #853 Layer A: surface spec drift to the model.

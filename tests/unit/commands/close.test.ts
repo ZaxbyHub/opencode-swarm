@@ -309,8 +309,8 @@ mock.module('../../../src/state.js', () => ({
 	getActiveFullAutoSessionID: () => undefined,
 	hasActiveLeanTurbo: () => false,
 	hasActiveEpicMode: () => false,
+	updateTaskWorkflowCache: () => {},
 }));
-
 // Import after mock setup
 const { handleCloseCommand, _internals } = await import(
 	'../../../src/commands/close.js'

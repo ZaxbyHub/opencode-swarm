@@ -19,6 +19,10 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 import {
+	getTaskWorkflowSnapshot,
+	readTaskEvidence,
+} from '../../src/gate-evidence';
+import {
 	type AgentSessionState,
 	advanceTaskState,
 	ensureAgentSession,
@@ -31,6 +35,7 @@ import {
 	executeUpdateTaskStatus,
 	type UpdateTaskStatusArgs,
 } from '../../src/tools/update-task-status';
+import { seedAuthoritativeTaskWorkflow } from '../unit/hooks/_delegation-gate-helpers';
 
 describe('Gate Workflow State Machine', () => {
 	let tempDir: string;
@@ -108,26 +113,17 @@ describe('Gate Workflow State Machine', () => {
 
 	describe('State Machine Transitions', () => {
 		test('1. Full happy path: coder_delegated → pre_check_passed → reviewer_run → tests_run → update_task_status("completed") succeeds', async () => {
-			const session = makeSession();
+			const generation = await seedAuthoritativeTaskWorkflow(
+				tempDir,
+				'1.1',
+				'tests_run',
+			);
+			expect(
+				getTaskWorkflowSnapshot(await readTaskEvidence(tempDir, '1.1')),
+			).toMatchObject({ generation, state: 'tests_run' });
 
-			// Step 1: Advance to coder_delegated
-			advanceTaskState(session, '1.1', 'coder_delegated');
-			expect(getTaskState(session, '1.1')).toBe('coder_delegated');
-
-			// Step 2: Advance to pre_check_passed (simulates pre_check_batch returning {gates_passed: true})
-			advanceTaskState(session, '1.1', 'pre_check_passed');
-			expect(getTaskState(session, '1.1')).toBe('pre_check_passed');
-
-			// Step 3: Advance to reviewer_run (simulates reviewer delegation seen)
-			advanceTaskState(session, '1.1', 'reviewer_run');
-			expect(getTaskState(session, '1.1')).toBe('reviewer_run');
-
-			// Step 4: Advance to tests_run (simulates reviewer+test_engineer delegations seen)
-			advanceTaskState(session, '1.1', 'tests_run');
-			expect(getTaskState(session, '1.1')).toBe('tests_run');
-
-			// Step 5: Check reviewer gate should pass now
-			const gateResult = checkReviewerGate('1.1');
+			// The exact durable gate should pass now.
+			const gateResult = checkReviewerGate('1.1', tempDir);
 			expect(gateResult.blocked).toBe(false);
 
 			// Step 6: update_task_status to "completed" should succeed
@@ -138,6 +134,9 @@ describe('Gate Workflow State Machine', () => {
 			const result = await executeUpdateTaskStatus(args, tempDir);
 			expect(result.success).toBe(true);
 			expect(result.new_status).toBe('completed');
+			expect(
+				getTaskWorkflowSnapshot(await readTaskEvidence(tempDir, '1.1')),
+			).toMatchObject({ generation, state: 'complete' });
 		});
 
 		test('2. Missing pre_check: state stays at coder_delegated → update_task_status rejects with gate error', async () => {
@@ -219,17 +218,13 @@ describe('Gate Workflow State Machine', () => {
 		});
 
 		test('5. All gates passed: state at tests_run → update_task_status succeeds', async () => {
-			const session = makeSession();
+			const generation = await seedAuthoritativeTaskWorkflow(
+				tempDir,
+				'1.1',
+				'tests_run',
+			);
 
-			// Advance to tests_run (all gates passed)
-			advanceTaskState(session, '1.1', 'coder_delegated');
-			advanceTaskState(session, '1.1', 'pre_check_passed');
-			advanceTaskState(session, '1.1', 'reviewer_run');
-			advanceTaskState(session, '1.1', 'tests_run');
-			expect(getTaskState(session, '1.1')).toBe('tests_run');
-
-			// Check reviewer gate should pass
-			const gateResult = checkReviewerGate('1.1');
+			const gateResult = checkReviewerGate('1.1', tempDir);
 			expect(gateResult.blocked).toBe(false);
 
 			// update_task_status to "completed" should succeed
@@ -240,6 +235,9 @@ describe('Gate Workflow State Machine', () => {
 			const result = await executeUpdateTaskStatus(args, tempDir);
 			expect(result.success).toBe(true);
 			expect(result.new_status).toBe('completed');
+			expect(
+				getTaskWorkflowSnapshot(await readTaskEvidence(tempDir, '1.1')),
+			).toMatchObject({ generation, state: 'complete' });
 		});
 
 		test('6. State is idempotent: calling advanceTaskState(tests_run) twice does not crash (non-fatal catch)', () => {
@@ -723,7 +721,8 @@ describe('Gate Workflow State Machine', () => {
 
 			// Should fail gracefully with proper error message
 			expect(result.success).toBe(false);
-			expect(result.message).toContain('Gate check failed');
+			expect(result.message).toBe('Failed to update task status');
+			expect(result.errors).toContain('Task not found: 999.999');
 		});
 	});
 });

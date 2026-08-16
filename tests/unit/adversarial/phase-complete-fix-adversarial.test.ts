@@ -7,10 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import {
-	recordAgentDispatch,
-	recordGateEvidence,
-} from '../../../src/gate-evidence';
+import { recordGateEvidence } from '../../../src/gate-evidence';
 import {
 	ensureAgentSession,
 	resetSwarmState,
@@ -19,6 +16,7 @@ import {
 } from '../../../src/state';
 import { executePhaseComplete } from '../../../src/tools/phase-complete';
 import { checkReviewerGate } from '../../../src/tools/update-task-status';
+import { seedStageAPassed } from '../../helpers/task-workflow-evidence';
 
 describe('ADVERSARIAL: update-task-status.ts checkReviewerGate', () => {
 	let tempDir: string;
@@ -89,13 +87,24 @@ describe('ADVERSARIAL: update-task-status.ts checkReviewerGate', () => {
 
 		// Durable evidence is required before restart-recovery plan.json fallback
 		// can trust completed plan state.
-		await recordAgentDispatch(tempDir, '1.1', 'coder');
-		await recordGateEvidence(tempDir, '1.1', 'reviewer', 'sess-reviewer');
+		const generation = await seedStageAPassed(tempDir, '1.1');
+		await recordGateEvidence(
+			tempDir,
+			'1.1',
+			'reviewer',
+			'sess-reviewer',
+			false,
+			{
+				expectedGeneration: generation,
+			},
+		);
 		await recordGateEvidence(
 			tempDir,
 			'1.1',
 			'test_engineer',
 			'sess-test-engineer',
+			false,
+			{ expectedGeneration: generation },
 		);
 
 		// Should not throw - should handle nulls gracefully

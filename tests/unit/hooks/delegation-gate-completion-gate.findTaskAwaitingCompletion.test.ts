@@ -20,7 +20,10 @@ import {
 	resetSwarmState,
 } from '../../../src/state';
 import { withFrozenClock } from '../../helpers/test-clock.js';
-import { recordPlanCriticApproval } from './_delegation-gate-helpers';
+import {
+	recordPlanCriticApproval,
+	seedAuthoritativeTaskWorkflow,
+} from './_delegation-gate-helpers';
 
 function makeConfig(
 	overrides?: Record<string, unknown>,
@@ -211,6 +214,7 @@ describe('delegation-gate: completion gate integration — findTaskAwaitingCompl
 			const hook = createDelegationGateHook(makeConfig(), tempDir);
 			const session = ensureAgentSession('test-session');
 			session.taskWorkflowStates.set('1.1', 'tests_run');
+			await seedAuthoritativeTaskWorkflow(tempDir, '1.1', 'tests_run');
 
 			// Task 1.1 is in tests_run state but plan says pending
 			// This should trigger the completion gate
@@ -413,6 +417,7 @@ describe('delegation-gate: completion gate integration — findTaskAwaitingCompl
 			const hook = createDelegationGateHook(makeConfig(), tempDir);
 			const session = ensureAgentSession('test-session');
 			session.taskWorkflowStates.set('1.1', 'tests_run');
+			await seedAuthoritativeTaskWorkflow(tempDir, '1.1', 'tests_run');
 
 			let threw = false;
 			let errorMessage = '';
@@ -437,6 +442,7 @@ describe('delegation-gate: completion gate integration — findTaskAwaitingCompl
 			const hook = createDelegationGateHook(makeConfig(), tempDir);
 			const session = ensureAgentSession('test-session');
 			session.taskWorkflowStates.set('1.1', 'tests_run');
+			await seedAuthoritativeTaskWorkflow(tempDir, '1.1', 'tests_run');
 
 			let threw = false;
 			let errorMessage = '';
@@ -469,6 +475,7 @@ describe('delegation-gate: completion gate integration — findTaskAwaitingCompl
 			const hook = createDelegationGateHook(makeConfig(), tempDir);
 			const session = ensureAgentSession('test-session');
 			session.taskWorkflowStates.set('1.1', 'tests_run');
+			await seedAuthoritativeTaskWorkflow(tempDir, '1.1', 'tests_run');
 
 			let threw = false;
 			let errorMessage = '';

@@ -23,6 +23,11 @@ import {
 	taskEvidencePath,
 	withTaskEvidenceLock,
 } from '../evidence/task-file.js';
+import {
+	assertTaskEvidenceWriteAllowed,
+	getTaskWorkflowSnapshot,
+	parseTaskEvidence,
+} from '../gate-evidence.js';
 import { assertProjectRoot } from '../utils/project-boundary.js';
 import type { CouncilSynthesis } from './types';
 
@@ -92,6 +97,7 @@ export async function writeCouncilEvidence(
 	workingDir: string,
 	synthesis: CouncilSynthesis,
 	attemptId?: string,
+	expectedGeneration?: number,
 ): Promise<void> {
 	// Defense in depth — library-level writer should not trust upstream validation.
 	if (!VALID_TASK_ID.test(synthesis.taskId)) {
@@ -116,18 +122,36 @@ export async function writeCouncilEvidence(
 		synthesis.taskId,
 		COUNCIL_AGENT_ID,
 		async () => {
+			assertTaskEvidenceWriteAllowed(workingDir, synthesis.taskId);
 			// Read existing evidence (if any) and start from a clean prototype-free object.
 			const existingRoot: Record<string, unknown> = Object.create(null);
 			if (existsSync(filePath)) {
 				try {
-					const parsed = EvidenceFileSchema.parse(
-						JSON.parse(readFileSync(filePath, 'utf-8')),
-					);
+					const raw = readFileSync(filePath, 'utf-8');
+					if (expectedGeneration !== undefined) {
+						const exactEvidence = parseTaskEvidence(raw, synthesis.taskId);
+						const workflow = getTaskWorkflowSnapshot(exactEvidence);
+						if (
+							!workflow.authoritative ||
+							workflow.generation !== expectedGeneration ||
+							workflow.state !== 'pre_check_passed'
+						) {
+							throw new Error(
+								`TASK_COUNCIL_GENERATION_MISMATCH: expected pre_check_passed@${expectedGeneration}, found ${workflow.state}@${workflow.generation}`,
+							);
+						}
+					}
+					const parsed = EvidenceFileSchema.parse(JSON.parse(raw));
 					safeAssignOwnProps(existingRoot, parsed);
 					// Arrays, nulls, or corrupt JSON all fall through to a fresh start.
-				} catch {
+				} catch (error) {
+					if (expectedGeneration !== undefined) throw error;
 					// Corrupted evidence file — start fresh rather than crashing.
 				}
+			} else if (expectedGeneration !== undefined) {
+				throw new Error(
+					`TASK_COUNCIL_GENERATION_MISMATCH: no exact evidence exists for generation ${expectedGeneration}`,
+				);
 			}
 
 			// Preserve any prior gates entries alongside the council entry.
@@ -159,6 +183,9 @@ export async function writeCouncilEvidence(
 				// distinct members. Old evidence files (pre-quorum) lack this field
 				// and are conservatively rehydrated as quorumSize: 1.
 				quorumSize: synthesis.quorumSize,
+				...(expectedGeneration !== undefined
+					? { workflowGeneration: expectedGeneration }
+					: {}),
 				...(attemptId ? { attemptId } : {}),
 			};
 

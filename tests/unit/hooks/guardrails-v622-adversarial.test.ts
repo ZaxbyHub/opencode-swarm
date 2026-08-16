@@ -320,7 +320,7 @@ index 1234567..89abcdef 100644
 	});
 
 	describe('OBJECTIVE 3: pre_check_batch result handling with warn on error', () => {
-		it('gates_passed: true in pre_check_batch output → advanceTaskState called', async () => {
+		it('uncorrelated gates_passed output cannot advance exact task state', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(config);
 			const sessionId = 'test-session';
@@ -340,9 +340,9 @@ index 1234567..89abcdef 100644
 				makeAfterOutput(outputJson),
 			);
 
-			// Verify state advanced to pre_check_passed
+			// Without a launch-bound generation, the positive receipt is inert.
 			const newState = session!.taskWorkflowStates.get(taskId);
-			expect(newState).toBe('pre_check_passed');
+			expect(newState).toBe('coder_delegated');
 		});
 
 		it('gates_passed: false → advanceTaskState NOT called', async () => {

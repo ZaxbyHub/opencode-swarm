@@ -22,6 +22,11 @@ import * as path from 'node:path';
 import { KnowledgeConfigSchema } from '../../src/config/schema';
 import { maybeEscalateOnViolation } from '../../src/hooks/knowledge-escalator';
 import { readKnowledgeEvents } from '../../src/hooks/knowledge-events';
+import {
+	commitDisplayedMembership,
+	_internals as receiptLedgerInternals,
+	validateAndCommitTerminalBatch,
+} from '../../src/hooks/knowledge-receipt-ledger';
 import { searchKnowledge } from '../../src/hooks/search-knowledge';
 import { computeKnowledgeDebug } from '../../src/services/knowledge-diagnostics';
 
@@ -71,24 +76,53 @@ function directiveLine(
 	});
 }
 
-function violatedLine(id: string, ms: number): string {
-	return JSON.stringify({
-		type: 'violated',
-		event_id: `v-${id}-${ms}`,
-		trace_id: 't',
-		knowledge_id: id,
-		timestamp: new Date(ms).toISOString(),
-		session_id: 's',
-		agent: 'coder',
-	});
-}
-
 const DECISION_CONTEXT = {
 	currentPhase: 'Phase 2',
 	targetAgent: 'coder',
 	currentAction: 'isolating the failing collaborator',
 	currentTool: 'edit',
 } as const;
+
+const originalReceiptNowMs = receiptLedgerInternals.nowMs;
+
+async function commitViolation(
+	directory: string,
+	entryId: string,
+	committedAtMs: number,
+): Promise<void> {
+	receiptLedgerInternals.nowMs = () => committedAtMs;
+	const traceId = `trace-${entryId}-${committedAtMs}`;
+	const membership = await commitDisplayedMembership(directory, {
+		trace_id: traceId,
+		session_id: 's',
+		phase: DECISION_CONTEXT.currentPhase,
+		agent: 'coder',
+		exposure_kind: 'delegate_directive',
+		entries: [{ entry_id: entryId, critical: false }],
+	});
+	if (!membership.ok) {
+		throw new Error(`membership commit failed: ${membership.detail}`);
+	}
+	const terminal = await validateAndCommitTerminalBatch(directory, {
+		trace_id: traceId,
+		session_id: 's',
+		phase: DECISION_CONTEXT.currentPhase,
+		agent: 'coder',
+		items: [
+			{
+				entry_id: entryId,
+				outcome: 'violated',
+				source: 'repeat-mistake-integration',
+				event_id: `v-${entryId}-${committedAtMs}`,
+			},
+		],
+	});
+	if (!terminal.ok || terminal.committed.length !== 1) {
+		throw new Error(
+			`terminal commit failed: ${terminal.ok ? JSON.stringify(terminal.rejected) : terminal.detail}`,
+		);
+	}
+}
 
 async function resultIds(dir: string): Promise<string[]> {
 	const { results } = await searchKnowledge({
@@ -122,6 +156,7 @@ describe('repeat-mistake prevention (Change 3, end-to-end)', () => {
 
 	beforeEach(() => {
 		dir = fs.mkdtempSync(path.join(os.tmpdir(), 'repeat-mistake-'));
+		fs.mkdirSync(path.join(dir, '.git'));
 		swarmDir = path.join(dir, '.swarm');
 		fs.mkdirSync(swarmDir, { recursive: true });
 		// d1: agent-only match (the directive that will be violated). d2/d3:
@@ -148,6 +183,7 @@ describe('repeat-mistake prevention (Change 3, end-to-end)', () => {
 	});
 
 	afterEach(() => {
+		receiptLedgerInternals.nowMs = originalReceiptNowMs;
 		if (prevXdg === undefined) delete process.env.XDG_DATA_HOME;
 		else process.env.XDG_DATA_HOME = prevXdg;
 		fs.rmSync(dir, { recursive: true, force: true });
@@ -160,14 +196,9 @@ describe('repeat-mistake prevention (Change 3, end-to-end)', () => {
 		expect(before).not.toContain('d1');
 		expect(before).toHaveLength(2);
 
-		// Two violations of d1 within the window.
-		fs.writeFileSync(
-			path.join(swarmDir, 'knowledge-events.jsonl'),
-			`${violatedLine('d1', NOW.getTime() - 2 * DAY)}\n${violatedLine(
-				'd1',
-				NOW.getTime() - 1 * DAY,
-			)}\n`,
-		);
+		// Two authoritative receipt violations of d1 within the window.
+		await commitViolation(dir, 'd1', NOW.getTime() - 2 * DAY);
+		await commitViolation(dir, 'd1', NOW.getTime() - 1 * DAY);
 
 		const result = await maybeEscalateOnViolation(dir, 'd1', NOW);
 		expect(result.escalated).toBe(true);
@@ -199,10 +230,7 @@ describe('repeat-mistake prevention (Change 3, end-to-end)', () => {
 	});
 
 	it('a single violation neither escalates nor force-includes the directive', async () => {
-		fs.writeFileSync(
-			path.join(swarmDir, 'knowledge-events.jsonl'),
-			`${violatedLine('d1', NOW.getTime() - 1 * DAY)}\n`,
-		);
+		await commitViolation(dir, 'd1', NOW.getTime() - 1 * DAY);
 		const result = await maybeEscalateOnViolation(dir, 'd1', NOW);
 		expect(result.escalated).toBe(false);
 

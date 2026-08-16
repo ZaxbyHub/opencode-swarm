@@ -35,6 +35,10 @@ import { createCuratorLLMDelegate } from '../hooks/curator-llm-factory.js';
 import { extractCurrentPhaseFromPlan } from '../hooks/extractors.js';
 import { curateAndStoreSwarm } from '../hooks/knowledge-curator.js';
 import { updateRetrievalOutcome } from '../hooks/knowledge-reader.js';
+import {
+	commitPhaseClosed,
+	recordPhaseCloseIntent,
+} from '../hooks/knowledge-receipt-ledger.js';
 import type { ConfidenceFloorOptions } from '../hooks/knowledge-store.js';
 import {
 	resolveHiveKnowledgePath,
@@ -51,6 +55,13 @@ import {
 	formatDirectiveBlockMessage,
 	recordDirectiveOverrides,
 } from '../hooks/phase-complete-directive-gate.js';
+
+/** Narrow seam for receipt/plan ordering tests. */
+export const phaseCompleteReceiptInternals = {
+	recordPhaseCloseIntent,
+	commitPhaseClosed,
+};
+
 import {
 	buildApprovedReceipt,
 	buildRejectedReceipt,
@@ -654,14 +665,14 @@ export async function executePhaseComplete(
 	// lacks a terminal outcome or carries an unremediated violation. The architect
 	// may override specific IDs with a written justification; each override is
 	// logged as an `override` knowledge event. Fail-closed.
+	const receiptPlan = await loadPlan(dir).catch(() => null);
+	const receiptPhaseLabel = receiptPlan
+		? (extractCurrentPhaseFromPlan(receiptPlan) ??
+			`Phase ${receiptPlan.current_phase ?? phase}`)
+		: `Phase ${phase}`;
 	const knowledgeEnabled =
 		(config.knowledge as { enabled?: boolean } | undefined)?.enabled !== false;
 	if (knowledgeEnabled) {
-		const plan = await loadPlan(dir).catch(() => null);
-		const phaseLabel = plan
-			? (extractCurrentPhaseFromPlan(plan) ??
-				`Phase ${plan.current_phase ?? phase}`)
-			: `Phase ${phase}`;
 		const requestedAccept = Array.isArray(args.acceptViolations)
 			? args.acceptViolations.filter(
 					(s) => typeof s === 'string' && s.length > 0,
@@ -703,26 +714,38 @@ export async function executePhaseComplete(
 			requestedAccept.length > 0 && isArchitect && justification.length >= 10
 				? requestedAccept
 				: [];
+		if (effectiveAccept.length > 0) {
+			try {
+				await recordDirectiveOverrides(
+					dir,
+					effectiveAccept,
+					justification,
+					sessionID,
+					receiptPhaseLabel,
+				);
+			} catch {
+				return blockedResult(phase, {
+					reason: 'directive_gate_failed_closed',
+					message:
+						'Critical-directive override could not be committed to authoritative receipt state; failing closed.',
+					agentsDispatched,
+					agentsMissing: [],
+					warnings,
+				});
+			}
+		}
 		const directiveGate = await evaluatePhaseCriticalDirectives({
 			directory: dir,
-			phaseLabel,
-			acceptViolations: effectiveAccept,
+			sessionId: sessionID,
+			phaseLabel: receiptPhaseLabel,
 		});
-		if (directiveGate.overridden.length > 0) {
-			await recordDirectiveOverrides(
-				dir,
-				directiveGate.overridden,
-				justification,
-				sessionID,
-			);
-		}
 		if (directiveGate.blocked) {
 			return blockedResult(phase, {
 				reason: directiveGate.failedClosed
 					? 'directive_gate_failed_closed'
 					: 'unresolved_critical_directives',
 				message: directiveGate.failedClosed
-					? 'Critical-directive gate could not read knowledge events; failing closed.'
+					? 'Critical-directive gate could not read authoritative receipt state; failing closed.'
 					: formatDirectiveBlockMessage(directiveGate.unresolved),
 				agentsDispatched,
 				agentsMissing: [],
@@ -1725,6 +1748,26 @@ export async function executePhaseComplete(
 
 	// Reset phase state on success
 	if (success) {
+		if (knowledgeEnabled) {
+			const closeIntent =
+				await phaseCompleteReceiptInternals.recordPhaseCloseIntent(
+					dir,
+					receiptPhaseLabel,
+					sessionID,
+				);
+			if (!closeIntent.ok) {
+				return JSON.stringify({
+					...result,
+					success: false,
+					status: 'incomplete' as const,
+					message:
+						'Phase completion blocked: could not persist receipt phase-close intent.',
+					errors: [closeIntent.detail],
+					recovery_guidance:
+						'Resolve the receipt-ledger lock/storage issue and retry phase_complete.',
+				});
+			}
+		}
 		// Scheduled skill consolidation: opportunistic and explicitly non-blocking.
 		// It may call an LLM and write proposal files, so only launch it after the
 		// phase gates have accepted completion.
@@ -2105,6 +2148,46 @@ export async function executePhaseComplete(
 				}
 			}
 		}
+
+		if (knowledgeEnabled) {
+			const durableReceiptPlan = receiptPlan
+				? await loadPlan(dir).catch(() => null)
+				: null;
+			const durableReceiptPhase = durableReceiptPlan?.phases.find(
+				(candidate) => candidate.id === phase,
+			);
+			if (
+				receiptPlan &&
+				(!durableReceiptPhase ||
+					!['complete', 'completed', 'closed'].includes(
+						durableReceiptPhase.status,
+					))
+			) {
+				// The plan mutation result remains authoritative for this tool call.
+				// Withhold only the receipt phase_closed transition when the durable
+				// plan cannot confirm completion; keeping the receipt lifecycle open is
+				// fail-safe and can be reconciled by a later phase_complete or close.
+				warnings.push(
+					`Receipt phase-close commit withheld: durable phase ${phase} is not complete.`,
+				);
+			} else {
+				const receiptClose =
+					await phaseCompleteReceiptInternals.commitPhaseClosed(
+						dir,
+						receiptPhaseLabel,
+						sessionID,
+					);
+				if (!receiptClose.ok) {
+					result.success = false;
+					result.status = 'incomplete';
+					result.message =
+						'Plan phase closed, but receipt lifecycle closure is pending reconciliation; retry phase_complete.';
+					warnings.push(
+						`Receipt phase-close commit failed: ${receiptClose.detail}`,
+					);
+				}
+			}
+		}
 	}
 
 	if (complianceWarnings.length > 0) {
@@ -2231,7 +2314,7 @@ export function createPhaseCompleteTool(
 				.array(z.string())
 				.optional()
 				.describe(
-					'ARCHITECT ONLY. Critical knowledge-directive IDs to explicitly accept as unresolved. Requires accept_violations_justification. Each is logged as an override event.',
+					'ARCHITECT ONLY. Critical knowledge-directive IDs (or exact trace_id/entry_id pairs when an ID is ambiguous) to explicitly accept as unresolved. Requires accept_violations_justification. Each is logged as an override event.',
 				),
 			accept_violations_justification: z
 				.string()

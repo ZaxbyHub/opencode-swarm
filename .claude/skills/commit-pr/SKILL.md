@@ -71,11 +71,16 @@ Run before publication work:
 
 ```bash
 git fetch origin main
-rm -f .swarm/evidence/*.json
 rm -f .swarm/evidence/pr_body.md
 rm -f .swarm/evidence/commit-pr-validation.md
+rm -f .swarm/evidence/publication-evidence.json
 git status --short
 ```
+
+Delete ONLY those three exact publication-cache files. NEVER broad-delete
+`.swarm/evidence/*.json` — that directory also holds authoritative task/gate
+evidence (`{taskId}.json`), `final-council.json`, and phase-council records
+(issue #2131 finding 4a).
 
 On Windows, prefer temporary save branches over `git stash`. If you must stash, use `git stash push --include-untracked` and verify the stash contents.
 
@@ -166,7 +171,21 @@ bash scripts/check-mock-cleanup.sh
 bash scripts/check-invariants.sh
 bash scripts/check-cross-contamination.sh
 bash scripts/check-test-clock.sh
+bun run check:runtime-src-refs
+bun run check:events
+bun run check:test-file-cap
+bun run check:gate-portability
+bash scripts/check-test-tmpdir.sh
+bash scripts/check-bash-portability.sh
+(cd scripts/swarm-model && node --test)
+bun run package:smoke
 ```
+
+This list is the FULL blocking CI quality contract (issue #2131 finding 4c):
+every quality-job step in `.github/workflows/ci.yml` plus the `package:smoke`
+pack check. `tests/unit/skills/commit-pr-validation-parity.test.ts` derives the
+list from the workflow — if CI adds a quality step, the parity test fails until
+this skill teaches it.
 
 ### Tier 2 - unit tests
 
@@ -311,6 +330,28 @@ and `gh pr ready` until publication evidence exists. Before publishing, write:
   `## Summary`, `## Invariant audit`, and `## Test plan`).
 - `.swarm/evidence/commit-pr-validation.md` — the validation commands you ran and
   their results.
+- `.swarm/evidence/publication-evidence.json` — the versioned, freshness-bound
+  receipt (issue #2131 finding 4b). The gate verifies it against the CURRENT git
+  state and the EXACT body being published:
+
+  ```bash
+  BODY_SHA256=$(sha256sum .swarm/evidence/pr_body.md | cut -d' ' -f1)
+  cat > .swarm/evidence/publication-evidence.json <<EOF
+  {
+    "schema_version": 1,
+    "state": "validated",
+    "repository": "$(git remote get-url origin)",
+    "head_sha": "$(git rev-parse HEAD)",
+    "body_sha256": "$BODY_SHA256",
+    "validation_commands": ["bun run typecheck", "bun run lint:ci"],
+    "recorded_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  }
+  EOF
+  ```
+
+  `pr_number` may be added once the PR exists (for `gh pr edit` / `gh pr ready`).
+  If HEAD changes, the body is edited, or you rerun validation, REGENERATE this
+  receipt — a stale or mismatched receipt is rejected by the gate.
 
 These files live under `.swarm/` (runtime state, never committed) and double as the
 evidence the gate checks. Keep them current if you edit the PR body or rerun

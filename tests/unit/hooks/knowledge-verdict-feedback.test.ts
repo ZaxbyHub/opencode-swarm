@@ -21,15 +21,25 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { applyKnowledgeVerdictFeedback } from '../../../src/hooks/knowledge-events.js';
+import {
+	_internals,
+	applyKnowledgeVerdictFeedback,
+} from '../../../src/hooks/knowledge-events.js';
+import type { ReceiptMembership } from '../../../src/hooks/knowledge-receipt-ledger.js';
 import {
 	readKnowledge,
 	resolveSwarmKnowledgePath,
 } from '../../../src/hooks/knowledge-store.js';
+import { freezeClock } from '../../helpers/test-clock.js';
 
 // ============================================================================
 // Helpers
 // ============================================================================
+
+let historicalMemberships: ReceiptMembership[] = [];
+const FIXED_NOW_MS = Date.parse('2026-06-01T12:00:00.000Z');
+const FIXED_NOW_ISO = '2026-06-01T12:00:00.000Z';
+let restoreClock: (() => void) | undefined;
 
 function makeTempDir(): string {
 	return mkdtempSync(join(tmpdir(), 'verdict-feedback-test-'));
@@ -78,6 +88,30 @@ function writeEvents(
 	const fp = ensureSwarmDir(dir);
 	const content = events.map((e) => makeReceiptEvent(e)).join('\n') + '\n';
 	writeFileSync(fp, content, 'utf-8');
+	historicalMemberships = events.map((event, index) => {
+		const eventId = event.event_id ?? `event-${index}`;
+		const timestamp = event.timestamp ?? new Date().toISOString();
+		return {
+			trace_id: `trace-${index}`,
+			entry_id: event.knowledge_id,
+			session_id: 'test-session',
+			critical: false,
+			committed_at: timestamp,
+			membership_event_id: `membership-${index}`,
+			grace_days: 7,
+			exposure_kind: 'legacy_unknown',
+			origin: 'v2',
+			terminal:
+				event.type === 'acknowledged'
+					? undefined
+					: {
+							outcome: event.type as 'applied',
+							source: 'test',
+							event_id: eventId,
+							committed_at: timestamp,
+						},
+		} satisfies ReceiptMembership;
+	});
 }
 
 /** Write knowledge entries to .swarm/knowledge.jsonl. */
@@ -133,12 +167,25 @@ async function readKnowledgeById(
 
 describe('applyKnowledgeVerdictFeedback', () => {
 	let dir: string;
+	const originalQueryHistoricalOutcomes = _internals.queryHistoricalOutcomes;
 
 	beforeEach(() => {
+		restoreClock = freezeClock({
+			fixedNow: FIXED_NOW_MS,
+			isoNow: FIXED_NOW_ISO,
+		});
 		dir = makeTempDir();
+		historicalMemberships = [];
+		_internals.queryHistoricalOutcomes = async () => ({
+			ok: true,
+			memberships: historicalMemberships,
+		});
 	});
 
 	afterEach(() => {
+		restoreClock?.();
+		restoreClock = undefined;
+		_internals.queryHistoricalOutcomes = originalQueryHistoricalOutcomes;
 		rmSync(dir, { recursive: true, force: true });
 	});
 

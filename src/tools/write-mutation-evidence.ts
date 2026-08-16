@@ -213,6 +213,7 @@ export const _internals = {
  * Tool definition for write_mutation_evidence
  */
 export const write_mutation_evidence: ToolDefinition = createSwarmTool({
+	allowWorkingDirectoryOverride: true,
 	description:
 		'Write mutation gate evidence for a completed phase. Accepts phase, verdict (PASS/WARN/FAIL/SKIP), killRate, adjustedKillRate, summary, and optional survivedMutants. Normalizes uppercase verdicts to lowercase (PASS→pass, WARN→warn, FAIL→fail, SKIP→skip) and writes entries[0].type="mutation-gate" to .swarm/evidence/{phase}/mutation-gate.json using atomic temp+rename write. Use this after mutation_test tool returns to persist the gate verdict.',
 	args: {

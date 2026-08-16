@@ -11,7 +11,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
-import * as os from 'node:os';
+import { rmSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 import type { DirectiveToVerify } from '../../../src/agents/reviewer-directive-compliance.js';
 import type { DelegateInjectionInput } from '../../../src/hooks/delegate-directive-injection.js';
@@ -21,6 +21,7 @@ import {
 	DELEGATE_DIRECTIVE_BLOCK_TAG,
 } from '../../../src/hooks/knowledge-injector.js';
 import type { RankedEntry } from '../../../src/hooks/knowledge-reader.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 import {
 	makeConfig,
 	makeEntry,
@@ -32,28 +33,24 @@ import {
 // ---------------------------------------------------------------------------
 
 describe('injectDelegateDirectivesBefore — FR-012 behavioral tests', () => {
-	// Working directory for tests that need one (not used for file I/O in these
-	// tests since we mock the file-reading functions, but required by signature).
-	const testDir = path.join(os.tmpdir(), 'delegate-directive-test');
-
-	// Save original _internals from knowledge-injector
+	let testDir: string;
 	let originalSearchKnowledge: typeof import('../../../src/hooks/knowledge-injector.js')._internals.searchKnowledge;
 	let originalRecordKnowledgeEvent: typeof import('../../../src/hooks/knowledge-injector.js')._internals.recordKnowledgeEvent;
 
 	beforeEach(async () => {
-		// Dynamically import to avoid top-level import issues with mock.module
+		testDir = canonicalMkdtemp('delegate-directive-test-');
+		writeFileSync(path.join(testDir, '.git'), 'gitdir: fixture');
 		const ki = await import('../../../src/hooks/knowledge-injector.js');
 		originalSearchKnowledge = ki._internals.searchKnowledge;
 		originalRecordKnowledgeEvent = ki._internals.recordKnowledgeEvent;
-		// Mock recordKnowledgeEvent to prevent real file writes
 		ki._internals.recordKnowledgeEvent = mock(async () => {});
 	});
 
 	afterEach(async () => {
-		// Restore original _internals
 		const ki = await import('../../../src/hooks/knowledge-injector.js');
 		ki._internals.searchKnowledge = originalSearchKnowledge;
 		ki._internals.recordKnowledgeEvent = originalRecordKnowledgeEvent;
+		rmSync(testDir, { recursive: true, force: true });
 		mock.restore();
 	});
 
@@ -205,7 +202,9 @@ describe('injectDelegateDirectivesBefore — FR-012 behavioral tests', () => {
 					async () =>
 						[
 							{
-								id: 'phase-dir-1',
+								trace_id: 'review-trace',
+								entry_id: 'phase-dir-1',
+								session_id: 'sess-review',
 								priority: 'high' as const,
 								lesson: 'Check all return paths',
 							},

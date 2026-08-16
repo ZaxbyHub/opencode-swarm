@@ -13,7 +13,10 @@ import type { Plan } from '../../../src/config/plan-schema';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 import { withFrozenClock } from '../../helpers/test-clock.js';
-import { recordPlanCriticApproval } from './_delegation-gate-helpers';
+import {
+	recordPlanCriticApproval,
+	seedAuthoritativeTaskWorkflow,
+} from './_delegation-gate-helpers';
 
 function makeConfig(overrides?: Record<string, unknown>): PluginConfig {
 	return {
@@ -168,6 +171,8 @@ describe('delegation-gate: tests_run regression edge cases', () => {
 		const session = ensureAgentSession('test-session');
 		session.taskWorkflowStates.set('1.1', 'tests_run');
 		session.taskWorkflowStates.set('1.2', 'tests_run');
+		await seedAuthoritativeTaskWorkflow(tempDir, '1.1', 'tests_run');
+		await seedAuthoritativeTaskWorkflow(tempDir, '1.2', 'tests_run');
 
 		let threw = false;
 		try {
@@ -195,6 +200,7 @@ describe('delegation-gate: tests_run regression edge cases', () => {
 
 		// Rapid transitions
 		session.taskWorkflowStates.set('1.1', 'tests_run');
+		await seedAuthoritativeTaskWorkflow(tempDir, '1.1', 'tests_run');
 		session.taskWorkflowStates.delete('1.1');
 		session.taskWorkflowStates.set('1.1', 'tests_run');
 

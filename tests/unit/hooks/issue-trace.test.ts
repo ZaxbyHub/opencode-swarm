@@ -99,6 +99,25 @@ function writeReproReceipt(dir: string, number = 42): void {
 	});
 }
 
+/** Writes both residual-B receipts (implementation review + recurrence sweep). */
+function writeResidualBReceipts(dir: string, number = 42): void {
+	writeJson(dir, 'implementation-review.json', {
+		issueNumber: number,
+		reviewerVerdict: 'APPROVE',
+		criticVerdict: 'APPROVE',
+		diffBase: 'abc1234',
+		diffHead: 'def5678',
+		notes: 'fresh reviewer and critic both approved',
+		timestamp: '2026-01-01T00:00:00Z',
+	});
+	writeJson(dir, 'recurrence-sweep.json', {
+		issueNumber: number,
+		defectClass: 'no defect class',
+		justification: 'docs-only change corrects no behavior',
+		timestamp: '2026-01-01T00:00:00Z',
+	});
+}
+
 /** Runs the hook's messagesTransform and returns the output messages. */
 async function runHook(
 	dir: string,
@@ -324,6 +343,7 @@ describe('issue-trace hook', () => {
 		_internals.isPlanCriticApproved = () => Promise.resolve(true);
 		_internals.readPlanPhaseStatus = () =>
 			Promise.resolve({ planExists: true, allComplete: true });
+		writeResidualBReceipts(tmpDir);
 
 		const messages = await runHook(tmpDir);
 		expect(messages).toHaveLength(1);

@@ -5,6 +5,7 @@ import type { ToolContext } from '@opencode-ai/plugin';
 import { z } from 'zod';
 
 import { createSwarmTool } from '../../../src/tools/create-tool';
+import { knowledge_add } from '../../../src/tools/knowledge-add';
 import { write_retro } from '../../../src/tools/write-retro';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
@@ -52,9 +53,10 @@ describe('createSwarmTool working_directory injection (issue #2171)', () => {
 		});
 	});
 
-	it('adds an optional working_directory schema to tools that omit it', () => {
+	it('adds an optional working_directory schema only to tools that opt in', () => {
 		const config = createSwarmTool({
 			description: 'schema test',
+			allowWorkingDirectoryOverride: true,
 			args: { value: z.string() },
 			execute: async () => 'ok',
 		});
@@ -73,6 +75,7 @@ describe('createSwarmTool working_directory injection (issue #2171)', () => {
 		let receivedContext: ToolContext | undefined;
 		const config = createSwarmTool({
 			description: 'reference test',
+			allowWorkingDirectoryOverride: true,
 			args: { value: z.string() },
 			execute: async (args, _directory, context) => {
 				receivedArgs = args;
@@ -112,6 +115,7 @@ describe('createSwarmTool working_directory injection (issue #2171)', () => {
 		let receivedContext: ToolContext | undefined;
 		const config = createSwarmTool({
 			description: 'override test',
+			allowWorkingDirectoryOverride: true,
 			args: { value: z.string() },
 			execute: async (args, directory, context) => {
 				receivedArgs = args;
@@ -138,6 +142,7 @@ describe('createSwarmTool working_directory injection (issue #2171)', () => {
 		let invoked = false;
 		const config = createSwarmTool({
 			description: 'invalid override test',
+			allowWorkingDirectoryOverride: true,
 			args: { value: z.string() },
 			execute: async () => {
 				invoked = true;
@@ -170,6 +175,7 @@ describe('createSwarmTool working_directory injection (issue #2171)', () => {
 		});
 		const outer = createSwarmTool({
 			description: 'outer tool',
+			allowWorkingDirectoryOverride: true,
 			args: { value: z.string() },
 			execute: async (_args, _directory, context) =>
 				nested.execute({ value: 'nested' }, context),
@@ -192,6 +198,7 @@ describe('createSwarmTool working_directory injection (issue #2171)', () => {
 		let receivedDirectory: string | undefined;
 		const config = createSwarmTool({
 			description: 'owned field test',
+			allowWorkingDirectoryOverride: true,
 			args: { value: z.string(), working_directory: ownedSchema },
 			execute: async (args, directory) => {
 				receivedArgs = args;
@@ -242,5 +249,30 @@ describe('createSwarmTool working_directory injection (issue #2171)', () => {
 				join(fallbackRoot, '.swarm', 'evidence', 'retro-1', 'evidence.json'),
 			),
 		).toBe(false);
+	});
+
+	it('wires the injected schema and root through the issue-listed knowledge_add tool', async () => {
+		const schemas = knowledge_add.args as Record<string, z.ZodTypeAny>;
+		expect(schemas.working_directory).toBeDefined();
+
+		const result = await knowledge_add.execute(
+			{
+				lesson:
+					'Run focused wrapper validation from the active worktree before merge.',
+				category: 'process',
+				applies_to_agents: ['coder'],
+				required_actions: ['Run focused tests for changed wrappers.'],
+				working_directory: overrideRoot,
+			},
+			makeContext(fallbackRoot),
+		);
+
+		expect(JSON.parse(result as string).success).toBe(true);
+		expect(existsSync(join(overrideRoot, '.swarm', 'knowledge.jsonl'))).toBe(
+			true,
+		);
+		expect(existsSync(join(fallbackRoot, '.swarm', 'knowledge.jsonl'))).toBe(
+			false,
+		);
 	});
 });

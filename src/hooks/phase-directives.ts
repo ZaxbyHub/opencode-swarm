@@ -6,16 +6,16 @@
  * reviewer must verify) and the phase-complete gate (Task 2.4 — which CRITICAL
  * IDs must reach a terminal outcome before the phase advances).
  *
- * The window is defined by the retrieval event's `phase` label: every
- * `retrieved` event (auto_injection AND delegate_inject) carries the plan phase
- * label, so a single equality filter gives a consistent set across consumers.
+ * The window is defined by each authoritative receipt membership's `phase`
+ * label. Legacy retrieval events are imported by the V2 ledger at cutover, so a
+ * single equality filter gives a consistent set across consumers.
  * Passing an empty/undefined phase collects directives across all phases (used
  * only as a permissive fallback).
  */
 
 import { existsSync } from 'node:fs';
 import type { DirectiveToVerify } from '../agents/reviewer-directive-compliance.js';
-import { readKnowledgeEvents } from './knowledge-events.js';
+import { queryLiveMemberships } from './knowledge-receipt-ledger.js';
 import {
 	readKnowledge,
 	resolveHiveKnowledgePath,
@@ -24,18 +24,21 @@ import {
 import type { KnowledgeEntryBase } from './knowledge-types.js';
 import { isActiveStatus } from './knowledge-types.js';
 
-/** Collect the directive IDs surfaced by `retrieved` events in the phase window. */
+/** Collect unique entry IDs from authoritative memberships in the phase window. */
 export async function collectPhaseDirectiveIds(
 	directory: string,
 	phaseLabel?: string,
 ): Promise<string[]> {
-	const events = await readKnowledgeEvents(directory);
-	const ids = new Set<string>();
-	for (const e of events) {
-		if (e.type !== 'retrieved') continue;
-		if (phaseLabel && e.phase !== phaseLabel) continue;
-		for (const id of e.result_ids) ids.add(id);
+	const result = await queryLiveMemberships(directory, {
+		phase: phaseLabel || undefined,
+		include_terminal: true,
+		include_phase_closed: false,
+	});
+	if (!result.ok) {
+		throw new Error(`receipt ledger unavailable: ${result.code}`);
 	}
+	const ids = new Set<string>();
+	for (const membership of result.memberships) ids.add(membership.entry_id);
 	return [...ids];
 }
 
@@ -67,20 +70,39 @@ export async function readPhaseDirectivesToVerify(
 	phaseLabel?: string,
 ): Promise<DirectiveToVerify[]> {
 	try {
-		const ids = await collectPhaseDirectiveIds(directory, phaseLabel);
-		if (ids.length === 0) return [];
+		const result = await queryLiveMemberships(directory, {
+			phase: phaseLabel || undefined,
+			include_terminal: true,
+			include_phase_closed: false,
+		});
+		if (!result.ok || result.memberships.length === 0) return [];
 		const entries = await readEntriesById(directory);
 		const out: DirectiveToVerify[] = [];
-		for (const id of ids) {
-			const e = entries.get(id);
+		for (const membership of result.memberships) {
+			if (membership.terminal && membership.terminal.outcome !== 'violated') {
+				continue;
+			}
+			const e = entries.get(membership.entry_id);
 			if (!e) continue;
 			// G4 (#1716): use the canonical helper so the inactive set has a single
 			// source of truth — also excludes `quarantined_unactionable` (failed
 			// the actionability gate; should not be re-injected as a directive).
 			if (!isActiveStatus(e.status)) continue;
 			out.push({
-				id,
-				priority: e.directive_priority ?? 'medium',
+				trace_id: membership.trace_id,
+				entry_id: membership.entry_id,
+				session_id: membership.session_id,
+				cohort_id: membership.cohort_id,
+				source_link_id: membership.source_link_id,
+				prior_terminal_outcome:
+					membership.terminal?.outcome === 'violated' ? 'violated' : undefined,
+				prior_terminal_event_id:
+					membership.terminal?.outcome === 'violated'
+						? membership.terminal.event_id
+						: undefined,
+				priority: membership.critical
+					? 'critical'
+					: (e.directive_priority ?? 'medium'),
 				lesson: e.lesson,
 				verification_predicate: e.verification_predicate,
 			});
@@ -97,5 +119,11 @@ export async function readPhaseCriticalDirectiveIds(
 	phaseLabel?: string,
 ): Promise<string[]> {
 	const directives = await readPhaseDirectivesToVerify(directory, phaseLabel);
-	return directives.filter((d) => d.priority === 'critical').map((d) => d.id);
+	return [
+		...new Set(
+			directives
+				.filter((d) => d.priority === 'critical')
+				.map((d) => d.entry_id),
+		),
+	];
 }

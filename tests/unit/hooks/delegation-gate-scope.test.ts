@@ -208,14 +208,24 @@ describe('delegation-gate: declaredCoderScope extraction (Task 5.3)', () => {
 			expect(session.declaredCoderScope).toBeNull();
 		});
 
-		it('normalizes indented CRLF FILE directives through the shared parser', async () => {
+		it('FB-005 retains valid normalized scope entries for observe-only telemetry while strict extraction fails closed', async () => {
 			const config = makeConfig();
 			const hook = createDelegationGateHook(config, process.cwd());
+			const prompt =
+				'mega_coder\r\nTASK: 1.1\r\n  FILE: src/indented.ts (implementation target)\r\nFILE: src/indented.ts\r\nFILE: src/ambiguous.ts (annotation one) (annotation two)\r\nINPUT: do stuff';
 
-			const messages = makeMessages(
-				'mega_coder\r\nTASK: 1.1\r\n  FILE: src/indented.ts (implementation target)\r\nINPUT: do stuff',
-				'architect',
-			);
+			expect(_internals.extractTaskFileDirectives({ prompt })).toEqual({
+				present: true,
+				files: null,
+			});
+			expect(
+				_internals.extractTaskFileDirectives({ prompt }, 'observe'),
+			).toEqual({
+				present: true,
+				files: ['src/indented.ts'],
+			});
+
+			const messages = makeMessages(prompt, 'architect');
 			await hook.messagesTransform({}, messages);
 
 			const session = ensureAgentSession('test-session');
@@ -294,7 +304,7 @@ describe('delegation-gate: declaredCoderScope extraction (Task 5.3)', () => {
 			).toEqual({ present: true, files: ['src/foo.ts (unbalanced'] });
 		});
 
-		it('fails closed for invalid quoted suffixes and ambiguous unquoted lists', () => {
+		it('FB-009 rejects repeated unquoted annotation groups without breaking quoted terminal parentheses', () => {
 			expect(
 				_internals.extractTaskFileDirectives({
 					prompt: 'FILE: "src/foo.ts" trailing prose',
@@ -305,6 +315,19 @@ describe('delegation-gate: declaredCoderScope extraction (Task 5.3)', () => {
 					prompt: 'FILE: src/foo.ts, src/bar.ts',
 				}),
 			).toEqual({ present: true, files: null });
+			expect(
+				_internals.extractTaskFileDirectives({
+					prompt: 'FILE: src/foo.ts (annotation one) (annotation two)',
+				}),
+			).toEqual({ present: true, files: null });
+			expect(
+				_internals.extractTaskFileDirectives({
+					prompt: 'FILE: "src/report (v1) (final)" (implementation target)',
+				}),
+			).toEqual({
+				present: true,
+				files: ['src/report (v1) (final)'],
+			});
 		});
 
 		it('deduplicates normalized directives', () => {

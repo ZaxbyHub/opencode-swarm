@@ -57,7 +57,7 @@ describe('delegation-gate: reviewer_run state transition (v6.22 Task 2.2)', () =
 	// ============================================
 
 	describe('verification: hasReviewer true + currentTaskId set advances to reviewer_run', () => {
-		it('should advance task state to reviewer_run when reviewer detected after coder with currentTaskId set', async () => {
+		it('does not advance from delegation-chain inference without a launch generation', async () => {
 			const config = makeConfig();
 			const hook = createDelegationGateHook(config, process.cwd());
 
@@ -75,11 +75,10 @@ describe('delegation-gate: reviewer_run state transition (v6.22 Task 2.2)', () =
 
 			await triggerToolAfter(hook, 'test-session');
 
-			// State should advance to reviewer_run
-			expect(getTaskState(session, '1.1')).toBe('reviewer_run');
+			expect(getTaskState(session, '1.1')).toBe('coder_delegated');
 		});
 
-		it('should advance to reviewer_run with mega_reviewer after local_coder', async () => {
+		it('does not trust prefixed delegation-chain inference without a launch generation', async () => {
 			const config = makeConfig();
 			const hook = createDelegationGateHook(config, process.cwd());
 
@@ -96,7 +95,7 @@ describe('delegation-gate: reviewer_run state transition (v6.22 Task 2.2)', () =
 
 			await triggerToolAfter(hook, 'test-session');
 
-			expect(getTaskState(session, '2.3')).toBe('reviewer_run');
+			expect(getTaskState(session, '2.3')).toBe('coder_delegated');
 		});
 	});
 
@@ -414,7 +413,7 @@ describe('delegation-gate: reviewer_run state transition (v6.22 Task 2.2)', () =
 			expect(getTaskState(session, '1.1')).toBe('idle');
 		});
 
-		it('should advance when reviewer is after the LAST coder', async () => {
+		it('does not advance after the last coder without an exact launch binding', async () => {
 			const config = makeConfig();
 			const hook = createDelegationGateHook(config, process.cwd());
 
@@ -434,13 +433,12 @@ describe('delegation-gate: reviewer_run state transition (v6.22 Task 2.2)', () =
 
 			await triggerToolAfter(hook, 'test-session');
 
-			// Reviewer IS after last coder (local_coder) → should advance
-			expect(getTaskState(session, '1.1')).toBe('reviewer_run');
+			expect(getTaskState(session, '1.1')).toBe('coder_delegated');
 		});
 	});
 
 	describe('input.args primary path (v6.23 hotfix)', () => {
-		it('should advance coder_delegated → reviewer_run via input.args alone (no delegationChains)', async () => {
+		it('does not advance via input.args alone without the matching toolBefore', async () => {
 			const config = makeConfig();
 			const hook = createDelegationGateHook(config, process.cwd());
 
@@ -459,7 +457,7 @@ describe('delegation-gate: reviewer_run state transition (v6.22 Task 2.2)', () =
 				{},
 			);
 
-			expect(getTaskState(session, '1.1')).toBe('reviewer_run');
+			expect(getTaskState(session, '1.1')).toBe('coder_delegated');
 		});
 	});
 });

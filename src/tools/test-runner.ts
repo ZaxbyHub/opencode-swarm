@@ -272,6 +272,44 @@ function validateArgs(args: unknown): args is TestRunnerArgs {
 	return true;
 }
 
+function validateNativeTargetInput(
+	target: NativeTestTarget,
+): string | undefined {
+	if (target.framework !== 'go-test' && target.framework !== 'ctest') {
+		return 'Native target framework must be "go-test" or "ctest"';
+	}
+	if (
+		typeof target.name !== 'string' ||
+		target.name.length === 0 ||
+		target.name.length > 256
+	) {
+		return 'Native target name must be a non-empty string up to 256 characters';
+	}
+	if (
+		typeof target.path !== 'string' ||
+		target.path.length === 0 ||
+		target.path.length > 1024
+	) {
+		return 'Native target path must be a non-empty string up to 1024 characters';
+	}
+	if (containsControlChars(target.name) || containsControlChars(target.path)) {
+		return 'Native target values must not contain control characters';
+	}
+	if (
+		target.framework === 'go-test' &&
+		target.name.split('/').some((p) => !p)
+	) {
+		return 'Go native target name must not contain empty slash-separated segments';
+	}
+	if (isAbsolutePath(target.path)) {
+		return 'Native target path must be workspace-relative, not absolute';
+	}
+	if (containsPathTraversal(target.path)) {
+		return 'Native target path escapes project root';
+	}
+	return undefined;
+}
+
 function resolveNativeTarget(
 	target: NativeTestTarget,
 	workingDir: string,
@@ -1811,16 +1849,26 @@ function parseTestOutput(
 		}
 		case 'ctest': {
 			// CTest: "X% tests passed, Y tests failed out of Z"
+			// Disabled tests are reported as "***Not Run (Disabled)" and are
+			// intentionally excluded from CTest's summary total.
+			const disabledCount = [
+				...output.matchAll(/\*{3}Not Run\s+\(Disabled\)/gi),
+			].length;
+			totals.skipped = disabledCount;
 			const ctestMatch = output.match(/(\d+) tests? failed out of (\d+)/);
 			if (ctestMatch) {
 				totals.failed = parseInt(ctestMatch[1], 10);
-				totals.total = parseInt(ctestMatch[2], 10);
-				totals.passed = totals.total - totals.failed;
+				const executedTotal = parseInt(ctestMatch[2], 10);
+				totals.total = executedTotal + disabledCount;
+				totals.passed = executedTotal - totals.failed;
 			} else {
 				const allPassMatch = output.match(/100% tests passed.*?(\d+) tests?/);
 				if (allPassMatch) {
-					totals.total = parseInt(allPassMatch[1], 10);
-					totals.passed = totals.total;
+					const executedTotal = parseInt(allPassMatch[1], 10);
+					totals.total = executedTotal + disabledCount;
+					totals.passed = executedTotal;
+				} else if (disabledCount > 0) {
+					totals.total = disabledCount;
 				}
 			}
 			break;
@@ -1962,6 +2010,31 @@ async function readBoundedStream(
 	return { text: decoder.decode(combined), truncated };
 }
 
+function formatPassingMessage(
+	framework: TestFramework,
+	totals: TestTotals,
+	coveragePercent?: number,
+): string {
+	let message =
+		totals.total > 0 &&
+		totals.passed === 0 &&
+		totals.failed === 0 &&
+		totals.skipped === totals.total
+			? `${framework} tests completed with ${totals.skipped} skipped (${totals.total} total)`
+			: `${framework} tests passed (${totals.passed}/${totals.total})`;
+	if (coveragePercent !== undefined) {
+		message += ` with ${coveragePercent}% coverage`;
+	}
+	return message;
+}
+
+function formatNativeHistoryTestFile(
+	target: NativeTestTarget,
+	historyPath: string,
+): string {
+	return `native:${target.framework}:path=${encodeURIComponent(historyPath)}#name=${encodeURIComponent(target.name)}`;
+}
+
 export async function runTests(
 	framework: TestFramework,
 	scope: TestScope,
@@ -1972,6 +2045,8 @@ export async function runTests(
 	bail: boolean,
 	nativeTarget?: NativeTestTarget,
 ): Promise<TestResult> {
+	let executionCwd = cwd;
+	let resolvedNativeTarget = nativeTarget;
 	if (
 		(scope === 'target' && !nativeTarget) ||
 		(scope !== 'target' && nativeTarget !== undefined) ||
@@ -1986,6 +2061,42 @@ export async function runTests(
 				'scope "target" requires one matching native target, and native targets are not valid with other scopes.',
 			outcome: 'error',
 		};
+	}
+	if (scope === 'target') {
+		if (files.length > 0 || coverage || bail) {
+			return {
+				success: false,
+				framework,
+				scope,
+				error:
+					'scope "target" cannot be combined with files, coverage, or bail',
+				message:
+					'Native target mode runs one exact framework-native name only. Omit files and leave coverage and bail disabled.',
+				outcome: 'error',
+			};
+		}
+		const nativeTargetError = validateNativeTargetInput(nativeTarget!);
+		if (nativeTargetError) {
+			return {
+				success: false,
+				framework,
+				scope,
+				error: nativeTargetError,
+				outcome: 'error',
+			};
+		}
+		const resolvedTarget = resolveNativeTarget(nativeTarget!, cwd);
+		if (!resolvedTarget.success) {
+			return {
+				success: false,
+				framework,
+				scope,
+				error: resolvedTarget.error,
+				outcome: 'error',
+			};
+		}
+		resolvedNativeTarget = resolvedTarget.target;
+		executionCwd = resolvedTarget.executionDirectory;
 	}
 	if (scope !== 'all' && scope !== 'target' && files.length > 0) {
 		const unsupportedReason = getTargetedExecutionUnsupportedReason(framework);
@@ -2013,27 +2124,27 @@ export async function runTests(
 				scope,
 				files,
 				coverage,
-				cwd,
+				executionCwd,
 				bail,
-				nativeTarget,
+				resolvedNativeTarget,
 			)) ??
 			buildTestCommand(
 				framework,
 				scope,
 				files,
 				coverage,
-				cwd,
+				executionCwd,
 				bail,
-				nativeTarget,
+				resolvedNativeTarget,
 			))
 		: buildTestCommand(
 				framework,
 				scope,
 				files,
 				coverage,
-				cwd,
+				executionCwd,
 				bail,
-				nativeTarget,
+				resolvedNativeTarget,
 			);
 
 	if (!command) {
@@ -2063,11 +2174,11 @@ export async function runTests(
 	const startTime = Date.now();
 	const vitestJsonOutputPath =
 		framework === 'vitest'
-			? path.join(cwd, '.swarm', 'cache', 'test-runner-vitest.json')
+			? path.join(executionCwd, '.swarm', 'cache', 'test-runner-vitest.json')
 			: undefined;
 	let proc: ReturnType<typeof bunSpawn> | undefined;
 	let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-	let timedOut = false;
+	let timedOutByDeadline = false;
 
 	try {
 		if (vitestJsonOutputPath) {
@@ -2082,12 +2193,11 @@ export async function runTests(
 		}
 
 		// Register the classification timer before spawning. bunSpawn remains the
-		// sole timeout-kill owner; registering first ensures this passive timer marks
-		// the result as timed out before bunSpawn's same-deadline kill settles it.
-		const timeoutPromise = new Promise<number>((resolve) => {
+		// sole timeout-kill owner; this passive timer only snapshots timeout-vs-exit
+		// classification and never kills the process itself.
+		const timeoutPromise = new Promise<{ kind: 'timeout' }>((resolve) => {
 			timeoutHandle = setTimeout(() => {
-				timedOut = true;
-				resolve(-1);
+				resolve({ kind: 'timeout' });
 			}, timeout_ms);
 		});
 
@@ -2095,7 +2205,7 @@ export async function runTests(
 			stdin: 'ignore',
 			stdout: 'pipe',
 			stderr: 'pipe',
-			cwd,
+			cwd: executionCwd,
 			timeout: timeout_ms,
 			killProcessTree: true,
 		});
@@ -2109,11 +2219,24 @@ export async function runTests(
 		// Fix: read bounded streams in parallel with exit/timeout, so the pipe is
 		// always being drained. readBoundedStream caps memory at MAX_OUTPUT_BYTES
 		// per stream, preventing OOM from unbounded test output.
-		const [exitCode, stdoutResult, stderrResult] = await Promise.all([
-			Promise.race([proc.exited, timeoutPromise]),
-			readBoundedStream(proc.stdout, MAX_OUTPUT_BYTES),
-			readBoundedStream(proc.stderr, MAX_OUTPUT_BYTES),
+		const stdoutPromise = readBoundedStream(proc.stdout, MAX_OUTPUT_BYTES);
+		const stderrPromise = readBoundedStream(proc.stderr, MAX_OUTPUT_BYTES);
+		const raceResult = await Promise.race<
+			{ kind: 'exit'; exitCode: number } | { kind: 'timeout' }
+		>([
+			proc.exited.then((exitCode) => ({ kind: 'exit' as const, exitCode })),
+			timeoutPromise,
 		]);
+		timedOutByDeadline = raceResult.kind === 'timeout';
+		if (timeoutHandle !== undefined) {
+			clearTimeout(timeoutHandle);
+			timeoutHandle = undefined;
+		}
+		const [stdoutResult, stderrResult] = await Promise.all([
+			stdoutPromise,
+			stderrPromise,
+		]);
+		const exitCode = raceResult.kind === 'timeout' ? -1 : raceResult.exitCode;
 
 		const duration_ms = Date.now() - startTime;
 
@@ -2148,7 +2271,7 @@ export async function runTests(
 		// the legacy path uses, so totals/coveragePercent shape is identical.
 		const useDispatchParse = process.env.SWARM_LANG_BACKEND !== 'legacy';
 		const parsed = useDispatchParse
-			? ((await parseTestOutputViaDispatch(framework, output, cwd)) ??
+			? ((await parseTestOutputViaDispatch(framework, output, executionCwd)) ??
 				parseTestOutput(framework, output))
 			: parseTestOutput(framework, output);
 		const parsedTestCases = parseFrameworkJsonTestResults(framework, output);
@@ -2164,12 +2287,15 @@ export async function runTests(
 		}
 
 		// Determine success based on exit code and failures
-		const isTimeout = exitCode === -1 || timedOut;
-		const nativeTargetObserved = nativeTarget
-			? didExecuteNativeTarget(nativeTarget, output)
+		const isTimeout = timedOutByDeadline;
+		const nativeTargetObserved = resolvedNativeTarget
+			? didExecuteNativeTarget(resolvedNativeTarget, output)
 			: true;
 		const testPassed =
-			exitCode === 0 && totals.failed === 0 && nativeTargetObserved;
+			exitCode === 0 &&
+			!isTimeout &&
+			totals.failed === 0 &&
+			nativeTargetObserved;
 
 		if (testPassed) {
 			const result: TestSuccessResult = {
@@ -2189,10 +2315,7 @@ export async function runTests(
 				result.coveragePercent = coveragePercent;
 			}
 
-			result.message = `${framework} tests passed (${totals.passed}/${totals.total})`;
-			if (coveragePercent !== undefined) {
-				result.message += ` with ${coveragePercent}% coverage`;
-			}
+			result.message = formatPassingMessage(framework, totals, coveragePercent);
 
 			return result;
 		} else {
@@ -2208,7 +2331,7 @@ export async function runTests(
 				error: isTimeout
 					? `Tests timed out after ${timeout_ms}ms`
 					: !nativeTargetObserved
-						? `Native target "${nativeTarget?.name}" did not execute`
+						? `Native target "${resolvedNativeTarget?.name}" did not execute`
 						: `Tests failed with ${totals.failed} failures`,
 				message: isTimeout
 					? `${framework} tests timed out after ${timeout_ms}ms`
@@ -2243,7 +2366,7 @@ export async function runTests(
 		};
 	} finally {
 		if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
-		if (proc?.exitCode === null && !timedOut) {
+		if (proc?.exitCode === null && !timedOutByDeadline) {
 			try {
 				if (proc.killTree) await proc.killTree('SIGKILL');
 				else proc.kill('SIGKILL');
@@ -2536,13 +2659,13 @@ function analyzeFailures(workingDir: string): TestHistoryReport {
 // ============ Tool Definition ============
 export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 	description:
-		'Run project tests with framework detection. Supports bounded exact Go and CTest names through scope "target" and native_target, plus file-based convention, graph, and impact scopes.',
+		'Run project tests with automatic framework detection for bun, vitest, jest, mocha, pytest, cargo, pester, go test, maven, gradle, dotnet test, ctest, swift test, dart test, rspec, minitest, pest, phpunit, or php-artisan. Returns JSON with success, framework, scope, command, timeout_ms, duration_ms, totals, outcome, and optional coveragePercent, rawOutput, testCases, and message fields. Scope "target" runs one exact Go test/subtest or CTest name via native_target using a workspace-relative package/build directory, with no broad fallback, coverage, or bail.',
 	args: {
 		scope: z
 			.enum(['all', 'convention', 'graph', 'impact', 'target'])
 			.optional()
 			.describe(
-				'Test scope: "target" runs one exact Go or CTest name; other scopes retain file-based behavior',
+				'Test scope: "all" runs the full suite, "convention"/"graph"/"impact" resolve files, and "target" runs one exact Go or CTest native name without file fallback.',
 			),
 		native_target: z
 			.object({
@@ -2552,7 +2675,7 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 			})
 			.optional()
 			.describe(
-				'For scope "target": exact framework-native test name and workspace-relative package/build directory',
+				'For scope "target": exact framework-native test name plus a workspace-relative package/build directory. Absolute paths, traversal, coverage, bail, and broad fallback are rejected.',
 			),
 		files: z
 			.array(z.string())
@@ -3106,9 +3229,7 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 
 		// Record results to history and analyze failures
 		const historyTestFiles = nativeTarget
-			? [
-					`native:${nativeTarget.framework}:${nativeHistoryPath}#${nativeTarget.name}`,
-				]
+			? [formatNativeHistoryTestFile(nativeTarget, nativeHistoryPath!)]
 			: testFiles;
 		recordAndAnalyzeResults(
 			result,
@@ -3159,6 +3280,7 @@ export const _internals: {
 	readFileSync: typeof fs.readFileSync;
 	bunSpawn: typeof bunSpawn;
 	buildNativeTargetCommand: typeof buildNativeTargetCommand;
+	formatNativeHistoryTestFile: typeof formatNativeHistoryTestFile;
 	selectHistoryForAnalysis: typeof selectHistoryForAnalysis;
 	AGGREGATE_TEST_NAME: typeof AGGREGATE_TEST_NAME;
 } = {
@@ -3170,6 +3292,7 @@ export const _internals: {
 	readFileSync: fs.readFileSync,
 	bunSpawn,
 	buildNativeTargetCommand,
+	formatNativeHistoryTestFile,
 	selectHistoryForAnalysis,
 	AGGREGATE_TEST_NAME,
 };

@@ -214,15 +214,17 @@ describe('delegation-gate: worktree state cleanup', () => {
 				cleanedBranches.push(branch);
 			});
 
-			await hook.toolAfter(
-				{
-					tool: 'Task',
-					sessionID: 'test-session',
-					callID,
-					args: { subagent_type: 'coder', task_id: '1.1' },
-				},
-				{ state: 'cancelled', output: 'child cancelled' },
-			);
+			await expect(
+				hook.toolAfter(
+					{
+						tool: 'Task',
+						sessionID: 'test-session',
+						callID,
+						args: { subagent_type: 'coder', task_id: '1.1' },
+					},
+					{ state: 'cancelled', output: 'child cancelled' },
+				),
+			).rejects.toThrow('CODER_SETTLEMENT_ATTRIBUTION_UNCERTAIN');
 
 			expect(mergeAttempts).toBe(0);
 			expect(preserveReasons).toEqual(['cancelled']);

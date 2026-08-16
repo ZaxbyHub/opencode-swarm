@@ -16,7 +16,7 @@ import { warn } from '../utils/logger.js';
 import type { CuratorLLMDelegate } from './curator.js';
 import {
 	effectiveRetrievalOutcomes,
-	readKnowledgeCounterRollups,
+	readAuthoritativeKnowledgeCounterRollups,
 } from './knowledge-events.js';
 import {
 	findActiveSwarmNearDuplicate,
@@ -1505,7 +1505,8 @@ export async function runAutoPromotion(
 	const knowledgePath = resolveSwarmKnowledgePath(directory);
 	const entries =
 		(await readKnowledge<SwarmKnowledgeEntry>(knowledgePath)) ?? [];
-	const counterRollups = await readKnowledgeCounterRollups(directory);
+	const counterRollups =
+		await readAuthoritativeKnowledgeCounterRollups(directory);
 	let changed = false;
 	for (const entry of entries) {
 		// Skip already promoted entries
@@ -1585,7 +1586,8 @@ export async function runAutoDemotion(
 	const knowledgePath = resolveSwarmKnowledgePath(directory);
 	const entries =
 		(await readKnowledge<SwarmKnowledgeEntry>(knowledgePath)) ?? [];
-	const counterRollups = await readKnowledgeCounterRollups(directory);
+	const counterRollups =
+		await readAuthoritativeKnowledgeCounterRollups(directory);
 	let changed = false;
 	for (const entry of entries) {
 		if (entry.status !== 'promoted') continue;

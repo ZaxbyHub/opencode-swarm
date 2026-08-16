@@ -341,12 +341,12 @@ describe('ARCHITECT WORKFLOW: Delegation Safety', () => {
 		expect(prompt).toContain('You do NOT write code');
 	});
 
-	test('SECURITY: Fallback only after QA_RETRY_LIMIT failures (Rule 4)', () => {
-		expect(prompt).toContain('Fallback: Only code yourself');
+	test('SECURITY: Retry exhaustion never grants self-coding authority (Rule 4)', () => {
 		expect(prompt).toContain(
-			'after {{QA_RETRY_LIMIT}} {{AGENT_PREFIX}}coder failures',
+			'Failure exhaustion never grants self-coding authority',
 		);
-		expect(prompt).toContain('on same task');
+		expect(prompt).toContain('Reaching {{QA_RETRY_LIMIT}}: consult the critic');
+		expect(prompt).toContain('Do not write the code yourself');
 	});
 
 	test('SECURITY: One agent per message (Rule 2)', () => {
@@ -508,10 +508,10 @@ describe('ARCHITECT WORKFLOW: Failure Counting Anti-Bypass (Phase 6)', () => {
 	test('SECURITY: Escalation required after limit reached', () => {
 		// Must escalate, not silently continue
 		expect(prompt).toContain('escalate to user');
-		expect(prompt).toContain('before writing code yourself');
+		expect(prompt).toContain('Any self-coding is a Rule 1 violation');
 
-		// Verify fallback is explicit about the condition
-		expect(prompt).toContain('after {{QA_RETRY_LIMIT}}');
+		// Verify escalation is explicit about the bounded condition
+		expect(prompt).toContain('Reaching {{QA_RETRY_LIMIT}}');
 		expect(prompt).toContain('failures');
 	});
 

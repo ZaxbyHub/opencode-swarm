@@ -157,9 +157,11 @@ describe('executeUpdateTaskStatus — ledger-replay staleness refusal (#1269 fin
 				_release: releaseSpy,
 			},
 		})) as unknown as typeof _internals.tryAcquireLock;
-		const updateSpy = mock(
-			async () => buildPlan() as unknown as RuntimePlan,
-		) as unknown as typeof _internals.updateTaskStatus;
+		const updateSpy = mock(async (_directory, _taskId, status) => {
+			const updated = buildPlan();
+			updated.phases[0]!.tasks[0]!.status = status;
+			return updated as unknown as RuntimePlan;
+		}) as unknown as typeof _internals.updateTaskStatus;
 		_internals.updateTaskStatus = updateSpy;
 
 		// Act
@@ -175,7 +177,7 @@ describe('executeUpdateTaskStatus — ledger-replay staleness refusal (#1269 fin
 		expect(result.message).not.toContain('stale');
 		expect(updateSpy).toHaveBeenCalledTimes(1);
 		expect(updateSpy).toHaveBeenCalledWith(tempDir, '1.1', 'in_progress', {
-			force: undefined,
+			force: false,
 			planLockAlreadyHeld: true,
 		});
 		// The acquired lock is released even on the success path.

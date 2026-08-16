@@ -29,7 +29,13 @@ import {
 	detectEnvironmentProfile,
 	type EnvironmentProfile,
 } from './environment/profile.js';
-import type { TaskEvidence } from './gate-evidence';
+import {
+	compareTaskWorkflowStateRank,
+	getTaskWorkflowSnapshot,
+	parseTaskEvidence,
+	type TaskEvidence,
+	type TaskWorkflowMetadata,
+} from './gate-evidence';
 import {
 	clearPendingCoderScope,
 	resetStandardWorktreeIsolationState,
@@ -41,11 +47,7 @@ import {
 import { clearTrajectoryStepCounters } from './hooks/trajectory-step-state.js';
 import { resetSessionQueue } from './learning/candidate-queue.js';
 import { resetPrmPatternSupport } from './learning/prm-pattern-support.js';
-import {
-	isTaskSettled,
-	loadPlanJsonOnly,
-	updateTaskStatus,
-} from './plan/manager.js';
+import { loadPlanJsonOnly } from './plan/manager.js';
 import { derivePlanId } from './plan/utils.js';
 import type { EscalationTracker } from './prm/escalation.js';
 import { clearTrajectoryCache } from './prm/trajectory-store.js';
@@ -143,7 +145,17 @@ export type TaskWorkflowState =
 	| 'pre_check_passed'
 	| 'reviewer_run'
 	| 'tests_run'
-	| 'complete';
+	| 'rework_required'
+	| 'complete'
+	| 'blocked';
+
+export interface TaskWorkflowCacheEntry {
+	generation: number;
+	retryCount: number;
+	lastOutcome: TaskWorkflowMetadata['lastOutcome'];
+	lastTransitionId: string | null;
+	updatedAt: string;
+}
 
 /**
  * Upper bound for per-session task file-attribution entries.
@@ -160,7 +172,17 @@ export const MAX_TRACKED_TASK_FILE_ATTRIBUTIONS = 128;
  * Extracted from three duplicate local literals to a single module-level constant
  * to eliminate duplication and prevent future drift.
  */
-const STATE_ORDER: TaskWorkflowState[] = [
+const LINEAR_STATE_ORDER: Array<
+	Extract<
+		TaskWorkflowState,
+		| 'idle'
+		| 'coder_delegated'
+		| 'pre_check_passed'
+		| 'reviewer_run'
+		| 'tests_run'
+		| 'complete'
+	>
+> = [
 	'idle',
 	'coder_delegated',
 	'pre_check_passed',
@@ -168,6 +190,13 @@ const STATE_ORDER: TaskWorkflowState[] = [
 	'tests_run',
 	'complete',
 ];
+
+function compareWorkflowStatePrecedence(
+	left: TaskWorkflowState,
+	right: TaskWorkflowState,
+): number {
+	return compareTaskWorkflowStateRank(left, right);
+}
 
 /** Exact lifecycle state for one coder generation and its paired reviewer. */
 export interface ReviewerScopeGeneration {
@@ -332,6 +361,8 @@ export interface AgentSessionState {
 	// v6.21 Per-task state machine
 	/** Per-task workflow state — taskId → current state */
 	taskWorkflowStates: Map<string, TaskWorkflowState>;
+	/** Exact-task workflow cache keyed by taskId. Durable evidence remains authoritative. */
+	taskWorkflowCache?: Map<string, TaskWorkflowCacheEntry>;
 	/**
 	 * PR 2 Stage B barrier: per-task set of completed Stage B agents.
 	 * Order-independent — either 'reviewer' or 'test_engineer' may complete first.
@@ -361,6 +392,8 @@ export interface AgentSessionState {
 			rewarded?: boolean;
 		}
 	>;
+	/** Generation captured when the first member of a task council is dispatched. */
+	taskCouncilWorkflowGeneration?: Map<string, number>;
 	/**
 	 * Per-(task,round) required council members for the next submission attempt.
 	 * Key format: `${taskId}:${roundNumber}`.
@@ -1690,8 +1723,10 @@ export function startAgentSession(
 		qaSkipTaskIds: [],
 		// v6.21 Per-task state machine
 		taskWorkflowStates: new Map(),
+		taskWorkflowCache: new Map(),
 		stageBCompletion: new Map(),
 		taskCouncilApproved: new Map(),
+		taskCouncilWorkflowGeneration: new Map(),
 		pendingCouncilRequirements: new Map(),
 		lastGateOutcome: null,
 		declaredCoderScope: null,
@@ -1976,6 +2011,9 @@ export function ensureAgentSession(
 		// v6.21 Per-task state machine migration safety
 		if (!session.taskWorkflowStates) {
 			session.taskWorkflowStates = new Map();
+		}
+		if (!session.taskWorkflowCache) {
+			session.taskWorkflowCache = new Map();
 		}
 		// PR 2 Stage B barrier migration safety
 		if (!session.stageBCompletion) {
@@ -2530,6 +2568,32 @@ function isValidTaskId(taskId: string | null | undefined): boolean {
 	return trimmed.length > 0;
 }
 
+function ensureTaskWorkflowCache(
+	session: AgentSessionState,
+): Map<string, TaskWorkflowCacheEntry> {
+	if (!session.taskWorkflowCache) {
+		session.taskWorkflowCache = new Map();
+	}
+	return session.taskWorkflowCache;
+}
+
+export function updateTaskWorkflowCache(
+	session: AgentSessionState,
+	taskId: string,
+	overrides: Partial<TaskWorkflowCacheEntry>,
+): void {
+	const cache = ensureTaskWorkflowCache(session);
+	const existing = cache.get(taskId);
+	cache.set(taskId, {
+		generation: overrides.generation ?? existing?.generation ?? 0,
+		retryCount: overrides.retryCount ?? existing?.retryCount ?? 0,
+		lastOutcome: overrides.lastOutcome ?? existing?.lastOutcome ?? 'none',
+		lastTransitionId:
+			overrides.lastTransitionId ?? existing?.lastTransitionId ?? null,
+		updatedAt: overrides.updatedAt ?? existing?.updatedAt ?? '',
+	});
+}
+
 /**
  * Advance a task's workflow state. Validates forward-only transitions.
  * Throws 'INVALID_TASK_STATE_TRANSITION: [taskId] [current] → [requested]' on illegal transition.
@@ -2563,10 +2627,14 @@ export function advanceTaskState(
 	}
 
 	const current = session.taskWorkflowStates.get(taskId) ?? 'idle';
-	const currentIndex = STATE_ORDER.indexOf(current);
-	const newIndex = STATE_ORDER.indexOf(newState);
+	const currentIndex = LINEAR_STATE_ORDER.indexOf(
+		current as (typeof LINEAR_STATE_ORDER)[number],
+	);
+	const newIndex = LINEAR_STATE_ORDER.indexOf(
+		newState as (typeof LINEAR_STATE_ORDER)[number],
+	);
 
-	if (newIndex <= currentIndex) {
+	if (newIndex === -1 || newIndex <= currentIndex) {
 		throw new Error(
 			`INVALID_TASK_STATE_TRANSITION: ${taskId} ${current} → ${newState}`,
 		);
@@ -2594,7 +2662,7 @@ export function advanceTaskState(
 			// here is more conservative still and forces a fresh council run.
 			(councilEntry.quorumSize ?? 0) >= effectiveMinimum;
 		const pastPreCheck =
-			currentIndex >= STATE_ORDER.indexOf('pre_check_passed');
+			currentIndex >= LINEAR_STATE_ORDER.indexOf('pre_check_passed');
 		if (!councilApproved || !pastPreCheck) {
 			throw new Error(
 				`INVALID_TASK_STATE_TRANSITION: ${taskId} cannot reach complete from ${current} — must pass through tests_run first (or have council APPROVE after pre_check)`,
@@ -2603,6 +2671,9 @@ export function advanceTaskState(
 	}
 
 	session.taskWorkflowStates.set(taskId, newState);
+	updateTaskWorkflowCache(session, taskId, {
+		updatedAt: new Date().toISOString(),
+	});
 	// Clear Stage B completion bits when a task reaches 'complete' so that
 	// any future retry/restart cycle starts the barrier fresh and does not
 	// fire prematurely from stale completion data.
@@ -2642,10 +2713,14 @@ export function canAdvanceTaskState(
 	if (!session || !(session.taskWorkflowStates instanceof Map)) return false;
 
 	const current = session.taskWorkflowStates.get(taskId) ?? 'idle';
-	const currentIndex = STATE_ORDER.indexOf(current);
-	const newIndex = STATE_ORDER.indexOf(newState);
+	const currentIndex = LINEAR_STATE_ORDER.indexOf(
+		current as (typeof LINEAR_STATE_ORDER)[number],
+	);
+	const newIndex = LINEAR_STATE_ORDER.indexOf(
+		newState as (typeof LINEAR_STATE_ORDER)[number],
+	);
 
-	if (newIndex <= currentIndex) return false;
+	if (newIndex === -1 || newIndex <= currentIndex) return false;
 
 	if (newState === 'complete' && current !== 'tests_run') {
 		const councilEntry = session.taskCouncilApproved?.get(taskId);
@@ -2656,7 +2731,7 @@ export function canAdvanceTaskState(
 			councilEntry?.verdict === 'APPROVE' &&
 			(councilEntry.quorumSize ?? 0) >= effectiveMinimum;
 		const pastPreCheck =
-			currentIndex >= STATE_ORDER.indexOf('pre_check_passed');
+			currentIndex >= LINEAR_STATE_ORDER.indexOf('pre_check_passed');
 		if (!councilApproved || !pastPreCheck) return false;
 	}
 
@@ -2664,67 +2739,28 @@ export function canAdvanceTaskState(
 }
 
 /**
- * Advance the per-task workflow state machine AND persist the corresponding
- * plan.json status at meaningful workflow boundaries.
- *
- * The two-layer model splits in-memory workflow state (Layer 1, fast, used by
- * gates) from the durable plan (Layer 2, projected to plan.md). Without this
- * bridge, council APPROVE → 'complete' updates Layer 1 only and plan.md goes
- * stale. This helper closes the gap by mapping:
- *   - 'coder_delegated' → plan.json status 'in_progress'
- *   - 'complete'        → plan.json status 'completed'
- * Other transitions are in-memory only (the task is already in_progress on disk
- * once coder_delegated has fired).
- *
- * Persistence errors are logged and swallowed so a transient disk failure does
- * not break the in-memory state machine — matches the existing defensive
- * pattern around advanceTaskState call sites.
+ * Legacy compatibility wrapper for diagnostic-only intermediate projections.
+ * Durable coder/terminal boundaries must use the exact-task evidence reducer
+ * and the plan→evidence transaction/WAL; this wrapper intentionally refuses
+ * those states so no caller can recreate the former split-brain writer.
  */
 export async function advanceTaskStateAndPersist(
 	session: AgentSessionState,
 	taskId: string,
 	newState: TaskWorkflowState,
-	directory: string,
+	_directory: string,
 	options?: {
 		telemetrySessionId?: string;
 		emitTelemetry?: boolean;
 	},
 	councilConfig?: { minimumMembers?: number; requireAllMembers?: boolean },
 ): Promise<void> {
-	// Preflight: refuse to re-dispatch a settled task (completed / closed /
-	// blocked) to coder_delegated. The centralized guard in updateTaskStatus
-	// already protects direct callers, but advanceTaskStateAndPersist is also
-	// called on session restart where the in-memory advance at :1415 would
-	// fire BEFORE the durable guard can refuse — leaving Layer 1 (session)
-	// ahead of Layer 2 (plan). This preflight closes that gap by checking
-	// the on-disk plan state first and skipping BOTH mutations when the
-	// task is settled.
-	if (newState === 'coder_delegated') {
-		const settled = await isTaskSettled(directory, taskId);
-		if (settled) {
-			logger.warn(
-				`[advanceTaskStateAndPersist] refusing to re-dispatch settled task ${taskId}; skipping in-memory advance + persist`,
-			);
-			return;
-		}
-	}
-
-	advanceTaskState(session, taskId, newState, options, councilConfig);
-
-	if (newState !== 'coder_delegated' && newState !== 'complete') {
-		return;
-	}
-
-	const planStatus: TaskStatus =
-		newState === 'complete' ? 'completed' : 'in_progress';
-
-	try {
-		await updateTaskStatus(directory, taskId, planStatus, { force: false });
-	} catch (err) {
-		logger.warn(
-			`[advanceTaskStateAndPersist] persist ${taskId} → ${planStatus} failed (in-memory state still advanced): ${err instanceof Error ? err.message : String(err)}`,
+	if (newState === 'coder_delegated' || newState === 'complete') {
+		throw new Error(
+			`TASK_WORKFLOW_CENTRAL_TRANSACTION_REQUIRED: ${taskId} → ${newState} must use exact-task durable transition APIs`,
 		);
 	}
+	advanceTaskState(session, taskId, newState, options, councilConfig);
 }
 
 /**
@@ -2882,16 +2918,18 @@ export function _resetCouncilDisagreementWarnings(): void {
 /**
  * Maps plan task status to task workflow state.
  * - 'pending' -> 'idle' (no work started yet)
- * - 'in_progress' -> 'coder_delegated' (work has started)
+ * - 'in_progress' -> 'idle' (plan intent alone is not mutation proof)
  * - 'completed' -> 'complete' (done)
- * - 'blocked' -> 'idle' (blocked tasks haven't progressed)
+ * - 'blocked' -> 'blocked' (durable terminal blocker)
  */
 function planStatusToWorkflowState(status: TaskStatus): TaskWorkflowState {
 	switch (status) {
 		case 'in_progress':
-			return 'coder_delegated';
+			return 'idle';
 		case 'completed':
 			return 'complete';
+		case 'blocked':
+			return 'blocked';
 		default:
 			return 'idle';
 	}
@@ -2899,36 +2937,29 @@ function planStatusToWorkflowState(status: TaskStatus): TaskWorkflowState {
 
 /**
  * Maps evidence gates to task workflow state.
- * Evidence provides stronger signal than plan-only status.
- * - 'coder' dispatched -> 'coder_delegated'
- * - 'reviewer' passed -> 'reviewer_run'
- * - 'test_engineer' passed -> 'tests_run'
- * - All required gates passed -> 'complete'
+ * Exact-task workflow metadata is authoritative when present.
+ * Legacy evidence written before the workflow schema marker is treated as
+ * non-authoritative and cannot by itself prove a passed gate.
  */
-function evidenceToWorkflowState(evidence: TaskEvidence): TaskWorkflowState {
-	const gates = evidence.gates ?? {};
-	const requiredGates = evidence.required_gates ?? [];
-
-	// Check if all required gates have evidence
-	if (requiredGates.length > 0) {
-		const allPassed = requiredGates.every((gate) => gates[gate] != null);
-		if (allPassed) {
-			return 'complete';
-		}
-	}
-
-	// Check the highest gate passed
-	if (gates.test_engineer != null) {
-		return 'tests_run';
-	}
-	if (gates.reviewer != null) {
-		return 'reviewer_run';
-	}
-	if (Object.keys(gates).length > 0) {
-		return 'coder_delegated';
-	}
-
-	return 'idle';
+function evidenceToWorkflowState(evidence: TaskEvidence): {
+	state: TaskWorkflowState;
+	generation: number;
+	authoritative: boolean;
+	retryCount: number;
+	lastOutcome: TaskWorkflowCacheEntry['lastOutcome'];
+	lastTransitionId: string | null;
+	updatedAt: string;
+} {
+	const snapshot = getTaskWorkflowSnapshot(evidence);
+	return {
+		state: snapshot.state,
+		generation: snapshot.generation,
+		authoritative: snapshot.authoritative,
+		retryCount: snapshot.retryCount,
+		lastOutcome: snapshot.lastOutcome,
+		lastTransitionId: snapshot.lastTransitionId,
+		updatedAt: snapshot.updatedAt,
+	};
 }
 
 /**
@@ -2976,17 +3007,8 @@ async function readGateEvidenceFromDisk(
 			try {
 				const filePath = path.join(evidenceDir, entry.name);
 				const content = await fs.readFile(filePath, 'utf-8');
-				const parsed = JSON.parse(content);
-
-				// Gate evidence schema validation: must have taskId and required_gates
-				// to match what recordGateEvidence writes ({ taskId, required_gates, gates })
-				if (
-					parsed &&
-					typeof parsed.taskId === 'string' &&
-					Array.isArray(parsed.required_gates)
-				) {
-					evidenceMap.set(taskId, parsed as TaskEvidence);
-				}
+				const parsed = parseTaskEvidence(content, taskId);
+				evidenceMap.set(taskId, parsed);
 			} catch {
 				// Skip malformed evidence files (non-fatal)
 			}
@@ -3053,6 +3075,9 @@ export function applyRehydrationCache(session: AgentSessionState): void {
 	if (!session.taskWorkflowStates) {
 		session.taskWorkflowStates = new Map();
 	}
+	if (!session.taskWorkflowCache) {
+		session.taskWorkflowCache = new Map();
+	}
 	if (!session.taskCouncilApproved) {
 		session.taskCouncilApproved = new Map();
 	}
@@ -3061,32 +3086,35 @@ export function applyRehydrationCache(session: AgentSessionState): void {
 
 	for (const [taskId, planState] of planTaskStates) {
 		const existingState = session.taskWorkflowStates.get(taskId);
+		const existingCache = ensureTaskWorkflowCache(session).get(taskId);
 		const evidence = evidenceMap.get(taskId);
 
 		if (evidence) {
-			// Evidence provides the strongest signal for completed gates.
-			// But evidence files lag behind in-memory state (evidence recording
-			// is async and only captures completed gates). Only upgrade state,
-			// never downgrade — same guard as the plan-only branch below.
-			const derivedState = evidenceToWorkflowState(evidence);
-			const existingIndex = existingState
-				? STATE_ORDER.indexOf(existingState)
-				: -1;
-			const derivedIndex = STATE_ORDER.indexOf(derivedState);
-			if (derivedIndex > existingIndex) {
-				session.taskWorkflowStates.set(taskId, derivedState);
+			const derivedWorkflow = evidenceToWorkflowState(evidence);
+			if (derivedWorkflow.authoritative) {
+				session.taskWorkflowStates.set(taskId, derivedWorkflow.state);
+				updateTaskWorkflowCache(session, taskId, {
+					generation: derivedWorkflow.generation,
+					retryCount: derivedWorkflow.retryCount,
+					lastOutcome: derivedWorkflow.lastOutcome,
+					lastTransitionId: derivedWorkflow.lastTransitionId,
+					updatedAt: derivedWorkflow.updatedAt,
+				});
+				continue;
 			}
-		} else {
-			// Plan-only: only advance past existing state, never downgrade.
-			// A snapshot state that is ahead of the plan is valid (e.g. gates passed
-			// after plan was last written), so keep it.
-			const existingIndex = existingState
-				? STATE_ORDER.indexOf(existingState)
-				: -1;
-			const derivedIndex = STATE_ORDER.indexOf(planState);
-			if (derivedIndex > existingIndex) {
-				session.taskWorkflowStates.set(taskId, planState);
-			}
+		}
+
+		// Plan-only: only advance past existing state, never downgrade a newer
+		// authoritative generation.
+		const existingGeneration = existingCache?.generation ?? 0;
+		if (existingGeneration > 0) {
+			continue;
+		}
+		const strongerPlanState =
+			existingState == null ||
+			compareWorkflowStatePrecedence(planState, existingState) > 0;
+		if (strongerPlanState) {
+			session.taskWorkflowStates.set(taskId, planState);
 		}
 	}
 
@@ -3098,17 +3126,28 @@ export function applyRehydrationCache(session: AgentSessionState): void {
 		'CONCERNS',
 	] as const);
 	for (const [taskId, evidence] of evidenceMap) {
-		// Skip if already in memory (in-memory wins over persisted evidence).
-		if (session.taskCouncilApproved.has(taskId)) {
-			continue;
-		}
 		// Cast to extended type — verdict/roundNumber/quorumSize are preserved via
 		// passthrough() but not in the base GateEvidence interface (which only has
 		// sessionId/timestamp/agent).
 		const council = evidence.gates?.council as
-			| { verdict?: string; roundNumber?: number; quorumSize?: number }
+			| {
+					verdict?: string;
+					roundNumber?: number;
+					quorumSize?: number;
+					workflowGeneration?: number;
+			  }
 			| undefined;
 		if (!council) {
+			session.taskCouncilApproved.delete(taskId);
+			continue;
+		}
+		const councilWorkflow = getTaskWorkflowSnapshot(evidence);
+		if (
+			!councilWorkflow.authoritative ||
+			council.workflowGeneration !== councilWorkflow.generation ||
+			councilWorkflow.state !== 'pre_check_passed'
+		) {
+			session.taskCouncilApproved.delete(taskId);
 			continue;
 		}
 		const rawVerdict = council.verdict;

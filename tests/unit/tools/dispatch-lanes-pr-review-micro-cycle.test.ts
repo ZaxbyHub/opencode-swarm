@@ -378,7 +378,7 @@ describe('PR-review trigger-evaluation and micro-dispatch cycle', () => {
 		expect(createdSessions).toBe(1);
 	});
 
-	test('uses an omitted-ledger retry artifact for final trigger provenance while rejecting the failed original', async () => {
+	test('uses an omitted-ledger retry artifact for final trigger provenance while disclosing the failed original', async () => {
 		await establishBaseCoverage();
 		const ledger = focusedRetryEvaluation();
 		await expect(
@@ -428,22 +428,11 @@ describe('PR-review trigger-evaluation and micro-dispatch cycle', () => {
 					: row,
 			);
 
-		const rejected = JSON.parse(
-			await executeWritePrReviewTriggerEval(
-				{
-					run_id: 'micro-retry-failed-original',
-					pr_head_sha: HEAD_SHA,
-					base_ref: 'origin/main',
-					base_sha: PR_REVIEW_BASE_SHA,
-					rows: rowsFrom('micro-retry-original', 'micro-retry-original-lane'),
-				},
-				tempDir,
-				{ sessionID: SESSION_ID },
-			),
-		);
-		expect(rejected.success).toBe(false);
-		expect(rejected.message).toMatch(/completed|provenance|artifact/i);
-
+		// Recoverability contract change: citing the FAILED original lane would
+		// now succeed-with-disclosure (provenance intact, degradation recorded on
+		// the receipt — pinned in write-pr-review-trigger-eval-degraded.test.ts);
+		// the healthy retry tuple remains the preferred final provenance and
+		// produces an un-degraded receipt.
 		const accepted = JSON.parse(
 			await executeWritePrReviewTriggerEval(
 				{
@@ -458,6 +447,7 @@ describe('PR-review trigger-evaluation and micro-dispatch cycle', () => {
 			),
 		);
 		expect(accepted.success).toBe(true);
+		expect(accepted.coverage_degradation_count).toBe(0);
 		const finalState = await readPrWorkflowGateState(tempDir, SESSION_ID);
 		expect(finalState?.prReviewTriggerEvalPath).toBe(accepted.path);
 	});

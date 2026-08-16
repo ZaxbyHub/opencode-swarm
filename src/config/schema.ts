@@ -1441,6 +1441,8 @@ export const KnowledgeConfigSchema = z.object({
 	low_utility_threshold: z.number().min(0).max(1).default(0.3),
 	/** Minimum retrieval events required before utility scoring is applied */
 	min_retrievals_for_utility: z.number().min(1).max(100).default(3),
+	/** Days to retain closed V2 receipt membership after phase closure. */
+	receipt_close_grace_days: z.number().int().min(0).max(3650).default(7),
 	/** Schema version for the knowledge store format */
 	schema_version: z.number().int().min(1).default(1),
 	/** v2: Confidence threshold above which a tool/agent match strongly boosts ranking. Default: 0.75 */

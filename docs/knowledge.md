@@ -25,7 +25,13 @@ When an architect receives a new message, entries from both stores are merged an
 ```
 .swarm/knowledge.jsonl            # active entries
 .swarm/knowledge-rejected.jsonl   # entries that failed validation
+.swarm/knowledge-receipts-v2.jsonl          # authoritative receipt journal
+.swarm/knowledge-receipts-v2.snapshot.json  # rebuildable live-state checkpoint
+.swarm/knowledge-receipts-v2-archive.jsonl  # closed receipt summaries
 ```
+
+The V2 receipt files are always anchored to this canonical project root. They
+never follow a knowledge link and never move to the hive or a cohort store.
 
 ### Hive (cross-project)
 
@@ -87,6 +93,7 @@ When linked, the following files are **redirected** to the shared store:
 The following remain **per-worktree** (not redirected):
 
 - `.knowledge-shown.json`
+- V2 receipt journal, snapshot, archive, and receipt lock
 - Plan (`.swarm/plan.json`, `.swarm/plan.md`)
 - Evidence (`.swarm/evidence/`)
 
@@ -254,6 +261,7 @@ All keys live under `knowledge.*` in your config (see `src/config/schema.ts:1043
 | `evergreen_utility` | float | 0.8 | Utility score for evergreen |
 | `low_utility_threshold` | float | 0.3 | Flag for removal at or below |
 | `min_retrievals_for_utility` | int | 3 | Retrievals before utility scoring |
+| `receipt_close_grace_days` | int | 7 | Days to retain resolved receipt membership after its phase closes (`0`-`3650`) |
 | `default_max_phases` | int | 10 | General TTL |
 | `todo_max_phases` | int | 3 | TODO-category TTL |
 | `same_project_weight` | float | 1.0 | Encounter score (source project) |
@@ -266,6 +274,15 @@ All keys live under `knowledge.*` in your config (see `src/config/schema.ts:1043
 ## Migration
 
 `/swarm knowledge migrate` imports from legacy `.swarm/context.md` into `.swarm/knowledge.jsonl`. Idempotent — a sentinel file `.swarm/.knowledge-migrated` prevents re-runs.
+
+Receipt migration is separate and automatic. The first receipt-ledger operation
+performs a lazy, lock-protected cutover; plugin initialization does no migration
+I/O. Only complete, still-live retrievals from this project's local legacy event
+file are imported. Missing, evicted, linked, malformed, or partial legacy state
+is recorded as typed `legacy_unverifiable` uncertainty and is never reconstructed
+from counters or inferred from cohort data. V2 is read first throughout cutover,
+and legacy access is restricted to the explicit imported pre-cutover trace set
+until that set drains to zero.
 
 Legacy sections mapped into the new schema:
 
@@ -415,7 +432,9 @@ and within a turn (e.g., after message compaction).
 
 ## Knowledge application contract (v2)
 
-The Architect now receives a structured directive block:
+The Architect now receives a structured directive block. Its receipt metadata
+also carries the originating retrieval trace so acknowledgments join the exact
+`(trace_id, entry_id)` pair rather than an entry ID from another display:
 
 ```
 <swarm_knowledge_directives>
@@ -450,17 +469,59 @@ satisfies the knowledge-application enforcement gate. The `knowledge_receipt` to
 audit — including applied/ignored/contradicted outcomes and new-lesson persistence
 — but does NOT satisfy the enforcement gate.
 
-### Audit log
+### Receipt authority and diagnostic log
 
-Every outcome is appended as a JSONL line to:
+Correctness-critical receipt state is committed to the canonical project's V2
+journal before a directive is displayed or a terminal is accepted:
+
+```
+.swarm/knowledge-receipts-v2.jsonl
+```
+
+Only the exact final displayed set becomes retrieval membership; candidates
+removed by ranking, filtering, or caps create no obligation. If optional
+injection membership cannot be committed, the block is not displayed. Terminal
+validation and commit are one cross-process-locked transition, so duplicate,
+late, and reordered outcomes are idempotent or explicitly rejected. Best-effort
+legacy, counter, promotion, and observability writes occur only after the
+correctness lock is released.
+
+The journal never evicts live membership because of an event-count cap. Its
+2,000-record threshold triggers a self-contained checkpoint rewrite; it is not
+a retention limit. Resolved state remains protected until its phase is durably closed and
+`knowledge.receipt_close_grace_days` has elapsed. Eligible closed summaries move
+to the separate project-local receipt archive; a bounded audit tail and a
+rebuildable snapshot do not share the diagnostic event budget.
+
+#### Receipt-ledger recovery
+
+An unterminated final journal line is treated as a crash tail: the plugin first
+preserves it in a quarantine file, then rewrites the last valid hash-chained
+prefix. Interior corruption, a hash mismatch, an unsupported schema, an
+unwritable quarantine, or a full disk intentionally fails receipt gates closed;
+the plugin does not guess which later authority is safe to discard.
+
+Before recovery, back up all project-local
+`.swarm/knowledge-receipts-v2*.jsonl` files. Do not hand-edit or truncate the
+authoritative journal. Free disk space when writes fail, then retry. For interior
+corruption, restore the journal and archive from a trusted project-local backup
+or reopen them with a plugin version that supports their schema. The snapshot is
+explicitly rebuildable and is never a substitute for the journal or archive.
+
+Operational knowledge observations continue to be appended to:
 
 ```
 .swarm/knowledge-events.jsonl
 ```
 
-with `{timestamp, phase, taskId, action, tool, targetAgent, knowledgeId,
-result: "shown"|"acknowledged"|"applied"|"ignored"|"violated", reason,
-generatedSkillPath, sessionId}`.
+This FIFO is diagnostics only. Churn or eviction in it cannot change receipt
+validation, application/phase gates, promotion evidence, escalation, or
+curation decisions. Linked stores may still redirect this diagnostic stream,
+but can never redirect or satisfy project-local V2 receipt authority.
+
+Issue #2032 owns normalization of outcome and source meanings. V2 preserves
+the producer's current typed value and records `unknown` when the producer has
+no stronger source; it does not reinterpret those semantics.
 
 ### Enforcement modes
 

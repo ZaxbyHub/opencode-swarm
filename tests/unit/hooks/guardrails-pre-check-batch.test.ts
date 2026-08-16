@@ -55,7 +55,7 @@ describe('guardrails - pre_check_batch state transition (v6.22 Task 2.1)', () =>
 	});
 
 	describe('toolAfter - pre_check_batch advances state to pre_check_passed', () => {
-		it('pre_check_batch with gates_passed: true advances state to pre_check_passed', async () => {
+		it('uncorrelated gates_passed receipt cannot advance exact task state', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(config);
 			const sessionId = 'test-session';
@@ -75,7 +75,7 @@ describe('guardrails - pre_check_batch state transition (v6.22 Task 2.1)', () =>
 			);
 
 			const newState = session!.taskWorkflowStates.get(taskId);
-			expect(newState).toBe('pre_check_passed');
+			expect(newState).toBe('coder_delegated');
 		});
 
 		it('pre_check_batch with gates_passed: false does NOT advance state', async () => {
@@ -209,7 +209,7 @@ describe('guardrails - pre_check_batch state transition (v6.22 Task 2.1)', () =>
 			expect(newState).toBe('coder_delegated');
 		});
 
-		it('pre_check_batch advances state when task already has initial idle state', async () => {
+		it('uncorrelated pre_check_batch cannot manufacture an initial workflow state', async () => {
 			const config = defaultConfig();
 			const hooks = createGuardrailsHooks(config);
 			const sessionId = 'test-session';
@@ -231,9 +231,9 @@ describe('guardrails - pre_check_batch state transition (v6.22 Task 2.1)', () =>
 				makeAfterOutput(outputJson),
 			);
 
-			// Verify state advanced to pre_check_passed (from idle)
+			// No exact coder generation exists, so the receipt remains inert.
 			const newState = session!.taskWorkflowStates.get(taskId);
-			expect(newState).toBe('pre_check_passed');
+			expect(newState).toBeUndefined();
 		});
 
 		it('pre_check_batch does NOT advance state when already at pre_check_passed', async () => {

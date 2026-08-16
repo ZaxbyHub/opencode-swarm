@@ -25,8 +25,10 @@ import {
 	withTaskEvidenceLock,
 } from '../../../src/evidence/task-file';
 import { recordGateEvidence } from '../../../src/gate-evidence';
+import { seedStageAPassed } from '../../helpers/task-workflow-evidence';
 
 let tempDir: string;
+let generation: number;
 
 const makeSynthesis = (
 	overrides: Partial<CouncilSynthesis> = {},
@@ -48,8 +50,9 @@ const makeSynthesis = (
 	...overrides,
 });
 
-beforeEach(() => {
+beforeEach(async () => {
 	tempDir = mkdtempSync(join(tmpdir(), 'council-concurrency-'));
+	generation = await seedStageAPassed(tempDir, '1.1');
 });
 
 afterEach(() => {
@@ -67,11 +70,14 @@ describe('council evidence writer — regression: serializes via shared evidence
 		await withTaskEvidenceLock(tempDir, '1.1', 'holder', async () => {
 			// Start the council write while we still hold the lock. Do NOT await it
 			// here — capture the promise so we can await it after releasing.
-			councilPromise = writeCouncilEvidence(tempDir, makeSynthesis()).then(
-				() => {
-					order.push('council-wrote');
-				},
-			);
+			councilPromise = writeCouncilEvidence(
+				tempDir,
+				makeSynthesis(),
+				undefined,
+				generation,
+			).then(() => {
+				order.push('council-wrote');
+			});
 			// Give the council write a window to run if it (incorrectly) bypassed
 			// the lock. A broken writer would push 'council-wrote' before this line.
 			await Bun.sleep(50);
@@ -87,17 +93,28 @@ describe('council evidence writer — regression: serializes via shared evidence
 	test('council write preserves gate entries recorded by the hook path', async () => {
 		// Seed the shared {taskId}.json with gate evidence via the locked+atomic
 		// gate path, then write council evidence. All entries must coexist — the
-		// council write must not clobber the reviewer/test_engineer gates.
-		await recordGateEvidence(tempDir, '1.1', 'reviewer', 'sess-1');
-		await recordGateEvidence(tempDir, '1.1', 'test_engineer', 'sess-1');
+		// council write must not clobber non-settling gate receipts.
+		await recordGateEvidence(
+			tempDir,
+			'1.1',
+			'critic_sounding_board',
+			'sess-1',
+			false,
+			{
+				expectedGeneration: generation,
+			},
+		);
+		await recordGateEvidence(tempDir, '1.1', 'docs', 'sess-1', false, {
+			expectedGeneration: generation,
+		});
 
-		await writeCouncilEvidence(tempDir, makeSynthesis());
+		await writeCouncilEvidence(tempDir, makeSynthesis(), undefined, generation);
 
 		const evidence = JSON.parse(
 			readFileSync(taskEvidencePath(tempDir, '1.1'), 'utf-8'),
 		);
-		expect(evidence.gates.reviewer).toBeDefined();
-		expect(evidence.gates.test_engineer).toBeDefined();
+		expect(evidence.gates.critic_sounding_board).toBeDefined();
+		expect(evidence.gates.docs).toBeDefined();
 		expect(evidence.gates.council).toBeDefined();
 		expect(evidence.gates.council.verdict).toBe('APPROVE');
 		// required_gates set by the gate path must survive the council write.
@@ -109,8 +126,10 @@ describe('council evidence writer — regression: serializes via shared evidence
 	test('gate write after council preserves the council entry', async () => {
 		// Reverse order: council first, then a gate write. The gate path's
 		// read-modify-write must preserve the council entry.
-		await writeCouncilEvidence(tempDir, makeSynthesis());
-		await recordGateEvidence(tempDir, '1.1', 'reviewer', 'sess-1');
+		await writeCouncilEvidence(tempDir, makeSynthesis(), undefined, generation);
+		await recordGateEvidence(tempDir, '1.1', 'reviewer', 'sess-1', false, {
+			expectedGeneration: generation,
+		});
 
 		const evidence = JSON.parse(
 			readFileSync(taskEvidencePath(tempDir, '1.1'), 'utf-8'),
@@ -125,14 +144,21 @@ describe('council evidence writer — regression: serializes via shared evidence
 		// All entries must survive in the final file regardless of which writer wins
 		// the lock race.
 		await Promise.all([
-			recordGateEvidence(tempDir, '1.1', 'reviewer', 'sess-concurrent'),
-			writeCouncilEvidence(tempDir, makeSynthesis()),
+			recordGateEvidence(
+				tempDir,
+				'1.1',
+				'critic_sounding_board',
+				'sess-concurrent',
+				false,
+				{ expectedGeneration: generation },
+			),
+			writeCouncilEvidence(tempDir, makeSynthesis(), undefined, generation),
 		]);
 
 		const evidence = JSON.parse(
 			readFileSync(taskEvidencePath(tempDir, '1.1'), 'utf-8'),
 		);
-		expect(evidence.gates.reviewer).toBeDefined();
+		expect(evidence.gates.critic_sounding_board).toBeDefined();
 		expect(evidence.gates.council).toBeDefined();
 		expect(evidence.gates.council.verdict).toBe('APPROVE');
 	});

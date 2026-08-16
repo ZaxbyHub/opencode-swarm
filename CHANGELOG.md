@@ -1,5 +1,35 @@
 # Changelog
 
+## [7.140.6](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.140.5...v7.140.6) (2026-08-15)
+
+
+### Bug Fixes
+
+* **pr-review:** repair benign lane-output shape defects and record degraded coverage instead of aborting ([4778eec](https://github.com/ZaxbyHub/opencode-swarm/commit/4778eec92595c95da090666eed65fdf4324d9e13))
+
+## [7.140.5](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.140.4...v7.140.5) (2026-08-15)
+
+
+### Bug Fixes
+
+* **workflow:** harden task-repair audit trail against review feedback ([f6623d6](https://github.com/ZaxbyHub/opencode-swarm/commit/f6623d62de9e8c59731c928814781a2a892d6dff))
+* **workflow:** make task transitions transactional and recoverable ([54a3a63](https://github.com/ZaxbyHub/opencode-swarm/commit/54a3a6380cab2d3c2a142676b6ecbdea465a1556))
+
+## [7.140.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.140.3...v7.140.4) (2026-08-15)
+
+
+### Bug Fixes
+
+* **#2131:** sdd-mutations test fixture — use full openspec structure ([fd9053d](https://github.com/ZaxbyHub/opencode-swarm/commit/fd9053dae657be5647f9910c96c4c3e11433d3f6))
+* **#2131:** update progressive-disclosure ratchet baselines ([69b3c63](https://github.com/ZaxbyHub/opencode-swarm/commit/69b3c6358c84811224c9873c41c7f6e45c487d75))
+* **#2131:** use realpathSync.native + case-insensitive paths on Windows ([c16d2b2](https://github.com/ZaxbyHub/opencode-swarm/commit/c16d2b22184f494a3fdef8dde5ce0bbe4c9a3d9b))
+* **knowledge:** make receipt state authoritative ([7b4d6f4](https://github.com/ZaxbyHub/opencode-swarm/commit/7b4d6f4fef1dc91cb27ecfc8742b51f8e48ea803))
+* **skills:** close deferred [#2131](https://github.com/ZaxbyHub/opencode-swarm/issues/2131) hardening (C, D, E, F, G-drift + residual B) ([defc922](https://github.com/ZaxbyHub/opencode-swarm/commit/defc9223255c666b7f379b86085ccf83495c6459))
+* **test:** avoid bare tmpdir() in afterEach reset (FR-011 gate) ([190e280](https://github.com/ZaxbyHub/opencode-swarm/commit/190e2806ca956bf76345790fb20bb66adba1baa0))
+* **test:** case-insensitive path comparison in junction test ([b0bb46d](https://github.com/ZaxbyHub/opencode-swarm/commit/b0bb46daa0b826fe1ea4159f9a1ce32103f11a7a))
+* **test:** remove double .native deref in cleanup test mock ([a381605](https://github.com/ZaxbyHub/opencode-swarm/commit/a381605b3fcb279a98fc793baef94ca338e8324e))
+* **test:** use realpathSync.native in junction test for Windows 8.3 ([7a1f7ea](https://github.com/ZaxbyHub/opencode-swarm/commit/7a1f7ea7ccd7490bb1387eda9de45ff0ae9a9e43))
+
 ## [7.140.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.140.2...v7.140.3) (2026-08-15)
 
 

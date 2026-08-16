@@ -12,6 +12,7 @@ import type {
 	BackgroundCoderReservation,
 	BackgroundDelegationRecord,
 	BackgroundTaskChangeContext,
+	BackgroundWorktreeDescriptor,
 	RecordPendingInput,
 } from '../background/pending-delegations.js';
 import {
@@ -28,10 +29,9 @@ import {
 	getProfileForIdentity,
 	type QaGates,
 } from '../db/qa-gate-profile.js';
-import {
-	isMarkdownOnlyDeclaredScope,
-	isMarkdownOnlyTaskChange,
-} from '../gate-evidence-classification.js';
+import { isReadOnlyTool } from '../full-auto/policy';
+import { isMarkdownOnlyTaskChange } from '../gate-evidence-classification.js';
+import { tryAcquireLock } from '../parallel/file-locks.js';
 import {
 	routeReviewForChanges,
 	shouldParallelizeReview,
@@ -42,9 +42,13 @@ import {
 	takeSnapshotEvent,
 } from '../plan/ledger';
 import { loadPlanJsonOnly, savePlan } from '../plan/manager';
-import { computeParallelVerdict } from '../plan/parallel-verdict';
+import {
+	computeParallelVerdict,
+	isProvablyDisjoint,
+} from '../plan/parallel-verdict';
 import { derivePlanId } from '../plan/utils.js';
 import { resetPrmSessionState } from '../prm/index.js';
+import { isPathWithinDeclaredScope } from '../scope/path-identity';
 import {
 	canonicalWorkspaceIdentity,
 	clearExactScopeBinding,
@@ -67,7 +71,6 @@ import { formatScopeResolutionDiagnostic } from '../scope/scope-resolution-diagn
 import type { AgentSessionState } from '../state';
 import {
 	advanceTaskState,
-	advanceTaskStateAndPersist,
 	ensureAgentSession,
 	getModifiedFilesForTask,
 	getTaskState,
@@ -77,6 +80,7 @@ import {
 	isCouncilGateActive,
 	recordStageBCompletion,
 	swarmState,
+	updateTaskWorkflowCache,
 } from '../state';
 import { telemetry } from '../telemetry.js';
 import type {
@@ -85,6 +89,16 @@ import type {
 } from '../types/delegation.js';
 import * as logger from '../utils/logger';
 import { isStrictTaskId } from '../validation/task-id';
+import {
+	beginCoderSettlement,
+	completeCoderSettlementCleanup,
+	recordCoderMergeProvenance,
+	recoverCoderSettlement,
+	releaseCoderDispatchOwnership,
+	settleCoderDispatch,
+} from '../workflow/coder-settlement.js';
+import { recoverPreparedTaskRepair } from '../workflow/task-repair.js';
+import { recoverPreparedTaskTerminal } from '../workflow/task-terminal.js';
 import {
 	awaitingMergeByCallID,
 	checkStandardWorktreeSerializationRelease,
@@ -100,12 +114,6 @@ import {
 import { consumePrFeedbackScopeDeclaration } from './pr-workflow-gate.js';
 export { resetStandardWorktreeIsolationState };
 
-import { COUNCIL_VERDICT_REWARDS } from '../memory/config';
-import { createConfiguredMemoryProvider } from '../memory/gateway';
-import {
-	applyCouncilReward,
-	truncateObjectForJson,
-} from '../memory/reward-capture';
 import { pushAdvisory } from '../utils/advisory-queue';
 import { _internals as _wtiInternals } from './delegation-gate/worktree-isolation';
 import {
@@ -1356,25 +1364,50 @@ async function assertPlanCriticApprovedForExecution(
  * persisted `false` is honored, while session overrides can only ratchet it
  * back to `true` through `getEffectiveGates`.
  */
-function isPlanCriticRequiredForExecution(
+export interface PlanCriticPolicyDecision {
+	required: boolean;
+	source:
+		| 'persisted_profile'
+		| 'session_ratchet'
+		| 'default_missing_profile'
+		| 'corrupt_profile_conservative';
+}
+
+export function resolvePlanCriticPolicyForExecution(
 	directory: string,
 	plan: Plan,
 	sessionOverrides: Partial<QaGates> = {},
-): boolean {
+): PlanCriticPolicyDecision {
 	try {
 		const profile = getProfileForIdentity(directory, {
 			swarm: plan.swarm,
 			title: plan.title,
 		});
-		if (!profile) return DEFAULT_QA_GATES.critic_pre_plan;
-		return getEffectiveGates(profile, sessionOverrides).critic_pre_plan;
+		if (!profile) {
+			return {
+				required: DEFAULT_QA_GATES.critic_pre_plan,
+				source: 'default_missing_profile',
+			};
+		}
+		const required = getEffectiveGates(
+			profile,
+			sessionOverrides,
+		).critic_pre_plan;
+		return {
+			required,
+			source:
+				sessionOverrides.critic_pre_plan === true &&
+				profile.gates.critic_pre_plan === false
+					? 'session_ratchet'
+					: 'persisted_profile',
+		};
 	} catch (error) {
 		logger.warn(
 			`[delegation-gate] failed to resolve critic_pre_plan profile; enforcing the gate: ${
 				error instanceof Error ? error.message : String(error)
 			}`,
 		);
-		return true;
+		return { required: true, source: 'corrupt_profile_conservative' };
 	}
 }
 
@@ -1571,14 +1604,6 @@ export async function forceRecordPlanCriticApproval(
 	};
 }
 
-/**
- * Returns the task ID to use when seeding cross-session state, derived from
- * the originating session's currentTaskId or lastCoderDelegationTaskId.
- */
-function getSeedTaskId(session: AgentSessionState): string | null {
-	return session.currentTaskId ?? session.lastCoderDelegationTaskId;
-}
-
 const ACTIVE_PARALLEL_TASK_STATES = new Set([
 	'coder_delegated',
 	'pre_check_passed',
@@ -1589,14 +1614,6 @@ const ACTIVE_PARALLEL_TASK_STATES = new Set([
 function isTaskCompletedForParallelGuidance(task: Task): boolean {
 	const status = task.status ?? 'pending';
 	return status === 'completed' || status === 'closed';
-}
-
-function getPlanTaskStatus(plan: Plan, taskId: string): string | null {
-	for (const phase of plan.phases) {
-		const task = phase.tasks.find((candidate) => candidate.id === taskId);
-		if (task) return task.status ?? 'pending';
-	}
-	return null;
 }
 
 function getPlanTaskDeclaredFiles(
@@ -1740,6 +1757,16 @@ function describeCoderScopeFailure(
 	return `no plan task id could be resolved. Include a TASK: <N.M> line or plan-task-shaped task_id arg. Explicit task_id field: ${explicitFieldShape}. TASK: line detected: ${taskLineDetected ? 'yes' : 'no'}. Known plan task ids: ${known}.`;
 }
 
+function stripSingleTrailingAnnotationSuffix(value: string): string | null {
+	const suffixMatch = value.match(/(?:\s+\([^()]*\))+$/);
+	if (!suffixMatch) return value;
+	const suffix = suffixMatch[0];
+	const annotationGroups = suffix.match(/\([^()]*\)/g) ?? [];
+	if (annotationGroups.length !== 1) return null;
+	const normalized = value.slice(0, -suffix.length).trimEnd();
+	return normalized || null;
+}
+
 function normalizeFileDirectiveValue(rawValue: string): string | null {
 	const value = rawValue.trim();
 	if (!value) return null;
@@ -1753,22 +1780,26 @@ function normalizeFileDirectiveValue(rawValue: string): string | null {
 		if (!filePath) return null;
 
 		const suffix = value.slice(closingQuoteIndex + 1);
-		if (suffix.length > 0 && !/^\s+\([^()]*\)\s*$/.test(suffix)) {
-			return null;
-		}
+		if (suffix.length > 0 && !/^\s+\([^()]*\)\s*$/.test(suffix)) return null;
 		return filePath;
 	}
 
-	// A parenthetical is commentary only when it is a balanced, non-nested,
-	// whitespace-separated terminal suffix. Internal, nested, and unbalanced
-	// parentheses remain part of the path so downstream scope validation fails
-	// closed instead of silently changing the declared target.
-	const normalized = value.replace(/\s+\([^()]*\)\s*$/, '').trimEnd();
+	// A parenthetical is commentary only when it is a single balanced,
+	// non-nested, whitespace-separated terminal suffix. Internal parentheses and
+	// nested/unbalanced trailing forms are preserved as literal path text here;
+	// downstream scope validation still rejects those malformed targets fail
+	// closed instead of silently changing the declared file.
+	const normalized = stripSingleTrailingAnnotationSuffix(value);
 	if (!normalized || /[,;|]/.test(normalized)) return null;
 	return normalized;
 }
 
-function extractTaskFileDirectives(args: Record<string, unknown>): {
+type FileDirectiveExtractionMode = 'enforce' | 'observe';
+
+function extractTaskFileDirectives(
+	args: Record<string, unknown>,
+	mode?: FileDirectiveExtractionMode,
+): {
 	present: boolean;
 	files: string[] | null;
 } {
@@ -1782,7 +1813,10 @@ function extractTaskFileDirectives(args: Record<string, unknown>): {
 			const value = normalizeFileDirectiveValue(
 				line.replace(/^\s*FILE\s*:\s*/i, ''),
 			);
-			if (!value) return { present: true, files: null };
+			if (!value) {
+				if (mode === 'observe') continue;
+				return { present: true, files: null };
+			}
 			files.add(value);
 		}
 	}
@@ -1844,7 +1878,6 @@ export function parsePerTaskVerdicts(outputText: string): Map<string, string> {
  */
 async function findTaskAwaitingCompletion(
 	directory: string | undefined,
-	session: AgentSessionState,
 	requestedTaskId?: string | null,
 ): Promise<string | null> {
 	if (!directory) return null;
@@ -1857,13 +1890,38 @@ async function findTaskAwaitingCompletion(
 	}
 	if (!plan) return null;
 
-	for (const [taskId, state] of session.taskWorkflowStates) {
-		if (state !== 'tests_run') continue;
-		if (requestedTaskId && requestedTaskId === taskId) continue;
+	const { getTaskWorkflowSnapshot, readTaskEvidence } = await import(
+		'../gate-evidence'
+	);
+	const tasks = plan.phases.flatMap((phase) => phase.tasks);
+	const orderedTasks = requestedTaskId
+		? [
+				...tasks.filter((task) => task.id === requestedTaskId),
+				...tasks.filter((task) => task.id !== requestedTaskId),
+			]
+		: tasks;
+	for (const task of orderedTasks) {
+		const taskId = task.id;
+		const evidence = await readTaskEvidence(directory, taskId);
+		const workflow = getTaskWorkflowSnapshot(evidence);
+		const councilEvidence = evidence?.gates.council as
+			| (Record<string, unknown> & { verdict?: string })
+			| undefined;
+		const awaitsQaCompletion =
+			workflow.authoritative && workflow.state === 'tests_run';
+		const awaitsCouncilCompletion =
+			workflow.authoritative &&
+			workflow.state === 'pre_check_passed' &&
+			councilEvidence?.verdict === 'APPROVE';
+		if (!awaitsQaCompletion && !awaitsCouncilCompletion) continue;
 
-		const planStatus = getPlanTaskStatus(plan, taskId);
-		if (!planStatus) continue;
-		if (planStatus === 'completed' || planStatus === 'closed') continue;
+		const planStatus = task.status ?? 'pending';
+		if (
+			planStatus === 'completed' ||
+			planStatus === 'closed' ||
+			planStatus === 'blocked'
+		)
+			continue;
 
 		return taskId;
 	}
@@ -1876,8 +1934,219 @@ function completionGateViolationMessage(
 ): string {
 	return (
 		`TASK_COMPLETION_GATE_VIOLATION: Task ${taskAwaitingCompletion} reached tests_run but is not marked completed in plan.json/plan.md. ` +
-		`Call update_task_status with task_id="${taskAwaitingCompletion}" and status="completed" before starting another task.`
+		`Call update_task_status with task_id="${taskAwaitingCompletion}" and status="completed". ` +
+		'Read-only inspection remains available; a proven-disjoint task may continue; if plan.json is ledger-stale, retry save_plan with reconcile_ledger_projection=true and otherwise-unchanged plan content.'
 	);
+}
+
+type CoderRetryEscalationAction =
+	| 'sounding_board_consultation'
+	| 'simplification'
+	| 'user_escalation';
+
+function readCoderRetryEscalations(
+	directory: string,
+	taskId: string,
+	retryEpoch: number,
+): Set<CoderRetryEscalationAction> {
+	const actions = new Set<CoderRetryEscalationAction>();
+	try {
+		const raw = fs.readFileSync(
+			validateSwarmPath(directory, 'events.jsonl'),
+			'utf-8',
+		);
+		for (const line of raw.split('\n')) {
+			if (!line.trim()) continue;
+			try {
+				const event = JSON.parse(line) as Record<string, unknown>;
+				if (
+					event.type === 'coder_retry_circuit_breaker' &&
+					event.taskId === taskId &&
+					event.retryEpoch === retryEpoch &&
+					(event.action === 'sounding_board_consultation' ||
+						event.action === 'simplification' ||
+						event.action === 'user_escalation')
+				) {
+					actions.add(event.action);
+				}
+			} catch {
+				// A malformed unrelated audit line does not erase exact workflow state.
+			}
+		}
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+	}
+	return actions;
+}
+
+async function emitCoderRetryEscalation(
+	directory: string,
+	input: {
+		taskId: string;
+		generation: number;
+		retryEpoch: number;
+		rejectionCount: number;
+		rejectionHistory: string[];
+		action: CoderRetryEscalationAction;
+	},
+): Promise<void> {
+	const eventsPath = validateSwarmPath(directory, 'events.jsonl');
+	const lock = await tryAcquireLock(
+		directory,
+		'events.jsonl',
+		'workflow-retry-escalation',
+		`coder-retry:${input.taskId}:${input.generation}:${input.action}`,
+	);
+	if (!lock.acquired) {
+		throw new Error('TASK_RETRY_AUDIT_LOCKED');
+	}
+	try {
+		const prior = readCoderRetryEscalations(
+			directory,
+			input.taskId,
+			input.retryEpoch,
+		);
+		if (prior.has(input.action)) return;
+		await fs.promises.mkdir(path.dirname(eventsPath), { recursive: true });
+		await fs.promises.appendFile(
+			eventsPath,
+			`${JSON.stringify({
+				type: 'coder_retry_circuit_breaker',
+				timestamp: new Date().toISOString(),
+				taskId: input.taskId,
+				generation: input.generation,
+				retryEpoch: input.retryEpoch,
+				rejectionCount: input.rejectionCount,
+				rejectionHistory: input.rejectionHistory,
+				phase: Number(input.taskId.split('.')[0]) || 0,
+				action: input.action,
+			})}\n`,
+			'utf-8',
+		);
+	} finally {
+		if (lock.lock._release) await lock.lock._release().catch(() => {});
+	}
+}
+
+async function enforceCoderRetryEscalation(input: {
+	directory: string;
+	taskId: string;
+	generation: number;
+	retryEpoch: number;
+	retryCount: number;
+	retryHistory: string[];
+	criticSatisfied: boolean;
+}): Promise<void> {
+	if (input.retryCount < 3) return;
+	const prior = readCoderRetryEscalations(
+		input.directory,
+		input.taskId,
+		input.retryEpoch,
+	);
+	if (!prior.has('sounding_board_consultation')) {
+		await emitCoderRetryEscalation(input.directory, {
+			...input,
+			rejectionCount: input.retryCount,
+			rejectionHistory: input.retryHistory,
+			action: 'sounding_board_consultation',
+		});
+		throw new Error(
+			`TASK_RETRY_CRITIC_REQUIRED: task ${input.taskId} reached the bounded retry threshold. Dispatch critic_sounding_board for this exact task before another coder attempt.`,
+		);
+	}
+	if (prior.has('simplification')) {
+		await emitCoderRetryEscalation(input.directory, {
+			...input,
+			rejectionCount: input.retryCount,
+			rejectionHistory: input.retryHistory,
+			action: 'user_escalation',
+		});
+		throw new Error(
+			`TASK_RETRY_USER_ESCALATION_REQUIRED: task ${input.taskId} failed its critic-guided simplified retry. Stop and ask the user to change scope, authorize repair, or choose a different approach.`,
+		);
+	}
+	if (!input.criticSatisfied) {
+		throw new Error(
+			`TASK_RETRY_CRITIC_REQUIRED: task ${input.taskId} is waiting for an exact-generation critic_sounding_board APPROVED verdict.`,
+		);
+	}
+	await emitCoderRetryEscalation(input.directory, {
+		...input,
+		rejectionCount: input.retryCount,
+		rejectionHistory: input.retryHistory,
+		action: 'simplification',
+	});
+	// One exact-generation coder retry is admitted after durable critic proof.
+	// Accepted mutation rotates the generation while retryEpoch preserves the
+	// circuit; any later failure progresses directly to user escalation.
+}
+
+const COMPLETION_RECOVERY_TOOLS = new Set([
+	'get_approved_plan',
+	'get_qa_gate_profile',
+	'check_gate_status',
+]);
+
+const TASK_GATE_AGENTS = new Set([
+	'reviewer',
+	'test_engineer',
+	'docs',
+	'designer',
+	'critic',
+	'critic_sounding_board',
+	'critic_drift_verifier',
+	'critic_hallucination_verifier',
+	'critic_architecture_supervisor',
+	'explorer',
+	'sme',
+]);
+
+export function canRunWhileTaskAwaitsCompletion(input: {
+	directory: string | undefined;
+	normalizedTool: string;
+	args: Record<string, unknown>;
+	awaitingTaskId: string;
+	requestedTaskId: string | null;
+}): boolean {
+	const normalizedTool = input.normalizedTool.toLowerCase();
+	if (isReadOnlyTool(normalizedTool)) return true;
+	if (COMPLETION_RECOVERY_TOOLS.has(normalizedTool)) return true;
+	if (
+		normalizedTool === 'spec_write' &&
+		input.directory &&
+		fs.existsSync(path.join(input.directory, '.swarm', 'spec-staleness.json'))
+	) {
+		return true;
+	}
+
+	if (
+		normalizedTool === 'save_plan' &&
+		input.args.reconcile_ledger_projection === true
+	) {
+		// save_plan performs the authoritative under-lock equality/tail check.
+		return true;
+	}
+
+	if (
+		normalizedTool === 'update_task_status' &&
+		input.requestedTaskId === input.awaitingTaskId
+	) {
+		return true;
+	}
+
+	if (
+		input.directory &&
+		input.requestedTaskId &&
+		input.requestedTaskId !== input.awaitingTaskId &&
+		isProvablyDisjoint(input.directory, [
+			input.awaitingTaskId,
+			input.requestedTaskId,
+		])
+	) {
+		return true;
+	}
+
+	return false;
 }
 
 async function buildParallelExecutionGuidance(
@@ -2401,6 +2670,11 @@ export function createDelegationGateHook(
 		BackgroundCoderReservation
 	>();
 	const coderObservedFilesByCallID = new Map<string, string[] | null>();
+	const stageBDispatchGenerationsByCallID = new Map<
+		string,
+		Map<string, number>
+	>();
+	const gateDispatchPrimaryTaskByCallID = new Map<string, string | null>();
 	const publishedScopeBindingsByCallID = new Map<
 		string,
 		Array<{ directory: string; binding: PreparedCoderScope['binding'] }>
@@ -2541,25 +2815,24 @@ export function createDelegationGateHook(
 				publishedScopeBindingsByCallID.set(callID, remaining);
 		}
 	};
-	const clearPublishedScopeBindingsForTask = (
-		taskId: string,
-		parentSessionId: string,
-	): void => {
-		for (const [callID, entries] of publishedScopeBindingsByCallID) {
-			if (
-				entries.some(
-					(entry) =>
-						entry.binding.taskId === taskId &&
-						(entry.binding.ownerSessionId === parentSessionId ||
-							entry.binding.parentOwnerSessionId === parentSessionId),
-				)
-			)
-				clearPublishedScopeBindings(callID);
-		}
-	};
 	const clearCoderTaskChangeContext = (callID: string): void => {
 		coderTaskChangeContextByCallID.delete(callID);
 		coderObservedFilesByCallID.delete(callID);
+	};
+	const rememberStageBDispatchGenerations = (
+		callID: string,
+		generations: Map<string, number>,
+	): void => {
+		if (
+			!stageBDispatchGenerationsByCallID.has(callID) &&
+			stageBDispatchGenerationsByCallID.size >=
+				MAX_PENDING_CODER_CHANGE_CONTEXTS
+		) {
+			throw new Error(
+				`STAGE_B_CONTEXT_CAPACITY: refusing Stage B dispatch because ${MAX_PENDING_CODER_CHANGE_CONTEXTS} live generation bindings are already tracked`,
+			);
+		}
+		stageBDispatchGenerationsByCallID.set(callID, generations);
 	};
 	const releasePrelaunchBackgroundCoderReservation = async (
 		callID: string,
@@ -2596,6 +2869,7 @@ export function createDelegationGateHook(
 		callID: string,
 		declaredFiles: string[] | null,
 		observationDirectory = directory,
+		workflowGeneration?: number,
 	): void => {
 		if (
 			!coderTaskChangeContextByCallID.has(callID) &&
@@ -2608,19 +2882,44 @@ export function createDelegationGateHook(
 		coderTaskChangeContextByCallID.set(callID, {
 			declaredFiles,
 			baseline: captureWorkspaceSnapshot(observationDirectory),
+			workflowGeneration,
+		});
+	};
+	const beginForegroundCoderSettlementIfNeeded = async (
+		input: { callID: string; sessionID: string },
+		taskId: string,
+		background: unknown,
+		worktree?: BackgroundWorktreeDescriptor,
+	): Promise<void> => {
+		if (backgroundSubagentsEnabled && isBackgroundTrue(background)) return;
+		const context = coderTaskChangeContextByCallID.get(input.callID);
+		if (!context || context.workflowGeneration === undefined) {
+			throw new Error(
+				`CODER_SETTLEMENT_CONTEXT_MISSING: no durable baseline or generation for task ${taskId}`,
+			);
+		}
+		await beginCoderSettlement({
+			directory,
+			taskId,
+			transitionId: `coder:${input.callID}`,
+			actor: input.sessionID,
+			expectedGeneration: context.workflowGeneration,
+			context,
+			...(worktree ? { worktree } : {}),
 		});
 	};
 	const shouldRememberCoderTaskChangeContext = (
-		declaredFiles: string[] | null,
-		background: unknown,
-	): boolean =>
-		isBackgroundTrue(background) || isMarkdownOnlyDeclaredScope(declaredFiles);
+		_declaredFiles: string[] | null,
+		_background: unknown,
+	): boolean => true;
 	const backgroundCompletionClaimed = (
 		record: BackgroundDelegationRecord,
 	): void => {
 		const callID = record.callID;
 		clearPublishedScopeBindings(callID);
 		clearCoderTaskChangeContext(callID);
+		stageBDispatchGenerationsByCallID.delete(callID);
+		gateDispatchPrimaryTaskByCallID.delete(callID);
 		deleteStoredInputArgs(callID);
 	};
 
@@ -2695,27 +2994,97 @@ export function createDelegationGateHook(
 				completionArgs,
 				completionPlanTaskIds,
 			);
-			const completionSession = ensureAgentSession(input.sessionID);
+			if (requestedTaskId) {
+				const { getTaskWorkflowSnapshot, readTaskEvidence } = await import(
+					'../gate-evidence'
+				);
+				const recoveredCoder = await recoverCoderSettlement(
+					directory,
+					requestedTaskId,
+				);
+				if (recoveredCoder) {
+					const recoveredSession = ensureAgentSession(input.sessionID);
+					const workflow = getTaskWorkflowSnapshot(recoveredCoder.evidence);
+					recoveredSession.taskWorkflowStates.set(
+						requestedTaskId,
+						workflow.state,
+					);
+					recoveredSession.stageBCompletion?.delete(requestedTaskId);
+					updateTaskWorkflowCache(recoveredSession, requestedTaskId, workflow);
+				}
+				const recoveredTerminal = await recoverPreparedTaskTerminal(
+					directory,
+					requestedTaskId,
+					input.sessionID,
+				);
+				if (recoveredTerminal) {
+					const recoveredSession = ensureAgentSession(input.sessionID);
+					const workflow = getTaskWorkflowSnapshot(recoveredTerminal.evidence);
+					recoveredSession.taskWorkflowStates.set(
+						requestedTaskId,
+						workflow.state,
+					);
+					recoveredSession.stageBCompletion?.delete(requestedTaskId);
+					recoveredSession.taskCouncilApproved?.delete(requestedTaskId);
+					recoveredSession.taskCouncilWorkflowGeneration?.delete(
+						requestedTaskId,
+					);
+					updateTaskWorkflowCache(recoveredSession, requestedTaskId, workflow);
+				}
+				// A COMMITTED-but-unaudited repair WAL makes recoverPreparedTaskRepair
+				// retry its audit-event write on every call for this task (the WAL is
+				// never deleted); transient events.jsonl lock contention must degrade
+				// this opportunistic recovery, not hard-block toolBefore for every
+				// tool call touching the task.
+				let recoveredRepair: Awaited<
+					ReturnType<typeof recoverPreparedTaskRepair>
+				> = null;
+				try {
+					recoveredRepair = await recoverPreparedTaskRepair(
+						directory,
+						requestedTaskId,
+						input.sessionID,
+					);
+				} catch (error) {
+					// Always-emitted: a swallowed failure here means the force-repair
+					// audit event may not be durably recorded yet, and warn() is
+					// silenced outside OPENCODE_SWARM_DEBUG=1.
+					logger.criticalWarn(
+						`[delegation-gate] task-repair recovery deferred for ${requestedTaskId}: ${
+							error instanceof Error ? error.message : String(error)
+						}`,
+					);
+				}
+				if (recoveredRepair) {
+					const recoveredSession = ensureAgentSession(input.sessionID);
+					const workflow = getTaskWorkflowSnapshot(
+						await readTaskEvidence(directory, requestedTaskId),
+					);
+					recoveredSession.taskWorkflowStates.set(
+						requestedTaskId,
+						workflow.state,
+					);
+					recoveredSession.stageBCompletion?.delete(requestedTaskId);
+					recoveredSession.taskCouncilApproved?.delete(requestedTaskId);
+					recoveredSession.taskCouncilWorkflowGeneration?.delete(
+						requestedTaskId,
+					);
+					updateTaskWorkflowCache(recoveredSession, requestedTaskId, workflow);
+				}
+			}
 			const taskAwaitingCompletion = await findTaskAwaitingCompletion(
 				directory,
-				completionSession,
 				requestedTaskId,
 			);
 			if (taskAwaitingCompletion) {
-				const allowingSameTaskRetry =
-					requestedTaskId === taskAwaitingCompletion;
-				// Allow completion of ANY task that is itself awaiting completion,
-				// not just the one returned by findTaskAwaitingCompletion.
-				// This prevents deadlock when multiple tasks are in tests_run simultaneously.
-				const requestedTaskIsAwaitingCompletion =
-					requestedTaskId &&
-					completionSession.taskWorkflowStates.get(requestedTaskId) ===
-						'tests_run';
-				const allowCompletionUpdate =
-					normalized === 'update_task_status' &&
-					completionArgs.status === 'completed' &&
-					requestedTaskIsAwaitingCompletion;
-				if (!allowingSameTaskRetry && !allowCompletionUpdate) {
+				const permitted = canRunWhileTaskAwaitsCompletion({
+					directory,
+					normalizedTool: normalized,
+					args: completionArgs,
+					awaitingTaskId: taskAwaitingCompletion,
+					requestedTaskId,
+				});
+				if (!permitted) {
 					throw new Error(
 						completionGateViolationMessage(taskAwaitingCompletion),
 					);
@@ -2930,16 +3299,184 @@ export function createDelegationGateHook(
 			}
 		}
 
+		if (TASK_GATE_AGENTS.has(targetAgent)) {
+			const stageBSession = ensureAgentSession(input.sessionID);
+			const resolvedTaskId = await resolveEvidenceTaskId(
+				args,
+				stageBSession,
+				directory,
+			);
+			const candidateTaskIds = new Set<string>();
+			if (resolvedTaskId) candidateTaskIds.add(resolvedTaskId);
+			const dispatchPlan = await loadPlanJsonOnly(directory);
+			if (dispatchPlan) {
+				const knownIds = new Set(
+					dispatchPlan.phases.flatMap((phase) =>
+						phase.tasks.map((task) => task.id),
+					),
+				);
+				const dispatchText = [
+					args.prompt,
+					args.description,
+					args.task,
+					args.input,
+				]
+					.filter((value): value is string => typeof value === 'string')
+					.join('\n');
+				for (const match of dispatchText.matchAll(
+					/(?:task-)?(\d+\.\d+(?:\.\d+)*)/gi,
+				)) {
+					if (match[1] && knownIds.has(match[1]))
+						candidateTaskIds.add(match[1]);
+				}
+			}
+			const generations = new Map<string, number>();
+			const { getTaskWorkflowSnapshot, readTaskEvidence } = await import(
+				'../gate-evidence'
+			);
+			for (const taskId of candidateTaskIds) {
+				const workflow = getTaskWorkflowSnapshot(
+					await readTaskEvidence(directory, taskId),
+				);
+				if (
+					taskId === resolvedTaskId &&
+					(await isCouncilGateActive(directory, config.council))
+				) {
+					if (!stageBSession.taskCouncilWorkflowGeneration) {
+						stageBSession.taskCouncilWorkflowGeneration = new Map();
+					}
+					if (!stageBSession.taskCouncilWorkflowGeneration.has(taskId)) {
+						stageBSession.taskCouncilWorkflowGeneration.set(
+							taskId,
+							workflow.generation,
+						);
+					}
+				}
+				if (targetAgent !== 'reviewer' && targetAgent !== 'test_engineer') {
+					generations.set(taskId, workflow.generation);
+					continue;
+				}
+				if (
+					workflow.authoritative &&
+					(workflow.state === 'pre_check_passed' ||
+						workflow.state === 'reviewer_run')
+				) {
+					generations.set(taskId, workflow.generation);
+					continue;
+				}
+				if (taskId === resolvedTaskId) {
+					throw new Error(
+						`TASK_WORKFLOW_STAGE_A_REQUIRED: cannot dispatch ${targetAgent} for task ${taskId} from ${workflow.state}`,
+					);
+				}
+			}
+			rememberStageBDispatchGenerations(input.callID, generations);
+			gateDispatchPrimaryTaskByCallID.set(input.callID, resolvedTaskId);
+			return;
+		}
+
 		if (targetAgent !== 'coder') return;
 
 		// Only check for the architect session (the orchestrator)
 		const session = ensureAgentSession(input.sessionID);
 		if (!session || !session.taskWorkflowStates) return;
 
+		const {
+			getTaskWorkflowSnapshot,
+			readTaskEvidence,
+			transitionTaskWorkflowEvidence,
+		} = await import('../gate-evidence');
+		const resolvedPreflightTaskId = await resolveEvidenceTaskId(
+			args,
+			session,
+			directory,
+		);
+		const preflightPlan = await loadPlanJsonOnly(directory);
+		const preflightTaskId =
+			resolvedPreflightTaskId &&
+			preflightPlan?.phases.some((phase) =>
+				phase.tasks.some((task) => task.id === resolvedPreflightTaskId),
+			)
+				? resolvedPreflightTaskId
+				: null;
+		const preflightEvidence = preflightTaskId
+			? await readTaskEvidence(directory, preflightTaskId)
+			: null;
+		const preflightWorkflow = getTaskWorkflowSnapshot(preflightEvidence);
+		if (preflightTaskId) {
+			await enforceCoderRetryEscalation({
+				directory,
+				taskId: preflightTaskId,
+				generation: preflightWorkflow.generation,
+				retryEpoch: preflightWorkflow.retryEpoch,
+				retryCount: preflightWorkflow.retryCount,
+				retryHistory: preflightWorkflow.retryHistory,
+				criticSatisfied: preflightEvidence?.gates.critic_sounding_board != null,
+			});
+			if (preflightWorkflow.state === 'coder_delegated') {
+				const turboBypass =
+					hasActiveTurboMode(input.sessionID) &&
+					!preflightTaskId.startsWith('3.');
+				if (!turboBypass) {
+					throw new Error(
+						`STAGE_A_REQUIRED: Task ${preflightTaskId} has an accepted coder mutation that has not passed pre_check_batch. ` +
+							'Run Stage A first. If Stage A fails, the task becomes rework_required and the same-task coder may repair it. ' +
+							'Do not send known-broken output to reviewer.',
+					);
+				}
+			}
+		}
+
 		// Scope preflight is mandatory and independent of the optional workflow
 		// gates. It creates a staged binding but does not publish authorization.
-		const preparedScope = await prepareCoderScope(directory, input, args);
+		let preparedScope: Awaited<ReturnType<typeof prepareCoderScope>>;
+		try {
+			preparedScope = await prepareCoderScope(directory, input, args);
+		} catch (error) {
+			if (preflightTaskId) {
+				const failed = await transitionTaskWorkflowEvidence(
+					directory,
+					preflightTaskId,
+					{
+						type: 'dispatch_no_mutation',
+						agentType: 'coder',
+						expectedGeneration: preflightWorkflow.generation,
+						transitionId: `coder-preflight:${input.callID}`,
+					},
+				);
+				const failedWorkflow = getTaskWorkflowSnapshot(failed);
+				if (failedWorkflow.retryCount >= 3) {
+					await emitCoderRetryEscalation(directory, {
+						taskId: preflightTaskId,
+						generation: failedWorkflow.generation,
+						retryEpoch: failedWorkflow.retryEpoch,
+						rejectionCount: failedWorkflow.retryCount,
+						rejectionHistory: failedWorkflow.retryHistory,
+						action: 'sounding_board_consultation',
+					});
+				}
+			}
+			throw error;
+		}
 		const { plan, taskId: incomingCoderTaskId } = preparedScope;
+		const coderEvidence = incomingCoderTaskId
+			? await readTaskEvidence(directory, incomingCoderTaskId)
+			: null;
+		const coderWorkflow = getTaskWorkflowSnapshot(coderEvidence);
+		const coderDispatchGeneration = coderWorkflow.generation;
+		if (incomingCoderTaskId) {
+			if (incomingCoderTaskId !== preflightTaskId) {
+				await enforceCoderRetryEscalation({
+					directory,
+					taskId: incomingCoderTaskId,
+					generation: coderWorkflow.generation,
+					retryEpoch: coderWorkflow.retryEpoch,
+					retryCount: coderWorkflow.retryCount,
+					retryHistory: coderWorkflow.retryHistory,
+					criticSatisfied: coderEvidence?.gates.critic_sounding_board != null,
+				});
+			}
+		}
 		const reserveBackgroundCoderIfNeeded = async (
 			maxConcurrent: number,
 		): Promise<void> => {
@@ -2986,6 +3523,8 @@ export function createDelegationGateHook(
 					rememberCoderTaskChangeContext(
 						input.callID,
 						preparedScope.declaredFiles,
+						directory,
+						coderDispatchGeneration,
 					);
 				}
 				await publishScopeBinding(
@@ -2993,8 +3532,15 @@ export function createDelegationGateHook(
 					directory,
 					preparedScope.binding,
 				);
+				await beginForegroundCoderSettlementIfNeeded(
+					input,
+					incomingCoderTaskId,
+					args.background,
+				);
 			} catch (error) {
 				await releasePrelaunchBackgroundCoderReservation(input.callID);
+				clearPublishedScopeBindings(input.callID);
+				clearCoderTaskChangeContext(input.callID);
 				throw error;
 			}
 			return;
@@ -3022,13 +3568,15 @@ export function createDelegationGateHook(
 		// pending tasks to be provably disjoint.
 		const parallelModeActive =
 			standardWorktreeIsolationActive && scopeAllowsParallel;
-		if (
-			isPlanCriticRequiredForExecution(
-				directory,
-				plan,
-				session.qaGateSessionOverrides ?? {},
-			)
-		) {
+		const criticPolicy = resolvePlanCriticPolicyForExecution(
+			directory,
+			plan,
+			session.qaGateSessionOverrides ?? {},
+		);
+		logger.log(
+			`[delegation-gate] critic_pre_plan policy task=${incomingCoderTaskId ?? 'unknown'} required=${criticPolicy.required} source=${criticPolicy.source}`,
+		);
+		if (criticPolicy.required) {
 			await assertPlanCriticApprovedForExecution(directory, plan);
 		}
 		const incomingCoderDeclaredFiles = preparedScope.declaredFiles;
@@ -3039,7 +3587,16 @@ export function createDelegationGateHook(
 		// for a DIFFERENT dependency-ready task is legitimate, so a coder_delegated
 		// task only blocks a coder for the SAME task (a true re-delegation that would
 		// skip review). The slot cap below bounds total in-flight unreviewed coders.
-		for (const [taskId, state] of session.taskWorkflowStates) {
+		for (const task of plan.phases.flatMap((phase) => phase.tasks)) {
+			const taskId = task.id;
+			const durableWorkflow = getTaskWorkflowSnapshot(
+				await readTaskEvidence(directory, taskId),
+			);
+			const state = durableWorkflow.authoritative
+				? durableWorkflow.state
+				: 'idle';
+			session.taskWorkflowStates.set(taskId, state);
+			updateTaskWorkflowCache(session, taskId, durableWorkflow);
 			if (state !== 'coder_delegated') continue;
 
 			// Before blocking, verify this coder_delegated state is from the CURRENT session.
@@ -3059,7 +3616,7 @@ export function createDelegationGateHook(
 					stripKnownSwarmPrefix(d.to) === 'coder' &&
 					d.timestamp > freshnessThreshold,
 			);
-			if (!hasCurrentSessionCoderDelegation) {
+			if (!durableWorkflow.authoritative && !hasCurrentSessionCoderDelegation) {
 				// Stale state from prior session — reset to idle and allow the delegation
 				session.taskWorkflowStates.set(taskId, 'idle');
 				logger.warn(
@@ -3089,9 +3646,9 @@ export function createDelegationGateHook(
 			}
 
 			throw new Error(
-				`REVIEWER_GATE_VIOLATION: Cannot re-delegate to coder without reviewer delegation. ` +
-					`Task ${taskId} state: coder_delegated. Delegate to reviewer first. ` +
-					`If this is stale state from a prior session, run /swarm reset-session to clear workflow state.`,
+				`STAGE_A_REQUIRED: Task ${taskId} has an accepted coder mutation that has not passed pre_check_batch. ` +
+					'Run Stage A first. If Stage A fails, the task becomes rework_required and the same-task coder may repair it. ' +
+					'Do not send known-broken output to reviewer.',
 			);
 		}
 
@@ -3147,6 +3704,8 @@ export function createDelegationGateHook(
 					rememberCoderTaskChangeContext(
 						input.callID,
 						incomingCoderDeclaredFiles,
+						directory,
+						coderDispatchGeneration,
 					);
 				}
 			}
@@ -3163,9 +3722,16 @@ export function createDelegationGateHook(
 					rememberCoderTaskChangeContext(
 						input.callID,
 						incomingCoderDeclaredFiles,
+						directory,
+						coderDispatchGeneration,
 					);
 				}
 				await publishScopeBinding(input.callID, directory, correlatedBinding);
+				await beginForegroundCoderSettlementIfNeeded(
+					input,
+					incomingCoderTaskId,
+					args.background,
+				);
 				return;
 			}
 
@@ -3245,6 +3811,7 @@ export function createDelegationGateHook(
 						input.callID,
 						incomingCoderDeclaredFiles,
 						standardDispatch.handle.worktreePath,
+						coderDispatchGeneration,
 					);
 				}
 			} else {
@@ -3259,12 +3826,36 @@ export function createDelegationGateHook(
 					rememberCoderTaskChangeContext(
 						input.callID,
 						incomingCoderDeclaredFiles,
+						directory,
+						coderDispatchGeneration,
 					);
 				}
 				await publishScopeBinding(input.callID, directory, correlatedBinding);
 			}
+			await beginForegroundCoderSettlementIfNeeded(
+				input,
+				incomingCoderTaskId,
+				args.background,
+				standardDispatch
+					? {
+							callID: standardDispatch.callID,
+							parentSessionId: standardDispatch.parentSessionID,
+							taskId: incomingCoderTaskId,
+							planTaskId: standardDispatch.planTaskId ?? null,
+							worktreePath: standardDispatch.handle.worktreePath,
+							branchName: standardDispatch.handle.branchName,
+							worktreeId: standardDispatch.handle.id,
+							worktreeSessionId: standardDispatch.handle.sessionId,
+							mergeStrategy: standardDispatch.mergeStrategy,
+							laneIndex: standardDispatch.laneIndex,
+							worktreeDir: standardDispatch.worktree_dir ?? null,
+						}
+					: undefined,
+			);
 		} catch (error) {
 			await releasePrelaunchBackgroundCoderReservation(input.callID);
+			clearPublishedScopeBindings(input.callID);
+			clearCoderTaskChangeContext(input.callID);
 			throw error;
 		}
 	};
@@ -3310,59 +3901,6 @@ export function createDelegationGateHook(
 			config.council,
 			qaGateSessionOverrides ?? {},
 		);
-
-		// ── Completion gate: advance state when architect marks task completed ──
-		if (normalized === 'update_task_status') {
-			const directArgs = input.args as Record<string, unknown> | undefined;
-			const storedArgs = getStoredInputArgs(input.callID) as
-				| Record<string, unknown>
-				| undefined;
-			const completionArgs = directArgs ?? storedArgs;
-			if (completionArgs && completionArgs.status === 'completed') {
-				const rawTaskId = completionArgs.task_id ?? completionArgs.taskId;
-				const completionTaskId =
-					typeof rawTaskId === 'string' ? rawTaskId.trim() : null;
-				if (completionTaskId && isStrictTaskId(completionTaskId)) {
-					const removed = clearScopeBindings(
-						(binding) =>
-							binding.taskId === completionTaskId &&
-							(binding.ownerSessionId === input.sessionID ||
-								binding.parentOwnerSessionId === input.sessionID),
-					);
-					for (const binding of removed) {
-						clearScopeBindingFromDisk({
-							directory: binding.workspaceIdentity,
-							binding,
-						});
-						if (binding.activation === 'active') {
-							const childSession = swarmState.agentSessions.get(
-								binding.ownerSessionId,
-							);
-							if (childSession) {
-								childSession.currentTaskId = null;
-								childSession.declaredCoderScope = null;
-							}
-						}
-					}
-					clearPublishedScopeBindingsForTask(completionTaskId, input.sessionID);
-					try {
-						const completionSession = ensureAgentSession(input.sessionID);
-						await advanceTaskStateAndPersist(
-							completionSession,
-							completionTaskId,
-							'complete',
-							directory,
-							{ telemetrySessionId: input.sessionID },
-							config.council,
-						);
-					} catch (err) {
-						logger.warn(
-							`[delegation-gate] toolAfter completion advancement: could not advance ${completionTaskId} → complete: ${err instanceof Error ? err.message : String(err)}`,
-						);
-					}
-				}
-			}
-		}
 
 		// Council branch: handle submit_council_verdicts tool calls. Records the verdict on the
 		// session, and if APPROVE + allCriteriaMet + zero required fixes, advances the
@@ -3422,105 +3960,10 @@ export function createDelegationGateHook(
 							result.allCriteriaMet === true &&
 							(result.requiredFixesCount ?? 0) === 0
 						) {
-							try {
-								// Pass council config so the fast-path quorum check
-								// inside advanceTaskState uses the configured
-								// minimumMembers (default 3) rather than rejecting
-								// every entry it sees.
-								await advanceTaskStateAndPersist(
-									session,
-									taskId,
-									'complete',
-									directory,
-									{ telemetrySessionId: input.sessionID },
-									config.council,
-								);
-								// A.4 — positive terminal reward capture. Fires ONLY after
-								// the APPROVE→complete advance above SUCCEEDS. Wrapped in its
-								// OWN try/catch: this is a HOT hook path and reward capture
-								// must NEVER throw into the gate or change task completion.
-								// Behavior is identical whether it succeeds, fails, or skips.
-								try {
-									const memoryConfig = config.memory;
-									// Post-condition (C-6): reward ONLY when the advance above
-									// actually moved the task to 'complete'. advanceTaskState
-									// silently no-ops (returns without throwing AND without
-									// advancing) on an invalid taskId — e.g. a whitespace-only id
-									// that passed the truthiness `if (taskId)` gate above but
-									// fails isValidTaskId — so a non-throwing await does not by
-									// itself prove completion. getTaskState also returns a
-									// non-'complete' state (or 'idle' for an invalid id) in every
-									// non-advance case, so this check closes the false-positive
-									// reward path without depending on advanceTaskState internals.
-									const advancedToComplete =
-										getTaskState(session, taskId) === 'complete';
-									if (advancedToComplete && memoryConfig?.enabled === true) {
-										const approvedEntry =
-											session.taskCouncilApproved?.get(taskId);
-										// Dedup: apply at most once per task.
-										if (approvedEntry?.rewarded !== true) {
-											const provider = createConfiguredMemoryProvider(
-												directory,
-												memoryConfig,
-											);
-											try {
-												// FR-010: compact synthesis payload, truncated to the
-												// configured byte cap with a marker beyond it.
-												const synthesis = {
-													overallVerdict: result.overallVerdict,
-													allCriteriaMet: result.allCriteriaMet === true,
-													requiredFixesCount: result.requiredFixesCount ?? 0,
-													roundNumber:
-														typeof result.roundNumber === 'number'
-															? result.roundNumber
-															: undefined,
-													quorumSize:
-														typeof result.quorumSize === 'number'
-															? result.quorumSize
-															: undefined,
-												};
-												let verdictSynthesisJson = JSON.stringify(synthesis);
-												const cap =
-													memoryConfig.qLearning.verdictPayloadCapBytes;
-												if (
-													typeof cap === 'number' &&
-													cap > 0 &&
-													verdictSynthesisJson.length > cap
-												) {
-													verdictSynthesisJson = JSON.stringify(
-														truncateObjectForJson(synthesis, cap),
-													);
-												}
-												await applyCouncilReward(provider, {
-													runId: input.sessionID,
-													unitId: taskId,
-													reward: COUNCIL_VERDICT_REWARDS.APPROVE,
-													eta: memoryConfig.qLearning.learningRate,
-													initialQValue: memoryConfig.qLearning.initialQValue,
-													// B.5: thread the full q-learning config so soft
-													// Q-propagation reads propagationFraction /
-													// propagationFanoutCap / propagationWindowDays.
-													qLearning: memoryConfig.qLearning,
-													verdictSynthesisJson,
-													timestamp: new Date().toISOString(),
-												});
-												if (approvedEntry) approvedEntry.rewarded = true;
-											} finally {
-												// Release the pool refcount acquired above (no leak).
-												await provider.close?.();
-											}
-										}
-									}
-								} catch (rewardErr) {
-									logger.warn(
-										`[delegation-gate] council reward capture failed: ${rewardErr instanceof Error ? rewardErr.message : String(rewardErr)}`,
-									);
-								}
-							} catch (err) {
-								logger.warn(
-									`[delegation-gate] toolAfter submit_council_verdicts: could not advance ${taskId} → complete: ${err instanceof Error ? err.message : String(err)}`,
-								);
-							}
+							pushAdvisory(
+								session,
+								`Council approved task ${taskId}. Call update_task_status with status="completed" so the central plan/evidence transaction can commit it.`,
+							);
 						}
 					}
 				}
@@ -3566,12 +4009,15 @@ export function createDelegationGateHook(
 			//   - PR 2 Stage A (flag ON): additionally record a DURABLE pending delegation so a
 			//     later (Stage B) trusted completion can be correlated. Still no gate effect.
 			// Either way: clean up stored args so the callID entry does not leak, then bail.
-			// A terminal failure (state === 'failed' or 'error') must not record a
+			// A terminal failure must not record a
 			// pending delegation — there is no later trusted completion to correlate.
 			const outputTerminalState = (_output as { state?: string } | undefined)
 				?.state;
 			const isTerminalFailure =
-				outputTerminalState === 'failed' || outputTerminalState === 'error';
+				outputTerminalState === 'failed' ||
+				outputTerminalState === 'error' ||
+				outputTerminalState === 'cancelled' ||
+				outputTerminalState === 'canceled';
 			if (
 				!isTerminalFailure &&
 				typeof subagentType === 'string' &&
@@ -3678,6 +4124,13 @@ export function createDelegationGateHook(
 											scope,
 										}),
 								taskChangeContext,
+								workflowGeneration: TASK_GATE_AGENTS.has(
+									stripKnownSwarmPrefix(subagentType),
+								)
+									? stageBDispatchGenerationsByCallID
+											.get(input.callID)
+											?.get(evidenceTaskId ?? '')
+									: undefined,
 								worktree: standardDispatch
 									? {
 											callID: standardDispatch.callID,
@@ -3827,6 +4280,8 @@ export function createDelegationGateHook(
 				}
 				if (backgroundRecordDurable) {
 					clearCoderTaskChangeContext(input.callID);
+					stageBDispatchGenerationsByCallID.delete(input.callID);
+					gateDispatchPrimaryTaskByCallID.delete(input.callID);
 					if (storedArgs !== undefined) deleteStoredInputArgs(input.callID);
 				}
 				if (!backgroundCorrelationConflict) {
@@ -3836,105 +4291,197 @@ export function createDelegationGateHook(
 					clearPublishedScopeBindings(input.callID);
 				return;
 			}
-			// A non-background Task result is terminal for this exact dispatch.
+			const foregroundCoderTaskId =
+				typeof subagentType === 'string' &&
+				stripKnownSwarmPrefix(subagentType) === 'coder'
+					? (standardDispatch?.planTaskId ??
+						standardDispatch?.taskId ??
+						(typeof directArgs?.task_id === 'string'
+							? directArgs.task_id
+							: typeof storedArgs?.task_id === 'string'
+								? storedArgs.task_id
+								: null))
+					: null;
+			// The child has returned, so its exact write lease must end before
+			// settlement/merge bookkeeping. A durability failure fences the output;
+			// it must not leave the child authorized to create more unattributed work.
 			clearPublishedScopeBindings(input.callID);
-
-			if (typeof subagentType === 'string') {
-				try {
-					const mergedArgs = { ...(storedArgs ?? {}), ...(directArgs ?? {}) };
-					await recordPlanCriticApprovalSnapshotIfApplicable(
-						directory,
-						input,
-						mergedArgs,
-						_output,
-					);
-				} catch (err) {
-					logger.warn(
-						`[delegation-gate] plan critic approval snapshot failed: ${err instanceof Error ? err.message : String(err)}`,
-					);
+			try {
+				if (typeof subagentType === 'string') {
+					try {
+						const mergedArgs = { ...(storedArgs ?? {}), ...(directArgs ?? {}) };
+						await recordPlanCriticApprovalSnapshotIfApplicable(
+							directory,
+							input,
+							mergedArgs,
+							_output,
+						);
+					} catch (err) {
+						logger.warn(
+							`[delegation-gate] plan critic approval snapshot failed: ${err instanceof Error ? err.message : String(err)}`,
+						);
+					}
 				}
-			}
 
-			// M15 advisory-only: surface delegation-envelope validation issues
-			// WITHOUT blocking. toolAfter runs POST-execution (the tool already ran),
-			// so this can never reject a delegation. appendDelegationEnvelopeAdvisory
-			// runs validateDelegationEnvelope — formerly dead production code — only
-			// when the prompt parses as a STRUCTURED envelope; a real free-text
-			// delegation is a no-op. planTasks is left empty so an off-plan taskId is
-			// never advised; validAgents covers the canonical role set so a genuinely
-			// unknown target agent (or a populated-but-malformed specCriteria field)
-			// is surfaced.
-			if (typeof subagentType === 'string') {
-				const advisoryArgs = { ...(storedArgs ?? {}), ...(directArgs ?? {}) };
-				const advisoryPrompt = advisoryArgs.prompt;
-				if (typeof advisoryPrompt === 'string' && advisoryPrompt.length > 0) {
-					appendDelegationEnvelopeAdvisory(session, advisoryPrompt, {
-						planTasks: [],
-						validAgents: [...ALL_AGENT_NAMES],
-					});
+				// M15 advisory-only: surface delegation-envelope validation issues
+				// WITHOUT blocking. toolAfter runs POST-execution (the tool already ran),
+				// so this can never reject a delegation. appendDelegationEnvelopeAdvisory
+				// runs validateDelegationEnvelope — formerly dead production code — only
+				// when the prompt parses as a STRUCTURED envelope; a real free-text
+				// delegation is a no-op. planTasks is left empty so an off-plan taskId is
+				// never advised; validAgents covers the canonical role set so a genuinely
+				// unknown target agent (or a populated-but-malformed specCriteria field)
+				// is surfaced.
+				if (typeof subagentType === 'string') {
+					const advisoryArgs = { ...(storedArgs ?? {}), ...(directArgs ?? {}) };
+					const advisoryPrompt = advisoryArgs.prompt;
+					if (typeof advisoryPrompt === 'string' && advisoryPrompt.length > 0) {
+						appendDelegationEnvelopeAdvisory(session, advisoryPrompt, {
+							planTasks: [],
+							validAgents: [...ALL_AGENT_NAMES],
+						});
+					}
 				}
-			}
 
-			let standardWorktreeSettled = !standardDispatch;
-			// A terminal failure (cancelled/error/failed) must not attempt merge-back.
-			// The worktree is preserved for inspection and cleaned up without merging.
-			const isStandardWorktreeFailure =
-				outputTerminalState === 'cancelled' ||
-				outputTerminalState === 'failed' ||
-				outputTerminalState === 'error';
-			if (standardDispatch && !isStandardWorktreeFailure) {
-				const taskChangeContext = coderTaskChangeContextByCallID.get(
-					input.callID,
-				);
-				if (taskChangeContext) {
-					rememberCoderObservedFiles(
+				let standardWorktreeSettled = !standardDispatch;
+				let coderSettlementCommitted = false;
+				let coderSettlementEvidence:
+					| Awaited<ReturnType<typeof settleCoderDispatch>>['evidence']
+					| null = null;
+				// A terminal failure (cancelled/error/failed) must not attempt merge-back.
+				// The worktree is preserved for inspection and cleaned up without merging.
+				const isStandardWorktreeFailure =
+					outputTerminalState === 'cancelled' ||
+					outputTerminalState === 'failed' ||
+					outputTerminalState === 'error';
+				if (standardDispatch && !isStandardWorktreeFailure) {
+					const taskChangeContext = coderTaskChangeContextByCallID.get(
 						input.callID,
-						changedFilesSinceSnapshot(
-							taskChangeContext.baseline.directory,
-							taskChangeContext.baseline,
-						),
 					);
+					if (taskChangeContext) {
+						rememberCoderObservedFiles(
+							input.callID,
+							changedFilesSinceSnapshot(
+								taskChangeContext.baseline.directory,
+								taskChangeContext.baseline,
+							),
+						);
+					}
+					// SC-115: Move from active → awaiting-merge BEFORE calling merge-back.
+					// The dispatch is removed from standardWorktreeByCallID here and
+					// added to awaitingMergeByCallID so /swarm lanes can show the real state.
+					// finishStandardWorktreeDispatch removes it from awaitingMergeByCallID
+					// after the merge completes (merged/partial/failed); the .catch() below
+					// handles the thrown-rejection path.
+					standardWorktreeByCallID.delete(input.callID);
+					awaitingMergeByCallID.set(input.callID, {
+						callID: input.callID,
+						parentSessionID: standardDispatch.parentSessionID,
+						taskId: standardDispatch.taskId,
+						planTaskId: standardDispatch.planTaskId,
+						branch: standardDispatch.handle.branchName,
+						worktreePath: standardDispatch.handle.worktreePath,
+						mergeStrategy: standardDispatch.mergeStrategy,
+						queuedAt: Date.now(),
+					});
+					const observedForMerge = coderObservedFilesByCallID.get(input.callID);
+					if (!Array.isArray(observedForMerge)) {
+						throw new Error(
+							`CODER_SETTLEMENT_ATTRIBUTION_UNCERTAIN: isolated task ${standardDispatch.planTaskId ?? standardDispatch.taskId} changed files could not be proven from its clean launch baseline`,
+						);
+					}
+					const settlement = await finishStandardWorktreeDispatch(
+						directory,
+						standardDispatch,
+						config,
+						input.callID,
+						{
+							operationId: `coder:${input.callID}`,
+							onBeforeMerge: (provenance) =>
+								recordCoderMergeProvenance({
+									directory,
+									taskId:
+										standardDispatch.planTaskId ?? standardDispatch.taskId,
+									transitionId: `coder:${input.callID}`,
+									provenance,
+									observedFiles: observedForMerge,
+								}),
+							onMerged: async () => {
+								const result = await settleCoderDispatch({
+									directory,
+									taskId:
+										standardDispatch.planTaskId ?? standardDispatch.taskId,
+									transitionId: `coder:${input.callID}`,
+									accepted: observedForMerge.length > 0,
+									testEngineerExempt: isMarkdownOnlyTaskChange(
+										coderTaskChangeContextByCallID.get(input.callID)
+											?.declaredFiles,
+										observedForMerge,
+									),
+								});
+								coderSettlementEvidence = result.evidence;
+								coderSettlementCommitted = true;
+							},
+						},
+					).catch((err) => {
+						const reason = err instanceof Error ? err.message : String(err);
+						logger.warn(
+							`[delegation-gate] standard worktree merge-back failed for ${standardDispatch.taskId}: ${reason}`,
+						);
+						// A thrown merge-back is a hard failure: the task's work
+						// did not land. Record it so Epic Rule 2 skips the
+						// completion marker (same contract as the partial/failed
+						// returns inside finishStandardWorktreeDispatch).
+						recordWorktreeMergeFailure(
+							standardDispatch.planTaskId ?? standardDispatch.taskId,
+							{
+								outcome: 'failed',
+								stage: 'merge-back',
+								message: reason,
+								worktreePath: standardDispatch.handle.worktreePath,
+								branch: standardDispatch.handle.branchName,
+								completedAt: Date.now(),
+							},
+						);
+						const dispatchSession = ensureAgentSession(
+							standardDispatch.parentSessionID,
+						);
+						pushAdvisory(
+							dispatchSession,
+							`STANDARD_WORKTREE_MERGE_FAILED: task ${standardDispatch.taskId} preserved at ${standardDispatch.handle.worktreePath}; reason: ${reason}.`,
+						);
+						// SC-115: Remove from awaiting-merge registry after recording failure.
+						awaitingMergeByCallID.delete(input.callID);
+					});
+					standardWorktreeSettled = settlement?.outcome === 'merged';
 				}
-				// SC-115: Move from active → awaiting-merge BEFORE calling merge-back.
-				// The dispatch is removed from standardWorktreeByCallID here and
-				// added to awaitingMergeByCallID so /swarm lanes can show the real state.
-				// finishStandardWorktreeDispatch removes it from awaitingMergeByCallID
-				// after the merge completes (merged/partial/failed); the .catch() below
-				// handles the thrown-rejection path.
-				standardWorktreeByCallID.delete(input.callID);
-				awaitingMergeByCallID.set(input.callID, {
-					callID: input.callID,
-					parentSessionID: standardDispatch.parentSessionID,
-					taskId: standardDispatch.taskId,
-					planTaskId: standardDispatch.planTaskId,
-					branch: standardDispatch.handle.branchName,
-					worktreePath: standardDispatch.handle.worktreePath,
-					mergeStrategy: standardDispatch.mergeStrategy,
-					queuedAt: Date.now(),
-				});
-				const settlement = await finishStandardWorktreeDispatch(
-					directory,
-					standardDispatch,
-					config,
-					input.callID,
-				).catch((err) => {
-					const reason = err instanceof Error ? err.message : String(err);
-					logger.warn(
-						`[delegation-gate] standard worktree merge-back failed for ${standardDispatch.taskId}: ${reason}`,
+				if (standardDispatch && isStandardWorktreeFailure) {
+					// Terminal failure: preserve the worktree for inspection, clean up
+					// the lane without merge-back, and record the failure.
+					standardWorktreeByCallID.delete(input.callID);
+					const reason = (
+						outputTerminalState === 'cancelled' ? 'cancelled' : 'denied'
+					) as 'cancelled' | 'denied';
+					await _wtiInternals.preserveDirtyWorktreeForCallId(
+						input.callID,
+						reason,
+						directory,
 					);
-					// A thrown merge-back is a hard failure: the task's work
-					// did not land. Record it so Epic Rule 2 skips the
-					// completion marker (same contract as the partial/failed
-					// returns inside finishStandardWorktreeDispatch).
+					await _wtiInternals.removeWorktree(
+						standardDispatch.handle.worktreePath,
+						directory,
+					);
+					await _wtiInternals.postMergeCleanup(
+						directory,
+						standardDispatch.handle.branchName,
+					);
+					awaitingMergeByCallID.delete(input.callID);
 					recordWorktreeMergeFailure(
 						standardDispatch.planTaskId ?? standardDispatch.taskId,
 						{
 							outcome: 'failed',
-							stage: 'merge-back',
-							message: reason,
-							worktreePath: standardDispatch.handle.worktreePath,
-							branch: standardDispatch.handle.branchName,
-							completedAt: Date.now(),
+							stage: 'task-result',
+							message: `task terminated with ${outputTerminalState ?? 'terminal-failure'}`,
 						},
 					);
 					const dispatchSession = ensureAgentSession(
@@ -3942,125 +4489,127 @@ export function createDelegationGateHook(
 					);
 					pushAdvisory(
 						dispatchSession,
-						`STANDARD_WORKTREE_MERGE_FAILED: task ${standardDispatch.taskId} preserved at ${standardDispatch.handle.worktreePath}; reason: ${reason}.`,
+						`STANDARD_WORKTREE_TASK_FAILED: task ${standardDispatch.taskId} terminated with ${outputTerminalState ?? 'terminal-failure'}; worktree preserved and cleaned without merge-back.`,
 					);
-					// SC-115: Remove from awaiting-merge registry after recording failure.
-					awaitingMergeByCallID.delete(input.callID);
-				});
-				standardWorktreeSettled = settlement?.outcome === 'merged';
-			}
-			if (standardDispatch && isStandardWorktreeFailure) {
-				// Terminal failure: preserve the worktree for inspection, clean up
-				// the lane without merge-back, and record the failure.
-				standardWorktreeByCallID.delete(input.callID);
-				const reason = (
-					outputTerminalState === 'cancelled' ? 'cancelled' : 'denied'
-				) as 'cancelled' | 'denied';
-				await _wtiInternals.preserveDirtyWorktreeForCallId(
-					input.callID,
-					reason,
-					directory,
-				);
-				await _wtiInternals.removeWorktree(
-					standardDispatch.handle.worktreePath,
-					directory,
-				);
-				await _wtiInternals.postMergeCleanup(
-					directory,
-					standardDispatch.handle.branchName,
-				);
-				awaitingMergeByCallID.delete(input.callID);
-				recordWorktreeMergeFailure(
-					standardDispatch.planTaskId ?? standardDispatch.taskId,
-					{
-						outcome: 'failed',
-						stage: 'task-result',
-						message: `task terminated with ${outputTerminalState ?? 'terminal-failure'}`,
-					},
-				);
-				const dispatchSession = ensureAgentSession(
-					standardDispatch.parentSessionID,
-				);
-				pushAdvisory(
-					dispatchSession,
-					`STANDARD_WORKTREE_TASK_FAILED: task ${standardDispatch.taskId} terminated with ${outputTerminalState ?? 'terminal-failure'}; worktree preserved and cleaned without merge-back.`,
-				);
-			}
+				}
 
-			// Track if we detected reviewer and/or test_engineer via stored args
-			let hasReviewer = false;
-			let hasTestEngineer = false;
+				// Track if we detected reviewer and/or test_engineer via stored args
+				let hasReviewer = false;
+				let hasTestEngineer = false;
 
-			// Primary path: use stored input args if available
-			if (typeof subagentType === 'string') {
-				const targetAgent = stripKnownSwarmPrefix(subagentType);
+				// Primary path: use stored input args if available
+				if (typeof subagentType === 'string') {
+					const targetAgent = stripKnownSwarmPrefix(subagentType);
 
-				// Track which agents have been delegated to
-				if (targetAgent === 'reviewer') hasReviewer = true;
-				if (targetAgent === 'test_engineer') hasTestEngineer = true;
+					// Track which agents have been delegated to
+					if (targetAgent === 'reviewer') hasReviewer = true;
+					if (targetAgent === 'test_engineer') hasTestEngineer = true;
 
-				// When council_mode is enabled, per-task Stage B (reviewer + test_engineer
-				// barrier) is replaced by the council verdict path (submit_council_verdicts).
-				// Stage B delegations may still occur as part of the 5-member council dispatch,
-				// but they do not advance state through the Stage B barrier.
-				if (!councilActive) {
-					const stageBParallelEnabled = true;
+					// When council_mode is enabled, per-task Stage B (reviewer + test_engineer
+					// barrier) is replaced by the council verdict path (submit_council_verdicts).
+					// Stage B delegations may still occur as part of the 5-member council dispatch,
+					// but they do not advance state through the Stage B barrier.
+					if (!councilActive) {
+						const stageBParallelEnabled = true;
 
-					if (stageBParallelEnabled) {
-						// ── PR 2 Stage B parallel path ──────────────────────────────────
-						// Order-independent barrier: record each completion independently.
-						// Advance to tests_run only when BOTH reviewer and test_engineer
-						// have completed. Either may complete first.
-						// A terminal failure must never advance Stage B.
-						const outputStatus = (_output as { status?: string } | undefined)
-							?.status;
-						if (
-							outputStatus !== 'failed' &&
-							!isStandardWorktreeFailure &&
-							(targetAgent === 'reviewer' || targetAgent === 'test_engineer') &&
-							session.taskWorkflowStates
-						) {
-							const stageBEligibleStates = [
-								'coder_delegated',
-								'pre_check_passed',
-								'reviewer_run',
-							] as const;
-							type EligibleState = (typeof stageBEligibleStates)[number];
+						if (stageBParallelEnabled) {
+							// ── PR 2 Stage B parallel path ──────────────────────────────────
+							// Order-independent barrier: record each completion independently.
+							// Advance to tests_run only when BOTH reviewer and test_engineer
+							// have completed. Either may complete first.
+							// A terminal failure must never advance Stage B.
+							const outputStatus = (_output as { status?: string } | undefined)
+								?.status;
+							if (
+								outputStatus !== 'failed' &&
+								!isStandardWorktreeFailure &&
+								(targetAgent === 'reviewer' ||
+									targetAgent === 'test_engineer') &&
+								session.taskWorkflowStates
+							) {
+								const stageBEligibleStates = [
+									'pre_check_passed',
+									'reviewer_run',
+								] as const;
+								type EligibleState = (typeof stageBEligibleStates)[number];
 
-							// FR-007: Try to parse per-task verdicts from dispatch output.
-							// When a reviewer or test_engineer covers multiple tasks (set-dispatch),
-							// it emits structured verdict lines like:
-							//   [REVIEWED] | task-2.1 | APPROVED | ...
-							//   [TESTED] | task-2.1 | PASS | ...
-							// If parseable, attribute per-task rather than over-attributing to
-							// every task in taskWorkflowStates.
-							const perTaskVerdicts = parsePerTaskVerdicts(outputText(_output));
-							const hasPerTaskAttribution = perTaskVerdicts.size > 0;
-
-							// FR-007: When per-task verdicts are parseable, iterate ONLY over the
-							// task IDs mentioned in those verdicts — skip all other eligible tasks
-							// to prevent over-attribution. When no verdicts are parseable, iterate
-							// over all eligible tasks (existing fallback behavior).
-
-							const { readTaskEvidence } = await import('../gate-evidence');
-							for (const [taskId, state] of session.taskWorkflowStates) {
-								if (
-									!(stageBEligibleStates as readonly string[]).includes(state)
-								)
-									continue;
-								// FR-007: Skip tasks NOT mentioned in per-task verdicts
-								if (hasPerTaskAttribution && !perTaskVerdicts.has(taskId))
-									continue;
-								const eligibleState = state as EligibleState;
-								recordStageBCompletion(
-									session,
-									taskId,
-									targetAgent as 'reviewer' | 'test_engineer',
+								// FR-007: Try to parse per-task verdicts from dispatch output.
+								// When a reviewer or test_engineer covers multiple tasks (set-dispatch),
+								// it emits structured verdict lines like:
+								//   [REVIEWED] | task-2.1 | APPROVED | ...
+								//   [TESTED] | task-2.1 | PASS | ...
+								// If parseable, attribute per-task rather than over-attributing to
+								// every task in taskWorkflowStates.
+								const perTaskVerdicts = parsePerTaskVerdicts(
+									outputText(_output),
 								);
+								const hasPerTaskAttribution = perTaskVerdicts.size > 0;
 
-								// FR-007: Record per-task gate evidence when parseable verdicts exist.
-								// Each task gets its own evidence entry keyed by the specific task ID.
-								if (hasPerTaskAttribution) {
+								// FR-007: When per-task verdicts are parseable, iterate ONLY over the
+								// task IDs mentioned in those verdicts — skip all other eligible tasks
+								// to prevent over-attribution. When no verdicts are parseable, iterate
+								// over all eligible tasks (existing fallback behavior).
+
+								const {
+									getTaskWorkflowSnapshot,
+									readTaskEvidence,
+									transitionTaskWorkflowEvidence,
+								} = await import('../gate-evidence');
+								for (const [taskId, state] of session.taskWorkflowStates) {
+									if (
+										!(stageBEligibleStates as readonly string[]).includes(state)
+									)
+										continue;
+									// FR-007: Skip tasks NOT mentioned in per-task verdicts
+									if (hasPerTaskAttribution && !perTaskVerdicts.has(taskId))
+										continue;
+									if (
+										!hasPerTaskAttribution &&
+										gateDispatchPrimaryTaskByCallID.get(input.callID) !== taskId
+									) {
+										continue;
+									}
+									const eligibleState = state as EligibleState;
+									const launchGeneration = stageBDispatchGenerationsByCallID
+										.get(input.callID)
+										?.get(taskId);
+									if (launchGeneration === undefined) {
+										logger.warn(
+											`[delegation-gate] ignoring unbound Stage B settlement for ${taskId} from call ${input.callID}`,
+										);
+										continue;
+									}
+									const verdict = perTaskVerdicts.get(taskId);
+									const positiveVerdict =
+										targetAgent === 'reviewer'
+											? verdict === 'APPROVED'
+											: verdict === 'PASS';
+									if (!positiveVerdict) {
+										try {
+											const rejected = await transitionTaskWorkflowEvidence(
+												directory,
+												taskId,
+												{
+													type: 'stage_b_failed',
+													gate: targetAgent as 'reviewer' | 'test_engineer',
+													expectedGeneration: launchGeneration,
+													transitionId: `gate-failed:${input.callID}:${taskId}`,
+												},
+											);
+											session.taskWorkflowStates.set(taskId, 'rework_required');
+											session.stageBCompletion?.delete(taskId);
+											updateTaskWorkflowCache(
+												session,
+												taskId,
+												getTaskWorkflowSnapshot(rejected),
+											);
+										} catch (err) {
+											logger.warn(
+												`[delegation-gate] Stage B rejection could not be persisted for ${taskId}: ${err instanceof Error ? err.message : String(err)}`,
+											);
+										}
+										continue;
+									}
 									try {
 										const turbo = hasActiveTurboMode(input.sessionID);
 										const { recordGateEvidence } = await import(
@@ -4072,483 +4621,364 @@ export function createDelegationGateHook(
 											targetAgent as 'reviewer' | 'test_engineer',
 											input.sessionID,
 											turbo,
+											{
+												expectedGeneration: launchGeneration,
+												transitionId: `gate:${input.callID}:${taskId}`,
+											},
 										);
 									} catch (err) {
 										logger.warn(
-											`[delegation-gate] per-task evidence recording failed for ${taskId}: ${err instanceof Error ? err.message : String(err)}`,
+											`[delegation-gate] Stage B settlement rejected for ${taskId}: ${err instanceof Error ? err.message : String(err)}`,
 										);
+										continue;
 									}
-								}
+									recordStageBCompletion(
+										session,
+										taskId,
+										targetAgent as 'reviewer' | 'test_engineer',
+									);
 
-								const taskEvidence = await readTaskEvidence(directory, taskId);
-								const reviewerCompletesStageB =
-									targetAgent === 'reviewer' &&
-									taskEvidence?.test_engineer_exempt === true;
-								if (
-									hasBothStageBCompletions(session, taskId) ||
-									reviewerCompletesStageB
-								) {
-									// Barrier reached: both reviewer and test_engineer have completed.
-									// Advance through reviewer_run → tests_run in a single compound
-									// step so the state machine stays consistent.
-									try {
-										if (
-											eligibleState === 'coder_delegated' ||
-											eligibleState === 'pre_check_passed'
-										) {
-											advanceTaskState(session, taskId, 'reviewer_run', {
-												telemetrySessionId: input.sessionID,
-											});
-										}
-										advanceTaskState(session, taskId, 'tests_run', {
-											telemetrySessionId: input.sessionID,
-										});
-									} catch (err) {
-										logger.warn(
-											`[delegation-gate] toolAfter stage-b-parallel: could not advance ${taskId} (${eligibleState}) → tests_run: ${err instanceof Error ? err.message : String(err)}`,
-										);
-									}
-								} else {
-									// Intermediate advancement: advance state immediately when a
-									// single Stage B agent completes, without waiting for the barrier.
-									// This preserves the sequential-equivalent state machine contract:
-									//   coder_delegated → reviewer_run  (when reviewer completes)
-									//   reviewer_run → tests_run        (when test_engineer completes)
-									// The barrier path above handles the case where both complete
-									// while state is still coder_delegated (compound step).
-									try {
-										if (
-											targetAgent === 'reviewer' &&
-											(eligibleState === 'coder_delegated' ||
-												eligibleState === 'pre_check_passed')
-										) {
-											advanceTaskState(session, taskId, 'reviewer_run', {
-												telemetrySessionId: input.sessionID,
-											});
-										} else if (
-											targetAgent === 'test_engineer' &&
-											eligibleState === 'reviewer_run'
-										) {
+									const taskEvidence = await readTaskEvidence(
+										directory,
+										taskId,
+									);
+									const reviewerCompletesStageB =
+										targetAgent === 'reviewer' &&
+										taskEvidence?.test_engineer_exempt === true;
+									if (
+										hasBothStageBCompletions(session, taskId) ||
+										reviewerCompletesStageB
+									) {
+										// Barrier reached: both reviewer and test_engineer have completed.
+										// Advance through reviewer_run → tests_run in a single compound
+										// step so the state machine stays consistent.
+										try {
+											if (eligibleState === 'pre_check_passed') {
+												advanceTaskState(session, taskId, 'reviewer_run', {
+													telemetrySessionId: input.sessionID,
+												});
+											}
 											advanceTaskState(session, taskId, 'tests_run', {
 												telemetrySessionId: input.sessionID,
 											});
-										}
-									} catch (err) {
-										logger.warn(
-											`[delegation-gate] toolAfter stage-b-parallel intermediate: could not advance ${taskId} (${eligibleState}) after ${targetAgent}: ${err instanceof Error ? err.message : String(err)}`,
-										);
-									}
-								}
-							}
-
-							// Cross-session propagation for Stage B parallel path.
-							// Scoped to seedTaskId only — recording completion for every task
-							// in every other session would contaminate unrelated tasks.
-							const seedTaskId = getSeedTaskId(session);
-							if (seedTaskId) {
-								const seedEvidence = await readTaskEvidence(
-									directory,
-									seedTaskId,
-								);
-								const reviewerCompletesSeedStageB =
-									targetAgent === 'reviewer' &&
-									seedEvidence?.test_engineer_exempt === true;
-								for (const [, otherSession] of swarmState.agentSessions) {
-									if (otherSession === session) continue;
-									if (!otherSession.taskWorkflowStates) continue;
-
-									if (!otherSession.taskWorkflowStates.has(seedTaskId)) {
-										otherSession.taskWorkflowStates.set(
-											seedTaskId,
-											'coder_delegated',
-										);
-									}
-
-									const seedState =
-										otherSession.taskWorkflowStates.get(seedTaskId);
-									if (
-										!seedState ||
-										!(stageBEligibleStates as readonly string[]).includes(
-											seedState,
-										)
-									) {
-										continue;
-									}
-									const seedEligibleState = seedState as EligibleState;
-									recordStageBCompletion(
-										otherSession,
-										seedTaskId,
-										targetAgent as 'reviewer' | 'test_engineer',
-									);
-									if (
-										hasBothStageBCompletions(otherSession, seedTaskId) ||
-										reviewerCompletesSeedStageB
-									) {
-										try {
-											if (
-												seedEligibleState === 'coder_delegated' ||
-												seedEligibleState === 'pre_check_passed'
-											) {
-												advanceTaskState(
-													otherSession,
-													seedTaskId,
-													'reviewer_run',
-													{ emitTelemetry: false },
-												);
-											}
-											advanceTaskState(otherSession, seedTaskId, 'tests_run', {
-												emitTelemetry: false,
-											});
 										} catch (err) {
 											logger.warn(
-												`[delegation-gate] toolAfter cross-session stage-b-parallel: could not advance ${seedTaskId} (${seedEligibleState}) → tests_run: ${err instanceof Error ? err.message : String(err)}`,
+												`[delegation-gate] toolAfter stage-b-parallel: could not advance ${taskId} (${eligibleState}) → tests_run: ${err instanceof Error ? err.message : String(err)}`,
 											);
 										}
 									} else {
-										// Intermediate cross-session advancement (mirrors same-session logic)
+										// Intermediate advancement: advance state immediately when a
+										// single Stage B agent completes, without waiting for the barrier.
+										// This preserves the sequential-equivalent state machine contract:
+										//   coder_delegated → reviewer_run  (when reviewer completes)
+										//   reviewer_run → tests_run        (when test_engineer completes)
+										// The barrier path above handles the case where both complete
+										// while state is still coder_delegated (compound step).
 										try {
 											if (
 												targetAgent === 'reviewer' &&
-												(seedEligibleState === 'coder_delegated' ||
-													seedEligibleState === 'pre_check_passed')
+												eligibleState === 'pre_check_passed'
 											) {
-												advanceTaskState(
-													otherSession,
-													seedTaskId,
-													'reviewer_run',
-													{ emitTelemetry: false },
-												);
+												advanceTaskState(session, taskId, 'reviewer_run', {
+													telemetrySessionId: input.sessionID,
+												});
 											} else if (
 												targetAgent === 'test_engineer' &&
-												seedEligibleState === 'reviewer_run'
+												eligibleState === 'reviewer_run'
 											) {
-												advanceTaskState(
-													otherSession,
-													seedTaskId,
-													'tests_run',
-													{
-														emitTelemetry: false,
-													},
-												);
+												advanceTaskState(session, taskId, 'tests_run', {
+													telemetrySessionId: input.sessionID,
+												});
 											}
 										} catch (err) {
 											logger.warn(
-												`[delegation-gate] toolAfter cross-session stage-b-parallel intermediate: could not advance ${seedTaskId} (${seedEligibleState}) after ${targetAgent}: ${err instanceof Error ? err.message : String(err)}`,
+												`[delegation-gate] toolAfter stage-b-parallel intermediate: could not advance ${taskId} (${eligibleState}) after ${targetAgent}: ${err instanceof Error ? err.message : String(err)}`,
 											);
 										}
 									}
 								}
 							}
 						}
-					}
-				} // end if (!councilActive) — primary Stage B path
-			}
+					} // end if (!councilActive) — primary Stage B path
+				}
 
-			// Record gate evidence for stored-args path
-			// v6.33.7: Entire block wrapped in try-catch — getEvidenceTaskId can
-			// re-throw unexpected errors (EPERM, EBUSY on Windows) which previously
-			// escaped outside the evidence try-catch and propagated to safeHook.
-			if (typeof subagentType === 'string') {
-				try {
-					const mergedArgs = { ...(storedArgs ?? {}), ...directArgs };
-					const evidenceTaskId = await resolveEvidenceTaskId(
-						mergedArgs,
-						session,
-						directory,
-					);
-					if (evidenceTaskId) {
-						const turbo = hasActiveTurboMode(input.sessionID);
-						const gateAgents = [
-							'reviewer',
-							'test_engineer',
-							'docs',
-							'designer',
-							'critic',
-							'explorer',
-							'sme',
-						];
-						const targetAgentForEvidence = stripKnownSwarmPrefix(subagentType);
-						if (gateAgents.includes(targetAgentForEvidence)) {
-							const { recordGateEvidence } = await import('../gate-evidence');
-							await recordGateEvidence(
-								directory,
-								evidenceTaskId,
-								targetAgentForEvidence,
-								input.sessionID,
-								turbo,
-							);
-						} else {
-							const { recordAgentDispatch } = await import('../gate-evidence');
-							const taskChangeContext =
-								targetAgentForEvidence === 'coder'
-									? coderTaskChangeContextByCallID.get(input.callID)
-									: undefined;
-							const observedFiles = taskChangeContext
-								? (coderObservedFilesByCallID.get(input.callID) ??
-									changedFilesSinceSnapshot(
-										taskChangeContext.baseline.directory,
-										taskChangeContext.baseline,
-									))
-								: null;
-							await recordAgentDispatch(
-								directory,
-								evidenceTaskId,
-								targetAgentForEvidence,
-								turbo,
-								{
+				// Record gate evidence for stored-args path
+				// v6.33.7: Entire block wrapped in try-catch — getEvidenceTaskId can
+				// re-throw unexpected errors (EPERM, EBUSY on Windows) which previously
+				// escaped outside the evidence try-catch and propagated to safeHook.
+				if (typeof subagentType === 'string') {
+					try {
+						const mergedArgs = { ...(storedArgs ?? {}), ...directArgs };
+						const evidenceTaskId = await resolveEvidenceTaskId(
+							mergedArgs,
+							session,
+							directory,
+						);
+						if (evidenceTaskId) {
+							const turbo = hasActiveTurboMode(input.sessionID);
+							const gateAgents = [
+								'reviewer',
+								'test_engineer',
+								'docs',
+								'designer',
+								'critic',
+								'critic_sounding_board',
+								'explorer',
+								'sme',
+							];
+							const targetAgentForEvidence =
+								stripKnownSwarmPrefix(subagentType);
+							if (gateAgents.includes(targetAgentForEvidence)) {
+								if (
+									targetAgentForEvidence === 'reviewer' ||
+									targetAgentForEvidence === 'test_engineer'
+								) {
+									// Primary Stage B handling above is the sole verdict-aware writer.
+								} else {
+									const positiveGateSettlement =
+										!isTerminalFailure &&
+										((targetAgentForEvidence !== 'critic' &&
+											targetAgentForEvidence !== 'critic_sounding_board') ||
+											extractPlanCriticVerdict(_output) === 'APPROVED');
+									if (!positiveGateSettlement) {
+										throw new Error(
+											`TASK_GATE_NOT_SATISFIED: ${targetAgentForEvidence} did not return a trusted positive verdict`,
+										);
+									}
+									const { recordGateEvidence } = await import(
+										'../gate-evidence'
+									);
+									const gateLaunchGeneration = stageBDispatchGenerationsByCallID
+										.get(input.callID)
+										?.get(evidenceTaskId);
+									if (
+										TASK_GATE_AGENTS.has(targetAgentForEvidence) &&
+										gateLaunchGeneration === undefined
+									) {
+										throw new Error(
+											`TASK_WORKFLOW_GENERATION_REQUIRED: no launch binding for ${targetAgentForEvidence} task ${evidenceTaskId}`,
+										);
+									}
+									await recordGateEvidence(
+										directory,
+										evidenceTaskId,
+										targetAgentForEvidence,
+										input.sessionID,
+										turbo,
+										{
+											expectedGeneration: gateLaunchGeneration,
+											transitionId: `gate:${input.callID}:${evidenceTaskId}`,
+										},
+									);
+								}
+							} else {
+								const { getTaskWorkflowSnapshot, recordAgentDispatch } =
+									await import('../gate-evidence');
+								const taskChangeContext =
+									targetAgentForEvidence === 'coder'
+										? coderTaskChangeContextByCallID.get(input.callID)
+										: undefined;
+								const rawObservedFiles = taskChangeContext
+									? (coderObservedFilesByCallID.get(input.callID) ??
+										changedFilesSinceSnapshot(
+											taskChangeContext.baseline.directory,
+											taskChangeContext.baseline,
+										))
+									: null;
+								if (
+									targetAgentForEvidence === 'coder' &&
+									!Array.isArray(rawObservedFiles)
+								) {
+									throw new Error(
+										`CODER_SETTLEMENT_ATTRIBUTION_UNCERTAIN: shared-root task ${evidenceTaskId} changed files could not be proven from its clean launch baseline`,
+									);
+								}
+								const observedFiles =
+									taskChangeContext?.declaredFiles &&
+									Array.isArray(rawObservedFiles)
+										? rawObservedFiles.filter((filePath) =>
+												isPathWithinDeclaredScope(
+													filePath,
+													taskChangeContext.declaredFiles as string[],
+													taskChangeContext.baseline.directory,
+												),
+											)
+										: [];
+								const context = {
 									testEngineerExempt:
 										targetAgentForEvidence === 'coder' &&
 										isMarkdownOnlyTaskChange(
 											taskChangeContext?.declaredFiles,
 											observedFiles,
 										),
-								},
-							);
-						}
-					}
-				} catch (err) {
-					/* non-fatal — evidence is additive, never blocks delegation */
-					logger.log(
-						`[delegation-gate] evidence recording failed: ${err instanceof Error ? err.message : String(err)}`,
-					);
-				} finally {
-					if (stripKnownSwarmPrefix(subagentType) === 'coder') {
-						clearCoderTaskChangeContext(input.callID);
-					}
-				}
-			}
-
-			// Always clean up stored args if they exist, regardless of subagent_type validity
-			if (storedArgs !== undefined) {
-				deleteStoredInputArgs(input.callID);
-			}
-
-			// Fallback: use delegationChains if stored args not available.
-			// Also runs when councilActive so the chain scan can reset qaSkipCount
-			// after council members (reviewer + test_engineer) complete — the primary
-			// path sets hasReviewer=true which would otherwise suppress this scan.
-			if (!subagentType || !hasReviewer || councilActive) {
-				const delegationChain = swarmState.delegationChains.get(
-					input.sessionID,
-				);
-				if (delegationChain && delegationChain.length > 0) {
-					// Find the index of the last 'coder' entry in the chain
-					let lastCoderIndex = -1;
-					for (let i = delegationChain.length - 1; i >= 0; i--) {
-						const target = stripKnownSwarmPrefix(delegationChain[i].to);
-						if (target.includes('coder')) {
-							lastCoderIndex = i;
-							break;
-						}
-					}
-
-					// If no coder in chain, skip qaSkip reset but still scan the
-					// full chain for reviewer/test_engineer so state advancement
-					// can proceed (pure verification tasks have no coder delegation).
-					const searchStart = lastCoderIndex === -1 ? 0 : lastCoderIndex;
-
-					// Walk forward from coder index (or start of chain if no coder)
-					const afterCoder = delegationChain.slice(searchStart);
-					for (const delegation of afterCoder) {
-						const target = stripKnownSwarmPrefix(delegation.to);
-						if (target === 'reviewer') hasReviewer = true;
-						if (target === 'test_engineer') hasTestEngineer = true;
-					}
-
-					// Only reset qaSkip when BOTH have been seen since last coder
-					// (skip qaSkip reset entirely when there's no coder in chain).
-					// Council members include reviewer + test_engineer, so when
-					// councilActive is true the reset fires via the chain scan even
-					// though Stage B advancement is skipped below.
-					if (lastCoderIndex !== -1 && hasReviewer && hasTestEngineer) {
-						session.qaSkipCount = 0;
-						session.qaSkipTaskIds = [];
-					}
-
-					// When council_mode is enabled, per-task Stage B (reviewer + test_engineer
-					// barrier) is replaced by the council verdict path (submit_council_verdicts).
-					// Stage B delegations may still occur as part of the 5-member council dispatch,
-					// but they do not advance state through the Stage B barrier.
-					if (!councilActive) {
-						// Fallback Pass 1: advance states via delegationChains
-						if (
-							lastCoderIndex !== -1 &&
-							hasReviewer &&
-							session.taskWorkflowStates
-						) {
-							for (const [taskId, state] of session.taskWorkflowStates) {
-								if (
-									state === 'coder_delegated' ||
-									state === 'pre_check_passed'
-								) {
-									try {
-										advanceTaskState(session, taskId, 'reviewer_run');
-									} catch (err) {
-										logger.warn(
-											`[delegation-gate] fallback: could not advance ${taskId} (${state}) → reviewer_run: ${err instanceof Error ? err.message : String(err)}`,
-										);
-									}
-								}
-							}
-						}
-
-						// Fallback Pass 2: advance states via delegationChains
-						if (
-							lastCoderIndex !== -1 &&
-							hasReviewer &&
-							hasTestEngineer &&
-							session.taskWorkflowStates
-						) {
-							for (const [taskId, state] of session.taskWorkflowStates) {
-								if (state === 'reviewer_run') {
-									try {
-										advanceTaskState(session, taskId, 'tests_run');
-									} catch (err) {
-										logger.warn(
-											`[delegation-gate] fallback: could not advance ${taskId} (${state}) → tests_run: ${err instanceof Error ? err.message : String(err)}`,
-										);
-									}
-								}
-							}
-						}
-
-						// Fallback: Also advance states in OTHER sessions via delegationChains
-						if (lastCoderIndex !== -1 && hasReviewer) {
-							for (const [, otherSession] of swarmState.agentSessions) {
-								if (otherSession === session) continue;
-								if (!otherSession.taskWorkflowStates) continue;
-
-								// Seed task state in sessions that don't have an entry yet
-								const seedTaskId = getSeedTaskId(session);
-								if (
-									seedTaskId &&
-									!otherSession.taskWorkflowStates.has(seedTaskId)
-								) {
-									otherSession.taskWorkflowStates.set(
-										seedTaskId,
-										'coder_delegated',
-									);
-								}
-								for (const [taskId, state] of otherSession.taskWorkflowStates) {
-									if (
-										state === 'coder_delegated' ||
-										state === 'pre_check_passed'
-									) {
-										try {
-											advanceTaskState(otherSession, taskId, 'reviewer_run', {
-												emitTelemetry: false,
-											});
-										} catch (err) {
-											logger.warn(
-												`[delegation-gate] fallback cross-session: could not advance ${taskId} (${state}) → reviewer_run: ${err instanceof Error ? err.message : String(err)}`,
+								};
+								if (targetAgentForEvidence === 'coder') {
+									const accepted =
+										(!standardDispatch || !isTerminalFailure) &&
+										standardWorktreeSettled &&
+										Array.isArray(observedFiles) &&
+										observedFiles.length > 0;
+									let updated: Awaited<
+										ReturnType<typeof settleCoderDispatch>
+									>['evidence'];
+									if (standardDispatch && !isStandardWorktreeFailure) {
+										if (!coderSettlementCommitted || !coderSettlementEvidence) {
+											throw new Error(
+												`CODER_SETTLEMENT_NOT_COMMITTED: isolated merge for ${evidenceTaskId} did not durably publish accepted-mutation evidence`,
 											);
 										}
+										updated = coderSettlementEvidence;
+									} else {
+										const settlement = await settleCoderDispatch({
+											directory,
+											taskId: evidenceTaskId,
+											transitionId: `coder:${input.callID}`,
+											accepted,
+											testEngineerExempt: context.testEngineerExempt === true,
+											settlementFailed: !standardDispatch && isTerminalFailure,
+										});
+										updated = settlement.evidence;
+										coderSettlementCommitted = true;
 									}
-								}
-							}
-						}
-
-						if (lastCoderIndex !== -1 && hasReviewer && hasTestEngineer) {
-							for (const [, otherSession] of swarmState.agentSessions) {
-								if (otherSession === session) continue;
-								if (!otherSession.taskWorkflowStates) continue;
-
-								// Seed task state in sessions that don't have an entry yet
-								const seedTaskId = getSeedTaskId(session);
-								if (
-									seedTaskId &&
-									!otherSession.taskWorkflowStates.has(seedTaskId)
-								) {
-									otherSession.taskWorkflowStates.set(
-										seedTaskId,
-										'reviewer_run',
+									if (accepted) {
+										const workflow = getTaskWorkflowSnapshot(updated);
+										session.taskWorkflowStates.set(
+											evidenceTaskId,
+											workflow.state,
+										);
+										session.stageBCompletion?.delete(evidenceTaskId);
+										session.taskCouncilApproved?.delete(evidenceTaskId);
+										session.taskCouncilWorkflowGeneration?.delete(
+											evidenceTaskId,
+										);
+										updateTaskWorkflowCache(session, evidenceTaskId, workflow);
+									}
+								} else {
+									await recordAgentDispatch(
+										directory,
+										evidenceTaskId,
+										targetAgentForEvidence,
+										turbo,
+										context,
 									);
 								}
-								for (const [taskId, state] of otherSession.taskWorkflowStates) {
-									if (state === 'reviewer_run') {
-										try {
-											advanceTaskState(otherSession, taskId, 'tests_run', {
-												emitTelemetry: false,
-											});
-										} catch (err) {
-											logger.warn(
-												`[delegation-gate] fallback cross-session: could not advance ${taskId} (${state}) → tests_run: ${err instanceof Error ? err.message : String(err)}`,
-											);
-										}
-									}
-								}
 							}
 						}
-					} // end if (!councilActive) — fallback Stage B path
-				}
-
-				// Record gate evidence for delegation-chain fallback path
-				// v6.33.7: Entire block wrapped in try-catch (same fix as stored-args path)
-				try {
-					const evidenceTaskId = await resolveEvidenceTaskId(
-						directArgs,
-						session,
-						directory,
-					);
-					if (evidenceTaskId) {
-						const turbo = hasActiveTurboMode(input.sessionID);
-						if (hasReviewer) {
-							const { recordGateEvidence } = await import('../gate-evidence');
-							await recordGateEvidence(
-								directory,
-								evidenceTaskId,
-								'reviewer',
-								input.sessionID,
-								turbo,
-							);
-						}
-						if (hasTestEngineer) {
-							const { recordGateEvidence } = await import('../gate-evidence');
-							await recordGateEvidence(
-								directory,
-								evidenceTaskId,
-								'test_engineer',
-								input.sessionID,
-								turbo,
-							);
-						}
-					}
-				} catch (err) {
-					/* non-fatal — evidence is additive, never blocks delegation */
-					logger.log(
-						`[delegation-gate] fallback evidence recording failed: ${err instanceof Error ? err.message : String(err)}`,
-					);
-				}
-			}
-
-			// ── Completion gate: push advisory if a task awaits completion ──
-			// B3 (issue #1976): the `break` below only caps pushes to one per
-			// toolBefore invocation; without cross-invocation state, a task stuck
-			// in tests_run re-injected the identical directive on EVERY Task tool
-			// call. Track warned task IDs so the same stuck task warns once.
-			if (session.taskWorkflowStates) {
-				for (const [, state] of session.taskWorkflowStates) {
-					if (state === 'tests_run') {
-						const taskAwaiting = await findTaskAwaitingCompletion(
-							directory,
-							session,
+					} catch (err) {
+						const normalizedAgent = stripKnownSwarmPrefix(subagentType);
+						logger.warn(
+							`[delegation-gate] evidence recording failed: ${err instanceof Error ? err.message : String(err)}`,
 						);
-						if (
-							taskAwaiting &&
-							!session.completionGateWarnedForTask.has(taskAwaiting)
-						) {
+						if (normalizedAgent === 'coder') {
 							pushAdvisory(
 								session,
-								completionGateViolationMessage(taskAwaiting),
+								`CODER_SETTLEMENT_DURABILITY_FAILURE: task output remains fenced until accepted-mutation evidence for call ${input.callID} is recovered.`,
 							);
-							session.completionGateWarnedForTask.add(taskAwaiting);
+							throw err;
 						}
-						break; // only push once
+					} finally {
+						if (
+							stripKnownSwarmPrefix(subagentType) === 'coder' &&
+							coderSettlementCommitted
+						) {
+							clearCoderTaskChangeContext(input.callID);
+							clearPublishedScopeBindings(input.callID);
+						}
 					}
 				}
-			}
-			if (standardWorktreeSettled) {
-				_wtiInternals.removeWorktreeProvisioningOwner(directory, input.callID);
+
+				// Always clean up stored args if they exist, regardless of subagent_type validity
+				if (storedArgs !== undefined) {
+					deleteStoredInputArgs(input.callID);
+				}
+
+				// Fallback: use delegationChains if stored args not available.
+				// Also runs when councilActive so the chain scan can reset qaSkipCount
+				// after council members (reviewer + test_engineer) complete — the primary
+				// path sets hasReviewer=true which would otherwise suppress this scan.
+				if (!subagentType || !hasReviewer || councilActive) {
+					const delegationChain = swarmState.delegationChains.get(
+						input.sessionID,
+					);
+					if (delegationChain && delegationChain.length > 0) {
+						// Find the index of the last 'coder' entry in the chain
+						let lastCoderIndex = -1;
+						for (let i = delegationChain.length - 1; i >= 0; i--) {
+							const target = stripKnownSwarmPrefix(delegationChain[i].to);
+							if (target.includes('coder')) {
+								lastCoderIndex = i;
+								break;
+							}
+						}
+
+						// If no coder in chain, skip qaSkip reset but still scan the
+						// full chain for reviewer/test_engineer so state advancement
+						// can proceed (pure verification tasks have no coder delegation).
+						const searchStart = lastCoderIndex === -1 ? 0 : lastCoderIndex;
+
+						// Walk forward from coder index (or start of chain if no coder)
+						const afterCoder = delegationChain.slice(searchStart);
+						for (const delegation of afterCoder) {
+							const target = stripKnownSwarmPrefix(delegation.to);
+							if (target === 'reviewer') hasReviewer = true;
+							if (target === 'test_engineer') hasTestEngineer = true;
+						}
+
+						// Only reset qaSkip when BOTH have been seen since last coder
+						// (skip qaSkip reset entirely when there's no coder in chain).
+						// Council members include reviewer + test_engineer, so when
+						// councilActive is true the reset fires via the chain scan even
+						// though Stage B advancement is skipped below.
+						if (lastCoderIndex !== -1 && hasReviewer && hasTestEngineer) {
+							session.qaSkipCount = 0;
+							session.qaSkipTaskIds = [];
+						}
+					}
+				}
+
+				stageBDispatchGenerationsByCallID.delete(input.callID);
+				gateDispatchPrimaryTaskByCallID.delete(input.callID);
+
+				// ── Completion gate: push advisory if a task awaits completion ──
+				// B3 (issue #1976): the `break` below only caps pushes to one per
+				// toolBefore invocation; without cross-invocation state, a task stuck
+				// in tests_run re-injected the identical directive on EVERY Task tool
+				// call. Track warned task IDs so the same stuck task warns once.
+				if (session.taskWorkflowStates) {
+					for (const [, state] of session.taskWorkflowStates) {
+						if (state === 'tests_run') {
+							const taskAwaiting = await findTaskAwaitingCompletion(directory);
+							if (
+								taskAwaiting &&
+								!session.completionGateWarnedForTask.has(taskAwaiting)
+							) {
+								pushAdvisory(
+									session,
+									completionGateViolationMessage(taskAwaiting),
+								);
+								session.completionGateWarnedForTask.add(taskAwaiting);
+							}
+							break; // only push once
+						}
+					}
+				}
+				if (standardWorktreeSettled && coderSettlementCommitted) {
+					if (foregroundCoderTaskId) {
+						await completeCoderSettlementCleanup(
+							directory,
+							foregroundCoderTaskId,
+							`coder:${input.callID}`,
+						);
+					}
+				}
+			} finally {
+				if (foregroundCoderTaskId) {
+					releaseCoderDispatchOwnership(
+						directory,
+						foregroundCoderTaskId,
+						`coder:${input.callID}`,
+					);
+				}
 			}
 		}
 	};
@@ -4687,27 +5117,14 @@ export function createDelegationGateHook(
 				session.lastCoderDelegationTaskId = currentTaskId;
 
 				// v6.21 Task 5.3: Extract FILE: directive values → declaredCoderScope
-				const directives = extractTaskFileDirectives({ prompt: text });
+				const directives = extractTaskFileDirectives(
+					{ prompt: text },
+					'observe',
+				);
 				session.declaredCoderScope = directives.files;
 
-				// OBSERVE-ONLY (Phase 2): Record coder delegation in task state machine for telemetry.
-				// Error swallowing is intentional — Phase 3 enforcement gates will check state directly
-				// at enforcement time. A transition failure here means state is already recorded or a
-				// re-delegation occurred; the gate continues correctly regardless.
-				try {
-					await advanceTaskStateAndPersist(
-						session,
-						currentTaskId,
-						'coder_delegated',
-						directory,
-						{ telemetrySessionId: sessionID },
-					);
-				} catch (err) {
-					// INVALID_TASK_STATE_TRANSITION is non-fatal in Phase 2 (observe-only)
-					logger.warn(
-						`[delegation-gate] state machine warn: ${err instanceof Error ? err.message : String(err)}`,
-					);
-				}
+				// Dispatch text is only an attempt. Durable workflow debt is created
+				// after tool settlement proves a non-empty accepted mutation.
 			}
 
 			// Step 4: Run zero-coder-delegation warning only if:
@@ -4757,10 +5174,8 @@ export function createDelegationGateHook(
 							deliberationSessionID,
 							deliberationSession,
 						);
-						const taskAwaitingCompletion = await findTaskAwaitingCompletion(
-							directory,
-							deliberationSession,
-						);
+						const taskAwaitingCompletion =
+							await findTaskAwaitingCompletion(directory);
 						let guidance: string;
 						if (taskAwaitingCompletion) {
 							guidance =

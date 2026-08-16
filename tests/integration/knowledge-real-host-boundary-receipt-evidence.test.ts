@@ -148,8 +148,7 @@ describe('issue #1849 — real-host receipt evidence through src/index.ts', () =
 			expect(traceId).toBeTruthy();
 			if (!traceId) throw new Error('injected directive lacks trace_id');
 			await seedTrace(dir, traceId, ['a1b2c3d4-e2e5-4184-9abc-def012345678']);
-			terminalOutput =
-				'Done.\nKNOWLEDGE_APPLIED:a1b2c3d4-e2e5-4184-9abc-def012345678';
+			terminalOutput = `Done.\nKNOWLEDGE_APPLIED:${encodeURIComponent(traceId)}:${encodeURIComponent('a1b2c3d4-e2e5-4184-9abc-def012345678')}`;
 		} finally {
 			// The real host emits exactly one terminal posthook per successful prehook.
 			await plugin.hooks['tool.execute.after'](
@@ -169,7 +168,7 @@ describe('issue #1849 — real-host receipt evidence through src/index.ts', () =
 		expect(applied.length).toBeGreaterThanOrEqual(1);
 	});
 
-	test('12. (#PRR-004) knowledge_receipt writes a PromotionEvidenceRecord readable by loadPromotionEvidenceByEntry', async () => {
+	test('12. knowledge_receipt exposes authoritative V2 promotion evidence', async () => {
 		const traceId = 'trace-1849-promo';
 		const promoId = 'd1e2f3a4-b5c6-4789-9abc-def01234567e';
 		await seedTrace(dir, traceId, [promoId]);
@@ -191,7 +190,6 @@ describe('issue #1849 — real-host receipt evidence through src/index.ts', () =
 		expect(out.recorded).toBe(true);
 		// Read the events log to get the actual applied event_id (for PRR-001 exact
 		// pairing assertion below).
-		const events = await readKnowledgeEvents(dir);
 		// Read the promotion-evidence store back and verify the record exists.
 		const { loadPromotionEvidenceByEntry } = await import(
 			'../../src/hooks/promotion-evidence-store'
@@ -209,10 +207,15 @@ describe('issue #1849 — real-host receipt evidence through src/index.ts', () =
 		// applied event's event_id in the knowledge-events log — not just be
 		// truthy. This pins the per-item eventIdByKnowledgeId map against the
 		// old fragile cursor arithmetic.
-		const appliedEvent = events.find(
-			(e) => e.type === 'applied' && e.knowledge_id === promoId,
+		const { queryHistoricalOutcomes } = await import(
+			'../../src/hooks/knowledge-receipt-ledger'
 		);
-		expect(appliedEvent).toBeDefined();
-		expect(appliedEvent?.event_id).toBe(rec.receipt_event_id);
+		const history = await queryHistoricalOutcomes(dir, [promoId]);
+		expect(history.ok).toBe(true);
+		if (!history.ok) return;
+		const terminal = history.memberships.find(
+			(membership) => membership.trace_id === traceId,
+		)?.terminal;
+		expect(terminal?.event_id).toBe(rec.receipt_event_id);
 	});
 });

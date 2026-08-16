@@ -283,6 +283,29 @@ describe('persisted PR-review trigger receipts', () => {
 		expect(() => parsePrReviewTriggerReceipt(rowWithUnknownField)).toThrow();
 	});
 
+	test('parses a pre-degradation v2 receipt lacking coverage_degradations', () => {
+		// Forward compatibility: receipts persisted before the recoverability
+		// change carry no coverage_degradations key; the strict v2 schema must
+		// default it to an empty array rather than reject the receipt.
+		const receipt = buildPrReviewTriggerReceiptV2({
+			run_id: 'run-coverage-omit',
+			pr_head_sha: 'a'.repeat(40),
+			base_ref: 'origin/main',
+			base_sha: 'b'.repeat(40),
+			evaluated_at: '2026-08-02T00:00:00.000Z',
+			dispatched_micro_lane_count: 4,
+			rows: persistedRows(),
+		});
+		const withoutDegradations = {
+			...receipt,
+			coverage_degradations: undefined,
+		} as Record<string, unknown>;
+		delete withoutDegradations.coverage_degradations;
+		const parsed = parsePrReviewTriggerReceipt(withoutDegradations);
+		expect(parsed.coverageDegradations).toEqual([]);
+		expect(parsed.matchedRows.length).toBe(receipt.matched_count);
+	});
+
 	test.each([
 		'scope',
 		'trigger_row',
