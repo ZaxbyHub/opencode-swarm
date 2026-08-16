@@ -32,6 +32,12 @@ import * as leanState from '../../../../src/turbo/lean/state';
 import { isTransientProviderError } from '../../../../src/utils/provider-error-classification';
 
 const SESSION_ID = 'sess-lane-scope-wiring';
+const WINDOWS_RETRYABLE_RM_CODES = new Set([
+	'EBUSY',
+	'EPERM',
+	'EACCES',
+	'ENOTEMPTY',
+]);
 
 let tmpDir: string;
 let originals: Partial<typeof LeanTurboRunner._internals>;
@@ -97,6 +103,31 @@ function injectSessionOps(
 	(runner as unknown as { _sessionOps: unknown })._sessionOps = ops;
 }
 
+async function removeDirWithWindowsRetry(directory: string): Promise<void> {
+	for (let attempt = 0; attempt < 5; attempt += 1) {
+		try {
+			fs.rmSync(directory, { recursive: true, force: true });
+			return;
+		} catch (error) {
+			const code =
+				typeof error === 'object' &&
+				error !== null &&
+				'code' in error &&
+				typeof error.code === 'string'
+					? error.code
+					: '';
+			if (
+				process.platform !== 'win32' ||
+				!WINDOWS_RETRYABLE_RM_CODES.has(code) ||
+				attempt === 4
+			) {
+				throw error;
+			}
+			await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
+		}
+	}
+}
+
 beforeEach(() => {
 	resetSwarmState();
 	clearScopeBindings();
@@ -146,7 +177,7 @@ beforeEach(() => {
 	) as never;
 });
 
-afterEach(() => {
+afterEach(async () => {
 	for (const [key, value] of Object.entries(originals)) {
 		(LeanTurboRunner._internals as Record<string, unknown>)[key] = value;
 	}
@@ -154,7 +185,7 @@ afterEach(() => {
 	resetSwarmState();
 	leanState.repairStateUnreadable(tmpDir);
 	try {
-		fs.rmSync(tmpDir, { recursive: true, force: true });
+		await removeDirWithWindowsRetry(tmpDir);
 	} catch {
 		/* best-effort */
 	}
@@ -285,7 +316,7 @@ describe('runner publishes lane write authority (#2002)', () => {
 				}),
 			).toBeNull();
 		} finally {
-			fs.rmSync(laneRoot, { recursive: true, force: true });
+			await removeDirWithWindowsRetry(laneRoot);
 		}
 	});
 

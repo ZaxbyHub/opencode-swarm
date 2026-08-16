@@ -1,7 +1,4 @@
-import { mkdir, readFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
 import type { Plan } from '../config/plan-schema.js';
-import { atomicWriteFile } from '../evidence/task-file.js';
 import {
 	getTaskWorkflowSnapshot,
 	type TaskEvidence,
@@ -9,81 +6,31 @@ import {
 } from '../gate-evidence.js';
 import { validateSwarmPath } from '../hooks/utils.js';
 import { tryAcquireLock } from '../parallel/file-locks.js';
-import { replayFromLedgerWithStatus } from '../plan/ledger.js';
+import {
+	readPlanEpochIdentity,
+	replayFromLedgerWithStatus,
+} from '../plan/ledger.js';
 import { loadPlanJsonOnly, updateTaskStatus } from '../plan/manager.js';
-import type { TaskWorkflowState } from '../state.js';
 import { assertNoUnsettledCoderDispatch } from './coder-settlement.js';
-
-type TerminalPlanStatus = 'blocked' | 'completed';
-type TerminalWorkflowState = 'blocked' | 'complete';
-type TerminalWalState = 'ABORTED' | 'COMMITTED' | 'PREPARED';
-
-interface TaskTerminalWal {
-	version: 1;
-	state: TerminalWalState;
-	taskId: string;
-	transitionId: string;
-	actor: string;
-	oldPlanStatus: string;
-	newPlanStatus: TerminalPlanStatus;
-	oldWorkflowState: TaskWorkflowState;
-	newWorkflowState: TerminalWorkflowState;
-	generation: number;
-	qaExempt: boolean;
-	recordedAt: string;
-}
+import {
+	readWorkflowWalFile,
+	writeWorkflowWalFile,
+} from './workflow-wal-file.js';
+import type {
+	TaskTerminalWal,
+	TerminalPlanStatus,
+} from './workflow-wal-schema.js';
 
 export interface TaskTerminalResult<TPlan> {
 	plan: TPlan;
 	evidence: TaskEvidence;
 	alreadyApplied: boolean;
 	transitionId: string;
+	targetStatus: TerminalPlanStatus;
 }
 
-async function readText(filePath: string): Promise<string | null> {
-	try {
-		return await readFile(filePath, 'utf-8');
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
-		throw error;
-	}
-}
-
-function parseWal(raw: string): TaskTerminalWal {
-	const parsed = JSON.parse(raw) as Partial<TaskTerminalWal>;
-	if (
-		parsed.version !== 1 ||
-		(parsed.state !== 'PREPARED' &&
-			parsed.state !== 'COMMITTED' &&
-			parsed.state !== 'ABORTED') ||
-		typeof parsed.taskId !== 'string' ||
-		typeof parsed.transitionId !== 'string' ||
-		typeof parsed.actor !== 'string' ||
-		typeof parsed.oldPlanStatus !== 'string' ||
-		(parsed.newPlanStatus !== 'completed' &&
-			parsed.newPlanStatus !== 'blocked') ||
-		typeof parsed.oldWorkflowState !== 'string' ||
-		(parsed.newWorkflowState !== 'complete' &&
-			parsed.newWorkflowState !== 'blocked') ||
-		!Number.isInteger(parsed.generation) ||
-		typeof parsed.qaExempt !== 'boolean' ||
-		typeof parsed.recordedAt !== 'string'
-	) {
-		throw new Error('TASK_TERMINAL_WAL_CORRUPT');
-	}
-	if (
-		(parsed.newPlanStatus === 'completed') !==
-		(parsed.newWorkflowState === 'complete')
-	) {
-		throw new Error('TASK_TERMINAL_WAL_STATE_MISMATCH');
-	}
-	return parsed as TaskTerminalWal;
-}
-
-async function writeWal(filePath: string, wal: TaskTerminalWal): Promise<void> {
-	await mkdir(dirname(filePath), { recursive: true });
-	await atomicWriteFile(filePath, `${JSON.stringify(wal, null, 2)}\n`);
-}
+const writeWal = (filePath: string, wal: TaskTerminalWal): Promise<void> =>
+	writeWorkflowWalFile('task-terminal', filePath, wal);
 
 function evidenceMatchesTerminal(
 	evidence: TaskEvidence | null,
@@ -110,16 +57,106 @@ async function applyTerminalEvidence(
 					expectedGeneration: wal.generation,
 					transitionId: wal.transitionId,
 				}
-			: {
-					type: 'task_blocked',
-					expectedGeneration: wal.generation,
-					transitionId: wal.transitionId,
-				},
+			: wal.newPlanStatus === 'blocked'
+				? {
+						type: 'task_blocked',
+						expectedGeneration: wal.generation,
+						transitionId: wal.transitionId,
+					}
+				: {
+						type: 'task_closed',
+						expectedGeneration: wal.generation,
+						transitionId: wal.transitionId,
+					},
 	);
 }
 
 /** Narrow dependency-injection seam for crash-window failure tests. */
 export const _internals = { applyTerminalEvidence };
+
+async function recoverPreparedTaskTerminalWithPlanLock(
+	directory: string,
+	taskId: string,
+	actor: string,
+	currentPlan: Plan,
+): Promise<TaskTerminalResult<Plan> | null> {
+	const walPath = validateSwarmPath(directory, `task-terminals/${taskId}.json`);
+	const observedWal = await readWorkflowWalFile(
+		'task-terminal',
+		walPath,
+		taskId,
+	);
+	if (observedWal === null) return null;
+	if (observedWal.state !== 'PREPARED') return null;
+	let plan: Plan = currentPlan;
+
+	return withTaskEvidenceTransaction(
+		directory,
+		taskId,
+		actor,
+		async (transaction) => {
+			// The first read is only an inexpensive exact-path fast path. The WAL
+			// is authoritative only after both plan and evidence locks are held.
+			const wal = await readWorkflowWalFile('task-terminal', walPath, taskId);
+			if (wal === null) return null;
+			if (wal.state !== 'PREPARED') return null;
+			if (wal.version === 2) {
+				const identity = await readPlanEpochIdentity(directory, plan);
+				if (
+					!identity ||
+					identity.planIdentityHash !== wal.planIdentityHash ||
+					identity.planEpoch !== wal.planEpoch
+				) {
+					throw new Error(
+						`TASK_TERMINAL_PLAN_IDENTITY_MISMATCH: ${walPath} belongs to a different plan epoch`,
+					);
+				}
+			}
+			const task = plan.phases
+				.flatMap((phase) => phase.tasks)
+				.find((candidate) => candidate.id === taskId);
+			if (!task) throw new Error(`TASK_TERMINAL_TASK_MISSING: ${taskId}`);
+			const evidence = transaction.read();
+			const workflow = getTaskWorkflowSnapshot(evidence);
+			const evidenceAlreadyTerminal = evidenceMatchesTerminal(evidence, wal);
+			if (
+				wal.version === 1 &&
+				task.status === wal.oldPlanStatus &&
+				workflow.state === wal.oldWorkflowState &&
+				workflow.generation === wal.generation
+			) {
+				await writeWal(walPath, { ...wal, state: 'ABORTED' });
+				return null;
+			}
+			if (task.status === wal.oldPlanStatus && evidenceAlreadyTerminal) {
+				plan = await updateTaskStatus(directory, taskId, wal.newPlanStatus, {
+					planLockAlreadyHeld: true,
+					terminalReconciliation: wal.version === 2,
+				});
+			} else if (wal.version === 2 && task.status === wal.oldPlanStatus) {
+				plan = await updateTaskStatus(directory, taskId, wal.newPlanStatus, {
+					planLockAlreadyHeld: true,
+					terminalReconciliation: true,
+				});
+			} else if (task.status !== wal.newPlanStatus) {
+				throw new Error(
+					`TASK_TERMINAL_PLAN_CAS_MISMATCH: expected ${wal.oldPlanStatus} or ${wal.newPlanStatus}, found ${task.status}`,
+				);
+			}
+			const nextEvidence = evidenceAlreadyTerminal
+				? (evidence as TaskEvidence)
+				: await _internals.applyTerminalEvidence(transaction, wal);
+			await writeWal(walPath, { ...wal, state: 'COMMITTED' });
+			return {
+				plan,
+				evidence: nextEvidence,
+				alreadyApplied: evidenceAlreadyTerminal,
+				transitionId: wal.transitionId,
+				targetStatus: wal.newPlanStatus,
+			};
+		},
+	);
+}
 
 /**
  * Lazily close the only recoverable terminal crash window: the plan was
@@ -133,13 +170,12 @@ export async function recoverPreparedTaskTerminal(
 	actor: string,
 ): Promise<TaskTerminalResult<Plan> | null> {
 	const walPath = validateSwarmPath(directory, `task-terminals/${taskId}.json`);
-	const raw = await readText(walPath);
-	if (raw === null) return null;
-	const observedWal = parseWal(raw);
-	if (observedWal.taskId !== taskId)
-		throw new Error('TASK_TERMINAL_WAL_TASK_MISMATCH');
-	if (observedWal.state !== 'PREPARED') return null;
-
+	const observedWal = await readWorkflowWalFile(
+		'task-terminal',
+		walPath,
+		taskId,
+	);
+	if (observedWal === null || observedWal.state !== 'PREPARED') return null;
 	const lock = await tryAcquireLock(
 		directory,
 		'plan.json',
@@ -156,60 +192,29 @@ export async function recoverPreparedTaskTerminal(
 		if (replay.truncated) throw new Error('TASK_TERMINAL_LEDGER_TRUNCATED');
 		const loadedPlan = replay.plan ?? (await loadPlanJsonOnly(directory));
 		if (!loadedPlan) throw new Error('TASK_TERMINAL_PLAN_MISSING');
-		let plan: Plan = loadedPlan;
-
-		return withTaskEvidenceTransaction(
+		return await recoverPreparedTaskTerminalWithPlanLock(
 			directory,
 			taskId,
 			actor,
-			async (transaction) => {
-				// The first read is only an inexpensive exact-path fast path. The WAL
-				// is authoritative only after both plan and evidence locks are held.
-				const lockedRaw = await readText(walPath);
-				if (lockedRaw === null) return null;
-				const wal = parseWal(lockedRaw);
-				if (wal.taskId !== taskId)
-					throw new Error('TASK_TERMINAL_WAL_TASK_MISMATCH');
-				if (wal.state !== 'PREPARED') return null;
-				const task = plan.phases
-					.flatMap((phase) => phase.tasks)
-					.find((candidate) => candidate.id === taskId);
-				if (!task) throw new Error(`TASK_TERMINAL_TASK_MISSING: ${taskId}`);
-				const evidence = transaction.read();
-				const workflow = getTaskWorkflowSnapshot(evidence);
-				const evidenceAlreadyTerminal = evidenceMatchesTerminal(evidence, wal);
-				if (
-					task.status === wal.oldPlanStatus &&
-					workflow.state === wal.oldWorkflowState &&
-					workflow.generation === wal.generation
-				) {
-					await writeWal(walPath, { ...wal, state: 'ABORTED' });
-					return null;
-				}
-				if (task.status === wal.oldPlanStatus && evidenceAlreadyTerminal) {
-					plan = await updateTaskStatus(directory, taskId, wal.newPlanStatus, {
-						planLockAlreadyHeld: true,
-					});
-				} else if (task.status !== wal.newPlanStatus) {
-					throw new Error(
-						`TASK_TERMINAL_PLAN_CAS_MISMATCH: expected ${wal.oldPlanStatus} or ${wal.newPlanStatus}, found ${task.status}`,
-					);
-				}
-				const nextEvidence = evidenceAlreadyTerminal
-					? (evidence as TaskEvidence)
-					: await _internals.applyTerminalEvidence(transaction, wal);
-				await writeWal(walPath, { ...wal, state: 'COMMITTED' });
-				return {
-					plan,
-					evidence: nextEvidence,
-					alreadyApplied: evidenceAlreadyTerminal,
-					transitionId: wal.transitionId,
-				};
-			},
+			loadedPlan,
 		);
 	} finally {
 		if (lock.lock._release) await lock.lock._release().catch(() => {});
 	}
+}
+
+export async function recoverPreparedTaskTerminalUnderPlanLock(
+	directory: string,
+	taskId: string,
+	actor: string,
+	currentPlan: Plan,
+): Promise<TaskTerminalResult<Plan> | null> {
+	return recoverPreparedTaskTerminalWithPlanLock(
+		directory,
+		taskId,
+		actor,
+		currentPlan,
+	);
 }
 
 /** Commit a terminal plan/evidence transition while the caller holds plan.json. */
@@ -221,9 +226,16 @@ export async function commitTaskTerminalUnderPlanLock<TPlan>(options: {
 	currentPlanStatus: string;
 	targetStatus: TerminalPlanStatus;
 	qaExempt: boolean;
+	resolveTerminal?: (evidence: TaskEvidence | null) => {
+		targetStatus: TerminalPlanStatus;
+		qaExempt: boolean;
+		preserveEvidence?: boolean;
+	};
+	planIdentityHash?: string;
+	planEpoch?: string;
 	currentPlan: TPlan;
 	validateEvidence?: (evidence: TaskEvidence | null) => Promise<void> | void;
-	updatePlan: () => Promise<TPlan>;
+	updatePlan: (targetStatus: TerminalPlanStatus) => Promise<TPlan>;
 }): Promise<TaskTerminalResult<TPlan>> {
 	const walPath = validateSwarmPath(
 		options.directory,
@@ -238,8 +250,15 @@ export async function commitTaskTerminalUnderPlanLock<TPlan>(options: {
 			const evidence = transaction.read();
 			const workflow = getTaskWorkflowSnapshot(evidence);
 			await options.validateEvidence?.(evidence);
-			const raw = await readText(walPath);
-			let existingWal = raw === null ? null : parseWal(raw);
+			const terminal = options.resolveTerminal?.(evidence) ?? {
+				targetStatus: options.targetStatus,
+				qaExempt: options.qaExempt,
+			};
+			let existingWal = await readWorkflowWalFile(
+				'task-terminal',
+				walPath,
+				options.taskId,
+			);
 			if (existingWal?.state === 'ABORTED') existingWal = null;
 			if (existingWal && existingWal.taskId !== options.taskId) {
 				throw new Error('TASK_TERMINAL_WAL_TASK_MISMATCH');
@@ -250,9 +269,18 @@ export async function commitTaskTerminalUnderPlanLock<TPlan>(options: {
 				);
 			}
 			if (
+				existingWal?.version === 2 &&
+				(existingWal.planIdentityHash !== options.planIdentityHash ||
+					existingWal.planEpoch !== options.planEpoch)
+			) {
+				throw new Error(
+					`TASK_TERMINAL_PLAN_IDENTITY_MISMATCH: ${walPath} belongs to a different plan epoch`,
+				);
+			}
+			if (
 				existingWal?.state === 'COMMITTED' &&
 				existingWal.transitionId === options.transitionId &&
-				existingWal.newPlanStatus === options.targetStatus &&
+				existingWal.newPlanStatus === terminal.targetStatus &&
 				evidenceMatchesTerminal(evidence, existingWal)
 			) {
 				return {
@@ -260,27 +288,80 @@ export async function commitTaskTerminalUnderPlanLock<TPlan>(options: {
 					evidence: evidence as TaskEvidence,
 					alreadyApplied: true,
 					transitionId: options.transitionId,
+					targetStatus: existingWal.newPlanStatus,
+				};
+			}
+			if (terminal.preserveEvidence) {
+				if (!evidence || !workflow.authoritative) {
+					throw new Error('TASK_TERMINAL_AUTHORITATIVE_EVIDENCE_REQUIRED');
+				}
+				const expectedState =
+					terminal.targetStatus === 'completed'
+						? 'complete'
+						: terminal.targetStatus === 'closed'
+							? 'closed'
+							: 'blocked';
+				if (workflow.state !== expectedState) {
+					throw new Error(
+						`TASK_TERMINAL_EVIDENCE_STATE_MISMATCH: expected ${expectedState}, found ${workflow.state}`,
+					);
+				}
+				const plan =
+					options.currentPlanStatus === terminal.targetStatus
+						? options.currentPlan
+						: await options.updatePlan(terminal.targetStatus);
+				return {
+					plan,
+					evidence,
+					alreadyApplied: true,
+					transitionId: workflow.lastTransitionId ?? options.transitionId,
+					targetStatus: terminal.targetStatus,
 				};
 			}
 
+			if (
+				terminal.targetStatus === 'closed' &&
+				(!options.planIdentityHash || !options.planEpoch)
+			) {
+				throw new Error('TASK_TERMINAL_PLAN_IDENTITY_REQUIRED');
+			}
 			const newWorkflowState =
-				options.targetStatus === 'completed' ? 'complete' : 'blocked';
-			const wal: TaskTerminalWal = {
-				version: 1,
-				state: 'PREPARED',
+				terminal.targetStatus === 'completed'
+					? 'complete'
+					: terminal.targetStatus === 'blocked'
+						? 'blocked'
+						: 'closed';
+			const baseWal = {
+				state: 'PREPARED' as const,
 				taskId: options.taskId,
 				transitionId: options.transitionId,
 				actor: options.actor,
 				oldPlanStatus: options.currentPlanStatus,
-				newPlanStatus: options.targetStatus,
+				newPlanStatus: terminal.targetStatus,
 				oldWorkflowState: workflow.state,
 				newWorkflowState,
 				generation: workflow.generation,
-				qaExempt: options.qaExempt,
+				qaExempt: terminal.qaExempt,
 				recordedAt: new Date().toISOString(),
 			};
+			const wal: TaskTerminalWal =
+				options.planIdentityHash && options.planEpoch
+					? {
+							...baseWal,
+							version: 2,
+							newPlanStatus: terminal.targetStatus as 'closed' | 'completed',
+							newWorkflowState: newWorkflowState as 'closed' | 'complete',
+							planIdentityHash: options.planIdentityHash,
+							planEpoch: options.planEpoch,
+						}
+					: {
+							...baseWal,
+							version: 1,
+							newPlanStatus: terminal.targetStatus as 'blocked' | 'completed',
+							newWorkflowState: newWorkflowState as 'blocked' | 'complete',
+						};
 			await writeWal(walPath, wal);
-			const plan = await options.updatePlan();
+			const plan = await options.updatePlan(terminal.targetStatus);
 			const nextEvidence = await _internals.applyTerminalEvidence(
 				transaction,
 				wal,
@@ -291,6 +372,7 @@ export async function commitTaskTerminalUnderPlanLock<TPlan>(options: {
 				evidence: nextEvidence,
 				alreadyApplied: false,
 				transitionId: options.transitionId,
+				targetStatus: terminal.targetStatus,
 			};
 		},
 	);

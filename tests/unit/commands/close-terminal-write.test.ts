@@ -215,11 +215,11 @@ describe('handleCloseCommand — terminal state uses closePlanTerminalState (reg
 		});
 		expect(call[2]).toMatchObject({
 			closedPhaseIds: expect.arrayContaining([1]),
-			closedTaskIds: expect.arrayContaining(['1.1']),
+			requestedClosedTaskIds: expect.arrayContaining(['1.1']),
 		});
 	});
 
-	it('closePlanTerminalState is NOT called when plan already has all phases complete', async () => {
+	it('reconciles exact evidence even when plan already has all phases complete', async () => {
 		// Write a plan where all phases are already 'complete'
 		const plan = {
 			title: 'Already Done',
@@ -249,10 +249,11 @@ describe('handleCloseCommand — terminal state uses closePlanTerminalState (reg
 
 		await handleCloseCommand(testDir, []);
 
-		// When plan is already done, closePlanTerminalState should NOT be called
-		// because there's nothing to close — the plan is already terminal
-		// The condition at close.ts:631-634 requires new closures
-		expect(mockClosePlanTerminalState).not.toHaveBeenCalled();
+		expect(mockClosePlanTerminalState).toHaveBeenCalledTimes(1);
+		expect(mockClosePlanTerminalState.mock.calls[0]?.[2]).toMatchObject({
+			requestedClosedTaskIds: [],
+			closedPhaseIds: [],
+		});
 	});
 
 	it('closePlanTerminalState IS called when plan is done but has newly closed items via --force', async () => {

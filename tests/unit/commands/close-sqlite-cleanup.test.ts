@@ -19,6 +19,7 @@ import path from 'node:path';
 import { loadDatabaseCtor } from '../../../src/db/sqlite-loader.js';
 import * as actualEvidenceManager from '../../../src/evidence/manager.js';
 import * as actualKnowledgeCurator from '../../../src/hooks/knowledge-curator.js';
+import { savePlan } from '../../../src/plan/manager.js';
 import * as actualState from '../../../src/state.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
@@ -99,14 +100,14 @@ afterEach(() => {
 	mock.restore();
 });
 
-function writePlan(): void {
-	writeFileSync(
-		path.join(swarmDir(), 'plan.json'),
-		JSON.stringify({
-			title: 'SQLite Cleanup',
-			phases: [{ id: 1, name: 'P1', status: 'complete', tasks: [] }],
-		}),
-	);
+async function writePlan(): Promise<void> {
+	await savePlan(testDir, {
+		title: 'SQLite Cleanup',
+		swarm: 'sqlite-cleanup',
+		schema_version: '1.0.0',
+		current_phase: 1,
+		phases: [{ id: 1, name: 'P1', status: 'complete', tasks: [] }],
+	});
 }
 
 function getLatestArchivePath(): string {
@@ -136,7 +137,7 @@ function writeRealSwarmDb(): void {
 
 describe('swarm.db cleanup (swarm.db, swarm.db-shm, swarm.db-wal)', () => {
 	it('archives and removes swarm.db', async () => {
-		writePlan();
+		await writePlan();
 		writeRealSwarmDb();
 
 		await handleCloseCommand(testDir, []);
@@ -147,7 +148,7 @@ describe('swarm.db cleanup (swarm.db, swarm.db-shm, swarm.db-wal)', () => {
 	});
 
 	it('preserves swarm.db-shm (not archived, not cleaned)', async () => {
-		writePlan();
+		await writePlan();
 		writeFileSync(
 			path.join(swarmDir(), 'swarm.db-shm'),
 			Buffer.from('shm content'),
@@ -165,7 +166,7 @@ describe('swarm.db cleanup (swarm.db, swarm.db-shm, swarm.db-wal)', () => {
 	});
 
 	it('preserves swarm.db-wal (not archived, not cleaned)', async () => {
-		writePlan();
+		await writePlan();
 		writeFileSync(
 			path.join(swarmDir(), 'swarm.db-wal'),
 			Buffer.from('wal content'),
@@ -179,7 +180,7 @@ describe('swarm.db cleanup (swarm.db, swarm.db-shm, swarm.db-wal)', () => {
 	});
 
 	it('swarm.db is archived with correct content; -shm/-wal sidecars are not archived', async () => {
-		writePlan();
+		await writePlan();
 		// Real WAL-mode DB with a committed row so the VACUUM INTO snapshot
 		// has verifiable content (issue #2030: the archive must contain
 		// committed rows, not a stale main-file shell).

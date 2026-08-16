@@ -10,6 +10,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { readKnowledgeEvents } from '../../src/hooks/knowledge-events.js';
 import { commitDisplayedMembership } from '../../src/hooks/knowledge-receipt-ledger.js';
@@ -39,10 +40,8 @@ function entryLine(id: string, priority: string): string {
 	});
 }
 
-function createRelativeTempDir(): string {
-	const baseDir = 'tmp';
-	if (!fs.existsSync(baseDir)) fs.mkdirSync(baseDir, { recursive: true });
-	return fs.mkdtempSync(path.join(baseDir, 'escalation-e2e-'));
+function createTempDir(): string {
+	return fs.mkdtempSync(path.join(os.tmpdir(), 'escalation-e2e-'));
 }
 
 describe('repeat-violation escalation (e2e)', () => {
@@ -89,7 +88,7 @@ describe('repeat-violation escalation (e2e)', () => {
 
 	beforeEach(() => {
 		violationIndex = 0;
-		dir = createRelativeTempDir();
+		dir = createTempDir();
 		swarmDir = path.join(dir, '.swarm');
 		fs.mkdirSync(swarmDir, { recursive: true });
 		fs.writeFileSync(

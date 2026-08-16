@@ -13,6 +13,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { injectDelegateDirectivesBefore } from '../../src/hooks/delegate-directive-injection.js';
 import { DELEGATE_DIRECTIVE_BLOCK_TAG } from '../../src/hooks/knowledge-injector.js';
@@ -112,10 +113,8 @@ function reviewerOnlyLine(id: string, lesson: string): string {
 	});
 }
 
-function createRelativeTempDir(): string {
-	const baseDir = 'tmp';
-	if (!fs.existsSync(baseDir)) fs.mkdirSync(baseDir, { recursive: true });
-	return fs.mkdtempSync(path.join(baseDir, 'arch-deleg-'));
+function createTempDir(): string {
+	return fs.mkdtempSync(path.join(os.tmpdir(), 'arch-deleg-'));
 }
 
 function seed(dir: string, lines: string[]): void {
@@ -128,7 +127,7 @@ describe('injectDelegateDirectivesBefore (architect → coder)', () => {
 	let dir: string;
 
 	beforeEach(() => {
-		dir = createRelativeTempDir();
+		dir = createTempDir();
 	});
 
 	afterEach(() => {

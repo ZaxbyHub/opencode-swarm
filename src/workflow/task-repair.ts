@@ -1,6 +1,4 @@
-import { appendFile, mkdir, readFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
-import { atomicWriteFile } from '../evidence/task-file.js';
+import { appendFile, readFile } from 'node:fs/promises';
 import {
 	getTaskWorkflowSnapshot,
 	type TaskEvidence,
@@ -11,30 +9,82 @@ import { tryAcquireLock } from '../parallel/file-locks.js';
 import { replayFromLedgerWithStatus } from '../plan/ledger.js';
 import { loadPlanJsonOnly, updateTaskStatus } from '../plan/manager.js';
 import { assertNoUnsettledCoderDispatch } from './coder-settlement.js';
-
-type RepairWalState = 'ABORTED' | 'COMMITTED' | 'PREPARED';
-
-interface TaskRepairWal {
-	version: 1;
-	state: RepairWalState;
-	taskId: string;
-	transitionId: string;
-	reason: string;
-	actor: string;
-	oldPlanStatus: string;
-	newPlanStatus: 'in_progress';
-	oldWorkflowState: string;
-	newWorkflowState: 'idle';
-	oldGeneration: number;
-	generation: number;
-	recordedAt: string;
-}
+import {
+	readWorkflowWalFile,
+	writeWorkflowWalFile,
+} from './workflow-wal-file.js';
+import type { TaskRepairWal } from './workflow-wal-schema.js';
 
 export interface TaskRepairResult<TPlan> {
 	plan: TPlan;
 	alreadyApplied: boolean;
 	generation: number;
 	transitionId: string;
+}
+
+async function recoverPreparedTaskRepairWithPlanLock(
+	directory: string,
+	taskId: string,
+	actor: string,
+	currentPlan: NonNullable<Awaited<ReturnType<typeof loadPlanJsonOnly>>>,
+): Promise<TaskRepairResult<
+	NonNullable<Awaited<ReturnType<typeof loadPlanJsonOnly>>>
+> | null> {
+	const walPath = validateSwarmPath(directory, `task-repairs/${taskId}.json`);
+	const eventsPath = validateSwarmPath(directory, 'events.jsonl');
+	const observedWal = await readWal(walPath, taskId);
+	if (observedWal === null) return null;
+	if (observedWal.state === 'ABORTED') return null;
+	if (observedWal.state === 'COMMITTED') {
+		await ensureAuditEvent(directory, eventsPath, observedWal);
+		return null;
+	}
+	const wal = await readWal(walPath, taskId);
+	if (wal === null) return null;
+	if (wal.state === 'ABORTED') return null;
+	if (wal.state === 'COMMITTED') {
+		await ensureAuditEvent(directory, eventsPath, wal);
+		return null;
+	}
+	const task = currentPlan.phases
+		.flatMap((phase) => phase.tasks)
+		.find((candidate) => candidate.id === taskId);
+	if (!task) throw new Error(`TASK_REPAIR_TASK_MISSING: ${taskId}`);
+	if (task.status === wal.oldPlanStatus) {
+		const aborted = await withTaskEvidenceTransaction(
+			directory,
+			taskId,
+			actor,
+			async (transaction) => {
+				const workflow = getTaskWorkflowSnapshot(transaction.read());
+				if (
+					workflow.state !== wal.oldWorkflowState ||
+					workflow.generation !== wal.oldGeneration
+				) {
+					return false;
+				}
+				await writeWal(walPath, { ...wal, state: 'ABORTED' });
+				return true;
+			},
+		);
+		if (aborted) return null;
+	}
+	return repairTaskWorkflowUnderPlanLock({
+		directory,
+		taskId,
+		actor: wal.actor,
+		reason: wal.reason,
+		transitionId: wal.transitionId,
+		expectedState: wal.oldWorkflowState,
+		expectedGeneration: wal.oldGeneration,
+		currentPlanStatus: task.status,
+		currentPlan,
+		updatePlan: () =>
+			updateTaskStatus(directory, taskId, 'in_progress', {
+				force: true,
+				planLockAlreadyHeld: true,
+			}),
+	});
 }
 
 /**
@@ -49,22 +99,16 @@ export async function recoverPreparedTaskRepair(
 	NonNullable<Awaited<ReturnType<typeof loadPlanJsonOnly>>>
 > | null> {
 	const walPath = validateSwarmPath(directory, `task-repairs/${taskId}.json`);
-	const eventsPath = validateSwarmPath(directory, 'events.jsonl');
-	const raw = await readText(walPath);
-	if (raw === null) return null;
-	const observedWal = parseWal(raw, walPath);
-	if (observedWal.taskId !== taskId)
-		throw new Error('TASK_REPAIR_WAL_TASK_MISMATCH');
-	if (observedWal.state === 'ABORTED') return null;
+	const observedWal = await readWal(walPath, taskId);
+	if (observedWal === null || observedWal.state === 'ABORTED') return null;
 	if (observedWal.state === 'COMMITTED') {
-		// The WAL committed but the audit event may not have (a prior
-		// ensureAuditEvent attempt could have hit lock contention or a crash).
-		// This retry is idempotent per transitionId, so it is safe to attempt
-		// on every lazy recovery until it succeeds.
-		await ensureAuditEvent(directory, eventsPath, observedWal);
+		await ensureAuditEvent(
+			directory,
+			validateSwarmPath(directory, 'events.jsonl'),
+			observedWal,
+		);
 		return null;
 	}
-
 	const lock = await tryAcquireLock(
 		directory,
 		'plan.json',
@@ -77,61 +121,42 @@ export async function recoverPreparedTaskRepair(
 		);
 	}
 	try {
-		const lockedRaw = await readText(walPath);
-		if (lockedRaw === null) return null;
-		const wal = parseWal(lockedRaw, walPath);
-		if (wal.taskId !== taskId) throw new Error('TASK_REPAIR_WAL_TASK_MISMATCH');
-		if (wal.state === 'ABORTED') return null;
-		if (wal.state === 'COMMITTED') {
-			await ensureAuditEvent(directory, eventsPath, wal);
-			return null;
-		}
 		const replay = await replayFromLedgerWithStatus(directory);
 		if (replay.truncated) throw new Error('TASK_REPAIR_LEDGER_TRUNCATED');
 		const plan = replay.plan ?? (await loadPlanJsonOnly(directory));
 		if (!plan) throw new Error('TASK_REPAIR_PLAN_MISSING');
-		const task = plan.phases
-			.flatMap((phase) => phase.tasks)
-			.find((candidate) => candidate.id === taskId);
-		if (!task) throw new Error(`TASK_REPAIR_TASK_MISSING: ${taskId}`);
-		if (task.status === wal.oldPlanStatus) {
-			const aborted = await withTaskEvidenceTransaction(
-				directory,
-				taskId,
-				actor,
-				async (transaction) => {
-					const workflow = getTaskWorkflowSnapshot(transaction.read());
-					if (
-						workflow.state !== wal.oldWorkflowState ||
-						workflow.generation !== wal.oldGeneration
-					) {
-						return false;
-					}
-					await writeWal(walPath, { ...wal, state: 'ABORTED' });
-					return true;
-				},
-			);
-			if (aborted) return null;
-		}
-		return await repairTaskWorkflowUnderPlanLock({
+		return await recoverPreparedTaskRepairWithPlanLock(
 			directory,
 			taskId,
-			actor: wal.actor,
-			reason: wal.reason,
-			transitionId: wal.transitionId,
-			expectedState: wal.oldWorkflowState,
-			expectedGeneration: wal.oldGeneration,
-			currentPlanStatus: task.status,
-			currentPlan: plan,
-			updatePlan: () =>
-				updateTaskStatus(directory, taskId, 'in_progress', {
-					force: true,
-					planLockAlreadyHeld: true,
-				}),
-		});
+			actor,
+			plan,
+		);
 	} finally {
 		if (lock.lock._release) await lock.lock._release().catch(() => {});
 	}
+}
+
+export async function recoverPreparedTaskRepairUnderPlanLock(
+	directory: string,
+	taskId: string,
+	actor: string,
+	currentPlan: NonNullable<Awaited<ReturnType<typeof loadPlanJsonOnly>>>,
+): Promise<TaskRepairResult<
+	NonNullable<Awaited<ReturnType<typeof loadPlanJsonOnly>>>
+> | null> {
+	return recoverPreparedTaskRepairWithPlanLock(
+		directory,
+		taskId,
+		actor,
+		currentPlan,
+	);
+}
+
+async function readWal(
+	filePath: string,
+	taskId: string,
+): Promise<TaskRepairWal | null> {
+	return readWorkflowWalFile('task-repair', filePath, taskId);
 }
 
 async function readText(filePath: string): Promise<string | null> {
@@ -143,44 +168,8 @@ async function readText(filePath: string): Promise<string | null> {
 	}
 }
 
-function parseWal(raw: string, walPath: string): TaskRepairWal {
-	let parsed: Partial<TaskRepairWal>;
-	try {
-		parsed = JSON.parse(raw) as Partial<TaskRepairWal>;
-	} catch (error) {
-		throw new Error(
-			`TASK_REPAIR_WAL_UNREADABLE: ${walPath} is not valid JSON (${
-				error instanceof Error ? error.message : String(error)
-			}). Delete this file to allow the task to be repaired again.`,
-		);
-	}
-	if (
-		parsed.version !== 1 ||
-		(parsed.state !== 'PREPARED' &&
-			parsed.state !== 'COMMITTED' &&
-			parsed.state !== 'ABORTED') ||
-		typeof parsed.taskId !== 'string' ||
-		typeof parsed.transitionId !== 'string' ||
-		typeof parsed.reason !== 'string' ||
-		typeof parsed.actor !== 'string' ||
-		typeof parsed.oldPlanStatus !== 'string' ||
-		parsed.newPlanStatus !== 'in_progress' ||
-		typeof parsed.oldWorkflowState !== 'string' ||
-		parsed.newWorkflowState !== 'idle' ||
-		!Number.isInteger(parsed.generation) ||
-		!Number.isInteger(parsed.oldGeneration) ||
-		typeof parsed.recordedAt !== 'string'
-	) {
-		throw new Error(
-			`TASK_REPAIR_WAL_UNREADABLE: ${walPath} is not a valid v1 repair WAL (unexpected shape or version). Delete this file to allow the task to be repaired again.`,
-		);
-	}
-	return parsed as TaskRepairWal;
-}
-
 async function writeWal(filePath: string, wal: TaskRepairWal): Promise<void> {
-	await mkdir(dirname(filePath), { recursive: true });
-	await atomicWriteFile(filePath, `${JSON.stringify(wal, null, 2)}\n`);
+	await writeWorkflowWalFile('task-repair', filePath, wal);
 }
 
 function parseAuditEventLine(line: string): Record<string, unknown> | null {
@@ -195,6 +184,7 @@ function parseAuditEventLine(line: string): Record<string, unknown> | null {
 
 function findRepairEvent(
 	content: string | null,
+	taskId: string,
 	transitionId: string,
 ): boolean {
 	if (!content) return false;
@@ -205,14 +195,17 @@ function findRepairEvent(
 	// JSON-string-escaped form (matching how it is serialized by
 	// JSON.stringify below) so a transitionId containing a quote, backslash,
 	// or control character can't produce a false negative here.
-	const needle = JSON.stringify(transitionId).slice(1, -1);
-	if (!content.includes(needle)) return false;
+	const transitionNeedle = JSON.stringify(transitionId).slice(1, -1);
+	const taskNeedle = JSON.stringify(taskId).slice(1, -1);
+	if (!content.includes(transitionNeedle) || !content.includes(taskNeedle))
+		return false;
 	for (const line of content.split('\n')) {
 		if (!line.trim()) continue;
 		const event = parseAuditEventLine(line);
 		if (!event) continue;
 		if (
 			event.type === 'task_workflow_repaired' &&
+			event.taskId === taskId &&
 			event.transitionId === transitionId
 		) {
 			return true;
@@ -230,7 +223,8 @@ async function ensureAuditEvent(
 	// lazy-recovery call for this task (the COMMITTED WAL is never deleted)
 	// must be able to confirm that cheaply and lock-free, rather than paying
 	// the shared events.jsonl lock on every subsequent, unrelated tool call.
-	if (findRepairEvent(await readText(eventsPath), wal.transitionId)) return;
+	if (findRepairEvent(await readText(eventsPath), wal.taskId, wal.transitionId))
+		return;
 
 	const lock = await tryAcquireLock(
 		directory,
@@ -243,7 +237,7 @@ async function ensureAuditEvent(
 	}
 	try {
 		const existing = await readText(eventsPath);
-		if (findRepairEvent(existing, wal.transitionId)) return;
+		if (findRepairEvent(existing, wal.taskId, wal.transitionId)) return;
 
 		await appendFile(
 			eventsPath,
@@ -264,7 +258,7 @@ async function ensureAuditEvent(
 		);
 
 		const verified = await readText(eventsPath);
-		if (!findRepairEvent(verified, wal.transitionId)) {
+		if (!findRepairEvent(verified, wal.taskId, wal.transitionId)) {
 			throw new Error('TASK_REPAIR_AUDIT_UNVERIFIED');
 		}
 	} finally {
@@ -316,13 +310,8 @@ export async function repairTaskWorkflowUnderPlanLock<TPlan>(options: {
 			await assertNoUnsettledCoderDispatch(options.directory, options.taskId);
 			let evidence = transaction.read();
 			let snapshot = getTaskWorkflowSnapshot(evidence);
-			const walRaw = await readText(walPath);
-			let existingWal = walRaw === null ? null : parseWal(walRaw, walPath);
+			let existingWal = await readWal(walPath, options.taskId);
 			if (existingWal?.state === 'ABORTED') existingWal = null;
-
-			if (existingWal && existingWal.taskId !== options.taskId) {
-				throw new Error('TASK_REPAIR_WAL_TASK_MISMATCH');
-			}
 			if (existingWal && existingWal.transitionId !== options.transitionId) {
 				if (existingWal.state === 'PREPARED') {
 					throw new Error(
@@ -360,7 +349,8 @@ export async function repairTaskWorkflowUnderPlanLock<TPlan>(options: {
 			if (
 				existingWal === null &&
 				options.currentPlanStatus !== 'completed' &&
-				options.currentPlanStatus !== 'blocked'
+				options.currentPlanStatus !== 'blocked' &&
+				options.currentPlanStatus !== 'closed'
 			) {
 				throw new Error(
 					`TASK_REPAIR_NOT_BACKWARD: cannot create a repair from plan status ${options.currentPlanStatus}`,
@@ -432,7 +422,7 @@ export async function repairTaskWorkflowUnderPlanLock<TPlan>(options: {
 			// behind a permanently PREPARED WAL (see assertTaskEvidenceWriteAllowed).
 			// A retry after a lock-contention throw here lands on the
 			// alreadyApplied fast path above and only needs to re-attempt the
-			// audit event, which is itself idempotent per transitionId.
+			// audit event, which is itself idempotent per exact task and transition ID.
 			await writeWal(walPath, { ...wal, state: 'COMMITTED' });
 			await ensureAuditEvent(options.directory, eventsPath, wal);
 

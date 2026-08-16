@@ -2253,7 +2253,11 @@ export async function updateTaskStatus(
 	directory: string,
 	taskId: string,
 	status: TaskStatus,
-	options?: { force?: boolean; planLockAlreadyHeld?: boolean },
+	options?: {
+		force?: boolean;
+		planLockAlreadyHeld?: boolean;
+		terminalReconciliation?: boolean;
+	},
 ): Promise<Plan> {
 	assertProjectRoot(directory);
 	const derivePhaseStatusFromTasks = (tasks: Task[]): Phase['status'] => {
@@ -2295,7 +2299,12 @@ export async function updateTaskStatus(
 				currentTask.status !== 'pending' &&
 				currentTask.status !== 'in_progress';
 			const auditedRepair = status === 'in_progress' && options?.force === true;
-			if (settled && status !== currentTask.status && !auditedRepair) {
+			if (
+				settled &&
+				status !== currentTask.status &&
+				!auditedRepair &&
+				options?.terminalReconciliation !== true
+			) {
 				warn(
 					`[updateTaskStatus] refusing backward transition of settled task ${taskId} (${currentTask.status}) to ${status} without audited repair`,
 				);

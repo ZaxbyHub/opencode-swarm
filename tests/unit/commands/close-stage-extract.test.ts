@@ -27,6 +27,7 @@ import {
 } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { savePlan } from '../../../src/plan/manager.js';
 
 // ── Import under test ─────────────────────────────────────────────────────
 const {
@@ -43,6 +44,7 @@ const realCurateAndStoreSwarm = closeInternals.curateAndStoreSwarm;
 const realCheckHivePromotions = closeInternals.checkHivePromotions;
 const realRunCuratorPostMortem = closeInternals.runCuratorPostMortem;
 const realCreateCuratorLLMDelegate = closeInternals.createCuratorLLMDelegate;
+const realClosePlanTerminalState = closeInternals.closePlanTerminalState;
 const realGetGitRepositoryStatus = closeInternals.getGitRepositoryStatus;
 const realResetToMainAfterMerge = closeInternals.resetToMainAfterMerge;
 const realResetToRemoteBranch = closeInternals.resetToRemoteBranch;
@@ -56,31 +58,50 @@ function swarmDir(): string {
 	return path.join(testDir, '.swarm');
 }
 
+function basePlan() {
+	return {
+		title: 'Stage Extract Test Project',
+		swarm: 'stage-extract',
+		schema_version: '1.0.0',
+		current_phase: 1,
+		phases: [
+			{
+				id: 1,
+				name: 'Phase 1',
+				status: 'in_progress',
+				tasks: [
+					{
+						id: '1.1',
+						status: 'in_progress',
+						description: 'Task A',
+						phase: 1,
+						size: 'small',
+						depends: [],
+						files_touched: [],
+					},
+					{
+						id: '1.2',
+						status: 'completed',
+						description: 'Task B',
+						phase: 1,
+						size: 'small',
+						depends: [],
+						files_touched: [],
+					},
+				],
+			},
+		],
+	};
+}
+
 function buildBaseCtx(
 	overrides: Record<string, unknown> = {},
 ): Record<string, unknown> {
+	const plan = basePlan();
 	const base: Record<string, unknown> = {
 		directory: testDir,
 		swarmDir: swarmDir(),
-		planData: {
-			title: 'Stage Extract Test Project',
-			phases: [
-				{
-					id: 1,
-					name: 'Phase 1',
-					status: 'in_progress',
-					tasks: [
-						{
-							id: '1.1',
-							status: 'in_progress',
-							description: 'Task A',
-							phase: 1,
-						},
-						{ id: '1.2', status: 'completed', description: 'Task B', phase: 1 },
-					],
-				},
-			],
-		},
+		planData: structuredClone(plan),
 		planExists: true,
 		planAlreadyDone: false,
 		config: {
@@ -122,28 +143,10 @@ function buildBaseCtx(
 		isForced: false,
 		runSkillReview: false,
 		options: {},
-		phases: [
-			{
-				id: 1,
-				name: 'Phase 1',
-				status: 'in_progress',
-				tasks: [
-					{ id: '1.1', status: 'in_progress', description: 'Task A', phase: 1 },
-					{ id: '1.2', status: 'completed', description: 'Task B', phase: 1 },
-				],
-			},
-		],
-		inProgressPhases: [
-			{
-				id: 1,
-				name: 'Phase 1',
-				status: 'in_progress',
-				tasks: [
-					{ id: '1.1', status: 'in_progress', description: 'Task A', phase: 1 },
-					{ id: '1.2', status: 'completed', description: 'Task B', phase: 1 },
-				],
-			},
-		],
+		phases: structuredClone(plan.phases),
+		inProgressPhases: structuredClone(
+			plan.phases.filter((phase) => phase.status === 'in_progress'),
+		),
 		curationSucceeded: false,
 		curationResult: undefined,
 		allLessons: [],
@@ -172,24 +175,8 @@ function buildBaseCtx(
 	return { ...base, ...overrides };
 }
 
-function writePlan(): void {
-	const plan = {
-		title: 'Stage Extract Test Project',
-		schema_version: '1.0.0',
-		current_phase: 1,
-		phases: [
-			{
-				id: 1,
-				name: 'Phase 1',
-				status: 'in_progress',
-				tasks: [
-					{ id: '1.1', status: 'in_progress', description: 'Task A', phase: 1 },
-					{ id: '1.2', status: 'completed', description: 'Task B', phase: 1 },
-				],
-			},
-		],
-	};
-	writeFileSync(path.join(swarmDir(), 'plan.json'), JSON.stringify(plan));
+async function writePlan(): Promise<void> {
+	await savePlan(testDir, basePlan());
 }
 
 function writeArtifact(relativePath: string, content: string): void {
@@ -197,10 +184,10 @@ function writeArtifact(relativePath: string, content: string): void {
 	writeFileSync(fullPath, content);
 }
 
-beforeEach(() => {
+beforeEach(async () => {
 	testDir = mkdtempSync(path.join(os.tmpdir(), 'close-stage-extract-test-'));
 	mkdirSync(swarmDir(), { recursive: true });
-	writePlan();
+	await writePlan();
 
 	closeInternals.loadPluginConfigWithMeta = () => ({
 		config: {
@@ -289,6 +276,7 @@ afterEach(() => {
 	closeInternals.checkHivePromotions = realCheckHivePromotions;
 	closeInternals.runCuratorPostMortem = realRunCuratorPostMortem;
 	closeInternals.createCuratorLLMDelegate = realCreateCuratorLLMDelegate;
+	closeInternals.closePlanTerminalState = realClosePlanTerminalState;
 	closeInternals.getGitRepositoryStatus = realGetGitRepositoryStatus;
 	closeInternals.resetToMainAfterMerge = realResetToMainAfterMerge;
 	closeInternals.resetToRemoteBranch = realResetToRemoteBranch;
@@ -516,49 +504,20 @@ describe('runFinalizeStage', () => {
 	});
 
 	it('records a warning when terminal plan state persistence fails (observable)', async () => {
-		// closePlanTerminalState is called directly (not via _internals), so we
-		// verify the warning path by providing invalid plan data that triggers
-		// a Zod validation error from the real function. The error is caught
-		// and a warning is emitted.
-		const ctx = buildBaseCtx({
-			planData: {
-				title: 'Bad Plan',
-				phases: [
-					{
-						id: 1,
-						name: 'Phase 1',
-						status: 'in_progress',
-						tasks: [{ id: '1.1', status: 'in_progress', phase: 1 }],
-					},
-				],
-			},
-			phases: [
-				{
-					id: 1,
-					name: 'Phase 1',
-					status: 'in_progress',
-					tasks: [{ id: '1.1', status: 'in_progress', phase: 1 }],
-				},
-			],
-			inProgressPhases: [
-				{
-					id: 1,
-					name: 'Phase 1',
-					status: 'in_progress',
-					tasks: [{ id: '1.1', status: 'in_progress', phase: 1 }],
-				},
-			],
-		}) as any;
+		const ctx = buildBaseCtx() as any;
+		closeInternals.closePlanTerminalState = mock(async () => {
+			throw new Error('terminal persist boom');
+		});
 
 		await runFinalizeStage(ctx);
 
-		// The real closePlanTerminalState throws ZodError; runFinalizeStage catches
-		// it and pushes a warning. Verify the warning was emitted.
+		// runFinalizeStage must fail-open and surface the persistence failure.
 		expect(
 			ctx.warnings.some((w: string) =>
 				w.includes('Failed to persist terminal plan state'),
 			),
 		).toBe(true);
+		expect(ctx.terminalizationError).toBe('terminal persist boom');
 	});
 
 	it('calls checkHivePromotions when curation succeeds and hive is enabled', async () => {

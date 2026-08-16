@@ -15,8 +15,7 @@ import {
 import os from 'node:os';
 import path from 'node:path';
 import { isValidEvidenceType } from '../../../src/evidence/manager.js';
-import { initLedger } from '../../../src/plan/ledger.js';
-import { derivePlanId } from '../../../src/plan/utils.js';
+import { savePlan } from '../../../src/plan/manager.js';
 import { STATE_MOCK_TRANSITIVE_STUBS } from './state-mock-transitive-stubs.js';
 
 /**
@@ -66,9 +65,13 @@ function canonicalPlan(input: TestPlanInput) {
 		...input,
 		phases: input.phases.map((phase) => ({
 			...phase,
+			status: phase.status === 'completed' ? 'complete' : phase.status,
 			tasks: phase.tasks.map((task) => ({
 				phase: phase.id,
+				size: 'small',
 				description: `Task ${task.id}`,
+				depends: [],
+				files_touched: [],
 				...task,
 				status: task.status === 'complete' ? 'completed' : task.status,
 			})),
@@ -78,11 +81,7 @@ function canonicalPlan(input: TestPlanInput) {
 
 async function writeCanonicalPlan(testDirectory: string, input: TestPlanInput) {
 	const plan = canonicalPlan(input);
-	writeFileSync(
-		path.join(testDirectory, '.swarm', 'plan.json'),
-		JSON.stringify(plan),
-	);
-	await initLedger(testDirectory, derivePlanId(plan));
+	await savePlan(testDirectory, plan);
 	return plan;
 }
 
@@ -458,7 +457,7 @@ describe('handleCloseCommand', () => {
 						id: 1,
 						name: 'Phase 1',
 						status: 'in_progress',
-						tasks: [{ id: '1.1', status: 'complete' }],
+						tasks: [{ id: '1.1', status: 'in_progress' }],
 					},
 					{
 						id: 2,
@@ -494,10 +493,7 @@ describe('handleCloseCommand', () => {
 					},
 				],
 			};
-			writeFileSync(
-				path.join(testDir, '.swarm', 'plan.json'),
-				JSON.stringify(planData),
-			);
+			await writeCanonicalPlan(testDir, planData);
 
 			await handleCloseCommand(testDir, []);
 
@@ -593,7 +589,7 @@ describe('handleCloseCommand', () => {
 			await handleCloseCommand(testDir, []);
 
 			const updatedPlan = readArchivedPlanJson(testDir);
-			expect(updatedPlan.phases[0].status).toBe('completed');
+			expect(updatedPlan.phases[0].status).toBe('complete');
 			expect(updatedPlan.phases[0].tasks[0].status).toBe('completed');
 			expect(updatedPlan.phases[1].status).toBe('closed');
 		});
@@ -640,10 +636,7 @@ describe('handleCloseCommand', () => {
 					},
 				],
 			});
-			writeFileSync(
-				path.join(testDir, '.swarm', 'plan.json'),
-				JSON.stringify(planData),
-			);
+			await savePlan(testDir, planData);
 
 			await handleCloseCommand(testDir, []);
 
@@ -676,10 +669,7 @@ describe('handleCloseCommand', () => {
 					},
 				],
 			};
-			writeFileSync(
-				path.join(testDir, '.swarm', 'plan.json'),
-				JSON.stringify(planData),
-			);
+			await writeCanonicalPlan(testDir, planData);
 
 			await handleCloseCommand(testDir, []);
 
@@ -715,10 +705,7 @@ describe('handleCloseCommand', () => {
 					},
 				],
 			};
-			writeFileSync(
-				path.join(testDir, '.swarm', 'plan.json'),
-				JSON.stringify(planData),
-			);
+			await writeCanonicalPlan(testDir, planData);
 
 			await handleCloseCommand(testDir, []);
 
@@ -743,10 +730,7 @@ describe('handleCloseCommand', () => {
 					},
 				],
 			};
-			writeFileSync(
-				path.join(testDir, '.swarm', 'plan.json'),
-				JSON.stringify(planData),
-			);
+			await writeCanonicalPlan(testDir, planData);
 
 			await handleCloseCommand(testDir, []);
 
@@ -773,10 +757,7 @@ describe('handleCloseCommand', () => {
 					},
 				],
 			};
-			writeFileSync(
-				path.join(testDir, '.swarm', 'plan.json'),
-				JSON.stringify(planData),
-			);
+			await writeCanonicalPlan(testDir, planData);
 
 			const result = await handleCloseCommand(testDir, []);
 
@@ -801,10 +782,7 @@ describe('handleCloseCommand', () => {
 					},
 				],
 			};
-			writeFileSync(
-				path.join(testDir, '.swarm', 'plan.json'),
-				JSON.stringify(planData),
-			);
+			await writeCanonicalPlan(testDir, planData);
 
 			const result = await handleCloseCommand(testDir, []);
 
@@ -824,14 +802,11 @@ describe('handleCloseCommand', () => {
 						id: 1,
 						name: 'Phase 1',
 						status: 'in_progress',
-						tasks: [{ id: '1.1', status: 'complete' }],
+						tasks: [{ id: '1.1', status: 'in_progress' }],
 					},
 				],
 			};
-			writeFileSync(
-				path.join(testDir, '.swarm', 'plan.json'),
-				JSON.stringify(planData),
-			);
+			await writeCanonicalPlan(testDir, planData);
 
 			// First run — has an in-progress phase, archives & removes plan.json
 			const result1 = await handleCloseCommand(testDir, []);
@@ -857,23 +832,18 @@ describe('handleCloseCommand', () => {
 			expect(mockExecuteWriteRetro).toHaveBeenCalledTimes(1);
 		});
 
-		it('should handle plan.json with no phases', async () => {
-			const planData = {
-				title: 'Test Project',
-				phases: [],
-			};
-			writeFileSync(
-				path.join(testDir, '.swarm', 'plan.json'),
-				JSON.stringify(planData),
-			);
-
+		it('should handle the no-plan path as a plan-free close', async () => {
 			const result = await handleCloseCommand(testDir, []);
 
-			// Empty phases array runs normally, not as terminal state
+			// No active plan runs normally, not as terminal state.
 			expect(result).toContain('finalized');
 			expect(result).not.toContain('terminal state');
 			expect(result).toContain('0 phase(s) closed');
-			expect(mockExecuteWriteRetro).not.toHaveBeenCalled();
+			expect(mockExecuteWriteRetro).toHaveBeenCalledTimes(1);
+			expect(
+				(mockExecuteWriteRetro.mock.calls[0]?.[0] as { task_id?: string })
+					.task_id,
+			).toBe('retro-session');
 			// Cleanup runs even for empty phases
 			expect(mockArchiveEvidence).toHaveBeenCalledTimes(1);
 		});
@@ -906,14 +876,11 @@ describe('handleCloseCommand', () => {
 						id: 1,
 						name: 'Phase 1',
 						status: 'in_progress',
-						tasks: [{ id: '1.1', status: 'complete' }],
+						tasks: [{ id: '1.1', status: 'in_progress' }],
 					},
 				],
 			};
-			writeFileSync(
-				path.join(testDir, '.swarm', 'plan.json'),
-				JSON.stringify(planData),
-			);
+			await writeCanonicalPlan(testDir, planData);
 
 			const result = await handleCloseCommand(testDir, []);
 
@@ -938,10 +905,7 @@ describe('handleCloseCommand', () => {
 					},
 				],
 			};
-			writeFileSync(
-				path.join(testDir, '.swarm', 'plan.json'),
-				JSON.stringify(planData),
-			);
+			await writeCanonicalPlan(testDir, planData);
 
 			const result = await handleCloseCommand(testDir, []);
 
@@ -967,10 +931,7 @@ describe('handleCloseCommand', () => {
 					},
 				],
 			};
-			writeFileSync(
-				path.join(testDir, '.swarm', 'plan.json'),
-				JSON.stringify(planData),
-			);
+			await writeCanonicalPlan(testDir, planData);
 
 			const result = await handleCloseCommand(testDir, []);
 
@@ -1047,26 +1008,21 @@ describe('handleCloseCommand', () => {
 			});
 
 			it('PF7: Empty phases array (plan exists, phases: []) → runs cleanup and returns finalized', async () => {
-				// Plan with empty phases array
-				const planData = {
-					title: 'Test Project',
-					phases: [],
-				};
-				writeFileSync(
-					path.join(testDir, '.swarm', 'plan.json'),
-					JSON.stringify(planData),
-				);
-
+				// With the authoritative writer, "no phases" is represented by
+				// the absence of an active plan rather than an invalid raw plan.json.
 				const result = await handleCloseCommand(testDir, []);
 
-				// Empty phases: runs cleanup and returns normal success (not terminal state)
+				// Plan-free close runs cleanup and returns normal success.
 				expect(result).toContain('finalized');
 				expect(result).not.toContain('terminal state');
 				// Cleanup runs
 				expect(mockArchiveEvidence).toHaveBeenCalledTimes(1);
-				// No phases AND plan exists → no retros (session retro only runs when
-				// !planExists)
-				expect(mockExecuteWriteRetro).not.toHaveBeenCalled();
+				// Plan-free closes record the session-level retrospective.
+				expect(mockExecuteWriteRetro).toHaveBeenCalledTimes(1);
+				expect(
+					(mockExecuteWriteRetro.mock.calls[0]?.[0] as { task_id?: string })
+						.task_id,
+				).toBe('retro-session');
 			});
 
 			it('PF8: Plan-free --force → session retro flagged as forced', async () => {
@@ -1089,14 +1045,11 @@ describe('handleCloseCommand', () => {
 							id: 1,
 							name: 'Phase 1',
 							status: 'in_progress',
-							tasks: [{ id: '1.1', status: 'complete' }],
+							tasks: [{ id: '1.1', status: 'in_progress' }],
 						},
 					],
 				};
-				writeFileSync(
-					path.join(testDir, '.swarm', 'plan.json'),
-					JSON.stringify(planData),
-				);
+				await writeCanonicalPlan(testDir, planData);
 
 				await handleCloseCommand(testDir, []);
 
@@ -1127,7 +1080,7 @@ describe('handleCloseCommand', () => {
 					],
 				};
 				const planPath = path.join(testDir, '.swarm', 'plan.json');
-				writeFileSync(planPath, JSON.stringify(planData));
+				await writeCanonicalPlan(testDir, planData);
 
 				await handleCloseCommand(testDir, []);
 
@@ -1142,7 +1095,7 @@ describe('handleCloseCommand', () => {
 							id: 1,
 							name: 'Phase 1',
 							status: 'in_progress',
-							tasks: [{ id: '1.1', status: 'complete' }],
+							tasks: [{ id: '1.1', status: 'in_progress' }],
 						},
 					],
 				});
@@ -1167,7 +1120,7 @@ describe('handleCloseCommand', () => {
 					],
 				};
 				const planPath = path.join(testDir, '.swarm', 'plan.json');
-				writeFileSync(planPath, JSON.stringify(planData));
+				await writeCanonicalPlan(testDir, planData);
 
 				await handleCloseCommand(testDir, []);
 
@@ -1226,10 +1179,7 @@ describe('handleCloseCommand', () => {
 						},
 					],
 				};
-				writeFileSync(
-					path.join(testDir, '.swarm', 'plan.json'),
-					JSON.stringify(planData),
-				);
+				await writeCanonicalPlan(testDir, planData);
 
 				await handleCloseCommand(testDir, []);
 
@@ -1250,10 +1200,7 @@ describe('handleCloseCommand', () => {
 						},
 					],
 				};
-				writeFileSync(
-					path.join(testDir, '.swarm', 'plan.json'),
-					JSON.stringify(planData),
-				);
+				await writeCanonicalPlan(testDir, planData);
 				await handleCloseCommand(testDir, []);
 				const contextPath = path.join(testDir, '.swarm', 'context.md');
 				expect(existsSync(contextPath)).toBe(true);
@@ -1282,15 +1229,12 @@ describe('handleCloseCommand', () => {
 				);
 
 				// Write a plan WITH in-progress phase so allDone=false and cleanup code runs
-				writeFileSync(
-					path.join(testDir, '.swarm', 'plan.json'),
-					JSON.stringify({
-						title: 'Test',
-						phases: [
-							{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] },
-						],
-					}),
-				);
+				await writeCanonicalPlan(testDir, {
+					title: 'Test',
+					phases: [
+						{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] },
+					],
+				});
 
 				await handleCloseCommand(testDir, []);
 
@@ -1316,15 +1260,12 @@ describe('handleCloseCommand', () => {
 				);
 
 				// Write a plan WITH in-progress phase so allDone=false
-				writeFileSync(
-					path.join(testDir, '.swarm', 'plan.json'),
-					JSON.stringify({
-						title: 'Test',
-						phases: [
-							{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] },
-						],
-					}),
-				);
+				await writeCanonicalPlan(testDir, {
+					title: 'Test',
+					phases: [
+						{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] },
+					],
+				});
 
 				await handleCloseCommand(testDir, []);
 
@@ -1340,15 +1281,12 @@ describe('handleCloseCommand', () => {
 
 			it('CB3: No backup files present → no error, still succeeds', async () => {
 				// No backup files, just a plan WITH in-progress phase
-				writeFileSync(
-					path.join(testDir, '.swarm', 'plan.json'),
-					JSON.stringify({
-						title: 'Test',
-						phases: [
-							{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] },
-						],
-					}),
-				);
+				await writeCanonicalPlan(testDir, {
+					title: 'Test',
+					phases: [
+						{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] },
+					],
+				});
 
 				const result = await handleCloseCommand(testDir, []);
 
@@ -1371,15 +1309,12 @@ describe('handleCloseCommand', () => {
 				);
 
 				// Write a plan WITH in-progress phase
-				writeFileSync(
-					path.join(testDir, '.swarm', 'plan.json'),
-					JSON.stringify({
-						title: 'Test Project',
-						phases: [
-							{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] },
-						],
-					}),
-				);
+				await writeCanonicalPlan(testDir, {
+					title: 'Test Project',
+					phases: [
+						{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] },
+					],
+				});
 
 				await handleCloseCommand(testDir, []);
 
@@ -1396,15 +1331,12 @@ describe('handleCloseCommand', () => {
 
 			it('LN2: close-lessons.md absent → curateAndStoreSwarm called with []', async () => {
 				// No lessons file - just a plan with in-progress phase
-				writeFileSync(
-					path.join(testDir, '.swarm', 'plan.json'),
-					JSON.stringify({
-						title: 'Test Project',
-						phases: [
-							{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] },
-						],
-					}),
-				);
+				await writeCanonicalPlan(testDir, {
+					title: 'Test Project',
+					phases: [
+						{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] },
+					],
+				});
 
 				await handleCloseCommand(testDir, []);
 
@@ -1427,15 +1359,12 @@ describe('handleCloseCommand', () => {
 				);
 
 				// Write a plan with in-progress phase
-				writeFileSync(
-					path.join(testDir, '.swarm', 'plan.json'),
-					JSON.stringify({
-						title: 'Test Project',
-						phases: [
-							{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] },
-						],
-					}),
-				);
+				await writeCanonicalPlan(testDir, {
+					title: 'Test Project',
+					phases: [
+						{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] },
+					],
+				});
 
 				await handleCloseCommand(testDir, []);
 
@@ -1458,15 +1387,12 @@ describe('handleCloseCommand', () => {
 				);
 
 				// Write a plan with in-progress phase
-				writeFileSync(
-					path.join(testDir, '.swarm', 'plan.json'),
-					JSON.stringify({
-						title: 'Test Project',
-						phases: [
-							{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] },
-						],
-					}),
-				);
+				await writeCanonicalPlan(testDir, {
+					title: 'Test Project',
+					phases: [
+						{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] },
+					],
+				});
 
 				await handleCloseCommand(testDir, []);
 
@@ -1488,15 +1414,12 @@ describe('handleCloseCommand', () => {
 				);
 
 				// Write a plan with in-progress phase
-				writeFileSync(
-					path.join(testDir, '.swarm', 'plan.json'),
-					JSON.stringify({
-						title: 'Test Project',
-						phases: [
-							{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] },
-						],
-					}),
-				);
+				await writeCanonicalPlan(testDir, {
+					title: 'Test Project',
+					phases: [
+						{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] },
+					],
+				});
 
 				const result = await handleCloseCommand(testDir, []);
 
@@ -1537,15 +1460,12 @@ describe('handleCloseCommand', () => {
 				);
 
 				// Write a plan with in-progress phase
-				writeFileSync(
-					path.join(testDir, '.swarm', 'plan.json'),
-					JSON.stringify({
-						title: 'Test Project',
-						phases: [
-							{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] },
-						],
-					}),
-				);
+				await writeCanonicalPlan(testDir, {
+					title: 'Test Project',
+					phases: [
+						{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] },
+					],
+				});
 
 				await handleCloseCommand(testDir, []);
 
@@ -1587,15 +1507,12 @@ describe('handleCloseCommand', () => {
 				);
 
 				// Write a plan with in-progress phase
-				writeFileSync(
-					path.join(testDir, '.swarm', 'plan.json'),
-					JSON.stringify({
-						title: 'Test Project',
-						phases: [
-							{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] },
-						],
-					}),
-				);
+				await writeCanonicalPlan(testDir, {
+					title: 'Test Project',
+					phases: [
+						{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] },
+					],
+				});
 
 				await handleCloseCommand(testDir, []);
 
@@ -1648,15 +1565,12 @@ describe('handleCloseCommand', () => {
 				);
 
 				// Write a plan with in-progress phase
-				writeFileSync(
-					path.join(testDir, '.swarm', 'plan.json'),
-					JSON.stringify({
-						title: 'Test Project',
-						phases: [
-							{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] },
-						],
-					}),
-				);
+				await writeCanonicalPlan(testDir, {
+					title: 'Test Project',
+					phases: [
+						{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] },
+					],
+				});
 
 				await handleCloseCommand(testDir, []);
 
@@ -1689,15 +1603,12 @@ describe('handleCloseCommand', () => {
 				);
 
 				// Write a plan with in-progress phase
-				writeFileSync(
-					path.join(testDir, '.swarm', 'plan.json'),
-					JSON.stringify({
-						title: 'Test Project',
-						phases: [
-							{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] },
-						],
-					}),
-				);
+				await writeCanonicalPlan(testDir, {
+					title: 'Test Project',
+					phases: [
+						{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] },
+					],
+				});
 
 				await handleCloseCommand(testDir, []);
 
@@ -1719,20 +1630,17 @@ describe('handleCloseCommand', () => {
 
 		describe('Session state reset', () => {
 			it('invokes resetSwarmState exactly once during close', async () => {
-				writeFileSync(
-					path.join(testDir, '.swarm', 'plan.json'),
-					JSON.stringify({
-						title: 'Reset Test',
-						phases: [
-							{
-								id: 1,
-								name: 'P1',
-								status: 'in_progress',
-								tasks: [{ id: '1.1', status: 'in_progress' }],
-							},
-						],
-					}),
-				);
+				await writeCanonicalPlan(testDir, {
+					title: 'Reset Test',
+					phases: [
+						{
+							id: 1,
+							name: 'P1',
+							status: 'in_progress',
+							tasks: [{ id: '1.1', status: 'in_progress' }],
+						},
+					],
+				});
 
 				expect(resetSwarmStateCallCount).toBe(0);
 				await handleCloseCommand(testDir, []);
@@ -1740,20 +1648,17 @@ describe('handleCloseCommand', () => {
 			});
 
 			it('clears stale per-session collections via resetSwarmState', async () => {
-				writeFileSync(
-					path.join(testDir, '.swarm', 'plan.json'),
-					JSON.stringify({
-						title: 'Reset Test',
-						phases: [
-							{
-								id: 1,
-								name: 'P1',
-								status: 'in_progress',
-								tasks: [],
-							},
-						],
-					}),
-				);
+				await writeCanonicalPlan(testDir, {
+					title: 'Reset Test',
+					phases: [
+						{
+							id: 1,
+							name: 'P1',
+							status: 'in_progress',
+							tasks: [],
+						},
+					],
+				});
 
 				// Pre-seed state collections with stale entries from prior sessions.
 				expect(mockSwarmState.activeToolCalls.size).toBe(1);
@@ -1769,20 +1674,17 @@ describe('handleCloseCommand', () => {
 			});
 
 			it('preserves opencodeClient and fullAutoEnabledInConfig across reset', async () => {
-				writeFileSync(
-					path.join(testDir, '.swarm', 'plan.json'),
-					JSON.stringify({
-						title: 'Reset Test',
-						phases: [
-							{
-								id: 1,
-								name: 'P1',
-								status: 'in_progress',
-								tasks: [],
-							},
-						],
-					}),
-				);
+				await writeCanonicalPlan(testDir, {
+					title: 'Reset Test',
+					phases: [
+						{
+							id: 1,
+							name: 'P1',
+							status: 'in_progress',
+							tasks: [],
+						},
+					],
+				});
 
 				// The mock reset nulls these fields; close.ts must save and
 				// restore them because these are plugin-init singletons with no
@@ -1825,15 +1727,12 @@ describe('handleCloseCommand', () => {
 					path.join(testDir, '.swarm', 'close-lessons.md'),
 					'Capture recurring test setup as a reusable skill\nCapture release note checklist',
 				);
-				writeFileSync(
-					path.join(testDir, '.swarm', 'plan.json'),
-					JSON.stringify({
-						title: 'Skill Hint Test',
-						phases: [
-							{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] },
-						],
-					}),
-				);
+				await writeCanonicalPlan(testDir, {
+					title: 'Skill Hint Test',
+					phases: [
+						{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] },
+					],
+				});
 
 				const result = await handleCloseCommand(testDir, []);
 				const summary = readFileSync(
@@ -2034,15 +1933,12 @@ describe('handleCloseCommand', () => {
 				});
 
 				// Write plan.json WITH in-progress phase so the command has something to work with
-				writeFileSync(
-					path.join(testDir, '.swarm', 'plan.json'),
-					JSON.stringify({
-						title: 'Test',
-						phases: [
-							{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] },
-						],
-					}),
-				);
+				await writeCanonicalPlan(testDir, {
+					title: 'Test',
+					phases: [
+						{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] },
+					],
+				});
 
 				const result = await handleCloseCommand(testDir, ['--prune-branches']);
 
@@ -2068,10 +1964,7 @@ describe('handleCloseCommand', () => {
 						},
 					],
 				};
-				writeFileSync(
-					path.join(testDir, '.swarm', 'plan.json'),
-					JSON.stringify(planData),
-				);
+				await writeCanonicalPlan(testDir, planData);
 
 				await handleCloseCommand(testDir, []);
 
@@ -2091,10 +1984,7 @@ describe('handleCloseCommand', () => {
 						},
 					],
 				};
-				writeFileSync(
-					path.join(testDir, '.swarm', 'plan.json'),
-					JSON.stringify(planData),
-				);
+				await writeCanonicalPlan(testDir, planData);
 
 				await handleCloseCommand(testDir, []);
 
@@ -2114,10 +2004,7 @@ describe('handleCloseCommand', () => {
 						},
 					],
 				};
-				writeFileSync(
-					path.join(testDir, '.swarm', 'plan.json'),
-					JSON.stringify(planData),
-				);
+				await writeCanonicalPlan(testDir, planData);
 
 				const result = await handleCloseCommand(testDir, []);
 
@@ -2136,10 +2023,7 @@ describe('handleCloseCommand', () => {
 						},
 					],
 				};
-				writeFileSync(
-					path.join(testDir, '.swarm', 'plan.json'),
-					JSON.stringify(planData),
-				);
+				await writeCanonicalPlan(testDir, planData);
 
 				await handleCloseCommand(testDir, []);
 
@@ -2195,14 +2079,11 @@ describe('handleCloseCommand', () => {
 							id: 1,
 							name: 'Phase 1',
 							status: 'in_progress',
-							tasks: [{ id: '1.1', status: 'complete' }],
+							tasks: [{ id: '1.1', status: 'in_progress' }],
 						},
 					],
 				};
-				writeFileSync(
-					path.join(testDir, '.swarm', 'plan.json'),
-					JSON.stringify(planData),
-				);
+				await writeCanonicalPlan(testDir, planData);
 
 				const result = await handleCloseCommand(testDir, []);
 
@@ -2229,10 +2110,7 @@ describe('handleCloseCommand', () => {
 						},
 					],
 				};
-				writeFileSync(
-					path.join(testDir, '.swarm', 'plan.json'),
-					JSON.stringify(planData),
-				);
+				await writeCanonicalPlan(testDir, planData);
 
 				await handleCloseCommand(testDir, []);
 
@@ -2285,10 +2163,7 @@ describe('handleCloseCommand', () => {
 						},
 					],
 				};
-				writeFileSync(
-					path.join(testDir, '.swarm', 'plan.json'),
-					JSON.stringify(planData),
-				);
+				await writeCanonicalPlan(testDir, planData);
 
 				const result = await handleCloseCommand(testDir, []);
 

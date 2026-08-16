@@ -3,7 +3,7 @@
  *
  * Verifies that when closePlanTerminalState fails, in-memory planData is
  * restored to its pre-mutation snapshot (no silent divergence from on-disk)
- * and fail-open is preserved.
+ * and the destructive close pipeline fails closed.
  *
  * Uses _internals DI seam for closePlanTerminalState stubbing (no mock.module).
  */
@@ -218,7 +218,7 @@ describe('planData snapshot — success path', () => {
 // ── Test: failure path — snapshot restore + fail-open ─────────────────────
 
 describe('planData snapshot — failure path (FR-014/SC-013)', () => {
-	it('restores planData on closePlanTerminalState failure and emits warning', async () => {
+	it('preserves active state and pauses close when terminal persistence fails', async () => {
 		writePlan();
 
 		const persistError = new Error('disk full during terminal write');
@@ -228,31 +228,16 @@ describe('planData snapshot — failure path (FR-014/SC-013)', () => {
 
 		const result = await handleCloseCommand(testDir, []);
 
-		// Fail-open preserved: handleCloseCommand succeeds despite the throw
-		expect(result).toContain('finalized');
-		expect(result).not.toContain('❌');
+		expect(result).toContain('❌ Close paused');
+		expect(result).not.toContain('finalized');
 
-		// Warning emitted
-		expect(result).toContain('Failed to persist terminal plan state');
+		expect(result).toContain('terminal plan/evidence reconciliation failed');
 
-		// plan.json on disk is unchanged (write never happened — the failure
-		// happens before any terminal-state write). The close command archives
-		// plan.json during cleanup, so we check the archived copy to verify the
-		// original on-disk state was preserved.
-		const archiveParent = path.join(swarmDir(), 'archive');
-		const archiveSubdirs = fsSync
-			.readdirSync(archiveParent)
-			.filter((f) =>
-				fsSync.statSync(path.join(archiveParent, f)).isDirectory(),
-			);
-		expect(archiveSubdirs.length).toBeGreaterThan(0);
-		const archivedPlanPath = path.join(
-			archiveParent,
-			archiveSubdirs[0]!,
-			'plan.json',
-		);
+		// The active projection and recovery inputs remain in place; archive and
+		// cleanup must not run after a terminal transaction failure.
+		expect(fsSync.existsSync(path.join(swarmDir(), 'archive'))).toBe(false);
 		const diskPlan = JSON.parse(
-			readFileSync(archivedPlanPath, 'utf-8'),
+			readFileSync(path.join(swarmDir(), 'plan.json'), 'utf-8'),
 		) as Record<string, unknown>;
 
 		// Phase should still be in_progress (original pre-mutation state)
@@ -263,7 +248,7 @@ describe('planData snapshot — failure path (FR-014/SC-013)', () => {
 		);
 	});
 
-	it('summary reflects rollback (not mutation) after failed terminal write', async () => {
+	it('does not emit a successful closure summary after failed terminal write', async () => {
 		writePendingPlan();
 
 		const persistError = new Error('terminal write failed');
@@ -273,21 +258,13 @@ describe('planData snapshot — failure path (FR-014/SC-013)', () => {
 
 		const result = await handleCloseCommand(testDir, []);
 
-		// Fail-open preserved
-		expect(result).toContain('finalized');
+		expect(result).toContain('❌ Close paused');
 
-		// Warning emitted
-		expect(result).toContain('Failed to persist terminal plan state');
+		expect(result).toContain('terminal plan/evidence reconciliation failed');
 
-		// SC-013 rollback assertion: after closePlanTerminalState throws,
-		// ctx.closedPhases/closedTasks must be rolled back to pre-mutation
-		// lengths so the summary does NOT falsely claim closures occurred.
-		// With 'pending' plan: retro adds nothing (not in_progress), so
-		// guaranteeAllPlansComplete adds Phase 1, then rollback restores
-		// closedPhases to 0. Summary shows "0 phase(s) closed" (rolled back).
-		// Without rollback it would show "1 phase(s) closed" (bug: mutation
-		// persisted in memory despite on-disk failure).
+		// No success summary is emitted at all; rollback remains defensive for
+		// callers that inspect the context in focused stage tests.
 		expect(result).not.toContain('1 phase(s) closed');
-		expect(result).toContain('0 phase(s) closed');
+		expect(result).not.toContain('0 phase(s) closed');
 	});
 });

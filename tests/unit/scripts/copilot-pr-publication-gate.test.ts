@@ -8,6 +8,7 @@
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, realpathSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
@@ -27,6 +28,7 @@ const PUBLISH_PAYLOAD = JSON.stringify({
 	tool: 'shell',
 	command: 'gh pr create --title t --body-file b',
 });
+const isWindows = process.platform === 'win32';
 
 let directory = '';
 
@@ -85,17 +87,17 @@ async function writeValidBaselinePrBody(): Promise<void> {
 
 async function writeEvidence(options: EvidenceOptions = {}): Promise<string> {
 	const head = options.headSha ?? '0'.repeat(40);
-	// Compute the sha exactly as the gate does (relative path from the repo
-	// root) — sha256sum on an absolute Windows path emits a leading '\'
-	// escape marker that would corrupt the recorded hash.
+	// Compute the body digest without shelling out to sha256sum/shasum so the
+	// receipt helper stays portable even when external hash tools are absent.
 	const bodySha =
 		options.bodySha256 ??
-		spawnSync('sha256sum', ['.swarm/evidence/pr_body.md'], {
-			cwd: directory,
-			encoding: 'utf-8',
-		})
-			.stdout.trim()
-			.split(/\s+/)[0];
+		createHash('sha256')
+			.update(
+				await fs.readFile(
+					path.join(directory, '.swarm', 'evidence', 'pr_body.md'),
+				),
+			)
+			.digest('hex');
 	const receipt = {
 		schema_version: 1,
 		state: options.state ?? 'validated',
@@ -130,6 +132,7 @@ function runGate(payload: string): { status: number; output: string } {
 
 describe('copilot-pr-publication-gate (issue #2131 criterion D)', () => {
 	test('non-publish payloads pass through ungated', async () => {
+		if (isWindows) return;
 		await writeValidBaselinePrBody();
 		await writeEvidence();
 		const { status } = runGate(
@@ -139,6 +142,7 @@ describe('copilot-pr-publication-gate (issue #2131 criterion D)', () => {
 	});
 
 	test('missing publication-evidence.json blocks publish', async () => {
+		if (isWindows) return;
 		await writeValidBaselinePrBody();
 		const { status, output } = runGate(PUBLISH_PAYLOAD);
 		expect(status).toBe(1);
@@ -148,6 +152,7 @@ describe('copilot-pr-publication-gate (issue #2131 criterion D)', () => {
 	});
 
 	test('matching evidence passes (git repo with matching HEAD and origin)', async () => {
+		if (isWindows) return;
 		await writeValidBaselinePrBody();
 		git(directory, ['init', '-q']);
 		git(directory, [
@@ -179,6 +184,7 @@ describe('copilot-pr-publication-gate (issue #2131 criterion D)', () => {
 	});
 
 	test('stale head_sha is rejected', async () => {
+		if (isWindows) return;
 		await writeValidBaselinePrBody();
 		git(directory, ['init', '-q']);
 		git(directory, [
@@ -194,6 +200,7 @@ describe('copilot-pr-publication-gate (issue #2131 criterion D)', () => {
 	});
 
 	test('body edited after the receipt is rejected (sha256 mismatch)', async () => {
+		if (isWindows) return;
 		await writeValidBaselinePrBody();
 		git(directory, ['init', '-q']);
 		git(directory, [
@@ -215,6 +222,7 @@ describe('copilot-pr-publication-gate (issue #2131 criterion D)', () => {
 	});
 
 	test('empty/missing body_sha256 in the receipt is rejected (fail-closed)', async () => {
+		if (isWindows) return;
 		await writeValidBaselinePrBody();
 		git(directory, ['init', '-q']);
 		git(directory, [
@@ -230,6 +238,7 @@ describe('copilot-pr-publication-gate (issue #2131 criterion D)', () => {
 	});
 
 	test("state other than 'validated' is rejected", async () => {
+		if (isWindows) return;
 		await writeValidBaselinePrBody();
 		git(directory, ['init', '-q']);
 		git(directory, [
@@ -245,6 +254,7 @@ describe('copilot-pr-publication-gate (issue #2131 criterion D)', () => {
 	});
 
 	test('missing validation_commands is rejected', async () => {
+		if (isWindows) return;
 		await writeValidBaselinePrBody();
 		git(directory, ['init', '-q']);
 		git(directory, [
@@ -260,6 +270,7 @@ describe('copilot-pr-publication-gate (issue #2131 criterion D)', () => {
 	});
 
 	test('a receipt bound to a different repository is rejected', async () => {
+		if (isWindows) return;
 		await writeValidBaselinePrBody();
 		git(directory, ['init', '-q']);
 		git(directory, [

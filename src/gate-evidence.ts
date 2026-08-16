@@ -28,6 +28,7 @@ import { validateSwarmPath } from './hooks/utils.js';
 import type { TaskWorkflowState } from './state';
 import { telemetry } from './telemetry.js';
 import { assertStrictTaskId, isStrictTaskId } from './validation/task-id';
+import { readWorkflowWalFileSync } from './workflow/workflow-wal-file.js';
 
 export interface GateEvidence {
 	sessionId: string;
@@ -46,6 +47,7 @@ const TASK_WORKFLOW_STATES = [
 	'rework_required',
 	'complete',
 	'blocked',
+	'closed',
 ] as const satisfies ReadonlyArray<TaskWorkflowState>;
 
 const TASK_WORKFLOW_OUTCOMES = [
@@ -61,6 +63,7 @@ const TASK_WORKFLOW_OUTCOMES = [
 	'gate_recorded',
 	'task_completed',
 	'task_blocked',
+	'task_closed',
 	'repair_idle',
 ] as const;
 
@@ -105,30 +108,15 @@ export function assertTaskEvidenceWriteAllowed(
 	event?: TaskWorkflowTransitionEvent,
 ): void {
 	assertValidTaskId(taskId);
-	const readWal = (
-		kind: 'coder-settlements' | 'task-repairs' | 'task-terminals',
-		corruptCode: string,
-	): Record<string, unknown> | null => {
-		const walPath = validateSwarmPath(directory, `${kind}/${taskId}.json`);
-		let raw: string;
-		try {
-			raw = readFileSync(walPath, 'utf-8');
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
-			throw error;
-		}
-		try {
-			return JSON.parse(raw) as Record<string, unknown>;
-		} catch (error) {
-			throw new Error(
-				`${corruptCode}: ${walPath} is not valid JSON (${
-					error instanceof Error ? error.message : String(error)
-				}). Delete this file to allow the task to be repaired again.`,
-			);
-		}
-	};
-
-	const coderWal = readWal('coder-settlements', 'CODER_SETTLEMENT_WAL_CORRUPT');
+	const coderWalPath = validateSwarmPath(
+		directory,
+		`coder-settlements/${taskId}.json`,
+	);
+	const coderWal = readWorkflowWalFileSync(
+		'coder-settlement',
+		coderWalPath,
+		taskId,
+	);
 	if (
 		(coderWal?.state === 'DISPATCHED' || coderWal?.state === 'PREPARED') &&
 		!(
@@ -144,7 +132,15 @@ export function assertTaskEvidenceWriteAllowed(
 		);
 	}
 
-	const terminalWal = readWal('task-terminals', 'TASK_TERMINAL_WAL_CORRUPT');
+	const terminalWalPath = validateSwarmPath(
+		directory,
+		`task-terminals/${taskId}.json`,
+	);
+	const terminalWal = readWorkflowWalFileSync(
+		'task-terminal',
+		terminalWalPath,
+		taskId,
+	);
 	if (terminalWal?.state === 'PREPARED') {
 		const matchingTerminalEvent =
 			event != null &&
@@ -152,7 +148,9 @@ export function assertTaskEvidenceWriteAllowed(
 			((event.type === 'task_completed' &&
 				terminalWal.newPlanStatus === 'completed') ||
 				(event.type === 'task_blocked' &&
-					terminalWal.newPlanStatus === 'blocked'));
+					terminalWal.newPlanStatus === 'blocked') ||
+				(event.type === 'task_closed' &&
+					terminalWal.newPlanStatus === 'closed'));
 		if (!matchingTerminalEvent) {
 			throw new Error(
 				`TASK_TERMINAL_PREPARED: transition ${String(terminalWal.transitionId)} owns evidence for task ${taskId}`,
@@ -160,7 +158,15 @@ export function assertTaskEvidenceWriteAllowed(
 		}
 	}
 
-	const repairWal = readWal('task-repairs', 'TASK_REPAIR_WAL_CORRUPT');
+	const repairWalPath = validateSwarmPath(
+		directory,
+		`task-repairs/${taskId}.json`,
+	);
+	const repairWal = readWorkflowWalFileSync(
+		'task-repair',
+		repairWalPath,
+		taskId,
+	);
 	if (
 		repairWal?.state === 'PREPARED' &&
 		!(
@@ -245,6 +251,11 @@ export type TaskWorkflowTransitionEvent =
 			transitionId?: string;
 	  }
 	| {
+			type: 'task_closed';
+			expectedGeneration: number;
+			transitionId?: string;
+	  }
+	| {
 			type: 'repair_idle';
 			expectedGeneration: number;
 			transitionId?: string;
@@ -316,7 +327,8 @@ const WORKFLOW_STATE_RANK: Record<TaskWorkflowState, number> = {
 	tests_run: 4,
 	rework_required: 5,
 	blocked: 6,
-	complete: 7,
+	closed: 7,
+	complete: 8,
 };
 
 /**
@@ -372,6 +384,8 @@ function getEventOutcome(
 			return 'task_completed';
 		case 'task_blocked':
 			return 'task_blocked';
+		case 'task_closed':
+			return 'task_closed';
 		case 'repair_idle':
 			return 'repair_idle';
 	}
@@ -493,11 +507,14 @@ export function reduceTaskWorkflowSnapshot(
 	},
 ): TaskWorkflowMetadata {
 	if (
-		(current.state === 'complete' || current.state === 'blocked') &&
+		(current.state === 'complete' ||
+			current.state === 'blocked' ||
+			current.state === 'closed') &&
 		event.type !== 'repair_idle' &&
 		!(
 			(current.state === 'complete' && event.type === 'task_completed') ||
-			(current.state === 'blocked' && event.type === 'task_blocked')
+			(current.state === 'blocked' && event.type === 'task_blocked') ||
+			(current.state === 'blocked' && event.type === 'task_closed')
 		)
 	) {
 		throw new Error(
@@ -634,6 +651,11 @@ export function reduceTaskWorkflowSnapshot(
 			return {
 				...base,
 				state: 'blocked',
+			};
+		case 'task_closed':
+			return {
+				...base,
+				state: 'closed',
 			};
 		case 'repair_idle':
 			return {

@@ -1,14 +1,11 @@
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir, readFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
 import type {
 	BackgroundTaskChangeContext,
 	BackgroundWorktreeDescriptor,
 } from '../background/pending-delegations.js';
 import { changedFilesSinceSnapshot } from '../background/workspace-snapshot.js';
-import { atomicWriteFile } from '../evidence/task-file.js';
 import {
 	getTaskWorkflowSnapshot,
 	type TaskEvidence,
@@ -20,28 +17,11 @@ import { tryAcquireLock } from '../parallel/file-locks.js';
 import { isPathWithinDeclaredScope } from '../scope/path-identity.js';
 import type { MergeOperationProvenance } from '../worktree/merge.js';
 import { reconcileLandedMerge } from '../worktree/merge.js';
-
-type CoderSettlementState = 'ABORTED' | 'COMMITTED' | 'DISPATCHED' | 'PREPARED';
-
-interface CoderSettlementWal {
-	version: 1;
-	state: CoderSettlementState;
-	taskId: string;
-	transitionId: string;
-	actor: string;
-	processId: number;
-	runtimeId: string;
-	expectedGeneration: number;
-	context: BackgroundTaskChangeContext;
-	worktree?: BackgroundWorktreeDescriptor;
-	observedFiles?: string[];
-	mergeProvenance?: MergeOperationProvenance;
-	accepted?: boolean;
-	testEngineerExempt?: boolean;
-	settlementFailed?: boolean;
-	cleanupComplete?: boolean;
-	recordedAt: string;
-}
+import {
+	readWorkflowWalFile,
+	writeWorkflowWalFile,
+} from './workflow-wal-file.js';
+import type { CoderSettlementWal } from './workflow-wal-schema.js';
 
 export interface CoderSettlementResult {
 	evidence: TaskEvidence;
@@ -74,117 +54,11 @@ function walPath(directory: string, taskId: string): string {
 	return validateSwarmPath(directory, `coder-settlements/${taskId}.json`);
 }
 
-async function readText(filePath: string): Promise<string | null> {
-	try {
-		return await readFile(filePath, 'utf-8');
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
-		throw error;
-	}
-}
-
-function parseWal(raw: string): CoderSettlementWal {
-	const parsed = JSON.parse(raw) as Partial<CoderSettlementWal>;
-	const context = parsed.context as
-		| Partial<BackgroundTaskChangeContext>
-		| undefined;
-	const baseline = context?.baseline;
-	const worktree = parsed.worktree as
-		| Partial<BackgroundWorktreeDescriptor>
-		| undefined;
-	const provenance = parsed.mergeProvenance as
-		| Partial<MergeOperationProvenance>
-		| undefined;
-	if (
-		parsed.version !== 1 ||
-		!['ABORTED', 'COMMITTED', 'DISPATCHED', 'PREPARED'].includes(
-			String(parsed.state),
-		) ||
-		typeof parsed.taskId !== 'string' ||
-		!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(parsed.taskId) ||
-		typeof parsed.transitionId !== 'string' ||
-		parsed.transitionId.length === 0 ||
-		parsed.transitionId.length > 512 ||
-		typeof parsed.actor !== 'string' ||
-		parsed.actor.length === 0 ||
-		parsed.actor.length > 512 ||
-		!Number.isInteger(parsed.processId) ||
-		(parsed.processId ?? 0) <= 0 ||
-		typeof parsed.runtimeId !== 'string' ||
-		parsed.runtimeId.length === 0 ||
-		!Number.isInteger(parsed.expectedGeneration) ||
-		(parsed.expectedGeneration ?? -1) < 0 ||
-		!context ||
-		!baseline ||
-		typeof baseline.directory !== 'string' ||
-		baseline.directory.length === 0 ||
-		baseline.directory.length > 4096 ||
-		(typeof baseline.gitHead !== 'string' && baseline.gitHead !== null) ||
-		(typeof baseline.dirtyHash !== 'string' && baseline.dirtyHash !== null) ||
-		(typeof baseline.prHeadSha !== 'string' && baseline.prHeadSha !== null) ||
-		(typeof baseline.scope !== 'string' && baseline.scope !== null) ||
-		(!Array.isArray(baseline.changedFiles) &&
-			baseline.changedFiles !== null &&
-			baseline.changedFiles !== undefined) ||
-		(Array.isArray(baseline.changedFiles) &&
-			(baseline.changedFiles.length > 50_000 ||
-				baseline.changedFiles.some(
-					(filePath) => typeof filePath !== 'string' || filePath.length > 4096,
-				))) ||
-		(!Array.isArray(context.declaredFiles) && context.declaredFiles !== null) ||
-		(Array.isArray(context.declaredFiles) &&
-			(context.declaredFiles.length > 50_000 ||
-				context.declaredFiles.some(
-					(filePath) => typeof filePath !== 'string' || filePath.length > 4096,
-				))) ||
-		(parsed.observedFiles !== undefined &&
-			(!Array.isArray(parsed.observedFiles) ||
-				parsed.observedFiles.length > 50_000 ||
-				parsed.observedFiles.some(
-					(filePath) =>
-						typeof filePath !== 'string' ||
-						filePath.length > 4096 ||
-						!isPathWithinDeclaredScope(
-							filePath,
-							context.declaredFiles ?? [],
-							baseline.directory,
-						),
-				))) ||
-		(worktree !== undefined &&
-			(typeof worktree.callID !== 'string' ||
-				typeof worktree.parentSessionId !== 'string' ||
-				typeof worktree.taskId !== 'string' ||
-				worktree.taskId !== parsed.taskId ||
-				typeof worktree.worktreePath !== 'string' ||
-				typeof worktree.branchName !== 'string' ||
-				typeof worktree.worktreeId !== 'string' ||
-				typeof worktree.worktreeSessionId !== 'string' ||
-				!['merge', 'rebase', 'cherry-pick'].includes(
-					String(worktree.mergeStrategy),
-				) ||
-				!Number.isInteger(worktree.laneIndex))) ||
-		(provenance !== undefined &&
-			(typeof provenance.operationId !== 'string' ||
-				provenance.operationId !== parsed.transitionId ||
-				typeof provenance.sourceHead !== 'string' ||
-				typeof provenance.targetHeadBefore !== 'string' ||
-				typeof provenance.branchName !== 'string' ||
-				(worktree !== undefined &&
-					(provenance.branchName !== worktree.branchName ||
-						provenance.strategy !== worktree.mergeStrategy)) ||
-				!['merge', 'rebase', 'cherry-pick'].includes(
-					String(provenance.strategy),
-				))) ||
-		typeof parsed.recordedAt !== 'string' ||
-		(parsed.state === 'PREPARED' && typeof parsed.accepted !== 'boolean') ||
-		(parsed.cleanupComplete !== undefined &&
-			typeof parsed.cleanupComplete !== 'boolean') ||
-		(parsed.settlementFailed !== undefined &&
-			typeof parsed.settlementFailed !== 'boolean')
-	) {
-		throw new Error('CODER_SETTLEMENT_WAL_CORRUPT');
-	}
-	return parsed as CoderSettlementWal;
+async function readWal(
+	filePath: string,
+	taskId: string,
+): Promise<CoderSettlementWal | null> {
+	return readWorkflowWalFile('coder-settlement', filePath, taskId);
 }
 
 async function withSettlementLock<T>(
@@ -214,8 +88,7 @@ async function writeWal(
 	filePath: string,
 	wal: CoderSettlementWal,
 ): Promise<void> {
-	await mkdir(dirname(filePath), { recursive: true });
-	await atomicWriteFile(filePath, `${JSON.stringify(wal, null, 2)}\n`);
+	await writeWorkflowWalFile('coder-settlement', filePath, wal);
 }
 
 function isProcessAlive(processId: number): boolean {
@@ -249,9 +122,8 @@ async function commitPrepared(
 		wal.taskId,
 		wal.actor,
 		async (transaction) => {
-			const lockedRaw = await readText(walPath(directory, wal.taskId));
-			if (lockedRaw === null) throw new Error('CODER_SETTLEMENT_WAL_MISSING');
-			let lockedWal = parseWal(lockedRaw);
+			let lockedWal = await readWal(walPath(directory, wal.taskId), wal.taskId);
+			if (lockedWal === null) throw new Error('CODER_SETTLEMENT_WAL_MISSING');
 			if (lockedWal.transitionId !== wal.transitionId) {
 				throw new Error('CODER_SETTLEMENT_WAL_REPLACED');
 			}
@@ -351,9 +223,8 @@ export async function beginCoderSettlement(options: {
 							`TASK_WORKFLOW_GENERATION_MISMATCH: expected ${options.expectedGeneration}, found ${snapshot.generation}`,
 						);
 					}
-					const raw = await readText(filePath);
-					if (raw !== null) {
-						const existing = parseWal(raw);
+					const existing = await readWal(filePath, options.taskId);
+					if (existing !== null) {
 						if (existing.taskId !== options.taskId) {
 							throw new Error('CODER_SETTLEMENT_WAL_TASK_MISMATCH');
 						}
@@ -439,9 +310,8 @@ export async function settleCoderDispatch(options: {
 		'coder-settlement',
 		async () => {
 			const filePath = walPath(options.directory, options.taskId);
-			const raw = await readText(filePath);
-			if (raw === null) throw new Error('CODER_SETTLEMENT_WAL_MISSING');
-			const wal = parseWal(raw);
+			const wal = await readWal(filePath, options.taskId);
+			if (wal === null) throw new Error('CODER_SETTLEMENT_WAL_MISSING');
 			if (wal.taskId !== options.taskId)
 				throw new Error('CODER_SETTLEMENT_WAL_TASK_MISMATCH');
 			if (wal.transitionId !== options.transitionId) {
@@ -482,8 +352,8 @@ export async function settleCoderDispatch(options: {
 			try {
 				return await commitPrepared(options.directory, prepared);
 			} finally {
-				const finalRaw = await readText(filePath);
-				if (finalRaw !== null && parseWal(finalRaw).state === 'COMMITTED') {
+				const finalWal = await readWal(filePath, options.taskId);
+				if (finalWal !== null && finalWal.state === 'COMMITTED') {
 					liveDispatches.delete(
 						dispatchKey(
 							options.directory,
@@ -510,9 +380,8 @@ export async function recordCoderMergeProvenance(options: {
 		'coder-merge-provenance',
 		async () => {
 			const filePath = walPath(options.directory, options.taskId);
-			const raw = await readText(filePath);
-			if (raw === null) throw new Error('CODER_SETTLEMENT_WAL_MISSING');
-			const wal = parseWal(raw);
+			const wal = await readWal(filePath, options.taskId);
+			if (wal === null) throw new Error('CODER_SETTLEMENT_WAL_MISSING');
 			if (
 				wal.taskId !== options.taskId ||
 				wal.transitionId !== options.transitionId
@@ -611,9 +480,8 @@ export async function completeCoderSettlementCleanup(
 ): Promise<void> {
 	await withSettlementLock(directory, taskId, 'coder-cleanup', async () => {
 		const filePath = walPath(directory, taskId);
-		const raw = await readText(filePath);
-		if (raw === null) throw new Error('CODER_SETTLEMENT_WAL_MISSING');
-		const wal = parseWal(raw);
+		const wal = await readWal(filePath, taskId);
+		if (wal === null) throw new Error('CODER_SETTLEMENT_WAL_MISSING');
 		if (wal.taskId !== taskId || wal.transitionId !== transitionId) {
 			throw new Error('CODER_SETTLEMENT_WAL_REPLACED');
 		}
@@ -632,11 +500,9 @@ export async function recoverCoderSettlement(
 ): Promise<CoderSettlementResult | null> {
 	return withSettlementLock(directory, taskId, 'coder-recovery', async () => {
 		const filePath = walPath(directory, taskId);
-		const raw = await readText(filePath);
-		if (raw === null) return null;
-		let wal = parseWal(raw);
-		if (wal.taskId !== taskId)
-			throw new Error('CODER_SETTLEMENT_WAL_TASK_MISMATCH');
+		const existingWal = await readWal(filePath, taskId);
+		if (existingWal === null) return null;
+		let wal: CoderSettlementWal = existingWal;
 		if (wal.state === 'ABORTED') return null;
 		if (wal.state === 'COMMITTED') {
 			if (wal.worktree && wal.cleanupComplete !== true) {
@@ -775,12 +641,12 @@ export async function recoverCoderSettlement(
 					);
 				}
 				await cleanupRecoveredWorktree(directory, descriptor);
-				const committedRaw = await readText(filePath);
-				if (committedRaw === null) {
+				const committedWal = await readWal(filePath, taskId);
+				if (committedWal === null) {
 					throw new Error('CODER_SETTLEMENT_WAL_MISSING');
 				}
 				await writeWal(filePath, {
-					...parseWal(committedRaw),
+					...committedWal,
 					cleanupComplete: true,
 				});
 				return recovered;
@@ -806,11 +672,10 @@ export async function recoverCoderSettlement(
 		const committed = await commitPrepared(directory, wal);
 		if (wal.worktree) {
 			await cleanupRecoveredWorktree(directory, wal.worktree);
-			const committedRaw = await readText(filePath);
-			if (committedRaw === null) {
+			const committedWal = await readWal(filePath, taskId);
+			if (committedWal === null) {
 				throw new Error('CODER_SETTLEMENT_WAL_MISSING');
 			}
-			const committedWal = parseWal(committedRaw);
 			await writeWal(filePath, { ...committedWal, cleanupComplete: true });
 		}
 		return committed;
@@ -829,9 +694,8 @@ export async function assertNoUnsettledCoderDispatch(
 	directory: string,
 	taskId: string,
 ): Promise<void> {
-	const raw = await readText(walPath(directory, taskId));
-	if (raw === null) return;
-	const wal = parseWal(raw);
+	const wal = await readWal(walPath(directory, taskId), taskId);
+	if (wal === null) return;
 	if (wal.state === 'DISPATCHED' || wal.state === 'PREPARED') {
 		throw new Error(
 			`CODER_SETTLEMENT_RECOVERY_REQUIRED: transition ${wal.transitionId} must settle before task ${taskId} can change plan status`,
@@ -840,6 +704,5 @@ export async function assertNoUnsettledCoderDispatch(
 }
 
 export const _internals = {
-	parseWal,
 	liveDispatches,
 };

@@ -10,6 +10,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { createKnowledgeInjectorHook } from '../../src/hooks/knowledge-injector.js';
 import type {
@@ -90,10 +91,8 @@ const CONFIG: KnowledgeConfig = {
 	sweep_enabled: true,
 };
 
-function createRelativeTempDir(): string {
-	const baseDir = 'tmp';
-	if (!fs.existsSync(baseDir)) fs.mkdirSync(baseDir, { recursive: true });
-	return fs.mkdtempSync(path.join(baseDir, 'cf-filter-'));
+function createTempProjectDir(): string {
+	return fs.mkdtempSync(path.join(os.tmpdir(), 'cf-filter-'));
 }
 
 function architectMessages(): MessageWithParts[] {
@@ -120,7 +119,7 @@ describe('confidence filter removed (Task 6.1)', () => {
 	let dir: string;
 
 	beforeEach(() => {
-		dir = createRelativeTempDir();
+		dir = createTempProjectDir();
 		fs.mkdirSync(path.join(dir, '.swarm'), { recursive: true });
 		fs.writeFileSync(path.join(dir, '.swarm', 'plan.json'), PLAN);
 		// (#1849) Map the session to the architect so identity resolves.

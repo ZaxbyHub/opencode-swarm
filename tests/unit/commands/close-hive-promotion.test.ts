@@ -7,6 +7,8 @@ import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import type { Plan } from '../../../src/config/plan-schema';
+import { savePlan } from '../../../src/plan/manager';
 
 // ── Import under test ────────────────────────────────────────────────
 const { handleCloseCommand, _internals: closeInternals } = await import(
@@ -32,10 +34,11 @@ function swarmDir(): string {
 	return path.join(testDir, '.swarm');
 }
 
-function writePlan(overrides: Record<string, unknown> = {}): void {
-	const plan = {
+async function writePlan(overrides: Partial<Plan> = {}): Promise<void> {
+	const plan: Plan = {
 		title: 'Hive Promotion Test Project',
 		schema_version: '1.0.0',
+		swarm: 'test-swarm',
 		current_phase: 1,
 		phases: [
 			{
@@ -43,14 +46,30 @@ function writePlan(overrides: Record<string, unknown> = {}): void {
 				name: 'Phase 1',
 				status: 'in_progress',
 				tasks: [
-					{ id: '1.1', status: 'in_progress', description: 'Task A' },
-					{ id: '1.2', status: 'complete', description: 'Task B' },
+					{
+						id: '1.1',
+						phase: 1,
+						status: 'in_progress',
+						size: 'small',
+						description: 'Task A',
+						depends: [],
+						files_touched: ['src/task-a.ts'],
+					},
+					{
+						id: '1.2',
+						phase: 1,
+						status: 'completed',
+						size: 'small',
+						description: 'Task B',
+						depends: [],
+						files_touched: ['src/task-b.ts'],
+					},
 				],
 			},
 		],
 		...overrides,
 	};
-	writeFileSync(path.join(swarmDir(), 'plan.json'), JSON.stringify(plan));
+	await savePlan(testDir, plan);
 }
 
 function writeKnowledgeEntry(entry: Record<string, unknown>): void {
@@ -140,6 +159,7 @@ describe('handleCloseCommand — hive promotion', () => {
 	beforeEach(() => {
 		testDir = mkdtempSync(path.join(os.tmpdir(), 'close-hive-promotion-test-'));
 		knowledgePath = path.join(swarmDir(), 'knowledge.jsonl');
+		mkdirSync(path.join(testDir, '.git'));
 		mkdirSync(swarmDir(), { recursive: true });
 		writeFileSync(knowledgePath, '');
 
@@ -197,7 +217,7 @@ describe('handleCloseCommand — hive promotion', () => {
 
 	describe('Hive promotion succeeds for multiple lessons', () => {
 		it('promotes all lessons when curation succeeds', async () => {
-			writePlan();
+			await writePlan();
 			writeKnowledgeEntry(baseKnowledgeEntry());
 
 			// Mock: 1 new promotion for the single entry
@@ -218,7 +238,7 @@ describe('handleCloseCommand — hive promotion', () => {
 		});
 
 		it('close still succeeds after promoting multiple lessons', async () => {
-			writePlan();
+			await writePlan();
 			writeKnowledgeEntry(baseKnowledgeEntry());
 
 			closeInternals.checkHivePromotions = mock(async () => ({
@@ -240,7 +260,7 @@ describe('handleCloseCommand — hive promotion', () => {
 
 	describe('Hive promotion non-blocking on individual failure', () => {
 		it('continues promoting remaining lessons when one fails', async () => {
-			writePlan();
+			await writePlan();
 			writeKnowledgeEntry(baseKnowledgeEntry());
 
 			// Simulate checkHivePromotions throwing
@@ -260,7 +280,7 @@ describe('handleCloseCommand — hive promotion', () => {
 		});
 
 		it('logs warning for failed individual promotion', async () => {
-			writePlan();
+			await writePlan();
 			writeKnowledgeEntry(baseKnowledgeEntry());
 
 			closeInternals.checkHivePromotions = mock(async () => {
@@ -282,7 +302,7 @@ describe('handleCloseCommand — hive promotion', () => {
 
 	describe('Hive promotion skipped when no knowledge.jsonl', () => {
 		it('skips promotion when readKnowledge returns empty array', async () => {
-			writePlan();
+			await writePlan();
 			writeFileSync(knowledgePath, '');
 
 			const result = await handleCloseCommand(testDir, []);
@@ -294,7 +314,7 @@ describe('handleCloseCommand — hive promotion', () => {
 		});
 
 		it('logs warning when knowledge file read fails', async () => {
-			writePlan();
+			await writePlan();
 			// Write a file that will cause readKnowledge to fail or return empty
 			writeFileSync(knowledgePath, '');
 
@@ -321,7 +341,7 @@ describe('handleCloseCommand — hive promotion', () => {
 
 	describe('Hive promotion skipped when curation fails', () => {
 		it('logs warning when curation fails but close still succeeds', async () => {
-			writePlan();
+			await writePlan();
 			writeKnowledgeEntry(baseKnowledgeEntry());
 
 			// Make curation fail
@@ -342,7 +362,7 @@ describe('handleCloseCommand — hive promotion', () => {
 		});
 
 		it('close succeeds even when curation fails', async () => {
-			writePlan();
+			await writePlan();
 			writeKnowledgeEntry(baseKnowledgeEntry());
 
 			closeInternals.curateAndStoreSwarm = mock(async () => {
@@ -360,7 +380,7 @@ describe('handleCloseCommand — hive promotion', () => {
 
 	describe('Overall hive promotion failure non-blocking', () => {
 		it('logs warning but still succeeds when checkHivePromotions throws', async () => {
-			writePlan();
+			await writePlan();
 			writeKnowledgeEntry(baseKnowledgeEntry());
 
 			closeInternals.checkHivePromotions = mock(async () => {
@@ -378,7 +398,7 @@ describe('handleCloseCommand — hive promotion', () => {
 		});
 
 		it('close still succeeds when checkHivePromotions returns 0 promotions', async () => {
-			writePlan();
+			await writePlan();
 			writeKnowledgeEntry(baseKnowledgeEntry());
 
 			closeInternals.checkHivePromotions = mock(async () => ({

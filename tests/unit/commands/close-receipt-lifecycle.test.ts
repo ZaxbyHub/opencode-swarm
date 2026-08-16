@@ -185,20 +185,79 @@ test('does not reconcile phase_closed when durable plan persistence fails', asyn
 
 test('terminalizes a plan when no receipt lifecycle exists to close', async () => {
 	const persist = mock(async () => {});
+	const reconcile = mock(async () => ({
+		ok: true,
+		reconciled: false,
+	}));
 	closeReceiptLifecycleInternals.recordPhaseCloseIntent = mock(async () => ({
 		ok: false,
 		code: 'trace_not_found',
 		detail: 'no exact receipt lifecycle scope exists for phase closure',
 	})) as never;
 	closeInternals.closePlanTerminalState = persist as never;
-	closeReceiptLifecycleInternals.reconcilePhaseClose = mock(async () => ({
-		ok: true,
-		reconciled: false,
-	}));
+	closeReceiptLifecycleInternals.reconcilePhaseClose = reconcile;
 	const ctx = makeContext();
 
 	await runFinalizeStage(ctx);
 
 	expect(persist).toHaveBeenCalledTimes(1);
+	expect(reconcile).not.toHaveBeenCalled();
 	expect(ctx.warnings).toEqual([]);
+});
+
+test('hard-stops finalize when receipt phase-close intent fails ambiguously', async () => {
+	const persist = mock(async () => {});
+	const reconcile = mock(async () => ({
+		ok: true,
+		reconciled: true,
+	}));
+	closeReceiptLifecycleInternals.recordPhaseCloseIntent = mock(async () => ({
+		ok: false,
+		code: 'store_unavailable',
+		detail:
+			'receipt lifecycle scope is ambiguous without an exact session identity',
+	})) as never;
+	closeInternals.closePlanTerminalState = persist as never;
+	closeReceiptLifecycleInternals.reconcilePhaseClose = reconcile;
+	const ctx = makeContext();
+
+	await runFinalizeStage(ctx);
+
+	expect(persist).not.toHaveBeenCalled();
+	expect(reconcile).not.toHaveBeenCalled();
+	expect(ctx.terminalizationError).toContain(
+		'Receipt phase-close intent failed for phase 1',
+	);
+	expect(ctx.warnings).toContain(
+		'Receipt phase-close intent failed for phase 1: receipt lifecycle scope is ambiguous without an exact session identity. Plan terminalization was not attempted.',
+	);
+});
+
+test('hard-stops finalize when receipt phase-close reconciliation fails', async () => {
+	const reconcile = mock(async (_directory, phase: string) => {
+		if (phase.startsWith('Phase 2')) {
+			return {
+				ok: false,
+				code: 'store_unavailable',
+				detail: 'receipt archive contains an invalid authoritative summary',
+			};
+		}
+		return { ok: true, reconciled: true };
+	});
+	closeReceiptLifecycleInternals.recordPhaseCloseIntent = mock(
+		async () => ({ ok: true, event_id: 'intent' }) as never,
+	);
+	closeInternals.closePlanTerminalState = mock(async () => {}) as never;
+	closeReceiptLifecycleInternals.reconcilePhaseClose = reconcile;
+	const ctx = makeContext();
+
+	await runFinalizeStage(ctx);
+
+	expect(reconcile).toHaveBeenCalledTimes(2);
+	expect(ctx.terminalizationError).toBe(
+		'Receipt phase-close reconciliation failed for phase 2: receipt archive contains an invalid authoritative summary',
+	);
+	expect(ctx.warnings).toContain(
+		'Receipt phase-close reconciliation failed for phase 2: receipt archive contains an invalid authoritative summary',
+	);
 });

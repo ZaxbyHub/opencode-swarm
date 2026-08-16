@@ -429,14 +429,14 @@ describe('ADVERSARIAL: TaskWorkflowState guard attacks', () => {
 			const current = getTaskState(session, 'task-1');
 			expect(current).toBe('invalid_state');
 
-			// STATE_ORDER.indexOf('invalid_state') returns -1
-			// So for any valid state: newIndex >= 0, currentIndex = -1
-			// newIndex <= currentIndex is false (e.g., 0 <= -1 is false)
-			// So transitions would actually be ALLOWED for invalid states!
-			// This is a potential security issue - but let's verify behavior
+			// Invalid stored states fail closed instead of being treated as a state
+			// before the beginning of the workflow order.
 			expect(() =>
 				advanceTaskState(session, 'task-1', 'coder_delegated'),
-			).not.toThrow();
+			).toThrow(
+				'INVALID_TASK_STATE_TRANSITION: task-1 invalid_state → coder_delegated',
+			);
+			expect(getTaskState(session, 'task-1')).toBe('invalid_state');
 		});
 	});
 

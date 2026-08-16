@@ -36,6 +36,7 @@ import path from 'node:path';
 
 import { isValidEvidenceType } from '../../../src/evidence/manager.js';
 import { initLedger } from '../../../src/plan/ledger.js';
+import { derivePlanId } from '../../../src/plan/utils.js';
 import { STATE_MOCK_TRANSITIVE_STUBS } from './state-mock-transitive-stubs.js';
 
 // ── Mocks (must precede the dynamic import) ──────────────────────────
@@ -310,6 +311,8 @@ async function writePlan(
 						status: 'in_progress',
 						description: 'Task A',
 						size: 'small',
+						depends: [],
+						files_touched: [],
 					},
 					{
 						id: '1.2',
@@ -317,6 +320,8 @@ async function writePlan(
 						status: 'completed',
 						description: 'Task B',
 						size: 'small',
+						depends: [],
+						files_touched: [],
 					},
 				],
 			},
@@ -324,7 +329,7 @@ async function writePlan(
 		...overrides,
 	};
 	writeFileSync(path.join(swarmDir(), 'plan.json'), JSON.stringify(plan));
-	await initLedger(testDir, plan.swarm ?? 'paid', undefined, plan);
+	await initLedger(testDir, derivePlanId(plan), undefined, plan);
 }
 
 // ── Test suites ──────────────────────────────────────────────────────
@@ -577,7 +582,8 @@ describe('handleCloseCommand — finalizer stages', () => {
 			// then add the rest.
 			await writePlan();
 			for (const f of activeFilesRemoved) {
-				if (f === 'plan.json') continue; // written by await writePlan()
+				if (f === 'plan.json' || f === 'plan-ledger.jsonl') continue;
+				// plan.json/plan-ledger.jsonl are written by await writePlan().
 				writeFileSync(path.join(swarmDir(), f), `content of ${f}`);
 			}
 
@@ -858,11 +864,6 @@ describe('handleCloseCommand — finalizer stages', () => {
 			//   1. The ledger is copied into the archive bundle (forensics)
 			//   2. The ledger is removed from .swarm/ (clean slate)
 			await writePlan();
-			// Seed a realistic-looking ledger file.
-			const ledgerContent =
-				`${JSON.stringify({ seq: 1, plan_id: 'test-plan', event_type: 'plan_created', timestamp: '2026-01-01T00:00:00.000Z' })}\n` +
-				`${JSON.stringify({ seq: 2, plan_id: 'test-plan', event_type: 'snapshot', source: 'critic_approved', timestamp: '2026-01-02T00:00:00.000Z' })}\n`;
-			writeFileSync(path.join(swarmDir(), 'plan-ledger.jsonl'), ledgerContent);
 
 			const result = await handleCloseCommand(testDir, []);
 
@@ -881,7 +882,9 @@ describe('handleCloseCommand — finalizer stages', () => {
 			const archivedLedger = readFileSync(archivedLedgerPath, 'utf-8');
 			expect(archivedLedger).toContain('"event_type":"plan_created"');
 			expect(archivedLedger).toContain('"event_type":"snapshot"');
-			expect(archivedLedger).toContain('"plan_id":"test-plan"');
+			expect(archivedLedger).toContain(
+				`"plan_id":"${derivePlanId({ swarm: 'paid', title: 'Finalizer Test Project' })}"`,
+			);
 
 			// 2. Clean-slate: ledger must be gone from .swarm/ so the next
 			//    session's loadPlan() falls through to Step 4 with no ledger
@@ -1095,7 +1098,7 @@ describe('handleCloseCommand — finalizer stages', () => {
 				changesDiscarded: false,
 				warnings: [],
 			}));
-			writePlan();
+			await writePlan();
 
 			const result = await handleCloseCommand(testDir, []);
 
@@ -1120,7 +1123,7 @@ describe('handleCloseCommand — finalizer stages', () => {
 				reason: 'git_unavailable',
 				message: 'git executable is not available on PATH',
 			}));
-			writePlan();
+			await writePlan();
 
 			const result = await handleCloseCommand(testDir, []);
 
@@ -1137,7 +1140,7 @@ describe('handleCloseCommand — finalizer stages', () => {
 				reason: 'git_error',
 				message: 'spawnSync git ETIMEDOUT',
 			}));
-			writePlan();
+			await writePlan();
 
 			const result = await handleCloseCommand(testDir, []);
 
@@ -1159,7 +1162,7 @@ describe('handleCloseCommand — finalizer stages', () => {
 				changesDiscarded: false,
 				warnings: [] as string[],
 			}));
-			writePlan();
+			await writePlan();
 
 			await handleCloseCommand(testDir, []);
 
