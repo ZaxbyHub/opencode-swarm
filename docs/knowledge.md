@@ -896,3 +896,68 @@ For new v2 agents:
 The deprecated top-level `model` fields remain in the schema only so that
 config-doctor can warn when they are present without an `agents.<name>.model`
 counterpart. They will be removed in a future major release.
+
+## Hive-store quarantine (human-only maintenance, issue #2033)
+
+The machine-global hive store (`shared-learnings.jsonl` under the platform data dir —
+`%LOCALAPPDATA%\opencode-swarm\Data` on Windows, XDG data roots on macOS/Linux) can be
+polluted by leaked test fixtures or bad promotions. `/swarm knowledge hive-quarantine` is
+the sanctioned operator remediation. It is **human-only**: agents are refused at
+`swarm_command` classification, the shell guardrail blocks CLI bypass attempts from agent
+shells, and the chat-fallback policy blocks agent-typed usage. There is no
+`--yes`/`--force`/env bypass anywhere.
+
+### Flow
+
+1. **Preview** — `/swarm knowledge hive-quarantine preview <id>[,<id>…]` prints each
+   exact candidate with status, confidence, source project, lineage actor, per-line
+   sha256, the whole-store fingerprint (entry count + file sha256), the plugin version,
+   and a short-lived confirmation **token** bound to all of them (15-minute TTL).
+2. **Commit** — `/swarm knowledge hive-quarantine commit --token <token> [--reason …]`
+   runs ONE `transactHiveStore` transaction: the token is re-verified against the
+   re-read-under-lock state (any concurrent append, curation, or per-entry change aborts
+   with no mutation), a complete backup plus `manifest.json` is written and hash-verified
+   under the same lock, EXACTLY the selected entries move to the
+   `shared-learnings-quarantined.jsonl` sidecar (mirroring the swarm-tier
+   `knowledge-quarantined.jsonl` convention), audit records land in
+   `shared-knowledge-events.jsonl`, and counts/hashes are verified afterwards — a
+   verification failure auto-restores the backup.
+3. **Rollback** — `/swarm knowledge hive-quarantine rollback --token <token12> |
+   --latest` restores the EXACT original line bytes from the manifest's backup,
+   idempotently: ids already present with identical bytes are skipped; an id present with
+   different content (re-promoted after quarantine) aborts with a collision report and
+   no mutation.
+4. **Status** — `/swarm knowledge hive-quarantine status` lists backups (read-only).
+
+### Invariants
+
+- **Exact-ID selection only.** No text, substring, "test-looking phrase", cohort, age, or
+  blacklist matching exists in the module; there is no bulk operation. A store that
+  legitimately contains test-like text keeps it unless its exact id is selected.
+- **Recoverable by construction.** Backups live beside the store under
+  `<dataDir>/quarantine-backups/<timestamp>-<token12>/` (machine-global, discoverable
+  from any project — deliberately NOT under a project's `.swarm/`). Quarantined entries
+  are removed from recall and query by construction (the sidecar is not a retrieval
+  source; `isActiveStatus` semantics are untouched).
+- **Audit trail.** Every phase emits a metadata-only `knowledge_maintenance` telemetry
+  event (bounded phase/abort codes, counts, hash/token prefixes — never lesson text or
+  paths) plus `quarantined`/`rollback` records in `shared-knowledge-events.jsonl`.
+- **Byte-fidelity scope.** Restored ids come back byte-exact and hash-verified. Two
+  standing-transaction behaviors apply to everything EXCEPT the selected ids: unselected
+  entries may be re-serialized by the store's normalize-on-write pipeline, and unparseable
+  (corrupt) lines are DROPPED by a commit rewrite — they survive only in the hash-verified
+  backup copy, from which they can be recovered manually.
+
+### Test isolation boundary (also issue #2033)
+
+Tests must never touch the real platform stores. The suite installs a fail-closed
+production-store tripwire (`tests/preload/prod-store-tripwire.ts`, loaded via
+`bunfig.toml [test] preload`) that captures the real hive/link paths at process start and
+throws on content reads and all mutation attempts against them (node:fs guards plus a
+`Bun.write` wrap; metadata reads — `readdir`/`stat`/`existsSync` — and `mkdir` are
+intentionally unguarded). The preload registers a global `afterEach` that re-arms the
+  guards after any `mock.restore()` and a global `afterAll` that verifies the real stores
+  are unchanged after every suite. To
+isolate, redirect `LOCALAPPDATA` **and** `XDG_DATA_HOME` **and** `HOME` to a temp dir
+(`createIsolatedTestEnv()` or explicit env redirection) — a POSIX-only redirect is a
+no-op on Windows, where the resolvers read `LOCALAPPDATA` first.

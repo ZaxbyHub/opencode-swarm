@@ -53,6 +53,7 @@ import { handleGateAuditCommand } from './gate-audit.js';
 import { handleGateStatsCommand } from './gate-stats.js';
 import { handleHandoffCommand } from './handoff.js';
 import { handleHistoryCommand } from './history.js';
+import { handleKnowledgeHiveQuarantineCommand } from './hive-quarantine.js';
 import { handleIssueCommand } from './issue.js';
 import {
 	handleKnowledgeListCommand,
@@ -1531,6 +1532,23 @@ export const COMMAND_REGISTRY = {
 			"Restores a quarantined or archived knowledge entry back to the active knowledge store by ID. Dispatches by current status: an 'archived' entry is restored to its pre-archive status; a 'quarantined' entry is restored from the quarantine sidecar. Validates entry ID format (1-64 alphanumeric/hyphen/underscore).",
 		args: '<entry-id>',
 		category: 'utility',
+	},
+	'knowledge hive-quarantine': {
+		handler: (ctx) =>
+			handleKnowledgeHiveQuarantineCommand(ctx.directory, ctx.args),
+		description:
+			'Human-only exact-ID quarantine of hive-store entries with backup and rollback',
+		subcommandOf: 'knowledge',
+		details:
+			'Issue #2033 operator maintenance for the machine-global hive knowledge store. ' +
+			'`preview <id>[,<id>...]` shows exact candidate IDs with per-line hashes, provenance, status, and a store fingerprint, and issues a short-lived confirmation token. ' +
+			'`commit --token <t> [--reason <text>]` re-verifies the store under the hive transaction lock, creates a hash-verified backup plus manifest, moves EXACTLY the selected entries to shared-learnings-quarantined.jsonl, and verifies counts and hashes afterwards (auto-restoring from the backup on verification failure). ' +
+			'`rollback --token <token12> | --latest` restores the exact original bytes idempotently. ' +
+			'Selection is exact-ID only — never by text, substring, cohort, age, or blacklist, and never in bulk. ' +
+			'Human-only: refused for agents via swarm_command, chat fallback, and the shell guardrail.',
+		args: '<preview|commit|rollback|status> ...',
+		category: 'utility',
+		toolPolicy: 'human-only',
 	},
 	'knowledge unactionable': {
 		handler: (ctx) =>

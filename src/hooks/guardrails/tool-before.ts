@@ -787,10 +787,18 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					if (probe === before) break;
 				}
 
-				// Form A: <runner> ... opencode-swarm ... run <subcmd> [subsubcmd]
-				const swarmCliBypassMatch = probe.match(
-					/^\\?(?:bunx|npx|pnpx|npm(?:\s+(?:exec|x)(?:\s+--)?)?|pnpm(?:\s+(?:dlx|exec))?|yarn(?:\s+(?:dlx|exec))?|bun(?:\s+x)?|node|deno\s+run|tsx|ts-node)\b[^|;&]*?\bopencode-swarm\b[^|;&]*?\brun\s+([A-Za-z0-9_-]+(?:\s+(?!-)[A-Za-z0-9_-]+)?)/i,
-				);
+				// Form A: <runner> ... opencode-swarm ... run <subcmd> [subsubcmd].
+				// A dequoted copy is also probed so quoting the subcommand
+				// (`run "knowledge hive-quarantine"`) cannot dodge the capture
+				// (issue #2033 forgery path; applies to every human-only command).
+				const probeDequoted = probe.replace(/["']/g, '');
+				const swarmCliBypassMatch =
+					probe.match(
+						/^\\?(?:bunx|npx|pnpx|npm(?:\s+(?:exec|x)(?:\s+--)?)?|pnpm(?:\s+(?:dlx|exec))?|yarn(?:\s+(?:dlx|exec))?|bun(?:\s+x)?|node|deno\s+run|tsx|ts-node)\b[^|;&]*?\bopencode-swarm\b[^|;&]*?\brun\s+([A-Za-z0-9_-]+(?:\s+(?!-)[A-Za-z0-9_-]+)?)/i,
+					) ??
+					probeDequoted.match(
+						/^\\?(?:bunx|npx|pnpx|npm(?:\s+(?:exec|x)(?:\s+--)?)?|pnpm(?:\s+(?:dlx|exec))?|yarn(?:\s+(?:dlx|exec))?|bun(?:\s+x)?|node|deno\s+run|tsx|ts-node)\b[^|;&]*?\bopencode-swarm\b[^|;&]*?\brun\s+([A-Za-z0-9_-]+(?:\s+(?!-)[A-Za-z0-9_-]+)?)/i,
+					);
 				if (swarmCliBypassMatch) {
 					const captured = swarmCliBypassMatch[1];
 					// Normalize all whitespace (tabs, multiple spaces) to single spaces for consistent lookup
@@ -812,10 +820,14 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					}
 				}
 
-				// Form B: bare `opencode-swarm` on PATH
-				const swarmBareBinMatch = probe.match(
-					/^\\?opencode-swarm\b[^|;&]*?\brun\s+([A-Za-z0-9_-]+(?:\s+(?!-)[A-Za-z0-9_-]+)?)/i,
-				);
+				// Form B: bare `opencode-swarm` on PATH (dequoted probe included, see Form A)
+				const swarmBareBinMatch =
+					probe.match(
+						/^\\?opencode-swarm\b[^|;&]*?\brun\s+([A-Za-z0-9_-]+(?:\s+(?!-)[A-Za-z0-9_-]+)?)/i,
+					) ??
+					probeDequoted.match(
+						/^\\?opencode-swarm\b[^|;&]*?\brun\s+([A-Za-z0-9_-]+(?:\s+(?!-)[A-Za-z0-9_-]+)?)/i,
+					);
 				if (swarmBareBinMatch) {
 					const captured = swarmBareBinMatch[1];
 					// Normalize all whitespace (tabs, multiple spaces) to single spaces for consistent lookup

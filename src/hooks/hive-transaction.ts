@@ -74,6 +74,39 @@ export interface HiveAuditEntry {
 	line: string;
 }
 
+/**
+ * A staged raw append to a JSONL file inside the hive data dir, performed under the
+ * held directory lock AFTER the atomic store write (issue #2033). Used by the
+ * human-only hive-quarantine flow to append quarantine records to the
+ * `shared-learnings-quarantined.jsonl` sidecar with the same atomicity guarantees as
+ * the audit log — never via `appendKnowledge`, which would re-enter the lock.
+ */
+export interface HiveStagedAppend {
+	/** Absolute path of an existing-or-new .jsonl file inside the hive data dir. */
+	path: string;
+	/** Pre-serialized JSONL block (newline-terminated lines). */
+	block: string;
+}
+
+/**
+ * Thrown when a staged append fails AFTER the atomic store rewrite (issue #2033). The
+ * store mutation already happened, so callers must compensate (the hive-quarantine flow
+ * restores from its just-written backup) rather than treating this as a clean abort.
+ */
+export class HiveStagedAppendError extends Error {
+	constructor(
+		public readonly stagedPath: string,
+		public readonly cause: unknown,
+	) {
+		super(
+			`staged append failed after store rewrite (${stagedPath}): ${
+				cause instanceof Error ? cause.message : String(cause)
+			}`,
+		);
+		this.name = 'HiveStagedAppendError';
+	}
+}
+
 /** The result a mutation closure returns. */
 export type HiveMutationOutcome<T> =
 	| {
@@ -85,6 +118,21 @@ export type HiveMutationOutcome<T> =
 			rejects?: RejectedLesson[];
 			/** Audit lines to append to the hive events log under the lock. */
 			audit?: HiveAuditEntry[];
+			/**
+			 * Additional staged raw JSONL appends under the same lock (issue #2033).
+			 * Each path is validated (before the atomic write) to resolve inside the
+			 * hive data dir, end in `.jsonl`, and NOT sit under `quarantine-backups/`
+			 * (reparse/junction defense). These appends are NEVER FIFO-trimmed.
+			 */
+			extraStagedAppends?: HiveStagedAppend[];
+			/**
+			 * Exact raw line bytes to persist for specific entry ids (issue #2033),
+			 * overriding the `JSON.stringify(entry)` serialization. Used by the
+			 * hive-quarantine rollback so restored legacy-shaped entries are written
+			 * byte-exactly instead of re-serialized through the normalize-on-read
+			 * pipeline.
+			 */
+			rawLineOverrides?: Record<string, string>;
 			/** Caller return value surfaced back through HiveTransactionResult. */
 			return: T;
 	  }
@@ -203,18 +251,31 @@ export async function transactHiveStore<T>(
 			);
 		}
 
+		// 4b. Pre-write validation of staged-append targets (issue #2033): purely lexical,
+		//     so a bad path can NEVER reach this point after the store has been rewritten.
+		if (outcome.extraStagedAppends && outcome.extraStagedAppends.length > 0) {
+			for (const staged of outcome.extraStagedAppends) {
+				validateStagedAppendPath(staged.path, dataDir);
+			}
+		}
+
 		// 5. Atomic persistence: temp + rename. On crash the previous file is
 		//    intact (rename is atomic; the temp is orphaned but cleaned by
-		//    atomicWriteFile's finally).
+		//    atomicWriteFile's finally). `rawLineOverrides` (issue #2033) lets a
+		//    caller demand EXACT original line bytes for specific ids — used by the
+		//    hive-quarantine rollback so restored legacy-shaped entries are not
+		//    re-serialized through the normalize-on-read pipeline.
+		const overrides = outcome.rawLineOverrides ?? {};
 		const content =
-			committedEntries.map((e) => JSON.stringify(e)).join('\n') +
-			(committedEntries.length > 0 ? '\n' : '');
+			committedEntries
+				.map((e) => overrides[e.id] ?? JSON.stringify(e))
+				.join('\n') + (committedEntries.length > 0 ? '\n' : '');
 		await _internals.atomicWriteFile(hivePath, content);
 
 		// 6. Staged appends (rejects + audit) under the SAME lock, via raw
-		//    appendFile. NEVER via appendKnowledge/appendHiveKnowledgeEvent,
-		//    which would re-enter the directory lock and deadlock. (See curator
-		//    precedent at curator.ts:1966-1969.)
+		// appendFile. NEVER via appendKnowledge/appendHiveKnowledgeEvent,
+		// which would re-enter the directory lock and deadlock. (See curator
+		// precedent at curator.ts:1966-1969.)
 		if (outcome.rejects && outcome.rejects.length > 0) {
 			const rejectBlock = `${outcome.rejects.map((r) => JSON.stringify(r)).join('\n')}\n`;
 			await appendFile(rejectedPath, rejectBlock, 'utf-8');
@@ -235,6 +296,22 @@ export async function transactHiveStore<T>(
 			}
 		}
 
+		// 6b. Extra staged appends (issue #2033): validated sibling JSONL writes under
+		// the same held lock. Never FIFO-trimmed — quarantine sidecars are operator
+		// records and must not be silently evicted. An I/O failure here happens AFTER
+		// the store rewrite, so it throws a typed HiveStagedAppendError letting the
+		// caller run its own backup-restore compensation instead of seeing a raw,
+		// post-mutation failure with no recovery (reviewer finding 3).
+		if (outcome.extraStagedAppends && outcome.extraStagedAppends.length > 0) {
+			for (const staged of outcome.extraStagedAppends) {
+				try {
+					await _internals.appendFile(staged.path, staged.block, 'utf-8');
+				} catch (err) {
+					throw new HiveStagedAppendError(staged.path, err);
+				}
+			}
+		}
+
 		return { committed: true, return: outcome.return, diagnostics };
 	} finally {
 		if (release) {
@@ -244,6 +321,42 @@ export async function transactHiveStore<T>(
 				/* lock release failed — non-blocking */
 			}
 		}
+	}
+}
+
+/**
+ * Validate a staged-append target (issue #2033): absolute, inside the hive data dir,
+ * `.jsonl` extension, and NOT under `quarantine-backups/`. Lexical resolution plus a
+ * `..`-segment rejection guards path escapes; the data-dir prefix guard makes symlink
+ * targets inside the backups tree unreachable as staging destinations.
+ */
+function validateStagedAppendPath(target: string, dataDir: string): void {
+	if (!path.isAbsolute(target)) {
+		throw new Error(`staged append path must be absolute: ${target}`);
+	}
+	if (path.extname(target) !== '.jsonl') {
+		throw new Error(`staged append path must end in .jsonl: ${target}`);
+	}
+	const resolvedDir = path.resolve(path.dirname(target));
+	const resolvedDataDir = path.resolve(dataDir);
+	const normalizedDir =
+		process.platform === 'win32' ? resolvedDir.toLowerCase() : resolvedDir;
+	const normalizedDataDir =
+		process.platform === 'win32'
+			? resolvedDataDir.toLowerCase()
+			: resolvedDataDir;
+	const insideDataDir =
+		normalizedDir === normalizedDataDir ||
+		normalizedDir.startsWith(`${normalizedDataDir}${path.sep}`);
+	if (!insideDataDir) {
+		throw new Error(
+			`staged append path escapes the hive data dir: ${target} (data dir ${dataDir})`,
+		);
+	}
+	if (normalizedDir.includes(`${path.sep}quarantine-backups${path.sep}`)) {
+		throw new Error(
+			`staged append path must not target quarantine backups: ${target}`,
+		);
 	}
 }
 
@@ -281,6 +394,9 @@ export const _internals = {
 	resolveHiveKnowledgePath,
 	resolveHiveRejectedPath,
 	resolveHiveEventsPath,
+	// staged-append seam (issue #2033): tests inject failures AFTER the atomic store
+	// write to prove the caller's compensation path (HiveStagedAppendError).
+	appendFile,
 	// re-exported for tests that build expected paths
 	path,
 };

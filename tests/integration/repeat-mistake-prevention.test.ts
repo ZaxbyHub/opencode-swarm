@@ -153,6 +153,8 @@ describe('repeat-mistake prevention (Change 3, end-to-end)', () => {
 	let dir: string;
 	let swarmDir: string;
 	let prevXdg: string | undefined;
+	let prevHome: string | undefined;
+	let prevLocalAppData: string | undefined;
 
 	beforeEach(() => {
 		dir = fs.mkdtempSync(path.join(os.tmpdir(), 'repeat-mistake-'));
@@ -179,13 +181,23 @@ describe('repeat-mistake prevention (Change 3, end-to-end)', () => {
 			)}\n`,
 		);
 		prevXdg = process.env.XDG_DATA_HOME;
+		prevHome = process.env.HOME;
+		prevLocalAppData = process.env.LOCALAPPDATA;
+		// LOCALAPPDATA is required on Windows: the platform resolvers read it FIRST, so
+		// an XDG-only redirect silently resolves the REAL hive store (#2033 tripwire).
 		process.env.XDG_DATA_HOME = path.join(dir, 'xdg');
+		process.env.HOME = path.join(dir, 'home');
+		process.env.LOCALAPPDATA = path.join(dir, 'localappdata');
 	});
 
 	afterEach(() => {
 		receiptLedgerInternals.nowMs = originalReceiptNowMs;
 		if (prevXdg === undefined) delete process.env.XDG_DATA_HOME;
 		else process.env.XDG_DATA_HOME = prevXdg;
+		if (prevHome === undefined) delete process.env.HOME;
+		else process.env.HOME = prevHome;
+		if (prevLocalAppData === undefined) delete process.env.LOCALAPPDATA;
+		else process.env.LOCALAPPDATA = prevLocalAppData;
 		fs.rmSync(dir, { recursive: true, force: true });
 	});
 

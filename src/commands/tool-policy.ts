@@ -396,6 +396,7 @@ export function classifySwarmCommandChatFallbackUse(
 		canonicalKey === 'knowledge migrate' ||
 		canonicalKey === 'knowledge quarantine' ||
 		canonicalKey === 'knowledge restore' ||
+		canonicalKey === 'knowledge hive-quarantine' ||
 		canonicalKey === 'memory import' ||
 		canonicalKey === 'memory migrate' ||
 		canonicalKey === 'memory compact'

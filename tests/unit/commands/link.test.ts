@@ -1,4 +1,12 @@
-import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
+import {
+	afterAll,
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	spyOn,
+	test,
+} from 'bun:test';
 import * as path from 'node:path';
 import { handleLinkCommand } from '../../../src/commands/link.js';
 import {

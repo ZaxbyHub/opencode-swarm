@@ -3,7 +3,7 @@
 Companion to `docs/evidence-and-telemetry.md` (evidence bundles + the legacy
 telemetry stream from a user's point of view) and `docs/engineering-invariants.md`
 (the invariant this PR establishes). This document is the contract definition for
-`src/observability/`: the canonical event envelope, the 41-entry event catalog,
+`src/observability/`: the canonical event envelope, the 42-entry event catalog,
 the legacy adapter, sampling/cardinality rules, the OTel mapping pin, and the
 exhaustive producer/consumer matrix across all seventeen known observability
 stores in the repository.
@@ -16,7 +16,7 @@ Issue: #2029. This is PR 01 of 23 in the observability sequence (#2029–#2051).
 
 **What this PR defines.** A single canonical `ObservabilityEvent` envelope
 (`src/observability/envelope.ts`), a discriminated catalog of every event kind
-the codebase emits today (`src/observability/catalog.ts`, 41 entries), a
+the codebase emits today (`src/observability/catalog.ts`, 42 entries), a
 relationship-validation function, a legacy-payload adapter, deterministic
 sampling and bounded-cardinality helpers, and a versioned OTel/OpenInference
 attribute-mapping table. It wires the envelope into the one live production
@@ -182,14 +182,16 @@ those inputs before this change.
 
 ---
 
-## 5. The 41-entry catalog
+## 5. The 42-entry catalog
 
-Source: `src/observability/catalog.ts`. Exactly 41 entries = the 38 pre-existing members of
+Source: `src/observability/catalog.ts`. Exactly 42 entries = the 38 pre-existing members of
 `TelemetryEvent` (`src/telemetry.ts:15-91`) plus `agent_conflict_detected`
 (emitted in production via a force-cast past the type system before #2029)
 plus `close_archive_result` (issue #2030 — the structured close/archive
 result event) plus `knowledge_receipt_transition` (issue #2031, the bounded
-diagnostic projection of authoritative receipt transitions).
+diagnostic projection of authoritative receipt transitions) plus
+`knowledge_maintenance` (issue #2033 — the metadata-only human-only hive-store
+quarantine audit).
 
 Legend: **Owner** is `futureOwnerIssue` when `consumers` is empty (permitted
 only together with an owner — an empty consumer list with no owner is a CI
@@ -490,13 +492,30 @@ Arbitrary reason text and `nonTransientCircuit` are never accepted. This event
 is diagnostic FIFO data only; the canonical-root V2 receipt journal remains the
 sole authority. No live reader exists yet, so #2047 owns the future sink.
 
+#### knowledge_maintenance
+Category `knowledge`, severity `notice`, privacy `pseudonymous`. Producer
+`src/knowledge/hive-quarantine.ts` (single emit site) for each phase of the
+human-only exact-ID hive-store quarantine flow (issue #2033): `preview`,
+`commit_aborted`, `committed`, `verify_failed`, `rollback_aborted`,
+`rolled_back`. Consumers: none; owner **#2047**. Retention: **#2045**. No
+workflow ID is required: the maintenance command runs outside any
+session/workflow context. The payload is strictly metadata: a bounded `phase`
+enum, a bounded `abortReason` code drawn from the module's abort taxonomy,
+`selectedCount`, `storeEntriesBefore`/`storeEntriesAfter`, `backupBytes`, a
+12-hex `storeSha256Prefix`, and a 12-char `token12` confirmation-token prefix.
+Entry IDs are never embedded; lesson text, reasons, and filesystem paths are
+never emitted (path redaction by omission — no path ever enters the payload).
+The authoritative record of what was quarantined is the backup manifest plus
+the hive events log under the platform data dir; this event only audits that
+the operator flow ran and why it aborted, if it did.
+
 ---
 
 ## 6. The exhaustive producer/consumer matrix (17 rows)
 
 **Every row carries a `file:line` citation, but those citations are
 UNGATED and go stale on any rebase that shifts a cited file.**
-`scripts/check-event-contract.ts` mechanically validates the 41-entry
+`scripts/check-event-contract.ts` mechanically validates the 42-entry
 *catalog* in §5 (catalog ↔ `TelemetryEvent` union parity, per-entry
 completeness) — it does not and cannot check this prose matrix. Treat a
 citation here as "verified as of `origin/main` `0060f48d`", not as a standing
