@@ -1,15 +1,6 @@
 /**
- * Tests for handleCloseCommand — finalizer, archive, clean, and align stages.
- *
- * Verifies the 4-stage close pipeline:
- *   1. Finalize  (retros, curation)
- *   2. Archive   (timestamped bundle under .swarm/archive/)
- *   3. Clean     (remove active-state files)
- *   4. Align     (git — skipped via mocks here)
- *
- * Also verifies that the shared singleton-preserving reset helper
- * (resetSwarmStatePreservingSingletons) is called at close time and
- * correctly preserves all 7 plugin-init singletons across the reset.
+ * Tests the close finalizer pipeline: finalize, archive, clean, align, and the
+ * singleton-preserving reset that must survive close.
  */
 import {
 	afterEach,
@@ -582,8 +573,7 @@ describe('handleCloseCommand — finalizer stages', () => {
 			// then add the rest.
 			await writePlan();
 			for (const f of activeFilesRemoved) {
-				if (f === 'plan.json' || f === 'plan-ledger.jsonl') continue;
-				// plan.json/plan-ledger.jsonl are written by await writePlan().
+				if (f === 'plan.json' || f === 'plan-ledger.jsonl') continue; // written by await writePlan()
 				writeFileSync(path.join(swarmDir(), f), `content of ${f}`);
 			}
 

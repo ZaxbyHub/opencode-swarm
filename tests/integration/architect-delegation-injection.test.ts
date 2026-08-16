@@ -13,11 +13,11 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { injectDelegateDirectivesBefore } from '../../src/hooks/delegate-directive-injection.js';
 import { DELEGATE_DIRECTIVE_BLOCK_TAG } from '../../src/hooks/knowledge-injector.js';
 import type { KnowledgeConfig } from '../../src/hooks/knowledge-types.js';
+import { canonicalMkdtemp } from '../helpers/tmpdir';
 
 const CONFIG: KnowledgeConfig = {
 	enabled: true,
@@ -114,7 +114,7 @@ function reviewerOnlyLine(id: string, lesson: string): string {
 }
 
 function createTempDir(): string {
-	return fs.mkdtempSync(path.join(os.tmpdir(), 'arch-deleg-'));
+	return canonicalMkdtemp('arch-deleg-');
 }
 
 function seed(dir: string, lines: string[]): void {

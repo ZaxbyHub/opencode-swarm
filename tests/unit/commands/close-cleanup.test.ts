@@ -1,20 +1,7 @@
 /**
- * Tests for handleCloseCommand — expanded artifact cleanup (Phase 1 sub-task 1.2).
- *
- * Verifies the flat-file and directory archiving/deletion behavior:
- *   - 24 flat files in ARCHIVE_ARTIFACTS are copied to the archive bundle
- *   - 20 flat files in ACTIVE_STATE_TO_CLEAN are removed from .swarm/ after archiving
- *   - 4 active-state directories (evidence/, session/, scopes/, spec-archive/)
- *     are recursively copied to the archive and then deleted. (locks/ is
- *     intentionally excluded — per-run locks are managed via proper-lockfile,
- *     not archived/cleaned by close.)
- *   - Archive-first-guard: directories are only deleted if they were successfully archived
- *   - close-summary.md is NOT in ACTIVE_STATE_TO_CLEAN — survives the clean stage.
- *     spec.md IS in ACTIVE_STATE_TO_CLEAN — it is archived AND then cleaned, so a
- *     stale spec never survives into the next session.
- *   - .swarm/archive/ itself survives the close
- *   - context.md is rewritten with "Session closed" content
- *   - Idempotent: running close twice produces no errors
+ * Tests handleCloseCommand artifact cleanup: archive copies survive, active
+ * state is removed only after archival, locks survive, context.md is rewritten,
+ * and repeated close runs remain idempotent.
  */
 import {
 	afterEach,
@@ -178,6 +165,16 @@ function swarmDir(): string {
 	return path.join(testDir, '.swarm');
 }
 
+const makeTask = (id: string, description: string) => ({
+	id,
+	phase: 1,
+	status: 'in_progress',
+	size: 'small',
+	description,
+	depends: [],
+	files_touched: [],
+});
+
 async function writePlan(
 	overrides: Record<string, unknown> = {},
 ): Promise<void> {
@@ -191,26 +188,7 @@ async function writePlan(
 				id: 1,
 				name: 'Phase 1',
 				status: 'in_progress',
-				tasks: [
-					{
-						id: '1.1',
-						phase: 1,
-						status: 'in_progress',
-						size: 'small',
-						description: 'Task A',
-						depends: [],
-						files_touched: [],
-					},
-					{
-						id: '1.2',
-						phase: 1,
-						status: 'in_progress',
-						size: 'small',
-						description: 'Task B',
-						depends: [],
-						files_touched: [],
-					},
-				],
+				tasks: [makeTask('1.1', 'Task A'), makeTask('1.2', 'Task B')],
 			},
 		],
 		...overrides,

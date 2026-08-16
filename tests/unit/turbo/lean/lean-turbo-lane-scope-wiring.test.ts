@@ -7,8 +7,7 @@
  * `_doDispatch`), before the lane's coder prompt is sent — and that a failed
  * publication fails the lane closed instead of running an unscoped coder.
  *
- * No mock.module: everything goes through the `_internals` / `_sessionOps` DI
- * seams the runner already exposes.
+ * No mock.module: the runner's `_internals` / `_sessionOps` DI seams are used.
  */
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import * as fs from 'node:fs';
@@ -30,15 +29,9 @@ import {
 import type { LeanTurboLane } from '../../../../src/turbo/lean/state';
 import * as leanState from '../../../../src/turbo/lean/state';
 import { isTransientProviderError } from '../../../../src/utils/provider-error-classification';
+import { safeRmRecursive } from '../../../helpers/safe-test-dir';
 
 const SESSION_ID = 'sess-lane-scope-wiring';
-const WINDOWS_RETRYABLE_RM_CODES = new Set([
-	'EBUSY',
-	'EPERM',
-	'EACCES',
-	'ENOTEMPTY',
-]);
-
 let tmpDir: string;
 let originals: Partial<typeof LeanTurboRunner._internals>;
 
@@ -103,31 +96,6 @@ function injectSessionOps(
 	(runner as unknown as { _sessionOps: unknown })._sessionOps = ops;
 }
 
-async function removeDirWithWindowsRetry(directory: string): Promise<void> {
-	for (let attempt = 0; attempt < 5; attempt += 1) {
-		try {
-			fs.rmSync(directory, { recursive: true, force: true });
-			return;
-		} catch (error) {
-			const code =
-				typeof error === 'object' &&
-				error !== null &&
-				'code' in error &&
-				typeof error.code === 'string'
-					? error.code
-					: '';
-			if (
-				process.platform !== 'win32' ||
-				!WINDOWS_RETRYABLE_RM_CODES.has(code) ||
-				attempt === 4
-			) {
-				throw error;
-			}
-			await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
-		}
-	}
-}
-
 beforeEach(() => {
 	resetSwarmState();
 	clearScopeBindings();
@@ -177,7 +145,7 @@ beforeEach(() => {
 	) as never;
 });
 
-afterEach(async () => {
+afterEach(() => {
 	for (const [key, value] of Object.entries(originals)) {
 		(LeanTurboRunner._internals as Record<string, unknown>)[key] = value;
 	}
@@ -185,7 +153,7 @@ afterEach(async () => {
 	resetSwarmState();
 	leanState.repairStateUnreadable(tmpDir);
 	try {
-		await removeDirWithWindowsRetry(tmpDir);
+		safeRmRecursive(tmpDir);
 	} catch {
 		/* best-effort */
 	}
@@ -316,7 +284,7 @@ describe('runner publishes lane write authority (#2002)', () => {
 				}),
 			).toBeNull();
 		} finally {
-			await removeDirWithWindowsRetry(laneRoot);
+			safeRmRecursive(laneRoot);
 		}
 	});
 

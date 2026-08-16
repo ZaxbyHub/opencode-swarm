@@ -1,12 +1,12 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Plan } from '../../../src/config/plan-schema';
 import { PluginConfigSchema } from '../../../src/config/schema';
 import { transitionTaskWorkflowEvidence } from '../../../src/gate-evidence';
 import { savePlan } from '../../../src/plan/manager';
 import { seedStageBGates } from '../../helpers/task-workflow-evidence';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const { handleCloseCommand, _internals, closeReceiptLifecycleInternals } =
 	await import('../../../src/commands/close.js');
@@ -71,9 +71,7 @@ describe('issue #2098 real close command exact terminalization', () => {
 	let rewardSweep: ReturnType<typeof mock>;
 
 	beforeEach(async () => {
-		directory = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'close-command-exact-2098-')),
-		);
+		directory = canonicalMkdtemp('close-command-exact-2098-');
 		fs.mkdirSync(path.join(directory, '.git'));
 		rewardSweep = mock(async () => {});
 		_internals.loadPluginConfigWithMeta = () => ({

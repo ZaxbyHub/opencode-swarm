@@ -10,7 +10,6 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { createKnowledgeInjectorHook } from '../../src/hooks/knowledge-injector.js';
 import type {
@@ -22,6 +21,7 @@ import type {
 // message. Fixtures set swarmState.activeAgent and stamp a consistent
 // sessionID on every message.
 import { swarmState } from '../../src/state';
+import { canonicalMkdtemp } from '../helpers/tmpdir';
 
 const SESSION_ID = 'cf-session';
 
@@ -92,7 +92,7 @@ const CONFIG: KnowledgeConfig = {
 };
 
 function createTempProjectDir(): string {
-	return fs.mkdtempSync(path.join(os.tmpdir(), 'cf-filter-'));
+	return canonicalMkdtemp('cf-filter-');
 }
 
 function architectMessages(): MessageWithParts[] {

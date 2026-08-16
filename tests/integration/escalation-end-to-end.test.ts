@@ -10,11 +10,11 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { readKnowledgeEvents } from '../../src/hooks/knowledge-events.js';
 import { commitDisplayedMembership } from '../../src/hooks/knowledge-receipt-ledger.js';
 import { reconcileReviewerVerdicts } from '../../src/hooks/reviewer-verdict-parser.js';
+import { canonicalMkdtemp } from '../helpers/tmpdir';
 
 function entryLine(id: string, priority: string): string {
 	return JSON.stringify({
@@ -41,7 +41,7 @@ function entryLine(id: string, priority: string): string {
 }
 
 function createTempDir(): string {
-	return fs.mkdtempSync(path.join(os.tmpdir(), 'escalation-e2e-'));
+	return canonicalMkdtemp('escalation-e2e-');
 }
 
 describe('repeat-violation escalation (e2e)', () => {

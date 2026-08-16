@@ -1,37 +1,15 @@
 /**
- * Tests for handleCloseCommand — hive promotion eligibility gating (negative-path only).
- *
- * Uses _internals DI seam for close.ts internals. Retains mock.module only for
- * modules/functions NOT yet exposed through _internals.
- *
- * Verifies the three-route eligibility gate in checkHivePromotions():
- *   Route 1: hive_eligible === true AND >= 3 distinct phases
- *   Route 2: tags includes 'hive-fast-track'
- *   Route 3: age >= auto_promote_days (default 90)
- *
- * Approach: write entries to a real knowledge.jsonl temp file and use the
- * real readKnowledge (knowledge-store is NOT mocked). Only curateAndStoreSwarm
- * is mocked to control the test environment. checkHivePromotions is the
- * function under test; its result determines eligibility via the new
- * single-call promotion path.
- *
- * Note: Positive-path tests (asserting promotion happened) were removed because
- * mock.module for hive-promoter.js does not reliably intercept the import in
- * close.ts (likely due to lazy/binding-time import patterns).
+ * Negative-path hive promotion eligibility tests for handleCloseCommand. These
+ * exercise the three eligibility routes through close.ts internals while using
+ * real knowledge.jsonl I/O and mocked curation/promotion side effects.
  */
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
-import {
-	existsSync,
-	mkdirSync,
-	mkdtempSync,
-	rmSync,
-	writeFileSync,
-} from 'node:fs';
-import os from 'node:os';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import type { Plan } from '../../../src/config/plan-schema';
 import type { SwarmKnowledgeEntry } from '../../../src/hooks/knowledge-types';
 import { savePlan } from '../../../src/plan/manager';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 // ── Import under test ────────────────────────────────────────────────
 const { handleCloseCommand, _internals: closeInternals } = await import(
@@ -81,11 +59,9 @@ mock.module('../../../src/services/skill-improver.js', () => ({
 // ── Helpers ──────────────────────────────────────────────────────────
 
 let testDir: string;
-
 function swarmDir(): string {
 	return path.join(testDir, '.swarm');
 }
-
 function knowledgePath(): string {
 	return path.join(swarmDir(), 'knowledge.jsonl');
 }
@@ -207,9 +183,7 @@ function makeConfig(hiveEnabled = true): Record<string, unknown> {
 
 describe('handleCloseCommand — hive promotion eligibility gating (negative paths)', () => {
 	beforeEach(() => {
-		testDir = mkdtempSync(
-			path.join(os.tmpdir(), 'close-hive-eligibility-test-'),
-		);
+		testDir = canonicalMkdtemp('close-hive-eligibility-test-');
 		mkdirSync(path.join(testDir, '.git'));
 		mkdirSync(swarmDir(), { recursive: true });
 		// Ensure no pre-existing knowledge file
