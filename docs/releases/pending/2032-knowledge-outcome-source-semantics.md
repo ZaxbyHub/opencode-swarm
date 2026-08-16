@@ -38,9 +38,15 @@ policy. The vocabulary was declared piecemeal with divergent members.
 
 `n_a` clears only the acknowledgement/applicability obligation: it never
 proves application, never produces promotion evidence, and never satisfies
-high-risk acceptance alone. Delegate self-report remains non-independent;
+high-risk acceptance alone. Delegate self-report remains non-independent —
+enforced by the promotion gate, which counts only evidence whose receipt
+source is present and not `delegate` toward
+`promotion_min_terminal_applications` when that gate is active;
 reviewer adjudication and deterministic test/evidence keep their distinct
-verification roles.
+verification roles. Terminal `source` values are normalized to the canonical
+taxonomy at every ledger commit boundary; out-of-taxonomy or legacy agent-name
+sources (e.g. pre-#2032 `'coder'` strings) persist as the honest `unknown`
+class — never a hard reject, and never inferred to a canonical class.
 
 ## Migration
 

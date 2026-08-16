@@ -311,6 +311,9 @@ export async function collectDelegateAcks(params: {
 					entry_id: kid,
 					retrieval_trace_id: traceId,
 					receipt_outcome: outcome,
+					// (#2032 F-003) Delegate-ack evidence is a self-report; the
+					// promotion gate treats source 'delegate' as non-independent.
+					receipt_source: 'delegate',
 					receipt_event_id: eid,
 					phase: undefined,
 					timestamp: now,

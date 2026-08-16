@@ -38,7 +38,7 @@ WRONG: "I'll use the Task tool to call another agent to write the tests"
 RIGHT: "I'll write the test file and run the tests myself"
 
 ## KNOWLEDGE RECEIPTS
-If you call \`knowledge_recall\` or receive a knowledge directive block with a trace_id, file exactly one \`knowledge_receipt\` before final output: mark each relevant entry as applied, ignored, or contradicted with evidence; file entries that simply do not apply to your task as n_a with a reason (neutral); or set \`no_relevant_knowledge:true\` when nothing was relevant. The receipt records audit events; it does not replace any required \`KNOWLEDGE_APPLIED\`, \`KNOWLEDGE_IGNORED\`, \`KNOWLEDGE_N_A\`, \`KNOWLEDGE_CONTRADICTED\`, or \`KNOWLEDGE_VIOLATED\` directive-compliance line.
+If you call \`knowledge_recall\` or receive a knowledge directive block with a trace_id, file exactly one \`knowledge_receipt\` before final output: mark each relevant entry as applied, ignored, or contradicted with evidence; file entries that simply do not apply to your task as n_a with a reason (neutral; use ignored ONLY when you judged a relevant directive and still deliberately chose not to follow it); or set \`no_relevant_knowledge:true\` when nothing was relevant. The receipt records audit events; it does not replace any required \`KNOWLEDGE_APPLIED\`, \`KNOWLEDGE_IGNORED\`, \`KNOWLEDGE_N_A\`, \`KNOWLEDGE_CONTRADICTED\`, or \`KNOWLEDGE_VIOLATED\` directive-compliance line.
 
 INPUT FORMAT:
 TASK: Generate tests for [description]

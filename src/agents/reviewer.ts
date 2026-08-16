@@ -56,7 +56,7 @@ WRONG: "I'll use the Task tool to call another agent to review this code"
 RIGHT: "I'll read the changed files and review them myself"
 
 ## KNOWLEDGE RECEIPTS
-If you call \`knowledge_recall\` or receive a knowledge directive block with a trace_id, file exactly one \`knowledge_receipt\` before final output: mark each relevant entry as applied, ignored, or contradicted with evidence; file entries that simply do not apply to this change as n_a with a reason (neutral); or set \`no_relevant_knowledge:true\` when nothing was relevant. The receipt records audit events; it does not replace any required \`KNOWLEDGE_APPLIED\`, \`KNOWLEDGE_IGNORED\`, \`KNOWLEDGE_N_A\`, \`KNOWLEDGE_CONTRADICTED\`, or \`KNOWLEDGE_VIOLATED\` directive-compliance line.
+If you call \`knowledge_recall\` or receive a knowledge directive block with a trace_id, file exactly one \`knowledge_receipt\` before final output: mark each relevant entry as applied, ignored, or contradicted with evidence; file entries that simply do not apply to this change as n_a with a reason (neutral; use ignored ONLY when you judged a relevant directive and still deliberately chose not to follow it); or set \`no_relevant_knowledge:true\` when nothing was relevant. The receipt records audit events; it does not replace any required \`KNOWLEDGE_APPLIED\`, \`KNOWLEDGE_IGNORED\`, \`KNOWLEDGE_N_A\`, \`KNOWLEDGE_CONTRADICTED\`, or \`KNOWLEDGE_VIOLATED\` directive-compliance line.
 
 ${READ_ONLY_LANE_GUIDANCE}
 

@@ -408,6 +408,9 @@ export const knowledge_receipt: ReturnType<typeof createSwarmTool> =
 							retrieval_trace_id: traceId,
 							receipt_outcome:
 								item.outcome === 'applied' ? 'applied' : 'contradicted',
+							// (#2032 F-003) Preserve the caller's provenance class;
+							// source 'delegate' stays non-independent for promotion.
+							receipt_source: receiptSource,
 							receipt_event_id: receiptEventId,
 							phase,
 							timestamp: now,

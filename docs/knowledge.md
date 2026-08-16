@@ -379,7 +379,9 @@ Retrieval-outcome counters now distinguish:
 - `acknowledged_count` — any explicit ack received.
 - `applied_explicit_count` — explicit `KNOWLEDGE_APPLIED`.
 - `ignored_count` — explicit `KNOWLEDGE_IGNORED` (relevant but deliberately not followed).
-- `n_a_count` — explicit `KNOWLEDGE_N_A` (not applicable; neutral, audit-only).
+- `n_a_count` — explicit `KNOWLEDGE_N_A` (not applicable; neutral, event-log
+  only — intentionally stripped before per-entry `retrieval_outcomes`, so it
+  is never persisted on entries and never reaches the outcome signal).
 - `violated_count` — explicit `KNOWLEDGE_VIOLATED` (or runtime-inferred).
 - `succeeded_after_shown_count` — phase succeeded after this entry was shown.
 - `failed_after_shown_count` — phase failed after this entry was shown.

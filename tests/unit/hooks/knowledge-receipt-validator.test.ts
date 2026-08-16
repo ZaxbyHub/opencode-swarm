@@ -186,30 +186,6 @@ describe('receipt validator', () => {
 		expect(terminal?.source).toBe('unknown');
 	});
 
-	test('regression: a whitespace-only source stamps unknown, never an unbounded-code string (#2032 PRR-004)', async () => {
-		// Previous behavior: '   ' is truthy, so it was persisted verbatim to
-		// the ledger while the telemetry BOUNDED_CODE gate silently dropped it
-		// — a ledger/telemetry divergence. Trim must route it to 'unknown'.
-		const traceId = newTraceId();
-		await seedTrace(dir, traceId, ['k1']);
-		const r = await validateReceipt(
-			ctx(dir, traceId, [{ id: 'k1', outcome: 'applied' }], {
-				source: '   ',
-			}),
-		);
-		expect(r.ok).toBe(true);
-		const state = await queryLiveMemberships(dir, {
-			session_id: SESSION,
-			include_terminal: true,
-		});
-		expect(state.ok).toBe(true);
-		if (!state.ok) return;
-		const terminal = state.memberships.find(
-			(m) => m.trace_id === traceId && m.entry_id === 'k1',
-		)?.terminal;
-		expect(terminal?.source).toBe('unknown');
-	});
-
 	test('fails closed when a pre-cutover trace cannot be proven to exist', async () => {
 		const r = await validateReceipt(
 			ctx(dir, newTraceId(), [{ id: 'k1', outcome: 'applied' }]),

@@ -144,6 +144,9 @@ export async function loadPromotionEvidenceByEntry(
 					entry_id: membership.entry_id,
 					retrieval_trace_id: membership.trace_id,
 					receipt_outcome: terminal.outcome,
+					// (#2032 F-003) Preserve the terminal's provenance class so
+					// the promotion gate can honor the independence guarantee.
+					receipt_source: terminal.source,
 					receipt_event_id: terminal.event_id,
 					phase: membership.phase,
 					timestamp: terminal.committed_at,

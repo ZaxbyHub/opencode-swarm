@@ -44,7 +44,8 @@ describe('role prompts: knowledge N_A guidance (#2032)', () => {
 		const section = receiptGuidanceSection(
 			createCoderAgent('opencode/big-pickle').config.prompt!,
 		);
-		expect(section).toContain('as n_a with a reason (neutral)');
+		expect(section).toContain('as n_a with a reason (neutral;');
+		expect(section).toContain('use ignored ONLY when');
 		expect(section).toContain('KNOWLEDGE_N_A');
 	});
 
@@ -52,7 +53,8 @@ describe('role prompts: knowledge N_A guidance (#2032)', () => {
 		const section = receiptGuidanceSection(
 			createReviewerAgent('opencode/big-pickle').config.prompt!,
 		);
-		expect(section).toContain('as n_a with a reason (neutral)');
+		expect(section).toContain('as n_a with a reason (neutral;');
+		expect(section).toContain('use ignored ONLY when');
 		expect(section).toContain('KNOWLEDGE_N_A');
 	});
 
@@ -60,7 +62,8 @@ describe('role prompts: knowledge N_A guidance (#2032)', () => {
 		const section = receiptGuidanceSection(
 			createTestEngineerAgent('opencode/big-pickle').config.prompt!,
 		);
-		expect(section).toContain('as n_a with a reason (neutral)');
+		expect(section).toContain('as n_a with a reason (neutral;');
+		expect(section).toContain('use ignored ONLY when');
 		expect(section).toContain('KNOWLEDGE_N_A');
 	});
 
