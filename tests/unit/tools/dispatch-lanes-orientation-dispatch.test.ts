@@ -98,7 +98,7 @@ describe('augmentCommonPromptWithOrientation — resolution and overflow rule', 
 			'shared context',
 			false,
 			'session-x',
-			{ buildBlock: buildBlock as never },
+			{ buildBlock },
 		);
 		expect(result).toBe('shared context');
 		expect(buildBlock).toHaveBeenCalledTimes(0);
@@ -113,7 +113,7 @@ describe('augmentCommonPromptWithOrientation — resolution and overflow rule', 
 			true,
 			'session-x',
 			{
-				buildBlock: (async () => block) as never,
+				buildBlock: async () => block,
 			},
 		);
 		expect(result).toBe(`shared context\n\n${block}`);
@@ -128,7 +128,7 @@ describe('augmentCommonPromptWithOrientation — resolution and overflow rule', 
 			undefined,
 			undefined,
 			{
-				buildBlock: (async () => block) as never,
+				buildBlock: async () => block,
 			},
 		);
 		expect(result).toBe(block);
@@ -137,7 +137,8 @@ describe('augmentCommonPromptWithOrientation — resolution and overflow rule', 
 	test('overflow rule — block dropped when combined length would exceed MAX_PROMPT_CHARS', async () => {
 		const common = 'c'.repeat(76_000);
 		const lane = 'l'.repeat(2_000);
-		// common + separator + lane fits; adding a 2000-char block does not.
+		// common + separator + lane fits; adding a 2000-char block exceeds the
+		// cap even before the suffix reserve.
 		expect(common.length + 2 + lane.length).toBeLessThanOrEqual(
 			MAX_PROMPT_CHARS,
 		);
@@ -149,7 +150,32 @@ describe('augmentCommonPromptWithOrientation — resolution and overflow rule', 
 			true,
 			'session-x',
 			{
-				buildBlock: (async () => block) as never,
+				buildBlock: async () => block,
+			},
+		);
+		expect(result).toBe(common);
+	});
+
+	test('suffix reserve (review F-09) — block dropped when it fits the raw cap but not cap minus reserve', async () => {
+		// common + separator + lane + block = 78,004 ≤ 80,000, so the raw
+		// common+lane check alone would KEEP the block; with the conservative
+		// reserve for the later explorer/PR-workflow suffix appends it must be
+		// dropped so those appenders can never hard-fail a previously-passing
+		// dispatch because an orientation block appeared.
+		const common = 'c'.repeat(74_000);
+		const lane = 'l'.repeat(2_000);
+		const block = 'b'.repeat(2_000);
+		expect(
+			common.length + 2 + lane.length + 2 + block.length,
+		).toBeLessThanOrEqual(MAX_PROMPT_CHARS);
+		const result = await _test_exports.augmentCommonPromptWithOrientation(
+			tmp,
+			[{ prompt: lane }],
+			common,
+			true,
+			'session-x',
+			{
+				buildBlock: async () => block,
 			},
 		);
 		expect(result).toBe(common);
@@ -163,9 +189,9 @@ describe('augmentCommonPromptWithOrientation — resolution and overflow rule', 
 			true,
 			'session-x',
 			{
-				buildBlock: (async () => {
+				buildBlock: async () => {
 					throw new Error('probe exploded');
-				}) as never,
+				},
 			},
 		);
 		expect(result).toBe('shared context');
@@ -379,5 +405,63 @@ describe('executeDispatchLanesAsync — lane orientation delivery', () => {
 		const sharedIndex = prompts[0].indexOf('SHARED MISSION CONTEXT');
 		const blockIndex = prompts[0].indexOf(ORIENTATION_HEADING);
 		expect(blockIndex).toBeGreaterThan(sharedIndex);
+	});
+});
+
+describe('executeDispatchLanes — orientation edge paths', () => {
+	test('near-cap dispatch drops the block via the suffix reserve and still succeeds (review F-09)', async () => {
+		await buildAndSaveStartupGraph();
+		const { ops } = makeSessionOps();
+		_internals.getSessionOps = () => ops;
+
+		// common + block + separator + lane stays under the raw 80k cap, so
+		// without the reserve the block would be kept — and the later suffix
+		// appenders could then hard-fail a dispatch that previously passed.
+		// (75,700 + 2 + ~38 lane + 2 + ~330 block ≈ 76,072 ≤ 80,000 raw;
+		// + 5,000 reserve → over the cap.)
+		const common = 'c'.repeat(75_700);
+		const result = await executeDispatchLanes(
+			{
+				common_prompt: common,
+				lanes: [
+					{
+						id: 'validator',
+						agent: 'explorer',
+						prompt: 'Audit the payment validation flow.',
+					},
+				],
+			},
+			tmp,
+			{ sessionID: 'parent-near-cap-1' },
+		);
+
+		expect(result.success).toBe(true);
+		const text = lanePromptTexts(ops)[0];
+		expect(text.startsWith(common)).toBe(true);
+		expect(text).not.toContain(ORIENTATION_HEADING);
+	});
+
+	test('cold start with no graph present dispatches cleanly with no block', async () => {
+		// No buildAndSaveStartupGraph: the directory has no .swarm graph.
+		const { ops } = makeSessionOps();
+		_internals.getSessionOps = () => ops;
+
+		const result = await executeDispatchLanes(
+			{
+				common_prompt: 'SHARED MISSION CONTEXT',
+				lanes: [
+					{
+						id: 'validator',
+						agent: 'explorer',
+						prompt: 'Audit the payment validation flow.',
+					},
+				],
+			},
+			tmp,
+			{ sessionID: 'parent-cold-start-1' },
+		);
+
+		expect(result.success).toBe(true);
+		expect(lanePromptTexts(ops)[0]).not.toContain(ORIENTATION_HEADING);
 	});
 });

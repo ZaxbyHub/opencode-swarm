@@ -259,6 +259,101 @@ describe('buildLaneOrientationBlock — gating policy (issue #1988 C2/C6)', () =
 			fs.rmSync(longDir, { recursive: true, force: true });
 		}
 	});
+
+	test('17th tracked session evicts the oldest session dedupe state (PRR-017)', async () => {
+		await buildAndSaveStartupGraph();
+		const mission = ['Audit the payment validation flow.'];
+		// Fill all 16 session slots; each call delivers pointers into its own
+		// session's dedupe set.
+		for (let i = 0; i < 16; i++) {
+			const block = await buildLaneOrientationBlock(tmp, mission, {
+				sessionID: `session-evict-${i}`,
+			});
+			expect(block).not.toBeNull();
+		}
+		// Session 0's pointers are all delivered — suppressed before eviction.
+		expect(
+			await buildLaneOrientationBlock(tmp, mission, {
+				sessionID: 'session-evict-0',
+			}),
+		).toBeNull();
+		// Creating the 17th session evicts the OLDEST (session-evict-0) set...
+		expect(
+			await buildLaneOrientationBlock(tmp, mission, {
+				sessionID: 'session-evict-16',
+			}),
+		).not.toBeNull();
+		// ...so session-evict-0's pointers are novel again and it re-emits.
+		expect(
+			await buildLaneOrientationBlock(tmp, mission, {
+				sessionID: 'session-evict-0',
+			}),
+		).not.toBeNull();
+		// Re-creating session-evict-0 evicted the NEXT-oldest session
+		// (session-evict-1); session-evict-2 is still tracked and suppressed.
+		expect(
+			await buildLaneOrientationBlock(tmp, mission, {
+				sessionID: 'session-evict-2',
+			}),
+		).toBeNull();
+	});
+
+	test('config-load failure falls back to option defaults (PRR-018)', async () => {
+		await buildAndSaveStartupGraph();
+		const original = injectionInternals.loadPluginConfigWithMetaAsync;
+		injectionInternals.loadPluginConfigWithMetaAsync = async () => {
+			throw new Error('config read exploded');
+		};
+		try {
+			const block = await buildLaneOrientationBlock(tmp, [
+				'Audit the payment validation flow.',
+			]);
+			expect(block).not.toBeNull();
+			expect(block).toContain('Freshness: fresh (probe clean)');
+		} finally {
+			injectionInternals.loadPluginConfigWithMetaAsync = original;
+		}
+	});
+
+	test('probe-inconclusive end-to-end renders the unknown-freshness line (PRR-020a)', async () => {
+		await buildAndSaveStartupGraph();
+		const original = injectionInternals.probeFreshness;
+		injectionInternals.probeFreshness = (async () => ({
+			state: 'inconclusive' as const,
+			changed: [],
+			removed: [],
+			truncated: true,
+			probedFiles: 42,
+			elapsedMs: 1,
+		})) as typeof original;
+		try {
+			const block = await buildLaneOrientationBlock(tmp, [
+				'Audit the payment validation flow.',
+			]);
+			expect(block).not.toBeNull();
+			expect(block).toContain(
+				'Freshness: freshness unknown (probe inconclusive)',
+			);
+		} finally {
+			injectionInternals.probeFreshness = original;
+		}
+	});
+
+	test('mission text beyond ORIENTATION_MISSION_CHAR_BUDGET is sliced deterministically (PRR-020b)', async () => {
+		await buildAndSaveStartupGraph();
+		const filler = 'z'.repeat(4_500);
+		// Mission terms inside the first 4000 chars: block emitted.
+		const inBudget = await buildLaneOrientationBlock(tmp, [
+			`Audit the payment validation flow. ${filler}`,
+		]);
+		expect(inBudget).not.toBeNull();
+		// Same filler FIRST pushes the payment terms past the 4000-char slice,
+		// so the graph sees no matching terms and nothing is emitted.
+		const outOfBudget = await buildLaneOrientationBlock(tmp, [
+			`${filler} Audit the payment validation flow.`,
+		]);
+		expect(outOfBudget).toBeNull();
+	});
 });
 
 describe('orientation render seam — pure render and freshness mapping', () => {

@@ -20,7 +20,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { loadPluginConfigWithMeta } from '../config/loader';
+import { loadPluginConfigWithMetaAsync } from '../config/loader';
 import { RepoGraphConfigSchema } from '../config/schema';
 import {
 	askGraph,
@@ -55,6 +55,9 @@ export const _internals = {
 	cacheSize: () => cache.size,
 	renderLaneOrientationBlock,
 	orientationFreshnessLine,
+	// Routed through the seam so tests can force the config-load failure
+	// fallback (the sync-free async variant per issue #704/#1900 discipline).
+	loadPluginConfigWithMetaAsync,
 };
 
 function touchCache(key: string, value: CachedGraph): void {
@@ -362,7 +365,8 @@ export async function buildLaneOrientationBlock(
 	try {
 		let resolved: RepoGraphInjectionOptions = options ?? {};
 		try {
-			const { config } = loadPluginConfigWithMeta(directory);
+			const { config } =
+				await _internals.loadPluginConfigWithMetaAsync(directory);
 			const repoGraphConfig = RepoGraphConfigSchema.parse(
 				config.repo_graph ?? {},
 			);

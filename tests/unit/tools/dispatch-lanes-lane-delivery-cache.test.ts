@@ -224,3 +224,29 @@ describe('recordToLaneResult — delivery store integration', () => {
 		expect(other.output_omitted_repeat).toBeUndefined();
 	});
 });
+
+describe('lane-delivery cache — torn-write recovery (review nit)', () => {
+	test('session present in sessions but missing from order is dropped on load', () => {
+		fs.mkdirSync(path.join(tmp, '.swarm'), { recursive: true });
+		fs.writeFileSync(
+			cacheFile(),
+			JSON.stringify({
+				version: 1,
+				order: ['session-kept'],
+				sessions: {
+					'session-kept': ['batch\0lane\0kept'],
+					'session-torn': ['batch\0lane\0torn'],
+				},
+			}),
+		);
+		// The torn session's state is not trusted (FIFO contract requires the
+		// order array); its delivery repeats once — the documented harmless
+		// direction — while the ordered session survives.
+		expect(
+			hasLaneOutputBeenDelivered(tmp, 'session-torn', 'batch\0lane\0torn'),
+		).toBe(false);
+		expect(
+			hasLaneOutputBeenDelivered(tmp, 'session-kept', 'batch\0lane\0kept'),
+		).toBe(true);
+	});
+});

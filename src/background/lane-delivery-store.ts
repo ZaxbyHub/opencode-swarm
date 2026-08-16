@@ -34,8 +34,9 @@ import { writeAtomicJson } from './lane-output-store.js';
 export const LANE_DELIVERY_CACHE_FILENAME = 'lane-delivery-cache.json';
 export const MAX_DELIVERED_LANE_OUTPUT_KEYS = 1024;
 const MAX_TRACKED_SESSIONS = 16;
-// Mirrors MAX_CACHED_DIRECTORIES in repo-graph-injection.ts deliberately:
-// both bound per-directory in-memory state at the same footprint.
+// Bound alignment with MAX_CACHED_DIRECTORIES in repo-graph-injection.ts: both
+// cap per-directory in-memory state at 16 entries. Eviction policy differs by
+// design — this store is strict FIFO (insertion order), the graph cache is LRU.
 const MAX_TRACKED_DIRECTORIES = 16;
 
 const CORRUPT_SUFFIX = '.corrupt';
@@ -105,11 +106,25 @@ function loadBucketFromDisk(directory: string): LaneDeliveryBucket {
 		parsed = null;
 	}
 	if (!isValidCacheFile(parsed)) {
-		// Rename the unusable file out of the way (best-effort) so every
+		// Rename the unusable file out of the way (best-effort, with the same
+		// Windows transient-error retry loop writeAtomicJson uses) so every
 		// subsequent read does not re-parse it; the next mark() writes a
 		// fresh, valid cache.
 		try {
-			fs.renameSync(file, `${file}${CORRUPT_SUFFIX}`);
+			const corruptPath = `${file}${CORRUPT_SUFFIX}`;
+			let lastRenameError: unknown;
+			for (let attempt = 0; attempt < 3; attempt++) {
+				try {
+					fs.renameSync(file, corruptPath);
+					lastRenameError = undefined;
+					break;
+				} catch (err) {
+					lastRenameError = err;
+					const code = (err as NodeJS.ErrnoException).code;
+					if (code !== 'EEXIST' && code !== 'EBUSY' && code !== 'EPERM') break;
+				}
+			}
+			if (lastRenameError) throw lastRenameError;
 		} catch {
 			/* best-effort — reads stay fail-open either way */
 		}

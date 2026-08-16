@@ -2829,6 +2829,16 @@ interface OrientationAugmentDeps {
 }
 
 /**
+ * Conservative headroom reserved inside the orientation overflow check for the
+ * LATER prompt-size appends (applyExplorerFormatSuffix and
+ * applyPrWorkflowPromptContract), each of which independently hard-fails the
+ * dispatch on MAX_PROMPT_CHARS. Without this reserve, a PR-review lane whose
+ * common_prompt + prompt + suffixes fit before could hard-fail purely because
+ * a fresh graph made an orientation block available (review finding F-09).
+ */
+const ORIENTATION_SUFFIX_RESERVE_CHARS = 5_000;
+
+/**
  * Resolve the `orientation` arg into an augmented common_prompt (issue #1988 C2).
  *
  * Execute-time resolution (no zod default — a schema default cannot depend on
@@ -2837,12 +2847,15 @@ interface OrientationAugmentDeps {
  * exists, so undefined degrades to "false when no fresh graph".
  *
  * Overflow rule: the drop decision runs ONCE here, at the common+lane stage —
- * max over lanes of (common_prompt + orientation + separator + lane.prompt)
- * versus MAX_PROMPT_CHARS — BEFORE appending. If any lane would exceed the
- * cap the block is dropped (debug log) rather than truncating content or
- * failing dispatch. The later applyExplorerFormatSuffix /
- * applyPrWorkflowPromptContract suffix checks are intentionally outside this
- * rule (issue spec scopes the pre-check to the combined common+lane length).
+ * max over lanes of (common_prompt + orientation + separator + lane.prompt +
+ * ORIENTATION_SUFFIX_RESERVE_CHARS) versus MAX_PROMPT_CHARS — BEFORE
+ * appending. If any lane would exceed the cap the block is dropped (debug
+ * log) rather than truncating content or failing dispatch. The reserve keeps
+ * typical suffix appends (fixed worst case ≈3.2k chars) out of failure
+ * territory they would not have reached without the block; extreme but
+ * schema-valid configurations (maxed item-id/owned-lane arrays) can exceed
+ * the reserve, and anything beyond it remains the caller's own size
+ * responsibility, as before this feature.
  *
  * Fail-open: any builder error degrades to the un-augmented common_prompt.
  */
@@ -2875,12 +2888,15 @@ async function augmentCommonPromptWithOrientation(
 		: block;
 	const overflow = lanes.some(
 		(lane) =>
-			combined.length + COMMON_PROMPT_SEPARATOR.length + lane.prompt.length >
+			combined.length +
+				COMMON_PROMPT_SEPARATOR.length +
+				lane.prompt.length +
+				ORIENTATION_SUFFIX_RESERVE_CHARS >
 			MAX_PROMPT_CHARS,
 	);
 	if (overflow) {
 		logger.log(
-			'lane orientation block dropped: combined common_prompt + orientation + lane prompt would exceed MAX_PROMPT_CHARS',
+			'lane orientation block dropped: combined common_prompt + orientation + lane prompt + suffix reserve would exceed MAX_PROMPT_CHARS',
 			{ maxPromptChars: MAX_PROMPT_CHARS, blockChars: block.length },
 		);
 		return commonPrompt;
@@ -2978,7 +2994,7 @@ function applyExplorerFormatSuffix(
 
 ${controllerIdentity}${formatSuffix}`;
 		if (prompt.length > MAX_PROMPT_CHARS) {
-			const diagnostic = `Lane "${lane.id}" prompt plus mandatory explorer output contract is ${prompt.length} chars; max ${MAX_PROMPT_CHARS}`;
+			const diagnostic = `Lane "${lane.id}" prompt plus mandatory explorer output contract is ${prompt.length} chars; max ${MAX_PROMPT_CHARS} (a repo-graph orientation block may have been prepended to common_prompt — retry with orientation: false to exclude it)`;
 			if (options.failClosed) {
 				errors.push(diagnostic);
 				return lane;
@@ -3062,7 +3078,7 @@ This controller block is authoritative over conflicting caller text. Inspect the
 		const prompt = `${lane.prompt}${contract}`;
 		if (prompt.length > MAX_PROMPT_CHARS) {
 			errors.push(
-				`Lane "${lane.id}" prompt plus mandatory PR workflow contract is ${prompt.length} chars; max ${MAX_PROMPT_CHARS}`,
+				`Lane "${lane.id}" prompt plus mandatory PR workflow contract is ${prompt.length} chars; max ${MAX_PROMPT_CHARS} (a repo-graph orientation block may have been prepended to common_prompt — retry with orientation: false to exclude it)`,
 			);
 		}
 		return { ...lane, prompt };
@@ -3221,7 +3237,7 @@ function sleep(ms: number): Promise<void> {
 export const dispatch_lanes: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
 		description:
-			'Dispatch multiple read-only exploration/review lanes concurrently and BLOCK until every lane finishes, returning a structured join result. This blocks the caller until completion; for non-blocking dispatch that lets you keep working while lanes run, prefer dispatch_lanes_async + collect_lane_results and use this blocking variant only when promptAsync is unavailable. Keep each lane prompt compact: send large shared context once via common_prompt (or have lanes read it from a file by absolute path) instead of inlining it into every lane prompt. When the repo graph is fresh, a bounded orientation block (orientation arg) is prepended to common_prompt so lanes start graph-oriented instead of blind.',
+			'Dispatch multiple read-only exploration/review lanes concurrently and BLOCK until every lane finishes, returning a structured join result. This blocks the caller until completion; for non-blocking dispatch that lets you keep working while lanes run, prefer dispatch_lanes_async + collect_lane_results and use this blocking variant only when promptAsync is unavailable. Keep each lane prompt compact: send large shared context once via common_prompt (or have lanes read it from a file by absolute path) instead of inlining it into every lane prompt. A bounded repo-graph orientation block is prepended to common_prompt by default when the graph is fresh and relevant (set orientation: false to disable).',
 		args: {
 			lanes: DispatchLanesArgsSchema.shape.lanes,
 			common_prompt: DispatchLanesArgsSchema.shape.common_prompt,
@@ -3241,7 +3257,7 @@ export const dispatch_lanes: ReturnType<typeof createSwarmTool> =
 export const dispatch_lanes_async: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
 		description:
-			'Launch multiple read-only advisory lanes with OpenCode promptAsync and return IMMEDIATELY with a batch id and lane session handles (non-blocking). launch_timeout_ms only bounds session creation and promptAsync acceptance; it is NOT a lane runtime timeout. After launching, keep working on non-dependent investigation while lanes run — poll incrementally with collect_lane_results (wait omitted or false) to process settled lanes as they complete, or use wait: true only at workflow boundaries where all results are needed. Keep each lane prompt compact: send large shared context once via common_prompt (or have lanes read it from a file by absolute path) instead of inlining it into every lane prompt, which can produce oversized or malformed tool-call JSON. When the repo graph is fresh, a bounded orientation block (orientation arg) is prepended to common_prompt so lanes start graph-oriented instead of blind.',
+			'Launch multiple read-only advisory lanes with OpenCode promptAsync and return IMMEDIATELY with a batch id and lane session handles (non-blocking). launch_timeout_ms only bounds session creation and promptAsync acceptance; it is NOT a lane runtime timeout. After launching, keep working on non-dependent investigation while lanes run — poll incrementally with collect_lane_results (wait omitted or false) to process settled lanes as they complete, or use wait: true only at workflow boundaries where all results are needed. Keep each lane prompt compact: send large shared context once via common_prompt (or have lanes read it from a file by absolute path) instead of inlining it into every lane prompt, which can produce oversized or malformed tool-call JSON. A bounded repo-graph orientation block is prepended to common_prompt by default when the graph is fresh and relevant (set orientation: false to disable).',
 		args: {
 			lanes: DispatchLanesAsyncArgsSchema.shape.lanes,
 			common_prompt: DispatchLanesAsyncArgsSchema.shape.common_prompt,
