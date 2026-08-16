@@ -24,7 +24,9 @@ const ctx = (directory: string): any => ({
 	agent: 'coder',
 });
 
-const FIXED_NOW_ISO = new Date(0).toISOString();
+// Fixed RECENT instant (string literal — no clock read; see PRR-009 note in
+// the matrix test file).
+const FIXED_NOW_ISO = '2026-01-01T00:00:00.000Z';
 
 describe('knowledge_receipt', () => {
 	let dir: string;
@@ -330,6 +332,10 @@ describe('knowledge_receipt', () => {
 		expect(map('custom_planner')).toBe('delegate');
 		expect(map('unknown')).toBe('unknown');
 		expect(map('')).toBe('unknown');
+		// Whitespace-bearing names classify by their trimmed form (PRR-004):
+		// 'reviewer ' must not silently degrade to 'delegate'.
+		expect(map('reviewer ')).toBe('reviewer');
+		expect(map(' mega_architect')).toBe('architect');
 	});
 
 	it('ignored reason enum no longer accepts not_relevant; n_a requires a reason (#2032)', () => {
@@ -351,11 +357,64 @@ describe('knowledge_receipt', () => {
 			_internals.notApplicableItemSchema.safeParse({ id: 'k1', reason: '' })
 				.success,
 		).toBe(false);
+		// A whitespace-only reason is rejected exactly like an empty one
+		// (PRR-005/020: min(1) alone would accept it, diverging from the phase
+		// gate's reason.trim() resolution rule).
+		expect(
+			_internals.notApplicableItemSchema.safeParse({ id: 'k1', reason: '   ' })
+				.success,
+		).toBe(false);
 		expect(
 			_internals.notApplicableItemSchema.safeParse({
 				id: 'k1',
 				reason: 'different subsystem',
 			}).success,
 		).toBe(true);
+	});
+
+	it('regression: n_a against an unknown trace is rejected, not silently dropped (PRR-020)', async () => {
+		const raw = await knowledge_receipt.execute(
+			{
+				trace_id: 'trace-never-seeded',
+				n_a: [{ id: 'k-ghost', reason: 'not applicable' }],
+			} as never,
+			ctx(dir),
+		);
+		const parsed = JSON.parse(raw);
+		expect(parsed.recorded).toBe(false);
+		expect(parsed.reason).toBe('legacy_unverifiable');
+		const events = await readKnowledgeEvents(dir);
+		expect(events.filter((e) => e.type === 'n_a')).toHaveLength(0);
+	});
+
+	it('regression: an empty n_a array alongside real items is inert (PRR-020)', async () => {
+		await appendKnowledgeEvent(dir, {
+			type: 'retrieved',
+			trace_id: 'trace-empty-na',
+			session_id: 'sess-1',
+			agent: 'coder',
+			query: 'q',
+			retrieval_mode: 'auto_injection',
+			result_ids: ['k-one'],
+			ranks: { 'k-one': 1 },
+			scores: { 'k-one': 1 },
+			timestamp: FIXED_NOW_ISO,
+		});
+		const raw = await knowledge_receipt.execute(
+			{
+				trace_id: 'trace-empty-na',
+				applied: [{ id: 'k-one', how: 'used it' }],
+				n_a: [],
+			} as never,
+			ctx(dir),
+		);
+		const parsed = JSON.parse(raw);
+		expect(parsed.recorded).toBe(true);
+		expect(parsed.applied).toBe(1);
+		expect(parsed.n_a).toBe(0);
+		const events = (await readKnowledgeEvents(dir)).filter(
+			(e): e is ReceiptEvent => e.type === 'applied',
+		);
+		expect(events).toHaveLength(1);
 	});
 });

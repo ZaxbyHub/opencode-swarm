@@ -109,6 +109,25 @@ describe('knowledgeApplicationGateBefore V2 authority', () => {
 		).rejects.toThrow(new RegExp(`trace-pending/${ENTRY}`));
 	});
 
+	it('denial message lists every accepted marker form including KNOWLEDGE_N_A (#2032 PRR-015)', async () => {
+		await display('trace-deny-text');
+		const denial = await knowledgeApplicationGateBefore(
+			directory,
+			{ tool: 'save_plan', agent: 'architect', sessionID: 'session-a' },
+			enforce,
+		).catch((err: unknown): string =>
+			err instanceof Error ? err.message : String(err),
+		);
+		expect(denial).toContain('KNOWLEDGE_ENFORCE_GATE_DENY');
+		// O-5's visible surface: the architect under denial is told the neutral
+		// N_A form exists (with its reason requirement) alongside the others.
+		expect(denial).toContain('KNOWLEDGE_APPLIED:<trace_id>:<entry_id>');
+		expect(denial).toContain('KNOWLEDGE_N_A:<trace_id>:<entry_id>');
+		expect(denial).toContain('(does not apply; neutral)');
+		expect(denial).toContain('KNOWLEDGE_IGNORED:<trace_id>:<entry_id>');
+		expect(denial).toContain('KNOWLEDGE_VIOLATED:<trace_id>:<entry_id>');
+	});
+
 	it('does not let one trace terminal hide the same entry on another trace', async () => {
 		await display('trace-closed');
 		await display('trace-open');

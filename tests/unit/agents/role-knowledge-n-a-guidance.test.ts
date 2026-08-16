@@ -16,6 +16,19 @@ import { createSpecWriterAgent } from '../../../src/agents/spec-writer';
 import { createTestEngineerAgent } from '../../../src/agents/test-engineer';
 
 describe('role prompts: knowledge N_A guidance (#2032)', () => {
+	/**
+	 * Section-anchored extraction (PRR-010): bare toContain over the whole
+	 * prompt passes even when the phrase wanders into an unrelated section.
+	 * The receipt-tool guidance lives in each role's KNOWLEDGE RECEIPTS
+	 * section, which runs to the next '## ' heading or end of prompt.
+	 */
+	function receiptGuidanceSection(prompt: string): string {
+		const start = prompt.indexOf('## KNOWLEDGE RECEIPTS');
+		expect(start).toBeGreaterThanOrEqual(0);
+		const next = prompt.indexOf('\n## ', start + 1);
+		return prompt.slice(start, next > start ? next : undefined);
+	}
+
 	it('spec_writer steers non-applicable directives to KNOWLEDGE_N_A', () => {
 		const agent = createSpecWriterAgent('opencode/big-pickle');
 		const prompt = agent.config.prompt!;
@@ -28,24 +41,27 @@ describe('role prompts: knowledge N_A guidance (#2032)', () => {
 	});
 
 	it('coder receipt-tool guidance offers the n_a channel and N_A chat marker', () => {
-		const agent = createCoderAgent('opencode/big-pickle');
-		const prompt = agent.config.prompt!;
-		expect(prompt).toContain('as n_a with a reason (neutral)');
-		expect(prompt).toContain('KNOWLEDGE_N_A');
+		const section = receiptGuidanceSection(
+			createCoderAgent('opencode/big-pickle').config.prompt!,
+		);
+		expect(section).toContain('as n_a with a reason (neutral)');
+		expect(section).toContain('KNOWLEDGE_N_A');
 	});
 
 	it('reviewer receipt-tool guidance offers the n_a channel and N_A chat marker', () => {
-		const agent = createReviewerAgent('opencode/big-pickle');
-		const prompt = agent.config.prompt!;
-		expect(prompt).toContain('as n_a with a reason (neutral)');
-		expect(prompt).toContain('KNOWLEDGE_N_A');
+		const section = receiptGuidanceSection(
+			createReviewerAgent('opencode/big-pickle').config.prompt!,
+		);
+		expect(section).toContain('as n_a with a reason (neutral)');
+		expect(section).toContain('KNOWLEDGE_N_A');
 	});
 
 	it('test_engineer receipt-tool guidance offers the n_a channel and N_A chat marker', () => {
-		const agent = createTestEngineerAgent('opencode/big-pickle');
-		const prompt = agent.config.prompt!;
-		expect(prompt).toContain('as n_a with a reason (neutral)');
-		expect(prompt).toContain('KNOWLEDGE_N_A');
+		const section = receiptGuidanceSection(
+			createTestEngineerAgent('opencode/big-pickle').config.prompt!,
+		);
+		expect(section).toContain('as n_a with a reason (neutral)');
+		expect(section).toContain('KNOWLEDGE_N_A');
 	});
 
 	it('architect prompt still carries the full marker contract (guard against factory drift)', () => {

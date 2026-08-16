@@ -116,7 +116,9 @@ async function seedRetrieved(
 	});
 }
 
-const FIXED_NOW_ISO = new Date(0).toISOString();
+// Fixed RECENT instant (string literal — no clock read; see PRR-009 note in
+// the matrix test file).
+const FIXED_NOW_ISO = '2026-01-01T00:00:00.000Z';
 
 describe('delegate terminal source attribution (#2032)', () => {
 	let dir: string;
@@ -209,5 +211,42 @@ describe('delegate terminal source attribution (#2032)', () => {
 		)?.terminal;
 		expect(terminal?.outcome).toBe('violated');
 		expect(terminal?.source).toBe('delegate');
+	});
+
+	it('legacy prompt (no trace header): n_a ack is preserved as acked but never fabricated into a terminal (PRR-016)', async () => {
+		// #2031 contract: a legacy prompt has no provable retrieval membership,
+		// so the collector marks the explicit ack as acknowledged (no false
+		// unacknowledged-critical escalation) but commits NO V2 terminal and
+		// NO diagnostic event — presence is not fabricated authority.
+		const legacyBlock = buildDelegateDirectiveBlock(
+			[rankedEntry(ID_NA, 'medium'), rankedEntry(ID_CRITICAL, 'critical')],
+			knowledgeConfig(),
+			undefined,
+		);
+		expect(legacyBlock).not.toContain('trace_id:');
+		const result = await collectDelegateAcks({
+			directory: dir,
+			prompt: `${legacyBlock}\n\nTASK_ID: task-legacy\nDelegated work here.`,
+			transcript: `KNOWLEDGE_N_A:${ID_NA} reason=different subsystem\nKNOWLEDGE_APPLIED:${ID_CRITICAL}`,
+			agent: 'coder',
+			sessionId: SESSION,
+		});
+		// Both acked → no escalation, no violated fabrication.
+		expect(result.unacknowledgedCriticals).toEqual([]);
+		// No terminal/diagnostic emissions for legacy acks.
+		expect(
+			result.emitted.filter((e) => e.type !== 'unacknowledged'),
+		).toHaveLength(0);
+		const receipts = (await readKnowledgeEvents(dir)).filter((e) =>
+			['applied', 'ignored', 'violated', 'n_a'].includes(e.type),
+		);
+		expect(receipts).toHaveLength(0);
+		const state = await queryLiveMemberships(dir, {
+			session_id: SESSION,
+			include_terminal: true,
+		});
+		expect(state.ok).toBe(true);
+		if (!state.ok) return;
+		expect(state.memberships.some((m) => m.terminal !== undefined)).toBe(false);
 	});
 });

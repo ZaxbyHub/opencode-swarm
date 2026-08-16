@@ -82,10 +82,13 @@ const ignoredItem = z.object({
  * A shown entry that did not apply to the task at hand (issue #2032).
  * Reasoned: the reason is required so `n_a` cannot be used as a silent
  * evasion channel — a gate consumer can always ask "why not applicable?".
+ * The reason is trimmed before validation (min(1) after trim), so a
+ * whitespace-only reason is rejected exactly like an empty one — matching
+ * the phase gate's `reason?.trim()` resolution rule.
  */
 const notApplicableItem = z.object({
 	id: z.string().min(1),
-	reason: z.string().min(1).max(500),
+	reason: z.string().trim().min(1).max(500),
 });
 
 const contradictedItem = z.object({
@@ -119,7 +122,10 @@ const newLessonItem = z.object({
  * legacy source is never inferred.
  */
 function receiptSourceForAgent(agent: string): string {
-	const base = stripKnownSwarmPrefix(agent);
+	// Trim first: host-supplied names should never carry whitespace, but a
+	// defensive trim keeps 'reviewer ' from silently classifying as 'delegate'
+	// (#2032 review PRR-004) instead of failing loudly in telemetry.
+	const base = stripKnownSwarmPrefix(agent.trim());
 	if (!base || base === 'unknown') return 'unknown';
 	if (base === 'reviewer') return 'reviewer';
 	if (base === 'test_engineer') return 'test_engineer';
@@ -141,8 +147,18 @@ export const knowledge_receipt: ReturnType<typeof createSwarmTool> =
 			task_id: z.string().min(1).optional(),
 			phase: z.string().optional(),
 			applied: z.array(appliedItem).optional(),
-			ignored: z.array(ignoredItem).optional(),
-			n_a: z.array(notApplicableItem).optional(),
+			ignored: z
+				.array(ignoredItem)
+				.optional()
+				.describe(
+					'entries you judged relevant but deliberately did not follow (counts against the entry). NOT for not-applicable entries — file those under n_a',
+				),
+			n_a: z
+				.array(notApplicableItem)
+				.optional()
+				.describe(
+					'entries that did not apply to this task (neutral; reasoned). Replaces the removed not_relevant ignore reason',
+				),
 			contradicted: z.array(contradictedItem).optional(),
 			new_lessons: z.array(newLessonItem).optional(),
 			no_relevant_knowledge: z.boolean().optional(),

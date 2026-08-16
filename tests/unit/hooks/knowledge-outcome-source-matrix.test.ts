@@ -165,7 +165,10 @@ function syntheticReceiptEvent(
 	} as ReceiptEvent;
 }
 
-const FIXED_NOW_ISO = new Date(0).toISOString();
+// Fixed RECENT instant (string literal — no clock read, deterministic): a
+// 1970 epoch seed would silently misbehave under any future grace-day,
+// staleness, or ordering assertion (#2032 review PRR-009).
+const FIXED_NOW_ISO = '2026-01-01T00:00:00.000Z';
 
 describe('knowledge outcome/source semantic matrix (#2032)', () => {
 	let dir: string;

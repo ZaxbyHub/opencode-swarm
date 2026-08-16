@@ -173,7 +173,11 @@ export async function validateReceipt(
 			entry_id: item.id,
 			outcome: item.outcome,
 			reason: item.reason,
-			source: ctx.source || 'unknown',
+			// Trim before the fail-open fallback (#2032 review PRR-004): a
+			// whitespace-only source must stamp the honest 'unknown' class,
+			// never persist an unbounded-code string the telemetry layer would
+			// then silently drop (ledger/telemetry divergence).
+			source: ctx.source.trim() || 'unknown',
 		})),
 		no_relevant_knowledge: noRelevant,
 	});

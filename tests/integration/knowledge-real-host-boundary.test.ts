@@ -291,13 +291,21 @@ describe('issue #1849 — real-host boundary end-to-end through src/index.ts', (
 		const conflictOut = JSON.parse(
 			typeof conflict === 'string' ? conflict : JSON.stringify(conflict),
 		);
-		// The conflicting outcome for the same (trace, id) must not add a second
-		// terminal — either rejected outright or recorded=false.
+		// The conflicting outcome for the same (trace, id) must be rejected
+		// outright — no second terminal, no partial acceptance (#2032 review
+		// PRR-007: the migrated form previously neither asserted the response
+		// nor filtered for n_a, so an over-accepting ledger would pass).
+		expect(conflictOut.recorded).toBe(false);
+		expect(conflictOut.reason).toBe('duplicate_conflicting_terminal');
 		const events = await readKnowledgeEvents(dir);
 		const k1Terminals = events.filter(
 			(e) =>
 				e.knowledge_id === 'k1' &&
-				(e.type === 'applied' || e.type === 'ignored'),
+				(e.type === 'applied' ||
+					e.type === 'ignored' ||
+					e.type === 'n_a' ||
+					e.type === 'contradicted' ||
+					e.type === 'violated'),
 		);
 		expect(k1Terminals.length).toBe(1);
 	});

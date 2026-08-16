@@ -477,7 +477,10 @@ closed transition kind (including distinct application-marker commits), closed
 `reasonCode`, positive `schemaVersion`, positive `receiptSemantics` (issue
 #2032: the outcome/source meaning-contract version, currently `2` — distinct
 from the journal `schemaVersion` format gate, so health/reports consumers can
-distinguish producer behavior and migration uncertainty), optional
+distinguish producer behavior and migration uncertainty). An ABSENT
+`receiptSemantics` means the transition was emitted before this contract
+existed (pre-#2032): consumers MUST treat such events' outcome/source
+semantics as unknown, never default them to the current version. Optional
 IDs, and bounded `receiptOutcome`/`receiptSource` domain codes drawn from the
 canonical outcome/source taxonomy of `src/hooks/knowledge-receipt-ledger.ts`
 (`receiptSource: 'delegate'` marks every new delegate terminal; legacy missing
