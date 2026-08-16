@@ -24,6 +24,8 @@ const ctx = (directory: string): any => ({
 	agent: 'coder',
 });
 
+const FIXED_NOW_ISO = new Date(0).toISOString();
+
 describe('knowledge_receipt', () => {
 	let dir: string;
 	beforeEach(() => {
@@ -238,7 +240,7 @@ describe('knowledge_receipt', () => {
 			result_ids: ['k-na'],
 			ranks: { 'k-na': 1 },
 			scores: { 'k-na': 1 },
-			timestamp: new Date().toISOString(),
+			timestamp: FIXED_NOW_ISO,
 		});
 		const raw = await knowledge_receipt.execute(
 			{
@@ -286,7 +288,7 @@ describe('knowledge_receipt', () => {
 			result_ids: ['k-rev'],
 			ranks: { 'k-rev': 1 },
 			scores: { 'k-rev': 1 },
-			timestamp: new Date().toISOString(),
+			timestamp: FIXED_NOW_ISO,
 		});
 		const reviewerCtx = { ...ctx(dir), agent: 'mega_reviewer' };
 		const raw = await knowledge_receipt.execute(

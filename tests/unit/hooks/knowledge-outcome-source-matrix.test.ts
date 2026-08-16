@@ -111,7 +111,7 @@ async function seedTrace(
 		result_ids: resultIds,
 		ranks: Object.fromEntries(resultIds.map((id, i) => [id, i + 1])),
 		scores: Object.fromEntries(resultIds.map((id) => [id, 1])),
-		timestamp: new Date().toISOString(),
+		timestamp: FIXED_NOW_ISO,
 	});
 }
 
@@ -157,13 +157,15 @@ function syntheticReceiptEvent(
 		event_id: `evt-${outcome}`,
 		trace_id: 't',
 		knowledge_id: 'k1',
-		timestamp: new Date().toISOString(),
+		timestamp: FIXED_NOW_ISO,
 		session_id: SESSION,
 		agent: 'coder',
 		source: 'delegate',
 		reason,
 	} as ReceiptEvent;
 }
+
+const FIXED_NOW_ISO = new Date(0).toISOString();
 
 describe('knowledge outcome/source semantic matrix (#2032)', () => {
 	let dir: string;
@@ -394,7 +396,7 @@ describe('knowledge outcome/source semantic matrix (#2032)', () => {
 			event_id: 'evt-legacy-1',
 			trace_id: traceId,
 			knowledge_id: 'k1',
-			timestamp: new Date().toISOString(),
+			timestamp: FIXED_NOW_ISO,
 			session_id: SESSION,
 			phase: PHASE,
 			agent: 'coder',

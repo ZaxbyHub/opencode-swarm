@@ -112,9 +112,11 @@ async function seedRetrieved(
 		result_ids: resultIds,
 		ranks: Object.fromEntries(resultIds.map((id, i) => [id, i + 1])),
 		scores: Object.fromEntries(resultIds.map((id) => [id, 1])),
-		timestamp: new Date().toISOString(),
+		timestamp: FIXED_NOW_ISO,
 	});
 }
+
+const FIXED_NOW_ISO = new Date(0).toISOString();
 
 describe('delegate terminal source attribution (#2032)', () => {
 	let dir: string;
