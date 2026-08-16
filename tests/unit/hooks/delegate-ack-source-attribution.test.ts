@@ -121,7 +121,9 @@ const FIXED_NOW_ISO = new Date(0).toISOString();
 describe('delegate terminal source attribution (#2032)', () => {
 	let dir: string;
 	beforeEach(() => {
-		dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-ack-source-')));
+		dir = fs.realpathSync(
+			fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-ack-source-')),
+		);
 	});
 	afterEach(() => {
 		fs.rmSync(dir, { recursive: true, force: true });
