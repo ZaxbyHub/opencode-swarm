@@ -8,6 +8,12 @@
 - The file covers the `WindowsSandboxExecutor` fallback wrapper transport:
   real PowerShell `spawnSync` round-trips, CRLF/LF multiline execution, cmd
   metacharacter temp paths, Base64 command transport, and PATH filtering.
+- Extended `tests/unit/scripts/ci/ci-yml-integration.test.ts` with a
+  regression describe-block (4 tests) that pins the ledger contract: the path
+  is an active windows-ledger entry, scoped to the windows ledger only (not
+  general/macos), resolves to a real on-disk file covered by the ci.yml
+  discovery chain, and the windows STATUS header count matches the active
+  entry count.
 
 ## Why
 
@@ -17,8 +23,7 @@ failed and the immediate retry passed (7.1s, `passed-on-retry` flake). Sibling
 ubuntu-2 and macos-2 shards ran the file green in the very same run (92ms / 31ms
 — the Windows-only cells skip off-platform), and windows shards 1/3/5/6 were
 green (windows-4 was cancelled mid-run on its disjoint shard set). Single-OS
-evidence
-with green siblings → windows ledger, per the ledger's own re-add policy
+evidence with green siblings → windows ledger, per the ledger's own re-add policy
 (merge-group windows-latest confirmed failure not fixable at the root).
 
 The ci.yml retry loop discards attempt-1 output when a retry passes, so no
@@ -34,9 +39,17 @@ Quarantining also stops the duplicate auto-filed issues: the detection script's
 rule A drops candidates already present in any quarantine ledger, so this
 entry prevents re-filing on the next detection.
 
+The new regression tests fail without the ledger entry (verified against the
+origin/main ledger) and pass with it, so a future revert or ledger accident
+that re-exposes the windows shards to the flake fails CI loudly instead of
+silently resuming duplicate flake issues.
+
 ## Migration steps
 
-None. CI-only data-file change; no runtime, `src/`, or test-logic changes.
+None for runtime behavior — the `src/` tree is untouched. CI-only change:
+the quarantine data file plus the pinning tests in
+`tests/unit/scripts/ci/ci-yml-integration.test.ts` (22 tests total in that
+file, all green; file remains under the FR-006 500-line cap at 336 lines).
 
 ## Known caveats
 
@@ -44,7 +57,8 @@ None. CI-only data-file change; no runtime, `src/`, or test-logic changes.
   paydown; this re-introduces 1 entry. Sibling open PR #2192 (issue #2028,
   knowledge-query.test.ts) also targets this ledger — its STATUS line and this
   one will need reconciliation at merge time (expected and noted in the commit
-  message for the wrapper).
+  message for the wrapper). The STATUS-count consistency test added here will
+  catch a wrong reconciliation.
 - The 11 Windows-runtime cells are skipped on ubuntu/macos runners, so the
   windows-latest unit shards lose ~11 Windows-native assertions until the file
   is de-flaked and un-quarantined under the #1782 test-stability sprint.
