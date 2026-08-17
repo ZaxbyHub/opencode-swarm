@@ -81,6 +81,18 @@ export interface TaskWorkflowMetadata {
 	lastOutcome: TaskWorkflowTransitionOutcome;
 	lastTransitionId: string | null;
 	updatedAt: string;
+	/**
+	 * True when this task reached `complete` via a QA-exempt forced completion
+	 * (`/swarm close` reconciling a task that plan.json already marked completed but
+	 * for which no authoritative workflow evidence existed) rather than by passing
+	 * the normal Stage B gates.
+	 *
+	 * Without this the durable evidence file is byte-identical for a genuinely
+	 * QA'd completion and a forced one, so no consumer can tell them apart. Absent
+	 * on evidence written before this field existed, which reads as "not forced" —
+	 * the same answer those files would have given anyway.
+	 */
+	forcedCompletion?: boolean;
 }
 
 export interface TaskWorkflowSnapshot extends TaskWorkflowMetadata {
@@ -285,6 +297,7 @@ const TaskWorkflowMetadataSchema = z.object({
 	lastOutcome: z.enum(TASK_WORKFLOW_OUTCOMES).default('none'),
 	lastTransitionId: z.string().min(1).nullable().optional().default(null),
 	updatedAt: z.string(),
+	forcedCompletion: z.boolean().optional(),
 });
 
 const TaskEvidenceSchema = z.object({
@@ -532,6 +545,10 @@ export function reduceTaskWorkflowSnapshot(
 		lastOutcome: outcome,
 		lastTransitionId: event.transitionId ?? current.lastTransitionId,
 		updatedAt: context.nowIso,
+		// Preserved across transitions that re-enter the terminal record so a forced
+		// completion stays visible downstream. Cleared by repair_idle, which opens a new
+		// generation for genuinely new work.
+		...(current.forcedCompletion === true ? { forcedCompletion: true } : {}),
 	};
 
 	switch (event.type) {
@@ -646,6 +663,10 @@ export function reduceTaskWorkflowSnapshot(
 			return {
 				...base,
 				state: 'complete',
+				// Record the QA-exempt path in durable evidence so downstream readers can
+				// distinguish a forced completion from one that passed the gates. Only set
+				// on the exempt path; a genuine completion leaves the field absent.
+				...(event.qaExempt === true ? { forcedCompletion: true } : {}),
 			};
 		case 'task_blocked':
 			return {
@@ -657,15 +678,19 @@ export function reduceTaskWorkflowSnapshot(
 				...base,
 				state: 'closed',
 			};
-		case 'repair_idle':
+		case 'repair_idle': {
+			// A repair reopens the task for new work, so a prior forced completion no
+			// longer describes this generation. Drop the field rather than carrying it.
+			const { forcedCompletion: _cleared, ...withoutForced } = base;
 			return {
-				...base,
+				...withoutForced,
 				generation: current.generation + 1,
 				state: 'idle',
 				retryCount: 0,
 				retryHistory: [],
 				retryEpoch: 0,
 			};
+		}
 	}
 }
 
@@ -1018,6 +1043,13 @@ export async function recordAgentDispatch(
 /**
  * Returns the TaskEvidence for a task, or null if file missing or parse error.
  * Never throws.
+ *
+ * Note this collapses "no evidence file" and "evidence file is unreadable" into the
+ * same `null`, which degrades two delegation-gate checks when an older build reads
+ * evidence carrying a `workflow.state` it does not recognise. Tracked in #2199 — do
+ * not "fix" this by rethrowing here: two call sites iterate every task in the plan,
+ * so one corrupt file would block dispatch for all of them. The fix is a separate
+ * discriminated reader used at the two affected sites.
  */
 export async function readTaskEvidence(
 	directory: string,

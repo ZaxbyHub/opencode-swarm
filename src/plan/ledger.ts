@@ -717,6 +717,41 @@ export async function initLedger(
 }
 
 /**
+ * Read ledger events for plan-epoch identity resolution, failing closed on a
+ * malformed line.
+ *
+ * `readLedgerEvents` silently skips unparseable lines. That is unsafe for epoch
+ * resolution specifically: a corrupted `plan_epoch_adopted` snapshot would become
+ * invisible to `extractPlanEpochCandidates`, whose conflict detection only compares
+ * candidates that parsed, so a fresh duplicate epoch could be minted instead of the
+ * corruption being surfaced.
+ *
+ * This is defense in depth for the exported, directly-callable surface
+ * (`readPlanEpochIdentity`, `getOrAdoptPlanEpochUnderLock`), not a live behavior
+ * change on any current call path: every in-tree route is already fenced by an
+ * earlier `replayFromLedgerWithStatus` check that throws first —
+ * `recoverPreparedTaskTerminal` (`TASK_TERMINAL_LEDGER_TRUNCATED`), which is the
+ * shared callee of both `update_task_status` and the delegation-gate `toolBefore`
+ * hook, and `loadAuthoritativePlan` in `close-terminal.ts`
+ * (`CLOSE_TERMINAL_LEDGER_TRUNCATED`). The two checks share one predicate, since
+ * both readers go through `readLedgerEventsWithIntegrity`, which flags the first
+ * malformed line anywhere in the file rather than only a trailing suffix. These
+ * helpers are exported and must not depend on future callers repeating that
+ * discipline.
+ */
+async function readLedgerEventsForEpoch(
+	directory: string,
+): Promise<LedgerEvent[]> {
+	const integrity = await _internals.readLedgerEventsWithIntegrity(directory);
+	if (integrity.truncated) {
+		throw new Error(
+			`PLAN_LEDGER_TRUNCATED: ${getLedgerPath(directory)} has a malformed line; plan epoch identity cannot be resolved. Preserve this file and quarantine the corrupted suffix before retrying.`,
+		);
+	}
+	return integrity.events;
+}
+
+/**
  * Read and validate the current plan epoch identity without creating,
  * adopting, or appending any ledger state.
  *
@@ -731,7 +766,7 @@ export async function readPlanEpochIdentity(
 	if (!(await ledgerExists(directory))) {
 		return null;
 	}
-	const events = await _internals.readLedgerEvents(directory);
+	const events = await readLedgerEventsForEpoch(directory);
 	if (events.length === 0) {
 		throw new Error('Plan ledger is empty; missing plan_created root.');
 	}
@@ -754,6 +789,7 @@ export async function getOrAdoptPlanEpochUnderLock(
 	const planId = derivePlanId(authoritativePlan);
 	const planIdentityHash = derivePlanIdentityHash(authoritativePlan);
 	const payloadHash = computePlanHash(authoritativePlan);
+	let lastStaleWriterError: LedgerStaleWriterError | undefined;
 	for (let attempt = 0; attempt < 4; attempt++) {
 		if (!(await ledgerExists(directory))) {
 			try {
@@ -770,7 +806,7 @@ export async function getOrAdoptPlanEpochUnderLock(
 			}
 		}
 
-		const events = await _internals.readLedgerEvents(directory);
+		const events = await readLedgerEventsForEpoch(directory);
 		const existing = resolvePlanEpochIdentity(events, authoritativePlan);
 		if (existing) {
 			return existing;
@@ -807,7 +843,7 @@ export async function getOrAdoptPlanEpochUnderLock(
 				},
 			);
 
-			const verifiedEvents = await _internals.readLedgerEvents(directory);
+			const verifiedEvents = await readLedgerEventsForEpoch(directory);
 			const verified = verifiedEvents[verifiedEvents.length - 1];
 			const verifiedPayload = asRecord(verified?.payload);
 			if (
@@ -834,7 +870,13 @@ export async function getOrAdoptPlanEpochUnderLock(
 				source: 'plan_epoch_adopted',
 			};
 		} catch (error) {
-			if (error instanceof LedgerStaleWriterError && attempt < 3) {
+			// Retries are bounded by the loop condition alone. Do not re-encode the
+			// attempt ceiling here: the previous `attempt < 3` guard rethrew the raw
+			// stale-writer error on the final attempt, which made the descriptive
+			// exhaustion error below unreachable and coupled two literals that had to
+			// be changed together.
+			if (error instanceof LedgerStaleWriterError) {
+				lastStaleWriterError = error;
 				continue;
 			}
 			throw error;
@@ -843,6 +885,7 @@ export async function getOrAdoptPlanEpochUnderLock(
 
 	throw new Error(
 		`Unable to settle plan epoch for ${planId} after repeated stale-writer retries.`,
+		{ cause: lastStaleWriterError },
 	);
 }
 

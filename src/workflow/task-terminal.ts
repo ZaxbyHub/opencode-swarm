@@ -260,12 +260,14 @@ export async function commitTaskTerminalUnderPlanLock<TPlan>(options: {
 				options.taskId,
 			);
 			if (existingWal?.state === 'ABORTED') existingWal = null;
-			if (existingWal && existingWal.taskId !== options.taskId) {
-				throw new Error('TASK_TERMINAL_WAL_TASK_MISMATCH');
-			}
+			// No caller-side task-id mismatch check here: readWorkflowWalFile above passes
+			// options.taskId as expectedTaskId, so parseTaskTerminalWal has already thrown
+			// TASK_TERMINAL_WAL_TASK_MISMATCH for a foreign WAL. A duplicate check here
+			// would be unreachable — the same redundancy this change removed from
+			// task-repair.ts. The parser owns that error, including its path/remediation.
 			if (existingWal?.state === 'PREPARED') {
 				throw new Error(
-					`TASK_TERMINAL_RECOVERY_REQUIRED: transition ${existingWal.transitionId} is PREPARED`,
+					`TASK_TERMINAL_RECOVERY_REQUIRED: transition ${existingWal.transitionId} for task ${options.taskId} is PREPARED (${walPath}); requested transition ${options.transitionId}. Run task-terminal recovery for this task before retrying.`,
 				);
 			}
 			if (
@@ -293,7 +295,9 @@ export async function commitTaskTerminalUnderPlanLock<TPlan>(options: {
 			}
 			if (terminal.preserveEvidence) {
 				if (!evidence || !workflow.authoritative) {
-					throw new Error('TASK_TERMINAL_AUTHORITATIVE_EVIDENCE_REQUIRED');
+					throw new Error(
+						`TASK_TERMINAL_AUTHORITATIVE_EVIDENCE_REQUIRED: task ${options.taskId} must have authoritative workflow evidence to preserve its terminal state for ${terminal.targetStatus} (transition ${options.transitionId}, ${walPath}); found ${evidence ? `non-authoritative evidence in state ${workflow.state}` : 'no evidence'}. Reconcile task evidence before retrying the terminal transition.`,
+					);
 				}
 				const expectedState =
 					terminal.targetStatus === 'completed'
@@ -323,7 +327,15 @@ export async function commitTaskTerminalUnderPlanLock<TPlan>(options: {
 				terminal.targetStatus === 'closed' &&
 				(!options.planIdentityHash || !options.planEpoch)
 			) {
-				throw new Error('TASK_TERMINAL_PLAN_IDENTITY_REQUIRED');
+				const missing = [
+					options.planIdentityHash ? null : 'planIdentityHash',
+					options.planEpoch ? null : 'planEpoch',
+				]
+					.filter((field): field is string => field !== null)
+					.join(' and ');
+				throw new Error(
+					`TASK_TERMINAL_PLAN_IDENTITY_REQUIRED: closing task ${options.taskId} requires both planIdentityHash and planEpoch (transition ${options.transitionId}, ${walPath}); missing ${missing}. Resolve the plan epoch identity (getOrAdoptPlanEpochUnderLock) before requesting a close.`,
+				);
 			}
 			const newWorkflowState =
 				terminal.targetStatus === 'completed'

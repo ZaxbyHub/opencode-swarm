@@ -275,6 +275,84 @@ describe('gate-evidence workflow transitions', () => {
 		expect(readTaskEvidenceRaw(tempDir, '1.8')).toEqual(before);
 	});
 
+	it('rejects a foreign task_closed against an already-closed task', async () => {
+		// Locks in fail-closed behavior. The terminal guard deliberately has no
+		// `(closed && task_closed)` idempotency branch, unlike the complete/blocked
+		// branches: `task_closed` rewrites lastTransitionId, so allowing a re-entry
+		// would let a foreign transition silently overwrite terminal provenance. An
+		// exact replay of the SAME transitionId is already short-circuited earlier by
+		// isDuplicateTransition, so no legitimate caller needs such a branch.
+		await transitionTaskWorkflowEvidence(tempDir, '1.9', {
+			type: 'task_closed',
+			expectedGeneration: 0,
+			transitionId: 'close-original',
+		});
+		const before = readTaskEvidenceRaw(tempDir, '1.9');
+		expect(before?.workflow).toMatchObject({
+			state: 'closed',
+			lastTransitionId: 'close-original',
+		});
+
+		await expect(
+			transitionTaskWorkflowEvidence(tempDir, '1.9', {
+				type: 'task_closed',
+				expectedGeneration: 0,
+				transitionId: 'close-foreign',
+			}),
+		).rejects.toThrow(/TASK_WORKFLOW_TERMINAL/);
+		expect(readTaskEvidenceRaw(tempDir, '1.9')).toEqual(before);
+	});
+
+	it('records forcedCompletion in durable evidence for a QA-exempt completion', async () => {
+		await transitionTaskWorkflowEvidence(tempDir, '1.10', {
+			type: 'task_completed',
+			qaExempt: true,
+			expectedGeneration: 0,
+			transitionId: 'forced-complete',
+		});
+		const forced = readTaskEvidenceRaw(tempDir, '1.10');
+		expect(forced?.workflow).toMatchObject({
+			state: 'complete',
+			forcedCompletion: true,
+		});
+
+		// A repair reopens the task, so the forced-completion fact must not survive
+		// into the new generation.
+		await transitionTaskWorkflowEvidence(tempDir, '1.10', {
+			type: 'repair_idle',
+			expectedGeneration: 0,
+			transitionId: 'repair-after-forced',
+		});
+		const repaired = readTaskEvidenceRaw(tempDir, '1.10');
+		expect(repaired?.workflow.state).toBe('idle');
+		expect(repaired?.workflow.forcedCompletion).toBeUndefined();
+	});
+
+	it('keeps forcedCompletion across a later non-exempt task_completed', async () => {
+		// The terminal guard permits task_completed from `complete`. Without the
+		// carry-forward in `base`, a second, non-exempt task_completed would drop the
+		// flag and launder a forced completion into one that looks gate-passed.
+		await transitionTaskWorkflowEvidence(tempDir, '1.11', {
+			type: 'task_completed',
+			qaExempt: true,
+			expectedGeneration: 0,
+			transitionId: 'forced-first',
+		});
+		expect(
+			readTaskEvidenceRaw(tempDir, '1.11')?.workflow.forcedCompletion,
+		).toBe(true);
+
+		await transitionTaskWorkflowEvidence(tempDir, '1.11', {
+			type: 'task_completed',
+			expectedGeneration: 0,
+			transitionId: 'relaunder-attempt',
+		});
+
+		const after = readTaskEvidenceRaw(tempDir, '1.11')?.workflow;
+		expect(after?.state).toBe('complete');
+		expect(after?.forcedCompletion).toBe(true);
+	});
+
 	it('keeps a single evidence lock across a caller-managed transaction callback', async () => {
 		const seenStates: string[] = [];
 

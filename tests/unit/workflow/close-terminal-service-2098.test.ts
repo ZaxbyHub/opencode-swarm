@@ -406,4 +406,80 @@ describe('issue #2098 close terminal service', () => {
 			(await loadPlanJsonOnly(directory))?.phases.map((phase) => phase.status),
 		).toEqual(['complete', 'closed']);
 	});
+
+	test('reports a QA-exempt forced completion and records it in durable evidence', async () => {
+		// No seedStageBGates: the task is `completed` in the plan projection but has no
+		// authoritative workflow evidence, which is the forced-completion path.
+		const result = await reconcileCloseTerminalState(
+			directory,
+			plan('completed'),
+			{
+				actor: 'close-test',
+				requestedClosedTaskIds: [],
+				closedPhaseIds: [1],
+				originalStatuses: new Map([['1.1', 'completed']]),
+			},
+		);
+
+		expect(result.forcedCompletionTaskIds).toEqual(['1.1']);
+		const workflow = readTaskEvidenceRaw(directory, '1.1')?.workflow;
+		expect(workflow?.state).toBe('complete');
+		expect(workflow?.forcedCompletion).toBe(true);
+	});
+
+	// Drives the real reconcileCloseTerminalState so both of its re-report branches
+	// (desired='closed' and desired='completed') are exercised against evidence an
+	// EARLIER forced completion already wrote — the half of the forcedCompletionTaskIds
+	// contract that reads the persisted flag rather than setting it.
+	for (const desired of ['closed', 'completed'] as const) {
+		test(`re-reports an existing forcedCompletion when reconciling desired=${desired}`, async () => {
+			await reconcileCloseTerminalState(directory, plan('completed'), {
+				actor: 'close-test',
+				requestedClosedTaskIds: [],
+				closedPhaseIds: [1],
+				originalStatuses: new Map([['1.1', 'completed']]),
+			});
+			expect(
+				readTaskEvidenceRaw(directory, '1.1')?.workflow?.forcedCompletion,
+			).toBe(true);
+
+			const again = await reconcileCloseTerminalState(
+				directory,
+				plan(desired),
+				{
+					actor: 'close-test',
+					requestedClosedTaskIds: desired === 'closed' ? ['1.1'] : [],
+					closedPhaseIds: [1],
+					originalStatuses: new Map([['1.1', 'completed']]),
+				},
+			);
+
+			expect(again.forcedCompletionTaskIds).toEqual(['1.1']);
+		});
+	}
+
+	test('does not report a forced completion for a genuinely gated success', async () => {
+		const generation = await seedStageBGates(directory, '1.1');
+		await transitionTaskWorkflowEvidence(directory, '1.1', {
+			type: 'task_completed',
+			expectedGeneration: generation,
+			transitionId: 'gated-success',
+		});
+
+		const result = await reconcileCloseTerminalState(
+			directory,
+			plan('completed'),
+			{
+				actor: 'close-test',
+				requestedClosedTaskIds: [],
+				closedPhaseIds: [1],
+				originalStatuses: new Map([['1.1', 'completed']]),
+			},
+		);
+
+		expect(result.forcedCompletionTaskIds).toEqual([]);
+		expect(
+			readTaskEvidenceRaw(directory, '1.1')?.workflow?.forcedCompletion,
+		).toBeUndefined();
+	});
 });

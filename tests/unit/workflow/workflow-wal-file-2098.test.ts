@@ -119,7 +119,7 @@ describe('issue #2098 shared workflow WAL trust boundary', () => {
 		).toThrow(`TASK_REPAIR_WAL_UNREADABLE: could not open ${filePath}`);
 	});
 
-	test('a path replacement during a multi-chunk read cannot replace the opened WAL', async () => {
+	test('a multi-chunk read opens the WAL exactly once', async () => {
 		const filePath = path.join(directory, 'repair.json');
 		const original = Buffer.from(
 			JSON.stringify({ ...repairWal(), padding: 'x'.repeat(96 * 1024) }),
@@ -127,6 +127,17 @@ describe('issue #2098 shared workflow WAL trust boundary', () => {
 		fs.writeFileSync(filePath, original);
 		let cursor = 0;
 		let openCalls = 0;
+		// This is a call-count invariant, not a filesystem race test. openFile is fully
+		// mocked and every chunk is served from `original`, a Buffer captured before the
+		// writeFileSync below — so that write is inert to the bytes this read observes.
+		// What is asserted is that the chunked read loop resolves the path once and
+		// reuses that handle, never re-resolving by path between chunks (openCalls === 1),
+		// which is the property that makes the real implementation fd-pinned. A genuine
+		// open-fd race is deliberately NOT tested here: it has no deterministic
+		// synchronization point, and rename/unlink-over-open-handle semantics differ
+		// between POSIX and Windows, so it would be flaky on the 3-OS CI matrix. Note
+		// also that production writers use rename-based atomicWriteFile, not the
+		// truncate-in-place simulated here.
 		_internals.openFile = (async () => {
 			openCalls++;
 			return {

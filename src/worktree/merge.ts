@@ -416,6 +416,10 @@ export async function reconcileLandedMerge(
 			`--grep=^${escapedTrailer}$`,
 			'--max-count=1',
 			`${provenance.targetHeadBefore}..HEAD`,
+			// Trailing `--` (after the revision range, never before it) so the range can
+			// never be reinterpreted as a pathspec. `git merge-base --is-ancestor` above
+			// takes no pathspec operand, so it deliberately does not get the same guard.
+			'--',
 		],
 		primaryDir,
 	);

@@ -315,7 +315,7 @@ export async function repairTaskWorkflowUnderPlanLock<TPlan>(options: {
 			if (existingWal && existingWal.transitionId !== options.transitionId) {
 				if (existingWal.state === 'PREPARED') {
 					throw new Error(
-						`TASK_REPAIR_IN_PROGRESS: transition ${existingWal.transitionId} owns this task repair`,
+						`TASK_REPAIR_IN_PROGRESS: transition ${existingWal.transitionId} owns the repair for task ${options.taskId} (${walPath}, state PREPARED); requested transition ${options.transitionId}. Recover or abort the owning repair transition before retrying.`,
 					);
 				}
 				// A committed repair is immutable history, not a permanent per-task

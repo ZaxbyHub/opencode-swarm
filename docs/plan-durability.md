@@ -125,6 +125,9 @@ Three independent layers surface `.swarm/spec-staleness.json` proactively:
   `update_task_status`, `phase_complete`, `lean_turbo_run_phase`,
   `lean_turbo_acquire_locks`) while the staleness file exists. No cache
   — `/swarm acknowledge-spec-drift` is reflected immediately.
+- **Layer C** (`src/services/status-service.ts`): `/swarm status` renders
+  a `**Spec drift detected**` line with stored/current hashes and the
+  resolution commands.
 
 Spec reconciliation is crash-recoverable. Canonical `spec_write` (or the
 separate human acknowledgement command) writes a PREPARED recovery record,

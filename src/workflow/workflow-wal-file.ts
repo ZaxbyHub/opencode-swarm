@@ -55,12 +55,17 @@ function remediationFor(kind: WorkflowWalKind): string {
 	}
 }
 
+// Exhaustive switch (no trailing return) so adding a WorkflowWalKind is a compile
+// error here rather than a silently wrong prefix, matching remediationFor above.
 function unreadableCode(kind: WorkflowWalKind): string {
-	return kind === 'coder-settlement'
-		? 'CODER_SETTLEMENT_WAL_UNREADABLE'
-		: kind === 'task-repair'
-			? 'TASK_REPAIR_WAL_UNREADABLE'
-			: 'TASK_TERMINAL_WAL_UNREADABLE';
+	switch (kind) {
+		case 'coder-settlement':
+			return 'CODER_SETTLEMENT_WAL_UNREADABLE';
+		case 'task-repair':
+			return 'TASK_REPAIR_WAL_UNREADABLE';
+		case 'task-terminal':
+			return 'TASK_TERMINAL_WAL_UNREADABLE';
+	}
 }
 
 function walIoError(
@@ -76,6 +81,19 @@ function walIoError(
 	);
 }
 
+// Exhaustive switch for the same reason as unreadableCode: a new WorkflowWalKind
+// must be a compile error here rather than silently borrowing another kind's prefix.
+function oversizeCode(kind: WorkflowWalKind): string {
+	switch (kind) {
+		case 'coder-settlement':
+			return 'CODER_SETTLEMENT_WAL_OVERSIZE';
+		case 'task-repair':
+			return 'TASK_REPAIR_WAL_OVERSIZE';
+		case 'task-terminal':
+			return 'TASK_TERMINAL_WAL_OVERSIZE';
+	}
+}
+
 function oversizeMessage(
 	kind: WorkflowWalKind,
 	filePath: string,
@@ -83,11 +101,11 @@ function oversizeMessage(
 ): never {
 	if (kind === 'coder-settlement') {
 		throw new Error(
-			`CODER_SETTLEMENT_WAL_OVERSIZE: ${filePath} exceeds the 64 MiB safety limit. Preserve this file, reconcile the lane, reduce or partition the declared scope, and only then move the WAL aside.`,
+			`${oversizeCode(kind)}: ${filePath} exceeds the 64 MiB safety limit. Preserve this file, reconcile the lane, reduce or partition the declared scope, and only then move the WAL aside.`,
 		);
 	}
 	throw new Error(
-		`${kind === 'task-repair' ? 'TASK_REPAIR' : 'TASK_TERMINAL'}_WAL_OVERSIZE: ${filePath} exceeds the ${maxBytes} byte safety limit. ${remediationFor(kind)}`,
+		`${oversizeCode(kind)}: ${filePath} exceeds the ${maxBytes} byte safety limit. ${remediationFor(kind)}`,
 	);
 }
 
@@ -99,14 +117,8 @@ function decodeUtf8(
 	try {
 		return UTF8_FATAL_DECODER.decode(bytes);
 	} catch (error) {
-		const code =
-			kind === 'coder-settlement'
-				? 'CODER_SETTLEMENT_WAL_UNREADABLE'
-				: kind === 'task-repair'
-					? 'TASK_REPAIR_WAL_UNREADABLE'
-					: 'TASK_TERMINAL_WAL_UNREADABLE';
 		throw new Error(
-			`${code}: ${filePath} is not valid UTF-8 (${error instanceof Error ? error.message : String(error)}). ${remediationFor(kind)}`,
+			`${unreadableCode(kind)}: ${filePath} is not valid UTF-8 (${error instanceof Error ? error.message : String(error)}). ${remediationFor(kind)}`,
 		);
 	}
 }
@@ -237,7 +249,7 @@ export async function readWorkflowWalFile<K extends WorkflowWalKind>(
 	if (bytes === null) return null;
 	if (bytes.length === 0) {
 		throw new Error(
-			`${kind === 'coder-settlement' ? 'CODER_SETTLEMENT' : kind === 'task-repair' ? 'TASK_REPAIR' : 'TASK_TERMINAL'}_WAL_UNREADABLE: ${filePath} is empty. ${remediationFor(kind)}`,
+			`${unreadableCode(kind)}: ${filePath} is empty. ${remediationFor(kind)}`,
 		);
 	}
 	if (bytes.length > maxBytes) oversizeMessage(kind, filePath, maxBytes);
@@ -259,7 +271,7 @@ export function readWorkflowWalFileSync<K extends WorkflowWalKind>(
 	if (bytes === null) return null;
 	if (bytes.length === 0) {
 		throw new Error(
-			`${kind === 'coder-settlement' ? 'CODER_SETTLEMENT' : kind === 'task-repair' ? 'TASK_REPAIR' : 'TASK_TERMINAL'}_WAL_UNREADABLE: ${filePath} is empty. ${remediationFor(kind)}`,
+			`${unreadableCode(kind)}: ${filePath} is empty. ${remediationFor(kind)}`,
 		);
 	}
 	if (bytes.length > maxBytes) oversizeMessage(kind, filePath, maxBytes);

@@ -10,7 +10,13 @@
  * F#: TBD (swarm review finding)
  */
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -185,6 +191,44 @@ describe('handleCloseCommand — terminal state uses closePlanTerminalState (reg
 		// in a combined bun test invocation.
 		closeInternals.closePlanTerminalState = realClosePlanTerminalState;
 		mock.restore();
+	});
+
+	it('surfaces a warning when reconciliation reports a QA-exempt forced completion', async () => {
+		writePlan();
+		// Reconciliation reports a task that reached `completed` without authoritative
+		// workflow evidence. The close summary must say so rather than presenting it as
+		// reviewed-and-tested work.
+		closeInternals.closePlanTerminalState = mock(async () => ({
+			plan: JSON.parse(
+				readFileSync(path.join(swarmDir(), 'plan.json'), 'utf-8'),
+			),
+			closedTaskIds: [],
+			preservedCompletedTaskIds: ['1.1'],
+			closedPhaseIds: [1],
+			forcedCompletionTaskIds: ['1.1'],
+		})) as unknown as typeof closeInternals.closePlanTerminalState;
+
+		const output = await handleCloseCommand(testDir, []);
+
+		expect(output).toContain('forced completion');
+		expect(output).toContain('1.1');
+	});
+
+	it('emits no forced-completion warning when reconciliation reports none', async () => {
+		writePlan();
+		closeInternals.closePlanTerminalState = mock(async () => ({
+			plan: JSON.parse(
+				readFileSync(path.join(swarmDir(), 'plan.json'), 'utf-8'),
+			),
+			closedTaskIds: [],
+			preservedCompletedTaskIds: ['1.1'],
+			closedPhaseIds: [1],
+			forcedCompletionTaskIds: [],
+		})) as unknown as typeof closeInternals.closePlanTerminalState;
+
+		const output = await handleCloseCommand(testDir, []);
+
+		expect(output).not.toContain('forced completion');
 	});
 
 	it('calls closePlanTerminalState (not raw fs.writeFile) when persisting terminal plan state', async () => {

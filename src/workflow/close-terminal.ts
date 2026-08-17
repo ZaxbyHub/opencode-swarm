@@ -24,6 +24,14 @@ export interface CloseTerminalResult {
 	closedTaskIds: string[];
 	preservedCompletedTaskIds: string[];
 	closedPhaseIds: number[];
+	/**
+	 * Tasks whose terminal state was settled as a QA-exempt forced completion — either
+	 * recorded as such by this reconciliation, or already carrying `forcedCompletion`
+	 * in durable evidence from an earlier one. Surfaced so `/swarm close` can report
+	 * that these tasks did not pass the normal gates; without it a forced completion is
+	 * indistinguishable from a genuinely reviewed and tested one.
+	 */
+	forcedCompletionTaskIds: string[];
 }
 
 function createCloseTransitionId(
@@ -254,8 +262,15 @@ export async function reconcileCloseTerminalState(
 		const requestedClosed = new Set(options.requestedClosedTaskIds);
 		const actualClosed = new Set<string>();
 		const preservedCompleted = new Set<string>();
+		const forcedCompletion = new Set<string>();
 
 		for (const targetTask of intent.taskIntents) {
+			// Deliberately re-scanned per iteration rather than hoisted into a
+			// Map<taskId, task> before the loop: `plan` is reassigned below from
+			// commitTaskTerminalUnderPlanLock's result (and by the recovery helpers
+			// above), and currentTask.status is passed as the optimistic-concurrency
+			// (CAS) precondition. A pre-built index would feed stale statuses into that
+			// check on every iteration after the first.
 			const currentTask = findTask(plan, targetTask.taskId);
 			if (!currentTask) {
 				throw new Error(`CLOSE_TERMINAL_TASK_MISSING: ${targetTask.taskId}`);
@@ -281,6 +296,9 @@ export async function reconcileCloseTerminalState(
 						const workflow = getTaskWorkflowSnapshot(evidence);
 						if (desired === 'closed') {
 							if (workflow.authoritative && workflow.state === 'complete') {
+								if (workflow.forcedCompletion === true) {
+									forcedCompletion.add(targetTask.taskId);
+								}
 								return {
 									targetStatus: 'completed',
 									qaExempt: false,
@@ -297,6 +315,12 @@ export async function reconcileCloseTerminalState(
 							return { targetStatus: 'closed', qaExempt: false };
 						}
 						if (workflow.authoritative && workflow.state === 'complete') {
+							// Evidence already records this as a forced completion from an
+							// earlier reconciliation; preserve it but keep reporting it as
+							// forced rather than silently treating it as gate-passed.
+							if (workflow.forcedCompletion === true) {
+								forcedCompletion.add(targetTask.taskId);
+							}
 							return {
 								targetStatus: 'completed',
 								qaExempt: false,
@@ -308,6 +332,7 @@ export async function reconcileCloseTerminalState(
 								`CLOSE_TERMINAL_EVIDENCE_CONTRADICTION: task ${targetTask.taskId} is completed in plan intent but exact workflow is ${workflow.state}`,
 							);
 						}
+						forcedCompletion.add(targetTask.taskId);
 						return { targetStatus: 'completed', qaExempt: true };
 					},
 					updatePlan: async (status) =>
@@ -342,6 +367,7 @@ export async function reconcileCloseTerminalState(
 			closedTaskIds: [...actualClosed],
 			preservedCompletedTaskIds: [...preservedCompleted],
 			closedPhaseIds: [...intent.closedPhaseIds],
+			forcedCompletionTaskIds: [...forcedCompletion],
 		};
 	} finally {
 		if (lock.lock._release) await lock.lock._release().catch(() => {});

@@ -85,6 +85,11 @@ export type TaskTerminalWal = TaskTerminalWalV1 | TaskTerminalWalV2;
 
 const TASK_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
+// Git object ids as written by `git rev-parse HEAD`: sha1 (40) today, sha256 (64)
+// under the sha256 object format. Abbreviated ids are deliberately rejected —
+// nothing in this codebase persists them. Constraining the shape also makes a
+// leading `-` structurally impossible for values later passed to git as revisions.
+const GIT_OBJECT_ID_PATTERN = /^[0-9a-f]{40}$|^[0-9a-f]{64}$/;
 const UUID_PATTERN =
 	/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const WORKFLOW_STATES = new Set<TaskWorkflowState>([
@@ -197,6 +202,7 @@ export function parseCoderSettlementWal(
 				typeof worktree.taskId !== 'string' ||
 				worktree.taskId !== parsed.taskId ||
 				typeof worktree.worktreePath !== 'string' ||
+				worktree.worktreePath.length > 4096 ||
 				typeof worktree.branchName !== 'string' ||
 				typeof worktree.worktreeId !== 'string' ||
 				typeof worktree.worktreeSessionId !== 'string' ||
@@ -208,7 +214,9 @@ export function parseCoderSettlementWal(
 			(typeof provenance.operationId !== 'string' ||
 				provenance.operationId !== parsed.transitionId ||
 				typeof provenance.sourceHead !== 'string' ||
+				!GIT_OBJECT_ID_PATTERN.test(provenance.sourceHead) ||
 				typeof provenance.targetHeadBefore !== 'string' ||
+				!GIT_OBJECT_ID_PATTERN.test(provenance.targetHeadBefore) ||
 				typeof provenance.branchName !== 'string' ||
 				(worktree !== undefined &&
 					(provenance.branchName !== worktree.branchName ||
@@ -231,8 +239,11 @@ export function parseCoderSettlementWal(
 		);
 	}
 	if (expectedTaskId && parsed.taskId !== expectedTaskId) {
-		throw new Error(
-			`CODER_SETTLEMENT_WAL_TASK_MISMATCH: expected ${expectedTaskId}, found ${parsed.taskId}`,
+		formatUnreadableMessage(
+			'CODER_SETTLEMENT_WAL_TASK_MISMATCH',
+			filePath,
+			`records task ${parsed.taskId} but was read for task ${expectedTaskId}`,
+			'Preserve this file, reconcile the task lane, and only then move it aside.',
 		);
 	}
 	return parsed as CoderSettlementWal;
@@ -293,8 +304,11 @@ export function parseTaskRepairWal(
 		);
 	}
 	if (expectedTaskId && parsed.taskId !== expectedTaskId) {
-		throw new Error(
-			`TASK_REPAIR_WAL_TASK_MISMATCH: expected ${expectedTaskId}, found ${parsed.taskId}`,
+		formatUnreadableMessage(
+			'TASK_REPAIR_WAL_TASK_MISMATCH',
+			filePath,
+			`records task ${parsed.taskId} but was read for task ${expectedTaskId}`,
+			'Preserve this file, reconcile the repair transition, and only then move it aside.',
 		);
 	}
 	return parsed as TaskRepairWal;
@@ -423,8 +437,11 @@ export function parseTaskTerminalWal(
 		);
 	}
 	if (expectedTaskId && parsed.taskId !== expectedTaskId) {
-		throw new Error(
-			`TASK_TERMINAL_WAL_TASK_MISMATCH: expected ${expectedTaskId}, found ${parsed.taskId}`,
+		formatUnreadableMessage(
+			'TASK_TERMINAL_WAL_TASK_MISMATCH',
+			filePath,
+			`records task ${parsed.taskId} but was read for task ${expectedTaskId}`,
+			'Preserve this file and reconcile the task terminal transition before moving it aside.',
 		);
 	}
 	return parsed as TaskTerminalWal;

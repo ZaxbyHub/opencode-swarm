@@ -6,11 +6,14 @@ import { join } from 'node:path';
 import type { Plan } from '../../../src/config/plan-schema';
 import {
 	_internals,
+	appendLedgerEvent,
 	computePlanHash,
 	getOrAdoptPlanEpochUnderLock,
 	LEDGER_SCHEMA_VERSION,
 	type LedgerEvent,
+	LedgerStaleWriterError,
 	readLedgerEvents,
+	readLedgerEventsWithIntegrity,
 	readPlanEpochIdentity,
 	replayFromLedger,
 } from '../../../src/plan/ledger';
@@ -99,6 +102,8 @@ describe('legacy ledger plan epoch adoption', () => {
 
 	afterEach(async () => {
 		_internals.readLedgerEvents = readLedgerEvents;
+		_internals.readLedgerEventsWithIntegrity = readLedgerEventsWithIntegrity;
+		_internals.appendLedgerEvent = appendLedgerEvent;
 		if (directory) {
 			await rm(directory, { recursive: true, force: true });
 			directory = '';
@@ -233,14 +238,17 @@ describe('legacy ledger plan epoch adoption', () => {
 
 	test('rejects when append read-verification cannot confirm the appended adoption snapshot', async () => {
 		directory = await createLegacyLedger(plan);
-		const realReadLedgerEvents = readLedgerEvents;
+		// Epoch resolution reads through readLedgerEventsWithIntegrity (fail-closed on a
+		// malformed line), not readLedgerEvents, so the corruption seam overrides that.
+		const realReadWithIntegrity = readLedgerEventsWithIntegrity;
 		let readCount = 0;
-		_internals.readLedgerEvents = async (worktree: string) => {
+		_internals.readLedgerEventsWithIntegrity = async (worktree: string) => {
 			readCount += 1;
-			const events = await realReadLedgerEvents(worktree);
-			if (readCount < 2 || events.length === 0) {
-				return events;
+			const integrity = await realReadWithIntegrity(worktree);
+			if (readCount < 2 || integrity.events.length === 0) {
+				return integrity;
 			}
+			const events = integrity.events;
 			const corruptedTail = {
 				...events[events.length - 1]!,
 				payload: {
@@ -249,11 +257,68 @@ describe('legacy ledger plan epoch adoption', () => {
 					plan_epoch: 'corrupted-after-append',
 				},
 			};
-			return [...events.slice(0, -1), corruptedTail];
+			return { ...integrity, events: [...events.slice(0, -1), corruptedTail] };
 		};
 
 		await expect(getOrAdoptPlanEpochUnderLock(directory, plan)).rejects.toThrow(
 			/read verification/i,
+		);
+	});
+
+	test('surfaces a descriptive error after exhausting stale-writer retries', async () => {
+		directory = await createLegacyLedger(plan);
+		let calls = 0;
+		_internals.appendLedgerEvent = (async () => {
+			calls += 1;
+			throw new LedgerStaleWriterError('expected seq 1, found 2');
+		}) as typeof _internals.appendLedgerEvent;
+
+		const error = await getOrAdoptPlanEpochUnderLock(directory, plan).catch(
+			(caught: unknown) => caught,
+		);
+
+		// Bounded at exactly 4 attempts, and the previously-unreachable descriptive
+		// exhaustion error now fires instead of the raw stale-writer error, with the
+		// last stale-writer error preserved as `cause`.
+		expect(calls).toBe(4);
+		expect(error).toBeInstanceOf(Error);
+		expect((error as Error).message).toMatch(
+			/Unable to settle plan epoch .* after repeated stale-writer retries/,
+		);
+		expect((error as Error).cause).toBeInstanceOf(LedgerStaleWriterError);
+	});
+
+	test('propagates a non-stale append error immediately without retrying', async () => {
+		directory = await createLegacyLedger(plan);
+		let calls = 0;
+		_internals.appendLedgerEvent = (async () => {
+			calls += 1;
+			throw new Error('DISK_FULL');
+		}) as typeof _internals.appendLedgerEvent;
+
+		await expect(getOrAdoptPlanEpochUnderLock(directory, plan)).rejects.toThrow(
+			/DISK_FULL/,
+		);
+		expect(calls).toBe(1);
+	});
+
+	test('fails closed when the ledger has a malformed line instead of minting a duplicate epoch', async () => {
+		directory = await createLegacyLedger(plan);
+		const ledgerPath = join(directory, '.swarm', 'plan-ledger.jsonl');
+		const original = fs.readFileSync(ledgerPath, 'utf8');
+		const lines = original.split('\n').filter((line) => line.trim() !== '');
+		// Corrupt a line in the MIDDLE of the ledger, not a truncated tail: the lenient
+		// reader would silently skip it and could then mint a fresh duplicate epoch.
+		const corrupted = [lines[0]!, '{not-valid-json', ...lines.slice(1)].join(
+			'\n',
+		);
+		fs.writeFileSync(ledgerPath, `${corrupted}\n`);
+
+		await expect(readPlanEpochIdentity(directory, plan)).rejects.toThrow(
+			/PLAN_LEDGER_TRUNCATED/,
+		);
+		await expect(getOrAdoptPlanEpochUnderLock(directory, plan)).rejects.toThrow(
+			/PLAN_LEDGER_TRUNCATED/,
 		);
 	});
 });

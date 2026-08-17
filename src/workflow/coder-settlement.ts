@@ -223,18 +223,19 @@ export async function beginCoderSettlement(options: {
 							`TASK_WORKFLOW_GENERATION_MISMATCH: expected ${options.expectedGeneration}, found ${snapshot.generation}`,
 						);
 					}
+					// readWal forwards options.taskId as expectedTaskId, so
+					// parseCoderSettlementWal already raised
+					// CODER_SETTLEMENT_WAL_TASK_MISMATCH (with path and remediation) for a
+					// foreign WAL. A caller-side re-check here would be unreachable.
 					const existing = await readWal(filePath, options.taskId);
 					if (existing !== null) {
-						if (existing.taskId !== options.taskId) {
-							throw new Error('CODER_SETTLEMENT_WAL_TASK_MISMATCH');
-						}
 						if (
 							(existing.state === 'DISPATCHED' ||
 								existing.state === 'PREPARED') &&
 							existing.transitionId !== options.transitionId
 						) {
 							throw new Error(
-								`CODER_SETTLEMENT_IN_PROGRESS: transition ${existing.transitionId} owns task ${options.taskId}`,
+								`CODER_SETTLEMENT_IN_PROGRESS: transition ${existing.transitionId} owns task ${options.taskId}, so transition ${options.transitionId} cannot dispatch it (${filePath}, state ${existing.state}). Wait for the owning transition to settle or run coder-settlement recovery for this task, then retry; do not remove the WAL by hand.`,
 							);
 						}
 						if (existing.transitionId === options.transitionId) {
@@ -312,8 +313,7 @@ export async function settleCoderDispatch(options: {
 			const filePath = walPath(options.directory, options.taskId);
 			const wal = await readWal(filePath, options.taskId);
 			if (wal === null) throw new Error('CODER_SETTLEMENT_WAL_MISSING');
-			if (wal.taskId !== options.taskId)
-				throw new Error('CODER_SETTLEMENT_WAL_TASK_MISMATCH');
+			// Task-id mismatch is owned by parseCoderSettlementWal (see readWal above).
 			if (wal.transitionId !== options.transitionId) {
 				throw new Error('CODER_SETTLEMENT_WAL_REPLACED');
 			}
@@ -517,7 +517,7 @@ export async function recoverCoderSettlement(
 			(wal.processId !== process.pid && isProcessAlive(wal.processId))
 		) {
 			throw new Error(
-				`CODER_DISPATCH_IN_PROGRESS: transition ${wal.transitionId} still owns task ${taskId}`,
+				`CODER_DISPATCH_IN_PROGRESS: transition ${wal.transitionId} still owns task ${taskId} (${filePath}, state ${wal.state}, pid ${wal.processId}). Wait for that dispatch to settle or recover it before retrying; do not remove the WAL by hand.`,
 			);
 		}
 		if (wal.state === 'DISPATCHED') {
@@ -636,6 +636,10 @@ export async function recoverCoderSettlement(
 					},
 				);
 				if (mergeResult.outcome !== 'merged' || recovered === null) {
+					// #2202: still bare — unlike the seven enriched state-conflict errors
+					// this one names neither the WAL path nor a recovery action. Reaching
+					// it needs a failed-worktree-merge fixture, so it is tracked rather
+					// than changed untested.
 					throw new Error(
 						`CODER_SETTLEMENT_MERGE_RECOVERY_REQUIRED: ${mergeResult.outcome === 'failed' ? mergeResult.message : mergeResult.outcome}`,
 					);
@@ -654,6 +658,9 @@ export async function recoverCoderSettlement(
 
 			const observed = scopedObservedFiles(directory, wal.context);
 			if (observed === null) {
+				// #2202: still bare — names the task but not the WAL path or a recovery
+				// action. Reaching it needs a baseline snapshot changedFilesSinceSnapshot
+				// cannot resolve, so it is tracked rather than changed untested.
 				throw new Error(
 					`CODER_SETTLEMENT_RECOVERY_UNCERTAIN: task ${taskId} workspace changes could not be attributed safely`,
 				);
@@ -694,11 +701,12 @@ export async function assertNoUnsettledCoderDispatch(
 	directory: string,
 	taskId: string,
 ): Promise<void> {
-	const wal = await readWal(walPath(directory, taskId), taskId);
+	const filePath = walPath(directory, taskId);
+	const wal = await readWal(filePath, taskId);
 	if (wal === null) return;
 	if (wal.state === 'DISPATCHED' || wal.state === 'PREPARED') {
 		throw new Error(
-			`CODER_SETTLEMENT_RECOVERY_REQUIRED: transition ${wal.transitionId} must settle before task ${taskId} can change plan status`,
+			`CODER_SETTLEMENT_RECOVERY_REQUIRED: transition ${wal.transitionId} must settle before task ${taskId} can change plan status (${filePath}, state ${wal.state}). Run coder-settlement recovery for this task, then retry.`,
 		);
 	}
 }

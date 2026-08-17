@@ -90,7 +90,17 @@ interface PlanData {
 const NO_RECEIPT_PHASE_CLOSE_SCOPE_DETAIL =
 	'no exact receipt lifecycle scope exists for phase closure';
 
-async function closePlanTerminalState(
+/**
+ * Close-command wrapper around the exact-task terminal reconciliation service.
+ *
+ * Deliberately NOT named `closePlanTerminalState`: `src/plan/manager.ts` exports a
+ * distinct function by that name (ledger-first phase/projection persistence), which
+ * `reconcileCloseTerminalState` itself calls downstream. Keeping the two identifiers
+ * distinct avoids a same-name collision across close.ts / close-terminal.ts /
+ * plan/manager.ts. The `_internals` key below stays `closePlanTerminalState` so the
+ * existing test seam is unchanged.
+ */
+async function reconcileCloseTerminalStateForPlan(
 	directory: string,
 	targetPlan: Plan,
 	options: {
@@ -1136,6 +1146,14 @@ export async function runFinalizeStage(ctx: CloseStageContext): Promise<void> {
 					};
 					ctx.closedPhases = [...reconciled.closedPhaseIds];
 					ctx.closedTasks = [...reconciled.closedTaskIds];
+					// Surface QA-exempt forced completions. These tasks were recorded
+					// complete without passing the normal Stage B gates, so the close
+					// summary must not present them as reviewed-and-tested work.
+					if (reconciled.forcedCompletionTaskIds.length > 0) {
+						ctx.warnings.push(
+							`Completed without QA evidence (forced completion): ${reconciled.forcedCompletionTaskIds.join(', ')}. These tasks had no authoritative workflow evidence and did not pass reviewer/test gates.`,
+						);
+					}
 				}
 				terminalPlanPersisted = true;
 			} catch (error) {
@@ -2616,7 +2634,10 @@ export const _internals = {
 	runAlignStage,
 	runFinalizeDryRun,
 	archiveEvidence,
-	closePlanTerminalState,
+	// Seam name intentionally retained for test compatibility; see the
+	// reconcileCloseTerminalStateForPlan doc comment for why the function itself
+	// no longer shares plan/manager.ts's `closePlanTerminalState` name.
+	closePlanTerminalState: reconcileCloseTerminalStateForPlan,
 	endAgentSession,
 	// Flushes the telemetry write stream before its files are archived. Delegates
 	// to the telemetry module's _internals so tests can substitute a no-op.
