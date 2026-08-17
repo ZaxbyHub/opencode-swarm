@@ -7,9 +7,12 @@ import { afterEach, describe, expect, mock, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import {
 	captureFileBytes,
+	collectCleanupError,
 	expectFileBytesUnchanged,
+	runWithCleanup,
 	setupIsolatedState,
 	withIsolatedState,
 } from './test-isolation.js';
@@ -224,5 +227,221 @@ describe('setupIsolatedState — cleanup robustness (F-007)', () => {
 		}
 		expect(dirRan).toBe(true); // dir step ran despite env throwing
 		expect((threw as Error)?.message).toBe('env boom'); // first error re-thrown
+	});
+});
+
+describe('captureFileBytes / expectFileBytesUnchanged — absence branches', () => {
+	test('captureFileBytes returns null for a file that does not exist', () => {
+		const state = setupIsolatedState({ prefix: 'iso-absent-' });
+		try {
+			expect(captureFileBytes(path.join(state.dir, 'nope.json'))).toBeNull();
+		} finally {
+			state.cleanup();
+		}
+	});
+
+	test('a still-absent file matches a null snapshot without throwing', () => {
+		const state = setupIsolatedState({ prefix: 'iso-absent-ok-' });
+		try {
+			const missing = path.join(state.dir, 'nope.json');
+			expect(() => expectFileBytesUnchanged(missing, null)).not.toThrow();
+		} finally {
+			state.cleanup();
+		}
+	});
+
+	test('a file created after a null snapshot is reported as appeared', () => {
+		const state = setupIsolatedState({ prefix: 'iso-appeared-' });
+		try {
+			const file = path.join(state.dir, 'appeared.json');
+			const snapshot = captureFileBytes(file);
+			expect(snapshot).toBeNull();
+			fs.writeFileSync(file, '{}\n');
+			expect(() => expectFileBytesUnchanged(file, snapshot)).toThrow(
+				/Tracked file unexpectedly appeared/,
+			);
+		} finally {
+			state.cleanup();
+		}
+	});
+
+	test('a file deleted after a byte snapshot is reported as deleted', () => {
+		const state = setupIsolatedState({ prefix: 'iso-deleted-' });
+		try {
+			const file = path.join(state.dir, 'deleted.json');
+			fs.writeFileSync(file, '{"a":1}\n');
+			const snapshot = captureFileBytes(file);
+			fs.rmSync(file);
+			expect(() => expectFileBytesUnchanged(file, snapshot)).toThrow(
+				/Tracked file was deleted/,
+			);
+		} finally {
+			state.cleanup();
+		}
+	});
+
+	test('an untouched file matches its byte snapshot without throwing', () => {
+		const state = setupIsolatedState({ prefix: 'iso-untouched-' });
+		try {
+			const file = path.join(state.dir, 'stable.json');
+			fs.writeFileSync(file, '{"a":1}\n');
+			const snapshot = captureFileBytes(file);
+			expect(() => expectFileBytesUnchanged(file, snapshot)).not.toThrow();
+		} finally {
+			state.cleanup();
+		}
+	});
+
+	test('the mutation message reports byte counts and sha256 digests (F-018)', () => {
+		// The default (preview-suppressed) message must still be actionable:
+		// asserting only on the leading phrase would pass even if the diagnostic
+		// body were empty.
+		const state = setupIsolatedState({ prefix: 'iso-diag-' });
+		try {
+			const file = path.join(state.dir, 'tracked.json');
+			fs.writeFileSync(file, '{"value":1}\n');
+			const snapshot = captureFileBytes(file);
+			fs.writeFileSync(file, '{"value":22}\n');
+			let message = '';
+			try {
+				expectFileBytesUnchanged(file, snapshot);
+			} catch (error) {
+				message = (error as Error).message;
+			}
+			expect(message).toContain(file);
+			expect(message).toMatch(/expected 12 bytes \(sha256:[0-9a-f]{16}\)/);
+			expect(message).toMatch(/saw 13 bytes \(sha256:[0-9a-f]{16}\)/);
+			expect(message).toContain('SWARM_TEST_FILE_PREVIEW=1');
+			// Direct negative assertion for the redaction property (F-016): the
+			// hint string above would still be present if the body ALSO leaked
+			// the file's content, so assert the content literally is not there.
+			expect(message).not.toContain('"value"');
+		} finally {
+			state.cleanup();
+		}
+	});
+
+	test('SWARM_TEST_FILE_PREVIEW=1 previews are UTF-8 safe (F-013)', () => {
+		// `SHOW_FILE_PREVIEW` is read once at module load, so the flag only takes
+		// effect for a process that starts with it set — which is also exactly how
+		// a developer uses it. A child process is therefore the honest way to
+		// exercise the preview branch; toggling process.env in-process would test
+		// nothing (and require_cache surgery leaks across files under bun test).
+		const state = setupIsolatedState({ prefix: 'iso-utf8-' });
+		try {
+			const file = path.join(state.dir, 'utf8.txt');
+			// 1 ASCII byte + 40x U+6F22 (3 bytes each). The 96-byte preview window
+			// ends 2 bytes into the 32nd character, i.e. mid-sequence.
+			fs.writeFileSync(file, `x${'漢'.repeat(40)}`);
+			const probe = path.join(state.dir, 'probe.mjs');
+			const helperUrl = pathToFileURL(
+				path.join(import.meta.dir, 'test-isolation.ts'),
+			).href;
+			fs.writeFileSync(
+				probe,
+				[
+					`import * as fs from 'node:fs';`,
+					`import { captureFileBytes, expectFileBytesUnchanged } from ${JSON.stringify(helperUrl)};`,
+					`const file = ${JSON.stringify(file)};`,
+					`const snapshot = captureFileBytes(file);`,
+					`fs.writeFileSync(file, 'y' + '\\u6f22'.repeat(40));`,
+					`try { expectFileBytesUnchanged(file, snapshot); } catch (error) {`,
+					`  process.stdout.write(error.message);`,
+					`}`,
+				].join('\n'),
+			);
+			const result = Bun.spawnSync([process.execPath, probe], {
+				env: { ...process.env, SWARM_TEST_FILE_PREVIEW: '1' },
+			});
+			const message = result.stdout.toString();
+			expect(message).toContain('Tracked file mutated');
+			// Preview branch actually taken.
+			expect(message).toContain('expected prefix:');
+			expect(message).toContain('actual prefix:');
+			// The straddling character is dropped, never rendered as U+FFFD.
+			expect(message).not.toContain('�');
+		} finally {
+			state.cleanup();
+		}
+	});
+});
+
+describe('collectCleanupError / runWithCleanup — error primacy (F-001/F-019)', () => {
+	test('a thrown falsy value is still reported as thrown', () => {
+		// The pre-fix truthiness gate swallowed this entirely.
+		const outcome = collectCleanupError(() => {
+			throw 0;
+		});
+		expect(outcome.thrown).toBe(true);
+		expect(outcome.error).toBe(0);
+	});
+
+	test('later steps run after an earlier throw and the FIRST error is kept', () => {
+		let secondRan = false;
+		let thirdRan = false;
+		const outcome = collectCleanupError(
+			() => {
+				throw new Error('first');
+			},
+			() => {
+				secondRan = true;
+				throw new Error('second');
+			},
+			() => {
+				thirdRan = true;
+			},
+		);
+		expect(secondRan).toBe(true);
+		expect(thirdRan).toBe(true);
+		expect(outcome.thrown).toBe(true);
+		expect((outcome.error as Error).message).toBe('first');
+	});
+
+	test('null/undefined steps are skipped', () => {
+		let ran = false;
+		const outcome = collectCleanupError(null, undefined, () => {
+			ran = true;
+		});
+		expect(ran).toBe(true);
+		expect(outcome.thrown).toBe(false);
+	});
+
+	test("runWithCleanup: the body's error wins and cleanup still runs", async () => {
+		let cleanupRan = false;
+		await expect(
+			runWithCleanup(
+				async () => {
+					throw new Error('body');
+				},
+				() => {
+					cleanupRan = true;
+					throw new Error('cleanup');
+				},
+			),
+		).rejects.toThrow('body');
+		expect(cleanupRan).toBe(true);
+	});
+
+	test('runWithCleanup: a cleanup error surfaces when the body succeeded', async () => {
+		await expect(
+			runWithCleanup(
+				async () => 'ok',
+				() => {
+					throw new Error('cleanup');
+				},
+			),
+		).rejects.toThrow('cleanup');
+	});
+
+	test('runWithCleanup returns the body value when nothing throws', async () => {
+		let cleanupRan = false;
+		const value = await runWithCleanup(
+			async () => 'value',
+			() => {
+				cleanupRan = true;
+			},
+		);
+		expect(value).toBe('value');
+		expect(cleanupRan).toBe(true);
 	});
 });

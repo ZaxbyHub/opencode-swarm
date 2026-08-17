@@ -1,10 +1,51 @@
-import { describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { createIsolatedTestEnv } from '../../helpers/isolated-test-env.js';
 
 const ROOT = path.resolve(import.meta.dir, '../../../');
 const BUNDLE = path.join(ROOT, 'dist/index.js');
+
+/**
+ * Issue #2010 isolation for a boot of the BUILT bundle.
+ *
+ * `server()` here runs against a bare `mkdtemp` directory with no project
+ * config, which is the exact shape that makes config-doctor fall back to — and
+ * REWRITE — the developer's real `~/.config/opencode/opencode-swarm.json`. Two
+ * independent guards, both applied to the bundle's own module instance:
+ *
+ *   1. `createIsolatedTestEnv()` repoints `XDG_CONFIG_HOME` (and friends) into a
+ *      temp root, so "the user's global config" IS a temp root.
+ *   2. `overrideIndexInternalsForTest` — re-exported by `dist/index.js`, so the
+ *      seam IS reachable for a bundle import; it stubs the post-resolution queue
+ *      that is config-doctor's only caller and that would otherwise recreate
+ *      this test's temp dir after teardown as a permanent `os.tmpdir()` orphan.
+ *
+ * File-scoped (`beforeAll`/`afterAll`) rather than per-test, matching
+ * `tests/helpers/index-commands-shared.ts`: Bun runs test files sequentially in
+ * one process, so a restore skipped by a throwing per-test teardown would leak
+ * the override into every later file.
+ */
+let restoreIsolatedEnv: () => void = () => {};
+let restoreBundleInternals: () => void = () => {};
+
+beforeAll(async () => {
+	restoreIsolatedEnv = createIsolatedTestEnv().cleanup;
+	const mod = await import(BUNDLE);
+	restoreBundleInternals = mod.overrideIndexInternalsForTest({
+		schedulePostResolutionTasks: () => {},
+	});
+});
+
+afterAll(() => {
+	// Restore the module seam FIRST: if the env teardown throws, the override
+	// must already be off so it cannot leak into the next test file.
+	restoreBundleInternals();
+	restoreBundleInternals = () => {};
+	restoreIsolatedEnv();
+	restoreIsolatedEnv = () => {};
+});
 
 // FR-007.1 throw-and-verify-located release gate.
 // Verifies the BUILT minified bundle (dist/index.js, built with

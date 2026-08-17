@@ -1,8 +1,29 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import {
+	afterAll,
+	afterEach,
+	beforeAll,
+	beforeEach,
+	describe,
+	expect,
+	test,
+} from 'bun:test';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import OpenCodeSwarm from '../../src/index';
+import { createIndexCommandsModuleGuards } from '../helpers/index-commands-shared.js';
+import { createIsolatedTestEnv } from '../helpers/isolated-test-env.js';
+
+// File-scoped, NOT per-test (PR #2173 F-006). `OpenCodeSwarm.server()` queues
+// background work on an unref'd `setTimeout(0)` that fires AFTER the synchronous
+// `afterEach` has removed this file's temp dir — and then RECREATES it, leaving
+// a permanent `swarm-test-*` orphan under os.tmpdir() on every run (2-5 per run
+// before this stub). No test in this file exercises the scheduling seam, so
+// neutralizing it costs nothing here.
+const moduleGuards = createIndexCommandsModuleGuards();
+
+beforeAll(moduleGuards.setUpAll);
+afterAll(moduleGuards.tearDownAll);
 
 interface CommandConfig {
 	template: string;
@@ -11,6 +32,7 @@ interface CommandConfig {
 
 describe('Task 4.2 - Command Config Templates for acknowledge-spec-drift and doctor-tools', () => {
 	let tempDir: string;
+	let cleanupIsolatedEnv: () => void = () => {};
 
 	const mockPluginInput = {
 		client: {} as any,
@@ -22,6 +44,15 @@ describe('Task 4.2 - Command Config Templates for acknowledge-spec-drift and doc
 	};
 
 	beforeEach(async () => {
+		// getCommands() below boots the REAL, unstubbed `OpenCodeSwarm.server()`.
+		// That boot's post-resolution queue runs config-doctor, whose
+		// getUserConfigDir() ignores the `directory` param entirely
+		// (src/services/config-doctor.ts:582-584); with no
+		// `.opencode/opencode-swarm.json` under the temp `directory`, its
+		// project-absent fallback reads AND REWRITES the developer's real global
+		// ~/.config/opencode/opencode-swarm.json (config-doctor.ts:1884-1896).
+		// Redirecting XDG_CONFIG_HOME/XDG_CACHE_HOME first neutralizes it.
+		cleanupIsolatedEnv = createIsolatedTestEnv().cleanup;
 		tempDir = await mkdtemp(path.join(tmpdir(), 'swarm-test-'));
 		mockPluginInput.directory = tempDir;
 		mockPluginInput.worktree = tempDir;
@@ -33,6 +64,8 @@ describe('Task 4.2 - Command Config Templates for acknowledge-spec-drift and doc
 		} catch {
 			// ignore
 		}
+		cleanupIsolatedEnv();
+		cleanupIsolatedEnv = () => {};
 	});
 
 	async function getCommands(): Promise<Record<string, CommandConfig>> {
