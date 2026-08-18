@@ -78,6 +78,7 @@ These are invoked as `/swarm <subcommand>`, NOT as bare `/subcommand`. The list 
 - `/swarm knowledge restore` — restore a quarantined or archived knowledge entry
 - `/swarm knowledge unactionable` — list unactionable knowledge entries pending hardening
 - `/swarm knowledge retry-hardening` — reset retire candidates for re-hardening
+- `/swarm knowledge hive-quarantine` — human-only exact-ID quarantine of hive-store entries with backup and rollback (issue #2033)
 - `/swarm memory` — show Swarm memory commands
 - `/swarm memory status` — show Swarm memory provider, JSONL, and migration status
 - `/swarm memory pending` — show pending Swarm memory proposals

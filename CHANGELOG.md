@@ -1,5 +1,55 @@
 # Changelog
 
+## [7.142.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.141.2...v7.142.0) (2026-08-18)
+
+
+### Features
+
+* **knowledge:** isolate hive stores with fail-closed tripwire and add human-only exact-id quarantine ([0ba1fd7](https://github.com/ZaxbyHub/opencode-swarm/commit/0ba1fd7958a7d31c8dda387d33246928cd380ec5))
+
+
+### Bug Fixes
+
+* **knowledge:** close PR review findings on hive quarantine hardening ([3a197e0](https://github.com/ZaxbyHub/opencode-swarm/commit/3a197e0f3a4b1d6e8754daaf9747e3f80f42385b))
+* **test:** resolve main merge — split parity baselines, hermetic curate, cap-safe CLI tests ([1bb8078](https://github.com/ZaxbyHub/opencode-swarm/commit/1bb8078bb8e5ddb71849ea0c0093fd81c5dac742))
+
+## [7.141.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.141.1...v7.141.2) (2026-08-18)
+
+
+### Bug Fixes
+
+* **test:** canonicalize tmpdir paths in changed tests (FR-011) ([8b1bf44](https://github.com/ZaxbyHub/opencode-swarm/commit/8b1bf448440151e8b596824203728035c2e777a0))
+* **test:** close review findings on server() boot isolation ([0da5d56](https://github.com/ZaxbyHub/opencode-swarm/commit/0da5d567c0dfeb8410bb6e9f378ef9ead9a85085)), closes [#2010](https://github.com/ZaxbyHub/opencode-swarm/issues/2010)
+* **test:** isolate server() boot tests ([d3a33ea](https://github.com/ZaxbyHub/opencode-swarm/commit/d3a33eaffd78ffb7f36a7fdf3479cbc0022db05a))
+
+## [7.141.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.141.0...v7.141.1) (2026-08-16)
+
+
+### Bug Fixes
+
+* **test-runner:** wire targets parameter through Zod schema and fix validation ([5c85aed](https://github.com/ZaxbyHub/opencode-swarm/commit/5c85aed48bf093b9482b5294e4346bd04bffef51))
+* **test-runner:** wire targets parameter through Zod schema and fix validation ([ec78d0f](https://github.com/ZaxbyHub/opencode-swarm/commit/ec78d0f9d841d2a69f1d831f974abcdd9869e68d))
+
+## [7.141.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.140.6...v7.141.0) (2026-08-16)
+
+
+### Features
+
+* **context:** wire graph delivery into agent prompts, lane dispatch, and skills ([0f35ecd](https://github.com/ZaxbyHub/opencode-swarm/commit/0f35ecd793507470f8eafbf07247fc7ff546c69a))
+* **context:** wire graph delivery into agent prompts, lane dispatch, and skills ([a97040c](https://github.com/ZaxbyHub/opencode-swarm/commit/a97040cfe2432577137df80ecfd4dad80c1966bb))
+* **test-runner:** add exact native targets and worktree-safe tools ([f6f543f](https://github.com/ZaxbyHub/opencode-swarm/commit/f6f543f3803dab123583b2807eb2ce1b2a24c7c3))
+
+
+### Bug Fixes
+
+* **context:** reserve suffix headroom in orientation overflow guard and close review findings ([d676e02](https://github.com/ZaxbyHub/opencode-swarm/commit/d676e024628686308ee3b93b21a4fd706a0976c7))
+* **knowledge:** enforce canonical source taxonomy and promotion independence (review F-001/F-003) ([eed5206](https://github.com/ZaxbyHub/opencode-swarm/commit/eed5206b0fb78816d678528e1a4c4da21be09e86))
+* **knowledge:** normalize outcome and source semantics end to end ([ce5c97a](https://github.com/ZaxbyHub/opencode-swarm/commit/ce5c97a04d146d3474e354ae5189732685513f13))
+* **knowledge:** normalize outcome and source semantics end to end ([9415c58](https://github.com/ZaxbyHub/opencode-swarm/commit/9415c58d9c21f486ed0b007d6702057b17d3e006))
+* **knowledge:** pin canonical source set in matrix; docs enumeration includes CONTRADICTED ([434a4cd](https://github.com/ZaxbyHub/opencode-swarm/commit/434a4cd6c35faebe6549602cf352b16f13fbd174))
+* **observability:** repoint knowledge_receipt_transition producer citation to post-format line ([9b69140](https://github.com/ZaxbyHub/opencode-swarm/commit/9b69140f9bed6068dbcddc1b22784da49b2de447))
+* **test-runner:** close review feedback and sync main ([92628d8](https://github.com/ZaxbyHub/opencode-swarm/commit/92628d85695145bccfe856a60ca0b3b145ef813d))
+
 ## [7.140.6](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.140.5...v7.140.6) (2026-08-15)
 
 

@@ -39,6 +39,7 @@ SKILLS HANDLING: If SKILLS is present and not "none", read the skill names/descr
 
 RULES:
 - Read target file before editing
+- Before editing a shared or cross-imported file, call \`repo_map action="localization"\` — the injected localization block covers only a declared scope's primary file; this covers the rest, including when no scope was declared
 - Implement exactly what TASK specifies
 - Respect CONSTRAINT
 - No web searches or documentation lookups — but DO use the search tool for cross-codebase pattern lookup before using any function
@@ -46,7 +47,7 @@ RULES:
 - WORKTREE ISOLATION: when the orchestrator runs coders in parallel, you may be working inside an isolated git worktree — a separate working directory on its own branch. Work exactly as normal: read and edit files at the paths you are given. Your changes are committed and merged back to the main tree automatically when you finish. If a merge conflict arises during merge-back, your work is preserved in its worktree and an advisory is surfaced to the orchestrator — your changes are never lost. Do NOT run git worktree/branch/checkout/merge commands yourself, and do NOT switch directories. Stay strictly within your declared FILE scope so coders working in sibling worktrees never collide with you.
 
 ## KNOWLEDGE RECEIPTS
-If you call \`knowledge_recall\` or receive a knowledge directive block with a trace_id, file exactly one \`knowledge_receipt\` before final output: mark each relevant entry as applied, ignored, or contradicted with evidence, or set \`no_relevant_knowledge:true\`. The receipt records audit events; it does not replace any required \`KNOWLEDGE_APPLIED\`, \`KNOWLEDGE_IGNORED\`, \`KNOWLEDGE_CONTRADICTED\`, or \`KNOWLEDGE_VIOLATED\` chat markers in directive compliance output.
+If you call \`knowledge_recall\` or receive a knowledge directive block with a trace_id, file exactly one \`knowledge_receipt\` before final output: mark each relevant entry as applied, ignored, or contradicted with evidence; file entries that simply do not apply to your task as n_a with a reason (neutral; use ignored ONLY when you judged a relevant directive and still deliberately chose not to follow it); or set \`no_relevant_knowledge:true\` when nothing was relevant. The receipt records audit events; it does not replace any required \`KNOWLEDGE_APPLIED\`, \`KNOWLEDGE_IGNORED\`, \`KNOWLEDGE_N_A\`, \`KNOWLEDGE_CONTRADICTED\`, or \`KNOWLEDGE_VIOLATED\` chat markers in directive compliance output.
 
 ## ANTI-HALLUCINATION PROTOCOL (MANDATORY)
 Before importing ANY function, type, or class from an existing project module:

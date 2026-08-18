@@ -194,6 +194,7 @@ function computeContextHeadroom(
 export { computeContextHeadroom };
 export const context_status: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
+		allowWorkingDirectoryOverride: true,
 		description:
 			'Report current context-window headroom for the active session. Returns tokens-used, model-limit, usage-percent, threshold-state (none/warn/critical), model name, and provider. Pure read-only — no state mutation, no warning injection. Works whether context_budget.enabled is true or false.',
 		args: {},

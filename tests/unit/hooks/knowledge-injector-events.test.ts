@@ -20,6 +20,13 @@ let tempDir: string;
 let originalSearch: typeof _internals.searchKnowledge;
 let originalRecordEvent: typeof _internals.recordKnowledgeEvent;
 let originalRecordShown: typeof _internals.recordKnowledgeShown;
+// Platform-root redirection (issue #2033): tests that write `.swarm/link.json` pointers make
+// link-aware event writes resolve the link dir via resolveDataDir(); without redirecting
+// LOCALAPPDATA/XDG_DATA_HOME/HOME on Windows those writes landed in the REAL
+// `.../opencode-swarm/Data/links/linked-worktree/` store (proven 2026-08-15).
+let prevXdg: string | undefined;
+let prevHome: string | undefined;
+let prevLocalAppData: string | undefined;
 
 function rankedEntry(
 	id: string,
@@ -53,6 +60,12 @@ function rankedEntry(
 beforeEach(() => {
 	tempDir = canonicalMkdtemp('swarm-kinj-');
 	mkdirSync(path.join(tempDir, '.swarm'), { recursive: true });
+	prevXdg = process.env.XDG_DATA_HOME;
+	prevHome = process.env.HOME;
+	prevLocalAppData = process.env.LOCALAPPDATA;
+	process.env.XDG_DATA_HOME = tempDir;
+	process.env.HOME = tempDir;
+	process.env.LOCALAPPDATA = tempDir;
 	swarmState.currentCriticalShownIds.clear();
 	swarmState.activeAgent.delete(SESSION);
 	originalSearch = _internals.searchKnowledge;
@@ -64,6 +77,12 @@ afterEach(() => {
 	_internals.searchKnowledge = originalSearch;
 	_internals.recordKnowledgeEvent = originalRecordEvent;
 	_internals.recordKnowledgeShown = originalRecordShown;
+	if (prevXdg === undefined) delete process.env.XDG_DATA_HOME;
+	else process.env.XDG_DATA_HOME = prevXdg;
+	if (prevHome === undefined) delete process.env.HOME;
+	else process.env.HOME = prevHome;
+	if (prevLocalAppData === undefined) delete process.env.LOCALAPPDATA;
+	else process.env.LOCALAPPDATA = prevLocalAppData;
 	swarmState.currentCriticalShownIds.clear();
 	swarmState.activeAgent.delete(SESSION);
 	swarmState.agentSessions.delete(SESSION);

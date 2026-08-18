@@ -194,7 +194,10 @@ export async function recordDirectiveOverrides(
 				knowledge_id: membership.entry_id,
 				session_id: sessionId,
 				agent: 'architect',
-				source: 'reviewer',
+				// (#2032) Provenance must match the authoritative terminal's
+				// 'phase_override' source — this is an architect phase override,
+				// not a reviewer verdict.
+				source: 'phase_override',
 				reason: `override: ${justification}`.slice(0, 280),
 			});
 		} catch {

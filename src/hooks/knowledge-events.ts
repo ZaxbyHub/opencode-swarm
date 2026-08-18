@@ -34,6 +34,7 @@ import { resolveKnowledgeStoreDir } from './knowledge-link.js';
 import {
 	queryHistoricalOutcomes,
 	type ReceiptMembership,
+	type ReceiptSourceCode,
 	type ReceiptTerminal,
 } from './knowledge-receipt-ledger.js';
 // Type-only import: erased at runtime, so it does NOT create a dependency that
@@ -157,8 +158,11 @@ export interface ReceiptEvent {
 	 * (`'reviewer'`) from delegate self-acks (`'delegate'`) without changing the
 	 * `type`, so existing counter rollups (which switch on `type`) stay intact.
 	 * A reviewer VERIFIED maps to type:'applied' with source:'reviewer'.
+	 * Canonical closed set: `ReceiptSourceCode` (issue #2032); the `| string`
+	 * tail keeps legacy records with unrecognized source values loadable, and
+	 * a MISSING legacy source is never inferred — it stays absent/`'unknown'`.
 	 */
-	source?: 'delegate' | 'reviewer' | string;
+	source?: ReceiptSourceCode | (string & {});
 	/** Result of executing a directive's verification_predicate (Change 2). */
 	predicate_check?: {
 		predicate: string;

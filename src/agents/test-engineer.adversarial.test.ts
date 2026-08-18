@@ -413,28 +413,30 @@ describe('T5: Adversarial Test Patterns', () => {
 	});
 });
 
-describe('Go Test Targeting Warning', () => {
+describe('Go and CTest native targeting', () => {
 	let agent: ReturnType<typeof createTestEngineerAgent>;
 
 	beforeEach(() => {
 		agent = createTestEngineerAgent('gpt-4');
 	});
 
-	it('should contain Go warning in RULES section about not being able to target individual files', () => {
+	it('should give the exact bounded Go target arguments', () => {
 		const prompt = agent.config.prompt ?? '';
 		const rulesIdx = prompt.indexOf('RULES:');
 		const rulesSection = prompt.substring(rulesIdx, rulesIdx + 800);
 		expect(rulesSection).toContain('Go');
-		expect(rulesSection).toContain('CANNOT TARGET');
+		expect(prompt).toContain('framework: "go-test"');
+		expect(prompt).toContain('TestName[/Subtest]');
 	});
 
-	it('should explain that go test runs packages, not individual files', () => {
+	it('should give the exact bounded CTest target arguments', () => {
 		const prompt = agent.config.prompt ?? '';
-		expect(prompt).toContain('go test runs packages, not individual files');
+		expect(prompt).toContain('framework: "ctest"');
+		expect(prompt).toContain('ExactTestName');
 	});
 
-	it('should mention SKIPPED as the expected outcome for Go', () => {
+	it('should prohibit broad fallback for native targets', () => {
 		const prompt = agent.config.prompt ?? '';
-		expect(prompt).toContain('SKIPPED for Go');
+		expect(prompt).toContain('never broaden to a package/build sweep');
 	});
 });

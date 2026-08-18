@@ -91,7 +91,7 @@ describe('toolPolicy classification snapshot — no regression', () => {
 		'memory compact',
 		'memory import',
 		'memory migrate',
-		// FR-004: sdd project moved to agent
+		'knowledge hive-quarantine',
 		// #1822: governed skill optimizer — mutating commands (human-gated)
 		'skill-opt run',
 		'skill-opt approve',
@@ -160,14 +160,14 @@ describe('toolPolicy classification snapshot — no regression', () => {
 		}
 	});
 
-	test("'human-only' bucket contains exactly the expected 8 commands", () => {
+	test("'human-only' bucket contains exactly the expected 9 commands", () => {
 		const actual = new Set<string>();
 		for (const [name, entry] of Object.entries(COMMAND_REGISTRY)) {
 			if ((entry as CommandEntry).toolPolicy === 'human-only') {
 				actual.add(name);
 			}
 		}
-		expect(actual.size).toBe(8);
+		expect(actual.size).toBe(9);
 		for (const name of EXPECTED_HUMAN_ONLY) {
 			expect(actual.has(name)).toBe(true);
 		}

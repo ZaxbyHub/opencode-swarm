@@ -244,6 +244,15 @@ const FIXTURES: Record<string, Record<string, unknown>> = {
 		receiptOutcome: 'applied',
 		receiptSource: 'delegate_ack',
 	},
+	knowledge_maintenance: {
+		phase: 'committed',
+		selectedCount: 2,
+		storeEntriesBefore: 30,
+		storeEntriesAfter: 28,
+		backupBytes: 27877,
+		storeSha256Prefix: 'a1b2c3d4e5f6',
+		token12: '0f6c3e29fc00',
+	},
 };
 
 describe('envelope roundtrip — AC1 positive', () => {

@@ -34,6 +34,7 @@ export const _internals = {
 
 export const knowledge_remove: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
+		allowWorkingDirectoryOverride: true,
 		description:
 			'Delete an outdated swarm knowledge entry by ID (swarm tier only — does not affect hive). Promoted entries cannot be deleted. Double-deletion is idempotent — removing a non-existent entry returns a clear message without error.',
 		args: {

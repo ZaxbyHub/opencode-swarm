@@ -236,10 +236,12 @@ export const KNOWN_TELEMETRY_KEYS: Readonly<Record<string, readonly string[]>> =
 
 		// Best-effort projection only. receiptOutcome/receiptSource are domain
 		// values and do not populate the generic observability outcome.
+		// receiptSemantics versions the outcome/source meaning contract (#2032).
 		knowledge_receipt_transition: Object.freeze([
 			'transition',
 			'reasonCode',
 			'schemaVersion',
+			'receiptSemantics',
 			'knowledgeTraceId',
 			'knowledgeEntryId',
 			'sessionId',
@@ -247,6 +249,18 @@ export const KNOWN_TELEMETRY_KEYS: Readonly<Record<string, readonly string[]>> =
 			'phase',
 			'receiptOutcome',
 			'receiptSource',
+		]),
+		// Issue #2033 human-only hive-store maintenance audit: metadata only — bounded
+		// phase/abort codes, counts, and hash/token prefixes.
+		knowledge_maintenance: Object.freeze([
+			'phase',
+			'abortReason',
+			'selectedCount',
+			'storeEntriesBefore',
+			'storeEntriesAfter',
+			'backupBytes',
+			'storeSha256Prefix',
+			'token12',
 		]),
 	});
 

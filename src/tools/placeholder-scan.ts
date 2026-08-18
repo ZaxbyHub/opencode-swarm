@@ -851,6 +851,7 @@ export async function placeholderScan(
 }
 
 export const placeholder_scan: ReturnType<typeof tool> = createSwarmTool({
+	allowWorkingDirectoryOverride: true,
 	description:
 		'Scan source files for placeholder content (TODO/FIXME comments, stub implementations, unimplemented functions). Returns JSON with findings grouped by file and rule.',
 	args: {

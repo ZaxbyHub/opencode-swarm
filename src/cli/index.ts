@@ -3,7 +3,11 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import packageJson from '../../package.json' with { type: 'json' };
-import { resolveCommand, VALID_COMMANDS } from '../commands/registry.js';
+import {
+	COMMAND_REGISTRY,
+	resolveCommand,
+	VALID_COMMANDS,
+} from '../commands/registry.js';
 import {
 	getPluginCachePaths,
 	getPluginConfigDir,
@@ -780,6 +784,37 @@ export async function run(args: string[]): Promise<number> {
 	if (!resolved) {
 		console.error(
 			`Unknown command: ${args[0]}\nValid commands: ${VALID_COMMANDS.join(', ')}`,
+		);
+		return 1;
+	}
+
+	// Human-only / restricted commands are operator actions. The CLI is the
+	// sanctioned human-terminal path, but agent Bash sessions are NOT TTYs —
+	// refuse non-interactive invocation of mutating operator commands so a
+	// shell-guardrail bypass (e.g. variable indirection) still meets a second
+	// gate at the entry point (issue #2033 PR review, CC-2). Scripts that
+	// genuinely need this path opt in with SWARM_ALLOW_HUMAN_ONLY_CLI=1.
+	let policy = (resolved.entry as { toolPolicy?: string }).toolPolicy;
+	if (!policy) {
+		// Aliases carry no toolPolicy of their own — resolve the canonical
+		// target's policy exactly as tool-policy.ts does (review finding: the
+		// dash form `run memory-import` bypassed the gate otherwise).
+		const aliasOf = (resolved.entry as { aliasOf?: string }).aliasOf;
+		if (aliasOf) {
+			const target = COMMAND_REGISTRY[
+				aliasOf as keyof typeof COMMAND_REGISTRY
+			] as { toolPolicy?: string } | undefined;
+			policy = target?.toolPolicy;
+		}
+	}
+	if (
+		(policy === 'human-only' || policy === 'restricted') &&
+		!process.stdout.isTTY &&
+		process.env.SWARM_ALLOW_HUMAN_ONLY_CLI !== '1'
+	) {
+		console.error(
+			`Refusing to run human-only command '${resolved.key}' from a non-interactive shell. ` +
+				'Run it yourself in a terminal, or set SWARM_ALLOW_HUMAN_ONLY_CLI=1 if this is an explicitly approved automation.',
 		);
 		return 1;
 	}

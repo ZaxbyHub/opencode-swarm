@@ -30,6 +30,7 @@ interface KnowledgeRecallResult {
 
 export const knowledge_recall: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
+		allowWorkingDirectoryOverride: true,
 		description:
 			'Performs semantic natural-language search across the knowledge base for relevant past decisions, patterns, and lessons learned. Returns ranked results via the unified hybrid retrieval service and a trace_id for knowledge_receipt. This is the tool to use when the user has a QUESTION about what the knowledge base contains. For structured filter-based retrieval (by category, status, or score), use `knowledge_query` instead.',
 		args: {

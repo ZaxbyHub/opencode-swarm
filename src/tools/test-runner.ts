@@ -3,6 +3,8 @@ import * as path from 'node:path';
 import type { tool } from '@opencode-ai/plugin';
 import { z } from 'zod';
 import { isCommandAvailable } from '../build/discovery';
+import type { NativeTestTarget, TestScope } from '../lang/backend';
+import { buildNativeTargetCommand } from '../lang/default-backend';
 import { analyzeImpact, loadImpactMap } from '../test-impact/analyzer.js';
 import { classifyAndCluster } from '../test-impact/failure-classifier.js';
 import {
@@ -95,8 +97,10 @@ export type TestFramework = (typeof SUPPORTED_FRAMEWORKS)[number] | 'none';
 
 // ============ Input Types ============
 export interface TestRunnerArgs {
-	scope?: 'all' | 'convention' | 'graph' | 'impact';
+	scope?: TestScope;
 	files?: string[];
+	targets?: string[];
+	native_target?: NativeTestTarget;
 	coverage?: boolean;
 	timeout_ms?: number;
 	bail?: boolean;
@@ -132,7 +136,7 @@ const VITEST_JSON_OUTPUT_RELATIVE_PATH = '.swarm/cache/test-runner-vitest.json';
 export interface TestSuccessResult {
 	success: true;
 	framework: TestFramework;
-	scope: 'all' | 'convention' | 'graph' | 'impact';
+	scope: TestScope;
 	command: string[];
 	timeout_ms: number;
 	duration_ms: number;
@@ -147,7 +151,7 @@ export interface TestSuccessResult {
 export interface TestErrorResult {
 	success: false;
 	framework: TestFramework;
-	scope: 'all' | 'convention' | 'graph' | 'impact';
+	scope: TestScope;
 	command?: string[];
 	timeout_ms?: number;
 	duration_ms?: number;
@@ -189,6 +193,16 @@ function containsPowerShellMetacharacters(str: string): boolean {
 	return POWERSHELL_METACHARACTERS.test(str);
 }
 
+// Shell metacharacters that enable command injection via subprocess argv.
+// Intentionally more permissive than POWERSHELL_METACHARACTERS: allows regex
+// chars (*, ?, |, [], .) that frameworks use as native test-name filters.
+// biome-ignore lint/suspicious/noControlCharactersInRegex: intentional security validation pattern
+const SHELL_METACHARACTERS = /[;&`$(){}<>"'\x00-\x1f]/;
+
+function containsShellMetacharacters(str: string): boolean {
+	return SHELL_METACHARACTERS.test(str);
+}
+
 function validateArgs(args: unknown): args is TestRunnerArgs {
 	if (typeof args !== 'object' || args === null) return false;
 	const obj = args as Record<string, unknown>;
@@ -199,10 +213,39 @@ function validateArgs(args: unknown): args is TestRunnerArgs {
 			obj.scope !== 'all' &&
 			obj.scope !== 'convention' &&
 			obj.scope !== 'graph' &&
-			obj.scope !== 'impact'
+			obj.scope !== 'impact' &&
+			obj.scope !== 'target'
 		) {
 			return false;
 		}
+	}
+
+	if (obj.native_target !== undefined) {
+		if (typeof obj.native_target !== 'object' || obj.native_target === null)
+			return false;
+		const target = obj.native_target as Record<string, unknown>;
+		if (target.framework !== 'go-test' && target.framework !== 'ctest')
+			return false;
+		if (typeof target.name !== 'string' || typeof target.path !== 'string')
+			return false;
+		if (target.name.length === 0 || target.name.length > 256) return false;
+		if (target.path.length === 0 || target.path.length > 1024) return false;
+		if (containsControlChars(target.name) || containsControlChars(target.path))
+			return false;
+		if (
+			target.framework === 'go-test' &&
+			target.name.split('/').some((p) => !p)
+		)
+			return false;
+		if (isAbsolutePath(target.path) || containsPathTraversal(target.path))
+			return false;
+	}
+	if (obj.scope === 'target') {
+		if (obj.native_target === undefined) return false;
+		if (Array.isArray(obj.files) && obj.files.length > 0) return false;
+		if (obj.coverage === true || obj.bail === true) return false;
+	} else if (obj.native_target !== undefined) {
+		return false;
 	}
 
 	// Validate files
@@ -218,6 +261,19 @@ function validateArgs(args: unknown): args is TestRunnerArgs {
 			if (containsControlChars(f)) return false;
 			// Check for PowerShell metacharacters that could enable injection
 			if (containsPowerShellMetacharacters(f)) return false;
+		}
+	}
+
+	// Validate targets
+	if (obj.targets !== undefined) {
+		if (!Array.isArray(obj.targets)) return false;
+		for (const t of obj.targets) {
+			if (typeof t !== 'string') return false;
+			if (t.length === 0) return false;
+			if (isAbsolutePath(t)) return false;
+			if (containsPathTraversal(t)) return false;
+			if (containsControlChars(t)) return false;
+			if (containsShellMetacharacters(t)) return false;
 		}
 	}
 
@@ -238,6 +294,133 @@ function validateArgs(args: unknown): args is TestRunnerArgs {
 	}
 
 	return true;
+}
+
+function validateNativeTargetInput(
+	target: NativeTestTarget,
+): string | undefined {
+	if (target.framework !== 'go-test' && target.framework !== 'ctest') {
+		return 'Native target framework must be "go-test" or "ctest"';
+	}
+	if (
+		typeof target.name !== 'string' ||
+		target.name.length === 0 ||
+		target.name.length > 256
+	) {
+		return 'Native target name must be a non-empty string up to 256 characters';
+	}
+	if (
+		typeof target.path !== 'string' ||
+		target.path.length === 0 ||
+		target.path.length > 1024
+	) {
+		return 'Native target path must be a non-empty string up to 1024 characters';
+	}
+	if (containsControlChars(target.name) || containsControlChars(target.path)) {
+		return 'Native target values must not contain control characters';
+	}
+	if (
+		target.framework === 'go-test' &&
+		target.name.split('/').some((p) => !p)
+	) {
+		return 'Go native target name must not contain empty slash-separated segments';
+	}
+	if (isAbsolutePath(target.path)) {
+		return 'Native target path must be workspace-relative, not absolute';
+	}
+	if (containsPathTraversal(target.path)) {
+		return 'Native target path escapes project root';
+	}
+	return undefined;
+}
+
+function resolveNativeTarget(
+	target: NativeTestTarget,
+	workingDir: string,
+):
+	| {
+			success: true;
+			target: NativeTestTarget;
+			executionDirectory: string;
+			historyPath: string;
+	  }
+	| { success: false; error: string } {
+	let rootReal: string;
+	let targetReal: string;
+	try {
+		rootReal = fs.realpathSync(workingDir);
+		targetReal = fs.realpathSync(path.resolve(rootReal, target.path));
+		if (!fs.statSync(targetReal).isDirectory()) {
+			return {
+				success: false,
+				error: 'Native target path must be a directory',
+			};
+		}
+	} catch {
+		return { success: false, error: 'Native target path does not exist' };
+	}
+	const relative = path.relative(rootReal, targetReal);
+	if (relative.startsWith('..') || path.isAbsolute(relative)) {
+		return { success: false, error: 'Native target path escapes project root' };
+	}
+	if (
+		!_internals.isCommandAvailable(
+			target.framework === 'go-test' ? 'go' : 'ctest',
+		)
+	) {
+		return {
+			success: false,
+			error: `Native target framework "${target.framework}" is unavailable`,
+		};
+	}
+	let executionDirectory = rootReal;
+	let commandRelative = relative;
+	if (target.framework === 'go-test') {
+		const hasRootWorkspace = fs.existsSync(path.join(rootReal, 'go.work'));
+		let moduleRoot: string | undefined;
+		for (let current = targetReal; ; current = path.dirname(current)) {
+			if (fs.existsSync(path.join(current, 'go.mod'))) {
+				moduleRoot = current;
+				break;
+			}
+			if (current === rootReal) break;
+			const parent = path.dirname(current);
+			if (
+				parent === current ||
+				path.relative(rootReal, parent).startsWith('..')
+			)
+				break;
+		}
+		if (!hasRootWorkspace && !moduleRoot) {
+			return {
+				success: false,
+				error:
+					'Go native target requires an enclosing go.mod or go.work at the project root',
+			};
+		}
+		if (!hasRootWorkspace && moduleRoot) {
+			executionDirectory = moduleRoot;
+			commandRelative = path.relative(moduleRoot, targetReal);
+		}
+	} else if (!fs.existsSync(path.join(targetReal, 'CMakeCache.txt'))) {
+		return {
+			success: false,
+			error:
+				'CTest native target requires CMakeCache.txt in the target directory',
+		};
+	}
+	return {
+		success: true,
+		target: {
+			...target,
+			path:
+				commandRelative.length === 0
+					? '.'
+					: commandRelative.replace(/\\/g, '/'),
+		},
+		executionDirectory,
+		historyPath: relative.length === 0 ? '.' : relative.replace(/\\/g, '/'),
+	};
 }
 
 // ============ Framework Detection ============
@@ -437,11 +620,13 @@ export async function detectTestFrameworkViaDispatch(
  */
 export async function buildTestCommandViaDispatch(
 	framework: TestFramework,
-	scope: 'all' | 'convention' | 'graph' | 'impact',
+	scope: TestScope,
 	files: string[],
 	coverage: boolean,
 	baseDir: string,
 	bail: boolean,
+	targets?: string[],
+	nativeTarget?: NativeTestTarget,
 ): Promise<string[] | null> {
 	if (framework === 'none') return null;
 	try {
@@ -452,6 +637,8 @@ export async function buildTestCommandViaDispatch(
 				scope,
 				coverage,
 				bail,
+				targets,
+				nativeTarget,
 			});
 			if (cmd) return cmd;
 		}
@@ -1139,12 +1326,19 @@ function getTargetedExecutionUnsupportedReason(
 
 function buildTestCommand(
 	framework: TestFramework,
-	scope: 'all' | 'convention' | 'graph' | 'impact',
+	scope: TestScope,
 	files: string[],
 	coverage: boolean,
 	baseDir: string,
 	bail: boolean,
+	targets?: string[],
+	nativeTarget?: NativeTestTarget,
 ): string[] | null {
+	if (nativeTarget) {
+		return nativeTarget.framework === framework
+			? buildNativeTargetCommand(nativeTarget)
+			: null;
+	}
 	switch (framework) {
 		case 'bun': {
 			const args: string[] = ['bun', 'test'];
@@ -1204,7 +1398,9 @@ function buildTestCommand(
 		case 'cargo': {
 			const args: string[] = ['cargo', 'test'];
 			// cargo has no bail support — silently ignore
-			if (scope !== 'all' && files.length > 0) {
+			if (targets && targets.length > 0) {
+				args.push('--', ...targets);
+			} else if (scope !== 'all' && files.length > 0) {
 				// Cargo test can accept test names
 				args.push(...files);
 			}
@@ -1232,26 +1428,50 @@ function buildTestCommand(
 			}
 			return ['pwsh', '-Command', 'Invoke-Pester'];
 		}
-		case 'go-test':
+		case 'go-test': {
 			// go-test has no bail support — silently ignore
 			// Note: 'files' param not forwarded — go test does not support arbitrary file paths;
 			// use package paths (./...) for full suite
-			return ['go', 'test', './...'];
-		case 'maven':
+			const args: string[] = ['go', 'test'];
+			if (targets && targets.length > 0) {
+				args.push('-run', targets.join('|'));
+			}
+			args.push('./...');
+			return args;
+		}
+		case 'maven': {
 			// maven has no bail support — silently ignore
-			return ['mvn', 'test'];
+			const args: string[] = ['mvn', 'test'];
+			if (targets && targets.length > 0) {
+				args.push(`-Dtest=${targets.join(',')}`);
+			}
+			return args;
+		}
 		case 'gradle': {
 			// gradle has no bail support — silently ignore
 			const isWindows = process.platform === 'win32';
 			const hasGradlewBat = fs.existsSync(path.join(baseDir, 'gradlew.bat'));
 			const hasGradlew = fs.existsSync(path.join(baseDir, 'gradlew'));
-			if (hasGradlewBat && isWindows) return ['gradlew.bat', 'test'];
-			if (hasGradlew) return ['./gradlew', 'test'];
-			return ['gradle', 'test'];
+			const args: string[] = [];
+			if (hasGradlewBat && isWindows) args.push('gradlew.bat');
+			else if (hasGradlew) args.push('./gradlew');
+			else args.push('gradle');
+			args.push('test');
+			if (targets && targets.length > 0) {
+				for (const target of targets) {
+					args.push('--tests', target);
+				}
+			}
+			return args;
 		}
-		case 'dotnet-test':
+		case 'dotnet-test': {
 			// dotnet-test has no bail support — silently ignore
-			return ['dotnet', 'test'];
+			const args: string[] = ['dotnet', 'test'];
+			if (targets && targets.length > 0) {
+				args.push('--filter', targets.join('|'));
+			}
+			return args;
+		}
 		case 'ctest': {
 			// ctest has no bail support — silently ignore
 			// Detect actual build directory by looking for CMakeCache.txt in common locations
@@ -1267,12 +1487,23 @@ function buildTestCommand(
 				buildDirCandidates.find((d) =>
 					fs.existsSync(path.join(baseDir, d, 'CMakeCache.txt')),
 				) ?? 'build';
-			return ['ctest', '--test-dir', actualBuildDir];
+			const args: string[] = ['ctest', '--test-dir', actualBuildDir];
+			if (targets && targets.length > 0) {
+				args.push('-R', targets.join('|'));
+			}
+			return args;
 		}
-		case 'swift-test':
+		case 'swift-test': {
 			// swift-test has no bail support — silently ignore
 			// Note: 'files' param not forwarded — swift test does not support arbitrary file paths
-			return ['swift', 'test'];
+			const args: string[] = ['swift', 'test'];
+			if (targets && targets.length > 0) {
+				for (const target of targets) {
+					args.push('--filter', target);
+				}
+			}
+			return args;
+		}
 		case 'dart-test':
 			// dart-test has no bail support — silently ignore
 			// Prefer flutter test for Flutter projects; fall back to dart test
@@ -1682,16 +1913,26 @@ function parseTestOutput(
 		}
 		case 'ctest': {
 			// CTest: "X% tests passed, Y tests failed out of Z"
+			// Disabled tests are reported as "***Not Run (Disabled)" and are
+			// intentionally excluded from CTest's summary total.
+			const disabledCount = [
+				...output.matchAll(/\*{3}Not Run\s+\(Disabled\)/gi),
+			].length;
+			totals.skipped = disabledCount;
 			const ctestMatch = output.match(/(\d+) tests? failed out of (\d+)/);
 			if (ctestMatch) {
 				totals.failed = parseInt(ctestMatch[1], 10);
-				totals.total = parseInt(ctestMatch[2], 10);
-				totals.passed = totals.total - totals.failed;
+				const executedTotal = parseInt(ctestMatch[2], 10);
+				totals.total = executedTotal + disabledCount;
+				totals.passed = executedTotal - totals.failed;
 			} else {
 				const allPassMatch = output.match(/100% tests passed.*?(\d+) tests?/);
 				if (allPassMatch) {
-					totals.total = parseInt(allPassMatch[1], 10);
-					totals.passed = totals.total;
+					const executedTotal = parseInt(allPassMatch[1], 10);
+					totals.total = executedTotal + disabledCount;
+					totals.passed = executedTotal;
+				} else if (disabledCount > 0) {
+					totals.total = disabledCount;
 				}
 			}
 			break;
@@ -1833,16 +2074,101 @@ async function readBoundedStream(
 	return { text: decoder.decode(combined), truncated };
 }
 
+function formatPassingMessage(
+	framework: TestFramework,
+	totals: TestTotals,
+	coveragePercent?: number,
+): string {
+	let message =
+		totals.total > 0 &&
+		totals.passed === 0 &&
+		totals.failed === 0 &&
+		totals.skipped === totals.total
+			? `${framework} tests completed with ${totals.skipped} skipped (${totals.total} total)`
+			: `${framework} tests passed (${totals.passed}/${totals.total})`;
+	if (coveragePercent !== undefined) {
+		message += ` with ${coveragePercent}% coverage`;
+	}
+	return message;
+}
+
+function formatNativeHistoryTestFile(
+	target: NativeTestTarget,
+	historyPath: string,
+): string {
+	return `native:${target.framework}:path=${encodeURIComponent(historyPath)}#name=${encodeURIComponent(target.name)}`;
+}
+
 export async function runTests(
 	framework: TestFramework,
-	scope: 'all' | 'convention' | 'graph' | 'impact',
+	scope: TestScope,
 	files: string[],
 	coverage: boolean,
 	timeout_ms: number,
 	cwd: string,
 	bail: boolean,
+	targets?: string[],
+	nativeTarget?: NativeTestTarget,
 ): Promise<TestResult> {
-	if (scope !== 'all' && files.length > 0) {
+	let executionCwd = cwd;
+	let resolvedNativeTarget = nativeTarget;
+	if (
+		(scope === 'target' && !nativeTarget) ||
+		(scope !== 'target' && nativeTarget !== undefined) ||
+		(nativeTarget !== undefined && nativeTarget.framework !== framework)
+	) {
+		return {
+			success: false,
+			framework,
+			scope,
+			error: 'Invalid native target pairing; refusing broad test fallback',
+			message:
+				'scope "target" requires one matching native target, and native targets are not valid with other scopes.',
+			outcome: 'error',
+		};
+	}
+	if (scope === 'target') {
+		if (files.length > 0 || coverage || bail) {
+			return {
+				success: false,
+				framework,
+				scope,
+				error:
+					'scope "target" cannot be combined with files, coverage, or bail',
+				message:
+					'Native target mode runs one exact framework-native name only. Omit files and leave coverage and bail disabled.',
+				outcome: 'error',
+			};
+		}
+		const nativeTargetError = validateNativeTargetInput(nativeTarget!);
+		if (nativeTargetError) {
+			return {
+				success: false,
+				framework,
+				scope,
+				error: nativeTargetError,
+				outcome: 'error',
+			};
+		}
+		const resolvedTarget = resolveNativeTarget(nativeTarget!, cwd);
+		if (!resolvedTarget.success) {
+			return {
+				success: false,
+				framework,
+				scope,
+				error: resolvedTarget.error,
+				outcome: 'error',
+			};
+		}
+		resolvedNativeTarget = resolvedTarget.target;
+		executionCwd = resolvedTarget.executionDirectory;
+	}
+	if (
+		scope !== 'all' &&
+		scope !== 'target' &&
+		files.length > 0 &&
+		!(targets && targets.length > 0)
+	) {
 		const unsupportedReason = getTargetedExecutionUnsupportedReason(framework);
 		if (unsupportedReason) {
 			return {
@@ -1868,10 +2194,31 @@ export async function runTests(
 				scope,
 				files,
 				coverage,
-				cwd,
+				executionCwd,
 				bail,
-			)) ?? buildTestCommand(framework, scope, files, coverage, cwd, bail))
-		: buildTestCommand(framework, scope, files, coverage, cwd, bail);
+				targets,
+				resolvedNativeTarget,
+			)) ??
+			buildTestCommand(
+				framework,
+				scope,
+				files,
+				coverage,
+				executionCwd,
+				bail,
+				targets,
+				resolvedNativeTarget,
+			))
+		: buildTestCommand(
+				framework,
+				scope,
+				files,
+				coverage,
+				executionCwd,
+				bail,
+				targets,
+				resolvedNativeTarget,
+			);
 
 	if (!command) {
 		return {
@@ -1900,8 +2247,11 @@ export async function runTests(
 	const startTime = Date.now();
 	const vitestJsonOutputPath =
 		framework === 'vitest'
-			? path.join(cwd, '.swarm', 'cache', 'test-runner-vitest.json')
+			? path.join(executionCwd, '.swarm', 'cache', 'test-runner-vitest.json')
 			: undefined;
+	let proc: ReturnType<typeof bunSpawn> | undefined;
+	let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+	let timedOutByDeadline = false;
 
 	try {
 		if (vitestJsonOutputPath) {
@@ -1915,10 +2265,22 @@ export async function runTests(
 			}
 		}
 
-		const proc = bunSpawn(command, {
+		// Register the classification timer before spawning. bunSpawn remains the
+		// sole timeout-kill owner; this passive timer only snapshots timeout-vs-exit
+		// classification and never kills the process itself.
+		const timeoutPromise = new Promise<{ kind: 'timeout' }>((resolve) => {
+			timeoutHandle = setTimeout(() => {
+				resolve({ kind: 'timeout' });
+			}, timeout_ms);
+		});
+
+		proc = _internals.bunSpawn(command, {
+			stdin: 'ignore',
 			stdout: 'pipe',
 			stderr: 'pipe',
-			cwd: cwd,
+			cwd: executionCwd,
+			timeout: timeout_ms,
+			killProcessTree: true,
 		});
 
 		// Race with timeout — but read streams CONCURRENTLY with waiting for exit.
@@ -1930,18 +2292,24 @@ export async function runTests(
 		// Fix: read bounded streams in parallel with exit/timeout, so the pipe is
 		// always being drained. readBoundedStream caps memory at MAX_OUTPUT_BYTES
 		// per stream, preventing OOM from unbounded test output.
-		const timeoutPromise = new Promise<number>((resolve) =>
-			setTimeout(() => {
-				proc.kill();
-				resolve(-1); // Timeout indicator
-			}, timeout_ms),
-		);
-
-		const [exitCode, stdoutResult, stderrResult] = await Promise.all([
-			Promise.race([proc.exited, timeoutPromise]),
-			readBoundedStream(proc.stdout, MAX_OUTPUT_BYTES),
-			readBoundedStream(proc.stderr, MAX_OUTPUT_BYTES),
+		const stdoutPromise = readBoundedStream(proc.stdout, MAX_OUTPUT_BYTES);
+		const stderrPromise = readBoundedStream(proc.stderr, MAX_OUTPUT_BYTES);
+		const raceResult = await Promise.race<
+			{ kind: 'exit'; exitCode: number } | { kind: 'timeout' }
+		>([
+			proc.exited.then((exitCode) => ({ kind: 'exit' as const, exitCode })),
+			timeoutPromise,
 		]);
+		timedOutByDeadline = raceResult.kind === 'timeout';
+		if (timeoutHandle !== undefined) {
+			clearTimeout(timeoutHandle);
+			timeoutHandle = undefined;
+		}
+		const [stdoutResult, stderrResult] = await Promise.all([
+			stdoutPromise,
+			stderrPromise,
+		]);
+		const exitCode = raceResult.kind === 'timeout' ? -1 : raceResult.exitCode;
 
 		const duration_ms = Date.now() - startTime;
 
@@ -1976,7 +2344,7 @@ export async function runTests(
 		// the legacy path uses, so totals/coveragePercent shape is identical.
 		const useDispatchParse = process.env.SWARM_LANG_BACKEND !== 'legacy';
 		const parsed = useDispatchParse
-			? ((await parseTestOutputViaDispatch(framework, output, cwd)) ??
+			? ((await parseTestOutputViaDispatch(framework, output, executionCwd)) ??
 				parseTestOutput(framework, output))
 			: parseTestOutput(framework, output);
 		const parsedTestCases = parseFrameworkJsonTestResults(framework, output);
@@ -1992,8 +2360,15 @@ export async function runTests(
 		}
 
 		// Determine success based on exit code and failures
-		const isTimeout = exitCode === -1;
-		const testPassed = exitCode === 0 && totals.failed === 0;
+		const isTimeout = timedOutByDeadline;
+		const nativeTargetObserved = resolvedNativeTarget
+			? didExecuteNativeTarget(resolvedNativeTarget, output)
+			: true;
+		const testPassed =
+			exitCode === 0 &&
+			!isTimeout &&
+			totals.failed === 0 &&
+			nativeTargetObserved;
 
 		if (testPassed) {
 			const result: TestSuccessResult = {
@@ -2013,10 +2388,7 @@ export async function runTests(
 				result.coveragePercent = coveragePercent;
 			}
 
-			result.message = `${framework} tests passed (${totals.passed}/${totals.total})`;
-			if (coveragePercent !== undefined) {
-				result.message += ` with ${coveragePercent}% coverage`;
-			}
+			result.message = formatPassingMessage(framework, totals, coveragePercent);
 
 			return result;
 		} else {
@@ -2031,10 +2403,14 @@ export async function runTests(
 				rawOutput: output,
 				error: isTimeout
 					? `Tests timed out after ${timeout_ms}ms`
-					: `Tests failed with ${totals.failed} failures`,
+					: !nativeTargetObserved
+						? `Native target "${resolvedNativeTarget?.name}" did not execute`
+						: `Tests failed with ${totals.failed} failures`,
 				message: isTimeout
 					? `${framework} tests timed out after ${timeout_ms}ms`
-					: `${framework} tests failed (${totals.failed}/${totals.total} failed)`,
+					: !nativeTargetObserved
+						? `${framework} did not report the exact requested native target; refusing a false-green 0/0 result`
+						: `${framework} tests failed (${totals.failed}/${totals.total} failed)`,
 				outcome: isTimeout ? 'error' : 'regression',
 				testCases: parsedTestCases,
 			};
@@ -2061,7 +2437,37 @@ export async function runTests(
 					: 'Execution failed: unknown error',
 			outcome: 'error',
 		};
+	} finally {
+		if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+		if (proc?.exitCode === null && !timedOutByDeadline) {
+			try {
+				if (proc.killTree) await proc.killTree('SIGKILL');
+				else proc.kill('SIGKILL');
+			} catch {
+				// Best-effort cleanup; the process may already have exited.
+			}
+		}
 	}
+}
+
+function escapeRegexForMatch(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function didExecuteNativeTarget(
+	target: NativeTestTarget,
+	output: string,
+): boolean {
+	if (target.framework === 'go-test') {
+		return [
+			...output.matchAll(/^\s*--- (?:PASS|FAIL|SKIP):\s+(.+?)(?:\s+\(|$)/gm),
+		].some((match) => match[1] === target.name);
+	}
+	const exactName = escapeRegexForMatch(target.name);
+	return new RegExp(
+		`(?:Start\\s+\\d+:\\s*|Test\\s+#\\d+:\\s*)${exactName}(?=\\s|$)`,
+		'm',
+	).test(output);
 }
 
 // ============ Source File Discovery ============
@@ -2202,7 +2608,7 @@ function recordAndAnalyzeResults(
 
 	const now = new Date().toISOString();
 	const changedFiles = (
-		sourceFiles && sourceFiles.length > 0 ? sourceFiles : testFiles
+		sourceFiles !== undefined ? sourceFiles : testFiles
 	).map((f) => f.replace(/\\/g, '/'));
 
 	const aggregateResultsByFile = new Map<string, 'pass' | 'fail' | 'skip'>();
@@ -2326,19 +2732,35 @@ function analyzeFailures(workingDir: string): TestHistoryReport {
 // ============ Tool Definition ============
 export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 	description:
-		'Run project tests with framework detection. Supports bun, vitest, jest, mocha, pytest, cargo, pester, go-test, maven, gradle, dotnet-test, ctest, swift-test, dart-test, rspec, and minitest. Returns deterministic normalized JSON with framework, scope, command, totals, coverage, duration, success status, and failures. Use scope "all" for full suite, "convention" to accept direct test files or map source files to test files, "graph" to find related tests via imports from source files, or "impact" to find tests covering changed source files using test-impact analysis.',
+		'Run project tests with automatic framework detection for bun, vitest, jest, mocha, pytest, cargo, pester, go test, maven, gradle, dotnet test, ctest, swift test, dart test, rspec, minitest, pest, phpunit, or php-artisan. Returns JSON with success, framework, scope, command, timeout_ms, duration_ms, totals, outcome, and optional coveragePercent, rawOutput, testCases, and message fields. Scope "target" runs one exact Go test/subtest or CTest name via native_target using a workspace-relative package/build directory, with no broad fallback, coverage, or bail. The "targets" array passes framework-native test name patterns to cargo, go-test, maven, gradle, dotnet-test, ctest, and swift-test.',
 	args: {
 		scope: z
-			.enum(['all', 'convention', 'graph', 'impact'])
+			.enum(['all', 'convention', 'graph', 'impact', 'target'])
 			.optional()
 			.describe(
-				'Test scope: "all" runs full suite, "convention" accepts direct test files or maps source files to tests by naming, "graph" finds related tests via imports from source files, "impact" finds tests covering changed source files via test-impact analysis',
+				'Test scope: "all" runs the full suite, "convention"/"graph"/"impact" resolve files, and "target" runs one exact Go or CTest native name without file fallback.',
+			),
+		native_target: z
+			.object({
+				framework: z.enum(['go-test', 'ctest']),
+				name: z.string(),
+				path: z.string(),
+			})
+			.optional()
+			.describe(
+				'For scope "target": exact framework-native test name plus a workspace-relative package/build directory. Absolute paths, traversal, coverage, bail, and broad fallback are rejected.',
 			),
 		files: z
 			.array(z.string())
 			.optional()
 			.describe(
 				'Specific files to test. For "convention", pass source files or direct test files. For "graph" and "impact", pass source files only.',
+			),
+		targets: z
+			.array(z.string())
+			.optional()
+			.describe(
+				"Framework-native test names or patterns to filter which tests run. Supported by cargo, go-test, maven, gradle, dotnet-test, ctest, and swift-test. Each entry is passed as-is to the framework's native filter flag.",
 			),
 		coverage: z
 			.boolean()
@@ -2435,13 +2857,38 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 				scope: 'all',
 				error: 'Invalid arguments',
 				message:
-					'scope must be "all", "convention", "graph", or "impact"; files must be array of strings; coverage must be boolean; timeout_ms must be a positive number',
+					'scope must be "all", "convention", "graph", "impact", or "target"; files and targets must be string arrays with safe values; target scope requires one valid native_target and cannot be combined with files, coverage, or bail',
 				outcome: 'error',
 			};
 			return JSON.stringify(errorResult, null, 2);
 		}
 
 		const scope = args.scope || 'all';
+		let nativeTarget: NativeTestTarget | undefined;
+		let nativeExecutionDirectory = workingDir;
+		let nativeHistoryPath: string | undefined;
+		if (scope === 'target') {
+			const resolvedTarget = resolveNativeTarget(
+				args.native_target!,
+				workingDir,
+			);
+			if (!resolvedTarget.success) {
+				return JSON.stringify(
+					{
+						success: false,
+						framework: args.native_target!.framework,
+						scope,
+						error: resolvedTarget.error,
+						outcome: 'error',
+					} satisfies TestErrorResult,
+					null,
+					2,
+				);
+			}
+			nativeTarget = resolvedTarget.target;
+			nativeExecutionDirectory = resolvedTarget.executionDirectory;
+			nativeHistoryPath = resolvedTarget.historyPath;
+		}
 
 		// Guard 1: scope === 'all' requires explicit opt-in via SWARM_ALLOW_FULL_SUITE env var
 		// Rationale: Full-suite output is one of the largest SSE payloads the swarm produces.
@@ -2470,19 +2917,20 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 			// Allow through — env opt-in confirmed
 		}
 
-		// Hard guard: convention, graph, and impact scopes require explicit files to prevent unsafe full-project discovery
+		// Hard guard: convention, graph, and impact scopes require explicit files (or targets) to prevent unsafe full-project discovery
 		if (
 			(scope === 'convention' || scope === 'graph' || scope === 'impact') &&
-			(!args.files || args.files.length === 0)
+			(!args.files || args.files.length === 0) &&
+			(!args.targets || args.targets.length === 0)
 		) {
 			const errorResult: TestErrorResult = {
 				success: false,
 				framework: 'none',
 				scope,
 				error:
-					'scope "convention" and "graph" require explicit files array - omitting files causes unsafe full-project discovery',
+					'scope "convention" and "graph" require explicit files or targets array - omitting both causes unsafe full-project discovery',
 				message:
-					'When using scope "convention" or "graph", you must provide a non-empty "files" array. Use scope "all" for full project test suite without specifying files.',
+					'When using scope "convention" or "graph", you must provide a non-empty "files" or "targets" array. Use scope "all" for full project test suite without specifying files.',
 				outcome: 'error',
 			};
 			return JSON.stringify(errorResult, null, 2);
@@ -2519,7 +2967,9 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 		// the legacy detection disagrees with.
 		const useDispatch = process.env.SWARM_LANG_BACKEND !== 'legacy';
 		let framework: TestFramework;
-		if (useDispatch) {
+		if (nativeTarget) {
+			framework = nativeTarget.framework;
+		} else if (useDispatch) {
 			framework = await detectTestFrameworkViaDispatch(workingDir);
 			if (framework === 'none') {
 				framework = await detectTestFramework(workingDir);
@@ -2551,14 +3001,12 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 		// 'graph' and 'impact' accept source files only; 'all' skips discovery entirely.
 		let testFiles: string[] = [];
 		let graphFallbackReason: string | undefined;
-		let effectiveScope: 'all' | 'convention' | 'graph' | 'impact' = scope as
-			| 'all'
-			| 'convention'
-			| 'graph'
-			| 'impact';
+		let effectiveScope: TestScope = scope;
 
 		// scope "all" — skip file discovery, let the test framework run its full suite
-		if (scope === 'all') {
+		if (scope === 'target') {
+			// Native targets are already bounded to one exact framework-native name.
+		} else if (scope === 'all') {
 			// effectiveScope is already 'all', testFiles stays empty
 			// Fall through to runTests which handles empty files for scope 'all'
 		} else if (scope === 'convention') {
@@ -2809,7 +3257,13 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 
 		// Guard: Reject when source files resolve to zero test files (prevents accidental full-suite run)
 		// Skip for scope 'all' — full-suite execution deliberately has no file filter
-		if (scope !== 'all' && testFiles.length === 0) {
+		// Skip when targets are provided — framework-native filters handle test selection
+		if (
+			scope !== 'all' &&
+			scope !== 'target' &&
+			testFiles.length === 0 &&
+			!(args.targets && args.targets.length > 0)
+		) {
 			const baseMessage =
 				'No matching test files found for the provided source files. Check that test files exist with matching naming conventions (.spec.*, .test.*, .Tests.ps1, __tests__/, tests/, test/, spec/).';
 			const errorResult: TestErrorResult = {
@@ -2829,7 +3283,11 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 
 		// Guard 2: Reject execution when resolved test-file count exceeds safe maximum
 		// Skip for scope 'all' — full-suite has no resolved file list
-		if (scope !== 'all' && testFiles.length > MAX_SAFE_TEST_FILES) {
+		if (
+			scope !== 'all' &&
+			scope !== 'target' &&
+			testFiles.length > MAX_SAFE_TEST_FILES
+		) {
 			// List first few resolved filenames for debugging
 			const sampleFiles = testFiles.slice(0, 5);
 			const errorResult: TestErrorResult = {
@@ -2850,16 +3308,21 @@ export const test_runner: ReturnType<typeof tool> = createSwarmTool({
 			testFiles,
 			coverage,
 			timeout_ms,
-			workingDir,
+			nativeExecutionDirectory,
 			bail,
+			args.targets,
+			nativeTarget,
 		);
 
 		// Record results to history and analyze failures
+		const historyTestFiles = nativeTarget
+			? [formatNativeHistoryTestFile(nativeTarget, nativeHistoryPath!)]
+			: testFiles;
 		recordAndAnalyzeResults(
 			result,
-			testFiles,
+			historyTestFiles,
 			workingDir,
-			_files.length > 0 ? _files : undefined,
+			nativeTarget ? [] : _files.length > 0 ? _files : undefined,
 			result.testCases,
 		);
 
@@ -2902,6 +3365,9 @@ export const _internals: {
 	existsSync: typeof fs.existsSync;
 	readdirSync: typeof fs.readdirSync;
 	readFileSync: typeof fs.readFileSync;
+	bunSpawn: typeof bunSpawn;
+	buildNativeTargetCommand: typeof buildNativeTargetCommand;
+	formatNativeHistoryTestFile: typeof formatNativeHistoryTestFile;
 	selectHistoryForAnalysis: typeof selectHistoryForAnalysis;
 	AGGREGATE_TEST_NAME: typeof AGGREGATE_TEST_NAME;
 } = {
@@ -2911,6 +3377,9 @@ export const _internals: {
 	existsSync: fs.existsSync,
 	readdirSync: fs.readdirSync,
 	readFileSync: fs.readFileSync,
+	bunSpawn,
+	buildNativeTargetCommand,
+	formatNativeHistoryTestFile,
 	selectHistoryForAnalysis,
 	AGGREGATE_TEST_NAME,
 };

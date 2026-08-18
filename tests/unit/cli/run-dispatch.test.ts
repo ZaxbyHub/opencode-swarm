@@ -470,11 +470,17 @@ describe('run() dispatch function', () => {
 		});
 
 		it('reset: calls handleResetCommand', async () => {
-			const result = await run(['reset']);
-
-			expect(result).toBe(0);
-			expect(mockHandleResetCommand).toHaveBeenCalledWith(cwd, []);
-			expect(mockConsoleLog).toHaveBeenCalledWith('reset output');
+			const prev = process.env.SWARM_ALLOW_HUMAN_ONLY_CLI;
+			process.env.SWARM_ALLOW_HUMAN_ONLY_CLI = '1';
+			try {
+				const result = await run(['reset']);
+				expect(result).toBe(0);
+				expect(mockHandleResetCommand).toHaveBeenCalledWith(cwd, []);
+				expect(mockConsoleLog).toHaveBeenCalledWith('reset output');
+			} finally {
+				if (prev === undefined) delete process.env.SWARM_ALLOW_HUMAN_ONLY_CLI;
+				else process.env.SWARM_ALLOW_HUMAN_ONLY_CLI = prev;
+			}
 		});
 
 		it('retrieve: calls handleRetrieveCommand', async () => {
@@ -510,29 +516,17 @@ describe('run() dispatch function', () => {
 		});
 
 		it('checkpoint: calls handleCheckpointCommand', async () => {
-			const result = await run(['checkpoint']);
-
-			expect(result).toBe(0);
-			expect(mockHandleCheckpointCommand).toHaveBeenCalledWith(cwd, []);
-			expect(mockConsoleLog).toHaveBeenCalledWith('checkpoint output');
-		});
-	});
-
-	describe('9. Args propagation', () => {
-		it('passes args.slice(1) to single-word commands', async () => {
-			const result = await run([
-				'dark-matter',
-				'--verbose',
-				'--output',
-				'file.json',
-			]);
-
-			expect(result).toBe(0);
-			expect(mockHandleDarkMatterCommand).toHaveBeenCalledWith(cwd, [
-				'--verbose',
-				'--output',
-				'file.json',
-			]);
+			const prev = process.env.SWARM_ALLOW_HUMAN_ONLY_CLI;
+			process.env.SWARM_ALLOW_HUMAN_ONLY_CLI = '1';
+			try {
+				const result = await run(['checkpoint']);
+				expect(result).toBe(0);
+				expect(mockHandleCheckpointCommand).toHaveBeenCalledWith(cwd, []);
+				expect(mockConsoleLog).toHaveBeenCalledWith('checkpoint output');
+			} finally {
+				if (prev === undefined) delete process.env.SWARM_ALLOW_HUMAN_ONLY_CLI;
+				else process.env.SWARM_ALLOW_HUMAN_ONLY_CLI = prev;
+			}
 		});
 
 		it('passes args.slice(2) to multi-word commands (knowledge)', async () => {

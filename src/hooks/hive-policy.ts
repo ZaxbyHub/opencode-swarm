@@ -106,20 +106,31 @@ export function evaluatePromotionPolicy(
 	// validated PromotionEvidenceRecords across the configured minimum number of
 	// DISTINCT canonical cohort ids. Defaults to 0 → satisfied by absence (no
 	// synthetic credit, no new blocking) until #1849 produces real receipts.
+	// (#2032 F-003) When the gate is active, only INDEPENDENT evidence counts:
+	// `receipt_source` must be present and not `'delegate'` (delegate
+	// self-report stays non-independent, per the shipped guarantee). Records
+	// without a source (pre-#2032) fail closed — they do not count.
 	const minApps = config.promotion_min_terminal_applications ?? 0;
 	const minCohorts = config.promotion_min_distinct_cohorts ?? 0;
+	const gateActive = minApps > 0 || minCohorts > 0;
+	const countedEvidence = gateActive
+		? evidence.filter(
+				(e) =>
+					typeof e.receipt_source === 'string' &&
+					e.receipt_source !== 'delegate',
+			)
+		: evidence;
 	const distinctCohorts = new Set(
-		evidence.map((e) => e.cohort_id).filter((c): c is string => !!c),
+		countedEvidence.map((e) => e.cohort_id).filter((c): c is string => !!c),
 	);
-	const appsOk = evidence.length >= minApps;
+	const appsOk = countedEvidence.length >= minApps;
 	const cohortsOk = distinctCohorts.size >= minCohorts;
 	gates.push({
 		name: 'validated_terminal_applications',
 		passed: appsOk && cohortsOk,
-		detail:
-			minApps === 0 && minCohorts === 0
-				? 'threshold 0 — no application-evidence gate active (until #1849)'
-				: `${evidence.length} receipt(s) across ${distinctCohorts.size} cohort(s) (need ≥${minApps} app / ≥${minCohorts} cohort)`,
+		detail: !gateActive
+			? 'threshold 0 — no application-evidence gate active (until #1849)'
+			: `${countedEvidence.length} independent receipt(s) (source ≠ delegate) across ${distinctCohorts.size} cohort(s) (need ≥${minApps} app / ≥${minCohorts} cohort; ${evidence.length} total)`,
 	});
 
 	// Gate: not currently confidence-floor-demoted (a floor-clamped entry should

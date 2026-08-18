@@ -285,6 +285,7 @@ export async function executeWritePrReviewArtifact(
 
 export const write_pr_review_artifact: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
+		allowWorkingDirectoryOverride: true,
 		description:
 			'Persist schema-validated PR-review findings checkpoints and exact actionable feedback handoffs under the active run.',
 		args: {

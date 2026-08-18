@@ -250,6 +250,7 @@ export async function executeGetApprovedPlan(
 // ============ Tool Definition ============
 
 export const get_approved_plan: ReturnType<typeof tool> = createSwarmTool({
+	allowWorkingDirectoryOverride: true,
 	description:
 		'Retrieve the last critic-approved immutable plan snapshot for baseline drift comparison. ' +
 		'Returns the approved plan, its approval metadata, and optionally compares against ' +
