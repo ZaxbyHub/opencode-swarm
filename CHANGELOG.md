@@ -1,5 +1,18 @@
 # Changelog
 
+## [7.143.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.142.1...v7.143.0) (2026-08-18)
+
+
+### Features
+
+* **delegation-gate:** inject verbatim fr/sc requirement text into acceptance ([6ca60bf](https://github.com/ZaxbyHub/opencode-swarm/commit/6ca60bf1b5679d5a5f6673ecfbb7581f903f7d1e))
+
+
+### Bug Fixes
+
+* **delegation-gate:** flag omitted acceptance requirement text as completely missing ([e9fc47a](https://github.com/ZaxbyHub/opencode-swarm/commit/e9fc47ae2e9ea2048be83b163e6cc6e0e30041b3))
+* **delegation-gate:** guard ACCEPTANCE injection against silent no-fire paths ([596aa25](https://github.com/ZaxbyHub/opencode-swarm/commit/596aa2518a6be1be3c105d6caa8be9c652104b31))
+
 ## [7.142.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.142.0...v7.142.1) (2026-08-18)
 
 
