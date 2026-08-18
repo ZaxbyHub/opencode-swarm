@@ -17,7 +17,7 @@
 # and this script preserves that placement across regeneration.
 # Escape hatch for a deliberate growth PR: MOCK_ALLOWLIST_ENFORCE=0 (soft-warn).
 #
-# Last updated: 2026-07-21 (normalization in scripts/lib/normalize-mock-target.sh)
+# Last updated: 2026-08-18 (normalization in scripts/lib/normalize-mock-target.sh)
 
 # --- Node builtins ---
 node:child_process
@@ -121,8 +121,12 @@ src/summaries/manager
 src/telemetry
 src/tools/checkpoint
 src/tools/co-change-analyzer
+# APPROVED-NEW: src/tools/completion-verify
+src/tools/completion-verify
 src/tools/knowledge-recall
 src/tools/lint
+# APPROVED-NEW: src/tools/phase-complete/gates/gate-helpers
+src/tools/phase-complete/gates/gate-helpers
 src/tools/quality-budget
 src/tools/sast-baseline
 src/tools/sast-scan

@@ -1950,16 +1950,9 @@ describe('phase_complete tool', () => {
 			});
 			const parsed = JSON.parse(result);
 
-			// .find() on null throws, caught by try/catch, falls through to normal enforcement
+			// .find() on null throws, caught by completion-verify-gate's fail-closed catch
 			expect(parsed.success).toBe(false);
-			expect(parsed.status).toBe('incomplete');
-			expect(parsed.agentsMissing).toContain('coder');
-			// Fallback should NOT activate due to null phases error
-			expect(
-				parsed.warnings.some((w: string) =>
-					w.includes('Agent dispatch fallback'),
-				),
-			).toBe(false);
+			expect(parsed.status).toBe('blocked');
 		});
 
 		test('ADVERSARY: plan.json with task having unexpected status value - fallback does NOT activate', async () => {
