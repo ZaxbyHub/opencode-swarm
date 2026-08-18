@@ -19,6 +19,7 @@ import {
 import { validateDiffScope } from '../hooks/diff-scope';
 import { validateSwarmPath } from '../hooks/utils.js';
 import { tryAcquireLock } from '../parallel/file-locks.js';
+import { matchesTier3 } from '../parallel/tier3-classifier.js';
 import { loadPlan, updateTaskStatus } from '../plan/manager';
 import { formatLegacyQaBindingRecovery } from '../qa-gate/recovery.js';
 import {
@@ -299,40 +300,6 @@ function reviewerGateDecision(
 	return result;
 }
 
-/**
- * Tier 3 patterns that require full gate review even in Turbo Mode.
- * These are critical security-sensitive files that must always pass Stage B.
- */
-const TIER_3_PATTERNS = [
-	/^architect.*\.ts$/i,
-	/^delegation.*\.ts$/i,
-	/^guardrails.*\.ts$/i,
-	/^adversarial.*\.ts$/i,
-	/^sanitiz.*\.ts$/i,
-	/^auth.*$/i,
-	/^permission.*$/i,
-	/^crypto.*$/i,
-	/^secret.*$/i,
-	/^security.*\.ts$/i,
-];
-
-/**
- * Check if any file in the list matches a Tier 3 pattern.
- * @param files - Array of file paths/names to check
- * @returns true if any file matches a Tier 3 pattern
- */
-function matchesTier3Pattern(files: string[]): boolean {
-	for (const file of files) {
-		const fileName = path.basename(file);
-		for (const pattern of TIER_3_PATTERNS) {
-			if (pattern.test(fileName)) {
-				return true;
-			}
-		}
-	}
-	return false;
-}
-
 function hasPassedDurableGateEvidence(
 	workingDirectory: string,
 	taskId: string,
@@ -432,7 +399,7 @@ export function checkReviewerGate(
 					for (const task of planPhase.tasks ?? []) {
 						if (task.id === taskId && task.files_touched) {
 							// If no Tier 3 patterns matched, bypass Stage B
-							if (!matchesTier3Pattern(task.files_touched)) {
+							if (!matchesTier3(task.files_touched)) {
 								return reviewerGateDecision(
 									taskId,
 									sessionID,

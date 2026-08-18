@@ -185,8 +185,10 @@ describe('delegation-gate: set-dispatch reviewed row parsing', () => {
 			'[reviewed] | task-2.1 | APPROVED | duplicate | ignored',
 		].join('\n');
 
-		const reviewedTaskIds = Array.from(parsePerTaskVerdicts(output)).flatMap(
-			([taskId, verdict]) => (verdict === 'APPROVED' ? [taskId] : []),
+		const reviewedTaskIds = Array.from(
+			parsePerTaskVerdicts(output).verdicts,
+		).flatMap(([taskId, entry]) =>
+			entry.verdict === 'APPROVED' ? [taskId] : [],
 		);
 		expect(reviewedTaskIds).toEqual(['2.1', '2.3']);
 	});

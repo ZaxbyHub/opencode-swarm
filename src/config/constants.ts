@@ -636,7 +636,7 @@ export const TURBO_MODE_BANNER = `## 🚀 TURBO MODE ACTIVE
 
 While Turbo Mode is active:
 - **Stage A gates** (lint, imports, pre_check_batch) are still REQUIRED for ALL tasks
-- **Tier 3 tasks** (security-sensitive files matching: architect*.ts, delegation*.ts, guardrails*.ts, adversarial*.ts, sanitiz*.ts, auth*, permission*, crypto*, secret*, security) still require FULL review (Stage B)
+- **Tier 3 tasks** (security-sensitive files matching: architect*.ts, delegation*.ts, guardrails*.ts, adversarial*.ts, sanitiz*.ts, security*.ts; exact basenames: auth, permission(s), crypto, secret(s); keyword prefixes: auth-*, permission-*, crypto-*, secret-*, security-*; or files under auth/, security/, crypto/, permission/, secret/ directories) still require FULL review (Stage B)
 - **Tier 0-2 tasks** can skip Stage B (reviewer, test_engineer) to speed up execution
 - **Phase completion gates** (Gates 1–5: completion-verify, drift-verifier, hallucination-guard, mutation-gate, phase-council) are automatically bypassed via the orchestrator short-circuit at \`src/tools/phase-complete.ts:774–827\` when turbo is active; Gate 5b (architecture-supervisor), Gate 6 (final-council), and Gate 7 (full-auto) remain enforced. Note: turbo bypass is session-scoped; one session's turbo does not affect other sessions.
 

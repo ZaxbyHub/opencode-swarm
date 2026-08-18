@@ -7,12 +7,14 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import type { ClassifiedChange } from '../../../src/diff/semantic-classifier';
 import {
 	type ComplexityMetrics,
 	computeComplexity,
 	type ReviewRouting,
 	routeReview,
 	routeReviewForChanges,
+	routeReviewSemantic,
 	shouldParallelizeReview,
 } from '../../../src/parallel/review-router';
 
@@ -225,7 +227,94 @@ class MyClass:
 		});
 	});
 
-	// ========== GROUP 4: routeReviewForChanges integration test ==========
+	// ========== GROUP 4: routeReviewSemantic tests ==========
+	describe('Group 4: routeReviewSemantic', () => {
+		const lowMetrics: ComplexityMetrics = {
+			fileCount: 1,
+			functionCount: 2,
+			astChangeCount: 5,
+			maxFileComplexity: 3,
+		};
+
+		function makeClassification(
+			category: ClassifiedChange['category'],
+		): ClassifiedChange {
+			return {
+				category,
+				riskLevel: 'High',
+				filePath: 'src/test.ts',
+				symbolName: 'testFn',
+				changeType: 'modified',
+				lineStart: 1,
+				lineEnd: 10,
+				description: `${category} detected`,
+			};
+		}
+
+		it('triggers double review for GUARD_REMOVED', () => {
+			const routing = routeReviewSemantic(lowMetrics, [
+				makeClassification('GUARD_REMOVED'),
+			]);
+			expect(routing.depth).toBe('double');
+			expect(routing.reason).toContain('GUARD_REMOVED');
+		});
+
+		it('triggers double review for SIGNATURE_CHANGE', () => {
+			const routing = routeReviewSemantic(lowMetrics, [
+				makeClassification('SIGNATURE_CHANGE'),
+			]);
+			expect(routing.depth).toBe('double');
+			expect(routing.reason).toContain('SIGNATURE_CHANGE');
+		});
+
+		it('triggers double review for API_CHANGE', () => {
+			const routing = routeReviewSemantic(lowMetrics, [
+				makeClassification('API_CHANGE'),
+			]);
+			expect(routing.depth).toBe('double');
+			expect(routing.reason).toContain('Semantic risk');
+		});
+
+		it('triggers double review for DELETED_FUNCTION', () => {
+			const routing = routeReviewSemantic(lowMetrics, [
+				makeClassification('DELETED_FUNCTION'),
+			]);
+			expect(routing.depth).toBe('double');
+		});
+
+		it('falls back to heuristic for low-risk categories', () => {
+			const routing = routeReviewSemantic(lowMetrics, [
+				makeClassification('COSMETIC'),
+				makeClassification('REFACTOR'),
+			]);
+			expect(routing.depth).toBe('single');
+			expect(routing.reason).toContain('Standard complexity');
+		});
+
+		it('includes all distinct high-risk categories in reason', () => {
+			const routing = routeReviewSemantic(lowMetrics, [
+				makeClassification('GUARD_REMOVED'),
+				makeClassification('API_CHANGE'),
+			]);
+			expect(routing.reason).toContain('GUARD_REMOVED');
+			expect(routing.reason).toContain('API_CHANGE');
+		});
+
+		it('reports change count in reason', () => {
+			const routing = routeReviewSemantic(lowMetrics, [
+				makeClassification('GUARD_REMOVED'),
+				makeClassification('GUARD_REMOVED'),
+			]);
+			expect(routing.reason).toContain('2 change(s)');
+		});
+
+		it('empty classifications fall back to heuristic', () => {
+			const routing = routeReviewSemantic(lowMetrics, []);
+			expect(routing.depth).toBe('single');
+		});
+	});
+
+	// ========== GROUP 5: routeReviewForChanges integration test ==========
 	describe('Group 4: routeReviewForChanges integration', () => {
 		it('computes and routes in one call', async () => {
 			fs.writeFileSync(

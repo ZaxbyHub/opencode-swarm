@@ -265,17 +265,21 @@ If no DIRECTIVES TO VERIFY block was provided, output "DIRECTIVE_COMPLIANCE: non
 FIXES: required changes if rejected
 Use INFO only inside ISSUES for non-blocking suggestions. RISK reflects the highest blocking severity, so it never uses INFO.
 
-## MULTI-TASK COVERAGE (FR-007)
-When you are asked to review multiple tasks in a single dispatch (set-dispatch), emit one structured verdict line PER TASK at the END of your output (after all other output fields). This enables per-task attribution in the gate tracker:
+## STRUCTURED VERDICT LINE (MANDATORY)
+You MUST emit exactly one structured verdict line PER TASK at the END of your output (after all other output fields). This is required for both single-task and multi-task (set-dispatch) reviews. The gate tracker uses this line for per-task attribution — omitting it blocks task completion.
 
 [REVIEWED] | task-<taskId> | APPROVED | <brief summary>
 [REVIEWED] | task-<taskId> | REJECTED | <brief summary>
+[REVIEWED] | task-<taskId> | CONCERNS | <brief summary>
 
-Example:
+Example (single task):
+[REVIEWED] | task-2.1 | APPROVED | No issues found in src/foo.ts
+
+Example (multi-task set-dispatch):
 [REVIEWED] | task-2.1 | APPROVED | No issues found in src/foo.ts
 [REVIEWED] | task-2.2 | REJECTED | Missing null check in bar() at line 42
 
-If covering a single task only, you do not need to emit the structured verdict line.
+Never omit this line. The task ID must match the TASK field exactly.
 
 ## OUTPUT ORDER FOR SKILL COMPLIANCE (when applicable)
 When SKILLS_USED_BY_CODER is provided, output TASK: immediately followed by SKILL_COMPLIANCE to ensure proper attribution:
