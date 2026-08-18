@@ -153,6 +153,102 @@ describe('knowledge hive-quarantine policy (issue #2033)', () => {
 		}
 	});
 
+	test('shell-bypass guardrail blocks variable-indirection and partial-quote shapes (PR feedback PRR-001/CC-3)', async () => {
+		await expectShellBlocked(
+			"CMD='knowledge hive-quarantine commit --token x' && bunx opencode-swarm run $CMD",
+		);
+		await expectShellBlocked(
+			'CMD=knowledge; bunx opencode-swarm run "$CMD hive-quarantine" commit',
+		);
+		await expectShellBlocked(
+			"bunx opencode-swarm run knowledge 'hive-quarantine' commit --token x",
+		);
+		await expectShellBlocked(
+			'/usr/local/bin/bunx opencode-swarm run knowledge hive-quarantine commit',
+		);
+		await expectShellBlocked(
+			'./node_modules/.bin/opencode-swarm run "knowledge hive-quarantine" commit',
+		);
+		await expectShellBlocked(
+			'node dist/cli/index.js run knowledge hive-quarantine rollback --latest',
+		);
+	});
+
+	test('shell-bypass guardrail does not false-block legitimate variable and path commands', async () => {
+		const hooks = createGuardrailsHooks('/tmp', undefined, defaultConfig());
+		for (const command of [
+			'bunx opencode-swarm run status',
+			'CMD=status && bunx opencode-swarm run $CMD',
+			'bunx opencode-swarm run knowledge list',
+			'CMD=knowledge; bunx opencode-swarm run "$CMD list"',
+			'/usr/local/bin/git log --oneline -5',
+			'./scripts/build.sh --fast',
+		]) {
+			await expect(
+				hooks.toolBefore(
+					{ tool: 'bash', sessionID: 'hq-session', callID: 'c1' },
+					{ args: { command } },
+				),
+			).resolves.toBeUndefined();
+		}
+	});
+
+	test('guardrail blocks quoted-assignment, alias, and unresolvable-substitution shapes (review N2/N3 backstop)', async () => {
+		// Quoted leading assignment used to defeat the runner anchor before the
+		// quoted-value strip landed; the dash alias used to defeat the CLI gate
+		// before aliasOf resolution landed; $(…) substitution is unresolvable so
+		// the guard fails closed and demands a literal subcommand.
+		await expectShellBlocked(
+			"JUNK='a b' bunx opencode-swarm run memory-import",
+		);
+		await expectShellBlocked(
+			"JUNK='x y' bunx opencode-swarm run knowledge hive-quarantine commit --token t",
+		);
+		// Command substitution is unresolvable — the guard fails closed with the
+		// literal-subcommand demand rather than the human-only message.
+		const hooks = createGuardrailsHooks('/tmp', undefined, defaultConfig());
+		await expect(
+			hooks.toolBefore(
+				{ tool: 'bash', sessionID: 'hq-session', callID: 'c1' },
+				{
+					args: {
+						command:
+							"CMD=$(echo 'knowledge hive-quarantine') && bunx opencode-swarm run $CMD",
+					},
+				},
+			),
+		).rejects.toThrow(/unresolvable shell variable/);
+	});
+
+	test('CLI refuses the alias of a human-only command from a non-interactive shell (review finding 1)', async () => {
+		const { run } = await import('../../../src/cli/index.js');
+		const prev = process.env.SWARM_ALLOW_HUMAN_ONLY_CLI;
+		delete process.env.SWARM_ALLOW_HUMAN_ONLY_CLI;
+		try {
+			// 'memory-import' is a deprecated alias of human-only 'memory import'.
+			await expect(run(['memory-import'])).resolves.toBe(1);
+		} finally {
+			if (prev === undefined) delete process.env.SWARM_ALLOW_HUMAN_ONLY_CLI;
+			else process.env.SWARM_ALLOW_HUMAN_ONLY_CLI = prev;
+		}
+	});
+
+	test('guardrail still allows legitimate quoted assignments and resolved allowed commands', async () => {
+		const hooks = createGuardrailsHooks('/tmp', undefined, defaultConfig());
+		for (const command of [
+			'FOO="a b" ./scripts/build.sh --fast',
+			"CMD='knowledge list' && bunx opencode-swarm run $CMD",
+			'bunx opencode-swarm run knowledge',
+		]) {
+			await expect(
+				hooks.toolBefore(
+					{ tool: 'bash', sessionID: 'hq-session', callID: 'c1' },
+					{ args: { command } },
+				),
+			).resolves.toBeUndefined();
+		}
+	});
+
 	test('the bare knowledge parent remains agent-safe (list-only) and cannot reach the mutation', () => {
 		const bare = classifySwarmCommandToolUse(resolve(['knowledge']));
 		expect(bare.allowed).toBe(true);

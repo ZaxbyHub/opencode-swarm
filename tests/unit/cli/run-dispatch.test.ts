@@ -470,11 +470,17 @@ describe('run() dispatch function', () => {
 		});
 
 		it('reset: calls handleResetCommand', async () => {
-			const result = await run(['reset']);
-
-			expect(result).toBe(0);
-			expect(mockHandleResetCommand).toHaveBeenCalledWith(cwd, []);
-			expect(mockConsoleLog).toHaveBeenCalledWith('reset output');
+			const prev = process.env.SWARM_ALLOW_HUMAN_ONLY_CLI;
+			process.env.SWARM_ALLOW_HUMAN_ONLY_CLI = '1';
+			try {
+				const result = await run(['reset']);
+				expect(result).toBe(0);
+				expect(mockHandleResetCommand).toHaveBeenCalledWith(cwd, []);
+				expect(mockConsoleLog).toHaveBeenCalledWith('reset output');
+			} finally {
+				if (prev === undefined) delete process.env.SWARM_ALLOW_HUMAN_ONLY_CLI;
+				else process.env.SWARM_ALLOW_HUMAN_ONLY_CLI = prev;
+			}
 		});
 
 		it('retrieve: calls handleRetrieveCommand', async () => {
@@ -510,11 +516,47 @@ describe('run() dispatch function', () => {
 		});
 
 		it('checkpoint: calls handleCheckpointCommand', async () => {
-			const result = await run(['checkpoint']);
+			const prev = process.env.SWARM_ALLOW_HUMAN_ONLY_CLI;
+			process.env.SWARM_ALLOW_HUMAN_ONLY_CLI = '1';
+			try {
+				const result = await run(['checkpoint']);
+				expect(result).toBe(0);
+				expect(mockHandleCheckpointCommand).toHaveBeenCalledWith(cwd, []);
+				expect(mockConsoleLog).toHaveBeenCalledWith('checkpoint output');
+			} finally {
+				if (prev === undefined) delete process.env.SWARM_ALLOW_HUMAN_ONLY_CLI;
+				else process.env.SWARM_ALLOW_HUMAN_ONLY_CLI = prev;
+			}
+		});
 
-			expect(result).toBe(0);
-			expect(mockHandleCheckpointCommand).toHaveBeenCalledWith(cwd, []);
-			expect(mockConsoleLog).toHaveBeenCalledWith('checkpoint output');
+		it('human-only commands are refused from non-interactive shells (issue #2033 CC-2)', async () => {
+			const prev = process.env.SWARM_ALLOW_HUMAN_ONLY_CLI;
+			delete process.env.SWARM_ALLOW_HUMAN_ONLY_CLI;
+			try {
+				const result = await run(['knowledge', 'hive-quarantine', 'status']);
+				expect(result).toBe(1);
+				expect(mockConsoleError).toHaveBeenCalledWith(
+					expect.stringContaining('human-only'),
+				);
+				const resetResult = await run(['reset']);
+				expect(resetResult).toBe(1);
+			} finally {
+				if (prev === undefined) delete process.env.SWARM_ALLOW_HUMAN_ONLY_CLI;
+				else process.env.SWARM_ALLOW_HUMAN_ONLY_CLI = prev;
+			}
+		});
+
+		it('SWARM_ALLOW_HUMAN_ONLY_CLI=1 opts in for approved automation', async () => {
+			const prev = process.env.SWARM_ALLOW_HUMAN_ONLY_CLI;
+			process.env.SWARM_ALLOW_HUMAN_ONLY_CLI = '1';
+			try {
+				const result = await run(['reset']);
+				expect(result).toBe(0);
+				expect(mockHandleResetCommand).toHaveBeenCalledWith(cwd, []);
+			} finally {
+				if (prev === undefined) delete process.env.SWARM_ALLOW_HUMAN_ONLY_CLI;
+				else process.env.SWARM_ALLOW_HUMAN_ONLY_CLI = prev;
+			}
 		});
 	});
 

@@ -269,6 +269,23 @@ describe('hive quarantine rollback (issue #2033)', () => {
 		}
 	});
 
+	test('rollback by token12 selects the new suffixed backup format (critic item 3)', async () => {
+		// Producer names are <ts>-<token12>-<random8>; the token12 ref must match
+		// the -<token12>- segment, not the trailing random suffix.
+		seedStore([
+			hiveEntry('id-suf-0011', 'Suffixed backup selected by token12 ref'),
+		]);
+		const backupDir = await commitIds(['id-suf-0011']);
+		const name = path.basename(backupDir);
+		expect(name).toMatch(/-[0-9a-f]{12}-[0-9a-f]{8}$/);
+		const token12 = name.split('-').slice(-3, -2)[0];
+		const rollback = await rollbackHiveQuarantine({ ref: token12 });
+		expect(rollback.ok).toBe(true);
+		if (!rollback.ok) return;
+		expect(rollback.result.restoredIds).toEqual(['id-suf-0011']);
+		expect(rollback.result.verified).toBe(true);
+	});
+
 	test('audit log records the rollback', async () => {
 		seedStore([hiveEntry('id-aud-0009', 'Rollback writes an audit record')]);
 		await commitIds(['id-aud-0009']);

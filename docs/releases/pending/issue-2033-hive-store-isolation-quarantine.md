@@ -29,24 +29,32 @@ issue: 2033
 
 ### Human-only exact-ID hive quarantine
 
-New `/swarm knowledge hive-quarantine` command (refused for agents via `swarm_command`,
-chat fallback, and the shell guardrail; no `--yes`/env bypass exists):
+New `/swarm knowledge hive-quarantine` command with layered agent gates (`swarm_command`
++ chat-fallback refusals; a shell guardrail that blocks direct, quoted, path-qualified,
+AND shell-variable-indirected CLI invocations; a CLI-side refusal of human-only commands
+from non-interactive shells; and an HMAC-signed confirmation token keyed to a
+per-install secret so tokens cannot be minted from public store contents). No
+`--yes`/`--force` flag exists; the layers are defense-in-depth plus honest audit —
+not a tamper-proof boundary against the machine's own user):
 
 - `preview <id>[,<id>…]` — read-only snapshot of exact IDs with per-line sha256,
   provenance, status, and a store fingerprint; issues a 15-minute confirmation token
   bound to preview + store + plugin version.
-- `commit --token <t> [--reason …]` — one `transactHiveStore` transaction: token
-  re-verified under lock (any drift — concurrent append, entry change, version bump —
-  aborts with no mutation), hash-verified backup + manifest under the same lock, exactly
-  the selected entries moved to `shared-learnings-quarantined.jsonl`, audit records in
-  `shared-knowledge-events.jsonl`, post-commit count/hash verification with automatic
-  backup restore on failure.
+- `commit --token <t> [--reason …]` — a validated backup + manifest written and
+  hash-verified BEFORE any mutation, then one fast `transactHiveStore` transaction that
+  re-verifies the live file hash against the backup under lock (any drift — concurrent
+  append, entry change, version bump, duplicate-id ambiguity — aborts with no mutation;
+  aborts clean up the orphaned backup dir), moving exactly the selected entries to
+  `shared-learnings-quarantined.jsonl` with audit records in
+  `shared-knowledge-events.jsonl`, then post-commit count/hash verification whose
+  automatic backup restore reports its outcome honestly (never a blanket "restored"
+  claim).
 - `rollback --token <t12> | --latest` — idempotent, byte-exact restore of the selected
   ids from the manifest; collision (id re-promoted with different content) aborts with
   no mutation. Two standing-transaction disclosures apply to everything except the
   selected ids: unselected entries may be re-serialized by the store's
-  normalize-on-write pipeline, and unparseable (corrupt) lines are dropped by a commit
-  rewrite — they survive only in the hash-verified backup copy.
+  normalize-on-write pipeline, and unparseable (corrupt) lines are dropped by commit AND rollback
+  rewrites — they survive only in the hash-verified backup copy.
 - `status` — read-only backup listing.
 
 Selection is exact-ID only — never by text, substring, cohort, age, or blacklist, and

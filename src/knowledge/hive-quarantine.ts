@@ -10,14 +10,21 @@
  * This module implements the adjudicated exact-ID flow:
  *   preview   — read-only snapshot of exact candidate IDs, per-entry hashes/provenance, a
  *               store fingerprint, and a confirmation token bound to preview + store +
- *               plugin version (TTL-bounded).
- *   commit    — ONE `transactHiveStore` transaction: re-verify the token against the
- *               re-read-under-lock state (any drift aborts with no mutation), create and
- *               verify a complete backup + manifest, quarantine EXACTLY the selected IDs,
- *               append audit + sidecar records under the same lock, and verify counts and
- *               hashes afterwards (auto-restoring from the backup if verification fails).
+ *               plugin version (TTL-bounded) AND HMAC-signed with a per-install secret
+ *               (not derivable from store contents — PR #2200 review CC-1).
+ *   commit    — a validated backup + manifest written and hash-verified BEFORE any
+ *               mutation (outside the hive lock, keeping the locked closure fast per
+ *               hive-transaction's contract), then ONE `transactHiveStore` transaction
+ *               that re-verifies the live file hash against the backup under lock (any
+ *               drift — including duplicate-id ambiguity — aborts with no mutation;
+ *               clean aborts clean up the orphaned backup dir), quarantines EXACTLY the
+ *               selected IDs with audit + sidecar records staged under the lock, and
+ *               verifies counts afterwards with an HONEST auto-restore report (a failed
+ *               restore is never claimed as success).
  *   rollback  — idempotent restore of the EXACT original line bytes from the manifest's
  *               backup, aborting on collision (an id re-promoted with different content).
+ *               Backup lookup resolves symlinks/reparse points on BOTH sides — a lexical
+ *               prefix compare alone is dead code against a planted link (review CC-4).
  *
  * Selection is EXACT-ID only: no text, substring, "test-looking phrase", cohort, age, or
  * blacklist matching exists anywhere in this module, and there is no bulk operation.
@@ -36,12 +43,15 @@
  * `knowledge hive-quarantine` command dispatch.
  */
 
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
 import {
+	chmod,
 	copyFile,
 	mkdir,
 	readdir,
 	readFile,
+	realpath,
+	rm,
 	stat,
 	writeFile,
 } from 'node:fs/promises';
@@ -74,6 +84,7 @@ export type HiveQuarantineAbortCode =
 	| 'invalid_ids'
 	| 'id_not_found'
 	| 'duplicate_id'
+	| 'duplicate_id_in_store'
 	| 'too_many_ids'
 	| 'invalid_token'
 	| 'token_expired'
@@ -165,6 +176,52 @@ function sha256Hex(content: string): string {
 	return createHash('sha256').update(content, 'utf-8').digest('hex');
 }
 
+/**
+ * Per-install HMAC secret backing the confirmation token (PR #2200 review CC-1:
+ * the token was previously a self-hashed bearer credential forgeable from public
+ * store contents — reproduced live). The secret lives beside the hive store in a
+ * user-scoped file, is NOT derivable from store data, and is re-read per
+ * encode/decode (no module-level cache — invariant 8). Holds "no local secret is
+ * safe from the owning user": this raises forgery from "read the store" to
+ * "read a sibling secret file AND invoke a gated surface" — the CLI gate is the load-bearing barrier.
+ */
+const QUARANTINE_SECRET_FILE = 'hive-quarantine.key';
+
+async function readQuarantineSecret(): Promise<string> {
+	const secretPath = path.join(
+		_internals.resolveHiveDataDir(),
+		QUARANTINE_SECRET_FILE,
+	);
+	try {
+		const existing = (await _internals.readFile(secretPath, 'utf-8')).trim();
+		if (/^[0-9a-f]{64}$/.test(existing)) return existing;
+	} catch {
+		/* absent or unreadable — (re)create below */
+	}
+	// Concurrent first-use race: last write wins; the loser's in-flight HMAC
+	// check fails closed (invalid_token) and the operator re-runs preview. A
+	// torn write fails the 64-hex test above on next read and regenerates.
+	const secret = randomBytes(32).toString('hex');
+	await _internals.mkdir(path.dirname(secretPath), { recursive: true });
+	await _internals.writeFile(secretPath, secret, 'utf-8');
+	try {
+		await _internals.chmod(secretPath, 0o600);
+	} catch {
+		/* POSIX-only hardening; Windows user-profile ACLs already scope access */
+	}
+	return secret;
+}
+
+async function hmacMarker(body: string): Promise<string> {
+	// Routes through the _internals seam (invariant 7) so tests can observe
+	// secret access without mock.module.
+	const secret = await _internals.readQuarantineSecret();
+	return createHmac('sha256', secret)
+		.update(body, 'utf-8')
+		.digest('hex')
+		.slice(0, 32);
+}
+
 /** raw_line_sha256: hex sha256 of the exact jsonl line bytes INCLUDING trailing newline. */
 function rawLineSha256(line: string): string {
 	return sha256Hex(`${line}\n`);
@@ -174,12 +231,13 @@ function token12Of(token: string): string {
 	return token.slice(token.lastIndexOf('.') + 1).slice(0, 12);
 }
 
-function encodeToken(payload: TokenPayload): string {
+async function encodeToken(payload: TokenPayload): Promise<string> {
 	const body = canonicalJson(payload);
-	return `${Buffer.from(body, 'utf-8').toString('base64url')}.${sha256Hex(body).slice(0, 16)}`;
+	const marker = await hmacMarker(body);
+	return `${Buffer.from(body, 'utf-8').toString('base64url')}.${marker}`;
 }
 
-function decodeToken(token: string): TokenPayload | null {
+async function decodeToken(token: string): Promise<TokenPayload | null> {
 	if (typeof token !== 'string' || token.length === 0 || token.length > 65_536)
 		return null;
 	const dot = token.lastIndexOf('.');
@@ -189,7 +247,7 @@ function decodeToken(token: string): TokenPayload | null {
 			'utf-8',
 		);
 		const payload = JSON.parse(body) as TokenPayload;
-		if (sha256Hex(body).slice(0, 16) !== token.slice(dot + 1)) return null;
+		if ((await hmacMarker(body)) !== token.slice(dot + 1)) return null;
 		if (
 			!Array.isArray(payload.ids) ||
 			typeof payload.fileSha256 !== 'string' ||
@@ -207,12 +265,32 @@ function decodeToken(token: string): TokenPayload | null {
 	}
 }
 
+/** Resolve a path, returning null instead of throwing when unreachable. */
+async function realpathQuiet(target: string): Promise<string | null> {
+	try {
+		return await _internals.realpath(target);
+	} catch {
+		return null;
+	}
+}
+
+/** Best-effort recursive removal used to clean orphaned backup dirs (CC-m3). */
+async function rmQuiet(target: string): Promise<void> {
+	try {
+		await _internals.rm(target, { recursive: true, force: true });
+	} catch {
+		/* best effort — an orphaned backup dir is recoverable via status/rollback */
+	}
+}
+
 interface ParsedStore {
 	raw: string;
 	lines: string[];
 	entries: HiveKnowledgeEntry[];
 	lineById: Map<string, string>;
 	hashById: Map<string, string>;
+	/** Ids that appear on more than one parseable line — ambiguous, never selectable (PR review CC-8). */
+	duplicateIds: Set<string>;
 }
 
 async function parseStore(storePath: string): Promise<ParsedStore> {
@@ -225,12 +303,14 @@ async function parseStore(storePath: string): Promise<ParsedStore> {
 	const lines = raw.split('\n').filter((l) => l.trim().length > 0);
 	const entries: HiveKnowledgeEntry[] = [];
 	const lineById = new Map<string, string>();
+	const duplicateIds = new Set<string>();
 	for (const line of lines) {
 		try {
 			const entry = JSON.parse(line) as HiveKnowledgeEntry;
 			entries.push(entry);
-			if (typeof entry.id === 'string' && !lineById.has(entry.id)) {
-				lineById.set(entry.id, line);
+			if (typeof entry.id === 'string') {
+				if (lineById.has(entry.id)) duplicateIds.add(entry.id);
+				else lineById.set(entry.id, line);
 			}
 		} catch {
 			/* corrupt line — skipped for selection here. NOT preserved by a commit
@@ -242,7 +322,7 @@ async function parseStore(storePath: string): Promise<ParsedStore> {
 	}
 	const hashById = new Map<string, string>();
 	for (const [id, line] of lineById) hashById.set(id, rawLineSha256(line));
-	return { raw, lines, entries, lineById, hashById };
+	return { raw, lines, entries, lineById, hashById, duplicateIds };
 }
 
 function validateIdList(ids: string[]): Abort | null {
@@ -254,7 +334,15 @@ function validateIdList(ids: string[]): Abort | null {
 		};
 	}
 	for (const id of ids) {
-		if (!/^[a-zA-Z0-9_-]{1,64}$/.test(id)) {
+		// Prototype-key deny-list (PR review CC-9): `__proto__`/`constructor`/
+		// `prototype` would corrupt plain-object override maps and mislead
+		// prototype-sensitive consumers; real hive ids are UUID-shaped.
+		if (
+			!/^([a-zA-Z0-9_-]{1,64})$/.test(id) ||
+			id === '__proto__' ||
+			id === 'constructor' ||
+			id === 'prototype'
+		) {
 			return {
 				ok: false,
 				code: 'invalid_ids',
@@ -294,6 +382,17 @@ export async function previewHiveQuarantine(
 	if (idError) return idError;
 
 	const store = await parseStore(_internals.resolveHiveKnowledgePath());
+	const dupSelected = ids.filter((id) => store.duplicateIds.has(id));
+	if (dupSelected.length > 0) {
+		return {
+			ok: false,
+			code: 'duplicate_id_in_store',
+			error:
+				`The store contains more than one physical line for id ${dupSelected.join(', ')}. ` +
+				'Ambiguous identity is never selectable — deduplicate or repair the store ' +
+				'entries first (the duplicate lines are preserved verbatim in any backup).',
+		};
+	}
 	const byId = new Map(store.entries.map((e) => [e.id, e]));
 	const missing = ids.filter((id) => !byId.has(id));
 	if (missing.length > 0) {
@@ -315,7 +414,7 @@ export async function previewHiveQuarantine(
 		pluginVersion: packageJson.version,
 		issuedAtMs,
 	};
-	const token = encodeToken(payload);
+	const token = await encodeToken(payload);
 	const preview: HiveQuarantinePreview = {
 		records: ids.map((id) => {
 			const e = byId.get(id) as HiveKnowledgeEntry;
@@ -368,7 +467,7 @@ export async function commitHiveQuarantine(input: {
 	token: string;
 	reason?: string;
 }): Promise<{ ok: true; result: HiveQuarantineCommitResult } | Abort> {
-	const payload = decodeToken(input.token);
+	const payload = await decodeToken(input.token);
 	if (!payload) {
 		emitMaintenanceTelemetry({
 			phase: 'commit_aborted',
@@ -417,14 +516,129 @@ export async function commitHiveQuarantine(input: {
 	const reason =
 		input.reason?.slice(0, 280) || 'Operator exact-ID quarantine (#2033)';
 	const token12 = token12Of(input.token);
+	const storePath = _internals.resolveHiveKnowledgePath();
+	const dataDir = _internals.resolveHiveDataDir();
+
+	const abort = (
+		code: HiveQuarantineAbortCode,
+		detail: string,
+	): { ok: false; code: HiveQuarantineAbortCode; error: string } => {
+		emitMaintenanceTelemetry({
+			phase: 'commit_aborted',
+			abortReason: code,
+			selectedCount: payload.ids.length,
+			token12,
+		});
+		return {
+			ok: false,
+			code,
+			error: `Aborted without mutation: ${detail}.`,
+		};
+	};
+
+	// Fail-fast pre-checks OUTSIDE the lock. The authoritative re-verification
+	// still happens under the lock below; these only avoid pointlessly creating
+	// a backup for an already-stale token.
+	const preStore = await parseStore(storePath);
+	for (const id of payload.ids) {
+		if (preStore.duplicateIds.has(id)) {
+			return abort(
+				'duplicate_id_in_store',
+				`the store contains more than one physical line for id ${id} (ambiguous identity is never selectable)`,
+			);
+		}
+		if (!preStore.hashById.has(id)) {
+			return abort('id_missing', `id ${id} no longer present`);
+		}
+		if ((preStore.hashById.get(id) ?? '') !== payload.rawLineHashes[id]) {
+			return abort('id_changed', `id ${id} changed after preview`);
+		}
+	}
+	if (
+		preStore.entries.length !== payload.entryCount ||
+		sha256Hex(preStore.raw) !== payload.fileSha256
+	) {
+		return abort('store_drift', 'store changed after preview');
+	}
+
+	// Validated backup BEFORE any mutation, OUTSIDE the lock (PR review CC-7:
+	// hive-transaction's contract keeps the locked closure fast — mkdir, full
+	// copyFile, re-read+hash, and the manifest write are ordinary I/O and do not
+	// need the hive lock; the under-lock re-verification below re-hashes the
+	// live file against this backup, so drift in between aborts with no
+	// mutation). copyFile writes the final destination directly, then
+	// verification re-reads the written bytes.
+	const backupsRoot = path.join(dataDir, HIVE_QUARANTINE_BACKUP_DIR);
+	// A random suffix disambiguates two commits sharing a millisecond AND a
+	// 12-hex token12 prefix (review finding 5: the loser's clean-abort
+	// cleanup would otherwise delete the winner's backup directory).
+	const backupDir = path.join(
+		backupsRoot,
+		`${new Date().toISOString().replace(/[:.]/g, '-')}-${token12}-${randomUUID().slice(0, 8)}`,
+	);
+	let backupBytes = 0;
+	try {
+		await _internals.mkdir(backupDir, { recursive: true });
+		const backupPath = path.join(backupDir, BACKUP_STORE_NAME);
+		await _internals.copyFile(storePath, backupPath);
+		const backupContent = await _internals.readFile(backupPath, 'utf-8');
+		if (sha256Hex(backupContent) !== payload.fileSha256) {
+			throw new Error('backup verification hash mismatch');
+		}
+		// Reparse defense (PR review CC-4): resolve BOTH sides — a lexical
+		// prefix compare alone never detects a symlinked backup path. The
+		// backup dir must resolve inside the resolved backups root.
+		const realRoot = await realpathQuiet(backupsRoot);
+		const realDir = await realpathQuiet(backupDir);
+		const fold = (p: string) =>
+			process.platform === 'win32' ? p.toLowerCase() : p;
+		if (
+			realRoot === null ||
+			realDir === null ||
+			!fold(realDir).startsWith(`${fold(realRoot)}${path.sep}`)
+		) {
+			throw new Error(
+				'backup path resolves outside the quarantine-backups root',
+			);
+		}
+		const manifest: BackupManifest = {
+			schema_version: 1,
+			plugin_version: packageJson.version,
+			token: input.token,
+			token12,
+			issued_at: new Date(payload.issuedAtMs).toISOString(),
+			committed_at: new Date().toISOString(),
+			reason,
+			ids: payload.ids.map((id) => ({
+				id,
+				raw_line_sha256: payload.rawLineHashes[id],
+			})),
+			store: {
+				entry_count: payload.entryCount,
+				file_sha256: payload.fileSha256,
+			},
+		};
+		await _internals.writeFile(
+			path.join(backupDir, BACKUP_MANIFEST_NAME),
+			`${JSON.stringify(manifest, null, 2)}\n`,
+			'utf-8',
+		);
+		const st = await _internals.stat(backupPath);
+		backupBytes = st.size;
+	} catch (err) {
+		// PR review CC-m3: never leave a half-written backup dir behind.
+		await rmQuiet(backupDir);
+		return abort(
+			'backup_failed',
+			err instanceof Error ? err.message : String(err),
+		);
+	}
 
 	let txn: Awaited<
 		ReturnType<
 			typeof _internals.transactHiveStore<{
 				abort?: HiveQuarantineAbortCode;
 				detail?: string;
-				backupDir?: string;
-				backupBytes?: number;
 				entriesBefore?: number;
 			}>
 		>
@@ -433,30 +647,21 @@ export async function commitHiveQuarantine(input: {
 		txn = await _internals.transactHiveStore<{
 			abort?: HiveQuarantineAbortCode;
 			detail?: string;
-			backupDir?: string;
-			backupBytes?: number;
 			entriesBefore?: number;
 		}>(async (ctx) => {
-			const storePath = _internals.resolveHiveKnowledgePath();
-			const dataDir = _internals.resolveHiveDataDir();
+			// Authoritative re-verification UNDER the lock: the live file must
+			// still hash to exactly what the (already-written) backup holds.
 			const store = await parseStore(storePath);
-
-			// Re-read under lock: reconstruct the token payload from CURRENT state and require
-			// canonical equality. Any concurrent append, curation, or entry change aborts here
-			// with no mutation.
-			const current: TokenPayload = {
-				ids: [...payload.ids],
-				rawLineHashes: Object.fromEntries(
-					payload.ids.map((id) => [id, store.hashById.get(id) ?? '']),
-				),
-				fileSha256: sha256Hex(store.raw),
-				entryCount: store.entries.length,
-				pluginVersion: packageJson.version,
-				issuedAtMs: payload.issuedAtMs,
-			};
-			// Per-id checks first so the abort code is precise when only a selected entry
-			// changed; whole-file drift (concurrent append elsewhere) reports store_drift.
 			for (const id of payload.ids) {
+				if (store.duplicateIds.has(id)) {
+					return {
+						kind: 'noop',
+						return: {
+							abort: 'duplicate_id_in_store',
+							detail: `id ${id} became ambiguous`,
+						},
+					};
+				}
 				if (!store.hashById.has(id)) {
 					return {
 						kind: 'noop',
@@ -466,7 +671,7 @@ export async function commitHiveQuarantine(input: {
 						},
 					};
 				}
-				if (current.rawLineHashes[id] !== payload.rawLineHashes[id]) {
+				if (store.hashById.get(id) !== payload.rawLineHashes[id]) {
 					return {
 						kind: 'noop',
 						return: {
@@ -477,150 +682,78 @@ export async function commitHiveQuarantine(input: {
 				}
 			}
 			if (
-				current.entryCount !== payload.entryCount ||
-				current.fileSha256 !== payload.fileSha256
+				store.entries.length !== payload.entryCount ||
+				sha256Hex(store.raw) !== payload.fileSha256
 			) {
 				return {
 					kind: 'noop',
 					return: {
 						abort: 'store_drift',
-						detail: 'store changed after preview',
-					},
-				};
-			}
-			if (canonicalJson(current) !== canonicalJson(payload)) {
-				return {
-					kind: 'noop',
-					return: {
-						abort: 'store_drift',
-						detail: 'token mismatch on re-read under lock',
+						detail: 'store changed between backup and commit',
 					},
 				};
 			}
 
-			// Validated backup BEFORE mutation, under the same lock (no drift window). copyFile
-			// writes the final destination directly (no temp+rename: the backup must appear
-			// atomically at its final path), then verification re-reads the written bytes.
-			const backupDir = path.join(
-				dataDir,
-				HIVE_QUARANTINE_BACKUP_DIR,
-				`${new Date().toISOString().replace(/[:.]/g, '-')}-${token12}`,
-			);
-			try {
-				await _internals.mkdir(backupDir, { recursive: true });
-				const backupPath = path.join(backupDir, BACKUP_STORE_NAME);
-				await _internals.copyFile(storePath, backupPath);
-				const backupContent = await _internals.readFile(backupPath, 'utf-8');
-				if (sha256Hex(backupContent) !== current.fileSha256) {
-					throw new Error('backup verification hash mismatch');
-				}
-				// Reparse defense: the backup dir must resolve inside the backups root.
-				const norm = (p: string) =>
-					process.platform === 'win32' ? p.toLowerCase() : p;
-				const root = norm(
-					path.resolve(path.join(dataDir, HIVE_QUARANTINE_BACKUP_DIR)),
-				);
-				if (!norm(path.resolve(backupDir)).startsWith(`${root}${path.sep}`)) {
-					throw new Error('backup path escapes the quarantine-backups root');
-				}
-				const manifest: BackupManifest = {
+			// Quarantine records + audit staged under the lock.
+			const selected = ctx.entries.filter((e) => payload.ids.includes(e.id));
+			const nowIso = new Date().toISOString();
+			const sidecarLines = selected.map((e) => {
+				const record: Record<string, unknown> = {
+					...e,
+					original_status: e.status,
+					quarantine_reason: reason,
+					quarantined_at: nowIso,
+					reported_by: 'operator',
+					quarantine_token12: token12,
+				};
+				delete record.status;
+				return JSON.stringify(record);
+			});
+			const audit: HiveAuditEntry[] = selected.map((e) => ({
+				line: JSON.stringify({
 					schema_version: 1,
-					plugin_version: packageJson.version,
-					token: input.token,
-					token12,
-					issued_at: new Date(payload.issuedAtMs).toISOString(),
-					committed_at: new Date().toISOString(),
+					type: 'quarantined',
+					entry_id: e.id,
+					tier: 'hive',
+					actor: 'user',
 					reason,
-					ids: payload.ids.map((id) => ({
-						id,
-						raw_line_sha256: payload.rawLineHashes[id],
-					})),
-					store: {
-						entry_count: payload.entryCount,
-						file_sha256: payload.fileSha256,
-					},
-				};
-				await _internals.writeFile(
-					path.join(backupDir, BACKUP_MANIFEST_NAME),
-					`${JSON.stringify(manifest, null, 2)}\n`,
-					'utf-8',
-				);
-				const st = await _internals.stat(backupPath);
-
-				// Quarantine records + audit staged under the same lock.
-				const selected = ctx.entries.filter((e) => payload.ids.includes(e.id));
-				const nowIso = new Date().toISOString();
-				const sidecarLines = selected.map((e) => {
-					const record: Record<string, unknown> = {
-						...e,
-						original_status: e.status,
-						quarantine_reason: reason,
-						quarantined_at: nowIso,
-						reported_by: 'operator',
-						quarantine_token12: token12,
-					};
-					delete record.status;
-					return JSON.stringify(record);
-				});
-				const audit: HiveAuditEntry[] = selected.map((e) => ({
-					line: JSON.stringify({
-						schema_version: 1,
-						type: 'quarantined',
-						entry_id: e.id,
-						tier: 'hive',
-						actor: 'user',
-						reason,
-						mode: 'quarantine',
-						previous_status: e.status,
-						token12,
-						event_id: randomUUID(),
-						timestamp: nowIso,
-					}),
-				}));
-				return {
-					kind: 'commit',
-					entries: ctx.entries.filter((e) => !payload.ids.includes(e.id)),
-					audit,
-					extraStagedAppends: [
-						{
-							path: path.join(dataDir, HIVE_QUARANTINE_SIDECAR),
-							block: `${sidecarLines.join('\n')}\n`,
-						} satisfies HiveStagedAppend,
-					],
-					return: {
-						backupDir,
-						backupBytes: st.size,
-						entriesBefore: payload.entryCount,
-					},
-				};
-			} catch (err) {
-				return {
-					kind: 'noop',
-					return: {
-						abort: 'backup_failed',
-						detail: err instanceof Error ? err.message : String(err),
-					},
-				};
-			}
+					mode: 'quarantine',
+					previous_status: e.status,
+					token12,
+					event_id: randomUUID(),
+					timestamp: nowIso,
+				}),
+			}));
+			return {
+				kind: 'commit',
+				entries: ctx.entries.filter((e) => !payload.ids.includes(e.id)),
+				audit,
+				extraStagedAppends: [
+					{
+						path: path.join(dataDir, HIVE_QUARANTINE_SIDECAR),
+						block: `${sidecarLines.join('\n')}\n`,
+					} satisfies HiveStagedAppend,
+				],
+				return: { entriesBefore: payload.entryCount },
+			};
 		});
 	} catch (err) {
 		// A throw from the transaction AFTER its atomic store write (e.g. a staged
 		// sidecar append hitting an AV lock / ENOSPC — HiveStagedAppendError) leaves
 		// the store mutated with no sidecar record. Compensate from the just-written
-		// backup (located by token12) before reporting a structured abort; if the
-		// compensation itself fails, surface BOTH failures honestly (reviewer finding 3).
+		// backup and report BOTH failures honestly (PR review PRR-008/CC-6: the
+		// restore's {ok:false} outcomes must never be reported as success).
 		let compensation = 'no automatic restore was performed';
 		try {
-			const located = await locateBackup(token12);
-			if (located.ok) {
-				await restoreFromBackup(
-					located.backupDir,
-					payload.ids,
-					token12,
-					'verify_failed',
-				);
-				compensation = 'the backup was restored automatically';
-			}
+			const restored = await restoreFromBackup(
+				backupDir,
+				payload.ids,
+				token12,
+				'verify_failed',
+			);
+			compensation = restored.ok
+				? 'the backup was restored automatically'
+				: `automatic restore FAILED (${restored.code}); run \`/swarm knowledge hive-quarantine rollback --token ${token12}\` manually`;
 		} catch (restoreErr) {
 			compensation = `automatic restore FAILED (${
 				restoreErr instanceof Error ? restoreErr.message : String(restoreErr)
@@ -642,6 +775,9 @@ export async function commitHiveQuarantine(input: {
 	}
 
 	if (txn.return === undefined || !txn.committed) {
+		// Clean abort before/without mutation — the backup we created outside the
+		// lock is no longer needed (PR review CC-m3).
+		await rmQuiet(backupDir);
 		const detail = txn.return;
 		const code = detail?.abort ?? 'transaction_failed';
 		emitMaintenanceTelemetry({
@@ -660,20 +796,28 @@ export async function commitHiveQuarantine(input: {
 	}
 
 	// Post-commit verification: counts. On failure, auto-restore from the validated
-	// backup and report the abort (the store is returned to its pre-mutation bytes).
+	// backup and report the abort — HONESTLY: the restore's own {ok:false} outcome
+	// must surface, never a blanket "restored automatically" claim (PRR-008/CC-6).
 	const entriesBefore = txn.return.entriesBefore ?? 0;
 	const after = await parseStore(_internals.resolveHiveKnowledgePath());
 	const expectedAfter = entriesBefore - payload.ids.length;
 	if (after.entries.length !== expectedAfter) {
+		let restoreReport =
+			'no automatic restore was performed; run `/swarm knowledge hive-quarantine rollback --latest` manually';
 		try {
-			await restoreFromBackup(
-				txn.return.backupDir ?? '',
+			const restored = await restoreFromBackup(
+				backupDir,
 				payload.ids,
 				token12,
 				'verify_failed',
 			);
-		} catch {
-			/* the original verification failure is the primary report */
+			restoreReport = restored.ok
+				? 'the backup was restored automatically'
+				: `automatic restore FAILED (${restored.code}); run \`/swarm knowledge hive-quarantine rollback --token ${token12}\` manually`;
+		} catch (restoreErr) {
+			restoreReport = `automatic restore FAILED (${
+				restoreErr instanceof Error ? restoreErr.message : String(restoreErr)
+			}); run \`/swarm knowledge hive-quarantine rollback --token ${token12}\` manually`;
 		}
 		emitMaintenanceTelemetry({
 			phase: 'verify_failed',
@@ -684,7 +828,7 @@ export async function commitHiveQuarantine(input: {
 		return {
 			ok: false,
 			code: 'store_drift',
-			error: `Post-commit verification failed (expected ${expectedAfter} entries, found ${after.entries.length}); the backup was restored automatically.`,
+			error: `Post-commit verification failed (expected ${expectedAfter} entries, found ${after.entries.length}); ${restoreReport}.`,
 		};
 	}
 	emitMaintenanceTelemetry({
@@ -692,7 +836,7 @@ export async function commitHiveQuarantine(input: {
 		selectedCount: payload.ids.length,
 		storeEntriesBefore: entriesBefore,
 		storeEntriesAfter: after.entries.length,
-		backupBytes: txn.return.backupBytes ?? 0,
+		backupBytes,
 		storeSha256Prefix: sha256Hex(after.raw).slice(0, 12),
 		token12,
 	});
@@ -702,8 +846,8 @@ export async function commitHiveQuarantine(input: {
 			quarantinedIds: payload.ids,
 			storeEntriesBefore: entriesBefore,
 			storeEntriesAfter: after.entries.length,
-			backupDir: txn.return.backupDir ?? '',
-			backupBytes: txn.return.backupBytes ?? 0,
+			backupDir,
+			backupBytes,
 			verified: true,
 		},
 	};
@@ -787,6 +931,30 @@ export async function listHiveQuarantineBackups(): Promise<
 	return out;
 }
 
+/** Runtime shape validation for a parsed manifest (PR review PRR-007). */
+function validateManifestShape(value: unknown): string | null {
+	const m = value as BackupManifest;
+	if (
+		!m ||
+		!Array.isArray(m.ids) ||
+		typeof m.token12 !== 'string' ||
+		!m.store ||
+		typeof m.store.file_sha256 !== 'string' ||
+		typeof m.store.entry_count !== 'number' ||
+		!m.ids.every(
+			(i) =>
+				i !== null &&
+				typeof i === 'object' &&
+				typeof (i as { id?: unknown }).id === 'string' &&
+				typeof (i as { raw_line_sha256?: unknown }).raw_line_sha256 ===
+					'string',
+		)
+	) {
+		return 'Backup manifest has an unusable shape.';
+	}
+	return null;
+}
+
 async function locateBackup(
 	ref: string,
 ): Promise<{ ok: true; backupDir: string; manifest: BackupManifest } | Abort> {
@@ -817,7 +985,9 @@ async function locateBackup(
 			? names.length > 0
 				? [names[names.length - 1]]
 				: []
-			: names.filter((n) => n.endsWith(`-${ref}`) || n === ref);
+			: names.filter(
+					(n) => n.includes(`-${ref}-`) || n.endsWith(`-${ref}`) || n === ref,
+				);
 	if (matches.length === 0) {
 		return {
 			ok: false,
@@ -833,14 +1003,22 @@ async function locateBackup(
 		};
 	}
 	const backupDir = path.join(root, matches[0]);
-	// Reparse/symlink defense: the resolved dir must stay inside the backups root.
-	const norm = (p: string) =>
+	// Reparse/symlink defense (PR review CC-4): a lexical prefix compare never
+	// detects a symlinked entry — resolve BOTH sides and require the resolved
+	// dir to sit inside the resolved backups root.
+	const fold = (p: string) =>
 		process.platform === 'win32' ? p.toLowerCase() : p;
-	if (!norm(path.resolve(backupDir)).startsWith(`${norm(root)}${path.sep}`)) {
+	const realRoot = await realpathQuiet(root);
+	const realDir = await realpathQuiet(backupDir);
+	if (
+		realRoot === null ||
+		realDir === null ||
+		!fold(realDir).startsWith(`${fold(realRoot)}${path.sep}`)
+	) {
 		return {
 			ok: false,
 			code: 'backup_corrupt',
-			error: 'Backup path escapes the backups root.',
+			error: 'Backup path escapes the backups root (symlink/reparse refused).',
 		};
 	}
 	let manifest: BackupManifest;
@@ -857,6 +1035,10 @@ async function locateBackup(
 			code: 'backup_corrupt',
 			error: 'Backup manifest missing or unreadable.',
 		};
+	}
+	const shapeError = validateManifestShape(manifest);
+	if (shapeError) {
+		return { ok: false, code: 'backup_corrupt', error: shapeError };
 	}
 	try {
 		const backup = await _internals.readFile(
@@ -882,16 +1064,33 @@ async function restoreFromBackup(
 	token12: string,
 	purpose: 'rollback' | 'verify_failed',
 ): Promise<{ ok: true; result: HiveQuarantineRollbackResult } | Abort> {
-	const manifest = JSON.parse(
-		await _internals.readFile(
-			path.join(backupDir, BACKUP_MANIFEST_NAME),
+	// All reads/parse are wrapped: a tampered manifest must surface as the
+	// structured backup_corrupt abort, never a raw throw (PR review PRR-007).
+	let manifest: BackupManifest;
+	let backup: string;
+	try {
+		manifest = JSON.parse(
+			await _internals.readFile(
+				path.join(backupDir, BACKUP_MANIFEST_NAME),
+				'utf-8',
+			),
+		) as BackupManifest;
+		const shapeError = validateManifestShape(manifest);
+		if (shapeError) throw new Error(shapeError);
+		backup = await _internals.readFile(
+			path.join(backupDir, BACKUP_STORE_NAME),
 			'utf-8',
-		),
-	) as BackupManifest;
-	const backup = await _internals.readFile(
-		path.join(backupDir, BACKUP_STORE_NAME),
-		'utf-8',
-	);
+		);
+	} catch (err) {
+		return {
+			ok: false,
+			code: 'backup_corrupt',
+			error:
+				err instanceof Error
+					? err.message
+					: 'Backup manifest or file unreadable.',
+		};
+	}
 	const lineById = new Map<string, string>();
 	for (const line of backup.split('\n').filter((l) => l.trim().length > 0)) {
 		try {
@@ -953,11 +1152,13 @@ async function restoreFromBackup(
 			next.push(JSON.parse(line) as HiveKnowledgeEntry);
 		// rawLineOverrides: persist the EXACT original line bytes for restored ids so
 		// legacy-shaped entries (pre-normalization fields) are not re-serialized by
-		// the transaction's normalize-on-read pipeline (reviewer finding 1).
-		const rawLineOverrides: Record<string, string> = {};
+		// the transaction's normalize-on-read pipeline (reviewer finding 1). A Map,
+		// never a plain object: prototype-key ids like '__proto__' must not corrupt
+		// the override table (PR review CC-9).
+		const rawLineOverrides = new Map<string, string>();
 		for (const line of restoreLines) {
 			const id = (JSON.parse(line) as { id: string }).id;
-			rawLineOverrides[id] = line;
+			rawLineOverrides.set(id, line);
 		}
 		const nowIso = new Date().toISOString();
 		const audit: HiveAuditEntry[] = restoreLines.map((line) => ({
@@ -1079,4 +1280,8 @@ export const _internals = {
 	resolveHiveDataDir,
 	resolveHiveKnowledgePath,
 	transactHiveStore,
+	realpath,
+	rm,
+	chmod,
+	readQuarantineSecret,
 };

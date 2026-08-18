@@ -91,7 +91,12 @@ declare global {
 
 function normalizeForCompare(p: string): string {
 	const resolved = path.resolve(p);
-	return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+	// Case-fold on win32 AND darwin — both ship case-insensitive filesystems
+	// (NTFS default; APFS default), so a case-only path variant would evade a
+	// case-sensitive compare (PR review CC-m4).
+	return process.platform === 'win32' || process.platform === 'darwin'
+		? resolved.toLowerCase()
+		: resolved;
 }
 
 /** True when the target path lies under the captured REAL platform data dir. */

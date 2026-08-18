@@ -130,7 +130,7 @@ export function classifySwarmCommandToolUse(
 					`Present the situation to the user and ask them to run \`/swarm ${canonicalKey}\` themselves ` +
 					`(or \`bunx opencode-swarm run ${canonicalKey}\` from a terminal). ` +
 					`You MUST NOT run it yourself via Bash, swarm_command, or any other tool — ` +
-					`the runtime guardrail will block such attempts.`,
+					`the runtime guardrails are configured to block such attempts; if you observe a bypass, stop and report it to the user.`,
 			};
 		}
 		return {

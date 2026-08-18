@@ -15,7 +15,7 @@ import {
 	expect,
 	test,
 } from 'bun:test';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -107,14 +107,24 @@ afterAll(() => {
 	_internals.copyFile = realCopyFile;
 });
 
-function forgeToken(overrides: Record<string, unknown>): string {
+/**
+ * Mints an HMAC-signed token exactly as production does (via the module's
+ * secret seam). `unkeyed` forges the PRE-HARDENING shape (plain sha256 marker)
+ * to prove such tokens are now rejected (PR review CC-1/CC-m5).
+ */
+async function forgeToken(
+	overrides: Record<string, unknown>,
+	unkeyed = false,
+): Promise<string> {
 	const body = JSON.stringify(overrides);
-	return `${Buffer.from(body, 'utf-8').toString('base64url')}.${createHash(
-		'sha256',
-	)
-		.update(body, 'utf-8')
-		.digest('hex')
-		.slice(0, 16)}`;
+	const secret = await _internals.readQuarantineSecret();
+	const marker = unkeyed
+		? createHash('sha256').update(body, 'utf-8').digest('hex').slice(0, 32)
+		: createHmac('sha256', secret)
+				.update(body, 'utf-8')
+				.digest('hex')
+				.slice(0, 32);
+	return `${Buffer.from(body, 'utf-8').toString('base64url')}.${marker}`;
 }
 
 describe('hive quarantine commit (issue #2033)', () => {
@@ -251,7 +261,7 @@ describe('hive quarantine commit (issue #2033)', () => {
 		seedStore([
 			hiveEntry('id-exp-0008', 'Expired token must not authorize mutation'),
 		]);
-		const stale = forgeToken({
+		const stale = await forgeToken({
 			ids: ['id-exp-0008'],
 			rawLineHashes: { 'id-exp-0008': '0'.repeat(64) },
 			fileSha256: '0'.repeat(64),
@@ -294,10 +304,13 @@ describe('hive quarantine commit (issue #2033)', () => {
 				token: preview.preview.token,
 			});
 			expect(commit.ok).toBe(false);
-			// Store B holds a different line for the same id — the per-id check reports
-			// the precise mismatch; either abort leaves store B untouched.
+			// With HMAC-bound tokens, a token minted under store A's secret fails
+			// decode under store B's secret (invalid_token) — an even earlier
+			// abort; the legacy drift checks remain as backstop.
 			if (!commit.ok)
-				expect(['id_changed', 'store_drift']).toContain(commit.code);
+				expect(['id_changed', 'store_drift', 'invalid_token']).toContain(
+					commit.code,
+				);
 		} finally {
 			process.env.XDG_DATA_HOME = dataDir;
 			process.env.HOME = dataDir;
@@ -368,7 +381,7 @@ describe('hive quarantine commit (issue #2033)', () => {
 		const restore = freezeClock({ fixedNow: 1_780_000_000_000 });
 		try {
 			const commit = await commitHiveQuarantine({
-				token: forgeToken({
+				token: await forgeToken({
 					ids: ['id-ver-0014'],
 					rawLineHashes: { 'id-ver-0014': '0'.repeat(64) },
 					fileSha256: '0'.repeat(64),

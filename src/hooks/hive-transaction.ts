@@ -35,7 +35,7 @@
  * imported on the plugin-init path (invariant 1).
  */
 
-import { appendFile, mkdir } from 'node:fs/promises';
+import { appendFile, mkdir, realpath } from 'node:fs/promises';
 import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
 import { atomicWriteFile } from '../evidence/task-file.js';
@@ -130,9 +130,10 @@ export type HiveMutationOutcome<T> =
 			 * overriding the `JSON.stringify(entry)` serialization. Used by the
 			 * hive-quarantine rollback so restored legacy-shaped entries are written
 			 * byte-exactly instead of re-serialized through the normalize-on-read
-			 * pipeline.
+			 * pipeline. A Map by contract (PR review CC-9): plain-object maps
+			 * silently corrupt prototype-key ids like '__proto__'.
 			 */
-			rawLineOverrides?: Record<string, string>;
+			rawLineOverrides?: ReadonlyMap<string, string>;
 			/** Caller return value surfaced back through HiveTransactionResult. */
 			return: T;
 	  }
@@ -255,7 +256,7 @@ export async function transactHiveStore<T>(
 		//     so a bad path can NEVER reach this point after the store has been rewritten.
 		if (outcome.extraStagedAppends && outcome.extraStagedAppends.length > 0) {
 			for (const staged of outcome.extraStagedAppends) {
-				validateStagedAppendPath(staged.path, dataDir);
+				await validateStagedAppendPath(staged.path, dataDir);
 			}
 		}
 
@@ -265,10 +266,10 @@ export async function transactHiveStore<T>(
 		//    caller demand EXACT original line bytes for specific ids — used by the
 		//    hive-quarantine rollback so restored legacy-shaped entries are not
 		//    re-serialized through the normalize-on-read pipeline.
-		const overrides = outcome.rawLineOverrides ?? {};
+		const overrides = outcome.rawLineOverrides;
 		const content =
 			committedEntries
-				.map((e) => overrides[e.id] ?? JSON.stringify(e))
+				.map((e) => overrides?.get(e.id) ?? JSON.stringify(e))
 				.join('\n') + (committedEntries.length > 0 ? '\n' : '');
 		await _internals.atomicWriteFile(hivePath, content);
 
@@ -330,7 +331,10 @@ export async function transactHiveStore<T>(
  * `..`-segment rejection guards path escapes; the data-dir prefix guard makes symlink
  * targets inside the backups tree unreachable as staging destinations.
  */
-function validateStagedAppendPath(target: string, dataDir: string): void {
+async function validateStagedAppendPath(
+	target: string,
+	dataDir: string,
+): Promise<void> {
 	if (!path.isAbsolute(target)) {
 		throw new Error(`staged append path must be absolute: ${target}`);
 	}
@@ -357,6 +361,34 @@ function validateStagedAppendPath(target: string, dataDir: string): void {
 		throw new Error(
 			`staged append path must not target quarantine backups: ${target}`,
 		);
+	}
+	// Reparse/symlink defense (PR review CC-4): lexical prefix compares never
+	// detect a symlinked path segment — resolve both sides and require the
+	// staged target's directory to sit inside the RESOLVED data dir.
+	const realDir = await realpathQuiet(path.dirname(target));
+	const realDataDir = await realpathQuiet(dataDir);
+	const foldReal = (q: string) =>
+		process.platform === 'win32' ? q.toLowerCase() : q;
+	const foldedDir = realDir === null ? '' : foldReal(realDir);
+	const foldedData = realDataDir === null ? '' : foldReal(realDataDir);
+	if (
+		realDir === null ||
+		realDataDir === null ||
+		(foldedDir !== foldedData &&
+			!foldedDir.startsWith(`${foldedData}${path.sep}`))
+	) {
+		throw new Error(
+			`staged append path resolves outside the hive data dir: ${target}`,
+		);
+	}
+}
+
+/** Resolve a path, returning null instead of throwing when unreachable. */
+async function realpathQuiet(target: string): Promise<string | null> {
+	try {
+		return await realpath(target);
+	} catch {
+		return null;
 	}
 }
 

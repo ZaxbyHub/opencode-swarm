@@ -1,7 +1,7 @@
 /**
  * The event catalog (issue #2029).
  *
- * Exactly 41 entries, matching the `TelemetryEvent` union at
+ * Exactly 42 entries, matching the `TelemetryEvent` union at
  * `src/telemetry.ts:15-91`. Thirty-eight predate the #2029 contract; the 39th is
  * `agent_conflict_detected` (previously emitted through a force-cast past the
  * type system), and the 40th is `close_archive_result` (issue #2030 — the
@@ -69,7 +69,7 @@ export interface CatalogEntry {
 	/**
 	 * Whether an event of this kind must carry `trace.parentSpanId`.
 	 *
-	 * `false` for all 41 entries today, and that is a truthful statement about
+	 * `false` for all 42 entries today, and that is a truthful statement about
 	 * the current system rather than a placeholder: no producer supplies a
 	 * parent span, so `createObservation` never sets one. Setting this to `true`
 	 * for a kind whose producer cannot supply a parent would make every
@@ -809,7 +809,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			// abort-reason codes, counts, hash/token prefixes. Entry IDs are
 			// pseudonymous; no lesson text, prose, or filesystem path is emitted.
 			privacyClass: 'pseudonymous',
-			producer: 'src/knowledge/hive-quarantine.ts:1064',
+			producer: 'src/knowledge/hive-quarantine.ts:1265',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_LIFECYCLE_RETENTION,

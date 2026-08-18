@@ -902,10 +902,13 @@ counterpart. They will be removed in a future major release.
 The machine-global hive store (`shared-learnings.jsonl` under the platform data dir —
 `%LOCALAPPDATA%\opencode-swarm\Data` on Windows, XDG data roots on macOS/Linux) can be
 polluted by leaked test fixtures or bad promotions. `/swarm knowledge hive-quarantine` is
-the sanctioned operator remediation. It is **human-only**: agents are refused at
-`swarm_command` classification, the shell guardrail blocks CLI bypass attempts from agent
-shells, and the chat-fallback policy blocks agent-typed usage. There is no
-`--yes`/`--force`/env bypass anywhere.
+the sanctioned operator remediation. It is **human-only** in depth: agents are refused at
+`swarm_command` classification, the chat-fallback policy blocks agent-typed usage, the
+shell guardrail blocks direct/quoted/path-qualified/shell-variable-indirected CLI
+invocations from agent shells, and the CLI entry refuses human-only commands from
+non-interactive shells. The confirmation token is HMAC-bound to a per-install secret.
+No `--yes`/`--force` flag exists; the layers are defense-in-depth plus honest audit —
+not a tamper-proof boundary against the machine's own user.
 
 ### Flow
 
@@ -914,14 +917,16 @@ shells, and the chat-fallback policy blocks agent-typed usage. There is no
    sha256, the whole-store fingerprint (entry count + file sha256), the plugin version,
    and a short-lived confirmation **token** bound to all of them (15-minute TTL).
 2. **Commit** — `/swarm knowledge hive-quarantine commit --token <token> [--reason …]`
-   runs ONE `transactHiveStore` transaction: the token is re-verified against the
-   re-read-under-lock state (any concurrent append, curation, or per-entry change aborts
-   with no mutation), a complete backup plus `manifest.json` is written and hash-verified
-   under the same lock, EXACTLY the selected entries move to the
+   writes and hash-verifies a complete backup plus `manifest.json` BEFORE any mutation
+   (outside the hive lock), then runs ONE fast `transactHiveStore` transaction that
+   re-verifies the live store against that backup under lock — any concurrent append,
+   curation, per-entry change, version bump, or duplicate-id ambiguity aborts with no
+   mutation and cleans up the orphaned backup. EXACTLY the selected entries move to the
    `shared-learnings-quarantined.jsonl` sidecar (mirroring the swarm-tier
    `knowledge-quarantined.jsonl` convention), audit records land in
    `shared-knowledge-events.jsonl`, and counts/hashes are verified afterwards — a
-   verification failure auto-restores the backup.
+   verification failure attempts an automatic restore whose outcome is reported
+   honestly (a failed restore is never claimed as success).
 3. **Rollback** — `/swarm knowledge hive-quarantine rollback --token <token12> |
    --latest` restores the EXACT original line bytes from the manifest's backup,
    idempotently: ids already present with identical bytes are skipped; an id present with
@@ -935,7 +940,7 @@ shells, and the chat-fallback policy blocks agent-typed usage. There is no
   blacklist matching exists in the module; there is no bulk operation. A store that
   legitimately contains test-like text keeps it unless its exact id is selected.
 - **Recoverable by construction.** Backups live beside the store under
-  `<dataDir>/quarantine-backups/<timestamp>-<token12>/` (machine-global, discoverable
+  `<dataDir>/quarantine-backups/<timestamp>-<token12>-<random8>/` (machine-global, discoverable
   from any project — deliberately NOT under a project's `.swarm/`). Quarantined entries
   are removed from recall and query by construction (the sidecar is not a retrieval
   source; `isActiveStatus` semantics are untouched).
@@ -945,8 +950,9 @@ shells, and the chat-fallback policy blocks agent-typed usage. There is no
 - **Byte-fidelity scope.** Restored ids come back byte-exact and hash-verified. Two
   standing-transaction behaviors apply to everything EXCEPT the selected ids: unselected
   entries may be re-serialized by the store's normalize-on-write pipeline, and unparseable
-  (corrupt) lines are DROPPED by a commit rewrite — they survive only in the hash-verified
-  backup copy, from which they can be recovered manually.
+  (corrupt) lines are DROPPED by BOTH a commit rewrite and a rollback rewrite (both rebuild
+  from parsed entries) — they survive only in the hash-verified backup copy, from which
+  they can be recovered manually.
 
 ### Test isolation boundary (also issue #2033)
 

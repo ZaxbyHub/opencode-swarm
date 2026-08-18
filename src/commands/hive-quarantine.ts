@@ -2,17 +2,23 @@
  * `/swarm knowledge hive-quarantine` — human-only knowledge maintenance for the
  * machine-global hive store (issue #2033).
  *
- * Flow (operator-driven, no `--yes`/`--force`/env bypass exists anywhere):
+ * Flow (operator-driven; no `--yes`/`--force` flag exists — the only
+ * non-interactive escape is the explicit SWARM_ALLOW_HUMAN_ONLY_CLI=1 opt-in):
  *   preview  <id>[,<id>…]            read-only snapshot + confirmation token
  *   commit   --token <t> [--reason r] validated backup → exact-ID quarantine → verify
  *   rollback --token <t12> | --latest  idempotent byte-exact restore from the manifest
  *   status                            read-only list of quarantine backups
  *
- * The mutating stages are gated by `toolPolicy: 'human-only'` on the registry entry:
- * agents are refused at `swarm_command` classification, the shell-bypass guardrail blocks
- * `bunx opencode-swarm run knowledge hive-quarantine …`, and the chat-fallback policy
- * blocks agent-typed usage. There is no non-interactive path: `commit` requires a token
- * that only a human-run `preview` can produce.
+ * Layered gates (PR #2200 review): `toolPolicy: 'human-only'` refuses agents at
+ * `swarm_command` classification and the chat-fallback policy blocks agent-typed
+ * usage; the shell guardrail blocks direct, quoted, path-qualified, and
+ * shell-variable-indirected CLI invocations from agent shells; the CLI entry
+ * itself refuses human-only commands from non-interactive shells (aliases
+ * resolved to their canonical policy). The confirmation token is HMAC-bound to
+ * a per-install secret, so it cannot be minted from public store contents
+ * alone. These layers are defense-in-depth with an honest audit trail — local
+ * single-user tooling cannot be tamper-proof against the owning user, and the
+ * docs make no absolute claim otherwise.
  */
 
 import {

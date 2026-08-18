@@ -1542,7 +1542,7 @@ export const COMMAND_REGISTRY = {
 		details:
 			'Issue #2033 operator maintenance for the machine-global hive knowledge store. ' +
 			'`preview <id>[,<id>...]` shows exact candidate IDs with per-line hashes, provenance, status, and a store fingerprint, and issues a short-lived confirmation token. ' +
-			'`commit --token <t> [--reason <text>]` re-verifies the store under the hive transaction lock, creates a hash-verified backup plus manifest, moves EXACTLY the selected entries to shared-learnings-quarantined.jsonl, and verifies counts and hashes afterwards (auto-restoring from the backup on verification failure). ' +
+			'`commit --token <t> [--reason <text>]` writes and hash-verifies a complete backup plus manifest BEFORE any mutation (outside the hive lock), then re-verifies the live store against that backup inside one fast transaction (any drift — concurrent append, entry change, version bump, or duplicate-id ambiguity — aborts with no mutation and cleans up the orphaned backup), moving EXACTLY the selected entries to shared-learnings-quarantined.jsonl, with counts verified afterwards and an honestly-reported automatic restore on failure. ' +
 			'`rollback --token <token12> | --latest` restores the exact original bytes idempotently. ' +
 			'Selection is exact-ID only — never by text, substring, cohort, age, or blacklist, and never in bulk. ' +
 			'Human-only: refused for agents via swarm_command, chat fallback, and the shell guardrail.',
