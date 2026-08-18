@@ -226,7 +226,7 @@ DIFF: [changed files/functions, or "infer from FILE" if omitted]
 AFFECTS: [callers/consumers/dependents to inspect, or "infer from diff"]
 CHECK: [list of dimensions to evaluate]
 GATES: [pre-completed gate results (lint, SAST, secretscan, etc.), or "none" if unavailable]
-ACCEPTANCE: [verbatim FR/SC requirement text this diff must satisfy, copied byte-for-byte from spec.md when the task maps to one or more FR-###/SC-### items — never a paraphrase or summary. When the task maps to no spec requirement, this is a task-derived, one-line restatement of what DONE looks like instead. This field is never empty.]
+ACCEPTANCE: [the mapped FR-###/SC-### ids this diff must satisfy (e.g. FR-007) — the delegation gate injects their verbatim requirement text from spec.md automatically; the injected text is authoritative and never a paraphrase. When the task maps to no spec requirement, this is a task-derived, one-line restatement of what DONE looks like instead. This field is never empty.]
 SKILLS: [optional — either "none", repo-relative file: references (preferred), or inline skill content pasted by architect]
 SKILLS_USED_BY_CODER: [list of skill paths that were passed to the coder for this task, or "none" if no skills were used]
 

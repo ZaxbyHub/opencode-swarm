@@ -1044,6 +1044,81 @@ export function describeCoverageMiss(params: {
 }
 
 /**
+ * Builds the ACCEPTANCE_FIELD_COVERAGE_MISMATCH error (#1687/#1896/#2063/#2204
+ * contract). Exported pure so the message contract — normalized-compare note,
+ * divergence pointer vs #2204 completely-missing fallback, mojibake warning,
+ * fenced paste-ready requirement body with its cap, and the anti-spelunking
+ * directive — stays unit-testable even though #2205's injection makes the
+ * toolBefore throw structurally unreachable (defense-in-depth).
+ */
+export function buildAcceptanceCoverageMismatchError(params: {
+	targetAgent: string;
+	coverageTaskId: string | null;
+	coverageResult: {
+		covered: boolean;
+		missingId?: string;
+		diagnostic?: CoverageMissDiagnostic;
+		expectedBody?: string;
+	};
+}): Error {
+	const { targetAgent, coverageTaskId, coverageResult } = params;
+	// #1896: the compare is a NORMALIZED substring match (Unicode NFC +
+	// punctuation/whitespace folding), not a raw byte compare — so the
+	// diagnostic below points at the first NORMALIZED divergence and, when
+	// the text looks mojibake'd, says so.
+	const diag = coverageResult.diagnostic;
+	const diagLines: string[] = [];
+	if (diag) {
+		if (diag.completelyMissing) {
+			// #2204: the sub-threshold prefix match is coincidental noise —
+			// do NOT point at a "divergence" word; state the text is absent.
+			diagLines.push(
+				`  no meaningful prefix of the requirement text was found in ACCEPTANCE (matched prefix under ${COVERAGE_DIAG_MIN_PREFIX} chars is treated as coincidental)`,
+			);
+			diagLines.push(`  spec requires here: "${diag.expectedSnippet}"`);
+			diagLines.push(
+				'  ACCEPTANCE has here: "[Requirement text completely missing from prompt]"',
+			);
+		} else {
+			diagLines.push(
+				`  first divergence at normalized offset ${diag.divergenceOffset}` +
+					(diag.divergenceOffset === 0 ? ' (no aligned prefix found)' : ''),
+			);
+			diagLines.push(`  spec requires here: "${diag.expectedSnippet}"`);
+			diagLines.push(`  ACCEPTANCE has here: "${diag.foundSnippet}"`);
+		}
+		if (diag.corruptionHint) {
+			diagLines.push(`  ENCODING WARNING: ${diag.corruptionHint}`);
+		}
+	}
+	// #2063 A2: embed the raw, untrimmed requirement body verbatim (fenced,
+	// capped) so the architect can paste it directly instead of re-reading
+	// spec.md. `normalizeAcceptanceText`'s leading list-marker strip is
+	// POSITION-dependent (only a line-initial `- `/`* ` is stripped), so a
+	// bulleted multi-line body flattened onto one line can false-fail even
+	// when "pasted verbatim" — hence the explicit line-break instruction.
+	const rawExpectedBody = coverageResult.expectedBody ?? '';
+	const truncated = rawExpectedBody.length > ACCEPTANCE_EXPECTED_BODY_CAP;
+	const expectedBodyBlock = truncated
+		? `${rawExpectedBody.slice(0, ACCEPTANCE_EXPECTED_BODY_CAP)}\n…[truncated — read the remainder from .swarm/spec.md under ${coverageResult.missingId}]`
+		: rawExpectedBody;
+	return new Error(
+		`ACCEPTANCE_FIELD_COVERAGE_MISMATCH: the ${targetAgent} delegation for task ${coverageTaskId} was blocked because its ACCEPTANCE field does not cover the requirement text for ${coverageResult.missingId} from .swarm/spec.md (compared after Unicode/whitespace normalization, not raw bytes).\n${diagLines.join('\n')}\n` +
+			`Replace your ACCEPTANCE text for ${coverageResult.missingId} with the exact requirement text below, ` +
+			`PRESERVING ITS LINE BREAKS, then re-dispatch (body capped at ${ACCEPTANCE_EXPECTED_BODY_CAP} chars` +
+			`${truncated ? ', truncated below' : ''}):\n` +
+			'```\n' +
+			`${expectedBodyBlock}\n` +
+			'```\n' +
+			`(see the ACCEPTANCE FIELD RESOLUTION section of your system prompt for how ACCEPTANCE is derived; ` +
+			`if the ENCODING WARNING above is present, repair .swarm/spec.md first, then re-dispatch.) ` +
+			`Do NOT investigate the installed swarm plugin package (node_modules/opencode-swarm, ~/.cache/opencode) ` +
+			`— the fix is in your dispatch content, not in plugin internals. If this same error repeats after 2 fix ` +
+			`attempts, STOP and present the blocker to the user.`,
+	);
+}
+
+/**
  * FR-001/FR-002/FR-005/SC-001/SC-002/SC-006 (issue #1687): mechanical coverage
  * check that the ACCEPTANCE text CONTAINS the verbatim requirement body for each
  * mapped spec id. Fail-open by construction:
@@ -1096,6 +1171,92 @@ export function checkAcceptanceCoversFrRefs(params: {
 		}
 	}
 	return { covered: true };
+}
+
+/** Args fields (in precedence order) that may carry the ACCEPTANCE header. */
+const ACCEPTANCE_ARGS_FIELDS = [
+	'prompt',
+	'description',
+	'task',
+	'input',
+	'message',
+] as const;
+
+export interface AcceptanceInjectionOutcome {
+	/** The args field that carried the ACCEPTANCE header and was mutated. */
+	field: (typeof ACCEPTANCE_ARGS_FIELDS)[number];
+	/** Spec ids whose verbatim bodies were appended. */
+	injectedIds: string[];
+}
+
+/**
+ * Issue #2205: programmatically guarantee verbatim FR/SC fidelity in the
+ * ACCEPTANCE field. The architect lists the task's mapped FR-###/SC-### ids on
+ * the ACCEPTANCE line (or pastes bodies itself, legacy style); this helper
+ * appends the VERBATIM requirement body from .swarm/spec.md — prefixed with the
+ * id, on its own line inside the ACCEPTANCE section — for every mapped id the
+ * current ACCEPTANCE text does not already cover, mutating the args field in
+ * place so the downstream coder/reviewer receives the exact requirement text.
+ *
+ * Coverage uses the SAME normalized-substring test as
+ * `checkAcceptanceCoversFrRefs` (shared helpers, no drift), so:
+ *  - an already-verbatim legacy dispatch is a no-op;
+ *  - an id missing from spec.md is skipped (fail-open, mirrored semantics);
+ *  - after injection, every extractable id is covered by construction.
+ *
+ * Returns null when nothing was injected (no ACCEPTANCE header in any field,
+ * or every mapped id already covered). Throws never — mechanical failures are
+ * the caller's concern (the coverage block is already fail-open).
+ */
+export function injectSpecRequirementsIntoAcceptance(params: {
+	args: Record<string, unknown>;
+	frRefs: string[];
+	specText: string;
+}): AcceptanceInjectionOutcome | null {
+	const headerRe = /^ACCEPTANCE:[ \t]*(.*)$/i;
+	let field: (typeof ACCEPTANCE_ARGS_FIELDS)[number] | undefined;
+	let lines: string[] | undefined;
+	let headerIdx = -1;
+	for (const candidate of ACCEPTANCE_ARGS_FIELDS) {
+		const value = params.args[candidate];
+		if (typeof value !== 'string' || !value.includes('ACCEPTANCE:')) continue;
+		const candidateLines = value.split(/\r?\n/);
+		const idx = candidateLines.findIndex((line) => headerRe.test(line));
+		if (idx >= 0) {
+			field = candidate;
+			lines = candidateLines;
+			headerIdx = idx;
+			break;
+		}
+	}
+	if (!field || !lines || headerIdx < 0) return null;
+
+	const normalizedAcceptance = normalizeAcceptanceText(lines.join('\n'));
+	const injectedIds: string[] = [];
+	const injectionBlocks: string[] = [];
+	for (const id of params.frRefs) {
+		const body = extractSpecRequirementBodyById(params.specText, id);
+		if (body === null) continue; // unknown id — fail-open skip
+		if (normalizedAcceptance.includes(normalizeAcceptanceText(body))) {
+			continue; // already covered verbatim — nothing to inject
+		}
+		injectedIds.push(id);
+		// trim(): extractSpecRequirementBodyById returns the RAW body (untrimmed,
+		// leading space after the bold span); the injected block reads cleaner
+		// trimmed, and the coverage compare normalizes whitespace anyway.
+		injectionBlocks.push(`${id}: ${body.trim()}`);
+	}
+	if (injectedIds.length === 0) return null;
+	// Insert right after the ACCEPTANCE header line. A `FR-###:`/`SC-###:` line
+	// does NOT match the next-field-header pattern (`^[A-Z][A-Z0-9_]*:` cannot
+	// span the `-`), so the injected bodies stay INSIDE the ACCEPTANCE section.
+	lines.splice(headerIdx + 1, 0, injectionBlocks.join('\n'));
+	params.args[field] = lines.join('\n');
+	logger.log(
+		'[delegation-gate] injected verbatim requirement text into ACCEPTANCE',
+		{ field, injected_ids: injectedIds.join(',') },
+	);
+	return { field, injectedIds };
 }
 
 interface MessageInfo {
@@ -3217,9 +3378,9 @@ export function createDelegationGateHook(
 						: 'it has no ACCEPTANCE field';
 				throw new Error(
 					`ACCEPTANCE_FIELD_REQUIRED: the ${targetAgent} delegation was blocked because ${detail}. ` +
-						`Every coder/reviewer dispatch MUST carry a non-empty ACCEPTANCE: line in its prompt — the verbatim ` +
-						`FR-###/SC-### requirement text from .swarm/spec.md when the task maps to one or more spec requirements, or a ` +
-						`one-line task-derived statement of what DONE looks like otherwise (see the ACCEPTANCE FIELD RESOLUTION ` +
+						`Every coder/reviewer dispatch MUST carry a non-empty ACCEPTANCE: line in its prompt — the mapped FR-###/SC-### ids ` +
+						`(the delegation gate injects their verbatim requirement text from .swarm/spec.md automatically) when the task maps to one or more ` +
+						`spec requirements, or a one-line task-derived statement of what DONE looks like otherwise (see the ACCEPTANCE FIELD RESOLUTION ` +
 						`section of your system prompt and .swarm/spec.md). Add an ACCEPTANCE: line to the delegation prompt and ` +
 						`re-dispatch. Do NOT investigate the installed swarm plugin package (node_modules/opencode-swarm, ` +
 						`~/.cache/opencode) — the fix is in your dispatch content, not in plugin internals. If this same error ` +
@@ -3269,8 +3430,33 @@ export function createDelegationGateHook(
 								path.join(directory, '.swarm', 'spec.md'),
 								'utf8',
 							);
+							// #2205: guarantee verbatim FR/SC fidelity programmatically —
+							// append the exact spec.md requirement bodies for any mapped id
+							// the ACCEPTANCE text does not already cover, mutating the
+							// dispatch args in place so the downstream coder/reviewer sees
+							// them. The architect only has to list the ids on the
+							// ACCEPTANCE line; byte-for-byte copying is no longer LLM
+							// responsibility. (Errors here fall to the surrounding
+							// fail-open catch, same as the rest of this block.)
+							injectSpecRequirementsIntoAcceptance({
+								args,
+								frRefs,
+								specText,
+							});
+							// Re-derive the acceptance text from the (possibly mutated)
+							// args so the coverage check validates what will actually be
+							// dispatched.
+							const effectiveAcceptanceText = [
+								args.prompt,
+								args.description,
+								args.task,
+								args.input,
+								args.message,
+							]
+								.filter((value): value is string => typeof value === 'string')
+								.join('\n');
 							coverageResult = checkAcceptanceCoversFrRefs({
-								acceptanceText: acceptancePromptText,
+								acceptanceText: effectiveAcceptanceText,
 								frRefs,
 								specText,
 							});
@@ -3282,63 +3468,16 @@ export function createDelegationGateHook(
 				coverageResult = undefined;
 			}
 			if (coverageResult && coverageResult.covered === false) {
-				// #1896: the compare is a NORMALIZED substring match (Unicode NFC +
-				// punctuation/whitespace folding), not a raw byte compare — so the
-				// diagnostic below points at the first NORMALIZED divergence and, when
-				// the text looks mojibake'd, says so. This replaces the old, misleading
-				// "copy byte-for-byte" instruction that sent architects hex-dumping.
-				const diag = coverageResult.diagnostic;
-				const diagLines: string[] = [];
-				if (diag) {
-					if (diag.completelyMissing) {
-						// #2204: the sub-threshold prefix match is coincidental noise —
-						// do NOT point at a "divergence" word; state the text is absent.
-						diagLines.push(
-							`  no meaningful prefix of the requirement text was found in ACCEPTANCE (matched prefix under ${COVERAGE_DIAG_MIN_PREFIX} chars is treated as coincidental)`,
-						);
-						diagLines.push(`  spec requires here: "${diag.expectedSnippet}"`);
-						diagLines.push(
-							'  ACCEPTANCE has here: "[Requirement text completely missing from prompt]"',
-						);
-					} else {
-						diagLines.push(
-							`  first divergence at normalized offset ${diag.divergenceOffset}` +
-								(diag.divergenceOffset === 0
-									? ' (no aligned prefix found)'
-									: ''),
-						);
-						diagLines.push(`  spec requires here: "${diag.expectedSnippet}"`);
-						diagLines.push(`  ACCEPTANCE has here: "${diag.foundSnippet}"`);
-					}
-					if (diag.corruptionHint) {
-						diagLines.push(`  ENCODING WARNING: ${diag.corruptionHint}`);
-					}
-				}
-				// #2063 A2: embed the raw, untrimmed requirement body verbatim (fenced,
-				// capped) so the architect can paste it directly instead of re-reading
-				// spec.md. `normalizeAcceptanceText`'s leading list-marker strip is
-				// POSITION-dependent (only a line-initial `- `/`* ` is stripped), so a
-				// bulleted multi-line body flattened onto one line can false-fail even
-				// when "pasted verbatim" — hence the explicit line-break instruction.
-				const rawExpectedBody = coverageResult.expectedBody ?? '';
-				const truncated = rawExpectedBody.length > ACCEPTANCE_EXPECTED_BODY_CAP;
-				const expectedBodyBlock = truncated
-					? `${rawExpectedBody.slice(0, ACCEPTANCE_EXPECTED_BODY_CAP)}\n…[truncated — read the remainder from .swarm/spec.md under ${coverageResult.missingId}]`
-					: rawExpectedBody;
-				throw new Error(
-					`ACCEPTANCE_FIELD_COVERAGE_MISMATCH: the ${targetAgent} delegation for task ${coverageTaskId} was blocked because its ACCEPTANCE field does not cover the requirement text for ${coverageResult.missingId} from .swarm/spec.md (compared after Unicode/whitespace normalization, not raw bytes).\n${diagLines.join('\n')}\n` +
-						`Replace your ACCEPTANCE text for ${coverageResult.missingId} with the exact requirement text below, ` +
-						`PRESERVING ITS LINE BREAKS, then re-dispatch (body capped at ${ACCEPTANCE_EXPECTED_BODY_CAP} chars` +
-						`${truncated ? ', truncated below' : ''}):\n` +
-						'```\n' +
-						`${expectedBodyBlock}\n` +
-						'```\n' +
-						`(see the ACCEPTANCE FIELD RESOLUTION section of your system prompt for how ACCEPTANCE is derived; ` +
-						`if the ENCODING WARNING above is present, repair .swarm/spec.md first, then re-dispatch.) ` +
-						`Do NOT investigate the installed swarm plugin package (node_modules/opencode-swarm, ~/.cache/opencode) ` +
-						`— the fix is in your dispatch content, not in plugin internals. If this same error repeats after 2 fix ` +
-						`attempts, STOP and present the blocker to the user.`,
-				);
+				// Defense-in-depth: after #2205's injection this throw is
+				// structurally unreachable in the toolBefore flow (injection
+				// covers every extractable id before the check runs), but the
+				// check + error contract stay wired for any future divergence
+				// between injection and validation.
+				throw buildAcceptanceCoverageMismatchError({
+					targetAgent,
+					coverageTaskId,
+					coverageResult,
+				});
 			}
 		}
 
