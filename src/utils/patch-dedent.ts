@@ -19,7 +19,13 @@
  *  - A uniformly indented patch (wrapper indent N) has every line stripped by
  *    exactly N chars: `+`/`-`/`\` markers return to column 0 and context lines
  *    keep their structural space marker (position N+1 is content, not wrapper).
- *  - Empty lines are skipped when computing the minimum and never sliced.
+ *  - Empty lines (and whitespace-only lines) are skipped when computing the
+ *    minimum indent. Truly empty lines (`line.length === 0`) carry no
+ *    characters so the length-guarded slice leaves them intact. Whitespace-only
+ *    lines whose length is >= minIndent ARE sliced to the prefix-stripped
+ *    remainder (e.g. a 3-space line with minIndent=3 becomes ''), which is
+ *    safe for downstream parsers because they treat whitespace-only lines as
+ *    no-content.
  *  - Mixed indentation (some lines shallower than others) yields minIndent 0 →
  *    no-op; the payload fails to parse exactly as it does today (fail-clean,
  *    no corruption).

@@ -245,6 +245,90 @@ describe('swarm_apply_patch #2206 alias + indent tolerance', () => {
 		expect(result.success).toBe(false);
 		expect(JSON.stringify(result)).toContain('patch text cannot be empty');
 	});
+
+	// === PRR-006: review-handoff test-gap coverage (closure of #2206 review) ===
+
+	test('canonical patch wins when all four payload fields are populated (#2206 review)', async () => {
+		const targetFile = 'precedence.txt';
+		createFile(workspace, targetFile, 'a\n');
+		const canonicalPatch = buildDiff(
+			targetFile,
+			targetFile,
+			'a\n',
+			'CANONICAL\n',
+		);
+		const aliasPatch = buildDiff(targetFile, targetFile, 'a\n', 'ALIAS\n');
+		const args: Record<string, unknown> = {
+			files: [targetFile],
+			patch: canonicalPatch,
+			patchText: aliasPatch,
+			patch_text: aliasPatch,
+			patchPayload: aliasPatch,
+		};
+		const result = parseResult(
+			await swarmApplyPatch.execute(args, workspaceOf(workspace) as any),
+		);
+		expect(result.success).toBe(true);
+		// Canonical `patch` wins; alias fields are silently ignored.
+		expect(readFileContent(workspace, targetFile)).toBe('CANONICAL\n');
+	});
+
+	test('alias precedence is positional first-truthy: patchText > patch_text > patchPayload (#2206 review)', async () => {
+		const targetFile = 'positional.txt';
+		createFile(workspace, targetFile, 'a\n');
+		const patchA = buildDiff(targetFile, targetFile, 'a\n', 'A\n');
+		const patchB = buildDiff(targetFile, targetFile, 'a\n', 'B\n');
+		const patchC = buildDiff(targetFile, targetFile, 'a\n', 'C\n');
+		const args: Record<string, unknown> = {
+			files: [targetFile],
+			patch_text: patchB,
+			patchPayload: patchC,
+			patchText: patchA,
+		};
+		const result = parseResult(
+			await swarmApplyPatch.execute(args, workspaceOf(workspace) as any),
+		);
+		expect(result.success).toBe(true);
+		// patchText is the first positional among the aliases → wins.
+		expect(readFileContent(workspace, targetFile)).toBe('A\n');
+	});
+
+	test('an empty canonical patch falls through to the first non-empty alias (#2206 review)', async () => {
+		const targetFile = 'empty-canonical.txt';
+		createFile(workspace, targetFile, 'a\n');
+		const aliasPatch = buildDiff(targetFile, targetFile, 'a\n', 'ALIAS\n');
+		const args: Record<string, unknown> = {
+			files: [targetFile],
+			patch: '',
+			patchText: aliasPatch,
+		};
+		const result = parseResult(
+			await swarmApplyPatch.execute(args, workspaceOf(workspace) as any),
+		);
+		expect(result.success).toBe(true);
+		// Schema accepts empty-string patch (now optional); execute-side
+		// find() predicate `value.length > 0` falls through to the alias.
+		expect(readFileContent(workspace, targetFile)).toBe('ALIAS\n');
+	});
+
+	test('applies a uniformly TAB-indented unified diff (#2206 review / edge parity)', async () => {
+		const targetFile = 'tab-indent.txt';
+		createFile(workspace, targetFile, 'a\nb\n');
+		const inner = buildDiff(targetFile, targetFile, 'a\nb\n', 'a\nB\n');
+		// Single leading tab per non-empty line.
+		const tabbed = inner
+			.split('\n')
+			.map((line) => (line.length === 0 ? line : '\t' + line))
+			.join('\n');
+		const result = parseResult(
+			await swarmApplyPatch.execute(
+				{ patch: tabbed, files: [targetFile] },
+				workspaceOf(workspace) as any,
+			),
+		);
+		expect(result.success).toBe(true);
+		expect(readFileContent(workspace, targetFile)).toBe('a\nB\n');
+	});
 });
 
 // ===== Issue #2206 (final-critic finding): pin the DECLARED schema surface =====

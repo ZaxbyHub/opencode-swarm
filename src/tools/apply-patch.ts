@@ -1245,7 +1245,7 @@ function isUnsupportedPatchFormat(patchText: string): boolean {
  */
 export const swarmApplyPatch: ToolDefinition = createSwarmTool({
 	description:
-		'Apply a unified diff patch to workspace files. Validates paths, matches context exactly, and writes atomically. Coder-scoped write tool. Use standard unified diff format (--- a/file / +++ b/file / @@ hunks). Does NOT support *** Begin Patch / *** Update File payloads — use the native apply_patch tool for those.',
+		'Apply a unified diff patch to workspace files. Validates paths, matches context exactly, and writes atomically. Coder-scoped write tool. Use standard unified diff format (--- a/file / +++ b/file / @@ hunks). Indented patches (e.g. inside a fenced markdown/YAML block) are automatically dedented to column 0 before parsing — the diff body itself may be indented. Does NOT support *** Begin Patch / *** Update File payloads — use the native apply_patch tool for those. Accepts the payload as `patch` (canonical) or any of the aliases `patchText`, `patch_text`, `patchPayload` (#2206); the resolver picks the first non-empty one.',
 	args: {
 		patch: z
 			.string()
