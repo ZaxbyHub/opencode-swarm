@@ -7,3 +7,9 @@ coverageReporter = ["lcov", "text"]
 # Generate lcov.info for CI artifacts + text for human readability
 coverageDir = "./coverage"
 # Coverage output directory
+
+# Fail-closed production-store tripwire (issue #2033): captures the REAL platform
+# knowledge-store paths with pristine env before any test file loads, then blocks
+# read/mutate attempts against them (spread-real node:fs guards + Bun.write wrap).
+# Hermetic suites that redirect platform roots are unaffected.
+preload = ["./tests/preload/prod-store-tripwire.ts"]

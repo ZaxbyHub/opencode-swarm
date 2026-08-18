@@ -250,6 +250,18 @@ export const KNOWN_TELEMETRY_KEYS: Readonly<Record<string, readonly string[]>> =
 			'receiptOutcome',
 			'receiptSource',
 		]),
+		// Issue #2033 human-only hive-store maintenance audit: metadata only — bounded
+		// phase/abort codes, counts, and hash/token prefixes.
+		knowledge_maintenance: Object.freeze([
+			'phase',
+			'abortReason',
+			'selectedCount',
+			'storeEntriesBefore',
+			'storeEntriesAfter',
+			'backupBytes',
+			'storeSha256Prefix',
+			'token12',
+		]),
 	});
 
 const EMPTY_EXTRA: Record<string, unknown> = Object.freeze({});

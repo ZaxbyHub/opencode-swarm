@@ -65,6 +65,7 @@ describe('Command registration parity — classification baselines', () => {
 			'memory import',
 			'memory migrate',
 			// FR-004: sdd project removed — moved to agent
+			'knowledge hive-quarantine', // #2033 human-only exact-ID quarantine
 		]);
 
 		// Authoritative pre-existing baseline (33 tool commands = 29 allowlist + 4 human-only)
@@ -74,6 +75,7 @@ describe('Command registration parity — classification baselines', () => {
 			'memory import',
 			'memory migrate',
 			// FR-004: sdd project removed — now in allowlist
+			'knowledge hive-quarantine', // #2033 human-only
 		]);
 
 		// Authoritative pre-existing baseline (14 no-args entries)

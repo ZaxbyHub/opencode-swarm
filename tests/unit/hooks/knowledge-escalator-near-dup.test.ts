@@ -21,6 +21,7 @@ import {
 } from '../../../src/hooks/knowledge-escalator.js';
 import { readKnowledgeEvents } from '../../../src/hooks/knowledge-events.js';
 import type { ReceiptMembership } from '../../../src/hooks/knowledge-receipt-ledger.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const DAY = 24 * 60 * 60 * 1000;
 const NOW = new Date('2026-04-15T00:00:00.000Z');
@@ -117,6 +118,10 @@ describe('maybeEscalateOnViolation — near-duplicate co-escalation', () => {
 	let swarmDir: string;
 	let knowledgePath: string;
 	let eventsPath: string;
+	let hiveHome: string;
+	let origHome: string | undefined;
+	let origLocalAppData: string | undefined;
+	let origXdgData: string | undefined;
 	const originalQueryHistoricalOutcomes = _internals.queryHistoricalOutcomes;
 
 	beforeEach(() => {
@@ -125,6 +130,17 @@ describe('maybeEscalateOnViolation — near-duplicate co-escalation', () => {
 		fs.mkdirSync(swarmDir, { recursive: true });
 		knowledgePath = path.join(swarmDir, 'knowledge.jsonl');
 		eventsPath = path.join(swarmDir, 'knowledge-events.jsonl');
+		// Redirect the platform hive root for the whole suite: the escalator's near-dup
+		// co-counting reads the hive store on every call (fail-open on read errors).
+		// Without redirection that read hits the REAL machine store — machine-dependent
+		// results and, under the issue #2033 tripwire, a blocked read (#2033).
+		origHome = process.env.HOME;
+		origLocalAppData = process.env.LOCALAPPDATA;
+		origXdgData = process.env.XDG_DATA_HOME;
+		hiveHome = canonicalMkdtemp('escalator-hive-');
+		process.env.HOME = hiveHome;
+		process.env.LOCALAPPDATA = path.join(hiveHome, 'AppData', 'Local');
+		process.env.XDG_DATA_HOME = hiveHome;
 		historicalMemberships = [];
 		_internals.queryHistoricalOutcomes = async () => ({
 			ok: true,
@@ -134,7 +150,14 @@ describe('maybeEscalateOnViolation — near-duplicate co-escalation', () => {
 
 	afterEach(() => {
 		_internals.queryHistoricalOutcomes = originalQueryHistoricalOutcomes;
+		if (origHome === undefined) delete process.env.HOME;
+		else process.env.HOME = origHome;
+		if (origLocalAppData === undefined) delete process.env.LOCALAPPDATA;
+		else process.env.LOCALAPPDATA = origLocalAppData;
+		if (origXdgData === undefined) delete process.env.XDG_DATA_HOME;
+		else process.env.XDG_DATA_HOME = origXdgData;
 		fs.rmSync(dir, { recursive: true, force: true });
+		fs.rmSync(hiveHome, { recursive: true, force: true });
 	});
 
 	it('does not escalate when only the exact entry has 1 violation (no near-duplicates)', async () => {
