@@ -20,7 +20,8 @@ const BUNDLE = path.join(ROOT, 'dist/index.js');
  *   2. `overrideIndexInternalsForTest` — re-exported by `dist/index.js`, so the
  *      seam IS reachable for a bundle import; it stubs the post-resolution queue
  *      that is config-doctor's only caller and that would otherwise recreate
- *      this test's temp dir after teardown as a permanent `os.tmpdir()` orphan.
+ *      this test's temp dir after teardown as a permanent orphan in the
+ *      system temp directory.
  *
  * File-scoped (`beforeAll`/`afterAll`) rather than per-test, matching
  * `tests/helpers/index-commands-shared.ts`: Bun runs test files sequentially in

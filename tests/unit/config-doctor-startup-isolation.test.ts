@@ -26,7 +26,6 @@
  */
 import { describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import OpenCodeSwarm, { overrideIndexInternalsForTest } from '../../src/index';
 import { createIsolatedTestEnv } from '../helpers/isolated-test-env.js';
@@ -36,6 +35,7 @@ import {
 	expectFileBytesUnchanged,
 	runWithCleanup,
 } from '../helpers/test-isolation.js';
+import { canonicalTmpDir } from '../helpers/tmpdir.js';
 
 const REPO_ROOT = path.resolve(import.meta.dir, '../..');
 const TRACKED_PROJECT_CONFIG = path.join(
@@ -90,10 +90,12 @@ function sleep(ms: number): Promise<void> {
 	});
 }
 
-/** `swarm-doctor-arm-*` entries directly under `os.tmpdir()`. */
+/** `swarm-doctor-arm-*` entries directly under the system temp directory. */
 function armDirEntries(): Set<string> {
 	return new Set(
-		fs.readdirSync(os.tmpdir()).filter((e) => e.startsWith(ARM_DIR_PREFIX)),
+		fs
+			.readdirSync(canonicalTmpDir())
+			.filter((e) => e.startsWith(ARM_DIR_PREFIX)),
 	);
 }
 

@@ -27,7 +27,7 @@ const isolation = createIndexCommandsIsolation(mockPluginInput);
 // File-scoped, NOT per-test — see `createIndexCommandsModuleGuards` (PR #2173
 // F-006): `OpenCodeSwarm.server()` schedules unref'd background tasks that
 // would otherwise fire after `afterEach` and recreate this file's temp dirs as
-// permanent orphans under os.tmpdir().
+// permanent orphans in the system temp directory.
 const moduleGuards = createIndexCommandsModuleGuards();
 
 beforeAll(moduleGuards.setUpAll);

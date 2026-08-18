@@ -17,9 +17,9 @@ import { createIsolatedTestEnv } from '../helpers/isolated-test-env.js';
 // File-scoped, NOT per-test (PR #2173 F-006). `OpenCodeSwarm.server()` queues
 // background work on an unref'd `setTimeout(0)` that fires AFTER the synchronous
 // `afterEach` has removed this file's temp dir — and then RECREATES it, leaving
-// a permanent `swarm-test-*` orphan under os.tmpdir() on every run (2-5 per run
-// before this stub). No test in this file exercises the scheduling seam, so
-// neutralizing it costs nothing here.
+// a permanent `swarm-test-*` orphan in the system temp directory on every run
+// (2-5 per run before this stub). No test in this file exercises the scheduling
+// seam, so neutralizing it costs nothing here.
 const moduleGuards = createIndexCommandsModuleGuards();
 
 beforeAll(moduleGuards.setUpAll);

@@ -6,12 +6,12 @@
  * bundled-skill sync, repo-graph init) onto an unref'd `setTimeout(0)`. That
  * timer fires AFTER the synchronous `afterEach` has already removed the test's
  * temp working dir — and the tasks then RECREATE it, leaving a permanent orphan
- * under `os.tmpdir()` on every run.
+ * in the system temp directory on every run.
  *
  * `createIndexCommandsModuleGuards()` stubs that scheduler, which is what
  * prevents the orphan. Nothing asserted it: reverting the stub left every other
- * test in the suite green while quietly littering `os.tmpdir()`. This file is
- * that missing assertion.
+ * test in the suite green while quietly littering the system temp directory.
+ * This file is that missing assertion.
  *
  * ## Two orphan prefixes, two guards
  *
@@ -22,7 +22,7 @@
  *      `tests/unit/index-commands*.test.ts` fixture. Covered IN-PROCESS below
  *      by driving that exact fixture.
  *   2. `swarm-test-*` — `createIsolatedTestEnv()` plus the bare
- *      `mkdtemp(path.join(tmpdir(), 'swarm-test-'))` used by
+ *      `mkdtemp` call against the system temp directory used by
  *      `tests/unit/index.test.ts` and
  *      `tests/unit/index-task-42-commands.test.ts`. Those two files carry their
  *      own `beforeAll(moduleGuards.setUpAll)` wiring, and an in-process test
@@ -39,7 +39,6 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import OpenCodeSwarm from '../../src/index';
 import {
@@ -49,11 +48,12 @@ import {
 } from '../helpers/index-commands-shared.js';
 import { createSafeTestDir } from '../helpers/safe-test-dir.js';
 import { runWithCleanup } from '../helpers/test-isolation.js';
+import { canonicalTmpDir } from '../helpers/tmpdir.js';
 
 /**
  * Every temp-dir prefix this repository's boot fixtures create directly under
- * `os.tmpdir()`: `createSafeTestDir()` uses the first, `createIsolatedTestEnv()`
- * and the two `mkdtemp` call sites use the second.
+ * the system temp directory: `createSafeTestDir()` uses the first,
+ * `createIsolatedTestEnv()` and the two `mkdtemp` call sites use the second.
  */
 const SWARM_TEMP_DIR_PREFIXES = ['swarm-safe-test-', 'swarm-test-'] as const;
 
@@ -109,7 +109,11 @@ describe('index-commands temp-dir hygiene (PR #2173 F-006)', () => {
 		// Snapshot-and-diff rather than an absolute count: `bun test` runs files
 		// sequentially in one process, but nothing forbids another fixture holding
 		// a temp dir open across this window, and an absolute count would blame it.
-		const before = swarmTempEntries(os.tmpdir());
+		//
+		// `canonicalTmpDir()` is the realpath-resolved form of the SAME directory
+		// the fixtures write into (macOS `/var` -> `/private/var`), so listing it
+		// still sees entries the fixtures created through the unresolved path.
+		const before = swarmTempEntries(canonicalTmpDir());
 
 		isolation.setUp();
 		// `runWithCleanup` rather than try/finally: the body's error always wins
@@ -124,7 +128,7 @@ describe('index-commands temp-dir hygiene (PR #2173 F-006)', () => {
 			setTimeout(resolve, POST_RESOLUTION_SETTLE_MS);
 		});
 
-		const leaked = [...swarmTempEntries(os.tmpdir())].filter(
+		const leaked = [...swarmTempEntries(canonicalTmpDir())].filter(
 			(entry) => !before.has(entry),
 		);
 		expect(leaked).toEqual([]);
@@ -157,8 +161,9 @@ describe('index.test.ts / index-task-42-commands.test.ts temp-dir hygiene (PR #2
 			const sandbox = createSafeTestDir('swarm-hygiene-sandbox-');
 			try {
 				// Dedicated roots so the child's leaks are attributable EXACTLY, with no
-				// diffing against a shared /tmp: `TMPDIR` is what `os.tmpdir()` reads on
-				// POSIX (verified on Bun 1.3.11), `TMP`/`TEMP` cover Windows.
+				// diffing against a shared /tmp: `TMPDIR` is what the runtime resolves
+				// the system temp dir from on POSIX (verified on Bun 1.3.11), while
+				// `TMP`/`TEMP` cover Windows.
 				const tmpRoot = path.join(sandbox.dir, 'tmp');
 				const cacheRoot = path.join(sandbox.dir, 'cache');
 				const configRoot = path.join(sandbox.dir, 'config');

@@ -25,7 +25,8 @@ import { createIsolatedTestEnv } from '../helpers/isolated-test-env.js';
 // Tests 2/3/4 boot `OpenCodeSwarm.server()` with no override of their own. That
 // boot queues background work on an unref'd `setTimeout(0)` which fires AFTER
 // the synchronous `afterEach` removed `tempDir` — and then RECREATES it,
-// leaving permanent `swarm-test-*` orphans under os.tmpdir() (2-5 per run).
+// leaving permanent `swarm-test-*` orphans in the system temp directory (2-5
+// per run).
 //
 // This is a DEFAULT, not a blanket override: `overrideIndexInternalsForTest`
 // saves the current value and its restore function puts that value back, so the
