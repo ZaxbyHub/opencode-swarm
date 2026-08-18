@@ -59,6 +59,7 @@ const VALID_TASK_WORKFLOW_STATES: TaskWorkflowState[] = [
 	'rework_required',
 	'complete',
 	'blocked',
+	'closed',
 ];
 
 /**

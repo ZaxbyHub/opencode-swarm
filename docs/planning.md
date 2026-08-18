@@ -91,9 +91,15 @@ Each task in the swarm follows a per-task state machine. The Architect advances 
 | `tests_run` | Verification tests passed | Test engineer delegation returns PASS |
 | `rework_required` | Current-generation verification failed and same-task repair is required | Stage A fails, or reviewer/test engineer returns a negative or malformed verdict |
 | `blocked` | Task ended without completion and no verification debt remains | `update_task_status(status: 'blocked')` commits the terminal transaction |
+| `closed` | A session ended with unfinished work; this is not successful completion | `/swarm close` commits a plan-bound `task_closed` transition |
 | `complete` | Task fully complete | `update_task_status(status: 'completed')` called |
 
 **Enforcement rule:** `update_task_status` with `status: 'completed'` is decided from durable evidence for the exact task and workflow generation. Session state and delegation history are diagnostic only. An empty/no-mutation coder attempt creates no review debt. Any safely attributed mutation rotates the generation and invalidates prior Stage A/B proof, including partial edits left by a failed or cancelled shared-root settlement; that failure enters `rework_required`. Stage A failure also moves the task to `rework_required`, where same-task repair remains callable.
+
+`closed` never substitutes for `complete`: `/swarm close` preserves authoritative
+successful evidence and records unfinished work as `closed`. Resuming a closed
+task requires the same audited exact-state, exact-generation force-repair path
+used for other settled non-success states.
 
 `execution_profile.planning_profile` selects planning ceremony. `balanced` is the normal default: durable QA/execution defaults are persisted and the architect asks only about material ambiguity or high-risk authorization. `strict` retains the full questionnaire, spec prerequisite, and checklist. Repositories with strict execution default to strict; locked legacy profiles without the field also resolve conservatively to strict. Locked plans may ratchet from balanced to strict, never the reverse. Explicit `balanced` and `strict` values remain distinct in plan hashes and Markdown; only the runtime resolver interprets an omitted locked legacy value as strict. On each architect turn, the persisted plan resolution supersedes the repository-default directive baked into the base prompt.
 

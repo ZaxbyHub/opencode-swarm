@@ -18,6 +18,7 @@ import {
 import path from 'node:path';
 import * as actualEvidenceManager from '../../../src/evidence/manager.js';
 import * as actualKnowledgeCurator from '../../../src/hooks/knowledge-curator.js';
+import { savePlan } from '../../../src/plan/manager.js';
 import * as actualState from '../../../src/state.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
@@ -100,14 +101,14 @@ afterEach(() => {
 	mock.restore();
 });
 
-function writePlan(): void {
-	writeFileSync(
-		path.join(swarmDir(), 'plan.json'),
-		JSON.stringify({
-			title: 'Telemetry Rotation',
-			phases: [{ id: 1, name: 'P1', status: 'complete', tasks: [] }],
-		}),
-	);
+async function writePlan(): Promise<void> {
+	await savePlan(testDir, {
+		title: 'Telemetry Rotation',
+		swarm: 'telemetry-rotation',
+		schema_version: '1.0.0',
+		current_phase: 1,
+		phases: [{ id: 1, name: 'P1', status: 'complete', tasks: [] }],
+	});
 }
 
 function getLatestArchivePath(): string {
@@ -122,7 +123,7 @@ function getLatestArchivePath(): string {
 
 describe('telemetry rotation archive/clean (issue #2030 item 8)', () => {
 	it('archives and removes both telemetry.jsonl and rotated telemetry.jsonl.1', async () => {
-		writePlan();
+		await writePlan();
 		// Stage BOTH the active and rotated generations: rotateTelemetryIfNeeded
 		// renames telemetry.jsonl → telemetry.jsonl.1, so a session that crossed
 		// the rotation threshold leaves exactly this pair on disk. The archive

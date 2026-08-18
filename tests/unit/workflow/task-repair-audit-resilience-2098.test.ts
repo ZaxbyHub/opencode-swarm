@@ -281,4 +281,113 @@ describe('issue #2098 task-repair audit-event resilience (FB-001)', () => {
 			if (externalLock.acquired) await externalLock.lock._release?.();
 		}
 	});
+
+	test('same transition id on different tasks records two audit events while same-task retry stays idempotent', async () => {
+		const swarmDir = path.join(directory, '.swarm');
+		const evidenceDir = path.join(swarmDir, 'evidence');
+		fs.writeFileSync(
+			path.join(swarmDir, 'plan.json'),
+			JSON.stringify(
+				{
+					schema_version: '1.0.0',
+					title: 'Repair audit identity scope',
+					swarm: 'test-swarm',
+					current_phase: 1,
+					phases: [
+						{
+							id: 1,
+							name: 'Phase 1',
+							status: 'complete',
+							tasks: [
+								{
+									id: '1.1',
+									phase: 1,
+									status: 'completed',
+									size: 'small',
+									description: 'First repaired task',
+									depends: [],
+									files_touched: ['src/first.ts'],
+								},
+								{
+									id: '1.2',
+									phase: 1,
+									status: 'completed',
+									size: 'small',
+									description: 'Second repaired task',
+									depends: [],
+									files_touched: ['src/second.ts'],
+								},
+							],
+						},
+					],
+				},
+				null,
+				2,
+			),
+		);
+		const evidencePayload = JSON.parse(
+			fs.readFileSync(path.join(evidenceDir, `${TASK_ID}.json`), 'utf-8'),
+		) as Record<string, unknown>;
+		fs.writeFileSync(
+			path.join(evidenceDir, '1.2.json'),
+			JSON.stringify({ ...evidencePayload, taskId: '1.2' }, null, 2),
+		);
+
+		const transitionId = 'shared-repair-transition';
+		expect(
+			(
+				await executeUpdateTaskStatus(
+					repairArgs({ transition_id: transitionId }),
+					directory,
+					context,
+				)
+			).success,
+		).toBe(true);
+		expect(
+			(
+				await executeUpdateTaskStatus(
+					repairArgs({ task_id: '1.2', transition_id: transitionId }),
+					directory,
+					context,
+				)
+			).success,
+		).toBe(true);
+
+		const repairedEvents = fs
+			.readFileSync(path.join(swarmDir, 'events.jsonl'), 'utf-8')
+			.split('\n')
+			.filter((line) => line.trim().length > 0)
+			.map((line) => JSON.parse(line) as Record<string, unknown>)
+			.filter(
+				(event) =>
+					event.type === 'task_workflow_repaired' &&
+					event.transitionId === transitionId,
+			);
+		expect(repairedEvents).toHaveLength(2);
+		expect(repairedEvents.map((event) => event.taskId).sort()).toEqual([
+			'1.1',
+			'1.2',
+		]);
+
+		expect(
+			(
+				await executeUpdateTaskStatus(
+					{ task_id: '1.1', status: 'in_progress' },
+					directory,
+					context,
+				)
+			).success,
+		).toBe(true);
+		const retryEvents = fs
+			.readFileSync(path.join(swarmDir, 'events.jsonl'), 'utf-8')
+			.split('\n')
+			.filter((line) => line.trim().length > 0)
+			.map((line) => JSON.parse(line) as Record<string, unknown>)
+			.filter(
+				(event) =>
+					event.type === 'task_workflow_repaired' &&
+					event.transitionId === transitionId,
+			);
+		expect(retryEvents).toHaveLength(2);
+	});
 });

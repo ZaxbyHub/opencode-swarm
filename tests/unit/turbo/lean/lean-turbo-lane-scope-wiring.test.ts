@@ -7,8 +7,7 @@
  * `_doDispatch`), before the lane's coder prompt is sent — and that a failed
  * publication fails the lane closed instead of running an unscoped coder.
  *
- * No mock.module: everything goes through the `_internals` / `_sessionOps` DI
- * seams the runner already exposes.
+ * No mock.module: the runner's `_internals` / `_sessionOps` DI seams are used.
  */
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import * as fs from 'node:fs';
@@ -30,9 +29,9 @@ import {
 import type { LeanTurboLane } from '../../../../src/turbo/lean/state';
 import * as leanState from '../../../../src/turbo/lean/state';
 import { isTransientProviderError } from '../../../../src/utils/provider-error-classification';
+import { safeRmRecursive } from '../../../helpers/safe-test-dir';
 
 const SESSION_ID = 'sess-lane-scope-wiring';
-
 let tmpDir: string;
 let originals: Partial<typeof LeanTurboRunner._internals>;
 
@@ -154,7 +153,7 @@ afterEach(() => {
 	resetSwarmState();
 	leanState.repairStateUnreadable(tmpDir);
 	try {
-		fs.rmSync(tmpDir, { recursive: true, force: true });
+		safeRmRecursive(tmpDir);
 	} catch {
 		/* best-effort */
 	}
@@ -285,7 +284,7 @@ describe('runner publishes lane write authority (#2002)', () => {
 				}),
 			).toBeNull();
 		} finally {
-			fs.rmSync(laneRoot, { recursive: true, force: true });
+			safeRmRecursive(laneRoot);
 		}
 	});
 

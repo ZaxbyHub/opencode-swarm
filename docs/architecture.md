@@ -972,6 +972,33 @@ If the lock holder crashes, the OS or lock library will eventually clean up the 
 
 ---
 
+## Exact-Task Terminal Reconciliation
+
+Task workflow evidence is the authority for completion, blockage, and session
+closure. The plan projection can lag or be stale; exact-task evidence cannot be
+silently "filled in" from a terminal plan status alone.
+
+`/swarm close` therefore reconciles tasks in two stages:
+
+- `src/workflow/close-terminal.ts` settles each target task under the
+  established plan-lock then task-evidence-lock order.
+- `src/plan/manager.ts:closePlanTerminalState()` persists the final phase and
+  projection snapshot only after exact-task evidence has converged.
+
+The truthful non-success terminal is workflow state `closed` with outcome
+`task_closed`. It records that a session ended with unfinished work, but it is
+not success and must never overwrite authoritative `complete`. When exact
+evidence already proves `complete`, close preserves that evidence and
+reconciles the task projection back to plan status `completed`.
+
+Close recovery is bound to plan identity. New ledgers persist a random
+`plan_epoch` in the `plan_created` root payload; legacy ledgers adopt exactly
+one backward-readable snapshot with `source: "plan_epoch_adopted"`. Version-2
+close WALs store both `planIdentityHash` and `planEpoch`, so a stale close WAL
+cannot replay into a later plan that reused the same task ID.
+
+---
+
 ## Failure Handling
 
 ### Task Rejection
@@ -1749,7 +1776,7 @@ Agent awareness tracks what each agent is doing and shares relevant context acro
 - `activeAgent: Map<sessionId, agentName>` — Which agent is active in each session (updated by chat.message hook)
 - `agentSessions: Map<sessionId, AgentSessionState>` — Per-session guardrail tracking. Key fields:
   - `toolCallCount`, `startTime`, `delegationActive` — Guardrail counters
-  - `taskWorkflowStates: Map<string, TaskWorkflowState>` — Per-task state machine. States: `'idle' | 'coder_delegated' | 'pre_check_passed' | 'reviewer_run' | 'tests_run' | 'complete'`. Transitions are forward-only; `complete` can only be reached from `tests_run`.
+  - `taskWorkflowStates: Map<string, TaskWorkflowState>` — Bounded diagnostic projection of the authoritative exact-task state machine. States: `'idle' | 'coder_delegated' | 'pre_check_passed' | 'reviewer_run' | 'tests_run' | 'rework_required' | 'complete' | 'blocked' | 'closed'`. Normal verification transitions are generation-bound; `complete`, `blocked`, and `closed` are terminal, and only the audited exact-CAS repair path returns a settled non-success task to `idle`.
   - `lastGateOutcome: { gate, taskId, passed, timestamp } | null` — Most recent gate result, populated by `guardrails/index.ts` toolAfter. Used for deliberation preamble injection in Phase 4 context engineering.
   - `declaredCoderScope: string[] | null` — Compatibility projection of the current identity-bound scope for this session. It is not independently authoritative.
   - `lastScopeViolation: string | null` — Last scope containment violation message (Phase 5). Set when coder modifies >2 files outside declared scope; cleared after warning is injected.

@@ -183,7 +183,11 @@ describe('executeUpdateTaskStatus concurrent writes', () => {
 			expect(plan.phases).toHaveLength(1);
 			expect(plan.phases[0].id).toBe(1);
 			expect(plan.phases[0].name).toBe('Phase 1');
-			expect(plan.phases[0].status).toBe('in_progress');
+			// The serialized winner set is intentionally timing-dependent. If a
+			// blocked-task writer wins, phase aggregation may truthfully mark the
+			// phase blocked; otherwise it remains in progress. Both are complete,
+			// non-corrupt projections for this structural-integrity assertion.
+			expect(['in_progress', 'blocked']).toContain(plan.phases[0].status);
 
 			// All 10 tasks have all required fields
 			for (const task of plan.phases[0].tasks) {

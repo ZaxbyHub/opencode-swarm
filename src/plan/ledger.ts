@@ -19,7 +19,7 @@ import { emit } from '../telemetry.js';
 import { criticalWarn, log } from '../utils/logger';
 import { assertProjectRoot } from '../utils/project-boundary';
 import { normalizeExecutionProfileForHash } from './planning-profile';
-import { derivePlanId } from './utils';
+import { derivePlanId, derivePlanIdentityHash } from './utils';
 
 /**
  * Ledger schema version.
@@ -104,6 +104,54 @@ export type LedgerEventInput = Omit<
 export interface SnapshotEventPayload {
 	plan: Plan;
 	payload_hash: string;
+	plan_epoch?: string;
+	root_event_hash?: string;
+}
+
+interface PlanEpochAdoptionPayload extends SnapshotEventPayload {
+	plan_epoch: string;
+	root_event_hash: string;
+}
+
+export interface PlanEpochIdentity {
+	planId: string;
+	planIdentityHash: string;
+	planEpoch: string;
+	rootEventHash: string;
+	payloadHash: string;
+	source: 'root' | 'plan_epoch_adopted';
+}
+
+function resolvePlanEpochIdentity(
+	events: LedgerEvent[],
+	authoritativePlan: Plan,
+): PlanEpochIdentity | null {
+	const planId = derivePlanId(authoritativePlan);
+	const planIdentityHash = derivePlanIdentityHash(authoritativePlan);
+	const payloadHash = computePlanHash(authoritativePlan);
+	const candidates = extractPlanEpochCandidates(events, planId);
+	const distinctCandidateKeys = new Set(
+		candidates.map(
+			(candidate) => `${candidate.planEpoch}:${candidate.rootEventHash}`,
+		),
+	);
+	if (distinctCandidateKeys.size > 1) {
+		throw new Error(
+			`Conflicting plan epoch metadata detected for ${planId}; refusing to continue.`,
+		);
+	}
+	if (candidates.length === 0) {
+		return null;
+	}
+	const existing = candidates[0]!;
+	return {
+		planId,
+		planIdentityHash,
+		planEpoch: existing.planEpoch,
+		rootEventHash: existing.rootEventHash,
+		payloadHash,
+		source: existing.source,
+	};
 }
 
 /**
@@ -146,6 +194,139 @@ function getLedgerPath(directory: string): string {
  */
 function getPlanJsonPath(directory: string): string {
 	return path.join(directory, '.swarm', PLAN_JSON_FILENAME);
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+	if (value && typeof value === 'object' && !Array.isArray(value)) {
+		return value as Record<string, unknown>;
+	}
+	return null;
+}
+
+function isSha256Hex(value: string): boolean {
+	return /^[a-f0-9]{64}$/i.test(value);
+}
+
+function isUuid(value: string): boolean {
+	return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+		value,
+	);
+}
+
+function serializeLedgerEvent(event: LedgerEvent): string {
+	return JSON.stringify(event);
+}
+
+function computeLedgerEventHash(event: LedgerEvent): string {
+	return crypto
+		.createHash('sha256')
+		.update(serializeLedgerEvent(event), 'utf8')
+		.digest('hex');
+}
+
+function extractPlanEpochCandidates(
+	events: LedgerEvent[],
+	expectedPlanId: string,
+): Array<{
+	planEpoch: string;
+	rootEventHash: string;
+	source: 'root' | 'plan_epoch_adopted';
+}> {
+	if (events.length === 0) {
+		throw new Error('Plan ledger is empty; missing plan_created root.');
+	}
+
+	const rootEvent = events[0]!;
+	if (rootEvent.event_type !== 'plan_created') {
+		throw new Error(
+			`Plan ledger root must be plan_created; found ${rootEvent.event_type} at seq ${rootEvent.seq}.`,
+		);
+	}
+	if (rootEvent.plan_id !== expectedPlanId) {
+		throw new Error(
+			`Plan ledger identity mismatch: expected ${expectedPlanId} but found ${rootEvent.plan_id}.`,
+		);
+	}
+
+	const rootEventHash = computeLedgerEventHash(rootEvent);
+	const candidates: Array<{
+		planEpoch: string;
+		rootEventHash: string;
+		source: 'root' | 'plan_epoch_adopted';
+	}> = [];
+	const rootPayload = asRecord(rootEvent.payload);
+	const rootPlanEpoch = rootPayload?.plan_epoch;
+	if (typeof rootPlanEpoch === 'string' && rootPlanEpoch.length > 0) {
+		if (!isUuid(rootPlanEpoch)) {
+			throw new Error('Plan ledger root carries an invalid plan_epoch.');
+		}
+		candidates.push({
+			planEpoch: rootPlanEpoch,
+			rootEventHash,
+			source: 'root',
+		});
+	}
+
+	for (const event of events) {
+		if (
+			event.event_type !== 'snapshot' ||
+			event.source !== 'plan_epoch_adopted'
+		) {
+			continue;
+		}
+		if (event.plan_id !== expectedPlanId) {
+			throw new Error(
+				`Plan epoch adoption snapshot at seq ${event.seq} belongs to ${event.plan_id}, expected ${expectedPlanId}.`,
+			);
+		}
+		const payload = asRecord(event.payload);
+		const planEpoch = payload?.plan_epoch;
+		const rootHash = payload?.root_event_hash;
+		const embeddedPlan = PlanSchema.safeParse(payload?.plan);
+		if (!embeddedPlan.success) {
+			throw new Error(
+				`Plan epoch adoption snapshot at seq ${event.seq} carries an invalid embedded plan.`,
+			);
+		}
+		const payloadHash = payload?.payload_hash;
+		if (typeof planEpoch !== 'string' || !isUuid(planEpoch)) {
+			throw new Error(
+				`Plan epoch adoption snapshot at seq ${event.seq} has an invalid plan_epoch.`,
+			);
+		}
+		if (typeof rootHash !== 'string' || !isSha256Hex(rootHash)) {
+			throw new Error(
+				`Plan epoch adoption snapshot at seq ${event.seq} has an invalid root_event_hash.`,
+			);
+		}
+		if (rootHash !== rootEventHash) {
+			throw new Error(
+				`Plan epoch adoption snapshot at seq ${event.seq} does not match the canonical ledger root.`,
+			);
+		}
+		if (typeof payloadHash !== 'string') {
+			throw new Error(
+				`Plan epoch adoption snapshot at seq ${event.seq} is missing payload_hash.`,
+			);
+		}
+		if (derivePlanId(embeddedPlan.data) !== expectedPlanId) {
+			throw new Error(
+				`Plan epoch adoption snapshot at seq ${event.seq} embeds a different plan identity.`,
+			);
+		}
+		if (computePlanHash(embeddedPlan.data) !== payloadHash) {
+			throw new Error(
+				`Plan epoch adoption snapshot at seq ${event.seq} has a mismatched payload_hash.`,
+			);
+		}
+		candidates.push({
+			planEpoch,
+			rootEventHash: rootHash,
+			source: 'plan_epoch_adopted',
+		});
+	}
+
+	return candidates;
 }
 
 /**
@@ -504,9 +685,12 @@ export async function initLedger(
 
 	// Embed the full plan in the plan_created event payload so the ledger
 	// is self-sufficient for replay without requiring plan.json (#444 item 4).
-	const payload: Record<string, unknown> | undefined = embeddedPlan
-		? { plan: embeddedPlan, payload_hash: planHashAfter }
-		: undefined;
+	const payload: Record<string, unknown> = {
+		plan_epoch: crypto.randomUUID(),
+		...(embeddedPlan
+			? { plan: embeddedPlan, payload_hash: planHashAfter }
+			: {}),
+	};
 
 	const event: LedgerEvent = {
 		seq: 1,
@@ -530,6 +714,203 @@ export async function initLedger(
 	const line = `${JSON.stringify(event)}\n`;
 
 	writeFileFsyncedThenRename(tempPath, ledgerPath, line);
+}
+
+/**
+ * Read ledger events for plan-epoch identity resolution, failing closed on a
+ * malformed line.
+ *
+ * `readLedgerEvents` silently skips unparseable lines. That is unsafe for epoch
+ * resolution specifically: a corrupted `plan_epoch_adopted` snapshot would become
+ * invisible to `extractPlanEpochCandidates`, whose conflict detection only compares
+ * candidates that parsed, so a fresh duplicate epoch could be minted instead of the
+ * corruption being surfaced.
+ *
+ * This is defense in depth for the exported, directly-callable surface
+ * (`readPlanEpochIdentity`, `getOrAdoptPlanEpochUnderLock`). For the
+ * MALFORMED-LINE case it is not a live behavior change on any current call
+ * path: every in-tree route is already fenced by an earlier
+ * `replayFromLedgerWithStatus` check that throws first —
+ * `recoverPreparedTaskTerminal` (`TASK_TERMINAL_LEDGER_TRUNCATED`), which is the
+ * shared callee of both `update_task_status` and the delegation-gate `toolBefore`
+ * hook, and `loadAuthoritativePlan` in `close-terminal.ts`
+ * (`CLOSE_TERMINAL_LEDGER_TRUNCATED`). The two checks share one predicate, since
+ * both readers go through `readLedgerEventsWithIntegrity`, which flags the first
+ * malformed line anywhere in the file rather than only a trailing suffix.
+ *
+ * That fence does NOT cover the second failure mode. When the ledger file
+ * exists but cannot be READ (EACCES, EIO, …), `readLedgerEventsWithIntegrity`
+ * returns `truncated: false` with zero events — byte-identical to an absent
+ * ledger — so `replayFromLedgerWithStatus` yields `plan: null` and those callers
+ * silently fall back to the derived plan.json projection. This reader therefore
+ * passes `failClosedOnReadError: true` and surfaces `PLAN_LEDGER_UNREADABLE`
+ * rather than mislabeling an unreadable ledger as an empty one.
+ *
+ * The three terminal-recovery `replayFromLedgerWithStatus` callers
+ * (`close-terminal.ts`, `task-terminal.ts`, `task-repair.ts`) do NOT yet opt in,
+ * and that is an accepted residual rather than a planned follow-up: on an
+ * unreadable ledger they still fall back to the derived plan.json projection
+ * without surfacing an error. Opting them in is a wider behavior change than
+ * this reader, because `replayFromLedgerWithStatus` feeds `replayFromLedger`,
+ * whose `manager.ts` and `phase-complete.ts` callers deliberately treat a null
+ * replay as "no ledger yet, use plan.json" on ordinary save_plan/phase_complete
+ * paths — several outside any recovery `try` — so a blanket opt-in would turn a
+ * transient EIO into a hard failure of the primary planning tools. Do not widen
+ * this without re-doing that caller analysis.
+ *
+ * These helpers are exported and must not depend on future callers repeating
+ * that discipline.
+ */
+async function readLedgerEventsForEpoch(
+	directory: string,
+): Promise<LedgerEvent[]> {
+	const integrity = await _internals.readLedgerEventsWithIntegrity(directory, {
+		failClosedOnReadError: true,
+	});
+	if (integrity.truncated) {
+		throw new Error(
+			`PLAN_LEDGER_TRUNCATED: ${getLedgerPath(directory)} has a malformed line; plan epoch identity cannot be resolved. Preserve this file and quarantine the corrupted suffix before retrying.`,
+		);
+	}
+	return integrity.events;
+}
+
+/**
+ * Read and validate the current plan epoch identity without creating,
+ * adopting, or appending any ledger state.
+ *
+ * Returns null when the ledger is absent or when a legacy ledger has not yet
+ * adopted an epoch. Invalid or conflicting epoch metadata still fails closed.
+ */
+export async function readPlanEpochIdentity(
+	directory: string,
+	authoritativePlan: Plan,
+): Promise<PlanEpochIdentity | null> {
+	assertProjectRoot(directory);
+	if (!(await ledgerExists(directory))) {
+		return null;
+	}
+	const events = await readLedgerEventsForEpoch(directory);
+	if (events.length === 0) {
+		throw new Error('Plan ledger is empty; missing plan_created root.');
+	}
+	return resolvePlanEpochIdentity(events, authoritativePlan);
+}
+
+/**
+ * Return the persisted plan epoch for the authoritative ledger root, adopting
+ * one backward-readable snapshot when a legacy root predates the epoch field.
+ *
+ * The caller is expected to already hold the higher-level plan lock. This
+ * helper acquires only the ledger append lock so concurrent adopters serialize
+ * to one adoption snapshot.
+ */
+export async function getOrAdoptPlanEpochUnderLock(
+	directory: string,
+	authoritativePlan: Plan,
+): Promise<PlanEpochIdentity> {
+	assertProjectRoot(directory);
+	const planId = derivePlanId(authoritativePlan);
+	const planIdentityHash = derivePlanIdentityHash(authoritativePlan);
+	const payloadHash = computePlanHash(authoritativePlan);
+	let lastStaleWriterError: LedgerStaleWriterError | undefined;
+	for (let attempt = 0; attempt < 4; attempt++) {
+		if (!(await ledgerExists(directory))) {
+			try {
+				await initLedger(directory, planId, payloadHash, authoritativePlan);
+			} catch (error) {
+				if (
+					!(
+						error instanceof Error &&
+						error.message.includes('Ledger already initialized')
+					)
+				) {
+					throw error;
+				}
+			}
+		}
+
+		const events = await readLedgerEventsForEpoch(directory);
+		const existing = resolvePlanEpochIdentity(events, authoritativePlan);
+		if (existing) {
+			return existing;
+		}
+
+		if (events.length === 0) {
+			throw new Error('Plan ledger is empty; cannot adopt a plan epoch.');
+		}
+
+		const rootEvent = events[0]!;
+		const rootEventHash = computeLedgerEventHash(rootEvent);
+		const tail = events[events.length - 1]!;
+		const planEpoch = _internals.randomUUID();
+		const adoptionPayload: PlanEpochAdoptionPayload = {
+			plan: authoritativePlan,
+			payload_hash: payloadHash,
+			plan_epoch: planEpoch,
+			root_event_hash: rootEventHash,
+		};
+
+		try {
+			const appended = await _internals.appendLedgerEvent(
+				directory,
+				{
+					event_type: 'snapshot',
+					source: 'plan_epoch_adopted',
+					plan_id: planId,
+					payload: adoptionPayload as unknown as Record<string, unknown>,
+				},
+				{
+					expectedSeq: tail.seq,
+					expectedLedgerHash: tail.plan_hash_after,
+					planHashAfter: payloadHash,
+				},
+			);
+
+			const verifiedEvents = await readLedgerEventsForEpoch(directory);
+			const verified = verifiedEvents[verifiedEvents.length - 1];
+			const verifiedPayload = asRecord(verified?.payload);
+			if (
+				!verified ||
+				verified.seq !== appended.seq ||
+				verified.event_type !== 'snapshot' ||
+				verified.source !== 'plan_epoch_adopted' ||
+				verified.plan_id !== planId ||
+				verifiedPayload?.plan_epoch !== planEpoch ||
+				verifiedPayload?.root_event_hash !== rootEventHash ||
+				verifiedPayload?.payload_hash !== payloadHash
+			) {
+				throw new Error(
+					`Plan epoch adoption read verification failed for ${planId}.`,
+				);
+			}
+
+			return {
+				planId,
+				planIdentityHash,
+				planEpoch,
+				rootEventHash,
+				payloadHash,
+				source: 'plan_epoch_adopted',
+			};
+		} catch (error) {
+			// Retries are bounded by the loop condition alone. Do not re-encode the
+			// attempt ceiling here: the previous `attempt < 3` guard rethrew the raw
+			// stale-writer error on the final attempt, which made the descriptive
+			// exhaustion error below unreachable and coupled two literals that had to
+			// be changed together.
+			if (error instanceof LedgerStaleWriterError) {
+				lastStaleWriterError = error;
+				continue;
+			}
+			throw error;
+		}
+	}
+
+	throw new Error(
+		`Unable to settle plan epoch for ${planId} after repeated stale-writer retries.`,
+		{ cause: lastStaleWriterError },
+	);
 }
 
 /**
@@ -1343,6 +1724,7 @@ export interface LedgerIntegrityResult {
  */
 export async function readLedgerEventsWithIntegrity(
 	directory: string,
+	options?: { failClosedOnReadError?: boolean },
 ): Promise<LedgerIntegrityResult> {
 	const ledgerPath = getLedgerPath(directory);
 
@@ -1382,7 +1764,16 @@ export async function readLedgerEventsWithIntegrity(
 		events.sort((a, b) => a.seq - b.seq);
 
 		return { events, truncated, badSuffix };
-	} catch {
+	} catch (error) {
+		// The ledger EXISTS but could not be read (EACCES, EIO, EISDIR, …).
+		// Returning the absent-ledger shape here is indistinguishable from ENOENT,
+		// which silently demotes the authoritative ledger to the derived plan.json
+		// projection. Callers that must fail closed opt in.
+		if (options?.failClosedOnReadError) {
+			throw new Error(
+				`PLAN_LEDGER_UNREADABLE: ${ledgerPath} exists but could not be read (${error instanceof Error ? error.message : String(error)}); plan state cannot be resolved. This is NOT an absent ledger — preserve the file and check permissions/filesystem health before retrying.`,
+			);
+		}
 		return { events: [], truncated: false, badSuffix: null };
 	}
 }
@@ -1676,4 +2067,5 @@ export const _internals = {
 	getPlanJsonPath,
 	writeFileFsyncedThenRename,
 	fsyncRecoveryDirectory,
+	randomUUID: () => crypto.randomUUID(),
 };

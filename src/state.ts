@@ -147,7 +147,8 @@ export type TaskWorkflowState =
 	| 'tests_run'
 	| 'rework_required'
 	| 'complete'
-	| 'blocked';
+	| 'blocked'
+	| 'closed';
 
 export interface TaskWorkflowCacheEntry {
 	generation: number;
@@ -2634,7 +2635,7 @@ export function advanceTaskState(
 		newState as (typeof LINEAR_STATE_ORDER)[number],
 	);
 
-	if (newIndex === -1 || newIndex <= currentIndex) {
+	if (currentIndex === -1 || newIndex === -1 || newIndex <= currentIndex) {
 		throw new Error(
 			`INVALID_TASK_STATE_TRANSITION: ${taskId} ${current} → ${newState}`,
 		);
@@ -2720,7 +2721,8 @@ export function canAdvanceTaskState(
 		newState as (typeof LINEAR_STATE_ORDER)[number],
 	);
 
-	if (newIndex === -1 || newIndex <= currentIndex) return false;
+	if (currentIndex === -1 || newIndex === -1 || newIndex <= currentIndex)
+		return false;
 
 	if (newState === 'complete' && current !== 'tests_run') {
 		const councilEntry = session.taskCouncilApproved?.get(taskId);
@@ -2930,6 +2932,8 @@ function planStatusToWorkflowState(status: TaskStatus): TaskWorkflowState {
 			return 'complete';
 		case 'blocked':
 			return 'blocked';
+		case 'closed':
+			return 'closed';
 		default:
 			return 'idle';
 	}

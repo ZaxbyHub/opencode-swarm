@@ -1,20 +1,7 @@
 /**
- * Tests for handleCloseCommand — expanded artifact cleanup (Phase 1 sub-task 1.2).
- *
- * Verifies the flat-file and directory archiving/deletion behavior:
- *   - 24 flat files in ARCHIVE_ARTIFACTS are copied to the archive bundle
- *   - 20 flat files in ACTIVE_STATE_TO_CLEAN are removed from .swarm/ after archiving
- *   - 4 active-state directories (evidence/, session/, scopes/, spec-archive/)
- *     are recursively copied to the archive and then deleted. (locks/ is
- *     intentionally excluded — per-run locks are managed via proper-lockfile,
- *     not archived/cleaned by close.)
- *   - Archive-first-guard: directories are only deleted if they were successfully archived
- *   - close-summary.md is NOT in ACTIVE_STATE_TO_CLEAN — survives the clean stage.
- *     spec.md IS in ACTIVE_STATE_TO_CLEAN — it is archived AND then cleaned, so a
- *     stale spec never survives into the next session.
- *   - .swarm/archive/ itself survives the close
- *   - context.md is rewritten with "Session closed" content
- *   - Idempotent: running close twice produces no errors
+ * Tests handleCloseCommand artifact cleanup: archive copies survive, active
+ * state is removed only after archival, locks survive, context.md is rewritten,
+ * and repeated close runs remain idempotent.
  */
 import {
 	afterEach,
@@ -51,6 +38,8 @@ import * as actualEvidenceManager from '../../../src/evidence/manager.js';
 // exports beyond curateAndStoreSwarm (e.g. enrichLessonToV3), so spread the
 // real module and only override the entry point this suite mocks.
 import * as actualKnowledgeCurator from '../../../src/hooks/knowledge-curator.js';
+import { initLedger } from '../../../src/plan/ledger.js';
+import { derivePlanId } from '../../../src/plan/utils.js';
 // Same rationale as above: enforceSpecDriftGate (used by the regression test
 // below) lives in src/hooks/guardrails/index.ts, which transitively imports
 // src/state.js for exports beyond the ones this suite overrides (e.g.
@@ -176,7 +165,19 @@ function swarmDir(): string {
 	return path.join(testDir, '.swarm');
 }
 
-function writePlan(overrides: Record<string, unknown> = {}): void {
+const makeTask = (id: string, description: string) => ({
+	id,
+	phase: 1,
+	status: 'in_progress',
+	size: 'small',
+	description,
+	depends: [],
+	files_touched: [],
+});
+
+async function writePlan(
+	overrides: Record<string, unknown> = {},
+): Promise<void> {
 	const plan = {
 		title: 'Cleanup Test Project',
 		schema_version: '1.0.0',
@@ -187,15 +188,13 @@ function writePlan(overrides: Record<string, unknown> = {}): void {
 				id: 1,
 				name: 'Phase 1',
 				status: 'in_progress',
-				tasks: [
-					{ id: '1.1', phase: 1, status: 'in_progress', description: 'Task A' },
-					{ id: '1.2', phase: 1, status: 'in_progress', description: 'Task B' },
-				],
+				tasks: [makeTask('1.1', 'Task A'), makeTask('1.2', 'Task B')],
 			},
 		],
 		...overrides,
 	};
 	writeFileSync(path.join(swarmDir(), 'plan.json'), JSON.stringify(plan));
+	await initLedger(testDir, derivePlanId(plan), undefined, plan);
 }
 
 function getLatestArchivePath(): string {
@@ -265,7 +264,7 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 
 	describe('Flat-file archiving (knowledge.jsonl, repo-graph.json, telemetry.jsonl, etc.)', () => {
 		it('archives knowledge.jsonl (survives cleanup)', async () => {
-			writePlan();
+			await writePlan();
 			writeFileSync(
 				path.join(swarmDir(), 'knowledge.jsonl'),
 				'{"id":1,"type":"lesson"}\n',
@@ -279,7 +278,7 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 		});
 
 		it('archives and removes knowledge-rejected.jsonl', async () => {
-			writePlan();
+			await writePlan();
 			writeFileSync(
 				path.join(swarmDir(), 'knowledge-rejected.jsonl'),
 				'{"id":1,"type":"rejected"}\n',
@@ -297,7 +296,7 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 		});
 
 		it('archives and removes repo-graph.json', async () => {
-			writePlan();
+			await writePlan();
 			writeFileSync(
 				path.join(swarmDir(), 'repo-graph.json'),
 				JSON.stringify({ nodes: [], edges: [] }),
@@ -311,7 +310,7 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 		});
 
 		it('archives and removes doc-manifest.json', async () => {
-			writePlan();
+			await writePlan();
 			writeFileSync(
 				path.join(swarmDir(), 'doc-manifest.json'),
 				JSON.stringify({ files: [] }),
@@ -329,7 +328,7 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 		});
 
 		it('archives and removes dark-matter.md', async () => {
-			writePlan();
+			await writePlan();
 			writeFileSync(
 				path.join(swarmDir(), 'dark-matter.md'),
 				'# Dark Matter\n\nSecret stuff.',
@@ -343,7 +342,7 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 		});
 
 		it('archives and removes telemetry.jsonl', async () => {
-			writePlan();
+			await writePlan();
 			writeFileSync(
 				path.join(swarmDir(), 'telemetry.jsonl'),
 				'{"event":"tick","ts":1}\n',
@@ -357,7 +356,7 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 		});
 
 		it('archives all handoff-related files', async () => {
-			writePlan();
+			await writePlan();
 			writeFileSync(path.join(swarmDir(), 'handoff.md'), '# Handoff');
 			writeFileSync(
 				path.join(swarmDir(), 'handoff-prompt.md'),
@@ -388,7 +387,7 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 		});
 
 		it('archives and removes escalation-report.md', async () => {
-			writePlan();
+			await writePlan();
 			writeFileSync(
 				path.join(swarmDir(), 'escalation-report.md'),
 				'# Escalation\nEscalated.',
@@ -406,7 +405,7 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 		});
 
 		it('plan.json and plan.md are archived', async () => {
-			writePlan();
+			await writePlan();
 			writeFileSync(path.join(swarmDir(), 'plan.md'), '# Plan\n\n## Phase 1');
 
 			await handleCloseCommand(testDir, []);
@@ -417,11 +416,7 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 		});
 
 		it('plan-ledger.jsonl is archived', async () => {
-			writePlan();
-			writeFileSync(
-				path.join(swarmDir(), 'plan-ledger.jsonl'),
-				`{"seq":1,"event":"created"}\n`,
-			);
+			await writePlan();
 
 			await handleCloseCommand(testDir, []);
 
@@ -440,7 +435,7 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 
 	describe('Directory archiving and deletion', () => {
 		it('archives and deletes evidence/ directory with contents', async () => {
-			writePlan();
+			await writePlan();
 			mkdirSync(path.join(swarmDir(), 'evidence', 'retro-1'), {
 				recursive: true,
 			});
@@ -470,7 +465,7 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 		});
 
 		it('archives and deletes session/ directory with contents', async () => {
-			writePlan();
+			await writePlan();
 			mkdirSync(path.join(swarmDir(), 'session', 'session-123'), {
 				recursive: true,
 			});
@@ -491,7 +486,7 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 		});
 
 		it('archives and deletes scopes/ directory with contents', async () => {
-			writePlan();
+			await writePlan();
 			mkdirSync(path.join(swarmDir(), 'scopes'), { recursive: true });
 			writeFileSync(
 				path.join(swarmDir(), 'scopes', 'scope-1.json'),
@@ -508,7 +503,7 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 		});
 
 		it('locks/ directory is NOT archived and NOT deleted (excluded from ACTIVE_STATE_DIRS_TO_CLEAN)', async () => {
-			writePlan();
+			await writePlan();
 			// locks/ was intentionally dropped from ACTIVE_STATE_DIRS_TO_CLEAN —
 			// per-run locks are now managed via proper-lockfile, not archived
 			// or cleaned by close. It should be left untouched, matching the
@@ -530,7 +525,7 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 		});
 
 		it('archives and deletes spec-archive/ directory with contents', async () => {
-			writePlan();
+			await writePlan();
 			mkdirSync(path.join(swarmDir(), 'spec-archive'), { recursive: true });
 			writeFileSync(
 				path.join(swarmDir(), 'spec-archive', 'spec-001.md'),
@@ -547,7 +542,7 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 		});
 
 		it('directory with one level of nesting archives files correctly', async () => {
-			writePlan();
+			await writePlan();
 			// Create evidence/retro-1/ with two files (1 level of nesting - works with current code)
 			mkdirSync(path.join(swarmDir(), 'evidence', 'retro-1'), {
 				recursive: true,
@@ -577,7 +572,7 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 		});
 
 		it('empty directory is still tracked as archived and deleted', async () => {
-			writePlan();
+			await writePlan();
 			mkdirSync(path.join(swarmDir(), 'scopes'), { recursive: true });
 
 			await handleCloseCommand(testDir, []);
@@ -588,7 +583,7 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 		});
 
 		it('non-existent directory does not cause errors', async () => {
-			writePlan();
+			await writePlan();
 			// scopes/ is never created
 
 			const result = await handleCloseCommand(testDir, []);
@@ -602,7 +597,7 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 
 	describe('Archive-first-guard for directories', () => {
 		it('directory not in ACTIVE_STATE_DIRS_TO_CLEAN is NOT deleted', async () => {
-			writePlan();
+			await writePlan();
 			// Create a directory that is NOT in ACTIVE_STATE_DIRS_TO_CLEAN
 			mkdirSync(path.join(swarmDir(), 'some-other-dir', 'subdir'), {
 				recursive: true,
@@ -625,7 +620,7 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 		});
 
 		it('active-state directory is deleted after successful archive', async () => {
-			writePlan();
+			await writePlan();
 			mkdirSync(path.join(swarmDir(), 'evidence', 'retro-1'), {
 				recursive: true,
 			});
@@ -642,7 +637,7 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 		});
 
 		it('per-entry copy failure does not prevent directory deletion', async () => {
-			writePlan();
+			await writePlan();
 			// Create evidence/ with a file AND a subdirectory
 			// The code handles files via copyFile and directories via mkdir+readdir
 			// If a file copy fails (e.g. permission error), the per-entry catch
@@ -667,7 +662,7 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 
 	describe('context.md rewritten after close', () => {
 		it('context.md contains "Session closed" text', async () => {
-			writePlan();
+			await writePlan();
 
 			await handleCloseCommand(testDir, []);
 
@@ -678,7 +673,7 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 		});
 
 		it('context.md contains "No active plan" text', async () => {
-			writePlan();
+			await writePlan();
 
 			await handleCloseCommand(testDir, []);
 
@@ -688,7 +683,7 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 		});
 
 		it('context.md contains the project name', async () => {
-			writePlan({ title: 'My Awesome Project' });
+			await writePlan({ title: 'My Awesome Project' });
 
 			await handleCloseCommand(testDir, []);
 
@@ -713,7 +708,7 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 
 	describe('Idempotency — running close twice', () => {
 		it('second close run produces no errors', async () => {
-			writePlan();
+			await writePlan();
 			writeFileSync(
 				path.join(swarmDir(), 'events.jsonl'),
 				'{"event":"test"}\n',
@@ -730,7 +725,7 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 		});
 
 		it('third close run also succeeds', async () => {
-			writePlan();
+			await writePlan();
 
 			await handleCloseCommand(testDir, []);
 			await handleCloseCommand(testDir, []);
@@ -755,7 +750,7 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 
 	describe('archive/ directory survives close', () => {
 		it('.swarm/archive/ directory exists after close', async () => {
-			writePlan();
+			await writePlan();
 
 			await handleCloseCommand(testDir, []);
 
@@ -765,7 +760,7 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 		});
 
 		it('archive bundle itself is intact (not deleted)', async () => {
-			writePlan();
+			await writePlan();
 
 			await handleCloseCommand(testDir, []);
 
@@ -775,7 +770,7 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 		});
 
 		it('new close run creates a second archive bundle', async () => {
-			writePlan({
+			await writePlan({
 				phases: [{ id: 1, name: 'P1', status: 'in_progress', tasks: [] }],
 			});
 
@@ -783,7 +778,7 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 
 			// Clear the session for second run
 			mkdirSync(path.join(swarmDir(), 'session'), { recursive: true });
-			writePlan({
+			await writePlan({
 				phases: [{ id: 1, name: 'P1', status: 'in_progress', tasks: [] }],
 			});
 
@@ -801,7 +796,7 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 
 	describe('close-summary.md survives; spec.md is archived and cleaned', () => {
 		it('close-summary.md is NOT deleted after close', async () => {
-			writePlan();
+			await writePlan();
 
 			await handleCloseCommand(testDir, []);
 
@@ -811,7 +806,7 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 		});
 
 		it('spec.md is archived then removed after close', async () => {
-			writePlan();
+			await writePlan();
 			writeFileSync(
 				path.join(swarmDir(), 'spec.md'),
 				'# Specification\n\nSome spec.',
@@ -829,7 +824,7 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 		});
 
 		it('spec-staleness.json is archived then removed after close', async () => {
-			writePlan();
+			await writePlan();
 			writeFileSync(
 				path.join(swarmDir(), 'spec-staleness.json'),
 				'{"type":"spec_stale_detected"}',
@@ -851,7 +846,7 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 		});
 
 		it('spec-snapshot.md is archived then removed after close', async () => {
-			writePlan();
+			await writePlan();
 			writeFileSync(
 				path.join(swarmDir(), 'spec-snapshot.md'),
 				'# Spec snapshot\n',
@@ -865,7 +860,7 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 		});
 
 		it('after close, a stale spec-staleness.json no longer blocks the core write tools', async () => {
-			writePlan();
+			await writePlan();
 			writeFileSync(
 				path.join(swarmDir(), 'spec-staleness.json'),
 				'{"type":"spec_stale_detected"}',
@@ -888,7 +883,7 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 		});
 
 		it('events.jsonl IS deleted (in ACTIVE_STATE_TO_CLEAN)', async () => {
-			writePlan();
+			await writePlan();
 			writeFileSync(path.join(swarmDir(), 'events.jsonl'), '{"event":"old"}\n');
 
 			await handleCloseCommand(testDir, []);
@@ -897,7 +892,7 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 		});
 
 		it('after close, a stale spec.md is gone and no longer resolves as the effective spec', async () => {
-			writePlan();
+			await writePlan();
 			writeFileSync(
 				path.join(swarmDir(), 'spec.md'),
 				'# Specification\n\nStale spec that must not survive close.',
@@ -920,7 +915,7 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 			// mistake "never archived because absent" for "archive failed" and
 			// must not emit a spurious "Preserved <file> because it was not
 			// successfully archived" warning for them.
-			writePlan();
+			await writePlan();
 
 			const result = await handleCloseCommand(testDir, []);
 
@@ -934,7 +929,7 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 
 	describe('All 4 active-state directories are archived and deleted', () => {
 		it('all four directories are archived and removed', async () => {
-			writePlan();
+			await writePlan();
 
 			// Create all 4 directories with unique marker files
 			mkdirSync(path.join(swarmDir(), 'evidence', 'retro-x'), {
@@ -995,7 +990,7 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 
 	describe('Full cleanup — all artifact types removed together', () => {
 		it('flat files, db files, and directories are all removed after close', async () => {
-			writePlan();
+			await writePlan();
 
 			// Flat files
 			writeFileSync(path.join(swarmDir(), 'knowledge.jsonl'), '[]');
@@ -1052,7 +1047,7 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 
 	describe('.tmp.* temp file sweep', () => {
 		it('removes .tmp.* files from .swarm/ after close but leaves non-.tmp.* files untouched', async () => {
-			writePlan();
+			await writePlan();
 
 			// Create .tmp.xxx temp artifact (should be swept by close cleanup)
 			writeFileSync(path.join(swarmDir(), '.tmp.xxx'), 'stale temp data');

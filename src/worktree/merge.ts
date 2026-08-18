@@ -210,6 +210,24 @@ export interface MergeOperationProvenance {
 	strategy: MergeStrategy;
 }
 
+/**
+ * Git object ids as written by `git rev-parse HEAD`: sha1 (40) today, sha256 (64)
+ * under the sha256 object format. Abbreviated ids are deliberately rejected —
+ * nothing in this codebase persists them. Constraining the shape also makes a
+ * leading `-` structurally impossible for values later passed to git as
+ * revisions, which matters because neither sink below passes a separator that
+ * would protect one today: the `git log` call's `--` sits after the range and
+ * separates pathspecs rather than options, and the
+ * `git merge-base --is-ancestor` call passes the revision bare. (Both commands
+ * would accept `--`/`--end-of-options` before the operand, so sink-side
+ * hardening is also available; this pattern guards the value itself.)
+ *
+ * Owned here beside `MergeOperationProvenance` because this module defines the
+ * struct whose head fields reach git argv; `workflow-wal-schema.ts` re-imports
+ * it so the two validation surfaces for the same values cannot drift apart.
+ */
+export const GIT_OBJECT_ID_PATTERN = /^[0-9a-f]{40}$|^[0-9a-f]{64}$/;
+
 export type MergeReconciliationResult =
 	| {
 			landed: true;
@@ -386,6 +404,17 @@ export async function reconcileLandedMerge(
 		return { landed: false, error: 'Incomplete merge operation provenance' };
 	}
 
+	// Both heads reach `git` argv below (a revision operand and a revision range).
+	// They round-trip through the on-disk delegation ledger, so re-validate their
+	// shape here — the single chokepoint every argv path passes through — rather
+	// than trusting whichever caller rebuilt the struct.
+	if (
+		!GIT_OBJECT_ID_PATTERN.test(provenance.sourceHead) ||
+		!GIT_OBJECT_ID_PATTERN.test(provenance.targetHeadBefore)
+	) {
+		return { landed: false, error: 'Malformed merge operation provenance' };
+	}
+
 	if (provenance.strategy !== 'cherry-pick') {
 		const ancestry = await runGit(
 			['merge-base', '--is-ancestor', provenance.sourceHead, 'HEAD'],
@@ -416,6 +445,10 @@ export async function reconcileLandedMerge(
 			`--grep=^${escapedTrailer}$`,
 			'--max-count=1',
 			`${provenance.targetHeadBefore}..HEAD`,
+			// Trailing `--` (after the revision range, never before it) so the range can
+			// never be reinterpreted as a pathspec. `git merge-base --is-ancestor` above
+			// takes no pathspec operand, so it deliberately does not get the same guard.
+			'--',
 		],
 		primaryDir,
 	);

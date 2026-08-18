@@ -14,6 +14,7 @@ import * as path from 'node:path';
 import { readKnowledgeEvents } from '../../src/hooks/knowledge-events.js';
 import { commitDisplayedMembership } from '../../src/hooks/knowledge-receipt-ledger.js';
 import { reconcileReviewerVerdicts } from '../../src/hooks/reviewer-verdict-parser.js';
+import { canonicalMkdtemp } from '../helpers/tmpdir';
 
 function entryLine(id: string, priority: string): string {
 	return JSON.stringify({
@@ -39,10 +40,8 @@ function entryLine(id: string, priority: string): string {
 	});
 }
 
-function createRelativeTempDir(): string {
-	const baseDir = 'tmp';
-	if (!fs.existsSync(baseDir)) fs.mkdirSync(baseDir, { recursive: true });
-	return fs.mkdtempSync(path.join(baseDir, 'escalation-e2e-'));
+function createTempDir(): string {
+	return canonicalMkdtemp('escalation-e2e-');
 }
 
 describe('repeat-violation escalation (e2e)', () => {
@@ -89,7 +88,7 @@ describe('repeat-violation escalation (e2e)', () => {
 
 	beforeEach(() => {
 		violationIndex = 0;
-		dir = createRelativeTempDir();
+		dir = createTempDir();
 		swarmDir = path.join(dir, '.swarm');
 		fs.mkdirSync(swarmDir, { recursive: true });
 		fs.writeFileSync(

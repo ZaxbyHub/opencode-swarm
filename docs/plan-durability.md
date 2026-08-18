@@ -125,6 +125,9 @@ Three independent layers surface `.swarm/spec-staleness.json` proactively:
   `update_task_status`, `phase_complete`, `lean_turbo_run_phase`,
   `lean_turbo_acquire_locks`) while the staleness file exists. No cache
   — `/swarm acknowledge-spec-drift` is reflected immediately.
+- **Layer C** (`src/services/status-service.ts`): `/swarm status` renders
+  a `**Spec drift detected**` line with stored/current hashes and the
+  resolution commands.
 
 Spec reconciliation is crash-recoverable. Canonical `spec_write` (or the
 separate human acknowledgement command) writes a PREPARED recovery record,
@@ -145,6 +148,20 @@ left a safely attributed mutation still rotates the generation and enters
 exact-task evidence is authoritative; session maps are bounded caches and
 delegation chains cannot satisfy a completion gate.
 
+The truthful non-success terminal is `closed` with outcome `task_closed`.
+`task_closed` is reserved for `/swarm close` reconciliation and other exact
+terminal ownership checks; it can settle unfinished work without fabricating
+success, but it must never replace authoritative `complete`. Exact-task repair
+remains the only allowed exit from an authoritative non-success terminal.
+
+Terminal and repair crash recovery now share one bounded WAL trust boundary.
+`src/workflow/workflow-wal-schema.ts` defines the accepted coder/repair/terminal
+record shapes, and `src/workflow/workflow-wal-file.ts` enforces UTF-8 decoding,
+serialized-size caps, exact task identity, and path-aware remediation for both
+runtime recovery and the synchronous evidence-write fence. Task-terminal and
+task-repair writes therefore fail closed with the same diagnostics instead of
+each parser drifting independently.
+
 Settled-task reopen is deliberately narrow. Architect-only
 `update_task_status(force: true)` requires `expected_state`,
 `expected_generation`, `target_state: "idle"`, a non-empty reason, and a caller
@@ -153,9 +170,14 @@ PREPARED task-repair record before moving the ledger projection, clears only
 that task's QA proof, appends one audited event, and commits. Retrying the same
 transition lazily resumes that exact task; plugin initialization never scans
 repair records.
-- **Layer C** (`src/services/status-service.ts`): `/swarm status` renders
-  a `**Spec drift detected**` line with stored/current hashes and the
-  resolution commands.
+
+Close-specific terminal reconciliation is similarly exact-task transactional.
+New ledgers persist a `plan_epoch` in the `plan_created` root payload. When a
+legacy ledger predates that field, `/swarm close` adopts exactly one
+backward-readable `snapshot` with `source: "plan_epoch_adopted"` under the plan
+lock. Close-target terminal WAL v2 records bind `closed` transitions to both
+`planIdentityHash` and `planEpoch`, so a stale WAL from another plan instance
+cannot be replayed into a reused task ID.
 
 ## Rebuild / Import / Export
 
@@ -208,32 +230,59 @@ Snapshot writes (triggered every 50 ledger events and on `phase_complete`) use a
 - **Telemetry**: Emits `snapshot_failed` event with `{ error, retries, source }` after all retries are exhausted
 - **Sources**: Both `save_plan` tool and `savePlan` manager layer independently retry their own snapshot calls
 
-## Terminal Plan State Write — `/swarm close` Managed Path (Phase 2)
+## Terminal Plan State Write — `/swarm close` Managed Path
 
-The `/swarm close` command uses `closePlanTerminalState()` (`src/plan/manager.ts`) to write terminal plan state through the managed ledger-first path instead of raw filesystem writes.
+`/swarm close` now has two distinct responsibilities:
+
+1. `src/workflow/close-terminal.ts` reconciles every target task against
+   authoritative exact-task evidence under plan lock.
+2. `closePlanTerminalState()` (`src/plan/manager.ts`) persists the final
+   phase/projection snapshot through the managed ledger-first path.
+
+The command always runs reconciliation, even when the caller's in-memory plan
+already appears terminal.
 
 ### Write sequence
 
-1. **PlanSchema validation** — plan is validated before any ledger events or file writes; invalid plans rejected early with no side effects
-2. **Terminal ledger events** — for each closed task: `task_status_changed` with `from_status` preserved (from the original status map); for each closed phase: `phase_completed`
-3. **Terminal snapshot** — `takeSnapshotEvent` called with `source: 'close_terminal'` to embed final closed statuses in the ledger
-4. **Atomic plan.json write** — temp+rename pattern (`.plan.json.close.{timestamp}`)
-5. **Atomic plan.md write** — with `<!-- PLAN_HASH: ... -->` comment for sync detection
-6. **Write-marker update** — `.plan-write-marker` refreshed with `source: 'plan_manager_close'` for `PlanSyncWorker` compatibility
+1. **PREPARED WAL recovery first** — any plan-enumerated task with a PREPARED
+   terminal WAL is recovered before new close work starts; plugin
+   initialization never scans these files.
+2. **Plan lock + authoritative reload** — the service replays the ledger,
+   reloads plan state, and settles or adopts the immutable `plan_epoch`.
+3. **Per-task exact reconciliation** — each target task is terminalized under
+   the established plan-lock then task-evidence-lock order. Authoritative
+   `complete` is preserved and reconciled back to plan status `completed`; only
+   unfinished or legacy/missing workflow state becomes truthful `closed`.
+   Each committed task update is persisted through `updateTaskStatus()` /
+   `savePlan()`, which appends that task's `task_status_changed` event.
+4. **Managed close projection** — once exact-task evidence is settled,
+   `closePlanTerminalState()` appends `phase_completed` events and the final
+   `close_terminal` snapshot before atomically updating `plan.json`, `plan.md`,
+   and the write marker. It does not duplicate the per-task status events
+   already written by the exact reconciliation step.
+5. **Archive/cleanup only after success** — negative rewards, archive, cleanup,
+   teardown, alignment, and success output run only after the exact-task close
+   transaction succeeds. A terminal-write failure pauses the close and leaves
+   plan/evidence/WAL recovery inputs in place for retry.
 
 ### How it differs from `savePlan`
 
-| Aspect | `savePlan` | `closePlanTerminalState` |
-|--------|------------|------------------------|
-| CAS protection | Yes (retry with backoff) | No (no concurrent writer during close) |
-| Task status re-derivation | Yes (phase statuses recomputed) | No (terminal state pre-applied by caller) |
-| Execution profile enforcement | Yes | No |
-| Ledger events | `task_status_changed`, `task_removed` | `task_status_changed` (source: `close_terminal`), `phase_completed` |
-| Snapshot | Every 50 events + phase_complete | Terminal snapshot on close |
+| Aspect | `savePlan` | `/swarm close` managed path |
+|--------|------------|-----------------------------|
+| Exact-task evidence authority | No | Yes — reconciliation runs before projection persistence |
+| Truthful non-success terminal | N/A | `closed` / `task_closed` |
+| Plan identity binding | N/A | v2 close WALs bind `planIdentityHash` + `planEpoch` |
+| Phase/task projection source | Incoming plan with normal manager rules | Authoritative post-reconciliation plan plus caller-requested phase closures |
+| Destructive follow-up after persistence failure | N/A | Forbidden — close pauses before archive/cleanup/reward |
+| Snapshot | Every 50 events + phase_complete | Terminal snapshot after exact-task reconciliation |
 
 ### Crash/restart recovery
 
-If the process crashes during `/swarm close` after ledger events are appended but before plan file writes complete, the next `loadPlan()` call detects the hash mismatch and rebuilds plan files from the ledger, recovering the terminal state.
+If the process crashes after a terminal WAL is written but before exact evidence
+or plan projection converges, the next exact-task operation lazily resumes that
+task's PREPARED record. If the crash happens after close ledger events append
+but before plan file writes complete, the next `loadPlan()` call detects the
+hash mismatch and rebuilds plan files from the authoritative ledger.
 
 ## Corruption Handling
 

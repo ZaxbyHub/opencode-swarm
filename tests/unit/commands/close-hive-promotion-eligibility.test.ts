@@ -1,35 +1,15 @@
 /**
- * Tests for handleCloseCommand — hive promotion eligibility gating (negative-path only).
- *
- * Uses _internals DI seam for close.ts internals. Retains mock.module only for
- * modules/functions NOT yet exposed through _internals.
- *
- * Verifies the three-route eligibility gate in checkHivePromotions():
- *   Route 1: hive_eligible === true AND >= 3 distinct phases
- *   Route 2: tags includes 'hive-fast-track'
- *   Route 3: age >= auto_promote_days (default 90)
- *
- * Approach: write entries to a real knowledge.jsonl temp file and use the
- * real readKnowledge (knowledge-store is NOT mocked). Only curateAndStoreSwarm
- * is mocked to control the test environment. checkHivePromotions is the
- * function under test; its result determines eligibility via the new
- * single-call promotion path.
- *
- * Note: Positive-path tests (asserting promotion happened) were removed because
- * mock.module for hive-promoter.js does not reliably intercept the import in
- * close.ts (likely due to lazy/binding-time import patterns).
+ * Negative-path hive promotion eligibility tests for handleCloseCommand. These
+ * exercise the three eligibility routes through close.ts internals while using
+ * real knowledge.jsonl I/O and mocked curation/promotion side effects.
  */
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
-import {
-	existsSync,
-	mkdirSync,
-	mkdtempSync,
-	rmSync,
-	writeFileSync,
-} from 'node:fs';
-import os from 'node:os';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import type { Plan } from '../../../src/config/plan-schema';
 import type { SwarmKnowledgeEntry } from '../../../src/hooks/knowledge-types';
+import { savePlan } from '../../../src/plan/manager';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 // ── Import under test ────────────────────────────────────────────────
 const { handleCloseCommand, _internals: closeInternals } = await import(
@@ -79,31 +59,40 @@ mock.module('../../../src/services/skill-improver.js', () => ({
 // ── Helpers ──────────────────────────────────────────────────────────
 
 let testDir: string;
-
 function swarmDir(): string {
 	return path.join(testDir, '.swarm');
 }
-
 function knowledgePath(): string {
 	return path.join(swarmDir(), 'knowledge.jsonl');
 }
 
-function writePlan(overrides: Record<string, unknown> = {}): void {
-	const plan = {
+async function writePlan(overrides: Partial<Plan> = {}): Promise<void> {
+	const plan: Plan = {
 		title: 'Eligibility Gate Test Project',
 		schema_version: '1.0.0',
+		swarm: 'test-swarm',
 		current_phase: 1,
 		phases: [
 			{
 				id: 1,
 				name: 'Phase 1',
 				status: 'complete',
-				tasks: [{ id: '1.1', status: 'complete', description: 'Task A' }],
+				tasks: [
+					{
+						id: '1.1',
+						phase: 1,
+						status: 'completed',
+						size: 'small',
+						description: 'Task A',
+						depends: [],
+						files_touched: ['src/task-a.ts'],
+					},
+				],
 			},
 		],
 		...overrides,
 	};
-	writeFileSync(path.join(swarmDir(), 'plan.json'), JSON.stringify(plan));
+	await savePlan(testDir, plan);
 }
 
 /** Write knowledge entries directly to the JSONL file (real file I/O) */
@@ -194,9 +183,8 @@ function makeConfig(hiveEnabled = true): Record<string, unknown> {
 
 describe('handleCloseCommand — hive promotion eligibility gating (negative paths)', () => {
 	beforeEach(() => {
-		testDir = mkdtempSync(
-			path.join(os.tmpdir(), 'close-hive-eligibility-test-'),
-		);
+		testDir = canonicalMkdtemp('close-hive-eligibility-test-');
+		mkdirSync(path.join(testDir, '.git'));
 		mkdirSync(swarmDir(), { recursive: true });
 		// Ensure no pre-existing knowledge file
 		if (existsSync(knowledgePath())) rmSync(knowledgePath());
@@ -260,7 +248,7 @@ describe('handleCloseCommand — hive promotion eligibility gating (negative pat
 
 	describe('Route 1 — hive_eligible flag with 3+ distinct phases', () => {
 		it('delegates to checkHivePromotions when entry has hive_eligible=true but only 1 distinct phase', async () => {
-			writePlan();
+			await writePlan();
 			writeKnowledgeJsonl([
 				makeEntry({
 					id: 'entry-route1-few-phases',
@@ -285,7 +273,7 @@ describe('handleCloseCommand — hive promotion eligibility gating (negative pat
 		});
 
 		it('delegates to checkHivePromotions when entry has hive_eligible=true but only 2 distinct phases', async () => {
-			writePlan();
+			await writePlan();
 			writeKnowledgeJsonl([
 				makeEntry({
 					id: 'entry-route1-two-phases',
@@ -313,7 +301,7 @@ describe('handleCloseCommand — hive promotion eligibility gating (negative pat
 		});
 
 		it('delegates to checkHivePromotions when hive_eligible=false regardless of phase count', async () => {
-			writePlan();
+			await writePlan();
 			writeKnowledgeJsonl([
 				makeEntry({
 					id: 'entry-route1-not-eligible',
@@ -362,7 +350,7 @@ describe('handleCloseCommand — hive promotion eligibility gating (negative pat
 
 	describe('Route 2 — hive-fast-track tag bypasses phase count', () => {
 		it('delegates to checkHivePromotions for entry without fast-track tag even with many phases but hive_eligible=false', async () => {
-			writePlan();
+			await writePlan();
 			writeKnowledgeJsonl([
 				makeEntry({
 					id: 'entry-many-phases-no-flag',
@@ -401,7 +389,7 @@ describe('handleCloseCommand — hive promotion eligibility gating (negative pat
 
 	describe('Route 3 — age-based promotion (auto_promote_days default 90)', () => {
 		it('delegates to checkHivePromotions for entry newer than auto_promote_days', async () => {
-			writePlan();
+			await writePlan();
 			// 1 ms ago — well under the 90-day threshold
 			const newDate = new Date(Date.now() - 1).toISOString();
 
@@ -425,7 +413,7 @@ describe('handleCloseCommand — hive promotion eligibility gating (negative pat
 		});
 
 		it('delegates to checkHivePromotions for entry with no created_at timestamp', async () => {
-			writePlan();
+			await writePlan();
 			// Entry without created_at — Date.parse(undefined) === NaN → ageMs === 0
 			const entryWithoutCreatedAt = makeEntry({
 				id: 'entry-no-created-at',
@@ -451,7 +439,7 @@ describe('handleCloseCommand — hive promotion eligibility gating (negative pat
 
 	describe('Entry with no confirmed_by (neither route 1 nor age applies)', () => {
 		it('delegates to checkHivePromotions for entry with no confirmed_by and no fast-track or age', async () => {
-			writePlan();
+			await writePlan();
 			// Recent entry with no confirmed_by and no fast-track tag
 			const recentDate = new Date(Date.now() - 5 * 86400000).toISOString();
 
@@ -479,7 +467,7 @@ describe('handleCloseCommand — hive promotion eligibility gating (negative pat
 
 	describe('confirmed_by with null/undefined phase_number is handled safely', () => {
 		it('delegates to checkHivePromotions and handles records with null phase_number safely when computing distinct phases', async () => {
-			writePlan();
+			await writePlan();
 
 			writeKnowledgeJsonl([
 				makeEntry({
