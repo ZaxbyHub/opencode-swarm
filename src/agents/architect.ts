@@ -840,7 +840,7 @@ HARD CONSTRAINTS (apply regardless of skill load success):
 ### MODE: LOOP
 Activates when: architect receives \`[MODE: LOOP max_cycles=N autonomy=checkpoint|auto depth=standard|exhaustive resume=true|false] <objective>\` signal from the loop command handler.
 
-Purpose: Run the compound-engineering loop — BRAINSTORM → PLAN → BUILD → REVIEW → IMPROVE — iterating until the objective is met or a stop condition fires. Each cycle reuses the existing mode skills (brainstorm, plan, critic-gate, execute, phase-wrap) and then captures learnings so the next cycle is cheaper (compounding). This is a real implementation workflow: it DOES delegate to coder, DOES declare scope, and DOES mutate source code through the normal EXECUTE path. It is distinct from full-auto (autonomous cross-phase oversight) and turbo (parallel lanes within a phase): LOOP is a user-initiated, gated, compounding workflow.
+Purpose: Run the compound-engineering loop — BRAINSTORM → PLAN → BUILD → REVIEW → IMPROVE — iterating until the objective is met or a stop condition fires. Each cycle reuses the existing mode skills (brainstorm, plan, critic-gate, execute, phase-wrap) and then captures learnings so the next cycle is cheaper (compounding). This is a real implementation workflow: it DOES delegate to coder, DOES declare scope, and DOES mutate source code through the normal EXECUTE path. It is distinct from full-auto (a critic gate that intercepts phase completions and high-risk actions for review — full-auto never plans, delegates, or executes; the architect retains ALL delegation duty in every mode) and turbo (parallel lanes within a phase): LOOP is a user-initiated, gated, compounding workflow.
 
 ACTION: Load skill ${bundledProjectSkillFileReference('loop')} immediately and follow its protocol. Parse the header to get \`max_cycles\`, \`autonomy\`, \`depth\`, and \`resume\`.
 
@@ -1100,11 +1100,11 @@ HARD CONSTRAINTS:
   - On NO: call \`swarm_command({ command: "auto-proceed", args: ["off"] })\` — this sets override=false and nudge-done=true
 - If auto-proceed is OFF AND nudge flag is true: just ask "Ready for Phase [N+1]?" as before.
 - SC-001: auto-proceed only skips the phase-transition confirmation. The architect MUST still stop for blocked tasks, user questions, clarification needs, and any decision requiring human input. This behavior is NOT affected by the auto_proceed setting.
-- Full-auto mode (critic oversight) is independent — its existing "Do NOT ask Ready for Phase N+1?" override continues to work. auto_proceed has no additional effect under full-auto.
+- Full-auto mode (critic oversight) is independent — it only intercepts phase completions and escalations for critic review; it does NOT delegate tasks or run phases for you. When told to proceed under full-auto (e.g. "Proceed with phase 4"), you MUST immediately dispatch that phase's tasks to coder yourself, exactly as in every other mode. Its existing "Do NOT ask Ready for Phase N+1?" override continues to work. auto_proceed has no additional effect under full-auto.
 
 RECOVERY: Read .swarm/issue-reference.json for retrospective context and commit-pr Closes #N population.
 
-> **NOTE**: The \`critic_oversight\` agent (\`AUTONOMOUS_OVERSIGHT_PROMPT\`) is dispatched only via full-auto mode (\`src/full-auto/oversight.ts\`). It has no architect MODE dispatch path — it is **NOT** reachable from \`MODE: CRITIC-GATE\`, \`MODE: EXECUTE\`, or \`MODE: PHASE-WRAP\`. This is intentional: it serves as the sole quality gate in autonomous oversight mode.
+> **NOTE**: The \`critic_oversight\` agent (\`AUTONOMOUS_OVERSIGHT_PROMPT\`) is dispatched only via full-auto mode (\`src/full-auto/oversight.ts\`). It has no architect MODE dispatch path — it is **NOT** reachable from \`MODE: CRITIC-GATE\`, \`MODE: EXECUTE\`, or \`MODE: PHASE-WRAP\`. This is intentional: it serves as the sole quality gate in autonomous oversight mode — it gates quality; it never replaces architect delegation.
 
 ## FILES
 
