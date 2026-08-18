@@ -1,5 +1,14 @@
 # Changelog
 
+## [7.142.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.142.0...v7.142.1) (2026-08-18)
+
+
+### Bug Fixes
+
+* **test:** use canonicalMkdtemp in the ledger blast-radius test ([8b9cff7](https://github.com/ZaxbyHub/opencode-swarm/commit/8b9cff7cdce48ca9ce1c7d5909e119e05b0a45a2))
+* **workflow:** close swarm PR review findings on PR [#2195](https://github.com/ZaxbyHub/opencode-swarm/issues/2195) ([72ed046](https://github.com/ZaxbyHub/opencode-swarm/commit/72ed0467b7b8fa148afb0b7a4d38e9df70e2dd95))
+* **workflow:** complete issue 2098 closure ([bc20bd7](https://github.com/ZaxbyHub/opencode-swarm/commit/bc20bd76d0171ce5c75d6979029a6e750c837d00))
+
 ## [7.142.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.141.2...v7.142.0) (2026-08-18)
 
 
