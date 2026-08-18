@@ -28,6 +28,9 @@ describe('isTier3Path', () => {
 	test('exact basename: secrets.ts', () => {
 		expect(isTier3Path('secrets.ts')).toBe(true);
 	});
+	test('exact basename: secretscan.ts', () => {
+		expect(isTier3Path('secretscan.ts')).toBe(true);
+	});
 
 	test('keyword prefix with separator: auth-handler.ts', () => {
 		expect(isTier3Path('auth-handler.ts')).toBe(true);

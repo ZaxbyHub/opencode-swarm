@@ -17,6 +17,7 @@ const TIER_3_EXACT_BASENAMES = new Set([
 	'crypto',
 	'secret',
 	'secrets',
+	'secretscan',
 ]);
 
 const TIER_3_KEYWORD_PREFIX_RE =
