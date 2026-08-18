@@ -4,7 +4,11 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 import { resolveHiveDataDir } from '../../src/knowledge/hive-paths';
-import { assertSafeForWrite, createIsolatedTestEnv } from './isolated-test-env';
+import {
+	assertSafeForWrite,
+	createIsolatedTestEnv,
+	ISOLATED_ENV_KEYS,
+} from './isolated-test-env';
 
 describe('isolated-test-env', () => {
 	describe('createIsolatedTestEnv', () => {
@@ -151,6 +155,43 @@ describe('isolated-test-env', () => {
 			if (originalLOCALAPPDATA !== undefined)
 				process.env.LOCALAPPDATA = originalLOCALAPPDATA;
 			if (originalHOME !== undefined) process.env.HOME = originalHOME;
+		});
+
+		test('every ISOLATED_ENV_KEYS entry is redirected, then restored (F-007/F-012)', () => {
+			// The per-key tests above enumerate five of the seven keys by hand, so
+			// dropping a key from the list is invisible to them. XDG_CACHE_HOME is
+			// the proven case: without it, booting the plugin in a test re-created
+			// the developer's REAL ~/.cache/opencode-swarm/version-check.json with
+			// zero test failures (PR #2173 F-007/F-012). This asserts the WHOLE
+			// list, and pins its exact membership so a silent removal fails here.
+			expect([...ISOLATED_ENV_KEYS]).toEqual([
+				'XDG_CONFIG_HOME',
+				'XDG_DATA_HOME',
+				'XDG_CACHE_HOME',
+				'APPDATA',
+				'LOCALAPPDATA',
+				'HOME',
+				'USERPROFILE',
+			]);
+
+			const originals = new Map<string, string | undefined>(
+				ISOLATED_ENV_KEYS.map((key) => [key, process.env[key]]),
+			);
+
+			const { configDir, cleanup } = createIsolatedTestEnv();
+			try {
+				for (const key of ISOLATED_ENV_KEYS) {
+					expect(`${key}=${process.env[key]}`).toBe(`${key}=${configDir}`);
+				}
+			} finally {
+				cleanup();
+			}
+
+			for (const key of ISOLATED_ENV_KEYS) {
+				expect(`${key}=${process.env[key]}`).toBe(
+					`${key}=${originals.get(key)}`,
+				);
+			}
 		});
 
 		test('After cleanup(), the temp dir is removed', () => {
