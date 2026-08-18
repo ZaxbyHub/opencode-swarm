@@ -413,7 +413,7 @@ Before delegating to {{AGENT_PREFIX}}reviewer: call check_gate_status for the cu
 
 ACCEPTANCE FIELD RESOLUTION — REQUIRED on every {{AGENT_PREFIX}}coder and {{AGENT_PREFIX}}reviewer Task dispatch. A dispatch with no ACCEPTANCE: line is BLOCKED by the delegation gate before the agent runs (ACCEPTANCE_FIELD_REQUIRED). Resolve it as:
 1. Read the current task's \`fr_refs\` from the plan.
-2. If \`fr_refs\` is non-empty: look up EVERY listed FR-###/SC-### id in the current \`.swarm/spec.md\` and copy each one's full requirement text into ACCEPTANCE VERBATIM — byte-for-byte, no summarizing or paraphrasing, and concatenate all of them when a task maps to more than one.
+2. If \`fr_refs\` is non-empty: list every mapped FR-###/SC-### id on the ACCEPTANCE line (e.g. \`ACCEPTANCE: FR-007, FR-012\`). The delegation gate automatically injects each id's full verbatim requirement text from the current \`.swarm/spec.md\` into the dispatch before the downstream agent runs — you do NOT need to copy the requirement bodies yourself (pasting them yourself is also fine and changes nothing). Never replace an id with a summary or paraphrase.
 3. When the task has no spec mapping: if \`fr_refs\` is empty or absent, populate ACCEPTANCE with a task-derived one-line restatement of what DONE looks like instead (the same pattern as \`acceptanceCriteria\` above).
 ACCEPTANCE must never be empty — lacking a spec mapping is normal and is not a reason to omit it.
 NOTE: the plan-task \`acceptance\` field is a different thing. Writing acceptance on the plan task does NOT satisfy this rule. The delegation prompt needs its own literal \`ACCEPTANCE:\` line.
@@ -1340,7 +1340,7 @@ and \`explorer\` as parallel Agent tasks. Each member receives phase-scoped cont
 - \`explorer\`      — full phase diff + original task intents + prior slop findings across all tasks
                     (hunts for lazy implementations, hallucinated APIs, cargo-cult patterns,
                      spec drift, lazy abstractions introduced anywhere in the phase)
-→ REQUIRED: the \`reviewer\` member dispatch MUST include a literal \`ACCEPTANCE:\` line per ACCEPTANCE FIELD RESOLUTION above (phase-scoped: concatenate the verbatim FR/SC text for every task in this phase when fr_refs is non-empty, otherwise a one-line phase-derived DONE restatement). A missing line is BLOCKED by ACCEPTANCE_FIELD_REQUIRED before that member runs. The other four members are not gated by this rule.
+→ REQUIRED: the \`reviewer\` member dispatch MUST include a literal \`ACCEPTANCE:\` line per ACCEPTANCE FIELD RESOLUTION above (phase-scoped: concatenate the verbatim FR/SC text for every task in this phase when fr_refs is non-empty — the delegation gate does NOT auto-inject for multi-task phase/council dispatches, so paste the bodies yourself — otherwise a one-line phase-derived DONE restatement). A missing line is BLOCKED by ACCEPTANCE_FIELD_REQUIRED before that member runs. The other four members are not gated by this rule.
 
 Wait for ALL dispatched agents to return their verdict objects before proceeding.
 

@@ -4,8 +4,10 @@
  * pointer — NOT the "[Requirement text completely missing from prompt]"
  * fallback that #2204 introduced for genuinely-omitted bodies.
  *
- * Two shapes are locked here, both end-to-end through `toolBefore` so the
- * rendered error string itself is the assertion surface:
+ * Two shapes are locked here, both asserted on the REAL rendered error string
+ * produced by the exact pair the throw site calls:
+ * `checkAcceptanceCoversFrRefs` (extraction + normalization +
+ * `describeCoverageMiss`) → `buildAcceptanceCoverageMismatchError` (rendering).
  *
  *  1. The id-label glue mismatch. `extractSpecRequirementBodyById` takes
  *     everything after the closing `**` of a `- **FR-050**: <body>` bullet, so
@@ -27,162 +29,105 @@
  * sub-threshold-prefix early return always set `completelyMissing`, so that
  * ternary could never fire.
  *
+ * Why NOT end-to-end through `toolBefore`: #2205 (already on main) injects the
+ * verbatim spec.md body into ACCEPTANCE for every extractable mapped id BEFORE
+ * the coverage recheck runs, using the same field list, id-resolution, and
+ * normalization helpers — so the recheck always finds those ids covered and the
+ * `ACCEPTANCE_FIELD_COVERAGE_MISMATCH` throw is structurally unreachable from
+ * `toolBefore` today (see the `buildAcceptanceCoverageMismatchError` docblock in
+ * src/hooks/delegation-gate.ts, which states the same). The diagnostic contract
+ * is therefore asserted through the exported builder the throw site calls —
+ * matching `delegation-gate-acceptance-remediation.test.ts` and
+ * `delegation-gate-acceptance-coverage.test.ts`, which assert every other
+ * coverage-mismatch message contract the same way. The end-to-end
+ * post-injection behaviour (a summary/shifted ACCEPTANCE now DISPATCHES, with
+ * the verbatim body appended to the mutated args) is covered by
+ * `delegation-gate-acceptance-coverage.test.ts` and
+ * `delegation-gate-acceptance-injection.test.ts`.
+ *
  * These live in their own file rather than in
- * `delegation-gate-acceptance-remediation.test.ts` (whose `writeSingleTaskPlan`
- * harness they mirror) because that file has no room left under the 500-line
- * FR-006 cap.
+ * `delegation-gate-acceptance-remediation.test.ts` because that file has no
+ * room left under the 500-line FR-006 cap.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import * as fs from 'node:fs';
-import * as path from 'node:path';
-import type { PluginConfig } from '../../../src/config';
-import type { Plan } from '../../../src/config/plan-schema';
-import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
-import { ensureAgentSession, resetSwarmState } from '../../../src/state';
-import { canonicalMkdtemp } from '../../helpers/tmpdir';
-import { recordPlanCriticApproval } from './_delegation-gate-helpers';
-
-function makeConfig(): PluginConfig {
-	return { hooks: { delegation_gate: true } } as unknown as PluginConfig;
-}
-
-function makeTempProject(prefix: string): string {
-	const real = canonicalMkdtemp(prefix);
-	fs.mkdirSync(path.join(real, '.swarm'), { recursive: true });
-	return real;
-}
-
-function toolBeforeInput(sessionID: string, callID = 'call-1') {
-	return { tool: 'Task', sessionID, callID };
-}
-
-async function writeSingleTaskPlan(
-	dir: string,
-	specMd: string,
-	frRefs: string[],
-): Promise<void> {
-	const plan: Plan = {
-		schema_version: '1.0.0' as const,
-		title: 'Shifted-Body Test Plan',
-		swarm: 'test-swarm',
-		current_phase: 1,
-		phases: [
-			{
-				id: 1,
-				name: 'Phase 1',
-				status: 'in_progress',
-				tasks: [
-					{
-						id: '1.1',
-						phase: 1,
-						status: 'pending',
-						size: 'small' as const,
-						description: 'Mapped task',
-						depends: [],
-						files_touched: ['src/mapped-task.ts'],
-						fr_refs: frRefs,
-					},
-				],
-			},
-		],
-	} as Plan;
-	fs.writeFileSync(
-		path.join(dir, '.swarm', 'plan.json'),
-		JSON.stringify(plan, null, 2),
-	);
-	fs.writeFileSync(path.join(dir, '.swarm', 'spec.md'), specMd);
-	await recordPlanCriticApproval(dir, plan);
-}
+import { describe, expect, it } from 'bun:test';
+import {
+	buildAcceptanceCoverageMismatchError,
+	checkAcceptanceCoversFrRefs,
+} from '../../../src/hooks/delegation-gate';
 
 describe('#2215: present-but-shifted body renders a divergence pointer, not the missing fallback', () => {
-	let tempDir: string;
 	const BODY = 'The service SHALL retry the upload three times before failing.';
+	// Id-only bold span (no title): the body extracted from this bullet keeps the
+	// leading `": "` glue that starves the prefix probe.
+	const SPEC_MD = `- **FR-050**: ${BODY}\n`;
 
-	beforeEach(async () => {
-		resetSwarmState();
-		tempDir = makeTempProject('c2215-shifted-');
-		await writeSingleTaskPlan(tempDir, `- **FR-050**: ${BODY}\n`, ['FR-050']);
-	});
+	function renderMismatch(acceptanceText: string): string {
+		const res = checkAcceptanceCoversFrRefs({
+			specText: SPEC_MD,
+			acceptanceText,
+			frRefs: ['FR-050'],
+		});
+		expect(res.covered).toBe(false);
+		return buildAcceptanceCoverageMismatchError({
+			targetAgent: 'coder',
+			coverageTaskId: '1.1',
+			coverageResult: res,
+		}).message;
+	}
 
-	afterEach(() => {
-		resetSwarmState();
-		try {
-			fs.rmSync(tempDir, { recursive: true, force: true });
-		} catch {
-			// best-effort cleanup
-		}
-	});
-
-	it('the id-label glue mismatch points at the mismatched head instead of claiming the text is absent', async () => {
-		const hooks = createDelegationGateHook(makeConfig(), tempDir);
-		ensureAgentSession('sess-2215-shifted', 'architect');
-		let caught: Error | undefined;
-		try {
-			await hooks.toolBefore(toolBeforeInput('sess-2215-shifted'), {
-				args: {
-					subagent_type: 'coder',
-					task_id: '1.1',
-					prompt: `TASK: 1.1 implement it\nACCEPTANCE: FR-050 - ${BODY}`,
-				},
-			});
-		} catch (err) {
-			caught = err as Error;
-		}
-		expect(caught).toBeDefined();
-		expect(caught?.message).toContain('ACCEPTANCE_FIELD_COVERAGE_MISMATCH');
+	it('the id-label glue mismatch points at the mismatched head instead of claiming the text is absent', () => {
+		const message = renderMismatch(
+			`TASK: 1.1 implement it\nACCEPTANCE: FR-050 - ${BODY}`,
+		);
+		expect(message).toContain('ACCEPTANCE_FIELD_COVERAGE_MISMATCH');
 		// The body IS in the prompt — claiming otherwise sends the architect
 		// hunting for text that is right there (the #2215 regression).
-		expect(caught?.message).not.toContain(
+		expect(message).not.toContain(
 			'[Requirement text completely missing from prompt]',
 		);
 		// Nothing aligns from character 0, so the renderer's offset-0 qualifier
 		// fires — live and correct only because of the suffix probe.
-		expect(caught?.message).toContain(
+		expect(message).toContain(
 			'first divergence at normalized offset 0 (no aligned prefix found)',
 		);
 		// The mismatched head on each side: the glue colon vs the id label.
-		expect(caught?.message).toContain('spec requires here: ":"');
-		expect(caught?.message).toContain(
+		expect(message).toContain('spec requires here: ":"');
+		expect(message).toContain(
 			'ACCEPTANCE has here: "task: 1.1 implement it acceptance: fr-050 -"',
 		);
 	});
 
-	it('the body is still found when a SKILLS line follows ACCEPTANCE in the dispatch', async () => {
+	it('the body is still found when a SKILLS line follows ACCEPTANCE in the dispatch', () => {
 		// The regression a tail-position compare cannot see: the compared blob does
 		// not END with the body when a dispatch has content after ACCEPTANCE (a
 		// SKILLS line here, but any trailing field has the same effect).
-		const hooks = createDelegationGateHook(makeConfig(), tempDir);
-		ensureAgentSession('sess-2215-trailing', 'architect');
-		let caught: Error | undefined;
-		try {
-			await hooks.toolBefore(toolBeforeInput('sess-2215-trailing'), {
-				args: {
-					subagent_type: 'coder',
-					task_id: '1.1',
-					prompt: [
-						'TASK: 1.1 implement it',
-						'FILE: src/service/upload.ts',
-						`ACCEPTANCE: FR-050 - ${BODY}`,
-						'SKILLS: file:.claude/skills/engineering-conventions/SKILL.md',
-					].join('\n'),
-				},
-			});
-		} catch (err) {
-			caught = err as Error;
-		}
-		expect(caught).toBeDefined();
-		expect(caught?.message).toContain('ACCEPTANCE_FIELD_COVERAGE_MISMATCH');
-		expect(caught?.message).not.toContain(
+		//
+		// The `FILE:`/`SKILLS:` lines are inert PROMPT CONTENT for this assertion —
+		// the coverage check receives one flat blob and never interprets them. Do
+		// NOT re-plumb this case through `toolBefore`: there the `FILE:` path would
+		// have to be covered by the plan task's `files_touched` or the later
+		// `prepareCoderScope` preflight blocks the dispatch with SCOPE_CONFLICT
+		// long before any of this is exercised.
+		const message = renderMismatch(
+			[
+				'TASK: 1.1 implement it',
+				'FILE: src/service/upload.ts',
+				`ACCEPTANCE: FR-050 - ${BODY}`,
+				'SKILLS: file:.claude/skills/engineering-conventions/SKILL.md',
+			].join('\n'),
+		);
+		expect(message).toContain('ACCEPTANCE_FIELD_COVERAGE_MISMATCH');
+		expect(message).not.toContain(
 			'[Requirement text completely missing from prompt]',
 		);
-		expect(caught?.message).toContain(
+		expect(message).toContain(
 			'first divergence at normalized offset 0 (no aligned prefix found)',
 		);
 		// The ACCEPTANCE snippet is the text preceding the LOCATED match, so it
 		// stops at the id label and never bleeds into the trailing SKILLS line.
-		expect(caught?.message).toContain('spec requires here: ":"');
-		expect(caught?.message).toContain(
+		expect(message).toContain('spec requires here: ":"');
+		expect(message).toContain(
 			'ACCEPTANCE has here: "task: 1.1 implement it file: src/service/upload.ts acceptance: fr-050 -"',
 		);
 	});

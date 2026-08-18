@@ -23,6 +23,7 @@ import * as path from 'node:path';
 import type { PluginConfig } from '../../../src/config';
 import type { Plan } from '../../../src/config/plan-schema';
 import {
+	buildAcceptanceCoverageMismatchError,
 	checkAcceptanceCoversFrRefs,
 	createDelegationGateHook,
 	extractSpecRequirementBodyById,
@@ -93,6 +94,11 @@ describe('extractSpecRequirementBodyById (unit)', () => {
 		// FR-001 appears only inside SC-001's `(FR-001)` parenthetical here.
 		const spec = `- **SC-001 (FR-001).** ${SC001_BODY}`;
 		expect(extractSpecRequirementBodyById(spec, 'FR-001')).toBeNull();
+	});
+
+	it('returns null for an empty or whitespace-only id instead of matching the first bullet', () => {
+		expect(extractSpecRequirementBodyById(SPEC_MD, '')).toBeNull();
+		expect(extractSpecRequirementBodyById(SPEC_MD, '   ')).toBeNull();
 	});
 });
 
@@ -334,108 +340,108 @@ describe('toolBefore ACCEPTANCE coverage gate (integration, F-007/#1687)', () =>
 		).resolves.toBeUndefined();
 	});
 
-	it('coder, mapped task, ACCEPTANCE = lorem ipsum => rejects COVERAGE_MISMATCH (task-id DISCOVERED from the TASK: line, the real free-text path — no args.task_id)', async () => {
+	it('coder, mapped task, ACCEPTANCE = lorem ipsum => dispatches with verbatim body injected (#2205; task-id DISCOVERED from the TASK: line, the real free-text path — no args.task_id)', async () => {
 		const hooks = createDelegationGateHook(makeConfig(), tempDir);
 		ensureAgentSession('sess-cov-coder-bad', 'architect');
 		// Deliberately omit args.task_id so resolveDelegatedPlanTaskId must extract
 		// "1.1" from the TASK: line — the production resolution path for free-text
-		// coder dispatches, where task_id is not reliably present.
+		// coder dispatches, where task_id is not reliably present. Pre-#2205 this
+		// threw ACCEPTANCE_FIELD_COVERAGE_MISMATCH; the gate now injects the
+		// verbatim FR-001 body into the dispatched prompt instead of blocking.
+		const output = {
+			args: {
+				subagent_type: 'coder',
+				prompt: 'TASK: 1.1 implement it\nACCEPTANCE: lorem ipsum',
+			} as Record<string, unknown>,
+		};
 		await expect(
-			hooks.toolBefore(toolBeforeInput('sess-cov-coder-bad'), {
-				args: {
-					subagent_type: 'coder',
-					prompt: 'TASK: 1.1 implement it\nACCEPTANCE: lorem ipsum',
-				},
-			}),
-		).rejects.toThrow(/ACCEPTANCE_FIELD_COVERAGE_MISMATCH/);
+			hooks.toolBefore(toolBeforeInput('sess-cov-coder-bad'), output),
+		).resolves.toBeUndefined();
+		expect(String(output.args.prompt)).toContain(`FR-001: ${FR001_BODY}`);
 	});
 
-	it('REVIEWER, mapped task, ACCEPTANCE = lorem ipsum => rejects (proves check gates reviewer above the coder-only return)', async () => {
+	it('REVIEWER, mapped task, ACCEPTANCE = lorem ipsum => dispatches with injection (#2205; reviewer path covered)', async () => {
+		await seedAuthoritativeTaskWorkflow(tempDir, '1.1', 'pre_check_passed');
 		const hooks = createDelegationGateHook(makeConfig(), tempDir);
 		ensureAgentSession('sess-cov-rev-bad', 'architect');
+		const output = {
+			args: {
+				subagent_type: 'reviewer',
+				task_id: '1.1',
+				prompt: 'TASK: 1.1 review it\nACCEPTANCE: lorem ipsum',
+			} as Record<string, unknown>,
+		};
 		await expect(
-			hooks.toolBefore(toolBeforeInput('sess-cov-rev-bad'), {
-				args: {
-					subagent_type: 'reviewer',
-					task_id: '1.1',
-					prompt: 'TASK: 1.1 review it\nACCEPTANCE: lorem ipsum',
-				},
-			}),
-		).rejects.toThrow(/ACCEPTANCE_FIELD_COVERAGE_MISMATCH/);
+			hooks.toolBefore(toolBeforeInput('sess-cov-rev-bad'), output),
+		).resolves.toBeUndefined();
+		expect(String(output.args.prompt)).toContain(`FR-001: ${FR001_BODY}`);
 	});
 
-	it('omitted requirement body renders the completely-missing fallback, not a divergence pointer (#2204)', async () => {
-		const hooks = createDelegationGateHook(makeConfig(), tempDir);
-		ensureAgentSession('sess-cov-missing-2204', 'architect');
-		// The agent summarized the task; only coincidental punctuation can match
-		// the FR-001 body — pre-#2204 this rendered a misleading "first
-		// divergence … ACCEPTANCE has here" pointer at a random prompt word.
-		let caught: Error | undefined;
-		try {
-			await hooks.toolBefore(toolBeforeInput('sess-cov-missing-2204'), {
-				args: {
-					subagent_type: 'coder',
-					task_id: '1.1',
-					prompt:
-						'TASK: 1.1 implement it\nACCEPTANCE: coder task: extract module logic',
-				},
-			});
-		} catch (err) {
-			caught = err as Error;
-		}
-		expect(caught).toBeDefined();
-		expect(caught?.message).toContain('ACCEPTANCE_FIELD_COVERAGE_MISMATCH');
-		expect(caught?.message).toContain(
+	it('omitted requirement body renders the completely-missing fallback in the error contract, not a divergence pointer (#2204)', () => {
+		// The mismatch throw is defense-in-depth after #2205's injection; its
+		// message contract is unit-tested through the exported builder.
+		const specText = SPEC_MD;
+		const res = checkAcceptanceCoversFrRefs({
+			specText,
+			// The agent summarized the task; only coincidental punctuation can
+			// match the FR-001 body — pre-#2204 the rendered error pointed at a
+			// random "divergence" word in the prompt.
+			acceptanceText: 'ACCEPTANCE: coder task: extract module logic',
+			frRefs: ['FR-001'],
+		});
+		expect(res.covered).toBe(false);
+		const err = buildAcceptanceCoverageMismatchError({
+			targetAgent: 'coder',
+			coverageTaskId: '1.1',
+			coverageResult: res,
+		});
+		expect(err.message).toContain('ACCEPTANCE_FIELD_COVERAGE_MISMATCH');
+		expect(err.message).toContain(
 			'ACCEPTANCE has here: "[Requirement text completely missing from prompt]"',
 		);
-		expect(caught?.message).not.toContain(
-			'first divergence at normalized offset',
-		);
+		expect(err.message).not.toContain('first divergence at normalized offset');
 	});
 
-	it('completely-missing fallback and the ENCODING WARNING co-occur in one rendered error (#1896 + #2204)', async () => {
+	it('completely-missing fallback and the ENCODING WARNING co-occur in one rendered error (#1896 + #2204)', () => {
 		// spec.md lost its section sign to a `??` save AND the agent omitted the
 		// requirement text entirely. Both diagnostic layers must survive into the
-		// SAME thrown message: the corruption hint tells the operator to repair
+		// SAME rendered message: the corruption hint tells the operator to repair
 		// spec.md, the fallback line tells them the body is absent from the prompt.
 		// Neither a >=10-char prefix nor a >=10-char suffix of the body occurs
 		// anywhere in this prompt: the prefix probe stalls at "s" (1 char) and the
 		// suffix probe stalls at "." (1 char — the period only appears in "1.1",
 		// and "g." never does). So it lands on the genuine completely-missing
 		// branch, not #2215's present-but-shifted one.
-		fs.writeFileSync(
-			path.join(tempDir, '.swarm', 'spec.md'),
-			[
-				'# Spec 1687 fixture',
-				'',
-				'## Functional Requirements',
-				'',
-				'- **FR-001 — Widget renders.** See ?? 4.2 of the retention policy before deleting.',
-				'',
-			].join('\n'),
-		);
-		const hooks = createDelegationGateHook(makeConfig(), tempDir);
-		ensureAgentSession('sess-cov-missing-encoded', 'architect');
-		let caught: Error | undefined;
-		try {
-			await hooks.toolBefore(toolBeforeInput('sess-cov-missing-encoded'), {
-				args: {
-					subagent_type: 'coder',
-					task_id: '1.1',
-					prompt:
-						'TASK: 1.1 implement it\nACCEPTANCE: refactor the module loader',
-				},
-			});
-		} catch (err) {
-			caught = err as Error;
-		}
-		expect(caught).toBeDefined();
-		expect(caught?.message).toContain('ACCEPTANCE_FIELD_COVERAGE_MISMATCH');
-		expect(caught?.message).toContain(
+		//
+		// Asserted through the exported builder for the same reason as the sibling
+		// test above: post-#2205 the toolBefore throw is defense-in-depth, because
+		// injection covers every extractable id before the recheck runs.
+		const corruptedSpec = [
+			'# Spec 1687 fixture',
+			'',
+			'## Functional Requirements',
+			'',
+			'- **FR-001 — Widget renders.** See ?? 4.2 of the retention policy before deleting.',
+			'',
+		].join('\n');
+		const res = checkAcceptanceCoversFrRefs({
+			specText: corruptedSpec,
+			acceptanceText:
+				'TASK: 1.1 implement it\nACCEPTANCE: refactor the module loader',
+			frRefs: ['FR-001'],
+		});
+		expect(res.covered).toBe(false);
+		const err = buildAcceptanceCoverageMismatchError({
+			targetAgent: 'coder',
+			coverageTaskId: '1.1',
+			coverageResult: res,
+		});
+		expect(err.message).toContain('ACCEPTANCE_FIELD_COVERAGE_MISMATCH');
+		expect(err.message).toContain(
 			'ACCEPTANCE has here: "[Requirement text completely missing from prompt]"',
 		);
-		expect(caught?.message).toContain('ENCODING WARNING:');
-		expect(caught?.message).toContain('??');
+		expect(err.message).toContain('ENCODING WARNING:');
+		expect(err.message).toContain('??');
 	});
 
 	it('task with NO fr_refs, task-derived ACCEPTANCE => resolves (FR-004 fail-open)', async () => {
