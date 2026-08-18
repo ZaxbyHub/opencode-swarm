@@ -4602,6 +4602,34 @@ export function createDelegationGateHook(
 										logger.warn(
 											`[delegation-gate] STAGE_B_ATTRIBUTION_MISSING: ${targetAgent} dispatch for call ${input.callID} returned no structured verdict lines. Expected tasks: ${expectedTasks}. Agent output must include [REVIEWED] or [TESTED] verdict lines.`,
 										);
+										const failClosedTaskIds = dispatchCtx
+											? [...dispatchCtx.taskIds]
+											: gateDispatchPrimaryTaskByCallID.has(input.callID)
+												? [
+														gateDispatchPrimaryTaskByCallID.get(
+															input.callID,
+														)!,
+													]
+												: [];
+										for (const failTaskId of failClosedTaskIds) {
+											const failState =
+												session.taskWorkflowStates.get(failTaskId);
+											if (
+												failState &&
+												(
+													stageBEligibleStates as readonly string[]
+												).includes(failState)
+											) {
+												session.taskWorkflowStates.set(
+													failTaskId,
+													'rework_required',
+												);
+												session.stageBCompletion?.delete(failTaskId);
+												logger.warn(
+													`[delegation-gate] STAGE_B_ATTRIBUTION_MISSING fail-closed: task ${failTaskId} → rework_required`,
+												);
+											}
+										}
 										break;
 									}
 
