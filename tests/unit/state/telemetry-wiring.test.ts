@@ -113,41 +113,39 @@ describe('telemetry wiring in state.ts', () => {
 		});
 	});
 
-	describe('3. beginInvocation emits delegation_begin', () => {
-		test('emits delegation_begin with correct agentName and taskId', () => {
+	describe('3. beginInvocation emits NO telemetry (delegation_begin moved to the Task boundary)', () => {
+		test('emits nothing for a subagent invocation window', () => {
+			// Previous code emitted delegation_begin here, but every reachable
+			// beginInvocation call site is guardrails-gated, so with
+			// `guardrails.enabled: false` the event was unreachable in production
+			// (measured: 12 delegation_end / 0 delegation_begin over 33 days).
+			// delegation_begin is now emitted by the Task-delegation boundary in
+			// src/index.ts tool.execute.before, paired by callID with the Task
+			// handoff's delegation_end. beginInvocation is pure guardrails
+			// bookkeeping and must stay telemetry-silent so guardrails-enabled
+			// sessions do not produce a second, unpaired begin event (see
+			// tests/unit/index-delegation-telemetry-pairing.test.ts).
 			const sessionId = 'invocation-test';
-			const agentName = 'swarm_coder'; // Uses underscore separator which is recognized
-
-			// Create session
 			startAgentSession(sessionId, 'architect');
-			capturedEvents.length = 0;
-
-			// Set current task
 			const session = ensureAgentSession(sessionId, 'architect');
 			session.currentTaskId = '1.2';
 			capturedEvents.length = 0;
 
-			// Begin invocation
-			beginInvocation(sessionId, agentName);
+			const window = beginInvocation(sessionId, 'swarm_coder');
 
-			expect(capturedEvents).toHaveLength(1);
-			expect(capturedEvents[0].event).toBe('delegation_begin');
-			expect(capturedEvents[0].data).toEqual({
-				sessionId,
-				agentName: 'coder', // stripped of swarm prefix
-				taskId: '1.2',
-			});
+			expect(window).not.toBeNull();
+			expect(capturedEvents).toHaveLength(0);
 		});
 
-		test('emits delegation_begin with unknown when currentTaskId is null', () => {
-			const sessionId = 'invocation-no-task';
+		test('emits nothing for an architect invocation (early-return path)', () => {
+			const sessionId = 'invocation-architect';
 			startAgentSession(sessionId, 'architect');
 			capturedEvents.length = 0;
 
-			beginInvocation(sessionId, 'coder');
+			const window = beginInvocation(sessionId, 'architect');
 
-			expect(capturedEvents).toHaveLength(1);
-			expect(capturedEvents[0].data.taskId).toBe('unknown');
+			expect(window).toBeNull();
+			expect(capturedEvents).toHaveLength(0);
 		});
 
 		test('throws error when session does not exist', () => {

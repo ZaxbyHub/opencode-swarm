@@ -294,6 +294,10 @@ const STAGE_B_VALIDATION_TASK_ID = 'reviewer-task-validation';
 
 /** Test seam for the otherwise process-global telemetry sink. */
 export const _internals = {
+	// Both halves of the delegation lifecycle go through the seam so a test that
+	// stubs one necessarily controls the other; an asymmetric seam would let a
+	// stubbed-throwing sink emit half a pair.
+	delegationBegin: telemetry.delegationBegin,
 	delegationEnd: telemetry.delegationEnd,
 	resolveReviewerTaskScope,
 	buildReviewerTaskScope,
@@ -345,6 +349,15 @@ function emitStageBValidationTelemetry(
 	costFields: Parameters<typeof telemetry.delegationEnd>[4],
 ): void {
 	try {
+		// Inside the SAME try as its end, so a throwing sink skips both halves
+		// rather than emitting an orphan. Like the engine's validation replay, this
+		// runs after the attempt already completed; the payload carries no duration
+		// or start timestamp, so pairing here is structural, not temporal.
+		_internals.delegationBegin(
+			sessionID,
+			validatorAgent,
+			STAGE_B_VALIDATION_TASK_ID,
+		);
 		_internals.delegationEnd(
 			sessionID,
 			validatorAgent,
