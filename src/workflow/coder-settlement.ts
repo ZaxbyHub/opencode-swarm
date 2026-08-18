@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
+import { appendFile } from 'node:fs/promises';
 import type {
 	BackgroundTaskChangeContext,
 	BackgroundWorktreeDescriptor,
@@ -15,6 +16,7 @@ import { isMarkdownOnlyTaskChange } from '../gate-evidence-classification.js';
 import { validateSwarmPath } from '../hooks/utils.js';
 import { tryAcquireLock } from '../parallel/file-locks.js';
 import { isPathWithinDeclaredScope } from '../scope/path-identity.js';
+import * as logger from '../utils/logger.js';
 import type { MergeOperationProvenance } from '../worktree/merge.js';
 import { reconcileLandedMerge } from '../worktree/merge.js';
 import {
@@ -91,6 +93,69 @@ async function writeWal(
 	await writeWorkflowWalFile('coder-settlement', filePath, wal);
 }
 
+/**
+ * Best-effort settlement lifecycle audit event (issue #2214 expected behavior:
+ * settlement dispatch/settle/abort must be observable in events.jsonl). Never
+ * throws — the WAL and evidence files remain the authoritative state; this is
+ * the human-readable trail, matching the plan-critic audit-event precedent.
+ */
+async function appendSettlementEvent(
+	directory: string,
+	action: 'dispatched' | 'settled' | 'aborted',
+	wal: Pick<CoderSettlementWal, 'taskId' | 'transitionId' | 'actor'>,
+	extra?: Record<string, unknown>,
+): Promise<void> {
+	try {
+		const eventsPath = validateSwarmPath(directory, 'events.jsonl');
+		await appendFile(
+			eventsPath,
+			`${JSON.stringify({
+				type: 'coder_settlement',
+				action,
+				timestamp: new Date().toISOString(),
+				taskId: wal.taskId,
+				transitionId: wal.transitionId,
+				actor: wal.actor,
+				...(extra ?? {}),
+			})}\n`,
+			'utf-8',
+		);
+	} catch (error) {
+		logger.warn(
+			`[coder-settlement] lifecycle event write failed (${action} ${wal.taskId}): ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		);
+	}
+}
+
+/**
+ * True when a launch baseline can never support mutation attribution, no
+ * matter how many recovery attempts run: a non-git baseline (gitHead null) or
+ * a baseline that was already dirty at dispatch (pre-existing uncommitted or
+ * untracked paths). `changedFiles === null` with a gitHead present is a
+ * capture failure, which may be transient — it is deliberately NOT doomed
+ * (issue #2214: distinguish structural failure from retryable failure).
+ */
+function baselineAttributionDoomed(baseline: {
+	gitHead: string | null;
+	changedFiles?: string[] | null;
+}): boolean {
+	if (baseline.gitHead === null) return true;
+	return (
+		Array.isArray(baseline.changedFiles) && baseline.changedFiles.length > 0
+	);
+}
+
+function doomedReason(baseline: {
+	gitHead: string | null;
+	changedFiles?: string[] | null;
+}): string {
+	if (baseline.gitHead === null)
+		return 'launch workspace has no git baseline (not a git repository, or git unavailable at dispatch)';
+	return `launch baseline was dirty with ${String(baseline.changedFiles?.length ?? 0)} pre-existing uncommitted/untracked change(s)`;
+}
+
 function isProcessAlive(processId: number): boolean {
 	if (processId === process.pid) return true;
 	try {
@@ -152,6 +217,9 @@ async function commitPrepared(
 						cleanupComplete: lockedWal.worktree === undefined,
 					};
 					await writeWal(walPath(directory, wal.taskId), lockedWal);
+					await appendSettlementEvent(directory, 'settled', lockedWal, {
+						resumed: true,
+					});
 				}
 				return {
 					evidence: transaction.read() as TaskEvidence,
@@ -187,6 +255,7 @@ async function commitPrepared(
 				cleanupComplete: lockedWal.worktree === undefined,
 			};
 			await writeWal(walPath(directory, wal.taskId), lockedWal);
+			await appendSettlementEvent(directory, 'settled', lockedWal);
 			return {
 				evidence,
 				accepted: lockedWal.accepted === true,
@@ -278,6 +347,11 @@ export async function beginCoderSettlement(options: {
 						recordedAt: new Date().toISOString(),
 					});
 					ownsActiveDispatch = true;
+					await appendSettlementEvent(options.directory, 'dispatched', {
+						taskId: options.taskId,
+						transitionId: options.transitionId,
+						actor: options.actor,
+					});
 				},
 			),
 	);
@@ -365,6 +439,95 @@ export async function settleCoderDispatch(options: {
 			}
 		},
 	);
+}
+
+/**
+ * Abort a DISPATCHED settlement (issue #2214): the settlement's launch
+ * baseline can never support attribution, so the dispatch must reach a
+ * terminal state instead of wedging at DISPATCHED with an un-releasable
+ * in-memory ownership key. Idempotent: an already-ABORTED WAL is a no-op;
+ * PREPARED/COMMITTED WALs are recoverable/terminal and are left untouched.
+ *
+ * Callers already holding the settlement lock must use
+ * `abortDispatchedWalUnderLock` instead — this entry point acquires the lock.
+ */
+export async function abortCoderSettlement(options: {
+	directory: string;
+	taskId: string;
+	transitionId: string;
+	reason: string;
+}): Promise<'aborted' | 'not-dispatched' | 'already-aborted'> {
+	return withSettlementLock(
+		options.directory,
+		options.taskId,
+		'coder-abort',
+		async () =>
+			abortDispatchedWalUnderLock(
+				options.directory,
+				options.taskId,
+				options.transitionId,
+				options.reason,
+			),
+	);
+}
+
+async function abortDispatchedWalUnderLock(
+	directory: string,
+	taskId: string,
+	transitionId: string,
+	reason: string,
+): Promise<'aborted' | 'not-dispatched' | 'already-aborted'> {
+	const filePath = walPath(directory, taskId);
+	// readWal validates the taskId (expectedTaskId) and throws the shared
+	// WAL_UNREADABLE/TASK_MISMATCH diagnostics on malformed content.
+	const wal = await readWal(filePath, taskId);
+	if (wal === null) throw new Error('CODER_SETTLEMENT_WAL_MISSING');
+	if (wal.transitionId !== transitionId) {
+		throw new Error('CODER_SETTLEMENT_WAL_REPLACED');
+	}
+	if (wal.state === 'ABORTED') return 'already-aborted';
+	if (wal.state !== 'DISPATCHED') return 'not-dispatched';
+	await writeWal(filePath, {
+		...wal,
+		state: 'ABORTED',
+		abortReason: reason,
+	});
+	liveDispatches.delete(dispatchKey(directory, taskId, transitionId));
+	await appendSettlementEvent(directory, 'aborted', wal, { reason });
+	return 'aborted';
+}
+
+/**
+ * Abort a DISPATCHED settlement only when its own recorded launch baseline
+ * was structurally attribution-doomed (non-git or dirty at dispatch — the
+ * pre-fix #2214 wedge class). Transient capture failures (gitHead present)
+ * stay recoverable and are NOT aborted.
+ */
+export async function abortCoderSettlementIfDoomed(options: {
+	directory: string;
+	taskId: string;
+	transitionId: string;
+}): Promise<boolean> {
+	const filePath = walPath(options.directory, options.taskId);
+	let wal: CoderSettlementWal | null;
+	try {
+		wal = await readWal(filePath, options.taskId);
+	} catch {
+		// Unreadable WAL: cannot determine doomed-ness; leave it to recovery.
+		return false;
+	}
+	if (wal === null) return false;
+	if (wal.transitionId !== options.transitionId || wal.state !== 'DISPATCHED') {
+		return false;
+	}
+	if (!baselineAttributionDoomed(wal.context.baseline)) return false;
+	const outcome = await abortCoderSettlement({
+		directory: options.directory,
+		taskId: options.taskId,
+		transitionId: options.transitionId,
+		reason: doomedReason(wal.context.baseline),
+	});
+	return outcome === 'aborted' || outcome === 'already-aborted';
 }
 
 export async function recordCoderMergeProvenance(options: {
@@ -656,7 +819,43 @@ export async function recoverCoderSettlement(
 				return recovered;
 			}
 
-			const observed = scopedObservedFiles(directory, wal.context);
+			// Mirror the shared-root settle semantics: a dispatch with no declared
+			// scope settles as no-mutation (observed = []) rather than wedging on
+			// scopedObservedFiles' declaredFiles requirement. A structurally
+			// doomed baseline (non-git or dirty at dispatch — the pre-#2214-fix
+			// wedge class) can never be attributed: abort so the task becomes
+			// repairable instead of throwing RECOVERY_UNCERTAIN forever. A clean
+			// baseline whose current capture fails stays retryable.
+			const rawObserved = changedFilesSinceSnapshot(
+				directory,
+				wal.context.baseline,
+			);
+			let observed: string[] | null;
+			if (rawObserved === null) {
+				if (baselineAttributionDoomed(wal.context.baseline)) {
+					// recoverCoderSettlement already holds the settlement lock.
+					const aborted = await abortDispatchedWalUnderLock(
+						directory,
+						taskId,
+						wal.transitionId,
+						doomedReason(wal.context.baseline),
+					);
+					if (aborted === 'aborted' || aborted === 'already-aborted') {
+						return null;
+					}
+				}
+				observed = null;
+			} else if (wal.context.declaredFiles === null) {
+				observed = [];
+			} else {
+				observed = rawObserved.filter((filePath) =>
+					isPathWithinDeclaredScope(
+						filePath,
+						wal.context.declaredFiles ?? [],
+						directory,
+					),
+				);
+			}
 			if (observed === null) {
 				// #2202: still bare — names the task but not the WAL path or a recovery
 				// action. Reaching it needs a baseline snapshot changedFilesSinceSnapshot

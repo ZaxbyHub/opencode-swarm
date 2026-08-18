@@ -35,6 +35,8 @@ export interface CoderSettlementWal {
 	testEngineerExempt?: boolean;
 	settlementFailed?: boolean;
 	cleanupComplete?: boolean;
+	/** Human-readable abort explanation; string of 1..512 chars, present on ABORTED WALs (issue #2214). */
+	abortReason?: string;
 	recordedAt: string;
 }
 
@@ -308,7 +310,11 @@ export function parseCoderSettlementWal(
 		(parsed.cleanupComplete !== undefined &&
 			typeof parsed.cleanupComplete !== 'boolean') ||
 		(parsed.settlementFailed !== undefined &&
-			typeof parsed.settlementFailed !== 'boolean')
+			typeof parsed.settlementFailed !== 'boolean') ||
+		(parsed.abortReason !== undefined &&
+			(typeof parsed.abortReason !== 'string' ||
+				parsed.abortReason.length === 0 ||
+				parsed.abortReason.length > 512))
 	) {
 		formatUnreadableMessage(
 			'CODER_SETTLEMENT_WAL_UNREADABLE',
