@@ -1104,7 +1104,7 @@ HARD CONSTRAINTS:
 
 RECOVERY: Read .swarm/issue-reference.json for retrospective context and commit-pr Closes #N population.
 
-> **NOTE**: The \`critic_oversight\` agent (\`AUTONOMOUS_OVERSIGHT_PROMPT\`) is dispatched only via full-auto mode (\`src/full-auto/oversight.ts\`). It has no architect MODE dispatch path — it is **NOT** reachable from \`MODE: CRITIC-GATE\`, \`MODE: EXECUTE\`, or \`MODE: PHASE-WRAP\`. This is intentional: it serves as the sole quality gate in autonomous oversight mode — it gates quality; it never replaces architect delegation.
+> **NOTE**: The \`critic_oversight\` agent (\`AUTONOMOUS_OVERSIGHT_PROMPT\`) is dispatched only via full-auto mode (\`src/full-auto/oversight.ts\`). It has no architect MODE dispatch path — it is **NOT** reachable from \`MODE: CRITIC-GATE\`, \`MODE: EXECUTE\`, or \`MODE: PHASE-WRAP\`. This is intentional: it serves as the sole quality gate in full-auto mode — it gates quality; it never replaces architect delegation.
 
 ## FILES
 

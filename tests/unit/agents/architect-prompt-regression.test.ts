@@ -165,7 +165,9 @@ describe('architect prompt — critical rules regression (Task 3.3)', () => {
 			// buildSlashCommandsList() renders into the architect prompt via the
 			// {{SLASH_COMMANDS}} placeholder — so the source-file grep alone could
 			// not prove the RENDERED prompt is clean. Pin every surface that
-			// reaches the prompt.
+			// reaches the prompt: the architect prompt source, the command
+			// registry rendered into it, AND the loop skill the MODE: LOOP block
+			// orders loaded at runtime (its content enters the conversation).
 			expect(ARCHITECT_SOURCE).not.toContain(
 				'autonomous cross-phase oversight',
 			);
@@ -174,6 +176,19 @@ describe('architect prompt — critical rules regression (Task 3.3)', () => {
 				'utf-8',
 			);
 			expect(registrySource).not.toContain('autonomous cross-phase oversight');
+			const loopSkillSource = readFileSync(
+				join(process.cwd(), '.opencode', 'skills', 'loop', 'SKILL.md'),
+				'utf-8',
+			);
+			expect(loopSkillSource).not.toContain('autonomous cross-phase oversight');
+			// Positive pin on the corrected loop-skill wording. Patterns are
+			// single-line because the skill file hard-wraps mid-phrase.
+			expect(loopSkillSource).toMatch(
+				/intercepts phase completions and high-risk actions for review/,
+			);
+			expect(loopSkillSource).toMatch(
+				/never plans, delegates, or executes; the architect retains ALL delegation/,
+			);
 		});
 	});
 });

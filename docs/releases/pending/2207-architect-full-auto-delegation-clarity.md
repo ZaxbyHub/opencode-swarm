@@ -2,7 +2,7 @@
 
 ## What changed
 
-The architect system prompt no longer describes full-auto as "autonomous cross-phase oversight" — wording that made the model hallucinate an autonomous "full-auto controller" that would take over task delegation, announce a handoff, and stop making tool calls (issue #2207). The ambiguous phrase was removed from every surface that reaches the rendered prompt: the architect prompt's two full-auto mention sites (MODE: LOOP purpose line and the PHASE-WRAP auto-proceed rules), and the `/swarm loop` and `/swarm full-auto` command `details` in `src/commands/registry.ts`, which `buildSlashCommandsList()` substitutes into the prompt's `{{SLASH_COMMANDS}}` placeholder. The prompt now states explicitly:
+The architect system prompt no longer describes full-auto as "autonomous cross-phase oversight" — wording that made the model hallucinate an autonomous "full-auto controller" that would take over task delegation, announce a handoff, and stop making tool calls (issue #2207). The ambiguous phrase was removed from every surface that reaches the rendered prompt: the architect prompt's full-auto mention sites (the MODE: LOOP purpose line — the only architect.ts site that carried the removed phrase — plus the PHASE-WRAP auto-proceed rules and the `critic_oversight` NOTE, both clarified), and the `/swarm loop` and `/swarm full-auto` command `details` in `src/commands/registry.ts`, which `buildSlashCommandsList()` substitutes into the prompt's `{{SLASH_COMMANDS}}` placeholder. The prompt now states explicitly:
 
 - full-auto is a critic gate that intercepts phase completions and high-risk actions for review;
 - it never plans, delegates, or executes — the architect retains ALL delegation duty in every mode;
@@ -11,7 +11,9 @@ The architect system prompt no longer describes full-auto as "autonomous cross-p
 
 The `.opencode/skills/loop/SKILL.md` mirror of the LOOP purpose line carries the same correction (LOOP skill is opencode-only; no `.claude` mirror).
 
-A prompt regression guard in `tests/unit/agents/architect-prompt-regression.test.ts` pins the new wording and asserts the ambiguous phrase is gone from both the architect prompt source AND the command registry that renders into the prompt.
+A follow-up review round aligned the remaining architect-visible texts with the same framing: the `[FULL-AUTO CONTINUATION]` messages injected by `src/hooks/full-auto-intercept.ts` now say "full-auto critic oversight" instead of "autonomous oversight", the full-auto bullet of the injected `AUTO_PROCEED_BANNER` (`src/config/constants.ts`) no longer calls full-auto an "auto-advance mechanism" (it names the confirmation suppression explicitly), the `critic_oversight` NOTE in `architect.ts` names "full-auto mode" instead of "autonomous oversight mode", and the `docs/commands.md` `/swarm full-auto` entry no longer describes the mode as "autonomous execution without confirmation prompts".
+
+A prompt regression guard in `tests/unit/agents/architect-prompt-regression.test.ts` pins the new wording and asserts the ambiguous phrase is gone from the architect prompt source, the command registry that renders into the prompt, AND the loop skill loaded at MODE: LOOP entry.
 
 ## Why
 
