@@ -3068,6 +3068,17 @@ async function initializeOpenCodeSwarm(
 				// (steps 5-8) rejected it, roll the DISPATCHED WAL back to
 				// ABORTED so the task is not wedged until a process restart.
 				// Never throws — the original denial propagates unchanged.
+				//
+				// INVARIANT (PR #2223 review, advisory): rollback ELIGIBILITY reuses
+				// `failClosedRegionCompleted`, so this block only fires when the
+				// denial came from the fail-closed region. That is correct today
+				// because no uncaught await exists in the advisory tail below the
+				// flag set (verified empirically by review fault injection). Any
+				// future raw-awaited call added to that tail must either set the
+				// flag first or throw only after this rollback — otherwise an
+				// advisory-tail throw would reject the call WITHOUT rolling back a
+				// begun settlement, reopening the #2214 wedge class. The
+				// gate-denial-wiring static guard pins this contract.
 				if (
 					!failClosedRegionCompleted &&
 					(normalizeToolName(input.tool) === 'Task' ||

@@ -1,7 +1,8 @@
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { appendFile } from 'node:fs/promises';
+import { appendFile, mkdir } from 'node:fs/promises';
+import { dirname } from 'node:path';
 import type {
 	BackgroundTaskChangeContext,
 	BackgroundWorktreeDescriptor,
@@ -98,6 +99,10 @@ async function writeWal(
  * settlement dispatch/settle/abort must be observable in events.jsonl). Never
  * throws — the WAL and evidence files remain the authoritative state; this is
  * the human-readable trail, matching the plan-critic audit-event precedent.
+ * The parent directory is created (future call sites may append before any WAL
+ * write) and a transient Windows EBUSY/EPERM gets one retry (PRR-003). Final
+ * failure surfaces via criticalWarn — always visible, not debug-gated — because
+ * a silently missing lifecycle event voids the observability claim.
  */
 async function appendSettlementEvent(
 	directory: string,
@@ -105,23 +110,38 @@ async function appendSettlementEvent(
 	wal: Pick<CoderSettlementWal, 'taskId' | 'transitionId' | 'actor'>,
 	extra?: Record<string, unknown>,
 ): Promise<void> {
+	const line = `${JSON.stringify({
+		type: 'coder_settlement',
+		action,
+		timestamp: new Date().toISOString(),
+		taskId: wal.taskId,
+		transitionId: wal.transitionId,
+		actor: wal.actor,
+		...(extra ?? {}),
+	})}\n`;
 	try {
 		const eventsPath = validateSwarmPath(directory, 'events.jsonl');
-		await appendFile(
-			eventsPath,
-			`${JSON.stringify({
-				type: 'coder_settlement',
-				action,
-				timestamp: new Date().toISOString(),
-				taskId: wal.taskId,
-				transitionId: wal.transitionId,
-				actor: wal.actor,
-				...(extra ?? {}),
-			})}\n`,
-			'utf-8',
-		);
+		await mkdir(dirname(eventsPath), { recursive: true });
+		await appendFile(eventsPath, line, 'utf-8');
 	} catch (error) {
-		logger.warn(
+		const code = (error as NodeJS.ErrnoException).code;
+		if (code === 'EBUSY' || code === 'EPERM') {
+			try {
+				const eventsPath = validateSwarmPath(directory, 'events.jsonl');
+				await appendFile(eventsPath, line, 'utf-8');
+				return;
+			} catch (retryError) {
+				logger.criticalWarn(
+					`[coder-settlement] lifecycle event write failed after retry (${action} ${wal.taskId}): ${
+						retryError instanceof Error
+							? retryError.message
+							: String(retryError)
+					}`,
+				);
+				return;
+			}
+		}
+		logger.criticalWarn(
 			`[coder-settlement] lifecycle event write failed (${action} ${wal.taskId}): ${
 				error instanceof Error ? error.message : String(error)
 			}`,
@@ -457,7 +477,7 @@ export async function abortCoderSettlement(options: {
 	transitionId: string;
 	reason: string;
 }): Promise<'aborted' | 'not-dispatched' | 'already-aborted'> {
-	return withSettlementLock(
+	const { outcome, worktree } = await withSettlementLock(
 		options.directory,
 		options.taskId,
 		'coder-abort',
@@ -469,6 +489,28 @@ export async function abortCoderSettlement(options: {
 				options.reason,
 			),
 	);
+	// F-001 (PR #2223 review): an aborted worktree-carrying settlement must
+	// not leak its git worktree and branch. recoverCoderSettlement
+	// short-circuits on ABORTED before the worktree merge/cleanup branch, so
+	// the abort path owns terminal cleanup. completeCoderSettlementCleanup
+	// runs under its own lock acquisition — we are post-lock here — and is
+	// best-effort: a cleanup failure must never un-abort the settlement.
+	if (worktree && outcome !== 'not-dispatched') {
+		try {
+			await completeCoderSettlementCleanup(
+				options.directory,
+				options.taskId,
+				options.transitionId,
+			);
+		} catch (error) {
+			logger.criticalWarn(
+				`[coder-settlement] aborted settlement worktree cleanup failed for task ${options.taskId}: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+		}
+	}
+	return outcome;
 }
 
 async function abortDispatchedWalUnderLock(
@@ -476,7 +518,10 @@ async function abortDispatchedWalUnderLock(
 	taskId: string,
 	transitionId: string,
 	reason: string,
-): Promise<'aborted' | 'not-dispatched' | 'already-aborted'> {
+): Promise<{
+	outcome: 'aborted' | 'not-dispatched' | 'already-aborted';
+	worktree: boolean;
+}> {
 	const filePath = walPath(directory, taskId);
 	// readWal validates the taskId (expectedTaskId) and throws the shared
 	// WAL_UNREADABLE/TASK_MISMATCH diagnostics on malformed content.
@@ -485,8 +530,12 @@ async function abortDispatchedWalUnderLock(
 	if (wal.transitionId !== transitionId) {
 		throw new Error('CODER_SETTLEMENT_WAL_REPLACED');
 	}
-	if (wal.state === 'ABORTED') return 'already-aborted';
-	if (wal.state !== 'DISPATCHED') return 'not-dispatched';
+	if (wal.state === 'ABORTED') {
+		return { outcome: 'already-aborted', worktree: wal.worktree !== undefined };
+	}
+	if (wal.state !== 'DISPATCHED') {
+		return { outcome: 'not-dispatched', worktree: false };
+	}
 	await writeWal(filePath, {
 		...wal,
 		state: 'ABORTED',
@@ -494,40 +543,49 @@ async function abortDispatchedWalUnderLock(
 	});
 	liveDispatches.delete(dispatchKey(directory, taskId, transitionId));
 	await appendSettlementEvent(directory, 'aborted', wal, { reason });
-	return 'aborted';
+	return { outcome: 'aborted', worktree: wal.worktree !== undefined };
 }
 
 /**
  * Abort a DISPATCHED settlement only when its own recorded launch baseline
  * was structurally attribution-doomed (non-git or dirty at dispatch — the
  * pre-fix #2214 wedge class). Transient capture failures (gitHead present)
- * stay recoverable and are NOT aborted.
+ * stay recoverable and are NOT aborted. Returns the terminal outcome so
+ * callers can distinguish a fresh abort, an already-terminal settlement, and
+ * a WAL that must stay recoverable (PRR-009: the already-aborted case is
+ * terminal, not a durability failure).
  */
 export async function abortCoderSettlementIfDoomed(options: {
 	directory: string;
 	taskId: string;
 	transitionId: string;
-}): Promise<boolean> {
+}): Promise<'aborted' | 'already-aborted' | 'not-doomed'> {
 	const filePath = walPath(options.directory, options.taskId);
 	let wal: CoderSettlementWal | null;
 	try {
 		wal = await readWal(filePath, options.taskId);
 	} catch {
 		// Unreadable WAL: cannot determine doomed-ness; leave it to recovery.
-		return false;
+		return 'not-doomed';
 	}
-	if (wal === null) return false;
+	if (wal === null) return 'not-doomed';
+	if (wal.state === 'ABORTED') return 'already-aborted';
 	if (wal.transitionId !== options.transitionId || wal.state !== 'DISPATCHED') {
-		return false;
+		return 'not-doomed';
 	}
-	if (!baselineAttributionDoomed(wal.context.baseline)) return false;
+	if (!baselineAttributionDoomed(wal.context.baseline)) return 'not-doomed';
 	const outcome = await abortCoderSettlement({
 		directory: options.directory,
 		taskId: options.taskId,
 		transitionId: options.transitionId,
 		reason: doomedReason(wal.context.baseline),
 	});
-	return outcome === 'aborted' || outcome === 'already-aborted';
+	// We re-verified state === 'DISPATCHED' above; a concurrent change can only
+	// have come from this same locked flow, so not-dispatched is unreachable
+	// here — map any residual case to not-doomed so callers stay recoverable.
+	return outcome === 'aborted' || outcome === 'already-aborted'
+		? outcome
+		: 'not-doomed';
 }
 
 export async function recordCoderMergeProvenance(options: {
@@ -648,7 +706,7 @@ export async function completeCoderSettlementCleanup(
 		if (wal.taskId !== taskId || wal.transitionId !== transitionId) {
 			throw new Error('CODER_SETTLEMENT_WAL_REPLACED');
 		}
-		if (wal.state !== 'COMMITTED') {
+		if (wal.state !== 'COMMITTED' && wal.state !== 'ABORTED') {
 			throw new Error('CODER_SETTLEMENT_NOT_COMMITTED');
 		}
 		if (!wal.worktree || wal.cleanupComplete === true) return;
@@ -834,13 +892,23 @@ export async function recoverCoderSettlement(
 			if (rawObserved === null) {
 				if (baselineAttributionDoomed(wal.context.baseline)) {
 					// recoverCoderSettlement already holds the settlement lock.
+					// Positional invariant (F-001 review): this doomed-abort is
+					// reachable only for NON-worktree WALs — every worktree-carrying
+					// DISPATCHED WAL was consumed by the `if (wal.worktree)` branch
+					// above, which fails closed with CODER_SETTLEMENT_RECOVERY_UNCERTAIN
+					// for a doomed baseline. So aborted.worktree is always false here
+					// and no worktree cleanup is needed on this path; the
+					// abortCoderSettlement entry point owns worktree cleanup.
 					const aborted = await abortDispatchedWalUnderLock(
 						directory,
 						taskId,
 						wal.transitionId,
 						doomedReason(wal.context.baseline),
 					);
-					if (aborted === 'aborted' || aborted === 'already-aborted') {
+					if (
+						aborted.outcome === 'aborted' ||
+						aborted.outcome === 'already-aborted'
+					) {
 						return null;
 					}
 				}

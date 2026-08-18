@@ -16,4 +16,4 @@ No action required. Tasks previously stuck at DISPATCHED self-heal on first use 
 ### Known caveats
 
 - A workspace that is dirty at coder-dispatch time is now a hard dispatch error by design; attribution of same-path edits under a dirty baseline is provably impossible, and no bypass flag is offered.
-- Foreground background-flagged coder dispatches (`background: true` while background subagents are disabled) from a dirty root are now rejected at the same dispatch-time guard. True background dispatches (background subagents enabled) are unchanged: they fail at claim time with existing recovery handling, as before.
+- Background-flagged Task dispatches (`background: true`) with background subagents disabled (the default) are denied by the pre-existing experimental-feature gate (`SWARM_BACKGROUND_TASK_BLOCKED`, issue #1151) before the settlement system is ever engaged — dirty or clean alike. True background dispatches (background subagents enabled) are unchanged: they fail at claim time with existing recovery handling, as before.

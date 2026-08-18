@@ -2687,8 +2687,12 @@ export function createDelegationGateHook(
 			!begunCoderSettlementsByCallID.has(callID) &&
 			begunCoderSettlementsByCallID.size >= MAX_PENDING_CODER_CHANGE_CONTEXTS
 		) {
-			const oldest = begunCoderSettlementsByCallID.keys().next().value;
-			if (oldest !== undefined) begunCoderSettlementsByCallID.delete(oldest);
+			// Fail closed like the sibling callID maps (PRR-002): silent FIFO
+			// eviction here would drop a denial-rollback entry and could
+			// re-introduce the #2214 DISPATCHED wedge under load.
+			throw new Error(
+				`BEGUN_SETTLEMENT_CONTEXT_CAPACITY: refusing coder dispatch because ${MAX_PENDING_CODER_CHANGE_CONTEXTS} live begun settlements are already tracked`,
+			);
 		}
 		begunCoderSettlementsByCallID.set(callID, { taskId, transitionId });
 	};
@@ -4942,7 +4946,7 @@ export function createDelegationGateHook(
 							// abort the WAL outright when its recorded launch baseline
 							// was structurally attribution-doomed (non-git or dirty at
 							// dispatch) — that settlement can never complete.
-							let abortedAsDoomed = false;
+							let terminalAbort = false;
 							if (coderSettleTaskId && !coderSettlementCommitted) {
 								releaseCoderDispatchOwnership(
 									directory,
@@ -4950,11 +4954,14 @@ export function createDelegationGateHook(
 									`coder:${input.callID}`,
 								);
 								try {
-									abortedAsDoomed = await abortCoderSettlementIfDoomed({
+									const abortOutcome = await abortCoderSettlementIfDoomed({
 										directory,
 										taskId: coderSettleTaskId,
 										transitionId: `coder:${input.callID}`,
 									});
+									terminalAbort =
+										abortOutcome === 'aborted' ||
+										abortOutcome === 'already-aborted';
 								} catch (abortErr) {
 									logger.warn(
 										`[delegation-gate] doomed settlement abort failed for ${coderSettleTaskId}: ${
@@ -4964,11 +4971,13 @@ export function createDelegationGateHook(
 										}`,
 									);
 								}
-								if (abortedAsDoomed) {
-									begunCoderSettlementsByCallID.delete(input.callID);
+								if (terminalAbort) {
+									// PRR-001: the dispatch is terminally settled; its
+									// change context is exhausted (recovery reads the WAL).
+									clearCoderTaskChangeContext(input.callID);
 								}
 							}
-							if (abortedAsDoomed) {
+							if (terminalAbort) {
 								pushAdvisory(
 									session,
 									`CODER_SETTLEMENT_ABORTED: task ${coderSettleTaskId} dispatch ${input.callID} was settled as ABORTED — its launch baseline was dirty or had no git history, so the coder's changes cannot be attributed. Reconcile the workspace (commit, stash, or discard the coder's output), then repair the task with update_task_status and re-dispatch from a clean tree.`,
@@ -4982,13 +4991,25 @@ export function createDelegationGateHook(
 							throw err;
 						}
 					} finally {
-						if (
-							stripKnownSwarmPrefix(subagentType) === 'coder' &&
-							coderSettlementCommitted
-						) {
-							clearCoderTaskChangeContext(input.callID);
-							clearPublishedScopeBindings(input.callID);
+						if (stripKnownSwarmPrefix(subagentType) === 'coder') {
+							if (coderSettlementCommitted) {
+								clearCoderTaskChangeContext(input.callID);
+								clearPublishedScopeBindings(input.callID);
+							}
+							// PRR-001: both purposes of the begun-settlement entry —
+							// denial rollback (a denied call never reaches toolAfter)
+							// and the task-id fallback above — are exhausted once
+							// toolAfter has run for this callID.
 							begunCoderSettlementsByCallID.delete(input.callID);
+							// The coder settle failure above RETHROWS, so the post-block
+							// cleanup (stored args, Stage B generation bindings) never
+							// runs on that path — drain it here instead. Idempotent
+							// with the success-path deletes below.
+							if (!coderSettlementCommitted) {
+								stageBDispatchGenerationsByCallID.delete(input.callID);
+								gateDispatchPrimaryTaskByCallID.delete(input.callID);
+								deleteStoredInputArgs(input.callID);
+							}
 						}
 					}
 				}
@@ -5487,29 +5508,46 @@ ${warningLines.join('\n')}`;
 		 * throw). A denied call never fires toolAfter, so without this rollback
 		 * the DISPATCHED WAL and its in-memory ownership key wedge the task
 		 * until a process restart. Never throws — the denial itself propagates.
+		 *
+		 * F-002 (PR #2223 review): cleanup runs in a FINALLY so every failure
+		 * class (settlement-lock contention, WAL_MISSING/REPLACED/UNREADABLE,
+		 * write errors) still releases the in-memory ownership key and the
+		 * callID bookkeeping — an abort that throws must not leave a louder
+		 * in-process CODER_DISPATCH_IN_PROGRESS wedge behind.
 		 */
 		abortDeniedSettlementForCall: async (callID: string): Promise<void> => {
 			const begun = begunCoderSettlementsByCallID.get(callID);
 			if (!begun?.taskId) return;
 			try {
-				const outcome = await abortCoderSettlement({
+				await abortCoderSettlement({
 					directory,
 					taskId: begun.taskId,
 					transitionId: begun.transitionId,
 					reason:
 						'dispatch denied by a fail-closed gate after settlement began',
 				});
-				if (outcome === 'aborted' || outcome === 'already-aborted') {
-					begunCoderSettlementsByCallID.delete(callID);
-					clearCoderTaskChangeContext(callID);
-					clearPublishedScopeBindings(callID);
-				}
 			} catch (error) {
-				logger.warn(
-					`[delegation-gate] denied-dispatch settlement rollback failed for call ${callID}: ${
+				logger.criticalWarn(
+					`[delegation-gate] denied-dispatch settlement rollback failed for call ${callID} (task ${begun.taskId}): ${
 						error instanceof Error ? error.message : String(error)
 					}`,
 				);
+			} finally {
+				// Unconditional (idempotent) cleanup, mirroring
+				// backgroundCompletionClaimed: a denied call never reaches the
+				// toolAfter cleanup path, so this is the only drain for these
+				// entries.
+				releaseCoderDispatchOwnership(
+					directory,
+					begun.taskId,
+					begun.transitionId,
+				);
+				begunCoderSettlementsByCallID.delete(callID);
+				clearCoderTaskChangeContext(callID);
+				clearPublishedScopeBindings(callID);
+				stageBDispatchGenerationsByCallID.delete(callID);
+				gateDispatchPrimaryTaskByCallID.delete(callID);
+				deleteStoredInputArgs(callID);
 			}
 		},
 	};
