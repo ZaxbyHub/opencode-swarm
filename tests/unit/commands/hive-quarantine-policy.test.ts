@@ -249,6 +249,37 @@ describe('knowledge hive-quarantine policy (issue #2033)', () => {
 		}
 	});
 
+	test('CLI refuses human-only commands from non-interactive shells (CC-2)', async () => {
+		const { run } = await import('../../../src/cli/index.js');
+		const prev = process.env.SWARM_ALLOW_HUMAN_ONLY_CLI;
+		delete process.env.SWARM_ALLOW_HUMAN_ONLY_CLI;
+		try {
+			await expect(
+				run(['knowledge', 'hive-quarantine', 'status']),
+			).resolves.toBe(1);
+			await expect(run(['reset'])).resolves.toBe(1);
+		} finally {
+			if (prev === undefined) delete process.env.SWARM_ALLOW_HUMAN_ONLY_CLI;
+			else process.env.SWARM_ALLOW_HUMAN_ONLY_CLI = prev;
+		}
+	});
+
+	test('SWARM_ALLOW_HUMAN_ONLY_CLI=1 is the explicit automation opt-in (CC-2)', async () => {
+		const { run } = await import('../../../src/cli/index.js');
+		const prev = process.env.SWARM_ALLOW_HUMAN_ONLY_CLI;
+		process.env.SWARM_ALLOW_HUMAN_ONLY_CLI = '1';
+		try {
+			// 'reset' is restricted: with the opt-in the CLI dispatches it (the
+			// handler itself is mocked nowhere — the real reset handler runs on a
+			// temp cwd and reports its usage/confirmation message; exit code 0).
+			const code = await run(['reset']);
+			expect(code).toBe(0);
+		} finally {
+			if (prev === undefined) delete process.env.SWARM_ALLOW_HUMAN_ONLY_CLI;
+			else process.env.SWARM_ALLOW_HUMAN_ONLY_CLI = prev;
+		}
+	});
+
 	test('the bare knowledge parent remains agent-safe (list-only) and cannot reach the mutation', () => {
 		const bare = classifySwarmCommandToolUse(resolve(['knowledge']));
 		expect(bare.allowed).toBe(true);

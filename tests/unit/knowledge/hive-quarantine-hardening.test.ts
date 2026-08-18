@@ -32,6 +32,7 @@ import {
 	previewHiveQuarantine,
 	rollbackHiveQuarantine,
 } from '../../../src/knowledge/hive-quarantine.js';
+import { freezeClock } from '../../helpers/test-clock.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 let dataDir: string;
@@ -141,7 +142,15 @@ describe('hive quarantine hardening (PR #2200 feedback)', () => {
 			.update(body)
 			.digest('hex')
 			.slice(0, 32)}`;
-		const commit = await commitHiveQuarantine({ token: forged });
+		// Freeze the clock: the forged payload embeds Date.now(), and the
+		// commit-side TTL check must see the same frozen instant (FR-011).
+		const restore = freezeClock();
+		let commit: Awaited<ReturnType<typeof commitHiveQuarantine>>;
+		try {
+			commit = await commitHiveQuarantine({ token: forged });
+		} finally {
+			restore();
+		}
 		expect(commit.ok).toBe(false);
 		if (!commit.ok) expect(commit.code).toBe('invalid_token');
 		// Store untouched.

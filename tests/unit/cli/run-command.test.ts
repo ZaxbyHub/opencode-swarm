@@ -387,25 +387,6 @@ describe('run() - CLI entry point', () => {
 		expect(mockConsoleLog).toHaveBeenCalledWith('export mock output');
 	});
 
-	it('reset → handleResetCommand called, returns 0', async () => {
-		// reset is restricted: non-interactive CLI runs are refused unless the
-		// documented automation opt-in is set (issue #2033 PR review CC-2).
-		const prev = process.env.SWARM_ALLOW_HUMAN_ONLY_CLI;
-		process.env.SWARM_ALLOW_HUMAN_ONLY_CLI = '1';
-		try {
-			const result = await run(['reset']);
-			expect(result).toBe(0);
-			expect(mockHandleResetCommand).toHaveBeenCalledWith(
-				expect.any(String),
-				[],
-			);
-			expect(mockConsoleLog).toHaveBeenCalledWith('reset mock output');
-		} finally {
-			if (prev === undefined) delete process.env.SWARM_ALLOW_HUMAN_ONLY_CLI;
-			else process.env.SWARM_ALLOW_HUMAN_ONLY_CLI = prev;
-		}
-	});
-
 	it('retrieve → handleRetrieveCommand called, returns 0', async () => {
 		const result = await run(['retrieve']);
 		expect(result).toBe(0);

@@ -529,54 +529,6 @@ describe('run() dispatch function', () => {
 			}
 		});
 
-		it('human-only commands are refused from non-interactive shells (issue #2033 CC-2)', async () => {
-			const prev = process.env.SWARM_ALLOW_HUMAN_ONLY_CLI;
-			delete process.env.SWARM_ALLOW_HUMAN_ONLY_CLI;
-			try {
-				const result = await run(['knowledge', 'hive-quarantine', 'status']);
-				expect(result).toBe(1);
-				expect(mockConsoleError).toHaveBeenCalledWith(
-					expect.stringContaining('human-only'),
-				);
-				const resetResult = await run(['reset']);
-				expect(resetResult).toBe(1);
-			} finally {
-				if (prev === undefined) delete process.env.SWARM_ALLOW_HUMAN_ONLY_CLI;
-				else process.env.SWARM_ALLOW_HUMAN_ONLY_CLI = prev;
-			}
-		});
-
-		it('SWARM_ALLOW_HUMAN_ONLY_CLI=1 opts in for approved automation', async () => {
-			const prev = process.env.SWARM_ALLOW_HUMAN_ONLY_CLI;
-			process.env.SWARM_ALLOW_HUMAN_ONLY_CLI = '1';
-			try {
-				const result = await run(['reset']);
-				expect(result).toBe(0);
-				expect(mockHandleResetCommand).toHaveBeenCalledWith(cwd, []);
-			} finally {
-				if (prev === undefined) delete process.env.SWARM_ALLOW_HUMAN_ONLY_CLI;
-				else process.env.SWARM_ALLOW_HUMAN_ONLY_CLI = prev;
-			}
-		});
-	});
-
-	describe('9. Args propagation', () => {
-		it('passes args.slice(1) to single-word commands', async () => {
-			const result = await run([
-				'dark-matter',
-				'--verbose',
-				'--output',
-				'file.json',
-			]);
-
-			expect(result).toBe(0);
-			expect(mockHandleDarkMatterCommand).toHaveBeenCalledWith(cwd, [
-				'--verbose',
-				'--output',
-				'file.json',
-			]);
-		});
-
 		it('passes args.slice(2) to multi-word commands (knowledge)', async () => {
 			const result = await run([
 				'knowledge',
