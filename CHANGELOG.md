@@ -1,5 +1,18 @@
 # Changelog
 
+## [7.142.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.141.2...v7.142.0) (2026-08-18)
+
+
+### Features
+
+* **knowledge:** isolate hive stores with fail-closed tripwire and add human-only exact-id quarantine ([0ba1fd7](https://github.com/ZaxbyHub/opencode-swarm/commit/0ba1fd7958a7d31c8dda387d33246928cd380ec5))
+
+
+### Bug Fixes
+
+* **knowledge:** close PR review findings on hive quarantine hardening ([3a197e0](https://github.com/ZaxbyHub/opencode-swarm/commit/3a197e0f3a4b1d6e8754daaf9747e3f80f42385b))
+* **test:** resolve main merge — split parity baselines, hermetic curate, cap-safe CLI tests ([1bb8078](https://github.com/ZaxbyHub/opencode-swarm/commit/1bb8078bb8e5ddb71849ea0c0093fd81c5dac742))
+
 ## [7.141.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.141.1...v7.141.2) (2026-08-18)
 
 
