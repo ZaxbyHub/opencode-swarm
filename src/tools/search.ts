@@ -173,6 +173,22 @@ function splitGlobPatterns(value?: string): string[] {
 		: [];
 }
 
+const GLOB_METACHARACTERS = /[*?[\]{}]/;
+
+function isExactPath(pattern: string): boolean {
+	return !GLOB_METACHARACTERS.test(pattern);
+}
+
+function targetsDotDirectory(pattern: string): boolean {
+	const firstSegment = pattern.split(/[\\/]/)[0];
+	return (
+		!!firstSegment &&
+		firstSegment.startsWith('.') &&
+		firstSegment !== '.' &&
+		firstSegment !== '..'
+	);
+}
+
 function toWorkspaceRelativePath(
 	filePath: string,
 	workspace: string,
@@ -250,10 +266,53 @@ async function ripgrepSearch(
 		'-n', // line numbers
 	];
 
-	// Add glob patterns for include/exclude
-	for (const pattern of splitGlobPatterns(opts.include)) {
-		args.push('--glob', pattern);
+	// Partition include patterns: exact file paths targeting dot-directories
+	// are promoted to path operands so ripgrep bypasses hidden-dir and
+	// gitignore filtering for explicitly named files.
+	const includes = splitGlobPatterns(opts.include);
+	const promotablePaths: string[] = [];
+	const globIncludes: string[] = [];
+
+	for (const pattern of includes) {
+		if (
+			isExactPath(pattern) &&
+			targetsDotDirectory(pattern) &&
+			pattern.split(/[\\/]/)[0]?.toLowerCase() !== '.git' &&
+			isPathInWorkspace(pattern, opts.workspace)
+		) {
+			promotablePaths.push(pattern);
+		} else {
+			globIncludes.push(pattern);
+		}
 	}
+
+	let pathOperands: string[];
+	if (promotablePaths.length > 0 && globIncludes.length === 0) {
+		// All includes are exact dot-dir paths — use as path operands directly
+		pathOperands = promotablePaths;
+	} else {
+		// Glob patterns present or mixed: use standard glob-based search
+		for (const pattern of [...globIncludes, ...promotablePaths]) {
+			args.push('--glob', pattern);
+		}
+		// When any include targets a dot-directory (excluding .git), enable
+		// hidden/ignored traversal. .git is excluded to prevent leaking tokens
+		// from .git/config and other sensitive git internals.
+		if (
+			includes.some(
+				(p) =>
+					targetsDotDirectory(p) &&
+					p.split(/[\\/]/)[0]?.toLowerCase() !== '.git',
+			)
+		) {
+			args.push('--hidden', '--no-ignore');
+			// Exclude .git even with --hidden --no-ignore: a mixed include like
+			// ".swarm/..., .git/config" would otherwise let .git ride along.
+			args.push('--glob', '!.git');
+		}
+		pathOperands = ['.'];
+	}
+
 	for (const pattern of splitGlobPatterns(opts.exclude)) {
 		args.push('--glob', `!${pattern}`); // ! negates glob in ripgrep
 	}
@@ -264,7 +323,7 @@ async function ripgrepSearch(
 	}
 
 	// Keep all options before `--`; query and path operands cannot be flags.
-	args.push('--', opts.query, '.');
+	args.push('--', opts.query, ...pathOperands);
 
 	const run = await _internals.runExternalTool({
 		executable: rgPath,
@@ -442,7 +501,11 @@ function collectFiles(
 			}
 
 			if (entry.isDirectory()) {
-				if (DEFAULT_SKIP_DIRS.has(entry.name)) {
+				if (
+					DEFAULT_SKIP_DIRS.has(entry.name) &&
+					(entry.name === '.git' ||
+						!includeGlobs.some((g) => g.split(/[\\/]/)[0] === entry.name))
+				) {
 					continue;
 				}
 				collectFiles(
