@@ -409,81 +409,10 @@ describe('ADVERSARIAL: toolBefore integration', () => {
 		).resolves.toBeUndefined();
 	});
 
-	// -- Bypass attempts: must still BLOCK -------------------------------------
-
-	it('coder: id-token-only ACCEPTANCE (no body text) is blocked, names FR-001', async () => {
-		const hooks = createDelegationGateHook(makeConfig(), tempDir);
-		ensureAgentSession('sess-adv-tokenonly', 'architect');
-		await expect(
-			hooks.toolBefore(toolBeforeInput('sess-adv-tokenonly'), {
-				args: {
-					subagent_type: 'coder',
-					task_id: '1.1',
-					prompt: 'TASK: 1.1 implement it\nACCEPTANCE: satisfies FR-001',
-				},
-			}),
-		).rejects.toThrow(/ACCEPTANCE_FIELD_COVERAGE_MISMATCH.*FR-001/s);
-	});
-
-	it('coder: paraphrased ACCEPTANCE is blocked', async () => {
-		const hooks = createDelegationGateHook(makeConfig(), tempDir);
-		ensureAgentSession('sess-adv-paraphrase', 'architect');
-		await expect(
-			hooks.toolBefore(toolBeforeInput('sess-adv-paraphrase'), {
-				args: {
-					subagent_type: 'coder',
-					task_id: '1.1',
-					prompt:
-						'TASK: 1.1 implement it\nACCEPTANCE: widget shows its label after mounting per config',
-				},
-			}),
-		).rejects.toThrow(/ACCEPTANCE_FIELD_COVERAGE_MISMATCH.*FR-001/s);
-	});
-
-	it('coder: partial (truncated) body copy is blocked', async () => {
-		const hooks = createDelegationGateHook(makeConfig(), tempDir);
-		ensureAgentSession('sess-adv-partial', 'architect');
-		const half = FR001_BODY.slice(0, Math.floor(FR001_BODY.length / 2));
-		await expect(
-			hooks.toolBefore(toolBeforeInput('sess-adv-partial'), {
-				args: {
-					subagent_type: 'coder',
-					task_id: '1.1',
-					prompt: `TASK: 1.1 implement it\nACCEPTANCE: ${half}`,
-				},
-			}),
-		).rejects.toThrow(/ACCEPTANCE_FIELD_COVERAGE_MISMATCH.*FR-001/s);
-	});
-
-	// -- Multi-FR/SC partial coverage: names the correct missing id -----------
-
-	it('mixed FR+SC task: ACCEPTANCE covers FR-001 only => throws naming SC-006 (not FR-001)', async () => {
-		const hooks = createDelegationGateHook(makeConfig(), tempDir);
-		ensureAgentSession('sess-adv-mixed', 'architect');
-		await expect(
-			hooks.toolBefore(toolBeforeInput('sess-adv-mixed'), {
-				args: {
-					subagent_type: 'coder',
-					task_id: '2.1',
-					prompt: `TASK: 2.1 implement it\nACCEPTANCE: ${FR001_BODY}`,
-				},
-			}),
-		).rejects.toThrow(/ACCEPTANCE_FIELD_COVERAGE_MISMATCH.*SC-006/s);
-	});
-
-	it('reviewer: mixed FR+SC task, ACCEPTANCE covers FR-001 only => throws naming SC-006 (reviewer gated too)', async () => {
-		const hooks = createDelegationGateHook(makeConfig(), tempDir);
-		ensureAgentSession('sess-adv-mixed-rev', 'architect');
-		await expect(
-			hooks.toolBefore(toolBeforeInput('sess-adv-mixed-rev'), {
-				args: {
-					subagent_type: 'reviewer',
-					task_id: '2.1',
-					prompt: `TASK: 2.1 review it\nACCEPTANCE: ${FR001_BODY}`,
-				},
-			}),
-		).rejects.toThrow(/ACCEPTANCE_FIELD_COVERAGE_MISMATCH.*SC-006/s);
-	});
+	// -- #2205: non-verbatim ACCEPTANCE dispatches with the verbatim body
+	// injected (id-only, paraphrase, partial copy, mixed FR+SC). These moved to
+	// delegation-gate-acceptance-injection.test.ts (FR-006 ratchet: this file is
+	// over the 500-line cap and must not grow).
 
 	// -- Fail-closed: ambiguous task-id resolution ------------------------------
 

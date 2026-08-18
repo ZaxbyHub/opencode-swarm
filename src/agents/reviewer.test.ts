@@ -140,9 +140,12 @@ describe('REVIEWER_PROMPT — ACCEPTANCE field (issue #1687 task 2.2)', () => {
 		expect(skillsIndex).toBeGreaterThan(acceptanceIndex);
 	});
 
-	it('documents verbatim/byte-for-byte FR text requirement, not paraphrase', () => {
-		expect(prompt).toContain('byte-for-byte');
-		expect(prompt).toContain('never a paraphrase or summary');
+	it('documents gate-injected verbatim FR text requirement, not paraphrase (#2205)', () => {
+		expect(prompt).toContain('the delegation gate injects');
+		expect(prompt).toContain(
+			'verbatim requirement text from spec.md automatically',
+		);
+		expect(prompt).toContain('never a paraphrase');
 	});
 
 	it('documents ACCEPTANCE is never empty even without a spec mapping', () => {

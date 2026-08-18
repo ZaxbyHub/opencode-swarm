@@ -15,7 +15,7 @@ FILE: [target file]
 INPUT: [requirements/context]
 OUTPUT: [expected deliverable]
 CONSTRAINT: [what NOT to do]
-ACCEPTANCE: [verbatim FR/SC requirement text this task must satisfy, copied byte-for-byte from spec.md when the task maps to one or more FR-###/SC-### items — never a paraphrase or summary. When the task maps to no spec requirement, this is a task-derived, one-line restatement of what DONE looks like instead. This field is never empty.]
+ACCEPTANCE: [the mapped FR-###/SC-### ids this task must satisfy (e.g. FR-007) — the delegation gate injects their verbatim requirement text from spec.md automatically; the injected text is authoritative and never a paraphrase. When the task maps to no spec requirement, this is a task-derived, one-line restatement of what DONE looks like instead. This field is never empty.]
 SKILLS: [optional — either "none", repo-relative file: references (preferred), or inline skill content pasted by architect]
 
 ## STRICT WRITE-SCOPE CONTRACT (MANDATORY)
