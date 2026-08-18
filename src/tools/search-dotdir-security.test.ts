@@ -34,9 +34,7 @@ const realRunExternalTool = searchInternals.runExternalTool;
 const realFallbackSearch = searchInternals.fallbackSearch;
 
 beforeEach(() => {
-	tmpDir = realpathSync(
-		mkdtempSync(path.join(os.tmpdir(), 'search-dotdir-test-')),
-	);
+	tmpDir = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'search-dotdir-test-')));
 	mkdirSync(path.join(tmpDir, 'src'), { recursive: true });
 });
 
