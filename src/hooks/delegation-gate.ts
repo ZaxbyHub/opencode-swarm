@@ -2049,26 +2049,45 @@ function extractTaskFileDirectives(
  * Lines that don't match the pattern are silently ignored.
  *
  * @param outputText - Raw text output from the agent dispatch
- * @returns Map of taskId -> verdict string
+ * @returns StageBAttributionResult with typed verdicts and any parsing errors
  */
-export function parsePerTaskVerdicts(outputText: string): Map<string, string> {
-	const result = new Map<string, string>();
-	// Match [REVIEWED] or [TESTED] tag lines with task ID and verdict
-	// Supports formats like "[REVIEWED] | task-2.1 | APPROVED | details"
-	// and "[TESTED] | 2.1 | PASS | details"
-	const reviewedPattern =
-		/^\[REVIEWED\]\s*\|\s*(?:task-)?(\d+\.\d+(?:\.\d+)*)\s*\|\s*(APPROVED|REJECTED|CONCERNS)\s*\|/im;
-	const testedPattern =
-		/^\[TESTED\]\s*\|\s*(?:task-)?(\d+\.\d+(?:\.\d+)*)\s*\|\s*(PASS|FAIL|SKIPPED)\s*\|/im;
+export interface VerdictEntry {
+	verdict: string;
+	kind: 'REVIEWED' | 'TESTED';
+}
 
-	for (const line of outputText.split('\n')) {
+export interface StageBAttributionResult {
+	verdicts: Map<string, VerdictEntry>;
+	errors: string[];
+}
+
+export function parsePerTaskVerdicts(
+	outputText: string,
+): StageBAttributionResult {
+	const verdicts = new Map<string, VerdictEntry>();
+	const errors: string[] = [];
+	const reviewedPattern =
+		/^\[REVIEWED\]\s*\|\s*(?:task-)?(\d+\.\d+(?:\.\d+)*)\s*\|\s*(APPROVED|REJECTED|CONCERNS)\s*\|?/im;
+	const testedPattern =
+		/^\[TESTED\]\s*\|\s*(?:task-)?(\d+\.\d+(?:\.\d+)*)\s*\|\s*(PASS|FAIL|SKIPPED)\s*\|?/im;
+
+	for (const line of outputText.split(/\r?\n/)) {
 		const trimmed = line.trim();
 		let match = reviewedPattern.exec(trimmed);
 		if (match) {
 			const taskId = match[1];
 			const verdict = match[2];
 			if (isStrictTaskId(taskId)) {
-				result.set(taskId, verdict);
+				const existing = verdicts.get(taskId);
+				if (existing) {
+					if (existing.verdict !== verdict || existing.kind !== 'REVIEWED') {
+						errors.push(
+							`STAGE_B_VERDICT_CONFLICT: task ${taskId} has conflicting verdicts: ${existing.kind}/${existing.verdict} vs REVIEWED/${verdict}`,
+						);
+					}
+				} else {
+					verdicts.set(taskId, { verdict, kind: 'REVIEWED' });
+				}
 			}
 			continue;
 		}
@@ -2077,11 +2096,20 @@ export function parsePerTaskVerdicts(outputText: string): Map<string, string> {
 			const taskId = match[1];
 			const verdict = match[2];
 			if (isStrictTaskId(taskId)) {
-				result.set(taskId, verdict);
+				const existing = verdicts.get(taskId);
+				if (existing) {
+					if (existing.verdict !== verdict || existing.kind !== 'TESTED') {
+						errors.push(
+							`STAGE_B_VERDICT_CONFLICT: task ${taskId} has conflicting verdicts: ${existing.kind}/${existing.verdict} vs TESTED/${verdict}`,
+						);
+					}
+				} else {
+					verdicts.set(taskId, { verdict, kind: 'TESTED' });
+				}
 			}
 		}
 	}
-	return result;
+	return { verdicts, errors };
 }
 
 /**
@@ -2888,6 +2916,15 @@ export function createDelegationGateHook(
 		Map<string, number>
 	>();
 	const gateDispatchPrimaryTaskByCallID = new Map<string, string | null>();
+
+	interface StageBDispatchContext {
+		taskIds: Set<string>;
+		expectedVerdictKind: 'REVIEWED' | 'TESTED';
+	}
+	const stageBDispatchContextByCallID = new Map<
+		string,
+		StageBDispatchContext
+	>();
 	const publishedScopeBindingsByCallID = new Map<
 		string,
 		Array<{ directory: string; binding: PreparedCoderScope['binding'] }>
@@ -3133,6 +3170,7 @@ export function createDelegationGateHook(
 		clearCoderTaskChangeContext(callID);
 		stageBDispatchGenerationsByCallID.delete(callID);
 		gateDispatchPrimaryTaskByCallID.delete(callID);
+		stageBDispatchContextByCallID.delete(callID);
 		deleteStoredInputArgs(callID);
 	};
 
@@ -3572,6 +3610,11 @@ export function createDelegationGateHook(
 			}
 			rememberStageBDispatchGenerations(input.callID, generations);
 			gateDispatchPrimaryTaskByCallID.set(input.callID, resolvedTaskId);
+			stageBDispatchContextByCallID.set(input.callID, {
+				taskIds: new Set(generations.keys()),
+				expectedVerdictKind:
+					targetAgent === 'test_engineer' ? 'TESTED' : 'REVIEWED',
+			});
 			return;
 		}
 
@@ -4482,6 +4525,7 @@ export function createDelegationGateHook(
 					clearCoderTaskChangeContext(input.callID);
 					stageBDispatchGenerationsByCallID.delete(input.callID);
 					gateDispatchPrimaryTaskByCallID.delete(input.callID);
+					stageBDispatchContextByCallID.delete(input.callID);
 					if (storedArgs !== undefined) deleteStoredInputArgs(input.callID);
 				}
 				if (!backgroundCorrelationConflict) {
@@ -4740,163 +4784,198 @@ export function createDelegationGateHook(
 								//   [TESTED] | task-2.1 | PASS | ...
 								// If parseable, attribute per-task rather than over-attributing to
 								// every task in taskWorkflowStates.
-								const perTaskVerdicts = parsePerTaskVerdicts(
+								const attributionResult = parsePerTaskVerdicts(
 									outputText(_output),
 								);
-								const hasPerTaskAttribution = perTaskVerdicts.size > 0;
-
-								// FR-007: When per-task verdicts are parseable, iterate ONLY over the
-								// task IDs mentioned in those verdicts — skip all other eligible tasks
-								// to prevent over-attribution. When no verdicts are parseable, iterate
-								// over all eligible tasks (existing fallback behavior).
-
-								const {
-									getTaskWorkflowSnapshot,
-									readTaskEvidence,
-									transitionTaskWorkflowEvidence,
-								} = await import('../gate-evidence');
-								for (const [taskId, state] of session.taskWorkflowStates) {
-									if (
-										!(stageBEligibleStates as readonly string[]).includes(state)
-									)
-										continue;
-									// FR-007: Skip tasks NOT mentioned in per-task verdicts
-									if (hasPerTaskAttribution && !perTaskVerdicts.has(taskId))
-										continue;
-									if (
-										!hasPerTaskAttribution &&
-										gateDispatchPrimaryTaskByCallID.get(input.callID) !== taskId
-									) {
-										continue;
-									}
-									const eligibleState = state as EligibleState;
-									const launchGeneration = stageBDispatchGenerationsByCallID
-										.get(input.callID)
-										?.get(taskId);
-									if (launchGeneration === undefined) {
-										logger.warn(
-											`[delegation-gate] ignoring unbound Stage B settlement for ${taskId} from call ${input.callID}`,
+								for (const err of attributionResult.errors) {
+									logger.warn(`[delegation-gate] ${err}`);
+								}
+								do {
+									if (attributionResult.verdicts.size === 0) {
+										const dispatchCtx = stageBDispatchContextByCallID.get(
+											input.callID,
 										);
-										continue;
+										const expectedTasks = dispatchCtx
+											? [...dispatchCtx.taskIds].join(', ')
+											: (gateDispatchPrimaryTaskByCallID.get(input.callID) ??
+												'unknown');
+										logger.warn(
+											`[delegation-gate] STAGE_B_ATTRIBUTION_MISSING: ${targetAgent} dispatch for call ${input.callID} returned no structured verdict lines. Expected tasks: ${expectedTasks}. Agent output must include [REVIEWED] or [TESTED] verdict lines.`,
+										);
+										const failClosedTaskIds = dispatchCtx
+											? [...dispatchCtx.taskIds]
+											: gateDispatchPrimaryTaskByCallID.has(input.callID)
+												? [gateDispatchPrimaryTaskByCallID.get(input.callID)!]
+												: [];
+										for (const failTaskId of failClosedTaskIds) {
+											const failState =
+												session.taskWorkflowStates.get(failTaskId);
+											if (
+												failState &&
+												(stageBEligibleStates as readonly string[]).includes(
+													failState,
+												)
+											) {
+												session.taskWorkflowStates.set(
+													failTaskId,
+													'rework_required',
+												);
+												session.stageBCompletion?.delete(failTaskId);
+												logger.warn(
+													`[delegation-gate] STAGE_B_ATTRIBUTION_MISSING fail-closed: task ${failTaskId} → rework_required`,
+												);
+											}
+										}
+										break;
 									}
-									const verdict = perTaskVerdicts.get(taskId);
-									const positiveVerdict =
-										targetAgent === 'reviewer'
-											? verdict === 'APPROVED'
-											: verdict === 'PASS';
-									if (!positiveVerdict) {
+
+									const {
+										getTaskWorkflowSnapshot,
+										readTaskEvidence,
+										transitionTaskWorkflowEvidence,
+									} = await import('../gate-evidence');
+									for (const [taskId, state] of session.taskWorkflowStates) {
+										if (
+											!(stageBEligibleStates as readonly string[]).includes(
+												state,
+											)
+										)
+											continue;
+										if (!attributionResult.verdicts.has(taskId)) continue;
+										const eligibleState = state as EligibleState;
+										const launchGeneration = stageBDispatchGenerationsByCallID
+											.get(input.callID)
+											?.get(taskId);
+										if (launchGeneration === undefined) {
+											logger.warn(
+												`[delegation-gate] ignoring unbound Stage B settlement for ${taskId} from call ${input.callID}`,
+											);
+											continue;
+										}
+										const verdictEntry = attributionResult.verdicts.get(taskId);
+										const dispatchCtxForVerdict =
+											stageBDispatchContextByCallID.get(input.callID);
+										const positiveVerdict =
+											dispatchCtxForVerdict?.expectedVerdictKind === 'TESTED'
+												? verdictEntry?.verdict === 'PASS'
+												: verdictEntry?.verdict === 'APPROVED';
+										if (!positiveVerdict) {
+											try {
+												const rejected = await transitionTaskWorkflowEvidence(
+													directory,
+													taskId,
+													{
+														type: 'stage_b_failed',
+														gate: targetAgent as 'reviewer' | 'test_engineer',
+														expectedGeneration: launchGeneration,
+														transitionId: `gate-failed:${input.callID}:${taskId}`,
+													},
+												);
+												session.taskWorkflowStates.set(
+													taskId,
+													'rework_required',
+												);
+												session.stageBCompletion?.delete(taskId);
+												updateTaskWorkflowCache(
+													session,
+													taskId,
+													getTaskWorkflowSnapshot(rejected),
+												);
+											} catch (err) {
+												logger.warn(
+													`[delegation-gate] Stage B rejection could not be persisted for ${taskId}: ${err instanceof Error ? err.message : String(err)}`,
+												);
+											}
+											continue;
+										}
 										try {
-											const rejected = await transitionTaskWorkflowEvidence(
+											const turbo = hasActiveTurboMode(input.sessionID);
+											const { recordGateEvidence } = await import(
+												'../gate-evidence'
+											);
+											await recordGateEvidence(
 												directory,
 												taskId,
+												targetAgent as 'reviewer' | 'test_engineer',
+												input.sessionID,
+												turbo,
 												{
-													type: 'stage_b_failed',
-													gate: targetAgent as 'reviewer' | 'test_engineer',
 													expectedGeneration: launchGeneration,
-													transitionId: `gate-failed:${input.callID}:${taskId}`,
+													transitionId: `gate:${input.callID}:${taskId}`,
 												},
 											);
-											session.taskWorkflowStates.set(taskId, 'rework_required');
-											session.stageBCompletion?.delete(taskId);
-											updateTaskWorkflowCache(
-												session,
-												taskId,
-												getTaskWorkflowSnapshot(rejected),
-											);
 										} catch (err) {
 											logger.warn(
-												`[delegation-gate] Stage B rejection could not be persisted for ${taskId}: ${err instanceof Error ? err.message : String(err)}`,
+												`[delegation-gate] Stage B settlement rejected for ${taskId}: ${err instanceof Error ? err.message : String(err)}`,
 											);
+											continue;
 										}
-										continue;
-									}
-									try {
-										const turbo = hasActiveTurboMode(input.sessionID);
-										const { recordGateEvidence } = await import(
-											'../gate-evidence'
-										);
-										await recordGateEvidence(
-											directory,
+										recordStageBCompletion(
+											session,
 											taskId,
 											targetAgent as 'reviewer' | 'test_engineer',
-											input.sessionID,
-											turbo,
-											{
-												expectedGeneration: launchGeneration,
-												transitionId: `gate:${input.callID}:${taskId}`,
-											},
 										);
-									} catch (err) {
-										logger.warn(
-											`[delegation-gate] Stage B settlement rejected for ${taskId}: ${err instanceof Error ? err.message : String(err)}`,
-										);
-										continue;
-									}
-									recordStageBCompletion(
-										session,
-										taskId,
-										targetAgent as 'reviewer' | 'test_engineer',
-									);
 
-									const taskEvidence = await readTaskEvidence(
-										directory,
-										taskId,
-									);
-									const reviewerCompletesStageB =
-										targetAgent === 'reviewer' &&
-										taskEvidence?.test_engineer_exempt === true;
-									if (
-										hasBothStageBCompletions(session, taskId) ||
-										reviewerCompletesStageB
-									) {
-										// Barrier reached: both reviewer and test_engineer have completed.
-										// Advance through reviewer_run → tests_run in a single compound
-										// step so the state machine stays consistent.
-										try {
-											if (eligibleState === 'pre_check_passed') {
-												advanceTaskState(session, taskId, 'reviewer_run', {
-													telemetrySessionId: input.sessionID,
-												});
-											}
-											advanceTaskState(session, taskId, 'tests_run', {
-												telemetrySessionId: input.sessionID,
-											});
-										} catch (err) {
-											logger.warn(
-												`[delegation-gate] toolAfter stage-b-parallel: could not advance ${taskId} (${eligibleState}) → tests_run: ${err instanceof Error ? err.message : String(err)}`,
-											);
-										}
-									} else {
-										// Intermediate advancement: advance state immediately when a
-										// single Stage B agent completes, without waiting for the barrier.
-										// This preserves the sequential-equivalent state machine contract:
-										//   coder_delegated → reviewer_run  (when reviewer completes)
-										//   reviewer_run → tests_run        (when test_engineer completes)
-										// The barrier path above handles the case where both complete
-										// while state is still coder_delegated (compound step).
-										try {
-											if (
-												targetAgent === 'reviewer' &&
-												eligibleState === 'pre_check_passed'
-											) {
-												advanceTaskState(session, taskId, 'reviewer_run', {
-													telemetrySessionId: input.sessionID,
-												});
-											} else if (
-												targetAgent === 'test_engineer' &&
-												eligibleState === 'reviewer_run'
-											) {
+										const taskEvidence = await readTaskEvidence(
+											directory,
+											taskId,
+										);
+										const reviewerCompletesStageB =
+											targetAgent === 'reviewer' &&
+											taskEvidence?.test_engineer_exempt === true;
+										if (
+											hasBothStageBCompletions(session, taskId) ||
+											reviewerCompletesStageB
+										) {
+											// Barrier reached: both reviewer and test_engineer have completed.
+											// Advance through reviewer_run → tests_run in a single compound
+											// step so the state machine stays consistent.
+											try {
+												if (eligibleState === 'pre_check_passed') {
+													advanceTaskState(session, taskId, 'reviewer_run', {
+														telemetrySessionId: input.sessionID,
+													});
+												}
 												advanceTaskState(session, taskId, 'tests_run', {
 													telemetrySessionId: input.sessionID,
 												});
+											} catch (err) {
+												logger.warn(
+													`[delegation-gate] toolAfter stage-b-parallel: could not advance ${taskId} (${eligibleState}) → tests_run: ${err instanceof Error ? err.message : String(err)}`,
+												);
 											}
-										} catch (err) {
-											logger.warn(
-												`[delegation-gate] toolAfter stage-b-parallel intermediate: could not advance ${taskId} (${eligibleState}) after ${targetAgent}: ${err instanceof Error ? err.message : String(err)}`,
-											);
+										} else {
+											// Intermediate advancement: advance state immediately when a
+											// single Stage B agent completes, without waiting for the barrier.
+											// This preserves the sequential-equivalent state machine contract:
+											//   coder_delegated → reviewer_run  (when reviewer completes)
+											//   reviewer_run → tests_run        (when test_engineer completes)
+											// The barrier path above handles the case where both complete
+											// while state is still coder_delegated (compound step).
+											try {
+												if (
+													targetAgent === 'reviewer' &&
+													eligibleState === 'pre_check_passed'
+												) {
+													advanceTaskState(session, taskId, 'reviewer_run', {
+														telemetrySessionId: input.sessionID,
+													});
+												} else if (
+													targetAgent === 'test_engineer' &&
+													eligibleState === 'reviewer_run'
+												) {
+													advanceTaskState(session, taskId, 'tests_run', {
+														telemetrySessionId: input.sessionID,
+													});
+												}
+											} catch (err) {
+												logger.warn(
+													`[delegation-gate] toolAfter stage-b-parallel intermediate: could not advance ${taskId} (${eligibleState}) after ${targetAgent}: ${err instanceof Error ? err.message : String(err)}`,
+												);
+											}
 										}
 									}
-								}
+								} while (false as boolean);
 							}
 						}
 					} // end if (!councilActive) — primary Stage B path
@@ -5138,6 +5217,7 @@ export function createDelegationGateHook(
 
 				stageBDispatchGenerationsByCallID.delete(input.callID);
 				gateDispatchPrimaryTaskByCallID.delete(input.callID);
+				stageBDispatchContextByCallID.delete(input.callID);
 
 				// ── Completion gate: push advisory if a task awaits completion ──
 				// B3 (issue #1976): the `break` below only caps pushes to one per

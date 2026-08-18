@@ -3463,7 +3463,14 @@ async function initializeOpenCodeSwarm(
 				const backgroundResultIsRunning =
 					outputLooksLikeBackgroundRunning(output);
 				const sessionId = input.sessionID;
-				const agentName = swarmState.activeAgent.get(sessionId) || 'unknown';
+				const storedSubagentType =
+					typeof afterCtx.args?.subagent_type === 'string'
+						? afterCtx.args.subagent_type
+						: undefined;
+				const agentName =
+					storedSubagentType ||
+					swarmState.activeAgent.get(sessionId) ||
+					'unknown';
 				const baseAgentName = stripKnownSwarmPrefix(agentName);
 				const preHandoffSession = swarmState.agentSessions.get(sessionId);
 				const activeWindow = getActiveWindow(sessionId);
