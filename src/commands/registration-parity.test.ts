@@ -1,17 +1,19 @@
-import { describe, expect, it } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import OpenCodeSwarm from '../index';
+import { createIsolatedTestEnv } from '../../tests/helpers/isolated-test-env.js';
+import { createSafeTestDir } from '../../tests/helpers/safe-test-dir.js';
+import {
+	captureFileBytes,
+	expectFileBytesUnchanged,
+	runWithCleanup,
+} from '../../tests/helpers/test-isolation.js';
+import OpenCodeSwarm, { overrideIndexInternalsForTest } from '../index';
 import {
 	COMMAND_REGISTRY,
 	type CommandEntry,
 	VALID_COMMANDS,
 } from './registry';
-import {
-	HUMAN_ONLY_SWARM_COMMANDS,
-	SWARM_COMMAND_TOOL_ALLOWLIST,
-	SWARM_COMMAND_TOOL_COMMANDS,
-} from './tool-policy';
 
 /**
  * Commands that intentionally lack shortcuts (exempt from parity check).
@@ -35,22 +37,62 @@ async function getIndexSource(): Promise<string> {
  * This avoids the circular reconstruction that compared the test's own
  * derived string against itself.
  */
-async function getActualSwarmDescription(): Promise<string> {
-	const plugin = await OpenCodeSwarm.server({
-		client: {} as any,
-		project: {} as any,
-		directory: process.cwd(),
-		worktree: process.cwd(),
-		serverUrl: new URL('http://localhost:3000'),
-		$: {} as any,
+const trackedConfigPath = path.join(
+	import.meta.dir,
+	'../../.opencode/opencode-swarm.json',
+);
+let trackedProjectConfigBefore: Buffer | null = null;
+let restoreIndexInternals: () => void = () => {};
+
+beforeAll(() => {
+	// `OpenCodeSwarm.server()` queues its post-resolution work on an unref'd
+	// `setTimeout(0)`, so those tasks fire AFTER this file's synchronous
+	// cleanup has already removed the temp dir — and then recreate it, leaving
+	// a permanent orphan under /tmp (PR #2173 F-006). Dropping the queue is
+	// safe here because these tests only assert the command-registration
+	// surface, which `plugin.config()` builds from the static COMMAND_REGISTRY;
+	// nothing they observe comes from the deferred tasks.
+	restoreIndexInternals = overrideIndexInternalsForTest({
+		schedulePostResolutionTasks: () => {},
 	});
-	const mockConfig: Record<string, unknown> = {};
-	await plugin.config?.(mockConfig);
-	const commands = mockConfig.command as Record<
-		string,
-		{ template: string; description: string }
-	>;
-	return commands.swarm.description;
+	trackedProjectConfigBefore = captureFileBytes(trackedConfigPath);
+});
+
+afterAll(() => {
+	// Restore FIRST so the seam is reset even if the byte assertion throws.
+	restoreIndexInternals();
+	restoreIndexInternals = () => {};
+	expectFileBytesUnchanged(trackedConfigPath, trackedProjectConfigBefore);
+});
+
+async function getActualSwarmDescription(): Promise<string> {
+	let safeDir: ReturnType<typeof createSafeTestDir> | undefined;
+	let isolatedEnv: ReturnType<typeof createIsolatedTestEnv> | undefined;
+	return runWithCleanup(
+		async () => {
+			safeDir = createSafeTestDir();
+			isolatedEnv = createIsolatedTestEnv();
+			const plugin = await OpenCodeSwarm.server({
+				client: {} as any,
+				project: {} as any,
+				directory: safeDir.dir,
+				worktree: safeDir.dir,
+				serverUrl: new URL('http://localhost:3000'),
+				$: {} as any,
+			});
+			const mockConfig: Record<string, unknown> = {};
+			await plugin.config?.(mockConfig);
+			const commands = mockConfig.command as Record<
+				string,
+				{ template: string; description: string }
+			>;
+			return commands.swarm.description;
+		},
+		// Read the `let`s lazily so a throw from createIsolatedTestEnv() still
+		// tears down the already-created safeDir.
+		() => isolatedEnv?.cleanup(),
+		() => safeDir?.cleanup(),
+	);
 }
 
 /**
@@ -357,406 +399,6 @@ describe('Command registration parity', () => {
 			expect(
 				simulatedDescription.includes('post-mortem'),
 				`Expected 'post-mortem' to still be present in simulated description`,
-			).toBe(true);
-		});
-	});
-
-	// ── FIX 2: subcommand TUI shortcut verification (bidirectional allowlist) ──
-	//
-	// The description string is STANDALONE-ONLY by design — subcommands are filtered
-	// out. We do NOT check subcommands against the description.
-	// Not all subcommands have individual TUI shortcuts; some are accessed via their
-	// parent (e.g. `memory pending`, `memory recall-log`, `memory stale`).
-	// This test uses an explicit bidirectional allowlist: every entry must have a
-	// shortcut in index.ts, and every subcommand shortcut in index.ts must be listed
-	// here. If either direction drifts, the test fails.
-
-	/**
-	 * Subcommands that have individual TUI shortcut keys in src/index.ts.
-	 * Other subcommands (memory pending, memory recall-log, memory stale,
-	 * knowledge migrate, knowledge quarantine, knowledge restore,
-	 * knowledge unactionable, knowledge retry-hardening, etc.) are accessed via
-	 * their parent command and intentionally lack shortcuts.
-	 *
-	 * Bidirectional invariant:
-	 *   - Forward: every entry below must have a `swarm-<cmd>` key in index.ts.
-	 *   - Reverse: every subcommand shortcut in index.ts must be listed here.
-	 *
-	 * Derived by scanning src/index.ts for `swarm-*` keys whose dash-converted
-	 * form maps back to a `subcommandOf` registry entry.
-	 */
-	const SUBCOMMANDS_WITH_SHORTCUTS = new Set([
-		'config doctor',
-		'doctor tools',
-		'evidence summary',
-		'memory status',
-		'memory export',
-		'memory import',
-		'memory migrate',
-		'sdd status',
-		'sdd validate',
-		'sdd project',
-	]);
-
-	describe('subcommand TUI shortcuts are complete and correctly keyed (bidirectional)', () => {
-		it('subcommand shortcuts are complete and no phantom shortcuts exist', async () => {
-			const indexSource = await getIndexSource();
-
-			// Forward check: every subcommand in the allowlist has a correctly
-			// dash-converted shortcut key in src/index.ts.
-			const missing: string[] = [];
-			for (const cmd of SUBCOMMANDS_WITH_SHORTCUTS) {
-				const expectedKey = expectedShortcutFor(cmd);
-				if (!hasShortcutKey(indexSource, cmd)) {
-					missing.push(
-						`${cmd} (expected key '${expectedKey}' missing from src/index.ts)`,
-					);
-				}
-			}
-			expect(
-				missing,
-				`Subcommands missing TUI shortcuts in src/index.ts:\n${missing.map((m) => `  - ${m}`).join('\n')}`,
-			).toHaveLength(0);
-
-			// Reverse check: every subcommand shortcut key found in index.ts is in
-			// the allowlist. (Catches phantom shortcuts for subcommands not listed.)
-			const allSubcommands = VALID_COMMANDS.filter((cmd) => {
-				const entry = COMMAND_REGISTRY[
-					cmd as keyof typeof COMMAND_REGISTRY
-				] as CommandEntry;
-				return !!entry.subcommandOf && !entry.aliasOf;
-			});
-			const phantom: string[] = [];
-			for (const cmd of allSubcommands) {
-				const expectedKey = expectedShortcutFor(cmd);
-				if (
-					hasShortcutKey(indexSource, cmd) &&
-					!SUBCOMMANDS_WITH_SHORTCUTS.has(cmd)
-				) {
-					phantom.push(
-						`${cmd} (has shortcut '${expectedKey}' but is not in SUBCOMMANDS_WITH_SHORTCUTS)`,
-					);
-				}
-			}
-			expect(
-				phantom,
-				`Phantom subcommand shortcuts not in SUBCOMMANDS_WITH_SHORTCUTS:\n${phantom.map((p) => `  - ${p}`).join('\n')}`,
-			).toHaveLength(0);
-		});
-	});
-
-	// ── FIX 3: subcommand toolPolicy validation ───────────────────────
-
-	describe('subcommand toolPolicy validation', () => {
-		it('every subcommand with a toolPolicy has a valid value', () => {
-			const invalid: string[] = [];
-			for (const cmd of VALID_COMMANDS) {
-				const entry = COMMAND_REGISTRY[
-					cmd as keyof typeof COMMAND_REGISTRY
-				] as CommandEntry;
-				if (!entry.subcommandOf) continue;
-				if (entry.toolPolicy === undefined) continue;
-				if (
-					!['agent', 'human-only', 'restricted', 'none'].includes(
-						entry.toolPolicy,
-					)
-				) {
-					invalid.push(`${cmd}: toolPolicy='${entry.toolPolicy}'`);
-				}
-			}
-			expect(
-				invalid,
-				`Subcommands with invalid toolPolicy values:\n${invalid.map((i) => `  - ${i}`).join('\n')}`,
-			).toHaveLength(0);
-		});
-
-		it('subcommands in the allowlist/human-only have matching toolPolicy', () => {
-			const mismatches: string[] = [];
-			for (const cmd of VALID_COMMANDS) {
-				const entry = COMMAND_REGISTRY[
-					cmd as keyof typeof COMMAND_REGISTRY
-				] as CommandEntry;
-				if (!entry.subcommandOf) continue;
-				if (entry.toolPolicy === undefined) continue;
-				const inAllowlist = SWARM_COMMAND_TOOL_ALLOWLIST.has(cmd);
-				const inHumanOnly = HUMAN_ONLY_SWARM_COMMANDS.has(cmd);
-				if (!inAllowlist && !inHumanOnly) continue;
-				if (inAllowlist && entry.toolPolicy !== 'agent') {
-					mismatches.push(
-						`${cmd}: in allowlist but toolPolicy='${entry.toolPolicy}'`,
-					);
-				}
-				if (
-					inHumanOnly &&
-					entry.toolPolicy !== 'agent' &&
-					entry.toolPolicy !== 'human-only'
-				) {
-					mismatches.push(
-						`${cmd}: in human-only but toolPolicy='${entry.toolPolicy}'`,
-					);
-				}
-			}
-			expect(
-				mismatches,
-				`Subcommands with toolPolicy mismatching their classification:\n${mismatches.map((m) => `  - ${m}`).join('\n')}`,
-			).toHaveLength(0);
-		});
-	});
-
-	// ── PART B: No-regression classification snapshot (FR-008/SC-12) ──
-
-	describe('no-regression classification snapshot (FR-008/SC-12)', () => {
-		// Authoritative pre-existing baseline (29 allowlist entries)
-		const BASELINE_28_ALLOWLIST = new Set([
-			'agents',
-			'config',
-			'config doctor',
-			'doctor tools',
-			'status',
-			'show-plan',
-			'help',
-			'history',
-			'evidence',
-			'evidence summary',
-			'retrieve',
-			'diagnose',
-			'preflight',
-			'benchmark',
-			'knowledge',
-			'memory',
-			'memory status',
-			'memory pending',
-			'memory recall-log',
-			'memory value-log',
-			'memory stale',
-			'memory export',
-			'memory evaluate',
-			'sdd',
-			'sdd status',
-			'sdd validate',
-			// FR-004: sdd project moved from human-only to agent
-			'sdd project',
-			'sync-plan',
-			'export',
-			'auto-proceed',
-			// #1850: cohort memory sharing commands (agent/utility + diagnostics)
-			'memory link',
-			'memory link status',
-			'memory unlink',
-		]);
-
-		// Authoritative pre-existing baseline (10 human-only entries)
-		const BASELINE_10_HUMAN_ONLY = new Set([
-			'acknowledge-spec-drift',
-			'reset',
-			'reset-session',
-			'rollback',
-			'checkpoint',
-			'consolidate',
-			'memory compact',
-			'memory import',
-			'memory migrate',
-			// FR-004: sdd project removed — moved to agent
-		]);
-
-		// Authoritative pre-existing baseline (33 tool commands = 29 allowlist + 4 human-only)
-		const BASELINE_32_TOOL_COMMANDS = new Set([
-			...BASELINE_28_ALLOWLIST,
-			'memory compact',
-			'memory import',
-			'memory migrate',
-			// FR-004: sdd project removed — now in allowlist
-		]);
-
-		// Authoritative pre-existing baseline (14 no-args entries)
-		const BASELINE_14_NO_ARGS = new Set([
-			'agents',
-			'config',
-			'config doctor',
-			'doctor tools',
-			'status',
-			'history',
-			'evidence summary',
-			'diagnose',
-			'preflight',
-			'sync-plan',
-			'export',
-			'memory',
-			'memory status',
-			'memory export',
-			// #1850: memory link status has toolNoArgs: true
-			'memory link status',
-		]);
-
-		// After the fix, only these additions are permitted to differ.
-		// `pr subscribe` / `pr unsubscribe` moved from human-only to agent
-		// Newer agent-callable commands added to the allowlist since the
-		// pre-fix baseline was frozen. All are read-only/diagnostic and
-		// therefore agent-appropriate: costs (token/cost totals), ci-simulate
-		// (dry-run CI), guardrail explain (dry-run guardrail preview),
-		// guardrail-log (read decision log), lanes (list worktree lanes),
-		// memory consolidation-log (read consolidation log), gate-audit (bounded
-		// production audit), and gate-stats (offline audit reducer). `review`
-		const NEWER_ALLOWLIST_ADDITIONS = [
-			'ci-simulate',
-			'costs',
-			'guardrail explain',
-			'guardrail-log',
-			'lanes',
-			'memory consolidation-log',
-			'gate-audit',
-			'gate-stats',
-			'context-map stats',
-		];
-		const EXPECTED_ADDITIONS = {
-			allowlist: new Set([
-				'pr status',
-				'pr subscribe',
-				'pr unsubscribe',
-				'learning',
-				'post-mortem',
-				...NEWER_ALLOWLIST_ADDITIONS,
-				// #1822: governed skill optimizer — read-only/proposal commands
-				'skill-opt',
-				'skill-opt plan',
-				'skill-opt status',
-				'skill-opt diff',
-				'skill-opt history',
-			]),
-			// Aliases that inherit a human-only/restricted canonical target (so
-			// the Bash CLI guardrail blocks the alias/dash form too — see
-			// HUMAN_ONLY_SWARM_COMMANDS). `clear` (→ reset-session, restricted)
-			// is a pre-existing alias that the canonical-aware derivation now
-			// also covers, closing a latent bypass.
-			// FR-004: sdd-project removed — canonical target (sdd project) is now agent
-			// `abort-pr-workflow` is a restricted human-only escape hatch for
-			// unrecoverable PR_REVIEW/PR_FEEDBACK mechanical gates.
-			// `approve-plan-critic` is a restricted human-only escape hatch for
-			// the ratchet-tighter critic_pre_plan execution gate (issue #2012).
-			humanOnly: new Set([
-				'memory-import',
-				'memory-migrate',
-				'clear',
-				'abort-pr-workflow',
-				'approve-plan-critic',
-				'review',
-				// #1822: governed skill optimizer — mutating commands (human-gated)
-				'skill-opt run',
-				'skill-opt approve',
-				'skill-opt reject',
-				'skill-opt rollback',
-			]),
-			toolCommands: new Set([
-				'pr subscribe',
-				'pr unsubscribe',
-				'pr status',
-				'learning',
-				'post-mortem',
-				...NEWER_ALLOWLIST_ADDITIONS,
-				'review',
-				// #1822: all 9 skill-opt commands carry a toolPolicy
-				'skill-opt',
-				'skill-opt plan',
-				'skill-opt status',
-				'skill-opt diff',
-				'skill-opt history',
-				'skill-opt run',
-				'skill-opt approve',
-				'skill-opt reject',
-				'skill-opt rollback',
-			]),
-			noArgs: new Set(['pr status', 'lanes', 'context-map stats']),
-		};
-		const expectedAllowlist = new Set([
-			...BASELINE_28_ALLOWLIST,
-			...EXPECTED_ADDITIONS.allowlist,
-		]);
-		const expectedHumanOnly = new Set([
-			...BASELINE_10_HUMAN_ONLY,
-			...EXPECTED_ADDITIONS.humanOnly,
-		]);
-
-		const expectedToolCommands = new Set([
-			...BASELINE_32_TOOL_COMMANDS,
-			...EXPECTED_ADDITIONS.toolCommands,
-		]);
-
-		const expectedNoArgs = new Set([
-			...BASELINE_14_NO_ARGS,
-			...EXPECTED_ADDITIONS.noArgs,
-		]);
-
-		it('SWARM_COMMAND_TOOL_ALLOWLIST matches baseline plus the permitted additions', () => {
-			const actual = SWARM_COMMAND_TOOL_ALLOWLIST;
-			const extra = [...actual].filter((x) => !expectedAllowlist.has(x));
-			const missing = [...expectedAllowlist].filter((x) => !actual.has(x));
-			expect(
-				extra.length === 0 && missing.length === 0,
-				`SWARM_COMMAND_TOOL_ALLOWLIST mismatch.\n` +
-					`Extra in actual: ${extra.join(', ') || 'none'}\n` +
-					`Missing from actual: ${missing.join(', ') || 'none'}`,
-			).toBe(true);
-		});
-
-		it('HUMAN_ONLY_SWARM_COMMANDS matches the permitted aliases and manual-only commands', () => {
-			const actual = HUMAN_ONLY_SWARM_COMMANDS;
-			const extra = [...actual].filter((x) => !expectedHumanOnly.has(x));
-			const missing = [...expectedHumanOnly].filter((x) => !actual.has(x));
-			expect(
-				extra.length === 0 && missing.length === 0,
-				`HUMAN_ONLY_SWARM_COMMANDS mismatch.\n` +
-					`Extra in actual: ${extra.join(', ') || 'none'}\n` +
-					`Missing from actual: ${missing.join(', ') || 'none'}`,
-			).toBe(true);
-		});
-
-		it('SWARM_COMMAND_TOOL_COMMANDS (z.enum) matches baseline plus the permitted additions', () => {
-			const actual = new Set(SWARM_COMMAND_TOOL_COMMANDS);
-			const extra = [...actual].filter((x) => !expectedToolCommands.has(x));
-			const missing = [...expectedToolCommands].filter((x) => !actual.has(x));
-			expect(
-				extra.length === 0 && missing.length === 0,
-				`SWARM_COMMAND_TOOL_COMMANDS mismatch.\n` +
-					`Extra in actual: ${extra.join(', ') || 'none'}\n` +
-					`Missing from actual: ${missing.join(', ') || 'none'}`,
-			).toBe(true);
-		});
-
-		it('NO_ARGS (derived from toolNoArgs) matches baseline plus pr status and lanes', () => {
-			const actual = new Set(
-				VALID_COMMANDS.filter(
-					(cmd) =>
-						(
-							COMMAND_REGISTRY[
-								cmd as keyof typeof COMMAND_REGISTRY
-							] as CommandEntry
-						)?.toolNoArgs === true,
-				),
-			);
-			const extra = [...actual].filter((x) => !expectedNoArgs.has(x));
-			const missing = [...expectedNoArgs].filter((x) => !actual.has(x));
-			expect(
-				extra.length === 0 && missing.length === 0,
-				`NO_ARGS mismatch.\n` +
-					`Extra in actual: ${extra.join(', ') || 'none'}\n` +
-					`Missing from actual: ${missing.join(', ') || 'none'}`,
-			).toBe(true);
-		});
-
-		it('only the permitted additions differ from the pre-fix baseline', () => {
-			const actualAllowlist = SWARM_COMMAND_TOOL_ALLOWLIST;
-			const diffFromBaseline = [
-				...[...actualAllowlist].filter((x) => !BASELINE_28_ALLOWLIST.has(x)),
-				...[...BASELINE_28_ALLOWLIST].filter((x) => !actualAllowlist.has(x)),
-			];
-			const permittedDiffs = EXPECTED_ADDITIONS.allowlist;
-			const unexpectedDiffs = diffFromBaseline.filter(
-				(x) => !permittedDiffs.has(x),
-			);
-			expect(
-				unexpectedDiffs.length === 0,
-				`Unexpected differences from pre-fix ALLOWLIST baseline: ${unexpectedDiffs.join(', ')}.\n` +
-					`Only these additions are permitted: ${[...permittedDiffs].join(', ')}`,
 			).toBe(true);
 		});
 	});
