@@ -947,11 +947,28 @@ export interface CoverageMissDiagnostic {
 	expectedSnippet: string;
 	foundSnippet: string;
 	divergenceOffset: number;
+	/**
+	 * Issue #2204: the longest matching prefix fell under
+	 * `COVERAGE_DIAG_MIN_PREFIX`, so the "divergence" is coincidental
+	 * punctuation/noise rather than a real aligned prefix — the requirement
+	 * text is effectively absent from ACCEPTANCE. Renderers must emit the
+	 * "requirement text completely missing" fallback instead of a
+	 * divergence pointer.
+	 */
+	completelyMissing?: boolean;
 	corruptionHint?: string;
 }
 
 const COVERAGE_DIAG_SNIPPET_CAP = 80;
 const COVERAGE_DIAG_MAX_SCAN = 400;
+/**
+ * Issue #2204: minimum longest-matching-prefix length for the divergence
+ * pointer to be meaningful. Below this, the match is treated as coincidental
+ * (e.g. a shared `": "` after a field label) and the diagnostic reports the
+ * requirement text as completely missing instead of pointing at a random
+ * "divergence" word in the prompt.
+ */
+const COVERAGE_DIAG_MIN_PREFIX = 10;
 
 /**
  * Issue #2063 (A2): per-body cap, in characters, on the raw requirement body
@@ -982,18 +999,6 @@ export function describeCoverageMiss(params: {
 	) {
 		divergenceOffset++;
 	}
-	const expectedSnippet = normalizedExpected.slice(
-		divergenceOffset,
-		divergenceOffset + COVERAGE_DIAG_SNIPPET_CAP,
-	);
-	const matchedPrefix = normalizedExpected.slice(0, divergenceOffset);
-	const foundIdx =
-		matchedPrefix.length > 0 ? normalizedAcceptance.indexOf(matchedPrefix) : -1;
-	const foundPos = foundIdx >= 0 ? foundIdx + matchedPrefix.length : 0;
-	const foundSnippet = normalizedAcceptance.slice(
-		foundPos,
-		foundPos + COVERAGE_DIAG_SNIPPET_CAP,
-	);
 	const raw = `${params.rawExpectedBody}\n${params.rawAcceptanceText}`;
 	let corruptionHint: string | undefined;
 	if (/�/.test(raw)) {
@@ -1006,6 +1011,30 @@ export function describeCoverageMiss(params: {
 		corruptionHint =
 			'the text contains a Latin-1 mojibake byte sequence (e.g. Â§, Ã©) — re-save spec.md as UTF-8';
 	}
+	// #2204: a sub-threshold longest-matching-prefix is coincidental noise (a
+	// shared `": "` or similar), not an aligned prefix — report the requirement
+	// text as completely missing rather than pointing at a random divergence word.
+	if (divergenceOffset < COVERAGE_DIAG_MIN_PREFIX) {
+		return {
+			expectedSnippet: normalizedExpected.slice(0, COVERAGE_DIAG_SNIPPET_CAP),
+			foundSnippet: '',
+			divergenceOffset: 0,
+			completelyMissing: true,
+			...(corruptionHint ? { corruptionHint } : {}),
+		};
+	}
+	const expectedSnippet = normalizedExpected.slice(
+		divergenceOffset,
+		divergenceOffset + COVERAGE_DIAG_SNIPPET_CAP,
+	);
+	const matchedPrefix = normalizedExpected.slice(0, divergenceOffset);
+	const foundIdx =
+		matchedPrefix.length > 0 ? normalizedAcceptance.indexOf(matchedPrefix) : -1;
+	const foundPos = foundIdx >= 0 ? foundIdx + matchedPrefix.length : 0;
+	const foundSnippet = normalizedAcceptance.slice(
+		foundPos,
+		foundPos + COVERAGE_DIAG_SNIPPET_CAP,
+	);
 	return {
 		expectedSnippet,
 		foundSnippet,
@@ -3261,12 +3290,26 @@ export function createDelegationGateHook(
 				const diag = coverageResult.diagnostic;
 				const diagLines: string[] = [];
 				if (diag) {
-					diagLines.push(
-						`  first divergence at normalized offset ${diag.divergenceOffset}` +
-							(diag.divergenceOffset === 0 ? ' (no aligned prefix found)' : ''),
-					);
-					diagLines.push(`  spec requires here: "${diag.expectedSnippet}"`);
-					diagLines.push(`  ACCEPTANCE has here: "${diag.foundSnippet}"`);
+					if (diag.completelyMissing) {
+						// #2204: the sub-threshold prefix match is coincidental noise —
+						// do NOT point at a "divergence" word; state the text is absent.
+						diagLines.push(
+							`  no meaningful prefix of the requirement text was found in ACCEPTANCE (matched prefix under ${COVERAGE_DIAG_MIN_PREFIX} chars is treated as coincidental)`,
+						);
+						diagLines.push(`  spec requires here: "${diag.expectedSnippet}"`);
+						diagLines.push(
+							'  ACCEPTANCE has here: "[Requirement text completely missing from prompt]"',
+						);
+					} else {
+						diagLines.push(
+							`  first divergence at normalized offset ${diag.divergenceOffset}` +
+								(diag.divergenceOffset === 0
+									? ' (no aligned prefix found)'
+									: ''),
+						);
+						diagLines.push(`  spec requires here: "${diag.expectedSnippet}"`);
+						diagLines.push(`  ACCEPTANCE has here: "${diag.foundSnippet}"`);
+					}
 					if (diag.corruptionHint) {
 						diagLines.push(`  ENCODING WARNING: ${diag.corruptionHint}`);
 					}

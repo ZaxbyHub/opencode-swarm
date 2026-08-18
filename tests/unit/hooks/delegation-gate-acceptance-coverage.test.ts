@@ -364,6 +364,35 @@ describe('toolBefore ACCEPTANCE coverage gate (integration, F-007/#1687)', () =>
 		).rejects.toThrow(/ACCEPTANCE_FIELD_COVERAGE_MISMATCH/);
 	});
 
+	it('omitted requirement body renders the completely-missing fallback, not a divergence pointer (#2204)', async () => {
+		const hooks = createDelegationGateHook(makeConfig(), tempDir);
+		ensureAgentSession('sess-cov-missing-2204', 'architect');
+		// The agent summarized the task; only coincidental punctuation can match
+		// the FR-001 body — pre-#2204 this rendered a misleading "first
+		// divergence … ACCEPTANCE has here" pointer at a random prompt word.
+		let caught: Error | undefined;
+		try {
+			await hooks.toolBefore(toolBeforeInput('sess-cov-missing-2204'), {
+				args: {
+					subagent_type: 'coder',
+					task_id: '1.1',
+					prompt:
+						'TASK: 1.1 implement it\nACCEPTANCE: coder task: extract module logic',
+				},
+			});
+		} catch (err) {
+			caught = err as Error;
+		}
+		expect(caught).toBeDefined();
+		expect(caught?.message).toContain('ACCEPTANCE_FIELD_COVERAGE_MISMATCH');
+		expect(caught?.message).toContain(
+			'ACCEPTANCE has here: "[Requirement text completely missing from prompt]"',
+		);
+		expect(caught?.message).not.toContain(
+			'first divergence at normalized offset',
+		);
+	});
+
 	it('task with NO fr_refs, task-derived ACCEPTANCE => resolves (FR-004 fail-open)', async () => {
 		const hooks = createDelegationGateHook(makeConfig(), tempDir);
 		ensureAgentSession('sess-cov-nofr', 'architect');

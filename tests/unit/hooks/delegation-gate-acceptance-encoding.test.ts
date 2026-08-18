@@ -143,8 +143,12 @@ describe('checkAcceptanceCoversFrRefs -- coverage-miss diagnostic (#1896)', () =
 		expect(res.missingId).toBe('FR-001');
 		expect(res.diagnostic).toBeDefined();
 		const diag = res.diagnostic!;
-		// Aligned on "see " before the corrupted token.
-		expect(diag.divergenceOffset).toBeGreaterThan(0);
+		// #2204: only "see " (4 chars) aligns — under the 10-char minimum-prefix
+		// threshold this is coincidental noise, so the diagnostic reports the
+		// requirement text as completely missing rather than pointing at a
+		// divergence word.
+		expect(diag.completelyMissing).toBe(true);
+		expect(diag.divergenceOffset).toBe(0);
 		expect(diag.corruptionHint).toBeDefined();
 		expect(diag.corruptionHint).toContain('??');
 		// The expected snippet shows the corrupted region so the operator sees it.
@@ -224,16 +228,49 @@ describe('describeCoverageMiss (unit, #1896)', () => {
 		expect(diag.corruptionHint).toContain('??');
 	});
 
-	it('reports the matched-prefix length as the divergence offset', () => {
+	it('treats a sub-threshold matched prefix as completely missing (#2204)', () => {
 		const diag = describeCoverageMiss({
 			rawExpectedBody: 'abcXYZ',
 			rawAcceptanceText: 'abcQQQ',
 			normalizedExpected: 'abcxyz',
 			normalizedAcceptance: 'abcqqq',
 		});
-		// "abc" aligns (offset 3); "abcx" is not a substring of "abcqqq".
-		expect(diag.divergenceOffset).toBe(3);
-		expect(diag.expectedSnippet.startsWith('xyz')).toBe(true);
+		// "abc" aligns (offset 3) but 3 < COVERAGE_DIAG_MIN_PREFIX (10), so the
+		// match is coincidental noise → completely-missing fallback (#2204).
+		expect(diag.completelyMissing).toBe(true);
+		expect(diag.divergenceOffset).toBe(0);
+		expect(diag.foundSnippet).toBe('');
+	});
+
+	it('reports a real divergence pointer when the aligned prefix meets the threshold (#2204)', () => {
+		const shared = 'the login endpoint shall require ';
+		const diag = describeCoverageMiss({
+			rawExpectedBody: `${shared}multi-factor authentication.`,
+			rawAcceptanceText: `${shared}a recovery code instead.`,
+			normalizedExpected: `${shared}multi-factor authentication.`,
+			normalizedAcceptance: `${shared}a recovery code instead.`,
+		});
+		// shared prefix is 34 chars ≥ 10 → meaningful divergence pointer.
+		expect(diag.completelyMissing).toBeUndefined();
+		expect(diag.divergenceOffset).toBe(shared.length);
+		expect(diag.expectedSnippet.startsWith('multi-factor')).toBe(true);
+		expect(diag.foundSnippet.startsWith('a recovery')).toBe(true);
+	});
+
+	it('flags an omitted requirement body whose only match is coincidental punctuation (#2204)', () => {
+		const res = checkAcceptanceCoversFrRefs({
+			specText: specBullet(
+				'FR-007',
+				'The login endpoint shall require multi-factor authentication.',
+			),
+			// The agent summarized the task; the only shared normalized prefix is
+			// the ": " after the field label — exactly the #2204 repro shape.
+			acceptanceText: 'coder task: extract module logic from utils',
+			frRefs: ['FR-007'],
+		});
+		expect(res.covered).toBe(false);
+		expect(res.diagnostic?.completelyMissing).toBe(true);
+		expect(res.diagnostic?.divergenceOffset).toBe(0);
 	});
 
 	it('emits no corruption hint for clean ASCII text', () => {
