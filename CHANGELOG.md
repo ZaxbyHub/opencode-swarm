@@ -1,5 +1,14 @@
 # Changelog
 
+## [7.141.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.141.1...v7.141.2) (2026-08-18)
+
+
+### Bug Fixes
+
+* **test:** canonicalize tmpdir paths in changed tests (FR-011) ([8b1bf44](https://github.com/ZaxbyHub/opencode-swarm/commit/8b1bf448440151e8b596824203728035c2e777a0))
+* **test:** close review findings on server() boot isolation ([0da5d56](https://github.com/ZaxbyHub/opencode-swarm/commit/0da5d567c0dfeb8410bb6e9f378ef9ead9a85085)), closes [#2010](https://github.com/ZaxbyHub/opencode-swarm/issues/2010)
+* **test:** isolate server() boot tests ([d3a33ea](https://github.com/ZaxbyHub/opencode-swarm/commit/d3a33eaffd78ffb7f36a7fdf3479cbc0022db05a))
+
 ## [7.141.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.141.0...v7.141.1) (2026-08-16)
 
 
