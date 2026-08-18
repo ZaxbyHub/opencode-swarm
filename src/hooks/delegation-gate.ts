@@ -4605,20 +4605,16 @@ export function createDelegationGateHook(
 										const failClosedTaskIds = dispatchCtx
 											? [...dispatchCtx.taskIds]
 											: gateDispatchPrimaryTaskByCallID.has(input.callID)
-												? [
-														gateDispatchPrimaryTaskByCallID.get(
-															input.callID,
-														)!,
-													]
+												? [gateDispatchPrimaryTaskByCallID.get(input.callID)!]
 												: [];
 										for (const failTaskId of failClosedTaskIds) {
 											const failState =
 												session.taskWorkflowStates.get(failTaskId);
 											if (
 												failState &&
-												(
-													stageBEligibleStates as readonly string[]
-												).includes(failState)
+												(stageBEligibleStates as readonly string[]).includes(
+													failState,
+												)
 											) {
 												session.taskWorkflowStates.set(
 													failTaskId,
