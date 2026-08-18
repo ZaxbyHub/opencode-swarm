@@ -2,6 +2,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import packageJson from '../../package.json' with { type: 'json' };
 import {
 	COMMAND_REGISTRY,
@@ -17,6 +18,23 @@ import { DEFAULT_AGENT_CONFIGS } from '../config/constants.js';
 import { safeRealpathSync } from '../tools/repo-graph/safe-realpath.js';
 
 const { version } = packageJson;
+
+// Two levels up, NOT one. This module lives one directory deeper than the main
+// plugin entry: the CLI builds to `<root>/dist/cli/index.js` (`bun build
+// src/cli/index.ts --outdir dist/cli`) and runs from `<root>/src/cli/index.ts`
+// in dev, whereas `src/index.ts` builds to `<root>/dist/index.js`. Copying that
+// module's single `'..'` here would resolve to `<root>/dist` (or `<root>/src`),
+// which silently breaks every consumer: the bundled-skill sync would look for a
+// nonexistent `<root>/dist/.opencode/skills` and no-op, and `gate-audit` would
+// override its correct DEFAULT_PACKAGE_ROOT with a path that hard-throws ENOENT.
+// Matches resolvePackageRoot (src/commands/gate-audit.ts) and
+// resolvePackageRootFromModule (src/commands/memory.ts), which both special-case
+// a `cli`/`commands` leaf with two `'..'`.
+const PACKAGE_ROOT = path.resolve(
+	path.dirname(fileURLToPath(import.meta.url)),
+	'..',
+	'..',
+);
 
 const CONFIG_DIR = getPluginConfigDir();
 
@@ -825,6 +843,7 @@ export async function run(args: string[]): Promise<number> {
 		sessionID: '',
 		agents: {},
 		source: 'cli',
+		packageRoot: PACKAGE_ROOT,
 	});
 
 	console.log(result);
