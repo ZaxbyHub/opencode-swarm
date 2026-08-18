@@ -845,6 +845,10 @@ export function extractSpecRequirementBodyById(
 	specText: string,
 	id: string,
 ): string | null {
+	// Guard against an empty/whitespace-only id: without this, the regex below
+	// degenerates to matching the FIRST bold bullet in spec.md instead of
+	// correctly reporting "not found".
+	if (!id || id.trim().length === 0) return null;
 	// Escape regex metacharacters in the id (`-` etc.) so it matches literally.
 	const escapedId = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 	const lines = specText.split(/\r?\n/);
@@ -1049,7 +1053,13 @@ export function describeCoverageMiss(params: {
  * divergence pointer vs #2204 completely-missing fallback, mojibake warning,
  * fenced paste-ready requirement body with its cap, and the anti-spelunking
  * directive — stays unit-testable even though #2205's injection makes the
- * toolBefore throw structurally unreachable (defense-in-depth).
+ * toolBefore throw structurally unreachable today (injection and the
+ * coverage recheck share the same field list, id-resolution, and
+ * normalization logic, so whatever injection covers, the recheck also
+ * considers covered). This stays wired as defense-in-depth against a FUTURE
+ * divergence — e.g. someone edits `injectSpecRequirementsIntoAcceptance`'s
+ * field list, unknown-id handling, or normalization without updating
+ * `checkAcceptanceCoversFrRefs` to match, or vice versa.
  */
 export function buildAcceptanceCoverageMismatchError(params: {
 	targetAgent: string;
@@ -1219,7 +1229,7 @@ export function injectSpecRequirementsIntoAcceptance(params: {
 	let headerIdx = -1;
 	for (const candidate of ACCEPTANCE_ARGS_FIELDS) {
 		const value = params.args[candidate];
-		if (typeof value !== 'string' || !value.includes('ACCEPTANCE:')) continue;
+		if (typeof value !== 'string' || !/ACCEPTANCE:/i.test(value)) continue;
 		const candidateLines = value.split(/\r?\n/);
 		const idx = candidateLines.findIndex((line) => headerRe.test(line));
 		if (idx >= 0) {
@@ -1232,9 +1242,14 @@ export function injectSpecRequirementsIntoAcceptance(params: {
 	if (!field || !lines || headerIdx < 0) return null;
 
 	const normalizedAcceptance = normalizeAcceptanceText(lines.join('\n'));
+	// Dedupe frRefs so a literal duplicate id in the caller's list is never
+	// injected twice — the "already covered" check below is a snapshot taken
+	// once before the loop and never reflects blocks queued earlier in this
+	// same run.
+	const uniqueFrRefs = [...new Set(params.frRefs)];
 	const injectedIds: string[] = [];
 	const injectionBlocks: string[] = [];
-	for (const id of params.frRefs) {
+	for (const id of uniqueFrRefs) {
 		const body = extractSpecRequirementBodyById(params.specText, id);
 		if (body === null) continue; // unknown id — fail-open skip
 		if (normalizedAcceptance.includes(normalizeAcceptanceText(body))) {
@@ -1244,7 +1259,15 @@ export function injectSpecRequirementsIntoAcceptance(params: {
 		// trim(): extractSpecRequirementBodyById returns the RAW body (untrimmed,
 		// leading space after the bold span); the injected block reads cleaner
 		// trimmed, and the coverage compare normalizes whitespace anyway.
-		injectionBlocks.push(`${id}: ${body.trim()}`);
+		//
+		// NOT capped: the post-injection `checkAcceptanceCoversFrRefs` recheck
+		// requires the FULL, UNCAPPED normalized body to be a substring of the
+		// dispatch text ("after injection, every extractable id is covered by
+		// construction" — see this function's docblock). Capping here would
+		// break that invariant for any body longer than the cap, hard-blocking
+		// a dispatch that should have succeeded.
+		const trimmedBody = body.trim();
+		injectionBlocks.push(`${id}: ${trimmedBody}`);
 	}
 	if (injectedIds.length === 0) return null;
 	// Insert right after the ACCEPTANCE header line. A `FR-###:`/`SC-###:` line
@@ -3360,13 +3383,9 @@ export function createDelegationGateHook(
 			// Reuse the same broad text-field extraction other checks in this file
 			// use (see resolveDelegatedPlanTaskId / taskLooksLikePlanCritic) so the
 			// ACCEPTANCE line is found regardless of which arg carried the prompt.
-			const acceptancePromptText = [
-				args.prompt,
-				args.description,
-				args.task,
-				args.input,
-				args.message,
-			]
+			const acceptancePromptText = ACCEPTANCE_ARGS_FIELDS.map(
+				(field) => args[field],
+			)
 				.filter((value): value is string => typeof value === 'string')
 				.join('\n');
 			const acceptanceCheck =
@@ -3379,7 +3398,8 @@ export function createDelegationGateHook(
 				throw new Error(
 					`ACCEPTANCE_FIELD_REQUIRED: the ${targetAgent} delegation was blocked because ${detail}. ` +
 						`Every coder/reviewer dispatch MUST carry a non-empty ACCEPTANCE: line in its prompt — the mapped FR-###/SC-### ids ` +
-						`(the delegation gate injects their verbatim requirement text from .swarm/spec.md automatically) when the task maps to one or more ` +
+						`(for a single-task dispatch the delegation gate injects their verbatim requirement text from .swarm/spec.md automatically; ` +
+						`phase/final-council multi-task reviewer dispatches are NOT auto-injected and must paste the verbatim text yourself) when the task maps to one or more ` +
 						`spec requirements, or a one-line task-derived statement of what DONE looks like otherwise (see the ACCEPTANCE FIELD RESOLUTION ` +
 						`section of your system prompt and .swarm/spec.md). Add an ACCEPTANCE: line to the delegation prompt and ` +
 						`re-dispatch. Do NOT investigate the installed swarm plugin package (node_modules/opencode-swarm, ` +
@@ -3446,13 +3466,9 @@ export function createDelegationGateHook(
 							// Re-derive the acceptance text from the (possibly mutated)
 							// args so the coverage check validates what will actually be
 							// dispatched.
-							const effectiveAcceptanceText = [
-								args.prompt,
-								args.description,
-								args.task,
-								args.input,
-								args.message,
-							]
+							const effectiveAcceptanceText = ACCEPTANCE_ARGS_FIELDS.map(
+								(field) => args[field],
+							)
 								.filter((value): value is string => typeof value === 'string')
 								.join('\n');
 							coverageResult = checkAcceptanceCoversFrRefs({
@@ -3469,10 +3485,12 @@ export function createDelegationGateHook(
 			}
 			if (coverageResult && coverageResult.covered === false) {
 				// Defense-in-depth: after #2205's injection this throw is
-				// structurally unreachable in the toolBefore flow (injection
-				// covers every extractable id before the check runs), but the
-				// check + error contract stay wired for any future divergence
-				// between injection and validation.
+				// structurally unreachable in the toolBefore flow today
+				// (injection covers every extractable id before the check
+				// runs, using the same field list, id-resolution, and
+				// normalization logic as the recheck), but the check + error
+				// contract stay wired for any FUTURE divergence between
+				// injection and validation.
 				throw buildAcceptanceCoverageMismatchError({
 					targetAgent,
 					coverageTaskId,

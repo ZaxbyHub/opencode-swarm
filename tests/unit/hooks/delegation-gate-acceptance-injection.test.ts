@@ -35,6 +35,8 @@ const FR001_BODY =
 	'The widget SHALL render the configured label exactly once on mount.';
 const FR002_BODY =
 	'The task SHALL carry all mapped requirements when it maps to more than one.';
+const SC006_BODY =
+	'Given the multi-map task, when both requirements apply, then the acceptance covers both bodies.';
 
 const SPEC_MD = [
 	'# Spec 2205 fixture',
@@ -43,6 +45,10 @@ const SPEC_MD = [
 	'',
 	`- **FR-001 — Widget renders.** ${FR001_BODY}`,
 	`- **FR-002 — Multi map.** ${FR002_BODY}`,
+	'',
+	'## Success Criteria',
+	'',
+	`- **SC-006 (FR-002).** ${SC006_BODY}`,
 	'',
 ].join('\n');
 
@@ -91,6 +97,28 @@ describe('injectSpecRequirementsIntoAcceptance (unit, #2205)', () => {
 		);
 	});
 
+	it('is idempotent on a genuine round trip: a second call after a real injection is a no-op', () => {
+		const args: Record<string, unknown> = {
+			prompt: 'TASK: 1.1 implement it\nACCEPTANCE: FR-001',
+		};
+		const r1 = injectSpecRequirementsIntoAcceptance({
+			args,
+			frRefs: ['FR-001'],
+			specText: SPEC_MD,
+		});
+		const afterFirstCall = args.prompt;
+		expect(r1?.injectedIds).toEqual(['FR-001']);
+		expect(String(afterFirstCall)).toContain(`FR-001: ${FR001_BODY}`);
+
+		const r2 = injectSpecRequirementsIntoAcceptance({
+			args,
+			frRefs: ['FR-001'],
+			specText: SPEC_MD,
+		});
+		expect(r2).toBeNull();
+		expect(args.prompt).toBe(afterFirstCall);
+	});
+
 	it('injects only the uncovered ids of a multi-mapped task', () => {
 		const args: Record<string, unknown> = {
 			prompt: `TASK: 1.1 implement it\nACCEPTANCE: ${FR001_BODY}`,
@@ -102,6 +130,22 @@ describe('injectSpecRequirementsIntoAcceptance (unit, #2205)', () => {
 		});
 		expect(result?.injectedIds).toEqual(['FR-002']);
 		expect(args.prompt).toContain(`FR-002: ${FR002_BODY}`);
+		expect(String(args.prompt).match(new RegExp(FR001_BODY, 'g'))?.length).toBe(
+			1,
+		);
+	});
+
+	it('injects the uncovered id of a mixed FR+SC multi-mapped task', () => {
+		const args: Record<string, unknown> = {
+			prompt: `TASK: 1.1 implement it\nACCEPTANCE: ${FR001_BODY}`,
+		};
+		const result = injectSpecRequirementsIntoAcceptance({
+			args,
+			frRefs: ['FR-001', 'SC-006'],
+			specText: SPEC_MD,
+		});
+		expect(result?.injectedIds).toEqual(['SC-006']);
+		expect(args.prompt).toContain(`SC-006: ${SC006_BODY}`);
 		expect(String(args.prompt).match(new RegExp(FR001_BODY, 'g'))?.length).toBe(
 			1,
 		);
@@ -157,6 +201,26 @@ describe('injectSpecRequirementsIntoAcceptance (unit, #2205)', () => {
 				specText: SPEC_MD,
 			}),
 		).toBeNull();
+	});
+
+	// FB-001b: the ACCEPTANCE header pre-filter is case-insensitive
+	// (`/ACCEPTANCE:/i.test(value)`), matching the header-line regex used to
+	// locate the injection point. Pre-fix, the pre-filter was case-sensitive
+	// (`.includes('ACCEPTANCE:')`) — a lowercase/mixed-case header silently
+	// failed to inject, and the dispatch then hard-blocked downstream with
+	// ACCEPTANCE_FIELD_COVERAGE_MISMATCH (the un-injected id-only header never
+	// covers the requirement body).
+	it('injects into a lowercase "acceptance:" header, not only the uppercase form', () => {
+		const args: Record<string, unknown> = {
+			prompt: 'TASK: 1.1\nacceptance: FR-001',
+		};
+		const result = injectSpecRequirementsIntoAcceptance({
+			args,
+			frRefs: ['FR-001'],
+			specText: SPEC_MD,
+		});
+		expect(result?.injectedIds).toEqual(['FR-001']);
+		expect(String(args.prompt)).toContain(`FR-001: ${FR001_BODY}`);
 	});
 
 	it('handles a bare ACCEPTANCE header with content on following lines', () => {

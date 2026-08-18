@@ -7,6 +7,7 @@ The delegation gate now guarantees verbatim `FR-###`/`SC-###` requirement fideli
 Consequences:
 
 - The architect no longer needs to byte-for-byte copy requirement bodies into ACCEPTANCE. Listing the mapped ids (e.g. `ACCEPTANCE: FR-007, FR-012`) is sufficient; the architect/coder/reviewer prompt templates now say so. Pasting the full bodies yourself still works (no duplicate injection).
+- Exception: phase-council and final-council dispatches (multi-task) are NOT covered by automatic injection — the gate only resolves a single task id, so it can't tell which task's spec text belongs to a multi-task dossier. Those prompt templates still require the architect to paste the verbatim FR/SC text by hand.
 - Dispatches that previously failed with `ACCEPTANCE_FIELD_COVERAGE_MISMATCH` (id-only, paraphrased, partially-copied, or flattened acceptance text) now dispatch, with the verbatim text injected.
 - `ACCEPTANCE_FIELD_REQUIRED` (empty/missing ACCEPTANCE line) is still enforced fail-closed.
 - The `ACCEPTANCE_FIELD_COVERAGE_MISMATCH` error remains as defense-in-depth (built by the new exported `buildAcceptanceCoverageMismatchError`), though the gate-side injection makes it structurally unreachable in the normal flow.

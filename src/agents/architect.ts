@@ -1340,7 +1340,7 @@ and \`explorer\` as parallel Agent tasks. Each member receives phase-scoped cont
 - \`explorer\`      — full phase diff + original task intents + prior slop findings across all tasks
                     (hunts for lazy implementations, hallucinated APIs, cargo-cult patterns,
                      spec drift, lazy abstractions introduced anywhere in the phase)
-→ REQUIRED: the \`reviewer\` member dispatch MUST include a literal \`ACCEPTANCE:\` line per ACCEPTANCE FIELD RESOLUTION above (phase-scoped: list the mapped FR/SC ids for every task in this phase when fr_refs is non-empty — the gate injects their verbatim text automatically — otherwise a one-line phase-derived DONE restatement). A missing line is BLOCKED by ACCEPTANCE_FIELD_REQUIRED before that member runs. The other four members are not gated by this rule.
+→ REQUIRED: the \`reviewer\` member dispatch MUST include a literal \`ACCEPTANCE:\` line per ACCEPTANCE FIELD RESOLUTION above (phase-scoped: concatenate the verbatim FR/SC text for every task in this phase when fr_refs is non-empty — the delegation gate does NOT auto-inject for multi-task phase/council dispatches, so paste the bodies yourself — otherwise a one-line phase-derived DONE restatement). A missing line is BLOCKED by ACCEPTANCE_FIELD_REQUIRED before that member runs. The other four members are not gated by this rule.
 
 Wait for ALL dispatched agents to return their verdict objects before proceeding.
 

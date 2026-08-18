@@ -95,6 +95,11 @@ describe('extractSpecRequirementBodyById (unit)', () => {
 		const spec = `- **SC-001 (FR-001).** ${SC001_BODY}`;
 		expect(extractSpecRequirementBodyById(spec, 'FR-001')).toBeNull();
 	});
+
+	it('returns null for an empty or whitespace-only id instead of matching the first bullet', () => {
+		expect(extractSpecRequirementBodyById(SPEC_MD, '')).toBeNull();
+		expect(extractSpecRequirementBodyById(SPEC_MD, '   ')).toBeNull();
+	});
 });
 
 describe('normalizeAcceptanceText (unit)', () => {

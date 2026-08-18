@@ -32,10 +32,7 @@ import {
 	extractSpecRequirementBodyById,
 } from '../../../src/hooks/delegation-gate';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
-import {
-	recordPlanCriticApproval,
-	seedAuthoritativeTaskWorkflow,
-} from './_delegation-gate-helpers';
+import { recordPlanCriticApproval } from './_delegation-gate-helpers';
 
 // ---------------------------------------------------------------------------
 // Fixture bodies / spec text (independent of the sibling file's fixture, per
