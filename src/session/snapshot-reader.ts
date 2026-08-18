@@ -357,6 +357,17 @@ export async function readSnapshot(
  * Rehydrate swarmState from a SnapshotData object.
  * Clears existing maps first, then populates from snapshot.
  * Does NOT touch activeToolCalls or pendingEvents (remain at defaults).
+ *
+ * activeAgent and delegationChains are restored only for session IDs that are
+ * actually restored into agentSessions. Snapshots written before ghost-entry
+ * eviction existed can carry far more activeAgent entries than agentSessions
+ * (sessions were evicted but their satellite entries never were); restoring
+ * those wholesale would resurrect the ghosts into memory and re-serialize them
+ * into every subsequent snapshot forever. Rehydration runs at plugin init,
+ * before any turn is in flight; a session that resumes afterwards gets its
+ * entry re-established by chat.message (delegation-tracker), and until then
+ * tool-path readers fall back to ORCHESTRATOR_NAME — the same treatment a
+ * fresh process gives an unknown session.
  */
 export async function rehydrateState(
 	snapshot: SnapshotData,
@@ -380,20 +391,6 @@ export async function rehydrateState(
 	if (snapshot.toolAggregates) {
 		for (const [key, value] of Object.entries(snapshot.toolAggregates)) {
 			swarmState.toolAggregates.set(key, value);
-		}
-	}
-
-	// Populate activeAgent
-	if (snapshot.activeAgent) {
-		for (const [key, value] of Object.entries(snapshot.activeAgent)) {
-			swarmState.activeAgent.set(key, value);
-		}
-	}
-
-	// Populate delegationChains
-	if (snapshot.delegationChains) {
-		for (const [key, value] of Object.entries(snapshot.delegationChains)) {
-			swarmState.delegationChains.set(key, value);
 		}
 	}
 
@@ -491,6 +488,29 @@ export async function rehydrateState(
 			}
 
 			swarmState.agentSessions.set(sessionId, session);
+		}
+	}
+
+	// Populate activeAgent — only for sessions that were actually restored
+	// above. Entries keyed by any other session ID are ghosts (their session
+	// was evicted, ended, or rejected as malformed) and must not be
+	// resurrected: nothing would ever evict them again, and the snapshot
+	// writer would re-serialize them on every tool call forever.
+	if (snapshot.activeAgent) {
+		for (const [key, value] of Object.entries(snapshot.activeAgent)) {
+			if (swarmState.agentSessions.has(key)) {
+				swarmState.activeAgent.set(key, value);
+			}
+		}
+	}
+
+	// Populate delegationChains — same session-keyed ghost filter as
+	// activeAgent above.
+	if (snapshot.delegationChains) {
+		for (const [key, value] of Object.entries(snapshot.delegationChains)) {
+			if (swarmState.agentSessions.has(key)) {
+				swarmState.delegationChains.set(key, value);
+			}
 		}
 	}
 }
