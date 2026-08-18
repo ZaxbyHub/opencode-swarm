@@ -1497,10 +1497,13 @@ export async function runPreCheckBatch(
 				}
 			}
 			// Verdict is already correctly set by sastScan — do not override.
+			// (#2210 note: a result carrying `error` was already consumed by the
+			// `if (sastResult.error)` branch above, so this branch is by
+			// construction the findings-driven case.)
 			if (sastResult.verdict === 'fail') {
 				gatesPassed = false;
 				warn(
-					`pre_check_batch: SAST scan found new findings above threshold - GATE FAILED`,
+					'pre_check_batch: SAST scan found new findings above threshold - GATE FAILED',
 				);
 			}
 		} else if (sastResult.verdict === 'fail') {
@@ -1537,7 +1540,9 @@ export async function runPreCheckBatch(
 				}
 			} else {
 				// SAST failed but no HIGH/CRITICAL findings (lower severity only)
-				// Original behavior: fail the gate
+				// Original behavior: fail the gate. (#2210 note: a result carrying
+				// `error` was already consumed by the `if (sastResult.error)`
+				// branch above.)
 				gatesPassed = false;
 				warn('pre_check_batch: SAST scan found vulnerabilities - GATE FAILED');
 			}
