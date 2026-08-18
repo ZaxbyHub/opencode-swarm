@@ -90,6 +90,8 @@ import type {
 import * as logger from '../utils/logger';
 import { isStrictTaskId } from '../validation/task-id';
 import {
+	abortCoderSettlement,
+	abortCoderSettlementIfDoomed,
 	beginCoderSettlement,
 	completeCoderSettlementCleanup,
 	recordCoderMergeProvenance,
@@ -2880,6 +2882,7 @@ export function createDelegationGateHook(
 	}) => Promise<void>;
 	sessionEnded: (sessionID: string, includeOwnedChildren?: boolean) => void;
 	backgroundCompletionClaimed: (record: BackgroundDelegationRecord) => void;
+	abortDeniedSettlementForCall: (callID: string) => Promise<void>;
 } {
 	// Initialize durable worktree merge-back status before any coders dispatch
 	initDurableStatusPath(directory);
@@ -2906,6 +2909,34 @@ export function createDelegationGateHook(
 		string,
 		BackgroundTaskChangeContext
 	>();
+	// Issue #2214: callID → the settlement this dispatch durably began. Used by
+	// (a) the toolBefore denial rollback when a LATER fail-closed hook rejects
+	// the Task call after the delegation gate already wrote the DISPATCHED WAL
+	// (no toolAfter will ever fire for a denied call), and (b) the toolAfter
+	// coder evidence block when resolveEvidenceTaskId cannot recover the task
+	// id the toolBefore scope preflight resolved. FIFO-capped like its siblings.
+	const begunCoderSettlementsByCallID = new Map<
+		string,
+		{ taskId: string | null; transitionId: string }
+	>();
+	const rememberBegunCoderSettlement = (
+		callID: string,
+		taskId: string | null,
+		transitionId: string,
+	): void => {
+		if (
+			!begunCoderSettlementsByCallID.has(callID) &&
+			begunCoderSettlementsByCallID.size >= MAX_PENDING_CODER_CHANGE_CONTEXTS
+		) {
+			// Fail closed like the sibling callID maps (PRR-002): silent FIFO
+			// eviction here would drop a denial-rollback entry and could
+			// re-introduce the #2214 DISPATCHED wedge under load.
+			throw new Error(
+				`BEGUN_SETTLEMENT_CONTEXT_CAPACITY: refusing coder dispatch because ${MAX_PENDING_CODER_CHANGE_CONTEXTS} live begun settlements are already tracked`,
+			);
+		}
+		begunCoderSettlementsByCallID.set(callID, { taskId, transitionId });
+	};
 	const backgroundCoderReservationByCallID = new Map<
 		string,
 		BackgroundCoderReservation
@@ -3148,6 +3179,24 @@ export function createDelegationGateHook(
 				`CODER_SETTLEMENT_CONTEXT_MISSING: no durable baseline or generation for task ${taskId}`,
 			);
 		}
+		// Issue #2214: a dirty launch baseline can never support mutation
+		// attribution — changedFilesSinceSnapshot fails closed for any
+		// pre-existing uncommitted/untracked path. Enforce the clean-baseline
+		// contract at dispatch time, BEFORE the coder runs and before the
+		// settlement WAL is written, so the dispatch fails fast with an
+		// actionable message instead of wedging the task at DISPATCHED after
+		// the coder's work is done.
+		const baselineDirtyFiles = Array.isArray(context.baseline.changedFiles)
+			? context.baseline.changedFiles
+			: [];
+		if (baselineDirtyFiles.length > 0) {
+			const sample = baselineDirtyFiles.slice(0, 5).join(', ');
+			throw new Error(
+				`CODER_SETTLEMENT_CLEAN_BASELINE_REQUIRED: ${String(baselineDirtyFiles.length)} uncommitted/untracked change(s) present at dispatch (${sample}${baselineDirtyFiles.length > 5 ? ', …' : ''}). ` +
+					'Commit or stash them before dispatching a coder — exact-task settlement cannot attribute coder mutations from a dirty launch baseline. ' +
+					`Task ${taskId} was not dispatched and no settlement state was created.`,
+			);
+		}
 		await beginCoderSettlement({
 			directory,
 			taskId,
@@ -3157,6 +3206,7 @@ export function createDelegationGateHook(
 			context,
 			...(worktree ? { worktree } : {}),
 		});
+		rememberBegunCoderSettlement(input.callID, taskId, `coder:${input.callID}`);
 	};
 	const shouldRememberCoderTaskChangeContext = (
 		_declaredFiles: string[] | null,
@@ -3168,6 +3218,7 @@ export function createDelegationGateHook(
 		const callID = record.callID;
 		clearPublishedScopeBindings(callID);
 		clearCoderTaskChangeContext(callID);
+		begunCoderSettlementsByCallID.delete(callID);
 		stageBDispatchGenerationsByCallID.delete(callID);
 		gateDispatchPrimaryTaskByCallID.delete(callID);
 		stageBDispatchContextByCallID.delete(callID);
@@ -3207,6 +3258,8 @@ export function createDelegationGateHook(
 			taskMetadata,
 			sessionEnded,
 			backgroundCompletionClaimed,
+			// Disabled gate never begins a settlement; nothing to roll back.
+			abortDeniedSettlementForCall: async (): Promise<void> => {},
 		};
 	}
 
@@ -4986,13 +5039,28 @@ export function createDelegationGateHook(
 				// re-throw unexpected errors (EPERM, EBUSY on Windows) which previously
 				// escaped outside the evidence try-catch and propagated to safeHook.
 				if (typeof subagentType === 'string') {
+					let coderSettleTaskId: string | null = null;
 					try {
 						const mergedArgs = { ...(storedArgs ?? {}), ...directArgs };
-						const evidenceTaskId = await resolveEvidenceTaskId(
+						let evidenceTaskId = await resolveEvidenceTaskId(
 							mergedArgs,
 							session,
 							directory,
 						);
+						// Issue #2214 belt: the toolBefore scope preflight may have
+						// resolved the task via sources resolveEvidenceTaskId lacks
+						// (e.g. the declare_scope pending-scope map). For a coder
+						// dispatch whose settlement this call durably began, trust the
+						// begun-settlement record instead of silently skipping
+						// finalization — a skipped settle wedges the DISPATCHED WAL.
+						if (
+							!evidenceTaskId &&
+							stripKnownSwarmPrefix(subagentType) === 'coder'
+						) {
+							const begun = begunCoderSettlementsByCallID.get(input.callID);
+							if (begun?.taskId) evidenceTaskId = begun.taskId;
+						}
+						coderSettleTaskId = evidenceTaskId;
 						if (evidenceTaskId) {
 							const turbo = hasActiveTurboMode(input.sessionID);
 							const gateAgents = [
@@ -5149,19 +5217,78 @@ export function createDelegationGateHook(
 							`[delegation-gate] evidence recording failed: ${err instanceof Error ? err.message : String(err)}`,
 						);
 						if (normalizedAgent === 'coder') {
-							pushAdvisory(
-								session,
-								`CODER_SETTLEMENT_DURABILITY_FAILURE: task output remains fenced until accepted-mutation evidence for call ${input.callID} is recovered.`,
-							);
+							// Issue #2214: a coder settle failure that never reached
+							// settleCoderDispatch leaves the DISPATCHED WAL with its
+							// in-memory ownership key retained — same-process recovery
+							// would throw CODER_DISPATCH_IN_PROGRESS forever. Release the
+							// key (idempotent) so recoverCoderSettlement can retry, and
+							// abort the WAL outright when its recorded launch baseline
+							// was structurally attribution-doomed (non-git or dirty at
+							// dispatch) — that settlement can never complete.
+							let terminalAbort = false;
+							if (coderSettleTaskId && !coderSettlementCommitted) {
+								releaseCoderDispatchOwnership(
+									directory,
+									coderSettleTaskId,
+									`coder:${input.callID}`,
+								);
+								try {
+									const abortOutcome = await abortCoderSettlementIfDoomed({
+										directory,
+										taskId: coderSettleTaskId,
+										transitionId: `coder:${input.callID}`,
+									});
+									terminalAbort =
+										abortOutcome === 'aborted' ||
+										abortOutcome === 'already-aborted';
+								} catch (abortErr) {
+									logger.warn(
+										`[delegation-gate] doomed settlement abort failed for ${coderSettleTaskId}: ${
+											abortErr instanceof Error
+												? abortErr.message
+												: String(abortErr)
+										}`,
+									);
+								}
+								if (terminalAbort) {
+									// PRR-001: the dispatch is terminally settled; its
+									// change context is exhausted (recovery reads the WAL).
+									clearCoderTaskChangeContext(input.callID);
+								}
+							}
+							if (terminalAbort) {
+								pushAdvisory(
+									session,
+									`CODER_SETTLEMENT_ABORTED: task ${coderSettleTaskId} dispatch ${input.callID} was settled as ABORTED — its launch baseline was dirty or had no git history, so the coder's changes cannot be attributed. Reconcile the workspace (commit, stash, or discard the coder's output), then repair the task with update_task_status and re-dispatch from a clean tree.`,
+								);
+							} else {
+								pushAdvisory(
+									session,
+									`CODER_SETTLEMENT_DURABILITY_FAILURE: task output remains fenced until accepted-mutation evidence for call ${input.callID} is recovered.`,
+								);
+							}
 							throw err;
 						}
 					} finally {
-						if (
-							stripKnownSwarmPrefix(subagentType) === 'coder' &&
-							coderSettlementCommitted
-						) {
-							clearCoderTaskChangeContext(input.callID);
-							clearPublishedScopeBindings(input.callID);
+						if (stripKnownSwarmPrefix(subagentType) === 'coder') {
+							if (coderSettlementCommitted) {
+								clearCoderTaskChangeContext(input.callID);
+								clearPublishedScopeBindings(input.callID);
+							}
+							// PRR-001: both purposes of the begun-settlement entry —
+							// denial rollback (a denied call never reaches toolAfter)
+							// and the task-id fallback above — are exhausted once
+							// toolAfter has run for this callID.
+							begunCoderSettlementsByCallID.delete(input.callID);
+							// The coder settle failure above RETHROWS, so the post-block
+							// cleanup (stored args, Stage B generation bindings) never
+							// runs on that path — drain it here instead. Idempotent
+							// with the success-path deletes below.
+							if (!coderSettlementCommitted) {
+								stageBDispatchGenerationsByCallID.delete(input.callID);
+								gateDispatchPrimaryTaskByCallID.delete(input.callID);
+								deleteStoredInputArgs(input.callID);
+							}
 						}
 					}
 				}
@@ -5654,5 +5781,54 @@ ${warningLines.join('\n')}`;
 		taskMetadata,
 		sessionEnded,
 		backgroundCompletionClaimed,
+		/**
+		 * Issue #2214: roll back a settlement this call durably began when a
+		 * LATER fail-closed hook denies the Task call (the delegation gate runs
+		 * at step 4; full-auto/knowledge/skill gates at steps 5-8 can still
+		 * throw). A denied call never fires toolAfter, so without this rollback
+		 * the DISPATCHED WAL and its in-memory ownership key wedge the task
+		 * until a process restart. Never throws — the denial itself propagates.
+		 *
+		 * F-002 (PR #2223 review): cleanup runs in a FINALLY so every failure
+		 * class (settlement-lock contention, WAL_MISSING/REPLACED/UNREADABLE,
+		 * write errors) still releases the in-memory ownership key and the
+		 * callID bookkeeping — an abort that throws must not leave a louder
+		 * in-process CODER_DISPATCH_IN_PROGRESS wedge behind.
+		 */
+		abortDeniedSettlementForCall: async (callID: string): Promise<void> => {
+			const begun = begunCoderSettlementsByCallID.get(callID);
+			if (!begun?.taskId) return;
+			try {
+				await abortCoderSettlement({
+					directory,
+					taskId: begun.taskId,
+					transitionId: begun.transitionId,
+					reason:
+						'dispatch denied by a fail-closed gate after settlement began',
+				});
+			} catch (error) {
+				logger.criticalWarn(
+					`[delegation-gate] denied-dispatch settlement rollback failed for call ${callID} (task ${begun.taskId}): ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				);
+			} finally {
+				// Unconditional (idempotent) cleanup, mirroring
+				// backgroundCompletionClaimed: a denied call never reaches the
+				// toolAfter cleanup path, so this is the only drain for these
+				// entries.
+				releaseCoderDispatchOwnership(
+					directory,
+					begun.taskId,
+					begun.transitionId,
+				);
+				begunCoderSettlementsByCallID.delete(callID);
+				clearCoderTaskChangeContext(callID);
+				clearPublishedScopeBindings(callID);
+				stageBDispatchGenerationsByCallID.delete(callID);
+				gateDispatchPrimaryTaskByCallID.delete(callID);
+				deleteStoredInputArgs(callID);
+			}
+		},
 	};
 }

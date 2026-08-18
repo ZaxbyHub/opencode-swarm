@@ -22,6 +22,7 @@ import {
 } from '../../../src/hooks/delegation-gate/worktree-provisioning-owner';
 import {
 	_internals,
+	abortCoderSettlement,
 	beginCoderSettlement,
 	recordCoderMergeProvenance,
 	recoverCoderSettlement,
@@ -353,5 +354,62 @@ describe('issue #2098 coder settlement isolated-worktree recovery', () => {
 				fixture.callID,
 			]);
 		}
+	});
+
+	// F-001 (PR #2223 review): the first-ever ABORTED writer must not leak the
+	// worktree. recoverCoderSettlement short-circuits on ABORTED before its
+	// worktree branch, so abortCoderSettlement owns terminal cleanup — and the
+	// provisioning-owner marker must go too, or the init orphan sweep's
+	// marker/liveness mutual-protection loop can never reclaim the lane.
+	test('aborting a worktree-carrying settlement cleans the worktree, branch, and owner marker', async () => {
+		const fixture = createFixture('abort-cleanup');
+		await begin(fixture);
+		expect(fs.existsSync(fixture.worktree)).toBe(true);
+		expect(branchExists(fixture)).toBe(true);
+
+		const outcome = await abortCoderSettlement({
+			directory: fixture.repo,
+			taskId: TASK_ID,
+			transitionId: fixture.transitionId,
+			reason: 'denied dispatch rollback probe',
+		});
+		expect(outcome).toBe('aborted');
+		expect(fs.existsSync(fixture.worktree)).toBe(false);
+		expect(branchExists(fixture)).toBe(false);
+		expect(scanWorktreeProvisioningOwnersForRecovery(fixture.repo)).toEqual({
+			status: 'ok',
+			owners: [],
+		});
+		expect(readWal(fixture)).toMatchObject({
+			state: 'ABORTED',
+			cleanupComplete: true,
+			abortReason: 'denied dispatch rollback probe',
+		});
+		// Recovery stays a stable no-op on the terminal state.
+		expect(await recoverCoderSettlement(fixture.repo, TASK_ID)).toBeNull();
+	});
+
+	// F-001 review follow-up: pin the positional invariant that a
+	// worktree-carrying DISPATCHED WAL with a DOOMED (hand-corrupted) baseline
+	// fails closed in the worktree branch (CODER_SETTLEMENT_RECOVERY_UNCERTAIN)
+	// and can NEVER reach the non-worktree doomed-abort, which does not run
+	// worktree cleanup. The abort entry point (tested above) owns that.
+	test('a worktree WAL with a doomed baseline fails closed in the worktree branch, never the doomed-abort', async () => {
+		const fixture = createFixture('doomed-worktree');
+		await begin(fixture);
+		const wal = readWal(fixture) as {
+			context: { baseline: { changedFiles: string[] } };
+		};
+		wal.context.baseline.changedFiles = ['src/untracked-wip.ts'];
+		fs.writeFileSync(walPath(fixture), `${JSON.stringify(wal, null, 2)}\n`);
+		_internals.liveDispatches.clear();
+
+		await expect(recoverCoderSettlement(fixture.repo, TASK_ID)).rejects.toThrow(
+			'CODER_SETTLEMENT_RECOVERY_UNCERTAIN: isolated task',
+		);
+		// Fail-closed: the WAL was NOT aborted (no silent worktree abandonment)
+		// and the worktree is still there for manual reconciliation.
+		expect(readWal(fixture)).toMatchObject({ state: 'DISPATCHED' });
+		expect(fs.existsSync(fixture.worktree)).toBe(true);
 	});
 });

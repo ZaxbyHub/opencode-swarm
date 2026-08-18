@@ -127,4 +127,33 @@ describe('gate-denial tracker wiring in src/index.ts', () => {
 			/import \{[^}]*recordDeniedToolCall[^}]*\} from '\.\/hooks\/trajectory-logger';/s,
 		);
 	});
+
+	// Issue #2214 denial rollback (F-003, PR #2223 review): a denied Task call
+	// never fires toolAfter, so the catch must roll back any settlement the
+	// delegation gate durably began. These assertions pin the wiring the same
+	// way the tracker assertions above do — the runtime behavior is covered by
+	// tests/unit/workflow/coder-settlement-2214*.test.ts against the hook
+	// object; this guard proves src/index.ts actually calls it.
+	test('the denial catch rolls back a begun settlement for denied Task calls', () => {
+		const catchIdx = toolBeforeBlock.search(/\}\s*catch\s*\(err\)\s*\{/);
+		const catchBody = toolBeforeBlock.slice(catchIdx);
+
+		// The rollback must fire only for the fail-closed region's denials and
+		// only for Task calls...
+		expect(catchBody).toMatch(
+			/if\s*\(\s*!failClosedRegionCompleted\s*&&\s*\(\s*normalizeToolName\(input\.tool\) === 'Task'\s*\|\|\s*normalizeToolName\(input\.tool\) === 'task'\s*\)\s*\)\s*\{/,
+		);
+		// ...and must call the delegation gate's rollback entry point from
+		// inside its own try/catch so the original denial still propagates, with
+		// the rethrow landing AFTER the rollback attempt.
+		expect(catchBody).toMatch(
+			/try\s*\{\s*await delegationGateHooks\.abortDeniedSettlementForCall\(\s*input\.callID,?\s*\);?\s*\}\s*catch\s*\{/,
+		);
+		const callIdx = catchBody.indexOf(
+			'delegationGateHooks.abortDeniedSettlementForCall(',
+		);
+		expect(callIdx).toBeGreaterThan(0);
+		const throwIdx = catchBody.indexOf('throw err;', callIdx);
+		expect(throwIdx).toBeGreaterThan(callIdx);
+	});
 });
