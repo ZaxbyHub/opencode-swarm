@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
@@ -351,6 +351,55 @@ describe('gate-evidence workflow transitions', () => {
 		const after = readTaskEvidenceRaw(tempDir, '1.11')?.workflow;
 		expect(after?.state).toBe('complete');
 		expect(after?.forcedCompletion).toBe(true);
+	});
+
+	it('reads pre-forcedCompletion evidence written before this change as not-forced', async () => {
+		// Legacy fixture: an evidence.json exactly as the pre-PR writer emitted it,
+		// with NO forcedCompletion key at all. Written raw (never through
+		// transitionTaskWorkflowEvidence) so a forward-compat regression in the
+		// reader cannot hide behind the new writer — same technique as
+		// createLegacyLedger in tests/unit/plan/ledger-plan-epoch-adoption.test.ts.
+		mkdirSync(path.join(tempDir, '.swarm', 'evidence'), { recursive: true });
+		writeFileSync(
+			path.join(tempDir, '.swarm', 'evidence', '1.12.json'),
+			JSON.stringify({
+				taskId: '1.12',
+				required_gates: ['reviewer', 'test_engineer'],
+				gates: {
+					reviewer: {
+						sessionId: 'ses_legacy',
+						timestamp: '2026-01-01T00:00:00.000Z',
+						agent: 'reviewer',
+					},
+				},
+				workflow: {
+					schema: 'exact-task-v1',
+					generation: 3,
+					state: 'complete',
+					retryCount: 0,
+					retryHistory: [],
+					retryEpoch: 0,
+					lastOutcome: 'task_completed',
+					lastTransitionId: 'legacy-transition',
+					updatedAt: '2026-01-01T00:00:00.000Z',
+				},
+			}),
+			'utf8',
+		);
+
+		const legacy = readTaskEvidenceRaw(tempDir, '1.12');
+		expect(legacy?.workflow.state).toBe('complete');
+		expect(legacy?.workflow.forcedCompletion).toBeUndefined();
+
+		// And a later non-exempt completion must not invent the flag.
+		await transitionTaskWorkflowEvidence(tempDir, '1.12', {
+			type: 'task_completed',
+			expectedGeneration: 3,
+			transitionId: 'post-legacy',
+		});
+		expect(
+			readTaskEvidenceRaw(tempDir, '1.12')?.workflow.forcedCompletion,
+		).toBeUndefined();
 	});
 
 	it('keeps a single evidence lock across a caller-managed transaction callback', async () => {

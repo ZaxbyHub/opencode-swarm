@@ -74,6 +74,29 @@ async function applyTerminalEvidence(
 /** Narrow dependency-injection seam for crash-window failure tests. */
 export const _internals = { applyTerminalEvidence };
 
+/**
+ * Terminal transitions persist plan.json before exact-task evidence, so a throw
+ * here leaves the deliberate, recoverable PREPARED window: plan forwarded,
+ * evidence still old, WAL still PREPARED. The WAL fences every other evidence
+ * write for the task until recovery finishes it, so the state is safe — but a
+ * persistently failing evidence write otherwise surfaces only the raw cause.
+ * Name the task, the WAL, and the way out.
+ */
+async function applyTerminalEvidenceOrExplain(
+	transaction: Parameters<Parameters<typeof withTaskEvidenceTransaction>[3]>[0],
+	wal: TaskTerminalWal,
+	walPath: string,
+): Promise<TaskEvidence> {
+	try {
+		return await _internals.applyTerminalEvidence(transaction, wal);
+	} catch (error) {
+		throw new Error(
+			`TASK_TERMINAL_EVIDENCE_WRITE_FAILED: transition ${wal.transitionId} for task ${wal.taskId} forwarded plan.json to ${wal.newPlanStatus} but could not persist ${wal.newWorkflowState} evidence; ${walPath} stays PREPARED and fences every other evidence write for this task. Re-run task-terminal recovery for task ${wal.taskId} once the underlying write can succeed; if it fails persistently, repair the evidence file or the WAL before any further work on this task. Cause: ${error instanceof Error ? error.message : String(error)}`,
+			{ cause: error },
+		);
+	}
+}
+
 async function recoverPreparedTaskTerminalWithPlanLock(
 	directory: string,
 	taskId: string,
@@ -145,7 +168,7 @@ async function recoverPreparedTaskTerminalWithPlanLock(
 			}
 			const nextEvidence = evidenceAlreadyTerminal
 				? (evidence as TaskEvidence)
-				: await _internals.applyTerminalEvidence(transaction, wal);
+				: await applyTerminalEvidenceOrExplain(transaction, wal, walPath);
 			await writeWal(walPath, { ...wal, state: 'COMMITTED' });
 			return {
 				plan,
@@ -159,10 +182,13 @@ async function recoverPreparedTaskTerminalWithPlanLock(
 }
 
 /**
- * Lazily close the only recoverable terminal crash window: the plan was
- * persisted to completed/blocked after PREPARED, but exact-task evidence was
- * not. A PREPARED record whose plan and evidence are both still old is safely
- * aborted rather than executing an abandoned status request.
+ * Lazily close a recoverable terminal crash window: the WAL is PREPARED but the
+ * plan/evidence pair it describes has not settled. A v1 record whose plan and
+ * evidence are both still old is safely aborted rather than executing an
+ * abandoned completed/blocked request. A v2 (close) record is instead
+ * force-forwarded even from old plan and old evidence — its plan-epoch identity
+ * is re-verified first, and abandoning it would leave a task the caller already
+ * closed silently open.
  */
 export async function recoverPreparedTaskTerminal(
 	directory: string,
@@ -374,9 +400,10 @@ export async function commitTaskTerminalUnderPlanLock<TPlan>(options: {
 						};
 			await writeWal(walPath, wal);
 			const plan = await options.updatePlan(terminal.targetStatus);
-			const nextEvidence = await _internals.applyTerminalEvidence(
+			const nextEvidence = await applyTerminalEvidenceOrExplain(
 				transaction,
 				wal,
+				walPath,
 			);
 			await writeWal(walPath, { ...wal, state: 'COMMITTED' });
 			return {

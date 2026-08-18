@@ -202,6 +202,42 @@ describe('issue #2098 close terminal v2 recovery', () => {
 		).toBe('closed');
 	});
 
+	test('leaves the recoverable PREPARED window and names the recovery action when evidence write fails after plan force-forward', async () => {
+		terminalInternals.applyTerminalEvidence = async () => {
+			throw new Error('injected evidence write failure');
+		};
+
+		await expect(
+			recoverPreparedTaskTerminal(directory, '1.1', 'close-recovery-test'),
+		).rejects.toThrow(
+			/TASK_TERMINAL_EVIDENCE_WRITE_FAILED[\s\S]*1\.1[\s\S]*injected evidence write failure/,
+		);
+
+		// The window is deliberate: plan is forwarded, evidence is not, WAL fences.
+		expect(
+			(await loadPlanJsonOnly(directory))?.phases[0]?.tasks[0]?.status,
+		).toBe('closed');
+		expect(readTaskEvidenceRaw(directory, '1.1')?.workflow?.state).toBe(
+			'tests_run',
+		);
+		expect(JSON.parse(fs.readFileSync(walPath, 'utf8')).state).toBe('PREPARED');
+
+		// …and it self-heals once the underlying write succeeds.
+		terminalInternals.applyTerminalEvidence = originalApply;
+		const recovered = await recoverPreparedTaskTerminal(
+			directory,
+			'1.1',
+			'close-recovery-test',
+		);
+		expect(recovered?.targetStatus).toBe('closed');
+		expect(readTaskEvidenceRaw(directory, '1.1')?.workflow?.state).toBe(
+			'closed',
+		);
+		expect(JSON.parse(fs.readFileSync(walPath, 'utf8')).state).toBe(
+			'COMMITTED',
+		);
+	});
+
 	test('rejects a valid foreign plan epoch without mutating plan, ledger, or evidence', async () => {
 		await writeWorkflowWalFile('task-terminal', walPath, {
 			...wal,

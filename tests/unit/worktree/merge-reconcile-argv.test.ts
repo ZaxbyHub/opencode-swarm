@@ -64,4 +64,35 @@ describe('reconcileLandedMerge git argv shape', () => {
 		expect(mergeBaseCall).not.toContain('--');
 		expect(mergeBaseCall?.at(-1)).toBe('HEAD');
 	});
+
+	test('rejects provenance whose head values are not full git object ids', async () => {
+		const calls = captureArgv(0);
+
+		const ancestry = await reconcileLandedMerge('/tmp/primary', {
+			operationId: 'op-1',
+			sourceHead: '--output=/tmp/pwn',
+			targetHeadBefore: OTHER40,
+			branchName: 'swarm/lane-0',
+			strategy: 'merge',
+		});
+		const trailer = await reconcileLandedMerge('/tmp/primary', {
+			operationId: 'op-1',
+			sourceHead: HEX40,
+			targetHeadBefore: '-e',
+			branchName: 'swarm/lane-0',
+			strategy: 'cherry-pick',
+		});
+
+		expect(ancestry).toEqual({
+			landed: false,
+			error: 'Malformed merge operation provenance',
+		});
+		expect(trailer).toEqual({
+			landed: false,
+			error: 'Malformed merge operation provenance',
+		});
+		// The guard must fail closed before argv is built: a leading-dash head would
+		// otherwise be option-parsed by git even though `--` guards the pathspec side.
+		expect(calls.length).toBe(0);
+	});
 });

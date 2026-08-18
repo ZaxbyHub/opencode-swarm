@@ -32,13 +32,9 @@ async function recoverPreparedTaskRepairWithPlanLock(
 > | null> {
 	const walPath = validateSwarmPath(directory, `task-repairs/${taskId}.json`);
 	const eventsPath = validateSwarmPath(directory, 'events.jsonl');
-	const observedWal = await readWal(walPath, taskId);
-	if (observedWal === null) return null;
-	if (observedWal.state === 'ABORTED') return null;
-	if (observedWal.state === 'COMMITTED') {
-		await ensureAuditEvent(directory, eventsPath, observedWal);
-		return null;
-	}
+	// Single read: this helper always runs with plan.json already locked by the
+	// caller, so the pre-lock observe half of the observe-then-reread idiom
+	// (see recoverPreparedTaskRepair) has no meaning here.
 	const wal = await readWal(walPath, taskId);
 	if (wal === null) return null;
 	if (wal.state === 'ABORTED') return null;

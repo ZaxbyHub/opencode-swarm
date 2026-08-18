@@ -727,22 +727,46 @@ export async function initLedger(
  * corruption being surfaced.
  *
  * This is defense in depth for the exported, directly-callable surface
- * (`readPlanEpochIdentity`, `getOrAdoptPlanEpochUnderLock`), not a live behavior
- * change on any current call path: every in-tree route is already fenced by an
- * earlier `replayFromLedgerWithStatus` check that throws first —
+ * (`readPlanEpochIdentity`, `getOrAdoptPlanEpochUnderLock`). For the
+ * MALFORMED-LINE case it is not a live behavior change on any current call
+ * path: every in-tree route is already fenced by an earlier
+ * `replayFromLedgerWithStatus` check that throws first —
  * `recoverPreparedTaskTerminal` (`TASK_TERMINAL_LEDGER_TRUNCATED`), which is the
  * shared callee of both `update_task_status` and the delegation-gate `toolBefore`
  * hook, and `loadAuthoritativePlan` in `close-terminal.ts`
  * (`CLOSE_TERMINAL_LEDGER_TRUNCATED`). The two checks share one predicate, since
  * both readers go through `readLedgerEventsWithIntegrity`, which flags the first
- * malformed line anywhere in the file rather than only a trailing suffix. These
- * helpers are exported and must not depend on future callers repeating that
- * discipline.
+ * malformed line anywhere in the file rather than only a trailing suffix.
+ *
+ * That fence does NOT cover the second failure mode. When the ledger file
+ * exists but cannot be READ (EACCES, EIO, …), `readLedgerEventsWithIntegrity`
+ * returns `truncated: false` with zero events — byte-identical to an absent
+ * ledger — so `replayFromLedgerWithStatus` yields `plan: null` and those callers
+ * silently fall back to the derived plan.json projection. This reader therefore
+ * passes `failClosedOnReadError: true` and surfaces `PLAN_LEDGER_UNREADABLE`
+ * rather than mislabeling an unreadable ledger as an empty one.
+ *
+ * The three terminal-recovery `replayFromLedgerWithStatus` callers
+ * (`close-terminal.ts`, `task-terminal.ts`, `task-repair.ts`) do NOT yet opt in,
+ * and that is an accepted residual rather than a planned follow-up: on an
+ * unreadable ledger they still fall back to the derived plan.json projection
+ * without surfacing an error. Opting them in is a wider behavior change than
+ * this reader, because `replayFromLedgerWithStatus` feeds `replayFromLedger`,
+ * whose `manager.ts` and `phase-complete.ts` callers deliberately treat a null
+ * replay as "no ledger yet, use plan.json" on ordinary save_plan/phase_complete
+ * paths — several outside any recovery `try` — so a blanket opt-in would turn a
+ * transient EIO into a hard failure of the primary planning tools. Do not widen
+ * this without re-doing that caller analysis.
+ *
+ * These helpers are exported and must not depend on future callers repeating
+ * that discipline.
  */
 async function readLedgerEventsForEpoch(
 	directory: string,
 ): Promise<LedgerEvent[]> {
-	const integrity = await _internals.readLedgerEventsWithIntegrity(directory);
+	const integrity = await _internals.readLedgerEventsWithIntegrity(directory, {
+		failClosedOnReadError: true,
+	});
 	if (integrity.truncated) {
 		throw new Error(
 			`PLAN_LEDGER_TRUNCATED: ${getLedgerPath(directory)} has a malformed line; plan epoch identity cannot be resolved. Preserve this file and quarantine the corrupted suffix before retrying.`,
@@ -1700,6 +1724,7 @@ export interface LedgerIntegrityResult {
  */
 export async function readLedgerEventsWithIntegrity(
 	directory: string,
+	options?: { failClosedOnReadError?: boolean },
 ): Promise<LedgerIntegrityResult> {
 	const ledgerPath = getLedgerPath(directory);
 
@@ -1739,7 +1764,16 @@ export async function readLedgerEventsWithIntegrity(
 		events.sort((a, b) => a.seq - b.seq);
 
 		return { events, truncated, badSuffix };
-	} catch {
+	} catch (error) {
+		// The ledger EXISTS but could not be read (EACCES, EIO, EISDIR, …).
+		// Returning the absent-ledger shape here is indistinguishable from ENOENT,
+		// which silently demotes the authoritative ledger to the derived plan.json
+		// projection. Callers that must fail closed opt in.
+		if (options?.failClosedOnReadError) {
+			throw new Error(
+				`PLAN_LEDGER_UNREADABLE: ${ledgerPath} exists but could not be read (${error instanceof Error ? error.message : String(error)}); plan state cannot be resolved. This is NOT an absent ledger — preserve the file and check permissions/filesystem health before retrying.`,
+			);
+		}
 		return { events: [], truncated: false, badSuffix: null };
 	}
 }

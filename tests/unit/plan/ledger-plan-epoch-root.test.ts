@@ -1,7 +1,8 @@
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, spyOn, test } from 'bun:test';
+import * as fs from 'node:fs';
 import { writeFileSync } from 'node:fs';
 import { mkdir, rm } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import type { Plan } from '../../../src/config/plan-schema';
 import {
 	appendLedgerEvent,
@@ -173,5 +174,95 @@ describe('ledger plan epoch root initialization', () => {
 
 		expect(identity).toBeNull();
 		expect((await readLedgerEvents(directory)).length).toBe(0);
+	});
+});
+
+describe('readPlanEpochIdentity fails closed on an unreadable ledger', () => {
+	const cleanup = new Set<string>();
+	let restoreReadFileSync: (() => void) | null = null;
+
+	afterEach(async () => {
+		restoreReadFileSync?.();
+		restoreReadFileSync = null;
+		for (const directory of cleanup) {
+			await rm(directory, { recursive: true, force: true });
+		}
+		cleanup.clear();
+	});
+
+	async function createPopulatedLedger(plan: Plan): Promise<string> {
+		const directory = await createWorkspace(plan);
+		cleanup.add(directory);
+		await initLedger(
+			directory,
+			derivePlanId(plan),
+			computePlanHash(plan),
+			plan,
+		);
+		await appendLedgerEvent(
+			directory,
+			{
+				plan_id: derivePlanId(plan),
+				event_type: 'plan_exported',
+				source: 'unreadable-ledger-test',
+			},
+			{ planHashAfter: computePlanHash(plan) },
+		);
+		return directory;
+	}
+
+	function failLedgerReadsWith(code: string, ledgerPath: string): void {
+		const realReadFileSync = fs.readFileSync;
+		// Only the ledger file is unreadable; the file still EXISTS on disk, so
+		// fs.existsSync is deliberately left untouched.
+		const spy = spyOn(fs, 'readFileSync').mockImplementation(((
+			target: unknown,
+			...rest: unknown[]
+		) => {
+			if (typeof target === 'string' && resolve(target) === ledgerPath) {
+				const error = new Error(
+					`${code}: permission denied, open '${ledgerPath}'`,
+				) as NodeJS.ErrnoException;
+				error.code = code;
+				throw error;
+			}
+			return (realReadFileSync as (...args: unknown[]) => unknown)(
+				target,
+				...rest,
+			);
+		}) as unknown as typeof fs.readFileSync);
+		restoreReadFileSync = () => {
+			spy.mockRestore();
+		};
+	}
+
+	test('surfaces PLAN_LEDGER_UNREADABLE, not "Plan ledger is empty"', async () => {
+		const plan = makePlan();
+		const directory = await createPopulatedLedger(plan);
+		const ledgerPath = resolve(join(directory, '.swarm', 'plan-ledger.jsonl'));
+		expect(fs.existsSync(ledgerPath)).toBe(true);
+
+		failLedgerReadsWith('EACCES', ledgerPath);
+
+		let caught: unknown;
+		try {
+			await readPlanEpochIdentity(directory, plan);
+		} catch (error) {
+			caught = error;
+		}
+
+		expect(caught).toBeInstanceOf(Error);
+		const message = (caught as Error).message;
+		expect(message).toMatch(/PLAN_LEDGER_UNREADABLE/);
+		expect(message).not.toContain('Plan ledger is empty');
+	});
+
+	test('an absent ledger still resolves to null rather than throwing', async () => {
+		const plan = makePlan();
+		const directory = await createPopulatedLedger(plan);
+		const ledgerPath = resolve(join(directory, '.swarm', 'plan-ledger.jsonl'));
+		fs.rmSync(ledgerPath, { force: true });
+
+		await expect(readPlanEpochIdentity(directory, plan)).resolves.toBeNull();
 	});
 });

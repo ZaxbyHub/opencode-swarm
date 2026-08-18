@@ -9,7 +9,7 @@
  * here.
  */
 
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -306,5 +306,62 @@ describe('quarantineLedgerSuffix', () => {
 			.readdirSync(path.join(testDir, '.swarm'))
 			.filter((f) => f.startsWith('plan-ledger.quarantine.'));
 		expect(quarantineFiles.length).toBe(1);
+	});
+});
+
+describe('readLedgerEventsWithIntegrity read-error tolerance (blast-radius lock)', () => {
+	let testDir: string;
+	let restore: (() => void) | null = null;
+
+	beforeEach(() => {
+		testDir = fs.mkdtempSync(
+			path.join(os.tmpdir(), 'ledger-integrity-eacces-'),
+		);
+		fs.mkdirSync(path.join(testDir, '.swarm'), { recursive: true });
+		const ledgerPath = path.join(testDir, '.swarm', 'plan-ledger.jsonl');
+		const event: LedgerEvent = {
+			seq: 1,
+			timestamp: new Date().toISOString(),
+			plan_id: 'test-plan-eacces',
+			event_type: 'plan_created',
+			source: 'test',
+			plan_hash_before: '',
+			plan_hash_after: 'abc123',
+			schema_version: '1.0.0',
+		};
+		fs.writeFileSync(ledgerPath, `${JSON.stringify(event)}\n`);
+
+		const realReadFileSync = fs.readFileSync;
+		const spy = spyOn(fs, 'readFileSync').mockImplementation(((
+			target: unknown,
+			...rest: unknown[]
+		) => {
+			if (typeof target === 'string' && target === ledgerPath) {
+				const error = new Error(
+					`EACCES: permission denied, open '${ledgerPath}'`,
+				) as NodeJS.ErrnoException;
+				error.code = 'EACCES';
+				throw error;
+			}
+			return (realReadFileSync as (...args: unknown[]) => unknown)(
+				target,
+				...rest,
+			);
+		}) as unknown as typeof fs.readFileSync);
+		restore = () => spy.mockRestore();
+	});
+
+	afterEach(() => {
+		restore?.();
+		restore = null;
+		fs.rmSync(testDir, { force: true, recursive: true });
+	});
+
+	test('without options, an unreadable-but-present ledger stays tolerant', async () => {
+		// The 6+ tolerant replayFromLedger callers must keep today's behavior:
+		// a transient read failure must not become a hard planning-tool failure.
+		const result = await readLedgerEventsWithIntegrity(testDir);
+
+		expect(result).toEqual({ events: [], truncated: false, badSuffix: null });
 	});
 });

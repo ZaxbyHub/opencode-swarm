@@ -15,12 +15,14 @@ const WAL_PATH = '/tmp/coder-settlements/1.1.json';
 function baseWal(
 	overrides: {
 		worktreePath?: string;
+		branchName?: string;
 		sourceHead?: string;
 		targetHeadBefore?: string;
 	} = {},
 ): string {
 	const {
 		worktreePath = '/tmp/wt/lane-0',
+		branchName = 'swarm/lane-0',
 		sourceHead = HEX40,
 		targetHeadBefore = HEX40,
 	} = overrides;
@@ -51,7 +53,7 @@ function baseWal(
 			parentSessionId: 'session-1',
 			taskId: '1.1',
 			worktreePath,
-			branchName: 'swarm/lane-0',
+			branchName,
 			worktreeId: 'wt-1',
 			worktreeSessionId: 'wt-session-1',
 			mergeStrategy: 'merge',
@@ -61,7 +63,7 @@ function baseWal(
 			operationId: 'tr-1',
 			sourceHead,
 			targetHeadBefore,
-			branchName: 'swarm/lane-0',
+			branchName,
 			strategy: 'merge',
 		},
 	});
@@ -184,5 +186,48 @@ describe('coder-settlement WAL worktree and provenance bounds', () => {
 				).toThrow(/CODER_SETTLEMENT_WAL_UNREADABLE/);
 			});
 		}
+	}
+});
+
+// F-003: branchName and worktreePath reach git as bare argv operands with no
+// `--` separator, so a tampered WAL carrying a leading `-` would be read by git
+// as an option (`git rebase --exec=<cmd>` runs <cmd> per replayed commit).
+describe('coder-settlement WAL git-argv shape safety', () => {
+	for (const [label, branchName] of [
+		['an option-shaped branch name', '--exec=touch /tmp/pwned'],
+		['a branch name one byte over the 1024 bound', 'x'.repeat(1025)],
+	] as const) {
+		test(`rejects ${label}`, () => {
+			expect(() =>
+				parseCoderSettlementWal(baseWal({ branchName }), WAL_PATH, '1.1'),
+			).toThrow(/CODER_SETTLEMENT_WAL_UNREADABLE/);
+		});
+	}
+
+	for (const [label, worktreePath] of [
+		['an option-shaped worktree path', '--force'],
+		['a worktree path carrying a control character', '/tmp/wt\nlane-0'],
+	] as const) {
+		test(`rejects ${label}`, () => {
+			expect(() =>
+				parseCoderSettlementWal(baseWal({ worktreePath }), WAL_PATH, '1.1'),
+			).toThrow(/CODER_SETTLEMENT_WAL_UNREADABLE/);
+		});
+	}
+
+	// Real lane branch names, in both shapes this repo produces, must survive.
+	for (const branchName of [
+		'swarm/lane/ses_abc/1.1',
+		'swarm-lane/ses_abc/1.1',
+		'swarm/lane-0',
+	]) {
+		test(`accepts the lane branch name ${branchName}`, () => {
+			const wal = parseCoderSettlementWal(
+				baseWal({ branchName }),
+				WAL_PATH,
+				'1.1',
+			);
+			expect(wal.worktree?.branchName).toBe(branchName);
+		});
 	}
 });

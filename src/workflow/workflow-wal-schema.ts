@@ -2,9 +2,15 @@ import type {
 	BackgroundTaskChangeContext,
 	BackgroundWorktreeDescriptor,
 } from '../background/pending-delegations.js';
-import { isPathWithinDeclaredScope } from '../scope/path-identity.js';
+import {
+	isPathWithinDeclaredScope,
+	unsafePathTextReason,
+} from '../scope/path-identity.js';
 import type { TaskWorkflowState } from '../state.js';
-import type { MergeOperationProvenance } from '../worktree/merge.js';
+import {
+	GIT_OBJECT_ID_PATTERN,
+	type MergeOperationProvenance,
+} from '../worktree/merge.js';
 
 export type CoderSettlementState =
 	| 'ABORTED'
@@ -85,11 +91,55 @@ export type TaskTerminalWal = TaskTerminalWalV1 | TaskTerminalWalV2;
 
 const TASK_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
-// Git object ids as written by `git rev-parse HEAD`: sha1 (40) today, sha256 (64)
-// under the sha256 object format. Abbreviated ids are deliberately rejected —
-// nothing in this codebase persists them. Constraining the shape also makes a
-// leading `-` structurally impossible for values later passed to git as revisions.
-const GIT_OBJECT_ID_PATTERN = /^[0-9a-f]{40}$|^[0-9a-f]{64}$/;
+// Branch names reach git as bare argv operands (`git merge <branch>`,
+// `git rebase <branch>`, `git branch -D <branch>`) with no `--` separator
+// present at those call sites, so a tampered WAL carrying a leading `-` would
+// be read by git as an option — `git rebase --exec=<cmd>` runs <cmd> per
+// replayed commit. (Those three commands would accept a `--` before the
+// operand; `git cherry-pick` would not, so validating the shape here is the
+// guard that covers every sink.) This allowlist is deliberately NOT expressed in terms of
+// `git check-ref-format --branch`: it neither contains nor is contained by that
+// grammar. It rejects names git would accept (`release+1`) and accepts at least
+// one git rejects (`HEAD`). Its safety argument does not depend on that
+// relationship — it rests on argv safety (no leading `-`, no control
+// characters, bounded length) plus the fact that `buildSwarmBranchName` is the
+// only producer of the branch names this parser ever sees. The 1024 bound
+// matches WorktreeDescriptorSchema in src/background/pending-delegations.ts,
+// the writer-side schema for this field.
+const BRANCH_NAME_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9._/-]{0,1023}$/;
+
+function isSafeGitBranchName(value: unknown): value is string {
+	if (typeof value !== 'string' || !BRANCH_NAME_PATTERN.test(value)) {
+		return false;
+	}
+	if (value.includes('..') || value.endsWith('/') || value.endsWith('.')) {
+		return false;
+	}
+	return !value
+		.split('/')
+		.some(
+			(segment) =>
+				segment.length === 0 ||
+				segment.startsWith('.') ||
+				segment.endsWith('.lock'),
+		);
+}
+
+// `worktree.worktreePath` reaches existsSync() (src/workflow/coder-settlement.ts)
+// and `git worktree remove <path>` (src/worktree/core.ts) with no `--` guard.
+// Containment is deliberately NOT asserted here: the Windows path-budget
+// fallback relocates lanes under os.tmpdir(), and `worktree_dir` is
+// configurable — isPathUnderSwarmWorktreeBase already gates the one dangerous
+// sink (the `--force` removal).
+function isSafeWorktreePath(value: unknown): value is string {
+	return (
+		typeof value === 'string' &&
+		value.length > 0 &&
+		value.length <= 4096 &&
+		!value.startsWith('-') &&
+		unsafePathTextReason(value) === null
+	);
+}
 const UUID_PATTERN =
 	/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const WORKFLOW_STATES = new Set<TaskWorkflowState>([
@@ -113,22 +163,52 @@ function formatUnreadableMessage(
 	throw new Error(`${code}: ${filePath} ${detail}. ${remediation}`);
 }
 
+/**
+ * Shared JSON entry point for every WAL parser below. `JSON.parse("null")`
+ * SUCCEEDS, so a WAL whose whole content is the literal `null` slips past the
+ * try/catch and the first property access throws a raw TypeError instead of the
+ * intended *_WAL_UNREADABLE diagnostic. Non-null primitives box, so only `null`
+ * (and, for a precise message, an array) needs the extra guard.
+ */
+function parseWalObject(
+	raw: string,
+	filePath: string,
+	code: string,
+	remediation: string,
+): Record<string, unknown> {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw);
+	} catch (error) {
+		formatUnreadableMessage(
+			code,
+			filePath,
+			`is not valid JSON (${error instanceof Error ? error.message : String(error)})`,
+			remediation,
+		);
+	}
+	if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+		formatUnreadableMessage(
+			code,
+			filePath,
+			'is not a JSON object',
+			remediation,
+		);
+	}
+	return parsed as Record<string, unknown>;
+}
+
 export function parseCoderSettlementWal(
 	raw: string,
 	filePath: string,
 	expectedTaskId?: string,
 ): CoderSettlementWal {
-	let parsed: Partial<CoderSettlementWal>;
-	try {
-		parsed = JSON.parse(raw) as Partial<CoderSettlementWal>;
-	} catch (error) {
-		formatUnreadableMessage(
-			'CODER_SETTLEMENT_WAL_UNREADABLE',
-			filePath,
-			`is not valid JSON (${error instanceof Error ? error.message : String(error)})`,
-			'Preserve this file, reconcile the task lane, and only then move it aside.',
-		);
-	}
+	const parsed = parseWalObject(
+		raw,
+		filePath,
+		'CODER_SETTLEMENT_WAL_UNREADABLE',
+		'Preserve this file, reconcile the task lane, and only then move it aside.',
+	) as Partial<CoderSettlementWal>;
 	const context = parsed.context as
 		| Partial<BackgroundTaskChangeContext>
 		| undefined;
@@ -201,9 +281,8 @@ export function parseCoderSettlementWal(
 				typeof worktree.parentSessionId !== 'string' ||
 				typeof worktree.taskId !== 'string' ||
 				worktree.taskId !== parsed.taskId ||
-				typeof worktree.worktreePath !== 'string' ||
-				worktree.worktreePath.length > 4096 ||
-				typeof worktree.branchName !== 'string' ||
+				!isSafeWorktreePath(worktree.worktreePath) ||
+				!isSafeGitBranchName(worktree.branchName) ||
 				typeof worktree.worktreeId !== 'string' ||
 				typeof worktree.worktreeSessionId !== 'string' ||
 				!['merge', 'rebase', 'cherry-pick'].includes(
@@ -217,7 +296,7 @@ export function parseCoderSettlementWal(
 				!GIT_OBJECT_ID_PATTERN.test(provenance.sourceHead) ||
 				typeof provenance.targetHeadBefore !== 'string' ||
 				!GIT_OBJECT_ID_PATTERN.test(provenance.targetHeadBefore) ||
-				typeof provenance.branchName !== 'string' ||
+				!isSafeGitBranchName(provenance.branchName) ||
 				(worktree !== undefined &&
 					(provenance.branchName !== worktree.branchName ||
 						provenance.strategy !== worktree.mergeStrategy)) ||
@@ -254,17 +333,12 @@ export function parseTaskRepairWal(
 	filePath: string,
 	expectedTaskId?: string,
 ): TaskRepairWal {
-	let parsed: Partial<TaskRepairWal>;
-	try {
-		parsed = JSON.parse(raw) as Partial<TaskRepairWal>;
-	} catch (error) {
-		formatUnreadableMessage(
-			'TASK_REPAIR_WAL_UNREADABLE',
-			filePath,
-			`is not valid JSON (${error instanceof Error ? error.message : String(error)})`,
-			'Preserve this file, reconcile the repair transition, and only then move it aside.',
-		);
-	}
+	const parsed = parseWalObject(
+		raw,
+		filePath,
+		'TASK_REPAIR_WAL_UNREADABLE',
+		'Preserve this file, reconcile the repair transition, and only then move it aside.',
+	) as Partial<TaskRepairWal>;
 	if (
 		parsed.version !== 1 ||
 		(parsed.state !== 'PREPARED' &&
@@ -319,7 +393,12 @@ export function parseTaskTerminalWal(
 	filePath: string,
 	expectedTaskId?: string,
 ): TaskTerminalWal {
-	let parsed: Partial<{
+	const parsed = parseWalObject(
+		raw,
+		filePath,
+		'TASK_TERMINAL_WAL_UNREADABLE',
+		'Preserve this file and reconcile the task terminal transition before moving it aside.',
+	) as Partial<{
 		version: number;
 		state: TerminalWalState;
 		taskId: string;
@@ -335,31 +414,6 @@ export function parseTaskTerminalWal(
 		planIdentityHash: string;
 		planEpoch: string;
 	}>;
-	try {
-		parsed = JSON.parse(raw) as Partial<{
-			version: number;
-			state: TerminalWalState;
-			taskId: string;
-			transitionId: string;
-			actor: string;
-			oldPlanStatus: string;
-			newPlanStatus: TerminalPlanStatus;
-			oldWorkflowState: TaskWorkflowState;
-			newWorkflowState: TerminalWorkflowState;
-			generation: number;
-			qaExempt: boolean;
-			recordedAt: string;
-			planIdentityHash: string;
-			planEpoch: string;
-		}>;
-	} catch (error) {
-		formatUnreadableMessage(
-			'TASK_TERMINAL_WAL_UNREADABLE',
-			filePath,
-			`is not valid JSON (${error instanceof Error ? error.message : String(error)})`,
-			'Preserve this file and reconcile the task terminal transition before moving it aside.',
-		);
-	}
 	if (
 		(parsed.version !== 1 && parsed.version !== 2) ||
 		(parsed.state !== 'PREPARED' &&

@@ -511,7 +511,9 @@ describe('runFinalizeStage', () => {
 
 		await runFinalizeStage(ctx);
 
-		// runFinalizeStage must fail-open and surface the persistence failure.
+		// runFinalizeStage must fail CLOSED: it records the warning, records
+		// ctx.terminalizationError, and returns before the destructive close
+		// follow-up runs (handleCloseCommand then reports "Close paused ...").
 		expect(
 			ctx.warnings.some((w: string) =>
 				w.includes('Failed to persist terminal plan state'),
