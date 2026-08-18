@@ -18,6 +18,7 @@ import {
 	quarantineLedgerSuffix,
 	readLedgerEventsWithIntegrity,
 } from '../../src/plan/ledger';
+import { canonicalMkdtemp } from '../../tests/helpers/tmpdir';
 
 describe('readLedgerEventsWithIntegrity', () => {
 	let testDir: string;
@@ -314,9 +315,7 @@ describe('readLedgerEventsWithIntegrity read-error tolerance (blast-radius lock)
 	let restore: (() => void) | null = null;
 
 	beforeEach(() => {
-		testDir = fs.mkdtempSync(
-			path.join(os.tmpdir(), 'ledger-integrity-eacces-'),
-		);
+		testDir = canonicalMkdtemp('ledger-integrity-eacces-');
 		fs.mkdirSync(path.join(testDir, '.swarm'), { recursive: true });
 		const ledgerPath = path.join(testDir, '.swarm', 'plan-ledger.jsonl');
 		const event: LedgerEvent = {
