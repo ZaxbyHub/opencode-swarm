@@ -393,6 +393,51 @@ describe('toolBefore ACCEPTANCE coverage gate (integration, F-007/#1687)', () =>
 		);
 	});
 
+	it('completely-missing fallback and the ENCODING WARNING co-occur in one rendered error (#1896 + #2204)', async () => {
+		// spec.md lost its section sign to a `??` save AND the agent omitted the
+		// requirement text entirely. Both diagnostic layers must survive into the
+		// SAME thrown message: the corruption hint tells the operator to repair
+		// spec.md, the fallback line tells them the body is absent from the prompt.
+		// Neither a >=10-char prefix nor a >=10-char suffix of the body occurs
+		// anywhere in this prompt: the prefix probe stalls at "s" (1 char) and the
+		// suffix probe stalls at "." (1 char — the period only appears in "1.1",
+		// and "g." never does). So it lands on the genuine completely-missing
+		// branch, not #2215's present-but-shifted one.
+		fs.writeFileSync(
+			path.join(tempDir, '.swarm', 'spec.md'),
+			[
+				'# Spec 1687 fixture',
+				'',
+				'## Functional Requirements',
+				'',
+				'- **FR-001 — Widget renders.** See ?? 4.2 of the retention policy before deleting.',
+				'',
+			].join('\n'),
+		);
+		const hooks = createDelegationGateHook(makeConfig(), tempDir);
+		ensureAgentSession('sess-cov-missing-encoded', 'architect');
+		let caught: Error | undefined;
+		try {
+			await hooks.toolBefore(toolBeforeInput('sess-cov-missing-encoded'), {
+				args: {
+					subagent_type: 'coder',
+					task_id: '1.1',
+					prompt:
+						'TASK: 1.1 implement it\nACCEPTANCE: refactor the module loader',
+				},
+			});
+		} catch (err) {
+			caught = err as Error;
+		}
+		expect(caught).toBeDefined();
+		expect(caught?.message).toContain('ACCEPTANCE_FIELD_COVERAGE_MISMATCH');
+		expect(caught?.message).toContain(
+			'ACCEPTANCE has here: "[Requirement text completely missing from prompt]"',
+		);
+		expect(caught?.message).toContain('ENCODING WARNING:');
+		expect(caught?.message).toContain('??');
+	});
+
 	it('task with NO fr_refs, task-derived ACCEPTANCE => resolves (FR-004 fail-open)', async () => {
 		const hooks = createDelegationGateHook(makeConfig(), tempDir);
 		ensureAgentSession('sess-cov-nofr', 'architect');

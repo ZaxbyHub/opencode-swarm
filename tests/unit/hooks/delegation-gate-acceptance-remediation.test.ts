@@ -20,6 +20,11 @@
  *    a line-initial `-`/`*` marker is stripped) — a bulleted body reproduced
  *    WITH line breaks passes, but the same content flattened onto one line
  *    strands an un-stripped marker mid-body and fails.
+ *
+ * The sibling case — a body that IS present in the prompt but shifted off
+ * character 0 (#2215) — lives in
+ * `delegation-gate-acceptance-shifted-body.test.ts`, which mirrors this file's
+ * `writeSingleTaskPlan` harness.
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
