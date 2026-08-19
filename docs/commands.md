@@ -501,7 +501,7 @@ Run a compound-engineering loop: brainstorm â†’ plan â†’ build â†�
 
 ### `/swarm full-auto [on|off]`
 
-Toggle Full-Auto Mode. Enables autonomous execution without confirmation prompts. Session-scoped.
+Toggle Full-Auto Mode. A critic gate: the `critic_oversight` agent reviews phase completions, escalations, and high-risk actions in your place; the architect still plans and delegates every task itself. Session-scoped.
 
 ### `/swarm auto-proceed [on|off]`
 

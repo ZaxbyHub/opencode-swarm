@@ -21,8 +21,10 @@ than merely repeating.
 
 This is a real implementation workflow: it delegates to the coder, declares
 scope, and mutates source code through the normal EXECUTE path. It is distinct
-from full-auto (autonomous cross-phase oversight via the `critic_oversight`
-agent) and turbo (parallel lanes within a single phase). LOOP is a
+from full-auto (a critic gate via the `critic_oversight` agent that
+intercepts phase completions and high-risk actions for review — full-auto
+never plans, delegates, or executes; the architect retains ALL delegation
+duty) and turbo (parallel lanes within a single phase). LOOP is a
 user-initiated, gated, sequential, compounding workflow.
 
 The two design rules that everything below serves:

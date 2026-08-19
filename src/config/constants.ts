@@ -668,7 +668,7 @@ Auto-proceed controls whether the architect advances to the next phase automatic
 Behavioral rules:
 - Session override (set via /swarm auto-proceed on|off) wins over the plan default.
 - If neither is set, auto-proceed defaults to OFF and the architect asks before advancing.
-- Full-auto mode (critic oversight) is independent — it has its own auto-advance mechanism.
+- Full-auto mode (critic oversight) is independent — while active it suppresses the "Ready for Phase N+1?" confirmation itself (it never delegates tasks or runs phases for you); the auto_proceed setting adds nothing on top.
 - autoProceedNudgeDone prevents the FR-004 first-boundary nudge from re-firing in this session.
 
 To toggle at runtime: call swarm_command({ command: "auto-proceed", args: ["on"|"off"] }) from the architect.
