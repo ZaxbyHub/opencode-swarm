@@ -325,7 +325,10 @@ describe('ci.yml integration — windows quarantine ledger entry for win32-wrapp
 		// "# STATUS: N active entr(y|ies)" header line. Drift between the two
 		// (e.g. an entry removed without updating the header, or a sibling PR
 		// reconciling the count incorrectly) makes the header lie to triage.
-		const raw = readFileSync(WINDOWS_LEDGER_PATH, 'utf8').replace(/\r\n/g, '\n');
+		const raw = readFileSync(WINDOWS_LEDGER_PATH, 'utf8').replace(
+			/\r\n/g,
+			'\n',
+		);
 		const statusMatches = [
 			...raw.matchAll(/^#\s*STATUS:\s*(\d+)\s+active entr/gm),
 		];

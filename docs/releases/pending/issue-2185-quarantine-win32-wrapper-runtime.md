@@ -49,7 +49,7 @@ silently resuming duplicate flake issues.
 None for runtime behavior — the `src/` tree is untouched. CI-only change:
 the quarantine data file plus the pinning tests in
 `tests/unit/scripts/ci/ci-yml-integration.test.ts` (22 tests total in that
-file, all green; file remains under the FR-006 500-line cap at 336 lines).
+file, all green; file remains under the FR-006 500-line cap at 339 lines).
 
 ## Known caveats
 
