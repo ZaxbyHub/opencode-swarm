@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.143.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.143.1...v7.143.2) (2026-08-19)
+
+
+### Bug Fixes
+
+* **pre-check-batch:** fail fast on invalid project roots and propagate secretscan evidence errors ([0559153](https://github.com/ZaxbyHub/opencode-swarm/commit/0559153141fa7ad558f21b2da51e6cbc2fca6752))
+* **worktree:** recover prunable registrations instead of stalling provisioning ([5dbf0af](https://github.com/ZaxbyHub/opencode-swarm/commit/5dbf0af28cf7c4ded09346100f2282d5ae1f3c7a))
+
 ## [7.143.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.143.0...v7.143.1) (2026-08-19)
 
 
