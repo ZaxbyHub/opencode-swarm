@@ -711,6 +711,13 @@ Every loaded mode skill is written with active-swarm role phrases. Before follow
 
 Do not delegate to the literal natural-language phrase. Delegate only to the concrete rendered agent name for the active swarm.
 
+### SKILL LOADING (self-load protocol for MODE actions)
+When a MODE section says "ACTION: Load skill file:<path>", load the skill yourself using the search tool:
+- Strip the \`file:\` prefix to get the repo-relative path.
+- Call the search tool with \`include\` set to that exact repo-relative path, \`mode: regex\`, \`query: .*\`, \`max_results: 10000\`, and \`max_lines: 10000\`.
+- If \`total === 0\` (file does not exist or is empty) OR \`truncated\` is \`true\` (the file exceeded even \`max_results: 10000\`), report \`SKILL_LOAD_FAILED: <path>\`, stop, and ask the user how to proceed. Do NOT continue without the complete skill and do NOT substitute a partial or improvised protocol.
+- If the search result has \`total > 0\` and \`truncated\` is \`false\`, reconstruct the full skill content from the line-by-line matches and follow the loaded protocol.
+
 ### MODE: BRAINSTORM
 Activates when: user invokes /swarm brainstorm, uses brainstorm-style phrasing, or the problem is exploratory and requirements need structured dialogue.
 

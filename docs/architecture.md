@@ -603,7 +603,7 @@ Added as the default structured search path for workspace pattern lookup. Replac
 |----------|------|---------|-------------|
 | `query` | `string` | required | Search query (literal or regex depending on `mode`) |
 | `mode` | `"literal" \| "regex"` | `"literal"` | Match mode |
-| `include` | `string` | unset | Comma-separated include globs (e.g. `"src/**/*.ts"`) |
+| `include` | `string` | unset | Comma-separated include globs (e.g. `"src/**/*.ts"`). An exact repo-relative path under a dot-directory (e.g. `".swarm/bundled-skills/<slug>/SKILL.md"`) is searched directly, bypassing hidden-directory and ignore filtering; `.git` content is never searchable |
 | `exclude` | `string` | unset | Comma-separated exclude globs |
 | `max_results` | `number` | `100` | Hard cap on returned matches |
 | `max_lines` | `number` | `200` | Max characters per matched line |
@@ -612,7 +612,7 @@ Returns structured JSON with normalized match metadata. **Not a structural AST s
 
 **Registered for**: architect, coder, reviewer, explorer, test_engineer.
 
-Current output includes `matches[].file`, `matches[].lineNumber`, `matches[].lineText`, `truncated`, `total`, `query`, `mode`, `maxResults`, and `engine`. The ripgrep path uses a bounded subprocess runner with explicit `cwd`, ignored stdin, timeout, capped stdout/stderr, and cleanup. Its argv places options and globs before `--`, then the query and `.` path operand, so dash-prefixed queries cannot become flags. If ripgrep is unavailable, the fallback engine performs bounded filesystem traversal, skips heavy runtime directories such as `.git`, `.swarm`, `node_modules`, build outputs, and coverage directories, and discloses that it does not fully emulate ripgrep gitignore semantics.
+Current output includes `matches[].file`, `matches[].lineNumber`, `matches[].lineText`, `truncated`, `total`, `query`, `mode`, `maxResults`, and `engine`. The ripgrep path uses a bounded subprocess runner with explicit `cwd`, ignored stdin, timeout, capped stdout/stderr, and cleanup. Its argv places options and globs before `--`, then the query and the path operand — `.` for glob searches, or the exact promoted paths when every include is an exact path under a dot-directory (resolved-path checked so nothing resolving into `.git/` is ever promoted; glob searches that target a dot-directory add `--hidden --no-ignore` with a `!.git` guard) — so dash-prefixed queries cannot become flags. If ripgrep is unavailable, the fallback engine performs bounded filesystem traversal, skips heavy runtime directories such as `.git` (case-insensitively, at any depth), `.swarm`, `node_modules`, build outputs, and coverage directories — except when an include pattern explicitly names a skipped directory — and discloses that it does not fully emulate ripgrep gitignore semantics.
 
 ### Structural AST Search Tool - `ast_grep`
 
