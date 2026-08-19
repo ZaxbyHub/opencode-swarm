@@ -665,7 +665,7 @@ The repo maintains several "canonical source + mirror" and "source + registry" s
 
 - **Skills:** `.opencode/skills/<name>/SKILL.md` (operative, loaded by the OpenCode plugin / architect MODE stubs) and `.claude/skills/<name>/SKILL.md` (Claude-side), plus `.agents/` adapter shims.
 - **Bundled skills:** `BUNDLED_PROJECT_SKILLS` (`src/config/bundled-skills.ts`), `package.json#files`, and the `package-smoke` allowlist must all match each other **and** the actual `.opencode/skills/` directory.
-- **Docs claims:** public numeric QA-gate claims must match `QA_GATE_PIPELINE_STEPS` (`src/config/qa-gate-pipeline.ts`) and the runtime execute protocol.
+- **Docs claims:** public numeric QA-gate claims must match `QA_GATE_PIPELINE_STEPS` (`src/config/qa-gate-pipeline.ts`) and the runtime execute protocol; hand-copied prose citations of the dispatch lane batch cap must match `MAX_LANES` (`src/tools/dispatch-lanes.ts`, issue #1645) — including spelled-out forms ("eight lanes") and every pending release fragment under `docs/releases/pending/`.
 - **Tools / commands / agents:** implementation, registries, and per-agent maps (invariant 11).
 
 Two failures motivated the automated check:
@@ -685,7 +685,7 @@ Two failures motivated the automated check:
 | `tool` | metadata / handler / plugin-object / `TOOL_NAMES` / `AGENT_TOOL_MAP` coherence | reuses `scripts/check-tool-registration.ts` |
 | `command` | `COMMAND_NAME_SET` parity; `subcommandOf` parents exist | `src/commands/registry.ts` |
 | `agent` | `ALL_AGENT_NAMES` ↔ `AGENT_TOOL_MAP`; opt-in maps only reference real agents | `src/config/agent-names.ts`, `src/config/constants.ts` |
-| `docs-claim` | public numeric QA-gate claims match the docs-visible pipeline registry | `src/config/qa-gate-pipeline.ts` |
+| `docs-claim` | public numeric QA-gate claims match the docs-visible pipeline registry; hand-copied dispatch lane-cap prose (digits and spelled-out forms) matches the exported `MAX_LANES`; pending release fragments are scanned for lane-cap citations | `src/config/qa-gate-pipeline.ts`, `src/tools/dispatch-lanes.ts` |
 
 ### Rules
 
