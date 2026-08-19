@@ -13,7 +13,13 @@
  */
 
 import { afterAll, describe, expect, test } from 'bun:test';
-import { appendFileSync, mkdirSync, rmdirSync, writeFileSync } from 'node:fs';
+import {
+	appendFileSync,
+	existsSync,
+	mkdirSync,
+	rmdirSync,
+	writeFileSync,
+} from 'node:fs';
 import * as path from 'node:path';
 import { atomicWriteFile } from '../../src/evidence/task-file.js';
 import { resolveLinkBaseDir } from '../../src/hooks/knowledge-link.js';
@@ -84,6 +90,15 @@ describe('prod-store tripwire (issue #2033)', () => {
 		expect(isRealStoreTarget(realLinkDir)).toBe(true);
 		// mkdir is intentionally unguarded (see helper docs); the file write inside the
 		// real link root must be refused.
+		// Regression (issue #2233): the recursive mkdir below also materializes the
+		// REAL <dataDir>/links root when it does not exist yet (fresh CI runner).
+		// The old cleanup removed only the regression-probe leaf, leaving links/
+		// behind as top-level store drift that failed this file's own afterAll
+		// bookend (verifyRealStoresUnchanged) on the first run against a clean
+		// HOME — a deterministic cross-OS attempt-1 flake that passed on retry
+		// (the leftover links/ dir was already there for attempt 2). Record the
+		// pre-probe existence of the real links root and restore that state.
+		const realLinkRootExisted = existsSync(resolveLinkBaseDir());
 		let mkdirThrew: unknown;
 		try {
 			mkdirSync(realLinkDir, { recursive: true });
@@ -103,6 +118,16 @@ describe('prod-store tripwire (issue #2033)', () => {
 			rmdirSync(realLinkDir);
 		} catch {
 			/* write threw, so the dir may never have been created */
+		}
+		// Restore the pre-probe state of the real links root: if this probe
+		// materialized <dataDir>/links, remove it again so the store's top-level
+		// listing stays byte-identical to process start (the #2233 fix).
+		if (!realLinkRootExisted) {
+			try {
+				rmdirSync(resolveLinkBaseDir());
+			} catch {
+				/* non-empty or already gone — leave whatever is there */
+			}
 		}
 		expect(mkdirThrew).toBeUndefined();
 	});
