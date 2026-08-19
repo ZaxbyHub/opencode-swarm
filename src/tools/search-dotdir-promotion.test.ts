@@ -1,15 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import {
-	mkdirSync,
-	mkdtempSync,
-	realpathSync,
-	rmSync,
-	symlinkSync,
-	writeFileSync,
-} from 'node:fs';
-import * as os from 'node:os';
+import { mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 import type { ToolContext } from '@opencode-ai/plugin';
+import { canonicalMkdtemp } from '../../tests/helpers/tmpdir.js';
 import type { ToolResult } from './create-tool';
 import { search, _internals as searchInternals } from './search';
 
@@ -39,9 +32,7 @@ const hasRealRipgrep = realResolveRipgrepBinary() !== null;
 // can skip rather than fail on machines without them.
 let canCreateSymlinks = false;
 try {
-	const probeDir = realpathSync(
-		mkdtempSync(path.join(os.tmpdir(), 'sdp-probe-')),
-	);
+	const probeDir = canonicalMkdtemp('sdp-probe-');
 	symlinkSync(
 		path.join(probeDir, 'target'),
 		path.join(probeDir, 'alias'),
@@ -54,7 +45,7 @@ try {
 }
 
 beforeEach(() => {
-	tmpDir = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'sdp-test-')));
+	tmpDir = canonicalMkdtemp('sdp-test-');
 });
 
 afterEach(() => {
