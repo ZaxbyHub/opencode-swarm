@@ -18,6 +18,11 @@ now follows the same eviction lifecycle as `agentSessions`:
   next plugin load instead of being resurrected forever.
 - `/swarm reset-session` clears `activeAgent` alongside `agentSessions` and
   `delegationChains` (previously it left every `activeAgent` entry orphaned).
+- The `/swarm close` summary line now reads "Cleared agent sessions,
+  delegation chains, and active-agent mappings" — close already cleared all
+  three via `endAgentSession`/reset; the line previously under-reported it.
+  The `/swarm reset-session` and `/swarm finalize` command help text lists
+  active-agent mappings for the same reason.
 
 ## Why
 
