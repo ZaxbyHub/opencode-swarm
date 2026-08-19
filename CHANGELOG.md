@@ -1,5 +1,19 @@
 # Changelog
 
+## [7.143.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.143.2...v7.143.3) (2026-08-19)
+
+
+### Bug Fixes
+
+* **gates:** fail-closed catch blocks in phase completion gates ([2fc39ce](https://github.com/ZaxbyHub/opencode-swarm/commit/2fc39cebffcdbd14e424d828e8e7c40ec27c63db))
+* **sast-scan:** attach error to zero-coverage failures and log the actual gate reason ([890e5b8](https://github.com/ZaxbyHub/opencode-swarm/commit/890e5b8cb5e476b237f445b8fc3b5ca7e2793d1c))
+* **search:** allow discovery of bundled skills in dot-directories ([7cb40fc](https://github.com/ZaxbyHub/opencode-swarm/commit/7cb40fc7eed29beb7586c3a0fa85c760edf636fc))
+* **search:** allow discovery of bundled skills in dot-directories ([#2212](https://github.com/ZaxbyHub/opencode-swarm/issues/2212)) ([4958cd4](https://github.com/ZaxbyHub/opencode-swarm/commit/4958cd4ef3a677daf3c3121a46d496c3e86f5256))
+* **search:** block resolved-path .git exposure and raise skill-load caps ([405e9f3](https://github.com/ZaxbyHub/opencode-swarm/commit/405e9f35d809b2824a0b6045fd6ef53540c56148))
+* **session:** retry transient windows rename failures in snapshot writer ([063d44f](https://github.com/ZaxbyHub/opencode-swarm/commit/063d44f9639e51e8fac3a072b7466d647620bee4))
+* **test:** put realpathSync wrap on one line for FR-011 lint ([96506b1](https://github.com/ZaxbyHub/opencode-swarm/commit/96506b1d4c2c6962096841ea8fd97852f2f134ab))
+* **test:** shorten tmpdir prefix to satisfy biome line-width ([3ea9259](https://github.com/ZaxbyHub/opencode-swarm/commit/3ea9259c885258710615f668d9ac9ce1f1b59f61))
+
 ## [7.143.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.143.1...v7.143.2) (2026-08-19)
 
 
