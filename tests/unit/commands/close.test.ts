@@ -686,7 +686,7 @@ describe('handleCloseCommand', () => {
 			expect(summary).toContain('## Lessons Committed');
 			expect(summary).toContain('Archived');
 			expect(summary).toContain(
-				'- Cleared agent sessions and delegation chains',
+				'- Cleared agent sessions, delegation chains, and active-agent mappings',
 			);
 			expect(summary).toContain(
 				'- Set non-completed phases/tasks to closed status',

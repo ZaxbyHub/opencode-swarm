@@ -1605,9 +1605,10 @@ let _lastIdleSweepAtMs = 0;
 
 /**
  * Evict every agent session whose last tool activity is older than
- * staleDurationMs, and drop the delegation chain keyed by that same sessionID
- * (delegationChains is keyed by sessionID — see delegation-tracker.ts, which
- * does `delegationChains.set(input.sessionID, ...)`). This is the single
+ * staleDurationMs, and drop the delegation chain and activeAgent entry keyed
+ * by that same sessionID (both maps are keyed by sessionID — see
+ * delegation-tracker.ts, which does `delegationChains.set(input.sessionID,
+ * ...)` and `activeAgent.set(input.sessionID, ...)`). This is the single
  * eviction loop reused by BOTH startAgentSession (eager, on new session start)
  * and maybeSweepStaleSessions (opportunistic, on the hot path) so the logic is
  * never duplicated.
@@ -1633,6 +1634,25 @@ export function sweepStaleSessions(
 		// delegationChains is keyed by sessionID; the evicted session's chain is
 		// now unreachable, so drop it in the same pass to reclaim its memory.
 		swarmState.delegationChains.delete(id);
+		// activeAgent is keyed by sessionID too. Without this, evicted sessions
+		// leave permanent ghost entries that the snapshot writer re-serializes
+		// on every tool.execute.after, growing state.json without bound and
+		// polluting whole-map consumers (curator-llm-factory's heuristic scan).
+		// A session active on the tool path is never its own victim —
+		// ensureAgentSession refreshes lastToolCallTime before it sweeps.
+		// Known bounded edge: a subagent turn that goes >staleDurationMs
+		// between two tool calls loses this entry along with its session state
+		// (the session eviction itself is pre-existing); the next tool call
+		// re-bootstraps the entry to ORCHESTRATOR_NAME (src/index.ts
+		// tool.execute.before) until the next chat.message re-establishes the
+		// real agent. The recreated session's delegationActive=false already
+		// forces that same identity convergence, so the ghost entry this
+		// replaces only masked the edge briefly, at unbounded-growth cost.
+		// Do not "fix" the edge by skipping sessions with pending
+		// pendingToolExecutions: those entries are shell-only and carry no
+		// timestamp, so an interrupted turn would make its session permanently
+		// unevictable — a worse leak than the one this pass closes.
+		swarmState.activeAgent.delete(id);
 	}
 	return staleIds;
 }
@@ -1871,6 +1891,12 @@ export function endAgentSession(sessionId: string): void {
 		});
 	}
 	swarmState.agentSessions.delete(sessionId);
+	// Drop the session-keyed satellite maps in the same pass. Leaving them
+	// behind orphans entries that no sweep can ever reclaim (sweepStaleSessions
+	// iterates agentSessions, which no longer contains this id), so they would
+	// persist in memory and in every state.json snapshot until process exit.
+	swarmState.activeAgent.delete(sessionId);
+	swarmState.delegationChains.delete(sessionId);
 	clearRealtimeLearningNudgeSession(sessionId);
 	// #1821: the same-session learning loop keeps per-session module state (the
 	// candidate queue and the PRM pattern-support/cooldown ledger). Both are

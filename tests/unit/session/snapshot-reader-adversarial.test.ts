@@ -508,7 +508,8 @@ describe('snapshot-reader ADVERSARIAL tests', () => {
 			};
 
 			await expect(rehydrateState(snapshot)).resolves.toBeUndefined();
-			expect(swarmState.delegationChains.size).toBe(100);
+			// All 100 chains are ghosts (no restored session) → filtered.
+			expect(swarmState.delegationChains.size).toBe(0);
 		});
 
 		it('should handle multiple rapid calls to rehydrateState with last-call data', async () => {
@@ -549,11 +550,10 @@ describe('snapshot-reader ADVERSARIAL tests', () => {
 			await rehydrateState(snapshot1);
 			await rehydrateState(snapshot2);
 
-			// Should have data from last call
+			// Data from last call; ghost activeAgent entries stay filtered.
 			expect(swarmState.toolAggregates.size).toBe(1);
 			expect(swarmState.toolAggregates.get('tool2')).toBeTruthy();
-			expect(swarmState.activeAgent.size).toBe(1);
-			expect(swarmState.activeAgent.get('session2')).toBe('agent2');
+			expect(swarmState.activeAgent.size).toBe(0);
 		});
 
 		it('should handle rehydrating over already-populated state (clears first)', async () => {
@@ -586,13 +586,13 @@ describe('snapshot-reader ADVERSARIAL tests', () => {
 
 			await rehydrateState(snapshot);
 
-			// Should have cleared old data and populated new data
+			// Old data cleared, new data populated; session2's activeAgent
+			// entry is a ghost so the map ends empty (session1 must be gone).
 			expect(swarmState.toolAggregates.size).toBe(1);
 			expect(swarmState.toolAggregates.get('tool1')).toBeUndefined();
 			expect(swarmState.toolAggregates.get('tool2')).toBeTruthy();
-			expect(swarmState.activeAgent.size).toBe(1);
+			expect(swarmState.activeAgent.size).toBe(0);
 			expect(swarmState.activeAgent.get('session1')).toBeUndefined();
-			expect(swarmState.activeAgent.get('session2')).toBe('agent2');
 		});
 	});
 
