@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { detectDocsClaimDrift } from '../../../scripts/drift-check.ts';
 import { QA_GATE_PIPELINE_STEP_COUNT } from '../../../src/config/qa-gate-pipeline';
 import { MAX_LANES } from '../../../src/tools/dispatch-lanes';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 // Docs numeric-claim detector tests (issue #1497 docs-claim category and
 // issue #1645 lane-cap citations), split from drift-check.test.ts to stay
@@ -15,7 +15,7 @@ import { MAX_LANES } from '../../../src/tools/dispatch-lanes';
 const tempRoots: string[] = [];
 
 function makeTempRoot(): string {
-	const root = fs.mkdtempSync(path.join(os.tmpdir(), 'drift-check-test-'));
+	const root = canonicalMkdtemp('drift-check-test-');
 	tempRoots.push(root);
 	return root;
 }
