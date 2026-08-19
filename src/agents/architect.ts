@@ -714,8 +714,8 @@ Do not delegate to the literal natural-language phrase. Delegate only to the con
 ### SKILL LOADING (self-load protocol for MODE actions)
 When a MODE section says "ACTION: Load skill file:<path>", load the skill yourself using the search tool:
 - Strip the \`file:\` prefix to get the repo-relative path.
-- Call the search tool with \`include\` set to that exact repo-relative path, \`mode: regex\`, \`query: .*\`, \`max_results: 1000\`, and \`max_lines: 1000\`.
-- If \`total === 0\` (file does not exist or is empty) OR \`truncated\` is \`true\` (file was too large and content was cut off), report \`SKILL_LOAD_FAILED: <path>\` and do NOT continue without the complete skill.
+- Call the search tool with \`include\` set to that exact repo-relative path, \`mode: regex\`, \`query: .*\`, \`max_results: 10000\`, and \`max_lines: 10000\`.
+- If \`total === 0\` (file does not exist or is empty) OR \`truncated\` is \`true\` (the file exceeded even \`max_results: 10000\`), report \`SKILL_LOAD_FAILED: <path>\`, stop, and ask the user how to proceed. Do NOT continue without the complete skill and do NOT substitute a partial or improvised protocol.
 - If the search result has \`total > 0\` and \`truncated\` is \`false\`, reconstruct the full skill content from the line-by-line matches and follow the loaded protocol.
 
 ### MODE: BRAINSTORM

@@ -25,11 +25,17 @@ instructing the architect to self-load `file:`-referenced skills via the
 `.swarm/bundled-skills/<slug>/SKILL.md` reference) and the search tool that
 previously couldn't read it back.
 
-`.git` content protection was hardened across five vectors so the new
+`.git` content protection was hardened across six vectors so the new
 dot-directory traversal never exposes `.git/config` or other repository
 internals: direct promotion, flag injection, mixed-include ride-along
 (`--glob !.git` appended whenever `--hidden --no-ignore` is added),
-fallback-engine leak, and a Windows case-insensitive `.Git` bypass.
+fallback-engine leak, a Windows case-insensitive `.Git` bypass, and — added
+after PR review — a **resolved-path guard**: a path is only promoted to a
+ripgrep operand when its *resolved* workspace-relative path (symlinks
+followed, traversals collapsed) contains no `.git` segment, which blocks
+nested `.git` directories (e.g. `.swarm/sub/.git/config`) and symlink aliases
+(e.g. `.foo -> .git`). The fallback engine's `.git` hard block is
+case-insensitive to match.
 
 ## Why
 
@@ -41,11 +47,20 @@ via its `file:.swarm/bundled-skills/...` reference got zero search results.
 
 ## Impact
 
-- Agents can now load bundled project skills as intended.
+- Agents can now load bundled project skills as intended. The self-load
+  protocol uses `max_results: 10000` and `max_lines: 10000` (both tool hard
+  caps), which covers the largest bundled skill (`swarm-pr-review`, ~1,990
+  lines with lines up to ~1,130 characters); if a skill ever exceeds even
+  that, the protocol fails loudly with `SKILL_LOAD_FAILED` and asks the user
+  instead of proceeding with partial content.
 - Explicitly targeting any dot-directory (`.claude/`, `.cache/`, etc.) via
   `include` now works through both the ripgrep and fallback search engines.
 - `.git/` remains fully blocked from search results regardless of how it is
-  included, on both engines and on case-insensitive filesystems.
+  included — including nested `.git` directories and symlink aliases — on
+  both engines and on case-insensitive filesystems.
+- Search now surfaces hard ripgrep errors (exit code 2, e.g. a malformed
+  glob) instead of silently returning zero matches, and rejects more than
+  100 comma-separated include/exclude patterns up front.
 
 ## Migration
 
