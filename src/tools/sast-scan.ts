@@ -742,8 +742,14 @@ export async function sastScan(
 	}
 
 	// Zero-coverage fail: preserved in both modes (only skip for capture mode, handled above)
+	// #2210: attach the reason so the payload carries WHY it failed — without
+	// it, pre_check_batch assumed findings above threshold and logged a
+	// misleading "found new findings" message for a zero-file scan.
+	let zeroCoverageError: string | undefined;
 	if (filesScanned === 0) {
 		verdict = 'fail';
+		zeroCoverageError =
+			'SAST requires at least one file to scan; zero files were scanned';
 	}
 
 	// Build summary
@@ -783,6 +789,9 @@ export async function sastScan(
 		verdict,
 		findings: finalFindings,
 		summary,
+		// #2210: surface the zero-coverage reason (mirrors the capture_baseline
+		// path's explicit error contract).
+		...(zeroCoverageError ? { error: zeroCoverageError } : {}),
 	};
 
 	if (baselineUsed) {

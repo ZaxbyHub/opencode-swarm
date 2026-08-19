@@ -188,3 +188,101 @@ describe('pre_check_batch secretscan evidence persistence failure (#2209)', () =
 		expect(result.gates_passed).toBe(true);
 	});
 });
+
+describe('pre_check_batch SAST zero-coverage failure reason (#2210)', () => {
+	let tempDir: string;
+	let warnSpy: { mock: { calls: string[][] }; restore: () => void };
+
+	beforeEach(() => {
+		tempDir = canonicalMkdtemp('pcb-sast-zero-');
+		fs.writeFileSync(path.join(tempDir, 'changed.xyz'), 'content\n');
+		// warn() is gated behind OPENCODE_SWARM_DEBUG — enable it and capture
+		// console.warn so the gate's failure reason is assertable.
+		process.env.OPENCODE_SWARM_DEBUG = '1';
+		const calls: string[][] = [];
+		const originalWarn = console.warn;
+		console.warn = (...args: unknown[]) => {
+			calls.push(args.map((a) => String(a)));
+		};
+		warnSpy = {
+			mock: { calls },
+			restore: () => {
+				console.warn = originalWarn;
+			},
+		};
+	});
+
+	afterEach(() => {
+		warnSpy.restore();
+		delete process.env.OPENCODE_SWARM_DEBUG;
+		Object.assign(_internals, originals);
+		fs.rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	function joinedWarns(): string {
+		return warnSpy.mock.calls.map((c) => c.join(' ')).join('\n');
+	}
+
+	test('baseline mode surfaces the zero-coverage error, not "found new findings"', async () => {
+		// Zero-coverage shape produced by sastScan on an empty/all-skipped
+		// file set (issue #2210 repro payload): verdict fail, 0 findings,
+		// and the #2210 error reason.
+		_internals.runSastScanWrapped = (async () =>
+			wrapped({
+				verdict: 'fail',
+				error:
+					'SAST requires at least one file to scan; zero files were scanned',
+				findings: [],
+				new_findings: [],
+				pre_existing_findings: [],
+				baseline_used: true,
+				summary: {
+					engine: 'tier_a',
+					files_scanned: 0,
+					findings_count: 0,
+					findings_by_severity: { critical: 0, high: 0, medium: 0, low: 0 },
+				},
+			})) as typeof _internals.runSastScanWrapped;
+
+		const result = await runPreCheckBatch(
+			{ directory: tempDir, files: ['changed.xyz'] },
+			tempDir,
+		);
+		expect(result.gates_passed).toBe(false);
+		// The gate-reason log carries the actual zero-coverage error (via the
+		// result-level error branch), and the misleading "found new findings
+		// above threshold" message is NOT emitted.
+		expect(joinedWarns()).toContain(
+			'SAST requires at least one file to scan; zero files were scanned',
+		);
+		expect(joinedWarns()).not.toContain(
+			'SAST scan found new findings above threshold',
+		);
+	});
+
+	test('a verdict-fail with no error field keeps the threshold message', async () => {
+		_internals.runSastScanWrapped = (async () =>
+			wrapped({
+				verdict: 'fail',
+				findings: [],
+				new_findings: [],
+				pre_existing_findings: [],
+				baseline_used: true,
+				summary: {
+					engine: 'tier_a',
+					files_scanned: 1,
+					findings_count: 0,
+					findings_by_severity: { critical: 0, high: 0, medium: 0, low: 0 },
+				},
+			})) as typeof _internals.runSastScanWrapped;
+
+		const result = await runPreCheckBatch(
+			{ directory: tempDir, files: ['changed.xyz'] },
+			tempDir,
+		);
+		expect(result.gates_passed).toBe(false);
+		expect(joinedWarns()).toContain(
+			'SAST scan found new findings above threshold - GATE FAILED',
+		);
+	});
+});

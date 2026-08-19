@@ -13,4 +13,4 @@ The validation bypass let invalid-anchor runs produce mixed, misleading tool res
 
 ## Migration
 
-No migration required. Runs anchored at a boundary-less subdirectory of an existing Swarm project that previously "passed" (with per-tool evidence errors buried in the payload) now fail fast with a clear message.
+No migration required. Runs anchored at a boundary-less subdirectory of an existing Swarm project that previously "passed" (with per-tool evidence errors buried in the payload) now fail fast with a clear message. Note: `assertProjectRoot` is reused unmodified and therefore also surfaces its pre-existing fail-CLOSED branches — a directory whose `realpathSync` throws, whose `.swarm`-bearing ancestor state is inaccessible (EPERM / ENOTDIR-class), whose ancestor search exceeds 20 levels, or whose ancestor project indicators are unreadable will now hard-fail at the pre-check-batch guard instead of deferring to evidence-write time.
