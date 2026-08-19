@@ -36,9 +36,10 @@ let _writeInFlight: Promise<void> = Promise.resolve();
 /**
  * Windows can transiently fail a rename with EEXIST/EBUSY/EPERM while another
  * process (an external snapshot reader, an AV scanner) briefly holds the
- * target open. Mirrors the retry policy in `bunWrite`
- * (src/utils/bun-compat.ts:36) — kept local rather than imported so this
- * module adds no new bun-compat exports for existing non-spread
+ * target open. Same codes, budget, and delay as the retry policy in `bunWrite`
+ * (src/utils/bun-compat.ts:36) — except this loop skips the sleep after the
+ * final attempt, which bunWrite still takes. Kept local rather than imported
+ * so this module adds no new bun-compat exports for existing non-spread
  * `mock.module('../utils/bun-compat', ...)` test factories to miss.
  */
 export const SNAPSHOT_RENAME_MAX_ATTEMPTS = 3;
@@ -419,7 +420,9 @@ export async function writeSnapshot(
 			// No-op after a successful swap (the temp path no longer exists);
 			// drops the orphan when every retry failed, so a persistently locked
 			// target cannot litter .swarm/session with one .tmp file per
-			// tool.execute.after. Mirrors src/evidence/task-file.ts:atomicWriteFile.
+			// tool.execute.after. Best-effort: an unlink blocked by something
+			// holding the fresh temp open can still leave the orphan behind.
+			// Mirrors src/evidence/task-file.ts:atomicWriteFile.
 			try {
 				unlinkSync(tempPath);
 			} catch {

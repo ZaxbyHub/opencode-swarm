@@ -6,7 +6,8 @@
  * EPERM — an external reader or AV scanner briefly holding
  * .swarm/session/state.json open) silently dropped the snapshot update and
  * left the on-disk state stale. The writer now retries the rename with the
- * same bounded policy as `bunWrite` (src/utils/bun-compat.ts:36) and cleans
+ * same codes/budget/delay as `bunWrite` (src/utils/bun-compat.ts:36 — except
+ * this loop skips the sleep after the final attempt) and best-effort cleans
  * up the orphaned temp file when the rename fails permanently.
  *
  * The rename is intercepted through the module's `_internals.rename` DI seam

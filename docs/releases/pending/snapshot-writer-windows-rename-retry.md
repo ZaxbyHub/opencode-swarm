@@ -6,7 +6,9 @@
 temp-file swap with a bare `renameSync`, inside a `catch` block that only logs.
 The rename now retries on the transient Windows sharing-violation codes
 (`EEXIST` / `EBUSY` / `EPERM`) with the same bounded policy the repository's
-own write shim already applies — 3 attempts, 50 ms apart — and breaks
+own write shim already applies — 3 attempts, 50 ms apart, same codes (one
+deliberate difference: `bunWrite` also sleeps after its final attempt; this
+loop skips that pointless terminal sleep) — and breaks
 immediately on any other error code.
 
 Two supporting changes:
@@ -30,8 +32,13 @@ in `bunWrite`. On Windows, a second process holding the destination open — an
 external reader tailing `.swarm/session/state.json`, or an antivirus scanner —
 makes `rename` fail transiently.
 
-The snapshot writer was the one writer in the repository without that defense.
-Because its `catch` only logs, a transient failure silently degraded an atomic
+The snapshot writer was the highest-frequency writer without this defense on
+its canonical-file swap — it is not the only one: `src/commands/handoff.ts`
+(`handoff.md`, `handoff-prompt.md`) and `src/evidence/task-file.ts`
+(`atomicWriteFile`) still perform bare `renameSync` swaps with the same
+transient exposure; unifying those behind a shared retrying helper is the
+remaining scope of #2035. Because the snapshot writer's `catch` only logs, a
+transient failure silently degraded an atomic
 update into a dropped one: the snapshot on disk stayed at its previous
 contents while the in-memory `swarmState` moved on. The writer runs on every
 `tool.execute.after`, so any consumer reading the snapshot (handoff, phase
@@ -60,6 +67,10 @@ No migration required. The change is internal to the snapshot write path:
 - The retry covers transient *rename* failures only. It does not attempt to
   make the write durable against a permanently locked target; after the budget
   is exhausted the failure is still logged and swallowed, as before.
+- The post-failure temp cleanup is best-effort: the `finally` `unlink` swallows
+  its own errors, so if something (e.g. a scanner holding the freshly written
+  temp open on Windows) blocks that unlink, an orphaned `.tmp.*` file can
+  still remain.
 - Simulated retry behavior is verified through the `_internals.rename` seam.
   The underlying Windows sharing-violation timing is not reproduced in CI —
   the same limitation applies to the pre-existing `bunWrite` retry loop.
