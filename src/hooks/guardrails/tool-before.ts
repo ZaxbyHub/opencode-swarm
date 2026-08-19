@@ -43,6 +43,7 @@ import {
 } from '../../state';
 import { telemetry } from '../../telemetry.js';
 import { warn } from '../../utils';
+import { normalizePatchIndentation } from '../../utils/patch-dedent';
 import { isPathUnderSwarmWorktreeBase } from '../../worktree/core.js';
 import { detectLoop } from '../loop-detector';
 import { normalizeToolName } from '../normalize-tool-name';
@@ -1746,34 +1747,40 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				'WRITE BLOCKED: Patch payload exceeds 1 MB — authority cannot be verified for all modified paths. Split into smaller patches.',
 			);
 		}
+		// #2206: strip a uniform leading indentation block (models emit diffs
+		// indented inside fenced/YAML blocks) so the column-0 anchored patterns
+		// below resolve the real target paths. A column-0 patch is a byte-identical
+		// no-op, so hunk context lines whose file content itself starts with `---`
+		// can never gain a phantom match.
+		const normalizedPatchText = normalizePatchIndentation(patchText);
 		const patchPathPattern = /\*\*\*\s+(?:Update|Add|Delete)\s+File:\s*(.+)/gi;
 		const diffPathPattern = /\+\+\+\s+b\/(.+)/gm;
 		const gitDiffPathPattern = /^diff --git a\/(.+?) b\/(.+?)$/gm;
 		const minusPathPattern = /^---\s+a\/(.+)$/gm;
 		const traditionalMinusPattern = /^---\s+([^\s].+?)(?:\t.*)?$/gm;
 		const traditionalPlusPattern = /^\+\+\+\s+([^\s].+?)(?:\t.*)?$/gm;
-		for (const match of patchText.matchAll(patchPathPattern))
+		for (const match of normalizedPatchText.matchAll(patchPathPattern))
 			paths.add(match[1].trim());
-		for (const match of patchText.matchAll(diffPathPattern)) {
+		for (const match of normalizedPatchText.matchAll(diffPathPattern)) {
 			const p = match[1].trim();
 			if (p !== '/dev/null') paths.add(p);
 		}
-		for (const match of patchText.matchAll(gitDiffPathPattern)) {
+		for (const match of normalizedPatchText.matchAll(gitDiffPathPattern)) {
 			const aPath = match[1].trim();
 			const bPath = match[2].trim();
 			if (aPath !== '/dev/null') paths.add(aPath);
 			if (bPath !== '/dev/null') paths.add(bPath);
 		}
-		for (const match of patchText.matchAll(minusPathPattern)) {
+		for (const match of normalizedPatchText.matchAll(minusPathPattern)) {
 			const p = match[1].trim();
 			if (p !== '/dev/null') paths.add(p);
 		}
-		for (const match of patchText.matchAll(traditionalMinusPattern)) {
+		for (const match of normalizedPatchText.matchAll(traditionalMinusPattern)) {
 			const p = match[1].trim();
 			if (p !== '/dev/null' && !p.startsWith('a/') && !p.startsWith('b/'))
 				paths.add(p);
 		}
-		for (const match of patchText.matchAll(traditionalPlusPattern)) {
+		for (const match of normalizedPatchText.matchAll(traditionalPlusPattern)) {
 			const p = match[1].trim();
 			if (p !== '/dev/null' && !p.startsWith('a/') && !p.startsWith('b/'))
 				paths.add(p);
