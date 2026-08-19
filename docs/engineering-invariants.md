@@ -685,7 +685,7 @@ Two failures motivated the automated check:
 | `tool` | metadata / handler / plugin-object / `TOOL_NAMES` / `AGENT_TOOL_MAP` coherence | reuses `scripts/check-tool-registration.ts` |
 | `command` | `COMMAND_NAME_SET` parity; `subcommandOf` parents exist | `src/commands/registry.ts` |
 | `agent` | `ALL_AGENT_NAMES` ↔ `AGENT_TOOL_MAP`; opt-in maps only reference real agents | `src/config/agent-names.ts`, `src/config/constants.ts` |
-| `docs-claim` | public numeric QA-gate claims match the docs-visible pipeline registry; hand-copied dispatch lane-cap prose (digits and spelled-out forms) matches the exported `MAX_LANES`; pending release fragments are scanned for lane-cap citations | `src/config/qa-gate-pipeline.ts`, `src/tools/dispatch-lanes.ts` |
+| `docs-claim` | public numeric QA-gate claims match the docs-visible pipeline registry; hand-copied dispatch lane-cap prose (digits plus the in-tree spelled form ("eight")) matches the exported `MAX_LANES`; pending release fragments are scanned for lane-cap citations | `src/config/qa-gate-pipeline.ts`, `src/tools/dispatch-lanes.ts` |
 
 ### Rules
 

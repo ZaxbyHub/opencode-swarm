@@ -184,9 +184,10 @@ function spellNumber(token: string): number {
 
 /**
  * Scans pending release-note fragments for hand-copied lane-cap prose and
- * verifies each against the imported MAX_LANES constant. Every phrasing regex
- * is checked independently, so a fragment citing the cap twice with two
- * different wrong numbers yields two findings.
+ * verifies each against the imported MAX_LANES constant. Every occurrence of
+ * every phrasing is checked, not just the first; duplicate hits at the same
+ * wrong number (including overlapping phrasings on one sentence) collapse
+ * to a single finding, while distinct wrong numbers each get their own.
  */
 function detectPendingFragmentLaneCapDrift(
 	root: string,
@@ -208,22 +209,31 @@ function detectPendingFragmentLaneCapDrift(
 	for (const name of fragmentNames) {
 		const relative = `${PENDING_RELEASE_FRAGMENT_DIR}/${name}`;
 		const contents = fs.readFileSync(path.join(dir, name), 'utf-8');
+		// Dedupe per (file, wrong number): regexes can overlap on the SAME
+		// sentence (e.g. "99 lanes per call (MAX_LANES=99)" matches two
+		// phrasings), and each distinct wrong number should surface exactly
+		// once. The first captured token is kept for the message.
+		const wrongNumberTokens = new Map<number, string>();
 		for (const regex of LANE_CAP_FRAGMENT_REGEXES) {
-			const match = regex.exec(contents);
-			if (!match?.[1]) continue;
-			const actual = spellNumber(match[1]);
-			if (actual !== MAX_LANES) {
-				findings.push({
-					category,
-					severity: 'warning',
-					file: relative,
-					message: `release fragment lane-cap citation says ${match[1]}, but MAX_LANES has ${MAX_LANES}`,
-				});
+			// matchAll requires the g flag; checking every occurrence means
+			// cloning each module-level regex with it instead of mutating the
+			// shared pattern (exec alone would only see the first hit).
+			const global = new RegExp(regex.source, `${regex.flags}g`);
+			for (const match of contents.matchAll(global)) {
+				if (!match[1]) continue;
+				const actual = spellNumber(match[1]);
+				if (actual !== MAX_LANES && !wrongNumberTokens.has(actual)) {
+					wrongNumberTokens.set(actual, match[1]);
+				}
 			}
-			// Report every drifted phrasing independently: a fragment that
-			// cites the cap twice with two different wrong numbers is two
-			// findings. Overlap between regexes on the SAME sentence is
-			// avoided by anchoring each on a distinct phrasing.
+		}
+		for (const token of wrongNumberTokens.values()) {
+			findings.push({
+				category,
+				severity: 'warning',
+				file: relative,
+				message: `release fragment lane-cap citation says ${token}, but MAX_LANES has ${MAX_LANES}`,
+			});
 		}
 	}
 }
