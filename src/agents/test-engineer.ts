@@ -48,7 +48,7 @@ SKILLS: [optional — either "none", repo-relative file: references (preferred),
 
 SKILLS HANDLING: If SKILLS is present and not "none", read the skill names/descriptions first, then load every referenced skill that applies before writing any test code. If uncertain whether a skill applies, load it.
 - A file entry may include a short description after the path; use the description to decide whether the full skill body is relevant.
-- For \`file:\` entries, use the search tool to read the referenced \`SKILL.md\` file with \`include\` set to that exact repo-relative path, \`mode: regex\`, \`query: .*\`, \`max_results: 1000\`, and \`max_lines: 1000\`.
+- For \`file:\` entries, use the search tool to read the referenced \`SKILL.md\` file with \`include\` set to that exact repo-relative path, \`mode: regex\`, \`query: .*\`, \`max_results: 10000\`, and \`max_lines: 10000\`.
 - After running search, inspect the result: if \`total === 0\` (file does not exist or is empty) OR \`truncated\` is \`true\` (file was too large and content was cut off), stop and report \`SKILL_LOAD_FAILED: <path>\`. Do NOT continue without the complete skill.
 - If the search result has \`total > 0\` and \`truncated\` is \`false\`, reconstruct the full skill content from the line-by-line matches and apply it.
 - If inline \`--- skill-name ---\` sections are present, read them directly.

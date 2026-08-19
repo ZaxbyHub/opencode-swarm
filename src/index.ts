@@ -2953,14 +2953,18 @@ async function initializeOpenCodeSwarm(
 						},
 						knowledgeConfig,
 					);
-					// (#1849) Re-snapshot output.args AFTER directive injection so the
-					// tool.execute.after ack collector recovers the FINAL prompt (with
-					// the <delegate_knowledge_directives> block + trace_id). The guardrails
-					// snapshot at step 1 captured the PRE-injection args; without this
-					// re-snapshot the after path could not find the directive block and the
-					// entire delegate-ack reconciliation would be dark in production.
-					setStoredInputArgs(input.callID, output.args);
 				}
+				// (#1849) Re-snapshot output.args after (optional) directive injection
+				// so tool.execute.after consumers recover the FINAL args. This store is
+				// UNCONDITIONAL (issue #2214): the SDK toolAfter input carries no args,
+				// guardrails' snapshot sits below its `if (!resolved) return` early-out
+				// and therefore never runs for the architect session, and this line is
+				// the only production store site for architect Task dispatches. Gating
+				// it on knowledgeConfig.enabled left subagent_type unresolvable in
+				// toolAfter when knowledge is disabled, silently skipping coder
+				// settlement finalization, Stage B advancement, and gate-evidence
+				// recording for every architect delegation.
+				setStoredInputArgs(input.callID, output.args);
 
 				// v6.29: One-time 50% context pressure warning
 				const pressurePct = getSessionBudgetPct(input.sessionID);
@@ -3126,6 +3130,36 @@ async function initializeOpenCodeSwarm(
 						},
 						deniedArgs,
 					);
+				}
+				// Issue #2214: a denied Task call never fires toolAfter. If the
+				// delegation gate (step 4) already durably began a coder
+				// settlement for this callID before a later fail-closed gate
+				// (steps 5-8) rejected it, roll the DISPATCHED WAL back to
+				// ABORTED so the task is not wedged until a process restart.
+				// Never throws — the original denial propagates unchanged.
+				//
+				// INVARIANT (PR #2223 review, advisory): rollback ELIGIBILITY reuses
+				// `failClosedRegionCompleted`, so this block only fires when the
+				// denial came from the fail-closed region. That is correct today
+				// because no uncaught await exists in the advisory tail below the
+				// flag set (verified empirically by review fault injection). Any
+				// future raw-awaited call added to that tail must either set the
+				// flag first or throw only after this rollback — otherwise an
+				// advisory-tail throw would reject the call WITHOUT rolling back a
+				// begun settlement, reopening the #2214 wedge class. The
+				// gate-denial-wiring static guard pins this contract.
+				if (
+					!failClosedRegionCompleted &&
+					(normalizeToolName(input.tool) === 'Task' ||
+						normalizeToolName(input.tool) === 'task')
+				) {
+					try {
+						await delegationGateHooks.abortDeniedSettlementForCall(
+							input.callID,
+						);
+					} catch {
+						/* rollback is best-effort; the denial still propagates */
+					}
 				}
 				throw err;
 			}

@@ -14,6 +14,8 @@ export async function runHallucinationGate(
 ): Promise<GateResult> {
 	const { phase, dir, sessionID, agentsDispatched, safeWarn } = ctx;
 
+	let hallucinationGateEnabled = false;
+
 	try {
 		const preamble = await resolveGatePreamble(dir, sessionID);
 
@@ -21,6 +23,7 @@ export async function runHallucinationGate(
 			preamble.resolved &&
 			preamble.effectiveGates?.hallucination_guard === true
 		) {
+			hallucinationGateEnabled = true;
 			if (preamble.identityBound === false) {
 				return {
 					blocked: true,
@@ -106,11 +109,23 @@ export async function runHallucinationGate(
 			}
 		}
 	} catch (hgError) {
-		// Non-blocking — treat as warning and continue
-		safeWarn(
-			`[phase_complete] Hallucination guard error (non-blocking):`,
-			hgError,
-		);
+		if (hallucinationGateEnabled) {
+			// Fail-closed: hallucination gate errors block phase completion (issue #2099 recurrence)
+			return {
+				blocked: true,
+				reason: 'HALLUCINATION_GATE_ERROR',
+				message: `Phase ${phase} cannot be completed: hallucination guard gate encountered an error when hallucination_guard was enabled. Error: ${String(hgError)}`,
+				agentsDispatched,
+				agentsMissing: [],
+				warnings: [`HALLUCINATION_GATE_ERROR: ${String(hgError)}`],
+			};
+		} else {
+			// Non-blocking when hallucination_guard is off
+			safeWarn(
+				`[phase_complete] Hallucination guard error (non-blocking):`,
+				hgError,
+			);
+		}
 	}
 
 	return { blocked: false, agentsDispatched, agentsMissing: [], warnings: [] };

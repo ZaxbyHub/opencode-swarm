@@ -538,16 +538,37 @@ export async function preProvisionCollisionCheck(
 	interface ParsedEntry {
 		path: string;
 		branch: string | undefined;
+		/**
+		 * #2208: git marks a registration `prunable` when the worktree's
+		 * directory is gone (crash/kill mid-task, interrupted remove). A
+		 * prunable registration is stale metadata, not an active lane —
+		 * excluding it below lets a restart recover the task instead of
+		 * stalling on STANDARD_WORKTREE_OWNER_PROTECTED for the full
+		 * provisioning-lease window. `git worktree add` is atomic
+		 * (registration exists iff the worktree exists), so a provisioning
+		 * lane that is mid-creation can never appear as prunable.
+		 */
+		prunable: boolean;
 	}
 	const entries: ParsedEntry[] = [];
-	let current: ParsedEntry = { path: '', branch: undefined };
+	let current: ParsedEntry = {
+		path: '',
+		branch: undefined,
+		prunable: false,
+	};
 	for (const rawLine of stdout.split('\n')) {
 		const line = rawLine.trim();
 		if (line.startsWith('worktree ')) {
 			if (current.path) entries.push(current);
-			current = { path: line.slice('worktree '.length), branch: undefined };
+			current = {
+				path: line.slice('worktree '.length),
+				branch: undefined,
+				prunable: false,
+			};
 		} else if (line.startsWith('branch ')) {
 			current.branch = line.slice('branch '.length);
+		} else if (line === 'prunable' || line.startsWith('prunable ')) {
+			current.prunable = true;
 		}
 	}
 	if (current.path) entries.push(current);
@@ -555,9 +576,12 @@ export async function preProvisionCollisionCheck(
 	// SC-004: Scan ALL worktrees to find ANY lane for this taskId
 	// (regardless of which session owns it). A lane is identified by a branch
 	// whose last path segment equals taskId and whose prefix matches the
-	// swarm lane naming convention.
+	// swarm lane naming convention. #2208: prunable (stale) registrations are
+	// skipped — the recovery path in provisionWorktree prunes the stale
+	// registration and reconciles the leftover branch.
 	for (const entry of entries) {
 		if (!entry.branch) continue;
+		if (entry.prunable) continue;
 		// Strip "refs/heads/" prefix
 		const branchName = entry.branch.startsWith('refs/heads/')
 			? entry.branch.slice('refs/heads/'.length)

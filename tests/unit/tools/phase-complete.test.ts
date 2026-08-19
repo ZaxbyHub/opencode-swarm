@@ -1919,7 +1919,13 @@ describe('phase_complete tool', () => {
 			).toBe(false);
 		});
 
-		test('ADVERSARY: plan.json with null phases field - normal enforcement applies', async () => {
+		test('ADVERSARY: plan.json with null phases field - completion-verify-gate fail-closes', async () => {
+			// Sibling test ("plan.json is corrupt JSON" ~line 1895) preserves the
+			// dispatch-fallback adversarial coverage (success=false, status='incomplete',
+			// agentsMissing contains 'coder', no fallback warning). This test is its
+			// counterpart for the fail-closed catch path: a null phases field causes
+			// .find() on null to throw inside the gate, which the fail-closed catch
+			// must convert to status='blocked' instead of letting it fall through.
 			// Set up permissive config with required_agents
 			fs.mkdirSync(path.join(tempDir, '.opencode'), { recursive: true });
 			fs.writeFileSync(
@@ -1950,16 +1956,9 @@ describe('phase_complete tool', () => {
 			});
 			const parsed = JSON.parse(result);
 
-			// .find() on null throws, caught by try/catch, falls through to normal enforcement
+			// .find() on null throws, caught by completion-verify-gate's fail-closed catch
 			expect(parsed.success).toBe(false);
-			expect(parsed.status).toBe('incomplete');
-			expect(parsed.agentsMissing).toContain('coder');
-			// Fallback should NOT activate due to null phases error
-			expect(
-				parsed.warnings.some((w: string) =>
-					w.includes('Agent dispatch fallback'),
-				),
-			).toBe(false);
+			expect(parsed.status).toBe('blocked');
 		});
 
 		test('ADVERSARY: plan.json with task having unexpected status value - fallback does NOT activate', async () => {

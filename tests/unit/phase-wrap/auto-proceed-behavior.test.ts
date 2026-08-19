@@ -221,7 +221,9 @@ describe('SC-002: Full-auto independence', () => {
 		const sc002Start = architectText.indexOf(
 			'Full-auto mode (critic oversight) is independent',
 		);
-		const sc002Section = architectText.slice(sc002Start, sc002Start + 200);
+		// 600-char window: the #2207 rewrite inserted the explicit
+		// full-auto-never-delegates sentences before these clauses.
+		const sc002Section = architectText.slice(sc002Start, sc002Start + 600);
 		expect(sc002Section).toContain('auto_proceed has no additional effect');
 	});
 
@@ -230,7 +232,7 @@ describe('SC-002: Full-auto independence', () => {
 		const sc002Start = architectText.indexOf(
 			'Full-auto mode (critic oversight) is independent',
 		);
-		const sc002Section = architectText.slice(sc002Start, sc002Start + 200);
+		const sc002Section = architectText.slice(sc002Start, sc002Start + 600);
 		expect(sc002Section).toContain('existing');
 		expect(sc002Section).toContain('override continues to work');
 	});

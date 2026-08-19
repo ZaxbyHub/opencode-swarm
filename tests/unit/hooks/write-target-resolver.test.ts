@@ -371,3 +371,59 @@ describe('write-target resolver — multi-field and non-string payload guards (F
 		});
 	});
 });
+
+describe('write-target resolver — uniformly indented payloads (#2206)', () => {
+	// Models emit diffs indented inside fenced markdown / YAML / JSON blocks.
+	// The resolver dedents the min common leading whitespace before the
+	// column-0 anchored classification/extraction regexes run.
+	test('a 2-space-indented unified diff resolves its target', () => {
+		const payload = [
+			'  --- a/src/a.ts',
+			'  +++ b/src/a.ts',
+			'  @@ -1 +1 @@',
+			'  -a',
+			'  +b',
+		].join('\n');
+		const result = resolveWriteTargets(
+			'patch',
+			{ patch: payload },
+			{ directory: process.cwd() },
+		);
+		expect(result).toEqual({ status: 'resolved', paths: ['src/a.ts'] });
+	});
+
+	test('a 2-space-indented native patch classifies native and resolves its targets', () => {
+		const payload = [
+			'  *** Begin Patch',
+			'  *** Update File: src/old.ts',
+			'  *** Move to: src/new.ts',
+			'  *** End Patch',
+		].join('\n');
+		const result = resolveWriteTargets(
+			'apply_patch',
+			{ patch: payload },
+			{ directory: process.cwd() },
+		);
+		expect(result).toEqual({
+			status: 'resolved',
+			paths: ['src/old.ts', 'src/new.ts'],
+		});
+	});
+
+	test('an indented unified diff with a stray *** End Patch trailer resolves as unified (no native misclassification)', () => {
+		const payload = [
+			'  --- a/src/a.ts',
+			'  +++ b/src/a.ts',
+			'  @@ -1 +1 @@',
+			'  -a',
+			'  +b',
+			'  *** End Patch',
+		].join('\n');
+		const result = resolveWriteTargets(
+			'patch',
+			{ patch: payload },
+			{ directory: process.cwd() },
+		);
+		expect(result).toEqual({ status: 'resolved', paths: ['src/a.ts'] });
+	});
+});

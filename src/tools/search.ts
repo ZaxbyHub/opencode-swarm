@@ -67,6 +67,7 @@ const MAX_FILE_SIZE_BYTES = 1024 * 1024; // 1MB per file
 const HARD_CAP_RESULTS = 10000;
 const HARD_CAP_LINES = 10000;
 const MAX_QUERY_LENGTH = 20_000;
+const MAX_INCLUDE_PATTERNS = 100;
 const MAX_RG_STDOUT_BYTES = 8 * 1024 * 1024;
 const MAX_RG_STDERR_BYTES = 64 * 1024;
 const FALLBACK_MAX_FILES = 20_000;
@@ -138,21 +139,33 @@ function containsWindowsAttacks(str: string): boolean {
 }
 
 /**
- * Validate that a path is within the workspace boundary.
+ * Resolve a path against the workspace and return the workspace-relative
+ * resolved path (symlinks followed, traversals collapsed), or null when the
+ * path does not exist or escapes the workspace boundary.
  */
-function isPathInWorkspace(filePath: string, workspace: string): boolean {
+function resolveWithinWorkspace(
+	filePath: string,
+	workspace: string,
+): string | null {
 	try {
 		const resolvedPath = path.resolve(workspace, filePath);
 		const realWorkspace = fs.realpathSync(workspace);
 		const realResolvedPath = fs.realpathSync(resolvedPath);
 		const relativePath = path.relative(realWorkspace, realResolvedPath);
 		if (relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
-			return false;
+			return null;
 		}
-		return true;
+		return relativePath;
 	} catch {
-		return false;
+		return null;
 	}
+}
+
+/**
+ * Validate that a path is within the workspace boundary.
+ */
+function isPathInWorkspace(filePath: string, workspace: string): boolean {
+	return resolveWithinWorkspace(filePath, workspace) !== null;
 }
 
 /**
@@ -171,6 +184,36 @@ function splitGlobPatterns(value?: string): string[] {
 				.map((p) => p.trim())
 				.filter(Boolean)
 		: [];
+}
+
+const GLOB_METACHARACTERS = /[*?[\]{}]/;
+
+function isExactPath(pattern: string): boolean {
+	return !GLOB_METACHARACTERS.test(pattern);
+}
+
+function targetsDotDirectory(pattern: string): boolean {
+	const firstSegment = pattern.split(/[\\/]/)[0];
+	return (
+		!!firstSegment &&
+		firstSegment.startsWith('.') &&
+		firstSegment !== '.' &&
+		firstSegment !== '..'
+	);
+}
+
+/**
+ * Whether any segment of a RESOLVED workspace-relative path is a git metadata
+ * directory. The promotion gate checks the resolved path, not the caller's
+ * pattern: a nested `.git` (`.swarm/sub/.git/config`) or a symlink alias
+ * (`.foo -> .git`) resolves into `.git/...` and must never be promoted to a
+ * ripgrep path operand, because explicit operands bypass hidden-dir and
+ * gitignore filtering (#2212 follow-up).
+ */
+function hasGitSegment(resolvedRelativePath: string): boolean {
+	return resolvedRelativePath
+		.split(/[\\/]/)
+		.some((segment) => segment.toLowerCase() === '.git');
 }
 
 function toWorkspaceRelativePath(
@@ -250,10 +293,55 @@ async function ripgrepSearch(
 		'-n', // line numbers
 	];
 
-	// Add glob patterns for include/exclude
-	for (const pattern of splitGlobPatterns(opts.include)) {
-		args.push('--glob', pattern);
+	// Partition include patterns: exact file paths targeting dot-directories
+	// are promoted to path operands so ripgrep bypasses hidden-dir and
+	// gitignore filtering for explicitly named files.
+	const includes = splitGlobPatterns(opts.include);
+	const promotablePaths: string[] = [];
+	const globIncludes: string[] = [];
+
+	for (const pattern of includes) {
+		const resolvedRelative = resolveWithinWorkspace(pattern, opts.workspace);
+		if (
+			isExactPath(pattern) &&
+			targetsDotDirectory(pattern) &&
+			pattern.split(/[\\/]/)[0]?.toLowerCase() !== '.git' &&
+			resolvedRelative !== null &&
+			!hasGitSegment(resolvedRelative)
+		) {
+			promotablePaths.push(pattern);
+		} else {
+			globIncludes.push(pattern);
+		}
 	}
+
+	let pathOperands: string[];
+	if (promotablePaths.length > 0 && globIncludes.length === 0) {
+		// All includes are exact dot-dir paths — use as path operands directly
+		pathOperands = promotablePaths;
+	} else {
+		// Glob patterns present or mixed: use standard glob-based search
+		for (const pattern of [...globIncludes, ...promotablePaths]) {
+			args.push('--glob', pattern);
+		}
+		// When any include targets a dot-directory (excluding .git), enable
+		// hidden/ignored traversal. .git is excluded to prevent leaking tokens
+		// from .git/config and other sensitive git internals.
+		if (
+			includes.some(
+				(p) =>
+					targetsDotDirectory(p) &&
+					p.split(/[\\/]/)[0]?.toLowerCase() !== '.git',
+			)
+		) {
+			args.push('--hidden', '--no-ignore');
+			// Exclude .git even with --hidden --no-ignore: a mixed include like
+			// ".swarm/..., .git/config" would otherwise let .git ride along.
+			args.push('--glob', '!.git');
+		}
+		pathOperands = ['.'];
+	}
+
 	for (const pattern of splitGlobPatterns(opts.exclude)) {
 		args.push('--glob', `!${pattern}`); // ! negates glob in ripgrep
 	}
@@ -264,7 +352,7 @@ async function ripgrepSearch(
 	}
 
 	// Keep all options before `--`; query and path operands cannot be flags.
-	args.push('--', opts.query, '.');
+	args.push('--', opts.query, ...pathOperands);
 
 	const run = await _internals.runExternalTool({
 		executable: rgPath,
@@ -303,6 +391,17 @@ async function ripgrepSearch(
 					error: true,
 					type: 'invalid-query',
 					message: `Invalid query: ${run.stderr.split('\n')[0]}`,
+				};
+			}
+			// Exit code 2 is a hard error (invalid glob, unreadable operand, IO
+			// failure). Exit 1 merely means "no matches". Surface hard errors
+			// instead of silently returning zero matches, which is
+			// indistinguishable from an empty result set for the caller.
+			if (run.exitCode === 2) {
+				return {
+					error: true,
+					type: 'unknown',
+					message: `ripgrep error: ${run.stderr.split('\n')[0]}`,
 				};
 			}
 		}
@@ -442,7 +541,15 @@ function collectFiles(
 			}
 
 			if (entry.isDirectory()) {
-				if (DEFAULT_SKIP_DIRS.has(entry.name)) {
+				// `.git` is hard-blocked case-insensitively: on case-insensitive
+				// filesystems a repo whose git dir was renamed `.Git` is still the
+				// git metadata directory and must never be traversed, matching the
+				// ripgrep engine's promotion gate.
+				if (
+					entry.name.toLowerCase() === '.git' ||
+					(DEFAULT_SKIP_DIRS.has(entry.name) &&
+						!includeGlobs.some((g) => g.split(/[\\/]/)[0] === entry.name))
+				) {
 					continue;
 				}
 				collectFiles(
@@ -625,7 +732,11 @@ export const search: ToolDefinition = createSwarmTool({
 			.string()
 			.optional()
 			.describe(
-				'Glob pattern for files to include (e.g., "*.ts", "src/**/*.js")',
+				'Glob pattern for files to include (e.g., "*.ts", "src/**/*.js"). ' +
+					'An exact repo-relative path under a dot-directory ' +
+					'(e.g., ".swarm/bundled-skills/<slug>/SKILL.md") is searched ' +
+					'directly, bypassing hidden-directory and ignore filtering; ' +
+					'.git content is never searchable.',
 			),
 		exclude: z
 			.string()
@@ -716,6 +827,33 @@ export const search: ToolDefinition = createSwarmTool({
 					error: true,
 					type: 'invalid-query',
 					message: 'Query contains invalid control characters',
+				} satisfies SearchError,
+				null,
+				2,
+			);
+		}
+
+		// Bound the number of include/exclude patterns: each pattern becomes a
+		// `--glob <pat>` argv pair (and exact dot-dir paths become path
+		// operands), so an unbounded list can exceed OS argv limits.
+		if (include && splitGlobPatterns(include).length > MAX_INCLUDE_PATTERNS) {
+			return JSON.stringify(
+				{
+					error: true,
+					type: 'invalid-query',
+					message: `Too many include patterns (max ${MAX_INCLUDE_PATTERNS})`,
+				} satisfies SearchError,
+				null,
+				2,
+			);
+		}
+
+		if (exclude && splitGlobPatterns(exclude).length > MAX_INCLUDE_PATTERNS) {
+			return JSON.stringify(
+				{
+					error: true,
+					type: 'invalid-query',
+					message: `Too many exclude patterns (max ${MAX_INCLUDE_PATTERNS})`,
 				} satisfies SearchError,
 				null,
 				2,

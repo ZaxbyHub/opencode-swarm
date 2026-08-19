@@ -90,6 +90,8 @@ import type {
 import * as logger from '../utils/logger';
 import { isStrictTaskId } from '../validation/task-id';
 import {
+	abortCoderSettlement,
+	abortCoderSettlementIfDoomed,
 	beginCoderSettlement,
 	completeCoderSettlementCleanup,
 	recordCoderMergeProvenance,
@@ -958,6 +960,14 @@ export interface CoverageMissDiagnostic {
 	 * text is effectively absent from ACCEPTANCE. Renderers must emit the
 	 * "requirement text completely missing" fallback instead of a
 	 * divergence pointer.
+	 *
+	 * Issue #2215: a SUFFIX of the body `COVERAGE_DIAG_MIN_PREFIX`+ characters
+	 * long that occurs as a substring ANYWHERE in the acceptance text ALSO
+	 * prevents this flag from being set. So the flag means: no ≥10-char prefix
+	 * of the body AND no ≥10-char suffix of the body appears anywhere in the
+	 * acceptance text. A body that is present but not aligned at character 0
+	 * (e.g. sitting behind a leading id-label glue, or embedded mid-prompt with
+	 * other dispatch fields around it) keeps the divergence-pointer rendering.
 	 */
 	completelyMissing?: boolean;
 	corruptionHint?: string;
@@ -968,9 +978,15 @@ const COVERAGE_DIAG_MAX_SCAN = 400;
 /**
  * Issue #2204: minimum longest-matching-prefix length for the divergence
  * pointer to be meaningful. Below this, the match is treated as coincidental
- * (e.g. a shared `": "` after a field label) and the diagnostic reports the
- * requirement text as completely missing instead of pointing at a random
- * "divergence" word in the prompt.
+ * (e.g. a short shared prefix, such as the `": "` after a field label — the
+ * colon is only illustrative; ANY short coincidental content triggers this)
+ * and the diagnostic reports the requirement text as completely missing
+ * instead of pointing at a random "divergence" word in the prompt.
+ *
+ * Issue #2215: the SAME threshold is applied to the longest SUFFIX of the body
+ * that occurs as a substring anywhere in the acceptance text, so a body whose
+ * tail is present in ACCEPTANCE is treated as present-but-shifted rather than
+ * absent.
  */
 const COVERAGE_DIAG_MIN_PREFIX = 10;
 
@@ -982,6 +998,46 @@ const COVERAGE_DIAG_MIN_PREFIX = 10;
  * for the remainder rather than growing the error without limit.
  */
 export const ACCEPTANCE_EXPECTED_BODY_CAP = 2000;
+
+/**
+ * Issue #2215: length of the longest SUFFIX of `expected` that occurs as a
+ * substring ANYWHERE in `acceptance`, bounded by `maxScan` so this stays
+ * O(1)-bounded on large spec bodies exactly like the prefix growth loop in
+ * `describeCoverageMiss`.
+ *
+ * True symmetric counterpart to that loop: the prefix loop grows a PREFIX of
+ * `expected` and asks `acceptance.includes(...)`; this grows a SUFFIX of
+ * `expected` and asks the same question. It is anchored only on the `expected`
+ * side — it does NOT assume the match sits at the literal end of `acceptance`,
+ * because the "acceptance text" this diagnostic receives is the full delegation
+ * prompt blob (`prompt`/`description`/`task`/`input`/`message` concatenated at
+ * the toolBefore call site), not a narrow slice of the ACCEPTANCE field. The
+ * dispatch examples in src/agents/architect.ts place `SKILLS:` after
+ * `ACCEPTANCE:`, and `SKILLS:` is optional (coder.ts, reviewer.ts) and can
+ * also be auto-injected after this check runs — so a verbatim body may sit
+ * mid-blob or at its tail, and searching anywhere covers both. (A
+ * tail-position character compare would miss the mid-blob case and falsely
+ * report the body absent.)
+ *
+ * The greedy grow-until-it-fails loop is exact: if a suffix of length k is a
+ * substring of `acceptance`, every shorter suffix is a substring of that one,
+ * so "is a substring" is monotone in k and the first failure is the maximum.
+ */
+function longestCommonSuffixLength(
+	expected: string,
+	acceptance: string,
+	maxScan: number,
+): number {
+	let len = 0;
+	const cap = Math.min(expected.length, maxScan);
+	while (
+		len < cap &&
+		acceptance.includes(expected.slice(expected.length - len - 1))
+	) {
+		len++;
+	}
+	return len;
+}
 
 export function describeCoverageMiss(params: {
 	rawExpectedBody: string;
@@ -1016,14 +1072,81 @@ export function describeCoverageMiss(params: {
 			'the text contains a Latin-1 mojibake byte sequence (e.g. Â§, Ã©) — re-save spec.md as UTF-8';
 	}
 	// #2204: a sub-threshold longest-matching-prefix is coincidental noise (a
-	// shared `": "` or similar), not an aligned prefix — report the requirement
-	// text as completely missing rather than pointing at a random divergence word.
+	// short shared run such as a `": "` after a field label — the colon is only
+	// illustrative, ANY short coincidental content lands here), not an aligned
+	// prefix. But a failed prefix alone does NOT prove the body is absent, so
+	// #2215 checks the symmetric anchor before declaring it missing.
 	if (divergenceOffset < COVERAGE_DIAG_MIN_PREFIX) {
+		const suffixLen = longestCommonSuffixLength(
+			normalizedExpected,
+			normalizedAcceptance,
+			COVERAGE_DIAG_MAX_SCAN,
+		);
+		if (suffixLen < COVERAGE_DIAG_MIN_PREFIX) {
+			// Neither a meaningful PREFIX nor a meaningful SUFFIX of the requirement
+			// body occurs anywhere in ACCEPTANCE — the text is genuinely absent, not
+			// just a coincidental short prefix match (#2204).
+			return {
+				expectedSnippet: normalizedExpected.slice(0, COVERAGE_DIAG_SNIPPET_CAP),
+				foundSnippet: '',
+				divergenceOffset: 0,
+				completelyMissing: true,
+				...(corruptionHint ? { corruptionHint } : {}),
+			};
+		}
+		// #2215: a meaningful SUFFIX of the body was found somewhere in ACCEPTANCE
+		// even though nothing aligns from position 0 — the text is PRESENT but
+		// shifted, e.g. by a leading id-label glue (a spec bullet of the form
+		// `- **FR-001**: <body>` leaves a `": "` on the body extracted
+		// by `extractSpecRequirementBodyById`, so a verbatim paste written as
+		// `FR-001 - <body>` misaligns by two characters) or by spec.md-side
+		// corruption near — not at — the start (#1896's destroyed `§`-as-`??`).
+		// Point at the mismatched HEAD region instead of falsely claiming the text
+		// is absent. `divergenceOffset` stays 0, which is accurate (nothing
+		// meaningful aligns from the very start — any match there is under
+		// `COVERAGE_DIAG_MIN_PREFIX`) and flows into the renderer's "(no aligned
+		// prefix found)" divergence-pointer branch.
+		const matchedSuffix = normalizedExpected.slice(
+			normalizedExpected.length - suffixLen,
+		);
+		// >= 0 by construction: `matchedSuffix` is exactly the last window
+		// `longestCommonSuffixLength` confirmed with `.includes()`. The match can
+		// sit ANYWHERE in ACCEPTANCE (the prompt blob usually continues past it,
+		// e.g. with a trailing `SKILLS:` line), so its position must be located
+		// rather than computed from `normalizedAcceptance.length`.
+		const foundIdx = normalizedAcceptance.indexOf(matchedSuffix);
+		// `Math.max(0, …)` is defensive only: `suffixLen` cannot exceed
+		// `normalizedExpected.length`, and it cannot EQUAL it either — that would
+		// mean the whole body is a substring of ACCEPTANCE, and
+		// `checkAcceptanceCoversFrRefs` only calls this function after the very
+		// same `normalizedAcceptance.includes(normalizedExpected)` returned false.
+		// So `expectedSnippet` below is always non-empty.
+		const mismatchedHeadLen = Math.max(
+			0,
+			normalizedExpected.length - suffixLen,
+		);
+		const expectedSnippet = normalizedExpected.slice(
+			0,
+			Math.min(mismatchedHeadLen, COVERAGE_DIAG_SNIPPET_CAP),
+		);
+		// Show what precedes the matched region in ACCEPTANCE — that is where the
+		// mismatched head lives. When the match starts at index 0 there is nothing
+		// before it, so show the start of the matched content itself rather than
+		// rendering an empty, confusing snippet.
+		const foundSnippet =
+			foundIdx > 0
+				? normalizedAcceptance.slice(
+						Math.max(0, foundIdx - COVERAGE_DIAG_SNIPPET_CAP),
+						foundIdx,
+					)
+				: normalizedAcceptance.slice(
+						0,
+						Math.min(normalizedAcceptance.length, COVERAGE_DIAG_SNIPPET_CAP),
+					);
 		return {
-			expectedSnippet: normalizedExpected.slice(0, COVERAGE_DIAG_SNIPPET_CAP),
-			foundSnippet: '',
+			expectedSnippet,
+			foundSnippet,
 			divergenceOffset: 0,
-			completelyMissing: true,
 			...(corruptionHint ? { corruptionHint } : {}),
 		};
 	}
@@ -1082,8 +1205,14 @@ export function buildAcceptanceCoverageMismatchError(params: {
 		if (diag.completelyMissing) {
 			// #2204: the sub-threshold prefix match is coincidental noise —
 			// do NOT point at a "divergence" word; state the text is absent.
+			// #2215: the flag now also requires the SUFFIX probe to fail, so
+			// say so. Note this only reports what the two anchor probes
+			// checked, not an absolute claim about the whole body: a middle
+			// portion of the requirement CAN still be present verbatim in
+			// ACCEPTANCE (e.g. an id-label prefix glued on the front plus a
+			// truncated tail) while both anchor probes still miss.
 			diagLines.push(
-				`  no meaningful prefix of the requirement text was found in ACCEPTANCE (matched prefix under ${COVERAGE_DIAG_MIN_PREFIX} chars is treated as coincidental)`,
+				`  neither the leading nor the trailing ${COVERAGE_DIAG_MIN_PREFIX} characters of the requirement text were found anywhere in ACCEPTANCE (a shorter or partial match is treated as coincidental)`,
 			);
 			diagLines.push(`  spec requires here: "${diag.expectedSnippet}"`);
 			diagLines.push(
@@ -2880,6 +3009,7 @@ export function createDelegationGateHook(
 	}) => Promise<void>;
 	sessionEnded: (sessionID: string, includeOwnedChildren?: boolean) => void;
 	backgroundCompletionClaimed: (record: BackgroundDelegationRecord) => void;
+	abortDeniedSettlementForCall: (callID: string) => Promise<void>;
 } {
 	// Initialize durable worktree merge-back status before any coders dispatch
 	initDurableStatusPath(directory);
@@ -2906,6 +3036,34 @@ export function createDelegationGateHook(
 		string,
 		BackgroundTaskChangeContext
 	>();
+	// Issue #2214: callID → the settlement this dispatch durably began. Used by
+	// (a) the toolBefore denial rollback when a LATER fail-closed hook rejects
+	// the Task call after the delegation gate already wrote the DISPATCHED WAL
+	// (no toolAfter will ever fire for a denied call), and (b) the toolAfter
+	// coder evidence block when resolveEvidenceTaskId cannot recover the task
+	// id the toolBefore scope preflight resolved. FIFO-capped like its siblings.
+	const begunCoderSettlementsByCallID = new Map<
+		string,
+		{ taskId: string | null; transitionId: string }
+	>();
+	const rememberBegunCoderSettlement = (
+		callID: string,
+		taskId: string | null,
+		transitionId: string,
+	): void => {
+		if (
+			!begunCoderSettlementsByCallID.has(callID) &&
+			begunCoderSettlementsByCallID.size >= MAX_PENDING_CODER_CHANGE_CONTEXTS
+		) {
+			// Fail closed like the sibling callID maps (PRR-002): silent FIFO
+			// eviction here would drop a denial-rollback entry and could
+			// re-introduce the #2214 DISPATCHED wedge under load.
+			throw new Error(
+				`BEGUN_SETTLEMENT_CONTEXT_CAPACITY: refusing coder dispatch because ${MAX_PENDING_CODER_CHANGE_CONTEXTS} live begun settlements are already tracked`,
+			);
+		}
+		begunCoderSettlementsByCallID.set(callID, { taskId, transitionId });
+	};
 	const backgroundCoderReservationByCallID = new Map<
 		string,
 		BackgroundCoderReservation
@@ -3148,6 +3306,24 @@ export function createDelegationGateHook(
 				`CODER_SETTLEMENT_CONTEXT_MISSING: no durable baseline or generation for task ${taskId}`,
 			);
 		}
+		// Issue #2214: a dirty launch baseline can never support mutation
+		// attribution — changedFilesSinceSnapshot fails closed for any
+		// pre-existing uncommitted/untracked path. Enforce the clean-baseline
+		// contract at dispatch time, BEFORE the coder runs and before the
+		// settlement WAL is written, so the dispatch fails fast with an
+		// actionable message instead of wedging the task at DISPATCHED after
+		// the coder's work is done.
+		const baselineDirtyFiles = Array.isArray(context.baseline.changedFiles)
+			? context.baseline.changedFiles
+			: [];
+		if (baselineDirtyFiles.length > 0) {
+			const sample = baselineDirtyFiles.slice(0, 5).join(', ');
+			throw new Error(
+				`CODER_SETTLEMENT_CLEAN_BASELINE_REQUIRED: ${String(baselineDirtyFiles.length)} uncommitted/untracked change(s) present at dispatch (${sample}${baselineDirtyFiles.length > 5 ? ', …' : ''}). ` +
+					'Commit or stash them before dispatching a coder — exact-task settlement cannot attribute coder mutations from a dirty launch baseline. ' +
+					`Task ${taskId} was not dispatched and no settlement state was created.`,
+			);
+		}
 		await beginCoderSettlement({
 			directory,
 			taskId,
@@ -3157,6 +3333,7 @@ export function createDelegationGateHook(
 			context,
 			...(worktree ? { worktree } : {}),
 		});
+		rememberBegunCoderSettlement(input.callID, taskId, `coder:${input.callID}`);
 	};
 	const shouldRememberCoderTaskChangeContext = (
 		_declaredFiles: string[] | null,
@@ -3168,6 +3345,7 @@ export function createDelegationGateHook(
 		const callID = record.callID;
 		clearPublishedScopeBindings(callID);
 		clearCoderTaskChangeContext(callID);
+		begunCoderSettlementsByCallID.delete(callID);
 		stageBDispatchGenerationsByCallID.delete(callID);
 		gateDispatchPrimaryTaskByCallID.delete(callID);
 		stageBDispatchContextByCallID.delete(callID);
@@ -3207,6 +3385,8 @@ export function createDelegationGateHook(
 			taskMetadata,
 			sessionEnded,
 			backgroundCompletionClaimed,
+			// Disabled gate never begins a settlement; nothing to roll back.
+			abortDeniedSettlementForCall: async (): Promise<void> => {},
 		};
 	}
 
@@ -4986,13 +5166,28 @@ export function createDelegationGateHook(
 				// re-throw unexpected errors (EPERM, EBUSY on Windows) which previously
 				// escaped outside the evidence try-catch and propagated to safeHook.
 				if (typeof subagentType === 'string') {
+					let coderSettleTaskId: string | null = null;
 					try {
 						const mergedArgs = { ...(storedArgs ?? {}), ...directArgs };
-						const evidenceTaskId = await resolveEvidenceTaskId(
+						let evidenceTaskId = await resolveEvidenceTaskId(
 							mergedArgs,
 							session,
 							directory,
 						);
+						// Issue #2214 belt: the toolBefore scope preflight may have
+						// resolved the task via sources resolveEvidenceTaskId lacks
+						// (e.g. the declare_scope pending-scope map). For a coder
+						// dispatch whose settlement this call durably began, trust the
+						// begun-settlement record instead of silently skipping
+						// finalization — a skipped settle wedges the DISPATCHED WAL.
+						if (
+							!evidenceTaskId &&
+							stripKnownSwarmPrefix(subagentType) === 'coder'
+						) {
+							const begun = begunCoderSettlementsByCallID.get(input.callID);
+							if (begun?.taskId) evidenceTaskId = begun.taskId;
+						}
+						coderSettleTaskId = evidenceTaskId;
 						if (evidenceTaskId) {
 							const turbo = hasActiveTurboMode(input.sessionID);
 							const gateAgents = [
@@ -5149,19 +5344,78 @@ export function createDelegationGateHook(
 							`[delegation-gate] evidence recording failed: ${err instanceof Error ? err.message : String(err)}`,
 						);
 						if (normalizedAgent === 'coder') {
-							pushAdvisory(
-								session,
-								`CODER_SETTLEMENT_DURABILITY_FAILURE: task output remains fenced until accepted-mutation evidence for call ${input.callID} is recovered.`,
-							);
+							// Issue #2214: a coder settle failure that never reached
+							// settleCoderDispatch leaves the DISPATCHED WAL with its
+							// in-memory ownership key retained — same-process recovery
+							// would throw CODER_DISPATCH_IN_PROGRESS forever. Release the
+							// key (idempotent) so recoverCoderSettlement can retry, and
+							// abort the WAL outright when its recorded launch baseline
+							// was structurally attribution-doomed (non-git or dirty at
+							// dispatch) — that settlement can never complete.
+							let terminalAbort = false;
+							if (coderSettleTaskId && !coderSettlementCommitted) {
+								releaseCoderDispatchOwnership(
+									directory,
+									coderSettleTaskId,
+									`coder:${input.callID}`,
+								);
+								try {
+									const abortOutcome = await abortCoderSettlementIfDoomed({
+										directory,
+										taskId: coderSettleTaskId,
+										transitionId: `coder:${input.callID}`,
+									});
+									terminalAbort =
+										abortOutcome === 'aborted' ||
+										abortOutcome === 'already-aborted';
+								} catch (abortErr) {
+									logger.warn(
+										`[delegation-gate] doomed settlement abort failed for ${coderSettleTaskId}: ${
+											abortErr instanceof Error
+												? abortErr.message
+												: String(abortErr)
+										}`,
+									);
+								}
+								if (terminalAbort) {
+									// PRR-001: the dispatch is terminally settled; its
+									// change context is exhausted (recovery reads the WAL).
+									clearCoderTaskChangeContext(input.callID);
+								}
+							}
+							if (terminalAbort) {
+								pushAdvisory(
+									session,
+									`CODER_SETTLEMENT_ABORTED: task ${coderSettleTaskId} dispatch ${input.callID} was settled as ABORTED — its launch baseline was dirty or had no git history, so the coder's changes cannot be attributed. Reconcile the workspace (commit, stash, or discard the coder's output), then repair the task with update_task_status and re-dispatch from a clean tree.`,
+								);
+							} else {
+								pushAdvisory(
+									session,
+									`CODER_SETTLEMENT_DURABILITY_FAILURE: task output remains fenced until accepted-mutation evidence for call ${input.callID} is recovered.`,
+								);
+							}
 							throw err;
 						}
 					} finally {
-						if (
-							stripKnownSwarmPrefix(subagentType) === 'coder' &&
-							coderSettlementCommitted
-						) {
-							clearCoderTaskChangeContext(input.callID);
-							clearPublishedScopeBindings(input.callID);
+						if (stripKnownSwarmPrefix(subagentType) === 'coder') {
+							if (coderSettlementCommitted) {
+								clearCoderTaskChangeContext(input.callID);
+								clearPublishedScopeBindings(input.callID);
+							}
+							// PRR-001: both purposes of the begun-settlement entry —
+							// denial rollback (a denied call never reaches toolAfter)
+							// and the task-id fallback above — are exhausted once
+							// toolAfter has run for this callID.
+							begunCoderSettlementsByCallID.delete(input.callID);
+							// The coder settle failure above RETHROWS, so the post-block
+							// cleanup (stored args, Stage B generation bindings) never
+							// runs on that path — drain it here instead. Idempotent
+							// with the success-path deletes below.
+							if (!coderSettlementCommitted) {
+								stageBDispatchGenerationsByCallID.delete(input.callID);
+								gateDispatchPrimaryTaskByCallID.delete(input.callID);
+								deleteStoredInputArgs(input.callID);
+							}
 						}
 					}
 				}
@@ -5654,5 +5908,54 @@ ${warningLines.join('\n')}`;
 		taskMetadata,
 		sessionEnded,
 		backgroundCompletionClaimed,
+		/**
+		 * Issue #2214: roll back a settlement this call durably began when a
+		 * LATER fail-closed hook denies the Task call (the delegation gate runs
+		 * at step 4; full-auto/knowledge/skill gates at steps 5-8 can still
+		 * throw). A denied call never fires toolAfter, so without this rollback
+		 * the DISPATCHED WAL and its in-memory ownership key wedge the task
+		 * until a process restart. Never throws — the denial itself propagates.
+		 *
+		 * F-002 (PR #2223 review): cleanup runs in a FINALLY so every failure
+		 * class (settlement-lock contention, WAL_MISSING/REPLACED/UNREADABLE,
+		 * write errors) still releases the in-memory ownership key and the
+		 * callID bookkeeping — an abort that throws must not leave a louder
+		 * in-process CODER_DISPATCH_IN_PROGRESS wedge behind.
+		 */
+		abortDeniedSettlementForCall: async (callID: string): Promise<void> => {
+			const begun = begunCoderSettlementsByCallID.get(callID);
+			if (!begun?.taskId) return;
+			try {
+				await abortCoderSettlement({
+					directory,
+					taskId: begun.taskId,
+					transitionId: begun.transitionId,
+					reason:
+						'dispatch denied by a fail-closed gate after settlement began',
+				});
+			} catch (error) {
+				logger.criticalWarn(
+					`[delegation-gate] denied-dispatch settlement rollback failed for call ${callID} (task ${begun.taskId}): ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				);
+			} finally {
+				// Unconditional (idempotent) cleanup, mirroring
+				// backgroundCompletionClaimed: a denied call never reaches the
+				// toolAfter cleanup path, so this is the only drain for these
+				// entries.
+				releaseCoderDispatchOwnership(
+					directory,
+					begun.taskId,
+					begun.transitionId,
+				);
+				begunCoderSettlementsByCallID.delete(callID);
+				clearCoderTaskChangeContext(callID);
+				clearPublishedScopeBindings(callID);
+				stageBDispatchGenerationsByCallID.delete(callID);
+				gateDispatchPrimaryTaskByCallID.delete(callID);
+				deleteStoredInputArgs(callID);
+			}
+		},
 	};
 }

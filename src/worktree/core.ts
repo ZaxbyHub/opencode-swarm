@@ -677,9 +677,15 @@ export async function provisionWorktree(
 		interface ParsedWorktree {
 			path: string;
 			branch: string | undefined;
+			/** #2208: git marks a registration `prunable` when its directory is gone. */
+			prunable: boolean;
 		}
-		const entries: ParsedWorktree[] = [];
-		let current: ParsedWorktree = { path: '', branch: undefined };
+		let entries: ParsedWorktree[] = [];
+		let current: ParsedWorktree = {
+			path: '',
+			branch: undefined,
+			prunable: false,
+		};
 
 		if (listResult.exitCode !== 0) {
 			const raw = listResult.stderr.trim() || listResult.stdout.trim();
@@ -690,19 +696,69 @@ export async function provisionWorktree(
 			};
 		}
 
-		for (const rawLine of listResult.stdout.split('\n')) {
-			const line = rawLine.trim();
-			if (line.startsWith('worktree ')) {
-				if (current.path) entries.push(current);
-				current = {
-					path: normalizeGitPath(line.slice('worktree '.length)),
-					branch: undefined,
-				};
-			} else if (line.startsWith('branch ')) {
-				current.branch = line.slice('branch '.length);
+		const parsePorcelain = (stdout: string): ParsedWorktree[] => {
+			const parsed: ParsedWorktree[] = [];
+			let cur: ParsedWorktree = {
+				path: '',
+				branch: undefined,
+				prunable: false,
+			};
+			for (const rawLine of stdout.split('\n')) {
+				const line = rawLine.trim();
+				if (line.startsWith('worktree ')) {
+					if (cur.path) parsed.push(cur);
+					cur = {
+						path: normalizeGitPath(line.slice('worktree '.length)),
+						branch: undefined,
+						prunable: false,
+					};
+				} else if (line.startsWith('branch ')) {
+					cur.branch = line.slice('branch '.length);
+				} else if (line === 'prunable' || line.startsWith('prunable ')) {
+					cur.prunable = true;
+				}
 			}
+			if (cur.path) parsed.push(cur);
+			return parsed;
+		};
+		entries = parsePorcelain(listResult.stdout);
+
+		// #2208: a registration git itself marks `prunable` (worktree directory
+		// deleted by a crash/kill mid-task while the branch survived) is stale
+		// metadata, not an active lane. Without this, the classification below
+		// treats the deleted path as an active collision and isCleanWorktree
+		// fails on the missing directory — surfacing "expected worktree is
+		// dirty" and stalling recovery. Prune the stale registration and
+		// re-enumerate; the leftover branch then reconciles through the normal
+		// stale-branch path below (ahead-count check + branch -d + re-add).
+		const hasPrunableCollision = entries.some(
+			(e) =>
+				e.prunable &&
+				(e.path === expectedPath || e.branch === `refs/heads/${branchName}`),
+		);
+		if (hasPrunableCollision) {
+			const pruneResult = await runGit(['worktree', 'prune'], directory);
+			if (pruneResult.exitCode !== 0) {
+				return {
+					error: `Failed to prune stale worktree registration: ${
+						pruneResult.stderr.trim() || pruneResult.stdout.trim()
+					}`,
+				};
+			}
+			const relistResult = await runGit(
+				['worktree', 'list', '--porcelain'],
+				directory,
+			);
+			if (relistResult.exitCode !== 0) {
+				const raw = relistResult.stderr.trim() || relistResult.stdout.trim();
+				const bounded =
+					raw.length > 500 ? `${raw.slice(0, 500)}... (truncated)` : raw;
+				return {
+					error: `worktree enumeration failed after prune: ${bounded}`,
+				};
+			}
+			entries = parsePorcelain(relistResult.stdout);
 		}
-		if (current.path) entries.push(current);
 
 		// Case (b) active collision: branch is checked out in ANY registered
 		// worktree, OR the expected path is itself registered (regardless of

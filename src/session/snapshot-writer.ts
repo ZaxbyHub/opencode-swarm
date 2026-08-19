@@ -3,7 +3,15 @@
  * Serializes swarmState to .swarm/session/state.json using atomic write (temp-file + rename).
  */
 
-import { closeSync, fsyncSync, mkdirSync, openSync, renameSync } from 'node:fs';
+import {
+	closeSync,
+	existsSync,
+	fsyncSync,
+	mkdirSync,
+	openSync,
+	unlinkSync,
+} from 'node:fs';
+import { rename as fsRename } from 'node:fs/promises';
 import * as path from 'node:path';
 import { TASK_WORKFLOW_SCHEMA_MARKER } from '../gate-evidence.js';
 import { validateSwarmPath } from '../hooks/utils';
@@ -24,6 +32,69 @@ import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
  * ensures only one write is in flight at a time so the last writer wins.
  */
 let _writeInFlight: Promise<void> = Promise.resolve();
+
+/**
+ * Windows can transiently fail a rename with EEXIST/EBUSY/EPERM while another
+ * process (an external snapshot reader, an AV scanner) briefly holds the
+ * target open. Same codes, budget, and delay as the retry policy in `bunWrite`
+ * (src/utils/bun-compat.ts:36) — except this loop skips the sleep after the
+ * final attempt, which bunWrite still takes. Kept local rather than imported
+ * so this module adds no new bun-compat exports for existing non-spread
+ * `mock.module('../utils/bun-compat', ...)` test factories to miss.
+ */
+export const SNAPSHOT_RENAME_MAX_ATTEMPTS = 3;
+const SNAPSHOT_RENAME_RETRY_DELAY_MS = 50;
+
+/**
+ * Atomic swap for the snapshot temp file, retrying the transient Windows
+ * sharing violations. A bare rename converts an external reader briefly
+ * holding `state.json` open into silent snapshot staleness: `writeSnapshot`'s
+ * catch only logs, so the update is dropped while the in-memory state moves
+ * on. Any non-transient code fails immediately — retrying an EACCES or
+ * ENOENT would only delay the log.
+ *
+ * Throws the last rename error when the budget is exhausted; the caller owns
+ * temp-file cleanup and error swallowing.
+ */
+async function renameWithTransientRetry(
+	tempPath: string,
+	targetPath: string,
+): Promise<void> {
+	let lastError: unknown;
+	for (let attempt = 0; attempt < SNAPSHOT_RENAME_MAX_ATTEMPTS; attempt++) {
+		try {
+			await _internals.rename(tempPath, targetPath);
+			return;
+		} catch (error) {
+			lastError = error;
+			const code = (error as NodeJS.ErrnoException).code;
+			// Windows can report a sharing violation for a rename that actually
+			// committed, so a retry then finds the source already gone. Treating
+			// that as a failure would skip the caller's cache invalidation for a
+			// file that really did change — the precise stale-read the #1729
+			// invalidation exists to prevent. Only a retry can observe this, so
+			// the check is scoped to attempt > 0.
+			if (
+				code === 'ENOENT' &&
+				attempt > 0 &&
+				!existsSync(tempPath) &&
+				existsSync(targetPath)
+			) {
+				return;
+			}
+			if (code !== 'EEXIST' && code !== 'EBUSY' && code !== 'EPERM') {
+				break;
+			}
+			// No point sleeping after the final attempt — nothing follows it.
+			if (attempt < SNAPSHOT_RENAME_MAX_ATTEMPTS - 1) {
+				await new Promise((resolve) =>
+					setTimeout(resolve, SNAPSHOT_RENAME_RETRY_DELAY_MS),
+				);
+			}
+		}
+	}
+	throw lastError;
+}
 
 /**
  * Serialized form of AgentSessionState with Map/Set fields converted to plain arrays/objects
@@ -343,7 +414,21 @@ export async function writeSnapshot(
 			// fsync is best-effort; OSes / filesystems that don't support it
 			// (e.g. tmpfs, ramdisk) shouldn't block the main path.
 		}
-		renameSync(tempPath, resolvedPath);
+		try {
+			await renameWithTransientRetry(tempPath, resolvedPath);
+		} finally {
+			// No-op after a successful swap (the temp path no longer exists);
+			// drops the orphan when every retry failed, so a persistently locked
+			// target cannot litter .swarm/session with one .tmp file per
+			// tool.execute.after. Best-effort: an unlink blocked by something
+			// holding the fresh temp open can still leave the orphan behind.
+			// Mirrors src/evidence/task-file.ts:atomicWriteFile.
+			try {
+				unlinkSync(tempPath);
+			} catch {
+				/* already renamed or never created */
+			}
+		}
 		// Only after a SUCCESSFUL rename. `session/state.json` is read through the
 		// cached reader (`readSwarmFileAsync(directory, 'session/state.json')` at
 		// src/services/handoff-service.ts:376), and this writer runs on every
@@ -400,8 +485,10 @@ export const _internals: {
 	writeSnapshot: typeof writeSnapshot;
 	createSnapshotWriterHook: typeof createSnapshotWriterHook;
 	flushPendingSnapshot: typeof flushPendingSnapshot;
+	rename: typeof fsRename;
 } = {
 	writeSnapshot,
 	createSnapshotWriterHook,
 	flushPendingSnapshot,
+	rename: fsRename,
 } as const;

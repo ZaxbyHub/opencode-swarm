@@ -14,6 +14,7 @@ import { saveEvidence } from '../evidence/manager.js';
 import { warn } from '../utils';
 import { runExternalTool } from '../utils/external-tool-runner';
 import {
+	assertProjectRoot,
 	hasExplicitProjectBoundary,
 	isStrictPathDescendant,
 } from '../utils/project-boundary';
@@ -1319,6 +1320,35 @@ export async function runPreCheckBatch(
 		};
 	}
 
+	// #2209: fail fast when the directory is not a valid project root for
+	// evidence writes. isAcceptedProjectRootForPlatform's equality branch
+	// (directory === workspaceDir — the CLI-invoked-from-a-subdirectory case)
+	// bypasses the explicit-boundary check, so a boundary-less subdirectory of
+	// an existing Swarm project used to pass validation above and surface the
+	// violation only at evidence-write time — inconsistently (secretscan
+	// swallowed it; sast_scan/quality_budget failed). assertProjectRoot is the
+	// same invariant the evidence writers enforce (reused, unmodified): a
+	// directory with its own boundary marker passes, a standalone directory
+	// with no `.swarm`-bearing ancestor passes, and a subdirectory nested
+	// under a `.swarm/`-owning project root throws — still BEFORE any tool
+	// executes (this runs after the no-files fail-closed checks so their
+	// distinct 'No files provided' contract is preserved).
+	try {
+		assertProjectRoot(directory);
+	} catch (error) {
+		const rootError = error instanceof Error ? error.message : String(error);
+		warn(`pre_check_batch: Project-root validation failed: ${rootError}`);
+		return {
+			batch_status: 'invalid',
+			gates_passed: false,
+			lint: { ran: false, error: rootError, duration_ms: 0 },
+			secretscan: { ran: false, error: rootError, duration_ms: 0 },
+			sast_scan: { ran: false, error: rootError, duration_ms: 0 },
+			quality_budget: { ran: false, error: rootError, duration_ms: 0 },
+			total_duration_ms: 0,
+		};
+	}
+
 	// Limit files to prevent abuse
 	if (changedFiles.length > MAX_FILES) {
 		throw new Error(
@@ -1423,9 +1453,18 @@ export async function runPreCheckBatch(
 				abortSignal,
 			);
 		} catch (e) {
-			warn(
-				`Failed to persist secretscan evidence: ${e instanceof Error ? e.message : String(e)}`,
-			);
+			// #2209: an evidence persistence failure is a runtime-state failure
+			// and must fail the scan identically to sast_scan/quality_budget
+			// (whose saveEvidence errors propagate into their ToolResult.error
+			// and hard-fail the gate). The gate evaluation above already ran on
+			// the clean scan result, so fail the gate directly here and surface
+			// the error on the payload.
+			const persistError = `Failed to persist secretscan evidence: ${
+				e instanceof Error ? e.message : String(e)
+			}`;
+			secretscanResult.error = persistError;
+			gatesPassed = false;
+			warn(`pre_check_batch: ${persistError} - GATE FAILED`);
 		}
 	}
 
@@ -1458,10 +1497,13 @@ export async function runPreCheckBatch(
 				}
 			}
 			// Verdict is already correctly set by sastScan — do not override.
+			// (#2210 note: a result carrying `error` was already consumed by the
+			// `if (sastResult.error)` branch above, so this branch is by
+			// construction the findings-driven case.)
 			if (sastResult.verdict === 'fail') {
 				gatesPassed = false;
 				warn(
-					`pre_check_batch: SAST scan found new findings above threshold - GATE FAILED`,
+					'pre_check_batch: SAST scan found new findings above threshold - GATE FAILED',
 				);
 			}
 		} else if (sastResult.verdict === 'fail') {
@@ -1498,7 +1540,9 @@ export async function runPreCheckBatch(
 				}
 			} else {
 				// SAST failed but no HIGH/CRITICAL findings (lower severity only)
-				// Original behavior: fail the gate
+				// Original behavior: fail the gate. (#2210 note: a result carrying
+				// `error` was already consumed by the `if (sastResult.error)`
+				// branch above.)
 				gatesPassed = false;
 				warn('pre_check_batch: SAST scan found vulnerabilities - GATE FAILED');
 			}

@@ -431,7 +431,7 @@ export function injectVerdictIntoMessages(
 			parts: [
 				{
 					type: 'text',
-					text: '[FULL-AUTO CONTINUATION] Phase approved by autonomous oversight. Call `phase_complete` now to finalize this phase, then proceed to the next phase in the plan. Do not wait for further human input.',
+					text: '[FULL-AUTO CONTINUATION] Phase approved by full-auto critic oversight. Call `phase_complete` now to finalize this phase, then proceed to the next phase in the plan. Do not wait for further human input.',
 				},
 			],
 		};
@@ -445,7 +445,7 @@ export function injectVerdictIntoMessages(
 			parts: [
 				{
 					type: 'text',
-					text: '[FULL-AUTO CONTINUATION] Approved by autonomous oversight. Continue executing the current task and plan. Do not wait for further human input.',
+					text: '[FULL-AUTO CONTINUATION] Approved by full-auto critic oversight. Continue executing the current task and plan. Do not wait for further human input.',
 				},
 			],
 		};

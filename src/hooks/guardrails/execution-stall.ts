@@ -190,14 +190,17 @@ const stallStates = new Map<string, ExecutionStallState>();
 /**
  * callID → canonical role of the `Task` dispatch observed in `toolBefore`.
  *
- * This exists because `setStoredInputArgs` sits BELOW `if (!resolved) return;`
- * in `tool-before.ts`, and the architect is exactly the `resolved === null`
- * case. So for the session this lever targets, `getStoredInputArgs(callID)` is
- * always empty in `toolAfter` and the SDK's `toolAfter` input carries no
- * `args`. Recording the role at dispatch time is what makes "a coder
- * completion resets the counter, an explorer completion does not" observable
- * at all — without it, EVERY completion would look role-less and the hard rung
- * could fire on a session that is legitimately delegating.
+ * Historical rationale (pre-issue-#2214): guardrails' `setStoredInputArgs`
+ * sits BELOW `if (!resolved) return;` in `tool-before.ts`, and the architect
+ * is exactly the `resolved === null` case, so `getStoredInputArgs(callID)`
+ * was always empty in `toolAfter` for architect sessions. Since #2214 the
+ * main index.ts toolBefore chain stores the final args snapshot
+ * UNCONDITIONALLY, so stored args ARE present now — but `pendingDispatchRoles`
+ * remains the correct mechanism here: it records the role at dispatch time
+ * from the SDK-provided `output.args` directly, independent of any later
+ * snapshot timing or config gating. Keeping "a coder completion resets the
+ * counter, an explorer completion does not" observable must not depend on the
+ * stored-args side channel.
  */
 const pendingDispatchRoles = new Map<string, string>();
 
