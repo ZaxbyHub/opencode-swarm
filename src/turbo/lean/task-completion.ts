@@ -9,6 +9,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { listActiveLocks } from '../../parallel/file-locks';
+import { matchesTier3 } from '../../parallel/tier3-classifier.js';
 import type { LeanTurboPersistedState, LeanTurboRunState } from './state';
 
 /**
@@ -35,39 +36,6 @@ export interface LeanTurboTaskCompletionResult {
 		laneStatus: string;
 		taskIds: string[];
 	};
-}
-
-/**
- * Tier 3 patterns that require full gate review even in Turbo Mode.
- * These are critical security-sensitive files that must always pass Stage B.
- * Copied from src/tools/update-task-status.ts.
- */
-const TIER_3_PATTERNS = [
-	/^architect.*\.ts$/i,
-	/^delegation.*\.ts$/i,
-	/^guardrails.*\.ts$/i,
-	/^adversarial.*\.ts$/i,
-	/^sanitiz.*\.ts$/i,
-	/^auth.*$/i,
-	/^permission.*$/i,
-	/^crypto.*$/i,
-	/^secret.*$/i,
-	/^security.*\.ts$/i,
-];
-
-/**
- * Check if any file in the list matches a Tier 3 pattern.
- */
-function matchesTier3Pattern(files: string[]): boolean {
-	for (const file of files) {
-		const fileName = path.basename(file);
-		for (const pattern of TIER_3_PATTERNS) {
-			if (pattern.test(fileName)) {
-				return true;
-			}
-		}
-	}
-	return false;
 }
 
 /**
@@ -330,7 +298,7 @@ export function verifyLeanTurboTaskCompletion(
 		};
 	}
 
-	if (filesTouched.length > 0 && matchesTier3Pattern(filesTouched)) {
+	if (filesTouched.length > 0 && matchesTier3(filesTouched)) {
 		return {
 			ok: false,
 			reason: `Task ${taskId} touches Tier-3 security-sensitive files and cannot bypass Stage B`,

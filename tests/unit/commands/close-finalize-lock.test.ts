@@ -7,6 +7,8 @@ import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { initLedger } from '../../../src/plan/ledger.js';
+import { derivePlanId } from '../../../src/plan/utils.js';
 
 // ── Import under test ────────────────────────────────────────────────
 const { handleCloseCommand, _internals: closeInternals } = await import(
@@ -32,9 +34,12 @@ function swarmDir(): string {
 	return path.join(testDir, '.swarm');
 }
 
-function writePlan(overrides: Record<string, unknown> = {}): void {
+async function writePlan(
+	overrides: Record<string, unknown> = {},
+): Promise<void> {
 	const plan = {
 		title: 'Finalize Lock Test Project',
+		swarm: 'finalize-lock-test',
 		schema_version: '1.0.0',
 		current_phase: 1,
 		phases: [
@@ -42,12 +47,23 @@ function writePlan(overrides: Record<string, unknown> = {}): void {
 				id: 1,
 				name: 'Phase 1',
 				status: 'in_progress',
-				tasks: [{ id: '1.1', status: 'in_progress', description: 'Task A' }],
+				tasks: [
+					{
+						id: '1.1',
+						phase: 1,
+						status: 'in_progress',
+						size: 'small',
+						description: 'Task A',
+						depends: [],
+						files_touched: [],
+					},
+				],
 			},
 		],
 		...overrides,
 	};
 	writeFileSync(path.join(swarmDir(), 'plan.json'), JSON.stringify(plan));
+	await initLedger(testDir, derivePlanId(plan), undefined, plan);
 }
 
 function makeConfig(): Record<string, unknown> {
@@ -183,7 +199,7 @@ describe('handleCloseCommand — finalize lock (FR-012)', () => {
 			closeInternals.acquireFinalizeLock = mock(async () => ({
 				acquired: false,
 			}));
-			writePlan();
+			await writePlan();
 
 			const result = await handleCloseCommand(testDir, []);
 
@@ -203,7 +219,7 @@ describe('handleCloseCommand — finalize lock (FR-012)', () => {
 
 	describe('Lock release on success', () => {
 		it('calls release() exactly once on successful finalize', async () => {
-			writePlan();
+			await writePlan();
 			const mockRelease = mock(async () => {});
 
 			closeInternals.acquireFinalizeLock = mock(async () => ({
@@ -217,7 +233,7 @@ describe('handleCloseCommand — finalize lock (FR-012)', () => {
 		});
 
 		it('proceeds with normal finalize output when lock is acquired', async () => {
-			writePlan();
+			await writePlan();
 			const mockRelease = mock(async () => {});
 
 			closeInternals.acquireFinalizeLock = mock(async () => ({
@@ -236,7 +252,7 @@ describe('handleCloseCommand — finalize lock (FR-012)', () => {
 
 	describe('Lock release on error path', () => {
 		it('calls release() even when downstream finalize fails', async () => {
-			writePlan();
+			await writePlan();
 			const mockRelease = mock(async () => {});
 
 			closeInternals.acquireFinalizeLock = mock(async () => ({

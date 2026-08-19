@@ -1,5 +1,65 @@
 # Changelog
 
+## [7.143.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.143.0...v7.143.1) (2026-08-19)
+
+
+### Bug Fixes
+
+* **apply-patch:** accept payload aliases in tool schema and tolerate indented diffs ([2968da0](https://github.com/ZaxbyHub/opencode-swarm/commit/2968da06bda2cb0ba7ab82c0a2bc4e0b6dc32649))
+* **apply-patch:** review-handoff closure — JSDoc, description, test gaps ([#2206](https://github.com/ZaxbyHub/opencode-swarm/issues/2206)) ([5d6e876](https://github.com/ZaxbyHub/opencode-swarm/commit/5d6e876a1186112b48cbabab3b4b4708deddf2c9))
+* **architect:** close PR review findings on full-auto delegation clarity ([#2207](https://github.com/ZaxbyHub/opencode-swarm/issues/2207)) ([5f7eb2d](https://github.com/ZaxbyHub/opencode-swarm/commit/5f7eb2d882c6f3f7ead884fe9421a6679158187a))
+* **architect:** state full-auto never delegates and architect retains delegation duty ([cacb4ad](https://github.com/ZaxbyHub/opencode-swarm/commit/cacb4ad112be30c61952285cc85a5aa12af78d38))
+* **cli:** pass packageRoot in CommandContext from CLI run() entry point ([1a2d2ee](https://github.com/ZaxbyHub/opencode-swarm/commit/1a2d2ee65ab5e2e8d1261394a939490e8faa358c))
+* **cli:** pass packageRoot in CommandContext from CLI run() entry point ([5aa374a](https://github.com/ZaxbyHub/opencode-swarm/commit/5aa374a859f236120e54c457d5aef157144aa850))
+* **delegation-gate:** don't report shifted-but-present bodies as completely missing ([2d56291](https://github.com/ZaxbyHub/opencode-swarm/commit/2d56291ae407c1349a46bd2c75ede9744263e78d))
+* **delegation-gate:** make Stage B attribution exact and add semantic review routing ([1e96bae](https://github.com/ZaxbyHub/opencode-swarm/commit/1e96bae43b570713c616a72b5560c753478d9573))
+* **workflow:** close pr review findings on settlement abort and rollback ([dd2dd42](https://github.com/ZaxbyHub/opencode-swarm/commit/dd2dd42bc0256ea645d6bbce970ac957552f06e0))
+* **workflow:** reject unattributable coder launches and unwedge settlements ([2e051e7](https://github.com/ZaxbyHub/opencode-swarm/commit/2e051e7a5249cb60ad5b70fc8deff91fa7e0b745))
+
+## [7.143.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.142.1...v7.143.0) (2026-08-18)
+
+
+### Features
+
+* **delegation-gate:** inject verbatim fr/sc requirement text into acceptance ([6ca60bf](https://github.com/ZaxbyHub/opencode-swarm/commit/6ca60bf1b5679d5a5f6673ecfbb7581f903f7d1e))
+
+
+### Bug Fixes
+
+* **delegation-gate:** flag omitted acceptance requirement text as completely missing ([e9fc47a](https://github.com/ZaxbyHub/opencode-swarm/commit/e9fc47ae2e9ea2048be83b163e6cc6e0e30041b3))
+* **delegation-gate:** guard ACCEPTANCE injection against silent no-fire paths ([596aa25](https://github.com/ZaxbyHub/opencode-swarm/commit/596aa2518a6be1be3c105d6caa8be9c652104b31))
+
+## [7.142.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.142.0...v7.142.1) (2026-08-18)
+
+
+### Bug Fixes
+
+* **test:** use canonicalMkdtemp in the ledger blast-radius test ([8b9cff7](https://github.com/ZaxbyHub/opencode-swarm/commit/8b9cff7cdce48ca9ce1c7d5909e119e05b0a45a2))
+* **workflow:** close swarm PR review findings on PR [#2195](https://github.com/ZaxbyHub/opencode-swarm/issues/2195) ([72ed046](https://github.com/ZaxbyHub/opencode-swarm/commit/72ed0467b7b8fa148afb0b7a4d38e9df70e2dd95))
+* **workflow:** complete issue 2098 closure ([bc20bd7](https://github.com/ZaxbyHub/opencode-swarm/commit/bc20bd76d0171ce5c75d6979029a6e750c837d00))
+
+## [7.142.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.141.2...v7.142.0) (2026-08-18)
+
+
+### Features
+
+* **knowledge:** isolate hive stores with fail-closed tripwire and add human-only exact-id quarantine ([0ba1fd7](https://github.com/ZaxbyHub/opencode-swarm/commit/0ba1fd7958a7d31c8dda387d33246928cd380ec5))
+
+
+### Bug Fixes
+
+* **knowledge:** close PR review findings on hive quarantine hardening ([3a197e0](https://github.com/ZaxbyHub/opencode-swarm/commit/3a197e0f3a4b1d6e8754daaf9747e3f80f42385b))
+* **test:** resolve main merge — split parity baselines, hermetic curate, cap-safe CLI tests ([1bb8078](https://github.com/ZaxbyHub/opencode-swarm/commit/1bb8078bb8e5ddb71849ea0c0093fd81c5dac742))
+
+## [7.141.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.141.1...v7.141.2) (2026-08-18)
+
+
+### Bug Fixes
+
+* **test:** canonicalize tmpdir paths in changed tests (FR-011) ([8b1bf44](https://github.com/ZaxbyHub/opencode-swarm/commit/8b1bf448440151e8b596824203728035c2e777a0))
+* **test:** close review findings on server() boot isolation ([0da5d56](https://github.com/ZaxbyHub/opencode-swarm/commit/0da5d567c0dfeb8410bb6e9f378ef9ead9a85085)), closes [#2010](https://github.com/ZaxbyHub/opencode-swarm/issues/2010)
+* **test:** isolate server() boot tests ([d3a33ea](https://github.com/ZaxbyHub/opencode-swarm/commit/d3a33eaffd78ffb7f36a7fdf3479cbc0022db05a))
+
 ## [7.141.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.141.0...v7.141.1) (2026-08-16)
 
 

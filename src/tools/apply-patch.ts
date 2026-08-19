@@ -23,6 +23,7 @@ import type { ToolDefinition } from '@opencode-ai/plugin/tool';
 import { z } from 'zod';
 import { loadPluginConfigWithMeta } from '../config';
 import { findClosestLines, fuzzyFindAndReplace } from '../utils/fuzzy-match';
+import { normalizePatchIndentation } from '../utils/patch-dedent';
 import {
 	containsControlChars,
 	containsPathTraversal,
@@ -358,8 +359,11 @@ function parseUnifiedDiff(patchText: string): {
 		};
 	}
 
-	// Normalize line endings to \n for consistent parsing
-	const normalized = patchText.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+	// Normalize line endings to \n for consistent parsing, and strip a uniform
+	// leading indentation block (#2206: models emit diffs indented inside
+	// fenced/YAML blocks; min-common-indent stripping restores column-0 anchors
+	// without widening any parser regex).
+	const normalized = normalizePatchIndentation(patchText);
 	let lines = normalized.split('\n');
 	// Strip trailing empty element produced by split when patch ends with \n
 	if (lines.length > 0 && lines[lines.length - 1] === '') {
@@ -1241,9 +1245,32 @@ function isUnsupportedPatchFormat(patchText: string): boolean {
  */
 export const swarmApplyPatch: ToolDefinition = createSwarmTool({
 	description:
-		'Apply a unified diff patch to workspace files. Validates paths, matches context exactly, and writes atomically. Coder-scoped write tool. Use standard unified diff format (--- a/file / +++ b/file / @@ hunks). Does NOT support *** Begin Patch / *** Update File payloads — use the native apply_patch tool for those.',
+		'Apply a unified diff patch to workspace files. Validates paths, matches context exactly, and writes atomically. Coder-scoped write tool. Use standard unified diff format (--- a/file / +++ b/file / @@ hunks). Indented patches (e.g. inside a fenced markdown/YAML block) are automatically dedented to column 0 before parsing — the diff body itself may be indented. Does NOT support *** Begin Patch / *** Update File payloads — use the native apply_patch tool for those. Accepts the payload as `patch` (canonical) or any of the aliases `patchText`, `patch_text`, `patchPayload` (#2206); the resolver picks the first non-empty one.',
 	args: {
-		patch: z.string().min(1).describe('Unified diff text to parse and apply'),
+		patch: z
+			.string()
+			.optional()
+			.describe(
+				'Unified diff text to parse and apply (optional when an alias below carries the payload)',
+			),
+		patchText: z
+			.string()
+			.optional()
+			.describe(
+				'Alias for patch — unified diff payload; accepted because models frequently hallucinate alternative argument names (#2206)',
+			),
+		patch_text: z
+			.string()
+			.optional()
+			.describe(
+				'Alias for patch — unified diff payload; accepted because models frequently hallucinate alternative argument names (#2206)',
+			),
+		patchPayload: z
+			.string()
+			.optional()
+			.describe(
+				'Alias for patch — unified diff payload; accepted because models frequently hallucinate alternative argument names (#2206)',
+			),
 		files: z
 			.array(z.string())
 			.min(1)
@@ -1281,7 +1308,16 @@ export const swarmApplyPatch: ToolDefinition = createSwarmTool({
 		}
 
 		const obj = args as Record<string, unknown>;
-		const patchText = (obj.patch as string) ?? '';
+		// #2206 mode (a): resolve the patch payload from the canonical `patch`
+		// argument first, then the declared aliases. The aliases exist in the args
+		// schema so strict hosts (which strip undeclared fields before execute
+		// runs) pass them through; the write-target resolver's PATCH_PAYLOAD_KEYS
+		// already accepts the same alias set.
+		const patchText =
+			[obj.patch, obj.patchText, obj.patch_text, obj.patchPayload].find(
+				(value): value is string =>
+					typeof value === 'string' && value.length > 0,
+			) ?? '';
 		const files = (obj.files as string[]) ?? [];
 		const dryRun = (obj.dryRun as boolean) ?? false;
 		const allowCreates = (obj.allowCreates as boolean) ?? false;

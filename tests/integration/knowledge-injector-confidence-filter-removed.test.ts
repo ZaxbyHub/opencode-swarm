@@ -21,6 +21,7 @@ import type {
 // message. Fixtures set swarmState.activeAgent and stamp a consistent
 // sessionID on every message.
 import { swarmState } from '../../src/state';
+import { canonicalMkdtemp } from '../helpers/tmpdir';
 
 const SESSION_ID = 'cf-session';
 
@@ -90,10 +91,8 @@ const CONFIG: KnowledgeConfig = {
 	sweep_enabled: true,
 };
 
-function createRelativeTempDir(): string {
-	const baseDir = 'tmp';
-	if (!fs.existsSync(baseDir)) fs.mkdirSync(baseDir, { recursive: true });
-	return fs.mkdtempSync(path.join(baseDir, 'cf-filter-'));
+function createTempProjectDir(): string {
+	return canonicalMkdtemp('cf-filter-');
 }
 
 function architectMessages(): MessageWithParts[] {
@@ -120,7 +119,7 @@ describe('confidence filter removed (Task 6.1)', () => {
 	let dir: string;
 
 	beforeEach(() => {
-		dir = createRelativeTempDir();
+		dir = createTempProjectDir();
 		fs.mkdirSync(path.join(dir, '.swarm'), { recursive: true });
 		fs.writeFileSync(path.join(dir, '.swarm', 'plan.json'), PLAN);
 		// (#1849) Map the session to the architect so identity resolves.

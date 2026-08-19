@@ -19,19 +19,34 @@ describe('#1850 diagnostics no-leakage (acceptance #13 — category #13)', () =>
 	const dirs: string[] = [];
 	let prevXdg: string | undefined;
 	let prevHome: string | undefined;
+	let prevLocalAppData: string | undefined;
+	let prevAppData: string | undefined;
 
 	beforeEach(() => {
 		prevXdg = process.env.XDG_DATA_HOME;
 		prevHome = process.env.HOME;
+		prevLocalAppData = process.env.LOCALAPPDATA;
+		prevAppData = process.env.APPDATA;
+		// LOCALAPPDATA is required on Windows: resolveDataDir's win32 branch reads it
+		// FIRST, so an XDG-only redirect silently resolves the REAL platform root (#2033).
 		const dataDir = makeTmp('diag-data-');
 		dirs.push(dataDir);
 		process.env.XDG_DATA_HOME = dataDir;
 		process.env.HOME = dataDir;
+		process.env.LOCALAPPDATA = dataDir;
+		process.env.APPDATA = dataDir;
 	});
 
 	afterEach(() => {
-		process.env.XDG_DATA_HOME = prevXdg;
-		process.env.HOME = prevHome;
+		// delete-if-undefined restore (assigning undefined coerces to the string).
+		if (prevXdg === undefined) delete process.env.XDG_DATA_HOME;
+		else process.env.XDG_DATA_HOME = prevXdg;
+		if (prevHome === undefined) delete process.env.HOME;
+		else process.env.HOME = prevHome;
+		if (prevLocalAppData === undefined) delete process.env.LOCALAPPDATA;
+		else process.env.LOCALAPPDATA = prevLocalAppData;
+		if (prevAppData === undefined) delete process.env.APPDATA;
+		else process.env.APPDATA = prevAppData;
 		for (const d of dirs.splice(0)) {
 			try {
 				rmSync(d, { recursive: true, force: true });

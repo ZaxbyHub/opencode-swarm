@@ -4,6 +4,7 @@ import {
 	type ExtractCodeBlocksArgs,
 	getOrPlanExtractCodeBlocks,
 } from '../tools/file-extractor-planner';
+import { normalizePatchIndentation } from '../utils/patch-dedent';
 
 export const MAX_PATCH_FIELD_BYTES = 1_000_000;
 export const MAX_PATCH_AGGREGATE_BYTES = 2_000_000;
@@ -169,7 +170,11 @@ function parsePatchPayload(payload: string): ParsedPatch | string {
 	// `(.*)$` path-extraction regex failed on CRLF input — so *every* CRLF
 	// patch resolved to "Patch contains no recognizable write targets" (F-011).
 	// `parseTarget` keeps its own trailing-`\r` strip as defence in depth.
-	const lines = payload.split(/\r?\n/);
+	// #2206: normalizePatchIndentation first strips a uniform leading
+	// indentation block (models emit diffs indented inside fenced/YAML
+	// blocks) and performs the \r\n normalization, restoring column-0 anchors
+	// for every regex below without widening them.
+	const lines = normalizePatchIndentation(payload).split(/\r?\n/);
 	const beginIndices: number[] = [];
 	const endIndices: number[] = [];
 	const nativeOperationIndices: number[] = [];

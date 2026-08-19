@@ -42,7 +42,6 @@ import type { SwarmKnowledgeEntry } from '../hooks/knowledge-types';
 import { validateSwarmPath } from '../hooks/utils';
 import { runFinalizeRewardSweep } from '../memory/finalize-reward-sweep';
 import { tryAcquireLock } from '../parallel/file-locks.js';
-import { closePlanTerminalState } from '../plan/manager';
 import { clearAllScopes } from '../scope/scope-persistence';
 import {
 	buildActionMenu,
@@ -66,6 +65,10 @@ import { telemetry as telemetryEmit } from '../telemetry';
 import { executeWriteRetro } from '../tools/write-retro';
 import { log } from '../utils/logger';
 import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
+import {
+	type CloseTerminalResult,
+	reconcileCloseTerminalState,
+} from '../workflow/close-terminal.js';
 import { archiveSqliteSnapshot, type SqliteRowCounts } from './archive-sqlite';
 
 interface PlanPhase {
@@ -82,6 +85,40 @@ interface PlanPhase {
 interface PlanData {
 	title: string;
 	phases: PlanPhase[];
+}
+
+const NO_RECEIPT_PHASE_CLOSE_SCOPE_DETAIL =
+	'no exact receipt lifecycle scope exists for phase closure';
+
+/**
+ * Close-command wrapper around the exact-task terminal reconciliation service.
+ *
+ * Deliberately NOT named `closePlanTerminalState`: `src/plan/manager.ts` exports a
+ * distinct function by that name (ledger-first phase/projection persistence), which
+ * `reconcileCloseTerminalState` itself calls downstream. Keeping the two identifiers
+ * distinct avoids a same-name collision across close.ts / close-terminal.ts /
+ * plan/manager.ts. The `_internals` key below stays `closePlanTerminalState` so the
+ * existing test seam is unchanged.
+ */
+async function reconcileCloseTerminalStateForPlan(
+	directory: string,
+	targetPlan: Plan,
+	options: {
+		actor: string;
+		requestedClosedTaskIds: string[];
+		closedPhaseIds: number[];
+		originalStatuses?: Map<string, string>;
+	},
+): Promise<CloseTerminalResult | undefined> {
+	return reconcileCloseTerminalState(directory, targetPlan, options);
+}
+
+function hardStopTerminalization(
+	ctx: CloseStageContext,
+	message: string,
+): void {
+	ctx.warnings.push(message);
+	ctx.terminalizationError = message;
 }
 
 interface CloseCommandOptions {
@@ -174,6 +211,7 @@ export interface CloseStageContext {
 	fullAuto: boolean;
 	originalStatuses: Map<string, string>;
 	guaranteeResult: { closedPhaseIds: number[]; closedTaskIds: string[] };
+	terminalizationError?: string;
 	archiveResult: string;
 	archivedFileCount: number;
 	archivedActiveStateFiles: Set<string>;
@@ -511,11 +549,14 @@ const REQUIRED_ARTIFACTS = new Set(['plan.json', 'plan-ledger.jsonl']);
  * swarms start clean. Each entry is a relative path under .swarm/.
  */
 const ACTIVE_STATE_DIRS_TO_CLEAN = [
+	'coder-settlements',
 	'council',
 	'evidence',
 	'session',
 	'scopes',
 	'spec-archive',
+	'task-repairs',
+	'task-terminals',
 ];
 
 /**
@@ -1038,6 +1079,7 @@ export async function runFinalizeStage(ctx: CloseStageContext): Promise<void> {
 		const closedTasksLenBefore = ctx.closedTasks.length;
 
 		const receiptPhaseLabels = new Map<number, string>();
+		const receiptLifecycleSkippedPhaseIds = new Set<number>();
 		for (const phase of ctx.planData.phases ?? []) {
 			const label =
 				extractCurrentPhaseFromPlan({
@@ -1056,13 +1098,12 @@ export async function runFinalizeStage(ctx: CloseStageContext): Promise<void> {
 				// phase has no receipt membership at all, there is no receipt lifecycle
 				// to close and terminal plan persistence must continue. Ambiguous or
 				// unreadable receipt state still fails closed below.
-				if (
-					intent.detail ===
-					'no exact receipt lifecycle scope exists for phase closure'
-				) {
+				if (intent.detail === NO_RECEIPT_PHASE_CLOSE_SCOPE_DETAIL) {
+					receiptLifecycleSkippedPhaseIds.add(phase.id);
 					continue;
 				}
-				ctx.warnings.push(
+				hardStopTerminalization(
+					ctx,
 					`Receipt phase-close intent failed for phase ${phase.id}: ${intent.detail}. Plan terminalization was not attempted.`,
 				);
 				return;
@@ -1082,40 +1123,57 @@ export async function runFinalizeStage(ctx: CloseStageContext): Promise<void> {
 			}
 		}
 
-		// Persist the terminal plan state
-		let terminalPlanPersisted = ctx.planAlreadyDone;
-		if (
-			!ctx.planAlreadyDone ||
-			ctx.guaranteeResult.closedPhaseIds.length > 0 ||
-			ctx.guaranteeResult.closedTaskIds.length > 0
-		) {
+		// Reconcile terminal plan state with exact-task evidence even when the
+		// caller projection already appears terminal.
+		let terminalPlanPersisted = !ctx.planExists;
+		if (ctx.planExists) {
 			try {
-				await _internals.closePlanTerminalState(
+				const reconciled = await _internals.closePlanTerminalState(
 					ctx.directory,
 					ctx.planData as Plan,
 					{
+						actor: ctx.options.sessionID ?? 'close-command',
 						closedPhaseIds: ctx.guaranteeResult.closedPhaseIds,
-						closedTaskIds: ctx.guaranteeResult.closedTaskIds,
+						requestedClosedTaskIds: ctx.guaranteeResult.closedTaskIds,
 						originalStatuses: ctx.originalStatuses,
 					},
 				);
+				if (reconciled) {
+					ctx.planData = reconciled.plan as PlanData;
+					ctx.guaranteeResult = {
+						closedPhaseIds: [...reconciled.closedPhaseIds],
+						closedTaskIds: [...reconciled.closedTaskIds],
+					};
+					ctx.closedPhases = [...reconciled.closedPhaseIds];
+					ctx.closedTasks = [...reconciled.closedTaskIds];
+					// Surface QA-exempt forced completions. These tasks were recorded
+					// complete without passing the normal Stage B gates, so the close
+					// summary must not present them as reviewed-and-tested work.
+					if (reconciled.forcedCompletionTaskIds.length > 0) {
+						ctx.warnings.push(
+							`Completed without QA evidence (forced completion): ${reconciled.forcedCompletionTaskIds.join(', ')}. These tasks had no authoritative workflow evidence and did not pass reviewer/test gates.`,
+						);
+					}
+				}
 				terminalPlanPersisted = true;
 			} catch (error) {
 				const msg = error instanceof Error ? error.message : String(error);
 				ctx.warnings.push(`Failed to persist terminal plan state: ${msg}`);
+				ctx.terminalizationError = msg;
 				log('[close-command] Failed to write terminal plan state:', error);
-				// SC-013 rollback: restore in-memory state to match on-disk when
-				// terminal write fails so the summary does not falsely claim
-				// phases/tasks were closed
 				ctx.planData = planDataSnapshot;
 				ctx.closedPhases.length = closedPhasesLenBefore;
 				ctx.closedTasks.length = closedTasksLenBefore;
+				return;
 			}
 		}
 
 		for (const phase of terminalPlanPersisted
 			? (ctx.planData.phases ?? [])
 			: []) {
+			if (receiptLifecycleSkippedPhaseIds.has(phase.id)) {
+				continue;
+			}
 			const reconciled =
 				await closeReceiptLifecycleInternals.reconcilePhaseClose(
 					ctx.directory,
@@ -1124,9 +1182,11 @@ export async function runFinalizeStage(ctx: CloseStageContext): Promise<void> {
 					ctx.options.sessionID,
 				);
 			if (!reconciled.ok) {
-				ctx.warnings.push(
-					`Receipt phase-close reconciliation remains pending for phase ${phase.id}: ${reconciled.detail}`,
+				hardStopTerminalization(
+					ctx,
+					`Receipt phase-close reconciliation failed for phase ${phase.id}: ${reconciled.detail}`,
 				);
+				return;
 			}
 		}
 	}
@@ -2234,6 +2294,9 @@ export async function handleCloseCommand(
 			: false;
 
 		await runFinalizeStage(ctx);
+		if (ctx.terminalizationError) {
+			return `❌ Close paused before reward, archive, cleanup, teardown, and Git alignment because terminal plan/evidence reconciliation failed: ${ctx.terminalizationError}\n\nNo active state was archived or removed. Fix the reported durable-state problem, then retry /swarm close.`;
+		}
 
 		// ─── B.6: NEGATIVE-TERMINAL REWARD SWEEP (design decision C-6) ───
 		// Tasks left non-complete were just stamped close_reason='session_terminated'
@@ -2571,7 +2634,10 @@ export const _internals = {
 	runAlignStage,
 	runFinalizeDryRun,
 	archiveEvidence,
-	closePlanTerminalState,
+	// Seam name intentionally retained for test compatibility; see the
+	// reconcileCloseTerminalStateForPlan doc comment for why the function itself
+	// no longer shares plan/manager.ts's `closePlanTerminalState` name.
+	closePlanTerminalState: reconcileCloseTerminalStateForPlan,
 	endAgentSession,
 	// Flushes the telemetry write stream before its files are archived. Delegates
 	// to the telemetry module's _internals so tests can substitute a no-op.

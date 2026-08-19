@@ -51,8 +51,9 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { createIsolatedTestEnv } from '../tests/helpers/isolated-test-env.js';
 import { canonicalMkdtemp } from '../tests/helpers/tmpdir.js';
-import OpenCodeSwarm from './index.js';
+import OpenCodeSwarm, { overrideIndexInternalsForTest } from './index.js';
 import {
 	createObservation,
 	type InitObservabilityInput,
@@ -222,12 +223,44 @@ describe('AC5 (b, best-effort) - real OpenCodeSwarm.server() resolves through th
 	// here means unusual bytes in an otherwise valid, isolated temp path, not
 	// a path that could make server() touch the real repo.
 	let parentDir: string;
+	let cleanupIsolatedEnv: () => void = () => {};
+	let restoreIndexInternals: () => void = () => {};
 
 	beforeEach(() => {
+		// The unstubbed `OpenCodeSwarm.server()` boots below run config-doctor from
+		// the post-resolution queue. config-doctor's getUserConfigDir() ignores the
+		// `directory` param entirely (src/services/config-doctor.ts:582-584), so with
+		// no `.opencode/opencode-swarm.json` under these temp directories its
+		// project-absent fallback reads AND REWRITES the developer's real global
+		// ~/.config/opencode/opencode-swarm.json (config-doctor.ts:1884-1896).
+		// Redirect XDG_CONFIG_HOME/XDG_CACHE_HOME before the first boot.
+		cleanupIsolatedEnv = createIsolatedTestEnv().cleanup;
+		// Env redirection ALONE is not sufficient here. The post-resolution queue
+		// runs on an UNREF'D `setTimeout(0)` that fires AFTER this describe's last
+		// synchronous `afterEach` has already restored the real env vars — so
+		// config-doctor (and the version-check cache writer) would run against the
+		// developer's REAL `~/.config` / `~/.cache` anyway. Verified: before this
+		// stub, running this file alone created a real
+		// `~/.cache/opencode-swarm/version-check.json`; after it, it does not.
+		//
+		// This does NOT weaken the AC5 (b) claim above. `initObservability` is
+		// called synchronously from inside `initializeOpenCodeSwarm`
+		// (`src/index.ts`, near the `initObservability({...})` call) — it is not one
+		// of the queued post-resolution tasks, so the real, unstubbed
+		// `initObservability` call site is still exercised end-to-end below.
+		restoreIndexInternals = overrideIndexInternalsForTest({
+			schedulePostResolutionTasks: () => {
+				/* drop: these unref'd tasks outlive this test's isolation window */
+			},
+		});
 		parentDir = canonicalMkdtemp('ocsm-adv-');
 	});
 
 	afterEach(() => {
+		// Restore the scheduler seam FIRST so a throw in the cleanup below cannot
+		// leak the override into later test files (Bun runs them in one process).
+		restoreIndexInternals();
+		restoreIndexInternals = () => {};
 		// `OpenCodeSwarm.server(...)` runs `initTelemetry`, which opens a long-lived
 		// `createWriteStream` on `<parentDir>/.swarm/telemetry.jsonl`. Only
 		// `resetTelemetryForTesting()` ends that stream, and on Windows an open
@@ -242,6 +275,8 @@ describe('AC5 (b, best-effort) - real OpenCodeSwarm.server() resolves through th
 		} catch {
 			// best-effort cleanup
 		}
+		cleanupIsolatedEnv();
+		cleanupIsolatedEnv = () => {};
 	});
 
 	test('server() resolves with adversarial-but-type-valid directory values', async () => {

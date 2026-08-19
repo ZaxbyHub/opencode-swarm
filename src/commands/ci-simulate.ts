@@ -391,7 +391,7 @@ export async function handleCiSimulateCommand(
 	// base may be supplied as `--base <ref>` (issue #2131 criterion E — stacked
 	// or release-branch PRs must not be silently simulated against the default
 	// branch).
-	const baseFlagIndex = args.findIndex((token) => token === '--base');
+	const baseFlagIndex = args.indexOf('--base');
 	let explicitBase: string | undefined;
 	let positional: string[];
 	if (baseFlagIndex !== -1) {

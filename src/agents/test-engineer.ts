@@ -227,18 +227,21 @@ COVERAGE REPORTING:
 - If COVERAGE_PCT < 70%, add a note: "COVERAGE_WARNING: Below 70% threshold — consider additional test cases for uncovered paths."
 - The architect uses this to decide whether to request an additional test pass (Rule 10 / Phase 5 step 5h).
 
-## MULTI-TASK COVERAGE (FR-007)
-When you are asked to test multiple tasks in a single dispatch (set-dispatch), emit one structured verdict line PER TASK at the END of your output (after all other output fields). This enables per-task attribution in the gate tracker:
+## STRUCTURED VERDICT LINE (MANDATORY)
+You MUST emit exactly one structured verdict line PER TASK at the END of your output (after all other output fields). This is required for both single-task and multi-task (set-dispatch) test runs. The gate tracker uses this line for per-task attribution — omitting it blocks task completion.
 
 [TESTED] | task-<taskId> | PASS | <brief summary>
 [TESTED] | task-<taskId> | FAIL | <brief summary>
 [TESTED] | task-<taskId> | SKIPPED | <reason>
 
-Example:
+Example (single task):
+[TESTED] | task-2.1 | PASS | 10/10 tests passed, 85% coverage
+
+Example (multi-task set-dispatch):
 [TESTED] | task-2.1 | PASS | 10/10 tests passed, 85% coverage
 [TESTED] | task-2.2 | FAIL | 8/10 tests passed — bar.test.ts missing coverage for error path
 
-If covering a single task only, you do not need to emit the structured verdict line.
+Never omit this line. The task ID must match the TASK field exactly.
 `;
 
 export function createTestEngineerAgent(

@@ -636,7 +636,7 @@ export const TURBO_MODE_BANNER = `## 🚀 TURBO MODE ACTIVE
 
 While Turbo Mode is active:
 - **Stage A gates** (lint, imports, pre_check_batch) are still REQUIRED for ALL tasks
-- **Tier 3 tasks** (security-sensitive files matching: architect*.ts, delegation*.ts, guardrails*.ts, adversarial*.ts, sanitiz*.ts, auth*, permission*, crypto*, secret*, security) still require FULL review (Stage B)
+- **Tier 3 tasks** (security-sensitive files matching: architect*.ts, delegation*.ts, guardrails*.ts, adversarial*.ts, sanitiz*.ts, security*.ts; exact basenames: auth, authenticate, authentication, authorization, permission(s), crypto, secret(s), secretscan; keyword prefixes: auth-*, permission-*, crypto-*, secret-*, security-*; or files under auth/, security/, crypto/, permission/, secret/ directories) still require FULL review (Stage B)
 - **Tier 0-2 tasks** can skip Stage B (reviewer, test_engineer) to speed up execution
 - **Phase completion gates** (Gates 1–5: completion-verify, drift-verifier, hallucination-guard, mutation-gate, phase-council) are automatically bypassed via the orchestrator short-circuit at \`src/tools/phase-complete.ts:774–827\` when turbo is active; Gate 5b (architecture-supervisor), Gate 6 (final-council), and Gate 7 (full-auto) remain enforced. Note: turbo bypass is session-scoped; one session's turbo does not affect other sessions.
 
@@ -668,7 +668,7 @@ Auto-proceed controls whether the architect advances to the next phase automatic
 Behavioral rules:
 - Session override (set via /swarm auto-proceed on|off) wins over the plan default.
 - If neither is set, auto-proceed defaults to OFF and the architect asks before advancing.
-- Full-auto mode (critic oversight) is independent — it has its own auto-advance mechanism.
+- Full-auto mode (critic oversight) is independent — while active it suppresses the "Ready for Phase N+1?" confirmation itself (it never delegates tasks or runs phases for you); the auto_proceed setting adds nothing on top.
 - autoProceedNudgeDone prevents the FR-004 first-boundary nudge from re-firing in this session.
 
 To toggle at runtime: call swarm_command({ command: "auto-proceed", args: ["on"|"off"] }) from the architect.

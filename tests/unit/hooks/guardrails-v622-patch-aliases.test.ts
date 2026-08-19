@@ -108,3 +108,94 @@ describe('guardrails - v6.22 OBJECTIVE 2: patch path extraction alias coverage (
 		await hooks.toolBefore(input, output);
 	});
 });
+
+describe('guardrails - #2206: indented patch payloads and no phantom context-line paths', () => {
+	beforeEach(() => {
+		resetSwarmState();
+	});
+
+	async function startArchitect(sessionId: string) {
+		startAgentSession(sessionId, ORCHESTRATOR_NAME);
+		const { swarmState } = await import('../../../src/state');
+		swarmState.activeAgent.set(sessionId, ORCHESTRATOR_NAME);
+	}
+
+	it('an indented patchText targeting .swarm/plan.json → throws PLAN STATE VIOLATION (#2206)', async () => {
+		const hooks = createGuardrailsHooks(defaultConfig());
+		const sessionId = 'test-2206-indented';
+		await startArchitect(sessionId);
+
+		// Uniformly 2-space-indented unified diff (e.g. pasted inside a fenced
+		// block). Pre-#2206 the column-0 anchored extraction regexes found no
+		// paths and the plan-state guard was silently bypassed.
+		const patchContent = [
+			'  --- a/.swarm/plan.json',
+			'  +++ b/.swarm/plan.json',
+			'  @@ -1 +1 @@',
+			'  -old',
+			'  +new',
+		].join('\n');
+
+		const input = makeInput(sessionId, 'apply_patch', 'call-1');
+		const output = makeOutput({ patchText: patchContent });
+
+		await expect(hooks.toolBefore(input, output)).rejects.toThrow(
+			'PLAN STATE VIOLATION',
+		);
+	});
+
+	it('a column-0 patch whose CONTEXT line mentions --- .swarm/plan.json → NOT blocked (no phantom header match)', async () => {
+		const hooks = createGuardrailsHooks(defaultConfig());
+		const sessionId = 'test-2206-phantom';
+		await startArchitect(sessionId);
+
+		// A README patch whose context line documents the plan path with a
+		// markdown horizontal-rule prefix: ` --- .swarm/plan.json`. The line's
+		// single leading space is the diff CONTEXT marker, so it must never be
+		// parsed as a `---` header — otherwise the guard would extract a phantom
+		// plan-state target and block a legitimate documentation patch.
+		const patchContent = [
+			'--- a/README.md',
+			'+++ b/README.md',
+			'@@ -1,3 +1,3 @@',
+			' # Project',
+			' --- .swarm/plan.json holds the plan',
+			'+ # Project (docs updated)',
+		].join('\n');
+
+		const input = makeInput(sessionId, 'patch', 'call-1');
+		const output = makeOutput({ patch: patchContent });
+
+		// must not throw: the context line is body content, never a header, so
+		// no phantom plan-state target is extracted. The sibling test above
+		// ('an indented patchText targeting .swarm/plan.json → throws PLAN STATE
+		// VIOLATION') is the positive control proving extraction + the plan-state
+		// guard ARE active for this harness — so this not-throwing means the
+		// context line genuinely contributed no path.
+		await hooks.toolBefore(input, output);
+	});
+
+	it('positive control: a REAL column-0 --- header for .swarm/plan.json → throws PLAN STATE VIOLATION', async () => {
+		const hooks = createGuardrailsHooks(defaultConfig());
+		const sessionId = 'test-2206-positive';
+		await startArchitect(sessionId);
+
+		// Identical patch, but the plan path sits on a genuine --- header line
+		// instead of a space-prefixed context line — extraction must see it and
+		// the plan-state guard must block.
+		const patchContent = [
+			'--- .swarm/plan.json',
+			'+++ .swarm/plan.json',
+			'@@ -1 +1 @@',
+			'-old',
+			'+new',
+		].join('\n');
+
+		const input = makeInput(sessionId, 'patch', 'call-1');
+		const output = makeOutput({ patch: patchContent });
+
+		await expect(hooks.toolBefore(input, output)).rejects.toThrow(
+			'PLAN STATE VIOLATION',
+		);
+	});
+});

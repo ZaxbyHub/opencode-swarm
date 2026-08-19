@@ -27,20 +27,36 @@ describe('#1850 storage-root resolution', () => {
 	const dirs: string[] = [];
 	let prevXdg: string | undefined;
 	let prevHome: string | undefined;
+	let prevLocalAppData: string | undefined;
+	let prevAppData: string | undefined;
 
 	beforeEach(() => {
 		prevXdg = process.env.XDG_DATA_HOME;
 		prevHome = process.env.HOME;
-		// Redirect the platform data dir so cohort paths land in temp.
+		prevLocalAppData = process.env.LOCALAPPDATA;
+		prevAppData = process.env.APPDATA;
+		// Redirect the platform data dir so cohort paths land in temp. LOCALAPPDATA is
+		// required on Windows: resolveDataDir's win32 branch reads it FIRST, so an
+		// XDG-only redirect silently resolves the REAL platform root (issue #2033).
 		const dataDir = makeTmp('storage-root-data-');
 		dirs.push(dataDir);
 		process.env.XDG_DATA_HOME = dataDir;
 		process.env.HOME = dataDir;
+		process.env.LOCALAPPDATA = dataDir;
+		process.env.APPDATA = dataDir;
 	});
 
 	afterEach(() => {
-		process.env.XDG_DATA_HOME = prevXdg;
-		process.env.HOME = prevHome;
+		// delete-if-undefined restore: assigning undefined coerces to the literal string
+		// 'undefined', leaking a bogus platform root into later resolutions.
+		if (prevXdg === undefined) delete process.env.XDG_DATA_HOME;
+		else process.env.XDG_DATA_HOME = prevXdg;
+		if (prevHome === undefined) delete process.env.HOME;
+		else process.env.HOME = prevHome;
+		if (prevLocalAppData === undefined) delete process.env.LOCALAPPDATA;
+		else process.env.LOCALAPPDATA = prevLocalAppData;
+		if (prevAppData === undefined) delete process.env.APPDATA;
+		else process.env.APPDATA = prevAppData;
 		invalidateMemoryStoreDirCache();
 		for (const d of dirs.splice(0)) {
 			try {

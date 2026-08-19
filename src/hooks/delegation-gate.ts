@@ -90,6 +90,8 @@ import type {
 import * as logger from '../utils/logger';
 import { isStrictTaskId } from '../validation/task-id';
 import {
+	abortCoderSettlement,
+	abortCoderSettlementIfDoomed,
 	beginCoderSettlement,
 	completeCoderSettlementCleanup,
 	recordCoderMergeProvenance,
@@ -845,6 +847,10 @@ export function extractSpecRequirementBodyById(
 	specText: string,
 	id: string,
 ): string | null {
+	// Guard against an empty/whitespace-only id: without this, the regex below
+	// degenerates to matching the FIRST bold bullet in spec.md instead of
+	// correctly reporting "not found".
+	if (!id || id.trim().length === 0) return null;
 	// Escape regex metacharacters in the id (`-` etc.) so it matches literally.
 	const escapedId = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 	const lines = specText.split(/\r?\n/);
@@ -947,11 +953,42 @@ export interface CoverageMissDiagnostic {
 	expectedSnippet: string;
 	foundSnippet: string;
 	divergenceOffset: number;
+	/**
+	 * Issue #2204: the longest matching prefix fell under
+	 * `COVERAGE_DIAG_MIN_PREFIX`, so the "divergence" is coincidental
+	 * punctuation/noise rather than a real aligned prefix — the requirement
+	 * text is effectively absent from ACCEPTANCE. Renderers must emit the
+	 * "requirement text completely missing" fallback instead of a
+	 * divergence pointer.
+	 *
+	 * Issue #2215: a SUFFIX of the body `COVERAGE_DIAG_MIN_PREFIX`+ characters
+	 * long that occurs as a substring ANYWHERE in the acceptance text ALSO
+	 * prevents this flag from being set. So the flag means: no ≥10-char prefix
+	 * of the body AND no ≥10-char suffix of the body appears anywhere in the
+	 * acceptance text. A body that is present but not aligned at character 0
+	 * (e.g. sitting behind a leading id-label glue, or embedded mid-prompt with
+	 * other dispatch fields around it) keeps the divergence-pointer rendering.
+	 */
+	completelyMissing?: boolean;
 	corruptionHint?: string;
 }
 
 const COVERAGE_DIAG_SNIPPET_CAP = 80;
 const COVERAGE_DIAG_MAX_SCAN = 400;
+/**
+ * Issue #2204: minimum longest-matching-prefix length for the divergence
+ * pointer to be meaningful. Below this, the match is treated as coincidental
+ * (e.g. a short shared prefix, such as the `": "` after a field label — the
+ * colon is only illustrative; ANY short coincidental content triggers this)
+ * and the diagnostic reports the requirement text as completely missing
+ * instead of pointing at a random "divergence" word in the prompt.
+ *
+ * Issue #2215: the SAME threshold is applied to the longest SUFFIX of the body
+ * that occurs as a substring anywhere in the acceptance text, so a body whose
+ * tail is present in ACCEPTANCE is treated as present-but-shifted rather than
+ * absent.
+ */
+const COVERAGE_DIAG_MIN_PREFIX = 10;
 
 /**
  * Issue #2063 (A2): per-body cap, in characters, on the raw requirement body
@@ -961,6 +998,46 @@ const COVERAGE_DIAG_MAX_SCAN = 400;
  * for the remainder rather than growing the error without limit.
  */
 export const ACCEPTANCE_EXPECTED_BODY_CAP = 2000;
+
+/**
+ * Issue #2215: length of the longest SUFFIX of `expected` that occurs as a
+ * substring ANYWHERE in `acceptance`, bounded by `maxScan` so this stays
+ * O(1)-bounded on large spec bodies exactly like the prefix growth loop in
+ * `describeCoverageMiss`.
+ *
+ * True symmetric counterpart to that loop: the prefix loop grows a PREFIX of
+ * `expected` and asks `acceptance.includes(...)`; this grows a SUFFIX of
+ * `expected` and asks the same question. It is anchored only on the `expected`
+ * side — it does NOT assume the match sits at the literal end of `acceptance`,
+ * because the "acceptance text" this diagnostic receives is the full delegation
+ * prompt blob (`prompt`/`description`/`task`/`input`/`message` concatenated at
+ * the toolBefore call site), not a narrow slice of the ACCEPTANCE field. The
+ * dispatch examples in src/agents/architect.ts place `SKILLS:` after
+ * `ACCEPTANCE:`, and `SKILLS:` is optional (coder.ts, reviewer.ts) and can
+ * also be auto-injected after this check runs — so a verbatim body may sit
+ * mid-blob or at its tail, and searching anywhere covers both. (A
+ * tail-position character compare would miss the mid-blob case and falsely
+ * report the body absent.)
+ *
+ * The greedy grow-until-it-fails loop is exact: if a suffix of length k is a
+ * substring of `acceptance`, every shorter suffix is a substring of that one,
+ * so "is a substring" is monotone in k and the first failure is the maximum.
+ */
+function longestCommonSuffixLength(
+	expected: string,
+	acceptance: string,
+	maxScan: number,
+): number {
+	let len = 0;
+	const cap = Math.min(expected.length, maxScan);
+	while (
+		len < cap &&
+		acceptance.includes(expected.slice(expected.length - len - 1))
+	) {
+		len++;
+	}
+	return len;
+}
 
 export function describeCoverageMiss(params: {
 	rawExpectedBody: string;
@@ -982,18 +1059,6 @@ export function describeCoverageMiss(params: {
 	) {
 		divergenceOffset++;
 	}
-	const expectedSnippet = normalizedExpected.slice(
-		divergenceOffset,
-		divergenceOffset + COVERAGE_DIAG_SNIPPET_CAP,
-	);
-	const matchedPrefix = normalizedExpected.slice(0, divergenceOffset);
-	const foundIdx =
-		matchedPrefix.length > 0 ? normalizedAcceptance.indexOf(matchedPrefix) : -1;
-	const foundPos = foundIdx >= 0 ? foundIdx + matchedPrefix.length : 0;
-	const foundSnippet = normalizedAcceptance.slice(
-		foundPos,
-		foundPos + COVERAGE_DIAG_SNIPPET_CAP,
-	);
 	const raw = `${params.rawExpectedBody}\n${params.rawAcceptanceText}`;
 	let corruptionHint: string | undefined;
 	if (/�/.test(raw)) {
@@ -1006,12 +1071,190 @@ export function describeCoverageMiss(params: {
 		corruptionHint =
 			'the text contains a Latin-1 mojibake byte sequence (e.g. Â§, Ã©) — re-save spec.md as UTF-8';
 	}
+	// #2204: a sub-threshold longest-matching-prefix is coincidental noise (a
+	// short shared run such as a `": "` after a field label — the colon is only
+	// illustrative, ANY short coincidental content lands here), not an aligned
+	// prefix. But a failed prefix alone does NOT prove the body is absent, so
+	// #2215 checks the symmetric anchor before declaring it missing.
+	if (divergenceOffset < COVERAGE_DIAG_MIN_PREFIX) {
+		const suffixLen = longestCommonSuffixLength(
+			normalizedExpected,
+			normalizedAcceptance,
+			COVERAGE_DIAG_MAX_SCAN,
+		);
+		if (suffixLen < COVERAGE_DIAG_MIN_PREFIX) {
+			// Neither a meaningful PREFIX nor a meaningful SUFFIX of the requirement
+			// body occurs anywhere in ACCEPTANCE — the text is genuinely absent, not
+			// just a coincidental short prefix match (#2204).
+			return {
+				expectedSnippet: normalizedExpected.slice(0, COVERAGE_DIAG_SNIPPET_CAP),
+				foundSnippet: '',
+				divergenceOffset: 0,
+				completelyMissing: true,
+				...(corruptionHint ? { corruptionHint } : {}),
+			};
+		}
+		// #2215: a meaningful SUFFIX of the body was found somewhere in ACCEPTANCE
+		// even though nothing aligns from position 0 — the text is PRESENT but
+		// shifted, e.g. by a leading id-label glue (a spec bullet of the form
+		// `- **FR-001**: <body>` leaves a `": "` on the body extracted
+		// by `extractSpecRequirementBodyById`, so a verbatim paste written as
+		// `FR-001 - <body>` misaligns by two characters) or by spec.md-side
+		// corruption near — not at — the start (#1896's destroyed `§`-as-`??`).
+		// Point at the mismatched HEAD region instead of falsely claiming the text
+		// is absent. `divergenceOffset` stays 0, which is accurate (nothing
+		// meaningful aligns from the very start — any match there is under
+		// `COVERAGE_DIAG_MIN_PREFIX`) and flows into the renderer's "(no aligned
+		// prefix found)" divergence-pointer branch.
+		const matchedSuffix = normalizedExpected.slice(
+			normalizedExpected.length - suffixLen,
+		);
+		// >= 0 by construction: `matchedSuffix` is exactly the last window
+		// `longestCommonSuffixLength` confirmed with `.includes()`. The match can
+		// sit ANYWHERE in ACCEPTANCE (the prompt blob usually continues past it,
+		// e.g. with a trailing `SKILLS:` line), so its position must be located
+		// rather than computed from `normalizedAcceptance.length`.
+		const foundIdx = normalizedAcceptance.indexOf(matchedSuffix);
+		// `Math.max(0, …)` is defensive only: `suffixLen` cannot exceed
+		// `normalizedExpected.length`, and it cannot EQUAL it either — that would
+		// mean the whole body is a substring of ACCEPTANCE, and
+		// `checkAcceptanceCoversFrRefs` only calls this function after the very
+		// same `normalizedAcceptance.includes(normalizedExpected)` returned false.
+		// So `expectedSnippet` below is always non-empty.
+		const mismatchedHeadLen = Math.max(
+			0,
+			normalizedExpected.length - suffixLen,
+		);
+		const expectedSnippet = normalizedExpected.slice(
+			0,
+			Math.min(mismatchedHeadLen, COVERAGE_DIAG_SNIPPET_CAP),
+		);
+		// Show what precedes the matched region in ACCEPTANCE — that is where the
+		// mismatched head lives. When the match starts at index 0 there is nothing
+		// before it, so show the start of the matched content itself rather than
+		// rendering an empty, confusing snippet.
+		const foundSnippet =
+			foundIdx > 0
+				? normalizedAcceptance.slice(
+						Math.max(0, foundIdx - COVERAGE_DIAG_SNIPPET_CAP),
+						foundIdx,
+					)
+				: normalizedAcceptance.slice(
+						0,
+						Math.min(normalizedAcceptance.length, COVERAGE_DIAG_SNIPPET_CAP),
+					);
+		return {
+			expectedSnippet,
+			foundSnippet,
+			divergenceOffset: 0,
+			...(corruptionHint ? { corruptionHint } : {}),
+		};
+	}
+	const expectedSnippet = normalizedExpected.slice(
+		divergenceOffset,
+		divergenceOffset + COVERAGE_DIAG_SNIPPET_CAP,
+	);
+	const matchedPrefix = normalizedExpected.slice(0, divergenceOffset);
+	const foundIdx =
+		matchedPrefix.length > 0 ? normalizedAcceptance.indexOf(matchedPrefix) : -1;
+	const foundPos = foundIdx >= 0 ? foundIdx + matchedPrefix.length : 0;
+	const foundSnippet = normalizedAcceptance.slice(
+		foundPos,
+		foundPos + COVERAGE_DIAG_SNIPPET_CAP,
+	);
 	return {
 		expectedSnippet,
 		foundSnippet,
 		divergenceOffset,
 		...(corruptionHint ? { corruptionHint } : {}),
 	};
+}
+
+/**
+ * Builds the ACCEPTANCE_FIELD_COVERAGE_MISMATCH error (#1687/#1896/#2063/#2204
+ * contract). Exported pure so the message contract — normalized-compare note,
+ * divergence pointer vs #2204 completely-missing fallback, mojibake warning,
+ * fenced paste-ready requirement body with its cap, and the anti-spelunking
+ * directive — stays unit-testable even though #2205's injection makes the
+ * toolBefore throw structurally unreachable today (injection and the
+ * coverage recheck share the same field list, id-resolution, and
+ * normalization logic, so whatever injection covers, the recheck also
+ * considers covered). This stays wired as defense-in-depth against a FUTURE
+ * divergence — e.g. someone edits `injectSpecRequirementsIntoAcceptance`'s
+ * field list, unknown-id handling, or normalization without updating
+ * `checkAcceptanceCoversFrRefs` to match, or vice versa.
+ */
+export function buildAcceptanceCoverageMismatchError(params: {
+	targetAgent: string;
+	coverageTaskId: string | null;
+	coverageResult: {
+		covered: boolean;
+		missingId?: string;
+		diagnostic?: CoverageMissDiagnostic;
+		expectedBody?: string;
+	};
+}): Error {
+	const { targetAgent, coverageTaskId, coverageResult } = params;
+	// #1896: the compare is a NORMALIZED substring match (Unicode NFC +
+	// punctuation/whitespace folding), not a raw byte compare — so the
+	// diagnostic below points at the first NORMALIZED divergence and, when
+	// the text looks mojibake'd, says so.
+	const diag = coverageResult.diagnostic;
+	const diagLines: string[] = [];
+	if (diag) {
+		if (diag.completelyMissing) {
+			// #2204: the sub-threshold prefix match is coincidental noise —
+			// do NOT point at a "divergence" word; state the text is absent.
+			// #2215: the flag now also requires the SUFFIX probe to fail, so
+			// say so. Note this only reports what the two anchor probes
+			// checked, not an absolute claim about the whole body: a middle
+			// portion of the requirement CAN still be present verbatim in
+			// ACCEPTANCE (e.g. an id-label prefix glued on the front plus a
+			// truncated tail) while both anchor probes still miss.
+			diagLines.push(
+				`  neither the leading nor the trailing ${COVERAGE_DIAG_MIN_PREFIX} characters of the requirement text were found anywhere in ACCEPTANCE (a shorter or partial match is treated as coincidental)`,
+			);
+			diagLines.push(`  spec requires here: "${diag.expectedSnippet}"`);
+			diagLines.push(
+				'  ACCEPTANCE has here: "[Requirement text completely missing from prompt]"',
+			);
+		} else {
+			diagLines.push(
+				`  first divergence at normalized offset ${diag.divergenceOffset}` +
+					(diag.divergenceOffset === 0 ? ' (no aligned prefix found)' : ''),
+			);
+			diagLines.push(`  spec requires here: "${diag.expectedSnippet}"`);
+			diagLines.push(`  ACCEPTANCE has here: "${diag.foundSnippet}"`);
+		}
+		if (diag.corruptionHint) {
+			diagLines.push(`  ENCODING WARNING: ${diag.corruptionHint}`);
+		}
+	}
+	// #2063 A2: embed the raw, untrimmed requirement body verbatim (fenced,
+	// capped) so the architect can paste it directly instead of re-reading
+	// spec.md. `normalizeAcceptanceText`'s leading list-marker strip is
+	// POSITION-dependent (only a line-initial `- `/`* ` is stripped), so a
+	// bulleted multi-line body flattened onto one line can false-fail even
+	// when "pasted verbatim" — hence the explicit line-break instruction.
+	const rawExpectedBody = coverageResult.expectedBody ?? '';
+	const truncated = rawExpectedBody.length > ACCEPTANCE_EXPECTED_BODY_CAP;
+	const expectedBodyBlock = truncated
+		? `${rawExpectedBody.slice(0, ACCEPTANCE_EXPECTED_BODY_CAP)}\n…[truncated — read the remainder from .swarm/spec.md under ${coverageResult.missingId}]`
+		: rawExpectedBody;
+	return new Error(
+		`ACCEPTANCE_FIELD_COVERAGE_MISMATCH: the ${targetAgent} delegation for task ${coverageTaskId} was blocked because its ACCEPTANCE field does not cover the requirement text for ${coverageResult.missingId} from .swarm/spec.md (compared after Unicode/whitespace normalization, not raw bytes).\n${diagLines.join('\n')}\n` +
+			`Replace your ACCEPTANCE text for ${coverageResult.missingId} with the exact requirement text below, ` +
+			`PRESERVING ITS LINE BREAKS, then re-dispatch (body capped at ${ACCEPTANCE_EXPECTED_BODY_CAP} chars` +
+			`${truncated ? ', truncated below' : ''}):\n` +
+			'```\n' +
+			`${expectedBodyBlock}\n` +
+			'```\n' +
+			`(see the ACCEPTANCE FIELD RESOLUTION section of your system prompt for how ACCEPTANCE is derived; ` +
+			`if the ENCODING WARNING above is present, repair .swarm/spec.md first, then re-dispatch.) ` +
+			`Do NOT investigate the installed swarm plugin package (node_modules/opencode-swarm, ~/.cache/opencode) ` +
+			`— the fix is in your dispatch content, not in plugin internals. If this same error repeats after 2 fix ` +
+			`attempts, STOP and present the blocker to the user.`,
+	);
 }
 
 /**
@@ -1067,6 +1310,105 @@ export function checkAcceptanceCoversFrRefs(params: {
 		}
 	}
 	return { covered: true };
+}
+
+/** Args fields (in precedence order) that may carry the ACCEPTANCE header. */
+const ACCEPTANCE_ARGS_FIELDS = [
+	'prompt',
+	'description',
+	'task',
+	'input',
+	'message',
+] as const;
+
+export interface AcceptanceInjectionOutcome {
+	/** The args field that carried the ACCEPTANCE header and was mutated. */
+	field: (typeof ACCEPTANCE_ARGS_FIELDS)[number];
+	/** Spec ids whose verbatim bodies were appended. */
+	injectedIds: string[];
+}
+
+/**
+ * Issue #2205: programmatically guarantee verbatim FR/SC fidelity in the
+ * ACCEPTANCE field. The architect lists the task's mapped FR-###/SC-### ids on
+ * the ACCEPTANCE line (or pastes bodies itself, legacy style); this helper
+ * appends the VERBATIM requirement body from .swarm/spec.md — prefixed with the
+ * id, on its own line inside the ACCEPTANCE section — for every mapped id the
+ * current ACCEPTANCE text does not already cover, mutating the args field in
+ * place so the downstream coder/reviewer receives the exact requirement text.
+ *
+ * Coverage uses the SAME normalized-substring test as
+ * `checkAcceptanceCoversFrRefs` (shared helpers, no drift), so:
+ *  - an already-verbatim legacy dispatch is a no-op;
+ *  - an id missing from spec.md is skipped (fail-open, mirrored semantics);
+ *  - after injection, every extractable id is covered by construction.
+ *
+ * Returns null when nothing was injected (no ACCEPTANCE header in any field,
+ * or every mapped id already covered). Throws never — mechanical failures are
+ * the caller's concern (the coverage block is already fail-open).
+ */
+export function injectSpecRequirementsIntoAcceptance(params: {
+	args: Record<string, unknown>;
+	frRefs: string[];
+	specText: string;
+}): AcceptanceInjectionOutcome | null {
+	const headerRe = /^ACCEPTANCE:[ \t]*(.*)$/i;
+	let field: (typeof ACCEPTANCE_ARGS_FIELDS)[number] | undefined;
+	let lines: string[] | undefined;
+	let headerIdx = -1;
+	for (const candidate of ACCEPTANCE_ARGS_FIELDS) {
+		const value = params.args[candidate];
+		if (typeof value !== 'string' || !/ACCEPTANCE:/i.test(value)) continue;
+		const candidateLines = value.split(/\r?\n/);
+		const idx = candidateLines.findIndex((line) => headerRe.test(line));
+		if (idx >= 0) {
+			field = candidate;
+			lines = candidateLines;
+			headerIdx = idx;
+			break;
+		}
+	}
+	if (!field || !lines || headerIdx < 0) return null;
+
+	const normalizedAcceptance = normalizeAcceptanceText(lines.join('\n'));
+	// Dedupe frRefs so a literal duplicate id in the caller's list is never
+	// injected twice — the "already covered" check below is a snapshot taken
+	// once before the loop and never reflects blocks queued earlier in this
+	// same run.
+	const uniqueFrRefs = [...new Set(params.frRefs)];
+	const injectedIds: string[] = [];
+	const injectionBlocks: string[] = [];
+	for (const id of uniqueFrRefs) {
+		const body = extractSpecRequirementBodyById(params.specText, id);
+		if (body === null) continue; // unknown id — fail-open skip
+		if (normalizedAcceptance.includes(normalizeAcceptanceText(body))) {
+			continue; // already covered verbatim — nothing to inject
+		}
+		injectedIds.push(id);
+		// trim(): extractSpecRequirementBodyById returns the RAW body (untrimmed,
+		// leading space after the bold span); the injected block reads cleaner
+		// trimmed, and the coverage compare normalizes whitespace anyway.
+		//
+		// NOT capped: the post-injection `checkAcceptanceCoversFrRefs` recheck
+		// requires the FULL, UNCAPPED normalized body to be a substring of the
+		// dispatch text ("after injection, every extractable id is covered by
+		// construction" — see this function's docblock). Capping here would
+		// break that invariant for any body longer than the cap, hard-blocking
+		// a dispatch that should have succeeded.
+		const trimmedBody = body.trim();
+		injectionBlocks.push(`${id}: ${trimmedBody}`);
+	}
+	if (injectedIds.length === 0) return null;
+	// Insert right after the ACCEPTANCE header line. A `FR-###:`/`SC-###:` line
+	// does NOT match the next-field-header pattern (`^[A-Z][A-Z0-9_]*:` cannot
+	// span the `-`), so the injected bodies stay INSIDE the ACCEPTANCE section.
+	lines.splice(headerIdx + 1, 0, injectionBlocks.join('\n'));
+	params.args[field] = lines.join('\n');
+	logger.log(
+		'[delegation-gate] injected verbatim requirement text into ACCEPTANCE',
+		{ field, injected_ids: injectedIds.join(',') },
+	);
+	return { field, injectedIds };
 }
 
 interface MessageInfo {
@@ -1836,26 +2178,45 @@ function extractTaskFileDirectives(
  * Lines that don't match the pattern are silently ignored.
  *
  * @param outputText - Raw text output from the agent dispatch
- * @returns Map of taskId -> verdict string
+ * @returns StageBAttributionResult with typed verdicts and any parsing errors
  */
-export function parsePerTaskVerdicts(outputText: string): Map<string, string> {
-	const result = new Map<string, string>();
-	// Match [REVIEWED] or [TESTED] tag lines with task ID and verdict
-	// Supports formats like "[REVIEWED] | task-2.1 | APPROVED | details"
-	// and "[TESTED] | 2.1 | PASS | details"
-	const reviewedPattern =
-		/^\[REVIEWED\]\s*\|\s*(?:task-)?(\d+\.\d+(?:\.\d+)*)\s*\|\s*(APPROVED|REJECTED|CONCERNS)\s*\|/im;
-	const testedPattern =
-		/^\[TESTED\]\s*\|\s*(?:task-)?(\d+\.\d+(?:\.\d+)*)\s*\|\s*(PASS|FAIL|SKIPPED)\s*\|/im;
+export interface VerdictEntry {
+	verdict: string;
+	kind: 'REVIEWED' | 'TESTED';
+}
 
-	for (const line of outputText.split('\n')) {
+export interface StageBAttributionResult {
+	verdicts: Map<string, VerdictEntry>;
+	errors: string[];
+}
+
+export function parsePerTaskVerdicts(
+	outputText: string,
+): StageBAttributionResult {
+	const verdicts = new Map<string, VerdictEntry>();
+	const errors: string[] = [];
+	const reviewedPattern =
+		/^\[REVIEWED\]\s*\|\s*(?:task-)?(\d+\.\d+(?:\.\d+)*)\s*\|\s*(APPROVED|REJECTED|CONCERNS)\s*\|?/im;
+	const testedPattern =
+		/^\[TESTED\]\s*\|\s*(?:task-)?(\d+\.\d+(?:\.\d+)*)\s*\|\s*(PASS|FAIL|SKIPPED)\s*\|?/im;
+
+	for (const line of outputText.split(/\r?\n/)) {
 		const trimmed = line.trim();
 		let match = reviewedPattern.exec(trimmed);
 		if (match) {
 			const taskId = match[1];
 			const verdict = match[2];
 			if (isStrictTaskId(taskId)) {
-				result.set(taskId, verdict);
+				const existing = verdicts.get(taskId);
+				if (existing) {
+					if (existing.verdict !== verdict || existing.kind !== 'REVIEWED') {
+						errors.push(
+							`STAGE_B_VERDICT_CONFLICT: task ${taskId} has conflicting verdicts: ${existing.kind}/${existing.verdict} vs REVIEWED/${verdict}`,
+						);
+					}
+				} else {
+					verdicts.set(taskId, { verdict, kind: 'REVIEWED' });
+				}
 			}
 			continue;
 		}
@@ -1864,11 +2225,20 @@ export function parsePerTaskVerdicts(outputText: string): Map<string, string> {
 			const taskId = match[1];
 			const verdict = match[2];
 			if (isStrictTaskId(taskId)) {
-				result.set(taskId, verdict);
+				const existing = verdicts.get(taskId);
+				if (existing) {
+					if (existing.verdict !== verdict || existing.kind !== 'TESTED') {
+						errors.push(
+							`STAGE_B_VERDICT_CONFLICT: task ${taskId} has conflicting verdicts: ${existing.kind}/${existing.verdict} vs TESTED/${verdict}`,
+						);
+					}
+				} else {
+					verdicts.set(taskId, { verdict, kind: 'TESTED' });
+				}
 			}
 		}
 	}
-	return result;
+	return { verdicts, errors };
 }
 
 /**
@@ -2639,6 +3009,7 @@ export function createDelegationGateHook(
 	}) => Promise<void>;
 	sessionEnded: (sessionID: string, includeOwnedChildren?: boolean) => void;
 	backgroundCompletionClaimed: (record: BackgroundDelegationRecord) => void;
+	abortDeniedSettlementForCall: (callID: string) => Promise<void>;
 } {
 	// Initialize durable worktree merge-back status before any coders dispatch
 	initDurableStatusPath(directory);
@@ -2665,6 +3036,34 @@ export function createDelegationGateHook(
 		string,
 		BackgroundTaskChangeContext
 	>();
+	// Issue #2214: callID → the settlement this dispatch durably began. Used by
+	// (a) the toolBefore denial rollback when a LATER fail-closed hook rejects
+	// the Task call after the delegation gate already wrote the DISPATCHED WAL
+	// (no toolAfter will ever fire for a denied call), and (b) the toolAfter
+	// coder evidence block when resolveEvidenceTaskId cannot recover the task
+	// id the toolBefore scope preflight resolved. FIFO-capped like its siblings.
+	const begunCoderSettlementsByCallID = new Map<
+		string,
+		{ taskId: string | null; transitionId: string }
+	>();
+	const rememberBegunCoderSettlement = (
+		callID: string,
+		taskId: string | null,
+		transitionId: string,
+	): void => {
+		if (
+			!begunCoderSettlementsByCallID.has(callID) &&
+			begunCoderSettlementsByCallID.size >= MAX_PENDING_CODER_CHANGE_CONTEXTS
+		) {
+			// Fail closed like the sibling callID maps (PRR-002): silent FIFO
+			// eviction here would drop a denial-rollback entry and could
+			// re-introduce the #2214 DISPATCHED wedge under load.
+			throw new Error(
+				`BEGUN_SETTLEMENT_CONTEXT_CAPACITY: refusing coder dispatch because ${MAX_PENDING_CODER_CHANGE_CONTEXTS} live begun settlements are already tracked`,
+			);
+		}
+		begunCoderSettlementsByCallID.set(callID, { taskId, transitionId });
+	};
 	const backgroundCoderReservationByCallID = new Map<
 		string,
 		BackgroundCoderReservation
@@ -2675,6 +3074,15 @@ export function createDelegationGateHook(
 		Map<string, number>
 	>();
 	const gateDispatchPrimaryTaskByCallID = new Map<string, string | null>();
+
+	interface StageBDispatchContext {
+		taskIds: Set<string>;
+		expectedVerdictKind: 'REVIEWED' | 'TESTED';
+	}
+	const stageBDispatchContextByCallID = new Map<
+		string,
+		StageBDispatchContext
+	>();
 	const publishedScopeBindingsByCallID = new Map<
 		string,
 		Array<{ directory: string; binding: PreparedCoderScope['binding'] }>
@@ -2898,6 +3306,24 @@ export function createDelegationGateHook(
 				`CODER_SETTLEMENT_CONTEXT_MISSING: no durable baseline or generation for task ${taskId}`,
 			);
 		}
+		// Issue #2214: a dirty launch baseline can never support mutation
+		// attribution — changedFilesSinceSnapshot fails closed for any
+		// pre-existing uncommitted/untracked path. Enforce the clean-baseline
+		// contract at dispatch time, BEFORE the coder runs and before the
+		// settlement WAL is written, so the dispatch fails fast with an
+		// actionable message instead of wedging the task at DISPATCHED after
+		// the coder's work is done.
+		const baselineDirtyFiles = Array.isArray(context.baseline.changedFiles)
+			? context.baseline.changedFiles
+			: [];
+		if (baselineDirtyFiles.length > 0) {
+			const sample = baselineDirtyFiles.slice(0, 5).join(', ');
+			throw new Error(
+				`CODER_SETTLEMENT_CLEAN_BASELINE_REQUIRED: ${String(baselineDirtyFiles.length)} uncommitted/untracked change(s) present at dispatch (${sample}${baselineDirtyFiles.length > 5 ? ', …' : ''}). ` +
+					'Commit or stash them before dispatching a coder — exact-task settlement cannot attribute coder mutations from a dirty launch baseline. ' +
+					`Task ${taskId} was not dispatched and no settlement state was created.`,
+			);
+		}
 		await beginCoderSettlement({
 			directory,
 			taskId,
@@ -2907,6 +3333,7 @@ export function createDelegationGateHook(
 			context,
 			...(worktree ? { worktree } : {}),
 		});
+		rememberBegunCoderSettlement(input.callID, taskId, `coder:${input.callID}`);
 	};
 	const shouldRememberCoderTaskChangeContext = (
 		_declaredFiles: string[] | null,
@@ -2918,8 +3345,10 @@ export function createDelegationGateHook(
 		const callID = record.callID;
 		clearPublishedScopeBindings(callID);
 		clearCoderTaskChangeContext(callID);
+		begunCoderSettlementsByCallID.delete(callID);
 		stageBDispatchGenerationsByCallID.delete(callID);
 		gateDispatchPrimaryTaskByCallID.delete(callID);
+		stageBDispatchContextByCallID.delete(callID);
 		deleteStoredInputArgs(callID);
 	};
 
@@ -2956,6 +3385,8 @@ export function createDelegationGateHook(
 			taskMetadata,
 			sessionEnded,
 			backgroundCompletionClaimed,
+			// Disabled gate never begins a settlement; nothing to roll back.
+			abortDeniedSettlementForCall: async (): Promise<void> => {},
 		};
 	}
 
@@ -3170,13 +3601,9 @@ export function createDelegationGateHook(
 			// Reuse the same broad text-field extraction other checks in this file
 			// use (see resolveDelegatedPlanTaskId / taskLooksLikePlanCritic) so the
 			// ACCEPTANCE line is found regardless of which arg carried the prompt.
-			const acceptancePromptText = [
-				args.prompt,
-				args.description,
-				args.task,
-				args.input,
-				args.message,
-			]
+			const acceptancePromptText = ACCEPTANCE_ARGS_FIELDS.map(
+				(field) => args[field],
+			)
 				.filter((value): value is string => typeof value === 'string')
 				.join('\n');
 			const acceptanceCheck =
@@ -3188,9 +3615,10 @@ export function createDelegationGateHook(
 						: 'it has no ACCEPTANCE field';
 				throw new Error(
 					`ACCEPTANCE_FIELD_REQUIRED: the ${targetAgent} delegation was blocked because ${detail}. ` +
-						`Every coder/reviewer dispatch MUST carry a non-empty ACCEPTANCE: line in its prompt — the verbatim ` +
-						`FR-###/SC-### requirement text from .swarm/spec.md when the task maps to one or more spec requirements, or a ` +
-						`one-line task-derived statement of what DONE looks like otherwise (see the ACCEPTANCE FIELD RESOLUTION ` +
+						`Every coder/reviewer dispatch MUST carry a non-empty ACCEPTANCE: line in its prompt — the mapped FR-###/SC-### ids ` +
+						`(for a single-task dispatch the delegation gate injects their verbatim requirement text from .swarm/spec.md automatically; ` +
+						`phase/final-council multi-task reviewer dispatches are NOT auto-injected and must paste the verbatim text yourself) when the task maps to one or more ` +
+						`spec requirements, or a one-line task-derived statement of what DONE looks like otherwise (see the ACCEPTANCE FIELD RESOLUTION ` +
 						`section of your system prompt and .swarm/spec.md). Add an ACCEPTANCE: line to the delegation prompt and ` +
 						`re-dispatch. Do NOT investigate the installed swarm plugin package (node_modules/opencode-swarm, ` +
 						`~/.cache/opencode) — the fix is in your dispatch content, not in plugin internals. If this same error ` +
@@ -3240,8 +3668,29 @@ export function createDelegationGateHook(
 								path.join(directory, '.swarm', 'spec.md'),
 								'utf8',
 							);
+							// #2205: guarantee verbatim FR/SC fidelity programmatically —
+							// append the exact spec.md requirement bodies for any mapped id
+							// the ACCEPTANCE text does not already cover, mutating the
+							// dispatch args in place so the downstream coder/reviewer sees
+							// them. The architect only has to list the ids on the
+							// ACCEPTANCE line; byte-for-byte copying is no longer LLM
+							// responsibility. (Errors here fall to the surrounding
+							// fail-open catch, same as the rest of this block.)
+							injectSpecRequirementsIntoAcceptance({
+								args,
+								frRefs,
+								specText,
+							});
+							// Re-derive the acceptance text from the (possibly mutated)
+							// args so the coverage check validates what will actually be
+							// dispatched.
+							const effectiveAcceptanceText = ACCEPTANCE_ARGS_FIELDS.map(
+								(field) => args[field],
+							)
+								.filter((value): value is string => typeof value === 'string')
+								.join('\n');
 							coverageResult = checkAcceptanceCoversFrRefs({
-								acceptanceText: acceptancePromptText,
+								acceptanceText: effectiveAcceptanceText,
 								frRefs,
 								specText,
 							});
@@ -3253,49 +3702,18 @@ export function createDelegationGateHook(
 				coverageResult = undefined;
 			}
 			if (coverageResult && coverageResult.covered === false) {
-				// #1896: the compare is a NORMALIZED substring match (Unicode NFC +
-				// punctuation/whitespace folding), not a raw byte compare — so the
-				// diagnostic below points at the first NORMALIZED divergence and, when
-				// the text looks mojibake'd, says so. This replaces the old, misleading
-				// "copy byte-for-byte" instruction that sent architects hex-dumping.
-				const diag = coverageResult.diagnostic;
-				const diagLines: string[] = [];
-				if (diag) {
-					diagLines.push(
-						`  first divergence at normalized offset ${diag.divergenceOffset}` +
-							(diag.divergenceOffset === 0 ? ' (no aligned prefix found)' : ''),
-					);
-					diagLines.push(`  spec requires here: "${diag.expectedSnippet}"`);
-					diagLines.push(`  ACCEPTANCE has here: "${diag.foundSnippet}"`);
-					if (diag.corruptionHint) {
-						diagLines.push(`  ENCODING WARNING: ${diag.corruptionHint}`);
-					}
-				}
-				// #2063 A2: embed the raw, untrimmed requirement body verbatim (fenced,
-				// capped) so the architect can paste it directly instead of re-reading
-				// spec.md. `normalizeAcceptanceText`'s leading list-marker strip is
-				// POSITION-dependent (only a line-initial `- `/`* ` is stripped), so a
-				// bulleted multi-line body flattened onto one line can false-fail even
-				// when "pasted verbatim" — hence the explicit line-break instruction.
-				const rawExpectedBody = coverageResult.expectedBody ?? '';
-				const truncated = rawExpectedBody.length > ACCEPTANCE_EXPECTED_BODY_CAP;
-				const expectedBodyBlock = truncated
-					? `${rawExpectedBody.slice(0, ACCEPTANCE_EXPECTED_BODY_CAP)}\n…[truncated — read the remainder from .swarm/spec.md under ${coverageResult.missingId}]`
-					: rawExpectedBody;
-				throw new Error(
-					`ACCEPTANCE_FIELD_COVERAGE_MISMATCH: the ${targetAgent} delegation for task ${coverageTaskId} was blocked because its ACCEPTANCE field does not cover the requirement text for ${coverageResult.missingId} from .swarm/spec.md (compared after Unicode/whitespace normalization, not raw bytes).\n${diagLines.join('\n')}\n` +
-						`Replace your ACCEPTANCE text for ${coverageResult.missingId} with the exact requirement text below, ` +
-						`PRESERVING ITS LINE BREAKS, then re-dispatch (body capped at ${ACCEPTANCE_EXPECTED_BODY_CAP} chars` +
-						`${truncated ? ', truncated below' : ''}):\n` +
-						'```\n' +
-						`${expectedBodyBlock}\n` +
-						'```\n' +
-						`(see the ACCEPTANCE FIELD RESOLUTION section of your system prompt for how ACCEPTANCE is derived; ` +
-						`if the ENCODING WARNING above is present, repair .swarm/spec.md first, then re-dispatch.) ` +
-						`Do NOT investigate the installed swarm plugin package (node_modules/opencode-swarm, ~/.cache/opencode) ` +
-						`— the fix is in your dispatch content, not in plugin internals. If this same error repeats after 2 fix ` +
-						`attempts, STOP and present the blocker to the user.`,
-				);
+				// Defense-in-depth: after #2205's injection this throw is
+				// structurally unreachable in the toolBefore flow today
+				// (injection covers every extractable id before the check
+				// runs, using the same field list, id-resolution, and
+				// normalization logic as the recheck), but the check + error
+				// contract stay wired for any FUTURE divergence between
+				// injection and validation.
+				throw buildAcceptanceCoverageMismatchError({
+					targetAgent,
+					coverageTaskId,
+					coverageResult,
+				});
 			}
 		}
 
@@ -3372,6 +3790,11 @@ export function createDelegationGateHook(
 			}
 			rememberStageBDispatchGenerations(input.callID, generations);
 			gateDispatchPrimaryTaskByCallID.set(input.callID, resolvedTaskId);
+			stageBDispatchContextByCallID.set(input.callID, {
+				taskIds: new Set(generations.keys()),
+				expectedVerdictKind:
+					targetAgent === 'test_engineer' ? 'TESTED' : 'REVIEWED',
+			});
 			return;
 		}
 
@@ -4282,6 +4705,7 @@ export function createDelegationGateHook(
 					clearCoderTaskChangeContext(input.callID);
 					stageBDispatchGenerationsByCallID.delete(input.callID);
 					gateDispatchPrimaryTaskByCallID.delete(input.callID);
+					stageBDispatchContextByCallID.delete(input.callID);
 					if (storedArgs !== undefined) deleteStoredInputArgs(input.callID);
 				}
 				if (!backgroundCorrelationConflict) {
@@ -4540,163 +4964,198 @@ export function createDelegationGateHook(
 								//   [TESTED] | task-2.1 | PASS | ...
 								// If parseable, attribute per-task rather than over-attributing to
 								// every task in taskWorkflowStates.
-								const perTaskVerdicts = parsePerTaskVerdicts(
+								const attributionResult = parsePerTaskVerdicts(
 									outputText(_output),
 								);
-								const hasPerTaskAttribution = perTaskVerdicts.size > 0;
-
-								// FR-007: When per-task verdicts are parseable, iterate ONLY over the
-								// task IDs mentioned in those verdicts — skip all other eligible tasks
-								// to prevent over-attribution. When no verdicts are parseable, iterate
-								// over all eligible tasks (existing fallback behavior).
-
-								const {
-									getTaskWorkflowSnapshot,
-									readTaskEvidence,
-									transitionTaskWorkflowEvidence,
-								} = await import('../gate-evidence');
-								for (const [taskId, state] of session.taskWorkflowStates) {
-									if (
-										!(stageBEligibleStates as readonly string[]).includes(state)
-									)
-										continue;
-									// FR-007: Skip tasks NOT mentioned in per-task verdicts
-									if (hasPerTaskAttribution && !perTaskVerdicts.has(taskId))
-										continue;
-									if (
-										!hasPerTaskAttribution &&
-										gateDispatchPrimaryTaskByCallID.get(input.callID) !== taskId
-									) {
-										continue;
-									}
-									const eligibleState = state as EligibleState;
-									const launchGeneration = stageBDispatchGenerationsByCallID
-										.get(input.callID)
-										?.get(taskId);
-									if (launchGeneration === undefined) {
-										logger.warn(
-											`[delegation-gate] ignoring unbound Stage B settlement for ${taskId} from call ${input.callID}`,
+								for (const err of attributionResult.errors) {
+									logger.warn(`[delegation-gate] ${err}`);
+								}
+								do {
+									if (attributionResult.verdicts.size === 0) {
+										const dispatchCtx = stageBDispatchContextByCallID.get(
+											input.callID,
 										);
-										continue;
+										const expectedTasks = dispatchCtx
+											? [...dispatchCtx.taskIds].join(', ')
+											: (gateDispatchPrimaryTaskByCallID.get(input.callID) ??
+												'unknown');
+										logger.warn(
+											`[delegation-gate] STAGE_B_ATTRIBUTION_MISSING: ${targetAgent} dispatch for call ${input.callID} returned no structured verdict lines. Expected tasks: ${expectedTasks}. Agent output must include [REVIEWED] or [TESTED] verdict lines.`,
+										);
+										const failClosedTaskIds = dispatchCtx
+											? [...dispatchCtx.taskIds]
+											: gateDispatchPrimaryTaskByCallID.has(input.callID)
+												? [gateDispatchPrimaryTaskByCallID.get(input.callID)!]
+												: [];
+										for (const failTaskId of failClosedTaskIds) {
+											const failState =
+												session.taskWorkflowStates.get(failTaskId);
+											if (
+												failState &&
+												(stageBEligibleStates as readonly string[]).includes(
+													failState,
+												)
+											) {
+												session.taskWorkflowStates.set(
+													failTaskId,
+													'rework_required',
+												);
+												session.stageBCompletion?.delete(failTaskId);
+												logger.warn(
+													`[delegation-gate] STAGE_B_ATTRIBUTION_MISSING fail-closed: task ${failTaskId} → rework_required`,
+												);
+											}
+										}
+										break;
 									}
-									const verdict = perTaskVerdicts.get(taskId);
-									const positiveVerdict =
-										targetAgent === 'reviewer'
-											? verdict === 'APPROVED'
-											: verdict === 'PASS';
-									if (!positiveVerdict) {
+
+									const {
+										getTaskWorkflowSnapshot,
+										readTaskEvidence,
+										transitionTaskWorkflowEvidence,
+									} = await import('../gate-evidence');
+									for (const [taskId, state] of session.taskWorkflowStates) {
+										if (
+											!(stageBEligibleStates as readonly string[]).includes(
+												state,
+											)
+										)
+											continue;
+										if (!attributionResult.verdicts.has(taskId)) continue;
+										const eligibleState = state as EligibleState;
+										const launchGeneration = stageBDispatchGenerationsByCallID
+											.get(input.callID)
+											?.get(taskId);
+										if (launchGeneration === undefined) {
+											logger.warn(
+												`[delegation-gate] ignoring unbound Stage B settlement for ${taskId} from call ${input.callID}`,
+											);
+											continue;
+										}
+										const verdictEntry = attributionResult.verdicts.get(taskId);
+										const dispatchCtxForVerdict =
+											stageBDispatchContextByCallID.get(input.callID);
+										const positiveVerdict =
+											dispatchCtxForVerdict?.expectedVerdictKind === 'TESTED'
+												? verdictEntry?.verdict === 'PASS'
+												: verdictEntry?.verdict === 'APPROVED';
+										if (!positiveVerdict) {
+											try {
+												const rejected = await transitionTaskWorkflowEvidence(
+													directory,
+													taskId,
+													{
+														type: 'stage_b_failed',
+														gate: targetAgent as 'reviewer' | 'test_engineer',
+														expectedGeneration: launchGeneration,
+														transitionId: `gate-failed:${input.callID}:${taskId}`,
+													},
+												);
+												session.taskWorkflowStates.set(
+													taskId,
+													'rework_required',
+												);
+												session.stageBCompletion?.delete(taskId);
+												updateTaskWorkflowCache(
+													session,
+													taskId,
+													getTaskWorkflowSnapshot(rejected),
+												);
+											} catch (err) {
+												logger.warn(
+													`[delegation-gate] Stage B rejection could not be persisted for ${taskId}: ${err instanceof Error ? err.message : String(err)}`,
+												);
+											}
+											continue;
+										}
 										try {
-											const rejected = await transitionTaskWorkflowEvidence(
+											const turbo = hasActiveTurboMode(input.sessionID);
+											const { recordGateEvidence } = await import(
+												'../gate-evidence'
+											);
+											await recordGateEvidence(
 												directory,
 												taskId,
+												targetAgent as 'reviewer' | 'test_engineer',
+												input.sessionID,
+												turbo,
 												{
-													type: 'stage_b_failed',
-													gate: targetAgent as 'reviewer' | 'test_engineer',
 													expectedGeneration: launchGeneration,
-													transitionId: `gate-failed:${input.callID}:${taskId}`,
+													transitionId: `gate:${input.callID}:${taskId}`,
 												},
 											);
-											session.taskWorkflowStates.set(taskId, 'rework_required');
-											session.stageBCompletion?.delete(taskId);
-											updateTaskWorkflowCache(
-												session,
-												taskId,
-												getTaskWorkflowSnapshot(rejected),
-											);
 										} catch (err) {
 											logger.warn(
-												`[delegation-gate] Stage B rejection could not be persisted for ${taskId}: ${err instanceof Error ? err.message : String(err)}`,
+												`[delegation-gate] Stage B settlement rejected for ${taskId}: ${err instanceof Error ? err.message : String(err)}`,
 											);
+											continue;
 										}
-										continue;
-									}
-									try {
-										const turbo = hasActiveTurboMode(input.sessionID);
-										const { recordGateEvidence } = await import(
-											'../gate-evidence'
-										);
-										await recordGateEvidence(
-											directory,
+										recordStageBCompletion(
+											session,
 											taskId,
 											targetAgent as 'reviewer' | 'test_engineer',
-											input.sessionID,
-											turbo,
-											{
-												expectedGeneration: launchGeneration,
-												transitionId: `gate:${input.callID}:${taskId}`,
-											},
 										);
-									} catch (err) {
-										logger.warn(
-											`[delegation-gate] Stage B settlement rejected for ${taskId}: ${err instanceof Error ? err.message : String(err)}`,
-										);
-										continue;
-									}
-									recordStageBCompletion(
-										session,
-										taskId,
-										targetAgent as 'reviewer' | 'test_engineer',
-									);
 
-									const taskEvidence = await readTaskEvidence(
-										directory,
-										taskId,
-									);
-									const reviewerCompletesStageB =
-										targetAgent === 'reviewer' &&
-										taskEvidence?.test_engineer_exempt === true;
-									if (
-										hasBothStageBCompletions(session, taskId) ||
-										reviewerCompletesStageB
-									) {
-										// Barrier reached: both reviewer and test_engineer have completed.
-										// Advance through reviewer_run → tests_run in a single compound
-										// step so the state machine stays consistent.
-										try {
-											if (eligibleState === 'pre_check_passed') {
-												advanceTaskState(session, taskId, 'reviewer_run', {
-													telemetrySessionId: input.sessionID,
-												});
-											}
-											advanceTaskState(session, taskId, 'tests_run', {
-												telemetrySessionId: input.sessionID,
-											});
-										} catch (err) {
-											logger.warn(
-												`[delegation-gate] toolAfter stage-b-parallel: could not advance ${taskId} (${eligibleState}) → tests_run: ${err instanceof Error ? err.message : String(err)}`,
-											);
-										}
-									} else {
-										// Intermediate advancement: advance state immediately when a
-										// single Stage B agent completes, without waiting for the barrier.
-										// This preserves the sequential-equivalent state machine contract:
-										//   coder_delegated → reviewer_run  (when reviewer completes)
-										//   reviewer_run → tests_run        (when test_engineer completes)
-										// The barrier path above handles the case where both complete
-										// while state is still coder_delegated (compound step).
-										try {
-											if (
-												targetAgent === 'reviewer' &&
-												eligibleState === 'pre_check_passed'
-											) {
-												advanceTaskState(session, taskId, 'reviewer_run', {
-													telemetrySessionId: input.sessionID,
-												});
-											} else if (
-												targetAgent === 'test_engineer' &&
-												eligibleState === 'reviewer_run'
-											) {
+										const taskEvidence = await readTaskEvidence(
+											directory,
+											taskId,
+										);
+										const reviewerCompletesStageB =
+											targetAgent === 'reviewer' &&
+											taskEvidence?.test_engineer_exempt === true;
+										if (
+											hasBothStageBCompletions(session, taskId) ||
+											reviewerCompletesStageB
+										) {
+											// Barrier reached: both reviewer and test_engineer have completed.
+											// Advance through reviewer_run → tests_run in a single compound
+											// step so the state machine stays consistent.
+											try {
+												if (eligibleState === 'pre_check_passed') {
+													advanceTaskState(session, taskId, 'reviewer_run', {
+														telemetrySessionId: input.sessionID,
+													});
+												}
 												advanceTaskState(session, taskId, 'tests_run', {
 													telemetrySessionId: input.sessionID,
 												});
+											} catch (err) {
+												logger.warn(
+													`[delegation-gate] toolAfter stage-b-parallel: could not advance ${taskId} (${eligibleState}) → tests_run: ${err instanceof Error ? err.message : String(err)}`,
+												);
 											}
-										} catch (err) {
-											logger.warn(
-												`[delegation-gate] toolAfter stage-b-parallel intermediate: could not advance ${taskId} (${eligibleState}) after ${targetAgent}: ${err instanceof Error ? err.message : String(err)}`,
-											);
+										} else {
+											// Intermediate advancement: advance state immediately when a
+											// single Stage B agent completes, without waiting for the barrier.
+											// This preserves the sequential-equivalent state machine contract:
+											//   coder_delegated → reviewer_run  (when reviewer completes)
+											//   reviewer_run → tests_run        (when test_engineer completes)
+											// The barrier path above handles the case where both complete
+											// while state is still coder_delegated (compound step).
+											try {
+												if (
+													targetAgent === 'reviewer' &&
+													eligibleState === 'pre_check_passed'
+												) {
+													advanceTaskState(session, taskId, 'reviewer_run', {
+														telemetrySessionId: input.sessionID,
+													});
+												} else if (
+													targetAgent === 'test_engineer' &&
+													eligibleState === 'reviewer_run'
+												) {
+													advanceTaskState(session, taskId, 'tests_run', {
+														telemetrySessionId: input.sessionID,
+													});
+												}
+											} catch (err) {
+												logger.warn(
+													`[delegation-gate] toolAfter stage-b-parallel intermediate: could not advance ${taskId} (${eligibleState}) after ${targetAgent}: ${err instanceof Error ? err.message : String(err)}`,
+												);
+											}
 										}
 									}
-								}
+								} while (false as boolean);
 							}
 						}
 					} // end if (!councilActive) — primary Stage B path
@@ -4707,13 +5166,28 @@ export function createDelegationGateHook(
 				// re-throw unexpected errors (EPERM, EBUSY on Windows) which previously
 				// escaped outside the evidence try-catch and propagated to safeHook.
 				if (typeof subagentType === 'string') {
+					let coderSettleTaskId: string | null = null;
 					try {
 						const mergedArgs = { ...(storedArgs ?? {}), ...directArgs };
-						const evidenceTaskId = await resolveEvidenceTaskId(
+						let evidenceTaskId = await resolveEvidenceTaskId(
 							mergedArgs,
 							session,
 							directory,
 						);
+						// Issue #2214 belt: the toolBefore scope preflight may have
+						// resolved the task via sources resolveEvidenceTaskId lacks
+						// (e.g. the declare_scope pending-scope map). For a coder
+						// dispatch whose settlement this call durably began, trust the
+						// begun-settlement record instead of silently skipping
+						// finalization — a skipped settle wedges the DISPATCHED WAL.
+						if (
+							!evidenceTaskId &&
+							stripKnownSwarmPrefix(subagentType) === 'coder'
+						) {
+							const begun = begunCoderSettlementsByCallID.get(input.callID);
+							if (begun?.taskId) evidenceTaskId = begun.taskId;
+						}
+						coderSettleTaskId = evidenceTaskId;
 						if (evidenceTaskId) {
 							const turbo = hasActiveTurboMode(input.sessionID);
 							const gateAgents = [
@@ -4870,19 +5344,78 @@ export function createDelegationGateHook(
 							`[delegation-gate] evidence recording failed: ${err instanceof Error ? err.message : String(err)}`,
 						);
 						if (normalizedAgent === 'coder') {
-							pushAdvisory(
-								session,
-								`CODER_SETTLEMENT_DURABILITY_FAILURE: task output remains fenced until accepted-mutation evidence for call ${input.callID} is recovered.`,
-							);
+							// Issue #2214: a coder settle failure that never reached
+							// settleCoderDispatch leaves the DISPATCHED WAL with its
+							// in-memory ownership key retained — same-process recovery
+							// would throw CODER_DISPATCH_IN_PROGRESS forever. Release the
+							// key (idempotent) so recoverCoderSettlement can retry, and
+							// abort the WAL outright when its recorded launch baseline
+							// was structurally attribution-doomed (non-git or dirty at
+							// dispatch) — that settlement can never complete.
+							let terminalAbort = false;
+							if (coderSettleTaskId && !coderSettlementCommitted) {
+								releaseCoderDispatchOwnership(
+									directory,
+									coderSettleTaskId,
+									`coder:${input.callID}`,
+								);
+								try {
+									const abortOutcome = await abortCoderSettlementIfDoomed({
+										directory,
+										taskId: coderSettleTaskId,
+										transitionId: `coder:${input.callID}`,
+									});
+									terminalAbort =
+										abortOutcome === 'aborted' ||
+										abortOutcome === 'already-aborted';
+								} catch (abortErr) {
+									logger.warn(
+										`[delegation-gate] doomed settlement abort failed for ${coderSettleTaskId}: ${
+											abortErr instanceof Error
+												? abortErr.message
+												: String(abortErr)
+										}`,
+									);
+								}
+								if (terminalAbort) {
+									// PRR-001: the dispatch is terminally settled; its
+									// change context is exhausted (recovery reads the WAL).
+									clearCoderTaskChangeContext(input.callID);
+								}
+							}
+							if (terminalAbort) {
+								pushAdvisory(
+									session,
+									`CODER_SETTLEMENT_ABORTED: task ${coderSettleTaskId} dispatch ${input.callID} was settled as ABORTED — its launch baseline was dirty or had no git history, so the coder's changes cannot be attributed. Reconcile the workspace (commit, stash, or discard the coder's output), then repair the task with update_task_status and re-dispatch from a clean tree.`,
+								);
+							} else {
+								pushAdvisory(
+									session,
+									`CODER_SETTLEMENT_DURABILITY_FAILURE: task output remains fenced until accepted-mutation evidence for call ${input.callID} is recovered.`,
+								);
+							}
 							throw err;
 						}
 					} finally {
-						if (
-							stripKnownSwarmPrefix(subagentType) === 'coder' &&
-							coderSettlementCommitted
-						) {
-							clearCoderTaskChangeContext(input.callID);
-							clearPublishedScopeBindings(input.callID);
+						if (stripKnownSwarmPrefix(subagentType) === 'coder') {
+							if (coderSettlementCommitted) {
+								clearCoderTaskChangeContext(input.callID);
+								clearPublishedScopeBindings(input.callID);
+							}
+							// PRR-001: both purposes of the begun-settlement entry —
+							// denial rollback (a denied call never reaches toolAfter)
+							// and the task-id fallback above — are exhausted once
+							// toolAfter has run for this callID.
+							begunCoderSettlementsByCallID.delete(input.callID);
+							// The coder settle failure above RETHROWS, so the post-block
+							// cleanup (stored args, Stage B generation bindings) never
+							// runs on that path — drain it here instead. Idempotent
+							// with the success-path deletes below.
+							if (!coderSettlementCommitted) {
+								stageBDispatchGenerationsByCallID.delete(input.callID);
+								gateDispatchPrimaryTaskByCallID.delete(input.callID);
+								deleteStoredInputArgs(input.callID);
+							}
 						}
 					}
 				}
@@ -4938,6 +5471,7 @@ export function createDelegationGateHook(
 
 				stageBDispatchGenerationsByCallID.delete(input.callID);
 				gateDispatchPrimaryTaskByCallID.delete(input.callID);
+				stageBDispatchContextByCallID.delete(input.callID);
 
 				// ── Completion gate: push advisory if a task awaits completion ──
 				// B3 (issue #1976): the `break` below only caps pushes to one per
@@ -5374,5 +5908,54 @@ ${warningLines.join('\n')}`;
 		taskMetadata,
 		sessionEnded,
 		backgroundCompletionClaimed,
+		/**
+		 * Issue #2214: roll back a settlement this call durably began when a
+		 * LATER fail-closed hook denies the Task call (the delegation gate runs
+		 * at step 4; full-auto/knowledge/skill gates at steps 5-8 can still
+		 * throw). A denied call never fires toolAfter, so without this rollback
+		 * the DISPATCHED WAL and its in-memory ownership key wedge the task
+		 * until a process restart. Never throws — the denial itself propagates.
+		 *
+		 * F-002 (PR #2223 review): cleanup runs in a FINALLY so every failure
+		 * class (settlement-lock contention, WAL_MISSING/REPLACED/UNREADABLE,
+		 * write errors) still releases the in-memory ownership key and the
+		 * callID bookkeeping — an abort that throws must not leave a louder
+		 * in-process CODER_DISPATCH_IN_PROGRESS wedge behind.
+		 */
+		abortDeniedSettlementForCall: async (callID: string): Promise<void> => {
+			const begun = begunCoderSettlementsByCallID.get(callID);
+			if (!begun?.taskId) return;
+			try {
+				await abortCoderSettlement({
+					directory,
+					taskId: begun.taskId,
+					transitionId: begun.transitionId,
+					reason:
+						'dispatch denied by a fail-closed gate after settlement began',
+				});
+			} catch (error) {
+				logger.criticalWarn(
+					`[delegation-gate] denied-dispatch settlement rollback failed for call ${callID} (task ${begun.taskId}): ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				);
+			} finally {
+				// Unconditional (idempotent) cleanup, mirroring
+				// backgroundCompletionClaimed: a denied call never reaches the
+				// toolAfter cleanup path, so this is the only drain for these
+				// entries.
+				releaseCoderDispatchOwnership(
+					directory,
+					begun.taskId,
+					begun.transitionId,
+				);
+				begunCoderSettlementsByCallID.delete(callID);
+				clearCoderTaskChangeContext(callID);
+				clearPublishedScopeBindings(callID);
+				stageBDispatchGenerationsByCallID.delete(callID);
+				gateDispatchPrimaryTaskByCallID.delete(callID);
+				deleteStoredInputArgs(callID);
+			}
+		},
 	};
 }

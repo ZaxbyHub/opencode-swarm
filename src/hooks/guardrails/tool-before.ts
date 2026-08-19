@@ -43,6 +43,7 @@ import {
 } from '../../state';
 import { telemetry } from '../../telemetry.js';
 import { warn } from '../../utils';
+import { normalizePatchIndentation } from '../../utils/patch-dedent';
 import { isPathUnderSwarmWorktreeBase } from '../../worktree/core.js';
 import { detectLoop } from '../loop-detector';
 import { normalizeToolName } from '../normalize-tool-name';
@@ -369,9 +370,24 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			...new Set([...outerSegments, ...innerSegments, ...perSegmentUnwrapped]),
 		];
 
+		// Cross-segment shell variable assignments (issue #2033 review): later
+		// segments referencing $NAME are resolved against assignments harvested
+		// from earlier segments so `CMD='knowledge hive-quarantine' && bunx ... run
+		// $CMD` cannot dodge the swarm-CLI-bypass probe below.
+		const swarmShellVars = new Map<string, string>();
+
 		for (const segment of allSegments) {
 			const seg = segment.trim();
 			if (!seg) continue;
+
+			// Harvest shell variable assignments (quoted values may contain
+			// spaces) for the $VAR-resolved probe variant below.
+			for (const m of seg.matchAll(
+				/(?:^|[\s;&|(])([A-Za-z_][A-Za-z0-9_]*)=(?:"([^"]*)"|'([^']*)'|([^\s;&|()]+))/g,
+			)) {
+				const value = m[2] ?? m[3] ?? m[4] ?? '';
+				if (m[1]) swarmShellVars.set(m[1], value);
+			}
 
 			// Junction/symlink CREATION with out-of-cwd target
 			const junctionBlock = dcCheckJunctionCreation(seg, cwd);
@@ -764,7 +780,10 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				const HUMAN_ONLY_SWARM_SUBCOMMANDS = HUMAN_ONLY_SWARM_COMMANDS;
 
 				let probe = seg
-					.replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)+/, '')
+					.replace(
+						/^(?:[A-Za-z_][A-Za-z0-9_]*(?:="[^"]*"|='[^']*'|=\S+)\s+)+/,
+						'',
+					)
 					.replace(/^eval(?:\s+--)?\s+["']?/, '')
 					.replace(/["']\s*$/, '')
 					.replace(/^\$\(\s*/, '')
@@ -782,85 +801,105 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 							'',
 						)
 						.replace(/^command\s+(?:-[pvV]\s+)*/, '')
-						.replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)+/, '')
+						.replace(
+							/^(?:[A-Za-z_][A-Za-z0-9_]*(?:="[^"]*"|='[^']*'|=\S+)\s+)+/,
+							'',
+						)
 						.trim();
 					if (probe === before) break;
 				}
 
-				// Form A: <runner> ... opencode-swarm ... run <subcmd> [subsubcmd]
-				const swarmCliBypassMatch = probe.match(
-					/^\\?(?:bunx|npx|pnpx|npm(?:\s+(?:exec|x)(?:\s+--)?)?|pnpm(?:\s+(?:dlx|exec))?|yarn(?:\s+(?:dlx|exec))?|bun(?:\s+x)?|node|deno\s+run|tsx|ts-node)\b[^|;&]*?\bopencode-swarm\b[^|;&]*?\brun\s+([A-Za-z0-9_-]+(?:\s+(?!-)[A-Za-z0-9_-]+)?)/i,
-				);
-				if (swarmCliBypassMatch) {
-					const captured = swarmCliBypassMatch[1];
-					// Normalize all whitespace (tabs, multiple spaces) to single spaces for consistent lookup
-					const normalized = captured.trim().split(/\s+/).join(' ');
-					const firstToken = normalized.includes(' ')
-						? normalized.split(' ')[0]
-						: normalized;
-					const cmdName = HUMAN_ONLY_SWARM_SUBCOMMANDS.has(normalized)
-						? normalized
-						: firstToken;
-					if (
-						HUMAN_ONLY_SWARM_SUBCOMMANDS.has(normalized) ||
-						HUMAN_ONLY_SWARM_SUBCOMMANDS.has(firstToken)
-					) {
+				// Probe variants (issue #2033 + PR #2200 review): a dequoted copy
+				// defeats quoting the subcommand; a $VAR-resolved copy (assignments
+				// harvested across the whole command) defeats shell-variable
+				// indirection. EVERY variant is matched independently — a partial
+				// primary match must not suppress the fallback probes (`knowledge
+				// 'hive-quarantine'` dequotes to the blockable full form).
+				const dequote = (input: string): string => input.replace(/["']/g, '');
+				const resolveVars = (input: string): string =>
+					input.replace(
+						/\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/g,
+						(full: string, name: string) =>
+							swarmShellVars.has(name)
+								? (swarmShellVars.get(name) as string)
+								: full,
+					);
+				// Fail closed on unresolvable indirection (review finding 2b): if a
+				// runner-shaped probe STILL references a shell variable or command
+				// substitution in the subcommand position AFTER variable
+				// resolution, the guard cannot know what will run — refuse and
+				// require a literal subcommand name.
+				const RUNNER_SHAPE =
+					/^(?:\\|\/?(?:[\w.:%@=+-]+[/\\])*)?(?:bunx|npx|pnpx|npm|pnpm|yarn|bun|node|deno|tsx|ts-node|opencode-swarm)\b[^|;&]*?\brun\s+\$/i;
+				for (const variant of [
+					resolveVars(probe),
+					dequote(resolveVars(probe)),
+				]) {
+					if (RUNNER_SHAPE.test(variant)) {
 						throw new Error(
-							`BLOCKED: "${cmdName}" is a human-only swarm command and may not be invoked from shell by an agent. ` +
-								`Present the situation to the user and ask them to run \`/swarm ${cmdName}\` themselves.`,
+							'BLOCKED: "opencode-swarm run" invoked with an unresolvable shell variable or command substitution in the subcommand position. ' +
+								'Re-run with the literal subcommand name so the human-only policy can be evaluated.',
 						);
 					}
 				}
+				const probeVariants = [
+					probe,
+					dequote(probe),
+					resolveVars(probe),
+					dequote(resolveVars(probe)),
+				];
+				const matchCaptures = (re: RegExp): string[] => {
+					const captures: string[] = [];
+					for (const variant of probeVariants) {
+						const m = variant.match(re);
+						if (m?.[1]) captures.push(m[1]);
+					}
+					return captures;
+				};
+				const blockIfHumanOnly = (captures: string[]): void => {
+					for (const captured of captures) {
+						// Normalize all whitespace (tabs, multiple spaces) for lookup.
+						const normalized = captured.trim().split(/\s+/).join(' ');
+						const firstToken = normalized.includes(' ')
+							? normalized.split(' ')[0]
+							: normalized;
+						const cmdName = HUMAN_ONLY_SWARM_SUBCOMMANDS.has(normalized)
+							? normalized
+							: firstToken;
+						if (
+							HUMAN_ONLY_SWARM_SUBCOMMANDS.has(normalized) ||
+							HUMAN_ONLY_SWARM_SUBCOMMANDS.has(firstToken)
+						) {
+							throw new Error(
+								`BLOCKED: "${cmdName}" is a human-only swarm command and may not be invoked from shell by an agent. ` +
+									`Present the situation to the user and ask them to run \`/swarm ${cmdName}\` themselves.`,
+							);
+						}
+					}
+				};
 
-				// Form B: bare `opencode-swarm` on PATH
-				const swarmBareBinMatch = probe.match(
-					/^\\?opencode-swarm\b[^|;&]*?\brun\s+([A-Za-z0-9_-]+(?:\s+(?!-)[A-Za-z0-9_-]+)?)/i,
+				// Form A: <runner> ... opencode-swarm ... run <subcmd> [subsubcmd].
+				// The optional path prefix (e.g. /usr/local/bin/bunx) is tolerated so a
+				// path-qualified runner cannot dodge the anchor.
+				blockIfHumanOnly(
+					matchCaptures(
+						/^(?:\\|\/?(?:[\w.:%@=+-]+[/\\])*)?(?:bunx|npx|pnpx|npm(?:\s+(?:exec|x)(?:\s+--)?)?|pnpm(?:\s+(?:dlx|exec))?|yarn(?:\s+(?:dlx|exec))?|bun(?:\s+x)?|node|deno\s+run|tsx|ts-node)\b[^|;&]*?\bopencode-swarm\b[^|;&]*?\brun\s+([A-Za-z0-9_-]+(?:\s+(?!-)[A-Za-z0-9_-]+)?)/i,
+					),
 				);
-				if (swarmBareBinMatch) {
-					const captured = swarmBareBinMatch[1];
-					// Normalize all whitespace (tabs, multiple spaces) to single spaces for consistent lookup
-					const normalized = captured.trim().split(/\s+/).join(' ');
-					const firstToken = normalized.includes(' ')
-						? normalized.split(' ')[0]
-						: normalized;
-					const cmdName = HUMAN_ONLY_SWARM_SUBCOMMANDS.has(normalized)
-						? normalized
-						: firstToken;
-					if (
-						HUMAN_ONLY_SWARM_SUBCOMMANDS.has(normalized) ||
-						HUMAN_ONLY_SWARM_SUBCOMMANDS.has(firstToken)
-					) {
-						throw new Error(
-							`BLOCKED: "${cmdName}" is a human-only swarm command and may not be invoked from shell by an agent. ` +
-								`Present the situation to the user and ask them to run \`/swarm ${cmdName}\` themselves.`,
-						);
-					}
-				}
+
+				// Form B: bare `opencode-swarm` on PATH (path-qualified tolerated).
+				blockIfHumanOnly(
+					matchCaptures(
+						/^(?:\\|\/?(?:[\w.:%@=+-]+[/\\])*)?opencode-swarm\b[^|;&]*?\brun\s+([A-Za-z0-9_-]+(?:\s+(?!-)[A-Za-z0-9_-]+)?)/i,
+					),
+				);
 
 				// Secondary: dist-relative CLI path invocation
-				const swarmCliPathMatch = probe.match(
-					/\bcli[/\\]+index\.[mc]?(?:js|ts)\b[^|;&]*?\brun\s+([A-Za-z0-9_-]+(?:\s+(?!-)[A-Za-z0-9_-]+)?)/i,
+				blockIfHumanOnly(
+					matchCaptures(
+						/\bcli[/\\]+index\.[mc]?(?:js|ts)\b[^|;&]*?\brun\s+([A-Za-z0-9_-]+(?:\s+(?!-)[A-Za-z0-9_-]+)?)/i,
+					),
 				);
-				if (swarmCliPathMatch) {
-					const captured = swarmCliPathMatch[1];
-					// Normalize all whitespace (tabs, multiple spaces) to single spaces for consistent lookup
-					const normalized = captured.trim().split(/\s+/).join(' ');
-					const firstToken = normalized.includes(' ')
-						? normalized.split(' ')[0]
-						: normalized;
-					const cmdName = HUMAN_ONLY_SWARM_SUBCOMMANDS.has(normalized)
-						? normalized
-						: firstToken;
-					if (
-						HUMAN_ONLY_SWARM_SUBCOMMANDS.has(normalized) ||
-						HUMAN_ONLY_SWARM_SUBCOMMANDS.has(firstToken)
-					) {
-						throw new Error(
-							`BLOCKED: "${cmdName}" is a human-only swarm command and may not be invoked from shell by an agent. ` +
-								`Present the situation to the user and ask them to run \`/swarm ${cmdName}\` themselves.`,
-						);
-					}
-				}
 			}
 
 			// Direct shell manipulation of .swarm/spec-staleness.json
@@ -1708,34 +1747,40 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				'WRITE BLOCKED: Patch payload exceeds 1 MB — authority cannot be verified for all modified paths. Split into smaller patches.',
 			);
 		}
+		// #2206: strip a uniform leading indentation block (models emit diffs
+		// indented inside fenced/YAML blocks) so the column-0 anchored patterns
+		// below resolve the real target paths. A column-0 patch is a byte-identical
+		// no-op, so hunk context lines whose file content itself starts with `---`
+		// can never gain a phantom match.
+		const normalizedPatchText = normalizePatchIndentation(patchText);
 		const patchPathPattern = /\*\*\*\s+(?:Update|Add|Delete)\s+File:\s*(.+)/gi;
 		const diffPathPattern = /\+\+\+\s+b\/(.+)/gm;
 		const gitDiffPathPattern = /^diff --git a\/(.+?) b\/(.+?)$/gm;
 		const minusPathPattern = /^---\s+a\/(.+)$/gm;
 		const traditionalMinusPattern = /^---\s+([^\s].+?)(?:\t.*)?$/gm;
 		const traditionalPlusPattern = /^\+\+\+\s+([^\s].+?)(?:\t.*)?$/gm;
-		for (const match of patchText.matchAll(patchPathPattern))
+		for (const match of normalizedPatchText.matchAll(patchPathPattern))
 			paths.add(match[1].trim());
-		for (const match of patchText.matchAll(diffPathPattern)) {
+		for (const match of normalizedPatchText.matchAll(diffPathPattern)) {
 			const p = match[1].trim();
 			if (p !== '/dev/null') paths.add(p);
 		}
-		for (const match of patchText.matchAll(gitDiffPathPattern)) {
+		for (const match of normalizedPatchText.matchAll(gitDiffPathPattern)) {
 			const aPath = match[1].trim();
 			const bPath = match[2].trim();
 			if (aPath !== '/dev/null') paths.add(aPath);
 			if (bPath !== '/dev/null') paths.add(bPath);
 		}
-		for (const match of patchText.matchAll(minusPathPattern)) {
+		for (const match of normalizedPatchText.matchAll(minusPathPattern)) {
 			const p = match[1].trim();
 			if (p !== '/dev/null') paths.add(p);
 		}
-		for (const match of patchText.matchAll(traditionalMinusPattern)) {
+		for (const match of normalizedPatchText.matchAll(traditionalMinusPattern)) {
 			const p = match[1].trim();
 			if (p !== '/dev/null' && !p.startsWith('a/') && !p.startsWith('b/'))
 				paths.add(p);
 		}
-		for (const match of patchText.matchAll(traditionalPlusPattern)) {
+		for (const match of normalizedPatchText.matchAll(traditionalPlusPattern)) {
 			const p = match[1].trim();
 			if (p !== '/dev/null' && !p.startsWith('a/') && !p.startsWith('b/'))
 				paths.add(p);

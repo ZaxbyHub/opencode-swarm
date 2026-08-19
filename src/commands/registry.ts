@@ -53,6 +53,7 @@ import { handleGateAuditCommand } from './gate-audit.js';
 import { handleGateStatsCommand } from './gate-stats.js';
 import { handleHandoffCommand } from './handoff.js';
 import { handleHistoryCommand } from './history.js';
+import { handleKnowledgeHiveQuarantineCommand } from './hive-quarantine.js';
 import { handleIssueCommand } from './issue.js';
 import {
 	handleKnowledgeListCommand,
@@ -1091,7 +1092,7 @@ export const COMMAND_REGISTRY = {
 		description:
 			'Enter architect MODE: LOOP — compound-engineering loop: brainstorm → plan → build → review → improve, iterating until done [objective]',
 		args: '<objective> [--max-cycles 1..5] [--autonomy checkpoint|auto] [--depth standard|exhaustive] [--resume]',
-		details: `Triggers the architect to run the compound-engineering loop defined in ${BUNDLED_PROJECT_SKILL_ROOT}/loop/SKILL.md: BRAINSTORM (requirements) → PLAN (+ critic gate) → BUILD (execute) → REVIEW (independent reviewer + critic on the diff, report-only) → IMPROVE (phase-wrap retrospective + compounding learning capture), then evaluate stop conditions and loop for another improvement cycle if the objective is unmet and budget remains. Generator and reviewer/critic run in separate contexts; failing assertions must be fixed at the root cause, never weakened, mocked, or skipped. Defense-in-depth stop conditions: objective met, --max-cycles budget (default 3), no-progress/plateau, oscillation, unrecoverable error, or explicit user stop. --autonomy auto (default) runs unattended with hard stops still enforced; --autonomy checkpoint pauses at phase gates for user approval. --depth exhaustive widens exploration. --resume continues an existing loop run from durable .swarm/loop/ state. Distinct from full-auto (autonomous cross-phase oversight) and turbo (parallel lanes within a phase): loop is a user-initiated, gated, compounding workflow.`,
+		details: `Triggers the architect to run the compound-engineering loop defined in ${BUNDLED_PROJECT_SKILL_ROOT}/loop/SKILL.md: BRAINSTORM (requirements) → PLAN (+ critic gate) → BUILD (execute) → REVIEW (independent reviewer + critic on the diff, report-only) → IMPROVE (phase-wrap retrospective + compounding learning capture), then evaluate stop conditions and loop for another improvement cycle if the objective is unmet and budget remains. Generator and reviewer/critic run in separate contexts; failing assertions must be fixed at the root cause, never weakened, mocked, or skipped. Defense-in-depth stop conditions: objective met, --max-cycles budget (default 3), no-progress/plateau, oscillation, unrecoverable error, or explicit user stop. --autonomy auto (default) runs unattended with hard stops still enforced; --autonomy checkpoint pauses at phase gates for user approval. --depth exhaustive widens exploration. --resume continues an existing loop run from durable .swarm/loop/ state. Distinct from full-auto (a critic gate that intercepts phase completions and high-risk actions for review — it never plans, delegates, or executes; the architect retains all delegation duty) and turbo (parallel lanes within a phase): loop is a user-initiated, gated, compounding workflow.`,
 		category: 'agent',
 		toolPolicy: 'none',
 	},
@@ -1478,7 +1479,7 @@ export const COMMAND_REGISTRY = {
 			'Toggle Full-Auto Mode for the active session [on [mode]|off|status]',
 		args: 'on [assisted|supervised|strict], off, status',
 		details:
-			'First-class toggle for Full-Auto Mode — autonomous execution with the critic reviewing escalations on your behalf. No config-level enablement is required: "on" activates immediately (unless full_auto.locked is true in config), "off" disarms the run and returns the session to normal interactive operation, "status" reports the durable run state. ' +
+			'First-class toggle for Full-Auto Mode — a critic gate reviewing escalations on your behalf (the architect still plans and delegates; full-auto never executes tasks itself). No config-level enablement is required: "on" activates immediately (unless full_auto.locked is true in config), "off" disarms the run and returns the session to normal interactive operation, "status" reports the durable run state. ' +
 			'An optional mode after "on" overrides full_auto.mode for this run: assisted (critic consulted only on policy escalations), supervised (default — risky/high-impact actions reviewed by the critic), strict (ALL plan mutations reviewed by the critic). ' +
 			'While active, the critic answers architect questions and reviews phase boundaries, delegations, and risky actions on your behalf; only ESCALATE_TO_HUMAN verdicts halt the run for your input. ' +
 			'The run state is durable (.swarm/full-auto-state.json) and survives restarts; toggle with no argument flips the current state.',
@@ -1531,6 +1532,23 @@ export const COMMAND_REGISTRY = {
 			"Restores a quarantined or archived knowledge entry back to the active knowledge store by ID. Dispatches by current status: an 'archived' entry is restored to its pre-archive status; a 'quarantined' entry is restored from the quarantine sidecar. Validates entry ID format (1-64 alphanumeric/hyphen/underscore).",
 		args: '<entry-id>',
 		category: 'utility',
+	},
+	'knowledge hive-quarantine': {
+		handler: (ctx) =>
+			handleKnowledgeHiveQuarantineCommand(ctx.directory, ctx.args),
+		description:
+			'Human-only exact-ID quarantine of hive-store entries with backup and rollback',
+		subcommandOf: 'knowledge',
+		details:
+			'Issue #2033 operator maintenance for the machine-global hive knowledge store. ' +
+			'`preview <id>[,<id>...]` shows exact candidate IDs with per-line hashes, provenance, status, and a store fingerprint, and issues a short-lived confirmation token. ' +
+			'`commit --token <t> [--reason <text>]` writes and hash-verifies a complete backup plus manifest BEFORE any mutation (outside the hive lock), then re-verifies the live store against that backup inside one fast transaction (any drift — concurrent append, entry change, version bump, or duplicate-id ambiguity — aborts with no mutation and cleans up the orphaned backup), moving EXACTLY the selected entries to shared-learnings-quarantined.jsonl, with counts verified afterwards and an honestly-reported automatic restore on failure. ' +
+			'`rollback --token <token12> | --latest` restores the exact original bytes idempotently. ' +
+			'Selection is exact-ID only — never by text, substring, cohort, age, or blacklist, and never in bulk. ' +
+			'Human-only: refused for agents via swarm_command, chat fallback, and the shell guardrail.',
+		args: '<preview|commit|rollback|status> ...',
+		category: 'utility',
+		toolPolicy: 'human-only',
 	},
 	'knowledge unactionable': {
 		handler: (ctx) =>

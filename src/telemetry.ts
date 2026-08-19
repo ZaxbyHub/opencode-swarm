@@ -88,7 +88,11 @@ export type TelemetryEvent =
 	// requiredness/attempt/validation/source_disposition plus aggregate
 	// archive_valid/archive_empty health facts (counts only, no row content).
 	| 'close_archive_result'
-	| 'knowledge_receipt_transition'; // Diagnostic projection only; the V2 journal is authoritative.
+	| 'knowledge_receipt_transition' // Diagnostic projection only; the V2 journal is authoritative.
+	// Human-only hive-store maintenance audit (issue #2033): one metadata-only event per
+	// preview/commit/rollback phase with bounded abort codes, counts, hash prefixes, and
+	// token prefixes. No lesson text and no filesystem paths ever enter the payload.
+	| 'knowledge_maintenance';
 
 /** Stable classification for how a reviewer-gate decision was established. */
 export type ReviewerGateEvidenceKind =

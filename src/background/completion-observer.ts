@@ -26,7 +26,10 @@ import {
 } from '../state.js';
 import { pushAdvisory } from '../utils/advisory-queue';
 import * as logger from '../utils/logger.js';
-import type { MergeOperationProvenance } from '../worktree/merge.js';
+import {
+	GIT_OBJECT_ID_PATTERN,
+	type MergeOperationProvenance,
+} from '../worktree/merge.js';
 import {
 	acknowledgeObservedBackgroundAdvisories,
 	appendDelegationTransition,
@@ -801,6 +804,8 @@ function settlementResume(
 		!settlement.operationId ||
 		!settlement.sourceHeadAfterCommit ||
 		!settlement.targetHeadBeforeMerge ||
+		!GIT_OBJECT_ID_PATTERN.test(settlement.sourceHeadAfterCommit) ||
+		!GIT_OBJECT_ID_PATTERN.test(settlement.targetHeadBeforeMerge) ||
 		!worktree
 	) {
 		return undefined;

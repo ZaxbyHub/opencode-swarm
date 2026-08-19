@@ -137,4 +137,58 @@ describe('architect prompt — critical rules regression (Task 3.3)', () => {
 			expect(ARCHITECT_SOURCE).toMatch(/call sast_scan or secretscan directly/);
 		});
 	});
+
+	describe('5. full-auto delegation clarity (#2207)', () => {
+		test('prompt states full-auto never delegates or executes — architect retains delegation duty', () => {
+			// #2207: with full-auto enabled, the architect hallucinated an autonomous
+			// "full-auto controller" that would take over delegation, announced a
+			// handoff, and made no tool calls — stalling the workflow. The prompt must
+			// explicitly state full-auto is only a critic gate and the architect MUST
+			// still dispatch tasks itself in every mode.
+			expect(ARCHITECT_SOURCE).toMatch(
+				/full-auto \(a critic gate that intercepts phase completions and high-risk actions/i,
+			);
+			expect(ARCHITECT_SOURCE).toMatch(
+				/full-auto never plans, delegates, or executes; the architect retains ALL delegation duty/i,
+			);
+			expect(ARCHITECT_SOURCE).toMatch(
+				/you MUST immediately dispatch that phase's tasks to coder yourself/i,
+			);
+			expect(ARCHITECT_SOURCE).toMatch(
+				/it gates quality; it never replaces architect delegation/i,
+			);
+		});
+
+		test('the ambiguous "autonomous cross-phase oversight" phrasing is gone from every prompt-reach surface', () => {
+			// #2207 final-critic finding: the phrase previously also lived in the
+			// /swarm loop command `details` (src/commands/registry.ts), which
+			// buildSlashCommandsList() renders into the architect prompt via the
+			// {{SLASH_COMMANDS}} placeholder — so the source-file grep alone could
+			// not prove the RENDERED prompt is clean. Pin every surface that
+			// reaches the prompt: the architect prompt source, the command
+			// registry rendered into it, AND the loop skill the MODE: LOOP block
+			// orders loaded at runtime (its content enters the conversation).
+			expect(ARCHITECT_SOURCE).not.toContain(
+				'autonomous cross-phase oversight',
+			);
+			const registrySource = readFileSync(
+				join(process.cwd(), 'src', 'commands', 'registry.ts'),
+				'utf-8',
+			);
+			expect(registrySource).not.toContain('autonomous cross-phase oversight');
+			const loopSkillSource = readFileSync(
+				join(process.cwd(), '.opencode', 'skills', 'loop', 'SKILL.md'),
+				'utf-8',
+			);
+			expect(loopSkillSource).not.toContain('autonomous cross-phase oversight');
+			// Positive pin on the corrected loop-skill wording. Patterns are
+			// single-line because the skill file hard-wraps mid-phrase.
+			expect(loopSkillSource).toMatch(
+				/intercepts phase completions and high-risk actions for review/,
+			);
+			expect(loopSkillSource).toMatch(
+				/never plans, delegates, or executes; the architect retains ALL delegation/,
+			);
+		});
+	});
 });

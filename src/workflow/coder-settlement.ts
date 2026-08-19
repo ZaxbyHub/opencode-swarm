@@ -1,14 +1,13 @@
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir, readFile } from 'node:fs/promises';
+import { appendFile, mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type {
 	BackgroundTaskChangeContext,
 	BackgroundWorktreeDescriptor,
 } from '../background/pending-delegations.js';
 import { changedFilesSinceSnapshot } from '../background/workspace-snapshot.js';
-import { atomicWriteFile } from '../evidence/task-file.js';
 import {
 	getTaskWorkflowSnapshot,
 	type TaskEvidence,
@@ -18,30 +17,14 @@ import { isMarkdownOnlyTaskChange } from '../gate-evidence-classification.js';
 import { validateSwarmPath } from '../hooks/utils.js';
 import { tryAcquireLock } from '../parallel/file-locks.js';
 import { isPathWithinDeclaredScope } from '../scope/path-identity.js';
+import * as logger from '../utils/logger.js';
 import type { MergeOperationProvenance } from '../worktree/merge.js';
 import { reconcileLandedMerge } from '../worktree/merge.js';
-
-type CoderSettlementState = 'ABORTED' | 'COMMITTED' | 'DISPATCHED' | 'PREPARED';
-
-interface CoderSettlementWal {
-	version: 1;
-	state: CoderSettlementState;
-	taskId: string;
-	transitionId: string;
-	actor: string;
-	processId: number;
-	runtimeId: string;
-	expectedGeneration: number;
-	context: BackgroundTaskChangeContext;
-	worktree?: BackgroundWorktreeDescriptor;
-	observedFiles?: string[];
-	mergeProvenance?: MergeOperationProvenance;
-	accepted?: boolean;
-	testEngineerExempt?: boolean;
-	settlementFailed?: boolean;
-	cleanupComplete?: boolean;
-	recordedAt: string;
-}
+import {
+	readWorkflowWalFile,
+	writeWorkflowWalFile,
+} from './workflow-wal-file.js';
+import type { CoderSettlementWal } from './workflow-wal-schema.js';
 
 export interface CoderSettlementResult {
 	evidence: TaskEvidence;
@@ -74,117 +57,11 @@ function walPath(directory: string, taskId: string): string {
 	return validateSwarmPath(directory, `coder-settlements/${taskId}.json`);
 }
 
-async function readText(filePath: string): Promise<string | null> {
-	try {
-		return await readFile(filePath, 'utf-8');
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
-		throw error;
-	}
-}
-
-function parseWal(raw: string): CoderSettlementWal {
-	const parsed = JSON.parse(raw) as Partial<CoderSettlementWal>;
-	const context = parsed.context as
-		| Partial<BackgroundTaskChangeContext>
-		| undefined;
-	const baseline = context?.baseline;
-	const worktree = parsed.worktree as
-		| Partial<BackgroundWorktreeDescriptor>
-		| undefined;
-	const provenance = parsed.mergeProvenance as
-		| Partial<MergeOperationProvenance>
-		| undefined;
-	if (
-		parsed.version !== 1 ||
-		!['ABORTED', 'COMMITTED', 'DISPATCHED', 'PREPARED'].includes(
-			String(parsed.state),
-		) ||
-		typeof parsed.taskId !== 'string' ||
-		!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(parsed.taskId) ||
-		typeof parsed.transitionId !== 'string' ||
-		parsed.transitionId.length === 0 ||
-		parsed.transitionId.length > 512 ||
-		typeof parsed.actor !== 'string' ||
-		parsed.actor.length === 0 ||
-		parsed.actor.length > 512 ||
-		!Number.isInteger(parsed.processId) ||
-		(parsed.processId ?? 0) <= 0 ||
-		typeof parsed.runtimeId !== 'string' ||
-		parsed.runtimeId.length === 0 ||
-		!Number.isInteger(parsed.expectedGeneration) ||
-		(parsed.expectedGeneration ?? -1) < 0 ||
-		!context ||
-		!baseline ||
-		typeof baseline.directory !== 'string' ||
-		baseline.directory.length === 0 ||
-		baseline.directory.length > 4096 ||
-		(typeof baseline.gitHead !== 'string' && baseline.gitHead !== null) ||
-		(typeof baseline.dirtyHash !== 'string' && baseline.dirtyHash !== null) ||
-		(typeof baseline.prHeadSha !== 'string' && baseline.prHeadSha !== null) ||
-		(typeof baseline.scope !== 'string' && baseline.scope !== null) ||
-		(!Array.isArray(baseline.changedFiles) &&
-			baseline.changedFiles !== null &&
-			baseline.changedFiles !== undefined) ||
-		(Array.isArray(baseline.changedFiles) &&
-			(baseline.changedFiles.length > 50_000 ||
-				baseline.changedFiles.some(
-					(filePath) => typeof filePath !== 'string' || filePath.length > 4096,
-				))) ||
-		(!Array.isArray(context.declaredFiles) && context.declaredFiles !== null) ||
-		(Array.isArray(context.declaredFiles) &&
-			(context.declaredFiles.length > 50_000 ||
-				context.declaredFiles.some(
-					(filePath) => typeof filePath !== 'string' || filePath.length > 4096,
-				))) ||
-		(parsed.observedFiles !== undefined &&
-			(!Array.isArray(parsed.observedFiles) ||
-				parsed.observedFiles.length > 50_000 ||
-				parsed.observedFiles.some(
-					(filePath) =>
-						typeof filePath !== 'string' ||
-						filePath.length > 4096 ||
-						!isPathWithinDeclaredScope(
-							filePath,
-							context.declaredFiles ?? [],
-							baseline.directory,
-						),
-				))) ||
-		(worktree !== undefined &&
-			(typeof worktree.callID !== 'string' ||
-				typeof worktree.parentSessionId !== 'string' ||
-				typeof worktree.taskId !== 'string' ||
-				worktree.taskId !== parsed.taskId ||
-				typeof worktree.worktreePath !== 'string' ||
-				typeof worktree.branchName !== 'string' ||
-				typeof worktree.worktreeId !== 'string' ||
-				typeof worktree.worktreeSessionId !== 'string' ||
-				!['merge', 'rebase', 'cherry-pick'].includes(
-					String(worktree.mergeStrategy),
-				) ||
-				!Number.isInteger(worktree.laneIndex))) ||
-		(provenance !== undefined &&
-			(typeof provenance.operationId !== 'string' ||
-				provenance.operationId !== parsed.transitionId ||
-				typeof provenance.sourceHead !== 'string' ||
-				typeof provenance.targetHeadBefore !== 'string' ||
-				typeof provenance.branchName !== 'string' ||
-				(worktree !== undefined &&
-					(provenance.branchName !== worktree.branchName ||
-						provenance.strategy !== worktree.mergeStrategy)) ||
-				!['merge', 'rebase', 'cherry-pick'].includes(
-					String(provenance.strategy),
-				))) ||
-		typeof parsed.recordedAt !== 'string' ||
-		(parsed.state === 'PREPARED' && typeof parsed.accepted !== 'boolean') ||
-		(parsed.cleanupComplete !== undefined &&
-			typeof parsed.cleanupComplete !== 'boolean') ||
-		(parsed.settlementFailed !== undefined &&
-			typeof parsed.settlementFailed !== 'boolean')
-	) {
-		throw new Error('CODER_SETTLEMENT_WAL_CORRUPT');
-	}
-	return parsed as CoderSettlementWal;
+async function readWal(
+	filePath: string,
+	taskId: string,
+): Promise<CoderSettlementWal | null> {
+	return readWorkflowWalFile('coder-settlement', filePath, taskId);
 }
 
 async function withSettlementLock<T>(
@@ -214,8 +91,89 @@ async function writeWal(
 	filePath: string,
 	wal: CoderSettlementWal,
 ): Promise<void> {
-	await mkdir(dirname(filePath), { recursive: true });
-	await atomicWriteFile(filePath, `${JSON.stringify(wal, null, 2)}\n`);
+	await writeWorkflowWalFile('coder-settlement', filePath, wal);
+}
+
+/**
+ * Best-effort settlement lifecycle audit event (issue #2214 expected behavior:
+ * settlement dispatch/settle/abort must be observable in events.jsonl). Never
+ * throws — the WAL and evidence files remain the authoritative state; this is
+ * the human-readable trail, matching the plan-critic audit-event precedent.
+ * The parent directory is created (future call sites may append before any WAL
+ * write) and a transient Windows EBUSY/EPERM gets one retry (PRR-003). Final
+ * failure surfaces via criticalWarn — always visible, not debug-gated — because
+ * a silently missing lifecycle event voids the observability claim.
+ */
+async function appendSettlementEvent(
+	directory: string,
+	action: 'dispatched' | 'settled' | 'aborted',
+	wal: Pick<CoderSettlementWal, 'taskId' | 'transitionId' | 'actor'>,
+	extra?: Record<string, unknown>,
+): Promise<void> {
+	const line = `${JSON.stringify({
+		type: 'coder_settlement',
+		action,
+		timestamp: new Date().toISOString(),
+		taskId: wal.taskId,
+		transitionId: wal.transitionId,
+		actor: wal.actor,
+		...(extra ?? {}),
+	})}\n`;
+	try {
+		const eventsPath = validateSwarmPath(directory, 'events.jsonl');
+		await mkdir(dirname(eventsPath), { recursive: true });
+		await appendFile(eventsPath, line, 'utf-8');
+	} catch (error) {
+		const code = (error as NodeJS.ErrnoException).code;
+		if (code === 'EBUSY' || code === 'EPERM') {
+			try {
+				const eventsPath = validateSwarmPath(directory, 'events.jsonl');
+				await appendFile(eventsPath, line, 'utf-8');
+				return;
+			} catch (retryError) {
+				logger.criticalWarn(
+					`[coder-settlement] lifecycle event write failed after retry (${action} ${wal.taskId}): ${
+						retryError instanceof Error
+							? retryError.message
+							: String(retryError)
+					}`,
+				);
+				return;
+			}
+		}
+		logger.criticalWarn(
+			`[coder-settlement] lifecycle event write failed (${action} ${wal.taskId}): ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		);
+	}
+}
+
+/**
+ * True when a launch baseline can never support mutation attribution, no
+ * matter how many recovery attempts run: a non-git baseline (gitHead null) or
+ * a baseline that was already dirty at dispatch (pre-existing uncommitted or
+ * untracked paths). `changedFiles === null` with a gitHead present is a
+ * capture failure, which may be transient — it is deliberately NOT doomed
+ * (issue #2214: distinguish structural failure from retryable failure).
+ */
+function baselineAttributionDoomed(baseline: {
+	gitHead: string | null;
+	changedFiles?: string[] | null;
+}): boolean {
+	if (baseline.gitHead === null) return true;
+	return (
+		Array.isArray(baseline.changedFiles) && baseline.changedFiles.length > 0
+	);
+}
+
+function doomedReason(baseline: {
+	gitHead: string | null;
+	changedFiles?: string[] | null;
+}): string {
+	if (baseline.gitHead === null)
+		return 'launch workspace has no git baseline (not a git repository, or git unavailable at dispatch)';
+	return `launch baseline was dirty with ${String(baseline.changedFiles?.length ?? 0)} pre-existing uncommitted/untracked change(s)`;
 }
 
 function isProcessAlive(processId: number): boolean {
@@ -249,9 +207,8 @@ async function commitPrepared(
 		wal.taskId,
 		wal.actor,
 		async (transaction) => {
-			const lockedRaw = await readText(walPath(directory, wal.taskId));
-			if (lockedRaw === null) throw new Error('CODER_SETTLEMENT_WAL_MISSING');
-			let lockedWal = parseWal(lockedRaw);
+			let lockedWal = await readWal(walPath(directory, wal.taskId), wal.taskId);
+			if (lockedWal === null) throw new Error('CODER_SETTLEMENT_WAL_MISSING');
 			if (lockedWal.transitionId !== wal.transitionId) {
 				throw new Error('CODER_SETTLEMENT_WAL_REPLACED');
 			}
@@ -280,6 +237,9 @@ async function commitPrepared(
 						cleanupComplete: lockedWal.worktree === undefined,
 					};
 					await writeWal(walPath(directory, wal.taskId), lockedWal);
+					await appendSettlementEvent(directory, 'settled', lockedWal, {
+						resumed: true,
+					});
 				}
 				return {
 					evidence: transaction.read() as TaskEvidence,
@@ -315,6 +275,7 @@ async function commitPrepared(
 				cleanupComplete: lockedWal.worktree === undefined,
 			};
 			await writeWal(walPath(directory, wal.taskId), lockedWal);
+			await appendSettlementEvent(directory, 'settled', lockedWal);
 			return {
 				evidence,
 				accepted: lockedWal.accepted === true,
@@ -351,19 +312,19 @@ export async function beginCoderSettlement(options: {
 							`TASK_WORKFLOW_GENERATION_MISMATCH: expected ${options.expectedGeneration}, found ${snapshot.generation}`,
 						);
 					}
-					const raw = await readText(filePath);
-					if (raw !== null) {
-						const existing = parseWal(raw);
-						if (existing.taskId !== options.taskId) {
-							throw new Error('CODER_SETTLEMENT_WAL_TASK_MISMATCH');
-						}
+					// readWal forwards options.taskId as expectedTaskId, so
+					// parseCoderSettlementWal already raised
+					// CODER_SETTLEMENT_WAL_TASK_MISMATCH (with path and remediation) for a
+					// foreign WAL. A caller-side re-check here would be unreachable.
+					const existing = await readWal(filePath, options.taskId);
+					if (existing !== null) {
 						if (
 							(existing.state === 'DISPATCHED' ||
 								existing.state === 'PREPARED') &&
 							existing.transitionId !== options.transitionId
 						) {
 							throw new Error(
-								`CODER_SETTLEMENT_IN_PROGRESS: transition ${existing.transitionId} owns task ${options.taskId}`,
+								`CODER_SETTLEMENT_IN_PROGRESS: transition ${existing.transitionId} owns task ${options.taskId}, so transition ${options.transitionId} cannot dispatch it (${filePath}, state ${existing.state}). Wait for the owning transition to settle or run coder-settlement recovery for this task, then retry; do not remove the WAL by hand.`,
 							);
 						}
 						if (existing.transitionId === options.transitionId) {
@@ -406,6 +367,11 @@ export async function beginCoderSettlement(options: {
 						recordedAt: new Date().toISOString(),
 					});
 					ownsActiveDispatch = true;
+					await appendSettlementEvent(options.directory, 'dispatched', {
+						taskId: options.taskId,
+						transitionId: options.transitionId,
+						actor: options.actor,
+					});
 				},
 			),
 	);
@@ -439,11 +405,9 @@ export async function settleCoderDispatch(options: {
 		'coder-settlement',
 		async () => {
 			const filePath = walPath(options.directory, options.taskId);
-			const raw = await readText(filePath);
-			if (raw === null) throw new Error('CODER_SETTLEMENT_WAL_MISSING');
-			const wal = parseWal(raw);
-			if (wal.taskId !== options.taskId)
-				throw new Error('CODER_SETTLEMENT_WAL_TASK_MISMATCH');
+			const wal = await readWal(filePath, options.taskId);
+			if (wal === null) throw new Error('CODER_SETTLEMENT_WAL_MISSING');
+			// Task-id mismatch is owned by parseCoderSettlementWal (see readWal above).
 			if (wal.transitionId !== options.transitionId) {
 				throw new Error('CODER_SETTLEMENT_WAL_REPLACED');
 			}
@@ -482,8 +446,8 @@ export async function settleCoderDispatch(options: {
 			try {
 				return await commitPrepared(options.directory, prepared);
 			} finally {
-				const finalRaw = await readText(filePath);
-				if (finalRaw !== null && parseWal(finalRaw).state === 'COMMITTED') {
+				const finalWal = await readWal(filePath, options.taskId);
+				if (finalWal !== null && finalWal.state === 'COMMITTED') {
 					liveDispatches.delete(
 						dispatchKey(
 							options.directory,
@@ -495,6 +459,133 @@ export async function settleCoderDispatch(options: {
 			}
 		},
 	);
+}
+
+/**
+ * Abort a DISPATCHED settlement (issue #2214): the settlement's launch
+ * baseline can never support attribution, so the dispatch must reach a
+ * terminal state instead of wedging at DISPATCHED with an un-releasable
+ * in-memory ownership key. Idempotent: an already-ABORTED WAL is a no-op;
+ * PREPARED/COMMITTED WALs are recoverable/terminal and are left untouched.
+ *
+ * Callers already holding the settlement lock must use
+ * `abortDispatchedWalUnderLock` instead — this entry point acquires the lock.
+ */
+export async function abortCoderSettlement(options: {
+	directory: string;
+	taskId: string;
+	transitionId: string;
+	reason: string;
+}): Promise<'aborted' | 'not-dispatched' | 'already-aborted'> {
+	const { outcome, worktree } = await withSettlementLock(
+		options.directory,
+		options.taskId,
+		'coder-abort',
+		async () =>
+			abortDispatchedWalUnderLock(
+				options.directory,
+				options.taskId,
+				options.transitionId,
+				options.reason,
+			),
+	);
+	// F-001 (PR #2223 review): an aborted worktree-carrying settlement must
+	// not leak its git worktree and branch. recoverCoderSettlement
+	// short-circuits on ABORTED before the worktree merge/cleanup branch, so
+	// the abort path owns terminal cleanup. completeCoderSettlementCleanup
+	// runs under its own lock acquisition — we are post-lock here — and is
+	// best-effort: a cleanup failure must never un-abort the settlement.
+	if (worktree && outcome !== 'not-dispatched') {
+		try {
+			await completeCoderSettlementCleanup(
+				options.directory,
+				options.taskId,
+				options.transitionId,
+			);
+		} catch (error) {
+			logger.criticalWarn(
+				`[coder-settlement] aborted settlement worktree cleanup failed for task ${options.taskId}: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+		}
+	}
+	return outcome;
+}
+
+async function abortDispatchedWalUnderLock(
+	directory: string,
+	taskId: string,
+	transitionId: string,
+	reason: string,
+): Promise<{
+	outcome: 'aborted' | 'not-dispatched' | 'already-aborted';
+	worktree: boolean;
+}> {
+	const filePath = walPath(directory, taskId);
+	// readWal validates the taskId (expectedTaskId) and throws the shared
+	// WAL_UNREADABLE/TASK_MISMATCH diagnostics on malformed content.
+	const wal = await readWal(filePath, taskId);
+	if (wal === null) throw new Error('CODER_SETTLEMENT_WAL_MISSING');
+	if (wal.transitionId !== transitionId) {
+		throw new Error('CODER_SETTLEMENT_WAL_REPLACED');
+	}
+	if (wal.state === 'ABORTED') {
+		return { outcome: 'already-aborted', worktree: wal.worktree !== undefined };
+	}
+	if (wal.state !== 'DISPATCHED') {
+		return { outcome: 'not-dispatched', worktree: false };
+	}
+	await writeWal(filePath, {
+		...wal,
+		state: 'ABORTED',
+		abortReason: reason,
+	});
+	liveDispatches.delete(dispatchKey(directory, taskId, transitionId));
+	await appendSettlementEvent(directory, 'aborted', wal, { reason });
+	return { outcome: 'aborted', worktree: wal.worktree !== undefined };
+}
+
+/**
+ * Abort a DISPATCHED settlement only when its own recorded launch baseline
+ * was structurally attribution-doomed (non-git or dirty at dispatch — the
+ * pre-fix #2214 wedge class). Transient capture failures (gitHead present)
+ * stay recoverable and are NOT aborted. Returns the terminal outcome so
+ * callers can distinguish a fresh abort, an already-terminal settlement, and
+ * a WAL that must stay recoverable (PRR-009: the already-aborted case is
+ * terminal, not a durability failure).
+ */
+export async function abortCoderSettlementIfDoomed(options: {
+	directory: string;
+	taskId: string;
+	transitionId: string;
+}): Promise<'aborted' | 'already-aborted' | 'not-doomed'> {
+	const filePath = walPath(options.directory, options.taskId);
+	let wal: CoderSettlementWal | null;
+	try {
+		wal = await readWal(filePath, options.taskId);
+	} catch {
+		// Unreadable WAL: cannot determine doomed-ness; leave it to recovery.
+		return 'not-doomed';
+	}
+	if (wal === null) return 'not-doomed';
+	if (wal.state === 'ABORTED') return 'already-aborted';
+	if (wal.transitionId !== options.transitionId || wal.state !== 'DISPATCHED') {
+		return 'not-doomed';
+	}
+	if (!baselineAttributionDoomed(wal.context.baseline)) return 'not-doomed';
+	const outcome = await abortCoderSettlement({
+		directory: options.directory,
+		taskId: options.taskId,
+		transitionId: options.transitionId,
+		reason: doomedReason(wal.context.baseline),
+	});
+	// We re-verified state === 'DISPATCHED' above; a concurrent change can only
+	// have come from this same locked flow, so not-dispatched is unreachable
+	// here — map any residual case to not-doomed so callers stay recoverable.
+	return outcome === 'aborted' || outcome === 'already-aborted'
+		? outcome
+		: 'not-doomed';
 }
 
 export async function recordCoderMergeProvenance(options: {
@@ -510,9 +601,8 @@ export async function recordCoderMergeProvenance(options: {
 		'coder-merge-provenance',
 		async () => {
 			const filePath = walPath(options.directory, options.taskId);
-			const raw = await readText(filePath);
-			if (raw === null) throw new Error('CODER_SETTLEMENT_WAL_MISSING');
-			const wal = parseWal(raw);
+			const wal = await readWal(filePath, options.taskId);
+			if (wal === null) throw new Error('CODER_SETTLEMENT_WAL_MISSING');
 			if (
 				wal.taskId !== options.taskId ||
 				wal.transitionId !== options.transitionId
@@ -611,13 +701,12 @@ export async function completeCoderSettlementCleanup(
 ): Promise<void> {
 	await withSettlementLock(directory, taskId, 'coder-cleanup', async () => {
 		const filePath = walPath(directory, taskId);
-		const raw = await readText(filePath);
-		if (raw === null) throw new Error('CODER_SETTLEMENT_WAL_MISSING');
-		const wal = parseWal(raw);
+		const wal = await readWal(filePath, taskId);
+		if (wal === null) throw new Error('CODER_SETTLEMENT_WAL_MISSING');
 		if (wal.taskId !== taskId || wal.transitionId !== transitionId) {
 			throw new Error('CODER_SETTLEMENT_WAL_REPLACED');
 		}
-		if (wal.state !== 'COMMITTED') {
+		if (wal.state !== 'COMMITTED' && wal.state !== 'ABORTED') {
 			throw new Error('CODER_SETTLEMENT_NOT_COMMITTED');
 		}
 		if (!wal.worktree || wal.cleanupComplete === true) return;
@@ -632,11 +721,9 @@ export async function recoverCoderSettlement(
 ): Promise<CoderSettlementResult | null> {
 	return withSettlementLock(directory, taskId, 'coder-recovery', async () => {
 		const filePath = walPath(directory, taskId);
-		const raw = await readText(filePath);
-		if (raw === null) return null;
-		let wal = parseWal(raw);
-		if (wal.taskId !== taskId)
-			throw new Error('CODER_SETTLEMENT_WAL_TASK_MISMATCH');
+		const existingWal = await readWal(filePath, taskId);
+		if (existingWal === null) return null;
+		let wal: CoderSettlementWal = existingWal;
 		if (wal.state === 'ABORTED') return null;
 		if (wal.state === 'COMMITTED') {
 			if (wal.worktree && wal.cleanupComplete !== true) {
@@ -651,7 +738,7 @@ export async function recoverCoderSettlement(
 			(wal.processId !== process.pid && isProcessAlive(wal.processId))
 		) {
 			throw new Error(
-				`CODER_DISPATCH_IN_PROGRESS: transition ${wal.transitionId} still owns task ${taskId}`,
+				`CODER_DISPATCH_IN_PROGRESS: transition ${wal.transitionId} still owns task ${taskId} (${filePath}, state ${wal.state}, pid ${wal.processId}). Wait for that dispatch to settle or recover it before retrying; do not remove the WAL by hand.`,
 			);
 		}
 		if (wal.state === 'DISPATCHED') {
@@ -770,24 +857,77 @@ export async function recoverCoderSettlement(
 					},
 				);
 				if (mergeResult.outcome !== 'merged' || recovered === null) {
+					// #2202: still bare — unlike the seven enriched state-conflict errors
+					// this one names neither the WAL path nor a recovery action. Reaching
+					// it needs a failed-worktree-merge fixture, so it is tracked rather
+					// than changed untested.
 					throw new Error(
 						`CODER_SETTLEMENT_MERGE_RECOVERY_REQUIRED: ${mergeResult.outcome === 'failed' ? mergeResult.message : mergeResult.outcome}`,
 					);
 				}
 				await cleanupRecoveredWorktree(directory, descriptor);
-				const committedRaw = await readText(filePath);
-				if (committedRaw === null) {
+				const committedWal = await readWal(filePath, taskId);
+				if (committedWal === null) {
 					throw new Error('CODER_SETTLEMENT_WAL_MISSING');
 				}
 				await writeWal(filePath, {
-					...parseWal(committedRaw),
+					...committedWal,
 					cleanupComplete: true,
 				});
 				return recovered;
 			}
 
-			const observed = scopedObservedFiles(directory, wal.context);
+			// Mirror the shared-root settle semantics: a dispatch with no declared
+			// scope settles as no-mutation (observed = []) rather than wedging on
+			// scopedObservedFiles' declaredFiles requirement. A structurally
+			// doomed baseline (non-git or dirty at dispatch — the pre-#2214-fix
+			// wedge class) can never be attributed: abort so the task becomes
+			// repairable instead of throwing RECOVERY_UNCERTAIN forever. A clean
+			// baseline whose current capture fails stays retryable.
+			const rawObserved = changedFilesSinceSnapshot(
+				directory,
+				wal.context.baseline,
+			);
+			let observed: string[] | null;
+			if (rawObserved === null) {
+				if (baselineAttributionDoomed(wal.context.baseline)) {
+					// recoverCoderSettlement already holds the settlement lock.
+					// Positional invariant (F-001 review): this doomed-abort is
+					// reachable only for NON-worktree WALs — every worktree-carrying
+					// DISPATCHED WAL was consumed by the `if (wal.worktree)` branch
+					// above, which fails closed with CODER_SETTLEMENT_RECOVERY_UNCERTAIN
+					// for a doomed baseline. So aborted.worktree is always false here
+					// and no worktree cleanup is needed on this path; the
+					// abortCoderSettlement entry point owns worktree cleanup.
+					const aborted = await abortDispatchedWalUnderLock(
+						directory,
+						taskId,
+						wal.transitionId,
+						doomedReason(wal.context.baseline),
+					);
+					if (
+						aborted.outcome === 'aborted' ||
+						aborted.outcome === 'already-aborted'
+					) {
+						return null;
+					}
+				}
+				observed = null;
+			} else if (wal.context.declaredFiles === null) {
+				observed = [];
+			} else {
+				observed = rawObserved.filter((filePath) =>
+					isPathWithinDeclaredScope(
+						filePath,
+						wal.context.declaredFiles ?? [],
+						directory,
+					),
+				);
+			}
 			if (observed === null) {
+				// #2202: still bare — names the task but not the WAL path or a recovery
+				// action. Reaching it needs a baseline snapshot changedFilesSinceSnapshot
+				// cannot resolve, so it is tracked rather than changed untested.
 				throw new Error(
 					`CODER_SETTLEMENT_RECOVERY_UNCERTAIN: task ${taskId} workspace changes could not be attributed safely`,
 				);
@@ -806,11 +946,10 @@ export async function recoverCoderSettlement(
 		const committed = await commitPrepared(directory, wal);
 		if (wal.worktree) {
 			await cleanupRecoveredWorktree(directory, wal.worktree);
-			const committedRaw = await readText(filePath);
-			if (committedRaw === null) {
+			const committedWal = await readWal(filePath, taskId);
+			if (committedWal === null) {
 				throw new Error('CODER_SETTLEMENT_WAL_MISSING');
 			}
-			const committedWal = parseWal(committedRaw);
 			await writeWal(filePath, { ...committedWal, cleanupComplete: true });
 		}
 		return committed;
@@ -829,17 +968,16 @@ export async function assertNoUnsettledCoderDispatch(
 	directory: string,
 	taskId: string,
 ): Promise<void> {
-	const raw = await readText(walPath(directory, taskId));
-	if (raw === null) return;
-	const wal = parseWal(raw);
+	const filePath = walPath(directory, taskId);
+	const wal = await readWal(filePath, taskId);
+	if (wal === null) return;
 	if (wal.state === 'DISPATCHED' || wal.state === 'PREPARED') {
 		throw new Error(
-			`CODER_SETTLEMENT_RECOVERY_REQUIRED: transition ${wal.transitionId} must settle before task ${taskId} can change plan status`,
+			`CODER_SETTLEMENT_RECOVERY_REQUIRED: transition ${wal.transitionId} must settle before task ${taskId} can change plan status (${filePath}, state ${wal.state}). Run coder-settlement recovery for this task, then retry.`,
 		);
 	}
 }
 
 export const _internals = {
-	parseWal,
 	liveDispatches,
 };

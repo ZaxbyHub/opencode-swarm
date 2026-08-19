@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { findByCorrelationId } from '../../../src/background/pending-delegations';
 import type { Plan } from '../../../src/config/plan-schema';
@@ -22,6 +21,7 @@ import {
 	getAgentSession,
 	resetSwarmState,
 } from '../../../src/state';
+import { createSafeTestDir } from '../../helpers/safe-test-dir';
 import {
 	createDelegationGateHook,
 	makeConfig,
@@ -57,13 +57,12 @@ function planWith(files: string[]): Plan {
 
 describe('coder scope preflight', () => {
 	let directory: string;
+	let cleanup: () => void;
 	let plan: Plan;
 
 	beforeEach(() => {
 		resetSwarmState();
-		directory = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'scope-preflight-')),
-		);
+		({ dir: directory, cleanup } = createSafeTestDir('scope-preflight-'));
 		fs.mkdirSync(path.join(directory, '.swarm'), { recursive: true });
 		ensureAgentSession('parent', 'architect', directory);
 	});
@@ -71,7 +70,7 @@ describe('coder scope preflight', () => {
 	afterEach(async () => {
 		resetSwarmState();
 		await flushScopeBindingMaintenance(directory);
-		fs.rmSync(directory, { recursive: true, force: true });
+		cleanup();
 	});
 
 	async function dispatch(prompt: string, agent = 'coder'): Promise<void> {
