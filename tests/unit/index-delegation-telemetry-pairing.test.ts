@@ -211,6 +211,99 @@ describe('Task delegation telemetry — regression: delegation_begin unreachable
 		expect(ends()).toHaveLength(0);
 	});
 
+	test('Task-path taskId asymmetry: begin carries empty taskId when no task is current, end carries the taskId resolved at completion', async () => {
+		// Pins the documented scoped contract (PR #2234): triple equality is
+		// asserted only for the review-engine paths. On the Task path the
+		// begin's taskId is '' when no task is current at dispatch, and the
+		// end's `beganDelegation?.taskId || taskSession.currentTaskId || ''`
+		// deliberately uses || (not ??) so an empty begin-side taskId falls
+		// through to the taskId that became current during the delegated
+		// call. Regressing || to ??, or making the begin read a stale
+		// currentTaskId, breaks this test.
+		const plugin = await boot({ guardrails: { enabled: false } });
+		const session = swarmState.agentSessions.get(SESSION_ID);
+		if (!session) throw new Error('session missing after boot');
+		session.currentTaskId = null;
+		await plugin.hooks['tool.execute.before'](
+			{ tool: 'task', sessionID: SESSION_ID, callID: 'taskid-asymmetry' },
+			{
+				args: {
+					description: 'explore',
+					prompt: 'Explore the codebase and report findings.',
+					subagent_type: 'explorer',
+				},
+			},
+		);
+		// A task id becomes current during the delegated call (e.g. populated
+		// by guardrails toolAfter before the handoff runs).
+		session.currentTaskId = '2.3';
+		await plugin.hooks['tool.execute.after'](
+			{ tool: 'task', sessionID: SESSION_ID, callID: 'taskid-asymmetry' },
+			{ state: 'completed', output: 'exploration done' },
+		);
+
+		expect(begins()).toHaveLength(1);
+		expect(ends()).toHaveLength(1);
+		expect(begins()[0]?.data.taskId).toBe('');
+		expect(ends()[0]?.data.taskId).toBe('2.3');
+	});
+
+	test('a non-Task tool call emits no delegation events', async () => {
+		// The begin emit is gated on the normalized tool name being Task/task,
+		// and the Task handoff in tool.execute.after is likewise task-gated.
+		// A read dispatch must leave the delegation event stream silent —
+		// guards against a future broadening of either predicate.
+		const plugin = await boot({ guardrails: { enabled: false } });
+		await plugin.hooks['tool.execute.before'](
+			{ tool: 'read', sessionID: SESSION_ID, callID: 'non-task-read' },
+			{ args: { path: 'README.md' } },
+		);
+		await plugin.hooks['tool.execute.after'](
+			{ tool: 'read', sessionID: SESSION_ID, callID: 'non-task-read' },
+			{ state: 'completed', output: 'file content' },
+		);
+
+		expect(begins()).toHaveLength(0);
+		expect(ends()).toHaveLength(0);
+	});
+
+	test('malformed subagent_type falls back to the session activeAgent', async () => {
+		// The begin-side agentName resolver only trusts
+		// `typeof subagent_type === 'string' && length > 0`. An empty or
+		// missing subagent_type must fall back to the session's activeAgent
+		// rather than being recorded as the agentName. Removing the guard (or
+		// trusting the raw value) breaks this test.
+		//
+		// Untested branch: the `'unknown'` terminal fallback
+		// (`activeAgent.get(...) ?? 'unknown'`) is unreachable through the
+		// plugin hook path — earlier steps in the before chain (ensureAgentSession
+		// and the delegation tracker) repopulate activeAgent for the session
+		// before the begin emit runs, observed empirically: deleting the
+		// activeAgent entry still produced 'architect'.
+		const plugin = await boot({ guardrails: { enabled: false } });
+		const before = plugin.hooks['tool.execute.before'];
+		const malformedArgs = (subagentType?: unknown) => ({
+			args: {
+				description: 'explore',
+				prompt: 'Explore the codebase and report findings.',
+				...(subagentType === undefined ? {} : { subagent_type: subagentType }),
+			},
+		});
+		await before(
+			{ tool: 'task', sessionID: SESSION_ID, callID: 'fallback-empty-string' },
+			malformedArgs(''),
+		);
+		await before(
+			{ tool: 'task', sessionID: SESSION_ID, callID: 'fallback-missing' },
+			malformedArgs(),
+		);
+
+		expect(begins().map((e) => e.data.agentName)).toEqual([
+			'architect',
+			'architect',
+		]);
+	});
+
 	test('a background running placeholder emits begin but defers end to the trusted terminal event', async () => {
 		// Mirrors the existing handoff contract (see
 		// index-background-placeholder-handoff.test.ts): a background Task's
