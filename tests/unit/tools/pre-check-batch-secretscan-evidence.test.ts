@@ -20,21 +20,6 @@ const mockRunLint = mock(async () => ({
 	output: '',
 	message: 'No issues found',
 }));
-const mockSastScan = mock(async () => ({
-	verdict: 'pass' as const,
-	findings: [],
-	summary: {
-		engine: 'tier_a' as const,
-		files_scanned: 0,
-		findings_count: 0,
-		findings_by_severity: {
-			critical: 0,
-			high: 0,
-			medium: 0,
-			low: 0,
-		},
-	},
-}));
 const mockQualityBudget = mock(async () => ({
 	verdict: 'pass' as const,
 	metrics: {
@@ -71,10 +56,6 @@ mock.module('../../../src/tools/secretscan', () => ({
 		files_scanned: 0,
 		skipped_files: 0,
 	})),
-}));
-
-mock.module('../../../src/tools/sast-scan', () => ({
-	sastScan: mockSastScan,
 }));
 
 mock.module('../../../src/tools/quality-budget', () => ({
@@ -141,7 +122,6 @@ describe('secretscan evidence persistence', () => {
 		// Reset mock call counts
 		mockDetectAvailableLinter.mockClear();
 		mockRunLint.mockClear();
-		mockSastScan.mockClear();
 		mockQualityBudget.mockClear();
 		mockSaveEvidence.mockClear();
 		_internals.saveEvidence = mockSaveEvidence;

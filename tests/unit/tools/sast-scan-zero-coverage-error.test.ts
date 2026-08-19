@@ -8,7 +8,7 @@
  * for findings above threshold.
  */
 
-import { beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { type SastScanInput, sastScan } from '../../../src/tools/sast-scan';
@@ -22,6 +22,10 @@ describe('sast_scan zero-coverage error payload (#2210)', () => {
 
 	beforeEach(() => {
 		tempDir = canonicalMkdtemp('sast-zero-2210-');
+	});
+
+	afterEach(() => {
+		fs.rmSync(tempDir, { recursive: true, force: true });
 	});
 
 	test('empty changed_files returns verdict fail with an explicit error reason', async () => {
