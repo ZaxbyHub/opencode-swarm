@@ -61,6 +61,21 @@ const INGESTION_CLAIM_LEASE_MS = 30_000;
 /** An abandoned ingestion lease may be reclaimed after this bounded interval. */
 export const BACKGROUND_INGESTION_LEASE_MS = 30_000;
 
+/**
+ * Canonical default staleness horizon for a tracked background delegation: a
+ * record whose `updatedAt` has not advanced in this long is treated as
+ * abandoned (its backing process died without ever writing a terminal
+ * snapshot) and may be swept to `stale`.
+ *
+ * 30 minutes is the value this subsystem already shipped — it was duplicated as
+ * a module-local literal in `src/tools/dispatch-lanes.ts` and as the
+ * `hooks.background_pending_timeout_minutes` schema default. It lives here so
+ * every consumer agrees on one number: this module imports nothing from
+ * `dispatch-lanes.ts` or `pr-workflow-gate.ts`, so both can reference it
+ * without an import cycle.
+ */
+export const DEFAULT_STALE_DELEGATION_TIMEOUT_MS = 30 * 60_000;
+
 export type BackgroundDelegationStatus =
 	| 'pending'
 	| 'running'
@@ -71,6 +86,31 @@ export type BackgroundDelegationStatus =
 	| 'cancelled'
 	| 'stale'
 	| 'consumed';
+
+/**
+ * The status classes the stale sweep is allowed to finalize to `stale`.
+ *
+ * Deliberately a subset of {@link BackgroundDelegationStatus}: a caller may
+ * *narrow* the sweep but can never widen it to a status the sweep was never
+ * meant to touch (`completed`, `consumed`, `ingesting`, ...).
+ */
+export type SweepableDelegationStatus =
+	| 'pending'
+	| 'running'
+	| 'ingestion_error';
+
+/**
+ * Default sweep scope — the exact set the sweep has always finalized.
+ *
+ * `ingestion_error` is included here because the pre-existing lazy-maintenance
+ * caller (`recordPendingDelegation`) relies on it: an ingestion that never
+ * retried within the horizon is genuinely abandoned from that caller's point of
+ * view. Callers for whom `ingestion_error` is still *retryable* — the ingestion
+ * claim gate admits `completed` and `ingestion_error` only, so the `stale` flip
+ * is irreversible — must pass a narrowed set instead.
+ */
+export const DEFAULT_SWEEPABLE_DELEGATION_STATUSES: ReadonlySet<SweepableDelegationStatus> =
+	new Set<SweepableDelegationStatus>(['pending', 'running', 'ingestion_error']);
 
 export interface BackgroundDelegationRecord {
 	schemaVersion: 1 | 2 | 3;
@@ -1983,22 +2023,22 @@ function isTerminal(status: BackgroundDelegationStatus): boolean {
 }
 
 /**
- * Mark all `pending` records older than `timeoutMs` as `stale` (status-only; no gate
+ * Mark all overdue records in `statuses` as `stale` (status-only; no gate
  * effect). Called within an already-held store lock.
+ *
+ * `statuses` defaults to {@link DEFAULT_SWEEPABLE_DELEGATION_STATUSES}, which is
+ * exactly the set this sweep has always finalized — the trailing default keeps
+ * the pre-existing positional call in `recordPendingDelegation` unchanged.
  */
 function sweepStaleLocked(
 	directory: string,
 	timeoutMs: number,
 	now: number,
+	statuses: ReadonlySet<BackgroundDelegationStatus> = DEFAULT_SWEEPABLE_DELEGATION_STATUSES,
 ): number {
 	let swept = 0;
 	for (const record of readDelegations(directory)) {
-		if (
-			record.status !== 'pending' &&
-			record.status !== 'running' &&
-			record.status !== 'ingestion_error'
-		)
-			continue;
+		if (!statuses.has(record.status)) continue;
 		if (now - record.updatedAt <= timeoutMs) continue;
 		appendRecord(directory, {
 			...record,
@@ -2013,19 +2053,27 @@ function sweepStaleLocked(
 /**
  * Public stale sweep: acquires the store lock and marks overdue pendings as `stale`.
  * Best-effort; returns the number swept (0 on lock timeout / error).
+ *
+ * `options.statuses` narrows which status classes may be finalized; omitting it
+ * preserves the historical scope ({@link DEFAULT_SWEEPABLE_DELEGATION_STATUSES}).
+ * The sweep is directory-wide with no session or mode filter, so a caller whose
+ * own decision covers only some status classes must narrow accordingly rather
+ * than finalizing records it never reasoned about.
  */
 export async function sweepStaleDelegations(
 	directory: string,
 	timeoutMs: number,
+	options: { statuses?: ReadonlySet<SweepableDelegationStatus> } = {},
 ): Promise<number> {
 	if (!timeoutMs || timeoutMs <= 0) return 0;
+	const statuses = options.statuses ?? DEFAULT_SWEEPABLE_DELEGATION_STATUSES;
 	try {
 		return await withEvidenceLock(
 			directory,
 			BACKGROUND_DELEGATIONS_FILE,
 			STORE_LOCK_AGENT,
 			STORE_LOCK_TASK,
-			async () => sweepStaleLocked(directory, timeoutMs, Date.now()),
+			async () => sweepStaleLocked(directory, timeoutMs, Date.now(), statuses),
 		);
 	} catch (err) {
 		logger.warn(
