@@ -88,8 +88,16 @@ export interface AgentDefinition {
  * This bound applies ONLY to the built-in prompt. User-supplied
  * `customPrompt`/`customAppendPrompt` values are exempt (they are validated
  * for placeholders, not size — a user may legitimately paste a large prompt).
+ *
+ * Naming: this is named `ARCHITECT_PROMPT_BUDGET_CHARS`, NOT `MAX_*`, to
+ * distinguish it from the runtime-enforced `MAX_PROMPT_CHARS` in
+ * `src/tools/dispatch-lanes.ts` (which has Zod `.max()` + runtime length
+ * checks). This constant is a TEST-TIME budget guard only — production
+ * code does not enforce it. Same role, different scope: the dispatch-lanes
+ * constant bounds a runtime-composed prompt payload; this one bounds CI
+ * regression of a built-in source string.
  */
-export const MAX_ARCHITECT_PROMPT_CHARS = 160_000;
+export const ARCHITECT_PROMPT_BUDGET_CHARS = 160_000;
 
 const ARCHITECT_PROMPT = `You are Architect - orchestrator of a multi-agent swarm.
 
