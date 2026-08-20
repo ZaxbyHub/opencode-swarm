@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, test } from 'bun:test';
+import * as fs from 'node:fs';
 import * as os from 'node:os';
 import {
 	claimReviewerScopeGeneration,
@@ -25,7 +26,7 @@ function consumeOwner(index: number): void {
 			coderCallID,
 			background: true,
 			declaredFiles: [file],
-			captureDirectory: os.tmpdir(),
+			captureDirectory: fs.realpathSync(os.tmpdir()),
 			workspaceIdentity: 'ws:/workspace',
 			createdAt: 1_000 + index * 10,
 		}),
@@ -75,7 +76,7 @@ function consumeOwner(index: number): void {
 
 beforeEach(() => {
 	resetSwarmState();
-	startAgentSession('parent', 'architect', os.tmpdir());
+	startAgentSession('parent', 'architect', fs.realpathSync(os.tmpdir()));
 });
 
 describe('reviewer scope ownership history', () => {

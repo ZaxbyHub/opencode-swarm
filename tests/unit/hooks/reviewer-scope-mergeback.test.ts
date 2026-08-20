@@ -42,7 +42,9 @@ function recordLaneFingerprint(
 beforeEach(() => {
 	resetSwarmState();
 	primary = fs.realpathSync(
-		fs.mkdtempSync(path.join(os.tmpdir(), 'reviewer-scope-mergeback-')),
+		fs.realpathSync(
+			fs.mkdtempSync(path.join(os.tmpdir(), 'reviewer-scope-mergeback-')),
+		),
 	);
 	lane = path.join(primary, '.swarm-worktrees', 'sess', 'lane-1');
 	fs.mkdirSync(path.join(primary, 'src'), { recursive: true });

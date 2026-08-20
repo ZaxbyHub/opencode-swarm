@@ -85,7 +85,9 @@ async function ingest(record: BackgroundDelegationRecord) {
 beforeEach(() => {
 	resetSwarmState();
 	directory = fs.realpathSync(
-		fs.mkdtempSync(path.join(os.tmpdir(), 'stage-b-nochange-')),
+		fs.realpathSync(
+			fs.mkdtempSync(path.join(os.tmpdir(), 'stage-b-nochange-')),
+		),
 	);
 	git('init');
 	git('config', 'user.email', 'test@example.com');

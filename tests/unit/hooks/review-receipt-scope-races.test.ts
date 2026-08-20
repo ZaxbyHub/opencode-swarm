@@ -34,7 +34,9 @@ function git(args: string[]): string {
 
 beforeEach(() => {
 	directory = fs.realpathSync(
-		fs.mkdtempSync(path.join(os.tmpdir(), 'review-scope-races-')),
+		fs.realpathSync(
+			fs.mkdtempSync(path.join(os.tmpdir(), 'review-scope-races-')),
+		),
 	);
 	git(['init']);
 	fs.mkdirSync(path.join(directory, 'src'), { recursive: true });

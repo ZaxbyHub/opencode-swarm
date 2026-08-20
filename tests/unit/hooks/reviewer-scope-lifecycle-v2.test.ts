@@ -108,7 +108,9 @@ async function beginReviewer(callID: string) {
 beforeEach(() => {
 	resetSwarmState();
 	directory = fs.realpathSync(
-		fs.mkdtempSync(path.join(os.tmpdir(), 'reviewer-scope-lifecycle-v2-')),
+		fs.realpathSync(
+			fs.mkdtempSync(path.join(os.tmpdir(), 'reviewer-scope-lifecycle-v2-')),
+		),
 	);
 	laneDirectory = path.join(directory, '.swarm-worktrees', 'sess', 'lane-1');
 	fs.mkdirSync(path.join(directory, 'src'), { recursive: true });

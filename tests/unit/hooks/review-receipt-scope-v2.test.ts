@@ -30,7 +30,9 @@ function git(args: string[]): string {
 
 beforeEach(() => {
 	directory = fs.realpathSync(
-		fs.mkdtempSync(path.join(os.tmpdir(), 'review-scope-manifest-v2-')),
+		fs.realpathSync(
+			fs.mkdtempSync(path.join(os.tmpdir(), 'review-scope-manifest-v2-')),
+		),
 	);
 	git(['init']);
 	fs.mkdirSync(path.join(directory, 'src'), { recursive: true });

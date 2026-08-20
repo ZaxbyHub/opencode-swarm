@@ -16,7 +16,9 @@ const realRead = fingerprintInternals.read;
 
 beforeEach(() => {
 	directory = fs.realpathSync(
-		fs.mkdtempSync(path.join(os.tmpdir(), 'reviewer-scope-capture-v2-')),
+		fs.realpathSync(
+			fs.mkdtempSync(path.join(os.tmpdir(), 'reviewer-scope-capture-v2-')),
+		),
 	);
 	fs.mkdirSync(path.join(directory, 'src'), { recursive: true });
 });
