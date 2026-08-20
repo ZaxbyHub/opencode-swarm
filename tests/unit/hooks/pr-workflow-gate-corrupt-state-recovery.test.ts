@@ -5,6 +5,7 @@ import {
 	abortPrWorkflow,
 	completePrWorkflow,
 	_test_exports as gateInternals,
+	MAX_SALVAGED_SCHEMA_ERROR_CHARS,
 	readPrWorkflowGateState,
 	readPrWorkflowGateStateForRecovery,
 } from '../../../src/hooks/pr-workflow-gate.js';
@@ -210,6 +211,44 @@ describe('readPrWorkflowGateStateForRecovery — regression: corrupted gate stat
 		expect(read?.salvaged).toBe(true);
 		expect(read?.revisionSalvageable).toBe(false);
 		expect(read?.disclosure).toContain('state revision unsalvageable');
+	});
+
+	test('FB-002: one oversized schema-error message is length-bounded', async () => {
+		// The issue-COUNT cap is no mitigation here: zod folds EVERY unrecognized
+		// key of one strict object into a SINGLE `unrecognized_keys` issue whose
+		// message inlines all of them. `checkoutRecovery` is a nested `.strict()`
+		// child (the root schema is passthrough, so a root-level unknown key would
+		// not fail at all), so one oversized key there yields one ~80,000-char
+		// message that lands verbatim in .swarm/events.jsonl and pr_workflow_status.
+		const oversizedKey = 'k'.repeat(50_000);
+		await writeRawBytes(
+			'oversized-error',
+			corruptState('oversized-error', {
+				checkoutRecovery: { ...TERMINAL_RECOVERY, [oversizedKey]: true },
+			}),
+		);
+
+		const read = await readPrWorkflowGateStateForRecovery(
+			directory,
+			'oversized-error',
+		);
+
+		expect(read?.salvaged).toBe(true);
+		const oversized = read?.schemaErrors.find((message) =>
+			message.startsWith('checkoutRecovery:'),
+		);
+		// Bound applied, and the truncation is MARKED rather than silent.
+		expect(oversized?.length).toBe(MAX_SALVAGED_SCHEMA_ERROR_CHARS);
+		expect(oversized?.endsWith('…')).toBe(true);
+		for (const message of read?.schemaErrors ?? []) {
+			expect(message.length).toBeLessThanOrEqual(
+				MAX_SALVAGED_SCHEMA_ERROR_CHARS,
+			);
+		}
+		// The whole disclosure stays operator-readable, not a 50KB durable record.
+		expect(read?.disclosure?.length ?? 0).toBeLessThan(
+			MAX_SALVAGED_SCHEMA_ERROR_CHARS * 12,
+		);
 	});
 
 	test('an unsalvageable sessionID/mode is NOT salvaged (identity fails closed)', async () => {

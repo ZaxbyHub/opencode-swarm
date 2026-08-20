@@ -114,14 +114,22 @@ async function recordOpenLane(
  * replacement snapshot — the store folds last-write-wins per correlationId, so
  * this is the same shape a real record takes when its process stops updating.
  */
-function backdateLane(correlationId: string, ageMs: number): void {
+function backdateLane(
+	correlationId: string,
+	ageMs: number,
+	status?: BackgroundDelegationRecord['status'],
+): void {
 	const record = readDelegations(directory).find(
 		(candidate) => candidate.correlationId === correlationId,
 	) as BackgroundDelegationRecord;
 	const storePath = path.join(directory, '.swarm', BACKGROUND_DELEGATIONS_FILE);
 	appendFileSync(
 		storePath,
-		`${JSON.stringify({ ...record, updatedAt: Date.now() - ageMs })}\n`,
+		`${JSON.stringify({
+			...record,
+			status: status ?? record.status,
+			updatedAt: Date.now() - ageMs,
+		})}\n`,
 		'utf-8',
 	);
 }
@@ -148,6 +156,46 @@ describe('settlePresumedStalePrWorkflowLanes — regression: W-4 stuck lanes wed
 		expect(settlement.disclosure).toContain(
 			'treated as settled: intent-architecture',
 		);
+	});
+
+	test('FB-005 #1: a lane exactly at the timeout boundary is NOT presumed stale (strict >)', async () => {
+		// Gap: every stale-path test in this file used STALE_AGE_MS (timeout +
+		// 60s), never the exact boundary, so a `>` -> `>=` flip on the
+		// PR_WORKFLOW_STALE_LANE_TIMEOUT_MS comparison in
+		// settlePresumedStalePrWorkflowLanes would pass the whole suite unnoticed.
+		await recordOpenLane(
+			'sess-boundary-open',
+			'intent-architecture',
+			'c-boundary-open',
+		);
+		backdateLane('c-boundary-open', DEFAULT_STALE_DELEGATION_TIMEOUT_MS);
+
+		const settlement = await settlePresumedStalePrWorkflowLanes(
+			directory,
+			'sess-boundary-open',
+		);
+
+		expect(settlement.openLanes).toBe(1);
+		expect(settlement.openLaneIds).toEqual(['intent-architecture']);
+		expect(settlement.presumedStaleLaneIds).toEqual([]);
+	});
+
+	test('FB-005 #1: a lane one millisecond past the boundary IS presumed stale', async () => {
+		await recordOpenLane(
+			'sess-boundary-stale',
+			'intent-architecture',
+			'c-boundary-stale',
+		);
+		backdateLane('c-boundary-stale', DEFAULT_STALE_DELEGATION_TIMEOUT_MS + 1);
+
+		const settlement = await settlePresumedStalePrWorkflowLanes(
+			directory,
+			'sess-boundary-stale',
+		);
+
+		expect(settlement.openLanes).toBe(0);
+		expect(settlement.openLaneIds).toEqual([]);
+		expect(settlement.presumedStaleLaneIds).toEqual(['intent-architecture']);
 	});
 
 	test('a lane with a fresh updatedAt still blocks (contradiction rule)', async () => {
@@ -199,6 +247,62 @@ describe('settlePresumedStalePrWorkflowLanes — regression: W-4 stuck lanes wed
 			sessionID: 'sess-d',
 			presumedStaleLanes: ['intent-architecture'],
 		});
+	});
+
+	test('a same-session retryable `ingestion_error` lane survives settlement while a genuinely stale lane is settled', async () => {
+		// The durable sweep this function triggers is directory-wide and its
+		// DEFAULT scope also finalizes `ingestion_error` — a status
+		// `isOpenPrWorkflowLane` never counts as open. So the record was flipped to
+		// `stale` without ever being counted, decided, or disclosed, and that flip
+		// is irreversible: the ingestion claim gate admits only `completed` and
+		// `ingestion_error`, so a swept record answers `not_ready` forever and the
+		// sole `ingestion_error` producer can no longer obtain a claim lease.
+		//
+		// The genuinely stale lane is load-bearing, not extra coverage: with no
+		// presumed-stale lane the function returns before the sweep ever runs, and
+		// the survival assertion below would hold with or without the restriction.
+		await recordOpenLane('sess-retryable', 'intent-architecture', 'c-stale');
+		backdateLane('c-stale', STALE_AGE_MS);
+		await recordOpenLane('sess-retryable', 'risk-security', 'c-ingest-err');
+		backdateLane('c-ingest-err', STALE_AGE_MS, 'ingestion_error');
+
+		const settlement = await settlePresumedStalePrWorkflowLanes(
+			directory,
+			'sess-retryable',
+		);
+
+		const statusOf = (correlationId: string) =>
+			readDelegations(directory).find(
+				(record) => record.correlationId === correlationId,
+			)?.status;
+		expect(settlement.openLanes).toBe(0);
+		expect(settlement.presumedStaleLaneIds).toEqual(['intent-architecture']);
+		expect(settlement.disclosure).toContain('1 lane(s) stale >30min');
+		expect(settlement.disclosure).not.toContain('risk-security');
+		expect(statusOf('c-stale')).toBe('stale');
+		expect(statusOf('c-ingest-err')).toBe('ingestion_error');
+	});
+
+	test('FB-005 #4: an events.jsonl write failure never blocks settlement (best-effort audit)', async () => {
+		// settlePresumedStalePrWorkflowLanes wraps the events.jsonl append in
+		// try/catch specifically so an audit-write failure can never block
+		// settlement; nothing previously exercised that branch. A directory at
+		// the events.jsonl path makes fsp.appendFile fail with EISDIR.
+		await recordOpenLane('sess-eisdir', 'intent-architecture', 'c-eisdir');
+		backdateLane('c-eisdir', STALE_AGE_MS);
+		const eventsPath = path.join(directory, '.swarm', 'events.jsonl');
+		await fs.rm(eventsPath, { recursive: true, force: true });
+		await fs.mkdir(eventsPath, { recursive: true });
+
+		const settlement = await settlePresumedStalePrWorkflowLanes(
+			directory,
+			'sess-eisdir',
+		);
+
+		expect(settlement.openLanes).toBe(0);
+		expect(settlement.openLaneIds).toEqual([]);
+		expect(settlement.presumedStaleLaneIds).toEqual(['intent-architecture']);
+		expect((await fs.stat(eventsPath)).isDirectory()).toBe(true);
 	});
 });
 

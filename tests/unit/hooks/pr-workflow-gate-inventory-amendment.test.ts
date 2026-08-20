@@ -97,6 +97,17 @@ async function writeRawState(
 	);
 }
 
+/** Synthesize `count` sequential amendment-ledger entries (FB-001, FB-002, …). */
+function buildAmendments(
+	count: number,
+): NonNullable<PrWorkflowGateState['prFeedbackInventoryAmendments']> {
+	return Array.from({ length: count }, (_unused, index) => ({
+		entry: `FB-${String(index + 1).padStart(3, '0')}`,
+		amendedAt: '2026-08-19T00:00:00.000Z',
+		batch: index + 1,
+	}));
+}
+
 describe('declarePrFeedbackInventory — regression: inventory immutability was a whole-workflow trap (R3/W-2)', () => {
 	test('an identical re-declaration is still idempotent', async () => {
 		await activateFeedback();
@@ -231,34 +242,40 @@ describe('declarePrFeedbackInventory — regression: inventory immutability was 
 	test('the amendment ledger is bounded and fails closed at the cap', async () => {
 		// The ledger is an integrity audit trail, not a reclaimable cache: it is
 		// never pruned, so growth must be refused rather than compacted.
-		const inventory = ['FB-000'];
-		const amendments = Array.from(
-			{ length: MAX_PR_FEEDBACK_INVENTORY_AMENDMENTS },
-			(_unused, index) => ({
-				entry: `FB-${String(index + 1).padStart(3, '0')}`,
-				amendedAt: '2026-08-19T00:00:00.000Z',
-				batch: index + 1,
-			}),
-		);
+		const amendments = buildAmendments(MAX_PR_FEEDBACK_INVENTORY_AMENDMENTS);
+		const entries = amendments.map((amendment) => amendment.entry);
 		await writeRawState('cap-session', {
-			prFeedbackInventory: [
-				...inventory,
-				...amendments.map((amendment) => amendment.entry),
-			].sort(),
+			prFeedbackInventory: ['FB-000', ...entries].sort(),
 			prFeedbackInventoryAmendments: amendments,
 		});
 		await expect(
 			declarePrFeedbackInventory(
 				directory,
 				'cap-session',
-				[
-					...inventory,
-					...amendments.map((amendment) => amendment.entry),
-					'FB-OVERFLOW',
-				],
+				['FB-000', ...entries, 'FB-OVERFLOW'],
 				{ prHeadSha: HEAD_SHA },
 			),
 		).rejects.toThrow(/amendment limit reached/i);
+	});
+
+	// FB-005 #2: only overflow was tested; a `>` -> `>=` flip on the
+	// MAX_PR_FEEDBACK_INVENTORY_AMENDMENTS comparison in declarePrFeedbackInventory
+	// would wrongly reject a legitimate final append at the cap, uncaught.
+	test('an append landing exactly at the cap SUCCEEDS (strict >)', async () => {
+		const cap = MAX_PR_FEEDBACK_INVENTORY_AMENDMENTS;
+		const amendments = buildAmendments(cap - 1);
+		const entries = amendments.map((a) => a.entry);
+		await writeRawState('cap-exact-session', {
+			prFeedbackInventory: ['FB-000', ...entries].sort(),
+			prFeedbackInventoryAmendments: amendments,
+		});
+		const state = await declarePrFeedbackInventory(
+			directory,
+			'cap-exact-session',
+			['FB-000', ...entries, 'FB-LAST'],
+			{ prHeadSha: HEAD_SHA },
+		);
+		expect(state.prFeedbackInventoryAmendments).toHaveLength(cap);
 	});
 
 	test('an amendment disarms publication', async () => {

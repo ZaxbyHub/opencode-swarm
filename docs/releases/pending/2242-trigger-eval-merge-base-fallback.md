@@ -28,11 +28,13 @@ The reviewed range stays SHA-scoped (`base_sha...pr_head_sha`) on both paths, so
 
 ## Migration notes
 
-No action required. `base_verification` is optional on the v2 receipt schema, so v2 receipts written before this change keep parsing unchanged, and historical unversioned and `schema_version: 1` receipts are untouched — the shared receipt envelope was deliberately **not** modified, precisely because widening it would change how legacy receipts parse and could reintroduce the same permanent-block class on the legacy path.
+No action required for the forward direction. `base_verification` is optional on the v2 receipt schema, so v2 receipts written before this change keep parsing unchanged, and historical unversioned and `schema_version: 1` receipts are untouched — the shared receipt envelope was deliberately **not** modified, precisely because widening it would change how legacy receipts parse and could reintroduce the same permanent-block class on the legacy path.
+
+The reverse direction does require awareness: the writer now always emits `base_verification` on every v2 receipt, and `V2ReceiptSchema` is `.strict()`, so a rollback to pre-change code — or any stale reader process still running that code — cannot parse a receipt written after this change; `V2ReceiptSchema.parse` throws on the unrecognized key. The blast radius is narrow: the only in-repo reader of this receipt (`pr-workflow-gate.ts`) ships together with the writer in the same change, `abort_pr_workflow` and `pr_workflow_status` do not read the receipt at all, and the receipt is scoped per-run under `.swarm/pr-review/<run_id>/`. Recovery for a mismatched-version reader is the same as any other unparseable receipt: `abort_pr_workflow` followed by re-dispatch.
 
 ## Breaking changes
 
-None.
+None for consumers upgrading in place. A downgrade/rollback of just this component while a receipt written by the new writer already exists is breaking for that one receipt: the pre-change `.strict()` schema rejects the new `base_verification` key. See Migration notes for scope and recovery.
 
 ## Known caveats
 

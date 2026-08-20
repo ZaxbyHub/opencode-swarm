@@ -13,6 +13,7 @@ import {
 	type RecordPendingInput,
 	readDelegations,
 	recordPendingDelegation,
+	type SweepableDelegationStatus,
 	sweepStaleDelegations,
 } from '../../../src/background/pending-delegations';
 
@@ -40,6 +41,28 @@ function input(over: Partial<RecordPendingInput> = {}): RecordPendingInput {
 
 describe('pending-delegations store', () => {
 	let dir: string;
+
+	/**
+	 * Append a record backdated 10 minutes so a 1-minute sweep timeout makes it
+	 * reliably overdue without depending on real elapsed time.
+	 */
+	function seedBackdated(
+		correlationId: string,
+		status: SweepableDelegationStatus,
+	): void {
+		const tenMinAgo = Date.now() - 10 * 60_000;
+		fs.appendFileSync(
+			path.join(dir, '.swarm', BACKGROUND_DELEGATIONS_FILE),
+			`${JSON.stringify({
+				...input({ correlationId, subagentSessionId: correlationId }),
+				schemaVersion: 1,
+				status,
+				createdAt: tenMinAgo,
+				updatedAt: tenMinAgo,
+			})}\n`,
+		);
+	}
+
 	beforeEach(() => {
 		dir = makeTempProject();
 	});
@@ -170,6 +193,30 @@ describe('pending-delegations store', () => {
 		const all = readDelegations(dir);
 		expect(all).toHaveLength(1);
 		expect(all[0].correlationId).toBe('ses_ok');
+	});
+
+	it('the DEFAULT sweep scope still finalizes overdue ingestion_error records', async () => {
+		// Pins the default for the lazy-maintenance caller
+		// (`recordPendingDelegation`). The PR-workflow gate narrows this sweep to
+		// pending/running; that narrowing must never leak into the default.
+		seedBackdated('ses_ingest_err', 'ingestion_error');
+
+		expect(await sweepStaleDelegations(dir, 60_000)).toBe(1);
+		expect(findByCorrelationId(dir, 'ses_ingest_err')?.status).toBe('stale');
+	});
+
+	it('an explicitly narrowed sweep spares statuses outside the restriction', async () => {
+		seedBackdated('ses_ingest_err', 'ingestion_error');
+		seedBackdated('ses_pending', 'pending');
+		const narrowed = new Set<SweepableDelegationStatus>(['pending', 'running']);
+
+		expect(
+			await sweepStaleDelegations(dir, 60_000, { statuses: narrowed }),
+		).toBe(1);
+		expect(findByCorrelationId(dir, 'ses_pending')?.status).toBe('stale');
+		expect(findByCorrelationId(dir, 'ses_ingest_err')?.status).toBe(
+			'ingestion_error',
+		);
 	});
 
 	it('sweep marks only overdue pendings stale (fresh ones survive)', async () => {

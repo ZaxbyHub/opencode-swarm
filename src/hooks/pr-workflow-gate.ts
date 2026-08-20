@@ -26,6 +26,7 @@ import {
 	DEFAULT_STALE_DELEGATION_TIMEOUT_MS,
 	findByBatchId,
 	readDelegations,
+	type SweepableDelegationStatus,
 	sweepStaleDelegations,
 } from '../background/pending-delegations.js';
 import {
@@ -1404,6 +1405,25 @@ const PR_WORKFLOW_STALE_LANE_TIMEOUT_MS = DEFAULT_STALE_DELEGATION_TIMEOUT_MS;
 const MAX_DISCLOSED_LANE_IDS = 10;
 
 /**
+ * The only status classes this gate's durability sweep may finalize.
+ *
+ * The sweep must never exceed what `isOpenPrWorkflowLane` counts as open —
+ * settlement here is a decision about lanes this session observed as `pending`
+ * or `running`, and the sweep is directory-wide with no session or mode filter,
+ * so any wider set finalizes records the decision never reasoned about and
+ * never discloses.
+ *
+ * `ingestion_error` is specifically excluded: it is a **retryable** state
+ * (`terminalDisposition` maps it to `retry_ingestion`; `isTerminal` excludes
+ * it), and the flip to `stale` is **irreversible** — the ingestion claim gate
+ * admits only `completed` and `ingestion_error`, so a swept record answers
+ * `not_ready` forever and the sole `ingestion_error` producer requires an
+ * active claim lease it can no longer obtain.
+ */
+const PR_WORKFLOW_SWEEPABLE_LANE_STATUSES: ReadonlySet<SweepableDelegationStatus> =
+	new Set<SweepableDelegationStatus>(['pending', 'running']);
+
+/**
  * Exact disclosure emitted when the abort path takes `clearPrWorkflowGateState`'s
  * documented `expectedRevision === undefined` escape hatch because the durable
  * state's `revision` could not be salvaged (issue #2242 R4).
@@ -1488,7 +1508,15 @@ export async function settlePresumedStalePrWorkflowLanes(
 	// Best-effort ONLY. Makes the terminal `stale` transition durable so later
 	// readers and the delegation ledger agree with the decision already made
 	// above; reachability never depends on either write succeeding.
-	await sweepStaleDelegations(directory, PR_WORKFLOW_STALE_LANE_TIMEOUT_MS);
+	//
+	// Restricted to `pending`/`running` so the durable sweep cannot exceed what
+	// `isOpenPrWorkflowLane` counted as open. The sweep is directory-wide with no
+	// session filter, and its default scope also finalizes `ingestion_error` —
+	// which is retryable, is never counted open here, and whose flip to `stale`
+	// is irreversible at the ingestion claim gate.
+	await sweepStaleDelegations(directory, PR_WORKFLOW_STALE_LANE_TIMEOUT_MS, {
+		statuses: PR_WORKFLOW_SWEEPABLE_LANE_STATUSES,
+	});
 	try {
 		await fsp.appendFile(
 			validateSwarmPath(directory, 'events.jsonl'),
@@ -1664,12 +1692,61 @@ export async function abortPrWorkflow(
 	// accidental one. When the revision WAS salvageable, normal CAS still
 	// applies, reading back through the same salvage-tolerant view.
 	const casEscape = recovery.salvaged && !recovery.revisionSalvageable;
-	await clearPrWorkflowGateState(
-		directory,
-		sessionID,
-		casEscape ? undefined : state.revision,
-		{ allowSalvagedRead: recovery.salvaged },
-	);
+	await _test_exports.beforeAbortClear?.();
+	try {
+		await clearPrWorkflowGateState(
+			directory,
+			sessionID,
+			casEscape ? undefined : state.revision,
+			{ allowSalvagedRead: recovery.salvaged },
+		);
+	} catch (error) {
+		// The `pr_workflow_aborted` record above is already durable, and the
+		// append deliberately precedes the clear so a write failure can never
+		// block the gate from clearing. But `clearPrWorkflowGateState` THROWS on
+		// a CAS mismatch, so a concurrent mutation would otherwise leave the
+		// audit trail asserting an abort that never executed, with no field
+		// distinguishing it. Append a best-effort correction — same non-fatal
+		// discipline as the abort event — carrying sessionID/mode/prHeadSha so it
+		// correlates with the record it retracts, then re-throw unchanged.
+		try {
+			await fsp.appendFile(
+				validateSwarmPath(directory, 'events.jsonl'),
+				`${JSON.stringify({
+					type: 'pr_workflow_abort_not_completed',
+					timestamp: isoNow(),
+					sessionID: state.sessionID,
+					mode: state.mode,
+					...(state.prHeadSha ? { prHeadSha: state.prHeadSha } : {}),
+					reason: sanitizedReason,
+					// Reuses the generic diagnostic char cap rather than declaring a
+					// third one-off bound; the value is a plain length ceiling on an
+					// operator-facing string, not a coverage-specific quantity.
+					failure: (error instanceof Error
+						? error.message
+						: String(error)
+					).slice(0, MAX_BASE_COVERAGE_DIAGNOSTIC_CHARS),
+					// Claims only what this catch can actually observe. Every throw
+					// reachable from `clearPrWorkflowGateState` today precedes the
+					// unlink (CAS mismatch, lock acquisition, non-ENOENT rm), so the
+					// gate is in fact still active — but asserting that here would
+					// depend on a swallow in `releaseSessionStateMutationLock` ~8,500
+					// lines away. Making a DURABLE audit record depend on that is the
+					// same defect class this record exists to retract, so it stays
+					// hedged and the operator revalidates.
+					disclosure:
+						'RETRACTION: the pr_workflow_aborted record for this session did NOT complete — ' +
+						'the clear failed and the gate state may still be active. Revalidate the current ' +
+						'session state before retrying the abort.',
+				})}\n`,
+				'utf-8',
+			);
+		} catch {
+			// Non-fatal, exactly like the abort event: a failed correction append
+			// must not mask the clear failure the caller has to see.
+		}
+		throw error;
+	}
 	return {
 		mode: state.mode,
 		...(state.prHeadSha ? { prHeadSha: state.prHeadSha } : {}),
@@ -5717,6 +5794,7 @@ export const _test_exports = {
 		pendingCheckoutMutationsByProject.clear();
 		completedCheckoutLockOwners.clear();
 		_test_exports.beforeTerminalClear = undefined;
+		_test_exports.beforeAbortClear = undefined;
 		_test_exports.beforePrFeedbackTransitionLock = undefined;
 		_test_exports.beforePrFeedbackTrackingSwitch = undefined;
 		_test_exports.afterPrFeedbackTrackingSwitch = undefined;
@@ -5734,6 +5812,12 @@ export const _test_exports = {
 		_test_exports.classifyPrWorkflowGitStateAsync = classifyPrWorkflowGitState;
 	},
 	beforeTerminalClear: undefined as (() => Promise<void>) | undefined,
+	/**
+	 * Interleave point between the durable `pr_workflow_aborted` append and the
+	 * CAS-guarded clear, so a test can simulate the concurrent mutation that
+	 * makes the clear throw after the audit record is already on disk (FB-008).
+	 */
+	beforeAbortClear: undefined as (() => Promise<void>) | undefined,
 	beforePrFeedbackTransitionLock: undefined as
 		| (() => Promise<void>)
 		| undefined,
@@ -10253,6 +10337,29 @@ async function readPrWorkflowGateStateFileFromDisk(
 /** Upper bound on schema issues quoted in one salvage disclosure. */
 const MAX_SALVAGED_SCHEMA_ERRORS = 10;
 
+/**
+ * Upper bound on the length of ONE quoted schema issue.
+ *
+ * The issue-COUNT cap alone is not a bound on disclosure size: zod folds every
+ * unrecognized key of a single strict object into ONE `unrecognized_keys` issue
+ * whose message inlines all of them, so one oversized key in a nested strict
+ * child (e.g. `checkoutRecovery`) yields a single 80,000-char message that the
+ * count cap does nothing about. The disclosure is written durably to
+ * `.swarm/events.jsonl` and surfaced verbatim in `pr_workflow_status`, so an
+ * attacker-influenced or partially-written state file could otherwise flood the
+ * audit sink and the operator's console. Matches the ellipsis-marker style of
+ * `MAX_LANE_VALIDATION_VALUE_CHARS` — this is operator prose, so the truncation
+ * must be visible rather than silent.
+ */
+export const MAX_SALVAGED_SCHEMA_ERROR_CHARS = 240;
+
+/** Bound one quoted schema issue, marking any truncation for the operator. */
+function boundSalvagedSchemaError(message: string): string {
+	return message.length <= MAX_SALVAGED_SCHEMA_ERROR_CHARS
+		? message
+		: `${message.slice(0, MAX_SALVAGED_SCHEMA_ERROR_CHARS - 1)}…`;
+}
+
 /** Result of one recovery-only gate-state read. */
 export interface PrWorkflowGateRecoveryRead {
 	/** Schema-valid state, or the salvaged projection when `salvaged`. */
@@ -10370,7 +10477,11 @@ export async function readPrWorkflowGateStateForRecovery(
 	const armedShapeUnreadable = armedKeyPresent && !salvagedArmed.success;
 	const schemaErrors = parsed.error.issues
 		.slice(0, MAX_SALVAGED_SCHEMA_ERRORS)
-		.map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`);
+		.map((issue) =>
+			boundSalvagedSchemaError(
+				`${issue.path.join('.') || '(root)'}: ${issue.message}`,
+			),
+		);
 	const disclosure =
 		`DEGRADED: PR workflow gate state for session "${normalizedSessionID}" failed schema validation ` +
 		`and was SALVAGED for recovery only (abort/status; write and completion paths still refuse it). ` +
