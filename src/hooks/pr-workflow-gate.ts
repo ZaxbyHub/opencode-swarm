@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { type BigIntStats, readFileSync } from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
+import type { SessionStatus } from '@opencode-ai/sdk';
 import { z } from 'zod';
 import {
 	analyzeCandidateFields,
@@ -68,8 +69,10 @@ import {
 	classifyPrWorkflowGitState,
 	type PrWorkflowGitState,
 } from '../git/pr-workflow-state.js';
+import { swarmState } from '../state.js';
 import { getPrWorkflowToolCapability } from '../tools/tool-metadata.js';
 import { warn } from '../utils/logger.js';
+import { withTimeout } from '../utils/timeout.js';
 import { validateSwarmPath } from './utils.js';
 
 export const PR_REVIEW_BASE_DIMENSION_IDS = [
@@ -1431,14 +1434,239 @@ const PR_WORKFLOW_SWEEPABLE_LANE_STATUSES: ReadonlySet<SweepableDelegationStatus
 const CAS_ESCAPE_DISCLOSURE =
 	'state revision unsalvageable; cleared without compare-and-swap';
 
+/**
+ * Deadline for one PR-workflow lane liveness probe (issue #2251).
+ *
+ * The probe is a best-effort contradiction check on a decision that is already
+ * safe without it, so it must never become the slow path of an escape hatch.
+ * Exposed through `_test_exports.laneLivenessProbeTimeoutMs` because
+ * `withTimeout` uses a REAL `setTimeout` and the test clock only patches
+ * `Date.now()` — without the seam the timeout branch is a five-second
+ * wall-clock test or theater.
+ */
+const PR_WORKFLOW_LANE_LIVENESS_PROBE_TIMEOUT_MS = 5_000;
+
+/**
+ * The session-status types that count as "provably still running".
+ *
+ * Deliberately an ALLOWLIST, not `type !== 'idle'`. The SDK's `SessionStatus`
+ * union is closed at three members today, so the two formulations coincide —
+ * but a future fourth member (`'error'`, `'cancelled'`, `'paused'`, …) would
+ * silently start CONTRADICTING staleness under the negative formulation and
+ * re-wedge abort and completion, which is exactly this issue returning. The
+ * compile-time assert below fails the build instead.
+ *
+ * The element type is the SDK union, and the literals go through `satisfies`, so
+ * a TYPO is a compile error too: `['busy', 'retyr']` no longer type-checks. The
+ * exhaustiveness assert below constrains the SDK union, not this set's members,
+ * so without the `satisfies` a misspelt member would compile clean and silently
+ * retire the probe — every lookup would miss and every live lane would settle.
+ */
+const LIVE_SESSION_STATUS_TYPES: ReadonlySet<SessionStatus['type']> = new Set([
+	'busy',
+	'retry',
+] satisfies SessionStatus['type'][]);
+
+/**
+ * Membership test for a status string that came off the wire.
+ *
+ * The single widening cast is deliberate and confined here: the probe's input is
+ * an untrusted `string` from the host response, and `ReadonlySet<T>.has` accepts
+ * only `T`, so the alternative is either widening the set (which loses the typo
+ * check above) or scattering casts at the call site.
+ */
+function isLiveSessionStatusType(type: string): boolean {
+	return (LIVE_SESSION_STATUS_TYPES as ReadonlySet<string>).has(type);
+}
+
+type _UnhandledSessionStatus = Exclude<
+	SessionStatus['type'],
+	'idle' | 'busy' | 'retry'
+>;
+/**
+ * Compile-time exhaustiveness guard for {@link LIVE_SESSION_STATUS_TYPES}.
+ * If the SDK adds a status member, `_UnhandledSessionStatus` stops being
+ * `never`, this initializer stops type-checking, and whoever bumps the SDK has
+ * to decide explicitly whether the new member is alive or settles.
+ */
+const _sessionStatusAllowlistIsExhaustive: _UnhandledSessionStatus extends never
+	? true
+	: never = true;
+
+/**
+ * The single session operation the liveness probe needs.
+ *
+ * Deliberately a narrow LOCAL structural type rather than a type-only import of
+ * `SessionOps` from `src/tools/dispatch-lanes.ts`: that module's
+ * `isLaneReadyForCollection` is the fail-CLOSED counterpart of this probe, and
+ * keeping the two textually independent removes any invitation to "share" the
+ * predicate. A type-only import would be erased either way; this is about
+ * preventing the wrong reuse, not about module graph cost.
+ */
+interface PrWorkflowLaneLivenessSessionOps {
+	status?: (args: { query?: { directory?: string } }) => Promise<{
+		data?: Record<string, { type?: string }> | null;
+		error?: unknown;
+	}>;
+}
+
+const defaultGetSessionOps = (): PrWorkflowLaneLivenessSessionOps | null =>
+	(swarmState.opencodeClient?.session as unknown as
+		| PrWorkflowLaneLivenessSessionOps
+		| undefined) ?? null;
+
+/** Why a probe produced no evidence of life. Absent means the probe ran. */
+export type PrWorkflowLaneProbeDegradedReason =
+	| 'probe-unavailable'
+	| 'probe-error'
+	| 'probe-timeout'
+	| 'probe-no-data';
+
+/**
+ * Probe which of `records` have a session the host affirmatively reports as
+ * still running (issue #2251).
+ *
+ * **FAIL-OPEN, by design.** For its ERROR and NO-DATA cases this is the exact
+ * inverse of `isLaneReadyForCollection` (`src/tools/dispatch-lanes.ts`), which
+ * returns `false` on a truthy `error`, on missing `data`, and on a throw —
+ * because a lane it cannot verify must not be collected. The two agree, rather
+ * than invert, on ONE case: a host that exposes no `status` function at all.
+ * There the collector returns `true` (`dispatch-lanes.ts`, the `typeof
+ * session.status !== 'function'` guard) and this probe reports
+ * `probe-unavailable`, so both fall through to proceeding — an unprobeable host
+ * must not wedge either side.
+ *
+ * Here the default outcome must be "settle": an unavailable, erroring,
+ * timing-out or empty probe returns the empty set, so age alone decides and the
+ * reachability floor this whole subsystem exists to preserve is untouched. Only
+ * a probe that RAN and affirmatively named a live session may contradict
+ * staleness.
+ *
+ * The returned set is built only from a fully-read response — a mid-iteration
+ * throw yields the empty set rather than a partial spare list, so a malformed
+ * response can never spare an arbitrary subset of lanes.
+ *
+ * Keys are `subagentSessionId`s. A record without one is unprobeable and is
+ * simply never added (it settles), which is the fail-open direction.
+ */
+async function probeAlivePrWorkflowLaneSessions(
+	directory: string,
+	records: BackgroundDelegationRecord[],
+): Promise<{
+	alive: Set<string>;
+	degradedReason?: PrWorkflowLaneProbeDegradedReason;
+}> {
+	const session = _test_exports.getSessionOps();
+	const statusOp = session?.status;
+	if (!session || typeof statusOp !== 'function') {
+		return { alive: new Set<string>(), degradedReason: 'probe-unavailable' };
+	}
+	// Identity-compared sentinel: the ONLY way to tell "the host took too long"
+	// apart from "the host threw", since withTimeout rejects with this exact
+	// object.
+	const timeoutError = new Error(
+		'PR workflow lane liveness probe exceeded its deadline',
+	);
+	let response: Awaited<ReturnType<NonNullable<typeof statusOp>>> | undefined;
+	try {
+		response = await withTimeout(
+			(async () => statusOp.call(session, { query: { directory } }))(),
+			_test_exports.laneLivenessProbeTimeoutMs,
+			timeoutError,
+		);
+	} catch (error) {
+		return {
+			alive: new Set<string>(),
+			degradedReason: error === timeoutError ? 'probe-timeout' : 'probe-error',
+		};
+	}
+	try {
+		if (response?.error) {
+			return { alive: new Set<string>(), degradedReason: 'probe-error' };
+		}
+		const data = response?.data;
+		if (data === null || data === undefined) {
+			return { alive: new Set<string>(), degradedReason: 'probe-no-data' };
+		}
+		const accumulated = new Set<string>();
+		for (const record of records) {
+			const subagentSessionId = record.subagentSessionId;
+			if (!subagentSessionId) continue;
+			const type = data[subagentSessionId]?.type;
+			if (typeof type === 'string' && isLiveSessionStatusType(type)) {
+				accumulated.add(subagentSessionId);
+			}
+		}
+		return { alive: accumulated };
+	} catch {
+		return { alive: new Set<string>(), degradedReason: 'probe-error' };
+	}
+}
+
 export interface PrWorkflowStaleLaneSettlement {
-	/** Lanes still genuinely in flight (fresh `updatedAt`). These still block. */
+	/**
+	 * Every lane that still blocks: lanes with a fresh `updatedAt` PLUS lanes
+	 * past the horizon whose session the liveness probe reported still running.
+	 */
 	openLaneIds: string[];
 	openLanes: number;
+	/**
+	 * Open lanes that block on FRESHNESS alone (age below the horizon).
+	 *
+	 * Separated from `openLanes` because the human-only `force` abort override
+	 * (issue #2251 S3) must distinguish "blocked only by probe retention", which
+	 * an operator may override, from "blocked by a lane that is genuinely young",
+	 * which stays fail-closed. Deriving it by subtraction or by comparing lane
+	 * LABELS would be wrong: `prWorkflowLaneLabel` falls back to `'unknown'`, so
+	 * labels are not unique.
+	 */
+	freshOpenLanes: number;
 	/** Lanes stale past the horizon, treated as settled with disclosure. */
 	presumedStaleLaneIds: string[];
-	/** Operator-facing disclosure; `undefined` when nothing was presumed stale. */
+	/**
+	 * Lanes past the horizon that the probe spared. Present only when non-empty.
+	 */
+	probedAliveLaneIds?: string[];
+	/**
+	 * The SAME records as {@link probedAliveLaneIds}, in the same order, keyed by
+	 * `correlationId` instead of by display label.
+	 *
+	 * Both are needed and neither substitutes for the other: `prWorkflowLaneLabel`
+	 * falls back to `'unknown'` and is not unique, so it cannot address a durable
+	 * record — while `correlationId` is the ledger's primary key and is what the
+	 * human-only `force` override must name to finalize exactly these records and
+	 * nothing else. Present only when non-empty.
+	 */
+	probeRetainedCorrelationIds?: string[];
+	/** Set when the probe could not produce evidence; absent when it ran. */
+	probeDegradedReason?: PrWorkflowLaneProbeDegradedReason;
+	/** Operator-facing disclosure; `undefined` when nothing was settled or retained. */
 	disclosure?: string;
+}
+
+/**
+ * Probe outcome rendered as a suffix for an operator-facing BLOCKED message.
+ *
+ * Wired into all three open-lane refusals so a blocked caller can tell "a lane
+ * is genuinely young" from "a lane past the horizon was spared because its
+ * session answered" — otherwise the two are indistinguishable and the probe's
+ * effect on the block is invisible.
+ */
+function describePrWorkflowLaneProbe(
+	settlement: PrWorkflowStaleLaneSettlement,
+): string {
+	const parts: string[] = [];
+	if (settlement.probedAliveLaneIds?.length) {
+		parts.push(
+			`liveness probe reports still running: ${settlement.probedAliveLaneIds
+				.slice(0, MAX_DISCLOSED_LANE_IDS)
+				.join(', ')}`,
+		);
+	}
+	if (settlement.probeDegradedReason) {
+		parts.push(`liveness probe degraded (${settlement.probeDegradedReason})`);
+	}
+	return parts.length > 0 ? ` (${parts.join('; ')})` : '';
 }
 
 function prWorkflowLaneLabel(record: BackgroundDelegationRecord): string {
@@ -1478,6 +1706,13 @@ function isOpenPrWorkflowLane(
  *
  * A lane with a RECENT `updatedAt` still blocks: a re-verification that CAN run
  * and reports "still progressing" contradicts settlement and fails closed.
+ *
+ * Issue #2251 adds the second, stronger contradiction: a lane PAST the horizon
+ * whose session the host affirmatively reports as `busy`/`retry` is genuinely
+ * running (nothing heartbeats `updatedAt`, so age alone cannot see this) and is
+ * retained instead of discarded. The probe is fail-open — see
+ * {@link probeAlivePrWorkflowLaneSessions} — so an unavailable, erroring or
+ * empty probe leaves the age-only behaviour exactly as it was.
  */
 export async function settlePresumedStalePrWorkflowLanes(
 	directory: string,
@@ -1494,17 +1729,94 @@ export async function settlePresumedStalePrWorkflowLanes(
 			open.push(record);
 		}
 	}
-	const presumedStaleLaneIds = presumedStale.map(prWorkflowLaneLabel);
-	const openLaneIds = open.map(prWorkflowLaneLabel);
 	if (presumedStale.length === 0) {
-		return { openLaneIds, openLanes: open.length, presumedStaleLaneIds };
+		// Nothing is below the horizon to re-verify, so the probe is not consulted
+		// at all: no host round-trip on the overwhelmingly common path.
+		const freshOnlyLaneIds = open.map(prWorkflowLaneLabel);
+		return {
+			openLaneIds: freshOnlyLaneIds,
+			openLanes: open.length,
+			freshOpenLanes: open.length,
+			presumedStaleLaneIds: [],
+		};
 	}
+	// R5: the seam is mutable and this function has call sites with no try/catch
+	// of their own, so a throwing probe must degrade here rather than convert a
+	// settleable workflow into an unhandled rejection.
+	let probe: {
+		alive: Set<string>;
+		degradedReason?: PrWorkflowLaneProbeDegradedReason;
+	};
+	try {
+		probe = await _test_exports.probeLaneLivenessAsync(
+			directory,
+			presumedStale,
+		);
+	} catch {
+		probe = { alive: new Set<string>(), degradedReason: 'probe-error' };
+	}
+	const probeRetained: BackgroundDelegationRecord[] = [];
+	const settled: BackgroundDelegationRecord[] = [];
+	for (const record of presumedStale) {
+		if (record.subagentSessionId && probe.alive.has(record.subagentSessionId)) {
+			probeRetained.push(record);
+		} else {
+			settled.push(record);
+		}
+	}
+	// Every returned count is derived AFTER the probe. Reporting the pre-probe
+	// partition would let a spared lane be reported as settled, which is the
+	// inverse wedge: abort and completion would sail past a live lane.
+	const probedAliveLaneIds = probeRetained.map(prWorkflowLaneLabel);
+	const openLaneIds = [...open.map(prWorkflowLaneLabel), ...probedAliveLaneIds];
+	const retentionDisclosure =
+		probeRetained.length > 0
+			? `${probeRetained.length} lane(s) past the horizon retained: ` +
+				`liveness probe reports still running: ${probedAliveLaneIds
+					.slice(0, MAX_DISCLOSED_LANE_IDS)
+					.join(', ')}`
+			: undefined;
+	const retentionFields = {
+		...(probedAliveLaneIds.length > 0
+			? {
+					probedAliveLaneIds,
+					probeRetainedCorrelationIds: probeRetained.map(
+						(record) => record.correlationId,
+					),
+				}
+			: {}),
+		...(probe.degradedReason
+			? { probeDegradedReason: probe.degradedReason }
+			: {}),
+	};
+	if (settled.length === 0) {
+		// Nothing was settled, so nothing may be swept and no
+		// `pr_workflow_lanes_presumed_stale` record may be written — an audit trail
+		// asserting a settlement that did not happen is worse than none.
+		return {
+			openLaneIds,
+			openLanes: openLaneIds.length,
+			freshOpenLanes: open.length,
+			presumedStaleLaneIds: [],
+			...retentionFields,
+			disclosure: retentionDisclosure,
+		};
+	}
+	const presumedStaleLaneIds = settled.map(prWorkflowLaneLabel);
+	// The leading clause is a STABLE PREFIX: existing operator tooling and tests
+	// pin `N lane(s) stale >30min` / `treated as settled: …`. The probe verdict is
+	// APPENDED so the three outcomes (probe ran and found nothing / probe could
+	// not run / some lanes retained) are distinguishable without breaking it.
 	const disclosure =
 		`${presumedStaleLaneIds.length} lane(s) stale >` +
 		`${Math.round(PR_WORKFLOW_STALE_LANE_TIMEOUT_MS / 60_000)}min, ` +
 		`treated as settled: ${presumedStaleLaneIds
 			.slice(0, MAX_DISCLOSED_LANE_IDS)
-			.join(', ')}`;
+			.join(', ')}` +
+		(probe.degradedReason
+			? `; settled despite liveness probe failure (${probe.degradedReason})`
+			: '; liveness probe found no live session') +
+		(retentionDisclosure ? `; ${retentionDisclosure}` : '');
 	// Best-effort ONLY. Makes the terminal `stale` transition durable so later
 	// readers and the delegation ledger agree with the decision already made
 	// above; reachability never depends on either write succeeding.
@@ -1514,9 +1826,29 @@ export async function settlePresumedStalePrWorkflowLanes(
 	// session filter, and its default scope also finalizes `ingestion_error` —
 	// which is retryable, is never counted open here, and whose flip to `stale`
 	// is irreversible at the ingestion claim gate.
-	await sweepStaleDelegations(directory, PR_WORKFLOW_STALE_LANE_TIMEOUT_MS, {
-		statuses: PR_WORKFLOW_SWEEPABLE_LANE_STATUSES,
-	});
+	//
+	// Issue #2251 R1: the sweep filters on status and age ONLY. A probe-retained
+	// lane is `pending`/`running` and past the horizon by construction, so in a
+	// mixed batch this directory-wide sweep would durably flip the very lane the
+	// probe just spared — the spare would last exactly one call. Excluding them by
+	// `correlationId` extends the existing "cannot exceed what
+	// `isOpenPrWorkflowLane` counted as open" restriction to "cannot exceed what
+	// this settlement DECIDED". The seam + try/catch keep a sweep failure from
+	// affecting the decision already made above.
+	try {
+		await _test_exports.sweepStaleDelegationsAsync(
+			directory,
+			PR_WORKFLOW_STALE_LANE_TIMEOUT_MS,
+			{
+				statuses: PR_WORKFLOW_SWEEPABLE_LANE_STATUSES,
+				excludeCorrelationIds: new Set(
+					probeRetained.map((record) => record.correlationId),
+				),
+			},
+		);
+	} catch {
+		// Durability is best-effort; the in-memory decision above already stands.
+	}
 	try {
 		await fsp.appendFile(
 			validateSwarmPath(directory, 'events.jsonl'),
@@ -1529,6 +1861,8 @@ export async function settlePresumedStalePrWorkflowLanes(
 					MAX_DISCLOSED_LANE_IDS,
 				),
 				staleTimeoutMs: PR_WORKFLOW_STALE_LANE_TIMEOUT_MS,
+				probeStatus: probe.degradedReason ?? 'ok',
+				probedAliveLanes: probedAliveLaneIds.slice(0, MAX_DISCLOSED_LANE_IDS),
 				disclosure,
 			})}\n`,
 			'utf-8',
@@ -1538,10 +1872,181 @@ export async function settlePresumedStalePrWorkflowLanes(
 	}
 	return {
 		openLaneIds,
-		openLanes: open.length,
+		openLanes: openLaneIds.length,
+		freshOpenLanes: open.length,
 		presumedStaleLaneIds,
+		...retentionFields,
 		disclosure,
 	};
+}
+
+/**
+ * What {@link finalizeOverriddenProbeRetainedLanes} POSITIVELY OBSERVED on disk
+ * after it ran — never what it inferred from an id's absence.
+ */
+interface OverriddenProbeRetainedLaneOutcome {
+	/**
+	 * Every still-open `swarm-pr-*` record of THIS session, targeted or not. This
+	 * is the restartability answer, because `countOpenPrWorkflowLanes` is what
+	 * refuses the next checkout preparation and it ignores which lanes an
+	 * override reasoned about.
+	 */
+	sessionOpenLaneIds: string[];
+	/**
+	 * Targeted ids observed terminal `stale`: the override really did abandon
+	 * these, and only these may be described as no longer collectable.
+	 */
+	finalizedLaneIds: string[];
+	/**
+	 * Targeted lanes the sweep did NOT finalize because they had already moved to
+	 * some other status, rendered as `correlationId (status)`.
+	 *
+	 * The OBSERVED status is carried rather than dropped, and the disclosure
+	 * asserts only that the record was left intact. Claiming "its output is
+	 * collectable" would be the mirror of the bug this fixes: `error` and
+	 * `ingestion_error` records surface through `collect_lane_results` as
+	 * `failed` with no result text (`recordToLaneResult`,
+	 * `src/tools/dispatch-lanes.ts`), and `ingesting` is filtered out of
+	 * `lane_results` entirely until it settles. Naming the status lets the
+	 * operator judge; asserting collectability would overclaim for three of the
+	 * statuses that can land here.
+	 */
+	sparedLaneDescriptions: string[];
+}
+
+/**
+ * Finalize the delegation records of the probe-retained lanes a human `force`
+ * abort is overriding, so clearing the gate actually restarts the workflow.
+ *
+ * Without this, the override traded an unexitable gate for an UN-RESTARTABLE
+ * session. The gate cleared, but each retained record stayed `pending` on disk
+ * forever (the retained lane never terminates — that is the hypothesis the
+ * override exists for), and `countOpenPrWorkflowLanes`
+ * (`src/tools/prepare-pr-workflow-checkout.ts`) is age-blind and horizon-blind:
+ * it counts every `pending`/`running` `swarm-pr-*` record of the session. So the
+ * next `prepare_pr_workflow_checkout` was refused permanently, recoverable only
+ * by hand-editing the ledger — the exact class of wedge this whole subsystem
+ * exists to remove.
+ *
+ * Three constraints shape this, and none of them is optional:
+ *
+ * 1. **Override path ONLY.** The ordinary retention path must leave a retained
+ *    record `pending`: that lane is alive and its output is still collectable,
+ *    which is the entire point of issue #2251. Only an explicit human override
+ *    abandons it.
+ * 2. **Exactly these `correlationId`s.** `includeCorrelationIds` narrows the
+ *    otherwise directory-wide sweep to the records this session's settlement
+ *    reasoned about. A directory-wide pass would finalize other sessions'
+ *    records and retryable `ingestion_error` records — the over-reach hazard
+ *    already documented at the settlement sweep above.
+ * 3. **It must not force a terminal record.** The sweep's own status and age
+ *    filters still apply on top of the id narrowing, so a lane that raced to
+ *    `completed` between the settlement read and this call keeps its result.
+ *    `appendDelegationTransition` would NOT be safe here: it explicitly permits
+ *    `completed` → `stale`, which would discard collected output — this issue's
+ *    own bug, re-introduced on the force path.
+ *
+ * Runs only AFTER `clearPrWorkflowGateState` has succeeded (issue #2251
+ * closeout F1). The finalization is irreversible — a `stale` record is never
+ * collected again — while the clear is a CAS-guarded write that can legitimately
+ * lose the compare-and-swap and throw. Ordering the irreversible half after the
+ * reversible one means a lost CAS destroys nothing and the operator's retry is a
+ * clean, correct override rather than a no-op over already-abandoned lanes.
+ *
+ * The single read-back answers two INDEPENDENT questions over two different id
+ * sets, which is why it returns three lists rather than one (issue #2251
+ * closeout F2, then N1):
+ *
+ * - **"Can this session start a new PR workflow?"** — `sessionOpenLaneIds`,
+ *   over every `swarm-pr-*` record of THIS SESSION, deliberately NOT just the
+ *   targeted ids. `countOpenPrWorkflowLanes`
+ *   (`src/tools/prepare-pr-workflow-checkout.ts`) is what actually refuses the
+ *   restart, and it counts every `pending`/`running` `swarm-pr-*` record of the
+ *   session, not the retained ones. The ordinary settlement sweep is best-effort
+ *   and `sweepStaleDelegations` swallows a lock timeout and returns 0, so a lane
+ *   the settlement DECIDED was stale can still be `pending` on disk here — and
+ *   it refuses the next checkout preparation exactly like an unfinalized
+ *   retained lane does. Reporting only the targeted ids let that case claim
+ *   restartability it had not verified.
+ * - **"Whose output did this override actually abandon?"** — answered by the
+ *   OBSERVED terminal status of each targeted id, never by absence from the open
+ *   set. Constraint 3 above means a targeted lane that raced to `completed` is
+ *   spared by the sweep's own status filter, so it is absent from
+ *   `sessionOpenLaneIds` for the opposite reason a finalized lane is. Inferring
+ *   abandonment from that absence told the operator to stop looking for output
+ *   that was in fact still collectable — the exact class of silent discard this
+ *   whole issue exists to remove. Only a positively observed `stale` lands in
+ *   `finalizedLaneIds`; a targeted lane observed in any other non-open status
+ *   lands in `sparedLaneDescriptions`, disclosed WITH that observed status and
+ *   described only as left intact — never as "collectable", which would
+ *   overclaim for `error`, `ingestion_error` and `ingesting`.
+ *
+ * The read-back reuses {@link isOpenPrWorkflowLane}, the same predicate the
+ * settlement counts with, so a hand-rolled second copy of its clauses cannot
+ * drift from it.
+ *
+ * The predicates agree; their INPUTS can still diverge, and the doc comment
+ * should not pretend otherwise. Everything here reads through `readDelegations`,
+ * which SKIPS any ledger line that fails schema validation, while
+ * `countOpenPrWorkflowLanes` — the check that actually refuses the restart —
+ * fails CLOSED and throws on one. So a session whose ledger holds a malformed
+ * row can be reported restartable here and still be refused there, and a
+ * targeted lane sitting on such a row falls into none of the three lists: it is
+ * silently omitted rather than falsely described as uncollectable. That
+ * divergence is a pre-existing property of the shared reader, not of this
+ * override, and both of its directions are conservative — so this path does not
+ * grow a second parser to close it.
+ *
+ * The result is disclosed rather than retried: reachability must never depend on
+ * a durability write, so the abort has already succeeded either way and the
+ * operator is told precisely which records still need attention.
+ */
+async function finalizeOverriddenProbeRetainedLanes(
+	directory: string,
+	sessionID: string,
+	correlationIds: readonly string[],
+): Promise<OverriddenProbeRetainedLaneOutcome> {
+	try {
+		await _test_exports.sweepStaleDelegationsAsync(
+			directory,
+			PR_WORKFLOW_STALE_LANE_TIMEOUT_MS,
+			{
+				statuses: PR_WORKFLOW_SWEEPABLE_LANE_STATUSES,
+				includeCorrelationIds: new Set(correlationIds),
+			},
+		);
+	} catch {
+		// Best-effort, exactly like the settlement sweep. The re-read below is what
+		// reports the truth, so a swallowed failure still reaches the operator.
+	}
+	// Read back rather than trusting the swept COUNT: the count cannot say which
+	// ids went terminal, only how many rows it touched. Only the durable status
+	// answers either question the disclosure makes.
+	const targeted = new Set(correlationIds);
+	const outcome: OverriddenProbeRetainedLaneOutcome = {
+		sessionOpenLaneIds: [],
+		finalizedLaneIds: [],
+		sparedLaneDescriptions: [],
+	};
+	for (const record of readDelegations(directory)) {
+		if (isOpenPrWorkflowLane(record, sessionID)) {
+			outcome.sessionOpenLaneIds.push(record.correlationId);
+		}
+		if (!targeted.has(record.correlationId)) continue;
+		if (record.status === 'stale') {
+			outcome.finalizedLaneIds.push(record.correlationId);
+		} else if (record.status !== 'pending' && record.status !== 'running') {
+			// A targeted lane still `pending`/`running` is deliberately in NEITHER
+			// list: the sweep did not finalize it, and it is already named by the
+			// restartability warning. Naming it twice — "left intact" beside "will
+			// keep refusing checkout preparation" — reads to an operator as two
+			// contradictory instructions about the same lane.
+			outcome.sparedLaneDescriptions.push(
+				`${record.correlationId} (${record.status})`,
+			);
+		}
+	}
+	return outcome;
 }
 
 /**
@@ -1587,6 +2092,16 @@ export async function abortPrWorkflow(
 	openLanes: number;
 	presumedStaleLanes?: string[];
 	presumedStaleDisclosure?: string;
+	/** Lanes past the horizon the liveness probe reported as still running. */
+	probeRetainedLanes?: string[];
+	/**
+	 * Present ONLY when a human `force` abort cleared the gate while those
+	 * probe-retained lanes were the sole remaining reason it was blocked
+	 * (issue #2251 S3).
+	 */
+	probeRetentionOverrideDisclosure?: string;
+	/** Why the liveness probe produced no evidence, when it could not run. */
+	probeDegradedReason?: PrWorkflowLaneProbeDegradedReason;
 	stateSalvaged?: boolean;
 	stateSalvageDisclosure?: string;
 	casEscapeDisclosure?: string;
@@ -1621,13 +2136,33 @@ export async function abortPrWorkflow(
 		directory,
 		state.sessionID,
 	);
-	if (laneSettlement.openLanes > 0) {
+	// S3 (issue #2251 R2): the liveness probe can now retain a lane past the age
+	// horizon indefinitely, so age alone no longer guarantees an eventual exit. A
+	// lane whose session never goes idle would make the workflow permanently
+	// unexitable through every tool, with no recourse short of hand-editing
+	// `.swarm/delegations.jsonl`.
+	//
+	// The human-only `force` path therefore overrides probe RETENTION — and only
+	// probe retention. `freshOpenLanes === 0` is the whole safety argument: a lane
+	// with a fresh `updatedAt` still blocks even under force, so the contradiction
+	// rule is untouched. An explicit human override is not an age-based
+	// presumption. The retained sessions are NOT aborted and their output is NOT
+	// collected — but their RECORDS are finalized below, once the clear has
+	// actually succeeded, because a cleared gate over `pending` records is an
+	// un-restartable session, not an exit.
+	const probeRetainedLanes = laneSettlement.probedAliveLaneIds ?? [];
+	const overridesProbeRetention =
+		options.kind === 'force' &&
+		laneSettlement.freshOpenLanes === 0 &&
+		probeRetainedLanes.length > 0;
+	if (laneSettlement.openLanes > 0 && !overridesProbeRetention) {
 		const laneIds = laneSettlement.openLaneIds
 			.filter(Boolean)
 			.slice(0, MAX_DISCLOSED_LANE_IDS)
 			.join(', ');
 		throw new Error(
-			`BLOCKED: ${state.mode} abort refused while ${laneSettlement.openLanes} PR workflow lane(s) are still in flight (lane ids: ${laneIds}). Collect their results or let them settle before aborting.`,
+			`BLOCKED: ${state.mode} abort refused while ${laneSettlement.openLanes} PR workflow lane(s) are still in flight (lane ids: ${laneIds}). Collect their results or let them settle before aborting.` +
+				describePrWorkflowLaneProbe(laneSettlement),
 		);
 	}
 	const sanitizedReason =
@@ -1639,6 +2174,30 @@ export async function abortPrWorkflow(
 			`BLOCKED: ${state.mode} abort requires a non-empty reason (recorded to the audit trail).`,
 		);
 	}
+	// The lanes this override abandons, addressed by `correlationId` — the
+	// ledger's primary key, not the non-unique display label. DECIDED here (after
+	// every refusal, before anything is written) but FINALIZED only once the
+	// CAS-guarded clear has succeeded, far below (issue #2251 closeout F1).
+	//
+	// Gated on the override rather than derived from the retained ids alone.
+	// Reaching here with retained lanes DOES imply an override today (a retained
+	// lane keeps `openLanes > 0`, which the refusal above rejects otherwise), but
+	// making the audit field depend on that inference would let a future change to
+	// the refusal silently start naming lanes no override ever targeted.
+	const overrideTargetedLaneIds = overridesProbeRetention
+		? (laneSettlement.probeRetainedCorrelationIds ?? [])
+		: [];
+	// Everything about the override that is TRUE BEFORE the clear runs. The
+	// durable `pr_workflow_aborted` record below is appended pre-clear (FB-008,
+	// issue #2242) and therefore may not claim a finalization outcome that has not
+	// happened yet; the returned disclosure appends that outcome once it has.
+	const probeRetentionOverrideDecision = overridesProbeRetention
+		? `force abort overrode ${probeRetainedLanes.length} lane(s) past the staleness horizon that the liveness probe reported as still running: ${probeRetainedLanes
+				.slice(0, MAX_DISCLOSED_LANE_IDS)
+				.join(
+					', ',
+				)}. Their sessions were NOT stopped and their output was NOT collected.`
+		: undefined;
 	const abortEvent = {
 		type: 'pr_workflow_aborted',
 		timestamp: isoNow(),
@@ -1656,6 +2215,38 @@ export async function abortPrWorkflow(
 					),
 					presumedStaleDisclosure: laneSettlement.disclosure,
 				}
+			: {}),
+		// Issue #2251 R4: the probe verdict belongs in the abort record, not only in
+		// the return value — an operator auditing why a gate cleared has to see that
+		// lanes were spared (or that the probe could not run at all).
+		...(probeRetainedLanes.length > 0
+			? {
+					probeRetainedLanes: probeRetainedLanes.slice(
+						0,
+						MAX_DISCLOSED_LANE_IDS,
+					),
+				}
+			: {}),
+		...(probeRetentionOverrideDecision
+			? { probeRetentionOverrideDisclosure: probeRetentionOverrideDecision }
+			: {}),
+		// Which records this override TARGETS, by `correlationId`. A decision, not
+		// an outcome: this record is appended before the clear, and the finalization
+		// it authorizes runs only if that clear succeeds. An auditor reconciles the
+		// two halves against the ledger itself — `.swarm/delegations.jsonl` is the
+		// authority on whether each named row went terminal, and a row that is still
+		// `pending` there is one that still refuses checkout preparation for this
+		// session.
+		...(overridesProbeRetention
+			? {
+					probeRetentionOverrideLanes: overrideTargetedLaneIds.slice(
+						0,
+						MAX_DISCLOSED_LANE_IDS,
+					),
+				}
+			: {}),
+		...(laneSettlement.probeDegradedReason
+			? { probeStatus: laneSettlement.probeDegradedReason }
 			: {}),
 		...(recovery.salvaged
 			? {
@@ -1719,6 +2310,21 @@ export async function abortPrWorkflow(
 					mode: state.mode,
 					...(state.prHeadSha ? { prHeadSha: state.prHeadSha } : {}),
 					reason: sanitizedReason,
+					// Issue #2251 closeout F1: the override's irreversible finalization is
+					// ordered AFTER the clear, so reaching here means it never ran and no
+					// lane record was touched. Stated POSITIVELY, because the operator's
+					// next action depends on it: their retry is a complete override of
+					// still-live lanes, not a second pass over lanes a failed attempt
+					// already abandoned.
+					...(overridesProbeRetention
+						? {
+								probeRetentionOverrideLanes: overrideTargetedLaneIds.slice(
+									0,
+									MAX_DISCLOSED_LANE_IDS,
+								),
+								probeRetentionOverrideFinalized: false,
+							}
+						: {}),
 					// Reuses the generic diagnostic char cap rather than declaring a
 					// third one-off bound; the value is a plain length ceiling on an
 					// operator-facing string, not a coverage-specific quantity.
@@ -1737,7 +2343,12 @@ export async function abortPrWorkflow(
 					disclosure:
 						'RETRACTION: the pr_workflow_aborted record for this session did NOT complete — ' +
 						'the clear failed and the gate state may still be active. Revalidate the current ' +
-						'session state before retrying the abort.',
+						'session state before retrying the abort.' +
+						(overridesProbeRetention
+							? ' No delegation record was finalized: the probe-retention override finalizes ' +
+								'lanes only after the clear succeeds, so the retained lanes are untouched ' +
+								'and their output is still collectable.'
+							: ''),
 				})}\n`,
 				'utf-8',
 			);
@@ -1747,6 +2358,83 @@ export async function abortPrWorkflow(
 		}
 		throw error;
 	}
+	// THE IRREVERSIBLE HALF, deliberately last (issue #2251 closeout F1). A
+	// finalized record is terminal, the collector skips terminal records, and that
+	// lane's transcript is gone for good — so it may only run once the reversible,
+	// CAS-guarded half has actually succeeded. Ordering it before the clear meant a
+	// lost compare-and-swap left a provably-live lane already abandoned while the
+	// thrown error named neither the lane nor the override, and the operator's
+	// retry then read as an ordinary force abort over nothing.
+	//
+	// The residual exposure is a process crash in the window between the two
+	// writes: the records stay `pending`, which keeps the session un-restartable
+	// until they settle. That is strictly the lesser failure — recoverable, and
+	// the lane's output is still collectable — and it is why the finalization is
+	// best-effort-with-disclosure rather than a precondition of the abort.
+	const overrideOutcome: OverriddenProbeRetainedLaneOutcome =
+		overridesProbeRetention
+			? await finalizeOverriddenProbeRetainedLanes(
+					directory,
+					state.sessionID,
+					overrideTargetedLaneIds,
+				)
+			: {
+					sessionOpenLaneIds: [],
+					finalizedLaneIds: [],
+					sparedLaneDescriptions: [],
+				};
+	// THREE independent facts on three independent conditions (issue #2251
+	// closeout F2, then N1). Every one of them is a POSITIVE observation:
+	//
+	//   1. Which overridden records went terminal `stale`? — that, and only that,
+	//      makes a lane's output permanently uncollectable.
+	//   2. Which overridden records did the sweep leave INTACT because they had
+	//      already moved on? — the operator must not be told to stop looking for
+	//      work this abort never abandoned. Reported with the observed status
+	//      rather than as "collectable": that would overclaim for the `error`,
+	//      `ingestion_error` and `ingesting` statuses that can also land here.
+	//   3. Can this session start a new PR workflow? — answered only by every
+	//      still-open `swarm-pr-*` record of the session, because
+	//      `countOpenPrWorkflowLanes` is what refuses the restart and it does not
+	//      care which lanes an override reasoned about.
+	//
+	// (1) and (3) come apart in a mixed batch: the ordinary settlement sweep
+	// swallows a store-lock timeout and returns 0, so a lane this abort reported
+	// as SETTLED can still be `pending` on disk and refuse the next checkout
+	// preparation even though every overridden lane WAS finalized. Conflating them
+	// either claims restartability that was never verified (the original defect)
+	// or suppresses the abandonment notice for a lane whose transcript is
+	// genuinely gone.
+	//
+	// (1) and (2) came apart because the abandonment clause used to be decided by
+	// ABSENCE from the open set. A raced-to-`completed` lane is absent for the
+	// opposite reason a finalized one is, so the clause fired over a lane whose
+	// result was sitting on disk, collectable — telling the operator to stop
+	// looking for recoverable work is precisely the harm this issue removes.
+	const probeRetentionOverrideDisclosure = probeRetentionOverrideDecision
+		? probeRetentionOverrideDecision +
+			(overrideOutcome.finalizedLaneIds.length === 0
+				? ''
+				: ` Their delegation records were finalized (correlationId: ${overrideOutcome.finalizedLaneIds
+						.slice(0, MAX_DISCLOSED_LANE_IDS)
+						.join(
+							', ',
+						)}); whatever those lanes still produce is no longer collectable.`) +
+			(overrideOutcome.sparedLaneDescriptions.length === 0
+				? ''
+				: ` ${overrideOutcome.sparedLaneDescriptions.length} of the overridden lane(s) were NOT finalized: the sweep left those records intact at the status they had already reached (${overrideOutcome.sparedLaneDescriptions
+						.slice(0, MAX_DISCLOSED_LANE_IDS)
+						.join(
+							', ',
+						)}). This abort did not discard them — check collect_lane_results before assuming that work is gone.`) +
+			(overrideOutcome.sessionOpenLaneIds.length === 0
+				? ' A new PR workflow can now be started for this session.'
+				: ` WARNING: ${overrideOutcome.sessionOpenLaneIds.length} PR workflow delegation record(s) for this session are still open (correlationId: ${overrideOutcome.sessionOpenLaneIds
+						.slice(0, MAX_DISCLOSED_LANE_IDS)
+						.join(
+							', ',
+						)}) and will keep refusing PR workflow checkout preparation for this session until they settle.`)
+		: undefined;
 	return {
 		mode: state.mode,
 		...(state.prHeadSha ? { prHeadSha: state.prHeadSha } : {}),
@@ -1756,6 +2444,13 @@ export async function abortPrWorkflow(
 					presumedStaleLanes: laneSettlement.presumedStaleLaneIds,
 					presumedStaleDisclosure: laneSettlement.disclosure,
 				}
+			: {}),
+		...(probeRetainedLanes.length > 0 ? { probeRetainedLanes } : {}),
+		...(probeRetentionOverrideDisclosure
+			? { probeRetentionOverrideDisclosure }
+			: {}),
+		...(laneSettlement.probeDegradedReason
+			? { probeDegradedReason: laneSettlement.probeDegradedReason }
 			: {}),
 		...(recovery.salvaged
 			? {
@@ -4888,7 +5583,8 @@ async function assertPrReviewTerminalReady(
 	);
 	if (laneSettlement.openLanes > 0) {
 		throw new Error(
-			`BLOCKED: PR_REVIEW transition has ${laneSettlement.openLanes} unsettled PR workflow lane(s)`,
+			`BLOCKED: PR_REVIEW transition has ${laneSettlement.openLanes} unsettled PR workflow lane(s)` +
+				describePrWorkflowLaneProbe(laneSettlement),
 		);
 	}
 	// One digest + one composed verdict map for the entire terminal check.
@@ -5590,7 +6286,8 @@ export async function completePrWorkflow(
 	);
 	if (laneSettlement.openLanes > 0) {
 		throw new Error(
-			`BLOCKED: ${expectedMode} completion has ${laneSettlement.openLanes} unsettled PR workflow lane(s)`,
+			`BLOCKED: ${expectedMode} completion has ${laneSettlement.openLanes} unsettled PR workflow lane(s)` +
+				describePrWorkflowLaneProbe(laneSettlement),
 		);
 	}
 	if (expectedMode === 'PR_REVIEW') {
@@ -5810,6 +6507,14 @@ export const _test_exports = {
 		_test_exports.checkoutMutationActionTimeoutMs =
 			CHECKOUT_MUTATION_ACTION_TIMEOUT_MS;
 		_test_exports.classifyPrWorkflowGitStateAsync = classifyPrWorkflowGitState;
+		// Every one of these resets to the NAMED original binding, never to a
+		// hand-rewritten literal: a re-written arrow is permanent pollution in
+		// bun's shared test process, not a restore.
+		_test_exports.sweepStaleDelegationsAsync = sweepStaleDelegations;
+		_test_exports.probeLaneLivenessAsync = probeAlivePrWorkflowLaneSessions;
+		_test_exports.getSessionOps = defaultGetSessionOps;
+		_test_exports.laneLivenessProbeTimeoutMs =
+			PR_WORKFLOW_LANE_LIVENESS_PROBE_TIMEOUT_MS;
 	},
 	beforeTerminalClear: undefined as (() => Promise<void>) | undefined,
 	/**
@@ -5840,6 +6545,32 @@ export const _test_exports = {
 	removeCheckoutLock: removeCheckoutLockFile,
 	checkoutMutationActionTimeoutMs: CHECKOUT_MUTATION_ACTION_TIMEOUT_MS,
 	classifyPrWorkflowGitStateAsync: classifyPrWorkflowGitState,
+	/**
+	 * The durability sweep, reached through a seam so a test can prove that a
+	 * failing sweep cannot un-settle the decision `settlePresumedStalePrWorkflow-
+	 * Lanes` already made in memory. It cannot throw today (it catches internally
+	 * and returns 0) — the seam is what makes that guarantee testable rather than
+	 * merely asserted.
+	 */
+	sweepStaleDelegationsAsync: sweepStaleDelegations,
+	/** The fail-open liveness probe (issue #2251). */
+	probeLaneLivenessAsync: probeAlivePrWorkflowLaneSessions,
+	/**
+	 * Session handle for the liveness probe.
+	 *
+	 * A seam rather than a direct `swarmState.opencodeClient` read at the call
+	 * site because 20+ test files mutate that field; without this, this suite and
+	 * the stale-lane suite would be order-dependent in bun's shared process.
+	 * Mirrors `_internals.getSessionOps` in `src/tools/dispatch-lanes.ts`.
+	 */
+	getSessionOps: defaultGetSessionOps,
+	/**
+	 * Probe deadline, read through the seam at CALL time. `freezeClock` patches
+	 * `Date.now()`, not `setTimeout`, so a test that must reach the timeout branch
+	 * has to shorten the real deadline. Same precedent as
+	 * `checkoutMutationActionTimeoutMs` above.
+	 */
+	laneLivenessProbeTimeoutMs: PR_WORKFLOW_LANE_LIVENESS_PROBE_TIMEOUT_MS,
 	resolveCurrentGitHead,
 	resolveCurrentGitHeadAsync,
 	resolveCurrentUpstreamPushTarget,

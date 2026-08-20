@@ -8,6 +8,7 @@ import * as path from 'node:path';
 import {
 	appendDelegationTransition,
 	BACKGROUND_DELEGATIONS_FILE,
+	type BackgroundDelegationRecord,
 	findByBatchId,
 	findByCorrelationId,
 	type RecordPendingInput,
@@ -50,7 +51,7 @@ describe('pending-delegations store', () => {
 	 */
 	function seedBackdated(
 		correlationId: string,
-		status: SweepableDelegationStatus,
+		status: BackgroundDelegationRecord['status'],
 	): void {
 		const tenMinAgo = Date.now() - 10 * 60_000;
 		fs.appendFileSync(
@@ -224,6 +225,78 @@ describe('pending-delegations store', () => {
 		expect(findByCorrelationId(dir, 'ses_ingest_err')?.status).toBe(
 			'ingestion_error',
 		);
+	});
+
+	it('excludeCorrelationIds spares a named overdue record and sweeps the rest', async () => {
+		// Issue #2251: status narrowing cannot express "this SPECIFIC overdue
+		// record was verified alive". The PR-workflow gate's liveness probe makes
+		// exactly that per-record decision, and this directory-wide sweep runs
+		// immediately afterwards on the same store — without the exclusion it flips
+		// the record the probe just spared, one line later.
+		seedBackdated('ses_probed_alive', 'pending');
+		seedBackdated('ses_really_stale', 'pending');
+
+		expect(
+			await sweepStaleDelegations(dir, 60_000, {
+				excludeCorrelationIds: new Set(['ses_probed_alive']),
+			}),
+		).toBe(1);
+		expect(findByCorrelationId(dir, 'ses_probed_alive')?.status).toBe(
+			'pending',
+		);
+		expect(findByCorrelationId(dir, 'ses_really_stale')?.status).toBe('stale');
+	});
+
+	it('includeCorrelationIds narrows the sweep to exactly the named records', async () => {
+		// Issue #2251: the human-only PR-workflow force override finalizes the
+		// handful of lanes it just overrode. A directory-wide pass would also
+		// finalize a neighbouring session's overdue records — and retryable
+		// `ingestion_error` records — that no operator reasoned about.
+		seedBackdated('ses_overridden', 'pending');
+		seedBackdated('ses_someone_else', 'pending');
+		seedBackdated('ses_other_retryable', 'ingestion_error');
+
+		expect(
+			await sweepStaleDelegations(dir, 60_000, {
+				statuses: new Set<SweepableDelegationStatus>(['pending', 'running']),
+				includeCorrelationIds: new Set(['ses_overridden']),
+			}),
+		).toBe(1);
+		expect(findByCorrelationId(dir, 'ses_overridden')?.status).toBe('stale');
+		expect(findByCorrelationId(dir, 'ses_someone_else')?.status).toBe(
+			'pending',
+		);
+		expect(findByCorrelationId(dir, 'ses_other_retryable')?.status).toBe(
+			'ingestion_error',
+		);
+	});
+
+	it('includeCorrelationIds does not force a named record that already went terminal', async () => {
+		// The race guard. A lane the caller decided to finalize is alive BY
+		// HYPOTHESIS, so it can complete between that decision and this call.
+		// Narrowing to a correlationId must not bypass the status filter:
+		// `completed` -> `stale` would make the collector skip a record whose output
+		// exists, which is the very discard issue #2251 exists to prevent.
+		seedBackdated('ses_raced_done', 'completed');
+
+		expect(
+			await sweepStaleDelegations(dir, 60_000, {
+				statuses: new Set<SweepableDelegationStatus>(['pending', 'running']),
+				includeCorrelationIds: new Set(['ses_raced_done']),
+			}),
+		).toBe(0);
+		expect(findByCorrelationId(dir, 'ses_raced_done')?.status).toBe(
+			'completed',
+		);
+	});
+
+	it('omitting excludeCorrelationIds preserves the historical sweep scope', async () => {
+		// The default must stay byte-identical for the lazy-maintenance caller in
+		// `recordPendingDelegation`, which passes no options at all.
+		seedBackdated('ses_a', 'pending');
+		seedBackdated('ses_b', 'pending');
+
+		expect(await sweepStaleDelegations(dir, 60_000)).toBe(2);
 	});
 
 	it('sweep marks only overdue pendings stale (fresh ones survive)', async () => {

@@ -22,6 +22,10 @@ beforeEach(() => {
 	_test_exports.resetTrackedStateCache();
 	_test_exports.resolveCurrentGitHead = () => 'abc123';
 	_test_exports.resolveIsWorkingTreeClean = () => true;
+	// Issue #2251: settlement probes host session liveness. Pin "no host" so a
+	// `swarmState.opencodeClient` leaked by another file cannot make this suite
+	// order-dependent (or make it wait out the probe's real 5s deadline).
+	_test_exports.getSessionOps = () => null;
 });
 
 afterEach(async () => {

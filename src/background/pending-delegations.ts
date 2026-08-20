@@ -3354,17 +3354,42 @@ function isTerminal(status: BackgroundDelegationStatus): boolean {
  * `statuses` defaults to {@link DEFAULT_SWEEPABLE_DELEGATION_STATUSES}, which is
  * exactly the set this sweep has always finalized — the trailing default keeps
  * the pre-existing positional call in `recordPendingDelegation` unchanged.
+ *
+ * `filters.excludeCorrelationIds` (issue #2251) removes specific records from an
+ * otherwise directory-wide sweep. A caller that has already DECIDED a record is
+ * not stale — e.g. the PR-workflow gate's liveness probe reported its session
+ * still running — must be able to keep this age-only sweep from durably
+ * contradicting that decision one line later. Omitting it is the historical
+ * behaviour.
+ *
+ * `filters.includeCorrelationIds` (issue #2251) is its opposite: it narrows the
+ * sweep to exactly the named records, so a caller that reasoned about a specific
+ * handful of lanes can finalize those and NOTHING else. Both filters compose;
+ * the status and age filters still apply on top of either, which is the point —
+ * an included record that has since gone `completed` is still spared.
  */
 function sweepStaleLocked(
 	directory: string,
 	timeoutMs: number,
 	now: number,
 	statuses: ReadonlySet<BackgroundDelegationStatus> = DEFAULT_SWEEPABLE_DELEGATION_STATUSES,
+	filters: {
+		excludeCorrelationIds?: ReadonlySet<string>;
+		includeCorrelationIds?: ReadonlySet<string>;
+	} = {},
 ): number {
 	let swept = 0;
+	const { excludeCorrelationIds, includeCorrelationIds } = filters;
 	const records = loadRecordsForWrite(directory);
 	if (records === null) return 0;
 	for (const record of records) {
+		if (
+			includeCorrelationIds !== undefined &&
+			!includeCorrelationIds.has(record.correlationId)
+		) {
+			continue;
+		}
+		if (excludeCorrelationIds?.has(record.correlationId)) continue;
 		if (!statuses.has(record.status)) continue;
 		if (now - record.updatedAt <= timeoutMs) continue;
 		appendRecord(directory, {
@@ -3387,21 +3412,48 @@ function sweepStaleLocked(
  * The sweep is directory-wide with no session or mode filter, so a caller whose
  * own decision covers only some status classes must narrow accordingly rather
  * than finalizing records it never reasoned about.
+ *
+ * `options.excludeCorrelationIds` (issue #2251) is the per-record counterpart:
+ * status narrowing cannot express "this specific overdue record was verified
+ * alive". Both filters are AND-ed — an excluded record is spared regardless of
+ * status or age.
+ *
+ * `options.includeCorrelationIds` (issue #2251) inverts that: the sweep visits
+ * ONLY the named records. It exists so a caller that decided something about a
+ * specific, already-identified handful of lanes can finalize exactly those
+ * without a directory-wide pass that would also finalize other sessions' records
+ * and retryable `ingestion_error` records it never reasoned about. Passing an
+ * empty set sweeps nothing.
+ *
+ * Narrowing to a record does NOT force it terminal: the status and age filters
+ * still apply, so a named record that has since reached a terminal status (a
+ * lane that completed between the caller's decision and this call) is spared and
+ * its collected output survives. That is deliberate — an unconditional write
+ * here would re-introduce the very discard this subsystem exists to prevent.
  */
 export async function sweepStaleDelegations(
 	directory: string,
 	timeoutMs: number,
-	options: { statuses?: ReadonlySet<SweepableDelegationStatus> } = {},
+	options: {
+		statuses?: ReadonlySet<SweepableDelegationStatus>;
+		excludeCorrelationIds?: ReadonlySet<string>;
+		includeCorrelationIds?: ReadonlySet<string>;
+	} = {},
 ): Promise<number> {
 	if (!timeoutMs || timeoutMs <= 0) return 0;
 	const statuses = options.statuses ?? DEFAULT_SWEEPABLE_DELEGATION_STATUSES;
+	const filters = {
+		excludeCorrelationIds: options.excludeCorrelationIds,
+		includeCorrelationIds: options.includeCorrelationIds,
+	};
 	try {
 		return await withEvidenceLock(
 			directory,
 			BACKGROUND_DELEGATIONS_FILE,
 			STORE_LOCK_AGENT,
 			STORE_LOCK_TASK,
-			async () => sweepStaleLocked(directory, timeoutMs, Date.now(), statuses),
+			async () =>
+				sweepStaleLocked(directory, timeoutMs, Date.now(), statuses, filters),
 		);
 	} catch (err) {
 		logger.warn(
