@@ -14,7 +14,6 @@ const mockSpawnSync = mock(() => ({
 	stdout: Buffer.from(''),
 }));
 const realSpawnSync = _internals.spawnSync;
-const realResolveGitExecutable = _internals.resolveGitExecutable;
 
 const mockPatch: MutationPatch = {
 	id: 'test-patch-001',
@@ -33,9 +32,6 @@ describe('executeMutation — ENOENT adversarial tests', () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mutation-enoent-'));
 		_internals.spawnSync =
 			mockSpawnSync as unknown as typeof _internals.spawnSync;
-		// Issue #2236 hardening (lane C1b): stub the resolver seam so the
-		// `cmd === 'git'` routing below stays deterministic.
-		_internals.resolveGitExecutable = () => 'git';
 		mockSpawnSync.mockImplementation(
 			(cmd: string, args: string[], opts: Record<string, unknown>) => {
 				if (cmd === 'git' && args[0] === 'apply' && !args.includes('-R')) {
@@ -66,7 +62,6 @@ describe('executeMutation — ENOENT adversarial tests', () => {
 
 	afterEach(() => {
 		_internals.spawnSync = realSpawnSync;
-		_internals.resolveGitExecutable = realResolveGitExecutable;
 		mockSpawnSync.mockClear();
 		try {
 			const entries = fs.readdirSync(tempDir);

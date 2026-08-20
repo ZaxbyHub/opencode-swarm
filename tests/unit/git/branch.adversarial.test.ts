@@ -19,7 +19,7 @@
  * 3. Git handles the validation (which would reject invalid inputs in real execution)
  */
 
-import { afterAll, beforeEach, describe, expect, mock, test } from 'bun:test';
+import { beforeEach, describe, expect, mock, test } from 'bun:test';
 
 // Track all calls to spawnSync for security verification
 interface SpawnCall {
@@ -57,15 +57,6 @@ mock.module('node:child_process', () => ({
 // Import AFTER mock setup
 const branch = await import('../../../src/git/branch');
 
-// Issue #2236 hardening (lane C1b): stub the resolver seam so `gitExec`
-// spawns a deterministic `'git'` command instead of running
-// `resolveGitExecutable()`'s real filesystem-probing candidate search
-// against this file's mocked `node:child_process.spawnSync` (which would
-// otherwise silently consume `returnValues` entries and desync the
-// call-index-based assertions below). See branch.test.ts for the same
-// pattern with fuller rationale.
-const originalResolveGitExecutable = branch._internals.resolveGitExecutable;
-
 function setupMock(
 	...values: Array<{ status: number; stdout: string; stderr: string }>
 ) {
@@ -91,7 +82,6 @@ describe('Git Branch Module - Adversarial Security Tests', () => {
 		spawnCalls = [];
 		returnValues = [];
 		mockSpawnSync.mockClear();
-		branch._internals.resolveGitExecutable = () => 'git';
 	});
 
 	describe('CRITICAL: spawnSync uses array arguments (not shell string)', () => {
@@ -927,8 +917,4 @@ describe('Git Branch Module - Adversarial Security Tests', () => {
 			}
 		});
 	});
-});
-
-afterAll(() => {
-	branch._internals.resolveGitExecutable = originalResolveGitExecutable;
 });

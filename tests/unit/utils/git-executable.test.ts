@@ -62,6 +62,14 @@ function enoentResult(): SpawnSyncReturns<Buffer> {
 // called a resolver function or mutated `_internals`.
 describe('git-executable — lazy load (AGENTS.md invariant 1)', () => {
 	test('describeGitResolution reports an idle state immediately after import', () => {
+		// tests/preload/executable-resolver-pin.ts seeds the resolver cache
+		// with a synthetic 'git' success entry for every test file (FR-006
+		// ratchet fix — see that file for why). That is a TEST-INFRA artifact,
+		// not module import-time behavior, so undo it here via the same
+		// `resetGitExecutableCache()` every other describe block below uses,
+		// before asserting the invariant this test actually cares about: the
+		// module itself never eagerly resolves anything on its own.
+		resetGitExecutableCache();
 		const description = describeGitResolution();
 		expect(description.attempts).toEqual([]);
 		expect(description.resolved).toBe(false);

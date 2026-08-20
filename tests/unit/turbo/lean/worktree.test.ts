@@ -38,20 +38,6 @@ const realSleep = _internals.sleep;
 const realOsTmpdir = _internals.osTmpdir;
 const realGetCoreLongPaths = _internals.getCoreLongPaths;
 const realFs = _internals.fs;
-const realResolveGitExecutable = _internals.resolveGitExecutable;
-
-// Issue #2236 hardening (lane C1b): `runGit`/`checkPathBudget` (re-exported
-// from `src/worktree/core.ts`) resolve the git binary via
-// `resolveGitExecutable()` instead of a bare `'git'` literal. Since this
-// file's `_internals.bunSpawn` stub returns a canned result regardless of
-// the resolved command, the literal value doesn't affect assertions here —
-// but stubbing it avoids every test in this file paying for a real
-// filesystem-probing resolution. Re-applied in `beforeEach` since the
-// top-level `afterEach` below restores the real implementation after every
-// test.
-beforeEach(() => {
-	_internals.resolveGitExecutable = () => 'git';
-});
 
 /**
  * Constructs a minimal BunCompatSubprocess mock.
@@ -92,7 +78,6 @@ afterEach(() => {
 	_internals.osTmpdir = realOsTmpdir;
 	_internals.getCoreLongPaths = realGetCoreLongPaths;
 	_internals.fs = realFs;
-	_internals.resolveGitExecutable = realResolveGitExecutable;
 });
 
 // ---------------------------------------------------------------------------

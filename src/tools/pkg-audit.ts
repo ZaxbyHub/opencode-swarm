@@ -12,9 +12,13 @@ const MAX_OUTPUT_BYTES = 52_428_800; // 50MB max output
 const AUDIT_TIMEOUT_MS = 120_000; // 120 seconds
 
 /**
- * Test-only seam for the `bunSpawn` call `runCargoAudit` makes. Lets tests
- * inject a synthetic subprocess (e.g. one with `spawnError` set) without
- * monkey-patching the `Bun.spawn` global — see #2236 Sweep A, FIX 2.
+ * Test-only seam for the `bunSpawn` calls `runNpmAudit` and `runCargoAudit`
+ * make. Lets tests inject a synthetic subprocess (e.g. one with `spawnError`
+ * set) without monkey-patching the `Bun.spawn` global — see #2236 Sweep A,
+ * FIX 2. These two route through the seam because both had a path where a
+ * failed spawn could be reported as a completed scan; the remaining audit
+ * functions gate strictly on a non-zero exit and were dispositioned
+ * SAFE-EXIT-CHECK by that sweep.
  */
 export const _internals: { bunSpawn: typeof bunSpawn } = { bunSpawn };
 
@@ -201,7 +205,7 @@ async function runNpmAudit(directory: string): Promise<AuditResult> {
 	const command = ['npm', 'audit', '--json'];
 
 	try {
-		const proc = bunSpawn(command, {
+		const proc = _internals.bunSpawn(command, {
 			stdout: 'pipe',
 			stderr: 'pipe',
 			cwd: directory,
@@ -238,6 +242,27 @@ async function runNpmAudit(directory: string): Promise<AuditResult> {
 		}
 
 		const exitCode = await proc.exited;
+
+		// A spawn failure (process never started, e.g. missing npm or a cwd that
+		// no longer exists) resolves `exited` to a non-zero code with empty
+		// stdout. That currently survives only by accident: it falls through to
+		// `JSON.parse('')`, which throws and is caught below as "output could not
+		// be parsed". Relying on a parser incidentally throwing is not a check —
+		// it breaks the moment the parse becomes lenient. Report it explicitly so
+		// the real reason survives, matching `runCargoAudit` (#2236 Sweep A).
+		if (proc.spawnError) {
+			return {
+				ecosystem: 'npm',
+				command,
+				findings: [],
+				criticalCount: 0,
+				highCount: 0,
+				totalCount: 0,
+				clean: true,
+				incomplete: true,
+				note: `npm audit failed to start: ${proc.spawnError.message}`,
+			};
+		}
 
 		// If exit code is 0, there are no vulnerabilities
 		if (exitCode === 0) {

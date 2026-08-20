@@ -3,7 +3,7 @@
  * Tests all git branch management functions with mocked spawnSync
  */
 
-import { afterAll, beforeEach, describe, expect, mock, test } from 'bun:test';
+import { beforeEach, describe, expect, mock, test } from 'bun:test';
 
 type MockSpawnResult = {
 	status: number | null;
@@ -40,17 +40,6 @@ mock.module('node:child_process', () => ({
 // Import AFTER mock setup
 const branch = await import('../../../src/git/branch');
 
-// Issue #2236 hardening (lane C1b): `gitExec` now resolves the git binary via
-// `resolveGitExecutable()` (src/utils/git-executable.ts) instead of looping
-// over `windowsGitCandidates()`. That resolver does its own filesystem
-// stat + `git --version` probing, which would (a) hit the real filesystem
-// and (b) consume entries from this file's `node:child_process` spawnSync
-// mock queue meant for the actual git calls under test. Stub the resolver
-// through branch.ts's own `_internals` seam so every test in this file
-// exercises exactly the git spawn calls it expects, at a stable command
-// name — mirroring the pre-conversion bare `'git'` behavior.
-const originalResolveGitExecutable = branch._internals.resolveGitExecutable;
-
 function setupMock(...values: Array<MockSpawnResult>) {
 	callIndex = 0;
 	returnValues = values;
@@ -65,7 +54,6 @@ describe('Git Branch Module', () => {
 		callIndex = 0;
 		returnValues = [];
 		mockSpawnSync.mockClear();
-		branch._internals.resolveGitExecutable = () => 'git';
 	});
 
 	describe('isGitRepo()', () => {
@@ -464,10 +452,8 @@ describe('Git Branch Module', () => {
 			if (!result.isRepo) {
 				expect(result.reason).toBe('git_unavailable');
 			}
-			// Issue #2236 hardening (lane C1b): gitExec resolves the git binary
-			// ONCE via resolveGitExecutable() (stubbed above) — ENOENT on that
-			// single resolved command throws GitBinaryMissingError immediately,
-			// with no per-candidate retry loop.
+			// Issue #2236 hardening: gitExec resolves ONE git binary — ENOENT on
+			// that resolved command throws immediately, no per-candidate retry.
 			expect(mockSpawnSync).toHaveBeenCalledTimes(1);
 		});
 
@@ -475,10 +461,9 @@ describe('Git Branch Module', () => {
 			const timedOut = Object.assign(new Error('spawnSync git ETIMEDOUT'), {
 				code: 'ETIMEDOUT',
 			}) as NodeJS.ErrnoException;
-			// getGitRepositoryStatus → gitExec resolves ONE git binary (via the
-			// stubbed resolver) and retries it up to MAX_TRANSIENT_RETRIES (5)
-			// times on a transient error before throwing GitBinaryMissingError,
-			// which getGitRepositoryStatus maps to 'git_error'.
+			// getGitRepositoryStatus → gitExec resolves ONE git binary and retries
+			// it up to MAX_TRANSIENT_RETRIES (5) times before throwing
+			// GitBinaryMissingError, mapped to 'git_error'.
 			const etimedoutResult: MockSpawnResult = {
 				status: null,
 				stdout: '',
@@ -568,11 +553,9 @@ describe('Git Branch Module', () => {
 		});
 
 		test('3. GitBinaryMissingError not retried: spawnSync returns git-binary-missing ENOENT, gitExec throws immediately with exactly ONE spawn call (single resolved binary, no candidate loop)', () => {
-			// Issue #2236 hardening (lane C1b): gitExec resolves ONE git binary via
-			// resolveGitExecutable() (stubbed to 'git' for this file) instead of
-			// looping over windowsGitCandidates(). ENOENT is classified as
-			// git-binary-missing by isGitBinaryMissing() → throws GitBinaryMissingError
-			// immediately, with NO retry and NO further candidates to try.
+			// Issue #2236 hardening: gitExec resolves ONE git binary instead of
+			// looping over windowsGitCandidates(). ENOENT is git-binary-missing →
+			// throws GitBinaryMissingError immediately, no retry/candidates.
 			setupMock({
 				status: null,
 				stdout: '',
@@ -644,18 +627,6 @@ describe('Git Branch Module', () => {
 			expect(result).toBe('main\n');
 			// Exactly 2 calls — first failed (transient), second succeeded
 			expect(mockSpawnSync).toHaveBeenCalledTimes(2);
-		});
-	});
-
-	describe('gitExec routes through resolveGitExecutable() (issue #2236 hardening, lane C1b)', () => {
-		test('spawns the binary returned by _internals.resolveGitExecutable, not a bare "git" literal', () => {
-			const sentinel = '/opt/fake-git-install/bin/git';
-			branch._internals.resolveGitExecutable = () => sentinel;
-			setupMock({ status: 0, stdout: 'main\n', stderr: '' });
-
-			branch._internals.gitExec(['rev-parse', '--abbrev-ref', 'HEAD'], testCwd);
-
-			expect(mockSpawnSync.mock.calls[0][0]).toBe(sentinel);
 		});
 	});
 
@@ -1132,8 +1103,4 @@ describe('_internals.spawnSync envOverrides', () => {
 		expect(process.env[key]).toBe('original_value');
 		delete process.env[key];
 	});
-});
-
-afterAll(() => {
-	branch._internals.resolveGitExecutable = originalResolveGitExecutable;
 });

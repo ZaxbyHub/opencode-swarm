@@ -302,15 +302,6 @@ beforeEach(() => {
 	LeanTurboRunner._internals.assertCleanWorkingTree = mock(() =>
 		Promise.resolve({ clean: true }),
 	);
-
-	// Issue #2236 hardening (lane C1b): `runGit`/`checkPathBudget`
-	// (re-exported from `src/worktree/core.ts` via `src/turbo/lean/worktree.ts`)
-	// resolve the git binary via `resolveGitExecutable()` instead of a bare
-	// `'git'` literal. Stub it so the `bunSpawn` mocks below don't each pay
-	// for a real filesystem-probing resolution; `restoreAllSeams()` in
-	// `afterEach` restores the real implementation via the `Object.assign`
-	// snapshot taken at file load.
-	worktreeModule._internals.resolveGitExecutable = () => 'git';
 });
 
 afterEach(() => {

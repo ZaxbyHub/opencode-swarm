@@ -523,6 +523,22 @@ export function resetGitExecutableCache(): void {
 }
 
 /**
+ * TEST-ONLY seam (issue #2236 FR-006 ratchet fix) — NOT a production API, do
+ * not call from `src/`. Pre-seeds the resolver cache with an explicit
+ * "success" entry so `resolveGitExecutable()` / `resolveGitExecutableAsync()`
+ * return `value` immediately with zero probe spawns. Used exclusively by
+ * `tests/preload/executable-resolver-pin.ts` so pre-existing test files that
+ * assert `cmd[0] === 'git'` (or mock `node:child_process` to assert exact
+ * spawnSync call counts/args) do not need a per-file resolver stub. A test
+ * that needs the REAL probing behavior calls `resetGitExecutableCache()`
+ * first — that clears this seed exactly like any other cache entry, since it
+ * is stored in the same `cache` variable.
+ */
+export function __seedGitExecutableForTests(value: string): void {
+	cache = { kind: 'success', path: value };
+}
+
+/**
  * Registers the config-sourced override (`git.binary`). The environment
  * variable `OPENCODE_SWARM_GIT_BINARY` always takes precedence when set —
  * this only registers the config fallback. Resets the cache ONLY when the

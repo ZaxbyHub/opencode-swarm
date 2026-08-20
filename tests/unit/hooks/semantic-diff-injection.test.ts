@@ -33,10 +33,7 @@ import {
 	generateSummaryMarkdown,
 } from '../../../src/diff/summary-generator.js';
 // Import the function under test
-import {
-	buildSemanticDiffBlock,
-	_internals as semanticDiffInternals,
-} from '../../../src/hooks/semantic-diff-injection.js';
+import { buildSemanticDiffBlock } from '../../../src/hooks/semantic-diff-injection.js';
 import {
 	GitBinaryMissingError,
 	isGitBinaryMissing,
@@ -118,23 +115,10 @@ afterEach(() => mock.restore());
 // beforeEach
 // ============================================================================
 
-const realResolveGitExecutable = semanticDiffInternals.resolveGitExecutable;
-
 beforeEach(() => {
 	execFileCalls = [];
 	readFileCalls = [];
 	realpathSyncCalls = [];
-	// Issue #2236 hardening (lane C1b): `execGit` resolves the git binary via
-	// `resolveGitExecutable()` instead of a bare `'git'` literal. Since this
-	// file's `import * as child_process` binding may have resolved before
-	// this test file's `mock.module('node:child_process', ...)` call takes
-	// effect, stub the resolver directly so `execGit` never depends on that
-	// timing to stay deterministic.
-	semanticDiffInternals.resolveGitExecutable = () => 'git';
-});
-
-afterEach(() => {
-	semanticDiffInternals.resolveGitExecutable = realResolveGitExecutable;
 });
 
 // ============================================================================
