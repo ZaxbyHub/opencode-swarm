@@ -1,5 +1,17 @@
 # Changelog
 
+## [7.144.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.143.6...v7.144.0) (2026-08-20)
+
+
+### Features
+
+* **background:** bound delegation recovery with checkpoint/tail compaction and status health ([b4ca485](https://github.com/ZaxbyHub/opencode-swarm/commit/b4ca4854938ea3b08e60f57c2231f3fc359c28c2))
+
+
+### Bug Fixes
+
+* **background:** address PR review findings — close wiring, repair hints, hardening ([1c77fd6](https://github.com/ZaxbyHub/opencode-swarm/commit/1c77fd621fff1e14e32b999590215232b4b3a4c4))
+
 ## [7.143.6](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.143.5...v7.143.6) (2026-08-20)
 
 
