@@ -16,6 +16,7 @@ import {
 	type SweepableDelegationStatus,
 	sweepStaleDelegations,
 } from '../../../src/background/pending-delegations';
+import { freezeClock } from '../../helpers/test-clock.js';
 
 function makeTempProject(): string {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'swarm-bg-'));
@@ -41,6 +42,7 @@ function input(over: Partial<RecordPendingInput> = {}): RecordPendingInput {
 
 describe('pending-delegations store', () => {
 	let dir: string;
+	let restoreClock: () => void = () => {};
 
 	/**
 	 * Append a record backdated 10 minutes so a 1-minute sweep timeout makes it
@@ -64,9 +66,14 @@ describe('pending-delegations store', () => {
 	}
 
 	beforeEach(() => {
+		// Staleness here is a pure function of Date.now() minus updatedAt, and the
+		// backdated fixtures below derive their timestamps from the same clock, so
+		// freezing it makes every age margin exact (issue #1782).
+		restoreClock = freezeClock();
 		dir = makeTempProject();
 	});
 	afterEach(() => {
+		restoreClock();
 		fs.rmSync(dir, { recursive: true, force: true });
 	});
 
