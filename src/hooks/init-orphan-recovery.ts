@@ -18,7 +18,9 @@
 import * as fs from 'node:fs';
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
+import { recordDelegationRecoveryObservation } from '../background/delegation-health.js';
 import {
+	isUnsettledWorktreeOwner,
 	scanDelegationFallbacksForRecovery,
 	scanDelegationsForRecovery,
 } from '../background/pending-delegations.js';
@@ -86,6 +88,7 @@ export const _internals: {
 	tryAcquireLock: typeof tryAcquireLock;
 	listOwnershipTagSessionIds: typeof listOwnershipTagSessionIds;
 	scanDelegationsForRecovery: typeof scanDelegationsForRecovery;
+	recordDelegationRecoveryObservation: typeof recordDelegationRecoveryObservation;
 	scanDelegationFallbacksForRecovery: typeof scanDelegationFallbacksForRecovery;
 	scanWorktreeMergeFailuresForRecovery: typeof scanWorktreeMergeFailuresForRecovery;
 	scanWorktreeProvisioningOwnersForRecovery: typeof scanWorktreeProvisioningOwnersForRecovery;
@@ -99,6 +102,7 @@ export const _internals: {
 	tryAcquireLock,
 	listOwnershipTagSessionIds,
 	scanDelegationsForRecovery,
+	recordDelegationRecoveryObservation,
 	scanDelegationFallbacksForRecovery,
 	scanWorktreeMergeFailuresForRecovery,
 	scanWorktreeProvisioningOwnersForRecovery,
@@ -521,23 +525,30 @@ export async function runInitOrphanRecovery(
 			),
 		);
 		if (primaryOwnerScan.status === 'uncertain') {
+			// #2034/#1659: persist the recovery failure so it stays visible in
+			// /swarm status after this in-memory failure is gone. The scan's
+			// source is honest: legacy only when no manifest exists, else the
+			// interpretation is unknown.
+			_internals.recordDelegationRecoveryObservation(directory, {
+				source: primaryOwnerScan.source ?? 'legacy-ledger',
+				ok: false,
+				reason: primaryOwnerScan.reason,
+			});
 			throw new Error(
 				`background primary ownership state is uncertain; destructive orphan cleanup skipped: ${primaryOwnerScan.reason}`,
 			);
 		}
-		const isUnsettledWorktreeOwner = (
+		_internals.recordDelegationRecoveryObservation(directory, {
+			source: primaryOwnerScan.source ?? 'legacy-ledger',
+			ok: true,
+		});
+		// Shared with the store so compaction summarization and orphan
+		// protection can never drift apart (issue #2034 review finding).
+		const isUnsettledOwner = (
 			record: (typeof primaryOwnerScan.owners)[number],
-		): boolean =>
-			Boolean(record.worktree) &&
-			!(
-				record.coderSettlement?.state === 'settled' &&
-				record.coderSettlement.outcome?.kind === 'standard-worktree' &&
-				(record.coderSettlement.outcome.result === 'merged' ||
-					record.coderSettlement.outcome.result === 'unchanged')
-			);
-		const durableWorktreeOwners = primaryOwnerScan.owners.filter(
-			isUnsettledWorktreeOwner,
-		);
+		): boolean => isUnsettledWorktreeOwner(record);
+		const durableWorktreeOwners =
+			primaryOwnerScan.owners.filter(isUnsettledOwner);
 		const mergeOwnerScan = await withTimeout(
 			// Best-effort: synchronous scan (fs.*Sync), timeout provides
 			// observability rather than interrupt capability.
@@ -558,7 +569,7 @@ export async function runInitOrphanRecovery(
 			...durableWorktreeOwners,
 			...fallbackOwnerScan.owners
 				.map((artifact) => artifact.record)
-				.filter(isUnsettledWorktreeOwner),
+				.filter(isUnsettledOwner),
 		];
 		const preservedMergeFailures = mergeOwnerScan.failures
 			.map(([, failure]) => failure)

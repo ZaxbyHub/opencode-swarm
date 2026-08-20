@@ -3155,6 +3155,21 @@ export function checkExplicitInvalidation(
 export const EVIDENCE_WRITE_BLIND_SPOTS: readonly EvidenceWriteBlindSpot[] = [
 	{
 		file: 'src/background/pending-delegations.ts',
+		rule: 'R',
+		target: 'to',
+		status: 'not-an-evidence-artifact',
+		reason:
+			'renameOnce(from, to) sits on the _checkpointInternals OBJECT ' +
+			'LITERAL, so RULE H cannot move the requirement into the callee. ' +
+			'Every production caller reaches it through writeDurableFileSync ' +
+			'with a target from storePath() / checkpointPath() / manifestPath() ' +
+			'-> .swarm/background-delegations{,.checkpoint.json,.manifest.json}, ' +
+			'none of which are cached evidence artifacts. The temp-file writes ' +
+			'beside each rename go through fsynced descriptors opened at a named ' +
+			'tmp const in the same function (issue #2034).',
+	},
+	{
+		file: 'src/background/pending-delegations.ts',
 		rule: 'W',
 		target: 'absPath',
 		status: 'not-an-evidence-artifact',
