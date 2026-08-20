@@ -1340,16 +1340,42 @@ Project has the following vulnerable packages
 	// ============ bundle-audit (Ruby) Tests ============
 	describe('bundle-audit audit', () => {
 		it('should return clean with note when neither bundle-audit nor bundle on PATH', async () => {
-			mockSpawnError = new Error("'bundle-audit' is not recognized");
+			// The "not installed" note comes from `runBundleAudit`'s
+			// `isCommandAvailable` early return, so the test must ESTABLISH that
+			// precondition rather than inherit it from the host. It previously did
+			// not, and passed only where Ruby happens to be absent — which is true
+			// on this Windows box and on ubuntu, and FALSE on macos-latest, where
+			// Ruby ships preinstalled so `bundle` resolves, the early return never
+			// fires, and the assertion sees "bundle-audit JSON output could not be
+			// parsed" instead. Same host-dependent-precondition class as the
+			// fabricated-path failures in #2236.
+			//
+			// Forced unavailable through the discovery DI seam, mirroring the dart
+			// case above. Cache cleared either side so nothing leaks between tests.
+			const originalSpawnSync = discoveryInternals.spawnSyncImpl;
+			clearToolchainCache();
+			discoveryInternals.spawnSyncImpl = () => ({
+				stdout: new Uint8Array(),
+				stderr: new Uint8Array(),
+				exitCode: 1,
+				success: false,
+			});
 
-			const result = await pkg_audit.execute(
-				{ ecosystem: 'ruby' },
-				getMockContext(),
-			);
-			const parsed = JSON.parse(result);
+			try {
+				mockSpawnError = new Error("'bundle-audit' is not recognized");
 
-			expect(parsed.clean).toBe(true);
-			expect(parsed.note).toContain('not installed');
+				const result = await pkg_audit.execute(
+					{ ecosystem: 'ruby' },
+					getMockContext(),
+				);
+				const parsed = JSON.parse(result);
+
+				expect(parsed.clean).toBe(true);
+				expect(parsed.note).toContain('not installed');
+			} finally {
+				discoveryInternals.spawnSyncImpl = originalSpawnSync;
+				clearToolchainCache();
+			}
 		});
 
 		it('should return clean with no findings when exit code 0', async () => {
