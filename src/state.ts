@@ -2363,11 +2363,14 @@ export function beginInvocation(
 	// Prune old windows to prevent memory leak
 	pruneOldWindows(sessionId, 24 * 60 * 60 * 1000, 50); // 24h max age, 50 max windows
 
-	telemetry.delegationBegin(
-		sessionId,
-		stripped,
-		session.currentTaskId ?? 'unknown',
-	);
+	// NOTE: `delegation_begin` telemetry is NOT emitted here. This function is
+	// guardrails bookkeeping — every reachable call site is gated on guardrails
+	// being enabled, so an emission here is unreachable with
+	// `guardrails.enabled: false` while its `delegation_end` counterpart (the
+	// Task handoff in src/index.ts tool.execute.after) still fires. The paired
+	// emission lives at the Task-delegation boundary in src/index.ts
+	// (tool.execute.before), keyed by callID so begin/end carry identical
+	// sessionId/agentName/taskId.
 	return window;
 }
 

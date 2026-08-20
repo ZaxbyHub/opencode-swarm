@@ -25,6 +25,7 @@ const STRUCTURED_REJECTED_OUTPUT = [
 	'```',
 ].join('\n');
 let tmpDir: string;
+const originalDelegationBegin = _internals.delegationBegin;
 const originalDelegationEnd = _internals.delegationEnd;
 const originalResolveReviewerTaskScope = _internals.resolveReviewerTaskScope;
 type DelegationEndCall = {
@@ -42,6 +43,10 @@ beforeEach(() => {
 	);
 	delegationEndCalls = [];
 	validationScheduler = createFindingValidationScheduler();
+	// Both halves are stubbed so this suite never reaches the real process-global
+	// telemetry sink. Stubbing only the end would let the paired begin escape to
+	// it (harmless, but it makes the seam's symmetry claim untrue in practice).
+	_internals.delegationBegin = () => {};
 	_internals.delegationEnd = (
 		sessionID,
 		agentName,
@@ -65,6 +70,7 @@ beforeEach(() => {
 });
 afterEach(() => {
 	validationScheduler.reset();
+	_internals.delegationBegin = originalDelegationBegin;
 	_internals.delegationEnd = originalDelegationEnd;
 	_internals.resolveReviewerTaskScope = originalResolveReviewerTaskScope;
 	try {

@@ -476,6 +476,243 @@ export function collectEntryErrors(
 export const _internals = { collectEntryErrors };
 
 /**
+ * Check 11 — lifecycle-pair producer inventory (recurrence guardrail).
+ *
+ * DEFECT CLASS: a telemetry kind declared as one half of a lifecycle PAIR
+ * acquires producers for only one half, so the stream is structurally
+ * unpairable. Observed twice in production `.swarm/telemetry.jsonl`:
+ * `delegation_end` with no `delegation_begin` (12 vs 0 over 33 days; three
+ * end-only producers — two in `src/review/engine.ts`, one in
+ * `src/hooks/review-receipt-collector.ts`), and `session_started` with no
+ * `session_ended` (26 vs 0 — still open, recorded as that pair's `knownGap`).
+ *
+ * Nothing in the type system or lint config requires an end-producer to have a
+ * begin-producer, so end-only producers were added silently. This check makes
+ * that mechanical.
+ *
+ * WHY COUNTS, NOT "does the file contain a begin": a file-level presence test
+ * passes trivially once `src/review/engine.ts` contains begins, so a NEW
+ * unpaired end added to that same file — the exact defect class — would slip
+ * through. Counting every call site means any added or removed producer fails
+ * this gate until the inventory below is deliberately updated, which forces the
+ * pairing question to be answered.
+ *
+ * WHY NOT `file:line` CITATIONS: `checkCitationMentions` line-pins to the emit
+ * call, and any formatting pass that shifts that line turns CI red for a
+ * non-defect. File + count ratchets identically without that maintenance tax.
+ *
+ * SCOPE, stated honestly so this docstring does not overclaim: the scan is
+ * TEXTUAL and bounded. It sees `telemetry.<wrapper>(` and `_internals.<wrapper>(`
+ * in non-comment lines of the TypeScript files under `src/`, excluding test
+ * files and the wrapper definitions in `src/telemetry.ts`. It does NOT see a
+ * producer reached through
+ * a differently-named seam object (`deps.delegationEnd(...)`), a destructured
+ * alias (`const { delegationEnd } = telemetry`), a call inside a block comment
+ * or string literal, or a producer outside `src/`. Those are accepted blind
+ * spots: every producer in the tree today uses one of the two recognised
+ * shapes, and the inventory's exact-count assertion means an author who changes
+ * shape still trips the count check for the file they edited. Line comments ARE
+ * stripped, because commenting a call out is what a careless edit looks like and
+ * leaving it counted would let the original defect return green. Do not read a
+ * green run as "no unpaired producer can possibly exist".
+ */
+interface ProducerExpectation {
+	readonly file: string;
+	readonly begins: number;
+	readonly ends: number;
+	readonly why: string;
+}
+
+interface LifecyclePairSpec {
+	readonly label: string;
+	/** Telemetry wrapper names for the opening and closing halves. */
+	readonly beginWrapper: string;
+	readonly endWrapper: string;
+	readonly producers: readonly ProducerExpectation[];
+	/**
+	 * Set when one half has NO producer anywhere in `src/`. Recording it here is
+	 * what keeps the gap mechanically visible: the check asserts the half stays
+	 * empty, so the first producer added for it fails this gate and forces the
+	 * author to close the pair (or restate the gap) deliberately.
+	 */
+	readonly knownGap?: { readonly half: 'begin' | 'end'; readonly why: string };
+}
+
+const LIFECYCLE_PAIR_INVENTORY: readonly LifecyclePairSpec[] = [
+	{
+		label: 'delegation',
+		beginWrapper: 'delegationBegin',
+		endWrapper: 'delegationEnd',
+		producers: [
+			{
+				file: 'src/index.ts',
+				begins: 1,
+				ends: 1,
+				why: 'Task-tool delegation boundary: begin in tool.execute.before, end in the Task handoff, paired by callID.',
+			},
+			{
+				file: 'src/review/engine.ts',
+				begins: 2,
+				ends: 2,
+				why: 'Reviewer dispatch (per model attempt) and the finding-validation attempt replay.',
+			},
+			{
+				file: 'src/hooks/review-receipt-collector.ts',
+				begins: 1,
+				ends: 1,
+				why: 'Stage-B validation attempt replay, both halves through the _internals seam.',
+			},
+		],
+	},
+	{
+		label: 'session',
+		beginWrapper: 'sessionStarted',
+		endWrapper: 'sessionEnded',
+		producers: [
+			{
+				file: 'src/state.ts',
+				begins: 1,
+				ends: 0,
+				why: 'startAgentSession emits session_started; nothing emits the matching end (see knownGap).',
+			},
+		],
+		knownGap: {
+			half: 'end',
+			why:
+				'session_ended has NO producer anywhere in src/, so session_started events ' +
+				'are unmatched in production (26 vs 0 observed). Closing it is not a ' +
+				'one-liner: dispatchEphemeralAgent deletes ephemeral child sessions that ' +
+				'never emitted a start (src/evaluation/ephemeral-agent-dispatcher.ts), so ' +
+				'emitting blindly on session deletion would manufacture the inverse ' +
+				'asymmetry. A fix must gate on the session having actually started.',
+		},
+	},
+];
+
+/**
+ * Producer call shapes: the direct wrapper and the `_internals` DI seam.
+ *
+ * Line comments are stripped FIRST. Without that, commenting out a begin left
+ * the count unchanged and this gate stayed green while the original defect was
+ * back in the tree — the single most dangerous bypass, because it is exactly
+ * what a careless edit looks like.
+ */
+function countProducerCalls(source: string, wrapperName: string): number {
+	const executable = source
+		.split('\n')
+		.filter((line) => !line.trim().startsWith('//'))
+		.join('\n');
+	const pattern = new RegExp(
+		`(?:telemetry|_internals)\\.${wrapperName}\\s*\\(`,
+		'g',
+	);
+	return (executable.match(pattern) ?? []).length;
+}
+
+/**
+ * `src/telemetry.ts` DEFINES the wrappers and is not a producer; `*.test.ts`
+ * files are their own runtime and may emit either half freely.
+ */
+function listLifecycleScanFiles(root: string = REPO_ROOT): string[] {
+	const srcRoot = path.join(root, 'src');
+	if (!fs.existsSync(srcRoot)) return [];
+	return fs
+		.readdirSync(srcRoot, { recursive: true, encoding: 'utf-8' })
+		.map((entry) => `src/${String(entry).replace(/\\/g, '/')}`)
+		.filter(
+			(rel) =>
+				rel.endsWith('.ts') &&
+				!rel.endsWith('.test.ts') &&
+				rel !== 'src/telemetry.ts',
+		)
+		.sort();
+}
+
+export function collectLifecyclePairingErrors(
+	/** Injectable so tests can drive fixture trees instead of the real repo. */
+	root: string = REPO_ROOT,
+): string[] {
+	const errors: string[] = [];
+	const remedy =
+		'Rule: the closing half of a lifecycle pair must be emitted only where the ' +
+		'opening half is emitted for the same unit of work, so the event stream ' +
+		'stays pairable — an end with no begin is a phantom completion no consumer ' +
+		'can attribute. Emit the paired opening call, then update ' +
+		'LIFECYCLE_PAIR_INVENTORY in scripts/check-event-contract.ts if the new ' +
+		'call-site counts are intentional.';
+
+	const scanned = listLifecycleScanFiles(root);
+	if (scanned.length === 0) {
+		return [
+			`Lifecycle pairing check scanned 0 files under ${root}/src — the scanner is broken, so its results would be vacuously green. ${remedy}`,
+		];
+	}
+
+	for (const pair of LIFECYCLE_PAIR_INVENTORY) {
+		const expected = new Map(
+			pair.producers.map((entry) => [entry.file, entry]),
+		);
+		const seen = new Set<string>();
+		let totalBegins = 0;
+		let totalEnds = 0;
+
+		for (const rel of scanned) {
+			const source = fs.readFileSync(path.join(root, rel), 'utf-8');
+			const begins = countProducerCalls(source, pair.beginWrapper);
+			const ends = countProducerCalls(source, pair.endWrapper);
+			if (begins === 0 && ends === 0) continue;
+			seen.add(rel);
+			totalBegins += begins;
+			totalEnds += ends;
+
+			// The defect class itself, independent of the inventory.
+			if (ends > 0 && begins === 0) {
+				errors.push(
+					`${rel} produces ${ends} ${pair.endWrapper} call(s) and no ${pair.beginWrapper} — an unpairable half-lifecycle in the "${pair.label}" pair. ${remedy}`,
+				);
+			}
+
+			const entry = expected.get(rel);
+			if (!entry) {
+				errors.push(
+					`${rel} is a new "${pair.label}" lifecycle producer (${begins} begin / ${ends} end) that is not in LIFECYCLE_PAIR_INVENTORY. ${remedy}`,
+				);
+				continue;
+			}
+			if (begins !== entry.begins || ends !== entry.ends) {
+				errors.push(
+					`${rel} has ${begins} ${pair.beginWrapper} and ${ends} ${pair.endWrapper} call site(s), but the inventory expects ${entry.begins} and ${entry.ends} (${entry.why}). ${remedy}`,
+				);
+			}
+		}
+
+		// A recorded gap must STAY empty. The first producer added for the missing
+		// half trips this, forcing the author to close the pair (or restate the
+		// gap) deliberately rather than silently half-closing it.
+		if (pair.knownGap) {
+			const observed = pair.knownGap.half === 'end' ? totalEnds : totalBegins;
+			const wrapper =
+				pair.knownGap.half === 'end' ? pair.endWrapper : pair.beginWrapper;
+			if (observed > 0) {
+				errors.push(
+					`The "${pair.label}" pair records a known gap for its ${pair.knownGap.half} half, but ${observed} ${wrapper} producer call(s) now exist. Close the pair and delete the knownGap entry in LIFECYCLE_PAIR_INVENTORY. (${pair.knownGap.why})`,
+				);
+			}
+		}
+
+		for (const entry of pair.producers) {
+			if (!seen.has(entry.file)) {
+				errors.push(
+					`LIFECYCLE_PAIR_INVENTORY lists ${entry.file} for the "${pair.label}" pair, but it produces no such lifecycle events. Remove the stale entry. (${entry.why})`,
+				);
+			}
+		}
+	}
+
+	return errors;
+}
+
+/**
  * Pure collector for event-contract violations (issue #2029 AC6). Returns
  * the list of human-readable error strings (empty when the contract holds).
  * Exported so the CI drift checker (scripts/drift-check.ts, issue #1497) can
@@ -552,6 +789,9 @@ export function collectEventContractErrors(): string[] {
 	// 10) Resolve every prose path:line citation in the observability module and
 	// its docs (see CITATION_SCAN_GLOBS for why this is machinery, not review).
 	errors.push(...collectCitationResolutionErrors());
+
+	// 11) Lifecycle-pair producer inventory (delegation + session) — no end-only producers.
+	errors.push(...collectLifecyclePairingErrors());
 
 	return errors;
 }
