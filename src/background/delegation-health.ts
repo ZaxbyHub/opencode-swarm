@@ -189,6 +189,22 @@ export const DelegationLedgerHealthSchema = z
 	.strict();
 
 /**
+ * Portable bounded sleep for the artifact rename retry (same shape as the
+ * store's `_checkpointInternals.syncSleep`: Atomics.wait with a busy-wait
+ * fallback for platforms where it throws).
+ */
+function sleepSync(ms: number): void {
+	try {
+		Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+	} catch {
+		const start = Date.now();
+		while (Date.now() - start < ms) {
+			/* bounded busy-wait */
+		}
+	}
+}
+
+/**
  * Test seam for the atomic-rename retry (issue #2034): tests inject a
  * transient EPERM here to exercise the real retry loop.
  */
@@ -299,6 +315,9 @@ export function writeDelegationHealthArtifact(
 				if (code !== 'EEXIST' && code !== 'EBUSY' && code !== 'EPERM') {
 					break;
 				}
+				// AV/indexer locks clear in tens of ms; a tight retry loop
+				// would burn all five attempts inside the same held window.
+				if (attempt < 4) sleepSync(15);
 			}
 		}
 		if (lastError !== undefined) {

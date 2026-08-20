@@ -41,11 +41,25 @@ recovery.
 - **Durable status health (#1659).** A new fold-free health artifact
   (`.swarm/background-delegations-health.json`) records ledger bytes/limit/
   pressure band, checkpoint state, recovery source, live-set counts, and the
-  most recent durable uncertainty — and `/swarm status` renders a
-  `Background Delegations` section (also in the no-plan branch, only when there
-  is something to report, so clean-repo output is unchanged). Startup orphan
-  recovery records its scan outcome, so an incident stays visible after the
-  in-memory failure is gone.
+  most recent durable uncertainty (with a repair hint) — and `/swarm status`
+  renders a `Background Delegations` section (also in the no-plan branch, only
+  when there is something to report, so clean-repo output is unchanged).
+  Startup orphan recovery records its scan outcome, so an incident stays
+  visible after the in-memory failure is gone.
+- **Close/archive wiring.** `/swarm close` archives the full delegation store
+  set (ledger + checkpoint + manifest + health artifact) for forensics and
+  deliberately leaves it in place — the store is cross-session state and
+  compaction, not close, is its bounded-retention mechanism.
+- **Documented bounds.** 4 MiB fail-closed recovery guard, 1 MiB compaction
+  high-water mark, 2 MiB checkpoint byte budget with a live-record cap 2048,
+  and a 72 h closed-summary age floor — all validated in code, and the
+  fragment's copies of these figures are flagged by drift-check when they
+  drift from the source constants.
+- **Known limitation — version downgrade.** A pre-#2034 plugin version opening
+  a repo whose ledger this version compacted reads the rolled tail as the
+  entire ledger (it has no manifest knowledge), silently missing pre-cut
+  records. Downgrading across a compacted repo is unsupported; re-upgrade
+  restores full recovery.
 
 ## Why
 
@@ -57,7 +71,7 @@ dead history, and nothing surfaced it.
 
 ## Verification
 
-- 55 new focused tests across 8 files: >4 MiB compaction/recovery, publication
+- 60 new focused tests across 10 files: >4 MiB compaction/recovery, publication
   crash matrix (rename-seam simulated, including checkpoint/manifest checksum
   mismatches), exactly-once across compaction (incl. advisory lease expiry),
   concurrency + real Windows-rename retry loops, health artifact, status

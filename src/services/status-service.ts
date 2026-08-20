@@ -1016,6 +1016,11 @@ export async function handleStatusCommand(
 				lines.push(
 					`  - ⚠ Last uncertainty (${new Date(delegationHealth.lastUncertainty.at).toISOString()}): ${delegationHealth.lastUncertainty.reason}`,
 				);
+				if (delegationHealth.lastUncertainty.repairHint) {
+					lines.push(
+						`    repair: ${delegationHealth.lastUncertainty.repairHint}`,
+					);
+				}
 			}
 			return lines.join('\n');
 		}

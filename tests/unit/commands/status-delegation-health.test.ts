@@ -48,6 +48,27 @@ describe('/swarm status delegation health (production command)', () => {
 		expect(result).toContain('Last uncertainty');
 	});
 
+	it('no-plan branch renders the repair hint when the observation carries one (#1659 actionability)', async () => {
+		fs.mkdirSync(path.join(dir, '.swarm'), { recursive: true });
+		fs.writeFileSync(
+			path.join(dir, '.swarm', 'background-delegations.jsonl'),
+			'',
+		);
+		recordDelegationRecoveryObservation(dir, {
+			source: 'unknown',
+			ok: false,
+			reason:
+				'background delegation checkpoint is invalid while a manifest is published',
+			repairHint:
+				'remove .swarm/background-delegations.manifest.json (manifest only) after verifying no in-flight background delegations',
+		});
+
+		const result = await handleStatusCommand(dir, AGENTS);
+		expect(result).toContain('Last uncertainty');
+		expect(result).toContain('repair:');
+		expect(result).toContain('manifest only');
+	});
+
 	it('no-plan branch renders checkpoint state after compaction', async () => {
 		fs.mkdirSync(path.join(dir, '.swarm'), { recursive: true });
 		await recordPendingDelegation(dir, {

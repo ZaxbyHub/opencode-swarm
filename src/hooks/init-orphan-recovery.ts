@@ -533,6 +533,9 @@ export async function runInitOrphanRecovery(
 				source: primaryOwnerScan.source ?? 'legacy-ledger',
 				ok: false,
 				reason: primaryOwnerScan.reason,
+				...(primaryOwnerScan.repairHint
+					? { repairHint: primaryOwnerScan.repairHint }
+					: {}),
 			});
 			throw new Error(
 				`background primary ownership state is uncertain; destructive orphan cleanup skipped: ${primaryOwnerScan.reason}`,

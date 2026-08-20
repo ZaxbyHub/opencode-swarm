@@ -146,15 +146,48 @@ describe('issue #2034 crash matrix', () => {
 		expect(scan.status).toBe('uncertain');
 		if (scan.status === 'uncertain') {
 			expect(scan.source).toBe('unknown');
+			// The repair hint rides along so durable observations stay actionable.
+			expect(scan.repairHint).toBeTruthy();
 		}
 
-		// Manifest-less failure keeps the legacy label.
+		// Manifest-less failure keeps the legacy label (and no repair hint:
+		// a legacy ledger needs no checkpoint repair).
 		fs.rmSync(manifestPath(), { force: true });
 		fs.appendFileSync(ledgerPath(), '{"torn json');
 		const legacy = scanDelegationsForRecovery(dir);
 		expect(legacy.status).toBe('uncertain');
 		if (legacy.status === 'uncertain') {
 			expect(legacy.source).toBe('legacy-ledger');
+		}
+	});
+
+	it('the manifest-behind-by-one publication window is accepted (sequence+1)', async () => {
+		await recordPendingDelegation(dir, pendingInput('live-1'));
+		await compactBackgroundDelegations(dir, { force: true });
+		// Simulate a second compaction whose checkpoint rename landed but whose
+		// manifest write did not: on-disk checkpoint is N+1 under manifest N.
+		// Deterministically fabricated below (the second compaction normally
+		// completes fully), exercising the exact loader branch: the +1 window
+		// accepts the newer self-checksummed checkpoint under the older
+		// manifest WITHOUT the manifest checksum cross-check.
+		await recordPendingDelegation(dir, pendingInput('post-cut-1'));
+		await compactBackgroundDelegations(dir, { force: true });
+		const checkpoint = JSON.parse(
+			fs.readFileSync(checkpointPath(), 'utf-8'),
+		) as { sequence: number };
+		writeManifest({
+			...readManifest(),
+			sequence: checkpoint.sequence - 1,
+			checkpointChecksum: '0'.repeat(64),
+		});
+
+		const scan = scanDelegationsForRecovery(dir);
+		expect(scan.status).toBe('ok');
+		if (scan.status === 'ok') {
+			expect(scan.owners.some((r) => r.correlationId === 'live-1')).toBe(true);
+			expect(scan.owners.some((r) => r.correlationId === 'post-cut-1')).toBe(
+				true,
+			);
 		}
 	});
 

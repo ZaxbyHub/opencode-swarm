@@ -113,6 +113,8 @@ export type RecoveryOwnershipScanResult<T> =
 				| 'checkpoint+ledger-suffix'
 				| 'legacy-ledger'
 				| 'unknown';
+			/** Operator remediation guidance, when the failure mode has one. */
+			repairHint?: string;
 	  };
 
 /** Lock + diagnostics identity for the project-scoped store lock. */
@@ -846,7 +848,16 @@ export const _checkpointInternals: {
 		fs.renameSync(from, to);
 	},
 	syncSleep: (ms) => {
-		Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+		// Portable sleep (transient-retry.ts precedent): Atomics.wait throws
+		// on some platforms/threads; fall back to a bounded busy-wait.
+		try {
+			Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+		} catch {
+			const start = Date.now();
+			while (Date.now() - start < ms) {
+				/* bounded busy-wait */
+			}
+		}
 	},
 };
 
@@ -884,8 +895,11 @@ function writeDurableFileSync(target: string, contents: string | Buffer): void {
 	}
 	try {
 		const dfd = fs.openSync(path.dirname(target), 'r');
-		fs.fsyncSync(dfd);
-		fs.closeSync(dfd);
+		try {
+			fs.fsyncSync(dfd);
+		} finally {
+			fs.closeSync(dfd);
+		}
 	} catch {
 		// Directory fsync is unsupported on Windows; ordering covers durability.
 	}
@@ -953,6 +967,13 @@ function readDelegationCheckpoint(
 	} catch {
 		// fall through to the read below; ENOENT surfaces there
 	}
+	// Reject over-budget files BEFORE reading/parsing them into memory.
+	if (bytes > MAX_CHECKPOINT_BYTES) {
+		return {
+			kind: 'invalid',
+			reason: `checkpoint exceeds the ${MAX_CHECKPOINT_BYTES}-byte bound`,
+		};
+	}
 	const read = readJsonFileWithRetry(checkpointPath(directory));
 	if (read.status === 'absent') return { kind: 'absent' };
 	if (read.status === 'invalid')
@@ -960,12 +981,6 @@ function readDelegationCheckpoint(
 	const parsed = CheckpointSchema.safeParse(read.value);
 	if (!parsed.success) {
 		return { kind: 'invalid', reason: 'checkpoint fails schema validation' };
-	}
-	if (bytes > MAX_CHECKPOINT_BYTES) {
-		return {
-			kind: 'invalid',
-			reason: `checkpoint exceeds the ${MAX_CHECKPOINT_BYTES}-byte bound`,
-		};
 	}
 	return { kind: 'ok', checkpoint: parsed.data, bytes };
 }
@@ -994,7 +1009,7 @@ function checkpointPayloadChecksum(
 }
 
 const CHECKPOINT_REBIND_HINT =
-	'remove .swarm/background-delegations.manifest.json and .swarm/background-delegations.checkpoint.json after verifying no in-flight background delegations; the ledger then recovers via the legacy full read and the next compaction re-checkpoints it';
+	'remove .swarm/background-delegations.manifest.json (manifest only) after verifying no in-flight background delegations; recovery then falls back to the full-ledger read. Only if you also want to discard pre-cut closed summaries and audit history — which for a compacted (rolled) ledger exist ONLY in .swarm/background-delegations.checkpoint.json — remove the checkpoint too or use the full reset below';
 const CHECKPOINT_RESET_HINT =
 	'the rolled tail no longer carries pre-checkpoint state: stop swarm processes, verify no in-flight background delegations, and remove .swarm/background-delegations.manifest.json, .swarm/background-delegations.checkpoint.json, and .swarm/background-delegations.jsonl to reset the store (or restore them from backup)';
 
@@ -1981,12 +1996,14 @@ export function scanDelegationsForRecovery(
 	if (load.status === 'uncertain') {
 		// Honest failure source (#2034 final-critic #4): a manifest-less store
 		// failed in the legacy interpretation; anything else is unknown rather
-		// than a wrongly-claimed recovery mode.
+		// than a wrongly-claimed recovery mode. The repair hint rides along so
+		// the durable recovery observation stays actionable.
 		const manifestKind = readDelegationManifest(directory).kind;
 		return {
 			status: 'uncertain',
 			reason: load.reason,
 			source: manifestKind === 'absent' ? 'legacy-ledger' : 'unknown',
+			...(load.repairHint ? { repairHint: load.repairHint } : {}),
 		};
 	}
 	const source =
@@ -2468,6 +2485,14 @@ export async function claimTerminalResult(
 						};
 					}
 				}
+				// Monotonic fold baseline (#2034 review PRR-012): recordedAt is
+				// caller-supplied and may be backdated; the fold's update-time
+				// merge would then drop this terminal against a later checkpoint
+				// entry. Clamp updatedAt to at least the current snapshot's.
+				const foldUpdatedAt = Math.max(
+					parsedTerminal.data.recordedAt,
+					current.updatedAt,
+				);
 				const next: BackgroundDelegationRecord = {
 					...current,
 					schemaVersion: 3,
@@ -2475,7 +2500,7 @@ export async function claimTerminalResult(
 					terminalResult: parsedTerminal.data,
 					result: parsedTerminal.data.result,
 					completedAt: parsedTerminal.data.recordedAt,
-					updatedAt: parsedTerminal.data.recordedAt,
+					updatedAt: foldUpdatedAt,
 					...(coderSettlement ? { coderSettlement } : {}),
 				};
 				if (!RecordSchema.safeParse(next).success) return;

@@ -379,6 +379,35 @@ describe('issue #2034 exactly-once across compaction', () => {
 		}
 	});
 
+	it('a backdated recordedAt cannot freeze the fold baseline (monotonic updatedAt)', async () => {
+		// #2034 review PRR-012: recordedAt is caller-supplied; without the
+		// monotonic clamp, a backdated terminal would lose the update-time
+		// merge against a checkpoint entry stamped later.
+		const input = pendingInput();
+		const first = await recordPendingDelegationDetailed(dir, input);
+		expect(first.status).toBe('recorded');
+		const baseline = first.record!.updatedAt;
+		const backdated = terminalFor(input.correlationId, 'backdated body');
+		const claim = await claimTerminalResult(dir, input.correlationId, {
+			...backdated,
+			recordedAt: baseline - 60_000,
+		});
+		expect(claim?.disposition).toBe('claimed');
+		// updatedAt is clamped to the record's baseline, not the backdate.
+		expect(claim!.record.updatedAt).toBeGreaterThanOrEqual(baseline);
+
+		await compactBackgroundDelegations(dir, { force: true });
+		const scan = scanDelegationsForRecovery(dir);
+		expect(scan.status).toBe('ok');
+		if (scan.status === 'ok') {
+			const record = scan.owners.find(
+				(r) => r.correlationId === input.correlationId,
+			);
+			expect(record?.status).toBe('completed');
+			expect(record?.updatedAt).toBeGreaterThanOrEqual(baseline);
+		}
+	});
+
 	it('requirement 9: no circuit-breaker or transient-retry state is serialized', async () => {
 		await dispatchAndComplete();
 		await compactBackgroundDelegations(dir, { force: true });
