@@ -3,6 +3,10 @@ import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+// Same bundler-resolved version the export service embeds (#1662) —
+// asserting against it keeps this test correct across future releases
+// instead of pinning a literal that drifts.
+import packageJson from '../../../package.json' with { type: 'json' };
 import { handleExportCommand } from '../../../src/commands/export';
 
 describe('handleExportCommand', () => {
@@ -51,7 +55,7 @@ Working on Phase 1
 
 		expect(result).toContain('## Swarm Export');
 		expect(result).toContain('```json');
-		expect(result).toContain('"version": "4.5.0"');
+		expect(result).toContain(`"version": "${packageJson.version}"`);
 		expect(result).toContain('"plan":');
 		expect(result).toContain('"context":');
 		expect(result).toContain('```');
@@ -147,10 +151,10 @@ Working on Phase 1
 		expect(result).toContain('```');
 	});
 
-	test('JSON has version field set to 4.5.0', async () => {
+	test('JSON version field matches the plugin package version', async () => {
 		const result = await handleExportCommand(tempDir, []);
 
-		expect(result).toContain('"version": "4.5.0"');
+		expect(result).toContain(`"version": "${packageJson.version}"`);
 	});
 
 	test('JSON includes exported timestamp', async () => {

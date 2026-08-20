@@ -33,7 +33,8 @@ async function runTool(
 	>;
 }
 
-const realReadGate = _internals.readPrWorkflowGateState;
+const realReadGate = _internals.readPrWorkflowGateStateForRecovery;
+
 const realHead = _internals.resolveCurrentGitHeadAsync;
 const realClean = _internals.resolveIsWorkingTreeCleanAsync;
 const realRunGit = _internals.runGitCapture;
@@ -76,7 +77,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
-	_internals.readPrWorkflowGateState = realReadGate;
+	_internals.readPrWorkflowGateStateForRecovery = realReadGate;
 	_internals.resolveCurrentGitHeadAsync = realHead;
 	_internals.resolveIsWorkingTreeCleanAsync = realClean;
 	_internals.runGitCapture = realRunGit;
@@ -305,7 +306,7 @@ describe('pr_workflow_status — session-pinned gate read', () => {
 
 	test('resolves the gate with the caller sessionID exactly once', async () => {
 		const calls: Array<[string, string]> = [];
-		_internals.readPrWorkflowGateState = mock(
+		_internals.readPrWorkflowGateStateForRecovery = mock(
 			async (directory: string, sessionID: string) => {
 				calls.push([directory, sessionID]);
 				return null;
@@ -320,27 +321,33 @@ describe('pr_workflow_status — session-pinned gate read', () => {
 
 describe('durable checkout recovery status', () => {
 	test('remains authoritative after live Git becomes clean', async () => {
-		_internals.readPrWorkflowGateState = async () => ({
-			schemaVersion: 1,
-			revision: 1,
-			sessionID: SESSION_ID,
-			mode: 'PR_REVIEW',
-			activatedAt: '2026-08-01T00:00:00.000Z',
-			updatedAt: '2026-08-01T00:00:01.000Z',
-			checkoutRecovery: {
-				code: 'UNMERGED_INDEX',
-				retryable: false,
-				requiredAction: 'Resolve the conflicted index manually.',
-				detectedAt: '2026-08-01T00:00:01.000Z',
-				evidence: {
-					worktreeRoot: tempDir,
-					gitDir: `${tempDir}/.git`,
-					operations: [],
-					unmergedCodes: ['UU'],
-					paths: ['conflict.ts'],
-					trackedCount: 1,
-					untrackedCount: 0,
-					pathsTruncated: false,
+		_internals.readPrWorkflowGateStateForRecovery = async () => ({
+			salvaged: false,
+			schemaErrors: [],
+			revisionSalvageable: true,
+			armedShapeUnreadable: false,
+			state: {
+				schemaVersion: 1,
+				revision: 1,
+				sessionID: SESSION_ID,
+				mode: 'PR_REVIEW',
+				activatedAt: '2026-08-01T00:00:00.000Z',
+				updatedAt: '2026-08-01T00:00:01.000Z',
+				checkoutRecovery: {
+					code: 'UNMERGED_INDEX',
+					retryable: false,
+					requiredAction: 'Resolve the conflicted index manually.',
+					detectedAt: '2026-08-01T00:00:01.000Z',
+					evidence: {
+						worktreeRoot: tempDir,
+						gitDir: `${tempDir}/.git`,
+						operations: [],
+						unmergedCodes: ['UU'],
+						paths: ['conflict.ts'],
+						trackedCount: 1,
+						untrackedCount: 0,
+						pathsTruncated: false,
+					},
 				},
 			},
 		});
@@ -357,7 +364,7 @@ describe('durable checkout recovery status', () => {
 		// The persisted-recovery test above bypasses the live result. This case
 		// proves live checkout classification remains authoritative without it.
 		let classifyCalls = 0;
-		_internals.readPrWorkflowGateState = async () => null;
+		_internals.readPrWorkflowGateStateForRecovery = async () => null;
 		_internals.classifyGitState = async () => {
 			classifyCalls += 1;
 			return {

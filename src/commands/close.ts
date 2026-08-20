@@ -404,6 +404,15 @@ const ARCHIVE_ARTIFACTS = [
 	'spec.md',
 	'spec-staleness.json',
 	'spec-snapshot.md',
+	// Background-delegation durable store (issue #2034): archived as a set
+	// (ledger + checkpoint + manifest + health) so the forensic bundle holds
+	// the complete recoverable state and terminal audit summaries. Deliberately
+	// omitted from ACTIVE_STATE_TO_CLEAN — the store is cross-session state;
+	// compaction (not close) is its bounded-retention mechanism.
+	'background-delegations.jsonl',
+	'background-delegations.checkpoint.json',
+	'background-delegations.manifest.json',
+	'background-delegations-health.json',
 ];
 
 /**

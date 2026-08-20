@@ -144,7 +144,7 @@ describe('pr-workflow-gate feedback verification', () => {
 		).resolves.toMatchObject({ prFeedbackVerifications: expect.any(Array) });
 	});
 
-	test('PR_FEEDBACK inventory is immutable and sequential batches require successful exact union', async () => {
+	test('PR_FEEDBACK inventory is append-only and sequential batches require successful exact union', async () => {
 		await activatePrWorkflow(tempDir, SESSION_ID, 'PR_FEEDBACK');
 		await declarePrFeedbackInventory(
 			tempDir,
@@ -156,7 +156,9 @@ describe('pr-workflow-gate feedback verification', () => {
 			declarePrFeedbackInventory(tempDir, SESSION_ID, ['FB-001'], {
 				prHeadSha: HEAD_SHA,
 			}),
-		).rejects.toThrow('inventory is immutable');
+			// Issue #2242 R3: the inventory became append-only. DROPPING a declared
+			// item is still a hard failure — only the message changed.
+		).rejects.toThrow('inventory is append-only after declaration');
 
 		await enforcePrFeedbackVerificationOwnership(
 			tempDir,

@@ -601,6 +601,9 @@ mock.module('node:fs', () => ({
 | `src/services/recommendation-ledger.ts` | `now`, `transactFile`, `readLedgerStrict`, `resolveRecommendationLedgerPath` | #1821 AC21 dedup-ledger clock + fail-open path tests |
 | `src/services/trajectory-cluster.ts` | `now`, `checkRecommendations`, `recordEmittedRecommendations` | #1821 AC21 motif-emission dedup tests |
 | `src/memory/redaction.ts` | `currentAlgorithmVersion` | #2062 F-012 cohort-fingerprint version gate: simulates a FUTURE bump of `FINGERPRINT_ALGORITHM_VERSION` so the legacy-file gate is testable before a real bump exists. Production code never mutates it. |
+| `src/background/pending-delegations.ts` | `_checkpointInternals` (`renameWithRetry`, `renameOnce`, `syncSleep`) | #2034 checkpoint crash-window + Windows rename-retry tests (inject EPERM at the atomic rename boundary) |
+| `src/background/delegation-health.ts` | `_healthInternals` (`renameOnce`) | #2034 health-artifact Windows rename-retry tests |
+| `src/hooks/init-orphan-recovery.ts` | `recordDelegationRecoveryObservation` | #2034/#1659 durable recovery-observation tests |
 
 **Delegation-gate split pattern (FR-006 SC-006.1):**
 

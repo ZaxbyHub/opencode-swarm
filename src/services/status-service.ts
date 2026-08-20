@@ -2,6 +2,15 @@ import * as fsSync from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import type { AgentDefinition } from '../agents';
+import {
+	collectDelegationLedgerHealth,
+	type DelegationLedgerHealth,
+} from '../background/delegation-health';
+import {
+	DELEGATION_COMPACTION_HIGH_WATER_BYTES,
+	DELEGATION_COMPACTION_LOW_WATER_BYTES,
+	MAX_RECOVERY_LEDGER_BYTES,
+} from '../background/pending-delegations';
 import { loadPluginConfig } from '../config/loader';
 import { MemoryConfigSchema } from '../config/schema';
 import { countConsensusReportFiles } from '../consensus/store';
@@ -196,6 +205,25 @@ export interface StatusData {
 		provider?: string;
 		configFingerprintMatch?: boolean;
 	};
+	/**
+	 * #2034 / #1659: background-delegation ledger health — tail bytes vs the
+	 * 4 MiB recovery bound, checkpoint state, the most recent durable
+	 * uncertainty, and live-set counts. Populated fold-free from the durable
+	 * health artifact + statSync; `undefined` when no ledger and no artifact
+	 * exist (clean repos keep their previous byte-identical output).
+	 */
+	delegationLedgerHealth?: DelegationLedgerHealth;
+}
+
+/** #2034: compact human-readable byte figure for the delegation-health block. */
+function formatLedgerBytes(bytes: number): string {
+	if (bytes >= 1024 * 1024) {
+		return `${Math.round((bytes / (1024 * 1024)) * 10) / 10} MiB`;
+	}
+	if (bytes >= 1024) {
+		return `${Math.round((bytes / 1024) * 10) / 10} KiB`;
+	}
+	return `${bytes} B`;
 }
 
 /**
@@ -365,6 +393,20 @@ export async function getStatusData(
 		status.consensusReports = await countConsensusReportFiles(directory);
 	} catch {
 		status.consensusReports = 0;
+	}
+
+	// #2034 / #1659: surface background-delegation ledger health. Fold-free by
+	// design (artifact + statSync), best-effort like every other optional
+	// artifact — a status command must never fail because the store is unreadable.
+	try {
+		status.delegationLedgerHealth =
+			collectDelegationLedgerHealth(directory, {
+				ledgerLimitBytes: MAX_RECOVERY_LEDGER_BYTES,
+				lowWaterBytes: DELEGATION_COMPACTION_LOW_WATER_BYTES,
+				highWaterBytes: DELEGATION_COMPACTION_HIGH_WATER_BYTES,
+			}) ?? undefined;
+	} catch {
+		status.delegationLedgerHealth = undefined;
 	}
 
 	// Issue #1846: surface cohort/link status so `/swarm status` makes the
@@ -846,6 +888,55 @@ export function formatStatusMarkdown(status: StatusData): string {
 		);
 	}
 
+	// #2034 / #1659: background-delegation ledger health. Rendered whenever the
+	// section exists (a ledger or health artifact is present); a clean repo
+	// without background delegations never enters this branch.
+	const delegationHealth = status.delegationLedgerHealth;
+	if (delegationHealth) {
+		lines.push('', '**Background Delegations**:');
+		lines.push(
+			`  - Ledger tail: ${formatLedgerBytes(delegationHealth.ledger.bytes)} / ${formatLedgerBytes(
+				delegationHealth.ledger.limitBytes,
+			)} recovery bound (${delegationHealth.ledger.pressurePct}% — ${delegationHealth.ledger.band})`,
+		);
+		if (delegationHealth.checkpoint) {
+			const checkpoint = delegationHealth.checkpoint;
+			lines.push(
+				`  - Checkpoint #${checkpoint.sequence}: ${checkpoint.liveRecords} live records, ${checkpoint.closedSummaries} archived summaries (${formatLedgerBytes(
+					checkpoint.bytes,
+				)}, ${new Date(checkpoint.createdAt).toISOString()})`,
+			);
+		} else {
+			lines.push('  - Checkpoint: none (full-history recovery)');
+		}
+		if (delegationHealth.recovery) {
+			const recovery = delegationHealth.recovery;
+			lines.push(
+				`  - Recovery: ${recovery.source} (${recovery.ok ? 'ok' : `FAILED: ${recovery.reason ?? 'uncertain'}`})`,
+			);
+		}
+		if (delegationHealth.lastUncertainty) {
+			const uncertainty = delegationHealth.lastUncertainty;
+			lines.push(
+				`  - ⚠ Last uncertainty (${new Date(uncertainty.at).toISOString()}, ${uncertainty.source}): ${uncertainty.reason}`,
+			);
+			if (uncertainty.repairHint) {
+				lines.push(`    repair: ${uncertainty.repairHint}`);
+			}
+		}
+		const counts = delegationHealth.counts;
+		if (
+			counts.activeOwners > 0 ||
+			counts.pendingAdvisories > 0 ||
+			counts.lateTerminals > 0 ||
+			counts.orphanWorktreeOwners > 0
+		) {
+			lines.push(
+				`  - Live set: ${counts.activeOwners} active owners, ${counts.pendingAdvisories} pending advisories, ${counts.lateTerminals} late terminals, ${counts.orphanWorktreeOwners} unsettled worktree owners`,
+			);
+		}
+	}
+
 	return lines.join('\n');
 }
 
@@ -874,6 +965,64 @@ export async function handleStatusCommand(
 				`**Spec drift detected**: ${reason} (stored: ${stored}, current: ${current})`,
 				'Run `/swarm clarify` to enter spec repair mode. Clarify alone does not clear drift: rewrite the spec so recovery can reconcile it, or run `/swarm acknowledge-spec-drift` to dismiss.',
 			].join('\n');
+		}
+		// #2034 / #1659: a delegation-ledger incident must stay visible even
+		// without an active plan — but only when there is something to say, so
+		// the clean-repo output stays byte-identical (pinned by existing tests).
+		const delegationHealth = statusData.delegationLedgerHealth;
+		if (
+			delegationHealth &&
+			(delegationHealth.checkpoint ||
+				delegationHealth.recovery ||
+				delegationHealth.lastUncertainty ||
+				delegationHealth.ledger.band !== 'ok' ||
+				delegationHealth.counts.activeOwners > 0 ||
+				delegationHealth.counts.pendingAdvisories > 0 ||
+				delegationHealth.counts.lateTerminals > 0 ||
+				delegationHealth.counts.orphanWorktreeOwners > 0)
+		) {
+			const lines = [
+				'No active swarm plan found.',
+				'',
+				'**Background Delegations**:',
+			];
+			lines.push(
+				`  - Ledger tail: ${formatLedgerBytes(delegationHealth.ledger.bytes)} / ${formatLedgerBytes(
+					delegationHealth.ledger.limitBytes,
+				)} recovery bound (${delegationHealth.ledger.pressurePct}% — ${delegationHealth.ledger.band})`,
+			);
+			if (delegationHealth.checkpoint) {
+				lines.push(
+					`  - Checkpoint #${delegationHealth.checkpoint.sequence} (${delegationHealth.checkpoint.liveRecords} live, ${delegationHealth.checkpoint.closedSummaries} archived)`,
+				);
+			}
+			if (delegationHealth.recovery) {
+				lines.push(
+					`  - Recovery: ${delegationHealth.recovery.source} (${delegationHealth.recovery.ok ? 'ok' : `FAILED: ${delegationHealth.recovery.reason ?? 'uncertain'}`})`,
+				);
+			}
+			const compactCounts = delegationHealth.counts;
+			if (
+				compactCounts.activeOwners > 0 ||
+				compactCounts.pendingAdvisories > 0 ||
+				compactCounts.lateTerminals > 0 ||
+				compactCounts.orphanWorktreeOwners > 0
+			) {
+				lines.push(
+					`  - Live set: ${compactCounts.activeOwners} active owners, ${compactCounts.pendingAdvisories} pending advisories, ${compactCounts.lateTerminals} late terminals, ${compactCounts.orphanWorktreeOwners} unsettled worktree owners`,
+				);
+			}
+			if (delegationHealth.lastUncertainty) {
+				lines.push(
+					`  - ⚠ Last uncertainty (${new Date(delegationHealth.lastUncertainty.at).toISOString()}): ${delegationHealth.lastUncertainty.reason}`,
+				);
+				if (delegationHealth.lastUncertainty.repairHint) {
+					lines.push(
+						`    repair: ${delegationHealth.lastUncertainty.repairHint}`,
+					);
+				}
+			}
+			return lines.join('\n');
 		}
 		return 'No active swarm plan found.';
 	}

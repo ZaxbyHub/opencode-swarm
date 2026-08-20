@@ -3,6 +3,13 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { QA_GATE_PIPELINE_STEP_COUNT } from '../src/config/qa-gate-pipeline';
 import { MAX_LANES } from '../src/tools/dispatch-lanes';
+import {
+	DELEGATION_COMPACTION_HIGH_WATER_BYTES,
+	MAX_CHECKPOINT_BYTES,
+	MAX_CHECKPOINT_RECORDS,
+	TOMBSTONE_MIN_AGE_MS,
+} from '../src/background/pending-delegations';
+import { MAX_RECOVERY_LEDGER_BYTES } from '../src/background/delegation-health';
 
 type DriftSeverity = 'error' | 'warning' | 'notice';
 
@@ -234,6 +241,74 @@ function detectPendingFragmentLaneCapDrift(
 				file: relative,
 				message: `release fragment lane-cap citation says ${token}, but MAX_LANES has ${MAX_LANES}`,
 			});
+		}
+		// #2034 review PRR-015: delegation-store bounds hand-copied into
+		// fragments. Each pattern maps to exactly one source constant and is
+		// ORDER-AGNOSTIC (the fragment phrases some bounds number-first and
+		// some phrase-first); MiB values are converted to bytes.
+		for (const [patterns, label, expected] of [
+			[
+				[/(\d+)\s*MiB\s+fail-closed\s+recovery\s+guard/i],
+				'recovery guard',
+				MAX_RECOVERY_LEDGER_BYTES,
+			],
+			[
+				[
+					/(\d+)\s*MiB\s+compaction\s+high-water\s+mark/i,
+					/compaction\s+high-water\s+(\d+)\s*MiB/i,
+				],
+				'compaction high-water',
+				DELEGATION_COMPACTION_HIGH_WATER_BYTES,
+			],
+			[
+				[/(\d+)\s*MiB\s+checkpoint\s+byte\s+budget/i],
+				'checkpoint byte budget',
+				MAX_CHECKPOINT_BYTES,
+			],
+		] as const) {
+			for (const regex of patterns) {
+				const global = new RegExp(regex.source, `${regex.flags}g`);
+				for (const match of contents.matchAll(global)) {
+					if (!match[1]) continue;
+					const claimedBytes = Number(match[1]) * 1024 * 1024;
+					if (claimedBytes !== expected) {
+						findings.push({
+							category,
+							severity: 'warning',
+							file: relative,
+							message: `release fragment says ${match[1]} MiB ${label}, but the source constant has ${expected} bytes`,
+						});
+					}
+				}
+			}
+		}
+		const liveCap = /live-record\s+cap\s+(\d+)/.exec(contents);
+		if (liveCap?.[1] && Number(liveCap[1]) !== MAX_CHECKPOINT_RECORDS) {
+			findings.push({
+				category,
+				severity: 'warning',
+				file: relative,
+				message: `release fragment live-record cap says ${liveCap[1]}, but MAX_CHECKPOINT_RECORDS has ${MAX_CHECKPOINT_RECORDS}`,
+			});
+		}
+		// 72 h tombstone age: match "N h" in BOTH phrasings of the tombstone
+		// bound (eviction sentence and bounds-bullet "N h closed-summary age
+		// floor") so neither copy can drift silently; unrelated hour figures
+		// are not flagged.
+		for (const tombstone of contents.matchAll(
+			/(?:(?:closed summaries (?:younger than|<))\s*(\d+)\s*h|(\d+)\s*h\s+closed-summary\s+age\s+floor)/gi,
+		)) {
+			const hours = tombstone[1] ?? tombstone[2];
+			if (!hours) continue;
+			const claimedMs = Number(hours) * 60 * 60 * 1000;
+			if (claimedMs !== TOMBSTONE_MIN_AGE_MS) {
+				findings.push({
+					category,
+					severity: 'warning',
+					file: relative,
+					message: `release fragment tombstone age says ${hours} h, but TOMBSTONE_MIN_AGE_MS has ${TOMBSTONE_MIN_AGE_MS} ms`,
+				});
+			}
 		}
 	}
 }
