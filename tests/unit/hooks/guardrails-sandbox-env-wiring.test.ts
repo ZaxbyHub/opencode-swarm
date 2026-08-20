@@ -18,6 +18,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { GuardrailsConfigSchema } from '../../../src/config/schema';
 import { _internals as guardrailsInternals } from '../../../src/hooks/guardrails';
 import {
 	_getMacOSSandboxPolicyForTest,
@@ -180,5 +181,32 @@ describe('F6a item 3 — sandbox_macos_enabled config gate reaches setMacOSSandb
 		setMacOSSandboxPolicy(true); // known starting state, opposite of expected
 		createGuardrailsHooks(directory, { ...baseGuardrailsConfig });
 		expect(_getMacOSSandboxPolicyForTest()).toBe(false);
+	});
+
+	// The schema half of the same guarantee. `sandbox_macos_enabled` is
+	// `.optional()`, NOT `.default(false)`: parsing must not invent a key the
+	// user never wrote (that regressed the exhaustive round-trip fixtures in
+	// tests/unit/config/guardrails-profile-loop-containment.test.ts). This
+	// asserts the absent-key shape AND that the absent key still lands as
+	// "disabled" at the consumer, so re-adding a Zod default fails here.
+	it('GuardrailsConfigSchema leaves sandbox_macos_enabled absent when unset, and absent still means disabled', () => {
+		const parsed = GuardrailsConfigSchema.parse({ enabled: true });
+
+		expect(parsed.sandbox_macos_enabled).toBeUndefined();
+		expect(Object.hasOwn(parsed, 'sandbox_macos_enabled')).toBe(false);
+
+		setMacOSSandboxPolicy(true); // known starting state, opposite of expected
+		createGuardrailsHooks(directory, {
+			...baseGuardrailsConfig,
+			sandbox_macos_enabled: parsed.sandbox_macos_enabled,
+		});
+		expect(_getMacOSSandboxPolicyForTest()).toBe(false);
+	});
+
+	it('GuardrailsConfigSchema still round-trips an explicit sandbox_macos_enabled: true', () => {
+		expect(
+			GuardrailsConfigSchema.parse({ sandbox_macos_enabled: true })
+				.sandbox_macos_enabled,
+		).toBe(true);
 	});
 });

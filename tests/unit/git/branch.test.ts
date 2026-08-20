@@ -446,14 +446,14 @@ describe('Git Branch Module', () => {
 			}) as NodeJS.ErrnoException;
 			setupMock({ status: null, stdout: '', stderr: '', error: enoent });
 
-			const result = branch.getGitRepositoryStatus(testCwd);
+			// #2236: ENOENT means "binary missing" only when cwd really exists
+			// (nonexistent '/test/repo' now classifies as cwd-missing instead).
+			const result = branch.getGitRepositoryStatus(process.cwd());
 
 			expect(result.isRepo).toBe(false);
 			if (!result.isRepo) {
 				expect(result.reason).toBe('git_unavailable');
 			}
-			// Issue #2236 hardening: gitExec resolves ONE git binary — ENOENT on
-			// that resolved command throws immediately, no per-candidate retry.
 			expect(mockSpawnSync).toHaveBeenCalledTimes(1);
 		});
 
@@ -554,8 +554,8 @@ describe('Git Branch Module', () => {
 
 		test('3. GitBinaryMissingError not retried: spawnSync returns git-binary-missing ENOENT, gitExec throws immediately with exactly ONE spawn call (single resolved binary, no candidate loop)', () => {
 			// Issue #2236 hardening: gitExec resolves ONE git binary instead of
-			// looping over windowsGitCandidates(). ENOENT is git-binary-missing →
-			// throws GitBinaryMissingError immediately, no retry/candidates.
+			// looping over windowsGitCandidates(). ENOENT under a cwd that really
+			// exists is git-binary-missing → throws immediately, no retry.
 			setupMock({
 				status: null,
 				stdout: '',
@@ -564,7 +564,7 @@ describe('Git Branch Module', () => {
 			});
 
 			expect(() =>
-				branch._internals.gitExec(['rev-parse', '--git-dir'], testCwd),
+				branch._internals.gitExec(['rev-parse', '--git-dir'], process.cwd()),
 			).toThrow();
 			// Exactly 1 call — the candidate loop is gone; this is the evidence
 			// that the F2 collapse actually happened, not just that the error

@@ -254,6 +254,13 @@ const WORKTREE_TIMEOUT_MS = 30_000;
 const WIN_PATH_BUDGET = 250;
 
 /**
+ * Exit code reported when git never started at all (resolution or spawn
+ * failure). Mirrors `GIT_SPAWN_FAILURE_EXIT_CODE` in `./merge.ts`; kept local
+ * rather than shared so `core.ts` gains no import edge on `merge.ts`.
+ */
+const GIT_SPAWN_FAILURE_EXIT_CODE = 1;
+
+/**
  * Runs a git command via `_internals.bunSpawn` and returns the exit code,
  * captured stdout, and captured stderr.
  *
@@ -263,23 +270,39 @@ const WIN_PATH_BUDGET = 250;
  * - `stdin: 'ignore'` (prevents Bun/Windows pipe hangs)
  * - Bounded `timeout`
  * - Best-effort `proc.kill()` in `finally`
+ *
+ * Never throws on a start failure: `_internals.resolveGitExecutable()` throws
+ * `GitBinaryMissingError` when every candidate is rejected, and calling it
+ * OUTSIDE the guard let that throw escape `runGit` entirely — structurally the
+ * same leak as the original `merge.ts` defect issue #2236 fixes. Resolution and
+ * spawn are contained together and mapped onto the non-zero `GitResult` this
+ * function already returns for a git that did not succeed (the containment
+ * shape used by `src/review/diff-source.ts`).
  */
 async function runGit(
 	args: string[],
 	cwd: string,
 	timeoutMs = WORKTREE_TIMEOUT_MS,
 ): Promise<GitResult> {
-	const proc = _internals.bunSpawn(
-		[_internals.resolveGitExecutable(), ...args],
-		{
+	let proc: ReturnType<typeof _internals.bunSpawn>;
+	try {
+		proc = _internals.bunSpawn([_internals.resolveGitExecutable(), ...args], {
 			cwd,
 			timeout: timeoutMs,
 			stdin: 'ignore' as const,
 			stdout: 'pipe' as const,
 			stderr: 'pipe' as const,
 			env: { ...process.env, LC_ALL: 'C' },
-		},
-	);
+		});
+	} catch (error) {
+		return {
+			exitCode: GIT_SPAWN_FAILURE_EXIT_CODE,
+			stdout: '',
+			stderr: `git ${args[0] ?? 'command'} could not start in ${cwd}: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		};
+	}
 	try {
 		const exitCode = await proc.exited;
 		const stdout = await proc.stdout.text();
@@ -350,17 +373,30 @@ export async function checkPathBudget(
 		return { ok: true };
 	}
 
-	const proc = _internals.bunSpawn(
-		[_internals.resolveGitExecutable(), 'ls-files'],
-		{
-			cwd: directory,
-			timeout: WORKTREE_TIMEOUT_MS,
-			stdin: 'ignore' as const,
-			stdout: 'pipe' as const,
-			stderr: 'ignore' as const,
-			env: { ...process.env, LC_ALL: 'C' },
-		},
-	);
+	// Issue #2236: `_internals.resolveGitExecutable()` throws
+	// `GitBinaryMissingError` when every candidate is rejected. Resolving
+	// outside this guard let that throw escape an otherwise fail-open advisory
+	// check. Resolution and spawn are contained together and mapped onto this
+	// function's documented fail-open contract — every other failure below
+	// (non-zero exit, empty output, longpaths query throw) already returns
+	// `{ ok: true }`, and a git that cannot start must not be the one failure
+	// mode that blocks worktree creation.
+	let proc: ReturnType<typeof _internals.bunSpawn>;
+	try {
+		proc = _internals.bunSpawn(
+			[_internals.resolveGitExecutable(), 'ls-files'],
+			{
+				cwd: directory,
+				timeout: WORKTREE_TIMEOUT_MS,
+				stdin: 'ignore' as const,
+				stdout: 'pipe' as const,
+				stderr: 'ignore' as const,
+				env: { ...process.env, LC_ALL: 'C' },
+			},
+		);
+	} catch {
+		return { ok: true };
+	}
 
 	try {
 		const exitCode = await proc.exited;

@@ -1142,8 +1142,16 @@ export const GuardrailsConfigSchema = z.object({
 	 * today: it resolves to `null` and every consumer (guardrails'
 	 * `applySandboxExecution`, `/swarm diagnose`) observes the same
 	 * fail-open "executor not available" state as before F6 shipped.
+	 *
+	 * Deliberately `.optional()` and NOT `.default(false)`: a Zod default makes
+	 * `GuardrailsConfigSchema.parse()` emit a key the user never wrote, which
+	 * breaks the exhaustive round-trip fixtures in
+	 * `tests/unit/config/guardrails-profile-loop-containment.test.ts` (parsing
+	 * must not invent config). Default-off semantics are preserved at the sole
+	 * consumer — `src/hooks/guardrails/tool-before.ts` reads
+	 * `cfg.sandbox_macos_enabled ?? false` — so an absent key is still disabled.
 	 */
-	sandbox_macos_enabled: z.boolean().default(false),
+	sandbox_macos_enabled: z.boolean().optional(),
 });
 
 export type GuardrailsConfig = z.infer<typeof GuardrailsConfigSchema>;

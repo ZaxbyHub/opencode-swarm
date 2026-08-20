@@ -6,8 +6,14 @@ import { mergeEnvForChild } from '../utils/bun-compat';
 import {
 	GitBinaryMissingError,
 	isGitBinaryMissing,
+	isSpawnCwdMissing,
+	isSpawnCwdUnreadable,
 } from '../utils/git-binary-missing-error.js';
-import { resolveGitExecutable } from '../utils/git-executable.js';
+import {
+	describeGitResolution,
+	GIT_BINARY_ENV_VAR,
+	resolveGitExecutable,
+} from '../utils/git-executable.js';
 import { warn } from '../utils/logger.js';
 import {
 	isTransientSpawnError,
@@ -151,6 +157,49 @@ export function readLaneEnvFileFromDiskSync(
 	return result;
 }
 
+/**
+ * Issue #2236 F5: builds the *actionable* "git is not available" message.
+ *
+ * `describeGitResolution()` (src/utils/git-executable.ts) is the production
+ * source of truth for what the resolver actually tried — every candidate path,
+ * its source (`override`/`platform`/`path`), and why each was rejected. A bare
+ * "git executable is not available on PATH" is what sent the original report
+ * down a four-day PATH investigation while git was present the whole time, so
+ * the thrown message names the candidates and the override escape hatch.
+ *
+ * `cwd` is named too: reaching this function means the cwd was positively
+ * classified as present-and-a-directory, which is the fact that rules the
+ * #2236 misdiagnosis out rather than leaving it implied.
+ */
+function gitBinaryMissingMessage(cwd: string): string {
+	const resolution = describeGitResolution();
+	const lines = [
+		`git executable is not available: spawning "${
+			resolution.resolvedPath ?? 'git'
+		}" failed, and the working directory ${cwd} exists and is a directory.`,
+	];
+	if (resolution.attempts.length > 0) {
+		lines.push('Candidates tried:');
+		for (const attempt of resolution.attempts) {
+			lines.push(
+				`  - [${attempt.source}] ${attempt.candidate}: ${
+					attempt.accepted ? 'accepted' : (attempt.reason ?? 'rejected')
+				}`,
+			);
+		}
+	} else {
+		lines.push(
+			'No candidate probe results are recorded for this process (the resolver was pre-seeded or has not probed yet).',
+		);
+	}
+	lines.push(
+		resolution.overrideValue
+			? `The configured override (${resolution.overrideSource ?? 'unknown'}) "${resolution.overrideValue}" did not work — point the ${GIT_BINARY_ENV_VAR} environment variable, or the "git.binary" config value, at a working git executable.`
+			: `No override is configured. Set the ${GIT_BINARY_ENV_VAR} environment variable, or the "git.binary" config value, to point at a working git executable.`,
+	);
+	return lines.join('\n');
+}
+
 function gitExec(
 	args: string[],
 	cwd: string,
@@ -200,13 +249,30 @@ function gitExec(
 		}
 
 		if (result.error) {
-			if (isGitBinaryMissing(result.error)) {
-				throw new GitBinaryMissingError(
-					process.platform === 'win32'
-						? 'git executable is not available on PATH or common Windows install locations'
-						: 'git executable is not available on PATH',
+			// Issue #2236: an ENOENT here is ambiguous — libuv reports the same
+			// code when the *binary* cannot be found and when the *cwd* is gone
+			// (or is a file). Classifying without the `cwd` we already hold is
+			// exactly the misdiagnosis this change exists to eliminate, so the
+			// split is three-way and a cwd fault names the offending directory
+			// instead of blaming PATH. Mirrors src/tools/checkpoint.ts.
+			if (isSpawnCwdMissing(result.error, cwd)) {
+				throw new Error(
+					`git could not start: working directory no longer exists: ${cwd}`,
 					{ cause: result.error },
 				);
+			}
+
+			if (isSpawnCwdUnreadable(result.error, cwd)) {
+				throw new Error(
+					`git could not start: working directory could not be inspected (permission denied): ${cwd}`,
+					{ cause: result.error },
+				);
+			}
+
+			if (isGitBinaryMissing(result.error, cwd)) {
+				throw new GitBinaryMissingError(gitBinaryMissingMessage(cwd), {
+					cause: result.error,
+				});
 			}
 
 			if (
