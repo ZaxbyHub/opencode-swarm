@@ -439,7 +439,21 @@ candidate list (`src/utils/git-executable.ts`).
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `binary` | string | _(unset)_ | Absolute path to the git executable to try first. Non-empty-string-validated at load; usability (absolute path, exists, passes `git --version`) is checked by the resolver itself — an unusable value is skipped with a warning, never fatal |
+| `binary` | string | _(unset)_ | Absolute path to the git executable to try first. **User-level config only** — see below. Non-empty-string-validated at load; usability (absolute path, exists, output matches `git version <n>.<n>`) is checked by the resolver itself — an unusable value is skipped with a warning, never fatal |
+
+> **`git.binary` is ignored in a project config.** This key is honored **only**
+> from the user-level config (`<config dir>/opencode/opencode-swarm.json`) and
+> the `OPENCODE_SWARM_GIT_BINARY` environment variable. A value set in a
+> repository's `.opencode/opencode-swarm.json` is **dropped with a warning**
+> and never used.
+>
+> The reason is that `git.binary` selects the executable the plugin spawns for
+> every git command it runs, while the project config file lives *inside the
+> repository* — so a repository could ship both a config naming a shim and the
+> shim itself, and the shim would then run with your privileges the moment you
+> opened the repo (CWE-427). If you need a per-machine git, set it in your user
+> config or the environment variable; there is no per-repository form of this
+> option.
 
 The environment variable `OPENCODE_SWARM_GIT_BINARY` always takes precedence
 over `git.binary` when set — it is the escape hatch a blocked user can set
@@ -448,6 +462,12 @@ is unusable, the resolver falls through its built-in candidate list
 (platform-specific absolute paths, then every `git` match on `PATH`, then the
 bare `git` name as a last resort) — see `describeGitResolution()` for a
 diagnostic of the most recent probe cycle.
+
+A candidate is accepted only if `<candidate> --version` exits 0 **and** prints
+git's own `git version <major>.<minor>…` line. A program that exits 0 while
+printing anything else is rejected, so an arbitrary executable cannot be
+mistaken for git — this applies to the environment variable and every
+automatically discovered candidate too, not just the config value.
 
 ### Memory
 

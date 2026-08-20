@@ -212,8 +212,8 @@ function gitBinaryMissingMessage(cwd: string): string {
 	}
 	lines.push(
 		resolution.overrideValue
-			? `The configured override (${resolution.overrideSource ?? 'unknown'}) "${resolution.overrideValue}" did not work — point the ${GIT_BINARY_ENV_VAR} environment variable, or the "git.binary" config value, at a working git executable.`
-			: `No override is configured. Set the ${GIT_BINARY_ENV_VAR} environment variable, or the "git.binary" config value, to point at a working git executable.`,
+			? `The configured override (${resolution.overrideSource ?? 'unknown'}) "${resolution.overrideValue}" did not work — point the ${GIT_BINARY_ENV_VAR} environment variable, or the "git.binary" value in your USER config (a project .opencode config is ignored for this key), at a working git executable.`
+			: `No override is configured. Set the ${GIT_BINARY_ENV_VAR} environment variable, or the "git.binary" value in your USER config (a project .opencode config is ignored for this key), to point at a working git executable.`,
 	);
 	return lines.join('\n');
 }

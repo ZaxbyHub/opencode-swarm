@@ -17,7 +17,10 @@
  * to avoid it):
  *
  *   1. explicit override — `OPENCODE_SWARM_GIT_BINARY` env var, else the
- *      value registered via `setGitBinaryOverride` (config `git.binary`);
+ *      value registered via `setGitBinaryOverride` (the USER-LEVEL config
+ *      `git.binary`; a project/repo-supplied value is refused before it ever
+ *      reaches this module — see `enforceGitBinaryProvenance` in
+ *      `src/config/loader.ts`);
  *   2. platform absolute candidates (darwin/linux/win32 — see
  *      `platformCandidates`);
  *   3. ALL PATH matches for `git` (every PATH entry is scanned, not just
@@ -30,7 +33,10 @@
  * `/usr/bin/git` xcode-select shim that exists on disk but fails with
  * `xcrun: error: invalid active developer path`, and it compensates for
  * `isExecutableFile`'s missing `X_OK` check
- * (`src/utils/external-tool-runner.ts`).
+ * (`src/utils/external-tool-runner.ts`). Exit 0 alone does NOT accept a
+ * candidate: the output must match git's own `git version <n>.<n>` format
+ * (`GIT_VERSION_PATTERN`), so an arbitrary program that merely exits 0 is
+ * never mistaken for git.
  *
  * Bounded probing (AGENTS.md invariant 1 — plugin init is fast and
  * side-effect-minimal): per-probe timeout 250ms, total first-resolution
@@ -84,6 +90,43 @@ const BARE_GIT = 'git';
 const PROBE_MAX_BUFFER_BYTES = 64 * 1024;
 
 const WINDOWS_PATH_EXTENSIONS = ['.exe', '.cmd', '.bat'];
+
+/**
+ * `git --version` prints exactly `git version <major>.<minor>...` — a fixed,
+ * NON-localized format string in git's own `cmd_version()`. Requiring it is
+ * what makes the probe an "is this git?" check instead of an "is this an
+ * executable that exits 0?" check.
+ *
+ * SECURITY (CWE-427/CWE-77). Every candidate — including the explicit
+ * override — is accepted purely on the strength of this probe, and the
+ * accepted path is then spawned for every host-side git call. Without a
+ * format check, ANY program that exits 0 qualifies: `/bin/true`, a shell
+ * shim, a downloaded helper. The provenance gate in `src/config/loader.ts`
+ * stops an untrusted repository from NAMING such a program; this check is the
+ * independent second layer that also covers the env var and any future
+ * candidate source.
+ *
+ * Deliberately anchored to the first line only, so a wrapper that prints its
+ * own banner AFTER git's line (e.g. `hub`) still passes, while a program
+ * whose output merely CONTAINS the phrase does not.
+ */
+const GIT_VERSION_PATTERN = /^git version \d+\.\d+/;
+
+/** Max characters of a rejected candidate's output echoed into a reason. */
+const PROBE_OUTPUT_EXCERPT_CHARS = 60;
+
+/**
+ * Excerpt untrusted probe output for a diagnostic string. Non-printable bytes
+ * are collapsed to spaces so a hostile candidate cannot smuggle ANSI escapes,
+ * newlines, or carriage returns into a warning rendered on the user's
+ * terminal.
+ */
+function excerptProbeOutput(raw: string): string {
+	return raw
+		.slice(0, PROBE_OUTPUT_EXCERPT_CHARS)
+		.replace(/[^\x20-\x7E]/g, ' ')
+		.trim();
+}
 
 export type GitResolutionCandidateSource = 'override' | 'platform' | 'path';
 
@@ -343,6 +386,19 @@ function probeCandidate(
 			reason: `git --version returned ${statusDescription}`,
 		};
 	}
+
+	// Exit 0 is NOT enough — the output must actually be git's. See
+	// GIT_VERSION_PATTERN.
+	const versionOutput = (result.stdout ?? '').toString().trim();
+	if (!GIT_VERSION_PATTERN.test(versionOutput)) {
+		const excerpt = excerptProbeOutput(versionOutput);
+		return {
+			accepted: false,
+			reason: excerpt
+				? `not git: --version printed "${excerpt}"`
+				: 'not git: --version printed nothing',
+		};
+	}
 	return { accepted: true };
 }
 
@@ -540,6 +596,14 @@ export function __seedGitExecutableForTests(value: string): void {
  * this only registers the config fallback. Resets the cache ONLY when the
  * value actually changes, so a repeat/multi-swarm init does not discard an
  * already-memoized good resolution.
+ *
+ * SECURITY: callers must pass only a USER-LEVEL value. `git.binary` selects
+ * an executable this process spawns, so a value read from a repository's
+ * `.opencode/opencode-swarm.json` would be attacker-controlled code
+ * selection (CWE-427). The config loader strips a project-supplied value
+ * before the merged config is built (`enforceGitBinaryProvenance` in
+ * `src/config/loader.ts`), which is why the sole production caller
+ * (`src/index.ts`) can pass `config.git?.binary` directly.
  */
 export function setGitBinaryOverride(value?: string): void {
 	const normalized = value && value.trim() !== '' ? value : undefined;

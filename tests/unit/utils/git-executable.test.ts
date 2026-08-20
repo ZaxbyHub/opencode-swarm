@@ -33,13 +33,23 @@ function restoreInternals(): void {
 	_internals.yieldToEventLoop = ORIGINAL_INTERNALS.yieldToEventLoop;
 }
 
+/**
+ * The stdout default is a REAL `git --version` line, not an empty buffer:
+ * `probeCandidate` accepts a candidate only when its output matches git's own
+ * format (GIT_VERSION_PATTERN), so a fixture that exits 0 while printing
+ * nothing simulates "some program that is not git", not "git". Tests that WANT
+ * that case override `stdout` explicitly — see
+ * git-executable-version-probe.test.ts.
+ */
+const GIT_VERSION_STDOUT = 'git version 2.43.0\n';
+
 function fakeSpawnResult(
 	overrides: Partial<SpawnSyncReturns<Buffer>> = {},
 ): SpawnSyncReturns<Buffer> {
 	return {
 		pid: 4242,
-		output: [null, Buffer.from(''), Buffer.from('')],
-		stdout: Buffer.from(''),
+		output: [null, Buffer.from(GIT_VERSION_STDOUT), Buffer.from('')],
+		stdout: Buffer.from(GIT_VERSION_STDOUT),
 		stderr: Buffer.from(''),
 		status: 0,
 		signal: null,

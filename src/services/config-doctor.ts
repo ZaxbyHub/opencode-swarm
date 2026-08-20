@@ -1438,6 +1438,12 @@ function validateConfigKey(path: string, value: unknown): ConfigFinding[] {
 		// src/config/schema.ts). Validation is therefore owed here, where a
 		// finding is advisory and non-fatal — without it a typo'd or blank
 		// override is accepted silently and only surfaces as a spawn failure.
+		//
+		// These findings are SOURCE-AGNOSTIC by construction: this validator
+		// receives a key/value pair, not the file it came from. The trust
+		// decision that a project-level `git.binary` is refused outright
+		// (CWE-427) therefore lives in the loader, which does see provenance —
+		// `enforceGitBinaryProvenance` in src/config/loader.ts.
 		case 'git.binary': {
 			if (value !== undefined && typeof value !== 'string') {
 				findings.push({

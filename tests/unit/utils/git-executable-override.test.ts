@@ -24,6 +24,12 @@ import {
 	resolveGitExecutableAsync,
 	setGitBinaryOverride,
 } from '../../../src/utils/git-executable';
+import {
+	SIM_GIT_NAME,
+	SIM_PLATFORM,
+	simJoin,
+	writeSimFixture,
+} from '../../helpers/git-executable-fixtures.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const ORIGINAL_INTERNALS = { ..._internals };
@@ -41,8 +47,9 @@ function fakeSpawnResult(
 ): SpawnSyncReturns<Buffer> {
 	return {
 		pid: 4242,
-		output: [null, Buffer.from(''), Buffer.from('')],
-		stdout: Buffer.from(''),
+		// Real `git --version` output — probeCandidate requires git's own format.
+		output: [null, Buffer.from('git version 2.43.0\n'), Buffer.from('')],
+		stdout: Buffer.from('git version 2.43.0\n'),
 		stderr: Buffer.from(''),
 		status: 0,
 		signal: null,
@@ -74,94 +81,124 @@ afterEach(() => {
 	fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
-function writeAcceptedBinary(name: string): string {
-	const dir = fs.mkdtempSync(path.join(tmpDir, `${name}-`));
-	const binPath = path.join(dir, 'git.exe');
-	fs.writeFileSync(binPath, 'stub');
-	return binPath;
+/**
+ * On-disk fixtures come from tests/helpers/git-executable-fixtures.ts, which
+ * shapes every candidate path for SIM_PLATFORM rather than for the host that
+ * happens to be running the suite. See that module for why a `path.join`
+ * fixture is a different string from the candidate the resolver generates,
+ * and why `win32` is the only simulation that works on both hosts.
+ */
+function simulateFixturePlatform(): void {
+	_internals.platform = () => SIM_PLATFORM;
+}
+
+/** Bound to this test's own tmpdir; see writeSimFixture for the guards. */
+function writeFixture(
+	label: string,
+	...segments: string[]
+): { dir: string; candidate: string } {
+	return writeSimFixture(tmpDir, label, ...segments);
+}
+
+/**
+ * Resolve, then assert BOTH that `expected` came back AND that the resolver
+ * actually generated that string as a candidate. The second assertion is the
+ * recurrence guard: a fixture shaped for the HOST instead of `SIM_PLATFORM`
+ * fails it first, printing the generated candidate list beside the fixture
+ * path — which names the cause, unlike a bare `Received: "git"`.
+ */
+function expectResolvesTo(expected: string): void {
+	const resolved = resolveGitExecutable();
+	expect(describeGitResolution().attempts.map((a) => a.candidate)).toContain(
+		expected,
+	);
+	expect(resolved).toBe(expected);
 }
 
 describe('git-executable — override precedence', () => {
 	test('env override wins over config override', () => {
-		const envGit = writeAcceptedBinary('env');
-		const configGit = writeAcceptedBinary('config');
+		const envGit = writeFixture('env').candidate;
+		const configGit = writeFixture('config').candidate;
 		setGitBinaryOverride(configGit);
 
-		_internals.platform = () => 'win32';
+		simulateFixturePlatform();
 		_internals.env = () => ({ [GIT_BINARY_ENV_VAR]: envGit, PATH: '' });
 		_internals.spawnSync = (cmd) =>
 			cmd === envGit || cmd === configGit
 				? fakeSpawnResult({ status: 0 })
 				: enoentResult();
 
-		expect(resolveGitExecutable()).toBe(envGit);
+		expectResolvesTo(envGit);
 	});
 
 	test('config override is used when no env override is set', () => {
-		const configGit = writeAcceptedBinary('config');
+		const configGit = writeFixture('config').candidate;
 		setGitBinaryOverride(configGit);
 
-		_internals.platform = () => 'win32';
+		simulateFixturePlatform();
 		_internals.env = () => ({ PATH: '' });
 		_internals.spawnSync = (cmd) =>
 			cmd === configGit ? fakeSpawnResult({ status: 0 }) : enoentResult();
 
-		expect(resolveGitExecutable()).toBe(configGit);
+		expectResolvesTo(configGit);
 	});
 
 	test('platform candidate wins over a PATH candidate when both are valid', () => {
-		const programFilesDir = path.join(tmpDir, 'ProgramFiles');
-		fs.mkdirSync(path.join(programFilesDir, 'Git', 'cmd'), { recursive: true });
-		const platformGit = path.join(programFilesDir, 'Git', 'cmd', 'git.exe');
-		fs.writeFileSync(platformGit, 'stub');
+		// `Git`/`cmd` are the literal segments `windowsPlatformCandidates()`
+		// appends to a ProgramFiles root, so the fixture is built from the same
+		// segments and joined with the SIMULATED separator.
+		const platformFixture = writeFixture(
+			'ProgramFiles',
+			'Git',
+			'cmd',
+			SIM_GIT_NAME,
+		);
+		const pathFixture = writeFixture('PathBin');
 
-		const pathDir = path.join(tmpDir, 'PathBin');
-		fs.mkdirSync(pathDir, { recursive: true });
-		const pathGit = path.join(pathDir, 'git.exe');
-		fs.writeFileSync(pathGit, 'stub');
-
-		_internals.platform = () => 'win32';
-		_internals.env = () => ({ ProgramFiles: programFilesDir, PATH: pathDir });
+		simulateFixturePlatform();
+		_internals.env = () => ({
+			ProgramFiles: platformFixture.dir,
+			PATH: pathFixture.dir,
+		});
 		_internals.spawnSync = (cmd) =>
-			cmd === platformGit || cmd === pathGit
+			cmd === platformFixture.candidate || cmd === pathFixture.candidate
 				? fakeSpawnResult({ status: 0 })
 				: enoentResult();
 
-		expect(resolveGitExecutable()).toBe(platformGit);
+		expectResolvesTo(platformFixture.candidate);
 	});
 
 	test('PATH candidate wins when no platform candidate is valid', () => {
-		const pathDir = path.join(tmpDir, 'PathBin');
-		fs.mkdirSync(pathDir, { recursive: true });
-		const pathGit = path.join(pathDir, 'git.exe');
-		fs.writeFileSync(pathGit, 'stub');
+		const pathFixture = writeFixture('PathBin');
 
-		_internals.platform = () => 'win32';
+		simulateFixturePlatform();
 		// ProgramFiles points at a real, empty directory — the constructed
 		// Git\cmd\git.exe / Git\bin\git.exe candidates do not exist.
-		_internals.env = () => ({ ProgramFiles: tmpDir, PATH: pathDir });
+		_internals.env = () => ({ ProgramFiles: tmpDir, PATH: pathFixture.dir });
 		_internals.spawnSync = (cmd) =>
-			cmd === pathGit ? fakeSpawnResult({ status: 0 }) : enoentResult();
+			cmd === pathFixture.candidate
+				? fakeSpawnResult({ status: 0 })
+				: enoentResult();
 
-		expect(resolveGitExecutable()).toBe(pathGit);
+		expectResolvesTo(pathFixture.candidate);
 	});
 });
 
 describe('git-executable — invalid override (F4 carry-forward item i)', () => {
 	test('a relative-path override is skipped with a warning and resolution falls through', () => {
-		const pathGit = writeAcceptedBinary('fallback');
-		const pathDir = path.dirname(pathGit);
+		const pathFixture = writeFixture('fallback');
 
-		_internals.platform = () => 'win32';
+		simulateFixturePlatform();
 		_internals.env = () => ({
 			[GIT_BINARY_ENV_VAR]: 'relative\\git.exe',
-			PATH: pathDir,
+			PATH: pathFixture.dir,
 		});
 		_internals.spawnSync = (cmd) =>
-			cmd === pathGit ? fakeSpawnResult({ status: 0 }) : enoentResult();
+			cmd === pathFixture.candidate
+				? fakeSpawnResult({ status: 0 })
+				: enoentResult();
 
-		const resolved = resolveGitExecutable();
-		expect(resolved).toBe(pathGit);
+		expectResolvesTo(pathFixture.candidate);
 
 		const { attempts } = describeGitResolution();
 		const overrideAttempt = attempts.find((a) => a.source === 'override');
@@ -172,48 +209,48 @@ describe('git-executable — invalid override (F4 carry-forward item i)', () => 
 	});
 
 	test('a nonexistent override is skipped with a warning and resolution falls through', () => {
-		const pathGit = writeAcceptedBinary('fallback');
-		const pathDir = path.dirname(pathGit);
-		const missingOverride = path.join(
-			tmpDir,
-			'nonexistent-override',
-			'git.exe',
+		const pathFixture = writeFixture('fallback');
+		// Deliberately never created — exempt from writeSimFixture, and absent
+		// on every host because it lives under this test's own temp dir.
+		const missingOverride = simJoin(
+			path.join(tmpDir, 'nonexistent-override'),
+			SIM_PLATFORM,
+			SIM_GIT_NAME,
 		);
+		expect(fs.existsSync(missingOverride)).toBe(false);
 
-		_internals.platform = () => 'win32';
+		simulateFixturePlatform();
 		_internals.env = () => ({
 			[GIT_BINARY_ENV_VAR]: missingOverride,
-			PATH: pathDir,
+			PATH: pathFixture.dir,
 		});
 		_internals.spawnSync = (cmd) =>
-			cmd === pathGit ? fakeSpawnResult({ status: 0 }) : enoentResult();
+			cmd === pathFixture.candidate
+				? fakeSpawnResult({ status: 0 })
+				: enoentResult();
 
-		const resolved = resolveGitExecutable();
-		expect(resolved).toBe(pathGit);
+		expectResolvesTo(pathFixture.candidate);
 		expect(getDeferredWarnings().some((w) => w.includes(missingOverride))).toBe(
 			true,
 		);
 	});
 
 	test('an override that fails the git --version probe is skipped with a warning and falls through', () => {
-		const brokenOverride = path.join(tmpDir, 'broken-git.exe');
-		fs.writeFileSync(brokenOverride, 'stub');
-		const pathGit = writeAcceptedBinary('fallback');
-		const pathDir = path.dirname(pathGit);
+		const brokenOverride = writeFixture('broken').candidate;
+		const pathFixture = writeFixture('fallback');
 
-		_internals.platform = () => 'win32';
+		simulateFixturePlatform();
 		_internals.env = () => ({
 			[GIT_BINARY_ENV_VAR]: brokenOverride,
-			PATH: pathDir,
+			PATH: pathFixture.dir,
 		});
 		_internals.spawnSync = (cmd) => {
 			if (cmd === brokenOverride) return fakeSpawnResult({ status: 1 });
-			if (cmd === pathGit) return fakeSpawnResult({ status: 0 });
+			if (cmd === pathFixture.candidate) return fakeSpawnResult({ status: 0 });
 			return enoentResult();
 		};
 
-		const resolved = resolveGitExecutable();
-		expect(resolved).toBe(pathGit);
+		expectResolvesTo(pathFixture.candidate);
 		expect(getDeferredWarnings().some((w) => w.includes(brokenOverride))).toBe(
 			true,
 		);
@@ -223,29 +260,33 @@ describe('git-executable — invalid override (F4 carry-forward item i)', () => 
 		// Regression guard for the "silently wins" failure mode named in the
 		// approved plan: an unusable override must not make a working host
 		// unreachable.
-		const pathGit = writeAcceptedBinary('fallback');
-		const pathDir = path.dirname(pathGit);
-		_internals.platform = () => 'win32';
-		_internals.env = () => ({ [GIT_BINARY_ENV_VAR]: '', PATH: pathDir });
+		const pathFixture = writeFixture('fallback');
+		simulateFixturePlatform();
+		_internals.env = () => ({
+			[GIT_BINARY_ENV_VAR]: '',
+			PATH: pathFixture.dir,
+		});
 		_internals.spawnSync = (cmd) =>
-			cmd === pathGit ? fakeSpawnResult({ status: 0 }) : enoentResult();
+			cmd === pathFixture.candidate
+				? fakeSpawnResult({ status: 0 })
+				: enoentResult();
 
 		// Empty string override is normalized to "unset" — resolves via PATH.
-		expect(resolveGitExecutable()).toBe(pathGit);
+		expectResolvesTo(pathFixture.candidate);
 	});
 });
 
 describe('git-executable — setGitBinaryOverride cache semantics', () => {
 	test('resets the cache only when the value actually changes', () => {
-		const gitPath = writeAcceptedBinary('cfg');
+		const gitPath = writeFixture('cfg').candidate;
 		setGitBinaryOverride(gitPath);
 
-		_internals.platform = () => 'win32';
+		simulateFixturePlatform();
 		_internals.env = () => ({ PATH: '' });
 		_internals.spawnSync = (cmd) =>
 			cmd === gitPath ? fakeSpawnResult({ status: 0 }) : enoentResult();
 
-		expect(resolveGitExecutable()).toBe(gitPath);
+		expectResolvesTo(gitPath);
 		expect(describeGitResolution().resolved).toBe(true);
 
 		setGitBinaryOverride(gitPath); // identical value — must NOT reset
@@ -309,15 +350,15 @@ describe('git-executable — negative-cache TTL (60s)', () => {
 	});
 
 	test('a successful resolution is NOT subject to the negative-cache TTL', () => {
-		const gitPath = writeAcceptedBinary('success');
+		const gitPath = writeFixture('success').candidate;
 		let simulatedNow = 0;
 		_internals.now = () => simulatedNow;
-		_internals.platform = () => 'win32';
+		simulateFixturePlatform();
 		_internals.env = () => ({ [GIT_BINARY_ENV_VAR]: gitPath, PATH: '' });
 		_internals.spawnSync = (cmd) =>
 			cmd === gitPath ? fakeSpawnResult({ status: 0 }) : enoentResult();
 
-		expect(resolveGitExecutable()).toBe(gitPath);
+		expectResolvesTo(gitPath);
 		simulatedNow = 10_000_000; // far beyond any TTL
 		expect(resolveGitExecutable()).toBe(gitPath);
 	});
@@ -407,8 +448,8 @@ describe('git-executable — resolveGitExecutableAsync', () => {
 	});
 
 	test('resolves the same absolute path as the sync entry point on success', async () => {
-		const gitPath = writeAcceptedBinary('async-success');
-		_internals.platform = () => 'win32';
+		const gitPath = writeFixture('async-success').candidate;
+		simulateFixturePlatform();
 		_internals.env = () => ({ [GIT_BINARY_ENV_VAR]: gitPath, PATH: '' });
 		_internals.spawnSync = (cmd) =>
 			cmd === gitPath ? fakeSpawnResult({ status: 0 }) : enoentResult();

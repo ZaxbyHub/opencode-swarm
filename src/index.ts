@@ -667,6 +667,12 @@ async function initializeOpenCodeSwarm(
 	// assignment — no I/O, no probe — so this cannot regress the init
 	// budget. The env var `OPENCODE_SWARM_GIT_BINARY` always wins over this
 	// config value at resolution time (src/utils/git-executable.ts).
+	//
+	// SECURITY (CWE-427): `config.git?.binary` is safe to pass straight
+	// through because the loader has already stripped any PROJECT-supplied
+	// value — `git.binary` is honored only from the user-level config and the
+	// env var, since a repo can commit both a config naming a shim and the
+	// shim itself (`enforceGitBinaryProvenance`, src/config/loader.ts).
 	setGitBinaryOverride(config.git?.binary);
 
 	// Full-auto mode validation: critic model must differ from architect model

@@ -824,6 +824,14 @@ export type DesignDocsConfig = z.infer<typeof DesignDocsConfigSchema>;
 // "config value must never make git unreachable" failure this field must
 // avoid. The env var `OPENCODE_SWARM_GIT_BINARY` always wins over this
 // value when set.
+//
+// SECURITY (CWE-427): because validation here is shape-only, the SOURCE of
+// the value carries the whole trust decision. This key is honored ONLY from
+// the user-level config and the env var. A value in a repository's
+// `.opencode/opencode-swarm.json` is untrusted — the repo can commit both the
+// config and the shim it points at — and is stripped before the merged config
+// is built (`enforceGitBinaryProvenance`, src/config/loader.ts). Zod cannot
+// make that call: it never sees which file a key came from.
 export const GitConfigSchema = z.object({
 	binary: z.string().optional(),
 });
