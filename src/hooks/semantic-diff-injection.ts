@@ -25,6 +25,8 @@ import { getImporters, normalizeGraphPath } from '../tools/repo-graph.js';
 import {
 	GitBinaryMissingError,
 	isGitBinaryMissing,
+	isSpawnCwdMissing,
+	isSpawnCwdUnreadable,
 } from '../utils/git-binary-missing-error.js';
 import { resolveGitExecutable } from '../utils/git-executable.js';
 import {
@@ -44,6 +46,14 @@ export const _internals = {
 	getImporters,
 	normalizeGraphPath,
 	resolveGitExecutable,
+	// Test seam only: `execGit` is a hoisted function declaration below, so
+	// referencing it here (before its textual definition) is safe — the
+	// binding exists by the time this object literal evaluates. Exposed so
+	// regression tests can exercise the #2236 three-way classification
+	// directly; `buildSemanticDiffBlock` swallows every git-classification
+	// error to `null` (this file's documented "failure mode: silent"), which
+	// makes the classified message unobservable through its return value.
+	execGit,
 };
 
 async function execGit(
@@ -82,10 +92,30 @@ async function execGit(
 		});
 		return stdout;
 	} catch (err) {
-		if (isGitBinaryMissing(err)) {
-			throw new GitBinaryMissingError('git binary is not available', {
-				cause: err,
-			});
+		// ENOENT from a spawn is ambiguous: it means "git is missing" just as
+		// often as it means `cwd` has been torn down. Classifying without the
+		// directory reports a stale worktree as a missing git binary — the exact
+		// misdiagnosis issue #2236 exists to eliminate. `directory` is already in
+		// scope (it is the `cwd` above), so the split is three-way and a cwd
+		// fault names the offending directory. Mirrors src/git/branch.ts and
+		// src/tools/checkpoint.ts.
+		if (isSpawnCwdMissing(err, directory)) {
+			throw new Error(
+				`git could not start: working directory no longer exists: ${directory}`,
+				{ cause: err },
+			);
+		}
+		if (isSpawnCwdUnreadable(err, directory)) {
+			throw new Error(
+				`git could not start: working directory could not be inspected (permission denied): ${directory}`,
+				{ cause: err },
+			);
+		}
+		if (isGitBinaryMissing(err, directory)) {
+			throw new GitBinaryMissingError(
+				`git executable is not available on PATH (working directory ${directory} exists)`,
+				{ cause: err },
+			);
 		}
 		throw err;
 	}

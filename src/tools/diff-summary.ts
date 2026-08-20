@@ -13,10 +13,30 @@ import { generateSummary } from '../diff/summary-generator.js';
 import {
 	GitBinaryMissingError,
 	isGitBinaryMissing,
+	isSpawnCwdMissing,
+	isSpawnCwdUnreadable,
 } from '../utils/git-binary-missing-error.js';
 import { resolveGitExecutableAsync } from '../utils/git-executable.js';
 import { createSwarmTool } from './create-tool';
 import { resolveWorkingDirectory } from './resolve-working-directory';
+
+// Test seam (mirrors src/hooks/semantic-diff-injection.ts's `_internals`
+// convention). This file has no other DI seam; `execGit` is added so
+// regression tests can inject a spawn failure via `_internals.execFile` and
+// invoke the #2236 three-way classification directly via `_internals.execGit`
+// — the only export, `diff_summary`, folds every `execGit` throw except
+// `GitBinaryMissingError` back to "treat as new/untracked file" per-item, so
+// the classified message for cwd-missing/cwd-unreadable is not observable
+// through the tool's JSON output.
+export const _internals = {
+	execFile: child_process.execFile,
+	resolveGitExecutableAsync,
+	// `execGit` is a hoisted function declaration below, so referencing it
+	// here (before its textual definition) is safe — the binding exists by
+	// the time this object literal evaluates. Mirrors the same pattern in
+	// src/hooks/semantic-diff-injection.ts.
+	execGit,
+};
 
 async function execGit(
 	workingDir: string,
@@ -27,7 +47,7 @@ async function execGit(
 	},
 ): Promise<string> {
 	try {
-		const gitExecutable = await resolveGitExecutableAsync();
+		const gitExecutable = await _internals.resolveGitExecutableAsync();
 		const stdout = await new Promise<string>((resolve, reject) => {
 			const execOpts: Record<string, unknown> = {
 				encoding: 'utf-8',
@@ -36,7 +56,7 @@ async function execGit(
 				maxBuffer: options?.maxBuffer,
 				stdio: ['ignore', 'pipe', 'pipe'],
 			};
-			child_process.execFile(
+			_internals.execFile(
 				gitExecutable,
 				args,
 				execOpts as child_process.ExecFileOptionsWithStringEncoding,
@@ -55,10 +75,30 @@ async function execGit(
 		});
 		return stdout;
 	} catch (err) {
-		if (isGitBinaryMissing(err)) {
-			throw new GitBinaryMissingError('git binary is not available', {
-				cause: err,
-			});
+		// ENOENT from a spawn is ambiguous: it means "git is missing" just as
+		// often as it means `cwd` has been torn down. Classifying without the
+		// directory reports a stale worktree as a missing git binary — the exact
+		// misdiagnosis issue #2236 exists to eliminate. `workingDir` is already
+		// in scope (it is the `cwd` above), so the split is three-way and a cwd
+		// fault names the offending directory. Mirrors src/git/branch.ts and
+		// src/tools/checkpoint.ts.
+		if (isSpawnCwdMissing(err, workingDir)) {
+			throw new Error(
+				`git could not start: working directory no longer exists: ${workingDir}`,
+				{ cause: err },
+			);
+		}
+		if (isSpawnCwdUnreadable(err, workingDir)) {
+			throw new Error(
+				`git could not start: working directory could not be inspected (permission denied): ${workingDir}`,
+				{ cause: err },
+			);
+		}
+		if (isGitBinaryMissing(err, workingDir)) {
+			throw new GitBinaryMissingError(
+				`git executable is not available on PATH (working directory ${workingDir} exists)`,
+				{ cause: err },
+			);
 		}
 		throw err;
 	}
