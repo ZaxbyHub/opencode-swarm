@@ -414,5 +414,4 @@ describe('reviewer scope lifecycle v2 (issue #2100 contracts D/E/F)', () => {
 		expect(error.message).toContain('attempts=1/3');
 		expect(error.message).toContain('responsible: architect');
 	});
-
 });
