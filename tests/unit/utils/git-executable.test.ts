@@ -13,7 +13,6 @@ import type { SpawnSyncReturns } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { clearDeferredWarnings } from '../../../src/services/warning-buffer';
-import { GitBinaryMissingError } from '../../../src/utils/git-binary-missing-error';
 import {
 	_internals,
 	describeGitResolution,
@@ -112,7 +111,10 @@ describe('git-executable — candidate ordering', () => {
 		_internals.platform = () => 'darwin';
 		_internals.env = () => ({ PATH: '' });
 
-		expect(() => resolveGitExecutable()).toThrow(GitBinaryMissingError);
+		// Every candidate is rejected, so resolution falls through to the
+		// unprobed bare name (BL-1) — but it still probed them IN ORDER, which
+		// is what this test pins.
+		expect(resolveGitExecutable()).toBe('git');
 		const { attempts } = describeGitResolution();
 		expect(attempts.map((a) => a.candidate)).toEqual([
 			'/opt/homebrew/bin/git',
@@ -126,7 +128,7 @@ describe('git-executable — candidate ordering', () => {
 		_internals.platform = () => 'linux';
 		_internals.env = () => ({ PATH: '' });
 
-		expect(() => resolveGitExecutable()).toThrow(GitBinaryMissingError);
+		expect(resolveGitExecutable()).toBe('git');
 		const { attempts } = describeGitResolution();
 		expect(attempts.map((a) => a.candidate)).toEqual([
 			'/usr/bin/git',
@@ -144,7 +146,7 @@ describe('git-executable — candidate ordering', () => {
 			LOCALAPPDATA: 'C:\\Users\\test\\AppData\\Local',
 		});
 
-		expect(() => resolveGitExecutable()).toThrow(GitBinaryMissingError);
+		expect(resolveGitExecutable()).toBe('git');
 		const { attempts } = describeGitResolution();
 		expect(attempts.map((a) => a.candidate)).toEqual([
 			'C:\\Program Files\\Git\\cmd\\git.exe',
@@ -160,7 +162,7 @@ describe('git-executable — candidate ordering', () => {
 		_internals.platform = () => 'linux';
 		_internals.env = () => ({ PATH: ['/a', '/b', '/c'].join(':') });
 
-		expect(() => resolveGitExecutable()).toThrow(GitBinaryMissingError);
+		expect(resolveGitExecutable()).toBe('git');
 		const { attempts } = describeGitResolution();
 		const pathAttempts = attempts.filter((a) => a.source === 'path');
 		expect(pathAttempts.map((a) => a.candidate)).toEqual([
@@ -174,24 +176,35 @@ describe('git-executable — candidate ordering', () => {
 		_internals.platform = () => 'linux';
 		_internals.env = () => ({ PATH: '' });
 
-		expect(() => resolveGitExecutable()).toThrow(GitBinaryMissingError);
+		// The bare name is what resolution RETURNS, and it is never itself a
+		// probed candidate — nothing ever spawned a --version check against a
+		// slash-less name, which is precisely why its success cannot be
+		// predicted from this attempt list (BL-1).
+		expect(resolveGitExecutable()).toBe('git');
 		const { attempts } = describeGitResolution();
+		// Guard against a vacuous pass: candidates really were probed.
+		expect(attempts.length).toBeGreaterThan(0);
 		expect(attempts.some((a) => a.candidate === 'git')).toBe(false);
 	});
 
-	test('empty candidate list (win32, no env hints) still throws an actionable error', () => {
+	test('empty candidate list (win32, no env hints) falls back to the bare name and reports itself unresolved', () => {
 		_internals.platform = () => 'win32';
 		_internals.env = () => ({});
 
-		expect(() => resolveGitExecutable()).toThrow(GitBinaryMissingError);
-		const { attempts } = describeGitResolution();
-		expect(attempts).toEqual([]);
-		try {
-			resolveGitExecutable();
-			throw new Error('expected resolveGitExecutable to throw');
-		} catch (err) {
-			expect((err as Error).message).toContain('no candidates were found');
-		}
+		// Zero enumerable candidates is NOT evidence that git is missing —
+		// nothing was probed at all. Returning the bare name keeps a host whose
+		// git resolves through the runtime's own PATH lookup working (BL-1).
+		expect(resolveGitExecutable()).toBe('git');
+
+		const description = describeGitResolution();
+		expect(description.attempts).toEqual([]);
+		// Deliberate asymmetry, pinned here so nobody "fixes" it later:
+		// resolution returned a usable value, yet `resolved` is false because
+		// nothing was VALIDATED. That honesty is what makes gitExec's "No
+		// candidate probe results are recorded for this process" diagnostic
+		// correct — see tests/unit/git/branch.gitexec-spawn-cwd-2236.test.ts.
+		expect(description.resolved).toBe(false);
+		expect(description.resolvedPath).toBeUndefined();
 	});
 });
 
@@ -226,7 +239,7 @@ describe('git-executable — probe validation', () => {
 					})
 				: enoentResult();
 
-		expect(() => resolveGitExecutable()).toThrow(GitBinaryMissingError);
+		expect(resolveGitExecutable()).toBe('git');
 		const { attempts } = describeGitResolution();
 		const shimAttempt = attempts.find((a) => a.candidate === shimPath);
 		expect(shimAttempt?.accepted).toBe(false);
@@ -255,7 +268,7 @@ describe('git-executable — probe validation', () => {
 		_internals.env = () => ({ [GIT_BINARY_ENV_VAR]: tmpDir, PATH: '' });
 		_internals.spawnSync = () => fakeSpawnResult({ status: 1 });
 
-		expect(() => resolveGitExecutable()).toThrow(GitBinaryMissingError);
+		expect(resolveGitExecutable()).toBe('git');
 		const { attempts } = describeGitResolution();
 		const overrideAttempt = attempts.find((a) => a.source === 'override');
 		expect(overrideAttempt?.reason).toBe('is a directory');
@@ -267,7 +280,7 @@ describe('git-executable — probe validation', () => {
 		_internals.env = () => ({ [GIT_BINARY_ENV_VAR]: missingPath, PATH: '' });
 		_internals.spawnSync = () => fakeSpawnResult({ status: 1 });
 
-		expect(() => resolveGitExecutable()).toThrow(GitBinaryMissingError);
+		expect(resolveGitExecutable()).toBe('git');
 		const { attempts } = describeGitResolution();
 		const overrideAttempt = attempts.find((a) => a.source === 'override');
 		expect(overrideAttempt?.reason).toBe('no such file');
@@ -313,24 +326,42 @@ describe('git-executable — probe validation', () => {
 		expect(calls).toBeGreaterThan(callsAfterFirst);
 	});
 
-	test('actionable error message names every candidate tried and the override', () => {
-		const overridePath = path.join(tmpDir, 'does-not-exist', 'git');
+	test('records the full actionable diagnostic — every candidate and the rejected override — while still falling back to the bare name', () => {
+		// POSIX-shaped on purpose: the simulated platform is linux, and a
+		// Windows-shaped path would be rejected as "not an absolute path"
+		// before the stat ever runs, quietly testing the wrong branch on this
+		// Windows host. Absent on every host, asserted rather than assumed.
+		const overridePath = '/opencode-swarm-2236-absent/does-not-exist/git';
+		expect(fs.existsSync(overridePath)).toBe(false);
 		_internals.platform = () => 'linux';
 		_internals.env = () => ({ [GIT_BINARY_ENV_VAR]: overridePath, PATH: '' });
 		_internals.spawnSync = () => fakeSpawnResult({ status: 1 });
 
-		let caught: unknown;
-		try {
-			resolveGitExecutable();
-		} catch (err) {
-			caught = err;
-		}
-		expect(caught).toBeInstanceOf(GitBinaryMissingError);
-		const message = (caught as Error).message;
-		expect(message).toContain(overridePath);
-		expect(message).toContain('/usr/bin/git');
-		expect(message).toContain('/usr/local/bin/git');
-		expect(message).toContain('/bin/git');
-		expect(message).toContain('also rejected');
+		// The diagnostic is no longer carried by an exception from THIS layer
+		// (BL-1: throwing here declared git missing on hosts where it works).
+		// It is the data recorded below, which gitExec renders into the
+		// GitBinaryMissingError it throws when the SPAWN fails. That rendering
+		// — candidate lines, override note, and the "... and N more" cap — is
+		// asserted in tests/unit/git/branch.gitexec-spawn-cwd-2236.test.ts.
+		// This test guarantees the renderer is fed a complete input.
+		expect(resolveGitExecutable()).toBe('git');
+
+		const description = describeGitResolution();
+		expect(description.attempts.map((a) => a.candidate)).toEqual([
+			overridePath,
+			'/usr/bin/git',
+			'/usr/local/bin/git',
+			'/bin/git',
+		]);
+		expect(description.attempts.every((a) => a.accepted === false)).toBe(true);
+		expect(
+			description.attempts.find((a) => a.source === 'override')?.reason,
+		).toBe('no such file');
+		expect(description.overrideValue).toBe(overridePath);
+		expect(description.overrideSource).toBe('env');
+		// A usable value came back, yet nothing was validated — see the
+		// empty-candidate-list test above for why that asymmetry is deliberate.
+		expect(description.resolved).toBe(false);
+		expect(description.resolvedPath).toBeUndefined();
 	});
 });

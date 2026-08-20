@@ -24,6 +24,17 @@ import {
 const GIT_TIMEOUT_MS = 30_000;
 const GIT_MAX_BUFFER_BYTES = 5 * 1024 * 1024;
 
+/**
+ * Issue #2236 NB-1: cap on candidate lines rendered by
+ * {@link gitBinaryMissingMessage}. The resolver probes one candidate per PATH
+ * entry (times three filename extensions on Windows), so an uncapped list is
+ * unbounded in the host's PATH length — measured at 209 lines on a real host.
+ * `src/tools/update-task-status.ts` surfaces `error.message` verbatim, so that
+ * is a 210-line error at the exact tool #2236 blocked. Same "... and N more"
+ * bounding as `boundZodIssues` in `src/tools/dispatch-lanes.ts`.
+ */
+const MAX_RENDERED_GIT_CANDIDATES = 10;
+
 export type GitRepositoryStatus =
 	| { isRepo: true }
 	| {
@@ -180,13 +191,19 @@ function gitBinaryMissingMessage(cwd: string): string {
 	];
 	if (resolution.attempts.length > 0) {
 		lines.push('Candidates tried:');
-		for (const attempt of resolution.attempts) {
+		// Bounded (NB-1). The override is always candidate #1
+		// (`buildCandidates` in src/utils/git-executable.ts), so a configured
+		// override's own rejection reason is never the thing that gets truncated.
+		const shown = resolution.attempts.slice(0, MAX_RENDERED_GIT_CANDIDATES);
+		for (const attempt of shown) {
 			lines.push(
 				`  - [${attempt.source}] ${attempt.candidate}: ${
 					attempt.accepted ? 'accepted' : (attempt.reason ?? 'rejected')
 				}`,
 			);
 		}
+		const omitted = resolution.attempts.length - shown.length;
+		if (omitted > 0) lines.push(`  ... and ${omitted} more`);
 	} else {
 		lines.push(
 			'No candidate probe results are recorded for this process (the resolver was pre-seeded or has not probed yet).',

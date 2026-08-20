@@ -271,13 +271,20 @@ const GIT_SPAWN_FAILURE_EXIT_CODE = 1;
  * - Bounded `timeout`
  * - Best-effort `proc.kill()` in `finally`
  *
- * Never throws on a start failure: `_internals.resolveGitExecutable()` throws
- * `GitBinaryMissingError` when every candidate is rejected, and calling it
- * OUTSIDE the guard let that throw escape `runGit` entirely — structurally the
- * same leak as the original `merge.ts` defect issue #2236 fixes. Resolution and
- * spawn are contained together and mapped onto the non-zero `GitResult` this
+ * Never throws on a start failure. Resolution and spawn are contained
+ * TOGETHER, inside one guard, and mapped onto the non-zero `GitResult` this
  * function already returns for a git that did not succeed (the containment
  * shape used by `src/review/diff-source.ts`).
+ *
+ * `resolveGitExecutable()` no longer throws on its own account — every
+ * non-accepting outcome returns the bare `'git'` name (issue #2236 BL-1, see
+ * `src/utils/git-executable.ts`) — so the containment is no longer there to
+ * catch a `GitBinaryMissingError`. It stays because the guarded region is
+ * still genuinely throw-capable: the spawn it wraps throws, and
+ * `_internals.resolveGitExecutable` is a DI seam a caller (or a test) can
+ * replace with something that does. Resolving OUTSIDE the guard would let any
+ * such throw escape `runGit` entirely — structurally the same leak as the
+ * original `merge.ts` defect issue #2236 fixes.
  */
 async function runGit(
 	args: string[],
@@ -373,10 +380,12 @@ export async function checkPathBudget(
 		return { ok: true };
 	}
 
-	// Issue #2236: `_internals.resolveGitExecutable()` throws
-	// `GitBinaryMissingError` when every candidate is rejected. Resolving
-	// outside this guard let that throw escape an otherwise fail-open advisory
-	// check. Resolution and spawn are contained together and mapped onto this
+	// Issue #2236: resolving outside this guard let a throw from the
+	// resolve-then-spawn sequence escape an otherwise fail-open advisory
+	// check. (`resolveGitExecutable()` itself no longer throws — BL-1 made
+	// every non-accepting outcome return the bare `'git'` name — but the spawn
+	// does, and `_internals.resolveGitExecutable` is a replaceable DI seam.)
+	// Resolution and spawn are contained together and mapped onto this
 	// function's documented fail-open contract — every other failure below
 	// (non-zero exit, empty output, longpaths query throw) already returns
 	// `{ ok: true }`, and a git that cannot start must not be the one failure

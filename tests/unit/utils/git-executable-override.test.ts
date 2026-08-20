@@ -15,7 +15,6 @@ import {
 	clearDeferredWarnings,
 	getDeferredWarnings,
 } from '../../../src/services/warning-buffer';
-import { GitBinaryMissingError } from '../../../src/utils/git-binary-missing-error';
 import {
 	_internals,
 	describeGitResolution,
@@ -275,11 +274,15 @@ describe('git-executable — negative-cache TTL (60s)', () => {
 			return 'linux';
 		};
 
-		expect(() => resolveGitExecutable()).toThrow(GitBinaryMissingError);
+		// Every candidate is rejected, so resolution falls back to the unprobed
+		// bare name (BL-1). What this test pins is that the FALLBACK itself is
+		// cached: the second call must return the same answer without paying
+		// for another probe cycle.
+		expect(resolveGitExecutable()).toBe('git');
 		expect(platformCalls).toBe(1);
 
 		simulatedNow = 59_000; // before the 60s TTL
-		expect(() => resolveGitExecutable()).toThrow(GitBinaryMissingError);
+		expect(resolveGitExecutable()).toBe('git');
 		expect(platformCalls).toBe(1); // no new probe cycle ran
 	});
 
@@ -295,11 +298,13 @@ describe('git-executable — negative-cache TTL (60s)', () => {
 			return 'linux';
 		};
 
-		expect(() => resolveGitExecutable()).toThrow(GitBinaryMissingError);
+		expect(resolveGitExecutable()).toBe('git');
 		expect(platformCalls).toBe(1);
 
 		simulatedNow = 61_000; // after the 60s TTL
-		expect(() => resolveGitExecutable()).toThrow(GitBinaryMissingError);
+		// Same answer, but re-derived — a host that installs git mid-session
+		// must not stay pinned to the bare fallback until restart.
+		expect(resolveGitExecutable()).toBe('git');
 		expect(platformCalls).toBe(2); // a fresh probe cycle ran
 	});
 
@@ -374,10 +379,10 @@ describe('git-executable — resolveGitExecutableAsync', () => {
 		_internals.env = () => ({ PATH: '' });
 		_internals.spawnSync = () => fakeSpawnResult({ status: 1 });
 
-		await expect(resolveGitExecutableAsync()).rejects.toBeInstanceOf(
-			GitBinaryMissingError,
-		);
-		// One yield per probed candidate — 3 linux platform candidates.
+		await expect(resolveGitExecutableAsync()).resolves.toBe('git');
+		// One yield per probed candidate — 3 linux platform candidates. The
+		// all-rejected cycle still runs to completion (and still yields between
+		// every probe) before falling back to the bare name.
 		expect(yieldCalls).toBe(3);
 	});
 
@@ -390,12 +395,14 @@ describe('git-executable — resolveGitExecutableAsync', () => {
 		_internals.env = () => ({ PATH: '' });
 		_internals.spawnSync = () => fakeSpawnResult({ status: 1 });
 
-		const [a, b] = await Promise.allSettled([
+		const [a, b] = await Promise.all([
 			resolveGitExecutableAsync(),
 			resolveGitExecutableAsync(),
 		]);
-		expect(a.status).toBe('rejected');
-		expect(b.status).toBe('rejected');
+		// Both callers get the same bare fallback out of ONE shared cycle —
+		// `platform()` (and therefore `buildCandidates`) ran exactly once.
+		expect(a).toBe('git');
+		expect(b).toBe('git');
 		expect(probeCycles).toBe(1);
 	});
 

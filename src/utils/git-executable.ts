@@ -34,18 +34,36 @@
  *
  * Bounded probing (AGENTS.md invariant 1 — plugin init is fast and
  * side-effect-minimal): per-probe timeout 250ms, total first-resolution
- * budget 1000ms. When the budget is exhausted before every candidate has
- * been tried, the remaining candidates are skipped and today's bare `'git'`
- * behavior is returned rather than declared a failure — we genuinely do not
- * know whether an untried candidate would have worked. Only when EVERY
- * candidate has been definitively probed and rejected do we throw
- * `GitBinaryMissingError` (F5) — at that point a bare `'git'` spawn would
- * hit the exact same PATH entries and fail identically, so throwing an
- * actionable error is not a regression.
+ * budget 1000ms.
+ *
+ * This resolver NEVER throws. Both non-accepting outcomes — "the budget was
+ * exhausted before every candidate had been tried" and "every candidate we
+ * could enumerate was probed and rejected" — return the bare name `'git'`
+ * (candidate 4 above), unprobed.
+ *
+ * An earlier revision threw `GitBinaryMissingError` on the all-rejected
+ * outcome, justified by "a bare `'git'` spawn would hit the exact same PATH
+ * entries and fail identically." That justification is refuted by this
+ * issue's own root-cause analysis: a slash-less spawn does NOT resolve
+ * against the PATH this module enumerates. `pathCandidates()` reads
+ * `_internals.env().PATH`, whereas the runtime resolves a bare name against
+ * libuv's `_PATH_DEFPATH` (`/usr/bin:/bin`) when the child env carries no
+ * PATH, and under Bun against a snapshot taken at PROCESS START rather than
+ * the live `process.env` (oven-sh/bun#29237). The two sets genuinely differ,
+ * so throwing reintroduced issue #2236's own defect class — reporting git as
+ * unavailable on a host where git works — precisely in the degraded-PATH
+ * state #2236 nominates as the reporter's candidate trigger. Measured:
+ * platform `linux` with `PATH=/usr/bin:/bin` threw after ZERO probes (all
+ * three POSIX candidates stat-reject in microseconds, so the budget never
+ * trips) and stayed cached for 60s.
+ *
+ * The actionable diagnostic is not lost by falling through — it moves one
+ * layer up, to the caller that actually observes a failed spawn:
+ * `gitExec()` (`src/git/branch.ts`) renders `describeGitResolution()` into
+ * the `GitBinaryMissingError` it throws when the spawn itself fails.
  *
  * Caching: a successful resolution is memoized for the process lifetime. A
- * failure (either "budget exhausted, using bare fallback" or "every
- * candidate rejected") is memoized with a 60s TTL, then re-probed. Without
+ * bare-fallback outcome is memoized with a 60s TTL, then re-probed. Without
  * any negative cache a git-less host would pay the full probe budget on
  * every call; a permanent negative cache would mean a host that installs
  * git mid-session stays broken until restart.
@@ -55,7 +73,6 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { advisoryWarn } from '../services/warning-buffer.js';
-import { GitBinaryMissingError } from './git-binary-missing-error.js';
 
 /** Env var escape hatch — a blocked user can set this without editing files. */
 export const GIT_BINARY_ENV_VAR = 'OPENCODE_SWARM_GIT_BINARY';
@@ -79,7 +96,15 @@ export interface GitResolutionAttempt {
 }
 
 export interface GitResolutionDescription {
-	/** Whether the most recent probe cycle produced a validated absolute path. */
+	/**
+	 * Whether the most recent probe cycle produced a VALIDATED ABSOLUTE PATH.
+	 *
+	 * This is deliberately narrower than "resolution returned something
+	 * usable": `resolveGitExecutable()` returns the unprobed bare `'git'` on
+	 * the fallback path, and `resolved` stays `false` there because nothing was
+	 * validated. Consumers rendering a diagnostic want exactly that
+	 * distinction — `resolvedPath` is likewise `undefined` on the fallback.
+	 */
 	resolved: boolean;
 	resolvedPath?: string;
 	attempts: GitResolutionAttempt[];
@@ -106,13 +131,17 @@ interface CacheSuccess {
 	kind: 'success';
 	path: string;
 }
-interface CacheFailure {
-	kind: 'failure';
-	mode: 'fallback' | 'missing';
-	error?: GitBinaryMissingError;
+/**
+ * No candidate was validated, so callers get the unprobed bare name. This is
+ * the ONLY negative outcome — the resolver has no "git is missing" state, by
+ * design (see the module docstring). Memoized with a TTL so a host that
+ * installs git mid-session recovers without a restart.
+ */
+interface CacheFallback {
+	kind: 'fallback';
 	expiresAt: number;
 }
-type CacheEntry = CacheSuccess | CacheFailure;
+type CacheEntry = CacheSuccess | CacheFallback;
 
 /**
  * Module state. Deliberately NOT initialized by calling anything at import
@@ -392,26 +421,6 @@ async function driveAsync(
 	return step.value;
 }
 
-function buildMissingErrorMessage(
-	attempts: GitResolutionAttempt[],
-	override: string | undefined,
-): string {
-	const lines = attempts.map(
-		(a) =>
-			`  - [${a.source}] ${a.candidate}: ${a.accepted ? 'ok' : (a.reason ?? 'rejected')}`,
-	);
-	const overrideNote = override
-		? `The configured override "${override}" was also rejected — see above.`
-		: `No override is configured. Set the ${GIT_BINARY_ENV_VAR} environment variable, or the "git.binary" config value, to point at a working git executable.`;
-	return [
-		'git executable could not be resolved on this host. Candidates tried:',
-		...(lines.length > 0
-			? lines
-			: ['  (no candidates were found for this platform)']),
-		overrideNote,
-	].join('\n');
-}
-
 /** Read the cache, expiring a stale negative entry in place. */
 function readCache(): CacheEntry | null {
 	if (cache === null) return null;
@@ -421,38 +430,37 @@ function readCache(): CacheEntry | null {
 	return null;
 }
 
+/**
+ * Commit one probe cycle's result to the cache and produce the executable to
+ * invoke. Total — there is no failure return, because neither non-accepting
+ * outcome justifies declaring git unavailable:
+ *
+ * - `exhausted-budget`: candidates remain UNTRIED, so we genuinely do not
+ *   know whether one of them would have worked.
+ * - `all-rejected`: every candidate we could ENUMERATE was rejected — but a
+ *   slash-less `'git'` spawn does not resolve against the set we enumerate
+ *   (see the module docstring for the measured evidence and oven-sh/bun#29237).
+ *
+ * Both therefore converge on the unprobed bare name. When that bare spawn
+ * genuinely fails, `gitExec` (src/git/branch.ts) classifies it and renders
+ * `describeGitResolution()`'s candidate list into an actionable error.
+ */
 function applyProbeResult(
 	result: ProbeCycleResult,
 	attempts: GitResolutionAttempt[],
-): { path: string } | { error: GitBinaryMissingError } {
+): string {
 	lastAttempts = attempts;
 
 	if (result.outcome === 'accepted') {
 		cache = { kind: 'success', path: result.path };
-		return { path: result.path };
-	}
-	if (result.outcome === 'exhausted-budget') {
-		cache = {
-			kind: 'failure',
-			mode: 'fallback',
-			expiresAt: _internals.now() + NEGATIVE_CACHE_TTL_MS,
-		};
-		return { path: BARE_GIT };
+		return result.path;
 	}
 
-	// 'all-rejected' — every candidate was definitively probed and rejected.
-	// A bare `'git'` spawn would hit the exact same PATH entries and fail
-	// identically, so this is not a regression; throw the actionable error.
-	const error = new GitBinaryMissingError(
-		buildMissingErrorMessage(attempts, effectiveOverride()),
-	);
 	cache = {
-		kind: 'failure',
-		mode: 'missing',
-		error,
+		kind: 'fallback',
 		expiresAt: _internals.now() + NEGATIVE_CACHE_TTL_MS,
 	};
-	return { error };
+	return BARE_GIT;
 }
 
 /**
@@ -463,20 +471,14 @@ function applyProbeResult(
  */
 export function resolveGitExecutable(): string {
 	const cached = readCache();
-	if (cached) {
-		if (cached.kind === 'success') return cached.path;
-		if (cached.mode === 'fallback') return BARE_GIT;
-		throw cached.error ?? new GitBinaryMissingError();
-	}
+	if (cached) return cached.kind === 'success' ? cached.path : BARE_GIT;
 
 	const platform = _internals.platform();
 	const attempts: GitResolutionAttempt[] = [];
 	const candidates = buildCandidates(platform);
 
 	const result = driveSync(probeCycle(candidates, platform, attempts));
-	const applied = applyProbeResult(result, attempts);
-	if ('error' in applied) throw applied.error;
-	return applied.path;
+	return applyProbeResult(result, attempts);
 }
 
 /**
@@ -488,11 +490,7 @@ export function resolveGitExecutable(): string {
  */
 export async function resolveGitExecutableAsync(): Promise<string> {
 	const cached = readCache();
-	if (cached) {
-		if (cached.kind === 'success') return cached.path;
-		if (cached.mode === 'fallback') return BARE_GIT;
-		throw cached.error ?? new GitBinaryMissingError();
-	}
+	if (cached) return cached.kind === 'success' ? cached.path : BARE_GIT;
 
 	if (inFlightAsync) return inFlightAsync;
 
@@ -502,9 +500,7 @@ export async function resolveGitExecutableAsync(): Promise<string> {
 
 	const run = (async (): Promise<string> => {
 		const result = await driveAsync(probeCycle(candidates, platform, attempts));
-		const applied = applyProbeResult(result, attempts);
-		if ('error' in applied) throw applied.error;
-		return applied.path;
+		return applyProbeResult(result, attempts);
 	})();
 
 	inFlightAsync = run;

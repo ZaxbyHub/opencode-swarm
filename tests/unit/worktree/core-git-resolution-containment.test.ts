@@ -4,10 +4,19 @@
  *
  * The hardening that routed `runGit` and `checkPathBudget` through
  * `_internals.resolveGitExecutable()` placed that call OUTSIDE the guarded
- * region at both sites. `resolveGitExecutable()` throws `GitBinaryMissingError`
- * when every candidate is rejected, so the throw escaped uncaught —
+ * region at both sites, so a throw from resolution escaped uncaught —
  * structurally identical to the original `merge.ts` defect this issue fixes,
  * re-introduced by the fix for it.
+ *
+ * `resolveGitExecutable()` itself no longer throws: BL-1 made every
+ * non-accepting outcome return the bare `'git'` name rather than declare git
+ * missing on a host where it works (`src/utils/git-executable.ts`). These
+ * tests therefore STUB `_internals.resolveGitExecutable` to throw. That is not
+ * theater — it is the point. The containment must hold for whatever the seam
+ * yields, and the production seam still wraps a spawn that throws for real.
+ * Pinning the guard's SHAPE here is what stops a future refactor from hoisting
+ * resolution back out of the try block, which is exactly how this leak was
+ * introduced the first time.
  *
  * Each function keeps its EXISTING failure contract:
  * - `runGit` returns a non-zero `GitResult`, exactly as it does for a spawn

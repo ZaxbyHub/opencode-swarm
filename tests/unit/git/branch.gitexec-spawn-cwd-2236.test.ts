@@ -15,6 +15,13 @@
  *    from it, so a genuinely blocked user is told which candidates were tried,
  *    why each was rejected, and which override to set.
  *
+ * This file is also the HOME of that diagnostic's coverage. The resolver
+ * itself no longer throws when every candidate is rejected — it returns the
+ * unprobed bare name so a working host is never declared git-less (BL-1) — so
+ * `gitExec` is the only layer that turns the recorded attempt list into a
+ * user-visible error. Both the content of that message and its NB-1 length cap
+ * are pinned here rather than at the resolver.
+ *
  * `branch.test.ts` is far over the FR-006 500-line cap (may only shrink), and
  * `branch.gitexec-resolver-routing.test.ts` is scoped by its own docstring to
  * resolver routing — hence a new file.
@@ -28,6 +35,7 @@ import { _internals as bunCompatInternals } from '../../../src/utils/bun-compat'
 import { GitBinaryMissingError } from '../../../src/utils/git-binary-missing-error';
 import {
 	__seedGitExecutableForTests,
+	describeGitResolution,
 	GIT_BINARY_ENV_VAR,
 	_internals as gitExecutableInternals,
 	resetGitExecutableCache,
@@ -76,11 +84,12 @@ function seedRejectedResolutionAttempts(env: NodeJS.ProcessEnv): string[] {
 	// paths '/usr/bin/git', '/usr/local/bin/git' and '/bin/git', which are
 	// absent on this Windows dev box but PRESENT on ubuntu-latest — where
 	// /usr/bin/git exists and answers `git --version`, so `probeCycle` returns
-	// 'accepted' and this helper's toThrow() inverts. That is a test whose
-	// result depends on the author's host: green locally, red in CI on every
-	// PR (.github/workflows/ci.yml runs `unit` on ubuntu-latest). It is the
-	// same false-green class #2236 exists to eliminate, so it is designed out
-	// rather than commented around.
+	// 'accepted', resolution yields that absolute path instead of the bare
+	// name, and the attempt list this helper exists to build never contains a
+	// rejection. That is a test whose result depends on the author's host:
+	// green locally, red in CI on every PR (.github/workflows/ci.yml runs
+	// `unit` on ubuntu-latest). It is the same false-green class #2236 exists
+	// to eliminate, so it is designed out rather than commented around.
 	const absentRoot = path.join(tempRoot('nogit'), 'absent');
 	const candidates = [
 		`${absentRoot}\\Git\\cmd\\git.exe`,
@@ -98,7 +107,26 @@ function seedRejectedResolutionAttempts(env: NodeJS.ProcessEnv): string[] {
 		'ProgramFiles(x86)': undefined,
 		LOCALAPPDATA: undefined,
 	});
-	expect(() => resolveGitExecutable()).toThrow(GitBinaryMissingError);
+	// The resolver no longer throws when every candidate is rejected — it
+	// returns the unprobed bare name (BL-1). That IS the property protecting a
+	// host where git works but is not on the PATH this module enumerates, so it
+	// is asserted positively.
+	expect(resolveGitExecutable()).toBe('git');
+	// Self-verifying precondition, restored in the same breath: `toBe('git')`
+	// alone would also hold if ZERO candidates had been built, which would make
+	// every assertion downstream vacuous. Pin that the cycle really probed and
+	// really rejected both candidates.
+	const { attempts, resolved, resolvedPath } = describeGitResolution();
+	// Only the PLATFORM candidates are fixed here: a caller that supplies an
+	// override in `env` legitimately prepends one more attempt.
+	expect(
+		attempts.filter((a) => a.source === 'platform').map((a) => a.candidate),
+	).toEqual(candidates);
+	expect(attempts.every((a) => a.accepted === false)).toBe(true);
+	// Nothing was VALIDATED even though resolution returned a usable value —
+	// this is what makes the rendered message say `spawning "git" failed`.
+	expect(resolved).toBe(false);
+	expect(resolvedPath).toBeUndefined();
 	return candidates;
 }
 
@@ -257,5 +285,71 @@ describe('gitExec surfaces describeGitResolution() in its missing-git error (#22
 		expect(message).not.toContain('Candidates tried:');
 		expect(message).toContain('No candidate probe results are recorded');
 		expect(message).toContain(GIT_BINARY_ENV_VAR);
+	});
+
+	test('caps the candidate list at 10 lines and keeps the override hint (NB-1)', () => {
+		// The resolver probes one candidate per PATH entry (times four filename
+		// forms on Windows), so an uncapped list grows with the host's PATH —
+		// measured at 209 lines on a real host, surfaced VERBATIM by
+		// src/tools/update-task-status.ts at the exact tool #2236 blocked.
+		//
+		// Every path below lives under a temp root that does not exist, so all
+		// candidates stat-reject identically on Windows, macOS and ubuntu CI —
+		// the win32 branch is driven through the resolver's DI seam for the same
+		// host-independence reason documented on `seedRejectedResolutionAttempts`.
+		const absentRoot = path.join(tempRoot('cap'), 'absent');
+		const pathDirs = Array.from({ length: 6 }, (_, i) =>
+			path.join(absentRoot, `bin${i}`),
+		);
+		expect(fs.existsSync(absentRoot)).toBe(false);
+
+		resetGitExecutableCache();
+		gitExecutableInternals.platform = () => 'win32';
+		gitExecutableInternals.env = () => ({
+			PATH: pathDirs.join(';'),
+			ProgramFiles: absentRoot,
+			'ProgramFiles(x86)': undefined,
+			LOCALAPPDATA: undefined,
+		});
+
+		expect(resolveGitExecutable()).toBe('git');
+		const { attempts } = describeGitResolution();
+		// 2 platform candidates + 6 PATH dirs x 4 win32 filename forms.
+		expect(attempts).toHaveLength(26);
+
+		branchInternals.resolveGitExecutable = () => 'git';
+		branchInternals.spawnSync = failingSpawn('ENOENT');
+
+		let thrown: unknown;
+		try {
+			branchInternals.gitExec(['rev-parse', '--git-dir'], process.cwd());
+		} catch (err) {
+			thrown = err;
+		}
+		expect(thrown).toBeInstanceOf(GitBinaryMissingError);
+		const message = (thrown as Error).message;
+
+		// Exactly the first 10 candidates are rendered, in order...
+		const candidateLines = message
+			.split('\n')
+			.filter((line) => line.trimStart().startsWith('- ['));
+		expect(candidateLines).toHaveLength(10);
+		for (const attempt of attempts.slice(0, 10)) {
+			expect(message).toContain(`[${attempt.source}] ${attempt.candidate}`);
+		}
+		// ...the 11th onward are summarized, not printed...
+		expect(message).toContain(`... and ${attempts.length - 10} more`);
+		expect(message).not.toContain(attempts[10]?.candidate ?? '<unreachable>');
+
+		// ...and the actionable part — the override escape hatch — survives the
+		// cap, because it is appended after the list rather than being one of
+		// the lines competing for room in it.
+		expect(message).toContain(GIT_BINARY_ENV_VAR);
+		expect(message).toContain('git.binary');
+
+		// Whole-message bound: 1 header + 1 "Candidates tried:" + 10 candidates
+		// + 1 "... and N more" + 1 override hint. Uncapped this same input
+		// renders 29 lines.
+		expect(message.split('\n')).toHaveLength(14);
 	});
 });
