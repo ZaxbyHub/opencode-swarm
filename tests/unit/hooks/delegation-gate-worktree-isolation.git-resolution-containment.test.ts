@@ -2,8 +2,13 @@
  * Issue #2236 (BL-1b): git-executable resolution failures must be CONTAINED
  * inside `worktree-isolation.ts`'s typed result contracts.
  *
- * `_internals.resolveGitExecutable()` can throw (`GitBinaryMissingError`, from
- * the cached `mode: 'missing'` state). Every one of these functions declares a
+ * The real resolver no longer throws — BL-1 made it total, returning the
+ * unprobed bare name rather than a "git is missing" error. But
+ * `_internals.resolveGitExecutable` is a replaceable DI seam, and these
+ * contracts must not depend on a reachability argument about today's
+ * implementation; a future hard-failure state would otherwise silently reopen
+ * all 13 leaks. These tests inject the throw through the seam directly, so they
+ * pin the contract regardless. Every one of these functions declares a
  * NON-throwing typed contract, so a resolution throw must become that typed
  * failure rather than escaping the function:
  *

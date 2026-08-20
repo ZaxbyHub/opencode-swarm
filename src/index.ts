@@ -565,8 +565,16 @@ async function initializeOpenCodeSwarm(
 	// staleness warning, never a plain startup line). `packageJson.version`
 	// is already imported at module scope, so this is zero extra I/O and does
 	// not touch AGENTS.md invariant 1.
+	// STDERR, not stdout. This is the only unconditional line the plugin runtime
+	// emits, and the host may use stdout for structured protocol traffic — a
+	// startup banner there risks corrupting it. Every other always-emitted
+	// operator signal in this repo goes to stderr (`criticalWarn`,
+	// src/utils/logger.ts); `console.warn` is used directly rather than
+	// `criticalWarn` because this is not a warning and should not carry that
+	// label. #2236 needs it because the reporter could not identify which
+	// plugin version was actually loaded.
 	// biome-ignore lint/suspicious/noConsole: Startup version line — user must be able to identify the running plugin version to diagnose stale-cache issues (issue #2236)
-	console.log(`[opencode-swarm] running v${packageJson.version}`);
+	console.warn(`[opencode-swarm] running v${packageJson.version}`);
 
 	// Clear deferred warnings at the very start of the session, BEFORE any
 	// init-path work that buffers advisories via advisoryWarn (config load,

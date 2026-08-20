@@ -496,9 +496,12 @@ export async function preProvisionCollisionCheck(
 	worktreePath?: string;
 	uncertainty?: string;
 }> {
-	// Issue #2236 (BL-1b): `_internals.resolveGitExecutable()` can throw
-	// (`GitBinaryMissingError`, from the cached `mode: 'missing'` state in
-	// `src/utils/git-executable.ts`). Calling it OUTSIDE the guard let that
+	// Issue #2236 (BL-1b): `_internals.resolveGitExecutable()` must not be able
+	// to escape this function. The real resolver no longer throws — BL-1 made it
+	// total, returning the unprobed bare name instead of a "git is missing"
+	// error — but `_internals.resolveGitExecutable` is a replaceable DI seam, and
+	// a typed contract must not rest on a reachability argument about today's
+	// implementation. Calling it OUTSIDE the guard let a throw
 	// throw escape this function entirely instead of becoming the typed result
 	// the signature promises — structurally the same leak fixed in `runGit`
 	// (`src/worktree/core.ts`), `src/worktree/merge.ts`, and
