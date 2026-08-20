@@ -502,7 +502,7 @@ export async function preProvisionCollisionCheck(
 	// error — but `_internals.resolveGitExecutable` is a replaceable DI seam, and
 	// a typed contract must not rest on a reachability argument about today's
 	// implementation. Calling it OUTSIDE the guard let a throw
-	// throw escape this function entirely instead of becoming the typed result
+	// escape this function entirely instead of becoming the typed result
 	// the signature promises — structurally the same leak fixed in `runGit`
 	// (`src/worktree/core.ts`), `src/worktree/merge.ts`, and
 	// `./worktree-ownership-tag.ts`. Resolution and spawn are contained
