@@ -1,8 +1,8 @@
-# `fix(pr-workflow)`: no PR-review workflow state can wedge with no exit through any tool
+# `fix(pr-workflow)`: closes four review-pipeline wedge states; integrity boundaries stay fail-closed
 
 ## Summary
 
-A tracing pass over the PR_REVIEW / PR_FEEDBACK gate found five wedge states — durable conditions that were permanent until `abort_pr_workflow`, or worse, that defeated `abort_pr_workflow` itself. This change closes the four that were live, under one rule: **unavailability degrades with disclosure; contradiction fails closed.** A check that *cannot run* never wedges the workflow; a check that *runs and disagrees* still hard-fails exactly as before.
+A tracing pass over the PR_REVIEW / PR_FEEDBACK gate found five wedge states — durable conditions that were permanent until `abort_pr_workflow`, or worse, that defeated `abort_pr_workflow` itself. This change closes the four that were live (W-5 for schema-invalid-but-**parseable** state — unparseable bytes and unreadable identity still fail everywhere, deliberately), under one rule: **unavailability degrades with disclosure; contradiction fails closed.** A check that *cannot run* never wedges the workflow; a check that *runs and disagrees* still hard-fails exactly as before. The fail-closed integrity boundaries listed below remain exits-by-`abort` only where identity or attestation cannot be proven.
 
 ## Stuck lanes no longer block abort or completion
 

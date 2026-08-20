@@ -10355,9 +10355,11 @@ export async function readPrWorkflowGateStateForRecovery(
 		.min(1)
 		.safeParse(rawRecord.activatedAt);
 	const salvagedUpdatedAt = z.string().min(1).safeParse(rawRecord.updatedAt);
-	const armedKeyPresent =
-		rawRecord.prFeedbackReadyToPublish !== undefined &&
-		rawRecord.prFeedbackReadyToPublish !== null;
+	// `undefined` is the only unarmed shape: the schema is `.optional()`, never
+	// `.nullable()`, so a `null` here can only come from corruption — treating
+	// it as absent would let the single most likely nested-record corruption
+	// bypass the armed-abort refusal (4.5-review finding, 2026-08-19).
+	const armedKeyPresent = rawRecord.prFeedbackReadyToPublish !== undefined;
 	const salvagedArmed = PrFeedbackReadyToPublishRecordSchema.safeParse(
 		rawRecord.prFeedbackReadyToPublish,
 	);

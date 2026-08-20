@@ -329,6 +329,35 @@ describe('abortPrWorkflow on salvaged state — regression: abort must survive g
 		).rejects.toThrow(/armed for publication; abort is blocked/i);
 	});
 
+	test('a NULL armed marker still refuses abort (fail-closed, not bypass)', async () => {
+		// Previous code required `!== null` for the marker to count as present,
+		// so `prFeedbackReadyToPublish: null` — the most likely nested-record
+		// corruption — silently read as UNARMED on the salvage path and abort
+		// cleared the gate (4.5-review finding). The schema is `.optional()`,
+		// never `.nullable()`: null is corruption and must be treated as armed.
+		await writeRawBytes(
+			'armed-null',
+			corruptState('armed-null', {
+				mode: 'PR_FEEDBACK',
+				prFeedbackReadyToPublish: null,
+			}),
+		);
+
+		const read = await readPrWorkflowGateStateForRecovery(
+			directory,
+			'armed-null',
+		);
+		expect(read?.armedShapeUnreadable).toBe(true);
+		expect(read?.state.prFeedbackReadyToPublish).toBeUndefined();
+
+		await expect(
+			abortPrWorkflow(directory, 'armed-null', {
+				kind: 'force',
+				reason: 'x',
+			}),
+		).rejects.toThrow(/armed for publication; abort is blocked/i);
+	});
+
 	test('abort on an absent gate still reports "no active gate"', async () => {
 		await expect(
 			abortPrWorkflow(directory, 'nothing-here', {
