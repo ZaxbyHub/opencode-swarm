@@ -175,7 +175,7 @@ describe('SAST Scan - Adversarial Tests', () => {
 		expect(mockExecuteRulesSyncCalls.length).toBe(0); // Tier A NOT called (nativeRuleSet === null)
 		expect(mockRunSemgrepCalls.length).toBe(1);
 		expect(mockRunSemgrepCalls[0].useAutoConfig).toBe(true); // Auto mode used
-		expect(mockRunSemgrepCalls[0].lang).toBe('kotlin');
+		expect(mockRunSemgrepCalls[0].lang).toBeUndefined();
 	});
 
 	it('Adversarial 5: runSemgrep returns malformed findings → must not crash', async () => {
@@ -309,7 +309,7 @@ describe('SAST Scan - Adversarial Tests', () => {
 		expect(result2.summary.files_scanned).toBe(1);
 		expect(mockRunSemgrepCalls.length).toBe(1);
 		expect(mockRunSemgrepCalls[0].useAutoConfig).toBe(true); // Auto mode
-		expect(mockRunSemgrepCalls[0].lang).toBe('kotlin');
+		expect(mockRunSemgrepCalls[0].lang).toBeUndefined();
 		expect(mockRunSemgrepCalls[0].files).toContain(kotlinFile);
 
 		// Combined: Both buckets work correctly

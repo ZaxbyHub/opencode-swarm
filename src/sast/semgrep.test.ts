@@ -211,7 +211,6 @@ describe('Semgrep Integration', () => {
 				files: ['./src/test.ts'],
 				cwd,
 				useAutoConfig: true,
-				lang: 'ts',
 			});
 
 			expect(result.available).toBe(true);
@@ -231,7 +230,6 @@ describe('Semgrep Integration', () => {
 				'--config=auto',
 				'--json',
 				'--quiet',
-				'--lang=ts',
 				'./src/test.ts',
 			]);
 		});
@@ -297,7 +295,10 @@ describe('Semgrep Integration', () => {
 			// exposing scanner output to tool responses and durable evidence.
 			const result = await runSemgrep({ files: ['src/f.ts'] });
 
-			expect(result.error).toBe('Semgrep exited with code 2');
+			expect(result.error).toBe(
+				'Semgrep exited with code 2; run Semgrep directly in the project to diagnose',
+			);
+			expect(result.failure_kind).toBe('process_exit');
 			expect(result.error).not.toContain(sensitiveStderr);
 		});
 

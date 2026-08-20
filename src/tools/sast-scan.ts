@@ -18,6 +18,7 @@ import {
 	checkSemgrepAvailable,
 	isSemgrepAvailable,
 	runSemgrep,
+	type SemgrepFailureKind,
 } from '../sast/semgrep';
 import { warn } from '../utils';
 import { createSwarmTool } from './create-tool';
@@ -66,6 +67,8 @@ export interface SastScanResult {
 	verdict: EvidenceVerdict;
 	/** Validation error when the requested scan cannot safely run */
 	error?: string;
+	/** Machine-readable failure category for gate consumers. */
+	failure_kind?: SastFailureKind;
 	/** Array of security findings */
 	findings: SastScanFinding[];
 	/** Summary information */
@@ -98,6 +101,20 @@ export interface SastScanResult {
 	/** True when pre_existing_findings were truncated to fit result limits */
 	truncated_pre_existing?: boolean;
 }
+
+export type SastFailureKind =
+	| 'semgrep_process_exit'
+	| 'semgrep_timeout'
+	| 'semgrep_cancelled'
+	| 'semgrep_output_limit'
+	| 'semgrep_spawn_error'
+	| 'semgrep_invalid_output'
+	| 'semgrep_scan_error'
+	| 'semgrep_unexpected'
+	| 'semgrep_unclassified'
+	| 'coverage'
+	| 'cancelled'
+	| 'invalid_input';
 
 export interface SastScanFinding {
 	rule_id: string;
@@ -223,6 +240,20 @@ function safeSemgrepDiagnostic(message: string): string {
 	if (/^Semgrep exited with code -?\d+$/.test(diagnostic)) {
 		return diagnostic;
 	}
+	if (
+		/^Semgrep exited with code -?\d+; run Semgrep directly in the project to diagnose$/.test(
+			diagnostic,
+		)
+	) {
+		return diagnostic;
+	}
+	if (
+		/^Semgrep exited with code -?\d+: incompatible --lang option in config mode$/.test(
+			diagnostic,
+		)
+	) {
+		return diagnostic;
+	}
 	if (/^Semgrep reported \d+ scan errors?$/.test(diagnostic)) {
 		return diagnostic;
 	}
@@ -240,6 +271,7 @@ function cancelledScanResult(
 	return {
 		verdict: 'fail',
 		error: 'SAST scan cancelled',
+		failure_kind: 'cancelled',
 		findings: finalFindings,
 		summary: {
 			engine: 'tier_a',
@@ -248,6 +280,12 @@ function cancelledScanResult(
 			findings_by_severity: countBySeverity(finalFindings),
 		},
 	};
+}
+
+function mapSemgrepFailureKind(
+	failureKind: SemgrepFailureKind | undefined,
+): SastFailureKind {
+	return failureKind ? `semgrep_${failureKind}` : 'semgrep_unclassified';
 }
 
 /**
@@ -342,6 +380,7 @@ export async function sastScan(
 	let semgrepError: string | undefined = abort_signal?.aborted
 		? 'SAST scan cancelled'
 		: undefined;
+	let semgrepFailureKind: SastFailureKind | undefined;
 
 	// Process each file
 	for (const filePath of changed_files) {
@@ -460,11 +499,9 @@ export async function sastScan(
 				let semgrepResult: Awaited<ReturnType<typeof runSemgrep>>;
 
 				if (bucketKey.startsWith('auto:')) {
-					// Profile-driven auto mode: --config auto --lang <lang>
-					const lang = bucketKey.slice('auto:'.length);
+					// Profile-driven auto mode: Semgrep infers language from the files.
 					semgrepResult = await _internals.runSemgrep({
 						files: bucketFiles,
-						lang,
 						useAutoConfig: true,
 						cwd: directory,
 						abortSignal: abort_signal,
@@ -479,6 +516,9 @@ export async function sastScan(
 				}
 				if (semgrepResult.error) {
 					semgrepError = safeSemgrepDiagnostic(semgrepResult.error);
+					semgrepFailureKind = mapSemgrepFailureKind(
+						semgrepResult.failure_kind,
+					);
 					break;
 				}
 
@@ -515,6 +555,7 @@ export async function sastScan(
 			}
 		} catch {
 			semgrepError = 'Semgrep execution failed';
+			semgrepFailureKind = 'semgrep_unexpected';
 		}
 	}
 	if (abort_signal?.aborted) {
@@ -552,6 +593,7 @@ export async function sastScan(
 		return {
 			verdict: 'fail',
 			error: `Semgrep execution failed: ${semgrepError}`,
+			failure_kind: semgrepFailureKind ?? 'semgrep_unclassified',
 			findings: finalFindings,
 			summary,
 		};
@@ -584,6 +626,7 @@ export async function sastScan(
 				verdict: 'fail',
 				error:
 					'capture_baseline requires changed_files to produce a non-empty baseline',
+				failure_kind: 'invalid_input',
 				findings: finalFindings,
 				summary: {
 					engine,
@@ -792,6 +835,7 @@ export async function sastScan(
 		// #2210: surface the zero-coverage reason (mirrors the capture_baseline
 		// path's explicit error contract).
 		...(zeroCoverageError ? { error: zeroCoverageError } : {}),
+		...(zeroCoverageError ? { failure_kind: 'coverage' as const } : {}),
 	};
 
 	if (baselineUsed) {
