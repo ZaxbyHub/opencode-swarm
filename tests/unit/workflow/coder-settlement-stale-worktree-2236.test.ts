@@ -216,17 +216,47 @@ describe('#2236 concurrent recovery of a stale lane worktree', () => {
 			recoverCoderSettlement(fixture.repo, TASK_ID),
 		]);
 
-		// `recoverCoderSettlement` runs under `withSettlementLock`, which is not
-		// reentrant and does not queue: the loser is rejected outright rather
-		// than being allowed to re-run the merge or the self-heal.
-		const settled = outcomes.filter((o) => o.status === 'fulfilled');
-		const rejected = outcomes.filter((o) => o.status === 'rejected');
-		expect(settled.length + rejected.length).toBe(2);
-		for (const failure of rejected) {
-			expect(String((failure as PromiseRejectedResult).reason)).toContain(
-				'CODER_SETTLEMENT_LOCKED',
-			);
-		}
+		// `recoverCoderSettlement` runs under `withSettlementLock`
+		// (src/workflow/coder-settlement.ts:72-93), which calls
+		// `tryAcquireLock` (src/parallel/file-locks.ts:143-198). That, in turn,
+		// hands `proper-lockfile` a `retries: { retries: 5, minTimeout: 10,
+		// maxTimeout: 500, factor: 2 }` backoff (file-locks.ts:169-178) — the
+		// lock is NOT reentrant, but it is also NOT fail-fast: a contended
+		// caller retries with exponential backoff for up to ~310ms before
+		// `tryAcquireLock` reports `acquired: false` and
+		// `withSettlementLock` throws `CODER_SETTLEMENT_LOCKED`
+		// (coder-settlement.ts:85-87). Measured empirically (7 runs): because
+		// this fixture's merge is fast, the second caller's retries always
+		// land inside that budget, so BOTH promises fulfil — there is no
+		// rejection in practice. That is timing-dependent, not a documented
+		// guarantee, so this test does not pin the fulfil/reject split.
+		// Instead it asserts the invariant that must hold under EITHER
+		// ordering: exactly one caller performs the real merge, and the
+		// other either (a) re-enters after the winner released the lock,
+		// finds `wal.state === 'COMMITTED'`, and returns `null` as a no-op
+		// (coder-settlement.ts:810-816), or (b) is turned away by the lock
+		// with `CODER_SETTLEMENT_LOCKED`. There is no third outcome — in
+		// particular, never a second real merge.
+		const winners = outcomes.filter(
+			(o) => o.status === 'fulfilled' && o.value !== null,
+		);
+		const idempotentNoops = outcomes.filter(
+			(o) => o.status === 'fulfilled' && o.value === null,
+		);
+		const lockRejections = outcomes.filter(
+			(o) =>
+				o.status === 'rejected' &&
+				String((o as PromiseRejectedResult).reason).includes(
+					'CODER_SETTLEMENT_LOCKED',
+				),
+		);
+		expect(winners).toHaveLength(1);
+		expect(idempotentNoops.length + lockRejections.length).toBe(1);
+		// No outcome falls outside those three buckets (e.g. a second winner,
+		// or a rejection for a different reason).
+		expect(
+			winners.length + idempotentNoops.length + lockRejections.length,
+		).toBe(outcomes.length);
 
 		// End state is indistinguishable from a single run.
 		expect(readWal(fixture)).toMatchObject({

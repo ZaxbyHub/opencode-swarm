@@ -114,12 +114,18 @@ describe('complexity_hotspots', () => {
 			Bun.spawn = originalSpawnFn;
 		});
 
-		// #2236: these two cases assert argv plumbing, so their directory must
-		// actually EXIST. `bunSpawn` now validates `options.cwd` before creating
-		// the child, so a fictitious path short-circuits and no spawn is ever
-		// recorded. The old literals were also platform-dependent theatre: on
-		// this Windows host `/test/project` resolves to an unrelated real
-		// directory and passed by accident, while on CI it does not exist at all.
+		// #2236: these two cases assert argv plumbing, so their directory is a
+		// real temp dir rather than a literal.
+		//
+		// The reason is platform-dependence, NOT a cwd pre-check: `bunSpawn`
+		// classifies a bad `cwd` ON FAILURE (`classifySpawnFailure`,
+		// src/utils/bun-compat.ts) — it does not validate `options.cwd` before
+		// creating the child, and these cases mock `Bun.spawn` anyway, so no
+		// real spawn failure occurs here in the first place.
+		//
+		// The old literals were platform-dependent theatre: on this Windows host
+		// `/test/project` resolves to an unrelated real directory and passed by
+		// accident, while on Linux CI it does not exist at all.
 		it('Bun.spawn is called with cwd: directory when valid directory provided', async () => {
 			const testDir = canonicalMkdtemp('hotspots-cwd-single-');
 			tempDirs.push(testDir);
