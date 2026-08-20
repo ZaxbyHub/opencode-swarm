@@ -112,9 +112,10 @@ describe('reviewer scope capture v2 (issue #2100 acceptance)', () => {
 		expect(
 			captureReviewerScopeFileFingerprint(directory, '../escape.ts'),
 		).toMatchObject({ kind: 'capture_failed', code: 'outside_workspace' });
-		expect(
-			captureReviewerScopeFileFingerprint(directory, ''),
-		).toMatchObject({ kind: 'capture_failed', code: 'outside_workspace' });
+		expect(captureReviewerScopeFileFingerprint(directory, '')).toMatchObject({
+			kind: 'capture_failed',
+			code: 'outside_workspace',
+		});
 		expect(
 			captureReviewerScopeFileFingerprint(directory, 'src/\u0000a.ts'),
 		).toMatchObject({ kind: 'capture_failed', code: 'invalid_request' });

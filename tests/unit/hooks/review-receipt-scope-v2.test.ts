@@ -184,7 +184,9 @@ describe('reviewer-task manifest v2 (issue #2100 contract C)', () => {
 	});
 
 	test('a legacy v1 scope rejection surfaces the one-time REVIEW_SCOPE_LEGACY_V1 advisory', async () => {
-		const { resolveAutoReviewConfig } = await import('../../../src/config/schema');
+		const { resolveAutoReviewConfig } = await import(
+			'../../../src/config/schema'
+		);
 		const {
 			_internals: collectorInternals,
 			collectReviewerReceiptFromTranscript,

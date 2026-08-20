@@ -63,7 +63,12 @@ describe('reviewer claim retry lifecycle', () => {
 				parentSessionID: 'parent',
 				taskId: '1.1',
 				coderCallID: 'coder-retry',
-				fingerprint: { file: 'src/a.ts', kind: 'file', size: 16, hash: 'c'.repeat(64) },
+				fingerprint: {
+					file: 'src/a.ts',
+					kind: 'file',
+					size: 16,
+					hash: 'c'.repeat(64),
+				},
 			}),
 		).toBe(true);
 		expect(

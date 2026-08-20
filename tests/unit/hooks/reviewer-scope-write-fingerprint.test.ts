@@ -196,9 +196,13 @@ describe('reviewer scope post-write fingerprints', () => {
 			// First call is the deadline read inside the streaming loop.
 			return calls === 1 ? 1_000 : Number.MAX_SAFE_INTEGER;
 		};
-		const captured = captureReviewerScopeFileFingerprint(directory, 'src/a.ts', {
-			deadlineAt: 500,
-		});
+		const captured = captureReviewerScopeFileFingerprint(
+			directory,
+			'src/a.ts',
+			{
+				deadlineAt: 500,
+			},
+		);
 		expect(captured).toMatchObject({
 			kind: 'capture_failed',
 			code: 'capture_deadline',

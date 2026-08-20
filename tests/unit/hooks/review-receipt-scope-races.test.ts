@@ -38,7 +38,10 @@ beforeEach(() => {
 	);
 	git(['init']);
 	fs.mkdirSync(path.join(directory, 'src'), { recursive: true });
-	fs.writeFileSync(path.join(directory, 'src', 'a.ts'), 'export const n = 1;\n');
+	fs.writeFileSync(
+		path.join(directory, 'src', 'a.ts'),
+		'export const n = 1;\n',
+	);
 	git(['add', 'src/a.ts']);
 	git([
 		'-c',
