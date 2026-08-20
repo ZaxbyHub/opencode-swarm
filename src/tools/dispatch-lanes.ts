@@ -66,7 +66,7 @@ import { teardownEphemeralSession } from '../utils/ephemeral-session-teardown.js
 import * as logger from '../utils/logger.js';
 import { createSwarmTool } from './create-tool.js';
 
-const MAX_LANES = 8;
+export const MAX_LANES = 8;
 export const MAX_PROMPT_CHARS = 80_000;
 const COMMON_PROMPT_SEPARATOR = '\n\n';
 const DEFAULT_TIMEOUT_MS = 300_000;

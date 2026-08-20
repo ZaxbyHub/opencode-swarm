@@ -142,6 +142,13 @@ export async function handleResetSessionCommand(
 	swarmState.delegationChains.clear();
 	results.push(`✅ Cleared ${chainCount} delegation chain(s)`);
 
+	// Clear activeAgent alongside the sessions it is keyed by. With
+	// agentSessions cleared above, any surviving entry is an orphan no sweep
+	// can ever reclaim, and the snapshot writer would persist it forever.
+	const activeAgentCount = swarmState.activeAgent.size;
+	swarmState.activeAgent.clear();
+	results.push(`✅ Cleared ${activeAgentCount} active-agent mapping(s)`);
+
 	// Best-effort: clean stale worktree directories and orphan branches
 	const worktreesDir = path.resolve(
 		path.dirname(directory),

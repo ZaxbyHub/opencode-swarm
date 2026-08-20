@@ -2395,7 +2395,7 @@ export async function handleCloseCommand(
 			'',
 			'## Context',
 			'- Reset context.md for next session',
-			'- Cleared agent sessions and delegation chains',
+			'- Cleared agent sessions, delegation chains, and active-agent mappings',
 			...(cleanResult.configBackupsRemoved > 0
 				? [
 						`- Removed ${cleanResult.configBackupsRemoved} stale config backup file(s)`,

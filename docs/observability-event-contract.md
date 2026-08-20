@@ -254,15 +254,26 @@ fact, not a unit of work.
 
 #### delegation_begin
 Category `delegation`, severity `info`, privacy `pseudonymous`. Producer
-`src/telemetry.ts:411`. Consumers: none — owner **#2047**. Retention: **#2045**.
+`src/telemetry.ts:479`. Consumers: none — owner **#2047**. Retention: **#2045**.
 Required workflow IDs: `hostSessionId`, `taskId`. OTel mapping: `genai`.
+Lifecycle pair with `delegation_end`: the Task boundary emits the begin in
+`tool.execute.before` and the Task handoff emits the matching end (identical
+`sessionId`/`agentName`, paired by `callID`); the review engine emits an
+adjacent begin/end per dispatch attempt. `taskId` is `''` when no task is
+current at dispatch — the paired end may then carry the taskId resolved at
+completion (deliberate: triple equality holds only for the review-engine
+paths). Known gap: background (deferred) delegations emit a begin whose end has
+no producer yet — the trusted terminal completion event that would emit it does
+not exist, so background flows appear as begin-without-end.
 
 #### delegation_end
 Category `delegation`, severity `info`, privacy `pseudonymous`. Producer
-`src/telemetry.ts:421`. Consumer: `src/services/cost-accounting.ts:127`
+`src/telemetry.ts:489`. Consumer: `src/services/cost-accounting.ts:127`
 (`readTelemetryEvents` → `summarizeTelemetryCosts` → `/swarm costs`). Retention:
 **#2043**. Required workflow IDs: `hostSessionId`, `taskId`. OTel mapping:
-`genai`.
+`genai`. `agentName` is the delegated agent's `subagent_type` as dispatched
+(resolved from the begin-side pairing entry), not the parent session's
+`activeAgent`.
 
 #### model_fallback
 Category `delegation`, severity `notice`, privacy `pseudonymous`. Producer

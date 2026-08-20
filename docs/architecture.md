@@ -1773,7 +1773,7 @@ Agent awareness tracks what each agent is doing and shares relevant context acro
 ### Shared State
 
 `src/state.ts` exports a module-scoped singleton (`swarmState`) with:
-- `activeAgent: Map<sessionId, agentName>` — Which agent is active in each session (updated by chat.message hook)
+- `activeAgent: Map<sessionId, agentName>` — Which agent is active in each session (updated by chat.message hook; evicted in lockstep with its `agentSessions` entry — stale-session sweep, `endAgentSession`, `/swarm reset-session`, and rehydration ghost-filtering — so entries never outlive their sessions)
 - `agentSessions: Map<sessionId, AgentSessionState>` — Per-session guardrail tracking. Key fields:
   - `toolCallCount`, `startTime`, `delegationActive` — Guardrail counters
   - `taskWorkflowStates: Map<string, TaskWorkflowState>` — Bounded diagnostic projection of the authoritative exact-task state machine. States: `'idle' | 'coder_delegated' | 'pre_check_passed' | 'reviewer_run' | 'tests_run' | 'rework_required' | 'complete' | 'blocked' | 'closed'`. Normal verification transitions are generation-bound; `complete`, `blocked`, and `closed` are terminal, and only the audited exact-CAS repair path returns a settled non-success task to `idle`.

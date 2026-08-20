@@ -56,12 +56,14 @@ describe('Snapshot Integration', () => {
 				totalDuration: 1000,
 			});
 
-			// Explicitly set activeAgent for both sessions
+			// Explicitly set activeAgent for both sessions. session-2 has no
+			// agentSessions entry, so it is a ghost: written to disk (the writer
+			// serializes the in-memory map as-is) but filtered on rehydration.
 			swarmState.activeAgent.set(sessionId, 'coder');
 			swarmState.activeAgent.set('session-2', 'reviewer');
 
-			// Add delegation chain
-			swarmState.delegationChains.set('session-1', [
+			// Add delegation chain for the real session
+			swarmState.delegationChains.set(sessionId, [
 				{ from: 'architect', to: 'coder', timestamp: Date.now() },
 			]);
 
@@ -102,12 +104,14 @@ describe('Snapshot Integration', () => {
 			expect(toolAgg?.failureCount).toBe(1);
 			expect(toolAgg?.totalDuration).toBe(1000);
 
-			expect(swarmState.activeAgent.size).toBe(2);
+			// The ghost session-2 entry was written to disk but must not be
+			// resurrected: only entries whose session was restored survive.
+			expect(swarmState.activeAgent.size).toBe(1);
 			expect(swarmState.activeAgent.get(sessionId)).toBe('coder');
-			expect(swarmState.activeAgent.get('session-2')).toBe('reviewer');
+			expect(swarmState.activeAgent.get('session-2')).toBeUndefined();
 
 			expect(swarmState.delegationChains.size).toBe(1);
-			const chain = swarmState.delegationChains.get('session-1');
+			const chain = swarmState.delegationChains.get(sessionId);
 			expect(chain).toBeDefined();
 			expect(chain?.length).toBe(1);
 			expect(chain?.[0].from).toBe('architect');

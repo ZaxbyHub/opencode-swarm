@@ -566,6 +566,18 @@ async function dispatchReviewerWithFallback(
 	const models = [input.reviewerModel, ...(input.reviewerFallbackModels ?? [])];
 	const attempts: ReviewDispatchResult[] = [];
 	for (let index = 0; index < models.length; index++) {
+		// Opens the lifecycle for the attempt the next statement dispatches, so the
+		// `delegation_end` below is never a phantom completion with no start. One
+		// begin PER ATTEMPT: the end is emitted per attempt too (retry_index), so a
+		// single begin per logical review would leave fallback attempts unpaired.
+		// Emitted before the await deliberately — if the dispatch throws, the
+		// resulting begin-without-end is the correct signal that a delegation
+		// started and never completed, not a leak.
+		telemetry.delegationBegin(
+			input.sessionID,
+			input.reviewerAgent,
+			input.trigger,
+		);
 		const result = await input.dispatcher.dispatch({
 			directory: input.directory,
 			parentSessionId: input.sessionID,
@@ -1071,6 +1083,17 @@ export async function runReviewEngine(
 		validationError = validation.error;
 		for (const [retryIndex, attempt] of validation.attempts.entries()) {
 			allDispatches.push(attempt);
+			// This loop REPLAYS attempts that already completed inside
+			// runFindingValidation, so begin and end are emitted adjacently rather
+			// than around the real dispatch. That is honest here: the payload has no
+			// duration or start-timestamp field, so pairing in this schema is
+			// structural (count + identity), never temporal. Emitting from the same
+			// variables on the next statement makes the triple match by construction.
+			telemetry.delegationBegin(
+				input.sessionID,
+				input.validatorAgent,
+				input.trigger,
+			);
 			telemetry.delegationEnd(
 				input.sessionID,
 				input.validatorAgent,

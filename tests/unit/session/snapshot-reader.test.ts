@@ -697,7 +697,10 @@ describe('rehydrateState', () => {
 		});
 	});
 
-	it('populates activeAgent from snapshot', async () => {
+	it('filters activeAgent entries whose session is not restored (ghosts)', async () => {
+		// Positive restore coverage (entries kept when the session IS restored)
+		// lives in snapshot-ghost-entry-eviction.test.ts. With no restored
+		// sessions, every satellite entry is a ghost and must be dropped.
 		const snapshot: SnapshotData = {
 			version: 1,
 			writtenAt: Date.now(),
@@ -713,13 +716,10 @@ describe('rehydrateState', () => {
 
 		await rehydrateState(snapshot);
 
-		expect(swarmState.activeAgent.size).toBe(3);
-		expect(swarmState.activeAgent.get('session-1')).toBe('architect');
-		expect(swarmState.activeAgent.get('session-2')).toBe('coder');
-		expect(swarmState.activeAgent.get('session-3')).toBe('reviewer');
+		expect(swarmState.activeAgent.size).toBe(0);
 	});
 
-	it('populates delegationChains from snapshot', async () => {
+	it('filters delegationChains whose session is not restored (ghosts)', async () => {
 		const snapshot: SnapshotData = {
 			version: 1,
 			writtenAt: Date.now(),
@@ -739,14 +739,7 @@ describe('rehydrateState', () => {
 
 		await rehydrateState(snapshot);
 
-		expect(swarmState.delegationChains.size).toBe(2);
-		expect(swarmState.delegationChains.get('session-1')).toEqual([
-			{ from: 'architect', to: 'coder', timestamp: 123456 },
-			{ from: 'coder', to: 'reviewer', timestamp: 123457 },
-		]);
-		expect(swarmState.delegationChains.get('session-2')).toEqual([
-			{ from: 'architect', to: 'test_engineer', timestamp: 123458 },
-		]);
+		expect(swarmState.delegationChains.size).toBe(0);
 	});
 
 	it('populates agentSessions using deserializeAgentSession', async () => {
@@ -1084,7 +1077,11 @@ describe('loadSnapshot', () => {
 			failureCount: 2,
 			totalDuration: 5000,
 		});
-		expect(swarmState.activeAgent.get('session-1')).toBe('architect');
+		// session-1 has no agentSessions entry in the fixture, so its
+		// activeAgent entry is a ghost and is filtered on rehydration. The
+		// restored-session positive case is covered end-to-end in
+		// snapshot-ghost-entry-eviction.test.ts.
+		expect(swarmState.activeAgent.get('session-1')).toBeUndefined();
 	});
 
 	it('with missing file: leaves swarmState at defaults (no-op)', async () => {
