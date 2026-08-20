@@ -322,9 +322,12 @@ describe('ci.yml integration — windows quarantine ledger entry for win32-wrapp
 
 	test('windows ledger STATUS header count matches its active-entry count', () => {
 		// The windows ledger's re-add policy tracks its active entry count in a
-		// "# STATUS: N active entr(y|ies)" header line. Drift between the two
-		// (e.g. an entry removed without updating the header, or a sibling PR
-		// reconciling the count incorrectly) makes the header lie to triage.
+		// "# STATUS: N active entr(y|ies)" header line. Drift between the
+		// declared count and the actual active-entry count (e.g. an entry
+		// removed without updating the header, or a count bumped without the
+		// matching entries) makes the header lie to triage. Note: this only
+		// catches count drift; the presence test above (line 296) is the
+		// cross-PR overwrite guard.
 		const raw = readFileSync(WINDOWS_LEDGER_PATH, 'utf8').replace(
 			/\r\n/g,
 			'\n',
