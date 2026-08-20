@@ -825,7 +825,7 @@ export const TOOL_METADATA = {
 	},
 	swarm_memory_outcome: {
 		description:
-			'record useful, dead-end, or corrected outcomes and synchronously refresh deterministic memory lessons',
+			'record useful, dead-end, or corrected outcomes and, when enabled, synchronously refresh deterministic memory lessons',
 		agents: [],
 	},
 	swarm_command: {

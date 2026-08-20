@@ -217,6 +217,8 @@ describe('swarm memory tools', () => {
 			},
 			eventId: 'tool-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
 			outcomeRecorded: true,
+			reflectionEnabled: true,
+			reflectionAttempted: true,
 			reflectionUpdated: true,
 			digest: { generatedFrom: { entries: 1 } },
 		})) as any;
@@ -246,6 +248,8 @@ describe('swarm memory tools', () => {
 		expect(parsed.success).toBe(true);
 		expect(parsed.outcome_recorded).toBe(true);
 		expect(parsed.event_id).toBe('tool-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+		expect(parsed.reflection_enabled).toBe(true);
+		expect(parsed.reflection_attempted).toBe(true);
 		expect(parsed.reflection_updated).toBe(true);
 		expect(outcomeInternals.recordOutcomeWithReflection).toHaveBeenCalledTimes(
 			1,

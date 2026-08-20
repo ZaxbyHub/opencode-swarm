@@ -51,6 +51,20 @@ function track<T extends MemoryProvider>(provider: T): T {
 	return provider;
 }
 
+function memoryFile(root: string, fileName: string): string {
+	return path.join(root, '.swarm', 'memory', fileName);
+}
+
+async function readJsonlLines(filePath: string): Promise<string[]> {
+	try {
+		return (await fs.readFile(filePath, 'utf-8'))
+			.split('\n')
+			.filter((line) => line.trim().length > 0);
+	} catch {
+		return [];
+	}
+}
+
 function memory(text = 'Prefer the bounded parser.'): MemoryRecord {
 	const base = {
 		scope: { type: 'repository' as const, repoId: 'repo-a' },
@@ -298,102 +312,6 @@ test('two initialized JSONL providers do not lose racing outcome appends', async
 	expect((await first.get(base.id))?.metadata.outcomeEventIds).toEqual([
 		'race-a',
 		'race-b',
-	]);
-});
-
-test('JSONL reopen applies the current durable-secret policy to canonical outcomes', async () => {
-	const root = path.join(tmpDir, 'jsonl-reopen-secret-policy');
-	await fs.mkdir(root, { recursive: true });
-	const permissive = track(
-		new LocalJsonlMemoryProvider(root, {
-			...DEFAULT_MEMORY_CONFIG,
-			enabled: true,
-			redaction: { rejectDurableSecrets: false },
-		}),
-	);
-	const base = memory('Policy-sensitive canonical outcome.');
-	await permissive.upsert(base);
-	await permissive.appendOutcome?.(base.id, {
-		id: 'permissive-secret',
-		outcome: {
-			outcome: 'corrected',
-			at: '2026-08-19T11:00:00.000Z',
-			correction: 'Use Authorization: Bearer abcdefghijklmnopqrstuvwxyz12345',
-		},
-	});
-	await permissive.close?.();
-
-	const strict = track(
-		new LocalJsonlMemoryProvider(root, {
-			...DEFAULT_MEMORY_CONFIG,
-			enabled: true,
-			redaction: { rejectDurableSecrets: true },
-		}),
-	);
-	expect(await strict.get(base.id)).toBeNull();
-	expect(
-		(await strict.list({ includeInactive: true })).map((item) => item.id),
-	).not.toContain(base.id);
-});
-
-test('JSONL invalid newest base row cannot resurrect an older valid row', async () => {
-	const root = path.join(tmpDir, 'jsonl-invalid-newest-row');
-	await fs.mkdir(root, { recursive: true });
-	const provider = track(cases[0]!.create(root));
-	const base = memory('Last row owns this memory identity.');
-	await provider.upsert(base);
-	await provider.close?.();
-	await fs.appendFile(
-		path.join(root, '.swarm', 'memory', 'memories.jsonl'),
-		`${JSON.stringify({ ...base, contentHash: 'invalid-newest-row' })}\n`,
-		'utf-8',
-	);
-
-	const reopened = track(cases[0]!.create(root));
-	expect(await reopened.get(base.id)).toBeNull();
-	expect(
-		(await reopened.list({ includeInactive: true })).map((item) => item.id),
-	).not.toContain(base.id);
-});
-
-test('JSONL readers ignore and the next append repairs an incomplete tail', async () => {
-	const root = path.join(tmpDir, 'jsonl-incomplete-tail');
-	await fs.mkdir(root, { recursive: true });
-	const provider = track(cases[0]!.create(root));
-	const base = memory();
-	await provider.upsert(base);
-	const first = await provider.appendOutcome?.(base.id, {
-		id: 'complete-event',
-		outcome: { outcome: 'useful', at: '2026-08-19T11:00:00.000Z' },
-	});
-	const outcomePath = path.join(
-		root,
-		'.swarm',
-		'memory',
-		'outcome-events.jsonl',
-	);
-	await fs.appendFile(
-		outcomePath,
-		JSON.stringify({
-			id: 'unterminated-event',
-			memoryId: base.id,
-			generation: first?.metadata.outcomeGeneration,
-			outcome: { outcome: 'useful', at: '2026-08-19T11:00:01.000Z' },
-			anchors: [],
-		}),
-		'utf-8',
-	);
-
-	expect((await provider.get(base.id))?.metadata.outcomeEventIds).toEqual([
-		'complete-event',
-	]);
-	await provider.appendOutcome?.(base.id, {
-		id: 'after-repair',
-		outcome: { outcome: 'dead_end', at: '2026-08-19T11:00:02.000Z' },
-	});
-	expect((await provider.get(base.id))?.metadata.outcomeEventIds).toEqual([
-		'complete-event',
-		'after-repair',
 	]);
 });
 

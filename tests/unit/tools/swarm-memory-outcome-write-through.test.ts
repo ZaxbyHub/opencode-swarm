@@ -14,6 +14,20 @@ import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 let root: string;
 
+async function writeMemoryConfig(reflectionEnabled: boolean): Promise<void> {
+	await fs.writeFile(
+		path.join(root, '.opencode', 'opencode-swarm.json'),
+		JSON.stringify({
+			memory: {
+				enabled: true,
+				provider: 'local-jsonl',
+				reflection: { enabled: reflectionEnabled, halfLifeDays: 30 },
+			},
+		}),
+		'utf-8',
+	);
+}
+
 function storedMemory(
 	text: string,
 	overrides: Partial<MemoryRecord> = {},
@@ -44,17 +58,7 @@ beforeEach(async () => {
 	await fs.mkdir(path.join(root, '.git'));
 	await fs.writeFile(path.join(root, 'README.md'), '# Fixture\n', 'utf-8');
 	await fs.mkdir(path.join(root, '.opencode'));
-	await fs.writeFile(
-		path.join(root, '.opencode', 'opencode-swarm.json'),
-		JSON.stringify({
-			memory: {
-				enabled: true,
-				provider: 'local-jsonl',
-				reflection: { enabled: false, halfLifeDays: 30 },
-			},
-		}),
-		'utf-8',
-	);
+	await writeMemoryConfig(true);
 });
 
 afterEach(async () => {
@@ -63,7 +67,9 @@ afterEach(async () => {
 });
 
 describe('swarm_memory_outcome write-through', () => {
-	test('lessons artifacts exist before the default-off tool call returns', async () => {
+	test('records the outcome without writing lessons when reflection is disabled', async () => {
+		await writeMemoryConfig(false);
+
 		const result = await swarm_memory_outcome.execute(
 			{
 				question: 'Which parser should handle the memory file?',
@@ -87,17 +93,19 @@ describe('swarm_memory_outcome write-through', () => {
 
 		if (parsed.success !== true) throw new Error(JSON.stringify(parsed));
 		expect(parsed.success).toBe(true);
-		expect(parsed.reflection_updated).toBe(true);
-		expect(existsSync(markdownPath)).toBe(true);
-		expect(existsSync(jsonPath)).toBe(true);
-		expect(await fs.readFile(markdownPath, 'utf-8')).toContain(
-			'Which parser should handle the memory file?',
-		);
+		expect(parsed.status).toBe('complete');
+		expect(parsed.partial).toBe(false);
+		expect(parsed.reflection_enabled).toBe(false);
+		expect(parsed.reflection_attempted).toBe(false);
+		expect(parsed.reflection_updated).toBe(false);
+		expect(existsSync(markdownPath)).toBe(false);
+		expect(existsSync(jsonPath)).toBe(false);
 	});
 
 	test('reports committed partial success and retries reflection without duplicating the outcome', async () => {
 		const reflectionDir = path.join(root, '.swarm', 'reflections');
 		const markdownPath = path.join(reflectionDir, 'lessons.md');
+		const jsonPath = path.join(reflectionDir, 'lessons.json');
 		await fs.mkdir(markdownPath, { recursive: true });
 		const args = {
 			question: 'How is a committed outcome retried safely?',
@@ -124,12 +132,17 @@ describe('swarm_memory_outcome write-through', () => {
 			status: 'partial',
 			partial: true,
 			outcome_recorded: true,
+			reflection_enabled: true,
+			reflection_attempted: true,
 			reflection_updated: false,
 			outcomes: 1,
 		});
 		expect(partial.event_id).toMatch(/^tool-[a-f0-9]{32}$/);
 		expect(partial.error).toBeString();
 		expect(partial.reflection_error).toBeString();
+		expect(
+			JSON.parse(await fs.readFile(jsonPath, 'utf-8')).tentative[0]?.text,
+		).toContain('How is a committed outcome retried safely?');
 
 		await fs.rm(markdownPath, { recursive: true });
 		const retry = JSON.parse(await swarm_memory_outcome.execute(args, context));
@@ -139,6 +152,8 @@ describe('swarm_memory_outcome write-through', () => {
 			status: 'complete',
 			partial: false,
 			outcome_recorded: true,
+			reflection_enabled: true,
+			reflection_attempted: true,
 			reflection_updated: true,
 			outcomes: 1,
 		});

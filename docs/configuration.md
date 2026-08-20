@@ -450,14 +450,14 @@ Optional scoped memory substrate for recall and proposal-only memory writes.
 | `recall.injection.requireQuerySignal` | boolean | `true` | Require text, tag, file, symbol, or explicit kind query signal before automatic injection |
 | `recall.injection.maxItems` | number | `6` | Maximum memories automatically injected into agent context |
 | `recall.injection.tokenBudget` | number | `1000` | Token budget for automatic memory injection |
-| `reflection.enabled` | boolean | `false` | Render and inject deterministic outcome-scored lessons |
+| `reflection.enabled` | boolean | `false` | When `memory.enabled=true`, regenerate `.swarm/reflections/lessons.{md,json}` and allow bounded system-prompt reflection injection |
 | `reflection.halfLifeDays` | number | `30` | Half-life used for signed outcome decay |
 | `writes.mode` | string | `"propose"` | Normal agents can only create proposals |
 | `redaction.rejectDurableSecrets` | boolean | `true` | Reject durable memories that contain likely secrets |
 | `maintenance.lowUtilityMaxConfidence` | number | `0.45` | Confidence threshold used by `/swarm memory stale` low-utility reporting |
 | `maintenance.lowUtilityMinAgeDays` | number | `30` | Age threshold used by `/swarm memory stale` low-utility reporting |
 
-Memory stores durable state in `.swarm/memory/memory.db` by default. Legacy JSONL files under `.swarm/memory/` are migrated once into SQLite, backed up, and remain available through `memory.provider="local-jsonl"` for legacy/debug mode. Recall is scope-filtered and labels retrieved memory as untrusted background. Proposals do not become durable memory without curator or trusted gateway review. See [Swarm Memory](memory.md).
+Memory stores durable state in `.swarm/memory/memory.db` by default. Legacy JSONL files under `.swarm/memory/` are migrated once into SQLite, backed up, and remain available through `memory.provider="local-jsonl"` for legacy/debug mode. Recall is scope-filtered and labels retrieved memory as untrusted background. Proposals do not become durable memory without curator or trusted gateway review. Reflection remains off unless both `memory.enabled` and `memory.reflection.enabled` are true. See [Swarm Memory](memory.md).
 
 ### PR Monitor
 

@@ -82,23 +82,25 @@ export function buildReflectionDigest(
 		);
 		if (allDead) deadAnchorMemoryIds.add(record.id);
 		const firstLiveAnchorIndex = statuses.findIndex((status) => status.alive);
-		if (firstLiveAnchorIndex >= 0) {
-			for (const outcome of outcomes) {
-				if (outcome.value.outcome === 'corrected' && outcome.value.correction) {
-					corrections.push({
-						memoryId: record.id,
-						correction: clip(outcome.value.correction),
-						at: outcome.value.at,
-						anchor: anchors[firstLiveAnchorIndex],
-						group: statuses[firstLiveAnchorIndex]?.packageBoundary,
-					});
-				}
+		for (const outcome of outcomes) {
+			if (outcome.value.outcome === 'corrected' && outcome.value.correction) {
+				corrections.push({
+					memoryId: record.id,
+					correction: clip(outcome.value.correction),
+					at: outcome.value.at,
+					anchor:
+						firstLiveAnchorIndex >= 0
+							? anchors[firstLiveAnchorIndex]
+							: undefined,
+					group:
+						firstLiveAnchorIndex >= 0
+							? statuses[firstLiveAnchorIndex]?.packageBoundary
+							: undefined,
+				});
 			}
 		}
 
-		for (const [index, anchor] of anchors.entries()) {
-			const status = statuses[index] ?? { alive: true };
-			if (!status.alive) continue;
+		for (const { anchor, status } of uniqueLiveAnchors(anchors, statuses)) {
 			const item = scoreItem(
 				record,
 				anchor,
@@ -137,6 +139,27 @@ export function buildReflectionDigest(
 			asOf: now.toISOString(),
 		},
 	};
+}
+
+function uniqueLiveAnchors(
+	anchors: readonly (MemoryAnchor | undefined)[],
+	statuses: readonly ReflectionAnchorStatus[],
+): Array<{ anchor: MemoryAnchor | undefined; status: ReflectionAnchorStatus }> {
+	const byGroup = new Map<
+		string,
+		{ anchor: MemoryAnchor | undefined; status: ReflectionAnchorStatus }
+	>();
+	for (const [index, anchor] of anchors.entries()) {
+		const status = statuses[index] ?? { alive: true };
+		if (!status.alive) continue;
+		// With no package boundary, each live anchor remains its own digest item.
+		// Collapsing all ungrouped anchors would hide unrelated lessons.
+		const groupKey = status.packageBoundary ?? `file:${anchor?.file ?? ''}`;
+		if (!byGroup.has(groupKey)) {
+			byGroup.set(groupKey, { anchor, status });
+		}
+	}
+	return [...byGroup.values()];
 }
 
 export function renderReflectionMarkdown(digest: ReflectionDigest): string {

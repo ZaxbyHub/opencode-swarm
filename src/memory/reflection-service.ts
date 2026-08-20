@@ -58,14 +58,25 @@ interface OutcomeWriteThroughBase {
 	record: MemoryRecord;
 	eventId: string;
 	outcomeRecorded: true;
+	reflectionEnabled: boolean;
+	reflectionAttempted: boolean;
 }
 
 export type OutcomeWriteThroughResult =
 	| (OutcomeWriteThroughBase & {
+			reflectionEnabled: false;
+			reflectionAttempted: false;
+			reflectionUpdated: false;
+	  })
+	| (OutcomeWriteThroughBase & {
+			reflectionEnabled: true;
+			reflectionAttempted: true;
 			reflectionUpdated: true;
 			digest: ReflectionDigest;
 	  })
 	| (OutcomeWriteThroughBase & {
+			reflectionEnabled: true;
+			reflectionAttempted: true;
 			reflectionUpdated: false;
 			error: string;
 	  });
@@ -76,32 +87,47 @@ export async function recordOutcomeWithReflection(
 	gateway: MemoryGateway,
 	input: RecordMemoryOutcomeInput,
 ): Promise<OutcomeWriteThroughResult> {
-	return withReflectionLock(directory, async () => {
-		const eventId = input.eventId ?? randomUUID();
-		const record = await gateway.recordOutcome({ ...input, eventId });
-		try {
-			const digest = await regenerateUnlocked(directory, config, gateway, {
+	const resolvedConfig = resolveMemoryConfig(config);
+	const eventId = input.eventId ?? randomUUID();
+	const record = await gateway.recordOutcome({ ...input, eventId });
+	if (resolvedConfig.reflection.enabled !== true) {
+		return {
+			record,
+			eventId,
+			outcomeRecorded: true,
+			reflectionEnabled: false,
+			reflectionAttempted: false,
+			reflectionUpdated: false,
+		};
+	}
+	try {
+		const digest = await _internals.withReflectionLock(directory, async () =>
+			regenerateUnlocked(directory, resolvedConfig, gateway, {
 				record,
 				eventId,
 				outcome: input.outcome,
-			});
-			return {
-				record,
-				eventId,
-				outcomeRecorded: true,
-				reflectionUpdated: true,
-				digest,
-			};
-		} catch (error) {
-			return {
-				record,
-				eventId,
-				outcomeRecorded: true,
-				reflectionUpdated: false,
-				error: error instanceof Error ? error.message : String(error),
-			};
-		}
-	});
+			}),
+		);
+		return {
+			record,
+			eventId,
+			outcomeRecorded: true,
+			reflectionEnabled: true,
+			reflectionAttempted: true,
+			reflectionUpdated: true,
+			digest,
+		};
+	} catch (error) {
+		return {
+			record,
+			eventId,
+			outcomeRecorded: true,
+			reflectionEnabled: true,
+			reflectionAttempted: true,
+			reflectionUpdated: false,
+			error: error instanceof Error ? error.message : String(error),
+		};
+	}
 }
 
 export async function regenerateMemoryReflection(
@@ -186,8 +212,8 @@ async function regenerateUnlocked(
 		resolveAnchor: anchorResolver,
 	});
 	const bounded = boundDigest(digest);
-	await persistDigest(directory, bounded);
-	return bounded;
+	await persistDigest(directory, bounded.digest, bounded.artifacts);
+	return bounded.digest;
 }
 
 /**
@@ -298,6 +324,12 @@ export const _test_exports = {
 	isReflectionEligible,
 	prepareWriteThroughEntry,
 	sanitizeReflectionRecord,
+};
+
+export const _internals = {
+	withReflectionLock,
+	serializeDigestArtifacts,
+	boundDigest,
 };
 
 function assertBoundedMemoryStore(
@@ -447,26 +479,51 @@ async function withReflectionLock<T>(
 async function persistDigest(
 	directory: string,
 	digest: ReflectionDigest,
+	artifacts: ReflectionArtifactPair = serializeDigestArtifacts(digest),
 ): Promise<void> {
-	const markdown = renderReflectionMarkdown(digest);
-	const json = `${JSON.stringify(digest, null, 2)}\n`;
-	if (
-		Buffer.byteLength(markdown) > MAX_ARTIFACT_BYTES ||
-		Buffer.byteLength(json) > MAX_ARTIFACT_BYTES
-	) {
-		throw new Error('bounded reflection artifact exceeded its size contract');
-	}
-	await atomicWrite(
-		validateSwarmPath(directory, 'reflections/lessons.md'),
-		markdown,
-	);
+	assertReflectionArtifactBudget(artifacts);
+	// JSON is the authoritative sidecar consumed by injection and stale-reporting.
+	// Writing it first leaves the recoverable source of truth intact if lessons.md
+	// cannot be replaced during the same pass.
 	await atomicWrite(
 		validateSwarmPath(directory, 'reflections/lessons.json'),
-		json,
+		artifacts.json,
+	);
+	await atomicWrite(
+		validateSwarmPath(directory, 'reflections/lessons.md'),
+		artifacts.markdown,
 	);
 }
 
-function boundDigest(digest: ReflectionDigest): ReflectionDigest {
+interface ReflectionArtifactPair {
+	markdown: string;
+	json: string;
+}
+
+function serializeDigestArtifacts(
+	digest: ReflectionDigest,
+): ReflectionArtifactPair {
+	return {
+		markdown: renderReflectionMarkdown(digest),
+		json: `${JSON.stringify(digest, null, 2)}\n`,
+	};
+}
+
+function assertReflectionArtifactBudget(
+	artifacts: ReflectionArtifactPair,
+): void {
+	if (
+		Buffer.byteLength(artifacts.markdown) > MAX_ARTIFACT_BYTES ||
+		Buffer.byteLength(artifacts.json) > MAX_ARTIFACT_BYTES
+	) {
+		throw new Error('bounded reflection artifact exceeded its size contract');
+	}
+}
+
+function boundDigest(digest: ReflectionDigest): {
+	digest: ReflectionDigest;
+	artifacts: ReflectionArtifactPair;
+} {
 	const bounded: ReflectionDigest = JSON.parse(JSON.stringify(digest));
 	const arrays: Array<
 		keyof Pick<
@@ -474,12 +531,17 @@ function boundDigest(digest: ReflectionDigest): ReflectionDigest {
 			'preferred' | 'tentative' | 'contested' | 'deadEnds' | 'corrections'
 		>
 	> = ['tentative', 'corrections', 'deadEnds', 'contested', 'preferred'];
-	while (Buffer.byteLength(JSON.stringify(bounded)) > MAX_ARTIFACT_BYTES) {
+	let artifacts = serializeDigestArtifacts(bounded);
+	while (
+		Buffer.byteLength(artifacts.markdown) > MAX_ARTIFACT_BYTES ||
+		Buffer.byteLength(artifacts.json) > MAX_ARTIFACT_BYTES
+	) {
 		const key = arrays.find((candidate) => bounded[candidate].length > 0);
 		if (!key) break;
 		bounded[key].pop();
+		artifacts = serializeDigestArtifacts(bounded);
 	}
-	return bounded;
+	return { digest: bounded, artifacts };
 }
 
 async function atomicWrite(filePath: string, content: string): Promise<void> {

@@ -16,6 +16,12 @@ import type {
 	NewMemoryRecord,
 } from './types';
 
+export const MAX_MEMORY_TEXT_LENGTH = 2000;
+export const MAX_MEMORY_ANCHORS = 20;
+export const MEMORY_OUTCOME_QUESTION_PREFIX = 'Outcome evidence for question: ';
+export const MAX_OUTCOME_QUESTION_LENGTH =
+	MAX_MEMORY_TEXT_LENGTH - MEMORY_OUTCOME_QUESTION_PREFIX.length;
+
 export const MemoryScopeTypeSchema = z.enum([
 	'global_user',
 	'workspace',
@@ -171,7 +177,7 @@ export const MemoryRecordSchema = z
 		id: z.string().regex(/^mem_[a-f0-9]{16}$/),
 		scope: MemoryScopeRefSchema,
 		kind: MemoryKindSchema,
-		text: z.string().min(1).max(2000),
+		text: z.string().min(1).max(MAX_MEMORY_TEXT_LENGTH),
 		tags: z.array(z.string().min(1).max(64)).max(32),
 		confidence: z.number().min(0).max(1),
 		stability: z.enum(['ephemeral', 'session', 'durable']),
@@ -185,7 +191,7 @@ export const MemoryRecordSchema = z
 		supersededBy: z.string().optional(),
 		contentHash: z.string().regex(/^[a-f0-9]{64}$/),
 		metadata: z.record(z.string(), z.unknown()),
-		anchors: z.array(MemoryAnchorSchema).max(20).optional(),
+		anchors: z.array(MemoryAnchorSchema).max(MAX_MEMORY_ANCHORS).optional(),
 		outcomes: z.array(MemoryOutcomeSchema).max(1000).optional(),
 		// #1850 cohort-sharing provenance (all optional for back-compat).
 		cohortId: z.string().optional(),
@@ -242,14 +248,14 @@ export const NewMemoryRecordSchema: z.ZodType<NewMemoryRecord> = z
 	.object({
 		scope: MemoryScopeRefSchema.optional(),
 		kind: MemoryKindSchema,
-		text: z.string().min(1).max(2000),
+		text: z.string().min(1).max(MAX_MEMORY_TEXT_LENGTH),
 		tags: z.array(z.string().min(1).max(64)).max(32).optional(),
 		confidence: z.number().min(0).max(1).optional(),
 		stability: z.enum(['ephemeral', 'session', 'durable']).optional(),
 		source: MemorySourceSchema.optional(),
 		expiresAt: z.string().datetime().optional(),
 		metadata: z.record(z.string(), z.unknown()).optional(),
-		anchors: z.array(MemoryAnchorSchema).max(20).optional(),
+		anchors: z.array(MemoryAnchorSchema).max(MAX_MEMORY_ANCHORS).optional(),
 		outcomes: z.array(MemoryOutcomeSchema).max(1000).optional(),
 	})
 	.strict();
@@ -258,14 +264,14 @@ export const MemoryPatchSchema: z.ZodType<MemoryPatch> = z
 	.object({
 		scope: MemoryScopeRefSchema.optional(),
 		kind: MemoryKindSchema.optional(),
-		text: z.string().min(1).max(2000).optional(),
+		text: z.string().min(1).max(MAX_MEMORY_TEXT_LENGTH).optional(),
 		tags: z.array(z.string().min(1).max(64)).max(32).optional(),
 		confidence: z.number().min(0).max(1).optional(),
 		stability: z.enum(['ephemeral', 'session', 'durable']).optional(),
 		source: MemorySourceSchema.optional(),
 		expiresAt: z.string().datetime().optional(),
 		metadata: z.record(z.string(), z.unknown()).optional(),
-		anchors: z.array(MemoryAnchorSchema).max(20).optional(),
+		anchors: z.array(MemoryAnchorSchema).max(MAX_MEMORY_ANCHORS).optional(),
 		outcomes: z.array(MemoryOutcomeSchema).max(1000).optional(),
 	})
 	.strict()

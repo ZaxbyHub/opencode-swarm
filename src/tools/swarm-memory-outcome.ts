@@ -39,7 +39,7 @@ const OutcomeArgsSchema = z
 export const swarm_memory_outcome: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
 		description:
-			'Record whether recalled memory or a graph answer was useful, a dead end, or corrected; synchronously refreshes deterministic reflection artifacts.',
+			'Record whether recalled memory or a graph answer was useful, a dead end, or corrected; when reflection is enabled, synchronously refresh deterministic reflection artifacts.',
 		args: {
 			memory_id: z
 				.string()
@@ -131,22 +131,30 @@ export const swarm_memory_outcome: ReturnType<typeof createSwarmTool> =
 					},
 				);
 				const reflectionUpdated = result.reflectionUpdated;
+				const reflectionAttempted = result.reflectionAttempted;
+				const partial =
+					result.reflectionEnabled === true &&
+					reflectionAttempted &&
+					!reflectionUpdated;
+				const reflectionError = 'error' in result ? result.error : undefined;
 				return JSON.stringify(
 					{
 						success: true,
-						status: reflectionUpdated ? 'complete' : 'partial',
-						partial: !reflectionUpdated,
+						status: partial ? 'partial' : 'complete',
+						partial,
 						outcome_recorded: result.outcomeRecorded,
 						event_id: result.eventId,
 						memory_id: result.record.id,
 						outcome: parsed.data.outcome,
 						outcomes: result.record.outcomes?.length ?? 0,
+						reflection_enabled: result.reflectionEnabled,
+						reflection_attempted: reflectionAttempted,
 						reflection_updated: reflectionUpdated,
 						reflection_entries: reflectionUpdated
 							? result.digest.generatedFrom.entries
 							: undefined,
-						error: reflectionUpdated ? undefined : result.error,
-						reflection_error: reflectionUpdated ? undefined : result.error,
+						error: partial ? reflectionError : undefined,
+						reflection_error: partial ? reflectionError : undefined,
 					},
 					null,
 					2,

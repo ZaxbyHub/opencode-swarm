@@ -93,7 +93,11 @@ describe('reflection persistence boundary', () => {
 
 		const result = await recordOutcomeWithReflection(
 			root,
-			{ enabled: true, provider: 'local-jsonl' },
+			{
+				enabled: true,
+				provider: 'local-jsonl',
+				reflection: { enabled: true, halfLifeDays: 30 },
+			},
 			gatewayFor([ephemeral, session], ephemeral),
 			{
 				memoryId: ephemeral.id,
@@ -130,7 +134,11 @@ describe('reflection persistence boundary', () => {
 
 		const result = await recordOutcomeWithReflection(
 			root,
-			{ enabled: true, provider: 'local-jsonl' },
+			{
+				enabled: true,
+				provider: 'local-jsonl',
+				reflection: { enabled: true, halfLifeDays: 30 },
+			},
 			gatewayFor(
 				[expired, deleted, superseded, active],
 				superseded,

@@ -143,6 +143,73 @@ describe('buildReflectionDigest', () => {
 		expect(flat.preferred[0]?.group).toBeUndefined();
 	});
 
+	test('dedupes same-group multi-anchors, preserves distinct groups, and keeps dead-anchor corrections', () => {
+		const multiAnchor = record('multi-anchor', 'packages/core/a.ts', [
+			{ outcome: 'useful', at: '2026-08-18T12:00:00.000Z' },
+			{ outcome: 'useful', at: '2026-08-19T10:00:00.000Z' },
+		]);
+		multiAnchor.anchors = [
+			{ file: 'packages/core/a.ts' },
+			{ file: 'packages/core/b.ts' },
+			{ file: 'packages/other/c.ts' },
+		];
+		const deadCorrection = record(
+			'dead-correction',
+			'packages/old/deleted.ts',
+			[
+				{
+					outcome: 'corrected',
+					at: '2026-08-19T11:00:00.000Z',
+					correction: 'Keep the async loader correction visible.',
+				},
+			],
+		);
+		deadCorrection.anchors = [{ file: 'packages/old/deleted.ts' }];
+		const resolveAnchor = (anchor: {
+			file: string;
+		}): ReflectionAnchorStatus => {
+			if (anchor.file.includes('deleted')) return { alive: false };
+			if (anchor.file.includes('other')) {
+				return { alive: true, packageBoundary: 'packages/other' };
+			}
+			return { alive: true, packageBoundary: 'packages/core' };
+		};
+
+		const digest = buildReflectionDigest([multiAnchor, deadCorrection], NOW, {
+			resolveAnchor,
+		});
+
+		expect(
+			digest.preferred
+				.filter((item) => item.memoryId === 'multi-anchor')
+				.map((item) => item.group),
+		).toEqual(['packages/core', 'packages/other']);
+		expect(digest.corrections[0]).toMatchObject({
+			memoryId: 'dead-correction',
+			correction: 'Keep the async loader correction visible.',
+			anchor: undefined,
+			group: undefined,
+		});
+		expect(digest.deadAnchorMemoryIds).toContain('dead-correction');
+	});
+
+	test('keeps distinct ungrouped live anchors separate (FB-010)', () => {
+		const entry = record('flat-multi-anchor', 'src/a.ts', [
+			{ outcome: 'useful', at: '2026-08-18T12:00:00.000Z' },
+			{ outcome: 'useful', at: '2026-08-19T10:00:00.000Z' },
+		]);
+		entry.anchors = [{ file: 'src/a.ts' }, { file: 'src/b.ts' }];
+
+		// Previously both no-boundary anchors shared an empty group key and one vanished.
+		const digest = buildReflectionDigest([entry], NOW, {
+			resolveAnchor: () => ({ alive: true }),
+		});
+		expect(digest.preferred.map((item) => item.anchor?.file)).toEqual([
+			'src/a.ts',
+			'src/b.ts',
+		]);
+	});
+
 	test('emits corrections and produces byte-stable rounded ordering', () => {
 		const entries = [
 			record('b', 'src/b.ts', [

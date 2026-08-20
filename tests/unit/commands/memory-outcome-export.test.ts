@@ -22,11 +22,11 @@ afterEach(async () => {
 	await fs.rm(root, { recursive: true, force: true });
 });
 
-function record(): MemoryRecord {
+function record(text = 'Export canonical outcome history.'): MemoryRecord {
 	const base = {
 		scope: { type: 'repository' as const, repoId: 'repo' },
 		kind: 'evidence' as const,
-		text: 'Export canonical outcome history.',
+		text,
 	};
 	return {
 		...base,
@@ -47,9 +47,14 @@ test('/swarm memory export includes canonical outcome events', async () => {
 		enabled: true,
 		provider: 'sqlite',
 	});
-	const memory = record();
+	const memory = record('Export canonical outcome history.');
+	const deleted = record(
+		'Exported memory should still be exported after deletion.',
+	);
 	try {
 		await provider.upsert(memory);
+		await provider.upsert(deleted);
+		await provider.delete(deleted.id, 'obsolete');
 		await provider.appendOutcome(memory.id, {
 			id: 'export-outcome',
 			outcome: {
@@ -69,6 +74,13 @@ test('/swarm memory export includes canonical outcome events', async () => {
 		'export',
 		'outcome-events.jsonl',
 	);
+	expect(output).toContain('Memories: `2`');
 	expect(output).toContain('Outcomes: `1`');
+	expect(
+		await fs.readFile(
+			path.join(root, '.swarm', 'memory', 'export', 'memories.jsonl'),
+			'utf-8',
+		),
+	).toContain(deleted.id);
 	expect(await fs.readFile(outcomePath, 'utf-8')).toContain('export-outcome');
 });

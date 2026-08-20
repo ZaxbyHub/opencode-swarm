@@ -8,7 +8,7 @@ Swarm memory is an optional, project-scoped recall system. The current default p
 - `swarm_memory_propose`: proposal-only writes. It creates pending proposals and never writes durable memory directly.
 - `swarm_memory_outcome`: records whether recalled memory or a graph answer was useful, a dead end, or corrected. It can target a memory ID or create a lightweight question result.
 
-Memory is disabled by default. When disabled, default agents are not given the memory tools, direct tool calls return a clear disabled result, and existing Swarm behavior is unchanged.
+Memory is disabled by default. When disabled, default agents are not given the memory tools, direct tool calls return a clear disabled result, reflection artifacts are not regenerated or injected, and existing Swarm behavior is unchanged.
 
 ## Configuration
 
@@ -75,7 +75,7 @@ Enable local memory in `.opencode/opencode-swarm.json`:
 
 All `learning.*` fields shown above are the defaults — override only the ones you want to tune; see [Recall Learning](#recall-learning) for what each controls.
 
-Outcome feedback is append-only and may include file/symbol anchors. When `reflection.enabled` is true, Swarm deterministically renders signed, time-decayed lessons to `.swarm/reflections/lessons.{md,json}` at startup and after every outcome write. The compact session context promotes a source only after two distinct useful outcomes, preserves contested and corrected evidence, and excludes memories whose anchors no longer exist. Reflection is opt-in in this release.
+Outcome feedback is append-only and may include file/symbol anchors. When both `memory.enabled` and `reflection.enabled` are true, Swarm regenerates signed, time-decayed lessons to `.swarm/reflections/lessons.{md,json}` in a deferred startup task and after every `swarm_memory_outcome` write, then the system enhancer may inject a bounded `[SWARM MEMORY REFLECTION — UNTRUSTED BACKGROUND]` block from `lessons.json` when prompt budget allows. The compact session context promotes a source only after two distinct useful outcomes, preserves contested and corrected evidence, and excludes memories whose anchors no longer exist. Reflection is opt-in in this release.
 
 `sqlite` is the default provider. `local-jsonl` remains available for legacy/debug mode:
 
@@ -422,6 +422,37 @@ Agents may also return an optional JSON `memoryProposals` array in Task output. 
 Curator agents may return an optional JSON `curatorMemoryDecisions` array in Task output. The controller accepts that key only from curator roles, schema-validates each decision, and applies it through `MemoryGateway.applyCuratorDecision`. Supported decisions are `add`, `update`, `supersede`, `reject`, and `noop`.
 
 In SQLite, decision application is transactional: Swarm loads the pending proposal, validates the decision and resulting memory record, applies the memory change, updates proposal status, and appends a `curator_decision` event in one transaction. Superseded memories are marked with `supersededBy` and stop appearing in recall.
+
+## Outcome Feedback
+
+`swarm_memory_outcome` records task-observed results for recalled memory or a graph answer. Supply exactly one of `memory_id` or `question`:
+
+```json
+{
+  "memory_id": "mem_aaaaaaaaaaaaaaaa",
+  "outcome": "corrected",
+  "correction": "The parser is async; await loadParser() before calling parse().",
+  "anchors": [
+    { "file": "src/parser.ts", "symbol": "loadParser" },
+    { "file": "src/parser.ts", "symbol": "parse" }
+  ]
+}
+```
+
+```json
+{
+  "question": "Which parser entrypoint is current?",
+  "outcome": "dead_end",
+  "anchors": [{ "file": "docs/parser.md" }]
+}
+```
+
+- `memory_id` must be an existing `mem_<16 hex>` id. `question` is for a lightweight result record when no memory id is known yet.
+- `outcome` is one of `useful`, `dead_end`, or `corrected`.
+- `correction` is required for `corrected` and invalid for other outcomes.
+- Each anchor is repository-relative: `file` is required and `symbol` is optional. Up to 20 anchors are accepted.
+
+Outcome events are durable, append-only history. Avoid putting secrets or personal data into `correction` text unless you are willing to retain it in project-local memory state; durable records reject likely secrets when `memory.redaction.rejectDurableSecrets=true`, and reflection artifacts additionally redact secret-like text before injection or persistence.
 
 ## Maintenance and Observability
 

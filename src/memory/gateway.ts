@@ -23,6 +23,8 @@ import {
 	createBundleId,
 	createMemoryId,
 	createProposalId,
+	MAX_OUTCOME_QUESTION_LENGTH,
+	MEMORY_OUTCOME_QUESTION_PREFIX,
 	normalizeMemoryText,
 	validateCuratorMemoryDecision,
 	validateMemoryRecordRules,
@@ -429,6 +431,11 @@ export class MemoryGateway {
 				'exactly one of memoryId or question is required',
 			);
 		}
+		if (question.length > MAX_OUTCOME_QUESTION_LENGTH) {
+			throw new MemoryValidationError(
+				`question must be at most ${MAX_OUTCOME_QUESTION_LENGTH} characters`,
+			);
+		}
 		if (input.outcome === 'corrected' && !input.correction?.trim()) {
 			throw new MemoryValidationError(
 				'corrected outcomes require correction text',
@@ -438,7 +445,7 @@ export class MemoryGateway {
 		if (!targetId) {
 			const candidate = this.createRecord({
 				kind: 'evidence',
-				text: `Outcome evidence for question: ${question}`,
+				text: `${MEMORY_OUTCOME_QUESTION_PREFIX}${question}`,
 				confidence: 0.5,
 				stability: 'durable',
 				tags: ['outcome-result'],

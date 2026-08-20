@@ -266,8 +266,11 @@ export class LocalJsonlMemoryProvider
 				}
 			}
 			const base = stripMaterializedOutcomes(parsed);
+			const materialized = this.validateMaterializedRecordUnlocked(
+				base,
+				events,
+			);
 			await this.appendMemoryUnlocked(base);
-			const materialized = materializeOutcomeRecord(base, events);
 			this.memories.set(materialized.id, materialized);
 			return materialized;
 		});
@@ -292,12 +295,14 @@ export class LocalJsonlMemoryProvider
 		await this.initialize();
 		const next = await this.withOutcomeStoreLock(async () => {
 			await this.refreshMemoriesUnlocked();
-			let base = this.memories.get(memoryId);
-			if (!base) throw new MemoryValidationError('target memory was not found');
-			if (base.metadata.deleted === true) {
+			const persisted = this.memories.get(memoryId);
+			if (!persisted) {
+				throw new MemoryValidationError('target memory was not found');
+			}
+			if (persisted.metadata.deleted === true) {
 				throw new MemoryValidationError('target memory is deleted');
 			}
-			base = ensureOutcomeGeneration(base);
+			const base = ensureOutcomeGeneration(persisted);
 			const storedBase = stripMaterializedOutcomes(base);
 			const events = this.readOutcomeEventsSync();
 			const nextEvent = validateOutcomeEventForMemory(
@@ -322,12 +327,26 @@ export class LocalJsonlMemoryProvider
 			) {
 				throw new MemoryValidationError('memory outcome limit exceeded');
 			}
-			await this.appendMemoryUnlocked(storedBase);
+			const eventAlreadyCommitted = events.some(
+				(candidate) => candidate.id === nextEvent.id,
+			);
+			const materialized = this.validateMaterializedRecordUnlocked(
+				storedBase,
+				eventAlreadyCommitted ? events : [...events, nextEvent],
+			);
+			// Persist the generation-bearing base row once. On retry after a
+			// partial two-file failure, the refreshed base already carries the
+			// committed generation, so the repair touches only outcome-events.jsonl.
+			if (
+				persisted.metadata.outcomeGeneration !==
+				storedBase.metadata.outcomeGeneration
+			) {
+				await this.appendMemoryUnlocked(storedBase);
+			}
 			await this.appendOutcomeEventUnlocked(nextEvent, events);
-			if (!events.some((candidate) => candidate.id === nextEvent.id)) {
+			if (!eventAlreadyCommitted) {
 				events.push(nextEvent);
 			}
-			const materialized = materializeOutcomeRecord(storedBase, events);
 			this.memories.set(memoryId, materialized);
 			return materialized;
 		});
@@ -812,6 +831,15 @@ export class LocalJsonlMemoryProvider
 			this.pathFor('memories'),
 			memories.map(stripMaterializedOutcomes),
 		);
+	}
+
+	private validateMaterializedRecordUnlocked(
+		base: MemoryRecord,
+		events: readonly MemoryOutcomeEvent[],
+	): MemoryRecord {
+		return validateMemoryRecordRules(materializeOutcomeRecord(base, events), {
+			rejectDurableSecrets: this.config.redaction.rejectDurableSecrets,
+		});
 	}
 
 	/**

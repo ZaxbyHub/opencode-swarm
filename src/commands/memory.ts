@@ -446,7 +446,10 @@ export async function handleMemoryExportCommand(
 	) as ExportableProvider;
 	try {
 		await provider.initialize?.();
-		const memories = await provider.list({ includeExpired: true });
+		const memories = await provider.list({
+			includeExpired: true,
+			includeInactive: true,
+		});
 		const proposals = provider.listProposals
 			? await provider.listProposals()
 			: [];
