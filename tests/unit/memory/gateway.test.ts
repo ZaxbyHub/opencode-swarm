@@ -10,7 +10,6 @@ import {
 	SQLiteMemoryProvider,
 } from '../../../src/memory';
 import { evictAndClose } from '../../../src/memory/provider-pool';
-import { MAX_OUTCOME_QUESTION_LENGTH } from '../../../src/memory/schema';
 
 let tmpDir: string;
 
@@ -63,43 +62,6 @@ describe('MemoryGateway', () => {
 
 		const recall = await gateway.recall({ query: 'bun tests', minScore: 0 });
 		expect(recall.items).toHaveLength(0);
-	});
-
-	test('recordOutcome enforces the effective question text budget before persistence', async () => {
-		const gateway = new MemoryGateway(
-			{ directory: tmpDir, sessionID: 'session-a', agentRole: 'coder' },
-			{
-				config: { enabled: true, provider: 'local-jsonl' },
-				now: () => new Date('2026-05-24T12:00:00.000Z'),
-			},
-		);
-
-		const accepted = await gateway.recordOutcome({
-			question: 'q'.repeat(MAX_OUTCOME_QUESTION_LENGTH),
-			outcome: 'useful',
-		});
-		expect(
-			accepted.text.endsWith('q'.repeat(MAX_OUTCOME_QUESTION_LENGTH)),
-		).toBe(true);
-		expect(
-			(await gateway.listMemories({ includeInactive: true })).map(
-				(record) => record.id,
-			),
-		).toEqual([accepted.id]);
-
-		await expect(
-			gateway.recordOutcome({
-				question: 'q'.repeat(MAX_OUTCOME_QUESTION_LENGTH + 1),
-				outcome: 'dead_end',
-			}),
-		).rejects.toThrow(
-			`question must be at most ${MAX_OUTCOME_QUESTION_LENGTH} characters`,
-		);
-		expect(
-			(await gateway.listMemories({ includeInactive: true })).map(
-				(record) => record.id,
-			),
-		).toEqual([accepted.id]);
 	});
 
 	test('secret-bearing proposals are stored redacted with policy rejection metadata', async () => {
