@@ -1950,8 +1950,10 @@ interface OverriddenProbeRetainedLaneOutcome {
  * closeout F1). The finalization is irreversible — a `stale` record is never
  * collected again — while the clear is a CAS-guarded write that can legitimately
  * lose the compare-and-swap and throw. Ordering the irreversible half after the
- * reversible one means a lost CAS destroys nothing and the operator's retry is a
- * clean, correct override rather than a no-op over already-abandoned lanes.
+ * reversible one means a lost CAS destroys no RETAINED lane, so the retry is a
+ * real override rather than a no-op over lanes a failed attempt already
+ * abandoned. It does NOT mean nothing was finalized: settlement sweeps the
+ * batch's probe-dead lanes before the clear is attempted.
  *
  * The single read-back answers two INDEPENDENT questions over two different id
  * sets, which is why it returns three lists rather than one (issue #2251
@@ -2311,11 +2313,14 @@ export async function abortPrWorkflow(
 					...(state.prHeadSha ? { prHeadSha: state.prHeadSha } : {}),
 					reason: sanitizedReason,
 					// Issue #2251 closeout F1: the override's irreversible finalization is
-					// ordered AFTER the clear, so reaching here means it never ran and no
-					// lane record was touched. Stated POSITIVELY, because the operator's
-					// next action depends on it: their retry is a complete override of
-					// still-live lanes, not a second pass over lanes a failed attempt
-					// already abandoned.
+					// ordered AFTER the clear, so reaching here means the OVERRIDE never
+					// ran and touched no retained lane. Scoped to the override on purpose
+					// — two broader readings are false and were shipped and retracted
+					// once each. "This abort touched nothing" is false because settlement
+					// durably sweeps the batch's probe-dead lanes before the clear; "the
+					// retained lanes are untouched" is false because a concurrent force
+					// abort can clear and finalize them, which is itself one of the ways
+					// this CAS loses. The disclosure below is hedged to match.
 					...(overridesProbeRetention
 						? {
 								probeRetentionOverrideLanes: overrideTargetedLaneIds.slice(
@@ -2345,9 +2350,9 @@ export async function abortPrWorkflow(
 						'the clear failed and the gate state may still be active. Revalidate the current ' +
 						'session state before retrying the abort.' +
 						(overridesProbeRetention
-							? ' No delegation record was finalized: the probe-retention override finalizes ' +
-								'lanes only after the clear succeeds, so the retained lanes are untouched ' +
-								'and their output is still collectable.'
+							? ' The probe-retention override finalized no record: it runs only after the ' +
+								'clear succeeds, and this clear failed. Other lanes in the same settlement ' +
+								'batch may already have been finalized as presumed-stale, and a concurrent abort for this session may have finalized more — revalidate the lane records rather than assuming they are untouched.'
 							: ''),
 				})}\n`,
 				'utf-8',

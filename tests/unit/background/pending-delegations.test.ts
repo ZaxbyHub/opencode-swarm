@@ -247,6 +247,40 @@ describe('pending-delegations store', () => {
 		expect(findByCorrelationId(dir, 'ses_really_stale')?.status).toBe('stale');
 	});
 
+	it('excludeCorrelationIds spares a named record regardless of its status', async () => {
+		// The documented contract is "spared regardless of status or age". What this
+		// pins is STATUS-INDEPENDENCE, not the source order of the two guards: both
+		// the exclusion and the status filter are `continue` guards in the same loop,
+		// so swapping them is semantically inert and no test can distinguish them.
+		// The test above seeds only `pending`, so it cannot tell status-independent
+		// exclusion from an exclusion that happens to work for one status.
+		// `ingestion_error` can: it sits inside the DEFAULT sweepable set used here,
+		// so an exclusion narrowed to `pending` would finalize it — and
+		// `ingestion_error` is a RETRYABLE state, so flipping it to terminal `stale`
+		// discards work the caller explicitly asked to keep.
+		seedBackdated('ses_excluded_retryable', 'ingestion_error');
+		seedBackdated('ses_excluded_pending', 'pending');
+		seedBackdated('ses_really_stale', 'pending');
+
+		expect(
+			await sweepStaleDelegations(dir, 60_000, {
+				excludeCorrelationIds: new Set([
+					'ses_excluded_retryable',
+					'ses_excluded_pending',
+				]),
+			}),
+		).toBe(1);
+		expect(findByCorrelationId(dir, 'ses_excluded_retryable')?.status).toBe(
+			'ingestion_error',
+		);
+		expect(findByCorrelationId(dir, 'ses_excluded_pending')?.status).toBe(
+			'pending',
+		);
+		// The un-excluded control: the sweep really did run and really was overdue,
+		// so the two spares above are the exclusion at work, not a no-op sweep.
+		expect(findByCorrelationId(dir, 'ses_really_stale')?.status).toBe('stale');
+	});
+
 	it('includeCorrelationIds narrows the sweep to exactly the named records', async () => {
 		// Issue #2251: the human-only PR-workflow force override finalizes the
 		// handful of lanes it just overrode. A directory-wide pass would also

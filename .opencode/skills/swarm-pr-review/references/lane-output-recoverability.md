@@ -189,10 +189,20 @@ and the disclosure says so explicitly.
 The ordering matters for recoverability, which is what this document is about.
 The clear is CAS-guarded and can legitimately lose its compare-and-swap and
 throw; the finalization is irreversible. Doing the irreversible half second means
-a failed clear abandons nothing and the operator's retry is a complete override —
-so **a `pr_workflow_abort_not_completed` retraction in `.swarm/events.jsonl` means
-the named lanes' output is still collectable.** That record states it positively
+a failed clear abandons no RETAINED lane and the operator's retry is a real
+override — so **a `pr_workflow_abort_not_completed` retraction in
+`.swarm/events.jsonl` means the lanes named in `probeRetentionOverrideLanes` were
+not finalized by the override, and their output is still collectable**
 (`probeRetentionOverrideFinalized: false`).
+
+Read that scope literally. It does NOT mean the abort finalized nothing:
+settlement durably sweeps the same batch's probe-DEAD lanes to `stale` *before*
+the clear is attempted, so those are already terminal when the retraction is
+written. Nor does it guarantee the named lanes are still `pending` by the time
+you read the record — a concurrent force abort for the same session can clear and
+finalize them, and that is itself one of the ways this CAS loses. Treat
+`.swarm/delegations.jsonl` as the authority and re-read it rather than inferring
+record state from the retraction alone.
 
 The override's disclosure separates three facts that used to be conflated, and
 every one of them is a POSITIVE observation rather than an inference from

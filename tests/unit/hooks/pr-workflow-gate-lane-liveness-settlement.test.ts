@@ -399,4 +399,48 @@ describe('a permanently-retained lane still has exactly one human exit (S3)', ()
 		expect(laneStatusOnDisk(directory, 'c-mix-alive')).toBe('pending');
 		expect(laneStatusOnDisk(directory, 'c-mix-fresh')).toBe('pending');
 	});
+
+	test('a `recovery` abort does NOT override probe retention, even with no fresh lane', async () => {
+		// The OTHER conjunct of the override gate. `freshOpenLanes === 0` is pinned
+		// by the test above; this one pins `kind === 'force'`. Both hold here — the
+		// single lane is stale-by-age and probe-retained, so the override would fire
+		// on every condition EXCEPT the kind — which makes this the only fixture in
+		// which deleting `options.kind === 'force'` is observable.
+		//
+		// It matters because `recovery` is the AGENT-reachable kind: `force` is
+		// human-only (`/swarm abort-pr-workflow`), and the tool pins
+		// `kind: z.literal('recovery')`. If the kind stopped gating the override, an
+		// agent could abandon a provably-live lane and finalize its record to
+		// terminal `stale` — the exact discard issue #2251 exists to prevent, reached
+		// through the one caller that is never a human decision.
+		await activatePrWorkflow(directory, 'sess-recovery-live', 'PR_REVIEW');
+		await seedStaleLane('sess-recovery-live', 'lane-alive', 'c-recovery-alive');
+		installStatusMap({
+			[laneSubagentSessionId('c-recovery-alive')]: { type: 'busy' },
+		});
+
+		const error = await abortPrWorkflow(directory, 'sess-recovery-live', {
+			kind: 'recovery',
+			reason: 'recovery must not abandon a lane the probe says is running',
+		}).then(
+			() => null,
+			(err: unknown) => (err instanceof Error ? err.message : String(err)),
+		);
+
+		// Asserted first so a regression that lets recovery through fails HERE with a
+		// legible message rather than tripping toContain on a null.
+		expect(error).not.toBeNull();
+		expect(error).toContain('abort refused while 1 PR workflow lane(s)');
+		// THE discriminator: the lane is blocking because the probe RETAINED it, not
+		// because it is merely fresh. Without this the fixture could drift to a
+		// fresh lane and the test would still pass, pinning the wrong conjunct.
+		expect(error).toContain('liveness probe reports still running: lane-alive');
+		// The two durable consequences a lost `kind` check would produce: the live
+		// lane's record finalized to terminal `stale` (its output uncollectable
+		// forever), and the gate cleared out from under it.
+		expect(laneStatusOnDisk(directory, 'c-recovery-alive')).toBe('pending');
+		expect(
+			await readPrWorkflowGateState(directory, 'sess-recovery-live'),
+		).not.toBeNull();
+	});
 });

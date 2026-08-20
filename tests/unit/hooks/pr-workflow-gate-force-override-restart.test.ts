@@ -198,7 +198,7 @@ describe('force override restores a restartable session', () => {
 });
 
 describe('the irreversible half is conditional on the reversible half (F1)', () => {
-	test('a lost CAS on the clear destroys nothing, and the retry is a real override', async () => {
+	test('a lost CAS on the clear destroys no retained lane, and the retry is a real override', async () => {
 		// The finalization is irreversible — a `stale` record is never collected
 		// again — while `clearPrWorkflowGateState` is CAS-guarded and can legitimately
 		// throw. Finalizing FIRST meant a lost compare-and-swap left a provably-live
@@ -250,8 +250,18 @@ describe('the irreversible half is conditional on the reversible half (F1)', () 
 			probeRetentionOverrideLanes: ['c-cas'],
 			probeRetentionOverrideFinalized: false,
 		});
+		// The claim is scoped to the OVERRIDE, not to this abort and not to the
+		// records' global state — both broader subjects are falsifiable here.
+		// "This abort finalized no record" would be false whenever the settlement
+		// batch also held a probe-DEAD past-horizon lane, because settlement sweeps
+		// those to `stale` before the clear runs; and "the retained lanes are
+		// untouched" would be false if a concurrent second force abort for this
+		// session finalized them first. Only the override's own behaviour — it
+		// finalizes nothing until the clear succeeds — is true under every
+		// interleaving, which is why the disclosure names it and then tells the
+		// operator to revalidate rather than assume.
 		expect(retraction?.disclosure).toContain(
-			'No delegation record was finalized',
+			'The probe-retention override finalized no record',
 		);
 
 		// And the retry is a COMPLETE override, not a no-op force abort over lanes

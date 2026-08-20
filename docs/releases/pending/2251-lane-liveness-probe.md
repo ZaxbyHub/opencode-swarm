@@ -106,11 +106,14 @@ The finalization is deliberately narrow:
 - **Ordered after the CAS-guarded clear.** The finalization is irreversible (a
   `stale` record is never collected again) while the clear can legitimately lose
   its compare-and-swap and throw, so the irreversible half is conditional on the
-  reversible one: a lost CAS abandons nothing and the operator's retry is a
-  clean, complete override. The residual exposure is a process crash in the
+  reversible one: a lost CAS abandons no RETAINED lane, and the operator's retry
+  is a complete override of the lanes that are still live. It does not follow
+  that a lost CAS abandons nothing at all — settlement durably sweeps the
+  batch's probe-DEAD lanes before the clear is attempted, so those are already
+  terminal when the retraction is written. The residual exposure is a process crash in the
   window between the two writes, which leaves the records `pending` — the session
-  stays un-restartable until they settle, but nothing is destroyed and the output
-  is still collectable.
+  stays un-restartable until they settle, but no RETAINED lane is destroyed and
+  its output is still collectable.
 - **Best-effort, but disclosed.** Reachability never depends on a durability
   write, so the abort stands even if the finalization fails — and the disclosure
   then names the exact `correlationId`s that will keep refusing checkout
@@ -148,8 +151,13 @@ The finalization is deliberately narrow:
   `probeRetentionOverrideLanes` — the `correlationId`s the override targets. An
   auditor reconciles that against `.swarm/delegations.jsonl`, which is the
   authority on which rows actually went terminal. When the clear fails, the
-  existing `pr_workflow_abort_not_completed` retraction now states positively
-  that no delegation record was finalized.
+  existing `pr_workflow_abort_not_completed` retraction now states that the
+  probe-retention OVERRIDE finalized no record, and explicitly warns that other
+  lanes in the same settlement batch may already have been finalized as
+  presumed-stale and that a concurrent abort may have finalized more. The claim
+  is scoped to the override because the broader readings are false: settlement
+  sweeps probe-dead lanes before the clear, and a concurrent force abort can
+  finalize the retained ones.
 
 A lane with a fresh `updatedAt` is never overridden, by `force` or anything else.
 An explicit human override of a *presumption* is not the same as softening a
@@ -188,14 +196,18 @@ The change is visible in two places:
 - the `openLanes` field of the `pr_workflow_aborted` audit event, where a
   successful force abort may now be recorded with a non-zero value.
 
-Nothing in the codebase reads either as a value — `src/tools/abort-pr-workflow.ts`
-passes it straight through to `open_lanes` on the tool response, and the only
-other mention (`src/hooks/pr-workflow-response-gate.ts`) is a comment describing
-the event's JSON-line format. So this is a **documentation** change for anyone
-parsing `.swarm/events.jsonl`, not a code migration. Any external check of the
-form "a successful abort has `openLanes === 0`" must be re-read as "a successful
-abort has no *fresh* lanes"; use `probeRetainedLanes` to tell a retained lane
-from a fresh one.
+Neither of those two **disclosed** fields is ever read back after the gate writes
+it, with a single exception: `src/tools/abort-pr-workflow.ts` copies the return
+field straight through to `open_lanes` on the tool response. The audit-event
+field is written and never read. The count is of course still consumed *upstream*
+of both — the gate reads `laneSettlement.openLanes` with `> 0` to refuse an
+abort, a PR_REVIEW transition and a completion — but that is the settlement field
+these two are copied from, not either disclosed artifact. So this is a
+**documentation** change for anyone parsing `.swarm/events.jsonl` or reading the
+`abort_pr_workflow` tool response, not a code migration. Any external check of
+the form "a successful abort has `openLanes === 0`" must be re-read as "a
+successful abort has no *fresh* lanes"; use `probeRetainedLanes` to tell a
+retained lane from a fresh one.
 
 The count is taken *before* the override's finalization runs, so a
 `pr_workflow_aborted` record with `openLanes: 1` and a
