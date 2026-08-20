@@ -67,14 +67,39 @@ function failingSpawn(code: string): typeof branchInternals.spawnSync {
  * resolver; this resets it explicitly rather than removing the preload, and
  * `afterEach` restores the seeded state.
  */
-function seedRejectedResolutionAttempts(env: NodeJS.ProcessEnv): void {
+function seedRejectedResolutionAttempts(env: NodeJS.ProcessEnv): string[] {
 	resetGitExecutableCache();
-	gitExecutableInternals.platform = () => 'linux';
-	gitExecutableInternals.env = () => env;
-	// Every POSIX platform candidate ('/usr/bin/git', '/usr/local/bin/git',
-	// '/bin/git') fails its stat pre-check on a Windows host, so the cycle
-	// ends in 'all-rejected' with three recorded attempts.
+	// Drive the WINDOWS candidate branch against a ProgramFiles root that
+	// provably does not exist on ANY host.
+	//
+	// The POSIX branch must NOT be used here. Its candidates are the absolute
+	// paths '/usr/bin/git', '/usr/local/bin/git' and '/bin/git', which are
+	// absent on this Windows dev box but PRESENT on ubuntu-latest — where
+	// /usr/bin/git exists and answers `git --version`, so `probeCycle` returns
+	// 'accepted' and this helper's toThrow() inverts. That is a test whose
+	// result depends on the author's host: green locally, red in CI on every
+	// PR (.github/workflows/ci.yml runs `unit` on ubuntu-latest). It is the
+	// same false-green class #2236 exists to eliminate, so it is designed out
+	// rather than commented around.
+	const absentRoot = path.join(tempRoot('nogit'), 'absent');
+	const candidates = [
+		`${absentRoot}\\Git\\cmd\\git.exe`,
+		`${absentRoot}\\Git\\bin\\git.exe`,
+	];
+	// Self-verifying precondition: if these ever exist, the assertions below
+	// would silently pass for the wrong reason.
+	for (const candidate of candidates) {
+		expect(fs.existsSync(candidate)).toBe(false);
+	}
+	gitExecutableInternals.platform = () => 'win32';
+	gitExecutableInternals.env = () => ({
+		...env,
+		ProgramFiles: absentRoot,
+		'ProgramFiles(x86)': undefined,
+		LOCALAPPDATA: undefined,
+	});
 	expect(() => resolveGitExecutable()).toThrow(GitBinaryMissingError);
+	return candidates;
 }
 
 afterEach(() => {
@@ -163,7 +188,7 @@ describe('gitExec spawn-failure classification uses the cwd it holds (#2236)', (
 
 describe('gitExec surfaces describeGitResolution() in its missing-git error (#2236 F5)', () => {
 	test('names every candidate tried, why it was rejected, and the override to set', () => {
-		seedRejectedResolutionAttempts({ PATH: '' });
+		const candidates = seedRejectedResolutionAttempts({ PATH: '' });
 		// Resolution is stubbed to succeed so the run reaches the SPAWN, which
 		// is the failure this message must explain; the resolver's recorded
 		// attempt list is what `describeGitResolution()` reads.
@@ -182,9 +207,9 @@ describe('gitExec surfaces describeGitResolution() in its missing-git error (#22
 		const message = (thrown as Error).message;
 		// Every candidate, with its source tag and its rejection reason.
 		expect(message).toContain('Candidates tried:');
-		expect(message).toContain('[platform] /usr/bin/git');
-		expect(message).toContain('[platform] /usr/local/bin/git');
-		expect(message).toContain('[platform] /bin/git');
+		for (const candidate of candidates) {
+			expect(message).toContain(`[platform] ${candidate}`);
+		}
 		expect(message).toContain('no such file');
 		// The actionable escape hatches.
 		expect(message).toContain(GIT_BINARY_ENV_VAR);
