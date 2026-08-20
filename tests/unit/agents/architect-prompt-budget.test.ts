@@ -4,8 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { getAgentConfigs } from '../../../src/agents';
 import {
-	createArchitectAgent,
 	ARCHITECT_PROMPT_BUDGET_CHARS,
+	createArchitectAgent,
 } from '../../../src/agents/architect';
 import type { PluginConfig } from '../../../src/config';
 
@@ -188,7 +188,7 @@ describe('architect prompt budget — regression: unbounded growth (F#1649)', ()
 		).toBeLessThan(ARCHITECT_PROMPT_BUDGET_CHARS);
 	});
 
-	it('adversarial default scope (enabled=true, scope=\'all\') stays under the ceiling', () => {
+	it("adversarial default scope (enabled=true, scope='all') stays under the ceiling", () => {
 		// PRR-007: when `adversarialTesting` is `{ enabled: true, scope: 'all' }`
 		// — the Zod-schema-defaulted scope — the production code substitutes the
 		// same template content as `scope: undefined`. The TS type asserts

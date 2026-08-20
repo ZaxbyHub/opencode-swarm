@@ -939,11 +939,14 @@ async function initializeOpenCodeSwarm(
 	// architect prompt across all swarms so multi-swarm configs (where
 	// `agents.architect` is undefined and only `cloud_architect`/
 	// `mega_architect` are present) still produce a meaningful value.
-	const largestArchitectChars = Object.entries(agents).reduce((max, [name, cfg]) => {
-		if (!name.endsWith('_architect') && name !== 'architect') return max;
-		const len = (cfg as { prompt?: string }).prompt?.length ?? 0;
-		return len > max ? len : max;
-	}, 0);
+	const largestArchitectChars = Object.entries(agents).reduce(
+		(max, [name, cfg]) => {
+			if (!name.endsWith('_architect') && name !== 'architect') return max;
+			const len = (cfg as { prompt?: string }).prompt?.length ?? 0;
+			return len > max ? len : max;
+		},
+		0,
+	);
 	log('architect prompt size', {
 		chars: largestArchitectChars,
 	});
