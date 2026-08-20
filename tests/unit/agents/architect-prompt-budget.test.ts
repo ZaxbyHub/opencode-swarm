@@ -1,13 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { canonicalMkdtemp } from '../../helpers/tmpdir';
 import { getAgentConfigs } from '../../../src/agents';
 import {
 	ARCHITECT_PROMPT_BUDGET_CHARS,
 	createArchitectAgent,
 } from '../../../src/agents/architect';
 import type { PluginConfig } from '../../../src/config';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 /**
  * PROMPT BUDGET regression guard (issue #1649).
