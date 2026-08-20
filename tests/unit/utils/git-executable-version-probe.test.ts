@@ -17,7 +17,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import type { SpawnSyncReturns } from 'node:child_process';
 import * as fs from 'node:fs';
-import * as path from 'node:path';
 import {
 	clearDeferredWarnings,
 	getDeferredWarnings,
@@ -30,6 +29,10 @@ import {
 	resolveGitExecutable,
 	setGitBinaryOverride,
 } from '../../../src/utils/git-executable';
+import {
+	SIM_PLATFORM,
+	writeSimFixture,
+} from '../../helpers/git-executable-fixtures.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const ORIGINAL_INTERNALS = { ..._internals };
@@ -88,17 +91,20 @@ afterEach(() => {
 });
 
 /**
- * Writes a stand-in executable and returns its path. Every test here
- * simulates `win32`, so the Windows-shaped fixture path this host produces is
- * genuinely absolute for the platform under test — simulating POSIX instead
- * would reject each fixture at the `isAbsoluteForPlatform` gate, so the tests
- * would pass without ever reaching the version check they exist to cover.
+ * Writes a stand-in executable and returns its path, shaped for the SIMULATED
+ * platform rather than for the host running the suite. Every test here
+ * simulates `SIM_PLATFORM`, so a host-shaped `path.join` fixture would be a
+ * different string from the candidate the resolver DERIVES for a PATH entry —
+ * see tests/helpers/git-executable-fixtures.ts for why that passes on Windows
+ * and fails on POSIX CI.
  */
 function writeCandidate(name: string): string {
-	const dir = fs.mkdtempSync(path.join(tmpDir, `${name}-`));
-	const binPath = path.join(dir, 'git.exe');
-	fs.writeFileSync(binPath, 'stub');
-	return binPath;
+	return writeSimFixture(tmpDir, name).candidate;
+}
+
+/** The directory to hand to `PATH`, plus the candidate derived from it. */
+function writePathFixture(name: string): { dir: string; candidate: string } {
+	return writeSimFixture(tmpDir, name);
 }
 
 /** Drives one probe cycle in which `candidate` is the only override. */
@@ -106,7 +112,7 @@ function resolveWithOverrideOutput(
 	candidate: string,
 	stdout: string,
 ): { resolved: string; reason?: string; accepted?: boolean } {
-	_internals.platform = () => 'win32';
+	_internals.platform = () => SIM_PLATFORM;
 	_internals.env = () => ({ [GIT_BINARY_ENV_VAR]: candidate, PATH: '' });
 	_internals.spawnSync = (cmd) =>
 		cmd === candidate ? spawnResult(stdout) : enoentResult();
@@ -185,22 +191,32 @@ describe('git --version output must actually be git', () => {
 
 	test('a rejected override warns and resolution continues down the candidate list', () => {
 		const shim = writeCandidate('warned');
-		const realGit = writeCandidate('real');
+		// The fall-through target is a PATH candidate, which the resolver
+		// DERIVES by joining with the simulated separator — so the fixture must
+		// be built the same way, not with the host's `path.join`.
+		const realGit = writePathFixture('real');
 
-		_internals.platform = () => 'win32';
+		_internals.platform = () => SIM_PLATFORM;
 		_internals.env = () => ({
 			[GIT_BINARY_ENV_VAR]: shim,
-			PATH: path.dirname(realGit),
+			PATH: realGit.dir,
 		});
 		_internals.spawnSync = (cmd) => {
 			if (cmd === shim) return spawnResult('definitely not git\n');
-			if (cmd === realGit) return spawnResult(GIT_VERSION_LINE);
+			if (cmd === realGit.candidate) return spawnResult(GIT_VERSION_LINE);
 			return enoentResult();
 		};
 
 		// The fall-through contract: a bad override must never make git
 		// unreachable.
-		expect(resolveGitExecutable()).toBe(realGit);
+		const resolved = resolveGitExecutable();
+		// Recurrence guard: assert the resolver actually GENERATED the fixture
+		// path before asserting it was chosen, so a host-shaped fixture fails
+		// naming the mismatch instead of as an opaque `Received: "git"`.
+		expect(describeGitResolution().attempts.map((a) => a.candidate)).toContain(
+			realGit.candidate,
+		);
+		expect(resolved).toBe(realGit.candidate);
 		expect(
 			getDeferredWarnings().filter((w) => w.includes('git.binary')).length,
 		).toBe(1);
@@ -243,7 +259,7 @@ describe('genuine git is still accepted', () => {
 		// rather than merely being the only candidate present.
 		setGitBinaryOverride(configGit);
 
-		_internals.platform = () => 'win32';
+		_internals.platform = () => SIM_PLATFORM;
 		_internals.env = () => ({ [GIT_BINARY_ENV_VAR]: envGit, PATH: '' });
 		_internals.spawnSync = (cmd) =>
 			cmd === envGit || cmd === configGit
@@ -258,7 +274,7 @@ describe('genuine git is still accepted', () => {
 		const configGit = writeCandidate('config-only');
 		setGitBinaryOverride(configGit);
 
-		_internals.platform = () => 'win32';
+		_internals.platform = () => SIM_PLATFORM;
 		_internals.env = () => ({ PATH: '' });
 		_internals.spawnSync = (cmd) =>
 			cmd === configGit ? spawnResult(GIT_VERSION_LINE) : enoentResult();
