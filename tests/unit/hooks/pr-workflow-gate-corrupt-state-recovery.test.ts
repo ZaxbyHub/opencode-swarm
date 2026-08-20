@@ -1,7 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, realpathSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import {
 	abortPrWorkflow,
@@ -10,6 +8,7 @@ import {
 	readPrWorkflowGateState,
 	readPrWorkflowGateStateForRecovery,
 } from '../../../src/hooks/pr-workflow-gate.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 let directory = '';
 const originals = {
@@ -20,9 +19,7 @@ const originals = {
 };
 
 beforeEach(() => {
-	directory = realpathSync(
-		mkdtempSync(path.join(os.tmpdir(), 'pr-workflow-corrupt-')),
-	);
+	directory = canonicalMkdtemp('pr-workflow-corrupt-');
 	gateInternals.resetTrackedStateCache();
 	gateInternals.resolveCurrentGitHead = () => 'abc123';
 	gateInternals.resolveCurrentGitHeadAsync = async () => 'abc123';

@@ -1,7 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, realpathSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import {
 	activatePrWorkflow,
@@ -12,6 +10,7 @@ import {
 	type PrWorkflowGateState,
 	readPrWorkflowGateState,
 } from '../../../src/hooks/pr-workflow-gate.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const SESSION_ID = 'feedback-amendment';
 const HEAD_SHA = 'abc123';
@@ -42,9 +41,7 @@ const UPSTREAM = {
 };
 
 beforeEach(() => {
-	directory = realpathSync(
-		mkdtempSync(path.join(os.tmpdir(), 'pr-gate-amendment-')),
-	);
+	directory = canonicalMkdtemp('pr-gate-amendment-');
 	gateInternals.resetTrackedStateCache();
 	gateInternals.resolveCurrentGitHead = () => HEAD_SHA;
 	gateInternals.resolveCurrentGitHeadAsync = async () => HEAD_SHA;

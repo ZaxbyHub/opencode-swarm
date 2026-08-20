@@ -1,7 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, realpathSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { storeLaneOutput } from '../../../src/background/lane-output-store.js';
 import {
@@ -18,6 +16,7 @@ import {
 	recordPrFeedbackGateBatch,
 	recordPrFeedbackStageA,
 } from '../../../src/hooks/pr-workflow-gate.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 /**
  * Issue #2242 R3: the *executable* proof that an append-only inventory
@@ -45,9 +44,7 @@ let directory = '';
 const originals = { ...gateInternals };
 
 beforeEach(() => {
-	directory = realpathSync(
-		mkdtempSync(path.join(os.tmpdir(), 'pr-gate-amend-e2e-')),
-	);
+	directory = canonicalMkdtemp('pr-gate-amend-e2e-');
 	gateInternals.resetTrackedStateCache();
 	gateInternals.resolveCurrentGitHead = () => HEAD_SHA;
 	gateInternals.resolveCurrentGitHeadAsync = async () => HEAD_SHA;

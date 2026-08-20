@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { appendFileSync, mkdtempSync, realpathSync } from 'node:fs';
+import { appendFileSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import {
 	BACKGROUND_DELEGATIONS_FILE,
@@ -18,8 +17,11 @@ import {
 	type PrWorkflowGateState,
 	settlePresumedStalePrWorkflowLanes,
 } from '../../../src/hooks/pr-workflow-gate.js';
+import { freezeClock } from '../../helpers/test-clock.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 let directory = '';
+let restoreClock: () => void = () => {};
 const originals = {
 	resolveCurrentGitHead: gateInternals.resolveCurrentGitHead,
 	resolveCurrentGitHeadAsync: gateInternals.resolveCurrentGitHeadAsync,
@@ -28,9 +30,10 @@ const originals = {
 };
 
 beforeEach(() => {
-	directory = realpathSync(
-		mkdtempSync(path.join(os.tmpdir(), 'pr-workflow-stale-lane-')),
-	);
+	// Staleness is a pure function of Date.now() - updatedAt; freezing the
+	// clock makes every backdated age margin exact (issue #1782 class 1).
+	restoreClock = freezeClock();
+	directory = canonicalMkdtemp('pr-workflow-stale-lane-');
 	gateInternals.resetTrackedStateCache();
 	// Both the sync and async Git seams are stubbed: `completePrWorkflow`
 	// verifies the bound head through the async pair before it ever reaches the
@@ -42,6 +45,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+	restoreClock();
 	gateInternals.resetTrackedStateCache();
 	gateInternals.resolveCurrentGitHead = originals.resolveCurrentGitHead;
 	gateInternals.resolveCurrentGitHeadAsync =
