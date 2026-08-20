@@ -18,6 +18,7 @@ import {
 	startAgentSession,
 	startReviewerScopeGeneration,
 } from '../../../src/state';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 let primary = '';
 let lane = '';
@@ -41,11 +42,7 @@ function recordLaneFingerprint(
 
 beforeEach(() => {
 	resetSwarmState();
-	primary = fs.realpathSync(
-		fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'reviewer-scope-mergeback-')),
-		),
-	);
+	primary = canonicalMkdtemp('reviewer-scope-mergeback-');
 	lane = path.join(primary, '.swarm-worktrees', 'sess', 'lane-1');
 	fs.mkdirSync(path.join(primary, 'src'), { recursive: true });
 	fs.mkdirSync(path.join(lane, 'src'), { recursive: true });

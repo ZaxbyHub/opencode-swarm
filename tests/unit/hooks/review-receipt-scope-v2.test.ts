@@ -10,6 +10,7 @@ import {
 	REVIEWER_TASK_SCOPE_DESCRIPTION,
 	REVIEWER_TASK_SCOPE_HEADER,
 } from '../../../src/hooks/review-receipt-scope';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 let directory = '';
 
@@ -29,11 +30,7 @@ function git(args: string[]): string {
 }
 
 beforeEach(() => {
-	directory = fs.realpathSync(
-		fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'review-scope-manifest-v2-')),
-		),
-	);
+	directory = canonicalMkdtemp('review-scope-manifest-v2-');
 	git(['init']);
 	fs.mkdirSync(path.join(directory, 'src'), { recursive: true });
 	fs.writeFileSync(

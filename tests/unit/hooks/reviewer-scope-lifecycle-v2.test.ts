@@ -24,6 +24,7 @@ import {
 	swarmState,
 } from '../../../src/state';
 import { installActiveScopeBinding } from '../../helpers/active-scope-binding';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 let directory = '';
 let laneDirectory = '';
@@ -107,11 +108,7 @@ async function beginReviewer(callID: string) {
 
 beforeEach(() => {
 	resetSwarmState();
-	directory = fs.realpathSync(
-		fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'reviewer-scope-lifecycle-v2-')),
-		),
-	);
+	directory = canonicalMkdtemp('reviewer-scope-lifecycle-v2-');
 	laneDirectory = path.join(directory, '.swarm-worktrees', 'sess', 'lane-1');
 	fs.mkdirSync(path.join(directory, 'src'), { recursive: true });
 	fs.mkdirSync(path.join(laneDirectory, 'src'), { recursive: true });

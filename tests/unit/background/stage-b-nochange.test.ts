@@ -19,6 +19,7 @@ import {
 	startReviewerScopeGeneration,
 } from '../../../src/state';
 import { withFrozenClock } from '../../helpers/test-clock.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 let directory = '';
 
@@ -84,11 +85,7 @@ async function ingest(record: BackgroundDelegationRecord) {
 
 beforeEach(() => {
 	resetSwarmState();
-	directory = fs.realpathSync(
-		fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'stage-b-nochange-')),
-		),
-	);
+	directory = canonicalMkdtemp('stage-b-nochange-');
 	git('init');
 	git('config', 'user.email', 'test@example.com');
 	git('config', 'user.name', 'Test');

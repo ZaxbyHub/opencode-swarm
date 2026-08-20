@@ -10,16 +10,13 @@ import {
 	reviewerScopeCaptureToFingerprint,
 	reviewerScopeFileFingerprintsEqual,
 } from '../../../src/hooks/reviewer-scope-file-fingerprint';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 let directory = '';
 const realRead = fingerprintInternals.read;
 
 beforeEach(() => {
-	directory = fs.realpathSync(
-		fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'reviewer-scope-capture-v2-')),
-		),
-	);
+	directory = canonicalMkdtemp('reviewer-scope-capture-v2-');
 	fs.mkdirSync(path.join(directory, 'src'), { recursive: true });
 });
 

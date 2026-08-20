@@ -13,6 +13,7 @@ import {
 	captureReviewerScopeFileFingerprint,
 	_internals as fingerprintInternals,
 } from '../../../src/hooks/reviewer-scope-file-fingerprint';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 let directory: string;
 const realRead = fingerprintInternals.read;
@@ -33,11 +34,7 @@ function git(args: string[]): string {
 }
 
 beforeEach(() => {
-	directory = fs.realpathSync(
-		fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'review-scope-races-')),
-		),
-	);
+	directory = canonicalMkdtemp('review-scope-races-');
 	git(['init']);
 	fs.mkdirSync(path.join(directory, 'src'), { recursive: true });
 	fs.writeFileSync(
