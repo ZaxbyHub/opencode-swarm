@@ -1,5 +1,32 @@
 # Changelog
 
+## [7.143.6](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.143.5...v7.143.6) (2026-08-20)
+
+
+### Bug Fixes
+
+* **pr-workflow:** close PR review feedback on disclosure surfaces and sweep scope ([2afdabd](https://github.com/ZaxbyHub/opencode-swarm/commit/2afdabdbb350266e9db266af006fb5763be380da))
+* **pr-workflow:** eradicate review-pipeline wedge states and harden req_coverage preflight gate ([369e880](https://github.com/ZaxbyHub/opencode-swarm/commit/369e8800a8f446de35f885489dd7587241b2b956))
+
+## [7.143.5](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.143.4...v7.143.5) (2026-08-20)
+
+
+### Bug Fixes
+
+* Auto-detected flaky tests (merge-group) — review for quarantine ([#2185](https://github.com/ZaxbyHub/opencode-swarm/issues/2185)) ([a3f4121](https://github.com/ZaxbyHub/opencode-swarm/commit/a3f4121009a106e9c9f53688c8c252a1caf553dc))
+
+## [7.143.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.143.3...v7.143.4) (2026-08-20)
+
+
+### Bug Fixes
+
+* Auto-detected flaky tests (merge-group) — review for quarantine ([#2233](https://github.com/ZaxbyHub/opencode-swarm/issues/2233)) ([269830a](https://github.com/ZaxbyHub/opencode-swarm/commit/269830a00ba5ee2afcd8e808478c2d99a40e391b))
+* **drift-check:** split docs-claim tests under FR-006 cap, pin fragment scan ([d1380b0](https://github.com/ZaxbyHub/opencode-swarm/commit/d1380b09df313eb8bdd48c1ec33de07eee4a60a0))
+* Export dispatch_lanes' MAX_LANES constant and drift-check the four hand-copied prose citations of it ([#1645](https://github.com/ZaxbyHub/opencode-swarm/issues/1645)) ([cd79c75](https://github.com/ZaxbyHub/opencode-swarm/commit/cd79c75d9aba38a64a405b75337b4778be447302))
+* **state:** evict activeAgent ghost entries alongside agentSessions ([6a9822e](https://github.com/ZaxbyHub/opencode-swarm/commit/6a9822e97102c2cd6bad7a87805c763308aaa43a))
+* **telemetry:** pair delegation_begin with every delegation_end ([94e297d](https://github.com/ZaxbyHub/opencode-swarm/commit/94e297dc550ec64f74377c3b290b382a1f8326a8))
+* **tests:** use canonicalMkdtemp in split docs-claim tests (FR-011) ([c032ed3](https://github.com/ZaxbyHub/opencode-swarm/commit/c032ed3a0babf6b8720d116d151bd930c4db14aa))
+
 ## [7.143.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.143.2...v7.143.3) (2026-08-19)
 
 

@@ -1135,7 +1135,7 @@ matched family owned exactly once across the dispatch, and every owned family
 attested in that lane's output, or the lane fails for all of them. Include
 the complete exact-set
 `trigger_evaluation` ledger and the same exact current `pr_head_sha` in the
-initial micro dispatch, in a separate batch from base lanes. That first
+initial micro dispatch, in a separate batch from base lanes (those inline `trigger_evaluation` rows carry only `trigger_id`, `result`, and `evidence` — they must never include `source_batch_id` or `source_lane_id`, which belong only to `write_pr_review_trigger_eval`'s `rows`). That first
 dispatch freezes the ledger for the session. A subsequent same-session micro
 batch may omit `trigger_evaluation` and reuse the frozen ledger; when it
 explicitly supplies a copy, the copy must remain exactly identical. The
@@ -1156,7 +1156,7 @@ plus provenance for every `MATCHED` row. The tool atomically writes
 pass the exact reviewed merge-base as `base_sha`, the exact live base branch
 tip/ref used to compute it as `base_ref`, and the same `pr_head_sha` to the
 writer. The writer runs bounded `git merge-base -- <base_ref> <pr_head_sha>` and
-rejects any claimed `base_sha` that is not the exact result. It accepts only an
+rejects any claimed `base_sha` that is not the exact result. When that bounded re-check is unavailable (git timeout, spawn failure, unresolvable ref) but the supplied `base_ref` and `base_sha` exactly equal the durably bound review scope, the writer proceeds and discloses `base_verification: bound_fallback` on the receipt, which synthesis must surface in the final review report (`references/lane-output-recoverability.md`); every other outcome stays fail-closed. It accepts only an
 exact eleven-row v2 receipt backed by verifiable provenance (identity, ownership, digest, retained artifact); a coverage-QUALITY failure is disclosed on the receipt as `coverage_degradations` and the run proceeds, with synthesis disclosing degraded families (`references/lane-output-recoverability.md`). `NOT_TRIGGERED` rows are provenance-free. Counts are recomputed and
 must agree. It never uses keyword or path classification alone as absence
 evidence. Any head mismatch makes persistence fail. Historical unversioned and
@@ -1946,9 +1946,9 @@ are:
    `pr_head_sha`, `base_sha`, and `base_ref`.
 2. **Call `abort_pr_workflow`** with `mode: "PR_REVIEW"`, `kind: "recovery"`,
    and a one-line `reason` describing the blocker. The tool clears the durable gate state
-   and stops the auto-resume loop. It refuses while PR workflow lanes are
-   still in flight (collect their results with `collect_lane_results`
-   first). It accepts both unbound and bound PR_REVIEW workflows so exhausted
+   and stops the auto-resume loop. It refuses only while PR workflow lanes are still LIVE (a recent `updatedAt`); collect those with `collect_lane_results` first.
+   Lanes idle past the 30-minute staleness horizon settle as presumed-stale instead of blocking, disclosed as `presumed_stale_lanes` on the response and in `.swarm/events.jsonl`; a schema-invalid (but JSON-parseable) gate state no longer defeats abort either. See `references/lane-output-recoverability.md`.
+   It accepts both unbound and bound PR_REVIEW workflows so exhausted
    post-bind discovery or validation cannot strand the gate. An audit event is
    appended to `.swarm/events.jsonl`.
    When the tool reports `checkout_restore_required`, immediately call

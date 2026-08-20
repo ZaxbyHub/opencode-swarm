@@ -4,7 +4,8 @@
 # Format: one repo-relative test file path per line. Blank lines and lines
 # starting with # are ignored.
 #
-# STATUS: 0 active entries (issue #1729 — debt paid down).
+# STATUS: 1 active entry (win32-wrapper-runtime.test.ts, issue #2185 — the
+# issue #1729 debt itself remains paid down; see the entry below).
 #
 # History: this list previously held 9 Windows-only failures. They were fixed
 # in issue #1729 by a combination of:
@@ -31,3 +32,23 @@
 #
 # Do NOT re-add entries here unless a merge_group run on windows-latest has
 # confirmed a real failure that cannot be fixed at the root.
+#
+# win32-wrapper-runtime.test.ts: covers the WindowsSandboxExecutor fallback
+# wrapper transport (real PowerShell spawnSync round-trips, CRLF/LF multiline
+# execution, cmd metacharacter temp paths, Base64 command transport, PATH
+# filtering). The Windows-only flake pattern: merge-group run 31895079948
+# (pr-2169), `unit (windows-latest, 2)` shard — attempt 1 failed and the
+# immediate retry passed in 7.1s (passed-on-retry flake), while sibling
+# ubuntu-2 and macos-2 shards ran the file green in the same CI run
+# (92ms/31ms — the Windows-only cells skip off-platform); windows shards
+# 1/3/5/6 green in the same run (windows-4 was cancelled mid-run on its
+# disjoint shard set). The ci.yml retry loop discards attempt-1 output
+# when a retry passes, so no failing assertion text exists to drive a
+# root-cause fix. Consistent with the windows-latest cold-spawn/tmpdir-handle
+# sensitivity of prior entries: 11 of its 13 wrapper-transport cells are
+# Windows-only (test.skipIf(!isWindows)) and spawn real PowerShell processes
+# with 10s spawnSync timeouts and per-test mkdirSync/rmSync temp-dir cycles.
+# Pre-existing, unrelated to any specific PR. Quarantined per issue #2185;
+# tracked under #1737 (test quarantine debt) pending a dedicated
+# test-stability sprint (#1782).
+tests/unit/sandbox/win32-wrapper-runtime.test.ts
