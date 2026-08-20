@@ -18,6 +18,7 @@ import {
 	startAgentSession,
 	startReviewerScopeGeneration,
 } from '../../../src/state';
+import { withFrozenClock } from '../../helpers/test-clock.js';
 
 let directory = '';
 
@@ -47,7 +48,7 @@ function coderRecord(input: {
 	baseline: BackgroundWorkspaceSnapshot;
 	declaredFiles: string[];
 }): BackgroundDelegationRecord {
-	const completedAt = Date.now();
+	const completedAt = withFrozenClock(() => Date.now());
 	return {
 		schemaVersion: 2,
 		correlationId: `child-${input.callID}`,
