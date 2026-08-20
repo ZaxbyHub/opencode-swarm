@@ -43,6 +43,13 @@ the reporter's macOS string names `posix_spawn`. Same libuv failure, platform-sp
   missing" unconditionally. A missing or non-directory `cwd`, and a `cwd` that cannot be inspected
   (`EACCES`/`EPERM`, or any other stat failure), are now distinct outcomes with distinct messages — the third
   case never silently collapses into either of the others.
+- **"git could not start" is never reinterpreted as a fact about the repository.** Two callers asked git
+  whether a path exists in `HEAD` and treated *any* failure other than a missing binary as the answer "no, it
+  is a new file" — so a torn-down working directory produced a semantic diff claiming every file had just been
+  added, rather than an honest failure. The semantic-diff block injected into reviewer context
+  (`src/hooks/semantic-diff-injection.ts`) and the `diff_summary` tool (`src/tools/diff-summary.ts`) now abort
+  on every "the process never ran" outcome, missing binary and `cwd` fault alike. A git process that genuinely
+  ran and reported the path is absent still takes the new-file path, unchanged.
 - **Recovery prefers the branch over the directory.** A missing lane worktree no longer means the work is
   lost: the merge runs from the primary repository against the lane branch, which is where the coder's commits
   actually live. The dirty-state prelude is skipped (there is no working tree left to commit) but the

@@ -24,6 +24,8 @@ import {
 import { getImporters, normalizeGraphPath } from '../tools/repo-graph.js';
 import {
 	GitBinaryMissingError,
+	GitSpawnCwdError,
+	GitUnavailableError,
 	isGitBinaryMissing,
 	isSpawnCwdMissing,
 	isSpawnCwdUnreadable,
@@ -100,16 +102,10 @@ async function execGit(
 		// fault names the offending directory. Mirrors src/git/branch.ts and
 		// src/tools/checkpoint.ts.
 		if (isSpawnCwdMissing(err, directory)) {
-			throw new Error(
-				`git could not start: working directory no longer exists: ${directory}`,
-				{ cause: err },
-			);
+			throw new GitSpawnCwdError(directory, 'missing', { cause: err });
 		}
 		if (isSpawnCwdUnreadable(err, directory)) {
-			throw new Error(
-				`git could not start: working directory could not be inspected (permission denied): ${directory}`,
-				{ cause: err },
-			);
+			throw new GitSpawnCwdError(directory, 'unreadable', { cause: err });
 		}
 		if (isGitBinaryMissing(err, directory)) {
 			throw new GitBinaryMissingError(
@@ -203,8 +199,16 @@ export async function buildSemanticDiffBlock(
 					});
 					fileExistsInHead = true;
 				} catch (err) {
-					// git binary ENOENT (missing binary) — abort immediately
-					if (err instanceof GitBinaryMissingError) {
+					// git never started — a missing binary OR a `cwd` fault. Abort
+					// immediately. "cat-file failed" only licenses the inference
+					// "this path is not in HEAD" when git actually ran and said so;
+					// when the spawn itself failed, that inference fabricates
+					// `oldContent = ''` and reports the entire file as newly added.
+					// A wrong semantic diff injected into a reviewer's context is
+					// strictly worse than this file's documented silent-null failure
+					// mode, so a torn-down or unreadable working directory must land
+					// in the honest-absence bucket, not the "it's a new file" bucket.
+					if (err instanceof GitUnavailableError) {
 						throw err;
 					}
 					// Otherwise git ran but file not in HEAD — treat as new/untracked file
@@ -233,9 +237,10 @@ export async function buildSemanticDiffBlock(
 					astDiffs.push(astResult);
 				}
 			} catch (err) {
-				// Re-throw git binary ENOENT to outer catch (returns null for whole block)
-				// But NOT fs.readFile ENOENT (deleted files should be silently skipped)
-				if (err instanceof GitBinaryMissingError) {
+				// Re-throw "git never ran" (missing binary or cwd fault) to the outer
+				// catch, which returns null for the whole block. But NOT fs.readFile
+				// ENOENT (deleted files should be silently skipped).
+				if (err instanceof GitUnavailableError) {
 					throw err;
 				}
 				// Parse failure, deleted file ENOENT, or other error — skip this file

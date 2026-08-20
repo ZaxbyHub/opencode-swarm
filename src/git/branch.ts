@@ -5,6 +5,7 @@ import { isValidEnvKey } from '../sandbox/executor';
 import { mergeEnvForChild } from '../utils/bun-compat';
 import {
 	GitBinaryMissingError,
+	GitSpawnCwdError,
 	isGitBinaryMissing,
 	isSpawnCwdMissing,
 	isSpawnCwdUnreadable,
@@ -273,17 +274,13 @@ function gitExec(
 			// split is three-way and a cwd fault names the offending directory
 			// instead of blaming PATH. Mirrors src/tools/checkpoint.ts.
 			if (isSpawnCwdMissing(result.error, cwd)) {
-				throw new Error(
-					`git could not start: working directory no longer exists: ${cwd}`,
-					{ cause: result.error },
-				);
+				throw new GitSpawnCwdError(cwd, 'missing', { cause: result.error });
 			}
 
 			if (isSpawnCwdUnreadable(result.error, cwd)) {
-				throw new Error(
-					`git could not start: working directory could not be inspected (permission denied): ${cwd}`,
-					{ cause: result.error },
-				);
+				throw new GitSpawnCwdError(cwd, 'unreadable', {
+					cause: result.error,
+				});
 			}
 
 			if (isGitBinaryMissing(result.error, cwd)) {

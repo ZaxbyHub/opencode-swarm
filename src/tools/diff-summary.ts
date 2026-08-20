@@ -12,6 +12,8 @@ import {
 import { generateSummary } from '../diff/summary-generator.js';
 import {
 	GitBinaryMissingError,
+	GitSpawnCwdError,
+	GitUnavailableError,
 	isGitBinaryMissing,
 	isSpawnCwdMissing,
 	isSpawnCwdUnreadable,
@@ -83,16 +85,10 @@ async function execGit(
 		// fault names the offending directory. Mirrors src/git/branch.ts and
 		// src/tools/checkpoint.ts.
 		if (isSpawnCwdMissing(err, workingDir)) {
-			throw new Error(
-				`git could not start: working directory no longer exists: ${workingDir}`,
-				{ cause: err },
-			);
+			throw new GitSpawnCwdError(workingDir, 'missing', { cause: err });
 		}
 		if (isSpawnCwdUnreadable(err, workingDir)) {
-			throw new Error(
-				`git could not start: working directory could not be inspected (permission denied): ${workingDir}`,
-				{ cause: err },
-			);
+			throw new GitSpawnCwdError(workingDir, 'unreadable', { cause: err });
 		}
 		if (isGitBinaryMissing(err, workingDir)) {
 			throw new GitBinaryMissingError(
@@ -180,8 +176,16 @@ export const diff_summary: ReturnType<typeof createSwarmTool> = createSwarmTool(
 						});
 						fileExistsInHead = true;
 					} catch (e: unknown) {
-						// If git binary itself is missing, that's critical
-						if (e instanceof GitBinaryMissingError) {
+						// git never started — a missing binary OR a `cwd` fault. Both
+						// are critical. "cat-file failed" only licenses the inference
+						// "this path is not in HEAD" when git actually ran and said
+						// so; when the spawn itself failed, that inference fabricates
+						// `oldContent = ''` and reports the whole file as newly
+						// added. A wrong summary returned as a success is strictly
+						// worse than the honest `success: false` the outer catch
+						// produces, so a torn-down or unreadable working directory
+						// aborts here rather than being reinterpreted.
+						if (e instanceof GitUnavailableError) {
 							throw e;
 						}
 						// git ran but file not in HEAD — it's a new/untracked file
@@ -212,7 +216,9 @@ export const diff_summary: ReturnType<typeof createSwarmTool> = createSwarmTool(
 
 						astResult = await computeASTDiff(filePath, oldContent, newContent);
 					} catch (e: unknown) {
-						if (e instanceof GitBinaryMissingError) {
+						// Same rule as the cat-file catch above: "git never ran" is
+						// never downgraded to a per-file skip.
+						if (e instanceof GitUnavailableError) {
 							throw e;
 						}
 						// Silently skip: file-read errors (including deleted files) and parse failures

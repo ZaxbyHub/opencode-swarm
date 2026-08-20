@@ -24,6 +24,8 @@ import {
 	classifySpawnFailure,
 	describeSpawnCwdFailure,
 	GitBinaryMissingError,
+	GitSpawnCwdError,
+	GitUnavailableError,
 	inspectSpawnCwd,
 	isGitBinaryMissing,
 	isSpawnCwdMissing,
@@ -250,5 +252,63 @@ describe('backwards compatibility for cwd-less callers', () => {
 
 	test('an empty-string cwd is treated as "no cwd offered"', () => {
 		expect(isGitBinaryMissing(enoentSpawnError(), '')).toBe(true);
+	});
+});
+
+/**
+ * The error hierarchy is load-bearing, not decoration.
+ *
+ * Callers that ask git a question about the repository (`cat-file -e
+ * HEAD:<path>`) may only read "no answer" as "the path is absent" when git
+ * actually ran. They discriminate on `GitUnavailableError`, so the shape of
+ * this hierarchy — not any single call site — is what keeps a `cwd` fault from
+ * being reinterpreted as a fact about HEAD. Flattening it, or making
+ * `GitSpawnCwdError` a subclass of `GitBinaryMissingError`, silently changes
+ * the behaviour of every one of those catches; these assertions fail first.
+ */
+describe('git-unavailable error hierarchy (#2236)', () => {
+	test('both "git never ran" errors share the GitUnavailableError base', () => {
+		expect(new GitBinaryMissingError()).toBeInstanceOf(GitUnavailableError);
+		expect(new GitSpawnCwdError('/lane', 'missing')).toBeInstanceOf(
+			GitUnavailableError,
+		);
+	});
+
+	test('a cwd fault is a sibling of, never a kind of, "binary missing"', () => {
+		expect(new GitSpawnCwdError('/lane', 'missing')).not.toBeInstanceOf(
+			GitBinaryMissingError,
+		);
+		expect(new GitSpawnCwdError('/lane', 'unreadable')).not.toBeInstanceOf(
+			GitBinaryMissingError,
+		);
+		expect(new GitBinaryMissingError()).not.toBeInstanceOf(GitSpawnCwdError);
+	});
+
+	test('an ordinary git failure is NOT a GitUnavailableError', () => {
+		// The negative control: `git` ran and exited non-zero. Callers must stay
+		// free to interpret this one as an answer about the repository.
+		expect(new Error('fatal: Not a valid object name')).not.toBeInstanceOf(
+			GitUnavailableError,
+		);
+	});
+
+	test('the cwd fault carries the directory and reason as data, not just prose', () => {
+		const missing = new GitSpawnCwdError('/lane/gone', 'missing');
+		expect(missing.cwd).toBe('/lane/gone');
+		expect(missing.fault).toBe('missing');
+		expect(missing.name).toBe('GitSpawnCwdError');
+		expect(missing.message).toBe(
+			'git could not start: working directory no longer exists: /lane/gone',
+		);
+
+		const cause = enoentSpawnError();
+		const unreadable = new GitSpawnCwdError('/lane/locked', 'unreadable', {
+			cause,
+		});
+		expect(unreadable.fault).toBe('unreadable');
+		expect(unreadable.cause).toBe(cause);
+		expect(unreadable.message).toBe(
+			'git could not start: working directory could not be inspected (permission denied): /lane/locked',
+		);
 	});
 });

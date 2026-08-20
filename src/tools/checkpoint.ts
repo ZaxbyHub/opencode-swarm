@@ -15,6 +15,7 @@ import { loadPlan } from '../plan/manager.js';
 import { derivePlanId, derivePlanIdentityHash } from '../plan/utils.js';
 import {
 	GitBinaryMissingError,
+	GitSpawnCwdError,
 	isGitBinaryMissing,
 	isSpawnCwdMissing,
 	isSpawnCwdUnreadable,
@@ -327,14 +328,10 @@ function gitExec(args: string[], cwd: string): string {
 				// the raw errno. Classification lives inside the throw branch so
 				// the transient-retry set above is untouched.
 				if (isSpawnCwdMissing(result.error, cwd)) {
-					throw new Error(
-						`git could not start: working directory no longer exists: ${cwd}`,
-					);
+					throw new GitSpawnCwdError(cwd, 'missing');
 				}
 				if (isSpawnCwdUnreadable(result.error, cwd)) {
-					throw new Error(
-						`git could not start: working directory could not be inspected (permission denied): ${cwd}`,
-					);
+					throw new GitSpawnCwdError(cwd, 'unreadable');
 				}
 				if (isGitBinaryMissing(result.error, cwd)) {
 					throw new GitBinaryMissingError(

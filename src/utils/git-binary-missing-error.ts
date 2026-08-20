@@ -31,7 +31,21 @@ export {
 	type SpawnFailureClass,
 } from './bun-compat.js';
 
-export class GitBinaryMissingError extends Error {
+/**
+ * Base type for "git never ran".
+ *
+ * Both subclasses mean the child process was never created, so **nothing may
+ * be inferred from its absence of output**. That distinction is the whole
+ * point: a caller that reads "git produced no result" as a fact about the
+ * repository (for example "this path is not in HEAD") is only entitled to do
+ * so when git actually executed and reported. Callers therefore discriminate
+ * on this base, not on either subclass — a two-way `instanceof` check against
+ * a three-way classification is what re-introduces the #2236 misdiagnosis one
+ * state at a time.
+ */
+export class GitUnavailableError extends Error {}
+
+export class GitBinaryMissingError extends GitUnavailableError {
 	override readonly name = 'GitBinaryMissingError';
 
 	constructor(
@@ -39,6 +53,42 @@ export class GitBinaryMissingError extends Error {
 		options?: { cause?: unknown },
 	) {
 		super(message, options);
+	}
+}
+
+/** Which of the two `cwd` fault states produced a {@link GitSpawnCwdError}. */
+export type GitSpawnCwdFault = 'missing' | 'unreadable';
+
+/**
+ * git could not start because its `cwd` was unusable — the #2236 shape.
+ *
+ * Deliberately a *sibling* of {@link GitBinaryMissingError}, never a subclass:
+ * "the working directory is gone" and "git is not installed" are different
+ * facts with different remediations, and the #2236 regression suites assert
+ * that a cwd fault is `not.toBeInstanceOf(GitBinaryMissingError)`.
+ *
+ * The message text is rendered here rather than at each throw site so all four
+ * `execGit`-style call sites (`git/branch.ts`, `tools/checkpoint.ts`,
+ * `hooks/semantic-diff-injection.ts`, `tools/diff-summary.ts`) cannot drift.
+ */
+export class GitSpawnCwdError extends GitUnavailableError {
+	override readonly name = 'GitSpawnCwdError';
+	readonly cwd: string;
+	readonly fault: GitSpawnCwdFault;
+
+	constructor(
+		cwd: string,
+		fault: GitSpawnCwdFault,
+		options?: { cause?: unknown },
+	) {
+		super(
+			fault === 'missing'
+				? `git could not start: working directory no longer exists: ${cwd}`
+				: `git could not start: working directory could not be inspected (permission denied): ${cwd}`,
+			options,
+		);
+		this.cwd = cwd;
+		this.fault = fault;
 	}
 }
 
