@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 import { getAgentConfigs } from '../../../src/agents';
 import {
 	ARCHITECT_PROMPT_BUDGET_CHARS,
@@ -64,7 +64,12 @@ describe('architect prompt budget — regression: unbounded growth (F#1649)', ()
 
 	beforeEach(() => {
 		prevXdg = process.env.XDG_CONFIG_HOME;
-		cfgDir = mkdtempSync(join(tmpdir(), 'swarm-prompt-budget-'));
+		// canonicalMkdtemp returns a realpath-resolved tempdir, closing the
+		// macOS /var -> /private/var symlink gap (FR-011, issue #1737). The
+		// loadAgentPrompt path resolves via getUserConfigDir() which uses
+		// `process.env.XDG_CONFIG_HOME || ~/.config`, so any symlink in the
+		// chain would silently route us to a different directory on macOS.
+		cfgDir = canonicalMkdtemp('swarm-prompt-budget-');
 		// loadAgentPrompt reads $XDG_CONFIG_HOME/opencode/opencode-swarm/<agent>.md
 		mkdirSync(join(cfgDir, 'opencode', 'opencode-swarm'), { recursive: true });
 		process.env.XDG_CONFIG_HOME = cfgDir;
