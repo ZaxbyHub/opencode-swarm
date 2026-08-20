@@ -2,10 +2,11 @@
 
 Swarm memory stores scoped, source-backed facts that can be recalled by agents without giving agents direct write access to durable memory.
 
-Swarm memory is an optional, project-scoped recall system. The current default provider is SQLite under `.swarm/memory/memory.db`; the legacy local JSONL provider remains available for migration and debug workflows. Enabling memory exposes two agent tools:
+Swarm memory is an optional, project-scoped recall system. The current default provider is SQLite under `.swarm/memory/memory.db`; the legacy local JSONL provider remains available for migration and debug workflows. Enabling memory exposes three agent tools:
 
 - `swarm_memory_recall`: read-only scoped recall.
 - `swarm_memory_propose`: proposal-only writes. It creates pending proposals and never writes durable memory directly.
+- `swarm_memory_outcome`: records whether recalled memory or a graph answer was useful, a dead end, or corrected. It can target a memory ID or create a lightweight question result.
 
 Memory is disabled by default. When disabled, default agents are not given the memory tools, direct tool calls return a clear disabled result, and existing Swarm behavior is unchanged.
 
@@ -27,6 +28,10 @@ Enable local memory in `.opencode/opencode-swarm.json`:
       "defaultMaxItems": 8,
       "defaultTokenBudget": 1200,
       "minScore": 0.05
+    },
+    "reflection": {
+      "enabled": false,
+      "halfLifeDays": 30
     },
     "writes": {
       "mode": "propose"
@@ -69,6 +74,8 @@ Enable local memory in `.opencode/opencode-swarm.json`:
 ```
 
 All `learning.*` fields shown above are the defaults — override only the ones you want to tune; see [Recall Learning](#recall-learning) for what each controls.
+
+Outcome feedback is append-only and may include file/symbol anchors. When `reflection.enabled` is true, Swarm deterministically renders signed, time-decayed lessons to `.swarm/reflections/lessons.{md,json}` at startup and after every outcome write. The compact session context promotes a source only after two distinct useful outcomes, preserves contested and corrected evidence, and excludes memories whose anchors no longer exist. Reflection is opt-in in this release.
 
 `sqlite` is the default provider. `local-jsonl` remains available for legacy/debug mode:
 

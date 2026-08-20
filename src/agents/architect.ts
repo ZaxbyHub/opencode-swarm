@@ -33,6 +33,8 @@ export interface AgentDefinition {
 	config: AgentConfig;
 }
 
+export const ARCHITECT_MEMORY_OUTCOME_GUIDANCE = `After using recalled memory or a graph answer, call \`swarm_memory_outcome\` to record whether it was \`useful\`, a \`dead_end\`, or \`corrected\`, with the relevant file/symbol anchors. If you correct a memory-backed claim, record \`corrected\` and include the corrected explanation in \`correction\`.`;
+
 /**
  * HARDENING BLOCK INVENTORY (v6.14)
  *
@@ -1953,6 +1955,10 @@ export function createArchitectAgent(
 				"- the active swarm's docs_design agent = @{{AGENT_PREFIX}}docs_design\n",
 				'',
 			);
+	}
+
+	if (memoryEnabled) {
+		prompt = `${prompt ?? ''}\n\n${ARCHITECT_MEMORY_OUTCOME_GUIDANCE}`.trim();
 	}
 
 	return {

@@ -437,7 +437,7 @@ Optional scoped memory substrate for recall and proposal-only memory writes.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enabled` | boolean | `false` | Enable agent access to `swarm_memory_recall` and `swarm_memory_propose` |
+| `enabled` | boolean | `false` | Enable agent access to `swarm_memory_recall`, `swarm_memory_propose`, and `swarm_memory_outcome` |
 | `provider` | string | `"sqlite"` | Memory provider. Supports default `"sqlite"` and legacy/debug `"local-jsonl"` |
 | `storageDir` | string | `".swarm/memory"` | Local storage directory under the project root |
 | `sqlite.path` | string | `".swarm/memory/memory.db"` | SQLite database path. Must remain inside `.swarm/` |
@@ -450,6 +450,8 @@ Optional scoped memory substrate for recall and proposal-only memory writes.
 | `recall.injection.requireQuerySignal` | boolean | `true` | Require text, tag, file, symbol, or explicit kind query signal before automatic injection |
 | `recall.injection.maxItems` | number | `6` | Maximum memories automatically injected into agent context |
 | `recall.injection.tokenBudget` | number | `1000` | Token budget for automatic memory injection |
+| `reflection.enabled` | boolean | `false` | Render and inject deterministic outcome-scored lessons |
+| `reflection.halfLifeDays` | number | `30` | Half-life used for signed outcome decay |
 | `writes.mode` | string | `"propose"` | Normal agents can only create proposals |
 | `redaction.rejectDurableSecrets` | boolean | `true` | Reject durable memories that contain likely secrets |
 | `maintenance.lowUtilityMaxConfidence` | number | `0.45` | Confidence threshold used by `/swarm memory stale` low-utility reporting |

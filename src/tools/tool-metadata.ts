@@ -823,6 +823,11 @@ export const TOOL_METADATA = {
 			'create a pending Swarm memory proposal; does not write durable memory directly',
 		agents: [],
 	},
+	swarm_memory_outcome: {
+		description:
+			'record useful, dead-end, or corrected outcomes and synchronously refresh deterministic memory lessons',
+		agents: [],
+	},
 	swarm_command: {
 		description:
 			'run supported /swarm commands through the canonical command registry',

@@ -20,6 +20,12 @@ export interface MemoryConfig {
 			tokenBudget: number;
 		};
 	};
+	reflection: {
+		/** Generate/inject deterministic outcome lessons automatically. */
+		enabled: boolean;
+		/** Exponential decay half-life for signed outcomes. */
+		halfLifeDays: number;
+	};
 	learning: MemoryLearningConfig;
 	writes: {
 		mode: 'propose';
@@ -272,6 +278,10 @@ export const DEFAULT_MEMORY_CONFIG: MemoryConfig = {
 			tokenBudget: 1000,
 		},
 	},
+	reflection: {
+		enabled: false,
+		halfLifeDays: 30,
+	},
 	learning: { ...DEFAULT_MEMORY_LEARNING_CONFIG },
 	writes: {
 		mode: 'propose',
@@ -331,6 +341,10 @@ export function resolveMemoryConfig(
 				...DEFAULT_MEMORY_CONFIG.recall.injection,
 				...(input?.recall?.injection ?? {}),
 			},
+		},
+		reflection: {
+			...DEFAULT_MEMORY_CONFIG.reflection,
+			...(input?.reflection ?? {}),
 		},
 		learning: {
 			...DEFAULT_MEMORY_CONFIG.learning,

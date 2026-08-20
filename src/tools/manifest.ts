@@ -127,6 +127,7 @@ import { submit_phase_council_verdicts } from './submit-phase-council-verdicts';
 import { suggestPatch } from './suggest-patch';
 import { summarize_work } from './summarize-work';
 import { swarm_command } from './swarm-command';
+import { swarm_memory_outcome } from './swarm-memory-outcome';
 import { swarm_memory_propose } from './swarm-memory-propose';
 import { swarm_memory_recall } from './swarm-memory-recall';
 import { symbols } from './symbols';
@@ -260,6 +261,7 @@ export const TOOL_MANIFEST = defineHandlers({
 	knowledge_archive: () => knowledge_archive,
 	swarm_memory_recall: () => swarm_memory_recall,
 	swarm_memory_propose: () => swarm_memory_propose,
+	swarm_memory_outcome: () => swarm_memory_outcome,
 	swarm_command: () => swarm_command,
 	dispatch_lanes: () => dispatch_lanes,
 	dispatch_lanes_async: () => dispatch_lanes_async,

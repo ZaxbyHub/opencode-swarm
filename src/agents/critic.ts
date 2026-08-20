@@ -1,4 +1,8 @@
 import type { AgentDefinition } from './architect';
+
+export const CRITIC_MEMORY_OUTCOME_GUIDANCE =
+	'Use `swarm_memory_outcome` after evaluating recalled memory or a graph answer. When overturning a memory-backed claim, record `corrected` and include the correction text and relevant file/symbol anchors.';
+
 import { READ_ONLY_LANE_GUIDANCE } from './read-only-lane-guidance';
 
 /**
@@ -776,7 +780,6 @@ export function createCriticAgent(
 							: role === 'architecture_supervisor'
 								? ARCHITECTURE_SUPERVISOR_PROMPT
 								: HALLUCINATION_VERIFIER_PROMPT;
-
 		prompt = customAppendPrompt
 			? `${rolePrompt}\n\n${customAppendPrompt}`
 			: rolePrompt;

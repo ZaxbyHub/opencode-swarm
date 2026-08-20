@@ -5,9 +5,11 @@ import {
 	mkdir,
 	readFile,
 	rename,
+	truncate,
 	writeFile,
 } from 'node:fs/promises';
 import * as path from 'node:path';
+import lockfileImport from 'proper-lockfile';
 import { validateSwarmPath } from '../hooks/utils';
 import { warn } from '../utils';
 import { DEFAULT_MEMORY_CONFIG, type MemoryConfig } from './config';
@@ -21,6 +23,16 @@ import {
 } from './curator-decision-helpers';
 import { MemoryValidationError } from './errors';
 import { shouldCompactMemory } from './maintenance';
+import {
+	assertEventIdentityCompatible,
+	ensureOutcomeGeneration,
+	importMaterializedOutcomeEvents,
+	type MemoryOutcomeEvent,
+	materializeOutcomeRecord,
+	stripMaterializedOutcomes,
+	validateOutcomeEvent,
+	validateOutcomeEventForMemory,
+} from './outcome-events';
 import type {
 	MemoryCompactOptions,
 	MemoryCompactResult,
@@ -45,7 +57,9 @@ import {
 } from './scoring';
 import type {
 	AppliedMemoryChange,
+	MemoryAnchor,
 	MemoryListFilter,
+	MemoryOutcome,
 	MemoryProposal,
 	MemoryRecord,
 	RecallRequest,
@@ -61,6 +75,17 @@ type AuditOperation =
 	| 'curator_decision'
 	| 'compact'
 	| 'invalid_load';
+
+const lockfile = lockfileImport as unknown as {
+	lock: (
+		file: string,
+		options: {
+			realpath: boolean;
+			stale: number;
+			retries: { retries: number; minTimeout: number; maxTimeout: number };
+		},
+	) => Promise<() => Promise<void>>;
+};
 
 interface AuditEvent {
 	id: string;
@@ -103,7 +128,12 @@ export class LocalJsonlMemoryProvider
 	 * - local root → existing behavior: strip `.swarm/`, validateSwarmPath.
 	 */
 	private pathFor(
-		file: 'memories' | 'proposals' | 'audit' | 'reward-events',
+		file:
+			| 'memories'
+			| 'proposals'
+			| 'audit'
+			| 'reward-events'
+			| 'outcome-events',
 	): string {
 		const filename =
 			file === 'memories'
@@ -112,7 +142,9 @@ export class LocalJsonlMemoryProvider
 					? 'proposals.jsonl'
 					: file === 'audit'
 						? 'audit.jsonl'
-						: 'reward-events.jsonl';
+						: file === 'reward-events'
+							? 'reward-events.jsonl'
+							: 'outcome-events.jsonl';
 		if (this.cohortRoot) {
 			return path.join(this.cohortRoot, filename);
 		}
@@ -141,18 +173,26 @@ export class LocalJsonlMemoryProvider
 			await readJsonl(proposalPath),
 			this.config,
 		);
+		const outcomeEvents = this.readOutcomeEventsSync();
+		const materializedLoad = validateMaterializedMemories(
+			memoryLoad.records,
+			outcomeEvents,
+			this.config,
+		);
 		this.memories = new Map(
-			memoryLoad.records.map((record) => [record.id, record]),
+			materializedLoad.records.map((record) => [record.id, record]),
 		);
 		this.proposals = new Map(
 			proposalLoad.records.map((proposal) => [proposal.id, proposal]),
 		);
 		this.initialized = true;
-		if (memoryLoad.invalidCount > 0) {
+		const invalidMemoryCount =
+			memoryLoad.invalidCount + materializedLoad.invalidCount;
+		if (invalidMemoryCount > 0) {
 			await this.audit(
 				'invalid_load',
 				'memories',
-				`${memoryLoad.invalidCount} invalid memory JSONL row(s) skipped`,
+				`${invalidMemoryCount} invalid memory JSONL row(s) skipped`,
 			);
 		}
 		if (proposalLoad.invalidCount > 0) {
@@ -166,21 +206,71 @@ export class LocalJsonlMemoryProvider
 
 	async upsert(record: MemoryRecord): Promise<MemoryRecord> {
 		await this.initialize();
-		const existing = this.memories.get(record.id);
-		if (existing?.metadata.deleted === true) {
-			throw new MemoryValidationError(
-				'memory is tombstoned and cannot be upserted',
+		const next = await this.withOutcomeStoreLock(async () => {
+			await this.refreshMemoriesUnlocked();
+			const existing = this.memories.get(record.id);
+			if (existing?.metadata.deleted === true) {
+				throw new MemoryValidationError(
+					'memory is tombstoned and cannot be upserted',
+				);
+			}
+			let parsed = validateMemoryRecordRules(
+				{
+					...record,
+					createdAt: existing?.createdAt ?? record.createdAt,
+					metadata: {
+						...record.metadata,
+						outcomeGeneration:
+							existing?.metadata.outcomeGeneration ??
+							record.metadata.outcomeGeneration,
+					},
+				},
+				{ rejectDurableSecrets: this.config.redaction.rejectDurableSecrets },
 			);
-		}
-		const next = validateMemoryRecordRules(
-			{
-				...record,
-				createdAt: existing?.createdAt ?? record.createdAt,
-			},
-			{ rejectDurableSecrets: this.config.redaction.rejectDurableSecrets },
-		);
-		this.memories.set(next.id, next);
-		await appendJsonl(this.pathFor('memories'), next);
+			if (
+				(parsed.outcomes?.length ?? 0) > 0 ||
+				typeof parsed.metadata.outcomeGeneration === 'string'
+			) {
+				parsed = ensureOutcomeGeneration(parsed);
+			}
+			const events = this.readOutcomeEventsSync();
+			if (typeof parsed.metadata.outcomeGeneration === 'string') {
+				const importedEvents = importMaterializedOutcomeEvents(parsed, events);
+				const preflight = [...events];
+				for (const imported of importedEvents) {
+					validateOutcomeEventForMemory(
+						imported,
+						parsed,
+						this.config.redaction.rejectDurableSecrets,
+					);
+					const prior = preflight.find(
+						(candidate) => candidate.id === imported.id,
+					);
+					assertEventIdentityCompatible(prior, imported);
+					if (!prior) preflight.push(imported);
+				}
+				if (
+					preflight.filter(
+						(event) =>
+							event.memoryId === parsed.id &&
+							event.generation === parsed.metadata.outcomeGeneration,
+					).length > 1000
+				) {
+					throw new MemoryValidationError('memory outcome limit exceeded');
+				}
+				for (const imported of importedEvents) {
+					await this.appendOutcomeEventUnlocked(imported, events);
+					if (!events.some((candidate) => candidate.id === imported.id)) {
+						events.push(imported);
+					}
+				}
+			}
+			const base = stripMaterializedOutcomes(parsed);
+			await this.appendMemoryUnlocked(base);
+			const materialized = materializeOutcomeRecord(base, events);
+			this.memories.set(materialized.id, materialized);
+			return materialized;
+		});
 		await this.audit('upsert', next.id);
 		this.bumpCohortGeneration();
 		return next;
@@ -188,25 +278,95 @@ export class LocalJsonlMemoryProvider
 
 	async get(id: string): Promise<MemoryRecord | null> {
 		await this.initialize();
-		return this.memories.get(id) ?? null;
+		return this.withOutcomeStoreLock(async () => {
+			await this.refreshMemoriesUnlocked();
+			return this.memories.get(id) ?? null;
+		});
+	}
+
+	async appendOutcome(
+		memoryId: string,
+		event: { id: string; outcome: MemoryOutcome },
+		anchors: MemoryAnchor[] = [],
+	): Promise<MemoryRecord> {
+		await this.initialize();
+		const next = await this.withOutcomeStoreLock(async () => {
+			await this.refreshMemoriesUnlocked();
+			let base = this.memories.get(memoryId);
+			if (!base) throw new MemoryValidationError('target memory was not found');
+			if (base.metadata.deleted === true) {
+				throw new MemoryValidationError('target memory is deleted');
+			}
+			base = ensureOutcomeGeneration(base);
+			const storedBase = stripMaterializedOutcomes(base);
+			const events = this.readOutcomeEventsSync();
+			const nextEvent = validateOutcomeEventForMemory(
+				{
+					...event,
+					memoryId,
+					generation: storedBase.metadata.outcomeGeneration,
+					anchors,
+				},
+				storedBase,
+				this.config.redaction.rejectDurableSecrets,
+			);
+			assertEventIdentityCompatible(
+				events.find((candidate) => candidate.id === nextEvent.id),
+				nextEvent,
+			);
+			if (
+				events.filter(
+					(candidate) => candidate.generation === nextEvent.generation,
+				).length >= 1000 &&
+				!events.some((candidate) => candidate.id === nextEvent.id)
+			) {
+				throw new MemoryValidationError('memory outcome limit exceeded');
+			}
+			await this.appendMemoryUnlocked(storedBase);
+			await this.appendOutcomeEventUnlocked(nextEvent, events);
+			if (!events.some((candidate) => candidate.id === nextEvent.id)) {
+				events.push(nextEvent);
+			}
+			const materialized = materializeOutcomeRecord(storedBase, events);
+			this.memories.set(memoryId, materialized);
+			return materialized;
+		});
+		this.bumpCohortGeneration();
+		return next;
+	}
+
+	async listOutcomeEvents(): Promise<MemoryOutcomeEvent[]> {
+		await this.initialize();
+		return this.withOutcomeStoreLock(async () => this.readOutcomeEventsSync());
 	}
 
 	async delete(id: string, reason?: string): Promise<void> {
 		await this.initialize();
-		const existing = this.memories.get(id);
-		if (!existing) return;
-		if (this.config.hardDelete) {
-			this.memories.delete(id);
-			await this.compact();
-		} else {
-			const tombstone: MemoryRecord = {
-				...existing,
-				updatedAt: new Date().toISOString(),
-				metadata: { ...existing.metadata, deleted: true, deleteReason: reason },
-			};
-			this.memories.set(id, tombstone);
-			await appendJsonl(this.pathFor('memories'), tombstone);
-		}
+		const changed = await this.withOutcomeStoreLock(async () => {
+			await this.refreshMemoriesUnlocked();
+			const existing = this.memories.get(id);
+			if (!existing) return false;
+			if (this.config.hardDelete) {
+				this.memories.delete(id);
+				await this.rewriteMemoryFamilyUnlocked(
+					Array.from(this.memories.values()),
+				);
+			} else {
+				const tombstone: MemoryRecord = {
+					...existing,
+					updatedAt: new Date().toISOString(),
+					metadata: {
+						...existing.metadata,
+						deleted: true,
+						deleteReason: reason,
+					},
+				};
+				this.memories.set(id, tombstone);
+				await this.appendMemoryUnlocked(tombstone);
+			}
+			return true;
+		});
+		if (!changed) return;
 		await this.audit('delete', id, reason);
 		this.bumpCohortGeneration();
 	}
@@ -302,6 +462,9 @@ export class LocalJsonlMemoryProvider
 
 	async list(filter: MemoryListFilter = {}): Promise<MemoryRecord[]> {
 		await this.initialize();
+		await this.withOutcomeStoreLock(async () => {
+			await this.refreshMemoriesUnlocked();
+		});
 		let records = Array.from(this.memories.values());
 		if (filter.scopes && filter.scopes.length > 0) {
 			records = records.filter((record) =>
@@ -324,7 +487,10 @@ export class LocalJsonlMemoryProvider
 				(record) => !record.supersededBy && record.metadata.deleted !== true,
 			);
 		}
-		records.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+		records.sort(
+			(a, b) =>
+				compareText(b.updatedAt, a.updatedAt) || compareText(a.id, b.id),
+		);
 		return records.slice(0, filter.limit ?? records.length);
 	}
 
@@ -356,6 +522,18 @@ export class LocalJsonlMemoryProvider
 		decision: ResolvedCuratorMemoryDecision,
 	): Promise<AppliedMemoryChange> {
 		await this.initialize();
+		const change = await this.withOutcomeStoreLock(async () => {
+			await this.refreshMemoriesUnlocked();
+			await this.refreshProposalsUnlocked();
+			return this.applyCuratorDecisionUnlocked(decision);
+		});
+		this.bumpCohortGeneration();
+		return change;
+	}
+
+	private async applyCuratorDecisionUnlocked(
+		decision: ResolvedCuratorMemoryDecision,
+	): Promise<AppliedMemoryChange> {
 		const appliedAt = new Date().toISOString();
 		const proposal = this.proposals.get(decision.proposalId);
 		if (!proposal) {
@@ -378,7 +556,7 @@ export class LocalJsonlMemoryProvider
 			});
 			validateCuratorPromotableMemory(memory);
 			this.memories.set(memory.id, memory);
-			await appendJsonl(this.pathFor('memories'), memory);
+			await this.appendMemoryUnlocked(memory);
 			memoryId = memory.id;
 		} else if (decision.action === 'update') {
 			const existing = this.activeMemory(decision.targetMemoryId);
@@ -400,10 +578,10 @@ export class LocalJsonlMemoryProvider
 					},
 				});
 				this.memories.set(tombstone.id, tombstone);
-				await appendJsonl(this.pathFor('memories'), tombstone);
+				await this.appendMemoryUnlocked(tombstone);
 			}
 			this.memories.set(updated.id, updated);
-			await appendJsonl(this.pathFor('memories'), updated);
+			await this.appendMemoryUnlocked(updated);
 			memoryId = updated.id;
 			targetMemoryId = existing.id;
 		} else if (decision.action === 'supersede') {
@@ -427,8 +605,8 @@ export class LocalJsonlMemoryProvider
 			});
 			this.memories.set(superseded.id, superseded);
 			this.memories.set(replacement.id, replacement);
-			await appendJsonl(this.pathFor('memories'), superseded);
-			await appendJsonl(this.pathFor('memories'), replacement);
+			await this.appendMemoryUnlocked(superseded);
+			await this.appendMemoryUnlocked(replacement);
 			oldMemoryId = oldMemory.id;
 			replacementMemoryId = replacement.id;
 			memoryId = replacement.id;
@@ -462,16 +640,17 @@ export class LocalJsonlMemoryProvider
 			change.reason,
 			buildCuratorDecisionEvent(change, proposal),
 		);
-		this.bumpCohortGeneration();
 		return change;
 	}
 
 	async compact(): Promise<void> {
 		await this.initialize();
-		await writeJsonlAtomic(
-			this.pathFor('memories'),
-			Array.from(this.memories.values()),
-		);
+		await this.withOutcomeStoreLock(async () => {
+			await this.refreshMemoriesUnlocked();
+			await this.rewriteMemoryFamilyUnlocked(
+				Array.from(this.memories.values()),
+			);
+		});
 		await this.audit('compact', 'memories');
 		this.bumpCohortGeneration();
 	}
@@ -480,35 +659,32 @@ export class LocalJsonlMemoryProvider
 		options: MemoryCompactOptions = {},
 	): Promise<MemoryCompactResult> {
 		await this.initialize();
-		const now = options.now ? new Date(options.now) : new Date();
-		const kept: MemoryRecord[] = [];
-		const result: MemoryCompactResult = {
-			dryRun: options.dryRun !== false,
-			removedDeleted: 0,
-			removedSuperseded: 0,
-			removedExpiredScratch: 0,
-			remaining: 0,
-		};
-		for (const memory of this.memories.values()) {
-			const compactReason = shouldCompactMemory(memory, now);
-			if (compactReason === 'deleted') {
-				result.removedDeleted++;
-				continue;
+		const result = await this.withOutcomeStoreLock(async () => {
+			await this.refreshMemoriesUnlocked();
+			const now = options.now ? new Date(options.now) : new Date();
+			const kept: MemoryRecord[] = [];
+			const current: MemoryCompactResult = {
+				dryRun: options.dryRun !== false,
+				removedDeleted: 0,
+				removedSuperseded: 0,
+				removedExpiredScratch: 0,
+				remaining: 0,
+			};
+			for (const memory of this.memories.values()) {
+				const compactReason = shouldCompactMemory(memory, now);
+				if (compactReason === 'deleted') current.removedDeleted++;
+				else if (compactReason === 'superseded') current.removedSuperseded++;
+				else if (compactReason === 'expired_scratch')
+					current.removedExpiredScratch++;
+				else kept.push(memory);
 			}
-			if (compactReason === 'superseded') {
-				result.removedSuperseded++;
-				continue;
-			}
-			if (compactReason === 'expired_scratch') {
-				result.removedExpiredScratch++;
-				continue;
-			}
-			kept.push(memory);
-		}
-		result.remaining = kept.length;
+			current.remaining = kept.length;
+			if (current.dryRun) return current;
+			this.memories = new Map(kept.map((memory) => [memory.id, memory]));
+			await this.rewriteMemoryFamilyUnlocked(kept);
+			return current;
+		});
 		if (result.dryRun) return result;
-		this.memories = new Map(kept.map((memory) => [memory.id, memory]));
-		await writeJsonlAtomic(this.pathFor('memories'), kept);
 		await this.audit(
 			'compact',
 			'memories',
@@ -534,6 +710,108 @@ export class LocalJsonlMemoryProvider
 			timestamp: new Date().toISOString(),
 		};
 		await appendJsonl(this.pathFor('audit'), event);
+	}
+
+	private async withOutcomeStoreLock<T>(fn: () => Promise<T>): Promise<T> {
+		const storageDirectory = path.dirname(this.pathFor('memories'));
+		await mkdir(storageDirectory, { recursive: true });
+		const release = await lockfile.lock(storageDirectory, {
+			realpath: false,
+			stale: 10_000,
+			retries: { retries: 20, minTimeout: 25, maxTimeout: 250 },
+		});
+		try {
+			return await fn();
+		} finally {
+			await release().catch(() => {});
+		}
+	}
+
+	private async refreshMemoriesUnlocked(): Promise<void> {
+		const loaded = validateLoadedMemories(
+			await readJsonl(this.pathFor('memories')),
+			this.config,
+		);
+		const events = this.readOutcomeEventsSync();
+		const materialized = validateMaterializedMemories(
+			loaded.records,
+			events,
+			this.config,
+		);
+		this.memories = new Map(
+			materialized.records.map((record) => [record.id, record]),
+		);
+	}
+
+	private async appendMemoryUnlocked(record: MemoryRecord): Promise<void> {
+		const filePath = this.pathFor('memories');
+		await repairIncompleteJsonlTail(filePath);
+		await appendJsonl(filePath, stripMaterializedOutcomes(record));
+	}
+
+	private async refreshProposalsUnlocked(): Promise<void> {
+		const loaded = validateLoadedProposals(
+			await readJsonl(this.pathFor('proposals')),
+			this.config,
+		);
+		this.proposals = new Map(
+			loaded.records.map((proposal) => [proposal.id, proposal]),
+		);
+	}
+
+	private readOutcomeEventsSync(): MemoryOutcomeEvent[] {
+		const filePath = this.pathFor('outcome-events');
+		if (!existsSync(filePath)) return [];
+		const content = readFileSync(filePath, 'utf-8');
+		const completeContent = content.endsWith('\n')
+			? content
+			: content.slice(0, Math.max(0, content.lastIndexOf('\n') + 1));
+		const events: MemoryOutcomeEvent[] = [];
+		for (const line of completeContent.split('\n')) {
+			if (!line.trim()) continue;
+			let event: MemoryOutcomeEvent;
+			try {
+				event = validateOutcomeEvent(JSON.parse(line));
+			} catch {
+				// Ignore invalid or incomplete rows; the next locked append repairs tail.
+				continue;
+			}
+			const prior = events.find((candidate) => candidate.id === event.id);
+			assertEventIdentityCompatible(prior, event);
+			if (!prior) events.push(event);
+		}
+		return events;
+	}
+
+	private async appendOutcomeEventUnlocked(
+		event: MemoryOutcomeEvent,
+		existing: readonly MemoryOutcomeEvent[],
+	): Promise<void> {
+		const same = existing.find((candidate) => candidate.id === event.id);
+		assertEventIdentityCompatible(same, event);
+		if (same) return;
+		const filePath = this.pathFor('outcome-events');
+		await repairIncompleteJsonlTail(filePath);
+		await appendJsonl(filePath, event);
+	}
+
+	private async rewriteMemoryFamilyUnlocked(
+		memories: readonly MemoryRecord[],
+	): Promise<void> {
+		const liveGenerations = new Set(
+			memories.map(
+				(memory) =>
+					`${memory.id}\0${String(memory.metadata.outcomeGeneration ?? '')}`,
+			),
+		);
+		const events = this.readOutcomeEventsSync().filter((event) =>
+			liveGenerations.has(`${event.memoryId}\0${event.generation}`),
+		);
+		await writeJsonlAtomic(this.pathFor('outcome-events'), events);
+		await writeJsonlAtomic(
+			this.pathFor('memories'),
+			memories.map(stripMaterializedOutcomes),
+		);
 	}
 
 	/**
@@ -653,8 +931,20 @@ function validateLoadedMemories(
 	config: MemoryConfig,
 ): { records: MemoryRecord[]; invalidCount: number } {
 	const records: MemoryRecord[] = [];
+	const seenIds = new Set<string>();
 	let invalidCount = 0;
-	for (const value of values) {
+	for (let index = values.length - 1; index >= 0; index--) {
+		const value = values[index];
+		const candidateId =
+			value &&
+			typeof value === 'object' &&
+			typeof (value as { id?: unknown }).id === 'string'
+				? (value as { id: string }).id
+				: undefined;
+		if (candidateId && seenIds.has(candidateId)) continue;
+		// A parseable newest row owns its identity even when policy/schema
+		// validation fails; never resurrect an older version of that memory.
+		if (candidateId) seenIds.add(candidateId);
 		try {
 			records.push(
 				validateMemoryRecordRules(value as MemoryRecord, {
@@ -665,7 +955,40 @@ function validateLoadedMemories(
 			invalidCount++;
 		}
 	}
+	records.reverse();
 	return { records, invalidCount };
+}
+
+function validateMaterializedMemories(
+	records: readonly MemoryRecord[],
+	events: readonly MemoryOutcomeEvent[],
+	config: MemoryConfig,
+): { records: MemoryRecord[]; invalidCount: number } {
+	const valid: MemoryRecord[] = [];
+	const seenIds = new Set<string>();
+	let invalidCount = 0;
+	for (let index = records.length - 1; index >= 0; index--) {
+		const record = records[index];
+		if (!record || seenIds.has(record.id)) continue;
+		// JSONL is last-row-wins. Mark the identity before validation so an
+		// invalid newest materialization cannot resurrect an older row.
+		seenIds.add(record.id);
+		try {
+			valid.push(
+				validateMemoryRecordRules(materializeOutcomeRecord(record, events), {
+					rejectDurableSecrets: config.redaction.rejectDurableSecrets,
+				}),
+			);
+		} catch {
+			invalidCount++;
+		}
+	}
+	valid.reverse();
+	return { records: valid, invalidCount };
+}
+
+function compareText(a: string, b: string): number {
+	return a < b ? -1 : a > b ? 1 : 0;
 }
 
 function validateLoadedProposals(
@@ -823,4 +1146,12 @@ async function writeJsonlAtomic(
 		(values.length > 0 ? '\n' : '');
 	await writeFile(tmp, content, 'utf-8');
 	await rename(tmp, filePath);
+}
+
+async function repairIncompleteJsonlTail(filePath: string): Promise<void> {
+	if (!existsSync(filePath)) return;
+	const content = await readFile(filePath, 'utf-8');
+	if (content.length === 0 || content.endsWith('\n')) return;
+	const lastNewline = content.lastIndexOf('\n');
+	await truncate(filePath, lastNewline < 0 ? 0 : lastNewline + 1);
 }

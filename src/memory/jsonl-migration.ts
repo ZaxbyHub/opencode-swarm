@@ -3,21 +3,36 @@ import { copyFile, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import { validateSwarmPath } from '../hooks/utils';
 import { DEFAULT_MEMORY_CONFIG, type MemoryConfig } from './config';
+import {
+	type MemoryOutcomeEvent,
+	validateOutcomeEvent,
+} from './outcome-events';
 import { validateMemoryProposal, validateMemoryRecordRules } from './schema';
 import type { MemoryProposal, MemoryRecord } from './types';
 
 export const LEGACY_JSONL_MIGRATION_VERSION = 2;
 export const LEGACY_JSONL_MIGRATION_NAME = 'legacy_jsonl_import_complete';
+/**
+ * Separate additive marker for outcome events. Existing databases may already
+ * carry the immutable v2 schema_migrations row, so outcome import cannot reuse
+ * that row or invent a future migration version (the migration runner is
+ * MAX(version)-based).
+ */
+export const LEGACY_JSONL_OUTCOME_META_KEY =
+	'legacy_jsonl_outcomes_import_complete';
 
 export interface JsonlInvalidRow {
-	file: 'memories.jsonl' | 'proposals.jsonl';
+	file: 'memories.jsonl' | 'proposals.jsonl' | 'outcome-events.jsonl';
 	line: number;
 	error: string;
 }
 
 export interface JsonlImportPayload {
 	memories: MemoryRecord[];
+	memoryRows: Array<{ line: number; record: MemoryRecord }>;
 	proposals: MemoryProposal[];
+	outcomeEvents: MemoryOutcomeEvent[];
+	outcomeEventRows: Array<{ line: number; event: MemoryOutcomeEvent }>;
 	invalidRows: JsonlInvalidRow[];
 	totalRows: number;
 }
@@ -35,6 +50,7 @@ export interface JsonlMigrationReport {
 	reason?: string;
 	importedMemories: number;
 	importedProposals: number;
+	importedOutcomes: number;
 	invalidRows: JsonlInvalidRow[];
 	backups: JsonlBackupResult[];
 }
@@ -71,11 +87,22 @@ export async function readLegacyJsonl(
 		path.join(storageDir, 'proposals.jsonl'),
 		resolved,
 	);
+	const outcomeLoad = await readOutcomeJsonl(
+		path.join(storageDir, 'outcome-events.jsonl'),
+	);
 	return {
 		memories: memoryLoad.records,
+		memoryRows: memoryLoad.rows,
 		proposals: proposalLoad.records,
-		invalidRows: [...memoryLoad.invalidRows, ...proposalLoad.invalidRows],
-		totalRows: memoryLoad.totalRows + proposalLoad.totalRows,
+		outcomeEvents: outcomeLoad.records,
+		outcomeEventRows: outcomeLoad.rows,
+		invalidRows: [
+			...memoryLoad.invalidRows,
+			...proposalLoad.invalidRows,
+			...outcomeLoad.invalidRows,
+		],
+		totalRows:
+			memoryLoad.totalRows + proposalLoad.totalRows + outcomeLoad.totalRows,
 	};
 }
 
@@ -87,7 +114,11 @@ export async function backupLegacyJsonl(
 	const backupDir = path.join(storageDir, 'backups');
 	await mkdir(backupDir, { recursive: true });
 	const results: JsonlBackupResult[] = [];
-	for (const filename of ['memories.jsonl', 'proposals.jsonl'] as const) {
+	for (const filename of [
+		'memories.jsonl',
+		'proposals.jsonl',
+		'outcome-events.jsonl',
+	] as const) {
 		const source = path.join(storageDir, filename);
 		if (!existsSync(source)) continue;
 		const backup = path.join(backupDir, `${filename}.pre-sqlite-migration`);
@@ -106,7 +137,13 @@ export async function writeJsonlExport(
 	config: Partial<MemoryConfig>,
 	memories: MemoryRecord[],
 	proposals: MemoryProposal[],
-): Promise<{ directory: string; memoriesPath: string; proposalsPath: string }> {
+	outcomeEvents: MemoryOutcomeEvent[] = [],
+): Promise<{
+	directory: string;
+	memoriesPath: string;
+	proposalsPath: string;
+	outcomesPath: string;
+}> {
 	const exportDir = path.join(
 		resolveMemoryStorageDir(rootDirectory, config),
 		'export',
@@ -114,6 +151,7 @@ export async function writeJsonlExport(
 	await mkdir(exportDir, { recursive: true });
 	const memoriesPath = path.join(exportDir, 'memories.jsonl');
 	const proposalsPath = path.join(exportDir, 'proposals.jsonl');
+	const outcomesPath = path.join(exportDir, 'outcome-events.jsonl');
 	const memoriesTempPath = path.join(
 		path.dirname(memoriesPath),
 		`${path.basename(memoriesPath)}.tmp.${Date.now()}.${Math.floor(Math.random() * 1e9)}`,
@@ -144,7 +182,22 @@ export async function writeJsonlExport(
 		}
 		throw err;
 	}
-	return { directory: exportDir, memoriesPath, proposalsPath };
+	const outcomesTempPath = path.join(
+		path.dirname(outcomesPath),
+		`${path.basename(outcomesPath)}.tmp.${Date.now()}.${Math.floor(Math.random() * 1e9)}`,
+	);
+	try {
+		await writeFile(outcomesTempPath, toJsonl(outcomeEvents), 'utf-8');
+		renameSync(outcomesTempPath, outcomesPath);
+	} catch (err) {
+		try {
+			unlinkSync(outcomesTempPath);
+		} catch {
+			// best-effort cleanup
+		}
+		throw err;
+	}
+	return { directory: exportDir, memoriesPath, proposalsPath, outcomesPath };
 }
 
 export async function writeMigrationReport(
@@ -200,7 +253,7 @@ export async function getLegacyJsonlFileStatus(
 	config: Partial<MemoryConfig> = {},
 ): Promise<
 	Array<{
-		file: 'memories.jsonl' | 'proposals.jsonl';
+		file: 'memories.jsonl' | 'proposals.jsonl' | 'outcome-events.jsonl';
 		path: string;
 		exists: boolean;
 		sizeBytes: number;
@@ -208,7 +261,11 @@ export async function getLegacyJsonlFileStatus(
 > {
 	const storageDir = resolveMemoryStorageDir(rootDirectory, config);
 	const statuses = [];
-	for (const file of ['memories.jsonl', 'proposals.jsonl'] as const) {
+	for (const file of [
+		'memories.jsonl',
+		'proposals.jsonl',
+		'outcome-events.jsonl',
+	] as const) {
 		const filePath = path.join(storageDir, file);
 		let sizeBytes = 0;
 		if (existsSync(filePath)) {
@@ -222,6 +279,24 @@ export async function getLegacyJsonlFileStatus(
 		});
 	}
 	return statuses;
+}
+
+/**
+ * Cheap change token for the append-only outcome stream. Unlike the legacy v2
+ * one-shot marker, this advances when a user switches back to JSONL, records
+ * more outcomes, and later reopens SQLite.
+ */
+export async function getLegacyOutcomeJsonlSignature(
+	rootDirectory: string,
+	config: Partial<MemoryConfig> = {},
+): Promise<string> {
+	const filePath = path.join(
+		resolveMemoryStorageDir(rootDirectory, config),
+		'outcome-events.jsonl',
+	);
+	if (!existsSync(filePath)) return 'missing';
+	const details = await stat(filePath);
+	return `${details.size}:${details.mtimeMs}`;
 }
 
 function resolveConfig(config: Partial<MemoryConfig>): MemoryConfig {
@@ -256,19 +331,35 @@ async function readMemoryJsonl(
 	config: MemoryConfig,
 ): Promise<{
 	records: MemoryRecord[];
+	rows: Array<{ line: number; record: MemoryRecord }>;
 	invalidRows: JsonlInvalidRow[];
 	totalRows: number;
 }> {
 	const rows = await readJsonlRows(filePath);
 	const records: MemoryRecord[] = [];
+	const validRows: Array<{ line: number; record: MemoryRecord }> = [];
 	const invalidRows: JsonlInvalidRow[] = [];
-	for (const row of rows.rows) {
+	const seenIds = new Set<string>();
+	for (let index = rows.rows.length - 1; index >= 0; index--) {
+		const row = rows.rows[index];
+		if (!row) continue;
+		const candidateId =
+			row.value &&
+			typeof row.value === 'object' &&
+			typeof (row.value as { id?: unknown }).id === 'string'
+				? (row.value as { id: string }).id
+				: undefined;
+		if (candidateId && seenIds.has(candidateId)) continue;
+		// JSONL is last-row-wins. A newest row with an extractable identity owns
+		// that identity even when validation fails, so an older valid row cannot
+		// be resurrected during SQLite migration.
+		if (candidateId) seenIds.add(candidateId);
 		try {
-			records.push(
-				validateMemoryRecordRules(row.value as MemoryRecord, {
-					rejectDurableSecrets: config.redaction.rejectDurableSecrets,
-				}),
-			);
+			const record = validateMemoryRecordRules(row.value as MemoryRecord, {
+				rejectDurableSecrets: config.redaction.rejectDurableSecrets,
+			});
+			records.push(record);
+			validRows.push({ line: row.line, record });
 		} catch (err) {
 			invalidRows.push({
 				file: 'memories.jsonl',
@@ -277,10 +368,17 @@ async function readMemoryJsonl(
 			});
 		}
 	}
+	records.reverse();
+	validRows.reverse();
 	for (const row of rows.invalidRows) {
 		invalidRows.push({ file: 'memories.jsonl', ...row });
 	}
-	return { records, invalidRows, totalRows: rows.totalRows };
+	return {
+		records,
+		rows: validRows,
+		invalidRows,
+		totalRows: rows.totalRows,
+	};
 }
 
 async function readProposalJsonl(
@@ -315,6 +413,35 @@ async function readProposalJsonl(
 		invalidRows.push({ file: 'proposals.jsonl', ...row });
 	}
 	return { records, invalidRows, totalRows: rows.totalRows };
+}
+
+async function readOutcomeJsonl(filePath: string): Promise<{
+	records: MemoryOutcomeEvent[];
+	rows: Array<{ line: number; event: MemoryOutcomeEvent }>;
+	invalidRows: JsonlInvalidRow[];
+	totalRows: number;
+}> {
+	const rows = await readJsonlRows(filePath);
+	const records: MemoryOutcomeEvent[] = [];
+	const validRows: Array<{ line: number; event: MemoryOutcomeEvent }> = [];
+	const invalidRows: JsonlInvalidRow[] = [];
+	for (const row of rows.rows) {
+		try {
+			const event = validateOutcomeEvent(row.value);
+			records.push(event);
+			validRows.push({ line: row.line, event });
+		} catch (err) {
+			invalidRows.push({
+				file: 'outcome-events.jsonl',
+				line: row.line,
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+	for (const row of rows.invalidRows) {
+		invalidRows.push({ file: 'outcome-events.jsonl', ...row });
+	}
+	return { records, rows: validRows, invalidRows, totalRows: rows.totalRows };
 }
 
 async function readJsonlRows(filePath: string): Promise<{
