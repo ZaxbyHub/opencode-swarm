@@ -21,6 +21,7 @@ import {
 	swarmState,
 } from '../../../src/state';
 import { installActiveScopeBinding } from '../../helpers/active-scope-binding';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const config: GuardrailsConfig = {
 	enabled: true,
@@ -234,12 +235,8 @@ describe('reviewer scope post-write fingerprints', () => {
 		// (binding + recorded workspace root agree, so routing works), but the
 		// generation was bound to laneB — the post-write cross-check must
 		// fail closed instead of hashing bytes from the wrong tree.
-		const laneA = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'review-write-laneA-')),
-		);
-		const laneB = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'review-write-laneB-')),
-		);
+		const laneA = canonicalMkdtemp('review-write-laneA-');
+		const laneB = canonicalMkdtemp('review-write-laneB-');
 		try {
 			for (const lane of [laneA, laneB]) {
 				fs.mkdirSync(path.join(lane, 'src'), { recursive: true });
