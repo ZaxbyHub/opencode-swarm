@@ -21,6 +21,7 @@ import {
 	appendDelegationTransition,
 	type BackgroundDelegationRecord,
 	type BackgroundDelegationResult,
+	DEFAULT_STALE_DELEGATION_TIMEOUT_MS,
 	findByBatchId,
 	recordPendingDelegationDetailed,
 } from '../background/pending-delegations.js';
@@ -77,7 +78,10 @@ const ASYNC_MESSAGE_FETCH_LIMIT = 50;
 const MAX_ERROR_CHARS = 200;
 const ERROR_TRUNCATION_SUFFIX = '...';
 const MAX_BATCH_ID_CHARS = 120;
-const DEFAULT_ASYNC_STALE_TIMEOUT_MS = 30 * 60_000;
+// One canonical staleness horizon across the delegation subsystem (issue #2242
+// R2): the gate's presumed-stale lane settlement and this collector must not
+// disagree about when a lane counts as abandoned.
+const DEFAULT_ASYNC_STALE_TIMEOUT_MS = DEFAULT_STALE_DELEGATION_TIMEOUT_MS;
 const DEFAULT_COLLECT_TIMEOUT_MS = DEFAULT_ASYNC_STALE_TIMEOUT_MS;
 const MAX_COLLECT_TIMEOUT_MS = 60 * 60_000;
 const COLLECT_POLL_INTERVAL_MS = 500;

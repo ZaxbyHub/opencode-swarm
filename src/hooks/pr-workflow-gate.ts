@@ -23,8 +23,10 @@ import {
 import {
 	type BackgroundDelegationRecord,
 	type BackgroundDelegationResult,
+	DEFAULT_STALE_DELEGATION_TIMEOUT_MS,
 	findByBatchId,
 	readDelegations,
+	sweepStaleDelegations,
 } from '../background/pending-delegations.js';
 import {
 	PR_REVIEW_REQUIRED_TRIGGER_IDS,
@@ -525,6 +527,12 @@ export interface PrWorkflowGateState {
 	prFeedbackTargetUrl?: string;
 	prFeedbackReviewHandoff?: PrFeedbackReviewHandoffRecord;
 	prFeedbackInventory?: string[];
+	/**
+	 * Append-only audit ledger of entries added to `prFeedbackInventory` after
+	 * its first declaration (issue #2242 R3). Bounded by
+	 * {@link MAX_PR_FEEDBACK_INVENTORY_AMENDMENTS}; never pruned.
+	 */
+	prFeedbackInventoryAmendments?: PrFeedbackInventoryAmendmentRecord[];
 	prFeedbackVerifications?: PrFeedbackVerificationRecord[];
 	/**
 	 * Item -> lane bindings of verification batches the capacity GC dropped
@@ -597,6 +605,18 @@ const MAX_RETIRED_CONSOLIDATED_LANES = 64;
  * reasoning as the reviewer-session ledger.
  */
 const MAX_RETIRED_FEEDBACK_ITEM_OWNERS = 4096;
+
+/**
+ * Bound on the PR_FEEDBACK inventory-amendment audit ledger (issue #2242 R3).
+ *
+ * `declarePrFeedbackInventory` is agent-callable and each call can append, so
+ * this array would otherwise grow without limit on durable state. It is an
+ * integrity ledger, not a reclaimable cache: unlike `prFeedbackVerifications`
+ * (which `prunePrFeedbackVerificationsForCapacity` compacts), pruning it would
+ * destroy the audit trail, so the cap fails closed on further amendments
+ * instead.
+ */
+export const MAX_PR_FEEDBACK_INVENTORY_AMENDMENTS = 128;
 const WINDOWS_RENAME_MAX_RETRIES = 3;
 const RENAME_RETRY_DELAY_MS = 10;
 const STATE_MUTATION_LOCK_MAX_ATTEMPTS = 50;
@@ -763,6 +783,23 @@ const PrFeedbackReadyToPublishRecordSchema = z
 	})
 	.strict();
 
+/**
+ * One appended PR_FEEDBACK inventory entry (issue #2242 R3). `batch` groups the
+ * entries appended by a single `declarePrFeedbackInventory` call so an auditor
+ * can tell "two items found in one pass" from "two separate late discoveries".
+ */
+const PrFeedbackInventoryAmendmentRecordSchema = z
+	.object({
+		entry: z.string().min(1),
+		amendedAt: z.string().min(1),
+		batch: z.number().int().positive(),
+	})
+	.strict();
+
+export type PrFeedbackInventoryAmendmentRecord = z.infer<
+	typeof PrFeedbackInventoryAmendmentRecordSchema
+>;
+
 const PrReviewValidationBatchRecordSchema = z
 	.object({
 		batchId: z.string().min(1),
@@ -913,6 +950,13 @@ const PrWorkflowGateStateSchema = z
 		prFeedbackTargetUrl: z.string().url().max(2000).optional(),
 		prFeedbackReviewHandoff: PrFeedbackReviewHandoffRecordSchema.optional(),
 		prFeedbackInventory: z.array(z.string().min(1)).min(1).optional(),
+		// Append-only audit ledger for inventory amendments (issue #2242 R3).
+		// Optional in both directions: older persisted state omits it, and older
+		// code ignores it through the root `.passthrough()` below.
+		prFeedbackInventoryAmendments: z
+			.array(PrFeedbackInventoryAmendmentRecordSchema)
+			.max(MAX_PR_FEEDBACK_INVENTORY_AMENDMENTS)
+			.optional(),
 		prFeedbackVerifications: z
 			.array(PrFeedbackVerificationRecordSchema)
 			.max(MAX_WORKFLOW_BATCHES)
@@ -1299,6 +1343,7 @@ export async function clearPrWorkflowGateState(
 	directory: string,
 	sessionID: string,
 	expectedRevision?: number,
+	options: { allowSalvagedRead?: boolean } = {},
 ): Promise<void> {
 	const normalizedSessionID = normalizeSessionID(sessionID);
 	await withSessionStateMutation(directory, normalizedSessionID, async () => {
@@ -1308,10 +1353,20 @@ export async function clearPrWorkflowGateState(
 		// (the sole purpose of this escape hatch) instead of the read itself
 		// re-throwing the same failure it exists to recover from.
 		if (expectedRevision !== undefined) {
-			const current = await readPrWorkflowGateStateFromDisk(
-				directory,
-				normalizedSessionID,
-			);
+			// Issue #2242 R4: the recovery abort path salvaged a revision from a
+			// schema-invalid state and still wants real concurrency protection.
+			// Reading it back through the GENERAL reader would re-throw the very
+			// `is invalid` failure the salvage exists to route around, forcing an
+			// unnecessary CAS drop. Only the abort path sets this flag; every
+			// other caller keeps the strict read byte-for-byte.
+			const current = options.allowSalvagedRead
+				? ((
+						await readPrWorkflowGateStateForRecovery(
+							directory,
+							normalizedSessionID,
+						)
+					)?.state ?? null)
+				: await readPrWorkflowGateStateFromDisk(directory, normalizedSessionID);
 			if (!current || current.revision !== expectedRevision) {
 				throw new Error(
 					'BLOCKED: PR workflow gate state changed during terminal completion; revalidate the current session state before retrying',
@@ -1331,6 +1386,134 @@ export async function clearPrWorkflowGateState(
 			stateCacheKey(directory, normalizedSessionID),
 		);
 	});
+}
+
+/**
+ * Presumed-stale settlement horizon for PR-workflow lanes.
+ *
+ * Reuses the background-delegation subsystem's canonical default rather than
+ * `hooks.background_pending_timeout_minutes`: the three gate predicates that
+ * consume it receive only `directory`/`sessionID` and never a resolved plugin
+ * config, and this sweep is a **reachability floor** (abort and completion must
+ * not be permanently blocked by a lane whose backing process died), not a
+ * tunable policy knob.
+ */
+const PR_WORKFLOW_STALE_LANE_TIMEOUT_MS = DEFAULT_STALE_DELEGATION_TIMEOUT_MS;
+
+/** Upper bound on lane ids named in one operator-facing disclosure string. */
+const MAX_DISCLOSED_LANE_IDS = 10;
+
+/**
+ * Exact disclosure emitted when the abort path takes `clearPrWorkflowGateState`'s
+ * documented `expectedRevision === undefined` escape hatch because the durable
+ * state's `revision` could not be salvaged (issue #2242 R4).
+ */
+const CAS_ESCAPE_DISCLOSURE =
+	'state revision unsalvageable; cleared without compare-and-swap';
+
+export interface PrWorkflowStaleLaneSettlement {
+	/** Lanes still genuinely in flight (fresh `updatedAt`). These still block. */
+	openLaneIds: string[];
+	openLanes: number;
+	/** Lanes stale past the horizon, treated as settled with disclosure. */
+	presumedStaleLaneIds: string[];
+	/** Operator-facing disclosure; `undefined` when nothing was presumed stale. */
+	disclosure?: string;
+}
+
+function prWorkflowLaneLabel(record: BackgroundDelegationRecord): string {
+	return record.laneId ?? record.subagentSessionId ?? 'unknown';
+}
+
+function isOpenPrWorkflowLane(
+	record: BackgroundDelegationRecord,
+	sessionID: string,
+): boolean {
+	return (
+		record.parentSessionId === sessionID &&
+		record.mode?.startsWith('swarm-pr-') === true &&
+		(record.status === 'pending' || record.status === 'running')
+	);
+}
+
+/**
+ * Resolve the open-lane predicate shared by `abortPrWorkflow`, the
+ * PR_REVIEW→PR_FEEDBACK transition, and `completePrWorkflow` (issue #2242 R2,
+ * wedge W-4).
+ *
+ * A lane whose delegation record has not advanced its `updatedAt` within
+ * `PR_WORKFLOW_STALE_LANE_TIMEOUT_MS` is **presumed stale** and settles with
+ * disclosure instead of blocking forever. The background process backing a lane
+ * can die without ever writing a terminal snapshot, and these three predicates
+ * are exactly the exits an operator reaches for when nothing else can proceed —
+ * previously the abort escape hatch was refused by the same check it exists to
+ * resolve, leaving the workflow with no exit through any tool.
+ *
+ * Deliberate ordering — this is the reachability invariant, do not "simplify"
+ * it: staleness is decided by the **in-memory filter below**, and
+ * `sweepStaleDelegations` runs only afterwards as a best-effort durability
+ * complement. That sweep swallows lock timeouts and returns 0
+ * (`pending-delegations.ts`), so making reachability depend on it would let a
+ * contended store lock re-create the exact wedge this removes.
+ *
+ * A lane with a RECENT `updatedAt` still blocks: a re-verification that CAN run
+ * and reports "still progressing" contradicts settlement and fails closed.
+ */
+export async function settlePresumedStalePrWorkflowLanes(
+	directory: string,
+	sessionID: string,
+): Promise<PrWorkflowStaleLaneSettlement> {
+	const now = Date.now();
+	const open: BackgroundDelegationRecord[] = [];
+	const presumedStale: BackgroundDelegationRecord[] = [];
+	for (const record of readDelegations(directory)) {
+		if (!isOpenPrWorkflowLane(record, sessionID)) continue;
+		if (now - record.updatedAt > PR_WORKFLOW_STALE_LANE_TIMEOUT_MS) {
+			presumedStale.push(record);
+		} else {
+			open.push(record);
+		}
+	}
+	const presumedStaleLaneIds = presumedStale.map(prWorkflowLaneLabel);
+	const openLaneIds = open.map(prWorkflowLaneLabel);
+	if (presumedStale.length === 0) {
+		return { openLaneIds, openLanes: open.length, presumedStaleLaneIds };
+	}
+	const disclosure =
+		`${presumedStaleLaneIds.length} lane(s) stale >` +
+		`${Math.round(PR_WORKFLOW_STALE_LANE_TIMEOUT_MS / 60_000)}min, ` +
+		`treated as settled: ${presumedStaleLaneIds
+			.slice(0, MAX_DISCLOSED_LANE_IDS)
+			.join(', ')}`;
+	// Best-effort ONLY. Makes the terminal `stale` transition durable so later
+	// readers and the delegation ledger agree with the decision already made
+	// above; reachability never depends on either write succeeding.
+	await sweepStaleDelegations(directory, PR_WORKFLOW_STALE_LANE_TIMEOUT_MS);
+	try {
+		await fsp.appendFile(
+			validateSwarmPath(directory, 'events.jsonl'),
+			`${JSON.stringify({
+				type: 'pr_workflow_lanes_presumed_stale',
+				timestamp: isoNow(),
+				sessionID,
+				presumedStaleLanes: presumedStaleLaneIds.slice(
+					0,
+					MAX_DISCLOSED_LANE_IDS,
+				),
+				staleTimeoutMs: PR_WORKFLOW_STALE_LANE_TIMEOUT_MS,
+				disclosure,
+			})}\n`,
+			'utf-8',
+		);
+	} catch {
+		// The audit trail is best-effort; settlement must not depend on it.
+	}
+	return {
+		openLaneIds,
+		openLanes: open.length,
+		presumedStaleLaneIds,
+		disclosure,
+	};
 }
 
 /**
@@ -1374,30 +1557,49 @@ export async function abortPrWorkflow(
 	mode: PrWorkflowMode;
 	prHeadSha?: string;
 	openLanes: number;
+	presumedStaleLanes?: string[];
+	presumedStaleDisclosure?: string;
+	stateSalvaged?: boolean;
+	stateSalvageDisclosure?: string;
+	casEscapeDisclosure?: string;
 }> {
-	const state = await requireAnyActiveState(directory, sessionID);
+	// W-5 (issue #2242 R4): abort reads through the DEDICATED recovery reader so
+	// a schema-invalid-but-parseable gate state cannot defeat the one escape
+	// hatch that exists to clear it. Unparseable bytes still fail here.
+	const recovery = await readPrWorkflowGateStateForRecovery(
+		directory,
+		sessionID,
+	);
+	if (!recovery) throw noActiveGateError(sessionID);
+	const state = recovery.state;
 	if (options.expectedMode && state.mode !== options.expectedMode) {
 		throw wrongModeError(state, options.expectedMode);
 	}
-	if (state.prFeedbackReadyToPublish) {
+	// An armed marker that is PRESENT but unreadable is treated as armed. Any
+	// other reading would make "corrupt this one record" a bypass of the
+	// armed-abort refusal.
+	if (state.prFeedbackReadyToPublish || recovery.armedShapeUnreadable) {
 		throw new Error(
-			`BLOCKED: ${state.mode} is armed for publication; abort is blocked. Complete the workflow with complete_pr_workflow (or push the bound commit first) before aborting.`,
+			`BLOCKED: ${state.mode} is armed for publication; abort is blocked. Complete the workflow with complete_pr_workflow (or push the bound commit first) before aborting.` +
+				(recovery.armedShapeUnreadable
+					? ' The publication-arming record is itself unreadable, so it is treated as armed (fail-closed).'
+					: ''),
 		);
 	}
-	const openLanes = readDelegations(directory).filter(
-		(record) =>
-			record.parentSessionId === state.sessionID &&
-			record.mode?.startsWith('swarm-pr-') &&
-			(record.status === 'pending' || record.status === 'running'),
+	// W-4 (issue #2242 R2): lanes stale past the settlement horizon no longer
+	// refuse the escape hatch that exists to resolve their own wedge. Lanes with
+	// a fresh `updatedAt` still block.
+	const laneSettlement = await settlePresumedStalePrWorkflowLanes(
+		directory,
+		state.sessionID,
 	);
-	if (openLanes.length > 0) {
-		const laneIds = openLanes
-			.map((record) => record.laneId ?? record.subagentSessionId ?? 'unknown')
+	if (laneSettlement.openLanes > 0) {
+		const laneIds = laneSettlement.openLaneIds
 			.filter(Boolean)
-			.slice(0, 10)
+			.slice(0, MAX_DISCLOSED_LANE_IDS)
 			.join(', ');
 		throw new Error(
-			`BLOCKED: ${state.mode} abort refused while ${openLanes.length} PR workflow lane(s) are still in flight (lane ids: ${laneIds}). Collect their results or let them settle before aborting.`,
+			`BLOCKED: ${state.mode} abort refused while ${laneSettlement.openLanes} PR workflow lane(s) are still in flight (lane ids: ${laneIds}). Collect their results or let them settle before aborting.`,
 		);
 	}
 	const sanitizedReason =
@@ -1417,7 +1619,25 @@ export async function abortPrWorkflow(
 		kind: options.kind,
 		...(state.prHeadSha ? { prHeadSha: state.prHeadSha } : {}),
 		...(state.checkoutRecovery ? { hadTerminalRecovery: true } : {}),
-		openLanes: openLanes.length,
+		openLanes: laneSettlement.openLanes,
+		...(laneSettlement.presumedStaleLaneIds.length > 0
+			? {
+					presumedStaleLanes: laneSettlement.presumedStaleLaneIds.slice(
+						0,
+						MAX_DISCLOSED_LANE_IDS,
+					),
+					presumedStaleDisclosure: laneSettlement.disclosure,
+				}
+			: {}),
+		...(recovery.salvaged
+			? {
+					stateSalvaged: true,
+					stateSalvageDisclosure: recovery.disclosure,
+					...(recovery.revisionSalvageable
+						? {}
+						: { casEscapeDisclosure: CAS_ESCAPE_DISCLOSURE }),
+				}
+			: {}),
 		reason: sanitizedReason,
 	};
 	try {
@@ -1436,11 +1656,37 @@ export async function abortPrWorkflow(
 	// this clear, the clear is rejected and the caller revalidates. Self-heals
 	// on retry and prevents a late concurrent mutation from being silently
 	// dropped by our clear.
-	await clearPrWorkflowGateState(directory, sessionID, state.revision);
+	//
+	// W-5 (issue #2242 R4): when the revision itself could not be salvaged there
+	// is no value to compare against, so this deliberately takes the documented
+	// `expectedRevision === undefined` escape hatch in `clearPrWorkflowGateState`
+	// (see its comment above) — a disclosed, intentional CAS drop, not an
+	// accidental one. When the revision WAS salvageable, normal CAS still
+	// applies, reading back through the same salvage-tolerant view.
+	const casEscape = recovery.salvaged && !recovery.revisionSalvageable;
+	await clearPrWorkflowGateState(
+		directory,
+		sessionID,
+		casEscape ? undefined : state.revision,
+		{ allowSalvagedRead: recovery.salvaged },
+	);
 	return {
 		mode: state.mode,
 		...(state.prHeadSha ? { prHeadSha: state.prHeadSha } : {}),
-		openLanes: openLanes.length,
+		openLanes: laneSettlement.openLanes,
+		...(laneSettlement.presumedStaleLaneIds.length > 0
+			? {
+					presumedStaleLanes: laneSettlement.presumedStaleLaneIds,
+					presumedStaleDisclosure: laneSettlement.disclosure,
+				}
+			: {}),
+		...(recovery.salvaged
+			? {
+					stateSalvaged: true,
+					stateSalvageDisclosure: recovery.disclosure,
+				}
+			: {}),
+		...(casEscape ? { casEscapeDisclosure: CAS_ESCAPE_DISCLOSURE } : {}),
 	};
 }
 
@@ -2930,12 +3176,75 @@ export async function declarePrFeedbackInventory(
 		);
 	}
 	if (state.prFeedbackInventory) {
-		if (!sameStringArray(state.prFeedbackInventory, normalizedInventory)) {
+		const existing = state.prFeedbackInventory;
+		if (sameStringArray(existing, normalizedInventory)) return state;
+		// Issue #2242 R3 (wedge W-2): hard immutability made a late-discovered
+		// finding unrecoverable — the only exit was abort + full restart, which
+		// also discarded every completed verification for correctly-declared
+		// items. Growth is now accepted; mutation, removal and reorder are not.
+		//
+		// Note on the comparison primitive: `normalizeInventoryIds` canonicalises
+		// by SORTING and rejects duplicates, so an appended id lands in sort
+		// position rather than at the end. An array-PREFIX rule would therefore
+		// reject legitimate appends. The equivalent (and, on a canonical form,
+		// stronger) rule is set-superset: every previously-declared entry must
+		// still be present. Because both sides are sorted and duplicate-free,
+		// "same set" implies "same array", so a reorder is not expressible and a
+		// missing entry is the single signal for mutation-or-removal.
+		const nextIds = new Set(normalizedInventory);
+		const droppedIds = existing.filter((itemId) => !nextIds.has(itemId));
+		if (droppedIds.length > 0) {
 			throw new Error(
-				'BLOCKED: PR_FEEDBACK inventory is immutable after declaration',
+				`BLOCKED: PR_FEEDBACK inventory is append-only after declaration; declared item(s) may not be removed or renamed: ${droppedIds.join(', ')}`,
 			);
 		}
-		return state;
+		const existingIds = new Set(existing);
+		const appendedIds = normalizedInventory.filter(
+			(itemId) => !existingIds.has(itemId),
+		);
+		/* c8 ignore next 6 -- unreachable: both sides are sorted and
+		   duplicate-free, so "no drops and nothing appended" is exactly the
+		   sameStringArray case already returned above. Kept as a fail-closed
+		   assertion so a future change to normalizeInventoryIds cannot silently
+		   turn this into a no-op amendment. */
+		if (appendedIds.length === 0) {
+			throw new Error(
+				'BLOCKED: PR_FEEDBACK inventory amendment declared no new items',
+			);
+		}
+		const previousAmendments = state.prFeedbackInventoryAmendments ?? [];
+		if (
+			previousAmendments.length + appendedIds.length >
+			MAX_PR_FEEDBACK_INVENTORY_AMENDMENTS
+		) {
+			throw new Error(
+				`BLOCKED: PR_FEEDBACK inventory amendment limit reached (${MAX_PR_FEEDBACK_INVENTORY_AMENDMENTS}); the amendment ledger is an audit trail and is never pruned`,
+			);
+		}
+		const amendedAt = isoNow();
+		const batch =
+			previousAmendments.reduce(
+				(highest, amendment) => Math.max(highest, amendment.batch),
+				0,
+			) + 1;
+		const amendedState: PrWorkflowGateState = {
+			...state,
+			updatedAt: amendedAt,
+			prFeedbackInventory: normalizedInventory,
+			prFeedbackInventoryAmendments: [
+				...previousAmendments,
+				...appendedIds.map((entry) => ({ entry, amendedAt, batch })),
+			],
+			// The armed record attests coverage of the PRE-amendment inventory,
+			// so adding an item invalidates exactly what it attested. Disarming on
+			// a coverage-affecting change is the existing convention here — see
+			// `recordPrFeedbackStageA`, which disarms unconditionally for the same
+			// reason. Re-arming is one `complete_pr_workflow` call that re-verifies
+			// every phase against the amended inventory.
+			prFeedbackReadyToPublish: undefined,
+		};
+		await persistState(directory, amendedState);
+		return amendedState;
 	}
 	const nextState: PrWorkflowGateState = {
 		...state,
@@ -3626,6 +3935,20 @@ export async function assertPrFeedbackGatePhaseSettled(
 	if (!batch || batch.revisionDigest !== currentDigest) {
 		throw new Error(
 			`BLOCKED: PR_FEEDBACK ${phase} has no validation batch on the current revision`,
+		);
+	}
+	// Issue #2242 R3: this is the control that makes an append-only inventory
+	// amendment safe. `recordPrFeedbackGateBatch` proves exact ownership at
+	// RECORD time, but `stageARetainsGateBatches` compares only the revision
+	// digest, categories and obligations — never the item list — so an
+	// amendment followed by a same-revision Stage A re-record RETAINS batches
+	// whose `itemIds` predate the growth. `successfulObligationsFromExactBatch`
+	// below is then fed the stale, shorter list and the appended item reaches
+	// publication with no verdict at all. Re-check ownership against the CURRENT
+	// inventory at settle time so every path (retention included) is covered.
+	if (!sameStringArray(batch.itemIds, state.prFeedbackInventory ?? [])) {
+		throw new Error(
+			`BLOCKED: PR_FEEDBACK ${phase} evidence covers a stale inventory; the feedback inventory was amended after this batch was recorded. Re-run ${phase} against every current inventory item.`,
 		);
 	}
 	const successful = successfulObligationsFromExactBatch(
@@ -4481,15 +4804,14 @@ async function assertPrReviewTerminalReady(
 ): Promise<PrWorkflowGateState> {
 	const state = await requireBoundState(directory, sessionID, 'PR_REVIEW');
 	await assertPrReviewCleanCheckout(directory, 'PR_REVIEW');
-	const open = readDelegations(directory).filter(
-		(record) =>
-			record.parentSessionId === state.sessionID &&
-			record.mode?.startsWith('swarm-pr-') &&
-			(record.status === 'pending' || record.status === 'running'),
+	// W-4 (issue #2242 R2): stale lanes settle with disclosure; fresh ones block.
+	const laneSettlement = await settlePresumedStalePrWorkflowLanes(
+		directory,
+		state.sessionID,
 	);
-	if (open.length > 0) {
+	if (laneSettlement.openLanes > 0) {
 		throw new Error(
-			`BLOCKED: PR_REVIEW transition has ${open.length} unsettled PR workflow lane(s)`,
+			`BLOCKED: PR_REVIEW transition has ${laneSettlement.openLanes} unsettled PR workflow lane(s)`,
 		);
 	}
 	// One digest + one composed verdict map for the entire terminal check.
@@ -5184,15 +5506,14 @@ export async function completePrWorkflow(
 			`BLOCKED: cannot complete ${expectedMode} at PR head "${normalizedHead}"; workflow is bound to "${state.prHeadSha}"`,
 		);
 	}
-	const open = readDelegations(directory).filter(
-		(record) =>
-			record.parentSessionId === state.sessionID &&
-			record.mode?.startsWith('swarm-pr-') &&
-			(record.status === 'pending' || record.status === 'running'),
+	// W-4 (issue #2242 R2): stale lanes settle with disclosure; fresh ones block.
+	const laneSettlement = await settlePresumedStalePrWorkflowLanes(
+		directory,
+		state.sessionID,
 	);
-	if (open.length > 0) {
+	if (laneSettlement.openLanes > 0) {
 		throw new Error(
-			`BLOCKED: ${expectedMode} completion has ${open.length} unsettled PR workflow lane(s)`,
+			`BLOCKED: ${expectedMode} completion has ${laneSettlement.openLanes} unsettled PR workflow lane(s)`,
 		);
 	}
 	if (expectedMode === 'PR_REVIEW') {
@@ -5548,21 +5869,26 @@ export const _test_exports = {
 	nowMs: () => Date.now(),
 };
 
+/**
+ * Issue #1931: surface the activation path so callers don't go hunting for a
+ * fictional gate file. See withPrWorkflowCheckoutPreparationLock for the same
+ * diagnostic on the prepare_pr_workflow_checkout path. Shared with
+ * `abortPrWorkflow`, which reads through the recovery reader instead.
+ */
+function noActiveGateError(sessionID: string): Error {
+	return new Error(
+		`BLOCKED: no active PR workflow gate for session "${normalizeSessionID(sessionID)}". ` +
+			`The gate is activated by running \`/swarm pr-review <pr-ref>\` (PR_REVIEW) or \`/swarm pr-feedback <pr-ref>\` (PR_FEEDBACK), ` +
+			`or by the first dispatch_lanes_async call with mode "swarm-pr-review:*" / "swarm-pr-feedback:*".`,
+	);
+}
+
 async function requireAnyActiveState(
 	directory: string,
 	sessionID: string,
 ): Promise<PrWorkflowGateState> {
 	const state = await readPrWorkflowGateState(directory, sessionID);
-	if (!state) {
-		// Issue #1931: surface the activation path so callers don't go
-		// hunting for a fictional gate file. See withPrWorkflowCheckoutPreparationLock
-		// for the same diagnostic on the prepare_pr_workflow_checkout path.
-		throw new Error(
-			`BLOCKED: no active PR workflow gate for session "${normalizeSessionID(sessionID)}". ` +
-				`The gate is activated by running \`/swarm pr-review <pr-ref>\` (PR_REVIEW) or \`/swarm pr-feedback <pr-ref>\` (PR_FEEDBACK), ` +
-				`or by the first dispatch_lanes_async call with mode "swarm-pr-review:*" / "swarm-pr-feedback:*".`,
-		);
-	}
+	if (!state) throw noActiveGateError(sessionID);
 	return state;
 }
 
@@ -9922,6 +10248,159 @@ async function readPrWorkflowGateStateFileFromDisk(
 		);
 	}
 	return parsed.data;
+}
+
+/** Upper bound on schema issues quoted in one salvage disclosure. */
+const MAX_SALVAGED_SCHEMA_ERRORS = 10;
+
+/** Result of one recovery-only gate-state read. */
+export interface PrWorkflowGateRecoveryRead {
+	/** Schema-valid state, or the salvaged projection when `salvaged`. */
+	state: PrWorkflowGateState;
+	/** true when the durable bytes failed schema validation and were salvaged. */
+	salvaged: boolean;
+	/** `path: message` per schema issue; empty unless `salvaged`. */
+	schemaErrors: string[];
+	/** Loud operator-facing disclosure; present only when `salvaged`. */
+	disclosure?: string;
+	/** false when `revision` could not be salvaged — the CAS escape is required. */
+	revisionSalvageable: boolean;
+	/**
+	 * true when a `prFeedbackReadyToPublish` key is present in the raw bytes but
+	 * is itself unreadable. Callers MUST treat this as armed: silently dropping
+	 * an unreadable armed marker would turn "corrupt that one record" into a way
+	 * to bypass the armed-abort refusal — a forgery-class relaxation, not an
+	 * availability one.
+	 */
+	armedShapeUnreadable: boolean;
+}
+
+/**
+ * Recovery-only gate-state reader (issue #2242 R4, wedge W-5).
+ *
+ * Used by `abortPrWorkflow` and `pr_workflow_status` ONLY. The general reader
+ * (`readPrWorkflowGateStateFromDisk`) is deliberately unchanged, so no write,
+ * completion, or verification path can ever act on a salvaged projection.
+ *
+ * Policy, mirroring the file-wide "unavailability degrades with disclosure;
+ * contradiction fails closed" invariant:
+ *   - **Unparseable bytes fail everywhere**, recovery included. There is nothing
+ *     to salvage and guessing would be fabrication.
+ *   - **Schema-validation failure on parseable JSON** salvages the fields abort
+ *     actually reads — `{sessionID, mode, prHeadSha}` plus `revision`,
+ *     `prFeedbackReadyToPublish` and `checkoutRecovery` when each is
+ *     individually well-formed — with a loud disclosure naming the schema
+ *     errors. Everything else is dropped rather than guessed.
+ *   - **Identity is not salvageable ⇒ nothing is.** Without a readable
+ *     `sessionID` and `mode` there is no provable subject to act on, so the
+ *     original `is invalid` failure stands.
+ *
+ * A salvaged view is never written to the tracked-state cache.
+ */
+export async function readPrWorkflowGateStateForRecovery(
+	directory: string,
+	sessionID: string,
+): Promise<PrWorkflowGateRecoveryRead | null> {
+	const normalizedSessionID = normalizeSessionID(sessionID);
+	const filePath = workflowGateStatePath(directory, normalizedSessionID);
+	let raw: string;
+	try {
+		raw = await fsp.readFile(filePath, 'utf-8');
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+		throw error;
+	}
+	let parsedJson: unknown;
+	try {
+		parsedJson = JSON.parse(raw);
+	} catch {
+		throw new Error(
+			`BLOCKED: PR workflow gate state for session "${normalizedSessionID}" is not valid JSON`,
+		);
+	}
+	const parsed = PrWorkflowGateStateSchema.safeParse(parsedJson);
+	if (parsed.success) {
+		return {
+			state: parsed.data,
+			salvaged: false,
+			schemaErrors: [],
+			revisionSalvageable: true,
+			armedShapeUnreadable: false,
+		};
+	}
+	const invalidError = new Error(
+		`BLOCKED: PR workflow gate state for session "${normalizedSessionID}" is invalid`,
+	);
+	if (
+		typeof parsedJson !== 'object' ||
+		parsedJson === null ||
+		Array.isArray(parsedJson)
+	) {
+		throw invalidError;
+	}
+	const rawRecord = parsedJson as Record<string, unknown>;
+	const salvagedSessionID = z.string().min(1).safeParse(rawRecord.sessionID);
+	const salvagedMode = z
+		.enum(['PR_REVIEW', 'PR_FEEDBACK'])
+		.safeParse(rawRecord.mode);
+	if (!salvagedSessionID.success || !salvagedMode.success) throw invalidError;
+	const salvagedRevision = z
+		.number()
+		.int()
+		.nonnegative()
+		.safeParse(rawRecord.revision);
+	const salvagedHead = z.string().min(1).safeParse(rawRecord.prHeadSha);
+	const salvagedActivatedAt = z
+		.string()
+		.min(1)
+		.safeParse(rawRecord.activatedAt);
+	const salvagedUpdatedAt = z.string().min(1).safeParse(rawRecord.updatedAt);
+	const armedKeyPresent =
+		rawRecord.prFeedbackReadyToPublish !== undefined &&
+		rawRecord.prFeedbackReadyToPublish !== null;
+	const salvagedArmed = PrFeedbackReadyToPublishRecordSchema.safeParse(
+		rawRecord.prFeedbackReadyToPublish,
+	);
+	const salvagedCheckoutRecovery =
+		PrWorkflowCheckoutRecoveryRecordSchema.safeParse(
+			rawRecord.checkoutRecovery,
+		);
+	const armedShapeUnreadable = armedKeyPresent && !salvagedArmed.success;
+	const schemaErrors = parsed.error.issues
+		.slice(0, MAX_SALVAGED_SCHEMA_ERRORS)
+		.map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`);
+	const disclosure =
+		`DEGRADED: PR workflow gate state for session "${normalizedSessionID}" failed schema validation ` +
+		`and was SALVAGED for recovery only (abort/status; write and completion paths still refuse it). ` +
+		`Schema errors: ${schemaErrors.join('; ')}.` +
+		(salvagedRevision.success ? '' : ' state revision unsalvageable.') +
+		(armedShapeUnreadable
+			? ' prFeedbackReadyToPublish is present but unreadable; treated as ARMED (fail-closed).'
+			: '');
+	return {
+		state: {
+			schemaVersion: GATE_SCHEMA_VERSION,
+			revision: salvagedRevision.success ? salvagedRevision.data : 0,
+			sessionID: salvagedSessionID.data,
+			mode: salvagedMode.data,
+			activatedAt: salvagedActivatedAt.success
+				? salvagedActivatedAt.data
+				: isoNow(),
+			updatedAt: salvagedUpdatedAt.success ? salvagedUpdatedAt.data : isoNow(),
+			...(salvagedHead.success ? { prHeadSha: salvagedHead.data } : {}),
+			...(salvagedArmed.success
+				? { prFeedbackReadyToPublish: salvagedArmed.data }
+				: {}),
+			...(salvagedCheckoutRecovery.success
+				? { checkoutRecovery: salvagedCheckoutRecovery.data }
+				: {}),
+		},
+		salvaged: true,
+		schemaErrors,
+		disclosure,
+		revisionSalvageable: salvagedRevision.success,
+		armedShapeUnreadable,
+	};
 }
 
 function rememberState(directory: string, state: PrWorkflowGateState): void {

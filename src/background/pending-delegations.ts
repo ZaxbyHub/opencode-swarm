@@ -61,6 +61,21 @@ const INGESTION_CLAIM_LEASE_MS = 30_000;
 /** An abandoned ingestion lease may be reclaimed after this bounded interval. */
 export const BACKGROUND_INGESTION_LEASE_MS = 30_000;
 
+/**
+ * Canonical default staleness horizon for a tracked background delegation: a
+ * record whose `updatedAt` has not advanced in this long is treated as
+ * abandoned (its backing process died without ever writing a terminal
+ * snapshot) and may be swept to `stale`.
+ *
+ * 30 minutes is the value this subsystem already shipped — it was duplicated as
+ * a module-local literal in `src/tools/dispatch-lanes.ts` and as the
+ * `hooks.background_pending_timeout_minutes` schema default. It lives here so
+ * every consumer agrees on one number: this module imports nothing from
+ * `dispatch-lanes.ts` or `pr-workflow-gate.ts`, so both can reference it
+ * without an import cycle.
+ */
+export const DEFAULT_STALE_DELEGATION_TIMEOUT_MS = 30 * 60_000;
+
 export type BackgroundDelegationStatus =
 	| 'pending'
 	| 'running'

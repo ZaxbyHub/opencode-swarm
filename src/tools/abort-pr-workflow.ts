@@ -67,6 +67,15 @@ export async function executeAbortPrWorkflow(
 			mode: summary.mode,
 			...(summary.prHeadSha ? { pr_head_sha: summary.prHeadSha } : {}),
 			open_lanes: summary.openLanes,
+			// Issue #2242 R2 (W-4): lanes settled as presumed-stale rather than
+			// observed terminal. Disclosed so the operator can see what was NOT
+			// re-verified before the gate cleared.
+			...(summary.presumedStaleLanes?.length
+				? {
+						presumed_stale_lanes: summary.presumedStaleLanes,
+						presumed_stale_disclosure: summary.presumedStaleDisclosure,
+					}
+				: {}),
 			gate_cleared: true,
 			checkout_restore_required: checkoutRestoreRequired,
 			checkout_restore_receipts: checkoutRestoreReceipts,

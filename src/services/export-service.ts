@@ -1,3 +1,8 @@
+// Bundled at build time from the plugin's own package.json — keeps the
+// exported `version` field in lockstep with releases instead of a stale
+// hardcoded literal (issue #1662: it had drifted to '4.5.0' three major
+// versions behind).
+import packageJson from '../../package.json' with { type: 'json' };
 import type { ExecutionProfile } from '../config/plan-schema';
 import { readSwarmFileAsync } from '../hooks/utils';
 import { loadPlanJsonOnly } from '../plan/manager';
@@ -24,7 +29,7 @@ export async function getExportData(directory: string): Promise<ExportData> {
 	const contextContent = await readSwarmFileAsync(directory, 'context.md');
 
 	return {
-		version: '4.5.0',
+		version: packageJson.version,
 		exported: new Date().toISOString(),
 		plan: planStructured || planContent, // structured Plan object if available, else markdown
 		context: contextContent,

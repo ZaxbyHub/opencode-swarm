@@ -14,6 +14,7 @@ import {
 } from '../background/pr-review-trigger-contract.js';
 import {
 	resolveExactMergeBase,
+	resolveExactMergeBaseAsync,
 	resolvePrWorkflowRevisionDigest,
 	resolvePrWorkflowRevisionDigestAsync,
 } from '../background/workspace-snapshot.js';
@@ -25,6 +26,7 @@ import {
 	readPrWorkflowGateState,
 } from '../hooks/pr-workflow-gate.js';
 import { validateSwarmPath } from '../hooks/utils';
+import { criticalWarn } from '../utils/logger.js';
 import { createSwarmTool } from './create-tool';
 
 export { PR_REVIEW_TRIGGER_DEFINITIONS } from '../background/pr-review-trigger-contract.js';
@@ -33,6 +35,7 @@ export const _internals = {
 	resolvePrWorkflowRevisionDigest,
 	resolvePrWorkflowRevisionDigestAsync,
 	resolveMergeBase: resolveExactMergeBase,
+	resolveMergeBaseAsync: resolveExactMergeBaseAsync,
 };
 
 /**
@@ -54,6 +57,67 @@ async function resolveCurrentRevisionDigest(
 		return _internals.resolvePrWorkflowRevisionDigest(directory, prHeadSha);
 	}
 	return _internals.resolvePrWorkflowRevisionDigestAsync(directory, prHeadSha);
+}
+
+/**
+ * Attempts allowed for the current-revision digest binding (issue #2242 R1).
+ *
+ * ONE bounded in-call retry. The underlying resolution is a bounded git read
+ * that collapses timeout, spawn failure and unreadable-worktree into a single
+ * bare `null`, and host contention makes that null transient — a single attempt
+ * let one unlucky read end the whole trigger evaluation. Two attempts, never a
+ * spin loop: the failure stays per-call and retryable because no durable state
+ * is consumed on this path.
+ */
+const REVISION_DIGEST_RESOLUTION_ATTEMPTS = 2;
+
+/**
+ * Bounded retry around {@link resolveCurrentRevisionDigest}.
+ *
+ * There is deliberately **NO FALLBACK** here, and adding one would be a
+ * forgery-enabling change rather than an availability improvement. Unlike the
+ * merge-base check below — which degrades to a durably-bound, bind-time-VERIFIED
+ * `prReviewBaseSha`/`prReviewBaseRef` — PR_REVIEW has no independently-bound
+ * durable revision digest to fall back to: the gate-state digest fields are
+ * PR_FEEDBACK's, and the only durable copies of a PR_REVIEW revision digest live
+ * on the very lane artifacts this evaluation is validating (circular).
+ * `lane-output-store` additionally declares `revisionDigest` optional, so a
+ * set-comparison fallback would convert today's fail-closed `undefined !==
+ * digest` into a passing `undefined === undefined`. Unavailability degrades only
+ * where an independently-bound verified value exists; it does not here.
+ */
+async function resolveCurrentRevisionDigestWithRetry(
+	directory: string,
+	prHeadSha: string,
+): Promise<string | null> {
+	for (
+		let attempt = 1;
+		attempt <= REVISION_DIGEST_RESOLUTION_ATTEMPTS;
+		attempt += 1
+	) {
+		const digest = await resolveCurrentRevisionDigest(directory, prHeadSha);
+		if (digest) return digest;
+	}
+	return null;
+}
+
+/**
+ * Same override-detecting seam as {@link resolveCurrentRevisionDigest}: a
+ * blocking `spawnSync` git call does not belong on an async tool path, and its
+ * 3s bound under host contention was a contributing cause of the transient
+ * merge-base failures that wedged PR_REVIEW completion (issue #2242 / RC-B).
+ * Production takes the async twin; the synchronous member is selected only
+ * while it is overridden, so the six sibling suites that stub it keep working.
+ */
+async function resolveReviewMergeBase(
+	directory: string,
+	baseRef: string,
+	prHeadSha: string,
+): Promise<string | null> {
+	if (_internals.resolveMergeBase !== resolveExactMergeBase) {
+		return _internals.resolveMergeBase(directory, baseRef, prHeadSha);
+	}
+	return _internals.resolveMergeBaseAsync(directory, baseRef, prHeadSha);
 }
 
 const WritePrReviewTriggerEvalArgsSchema = z
@@ -214,13 +278,13 @@ export async function executeWritePrReviewTriggerEval(
 	// record validation below enforces ownership containment and all-owned
 	// artifact attestation, so a lane can never lend provenance to a family it
 	// did not declare and fully attest.
-	const currentRevisionDigest = await resolveCurrentRevisionDigest(
+	const currentRevisionDigest = await resolveCurrentRevisionDigestWithRetry(
 		directory,
 		parsed.data.pr_head_sha,
 	);
 	if (!currentRevisionDigest) {
 		return failure(
-			'Active PR_REVIEW trigger evaluation could not bind the current exact revision digest',
+			`Active PR_REVIEW trigger evaluation could not bind the current exact revision digest for pr_head_sha "${parsed.data.pr_head_sha}" after ${REVISION_DIGEST_RESOLUTION_ATTEMPTS} attempts. A null digest collapses several causes: the bounded git call timed out, the git process failed to spawn, the working tree could not be read, or pr_head_sha was rejected as an unsafe revision token. This fails closed on purpose and has no bound-value fallback — no independently-bound durable PR_REVIEW revision digest exists to compare against, so accepting an unresolved digest would let a lane artifact self-certify its own revision. Nothing was persisted, so this call is retryable as-is. Recovery: confirm the checkout is readable and pr_head_sha exists here (git rev-parse), retry once the environment settles, or restart with abort_pr_workflow (kind "recovery").`,
 		);
 	}
 	// Two different (batchId, laneId) tuples cited across the row set must never
@@ -374,27 +438,70 @@ export async function executeWritePrReviewTriggerEval(
 			'Active PR_REVIEW trigger evaluation requires the exact live base_ref used to verify base_sha',
 		);
 	}
-	const resolvedMergeBase = _internals.resolveMergeBase(
+	// Explicit unbound guard, ahead of the resolution below. The bounded-fallback
+	// branch derives its entire integrity from comparing against a durably bound
+	// scope, so "no bound scope" must fail by construction here rather than
+	// falling through to a later check that happens to reject it.
+	if (!gateState.prReviewBaseRef || !gateState.prReviewBaseSha) {
+		return failure(
+			'Active PR_REVIEW trigger evaluation requires a durably bound review base; the active PR_REVIEW gate has no bound base_ref/base_sha, so the received scope cannot be verified against anything. Re-bind the review scope by dispatching the review lanes for this PR, or restart with abort_pr_workflow (kind "recovery").',
+		);
+	}
+	const resolvedMergeBase = await resolveReviewMergeBase(
 		directory,
 		parsed.data.base_ref,
 		parsed.data.pr_head_sha,
 	);
-	if (!resolvedMergeBase) {
-		return failure(
-			'Active PR_REVIEW trigger evaluation could not resolve the exact merge base from base_ref and pr_head_sha',
-		);
-	}
-	if (resolvedMergeBase.toLowerCase() !== parsed.data.base_sha.toLowerCase()) {
-		return failure(
-			`PR_REVIEW merge-base mismatch: expected ${resolvedMergeBase}, received ${parsed.data.base_sha}`,
-		);
-	}
-	if (
-		gateState.prReviewBaseRef !== parsed.data.base_ref ||
-		gateState.prReviewBaseSha !== parsed.data.base_sha.toLowerCase()
+	let baseVerification: 'live' | 'bound_fallback' = 'live';
+	if (resolvedMergeBase) {
+		if (
+			resolvedMergeBase.toLowerCase() !== parsed.data.base_sha.toLowerCase()
+		) {
+			return failure(
+				`PR_REVIEW merge-base mismatch: expected ${resolvedMergeBase}, received ${parsed.data.base_sha}`,
+			);
+		}
+		if (
+			gateState.prReviewBaseRef !== parsed.data.base_ref ||
+			gateState.prReviewBaseSha !== parsed.data.base_sha.toLowerCase()
+		) {
+			return failure(
+				`PR_REVIEW trigger evaluation scope mismatch: workflow is bound to ${gateState.prReviewBaseRef ?? '(unbound)'} at ${gateState.prReviewBaseSha ?? '(unbound)'}, received ${parsed.data.base_ref} at ${parsed.data.base_sha}`,
+			);
+		}
+		// Live re-derivation is a REDUNDANT re-verification of a fact already proven
+		// at dispatch: the bound base is derived only at `dispatch-lanes.ts:1065-1092`
+		// via `resolveExactMergeBaseAsync`, whose verified result reaches the sole
+		// `bindPrReviewBase` call site (`dispatch-lanes.ts:1189-1192`), and
+		// `bindPrReviewBase` itself (`pr-workflow-gate.ts:1597-1637`) only trims and
+		// lowercases what it is handed — it never re-derives. So an exact match
+		// against the bound scope means this base_ref/base_sha pair already passed a
+		// real `git merge-base`. Because `resolveExactMergeBase{,Async}` collapses
+		// git timeout, spawn failure, unresolvable ref, and unsafe-revision-token
+		// rejection into one bare `null`, UNAVAILABILITY of that re-check must not be
+		// read as REFUTATION: doing so made completion permanently unsatisfiable
+		// (issue #2242 / RC-B) because every retry re-failed identically.
+		// Two caveats, recorded deliberately:
+		//   1. The property assumes durable-state integrity. An attacker who can
+		//      write `.swarm` can forge the receipt directly, so this adds no new
+		//      attack surface, but it is not a defense against that attacker either.
+		//   2. The writer-suite tests bind literal SHAs rather than deriving them
+		//      through dispatch, so they do NOT exercise this property.
+		// Residual accepted risk: post-bind ref movement or deletion escapes
+		// staleness detection on this path only, and only with disclosure. The
+		// reviewed range stays SHA-scoped (`base_sha...pr_head_sha`), so what was
+		// reviewed is unchanged either way.
+	} else if (
+		parsed.data.base_ref === gateState.prReviewBaseRef &&
+		parsed.data.base_sha.toLowerCase() === gateState.prReviewBaseSha
 	) {
+		baseVerification = 'bound_fallback';
+		criticalWarn(
+			`PR_REVIEW trigger evaluation could not re-derive the merge base for base_ref "${parsed.data.base_ref}" at pr_head_sha "${parsed.data.pr_head_sha}"; proceeding on the durably bound, bind-time-verified review scope (${gateState.prReviewBaseRef} at ${gateState.prReviewBaseSha}). The receipt discloses base_verification: bound_fallback and the final review report must disclose it too.`,
+		);
+	} else {
 		return failure(
-			`PR_REVIEW trigger evaluation scope mismatch: workflow is bound to ${gateState.prReviewBaseRef ?? '(unbound)'} at ${gateState.prReviewBaseSha ?? '(unbound)'}, received ${parsed.data.base_ref} at ${parsed.data.base_sha}`,
+			`Active PR_REVIEW trigger evaluation could not resolve the exact merge base from base_ref "${parsed.data.base_ref}" and pr_head_sha "${parsed.data.pr_head_sha}", and the received scope does not equal the durably bound review scope (${gateState.prReviewBaseRef} at ${gateState.prReviewBaseSha}), so the bound-scope fallback does not apply. A null resolution collapses several causes: the bounded git call timed out, the git process failed to spawn, base_ref is not resolvable in this checkout, or base_ref/pr_head_sha was rejected as an unsafe revision token. Recovery: verify both revisions exist here (git rev-parse), retry once the environment settles, or restart with abort_pr_workflow (kind "recovery").`,
 		);
 	}
 
@@ -434,6 +541,7 @@ export async function executeWritePrReviewTriggerEval(
 		dispatched_micro_lane_count: dispatchedMicroLaneCount,
 		rows: validatedRows,
 		coverage_degradations: coverageDegradations,
+		base_verification: baseVerification,
 	});
 
 	const relativePath = path.join(
@@ -497,6 +605,13 @@ export async function executeWritePrReviewTriggerEval(
 			not_triggered_count: artifact.not_triggered_count,
 			no_match_count: artifact.no_match_count,
 			dispatched_micro_lane_count: dispatchedMicroLaneCount,
+			base_verification: baseVerification,
+			...(baseVerification === 'bound_fallback'
+				? {
+						base_verification_note:
+							'live merge-base re-derivation was unavailable; the bound review scope was used and MUST be disclosed in the final review report',
+					}
+				: {}),
 			coverage_degradation_count: coverageDegradations.length,
 			...(coverageDegradations.length > 0
 				? {
