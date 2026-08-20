@@ -21,20 +21,12 @@
  */
 import { afterAll, expect, mock, test } from 'bun:test';
 import * as realFs from 'node:fs';
-import {
-	mkdirSync,
-	mkdtempSync,
-	realpathSync,
-	rmSync,
-	writeFileSync,
-} from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 // --- Fixture setup (module scope, BEFORE the mock.module call below) ---
-const tempDir = realpathSync(
-	mkdtempSync(join(tmpdir(), 'opencode-swarm-verify-delete-')),
-);
+const tempDir = canonicalMkdtemp('opencode-swarm-verify-delete-');
 const xdgCacheHome = join(tempDir, 'cache');
 const xdgConfigHome = join(tempDir, 'config');
 

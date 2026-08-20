@@ -1,12 +1,11 @@
 import { afterEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
-import * as path from 'node:path';
 import type { ToolContext } from '@opencode-ai/plugin';
 import {
 	_internals,
 	complexity_hotspots,
 } from '../../../src/tools/complexity-hotspots';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 // Regression coverage for #2236 Sweep A, FIX 1: `getGitChurn` must surface a
 // `bunSpawn` process-creation failure as a loud `error` field, not as a false
@@ -53,9 +52,7 @@ describe('complexity_hotspots — spawn failure surfaces as a loud error (#2236 
 	}
 
 	it('spawnError set (process never started) is reported as an error, not empty hotspots', async () => {
-		tempDir = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'complexity-hotspots-spawn-')),
-		);
+		tempDir = canonicalMkdtemp('complexity-hotspots-spawn-');
 
 		_internals.bunSpawn = (() => ({
 			stdout: { text: async () => '' },
@@ -86,9 +83,7 @@ describe('complexity_hotspots — spawn failure surfaces as a loud error (#2236 
 	});
 
 	it('non-zero git log exit (e.g. empty repo, exit 128) with no spawnError does NOT throw — stays a clean empty result', async () => {
-		tempDir = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'complexity-hotspots-spawn-')),
-		);
+		tempDir = canonicalMkdtemp('complexity-hotspots-spawn-');
 
 		_internals.bunSpawn = (() => ({
 			stdout: { text: async () => '' },

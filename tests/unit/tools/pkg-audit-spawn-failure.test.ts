@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, mock } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import type { ToolContext } from '@opencode-ai/plugin';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 // Mock isCommandAvailable so the cargo ecosystem is treated as available.
 mock.module('../../../src/build/discovery.js', () => ({
@@ -47,9 +47,7 @@ describe('pkg_audit (cargo) — spawn failure surfaces as incomplete, not clean 
 	}
 
 	it('spawnError set (process never started, empty stdout) is reported as incomplete with a note', async () => {
-		tempDir = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'pkg-audit-spawn-')),
-		);
+		tempDir = canonicalMkdtemp('pkg-audit-spawn-');
 		fs.writeFileSync(
 			path.join(tempDir, 'Cargo.toml'),
 			'[package]\nname = "test"',
@@ -81,9 +79,7 @@ describe('pkg_audit (cargo) — spawn failure surfaces as incomplete, not clean 
 	});
 
 	it('auto ecosystem: cargo spawn failure forces the combined result clean:false via ecosystemsIncomplete', async () => {
-		tempDir = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'pkg-audit-spawn-auto-')),
-		);
+		tempDir = canonicalMkdtemp('pkg-audit-spawn-auto-');
 		fs.writeFileSync(
 			path.join(tempDir, 'Cargo.toml'),
 			'[package]\nname = "test"',
@@ -140,9 +136,7 @@ describe('pkg_audit (npm) — spawn failure is reported explicitly, not via a JS
 	}
 
 	it('reports the spawn failure reason rather than a parse error', async () => {
-		tempDir = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'pkg-audit-npm-spawn-')),
-		);
+		tempDir = canonicalMkdtemp('pkg-audit-npm-spawn-');
 		fs.writeFileSync(
 			path.join(tempDir, 'package.json'),
 			JSON.stringify({ name: 'test', version: '1.0.0' }),

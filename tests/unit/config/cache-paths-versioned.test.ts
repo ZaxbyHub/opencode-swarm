@@ -11,8 +11,7 @@
  */
 import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import * as fs from 'node:fs';
-import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
 	discoverVersionPinnedCachePaths,
@@ -21,6 +20,7 @@ import {
 	resolveCachePackageRoot,
 	VERSION_PINNED_LEAF,
 } from '../../../src/config/cache-paths.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const originalPlatform = process.platform;
 const originalLocalAppData = process.env.LOCALAPPDATA;
@@ -85,9 +85,7 @@ describe('discoverVersionPinnedCachePaths', () => {
 	});
 
 	test('discovers a version-pinned directory under the XDG packages/ parent', async () => {
-		tempDir = await realpath(
-			await mkdtemp(join(tmpdir(), 'opencode-swarm-discover-')),
-		);
+		tempDir = canonicalMkdtemp('opencode-swarm-discover-');
 		const xdgCacheHome = join(tempDir, 'cache');
 		process.env.XDG_CACHE_HOME = xdgCacheHome;
 		const pinnedDir = join(
@@ -103,9 +101,7 @@ describe('discoverVersionPinnedCachePaths', () => {
 	});
 
 	test('ignores non-matching entries in the same packages/ directory', async () => {
-		tempDir = await realpath(
-			await mkdtemp(join(tmpdir(), 'opencode-swarm-discover-')),
-		);
+		tempDir = canonicalMkdtemp('opencode-swarm-discover-');
 		const xdgCacheHome = join(tempDir, 'cache');
 		process.env.XDG_CACHE_HOME = xdgCacheHome;
 		const packagesDir = join(xdgCacheHome, 'opencode', 'packages');
@@ -124,18 +120,14 @@ describe('discoverVersionPinnedCachePaths', () => {
 	});
 
 	test('returns [] when the packages/ parent does not exist (no throw)', async () => {
-		tempDir = await realpath(
-			await mkdtemp(join(tmpdir(), 'opencode-swarm-discover-')),
-		);
+		tempDir = canonicalMkdtemp('opencode-swarm-discover-');
 		process.env.XDG_CACHE_HOME = join(tempDir, 'nonexistent-cache');
 		expect(() => discoverVersionPinnedCachePaths()).not.toThrow();
 		expect(discoverVersionPinnedCachePaths()).toEqual([]);
 	});
 
 	test('ignores a version-pinned FILE (not a directory) with a matching name', async () => {
-		tempDir = await realpath(
-			await mkdtemp(join(tmpdir(), 'opencode-swarm-discover-')),
-		);
+		tempDir = canonicalMkdtemp('opencode-swarm-discover-');
 		const xdgCacheHome = join(tempDir, 'cache');
 		process.env.XDG_CACHE_HOME = xdgCacheHome;
 		const packagesDir = join(xdgCacheHome, 'opencode', 'packages');
@@ -155,9 +147,7 @@ describe('discoverVersionPinnedCachePaths', () => {
 
 	test('on win32 also enumerates %LOCALAPPDATA%/opencode/packages', async () => {
 		setPlatform('win32');
-		tempDir = await realpath(
-			await mkdtemp(join(tmpdir(), 'opencode-swarm-discover-win-')),
-		);
+		tempDir = canonicalMkdtemp('opencode-swarm-discover-win-');
 		process.env.LOCALAPPDATA = join(tempDir, 'AppData', 'Local');
 		const pinnedDir = join(
 			process.env.LOCALAPPDATA,
@@ -182,26 +172,20 @@ describe('resolveCachePackageRoot / readCachePackageVersion', () => {
 	});
 
 	test('resolveCachePackageRoot returns the cache path itself when there is no nested node_modules', async () => {
-		tempDir = await realpath(
-			await mkdtemp(join(tmpdir(), 'opencode-swarm-pkgroot-')),
-		);
+		tempDir = canonicalMkdtemp('opencode-swarm-pkgroot-');
 		await mkdir(tempDir, { recursive: true });
 		expect(resolveCachePackageRoot(tempDir)).toBe(tempDir);
 	});
 
 	test('resolveCachePackageRoot descends into a nested node_modules/opencode-swarm when present', async () => {
-		tempDir = await realpath(
-			await mkdtemp(join(tmpdir(), 'opencode-swarm-pkgroot-')),
-		);
+		tempDir = canonicalMkdtemp('opencode-swarm-pkgroot-');
 		const nested = join(tempDir, 'node_modules', 'opencode-swarm');
 		await mkdir(nested, { recursive: true });
 		expect(resolveCachePackageRoot(tempDir)).toBe(nested);
 	});
 
 	test('readCachePackageVersion reads the version from package.json', async () => {
-		tempDir = await realpath(
-			await mkdtemp(join(tmpdir(), 'opencode-swarm-version-')),
-		);
+		tempDir = canonicalMkdtemp('opencode-swarm-version-');
 		await mkdir(tempDir, { recursive: true });
 		await writeFile(
 			join(tempDir, 'package.json'),
@@ -211,17 +195,13 @@ describe('resolveCachePackageRoot / readCachePackageVersion', () => {
 	});
 
 	test('readCachePackageVersion returns null when package.json is missing', async () => {
-		tempDir = await realpath(
-			await mkdtemp(join(tmpdir(), 'opencode-swarm-version-')),
-		);
+		tempDir = canonicalMkdtemp('opencode-swarm-version-');
 		await mkdir(tempDir, { recursive: true });
 		expect(readCachePackageVersion(tempDir)).toBeNull();
 	});
 
 	test('readCachePackageVersion returns null when package.json is unparsable (does not throw)', async () => {
-		tempDir = await realpath(
-			await mkdtemp(join(tmpdir(), 'opencode-swarm-version-')),
-		);
+		tempDir = canonicalMkdtemp('opencode-swarm-version-');
 		await mkdir(tempDir, { recursive: true });
 		await writeFile(join(tempDir, 'package.json'), '{not valid json');
 		expect(() => readCachePackageVersion(tempDir)).not.toThrow();
@@ -229,9 +209,7 @@ describe('resolveCachePackageRoot / readCachePackageVersion', () => {
 	});
 
 	test('readCachePackageVersion returns null when "version" is not a string', async () => {
-		tempDir = await realpath(
-			await mkdtemp(join(tmpdir(), 'opencode-swarm-version-')),
-		);
+		tempDir = canonicalMkdtemp('opencode-swarm-version-');
 		await mkdir(tempDir, { recursive: true });
 		await writeFile(
 			join(tempDir, 'package.json'),

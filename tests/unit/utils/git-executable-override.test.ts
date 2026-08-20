@@ -10,7 +10,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import type { SpawnSyncReturns } from 'node:child_process';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import {
 	clearDeferredWarnings,
@@ -26,6 +25,7 @@ import {
 	resolveGitExecutableAsync,
 	setGitBinaryOverride,
 } from '../../../src/utils/git-executable';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const ORIGINAL_INTERNALS = { ..._internals };
 
@@ -65,7 +65,7 @@ beforeEach(() => {
 	resetGitExecutableCache();
 	setGitBinaryOverride(undefined);
 	clearDeferredWarnings();
-	tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'git-exec-override-'));
+	tmpDir = canonicalMkdtemp('git-exec-override-');
 });
 afterEach(() => {
 	restoreInternals();

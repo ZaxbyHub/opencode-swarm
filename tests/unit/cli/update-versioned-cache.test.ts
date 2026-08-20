@@ -13,18 +13,11 @@
  */
 import { describe, expect, test } from 'bun:test';
 import { existsSync } from 'node:fs';
-import {
-	mkdir,
-	mkdtemp,
-	realpath,
-	rm,
-	symlink,
-	writeFile,
-} from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { isSafeCachePath } from '../../../src/cli/index.js';
 import { safeRealpathSync } from '../../../src/tools/repo-graph/safe-realpath.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const CLI_PATH = join(
 	import.meta.dir,
@@ -172,9 +165,7 @@ describe('M6 realpath canonicalization — extended to version-pinned leaves', (
 	const symlinkType = process.platform === 'win32' ? 'junction' : 'dir';
 
 	test('a symlinked version-pinned cache leaf is refused after realpath (final-component swap)', async () => {
-		tempDir = await realpath(
-			await mkdtemp(join(tmpdir(), 'opencode-swarm-m6-versioned-')),
-		);
+		tempDir = canonicalMkdtemp('opencode-swarm-m6-versioned-');
 		try {
 			const evilTarget = join(tempDir, 'evil', 'target');
 			await mkdir(evilTarget, { recursive: true });
@@ -205,9 +196,7 @@ describe('update command — version-pinned cache discovery and clearing', () =>
 	let xdgConfigHome: string;
 
 	async function setup(): Promise<void> {
-		tempDir = await realpath(
-			await mkdtemp(join(tmpdir(), 'opencode-swarm-versioned-update-')),
-		);
+		tempDir = canonicalMkdtemp('opencode-swarm-versioned-update-');
 		xdgCacheHome = join(tempDir, 'cache');
 		xdgConfigHome = join(tempDir, 'config');
 	}
