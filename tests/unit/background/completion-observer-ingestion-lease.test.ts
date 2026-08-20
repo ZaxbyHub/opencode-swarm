@@ -67,6 +67,8 @@ function startCoderGeneration(callID: string): void {
 			coderCallID: callID,
 			background: true,
 			declaredFiles: ['src/example.ts'],
+			captureDirectory: directory,
+			workspaceIdentity: 'ws:/observer-lease',
 		}),
 	).not.toBeNull();
 }

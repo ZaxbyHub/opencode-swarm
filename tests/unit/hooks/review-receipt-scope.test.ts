@@ -85,9 +85,8 @@ describe('reviewer task receipt scope', () => {
 		// Previous execFile code cast an unsupported `stdio` option, so Node
 		// silently created a writable stdin pipe even though the source claimed
 		// stdin was ignored.
-		expect(
-			await buildReviewerTaskScope(directory, ['src/actual.ts']),
-		).not.toBeNull();
+		const result = await buildReviewerTaskScope(directory, ['src/actual.ts']);
+		expect(result.ok).toBe(true);
 		expect(observedStdio).toEqual(['ignore', 'pipe', 'ignore']);
 		expect(observedTimeout).toBe(5_000);
 		expect(childStdinWasNull).toBe(true);
@@ -116,9 +115,8 @@ describe('reviewer task receipt scope', () => {
 
 		// This fake covers only output overflow. The real-process test above
 		// covers normal completion; existing scope tests cover valid SHA output.
-		expect(
-			await buildReviewerTaskScope(directory, ['src/actual.ts']),
-		).toBeNull();
+		const result = await buildReviewerTaskScope(directory, ['src/actual.ts']);
+		expect(result).toMatchObject({ ok: false, code: 'head_timeout' });
 		expect(killCalls).toBeGreaterThan(0);
 	});
 
@@ -161,7 +159,7 @@ describe('reviewer task receipt scope', () => {
 			fs.readFileSync(receiptPath as string, 'utf-8'),
 		) as ReviewReceipt;
 		expect(receipt.scope_fingerprint.scope_description).toBe(
-			'reviewer-task-files-v1',
+			'reviewer-task-files-v2',
 		);
 		expect(isScopeStale(receipt, reviewedScope?.content)).toBe(false);
 
@@ -183,7 +181,7 @@ describe('reviewer task receipt scope', () => {
 			'export const n = 2;\n',
 		);
 		const before = await buildReviewerTaskScope(directory, ['src/actual.ts']);
-		expect(before).not.toBeNull();
+		expect(before.ok).toBe(true);
 
 		fs.writeFileSync(
 			path.join(directory, 'unrelated.txt'),
@@ -200,13 +198,13 @@ describe('reviewer task receipt scope', () => {
 			'advance head',
 		]);
 		const after = await buildReviewerTaskScope(directory, ['src/actual.ts']);
+		expect(after.ok).toBe(true);
 
-		expect(after?.content).not.toBe(before?.content);
+		expect(after.scope.content).not.toBe(before.scope.content);
 	});
 
 	test('rejects path escapes instead of forging a partial scope', async () => {
-		expect(
-			await buildReviewerTaskScope(directory, ['../outside.ts']),
-		).toBeNull();
+		const escaped = await buildReviewerTaskScope(directory, ['../outside.ts']);
+		expect(escaped).toMatchObject({ ok: false, code: 'outside_workspace' });
 	});
 });

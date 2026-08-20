@@ -12,6 +12,7 @@ import {
 	getReviewerScopeGenerationForCoderCall,
 	markReviewerScopeGenerationReady,
 	recordReviewerScopeGenerationFile,
+	recordReviewerScopeGenerationFileFingerprint,
 	resetSwarmState,
 	startAgentSession,
 	startReviewerScopeGeneration,
@@ -45,6 +46,8 @@ describe('reviewer claim retry lifecycle', () => {
 			taskId: '1.1',
 			coderCallID: 'coder-retry',
 			declaredFiles: ['src/a.ts'],
+			captureDirectory: directory,
+			workspaceIdentity: 'ws:/claim-retry',
 		});
 		expect(generation).not.toBeNull();
 		expect(
@@ -53,6 +56,14 @@ describe('reviewer claim retry lifecycle', () => {
 				taskId: '1.1',
 				coderCallID: 'coder-retry',
 				file: 'src/a.ts',
+			}),
+		).toBe(true);
+		expect(
+			recordReviewerScopeGenerationFileFingerprint({
+				parentSessionID: 'parent',
+				taskId: '1.1',
+				coderCallID: 'coder-retry',
+				fingerprint: { file: 'src/a.ts', kind: 'file', size: 16, hash: 'c'.repeat(64) },
 			}),
 		).toBe(true);
 		expect(
@@ -71,9 +82,11 @@ describe('reviewer claim retry lifecycle', () => {
 		).not.toBeNull();
 		const scope = {
 			content: 'immutable scope\n',
-			description: 'reviewer-task-files-v1',
+			description: 'reviewer-task-files-v2',
 			files: ['src/a.ts'],
 			headSha: 'a'.repeat(40),
+			workspaceIdentity: 'ws:/claim-retry',
+			delivery: [{ path: 'src/a.ts', mode: 'inline' as const }],
 			taskId: '1.1',
 			coderCallID: 'coder-retry',
 			generation: generation!.generation,
@@ -84,7 +97,10 @@ describe('reviewer claim retry lifecycle', () => {
 			resolveAttempts += 1;
 			return resolveAttempts === 1 ? null : scope;
 		};
-		_internals.buildReviewerTaskScope = async () => scope;
+		_internals.buildReviewerTaskScope = (async () => ({
+			ok: true as const,
+			scope,
+		})) as typeof _internals.buildReviewerTaskScope;
 		let persistAttempts = 0;
 		_internals.persistReviewReceipt = async (...args) => {
 			persistAttempts += 1;

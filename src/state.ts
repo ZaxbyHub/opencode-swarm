@@ -199,6 +199,25 @@ function compareWorkflowStatePrecedence(
 	return compareTaskWorkflowStateRank(left, right);
 }
 
+/** Typed per-file capture failure retained on a generation (issue #2100). */
+export interface ReviewerScopeCaptureFailure {
+	file: string;
+	code: string;
+	retryable: boolean;
+	attempts: number;
+	at: number;
+}
+
+/**
+ * Merge-back provenance for lane-captured generations. `verified` records the
+ * primary-checkout match that makes the generation reviewable from the primary
+ * root; the failure arm retains an actionable typed reason instead of
+ * relabeling the generation as generic reviewer-stale.
+ */
+export type ReviewerScopeMergebackState =
+	| { verifiedAt: number; primaryWorkspaceIdentity: string }
+	| { failedAt: number; reason: string };
+
 /** Exact lifecycle state for one coder generation and its paired reviewer. */
 export interface ReviewerScopeGeneration {
 	taskId: string;
@@ -206,14 +225,27 @@ export interface ReviewerScopeGeneration {
 	generation: number;
 	sessionIncarnation: string;
 	background: boolean;
+	/** Canonical root every capture/equality site must use (lane or primary). */
+	captureDirectory: string;
+	/** Canonical workspace identity of `captureDirectory` (issue #2100 root correctness). */
+	workspaceIdentity: string;
 	declaredFiles: string[];
 	modifiedFiles: string[];
 	modifiedFileFingerprints: import('./hooks/reviewer-scope-file-fingerprint.js').ReviewerScopeFileFingerprint[];
-	status: 'collecting' | 'ready' | 'claimed';
+	/** Last typed capture failure per file; cleared when that file later captures. */
+	captureFailures: ReviewerScopeCaptureFailure[];
+	status:
+		| 'collecting'
+		| 'ready'
+		| 'claimed'
+		| 'no_change'
+		| 'mergeback_pending'
+		| 'mergeback_mismatch';
 	createdAt: number;
 	readyAt?: number;
 	reviewerCallID?: string;
 	reviewerDispatchScope?: ReviewerScopeDispatchSnapshot;
+	mergeback?: ReviewerScopeMergebackState;
 }
 
 export interface ReviewerScopeDispatchSnapshot {
@@ -239,6 +271,7 @@ function cloneReviewerScopeGeneration(
 				...entry,
 			}),
 		),
+		captureFailures: generation.captureFailures.map((entry) => ({ ...entry })),
 		reviewerDispatchScope: generation.reviewerDispatchScope
 			? {
 					...generation.reviewerDispatchScope,
@@ -265,6 +298,8 @@ export interface ReviewerScopeOwnershipTombstone
 	parentSessionID: string;
 	taskId: string;
 	background: true;
+	captureDirectory: string;
+	workspaceIdentity: string;
 	declaredFiles: string[];
 	modifiedFiles: string[];
 	modifiedFileFingerprints: import('./hooks/reviewer-scope-file-fingerprint.js').ReviewerScopeFileFingerprint[];
@@ -1144,13 +1179,19 @@ export function startReviewerScopeGeneration(input: {
 	coderCallID: string;
 	background?: boolean;
 	declaredFiles?: string[];
+	/** Canonical root post-write capture must read from (lane or primary). */
+	captureDirectory: string;
+	/** Canonical workspace identity of `captureDirectory` (scope-binding identity). */
+	workspaceIdentity: string;
 	createdAt?: number;
 }): ReviewerScopeGeneration | null {
 	const session = swarmState.agentSessions.get(input.parentSessionID);
 	if (
 		!session ||
 		!isBoundedGenerationValue(input.taskId, 512) ||
-		!isBoundedGenerationValue(input.coderCallID, 512)
+		!isBoundedGenerationValue(input.coderCallID, 512) ||
+		!input.captureDirectory.trim() ||
+		!input.workspaceIdentity.trim()
 	) {
 		return null;
 	}
@@ -1181,9 +1222,12 @@ export function startReviewerScopeGeneration(input: {
 		generation: session.reviewerScopeGenerationCounter,
 		sessionIncarnation: incarnation,
 		background: input.background === true,
+		captureDirectory: input.captureDirectory,
+		workspaceIdentity: input.workspaceIdentity,
 		declaredFiles: [...new Set(input.declaredFiles ?? [])],
 		modifiedFiles: [],
 		modifiedFileFingerprints: [],
+		captureFailures: [],
 		status: 'collecting',
 		createdAt: now,
 	};
@@ -1253,6 +1297,7 @@ export function recordReviewerScopeGenerationFile(input: {
 /**
  * Record the bounded post-write state only after a guarded child write returns
  * successfully. Pre-write routing in modifiedFiles remains authorization metadata.
+ * A successful capture clears any retained typed failure for that file.
  */
 export function recordReviewerScopeGenerationFileFingerprint(input: {
 	parentSessionID: string;
@@ -1272,6 +1317,9 @@ export function recordReviewerScopeGenerationFileFingerprint(input: {
 	if (matches.length !== 1) return false;
 	const generation = matches[0];
 	if (!generation.modifiedFiles.includes(input.fingerprint.file)) return false;
+	generation.captureFailures = generation.captureFailures.filter(
+		(entry) => entry.file !== input.fingerprint.file,
+	);
 	const existingIndex = generation.modifiedFileFingerprints.findIndex(
 		(entry) => entry.file === input.fingerprint.file,
 	);
@@ -1291,7 +1339,67 @@ export function recordReviewerScopeGenerationFileFingerprint(input: {
 	return true;
 }
 
-/** Mark the exact coder call terminal; background running placeholders do not call this. */
+/**
+ * Retain the LAST typed capture failure per file (upsert by file, bounded at
+ * the generation file cap). Failures are diagnostic recovery metadata — they
+ * never invalidate a generation by themselves.
+ */
+export function recordReviewerScopeGenerationCaptureFailure(input: {
+	parentSessionID: string;
+	taskId: string;
+	coderCallID: string;
+	file: string;
+	code: string;
+	retryable: boolean;
+	at?: number;
+}): boolean {
+	const session = swarmState.agentSessions.get(input.parentSessionID);
+	if (!session || !isBoundedGenerationValue(input.file, 4_096)) return false;
+	const { generations } = ensureReviewerScopeGenerationState(session);
+	const matches = [...generations.values()].filter(
+		(entry) =>
+			entry.taskId === input.taskId &&
+			entry.coderCallID === input.coderCallID &&
+			entry.status === 'collecting',
+	);
+	if (matches.length !== 1) return false;
+	const generation = matches[0];
+	const now = input.at ?? Date.now();
+	const existingIndex = generation.captureFailures.findIndex(
+		(entry) => entry.file === input.file,
+	);
+	if (existingIndex >= 0) {
+		const existing = generation.captureFailures[existingIndex];
+		generation.captureFailures[existingIndex] = {
+			...existing,
+			code: input.code,
+			retryable: input.retryable,
+			attempts: existing.attempts + 1,
+			at: now,
+		};
+		return true;
+	}
+	if (
+		generation.captureFailures.length >= MAX_REVIEWER_SCOPE_GENERATION_FILES
+	) {
+		generation.captureFailures.shift();
+	}
+	generation.captureFailures.push({
+		file: input.file,
+		code: input.code,
+		retryable: input.retryable,
+		attempts: 1,
+		at: now,
+	});
+	return true;
+}
+
+/**
+ * Mark the exact coder call terminal. Transactional publication (issue #2100
+ * contract E): `ready` is published only when every observed file has exactly
+ * one exact fingerprint — a half-populated fingerprint array is never exposed
+ * as reviewable. Incomplete generations stay `collecting` (recoverable).
+ */
 export function markReviewerScopeGenerationReady(input: {
 	parentSessionID: string;
 	taskId: string;
@@ -1310,9 +1418,108 @@ export function markReviewerScopeGenerationReady(input: {
 			(entry.status === 'collecting' || entry.status === 'ready'),
 	);
 	if (matches.length !== 1) return false;
-	if (matches[0].status === 'ready') return true;
-	matches[0].status = 'ready';
-	matches[0].readyAt = now;
+	const generation = matches[0];
+	if (generation.status === 'ready') return true;
+	const complete =
+		generation.modifiedFiles.length ===
+			generation.modifiedFileFingerprints.length &&
+		generation.modifiedFiles.every((file) =>
+			generation.modifiedFileFingerprints.some((entry) => entry.file === file),
+		);
+	if (!complete) return false;
+	generation.status = 'ready';
+	generation.readyAt = now;
+	return true;
+}
+
+/** Truthful no-change terminal: zero observed writes, verified zero diff (issue #2100 contract F). */
+export function markReviewerScopeGenerationNoChange(input: {
+	parentSessionID: string;
+	taskId: string;
+	coderCallID: string;
+	at?: number;
+}): boolean {
+	const session = swarmState.agentSessions.get(input.parentSessionID);
+	if (!session) return false;
+	const now = input.at ?? Date.now();
+	sweepReviewerScopeGenerations(session, now);
+	const { generations } = ensureReviewerScopeGenerationState(session);
+	const matches = [...generations.values()].filter(
+		(entry) =>
+			entry.taskId === input.taskId &&
+			entry.coderCallID === input.coderCallID &&
+			entry.status === 'collecting',
+	);
+	if (matches.length !== 1) return false;
+	const generation = matches[0];
+	if (generation.modifiedFiles.length !== 0) return false;
+	generation.status = 'no_change';
+	generation.readyAt = now;
+	return true;
+}
+
+/**
+ * A lane-captured generation awaits merge-back verification before it is
+ * reviewable from the primary root. Conflicts/deferred merges retain the
+ * generation here — they are never relabeled as generic reviewer-stale.
+ */
+export function markReviewerScopeGenerationMergebackPending(input: {
+	parentSessionID: string;
+	taskId?: string;
+	coderCallID: string;
+	at?: number;
+}): boolean {
+	const session = swarmState.agentSessions.get(input.parentSessionID);
+	if (!session) return false;
+	const { generations } = ensureReviewerScopeGenerationState(session);
+	const matches = [...generations.values()].filter(
+		(entry) =>
+			(input.taskId === undefined || entry.taskId === input.taskId) &&
+			entry.coderCallID === input.coderCallID &&
+			(entry.status === 'collecting' || entry.status === 'ready'),
+	);
+	if (matches.length !== 1) return false;
+	if (matches[0].status === 'mergeback_pending') return true;
+	matches[0].status = 'mergeback_pending';
+	return true;
+}
+
+/**
+ * Pure state transition for merge-back settlement: a verified primary match
+ * publishes `ready`; a typed reason retains the generation as
+ * `mergeback_mismatch` for an actionable architect retry.
+ */
+export function settleReviewerScopeMergeback(input: {
+	parentSessionID: string;
+	taskId?: string;
+	coderCallID: string;
+	outcome:
+		| { verified: true; primaryWorkspaceIdentity: string; at?: number }
+		| { verified: false; reason: string; at?: number };
+}): boolean {
+	const session = swarmState.agentSessions.get(input.parentSessionID);
+	if (!session) return false;
+	const { generations } = ensureReviewerScopeGenerationState(session);
+	const matches = [...generations.values()].filter(
+		(entry) =>
+			(input.taskId === undefined || entry.taskId === input.taskId) &&
+			entry.coderCallID === input.coderCallID &&
+			entry.status === 'mergeback_pending',
+	);
+	if (matches.length !== 1) return false;
+	const generation = matches[0];
+	const now = input.outcome.at ?? Date.now();
+	if (input.outcome.verified) {
+		generation.status = 'ready';
+		if (generation.readyAt === undefined) generation.readyAt = now;
+		generation.mergeback = {
+			verifiedAt: now,
+			primaryWorkspaceIdentity: input.outcome.primaryWorkspaceIdentity,
+		};
+		return true;
+	}
+	generation.status = 'mergeback_mismatch';
+	generation.mergeback = { failedAt: now, reason: input.outcome.reason };
 	return true;
 }
 
@@ -1347,6 +1554,27 @@ export function peekReadyReviewerScopeGeneration(input: {
 	const { generations } = ensureReviewerScopeGenerationState(session);
 	const matches = [...generations.values()].filter(
 		(entry) => entry.taskId === input.taskId && entry.status === 'ready',
+	);
+	return matches.length === 1 ? cloneReviewerScopeGeneration(matches[0]) : null;
+}
+
+/**
+ * Inspect the single generation for a task in a NON-reviewable status
+ * (`no_change` | `mergeback_pending` | `mergeback_mismatch`) so lifecycle
+ * denials can name the exact typed recovery action instead of generic stale.
+ */
+export function peekReviewerScopeGenerationByStatus(input: {
+	parentSessionID: string;
+	taskId: string;
+	status: 'no_change' | 'mergeback_pending' | 'mergeback_mismatch';
+	now?: number;
+}): ReviewerScopeGeneration | null {
+	const session = swarmState.agentSessions.get(input.parentSessionID);
+	if (!session) return null;
+	sweepReviewerScopeGenerations(session, input.now ?? Date.now());
+	const { generations } = ensureReviewerScopeGenerationState(session);
+	const matches = [...generations.values()].filter(
+		(entry) => entry.taskId === input.taskId && entry.status === input.status,
 	);
 	return matches.length === 1 ? cloneReviewerScopeGeneration(matches[0]) : null;
 }
@@ -1447,13 +1675,15 @@ export function takeReviewerScopeGeneration(input: {
 			generation: generation.generation,
 			sessionIncarnation: generation.sessionIncarnation,
 			background: true,
+			captureDirectory: generation.captureDirectory,
+			workspaceIdentity: generation.workspaceIdentity,
 			declaredFiles: [...generation.declaredFiles],
 			modifiedFiles: [...generation.modifiedFiles],
 			modifiedFileFingerprints: generation.modifiedFileFingerprints.map(
 				(fingerprint) => ({ ...fingerprint }),
 			),
 			createdAt: generation.createdAt,
-			readyAt: generation.readyAt,
+			readyAt: generation.readyAt ?? input.now ?? Date.now(),
 			consumedAt: input.now ?? Date.now(),
 		};
 		ownershipHistory.set(

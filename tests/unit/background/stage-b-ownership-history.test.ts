@@ -10,7 +10,10 @@ import type {
 import { ingestBackgroundStageBCompletion } from '../../../src/background/stage-b-gates';
 import { captureWorkspaceSnapshot } from '../../../src/background/workspace-snapshot';
 import { resolveAutoReviewConfig } from '../../../src/config/schema';
-import { captureReviewerScopeFileFingerprint } from '../../../src/hooks/reviewer-scope-file-fingerprint';
+import {
+	captureReviewerScopeFileFingerprint,
+	reviewerScopeCaptureToFingerprint,
+} from '../../../src/hooks/reviewer-scope-file-fingerprint';
 import {
 	claimReviewerScopeGeneration,
 	getReviewerScopeOwnershipHistory,
@@ -62,6 +65,8 @@ function startCoder(
 			coderCallID: callID,
 			background: true,
 			declaredFiles: [file],
+			captureDirectory: directory,
+			workspaceIdentity: 'ws:/stage-b-ownership',
 			createdAt,
 		}),
 	).not.toBeNull();
@@ -77,13 +82,13 @@ function startCoder(
 
 function fingerprint(taskId: string, callID: string, file: string): void {
 	const value = captureReviewerScopeFileFingerprint(directory, file);
-	expect(value).not.toBeNull();
+	expect(value?.kind).toBe('captured_file');
 	expect(
 		recordReviewerScopeGenerationFileFingerprint({
 			parentSessionID: 'parent',
 			taskId,
 			coderCallID: callID,
-			fingerprint: value!,
+			fingerprint: reviewerScopeCaptureToFingerprint(value)!,
 		}),
 	).toBe(true);
 }

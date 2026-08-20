@@ -8,8 +8,12 @@ import {
 	captureReviewerScopeFileFingerprint,
 	_internals as fingerprintInternals,
 } from '../../../src/hooks/reviewer-scope-file-fingerprint';
+import { canonicalWorkspaceIdentity } from '../../../src/scope/scope-binding';
 import {
 	getReviewerScopeGenerationForCoderCall,
+	recordReviewerScopeGenerationCaptureFailure,
+	recordReviewerScopeGenerationFile,
+	recordReviewerScopeGenerationFileFingerprint,
 	resetSwarmState,
 	startAgentSession,
 	startReviewerScopeGeneration,
@@ -31,7 +35,7 @@ const config: GuardrailsConfig = {
 
 let directory = '';
 let hooks: ReturnType<typeof createGuardrailsHooks>;
-const realReadFileSync = fingerprintInternals.readFileSync;
+const realNow = fingerprintInternals.now;
 
 function generation() {
 	return getReviewerScopeGenerationForCoderCall({
@@ -79,13 +83,15 @@ beforeEach(() => {
 			coderCallID: 'coder-call',
 			background: true,
 			declaredFiles: ['src/a.ts'],
+			captureDirectory: directory,
+			workspaceIdentity: canonicalWorkspaceIdentity(directory) ?? 'ws:test',
 		}),
 	).not.toBeNull();
 	hooks = createGuardrailsHooks(directory, undefined, config);
 });
 
 afterEach(() => {
-	fingerprintInternals.readFileSync = realReadFileSync;
+	fingerprintInternals.now = realNow;
 	resetSwarmState();
 	fs.rmSync(directory, { recursive: true, force: true });
 });
@@ -107,7 +113,7 @@ describe('reviewer scope post-write fingerprints', () => {
 		await after('apply_patch', 'direct-write');
 
 		expect(generation()?.modifiedFileFingerprints).toEqual([
-			captureReviewerScopeFileFingerprint(directory, 'src/a.ts'),
+			{ file: 'src/a.ts', kind: 'file', size: 6, hash: expect.any(String) },
 		]);
 	});
 
@@ -134,7 +140,10 @@ describe('reviewer scope post-write fingerprints', () => {
 		fs.writeFileSync(path.join(directory, 'src/a.ts'), 'direct mutation\n');
 
 		expect(recorded).toBeDefined();
-		expect(recorded).not.toEqual(
+		expect(
+			captureReviewerScopeFileFingerprint(directory, 'src/a.ts'),
+		).toMatchObject({ kind: 'captured_file' });
+		expect(recorded?.kind === 'file' && recorded.hash).not.toEqual(
 			captureReviewerScopeFileFingerprint(directory, 'src/a.ts'),
 		);
 	});
@@ -148,9 +157,11 @@ describe('reviewer scope post-write fingerprints', () => {
 		await after('bash', 'shell-write');
 
 		expect(generation()?.modifiedFiles).toEqual(['src/a.ts']);
-		expect(generation()?.modifiedFileFingerprints).toEqual([
-			captureReviewerScopeFileFingerprint(directory, 'src/a.ts'),
-		]);
+		expect(generation()?.modifiedFileFingerprints[0]).toMatchObject({
+			file: 'src/a.ts',
+			kind: 'file',
+			size: 6,
+		});
 	});
 
 	test('fails closed for a shell write whose target is dynamic', async () => {
@@ -164,21 +175,83 @@ describe('reviewer scope post-write fingerprints', () => {
 		expect(generation()?.modifiedFileFingerprints).toEqual([]);
 	});
 
-	test('rejects an over-budget target before reading or hashing its bytes', () => {
-		fs.writeFileSync(path.join(directory, 'src/a.ts'), 'A'.repeat(32));
-		let reads = 0;
-		fingerprintInternals.readFileSync = ((...args) => {
-			reads += 1;
-			return realReadFileSync(...args);
-		}) as typeof realReadFileSync;
+	test('files larger than the old 1 MiB cap are fingerprinted exactly, not rejected', () => {
+		const big = Buffer.alloc(1_048_576 + 1, 0x61);
+		fs.writeFileSync(path.join(directory, 'src/big.bin'), big);
+		const captured = captureReviewerScopeFileFingerprint(
+			directory,
+			'src/big.bin',
+		);
+		expect(captured).toMatchObject({
+			kind: 'captured_file',
+			size: big.byteLength,
+		});
+	});
 
+	test('a capture deadline produces a typed retryable timeout, never a partial digest', () => {
+		fs.writeFileSync(path.join(directory, 'src/a.ts'), 'content\n');
+		let calls = 0;
+		fingerprintInternals.now = () => {
+			calls += 1;
+			// First call is the deadline read inside the streaming loop.
+			return calls === 1 ? 1_000 : Number.MAX_SAFE_INTEGER;
+		};
+		const captured = captureReviewerScopeFileFingerprint(directory, 'src/a.ts', {
+			deadlineAt: 500,
+		});
+		expect(captured).toMatchObject({
+			kind: 'capture_failed',
+			code: 'capture_deadline',
+			retryable: true,
+		});
+	});
+
+	test('a permanent capture failure is recorded as typed recovery metadata, not silent', async () => {
+		await hooks.toolBefore(
+			{ tool: 'write', sessionID: 'child', callID: 'dir-write' },
+			{ args: { filePath: 'src/a.ts', content: 'after\n' } },
+		);
+		fs.rmSync(path.join(directory, 'src/a.ts'));
+		fs.mkdirSync(path.join(directory, 'src/a.ts'));
+		await after('write', 'dir-write');
+
+		expect(generation()?.modifiedFileFingerprints).toEqual([]);
+		expect(generation()?.captureFailures).toHaveLength(1);
+		expect(generation()?.captureFailures[0]).toMatchObject({
+			file: 'src/a.ts',
+			code: 'non_regular',
+			retryable: false,
+		});
+	});
+
+	test('capture failure entries clear when the file later captures successfully', () => {
 		expect(
-			captureReviewerScopeFileFingerprint(directory, 'src/a.ts', 16),
-		).toBeNull();
-		expect(reads).toBe(0);
+			recordReviewerScopeGenerationFile({
+				parentSessionID: 'parent',
+				taskId: '1.1',
+				coderCallID: 'coder-call',
+				file: 'src/a.ts',
+			}),
+		).toBe(true);
 		expect(
-			captureReviewerScopeFileFingerprint(directory, 'src/a.ts', 32),
-		).not.toBeNull();
-		expect(reads).toBe(1);
+			recordReviewerScopeGenerationCaptureFailure({
+				parentSessionID: 'parent',
+				taskId: '1.1',
+				coderCallID: 'coder-call',
+				file: 'src/a.ts',
+				code: 'capture_deadline',
+				retryable: true,
+			}),
+		).toBe(true);
+		expect(generation()?.captureFailures).toHaveLength(1);
+		expect(
+			recordReviewerScopeGenerationFileFingerprint({
+				parentSessionID: 'parent',
+				taskId: '1.1',
+				coderCallID: 'coder-call',
+				fingerprint: { file: 'src/a.ts', kind: 'file', size: 7, hash: 'x' },
+			}),
+		).toBe(true);
+		expect(generation()?.captureFailures).toEqual([]);
 	});
 });

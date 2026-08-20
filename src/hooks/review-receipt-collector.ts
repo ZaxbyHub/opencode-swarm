@@ -40,10 +40,12 @@ import {
 } from '../review/runtime.js';
 import {
 	discardReviewerScopeGenerationClaim,
+	ensureAgentSession,
 	isReviewerScopeGenerationCurrent,
 	peekReviewerScopeGenerationClaim,
 } from '../state.js';
 import { telemetry } from '../telemetry.js';
+import { pushAdvisory } from '../utils/advisory-queue.js';
 import * as logger from '../utils/logger.js';
 import {
 	type BlockingFinding,
@@ -56,6 +58,7 @@ import {
 } from './review-receipt.js';
 import {
 	buildReviewerTaskScope,
+	LEGACY_REVIEWER_TASK_SCOPE_DESCRIPTION,
 	type ReviewerTaskScope,
 	resolveReviewerScopeTaskId,
 	resolveReviewerTaskScope,
@@ -440,8 +443,21 @@ async function reviewerScopeRemainsCurrent(input: {
 			sessionIncarnation: input.scope.sessionIncarnation,
 		},
 	);
+	if (currentScope === null) return false;
+	if (!currentScope.ok) {
+		// A legacy v1 scope can never satisfy a v2 rebuild (issue #2100): fail
+		// closed with the typed one-time cutover advisory — a debug log alone
+		// would leave upgrading users with a silently stale receipt.
+		if (input.scope.description === LEGACY_REVIEWER_TASK_SCOPE_DESCRIPTION) {
+			pushAdvisory(
+				ensureAgentSession(input.sessionID),
+				`REVIEW_SCOPE_LEGACY_V1: receipt scope predates the v2 manifest; re-review required (task ${input.scope.taskId ?? 'unknown'}). ACTION[architect]: re-dispatch the reviewer to record a v2-manifest receipt`,
+			);
+		}
+		return false;
+	}
+	const scope = currentScope.scope;
 	return (
-		currentScope !== null &&
 		isReviewerScopeGenerationCurrent({
 			parentSessionID: input.sessionID,
 			taskId: input.scope.taskId,
@@ -449,10 +465,10 @@ async function reviewerScopeRemainsCurrent(input: {
 			generation: input.scope.generation,
 			sessionIncarnation: input.scope.sessionIncarnation,
 		}) &&
-		currentScope.headSha === input.scope.headSha &&
-		currentScope.content === input.scope.content &&
-		currentScope.description === input.scope.description &&
-		JSON.stringify(currentScope.files) === JSON.stringify(input.scope.files)
+		scope.headSha === input.scope.headSha &&
+		scope.content === input.scope.content &&
+		scope.description === input.scope.description &&
+		JSON.stringify(scope.files) === JSON.stringify(input.scope.files)
 	);
 }
 

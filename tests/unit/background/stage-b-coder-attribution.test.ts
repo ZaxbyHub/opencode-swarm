@@ -11,7 +11,10 @@ import type {
 import { ingestBackgroundStageBCompletion } from '../../../src/background/stage-b-gates';
 import { captureWorkspaceSnapshot } from '../../../src/background/workspace-snapshot';
 import { resolveAutoReviewConfig } from '../../../src/config/schema';
-import { captureReviewerScopeFileFingerprint } from '../../../src/hooks/reviewer-scope-file-fingerprint';
+import {
+	captureReviewerScopeFileFingerprint,
+	reviewerScopeCaptureToFingerprint,
+} from '../../../src/hooks/reviewer-scope-file-fingerprint';
 import {
 	getReviewerScopeGenerationForCoderCall,
 	recordReviewerScopeGenerationFile,
@@ -91,6 +94,8 @@ function startCoder(taskId: string, callID: string, files: string[]): void {
 			coderCallID: callID,
 			background: true,
 			declaredFiles: files,
+			captureDirectory: directory,
+			workspaceIdentity: 'ws:/stage-b-attribution',
 		}),
 	).not.toBeNull();
 }
@@ -108,13 +113,15 @@ function route(taskId: string, callID: string, file: string): void {
 
 function fingerprint(taskId: string, callID: string, file: string): void {
 	const captured = captureReviewerScopeFileFingerprint(directory, file);
-	expect(captured).not.toBeNull();
+	expect(captured?.kind).toBe('captured_file');
+	const converted = reviewerScopeCaptureToFingerprint(captured);
+	expect(converted).not.toBeNull();
 	expect(
 		recordReviewerScopeGenerationFileFingerprint({
 			parentSessionID: 'parent',
 			taskId,
 			coderCallID: callID,
-			fingerprint: captured!,
+			fingerprint: converted!,
 		}),
 	).toBe(true);
 }

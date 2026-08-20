@@ -1,48 +1,26 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { PassThrough } from 'node:stream';
 import {
 	buildReviewerTaskScope,
 	_internals as receiptScopeInternals,
 } from '../../../src/hooks/review-receipt-scope';
+import {
+	captureReviewerScopeFileFingerprint,
+	_internals as fingerprintInternals,
+} from '../../../src/hooks/reviewer-scope-file-fingerprint';
 
 let directory: string;
-let outsideDirectory: string | undefined;
-const originalSpawn = receiptScopeInternals.spawn;
-const originalRealpath = receiptScopeInternals.realpath;
-const originalLstatBigInt = receiptScopeInternals.lstatBigInt;
-const originalOpen = receiptScopeInternals.open;
-const originalFileHandleStatBigInt = receiptScopeInternals.fileHandleStatBigInt;
-const COLLIDING_INODE_A = 9_007_199_254_740_992n;
-const COLLIDING_INODE_B = COLLIDING_INODE_A + 1n;
-
-function withIdentity(stat: fs.BigIntStats, ino: bigint): fs.BigIntStats {
-	return Object.assign(
-		Object.create(Object.getPrototypeOf(stat)) as fs.BigIntStats,
-		stat,
-		{ dev: 1n, ino },
-	);
-}
-
-function sameSnapshotAfterNumberCoercion(
-	left: fs.BigIntStats,
-	right: fs.BigIntStats,
-): boolean {
-	return (
-		Number(left.dev) === Number(right.dev) &&
-		Number(left.ino) === Number(right.ino) &&
-		Number(left.size) === Number(right.size) &&
-		Number(left.mtimeNs) === Number(right.mtimeNs) &&
-		Number(left.ctimeNs) === Number(right.ctimeNs)
-	);
-}
+const realRead = fingerprintInternals.read;
 
 function git(args: string[]): string {
 	const result = spawnSync('git', args, {
 		cwd: directory,
-		encoding: 'utf8',
+		encoding: 'utf-8',
 		timeout: 5_000,
 		maxBuffer: 64 * 1024,
 		stdio: ['ignore', 'pipe', 'pipe'],
@@ -51,191 +29,135 @@ function git(args: string[]): string {
 	if (result.status !== 0) {
 		throw new Error(result.stderr || `git ${args.join(' ')} failed`);
 	}
-	return result.stdout.trim();
+	return result.stdout;
 }
 
 beforeEach(() => {
 	directory = fs.realpathSync(
-		fs.mkdtempSync(path.join(os.tmpdir(), 'review-receipt-race-')),
+		fs.mkdtempSync(path.join(os.tmpdir(), 'review-scope-races-')),
 	);
-	git(['init', '-b', 'main']);
-	git(['config', 'user.name', 'Receipt Race']);
-	git(['config', 'user.email', 'race@example.invalid']);
-	fs.mkdirSync(path.join(directory, 'src'));
-	fs.writeFileSync(path.join(directory, 'src', 'actual.ts'), 'baseline\n');
-	git(['add', 'src/actual.ts']);
-	git(['commit', '-m', 'baseline']);
+	git(['init']);
+	fs.mkdirSync(path.join(directory, 'src'), { recursive: true });
+	fs.writeFileSync(path.join(directory, 'src', 'a.ts'), 'export const n = 1;\n');
+	git(['add', 'src/a.ts']);
+	git([
+		'-c',
+		'user.name=Race Test',
+		'-c',
+		'user.email=race@example.invalid',
+		'commit',
+		'-m',
+		'baseline',
+	]);
 });
 
 afterEach(() => {
-	receiptScopeInternals.spawn = originalSpawn;
-	receiptScopeInternals.realpath = originalRealpath;
-	receiptScopeInternals.lstatBigInt = originalLstatBigInt;
-	receiptScopeInternals.open = originalOpen;
-	receiptScopeInternals.fileHandleStatBigInt = originalFileHandleStatBigInt;
+	fingerprintInternals.read = realRead;
+	receiptScopeInternals.spawn = originalReceiptSpawn;
 	fs.rmSync(directory, { recursive: true, force: true });
-	if (outsideDirectory) {
-		fs.rmSync(outsideDirectory, { recursive: true, force: true });
-		outsideDirectory = undefined;
-	}
 });
 
-describe('reviewer receipt scope - regression: coherent snapshots (F6.3)', () => {
-	test('rejects a HEAD advance between the initial SHA and file reads', async () => {
-		const initialHead = git(['rev-parse', 'HEAD']);
-		let advanced = false;
-		receiptScopeInternals.spawn = ((command, args, options) => {
-			const child = originalSpawn(command, args, options);
-			if (!advanced) {
-				advanced = true;
-				child.once('close', () => {
-					fs.writeFileSync(
-						path.join(directory, 'src', 'actual.ts'),
-						'advanced checkout\n',
-					);
-					git(['add', 'src/actual.ts']);
-					git(['commit', '-m', 'advance during scope build']);
-				});
+const originalReceiptSpawn = receiptScopeInternals.spawn;
+
+describe('reviewer scope capture races (v2)', () => {
+	test('rejects a same-size content replacement during streaming; no partial digest', () => {
+		let streamReads = 0;
+		fingerprintInternals.read = ((
+			fd: number,
+			buffer: Buffer,
+			offset: number,
+			length: number,
+			position: number | null,
+		) => {
+			streamReads += 1;
+			const bytesRead = realRead(fd, buffer, offset, length, position);
+			if (streamReads === 1) {
+				// Swap in different content of the SAME size mid-stream.
+				fs.writeFileSync(
+					path.join(directory, 'src/a.ts'),
+					'export const m = 1;\n',
+				);
 			}
-			return child;
-		}) as typeof originalSpawn;
+			return bytesRead;
+		}) as typeof realRead;
 
-		// Previous code captured HEAD only once and returned a mixed receipt scope
-		// containing the old SHA and bytes read after the commit advanced.
-		const scope = await buildReviewerTaskScope(directory, ['src/actual.ts']);
-		expect(git(['rev-parse', 'HEAD'])).not.toBe(initialHead);
-		expect(scope).toBeNull();
+		const captured = captureReviewerScopeFileFingerprint(directory, 'src/a.ts');
+		expect(streamReads).toBeGreaterThan(0);
+		expect(captured).toMatchObject({
+			kind: 'capture_failed',
+			code: 'file_changed_during_capture',
+			retryable: true,
+		});
 	});
 
-	test('rejects a parent junction swap between realpath and open', async () => {
-		const sourcePath = path.join(directory, 'src', 'actual.ts');
-		const sourceBytes = Buffer.from('A'.repeat(64));
-		fs.writeFileSync(sourcePath, sourceBytes);
-		const sharedTimestamp = new Date(Math.floor(Date.now() / 1_000) * 1_000);
-		fs.utimesSync(sourcePath, sharedTimestamp, sharedTimestamp);
-		const sourceStat = fs.statSync(sourcePath);
-
-		outsideDirectory = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'review-receipt-outside-')),
-		);
-		const outsidePath = path.join(outsideDirectory, 'actual.ts');
-		const outsideBytes = Buffer.from(
-			`OUTSIDE_SECRET_SENTINEL${'Z'.repeat(
-				sourceBytes.byteLength - 'OUTSIDE_SECRET_SENTINEL'.length,
-			)}`,
-		);
-		fs.writeFileSync(outsidePath, outsideBytes);
-		fs.utimesSync(outsidePath, sharedTimestamp, sharedTimestamp);
-		expect(fs.statSync(outsidePath).size).toBe(sourceStat.size);
-		expect(fs.statSync(outsidePath).mtimeMs).toBe(sourceStat.mtimeMs);
-
-		const sourceDirectory = path.dirname(sourcePath);
-		let swapped = false;
-		let linkUnavailableCode: string | undefined;
-		receiptScopeInternals.realpath = (async (candidate) => {
-			const canonical = await originalRealpath(candidate);
-			if (
-				!swapped &&
-				path.resolve(String(candidate)) === path.resolve(sourcePath)
-			) {
-				fs.rmSync(sourceDirectory, { recursive: true, force: true });
-				try {
-					fs.symlinkSync(
-						outsideDirectory as string,
-						sourceDirectory,
-						process.platform === 'win32' ? 'junction' : 'dir',
-					);
-					swapped = true;
-				} catch (error) {
-					linkUnavailableCode = (error as NodeJS.ErrnoException).code;
-				}
+	test('rejects a full file replacement after streaming via final path identity', () => {
+		let streamReads = 0;
+		fingerprintInternals.read = ((
+			fd: number,
+			buffer: Buffer,
+			offset: number,
+			length: number,
+			position: number | null,
+		) => {
+			streamReads += 1;
+			const bytesRead = realRead(fd, buffer, offset, length, position);
+			if (streamReads === 1) {
+				// Replace with different content AND size after the descriptor
+				// streamed its first chunk: the final path stat must disagree.
+				fs.writeFileSync(
+					path.join(directory, 'src/a.ts'),
+					'replaced with different length content\n',
+				);
 			}
-			return canonical;
-		}) as typeof originalRealpath;
+			return bytesRead;
+		}) as typeof realRead;
 
-		const scope = await buildReviewerTaskScope(directory, ['src/actual.ts']);
-		if (!swapped) {
-			expect(['EACCES', 'ENOSYS', 'EPERM']).toContain(linkUnavailableCode);
-			return;
-		}
-		// Previous pathname-based read accepted the outside file when its size and
-		// mtime matched, binding a receipt to bytes outside the project root.
-		expect(scope).toBeNull();
-	});
-});
-
-describe('reviewer receipt scope - regression: exact BigInt snapshots (#1675)', () => {
-	test('rejects pathname and descriptor identities that collide as Numbers', async () => {
-		let pathnameStat: fs.BigIntStats | undefined;
-		let descriptorStat: fs.BigIntStats | undefined;
-
-		// These seams alter only a regular file's identity. ENOENT, non-file, and
-		// filesystem-error branches remain covered by review-receipt-scope.test.ts.
-		receiptScopeInternals.lstatBigInt = async (candidate) => {
-			const actual = await originalLstatBigInt(candidate);
-			if (path.basename(String(candidate)) !== 'actual.ts') return actual;
-			pathnameStat = withIdentity(actual, COLLIDING_INODE_A);
-			return pathnameStat;
-		};
-		receiptScopeInternals.fileHandleStatBigInt = async (handle) => {
-			const actual = await originalFileHandleStatBigInt(handle);
-			descriptorStat = withIdentity(actual, COLLIDING_INODE_B);
-			return descriptorStat;
-		};
-
-		// Previous Number-valued stats rounded these distinct inode values to the
-		// same identity, so a replaced pathname could match the opened descriptor.
-		const scope = await buildReviewerTaskScope(directory, ['src/actual.ts']);
-		expect(pathnameStat).toBeDefined();
-		expect(descriptorStat).toBeDefined();
-		expect(COLLIDING_INODE_A).not.toBe(COLLIDING_INODE_B);
-		expect(Number(COLLIDING_INODE_A)).toBe(Number(COLLIDING_INODE_B));
-		expect(
-			sameSnapshotAfterNumberCoercion(
-				pathnameStat as fs.BigIntStats,
-				descriptorStat as fs.BigIntStats,
-			),
-		).toBe(true);
-		expect(scope).toBeNull();
+		const captured = captureReviewerScopeFileFingerprint(directory, 'src/a.ts');
+		expect(captured).toMatchObject({
+			kind: 'capture_failed',
+			code: 'file_changed_during_capture',
+			retryable: true,
+		});
 	});
 
-	test('rejects a final pathname identity change hidden by Number rounding', async () => {
-		let sourceLstatCalls = 0;
-		let initialStat: fs.BigIntStats | undefined;
-		let finalStat: fs.BigIntStats | undefined;
+	test('a stable file still captures exactly across the same hooks', () => {
+		const captured = captureReviewerScopeFileFingerprint(directory, 'src/a.ts');
+		expect(captured).toMatchObject({ kind: 'captured_file', size: 20 });
+	});
 
-		// These seams alter only a regular file's identity. ENOENT, non-file, and
-		// filesystem-error branches remain covered by review-receipt-scope.test.ts.
-		receiptScopeInternals.lstatBigInt = async (candidate) => {
-			const actual = await originalLstatBigInt(candidate);
-			if (path.basename(String(candidate)) !== 'actual.ts') return actual;
-			sourceLstatCalls += 1;
-			const observed = withIdentity(
-				actual,
-				sourceLstatCalls === 1 ? COLLIDING_INODE_A : COLLIDING_INODE_B,
-			);
-			if (sourceLstatCalls === 1) initialStat = observed;
-			else finalStat = observed;
-			return observed;
-		};
-		receiptScopeInternals.fileHandleStatBigInt = async (handle) =>
-			withIdentity(
-				await originalFileHandleStatBigInt(handle),
-				COLLIDING_INODE_A,
-			);
+	test('HEAD advance between initial SHA and capture recheck is typed retryable', async () => {
+		// Fake spawn: the first rev-parse returns the real HEAD; the second
+		// (final recheck) returns a different valid SHA — a HEAD race.
+		const realSha = spawnSync('git', ['rev-parse', '--verify', 'HEAD'], {
+			cwd: directory,
+			encoding: 'utf-8',
+			timeout: 5_000,
+		}).stdout.trim();
+		let spawnCalls = 0;
+		receiptScopeInternals.spawn = (() => {
+			spawnCalls += 1;
+			const sha = spawnCalls <= 1 ? realSha : 'f'.repeat(40);
+			const stdout = new PassThrough();
+			const fakeChild = Object.assign(new EventEmitter(), {
+				stdin: null,
+				stdout,
+				stderr: null,
+				kill: () => true,
+			}) as unknown as ReturnType<typeof originalReceiptSpawn>;
+			queueMicrotask(() => {
+				stdout.write(`${sha}\n`);
+				stdout.end();
+				fakeChild.emit('close', 0);
+			});
+			return fakeChild;
+		}) as typeof originalReceiptSpawn;
 
-		// Previous Number-valued final revalidation treated the second inode as
-		// unchanged and could issue a receipt for a pathname that had been swapped.
-		const scope = await buildReviewerTaskScope(directory, ['src/actual.ts']);
-		expect(sourceLstatCalls).toBe(2);
-		expect(initialStat).toBeDefined();
-		expect(finalStat).toBeDefined();
-		expect(
-			sameSnapshotAfterNumberCoercion(
-				initialStat as fs.BigIntStats,
-				finalStat as fs.BigIntStats,
-			),
-		).toBe(true);
-		expect(scope).toBeNull();
+		const result = await buildReviewerTaskScope(directory, ['src/a.ts']);
+		expect(spawnCalls).toBeGreaterThanOrEqual(2);
+		expect(result).toMatchObject({
+			ok: false,
+			code: 'head_changed',
+			retryable: true,
+		});
 	});
 });

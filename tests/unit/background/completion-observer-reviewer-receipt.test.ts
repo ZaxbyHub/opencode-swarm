@@ -26,7 +26,10 @@ import {
 } from '../../../src/gate-evidence';
 import { readAllReceipts } from '../../../src/hooks/review-receipt';
 import { _internals as receiptCollectorInternals } from '../../../src/hooks/review-receipt-collector';
-import { captureReviewerScopeFileFingerprint } from '../../../src/hooks/reviewer-scope-file-fingerprint';
+import {
+	captureReviewerScopeFileFingerprint,
+	reviewerScopeCaptureToFingerprint,
+} from '../../../src/hooks/reviewer-scope-file-fingerprint';
 import { beginApprovedReviewerScopeLifecycle } from '../../../src/hooks/reviewer-scope-lifecycle';
 import {
 	claimReviewerScopeGeneration,
@@ -271,13 +274,13 @@ describe('background completion observer reviewer receipts', () => {
 		).toBe(true);
 		fs.writeFileSync(path.join(dir, 'src/a.ts'), 'export const value = 2;\n');
 		const fingerprint = captureReviewerScopeFileFingerprint(dir, 'src/a.ts');
-		expect(fingerprint).not.toBeNull();
+		expect(fingerprint?.kind).toBe('captured_file');
 		expect(
 			recordReviewerScopeGenerationFileFingerprint({
 				parentSessionID: 'parent_session',
 				taskId: '1.1',
 				coderCallID: 'coder-bg-call',
-				fingerprint: fingerprint!,
+				fingerprint: reviewerScopeCaptureToFingerprint(fingerprint)!,
 			}),
 		).toBe(true);
 		expect(changedFilesSinceSnapshot(dir, baseline)).toEqual(['src/a.ts']);
@@ -374,6 +377,8 @@ describe('background completion observer reviewer receipts', () => {
 				parentSessionID: 'parent_session',
 				taskId: '1.1',
 				coderCallID: 'coder-terminal-error',
+				captureDirectory: dir,
+				workspaceIdentity: 'ws:/observer-receipt',
 			}),
 		).not.toBeNull();
 		await recordPendingDelegation(dir, {
@@ -407,6 +412,8 @@ describe('background completion observer reviewer receipts', () => {
 					parentSessionID: 'parent_session',
 					taskId: '1.1',
 					coderCallID,
+					captureDirectory: dir,
+					workspaceIdentity: 'ws:/observer-receipt',
 				}),
 			).not.toBeNull();
 			expect(

@@ -28,12 +28,16 @@ import {
 } from '../../gate-evidence.js';
 import { loadPlan } from '../../plan/manager';
 import { getExecutor } from '../../sandbox/executor';
+import { canonicalWorkspaceIdentity } from '../../scope/scope-binding';
 import { createScopeLeaseRenewalTracker } from '../../scope/scope-lease-renewal';
 import {
 	advanceTaskState,
+	ensureAgentSession,
 	getActiveWindow,
 	getReviewerScopeGenerationForCoderCall,
+	recordReviewerScopeGenerationCaptureFailure,
 	recordReviewerScopeGenerationFileFingerprint,
+	resolveSessionWorkspaceDirectory,
 	swarmState,
 	updateTaskWorkflowCache,
 } from '../../state';
@@ -53,7 +57,9 @@ import { extractCurrentPhaseFromPlan } from '../extractors';
 import { normalizeToolName } from '../normalize-tool-name';
 import {
 	captureReviewerScopeFileFingerprint,
-	MAX_REVIEWER_SCOPE_FINGERPRINT_AGGREGATE_BYTES,
+	REVIEWER_SCOPE_CAPTURE_ATTEMPTS,
+	REVIEWER_SCOPE_CAPTURE_BATCH_DEADLINE_MS,
+	reviewerScopeCaptureToFingerprint,
 } from '../reviewer-scope-file-fingerprint';
 import { classifyTaskResult } from '../task-result-classifier';
 import { dcCheckJunctionCreation } from './destructive-command';
@@ -1121,41 +1127,102 @@ export function createGuardrailsHooks(
 				pendingReviewerScopeWrite &&
 				classifyTaskResult(safeOutput) === 'success'
 			) {
-				const completedFingerprints: Array<{
-					pendingWrite: (typeof pendingReviewerScopeWrite)[number];
-					fingerprint: NonNullable<
-						ReturnType<typeof captureReviewerScopeFileFingerprint>
-					>;
-				}> = [];
-				let aggregateBytes = 0;
-				let captureFailed = false;
+				// Issue #2100: capture from the child coder session's workspace
+				// root (the lane when worktree-isolated, the primary checkout
+				// otherwise) — never the ambient plugin root. Each file gets a
+				// typed capture result; one failure never abandons the batch,
+				// retryable classes get a bounded inline retry, and permanent
+				// failures are retained on the generation as actionable
+				// recovery metadata instead of silently dropping evidence.
+				const sessionCaptureRoot = resolveSessionWorkspaceDirectory(
+					input.sessionID,
+					effectiveDirectory,
+				);
+				const sessionRootIdentity =
+					canonicalWorkspaceIdentity(sessionCaptureRoot);
+				const batchDeadline =
+					Date.now() + REVIEWER_SCOPE_CAPTURE_BATCH_DEADLINE_MS;
 				for (const pendingWrite of pendingReviewerScopeWrite) {
-					const fingerprint = captureReviewerScopeFileFingerprint(
-						effectiveDirectory,
-						pendingWrite.file,
-						MAX_REVIEWER_SCOPE_FINGERPRINT_AGGREGATE_BYTES - aggregateBytes,
-					);
-					if (!fingerprint) {
-						captureFailed = true;
-						break;
-					}
-					if (fingerprint.kind === 'file') {
-						aggregateBytes += fingerprint.size;
-					}
-					completedFingerprints.push({ pendingWrite, fingerprint });
-				}
-				if (
-					!captureFailed &&
-					completedFingerprints.length === pendingReviewerScopeWrite.length &&
-					aggregateBytes <= MAX_REVIEWER_SCOPE_FINGERPRINT_AGGREGATE_BYTES
-				) {
-					for (const { pendingWrite, fingerprint } of completedFingerprints) {
-						recordReviewerScopeGenerationFileFingerprint({
+					const generation = getReviewerScopeGenerationForCoderCall({
+						parentSessionID: pendingWrite.parentSessionID,
+						taskId: pendingWrite.taskId,
+						coderCallID: pendingWrite.coderCallID,
+					});
+					if (
+						generation &&
+						sessionRootIdentity &&
+						generation.workspaceIdentity !== sessionRootIdentity
+					) {
+						recordReviewerScopeGenerationCaptureFailure({
 							parentSessionID: pendingWrite.parentSessionID,
 							taskId: pendingWrite.taskId,
 							coderCallID: pendingWrite.coderCallID,
-							fingerprint,
+							file: pendingWrite.file,
+							code: 'workspace_mismatch',
+							retryable: false,
 						});
+						const mismatchSession = ensureAgentSession(
+							pendingWrite.parentSessionID,
+						);
+						pushAdvisory(
+							mismatchSession,
+							`REVIEWER_CAPTURE_FAILED: task ${pendingWrite.taskId}: file ${pendingWrite.file} was written from workspace ${sessionRootIdentity} but the coder generation is bound to ${generation.workspaceIdentity} (code workspace_mismatch, retryable=false). ACTION[architect]: verify the coder dispatch lane/scope binding, then redispatch`,
+						);
+						continue;
+					}
+					const captureRoot =
+						generation?.captureDirectory?.trim() || sessionCaptureRoot;
+					let lastFailure: {
+						code: string;
+						retryable: boolean;
+					} | null = null;
+					let attempts = 0;
+					while (attempts < REVIEWER_SCOPE_CAPTURE_ATTEMPTS) {
+						attempts += 1;
+						const captured = captureReviewerScopeFileFingerprint(
+							captureRoot,
+							pendingWrite.file,
+							{ deadlineAt: batchDeadline },
+						);
+						if (captured.kind !== 'capture_failed') {
+							const fingerprint = reviewerScopeCaptureToFingerprint(captured);
+							if (fingerprint) {
+								recordReviewerScopeGenerationFileFingerprint({
+									parentSessionID: pendingWrite.parentSessionID,
+									taskId: pendingWrite.taskId,
+									coderCallID: pendingWrite.coderCallID,
+									fingerprint,
+								});
+							}
+							lastFailure = null;
+							break;
+						}
+						lastFailure = {
+							code: captured.code,
+							retryable: captured.retryable,
+						};
+						if (!captured.retryable) break;
+					}
+					if (lastFailure) {
+						recordReviewerScopeGenerationCaptureFailure({
+							parentSessionID: pendingWrite.parentSessionID,
+							taskId: pendingWrite.taskId,
+							coderCallID: pendingWrite.coderCallID,
+							file: pendingWrite.file,
+							code: lastFailure.code,
+							retryable: lastFailure.retryable,
+						});
+						const captureSession = ensureAgentSession(
+							pendingWrite.parentSessionID,
+						);
+						pushAdvisory(
+							captureSession,
+							`REVIEWER_CAPTURE_FAILED: task ${pendingWrite.taskId}: file ${pendingWrite.file} could not be fingerprinted exactly (code ${lastFailure.code}, retryable=${lastFailure.retryable}, attempts=${attempts}/${REVIEWER_SCOPE_CAPTURE_ATTEMPTS}). ACTION[architect]: ${
+								lastFailure.retryable
+									? 'retry the coder write or re-dispatch the coder so capture re-runs'
+									: `resolve the ${lastFailure.code} condition for the file, then retry or route explicit manual review`
+							}`,
+						);
 					}
 				}
 			}

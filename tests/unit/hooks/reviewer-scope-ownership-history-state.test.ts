@@ -25,6 +25,8 @@ function consumeOwner(index: number): void {
 			coderCallID,
 			background: true,
 			declaredFiles: [file],
+			captureDirectory: os.tmpdir(),
+			workspaceIdentity: 'ws:/workspace',
 			createdAt: 1_000 + index * 10,
 		}),
 	).not.toBeNull();

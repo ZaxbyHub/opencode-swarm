@@ -288,6 +288,8 @@ describe('review receipt validation commit boundary', () => {
 						taskId: '1.1',
 						coderCallID: 'coder-replacement',
 						declaredFiles: ['src/a.ts'],
+						captureDirectory: directory,
+						workspaceIdentity: 'ws:/commit-race',
 					});
 					return (await options.verifyCurrent?.()) ?? true;
 				},
