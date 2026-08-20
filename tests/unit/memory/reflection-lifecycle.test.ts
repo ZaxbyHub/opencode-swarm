@@ -108,7 +108,11 @@ describe('reflection stale lifecycle', () => {
 
 		const result = await recordOutcomeWithReflection(
 			root,
-			{ enabled: true, provider: 'local-jsonl' },
+			{
+				enabled: true,
+				provider: 'local-jsonl',
+				reflection: { enabled: true, halfLifeDays: 30 },
+			},
 			gateway,
 			{
 				memoryId: oldTarget.id,
