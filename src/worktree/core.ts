@@ -21,6 +21,7 @@ import {
 import { advisoryWarn } from '../services/warning-buffer';
 import { log } from '../utils';
 import { bunSpawn } from '../utils/bun-compat';
+import { resolveGitExecutable } from '../utils/git-executable.js';
 // Note: writeScopeToDisk is accessed via _internals.writeScopeToDisk at call time
 // to allow DI for tests without mock.module leakage. The top-level import is intentionally
 // omitted; the seam default performs a dynamic import on first use.
@@ -92,8 +93,16 @@ export const _internals: {
 	) => Promise<void>;
 	/** Test seam for removeWorktree — allows tests to intercept worktree removal calls. */
 	removeWorktree: typeof removeWorktree;
+	/**
+	 * Test seam for the git binary resolution (issue #2236 hardening, lane
+	 * C1b) — see `src/utils/git-executable.ts`. Allows tests to stub a
+	 * deterministic value instead of exercising the real filesystem-probing
+	 * resolver against a mocked `bunSpawn`.
+	 */
+	resolveGitExecutable: typeof resolveGitExecutable;
 } = {
 	bunSpawn,
+	resolveGitExecutable,
 	platform: process.platform,
 	sleep: (ms: number) =>
 		new Promise<void>((resolve) => setTimeout(resolve, ms)),
@@ -260,14 +269,17 @@ async function runGit(
 	cwd: string,
 	timeoutMs = WORKTREE_TIMEOUT_MS,
 ): Promise<GitResult> {
-	const proc = _internals.bunSpawn(['git', ...args], {
-		cwd,
-		timeout: timeoutMs,
-		stdin: 'ignore' as const,
-		stdout: 'pipe' as const,
-		stderr: 'pipe' as const,
-		env: { ...process.env, LC_ALL: 'C' },
-	});
+	const proc = _internals.bunSpawn(
+		[_internals.resolveGitExecutable(), ...args],
+		{
+			cwd,
+			timeout: timeoutMs,
+			stdin: 'ignore' as const,
+			stdout: 'pipe' as const,
+			stderr: 'pipe' as const,
+			env: { ...process.env, LC_ALL: 'C' },
+		},
+	);
 	try {
 		const exitCode = await proc.exited;
 		const stdout = await proc.stdout.text();
@@ -338,14 +350,17 @@ export async function checkPathBudget(
 		return { ok: true };
 	}
 
-	const proc = _internals.bunSpawn(['git', 'ls-files'], {
-		cwd: directory,
-		timeout: WORKTREE_TIMEOUT_MS,
-		stdin: 'ignore' as const,
-		stdout: 'pipe' as const,
-		stderr: 'ignore' as const,
-		env: { ...process.env, LC_ALL: 'C' },
-	});
+	const proc = _internals.bunSpawn(
+		[_internals.resolveGitExecutable(), 'ls-files'],
+		{
+			cwd: directory,
+			timeout: WORKTREE_TIMEOUT_MS,
+			stdin: 'ignore' as const,
+			stdout: 'pipe' as const,
+			stderr: 'ignore' as const,
+			env: { ...process.env, LC_ALL: 'C' },
+		},
+	);
 
 	try {
 		const exitCode = await proc.exited;

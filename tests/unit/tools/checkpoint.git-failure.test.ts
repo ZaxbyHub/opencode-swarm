@@ -52,7 +52,19 @@ mock.module('node:child_process', () => ({
 }));
 
 // Import checkpoint AFTER mock is set up
-const { checkpoint } = await import('../../../src/tools/checkpoint');
+const { checkpoint, _internals } = await import(
+	'../../../src/tools/checkpoint'
+);
+
+// Issue #2236 hardening: `gitExec` now resolves the git executable via
+// `_internals.resolveGitExecutable()` before spawning. Left un-stubbed, that
+// resolver's own candidate-probing loop would consume calls from the SAME
+// mocked `spawnSync` this file uses to drive `gitExec`'s retry/classification
+// logic, throwing off the `callCount` assertions below. Stubbed to a fixed
+// value so only `gitExec`'s own spawn calls are counted — mirrors
+// `src/git/branch.ts`'s `_internals.resolveGitExecutable` test convention
+// (see tests/unit/git/branch-clean.test.ts).
+const originalResolveGitExecutable = _internals.resolveGitExecutable;
 
 function setupMock(...values: Array<child_process.SpawnSyncReturns<string>>) {
 	callCount = 0;
@@ -60,9 +72,14 @@ function setupMock(...values: Array<child_process.SpawnSyncReturns<string>>) {
 	mockSpawnSync.mockClear();
 }
 
+beforeEach(() => {
+	_internals.resolveGitExecutable = () => 'git';
+});
+
 // Undo the module mock after all tests in this file
 afterEach(() => {
 	mock.restore();
+	_internals.resolveGitExecutable = originalResolveGitExecutable;
 });
 
 // =============================================================================

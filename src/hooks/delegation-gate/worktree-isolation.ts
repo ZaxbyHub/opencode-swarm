@@ -23,6 +23,7 @@ import {
 } from '../../state';
 import { pushAdvisory } from '../../utils/advisory-queue';
 import { bunSpawn } from '../../utils/bun-compat';
+import { resolveGitExecutable } from '../../utils/git-executable.js';
 import * as logger from '../../utils/logger.js';
 import type { WorktreeHandle } from '../../worktree';
 import {
@@ -39,6 +40,10 @@ import {
 import type {
 	DirtyMergeOptions,
 	MergeOperationProvenance,
+} from '../../worktree/merge';
+import {
+	SOURCE_WORKTREE_GONE_STAGE,
+	SOURCE_WORKTREE_UNCERTAIN_STAGE,
 } from '../../worktree/merge';
 import {
 	clearWorktreeMergeStatus,
@@ -492,7 +497,14 @@ export async function preProvisionCollisionCheck(
 	uncertainty?: string;
 }> {
 	const proc = _internals.bunSpawn(
-		['git', '-C', directory, 'worktree', 'list', '--porcelain'],
+		[
+			_internals.resolveGitExecutable(),
+			'-C',
+			directory,
+			'worktree',
+			'list',
+			'--porcelain',
+		],
 		{
 			stdin: 'ignore',
 			stdout: 'pipe',
@@ -1094,7 +1106,13 @@ export async function preserveBackgroundWorktreeOwnershipForCallId(
 	if (!dispatch) return { outcome: 'not-found' };
 
 	const refProc = _internals.bunSpawn(
-		['git', '-C', dispatch.handle.worktreePath, 'rev-parse', 'HEAD'],
+		[
+			_internals.resolveGitExecutable(),
+			'-C',
+			dispatch.handle.worktreePath,
+			'rev-parse',
+			'HEAD',
+		],
 		{
 			stdin: 'ignore',
 			stdout: 'pipe',
@@ -1137,7 +1155,14 @@ export async function preserveBackgroundWorktreeOwnershipForCallId(
 		.slice(0, 12);
 	const tag = `swarm-preserved-owner/${session}/${lane}/${callDigest}`;
 	const tagProc = _internals.bunSpawn(
-		['git', '-C', dispatch.handle.worktreePath, 'tag', tag, ref],
+		[
+			_internals.resolveGitExecutable(),
+			'-C',
+			dispatch.handle.worktreePath,
+			'tag',
+			tag,
+			ref,
+		],
 		{
 			stdin: 'ignore',
 			stdout: 'pipe',
@@ -1206,7 +1231,13 @@ export async function preserveDirtyWorktreeForCallId(
 
 	// Detect dirty state: git status --porcelain
 	const statusProc = _internals.bunSpawn(
-		['git', '-C', worktreePath, 'status', '--porcelain'],
+		[
+			_internals.resolveGitExecutable(),
+			'-C',
+			worktreePath,
+			'status',
+			'--porcelain',
+		],
 		{
 			stdin: 'ignore',
 			stdout: 'pipe',
@@ -1245,7 +1276,7 @@ export async function preserveDirtyWorktreeForCallId(
 
 	// Dirty — stage all changes
 	const addProc = _internals.bunSpawn(
-		['git', '-C', worktreePath, 'add', '-A'],
+		[_internals.resolveGitExecutable(), '-C', worktreePath, 'add', '-A'],
 		{
 			stdin: 'ignore',
 			stdout: 'pipe',
@@ -1280,7 +1311,14 @@ export async function preserveDirtyWorktreeForCallId(
 	const commitMessage = `swarm-preserved: ${reason} for callID ${sanitizedCallID} at ${isoDate}`;
 
 	const commitProc = _internals.bunSpawn(
-		['git', '-C', worktreePath, 'commit', '-m', commitMessage],
+		[
+			_internals.resolveGitExecutable(),
+			'-C',
+			worktreePath,
+			'commit',
+			'-m',
+			commitMessage,
+		],
 		{
 			stdin: 'ignore',
 			stdout: 'pipe',
@@ -1312,7 +1350,13 @@ export async function preserveDirtyWorktreeForCallId(
 
 	// Get commit hash: git rev-parse HEAD
 	const hashProc = _internals.bunSpawn(
-		['git', '-C', worktreePath, 'rev-parse', 'HEAD'],
+		[
+			_internals.resolveGitExecutable(),
+			'-C',
+			worktreePath,
+			'rev-parse',
+			'HEAD',
+		],
 		{
 			stdin: 'ignore',
 			stdout: 'pipe',
@@ -1355,7 +1399,7 @@ export async function preserveDirtyWorktreeForCallId(
 	const tagName = `swarm-preserved-${sanitizedCallID}-${shortHash}`;
 
 	const tagProc = _internals.bunSpawn(
-		['git', '-C', worktreePath, 'tag', tagName],
+		[_internals.resolveGitExecutable(), '-C', worktreePath, 'tag', tagName],
 		{
 			stdin: 'ignore',
 			stdout: 'pipe',
@@ -1423,7 +1467,13 @@ export async function preserveDirtyWorktreeAtPath(
 }> {
 	// Detect dirty state: git status --porcelain
 	const statusProc = _internals.bunSpawn(
-		['git', '-C', worktreePath, 'status', '--porcelain'],
+		[
+			_internals.resolveGitExecutable(),
+			'-C',
+			worktreePath,
+			'status',
+			'--porcelain',
+		],
 		{
 			stdin: 'ignore',
 			stdout: 'pipe',
@@ -1462,7 +1512,7 @@ export async function preserveDirtyWorktreeAtPath(
 
 	// Dirty — stage all changes
 	const addProc = _internals.bunSpawn(
-		['git', '-C', worktreePath, 'add', '-A'],
+		[_internals.resolveGitExecutable(), '-C', worktreePath, 'add', '-A'],
 		{
 			stdin: 'ignore',
 			stdout: 'pipe',
@@ -1502,7 +1552,14 @@ export async function preserveDirtyWorktreeAtPath(
 	const commitMessage = `swarm-preserved: ${reason} for worktree ${sanitizedPath} at ${isoDate}`;
 
 	const commitProc = _internals.bunSpawn(
-		['git', '-C', worktreePath, 'commit', '-m', commitMessage],
+		[
+			_internals.resolveGitExecutable(),
+			'-C',
+			worktreePath,
+			'commit',
+			'-m',
+			commitMessage,
+		],
 		{
 			stdin: 'ignore',
 			stdout: 'pipe',
@@ -1534,7 +1591,13 @@ export async function preserveDirtyWorktreeAtPath(
 
 	// Get commit hash: git rev-parse HEAD
 	const hashProc = _internals.bunSpawn(
-		['git', '-C', worktreePath, 'rev-parse', 'HEAD'],
+		[
+			_internals.resolveGitExecutable(),
+			'-C',
+			worktreePath,
+			'rev-parse',
+			'HEAD',
+		],
 		{
 			stdin: 'ignore',
 			stdout: 'pipe',
@@ -1577,7 +1640,7 @@ export async function preserveDirtyWorktreeAtPath(
 	const tagName = `swarm-preserved-worktree-${sanitizedBranch}-${shortHash}`;
 
 	const tagProc = _internals.bunSpawn(
-		['git', '-C', worktreePath, 'tag', tagName],
+		[_internals.resolveGitExecutable(), '-C', worktreePath, 'tag', tagName],
 		{
 			stdin: 'ignore',
 			stdout: 'pipe',
@@ -1943,9 +2006,19 @@ export async function finishStandardWorktreeDispatch(
 				completedAt: Date.now(),
 			});
 			const session = ensureAgentSession(dispatch.parentSessionID);
+			// #2236: for the two "source worktree is gone" stages there is nothing
+			// preserved at that path — the directory is exactly what disappeared.
+			// Saying "preserved at <gone path>" would send the reader looking for
+			// a worktree that does not exist, which is the same class of
+			// misleading message this change removes.
+			const location =
+				mergeResult.stage === SOURCE_WORKTREE_GONE_STAGE ||
+				mergeResult.stage === SOURCE_WORKTREE_UNCERTAIN_STAGE
+					? `lane worktree ${dispatch.handle.worktreePath} no longer exists`
+					: `preserved at ${dispatch.handle.worktreePath}`;
 			pushAdvisory(
 				session,
-				`STANDARD_WORKTREE_MERGE_FAILED: task ${dispatch.taskId} preserved at ${dispatch.handle.worktreePath}; stage: ${mergeResult.stage}; ${mergeResult.message}.`,
+				`STANDARD_WORKTREE_MERGE_FAILED: task ${dispatch.taskId} ${location}; stage: ${mergeResult.stage}; ${mergeResult.message}.`,
 			);
 
 			// F-C004: retain failed merge lanes for recovery. In particular, a
@@ -2078,4 +2151,10 @@ export const _internals = {
 	isLaneOwnedByCurrentSession,
 	/** FR-001b: bunSpawn — exposed for test injection so collision check can be mocked. */
 	bunSpawn,
+	/**
+	 * Issue #2236 hardening (F1/F4/F5) — resolves the absolute git executable
+	 * path instead of spawning the bare `'git'` name. Exposed for test
+	 * injection following the `src/worktree/core.ts` convention.
+	 */
+	resolveGitExecutable,
 };

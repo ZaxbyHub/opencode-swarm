@@ -9,11 +9,21 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as branch from '../../../src/git/branch';
+import { _internals as prInternals } from '../../../src/git/pr';
 
 // Mock spawnSync using spyOn - we'll spy on the module's spawnSync function
 let mockSpawnSync: ReturnType<typeof spyOn>;
 // Store original branch._internals.spawnSync for restoration
 let originalBranchSpawnSync: typeof branch._internals.spawnSync;
+// Issue #2236 hardening (lane C1b): ghExec/ghExecAsync now resolve the `gh`
+// binary via `resolveGhBinary()` (src/tools/gh-evidence.ts) instead of
+// spawning a bare `'gh'` literal. That resolver does a real filesystem PATH
+// scan (`resolveExecutableFromPath`), which would make the exact spawned
+// command depend on whether `gh` happens to be installed on the host
+// running these tests. Stub it through pr.ts's `_internals` seam so every
+// assertion below (`toHaveBeenCalledWith('gh', ...)`, etc.) stays
+// deterministic — mirroring the pre-conversion bare-`'gh'` behavior.
+let originalResolveGhBinary: typeof prInternals.resolveGhBinary;
 
 describe('PR Creation - Comprehensive Tests', () => {
 	let tmpDir: string;
@@ -48,6 +58,9 @@ describe('PR Creation - Comprehensive Tests', () => {
 				options as Parameters<typeof child_process.spawnSync>[2],
 			);
 		}) as typeof branch._internals.spawnSync;
+
+		originalResolveGhBinary = prInternals.resolveGhBinary;
+		prInternals.resolveGhBinary = () => 'gh';
 	});
 
 	afterEach(async () => {
@@ -58,6 +71,7 @@ describe('PR Creation - Comprehensive Tests', () => {
 		if (originalBranchSpawnSync) {
 			branch._internals.spawnSync = originalBranchSpawnSync;
 		}
+		prInternals.resolveGhBinary = originalResolveGhBinary;
 		try {
 			fs.rmSync(tmpDir, { recursive: true, force: true });
 		} catch {

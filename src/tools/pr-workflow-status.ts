@@ -16,6 +16,7 @@ import {
 } from '../hooks/pr-workflow-gate';
 import { validateSwarmPath } from '../hooks/utils';
 import { bunSpawn } from '../utils/bun-compat';
+import { resolveGitExecutableAsync } from '../utils/git-executable.js';
 import { createSwarmTool } from './create-tool';
 
 const GIT_TIMEOUT_MS = 5_000;
@@ -114,7 +115,16 @@ async function runGitCapture(
 	directory: string,
 	args: string[],
 ): Promise<string | null> {
-	const proc = bunSpawn(['git', ...args], {
+	// Resolution failure (every candidate rejected) maps onto this function's
+	// existing "any failure -> null" contract, same as a spawn failure would —
+	// no new throw introduced at this call site.
+	let gitExecutable: string;
+	try {
+		gitExecutable = await resolveGitExecutableAsync();
+	} catch {
+		return null;
+	}
+	const proc = bunSpawn([gitExecutable, ...args], {
 		cwd: directory,
 		stdin: 'ignore',
 		stdout: 'pipe',

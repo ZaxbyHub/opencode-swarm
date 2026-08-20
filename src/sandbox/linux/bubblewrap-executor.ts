@@ -8,6 +8,7 @@
  */
 
 import { type SpawnSyncOptions, spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { warn } from '../../utils/logger';
 import { isValidEnvKey, SandboxError, type SandboxExecutor } from '../executor';
 
@@ -18,6 +19,31 @@ const BWRAP_VERSION_EXIT = 0;
  * Error codes from spawnSync that indicate bwrap is unavailable.
  */
 const BWRAP_UNAVAILABLE_CODES = new Set(['ENOENT', 'EACCES', 'ENOSPC']);
+
+/**
+ * Base-OS location of bwrap on the common Linux distros (Debian/Ubuntu,
+ * Fedora). Preferred over the bare name for the same class of reason as the
+ * macOS sandbox-exec resolver (issue #2236 F6): resolving to an absolute
+ * path forecloses PATH-shim ambiguity. bwrap's `--version` flag IS valid
+ * (unlike sandbox-exec's), so only the binary resolution changes here — the
+ * probe invocation and success criterion are unchanged.
+ */
+const BWRAP_ABSOLUTE = '/usr/bin/bwrap';
+
+/**
+ * Resolve the bwrap binary: absolute base-OS path when present, bare-name
+ * (PATH resolution) fallback otherwise. Never throws.
+ */
+function resolveBwrapBinary(): string {
+	try {
+		if (existsSync(BWRAP_ABSOLUTE)) {
+			return BWRAP_ABSOLUTE;
+		}
+	} catch {
+		// fall through to bare-name fallback
+	}
+	return 'bwrap';
+}
 
 /**
  * Size in bytes for the /tmp tmpfs (500 MiB).
@@ -33,7 +59,8 @@ const TMPFS_SIZE_BYTES = 524288000; // 500 * 1024 * 1024
  */
 function probeBwrap(): boolean {
 	try {
-		const result = spawnSync('bwrap', ['--version'], {
+		const binary = _internals.resolveBwrapBinary();
+		const result = spawnSync(binary, ['--version'], {
 			windowsHide: true,
 			encoding: 'utf-8',
 			timeout: 5000,
@@ -76,8 +103,12 @@ function probeBwrap(): boolean {
  * ENOENT / EACCES / ENOSPC error conditions without requiring a real bwrap binary.
  * Internal calls use probeBwrap() directly; tests replace _internals.probeBwrap.
  */
-export const _internals: { probeBwrap: typeof probeBwrap } = {
+export const _internals: {
+	probeBwrap: typeof probeBwrap;
+	resolveBwrapBinary: typeof resolveBwrapBinary;
+} = {
 	probeBwrap,
+	resolveBwrapBinary,
 } as const;
 
 /**
@@ -253,7 +284,8 @@ export class BubblewrapSandboxExecutor implements SandboxExecutor {
 			`'${shellEscape(command)}'`,
 		];
 
-		return `bwrap ${args.join(' ')}`;
+		const binary = _internals.resolveBwrapBinary();
+		return `${binary} ${args.join(' ')}`;
 	}
 
 	/**

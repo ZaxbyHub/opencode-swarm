@@ -44,6 +44,7 @@ import {
 // Saved real spawnSync so it can be restored after each test, keeping the
 // seam injection isolated from other test files.
 let originalSpawnSync: typeof engineInternals.spawnSync;
+let originalResolveGitExecutable: typeof engineInternals.resolveGitExecutable;
 
 describe('executeMutation - shell injection mitigation', () => {
 	const workingDir = '/fake/workdir';
@@ -60,6 +61,11 @@ describe('executeMutation - shell injection mitigation', () => {
 		originalSpawnSync = engineInternals.spawnSync;
 		engineInternals.spawnSync =
 			mockSpawnSync as unknown as typeof engineInternals.spawnSync;
+
+		// Issue #2236 hardening (lane C1b): stub the resolver seam so the
+		// `command === 'git'` routing below stays deterministic.
+		originalResolveGitExecutable = engineInternals.resolveGitExecutable;
+		engineInternals.resolveGitExecutable = () => 'git';
 
 		// Default: successful git apply and revert
 		mockSpawnSync.mockImplementation(
@@ -85,6 +91,7 @@ describe('executeMutation - shell injection mitigation', () => {
 		// Restore the real spawnSync binding so the seam injection does not
 		// leak into other tests/files.
 		engineInternals.spawnSync = originalSpawnSync;
+		engineInternals.resolveGitExecutable = originalResolveGitExecutable;
 		vi.restoreAllMocks();
 		mock.restore();
 	});

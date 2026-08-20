@@ -151,7 +151,16 @@ export function resolveGhBinaryCandidates(
 	return candidates;
 }
 
-function resolveGhBinary(): string | null {
+/**
+ * Resolve the `gh` binary to invoke. Exported (issue #2236 hardening, lane
+ * C1b) so other call sites that need a `gh` executable — e.g. `src/git/pr.ts`,
+ * `src/commands/pr-monitor-status.ts` — reuse this resolver instead of
+ * spawning a bare `'gh'` literal or inventing a second gh resolver. Returns
+ * `null` when no candidate is found; callers should fall back to the bare
+ * `'gh'` literal (mirrors `resolveGitExecutable()`'s "never regress a working
+ * host" fallback in `src/utils/git-executable.ts`).
+ */
+export function resolveGhBinary(): string | null {
 	return _internals.resolveExecutableFromPath(resolveGhBinaryCandidates());
 }
 

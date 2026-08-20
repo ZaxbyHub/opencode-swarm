@@ -43,6 +43,14 @@ mock.module('node:child_process', () => ({
 // Import branch module AFTER mock setup
 const branch = await import('../../../src/git/branch');
 
+// Issue #2236 hardening (lane C1b): stub the resolver seam so `gitExec`
+// spawns a deterministic `'git'` command instead of running
+// `resolveGitExecutable()`'s real filesystem-probing candidate search
+// against this file's mocked `node:child_process.spawnSync`, which would
+// otherwise consume `returnValues` entries meant for the actual git calls
+// under test.
+branch._internals.resolveGitExecutable = () => 'git';
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------

@@ -61,12 +61,18 @@ function makeGitApplyFailed(status: number): ReturnType<typeof spawnSync> {
 describe('executeMutation — ENOENT error handling', () => {
 	let mockWorkingDir: string;
 	let savedSpawnSync: typeof _internals.spawnSync;
+	const savedResolveGitExecutable = _internals.resolveGitExecutable;
 
 	beforeEach(() => {
 		vi.clearAllMocks();
 		savedSpawnSync = _internals.spawnSync;
 		_internals.spawnSync =
 			mockSpawnSync as unknown as typeof _internals.spawnSync;
+		// Issue #2236 hardening (lane C1b): executeMutation's git apply/revert
+		// sites resolve the git binary via resolveGitExecutable() instead of a
+		// bare 'git' literal. Stub it so the `cmd === 'git'` routing below
+		// (and the "git is not installed" message text) stay deterministic.
+		_internals.resolveGitExecutable = () => 'git';
 		mockWorkingDir = realpathSync(
 			mkdtempSync(join(tmpdir(), 'mutation-enoent-')),
 		);
@@ -75,6 +81,7 @@ describe('executeMutation — ENOENT error handling', () => {
 
 	afterEach(() => {
 		_internals.spawnSync = savedSpawnSync;
+		_internals.resolveGitExecutable = savedResolveGitExecutable;
 		rmSync(mockWorkingDir, { recursive: true, force: true });
 	});
 

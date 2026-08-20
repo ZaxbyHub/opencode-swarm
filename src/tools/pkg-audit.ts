@@ -11,6 +11,13 @@ import { createSwarmTool } from './create-tool';
 const MAX_OUTPUT_BYTES = 52_428_800; // 50MB max output
 const AUDIT_TIMEOUT_MS = 120_000; // 120 seconds
 
+/**
+ * Test-only seam for the `bunSpawn` call `runCargoAudit` makes. Lets tests
+ * inject a synthetic subprocess (e.g. one with `spawnError` set) without
+ * monkey-patching the `Bun.spawn` global — see #2236 Sweep A, FIX 2.
+ */
+export const _internals: { bunSpawn: typeof bunSpawn } = { bunSpawn };
+
 // ============ Types ============
 type Severity = 'critical' | 'high' | 'moderate' | 'low' | 'info';
 type Ecosystem =
@@ -567,7 +574,7 @@ async function runCargoAudit(directory: string): Promise<AuditResult> {
 	const command = ['cargo', 'audit', '--json'];
 
 	try {
-		const proc = bunSpawn(command, {
+		const proc = _internals.bunSpawn(command, {
 			stdout: 'pipe',
 			stderr: 'pipe',
 			cwd: directory,
@@ -604,6 +611,26 @@ async function runCargoAudit(directory: string): Promise<AuditResult> {
 		}
 
 		const exitCode = await proc.exited;
+
+		// A spawn failure (process never started, e.g. missing binary or a cwd
+		// that no longer exists) resolves `exited` to a non-zero code with empty
+		// stdout — indistinguishable, by exit code alone, from "cargo audit ran
+		// and reported nothing." Check `spawnError` explicitly so that case is
+		// never reported as a clean scan (#2236 Sweep A, FIX 2 — security-relevant:
+		// a false clean here masks an audit that never actually ran).
+		if (proc.spawnError) {
+			return {
+				ecosystem: 'cargo',
+				command,
+				findings: [],
+				criticalCount: 0,
+				highCount: 0,
+				totalCount: 0,
+				clean: true,
+				incomplete: true,
+				note: `cargo audit failed to start: ${proc.spawnError.message}`,
+			};
+		}
 
 		// If exit code is 0, no vulnerabilities
 		if (exitCode === 0) {

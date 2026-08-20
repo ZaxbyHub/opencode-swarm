@@ -229,6 +229,15 @@ jobs:
       - name: CI gate portability ratchet (issue #2078)
         if: needs.detect-release.outputs.is-release != 'true'
         run: bun run check:gate-portability
+      # Issue #2236 (F8b) recurrence guardrail: a call to the spawn family
+      # (spawnSync/spawn/execFile/execFileSync/exec/bunSpawn/runExternalTool)
+      # must not spawn a bare 'git'/'gh'/'sandbox-exec'/'bwrap' literal —
+      # every such executable must be resolved to an absolute path first
+      # (src/utils/git-executable.ts is the sole allowlisted resolver
+      # module). Hard-fail, zero exemptions outside the resolver.
+      - name: Bare-executable-spawn ratchet (issue #2236)
+        if: needs.detect-release.outputs.is-release != 'true'
+        run: bun run check:bare-spawn
       # Line-scoped (not file-scoped): fails only on NEW/changed lines that add
       # a raw tmpdir() call not wrapped in realpathSync. Pre-existing raw calls
       # elsewhere in a touched file are not flagged (issue #1737 FR-011 scope

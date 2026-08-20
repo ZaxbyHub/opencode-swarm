@@ -94,13 +94,26 @@ mock.module('node:path', () => mockPathModule);
 
 // Import AFTER mock setup - need to import branch first to get its functions
 const branch = await import('../../../src/git/branch');
+const prModule = await import('../../../src/git/pr');
 const {
 	sanitizeInput,
 	createPullRequest,
 	generateEvidenceMd,
 	isGhAvailable,
 	isAuthenticated,
-} = await import('../../../src/git/pr');
+} = prModule;
+
+// Issue #2236 hardening (lane C1b): both `branch.ts`'s `gitExec` and
+// `pr.ts`'s `ghExec`/`ghExecAsync` now resolve their binaries via
+// `resolveGitExecutable()` / `resolveGhBinary()` instead of spawning bare
+// `'git'`/`'gh'` literals. Those resolvers do real filesystem probing
+// (`git-executable.ts`) / PATH scanning (`resolveExecutableFromPath`),
+// which would make the exact spawned command depend on host state. Stub
+// both through their `_internals` seams so this file's array-arg /
+// injection-safety assertions (which read `spawnCalls[].command`) stay
+// deterministic — mirroring the pre-conversion bare-literal behavior.
+branch._internals.resolveGitExecutable = () => 'git';
+prModule._internals.resolveGhBinary = () => 'gh';
 
 function setupMock(
 	...values: Array<{ status: number; stdout: string; stderr: string }>

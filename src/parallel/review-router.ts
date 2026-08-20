@@ -3,6 +3,7 @@ import type {
 	ChangeCategory,
 	ClassifiedChange,
 } from '../diff/semantic-classifier.js';
+import { resolveGitExecutableAsync } from '../utils/git-executable.js';
 
 export type ReviewDepth = 'single' | 'double';
 
@@ -150,6 +151,11 @@ export async function computeSemanticClassifications(
 		const { computeASTDiff } = await import('../diff/ast-diff.js');
 		const { classifyChanges } = await import('../diff/semantic-classifier.js');
 		const { execFileSync } = await import('node:child_process');
+		// A resolution failure (every candidate rejected) falls through to the
+		// function's own outer catch below and returns null, matching the
+		// documented "AST analysis unavailable" contract — no new throw class
+		// is introduced at this call site.
+		const gitExecutable = await resolveGitExecutableAsync();
 
 		const astResults: ASTDiffResult[] = [];
 		const deadline = Date.now() + AST_TIMEOUT_MS;
@@ -164,7 +170,7 @@ export async function computeSemanticClassifications(
 				const content = fs.readFileSync(filePath, 'utf-8');
 				let oldContent = '';
 				try {
-					oldContent = execFileSync('git', ['show', `HEAD:${file}`], {
+					oldContent = execFileSync(gitExecutable, ['show', `HEAD:${file}`], {
 						cwd: directory,
 						encoding: 'utf-8',
 						timeout: 2000,

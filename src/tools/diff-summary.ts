@@ -14,6 +14,7 @@ import {
 	GitBinaryMissingError,
 	isGitBinaryMissing,
 } from '../utils/git-binary-missing-error.js';
+import { resolveGitExecutableAsync } from '../utils/git-executable.js';
 import { createSwarmTool } from './create-tool';
 import { resolveWorkingDirectory } from './resolve-working-directory';
 
@@ -26,6 +27,7 @@ async function execGit(
 	},
 ): Promise<string> {
 	try {
+		const gitExecutable = await resolveGitExecutableAsync();
 		const stdout = await new Promise<string>((resolve, reject) => {
 			const execOpts: Record<string, unknown> = {
 				encoding: 'utf-8',
@@ -35,7 +37,7 @@ async function execGit(
 				stdio: ['ignore', 'pipe', 'pipe'],
 			};
 			child_process.execFile(
-				'git',
+				gitExecutable,
 				args,
 				execOpts as child_process.ExecFileOptionsWithStringEncoding,
 				(

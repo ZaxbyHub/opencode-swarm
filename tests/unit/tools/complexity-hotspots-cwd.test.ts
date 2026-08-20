@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test';
 import * as fs from 'node:fs';
 import { complexity_hotspots } from '../../../src/tools/complexity-hotspots';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 // Mock for Bun.spawn
 let originalSpawn: typeof Bun.spawn;
@@ -92,6 +93,14 @@ describe('complexity_hotspots', () => {
 		let spawnCalls: Array<{ cmd: string[]; opts: any }> = [];
 		let originalSpawnFn: typeof Bun.spawn;
 
+		const tempDirs: string[] = [];
+
+		afterEach(() => {
+			for (const dir of tempDirs.splice(0)) {
+				fs.rmSync(dir, { recursive: true, force: true });
+			}
+		});
+
 		beforeEach(() => {
 			spawnCalls = [];
 			originalSpawnFn = Bun.spawn;
@@ -105,8 +114,15 @@ describe('complexity_hotspots', () => {
 			Bun.spawn = originalSpawnFn;
 		});
 
+		// #2236: these two cases assert argv plumbing, so their directory must
+		// actually EXIST. `bunSpawn` now validates `options.cwd` before creating
+		// the child, so a fictitious path short-circuits and no spawn is ever
+		// recorded. The old literals were also platform-dependent theatre: on
+		// this Windows host `/test/project` resolves to an unrelated real
+		// directory and passed by accident, while on CI it does not exist at all.
 		it('Bun.spawn is called with cwd: directory when valid directory provided', async () => {
-			const testDir = '/test/project';
+			const testDir = canonicalMkdtemp('hotspots-cwd-single-');
+			tempDirs.push(testDir);
 
 			const result = await complexity_hotspots.execute({}, {
 				directory: testDir,
@@ -126,8 +142,9 @@ describe('complexity_hotspots', () => {
 		});
 
 		it('different directories result in different cwd values', async () => {
-			const dir1 = '/first/directory';
-			const dir2 = '/second/directory';
+			const dir1 = canonicalMkdtemp('hotspots-cwd-first-');
+			const dir2 = canonicalMkdtemp('hotspots-cwd-second-');
+			tempDirs.push(dir1, dir2);
 
 			// First call
 			await complexity_hotspots.execute({}, { directory: dir1 } as any);

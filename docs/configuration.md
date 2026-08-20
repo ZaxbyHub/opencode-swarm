@@ -431,6 +431,24 @@ Disabled by default. When enabled, the `docs_design` agent writes
 target repo; the drift check writes `.swarm/doc-drift-phase-N.json`. See
 [Commands → `/swarm design-docs`](commands.md).
 
+### Git (`git`)
+
+Hardening for git-executable resolution (issue #2236). Optional override for
+the git binary the plugin invokes, ahead of the built-in platform/PATH
+candidate list (`src/utils/git-executable.ts`).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `binary` | string | _(unset)_ | Absolute path to the git executable to try first. Non-empty-string-validated at load; usability (absolute path, exists, passes `git --version`) is checked by the resolver itself — an unusable value is skipped with a warning, never fatal |
+
+The environment variable `OPENCODE_SWARM_GIT_BINARY` always takes precedence
+over `git.binary` when set — it is the escape hatch a blocked user can set
+without editing a config file. When neither is set, or the configured value
+is unusable, the resolver falls through its built-in candidate list
+(platform-specific absolute paths, then every `git` match on `PATH`, then the
+bare `git` name as a last resort) — see `describeGitResolution()` for a
+diagnostic of the most recent probe cycle.
+
 ### Memory
 
 Optional scoped memory substrate for recall and proposal-only memory writes.
@@ -705,6 +723,58 @@ An episode disarms — resetting every counter — on **either** of two conditio
     "gate_denial_stop_threshold": 3,
     "execution_stall_warn_calls": 50,
     "execution_stall_stop_calls": 100
+  }
+}
+```
+
+### macOS sandbox activation (`guardrails.sandbox_macos_enabled`)
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `sandbox_macos_enabled` | boolean | `false` | Enables `sandbox-exec` containment for bash/shell tool calls on macOS. |
+
+Issue #2236 (RC2) found that the macOS sandbox availability probe invoked
+`sandbox-exec --version` — a flag that does not exist in `sandbox-exec(8)`'s
+BSD-getopt argument grammar. The invalid flag made the probe fail on **every**
+macOS host, so `MacOSSandboxExecutor` has never actually activated in
+production; bash/shell commands ran unsandboxed with only tool-layer
+enforcement, silently. The probe is now corrected (gates on exit code 0 only,
+never on stdout/stderr content) and shares its SBPL profile shape with the
+production profile, so probe success reliably implies the production
+profile's primitives parse.
+
+That correction alone is not sufficient to turn the sandbox on by default.
+The production profile's last-match-wins primitive ordering
+(`src/sandbox/macos/sandbox-exec-executor.ts`, see the `buildSandboxProfile`
+doc comment) is reasoned from documented SBPL semantics but has not been
+empirically re-verified against a real macOS host's `sandbox-exec` from this
+project's Windows/Linux development environments. If that ordering is wrong,
+every declared scope write would be denied and bash would break for macOS
+users — strictly worse than today's fail-open (unsandboxed) behavior.
+
+`sandbox_macos_enabled` therefore defaults to `false`. When `false`,
+`getExecutor()` behaves exactly as it did before the probe fix: it resolves
+to `null`, and every consumer (`applySandboxExecution`, `/swarm diagnose`)
+reports the same "executor not available, running unsandboxed" state as
+before. Set it to `true` only after verifying the production SBPL profile on
+a real macOS host — for example, confirming that a command targeting an
+in-scope path succeeds and a command targeting an out-of-scope path is denied
+under a real `sandbox-exec -f <profile>` invocation.
+
+When enabled on macOS, `applySandboxExecution` also applies the DYLD
+injection-variable hardening declared by
+`MacOSSandboxExecutor.getEnvOverrides()` — unsetting `DYLD_INSERT_LIBRARIES`,
+`DYLD_LIBRARY_PATH`, `DYLD_FRAMEWORK_PATH`, and `DYLD_ROOT_PATH`, and pinning
+`PATH` to the base-OS bin directories — baked into the wrapped command via
+SBPL `(setenv)`/`(unsetenv)` primitives. This wiring is macOS-only: Windows
+and Linux `getEnvOverrides()` implementations remain unwired in this release
+(Windows strong mode's `PATH: null` would be a separate, riskier behavior
+change applied to real commands for the first time).
+
+```json
+{
+  "guardrails": {
+    "sandbox_macos_enabled": true
   }
 }
 ```

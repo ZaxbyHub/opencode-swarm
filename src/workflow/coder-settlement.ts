@@ -17,9 +17,14 @@ import { isMarkdownOnlyTaskChange } from '../gate-evidence-classification.js';
 import { validateSwarmPath } from '../hooks/utils.js';
 import { tryAcquireLock } from '../parallel/file-locks.js';
 import { isPathWithinDeclaredScope } from '../scope/path-identity.js';
+import { advisoryWarn } from '../services/warning-buffer.js';
+import { resolveGitExecutable } from '../utils/git-executable.js';
 import * as logger from '../utils/logger.js';
 import type { MergeOperationProvenance } from '../worktree/merge.js';
-import { reconcileLandedMerge } from '../worktree/merge.js';
+import {
+	reconcileLandedMerge,
+	SOURCE_WORKTREE_GONE_STAGE,
+} from '../worktree/merge.js';
 import {
 	readWorkflowWalFile,
 	writeWorkflowWalFile,
@@ -628,35 +633,46 @@ export async function recordCoderMergeProvenance(options: {
 	);
 }
 
+/**
+ * Does the lane branch still exist in the primary repository?
+ *
+ * Throws rather than guessing when git cannot answer: an INDETERMINATE result
+ * must never be read as "gone". The #2236 self-heal decides whether to mark a
+ * settlement terminal on this answer, and marking terminal while the branch
+ * survives strands the coder's commits on an orphan branch.
+ */
+function probeBranchExists(directory: string, branchName: string): boolean {
+	const result = spawnSync(
+		resolveGitExecutable(),
+		[
+			'-C',
+			directory,
+			'show-ref',
+			'--verify',
+			'--quiet',
+			`refs/heads/${branchName}`,
+		],
+		{
+			cwd: directory,
+			stdio: ['ignore', 'ignore', 'ignore'],
+			timeout: 5_000,
+			windowsHide: true,
+		},
+	);
+	if (result.error) throw result.error;
+	if (result.status === 0) return true;
+	if (result.status === 1) return false;
+	throw new Error(
+		`CODER_SETTLEMENT_CLEANUP_UNCERTAIN: git show-ref exited with status ${String(result.status)}`,
+	);
+}
+
 async function cleanupRecoveredWorktree(
 	directory: string,
 	descriptor: BackgroundWorktreeDescriptor,
 ): Promise<void> {
-	const branchExists = (): boolean => {
-		const result = spawnSync(
-			'git',
-			[
-				'-C',
-				directory,
-				'show-ref',
-				'--verify',
-				'--quiet',
-				`refs/heads/${descriptor.branchName}`,
-			],
-			{
-				cwd: directory,
-				stdio: ['ignore', 'ignore', 'ignore'],
-				timeout: 5_000,
-				windowsHide: true,
-			},
-		);
-		if (result.error) throw result.error;
-		if (result.status === 0) return true;
-		if (result.status === 1) return false;
-		throw new Error(
-			`CODER_SETTLEMENT_CLEANUP_UNCERTAIN: git show-ref exited with status ${String(result.status)}`,
-		);
-	};
+	const branchExists = (): boolean =>
+		_internals.branchExists(directory, descriptor.branchName);
 	const hasResidue = existsSync(descriptor.worktreePath) || branchExists();
 	const {
 		awaitingMergeByCallID,
@@ -713,6 +729,72 @@ export async function completeCoderSettlementCleanup(
 		await cleanupRecoveredWorktree(directory, wal.worktree);
 		await writeWal(filePath, { ...wal, cleanupComplete: true });
 	});
+}
+
+/**
+ * #2236 F0b: self-heal a DISPATCHED settlement whose lane worktree directory
+ * AND lane branch are both gone.
+ *
+ * HARD INVARIANT, enforced here at the mutation site rather than trusted from
+ * the caller's stage string: **the WAL is never marked terminal while the lane
+ * branch exists or its existence is INDETERMINATE.** Violating it strands the
+ * coder's committed work on a branch nobody has a pointer to. `branchExists`
+ * throws on an indeterminate answer, and that throw is deliberately allowed to
+ * propagate — "cannot tell" fails closed exactly like `cwd-unreadable`.
+ *
+ * Caller must already hold the settlement lock; every write below is
+ * lock-internal (`withSettlementLock` is not reentrant).
+ *
+ * Returns true when the settlement was healed to terminal, false when it must
+ * stay recoverable.
+ */
+async function selfHealMissingLaneWorktree(
+	directory: string,
+	filePath: string,
+	taskId: string,
+	transitionId: string,
+	descriptor: BackgroundWorktreeDescriptor,
+	detail: string,
+): Promise<boolean> {
+	if (existsSync(descriptor.worktreePath)) return false;
+	// Throws CODER_SETTLEMENT_CLEANUP_UNCERTAIN (or the raw spawn error) when
+	// git cannot answer — intentionally NOT caught.
+	if (_internals.branchExists(directory, descriptor.branchName)) return false;
+
+	const reason = `CODER_SETTLEMENT_SELF_HEALED_MISSING_WORKTREE: ${detail}`;
+	const aborted = await abortDispatchedWalUnderLock(
+		directory,
+		taskId,
+		transitionId,
+		reason,
+	);
+	if (aborted.outcome === 'not-dispatched') return false;
+
+	// Best-effort, mirroring abortCoderSettlement: a cleanup failure must never
+	// un-abort the settlement, and must never re-wedge update_task_status —
+	// re-wedging is exactly the deadlock this change removes.
+	try {
+		await cleanupRecoveredWorktree(directory, descriptor);
+		const healedWal = await readWal(filePath, taskId);
+		if (healedWal !== null) {
+			await writeWal(filePath, { ...healedWal, cleanupComplete: true });
+		}
+	} catch (error) {
+		logger.criticalWarn(
+			`[coder-settlement] self-healed task ${taskId} but residual cleanup failed: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		);
+	}
+
+	const message =
+		`STALE_CODER_SETTLEMENT_SELF_HEALED: task ${taskId} was blocked by a coder settlement whose lane worktree ` +
+		`"${descriptor.worktreePath}" and lane branch "${descriptor.branchName}" no longer exist. ` +
+		`Nothing was recoverable, so the write-ahead log at "${filePath}" was marked terminal (ABORTED) and the task was unblocked. ` +
+		'Re-dispatch the task if its work still needs doing.';
+	logger.criticalWarn(message);
+	advisoryWarn(message);
+	return true;
 }
 
 export async function recoverCoderSettlement(
@@ -857,6 +939,24 @@ export async function recoverCoderSettlement(
 					},
 				);
 				if (mergeResult.outcome !== 'merged' || recovered === null) {
+					// #2236 F0b: the lane worktree directory is gone AND the lane
+					// branch is gone, so nothing is recoverable and there is nothing
+					// to strand. Self-heal the WAL to terminal instead of wedging
+					// this task on every future update_task_status.
+					if (
+						mergeResult.outcome === 'failed' &&
+						mergeResult.stage === SOURCE_WORKTREE_GONE_STAGE &&
+						(await selfHealMissingLaneWorktree(
+							directory,
+							filePath,
+							taskId,
+							wal.transitionId,
+							descriptor,
+							mergeResult.message,
+						))
+					) {
+						return null;
+					}
 					// #2202: still bare — unlike the seven enriched state-conflict errors
 					// this one names neither the WAL path nor a recovery action. Reaching
 					// it needs a failed-worktree-merge fixture, so it is tracked rather
@@ -980,4 +1080,12 @@ export async function assertNoUnsettledCoderDispatch(
 
 export const _internals = {
 	liveDispatches,
+	/**
+	 * Test seam for the lane-branch existence probe. Production reads it here,
+	 * so the #2236 fail-closed invariants — never mark a WAL terminal while the
+	 * branch exists, and never mark it terminal on an INDETERMINATE answer —
+	 * are drivable without a second git fixture whose `.git` is unusable (which
+	 * would break every other git call and never reach the guard).
+	 */
+	branchExists: probeBranchExists,
 };

@@ -115,9 +115,9 @@ describe('BubblewrapSandboxExecutor', () => {
 			mock.restore();
 		});
 
-		test('starts with bwrap', () => {
+		test('starts with the resolved bwrap binary (#2236 F6)', () => {
 			const result = executor.wrapCommand('echo hello', []);
-			expect(result.startsWith('bwrap ')).toBe(true);
+			expect(result.startsWith(_internals.resolveBwrapBinary())).toBe(true);
 		});
 
 		test('includes --bind for each scope path', () => {

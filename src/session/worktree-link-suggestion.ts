@@ -16,6 +16,7 @@
 import { execFile } from 'node:child_process';
 import { isLinked } from '../hooks/knowledge-link.js';
 import { advisoryWarn } from '../services/warning-buffer.js';
+import { resolveGitExecutableAsync } from '../utils/git-executable.js';
 
 const GIT_TIMEOUT_MS = 1_500;
 
@@ -42,11 +43,20 @@ function markSuggested(sessionId: string): void {
 }
 
 /** Count worktrees via `git worktree list --porcelain`. Returns 0 on any failure. */
-function countWorktrees(directory: string): Promise<number> {
+async function countWorktrees(directory: string): Promise<number> {
+	// Resolution failure (every candidate rejected) maps onto this function's
+	// existing "any failure -> 0" contract, same as a spawn failure would —
+	// no new throw introduced at this call site.
+	let gitExecutable: string;
+	try {
+		gitExecutable = await resolveGitExecutableAsync();
+	} catch {
+		return 0;
+	}
 	return new Promise<number>((resolve) => {
 		try {
 			const child = execFile(
-				'git',
+				gitExecutable,
 				['-C', directory, 'worktree', 'list', '--porcelain'],
 				{ timeout: GIT_TIMEOUT_MS, windowsHide: true, encoding: 'utf-8' },
 				(err, stdout) => {

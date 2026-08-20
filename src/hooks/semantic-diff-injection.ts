@@ -26,6 +26,7 @@ import {
 	GitBinaryMissingError,
 	isGitBinaryMissing,
 } from '../utils/git-binary-missing-error.js';
+import { resolveGitExecutable } from '../utils/git-executable.js';
 import {
 	getCachedGraph,
 	type RepoGraphInjectionOptions,
@@ -42,6 +43,7 @@ export const _internals = {
 	getCachedGraph,
 	getImporters,
 	normalizeGraphPath,
+	resolveGitExecutable,
 };
 
 async function execGit(
@@ -62,7 +64,7 @@ async function execGit(
 				stdio: ['ignore', 'pipe', 'pipe'],
 			};
 			_internals.execFile(
-				'git',
+				_internals.resolveGitExecutable(),
 				args,
 				execOpts as child_process.ExecFileOptionsWithStringEncoding,
 				(

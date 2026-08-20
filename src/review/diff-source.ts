@@ -15,6 +15,7 @@ import {
 	type BunCompatStream,
 	bunSpawn,
 } from '../utils/bun-compat.js';
+import { resolveGitExecutableAsync } from '../utils/git-executable.js';
 
 const DEFAULT_TIMEOUT_MS = 15_000;
 const DEFAULT_MAX_BYTES = 512 * 1024;
@@ -500,8 +501,9 @@ async function runGit(
 	};
 	let proc: ReturnType<typeof bunSpawn>;
 	try {
+		const gitExecutable = await _internals.resolveGitExecutable();
 		proc = _internals.bunSpawn(
-			['git', '-c', 'core.quotepath=false', ...args],
+			[gitExecutable, '-c', 'core.quotepath=false', ...args],
 			spawnOptions,
 		);
 	} catch (error) {
@@ -1304,6 +1306,7 @@ export const _internals: {
 	fstatBigIntSync: (fd: number) => fs.BigIntStats;
 	readSync: typeof fs.readSync;
 	closeSync: typeof fs.closeSync;
+	resolveGitExecutable: typeof resolveGitExecutableAsync;
 } = {
 	bunSpawn,
 	realpathSync: fs.realpathSync,
@@ -1312,4 +1315,5 @@ export const _internals: {
 	fstatBigIntSync: (fd) => fs.fstatSync(fd, { bigint: true }),
 	readSync: fs.readSync,
 	closeSync: fs.closeSync,
+	resolveGitExecutable: resolveGitExecutableAsync,
 };

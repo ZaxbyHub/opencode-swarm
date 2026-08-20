@@ -7,7 +7,15 @@
  * mock handles getCurrentBranch (which calls gitExec directly, not via _internals).
  */
 
-import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
+import {
+	afterAll,
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	mock,
+	test,
+} from 'bun:test';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
@@ -37,6 +45,20 @@ mock.module('node:child_process', () => ({
 // ---------------------------------------------------------------------------
 
 const branch = await import('../../../src/git/branch');
+
+// Issue #2236 hardening (lane C1b): `getCurrentBranch` (invoked internally by
+// `resetToMainAfterMerge`) calls the module-local `gitExec` directly — not
+// through `_internals.gitExec` — so the `setup()` stub below never
+// intercepts it (see the docstring above). Since `gitExec` now resolves the
+// git binary via `resolveGitExecutable()`, that real resolver would
+// otherwise run its filesystem-probing candidate search against this
+// process's real `node:fs` and the mocked `spawnSync`, at the mercy of
+// whatever git install locations exist on the host. Stub the resolver
+// through branch.ts's own `_internals` seam to keep this file's single
+// bare-`'git'`-equivalent spawn deterministic, matching pre-conversion
+// behavior.
+const originalResolveGitExecutable = branch._internals.resolveGitExecutable;
+branch._internals.resolveGitExecutable = () => 'git';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -230,4 +252,8 @@ describe('resetToMainAfterMerge — FR-013: git clean -fdX regression', () => {
 		);
 		expect(badCleanCalls).toEqual([]);
 	});
+});
+
+afterAll(() => {
+	branch._internals.resolveGitExecutable = originalResolveGitExecutable;
 });
