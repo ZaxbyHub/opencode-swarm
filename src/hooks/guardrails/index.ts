@@ -28,6 +28,7 @@ import {
 } from '../../gate-evidence.js';
 import { loadPlan } from '../../plan/manager';
 import { getExecutor } from '../../sandbox/executor';
+import { sanitizeDiagnosticText } from '../../scope/path-identity';
 import { canonicalWorkspaceIdentity } from '../../scope/scope-binding';
 import { createScopeLeaseRenewalTracker } from '../../scope/scope-lease-renewal';
 import {
@@ -1166,7 +1167,8 @@ export function createGuardrailsHooks(
 						);
 						pushAdvisory(
 							mismatchSession,
-							`REVIEWER_CAPTURE_FAILED: task ${pendingWrite.taskId}: file ${pendingWrite.file} was written from workspace ${sessionRootIdentity} but the coder generation is bound to ${generation.workspaceIdentity} (code workspace_mismatch, retryable=false). ACTION[architect]: verify the coder dispatch lane/scope binding, then redispatch`,
+							`REVIEWER_CAPTURE_FAILED: task ${pendingWrite.taskId}: file ${sanitizeDiagnosticText(pendingWrite.file, 160)} was written from workspace ${sessionRootIdentity} but the coder generation is bound to ${generation.workspaceIdentity} (code workspace_mismatch, retryable=false, responsible: architect). ACTION[architect]: verify the coder dispatch lane/scope binding, then redispatch`,
+							{ dedupeKey: `reviewer-capture-failed:${pendingWrite.taskId}` },
 						);
 						continue;
 					}
@@ -1217,11 +1219,12 @@ export function createGuardrailsHooks(
 						);
 						pushAdvisory(
 							captureSession,
-							`REVIEWER_CAPTURE_FAILED: task ${pendingWrite.taskId}: file ${pendingWrite.file} could not be fingerprinted exactly (code ${lastFailure.code}, retryable=${lastFailure.retryable}, attempts=${attempts}/${REVIEWER_SCOPE_CAPTURE_ATTEMPTS}). ACTION[architect]: ${
+							`REVIEWER_CAPTURE_FAILED: task ${pendingWrite.taskId}: file ${sanitizeDiagnosticText(pendingWrite.file, 160)} could not be fingerprinted exactly (code ${lastFailure.code}, retryable=${lastFailure.retryable}, attempts=${attempts}/${REVIEWER_SCOPE_CAPTURE_ATTEMPTS}, responsible: architect). ACTION[architect]: ${
 								lastFailure.retryable
 									? 'retry the coder write or re-dispatch the coder so capture re-runs'
 									: `resolve the ${lastFailure.code} condition for the file, then retry or route explicit manual review`
 							}`,
+							{ dedupeKey: `reviewer-capture-failed:${pendingWrite.taskId}` },
 						);
 					}
 				}

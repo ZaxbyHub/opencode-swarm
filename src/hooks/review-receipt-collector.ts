@@ -40,12 +40,10 @@ import {
 } from '../review/runtime.js';
 import {
 	discardReviewerScopeGenerationClaim,
-	ensureAgentSession,
 	isReviewerScopeGenerationCurrent,
 	peekReviewerScopeGenerationClaim,
 } from '../state.js';
 import { telemetry } from '../telemetry.js';
-import { pushAdvisory } from '../utils/advisory-queue.js';
 import * as logger from '../utils/logger.js';
 import {
 	type BlockingFinding,
@@ -58,7 +56,6 @@ import {
 } from './review-receipt.js';
 import {
 	buildReviewerTaskScope,
-	LEGACY_REVIEWER_TASK_SCOPE_DESCRIPTION,
 	type ReviewerTaskScope,
 	resolveReviewerScopeTaskId,
 	resolveReviewerTaskScope,
@@ -445,15 +442,12 @@ async function reviewerScopeRemainsCurrent(input: {
 	);
 	if (currentScope === null) return false;
 	if (!currentScope.ok) {
-		// A legacy v1 scope can never satisfy a v2 rebuild (issue #2100): fail
-		// closed with the typed one-time cutover advisory — a debug log alone
-		// would leave upgrading users with a silently stale receipt.
-		if (input.scope.description === LEGACY_REVIEWER_TASK_SCOPE_DESCRIPTION) {
-			pushAdvisory(
-				ensureAgentSession(input.sessionID),
-				`REVIEW_SCOPE_LEGACY_V1: receipt scope predates the v2 manifest; re-review required (task ${input.scope.taskId ?? 'unknown'}). ACTION[architect]: re-dispatch the reviewer to record a v2-manifest receipt`,
-			);
-		}
+		// A scope the v2 builder cannot reconstruct can never satisfy the
+		// receipt — fail closed. (The v1-only advisory branch was removed:
+		// every production scope constructor hardcodes the v2 description, so
+		// no comparison could ever match it — dead code, unwired by
+		// construction. The v1-never-satisfies-v2 guarantee holds via the
+		// description + content-hash equality above.)
 		return false;
 	}
 	const scope = currentScope.scope;

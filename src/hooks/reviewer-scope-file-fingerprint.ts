@@ -203,26 +203,75 @@ export function captureReviewerScopeFileFingerprint(
 			retryable: false,
 		};
 	}
+	// F-003 (PR #2250 review): a SINGLE parent-ENOENT observation must not
+	// become a durable deletion attestation — under directory-rename churn the
+	// parent resolves again microseconds later. Re-observe once; only a stable
+	// double ENOENT plus a missing file attests deletion.
 	try {
 		canonicalParent = _internals.realpathSync(path.dirname(absolute));
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-			return deletedPathIsContained(canonicalRoot, absolute)
-				? { kind: 'captured_deleted', file: normalized }
-				: {
+			let secondObservation: string | null = null;
+			let secondFailed = false;
+			try {
+				secondObservation = _internals.realpathSync(path.dirname(absolute));
+			} catch (secondError) {
+				if ((secondError as NodeJS.ErrnoException).code !== 'ENOENT') {
+					return {
 						kind: 'capture_failed',
 						file: normalized,
-						code: 'outside_workspace',
+						code: 'unreadable',
 						retryable: false,
+						detail: (secondError as NodeJS.ErrnoException).code,
 					};
+				}
+				secondFailed = true;
+			}
+			if (!secondFailed) {
+				// Transient: the parent came back between observations — the
+				// file likely exists under the restored path. Continue capture.
+				canonicalParent = secondObservation as string;
+			} else {
+				try {
+					_internals.lstat(absolute);
+					// File observable again while the parent path stays absent:
+					// treat as churn, not deletion.
+					return {
+						kind: 'capture_failed',
+						file: normalized,
+						code: 'file_changed_during_capture',
+						retryable: true,
+						detail: 'parent enoent unstable',
+					};
+				} catch (fileError) {
+					if ((fileError as NodeJS.ErrnoException).code !== 'ENOENT') {
+						return {
+							kind: 'capture_failed',
+							file: normalized,
+							code: 'unreadable',
+							retryable: false,
+							detail: (fileError as NodeJS.ErrnoException).code,
+						};
+					}
+				}
+				return deletedPathIsContained(canonicalRoot, absolute)
+					? { kind: 'captured_deleted', file: normalized }
+					: {
+							kind: 'capture_failed',
+							file: normalized,
+							code: 'outside_workspace',
+							retryable: false,
+						};
+			}
+		} else {
+			return {
+				kind: 'capture_failed',
+				file: normalized,
+				code: 'unreadable',
+				retryable: false,
+				detail: (error as NodeJS.ErrnoException).code,
+			};
 		}
-		return {
-			kind: 'capture_failed',
-			file: normalized,
-			code: 'unreadable',
-			retryable: false,
-			detail: (error as NodeJS.ErrnoException).code,
-		};
 	}
 	if (!isWithinRoot(canonicalRoot, canonicalParent)) {
 		return {
@@ -298,6 +347,23 @@ export function captureReviewerScopeFileFingerprint(
 	const openFlags =
 		fs.constants.O_RDONLY |
 		(process.platform === 'win32' ? 0 : fs.constants.O_NOFOLLOW);
+	// F-002 (PR #2250 review): bind the pre-open path observation to whatever
+	// open() lands on. A bigint snapshot here lets the post-open fstat prove
+	// the descriptor names the SAME inode the containment checks approved —
+	// a junction/reparse swap in the realpath→open window cannot pass.
+	let beforeBigInt: fs.BigIntStats;
+	try {
+		beforeBigInt = _internals.lstat(absolute, {
+			bigint: true,
+		}) as fs.BigIntStats;
+	} catch {
+		return {
+			kind: 'capture_failed',
+			file: normalized,
+			code: 'file_changed_during_capture',
+			retryable: true,
+		};
+	}
 	let fd: number | undefined;
 	try {
 		fd = _internals.open(absolute, openFlags);
@@ -338,6 +404,16 @@ export function captureReviewerScopeFileFingerprint(
 				file: normalized,
 				code: 'non_regular',
 				retryable: false,
+			};
+		}
+		if (!sameSnapshot(beforeBigInt, openedBefore)) {
+			// The path resolved to a different inode between the containment
+			// checks and the open — never attest those bytes.
+			return {
+				kind: 'capture_failed',
+				file: normalized,
+				code: 'file_changed_during_capture',
+				retryable: true,
 			};
 		}
 		const hash: Hash = createHash('sha256');
@@ -406,6 +482,32 @@ export function captureReviewerScopeFileFingerprint(
 			};
 		}
 		if (!pathAfter.isFile() || !sameSnapshot(openedBefore, pathAfter)) {
+			return {
+				kind: 'capture_failed',
+				file: normalized,
+				code: 'file_changed_during_capture',
+				retryable: true,
+			};
+		}
+		// F-002 companion: re-resolve the PATH after streaming and prove it
+		// still lands inside the approved parent — catches a parent-directory
+		// junction/reparse swap that O_NOFOLLOW (trailing component only)
+		// cannot express.
+		let canonicalAfterRead: string;
+		try {
+			canonicalAfterRead = _internals.realpathSync(absolute);
+		} catch {
+			return {
+				kind: 'capture_failed',
+				file: normalized,
+				code: 'file_changed_during_capture',
+				retryable: true,
+			};
+		}
+		if (
+			!isWithinRoot(canonicalRoot, canonicalAfterRead) ||
+			path.dirname(canonicalAfterRead) !== canonicalParent
+		) {
 			return {
 				kind: 'capture_failed',
 				file: normalized,

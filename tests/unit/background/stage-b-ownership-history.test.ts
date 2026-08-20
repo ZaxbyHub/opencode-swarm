@@ -14,6 +14,7 @@ import {
 	captureReviewerScopeFileFingerprint,
 	reviewerScopeCaptureToFingerprint,
 } from '../../../src/hooks/reviewer-scope-file-fingerprint';
+import { canonicalWorkspaceIdentity } from '../../../src/scope/scope-binding';
 import {
 	claimReviewerScopeGeneration,
 	getReviewerScopeOwnershipHistory,
@@ -66,7 +67,7 @@ function startCoder(
 			background: true,
 			declaredFiles: [file],
 			captureDirectory: directory,
-			workspaceIdentity: 'ws:/stage-b-ownership',
+			workspaceIdentity: canonicalWorkspaceIdentity(directory) ?? 'ws:test',
 			createdAt,
 		}),
 	).not.toBeNull();

@@ -15,6 +15,7 @@ import {
 	captureReviewerScopeFileFingerprint,
 	reviewerScopeCaptureToFingerprint,
 } from '../../../src/hooks/reviewer-scope-file-fingerprint';
+import { canonicalWorkspaceIdentity } from '../../../src/scope/scope-binding';
 import {
 	getReviewerScopeGenerationForCoderCall,
 	recordReviewerScopeGenerationFile,
@@ -95,7 +96,7 @@ function startCoder(taskId: string, callID: string, files: string[]): void {
 			background: true,
 			declaredFiles: files,
 			captureDirectory: directory,
-			workspaceIdentity: 'ws:/stage-b-attribution',
+			workspaceIdentity: canonicalWorkspaceIdentity(directory) ?? 'ws:test',
 		}),
 	).not.toBeNull();
 }

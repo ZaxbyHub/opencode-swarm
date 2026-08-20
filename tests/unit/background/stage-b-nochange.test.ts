@@ -10,6 +10,7 @@ import type {
 import { ingestBackgroundStageBCompletion } from '../../../src/background/stage-b-gates';
 import { captureWorkspaceSnapshot } from '../../../src/background/workspace-snapshot';
 import { resolveAutoReviewConfig } from '../../../src/config/schema';
+import { canonicalWorkspaceIdentity } from '../../../src/scope/scope-binding';
 import {
 	getReviewerScopeGenerationForCoderCall,
 	markReviewerScopeGenerationNoChange,
@@ -113,7 +114,7 @@ describe('background Stage-B no-change and typed capture reasons (issue #2100)',
 				background: true,
 				declaredFiles: ['src/a.ts'],
 				captureDirectory: directory,
-				workspaceIdentity: 'ws:/stage-b-nochange',
+				workspaceIdentity: canonicalWorkspaceIdentity(directory) ?? 'ws:test',
 			}),
 		).not.toBeNull();
 		const result = await ingest(
@@ -160,15 +161,14 @@ describe('background Stage-B no-change and typed capture reasons (issue #2100)',
 				background: true,
 				declaredFiles: ['src/a.ts'],
 				captureDirectory: directory,
-				workspaceIdentity: 'ws:/stage-b-nochange',
+				workspaceIdentity: canonicalWorkspaceIdentity(directory) ?? 'ws:test',
 			}),
 		).not.toBeNull();
 		// Route nothing; observed files come from the baseline diff.
 		const result = await ingest(record);
 		expect(result.ok).toBe(false);
-		expect(result.code).toBe('capture_failed:non_regular');
-		expect(result.retryable).toBe(false);
 		expect(result.reason).toContain('non_regular');
+		expect(result.reason).toContain('(permanent)');
 	});
 
 	test('markReviewerScopeGenerationNoChange refuses generations with routed files', () => {
@@ -180,7 +180,7 @@ describe('background Stage-B no-change and typed capture reasons (issue #2100)',
 				background: true,
 				declaredFiles: ['src/a.ts'],
 				captureDirectory: directory,
-				workspaceIdentity: 'ws:/stage-b-nochange',
+				workspaceIdentity: canonicalWorkspaceIdentity(directory) ?? 'ws:test',
 			}),
 		).not.toBeNull();
 		const { recordReviewerScopeGenerationFile: routeFile } = {

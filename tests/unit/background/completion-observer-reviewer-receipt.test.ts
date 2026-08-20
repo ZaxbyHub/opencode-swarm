@@ -31,6 +31,7 @@ import {
 	reviewerScopeCaptureToFingerprint,
 } from '../../../src/hooks/reviewer-scope-file-fingerprint';
 import { beginApprovedReviewerScopeLifecycle } from '../../../src/hooks/reviewer-scope-lifecycle';
+import { canonicalWorkspaceIdentity } from '../../../src/scope/scope-binding';
 import {
 	claimReviewerScopeGeneration,
 	ensureAgentSession,
@@ -378,7 +379,7 @@ describe('background completion observer reviewer receipts', () => {
 				taskId: '1.1',
 				coderCallID: 'coder-terminal-error',
 				captureDirectory: dir,
-				workspaceIdentity: 'ws:/observer-receipt',
+				workspaceIdentity: canonicalWorkspaceIdentity(dir) ?? 'ws:test',
 			}),
 		).not.toBeNull();
 		await recordPendingDelegation(dir, {
@@ -413,7 +414,7 @@ describe('background completion observer reviewer receipts', () => {
 					taskId: '1.1',
 					coderCallID,
 					captureDirectory: dir,
-					workspaceIdentity: 'ws:/observer-receipt',
+					workspaceIdentity: canonicalWorkspaceIdentity(dir) ?? 'ws:test',
 				}),
 			).not.toBeNull();
 			expect(

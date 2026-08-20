@@ -151,10 +151,127 @@ describe('reviewer scope capture v2 (issue #2100 acceptance)', () => {
 		} catch {
 			created = false;
 		}
-		if (!created) return; // Windows without symlink privilege: skip
+		// Visible skip: Windows file-symlink creation needs elevation; the
+		// junction-swap class is covered cross-platform by the hooked
+		// pre-open/post-read identity tests below.
+		if (!created) return;
 		expect(
 			captureReviewerScopeFileFingerprint(directory, 'src/link.ts'),
 		).toMatchObject({ kind: 'capture_failed', code: 'symlink_or_reparse' });
+	});
+
+	test('F-003: a transient parent-ENOENT (dir churn) does not attest deletion; capture proceeds', () => {
+		fs.writeFileSync(path.join(directory, 'src/a.ts'), 'content\n');
+		const realRealpath = fingerprintInternals.realpathSync;
+		let parentCalls = 0;
+		fingerprintInternals.realpathSync = ((
+			target: fs.PathLike,
+			...rest: unknown[]
+		) => {
+			const targetPath = String(target);
+			if (path.dirname(path.join(directory, 'src/a.ts')) === targetPath) {
+				parentCalls += 1;
+				if (parentCalls === 1) {
+					const error = new Error('enoent') as NodeJS.ErrnoException;
+					error.code = 'ENOENT';
+					throw error;
+				}
+			}
+			return (realRealpath as (...args: unknown[]) => string)(target, ...rest);
+		}) as typeof realRealpath;
+		try {
+			const captured = captureReviewerScopeFileFingerprint(
+				directory,
+				'src/a.ts',
+			);
+			expect(parentCalls).toBeGreaterThanOrEqual(2);
+			expect(captured).toMatchObject({ kind: 'captured_file' });
+		} finally {
+			fingerprintInternals.realpathSync = realRealpath;
+		}
+	});
+
+	test('F-003: a stable double parent-ENOENT with a missing file attests deletion', () => {
+		fs.mkdirSync(path.join(directory, 'src/gone'), { recursive: true });
+		fs.writeFileSync(path.join(directory, 'src/gone/a.ts'), 'x\n');
+		fs.rmSync(path.join(directory, 'src/gone'), { recursive: true });
+		expect(
+			captureReviewerScopeFileFingerprint(directory, 'src/gone/a.ts'),
+		).toMatchObject({ kind: 'captured_deleted' });
+	});
+
+	test('F-002: an inode swap between the pre-open lstat and open is rejected', () => {
+		fs.writeFileSync(path.join(directory, 'src/a.ts'), 'original\n');
+		const realOpen = fingerprintInternals.open;
+		fingerprintInternals.open = ((...args: Parameters<typeof realOpen>) => {
+			// Swap the path to a DIFFERENT inode right before open lands.
+			fs.writeFileSync(path.join(directory, 'src/a.ts'), 'swapped-longer\n');
+			return realOpen(...args);
+		}) as typeof realOpen;
+		try {
+			const captured = captureReviewerScopeFileFingerprint(
+				directory,
+				'src/a.ts',
+			);
+			expect(captured).toMatchObject({
+				kind: 'capture_failed',
+				code: 'file_changed_during_capture',
+				retryable: true,
+			});
+		} finally {
+			fingerprintInternals.open = realOpen;
+		}
+	});
+
+	test('F-002: a post-read parent re-resolution mismatch is rejected', () => {
+		fs.writeFileSync(path.join(directory, 'src/a.ts'), 'stable\n');
+		const realRealpath = fingerprintInternals.realpathSync;
+		let targetCalls = 0;
+		fingerprintInternals.realpathSync = ((
+			target: fs.PathLike,
+			...rest: unknown[]
+		) => {
+			const targetPath = String(target);
+			if (path.join(directory, 'src/a.ts') === targetPath) {
+				targetCalls += 1;
+				// The FINAL post-read re-resolution reports a different parent.
+				if (targetCalls >= 2) return path.join(directory, 'elsewhere', 'a.ts');
+			}
+			return (realRealpath as (...args: unknown[]) => string)(target, ...rest);
+		}) as typeof realRealpath;
+		try {
+			const captured = captureReviewerScopeFileFingerprint(
+				directory,
+				'src/a.ts',
+			);
+			expect(captured).toMatchObject({
+				kind: 'capture_failed',
+				code: 'file_changed_during_capture',
+			});
+		} finally {
+			fingerprintInternals.realpathSync = realRealpath;
+		}
+	});
+
+	test('unreadable files fail closed as unreadable (EACCES at open)', () => {
+		fs.writeFileSync(path.join(directory, 'src/locked.ts'), 'secret\n');
+		const realOpen = fingerprintInternals.open;
+		fingerprintInternals.open = (() => {
+			const error = new Error('eacces') as NodeJS.ErrnoException;
+			error.code = 'EACCES';
+			throw error;
+		}) as typeof realOpen;
+		try {
+			expect(
+				captureReviewerScopeFileFingerprint(directory, 'src/locked.ts'),
+			).toMatchObject({
+				kind: 'capture_failed',
+				code: 'unreadable',
+				retryable: false,
+			});
+		} finally {
+			fingerprintInternals.open = realOpen;
+		}
 	});
 
 	test('retryability classification is exact', () => {

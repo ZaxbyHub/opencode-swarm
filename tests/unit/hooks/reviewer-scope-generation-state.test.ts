@@ -6,6 +6,7 @@ import {
 	MAX_REVIEWER_SCOPE_GENERATIONS,
 	markReviewerScopeGenerationReady,
 	REVIEWER_SCOPE_GENERATION_TTL_MS,
+	recordReviewerScopeGenerationCaptureFailure,
 	recordReviewerScopeGenerationFile,
 	recordReviewerScopeGenerationFileFingerprint,
 	resetSwarmState,
@@ -155,6 +156,62 @@ describe('reviewer scope generation state', () => {
 				coderCallID: 'coder-b',
 			})?.modifiedFiles,
 		).toEqual(['src/b.ts']);
+	});
+
+	test('a late capture failure retires the stale fingerprint and blocks ready (latest observation wins)', () => {
+		startAgentSession('parent', 'architect');
+		expect(
+			startGen({
+				parentSessionID: 'parent',
+				taskId: '8.1',
+				coderCallID: 'coder-late-failure',
+			}),
+		).not.toBeNull();
+		expect(
+			recordReviewerScopeGenerationFile({
+				parentSessionID: 'parent',
+				taskId: '8.1',
+				coderCallID: 'coder-late-failure',
+				file: 'src/a.ts',
+			}),
+		).toBe(true);
+		expect(
+			recordReviewerScopeGenerationFileFingerprint({
+				parentSessionID: 'parent',
+				taskId: '8.1',
+				coderCallID: 'coder-late-failure',
+				fingerprint: storedFingerprint('src/a.ts'),
+			}),
+		).toBe(true);
+		// A SUBSEQUENT failed capture of the same file is the latest
+		// observation: the stale fingerprint must be retired so
+		// ready-publication fails closed instead of attesting bytes that are
+		// no longer last-seen. (Failures record only while collecting — after
+		// ready, a new write cycle owns a fresh generation by design.)
+		expect(
+			recordReviewerScopeGenerationCaptureFailure({
+				parentSessionID: 'parent',
+				taskId: '8.1',
+				coderCallID: 'coder-late-failure',
+				file: 'src/a.ts',
+				code: 'capture_deadline',
+				retryable: true,
+			}),
+		).toBe(true);
+		const generation = getReviewerScopeGenerationForCoderCall({
+			parentSessionID: 'parent',
+			taskId: '8.1',
+			coderCallID: 'coder-late-failure',
+		});
+		expect(generation?.modifiedFileFingerprints).toEqual([]);
+		expect(generation?.captureFailures).toHaveLength(1);
+		expect(
+			markReviewerScopeGenerationReady({
+				parentSessionID: 'parent',
+				taskId: '8.1',
+				coderCallID: 'coder-late-failure',
+			}),
+		).toBe(false);
 	});
 
 	test('retains a claimed generation while a later same-task generation proceeds', () => {

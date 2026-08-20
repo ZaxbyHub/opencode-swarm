@@ -144,6 +144,12 @@ describe('reviewer scope merge-back verification (issue #2100 contract D)', () =
 			verifiedAt: expect.any(Number),
 			primaryWorkspaceIdentity: canonicalWorkspaceIdentity(primary),
 		});
+		// F-001: verified settlement must repoint the capture root to the
+		// primary — the lane directory is torn down right after merge-back.
+		expect(settled?.captureDirectory).toBe(primary);
+		expect(settled?.workspaceIdentity).toBe(
+			canonicalWorkspaceIdentity(primary),
+		);
 	});
 
 	test('a primary byte mismatch retains the generation as mergeback_mismatch', () => {
@@ -255,7 +261,11 @@ describe('reviewer scope merge-back verification (issue #2100 contract D)', () =
 				parentSessionID: 'parent',
 				taskId: '9.9',
 				coderCallID: 'missing',
-				outcome: { verified: true, primaryWorkspaceIdentity: 'ws:x' },
+				outcome: {
+					verified: true,
+					primaryWorkspaceIdentity: 'ws:x',
+					primaryDirectory: '/primary/x',
+				},
 			}),
 		).toBe(false);
 	});

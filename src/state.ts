@@ -1161,7 +1161,16 @@ function sweepReviewerScopeGenerations(
 		// Claimed state is correlated to a durable reviewer delegation. Its
 		// terminal/error/stale lifecycle owns cleanup; an unrelated in-memory
 		// clock sweep must never invalidate a reviewer that is still running.
-		if (entry.status === 'claimed') continue;
+		// Merge-back states are actionable recovery state (issue #2100
+		// contract D: conflicts RETAIN the generation) — capacity eviction and
+		// same-task supersession remain their bounds, not the idle TTL.
+		if (
+			entry.status === 'claimed' ||
+			entry.status === 'mergeback_pending' ||
+			entry.status === 'mergeback_mismatch'
+		) {
+			continue;
+		}
 		if (
 			!Number.isFinite(entry.createdAt) ||
 			now < entry.createdAt ||
@@ -1365,6 +1374,13 @@ export function recordReviewerScopeGenerationCaptureFailure(input: {
 	if (matches.length !== 1) return false;
 	const generation = matches[0];
 	const now = input.at ?? Date.now();
+	// Latest observation wins: a failure recorded after a success retires the
+	// stale fingerprint (its bytes are no longer the last-seen state) so the
+	// completeness gate fails closed instead of publishing stale evidence.
+	generation.modifiedFileFingerprints =
+		generation.modifiedFileFingerprints.filter(
+			(entry) => entry.file !== input.file,
+		);
 	const existingIndex = generation.captureFailures.findIndex(
 		(entry) => entry.file === input.file,
 	);
@@ -1405,6 +1421,8 @@ export function markReviewerScopeGenerationReady(input: {
 	taskId: string;
 	coderCallID: string;
 	readyAt?: number;
+	/** Canonical identity of the primary checkout; a lane-rooted generation is not reviewable from it until merge-back verification repoints the root. */
+	primaryWorkspaceIdentity?: string;
 }): boolean {
 	const session = swarmState.agentSessions.get(input.parentSessionID);
 	if (!session) return false;
@@ -1420,6 +1438,15 @@ export function markReviewerScopeGenerationReady(input: {
 	if (matches.length !== 1) return false;
 	const generation = matches[0];
 	if (generation.status === 'ready') return true;
+	if (
+		input.primaryWorkspaceIdentity &&
+		generation.workspaceIdentity !== input.primaryWorkspaceIdentity
+	) {
+		// Lane-captured bytes were never merge-back verified against this
+		// primary: publishing ready would strand every later capture on a
+		// lane directory that merge-back cleanup deletes.
+		return false;
+	}
 	const complete =
 		generation.modifiedFiles.length ===
 			generation.modifiedFileFingerprints.length &&
@@ -1494,7 +1521,12 @@ export function settleReviewerScopeMergeback(input: {
 	taskId?: string;
 	coderCallID: string;
 	outcome:
-		| { verified: true; primaryWorkspaceIdentity: string; at?: number }
+		| {
+				verified: true;
+				primaryWorkspaceIdentity: string;
+				primaryDirectory: string;
+				at?: number;
+		  }
 		| { verified: false; reason: string; at?: number };
 }): boolean {
 	const session = swarmState.agentSessions.get(input.parentSessionID);
@@ -1516,6 +1548,11 @@ export function settleReviewerScopeMergeback(input: {
 			verifiedAt: now,
 			primaryWorkspaceIdentity: input.outcome.primaryWorkspaceIdentity,
 		};
+		// The lane directory is torn down right after a verified merge-back;
+		// every later capture/equality site must read the primary checkout the
+		// manifest was verified against (issue #2100 F-001).
+		generation.captureDirectory = input.outcome.primaryDirectory;
+		generation.workspaceIdentity = input.outcome.primaryWorkspaceIdentity;
 		return true;
 	}
 	generation.status = 'mergeback_mismatch';

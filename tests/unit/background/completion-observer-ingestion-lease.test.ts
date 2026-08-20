@@ -13,6 +13,7 @@ import {
 	findByCorrelationId,
 	recordPendingDelegation,
 } from '../../../src/background/pending-delegations';
+import { canonicalWorkspaceIdentity } from '../../../src/scope/scope-binding';
 import {
 	claimReviewerScopeGeneration,
 	getReviewerScopeGenerationForCoderCall,
@@ -68,7 +69,7 @@ function startCoderGeneration(callID: string): void {
 			background: true,
 			declaredFiles: ['src/example.ts'],
 			captureDirectory: directory,
-			workspaceIdentity: 'ws:/observer-lease',
+			workspaceIdentity: canonicalWorkspaceIdentity(directory) ?? 'ws:test',
 		}),
 	).not.toBeNull();
 }

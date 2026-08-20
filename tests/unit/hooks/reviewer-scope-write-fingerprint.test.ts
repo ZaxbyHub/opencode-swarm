@@ -14,6 +14,7 @@ import {
 	recordReviewerScopeGenerationCaptureFailure,
 	recordReviewerScopeGenerationFile,
 	recordReviewerScopeGenerationFileFingerprint,
+	recordSessionWorkspaceRoot,
 	resetSwarmState,
 	startAgentSession,
 	startReviewerScopeGeneration,
@@ -226,6 +227,81 @@ describe('reviewer scope post-write fingerprints', () => {
 			code: 'non_regular',
 			retryable: false,
 		});
+	});
+
+	test('a session-root/generation workspace divergence is recorded as workspace_mismatch, not captured', async () => {
+		// Production-shaped divergence: the child session is rooted in laneA
+		// (binding + recorded workspace root agree, so routing works), but the
+		// generation was bound to laneB — the post-write cross-check must
+		// fail closed instead of hashing bytes from the wrong tree.
+		const laneA = fs.realpathSync(
+			fs.mkdtempSync(path.join(os.tmpdir(), 'review-write-laneA-')),
+		);
+		const laneB = fs.realpathSync(
+			fs.mkdtempSync(path.join(os.tmpdir(), 'review-write-laneB-')),
+		);
+		try {
+			for (const lane of [laneA, laneB]) {
+				fs.mkdirSync(path.join(lane, 'src'), { recursive: true });
+				fs.writeFileSync(path.join(lane, 'src/a.ts'), 'lane bytes\n');
+			}
+			startAgentSession('parent-other', 'architect', laneA);
+			startAgentSession('child-other', 'coder', laneA);
+			swarmState.activeAgent.set('child-other', 'coder');
+			recordSessionWorkspaceRoot('child-other', laneA);
+			swarmState.agentSessions.get('child-other')!.delegationActive = true;
+			installActiveScopeBinding({
+				directory: laneA,
+				childSessionId: 'child-other',
+				parentSessionId: 'parent-other',
+				dispatchCallId: 'coder-mismatch',
+				taskId: '1.1',
+				files: ['src/a.ts'],
+			});
+			expect(
+				startReviewerScopeGeneration({
+					parentSessionID: 'parent-other',
+					taskId: '1.1',
+					coderCallID: 'coder-mismatch',
+					background: true,
+					declaredFiles: ['src/a.ts'],
+					captureDirectory: laneB,
+					workspaceIdentity: canonicalWorkspaceIdentity(laneB) ?? 'ws:laneB',
+				}),
+			).not.toBeNull();
+			await hooks.toolBefore(
+				{ tool: 'write', sessionID: 'child-other', callID: 'mismatch-write' },
+				{ args: { filePath: 'src/a.ts', content: 'after\n' } },
+			);
+			fs.writeFileSync(path.join(laneA, 'src/a.ts'), 'after\n');
+			await hooks.toolAfter(
+				{ tool: 'write', sessionID: 'child-other', callID: 'mismatch-write' },
+				{
+					title: '',
+					output: 'write completed',
+					metadata: { status: 'completed' },
+				},
+			);
+			const mismatched = getReviewerScopeGenerationForCoderCall({
+				parentSessionID: 'parent-other',
+				taskId: '1.1',
+				coderCallID: 'coder-mismatch',
+			});
+			expect(mismatched?.modifiedFileFingerprints).toEqual([]);
+			expect(mismatched?.captureFailures[0]).toMatchObject({
+				file: 'src/a.ts',
+				code: 'workspace_mismatch',
+				retryable: false,
+			});
+		} finally {
+			resetSwarmState();
+			startAgentSession('parent', 'architect', directory);
+			startAgentSession('child', 'coder', directory);
+			swarmState.activeAgent.set('child', 'coder');
+			swarmState.agentSessions.get('child')!.delegationActive = true;
+			fs.rmSync(laneA, { recursive: true, force: true });
+			fs.rmSync(laneB, { recursive: true, force: true });
+		}
 	});
 
 	test('capture failure entries clear when the file later captures successfully', () => {

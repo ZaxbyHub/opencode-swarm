@@ -15,6 +15,7 @@ import {
 	reviewerScopeCaptureToFingerprint,
 	reviewerScopeFileFingerprintsEqual,
 } from '../hooks/reviewer-scope-file-fingerprint.js';
+import { canonicalWorkspaceIdentity } from '../scope/scope-binding.js';
 import {
 	type AgentSessionState,
 	advanceTaskState,
@@ -23,6 +24,7 @@ import {
 	getTaskState,
 	hasActiveTurboMode,
 	hasBothStageBCompletions,
+	markReviewerScopeGenerationMergebackPending,
 	markReviewerScopeGenerationNoChange,
 	markReviewerScopeGenerationReady,
 	type ReviewerScopeGeneration,
@@ -203,10 +205,6 @@ export interface StageBIngestionResult {
 	consumed: boolean;
 	stale?: boolean;
 	reason?: string;
-	/** Typed failure code (issue #2100) — e.g. `capture_failed:<code>`. */
-	code?: string;
-	/** True when the failure class is transient and bounded retry may recover. */
-	retryable?: boolean;
 }
 
 export function isBackgroundGateBearingRecord(
@@ -361,9 +359,7 @@ export async function ingestBackgroundStageBCompletion(args: {
 						return {
 							ok: false,
 							consumed: false,
-							code: `capture_failed:${captured.code}`,
-							retryable: captured.retryable,
-							reason: `background coder post-write fingerprint could not be reconstructed exactly (${captured.code} on ${captured.file})`,
+							reason: `background coder post-write fingerprint could not be reconstructed exactly (${captured.code}${captured.retryable ? ' (retryable)' : ' (permanent)'} on ${captured.file})`,
 						};
 					}
 					const fingerprint = reviewerScopeCaptureToFingerprint(captured);
@@ -371,8 +367,6 @@ export async function ingestBackgroundStageBCompletion(args: {
 						return {
 							ok: false,
 							consumed: false,
-							code: 'capture_failed:invalid_request',
-							retryable: false,
 							reason:
 								'background coder post-write fingerprint returned an unusable result',
 						};
@@ -532,12 +526,37 @@ export async function ingestBackgroundStageBCompletion(args: {
 					updateTaskWorkflowCache(parentSession, taskId, workflow);
 				}
 			}
+			if (args.reviewerReceiptOptions?.config?.enabled === true) {
+				// Lane-rooted background generations are never published ready
+				// from the primary root without merge-back verification (F-001):
+				// retain them as mergeback_pending; the merge-back verifier
+				// repoints and publishes when the primary matches.
+				const laneGeneration = getReviewerScopeGenerationForCoderCall({
+					parentSessionID: args.record.parentSessionId,
+					taskId,
+					coderCallID: args.record.callID,
+				});
+				const laneRooted =
+					laneGeneration !== null &&
+					laneGeneration.workspaceIdentity !==
+						canonicalWorkspaceIdentity(args.directory);
+				if (laneRooted) {
+					markReviewerScopeGenerationMergebackPending({
+						parentSessionID: args.record.parentSessionId,
+						taskId,
+						coderCallID: args.record.callID,
+					});
+					return { ok: true, consumed: true };
+				}
+			}
 			if (
 				args.reviewerReceiptOptions?.config?.enabled === true &&
 				!markReviewerScopeGenerationReady({
 					parentSessionID: args.record.parentSessionId,
 					taskId,
 					coderCallID: args.record.callID,
+					primaryWorkspaceIdentity:
+						canonicalWorkspaceIdentity(args.directory) ?? undefined,
 				})
 			) {
 				return {

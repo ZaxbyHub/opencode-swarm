@@ -205,68 +205,6 @@ describe('reviewer scope lifecycle v2 (issue #2100 contracts D/E/F)', () => {
 		expect(advisories).toContain('REVIEWER_CAPTURE_INCOMPLETE');
 	});
 
-	test('a worktree_derived binding resolves the lane root from the dispatch registry', async () => {
-		const { standardWorktreeByCallID } = await import(
-			'../../../src/hooks/delegation-gate/worktree-isolation'
-		);
-		fs.writeFileSync(path.join(laneDirectory, 'src/a.ts'), 'lane bytes\n');
-		standardWorktreeByCallID.set('coder-wt', {
-			callID: 'coder-wt',
-			handle: {
-				worktreePath: laneDirectory,
-				branchName: 'swarm/lane-test',
-			},
-		} as never);
-		try {
-			// installActiveScopeBinding creates a plan-sourced binding; flip it to
-			// worktree_derived with the lane identity the way deriveChildScopeBinding does.
-			const childSessionID = 'child-coder-wt';
-			startAgentSession(childSessionID, 'coder', laneDirectory);
-			swarmState.activeAgent.set(childSessionID, 'coder');
-			swarmState.agentSessions.get(childSessionID)!.delegationActive = true;
-			installActiveScopeBinding({
-				directory: laneDirectory,
-				childSessionId: childSessionID,
-				parentSessionId: 'parent',
-				dispatchCallId: 'coder-wt',
-				taskId: '1.1',
-				files: ['src/a.ts'],
-			});
-			const { getScopeBindingForParentDispatch } = await import(
-				'../../../src/scope/scope-binding'
-			);
-			const binding = getScopeBindingForParentDispatch({
-				parentSessionId: 'parent',
-				dispatchCallId: 'coder-wt',
-			});
-			expect(binding).not.toBeNull();
-			(binding as { source: string }).source = 'worktree_derived';
-
-			await expect(
-				beginApprovedReviewerScopeLifecycle({
-					directory,
-					tool: 'Task',
-					args: {
-						subagent_type: 'coder',
-						prompt: 'TASK: 1.1\nImplement the task.',
-					},
-					parentSessionID: 'parent',
-					callID: 'coder-wt',
-				}),
-			).resolves.toBe('coder_started');
-			const generation = getReviewerScopeGenerationForCoderCall({
-				parentSessionID: 'parent',
-				coderCallID: 'coder-wt',
-			});
-			expect(generation?.captureDirectory).toBe(laneDirectory);
-			expect(generation?.workspaceIdentity).toBe(
-				canonicalWorkspaceIdentity(laneDirectory),
-			);
-		} finally {
-			standardWorktreeByCallID.delete('coder-wt');
-		}
-	});
-
 	test('a genuine byte change before reviewer dispatch is stale and discarded (retry cannot fake equality)', async () => {
 		expect(await beginCoder({ callID: 'coder-drift' })).toBe('coder_started');
 		expect(
@@ -364,96 +302,117 @@ describe('reviewer scope lifecycle v2 (issue #2100 contracts D/E/F)', () => {
 		).toBe('ready');
 	});
 
-	test('a lane-rooted generation stays mergeback_pending until verified; then it is claimable', async () => {
-		// Lane copy of the repo file with the coder's post-write bytes.
-		fs.writeFileSync(path.join(laneDirectory, 'src/a.ts'), 'lane bytes\n');
-		const generation = startReviewerScopeGeneration({
-			parentSessionID: 'parent',
-			taskId: '1.1',
-			coderCallID: 'coder-lane',
-			declaredFiles: ['src/a.ts'],
-			captureDirectory: laneDirectory,
-			workspaceIdentity: canonicalWorkspaceIdentity(laneDirectory)!,
-		});
-		expect(generation).not.toBeNull();
+	test('F-005: a zero deadline never skips the final funded attempt; attempt counts are true', async () => {
+		const { _internals: lifecycleInternals } = await import(
+			'../../../src/hooks/reviewer-scope-lifecycle'
+		);
+		expect(await beginCoder({ callID: 'coder-deadline' })).toBe(
+			'coder_started',
+		);
 		expect(
 			recordReviewerScopeGenerationFile({
 				parentSessionID: 'parent',
 				taskId: '1.1',
-				coderCallID: 'coder-lane',
+				coderCallID: 'coder-deadline',
 				file: 'src/a.ts',
 			}),
 		).toBe(true);
-		const captured = captureReviewerScopeFileFingerprint(
-			laneDirectory,
-			'src/a.ts',
-		);
-		expect(captured.kind).toBe('captured_file');
+		fs.writeFileSync(path.join(directory, 'src/a.ts'), 'stable bytes\n');
+		const captured = captureReviewerScopeFileFingerprint(directory, 'src/a.ts');
 		expect(
 			recordReviewerScopeGenerationFileFingerprint({
 				parentSessionID: 'parent',
 				taskId: '1.1',
-				coderCallID: 'coder-lane',
+				coderCallID: 'coder-deadline',
 				fingerprint: reviewerScopeCaptureToFingerprint(captured)!,
 			}),
 		).toBe(true);
-		// Completing from the primary root routes a lane generation to pending.
-		expect(await completeCoder('coder-lane')).toBeNull();
 		expect(
-			getReviewerScopeGenerationForCoderCall({
+			markReviewerScopeGenerationReady({
 				parentSessionID: 'parent',
-				coderCallID: 'coder-lane',
-			})?.status,
-		).toBe('mergeback_pending');
-
-		// Reviewer dispatch is typed-blocked while merge-back is unverified.
-		await expect(beginReviewer('reviewer-lane')).rejects.toThrow(
-			/REVIEWER_SCOPE_MERGEBACK_PENDING/,
-		);
-		expect(
-			getReviewerScopeGenerationForCoderCall({
-				parentSessionID: 'parent',
-				coderCallID: 'coder-lane',
-			})?.status,
-		).toBe('mergeback_pending');
-
-		// Simulate merge-back landing the exact lane bytes in the primary root.
-		fs.writeFileSync(path.join(directory, 'src/a.ts'), 'lane bytes\n');
-		const { verifyReviewerScopeGenerationMergeBack } = await import(
-			'../../../src/hooks/reviewer-scope-mergeback'
-		);
-		verifyReviewerScopeGenerationMergeBack({
-			parentSessionID: 'parent',
-			taskId: '1.1',
-			coderCallID: 'coder-lane',
-			primaryDirectory: directory,
-		});
-		const settled = getReviewerScopeGenerationForCoderCall({
-			parentSessionID: 'parent',
-			coderCallID: 'coder-lane',
-		});
-		expect(settled?.status).toBe('ready');
-		expect(settled?.mergeback).toMatchObject({
-			verifiedAt: expect.any(Number),
-		});
-
-		// Primary bytes now equal the lane manifest: the reviewer claims cleanly
-		// and receives the exact manifest block in its prompt.
-		const reviewerArgs = {
-			subagent_type: 'reviewer',
-			prompt: 'TASK: 1.1\nReview the task.',
-		};
-		await expect(
-			beginApprovedReviewerScopeLifecycle({
-				directory,
-				tool: 'Task',
-				args: reviewerArgs,
-				parentSessionID: 'parent',
-				callID: 'reviewer-lane',
-				maxBytes: 1024 * 1024,
+				taskId: '1.1',
+				coderCallID: 'coder-deadline',
 			}),
-		).resolves.toBe('reviewer_claimed');
-		expect(reviewerArgs.prompt).toContain('<reviewer_scope_manifest>');
-		expect(reviewerArgs.prompt).toContain('manifest_hash: ');
+		).toBe(true);
+		// Every attempt races AND the retry deadline is already expired: the
+		// middle attempt may be skipped, but the FINAL funded attempt must run.
+		let reads = 0;
+		fingerprintInternals.read = ((
+			fd: number,
+			buffer: Buffer,
+			offset: number,
+			length: number,
+			position: number | null,
+		) => {
+			reads += 1;
+			const bytesRead = realRead(fd, buffer, offset, length, position);
+			if (bytesRead > 0) {
+				fs.writeFileSync(path.join(directory, 'src/a.ts'), 'raced again\n');
+			}
+			return bytesRead;
+		}) as typeof realRead;
+		const previousBackoff = lifecycleInternals.backoffMs;
+		const previousDeadline = lifecycleInternals.retryDeadlineMs;
+		lifecycleInternals.backoffMs = 0;
+		lifecycleInternals.retryDeadlineMs = 0;
+		try {
+			const error = await beginReviewer('reviewer-deadline').catch(
+				(thrown: Error) => thrown,
+			);
+			expect(error.message).toContain('REVIEWER_CAPTURE_RETRY_EXHAUSTED');
+			// attempts=2/3 with an always-expired deadline proves: attempt 1
+			// ran, attempt 2 was deadline-skipped (middle), and the FINAL
+			// funded attempt 3 still ran and self-aborted on its own expired
+			// per-chunk deadline. The early-exit regression would report 1/3
+			// with the final slot unspent.
+			expect(error.message).toContain('attempts=2/3');
+		} finally {
+			lifecycleInternals.backoffMs = previousBackoff;
+			lifecycleInternals.retryDeadlineMs = previousDeadline;
+		}
+		// Under an always-expired deadline every attempt self-aborts on its
+		// pre-chunk deadline check (by design) — the attempts count above is
+		// the contract proof, not chunk throughput.
 	});
+
+	test('a permanent capture failure reports attempts=1/3 (true count)', async () => {
+		expect(await beginCoder({ callID: 'coder-permanent' })).toBe(
+			'coder_started',
+		);
+		expect(
+			recordReviewerScopeGenerationFile({
+				parentSessionID: 'parent',
+				taskId: '1.1',
+				coderCallID: 'coder-permanent',
+				file: 'src/a.ts',
+			}),
+		).toBe(true);
+		fs.writeFileSync(path.join(directory, 'src/a.ts'), 'stable bytes\n');
+		const captured = captureReviewerScopeFileFingerprint(directory, 'src/a.ts');
+		expect(
+			recordReviewerScopeGenerationFileFingerprint({
+				parentSessionID: 'parent',
+				taskId: '1.1',
+				coderCallID: 'coder-permanent',
+				fingerprint: reviewerScopeCaptureToFingerprint(captured)!,
+			}),
+		).toBe(true);
+		expect(
+			markReviewerScopeGenerationReady({
+				parentSessionID: 'parent',
+				taskId: '1.1',
+				coderCallID: 'coder-permanent',
+			}),
+		).toBe(true);
+		// The path becomes a directory: non_regular is permanent, no retries.
+		fs.rmSync(path.join(directory, 'src/a.ts'));
+		fs.mkdirSync(path.join(directory, 'src/a.ts'));
+		const error = await beginReviewer('reviewer-permanent').catch(
+			(thrown: Error) => thrown,
+		);
+		expect(error.message).toContain('REVIEWER_CAPTURE_FAILED');
+		expect(error.message).toContain('attempts=1/3');
+		expect(error.message).toContain('responsible: architect');
+	});
+
 });

@@ -141,6 +141,7 @@ export function verifyReviewerScopeGenerationMergeBack(input: {
 			outcome: {
 				verified: true,
 				primaryWorkspaceIdentity: primaryIdentity ?? input.primaryDirectory,
+				primaryDirectory: input.primaryDirectory,
 				at: input.now,
 			},
 		});

@@ -41,9 +41,6 @@ export const REVIEWER_TASK_SCOPE_DESCRIPTION = 'reviewer-task-files-v2';
 export const REVIEWER_TASK_SCOPE_HEADER =
 	'opencode-swarm-reviewer-task-scope-v2';
 
-/** Legacy v1 description — receipts carrying it can never satisfy a v2 rebuild. */
-export const LEGACY_REVIEWER_TASK_SCOPE_DESCRIPTION = 'reviewer-task-files-v1';
-
 export interface ReviewerTaskScopeDeliveryEntry {
 	path: string;
 	mode: 'inline' | 'manual';
@@ -271,6 +268,7 @@ export async function buildReviewerTaskScope(
 	modifiedFiles: readonly string[],
 	maxBytes = DEFAULT_MAX_SCOPE_BYTES,
 	provenance?: ReviewerTaskScopeProvenance,
+	options: { deadlineAt?: number } = {},
 ): Promise<ReviewerScopeBuildResult> {
 	if (modifiedFiles.length === 0) {
 		return { ok: false, code: 'no_files', retryable: false };
@@ -345,7 +343,12 @@ export async function buildReviewerTaskScope(
 		left.relativePath.localeCompare(right.relativePath, 'en'),
 	);
 
-	const deadlineAt = Date.now() + REVIEWER_SCOPE_CAPTURE_BATCH_DEADLINE_MS;
+	// An outer deadline (bounded retry loop) caps this build's own budget so
+	// per-attempt budgets cannot stack past the caller's wall-clock claim.
+	const deadlineAt = Math.min(
+		options.deadlineAt ?? Number.POSITIVE_INFINITY,
+		Date.now() + REVIEWER_SCOPE_CAPTURE_BATCH_DEADLINE_MS,
+	);
 	const records: string[] = [
 		REVIEWER_TASK_SCOPE_HEADER,
 		JSON.stringify({

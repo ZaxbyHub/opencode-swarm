@@ -6,7 +6,6 @@ import * as path from 'node:path';
 import { computeScopeFingerprint } from '../../../src/hooks/review-receipt';
 import {
 	buildReviewerTaskScope,
-	LEGACY_REVIEWER_TASK_SCOPE_DESCRIPTION,
 	REVIEWER_TASK_SCOPE_DESCRIPTION,
 	REVIEWER_TASK_SCOPE_HEADER,
 } from '../../../src/hooks/review-receipt-scope';
@@ -170,72 +169,5 @@ describe('reviewer-task manifest v2 (issue #2100 contract C)', () => {
 				Array.from({ length: 300 }, (_, i) => `src/f${i}.ts`),
 			),
 		).toMatchObject({ ok: false, code: 'too_many_files', retryable: false });
-	});
-
-	test('the legacy v1 description is exported and distinct from v2', () => {
-		expect(LEGACY_REVIEWER_TASK_SCOPE_DESCRIPTION).toBe(
-			'reviewer-task-files-v1',
-		);
-		expect(REVIEWER_TASK_SCOPE_DESCRIPTION).toBe('reviewer-task-files-v2');
-		expect(LEGACY_REVIEWER_TASK_SCOPE_DESCRIPTION).not.toBe(
-			REVIEWER_TASK_SCOPE_DESCRIPTION,
-		);
-	});
-
-	test('a legacy v1 scope rejection surfaces the one-time REVIEW_SCOPE_LEGACY_V1 advisory', async () => {
-		const { resolveAutoReviewConfig } = await import(
-			'../../../src/config/schema'
-		);
-		const {
-			_internals: collectorInternals,
-			collectReviewerReceiptFromTranscript,
-		} = await import('../../../src/hooks/review-receipt-collector');
-		const { resetSwarmState, startAgentSession, swarmState } = await import(
-			'../../../src/state'
-		);
-		resetSwarmState();
-		startAgentSession('parent', 'architect', directory);
-		const legacyScope = {
-			content: 'opencode-swarm-reviewer-task-scope-v1\nlegacy\n',
-			description: LEGACY_REVIEWER_TASK_SCOPE_DESCRIPTION,
-			files: ['src/small.ts'],
-			headSha: 'a'.repeat(40),
-			workspaceIdentity: 'ws:/legacy',
-			delivery: [{ path: 'src/small.ts', mode: 'manual' as const }],
-			taskId: '1.1',
-			coderCallID: 'coder-legacy',
-			generation: 1,
-			sessionIncarnation: 'inc-legacy',
-		};
-		const realResolve = collectorInternals.resolveReviewerTaskScope;
-		const realBuild = collectorInternals.buildReviewerTaskScope;
-		collectorInternals.resolveReviewerTaskScope = async () => legacyScope;
-		collectorInternals.buildReviewerTaskScope = (async () => ({
-			ok: false as const,
-			code: 'head_timeout' as const,
-			retryable: true,
-		})) as typeof collectorInternals.buildReviewerTaskScope;
-		try {
-			const result = await collectReviewerReceiptFromTranscript(
-				directory,
-				{
-					targetAgent: 'reviewer',
-					transcript: 'VERDICT: APPROVED\nRISK: LOW\nISSUES: none\nFIXES: none',
-					sessionID: 'parent',
-					taskId: '1.1',
-				},
-				{ config: resolveAutoReviewConfig({ enabled: true }) },
-			);
-			expect(result).toBeNull();
-			const advisories = (
-				swarmState.agentSessions.get('parent')?.pendingAdvisoryMessages ?? []
-			).join('\n');
-			expect(advisories).toContain('REVIEW_SCOPE_LEGACY_V1');
-			expect(advisories).toContain('ACTION[architect]');
-		} finally {
-			collectorInternals.resolveReviewerTaskScope = realResolve;
-			collectorInternals.buildReviewerTaskScope = realBuild;
-			resetSwarmState();
-		}
 	});
 });

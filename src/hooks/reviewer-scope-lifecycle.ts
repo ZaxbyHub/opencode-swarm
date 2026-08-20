@@ -1,5 +1,6 @@
 import * as child_process from 'node:child_process';
 import { stripKnownSwarmPrefix } from '../config/schema.js';
+import { sanitizeDiagnosticText } from '../scope/path-identity.js';
 import {
 	canonicalWorkspaceIdentity,
 	getScopeBindingForParentDispatch,
@@ -23,7 +24,10 @@ import {
 	startReviewerScopeGeneration,
 } from '../state.js';
 import { pushAdvisory } from '../utils/advisory-queue.js';
-import { standardWorktreeByCallID } from './delegation-gate/worktree-isolation.js';
+import {
+	abortStandardWorktreeDispatch,
+	standardWorktreeByCallID,
+} from './delegation-gate/worktree-isolation.js';
 import { normalizeToolName } from './normalize-tool-name.js';
 import { computeScopeFingerprint } from './review-receipt.js';
 import {
@@ -53,6 +57,8 @@ export type ReviewerScopeLifecycleTransition =
 export const _internals: {
 	spawn: typeof child_process.spawn;
 	backoffMs?: number;
+	/** Test-only deadline override for the bounded retry loop (ms). */
+	retryDeadlineMs?: number;
 } = {
 	spawn: child_process.spawn,
 };
@@ -208,7 +214,7 @@ function freshnessDenial(
 			failure.retryable
 				? 'REVIEWER_CAPTURE_RETRY_EXHAUSTED'
 				: 'REVIEWER_CAPTURE_FAILED',
-			`task ${generation.taskId} generation ${generation.generation}: file ${failure.file} capture failed (${failure.code}, retryable=${failure.retryable}, attempts=${attempt}/${REVIEWER_SCOPE_CAPTURE_ATTEMPTS}). ACTION[architect]: ${
+			`task ${generation.taskId} generation ${generation.generation}: file ${failure.file} capture failed (${failure.code}, retryable=${failure.retryable}, attempts=${attempt}/${REVIEWER_SCOPE_CAPTURE_ATTEMPTS}, responsible: architect). ACTION[architect]: ${
 				failure.retryable
 					? 're-dispatch the reviewer to retry capture, or route explicit manual review'
 					: `resolve the ${failure.code} condition for the file, then re-dispatch the reviewer or route explicit manual review`
@@ -235,32 +241,37 @@ async function withCaptureRetry<T>(
 	run: (attempt: number, deadlineAt: number) => Promise<T> | T,
 	isRetryable: (value: T) => boolean,
 	options: { deadlineMs?: number } = {},
-): Promise<T> {
+): Promise<{ value: T; attemptsRun: number }> {
 	const backoff = _internals.backoffMs ?? 100;
 	const deadlineAt =
 		Date.now() +
-		(options.deadlineMs ?? REVIEWER_SCOPE_CAPTURE_BATCH_DEADLINE_MS);
+		(options.deadlineMs ??
+			_internals.retryDeadlineMs ??
+			REVIEWER_SCOPE_CAPTURE_BATCH_DEADLINE_MS);
 	let last: T | undefined;
+	let attemptsRun = 0;
 	for (
 		let attempt = 1;
 		attempt <= REVIEWER_SCOPE_CAPTURE_ATTEMPTS;
 		attempt += 1
 	) {
-		// The deadline may skip a MIDDLE attempt but never the final one —
-		// callers report `attempts=N/N` and must not claim exhaustion while a
-		// funded attempt slot remains unspent.
+		// The deadline may skip a MIDDLE attempt (continue) but never the final
+		// one — exhaustion must never be reported while a funded attempt slot
+		// remains unspent, and the reported attempt count is always the true
+		// number of executed attempts.
 		if (
 			attempt > 1 &&
 			attempt < REVIEWER_SCOPE_CAPTURE_ATTEMPTS &&
 			Date.now() > deadlineAt
 		) {
-			return last as T;
+			continue;
 		}
+		attemptsRun += 1;
 		last = await run(attempt, deadlineAt);
-		if (!isRetryable(last)) return last;
+		if (!isRetryable(last)) return { value: last, attemptsRun };
 		if (attempt < REVIEWER_SCOPE_CAPTURE_ATTEMPTS) await sleepBounded(backoff);
 	}
-	return last as T;
+	return { value: last as T, attemptsRun };
 }
 
 /**
@@ -274,11 +285,13 @@ async function verifyWorkingTreeClean(
 	let child: child_process.ChildProcess | undefined;
 	let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
 	try {
-		// Single timeout source of truth: the explicit timer below (matching the
-		// resolveHeadSha exemplar), not a second spawn-level timeout racing it.
+		// AGENTS.md invariant 3 requires the spawn-level timeout; the explicit
+		// timer below remains the single resolution path (settled-guarded), and
+		// the spawn option is defense in depth for a timer-schedule stall.
 		child = _internals.spawn('git', ['status', '--porcelain'], {
 			cwd: directory,
 			stdio: ['ignore', 'pipe', 'ignore'],
+			timeout: NOCHANGE_STATUS_TIMEOUT_MS,
 			windowsHide: true,
 		});
 		return await new Promise<'clean' | 'dirty' | 'unverifiable'>((resolve) => {
@@ -355,12 +368,16 @@ function reviewerManifestPromptBlock(input: {
 		`head: ${input.headSha}`,
 		`workspace: ${input.workspaceIdentity}`,
 	];
+	// Paths are coder-influenced strings: JSON-quoting neutralizes tag and
+	// delimiter injection (a raw `</reviewer_scope_manifest>` in a filename
+	// must never splice fake structure into the reviewer's prompt).
 	const full = input.entries.map((entry) =>
 		entry.state === 'deleted'
-			? `${entry.path} state=deleted delivery=${entry.mode}`
-			: `${entry.path} state=file bytes=${entry.bytes} sha256=${entry.sha256} delivery=${entry.mode}`,
+			? `${JSON.stringify(entry.path)} state=deleted delivery=${entry.mode}`
+			: `${JSON.stringify(entry.path)} state=file bytes=${entry.bytes} sha256=${entry.sha256} delivery=${entry.mode}`,
 	);
 	const instruction = [
+		'completeness: exact — every guardrail-observed modified file is listed; none omitted.',
 		'Every listed file must be verified against its sha256 (current bytes) before a verdict.',
 		'Files with delivery=manual MUST be inspected through read-only tools; inline bytes were not attached.',
 		'</reviewer_scope_manifest>',
@@ -369,7 +386,7 @@ function reviewerManifestPromptBlock(input: {
 	if (withEntries.length <= MANIFEST_PROMPT_BYTES) return withEntries;
 	const pathsOnly = [
 		...header,
-		...input.entries.map((e) => e.path),
+		...input.entries.map((entry) => JSON.stringify(entry.path)),
 		...instruction,
 	].join('\n');
 	if (pathsOnly.length <= MANIFEST_PROMPT_BYTES) return pathsOnly;
@@ -455,9 +472,23 @@ export async function beginApprovedReviewerScopeLifecycle(input: {
 		});
 		if (!binding) return null;
 		if (binding.taskId !== taskId) {
+			// This throw fires after the fail-closed region, so the normal
+			// before-chain cleanup never runs — abort any provisioned lane
+			// first or the worktree/branch leaks (F-006).
+			if (standardWorktreeByCallID.has(input.callID)) {
+				try {
+					await abortStandardWorktreeDispatch(
+						input.callID,
+						'cancelled',
+						input.directory,
+					);
+				} catch {
+					// Best-effort; the typed denial below is the payload.
+				}
+			}
 			throw typedReviewerScopeError(
 				'REVIEWER_SCOPE_BINDING_MISMATCH',
-				`task ${taskId}: the activated scope binding names task ${binding.taskId} for this dispatch. ACTION[architect]: re-declare scope for the exact task and redispatch`,
+				`task ${taskId}: the activated scope binding names task ${binding.taskId} for this dispatch (retryable=true, responsible: architect). ACTION[architect]: re-declare scope for the exact task and redispatch`,
 			);
 		}
 		const capture = resolveReviewerCaptureDirectory({
@@ -466,9 +497,20 @@ export async function beginApprovedReviewerScopeLifecycle(input: {
 			ambient: input.directory,
 		});
 		if (!capture.ok) {
+			if (standardWorktreeByCallID.has(input.callID)) {
+				try {
+					await abortStandardWorktreeDispatch(
+						input.callID,
+						'cancelled',
+						input.directory,
+					);
+				} catch {
+					// Best-effort; the typed denial below is the payload.
+				}
+			}
 			throw typedReviewerScopeError(
 				'REVIEWER_SCOPE_BINDING_MISMATCH',
-				`task ${taskId}: coder workspace root could not be bound (${capture.detail}). ACTION[architect]: verify the worktree lane/scope binding for this dispatch, then redispatch`,
+				`task ${taskId}: coder workspace root could not be bound (${capture.detail}) (retryable=true, responsible: architect). ACTION[architect]: verify the worktree lane/scope binding for this dispatch, then redispatch`,
 			);
 		}
 		const rawArgs =
@@ -502,7 +544,7 @@ export async function beginApprovedReviewerScopeLifecycle(input: {
 			if (noChange) {
 				throw typedReviewerScopeError(
 					'REVIEWER_SCOPE_NO_CHANGE',
-					`task ${taskId} generation ${noChange.generation}: the coder made zero guardrail-observed writes and the workspace diff is empty — no reviewer pass is owed. ACTION[architect]: satisfy acceptance deterministically, or re-dispatch the coder if changes were intended`,
+					`task ${taskId} generation ${noChange.generation}: the coder made zero guardrail-observed writes and the workspace diff is empty — no reviewer pass is owed (retryable=true, responsible: architect). ACTION[architect]: satisfy acceptance deterministically, or re-dispatch the coder if changes were intended`,
 				);
 			}
 			const pending = peekReviewerScopeGenerationByStatus({
@@ -513,7 +555,7 @@ export async function beginApprovedReviewerScopeLifecycle(input: {
 			if (pending) {
 				throw typedReviewerScopeError(
 					'REVIEWER_SCOPE_MERGEBACK_PENDING',
-					`task ${taskId} generation ${pending.generation}: lane merge-back has not been verified against the primary checkout yet. ACTION[architect]: wait for the merge-back advisory, then re-dispatch the reviewer`,
+					`task ${taskId} generation ${pending.generation}: lane merge-back has not been verified against the primary checkout yet (retryable=true, responsible: architect). ACTION[architect]: wait for the merge-back advisory, then re-dispatch the reviewer`,
 				);
 			}
 			const mismatch = peekReviewerScopeGenerationByStatus({
@@ -528,12 +570,12 @@ export async function beginApprovedReviewerScopeLifecycle(input: {
 						: 'unverified';
 				throw typedReviewerScopeError(
 					'REVIEWER_SCOPE_MERGEBACK_MISMATCH',
-					`task ${taskId} generation ${mismatch.generation}: merge-back verification failed (${mergebackReason}). ACTION[architect]: resolve the lane merge conflict or re-dispatch the coder`,
+					`task ${taskId} generation ${mismatch.generation}: merge-back verification failed (${mergebackReason}) (retryable=true, responsible: architect). ACTION[architect]: resolve the lane merge conflict or re-dispatch the coder`,
 				);
 			}
 			throw typedReviewerScopeError(
 				'REVIEWER_SCOPE_STALE',
-				`task ${taskId}: coder post-write fingerprints are incomplete or changed before reviewer dispatch`,
+				`task ${taskId}: coder post-write fingerprints are incomplete or changed before reviewer dispatch (retryable=false, responsible: architect)`,
 			);
 		}
 		// First freshness gate: typed transient failures get one bounded retry
@@ -553,18 +595,19 @@ export async function beginApprovedReviewerScopeLifecycle(input: {
 				outcome.reason === 'capture_failed' &&
 				outcome.failure.retryable,
 		);
-		if (freshFirst.current === false) {
-			if (freshFirst.reason === 'genuine_drift') {
+		if (freshFirst.value.current === false) {
+			const outcome = freshFirst.value;
+			if (outcome.reason === 'genuine_drift') {
 				discardReviewerScopeGenerationForCoderCall({
 					parentSessionID: input.parentSessionID,
 					taskId,
 					coderCallID: ready.coderCallID,
 				});
 			}
-			throw freshnessDenial(freshFirst, ready, REVIEWER_SCOPE_CAPTURE_ATTEMPTS);
+			throw freshnessDenial(outcome, ready, freshFirst.attemptsRun);
 		}
 		const build = await withCaptureRetry(
-			() =>
+			(_attempt, deadlineAt) =>
 				buildReviewerTaskScope(
 					input.directory,
 					ready.modifiedFiles,
@@ -575,18 +618,20 @@ export async function beginApprovedReviewerScopeLifecycle(input: {
 						generation: ready.generation,
 						sessionIncarnation: ready.sessionIncarnation,
 					},
+					{ deadlineAt },
 				),
 			(result) => result.ok === false && result.retryable,
 		);
-		if (!build.ok) {
+		if (!build.value.ok) {
+			const failure = build.value;
 			throw typedReviewerScopeError(
-				build.retryable
+				failure.retryable
 					? 'REVIEWER_CAPTURE_RETRY_EXHAUSTED'
 					: 'REVIEWER_CAPTURE_FAILED',
-				`task ${ready.taskId} generation ${ready.generation}${build.file ? `: file ${build.file}` : ''}: scope build failed (${build.code}, retryable=${build.retryable}, attempts=${REVIEWER_SCOPE_CAPTURE_ATTEMPTS}/${REVIEWER_SCOPE_CAPTURE_ATTEMPTS}). ACTION[architect]: ${
-					build.retryable
+				`task ${ready.taskId} generation ${ready.generation}${failure.file ? `: file ${failure.file}` : ''}: scope build failed (${failure.code}, retryable=${failure.retryable}, attempts=${build.attemptsRun}/${REVIEWER_SCOPE_CAPTURE_ATTEMPTS}, responsible: architect). ACTION[architect]: ${
+					failure.retryable
 						? 're-dispatch the reviewer to retry capture, or route explicit manual review'
-						: `resolve the ${build.code} condition, then re-dispatch the reviewer or route explicit manual review`
+						: `resolve the ${failure.code} condition, then re-dispatch the reviewer or route explicit manual review`
 				}`,
 			);
 		}
@@ -612,7 +657,7 @@ export async function beginApprovedReviewerScopeLifecycle(input: {
 			!generationFingerprintsAreCurrent(current, {
 				deadlineAt: Date.now() + REVIEWER_SCOPE_CAPTURE_BATCH_DEADLINE_MS,
 			}).current ||
-			!scopeMatchesGenerationFingerprints(build.scope, current)
+			!scopeMatchesGenerationFingerprints(build.value.scope, current)
 		) {
 			discardReviewerScopeGenerationForCoderCall({
 				parentSessionID: input.parentSessionID,
@@ -621,7 +666,7 @@ export async function beginApprovedReviewerScopeLifecycle(input: {
 			});
 			throw typedReviewerScopeError(
 				'REVIEWER_SCOPE_STALE',
-				`task ${taskId} generation ${ready.generation}: exact reviewer dispatch scope changed during capture`,
+				`task ${taskId} generation ${ready.generation}: exact reviewer dispatch scope changed during capture (retryable=false, responsible: architect)`,
 			);
 		}
 		// No await is permitted between the final byte/generation recheck above
@@ -644,12 +689,12 @@ export async function beginApprovedReviewerScopeLifecycle(input: {
 			});
 			throw typedReviewerScopeError(
 				'REVIEWER_SCOPE_STALE',
-				`task ${taskId}: exact reviewer dispatch scope could not be claimed`,
+				`task ${taskId}: exact reviewer dispatch scope could not be claimed (retryable=false, responsible: architect)`,
 			);
 		}
 		const dispatchHash = computeScopeFingerprint(
-			build.scope.content,
-			build.scope.description,
+			build.value.scope.content,
+			build.value.scope.description,
 		).hash;
 		if (
 			!attachReviewerScopeGenerationDispatchSnapshot({
@@ -658,9 +703,9 @@ export async function beginApprovedReviewerScopeLifecycle(input: {
 				reviewerCallID: input.callID,
 				snapshot: {
 					hash: dispatchHash,
-					description: build.scope.description,
-					files: [...build.scope.files],
-					headSha: build.scope.headSha,
+					description: build.value.scope.description,
+					files: [...build.value.scope.files],
+					headSha: build.value.scope.headSha,
 					taskId: claimed.taskId,
 					coderCallID: claimed.coderCallID,
 					generation: claimed.generation,
@@ -675,11 +720,11 @@ export async function beginApprovedReviewerScopeLifecycle(input: {
 			});
 			throw typedReviewerScopeError(
 				'REVIEWER_SCOPE_STALE',
-				`task ${taskId}: exact reviewer dispatch scope could not be captured`,
+				`task ${taskId}: exact reviewer dispatch scope could not be captured (retryable=false, responsible: architect)`,
 			);
 		}
 		// Claim is durable; hand the reviewer the exact manifest it reviews under.
-		injectReviewerManifestPrompt(input.args, build.scope, dispatchHash);
+		injectReviewerManifestPrompt(input.args, build.value.scope, dispatchHash);
 		return 'reviewer_claimed';
 	}
 	return null;
@@ -753,9 +798,9 @@ export async function completeReviewerScopeLifecycle(input: {
 		pushAdvisory(
 			ensureAgentSession(input.parentSessionID),
 			`REVIEWER_CAPTURE_INCOMPLETE: task ${taskId} generation ${generation.generation}: ${missing} file(s) have no stored fingerprint after coder completion; the generation is retained but not reviewable yet. ACTION[architect]: retry the coder so capture re-runs, or inspect ${generation.captureFailures
-				.map((entry) => entry.file)
+				.map((entry) => sanitizeDiagnosticText(entry.file, 120))
 				.slice(0, 5)
-				.join(', ')} capture failures`,
+				.join(', ')} capture failures (responsible: architect)`,
 		);
 		return null;
 	}
@@ -777,6 +822,9 @@ export async function completeReviewerScopeLifecycle(input: {
 		parentSessionID: input.parentSessionID,
 		taskId,
 		coderCallID: input.callID,
+		// Arm the state-level lane gate whenever the primary identity is
+		// computable, mirroring the background path's fail-closed routing.
+		primaryWorkspaceIdentity: primaryIdentity ?? undefined,
 	})
 		? 'coder_ready'
 		: null;
