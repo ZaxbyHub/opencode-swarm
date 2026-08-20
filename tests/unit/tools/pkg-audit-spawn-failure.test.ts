@@ -2,15 +2,20 @@ import { afterEach, describe, expect, it, mock } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { ToolContext } from '@opencode-ai/plugin';
+import { _internals, pkg_audit } from '../../../src/tools/pkg-audit';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
-// Mock isCommandAvailable so the cargo ecosystem is treated as available.
-mock.module('../../../src/build/discovery.js', () => ({
-	isCommandAvailable: (_cmd: string) => true,
-	clearToolchainCache: () => {},
-}));
-
-import { _internals, pkg_audit } from '../../../src/tools/pkg-audit';
+// NO `mock.module` HERE, deliberately. An earlier revision force-mocked
+// `isCommandAvailable` to `true` at file scope. `mock.module` registers
+// process-wide and `mock.restore()` does NOT unregister it, so that leaked into
+// every file loaded afterwards in the same Bun process, skipping the real
+// "tool not installed" early returns in `runGoAudit`, `runBundleAudit` and
+// `runDartAudit` and failing three `pkg-audit.test.ts` tests in BOTH orders.
+// Inside a security-audit tool's suite that is a false-green generator.
+//
+// It was also unnecessary: neither `runCargoAudit` nor `runNpmAudit` consults
+// `isCommandAvailable` at all (only the go/dotnet/bundle/dart/composer paths
+// do), so these tests reach the spawn without any availability stub.
 
 // Regression coverage for #2236 Sweep A, FIX 2 (security-relevant): a `cargo
 // audit` process-creation failure must be reported with `incomplete: true`
