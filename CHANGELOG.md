@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.143.6](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.143.5...v7.143.6) (2026-08-20)
+
+
+### Bug Fixes
+
+* **pr-workflow:** close PR review feedback on disclosure surfaces and sweep scope ([2afdabd](https://github.com/ZaxbyHub/opencode-swarm/commit/2afdabdbb350266e9db266af006fb5763be380da))
+* **pr-workflow:** eradicate review-pipeline wedge states and harden req_coverage preflight gate ([369e880](https://github.com/ZaxbyHub/opencode-swarm/commit/369e8800a8f446de35f885489dd7587241b2b956))
+
 ## [7.143.5](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.143.4...v7.143.5) (2026-08-20)
 
 
