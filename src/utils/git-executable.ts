@@ -35,8 +35,11 @@
  * `isExecutableFile`'s missing `X_OK` check
  * (`src/utils/external-tool-runner.ts`). Exit 0 alone does NOT accept a
  * candidate: the output must match git's own `git version <n>.<n>` format
- * (`GIT_VERSION_PATTERN`), so an arbitrary program that merely exits 0 is
- * never mistaken for git.
+ * (`GIT_VERSION_PATTERN`), so a non-git program that merely exits 0 is not
+ * mistaken for git BY ACCIDENT. That format check is not an anti-tampering
+ * control — see `GIT_VERSION_PATTERN` below for what it can and cannot do;
+ * the control over which binaries may be NAMED at all is
+ * `enforceGitBinaryProvenance` in `src/config/loader.ts`.
  *
  * Bounded probing (AGENTS.md invariant 1 — plugin init is fast and
  * side-effect-minimal): per-probe timeout 250ms, total first-resolution
@@ -93,18 +96,31 @@ const WINDOWS_PATH_EXTENSIONS = ['.exe', '.cmd', '.bat'];
 
 /**
  * `git --version` prints exactly `git version <major>.<minor>...` — a fixed,
- * NON-localized format string in git's own `cmd_version()`. Requiring it is
- * what makes the probe an "is this git?" check instead of an "is this an
- * executable that exits 0?" check.
+ * NON-localized format string in git's own `cmd_version()`. Requiring it
+ * upgrades the probe from "is this an executable that exits 0?" to "does this
+ * behave like git?".
  *
- * SECURITY (CWE-427/CWE-77). Every candidate — including the explicit
- * override — is accepted purely on the strength of this probe, and the
- * accepted path is then spawned for every host-side git call. Without a
- * format check, ANY program that exits 0 qualifies: `/bin/true`, a shell
- * shim, a downloaded helper. The provenance gate in `src/config/loader.ts`
- * stops an untrusted repository from NAMING such a program; this check is the
- * independent second layer that also covers the env var and any future
- * candidate source.
+ * NOT A SECURITY CONTROL — it stops ACCIDENTS, not attackers.
+ *
+ * What it catches: a candidate that is not git but happens to exit 0, which
+ * is a real and common state on developer machines — `/bin/true`, a broken
+ * `/usr/bin/git` xcode-select shim, a `.cmd`/`.bat` wrapper, an unrelated
+ * program named `git` earlier on PATH.
+ *
+ * What it does NOT catch: a HOSTILE candidate. Whoever controls the named
+ * program controls its stdout, and printing `git version 2.43.0` to satisfy
+ * this regex is a one-line script. Treat clearing this check as evidence of
+ * nothing more than "not obviously the wrong program" — the path is
+ * afterwards spawned for every host-side git call with whatever arguments the
+ * caller passes.
+ *
+ * The actual control against an untrusted repository choosing which binary
+ * this process executes (CWE-427) is `enforceGitBinaryProvenance` in
+ * `src/config/loader.ts`: it strips a PROJECT-supplied `git.binary` before the
+ * merged config is built, so only the user-level config and the
+ * `OPENCODE_SWARM_GIT_BINARY` env var — both of which the user, not the repo,
+ * controls — can name a candidate at all. That gate is the trust boundary;
+ * this regex sits behind it and would not compensate for its removal.
  *
  * Deliberately anchored to the first line only, so a wrapper that prints its
  * own banner AFTER git's line (e.g. `hub`) still passes, while a program
@@ -195,6 +211,29 @@ let cache: CacheEntry | null = null;
 let lastAttempts: GitResolutionAttempt[] = [];
 let configuredOverride: string | undefined;
 let inFlightAsync: Promise<string> | null = null;
+
+/**
+ * Monotonic counter bumped by every `resetGitExecutableCache()`. A resolution
+ * cycle captures it before building its candidate list and re-checks it before
+ * committing; a cycle whose generation is stale was computed against module
+ * state that no longer exists and must NOT write `cache`/`lastAttempts`.
+ *
+ * The bug this closes. `ensureSwarmGitExcluded` awaits
+ * `resolveGitExecutableAsync()` as its first statement, and plugin init runs
+ * it under an outer `withTimeout` while registering the user's `git.binary`
+ * via `setGitBinaryOverride` afterwards (`src/index.ts`). When that timeout
+ * fires, the probe is abandoned but keeps running with a candidate list built
+ * BEFORE the override existed. `setGitBinaryOverride` resets the cache; the
+ * abandoned probe then completes and re-writes a `success` entry naming the
+ * pre-override candidate. A `success` entry never expires, so the user's
+ * configured git binary is silently discarded for the entire process
+ * lifetime, with no diagnostic.
+ *
+ * Registering the override earlier does not fix this: the probe starts when
+ * the init promise is CONSTRUCTED, not when it is awaited, so any later
+ * registration still lands mid-flight. The guard has to be at the write.
+ */
+let cacheGeneration = 0;
 
 function unique(values: string[]): string[] {
 	return [...new Set(values.filter(Boolean))];
@@ -500,11 +539,28 @@ function readCache(): CacheEntry | null {
  * Both therefore converge on the unprobed bare name. When that bare spawn
  * genuinely fails, `gitExec` (src/git/branch.ts) classifies it and renders
  * `describeGitResolution()`'s candidate list into an actionable error.
+ *
+ * `generation` is the value of `cacheGeneration` captured when this cycle
+ * built its candidate list — see that variable for why a stale cycle must not
+ * commit.
  */
 function applyProbeResult(
 	result: ProbeCycleResult,
 	attempts: GitResolutionAttempt[],
+	generation: number,
 ): string {
+	if (generation !== cacheGeneration) {
+		// Stale cycle: the cache was reset (an override registered, or a test
+		// reset) after this cycle read module state. Hand the in-flight caller
+		// what WAS probed — it is a validated binary, and the alternative is
+		// failing a call that has a usable answer — but leave `cache` and
+		// `lastAttempts` untouched so the next resolution re-probes against
+		// current state. Deliberately NOT a recursive re-resolve: that can loop
+		// under repeated resets, and one call using a validated non-override git
+		// is bounded harm next to a cache entry that never expires.
+		return result.outcome === 'accepted' ? result.path : BARE_GIT;
+	}
+
 	lastAttempts = attempts;
 
 	if (result.outcome === 'accepted') {
@@ -531,10 +587,11 @@ export function resolveGitExecutable(): string {
 
 	const platform = _internals.platform();
 	const attempts: GitResolutionAttempt[] = [];
+	const generation = cacheGeneration;
 	const candidates = buildCandidates(platform);
 
 	const result = driveSync(probeCycle(candidates, platform, attempts));
-	return applyProbeResult(result, attempts);
+	return applyProbeResult(result, attempts, generation);
 }
 
 /**
@@ -552,11 +609,12 @@ export async function resolveGitExecutableAsync(): Promise<string> {
 
 	const platform = _internals.platform();
 	const attempts: GitResolutionAttempt[] = [];
+	const generation = cacheGeneration;
 	const candidates = buildCandidates(platform);
 
 	const run = (async (): Promise<string> => {
 		const result = await driveAsync(probeCycle(candidates, platform, attempts));
-		return applyProbeResult(result, attempts);
+		return applyProbeResult(result, attempts, generation);
 	})();
 
 	inFlightAsync = run;
@@ -567,11 +625,19 @@ export async function resolveGitExecutableAsync(): Promise<string> {
 	}
 }
 
-/** Exported for tests and called by `setGitBinaryOverride` on change. */
+/**
+ * Exported for tests and called by `setGitBinaryOverride` on change.
+ *
+ * Bumping `cacheGeneration` is load-bearing, not bookkeeping: clearing
+ * `inFlightAsync` detaches an in-flight async probe but cannot cancel it, so
+ * without the bump that abandoned probe still commits its pre-reset result
+ * over the state this reset just established.
+ */
 export function resetGitExecutableCache(): void {
 	cache = null;
 	lastAttempts = [];
 	inFlightAsync = null;
+	cacheGeneration++;
 }
 
 /**
