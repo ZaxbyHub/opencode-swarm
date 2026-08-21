@@ -13,6 +13,8 @@ vi.mock('../../../src/evidence/manager.js', () => ({
 }));
 vi.mock('../../../src/hooks/utils.js', () => ({
 	readSwarmFileAsync: vi.fn(),
+	// #2268: diagnose's Coder Settlements check resolves paths via this stub.
+	validateSwarmPath: (dir: string, file: string) => `${dir}/${file}`,
 }));
 vi.mock('../../../src/config/loader.js', () => ({
 	loadPluginConfig: vi.fn(),
@@ -35,7 +37,6 @@ import { readSwarmFileAsync } from '../../../src/hooks/utils.js';
 // Import mocked modules
 import { loadPlanJsonOnly } from '../../../src/plan/manager.js';
 
-// Type assertions for mocks
 const mockLoadPlanJsonOnly = loadPlanJsonOnly as ReturnType<typeof vi.fn>;
 const mockListEvidenceTaskIds = listEvidenceTaskIds as ReturnType<typeof vi.fn>;
 const mockReadSwarmFileAsync = readSwarmFileAsync as ReturnType<typeof vi.fn>;
@@ -46,7 +47,6 @@ const mockStatSync = statSync as ReturnType<typeof vi.fn>;
 const mockExecSync = execSync as ReturnType<typeof vi.fn>;
 const mockReadFileSync = readFileSync as ReturnType<typeof vi.fn>;
 
-// Helper to find a check by name
 function findCheck(checks: any[], name: string) {
 	return checks.find((c) => c.name === name);
 }

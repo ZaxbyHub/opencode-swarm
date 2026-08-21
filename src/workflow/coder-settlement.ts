@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { appendFile, mkdir } from 'node:fs/promises';
+import { appendFile, mkdir, readdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type {
 	BackgroundTaskChangeContext,
@@ -106,7 +106,12 @@ async function writeWal(
  */
 async function appendSettlementEvent(
 	directory: string,
-	action: 'dispatched' | 'settled' | 'aborted',
+	action:
+		| 'dispatched'
+		| 'settled'
+		| 'aborted'
+		| 'recovered'
+		| 'recovery-failed',
 	wal: Pick<CoderSettlementWal, 'taskId' | 'transitionId' | 'actor'>,
 	extra?: Record<string, unknown>,
 ): Promise<void> {
@@ -324,7 +329,7 @@ export async function beginCoderSettlement(options: {
 							existing.transitionId !== options.transitionId
 						) {
 							throw new Error(
-								`CODER_SETTLEMENT_IN_PROGRESS: transition ${existing.transitionId} owns task ${options.taskId}, so transition ${options.transitionId} cannot dispatch it (${filePath}, state ${existing.state}). Wait for the owning transition to settle or run coder-settlement recovery for this task, then retry; do not remove the WAL by hand.`,
+								`CODER_SETTLEMENT_IN_PROGRESS: transition ${existing.transitionId} owns task ${options.taskId}, so transition ${options.transitionId} cannot dispatch it (${filePath}, state ${existing.state}). Wait for the owning transition to settle or run /swarm recover ${options.taskId} (or /swarm reset-session), then retry; do not remove the WAL by hand.`,
 							);
 						}
 						if (existing.transitionId === options.transitionId) {
@@ -738,7 +743,7 @@ export async function recoverCoderSettlement(
 			(wal.processId !== process.pid && isProcessAlive(wal.processId))
 		) {
 			throw new Error(
-				`CODER_DISPATCH_IN_PROGRESS: transition ${wal.transitionId} still owns task ${taskId} (${filePath}, state ${wal.state}, pid ${wal.processId}). Wait for that dispatch to settle or recover it before retrying; do not remove the WAL by hand.`,
+				`CODER_DISPATCH_IN_PROGRESS: transition ${wal.transitionId} still owns task ${taskId} (${filePath}, state ${wal.state}, pid ${wal.processId}). Wait for that dispatch to settle or run /swarm recover ${taskId} (or /swarm reset-session) to unwedge it; do not remove the WAL by hand.`,
 			);
 		}
 		if (wal.state === 'DISPATCHED') {
@@ -973,11 +978,264 @@ export async function assertNoUnsettledCoderDispatch(
 	if (wal === null) return;
 	if (wal.state === 'DISPATCHED' || wal.state === 'PREPARED') {
 		throw new Error(
-			`CODER_SETTLEMENT_RECOVERY_REQUIRED: transition ${wal.transitionId} must settle before task ${taskId} can change plan status (${filePath}, state ${wal.state}). Run coder-settlement recovery for this task, then retry.`,
+			`CODER_SETTLEMENT_RECOVERY_REQUIRED: transition ${wal.transitionId} must settle before task ${taskId} can change plan status (${filePath}, state ${wal.state}). Run /swarm recover ${taskId} (or /swarm reset-session), then retry.`,
 		);
 	}
 }
 
+const MAX_SETTLEMENT_WAL_SCAN = 200;
+const SETTLEMENT_WAL_FILE_PATTERN = /^[\w.\-:]+\.json$/;
+
+export interface CoderSettlementWalState {
+	taskId: string;
+	state: CoderSettlementWal['state'] | 'unreadable';
+	transitionId?: string;
+	processId?: number;
+	recordedAt?: string;
+	/** The in-process ownership registry still holds this dispatch (toolAfter never drained it). */
+	ownedInProcess: boolean;
+	/** A different, still-alive host process owns the dispatch. Never force-releasable from here. */
+	ownedByLiveForeignPid: boolean;
+}
+
+/**
+ * Bounded inventory of durable coder-settlement WALs for diagnostics and
+ * recovery surfaces (/swarm diagnose, /swarm recover, /swarm reset-session).
+ * Ownership predicates mirror recoverCoderSettlement's refusal guard exactly:
+ * `ownedInProcess` means this process's liveDispatches registry holds the
+ * dispatch (its completion may still be pending or was lost); a foreign live
+ * pid can never be released from this process by construction.
+ */
+export async function listCoderSettlementWalStates(
+	directory: string,
+): Promise<CoderSettlementWalState[]> {
+	let entries: string[];
+	try {
+		const dirPath = validateSwarmPath(directory, 'coder-settlements');
+		entries = await readdir(dirPath);
+	} catch {
+		// Missing directory or unreadable path: no settlements to report.
+		return [];
+	}
+	const states: CoderSettlementWalState[] = [];
+	for (const entry of entries.sort().slice(0, MAX_SETTLEMENT_WAL_SCAN)) {
+		if (!SETTLEMENT_WAL_FILE_PATTERN.test(entry)) continue;
+		const taskId = entry.slice(0, -'.json'.length);
+		try {
+			const wal = await readWal(walPath(directory, taskId), taskId);
+			if (wal === null) continue;
+			states.push({
+				taskId,
+				state: wal.state,
+				transitionId: wal.transitionId,
+				processId: wal.processId,
+				recordedAt: wal.recordedAt,
+				ownedInProcess: liveDispatches.has(
+					dispatchKey(directory, taskId, wal.transitionId),
+				),
+				ownedByLiveForeignPid:
+					wal.processId !== process.pid && isProcessAlive(wal.processId),
+			});
+		} catch {
+			states.push({
+				taskId,
+				state: 'unreadable',
+				ownedInProcess: false,
+				ownedByLiveForeignPid: false,
+			});
+		}
+	}
+	return states;
+}
+
+export type StaleSettlementRecoveryOutcome =
+	| { taskId: string; outcome: 'recovered'; accepted: boolean; forced: boolean }
+	| {
+			taskId: string;
+			outcome: 'already_terminal';
+			state: 'ABORTED' | 'COMMITTED';
+	  }
+	| {
+			taskId: string;
+			outcome: 'owned_in_process';
+			transitionId: string;
+	  }
+	| {
+			taskId: string;
+			outcome: 'owned_by_live_foreign_pid';
+			processId: number;
+	  }
+	| { taskId: string; outcome: 'unreadable_wal' }
+	| { taskId: string; outcome: 'error'; message: string };
+
+/**
+ * Issue #2268: the user-facing settlement recovery entry point. Settles every
+ * non-terminal coder-settlement WAL via the same recoverCoderSettlement
+ * transition the internal sinks (update_task_status, /swarm close preflight,
+ * Stage-B ingestion) already use — no new states, no schema change.
+ *
+ * `force` releases THIS process's ownership registry keys before recovery.
+ * That is safe only as an explicit operator assertion (human-only /swarm
+ * recover --force, /swarm reset-session): if the dispatch was genuinely still
+ * in flight, its late completion will fail settlement with
+ * CODER_SETTLEMENT_IDEMPOTENCY_CONFLICT against the already-recovered WAL.
+ * A foreign live pid is NEVER forced — its dispatch lives in another process.
+ */
+export async function recoverStaleCoderSettlements(
+	directory: string,
+	options?: { taskIds?: string[]; force?: boolean },
+): Promise<StaleSettlementRecoveryOutcome[]> {
+	const listed = await listCoderSettlementWalStates(directory);
+	const filter = options?.taskIds ? new Set(options.taskIds) : undefined;
+	const results: StaleSettlementRecoveryOutcome[] = [];
+	for (const entry of listed) {
+		if (filter && !filter.has(entry.taskId)) continue;
+		if (entry.state === 'unreadable') {
+			results.push({ taskId: entry.taskId, outcome: 'unreadable_wal' });
+			continue;
+		}
+		if (entry.state === 'ABORTED' || entry.state === 'COMMITTED') {
+			// Idempotent: completes pending COMMITTED worktree cleanup, else no-op.
+			try {
+				await _internals.recoverCoderSettlement(directory, entry.taskId);
+				results.push({
+					taskId: entry.taskId,
+					outcome: 'already_terminal',
+					state: entry.state,
+				});
+			} catch (error) {
+				results.push({
+					taskId: entry.taskId,
+					outcome: 'error',
+					message: error instanceof Error ? error.message : String(error),
+				});
+			}
+			continue;
+		}
+		// Non-terminal (DISPATCHED/PREPARED).
+		if (entry.ownedInProcess && options?.force !== true) {
+			results.push({
+				taskId: entry.taskId,
+				outcome: 'owned_in_process',
+				transitionId: entry.transitionId ?? '',
+			});
+			continue;
+		}
+		if (entry.ownedByLiveForeignPid) {
+			results.push({
+				taskId: entry.taskId,
+				outcome: 'owned_by_live_foreign_pid',
+				processId: entry.processId ?? -1,
+			});
+			continue;
+		}
+		const forced = entry.ownedInProcess && options?.force === true;
+		// `force` is established at this ownership-release layer only —
+		// recoverCoderSettlement below is the normal recovery path; `forced`
+		// in the result reports that a release was necessary, not that the
+		// caller passed --force.
+		if (forced && entry.transitionId) {
+			releaseCoderDispatchOwnership(
+				directory,
+				entry.taskId,
+				entry.transitionId,
+			);
+			await appendSettlementEvent(
+				directory,
+				'recovered',
+				{
+					taskId: entry.taskId,
+					transitionId: entry.transitionId,
+					actor: 'swarm-recovery',
+				},
+				{ forced: true, stage: 'ownership-release' },
+			);
+		}
+		try {
+			const recovered = await _internals.recoverCoderSettlement(
+				directory,
+				entry.taskId,
+			);
+			if (recovered === null) {
+				// A concurrent completion may have settled the WAL between our
+				// listing and the recovery attempt — that is success, not an
+				// error. Only a genuinely missing (or newly unreadable) WAL
+				// stays an error.
+				let current: CoderSettlementWal | null = null;
+				try {
+					current = await readWal(
+						walPath(directory, entry.taskId),
+						entry.taskId,
+					);
+				} catch {
+					current = null;
+				}
+				if (
+					current &&
+					(current.state === 'COMMITTED' || current.state === 'ABORTED')
+				) {
+					results.push({
+						taskId: entry.taskId,
+						outcome: 'already_terminal',
+						state: current.state,
+					});
+					continue;
+				}
+				results.push({
+					taskId: entry.taskId,
+					outcome: 'error',
+					message: 'settlement WAL disappeared during recovery',
+				});
+				continue;
+			}
+			await appendSettlementEvent(
+				directory,
+				'recovered',
+				{
+					taskId: entry.taskId,
+					transitionId: entry.transitionId ?? '',
+					actor: 'swarm-recovery',
+				},
+				{ forced, accepted: recovered.accepted },
+			);
+			results.push({
+				taskId: entry.taskId,
+				outcome: 'recovered',
+				accepted: recovered.accepted,
+				forced,
+			});
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			// Reviewer finding: a forced ownership-release event without a
+			// matching outcome leaves the audit trail inconsistent — record the
+			// failure so events.jsonl explains a still-non-terminal WAL. The
+			// failure carries its own top-level action so analytics can filter
+			// it without inspecting the extras.
+			await appendSettlementEvent(
+				directory,
+				'recovery-failed',
+				{
+					taskId: entry.taskId,
+					transitionId: entry.transitionId ?? '',
+					actor: 'swarm-recovery',
+				},
+				{ forced, error: message },
+			);
+			results.push({
+				taskId: entry.taskId,
+				outcome: 'error',
+				message,
+			});
+		}
+	}
+	return results;
+}
+
 export const _internals = {
 	liveDispatches,
+	// Test seam: recoverStaleCoderSettlements routes its per-task recovery
+	// through here so tests can deterministically simulate the
+	// listed-non-terminal → recovered-atomically race window (a concurrent
+	// completion) and recovery failures without real interleaving.
+	recoverCoderSettlement,
 };

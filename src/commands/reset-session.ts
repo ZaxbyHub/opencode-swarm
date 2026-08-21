@@ -5,6 +5,7 @@ import { clearTrajectoryStep } from '../hooks/trajectory-logger';
 import { validateSwarmPath } from '../hooks/utils';
 import { resetPrmSessionState } from '../prm';
 import { swarmState } from '../state';
+import { recoverStaleCoderSettlements } from '../workflow/coder-settlement.js';
 import {
 	cleanupOrphanedBranches,
 	type OrphanCleanupResult,
@@ -148,6 +149,82 @@ export async function handleResetSessionCommand(
 	const activeAgentCount = swarmState.activeAgent.size;
 	swarmState.activeAgent.clear();
 	results.push(`✅ Cleared ${activeAgentCount} active-agent mapping(s)`);
+
+	// Issue #2268: recover stale coder settlements. reset-session already
+	// clears every session's in-process state process-wide, so it is the
+	// operator's quiescence assertion: a DISPATCHED settlement WAL whose
+	// completion never arrived (host killed mid-dispatch, cancelled Task,
+	// gate denial on the reporter's pre-#2214 build) is settled here instead
+	// of wedging every future dispatch with CODER_DISPATCH_IN_PROGRESS.
+	// Runs BEFORE the .swarm-worktrees removal below so worktree-carrying
+	// settlements can still reconcile their merges. Fail-open per task.
+	try {
+		const settlementResults = await recoverStaleCoderSettlements(directory, {
+			force: true,
+		});
+		if (settlementResults.length === 0) {
+			results.push('⏭️ No coder settlements to recover');
+		}
+		for (const outcome of settlementResults) {
+			switch (outcome.outcome) {
+				case 'recovered':
+					results.push(
+						`✅ Recovered coder settlement ${outcome.taskId} (${
+							outcome.accepted
+								? 'changes attributed'
+								: 'no workspace change to attribute'
+						})`,
+					);
+					break;
+				case 'already_terminal':
+					results.push(
+						`⏭️ Coder settlement ${outcome.taskId} already ${outcome.state}`,
+					);
+					break;
+				case 'owned_in_process':
+					results.push(
+						`ℹ️ Coder settlement ${outcome.taskId} still registered in flight (${outcome.transitionId}) — its dispatch may be genuinely running; not force-recovered`,
+					);
+					break;
+				case 'owned_by_live_foreign_pid':
+					results.push(
+						`ℹ️ Coder settlement ${outcome.taskId} owned by live process pid ${outcome.processId} (another OpenCode instance) — not touched; run /swarm recover there after closing it`,
+					);
+					break;
+				case 'unreadable_wal':
+					results.push(
+						`⚠️ Coder settlement WAL ${outcome.taskId} is unreadable — inspect .swarm/coder-settlements/${outcome.taskId}.json`,
+					);
+					break;
+				case 'error':
+					results.push(
+						`⚠️ Coder settlement ${outcome.taskId} recovery failed: ${outcome.message}`,
+					);
+					break;
+				default:
+					results.push(
+						`⚠️ Coder settlement ${(outcome as { taskId: string }).taskId}: unknown outcome`,
+					);
+					break;
+			}
+		}
+		// reset-session always recovers with force, so mirror /swarm recover
+		// --force's heads-up when any in-process ownership key had to be
+		// released: a genuinely still-running dispatch's late completion will
+		// fail settlement with CODER_SETTLEMENT_IDEMPOTENCY_CONFLICT.
+		const forcedRecovered = settlementResults.filter(
+			(outcome) => outcome.outcome === 'recovered' && outcome.forced,
+		).length;
+		if (forcedRecovered > 0) {
+			results.push(
+				`⚠️ Released in-process ownership for ${forcedRecovered} dispatch(es) before recovery — if any was genuinely still running, its completion will report CODER_SETTLEMENT_IDEMPOTENCY_CONFLICT (safe to ignore; the settlement is already recovered).`,
+			);
+		}
+	} catch (err) {
+		results.push(
+			`⚠️ Coder settlement recovery failed (continuing with reset): ${errorMessage(err)}`,
+		);
+	}
 
 	// Best-effort: clean stale worktree directories and orphan branches
 	const worktreesDir = path.resolve(

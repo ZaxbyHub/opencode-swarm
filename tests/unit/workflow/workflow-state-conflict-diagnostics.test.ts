@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { captureWorkspaceSnapshot } from '../../../src/background/workspace-snapshot';
+import { assertTaskEvidenceWriteAllowed } from '../../../src/gate-evidence';
 import {
 	assertNoUnsettledCoderDispatch,
 	beginCoderSettlement,
@@ -106,6 +107,61 @@ describe('workflow state-conflict error diagnostics', () => {
 		expect(error.message).toContain('do not remove the WAL by hand');
 	});
 
+	test('gate-evidence CODER_SETTLEMENT_IN_PROGRESS names the recovery commands (issue #2268 sweep)', async () => {
+		// The evidence fence emits the same wedge token from a fourth site
+		// (assertTaskEvidenceWriteAllowed); the #2268 sweep must keep its
+		// remediation wired, not just the three coder-settlement.ts sites.
+		const git = (args: string[]): void => {
+			const result = spawnSync('git', ['-C', directory, ...args], {
+				cwd: directory,
+				stdin: 'ignore',
+				stdout: 'pipe',
+				stderr: 'pipe',
+				encoding: 'utf8',
+				timeout: 10_000,
+				maxBuffer: 128 * 1024,
+				windowsHide: true,
+			});
+			if (result.status !== 0) throw new Error(result.stderr || result.stdout);
+		};
+		fs.mkdirSync(path.join(directory, 'src'), { recursive: true });
+		fs.writeFileSync(
+			path.join(directory, 'src', 'feature.ts'),
+			'export const feature = 1;\n',
+		);
+		git(['init']);
+		git(['config', 'user.email', 'tests@example.com']);
+		git(['config', 'user.name', 'Tests']);
+		git(['add', 'src/feature.ts']);
+		git(['commit', '-m', 'test: seed']);
+
+		await beginCoderSettlement({
+			directory,
+			taskId: '8.2',
+			transitionId: 'coder:8.2:owning',
+			actor: 'architect',
+			expectedGeneration: 0,
+			context: {
+				declaredFiles: ['src/feature.ts'],
+				baseline: captureWorkspaceSnapshot(directory),
+				workflowGeneration: 0,
+			},
+		});
+
+		let error: Error = new Error('no throw');
+		try {
+			assertTaskEvidenceWriteAllowed(directory, '8.2');
+		} catch (caught) {
+			error = caught as Error;
+		}
+		expect(error.message).toContain('CODER_SETTLEMENT_IN_PROGRESS');
+		expect(error.message).toContain('coder:8.2:owning');
+		expect(error.message).toContain('task 8.2');
+		expect(error.message).toContain('/swarm recover 8.2');
+		expect(error.message).toContain('/swarm reset-session');
+		expect(error.message).toContain('do not remove the WAL by hand');
+	});
+
 	test('CODER_SETTLEMENT_RECOVERY_REQUIRED names the task, transition, WAL path and next action', async () => {
 		const walPath = writeWal('coder-settlements', '1.1', {
 			version: 1,
@@ -139,7 +195,10 @@ describe('workflow state-conflict error diagnostics', () => {
 		expect(error.message).toContain('task 1.1');
 		expect(error.message).toContain(walPath);
 		expect(error.message).toContain('state DISPATCHED');
-		expect(error.message).toContain('Run coder-settlement recovery');
+		// Issue #2268: the advised action must name the real command, not an
+		// internal function with no user-facing invoker.
+		expect(error.message).toContain('Run /swarm recover 1.1');
+		expect(error.message).toContain('/swarm reset-session');
 	});
 
 	test('CODER_DISPATCH_IN_PROGRESS names the owning transition, WAL path, state and pid', async () => {

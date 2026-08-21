@@ -56,8 +56,9 @@ describe('Swarm subcommand registration', () => {
 
 		// Catch-all plus the current command registry entries. This includes the
 		// evaluation gate commands, main's CI-monitor command, the context-map
-		// stats command (issue #1672), and the swarm-skill-opt shortcut (issue #1822).
-		expect(commandKeys.length).toBe(83);
+		// stats command (issue #1672), the swarm-skill-opt shortcut (issue #1822),
+		// and the swarm-recover shortcut (issue #2268).
+		expect(commandKeys.length).toBe(84);
 
 		expect(commands.swarm).toBeDefined();
 	});
@@ -170,6 +171,7 @@ describe('Swarm subcommand registration', () => {
 			'swarm-auto-proceed',
 			'swarm-write-retro',
 			'swarm-reset-session',
+			'swarm-recover',
 			'swarm-simulate',
 			'swarm-promote',
 			'swarm-checkpoint',

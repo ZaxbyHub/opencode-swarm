@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
-import { resolveCommand } from './registry';
+import { COMMAND_REGISTRY, resolveCommand } from './registry';
+import type { CommandEntry } from './registry';
 import {
 	classifySwarmCommandChatFallbackUse,
 	classifySwarmCommandToolUse,
@@ -29,6 +30,51 @@ describe('tool-policy — human-only command refusal (issue #890)', () => {
 		expect(HUMAN_ONLY_SWARM_COMMANDS.has('memory compact')).toBe(true);
 		// FR-004: sdd project is now agent-invocable (overwrite gated by --overwrite)
 		expect(HUMAN_ONLY_SWARM_COMMANDS.has('sdd project')).toBe(false);
+	});
+
+	// Moved from registry.tool-policy.test.ts (FR-006 ratchet: that file is
+	// over the 500-line cap and must not grow). #2268 added 'recover'.
+	test("'human-only' registry bucket contains exactly the expected 10 commands", () => {
+		const expectedHumanOnly = new Set<string>([
+			'review',
+			'memory compact',
+			'memory import',
+			'memory migrate',
+			'knowledge hive-quarantine',
+			// #1822: governed skill optimizer — mutating commands (human-gated)
+			'skill-opt run',
+			'skill-opt approve',
+			'skill-opt reject',
+			'skill-opt rollback',
+			// #2268: settlement recovery escape hatch — --force releases
+			// in-process dispatch ownership, an operator-only assertion.
+			'recover',
+		]);
+		const actual = new Set<string>();
+		for (const [name, entry] of Object.entries(COMMAND_REGISTRY)) {
+			if ((entry as CommandEntry).toolPolicy === 'human-only') {
+				actual.add(name);
+			}
+		}
+		expect(actual.size).toBe(10);
+		for (const name of expectedHumanOnly) {
+			expect(actual.has(name)).toBe(true);
+		}
+		for (const name of actual) {
+			expect(expectedHumanOnly.has(name)).toBe(true);
+		}
+	});
+
+	test('recover is refused for agents but allowed for the user (issue #2268)', () => {
+		expect(HUMAN_ONLY_SWARM_COMMANDS.has('recover')).toBe(true);
+		const toolResult = classifySwarmCommandToolUse(resolve(['recover']));
+		expect(toolResult.allowed).toBe(false);
+		if (toolResult.allowed === false) {
+			expect(toolResult.message).toContain('human-only');
+		}
+		expect(
+			classifySwarmCommandChatFallbackUse(resolve(['recover'])).allowed,
+		).toBe(true);
 	});
 
 	describe('classifySwarmCommandToolUse — chat-tool path', () => {

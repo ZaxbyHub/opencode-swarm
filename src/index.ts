@@ -2462,6 +2462,11 @@ async function initializeOpenCodeSwarm(
 					description:
 						'Use /swarm reset-session to clear session state and delegation chains',
 				},
+				'swarm-recover': {
+					template: '/swarm recover $ARGUMENTS',
+					description:
+						'Use /swarm recover to settle wedged coder settlements [task_id] [--force]',
+				},
 				'swarm-simulate': {
 					template: '/swarm simulate $ARGUMENTS',
 					description: 'Use /swarm simulate to run a simulated agent session',
@@ -3133,25 +3138,25 @@ async function initializeOpenCodeSwarm(
 				}
 				// Issue #2214: a denied Task call never fires toolAfter. If the
 				// delegation gate (step 4) already durably began a coder
-				// settlement for this callID before a later fail-closed gate
-				// (steps 5-8) rejected it, roll the DISPATCHED WAL back to
-				// ABORTED so the task is not wedged until a process restart.
-				// Never throws — the original denial propagates unchanged.
+				// settlement for this callID before ANY later step in this
+				// handler rejected it — fail-closed gates 5-8 OR the advisory
+				// tail above the flag (issue #2268) — roll the DISPATCHED WAL
+				// back to ABORTED so the task is not wedged until a process
+				// restart. Never throws — the original denial propagates
+				// unchanged.
 				//
-				// INVARIANT (PR #2223 review, advisory): rollback ELIGIBILITY reuses
-				// `failClosedRegionCompleted`, so this block only fires when the
-				// denial came from the fail-closed region. That is correct today
-				// because no uncaught await exists in the advisory tail below the
-				// flag set (verified empirically by review fault injection). Any
-				// future raw-awaited call added to that tail must either set the
-				// flag first or throw only after this rollback — otherwise an
-				// advisory-tail throw would reject the call WITHOUT rolling back a
-				// begun settlement, reopening the #2214 wedge class. The
-				// gate-denial-wiring static guard pins this contract.
+				// INVARIANT (issue #2268): rollback eligibility deliberately does
+				// NOT consult `failClosedRegionCompleted`. This catch only runs
+				// when toolBefore THREW, so the Task tool never executes and any
+				// begun settlement is orphaned regardless of which region threw.
+				// abortDeniedSettlementForCall is a callID-keyed no-op when no
+				// settlement was begun for this call, so firing it
+				// unconditionally is safe for non-settlement throws (reviewer/
+				// docs/other tools). The gate-denial-wiring static guard pins
+				// this contract.
 				if (
-					!failClosedRegionCompleted &&
-					(normalizeToolName(input.tool) === 'Task' ||
-						normalizeToolName(input.tool) === 'task')
+					normalizeToolName(input.tool) === 'Task' ||
+					normalizeToolName(input.tool) === 'task'
 				) {
 					try {
 						await delegationGateHooks.abortDeniedSettlementForCall(

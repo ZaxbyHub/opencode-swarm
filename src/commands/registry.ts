@@ -98,6 +98,7 @@ import { handlePrUnsubscribeCommand } from './pr-unsubscribe.js';
 import { handlePreflightCommand } from './preflight.js';
 import { handlePromoteCommand } from './promote.js';
 import { handleQaGatesCommand } from './qa-gates.js';
+import { handleRecoverCommand } from './recover.js';
 import { handleResetCommand } from './reset.js';
 import { handleResetSessionCommand } from './reset-session.js';
 import { handleRetrieveCommand } from './retrieve.js';
@@ -1409,10 +1410,19 @@ export const COMMAND_REGISTRY = {
 		description:
 			'Clear session state while preserving plan, evidence, and knowledge',
 		details:
-			'Deletes only .swarm/session/state.json and any other session files. Clears in-memory agent sessions, delegation chains, and active-agent mappings. Preserves plan, evidence, and knowledge for cross-session continuity. Before deleting, auto-backs up the session files it removes to .swarm/reset-backups/<timestamp>/ (newest 5 kept).',
+			'Deletes only .swarm/session/state.json and any other session files. Clears in-memory agent sessions, delegation chains, and active-agent mappings. Preserves plan, evidence, and knowledge for cross-session continuity. Also recovers stale coder settlements, releasing in-flight ownership held by this process, so dispatches cannot stay wedged on CODER_DISPATCH_IN_PROGRESS (issue #2268). Before deleting, auto-backs up the session files it removes to .swarm/reset-backups/<timestamp>/ (newest 5 kept).',
 		args: '',
 		category: 'utility',
 		toolPolicy: 'restricted',
+	},
+	recover: {
+		handler: (ctx) => handleRecoverCommand(ctx.directory, ctx.args),
+		description: 'Recover wedged coder settlements [task_id] [--force]',
+		details:
+			"Settles stale coder-settlement WALs in .swarm/coder-settlements/ — the CODER_DISPATCH_IN_PROGRESS wedge where a dispatch's completion never fired (issue #2268). Safe mode recovers settlements whose owner process is gone. --force also releases ownership keys held by this process: use only when no dispatch is genuinely running (a late completion then reports CODER_SETTLEMENT_IDEMPOTENCY_CONFLICT, safe to ignore). Never interrupts another live OpenCode process. Human-only.",
+		args: '[task_id] [--force]',
+		category: 'utility',
+		toolPolicy: 'human-only',
 	},
 	rollback: {
 		handler: (ctx) => handleRollbackCommand(ctx.directory, ctx.args),

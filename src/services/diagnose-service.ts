@@ -13,6 +13,7 @@ import { loadPlanJsonOnly } from '../plan/manager';
 import { SandboxCapabilityProbe } from '../sandbox/capability-probe.js';
 import { getExecutor } from '../sandbox/executor.js';
 import { readEffectiveSpecSync } from '../sdd/effective-spec';
+import { listCoderSettlementWalStates } from '../workflow/coder-settlement.js';
 import { checkKnowledgeHealth } from './knowledge-diagnostics.js';
 import { compareVersions, readVersionCache } from './version-check.js';
 import { getDeferredWarnings } from './warning-buffer.js';
@@ -991,6 +992,63 @@ export async function getDiagnoseData(
 				detail: 'Not found',
 			});
 		}
+	}
+
+	// Check: Coder settlements (issue #2268) — surface the
+	// CODER_DISPATCH_IN_PROGRESS wedge class that used to be invisible to
+	// diagnose: a non-terminal settlement WAL whose dispatch completion never
+	// arrived. Warn-level by design: a genuinely in-flight dispatch also shows
+	// up as non-terminal here and must not fail the health check. Fail-open:
+	// an inspection failure downgrades to a warning, never breaks diagnose.
+	try {
+		const settlementStates = await listCoderSettlementWalStates(directory);
+		if (settlementStates.length === 0) {
+			checks.push({
+				name: 'Coder Settlements',
+				status: '✅',
+				detail: 'No coder settlement WALs',
+			});
+		} else {
+			const nonTerminal = settlementStates.filter(
+				(entry) =>
+					entry.state === 'DISPATCHED' ||
+					entry.state === 'PREPARED' ||
+					entry.state === 'unreadable',
+			);
+			if (nonTerminal.length === 0) {
+				checks.push({
+					name: 'Coder Settlements',
+					status: '✅',
+					detail: `${settlementStates.length} settlement(s) all in terminal state`,
+				});
+			} else {
+				const details = nonTerminal.map((entry) => {
+					if (entry.state === 'unreadable') {
+						return `task ${entry.taskId}: WAL unreadable`;
+					}
+					const owner =
+						entry.ownedInProcess || entry.ownedByLiveForeignPid
+							? `owner pid ${entry.processId ?? '?'} still alive — in flight or wedged`
+							: 'owner process is gone — stale';
+					return `task ${entry.taskId} (${entry.state}, ${owner})`;
+				});
+				checks.push({
+					name: 'Coder Settlements',
+					status: '⚠️',
+					detail: `${nonTerminal.length} non-terminal settlement(s): ${details.join(
+						'; ',
+					)}. Stale settlements block dispatches with CODER_DISPATCH_IN_PROGRESS — run /swarm recover [task_id] (--force if no dispatch is genuinely running) or /swarm reset-session.`,
+				});
+			}
+		}
+	} catch (error) {
+		checks.push({
+			name: 'Coder Settlements',
+			status: '⚠️',
+			detail: `could not inspect coder settlements: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		});
 	}
 
 	// Check: context.md exists
