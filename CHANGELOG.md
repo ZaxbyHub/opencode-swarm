@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.144.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.144.1...v7.144.2) (2026-08-21)
+
+
+### Bug Fixes
+
+* **auto-review:** [Guardrail remediation 5/12] Make auto_review reviewer scope root-correct, size-safe, and retryable ([b598aff](https://github.com/ZaxbyHub/opencode-swarm/commit/b598aff3516569f3624376ba3da2eaa9c6c93690))
+
 ## [7.144.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.144.0...v7.144.1) (2026-08-21)
 
 
