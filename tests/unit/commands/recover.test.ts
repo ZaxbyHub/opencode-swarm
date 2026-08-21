@@ -171,6 +171,38 @@ describe('issue #2268 — /swarm recover command', () => {
 		expect(out).toContain('Known tasks: 1.1');
 	});
 
+	test('empty project with an explicit task_id reports the task-specific miss (PRR-014)', async () => {
+		const out = await handleRecoverCommand(directory, ['2.2']);
+		expect(out).toContain('No settlement WAL for task 2.2');
+		expect(out).toContain(
+			'no settlement WALs found in .swarm/coder-settlements/',
+		);
+	});
+
+	test('hostile WAL transitionId is sanitized in rendered output (PRR-001)', async () => {
+		await beginRealDispatch('evil\u0000inject\nline2');
+		const out = await handleRecoverCommand(directory, []);
+		expect(out).toContain('still registered as in flight');
+		// The raw NUL/newline payload must never reach the chat surface; the
+		// sanitizer collapses control characters to '?'.
+		expect(out).not.toContain('evil\u0000');
+		expect(out).toContain('coder:evil?inject?line2');
+	});
+
+	test('scan-cap truncation is surfaced to the operator (PRR-011)', async () => {
+		const settlementsDir = path.join(directory, '.swarm', 'coder-settlements');
+		fs.mkdirSync(settlementsDir, { recursive: true });
+		// Pattern-matching but unparseable files still count toward the cap and
+		// surface as unreadable entries — the cheapest realistic >200 fixture.
+		for (let i = 0; i < 201; i++) {
+			fs.writeFileSync(path.join(settlementsDir, `9${i}.json`), 'not json');
+		}
+		const out = await handleRecoverCommand(directory, []);
+		expect(out).toContain('WAL is unreadable');
+		expect(out).toContain('scan cap (200)');
+		expect(out).toContain('NOT listed or processed');
+	});
+
 	test('extra positional arguments print usage', async () => {
 		const out = await handleRecoverCommand(directory, ['1.1', '2.2']);
 		expect(out).toContain('Unexpected arguments');

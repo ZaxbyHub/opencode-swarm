@@ -2,7 +2,10 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { handleResetSessionCommand } from '../../../src/commands/reset-session';
+import {
+	_internals,
+	handleResetSessionCommand,
+} from '../../../src/commands/reset-session';
 import type { PluginConfig } from '../../../src/config';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
@@ -44,6 +47,8 @@ function readWalState(directory: string, taskId: string): string {
 		}
 	).state;
 }
+
+const realRecoverStale = _internals.recoverStaleCoderSettlements;
 
 const CODER_ARGS = {
 	subagent_type: 'coder',
@@ -96,6 +101,7 @@ describe('issue #2268 — reset-session recovers stale coder settlements', () =>
 	});
 
 	afterEach(() => {
+		_internals.recoverStaleCoderSettlements = realRecoverStale;
 		resetSwarmState();
 		settlementInternals.liveDispatches.clear();
 		cleanup();
@@ -141,6 +147,64 @@ describe('issue #2268 — reset-session recovers stale coder settlements', () =>
 		const out = await handleResetSessionCommand(directory, []);
 		expect(out).toContain('WAL 7.7 is unreadable');
 		expect(out).toContain('Deleted .swarm/session/state.json');
+	});
+
+	test('failed recovery preserves .swarm-worktrees/ and sanitizes hostile messages (PRR-012/001)', async () => {
+		const worktreesDir = path.resolve(
+			path.dirname(directory),
+			'.swarm-worktrees',
+		);
+		fs.mkdirSync(worktreesDir, { recursive: true });
+		fs.writeFileSync(path.join(worktreesDir, 'lane-marker'), 'keep');
+		_internals.recoverStaleCoderSettlements = (async () => ({
+			results: [
+				{
+					taskId: '1.1',
+					outcome: 'error',
+					message:
+						'CODER_SETTLEMENT_RECOVERY_UNCERTAIN: evil\u0007inject\nline2',
+				},
+			],
+			truncated: false,
+		})) as typeof realRecoverStale;
+
+		const out = await handleResetSessionCommand(directory, []);
+		expect(out).toContain(
+			'recovery failed: CODER_SETTLEMENT_RECOVERY_UNCERTAIN: evil?inject?line2',
+		);
+		expect(out).not.toContain('evil\u0007');
+		expect(out).toContain('Preserved .swarm-worktrees/');
+		expect(out).toContain('Skipped .swarm-worktrees/ removal');
+		expect(fs.existsSync(path.join(worktreesDir, 'lane-marker'))).toBe(true);
+	});
+
+	test('scan-cap truncation is surfaced by reset-session (PRR-011)', async () => {
+		_internals.recoverStaleCoderSettlements = (async () => ({
+			results: [],
+			truncated: true,
+		})) as typeof realRecoverStale;
+		const out = await handleResetSessionCommand(directory, []);
+		expect(out).toContain('scan cap (200)');
+		expect(out).toContain('NOT recovered');
+	});
+
+	test('a thrown recovery call also preserves .swarm-worktrees/ (reviewer round)', async () => {
+		const worktreesDir = path.resolve(
+			path.dirname(directory),
+			'.swarm-worktrees',
+		);
+		fs.mkdirSync(worktreesDir, { recursive: true });
+		fs.writeFileSync(path.join(worktreesDir, 'lane-marker'), 'keep');
+		_internals.recoverStaleCoderSettlements = (async () => {
+			throw new Error('CODER_SETTLEMENT_LOCKED: task 1.1');
+		}) as typeof realRecoverStale;
+
+		const out = await handleResetSessionCommand(directory, []);
+		expect(out).toContain(
+			'Coder settlement recovery failed (continuing with reset)',
+		);
+		expect(out).toContain('Skipped .swarm-worktrees/ removal');
+		expect(fs.existsSync(path.join(worktreesDir, 'lane-marker'))).toBe(true);
 	});
 
 	test('a foreign-live-pid settlement is reported, not touched', async () => {

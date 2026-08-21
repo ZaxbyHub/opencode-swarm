@@ -134,12 +134,15 @@ describe('issue #2268 — stale settlement recovery helpers', () => {
 	}
 
 	test('listCoderSettlementWalStates: empty project lists nothing', async () => {
-		expect(await listCoderSettlementWalStates(directory)).toEqual([]);
+		expect(await listCoderSettlementWalStates(directory)).toEqual({
+			states: [],
+			truncated: false,
+		});
 	});
 
 	test('listCoderSettlementWalStates: in-flight dispatch reports ownedInProcess', async () => {
 		await beginRealDispatch('list-owned');
-		const states = await listCoderSettlementWalStates(directory);
+		const { states } = await listCoderSettlementWalStates(directory);
 		expect(states).toHaveLength(1);
 		expect(states[0]).toMatchObject({
 			taskId: '1.1',
@@ -154,7 +157,7 @@ describe('issue #2268 — stale settlement recovery helpers', () => {
 		rewriteWalProcessId(directory, '1.1', deadProcessId());
 		settlementInternals.liveDispatches.clear();
 
-		const results = await recoverStaleCoderSettlements(directory);
+		const { results } = await recoverStaleCoderSettlements(directory);
 		expect(results).toEqual([
 			{ taskId: '1.1', outcome: 'recovered', accepted: false, forced: false },
 		]);
@@ -163,7 +166,7 @@ describe('issue #2268 — stale settlement recovery helpers', () => {
 
 	test('same-process wedge: no --force reports owned_in_process and leaves the WAL untouched', async () => {
 		await beginRealDispatch('in-process');
-		const results = await recoverStaleCoderSettlements(directory);
+		const { results } = await recoverStaleCoderSettlements(directory);
 		expect(results).toEqual([
 			{
 				taskId: '1.1',
@@ -178,7 +181,7 @@ describe('issue #2268 — stale settlement recovery helpers', () => {
 		await beginRealDispatch('force-me');
 		expect(readWalJson(directory, '1.1').state).toBe('DISPATCHED');
 
-		const results = await recoverStaleCoderSettlements(directory, {
+		const { results } = await recoverStaleCoderSettlements(directory, {
 			force: true,
 		});
 		expect(results).toEqual([
@@ -207,7 +210,9 @@ describe('issue #2268 — stale settlement recovery helpers', () => {
 		settlementInternals.liveDispatches.clear();
 
 		for (const force of [false, true]) {
-			const results = await recoverStaleCoderSettlements(directory, { force });
+			const { results } = await recoverStaleCoderSettlements(directory, {
+				force,
+			});
 			expect(results).toEqual([
 				{
 					taskId: '1.1',
@@ -229,13 +234,55 @@ describe('issue #2268 — stale settlement recovery helpers', () => {
 		});
 		expect(readWalJson(directory, '1.1').state).toBe('ABORTED');
 
-		const results = await recoverStaleCoderSettlements(directory, {
+		const { results } = await recoverStaleCoderSettlements(directory, {
 			force: true,
 		});
 		expect(results).toEqual([
 			{ taskId: '1.1', outcome: 'already_terminal', state: 'ABORTED' },
 		]);
 		expect(readWalJson(directory, '1.1').state).toBe('ABORTED');
+	});
+
+	test('scan cap: >200 WALs truncates the listing with truncated=true (PRR-011)', async () => {
+		const settlementsDir = path.join(directory, '.swarm', 'coder-settlements');
+		fs.mkdirSync(settlementsDir, { recursive: true });
+		const template = {
+			version: 1,
+			state: 'COMMITTED',
+			taskId: 'x',
+			transitionId: 'coder:cap',
+			actor: 'architect',
+			processId: process.pid,
+			runtimeId: 'runtime-cap',
+			expectedGeneration: 0,
+			context: {
+				declaredFiles: [],
+				baseline: {
+					directory,
+					gitHead: null,
+					dirtyHash: null,
+					prHeadSha: null,
+					scope: null,
+					changedFiles: [],
+				},
+			},
+			recordedAt: new Date().toISOString(),
+		};
+		for (let i = 0; i < 201; i++) {
+			const taskId = `9${i}`;
+			fs.writeFileSync(
+				path.join(settlementsDir, `${taskId}.json`),
+				JSON.stringify({ ...template, taskId }),
+			);
+		}
+		const { states, truncated } = await listCoderSettlementWalStates(directory);
+		expect(truncated).toBe(true);
+		expect(states).toHaveLength(200);
+		const { results, truncated: recoverTruncated } =
+			await recoverStaleCoderSettlements(directory);
+		expect(recoverTruncated).toBe(true);
+		expect(results).toHaveLength(200);
+		expect(results.every((r) => r.outcome === 'already_terminal')).toBe(true);
 	});
 
 	test('a settlement completed concurrently with recovery is already_terminal, not error (reviewer delta)', async () => {
@@ -258,7 +305,7 @@ describe('issue #2268 — stale settlement recovery helpers', () => {
 			return null;
 		};
 		try {
-			const results = await recoverStaleCoderSettlements(directory);
+			const { results } = await recoverStaleCoderSettlements(directory);
 			expect(results).toEqual([
 				{ taskId: '1.1', outcome: 'already_terminal', state: 'COMMITTED' },
 			]);
@@ -275,7 +322,7 @@ describe('issue #2268 — stale settlement recovery helpers', () => {
 			throw new Error('CODER_SETTLEMENT_RECOVERY_UNCERTAIN: simulated');
 		};
 		try {
-			const results = await recoverStaleCoderSettlements(directory);
+			const { results } = await recoverStaleCoderSettlements(directory);
 			expect(results).toEqual([
 				{
 					taskId: '1.1',
@@ -304,7 +351,7 @@ describe('issue #2268 — stale settlement recovery helpers', () => {
 			recursive: true,
 		});
 		fs.writeFileSync(walPath(directory, '9.9'), 'not json at all');
-		const results = await recoverStaleCoderSettlements(directory);
+		const { results } = await recoverStaleCoderSettlements(directory);
 		expect(results).toEqual([{ taskId: '9.9', outcome: 'unreadable_wal' }]);
 	});
 
@@ -317,7 +364,7 @@ describe('issue #2268 — stale settlement recovery helpers', () => {
 		});
 		fs.writeFileSync(walPath(directory, '9.9'), 'not json at all');
 
-		const results = await recoverStaleCoderSettlements(directory, {
+		const { results } = await recoverStaleCoderSettlements(directory, {
 			taskIds: ['1.1'],
 			force: true,
 		});

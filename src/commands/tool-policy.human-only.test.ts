@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
-import { COMMAND_REGISTRY, resolveCommand } from './registry';
 import type { CommandEntry } from './registry';
+import { COMMAND_REGISTRY, resolveCommand } from './registry';
 import {
 	classifySwarmCommandChatFallbackUse,
 	classifySwarmCommandToolUse,

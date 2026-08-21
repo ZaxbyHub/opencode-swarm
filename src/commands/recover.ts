@@ -1,3 +1,4 @@
+import { sanitizeDiagnosticText } from '../scope/path-identity.js';
 import {
 	listCoderSettlementWalStates,
 	recoverStaleCoderSettlements,
@@ -7,7 +8,10 @@ import {
 /**
  * Renders one recovery outcome as a user-facing report line. Kept as a pure
  * function (no directory access) so tests can pin the exact remediation text
- * for every outcome class.
+ * for every outcome class. WAL-derived free-form fields (transitionId, error
+ * message) are sanitized per the repo's untrusted-diagnostic-field pattern —
+ * they are length-validated only at the schema layer (issue #2268 review,
+ * PRR-001/002).
  */
 function renderOutcome(outcome: StaleSettlementRecoveryOutcome): string {
 	switch (outcome.outcome) {
@@ -20,13 +24,18 @@ function renderOutcome(outcome: StaleSettlementRecoveryOutcome): string {
 		case 'already_terminal':
 			return `⏭️ Task ${outcome.taskId}: settlement already ${outcome.state} (nothing to recover)`;
 		case 'owned_in_process':
-			return `ℹ️ Task ${outcome.taskId}: dispatch ${outcome.transitionId} is still registered as in flight in this process. If no coder is genuinely running, re-run with --force to release it.`;
+			return `ℹ️ Task ${outcome.taskId}: dispatch ${sanitizeDiagnosticText(
+				outcome.transitionId,
+			)} is still registered as in flight in this process. If no coder is genuinely running, re-run with --force to release it.`;
 		case 'owned_by_live_foreign_pid':
 			return `ℹ️ Task ${outcome.taskId}: owned by live process pid ${outcome.processId} (another OpenCode instance). Close that instance or run /swarm recover there; this command never interrupts another live process's dispatch.`;
 		case 'unreadable_wal':
 			return `⚠️ Task ${outcome.taskId}: settlement WAL is unreadable — inspect .swarm/coder-settlements/${outcome.taskId}.json`;
 		case 'error':
-			return `❌ Task ${outcome.taskId}: recovery failed — ${outcome.message}`;
+			return `❌ Task ${outcome.taskId}: recovery failed — ${sanitizeDiagnosticText(
+				outcome.message,
+				512,
+			)}`;
 		default:
 			return `❌ Task ${(outcome as { taskId: string }).taskId}: unknown outcome`;
 	}
@@ -64,12 +73,15 @@ export async function handleRecoverCommand(
 		].join('\n');
 	}
 
-	const listed = await listCoderSettlementWalStates(directory);
+	const { states: listed, truncated: listTruncated } =
+		await listCoderSettlementWalStates(directory);
 	if (listed.length === 0) {
 		return [
 			'## Coder Settlement Recovery',
 			'',
-			'No coder settlement WALs found in .swarm/coder-settlements/ — nothing to recover.',
+			taskId
+				? `❌ No settlement WAL for task ${taskId} (no settlement WALs found in .swarm/coder-settlements/).`
+				: 'No coder settlement WALs found in .swarm/coder-settlements/ — nothing to recover.',
 		].join('\n');
 	}
 
@@ -86,10 +98,11 @@ export async function handleRecoverCommand(
 		}
 	}
 
-	const results = await recoverStaleCoderSettlements(directory, {
-		...(taskId ? { taskIds: [taskId] } : {}),
-		force,
-	});
+	const { results, truncated: recoverTruncated } =
+		await recoverStaleCoderSettlements(directory, {
+			...(taskId ? { taskIds: [taskId] } : {}),
+			force,
+		});
 
 	const lines = results.map((outcome) => renderOutcome(outcome));
 	const recoveredCount = results.filter(
@@ -112,6 +125,12 @@ export async function handleRecoverCommand(
 				: ''
 		}.`,
 	];
+	if (listTruncated || recoverTruncated) {
+		report.push(
+			'',
+			'⚠️ More settlement WALs exist than the recovery scan cap (200) — older settlements were NOT listed or processed. Re-run after the tasks above are settled to reach the rest.',
+		);
+	}
 	if (force && recoveredCount > 0) {
 		report.push(
 			'',

@@ -1005,21 +1005,27 @@ export interface CoderSettlementWalState {
  * `ownedInProcess` means this process's liveDispatches registry holds the
  * dispatch (its completion may still be pending or was lost); a foreign live
  * pid can never be released from this process by construction.
+ *
+ * `truncated` is true when the directory held more matching files than
+ * MAX_SETTLEMENT_WAL_SCAN — consumers MUST surface that so a wedge sorted
+ * past the cap is not silently invisible (issue #2268 review, PRR-011).
  */
 export async function listCoderSettlementWalStates(
 	directory: string,
-): Promise<CoderSettlementWalState[]> {
+): Promise<{ states: CoderSettlementWalState[]; truncated: boolean }> {
 	let entries: string[];
 	try {
 		const dirPath = validateSwarmPath(directory, 'coder-settlements');
 		entries = await readdir(dirPath);
 	} catch {
 		// Missing directory or unreadable path: no settlements to report.
-		return [];
+		return { states: [], truncated: false };
 	}
+	const matching = entries.filter((entry) =>
+		SETTLEMENT_WAL_FILE_PATTERN.test(entry),
+	);
 	const states: CoderSettlementWalState[] = [];
-	for (const entry of entries.sort().slice(0, MAX_SETTLEMENT_WAL_SCAN)) {
-		if (!SETTLEMENT_WAL_FILE_PATTERN.test(entry)) continue;
+	for (const entry of matching.sort().slice(0, MAX_SETTLEMENT_WAL_SCAN)) {
 		const taskId = entry.slice(0, -'.json'.length);
 		try {
 			const wal = await readWal(walPath(directory, taskId), taskId);
@@ -1045,7 +1051,7 @@ export async function listCoderSettlementWalStates(
 			});
 		}
 	}
-	return states;
+	return { states, truncated: matching.length > MAX_SETTLEMENT_WAL_SCAN };
 }
 
 export type StaleSettlementRecoveryOutcome =
@@ -1084,8 +1090,12 @@ export type StaleSettlementRecoveryOutcome =
 export async function recoverStaleCoderSettlements(
 	directory: string,
 	options?: { taskIds?: string[]; force?: boolean },
-): Promise<StaleSettlementRecoveryOutcome[]> {
-	const listed = await listCoderSettlementWalStates(directory);
+): Promise<{
+	results: StaleSettlementRecoveryOutcome[];
+	truncated: boolean;
+}> {
+	const { states: listed, truncated } =
+		await listCoderSettlementWalStates(directory);
 	const filter = options?.taskIds ? new Set(options.taskIds) : undefined;
 	const results: StaleSettlementRecoveryOutcome[] = [];
 	for (const entry of listed) {
@@ -1228,7 +1238,7 @@ export async function recoverStaleCoderSettlements(
 			});
 		}
 	}
-	return results;
+	return { results, truncated };
 }
 
 export const _internals = {

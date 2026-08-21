@@ -164,4 +164,50 @@ describe('diagnose — Coder Settlements check (issue #2268)', () => {
 		expect(check?.status).toBe('✅');
 		expect(check?.detail).toContain('all in terminal state');
 	});
+
+	test('warns with remediation when all shown settlements are terminal but the scan truncated (critic round)', async () => {
+		// 201 hand-written schema-valid COMMITTED WALs: every SHOWN entry is
+		// terminal, so only the truncation flag stands between this check and
+		// a green ✅ that hides settlements beyond the cap.
+		const settlementsDir = path.join(directory, '.swarm', 'coder-settlements');
+		fs.mkdirSync(settlementsDir, { recursive: true });
+		const template = {
+			version: 1,
+			state: 'COMMITTED',
+			taskId: 'x',
+			transitionId: 'coder:diagnose-cap',
+			actor: 'architect',
+			processId: process.pid,
+			runtimeId: 'runtime-diagnose-cap',
+			expectedGeneration: 0,
+			accepted: false,
+			testEngineerExempt: false,
+			context: {
+				declaredFiles: [],
+				baseline: {
+					directory,
+					gitHead: null,
+					dirtyHash: null,
+					prHeadSha: null,
+					scope: null,
+					changedFiles: [],
+				},
+			},
+			recordedAt: new Date().toISOString(),
+		};
+		for (let i = 0; i < 201; i++) {
+			const taskId = `9${i}`;
+			fs.writeFileSync(
+				path.join(settlementsDir, `${taskId}.json`),
+				JSON.stringify({ ...template, taskId }),
+			);
+		}
+		const data = await getDiagnoseData(directory);
+		const check = findCheck(data.checks, 'Coder Settlements');
+		expect(check?.status).toBe('⚠️');
+		expect(check?.detail).toContain(
+			'All shown settlements are terminal, but the scan was truncated.',
+		);
+		expect(check?.detail).toContain('/swarm recover');
+	});
 });
