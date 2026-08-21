@@ -328,8 +328,8 @@ describe('BubblewrapSandboxExecutor', () => {
 			const result = executor.wrapCommand('echo hello', [], undefined, {
 				MY_VAR: 'my_value',
 			});
-			// Uses 3-arg form: --setenv KEY VALUE (three separate args)
-			expect(result).toContain('--setenv MY_VAR my_value');
+			// VALUE is single-quoted: wrapCommand returns a SHELL STRING.
+			expect(result).toContain("--setenv MY_VAR 'my_value'");
 		});
 
 		test('null value emits --unsetenv KEY before -- separator', () => {
@@ -348,33 +348,33 @@ describe('BubblewrapSandboxExecutor', () => {
 				VAR_B: null,
 				VAR_C: 'value_c',
 			});
-			expect(result).toContain('--setenv VAR_A value_a');
+			expect(result).toContain("--setenv VAR_A 'value_a'");
 			expect(result).toContain('--unsetenv VAR_B');
-			expect(result).toContain('--setenv VAR_C value_c');
+			expect(result).toContain("--setenv VAR_C 'value_c'");
 		});
 
 		test('value with spaces is preserved verbatim in --setenv', () => {
 			const result = executor.wrapCommand('echo hello', [], undefined, {
 				MY_VAR: 'hello world',
 			});
-			// Value is passed verbatim to bwrap/execve, no shell escaping needed
-			expect(result).toContain('--setenv MY_VAR hello world');
+			// Quoting PRESERVES it: unquoted, bwrap gets a truncated value.
+			expect(result).toContain("--setenv MY_VAR 'hello world'");
 		});
 
 		test('value with special chars is preserved verbatim', () => {
 			const result = executor.wrapCommand('echo hello', [], undefined, {
 				MY_VAR: '$HOME',
 			});
-			// $ is NOT shell-expanded because bwrap passes to execve directly
-			expect(result).toContain('--setenv MY_VAR $HOME');
+			// Quotes stop the OUTER shell expanding $HOME before bwrap sees it.
+			expect(result).toContain("--setenv MY_VAR '$HOME'");
 		});
 
 		test('value with = is preserved correctly using 3-arg form', () => {
 			const result = executor.wrapCommand('echo hello', [], undefined, {
 				FOO: 'a=b',
 			});
-			// 3-arg form avoids ambiguity: --setenv FOO a=b (three separate args)
-			expect(result).toContain('--setenv FOO a=b');
+			// 3-arg form avoids KEY=VALUE ambiguity; quotes carry it intact.
+			expect(result).toContain("--setenv FOO 'a=b'");
 		});
 
 		test('invalid env var key is rejected silently (no flag emitted)', () => {

