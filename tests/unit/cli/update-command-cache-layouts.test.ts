@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { isSafeCachePath } from '../../../src/cli/index.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const REPO_ROOT = join(import.meta.dir, '..', '..', '..');
 const CLI_PATH = join(REPO_ROOT, 'src', 'cli', 'index.ts');
@@ -42,9 +42,7 @@ describe('CLI update cache layouts', () => {
 	let cachePaths: string[];
 
 	beforeEach(async () => {
-		tempDir = await realpath(
-			await mkdtemp(join(tmpdir(), 'opencode-swarm-update-layouts-')),
-		);
+		tempDir = canonicalMkdtemp('opencode-swarm-update-layouts-');
 		xdgCacheHome = join(tempDir, 'cache');
 		xdgConfigHome = join(tempDir, 'config');
 		cachePaths = [
