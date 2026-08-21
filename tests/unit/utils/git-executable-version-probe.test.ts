@@ -1,14 +1,24 @@
 /**
  * `git --version` OUTPUT-FORMAT validation for src/utils/git-executable.ts.
  *
- * Why this file exists (CWE-427). An accepted candidate becomes the executable
- * this process spawns for every host-side git call. Before this check, the
- * probe accepted any regular file that exited 0 — `/bin/true`, a shell shim, a
- * downloaded helper — so "is it git?" was never actually asked. Requiring
- * git's own `git version <n>.<n>` output closes that for EVERY candidate
- * source, including `OPENCODE_SWARM_GIT_BINARY`, which the loader-level
- * provenance gate (tests/unit/config/loader-git-binary-provenance.test.ts)
- * deliberately does not cover.
+ * Why this file exists. An accepted candidate becomes the executable this
+ * process spawns for every host-side git call. Before this check, the probe
+ * accepted any regular file that exited 0 — `/bin/true`, a shell shim, an
+ * unrelated `git` earlier on PATH — so "is it actually git?" was never asked.
+ * Requiring git's own `git version <n>.<n>` output asks it.
+ *
+ * THIS IS NOT A SECURITY CONTROL, and nothing here should be read as one.
+ * Whoever controls the named binary also controls its stdout: printing
+ * `git version 2.43.0` is a one-line script, so a HOSTILE candidate satisfies
+ * this check trivially. What it catches is an ACCIDENTAL non-git target. The
+ * actual trust boundary against a repo-supplied `git.binary` is
+ * `enforceGitBinaryProvenance` in src/config/loader.ts, covered by
+ * tests/unit/config/loader-git-binary-provenance.test.ts.
+ *
+ * (An earlier version of this comment claimed the format check "closes that
+ * for EVERY candidate source, including `OPENCODE_SWARM_GIT_BINARY`". That was
+ * wrong, and overstating a defense is worse than not having it — it invites
+ * relying on a layer that does not hold.)
  *
  * See git-executable.test.ts for lazy-load/candidate-ordering coverage and
  * git-executable-override.test.ts for precedence/TTL/budget coverage.

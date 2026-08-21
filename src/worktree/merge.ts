@@ -1262,6 +1262,19 @@ export async function cleanupOrphanedBranches(
 
 	const branches = await listLaneBranches(directory);
 
+	// Prune stale worktree metadata FIRST (DD-9, #2236 BR-2).
+	//
+	// Order is load-bearing, not cosmetic: git refuses `branch -d/-D` for a
+	// branch that a *registered* worktree still claims — including a worktree
+	// whose directory has already been deleted — with
+	// `error: cannot delete branch 'X' used by worktree at ...`. Pruning after
+	// the delete leaves the branch alive, which then trips
+	// CODER_SETTLEMENT_WORKTREE_CLEANUP_UNVERIFIED and reproduces the #2236
+	// deadlock under a different message. Verified empirically on git 2.54.
+	// See postMergeCleanup (:598-606) for the same rationale at the first
+	// site this was fixed.
+	await runGit(['worktree', 'prune'], directory);
+
 	for (const branch of branches) {
 		const sessionId = extractSessionId(branch);
 
@@ -1296,9 +1309,6 @@ export async function cleanupOrphanedBranches(
 			});
 		}
 	}
-
-	// Prune stale worktree metadata after cleanup
-	await runGit(['worktree', 'prune'], directory);
 
 	return {
 		removed,
