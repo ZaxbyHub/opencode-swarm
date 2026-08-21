@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.144.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.144.2...v7.144.3) (2026-08-21)
+
+
+### Bug Fixes
+
+* **pr-workflow:** probe lane liveness before presuming a lane stale ([20ea36b](https://github.com/ZaxbyHub/opencode-swarm/commit/20ea36b2469d77c0f0badf1774702c40f9ae7d29))
+
 ## [7.144.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.144.1...v7.144.2) (2026-08-21)
 
 
