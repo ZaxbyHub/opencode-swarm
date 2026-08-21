@@ -31,7 +31,7 @@ import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
  * Fixture git runs go through `Bun.spawnSync`, NOT
  * `node:child_process.spawnSync`.
  *
- * Nine test files in this repo call `mock.module('node:child_process', ...)`,
+ * Nine test files in this repo install a module mock over node:child_process,
  * which bun registers PROCESS-WIDE and does not undo on `mock.restore()`. A
  * node-backed helper here would bind to whichever mock a co-resident file
  * installed, so this test's REPO SETUP would silently no-op — leaving an empty
