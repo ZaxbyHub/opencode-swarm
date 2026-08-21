@@ -42,11 +42,11 @@ import type {
 	DirtyMergeOptions,
 	MergeOperationProvenance,
 } from '../../worktree/merge';
-import { verifyReviewerScopeGenerationMergeBack } from '../reviewer-scope-mergeback';
 import {
 	SOURCE_WORKTREE_GONE_STAGE,
 	SOURCE_WORKTREE_UNCERTAIN_STAGE,
 } from '../../worktree/merge';
+import { verifyReviewerScopeGenerationMergeBack } from '../reviewer-scope-mergeback';
 import {
 	clearWorktreeMergeStatus,
 	recordWorktreeMergeFailure,
