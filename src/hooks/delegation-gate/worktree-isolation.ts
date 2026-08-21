@@ -18,6 +18,7 @@ import { tryAcquireLock } from '../../parallel/file-locks';
 import { isValidEnvKey } from '../../sandbox/executor';
 import {
 	ensureAgentSession,
+	markReviewerScopeGenerationMergebackPending,
 	recordSessionWorkspaceRoot,
 	swarmState,
 } from '../../state';
@@ -40,6 +41,7 @@ import type {
 	DirtyMergeOptions,
 	MergeOperationProvenance,
 } from '../../worktree/merge';
+import { verifyReviewerScopeGenerationMergeBack } from '../reviewer-scope-mergeback';
 import {
 	clearWorktreeMergeStatus,
 	recordWorktreeMergeFailure,
@@ -1893,6 +1895,21 @@ export async function finishStandardWorktreeDispatch(
 				);
 			}
 
+			// Issue #2100: verify the primary checkout now matches the lane's
+			// reviewer manifest before lane teardown — this is what publishes the
+			// generation as reviewable from the primary root. Reads from the
+			// primary directory only; best-effort and never breaks settlement.
+			try {
+				verifyReviewerScopeGenerationMergeBack({
+					parentSessionID: dispatch.parentSessionID,
+					taskId: statusKey,
+					coderCallID: resolvedCallID,
+					primaryDirectory: directory,
+				});
+			} catch {
+				// Best-effort; a verification failure retains the generation.
+			}
+
 			// Cleanup unconditionally — runs on success, partial, AND failed.
 			await cleanupStandardWorktreeForCallId(
 				resolvedCallID,
@@ -1921,6 +1938,17 @@ export async function finishStandardWorktreeDispatch(
 			// F-C004: merge conflicts retain the lane worktree and branch for
 			// recovery. The conflict can leave uncommitted state that must not be
 			// force-removed under the successful-cleanup path.
+			// Issue #2100: the reviewer generation stays mergeback_pending — a
+			// conflict is a typed recoverable state, never reviewer-stale.
+			try {
+				markReviewerScopeGenerationMergebackPending({
+					parentSessionID: dispatch.parentSessionID,
+					taskId: statusKey,
+					coderCallID: resolvedCallID,
+				});
+			} catch {
+				// Best-effort; generation retention is advisory here.
+			}
 
 			return {
 				outcome: 'partial',
@@ -1951,6 +1979,17 @@ export async function finishStandardWorktreeDispatch(
 			// F-C004: retain failed merge lanes for recovery. In particular, a
 			// cleanup-stage failure can leave dirty or untracked work that has not
 			// been safely committed yet.
+			// Issue #2100: the reviewer generation stays mergeback_pending — a
+			// failed merge is a typed recoverable state, never reviewer-stale.
+			try {
+				markReviewerScopeGenerationMergebackPending({
+					parentSessionID: dispatch.parentSessionID,
+					taskId: statusKey,
+					coderCallID: resolvedCallID,
+				});
+			} catch {
+				// Best-effort; generation retention is advisory here.
+			}
 			return {
 				outcome: 'failed',
 				stage: mergeResult.stage,

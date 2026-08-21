@@ -349,6 +349,8 @@ describe('Stage-B exact reviewer scope lifecycle', () => {
 			taskId: '1.1',
 			coderCallID: 'coder-new',
 			declaredFiles: ['src/a.ts'],
+			captureDirectory: directory,
+			workspaceIdentity: 'ws:/lifecycle',
 		});
 		expect(replacement).not.toBeNull();
 		expect(
@@ -395,6 +397,8 @@ describe('Stage-B exact reviewer scope lifecycle', () => {
 					taskId: '1.1',
 					coderCallID: 'coder-incarnation-new',
 					declaredFiles: ['src/a.ts'],
+					captureDirectory: directory,
+					workspaceIdentity: 'ws:/lifecycle',
 				});
 			}
 			return realBuildReviewerTaskScope(...args);
