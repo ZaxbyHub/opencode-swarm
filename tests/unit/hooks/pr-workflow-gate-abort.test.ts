@@ -25,6 +25,12 @@ beforeEach(() => {
 	gateInternals.resetTrackedStateCache();
 	gateInternals.resolveCurrentGitHead = () => 'abc123';
 	gateInternals.resolveIsWorkingTreeClean = () => true;
+	// Issue #2251: abort settles lanes, and settlement now probes host session
+	// liveness. Pin "no host" so this suite cannot inherit a `swarmState.
+	// opencodeClient` leaked by another file in bun's shared process — a leaked
+	// client whose `session.status` never resolves would burn the probe's real
+	// 5s deadline against bun's 5s per-test timeout.
+	gateInternals.getSessionOps = () => null;
 });
 
 afterEach(async () => {
