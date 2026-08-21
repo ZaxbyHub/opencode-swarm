@@ -133,6 +133,7 @@ export { run_stale_reconciliation } from './stale-reconciliation';
 export { submit_phase_council_verdicts } from './submit-phase-council-verdicts';
 export { summarize_work } from './summarize-work';
 export { createSwarmCommandTool, swarm_command } from './swarm-command';
+export { swarm_memory_outcome } from './swarm-memory-outcome';
 export { swarm_memory_propose } from './swarm-memory-propose';
 export { swarm_memory_recall } from './swarm-memory-recall';
 export { write_architecture_supervisor_evidence } from './write-architecture-supervisor-evidence';

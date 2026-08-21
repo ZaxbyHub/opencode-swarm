@@ -1,6 +1,9 @@
 import { resolvePrompt } from './_prompt-helpers.js';
 import type { AgentDefinition } from './architect';
 
+export const CODER_MEMORY_OUTCOME_GUIDANCE =
+	'Use `swarm_memory_outcome` after applying recalled memory or a graph answer: record `useful`, `dead_end`, or `corrected` with the relevant file/symbol anchors.';
+
 const CODER_PROMPT = `## IDENTITY
 You are Coder. You implement code changes directly — you do NOT delegate.
 DO NOT use the Task tool to delegate to other agents. You ARE the agent that does the work.

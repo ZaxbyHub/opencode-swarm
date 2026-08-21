@@ -1,7 +1,10 @@
+import type { MemoryOutcomeEvent } from './outcome-events';
 import type { RecallScoringDiagnostics } from './scoring';
 import type {
 	AppliedMemoryChange,
+	MemoryAnchor,
 	MemoryListFilter,
+	MemoryOutcome,
 	MemoryProposal,
 	MemoryRecord,
 	RecallRequest,
@@ -90,6 +93,12 @@ export interface MemoryProvider {
 	initialize?(): Promise<void>;
 	close?(): Promise<void> | void;
 	upsert(record: MemoryRecord): Promise<MemoryRecord>;
+	appendOutcome?(
+		memoryId: string,
+		event: { id: string; outcome: MemoryOutcome },
+		anchors?: MemoryAnchor[],
+	): Promise<MemoryRecord>;
+	listOutcomeEvents?(): Promise<MemoryOutcomeEvent[]>;
 	get(id: string): Promise<MemoryRecord | null>;
 	delete(id: string, reason?: string): Promise<void>;
 	recall(request: RecallRequest): Promise<RecallResultItem[]>;

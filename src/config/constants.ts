@@ -202,16 +202,29 @@ export const CLAUDE_CODE_NATIVE_COMMANDS: ReadonlySet<string> = freezeSet([
 export const MEMORY_TOOL_NAMES = [
 	'swarm_memory_recall',
 	'swarm_memory_propose',
+	'swarm_memory_outcome',
 ] as const satisfies readonly ToolName[];
 
 export const MEMORY_AGENT_TOOL_MAP: Partial<Record<AgentName, ToolName[]>> = {
-	architect: ['swarm_memory_recall', 'swarm_memory_propose'],
-	explorer: ['swarm_memory_recall', 'swarm_memory_propose'],
-	coder: ['swarm_memory_recall', 'swarm_memory_propose'],
-	reviewer: ['swarm_memory_recall'],
+	architect: [
+		'swarm_memory_recall',
+		'swarm_memory_propose',
+		'swarm_memory_outcome',
+	],
+	explorer: [
+		'swarm_memory_recall',
+		'swarm_memory_propose',
+		'swarm_memory_outcome',
+	],
+	coder: [
+		'swarm_memory_recall',
+		'swarm_memory_propose',
+		'swarm_memory_outcome',
+	],
+	reviewer: ['swarm_memory_recall', 'swarm_memory_outcome'],
 	test_engineer: ['swarm_memory_recall', 'swarm_memory_propose'],
 	sme: ['swarm_memory_recall', 'swarm_memory_propose'],
-	critic: ['swarm_memory_recall'],
+	critic: ['swarm_memory_recall', 'swarm_memory_outcome'],
 	critic_sounding_board: ['swarm_memory_recall'],
 	critic_drift_verifier: ['swarm_memory_recall'],
 	critic_hallucination_verifier: ['swarm_memory_recall'],

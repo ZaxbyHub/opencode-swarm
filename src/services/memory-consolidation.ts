@@ -24,6 +24,7 @@ import {
 	readConsolidationLog,
 } from '../memory/consolidation-log.js';
 import { createMemoryGateway } from '../memory/gateway.js';
+import { readDeadAnchorMemoryIds } from '../memory/reflection-service.js';
 import { appendMemoryRunLog } from '../memory/run-log.js';
 import { resolveVettedMemoryRoot } from '../memory/storage-root.js';
 
@@ -110,6 +111,7 @@ export async function runMemoryConsolidation(
 							resolveVettedMemoryRoot(req.directory, req.config),
 							record,
 						),
+					readDeadAnchorMemoryIds: () => readDeadAnchorMemoryIds(req.directory),
 					signal: controller.signal,
 				},
 			);

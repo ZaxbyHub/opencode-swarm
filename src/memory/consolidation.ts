@@ -54,6 +54,8 @@ export interface ConsolidationDeps {
 	logEvent: (event: MemoryRunLogEvent) => Promise<void>;
 	readLog: () => Promise<ConsolidationLogRecord[]>;
 	appendLog: (record: ConsolidationLogRecord) => Promise<void>;
+	/** Worktree-local structural staleness. Optional for legacy/test callers. */
+	readDeadAnchorMemoryIds?: () => ReadonlySet<string>;
 	signal?: AbortSignal;
 }
 
@@ -354,7 +356,11 @@ export async function runConsolidationPass(
 		// deterministic regardless of the order listProposals returns from
 		// storage (clusterByJaccard is order-sensitive by construction).
 		.sort((a, b) => a.id.localeCompare(b.id));
-	const existingMemories = await deps.gateway.listMemories({});
+	const deadAnchorMemoryIds =
+		deps.readDeadAnchorMemoryIds?.() ?? new Set<string>();
+	const existingMemories = (await deps.gateway.listMemories({})).filter(
+		(memory) => !deadAnchorMemoryIds.has(memory.id),
+	);
 
 	const clusters = clusterByJaccard(
 		pendingProposals,

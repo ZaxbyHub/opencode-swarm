@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import * as path from 'node:path';
 import {
@@ -8,6 +8,7 @@ import {
 } from './config';
 import { MemoryDisabledError, MemoryValidationError } from './errors';
 import { LocalJsonlMemoryProvider } from './local-jsonl-provider';
+import { canonicalOutcomePayload } from './outcome-events';
 import { toRecallBundle } from './prompt-block';
 import type {
 	MemoryProposalStore,
@@ -22,6 +23,8 @@ import {
 	createBundleId,
 	createMemoryId,
 	createProposalId,
+	MAX_OUTCOME_QUESTION_LENGTH,
+	MEMORY_OUTCOME_QUESTION_PREFIX,
 	normalizeMemoryText,
 	validateCuratorMemoryDecision,
 	validateMemoryRecordRules,
@@ -35,9 +38,11 @@ import {
 import type {
 	AppliedMemoryChange,
 	CuratorMemoryDecision,
+	MemoryAnchor,
 	MemoryContext,
 	MemoryKind,
 	MemoryListFilter,
+	MemoryOutcome,
 	MemoryPatch,
 	MemoryProposal,
 	MemoryRecord,
@@ -54,6 +59,15 @@ export interface MemoryGatewayOptions {
 	config?: Partial<MemoryConfig>;
 	provider?: MemoryProvider & Partial<MemoryProposalStore>;
 	now?: () => Date;
+}
+
+export interface RecordMemoryOutcomeInput {
+	memoryId?: string;
+	question?: string;
+	outcome: MemoryOutcome['outcome'];
+	anchors?: MemoryAnchor[];
+	correction?: string;
+	eventId?: string;
 }
 
 export interface ProposeMemoryInput {
@@ -402,6 +416,102 @@ export class MemoryGateway {
 		return this.provider.upsert(parsed);
 	}
 
+	async recordOutcome(input: RecordMemoryOutcomeInput): Promise<MemoryRecord> {
+		this.assertEnabled();
+		if (!this.provider.appendOutcome) {
+			throw new MemoryValidationError(
+				'memory provider does not support outcome capture',
+			);
+		}
+		const hasId =
+			typeof input.memoryId === 'string' && input.memoryId.length > 0;
+		const question = input.question ? normalizeMemoryText(input.question) : '';
+		if (hasId === question.length > 0) {
+			throw new MemoryValidationError(
+				'exactly one of memoryId or question is required',
+			);
+		}
+		if (question.length > MAX_OUTCOME_QUESTION_LENGTH) {
+			throw new MemoryValidationError(
+				`question must be at most ${MAX_OUTCOME_QUESTION_LENGTH} characters`,
+			);
+		}
+		if (input.outcome === 'corrected' && !input.correction?.trim()) {
+			throw new MemoryValidationError(
+				'corrected outcomes require correction text',
+			);
+		}
+		let targetId = input.memoryId;
+		if (!targetId) {
+			const candidate = this.createRecord({
+				kind: 'evidence',
+				text: `${MEMORY_OUTCOME_QUESTION_PREFIX}${question}`,
+				confidence: 0.5,
+				stability: 'durable',
+				tags: ['outcome-result'],
+				source: { type: 'tool', ref: 'swarm_memory_outcome' },
+				metadata: { outcomeQuestion: question },
+			});
+			const existing = await this.provider.get(candidate.id);
+			if (!existing) await this.provider.upsert(candidate);
+			targetId = candidate.id;
+		}
+		// A write-through publication failure may cause the exact tool invocation
+		// to retry after its outcome event has already committed. Reuse the stored
+		// timestamp for that stable event id so provider identity checks see the
+		// byte-equivalent payload; any changed outcome/anchors/correction still
+		// reaches the provider and fails closed as an id collision.
+		const priorEvent =
+			input.eventId && this.provider.listOutcomeEvents
+				? (await this.provider.listOutcomeEvents()).find(
+						(event) => event.id === input.eventId,
+					)
+				: undefined;
+		if (priorEvent) {
+			const requestedOutcome: MemoryOutcome = {
+				outcome: input.outcome,
+				at: priorEvent.outcome.at,
+				...(this.context.unitId ? { taskId: this.context.unitId } : {}),
+				...(input.correction
+					? { correction: normalizeMemoryText(input.correction) }
+					: {}),
+			};
+			const requestedPayload = canonicalOutcomePayload(
+				requestedOutcome,
+				input.anchors ?? [],
+			);
+			if (
+				priorEvent.memoryId !== targetId ||
+				requestedPayload !==
+					canonicalOutcomePayload(priorEvent.outcome, priorEvent.anchors)
+			) {
+				throw new MemoryValidationError(
+					'outcome event id already exists with a different payload',
+				);
+			}
+			return this.provider.appendOutcome(
+				priorEvent.memoryId,
+				{ id: priorEvent.id, outcome: priorEvent.outcome },
+				priorEvent.anchors,
+			);
+		}
+		return this.provider.appendOutcome(
+			targetId,
+			{
+				id: input.eventId ?? randomUUID(),
+				outcome: {
+					outcome: input.outcome,
+					at: this.now().toISOString(),
+					taskId: this.context.unitId,
+					correction: input.correction
+						? normalizeMemoryText(input.correction)
+						: undefined,
+				},
+			},
+			input.anchors,
+		);
+	}
+
 	async applyCuratorDecision(
 		decision: CuratorMemoryDecision,
 	): Promise<AppliedMemoryChange> {
@@ -426,6 +536,8 @@ export class MemoryGateway {
 		stability?: MemoryRecord['stability'];
 		tags?: string[];
 		metadata?: Record<string, unknown>;
+		anchors?: MemoryAnchor[];
+		outcomes?: MemoryOutcome[];
 	}): MemoryRecord {
 		const now = this.now().toISOString();
 		const text = normalizeMemoryText(input.text);
@@ -458,6 +570,8 @@ export class MemoryGateway {
 			expiresAt,
 			contentHash: computeMemoryContentHash(recordBase),
 			metadata: input.metadata ?? {},
+			anchors: input.anchors,
+			outcomes: input.outcomes,
 			// #1850: provenance (acceptance #13). Stamped on every record so
 			// cohort members can attribute and verify redaction policy.
 			cohortId: isCohortRoot(this.vettedRoot)
@@ -522,6 +636,8 @@ export class MemoryGateway {
 			stability: input.stability,
 			source: input.source,
 			metadata: input.metadata,
+			anchors: input.anchors,
+			outcomes: input.outcomes,
 		});
 		const next = input.expiresAt
 			? { ...record, expiresAt: input.expiresAt }
