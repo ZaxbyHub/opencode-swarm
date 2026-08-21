@@ -434,6 +434,7 @@ export async function runSemgrep(
 				available: true,
 				findings: [],
 				error: 'Semgrep execution cancelled',
+				failure_kind: 'cancelled',
 				engine: 'tier_a',
 			};
 		}
@@ -441,6 +442,7 @@ export async function runSemgrep(
 			available: false,
 			findings: [],
 			error: 'Semgrep is not installed or not available on PATH',
+			failure_kind: 'spawn_error',
 			engine: 'tier_a',
 		};
 	}
@@ -451,6 +453,7 @@ export async function runSemgrep(
 			available: false,
 			findings: [],
 			error: 'Semgrep is not installed or not available on PATH',
+			failure_kind: 'spawn_error',
 			engine: 'tier_a',
 		};
 	}

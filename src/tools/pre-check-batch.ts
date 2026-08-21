@@ -228,6 +228,8 @@ export interface PreCheckBatchResult {
 	sast_preexisting_findings?: SastScanFinding[];
 	/** Optional Semgrep exited nonzero with no findings; SAST coverage is incomplete. */
 	sast_degraded?: boolean;
+	/** SAST was intentionally disabled by the effective QA profile. */
+	sast_skipped?: boolean;
 }
 
 function truncateUtf8(value: string, maxBytes: number): string {
@@ -273,6 +275,9 @@ function serializePreCheckResult(result: PreCheckBatchResult): string {
 		gates_passed: result.gates_passed,
 		...(result.sast_degraded !== undefined && {
 			sast_degraded: result.sast_degraded,
+		}),
+		...(result.sast_skipped !== undefined && {
+			sast_skipped: result.sast_skipped,
 		}),
 		lint: compactToolResult(result.lint),
 		secretscan: compactToolResult(result.secretscan),
@@ -1618,6 +1623,7 @@ export async function runPreCheckBatch(
 		quality_budget: qualityBudgetResult,
 		total_duration_ms: Math.round(totalDuration),
 		...(sastDegraded && { sast_degraded: true }),
+		...(!sast_enabled && { sast_skipped: true }),
 		...(sastPreexistingFindings &&
 			sastPreexistingFindings.length > 0 && {
 				sast_preexisting_findings: sastPreexistingFindings,

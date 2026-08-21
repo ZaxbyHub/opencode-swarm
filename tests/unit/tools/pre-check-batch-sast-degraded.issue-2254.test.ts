@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { decodePreCheckResult } from '../../../src/hooks/guardrails/pre-check-result';
 import {
 	_internals as batchInternals,
 	runPreCheckBatch,
@@ -105,6 +106,10 @@ describe('pre_check_batch degraded SAST contract — issue #2254', () => {
 		expect(calls).toBe(0);
 		expect(result.gates_passed).toBe(true);
 		expect(result.sast_scan).toEqual({ ran: false, duration_ms: 0 });
+		expect(result.sast_skipped).toBe(true);
+		expect(
+			decodePreCheckResult(batchInternals.serializePreCheckResult(result)),
+		).toEqual({ kind: 'pass' });
 	});
 
 	test('a Semgrep process exit with zero findings is an explicit nonblocking degradation', async () => {
@@ -124,6 +129,9 @@ describe('pre_check_batch degraded SAST contract — issue #2254', () => {
 		expect(result.gates_passed).toBe(true);
 		expect(result.sast_degraded).toBe(true);
 		expect(result.sast_scan.result?.error).toContain('code 7');
+		expect(
+			decodePreCheckResult(batchInternals.serializePreCheckResult(result)),
+		).toEqual({ kind: 'pass' });
 	});
 
 	test('a Semgrep process exit with any finding remains blocking', async () => {
@@ -162,6 +170,7 @@ describe('pre_check_batch degraded SAST contract — issue #2254', () => {
 		'semgrep_invalid_output',
 		'semgrep_scan_error',
 		'semgrep_unexpected',
+		'semgrep_unclassified',
 	] as const)('%s remains fail-closed', async (failureKind) => {
 		sastResult = {
 			...cleanSastResult(),

@@ -85,11 +85,64 @@ function everyGateFindingIsPreexisting(
 	return true;
 }
 
+function isIntentionalSastSkip(
+	toolResult: Record<string, unknown>,
+	batchResult: Record<string, unknown>,
+): boolean {
+	return (
+		batchResult.sast_skipped === true &&
+		toolResult.ran === false &&
+		toolResult.duration_ms === 0 &&
+		toolResult.passed === undefined &&
+		toolResult.result === undefined &&
+		toolResult.error === undefined &&
+		toolResult.result_omitted === undefined
+	);
+}
+
+function isExpectedSastDegradation(
+	toolResult: Record<string, unknown>,
+	batchResult: Record<string, unknown>,
+): boolean {
+	if (batchResult.sast_degraded !== true || toolResult.ran !== true) {
+		return false;
+	}
+	if (
+		batchResult.output_truncated === true &&
+		toolResult.result_omitted === true &&
+		toolResult.passed === undefined &&
+		toolResult.result === undefined &&
+		toolResult.error === undefined
+	) {
+		return true;
+	}
+	if (
+		toolResult.passed !== undefined ||
+		toolResult.error !== undefined ||
+		toolResult.result_omitted !== undefined
+	) {
+		return false;
+	}
+	const result = toolResult.result;
+	return (
+		isRecord(result) &&
+		result.verdict === 'fail' &&
+		typeof result.error === 'string' &&
+		result.failure_kind === 'semgrep_process_exit' &&
+		Array.isArray(result.findings) &&
+		result.findings.length === 0 &&
+		result.baseline_used !== true
+	);
+}
+
 function hardGateExplicitlyFailed(
 	key: (typeof HARD_GATE_KEYS)[number],
 	toolResult: Record<string, unknown>,
 	batchResult: Record<string, unknown>,
 ): boolean {
+	if (key === 'sast_scan' && isIntentionalSastSkip(toolResult, batchResult)) {
+		return false;
+	}
 	if (toolResult.ran === false || toolResult.passed === false) return true;
 	if (
 		typeof toolResult.error === 'string' &&
@@ -108,6 +161,12 @@ function hardGateExplicitlyFailed(
 		);
 	}
 	if (toolResult.result_omitted !== undefined) return true;
+	if (
+		key === 'sast_scan' &&
+		isExpectedSastDegradation(toolResult, batchResult)
+	) {
+		return false;
+	}
 	if (result.passed === false || typeof result.error === 'string') return true;
 
 	if (key === 'secretscan') {
@@ -177,6 +236,14 @@ export function decodePreCheckResult(output: unknown): PreCheckVerdict {
 	) {
 		return { kind: 'invalid', code: 'PRE_CHECK_RESULT_INVALID' };
 	}
+	if (
+		(parsed.sast_skipped !== undefined &&
+			typeof parsed.sast_skipped !== 'boolean') ||
+		(parsed.sast_degraded !== undefined &&
+			typeof parsed.sast_degraded !== 'boolean')
+	) {
+		return { kind: 'invalid', code: 'PRE_CHECK_RESULT_INVALID' };
+	}
 
 	const ranStates: boolean[] = [];
 	for (const key of TOOL_KEYS) {
@@ -200,6 +267,21 @@ export function decodePreCheckResult(output: unknown): PreCheckVerdict {
 	const allSkipped = ranStates.every((ran) => ran === false);
 	const anyRan = ranStates.some((ran) => ran === true);
 	const batchStatus = parsed.batch_status;
+	if (
+		parsed.sast_skipped === true &&
+		!isIntentionalSastSkip(parsed.sast_scan as Record<string, unknown>, parsed)
+	) {
+		return { kind: 'invalid', code: 'PRE_CHECK_RESULT_INVALID' };
+	}
+	if (
+		parsed.sast_degraded === true &&
+		!isExpectedSastDegradation(
+			parsed.sast_scan as Record<string, unknown>,
+			parsed,
+		)
+	) {
+		return { kind: 'invalid', code: 'PRE_CHECK_RESULT_INVALID' };
+	}
 	if (
 		batchStatus !== undefined &&
 		batchStatus !== 'completed' &&
