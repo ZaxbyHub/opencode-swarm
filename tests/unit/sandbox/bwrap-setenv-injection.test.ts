@@ -38,8 +38,14 @@ import {
  * `mock.restore()`, so a `probeBwrap: () => true` module stub leaks into every
  * later file in a shared-process run. Measured: it broke linux.test.ts's
  * "returns false on Windows (bwrap is Linux-only)", which asserts the REAL
- * probe. CI spawns one process per file and would stay green; the merge-queue
- * `coverage` job shares a process and would not.
+ * probe.
+ *
+ * NOTE ON CI: no CI job would have caught this. Both the `unit` job and the
+ * merge-queue `coverage` gate run ONE FILE PER PROCESS
+ * (`scripts/ci/run-coverage-gate.sh:53` loops and invokes
+ * `bun test --isolate` per file, per issue #1712). What contamination breaks is
+ * a plain local `bun test a.test.ts b.test.ts` — which developers run
+ * constantly — so the seam matters for the humans, not for the build.
  *
  * The seam is per-module and genuinely restorable, so the original is captured
  * once here and put back after every test.

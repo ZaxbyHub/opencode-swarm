@@ -39,10 +39,14 @@ import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
  * about the real cause.
  *
  * Not hypothetical: observed co-running this file with
- * tests/unit/git/branch.test.ts. CI spawns one process per file and would stay
- * green, but the merge-queue `coverage` job runs the whole suite in a SHARED
- * process, where it would fail. `Bun.spawnSync` is unaffected by a node-module
- * mock, so the fixture is honest under both runners.
+ * tests/unit/git/branch.test.ts.
+ *
+ * NOTE ON CI: no CI job would have caught it. Both the `unit` job and the
+ * merge-queue `coverage` gate run ONE FILE PER PROCESS
+ * (`scripts/ci/run-coverage-gate.sh:53` loops and invokes `bun test --isolate`
+ * per file, per issue #1712). What breaks is a plain local
+ * `bun test a.test.ts b.test.ts`. `Bun.spawnSync` is unaffected by a
+ * node-module mock, so the fixture is honest under every runner.
  *
  * The code under test is unaffected either way — it reaches git via `bunSpawn`.
  */
@@ -80,11 +84,11 @@ function tempRoot(label: string): string {
 	return dir;
 }
 
-function mockProc(exitCode: number): BunCompatSubprocess {
+function mockProc(exitCode: number, stdout = ''): BunCompatSubprocess {
 	return {
 		exited: Promise.resolve(exitCode),
 		exitCode,
-		stdout: { text: () => Promise.resolve('') },
+		stdout: { text: () => Promise.resolve(stdout) },
 		stderr: { text: () => Promise.resolve('') },
 		kill: () => {},
 	} as unknown as BunCompatSubprocess;
@@ -134,8 +138,16 @@ function branchExists(directory: string, branch: string): boolean {
 describe('cleanupOrphanedBranches ordering (#2236 recurrence, review of #2261)', () => {
 	test('worktree prune runs BEFORE branch -D', async () => {
 		const calls: string[][] = [];
+		// `listLaneBranches` must return a lane branch, or the delete loop never
+		// runs and the ordering assertion below has nothing to compare. An
+		// earlier version of this test mocked an EMPTY listing and guarded the
+		// comparison with `if (deleteIndex >= 0)`, so it passed under BOTH
+		// orderings — it asserted its own setup, not the fix.
 		_internals.bunSpawn = (args: string[]) => {
 			calls.push(args);
+			if (args[1] === 'branch' && args[2] === '--format=%(refname:short)') {
+				return mockProc(0, 'main\nswarm-lane/s1/lane-1\n');
+			}
 			return mockProc(0);
 		};
 
@@ -147,13 +159,11 @@ describe('cleanupOrphanedBranches ordering (#2236 recurrence, review of #2261)',
 		const deleteIndex = calls.findIndex(
 			(args) => args[1] === 'branch' && (args[2] === '-D' || args[2] === '-d'),
 		);
-		// With no lane branches listed, the delete loop never runs; assert the
-		// prune call itself still fires and, when a delete call exists, prune
-		// precedes it.
+		// Both must be UNCONDITIONALLY present: a missing delete call would mean
+		// the listing mock stopped matching and the ordering went unchecked.
 		expect(pruneIndex).toBeGreaterThanOrEqual(0);
-		if (deleteIndex >= 0) {
-			expect(pruneIndex).toBeLessThan(deleteIndex);
-		}
+		expect(deleteIndex).toBeGreaterThanOrEqual(0);
+		expect(pruneIndex).toBeLessThan(deleteIndex);
 	});
 
 	test('real repo: an orphaned lane branch is deleted even when its worktree directory is already gone', async () => {
