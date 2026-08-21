@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.144.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.144.0...v7.144.1) (2026-08-21)
+
+
+### Bug Fixes
+
+* Architect prompt regression guards: size-ceiling test + fix false renderPrompt "pinned call site" doc ([#1649](https://github.com/ZaxbyHub/opencode-swarm/issues/1649)) ([63b7dc3](https://github.com/ZaxbyHub/opencode-swarm/commit/63b7dc314909196e226416bfe194a347e856dbae))
+* **runners:** resolve clippy needless_late_init blocking merge queue ([4384fb7](https://github.com/ZaxbyHub/opencode-swarm/commit/4384fb79b8cacc884a66109bfd3ad5ca4a17b4db))
+
 ## [7.144.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.143.6...v7.144.0) (2026-08-20)
 
 

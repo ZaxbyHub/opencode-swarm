@@ -11,10 +11,11 @@ import {
 } from '../hooks/review-receipt-collector.js';
 import {
 	captureReviewerScopeFileFingerprint,
-	MAX_REVIEWER_SCOPE_FINGERPRINT_AGGREGATE_BYTES,
 	type ReviewerScopeFileFingerprint,
+	reviewerScopeCaptureToFingerprint,
 	reviewerScopeFileFingerprintsEqual,
 } from '../hooks/reviewer-scope-file-fingerprint.js';
+import { canonicalWorkspaceIdentity } from '../scope/scope-binding.js';
 import {
 	type AgentSessionState,
 	advanceTaskState,
@@ -23,9 +24,12 @@ import {
 	getTaskState,
 	hasActiveTurboMode,
 	hasBothStageBCompletions,
+	markReviewerScopeGenerationMergebackPending,
+	markReviewerScopeGenerationNoChange,
 	markReviewerScopeGenerationReady,
 	type ReviewerScopeGeneration,
 	recordModifiedFilesForTask,
+	recordReviewerScopeGenerationFileFingerprint,
 	recordStageBCompletion,
 	reviewerScopeGenerationHasDeclaredOverlap,
 	swarmState,
@@ -318,37 +322,54 @@ export async function ingestBackgroundStageBCompletion(args: {
 					generation?.modifiedFiles ?? null,
 				);
 				const routedFingerprints = generation?.modifiedFileFingerprints ?? null;
+				// Issue #2100: a background coder with zero observed files and a
+				// zero-route collecting generation is a truthful no-change, not an
+				// attribution failure.
+				if (
+					generation?.status === 'collecting' &&
+					generation.background === true &&
+					observedSet.size === 0 &&
+					routedFiles?.size === 0 &&
+					declaredSet
+				) {
+					if (
+						markReviewerScopeGenerationNoChange({
+							parentSessionID: args.record.parentSessionId,
+							taskId,
+							coderCallID: args.record.callID,
+						})
+					) {
+						return { ok: true, consumed: true };
+					}
+				}
+				// Capture from the generation's bound workspace root (the lane
+				// for worktree-isolated background coders) with typed results.
+				const captureRoot =
+					generation?.captureDirectory?.trim() || args.directory;
 				const observedFingerprints = new Map<
 					string,
 					ReviewerScopeFileFingerprint
 				>();
-				let fingerprintBytes = 0;
 				for (const file of observedSet) {
-					const fingerprint = captureReviewerScopeFileFingerprint(
-						args.directory,
+					const captured = captureReviewerScopeFileFingerprint(
+						captureRoot,
 						file,
-						MAX_REVIEWER_SCOPE_FINGERPRINT_AGGREGATE_BYTES - fingerprintBytes,
 					);
+					if (captured.kind === 'capture_failed') {
+						return {
+							ok: false,
+							consumed: false,
+							reason: `background coder post-write fingerprint could not be reconstructed exactly (${captured.code}${captured.retryable ? ' (retryable)' : ' (permanent)'} on ${captured.file})`,
+						};
+					}
+					const fingerprint = reviewerScopeCaptureToFingerprint(captured);
 					if (!fingerprint) {
 						return {
 							ok: false,
 							consumed: false,
 							reason:
-								'background coder post-write fingerprint could not be reconstructed exactly',
+								'background coder post-write fingerprint returned an unusable result',
 						};
-					}
-					if (fingerprint.kind === 'file') {
-						fingerprintBytes += fingerprint.size;
-						if (
-							fingerprintBytes > MAX_REVIEWER_SCOPE_FINGERPRINT_AGGREGATE_BYTES
-						) {
-							return {
-								ok: false,
-								consumed: false,
-								reason:
-									'background coder post-write fingerprint aggregate exceeded the bounded limit',
-							};
-						}
 					}
 					observedFingerprints.set(file, fingerprint);
 				}
@@ -414,6 +435,22 @@ export async function ingestBackgroundStageBCompletion(args: {
 					};
 				}
 				attributedFiles = [...routedFiles];
+				// Repair path (issue #2100): ingestion re-captured every routed
+				// file's exact bytes against the generation's bound root — write
+				// them back so the completeness gate at ready-publication sees a
+				// fully populated fingerprint set even when a write-time capture
+				// transiently failed.
+				for (const file of routedFiles) {
+					const fingerprint = observedFingerprints.get(file);
+					if (fingerprint) {
+						recordReviewerScopeGenerationFileFingerprint({
+							parentSessionID: args.record.parentSessionId,
+							taskId,
+							coderCallID: args.record.callID,
+							fingerprint,
+						});
+					}
+				}
 			}
 			const parentSession = swarmState.agentSessions.get(
 				args.record.parentSessionId,
@@ -489,12 +526,37 @@ export async function ingestBackgroundStageBCompletion(args: {
 					updateTaskWorkflowCache(parentSession, taskId, workflow);
 				}
 			}
+			if (args.reviewerReceiptOptions?.config?.enabled === true) {
+				// Lane-rooted background generations are never published ready
+				// from the primary root without merge-back verification (F-001):
+				// retain them as mergeback_pending; the merge-back verifier
+				// repoints and publishes when the primary matches.
+				const laneGeneration = getReviewerScopeGenerationForCoderCall({
+					parentSessionID: args.record.parentSessionId,
+					taskId,
+					coderCallID: args.record.callID,
+				});
+				const laneRooted =
+					laneGeneration !== null &&
+					laneGeneration.workspaceIdentity !==
+						canonicalWorkspaceIdentity(args.directory);
+				if (laneRooted) {
+					markReviewerScopeGenerationMergebackPending({
+						parentSessionID: args.record.parentSessionId,
+						taskId,
+						coderCallID: args.record.callID,
+					});
+					return { ok: true, consumed: true };
+				}
+			}
 			if (
 				args.reviewerReceiptOptions?.config?.enabled === true &&
 				!markReviewerScopeGenerationReady({
 					parentSessionID: args.record.parentSessionId,
 					taskId,
 					coderCallID: args.record.callID,
+					primaryWorkspaceIdentity:
+						canonicalWorkspaceIdentity(args.directory) ?? undefined,
 				})
 			) {
 				return {

@@ -1,27 +1,35 @@
 /**
- * Canonical scope construction for Stage-B reviewer receipts.
+ * Canonical scope construction for Stage-B reviewer receipts (v2, issue #2100).
  *
  * The architect-authored reviewer prompt is not authoritative scope: it can
  * omit files that the coder actually changed. Guardrails records every
- * write-tool target in `modifiedFilesThisCoderTask`, so receipts fingerprint a
- * bounded manifest of repository HEAD, those paths, and their current byte
- * content instead. A base change therefore invalidates the receipt even when
- * the working-file bytes happen to remain identical.
+ * write-tool target on the coder generation, so receipts fingerprint an exact
+ * manifest of repository HEAD, the canonical workspace identity, those paths,
+ * and their complete current bytes (streamed SHA-256 — no byte caps). A base
+ * change therefore invalidates the receipt even when the working-file bytes
+ * happen to remain identical.
  *
- * Any missing session state, unsafe path, symlink/reparse point, concurrent
- * mutation, or size overflow fails toward no receipt. A durable receipt must
- * never claim a scope the harness could not reconstruct exactly.
+ * The inline payload budget (`maxBytes`) selects a per-file DELIVERY MODE only
+ * — it never decides which files enter the manifest and never changes the
+ * manifest digest. Unsafe paths, symlink/reparse points, non-regular files,
+ * and concurrent mutation fail toward typed results; transient classes
+ * (HEAD timeout/race, capture races, capture deadline) are retryable.
  */
 
 import * as child_process from 'node:child_process';
-import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { loadPlanJsonOnly } from '../plan/manager.js';
+import { canonicalWorkspaceIdentity } from '../scope/scope-binding.js';
 import { peekReviewerScopeGenerationClaim, swarmState } from '../state.js';
 import { resolveGitExecutable } from '../utils/git-executable.js';
 import { resolveDelegatedPlanTaskId } from './delegation-gate.js';
 import { computeScopeFingerprint } from './review-receipt.js';
+import {
+	captureReviewerScopeFileFingerprint,
+	REVIEWER_SCOPE_CAPTURE_BATCH_DEADLINE_MS,
+	type ReviewerScopeCaptureFailureCode,
+} from './reviewer-scope-file-fingerprint.js';
 
 const MAX_SCOPE_FILES = 256;
 const DEFAULT_MAX_SCOPE_BYTES = 256 * 1024;
@@ -30,13 +38,25 @@ const HEAD_TIMEOUT_MS = 5_000;
 const HEAD_OUTPUT_BYTES = 256;
 const HEAD_SHA_PATTERN = /^[0-9a-f]{40,64}$/i;
 
-export const REVIEWER_TASK_SCOPE_DESCRIPTION = 'reviewer-task-files-v1';
+export const REVIEWER_TASK_SCOPE_DESCRIPTION = 'reviewer-task-files-v2';
+export const REVIEWER_TASK_SCOPE_HEADER =
+	'opencode-swarm-reviewer-task-scope-v2';
+
+export interface ReviewerTaskScopeDeliveryEntry {
+	path: string;
+	mode: 'inline' | 'manual';
+}
 
 export interface ReviewerTaskScope {
 	content: string;
-	description: typeof REVIEWER_TASK_SCOPE_DESCRIPTION;
+	/** Manifest version discriminator — `reviewer-task-files-v2` for live builds; legacy v1 values only reach us from persisted data. */
+	description: string;
 	files: string[];
 	headSha: string;
+	/** Canonical workspace identity the manifest bytes were captured from. */
+	workspaceIdentity: string;
+	/** Per-file delivery mode — advisory prompt metadata, never part of the digest. */
+	delivery: ReviewerTaskScopeDeliveryEntry[];
 	taskId?: string;
 	coderCallID?: string;
 	generation?: number;
@@ -60,6 +80,31 @@ export interface ResolveReviewerTaskScopeOptions {
 	/** Injectable clock used only for deterministic expiry tests. */
 	now?: number;
 }
+
+export type ReviewerScopeBuildFailureCode =
+	| 'no_files'
+	| 'too_many_files'
+	| 'invalid_budget'
+	| 'invalid_path'
+	| 'workspace_unresolvable'
+	| 'head_timeout'
+	| 'head_changed'
+	| 'outside_workspace'
+	| 'symlink_or_reparse'
+	| 'non_regular'
+	| 'unreadable'
+	| 'file_changed_during_capture'
+	| 'capture_deadline';
+
+export type ReviewerScopeBuildResult =
+	| { ok: true; scope: ReviewerTaskScope }
+	| {
+			ok: false;
+			code: ReviewerScopeBuildFailureCode;
+			retryable: boolean;
+			file?: string;
+			detail?: string;
+	  };
 
 /**
  * Resolve the exact known plan task carried by reviewer/coder Task arguments.
@@ -97,11 +142,6 @@ export async function resolveReviewerScopeTaskId(
 export const _internals: {
 	spawn: typeof child_process.spawn;
 	realpath: typeof fs.promises.realpath;
-	lstatBigInt: (path: fs.PathLike) => Promise<fs.BigIntStats>;
-	open: typeof fs.promises.open;
-	fileHandleStatBigInt: (
-		handle: fs.promises.FileHandle,
-	) => Promise<fs.BigIntStats>;
 	/**
 	 * Issue #2236 hardening (F1/F4/F5) — resolves the absolute git executable
 	 * path instead of spawning the bare `'git'` name. Exposed for test
@@ -111,9 +151,6 @@ export const _internals: {
 } = {
 	spawn: child_process.spawn,
 	realpath: fs.promises.realpath,
-	lstatBigInt: (path) => fs.promises.lstat(path, { bigint: true }),
-	open: fs.promises.open,
-	fileHandleStatBigInt: (handle) => handle.stat({ bigint: true }),
 	resolveGitExecutable,
 };
 
@@ -143,75 +180,6 @@ function pathKey(relativePath: string): string {
 	return process.platform === 'win32'
 		? relativePath.toLowerCase()
 		: relativePath;
-}
-
-function samePath(left: string, right: string): boolean {
-	const a = path.resolve(left);
-	const b = path.resolve(right);
-	return process.platform === 'win32'
-		? a.toLowerCase() === b.toLowerCase()
-		: a === b;
-}
-
-function sameFileIdentity(
-	left: fs.BigIntStats,
-	right: fs.BigIntStats,
-): boolean {
-	return (
-		(left.dev !== 0n || left.ino !== 0n) &&
-		(right.dev !== 0n || right.ino !== 0n) &&
-		left.dev === right.dev &&
-		left.ino === right.ino
-	);
-}
-
-function sameFileSnapshot(
-	left: fs.BigIntStats,
-	right: fs.BigIntStats,
-): boolean {
-	return (
-		sameFileIdentity(left, right) &&
-		left.size === right.size &&
-		left.mtimeNs === right.mtimeNs &&
-		left.ctimeNs === right.ctimeNs
-	);
-}
-
-async function missingPathParentIsContained(
-	root: string,
-	absolutePath: string,
-): Promise<boolean> {
-	let current = path.dirname(absolutePath);
-	for (;;) {
-		try {
-			const canonical = await _internals.realpath(current);
-			return samePath(root, canonical) || isContained(root, canonical);
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return false;
-		}
-		const parent = path.dirname(current);
-		if (samePath(parent, current)) return false;
-		current = parent;
-	}
-}
-
-async function readBoundedHandle(
-	handle: fs.promises.FileHandle,
-	maxBytes: number,
-): Promise<Buffer> {
-	const buffer = Buffer.alloc(maxBytes + 1);
-	let offset = 0;
-	while (offset < buffer.byteLength) {
-		const { bytesRead } = await handle.read(
-			buffer,
-			offset,
-			buffer.byteLength - offset,
-			offset,
-		);
-		if (bytesRead === 0) break;
-		offset += bytesRead;
-	}
-	return buffer.subarray(0, offset);
 }
 
 async function resolveHeadSha(directory: string): Promise<string | null> {
@@ -281,23 +249,51 @@ async function resolveHeadSha(directory: string): Promise<string | null> {
 	}
 }
 
+function buildFailureFromCapture(
+	file: string,
+	code: ReviewerScopeCaptureFailureCode,
+): Extract<ReviewerScopeBuildResult, { ok: false }> {
+	switch (code) {
+		case 'file_changed_during_capture':
+		case 'capture_deadline':
+			return { ok: false, code, retryable: true, file };
+		case 'outside_workspace':
+			return { ok: false, code: 'outside_workspace', retryable: false, file };
+		case 'symlink_or_reparse':
+			return { ok: false, code: 'symlink_or_reparse', retryable: false, file };
+		case 'non_regular':
+			return { ok: false, code: 'non_regular', retryable: false, file };
+		default:
+			return { ok: false, code: 'unreadable', retryable: false, file };
+	}
+}
+
 /**
- * Build the exact scope fingerprint input for a guardrails-observed file list.
+ * Build the exact reviewer-task manifest for a guardrails-observed file list.
+ *
+ * Every regular file contributes its COMPLETE byte count and SHA-256 (streamed
+ * capture); the payload budget only selects per-file delivery mode. Transient
+ * failures return typed retryable results; the caller owns bounded retry.
  */
 export async function buildReviewerTaskScope(
 	directory: string,
 	modifiedFiles: readonly string[],
 	maxBytes = DEFAULT_MAX_SCOPE_BYTES,
 	provenance?: ReviewerTaskScopeProvenance,
-): Promise<ReviewerTaskScope | null> {
+	options: { deadlineAt?: number } = {},
+): Promise<ReviewerScopeBuildResult> {
+	if (modifiedFiles.length === 0) {
+		return { ok: false, code: 'no_files', retryable: false };
+	}
+	if (modifiedFiles.length > MAX_SCOPE_FILES) {
+		return { ok: false, code: 'too_many_files', retryable: false };
+	}
 	if (
-		modifiedFiles.length === 0 ||
-		modifiedFiles.length > MAX_SCOPE_FILES ||
 		!Number.isSafeInteger(maxBytes) ||
 		maxBytes <= 0 ||
 		maxBytes > MAX_SCOPE_BYTES
 	) {
-		return null;
+		return { ok: false, code: 'invalid_budget', retryable: false };
 	}
 
 	let lexicalRoot: string;
@@ -306,47 +302,72 @@ export async function buildReviewerTaskScope(
 		lexicalRoot = path.resolve(directory);
 		realRoot = await _internals.realpath(lexicalRoot);
 	} catch {
-		return null;
+		return { ok: false, code: 'workspace_unresolvable', retryable: false };
+	}
+	const workspaceIdentity = canonicalWorkspaceIdentity(realRoot);
+	if (!workspaceIdentity) {
+		return { ok: false, code: 'workspace_unresolvable', retryable: false };
 	}
 	const headSha = await resolveHeadSha(realRoot);
-	if (!headSha) return null;
+	if (!headSha) {
+		return { ok: false, code: 'head_timeout', retryable: true };
+	}
 
 	const candidates = new Map<
 		string,
 		{ absolutePath: string; relativePath: string }
 	>();
 	for (const rawPath of modifiedFiles) {
-		if (
-			typeof rawPath !== 'string' ||
-			rawPath.length === 0 ||
-			hasControlCharacter(rawPath)
-		) {
-			return null;
+		if (typeof rawPath !== 'string') {
+			return { ok: false, code: 'invalid_path', retryable: false };
+		}
+		if (rawPath.length === 0 || hasControlCharacter(rawPath)) {
+			return {
+				ok: false,
+				code: 'invalid_path',
+				retryable: false,
+				file: rawPath,
+			};
 		}
 		const absolutePath = path.resolve(lexicalRoot, rawPath);
-		if (!isContained(lexicalRoot, absolutePath)) return null;
+		if (!isContained(lexicalRoot, absolutePath)) {
+			return {
+				ok: false,
+				code: 'outside_workspace',
+				retryable: false,
+				file: rawPath,
+			};
+		}
 		const relativePath = canonicalPath(
 			path.relative(lexicalRoot, absolutePath),
 		);
-		if (relativePath.length === 0 || relativePath.startsWith('-')) return null;
+		if (relativePath.length === 0 || relativePath.startsWith('-')) {
+			return {
+				ok: false,
+				code: 'invalid_path',
+				retryable: false,
+				file: rawPath,
+			};
+		}
 		candidates.set(pathKey(relativePath), { absolutePath, relativePath });
 	}
-
 	const ordered = [...candidates.values()].sort((left, right) =>
 		left.relativePath.localeCompare(right.relativePath, 'en'),
 	);
-	if (ordered.length === 0) return null;
 
-	let totalBytes = 0;
-	const stableFiles: Array<{
-		absolutePath: string;
-		canonicalPath: string;
-		stat: fs.BigIntStats;
-	}> = [];
-	const deletedPaths: string[] = [];
+	// An outer deadline (bounded retry loop) caps this build's own budget so
+	// per-attempt budgets cannot stack past the caller's wall-clock claim.
+	const deadlineAt = Math.min(
+		options.deadlineAt ?? Number.POSITIVE_INFINITY,
+		Date.now() + REVIEWER_SCOPE_CAPTURE_BATCH_DEADLINE_MS,
+	);
 	const records: string[] = [
-		'opencode-swarm-reviewer-task-scope-v1',
-		JSON.stringify({ head: headSha }),
+		REVIEWER_TASK_SCOPE_HEADER,
+		JSON.stringify({
+			manifest: REVIEWER_TASK_SCOPE_DESCRIPTION,
+			head: headSha,
+			workspace: workspaceIdentity,
+		}),
 	];
 	if (provenance) {
 		records.push(
@@ -358,139 +379,66 @@ export async function buildReviewerTaskScope(
 			}),
 		);
 	}
+	const delivery: ReviewerTaskScopeDeliveryEntry[] = [];
+	let deliveryBudget = maxBytes;
 	for (const candidate of ordered) {
-		let before: fs.BigIntStats;
-		try {
-			before = await _internals.lstatBigInt(candidate.absolutePath);
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-				if (
-					!(await missingPathParentIsContained(
-						realRoot,
-						candidate.absolutePath,
-					))
-				) {
-					return null;
-				}
-				deletedPaths.push(candidate.absolutePath);
-				records.push(
-					JSON.stringify({
-						path: candidate.relativePath,
-						state: 'deleted',
-					}),
-				);
-				continue;
-			}
-			return null;
+		const captured = captureReviewerScopeFileFingerprint(
+			lexicalRoot,
+			candidate.relativePath,
+			{ deadlineAt },
+		);
+		if (captured.kind === 'capture_failed') {
+			return buildFailureFromCapture(captured.file, captured.code);
 		}
-
-		if (!before.isFile() || before.isSymbolicLink()) return null;
-		let realCandidate: string;
-		try {
-			realCandidate = await _internals.realpath(candidate.absolutePath);
-		} catch {
-			return null;
-		}
-		if (!isContained(realRoot, realCandidate)) return null;
-		if (before.size > BigInt(maxBytes - totalBytes)) return null;
-
-		let handle: fs.promises.FileHandle | undefined;
-		let bytes: Buffer;
-		let openedBefore: fs.BigIntStats;
-		try {
-			handle = await _internals.open(realCandidate, 'r');
-			openedBefore = await _internals.fileHandleStatBigInt(handle);
-			const canonicalAfterOpen = await _internals.realpath(
-				candidate.absolutePath,
+		if (captured.kind === 'captured_deleted') {
+			records.push(
+				JSON.stringify({
+					path: candidate.relativePath,
+					state: 'deleted',
+				}),
 			);
-			if (
-				!openedBefore.isFile() ||
-				!sameFileSnapshot(before, openedBefore) ||
-				!samePath(realCandidate, canonicalAfterOpen) ||
-				!isContained(realRoot, canonicalAfterOpen)
-			) {
-				return null;
-			}
-			bytes = await readBoundedHandle(handle, maxBytes - totalBytes);
-			const openedAfter = await _internals.fileHandleStatBigInt(handle);
-			const canonicalAfterRead = await _internals.realpath(
-				candidate.absolutePath,
-			);
-			if (
-				!sameFileSnapshot(openedBefore, openedAfter) ||
-				!samePath(realCandidate, canonicalAfterRead) ||
-				!isContained(realRoot, canonicalAfterRead) ||
-				BigInt(bytes.byteLength) !== openedBefore.size
-			) {
-				return null;
-			}
-		} catch {
-			return null;
-		} finally {
-			await handle?.close().catch(() => {});
+			delivery.push({ path: candidate.relativePath, mode: 'manual' });
+			continue;
 		}
-		totalBytes += bytes.byteLength;
-		stableFiles.push({
-			absolutePath: candidate.absolutePath,
-			canonicalPath: realCandidate,
-			stat: openedBefore,
-		});
 		records.push(
 			JSON.stringify({
 				path: candidate.relativePath,
 				state: 'file',
-				bytes: bytes.byteLength,
-				sha256: createHash('sha256').update(bytes).digest('hex'),
+				bytes: captured.size,
+				sha256: captured.hash,
 			}),
 		);
+		if (captured.size <= deliveryBudget) {
+			deliveryBudget -= captured.size;
+			delivery.push({ path: candidate.relativePath, mode: 'inline' });
+		} else {
+			delivery.push({ path: candidate.relativePath, mode: 'manual' });
+		}
 	}
 
-	for (const stable of stableFiles) {
-		try {
-			const current = await _internals.lstatBigInt(stable.absolutePath);
-			const canonical = await _internals.realpath(stable.absolutePath);
-			if (
-				!current.isFile() ||
-				current.isSymbolicLink() ||
-				!sameFileSnapshot(stable.stat, current) ||
-				!samePath(stable.canonicalPath, canonical) ||
-				!isContained(realRoot, canonical)
-			) {
-				return null;
-			}
-		} catch {
-			return null;
-		}
-	}
-	for (const deletedPath of deletedPaths) {
-		try {
-			await _internals.lstatBigInt(deletedPath);
-			return null;
-		} catch (error) {
-			if (
-				(error as NodeJS.ErrnoException).code !== 'ENOENT' ||
-				!(await missingPathParentIsContained(realRoot, deletedPath))
-			) {
-				return null;
-			}
-		}
-	}
 	const finalHeadSha = await resolveHeadSha(realRoot);
-	if (finalHeadSha !== headSha) return null;
+	if (finalHeadSha !== headSha) {
+		return { ok: false, code: 'head_changed', retryable: true };
+	}
 
 	return {
-		content: `${records.join('\n')}\n`,
-		description: REVIEWER_TASK_SCOPE_DESCRIPTION,
-		files: ordered.map((candidate) => candidate.relativePath),
-		headSha,
-		...(provenance
-			? {
-					taskId: provenance.taskId,
-					coderCallID: provenance.coderCallID,
-					generation: provenance.generation,
-					sessionIncarnation: provenance.sessionIncarnation,
-				}
-			: {}),
+		ok: true,
+		scope: {
+			content: `${records.join('\n')}\n`,
+			description: REVIEWER_TASK_SCOPE_DESCRIPTION,
+			files: ordered.map((candidate) => candidate.relativePath),
+			headSha,
+			workspaceIdentity,
+			delivery,
+			...(provenance
+				? {
+						taskId: provenance.taskId,
+						coderCallID: provenance.coderCallID,
+						generation: provenance.generation,
+						sessionIncarnation: provenance.sessionIncarnation,
+					}
+				: {}),
+		},
 	};
 }
 
@@ -520,6 +468,9 @@ export async function resolveReviewerTaskScope(
 		if (!handoff) return null;
 		const snapshot = handoff.reviewerDispatchScope;
 		if (!snapshot) return null;
+		// Rebuild from the same ambient (primary) root the dispatch snapshot was
+		// built from: lane generations are only claimable after merge-back
+		// verification, and the lane itself may already be cleaned up.
 		const current = await buildReviewerTaskScope(
 			directory,
 			handoff.modifiedFiles,
@@ -532,20 +483,21 @@ export async function resolveReviewerTaskScope(
 			},
 		);
 		if (
-			!current ||
-			computeScopeFingerprint(current.content, current.description).hash !==
-				snapshot.hash ||
-			current.description !== snapshot.description ||
-			current.headSha !== snapshot.headSha ||
-			JSON.stringify(current.files) !== JSON.stringify(snapshot.files)
+			!current.ok ||
+			computeScopeFingerprint(current.scope.content, current.scope.description)
+				.hash !== snapshot.hash ||
+			current.scope.description !== snapshot.description ||
+			current.scope.headSha !== snapshot.headSha ||
+			JSON.stringify(current.scope.files) !== JSON.stringify(snapshot.files)
 		) {
 			return null;
 		}
-		return current;
+		return current.scope;
 	}
-	return buildReviewerTaskScope(
+	const live = await buildReviewerTaskScope(
 		directory,
 		session.modifiedFilesThisCoderTask,
 		maxBytes,
 	);
+	return live.ok ? live.scope : null;
 }

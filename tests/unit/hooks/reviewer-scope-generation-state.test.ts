@@ -6,13 +6,32 @@ import {
 	MAX_REVIEWER_SCOPE_GENERATIONS,
 	markReviewerScopeGenerationReady,
 	REVIEWER_SCOPE_GENERATION_TTL_MS,
+	recordReviewerScopeGenerationCaptureFailure,
 	recordReviewerScopeGenerationFile,
+	recordReviewerScopeGenerationFileFingerprint,
 	resetSwarmState,
 	startAgentSession,
 	startReviewerScopeGeneration,
 	swarmState,
 	takeReviewerScopeGeneration,
 } from '../../../src/state';
+
+function startGen(input: {
+	parentSessionID: string;
+	taskId: string;
+	coderCallID: string;
+	createdAt?: number;
+}) {
+	return startReviewerScopeGeneration({
+		...input,
+		captureDirectory: '/workspace',
+		workspaceIdentity: 'ws:/workspace',
+	});
+}
+
+function storedFingerprint(file: string) {
+	return { file, kind: 'file' as const, size: 1, hash: 'a'.repeat(64) };
+}
 
 describe('reviewer scope generation state', () => {
 	beforeEach(() => resetSwarmState());
@@ -21,21 +40,21 @@ describe('reviewer scope generation state', () => {
 		startAgentSession('parent-a', 'architect');
 		startAgentSession('parent-b', 'architect');
 		expect(
-			startReviewerScopeGeneration({
+			startGen({
 				parentSessionID: 'parent-a',
 				taskId: '1.1',
 				coderCallID: 'coder-a',
 			}),
 		).not.toBeNull();
 		expect(
-			startReviewerScopeGeneration({
+			startGen({
 				parentSessionID: 'parent-a',
 				taskId: '1.2',
 				coderCallID: 'coder-b',
 			}),
 		).not.toBeNull();
 		expect(
-			startReviewerScopeGeneration({
+			startGen({
 				parentSessionID: 'parent-b',
 				taskId: '1.1',
 				coderCallID: 'coder-a',
@@ -56,6 +75,22 @@ describe('reviewer scope generation state', () => {
 				taskId: '1.2',
 				coderCallID: 'coder-b',
 				file: 'src/b.ts',
+			}),
+		).toBe(true);
+		expect(
+			recordReviewerScopeGenerationFileFingerprint({
+				parentSessionID: 'parent-a',
+				taskId: '1.1',
+				coderCallID: 'coder-a',
+				fingerprint: storedFingerprint('src/a.ts'),
+			}),
+		).toBe(true);
+		expect(
+			recordReviewerScopeGenerationFileFingerprint({
+				parentSessionID: 'parent-a',
+				taskId: '1.2',
+				coderCallID: 'coder-b',
+				fingerprint: storedFingerprint('src/b.ts'),
 			}),
 		).toBe(true);
 		expect(
@@ -123,16 +158,72 @@ describe('reviewer scope generation state', () => {
 		).toEqual(['src/b.ts']);
 	});
 
+	test('a late capture failure retires the stale fingerprint and blocks ready (latest observation wins)', () => {
+		startAgentSession('parent', 'architect');
+		expect(
+			startGen({
+				parentSessionID: 'parent',
+				taskId: '8.1',
+				coderCallID: 'coder-late-failure',
+			}),
+		).not.toBeNull();
+		expect(
+			recordReviewerScopeGenerationFile({
+				parentSessionID: 'parent',
+				taskId: '8.1',
+				coderCallID: 'coder-late-failure',
+				file: 'src/a.ts',
+			}),
+		).toBe(true);
+		expect(
+			recordReviewerScopeGenerationFileFingerprint({
+				parentSessionID: 'parent',
+				taskId: '8.1',
+				coderCallID: 'coder-late-failure',
+				fingerprint: storedFingerprint('src/a.ts'),
+			}),
+		).toBe(true);
+		// A SUBSEQUENT failed capture of the same file is the latest
+		// observation: the stale fingerprint must be retired so
+		// ready-publication fails closed instead of attesting bytes that are
+		// no longer last-seen. (Failures record only while collecting — after
+		// ready, a new write cycle owns a fresh generation by design.)
+		expect(
+			recordReviewerScopeGenerationCaptureFailure({
+				parentSessionID: 'parent',
+				taskId: '8.1',
+				coderCallID: 'coder-late-failure',
+				file: 'src/a.ts',
+				code: 'capture_deadline',
+				retryable: true,
+			}),
+		).toBe(true);
+		const generation = getReviewerScopeGenerationForCoderCall({
+			parentSessionID: 'parent',
+			taskId: '8.1',
+			coderCallID: 'coder-late-failure',
+		});
+		expect(generation?.modifiedFileFingerprints).toEqual([]);
+		expect(generation?.captureFailures).toHaveLength(1);
+		expect(
+			markReviewerScopeGenerationReady({
+				parentSessionID: 'parent',
+				taskId: '8.1',
+				coderCallID: 'coder-late-failure',
+			}),
+		).toBe(false);
+	});
+
 	test('retains a claimed generation while a later same-task generation proceeds', () => {
 		startAgentSession('parent', 'architect');
-		const first = startReviewerScopeGeneration({
+		const first = startGen({
 			parentSessionID: 'parent',
 			taskId: '2.1',
 			coderCallID: 'coder-old',
 		});
 		expect(first).not.toBeNull();
 		expect(
-			startReviewerScopeGeneration({
+			startGen({
 				parentSessionID: 'parent',
 				taskId: '2.1',
 				coderCallID: 'coder-new',
@@ -160,7 +251,7 @@ describe('reviewer scope generation state', () => {
 			}),
 		).not.toBeNull();
 		expect(
-			startReviewerScopeGeneration({
+			startGen({
 				parentSessionID: 'parent',
 				taskId: '2.1',
 				coderCallID: 'coder-too-late',
@@ -194,7 +285,7 @@ describe('reviewer scope generation state', () => {
 		for (let index = 0; index < MAX_REVIEWER_SCOPE_GENERATIONS; index += 1) {
 			const taskId = `3.${index + 1}`;
 			expect(
-				startReviewerScopeGeneration({
+				startGen({
 					parentSessionID: 'parent',
 					taskId,
 					coderCallID: `coder-${index}`,
@@ -216,7 +307,7 @@ describe('reviewer scope generation state', () => {
 			).not.toBeNull();
 		}
 		expect(
-			startReviewerScopeGeneration({
+			startGen({
 				parentSessionID: 'parent',
 				taskId: '4.1',
 				coderCallID: 'overflow',
@@ -232,7 +323,7 @@ describe('reviewer scope generation state', () => {
 	test('expires abandoned unclaimed generations at the bounded TTL', () => {
 		startAgentSession('parent', 'architect');
 		expect(
-			startReviewerScopeGeneration({
+			startGen({
 				parentSessionID: 'parent',
 				taskId: '5.1',
 				coderCallID: 'abandoned',
@@ -250,7 +341,7 @@ describe('reviewer scope generation state', () => {
 
 	test('invalidates async validation when a later same-task generation starts', () => {
 		startAgentSession('parent', 'architect');
-		const first = startReviewerScopeGeneration({
+		const first = startGen({
 			parentSessionID: 'parent',
 			taskId: '6.1',
 			coderCallID: 'coder-first',
@@ -266,7 +357,7 @@ describe('reviewer scope generation state', () => {
 			}),
 		).toBe(true);
 		expect(
-			startReviewerScopeGeneration({
+			startGen({
 				parentSessionID: 'parent',
 				taskId: '6.1',
 				coderCallID: 'coder-second',
@@ -285,7 +376,7 @@ describe('reviewer scope generation state', () => {
 
 	test('rejects callbacks from a prior session incarnation even when counters repeat', () => {
 		startAgentSession('parent', 'architect');
-		const prior = startReviewerScopeGeneration({
+		const prior = startGen({
 			parentSessionID: 'parent',
 			taskId: '7.1',
 			coderCallID: 'coder-reused',
@@ -294,7 +385,7 @@ describe('reviewer scope generation state', () => {
 
 		resetSwarmState();
 		startAgentSession('parent', 'architect');
-		const replacement = startReviewerScopeGeneration({
+		const replacement = startGen({
 			parentSessionID: 'parent',
 			taskId: '7.1',
 			coderCallID: 'coder-reused',

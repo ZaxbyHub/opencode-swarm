@@ -297,8 +297,7 @@ pub fn execute(policy: &Policy, command: &[String]) -> Result<SandboxResult, Run
 
     watcher.stop();
 
-    let exit_code;
-    if wait_result == WAIT_TIMEOUT {
+    let exit_code = if wait_result == WAIT_TIMEOUT {
         events::emit(&events::quota_exceeded_wall_clock(
             policy.wall_clock_timeout_ms,
             policy.wall_clock_timeout_ms,
@@ -327,8 +326,8 @@ pub fn execute(policy: &Policy, command: &[String]) -> Result<SandboxResult, Run
             GetExitCodeProcess(pi.hProcess, &mut code)
                 .map_err(|e| RunnerError::OsApiFailure(format!("GetExitCodeProcess: {e}")))?;
         }
-        exit_code = code as i32;
-    }
+        code as i32
+    };
 
     events::emit(&events::exit_event(exit_code, None));
 

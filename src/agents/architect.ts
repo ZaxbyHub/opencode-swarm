@@ -63,6 +63,42 @@ export interface AgentDefinition {
  * - Context is preserved across agent delegations
  */
 
+/**
+ * PROMPT BUDGET — CI regression ceiling for the rendered architect prompt
+ * (issue #1649).
+ *
+ * The built-in `ARCHITECT_PROMPT` grows with every hardening block and opt-in
+ * feature block (council, architectural supervision, design docs, skills,
+ * turbo, adversarial testing). Before this guard existed, the prompt grew from
+ * ~104K chars (measured 2026-07-02 when #1649 was filed) to ~129K default /
+ * ~149K with every opt-in feature enabled — a ~25% increase in six weeks with
+ * zero CI signal, because existing tests only assert LOWER bounds
+ * (`toBeGreaterThan(100000)` in tests/unit/agents/architect-adversarial.test.ts).
+ *
+ * `tests/unit/agents/architect-prompt-budget.test.ts` fails when any rendered
+ * built-in prompt exceeds this ceiling. At ~4 chars/token, 160K chars is
+ * ~40K tokens of system prompt — already a large share of a 128K-token
+ * context window.
+ *
+ * Baseline at introduction (2026-08): default render ≈ 129K chars; all opt-in
+ * features enabled ≈ 149K chars. The ceiling intentionally leaves only ~7%
+ * headroom above the heaviest configuration: raising it requires justifying
+ * the growth in the PR that needs it and updating the baseline above.
+ *
+ * This bound applies ONLY to the built-in prompt. User-supplied
+ * `customPrompt`/`customAppendPrompt` values are exempt (they are validated
+ * for placeholders, not size — a user may legitimately paste a large prompt).
+ *
+ * Naming: this is named `ARCHITECT_PROMPT_BUDGET_CHARS`, NOT `MAX_*`, to
+ * distinguish it from the runtime-enforced `MAX_PROMPT_CHARS` in
+ * `src/tools/dispatch-lanes.ts` (which has Zod `.max()` + runtime length
+ * checks). This constant is a TEST-TIME budget guard only — production
+ * code does not enforce it. Same role, different scope: the dispatch-lanes
+ * constant bounds a runtime-composed prompt payload; this one bounds CI
+ * regression of a built-in source string.
+ */
+export const ARCHITECT_PROMPT_BUDGET_CHARS = 160_000;
+
 const ARCHITECT_PROMPT = `You are Architect - orchestrator of a multi-agent swarm.
 
 ## COMMAND NAMESPACE — CRITICAL
