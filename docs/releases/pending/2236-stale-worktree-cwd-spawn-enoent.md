@@ -101,8 +101,11 @@ repository's `.opencode/opencode-swarm.json` is dropped with a warning and never
 the repo, so a repository could otherwise ship both a config naming a shim and the shim itself, and the shim
 would run with the user's privileges on the next git command (CWE-427). There is no per-repository form of
 this option. Independently of provenance, a candidate is now accepted only when `--version` exits 0 **and**
-prints git's own `git version <major>.<minor>…` line — exiting 0 is no longer enough for any candidate source,
-so an arbitrary executable cannot be mistaken for git. A refused or unusable value is still never fatal:
+prints git's own `git version <major>.<minor>…` line — exiting 0 is no longer enough for any candidate source.
+**This output check is not a security control and should not be read as one:** anything that can name the
+binary can also make it print `git version 2.43.0`. What it does catch is an *accidental* non-git target — a
+`/bin/true`, a broken `xcode-select` shim, a wrapper that exits 0 without being git. The provenance rule above
+is the actual control. A refused or unusable value is still never fatal:
 resolution warns and continues down the candidate list.
 
 A CI check (`check:bare-spawn`) fails the build on any new bare-name **string literal** in a spawn call outside

@@ -473,7 +473,6 @@ function exposedGitBinary(raw: Record<string, unknown> | null): unknown {
 function enforceGitBinaryProvenance(
 	mergedRaw: Record<string, unknown>,
 	rawUserConfig: Record<string, unknown> | null,
-	rawProjectConfig: Record<string, unknown> | null,
 ): Record<string, unknown> {
 	const userBinary = exposedGitBinary(rawUserConfig);
 	const exposedBinary = exposedGitBinary(mergedRaw);
@@ -562,11 +561,7 @@ function buildConfigWithMeta(
 	//     immediately after the merge so every downstream step (including
 	//     each recovery branch) sees the already-neutralized object.
 	//     SECURITY (CWE-427) — see `enforceGitBinaryProvenance`.
-	mergedRaw = enforceGitBinaryProvenance(
-		mergedRaw,
-		rawUserConfig,
-		rawProjectConfig,
-	);
+	mergedRaw = enforceGitBinaryProvenance(mergedRaw, rawUserConfig);
 
 	// 2. `full_auto.locked` is an administrative hard-off: a project-level
 	//    `locked: false` must NOT override a user-level `locked: true`.
