@@ -6,9 +6,10 @@
  * src/cli/index.ts) and the diagnostics service (getDiagnoseData in
  * src/services/diagnose-service.ts) read from this list so they stay in sync.
  *
- * OpenCode caches plugins in three layouts depending on host and version:
- * 1. XDG packages cache (some macOS + Windows OpenCode installs ≤ v20):
+ * OpenCode caches plugins in four layouts depending on host and version:
+ * 1. XDG packages caches (some macOS + Windows OpenCode installs ≤ v20):
  *    `<XDG_CACHE_HOME or ~/.cache>/opencode/packages/opencode-swarm@latest/`
+ *    `<XDG_CACHE_HOME or ~/.cache>/opencode/packages/opencode-swarm/`
  * 2. Legacy XDG config node_modules (older OpenCode installs ≤ v19):
  *    `<XDG_CONFIG_HOME or ~/.config>/opencode/node_modules/opencode-swarm/`
  * 3. CANONICAL XDG cache node_modules (current OpenCode v20+, all platforms,
@@ -131,6 +132,7 @@ export function getPluginCachePaths(): readonly string[] {
 	const paths: string[] = [
 		path.join(cacheBase, 'opencode', 'node_modules', 'opencode-swarm'),
 		path.join(cacheBase, 'opencode', 'packages', 'opencode-swarm@latest'),
+		path.join(cacheBase, 'opencode', 'packages', 'opencode-swarm'),
 		path.join(configDir, 'node_modules', 'opencode-swarm'),
 	];
 	if (process.platform === 'darwin') {
@@ -138,6 +140,7 @@ export function getPluginCachePaths(): readonly string[] {
 		paths.push(
 			path.join(libCaches, 'opencode', 'node_modules', 'opencode-swarm'),
 			path.join(libCaches, 'opencode', 'packages', 'opencode-swarm@latest'),
+			path.join(libCaches, 'opencode', 'packages', 'opencode-swarm'),
 		);
 	}
 	if (process.platform === 'win32') {
@@ -148,6 +151,7 @@ export function getPluginCachePaths(): readonly string[] {
 		paths.push(
 			path.join(localAppData, 'opencode', 'node_modules', 'opencode-swarm'),
 			path.join(localAppData, 'opencode', 'packages', 'opencode-swarm@latest'),
+			path.join(localAppData, 'opencode', 'packages', 'opencode-swarm'),
 			path.join(appData, 'opencode', 'node_modules', 'opencode-swarm'),
 		);
 	}

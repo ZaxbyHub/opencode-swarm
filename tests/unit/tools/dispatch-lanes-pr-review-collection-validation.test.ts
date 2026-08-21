@@ -43,6 +43,12 @@ beforeEach(() => {
 	const ops: SessionOps = {
 		create: mock(async () => ({ data: { id: 'unused' }, error: undefined })),
 		prompt: mock(async () => ({ data: null, error: undefined })),
+		status: mock(async () => ({
+			data: Object.fromEntries(
+				[...outputs.keys()].map((session) => [session, { type: 'idle' }]),
+			),
+			error: undefined,
+		})),
 		messages: mock(async ({ path: sessionPath }) => ({
 			data: [
 				{
@@ -219,6 +225,13 @@ describe('PR-review discovery validation during collection', () => {
 		expect(result.lane_results[0].status).toBe('completed');
 		const record = findByCorrelationId(directory, `session-${batch}-${lane}`);
 		expect(record?.result?.salvagedWorkflowLanes).toEqual([workflowLane]);
+		expect(record?.result?.salvagedWorkflowLaneRecoveries).toEqual([
+			{
+				workflowLane,
+				kind: 'parser-normalization',
+				reason: 'structural repairs applied: redundant-clean-confidence',
+			},
+		]);
 	});
 
 	test.each([
@@ -282,6 +295,23 @@ describe('PR-review discovery validation during collection', () => {
 			'session-fenced-base-fenced-lane',
 		);
 		expect(record?.result?.salvagedWorkflowLanes).toEqual(['security-trust']);
+		expect(record?.result?.salvagedWorkflowLaneRecoveries).toEqual([
+			{
+				workflowLane: 'security-trust',
+				kind: 'parser-normalization',
+				reason: 'structural repairs applied: terminal-protocol-fence',
+			},
+		]);
+		expect(result.lane_results[0].salvaged_workflow_lanes).toEqual([
+			'security-trust',
+		]);
+		expect(result.lane_results[0].salvaged_workflow_lane_recoveries).toEqual([
+			{
+				workflow_lane: 'security-trust',
+				kind: 'parser-normalization',
+				reason: 'structural repairs applied: terminal-protocol-fence',
+			},
+		]);
 	});
 
 	test('persists validator-proven salvage for repaired council output', async () => {
@@ -302,6 +332,14 @@ describe('PR-review discovery validation during collection', () => {
 		expect(result.lane_results[0].status).toBe('completed');
 		const record = findByCorrelationId(directory, `session-${batch}-${lane}`);
 		expect(record?.result?.salvagedWorkflowLanes).toEqual([workflowLane]);
+		expect(record?.result?.salvagedWorkflowLaneRecoveries).toEqual([
+			{
+				workflowLane,
+				kind: 'parser-normalization',
+				reason:
+					'structural repairs applied: terminal-protocol-fence, redundant-clean-confidence',
+			},
+		]);
 	});
 
 	test('does not mark well-formed council output as salvaged', async () => {
@@ -432,6 +470,23 @@ describe('PR-review discovery validation during collection', () => {
 		expect(record?.status).toBe('completed');
 		expect(record?.result?.salvagedWorkflowLanes).toEqual([
 			'intent-architecture',
+		]);
+		expect(record?.result?.salvagedWorkflowLaneRecoveries).toEqual([
+			{
+				workflowLane: 'intent-architecture',
+				kind: 'parser-normalization',
+				reason: 'structural repairs applied: synthesized-header',
+			},
+		]);
+		expect(result.lane_results[0].salvaged_workflow_lanes).toEqual([
+			'intent-architecture',
+		]);
+		expect(result.lane_results[0].salvaged_workflow_lane_recoveries).toEqual([
+			{
+				workflow_lane: 'intent-architecture',
+				kind: 'parser-normalization',
+				reason: 'structural repairs applied: synthesized-header',
+			},
 		]);
 	});
 });

@@ -25,6 +25,34 @@ do not. The per-obligation CLEAN rules: a `[CLEAN]` conflicts with `[CANDIDATE]`
 rows only for the SAME lane; a valid CLEAN for a different lane in an unscoped
 parse is skipped, not an error; duplicates for the same lane still fail.
 
+## Host-transport recovery (recorded as salvage)
+
+Collection preserves a strict evidence hierarchy: the complete immutable
+`output_ref` artifact outranks its bounded inline preview. Consequently,
+`result.truncated` is not a failure when that artifact still passes identity,
+digest, exact-head, scope, ownership, and row-coverage validation. The affected
+workflow lane is recorded in `salvaged_workflow_lanes` even when no parser repair
+was necessary. That compatibility list is paired with typed per-lane metadata in
+`salvaged_workflow_lane_recoveries`.
+
+A host `session.status` timeout means readiness is **unknown**, not busy and not
+complete. Status and message calls receive separate fair bounded budgets so one
+lane cannot starve later lanes. For unknown readiness, a readable transcript is
+accepted only when the newest assistant message proves terminal completion; a
+mid-run snapshot remains pending. Invalid output also remains pending while
+readiness is unknown, because the agent may still be producing its protocol row.
+
+When the host message window is incomplete, independently validated positive
+`[CANDIDATE]` rows may be recovered only for base and micro discovery lanes;
+their exact owned workflow lanes are marked salvaged. Council, reviewer, and
+critic outputs remain fail-closed and require retry when incomplete. `[CLEAN]`
+is absence evidence and therefore requires a complete transcript. One positive
+row in a consolidated lane never salvages a sibling dimension whose only
+evidence is `[CLEAN]` or missing. Recovery reasons are lane-scoped and use four
+kinds: `parser-normalization`, `parser-row-recovery`,
+`truncated-preview-durable-artifact`, and
+`transcript-incomplete-terminal-candidate`.
+
 ## Verdict-row pipe tolerance and its fidelity boundary
 
 `[REVIEWED]` (10-field), `[CRITIC]` (6-field), and `[FEEDBACK-VERIFIED]`

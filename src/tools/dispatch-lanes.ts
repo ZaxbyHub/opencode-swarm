@@ -21,8 +21,10 @@ import {
 	appendDelegationTransition,
 	type BackgroundDelegationRecord,
 	type BackgroundDelegationResult,
+	type BackgroundDelegationWorkflowLaneRecovery,
 	DEFAULT_STALE_DELEGATION_TIMEOUT_MS,
 	findByBatchId,
+	findByCorrelationId,
 	recordPendingDelegationDetailed,
 } from '../background/pending-delegations.js';
 import {
@@ -58,6 +60,7 @@ import {
 	recordPrFeedbackGateBatch,
 	recordPrReviewValidationBatch,
 	validatePrReviewDiscoveryLaneCompletion,
+	validatePrWorkflowTransportRecovery,
 } from '../hooks/pr-workflow-gate.js';
 import { buildLaneOrientationBlock } from '../hooks/repo-graph-injection.js';
 import type { ParallelDispatcher } from '../parallel/dispatcher/parallel-dispatcher.js';
@@ -86,6 +89,8 @@ const DEFAULT_COLLECT_TIMEOUT_MS = DEFAULT_ASYNC_STALE_TIMEOUT_MS;
 const MAX_COLLECT_TIMEOUT_MS = 60 * 60_000;
 const COLLECT_POLL_INTERVAL_MS = 500;
 const MAX_COLLECT_POLL_INTERVAL_MS = 10_000;
+const MAX_STATUS_CALL_BUDGET_MS = 2_000;
+const PR_WORKFLOW_PROTOCOL_OUTPUT_MAX_CHARS = 12_000;
 const MAX_ZOD_ISSUES_LISTED = 20;
 const MAX_SESSION_CREATE_GENERATIONS = 2;
 const MAX_CREATE_FAILURE_WALK_NODES = 64;
@@ -645,6 +650,12 @@ export interface DispatchLaneResult {
 	output_artifact_error?: string;
 	transcript_incomplete?: boolean;
 	message_count?: number;
+	salvaged_workflow_lanes?: string[];
+	salvaged_workflow_lane_recoveries?: Array<{
+		workflow_lane: string;
+		kind: BackgroundDelegationWorkflowLaneRecovery['kind'];
+		reason: string;
+	}>;
 	/**
 	 * Set to true when this lane's `output` preview was withheld because an
 	 * identical preview (same batch, lane, and result digest) was already
@@ -737,7 +748,12 @@ export interface SessionOps {
 		query?: { directory?: string; limit?: number };
 	}) => Promise<{
 		data?: Array<{
-			info?: { role?: string };
+			info?: {
+				role?: string;
+				time?: { completed?: number };
+				finish?: string;
+				error?: unknown;
+			};
 			parts?: Array<{ type: string; text?: string }>;
 		}> | null;
 		error?: unknown;
@@ -756,6 +772,7 @@ export const _internals: {
 	createParallelDispatcher: typeof createParallelDispatcher;
 	resolvePrWorkflowRevisionDigestAsync: typeof resolvePrWorkflowRevisionDigestAsync;
 	resolveExactMergeBaseAsync: typeof resolveExactMergeBaseAsync;
+	validatePrWorkflowTransportRecovery: typeof validatePrWorkflowTransportRecovery;
 	now: () => number;
 	sleep: (ms: number) => Promise<void>;
 } = {
@@ -766,6 +783,7 @@ export const _internals: {
 	createParallelDispatcher,
 	resolvePrWorkflowRevisionDigestAsync,
 	resolveExactMergeBaseAsync,
+	validatePrWorkflowTransportRecovery,
 	now: () => Date.now(),
 	sleep,
 };
@@ -783,6 +801,7 @@ export const _test_exports = {
 	formatError,
 	nextCollectPollInterval,
 	promptHash,
+	reserveCollectionLaneCallBudgets,
 	isRetryableSessionCreateFailure,
 	DispatchLanesArgsSchema,
 	DispatchLanesAsyncArgsSchema,
@@ -1586,7 +1605,9 @@ export async function executeCollectLaneResults(
 	);
 	if (hostTimeouts.size > 0) {
 		result.message =
-			'Collection deadline exhausted while waiting for OpenCode host calls; pending lanes remain safe to retry.';
+			result.pending > 0
+				? 'Collection deadline exhausted while waiting for OpenCode host calls; pending lanes remain safe to retry.'
+				: 'Collection recovered and settled all lanes despite bounded OpenCode host-call timeouts; no collection retry is required.';
 		result.errors = [...hostTimeouts];
 	}
 	return result;
@@ -2001,8 +2022,20 @@ async function collectOnce(
 	deadline: number,
 	hostTimeouts: Set<string>,
 ): Promise<void> {
-	for (const record of records) {
-		if (record.status !== 'pending' && record.status !== 'running') continue;
+	const activeRecords = records.filter(
+		(record) => record.status === 'pending' || record.status === 'running',
+	);
+	const pendingSettlements: Promise<void>[] = [];
+	for (let index = 0; index < activeRecords.length; index++) {
+		const record = activeRecords[index];
+		const remainingLaneCount = activeRecords.length - index;
+		const needsRevisionDigest = Boolean(record.workspace?.prHeadSha);
+		const laneBudgets = reserveCollectionLaneCallBudgets(
+			deadline,
+			remainingLaneCount,
+			typeof session.status === 'function',
+			needsRevisionDigest,
+		);
 		if (cancelPending) {
 			if (typeof session.abort === 'function') {
 				const timeoutCount = hostTimeouts.size;
@@ -2012,6 +2045,7 @@ async function collectOnce(
 						deadline,
 						`session.abort for lane session "${record.subagentSessionId}"`,
 						hostTimeouts,
+						laneBudgets.laneBudgetMs,
 					);
 				} catch {
 					// Preserve the old best-effort behavior for ordinary host errors, but
@@ -2024,14 +2058,15 @@ async function collectOnce(
 			});
 			continue;
 		}
-		const readyForCollection = await isLaneReadyForCollection(
+		const readiness = await getLaneCollectionReadiness(
 			session,
 			directory,
 			record.subagentSessionId,
 			deadline,
 			hostTimeouts,
+			laneBudgets.statusBudgetMs,
 		);
-		if (!readyForCollection) continue;
+		if (readiness === 'busy') continue;
 		let messages: Awaited<ReturnType<NonNullable<SessionOps['messages']>>>;
 		try {
 			messages = await withCollectionDeadline(
@@ -2043,6 +2078,7 @@ async function collectOnce(
 				deadline,
 				`session.messages for lane "${record.laneId ?? record.correlationId}"`,
 				hostTimeouts,
+				laneBudgets.messagesBudgetMs,
 			);
 		} catch {
 			continue;
@@ -2050,95 +2086,214 @@ async function collectOnce(
 		if (!messages.data) continue;
 		const transcript = extractAssistantTranscript(messages.data);
 		if (!transcript.text) continue;
-		const collectedRevisionDigest = record.workspace?.prHeadSha
-			? ((await _internals.resolvePrWorkflowRevisionDigestAsync(
-					directory,
-					record.workspace.prHeadSha,
-				)) ?? undefined)
-			: undefined;
-		const output = prepareLaneOutput({
-			directory,
-			batchId: record.batchId ?? record.callID,
-			laneId: record.laneId ?? record.correlationId,
-			agent: record.swarmPrefixedAgent,
-			role: record.normalizedAgent,
-			sessionId: record.subagentSessionId,
-			parentSessionId: record.parentSessionId,
-			mode: record.mode,
-			workflowLane: record.workflowLane,
-			prHeadSha: record.workspace?.prHeadSha ?? undefined,
-			gitHead: record.workspace?.gitHead ?? undefined,
-			revisionDigest: collectedRevisionDigest,
-			scope: record.workspace?.scope ?? undefined,
-			source: 'collect_lane_results',
-			text: transcript.text,
-			messageCount: transcript.messageCount,
-			transcriptIncomplete: transcript.transcriptIncomplete,
-		});
-		const prospectiveResult: BackgroundDelegationResult = {
-			text: output.output,
-			chars: output.output_chars,
-			truncated: output.output_truncated,
-			digest: output.output_digest,
-			...(output.output_ref ? { outputRef: output.output_ref } : {}),
-			outputPreviewChars: output.output.length,
-			...(output.output_degraded !== undefined
-				? { outputDegraded: output.output_degraded }
-				: {}),
-			...(output.output_artifact_error
-				? { outputArtifactError: output.output_artifact_error }
-				: {}),
-			...(output.transcript_incomplete !== undefined
-				? { transcriptIncomplete: output.transcript_incomplete }
-				: {}),
-			messageCount: transcript.messageCount,
-		};
-		let terminalStatus: 'completed' | 'error' = 'completed';
-		if (
-			record.mode === 'swarm-pr-review:base' ||
-			record.mode === 'swarm-pr-review:micro' ||
-			record.mode === 'swarm-pr-review:council'
-		) {
-			const artifact = output.output_ref
-				? (readLaneOutput(directory, output.output_ref)?.artifact ?? null)
-				: null;
-			const validation = validatePrReviewDiscoveryLaneCompletion({
+		if (readiness === 'unknown' && !transcript.terminalAssistantProof) {
+			continue;
+		}
+		// Start digest/validation settlement without awaiting it here. Host status
+		// and transcript collection remain ordered and fair, while one slow digest
+		// cannot prevent later lanes from receiving their collection opportunity.
+		pendingSettlements.push(
+			settleCollectedLane({
+				directory,
 				record,
-				result: prospectiveResult,
-				artifact,
-				expected: {
-					mode: record.mode,
-					workflowLane: record.workflowLane ?? '',
-					ownedWorkflowLanes: record.ownedWorkflowLanes,
-					prHeadSha: record.workspace?.prHeadSha ?? '',
-					gitHead: record.workspace?.gitHead ?? '',
-					revisionDigest: collectedRevisionDigest ?? '',
-					reviewScope: record.workspace?.scope ?? undefined,
-				},
-			});
-			if (validation.ok && validation.salvaged?.length) {
-				// Persist the repair on the durable ledger: a salvaged lane is
-				// accepted, so nothing downstream would otherwise record that its
-				// artifact needed fixing.
-				prospectiveResult.salvagedWorkflowLanes = [...validation.salvaged];
-			}
-			if (!validation.ok) {
-				terminalStatus = 'error';
-				const family =
-					record.mode === 'swarm-pr-review:base'
-						? 'base_explorer'
-						: 'micro_lane';
-				prospectiveResult.error =
-					`PR_REVIEW_DISCOVERY_CONTRACT_INVALID: batch=${record.batchId ?? '(missing)'} lane=${record.laneId ?? '(missing)'} workflow_lane=${record.workflowLane ?? '(missing)'} ` +
-					`${formatPrReviewLaneValidationFailure(validation.failure)}; expected candidate row: ${CANDIDATE_HEADERS[family]}; expected clean row: ${CLEAN_TEMPLATES[family]}`;
-				prospectiveResult.error = prospectiveResult.error.slice(0, 1_024);
+				readiness,
+				transcript,
+				deadline,
+				hostTimeouts,
+				revisionDigestBudgetMs: laneBudgets.revisionDigestBudgetMs,
+			}),
+		);
+	}
+	await Promise.all(pendingSettlements);
+}
+
+async function settleCollectedLane(args: {
+	directory: string;
+	record: BackgroundDelegationRecord;
+	readiness: LaneCollectionReadiness;
+	transcript: ReturnType<typeof extractAssistantTranscript>;
+	deadline: number;
+	hostTimeouts: Set<string>;
+	revisionDigestBudgetMs: number;
+}): Promise<void> {
+	const { directory, record, readiness, transcript, deadline, hostTimeouts } =
+		args;
+	let collectedRevisionDigest: string | undefined;
+	const prHeadSha = record.workspace?.prHeadSha;
+	if (prHeadSha) {
+		try {
+			collectedRevisionDigest =
+				(await withCollectionDeadline(
+					() =>
+						_internals.resolvePrWorkflowRevisionDigestAsync(
+							directory,
+							prHeadSha,
+						),
+					deadline,
+					`revision digest for lane "${record.laneId ?? record.correlationId}"`,
+					hostTimeouts,
+					args.revisionDigestBudgetMs,
+				)) ?? undefined;
+		} catch {
+			// Without a bounded, current digest the durable artifact cannot be
+			// correlated safely. Leave the lane pending; late completion is ignored.
+			return;
+		}
+	}
+	const output = prepareLaneOutput({
+		directory,
+		batchId: record.batchId ?? record.callID,
+		laneId: record.laneId ?? record.correlationId,
+		agent: record.swarmPrefixedAgent,
+		role: record.normalizedAgent,
+		sessionId: record.subagentSessionId,
+		parentSessionId: record.parentSessionId,
+		mode: record.mode,
+		workflowLane: record.workflowLane,
+		prHeadSha: record.workspace?.prHeadSha ?? undefined,
+		gitHead: record.workspace?.gitHead ?? undefined,
+		revisionDigest: collectedRevisionDigest,
+		scope: record.workspace?.scope ?? undefined,
+		source: 'collect_lane_results',
+		text: transcript.text,
+		messageCount: transcript.messageCount,
+		transcriptIncomplete: transcript.transcriptIncomplete,
+	});
+	const prospectiveResult: BackgroundDelegationResult = {
+		text: output.output,
+		chars: output.output_chars,
+		truncated: output.output_truncated,
+		digest: output.output_digest,
+		...(output.output_ref ? { outputRef: output.output_ref } : {}),
+		outputPreviewChars: output.output.length,
+		...(output.output_degraded !== undefined
+			? { outputDegraded: output.output_degraded }
+			: {}),
+		...(output.output_artifact_error
+			? { outputArtifactError: output.output_artifact_error }
+			: {}),
+		...(output.transcript_incomplete !== undefined
+			? { transcriptIncomplete: output.transcript_incomplete }
+			: {}),
+		messageCount: transcript.messageCount,
+	};
+	let terminalStatus: 'completed' | 'error' = 'completed';
+	if (
+		record.mode === 'swarm-pr-review:base' ||
+		record.mode === 'swarm-pr-review:micro' ||
+		record.mode === 'swarm-pr-review:council'
+	) {
+		const artifact = output.output_ref
+			? (readLaneOutput(directory, output.output_ref)?.artifact ?? null)
+			: null;
+		const validation = validatePrReviewDiscoveryLaneCompletion({
+			record,
+			result: prospectiveResult,
+			artifact,
+			expected: {
+				mode: record.mode,
+				workflowLane: record.workflowLane ?? '',
+				ownedWorkflowLanes: record.ownedWorkflowLanes,
+				prHeadSha: record.workspace?.prHeadSha ?? '',
+				gitHead: record.workspace?.gitHead ?? '',
+				revisionDigest: collectedRevisionDigest ?? '',
+				reviewScope: record.workspace?.scope ?? undefined,
+			},
+		});
+		if (validation.ok && validation.salvaged?.length) {
+			// Persist the repair on the durable ledger: a salvaged lane is
+			// accepted, so nothing downstream would otherwise record that its
+			// artifact needed fixing.
+			prospectiveResult.salvagedWorkflowLanes = [...validation.salvaged];
+			if (validation.recoveries?.length) {
+				prospectiveResult.salvagedWorkflowLaneRecoveries = [
+					...validation.recoveries,
+				];
 			}
 		}
-		await appendDelegationTransition(directory, record.correlationId, {
-			status: terminalStatus,
-			result: prospectiveResult,
-		});
+		if (!validation.ok) {
+			if (readiness === 'unknown') return;
+			terminalStatus = 'error';
+			const family =
+				record.mode === 'swarm-pr-review:base' ? 'base_explorer' : 'micro_lane';
+			prospectiveResult.error =
+				`PR_REVIEW_DISCOVERY_CONTRACT_INVALID: batch=${record.batchId ?? '(missing)'} lane=${record.laneId ?? '(missing)'} workflow_lane=${record.workflowLane ?? '(missing)'} ` +
+				`${formatPrReviewLaneValidationFailure(validation.failure)}; expected candidate row: ${CANDIDATE_HEADERS[family]}; expected clean row: ${CLEAN_TEMPLATES[family]}`;
+			prospectiveResult.error = prospectiveResult.error.slice(0, 1_024);
+		}
 	}
+	if (
+		(record.mode === 'swarm-pr-review:reviewer' ||
+			record.mode === 'swarm-pr-review:critic' ||
+			record.mode === 'swarm-pr-feedback:verification' ||
+			record.mode === 'swarm-pr-feedback:stage-b-reviewer' ||
+			record.mode === 'swarm-pr-feedback:stage-b-test' ||
+			record.mode === 'swarm-pr-feedback:closeout-reviewer' ||
+			record.mode === 'swarm-pr-feedback:closeout-critic') &&
+		(prospectiveResult.truncated === true ||
+			prospectiveResult.transcriptIncomplete === true)
+	) {
+		const artifact = output.output_ref
+			? (readLaneOutput(directory, output.output_ref)?.artifact ?? null)
+			: null;
+		const transportValidationOperation = `transport recovery validation for lane "${record.laneId ?? record.correlationId}"`;
+		const transportValidationDeadlineDiagnosticPrefix = `${transportValidationOperation} exceeded the remaining collect_lane_results budget (`;
+		let validation:
+			| Awaited<ReturnType<typeof validatePrWorkflowTransportRecovery>>
+			| undefined;
+		try {
+			validation = await withCollectionDeadline(
+				() =>
+					_internals.validatePrWorkflowTransportRecovery({
+						directory,
+						record,
+						result: prospectiveResult,
+						artifact,
+						revisionDigest: collectedRevisionDigest ?? '',
+					}),
+				deadline,
+				transportValidationOperation,
+				hostTimeouts,
+			);
+		} catch (error) {
+			if (
+				formatError(error).startsWith(
+					transportValidationDeadlineDiagnosticPrefix,
+				)
+			) {
+				return;
+			}
+			terminalStatus = 'error';
+			prospectiveResult.error =
+				`PR_WORKFLOW_CONTRACT_INVALID: batch=${record.batchId ?? '(missing)'} lane=${record.laneId ?? '(missing)'} workflow_lane=${record.workflowLane ?? '(missing)'} ` +
+				formatError(error);
+			prospectiveResult.error = prospectiveResult.error.slice(0, 1_024);
+			await appendDelegationTransition(directory, record.correlationId, {
+				status: terminalStatus,
+				result: prospectiveResult,
+			});
+			return;
+		}
+		if (!validation.ok) {
+			if (readiness === 'unknown') return;
+			terminalStatus = 'error';
+			prospectiveResult.error = `PR_WORKFLOW_CONTRACT_INVALID: batch=${record.batchId ?? '(missing)'} lane=${record.laneId ?? '(missing)'} workflow_lane=${record.workflowLane ?? '(missing)'} ${validation.reason}`;
+			prospectiveResult.error = prospectiveResult.error.slice(0, 1_024);
+		} else if (validation.recoveries?.length) {
+			const workflowLane = record.workflowLane?.trim();
+			if (workflowLane) {
+				prospectiveResult.salvagedWorkflowLanes = [workflowLane];
+			}
+			prospectiveResult.salvagedWorkflowLaneRecoveries = [
+				...(prospectiveResult.salvagedWorkflowLaneRecoveries ?? []),
+				...validation.recoveries,
+			];
+		}
+	}
+	await appendDelegationTransition(directory, record.correlationId, {
+		status: terminalStatus,
+		result: prospectiveResult,
+	});
 }
 
 function scheduleAsyncLanePrompt(args: {
@@ -2227,26 +2382,34 @@ async function appendAsyncLaneLaunchError(
 	cleanupAsyncLaunchSession(session, sessionId);
 }
 
-async function isLaneReadyForCollection(
+type LaneCollectionReadiness = 'idle' | 'busy' | 'unknown';
+
+async function getLaneCollectionReadiness(
 	session: SessionOps,
 	directory: string,
 	sessionId: string,
 	deadline: number,
 	hostTimeouts: Set<string>,
-): Promise<boolean> {
-	if (typeof session.status !== 'function') return true;
+	statusBudgetMs: number,
+): Promise<LaneCollectionReadiness> {
+	if (typeof session.status !== 'function') return 'unknown';
+	if (statusBudgetMs <= 0) return 'unknown';
 	try {
 		const status = await withCollectionDeadline(
 			() => session.status!({ query: { directory } }),
 			deadline,
 			`session.status for lane session "${sessionId}"`,
 			hostTimeouts,
+			statusBudgetMs,
 		);
-		if (status.error || !status.data) return false;
+		if (status.error || !status.data) return 'unknown';
 		const current = status.data[sessionId];
-		return current === undefined || current.type === 'idle';
+		if (current === undefined) return 'unknown';
+		if (current.type === 'idle') return 'idle';
+		if (current.type === 'busy' || current.type === 'retry') return 'busy';
+		return 'unknown';
 	} catch {
-		return false;
+		return 'unknown';
 	}
 }
 
@@ -2261,46 +2424,158 @@ async function sweepStaleAsyncLaneRecords(
 	if (staleTimeoutMs <= 0) return;
 	const now = _internals.now();
 	for (const record of records) {
-		if (
-			record.status !== 'pending' &&
-			record.status !== 'running' &&
-			record.status !== 'ingestion_error'
-		)
-			continue;
-		if (now - record.updatedAt <= staleTimeoutMs) continue;
-		const readyForCollection = await isLaneReadyForCollection(
+		const currentBeforeReadiness = getCurrentStaleSweepCandidate(
+			directory,
+			record,
+			staleTimeoutMs,
+			now,
+		);
+		if (!currentBeforeReadiness) continue;
+		const readiness = await getLaneCollectionReadiness(
 			session,
 			directory,
-			record.subagentSessionId,
+			currentBeforeReadiness.subagentSessionId,
 			deadline,
 			hostTimeouts,
+			reserveCollectionLaneCallBudgets(
+				deadline,
+				records.length,
+				typeof session.status === 'function',
+			).statusBudgetMs,
 		);
-		if (!readyForCollection) continue;
-		await appendDelegationTransition(directory, record.correlationId, {
-			status: 'stale',
-		});
+		if (readiness !== 'idle') continue;
+		const currentAfterReadiness = getCurrentStaleSweepCandidate(
+			directory,
+			record,
+			staleTimeoutMs,
+			now,
+		);
+		if (!currentAfterReadiness) continue;
+		await appendDelegationTransition(
+			directory,
+			currentAfterReadiness.correlationId,
+			{
+				status: 'stale',
+				expectedCurrentStatuses: ['pending', 'running', 'ingestion_error'],
+			},
+		);
 	}
+}
+
+function getCurrentStaleSweepCandidate(
+	directory: string,
+	record: BackgroundDelegationRecord,
+	staleTimeoutMs: number,
+	now: number,
+): BackgroundDelegationRecord | null {
+	const current = findByCorrelationId(directory, record.correlationId);
+	if (!current) return null;
+	if (current.subagentSessionId !== record.subagentSessionId) return null;
+	if ((current.generation ?? 1) !== (record.generation ?? 1)) return null;
+	if (
+		current.status !== 'pending' &&
+		current.status !== 'running' &&
+		current.status !== 'ingestion_error'
+	) {
+		return null;
+	}
+	if (now - current.updatedAt <= staleTimeoutMs) return null;
+	return current;
 }
 
 function extractAssistantTranscript(
 	messages: Array<{
-		info?: { role?: string };
+		info?: {
+			role?: string;
+			time?: { completed?: number };
+			finish?: string;
+			error?: unknown;
+		};
 		parts?: Array<{ type: string; text?: string }>;
 	}>,
-): { text: string; messageCount: number; transcriptIncomplete: boolean } {
+): {
+	text: string;
+	messageCount: number;
+	transcriptIncomplete: boolean;
+	terminalAssistantProof: boolean;
+} {
 	const assistantTexts: string[] = [];
+	let lastAssistantInfo:
+		| {
+				role?: string;
+				time?: { completed?: number };
+				finish?: string;
+				error?: unknown;
+		  }
+		| undefined;
 	for (const message of messages) {
 		if (message.info?.role !== 'assistant') continue;
+		lastAssistantInfo = message.info;
 		const text = extractText(message.parts);
 		if (text.trim().length > 0) assistantTexts.push(text);
 	}
+	const completedAt = lastAssistantInfo?.time?.completed;
+	const finish =
+		typeof lastAssistantInfo?.finish === 'string'
+			? lastAssistantInfo.finish.toLowerCase()
+			: '';
+	const terminalAssistantFinish =
+		finish === 'stop' || finish === 'length' || finish === 'content-filter';
 	return {
 		text: assistantTexts.join('\n\n'),
 		messageCount: assistantTexts.length,
 		// Total message count (not just assistant) is the correct signal: the API
 		// limit is applied to all message types, so hitting it means there may be
 		// earlier messages of any role — including assistant — that were not fetched.
-		transcriptIncomplete: messages.length >= ASYNC_MESSAGE_FETCH_LIMIT,
+		transcriptIncomplete:
+			messages.length >= ASYNC_MESSAGE_FETCH_LIMIT ||
+			finish === 'length' ||
+			finish === 'content-filter',
+		terminalAssistantProof:
+			typeof completedAt === 'number' &&
+			Number.isFinite(completedAt) &&
+			terminalAssistantFinish &&
+			lastAssistantInfo?.error === undefined,
+	};
+}
+
+function reserveCollectionLaneCallBudgets(
+	deadline: number,
+	remainingLaneCount: number,
+	hasStatusCall: boolean,
+	hasRevisionDigestCall = false,
+): {
+	laneBudgetMs: number;
+	statusBudgetMs: number;
+	messagesBudgetMs: number;
+	revisionDigestBudgetMs: number;
+} {
+	const remainingMs = Math.max(0, deadline - _internals.now());
+	if (remainingMs === 0) {
+		return {
+			laneBudgetMs: 0,
+			statusBudgetMs: 0,
+			messagesBudgetMs: 0,
+			revisionDigestBudgetMs: 0,
+		};
+	}
+	const laneBudgetMs = Math.min(
+		remainingMs,
+		Math.max(1, Math.floor(remainingMs / Math.max(1, remainingLaneCount))),
+	);
+	const callCount = 1 + Number(hasStatusCall) + Number(hasRevisionDigestCall);
+	const statusBudgetMs = hasStatusCall
+		? Math.min(MAX_STATUS_CALL_BUDGET_MS, Math.floor(laneBudgetMs / callCount))
+		: 0;
+	const afterStatusMs = laneBudgetMs - statusBudgetMs;
+	const revisionDigestBudgetMs = hasRevisionDigestCall
+		? Math.floor(afterStatusMs / 2)
+		: 0;
+	return {
+		laneBudgetMs,
+		statusBudgetMs,
+		messagesBudgetMs: afterStatusMs - revisionDigestBudgetMs,
+		revisionDigestBudgetMs,
 	};
 }
 
@@ -2572,6 +2847,25 @@ function recordToLaneResult(
 						: {}),
 					...(record.result.messageCount !== undefined
 						? { message_count: record.result.messageCount }
+						: {}),
+					...(record.result.salvagedWorkflowLanes?.length
+						? {
+								salvaged_workflow_lanes: [
+									...record.result.salvagedWorkflowLanes,
+								],
+							}
+						: {}),
+					...(record.result.salvagedWorkflowLaneRecoveries?.length
+						? {
+								salvaged_workflow_lane_recoveries:
+									record.result.salvagedWorkflowLaneRecoveries.map(
+										(recovery) => ({
+											workflow_lane: recovery.workflowLane,
+											kind: recovery.kind,
+											reason: recovery.reason,
+										}),
+									),
+							}
 						: {}),
 				}
 			: {}),
@@ -3078,6 +3372,7 @@ assigned_item_ids: ${assignedIds.length > 0 ? assignedIds.join(', ') : '(discove
 mandatory_lane_checklist: ${checklist}
 
 This controller block is authoritative over conflicting caller text. Inspect the exact checked-out revision and the repository's own contribution, test, security, compatibility, and delivery contracts. Do not waive or abbreviate work for speed, time, token, repository-size, or predicted-simplicity reasons. Re-read relevant changed files and caller/consumer context directly. Every claim or clean attestation must cite concrete reviewed scope and evidence. Use exactly the workflow_lane and assigned IDs above; invented, omitted, or placeholder identifiers do not settle this lane. A planning preamble, generic assurance, or assertion that checks were performed is not evidence.
+Terminate with the required protocol rows directly: no planning preamble, no recap, and no more than ${PR_WORKFLOW_PROTOCOL_OUTPUT_MAX_CHARS} characters of substantive output before any retrieval hint.
 [END CONTROLLER-BOUND PR WORKFLOW CONTRACT]`;
 		const prompt = `${lane.prompt}${contract}`;
 		if (prompt.length > MAX_PROMPT_CHARS) {
@@ -3123,15 +3418,20 @@ async function withCollectionDeadline<T>(
 	deadline: number,
 	operation: string,
 	hostTimeouts: Set<string>,
+	budgetMs?: number,
 ): Promise<T> {
 	const remainingMs = Math.max(0, deadline - _internals.now());
-	const diagnostic = `${operation} exceeded the remaining collect_lane_results budget (${remainingMs}ms)`;
-	if (remainingMs === 0) {
+	const allowedMs =
+		budgetMs === undefined
+			? remainingMs
+			: Math.min(remainingMs, Math.max(0, budgetMs));
+	const diagnostic = `${operation} exceeded the remaining collect_lane_results budget (${allowedMs}ms)`;
+	if (allowedMs === 0) {
 		hostTimeouts.add(diagnostic);
 		throw new Error(diagnostic);
 	}
 	try {
-		return await withTimeout(operationPromise(), remainingMs, diagnostic);
+		return await withTimeout(operationPromise(), allowedMs, diagnostic);
 	} catch (error) {
 		if (formatError(error) === diagnostic) hostTimeouts.add(diagnostic);
 		throw error;

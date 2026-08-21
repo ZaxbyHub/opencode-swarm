@@ -238,12 +238,14 @@ several places depending on your platform and OpenCode version:
   `~/.config/opencode/node_modules/opencode-swarm/`
 - Package cache layout:
   `~/.cache/opencode/packages/opencode-swarm@latest/`
+- Older bare package cache layout:
+  `~/.cache/opencode/packages/opencode-swarm/`
 - Platform-specific macOS / Windows cache roots:
   `~/Library/Caches/opencode/...`, `%LOCALAPPDATA%\opencode\...`, or `%APPDATA%\opencode\...`
 
 The updater also clears known OpenCode lock files (`bun.lock`, `bun.lockb`, and `package-lock.json`) so the next start resolves the latest package.
 
-To upgrade to the latest published version (clears both layouts automatically):
+To upgrade to the latest published version (clears all known layouts automatically):
 
 ```bash
 bunx opencode-swarm update     # cache-only refresh, then restart opencode

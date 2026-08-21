@@ -121,7 +121,9 @@ function expectMasked(
 	warning = '[CONTEXT CRITICAL',
 ): void {
 	expect(output.messages[1].parts[0].type).toBe('text');
-	expect(output.messages[1].parts[0].text).toContain('[Tool output masked');
+	expect(output.messages[1].parts[0].text).toMatch(
+		/\[(?:Tool output masked|Context pruned)/,
+	);
 	expect(output.messages[4].parts[0].text).toContain(warning);
 }
 
@@ -180,6 +182,25 @@ describe('context-budget target model handoff enforcement (#2122)', () => {
 		await handler({}, output);
 
 		expectMasked(output, '[CONTEXT WARNING');
+	});
+
+	test('does not prune or inject warnings for untracked agents', async () => {
+		const config = makeConfig();
+		config.context_budget = {
+			...config.context_budget,
+			model_limits: {
+				...config.context_budget!.model_limits,
+				'provider/model-large': 100,
+			},
+			tracked_agents: ['architect', 'coder'],
+		};
+		const handler = createContextBudgetHandler(config);
+		const output = budgetOutput('explorer', 'session-untracked', 6_000);
+
+		await handler({}, output);
+
+		expectUnmasked(output);
+		expect(output.messages[4].parts[0].text).toBe('take over');
 	});
 
 	test('does not leak switch history across interleaved sessions', async () => {

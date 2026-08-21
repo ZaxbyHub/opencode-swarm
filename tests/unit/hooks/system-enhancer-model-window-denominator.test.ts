@@ -133,7 +133,7 @@ describe('system-enhancer: budget denominator derives from model.limit.context',
 	}
 
 	const budgetBlockOf = (system: string[]) =>
-		system.find((s) => s.includes('[CONTEXT BUDGET:'));
+		system.find((s) => s.includes('[SWARM INJECTION FOOTPRINT:'));
 
 	beforeEach(async () => {
 		resetSwarmState();

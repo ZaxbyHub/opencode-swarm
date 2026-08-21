@@ -132,6 +132,7 @@ export async function persistBatch(
 		empty?: boolean;
 		textOverride?: string;
 		transcriptIncomplete?: boolean;
+		truncated?: boolean;
 		artifactRole?: string;
 		subagentSessionId?: string;
 		scope?: string;
@@ -213,7 +214,7 @@ export async function persistBatch(
 			result: {
 				text,
 				chars: stored.chars,
-				truncated: false,
+				truncated: options.truncated ?? false,
 				digest: stored.digest,
 				...(stored.ref ? { outputRef: stored.ref } : {}),
 				...(options.transcriptIncomplete ? { transcriptIncomplete: true } : {}),

@@ -3,7 +3,7 @@
 Companion to `docs/evidence-and-telemetry.md` (evidence bundles + the legacy
 telemetry stream from a user's point of view) and `docs/engineering-invariants.md`
 (the invariant this PR establishes). This document is the contract definition for
-`src/observability/`: the canonical event envelope, the 42-entry event catalog,
+`src/observability/`: the canonical event envelope, the 43-entry event catalog,
 the legacy adapter, sampling/cardinality rules, the OTel mapping pin, and the
 exhaustive producer/consumer matrix across all seventeen known observability
 stores in the repository.
@@ -16,7 +16,7 @@ Issue: #2029. This is PR 01 of 23 in the observability sequence (#2029–#2051).
 
 **What this PR defines.** A single canonical `ObservabilityEvent` envelope
 (`src/observability/envelope.ts`), a discriminated catalog of every event kind
-the codebase emits today (`src/observability/catalog.ts`, 42 entries), a
+the codebase emits today (`src/observability/catalog.ts`, 43 entries), a
 relationship-validation function, a legacy-payload adapter, deterministic
 sampling and bounded-cardinality helpers, and a versioned OTel/OpenInference
 attribute-mapping table. It wires the envelope into the one live production
@@ -75,7 +75,7 @@ in production stops anything or is visible anywhere today — it is not.
 
 Defined in `src/observability/envelope.ts` as a zod schema (`z.infer`d for the
 `ObservabilityEvent` type). The schema is safe-parsed by the tests
-(`tests/unit/observability/envelope-roundtrip.test.ts`, all 41 kinds). It is **not** parsed by the
+(`tests/unit/observability/envelope-roundtrip.test.ts`, all 43 kinds). It is **not** parsed by the
 CI contract check, and **not** parsed on the `emit()` hot path; `createObservation` builds a plain
 object and never calls `.parse()`, because parsing would reallocate on every
 emit and would clone or reject `legacy.raw` (see §4).
@@ -182,16 +182,18 @@ those inputs before this change.
 
 ---
 
-## 5. The 42-entry catalog
+## 5. The 43-entry catalog
 
-Source: `src/observability/catalog.ts`. Exactly 42 entries = the 38 pre-existing members of
-`TelemetryEvent` (`src/telemetry.ts:15-91`) plus `agent_conflict_detected`
+Source: `src/observability/catalog.ts`. Exactly 43 entries = the 38 pre-existing members of
+`TelemetryEvent` (`src/telemetry.ts:15-92`) plus `agent_conflict_detected`
 (emitted in production via a force-cast past the type system before #2029)
 plus `close_archive_result` (issue #2030 — the structured close/archive
 result event) plus `knowledge_receipt_transition` (issue #2031, the bounded
 diagnostic projection of authoritative receipt transitions) plus
 `knowledge_maintenance` (issue #2033 — the metadata-only human-only hive-store
-quarantine audit).
+quarantine audit) plus `context_pruned` (the bounded aggregate transcript
+mutation audit emitted when context-budget masking and/or pruning changes a
+session transcript).
 
 Legend: **Owner** is `futureOwnerIssue` when `consumers` is empty (permitted
 only together with an owner — an empty consumer list with no owner is a CI
@@ -317,6 +319,18 @@ Category `cost`, severity `info`, privacy `pseudonymous`. Producer
 Required workflow IDs: `hostSessionId`.
 
 ### Guardrail category
+
+#### context_pruned
+Category `guardrail`, severity `notice`, privacy `pseudonymous`. Producer
+`src/telemetry.ts:584`. Consumers: none — owner **#2047**. Retention: **#2047**.
+Required workflow IDs: `hostSessionId`.
+
+Bounded aggregate emitted once per enforcement pass when transcript mutation
+actually happens. Payload fields are counts and token totals only:
+`trigger`, `usageSource`, `beforeTokens`, `afterTokens`, `modelLimit`,
+`maskedMessages`, `maskedToolParts`, `maskedTokensFreed`, `prunedMessages`,
+`prunedTextParts`, `prunedToolParts`, and `prunedTokensFreed`. No prompt
+content, tool output, path, or fabricated session identifier is written.
 
 #### hard_limit_hit
 Category `guardrail`, severity `error`, privacy `pseudonymous`. Producer
@@ -526,7 +540,7 @@ the operator flow ran and why it aborted, if it did.
 
 **Every row carries a `file:line` citation, but those citations are
 UNGATED and go stale on any rebase that shifts a cited file.**
-`scripts/check-event-contract.ts` mechanically validates the 42-entry
+`scripts/check-event-contract.ts` mechanically validates the 43-entry
 *catalog* in §5 (catalog ↔ `TelemetryEvent` union parity, per-entry
 completeness) — it does not and cannot check this prose matrix. Treat a
 citation here as "verified as of `origin/main` `0060f48d`", not as a standing

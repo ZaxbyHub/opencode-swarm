@@ -278,6 +278,18 @@ export interface BackgroundPromptSnapshot {
 	digest: string;
 }
 
+export type BackgroundDelegationRecoveryKind =
+	| 'parser-normalization'
+	| 'parser-row-recovery'
+	| 'truncated-preview-durable-artifact'
+	| 'transcript-incomplete-terminal-candidate';
+
+export interface BackgroundDelegationWorkflowLaneRecovery {
+	workflowLane: string;
+	kind: BackgroundDelegationRecoveryKind;
+	reason: string;
+}
+
 export interface BackgroundDelegationResult {
 	text?: string;
 	error?: string;
@@ -297,6 +309,13 @@ export interface BackgroundDelegationResult {
 	 * a well-formed one after the fact, which is where post-mortems actually look.
 	 */
 	salvagedWorkflowLanes?: string[];
+	/**
+	 * Per-workflow-lane recovery disclosures retained on the durable ledger.
+	 * Unlike `salvagedWorkflowLanes`, which is the compatibility list surface,
+	 * this captures the exact recovery class and human-readable reason so
+	 * transport recovery is not collapsed into the same bucket as parser repair.
+	 */
+	salvagedWorkflowLaneRecoveries?: BackgroundDelegationWorkflowLaneRecovery[];
 }
 
 export interface BackgroundTerminalResult {
@@ -377,6 +396,19 @@ export interface BackgroundCoderReservation {
 	updatedAt: number;
 }
 
+const WorkflowLaneRecoverySchema = z
+	.object({
+		workflowLane: z.string(),
+		kind: z.enum([
+			'parser-normalization',
+			'parser-row-recovery',
+			'truncated-preview-durable-artifact',
+			'transcript-incomplete-terminal-candidate',
+		]),
+		reason: z.string(),
+	})
+	.strict();
+
 const ResultSchema = z
 	.object({
 		text: z.string().optional(),
@@ -395,6 +427,9 @@ const ResultSchema = z
 		// the entire terminal transition invisible to every reader — turning a
 		// successfully salvaged lane into one that appears never to have completed.
 		salvagedWorkflowLanes: z.array(z.string()).optional(),
+		salvagedWorkflowLaneRecoveries: z
+			.array(WorkflowLaneRecoverySchema)
+			.optional(),
 	})
 	.strict();
 
@@ -2279,6 +2314,7 @@ export async function appendDelegationTransition(
 		status: BackgroundDelegationStatus;
 		result?: BackgroundDelegationResult;
 		completedAt?: number;
+		expectedCurrentStatuses?: readonly BackgroundDelegationStatus[];
 	},
 ): Promise<BackgroundDelegationRecord | null> {
 	const now = Date.now();
@@ -2294,6 +2330,13 @@ export async function appendDelegationTransition(
 				if (records === null) return;
 				const current = findRecordForWrite(records, correlationId);
 				if (!current) return;
+				if (
+					transition.expectedCurrentStatuses &&
+					!transition.expectedCurrentStatuses.includes(current.status)
+				) {
+					next = current;
+					return;
+				}
 				if (
 					isTerminal(current.status) &&
 					transition.status !== 'consumed' &&
@@ -2384,7 +2427,11 @@ function sameRetainedResult(
 		left.outputArtifactError === right.outputArtifactError &&
 		left.transcriptIncomplete === right.transcriptIncomplete &&
 		left.messageCount === right.messageCount &&
-		sameJson(left.salvagedWorkflowLanes, right.salvagedWorkflowLanes)
+		sameJson(left.salvagedWorkflowLanes, right.salvagedWorkflowLanes) &&
+		sameJson(
+			left.salvagedWorkflowLaneRecoveries,
+			right.salvagedWorkflowLaneRecoveries,
+		)
 	);
 }
 

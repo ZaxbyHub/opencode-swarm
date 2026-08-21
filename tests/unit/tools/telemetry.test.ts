@@ -295,13 +295,13 @@ describe('telemetry module', () => {
 	});
 
 	describe('telemetry convenience methods', () => {
-		test('7. all 17 telemetry.* methods call emit (verify via listener)', () => {
+		test('7. all 18 telemetry.* methods call emit (verify via listener)', () => {
 			const receivedEvents: string[] = [];
 			addTelemetryListener((event) => {
 				receivedEvents.push(event);
 			});
 
-			// Call all 17 methods
+			// Call all 18 methods
 			telemetry.sessionStarted('s1', 'agent');
 			telemetry.sessionEnded('s1', 'completed');
 			telemetry.agentActivated('s1', 'new-agent');
@@ -312,6 +312,22 @@ describe('telemetry module', () => {
 			telemetry.gateFailed('s1', 'gate-1', 'task-1', 'reason');
 			telemetry.phaseChanged('s1', 1, 2);
 			telemetry.budgetUpdated('s1', 50, 'agent');
+			telemetry.contextPruned({
+				sessionId: 's1',
+				agentName: 'agent',
+				trigger: 'critical_threshold',
+				usageSource: 'estimated',
+				beforeTokens: 900,
+				afterTokens: 500,
+				modelLimit: 1000,
+				maskedMessages: 1,
+				maskedToolParts: 2,
+				maskedTokensFreed: 150,
+				prunedMessages: 3,
+				prunedTextParts: 2,
+				prunedToolParts: 1,
+				prunedTokensFreed: 250,
+			});
 			telemetry.modelFallback('s1', 'agent', 'gpt-4', 'gpt-3.5', 'cost');
 			telemetry.hardLimitHit('s1', 'agent', 'tokens', 100);
 			telemetry.revisionLimitHit('s1', 'agent');
@@ -320,9 +336,9 @@ describe('telemetry module', () => {
 			telemetry.qaSkipViolation('s1', 'agent', 3);
 			telemetry.heartbeat('s1');
 
-			expect(receivedEvents.length).toBeGreaterThanOrEqual(17);
+			expect(receivedEvents.length).toBeGreaterThanOrEqual(18);
 
-			// Check all 17 event types are present
+			// Check all 18 event types are present
 			const eventTypes = [
 				'session_started',
 				'session_ended',
@@ -334,6 +350,7 @@ describe('telemetry module', () => {
 				'gate_failed',
 				'phase_changed',
 				'budget_updated',
+				'context_pruned',
 				'model_fallback',
 				'hard_limit_hit',
 				'revision_limit_hit',

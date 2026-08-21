@@ -104,7 +104,7 @@ describe('System Enhancer Hook - Context Budget Wiring', () => {
 	}
 
 	const budgetBlockOf = (system: string[]) =>
-		system.find((s) => s.includes('[CONTEXT BUDGET:'));
+		system.find((s) => s.includes('[SWARM INJECTION FOOTPRINT:'));
 
 	beforeEach(async () => {
 		resetSwarmState();
@@ -162,7 +162,9 @@ describe('System Enhancer Hook - Context Budget Wiring', () => {
 		// after the seeded prompt and after the phase/plan injections.
 		const system = await runHook(configWithBudget(), WARNING_PROMPT);
 		expect(system.length).toBeGreaterThan(1);
-		const budgetIndex = system.findIndex((s) => s.includes('[CONTEXT BUDGET:'));
+		const budgetIndex = system.findIndex((s) =>
+			s.includes('[SWARM INJECTION FOOTPRINT:'),
+		);
 		expect(budgetIndex).toBeGreaterThan(0);
 	});
 

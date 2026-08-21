@@ -382,14 +382,9 @@ describe('Issue #2068: edge cases', () => {
 		expect(output.messages[0].parts[0].state.status).toBe('pending');
 	});
 
-	// T15 (F6): a very short tool output that is still above the mask threshold
-	// gets masked (replaced by a placeholder that is longer than the original).
-	// This confirms masking runs on tiny outputs; the freed-token accounting is
-	// clamped to ≥ 0 in production (Math.max(0, …) in maskToolOutput /
-	// applyObservationMasking) so a longer placeholder never shows as negative
-	// freed tokens, but that clamp is not directly observable through the
-	// public handler output and is therefore not asserted here.
-	test('T15: very short tool output above threshold is still masked', async () => {
+	// T15 (F6): eligibility alone must not replace a very short tool output
+	// with a longer placeholder. The transform skips non-reducing mutations.
+	test('T15: very short tool output above threshold is not context-growing', async () => {
 		const config = baseConfig({
 			model_limits: { default: 10000 },
 			critical_threshold: 0.5,
@@ -418,6 +413,7 @@ describe('Issue #2068: edge cases', () => {
 			(p) =>
 				p.type === 'text' && (p.text as string).includes('[Tool output masked'),
 		);
-		expect(masked).toBe(true);
+		expect(masked).toBe(false);
+		expect(output.messages[0].parts[0].type).toBe('tool');
 	});
 });

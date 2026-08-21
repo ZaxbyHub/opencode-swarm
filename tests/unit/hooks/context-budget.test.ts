@@ -948,7 +948,7 @@ describe('context-budget hook', () => {
 			expect(hasMaskedMessage).toBe(false);
 		});
 
-		test('Rapid switches A→B→A trigger enforcement on each switch', async () => {
+		test('Rapid switches A→B→A do not grow context when candidates are too short', async () => {
 			const config = {
 				context_budget: {
 					enabled: true,
@@ -1019,7 +1019,7 @@ describe('context-budget hook', () => {
 							p.text.includes('[Tool output masked')),
 				),
 			);
-			expect(hasMasked2).toBe(true);
+			expect(hasMasked2).toBe(false);
 
 			const messages3 = baseMessages.map((msg, i) =>
 				i % 2 === 0
@@ -1037,7 +1037,7 @@ describe('context-budget hook', () => {
 							p.text.includes('[Tool output masked')),
 				),
 			);
-			expect(hasMasked3).toBe(true);
+			expect(hasMasked3).toBe(false);
 		});
 	});
 
@@ -1066,7 +1066,7 @@ describe('context-budget hook', () => {
 					info: { role: 'user', agent: 'architect' },
 					parts: [{ type: 'text', text: 'user msg' }],
 				},
-				toolMsg('tool_1', 'output 1'), // Index 1
+				toolMsg('tool_1', 'output 1'.repeat(1_000)), // Index 1, old + reducible
 				toolMsg('tool_2', 'output 2'), // Index 2
 				toolMsg('tool_3', 'output 3'), // Index 3
 				toolMsg('tool_4', 'output 4'), // Index 4
@@ -1087,11 +1087,9 @@ describe('context-budget hook', () => {
 
 			// With 9 messages total and recent_window=5, old tool outputs are maskable.
 			// Index 0 is a user message and is never tool-masked.
-			const hasMaskedText = output.messages.some(
-				(msg, idx) =>
-					idx < 4 && msg.parts[0]?.text?.includes('[Tool output masked'),
+			expect(output.messages[1].parts[0]?.text).toContain(
+				'[Tool output masked',
 			);
-			expect(hasMaskedText).toBe(true);
 		});
 
 		test('Recent tool output (< recentWindowSize old) NOT masked', async () => {

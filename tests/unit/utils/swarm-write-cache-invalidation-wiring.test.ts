@@ -212,7 +212,7 @@ describe('cached .swarm/ artifact writers invalidate the swarm-artifact-cache (#
 		);
 		// Falsifiability: the invalidation only runs after a SUCCESSFUL write, so
 		// confirm the warning path actually executed before trusting the assertion.
-		expect(warning).toContain('[CONTEXT BUDGET:');
+		expect(warning).toContain('[SWARM INJECTION FOOTPRINT:');
 		await expectInvalidated(target);
 	});
 

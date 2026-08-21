@@ -2,7 +2,9 @@
  * Context Status Tool
  *
  * Read-only tool that reports current context-window headroom for the active
- * session. Derives messages from the runtime session context (via
+ * session. Returns both the measured usage and the `usageSource`
+ * (`provider` prompt accounting when available, otherwise `estimated`).
+ * Derives messages from the runtime session context (via
  * `swarmState.opencodeClient.session.messages`) and resolves thresholds from
  * the plugin config, mirroring the active `createContextBudgetHandler` hook's
  * behavior exactly — including strict `>` boundary semantics (exact threshold
@@ -14,8 +16,11 @@
 
 import type { ToolContext } from '@opencode-ai/plugin';
 import { loadPluginConfig } from '../config';
+import {
+	type ContextUsageSource,
+	computeContextUsage,
+} from '../hooks/context-usage';
 import { extractModelInfo, resolveModelLimit } from '../hooks/model-limits';
-import { estimateTokens } from '../hooks/utils';
 import {
 	getLiveContextModelIdentity,
 	getLiveContextWindow,
@@ -60,8 +65,10 @@ export interface ContextMessage {
  * Result returned by the context_status tool.
  */
 export interface ContextStatusResult {
-	/** Estimated tokens used across all text parts in the session */
+	/** Provider-accounted or estimated tokens used across the session */
 	tokensUsed: number;
+	/** Whether usage came from provider prompt accounting or a bounded estimate */
+	usageSource: ContextUsageSource;
 	/** Resolved model context limit in tokens */
 	modelLimit: number;
 	/** Ratio of tokens-used to model-limit (0.0 – 1.0+) */
@@ -142,19 +149,9 @@ function computeContextHeadroom(
 		liveContextLimit,
 	);
 
-	// Calculate total token usage across all text parts (mirrors context-budget.ts:94-106)
-	let totalTokens = 0;
-	for (const message of messages) {
-		if (!message?.parts) continue;
+	const usage = computeContextUsage(messages);
 
-		for (const part of message.parts) {
-			if (part?.type === 'text' && part.text) {
-				totalTokens += estimateTokens(part.text);
-			}
-		}
-	}
-
-	const usagePercent = totalTokens / modelLimit;
+	const usagePercent = usage.tokensUsed / modelLimit;
 
 	// Determine threshold state using config-resolved thresholds
 	// Uses strict `>` to match the live context-budget hook boundary semantics.
@@ -166,7 +163,8 @@ function computeContextHeadroom(
 	}
 
 	return {
-		tokensUsed: totalTokens,
+		tokensUsed: usage.tokensUsed,
+		usageSource: usage.source,
 		modelLimit,
 		usagePercent,
 		thresholdCrossed,
@@ -189,14 +187,15 @@ function computeContextHeadroom(
  *
  * No arguments required — the tool queries current state automatically.
  *
- * Returns JSON string with tokensUsed, modelLimit, usagePercent, thresholdCrossed, modelId, provider.
+ * Returns JSON with tokensUsed, usageSource, modelLimit, usagePercent,
+ * thresholdCrossed, modelId, and provider.
  */
 export { computeContextHeadroom };
 export const context_status: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
 		allowWorkingDirectoryOverride: true,
 		description:
-			'Report current context-window headroom for the active session. Returns tokens-used, model-limit, usage-percent, threshold-state (none/warn/critical), model name, and provider. Pure read-only — no state mutation, no warning injection. Works whether context_budget.enabled is true or false.',
+			'Report current context-window headroom for the active session. Returns tokens-used, usageSource (provider|estimated), model-limit, usage-percent, threshold-state (none/warn/critical), model name, and provider. Pure read-only — no state mutation, no warning injection. Works whether context_budget.enabled is true or false.',
 		args: {},
 		async execute(
 			_args: unknown,

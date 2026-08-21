@@ -93,6 +93,31 @@ describe('pending-delegations store', () => {
 		).toBe(true);
 	});
 
+	it('conditionally rejects a stale transition after a concurrent completion', async () => {
+		await recordPendingDelegation(
+			dir,
+			input({ correlationId: 'ses_atomic', subagentSessionId: 'ses_atomic' }),
+		);
+		await appendDelegationTransition(dir, 'ses_atomic', {
+			status: 'completed',
+			result: {
+				text: 'durable result',
+				chars: 14,
+				truncated: false,
+				digest: 'digest',
+			},
+		});
+
+		const guarded = await appendDelegationTransition(dir, 'ses_atomic', {
+			status: 'stale',
+			expectedCurrentStatuses: ['pending', 'running', 'ingestion_error'],
+		});
+
+		expect(guarded?.status).toBe('completed');
+		expect(guarded?.result?.text).toBe('durable result');
+		expect(findByCorrelationId(dir, 'ses_atomic')?.status).toBe('completed');
+	});
+
 	it('round-trips immutable coder task-change provenance', async () => {
 		const baseline = {
 			directory: dir,
@@ -317,6 +342,13 @@ describe('pending-delegations store', () => {
 				truncated: false,
 				digest: 'd'.repeat(64),
 				salvagedWorkflowLanes: ['correctness-state'],
+				salvagedWorkflowLaneRecoveries: [
+					{
+						workflowLane: 'correctness-state',
+						kind: 'parser-normalization',
+						reason: 'structural repairs applied: synthesized-header',
+					},
+				],
 			},
 		});
 
@@ -324,6 +356,13 @@ describe('pending-delegations store', () => {
 		expect(record?.status).toBe('completed');
 		expect(record?.result?.salvagedWorkflowLanes).toEqual([
 			'correctness-state',
+		]);
+		expect(record?.result?.salvagedWorkflowLaneRecoveries).toEqual([
+			{
+				workflowLane: 'correctness-state',
+				kind: 'parser-normalization',
+				reason: 'structural repairs applied: synthesized-header',
+			},
 		]);
 	});
 });

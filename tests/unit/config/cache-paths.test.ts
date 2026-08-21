@@ -55,10 +55,10 @@ describe('getPluginCachePaths', () => {
 		restoreEnv('XDG_CONFIG_HOME', originalXdgConfigHome);
 	});
 
-	test('on linux returns exactly 3 XDG paths and no platform-specific paths', () => {
+	test('on linux returns all four XDG paths and no platform-specific paths', () => {
 		setPlatform('linux');
 		const paths = getPluginCachePaths();
-		expect(paths.length).toBe(3);
+		expect(paths.length).toBe(4);
 		// No darwin or win32 paths
 		for (const p of paths) {
 			expect(p).not.toContain('Library/Caches');
@@ -71,6 +71,9 @@ describe('getPluginCachePaths', () => {
 			),
 		).toBe(true);
 		expect(paths.some((p) => p.endsWith('opencode-swarm@latest'))).toBe(true);
+		expect(
+			paths.some((p) => p.endsWith(path.join('packages', 'opencode-swarm'))),
+		).toBe(true);
 	});
 
 	test('on darwin adds ~/Library/Caches paths', () => {
@@ -92,6 +95,12 @@ describe('getPluginCachePaths', () => {
 					path.join(libCaches, 'opencode', 'packages', 'opencode-swarm@latest'),
 			),
 		).toBe(true);
+		expect(
+			paths.some(
+				(p) =>
+					p === path.join(libCaches, 'opencode', 'packages', 'opencode-swarm'),
+			),
+		).toBe(true);
 	});
 
 	test('on win32 adds %LOCALAPPDATA% paths when env is set', () => {
@@ -107,6 +116,18 @@ describe('getPluginCachePaths', () => {
 						'C:/Users/test/AppData/Local',
 						'opencode',
 						'node_modules',
+						'opencode-swarm',
+					),
+			),
+		).toBe(true);
+		expect(
+			paths.some(
+				(p) =>
+					p ===
+					path.join(
+						'C:/Users/test/AppData/Local',
+						'opencode',
+						'packages',
 						'opencode-swarm',
 					),
 			),

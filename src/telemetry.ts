@@ -25,6 +25,7 @@ export type TelemetryEvent =
 	| 'reviewer_gate_decision'
 	| 'phase_changed'
 	| 'budget_updated'
+	| 'context_pruned'
 	| 'model_fallback'
 	| 'hard_limit_hit'
 	| 'revision_limit_hit'
@@ -562,6 +563,25 @@ export const telemetry = {
 
 	budgetUpdated(sessionId: string, budgetPct: number, agentName: string): void {
 		_internals.emit('budget_updated', { sessionId, budgetPct, agentName });
+	},
+
+	contextPruned(data: {
+		sessionId: string;
+		agentName: string;
+		trigger: 'agent_switch' | 'critical_threshold';
+		usageSource: 'provider' | 'estimated';
+		beforeTokens: number;
+		afterTokens: number;
+		modelLimit: number;
+		maskedMessages: number;
+		maskedToolParts: number;
+		maskedTokensFreed: number;
+		prunedMessages: number;
+		prunedTextParts: number;
+		prunedToolParts: number;
+		prunedTokensFreed: number;
+	}): void {
+		_internals.emit('context_pruned', data);
 	},
 
 	modelFallback(
