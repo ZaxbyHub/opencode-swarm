@@ -39,10 +39,18 @@ const TRUE_ABSOLUTE = '/usr/bin/true';
 /**
  * Resolve a binary to its base-OS absolute path when present, falling back
  * to the bare name (PATH resolution) otherwise. Never throws.
+ *
+ * The existence check goes through `_internals.exists` rather than calling
+ * `existsSync` directly so BOTH branches are reachable from a test on ANY
+ * host. Against the real filesystem the outcome is decided by the host:
+ * `/usr/bin/true` exists on Linux and macOS but not on Windows, and
+ * `/usr/bin/sandbox-exec` exists only on macOS — so a test that asserts one
+ * branch without this seam is really asserting which OS is running it, and
+ * fails on the others (issue #2236 CI: ubuntu shard 2, macos shard 2).
  */
 function resolveBinary(absolutePath: string, bareName: string): string {
 	try {
-		if (existsSync(absolutePath)) {
+		if (_internals.exists(absolutePath)) {
 			return absolutePath;
 		}
 	} catch {
@@ -190,6 +198,7 @@ export const _internals: {
 	buildProbeProfile: typeof buildProbeProfile;
 	resolveSandboxExecBinary: typeof resolveSandboxExecBinary;
 	resolveProbeTargetBinary: typeof resolveProbeTargetBinary;
+	exists: typeof existsSync;
 	spawnSync: typeof spawnSync;
 } = {
 	probeSandboxExec,
@@ -199,6 +208,7 @@ export const _internals: {
 	buildProbeProfile,
 	resolveSandboxExecBinary,
 	resolveProbeTargetBinary,
+	exists: existsSync,
 	spawnSync,
 } as const;
 

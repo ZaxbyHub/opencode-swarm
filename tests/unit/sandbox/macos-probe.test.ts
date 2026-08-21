@@ -21,6 +21,7 @@ type SpawnResult = ReturnType<typeof _internals.spawnSync>;
 
 const originalSpawnSync = _internals.spawnSync;
 const originalProbeSandboxExec = _internals.probeSandboxExec;
+const originalExists = _internals.exists;
 
 beforeEach(() => {
 	_internals.resetProbeMemo();
@@ -29,6 +30,7 @@ beforeEach(() => {
 afterEach(() => {
 	_internals.spawnSync = originalSpawnSync;
 	_internals.probeSandboxExec = originalProbeSandboxExec;
+	_internals.exists = originalExists;
 	_internals.resetProbeMemo();
 });
 
@@ -141,16 +143,53 @@ describe('probeSandboxExec — invocation shape', () => {
 		expect(args[1]).toContain('(version 1)');
 	});
 
-	test('resolveSandboxExecBinary falls back to the bare name when the absolute path is absent', () => {
-		// On this (non-macOS) host /usr/bin/sandbox-exec does not exist, so
-		// resolution must fall back to the bare name — proving the fallback
-		// branch, not just the happy path.
-		expect(_internals.resolveSandboxExecBinary()).toBe('sandbox-exec');
-	});
+	// Both branches are driven through the `_internals.exists` seam. Against
+	// the real filesystem the outcome is decided by the HOST — `/usr/bin/true`
+	// exists on Linux and macOS but not on Windows, and `/usr/bin/sandbox-exec`
+	// exists only on macOS — so asserting a branch without the seam asserts
+	// which OS is running the suite. That is what failed ubuntu shard 2 and
+	// macos shard 2 while passing on Windows.
+	const RESOLVERS = [
+		{
+			label: 'resolveSandboxExecBinary',
+			resolve: () => _internals.resolveSandboxExecBinary(),
+			absolute: '/usr/bin/sandbox-exec',
+			bare: 'sandbox-exec',
+		},
+		{
+			label: 'resolveProbeTargetBinary',
+			resolve: () => _internals.resolveProbeTargetBinary(),
+			absolute: '/usr/bin/true',
+			bare: 'true',
+		},
+	] as const;
 
-	test('resolveProbeTargetBinary falls back to the bare name when the absolute path is absent', () => {
-		expect(_internals.resolveProbeTargetBinary()).toBe('true');
-	});
+	for (const { label, resolve, absolute, bare } of RESOLVERS) {
+		test(`${label} prefers the absolute path when it is present`, () => {
+			const seen: string[] = [];
+			_internals.exists = ((p: string) => {
+				seen.push(p);
+				return p === absolute;
+			}) as typeof _internals.exists;
+
+			expect(resolve()).toBe(absolute);
+			// Non-vacuous: the resolver must actually have asked about the
+			// path we stubbed, not returned it for some unrelated reason.
+			expect(seen).toContain(absolute);
+		});
+
+		test(`${label} falls back to the bare name when the absolute path is absent`, () => {
+			_internals.exists = (() => false) as typeof _internals.exists;
+			expect(resolve()).toBe(bare);
+		});
+
+		test(`${label} falls back to the bare name when the existence check throws`, () => {
+			_internals.exists = (() => {
+				throw new Error('EACCES');
+			}) as typeof _internals.exists;
+			expect(resolve()).toBe(bare);
+		});
+	}
 });
 
 describe('buildProbeProfile — F6a item 2 shape parity with production', () => {
