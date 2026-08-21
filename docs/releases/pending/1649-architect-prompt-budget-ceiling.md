@@ -1,0 +1,91 @@
+# Architect prompt size ceiling (CI regression guard)
+
+## What changed
+
+- Added an exported `ARCHITECT_PROMPT_BUDGET_CHARS = 160_000` constant next
+  to the `HARDENING BLOCK INVENTORY` comment in `src/agents/architect.ts`,
+  with documentation of the measured baselines and the raise-with-justification
+  policy. The constant is intentionally NOT named `MAX_*` (which is the
+  convention reserved for runtime-enforced guards — see
+  `src/tools/dispatch-lanes.ts:64`'s `MAX_PROMPT_CHARS`, which has Zod `.max()`
+  + runtime length checks). This constant is a test-time budget guard only —
+  production code does not enforce it.
+- Added `tests/unit/agents/architect-prompt-budget.test.ts`, a CI regression
+  suite asserting every reachable built-in architect prompt render stays
+  within a `[floor, ceiling]` window: default factory render, maximal opt-in
+  feature render (council + ui_review + design_docs + architectural_supervision
+  + adversarial scope=all + memory + external skills + turbo + skills), the
+  full `getAgentConfigs` pipeline (default and feature-heavy configs), a
+  prefixed non-default swarm render, a multi-swarm render (two prefixed
+  architects), and the adversarial-scope variants (`security-only`, default
+  `scope` omitted, `enabled: false`).
+- Each pipeline test isolates `$XDG_CONFIG_HOME` via `beforeEach`/`afterEach`
+  (same pattern as `tests/unit/agents/placeholder-safety-net.test.ts:163-181`)
+  so a developer with a custom prompt file in their config directory cannot
+  silently shrink the measured length and defeat growth detection.
+- Added a debug-gated `log('architect prompt size', { chars: ... })` line in
+  `src/index.ts` immediately after `getAgentConfigs(...)` so operators and
+  support traces can see the rendered size without re-running tests.
+
+## Why
+
+Issue #1649: existing tests only assert lower bounds
+(`toBeGreaterThan(100000)` in `tests/unit/agents/architect-adversarial.test.ts`,
+`toBeGreaterThan(90000)` in `tests/unit/agents/critic.adversarial.test.ts`),
+so the built-in architect prompt could grow indefinitely with no CI signal.
+It in fact grew from ~104K chars when #1649 was filed (2026-07-02) to ~129K
+default / ~149K with all opt-in features enabled at introduction of this
+guard (~25% in six weeks). Bulk growth silently consumes model context
+(~40K tokens at the ceiling) and cannot be caught in review of large
+hardening additions.
+
+Without a floor pin, the new ceiling-only guard still leaves a regression
+window: a developer who silently raises the constant to 200_000 (or who
+removes a hardening block to shrink the prompt by 20K) cannot be detected by
+the upper bound alone. The floor pin (`> 100_000` default, `> 140_000`
+feature-heavy) closes both windows — silent growth AND silent shrinkage both
+fail CI.
+
+The environment isolation closes the most pernicious regression mode: a
+custom-prompt file in the developer's `~/.config/opencode/opencode-swarm/`
+directory silently shrinks the measured length to ~1-14K chars, turning the
+guard from "catches growth" to "silently passes." This was empirically
+reproduced — without isolation, the pipeline tests measure 1,304 chars when a
+tiny custom `architect.md` is present, vs. 128,571 chars for the built-in.
+
+This is a test-only guard plus a debug-gated observability line: no runtime
+prompt content, substitution logic, or plugin behavior changed.
+
+## Migration steps
+
+None. This is additive test coverage plus an exported constant plus a
+debug-gated log line; no config, CLI, or behavioral surface changed.
+
+## Known caveats
+
+- The budget applies only to built-in prompt renders. User-supplied
+  `customPrompt`/`customAppendPrompt` values are intentionally exempt —
+  `tests/unit/agents/architect-adversarial.test.ts` "Attack Vector 8"
+  asserts 100KB user prompts are accepted without truncation. The
+  pipeline-test environment isolation (pointing `XDG_CONFIG_HOME` at an empty
+  tempdir) is what makes this exclusion work: without it, a developer with a
+  custom `~/.config/opencode/opencode-swarm/architect.md` would silently
+  shrink the rendered length and the guard would no longer measure the
+  built-in prompt.
+- At introduction the heaviest legitimate render is ~149K chars; the 160K
+  ceiling leaves ~7% headroom above the heaviest configuration. The default
+  baseline is ~129K chars; the 100K floor leaves ~23% headroom below the
+  default for the lower bound. Any PR whose prompt growth would cross the
+  ceiling must either justify and raise the constant (updating the
+  documented baseline) or trim hardening prose — deliberate bulk deletions
+  of hardening text still require their own behaviorally evaluated change per
+  #1649.
+- The issue's second part (false `renderPrompt` "pinned call site" docstring)
+  was already resolved by earlier work: `renderPrompt` no longer exists and
+  `src/agents/template.ts` documents the actual substitution architecture,
+  enforced by `tests/unit/agents/placeholder-safety-net.test.ts`. This
+  change makes no further edits there.
+- The observability log line is debug-gated (`OPENCODE_SWARM_DEBUG=1`) — it
+  will not appear in production output. Operators who need the value can
+  re-run the test or set the env var; the constant itself is exported so
+  tests and CI remain the primary measurement surface.

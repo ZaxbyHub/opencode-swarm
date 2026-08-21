@@ -932,6 +932,24 @@ async function initializeOpenCodeSwarm(
 		undefined,
 		projectContext ?? undefined,
 	);
+	// PRR-004 (issue #1649 observability): emit the rendered architect prompt
+	// size at session init so operators and support traces can see the budget
+	// without re-running tests. Debug-gated — visible only when
+	// OPENCODE_SWARM_DEBUG=1, never to chat-visible streams. Find the largest
+	// architect prompt across all swarms so multi-swarm configs (where
+	// `agents.architect` is undefined and only `cloud_architect`/
+	// `mega_architect` are present) still produce a meaningful value.
+	const largestArchitectChars = Object.entries(agents).reduce(
+		(max, [name, cfg]) => {
+			if (!name.endsWith('_architect') && name !== 'architect') return max;
+			const len = (cfg as { prompt?: string }).prompt?.length ?? 0;
+			return len > max ? len : max;
+		},
+		0,
+	);
+	log('architect prompt size', {
+		chars: largestArchitectChars,
+	});
 	const agentDefinitions = createAgents(
 		configWithResolvedAutoReview,
 		projectContext ?? undefined,
