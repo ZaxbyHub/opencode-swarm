@@ -9,6 +9,17 @@ import { containsControlChars } from '../utils/path-security';
 import { neutralizeUntrustedMarkdown } from '../utils/untrusted-markdown';
 import { createSwarmTool } from './create-tool';
 
+/**
+ * TEST-ONLY pin (issue #2236 FR-006 ratchet fix) — NOT a production value,
+ * never set outside `tests/preload/executable-resolver-pin.ts`. When defined
+ * (including `null`), `resolveGhBinary()` returns it immediately instead of
+ * doing a real PATH scan, so pre-existing tests that assert
+ * `toHaveBeenCalledWith('gh', ...)` do not depend on whether `gh` happens to
+ * be installed on the host running the tests. See `__seedGhBinaryForTests`
+ * below.
+ */
+let ghBinaryTestPin: string | null | undefined;
+
 const GH_TIMEOUT_MS = 20_000;
 const GH_MAX_STDOUT_BYTES = 2 * 1024 * 1024;
 const GH_MAX_STDERR_BYTES = 128 * 1024;
@@ -151,8 +162,28 @@ export function resolveGhBinaryCandidates(
 	return candidates;
 }
 
-function resolveGhBinary(): string | null {
+/**
+ * Resolve the `gh` binary to invoke. Exported (issue #2236 hardening, lane
+ * C1b) so other call sites that need a `gh` executable — e.g. `src/git/pr.ts`,
+ * `src/commands/pr-monitor-status.ts` — reuse this resolver instead of
+ * spawning a bare `'gh'` literal or inventing a second gh resolver. Returns
+ * `null` when no candidate is found; callers should fall back to the bare
+ * `'gh'` literal (mirrors `resolveGitExecutable()`'s "never regress a working
+ * host" fallback in `src/utils/git-executable.ts`).
+ */
+export function resolveGhBinary(): string | null {
+	if (ghBinaryTestPin !== undefined) return ghBinaryTestPin;
 	return _internals.resolveExecutableFromPath(resolveGhBinaryCandidates());
+}
+
+/**
+ * TEST-ONLY seam (issue #2236 FR-006 ratchet fix) — NOT a production API, do
+ * not call from `src/`. Sets the pin `resolveGhBinary()` checks first; pass
+ * `null` to simulate "no `gh` candidate found". Mirrors
+ * `__seedGitExecutableForTests` in `src/utils/git-executable.ts`.
+ */
+export function __seedGhBinaryForTests(value: string | null): void {
+	ghBinaryTestPin = value;
 }
 
 function normalizeRepo(value: unknown): string | undefined | GhEvidenceError {

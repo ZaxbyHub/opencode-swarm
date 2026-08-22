@@ -13,7 +13,7 @@
  */
 
 import { type SpawnSyncOptions, spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { warn } from '../../utils/logger';
@@ -25,16 +25,97 @@ import { isValidEnvKey, SandboxError, type SandboxExecutor } from '../executor';
 const SANDBOX_UNAVAILABLE_CODES = new Set(['ENOENT', 'EACCES', 'ENOSPC']);
 
 /**
+ * Base-OS location of sandbox-exec. Preferred over the bare name so the
+ * probe and every real invocation resolve the actual Seatbelt binary rather
+ * than whatever `sandbox-exec` PATH resolution turns up first (e.g. an
+ * xcode-select shim that fails after a successful spawn with an unrelated
+ * `xcrun: error` — see the P1 hardening class in issue #2236 RC1-LEGACY).
+ */
+const SANDBOX_EXEC_ABSOLUTE = '/usr/bin/sandbox-exec';
+
+/** Base-OS location of the `true` utility used as the probe's target command. */
+const TRUE_ABSOLUTE = '/usr/bin/true';
+
+/**
+ * Resolve a binary to its base-OS absolute path when present, falling back
+ * to the bare name (PATH resolution) otherwise. Never throws.
+ *
+ * The existence check goes through `_internals.exists` rather than calling
+ * `existsSync` directly so BOTH branches are reachable from a test on ANY
+ * host. Against the real filesystem the outcome is decided by the host:
+ * `/usr/bin/true` exists on Linux and macOS but not on Windows, and
+ * `/usr/bin/sandbox-exec` exists only on macOS — so a test that asserts one
+ * branch without this seam is really asserting which OS is running it, and
+ * fails on the others (issue #2236 CI: ubuntu shard 2, macos shard 2).
+ */
+function resolveBinary(absolutePath: string, bareName: string): string {
+	try {
+		if (_internals.exists(absolutePath)) {
+			return absolutePath;
+		}
+	} catch {
+		// fall through to bare-name fallback
+	}
+	return bareName;
+}
+
+/** Resolve the sandbox-exec binary: absolute base-OS path, bare-name fallback. */
+function resolveSandboxExecBinary(): string {
+	return resolveBinary(SANDBOX_EXEC_ABSOLUTE, 'sandbox-exec');
+}
+
+/** Resolve the probe's target command: absolute base-OS path, bare-name fallback. */
+function resolveProbeTargetBinary(): string {
+	return resolveBinary(TRUE_ABSOLUTE, 'true');
+}
+
+/**
+ * Build the SBPL profile used ONLY for availability probing.
+ *
+ * F6a item 2 (issue #2236): this deliberately shares the same primitives and
+ * ordering as buildSandboxProfile's production profile — a blanket
+ * `(deny file-write*)` followed by a scoped `(allow file-write* (subpath …))`,
+ * plus a `(setenv …)`/`(unsetenv …)` pair (F6b) — so that probe success
+ * implies the production profile's primitives actually parse under this
+ * host's sandbox-exec. A trivial `(allow default)`-only probe would pass
+ * even when the production profile is unparseable, which is the exact
+ * probe-passes/production-fails failure mode this guards against.
+ */
+function buildProbeProfile(tempDir: string): string {
+	return `(version 1)
+(allow default)
+(deny file-write*)
+(allow file-write* (subpath "${sbplEscapePath(tempDir)}"))
+(setenv SWARM_SANDBOX_PROBE "1")
+(unsetenv SWARM_SANDBOX_PROBE)`;
+}
+
+/**
  * Check whether the sandbox-exec binary is present and functional.
  * Uses spawnSync to probe synchronously without throwing.
+ *
+ * F6 (issue #2236 RC2): sandbox-exec(8) has NO `--version` flag — its
+ * synopsis is `sandbox-exec [-f file | -n name | -p string] [-D k=v]
+ * command [args...]` (BSD getopt, short options only). The previous probe
+ * invoked `sandbox-exec --version`, which is consumed as an invalid option
+ * and fails on EVERY macOS host regardless of whether Seatbelt actually
+ * works. The corrected probe runs a real invocation
+ * (`sandbox-exec -p <profile> <target>`) and gates on **exit code 0 ONLY**.
+ * stderr is deliberately never consulted — modern macOS prints a
+ * deprecation notice to stderr on every sandbox-exec call, and that is not
+ * a failure. Empty stdout with exit 0 IS success (sandbox-exec prints
+ * nothing on a clean run of `true`).
  */
 function probeSandboxExec(): boolean {
 	try {
-		const result = spawnSync('sandbox-exec', ['--version'], {
+		const binary = resolveSandboxExecBinary();
+		const target = resolveProbeTargetBinary();
+		const profile = buildProbeProfile(os.tmpdir());
+		const result = _internals.spawnSync(binary, ['-p', profile, target], {
 			windowsHide: true,
 			encoding: 'utf-8',
 			timeout: 5000,
-			stdio: ['ignore', 'pipe', 'ignore'] as SpawnSyncOptions['stdio'],
+			stdio: ['ignore', 'pipe', 'pipe'] as SpawnSyncOptions['stdio'],
 		} satisfies SpawnSyncOptions);
 
 		if (result.error) {
@@ -53,6 +134,8 @@ function probeSandboxExec(): boolean {
 			return false;
 		}
 
+		// Exit code 0 is the ONLY success criterion. stdout/stderr content is
+		// never consulted (see function doc above).
 		return result.status === 0;
 	} catch (err: unknown) {
 		const message = err instanceof Error ? err.message : String(err);
@@ -64,15 +147,69 @@ function probeSandboxExec(): boolean {
 }
 
 /**
+ * F6a item 1 (issue #2236): memoize the probe.
+ *
+ * Prior to F6, `wrapCommand()` re-ran `probeSandboxExec()` on EVERY call, but
+ * that spawn never actually fired in production because the (broken) probe
+ * always reported the executor unavailable, so the executor was never
+ * constructed. Once F6 corrects the probe, an unmemoized re-probe becomes a
+ * synchronous `sandbox-exec` spawn on every bash tool call. Discipline
+ * mirrors the git-binary resolver (F1): a successful probe is memoized for
+ * the process lifetime; a failed probe is memoized for a 60s TTL and then
+ * re-probed (so a transiently-broken sandbox-exec — e.g. mid-OS-update —
+ * recovers without requiring a process restart).
+ */
+const PROBE_FAILURE_TTL_MS = 60_000;
+
+interface ProbeMemo {
+	result: boolean;
+	expiresAt: number;
+}
+
+let _probeMemo: ProbeMemo | undefined;
+
+function probeSandboxExecMemoized(): boolean {
+	const now = Date.now();
+	if (_probeMemo && now < _probeMemo.expiresAt) {
+		return _probeMemo.result;
+	}
+	const result = _internals.probeSandboxExec();
+	_probeMemo = {
+		result,
+		expiresAt: result ? Number.POSITIVE_INFINITY : now + PROBE_FAILURE_TTL_MS,
+	};
+	return result;
+}
+
+/** Clear the probe memo. Test-only — production never needs to reset it mid-process. */
+function resetProbeMemo(): void {
+	_probeMemo = undefined;
+}
+
+/**
  * DI seam for testability. Exposes probeSandboxExec so tests can simulate
  * ENOENT / EACCES / ENOSPC error conditions without requiring a real sandbox-exec binary.
  */
 export const _internals: {
 	probeSandboxExec: typeof probeSandboxExec;
+	probeSandboxExecMemoized: typeof probeSandboxExecMemoized;
+	resetProbeMemo: typeof resetProbeMemo;
 	buildSandboxProfile: typeof buildSandboxProfile;
+	buildProbeProfile: typeof buildProbeProfile;
+	resolveSandboxExecBinary: typeof resolveSandboxExecBinary;
+	resolveProbeTargetBinary: typeof resolveProbeTargetBinary;
+	exists: typeof existsSync;
+	spawnSync: typeof spawnSync;
 } = {
 	probeSandboxExec,
+	probeSandboxExecMemoized,
+	resetProbeMemo,
 	buildSandboxProfile,
+	buildProbeProfile,
+	resolveSandboxExecBinary,
+	resolveProbeTargetBinary,
+	exists: existsSync,
+	spawnSync,
 } as const;
 
 /**
@@ -206,7 +343,7 @@ export class MacOSSandboxExecutor implements SandboxExecutor {
 		this._disabledReason = null;
 
 		try {
-			if (!_internals.probeSandboxExec()) {
+			if (!_internals.probeSandboxExecMemoized()) {
 				this._disabledReason = 'sandbox-exec not available or not functional';
 				warn(
 					`Sandbox disabled: ${this._disabledReason}. Falling through to tool-layer enforcement.`,
@@ -264,7 +401,7 @@ export class MacOSSandboxExecutor implements SandboxExecutor {
 			throw new SandboxError('Sandbox not available', 'SANDBOX_UNAVAILABLE');
 		}
 
-		if (!_internals.probeSandboxExec()) {
+		if (!_internals.probeSandboxExecMemoized()) {
 			this._available = false;
 			this._disabledReason = 'sandbox-exec became unavailable between calls';
 			warn(
@@ -295,13 +432,17 @@ export class MacOSSandboxExecutor implements SandboxExecutor {
 			throw new SandboxError('Sandbox not available', 'SANDBOX_UNAVAILABLE');
 		}
 
-		// sandbox-exec -f <profile> bash -c '<command>'
+		// <sandbox-exec> -f <profile> bash -c '<command>'
+		// Resolved to the base-OS absolute path (F6) so this can never resolve
+		// to a broken PATH shim (e.g. an xcode-select stub that fails after a
+		// successful spawn with an unrelated `xcrun: error`).
 		// Profile file persists for the lifetime of the spawned process.
 		// Note: profile files accumulate in os.tmpdir() over time. This is
 		// acceptable — they are small text files with allowlist rules, no secrets.
+		const binary = _internals.resolveSandboxExecBinary();
 		const escapedCommand = shellEscape(command);
 		const escapedProfilePath = shellEscape(profilePath);
-		return `sandbox-exec -f '${escapedProfilePath}' bash -c '${escapedCommand}'`;
+		return `${binary} -f '${escapedProfilePath}' bash -c '${escapedCommand}'`;
 	}
 
 	/**

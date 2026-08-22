@@ -33,13 +33,21 @@ import {
 } from '../src/utils/gitignore-warning';
 
 const realBunSpawn = _internals.bunSpawn;
+const realResolveGitExecutableAsync = _internals.resolveGitExecutableAsync;
 
 afterEach(() => {
 	_internals.bunSpawn = realBunSpawn;
+	_internals.resolveGitExecutableAsync = realResolveGitExecutableAsync;
 });
 
 beforeEach(() => {
 	resetSwarmGitExcludedState();
+	// Issue #2236 hardening (lane C1b): `ensureSwarmGitExcluded` resolves the
+	// git binary via `resolveGitExecutableAsync()` instead of a bare `'git'`
+	// literal. Stub it so the captured argv assertions below stay
+	// deterministic (no real filesystem probing against the mocked
+	// `bunSpawn`).
+	_internals.resolveGitExecutableAsync = async () => 'git';
 });
 
 describe('ensureSwarmGitExcluded — bounded execution', () => {

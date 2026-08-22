@@ -4,12 +4,23 @@ import type { tool } from '@opencode-ai/plugin';
 import { z } from 'zod';
 import { isCommandAvailable } from '../build/discovery';
 import { warn } from '../utils';
-import { bunSpawn } from '../utils/bun-compat';
+import { bunSpawn, classifySpawnFailure } from '../utils/bun-compat';
 import { createSwarmTool } from './create-tool';
 
 // ============ Constants ============
 const MAX_OUTPUT_BYTES = 52_428_800; // 50MB max output
 const AUDIT_TIMEOUT_MS = 120_000; // 120 seconds
+
+/**
+ * Test-only seam for the `bunSpawn` calls `runNpmAudit` and `runCargoAudit`
+ * make. Lets tests inject a synthetic subprocess (e.g. one with `spawnError`
+ * set) without monkey-patching the `Bun.spawn` global — see #2236 Sweep A,
+ * FIX 2. These two route through the seam because both had a path where a
+ * failed spawn could be reported as a completed scan; the remaining audit
+ * functions gate strictly on a non-zero exit and were dispositioned
+ * SAFE-EXIT-CHECK by that sweep.
+ */
+export const _internals: { bunSpawn: typeof bunSpawn } = { bunSpawn };
 
 // ============ Types ============
 type Severity = 'critical' | 'high' | 'moderate' | 'low' | 'info';
@@ -190,11 +201,90 @@ interface NpmAuditResponse {
 	vulnerabilities?: Record<string, NpmVulnInfo>;
 }
 
+/**
+ * The one place that turns "this scan did not produce a result" into an
+ * `AuditResult`, for `npm` and `cargo` alike.
+ *
+ * Both functions can learn a scan failed through two different channels: a
+ * `spawnError` on the returned subprocess (the process was never created) and a
+ * `throw` caught mid-scan. Issue #2236 moved process-creation failures from the
+ * second channel to the first, which is exactly the kind of change that lets two
+ * hand-written failure blocks drift into reporting the same real-world fault
+ * ("npm is not installed") two different ways. Routing both channels through one
+ * classifier makes that drift impossible by construction.
+ *
+ * Every branch sets `incomplete: true`. `clean: true` here means only "no
+ * findings were produced", never "no vulnerabilities exist" — the combined
+ * result reads `incomplete` (not the absence of a note) to decide whether an
+ * unqualified clean may be reported.
+ */
+function auditFailureResult(
+	ecosystem: Ecosystem,
+	command: string[],
+	error: unknown,
+	/** Substring predicate identifying "the scanner itself is absent". */
+	isToolMissing: (message: string) => boolean,
+	toolMissingNote: string,
+	genericNotePrefix: string,
+): AuditResult {
+	const message = error instanceof Error ? error.message : 'Unknown error';
+	const base = {
+		ecosystem,
+		command,
+		findings: [] as VulnerabilityFinding[],
+		criticalCount: 0,
+		highCount: 0,
+		totalCount: 0,
+		clean: true,
+		incomplete: true,
+	};
+	// Typed cwd failure is checked FIRST and deliberately never collapses into
+	// the tool-missing note: #2236 exists because "the working directory is gone"
+	// was being reported as "the binary is missing". The substring predicates
+	// below are broad by necessity (npm's includes `'audit'`), so letting them
+	// see a cwd error first would reintroduce that exact mislabel.
+	if (classifySpawnFailure(error) === 'cwd-missing') {
+		return { ...base, note: `${genericNotePrefix}: ${message}` };
+	}
+	if (isToolMissing(message)) {
+		return { ...base, note: toolMissingNote };
+	}
+	return { ...base, note: `${genericNotePrefix}: ${message}` };
+}
+
+function npmAuditFailure(command: string[], error: unknown): AuditResult {
+	return auditFailureResult(
+		'npm',
+		command,
+		error,
+		(m) =>
+			m.includes('audit') ||
+			m.includes('command not found') ||
+			m.includes("'npm' is not recognized"),
+		'npm audit not available - npm may not be installed',
+		'Error running npm audit',
+	);
+}
+
+function cargoAuditFailure(command: string[], error: unknown): AuditResult {
+	return auditFailureResult(
+		'cargo',
+		command,
+		error,
+		(m) =>
+			m.includes('not found') ||
+			m.includes('not recognized') ||
+			m.includes('cargo-audit'),
+		'cargo-audit not installed. Install with: cargo install cargo-audit',
+		'Error running cargo audit',
+	);
+}
+
 async function runNpmAudit(directory: string): Promise<AuditResult> {
 	const command = ['npm', 'audit', '--json'];
 
 	try {
-		const proc = bunSpawn(command, {
+		const proc = _internals.bunSpawn(command, {
 			stdout: 'pipe',
 			stderr: 'pipe',
 			cwd: directory,
@@ -231,6 +321,18 @@ async function runNpmAudit(directory: string): Promise<AuditResult> {
 		}
 
 		const exitCode = await proc.exited;
+
+		// A spawn failure (process never started, e.g. missing npm or a cwd that
+		// no longer exists) resolves `exited` to a non-zero code with empty
+		// stdout. That currently survives only by accident: it falls through to
+		// `JSON.parse('')`, which throws and is caught below as "output could not
+		// be parsed". Relying on a parser incidentally throwing is not a check —
+		// it breaks the moment the parse becomes lenient. Report it explicitly,
+		// through the SAME classifier the catch below uses, so a given real-world
+		// fault reads identically no matter which channel surfaced it.
+		if (proc.spawnError) {
+			return npmAuditFailure(command, proc.spawnError);
+		}
 
 		// If exit code is 0, there are no vulnerabilities
 		if (exitCode === 0) {
@@ -295,37 +397,7 @@ async function runNpmAudit(directory: string): Promise<AuditResult> {
 			clean: findings.length === 0,
 		};
 	} catch (error) {
-		const errorMessage =
-			error instanceof Error ? error.message : 'Unknown error';
-		// Check if npm audit is not installed
-		if (
-			errorMessage.includes('audit') ||
-			errorMessage.includes('command not found') ||
-			errorMessage.includes("'npm' is not recognized")
-		) {
-			return {
-				ecosystem: 'npm',
-				command,
-				findings: [],
-				criticalCount: 0,
-				highCount: 0,
-				totalCount: 0,
-				clean: true,
-				incomplete: true,
-				note: 'npm audit not available - npm may not be installed',
-			};
-		}
-		return {
-			ecosystem: 'npm',
-			command,
-			findings: [],
-			criticalCount: 0,
-			highCount: 0,
-			totalCount: 0,
-			clean: true,
-			incomplete: true,
-			note: `Error running npm audit: ${errorMessage}`,
-		};
+		return npmAuditFailure(command, error);
 	}
 }
 
@@ -567,7 +639,7 @@ async function runCargoAudit(directory: string): Promise<AuditResult> {
 	const command = ['cargo', 'audit', '--json'];
 
 	try {
-		const proc = bunSpawn(command, {
+		const proc = _internals.bunSpawn(command, {
 			stdout: 'pipe',
 			stderr: 'pipe',
 			cwd: directory,
@@ -604,6 +676,17 @@ async function runCargoAudit(directory: string): Promise<AuditResult> {
 		}
 
 		const exitCode = await proc.exited;
+
+		// A spawn failure (process never started, e.g. missing binary or a cwd
+		// that no longer exists) resolves `exited` to a non-zero code with empty
+		// stdout — indistinguishable, by exit code alone, from "cargo audit ran
+		// and reported nothing." Unlike npm's parser, the line loop below does
+		// NOT throw on empty stdout: `''.split('\n').filter(Boolean)` is `[]`, so
+		// without this check the function returns `clean: true` with NO
+		// `incomplete` flag — a false clean masking an audit that never ran.
+		if (proc.spawnError) {
+			return cargoAuditFailure(command, proc.spawnError);
+		}
 
 		// If exit code is 0, no vulnerabilities
 		if (exitCode === 0) {
@@ -669,36 +752,7 @@ async function runCargoAudit(directory: string): Promise<AuditResult> {
 			clean: findings.length === 0,
 		};
 	} catch (error) {
-		const errorMessage =
-			error instanceof Error ? error.message : 'Unknown error';
-		if (
-			errorMessage.includes('not found') ||
-			errorMessage.includes('not recognized') ||
-			errorMessage.includes('cargo-audit')
-		) {
-			return {
-				ecosystem: 'cargo',
-				command,
-				findings: [],
-				criticalCount: 0,
-				highCount: 0,
-				totalCount: 0,
-				clean: true,
-				incomplete: true,
-				note: 'cargo-audit not installed. Install with: cargo install cargo-audit',
-			};
-		}
-		return {
-			ecosystem: 'cargo',
-			command,
-			findings: [],
-			criticalCount: 0,
-			highCount: 0,
-			totalCount: 0,
-			clean: true,
-			incomplete: true,
-			note: `Error running cargo audit: ${errorMessage}`,
-		};
+		return cargoAuditFailure(command, error);
 	}
 }
 

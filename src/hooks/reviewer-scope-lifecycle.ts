@@ -24,6 +24,7 @@ import {
 	startReviewerScopeGeneration,
 } from '../state.js';
 import { pushAdvisory } from '../utils/advisory-queue.js';
+import { resolveGitExecutable } from '../utils/git-executable.js';
 import {
 	abortStandardWorktreeDispatch,
 	standardWorktreeByCallID,
@@ -59,8 +60,17 @@ export const _internals: {
 	backoffMs?: number;
 	/** Test-only deadline override for the bounded retry loop (ms). */
 	retryDeadlineMs?: number;
+	/**
+	 * Issue #2236 hardening (F1/F4/F5) — resolves the absolute git executable
+	 * path instead of spawning the bare `'git'` name, which resolves against
+	 * the PATH inside the child's env and can pick up an unintended binary.
+	 * Exposed for test injection following the convention in
+	 * `src/hooks/review-receipt-scope.ts`.
+	 */
+	resolveGitExecutable: typeof resolveGitExecutable;
 } = {
 	spawn: child_process.spawn,
+	resolveGitExecutable,
 };
 
 const NOCHANGE_STATUS_TIMEOUT_MS = 10_000;
@@ -288,12 +298,16 @@ async function verifyWorkingTreeClean(
 		// AGENTS.md invariant 3 requires the spawn-level timeout; the explicit
 		// timer below remains the single resolution path (settled-guarded), and
 		// the spawn option is defense in depth for a timer-schedule stall.
-		child = _internals.spawn('git', ['status', '--porcelain'], {
-			cwd: directory,
-			stdio: ['ignore', 'pipe', 'ignore'],
-			timeout: NOCHANGE_STATUS_TIMEOUT_MS,
-			windowsHide: true,
-		});
+		child = _internals.spawn(
+			_internals.resolveGitExecutable(),
+			['status', '--porcelain'],
+			{
+				cwd: directory,
+				stdio: ['ignore', 'pipe', 'ignore'],
+				timeout: NOCHANGE_STATUS_TIMEOUT_MS,
+				windowsHide: true,
+			},
+		);
 		return await new Promise<'clean' | 'dirty' | 'unverifiable'>((resolve) => {
 			let settled = false;
 			let stdoutBytes = 0;

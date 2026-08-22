@@ -10,6 +10,7 @@ import {
 	generateSummaryMarkdown,
 	type SemanticDiffSummary,
 } from '../diff/summary-generator.js';
+import { resolveGitExecutableAsync } from '../utils/git-executable.js';
 import { createSwarmTool } from './create-tool';
 
 const MAX_DIFF_LINES = 500;
@@ -155,6 +156,11 @@ export const diff: ReturnType<typeof createSwarmTool> = createSwarmTool({
 				return JSON.stringify(errorResult, null, 2);
 			}
 
+			// Resolved once and reused for every git spawn below — same
+			// candidate, same probe result, no per-call re-resolution cost
+			// beyond the first (memoized) call (issue #2236 hardening, F1/F4/F5).
+			const gitExecutable = await resolveGitExecutableAsync();
+
 			let gitArgs: string[];
 			if (base === 'staged') {
 				gitArgs = ['--no-pager', 'diff', '--cached'];
@@ -172,13 +178,17 @@ export const diff: ReturnType<typeof createSwarmTool> = createSwarmTool({
 				fullDiffArgs.push('--', ...typedArgs.paths);
 			}
 
-			const numstatOutput = child_process.execFileSync('git', numstatArgs, {
-				encoding: 'utf-8',
-				timeout: DIFF_TIMEOUT_MS,
-				maxBuffer: MAX_BUFFER_BYTES,
-				cwd: directory,
-				stdio: ['ignore', 'pipe', 'pipe'],
-			});
+			const numstatOutput = child_process.execFileSync(
+				gitExecutable,
+				numstatArgs,
+				{
+					encoding: 'utf-8',
+					timeout: DIFF_TIMEOUT_MS,
+					maxBuffer: MAX_BUFFER_BYTES,
+					cwd: directory,
+					stdio: ['ignore', 'pipe', 'pipe'],
+				},
+			);
 
 			const files: Array<{
 				path: string;
@@ -207,7 +217,7 @@ export const diff: ReturnType<typeof createSwarmTool> = createSwarmTool({
 						contractDiffArgs.push('--', ...typedArgs.paths);
 					}
 					const contractDiffOutput = child_process.execFileSync(
-						'git',
+						gitExecutable,
 						contractDiffArgs,
 						{
 							encoding: 'utf-8',
@@ -240,13 +250,17 @@ export const diff: ReturnType<typeof createSwarmTool> = createSwarmTool({
 				return JSON.stringify(result, null, 2);
 			}
 
-			const fullDiffOutput = child_process.execFileSync('git', fullDiffArgs, {
-				encoding: 'utf-8',
-				timeout: DIFF_TIMEOUT_MS,
-				maxBuffer: MAX_BUFFER_BYTES,
-				cwd: directory,
-				stdio: ['ignore', 'pipe', 'pipe'],
-			});
+			const fullDiffOutput = child_process.execFileSync(
+				gitExecutable,
+				fullDiffArgs,
+				{
+					encoding: 'utf-8',
+					timeout: DIFF_TIMEOUT_MS,
+					maxBuffer: MAX_BUFFER_BYTES,
+					cwd: directory,
+					stdio: ['ignore', 'pipe', 'pipe'],
+				},
+			);
 
 			const contractChanges: string[] = [];
 			const diffLines = fullDiffOutput.split('\n');
@@ -281,12 +295,16 @@ export const diff: ReturnType<typeof createSwarmTool> = createSwarmTool({
 			// Helper: check if a ref:path exists using git cat-file -e
 			function fileExistsInRef(refPath: string): boolean {
 				try {
-					child_process.execFileSync('git', ['cat-file', '-e', refPath], {
-						encoding: 'utf-8',
-						timeout: 3000,
-						cwd: directory,
-						stdio: ['ignore', 'pipe', 'pipe'],
-					});
+					child_process.execFileSync(
+						gitExecutable,
+						['cat-file', '-e', refPath],
+						{
+							encoding: 'utf-8',
+							timeout: 3000,
+							cwd: directory,
+							stdio: ['ignore', 'pipe', 'pipe'],
+						},
+					);
 					return true;
 				} catch (e: unknown) {
 					// Re-throw ENOENT (git binary missing) — not a "file not in ref" scenario
@@ -300,7 +318,7 @@ export const diff: ReturnType<typeof createSwarmTool> = createSwarmTool({
 
 			// Helper: read file content from a git ref
 			function getContentFromRef(refPath: string): string {
-				return child_process.execFileSync('git', ['show', refPath], {
+				return child_process.execFileSync(gitExecutable, ['show', refPath], {
 					encoding: 'utf-8',
 					timeout: 15_000,
 					cwd: directory,

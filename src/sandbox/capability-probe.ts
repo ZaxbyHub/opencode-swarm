@@ -13,6 +13,8 @@
 import type { ExecException } from 'node:child_process';
 import { execFile, spawnSync } from 'node:child_process';
 import * as os from 'node:os';
+import { _internals as bwrapInternals } from './linux/bubblewrap-executor';
+import { _internals as macosExecutorInternals } from './macos/sandbox-exec-executor';
 
 /** Possible sandbox status values. */
 export type SandboxStatus = 'enabled' | 'disabled' | 'unsupported';
@@ -46,6 +48,11 @@ export interface SandboxCapability {
 
 // Session-lifetime cache so repeated calls never re-probe.
 let _cached: SandboxCapability | undefined;
+
+/** Reset the session-lifetime capability cache. Test-only. */
+export function _resetCapabilityCache(): void {
+	_cached = undefined;
+}
 
 /**
  * Wraps a probe command in an AbortController timeout.
@@ -109,10 +116,30 @@ function withProbeTimeout(
 	});
 }
 
+/**
+ * DI seam for testability. Exposes withProbeTimeout so tests can simulate
+ * exit-0/exit-nonzero/ENOENT probe outcomes for every platform's probe
+ * (including darwin) without requiring the real binary on the host running
+ * the tests. See src/sandbox/macos/sandbox-exec-executor.ts's _internals for
+ * the sibling sync-probe seam.
+ */
+export const _internals: { withProbeTimeout: typeof withProbeTimeout } = {
+	withProbeTimeout,
+} as const;
+
 /** Probe for Linux Bubblewrap (bwrap). */
 async function probeLinux(): Promise<SandboxCapability> {
 	try {
-		const output = await withProbeTimeout('bwrap', ['--version'], 2000);
+		// F6 (#2236): resolve to the base-OS absolute path when present (same
+		// class of fix as the macOS probe below), falling back to the bare
+		// name. bwrap's --version flag IS valid, so the invocation and
+		// success criterion (non-empty stdout) are unchanged.
+		const binary = bwrapInternals.resolveBwrapBinary();
+		const output = await _internals.withProbeTimeout(
+			binary,
+			['--version'],
+			2000,
+		);
 		if (output.length > 0) {
 			return {
 				status: 'enabled',
@@ -150,22 +177,36 @@ async function probeLinux(): Promise<SandboxCapability> {
 /** Probe for macOS sandbox-exec. */
 async function probeMacOS(): Promise<SandboxCapability> {
 	try {
-		// sandbox-exec --version prints the version on success; exit code 1
-		// with no output when the binary is absent on a non-macOS machine.
-		const output = await withProbeTimeout('sandbox-exec', ['--version'], 2000);
-		if (output.length > 0) {
-			return {
-				status: 'enabled',
-				strength: 'strong',
-				mechanism: 'sandbox-exec',
-				platform: 'darwin',
-			};
-		}
+		// F6 (issue #2236 RC2): sandbox-exec(8) has NO `--version` flag — its
+		// synopsis is `sandbox-exec [-f file | -n name | -p string] [-D k=v]
+		// command [args...]` (BSD getopt, short options only). The previous
+		// probe here invoked `sandbox-exec --version` and required non-empty
+		// STDOUT, which is wrong on two independent counts: `--version` is
+		// consumed as an invalid option and fails on EVERY macOS host
+		// regardless of whether Seatbelt works, AND even a correct
+		// invocation of a real command (e.g. `/usr/bin/true`) legitimately
+		// produces empty stdout on success — the sibling sync probe in
+		// sandbox-exec-executor.ts previously used the opposite (exit-code)
+		// criterion, so the two probes disagreed. Both are now reconciled
+		// onto exit code ONLY: execFile's callback receives a non-null
+		// `error` for any non-zero exit or spawn failure, so a RESOLVED
+		// withProbeTimeout promise already IS the exit-0 signal — stdout
+		// content is irrelevant here and stderr (macOS prints a deprecation
+		// notice on every invocation) is never consulted.
+		//
+		// The probe profile is built by the SAME buildProbeProfile the sync
+		// probe uses (F6a item 2) — sharing one builder is what keeps the
+		// two probes from drifting into contradictory criteria again, which
+		// is exactly how this defect happened the first time.
+		const binary = macosExecutorInternals.resolveSandboxExecBinary();
+		const target = macosExecutorInternals.resolveProbeTargetBinary();
+		const profile = macosExecutorInternals.buildProbeProfile(os.tmpdir());
+		await _internals.withProbeTimeout(binary, ['-p', profile, target], 2000);
 		return {
-			status: 'disabled',
+			status: 'enabled',
+			strength: 'strong',
 			mechanism: 'sandbox-exec',
 			platform: 'darwin',
-			error: 'binary returned empty version',
 		};
 	} catch (err) {
 		const msg = err instanceof Error ? err.message : String(err);

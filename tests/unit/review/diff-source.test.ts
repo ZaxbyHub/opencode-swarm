@@ -55,6 +55,7 @@ function proc(
 const realSpawn = _internals.bunSpawn;
 const realLstatBigInt = _internals.lstatBigIntSync;
 const realOpen = _internals.openSync;
+const realResolveGitExecutable = _internals.resolveGitExecutable;
 
 function fixtureGit(directory: string, args: string[]): string {
 	const result = spawnSync('git', args, {
@@ -75,6 +76,7 @@ afterEach(() => {
 	_internals.bunSpawn = realSpawn;
 	_internals.lstatBigIntSync = realLstatBigInt;
 	_internals.openSync = realOpen;
+	_internals.resolveGitExecutable = realResolveGitExecutable;
 });
 
 describe('parseReviewDiffSelector', () => {
@@ -222,6 +224,10 @@ function installGitStub(options: {
 	onCall?: (cmd: string[], opts?: BunCompatSpawnOptions) => void;
 	onKill?: () => void;
 }): void {
+	// Deterministic, host-independent resolution — asserted against below
+	// (`call.cmd[0]`) instead of letting the real resolver's PATH probing
+	// decide the value on whatever host runs the suite.
+	_internals.resolveGitExecutable = async () => 'git';
 	_internals.bunSpawn = ((cmd, spawnOptions) => {
 		options.onCall?.(cmd, spawnOptions);
 		const joined = cmd.join(' ');

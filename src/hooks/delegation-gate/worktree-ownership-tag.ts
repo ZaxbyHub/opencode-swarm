@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { bunSpawn } from '../../utils/bun-compat';
+import { resolveGitExecutable } from '../../utils/git-executable.js';
 
 const OWNERSHIP_TAG_SCAN_TIMEOUT_MS = 2_000;
 const MAX_OWNERSHIP_TAGS = 512;
@@ -46,24 +47,30 @@ export async function scanBackgroundWorktreeOwnershipTagsForRecovery(
 		};
 	}
 
-	const proc = bunSpawn(
-		[
-			'git',
-			'-C',
-			directory,
-			'for-each-ref',
-			`--count=${MAX_OWNERSHIP_TAGS + 1}`,
-			'--format=%(refname:strip=2)%00%(objectname)',
-			'refs/tags/swarm-preserved-owner/',
-		],
-		{
-			stdin: 'ignore',
-			stdout: 'pipe',
-			stderr: 'ignore',
-			timeout: OWNERSHIP_TAG_SCAN_TIMEOUT_MS,
-		},
-	);
+	// Issue #2236 hardening: resolveGitExecutable() is called INSIDE this try
+	// block (not before it) so a GitBinaryMissingError throw is caught by the
+	// existing catch below and mapped onto this function's established
+	// failure contract (`{ status: 'uncertain', reason }`) instead of
+	// propagating as a new unhandled rejection.
+	let proc: ReturnType<typeof bunSpawn> | undefined;
 	try {
+		proc = bunSpawn(
+			[
+				resolveGitExecutable(),
+				'-C',
+				directory,
+				'for-each-ref',
+				`--count=${MAX_OWNERSHIP_TAGS + 1}`,
+				'--format=%(refname:strip=2)%00%(objectname)',
+				'refs/tags/swarm-preserved-owner/',
+			],
+			{
+				stdin: 'ignore',
+				stdout: 'pipe',
+				stderr: 'ignore',
+				timeout: OWNERSHIP_TAG_SCAN_TIMEOUT_MS,
+			},
+		);
 		const exitCode = await proc.exited;
 		if (exitCode !== 0) {
 			return {
@@ -117,7 +124,7 @@ export async function scanBackgroundWorktreeOwnershipTagsForRecovery(
 		};
 	} finally {
 		try {
-			proc.kill();
+			proc?.kill();
 		} catch {
 			// best-effort
 		}

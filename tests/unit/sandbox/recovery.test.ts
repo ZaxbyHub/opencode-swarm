@@ -52,12 +52,15 @@ beforeEach(() => {
 	origBwrapProbe = bwrapInternals.probeBwrap;
 	origMacosProbe = macosInternals.probeSandboxExec;
 	origWinProbe = winInternals.probeWindowsSandbox;
+	// #2236 F6a item 1: probeSandboxExec is now memoized — reset per test.
+	macosInternals.resetProbeMemo();
 });
 
 afterEach(() => {
 	bwrapInternals.probeBwrap = origBwrapProbe;
 	macosInternals.probeSandboxExec = origMacosProbe;
 	winInternals.probeWindowsSandbox = origWinProbe;
+	macosInternals.resetProbeMemo();
 });
 
 // ---------------------------------------------------------------------------
@@ -130,62 +133,59 @@ describe('Sandbox recovery scenarios', () => {
 			},
 		);
 
+		// #2236 F6a item 1: probeSandboxExecMemoized() caches a SUCCESSFUL
+		// probe for the process lifetime, so a raw probe failure no longer
+		// surfaces on the very next wrapCommand call by itself — only once
+		// the memo is invalidated (production: the 60s failure TTL;
+		// here: resetProbeMemo() standing in for "enough time has passed").
 		test.skipIf(!isMac)(
-			'MacOSSandboxExecutor: wrapCommand throws SandboxError when sandbox-exec disappears mid-session',
+			'MacOSSandboxExecutor: wrapCommand throws once the invalidated memo re-probes and fails',
 			() => {
-				// macOS executor constructor calls probeSandboxExec once.
-				// wrapCommand re-checks before each wrap.
-				// Probe sequence: constructor (call 1, true), first wrapCommand
-				// (call 2, true), second wrapCommand (call 3, false ΓåÆ throws).
 				let callCount = 0;
 				macosInternals.probeSandboxExec = mock(() => {
 					callCount++;
-					return callCount <= 2;
-				});
-
-				const executor = new MacOSSandboxExecutor([]);
-
-				// First call ΓÇö sandbox-exec available (constructor probe succeeded)
-				const wasAvailable = executor.isAvailable();
-				const result1 = executor.wrapCommand('echo first', []);
-
-				// Second call ΓÇö probe now fails, executor must disable and throw
-				expect(() => executor.wrapCommand('echo second', [])).toThrow(
-					SandboxError,
-				);
-
-				expect(executor.isAvailable()).toBe(false);
-
-				if (wasAvailable) {
-					expect(result1).not.toBe('echo first');
-					expect(result1).toContain('sandbox-exec');
-				}
-			},
-		);
-
-		test.skipIf(!isMac)(
-			'MacOSSandboxExecutor: isAvailable() returns false after mid-session probe failure',
-			() => {
-				// Probe sequence: constructor (call 1, true), first wrapCommand
-				// (call 2, true), second wrapCommand (call 3, false ΓåÆ throws and
-				// disables the executor).
-				let probeCallCount = 0;
-				macosInternals.probeSandboxExec = mock(() => {
-					probeCallCount++;
-					return probeCallCount <= 2;
+					return callCount === 1; // available at construction only
 				});
 
 				const executor = new MacOSSandboxExecutor([]);
 				expect(executor.isAvailable()).toBe(true);
 
-				executor.wrapCommand('echo hello', []);
-				// Second wrapCommand's probe fails ΓåÆ throws SandboxError and flips
-				// _available to false.
-				expect(() => executor.wrapCommand('echo again', [])).toThrow(
+				// Memoized: still succeeds even though the mock would now
+				// return false if the raw probe were called again.
+				const result1 = executor.wrapCommand('echo first', []);
+				expect(result1).not.toBe('echo first');
+				expect(result1).toContain('sandbox-exec');
+				expect(callCount).toBe(1);
+
+				macosInternals.resetProbeMemo();
+				expect(() => executor.wrapCommand('echo second', [])).toThrow(
 					SandboxError,
 				);
-
+				expect(callCount).toBe(2);
 				expect(executor.isAvailable()).toBe(false);
+			},
+		);
+
+		// Direct regression test for F6a item 1: before memoization,
+		// wrapCommand re-ran probeSandboxExec() on EVERY call.
+		test.skipIf(!isMac)(
+			'MacOSSandboxExecutor: a successful probe memo absorbs repeated wrapCommand calls without re-invoking the raw probe',
+			() => {
+				let probeCallCount = 0;
+				macosInternals.probeSandboxExec = mock(() => {
+					probeCallCount++;
+					return true;
+				});
+
+				const executor = new MacOSSandboxExecutor([]);
+				expect(probeCallCount).toBe(1); // constructor probe
+
+				executor.wrapCommand('echo one', []);
+				executor.wrapCommand('echo two', []);
+				executor.wrapCommand('echo three', []);
+
+				expect(probeCallCount).toBe(1);
+				expect(executor.isAvailable()).toBe(true);
 			},
 		);
 

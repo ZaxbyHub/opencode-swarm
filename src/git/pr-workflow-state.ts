@@ -5,6 +5,7 @@ import {
 	parsePorcelainV2Snapshot,
 } from '../background/workspace-snapshot.js';
 import { runExternalTool } from '../utils/external-tool-runner.js';
+import { resolveGitExecutable } from '../utils/git-executable.js';
 
 const GIT_TIMEOUT_MS = 5_000;
 const MAX_GIT_OUTPUT_BYTES = 512 * 1024;
@@ -102,7 +103,7 @@ async function runGitCapture(
 	args: readonly string[],
 ): Promise<GitCaptureResult> {
 	const result = await runExternalTool({
-		executable: 'git',
+		executable: resolveGitExecutable(),
 		args: [...args],
 		cwd: path.resolve(directory),
 		timeoutMs: GIT_TIMEOUT_MS,

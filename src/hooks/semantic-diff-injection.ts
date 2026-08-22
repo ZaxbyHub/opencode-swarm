@@ -24,8 +24,13 @@ import {
 import { getImporters, normalizeGraphPath } from '../tools/repo-graph.js';
 import {
 	GitBinaryMissingError,
+	GitSpawnCwdError,
+	GitUnavailableError,
 	isGitBinaryMissing,
+	isSpawnCwdMissing,
+	isSpawnCwdUnreadable,
 } from '../utils/git-binary-missing-error.js';
+import { resolveGitExecutable } from '../utils/git-executable.js';
 import {
 	getCachedGraph,
 	type RepoGraphInjectionOptions,
@@ -42,6 +47,15 @@ export const _internals = {
 	getCachedGraph,
 	getImporters,
 	normalizeGraphPath,
+	resolveGitExecutable,
+	// Test seam only: `execGit` is a hoisted function declaration below, so
+	// referencing it here (before its textual definition) is safe — the
+	// binding exists by the time this object literal evaluates. Exposed so
+	// regression tests can exercise the #2236 three-way classification
+	// directly; `buildSemanticDiffBlock` swallows every git-classification
+	// error to `null` (this file's documented "failure mode: silent"), which
+	// makes the classified message unobservable through its return value.
+	execGit,
 };
 
 async function execGit(
@@ -62,7 +76,7 @@ async function execGit(
 				stdio: ['ignore', 'pipe', 'pipe'],
 			};
 			_internals.execFile(
-				'git',
+				_internals.resolveGitExecutable(),
 				args,
 				execOpts as child_process.ExecFileOptionsWithStringEncoding,
 				(
@@ -80,10 +94,24 @@ async function execGit(
 		});
 		return stdout;
 	} catch (err) {
-		if (isGitBinaryMissing(err)) {
-			throw new GitBinaryMissingError('git binary is not available', {
-				cause: err,
-			});
+		// ENOENT from a spawn is ambiguous: it means "git is missing" just as
+		// often as it means `cwd` has been torn down. Classifying without the
+		// directory reports a stale worktree as a missing git binary — the exact
+		// misdiagnosis issue #2236 exists to eliminate. `directory` is already in
+		// scope (it is the `cwd` above), so the split is three-way and a cwd
+		// fault names the offending directory. Mirrors src/git/branch.ts and
+		// src/tools/checkpoint.ts.
+		if (isSpawnCwdMissing(err, directory)) {
+			throw new GitSpawnCwdError(directory, 'missing', { cause: err });
+		}
+		if (isSpawnCwdUnreadable(err, directory)) {
+			throw new GitSpawnCwdError(directory, 'unreadable', { cause: err });
+		}
+		if (isGitBinaryMissing(err, directory)) {
+			throw new GitBinaryMissingError(
+				`git executable is not available on PATH (working directory ${directory} exists)`,
+				{ cause: err },
+			);
 		}
 		throw err;
 	}
@@ -171,8 +199,16 @@ export async function buildSemanticDiffBlock(
 					});
 					fileExistsInHead = true;
 				} catch (err) {
-					// git binary ENOENT (missing binary) — abort immediately
-					if (err instanceof GitBinaryMissingError) {
+					// git never started — a missing binary OR a `cwd` fault. Abort
+					// immediately. "cat-file failed" only licenses the inference
+					// "this path is not in HEAD" when git actually ran and said so;
+					// when the spawn itself failed, that inference fabricates
+					// `oldContent = ''` and reports the entire file as newly added.
+					// A wrong semantic diff injected into a reviewer's context is
+					// strictly worse than this file's documented silent-null failure
+					// mode, so a torn-down or unreadable working directory must land
+					// in the honest-absence bucket, not the "it's a new file" bucket.
+					if (err instanceof GitUnavailableError) {
 						throw err;
 					}
 					// Otherwise git ran but file not in HEAD — treat as new/untracked file
@@ -201,9 +237,10 @@ export async function buildSemanticDiffBlock(
 					astDiffs.push(astResult);
 				}
 			} catch (err) {
-				// Re-throw git binary ENOENT to outer catch (returns null for whole block)
-				// But NOT fs.readFile ENOENT (deleted files should be silently skipped)
-				if (err instanceof GitBinaryMissingError) {
+				// Re-throw "git never ran" (missing binary or cwd fault) to the outer
+				// catch, which returns null for the whole block. But NOT fs.readFile
+				// ENOENT (deleted files should be silently skipped).
+				if (err instanceof GitUnavailableError) {
 					throw err;
 				}
 				// Parse failure, deleted file ENOENT, or other error — skip this file

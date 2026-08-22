@@ -2,8 +2,10 @@
  * Tests for src/sandbox/capability-probe.ts
  */
 
-import { describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import {
+	_internals,
+	_resetCapabilityCache,
 	isBubblewrapAvailable,
 	isSandboxExecAvailable,
 	isWindowsSandboxAvailable,
@@ -126,6 +128,108 @@ describe('SandboxCapabilityProbe', () => {
 
 			// Should be the same object reference (cached)
 			expect(result1).toBe(result2);
+		});
+	});
+
+	// -------------------------------------------------------------------------
+	// darwin block (issue #2236 F6/F9) — seam-driven so it runs on any host.
+	//
+	// Prior to F6, capability-probe.test.ts had NO darwin coverage at all: the
+	// only way to exercise probeMacOS() was to actually run on a macOS host.
+	// process.platform is overridden via the established Object.defineProperty
+	// pattern (see tests/unit/config/cache-paths.test.ts) and
+	// _internals.withProbeTimeout is mocked, so these assertions exercise the
+	// real probeMacOS() logic — including the F6 exit-code-only fix — from
+	// this Windows host.
+	// -------------------------------------------------------------------------
+	describe('darwin — probeMacOS() (#2236 F6, seam-driven)', () => {
+		const originalPlatform = process.platform;
+		const originalWithProbeTimeout = _internals.withProbeTimeout;
+
+		function setPlatform(value: NodeJS.Platform): void {
+			Object.defineProperty(process, 'platform', {
+				value,
+				configurable: true,
+			});
+		}
+
+		beforeEach(() => {
+			setPlatform('darwin');
+			_resetCapabilityCache();
+		});
+
+		afterEach(() => {
+			Object.defineProperty(process, 'platform', {
+				value: originalPlatform,
+				configurable: true,
+			});
+			_internals.withProbeTimeout = originalWithProbeTimeout;
+			_resetCapabilityCache();
+		});
+
+		test('resolved withProbeTimeout (exit 0) with EMPTY stdout reports enabled/strong — the case the old stdout-length check got wrong', async () => {
+			_internals.withProbeTimeout = mock(async () => '');
+
+			const result = await new SandboxCapabilityProbe().detect();
+
+			expect(result.status).toBe('enabled');
+			expect(result.strength).toBe('strong');
+			expect(result.mechanism).toBe('sandbox-exec');
+			expect(result.platform).toBe('darwin');
+		});
+
+		test('resolved withProbeTimeout with non-empty stdout ALSO reports enabled (content is irrelevant to the criterion)', async () => {
+			_internals.withProbeTimeout = mock(async () => 'some incidental output');
+
+			const result = await new SandboxCapabilityProbe().detect();
+
+			expect(result.status).toBe('enabled');
+		});
+
+		test('rejected withProbeTimeout with a non-ENOENT error reports disabled, not unsupported', async () => {
+			_internals.withProbeTimeout = mock(async () => {
+				throw new Error('permission denied');
+			});
+
+			const result = await new SandboxCapabilityProbe().detect();
+
+			expect(result.status).toBe('disabled');
+			expect(result.error).toBe('permission denied');
+		});
+
+		test('rejected withProbeTimeout with "binary not found" reports unsupported', async () => {
+			_internals.withProbeTimeout = mock(async () => {
+				throw new Error('binary not found');
+			});
+
+			const result = await new SandboxCapabilityProbe().detect();
+
+			expect(result.status).toBe('unsupported');
+		});
+
+		test('invokes withProbeTimeout with -p <profile> <target>, never --version', async () => {
+			let capturedArgs: [string, string[], number] | undefined;
+			_internals.withProbeTimeout = mock(
+				async (cmd: string, args: string[], ms: number) => {
+					capturedArgs = [cmd, args, ms];
+					return '';
+				},
+			);
+
+			await new SandboxCapabilityProbe().detect();
+
+			expect(capturedArgs).toBeDefined();
+			const [, args] = capturedArgs!;
+			expect(args).not.toContain('--version');
+			expect(args[0]).toBe('-p');
+			expect(typeof args[1]).toBe('string');
+			expect(args[1]).toContain('(version 1)');
+		});
+
+		test('isSandboxExecAvailable() reflects the mocked enabled result', async () => {
+			_internals.withProbeTimeout = mock(async () => '');
+			await new SandboxCapabilityProbe().detect();
+			expect(isSandboxExecAvailable()).toBe(true);
 		});
 	});
 });

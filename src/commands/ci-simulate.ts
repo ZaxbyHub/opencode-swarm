@@ -32,6 +32,7 @@ import {
 	type ExternalToolRunResult,
 	runExternalTool,
 } from '../utils/external-tool-runner.js';
+import { resolveGitExecutable } from '../utils/git-executable.js';
 import { log } from '../utils/logger';
 
 /** Default timeout for git operations (30 seconds). */
@@ -45,6 +46,7 @@ export const _internals: {
 	runExternalTool: typeof runExternalTool;
 	getDefaultBaseBranch: typeof getDefaultBaseBranch;
 	detectDefaultRemoteBranch: typeof detectDefaultRemoteBranch;
+	resolveGitExecutable: typeof resolveGitExecutable;
 	platform: string;
 	osTmpdir: () => string;
 	fs: {
@@ -56,6 +58,7 @@ export const _internals: {
 	runExternalTool,
 	getDefaultBaseBranch,
 	detectDefaultRemoteBranch,
+	resolveGitExecutable,
 	platform: process.platform,
 	osTmpdir: () => os.tmpdir(),
 	fs: {
@@ -98,7 +101,7 @@ async function runGit(
 	timeoutMs = GIT_TIMEOUT_MS,
 ): Promise<GitResult> {
 	const result: ExternalToolRunResult = await _internals.runExternalTool({
-		executable: 'git',
+		executable: _internals.resolveGitExecutable(),
 		args,
 		cwd,
 		timeoutMs,

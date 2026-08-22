@@ -13,6 +13,7 @@ import type { SecretscanEvidence } from '../config/evidence-schema.js';
 import { saveEvidence } from '../evidence/manager.js';
 import { warn } from '../utils';
 import { runExternalTool } from '../utils/external-tool-runner';
+import { resolveGitExecutableAsync } from '../utils/git-executable.js';
 import {
 	assertProjectRoot,
 	hasExplicitProjectBoundary,
@@ -833,8 +834,17 @@ async function runGit(
 	directory: string,
 	abortSignal?: AbortSignal,
 ): Promise<string | null> {
+	// Resolution failure (every candidate rejected) maps onto this function's
+	// existing "any failure -> null" contract, same as a failed runExternalTool
+	// call would — no new throw introduced at this call site.
+	let gitExecutable: string;
+	try {
+		gitExecutable = await resolveGitExecutableAsync();
+	} catch {
+		return null;
+	}
 	const result = await _internals.runExternalTool({
-		executable: 'git',
+		executable: gitExecutable,
 		args,
 		cwd: directory,
 		timeoutMs: GIT_TIMEOUT_MS,

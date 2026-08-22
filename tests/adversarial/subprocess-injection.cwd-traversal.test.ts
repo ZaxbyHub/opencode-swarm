@@ -65,18 +65,42 @@ console.log('arg:' + (args[0] || ''));`,
 	});
 
 	test('absolute path with null byte is rejected by spawn (secure behavior)', async () => {
-		// Bun.spawn correctly rejects null bytes in arguments - this is secure!
-		// Null bytes in paths can truncate and enable path traversal attacks
+		// A null byte in a path can truncate it and enable traversal
+		// (`/etc/passwd\0suffix` -> `/etc/passwd`), so the child must never be
+		// created.
+		//
+		// Issue #2236 changed only HOW that rejection is reported: `bunSpawn` no
+		// longer throws on a process-creation failure, it returns the Node path's
+		// long-standing contract (`exitCode: null`, non-zero `exited`, reason on
+		// `spawnError`, reason replayed on `stderr`). The security property is
+		// unchanged, so this test still asserts rejection — but it now pins the
+		// property by OBSERVABLE SIDE EFFECT (the script would create a marker
+		// file if it ever ran) rather than by the shape of the report. A future
+		// change to the reporting contract cannot make this pass while the child
+		// actually executes.
+		const marker = path.join(tmpDir, 'null-byte-path-marker.txt');
+		const script = writeNodeScript(
+			'null-byte-path-probe.js',
+			`require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'child ran');`,
+		);
 		const maliciousPath = '/etc/passwd\x00suffix';
-		try {
-			await runNodeScript('/some/script.js', [maliciousPath], { cwd: tmpDir });
-			// If we get here, the null byte was accepted (unexpected)
-			expect(true).toBe(false);
-		} catch (err: unknown) {
-			// Bun.spawn throws ERR_INVALID_ARG_VALUE for null bytes - correct!
-			const error = err as { message?: string; code?: string };
-			expect(error.code).toBe('ERR_INVALID_ARG_VALUE');
-		}
+
+		const result = await runNodeScript(script, [maliciousPath], {
+			cwd: tmpDir,
+		});
+
+		// The process was never created: no side effect and no output.
+		expect(fs.existsSync(marker)).toBe(false);
+		expect(result.stdout).toBe('');
+		// The rejection is reported, not swallowed.
+		expect(result.spawnError).not.toBeNull();
+		expect((result.spawnError as unknown as { code?: string }).code).toBe(
+			'ERR_INVALID_ARG_VALUE',
+		);
+		expect(result.exitCode).not.toBe(0);
+		// stderr replays the reason, so a caller that reads only stderr still
+		// learns the spawn failed instead of seeing a silent empty result.
+		expect(result.stderr.length).toBeGreaterThan(0);
 	});
 
 	test('symlink traversal via ../ inside symlinked directory stays within bounds', async () => {
@@ -175,16 +199,27 @@ console.log(args[0] || '');`,
 	});
 
 	test('null byte (\\x00) in argument is rejected by spawn (secure behavior)', async () => {
-		// Bun.spawn correctly rejects null bytes - this prevents truncation attacks
-		// where /etc/passwd\x00suffix could become /etc/passwd
+		// Rejecting null bytes prevents truncation attacks. As in SC-003.5, the
+		// #2236 contract reports the rejection as a value rather than a throw, so
+		// the assertion is anchored on the child never running (no marker file)
+		// plus the reported reason — not on an exception being raised.
+		const marker = path.join(tmpDir, 'null-byte-arg-marker.txt');
+		const script = writeNodeScript(
+			'null-byte-arg-probe.js',
+			`require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'child ran');`,
+		);
 		const withNull = 'hello\x00world';
-		try {
-			await runNodeScript('/some/script.js', [withNull], { cwd: tmpDir });
-			expect(true).toBe(false); // Should have thrown
-		} catch (err: unknown) {
-			const error = err as { code?: string };
-			expect(error.code).toBe('ERR_INVALID_ARG_VALUE');
-		}
+
+		const result = await runNodeScript(script, [withNull], { cwd: tmpDir });
+
+		expect(fs.existsSync(marker)).toBe(false);
+		expect(result.stdout).toBe('');
+		expect(result.spawnError).not.toBeNull();
+		expect((result.spawnError as unknown as { code?: string }).code).toBe(
+			'ERR_INVALID_ARG_VALUE',
+		);
+		expect(result.exitCode).not.toBe(0);
+		expect(result.stderr.length).toBeGreaterThan(0);
 	});
 
 	test('vertical bar and ampersand in data are literal when passed as array args', async () => {

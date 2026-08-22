@@ -14,6 +14,7 @@ const mockSpawnSync = mock(() => ({
 	stdout: Buffer.from(''),
 }));
 const realSpawnSync = _internals.spawnSync;
+const realResolveGitExecutable = _internals.resolveGitExecutable;
 
 describe('executeMutation — shell injection adversarial tests', () => {
 	let tempDir: string;
@@ -22,6 +23,9 @@ describe('executeMutation — shell injection adversarial tests', () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mutation-adversarial-'));
 		_internals.spawnSync =
 			mockSpawnSync as unknown as typeof _internals.spawnSync;
+		// Issue #2236 hardening (lane C1b): stub the resolver seam so this
+		// test doesn't pay for real filesystem probing on every run.
+		_internals.resolveGitExecutable = () => 'git';
 		mockSpawnSync.mockReturnValue({
 			status: 0,
 			stderr: Buffer.from(''),
@@ -31,6 +35,7 @@ describe('executeMutation — shell injection adversarial tests', () => {
 
 	afterEach(() => {
 		_internals.spawnSync = realSpawnSync;
+		_internals.resolveGitExecutable = realResolveGitExecutable;
 		mockSpawnSync.mockClear();
 		// Clean up temp directory
 		try {

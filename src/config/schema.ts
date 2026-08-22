@@ -812,6 +812,32 @@ export const DesignDocsConfigSchema = z.object({
 
 export type DesignDocsConfig = z.infer<typeof DesignDocsConfigSchema>;
 
+// Git executable resolution override (issue #2236 hardening — F4).
+// A single optional field naming the git binary to try FIRST, before the
+// built-in platform/PATH candidate list (src/utils/git-executable.ts).
+// Deliberately shape-validated only (non-empty string) — usability
+// (absolute, exists, passes `git --version`) is decided by the same probe
+// every other candidate faces. A `.refine()` here that rejected a relative
+// or nonexistent path would fail the WHOLE config parse on an unrelated
+// typo (config/loader.ts's targeted recovery only strips unrecognized
+// keys, not refine failures on a recognized key's value) — exactly the
+// "config value must never make git unreachable" failure this field must
+// avoid. The env var `OPENCODE_SWARM_GIT_BINARY` always wins over this
+// value when set.
+//
+// SECURITY (CWE-427): because validation here is shape-only, the SOURCE of
+// the value carries the whole trust decision. This key is honored ONLY from
+// the user-level config and the env var. A value in a repository's
+// `.opencode/opencode-swarm.json` is untrusted — the repo can commit both the
+// config and the shim it points at — and is stripped before the merged config
+// is built (`enforceGitBinaryProvenance`, src/config/loader.ts). Zod cannot
+// make that call: it never sees which file a key came from.
+export const GitConfigSchema = z.object({
+	binary: z.string().optional(),
+});
+
+export type GitConfig = z.infer<typeof GitConfigSchema>;
+
 // UI/UX review configuration (designer agent — opt-in)
 export const UIReviewConfigSchema = z.object({
 	enabled: z.boolean().default(false),
@@ -1099,6 +1125,41 @@ export const GuardrailsConfigSchema = z.object({
 	 * not configurable. Consumed by `src/hooks/guardrails/execution-stall.ts`.
 	 */
 	execution_stall_episode_minutes: z.number().int().min(1).default(30),
+
+	// ── macOS sandbox activation gate (issue #2236 F6/F6a) ──────────────────
+	/**
+	 * Enables macOS `sandbox-exec` containment for bash/shell tool calls.
+	 *
+	 * Defaults to `false`. F6 (issue #2236 RC2) corrects the sandbox-exec
+	 * availability probe, which previously invoked the nonexistent
+	 * `sandbox-exec --version` flag and therefore reported "unavailable" on
+	 * EVERY macOS host — meaning `MacOSSandboxExecutor` has never actually
+	 * activated in production. The corrected probe makes activation possible
+	 * for the first time, but the production SBPL profile's last-match-wins
+	 * ordering (`src/sandbox/macos/sandbox-exec-executor.ts`, see the
+	 * `buildSandboxProfile` doc comment) is reasoned from documented SBPL
+	 * semantics and has NOT been empirically re-verified against a real
+	 * macOS host's sandbox-exec from this repository's Windows/Linux
+	 * development environments. If that ordering is wrong, every declared
+	 * scope write would be denied and bash would break for macOS users —
+	 * strictly worse than today's fail-open (unsandboxed) behavior.
+	 *
+	 * Flip to `true` only after verifying the production profile on a real
+	 * macOS host (see docs/configuration.md's macOS sandbox activation
+	 * section). When `false`, `getExecutor()` behaves exactly as it does
+	 * today: it resolves to `null` and every consumer (guardrails'
+	 * `applySandboxExecution`, `/swarm diagnose`) observes the same
+	 * fail-open "executor not available" state as before F6 shipped.
+	 *
+	 * Deliberately `.optional()` and NOT `.default(false)`: a Zod default makes
+	 * `GuardrailsConfigSchema.parse()` emit a key the user never wrote, which
+	 * breaks the exhaustive round-trip fixtures in
+	 * `tests/unit/config/guardrails-profile-loop-containment.test.ts` (parsing
+	 * must not invent config). Default-off semantics are preserved at the sole
+	 * consumer — `src/hooks/guardrails/tool-before.ts` reads
+	 * `cfg.sandbox_macos_enabled ?? false` — so an absent key is still disabled.
+	 */
+	sandbox_macos_enabled: z.boolean().optional(),
 });
 
 export type GuardrailsConfig = z.infer<typeof GuardrailsConfigSchema>;
@@ -3227,6 +3288,9 @@ export const PluginConfigSchema = z.object({
 
 	// Structured design-doc generation (issue #1080 — docs_design agent, opt-in)
 	design_docs: DesignDocsConfigSchema.optional(),
+
+	// Git executable resolution override (issue #2236 hardening)
+	git: GitConfigSchema.optional(),
 
 	// UI/UX review configuration (designer agent)
 	ui_review: UIReviewConfigSchema.optional(),

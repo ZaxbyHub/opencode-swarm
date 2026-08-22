@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { advisoryWarn } from '../services/warning-buffer.js';
 import { bunSpawn } from './bun-compat';
+import { resolveGitExecutableAsync } from './git-executable.js';
 
 /**
  * Test-only dependency-injection seam. Production code calls
@@ -11,7 +12,18 @@ import { bunSpawn } from './bun-compat';
  * would corrupt unrelated suites that import `bun-compat`. Mutating this
  * local object is file-scoped and trivially restorable via `afterEach`.
  */
-export const _internals: { bunSpawn: typeof bunSpawn } = { bunSpawn };
+export const _internals: {
+	bunSpawn: typeof bunSpawn;
+	/**
+	 * Test seam for async git binary resolution (issue #2236 hardening, lane
+	 * C1b) — see `src/utils/git-executable.ts`. `ensureSwarmGitExcluded` runs
+	 * on the plugin init path (AGENTS.md invariant 1), so it MUST use the
+	 * async resolver, never the synchronous one — a synchronous probe loop
+	 * here would be exactly the kind of unbounded-feeling init-path work the
+	 * invariant forbids.
+	 */
+	resolveGitExecutableAsync: typeof resolveGitExecutableAsync;
+} = { bunSpawn, resolveGitExecutableAsync };
 
 /**
  * Module-level flag so the warning fires at most once per process.
@@ -224,6 +236,11 @@ export async function ensureSwarmGitExcluded(
 	void _quiet;
 
 	try {
+		// Issue #2236 hardening (lane C1b): resolve the git binary ONCE (async
+		// — this function runs on the plugin init path) before the parallel
+		// Steps below, all of which spawn git.
+		const gitExecutable = await _internals.resolveGitExecutableAsync();
+
 		// Steps 1, 2, and 3 are independent — run them in parallel to reduce
 		// startup latency. Each adds ~10-50 ms; parallelizing saves up to 100 ms
 		// on cold cache.
@@ -235,7 +252,7 @@ export async function ensureSwarmGitExcluded(
 			// Step 1: Get git root using CLI (handles worktrees/submodules)
 			(async (): Promise<[number, string]> => {
 				const proc = _internals.bunSpawn(
-					['git', '-C', directory, 'rev-parse', '--show-toplevel'],
+					[gitExecutable, '-C', directory, 'rev-parse', '--show-toplevel'],
 					GIT_SPAWN_OPTIONS,
 				);
 				try {
@@ -254,7 +271,14 @@ export async function ensureSwarmGitExcluded(
 			// Step 2: Get the correct exclude path (resolves through worktree .git files)
 			(async (): Promise<[number, string]> => {
 				const proc = _internals.bunSpawn(
-					['git', '-C', directory, 'rev-parse', '--git-path', 'info/exclude'],
+					[
+						gitExecutable,
+						'-C',
+						directory,
+						'rev-parse',
+						'--git-path',
+						'info/exclude',
+					],
 					GIT_SPAWN_OPTIONS,
 				);
 				try {
@@ -274,7 +298,14 @@ export async function ensureSwarmGitExcluded(
 			// (covers .gitignore, global gitignore, and info/exclude)
 			(async (): Promise<number> => {
 				const proc = _internals.bunSpawn(
-					['git', '-C', directory, 'check-ignore', '-q', '.swarm/.gitkeep'],
+					[
+						gitExecutable,
+						'-C',
+						directory,
+						'check-ignore',
+						'-q',
+						'.swarm/.gitkeep',
+					],
 					GIT_SPAWN_OPTIONS,
 				);
 				try {
@@ -339,7 +370,7 @@ export async function ensureSwarmGitExcluded(
 		// Step 4: Detect already-tracked .swarm/ files
 		// NOTE: ignore rules have no effect on tracked files; git rm --cached is required.
 		const trackedProc = _internals.bunSpawn(
-			['git', '-C', directory, 'ls-files', '--', '.swarm'],
+			[gitExecutable, '-C', directory, 'ls-files', '--', '.swarm'],
 			GIT_SPAWN_OPTIONS,
 		);
 		let trackedExitCode: number;

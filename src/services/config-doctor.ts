@@ -1425,6 +1425,51 @@ function validateConfigKey(path: string, value: unknown): ConfigFinding[] {
 			break;
 		}
 
+		case 'git': {
+			emitObjectTypeMismatch('git', value, findings);
+			break;
+		}
+
+		// `git.binary` overrides which git executable the plugin spawns.
+		// `GitConfigSchema` deliberately does NOT `.refine()` this field: a refine
+		// failure fails the WHOLE config parse, and a config that cannot load is
+		// precisely the "config value makes git unreachable" outcome the field is
+		// meant to avoid (see the comment above GitConfigSchema in
+		// src/config/schema.ts). Validation is therefore owed here, where a
+		// finding is advisory and non-fatal — without it a typo'd or blank
+		// override is accepted silently and only surfaces as a spawn failure.
+		//
+		// These findings are SOURCE-AGNOSTIC by construction: this validator
+		// receives a key/value pair, not the file it came from. The trust
+		// decision that a project-level `git.binary` is refused outright
+		// (CWE-427) therefore lives in the loader, which does see provenance —
+		// `enforceGitBinaryProvenance` in src/config/loader.ts.
+		case 'git.binary': {
+			if (value !== undefined && typeof value !== 'string') {
+				findings.push({
+					id: 'invalid-git-binary-type',
+					title: 'Invalid git.binary type',
+					description: `"git.binary" must be a string, got ${typeof value}`,
+					severity: 'error',
+					path: 'git.binary',
+					currentValue: value,
+					autoFixable: false,
+				});
+			} else if (typeof value === 'string' && value.trim() === '') {
+				findings.push({
+					id: 'empty-git-binary',
+					title: 'Empty git.binary',
+					description:
+						'"git.binary" is blank, so no git executable is named. Remove the key to fall back to the default `git` lookup, or set it to a real git executable path.',
+					severity: 'error',
+					path: 'git.binary',
+					currentValue: value,
+					autoFixable: false,
+				});
+			}
+			break;
+		}
+
 		case 'ui_review': {
 			emitObjectTypeMismatch('ui_review', value, findings);
 			break;

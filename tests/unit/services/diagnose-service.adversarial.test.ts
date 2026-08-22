@@ -3,6 +3,7 @@ import * as realChildProcess from 'node:child_process';
 import * as realFs from 'node:fs';
 import type { Plan } from '../../../src/config/plan-schema.js';
 import { getDiagnoseData } from '../../../src/services/diagnose-service.js';
+import { __seedGitExecutableForTests } from '../../../src/utils/git-executable.js';
 
 // Shared mock registry — allows factory-created mocks to be re-imported
 // and accessed via the same binding that the test code uses.
@@ -55,11 +56,13 @@ mock.module('node:fs', () => ({
 }));
 mock.module('node:child_process', () => {
 	const m = mock(() => Buffer.from('.git'));
+	const mFile = mock(() => Buffer.from('.git'));
 	mockRegistry.execSync = m;
-	return { ...realChildProcess, execSync: m };
+	mockRegistry.execFileSync = mFile;
+	return { ...realChildProcess, execSync: m, execFileSync: mFile };
 });
 
-import { execSync } from 'node:child_process';
+import { execFileSync, execSync } from 'node:child_process';
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { loadPluginConfig } from '../../../src/config/loader.js';
 import { listEvidenceTaskIds } from '../../../src/evidence/manager.js';
@@ -89,6 +92,7 @@ const mockExistsSyncFromReg = mockRegistry.existsSync as ReturnType<
 >;
 const mockStatSyncFromReg = mockRegistry.statSync as ReturnType<typeof mock>;
 const mockExecSync = mockRegistry.execSync as ReturnType<typeof mock>;
+const mockExecFileSync = mockRegistry.execFileSync as ReturnType<typeof mock>;
 
 // Helper to create minimal valid plan object
 function makePlan(
@@ -138,6 +142,8 @@ beforeEach(() => {
 	mockExistsSyncFromReg.mockReturnValue(true);
 	mockStatSyncFromReg.mockReturnValue({ isDirectory: () => true });
 	mockExecSync.mockReturnValue(Buffer.from('.git'));
+	mockExecFileSync.mockReturnValue(Buffer.from('.git'));
+	__seedGitExecutableForTests('git');
 	// restore env var
 	delete process.env.OPENCODE_SWARM_ID;
 });
@@ -329,47 +335,11 @@ describe('DiagnoseService Adversarial Security Tests', () => {
 		});
 
 		describe('ATTACK VECTOR 4: plan.swarm with shell metacharacters', () => {
-			it('should treat swarm ID with shell metacharacters as plain string', async () => {
-				const maliciousPlan: Plan = makePlan({
-					swarm: '"; rm -rf /; echo "',
-					phases: [
-						{
-							id: 1,
-							name: 'Phase 1',
-							status: 'pending' as const,
-							tasks: [
-								{
-									id: '1.1',
-									phase: 1,
-									status: 'pending' as const,
-									size: 'small' as const,
-									description: 'Task 1.1',
-									depends: [],
-									files_touched: [],
-								},
-							],
-						},
-					],
-				});
-
-				mockLoadPlanJsonOnly.mockResolvedValue(maliciousPlan);
-
-				process.env.OPENCODE_SWARM_ID = '"; rm -rf /; echo "';
-
-				const result = await getDiagnoseData(testDirectory);
-
-				const identityCheck = findCheck(result.checks, 'Swarm Identity');
-				expect(identityCheck).toBeDefined();
-				expect(identityCheck?.status).toBe('✅');
-				expect(identityCheck?.detail).toContain('; rm -rf /; echo ');
-
-				// Verify execSync was never called with the swarm ID
-				expect(mockExecSync).toHaveBeenCalledTimes(1);
-				expect(mockExecSync).toHaveBeenCalledWith('git rev-parse --git-dir', {
-					cwd: testDirectory,
-					stdio: 'pipe',
-				});
-			});
+			// A sibling test here ("should treat swarm ID with shell metacharacters
+			// as plain string"), which also asserts that git was invoked in
+			// array-argv form via execFileSync, now lives in
+			// diagnose-git-repository.test.ts (extracted to keep this file under
+			// the FR-006 line-count ratchet).
 
 			it('should treat swarm ID with command substitution chars as plain string', async () => {
 				const maliciousPlan: Plan = makePlan({

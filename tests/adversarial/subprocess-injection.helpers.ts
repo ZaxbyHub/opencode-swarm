@@ -25,6 +25,21 @@ export function getTmpDir(): string {
  * Helper: run a command via bunSpawn.
  * Exercises src/utils/bun-compat.ts which is what production code uses.
  */
+export interface ProcResult {
+	exitCode: number;
+	stdout: string;
+	stderr: string;
+	/**
+	 * Process-creation failure reason, or `null` when the process started.
+	 *
+	 * `bunSpawn` reports a spawn that never produced a child as a VALUE, not a
+	 * throw (issue #2236): `exited` resolves non-zero and the cause lands here.
+	 * Surfacing it lets an adversarial test assert that a malformed argument was
+	 * *rejected* without depending on rejection being delivered as an exception.
+	 */
+	spawnError: Error | null;
+}
+
 export async function runProc(
 	cmd: string[],
 	opts?: {
@@ -34,7 +49,7 @@ export async function runProc(
 		stderr?: 'inherit' | 'ignore' | 'pipe';
 		timeout?: number;
 	},
-): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+): Promise<ProcResult> {
 	const proc = bunSpawn(cmd, {
 		cwd: opts?.cwd,
 		stdin: opts?.stdin ?? 'ignore',
@@ -45,7 +60,7 @@ export async function runProc(
 	const exitCode = await proc.exited;
 	const stdout = await proc.stdout.text();
 	const stderr = await proc.stderr.text();
-	return { exitCode, stdout, stderr };
+	return { exitCode, stdout, stderr, spawnError: proc.spawnError ?? null };
 }
 
 /** Helper: write a Node.js test script that echoes its arguments or environment */
@@ -66,7 +81,7 @@ export async function runNodeScript(
 		stderr?: 'inherit' | 'ignore' | 'pipe';
 		timeout?: number;
 	},
-): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+): Promise<ProcResult> {
 	return runProc([process.execPath, scriptPath, ...scriptArgs], opts);
 }
 

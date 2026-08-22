@@ -49,9 +49,9 @@ describe('BubblewrapSandboxExecutor — envOverride verification (supplementary)
 				// Value contains '=': 3-arg form makes this unambiguous
 				FOO: 'a=b=c',
 			});
-			// The 3-arg form: --setenv FOO a=b=c (three separate args to bwrap)
-			// bwrap parses KEY=FOO, VALUE=a=b=c directly.
-			expect(result).toContain('--setenv FOO a=b=c');
+			// 3-arg form, value single-quoted so the OUTER shell keeps it whole;
+			// bwrap then parses KEY=FOO, VALUE=a=b=c directly.
+			expect(result).toContain("--setenv FOO 'a=b=c'");
 		},
 	);
 
@@ -61,7 +61,7 @@ describe('BubblewrapSandboxExecutor — envOverride verification (supplementary)
 			const result = executor.wrapCommand('echo hello', [], undefined, {
 				X: '=',
 			});
-			expect(result).toContain('--setenv X =');
+			expect(result).toContain("--setenv X '='");
 		},
 	);
 
@@ -77,7 +77,7 @@ describe('BubblewrapSandboxExecutor — envOverride verification (supplementary)
 				HOME: '$HOME',
 			});
 			// $ is literal in the wrapped command — bwrap passes it to execve, not bash
-			expect(result).toContain('--setenv HOME $HOME');
+			expect(result).toContain("--setenv HOME '$HOME'");
 		},
 	);
 
@@ -87,9 +87,10 @@ describe('BubblewrapSandboxExecutor — envOverride verification (supplementary)
 			const result = executor.wrapCommand('echo hello', [], undefined, {
 				CMD: 'echo a; echo b',
 			});
-			// The semicolon is literal — the wrapped command is bwrap ... bash -c 'echo a; echo b'
-			// where the semicolon inside the quoted command string is literal content
-			expect(result).toContain('--setenv CMD echo a; echo b');
+			// The single quotes are WHY the semicolon is literal. Unquoted, the
+			// outer shell parsing this string would treat it as a command
+			// separator and run `echo b` OUTSIDE the sandbox.
+			expect(result).toContain("--setenv CMD 'echo a; echo b'");
 		},
 	);
 
@@ -99,7 +100,7 @@ describe('BubblewrapSandboxExecutor — envOverride verification (supplementary)
 			const result = executor.wrapCommand('echo hello', [], undefined, {
 				AMP: 'a&b',
 			});
-			expect(result).toContain('--setenv AMP a&b');
+			expect(result).toContain("--setenv AMP 'a&b'");
 		},
 	);
 
@@ -107,7 +108,7 @@ describe('BubblewrapSandboxExecutor — envOverride verification (supplementary)
 		const result = executor.wrapCommand('echo hello', [], undefined, {
 			PIPE: 'a|b',
 		});
-		expect(result).toContain('--setenv PIPE a|b');
+		expect(result).toContain("--setenv PIPE 'a|b'");
 	});
 
 	// -----------------------------------------------------------------------
@@ -170,11 +171,10 @@ describe('BubblewrapSandboxExecutor — envOverride verification (supplementary)
 			const result = executor.wrapCommand('echo hello', [], undefined, {
 				INJECT_ME: 'injected_value',
 			});
-			// The wrapped string contains --setenv INJECT_ME injected_value verbatim (3-arg form).
-			// When bwrap parses its argv, it receives:
+			// Once the outer shell strips the quotes, bwrap receives argv
 			//   ['--setenv', 'INJECT_ME', 'injected_value']
-			// and calls execve() with that env — so INJECT_ME IS set to injected_value.
-			expect(result).toContain('--setenv INJECT_ME injected_value');
+			// and calls execve() with that env — so INJECT_ME IS set.
+			expect(result).toContain("--setenv INJECT_ME 'injected_value'");
 		},
 	);
 
@@ -187,8 +187,8 @@ describe('BubblewrapSandboxExecutor — envOverride verification (supplementary)
 				ANOTHER_VALID: 'another_value',
 			});
 			// Valid keys appear (3-arg form: --setenv KEY VALUE)
-			expect(result).toContain('--setenv VALID_KEY valid_value');
-			expect(result).toContain('--setenv ANOTHER_VALID another_value');
+			expect(result).toContain("--setenv VALID_KEY 'valid_value'");
+			expect(result).toContain("--setenv ANOTHER_VALID 'another_value'");
 			// Invalid key must not appear
 			expect(result).not.toContain('INVALID');
 			expect(result).not.toContain('should_be_dropped');

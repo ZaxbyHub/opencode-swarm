@@ -444,42 +444,39 @@ describe('Git Branch Module', () => {
 			const enoent = Object.assign(new Error('spawn git ENOENT'), {
 				code: 'ENOENT',
 			}) as NodeJS.ErrnoException;
-			// Over-provision values so the test works on all platforms (Windows has more candidates)
-			returnValues = Array.from({ length: 10 }, () => ({
-				status: null,
-				stdout: '',
-				stderr: '',
-				error: enoent,
-			}));
-			callIndex = 0;
-			mockSpawnSync.mockClear();
+			setupMock({ status: null, stdout: '', stderr: '', error: enoent });
 
-			const result = branch.getGitRepositoryStatus(testCwd);
+			// #2236: ENOENT means "binary missing" only when cwd really exists
+			// (nonexistent '/test/repo' now classifies as cwd-missing instead).
+			const result = branch.getGitRepositoryStatus(process.cwd());
 
 			expect(result.isRepo).toBe(false);
 			if (!result.isRepo) {
 				expect(result.reason).toBe('git_unavailable');
 			}
+			expect(mockSpawnSync).toHaveBeenCalledTimes(1);
 		});
 
 		test('reports other git probe failures as git_error', () => {
 			const timedOut = Object.assign(new Error('spawnSync git ETIMEDOUT'), {
 				code: 'ETIMEDOUT',
 			}) as NodeJS.ErrnoException;
-			// getGitRepositoryStatus → gitExec loops over all Windows git candidates
-			// (7 on Windows: 'git' + 2 per ProgramFiles root × 2 roots) and retries
-			// each up to MAX_TRANSIENT_RETRIES (5) times. Provide enough ETIMEDOUT
-			// values so every candidate exhausts its retries and the function throws
-			// GitBinaryMissingError, which getGitRepositoryStatus maps to 'git_error'.
+			// getGitRepositoryStatus → gitExec resolves ONE git binary and retries
+			// it up to MAX_TRANSIENT_RETRIES (5) times before throwing
+			// GitBinaryMissingError, mapped to 'git_error'.
 			const etimedoutResult: MockSpawnResult = {
 				status: null,
 				stdout: '',
 				stderr: '',
 				error: timedOut,
 			};
-			returnValues = Array.from({ length: 35 }, () => etimedoutResult);
-			callIndex = 0;
-			mockSpawnSync.mockClear();
+			setupMock(
+				etimedoutResult,
+				etimedoutResult,
+				etimedoutResult,
+				etimedoutResult,
+				etimedoutResult,
+			);
 
 			const result = branch.getGitRepositoryStatus(testCwd);
 
@@ -487,6 +484,7 @@ describe('Git Branch Module', () => {
 			if (!result.isRepo) {
 				expect(result.reason).toBe('git_error');
 			}
+			expect(mockSpawnSync).toHaveBeenCalledTimes(5);
 		});
 
 		test('uses bounded non-interactive git spawn options', () => {
@@ -554,26 +552,24 @@ describe('Git Branch Module', () => {
 			expect(mockSpawnSync).toHaveBeenCalledTimes(1);
 		});
 
-		test('3. GitBinaryMissingError not retried: spawnSync returns git-binary-missing ENOENT, gitExec continues to next candidate (not retried as transient)', () => {
-			// ENOENT is classified as git-binary-missing by isGitBinaryMissing → breaks to next candidate.
-			// On Windows there are 7 git candidates; over-provision so the fallback default
-			// { status: 0, stdout: '', stderr: '' } never gets used (which would return '' instead of throwing).
-			const enoentResult = {
-				status: null as number | null,
+		test('3. GitBinaryMissingError not retried: spawnSync returns git-binary-missing ENOENT, gitExec throws immediately with exactly ONE spawn call (single resolved binary, no candidate loop)', () => {
+			// Issue #2236 hardening: gitExec resolves ONE git binary instead of
+			// looping over windowsGitCandidates(). ENOENT under a cwd that really
+			// exists is git-binary-missing → throws immediately, no retry.
+			setupMock({
+				status: null,
 				stdout: '',
 				stderr: '',
 				error: enoentErr,
-			};
-			returnValues = Array.from({ length: 10 }, () => enoentResult);
-			callIndex = 0;
-			mockSpawnSync.mockClear();
+			});
 
 			expect(() =>
-				branch._internals.gitExec(['rev-parse', '--git-dir'], testCwd),
+				branch._internals.gitExec(['rev-parse', '--git-dir'], process.cwd()),
 			).toThrow();
-			// ENOENT git-missing is NOT retried as transient — each candidate breaks immediately
-			const expectedCandidates = process.platform === 'win32' ? 7 : 1;
-			expect(mockSpawnSync).toHaveBeenCalledTimes(expectedCandidates);
+			// Exactly 1 call — the candidate loop is gone; this is the evidence
+			// that the F2 collapse actually happened, not just that the error
+			// still surfaces.
+			expect(mockSpawnSync).toHaveBeenCalledTimes(1);
 		});
 
 		test('4. Success path transparent: spawnSync succeeds on FIRST attempt, gitExec returns immediately with NO retry delay', () => {

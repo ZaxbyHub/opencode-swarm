@@ -15,16 +15,21 @@ import * as path from 'node:path';
 import { _internals, validateDiffScope } from '../src/hooks/diff-scope';
 
 const realBunSpawn = _internals.bunSpawn;
+const realResolveGitExecutable = _internals.resolveGitExecutable;
 const EXPECTED_PER_CALL_TIMEOUT_MS = 1_500;
 
 afterEach(() => {
 	_internals.bunSpawn = realBunSpawn;
+	_internals.resolveGitExecutable = realResolveGitExecutable;
 });
 
 describe('validateDiffScope getChangedFiles — bounded execution', () => {
 	test('every git bunSpawn call passes timeout + stdin:ignore', async () => {
 		const observed: Array<Record<string, unknown>> = [];
 		const killCalls = { count: 0 };
+		// Issue #2236 hardening (lane C1b): stub the resolver seam so this
+		// test doesn't pay for real filesystem probing on every run.
+		_internals.resolveGitExecutable = () => 'git';
 		_internals.bunSpawn = ((
 			_cmd: string[],
 			options?: Record<string, unknown>,
