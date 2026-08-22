@@ -9,9 +9,9 @@
  * Mocking `Bun.write` / `mock.module('node:fs', ...)` no longer intercepts.
  */
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
-import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { canonicalMkdtemp } from '../../tests/helpers/tmpdir.js';
 
 import { _internals as atomicWriteInternals } from '../utils/atomic-write.js';
 
@@ -33,7 +33,7 @@ describe('handoff.ts temp file cleanup adversarial tests', () => {
 	let renameCount: number;
 
 	beforeEach(() => {
-		testDir = mkdtempSync(join(tmpdir(), 'handoff-adv-'));
+		testDir = canonicalMkdtemp('handoff-adv-');
 		unlinkTargets = [];
 		renameDests = [];
 		renameCount = 0;

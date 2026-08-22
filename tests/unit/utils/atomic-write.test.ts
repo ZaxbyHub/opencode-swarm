@@ -322,6 +322,30 @@ describe('atomicWriteSwarmFile', () => {
 		expect(readdirSync(swarmDir)).toEqual(['keep.json']);
 	});
 
+	test('payload write failure: temp cleaned, PRIOR target preserved, error propagates', async () => {
+		// The write phase (not the rename phase) fails — e.g. ENOSPC after
+		// the temp was created. The own-temp finally-unlink must still run
+		// (issue #2035 acceptance: failed writes clean only their own temp
+		// and preserve the previous target).
+		const target = path.join(swarmDir, 'keep.json');
+		await atomicWriteSwarmFile(target, 'previous');
+		const realWriteSync = _internals.writeSync;
+		_internals.writeSync = (() => {
+			throw Object.assign(new Error('ENOSPC: no space left on device'), {
+				code: 'ENOSPC',
+			});
+		}) as typeof _internals.writeSync;
+		try {
+			await expect(atomicWriteSwarmFile(target, 'new')).rejects.toThrow(
+				'ENOSPC',
+			);
+		} finally {
+			_internals.writeSync = realWriteSync;
+		}
+		expect(readFileSync(target, 'utf-8')).toBe('previous');
+		expect(readdirSync(swarmDir)).toEqual(['keep.json']);
+	});
+
 	test('transient EPERM on first rename is retried to success', async () => {
 		const target = path.join(swarmDir, 'retry.json');
 		const realRename = _internals.renameSync;

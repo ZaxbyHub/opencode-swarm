@@ -167,58 +167,52 @@ describe('Agent Activity — Adversarial Security & Edge Cases', () => {
 			const contextPath = join(tempDir, '.swarm', 'context.md');
 			await writeFile(contextPath, '# Initial\n');
 
-			// Create a promise we can control
-			let resolveWrite: () => void;
-			const writeBlocker = new Promise<void>((resolve) => {
-				resolveWrite = resolve!;
-			});
+			// The canonical writer is synchronous, so the real interleaving
+			// point for a concurrent state mutation is inside the payload
+			// write itself — mutate state on the first writeSync call, then
+			// delegate to the real writer. (The old Bun.write blocker could
+			// never reach this path after the issue #2035 migration.)
+			const real = atomicWriteInternals.writeSync;
+			let writeCalls = 0;
+			atomicWriteInternals.writeSync = (
+				fd: number,
+				buffer: Uint8Array,
+				offset: number,
+				length: number,
+			) => {
+				if (++writeCalls === 1) {
+					swarmState.pendingEvents = 10;
+					swarmState.toolAggregates.set('tool3', {
+						tool: 'tool3',
+						count: 2,
+						successCount: 1,
+						failureCount: 1,
+						totalDuration: 200,
+					});
+				}
+				return real(fd, buffer, offset, length);
+			};
 
-			// Mock Bun.write to block on first call, then release
-			const originalWrite = Bun.write;
-			let writeCount = 0;
-			const writeSpy = spyOn(Bun, 'write').mockImplementation(
-				async (path: string, data: string | BunFile) => {
-					writeCount++;
-					if (writeCount === 1) {
-						// Block first write to create race condition
-						await writeBlocker;
-					}
-					return originalWrite(path, data);
-				},
-			);
+			try {
+				const flush1 = _flushForTesting(tempDir);
+				const flush2 = _flushForTesting(tempDir);
+				await Promise.all([flush1, flush2]);
 
-			// Start first flush (will block)
-			const flush1 = _flushForTesting(tempDir);
+				// Final file is valid and reflects the concurrently-added state
+				const content = await Bun.file(contextPath).text();
+				expect(content).toContain('## Agent Activity');
+				expect(content).toContain('test-tool');
+				expect(content).toContain('tool3');
 
-			// While first flush is blocked, modify state and trigger second flush
-			swarmState.pendingEvents = 10;
-			swarmState.toolAggregates.set('tool3', {
-				tool: 'tool3',
-				count: 2,
-				successCount: 1,
-				failureCount: 1,
-				totalDuration: 200,
-			});
-
-			const flush2 = _flushForTesting(tempDir);
-
-			// Release the block
-			resolveWrite!();
-
-			// Wait for both to complete
-			await Promise.all([flush1, flush2]);
-
-			// Final file should be valid
-			const content = await Bun.file(contextPath).text();
-			expect(content).toContain('## Agent Activity');
-
-			// Verify .tmp file was cleaned up
-			const tempExists = await stat(`${contextPath}.tmp`)
-				.then(() => true)
-				.catch(() => false);
-			expect(tempExists).toBe(false);
-
-			writeSpy.mockRestore();
+				// No atomic-write temp residue of any grammar remains
+				const swarmFiles = await readdir(join(tempDir, '.swarm'));
+				const residue = swarmFiles.filter(
+					(f) => f.startsWith('context.md') && f.endsWith('.tmp'),
+				);
+				expect(residue).toEqual([]);
+			} finally {
+				atomicWriteInternals.writeSync = real;
+			}
 		});
 	});
 
