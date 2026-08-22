@@ -182,9 +182,9 @@ those inputs before this change.
 
 ---
 
-## 5. The 44-entry catalog
+## 5. The 45-entry catalog
 
-Source: `src/observability/catalog.ts`. Exactly 44 entries = the 38 pre-existing members of
+Source: `src/observability/catalog.ts`. Exactly 45 entries = the 38 pre-existing members of
 `TelemetryEvent` (`src/telemetry.ts:15-92`) plus `agent_conflict_detected`
 (emitted in production via a force-cast past the type system before #2029)
 plus `close_archive_result` (issue #2030 — the structured close/archive
