@@ -589,21 +589,10 @@ int main() {
 			expect(result.summary.files_scanned).toBe(0);
 		});
 
-		// R2 SAST zero-coverage semantic test
-		it('should fail verdict when all provided files are skipped (unsupported)', async () => {
-			const testFile = path.join(tempDir, 'test.xyz');
-			fs.writeFileSync(testFile, 'some content');
-
-			const input: SastScanInput = {
-				changed_files: [testFile],
-			};
-
-			const result = await sastScan(input, tempDir);
-
-			// Files provided but all skipped => files_scanned === 0 => should fail in enabled mode
-			expect(result.summary.files_scanned).toBe(0);
-			expect(result.verdict).toBe('fail');
-		});
+		// R2 SAST zero-coverage semantics moved (FR-006 cap: this file must not
+		// grow). Issue #2271 bug 3 made a non-code-only diff a legitimate PASS;
+		// that contract and the still-failing zero-coverage cases are covered
+		// by sast-scan-zero-coverage-error.test.ts.
 
 		it('should skip empty files', async () => {
 			const testFile = path.join(tempDir, 'test.js');

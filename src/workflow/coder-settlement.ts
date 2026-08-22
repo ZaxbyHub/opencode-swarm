@@ -7,7 +7,10 @@ import type {
 	BackgroundTaskChangeContext,
 	BackgroundWorktreeDescriptor,
 } from '../background/pending-delegations.js';
-import { changedFilesSinceSnapshot } from '../background/workspace-snapshot.js';
+import {
+	captureWorkspaceSnapshot,
+	changedFilesSinceSnapshot,
+} from '../background/workspace-snapshot.js';
 import {
 	getTaskWorkflowSnapshot,
 	type TaskEvidence,
@@ -294,6 +297,31 @@ export async function beginCoderSettlement(options: {
 	context: BackgroundTaskChangeContext;
 	worktree?: BackgroundWorktreeDescriptor;
 }): Promise<void> {
+	// Issue #2271 bug 1: a launch baseline with no git HEAD produced by an
+	// OBSERVATION DIRECTORY that is not a git repository (an unregistered
+	// worktree lane) can never support mutation attribution:
+	// baselineAttributionDoomed would abort it at settle time only AFTER the
+	// coder's work is already unreachable. Fail the dispatch up front with an
+	// actionable error instead.
+	//
+	// Scoped to the lane case: when the PROJECT ROOT itself is not a git
+	// repository (a supported non-git project flow), the #2214 contract keeps
+	// dispatch allowed and aborts cleanly at settle — coder work still lands
+	// in the tree, only attribution gives up. The extra root probe only runs
+	// on the already-failing (null HEAD) path, so healthy dispatches pay
+	// nothing. A transient capture failure (changedFiles null while gitHead
+	// is present) is deliberately NOT blocked here — issue #2214 keeps that
+	// class retryable at settle time.
+	if (options.context.baseline.gitHead === null) {
+		const rootBaseline = captureWorkspaceSnapshot(options.directory);
+		if (rootBaseline.gitHead !== null) {
+			throw new Error(
+				`CODER_SETTLEMENT_BASELINE_UNAVAILABLE: the launch baseline for task ${options.taskId} has no git HEAD — the observation directory (${options.context.baseline.directory}) is not a git repository or git is unavailable there. ` +
+					'An unregistered worktree lane (a lane directory that git worktree list does not know) produces exactly this. ' +
+					'The task was not dispatched and no settlement state was created; retry the dispatch, or set worktree.policy "disabled" to run coders in the primary tree.',
+			);
+		}
+	}
 	const filePath = walPath(options.directory, options.taskId);
 	let ownsActiveDispatch = false;
 	await withSettlementLock(

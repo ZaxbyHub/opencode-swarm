@@ -237,6 +237,13 @@ interface GitResult {
 
 /** Default timeout for git worktree operations (30 seconds). */
 const WORKTREE_TIMEOUT_MS = 30_000;
+/**
+ * Issue #2271 bug 1: budget for the two post-provision verification probes
+ * (`.git` stat + `git rev-parse --git-dir` inside the fresh lane). These run
+ * on an already-created lane, so a tight bound suffices — a lane whose git
+ * link cannot be probed in 5 s is broken, not slow.
+ */
+const WORKTREE_VERIFICATION_TIMEOUT_MS = 5_000;
 
 /**
  * Windows MAX_PATH safety margin. The OS limit is 260 characters; we use
@@ -826,6 +833,42 @@ export async function provisionWorktree(
 	if (addResult.exitCode !== 0) {
 		return {
 			error: `Failed to create worktree: ${addResult.stderr.trim() || addResult.stdout.trim()}`,
+		};
+	}
+
+	// Issue #2271 bug 1: `git worktree add` exiting 0 does not by itself prove
+	// the lane is a registered, usable worktree — a concurrent prune, a partial
+	// removal from a sibling dispatch's collision cleanup, or a half-consumed
+	// `worktree remove` can leave a plain directory with no `.git` link. A coder
+	// session created in such a directory writes files git can never attribute,
+	// and settlement records dispatch_no_mutation even though the coder worked.
+	// Verify both the on-disk `.git` link and git's own view of the worktree
+	// before any session is created inside the lane.
+	const verificationProblems: string[] = [];
+	if (!_internals.fs.existsSync(path.join(worktreePath, '.git'))) {
+		verificationProblems.push(
+			`no .git link at ${path.join(worktreePath, '.git')}`,
+		);
+	}
+	const revParseResult = await runGit(
+		['rev-parse', '--git-dir'],
+		worktreePath,
+		WORKTREE_VERIFICATION_TIMEOUT_MS,
+	);
+	if (revParseResult.exitCode !== 0) {
+		verificationProblems.push(
+			`git rev-parse --git-dir failed in the lane: ${revParseResult.stderr.trim() || revParseResult.stdout.trim() || `exit ${revParseResult.exitCode}`}`,
+		);
+	}
+	if (verificationProblems.length > 0) {
+		// The lane is unusable; remove the partial registration so the next
+		// attempt provisions cleanly instead of colliding with this carcass.
+		await removeWorktree(worktreePath, directory, {
+			force: true,
+			worktreeDir: options.worktreeDir,
+		}).catch(() => {});
+		return {
+			error: `WORKTREE_VERIFICATION_FAILED: lane ${worktreePath} did not register as a usable git worktree (${verificationProblems.join('; ')}). The lane was removed; retry the dispatch.`,
 		};
 	}
 

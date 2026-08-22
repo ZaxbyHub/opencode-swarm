@@ -174,6 +174,7 @@ import { captureReviewAgentModelRegistry } from './review/runtime.js';
 import { createCompactionService } from './services/compaction-service';
 import { shouldRunOnStartup } from './services/config-doctor';
 import { buildDelegationCostFields } from './services/cost-accounting.js';
+import { runModelPreflight } from './services/model-preflight';
 import { scheduleVersionCheck } from './services/version-check.js';
 import { loadSnapshot } from './session/snapshot-reader.js';
 import { createSnapshotWriterHook } from './session/snapshot-writer.js';
@@ -734,6 +735,47 @@ async function initializeOpenCodeSwarm(
 
 	// Store SDK client for curator LLM delegation
 	swarmState.opencodeClient = ctx.client;
+
+	// Issue #2271 bug 4: model-resolution preflight runs OFF the resolution
+	// path (it makes an HTTP call to the host's provider catalog — exactly the
+	// class of work invariant 1 keeps out of `server()` awaits). Fail-open by
+	// construction: catalog errors surface nothing, and only a POSITIVE
+	// unresolved detection warns.
+	postResolutionTasks.push(() => {
+		void runModelPreflight(config, swarmState.opencodeClient)
+			.then((result) => {
+				if (!result.catalogAvailable) return;
+				const unresolved = result.resolutions.filter(
+					(resolution) => resolution.status === 'unresolved',
+				);
+				if (unresolved.length === 0) return;
+				const lines = unresolved.map(
+					(resolution) =>
+						`  ${resolution.agent}: ${resolution.model} (${resolution.detail ?? 'does not resolve'})`,
+				);
+				const msg =
+					`[opencode-swarm] WARNING: ${unresolved.length} configured agent model(s) do not resolve against the provider catalog:\n` +
+					`${lines.join('\n')}\n` +
+					'Dispatching these agents will fail permanently ("Model not found"/"Forbidden"). ' +
+					'Fix agents.<role>.model in opencode-swarm.json (or remove the override to fall back to the default).';
+				if (!config.quiet) {
+					// biome-ignore lint/suspicious/noConsole: user-facing operational warning — must be visible even outside debug mode
+					console.warn(msg);
+				} else {
+					addDeferredWarning(msg);
+				}
+				for (const resolution of unresolved) {
+					telemetry.modelUnresolved(
+						resolution.agent,
+						resolution.model,
+						resolution.detail ?? 'does not resolve',
+					);
+				}
+			})
+			.catch(() => {
+				/* fail-open: preflight must never surface as an error */
+			});
+	});
 
 	// `loadSnapshot` was awaited in the parallel block above. Its comment
 	// (preserved here for context): bounded with a 5s timeout (issue #704);

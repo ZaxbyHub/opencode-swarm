@@ -21,6 +21,7 @@ import {
 } from '../background/workspace-snapshot.js';
 import type { PluginConfig } from '../config';
 import { ALL_AGENT_NAMES } from '../config/agent-names.js';
+import { DEFAULT_MODELS } from '../config/constants';
 import type { Phase, Plan, Task } from '../config/plan-schema';
 import { isKnownCanonicalRole, stripKnownSwarmPrefix } from '../config/schema';
 import {
@@ -106,6 +107,7 @@ import {
 	checkStandardWorktreeSerializationRelease,
 	cleanupStandardWorktreeForCallId,
 	finishStandardWorktreeDispatch,
+	getStandardWorktreeDegradationReason,
 	precreateStandardWorktreeSession,
 	resetStandardWorktreeIsolationState,
 	resolveWorktreeIsolationConfig,
@@ -3321,6 +3323,7 @@ export function createDelegationGateHook(
 			throw new Error(
 				`CODER_SETTLEMENT_CLEAN_BASELINE_REQUIRED: ${String(baselineDirtyFiles.length)} uncommitted/untracked change(s) present at dispatch (${sample}${baselineDirtyFiles.length > 5 ? ', …' : ''}). ` +
 					'Commit or stash them before dispatching a coder — exact-task settlement cannot attribute coder mutations from a dirty launch baseline. ' +
+					'(.swarm/ plugin runtime state is excluded from this check automatically.) ' +
 					`Task ${taskId} was not dispatched and no settlement state was created.`,
 			);
 		}
@@ -3404,6 +3407,56 @@ export function createDelegationGateHook(
 		if (!input.sessionID) return;
 
 		const normalized = normalizeToolName(input.tool);
+
+		// ── Issue #2271 bug 4: critic model-resolution preflight ──
+		// A critic dispatch whose model id does not resolve fails permanently
+		// AFTER the Task leaves this gate ("Model not found"/"Forbidden"), so the
+		// plan-critic gate can never produce VERDICT: APPROVED and wedges into
+		// manual approve_plan_critic overrides. Deny fail-fast with an
+		// actionable message instead. Fail-open: any catalog/check error lets
+		// the dispatch proceed (existing retry classification still applies).
+		const preflightArgs = output.args as Record<string, unknown> | undefined;
+		if (
+			(normalized === 'Task' || normalized === 'task') &&
+			preflightArgs &&
+			typeof preflightArgs.subagent_type === 'string'
+		) {
+			const preflightAgent = stripKnownSwarmPrefix(preflightArgs.subagent_type);
+			if (preflightAgent.startsWith('critic')) {
+				const criticModel =
+					config.agents?.[preflightAgent]?.model ??
+					DEFAULT_MODELS[preflightAgent] ??
+					DEFAULT_MODELS.default;
+				try {
+					const { checkSingleModelResolution } = await import(
+						'../services/model-preflight'
+					);
+					const resolution = await checkSingleModelResolution(
+						criticModel,
+						swarmState.opencodeClient,
+					);
+					if (resolution === 'unresolved') {
+						telemetry.modelUnresolved(
+							preflightAgent,
+							criticModel,
+							'plan-critic dispatch preflight',
+						);
+						throw new Error(
+							`PLAN_CRITIC_MODEL_UNRESOLVED: the ${preflightAgent} agent's model "${criticModel}" does not resolve against the provider catalog — the critic can never run, so the plan-critic gate cannot produce VERDICT: APPROVED. ` +
+								`Fix agents.${preflightAgent}.model in opencode-swarm.json (or remove the override to fall back to the default model), then re-run MODE: CRITIC-GATE.`,
+						);
+					}
+				} catch (error) {
+					if (
+						error instanceof Error &&
+						error.message.startsWith('PLAN_CRITIC_MODEL_UNRESOLVED')
+					) {
+						throw error;
+					}
+					// Catalog unavailable / check failed — fail open.
+				}
+			}
+		}
 
 		// ── Completion gate: blocks starting a different task after QA gates pass ──
 		// Runs for ALL tools (declare_scope, update_task_status, Task), not just Task.
@@ -4252,6 +4305,43 @@ export function createDelegationGateHook(
 						directory,
 						coderDispatchGeneration,
 					);
+				}
+				// Issue #2271 bug 1: when this coder is running un-isolated because
+				// worktree isolation degraded (not because the user disabled it),
+				// record a durable event so a later dispatch_no_mutation outcome is
+				// explainable from the ledger instead of looking like the coder
+				// did nothing.
+				const degradation = getStandardWorktreeDegradationReason(
+					input.sessionID,
+				);
+				if (degradation) {
+					try {
+						const eventsPath = validateSwarmPath(directory, 'events.jsonl');
+						await fs.promises.mkdir(path.dirname(eventsPath), {
+							recursive: true,
+						});
+						await fs.promises.appendFile(
+							eventsPath,
+							`${JSON.stringify({
+								type: 'worktree_isolation_degraded',
+								timestamp: new Date().toISOString(),
+								sessionId: input.sessionID,
+								callId: input.callID,
+								taskId: incomingCoderTaskId,
+								reason: degradation.reason,
+								degradedAt: new Date(degradation.at).toISOString(),
+							})}\n`,
+							'utf-8',
+						);
+					} catch (eventError) {
+						logger.log(
+							`[delegation-gate] worktree_isolation_degraded event write failed: ${
+								eventError instanceof Error
+									? eventError.message
+									: String(eventError)
+							}`,
+						);
+					}
 				}
 				await publishScopeBinding(input.callID, directory, correlatedBinding);
 			}

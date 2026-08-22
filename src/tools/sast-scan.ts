@@ -83,6 +83,12 @@ export interface SastScanResult {
 			medium: number;
 			low: number;
 		};
+		/**
+		 * Issue #2271 bug 3: present when every input was skipped for having no
+		 * SAST language profile (non-code diff) — the scan passed because there
+		 * was nothing to scan, and this counts the skipped non-code inputs.
+		 */
+		files_skipped_non_code?: number;
 	};
 	// Baseline-diffing fields — present when capture_baseline is true or a baseline was loaded
 	/** 'baseline_captured' when capture_baseline:true succeeded */
@@ -322,6 +328,14 @@ export async function sastScan(
 	const allFindings: SastScanFinding[] = [];
 	let filesScanned = 0;
 	let _filesSkipped = 0;
+	/**
+	 * Issue #2271 bug 3: inputs skipped because no language profile/registry
+	 * entry knows their type (markdown, JSON, plain text, …). A diff consisting
+	 * ONLY of such files is a legitimate nothing-to-scan pass, not a coverage
+	 * failure — distinguishing this from size/binary/missing skips keeps the
+	 * zero-coverage hard fail for real coverage gaps.
+	 */
+	let nonCodeSkipped = 0;
 	/** Paths of files that were successfully scanned (for baseline capture). */
 	const scannedFilePaths: string[] = [];
 	if (abort_signal?.aborted) {
@@ -390,6 +404,7 @@ export async function sastScan(
 		// Skip if neither registry knows about this file type
 		if (!profile && !langDef) {
 			_filesSkipped++;
+			nonCodeSkipped++;
 			continue;
 		}
 
@@ -745,11 +760,25 @@ export async function sastScan(
 	// #2210: attach the reason so the payload carries WHY it failed — without
 	// it, pre_check_batch assumed findings above threshold and logged a
 	// misleading "found new findings" message for a zero-file scan.
+	// Issue #2271 bug 3: a normal-mode scan whose EVERY input file was skipped
+	// for having no language profile (markdown-only / JSON-only diffs) passes
+	// instead of failing — there is no code to scan and no coverage was lost.
+	// The hard fail stays for capture mode (handled above), for empty input,
+	// and for scannable files that could not be scanned (size/binary/missing).
 	let zeroCoverageError: string | undefined;
+	let nonCodeOnly = false;
 	if (filesScanned === 0) {
-		verdict = 'fail';
-		zeroCoverageError =
-			'SAST requires at least one file to scan; zero files were scanned';
+		if (
+			!baselineUsed &&
+			nonCodeSkipped > 0 &&
+			nonCodeSkipped === changed_files.length
+		) {
+			nonCodeOnly = true;
+		} else {
+			verdict = 'fail';
+			zeroCoverageError =
+				'SAST requires at least one file to scan; zero files were scanned';
+		}
 	}
 
 	// Build summary
@@ -758,6 +787,7 @@ export async function sastScan(
 		files_scanned: filesScanned,
 		findings_count: finalFindings.length,
 		findings_by_severity: findingsBySeverity,
+		...(nonCodeOnly ? { files_skipped_non_code: nonCodeSkipped } : {}),
 	};
 
 	// Save evidence
@@ -773,7 +803,9 @@ export async function sastScan(
 			timestamp: new Date().toISOString(),
 			agent: 'sast_scan',
 			verdict,
-			summary: `Scanned ${filesScanned} files, found ${finalFindings.length} finding(s) using ${engine}`,
+			summary: nonCodeOnly
+				? `No scannable code files in input (${nonCodeSkipped} non-code file(s) skipped); nothing to scan`
+				: `Scanned ${filesScanned} files, found ${finalFindings.length} finding(s) using ${engine}`,
 			...summary,
 			findings: finalFindings,
 			...(baselineUsed && {
