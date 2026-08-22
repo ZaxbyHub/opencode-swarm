@@ -3451,6 +3451,13 @@ export function createDelegationGateHook(
 						error instanceof Error &&
 						error.message.startsWith('PLAN_CRITIC_MODEL_UNRESOLVED')
 					) {
+						// PR-review PRR-006: a denial invalidates the catalog
+						// cache so a user who fixes the model config is not
+						// re-denied from a stale catalog for up to the 30 s TTL.
+						const { invalidateProviderCatalogCache } = await import(
+							'../services/model-preflight'
+						);
+						invalidateProviderCatalogCache();
 						throw error;
 					}
 					// Catalog unavailable / check failed — fail open.
@@ -4328,7 +4335,13 @@ export function createDelegationGateHook(
 								sessionId: input.sessionID,
 								callId: input.callID,
 								taskId: incomingCoderTaskId,
-								reason: degradation.reason,
+								// PR-review PRR-014: the reason embeds git stderr /
+								// session-create error text whose producers are not
+								// all length-bounded — cap the durable ledger copy.
+								reason:
+									degradation.reason.length > 500
+										? `${degradation.reason.slice(0, 500)}… (truncated)`
+										: degradation.reason,
 								degradedAt: new Date(degradation.at).toISOString(),
 							})}\n`,
 							'utf-8',

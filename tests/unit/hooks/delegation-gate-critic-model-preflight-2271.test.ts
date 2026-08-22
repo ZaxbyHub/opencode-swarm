@@ -15,6 +15,7 @@
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
+import * as path from 'node:path';
 import type { OpencodeClient } from '@opencode-ai/sdk';
 import type { PluginConfig } from '../../../src/config';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
@@ -127,5 +128,29 @@ describe('issue #2271 bug 4 — critic-gate model preflight wiring', () => {
 		expect(result.escalationNeeded).toBe(true);
 		expect(result.reasoning).toContain('does not resolve');
 		expect(result.reasoning).toContain('agents.critic_oversight.model');
+	});
+
+	test('PRR-004: unresolved-model refusal survives an oversight-event write failure', async () => {
+		// Make the durable audit write fail (events.jsonl path occupied by a
+		// directory) — the refusal itself must still be returned instead of
+		// falling through to dispatching the known-unresolvable model.
+		swarmState.opencodeClient = catalogClient();
+		const swarmDir = path.join(tempDir, '.swarm');
+		fs.mkdirSync(swarmDir, { recursive: true });
+		fs.mkdirSync(path.join(swarmDir, 'events.jsonl'));
+		const result = await dispatchCriticAndWriteEvent(
+			tempDir,
+			'architect output',
+			'critic context',
+			'opencode/nemotron-3-ultra-free',
+			'phase_completion',
+			0,
+			0,
+			'critic_oversight',
+			'session-1',
+		);
+		expect(result.verdict).toBe('PENDING');
+		expect(result.escalationNeeded).toBe(true);
+		expect(result.reasoning).toContain('does not resolve');
 	});
 });

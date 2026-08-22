@@ -362,14 +362,47 @@ async function gatherLedgerRejections(
 	sessionId?: string,
 ): Promise<Record<string, number>> {
 	const counts: Record<string, number> = {};
+	// PR-review PRR-016: an oversized ledger is read from its TAIL (the most
+	// recent — session-relevant — events) instead of being refused outright;
+	// refusing silently resurrected bug 6's "no rejections" false claim for
+	// long-running sessions. A partial first line (cut mid-record by the tail
+	// window) is skipped by the JSON.parse try/catch below.
 	const readLedger = async (filePath: string): Promise<string | null> => {
 		try {
-			const stat = await fs.stat(filePath);
-			if (!stat.isFile() || stat.size > MAX_LEDGER_BYTES) return null;
-			return await fs.readFile(filePath, 'utf-8');
+			const handle = await fs.open(filePath, 'r');
+			try {
+				const stat = await handle.stat();
+				if (!stat.isFile()) return null;
+				const length = Math.min(stat.size, MAX_LEDGER_BYTES);
+				const buffer = Buffer.alloc(length);
+				await handle.read(buffer, 0, length, stat.size - length);
+				return buffer.toString('utf-8');
+			} finally {
+				await handle.close().catch(() => {});
+			}
 		} catch {
 			return null;
 		}
+	};
+	// PR-review PRR-007: containment guard for the archive fallback — the
+	// entry names come from readdir and a planted symlink under .swarm/archive
+	// must not steer the read outside the archive tree (mirrors the
+	// lstat/realpath discipline of validateSwarmPath without importing hooks
+	// code into services).
+	const readContained = async (
+		root: string,
+		...segments: string[]
+	): Promise<string | null> => {
+		const target = path.join(root, ...segments);
+		try {
+			const realRoot = await fs.realpath(path.join(root));
+			const realTarget = await fs.realpath(target);
+			const rel = path.relative(realRoot, realTarget);
+			if (rel.startsWith('..') || path.isAbsolute(rel)) return null;
+		} catch {
+			return null;
+		}
+		return readLedger(target);
 	};
 
 	let content = await readLedger(
@@ -387,8 +420,10 @@ async function gatherLedgerRejections(
 				index >= 0 && content === null;
 				index--
 			) {
-				content = await readLedger(
-					path.join(archiveRoot, archives[index], 'events.jsonl'),
+				content = await readContained(
+					archiveRoot,
+					archives[index],
+					'events.jsonl',
 				);
 			}
 		} catch {

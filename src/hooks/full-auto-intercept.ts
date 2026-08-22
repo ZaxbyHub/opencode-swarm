@@ -518,42 +518,64 @@ export async function dispatchCriticAndWriteEvent(
 	// an actionable reason (full-auto then degrades to user escalation, its
 	// designed unavailability path) instead of wedging. Catalog unavailable →
 	// fail open and let the existing retry/classification handle it.
+	//
+	// PR-review PRR-004: the unresolved decision must not be inside the
+	// fail-open try — a throw from writeAutoOversightEvent (it rethrows write
+	// errors) would otherwise be swallowed and execution would fall through to
+	// dispatching the known-unresolvable model.
+	let unresolvedModel: string | undefined;
 	try {
 		const { checkSingleModelResolution } = await import(
 			'../services/model-preflight'
 		);
 		const resolution = await checkSingleModelResolution(criticModel, client);
 		if (resolution === 'unresolved') {
-			logger.warn(
-				`[full-auto-intercept] critic model "${criticModel}" does not resolve against the provider catalog — oversight dispatch refused`,
-			);
-			telemetry.modelUnresolved(
-				'critic_oversight',
-				criticModel,
-				'full-auto oversight dispatch preflight',
-			);
-			const result: CriticDispatchResult = {
-				verdict: 'PENDING',
-				reasoning: `Critic model "${criticModel}" does not resolve against the provider catalog — fix agents.critic_oversight.model (or the critic model) in opencode-swarm.json before full-auto can gate on a real critic verdict`,
-				evidenceChecked: [],
-				antiPatternsDetected: [],
-				escalationNeeded: true,
-				rawResponse: '',
-			};
-			await writeAutoOversightEvent(
-				directory,
-				architectOutput,
-				result.verdict,
-				result.reasoning,
-				result.evidenceChecked,
-				interactionCount,
-				deadlockCount,
-				escalationType,
-			);
-			return result;
+			unresolvedModel = criticModel;
 		}
 	} catch {
 		/* fail-open: preflight errors never block the dispatch */
+	}
+	if (unresolvedModel !== undefined) {
+		// PRR-006: drop the catalog cache on a positive denial so a fixed
+		// model config takes effect on the next attempt, not after the TTL.
+		const { invalidateProviderCatalogCache } = await import(
+			'../services/model-preflight'
+		);
+		invalidateProviderCatalogCache();
+		logger.warn(
+			`[full-auto-intercept] critic model "${unresolvedModel}" does not resolve against the provider catalog — oversight dispatch refused`,
+		);
+		telemetry.modelUnresolved(
+			'critic_oversight',
+			unresolvedModel,
+			'full-auto oversight dispatch preflight',
+		);
+		const result: CriticDispatchResult = {
+			verdict: 'PENDING',
+			reasoning: `Critic model "${unresolvedModel}" does not resolve against the provider catalog — fix agents.critic_oversight.model (or the critic model) in opencode-swarm.json before full-auto can gate on a real critic verdict`,
+			evidenceChecked: [],
+			antiPatternsDetected: [],
+			escalationNeeded: true,
+			rawResponse: '',
+		};
+		// The refusal itself must not depend on the audit write succeeding.
+		await writeAutoOversightEvent(
+			directory,
+			architectOutput,
+			result.verdict,
+			result.reasoning,
+			result.evidenceChecked,
+			interactionCount,
+			deadlockCount,
+			escalationType,
+		).catch((eventError: unknown) => {
+			logger.warn(
+				`[full-auto-intercept] unresolved-model oversight event write failed: ${
+					eventError instanceof Error ? eventError.message : String(eventError)
+				}`,
+			);
+		});
+		return result;
 	}
 
 	let ephemeralSessionId: string | undefined;

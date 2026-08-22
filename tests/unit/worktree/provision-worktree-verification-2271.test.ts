@@ -130,6 +130,10 @@ describe('issue #2271 bug 1 — provisionWorktree lane verification', () => {
 		}
 		expect(result.error).toContain('WORKTREE_VERIFICATION_FAILED');
 		expect(result.error).toContain('git rev-parse --git-dir failed');
-		expect(result.error).toContain('retry the dispatch');
+		// PR-review PRR-005: the removal outcome is reported honestly. In this
+		// sabotage the lane has no .git link, so git worktree remove fails and
+		// the message must say the lane could NOT be removed — never claim a
+		// removal that did not happen.
+		expect(result.error).toContain('could NOT be removed');
 	});
 });

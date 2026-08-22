@@ -285,11 +285,14 @@ Required workflow IDs: `hostSessionId`. OTel mapping: `genai`.
 
 #### model_unresolved
 Category `delegation`, severity `warning`, privacy `pseudonymous`. Producer
-`src/telemetry.ts:594` (issue #2271 bug 4: preflight confirmed a configured
+`src/telemetry.ts:614` (issue #2271 bug 4: preflight confirmed a configured
 agent model id does not resolve against the provider catalog — fires before
 any dispatch attempt, unlike a runtime `model_fallback`). Consumers: none —
 owner **#2047**. Retention: **#2045**. Required workflow IDs: `hostSessionId`.
-OTel mapping: `genai`.
+OTel mapping: `genai`. The event carries the sentinel session id `preflight`
+(there is no live session at preflight time); OTel consumers will see a
+`gen_ai.conversation.id` of `preflight` for this kind — a known, documented
+phantom-conversation artifact, not a real session.
 
 ### Gate category
 

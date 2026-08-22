@@ -123,6 +123,12 @@ export const KNOWN_TELEMETRY_KEYS: Readonly<Record<string, readonly string[]>> =
 			'toModel',
 			'reason',
 		]),
+		model_unresolved: Object.freeze([
+			'sessionId',
+			'agentName',
+			'model',
+			'detail',
+		]),
 		hard_limit_hit: Object.freeze([
 			'sessionId',
 			'agentName',

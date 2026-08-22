@@ -318,5 +318,49 @@ describe('issue #2271 bug 5 — idle scope-binding auto-revival', () => {
 		if (resolution.status === 'expired') {
 			expect(resolution.totalCandidates).toBe(2);
 		}
+		// PR-review T-neg2: ambiguity must also produce NO side effect — a
+		// revival that wrote its audit event before refusing would leave a
+		// scope_binding_auto_recovered record for a binding that stayed dead.
+		const eventsPath = path.join(directory, '.swarm', 'events.jsonl');
+		if (fs.existsSync(eventsPath)) {
+			const revived = fs
+				.readFileSync(eventsPath, 'utf-8')
+				.trim()
+				.split('\n')
+				.map((line) => JSON.parse(line) as Record<string, unknown>)
+				.filter((event) => event.type === 'scope_binding_auto_recovered');
+			expect(revived).toEqual([]);
+		}
+	});
+
+	test('the 24 h revival window is inclusive at the exact boundary', async () => {
+		// PR-review T-bnd: the window check is strict (now - expiresAt > 24 h
+		// refuses), so a binding idle for EXACTLY 24 h still revives while one
+		// at 24 h + 1 ms does not — pin both sides of the off-by-one.
+		const { directory, plan } = fixture();
+		const claimed = await claimedActiveBinding(directory, plan);
+		patchDurable(directory, claimed, {
+			expiresAt: Date.now() - 24 * 60 * 60 * 1000,
+		});
+		clearScopeBindings();
+		const atBoundary = resolveAuthorizedScopeBindingDetailed({
+			directory,
+			taskId: '1.1',
+			activeSessionId: 'coder-session',
+		});
+		expect(atBoundary.status).toBe('found');
+
+		const { directory: dir2, plan: plan2 } = fixture();
+		const claimed2 = await claimedActiveBinding(dir2, plan2);
+		patchDurable(dir2, claimed2, {
+			expiresAt: Date.now() - (24 * 60 * 60 * 1000 + 1),
+		});
+		clearScopeBindings();
+		const pastBoundary = resolveAuthorizedScopeBindingDetailed({
+			directory: dir2,
+			taskId: '1.1',
+			activeSessionId: 'coder-session',
+		});
+		expect(pastBoundary.status).toBe('expired');
 	});
 });

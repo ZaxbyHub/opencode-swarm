@@ -229,4 +229,28 @@ describe('issue #2271 bug 4 — agent model-resolution preflight', () => {
 		await fetchProviderCatalog(countingClient);
 		expect(calls).toBe(2);
 	});
+
+	test('PRR-006: the catalog cache is keyed per client — a swapped client refetches', async () => {
+		// A stale shared cache would serve client A's catalog to client B
+		// (e.g. after a token rotation swaps the opencodeClient instance).
+		const clientA = fakeClient(CATALOG);
+		const clientB = fakeClient(CATALOG);
+		let aCalls = 0;
+		let bCalls = 0;
+		const original = _internals.providerList;
+		_internals.providerList = async (client) => {
+			if (client === clientA) aCalls++;
+			else bCalls++;
+			return client.provider.list();
+		};
+		try {
+			await fetchProviderCatalog(clientA);
+			await fetchProviderCatalog(clientA);
+			await fetchProviderCatalog(clientB);
+			expect(aCalls).toBe(1);
+			expect(bCalls).toBe(1);
+		} finally {
+			_internals.providerList = original;
+		}
+	});
 });

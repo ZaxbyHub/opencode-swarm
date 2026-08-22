@@ -105,16 +105,23 @@ export function collectConfiguredAgentModels(
 export type ProviderCatalog = Map<string, Set<string>>;
 
 /**
- * Issue #2271 review finding: the delegation-gate critic preflight calls this
- * on every critic dispatch — a short TTL cache keeps the per-dispatch cost off
- * the host while staying fresh enough for interactive model-config fixes.
+ * Issue #2271 review finding PRR-006: the delegation-gate critic preflight
+ * calls this on every critic dispatch — a short TTL cache keeps the per-dispatch
+ * cost off the host while staying fresh enough for interactive model-config
+ * fixes. Keyed per-client (WeakMap) so a swapped OpenCode client never sees
+ * another client's catalog; gate call sites additionally invalidate the cache
+ * after a positive unresolved verdict so a fixed config takes effect on the
+ * very next attempt instead of after the TTL.
  */
 const CATALOG_CACHE_TTL_MS = 30_000;
-let catalogCache: { fetchedAt: number; catalog: ProviderCatalog } | null = null;
+let catalogCacheByClient = new WeakMap<
+	OpencodeClient,
+	{ fetchedAt: number; catalog: ProviderCatalog }
+>();
 
-/** Test seam: drop the cached catalog (also used after config changes). */
+/** Test/gate seam: drop the cached catalogs (used after config changes and denials). */
 export function invalidateProviderCatalogCache(): void {
-	catalogCache = null;
+	catalogCacheByClient = new WeakMap();
 }
 
 /**
@@ -125,11 +132,9 @@ export async function fetchProviderCatalog(
 	client: OpencodeClient | null,
 ): Promise<ProviderCatalog | null> {
 	if (!client) return null;
-	if (
-		catalogCache &&
-		Date.now() - catalogCache.fetchedAt < CATALOG_CACHE_TTL_MS
-	) {
-		return catalogCache.catalog;
+	const cached = catalogCacheByClient.get(client);
+	if (cached && Date.now() - cached.fetchedAt < CATALOG_CACHE_TTL_MS) {
+		return cached.catalog;
 	}
 	let response: Awaited<ReturnType<OpencodeClient['provider']['list']>>;
 	try {
@@ -150,7 +155,7 @@ export async function fetchProviderCatalog(
 		}
 		catalog.set(provider.id, models);
 	}
-	catalogCache = { fetchedAt: Date.now(), catalog };
+	catalogCacheByClient.set(client, { fetchedAt: Date.now(), catalog });
 	return catalog;
 }
 

@@ -101,6 +101,66 @@ describe('issue #2271 bug 6 — session reflection counts ledger rejections', ()
 		expect(await _internals.gatherLedgerRejections(tempDir)).toEqual({});
 	});
 
+	test('PRR-016: an oversized ledger is read from its tail, not refused', async () => {
+		// A ledger past MAX_LEDGER_BYTES used to be skipped entirely, silently
+		// resurrecting the "no rejections" false claim. The tail read keeps the
+		// recent (session-relevant) events counted and drops only the partial
+		// first line cut by the window.
+		const recent = `${JSON.stringify({
+			type: 'coder_retry_circuit_breaker',
+			taskId: '9.9',
+		})}\n`;
+		const filler = `${JSON.stringify({
+			type: 'sounding_board_consulted',
+			blob: 'x'.repeat(1024),
+		})}\n`;
+		const eventsPath = path.join(tempDir, '.swarm', 'events.jsonl');
+		fs.mkdirSync(path.dirname(eventsPath), { recursive: true });
+		// ~20 MB of non-rejection filler followed by the recent rejection.
+		const handle = fs.openSync(eventsPath, 'w');
+		try {
+			for (let index = 0; index < 20 * 1024; index++) {
+				fs.writeSync(handle, filler);
+			}
+			fs.writeSync(handle, recent);
+		} finally {
+			fs.closeSync(handle);
+		}
+		const stat = fs.statSync(eventsPath);
+		expect(stat.size).toBeGreaterThan(16 * 1024 * 1024);
+
+		const counts = await _internals.gatherLedgerRejections(tempDir);
+		expect(counts).toEqual({ coder_retry_circuit_breaker: 1 });
+	});
+
+	test('PRR-007: an archive entry escaping the archive root is not read', async () => {
+		if (process.platform === 'win32') {
+			// Creating symlinks on Windows requires elevated privileges; the
+			// containment guard is exercised on POSIX CI runners.
+			return;
+		}
+		const archiveRoot = path.join(tempDir, '.swarm', 'archive');
+		const outsideDir = canonicalMkdtemp('outside-target-');
+		fs.mkdirSync(path.join(archiveRoot, 'swarm-2026-08-21T00-00-00-000-x'), {
+			recursive: true,
+		});
+		// Replace the entry directory with a symlink pointing outside .swarm.
+		fs.rmdirSync(path.join(archiveRoot, 'swarm-2026-08-21T00-00-00-000-x'));
+		fs.symlinkSync(
+			outsideDir,
+			path.join(archiveRoot, 'swarm-2026-08-21T00-00-00-000-x'),
+			'dir',
+		);
+		fs.writeFileSync(
+			path.join(outsideDir, 'events.jsonl'),
+			`${JSON.stringify({ type: 'architect_loop_detected' })}\n`,
+		);
+		// No live ledger → the fallback would normally pick this archive up;
+		// the containment guard must refuse the escaped target.
+		const counts = await _internals.gatherLedgerRejections(tempDir);
+		expect(counts).toEqual({});
+	});
+
 	test('gatherLedgerRejections scopes to a session when one is provided', async () => {
 		writeEvents(tempDir, [
 			// REAL writer shape: coder_retry_circuit_breaker carries NO session

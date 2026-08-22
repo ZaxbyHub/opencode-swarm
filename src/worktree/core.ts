@@ -917,12 +917,25 @@ export async function provisionWorktree(
 	if (revParseResult.exitCode !== 0) {
 		// The lane is unusable; remove the partial registration so the next
 		// attempt provisions cleanly instead of colliding with this carcass.
-		await removeWorktree(worktreePath, directory, {
+		// removeWorktree never REJECTS — it resolves with { error } on failure
+		// (Windows EBUSY/EPERM retries exhausted, non-force-refusable path) —
+		// so a bare .catch() cannot observe that failure. Report the removal
+		// outcome honestly instead of claiming the lane was removed.
+		const removeResult = await removeWorktree(worktreePath, directory, {
 			force: true,
 			worktreeDir: options.worktreeDir,
-		}).catch(() => {});
+		}).catch((removalError: unknown): { error: string } => ({
+			error:
+				removalError instanceof Error
+					? removalError.message
+					: String(removalError),
+		}));
+		const removalNote =
+			'error' in removeResult
+				? `The lane could NOT be removed (${removeResult.error}) — it may collide with the next provisioning attempt; clear ${worktreePath} manually if retries fail.`
+				: 'The lane was removed; retry the dispatch.';
 		return {
-			error: `WORKTREE_VERIFICATION_FAILED: lane ${worktreePath} did not register as a usable git worktree (git rev-parse --git-dir failed in the lane: ${revParseResult.stderr.trim() || revParseResult.stdout.trim() || `exit ${revParseResult.exitCode}`}). The lane was removed; retry the dispatch.`,
+			error: `WORKTREE_VERIFICATION_FAILED: lane ${worktreePath} did not register as a usable git worktree (git rev-parse --git-dir failed in the lane: ${revParseResult.stderr.trim() || revParseResult.stdout.trim() || `exit ${revParseResult.exitCode}`}). ${removalNote}`,
 		};
 	}
 

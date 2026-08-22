@@ -164,4 +164,36 @@ describe('issue #2271 bug 1 — worktree_isolation_degraded ledger event', () =>
 		} as Parameters<typeof checkStandardWorktreeSerializationRelease>[1]);
 		expect(getStandardWorktreeDegradationReason('parent')).toBeUndefined();
 	});
+
+	test('explicit policy disabled never records a degradation event', async () => {
+		// PR-review T-neg1: worktree.policy 'disabled' is a user opt-out, not a
+		// degradation — precreate returns before any serialization, so no
+		// reason exists and no worktree_isolation_degraded event may be
+		// written even though the coder runs un-isolated in the project root.
+		const disabledConfig = {
+			...config,
+			worktree: { policy: 'disabled' },
+		} as PluginConfig;
+		const hook = createDelegationGateHook(disabledConfig, directory);
+		await hook.toolBefore(
+			{ tool: 'Task', sessionID: 'parent', callID: 'disabled-1' },
+			{ args: { ...CODER_ARGS } },
+		);
+		expect(getStandardWorktreeDegradationReason('parent')).toBeUndefined();
+		const eventsPath = path.join(directory, '.swarm', 'events.jsonl');
+		if (fs.existsSync(eventsPath)) {
+			const degraded = readEvents(directory).filter(
+				(event) => event.type === 'worktree_isolation_degraded',
+			);
+			expect(degraded).toEqual([]);
+		}
+		// The dispatch itself still proceeds in the primary tree.
+		const walPath = path.join(
+			directory,
+			'.swarm',
+			'coder-settlements',
+			'1.1.json',
+		);
+		expect(fs.existsSync(walPath)).toBe(true);
+	});
 });
