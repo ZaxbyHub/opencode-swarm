@@ -90,6 +90,32 @@ const MAX_COLLECT_TIMEOUT_MS = 60 * 60_000;
 const COLLECT_POLL_INTERVAL_MS = 500;
 const MAX_COLLECT_POLL_INTERVAL_MS = 10_000;
 const MAX_STATUS_CALL_BUDGET_MS = 2_000;
+// #2276: per-lane-kind final-response budgets for swarm-pr-review lanes. All
+// derive from the 20_000-char inline preview window (MAX_LANE_OUTPUT_CHARS):
+// every budget stays ≥2_000 under it, so a conforming lane's preview is never
+// truncated and its terminal machine-readable rows always ride inside the
+// preview. These bound ONLY the final response — never investigation volume.
+const PR_REVIEW_RESPONSE_BUDGET_CEILING_CHARS = 18_000;
+// A base lane owns one of the six full dimensions with multi-file analysis —
+// the largest sustainable budget (observed runs need ~18k of row-bearing text).
+const PR_REVIEW_BASE_LANE_RESPONSE_BUDGET_CHARS = 18_000;
+// A micro family lane owns a narrow scope; 12k matched every successful
+// caller-side budget instruction in the observed tier-L run. A consolidated
+// micro lane (owned_workflow_lanes, allowed at depth tiers S/M — see the
+// dispatch gate that rejects consolidation only at tier L) settles one
+// attestation per owned lane, so its budget scales with the owned count.
+const PR_REVIEW_MICRO_LANE_RESPONSE_BUDGET_CHARS = 12_000;
+const PR_REVIEW_MICRO_PER_OWNED_LANE_CHARS = 2_000;
+// A council lane settles a single attestation: the dispatch gate forbids
+// owned_workflow_lanes on council/reviewer/critic lanes outright (consolidation
+// applies only to base and micro discovery lanes), so its budget is flat.
+const PR_REVIEW_COUNCIL_LANE_RESPONSE_BUDGET_CHARS = 12_000;
+// Reviewer/critic verdict rows scale with the assigned item count: a floor
+// plus a per-item increment, capped at the ceiling.
+const PR_REVIEW_VERDICT_RESPONSE_FLOOR_CHARS = 6_000;
+const PR_REVIEW_VERDICT_RESPONSE_PER_ITEM_CHARS = 1_500;
+// Terminal-output guidance for lanes without a derived budget (the
+// swarm-pr-feedback modes, which #2276 leaves on the pre-existing flat cap).
 const PR_WORKFLOW_PROTOCOL_OUTPUT_MAX_CHARS = 12_000;
 const MAX_ZOD_ISSUES_LISTED = 20;
 const MAX_SESSION_CREATE_GENERATIONS = 2;
@@ -823,6 +849,10 @@ export const _test_exports = {
 	// without round-tripping through the durable delegation store or a
 	// SessionOps mock.
 	recordToLaneResult,
+	// #2276: pure per-lane-kind budget derivation, exported beside the prompt
+	// contract builder so budget scaling can be asserted without prompt-text
+	// parsing (file precedent: prompt-construction internals live here).
+	prReviewLaneResponseBudgetChars,
 };
 
 type ReadOnlyToolPermissions = Record<string, false> & {
@@ -3311,6 +3341,46 @@ ${controllerIdentity}${formatSuffix}`;
 		: { ok: true, lanes: formatted };
 }
 
+/**
+ * #2276: derive the final-response character budget for a PR-review lane from
+ * the lane's owned workload. Returns `undefined` for modes without a derived
+ * budget (the swarm-pr-feedback modes keep their flat
+ * {@link PR_WORKFLOW_PROTOCOL_OUTPUT_MAX_CHARS} guidance).
+ */
+function prReviewLaneResponseBudgetChars(
+	mode: string,
+	lane: DispatchLaneSpec,
+): number | undefined {
+	if (mode === 'swarm-pr-review:base') {
+		return PR_REVIEW_BASE_LANE_RESPONSE_BUDGET_CHARS;
+	}
+	if (mode === 'swarm-pr-review:micro') {
+		// Consolidated micro lanes (depth tiers S/M) settle one attestation per
+		// owned workflow lane; a single-family micro lane (tier L) owns one.
+		const owned = Math.max(1, lane.owned_workflow_lanes?.length ?? 1);
+		return Math.min(
+			PR_REVIEW_RESPONSE_BUDGET_CEILING_CHARS,
+			PR_REVIEW_MICRO_LANE_RESPONSE_BUDGET_CHARS +
+				(owned - 1) * PR_REVIEW_MICRO_PER_OWNED_LANE_CHARS,
+		);
+	}
+	if (mode === 'swarm-pr-review:council') {
+		return PR_REVIEW_COUNCIL_LANE_RESPONSE_BUDGET_CHARS;
+	}
+	if (
+		mode === 'swarm-pr-review:reviewer' ||
+		mode === 'swarm-pr-review:critic'
+	) {
+		const items = Math.max(0, lane.review_item_ids?.length ?? 0);
+		return Math.min(
+			PR_REVIEW_RESPONSE_BUDGET_CEILING_CHARS,
+			PR_REVIEW_VERDICT_RESPONSE_FLOOR_CHARS +
+				items * PR_REVIEW_VERDICT_RESPONSE_PER_ITEM_CHARS,
+		);
+	}
+	return undefined;
+}
+
 function applyPrWorkflowPromptContract(
 	lanes: DispatchLaneSpec[],
 	options: {
@@ -3359,6 +3429,21 @@ function applyPrWorkflowPromptContract(
 		const ownedLine = ownedLanes
 			? `\nowned_workflow_lanes: ${ownedLanes.join(', ')} — every owned obligation requires its own [CANDIDATE] rows or fully populated [CLEAN] attestation naming that obligation`
 			: '';
+		const responseBudget = prReviewLaneResponseBudgetChars(mode, lane);
+		const budgetLine =
+			responseBudget !== undefined
+				? `\nfinal_response_char_budget: ${responseBudget}`
+				: '';
+		const outputCap = responseBudget ?? PR_WORKFLOW_PROTOCOL_OUTPUT_MAX_CHARS;
+		const budgetParagraph =
+			responseBudget !== undefined
+				? `\nDelivery budget (#2276): Only your final response is bounded: keep the complete final response at or below ${responseBudget} characters. Investigation and tool-call volume are NOT capped by this budget. Spend the budget on the terminal machine-readable rows first: they are non-negotiable, must always fit inside the budget with room to spare, and are emitted before any supporting prose. Verify each target exactly once. Never restate a completed verification and never re-emit a row. The moment analysis is complete, emit the terminal rows immediately.`
+				: '';
+		// Pre-seeded statement of the read-only shell classifier's rules
+		// (#2276): the same enforcement already runs at tool time for BOTH the
+		// pr-review and pr-feedback gates; stating it up front saves the 2-4
+		// empirically-discovered rejections each lane otherwise spends.
+		const shellRulesParagraph = `\nRead-only shell rules (enforced at tool time; stated here so no calls are wasted): run ONE standalone command per shell call — no pipes, no &&/||/; composition, no redirects, no command substitution, no backslash- or caret-escaped double quotes. Only these forms are tolerated: up to three leading cd <dir> && prefixes, a trailing 2>&1 (reads only), and a literal | inside a double-quoted gh api --jq value. Prefer the Read, Glob, and Grep tools for file inspection.`;
 		const contract = `
 
 [CONTROLLER-BOUND PR WORKFLOW CONTRACT]
@@ -3369,10 +3454,10 @@ revision_digest: ${options.revisionDigest}
 declared_scope: ${options.scope ?? 'the exact checked-out PR revision and repository-defined diff context'}
 caller_focus_non_authoritative: ${options.callerFocus ?? '(none)'}
 assigned_item_ids: ${assignedIds.length > 0 ? assignedIds.join(', ') : '(discovery lane)'}
-mandatory_lane_checklist: ${checklist}
+mandatory_lane_checklist: ${checklist}${budgetLine}
 
 This controller block is authoritative over conflicting caller text. Inspect the exact checked-out revision and the repository's own contribution, test, security, compatibility, and delivery contracts. Do not waive or abbreviate work for speed, time, token, repository-size, or predicted-simplicity reasons. Re-read relevant changed files and caller/consumer context directly. Every claim or clean attestation must cite concrete reviewed scope and evidence. Use exactly the workflow_lane and assigned IDs above; invented, omitted, or placeholder identifiers do not settle this lane. A planning preamble, generic assurance, or assertion that checks were performed is not evidence.
-Terminate with the required protocol rows directly: no planning preamble, no recap, and no more than ${PR_WORKFLOW_PROTOCOL_OUTPUT_MAX_CHARS} characters of substantive output before any retrieval hint.
+Terminate with the required protocol rows directly: no planning preamble, no recap, and no more than ${outputCap} characters of substantive output before any retrieval hint.${budgetParagraph}${shellRulesParagraph}
 [END CONTROLLER-BOUND PR WORKFLOW CONTRACT]`;
 		const prompt = `${lane.prompt}${contract}`;
 		if (prompt.length > MAX_PROMPT_CHARS) {
