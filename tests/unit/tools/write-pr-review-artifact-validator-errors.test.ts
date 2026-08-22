@@ -306,11 +306,13 @@ describe('write_pr_review_artifact validator errors (issue #2277)', () => {
 			]),
 		).resolves.toContain('"success": true');
 
+		// C-2's reviewer and critic severities AGREE (both HIGH), so its present
+		// but differing severity pins the agreement cell of the truth table.
 		const message = await rejectionMessage(
 			writePrReviewFindings(directory, 'critic-matrix', 'post_critic', [
 				artifactRecord('C-0', 'CONFIRMED', 'report'),
 				artifactRecord('C-1', 'CONFIRMED', 'report'),
-				artifactRecord('C-2', 'DISPROVED', 'suppress_with_reason'),
+				artifactRecord('C-2', 'DISPROVED', 'suppress_with_reason', 'LOW'),
 				artifactRecord('C-3', 'CONFIRMED', 'report'),
 				artifactRecord('C-4', 'CONFIRMED', 'report'),
 				artifactRecord('C-5', 'CONFIRMED', 'report'),
@@ -318,13 +320,14 @@ describe('write_pr_review_artifact validator errors (issue #2277)', () => {
 		);
 		expect(message).toBe(
 			[
-				'BLOCKED: PR_REVIEW post_critic artifact invalid — 6 violation(s):',
+				'BLOCKED: PR_REVIEW post_critic artifact invalid — 7 violation(s):',
 				'  C-0: status expected "DISPROVED", got "CONFIRMED"',
 				'  C-0: next_action expected "suppress_with_reason", got "report"',
 				'  C-1: status expected "DISPROVED", got "CONFIRMED"',
 				'  C-1: next_action expected "suppress_with_reason", got "report"',
 				'  C-2: status expected "CONFIRMED", got "DISPROVED"',
 				'  C-2: next_action expected "report" or "handoff_to_feedback", got "suppress_with_reason"',
+				'  C-2: severity expected "HIGH", got "LOW"',
 			].join('\n'),
 		);
 	});

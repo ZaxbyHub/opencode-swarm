@@ -49,6 +49,14 @@ reviewer disposition above; critic-routed records follow the critic verdict:
 | --- | --- | --- |
 | DISPROVED | `DISPROVED` | `suppress_with_reason` |
 | UPHELD / DOWNGRADED (any non-DISPROVED) | `CONFIRMED` | `report` or `handoff_to_feedback` |
+| no critic verdict for a critic-routed record | (defensive) | (defensive) |
+
+The "no critic verdict" row is defensive: through the controller the critic
+phase must already be settled over every critic-routed item before the
+`post_critic` boundary is admitted, so a critic-routed record without a critic
+verdict indicates an invariant break, not a caller mistake — the rejection
+reports `no authoritative critic verdict (absent from the settled critic map)`
+(and any reviewer-severity mismatch alongside it).
 
 At `post_explorer` every record must be `PENDING` with
 `next_action: "route_to_reviewer"`.

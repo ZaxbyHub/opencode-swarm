@@ -17,6 +17,7 @@ import {
 	PR_ARTIFACT_REVISION_DIGEST,
 	PR_ARTIFACT_SESSION_ID,
 	persistPrReviewBatch,
+	rejectionMessage,
 } from '../../helpers/pr-review-artifact-fixtures.js';
 
 const SESSION_ID = PR_ARTIFACT_SESSION_ID;
@@ -237,7 +238,7 @@ describe('write_pr_review_artifact', () => {
 				{ sessionID: SESSION_ID },
 			),
 		).resolves.toContain('"success": true');
-		await expect(
+		const reviewerOverrideMessage = await rejectionMessage(
 			executeWritePrReviewArtifact(
 				{
 					kind: 'findings',
@@ -254,8 +255,21 @@ describe('write_pr_review_artifact', () => {
 				{ sessionID: SESSION_ID },
 			),
 			// All violations are reported at once with expected-vs-actual (issue #2277).
-		).rejects.toThrow(
-			/C-1: status expected "CONFIRMED", got "DISPROVED"[\s\S]*C-1: next_action expected "route_to_critic", got "suppress_with_reason"/,
+		);
+		expect(reviewerOverrideMessage).toBe(
+			[
+				'BLOCKED: PR_REVIEW post_reviewer artifact invalid — 10 violation(s):',
+				'  C-1: status expected "CONFIRMED", got "DISPROVED"',
+				'  C-1: next_action expected "route_to_critic", got "suppress_with_reason"',
+				'  C-2: status expected "CONFIRMED", got "DISPROVED"',
+				'  C-2: next_action expected "route_to_critic", got "suppress_with_reason"',
+				'  C-3: status expected "CONFIRMED", got "DISPROVED"',
+				'  C-3: next_action expected "route_to_critic", got "suppress_with_reason"',
+				'  C-4: status expected "CONFIRMED", got "DISPROVED"',
+				'  C-4: next_action expected "route_to_critic", got "suppress_with_reason"',
+				'  C-5: status expected "CONFIRMED", got "DISPROVED"',
+				'  C-5: next_action expected "route_to_critic", got "suppress_with_reason"',
+			].join('\n'),
 		);
 		await expect(
 			executeWritePrReviewArtifact(
@@ -290,7 +304,7 @@ describe('write_pr_review_artifact', () => {
 				{ sessionID: SESSION_ID },
 			),
 		).resolves.toContain('"success": true');
-		await expect(
+		const criticOverrideMessage = await rejectionMessage(
 			executeWritePrReviewArtifact(
 				{
 					kind: 'findings',
@@ -306,8 +320,21 @@ describe('write_pr_review_artifact', () => {
 				directory,
 				{ sessionID: SESSION_ID },
 			),
-		).rejects.toThrow(
-			/C-1: status expected "CONFIRMED", got "DISPROVED"[\s\S]*C-1: next_action expected "report" or "handoff_to_feedback", got "suppress_with_reason"/,
+		);
+		expect(criticOverrideMessage).toBe(
+			[
+				'BLOCKED: PR_REVIEW post_critic artifact invalid — 10 violation(s):',
+				'  C-1: status expected "CONFIRMED", got "DISPROVED"',
+				'  C-1: next_action expected "report" or "handoff_to_feedback", got "suppress_with_reason"',
+				'  C-2: status expected "CONFIRMED", got "DISPROVED"',
+				'  C-2: next_action expected "report" or "handoff_to_feedback", got "suppress_with_reason"',
+				'  C-3: status expected "CONFIRMED", got "DISPROVED"',
+				'  C-3: next_action expected "report" or "handoff_to_feedback", got "suppress_with_reason"',
+				'  C-4: status expected "CONFIRMED", got "DISPROVED"',
+				'  C-4: next_action expected "report" or "handoff_to_feedback", got "suppress_with_reason"',
+				'  C-5: status expected "CONFIRMED", got "DISPROVED"',
+				'  C-5: next_action expected "report" or "handoff_to_feedback", got "suppress_with_reason"',
+			].join('\n'),
 		);
 
 		await expect(

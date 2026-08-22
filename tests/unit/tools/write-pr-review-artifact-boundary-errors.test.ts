@@ -136,6 +136,32 @@ describe('write_pr_review_artifact boundary and coverage errors (issue #2277)', 
 		expect(duplicateMessage).toBe(
 			'BLOCKED: PR_REVIEW post_explorer findings must exactly cover the discovered candidate inventory; missing: C-5; extra: (none); duplicates: C-0',
 		);
+		const nonConsecutiveDuplicateMessage = await rejectionMessage(
+			writePrReviewFindings(directory, 'coverage-run', 'post_explorer', [
+				artifactRecord('C-0', 'PENDING', 'route_to_reviewer'),
+				artifactRecord('C-1', 'PENDING', 'route_to_reviewer'),
+				artifactRecord('C-0', 'PENDING', 'route_to_reviewer'),
+				...candidateIds
+					.slice(2, -1)
+					.map((id) => artifactRecord(id, 'PENDING', 'route_to_reviewer')),
+			]),
+		);
+		expect(nonConsecutiveDuplicateMessage).toBe(
+			'BLOCKED: PR_REVIEW post_explorer findings must exactly cover the discovered candidate inventory; missing: C-5; extra: (none); duplicates: C-0',
+		);
+		const extraIdMessage = await rejectionMessage(
+			writePrReviewFindings(
+				directory,
+				'coverage-run',
+				'post_explorer',
+				candidateIds
+					.map((id) => artifactRecord(id, 'PENDING', 'route_to_reviewer'))
+					.concat(artifactRecord('C-9', 'PENDING', 'route_to_reviewer')),
+			),
+		);
+		expect(extraIdMessage).toBe(
+			'BLOCKED: PR_REVIEW post_explorer findings must exactly cover the discovered candidate inventory; missing: (none); extra: C-9; duplicates: (none)',
+		);
 	});
 
 	test('empty records stay a tool-level schema rejection, not a validator rejection', async () => {
