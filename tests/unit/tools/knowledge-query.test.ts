@@ -551,30 +551,30 @@ describe('knowledge-query tool verification tests', () => {
 				'todo',
 				'other',
 			] as const;
-
+			// Write every entry ONCE (#2283): a per-iteration rewrite-then-read
+			// raced on windows and evicted queued PRs. Never write in the loop.
+			const entries: SwarmKnowledgeEntry[] = categories.map((cat) => ({
+				id: `entry-${cat}`,
+				tier: 'swarm',
+				lesson: `${cat} lesson`,
+				category: cat,
+				tags: [],
+				scope: 'global',
+				confidence: 0.8,
+				status: 'established',
+				confirmed_by: [],
+				retrieval_outcomes: {
+					applied_count: 0,
+					succeeded_after_count: 0,
+					failed_after_count: 0,
+				},
+				schema_version: 1,
+				created_at: '2024-01-01T00:00:00Z',
+				updated_at: '2024-01-01T00:00:00Z',
+				project_name: 'test-project',
+			}));
+			writeSwarmKnowledge(entries);
 			for (const cat of categories) {
-				const swarmData: SwarmKnowledgeEntry = {
-					id: `entry-${cat}`,
-					tier: 'swarm',
-					lesson: `${cat} lesson`,
-					category: cat,
-					tags: [],
-					scope: 'global',
-					confidence: 0.8,
-					status: 'established',
-					confirmed_by: [],
-					retrieval_outcomes: {
-						applied_count: 0,
-						succeeded_after_count: 0,
-						failed_after_count: 0,
-					},
-					schema_version: 1,
-					created_at: '2024-01-01T00:00:00Z',
-					updated_at: '2024-01-01T00:00:00Z',
-					project_name: 'test-project',
-				};
-				writeSwarmKnowledge([swarmData]);
-
 				const result = await knowledge_query.execute({
 					tier: 'swarm',
 					category: cat,
