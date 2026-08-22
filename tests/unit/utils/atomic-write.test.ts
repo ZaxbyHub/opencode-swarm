@@ -35,6 +35,8 @@ import {
 
 let projectDir: string;
 let swarmDir: string;
+// NOTE: the WRITER_CLASSIFICATION ratchet and the PRR-019 persisted-contract
+// pin live in tests/unit/utils/atomic-write-ratchet.test.ts (FR-006 cap).
 
 beforeEach(() => {
 	projectDir = mkdtempSync(path.join(os.tmpdir(), 'atomic-write-'));
@@ -131,7 +133,7 @@ describe('SWARM_TEMP_GRAMMARS registry', () => {
 	});
 
 	test('review-receipt producer form classifies to the two-token family', () => {
-		// review-receipt builds `.tmp.${Date.now()}.${Math.random().toString(36)}`
+		// review-receipt builds a `<epoch-ms>.<base36-random>` two-token temp
 		// — toString(36) of a Math.random() value ALWAYS starts with '0' (the
 		// fractional '0.xxx' form), so the second token is [0-9a-z]+ and the
 		// two-token family owns it; this pins that invariant against a future
@@ -155,103 +157,6 @@ describe('SWARM_TEMP_GRAMMARS registry', () => {
 });
 
 // ── WRITER_CLASSIFICATION ratchet ───────────────────────────────────────────
-
-describe('WRITER_CLASSIFICATION ratchet (no unregistered temp constructor)', () => {
-	test('every src file containing a .tmp./.tmp- construction is classified', () => {
-		const repoRoot = path.resolve(import.meta.dir, '../../..');
-		const srcRoot = path.join(repoRoot, 'src');
-		const unclassified: string[] = [];
-		const walk = (dir: string, rel: string): void => {
-			for (const entry of readdirSync(dir, { withFileTypes: true })) {
-				const relPath = rel ? `${rel}/${entry.name}` : entry.name;
-				if (entry.isDirectory()) {
-					walk(path.join(dir, entry.name), relPath);
-					continue;
-				}
-				if (!entry.name.endsWith('.ts') || entry.name.includes('.test.')) {
-					continue;
-				}
-				const posixRel = `src/${relPath.split(path.sep).join('/')}`;
-				if (posixRel === 'src/utils/atomic-write.ts') continue; // the registry itself
-				if (posixRel === 'src/services/swarm-residue.ts') continue; // scanner
-				let text = '';
-				try {
-					text = readFileSync(path.join(dir, entry.name), 'utf-8');
-				} catch {
-					continue;
-				}
-				// Construction shapes: `.tmp.` / `.tmp-` (mid-name), and
-				// `.tmp` at a string/template terminator (quote, backtick, or
-				// end-of-line) — the final-critic round caught a live
-				// unclassified writer (`${metaPath}.tmp`) that the
-				// mid-name-only form missed.
-				if (
-					/\.tmp(?:[.-]|['"`]|$)/.test(text) &&
-					!WRITER_CLASSIFICATION[posixRel]
-				) {
-					unclassified.push(posixRel);
-				}
-			}
-		};
-		walk(srcRoot, '');
-		expect(unclassified).toEqual([]);
-	});
-
-	test('classification values come from the closed vocabulary', () => {
-		const allowed = new Set([
-			'migrated',
-			'registered-bespoke',
-			'external',
-			'reader-only',
-		]);
-		for (const value of Object.values(WRITER_CLASSIFICATION)) {
-			expect(allowed.has(value)).toBe(true);
-		}
-	});
-
-	test('every classification entry names a real src file (no dead entries)', () => {
-		const repoRoot = path.resolve(import.meta.dir, '../../..');
-		for (const key of Object.keys(WRITER_CLASSIFICATION)) {
-			expect(existsSync(path.join(repoRoot, ...key.split('/')))).toBe(true);
-		}
-	});
-
-	test('every registry producer citation resolves to a live temp construction or a historical marker', () => {
-		const repoRoot = path.resolve(import.meta.dir, '../../..');
-		const stale: string[] = [];
-		for (const grammar of SWARM_TEMP_GRAMMARS) {
-			for (const producer of grammar.producers) {
-				const m = /^(src\/[A-Za-z0-9/_.-]+?)(?::(\d+))?( \(pre-#2035\))?$/.exec(
-					producer,
-				);
-				if (!m) continue; // descriptive citations (e.g. 'pre-7.x writers') have no path
-				const [, fileRel, lineNo, historical] = m;
-				const abs = path.join(repoRoot, ...fileRel.split('/'));
-				if (!existsSync(abs)) {
-					stale.push(`${grammar.id}: ${producer} — file missing`);
-					continue;
-				}
-				if (!lineNo) continue; // function-level citation (the canonical writer itself)
-				const line =
-					readFileSync(abs, 'utf-8').split(/\r?\n/)[Number(lineNo) - 1] ?? '';
-				// A live construction shows `.tmp` followed by a non-alnum
-				// terminator (dot/dash/quote/backtick/end) — pure `.tmp`-suffix
-				// templates end with a backtick. Or an explicit historical mark.
-				const ok =
-					/\.tmp(?:[^A-Za-z0-9]|$)/.test(line) ||
-					/\.(?:rebuild|close|migration)[.-]/.test(line) ||
-					Boolean(historical);
-				if (!ok)
-					stale.push(
-						`${grammar.id}: ${producer} — line has no temp construction`,
-					);
-			}
-		}
-		expect(stale).toEqual([]);
-	});
-});
-
-// ── Containment ─────────────────────────────────────────────────────────────
 
 describe('assertSwarmContainedTarget', () => {
 	test('accepts a target directly under .swarm and reports the root', () => {
@@ -460,3 +365,5 @@ describe('atomicWriteSwarmFile', () => {
 		expect(readdirSync(swarmDir)).toEqual(['sync.json']);
 	});
 });
+
+// ── PR-feedback round: PRR-019 persisted-contract pin ───────────────────────

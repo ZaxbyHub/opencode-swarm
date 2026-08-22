@@ -13,6 +13,7 @@ import {
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
+	readdirSync,
 	readFileSync,
 	rmSync,
 	symlinkSync,
@@ -29,17 +30,25 @@ import {
 	RESIDUE_STALE_AGE_MS,
 	rollbackResidueQuarantine,
 } from '../../../src/services/swarm-residue';
+import { withFrozenClock } from '../../helpers/test-clock';
 
 let projectDir: string;
 let swarmDir: string;
 const realQueryTracked = _internals.queryTracked;
 const realLockTargets = _internals.activeLockTargets;
+// NOTE: quarantine move-failure / nested round-trip / non-ASCII regressions
+// live in tests/unit/services/swarm-residue-quarantine.test.ts (FR-006 cap).
 
 function makeResidue(rel: string, hoursOld = 2, content = 'x'): string {
 	const abs = path.join(swarmDir, ...rel.split('/'));
 	mkdirSync(path.dirname(abs), { recursive: true });
 	writeFileSync(abs, content, 'utf-8');
-	const t = new Date(Date.now() - hoursOld * 60 * 60 * 1000);
+	const t = withFrozenClock(
+		() => new Date(Date.now() - hoursOld * 60 * 60 * 1000),
+		// anchor the frozen instant to the real clock: relative fixtures must
+		// // stay on the same side of the staleness window as before freezing
+		{ fixedNow: Date.now() },
+	);
 	utimesSync(abs, t, t);
 	return abs;
 }
@@ -387,89 +396,6 @@ describe('quarantineSwarmResidue', () => {
 });
 
 // ── Rollback ────────────────────────────────────────────────────────────────
-
-describe('rollbackResidueQuarantine', () => {
-	test('restores originals and drains the batch', async () => {
-		makeTarget('context.md');
-		const rel = 'context.md.tmp.1710000000.123456789';
-		makeResidue(rel, 3, 'payload');
-		const q = await quarantineSwarmResidue(projectDir, { trigger: 'test' });
-		expect(q.quarantined).toBe(1);
-
-		const rb = await rollbackResidueQuarantine(projectDir);
-		expect(rb.items).toEqual([{ relPath: rel, status: 'restored' }]);
-		expect(existsSync(path.join(swarmDir, rel))).toBe(true);
-		expect(readFileSync(path.join(swarmDir, rel), 'utf-8')).toBe('payload');
-		expect(rb.drained).toBe(true);
-		// Batch dir fully removed.
-		expect(existsSync(path.join(swarmDir, ...rb.batchRelDir.split('/')))).toBe(
-			false,
-		);
-	});
-
-	test('collision: an original recreated with different content is NEVER overwritten', async () => {
-		makeTarget('context.md');
-		const rel = 'context.md.tmp.1710000000.123456789';
-		makeResidue(rel, 3, 'quarantined-payload');
-		const q = await quarantineSwarmResidue(projectDir, { trigger: 'test' });
-		expect(q.quarantined).toBe(1);
-
-		// Recreate the residue at the original location with DIFFERENT content
-		// (simulating another quarantine batch's rollback or a new writer).
-		writeFileSync(path.join(swarmDir, rel), 'new-different-content', 'utf-8');
-
-		const rb = await rollbackResidueQuarantine(projectDir);
-		expect(rb.items[0]?.status).toBe('collision');
-		expect(rb.drained).toBe(false);
-		// The differing original is untouched; the quarantine copy is retained.
-		expect(readFileSync(path.join(swarmDir, rel), 'utf-8')).toBe(
-			'new-different-content',
-		);
-	});
-
-	test('re-rollback of an already-restored batch is a clean no-op error', async () => {
-		makeTarget('context.md');
-		makeResidue('context.md.tmp.1710000000.123456789', 3);
-		await quarantineSwarmResidue(projectDir, { trigger: 'test' });
-		await rollbackResidueQuarantine(projectDir);
-		await expect(rollbackResidueQuarantine(projectDir)).rejects.toThrow(
-			/No quarantine batches/,
-		);
-	});
-
-	test('already-restored identical copy is dropped (idempotent restore)', async () => {
-		makeTarget('context.md');
-		const rel = 'context.md.tmp.1710000000.123456789';
-		makeResidue(rel, 3, 'same');
-		const q = await quarantineSwarmResidue(projectDir, { trigger: 'test' });
-		// Manually restore the identical content at the original location.
-		writeFileSync(path.join(swarmDir, rel), 'same', 'utf-8');
-		const rb = await rollbackResidueQuarantine(projectDir);
-		expect(rb.items[0]?.status).toBe('already-restored');
-		expect(rb.drained).toBe(true);
-	});
-
-	test('tampered manifest with traversal relpaths is rejected', async () => {
-		makeTarget('context.md');
-		makeResidue('context.md.tmp.1710000000.123456789', 3);
-		const q = await quarantineSwarmResidue(projectDir, { trigger: 'test' });
-		const manifestPath = path.join(
-			swarmDir,
-			...q.batchRelDir!.split('/'),
-			'manifest.json',
-		);
-		const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as {
-			entries: Array<{ original_rel_path: string }>;
-		};
-		manifest.entries[0]!.original_rel_path = '../../escape.json';
-		writeFileSync(manifestPath, JSON.stringify(manifest), 'utf-8');
-		await expect(rollbackResidueQuarantine(projectDir)).rejects.toThrow(
-			/unsafe original_rel_path/,
-		);
-	});
-});
-
-// ── Shared formatter ────────────────────────────────────────────────────────
 
 describe('formatResidueInventoryLines (close/doctor shared renderer)', () => {
 	test('renders bounded, path-relative lines from the same inventory', async () => {

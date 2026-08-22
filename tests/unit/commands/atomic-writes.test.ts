@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
-import * as nodeFs from 'node:fs';
+import * as realFs from 'node:fs';
 import {
 	existsSync,
 	mkdirSync,
@@ -15,11 +15,12 @@ import type {
 	MemoryProposal,
 	MemoryRecord,
 } from '../../../src/memory/types.js';
+import { withFrozenClock } from '../../helpers/test-clock';
 
 // Save real fs functions before any mocks are applied to avoid recursion
-const realRenameSync = nodeFs.renameSync;
-const realReadFileSync = nodeFs.readFileSync;
-const realReaddirSync = nodeFs.readdirSync;
+const realRenameSync = realFs.renameSync;
+const realReadFileSync = realFs.readFileSync;
+const realReaddirSync = realFs.readdirSync;
 
 // Import co-change-analyzer for _internals DI seam (avoids mock.module leakage)
 import * as coChangeAnalyzer from '../../../src/tools/co-change-analyzer.js';
@@ -50,7 +51,7 @@ describe('atomic writes — temp+rename verification (FR-008 SC-013/014/015)', (
 		coChangeAnalyzer._internals.detectDarkMatter = mock(async () => []);
 
 		await mock.module('node:fs', () => ({
-			...nodeFs,
+			...realFs,
 			renameSync: mock((from: string, to: string) => {
 				renameCalls.push([from, to]);
 				return realRenameSync(from, to);
@@ -79,7 +80,7 @@ describe('atomic writes — temp+rename verification (FR-008 SC-013/014/015)', (
 		const renameCalls: [string, string][] = [];
 
 		await mock.module('node:fs', () => ({
-			...nodeFs,
+			...realFs,
 			renameSync: mock((from: string, to: string) => {
 				renameCalls.push([from, to]);
 				return realRenameSync(from, to);
@@ -111,7 +112,7 @@ describe('atomic writes — temp+rename verification (FR-008 SC-013/014/015)', (
 		const renameCalls: [string, string][] = [];
 
 		await mock.module('node:fs', () => ({
-			...nodeFs,
+			...realFs,
 			renameSync: mock((from: string, to: string) => {
 				renameCalls.push([from, to]);
 				return realRenameSync(from, to);
@@ -197,7 +198,7 @@ describe('atomic writes — temp+rename verification (FR-008 SC-013/014/015)', (
 		const renameCalls: [string, string][] = [];
 
 		await mock.module('node:fs', () => ({
-			...nodeFs,
+			...realFs,
 			renameSync: mock((from: string, to: string) => {
 				renameCalls.push([from, to]);
 				return realRenameSync(from, to);
@@ -232,7 +233,12 @@ describe('finalize dry-run residue inventory (issue #2035)', () => {
 			const residueRel = 'context.md.tmp.1710000000.123456789';
 			const residueAbs = path.join(testDir, '.swarm', residueRel);
 			writeFileSync(residueAbs, 'stale', 'utf-8');
-			const t = new Date(Date.now() - 2 * 60 * 60 * 1000);
+			const t = withFrozenClock(
+				() => new Date(Date.now() - 2 * 60 * 60 * 1000),
+				// anchor the frozen instant to the real clock: relative fixtures must
+				// // stay on the same side of the staleness window as before freezing
+				{ fixedNow: Date.now() },
+			);
 			utimesSync(residueAbs, t, t);
 
 			const report = await ci.runFinalizeDryRun(

@@ -18,11 +18,10 @@
  * Containment contract (issue #2035 req 1): the canonical target must live
  * under a `.swarm/` root, determined by SPELLING — the nearest `.swarm` path
  * segment between the filesystem root and the target. A pre-existing root
- * must be a real directory (no symlink/reparse), and no path segment between
- * it and the target may be a symlink/reparse point. Semantics deliberately
- * match `validateSwarmPath` in `src/hooks/utils.ts` (kept self-contained here
- * so the utils layer does not import upward into hooks; parity is pinned by
- * test).
+ * must be a real directory (no symlinks), and no path segment between it and
+ * the target may be a symlink. Semantics are validateSwarmPath-INSPIRED but
+ * NOT identical — see the junction limitation on
+ * `assertSwarmContainedTarget`.
  */
 
 import { randomBytes } from 'node:crypto';
@@ -78,7 +77,12 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 		token: 'instance',
 		quarantineEligible: true,
 		parsesTarget: true,
-		producers: ['src/utils/atomic-write.ts:atomicWriteSwarmFile'],
+		producers: [
+			'src/utils/atomic-write.ts:atomicWriteSwarmFile',
+			// The any-root variant shares the same writeAtomicSync core and
+			// emits the identical grammar (PR review PRR-018):
+			'src/utils/atomic-write.ts:atomicWriteFileAnyRoot',
+		],
 	},
 	{
 		id: 'target-suffix-tmp-uuid',
@@ -507,8 +511,7 @@ function lstatNotSymlink(p: string, what: string): void {
 }
 
 /**
- * Assert `targetPath` lives beneath a `.swarm/` root, with the same semantics
- * as the audited `validateSwarmPath` (src/hooks/utils.ts:157).
+ * Assert `targetPath` lives beneath a `.swarm/` root.
  *
  * The root is determined by SPELLING: the nearest `.swarm` path segment
  * between the filesystem root and the target. Existence-based ancestor
@@ -516,8 +519,20 @@ function lstatNotSymlink(p: string, what: string): void {
  * OS temp dir) would hijack the walk and reject legitimate first-writes whose
  * own `.swarm` parent does not exist yet (invariant 4: ambiguous ancestor
  * `.swarm` state fails closed). If the `.swarm` root exists it must be a real
- * directory (no symlink/reparse point), and no existing path segment between
- * it and the target may be a symlink/reparse point.
+ * directory (no symlink), and no existing path segment between it and the
+ * target may be a symlink.
+ *
+ * KNOWN LIMITATION vs `validateSwarmPath` (src/hooks/utils.ts:157, PR review
+ * PRR-007): this check detects SYMLINKS via lstatSync().isSymbolicLink(),
+ * which returns FALSE for Windows directory JUNCTIONS (a distinct reparse
+ * class). validateSwarmPath resolves all reparse points via realpathSync. A
+ * junctioned `.swarm/` therefore passes this spelling-based gate. Mitigations
+ * in scope: junctions require same-user filesystem write access to create
+ * (outside the adversarial-local-process threat model invariant 4 excludes),
+ * targets are still spelling-bounded to the `.swarm` subtree, and the
+ * spell-time `.swarm` position must already exist in the user's path. Full
+ * junction parity would require realpath-resolution of every existing
+ * ancestor — deliberately out of budget for the write hot path.
  *
  * Project-boundary enforcement (`.git`/`.opencode` markers, invariant 4) is
  * deliberately NOT re-checked here: that belongs to the tool-layer
@@ -614,7 +629,12 @@ function toBuffer(content: string | Uint8Array): Uint8Array {
 	return content;
 }
 
-/** Portable synchronous sleep (pending-delegations.ts/transient-retry precedent). */
+/** Portable synchronous sleep (pending-delegations.ts/transient-retry precedent).
+ * The busy-wait fallback is theoretical on supported runtimes (Atomics.wait is
+ * available on all Node/Bun versions this repo ships) and burns CPU only when
+ * Atomics is unavailable — bounded by RENAME_RETRY_DELAYS_MS (385ms worst
+ * case). Kept for precedent-consistency (PR review PRR-011: documented, not
+ * load-bearing). */
 function syncSleep(ms: number): void {
 	try {
 		Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);

@@ -299,9 +299,13 @@ export async function handleDoctorCommand(
 	// stale residue into a manifest-backed .swarm/quarantine/ batch;
 	// --rollback-residue-quarantine[=<batch>] restores it. Nothing is ever
 	// deleted automatically.
-	const rollbackArg = args.find((a) =>
-		a.startsWith('--rollback-residue-quarantine'),
-	);
+	// Exact-match the bare form or accept the '=' batch form only — a bare
+	// startsWith would also swallow typo'd longer flags like
+	// `--rollback-residue-quarantine-batch` and silently act on them
+	// (PR review PRR-024).
+	const rollbackArg = args.includes('--rollback-residue-quarantine')
+		? '--rollback-residue-quarantine'
+		: args.find((a) => a.startsWith('--rollback-residue-quarantine='));
 	if (rollbackArg) {
 		const batchId = rollbackArg.includes('=')
 			? rollbackArg.split('=')[1]

@@ -20,6 +20,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { handleDoctorCommand } from '../../../src/commands/doctor';
 import { _internals as residueInternals } from '../../../src/services/swarm-residue';
+import { withFrozenClock } from '../../helpers/test-clock';
 
 let projectDir: string;
 let swarmDir: string;
@@ -29,7 +30,12 @@ function makeResidue(rel: string, hoursOld = 2, content = 'stale'): string {
 	const abs = path.join(swarmDir, ...rel.split('/'));
 	mkdirSync(path.dirname(abs), { recursive: true });
 	writeFileSync(abs, content, 'utf-8');
-	const t = new Date(Date.now() - hoursOld * 60 * 60 * 1000);
+	const t = withFrozenClock(
+		() => new Date(Date.now() - hoursOld * 60 * 60 * 1000),
+		// anchor the frozen instant to the real clock: relative fixtures must
+		// // stay on the same side of the staleness window as before freezing
+		{ fixedNow: Date.now() },
+	);
 	utimesSync(abs, t, t);
 	return abs;
 }
@@ -111,5 +117,30 @@ describe('handleDoctorCommand — atomic-write residue (issue #2035)', () => {
 		expect(out).toContain('Residue Quarantine Rollback');
 		expect(out).toContain('1 restored');
 		expect(readFileSync(path.join(swarmDir, rel), 'utf-8')).toBe('recover-me');
+	});
+});
+
+// ── PR-feedback round: PRR-024 flag exactness ───────────────────────────────
+
+describe('doctor rollback flag parsing exactness (PRR-024)', () => {
+	test("a typo'd longer prefixed flag is NOT treated as rollback", async () => {
+		const out = await handleDoctorCommand(projectDir, [
+			'--rollback-residue-quarantine-batch',
+		]);
+		// Falls through to the read-only default surface — no rollback
+		// section, no error.
+		expect(out).not.toContain('Residue Quarantine Rollback');
+	});
+
+	test("the '=' form still selects an explicit batch", async () => {
+		// No batches exist: the exact '=' form must reach the rollback path
+		// and surface its typed error, not silently fall back to read-only.
+		const out = await handleDoctorCommand(projectDir, [
+			'--rollback-residue-quarantine=nonexistent-batch',
+		]);
+		expect(out).toContain('rollback failed');
+		// No batches exist at all, so the empty-store error fires before the
+		// batch-id lookup — either way the '=' form reached the rollback path.
+		expect(out).toContain('No quarantine batches found');
 	});
 });

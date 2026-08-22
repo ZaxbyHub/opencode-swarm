@@ -98,6 +98,10 @@ interface ScanItem {
  */
 export const _internals = {
 	now: (): number => Date.now(),
+	/** Rename seam for the per-entry guarded move (PRR-005 regression tests). */
+	renameResidueEntry: (from: string, to: string): void => {
+		fs.renameSync(from, to);
+	},
 	queryTracked: (
 		projectRoot: string,
 		swarmRoot: string,
@@ -105,9 +109,32 @@ export const _internals = {
 		// ONE bounded git call per scan: array-form, explicit cwd, stdin
 		// ignored, 5s timeout. Failure (not a repo / git unavailable / not a
 		// worktree-recognized path) maps to `undefined` = unknown = fail-closed.
+		// -c core.quotepath=false: git C-QUOTES non-ASCII paths by default
+		// (e.g. "\346\226\260..."), which path.resolve would misparse and the
+		// tracked-set membership would miss — a TRACKED non-ASCII file would
+		// then be quarantined (execution-verified, PR review PRR-013).
+		// envOverrides=null deletes GIT_* redirectors (PRR-026): an inherited
+		// GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE would silently retarget the
+		// query at another repository.
 		const result = bunSpawnSync(
-			['git', 'ls-files', '--', swarmRoot.split(path.sep).join('/')],
-			{ cwd: projectRoot, stdin: 'ignore', timeout: 5_000 },
+			[
+				'git',
+				'-c',
+				'core.quotepath=false',
+				'ls-files',
+				'--',
+				swarmRoot.split(path.sep).join('/'),
+			],
+			{
+				cwd: projectRoot,
+				stdin: 'ignore',
+				timeout: 5_000,
+				envOverrides: {
+					GIT_DIR: null,
+					GIT_WORK_TREE: null,
+					GIT_INDEX_FILE: null,
+				},
+			},
 		);
 		if (result.exitCode !== 0) return { tracked: undefined };
 		const out = new TextDecoder().decode(result.stdout);
@@ -122,6 +149,12 @@ export const _internals = {
 		return { tracked };
 	},
 	activeLockTargets: (directory: string): Set<string> => {
+		// KNOWN LIMITATION (PR review PRR-008): locks whose .meta sidecar is
+		// missing report only their hashed sentinel path (the original target
+		// is unrecoverable), so a meta-less active lock can never match a
+		// residue candidate's target. The staleness gate (≥30 min) is the
+		// primary defense against racing a live writer; this signal only adds
+		// precision for well-formed locks.
 		const targets = new Set<string>();
 		for (const lock of listActiveLocks(directory)) {
 			targets.add(path.normalize(path.resolve(directory, lock.filePath)));
@@ -341,6 +374,17 @@ export interface QuarantineManifestEntry {
 }
 
 export interface QuarantineManifest {
+	/**
+	 * Manifest format version. Forward-compat POLICY (PR review PRR-009):
+	 * rollback hard-rejects any version it does not know — a FUTURE schema
+	 * bump MUST ship its own reader/migration before (or with) the writer,
+	 * because payloads on disk are only recoverable through a manifest the
+	 * current code can parse. Deliberate design: a partial-reader migration
+	 * is more dangerous than a readable "unsupported manifest shape" error
+	 * naming the version. Mixed-version operation is therefore unsafe by
+	 * construction across schema bumps: downgrade with v2 batches present
+	 * blocks rollback of those batches until the newer plugin returns.
+	 */
 	schema_version: 1;
 	batch_id: string;
 	created_at: string;
@@ -456,9 +500,29 @@ export async function quarantineSwarmResidue(
 			});
 			continue;
 		}
+		// Per-entry guarded move (PR review PRR-005): a concurrent process
+		// winning this same entry makes our rename throw ENOENT, and EXDEV /
+		// EPERM / antivirus locks can surface here too. An UNGUARDED throw
+		// would abort the loop mid-batch with the manifest still unwritten —
+		// stranding already-moved payloads in a manifest-less batch dir that
+		// sorts LAST and then poisons every DEFAULT rollback ("no readable
+		// manifest") until a newer batch exists. Guarding per entry and
+		// continuing keeps the manifest authoritative over everything that
+		// DID move; the failed entry simply stays in place, reported as
+		// preserved.
 		const storedAbs = path.join(batchAbs, ...entry.relPath.split('/'));
-		fs.mkdirSync(path.dirname(storedAbs), { recursive: true });
-		fs.renameSync(abs, storedAbs);
+		try {
+			fs.mkdirSync(path.dirname(storedAbs), { recursive: true });
+			_internals.renameResidueEntry(abs, storedAbs);
+		} catch (moveErr) {
+			const code = (moveErr as NodeJS.ErrnoException)?.code ?? 'unknown';
+			preserved.push({
+				relPath: entry.relPath,
+				status: 'preserved',
+				reasons: [`move-failed:${code}`],
+			});
+			continue;
+		}
 		manifest.entries.push({
 			original_rel_path: entry.relPath,
 			stored_rel_path: path.posix.join('quarantine', batchId, entry.relPath),

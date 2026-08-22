@@ -1866,8 +1866,12 @@ export async function runCleanStage(
 		}
 	} catch (err) {
 		const reason = err instanceof Error ? err.message : String(err);
+		// Honest about partial outcomes (PR review PRR-005): an abort here can
+		// occur after some entries already moved, so do not claim all were
+		// preserved. Quarantine itself now guards each entry's move, so this
+		// path only triggers on inventory/telemetry-level failures.
 		ctx.warnings.push(
-			`Atomic-write residue quarantine failed (all candidates preserved): ${reason}`,
+			`Atomic-write residue quarantine failed (status of individual candidates unknown — inspect .swarm/quarantine/): ${reason}`,
 		);
 	}
 

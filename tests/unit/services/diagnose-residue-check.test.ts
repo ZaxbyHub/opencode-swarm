@@ -17,6 +17,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { getDiagnoseData } from '../../../src/services/diagnose-service';
 import { _internals as residueInternals } from '../../../src/services/swarm-residue';
+import { withFrozenClock } from '../../helpers/test-clock';
 
 let projectDir: string;
 let swarmDir: string;
@@ -46,7 +47,12 @@ describe('getDiagnoseData — Atomic-write residue check (issue #2035)', () => {
 		writeFileSync(path.join(swarmDir, 'context.md'), 'target', 'utf-8');
 		const residue = path.join(swarmDir, 'context.md.tmp.1710000000.123456789');
 		writeFileSync(residue, 'stale', 'utf-8');
-		const t = new Date(Date.now() - 3 * 60 * 60 * 1000);
+		const t = withFrozenClock(
+			() => new Date(Date.now() - 3 * 60 * 60 * 1000),
+			// anchor the frozen instant to the real clock: relative fixtures must
+			// // stay on the same side of the staleness window as before freezing
+			{ fixedNow: Date.now() },
+		);
 		utimesSync(residue, t, t);
 
 		const data = await getDiagnoseData(projectDir);
