@@ -9,9 +9,14 @@ import {
 	buildApprovedReceipt,
 	_internals as receiptInternals,
 } from '../../../src/hooks/review-receipt';
-import type { ReviewDiffResult } from '../../../src/review/diff-source';
+import type {
+	ReviewDiffManifest,
+	ReviewDiffResult,
+} from '../../../src/review/diff-source';
 import {
 	type AutoReviewEvidence,
+	computeAutoReviewManifestHash,
+	computeAutoReviewPolicyDigest,
 	persistAutoReviewEvidence,
 	validateAutoReviewEvidenceIntegrity,
 } from '../../../src/review/evidence';
@@ -30,6 +35,23 @@ const originalOpenSync = receiptInternals.openSync;
 
 let projectDir: string;
 let cleanupProject: () => void;
+
+function currentManifest(): ReviewDiffManifest {
+	return {
+		schema_version: 2,
+		hash: 'c'.repeat(64),
+		content_hash: 'd'.repeat(64),
+		selector: { kind: 'default' },
+		selector_key: 'default',
+		review_target_kind: 'checkout-history-index-working-tree',
+		completeness: {
+			complete: true,
+			truncated: false,
+			skip_reason_codes: [],
+		},
+		path_records: [],
+	};
+}
 
 function currentScope(): Extract<ReviewDiffResult, { status: 'ok' }> {
 	return {
@@ -54,6 +76,7 @@ function currentScope(): Extract<ReviewDiffResult, { status: 'ok' }> {
 			includesWorkingTree: true,
 			scopeHash: SCOPE_HASH,
 		},
+		manifest: currentManifest(),
 	};
 }
 
@@ -91,8 +114,17 @@ function createEvidence(
 		'review-receipts',
 		'receipt.json',
 	);
+	const reviewConfig = gateConfig().auto_review;
+	if (!reviewConfig) throw new Error('auto-review config fixture is required');
+	const policyDigest = computeAutoReviewPolicyDigest(reviewConfig);
+	const { hash: _manifestHash, ...manifestSource } = currentManifest();
+	const manifestPayload = {
+		...manifestSource,
+		plan_requirements_hash: 'plan:none',
+		review_policy_digest: policyDigest,
+	};
 	const evidence: AutoReviewEvidence = {
-		schema_version: 1,
+		schema_version: 2,
 		timestamp: new Date().toISOString(),
 		trigger: 'phase_completion',
 		session_id: 'receipt-integrity-session',
@@ -107,12 +139,17 @@ function createEvidence(
 				truncated: false,
 				skipReasons: [],
 			},
+			manifest: {
+				...manifestPayload,
+				hash: computeAutoReviewManifestHash(manifestPayload),
+			},
 		},
 		policy: {
 			mode: 'gate',
 			min_confidence: 0.7,
 			structured_findings: true,
 			validate_findings: false,
+			digest: policyDigest,
 		},
 		review: {
 			status: 'completed',

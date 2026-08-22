@@ -15,6 +15,7 @@ import {
 function makeArgs(overrides: Partial<WriteRetroArgs> = {}): WriteRetroArgs {
 	return {
 		phase: 4,
+		verdict: 'pass',
 		summary: 'Phase 4 completed',
 		task_count: 3,
 		task_complexity: 'moderate',

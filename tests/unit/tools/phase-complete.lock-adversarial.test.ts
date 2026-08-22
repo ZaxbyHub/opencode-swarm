@@ -94,7 +94,12 @@ vi.mock('../../../src/plan/ledger', () => ({
 
 vi.mock('../../../src/plan/manager', () => ({
 	loadPlan: vi.fn().mockResolvedValue({
-		phases: [{ id: 1, status: 'in_progress', tasks: [] }],
+		schema_version: '1.0.0',
+		title: 'Test Plan',
+		swarm: 'test-swarm',
+		current_phase: 1,
+		migration_status: 'migrated',
+		phases: [{ id: 1, name: 'Phase 1', status: 'in_progress', tasks: [] }],
 	}),
 	savePlan: vi.fn().mockResolvedValue(undefined),
 	closePlanTerminalState: async () => {},
@@ -338,20 +343,23 @@ describe('phase_complete adversarial locking + path tests', () => {
 
 			const failed = failures[0];
 			expect(failed.status).toBe('incomplete');
-			expect(failed.message).toContain(
-				'Plan write blocked: plan.json is locked',
-			);
+			expect(failed.reason).toBe('PHASE_COMMIT_LOCKED');
+			expect(failed.message).toContain('Plan write is locked by another agent');
+			expect(failed.recovery).toEqual({
+				kind: 'retry',
+				action: 'phase_complete',
+			});
 			expect(failed.errors.length).toBeGreaterThan(0);
 			expect(failed.errors[0]).toContain('Concurrent plan write detected');
 			expect(failed.recovery_guidance).toBeDefined();
 
-			// Both events should be written (events.jsonl write is soft-fail, happens before plan.json lock)
+			// Only the successful caller may publish a completion event.
 			const content = fs.readFileSync(eventsPath, 'utf-8').trim();
 			const lines = content.split('\n').filter(Boolean);
 			const phaseEvents = lines
 				.map((l) => JSON.parse(l))
 				.filter((e: Record<string, unknown>) => e.event === 'phase_complete');
-			expect(phaseEvents.length).toBe(2);
+			expect(phaseEvents.length).toBe(1);
 		});
 
 		test('lock throw causes phase_complete to return failure', async () => {
@@ -367,17 +375,18 @@ describe('phase_complete adversarial locking + path tests', () => {
 			// Must return failure with clear error, not throw
 			expect(parsed.success).toBe(false);
 			expect(parsed.status).toBe('incomplete');
-			expect(parsed.message).toContain('Failed to acquire lock for plan.json');
+			expect(parsed.reason).toBe('PHASE_COMMIT_LOCK_ERROR');
+			expect(parsed.message).toContain(
+				'Failed to acquire the guarded phase commit lock',
+			);
+			expect(parsed.message).toContain('Cannot create lock dir');
 			expect(parsed.errors.length).toBeGreaterThan(0);
 			expect(parsed.errors[0]).toContain('Cannot create lock dir');
 			expect(parsed.recovery_guidance).toBeDefined();
 
-			// Event must still be written (events.jsonl write is soft-fail, happens before plan.json lock)
+			// Fail closed: a lock error cannot publish a completion event.
 			const content = fs.readFileSync(eventsPath, 'utf-8').trim();
-			expect(() => JSON.parse(content)).not.toThrow();
-			const event = JSON.parse(content);
-			expect(event.event).toBe('phase_complete');
-			expect(event.phase).toBe(1);
+			expect(content).toBe('');
 		});
 	});
 
@@ -546,10 +555,11 @@ describe('phase_complete adversarial locking + path tests', () => {
 			const parsed = JSON.parse(result);
 
 			expect(parsed.success).toBe(false);
+			expect(['blocked', 'incomplete']).toContain(parsed.status);
 			expect(
-				parsed.reason === 'RETROSPECTIVE_MISSING' ||
-					parsed.reason === 'directive_gate_failed_closed' ||
-					parsed.message.includes('path traversal'),
+				parsed.gate_report.entries.some((entry: { outcome: string }) =>
+					['block', 'error'].includes(entry.outcome),
+				),
 			).toBe(true);
 		});
 

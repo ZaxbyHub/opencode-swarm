@@ -591,7 +591,7 @@ describe('Task 2.4: Tighten missing-spec enforcement in phase-complete', () => {
 			expect(driftWarning).toBeDefined();
 		});
 
-		test('malformed plan.json is treated as missing -> warning includes critic_drift_verifier', async () => {
+		test('malformed plan.json fails closed while retaining spec-recovery guidance', async () => {
 			// Write malformed JSON to plan.json
 			fs.writeFileSync(
 				path.join(tempDir, '.swarm', 'plan.json'),
@@ -604,10 +604,11 @@ describe('Task 2.4: Tighten missing-spec enforcement in phase-complete', () => {
 			});
 			const parsed = JSON.parse(result);
 
-			// Phase should succeed (advisory-only mode)
-			expect(parsed.success).toBe(true);
+			expect(parsed.success).toBe(false);
+			expect(parsed.status).toBe('incomplete');
+			expect(parsed.reason).toBe('PHASE_PLAN_UNREADABLE');
 
-			// Warning should mention no effective spec and suggest running critic_drift_verifier
+			// The aggregate still reports the independent spec-recovery guidance.
 			const warning = parsed.warnings.find((w: string) =>
 				w.includes('No effective spec'),
 			);

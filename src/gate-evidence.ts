@@ -24,6 +24,7 @@ import {
 	taskEvidencePath,
 	withTaskEvidenceLock,
 } from './evidence/task-file.js';
+import { appendTaskGateRequirementsReceiptIfNeeded } from './evidence/task-gate-requirements.js';
 import { validateSwarmPath } from './hooks/utils.js';
 import type { TaskWorkflowState } from './state';
 import { telemetry } from './telemetry.js';
@@ -104,10 +105,17 @@ export interface TaskEvidence {
 	required_gates: string[];
 	gates: Record<string, GateEvidence>;
 	turbo?: boolean;
+	requirements_state?: 'known' | 'unknown';
 	/** Durable proof that the coder dispatch was classified as exact Markdown-only. */
 	test_engineer_exempt?: boolean;
 	/** Exact-task workflow metadata. Missing on legacy evidence written before #2098. */
 	workflow?: TaskWorkflowMetadata;
+	/** Immutable source identity for an idempotent fail-closed evidence repair. */
+	repair_provenance?: {
+		source_sha256: string | null;
+		source_generation: number | null;
+		requirements_receipt_hash: string | null;
+	};
 }
 
 /**
@@ -305,8 +313,22 @@ const TaskEvidenceSchema = z.object({
 	required_gates: z.array(z.string()).default([]),
 	gates: z.record(z.string(), GateEvidenceSchema),
 	turbo: z.boolean().optional(),
+	requirements_state: z.enum(['known', 'unknown']).optional(),
 	test_engineer_exempt: z.boolean().optional(),
 	workflow: TaskWorkflowMetadataSchema.optional(),
+	repair_provenance: z
+		.object({
+			source_sha256: z
+				.string()
+				.regex(/^[a-f0-9]{64}$/)
+				.nullable(),
+			source_generation: z.number().int().min(0).nullable(),
+			requirements_receipt_hash: z
+				.string()
+				.regex(/^[a-f0-9]{64}$/)
+				.nullable(),
+		})
+		.optional(),
 });
 
 export function parseTaskEvidence(
@@ -924,12 +946,22 @@ export async function withTaskEvidenceTransaction<T>(
 
 		const persist = async (
 			nextEvidence: TaskEvidence,
+			event?: TaskWorkflowTransitionEvent,
 		): Promise<TaskEvidence> => {
 			const validated = TaskEvidenceSchema.parse({
 				...nextEvidence,
 				taskId,
 			});
 			await atomicWriteFile(evidencePath, JSON.stringify(validated, null, 2));
+			if (event) {
+				await appendTaskGateRequirementsReceiptIfNeeded(
+					directory,
+					taskId,
+					current,
+					validated,
+					event,
+				);
+			}
 			current = validated;
 			return validated;
 		};
@@ -941,7 +973,7 @@ export async function withTaskEvidenceTransaction<T>(
 				assertTaskEvidenceWriteAllowed(directory, taskId, event);
 				const nextEvidence = updateEvidenceForTransition(current, event);
 				nextEvidence.taskId = taskId;
-				return persist(nextEvidence);
+				return persist(nextEvidence, event);
 			},
 		});
 	});

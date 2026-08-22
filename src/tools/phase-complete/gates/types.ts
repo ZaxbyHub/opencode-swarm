@@ -44,14 +44,16 @@ export interface GateContext {
 		| null;
 	/** Task id for the accepted retrospective bundle, if one was loaded */
 	loadedRetroTaskId?: string | null;
-	/** Exact scope produced by the model-dispatching phase_complete body. */
+	/** Legacy compatibility field; current final review derives persisted scope. */
 	autoReviewScopeHash?: string;
 	/** Completeness of the freshly collected in-memory review scope. */
 	autoReviewScopeComplete?: boolean;
 	/** Distinguishes ordinary phase review from the final durable plan phase. */
 	autoReviewTrigger?: 'phase_completion' | 'plan_completion';
-	/** Fresh in-memory disposition from the review run owned by phase_complete. */
+	/** Legacy compatibility field for callers carrying a fresh disposition. */
 	autoReviewBlocked?: boolean;
 	/** Machine-readable reason from the current review run, when blocked. */
 	autoReviewBlockReason?: import('../../../review/engine').ReviewEngineResult['blockReason'];
+	/** Final manifest hash from the current review run, when available. */
+	autoReviewManifestHash?: string;
 }

@@ -32,8 +32,11 @@ export type KnowledgeReceiptObservedTransition =
 	| 'terminal_attempt_idempotent'
 	| 'authorized_transition_committed'
 	| 'application_marker_committed'
+	| 'gate_release_committed'
 	| 'phase_close_intent'
 	| 'phase_closed'
+	| 'repair_uncertainty_installed'
+	| 'repair_uncertainty_cleared'
 	| 'legacy_imported'
 	| 'legacy_unverifiable'
 	| 'cutover_completed'
@@ -86,8 +89,11 @@ const TRANSITIONS = new Set<KnowledgeReceiptObservedTransition>([
 	'terminal_attempt_idempotent',
 	'authorized_transition_committed',
 	'application_marker_committed',
+	'gate_release_committed',
 	'phase_close_intent',
 	'phase_closed',
+	'repair_uncertainty_installed',
+	'repair_uncertainty_cleared',
 	'legacy_imported',
 	'legacy_unverifiable',
 	'cutover_completed',

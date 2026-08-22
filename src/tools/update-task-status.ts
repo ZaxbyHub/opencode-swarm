@@ -568,13 +568,15 @@ export function checkReviewerGate(
 						sessionID,
 						{
 							blocked: true,
-							reason: `Evidence file for task ${taskId} is corrupt or unreadable: ${error instanceof Error ? error.message : String(error)}`,
+							reason:
+								`Evidence file for task ${taskId} is corrupt or unreadable: ${error instanceof Error ? error.message : String(error)}. ` +
+								`Call repair_gate_evidence for task ${taskId}; corrupt evidence fails closed until the repair completes.`,
 							requiredGates: [],
 							satisfiedGates: [],
 							missingGates: ['reviewer', 'test_engineer'],
 							source: 'durable_exact_task',
 							corrupt: true,
-							nextAction: `Repair .swarm/evidence/${taskId}.json; corrupt evidence fails closed.`,
+							nextAction: `Call repair_gate_evidence for task ${taskId}; corrupt evidence fails closed until the repair completes.`,
 						},
 						'corrupt_evidence',
 						'data_quality',
@@ -671,7 +673,7 @@ export function checkReviewerGate(
 					blocked: true,
 					reason:
 						`Evidence file for task ${taskId} is corrupt or unreadable. ` +
-						`Fix the file at .swarm/evidence/${taskId}.json or delete it to fall through to session state.`,
+						`Call repair_gate_evidence for task ${taskId}; corrupt evidence fails closed until the repair completes.`,
 				},
 				'corrupt_evidence',
 				'data_quality',

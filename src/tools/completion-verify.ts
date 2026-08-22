@@ -24,6 +24,8 @@ export interface CompletionVerifyArgs {
 	sessionID?: string;
 	/** Explicit project root directory override */
 	working_directory?: string;
+	/** Internal observational mode used by aggregate phase preflight. */
+	writeEvidence?: boolean;
 }
 
 /**
@@ -454,44 +456,55 @@ export async function executeCompletionVerify(
 		blockedTasks,
 	};
 
-	// Store evidence to .swarm/evidence/{phase}/completion-verify.json
-	try {
-		const evidenceDir = path.join(directory, '.swarm', 'evidence', `${phase}`);
-		const evidencePath = path.join(evidenceDir, 'completion-verify.json');
+	// Standalone tool calls preserve the historical evidence artifact. Aggregate
+	// phase preflight is observational and explicitly disables this write.
+	if (args.writeEvidence !== false)
+		try {
+			const evidenceDir = path.join(
+				directory,
+				'.swarm',
+				'evidence',
+				`${phase}`,
+			);
+			const evidencePath = path.join(evidenceDir, 'completion-verify.json');
 
-		// Ensure directory exists
-		fs.mkdirSync(evidenceDir, { recursive: true });
+			// Ensure directory exists
+			fs.mkdirSync(evidenceDir, { recursive: true });
 
-		const evidenceBundle: EvidenceBundle = {
-			schema_version: '1.0.0',
-			task_id: 'completion-verify',
-			created_at: now,
-			entries: [
-				{
-					task_id: 'completion-verify',
-					type: 'completion_verify',
-					timestamp: now,
-					agent: 'completion_verify',
-					verdict: tasksBlocked === 0 ? 'pass' : 'fail',
-					summary: buildVerifySummary(tasksChecked, tasksSkipped, tasksBlocked),
-					phase,
-					tasks_checked: tasksChecked,
-					tasks_skipped: tasksSkipped,
-					tasks_blocked: tasksBlocked,
-					blocked_tasks: blockedTasks,
-				},
-			],
-		};
+			const evidenceBundle: EvidenceBundle = {
+				schema_version: '1.0.0',
+				task_id: 'completion-verify',
+				created_at: now,
+				entries: [
+					{
+						task_id: 'completion-verify',
+						type: 'completion_verify',
+						timestamp: now,
+						agent: 'completion_verify',
+						verdict: tasksBlocked === 0 ? 'pass' : 'fail',
+						summary: buildVerifySummary(
+							tasksChecked,
+							tasksSkipped,
+							tasksBlocked,
+						),
+						phase,
+						tasks_checked: tasksChecked,
+						tasks_skipped: tasksSkipped,
+						tasks_blocked: tasksBlocked,
+						blocked_tasks: blockedTasks,
+					},
+				],
+			};
 
-		fs.writeFileSync(
-			evidencePath,
-			JSON.stringify(evidenceBundle, null, 2),
-			'utf-8',
-		);
-		invalidateCachedArtifact(evidencePath);
-	} catch {
-		// Non-blocking - don't fail the tool if evidence write fails
-	}
+			fs.writeFileSync(
+				evidencePath,
+				JSON.stringify(evidenceBundle, null, 2),
+				'utf-8',
+			);
+			invalidateCachedArtifact(evidencePath);
+		} catch {
+			// Non-blocking - don't fail the tool if evidence write fails
+		}
 
 	return JSON.stringify(result, null, 2);
 }

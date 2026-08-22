@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 
 import {
@@ -168,8 +167,9 @@ describe('phase_complete retrospective gate', () => {
 			expect(parsed.success).toBe(false);
 			expect(parsed.status).toBe('blocked');
 			expect(parsed.reason).toBe('RETROSPECTIVE_MISSING');
-			expect(parsed.message).toContain('no valid retrospective evidence found');
-			expect(parsed.warnings[0]).toContain('Retrospective missing for phase 1');
+			expect(parsed.message).toContain(
+				'cannot be completed without an explicit retrospective verdict',
+			);
 		});
 	});
 
@@ -238,7 +238,8 @@ describe('phase_complete retrospective gate', () => {
 
 			expect(parsed.success).toBe(false);
 			expect(parsed.status).toBe('blocked');
-			expect(parsed.reason).toBe('RETROSPECTIVE_MISSING');
+			expect(parsed.reason).toBe('RETROSPECTIVE_FAILED');
+			expect(parsed.message).toContain('verdict "fail"');
 		});
 	});
 
@@ -346,6 +347,9 @@ describe('phase_complete retrospective gate', () => {
 			expect(parsed.success).toBe(false);
 			expect(parsed.status).toBe('blocked');
 			expect(parsed.reason).toBe('RETROSPECTIVE_MISSING');
+			expect(parsed.message).toContain(
+				'cannot be completed without an explicit retrospective verdict',
+			);
 		});
 	});
 
@@ -379,7 +383,13 @@ describe('phase_complete retrospective gate', () => {
 
 			expect(parsed.success).toBe(false);
 			expect(parsed.status).toBe('blocked');
-			expect(parsed.reason).toBe('RETROSPECTIVE_MISSING');
+			expect(parsed.reason).toBe('RETROSPECTIVE_SCHEMA_INVALID');
+			expect(parsed.message).toContain(
+				'cannot be completed without an explicit retrospective verdict',
+			);
+			expect(parsed.message).toContain(
+				'Schema validation failed: Invalid JSON',
+			);
 		});
 	});
 

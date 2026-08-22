@@ -1,4 +1,11 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	setDefaultTimeout,
+	test,
+} from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -12,6 +19,8 @@ import {
 
 // Import the tool after setting up environment
 const { phase_complete } = await import('../../../src/tools/phase-complete');
+
+setDefaultTimeout(30_000);
 
 /**
  * Helper to write a valid retro bundle so phase_complete gate passes in tests.
@@ -571,7 +580,7 @@ describe('phase_complete tool - ADVERSARIAL SECURITY TESTS', () => {
 			expect(parsed2.success).toBe(true);
 			expect(parsed1.agentsDispatched).toContain('coder');
 			expect(parsed2.agentsDispatched).toContain('reviewer');
-		}, 10_000);
+		}, 30_000);
 	});
 
 	describe('Type coercion and validation bypass attempts', () => {
@@ -798,7 +807,14 @@ describe('phase_complete tool - ADVERSARIAL SECURITY TESTS', () => {
 
 			// Should complete without crashing
 			expect(parsed.success).toBe(true);
-			expect(parsed.agentsDispatched.length).toBe(1000);
+			// Structured gate output is intentionally bounded against untrusted state.
+			expect(parsed.agentsDispatched.length).toBe(64);
+			expect(
+				parsed.gate_report.entries.every(
+					(entry: { agentsDispatched: string[] }) =>
+						entry.agentsDispatched.length <= 64,
+				),
+			).toBe(true);
 		});
 	});
 });

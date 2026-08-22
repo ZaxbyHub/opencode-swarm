@@ -1,4 +1,11 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	setDefaultTimeout,
+	test,
+} from 'bun:test';
 import { execSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -8,6 +15,11 @@ import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 
 // Import tools after setting up environment
 const { phase_complete } = await import('../../../src/tools/phase-complete');
+
+// phase_complete performs the full preflight twice (including bounded Git and
+// evidence checks) before the single plan transition. Multi-phase cases invoke
+// it repeatedly and need a file-level budget above Bun's 5-second default.
+setDefaultTimeout(60_000);
 
 describe('phase_complete auto-checkpoint trigger', () => {
 	let tempDir: string;

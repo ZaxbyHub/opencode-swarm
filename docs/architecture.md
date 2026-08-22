@@ -462,7 +462,7 @@ All tasks in phase done
 │         - .swarm/evidence/{phase}/mutation-gate.json (if mutation_test enabled; written by write_mutation_evidence after generate_mutants + mutation_test)
 │         - .swarm/evidence/{phase}/phase-council.json (if phase_council enabled; written by submit_phase_council_verdicts)
 │         - .swarm/evidence/{phase}/architecture-supervisor.json (if architectural_supervision enabled; written by write_architecture_supervisor_evidence)
-│         - .swarm/evidence/{phase}/auto-review.json (written by phase_complete when auto_review phase/plan review is enabled)
+│         - .swarm/evidence/{phase}/auto-review.json (written by run_phase_review when auto_review phase/plan review is enabled)
 │         - .swarm/evidence/final-council.json (if final_council enabled; written by write_final_council_evidence, last phase only)
 │         If either missing: run the missing gate first
 │         Note: Gates 1–5 bypassed in turbo mode; architecture-supervisor, explicit auto-review gate mode, and final-council are never bypassed
@@ -473,7 +473,7 @@ All tasks in phase done
 │         - Gate 4: mutation gate — reads mutation-gate.json for pass/warn/fail verdict (if enabled)
 │         - Gate 5: phase council — reads phase-council.json for approved verdict (if phase_council enabled)
 │         - Gate 5b: architecture supervisor — reads architecture-supervisor.json (if enabled, never turbo-bypassed)
-│         - Final review: dispatches the bounded whole-diff engine, then verifies current auto-review evidence (gate mode only, never turbo-bypassed)
+│         - Final review: verifies complete content-addressed auto-review evidence (gate mode only, never turbo-bypassed)
 │         - Gate 6: final council — reads final-council.json for approved verdict (if final_council enabled, last phase only, never turbo-bypassed)
 │         - Gates 1–5 bypassed when turbo mode is active; Gate 5b, final-review gate mode, and Gate 6 are never bypassed
 └── 7. Ask user: "Ready for Phase [N+1]?"
@@ -482,6 +482,8 @@ All tasks in phase done
 ### Phase Completion Gates
 
 The `phase_complete` tool enforces up to eight gates before marking a phase complete. Gates 1–5 and phase council are turbo-bypassed; architecture supervisor, explicit auto-review gate mode, and final council are never turbo-bypassed.
+
+Every invocation first returns a versioned structured gate report containing every applicable pass, block, error, and not-applicable result in deterministic order. Gate checks are read-only and individually bounded. A phase transition is committed only after the complete report passes, the evidence/config/plan snapshot remains byte-identical under the plan lock, and the same preflight report is reproduced. A blocker never dispatches a model or performs a partial phase transition. Recovery actions are typed and name registered tools such as `run_phase_review`, `repair_gate_evidence`, and `repair_knowledge_receipt_ledger`.
 
 | Gate | Purpose | Blocking Reason | Turbo Bypass |
 |------|---------|-----------------|--------------|
@@ -536,7 +538,14 @@ The automatic task, phase, plan, Lean, and `/swarm review` paths share one set o
 1. `src/evaluation/ephemeral-agent-dispatcher.ts` owns the bounded session lifecycle: instance-local client injection, fresh parent-bound session, replacement system prompt, false-only read-only tool map, prompt/response byte caps, timeout/abort handling, cost extraction, and awaited best-effort cleanup.
 2. `src/review/diff-source.ts` owns canonical scope construction. Default/base scopes compute the merge base and include current tracked plus safe untracked text; exact ranges are committed-only; working-tree scope compares `HEAD` with tracked plus safe untracked text. Every Git child is non-interactive, bounded, killable, and rooted explicitly.
 3. `src/review/engine.ts` owns the shared policy pipeline: reviewer fallback dispatch, tolerant structured parsing, stable finding IDs and deduplication, current-side hunk anchoring, confidence demotion, batched independent validation, receipts/evidence, telemetry/cost accounting, and advisory/gate disposition.
-4. `src/tools/phase-complete.ts` owns phase/plan model dispatch and persists `.swarm/evidence/<phase>/auto-review.json`. `final-review-gate.ts` never invokes a model; it only checks that the in-memory scope hash and configured policy match durable evidence and that scope, structured output, validation, required receipt, and confirmed-finding policy are satisfied. Clean-scope evidence is valid without a finding receipt.
+4. `run_phase_review` owns phase/plan model dispatch and persists `.swarm/evidence/<phase>/auto-review.json`. `phase_complete` and `final-review-gate.ts` never invoke a review model; they only verify a complete version-2 manifest, exact selector, policy, plan requirements, file identities, canonical content hashes, structured output, validation, required receipt, and confirmed-finding policy. Unrelated `HEAD` movement does not invalidate byte-identical scope, while any reviewed-byte, file-set, selector, policy, or plan-requirement change does. Clean-scope evidence is valid without a finding receipt.
+
+### Evidence repair and re-evaluation
+
+- `repair_gate_evidence` is architect-only. It operates on an exact task, preserves readable corrupt/legacy bytes in bounded immutable quarantine metadata, and installs a fresh fail-closed generation. Requirements are rebuilt only from the durable task-requirements receipt; otherwise the reconstruction sentinel requires all gates to run again. Unreadable and oversized originals are never overwritten.
+- `repair_knowledge_receipt_ledger` is architect-only and exact phase/session scoped. A readable journal only rebuilds its derived snapshot. A corrupt journal is captured in an append-only bounded quarantine, only the hash-validated prefix is salvaged, and an authoritative uncertainty record blocks that phase/session until a fresh displayed-membership or empty-retrieval commit proves re-evaluation.
+- `record_directive_override` records explicit architect authorization separately from `phase_complete`; it cannot make missing, corrupt, or uncertain authority pass.
+- `write_retro` requires the caller to state `verdict: pass | fail`. A syntactically valid retrospective with `fail` remains a phase blocker; the runtime never pre-fills a passing verdict.
 
 Advisory mode injects ranked findings and continues. Gate mode fails closed on missing, stale, truncated, malformed, or unpersisted evidence and blocks only on independently `CONFIRMED`, diff-anchored, effective HIGH/CRITICAL findings. `DISPROVED`, `UNVERIFIED`, unanchored, out-of-scope, and below-threshold findings remain visible evidence but are non-blocking.
 

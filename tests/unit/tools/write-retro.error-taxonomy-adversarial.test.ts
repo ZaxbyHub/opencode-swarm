@@ -12,6 +12,7 @@ import * as path from 'node:path';
 // Define the args type locally to avoid import issues with await import
 interface WriteRetroArgs {
 	phase: number;
+	verdict?: 'pass' | 'fail';
 	summary: string;
 	task_count: number;
 	task_complexity: 'trivial' | 'simple' | 'moderate' | 'complex';
@@ -72,6 +73,7 @@ const { executeWriteRetro } = await import('../../../src/tools/write-retro.js');
 function makeArgs(overrides: Partial<WriteRetroArgs> = {}): WriteRetroArgs {
 	return {
 		phase: 3,
+		verdict: 'pass',
 		summary: 'Test phase completed',
 		task_count: 5,
 		task_complexity: 'moderate',

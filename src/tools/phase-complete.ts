@@ -3,19 +3,19 @@
  * Core implementation - gathers data, enforces policy, writes event, resets state.
  */
 
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { ToolDefinition } from '@opencode-ai/plugin/tool';
 import { z } from 'zod';
 import { loadPluginConfigWithMeta } from '../config';
 import type { EvidenceBundle } from '../config/evidence-schema';
-import { PlanSchema, type RuntimePlan } from '../config/plan-schema';
+import type { RuntimePlan } from '../config/plan-schema';
 import {
 	CuratorConfigSchema,
 	KnowledgeConfigSchema,
 	type PhaseCompleteConfig,
 	PhaseCompleteConfigSchema,
-	resolveAutoReviewConfig,
 	SkillImproverConfigSchema,
 	stripKnownSwarmPrefix,
 } from '../config/schema';
@@ -24,7 +24,6 @@ import {
 	type ParticipationReadResult,
 	readPhaseParticipation,
 } from '../evidence/phase-participation.js';
-import { atomicWriteFile } from '../evidence/task-file.js';
 import { verifyFullAutoPhaseApproval } from '../full-auto/phase-approval';
 import { hasPassedAllGates } from '../gate-evidence';
 import {
@@ -53,14 +52,7 @@ import type {
 import {
 	evaluatePhaseCriticalDirectives,
 	formatDirectiveBlockMessage,
-	recordDirectiveOverrides,
 } from '../hooks/phase-complete-directive-gate.js';
-
-/** Narrow seam for receipt/plan ordering tests. */
-export const phaseCompleteReceiptInternals = {
-	recordPhaseCloseIntent,
-	commitPhaseClosed,
-};
 
 import {
 	buildApprovedReceipt,
@@ -75,20 +67,13 @@ import { validateSwarmPath } from '../hooks/utils';
 import { tryAcquireLock } from '../parallel/file-locks.js';
 import { writeCheckpoint } from '../plan/checkpoint';
 import {
+	computePlanStructureHash,
 	ledgerExists,
 	replayFromLedger,
 	takeSnapshotEvent,
 } from '../plan/ledger';
-import {
-	loadPlan,
-	savePlan,
-	savePlanWithAutoAcknowledgedRemovals,
-} from '../plan/manager';
+import { loadPlan, savePlan } from '../plan/manager';
 import type { ReviewModelDispatcher } from '../review/contracts.js';
-import {
-	mayRunPhaseAutoReview,
-	runPhaseAutoReview,
-} from '../review/phase-runner.js';
 import type { ReviewAgentModelRegistry } from '../review/runtime.js';
 import { runMemoryConsolidationFireAndForget } from '../services/memory-consolidation.js';
 import { runSkillConsolidationFireAndForget } from '../services/skill-consolidation.js';
@@ -116,7 +101,37 @@ import {
 	runMutationGate,
 	runPhaseCouncilGate,
 } from './phase-complete/gates/index.js';
+import {
+	collectPhaseGateReport,
+	formatPhaseGateCompatibility,
+	type PhaseGateCheck,
+	type PhaseGateReport,
+} from './phase-complete/preflight-report.js';
+import { computePhaseEvidenceSnapshot } from './phase-complete/snapshot-identity.js';
 import { resolveWorkingDirectory } from './resolve-working-directory';
+
+/** Narrow seam for receipt/plan ordering tests. */
+export const phaseCompleteReceiptInternals = {
+	recordPhaseCloseIntent,
+	commitPhaseClosed,
+};
+
+/** Narrow seam for guarded-plan commit tests. */
+export const phaseCompleteCommitInternals = {
+	savePlan: (...args: Parameters<typeof savePlan>) => savePlan(...args),
+};
+
+/** Injectable observational gates for aggregate-preflight regression tests. */
+export const phaseCompletePreflightInternals = {
+	runCompletionVerifyGate,
+	runDriftGate,
+	runHallucinationGate,
+	runMutationGate,
+	runPhaseCouncilGate,
+	runArchitectureSupervisorGate,
+	runFinalReviewGate,
+	runFinalCouncilGate,
+};
 
 /**
  * Arguments for the phase_complete tool
@@ -165,8 +180,10 @@ interface PhaseCompleteResult {
 	agentsMissing: string[];
 	status: 'success' | 'incomplete' | 'warned' | 'disabled';
 	warnings: string[];
+	gate_report?: PhaseGateReport;
 	recovery_guidance?: string;
 	phase_council_required?: boolean;
+	final_council_required?: boolean;
 }
 
 function buildMissingAgentRecoveryGuidance(input: {
@@ -380,74 +397,6 @@ interface PhaseCompleteEvent {
 }
 
 /**
- * Last-resort emergency plan.json writer, made traceable + validated (FR-002,
- * issue #660 / F-08).
- *
- * INVARIANT 5 (plan durability): this is NOT a new plan.json writer. It is the
- * EXISTING "Last resort: direct write" emergency fallback — the only path that
- * persists a phase-status flip when both ledger-replay and the normal savePlan
- * path are unavailable — refactored so that it (a) refuses to persist a
- * schema-invalid candidate and (b) records a traceability event when it does
- * write. The durable `PlanSchema` is unchanged and no additional plan.json write
- * site is introduced; `candidate` is the JSON-parsed + mutated copy of the
- * on-disk plan that the legacy code already wrote verbatim.
- *
- * @param dir - Project root directory (.swarm/ lives under it).
- * @param planPath - Pre-resolved path to .swarm/plan.json.
- * @param candidate - The mutated plan object about to be persisted.
- * @param phase - The phase whose status was flipped (for the trace event).
- * @param warnings - Warnings array; failures are surfaced here, never thrown.
- * @returns true if the candidate validated and was written, false otherwise.
- */
-async function fallbackWritePlanWithTrace(
-	dir: string,
-	planPath: string,
-	candidate: unknown,
-	phase: number,
-	warnings: string[],
-): Promise<boolean> {
-	// Defense-in-depth: never persist a schema-invalid plan.json. The candidate
-	// is a parsed+mutated copy of the on-disk plan, so this should normally pass;
-	// if it does not, the on-disk plan was already corrupt and we must not make it
-	// worse by rewriting it.
-	const validation = PlanSchema.safeParse(candidate);
-	if (!validation.success) {
-		const detail = validation.error.issues
-			.slice(0, 5)
-			.map((issue) => `${issue.path.join('.') || '<root>'}: ${issue.message}`)
-			.join('; ');
-		logger.warn(
-			'[phase_complete] Last-resort plan.json write aborted — mutated plan failed PlanSchema validation:',
-			detail,
-		);
-		warnings.push(
-			`Warning: last-resort plan.json write skipped — mutated plan failed schema validation (${detail})`,
-		);
-		return false;
-	}
-
-	await atomicWriteFile(planPath, JSON.stringify(validation.data, null, 2));
-
-	// Best-effort traceability event. Reuses the canonical events.jsonl append
-	// pattern used for the phase_complete event above
-	// (validateSwarmPath + fs.appendFileSync). Never throw out of the fallback.
-	try {
-		const traceEvent = {
-			event: 'phase_complete_fallback_write' as const,
-			phase,
-			timestamp: new Date().toISOString(),
-		};
-		const eventsPath = validateSwarmPath(dir, 'events.jsonl');
-		fs.appendFileSync(eventsPath, `${JSON.stringify(traceEvent)}\n`, 'utf-8');
-	} catch (eventError) {
-		warnings.push(
-			`Warning: failed to record phase_complete_fallback_write trace event: ${eventError instanceof Error ? eventError.message : String(eventError)}`,
-		);
-	}
-	return true;
-}
-
-/**
  * Filter delegation chains since the last completion timestamp
  * @param sessionID - The session identifier
  * @param sinceTimestamp - Filter entries after this timestamp (0 means all entries)
@@ -503,49 +452,8 @@ function isValidRetroEntry(
 		'phase_number' in entry &&
 		(entry as { phase_number?: unknown }).phase_number === phase &&
 		'verdict' in entry &&
-		(entry as { verdict?: unknown }).verdict === 'pass'
-	);
-}
-
-/**
- * Helper to build a blocked PhaseCompleteResult from a GateResult.
- * The agentsDispatched and agentsMissing from the gate are preserved.
- */
-function blockedResult(
-	phase: number,
-	gateResult: {
-		reason?: string;
-		message?: string;
-		agentsDispatched: string[];
-		agentsMissing: string[];
-		warnings: string[];
-		[k: string]: unknown;
-	},
-): string {
-	// Collect extra fields (e.g. phase_council_required, final_council_required)
-	const {
-		reason,
-		message,
-		agentsDispatched,
-		agentsMissing,
-		warnings,
-		blocked: _blocked,
-		...extra
-	} = gateResult;
-	return JSON.stringify(
-		{
-			success: false,
-			phase,
-			status: 'blocked' as const,
-			reason,
-			message,
-			agentsDispatched,
-			agentsMissing,
-			warnings,
-			...extra,
-		},
-		null,
-		2,
+		((entry as { verdict?: unknown }).verdict === 'pass' ||
+			(entry as { verdict?: unknown }).verdict === 'fail')
 	);
 }
 
@@ -557,7 +465,7 @@ export async function executePhaseComplete(
 	args: PhaseCompleteArgs,
 	workingDirectory?: string,
 	directory?: string,
-	runtime: PhaseCompleteRuntime = {},
+	_runtime: PhaseCompleteRuntime = {},
 ): Promise<string> {
 	// Extract arguments
 	const phase = Number(args.phase);
@@ -611,6 +519,11 @@ export async function executePhaseComplete(
 
 	// Build warnings list early so it is available to both the drift gate and post-gate logic
 	const warnings: string[] = [];
+	if (hasActiveTurboMode(sessionID)) {
+		warnings.push(
+			`Turbo mode active — skipped completion-verify, drift-verifier, hallucination-guard, mutation-gate, and phase-council gates for phase ${phase}.`,
+		);
+	}
 
 	// Use aggregated cross-session agents for required-agent evaluation
 	const crossSessionResult = collectCrossSessionDispatchedAgents(
@@ -645,6 +558,36 @@ export async function executePhaseComplete(
 
 	// If enforcement is disabled, return early with success
 	if (phaseCompleteConfig.enabled === false) {
+		const disabledReport = await collectPhaseGateReport({
+			phase,
+			checks: [
+				'critical_directives',
+				'retrospective',
+				'completion_verify',
+				'drift',
+				'hallucination',
+				'mutation',
+				'phase_council',
+				'architecture_supervisor',
+				'final_review',
+				'final_council',
+				'full_auto_approval',
+				'lean_turbo_readiness',
+				'required_agents',
+				'snapshot_identity',
+			].map((id) => ({
+				id,
+				responsibleActor: 'architect',
+				applicable: false,
+				notApplicableDetail: 'phase completion enforcement is disabled',
+				run: async () => ({
+					blocked: false,
+					agentsDispatched: [],
+					agentsMissing: [],
+					warnings: [],
+				}),
+			})),
+		});
 		return JSON.stringify(
 			{
 				success: true,
@@ -654,17 +597,16 @@ export async function executePhaseComplete(
 				agentsDispatched,
 				agentsMissing: [],
 				warnings: [],
+				gate_report: disabledReport,
 			},
 			null,
 			2,
 		);
 	}
 
-	// Critical knowledge-directive gate (Change 2, Task 2.4).
-	// A phase cannot complete while a CRITICAL directive shown during the phase
-	// lacks a terminal outcome or carries an unremediated violation. The architect
-	// may override specific IDs with a written justification; each override is
-	// logged as an `override` knowledge event. Fail-closed.
+	// Phase closure starts with one observational pass. Nothing below this
+	// boundary may dispatch agents or write phase evidence until the complete
+	// report has passed.
 	const receiptPlan = await loadPlan(dir).catch(() => null);
 	const receiptPhaseLabel = receiptPlan
 		? (extractCurrentPhaseFromPlan(receiptPlan) ??
@@ -672,199 +614,23 @@ export async function executePhaseComplete(
 		: `Phase ${phase}`;
 	const knowledgeEnabled =
 		(config.knowledge as { enabled?: boolean } | undefined)?.enabled !== false;
-	if (knowledgeEnabled) {
-		const requestedAccept = Array.isArray(args.acceptViolations)
-			? args.acceptViolations.filter(
-					(s) => typeof s === 'string' && s.length > 0,
-				)
-			: [];
-		const justification =
-			typeof args.acceptViolationsJustification === 'string'
-				? args.acceptViolationsJustification.trim()
-				: '';
-		// Override is architect-only. Identity comes from the tool ctx (callerAgent),
-		// falling back to the session's active agent; default architect since
-		// phase_complete is an architect-only tool by the AGENT_TOOL_MAP.
-		const callerAgent =
-			args.callerAgent ?? swarmState.activeAgent.get(sessionID) ?? 'architect';
-		const isArchitect =
-			stripKnownSwarmPrefix(callerAgent).toLowerCase() === 'architect';
-
-		if (requestedAccept.length > 0 && !isArchitect) {
-			return blockedResult(phase, {
-				reason: 'override_denied_non_architect',
-				message:
-					'accept_violations is architect-only — this caller may not override critical directive violations.',
-				agentsDispatched,
-				agentsMissing: [],
-				warnings,
-			});
-		}
-		if (requestedAccept.length > 0 && justification.length < 10) {
-			return blockedResult(phase, {
-				reason: 'override_requires_justification',
-				message:
-					'accept_violations requires accept_violations_justification (minimum 10 characters of substantive reasoning).',
-				agentsDispatched,
-				agentsMissing: [],
-				warnings,
-			});
-		}
-		const effectiveAccept =
-			requestedAccept.length > 0 && isArchitect && justification.length >= 10
-				? requestedAccept
-				: [];
-		if (effectiveAccept.length > 0) {
-			try {
-				await recordDirectiveOverrides(
-					dir,
-					effectiveAccept,
-					justification,
-					sessionID,
-					receiptPhaseLabel,
-				);
-			} catch {
-				return blockedResult(phase, {
-					reason: 'directive_gate_failed_closed',
-					message:
-						'Critical-directive override could not be committed to authoritative receipt state; failing closed.',
-					agentsDispatched,
-					agentsMissing: [],
-					warnings,
-				});
-			}
-		}
-		const directiveGate = await evaluatePhaseCriticalDirectives({
-			directory: dir,
-			sessionId: sessionID,
-			phaseLabel: receiptPhaseLabel,
-		});
-		if (directiveGate.blocked) {
-			return blockedResult(phase, {
-				reason: directiveGate.failedClosed
-					? 'directive_gate_failed_closed'
-					: 'unresolved_critical_directives',
-				message: directiveGate.failedClosed
-					? 'Critical-directive gate could not read authoritative receipt state; failing closed.'
-					: formatDirectiveBlockMessage(directiveGate.unresolved),
-				agentsDispatched,
-				agentsMissing: [],
-				warnings,
-				unresolved_directives: directiveGate.unresolved,
-			});
-		}
-	}
-
-	// Retrospective gate: require a valid retro bundle for this phase
-	const retroResult = await loadEvidence(dir, `retro-${phase}`);
 	let retroFound = false;
-	let retroEntry: { lessons_learned?: string[] } | null = null;
-	let invalidSchemaErrors: string[] = [];
+	let retroEntry: {
+		lessons_learned?: string[];
+		verdict?: 'pass' | 'fail';
+	} | null = null;
+	const invalidSchemaErrors: string[] = [];
 	let loadedRetroTaskId: string | null = null;
 	let loadedRetroBundle: EvidenceBundle | null = null;
-
-	// Track the task ID that was used to load the retro bundle
+	let retrospectiveGate: {
+		schema_valid: boolean;
+		gate_pass: boolean;
+		verdict?: 'pass' | 'fail';
+	} = {
+		schema_valid: false,
+		gate_pass: false,
+	};
 	const primaryRetroTaskId = `retro-${phase}`;
-
-	if (retroResult.status === 'found') {
-		const validEntry = retroResult.bundle.entries?.find((entry) =>
-			isValidRetroEntry(entry, phase),
-		);
-		if (validEntry) {
-			retroFound = true;
-			retroEntry = validEntry as { lessons_learned?: string[] } | null;
-			loadedRetroTaskId = primaryRetroTaskId;
-			loadedRetroBundle = retroResult.bundle;
-		}
-	} else if (retroResult.status === 'invalid_schema') {
-		invalidSchemaErrors = retroResult.errors;
-	}
-
-	if (!retroFound) {
-		// Fallback: scan all task IDs for any retro-N matching this phase
-		const allTaskIds = await listEvidenceTaskIds(dir);
-		const retroTaskIds = allTaskIds.filter(
-			(id) => id.startsWith('retro-') && /^retro-\d+$/.test(id),
-		);
-		for (const taskId of retroTaskIds) {
-			const bundleResult = await loadEvidence(dir, taskId);
-			if (bundleResult.status !== 'found') {
-				if (bundleResult.status === 'invalid_schema') {
-					invalidSchemaErrors.push(...bundleResult.errors);
-				}
-				continue;
-			}
-			const validEntry = bundleResult.bundle.entries?.find((entry) =>
-				isValidRetroEntry(entry, phase),
-			);
-			if (validEntry) {
-				retroFound = true;
-				retroEntry = validEntry as { lessons_learned?: string[] } | null;
-				loadedRetroTaskId = taskId;
-				loadedRetroBundle = bundleResult.bundle;
-				break;
-			}
-		}
-	}
-
-	if (!retroFound) {
-		const schemaErrorDetail =
-			invalidSchemaErrors.length > 0
-				? ` Schema validation failed: ${invalidSchemaErrors.join('; ')}.`
-				: '';
-		return JSON.stringify(
-			{
-				success: false,
-				phase,
-				status: 'blocked' as const,
-				reason: 'RETROSPECTIVE_MISSING',
-				message: `Phase ${phase} cannot be completed: no valid retrospective evidence found.${schemaErrorDetail} Write a retrospective bundle at .swarm/evidence/retro-${phase}/evidence.json before calling phase_complete.`,
-				agentsDispatched,
-				agentsMissing: [],
-				warnings: [
-					`Retrospective missing for phase ${phase}.${schemaErrorDetail} Use this template:`,
-					JSON.stringify(
-						{
-							schema_version: '1.0.0',
-							task_id: `retro-${phase}`,
-							created_at: new Date().toISOString(),
-							updated_at: new Date().toISOString(),
-							entries: [
-								{
-									task_id: `retro-${phase}`,
-									type: 'retrospective',
-									timestamp: new Date().toISOString(),
-									agent: 'architect',
-									verdict: 'pass',
-									summary: `Phase ${phase} completed.`,
-									phase_number: phase,
-									total_tool_calls: 0,
-									coder_revisions: 0,
-									reviewer_rejections: 0,
-									test_failures: 0,
-									security_findings: 0,
-									integration_issues: 0,
-									task_count: 1,
-									task_complexity: 'simple',
-									top_rejection_reasons: [],
-									lessons_learned: [],
-								},
-							],
-						},
-						null,
-						2,
-					),
-				],
-			},
-			null,
-			2,
-		);
-	}
-
-	// ── Gate orchestration ──────────────────────────────────────────────────────
-
-	// Build the shared gate context used by all gate functions.
-	// Fields that some gates need but not all: safeWarn is always provided.
 	const gateCtx: GateContext = {
 		phase,
 		dir,
@@ -875,211 +641,765 @@ export async function executePhaseComplete(
 		loadedRetroBundle,
 		loadedRetroTaskId,
 	};
+	const passGate = (extra: Record<string, unknown> = {}) => ({
+		blocked: false,
+		agentsDispatched,
+		agentsMissing: [] as string[],
+		warnings: [] as string[],
+		...extra,
+	});
+	const preflightChecks: PhaseGateCheck[] = [];
 
-	// Turbo mode: skip gates 1-5 (but NOT 5b Architecture Supervision).
-	// NOTE: Gate 5b (Architecture Supervision) is intentionally NOT turbo-bypassed —
-	// enabling mode:'gate' is an explicit opt-in to a hard cross-task coherence
-	// check, so it is enforced even under lean turbo.
-	if (hasActiveTurboMode(sessionID)) {
-		warnings.push(
-			`Turbo mode active — skipped completion-verify, drift-verifier, hallucination-guard, mutation-gate, and phase-council gates for phase ${phase}.`,
-		);
-	} else {
-		// Gate 1: Completion Verify
-		{
-			const gateResult = await runCompletionVerifyGate(gateCtx);
-			if (gateResult.blocked) {
-				return blockedResult(phase, gateResult);
+	preflightChecks.push({
+		id: 'critical_directives',
+		responsibleActor: 'architect',
+		applicable: knowledgeEnabled,
+		notApplicableDetail: 'knowledge directives are disabled',
+		run: async () => {
+			const requestedAccept = Array.isArray(args.acceptViolations)
+				? args.acceptViolations.filter(
+						(value): value is string =>
+							typeof value === 'string' && value.length > 0,
+					)
+				: [];
+			if (requestedAccept.length > 0) {
+				const callerAgent =
+					args.callerAgent ??
+					swarmState.activeAgent.get(sessionID) ??
+					'architect';
+				if (stripKnownSwarmPrefix(callerAgent).toLowerCase() !== 'architect') {
+					return {
+						...passGate(),
+						blocked: true,
+						reason: 'OVERRIDE_DENIED_NON_ARCHITECT',
+						message:
+							'accept_violations is architect-only and cannot be committed by this caller.',
+					};
+				}
+				const justification =
+					typeof args.acceptViolationsJustification === 'string'
+						? args.acceptViolationsJustification.trim()
+						: '';
+				return {
+					...passGate(),
+					blocked: true,
+					reason:
+						justification.length >= 10
+							? 'DIRECTIVE_OVERRIDE_SEPARATE_ACTION_REQUIRED'
+							: 'OVERRIDE_REQUIRES_JUSTIFICATION',
+					message:
+						justification.length >= 10
+							? 'Directive overrides are separate audited evidence writes. Record the override, then retry phase_complete without accept_violations.'
+							: 'accept_violations requires at least 10 characters of substantive justification.',
+					recovery: {
+						kind: 'tool',
+						action: 'record_directive_override',
+						args: {
+							directive_ids: requestedAccept,
+							justification,
+							phase,
+						},
+					},
+				};
 			}
-			warnings.push(...gateResult.warnings);
-		}
-
-		// Gate 2: Drift Verifier
-		{
-			const gateResult = await runDriftGate(gateCtx);
-			if (gateResult.blocked) {
-				return blockedResult(phase, gateResult);
-			}
-			warnings.push(...gateResult.warnings);
-		}
-
-		// Gate 3: Hallucination Guard
-		{
-			const gateResult = await runHallucinationGate(gateCtx);
-			if (gateResult.blocked) {
-				return blockedResult(phase, gateResult);
-			}
-			warnings.push(...gateResult.warnings);
-		}
-
-		// Gate 4: Mutation Gate
-		{
-			const gateResult = await runMutationGate(gateCtx);
-			if (gateResult.blocked) {
-				return blockedResult(phase, gateResult);
-			}
-			warnings.push(...gateResult.warnings);
-		}
-
-		// Gate 5: Phase Council
-		{
-			const gateResult = await runPhaseCouncilGate(gateCtx);
-			if (gateResult.blocked) {
-				return blockedResult(phase, gateResult);
-			}
-			warnings.push(...gateResult.warnings);
-		}
-	}
-
-	// Gate 5b: Architecture Supervision — NOT turbo-bypassed (see note above)
-	if (
-		config.architectural_supervision?.enabled &&
-		config.architectural_supervision.mode === 'gate'
-	) {
-		const gateResult = await runArchitectureSupervisorGate(gateCtx);
-		if (gateResult.blocked) {
-			return blockedResult(phase, gateResult);
-		}
-		warnings.push(...gateResult.warnings);
-	}
-
-	// Gate 6: Final Council — NOT turbo-bypassed (is last-phase only by design)
-	// Generalized whole-diff review. This tool body owns the bounded dispatch
-	// and durable evidence write; the gate only verifies that exact evidence.
-	// Gate mode is intentionally not bypassed by Turbo.
-	try {
-		const autoReviewConfig = resolveAutoReviewConfig(config.auto_review ?? {});
-		if (mayRunPhaseAutoReview(autoReviewConfig)) {
-			const plan = await loadPlan(dir).catch(() => null);
-			const phaseIds =
-				plan?.phases
-					?.map((item) => Number(item.id))
-					.filter((id) => Number.isInteger(id) && id > 0) ?? [];
-			const phaseReview = await runPhaseAutoReview({
+			const directiveGate = await evaluatePhaseCriticalDirectives({
 				directory: dir,
+				sessionId: sessionID,
+				phaseLabel: receiptPhaseLabel,
+			});
+			if (!directiveGate.blocked) return passGate();
+			return {
+				...passGate(),
+				blocked: true,
+				reason: directiveGate.failedClosed
+					? 'DIRECTIVE_GATE_FAILED_CLOSED'
+					: 'UNRESOLVED_CRITICAL_DIRECTIVES',
+				message: directiveGate.failedClosed
+					? 'Critical-directive gate could not read authoritative receipt state; failing closed.'
+					: formatDirectiveBlockMessage(directiveGate.unresolved),
+				unresolved_directives: directiveGate.unresolved,
+				...('recovery' in directiveGate &&
+				directiveGate.recovery &&
+				typeof directiveGate.recovery === 'object'
+					? { recovery: directiveGate.recovery }
+					: {}),
+			};
+		},
+	});
+
+	preflightChecks.push({
+		id: 'retrospective',
+		responsibleActor: 'architect',
+		run: async () => {
+			const retroResult = await loadEvidence(dir, primaryRetroTaskId, {
+				migrate: false,
+			});
+			const candidates: Array<{
+				taskId: string;
+				bundle: EvidenceBundle;
+			}> = [];
+			if (retroResult.status === 'found') {
+				candidates.push({
+					taskId: primaryRetroTaskId,
+					bundle: retroResult.bundle,
+				});
+			} else if (retroResult.status === 'invalid_schema') {
+				invalidSchemaErrors.push(...retroResult.errors);
+			}
+			if (candidates.length === 0) {
+				const taskIds = (await listEvidenceTaskIds(dir))
+					.filter((id) => /^retro-\d+$/.test(id))
+					.sort();
+				for (const taskId of taskIds) {
+					const candidate = await loadEvidence(dir, taskId, { migrate: false });
+					if (candidate.status === 'found') {
+						candidates.push({ taskId, bundle: candidate.bundle });
+					} else if (candidate.status === 'invalid_schema') {
+						invalidSchemaErrors.push(...candidate.errors);
+					}
+				}
+			}
+			for (const candidate of candidates) {
+				const entry = candidate.bundle.entries?.find((item) =>
+					isValidRetroEntry(item, phase),
+				) as
+					| {
+							lessons_learned?: string[];
+							verdict?: 'pass' | 'fail';
+					  }
+					| undefined;
+				if (!entry) continue;
+				retroFound = true;
+				retroEntry = entry;
+				loadedRetroTaskId = candidate.taskId;
+				loadedRetroBundle = candidate.bundle;
+				retrospectiveGate = {
+					schema_valid: true,
+					gate_pass: entry.verdict === 'pass',
+					verdict: entry.verdict,
+				};
+				gateCtx.loadedRetroTaskId = candidate.taskId;
+				gateCtx.loadedRetroBundle = candidate.bundle;
+				if (entry.verdict === 'fail') {
+					return {
+						...passGate(),
+						blocked: true,
+						reason: 'RETROSPECTIVE_FAILED',
+						message:
+							'The retrospective is schema-valid and truthfully records verdict "fail". Resolve the phase findings and write a new explicit verdict before retrying.',
+						retrospective_gate: retrospectiveGate,
+						recovery: { kind: 'tool', action: 'write_retro' },
+					};
+				}
+				return passGate({ retrospective_gate: retrospectiveGate });
+			}
+			const schemaDetail =
+				invalidSchemaErrors.length > 0
+					? ` Schema validation failed: ${invalidSchemaErrors
+							.slice(0, 8)
+							.join('; ')}.`
+					: '';
+			return {
+				...passGate(),
+				blocked: true,
+				reason:
+					invalidSchemaErrors.length > 0
+						? 'RETROSPECTIVE_SCHEMA_INVALID'
+						: 'RETROSPECTIVE_MISSING',
+				message: `Phase ${phase} cannot be completed without an explicit retrospective verdict.${schemaDetail}`,
+				retrospective_gate: retrospectiveGate,
+				recovery: {
+					kind: 'tool',
+					action: 'write_retro',
+					args: { phase },
+				},
+			};
+		},
+	});
+
+	const turboActive = hasActiveTurboMode(sessionID);
+	const standardGateSpecs: Array<{
+		id: string;
+		actor: string;
+		run: () => Promise<import('./phase-complete/gates/types.js').GateResult>;
+	}> = [
+		{
+			id: 'completion_verify',
+			actor: 'test_engineer',
+			run: () =>
+				phaseCompletePreflightInternals.runCompletionVerifyGate(gateCtx),
+		},
+		{
+			id: 'drift',
+			actor: 'critic',
+			run: () => phaseCompletePreflightInternals.runDriftGate(gateCtx),
+		},
+		{
+			id: 'hallucination',
+			actor: 'reviewer',
+			run: () => phaseCompletePreflightInternals.runHallucinationGate(gateCtx),
+		},
+		{
+			id: 'mutation',
+			actor: 'test_engineer',
+			run: () => phaseCompletePreflightInternals.runMutationGate(gateCtx),
+		},
+		{
+			id: 'phase_council',
+			actor: 'architect',
+			run: () => phaseCompletePreflightInternals.runPhaseCouncilGate(gateCtx),
+		},
+	];
+	for (const spec of standardGateSpecs) {
+		preflightChecks.push({
+			id: spec.id,
+			responsibleActor: spec.actor,
+			applicable: !turboActive,
+			notApplicableDetail: 'standard gate bypassed by active Turbo policy',
+			run: spec.run,
+		});
+	}
+	preflightChecks.push({
+		id: 'architecture_supervisor',
+		responsibleActor: 'architecture_supervisor',
+		applicable:
+			config.architectural_supervision?.enabled === true &&
+			config.architectural_supervision.mode === 'gate',
+		notApplicableDetail: 'architecture supervision gate is not enabled',
+		run: () =>
+			phaseCompletePreflightInternals.runArchitectureSupervisorGate(gateCtx),
+	});
+	preflightChecks.push({
+		id: 'final_review',
+		responsibleActor: 'reviewer',
+		run: () => phaseCompletePreflightInternals.runFinalReviewGate(gateCtx),
+	});
+	preflightChecks.push({
+		id: 'final_council',
+		responsibleActor: 'architect',
+		run: () => phaseCompletePreflightInternals.runFinalCouncilGate(gateCtx),
+	});
+	preflightChecks.push({
+		id: 'full_auto_approval',
+		responsibleActor: 'critic',
+		run: async () => {
+			const approval = verifyFullAutoPhaseApproval(
+				dir,
 				sessionID,
 				phase,
-				isFinalPlanPhase:
-					phaseIds.length > 0 && phase === Math.max(...phaseIds),
-				activeLeanTurbo: hasActiveLeanTurbo(sessionID),
-				config: autoReviewConfig,
-				dispatcher: runtime.reviewModelDispatcher,
-				generatedAgentNames: resolvePhaseReviewAgentNames(runtime),
-				activeAgentName:
-					args.callerAgent ?? runtime.getActiveAgentName?.(sessionID),
-				agentModelRegistry: runtime.reviewAgentModelRegistry,
-				injectAdvisory: (_targetSessionID, advisory) => {
-					const sessionState = swarmState.agentSessions.get(sessionID);
-					if (!sessionState) return;
-					pushAdvisory(sessionState, advisory);
-				},
-			});
-			gateCtx.autoReviewTrigger = phaseReview.trigger;
-			gateCtx.autoReviewScopeHash = phaseReview.scopeHash;
-			gateCtx.autoReviewScopeComplete = phaseReview.scopeComplete;
-			gateCtx.autoReviewBlocked = phaseReview.blocked;
-			gateCtx.autoReviewBlockReason = phaseReview.blockReason;
-			warnings.push(...phaseReview.warnings);
-		}
-	} catch (error) {
-		gateCtx.autoReviewTrigger = 'phase_completion';
-		gateCtx.autoReviewBlocked = true;
-		gateCtx.autoReviewBlockReason = 'REVIEW_DISPATCH_FAILED';
-		warnings.push(
-			`Auto-review configuration or dispatch failed: ${error instanceof Error ? error.message : String(error)}`,
-		);
-	}
-
-	{
-		const reviewGateResult = await runFinalReviewGate(gateCtx);
-		if (reviewGateResult.blocked) {
-			return blockedResult(phase, reviewGateResult);
-		}
-		warnings.push(...reviewGateResult.warnings);
-	}
-
-	const gateResult = await runFinalCouncilGate(gateCtx);
-	if (gateResult.blocked) {
-		return blockedResult(phase, gateResult);
-	}
-	warnings.push(...gateResult.warnings);
-
-	// ── Post-gate logic ────────────────────────────────────────────────────────
-
-	// Gate 7: Full-Auto v2 approval (sits OUTSIDE the Turbo bypass on purpose).
-	// When Full-Auto v2 is the active autonomy regime, Turbo must NOT bypass
-	// the autonomous-oversight approval — fail-closed by default. The gate is
-	// a no-op when no durable Full-Auto run is active for this session
-	// (first-class toggle: config.full_auto.enabled no longer gates it).
-	// Runs after Gate 6 (Final Council) so that
-	// last-phase completions are gated by both council approval (when
-	// final_council is enabled) AND Full-Auto v2 approval (when active).
-	{
-		const approval = verifyFullAutoPhaseApproval(dir, sessionID, phase, config);
-		if (!approval.ok) {
-			return JSON.stringify(
-				{
-					success: false,
-					phase,
-					status: 'blocked' as const,
-					reason: 'FULL_AUTO_APPROVAL_REQUIRED',
-					message: `Phase ${phase} cannot be completed: ${approval.reason ?? 'Full-Auto v2 approval missing'}`,
-					agentsDispatched,
-					agentsMissing: [],
-					warnings: [
-						`Full-Auto v2 active. Re-run critic_oversight with trigger_source=phase_boundary so an APPROVED record is written to .swarm/evidence/${phase}/full-auto-*.json before calling phase_complete again.`,
-					],
-				},
-				null,
-				2,
+				config,
 			);
-		}
-	}
-
-	// Lean Turbo phase readiness gate (outside standard Turbo bypass).
-	//
-	// Epic Mode escape: when Epic Mode is active for this project, the
-	// architect dispatched coders directly via the `Task` tool (per
-	// `epic_plan_waves` + EPIC_MODE_BANNER step 5) and never instantiated
-	// `LeanTurboRunner`. As a result, no `runState` with
-	// `strategy: 'lean', status: 'running'` exists on disk — the Lean
-	// readiness gate would block with "No active Lean Turbo session" even
-	// though every wave's tasks completed. Skip the Lean gate in that case
-	// and rely on per-task `update_task_status` + the standard reviewer
-	// path to provide phase-end quality control.
+			return approval.ok
+				? passGate()
+				: {
+						...passGate(),
+						blocked: true,
+						reason: 'FULL_AUTO_APPROVAL_REQUIRED',
+						message: `Phase ${phase} cannot be completed: ${approval.reason ?? 'Full-Auto v2 approval missing'}`,
+						recovery: {
+							kind: 'user_action',
+							action: 'Task',
+							args: {
+								subagent_type: 'critic_oversight',
+								trigger_source: 'phase_boundary',
+								phase,
+							},
+						},
+					};
+		},
+	});
 	const epicActiveForProject = isEpicModeActiveForProject(dir);
-	if (hasActiveLeanTurbo(sessionID) && !epicActiveForProject) {
-		// Extract lean config for phase readiness checks (phase_reviewer, phase_critic, etc.)
-		const leanConfig = config?.turbo?.lean;
-		const leanPhaseReadyConfig = leanConfig
-			? {
-					phase_reviewer: leanConfig.phase_reviewer,
-					phase_critic: leanConfig.phase_critic,
-					integrated_diff_required: leanConfig.integrated_diff_required,
+	preflightChecks.push({
+		id: 'lean_turbo_readiness',
+		responsibleActor: 'architect',
+		applicable: hasActiveLeanTurbo(sessionID) && !epicActiveForProject,
+		notApplicableDetail: 'Lean Turbo is inactive or Epic Mode owns readiness',
+		run: async () => {
+			const leanConfig = config?.turbo?.lean;
+			const check = leanPhaseInternals.verifyLeanTurboPhaseReady(
+				dir,
+				phase,
+				sessionID,
+				leanConfig
+					? {
+							phase_reviewer: leanConfig.phase_reviewer,
+							phase_critic: leanConfig.phase_critic,
+							integrated_diff_required: leanConfig.integrated_diff_required,
+						}
+					: undefined,
+			);
+			return check.ok
+				? passGate()
+				: {
+						...passGate(),
+						blocked: true,
+						reason: 'LEAN_TURBO_PHASE_NOT_READY',
+						message: `Phase ${phase} cannot be completed: ${check.reason}`,
+					};
+		},
+	});
+
+	preflightChecks.push({
+		id: 'required_agents',
+		responsibleActor: 'architect',
+		run: async () => {
+			let participationPlan: RuntimePlan | null = null;
+			let phaseRequiredAgents: string[] | undefined;
+			try {
+				participationPlan = await loadPlan(dir);
+				phaseRequiredAgents = participationPlan?.phases.find(
+					(item) => item.id === phase,
+				)?.required_agents;
+			} catch {
+				participationPlan = null;
+			}
+			const configured = [
+				...(phaseRequiredAgents ?? phaseCompleteConfig.required_agents),
+			];
+			const required = [...configured];
+			if (phaseCompleteConfig.require_docs && !required.includes('docs')) {
+				required.push('docs');
+			}
+			let docsStatus: ParticipationReadResult['status'] | null = null;
+			let durableDocsFound = false;
+			if (required.includes('docs')) {
+				crossSessionResult.agents.delete('docs');
+				if (participationPlan) {
+					const receipt = readPhaseParticipation(
+						dir,
+						participationPlan,
+						phase,
+						'docs',
+					);
+					docsStatus = receipt.status;
+					if (receipt.found) {
+						durableDocsFound = true;
+						crossSessionResult.agents.add('docs');
+					}
 				}
-			: undefined;
-		const leanCheck = leanPhaseInternals.verifyLeanTurboPhaseReady(
-			dir,
-			phase,
-			sessionID,
-			leanPhaseReadyConfig,
+			}
+			let missing = required.filter(
+				(role) => !crossSessionResult.agents.has(role),
+			);
+			let inferredFromTaskGates: string[] = [];
+			if (missing.length > 0) {
+				try {
+					const planRaw = fs.readFileSync(
+						validateSwarmPath(dir, 'plan.json'),
+						'utf8',
+					);
+					const plan = JSON.parse(planRaw) as {
+						phases: Array<{
+							id: number;
+							tasks: Array<{ id: string; status: string }>;
+						}>;
+					};
+					const target = plan.phases.find((item) => item.id === phase);
+					if (
+						target &&
+						target.tasks.length > 0 &&
+						canInferMissingAgentsFromTaskGates(missing) &&
+						(await allCompletedTasksHavePassedGateEvidence(dir, target.tasks))
+					) {
+						inferredFromTaskGates = [...missing];
+						missing = [];
+					}
+				} catch {
+					// Fail closed through the unresolved missing set.
+				}
+			}
+			const recoveryGuidance = buildMissingAgentRecoveryGuidance({
+				missing,
+				docsAddedByConfig:
+					phaseCompleteConfig.require_docs && !configured.includes('docs'),
+				docsEvidenceStatus: docsStatus,
+				docsPlanReadable: participationPlan !== null,
+				policy: phaseCompleteConfig.policy,
+			});
+			const authoritativeAgents = [...crossSessionResult.agents].sort();
+			return missing.length > 0 && phaseCompleteConfig.policy === 'enforce'
+				? {
+						...passGate(),
+						blocked: true,
+						reason: 'REQUIRED_AGENTS_MISSING',
+						message: `Phase ${phase} is missing required agents: ${missing.join(', ')}. ${recoveryGuidance}`,
+						agentsMissing: missing,
+						agentsDispatched: authoritativeAgents,
+						recovery_guidance: recoveryGuidance,
+						recovery: {
+							kind: 'user_action',
+							action: 'Task',
+							args: { agents: missing },
+						},
+					}
+				: passGate({
+						agentsDispatched: durableDocsFound
+							? [...new Set([...authoritativeAgents, 'docs'])].sort()
+							: authoritativeAgents,
+						recovery_guidance: recoveryGuidance,
+						agentsMissing: missing,
+						warnings: [
+							...(durableDocsFound
+								? [
+										`Recovered durable docs participation proof for phase ${phase}.`,
+									]
+								: []),
+							...(inferredFromTaskGates.length > 0
+								? [
+										`Agent dispatch fallback: all completed tasks in phase ${phase} have durable passing gate evidence. Clearing missing agents: ${inferredFromTaskGates.join(', ')}.`,
+									]
+								: []),
+							...(missing.length > 0
+								? [
+										`Warning: phase ${phase} missing required agents: ${missing.join(', ')} (advisory because phase_complete.policy=warn).`,
+									]
+								: []),
+						],
+					});
+		},
+	});
+
+	preflightChecks.push({
+		id: 'snapshot_identity',
+		responsibleActor: 'architect',
+		run: async () => {
+			const plan = await loadPlan(dir);
+			const structureHash = plan ? computePlanStructureHash(plan) : 'plan:none';
+			const policyHash = createHash('sha256')
+				.update(JSON.stringify(config))
+				.digest('hex');
+			const evidenceHash = computePhaseEvidenceSnapshot(dir);
+			return passGate({
+				evidenceRefs: [
+					`plan-structure:${structureHash}`,
+					`policy:${policyHash}`,
+					`phase-evidence:${evidenceHash}`,
+				],
+			});
+		},
+	});
+
+	const preflightReport = await collectPhaseGateReport({
+		phase,
+		checks: preflightChecks,
+	});
+	if (preflightReport.outcome === 'block') {
+		return JSON.stringify(
+			formatPhaseGateCompatibility(preflightReport),
+			null,
+			2,
 		);
-		if (!leanCheck.ok) {
-			return JSON.stringify(
-				{
+	}
+	for (const entry of preflightReport.entries) {
+		warnings.push(...entry.warnings);
+	}
+	// The retrospective check populates these values inside an async closure.
+	// Capture its accepted state explicitly because control-flow analysis cannot
+	// infer those closure assignments.
+	const acceptedRetro = {
+		found: retroFound as boolean,
+		entry: retroEntry as {
+			lessons_learned?: string[];
+			verdict?: 'pass' | 'fail';
+		} | null,
+		taskId: loadedRetroTaskId as string | null,
+		bundle: loadedRetroBundle as EvidenceBundle | null,
+	};
+	const phaseRecoveryGuidance = preflightReport.entries.find(
+		(entry) => entry.id === 'required_agents' && entry.recoveryGuidance,
+	)?.recoveryGuidance;
+
+	// Guard the single authoritative plan transition before any advisory,
+	// curation, event, session-reset, or knowledge-feedback side effect.
+	let phaseCommitAgent = 'phase-complete';
+	for (const [, activeAgent] of swarmState.activeAgent) {
+		phaseCommitAgent = activeAgent;
+		break;
+	}
+	const planLockTaskId = `phase-complete-plan-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+	let phasePlanLock: Awaited<ReturnType<typeof tryAcquireLock>> | undefined;
+	try {
+		phasePlanLock = await tryAcquireLock(
+			dir,
+			'plan.json',
+			phaseCommitAgent,
+			planLockTaskId,
+		);
+	} catch (error) {
+		const detail = error instanceof Error ? error.message : String(error);
+		return JSON.stringify({
+			success: false,
+			phase,
+			status: 'incomplete' as const,
+			reason: 'PHASE_COMMIT_LOCK_ERROR',
+			message: `Failed to acquire the guarded phase commit lock: ${detail}`,
+			agentsDispatched,
+			agentsMissing: [],
+			warnings,
+			gate_report: preflightReport,
+			errors: [`Phase commit lock acquisition failed: ${detail}`],
+			recovery_guidance:
+				'Resolve the filesystem or lock-directory error, then retry phase_complete. No phase transition or completion event was committed.',
+			recovery: { kind: 'retry', action: 'phase_complete' },
+		});
+	}
+	if (!phasePlanLock.acquired) {
+		const lockOwner = phasePlanLock.existing?.agent ?? 'another agent';
+		return JSON.stringify({
+			success: false,
+			phase,
+			status: 'incomplete' as const,
+			reason: 'PHASE_COMMIT_LOCKED',
+			message: `Plan write is locked by ${lockOwner}.`,
+			agentsDispatched,
+			agentsMissing: [],
+			warnings,
+			gate_report: preflightReport,
+			errors: [`Concurrent plan write detected; lock is held by ${lockOwner}.`],
+			recovery_guidance:
+				'Wait for the current plan writer to finish, then retry phase_complete. No phase transition or completion event was committed.',
+			recovery: { kind: 'retry', action: 'phase_complete' },
+		});
+	}
+	try {
+		const lockedPreflight = await collectPhaseGateReport({
+			phase,
+			checks: preflightChecks,
+		});
+		if (
+			lockedPreflight.outcome !== 'pass' ||
+			lockedPreflight.reportHash !== preflightReport.reportHash
+		) {
+			return JSON.stringify({
+				success: false,
+				phase,
+				status: 'blocked' as const,
+				reason: 'PHASE_PREFLIGHT_STALE',
+				message:
+					'Phase evidence, plan identity, or policy changed after preflight. No phase transition or post-commit side effect was written.',
+				agentsDispatched,
+				agentsMissing: [],
+				warnings,
+				gate_report: lockedPreflight,
+				recovery: { kind: 'retry', action: 'phase_complete' },
+			});
+		}
+		let plan = await loadPlan(dir);
+		if ((plan as RuntimePlan | null)?._ledgerReplayStale === true) {
+			const staleReason =
+				(plan as RuntimePlan)._ledgerReplayStaleReason ?? 'unknown reason';
+			return JSON.stringify({
+				success: false,
+				phase,
+				status: 'incomplete' as const,
+				reason: 'PHASE_PLAN_STALE',
+				message: `Plan write refused: plan.json is stale from a failed ledger replay (${staleReason}). Refusing to complete phase ${phase} against a known-stale plan.`,
+				agentsDispatched,
+				agentsMissing: [],
+				warnings,
+				gate_report: lockedPreflight,
+				errors: [`Stale plan from failed ledger replay: ${staleReason}`],
+				recovery_guidance:
+					'The ledger replay failed and no critic-approved snapshot was available, so loadPlan fell back to a stale plan.json. Do NOT retry blindly. Recover first: re-verify the plan (re-run completion verification), reset the session, or restore from the latest checkpoint under .swarm/plan-export/, then retry phase_complete.',
+				_ledgerReplayStaleReason: staleReason,
+			});
+		}
+		if (!plan && (await ledgerExists(dir))) {
+			plan = await replayFromLedger(dir);
+		}
+		const phaseObject = plan
+			? plan.phases.find((candidate) => candidate.id === phase)
+			: undefined;
+		if (plan) {
+			if (!phaseObject) {
+				return JSON.stringify({
 					success: false,
 					phase,
-					status: 'blocked' as const,
-					reason: 'LEAN_TURBO_PHASE_NOT_READY',
-					message: `Phase ${phase} cannot be completed: ${leanCheck.reason}`,
+					status: 'incomplete' as const,
+					reason: 'PHASE_NOT_IN_PLAN',
+					message: `Phase ${phase} is not present in the authoritative plan.`,
 					agentsDispatched,
 					agentsMissing: [],
-					warnings: [`Lean Turbo phase readiness: ${leanCheck.reason}`],
-				},
-				null,
-				2,
-			);
+					warnings,
+					gate_report: lockedPreflight,
+				});
+			}
+		} else if (fs.existsSync(validateSwarmPath(dir, 'plan.json'))) {
+			return JSON.stringify({
+				success: false,
+				phase,
+				status: 'incomplete' as const,
+				reason: 'PHASE_PLAN_UNREADABLE',
+				message:
+					'Plan exists but could not be read or rebuilt from the ledger; no phase transition was committed.',
+				agentsDispatched,
+				agentsMissing: [],
+				warnings,
+				gate_report: lockedPreflight,
+			});
 		}
+		// The close intent is the WAL record for the plan transition. Persist it
+		// only after the locked freshness and authoritative-plan validation, but
+		// before mutation, so rejected plans cannot publish misleading intents.
+		if (knowledgeEnabled) {
+			const closeIntent =
+				await phaseCompleteReceiptInternals.recordPhaseCloseIntent(
+					dir,
+					receiptPhaseLabel,
+					sessionID,
+				);
+			if (!closeIntent.ok) {
+				return JSON.stringify({
+					success: false,
+					phase,
+					status: 'incomplete' as const,
+					reason: 'PHASE_CLOSE_INTENT_FAILED',
+					message:
+						'Phase completion blocked: could not persist receipt phase-close intent.',
+					agentsDispatched,
+					agentsMissing: [],
+					warnings,
+					gate_report: lockedPreflight,
+					errors: [closeIntent.detail],
+					recovery: { kind: 'retry', action: 'phase_complete' },
+				});
+			}
+		}
+		const commitPreflight = await collectPhaseGateReport({
+			phase,
+			checks: preflightChecks,
+		});
+		if (commitPreflight.outcome !== 'pass') {
+			return JSON.stringify({
+				success: false,
+				phase,
+				status: 'blocked' as const,
+				reason: 'PHASE_PREFLIGHT_STALE',
+				message:
+					'Phase evidence or policy changed before the authoritative transition. No plan transition or completion event was written.',
+				agentsDispatched,
+				agentsMissing: [],
+				warnings,
+				gate_report: commitPreflight,
+				recovery: { kind: 'retry', action: 'phase_complete' },
+			});
+		}
+		const commitEvidenceRef = commitPreflight.entries
+			.find((entry) => entry.id === 'snapshot_identity')
+			?.evidenceRefs.find((reference) =>
+				reference.startsWith('phase-evidence:'),
+			);
+		const commitPolicyRef = commitPreflight.entries
+			.find((entry) => entry.id === 'snapshot_identity')
+			?.evidenceRefs.find((reference) => reference.startsWith('policy:'));
+		const expectedCommitEvidenceHash = commitEvidenceRef?.slice(
+			'phase-evidence:'.length,
+		);
+		const expectedCommitPolicyHash = commitPolicyRef?.slice('policy:'.length);
+		if (!expectedCommitEvidenceHash || !expectedCommitPolicyHash) {
+			return JSON.stringify({
+				success: false,
+				phase,
+				status: 'blocked' as const,
+				reason: 'PHASE_PREFLIGHT_STALE',
+				message:
+					'The commit-boundary evidence identity was unavailable. No plan transition or completion event was written.',
+				agentsDispatched,
+				agentsMissing: [],
+				warnings,
+				gate_report: commitPreflight,
+				recovery: { kind: 'retry', action: 'phase_complete' },
+			});
+		}
+		if (
+			plan &&
+			phaseObject &&
+			!['complete', 'completed', 'closed'].includes(phaseObject.status)
+		) {
+			phaseObject.status = 'complete';
+			try {
+				await phaseCompleteCommitInternals.savePlan(dir, plan, {
+					preserveCompletedStatuses: true,
+					planLockAlreadyHeld: true,
+					preCommitCheck: () => {
+						const currentPolicyHash = createHash('sha256')
+							.update(JSON.stringify(loadPluginConfigWithMeta(dir).config))
+							.digest('hex');
+						if (
+							computePhaseEvidenceSnapshot(dir) !==
+								expectedCommitEvidenceHash ||
+							currentPolicyHash !== expectedCommitPolicyHash
+						) {
+							throw new Error(
+								'PHASE_PREFLIGHT_STALE: evidence changed at the authoritative transition boundary',
+							);
+						}
+					},
+				});
+			} catch (error) {
+				if (
+					error instanceof Error &&
+					error.message.startsWith('PHASE_PREFLIGHT_STALE:')
+				) {
+					return JSON.stringify({
+						success: false,
+						phase,
+						status: 'blocked' as const,
+						reason: 'PHASE_PREFLIGHT_STALE',
+						message:
+							'Phase evidence changed at the authoritative transition boundary. No plan transition or completion event was written.',
+						agentsDispatched,
+						agentsMissing: [],
+						warnings,
+						gate_report: commitPreflight,
+						recovery: { kind: 'retry', action: 'phase_complete' },
+					});
+				}
+				throw error;
+			}
+			await takeSnapshotEvent(dir, plan).catch(() => undefined);
+		}
+	} finally {
+		if (phasePlanLock.lock._release) {
+			await phasePlanLock.lock._release().catch((error: unknown) => {
+				logger.warn(
+					'[phase_complete] Plan lock release failed:',
+					error instanceof Error ? error.message : String(error),
+				);
+			});
+		}
+	}
+	if (knowledgeEnabled) {
+		const receiptClose = await phaseCompleteReceiptInternals.commitPhaseClosed(
+			dir,
+			receiptPhaseLabel,
+			sessionID,
+		);
+		if (!receiptClose.ok) {
+			return JSON.stringify({
+				success: false,
+				phase,
+				status: 'incomplete' as const,
+				reason: 'PHASE_RECEIPT_CLOSE_PENDING',
+				message:
+					'Plan phase closed, but receipt lifecycle closure is pending reconciliation; retry phase_complete.',
+				agentsDispatched,
+				agentsMissing: [],
+				warnings: [...warnings, receiptClose.detail],
+				gate_report: preflightReport,
+				recovery: { kind: 'retry', action: 'phase_complete' },
+			});
+		}
+	}
+	const requiredAgentsEntry = preflightReport.entries.find(
+		(entry) => entry.id === 'required_agents',
+	);
+	if (requiredAgentsEntry) {
+		agentsDispatched.splice(
+			0,
+			agentsDispatched.length,
+			...requiredAgentsEntry.agentsDispatched,
+		);
 	}
 
 	// Knowledge config: load from plugin config so user overrides are respected.
@@ -1095,9 +1415,9 @@ export async function executePhaseComplete(
 
 	// Extract and store lessons from retrospective to knowledge.jsonl
 	if (
-		retroFound &&
-		retroEntry?.lessons_learned &&
-		retroEntry.lessons_learned.length > 0
+		acceptedRetro.found &&
+		acceptedRetro.entry?.lessons_learned &&
+		acceptedRetro.entry.lessons_learned.length > 0
 	) {
 		try {
 			// Infer project name from directory
@@ -1107,7 +1427,7 @@ export async function executePhaseComplete(
 			// lessons are enriched with v3 actionability fields before the Layer-5
 			// gate; quota knobs come from the dedicated knowledge.enrichment budget.
 			const curationResult = await curateAndStoreSwarm(
-				retroEntry.lessons_learned,
+				acceptedRetro.entry.lessons_learned,
 				projectName,
 				{ phase_number: phase },
 				dir,
@@ -1453,115 +1773,23 @@ export async function executePhaseComplete(
 		);
 	}
 
-	// Build the effective required-agents list.
-	// If the phase defines its own required_agents, use those instead of the global config.
-	// This allows non-code phases (acceptance, docs) to skip coder/reviewer/test_engineer requirements.
-	let phaseRequiredAgents: string[] | undefined;
-	let participationPlan: RuntimePlan | null = null;
-	try {
-		const plan = await loadPlan(dir);
-		if (!plan) throw new Error('plan unavailable');
-		participationPlan = plan;
-		const phaseObj = plan.phases.find((p) => p.id === phase);
-		phaseRequiredAgents = phaseObj?.required_agents;
-	} catch {
-		// plan.json missing or unreadable — fall through to config defaults
-	}
-	const configuredRequired = [
-		...(phaseRequiredAgents ?? phaseCompleteConfig.required_agents),
-	];
-	const effectiveRequired: string[] = [...configuredRequired];
-	const docsAddedByConfig =
-		phaseCompleteConfig.require_docs && !configuredRequired.includes('docs');
-	if (phaseCompleteConfig.require_docs && !effectiveRequired.includes('docs')) {
-		effectiveRequired.push('docs');
-	}
-
-	let docsEvidenceStatus: ParticipationReadResult['status'] | null = null;
-	if (effectiveRequired.includes('docs')) {
-		// Chat-start dispatch tracking is useful for role visibility, but it does
-		// not prove the docs Task finished successfully. Required docs therefore
-		// fail closed unless an exact durable completion receipt can be rebound to
-		// a readable plan identity for this phase.
-		crossSessionResult.agents.delete('docs');
-		const staleDocsIndex = agentsDispatched.indexOf('docs');
-		if (staleDocsIndex !== -1) agentsDispatched.splice(staleDocsIndex, 1);
-		if (participationPlan) {
-			const docsParticipation = readPhaseParticipation(
-				dir,
-				participationPlan,
-				phase,
-				'docs',
-			);
-			docsEvidenceStatus = docsParticipation.status;
-			if (docsParticipation.found) {
-				crossSessionResult.agents.add('docs');
-				agentsDispatched.push('docs');
-				agentsDispatched.sort();
-				warnings.push(
-					`Recovered durable docs participation proof for phase ${phase}.`,
-				);
-			}
-		}
-	}
-
-	// Compute missing agents using cross-session aggregated agents
-	let agentsMissing = effectiveRequired.filter(
-		(req) => !crossSessionResult.agents.has(req),
-	);
-
-	// Build warnings and determine success based on policy
-
-	// Plan.json fallback: if agents are missing after a session restart but all
-	// tasks in the phase are completed, treat the phase as closeable only when
-	// durable per-task gate evidence also proves the QA gates ran. A completed
-	// plan alone is not proof; it can be stale or hand-edited.
-	if (agentsMissing.length > 0) {
-		try {
-			const planPath = validateSwarmPath(dir, 'plan.json');
-			const planRaw = fs.readFileSync(planPath, 'utf-8');
-			const plan: {
-				phases: Array<{
-					id: number;
-					status: string;
-					tasks: Array<{ id: string; status: string }>;
-				}>;
-			} = JSON.parse(planRaw);
-			const targetPhase = plan.phases.find((p) => p.id === phase);
-			if (
-				targetPhase &&
-				targetPhase.tasks.length > 0 &&
-				canInferMissingAgentsFromTaskGates(agentsMissing) &&
-				(await allCompletedTasksHavePassedGateEvidence(dir, targetPhase.tasks))
-			) {
-				warnings.push(
-					`Agent dispatch fallback: all ${targetPhase.tasks.length} tasks in phase ${phase} are completed in plan.json and durable gate evidence passed. Clearing missing agents: ${agentsMissing.join(', ')}.`,
-				);
-				agentsMissing = [];
-			}
-		} catch {
-			// plan.json missing or unreadable — fall through to normal enforcement
-		}
-	}
-	const recoveryGuidance = buildMissingAgentRecoveryGuidance({
-		missing: agentsMissing,
-		docsAddedByConfig,
-		docsEvidenceStatus,
-		docsPlanReadable: participationPlan !== null,
-		policy: phaseCompleteConfig.policy,
-	});
+	// All authoritative blockers, including durable participation, were checked
+	// twice (before and under the commit lock). Do not re-run gates after the
+	// phase transition: a post-commit observation must never turn a committed
+	// phase into an apparent failure.
+	const agentsMissing = [...(requiredAgentsEntry?.agentsMissing ?? [])];
 
 	// Detect potential auto-repair of retrospective bundle
 	// If loaded from a retro-N task ID with schema_version 1.0.0 and valid task_complexity,
 	// it may have been auto-repaired from a malformed legacy format
 	const VALID_TASK_COMPLEXITY = ['trivial', 'simple', 'moderate', 'complex'];
-	const firstEntry = loadedRetroBundle?.entries?.[0] as
+	const firstEntry = acceptedRetro.bundle?.entries?.[0] as
 		| { task_complexity?: string }
 		| undefined;
 	if (
-		loadedRetroTaskId !== primaryRetroTaskId &&
-		loadedRetroTaskId?.startsWith('retro-') &&
-		loadedRetroBundle?.schema_version === '1.0.0' &&
+		acceptedRetro.taskId !== primaryRetroTaskId &&
+		acceptedRetro.taskId?.startsWith('retro-') &&
+		acceptedRetro.bundle?.schema_version === '1.0.0' &&
 		firstEntry?.task_complexity &&
 		VALID_TASK_COMPLEXITY.includes(firstEntry.task_complexity)
 	) {
@@ -1570,25 +1798,13 @@ export async function executePhaseComplete(
 		);
 	}
 
-	let success = true;
-	let status: PhaseCompleteResult['status'] = 'success';
+	const success = true;
+	const status: PhaseCompleteResult['status'] =
+		agentsMissing.length > 0 ? 'warned' : 'success';
 	const safeSummary = summary?.trim().slice(0, 500);
-	let message = safeSummary
+	const message = safeSummary
 		? `Phase ${phase} completed: ${safeSummary}`
 		: `Phase ${phase} completed`;
-
-	if (agentsMissing.length > 0) {
-		if (phaseCompleteConfig.policy === 'enforce') {
-			success = false;
-			status = 'incomplete';
-			message = `Phase ${phase} incomplete: missing required agents: ${agentsMissing.join(', ')}. ${recoveryGuidance}`;
-		} else {
-			status = 'warned';
-			warnings.push(
-				`Warning: phase ${phase} missing required agents: ${agentsMissing.join(', ')}`,
-			);
-		}
-	}
 
 	// Declare result early so the ledger-rebuild blocks can set result fields
 	// instead of returning early, allowing flow-through to the finalization block
@@ -1600,7 +1816,10 @@ export async function executePhaseComplete(
 		agentsDispatched,
 		agentsMissing,
 		warnings,
-		...(recoveryGuidance ? { recovery_guidance: recoveryGuidance } : {}),
+		gate_report: preflightReport,
+		...(phaseRecoveryGuidance
+			? { recovery_guidance: phaseRecoveryGuidance }
+			: {}),
 	};
 
 	// Plan-free code-change enforcement (issue #1744): when there's no plan.json,
@@ -1624,6 +1843,11 @@ export async function executePhaseComplete(
 				`Consider dispatching reviewer + test_engineer before completing future plan-free phases.`,
 		);
 	}
+	if (!hasPlan) {
+		warnings.push(
+			`Warning: failed to update plan.json phase status because no authoritative plan was found; phase ${phase} completed in plan-free mode.`,
+		);
+	}
 
 	// Record retrieval outcome for shown lessons from this phase, using the
 	// REAL outcome. Previously this was hardcoded `true` and ran before `success`
@@ -1631,9 +1855,9 @@ export async function executePhaseComplete(
 	// agents) could never record a 'failure' outcome, leaving the negative half
 	// of the outcome signal dead (G1). Now it runs after `success` is finalized.
 	if (
-		retroFound &&
-		retroEntry?.lessons_learned &&
-		retroEntry.lessons_learned.length > 0
+		acceptedRetro.found &&
+		acceptedRetro.entry?.lessons_learned &&
+		acceptedRetro.entry.lessons_learned.length > 0
 	) {
 		await updateRetrievalOutcome(dir, `Phase ${phase}`, success).catch(() => {
 			// Never throw out of phase-complete on a knowledge-store failure.
@@ -1699,18 +1923,12 @@ export async function executePhaseComplete(
 
 	const lockTaskId = `phase-complete-${Date.now()}`;
 	const eventsFilePath = 'events.jsonl';
-	// Derive agent from swarmState session context, fallback to 'phase-complete' sentinel
-	let agentName = 'phase-complete';
-	for (const [, agent] of swarmState?.activeAgent ?? []) {
-		agentName = agent;
-		break;
-	}
 	let lockResult: Awaited<ReturnType<typeof tryAcquireLock>> | undefined;
 	try {
 		lockResult = await tryAcquireLock(
 			dir,
 			eventsFilePath,
-			agentName,
+			phaseCommitAgent,
 			lockTaskId,
 		);
 	} catch (error) {
@@ -1748,26 +1966,6 @@ export async function executePhaseComplete(
 
 	// Reset phase state on success
 	if (success) {
-		if (knowledgeEnabled) {
-			const closeIntent =
-				await phaseCompleteReceiptInternals.recordPhaseCloseIntent(
-					dir,
-					receiptPhaseLabel,
-					sessionID,
-				);
-			if (!closeIntent.ok) {
-				return JSON.stringify({
-					...result,
-					success: false,
-					status: 'incomplete' as const,
-					message:
-						'Phase completion blocked: could not persist receipt phase-close intent.',
-					errors: [closeIntent.detail],
-					recovery_guidance:
-						'Resolve the receipt-ledger lock/storage issue and retry phase_complete.',
-				});
-			}
-		}
 		// Scheduled skill consolidation: opportunistic and explicitly non-blocking.
 		// It may call an LLM and write proposal files, so only launch it after the
 		// phase gates have accepted completion.
@@ -1916,277 +2114,6 @@ export async function executePhaseComplete(
 				detail = 'permission denied';
 			}
 			warnings.push(`Knowledge sweep failed for phase ${phase}: ${detail}`);
-		}
-
-		// Update plan.json phase status to complete via ledger-first savePlan
-		// Acquire lock on plan.json to prevent concurrent writes (F-03)
-		const planLockTaskId = `phase-complete-plan-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-		const planFilePath = 'plan.json';
-		let planLockResult: Awaited<ReturnType<typeof tryAcquireLock>> | undefined;
-		try {
-			planLockResult = await tryAcquireLock(
-				dir,
-				planFilePath,
-				agentName,
-				planLockTaskId,
-			);
-		} catch (error) {
-			// F-002: fail-closed on filesystem errors (not contention). The lock subsystem is
-			// in a bad state; writing without a lock on a read-modify-write file is unsafe.
-			// The pre-existing events.jsonl lock above uses soft-fail because events.jsonl is
-			// append-only; plan.json is RMW and needs fail-closed behavior.
-			return JSON.stringify({
-				success: false,
-				phase: args.phase,
-				status: 'incomplete' as const,
-				message: `Failed to acquire lock for plan.json: ${error instanceof Error ? error.message : String(error)}`,
-				agentsDispatched,
-				agentsMissing,
-				warnings,
-				errors: [error instanceof Error ? error.message : String(error)],
-				recovery_guidance:
-					'Resolve the filesystem issue (permissions, disk space, or .swarm/locks/ directory) and retry phase_complete.',
-			});
-		}
-		if (!planLockResult?.acquired) {
-			// F-001: hard-fail on contention, consistent with save-plan.ts:724-733 and
-			// update-task-status.ts:1114-1123. The tryAcquireLock retry config already
-			// handles transient contention (5 retries with exponential backoff), so a
-			// returned acquired: false after retries means real concurrent contention.
-			// plan.json is read-modify-write; proceeding without the lock creates a
-			// lost-update risk.
-			return JSON.stringify({
-				success: false,
-				phase: args.phase,
-				status: 'incomplete' as const,
-				message: `Plan write blocked: plan.json is locked by ${planLockResult.existing?.agent ?? 'another agent'}`,
-				agentsDispatched,
-				agentsMissing,
-				warnings,
-				errors: [
-					`Concurrent plan write detected — lock held by ${planLockResult.existing?.agent ?? 'another agent'} (task: ${planLockResult.existing?.taskId ?? 'unknown'})`,
-				],
-				recovery_guidance:
-					'Wait a moment and retry phase_complete. The lock will expire automatically if the holding agent fails.',
-			});
-		}
-
-		try {
-			const plan = await loadPlan(dir);
-			// #1269 finding 2: if loadPlan fell back to a STALE plan.json (the ledger
-			// hash mismatched, ledger replay threw, AND no critic-approved snapshot was
-			// available), refuse to mutate phase status against it instead of silently
-			// trusting plan.json. This MUST sit before any savePlan / plan.json write
-			// below; the plan.json lock acquired above is released by the finally block
-			// on this early return.
-			const runtimePlan = plan as RuntimePlan | null;
-			if (runtimePlan?._ledgerReplayStale === true) {
-				const staleReason =
-					runtimePlan._ledgerReplayStaleReason ?? 'unknown reason';
-				return JSON.stringify({
-					success: false,
-					phase: args.phase,
-					status: 'incomplete' as const,
-					message: `Plan write refused: plan.json is stale from a failed ledger replay (${staleReason}). Refusing to complete phase ${args.phase} against a known-stale plan.`,
-					agentsDispatched,
-					agentsMissing,
-					warnings,
-					errors: [`Stale plan from failed ledger replay: ${staleReason}`],
-					recovery_guidance:
-						'The ledger replay failed and no critic-approved snapshot was available, so loadPlan fell back to a stale plan.json. Do NOT retry blindly. Recover first: re-verify the plan (re-run completion verification), reset the session, or restore from the latest checkpoint under .swarm/plan-export/, then retry phase_complete.',
-					_ledgerReplayStaleReason: staleReason,
-				});
-			}
-			if (plan === null) {
-				// loadPlan() returned null (malformed JSON and no plan.md to migrate from)
-				// Try ledger-first rebuild before direct write
-				if (await ledgerExists(dir)) {
-					try {
-						const rebuilt = await replayFromLedger(dir);
-						if (rebuilt) {
-							const phaseObj = rebuilt.phases.find(
-								(p: { id: number }) => p.id === phase,
-							);
-							if (phaseObj) {
-								phaseObj.status = 'complete';
-								await savePlanWithAutoAcknowledgedRemovals(
-									dir,
-									rebuilt,
-									'phase_complete_rebuild_from_ledger',
-									'phase-complete rebuild from ledger',
-									{ planLockAlreadyHeld: true },
-								);
-								// After successful phase completion, take a snapshot
-								try {
-									await takeSnapshotEvent(dir, rebuilt).catch(() => {});
-								} catch {
-									// Snapshot failure is non-blocking
-								}
-								// Don't return here — flow through to the common finalization block
-								// which writes checkpoint artifacts and builds the final result
-								result.success = true;
-								result.status = 'success';
-							}
-						}
-					} catch {
-						// Rebuild failed, fall through to direct write
-					}
-				}
-				// Last resort: direct write
-				warnings.push(`Warning: failed to update plan.json phase status`);
-				try {
-					const planPath = validateSwarmPath(dir, 'plan.json');
-					const planRaw = fs.readFileSync(planPath, 'utf-8');
-					const plan = JSON.parse(planRaw);
-					const phaseObj = plan.phases.find(
-						(p: { id: number }) => p.id === phase,
-					);
-					if (phaseObj) {
-						phaseObj.status = 'complete';
-						// FR-002: validate + traceable emergency write (not a new writer).
-						await fallbackWritePlanWithTrace(
-							dir,
-							planPath,
-							plan,
-							phase,
-							warnings,
-						);
-					}
-				} catch {
-					/* fallback failed */
-				}
-			} else if (plan) {
-				const phaseObj = plan.phases.find(
-					(p: { id: number }) => p.id === phase,
-				);
-				if (phaseObj) {
-					phaseObj.status = 'complete';
-					await savePlan(dir, plan, {
-						preserveCompletedStatuses: true,
-						planLockAlreadyHeld: true,
-					});
-				}
-				// After successful phase completion, take a snapshot
-				try {
-					const plan = await loadPlan(dir);
-					if (plan) {
-						await takeSnapshotEvent(dir, plan).catch(() => {});
-					}
-				} catch {
-					// Snapshot failure is non-blocking
-				}
-			}
-		} catch (_error) {
-			// loadPlan() threw — this shouldn't happen for malformed JSON (loadPlan returns null instead)
-			// Try ledger-first rebuild before direct write
-			if (await ledgerExists(dir)) {
-				try {
-					const rebuilt = await replayFromLedger(dir);
-					if (rebuilt) {
-						const phaseObj = rebuilt.phases.find(
-							(p: { id: number }) => p.id === phase,
-						);
-						if (phaseObj) {
-							phaseObj.status = 'complete';
-							await savePlanWithAutoAcknowledgedRemovals(
-								dir,
-								rebuilt,
-								'phase_complete_rebuild_from_ledger',
-								'phase-complete rebuild from ledger',
-								{ planLockAlreadyHeld: true },
-							);
-							// After successful phase completion, take a snapshot
-							try {
-								await takeSnapshotEvent(dir, rebuilt).catch(() => {});
-							} catch {
-								// Snapshot failure is non-blocking
-							}
-							// Don't return here — flow through to the common finalization block
-							// which writes checkpoint artifacts and builds the final result
-							result.success = true;
-							result.status = 'success';
-						}
-					}
-				} catch {
-					// Rebuild failed, fall through to direct write
-				}
-			}
-			// Last resort: direct write
-			warnings.push(`Warning: failed to update plan.json phase status`);
-			try {
-				const planPath = validateSwarmPath(dir, 'plan.json');
-				const planRaw = fs.readFileSync(planPath, 'utf-8');
-				const plan = JSON.parse(planRaw);
-				const phaseObj = plan.phases.find(
-					(p: { id: number }) => p.id === phase,
-				);
-				if (phaseObj) {
-					phaseObj.status = 'complete';
-					// FR-002: validate + traceable emergency write (not a new writer).
-					await fallbackWritePlanWithTrace(
-						dir,
-						planPath,
-						plan,
-						phase,
-						warnings,
-					);
-				}
-			} catch {
-				/* fallback failed */
-			}
-		} finally {
-			if (planLockResult?.acquired && planLockResult.lock._release) {
-				try {
-					await planLockResult.lock._release();
-				} catch (releaseError) {
-					logger.warn(
-						'[phase_complete] Plan lock release failed (non-blocking):',
-						releaseError instanceof Error
-							? releaseError.message
-							: String(releaseError),
-					);
-				}
-			}
-		}
-
-		if (knowledgeEnabled) {
-			const durableReceiptPlan = receiptPlan
-				? await loadPlan(dir).catch(() => null)
-				: null;
-			const durableReceiptPhase = durableReceiptPlan?.phases.find(
-				(candidate) => candidate.id === phase,
-			);
-			if (
-				receiptPlan &&
-				(!durableReceiptPhase ||
-					!['complete', 'completed', 'closed'].includes(
-						durableReceiptPhase.status,
-					))
-			) {
-				// The plan mutation result remains authoritative for this tool call.
-				// Withhold only the receipt phase_closed transition when the durable
-				// plan cannot confirm completion; keeping the receipt lifecycle open is
-				// fail-safe and can be reconciled by a later phase_complete or close.
-				warnings.push(
-					`Receipt phase-close commit withheld: durable phase ${phase} is not complete.`,
-				);
-			} else {
-				const receiptClose =
-					await phaseCompleteReceiptInternals.commitPhaseClosed(
-						dir,
-						receiptPhaseLabel,
-						sessionID,
-					);
-				if (!receiptClose.ok) {
-					result.success = false;
-					result.status = 'incomplete';
-					result.message =
-						'Plan phase closed, but receipt lifecycle closure is pending reconciliation; retry phase_complete.';
-					warnings.push(
-						`Receipt phase-close commit failed: ${receiptClose.detail}`,
-					);
-				}
-			}
 		}
 	}
 

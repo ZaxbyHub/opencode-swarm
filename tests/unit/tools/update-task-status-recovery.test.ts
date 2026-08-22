@@ -29,6 +29,7 @@ import {
 	recoverTaskStateFromDelegations,
 } from '../../../src/tools/update-task-status';
 import { buildExactTaskEvidence } from '../../helpers/update-task-status-fixtures';
+import { createWorkflowTestSessionWithPassedTask } from '../../helpers/workflow-session-factory';
 
 const PLAN_JSON = JSON.stringify({
 	schema_version: '1.0.0',
@@ -687,6 +688,20 @@ describe('checkReviewerGate structured diagnostic messages (Task 1.2)', () => {
 		expect(result.reason).toContain('test_engineer');
 		// Rehydrated count should be 1 (only session-1 has sessionRehydratedAt > 0)
 		expect(result.reason).toContain('Rehydrated sessions: 1');
+	});
+
+	it('corrupt evidence recovery guidance names repair_gate_evidence instead of manual deletion', () => {
+		fs.mkdirSync(path.join(tmpDir, '.swarm', 'evidence'), { recursive: true });
+		fs.writeFileSync(evidencePath(tmpDir, '1.1'), '{ invalid json }');
+
+		const session = createWorkflowTestSessionWithPassedTask('1.1');
+		swarmState.agentSessions.set('session-1', session);
+
+		const result = checkReviewerGate('1.1', tmpDir);
+
+		expect(result.blocked).toBe(true);
+		expect(result.reason).toContain('repair_gate_evidence');
+		expect(result.reason).not.toContain('delete it to fall through');
 	});
 
 	// -------------------------------------------------------------------------

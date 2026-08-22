@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
@@ -302,7 +301,14 @@ describe('phase_complete retrospective gate - ADVERSARIAL ATTACKS', () => {
 			// Should be blocked because the bundle fails validation
 			expect(parsed.success).toBe(false);
 			expect(parsed.status).toBe('blocked');
-			expect(parsed.reason).toBe('RETROSPECTIVE_MISSING');
+			expect([
+				'RETROSPECTIVE_SCHEMA_INVALID',
+				'SNAPSHOT_IDENTITY_ERROR',
+			]).toContain(parsed.reason);
+			const decisiveGate = parsed.gate_report.entries.find(
+				(entry: { code: string }) => entry.code === parsed.reason,
+			);
+			expect(['block', 'error']).toContain(decisiveGate?.outcome);
 		});
 
 		test('entry with inherited properties is blocked by Zod validation', async () => {
@@ -341,7 +347,16 @@ describe('phase_complete retrospective gate - ADVERSARIAL ATTACKS', () => {
 			// Should be blocked
 			expect(parsed.success).toBe(false);
 			expect(parsed.status).toBe('blocked');
-			expect(parsed.reason).toBe('RETROSPECTIVE_MISSING');
+			expect([
+				'RETROSPECTIVE_SCHEMA_INVALID',
+				'SNAPSHOT_IDENTITY_ERROR',
+			]).toContain(parsed.reason);
+			const decisiveEntries = parsed.gate_report.entries.filter(
+				(entry: { id: string; outcome: string }) =>
+					(entry.id === 'retrospective' || entry.id === 'snapshot_identity') &&
+					(entry.outcome === 'block' || entry.outcome === 'error'),
+			);
+			expect(decisiveEntries.length).toBeGreaterThan(0);
 		});
 	});
 
@@ -396,7 +411,8 @@ describe('phase_complete retrospective gate - ADVERSARIAL ATTACKS', () => {
 			// Should fail because phase_number "1" !== 1 (strict equality)
 			expect(parsed.success).toBe(false);
 			expect(parsed.status).toBe('blocked');
-			expect(parsed.reason).toBe('RETROSPECTIVE_MISSING');
+			expect(parsed.reason).toBe('RETROSPECTIVE_SCHEMA_INVALID');
+			expect(parsed.message).toContain('Schema validation failed');
 		});
 
 		test('phase_number = true should fail strict equality check', async () => {
@@ -447,7 +463,8 @@ describe('phase_complete retrospective gate - ADVERSARIAL ATTACKS', () => {
 
 			expect(parsed.success).toBe(false);
 			expect(parsed.status).toBe('blocked');
-			expect(parsed.reason).toBe('RETROSPECTIVE_MISSING');
+			expect(parsed.reason).toBe('RETROSPECTIVE_SCHEMA_INVALID');
+			expect(parsed.message).toContain('Schema validation failed');
 		});
 	});
 
@@ -500,7 +517,8 @@ describe('phase_complete retrospective gate - ADVERSARIAL ATTACKS', () => {
 
 			expect(parsed.success).toBe(false);
 			expect(parsed.status).toBe('blocked');
-			expect(parsed.reason).toBe('RETROSPECTIVE_MISSING');
+			expect(parsed.reason).toBe('RETROSPECTIVE_SCHEMA_INVALID');
+			expect(parsed.message).toContain('Schema validation failed');
 		});
 
 		test('verdict = "PASS" should be rejected', async () => {
@@ -551,12 +569,13 @@ describe('phase_complete retrospective gate - ADVERSARIAL ATTACKS', () => {
 
 			expect(parsed.success).toBe(false);
 			expect(parsed.status).toBe('blocked');
-			expect(parsed.reason).toBe('RETROSPECTIVE_MISSING');
+			expect(parsed.reason).toBe('RETROSPECTIVE_SCHEMA_INVALID');
+			expect(parsed.message).toContain('Schema validation failed');
 		});
 	});
 
 	describe('Attack Vector 5: Large entry array denial-of-service', () => {
-		test('bundle with 100,000 non-retro entries before valid retro should eventually find it', async () => {
+		test('bundle with 100,000 non-retro entries before valid retro is rejected closed', async () => {
 			fs.mkdirSync(path.join(tempDir, '.opencode'), { recursive: true });
 			fs.writeFileSync(
 				path.join(tempDir, '.opencode', 'opencode-swarm.json'),
@@ -616,8 +635,18 @@ describe('phase_complete retrospective gate - ADVERSARIAL ATTACKS', () => {
 			});
 			const parsed = JSON.parse(result);
 
-			// Should succeed, albeit slowly (this is a performance DoS, not a bypass)
-			expect(parsed.success).toBe(true);
+			expect(parsed.success).toBe(false);
+			expect(parsed.status).toBe('blocked');
+			expect([
+				'RETROSPECTIVE_SCHEMA_INVALID',
+				'SNAPSHOT_IDENTITY_ERROR',
+			]).toContain(parsed.reason);
+			const decisiveEntries = parsed.gate_report.entries.filter(
+				(entry: { id: string; outcome: string }) =>
+					(entry.id === 'retrospective' || entry.id === 'snapshot_identity') &&
+					(entry.outcome === 'block' || entry.outcome === 'error'),
+			);
+			expect(decisiveEntries.length).toBeGreaterThan(0);
 		}, 30000); // 30 second timeout for this DoS test
 	});
 
@@ -673,9 +702,10 @@ describe('phase_complete retrospective gate - ADVERSARIAL ATTACKS', () => {
 				});
 				const parsed = JSON.parse(result);
 
-				// If we get here without crashing, code handles it
-				// But it should still block because null.type === 'retrospective' is false
 				expect(parsed.success).toBe(false);
+				expect(parsed.status).toBe('blocked');
+				expect(parsed.reason).toBe('RETROSPECTIVE_SCHEMA_INVALID');
+				expect(parsed.message).toContain('Schema validation failed');
 			} catch (error) {
 				// If it crashes, that's a bug - report it
 				expect.fail(`Crashed with null entry: ${error}`);
@@ -789,7 +819,8 @@ describe('phase_complete retrospective gate - ADVERSARIAL ATTACKS', () => {
 
 			expect(parsed.success).toBe(false);
 			expect(parsed.status).toBe('blocked');
-			expect(parsed.reason).toBe('RETROSPECTIVE_MISSING');
+			expect(parsed.reason).toBe('RETROSPECTIVE_SCHEMA_INVALID');
+			expect(parsed.message).toContain('Schema validation failed');
 		});
 	});
 
@@ -842,7 +873,8 @@ describe('phase_complete retrospective gate - ADVERSARIAL ATTACKS', () => {
 
 			expect(parsed.success).toBe(false);
 			expect(parsed.status).toBe('blocked');
-			expect(parsed.reason).toBe('RETROSPECTIVE_MISSING');
+			expect(parsed.reason).toBe('RETROSPECTIVE_SCHEMA_INVALID');
+			expect(parsed.message).toContain('Schema validation failed');
 		});
 	});
 
@@ -884,7 +916,8 @@ describe('phase_complete retrospective gate - ADVERSARIAL ATTACKS', () => {
 
 			expect(parsed.success).toBe(false);
 			expect(parsed.status).toBe('blocked');
-			expect(parsed.reason).toBe('RETROSPECTIVE_MISSING');
+			expect(parsed.reason).toBe('RETROSPECTIVE_SCHEMA_INVALID');
+			expect(parsed.message).toContain('Schema validation failed');
 		});
 
 		test('entry missing verdict should not bypass gate', async () => {
@@ -924,7 +957,8 @@ describe('phase_complete retrospective gate - ADVERSARIAL ATTACKS', () => {
 
 			expect(parsed.success).toBe(false);
 			expect(parsed.status).toBe('blocked');
-			expect(parsed.reason).toBe('RETROSPECTIVE_MISSING');
+			expect(parsed.reason).toBe('RETROSPECTIVE_SCHEMA_INVALID');
+			expect(parsed.message).toContain('Schema validation failed');
 		});
 	});
 });

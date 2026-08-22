@@ -119,7 +119,9 @@ function setupBaseDir(dir: string): void {
 				name: 'Phase 1',
 				status: 'in_progress',
 				type: 'code',
-				tasks: [{ id: '1.1', status: 'pending', description: 'Test task' }],
+				tasks: [
+					{ id: '1.1', phase: 1, status: 'pending', description: 'Test task' },
+				],
 			},
 		],
 	};
