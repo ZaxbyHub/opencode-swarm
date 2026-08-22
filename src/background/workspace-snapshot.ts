@@ -7,6 +7,7 @@ import {
 	type BunCompatSubprocess,
 	bunSpawn,
 } from '../utils/bun-compat.js';
+import { resolveGitExecutable } from '../utils/git-executable.js';
 import type { BackgroundWorkspaceSnapshot } from './pending-delegations.js';
 
 const GIT_SNAPSHOT_TIMEOUT_MS = 3_000;
@@ -119,13 +120,17 @@ function runGit(
 	args: string[],
 	timeoutMs = GIT_SNAPSHOT_TIMEOUT_MS,
 ): string | null {
-	const result = _internals.spawnSync('git', ['-C', directory, ...args], {
-		cwd: directory,
-		encoding: 'utf-8',
-		timeout: timeoutMs,
-		maxBuffer: GIT_SNAPSHOT_MAX_BUFFER,
-		stdio: ['ignore', 'pipe', 'pipe'],
-	});
+	const result = _internals.spawnSync(
+		_internals.resolveGitExecutable(),
+		['-C', directory, ...args],
+		{
+			cwd: directory,
+			encoding: 'utf-8',
+			timeout: timeoutMs,
+			maxBuffer: GIT_SNAPSHOT_MAX_BUFFER,
+			stdio: ['ignore', 'pipe', 'pipe'],
+		},
+	);
 	if (result.error || result.status !== 0) return null;
 	return typeof result.stdout === 'string' ? result.stdout.trimEnd() : null;
 }
@@ -162,7 +167,10 @@ async function runGitAsync(
 			timeout: timeoutMs,
 			killProcessTree: true,
 		};
-		proc = _internals.bunSpawn(['git', '-C', directory, ...args], options);
+		proc = _internals.bunSpawn(
+			[_internals.resolveGitExecutable(), '-C', directory, ...args],
+			options,
+		);
 		let overflowed = false;
 		const stopOverflow = () => {
 			overflowed = true;
@@ -237,13 +245,17 @@ function runGitDetailed(
 	args: string[],
 	timeoutMs: number,
 ): GitCallResult {
-	const result = _internals.spawnSync('git', ['-C', directory, ...args], {
-		cwd: directory,
-		encoding: 'utf-8',
-		timeout: timeoutMs,
-		maxBuffer: _internals.gitSnapshotMaxBuffer,
-		stdio: ['ignore', 'pipe', 'pipe'],
-	});
+	const result = _internals.spawnSync(
+		_internals.resolveGitExecutable(),
+		['-C', directory, ...args],
+		{
+			cwd: directory,
+			encoding: 'utf-8',
+			timeout: timeoutMs,
+			maxBuffer: _internals.gitSnapshotMaxBuffer,
+			stdio: ['ignore', 'pipe', 'pipe'],
+		},
+	);
 	const errorCode = (result.error as NodeJS.ErrnoException | undefined)?.code;
 	if (errorCode === 'ENOBUFS') return { ok: false, reason: 'buffer-truncated' };
 	if (errorCode === 'ETIMEDOUT') return { ok: false, reason: 'timeout' };
@@ -290,7 +302,10 @@ async function runGitAsyncDetailed(
 			stderr: 'pipe',
 			killProcessTree: true,
 		};
-		proc = _internals.bunSpawn(['git', '-C', directory, ...args], options);
+		proc = _internals.bunSpawn(
+			[_internals.resolveGitExecutable(), '-C', directory, ...args],
+			options,
+		);
 		let overflowed = false;
 		const stopOverflow = () => {
 			overflowed = true;
@@ -355,7 +370,7 @@ export function readGitTextAtRevision(
 		return null;
 	}
 	const result = _internals.spawnSync(
-		'git',
+		_internals.resolveGitExecutable(),
 		['-C', directory, 'show', `${revision}:${relativePath}`],
 		{
 			cwd: directory,
@@ -1658,6 +1673,12 @@ export function digest(text: string): string {
 export const _internals: {
 	spawnSync: SpawnSync;
 	bunSpawn: typeof bunSpawn;
+	/**
+	 * Test seam for git binary resolution (issue #2236 hardening, lane C1b) —
+	 * see `src/utils/git-executable.ts`. Allows tests to stub a deterministic
+	 * value instead of exercising the real filesystem-probing resolver.
+	 */
+	resolveGitExecutable: typeof resolveGitExecutable;
 	gitTimeoutMs: number;
 	yieldControl: () => Promise<void>;
 	parsePorcelainV2Snapshot: typeof parsePorcelainV2Snapshot;
@@ -1687,6 +1708,7 @@ export const _internals: {
 } = {
 	spawnSync: child_process.spawnSync,
 	bunSpawn,
+	resolveGitExecutable,
 	gitTimeoutMs: GIT_SNAPSHOT_TIMEOUT_MS,
 	yieldControl: () => new Promise<void>((resolve) => setImmediate(resolve)),
 	parsePorcelainV2Snapshot,

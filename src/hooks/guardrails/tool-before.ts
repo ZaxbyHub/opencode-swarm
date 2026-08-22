@@ -21,6 +21,7 @@ import {
 	resolveGuardrailsConfig,
 	stripKnownSwarmPrefix,
 } from '../../config/schema';
+import { setMacOSSandboxPolicy } from '../../sandbox/executor';
 import { resolveScopePaths } from '../../sandbox/scope-resolver';
 import { sanitizeDiagnosticText } from '../../scope/path-identity';
 import type { ScopeLeaseCandidateInput } from '../../scope/scope-lease-renewal';
@@ -171,6 +172,17 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		rememberReviewerScopeWrite,
 		rememberScopeLeaseCandidate,
 	} = ctx;
+
+	// Issue #2236 F6a item 3: propagate the resolved macOS sandbox activation
+	// gate to the sandbox executor factory. Must run here, synchronously, at
+	// handler-creation time (hook registration, which happens at plugin init
+	// — src/index.ts calls createGuardrailsHooks before any tool call can
+	// occur) so it is set before the first `getSandboxExecutor()` call inside
+	// `applySandboxExecution` below. Every consumer of `getExecutor()`
+	// (this handler, `/swarm diagnose`, guardrails/index) then observes the
+	// same gated result — defaults to false (opt-in) until a real macOS host
+	// has verified the production SBPL profile (see docs/configuration.md).
+	setMacOSSandboxPolicy(cfg.sandbox_macos_enabled ?? false);
 
 	/**
 	 * Issue #2063 B4/B5 — containment options, computed once per handler.
@@ -1295,7 +1307,28 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		if (resolved.paths.length === 0) return;
 
 		try {
-			const wrappedCommand = executor.wrapCommand(rawCommand, resolved.paths);
+			// Issue #2236 F6b: bake the macOS DYLD-stripping env hardening
+			// (DYLD_INSERT_LIBRARIES/DYLD_LIBRARY_PATH/DYLD_FRAMEWORK_PATH/
+			// DYLD_ROOT_PATH -> null, PATH -> the base-OS bin dirs) into the
+			// wrapped command via wrapCommand's 4th parameter, which emits
+			// SBPL (setenv)/(unsetenv) primitives. getEnvOverrides() was
+			// previously declared on every executor but had ZERO production
+			// callers — this is macOS ONLY by explicit user decision (F6c):
+			// Windows strong mode's getEnvOverrides() returns `PATH: null`,
+			// and applying that to real commands for the first time is a
+			// separate, riskier change tracked in a follow-up issue. Linux
+			// Bubblewrap's getEnvOverrides() is `{}` (bwrap enforces via CLI
+			// flags, not env), so gating by mechanism costs it nothing.
+			const envOverrides =
+				executor.mechanism === 'sandbox-exec'
+					? executor.getEnvOverrides()
+					: undefined;
+			const wrappedCommand = executor.wrapCommand(
+				rawCommand,
+				resolved.paths,
+				undefined,
+				envOverrides,
+			);
 			toolArgs.command = wrappedCommand;
 			markToolExecutionSandboxWrapped(sessionID, callID);
 

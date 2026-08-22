@@ -1,33 +1,43 @@
 ﻿/**
  * Tests for macOS sandbox implementation:
- * - src/sandbox/executors/macos.ts (MacOSSandboxExecutor)
+ * - src/sandbox/macos/sandbox-exec-executor.ts (MacOSSandboxExecutor)
  * - src/sandbox/macos/edge-cases.ts (macOS-specific security detection)
  *
- * Platform notes:
- * - Tests that use sandbox-exec are skipped on non-macOS platforms.
- * - Tests that probe macOS-specific paths (/System/Library, etc.) are skipped on non-macOS.
- * - The placeholder MacOSSandboxExecutor throws on construction until Phase 3.
- * - The _internals DI seam will be added in Phase 3 alongside the real implementation.
+ * Issue #2236 F6a item 4: this file's MacOSSandboxExecutor suite previously
+ * self-disabled on macOS CI via `if (!executor.isAvailable()) return;`
+ * guards (the pre-F6 probe always failed, so isAvailable() was always
+ * false) — silent no-ops that let the broken `sandbox-exec --version`
+ * probe survive undetected. The suite is now seam-driven: process.platform
+ * is overridden to 'darwin' via the established Object.defineProperty
+ * pattern (see tests/unit/config/cache-paths.test.ts) and
+ * _internals.probeSandboxExec is mocked, so these tests exercise the real
+ * MacOSSandboxExecutor logic and assert regardless of the host platform
+ * actually running the suite.
+ *
+ * Coverage split (FR-006 500-line cap — planned up front, not a cascading
+ * split): the SBPL env-override emission tests live in
+ * tests/unit/sandbox/macos-env-hardening.test.ts, and the probe's own
+ * exit-code/invocation-shape/memoization tests live in
+ * tests/unit/sandbox/macos-probe.test.ts. This file covers the executor's
+ * constructor, isAvailable()/wrapCommand()/disable() behavioral contract,
+ * and the macOS-specific edge-case detectors.
  */
 
-import { describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 
 const isMac = process.platform === 'darwin';
-const isWindows = process.platform === 'win32';
-const isLinux = process.platform === 'linux';
 
 // ---------------------------------------------------------------------------
-// macOS executor ΓÇö import (placeholder throws on construction)
+// macOS executor
 // ---------------------------------------------------------------------------
 
-// The actual implementation will be at src/sandbox/executors/macos.ts.
-// The placeholder throws on construction. Real tests will be uncommented
-// in Phase 3 when the implementation exists.
-// _internals will be exported in Phase 3 for DI-based testing.
-import { MacOSSandboxExecutor } from '../../../src/sandbox/macos/sandbox-exec-executor';
+import {
+	_internals,
+	MacOSSandboxExecutor,
+} from '../../../src/sandbox/macos/sandbox-exec-executor';
 
 // ---------------------------------------------------------------------------
-// macOS edge-cases ΓÇö real implementations
+// macOS edge-cases — real implementations
 // ---------------------------------------------------------------------------
 
 import {
@@ -41,21 +51,39 @@ import {
 } from '../../../src/sandbox/macos/edge-cases';
 
 // ---------------------------------------------------------------------------
-// Test suite ΓÇö MacOSSandboxExecutor
+// Seam helpers — platform override + probe mock, save/restore per test.
+// ---------------------------------------------------------------------------
+
+const originalPlatform = process.platform;
+const originalProbeSandboxExec = _internals.probeSandboxExec;
+
+function setPlatform(value: NodeJS.Platform): void {
+	Object.defineProperty(process, 'platform', { value, configurable: true });
+}
+
+function restorePlatform(): void {
+	Object.defineProperty(process, 'platform', {
+		value: originalPlatform,
+		configurable: true,
+	});
+}
+
+// ---------------------------------------------------------------------------
+// Test suite — MacOSSandboxExecutor
 // ---------------------------------------------------------------------------
 
 describe('MacOSSandboxExecutor', () => {
 	// -----------------------------------------------------------------------
-	// 1. Constructor
+	// 1. Constructor — real-platform behavior (the platform guard itself)
 	// -----------------------------------------------------------------------
 
 	describe('constructor', () => {
-		// MacOSSandboxExecutor is implemented (issue #1729 macOS quarantine:
-		// the previous "throws on construction" placeholders were stale). On
-		// non-darwin the constructor throws 'MacOSSandboxExecutor not yet
-		// implemented'; on darwin it constructs and self-disables when
-		// sandbox-exec is unavailable. The tests below exercise the new
-		// contract on each platform.
+		// These specifically exercise the REAL host's process.platform value
+		// (not the seam) because the assertion under test IS the platform
+		// guard — on real darwin the constructor probes and constructs; on
+		// every other real platform it throws immediately, before any probe
+		// runs. skipIf partitions the two branches across whichever platform
+		// actually runs the suite.
 
 		test.skipIf(!isMac)('accepts scopePaths array on darwin', () => {
 			const executor = new MacOSSandboxExecutor(['/Users/user/scope']);
@@ -87,312 +115,119 @@ describe('MacOSSandboxExecutor', () => {
 	});
 
 	// -----------------------------------------------------------------------
-	// 2. isAvailable()
+	// 2-5. Seam-driven behavior — regardless of host (#2236 F6a item 4)
 	// -----------------------------------------------------------------------
 
-	describe('isAvailable()', () => {
-		test('returns false on non-macOS platforms', () => {
-			// On Windows/Linux, sandbox-exec doesn't exist.
-			// The executor should return false without spawning sandbox-exec.
-			// Contract: isAvailable() returns false on non-macOS without attempting probe.
-			if (isMac) {
-				// On macOS the real test will be written in Phase 3.
-				// For now, document the contract:
-				expect(true).toBe(true);
-				return;
-			}
-			// On non-macOS: isAvailable() must return false without throwing.
-			// The placeholder MacOSSandboxExecutor throws on construction,
-			// but the contract requires isAvailable() to be callable on non-macOS.
-			// Once Phase 3 implements it:
-			// const executor = new MacOSSandboxExecutor([]);
-			// expect(executor.isAvailable()).toBe(false);
-			// For now with the placeholder that throws, we verify the platform contract:
-			expect(isMac).toBe(false); // This test only runs on non-macOS
+	describe('seam-driven — regardless of host', () => {
+		beforeEach(() => {
+			setPlatform('darwin');
+			_internals.resetProbeMemo();
 		});
 
-		test('returns boolean on all platforms when implemented (Phase 3)', () => {
-			// Once implemented:
-			// const executor = new MacOSSandboxExecutor([]);
-			// expect(typeof executor.isAvailable()).toBe('boolean');
-			expect(true).toBe(true);
-		});
-	});
-
-	// -----------------------------------------------------------------------
-	// 3. wrapCommand()
-	// -----------------------------------------------------------------------
-
-	describe('wrapCommand()', () => {
-		test('returns raw command on non-macOS (passthrough mode)', () => {
-			// On non-macOS, wrapCommand returns the raw command (passthrough).
-			// This is the sandbox-disabled contract.
-			if (isMac) {
-				// Phase 3 will test actual sandbox-exec behavior on macOS.
-				expect(true).toBe(true);
-				return;
-			}
-			// On non-macOS: no sandbox wrapping needed.
-			// Once Phase 3 implements and the executor is constructable:
-			// const executor = new MacOSSandboxExecutor([]);
-			// if (!executor.isAvailable()) {
-			//   expect(executor.wrapCommand('echo hello', [])).toBe('echo hello');
-			// }
-			expect(true).toBe(true);
+		afterEach(() => {
+			restorePlatform();
+			_internals.probeSandboxExec = originalProbeSandboxExec;
+			_internals.resetProbeMemo();
 		});
 
-		test('generates sandbox-exec -f <profile> command on macOS (Phase 3)', () => {
-			if (!isMac) return; // Only runs on macOS
-			// Once implemented:
-			// const executor = new MacOSSandboxExecutor(['/scope']);
-			// const result = executor.wrapCommand('echo hello', []);
-			// expect(result).toContain('sandbox-exec');
-			// expect(result).toContain('-f');
-			// expect(result).toMatch(/sandbox-exec -f .+ bash -c/);
-			expect(true).toBe(true); // Placeholder
-		});
+		describe('isAvailable()', () => {
+			test('returns true when probeSandboxExec succeeds', () => {
+				_internals.probeSandboxExec = mock(() => true);
+				const executor = new MacOSSandboxExecutor([]);
+				expect(executor.isAvailable()).toBe(true);
+			});
 
-		test('includes scope paths in sandbox profile on macOS (Phase 3)', () => {
-			if (!isMac) return;
-			// Once implemented: scope paths should be allowed in the generated profile.
-			expect(true).toBe(true);
-		});
+			test('returns false when probeSandboxExec fails', () => {
+				_internals.probeSandboxExec = mock(() => false);
+				const executor = new MacOSSandboxExecutor([]);
+				expect(executor.isAvailable()).toBe(false);
+			});
 
-		test('includes tempDir in sandbox profile on macOS (Phase 3)', () => {
-			if (!isMac) return;
-			// Once implemented: tempDir should be allowed in the generated profile.
-			expect(true).toBe(true);
-		});
-
-		test('embeds shell command in sandbox-exec invocation on macOS (Phase 3)', () => {
-			if (!isMac) return;
-			// Once implemented: command should be passed to bash -c inside sandbox-exec.
-			expect(true).toBe(true);
-		});
-
-		test('returns raw command when executor is disabled (Phase 3)', () => {
-			// Once implemented:
-			// const executor = new MacOSSandboxExecutor([]);
-			// executor.disable('test');
-			// expect(executor.wrapCommand('echo hello', [])).toBe('echo hello');
-			expect(true).toBe(true);
-		});
-	});
-
-	// -----------------------------------------------------------------------
-	// 4. wrapCommand() envOverrides (macOS only — Phase 3)
-	// -----------------------------------------------------------------------
-
-	describe('wrapCommand() envOverrides (macOS only)', () => {
-		test.skipIf(!isMac)(
-			'omitted envOverrides produces no setenv/unenv SBPL primitives',
-			() => {
-				const executor = new MacOSSandboxExecutor(['/scope'], '/tmp');
-				if (!executor.isAvailable()) return;
-				const result = executor.wrapCommand(
-					'echo hello',
-					[],
-					undefined,
-					undefined,
-				);
-				expect(result).not.toContain('(setenv');
-				expect(result).not.toContain('(unsetenv');
-			},
-		);
-
-		test.skipIf(!isMac)(
-			'empty envOverrides {} produces no setenv/unsetenv SBPL primitives',
-			() => {
-				const executor = new MacOSSandboxExecutor(['/scope'], '/tmp');
-				if (!executor.isAvailable()) return;
-				const result = executor.wrapCommand('echo hello', [], undefined, {});
-				expect(result).not.toContain('(setenv');
-				expect(result).not.toContain('(unsetenv');
-			},
-		);
-
-		test.skipIf(!isMac)(
-			'string value produces sandbox-exec wrapped command (profile contains env)',
-			() => {
-				const executor = new MacOSSandboxExecutor(['/scope'], '/tmp');
-				if (!executor.isAvailable()) return;
-				const result = executor.wrapCommand('echo hello', [], undefined, {
-					MY_VAR: 'my_value',
+			test('returns false without throwing when probeSandboxExec itself throws', () => {
+				_internals.probeSandboxExec = mock(() => {
+					throw new Error('unexpected probe failure');
 				});
-				// The result should be a sandbox-exec -f <profile> bash -c '...' command
+				expect(() => new MacOSSandboxExecutor([])).not.toThrow();
+				const executor = new MacOSSandboxExecutor([]);
+				expect(executor.isAvailable()).toBe(false);
+			});
+		});
+
+		describe('wrapCommand()', () => {
+			test('generates a <sandbox-exec> -f <profile> bash -c command when available', () => {
+				_internals.probeSandboxExec = mock(() => true);
+				const executor = new MacOSSandboxExecutor(['/scope']);
+				const result = executor.wrapCommand('echo hello', []);
 				expect(result).toContain('sandbox-exec');
 				expect(result).toContain('-f');
-			},
-		);
+				expect(result).toMatch(/sandbox-exec -f .+ bash -c/);
+			});
 
-		test.skipIf(!isMac)(
-			'null value produces sandbox-exec wrapped command with unsetenv in profile',
-			() => {
-				const executor = new MacOSSandboxExecutor(['/scope'], '/tmp');
-				if (!executor.isAvailable()) return;
-				const result = executor.wrapCommand('echo hello', [], undefined, {
-					MY_VAR: null,
-				});
-				expect(result).toContain('sandbox-exec');
-			},
-		);
+			test('embeds the shell command inside bash -c', () => {
+				_internals.probeSandboxExec = mock(() => true);
+				const executor = new MacOSSandboxExecutor(['/scope']);
+				const result = executor.wrapCommand('echo unique-marker-42', []);
+				expect(result).toContain('unique-marker-42');
+			});
 
-		test.skipIf(!isMac)(
-			'multiple env overrides are all present in profile',
-			() => {
-				const executor = new MacOSSandboxExecutor(['/scope'], '/tmp');
-				if (!executor.isAvailable()) return;
-				const result = executor.wrapCommand('echo hello', [], undefined, {
-					VAR_A: 'value_a',
-					VAR_B: null,
-				});
-				expect(result).toContain('sandbox-exec');
-			},
-		);
+			test('includes constructor scope paths and per-call scope paths in the generated profile', () => {
+				_internals.probeSandboxExec = mock(() => true);
+				const executor = new MacOSSandboxExecutor(['/ctor/scope']);
+				const profile = _internals.buildSandboxProfile(
+					['/ctor/scope', '/call/scope'],
+					'/tmp',
+				);
+				expect(profile).toContain('/ctor/scope');
+				expect(profile).toContain('/call/scope');
+				// Sanity: wrapCommand does not throw when both scopes are supplied.
+				expect(() =>
+					executor.wrapCommand('echo hello', ['/call/scope']),
+				).not.toThrow();
+			});
 
-		test.skipIf(!isMac)(
-			'value with double quotes has backslash-escaped quotes in SBPL string',
-			() => {
-				const executor = new MacOSSandboxExecutor(['/scope'], '/tmp');
-				if (!executor.isAvailable()) return;
-				const result = executor.wrapCommand('echo hello', [], undefined, {
-					FOO: 'a"b',
-				});
-				// Double quote in value should be escaped as \" in SBPL double-quoted string
-				expect(result).toContain('\\"');
-				// Should NOT contain the raw unescaped double quote in the profile section
-				// The SBPL string "(setenv FOO \"a\"b\")" would break syntax
-				expect(result).not.toContain('(setenv FOO "a"b")');
-			},
-		);
+			test('includes tempDir in the generated profile', () => {
+				_internals.probeSandboxExec = mock(() => true);
+				const profile = _internals.buildSandboxProfile(
+					['/scope'],
+					'/tmp/custom-swarm-tmp',
+				);
+				expect(profile).toContain('/tmp/custom-swarm-tmp');
+			});
 
-		test.skipIf(!isMac)(
-			'invalid env var key is rejected silently (no setenv/unsetenv emitted)',
-			() => {
-				const executor = new MacOSSandboxExecutor(['/scope'], '/tmp');
-				if (!executor.isAvailable()) return;
-				// Key with parens is invalid per POSIX: [a-zA-Z_][a-zA-Z0-9_]*
-				const result = executor.wrapCommand('echo hello', [], undefined, {
-					'FOO(BAR)': 'value',
-				});
-				// Invalid key must not appear in SBPL primitives
-				expect(result).not.toContain('FOO(BAR)');
-				expect(result).not.toContain('(setenv');
-				expect(result).not.toContain('(unsetenv');
-			},
-		);
-	});
-
-	// -----------------------------------------------------------------------
-	// 5. getEnvOverrides()
-	// -----------------------------------------------------------------------
-
-	describe('getEnvOverrides()', () => {
-		test('returns DYLD_INSERT_LIBRARIES: null on macOS (Phase 3)', () => {
-			if (!isMac) return;
-			// sandbox-exec unsets DYLD_INSERT_LIBRARIES to prevent dylib injection.
-			// Once implemented:
-			// const executor = new MacOSSandboxExecutor([]);
-			// const env = executor.getEnvOverrides();
-			// expect(env.DYLD_INSERT_LIBRARIES).toBeNull();
-			expect(true).toBe(true);
+			test('throws SandboxError instead of returning the raw command when unavailable', () => {
+				_internals.probeSandboxExec = mock(() => false);
+				const executor = new MacOSSandboxExecutor([]);
+				expect(executor.isAvailable()).toBe(false);
+				expect(() => executor.wrapCommand('echo hello', [])).toThrow();
+			});
 		});
 
-		test('returns DYLD_LIBRARY_PATH: null on macOS (Phase 3)', () => {
-			if (!isMac) return;
-			// Once implemented:
-			// const executor = new MacOSSandboxExecutor([]);
-			// const env = executor.getEnvOverrides();
-			// expect(env.DYLD_LIBRARY_PATH).toBeNull();
-			expect(true).toBe(true);
-		});
+		describe('disable()', () => {
+			test('isAvailable() returns false after disable()', () => {
+				_internals.probeSandboxExec = mock(() => true);
+				const executor = new MacOSSandboxExecutor([]);
+				expect(executor.isAvailable()).toBe(true);
+				executor.disable('test reason');
+				expect(executor.isAvailable()).toBe(false);
+			});
 
-		test('returns DYLD_FRAMEWORK_PATH: null on macOS (Phase 3)', () => {
-			if (!isMac) return;
-			// Once implemented:
-			// const executor = new MacOSSandboxExecutor([]);
-			// const env = executor.getEnvOverrides();
-			// expect(env.DYLD_FRAMEWORK_PATH).toBeNull();
-			expect(true).toBe(true);
-		});
+			test('wrapCommand() throws SandboxError after disable(), never returns the raw command unwrapped', () => {
+				_internals.probeSandboxExec = mock(() => true);
+				const executor = new MacOSSandboxExecutor([]);
+				executor.disable('testing');
+				// Contract: an executor that WAS constructed as available must
+				// never silently fall through to unwrapped execution once
+				// disabled — the caller (applySandboxExecution) is responsible
+				// for the fail-open decision, not wrapCommand() itself.
+				expect(() => executor.wrapCommand('echo hello', [])).toThrow();
+			});
 
-		test('returns all three DYLD_* vars as null on macOS (Phase 3)', () => {
-			if (!isMac) return;
-			// Once implemented:
-			// const executor = new MacOSSandboxExecutor([]);
-			// const env = executor.getEnvOverrides();
-			// expect(env).toEqual({
-			//   DYLD_INSERT_LIBRARIES: null,
-			//   DYLD_LIBRARY_PATH: null,
-			//   DYLD_FRAMEWORK_PATH: null,
-			// });
-			expect(true).toBe(true);
-		});
-
-		test('returns empty object when no DYLD vars relevant (non-macOS)', () => {
-			// On non-macOS, sandbox-exec doesn't exist ΓÇö no DYLD vars to unset.
-			if (isMac) return;
-			// On non-macOS, getEnvOverrides should return {}.
-			// Once Phase 3 implements a non-throwing executor:
-			// const executor = new MacOSSandboxExecutor([]);
-			// expect(executor.getEnvOverrides()).toEqual({});
-			expect(true).toBe(true);
-		});
-	});
-
-	// -----------------------------------------------------------------------
-	// 5. rollback / error handling
-	// -----------------------------------------------------------------------
-
-	describe('rollback ΓÇö disable()', () => {
-		test('isAvailable() returns false after disable() (Phase 3)', () => {
-			// Once implemented:
-			// const executor = new MacOSSandboxExecutor([]);
-			// executor.disable('test');
-			// expect(executor.isAvailable()).toBe(false);
-			expect(true).toBe(true);
-		});
-	});
-
-	describe('rollback ΓÇö wrapCommand() when disabled', () => {
-		test('returns raw command when executor is disabled (Phase 3)', () => {
-			// Once implemented:
-			// const executor = new MacOSSandboxExecutor([]);
-			// executor.disable('testing');
-			// expect(executor.wrapCommand('echo hello', [])).toBe('echo hello');
-			expect(true).toBe(true);
-		});
-
-		test('returns raw command when sandbox-exec is not available (Phase 3)', () => {
-			// Once implemented:
-			// const executor = new MacOSSandboxExecutor([]);
-			// if (!executor.isAvailable()) {
-			//   expect(executor.wrapCommand('echo hello', [])).toBe('echo hello');
-			// }
-			expect(true).toBe(true);
-		});
-	});
-
-	// -----------------------------------------------------------------------
-	// 6. _internals.probeSandboxExec DI seam (Phase 3)
-	// -----------------------------------------------------------------------
-
-	describe('_internals ΓÇö DI seam (Phase 3)', () => {
-		test('executor disables when probeSandboxExec returns false (Phase 3)', () => {
-			// Phase 3: Will use _internals.probeSandboxExec = mock(() => false)
-			// to simulate sandbox-exec not being available.
-			// Once implemented:
-			// const executor = new MacOSSandboxExecutor([]);
-			// expect(executor.isAvailable()).toBe(false);
-			expect(true).toBe(true);
-		});
-
-		test('executor enables when probeSandboxExec returns true (Phase 3)', () => {
-			// Phase 3: Will use _internals.probeSandboxExec = mock(() => true)
-			// Once implemented:
-			// const executor = new MacOSSandboxExecutor([]);
-			// expect(executor.isAvailable()).toBe(true);
-			expect(true).toBe(true);
+			test('disable() does not throw even when the executor was never available', () => {
+				_internals.probeSandboxExec = mock(() => false);
+				const executor = new MacOSSandboxExecutor([]);
+				expect(() => executor.disable('test')).not.toThrow();
+				expect(executor.isAvailable()).toBe(false);
+			});
 		});
 	});
 });

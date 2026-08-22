@@ -3,7 +3,11 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import packageJson from '../../package.json' with { type: 'json' };
-import { getPluginCachePaths } from '../config/cache-paths.js';
+import {
+	discoverVersionPinnedCachePaths,
+	getPluginCachePaths,
+	resolveCachePackageRoot,
+} from '../config/cache-paths.js';
 import { loadPluginConfig } from '../config/loader';
 import type { Plan } from '../config/plan-schema';
 import { getDurableGateEvidenceStatusForTask } from '../evidence/gate-bridge.js';
@@ -13,6 +17,7 @@ import { loadPlanJsonOnly } from '../plan/manager';
 import { SandboxCapabilityProbe } from '../sandbox/capability-probe.js';
 import { getExecutor } from '../sandbox/executor.js';
 import { readEffectiveSpecSync } from '../sdd/effective-spec';
+import { resolveGitExecutableAsync } from '../utils/git-executable.js';
 import { listCoderSettlementWalStates } from '../workflow/coder-settlement.js';
 import { checkKnowledgeHealth } from './knowledge-diagnostics.js';
 import { inventorySwarmResidue } from './swarm-residue.js';
@@ -26,15 +31,6 @@ const REQUIRED_CACHE_GRAMMAR_ASSETS = [
 	'tree-sitter-javascript.wasm',
 	'tree-sitter-typescript.wasm',
 ] as const;
-
-function resolveCachePackageRoot(cachePath: string): string {
-	const nestedPackageRoot = path.join(
-		cachePath,
-		'node_modules',
-		'opencode-swarm',
-	);
-	return existsSync(nestedPackageRoot) ? nestedPackageRoot : cachePath;
-}
 
 export const _internals = {
 	detectSandboxCapability: () => sandboxCapabilityProbe.detect(),
@@ -391,7 +387,8 @@ async function checkGitRepository(directory: string): Promise<HealthCheck> {
 				detail: 'Invalid directory — cannot check git status',
 			};
 		}
-		child_process.execSync('git rev-parse --git-dir', {
+		const gitExecutable = await resolveGitExecutableAsync();
+		child_process.execFileSync(gitExecutable, ['rev-parse', '--git-dir'], {
 			cwd: directory,
 			stdio: 'pipe',
 		});
@@ -1224,7 +1221,17 @@ export async function getDiagnoseData(
 	// Check: Plugin Caches — inventory of known OpenCode plugin cache locations.
 	// Shows which caches are present, what version is installed there, and which
 	// are absent. Helps users diagnose stale-cache issues (issue #675).
-	const cachePaths = getPluginCachePaths();
+	// Issue #2236 RC3 item 1 / non-blocking 5: getPluginCachePaths() is a
+	// fixed, pure list (opencode-swarm@latest / opencode-swarm literals only)
+	// so it cannot see a version-pinned OpenCode host cache like
+	// opencode-swarm@7.143.1. discoverVersionPinnedCachePaths() performs the
+	// filesystem enumeration to find those and is called explicitly here —
+	// getPluginCachePaths() intentionally stays pure so it can still be
+	// called from module scope elsewhere (AGENTS.md invariant 1).
+	const cachePaths = [
+		...getPluginCachePaths(),
+		...discoverVersionPinnedCachePaths(),
+	];
 	const cacheRows: string[] = [];
 	for (const cachePath of cachePaths) {
 		try {

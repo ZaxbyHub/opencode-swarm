@@ -4,6 +4,7 @@ import type { tool } from '@opencode-ai/plugin';
 import { z } from 'zod';
 import { estimateCyclomaticComplexity } from '../quality/metrics';
 import { bunSpawn } from '../utils/bun-compat';
+import { resolveGitExecutable } from '../utils/git-executable.js';
 import { createSwarmTool } from './create-tool';
 
 // ============ Constants ============
@@ -140,6 +141,20 @@ function validateExtensions(extensions: unknown): {
 	return { valid: true, value: extensions, error: null };
 }
 
+/**
+ * Test-only seam for the `bunSpawn` call this file makes. Lets tests inject a
+ * synthetic subprocess (e.g. one with `spawnError` set) without monkey-patching
+ * the `Bun.spawn` global — see #2236 Sweep A, FIX 1.
+ *
+ * `resolveGitExecutable` (issue #2236 hardening, F1/F4/F5) resolves the
+ * absolute git executable path instead of spawning the bare `'git'` name;
+ * exposed here so tests can inject a deterministic value.
+ */
+export const _internals: {
+	bunSpawn: typeof bunSpawn;
+	resolveGitExecutable: typeof resolveGitExecutable;
+} = { bunSpawn, resolveGitExecutable };
+
 // ============ Git Churn Analysis ============
 async function getGitChurn(
 	days: number,
@@ -147,9 +162,9 @@ async function getGitChurn(
 ): Promise<Map<string, number>> {
 	const churnMap = new Map<string, number>();
 
-	const proc = bunSpawn(
+	const proc = _internals.bunSpawn(
 		[
-			'git',
+			_internals.resolveGitExecutable(),
 			'log',
 			`--since=${days} days ago`,
 			'--name-only',
@@ -165,6 +180,25 @@ async function getGitChurn(
 	// Read stdout concurrently with process exit to avoid pipe deadlock.
 	// git log output can be very large for repos with extensive history.
 	const [stdout] = await Promise.all([proc.stdout.text(), proc.exited]);
+
+	// A spawn failure (process never started — e.g. missing git binary or a
+	// cwd that no longer exists) means the churn data is unproven, not empty.
+	// `analyzeHotspots` drives its entire file iteration off this map, so
+	// silently continuing here previously produced a false "ran fine, found
+	// nothing" success once the Bun spawn path stopped throwing on process-
+	// creation failure (#2236 Sweep A, FIX 1). Throwing preserves the loud
+	// `error: 'analysis failed: ...'` behavior the tool already surfaces via
+	// the try/catch in `execute`.
+	//
+	// Deliberately scoped to `spawnError` only, NOT a general non-zero-exit
+	// check: `git log` legitimately exits non-zero with empty (not erroring)
+	// output on a repo with no commits yet (exit 128, verified empirically),
+	// and treating every non-zero exit as a hard failure would turn that
+	// benign case into a false error. This mirrors FIX 2's scoping in
+	// `pkg-audit.ts`'s `runCargoAudit`.
+	if (proc.spawnError) {
+		throw new Error(`git churn analysis failed: ${proc.spawnError.message}`);
+	}
 
 	// Split on CRLF for cross-platform handling
 	const lines = stdout.split(/\r?\n/);

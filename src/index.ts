@@ -187,6 +187,7 @@ import { initTelemetry, startHeartbeatTracking, telemetry } from './telemetry';
 import { buildPluginToolObject } from './tools/plugin-registration';
 import { error, log, warn } from './utils';
 import { pushAdvisory } from './utils/advisory-queue';
+import { setGitBinaryOverride } from './utils/git-executable';
 import {
 	ENSURE_SWARM_GIT_EXCLUDED_OUTER_TIMEOUT_MS,
 	ensureSwarmGitExcluded,
@@ -575,6 +576,24 @@ async function initializeOpenCodeSwarm(
 	ctx: Parameters<Plugin>[0],
 	postResolutionTasks: PostResolutionTask[],
 ) {
+	// Issue #2236 RC3 item 3: the running plugin version was never logged at
+	// startup, so a user hitting a stale-cache/behavior-mismatch issue had no
+	// way to confirm which version was actually loaded (packageJson.version
+	// previously only reached observability provenance and the throttled
+	// staleness warning, never a plain startup line). `packageJson.version`
+	// is already imported at module scope, so this is zero extra I/O and does
+	// not touch AGENTS.md invariant 1.
+	// STDERR, not stdout. This is the only unconditional line the plugin runtime
+	// emits, and the host may use stdout for structured protocol traffic — a
+	// startup banner there risks corrupting it. Every other always-emitted
+	// operator signal in this repo goes to stderr (`criticalWarn`,
+	// src/utils/logger.ts); `console.warn` is used directly rather than
+	// `criticalWarn` because this is not a warning and should not carry that
+	// label. #2236 needs it because the reporter could not identify which
+	// plugin version was actually loaded.
+	// biome-ignore lint/suspicious/noConsole: Startup version line — user must be able to identify the running plugin version to diagnose stale-cache issues (issue #2236)
+	console.warn(`[opencode-swarm] running v${packageJson.version}`);
+
 	// Clear deferred warnings at the very start of the session, BEFORE any
 	// init-path work that buffers advisories via advisoryWarn (config load,
 	// ensureSwarmGitExcluded, writeProjectConfigIfNew). The clear isolates the
@@ -660,6 +679,19 @@ async function initializeOpenCodeSwarm(
 	log(
 		`init-path I/O completed in ${(performance.now() - __initIoStart).toFixed(1)}ms (parallel: config+snapshot+git-exclude)`,
 	);
+
+	// Register the git-executable resolver override once per init (issue
+	// #2236 hardening, F4). `setGitBinaryOverride` is a plain sync object
+	// assignment — no I/O, no probe — so this cannot regress the init
+	// budget. The env var `OPENCODE_SWARM_GIT_BINARY` always wins over this
+	// config value at resolution time (src/utils/git-executable.ts).
+	//
+	// SECURITY (CWE-427): `config.git?.binary` is safe to pass straight
+	// through because the loader has already stripped any PROJECT-supplied
+	// value — `git.binary` is honored only from the user-level config and the
+	// env var, since a repo can commit both a config naming a shim and the
+	// shim itself (`enforceGitBinaryProvenance`, src/config/loader.ts).
+	setGitBinaryOverride(config.git?.binary);
 
 	// Full-auto mode validation: critic model must differ from architect model
 	if (config.full_auto?.enabled === true) {

@@ -1,5 +1,6 @@
 import * as child_process from 'node:child_process';
 import { mergeEnvForChild } from '../../utils/bun-compat';
+import { resolveGitExecutable } from '../../utils/git-executable.js';
 
 export const MAX_URL_LEN = 2048;
 const IPV4_PRIVATE = /^10\./;
@@ -238,7 +239,7 @@ export function detectGitRemote(
 ): string | null {
 	try {
 		const result = _internals.spawnSync(
-			'git',
+			resolveGitExecutable(),
 			['remote', 'get-url', 'origin'],
 			{
 				encoding: 'utf-8',

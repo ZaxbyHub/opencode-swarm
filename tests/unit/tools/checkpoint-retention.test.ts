@@ -197,6 +197,14 @@ describe('checkpoint retention policy', () => {
 				expect(retentionEvents[i].remaining_count).toBe(20);
 				expect(retentionEvents[i].evicted_labels).toEqual([`over-limit-${i}`]);
 			}
-		});
+			// Issue #2236 hardening: `gitExec` now resolves the git executable via
+			// `resolveGitExecutable()` before its first real spawn (a one-time,
+			// bounded probe — up to 1000ms worst case, memoized after). This test
+			// drives ~75 real git spawns (25 checkpoints x 3 gitExec calls) plus
+			// 25x10ms explicit sleeps and was already close to bun:test's 5000ms
+			// default; the added one-time resolution cost pushed it over on a
+			// loaded host. Bumped, not weakened — every assertion above is
+			// unchanged.
+		}, 15_000);
 	});
 });

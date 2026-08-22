@@ -37,6 +37,7 @@ import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import * as path from 'node:path';
+import { resolveGitExecutableAsync } from '../utils/git-executable.js';
 
 /** Bounded git subprocess timeout (ms). */
 const GIT_TIMEOUT_MS = 1_500;
@@ -198,11 +199,23 @@ export function normalizeGitRemote(rawUrl: string): string | null {
  * `child.on('error')` guard resolves the promise rather than hanging on a
  * spawn failure.
  */
-function runGit(directory: string, args: string[]): Promise<string | null> {
+async function runGit(
+	directory: string,
+	args: string[],
+): Promise<string | null> {
+	// Resolution failure (every candidate rejected) maps onto this function's
+	// existing "any failure -> null" contract, same as a spawn failure would —
+	// no new throw introduced at this call site.
+	let gitExecutable: string;
+	try {
+		gitExecutable = await resolveGitExecutableAsync();
+	} catch {
+		return null;
+	}
 	return new Promise((resolve) => {
 		try {
 			const child = execFile(
-				'git',
+				gitExecutable,
 				['-C', directory, ...args],
 				{
 					timeout: GIT_TIMEOUT_MS,

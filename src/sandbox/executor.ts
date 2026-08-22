@@ -5,6 +5,8 @@
  * Linux (Bubblewrap), macOS (sandbox-exec), and Windows (restricted token/Low Integrity).
  */
 
+import { warn } from '../utils/logger';
+
 /**
  * Error thrown when sandbox operations fail.
  */
@@ -132,7 +134,51 @@ async function _createLinuxExecutor(): Promise<SandboxExecutor | null> {
 	}
 }
 
+/**
+ * F6a item 3 (issue #2236): the macOS sandbox stays opt-in until a real
+ * macOS host has verified the production SBPL profile's last-match-wins
+ * ordering (`sandbox-exec-executor.ts` flags that ordering as "reasoned
+ * from documented SBPL semantics; not empirically re-verified"). Defaults
+ * to false; set via `setMacOSSandboxPolicy()` from the resolved
+ * `guardrails.sandbox_macos_enabled` config value at hook-registration
+ * time, before any tool call can reach `getExecutor()`.
+ */
+let _macosSandboxEnabled = false;
+let _hasWarnedMacOSSandboxDisabledByConfig = false;
+
+/**
+ * Set whether the macOS sandbox-exec mechanism may be activated. Called
+ * once from `createToolBeforeHandler` (src/hooks/guardrails/tool-before.ts)
+ * using the already-resolved `GuardrailsConfig`, at guardrails hook
+ * registration — which runs at plugin init, before the first bash tool call
+ * can trigger `getExecutor()`. When false (the default), `getExecutor()`
+ * behaves exactly as it did before F6: it resolves to `null` and every
+ * consumer (tool-before's `applySandboxExecution`, `diagnose-service`,
+ * guardrails/index) observes the identical fail-open "executor not
+ * available" state, so activation stays byte-identical to today until this
+ * is explicitly turned on.
+ */
+export function setMacOSSandboxPolicy(enabled: boolean): void {
+	_macosSandboxEnabled = enabled;
+}
+
+/** @internal test seam — read the current policy without going through config. */
+export function _getMacOSSandboxPolicyForTest(): boolean {
+	return _macosSandboxEnabled;
+}
+
 async function _createMacOSExecutor(): Promise<SandboxExecutor | null> {
+	if (!_macosSandboxEnabled) {
+		if (!_hasWarnedMacOSSandboxDisabledByConfig) {
+			_hasWarnedMacOSSandboxDisabledByConfig = true;
+			warn(
+				'[sandbox] macOS sandbox-exec is disabled by config (guardrails.sandbox_macos_enabled=false). ' +
+					'Enable it only after verifying the production SBPL profile on a real macOS host — see docs/configuration.md.',
+			);
+		}
+		return null;
+	}
+
 	// Import and run the async capability probe first to populate the sync cache
 	const { SandboxCapabilityProbe, isSandboxExecAvailable } = await import(
 		'./capability-probe'

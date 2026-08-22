@@ -42,6 +42,7 @@ const CI_COMMAND_TO_SKILL_STRING: Record<string, string> = {
 	'bash scripts/check-test-clock.sh': 'bash scripts/check-test-clock.sh',
 	'bun run check:test-file-cap': 'bun run check:test-file-cap',
 	'bun run check:gate-portability': 'bun run check:gate-portability',
+	'bun run check:bare-spawn': 'bun run check:bare-spawn',
 	'bash scripts/check-test-tmpdir.sh': 'bash scripts/check-test-tmpdir.sh',
 	'bash scripts/check-bash-portability.sh':
 		'bash scripts/check-bash-portability.sh',

@@ -143,7 +143,7 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 			'src/hooks/review-receipt.ts:608',
 			'src/hooks/review-receipt.ts:674',
 			'src/hooks/review-receipt.ts:812',
-			'src/knowledge/identity.ts:206',
+			'src/knowledge/identity.ts:209',
 			'src/evidence/phase-participation.ts:303 (pre-#2035)',
 			'src/turbo/lean/integration.ts:426',
 			'src/turbo/lean/reviewer.ts:403',
@@ -307,7 +307,7 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 		quarantineEligible: false,
 		parsesTarget: false,
 		producers: [
-			'src/tools/checkpoint.ts:175',
+			'src/tools/checkpoint.ts:194',
 			'src/full-auto/state.ts:448',
 			'src/context-map/persistence.ts:119',
 			'src/context-map/capsule-persistence.ts:107',

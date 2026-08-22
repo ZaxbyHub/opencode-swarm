@@ -22,6 +22,7 @@ import * as path from 'node:path';
 import { loadPlanJsonOnly } from '../plan/manager.js';
 import { canonicalWorkspaceIdentity } from '../scope/scope-binding.js';
 import { peekReviewerScopeGenerationClaim, swarmState } from '../state.js';
+import { resolveGitExecutable } from '../utils/git-executable.js';
 import { resolveDelegatedPlanTaskId } from './delegation-gate.js';
 import { computeScopeFingerprint } from './review-receipt.js';
 import {
@@ -141,9 +142,16 @@ export async function resolveReviewerScopeTaskId(
 export const _internals: {
 	spawn: typeof child_process.spawn;
 	realpath: typeof fs.promises.realpath;
+	/**
+	 * Issue #2236 hardening (F1/F4/F5) — resolves the absolute git executable
+	 * path instead of spawning the bare `'git'` name. Exposed for test
+	 * injection following the `src/worktree/core.ts` convention.
+	 */
+	resolveGitExecutable: typeof resolveGitExecutable;
 } = {
 	spawn: child_process.spawn,
 	realpath: fs.promises.realpath,
+	resolveGitExecutable,
 };
 
 function hasControlCharacter(value: string): boolean {
@@ -178,12 +186,16 @@ async function resolveHeadSha(directory: string): Promise<string | null> {
 	let child: child_process.ChildProcess | undefined;
 	let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
 	try {
-		child = _internals.spawn('git', ['rev-parse', '--verify', 'HEAD'], {
-			cwd: directory,
-			stdio: ['ignore', 'pipe', 'ignore'],
-			timeout: HEAD_TIMEOUT_MS,
-			windowsHide: true,
-		});
+		child = _internals.spawn(
+			_internals.resolveGitExecutable(),
+			['rev-parse', '--verify', 'HEAD'],
+			{
+				cwd: directory,
+				stdio: ['ignore', 'pipe', 'ignore'],
+				timeout: HEAD_TIMEOUT_MS,
+				windowsHide: true,
+			},
+		);
 
 		return await new Promise<string | null>((resolve) => {
 			let settled = false;

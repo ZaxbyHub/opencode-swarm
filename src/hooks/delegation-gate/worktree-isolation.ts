@@ -24,6 +24,7 @@ import {
 } from '../../state';
 import { pushAdvisory } from '../../utils/advisory-queue';
 import { bunSpawn } from '../../utils/bun-compat';
+import { resolveGitExecutable } from '../../utils/git-executable.js';
 import * as logger from '../../utils/logger.js';
 import type { WorktreeHandle } from '../../worktree';
 import {
@@ -40,6 +41,10 @@ import {
 import type {
 	DirtyMergeOptions,
 	MergeOperationProvenance,
+} from '../../worktree/merge';
+import {
+	SOURCE_WORKTREE_GONE_STAGE,
+	SOURCE_WORKTREE_UNCERTAIN_STAGE,
 } from '../../worktree/merge';
 import { verifyReviewerScopeGenerationMergeBack } from '../reviewer-scope-mergeback';
 import {
@@ -493,15 +498,53 @@ export async function preProvisionCollisionCheck(
 	worktreePath?: string;
 	uncertainty?: string;
 }> {
-	const proc = _internals.bunSpawn(
-		['git', '-C', directory, 'worktree', 'list', '--porcelain'],
-		{
-			stdin: 'ignore',
-			stdout: 'pipe',
-			stderr: 'pipe',
-			timeout: WORKTREE_LIST_TIMEOUT_MS,
-		},
-	);
+	// Issue #2236 (BL-1b): `_internals.resolveGitExecutable()` must not be able
+	// to escape this function. The real resolver no longer throws — BL-1 made it
+	// total, returning the unprobed bare name instead of a "git is missing"
+	// error — but `_internals.resolveGitExecutable` is a replaceable DI seam, and
+	// a typed contract must not rest on a reachability argument about today's
+	// implementation. Calling it OUTSIDE the guard let a throw
+	// escape this function entirely instead of becoming the typed result
+	// the signature promises — structurally the same leak fixed in `runGit`
+	// (`src/worktree/core.ts`), `src/worktree/merge.ts`, and
+	// `./worktree-ownership-tag.ts`. Resolution and spawn are contained
+	// together and mapped onto the SAME fail-closed result this function
+	// already returns when `git worktree list` itself fails:
+	// `{ collision: false, uncertainty }`.
+	//
+	// `uncertainty` is the load-bearing half. This is a destructive-cleanup
+	// gate: `precreateStandardWorktreeSession` hard-stops the dispatch on any
+	// `uncertainty`, so an enumeration that never ran can never be read as
+	// "no lane exists". This is deliberately a dedicated catch rather than a
+	// fall-through into the exit-code handling below — that path has a
+	// `not a git repository` branch returning a bare `{ collision: false }`
+	// with NO `uncertainty`, and a resolution failure must never reach it.
+	let proc: ReturnType<typeof _internals.bunSpawn>;
+	try {
+		proc = _internals.bunSpawn(
+			[
+				_internals.resolveGitExecutable(),
+				'-C',
+				directory,
+				'worktree',
+				'list',
+				'--porcelain',
+			],
+			{
+				stdin: 'ignore',
+				stdout: 'pipe',
+				stderr: 'pipe',
+				timeout: WORKTREE_LIST_TIMEOUT_MS,
+			},
+		);
+	} catch (error) {
+		const detail = `git worktree list could not start in ${directory}: ${
+			error instanceof Error ? error.message : String(error)
+		}`;
+		// Destructive callers must not infer absence when enumeration never ran.
+		logger.log(`[swarm] preProvisionCollisionCheck: ${detail}`);
+		return { collision: false, uncertainty: detail };
+	}
 	let stdout = '';
 	let stderr = '';
 	try {
@@ -1095,15 +1138,38 @@ export async function preserveBackgroundWorktreeOwnershipForCallId(
 	const dispatch = standardWorktreeByCallID.get(callID);
 	if (!dispatch) return { outcome: 'not-found' };
 
-	const refProc = _internals.bunSpawn(
-		['git', '-C', dispatch.handle.worktreePath, 'rev-parse', 'HEAD'],
-		{
-			stdin: 'ignore',
-			stdout: 'pipe',
-			stderr: 'pipe',
-			timeout: PRESERVE_COMMIT_TIMEOUT_MS,
-		},
-	);
+	// Issue #2236 (BL-1b): `_internals.resolveGitExecutable()` is called INSIDE
+	// the guard, mirroring `runGit` in `src/worktree/core.ts`. Outside it, a
+	// `GitBinaryMissingError` escaped this function instead of becoming the
+	// typed `outcome` the signature promises. Preserving the worktree is the
+	// protective action, so a resolution failure maps onto the SAME
+	// `'preserve-failed'` contract a non-zero git exit already produces —
+	// never onto a success path.
+	let refProc: ReturnType<typeof _internals.bunSpawn>;
+	try {
+		refProc = _internals.bunSpawn(
+			[
+				_internals.resolveGitExecutable(),
+				'-C',
+				dispatch.handle.worktreePath,
+				'rev-parse',
+				'HEAD',
+			],
+			{
+				stdin: 'ignore',
+				stdout: 'pipe',
+				stderr: 'pipe',
+				timeout: PRESERVE_COMMIT_TIMEOUT_MS,
+			},
+		);
+	} catch (error) {
+		return {
+			outcome: 'preserve-failed',
+			error: `git rev-parse could not start: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		};
+	}
 	let ref = '';
 	try {
 		const exitCode = await refProc.exited;
@@ -1138,15 +1204,36 @@ export async function preserveBackgroundWorktreeOwnershipForCallId(
 		.digest('hex')
 		.slice(0, 12);
 	const tag = `swarm-preserved-owner/${session}/${lane}/${callDigest}`;
-	const tagProc = _internals.bunSpawn(
-		['git', '-C', dispatch.handle.worktreePath, 'tag', tag, ref],
-		{
-			stdin: 'ignore',
-			stdout: 'pipe',
-			stderr: 'pipe',
-			timeout: PRESERVE_COMMIT_TIMEOUT_MS,
-		},
-	);
+	// Issue #2236 (BL-1b): same containment as the `rev-parse` spawn above. A
+	// warm resolver cache does NOT make this site safe — negative cache entries
+	// expire on a TTL, so resolution can begin failing between two spawns in
+	// one call.
+	let tagProc: ReturnType<typeof _internals.bunSpawn>;
+	try {
+		tagProc = _internals.bunSpawn(
+			[
+				_internals.resolveGitExecutable(),
+				'-C',
+				dispatch.handle.worktreePath,
+				'tag',
+				tag,
+				ref,
+			],
+			{
+				stdin: 'ignore',
+				stdout: 'pipe',
+				stderr: 'pipe',
+				timeout: PRESERVE_COMMIT_TIMEOUT_MS,
+			},
+		);
+	} catch (error) {
+		return {
+			outcome: 'preserve-failed',
+			error: `git tag could not start: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		};
+	}
 	try {
 		const exitCode = await tagProc.exited;
 		if (exitCode !== 0) {
@@ -1207,15 +1294,41 @@ export async function preserveDirtyWorktreeForCallId(
 	}
 
 	// Detect dirty state: git status --porcelain
-	const statusProc = _internals.bunSpawn(
-		['git', '-C', worktreePath, 'status', '--porcelain'],
-		{
-			stdin: 'ignore',
-			stdout: 'pipe',
-			stderr: 'pipe',
-			timeout: PRESERVE_COMMIT_TIMEOUT_MS,
-		},
-	);
+	// Issue #2236 (BL-1b): `_internals.resolveGitExecutable()` is called INSIDE
+	// the guard, mirroring `runGit` in `src/worktree/core.ts`. Outside it, a
+	// `GitBinaryMissingError` escaped this function instead of becoming the
+	// typed `outcome` the signature promises. Preserving a worktree is the
+	// protective action, so every resolution failure below maps onto the SAME
+	// `'preserve-failed'` contract a non-zero git exit already produces — never
+	// onto `clean` or `preserved`. Every spawn in this function is guarded, not
+	// only the first: negative resolver cache entries expire on a TTL, so
+	// resolution can begin failing between two spawns in one call.
+	let statusProc: ReturnType<typeof _internals.bunSpawn>;
+	try {
+		statusProc = _internals.bunSpawn(
+			[
+				_internals.resolveGitExecutable(),
+				'-C',
+				worktreePath,
+				'status',
+				'--porcelain',
+			],
+			{
+				stdin: 'ignore',
+				stdout: 'pipe',
+				stderr: 'pipe',
+				timeout: PRESERVE_COMMIT_TIMEOUT_MS,
+			},
+		);
+	} catch (error) {
+		return {
+			outcome: 'preserve-failed',
+			preserved: false,
+			error: `git status could not start: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		};
+	}
 	let statusStdout = '';
 	let statusStderr = '';
 	try {
@@ -1246,15 +1359,26 @@ export async function preserveDirtyWorktreeForCallId(
 	}
 
 	// Dirty — stage all changes
-	const addProc = _internals.bunSpawn(
-		['git', '-C', worktreePath, 'add', '-A'],
-		{
-			stdin: 'ignore',
-			stdout: 'pipe',
-			stderr: 'pipe',
-			timeout: PRESERVE_COMMIT_TIMEOUT_MS,
-		},
-	);
+	let addProc: ReturnType<typeof _internals.bunSpawn>;
+	try {
+		addProc = _internals.bunSpawn(
+			[_internals.resolveGitExecutable(), '-C', worktreePath, 'add', '-A'],
+			{
+				stdin: 'ignore',
+				stdout: 'pipe',
+				stderr: 'pipe',
+				timeout: PRESERVE_COMMIT_TIMEOUT_MS,
+			},
+		);
+	} catch (error) {
+		return {
+			outcome: 'preserve-failed',
+			preserved: false,
+			error: `git add could not start: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		};
+	}
 	try {
 		const addExit = await addProc.exited;
 		if (addExit !== 0) {
@@ -1281,15 +1405,33 @@ export async function preserveDirtyWorktreeForCallId(
 	const sanitizedCallID = callID.replace(/[^A-Za-z0-9._-]/g, '-').slice(0, 64);
 	const commitMessage = `swarm-preserved: ${reason} for callID ${sanitizedCallID} at ${isoDate}`;
 
-	const commitProc = _internals.bunSpawn(
-		['git', '-C', worktreePath, 'commit', '-m', commitMessage],
-		{
-			stdin: 'ignore',
-			stdout: 'pipe',
-			stderr: 'pipe',
-			timeout: PRESERVE_COMMIT_TIMEOUT_MS,
-		},
-	);
+	let commitProc: ReturnType<typeof _internals.bunSpawn>;
+	try {
+		commitProc = _internals.bunSpawn(
+			[
+				_internals.resolveGitExecutable(),
+				'-C',
+				worktreePath,
+				'commit',
+				'-m',
+				commitMessage,
+			],
+			{
+				stdin: 'ignore',
+				stdout: 'pipe',
+				stderr: 'pipe',
+				timeout: PRESERVE_COMMIT_TIMEOUT_MS,
+			},
+		);
+	} catch (error) {
+		return {
+			outcome: 'preserve-failed',
+			preserved: false,
+			error: `git commit could not start: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		};
+	}
 	let commitHash = '';
 	try {
 		const commitExit = await commitProc.exited;
@@ -1313,15 +1455,32 @@ export async function preserveDirtyWorktreeForCallId(
 	}
 
 	// Get commit hash: git rev-parse HEAD
-	const hashProc = _internals.bunSpawn(
-		['git', '-C', worktreePath, 'rev-parse', 'HEAD'],
-		{
-			stdin: 'ignore',
-			stdout: 'pipe',
-			stderr: 'pipe',
-			timeout: PRESERVE_COMMIT_TIMEOUT_MS,
-		},
-	);
+	let hashProc: ReturnType<typeof _internals.bunSpawn>;
+	try {
+		hashProc = _internals.bunSpawn(
+			[
+				_internals.resolveGitExecutable(),
+				'-C',
+				worktreePath,
+				'rev-parse',
+				'HEAD',
+			],
+			{
+				stdin: 'ignore',
+				stdout: 'pipe',
+				stderr: 'pipe',
+				timeout: PRESERVE_COMMIT_TIMEOUT_MS,
+			},
+		);
+	} catch (error) {
+		return {
+			outcome: 'preserve-failed',
+			preserved: false,
+			error: `git rev-parse could not start: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		};
+	}
 	try {
 		const hashExit = await hashProc.exited;
 		if (hashExit !== 0) {
@@ -1356,15 +1515,26 @@ export async function preserveDirtyWorktreeForCallId(
 	const shortHash = commitHash.slice(0, 8);
 	const tagName = `swarm-preserved-${sanitizedCallID}-${shortHash}`;
 
-	const tagProc = _internals.bunSpawn(
-		['git', '-C', worktreePath, 'tag', tagName],
-		{
-			stdin: 'ignore',
-			stdout: 'pipe',
-			stderr: 'pipe',
-			timeout: PRESERVE_COMMIT_TIMEOUT_MS,
-		},
-	);
+	let tagProc: ReturnType<typeof _internals.bunSpawn>;
+	try {
+		tagProc = _internals.bunSpawn(
+			[_internals.resolveGitExecutable(), '-C', worktreePath, 'tag', tagName],
+			{
+				stdin: 'ignore',
+				stdout: 'pipe',
+				stderr: 'pipe',
+				timeout: PRESERVE_COMMIT_TIMEOUT_MS,
+			},
+		);
+	} catch (error) {
+		return {
+			outcome: 'preserve-failed',
+			preserved: false,
+			error: `git tag could not start: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		};
+	}
 	try {
 		const tagExit = await tagProc.exited;
 		if (tagExit !== 0) {
@@ -1424,15 +1594,41 @@ export async function preserveDirtyWorktreeAtPath(
 	error?: string;
 }> {
 	// Detect dirty state: git status --porcelain
-	const statusProc = _internals.bunSpawn(
-		['git', '-C', worktreePath, 'status', '--porcelain'],
-		{
-			stdin: 'ignore',
-			stdout: 'pipe',
-			stderr: 'pipe',
-			timeout: PRESERVE_COMMIT_TIMEOUT_MS,
-		},
-	);
+	// Issue #2236 (BL-1b): `_internals.resolveGitExecutable()` is called INSIDE
+	// the guard, mirroring `runGit` in `src/worktree/core.ts`. Outside it, a
+	// `GitBinaryMissingError` escaped this function instead of becoming the
+	// typed `outcome` the signature promises. Preserving a worktree is the
+	// protective action, so every resolution failure below maps onto the SAME
+	// `'preserve-failed'` contract a non-zero git exit already produces — never
+	// onto `clean` or `preserved`. Every spawn in this function is guarded, not
+	// only the first: negative resolver cache entries expire on a TTL, so
+	// resolution can begin failing between two spawns in one call.
+	let statusProc: ReturnType<typeof _internals.bunSpawn>;
+	try {
+		statusProc = _internals.bunSpawn(
+			[
+				_internals.resolveGitExecutable(),
+				'-C',
+				worktreePath,
+				'status',
+				'--porcelain',
+			],
+			{
+				stdin: 'ignore',
+				stdout: 'pipe',
+				stderr: 'pipe',
+				timeout: PRESERVE_COMMIT_TIMEOUT_MS,
+			},
+		);
+	} catch (error) {
+		return {
+			outcome: 'preserve-failed',
+			preserved: false,
+			error: `git status could not start: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		};
+	}
 	let statusStdout = '';
 	let statusStderr = '';
 	try {
@@ -1463,15 +1659,26 @@ export async function preserveDirtyWorktreeAtPath(
 	}
 
 	// Dirty — stage all changes
-	const addProc = _internals.bunSpawn(
-		['git', '-C', worktreePath, 'add', '-A'],
-		{
-			stdin: 'ignore',
-			stdout: 'pipe',
-			stderr: 'pipe',
-			timeout: PRESERVE_COMMIT_TIMEOUT_MS,
-		},
-	);
+	let addProc: ReturnType<typeof _internals.bunSpawn>;
+	try {
+		addProc = _internals.bunSpawn(
+			[_internals.resolveGitExecutable(), '-C', worktreePath, 'add', '-A'],
+			{
+				stdin: 'ignore',
+				stdout: 'pipe',
+				stderr: 'pipe',
+				timeout: PRESERVE_COMMIT_TIMEOUT_MS,
+			},
+		);
+	} catch (error) {
+		return {
+			outcome: 'preserve-failed',
+			preserved: false,
+			error: `git add could not start: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		};
+	}
 	try {
 		const addExit = await addProc.exited;
 		if (addExit !== 0) {
@@ -1503,15 +1710,33 @@ export async function preserveDirtyWorktreeAtPath(
 		.slice(0, 64);
 	const commitMessage = `swarm-preserved: ${reason} for worktree ${sanitizedPath} at ${isoDate}`;
 
-	const commitProc = _internals.bunSpawn(
-		['git', '-C', worktreePath, 'commit', '-m', commitMessage],
-		{
-			stdin: 'ignore',
-			stdout: 'pipe',
-			stderr: 'pipe',
-			timeout: PRESERVE_COMMIT_TIMEOUT_MS,
-		},
-	);
+	let commitProc: ReturnType<typeof _internals.bunSpawn>;
+	try {
+		commitProc = _internals.bunSpawn(
+			[
+				_internals.resolveGitExecutable(),
+				'-C',
+				worktreePath,
+				'commit',
+				'-m',
+				commitMessage,
+			],
+			{
+				stdin: 'ignore',
+				stdout: 'pipe',
+				stderr: 'pipe',
+				timeout: PRESERVE_COMMIT_TIMEOUT_MS,
+			},
+		);
+	} catch (error) {
+		return {
+			outcome: 'preserve-failed',
+			preserved: false,
+			error: `git commit could not start: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		};
+	}
 	let commitHash = '';
 	try {
 		const commitExit = await commitProc.exited;
@@ -1535,15 +1760,32 @@ export async function preserveDirtyWorktreeAtPath(
 	}
 
 	// Get commit hash: git rev-parse HEAD
-	const hashProc = _internals.bunSpawn(
-		['git', '-C', worktreePath, 'rev-parse', 'HEAD'],
-		{
-			stdin: 'ignore',
-			stdout: 'pipe',
-			stderr: 'pipe',
-			timeout: PRESERVE_COMMIT_TIMEOUT_MS,
-		},
-	);
+	let hashProc: ReturnType<typeof _internals.bunSpawn>;
+	try {
+		hashProc = _internals.bunSpawn(
+			[
+				_internals.resolveGitExecutable(),
+				'-C',
+				worktreePath,
+				'rev-parse',
+				'HEAD',
+			],
+			{
+				stdin: 'ignore',
+				stdout: 'pipe',
+				stderr: 'pipe',
+				timeout: PRESERVE_COMMIT_TIMEOUT_MS,
+			},
+		);
+	} catch (error) {
+		return {
+			outcome: 'preserve-failed',
+			preserved: false,
+			error: `git rev-parse could not start: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		};
+	}
 	try {
 		const hashExit = await hashProc.exited;
 		if (hashExit !== 0) {
@@ -1578,15 +1820,26 @@ export async function preserveDirtyWorktreeAtPath(
 	const shortHash = commitHash.slice(0, 8);
 	const tagName = `swarm-preserved-worktree-${sanitizedBranch}-${shortHash}`;
 
-	const tagProc = _internals.bunSpawn(
-		['git', '-C', worktreePath, 'tag', tagName],
-		{
-			stdin: 'ignore',
-			stdout: 'pipe',
-			stderr: 'pipe',
-			timeout: PRESERVE_COMMIT_TIMEOUT_MS,
-		},
-	);
+	let tagProc: ReturnType<typeof _internals.bunSpawn>;
+	try {
+		tagProc = _internals.bunSpawn(
+			[_internals.resolveGitExecutable(), '-C', worktreePath, 'tag', tagName],
+			{
+				stdin: 'ignore',
+				stdout: 'pipe',
+				stderr: 'pipe',
+				timeout: PRESERVE_COMMIT_TIMEOUT_MS,
+			},
+		);
+	} catch (error) {
+		return {
+			outcome: 'preserve-failed',
+			preserved: false,
+			error: `git tag could not start: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		};
+	}
 	try {
 		const tagExit = await tagProc.exited;
 		if (tagExit !== 0) {
@@ -1971,9 +2224,19 @@ export async function finishStandardWorktreeDispatch(
 				completedAt: Date.now(),
 			});
 			const session = ensureAgentSession(dispatch.parentSessionID);
+			// #2236: for the two "source worktree is gone" stages there is nothing
+			// preserved at that path — the directory is exactly what disappeared.
+			// Saying "preserved at <gone path>" would send the reader looking for
+			// a worktree that does not exist, which is the same class of
+			// misleading message this change removes.
+			const location =
+				mergeResult.stage === SOURCE_WORKTREE_GONE_STAGE ||
+				mergeResult.stage === SOURCE_WORKTREE_UNCERTAIN_STAGE
+					? `lane worktree ${dispatch.handle.worktreePath} no longer exists`
+					: `preserved at ${dispatch.handle.worktreePath}`;
 			pushAdvisory(
 				session,
-				`STANDARD_WORKTREE_MERGE_FAILED: task ${dispatch.taskId} preserved at ${dispatch.handle.worktreePath}; stage: ${mergeResult.stage}; ${mergeResult.message}.`,
+				`STANDARD_WORKTREE_MERGE_FAILED: task ${dispatch.taskId} ${location}; stage: ${mergeResult.stage}; ${mergeResult.message}.`,
 			);
 
 			// F-C004: retain failed merge lanes for recovery. In particular, a
@@ -2117,4 +2380,10 @@ export const _internals = {
 	isLaneOwnedByCurrentSession,
 	/** FR-001b: bunSpawn — exposed for test injection so collision check can be mocked. */
 	bunSpawn,
+	/**
+	 * Issue #2236 hardening (F1/F4/F5) — resolves the absolute git executable
+	 * path instead of spawning the bare `'git'` name. Exposed for test
+	 * injection following the `src/worktree/core.ts` convention.
+	 */
+	resolveGitExecutable,
 };

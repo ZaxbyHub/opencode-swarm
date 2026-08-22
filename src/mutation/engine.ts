@@ -6,6 +6,7 @@ import {
 	resolveExecutableFromPath,
 	runExternalTool,
 } from '../utils/external-tool-runner.js';
+import { resolveGitExecutable } from '../utils/git-executable.js';
 
 import {
 	batchCheckEquivalence,
@@ -255,6 +256,16 @@ export const _internals: {
 	runCommand: MutationCommandRunner;
 	runExternalTool: typeof runExternalTool;
 	resolveExecutableFromPath: typeof resolveExecutableFromPath;
+	/**
+	 * Test seam for git binary resolution (issue #2236 hardening, lane C1b) —
+	 * used ONLY by the two `executable: 'git'` sites in `executeMutation`
+	 * (apply / revert). Deliberately NOT used by `runMutationCommand`'s
+	 * caller-supplied `args.executable` path (see the doc comment above
+	 * `runMutationCommand`) — that path stays on `resolveExecutableFromPath`
+	 * so the friendly "git is not installed" message (keyed on
+	 * `args.executable === 'git'`) keeps working for `git`-flavored callers.
+	 */
+	resolveGitExecutable: typeof resolveGitExecutable;
 } = {
 	executeMutation,
 	computeReport,
@@ -263,6 +274,7 @@ export const _internals: {
 	runCommand: runMutationCommand,
 	runExternalTool,
 	resolveExecutableFromPath,
+	resolveGitExecutable,
 } as const;
 
 export async function executeMutation(
@@ -301,7 +313,7 @@ export async function executeMutation(
 
 		try {
 			const applyResult = await runner({
-				executable: 'git',
+				executable: _internals.resolveGitExecutable(),
 				args: ['apply', '--', patchFile],
 				cwd: workingDir,
 				timeoutMs: GIT_APPLY_TIMEOUT_MS,
@@ -384,7 +396,7 @@ export async function executeMutation(
 		if (patchFile) {
 			try {
 				const revertResult = await runner({
-					executable: 'git',
+					executable: _internals.resolveGitExecutable(),
 					args: ['apply', '-R', '--', patchFile],
 					cwd: workingDir,
 					timeoutMs: GIT_APPLY_TIMEOUT_MS,

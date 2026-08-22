@@ -17,7 +17,12 @@ import {
 	recoveryReadErrored,
 } from '../turbo/lean/recovery';
 import { log } from '../utils';
-import { bunSpawn } from '../utils/bun-compat';
+import { type BunCompatSubprocess, bunSpawn } from '../utils/bun-compat';
+import {
+	isSpawnCwdMissing,
+	isSpawnCwdUnreadable,
+} from '../utils/git-binary-missing-error';
+import { resolveGitExecutable } from '../utils/git-executable.js';
 import { autoCommitDirty, cleanUntrackedFiles } from './core';
 import type { MergeStrategy } from './types';
 
@@ -45,6 +50,12 @@ export const _internals: {
 	startupOrphanRecovery: typeof startupOrphanRecovery;
 	/** FR-001b: exposes extractSessionId for lane ownership validation. */
 	extractSessionId: typeof extractSessionId;
+	/**
+	 * Issue #2236 hardening (F1/F4/F5) — resolves the absolute git executable
+	 * path instead of spawning the bare `'git'` name. Exposed for test
+	 * injection following the `src/worktree/core.ts` convention.
+	 */
+	resolveGitExecutable: typeof resolveGitExecutable;
 } = {
 	bunSpawn,
 	platform: process.platform,
@@ -53,20 +64,102 @@ export const _internals: {
 	cleanupOrphanedBranches,
 	startupOrphanRecovery,
 	extractSessionId,
+	resolveGitExecutable,
 };
 
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Why a git child process never started (issue #2236).
+ *
+ * `cwd-missing` is the reported bug: a lane worktree path read from durable
+ * WAL state whose directory has already been torn down. `cwd-unreadable` is
+ * the deliberate third state — "cannot tell" must never be treated as "gone",
+ * because the recovery path decides whether to discard a branch on it.
+ */
+export type GitSpawnFailureKind =
+	| 'cwd-missing'
+	| 'cwd-unreadable'
+	| 'spawn-failed';
+
+export interface GitSpawnFailure {
+	kind: GitSpawnFailureKind;
+	cwd: string;
+	message: string;
+}
+
 interface GitResult {
 	exitCode: number;
 	stdout: string;
 	stderr: string;
+	/**
+	 * Present only when the child never started. `exitCode` is a synthetic
+	 * non-zero value in that case — it is NOT git's exit status.
+	 */
+	spawnFailure?: GitSpawnFailure;
 }
 
 /** Default timeout for git merge-back operations (30 seconds). */
 const MERGE_TIMEOUT_MS = 30_000;
+
+/**
+ * Synthetic exit code for a git process that was never created. Non-zero so
+ * every existing `exitCode === 0` gate treats it as a failure; `spawnFailure`
+ * is the field that says the process never ran.
+ */
+const GIT_SPAWN_FAILURE_EXIT_CODE = 1;
+
+/**
+ * Stage reported when the lane worktree directory is gone AND the lane branch
+ * no longer exists — nothing is recoverable. The coder-settlement recovery
+ * path keys its self-heal on this stage, then re-verifies branch absence
+ * itself before touching the WAL.
+ */
+export const SOURCE_WORKTREE_GONE_STAGE = 'source-worktree-gone';
+
+/**
+ * Stage reported when the lane worktree directory is gone but branch existence
+ * could not be determined. Fails closed: callers must never self-heal on it.
+ */
+export const SOURCE_WORKTREE_UNCERTAIN_STAGE = 'source-worktree-uncertain';
+
+/**
+ * Converts a spawn-time failure into `runGit`'s typed failure result.
+ *
+ * Never throws and never returns a success shape: before #2236 a synchronous
+ * spawn throw escaped `runGit` entirely and its raw
+ * `ENOENT ... posix_spawn 'git'` reached the user looking like a missing git
+ * binary. git was never missing — the `cwd` was.
+ */
+function gitSpawnFailureResult(
+	error: unknown,
+	cwd: string,
+	args: string[],
+): GitResult {
+	const operation = args[0] ?? 'command';
+	let kind: GitSpawnFailureKind;
+	let message: string;
+	if (isSpawnCwdMissing(error, cwd)) {
+		kind = 'cwd-missing';
+		message = `git ${operation} could not start: working directory no longer exists: ${cwd}`;
+	} else if (isSpawnCwdUnreadable(error, cwd)) {
+		kind = 'cwd-unreadable';
+		message = `git ${operation} could not start: working directory could not be inspected: ${cwd}`;
+	} else {
+		kind = 'spawn-failed';
+		message = `git ${operation} could not start in ${cwd}: ${
+			error instanceof Error ? error.message : String(error)
+		}`;
+	}
+	return {
+		exitCode: GIT_SPAWN_FAILURE_EXIT_CODE,
+		stdout: '',
+		stderr: message,
+		spawnFailure: { kind, cwd, message },
+	};
+}
 
 /**
  * Runs a git command via `_internals.bunSpawn` and returns the exit code,
@@ -79,28 +172,50 @@ const MERGE_TIMEOUT_MS = 30_000;
  * - `env: { LC_ALL: 'C' }` (ensures locale-independent English output)
  * - Bounded `timeout`
  * - Best-effort `proc.kill()` in `finally`
+ *
+ * #2236 F0a: the spawn call itself sits INSIDE the `try`. It used to sit
+ * outside, so a synchronous spawn throw bypassed both the `try` and the
+ * `finally`'s `proc.kill()`. `proc` is therefore declared before the `try`
+ * and killed with `proc?.kill()`, or the timeout-kill guarantee would
+ * silently regress for every caller.
  */
 async function runGit(
 	args: string[],
 	cwd: string,
 	timeoutMs = MERGE_TIMEOUT_MS,
 ): Promise<GitResult> {
-	const proc = _internals.bunSpawn(['git', ...args], {
-		cwd,
-		timeout: timeoutMs,
-		stdin: 'ignore' as const,
-		stdout: 'pipe' as const,
-		stderr: 'pipe' as const,
-		env: { ...process.env, LC_ALL: 'C' },
-	});
+	let proc: BunCompatSubprocess | undefined;
 	try {
+		proc = _internals.bunSpawn([_internals.resolveGitExecutable(), ...args], {
+			cwd,
+			timeout: timeoutMs,
+			stdin: 'ignore' as const,
+			stdout: 'pipe' as const,
+			stderr: 'pipe' as const,
+			env: { ...process.env, LC_ALL: 'C' },
+		});
+		// The Bun path reports process-creation failure synchronously (now as a
+		// value, not a throw); the Node path reports it asynchronously via the
+		// `error` event. Check both sides of the await, and return before
+		// touching the streams of a process that never existed.
+		if (proc.spawnError) {
+			return gitSpawnFailureResult(proc.spawnError, cwd, args);
+		}
 		const exitCode = await proc.exited;
+		if (proc.spawnError) {
+			return gitSpawnFailureResult(proc.spawnError, cwd, args);
+		}
 		const stdout = await proc.stdout.text();
 		const stderr = await proc.stderr.text();
 		return { exitCode, stdout, stderr };
+	} catch (error) {
+		// Defense in depth behind the chokepoint in `bunSpawn`: even if a future
+		// spawn path throws again, the raw error is contained here and converted
+		// into the typed failure result rather than escaping to a tool boundary.
+		return gitSpawnFailureResult(error, cwd, args);
 	} finally {
 		try {
-			proc.kill();
+			proc?.kill();
 		} catch {
 			// best-effort — process may already be exited
 		}
@@ -480,13 +595,21 @@ export async function postMergeCleanup(
 	directory: string,
 	branchName: string,
 ): Promise<CleanupSuccess | CleanupFailure> {
+	// Prune stale worktree metadata FIRST (DD-9, #2236 BR-2).
+	//
+	// Order is load-bearing, not cosmetic: git refuses `branch -d/-D` for a
+	// branch that a *registered* worktree still claims — including a worktree
+	// whose directory has already been deleted — with
+	// `error: cannot delete branch 'X' used by worktree at ...`. Pruning after
+	// the delete leaves the branch alive, which then trips
+	// CODER_SETTLEMENT_WORKTREE_CLEANUP_UNVERIFIED and reproduces the #2236
+	// deadlock under a different message. Verified empirically on git 2.54.
+	const pruneResult = await runGit(['worktree', 'prune'], directory);
+	const pruneOk = pruneResult.exitCode === 0;
+
 	// Delete the lane branch (DD-9)
 	const deleteResult = await runGit(['branch', '-D', branchName], directory);
 	const deleteOk = deleteResult.exitCode === 0;
-
-	// Prune stale worktree metadata (DD-9)
-	const pruneResult = await runGit(['worktree', 'prune'], directory);
-	const pruneOk = pruneResult.exitCode === 0;
 
 	if (deleteOk && pruneOk) {
 		return { cleaned: true };
@@ -647,6 +770,123 @@ export async function handleMergeConflict(
 }
 
 /**
+ * Reads the lane branch tip from the PRIMARY repository.
+ *
+ * `--verify --quiet` gives a clean three-way answer, verified on git 2.54:
+ * exit 0 with the object id on stdout when the branch exists, exit 1 with
+ * empty stdout when it does not, anything else means git itself failed and
+ * the answer is indeterminate. `refs/heads/` is spelled out so the revision
+ * can never be reinterpreted (a lane branch name is repo-derived, and a bare
+ * name is ambiguous between a ref and a path).
+ */
+async function readLaneBranchHead(
+	branchName: string,
+	primaryDir: string,
+): Promise<GitResult> {
+	return runGit(
+		['rev-parse', '--verify', '--quiet', `refs/heads/${branchName}`],
+		primaryDir,
+	);
+}
+
+/**
+ * Captures the lane's source HEAD (#2236 BR-1).
+ *
+ * The provenance guard this feeds is a merge-SAFETY check, not a convenience:
+ * it refuses to proceed when the lane branch or the target has moved since
+ * provenance was written, and the recovery path is the only path carrying it.
+ * So when the worktree directory is gone the capture is RELOCATED to the
+ * primary repository — never dropped. Everything the coder committed lives on
+ * the lane branch in the primary object store and stays fully reachable
+ * (verified on git 2.54 with the worktree directory deleted and its
+ * registration left stale).
+ *
+ * Detection is reactive rather than a proactive `fs` probe: we only conclude
+ * "gone" from an actual `cwd-missing` spawn failure, so a live worktree takes
+ * exactly the pre-#2236 code path.
+ */
+async function captureLaneSourceHead(
+	worktreePath: string,
+	branchName: string,
+	primaryDir: string,
+	knownMissing: boolean,
+): Promise<{ result: GitResult; sourceWorktreeMissing: boolean }> {
+	if (!knownMissing) {
+		const fromWorktree = await runGit(['rev-parse', 'HEAD'], worktreePath);
+		if (fromWorktree.spawnFailure?.kind !== 'cwd-missing') {
+			return { result: fromWorktree, sourceWorktreeMissing: false };
+		}
+	}
+	return {
+		result: await readLaneBranchHead(branchName, primaryDir),
+		sourceWorktreeMissing: true,
+	};
+}
+
+/**
+ * "Source worktree is gone" mode (#2236 F0b).
+ *
+ * Returns `null` when the merge can still be recovered from the branch, or a
+ * typed failure when it cannot. Decides on BRANCH existence, never on
+ * directory existence alone — marking a settlement terminal while the branch
+ * survives would strand the coder's commits on an orphan branch the user has
+ * no pointer to.
+ */
+async function handleSourceWorktreeGone(
+	branchHead: GitResult,
+	worktreePath: string,
+	branchName: string,
+	primaryDir: string,
+	provenance: MergeOperationProvenance | undefined,
+): Promise<DirtyMergeFailure | null> {
+	const branchResolved =
+		branchHead.spawnFailure === undefined &&
+		branchHead.exitCode === 0 &&
+		branchHead.stdout.trim().length > 0;
+	if (!branchResolved) {
+		// Branch definitely absent (clean exit 1, empty stdout) vs. "cannot
+		// tell". Only the first is recoverable-as-nothing; the second must fail
+		// closed so no caller discards state on an uncertain answer.
+		const definitelyAbsent =
+			branchHead.spawnFailure === undefined && branchHead.exitCode === 1;
+		return {
+			failed: true,
+			stage: definitelyAbsent
+				? SOURCE_WORKTREE_GONE_STAGE
+				: SOURCE_WORKTREE_UNCERTAIN_STAGE,
+			message: definitelyAbsent
+				? `Lane worktree "${worktreePath}" is gone and branch "${branchName}" no longer exists; nothing is recoverable`
+				: `Lane worktree "${worktreePath}" is gone and branch "${branchName}" existence could not be determined: ${
+						branchHead.stderr.trim() || `git exited ${branchHead.exitCode}`
+					}`,
+			...(provenance ? { provenance } : {}),
+		};
+	}
+	// #2236 BR-2: drop the stale registration BEFORE anything tries to delete
+	// the branch. `git branch -d/-D` refuses while a registered worktree still
+	// claims it, even when that worktree's directory is already gone. Do not
+	// rely on `git worktree remove` returning 0 for a missing directory — that
+	// was only verified on one git version, and CI spans three.
+	const prune = await runGit(['worktree', 'prune'], primaryDir);
+	if (prune.exitCode !== 0) {
+		log(
+			`[worktree] attemptMergeBackFromDirty: worktree prune failed for "${worktreePath}": ${
+				prune.stderr.trim() || prune.stdout.trim()
+			}`,
+		);
+	}
+	// Deliberately states what was DONE, not what will succeed: this runs
+	// before the provenance guard below, which can still refuse the merge.
+	advisoryWarn(
+		`STALE_LANE_WORKTREE_DETECTED: lane worktree "${worktreePath}" no longer exists. ` +
+			`Its stale git registration was pruned, and the merge-back for branch "${branchName}" ` +
+			`is being taken from "${primaryDir}" instead. Any uncommitted work in that worktree is ` +
+			'unrecoverable; every commit on the branch is preserved.',
+	);
+	return null;
+}
+
+/**
  * Attempts to merge a lane branch back from a potentially dirty worktree
  * using progressive cleanup (DD-7).
  *
@@ -677,6 +917,13 @@ export async function attemptMergeBackFromDirty(
 	let autoCommitFailed = false;
 	let cleanFailed = false;
 	let provenance = options.resume;
+	/**
+	 * #2236 F0b: set once the lane worktree directory is proven gone. Drives
+	 * the "dirty state is unrecoverable-and-empty" path — an added path, never
+	 * an abort — and is only ever set from a definite `cwd-missing` spawn
+	 * failure, so an unreadable directory keeps today's behaviour.
+	 */
+	let sourceWorktreeMissing = false;
 
 	if (provenance) {
 		if (
@@ -713,7 +960,28 @@ export async function attemptMergeBackFromDirty(
 			};
 		}
 
-		const sourceHead = await runGit(['rev-parse', 'HEAD'], worktreePath);
+		// #2236 BR-1: the guard below is RELOCATED, not skipped, when the lane
+		// worktree is gone — its `sourceHead`/`targetHead` comparison is the
+		// only thing stopping a stale-provenance merge, and this is the only
+		// path that carries it.
+		const source = await captureLaneSourceHead(
+			worktreePath,
+			branchName,
+			primaryDir,
+			false,
+		);
+		if (source.sourceWorktreeMissing) {
+			const unrecoverable = await handleSourceWorktreeGone(
+				source.result,
+				worktreePath,
+				branchName,
+				primaryDir,
+				provenance,
+			);
+			if (unrecoverable) return unrecoverable;
+			sourceWorktreeMissing = true;
+		}
+		const sourceHead = source.result;
 		const targetHead = await runGit(['rev-parse', 'HEAD'], primaryDir);
 		if (
 			sourceHead.exitCode !== 0 ||
@@ -731,8 +999,10 @@ export async function attemptMergeBackFromDirty(
 		}
 	}
 
-	// Step 1: Auto-commit dirty state
-	if (!provenance) {
+	// Step 1: Auto-commit dirty state.
+	// Skipped when the worktree directory is gone: there is no working tree
+	// left to commit, and nothing is lost by not trying.
+	if (!provenance && !sourceWorktreeMissing) {
 		const commitResult = await autoCommitDirty(worktreePath);
 		if (commitResult.committed) {
 			autoCommitted = true;
@@ -744,25 +1014,49 @@ export async function attemptMergeBackFromDirty(
 		}
 	}
 
-	// Step 2: Clean untracked files
-	const cleanResult = await cleanUntrackedFiles(worktreePath);
-	if (cleanResult.cleaned) {
-		cleaned = true;
-	} else {
-		cleanFailed = true;
-		log(
-			`[worktree] attemptMergeBackFromDirty: clean untracked failed for worktree "${worktreePath}" branch "${branchName}": ${cleanResult.error}`,
-		);
+	// Step 2: Clean untracked files. Skipped for the same reason as step 1 —
+	// no directory means no untracked files to clean.
+	if (!sourceWorktreeMissing) {
+		const cleanResult = await cleanUntrackedFiles(worktreePath);
+		if (cleanResult.cleaned) {
+			cleaned = true;
+		} else {
+			cleanFailed = true;
+			log(
+				`[worktree] attemptMergeBackFromDirty: clean untracked failed for worktree "${worktreePath}" branch "${branchName}": ${cleanResult.error}`,
+			);
+		}
 	}
 
 	// Step 3a: Abandon if both auto-commit AND clean truly failed
 	if (autoCommitFailed && cleanFailed) {
-		return {
-			failed: true,
-			stage: 'cleanup',
-			message: 'Auto-commit and clean both failed; abandoning worktree',
-			...(provenance ? { provenance } : {}),
-		};
+		// #2236 F0b: both steps also fail when the worktree DIRECTORY is gone,
+		// which is recoverable rather than fatal. Ask git directly — a
+		// `cwd-missing` spawn failure is the only accepted proof, so a live
+		// worktree whose git commands merely failed still abandons as before.
+		const probe = await runGit(['rev-parse', '--git-dir'], worktreePath);
+		if (probe.spawnFailure?.kind === 'cwd-missing') {
+			const unrecoverable = await handleSourceWorktreeGone(
+				await readLaneBranchHead(branchName, primaryDir),
+				worktreePath,
+				branchName,
+				primaryDir,
+				provenance,
+			);
+			if (unrecoverable) return unrecoverable;
+			sourceWorktreeMissing = true;
+			// Neither step could have lost anything: there was no working tree.
+			autoCommitFailed = false;
+			cleanFailed = false;
+			cleaned = false;
+		} else {
+			return {
+				failed: true,
+				stage: 'cleanup',
+				message: 'Auto-commit and clean both failed; abandoning worktree',
+				...(provenance ? { provenance } : {}),
+			};
+		}
 	}
 
 	if (!provenance && (options.operationId || options.onBeforeMerge)) {
@@ -773,7 +1067,25 @@ export async function attemptMergeBackFromDirty(
 				message: 'A pre-merge callback requires a stable operationId',
 			};
 		}
-		const sourceHead = await runGit(['rev-parse', 'HEAD'], worktreePath);
+		// #2236 BR-1: same relocation as the provenance branch above.
+		const source = await captureLaneSourceHead(
+			worktreePath,
+			branchName,
+			primaryDir,
+			sourceWorktreeMissing,
+		);
+		if (source.sourceWorktreeMissing && !sourceWorktreeMissing) {
+			const unrecoverable = await handleSourceWorktreeGone(
+				source.result,
+				worktreePath,
+				branchName,
+				primaryDir,
+				provenance,
+			);
+			if (unrecoverable) return unrecoverable;
+			sourceWorktreeMissing = true;
+		}
+		const sourceHead = source.result;
 		const targetHead = await runGit(['rev-parse', 'HEAD'], primaryDir);
 		if (
 			sourceHead.exitCode !== 0 ||
@@ -950,6 +1262,19 @@ export async function cleanupOrphanedBranches(
 
 	const branches = await listLaneBranches(directory);
 
+	// Prune stale worktree metadata FIRST (DD-9, #2236 BR-2).
+	//
+	// Order is load-bearing, not cosmetic: git refuses `branch -d/-D` for a
+	// branch that a *registered* worktree still claims — including a worktree
+	// whose directory has already been deleted — with
+	// `error: cannot delete branch 'X' used by worktree at ...`. Pruning after
+	// the delete leaves the branch alive, which then trips
+	// CODER_SETTLEMENT_WORKTREE_CLEANUP_UNVERIFIED and reproduces the #2236
+	// deadlock under a different message. Verified empirically on git 2.54.
+	// See postMergeCleanup (:598-606) for the same rationale at the first
+	// site this was fixed.
+	await runGit(['worktree', 'prune'], directory);
+
 	for (const branch of branches) {
 		const sessionId = extractSessionId(branch);
 
@@ -984,9 +1309,6 @@ export async function cleanupOrphanedBranches(
 			});
 		}
 	}
-
-	// Prune stale worktree metadata after cleanup
-	await runGit(['worktree', 'prune'], directory);
 
 	return {
 		removed,

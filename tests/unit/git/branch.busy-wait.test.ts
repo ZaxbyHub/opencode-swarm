@@ -48,6 +48,16 @@ afterEach(() => {
 
 const branch = await import('../../../src/git/branch');
 
+// Issue #2236 hardening (lane C1b): stub the resolver seam so `gitExec`
+// spawns a deterministic `'git'` command instead of running
+// `resolveGitExecutable()`'s real filesystem-probing candidate search
+// against this file's mocked `node:child_process.spawnSync`, which would
+// otherwise consume `returnValues` entries meant for the actual git calls
+// under test. `afterEach(() => mock.restore())` above only resets
+// `mock.module`/`mock()` state, not this plain `_internals` property, so it
+// is set once here rather than per-test.
+branch._internals.resolveGitExecutable = () => 'git';
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------

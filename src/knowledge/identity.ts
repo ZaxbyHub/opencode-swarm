@@ -8,6 +8,7 @@ import { existsSync } from 'node:fs';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import { getPlatformConfigDir } from '../hooks/knowledge-store.js';
+import { resolveGitExecutable } from '../utils/git-executable.js';
 
 // ============================================================================
 // Types
@@ -64,8 +65,9 @@ export function deriveProjectHash(directory: string): string {
 	try {
 		// Try to get git remote URL. Bounded with a timeout (Invariant 3 — no
 		// unbounded subprocess); a missing/hung remote falls back to the path.
+		const gitExecutable = resolveGitExecutable();
 		const remoteUrl = child_process
-			.execSync('git -C . remote get-url origin', {
+			.execFileSync(gitExecutable, ['-C', '.', 'remote', 'get-url', 'origin'], {
 				cwd: directory,
 				encoding: 'utf-8',
 				stdio: ['ignore', 'pipe', 'ignore'],
@@ -127,8 +129,9 @@ async function getSwarmVersion(directory?: string): Promise<string> {
  */
 function getGitRemoteUrl(directory: string): string | undefined {
 	try {
+		const gitExecutable = resolveGitExecutable();
 		const remoteUrl = child_process
-			.execSync('git remote get-url origin', {
+			.execFileSync(gitExecutable, ['remote', 'get-url', 'origin'], {
 				cwd: directory,
 				encoding: 'utf-8',
 				stdio: ['pipe', 'pipe', 'ignore'],

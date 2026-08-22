@@ -1,5 +1,20 @@
 # Changelog
 
+## [7.144.6](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.144.5...v7.144.6) (2026-08-22)
+
+
+### Bug Fixes
+
+* **test:** remove the rewrite-then-read race in knowledge-query category test ([8ec778c](https://github.com/ZaxbyHub/opencode-swarm/commit/8ec778cf9f123e0789ed0866ee63cfcb6a590f72))
+* **test:** remove the rewrite-then-read race in knowledge-query category test ([27c0114](https://github.com/ZaxbyHub/opencode-swarm/commit/27c01145286e44099e144ce52c243a1d02e4635c))
+
+## [7.144.5](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.144.4...v7.144.5) (2026-08-22)
+
+
+### Bug Fixes
+
+* **pr-review:** inject per-lane-kind output budgets and pre-seed shell rules ([#2276](https://github.com/ZaxbyHub/opencode-swarm/issues/2276)) ([1992c8c](https://github.com/ZaxbyHub/opencode-swarm/commit/1992c8c8c9f794c271a63fe8e6dc26346561d78b))
+
 ## [7.144.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.144.3...v7.144.4) (2026-08-22)
 
 
