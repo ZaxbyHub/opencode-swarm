@@ -1,5 +1,6 @@
 import type { ToolContext, ToolDefinition } from '@opencode-ai/plugin/tool';
 import { z } from 'zod';
+import { stripKnownSwarmPrefix } from '../config/schema.js';
 import {
 	type RepairGateEvidenceArgs,
 	repairTaskGateEvidence,
@@ -13,6 +14,16 @@ export async function executeRepairGateEvidence(
 	_ctx?: ToolContext,
 ) {
 	try {
+		if (
+			_ctx &&
+			stripKnownSwarmPrefix(_ctx.agent ?? '').toLowerCase() !== 'architect'
+		) {
+			return {
+				success: false,
+				message: 'Only the architect may repair task gate evidence.',
+				errors: ['TASK_GATE_EVIDENCE_ARCHITECT_ONLY'],
+			};
+		}
 		const resolved = resolveWorkingDirectory(args.working_directory, directory);
 		if (!resolved.success) {
 			return {

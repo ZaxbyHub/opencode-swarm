@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from 'bun:test';
+import type { ToolContext } from '@opencode-ai/plugin/tool';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { commitDisplayedMembership } from '../../../src/hooks/knowledge-receipt-ledger.js';
@@ -57,7 +58,7 @@ test('executeRepairKnowledgeReceiptLedger rejects a different invoking session',
 			working_directory: directory,
 		},
 		directory,
-		{ sessionID: 'session-b' } as never,
+		{ sessionID: 'session-b', agent: 'architect' } as never,
 	);
 
 	expect(result).toMatchObject({
@@ -80,4 +81,20 @@ test('executeRepairKnowledgeReceiptLedger rejects a generic repair reason withou
 	);
 
 	expect(result).toMatchObject({ success: false, code: 'store_unavailable' });
+});
+
+test('executeRepairKnowledgeReceiptLedger rejects a non-architect runtime caller', async () => {
+	const directory = project('repair-knowledge-receipt-ledger-agent-');
+	const result = await executeRepairKnowledgeReceiptLedger(
+		{
+			phase: 'phase-a',
+			session_id: 'session-a',
+			reason: 'validate ledger authority safely',
+		},
+		directory,
+		{ agent: 'reviewer' } as ToolContext,
+	);
+
+	expect(result.success).toBe(false);
+	expect(result.errors).toEqual(['RECEIPT_REPAIR_ARCHITECT_ONLY']);
 });

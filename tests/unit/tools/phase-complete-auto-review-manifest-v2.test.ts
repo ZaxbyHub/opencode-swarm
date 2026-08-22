@@ -23,6 +23,7 @@ import { createSafeTestDir } from '../../helpers/safe-test-dir';
 let tmpDir: string;
 let cleanupTmpDir: () => void;
 const realCollectReviewDiff = _internals.collectReviewDiff;
+const FIXED_TIMESTAMP = '2026-08-22T12:00:00.000Z';
 
 const PLAN_TEMPLATE: Plan = {
 	schema_version: '1.0.0',
@@ -84,7 +85,7 @@ function currentScope() {
 			skipReasons: [],
 		},
 		staleness: {
-			collectedAt: new Date().toISOString(),
+			collectedAt: FIXED_TIMESTAMP,
 			headSha: 'b'.repeat(40),
 			selectorKey: 'default',
 			includesWorkingTree: true,
@@ -140,7 +141,7 @@ async function evidence(
 	);
 	const result: AutoReviewEvidence = {
 		schema_version: 2,
-		timestamp: new Date().toISOString(),
+		timestamp: FIXED_TIMESTAMP,
 		trigger: 'phase_completion',
 		session_id: 'review-session',
 		phase: 1,

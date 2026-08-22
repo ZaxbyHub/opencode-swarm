@@ -368,7 +368,7 @@ export function formatDirectiveBlockMessage(
 		'PHASE_COMPLETE_BLOCKED: unresolved critical knowledge directive(s):',
 		...lines,
 		'Resolve each by applying/verifying the directive, recording an explicit',
-		'ignored/n_a with a reason, or (architect only) accept_violations with a',
+		'ignored/n_a with a reason, or use the separate architect-only record_directive_override action with a',
 		'written justification.',
 	].join('\n');
 }

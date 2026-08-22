@@ -118,7 +118,7 @@ describe('phase_complete override spoofing', () => {
 				dir,
 			);
 			const parsed = JSON.parse(out);
-			expect(parsed.reason).toBe('override_denied_non_architect');
+			expect(parsed.reason).toBe('OVERRIDE_DENIED_NON_ARCHITECT');
 
 			// No override event was logged.
 			const evs = await readKnowledgeEvents(dir);
@@ -143,10 +143,10 @@ describe('phase_complete override spoofing', () => {
 			dir,
 		);
 		const parsed = JSON.parse(out);
-		expect(parsed.reason).not.toBe('override_denied_non_architect');
-		expect(parsed.reason).not.toBe('directive_gate_failed_closed');
-		expect(parsed.reason).not.toBe('unresolved_critical_directives');
+		expect(parsed.reason).not.toBe('OVERRIDE_DENIED_NON_ARCHITECT');
+		expect(parsed.reason).not.toBe('DIRECTIVE_GATE_FAILED_CLOSED');
+		expect(parsed.reason).not.toBe('UNRESOLVED_CRITICAL_DIRECTIVES');
 		const evs = await readKnowledgeEvents(dir);
-		expect(evs.filter((e) => e.type === 'override').length).toBe(1);
+		expect(evs.filter((e) => e.type === 'override').length).toBe(0);
 	});
 });

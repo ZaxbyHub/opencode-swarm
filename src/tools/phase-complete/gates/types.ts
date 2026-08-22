@@ -54,6 +54,4 @@ export interface GateContext {
 	autoReviewBlocked?: boolean;
 	/** Machine-readable reason from the current review run, when blocked. */
 	autoReviewBlockReason?: import('../../../review/engine').ReviewEngineResult['blockReason'];
-	/** Final manifest hash from the current review run, when available. */
-	autoReviewManifestHash?: string;
 }

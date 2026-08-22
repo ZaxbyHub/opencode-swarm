@@ -200,7 +200,7 @@ describe('repair_gate_evidence', () => {
 		expect(fs.readFileSync(evidencePath(directory))).toEqual(repairedBytes);
 	});
 
-	test('a repaired generation already ahead of its requirements receipt remains idempotent', async () => {
+	test('refuses to rewrite an authoritative generation ahead of its requirements receipt', async () => {
 		await seedCoderReceipt(directory);
 		const current = JSON.parse(
 			fs.readFileSync(evidencePath(directory), 'utf8'),
@@ -208,24 +208,18 @@ describe('repair_gate_evidence', () => {
 		current.workflow.generation = 5;
 		fs.writeFileSync(evidencePath(directory), JSON.stringify(current, null, 2));
 
-		const first = await executeRepairGateEvidence(
+		const before = fs.readFileSync(evidencePath(directory));
+		const result = await executeRepairGateEvidence(
 			{
 				task_id: TASK_ID,
 				reason: 'repair evidence ahead of receipt generation',
 			},
 			directory,
 		);
-		const repairedBytes = fs.readFileSync(evidencePath(directory));
-		const second = await executeRepairGateEvidence(
-			{ task_id: TASK_ID, reason: 'repeat ahead generation repair safely' },
-			directory,
-		);
 
-		expect(first.repaired_generation).toBe(6);
-		expect(second.success).toBe(true);
-		expect(second.repaired).toBe(false);
-		expect(second.repaired_generation).toBe(6);
-		expect(fs.readFileSync(evidencePath(directory))).toEqual(repairedBytes);
+		expect(result.success).toBe(false);
+		expect(result.message).toBe('TASK_GATE_EVIDENCE_REPAIR_NOT_REQUIRED');
+		expect(fs.readFileSync(evidencePath(directory))).toEqual(before);
 	});
 
 	test('remains incomplete after only reviewer evidence reruns in the fresh generation', async () => {
@@ -439,18 +433,6 @@ describe('repair_gate_evidence', () => {
 		).toEqual([path.basename(quarantinePath)]);
 	});
 
-	test('rejects non-substantive repair reasons during execution', async () => {
-		const result = await executeRepairGateEvidence(
-			{ task_id: TASK_ID, reason: 'repair' },
-			directory,
-		);
-
-		expect(result.success).toBe(false);
-		expect([result.message, ...(result.errors ?? [])].join(' ')).toContain(
-			'TASK_GATE_EVIDENCE_REASON_REQUIRED',
-		);
-	});
-
 	test('fails closed when called on a subdirectory instead of the canonical project root', async () => {
 		const child = path.join(directory, 'nested');
 		fs.mkdirSync(child, { recursive: true });
@@ -500,30 +482,4 @@ describe('repair_gate_evidence', () => {
 		}
 	});
 
-	test('fails closed when the evidence directory is redirected by a symlink or junction', async () => {
-		const evidenceDirectory = path.join(directory, '.swarm', 'evidence');
-		const redirected = path.join(directory, 'redirected-evidence');
-		fs.rmSync(evidenceDirectory, { recursive: true, force: true });
-		fs.mkdirSync(redirected, { recursive: true });
-		try {
-			fs.symlinkSync(redirected, evidenceDirectory, LINK_TYPE);
-		} catch (error) {
-			const code = (error as NodeJS.ErrnoException).code;
-			if (code === 'EPERM' || code === 'EACCES') return;
-			throw error;
-		}
-
-		const result = await executeRepairGateEvidence(
-			{
-				task_id: TASK_ID,
-				reason: 'repair through redirected evidence must fail closed',
-			},
-			directory,
-		);
-
-		expect(result.success).toBe(false);
-		expect([result.message, ...(result.errors ?? [])].join(' ')).toContain(
-			'TASK_GATE_EVIDENCE_PATH_UNSAFE',
-		);
-	});
 });

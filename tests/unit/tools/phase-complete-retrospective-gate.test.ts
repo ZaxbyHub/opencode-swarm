@@ -6,6 +6,7 @@ import * as path from 'node:path';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state.js';
 
 const { phase_complete } = await import('../../../src/tools/phase-complete.js');
+const FIXED_TIMESTAMP = '2026-08-22T12:00:00.000Z';
 
 describe('phase_complete retrospective gate', () => {
 	let tempDir: string;
@@ -85,7 +86,7 @@ describe('phase_complete retrospective gate', () => {
 						{
 							task_id: `retro-${phaseNumber}`,
 							type: 'retrospective',
-							timestamp: new Date().toISOString(),
+							timestamp: FIXED_TIMESTAMP,
 							agent: 'architect',
 							verdict,
 							summary: `Phase ${phaseNumber} retrospective`,
@@ -104,8 +105,8 @@ describe('phase_complete retrospective gate', () => {
 							approaches_tried: [],
 						},
 					],
-					created_at: new Date().toISOString(),
-					updated_at: new Date().toISOString(),
+					created_at: FIXED_TIMESTAMP,
+					updated_at: FIXED_TIMESTAMP,
 				},
 				null,
 				2,
@@ -148,14 +149,14 @@ describe('phase_complete retrospective gate', () => {
 					{
 						task_id: 'retro-1',
 						type: 'retrospective',
-						timestamp: new Date().toISOString(),
+						timestamp: FIXED_TIMESTAMP,
 						agent: 'architect',
 						summary: 'Malformed retrospective',
 						phase_number: 1,
 					},
 				],
-				created_at: new Date().toISOString(),
-				updated_at: new Date().toISOString(),
+				created_at: FIXED_TIMESTAMP,
+				updated_at: FIXED_TIMESTAMP,
 			}),
 		);
 

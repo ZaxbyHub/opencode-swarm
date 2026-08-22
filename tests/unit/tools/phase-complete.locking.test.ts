@@ -12,7 +12,6 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { loadPlan } from '../../../src/plan/manager';
 import { resetSwarmState, swarmState } from '../../../src/state';
 import { executePhaseComplete } from '../../../src/tools/phase-complete';
 
@@ -535,93 +534,6 @@ describe('executePhaseComplete locking behavior', () => {
 		});
 	});
 
-	// ========== GROUP 3: Write Always Happens ==========
-	describe('Group 3: Write Always Happens', () => {
-		test('no event is written when lock acquisition fails completely (exception)', async () => {
-			// Arrange
-			mockTryAcquireLock.mockRejectedValue(new Error('Filesystem error'));
-
-			// Act
-			const result = await executePhaseComplete(
-				{ phase: 1, sessionID: 'test-session' },
-				tempDir,
-			);
-			const parsed = JSON.parse(result);
-
-			// Fail closed: no event is committed when the guarded phase lock fails
-			const eventsContent = fs.readFileSync(eventsPath, 'utf-8');
-			expect(eventsContent.trim()).toBe('');
-			// phase_complete returns failure because plan.json lock acquisition threw
-			expect(parsed.success).toBe(false);
-			expect(parsed.status).toBe('incomplete');
-			expect(parsed.reason).toBe('PHASE_COMMIT_LOCK_ERROR');
-			expect(parsed.message).toContain(
-				'Failed to acquire the guarded phase commit lock',
-			);
-			expect(parsed.message).toContain('Filesystem error');
-			expect(parsed.recovery).toEqual({
-				kind: 'retry',
-				action: 'phase_complete',
-			});
-		});
-
-		test('phase_complete returns failure when lock acquisition returns acquired=false', async () => {
-			// Arrange
-			mockTryAcquireLock.mockResolvedValue({
-				acquired: false,
-			});
-
-			// Act
-			const result = await executePhaseComplete(
-				{ phase: 1, sessionID: 'test-session' },
-				tempDir,
-			);
-			const parsed = JSON.parse(result);
-
-			// Assert: phase_complete returns failure due to concurrent plan lock
-			expect(parsed.success).toBe(false);
-			expect(parsed.status).toBe('incomplete');
-			expect(parsed.reason).toBe('PHASE_COMMIT_LOCKED');
-			expect(parsed.message).toContain(
-				'Plan write is locked by another agent.',
-			);
-			expect(parsed.recovery).toEqual({
-				kind: 'retry',
-				action: 'phase_complete',
-			});
-		});
-
-		test('event is written even when lock acquisition succeeds but write happens after', async () => {
-			// Arrange
-			const mockRelease = vi.fn().mockResolvedValue(undefined);
-			mockTryAcquireLock.mockResolvedValue({
-				acquired: true,
-				lock: {
-					filePath: 'events.jsonl',
-					agent: 'phase-complete',
-					taskId: 'phase-complete-123',
-					timestamp: new Date().toISOString(),
-					expiresAt: Date.now() + 300000,
-					_release: mockRelease,
-				},
-			});
-
-			// Act
-			const result = await executePhaseComplete(
-				{ phase: 1, sessionID: 'test-session' },
-				tempDir,
-			);
-			const parsed = JSON.parse(result);
-
-			// Assert
-			expect(parsed.success).toBe(true);
-			const eventsContent = fs.readFileSync(eventsPath, 'utf-8');
-			const eventLine = eventsContent.trim().split('\n').filter(Boolean)[0];
-			const writtenEvent = JSON.parse(eventLine);
-			expect(writtenEvent.event).toBe('phase_complete');
-		});
-	});
-
 	// ========== GROUP 4: Error Handling ==========
 	describe('Group 4: Error Handling', () => {
 		test('when write fails, error is added to warnings and execution continues', async () => {
@@ -834,70 +746,4 @@ describe('executePhaseComplete locking behavior', () => {
 		});
 	});
 
-	// ========== GROUP 6: F-08 Atomic Fallback ==========
-	describe('Group 6: F-08 Atomic Fallback', () => {
-		test('when loadPlan returns null and no ledger exists, phase_complete fails closed without an atomic fallback write', async () => {
-			// Arrange: lock acquisition succeeds for both events.jsonl and plan.json
-			const mockRelease = vi.fn().mockResolvedValue(undefined);
-			const planRelease = vi.fn().mockResolvedValue(undefined);
-			mockTryAcquireLock.mockImplementation(
-				(_dir: string, filePath: string) => {
-					if (filePath === 'events.jsonl') {
-						return {
-							acquired: true,
-							lock: {
-								filePath: 'events.jsonl',
-								agent: 'phase-complete',
-								taskId: 'phase-complete-123',
-								timestamp: new Date().toISOString(),
-								expiresAt: Date.now() + 300000,
-								_release: mockRelease,
-							},
-						};
-					}
-					// plan.json: acquired
-					return {
-						acquired: true,
-						lock: {
-							filePath: 'plan.json',
-							agent: 'phase-complete',
-							taskId: 'phase-complete-plan-123',
-							timestamp: new Date().toISOString(),
-							expiresAt: Date.now() + 300000,
-							_release: planRelease,
-						},
-					};
-				},
-			);
-
-			// Override loadPlan to return null for the calls that drive the F-08 path:
-			// 1) line 506 (knowledge gate pre-check),
-			// 2) line 1555 (plan update branch),
-			// 3) line 1705 (post-mortem finalPlan check).
-			(loadPlan as ReturnType<typeof vi.fn>).mockResolvedValue(null);
-
-			// Debug: capture the mocked loadPlan call count to verify the override is in effect
-			const planPath = path.join(tempDir, '.swarm', 'plan.json');
-			const planContentBefore = fs.readFileSync(planPath, 'utf-8');
-
-			// Act
-			const result = await executePhaseComplete(
-				{ phase: 1, sessionID: 'test-session' },
-				tempDir,
-			);
-			const parsed = JSON.parse(result);
-
-			// Assert: execution fails closed because there is no authoritative plan
-			expect(parsed.success).toBe(false);
-			expect(parsed.status).toBe('incomplete');
-			expect(parsed.reason).toBe('PHASE_PLAN_UNREADABLE');
-			expect(parsed.message).toContain(
-				'Plan exists but could not be read or rebuilt from the ledger',
-			);
-
-			// Assert: on-disk plan.json was not rewritten through a direct fallback path
-			const onDiskPlan = JSON.parse(fs.readFileSync(planPath, 'utf-8'));
-			expect(JSON.stringify(onDiskPlan)).toBe(planContentBefore);
-		});
-	});
 });

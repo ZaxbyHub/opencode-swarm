@@ -9,9 +9,6 @@ import {
 	type WriteRetroArgs,
 } from '../../../src/tools/write-retro';
 
-/**
- * Helper function to create valid WriteRetroArgs
- */
 function makeArgs(overrides: Partial<WriteRetroArgs> = {}): WriteRetroArgs {
 	return {
 		phase: 4,

@@ -9,7 +9,6 @@ import {
 	resetSwarmState,
 } from '../../../src/state';
 
-// Mock curator functions BEFORE importing the module under test
 const mockRunCuratorPhase = mock(async () => ({
 	phase: 1,
 	agents_dispatched: ['coder'],

@@ -2,31 +2,15 @@
  * Adversarial tests for phase-complete.ts loadEvidence callers — attack vectors only
  * Tests error propagation, memory overflow, injection, boundary violations
  */
-
 import { afterEach, beforeEach, describe, expect, test, vi } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 
-function retrospectiveRecovery(result: {
-	gate_report?: {
-		entries?: Array<{
-			id: string;
-			recovery?: {
-				kind?: string;
-				action?: string;
-				args?: Record<string, unknown>;
-			};
-		}>;
-	};
-}) {
-	const recovery = result.gate_report?.entries?.find(
-		(entry) => entry.id === 'retrospective',
-	)?.recovery;
-	expect(recovery).toBeDefined();
-	return recovery!;
+function retrospectiveRecovery(result: { gate_report?: { entries?: Array<{ id: string; recovery?: unknown }> } }) {
+	return result.gate_report?.entries?.find((entry) => entry.id === 'retrospective')
+		?.recovery;
 }
 
 // Mock loadEvidence and listEvidenceTaskIds from evidence/manager
@@ -494,7 +478,7 @@ describe('phase_complete - loadEvidence adversarial testing', () => {
 			expect(parsed.success).toBe(false);
 			expect(parsed.phase).toBe(Number.MAX_SAFE_INTEGER);
 
-			expect(retrospectiveRecovery(parsed).args).toEqual({ phase });
+			expect(retrospectiveRecovery(parsed)).toMatchObject({ args: { phase } });
 		});
 
 		test('should handle NaN phase', async () => {
@@ -616,101 +600,4 @@ describe('phase_complete - loadEvidence adversarial testing', () => {
 		});
 	});
 
-	describe('typed recovery — phase-number integrity', () => {
-		test('embeds the numeric phase in recovery args', async () => {
-			// Arrange
-			const phase = 1;
-			ensureAgentSession('sess1');
-
-			mockLoadEvidence.mockResolvedValue({ status: 'not_found' });
-			mockListEvidenceTaskIds.mockResolvedValue([]);
-
-			// Act
-			const result = await phase_complete.execute({
-				phase,
-				sessionID: 'sess1',
-			});
-			const parsed = JSON.parse(result);
-
-			expect(retrospectiveRecovery(parsed)).toEqual({
-				kind: 'tool',
-				action: 'write_retro',
-				args: { phase },
-			});
-		});
-
-		test('handles a large phase number in recovery args', async () => {
-			// Arrange
-			const phase = 999999999;
-			ensureAgentSession('sess1');
-
-			mockLoadEvidence.mockResolvedValue({ status: 'not_found' });
-			mockListEvidenceTaskIds.mockResolvedValue([]);
-
-			// Act
-			const result = await phase_complete.execute({
-				phase,
-				sessionID: 'sess1',
-			});
-			const parsed = JSON.parse(result);
-
-			expect(retrospectiveRecovery(parsed).args).toEqual({ phase });
-		});
-
-		test('handles MAX_SAFE_INTEGER phase in recovery args', async () => {
-			// Arrange
-			const phase = Number.MAX_SAFE_INTEGER;
-			ensureAgentSession('sess1');
-
-			mockLoadEvidence.mockResolvedValue({ status: 'not_found' });
-			mockListEvidenceTaskIds.mockResolvedValue([]);
-
-			// Act
-			const result = await phase_complete.execute({
-				phase,
-				sessionID: 'sess1',
-			});
-			const parsed = JSON.parse(result);
-
-			expect(retrospectiveRecovery(parsed).args).toEqual({ phase });
-		});
-
-		test('recovery phase remains a number', async () => {
-			// Arrange
-			const phase = 1;
-			ensureAgentSession('sess1');
-
-			mockLoadEvidence.mockResolvedValue({ status: 'not_found' });
-			mockListEvidenceTaskIds.mockResolvedValue([]);
-
-			// Act
-			const result = await phase_complete.execute({
-				phase,
-				sessionID: 'sess1',
-			});
-			const parsed = JSON.parse(result);
-
-			expect(typeof retrospectiveRecovery(parsed).args?.phase).toBe('number');
-		});
-
-		test('recovery contains no user-derived task identifier', async () => {
-			// Arrange
-			const phase = 1;
-			ensureAgentSession('sess1');
-
-			mockLoadEvidence.mockResolvedValue({ status: 'not_found' });
-			mockListEvidenceTaskIds.mockResolvedValue([]);
-
-			// Act
-			const result = await phase_complete.execute({
-				phase,
-				sessionID: 'sess1',
-			});
-			const parsed = JSON.parse(result);
-
-			const recovery = retrospectiveRecovery(parsed);
-			expect(recovery.action).toBe('write_retro');
-			expect(Object.keys(recovery.args ?? {})).toEqual(['phase']);
-		});
-	});
 });

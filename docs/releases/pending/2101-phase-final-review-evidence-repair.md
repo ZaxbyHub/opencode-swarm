@@ -34,4 +34,6 @@ No manual migration is required. Legacy task evidence remains readable, but a
 repair installs a fresh generation and requires the relevant gates to run again.
 Legacy final-review evidence must be regenerated with `run_phase_review` before
 gate-mode completion. Existing callers of `write_retro` must now supply an
-explicit verdict.
+explicit verdict. Existing callers that passed `accept_violations` to
+`phase_complete` must instead call `record_directive_override` first, then
+retry `phase_complete` without the deprecated input.

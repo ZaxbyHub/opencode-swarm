@@ -1,5 +1,6 @@
 import type { ToolContext, ToolDefinition } from '@opencode-ai/plugin/tool';
 import { z } from 'zod';
+import { stripKnownSwarmPrefix } from '../config/schema.js';
 import {
 	type RepairKnowledgeReceiptLedgerInput,
 	repairKnowledgeReceiptLedger,
@@ -13,6 +14,16 @@ export async function executeRepairKnowledgeReceiptLedger(
 	_ctx?: ToolContext,
 ) {
 	try {
+		if (
+			_ctx &&
+			stripKnownSwarmPrefix(_ctx.agent ?? '').toLowerCase() !== 'architect'
+		) {
+			return {
+				success: false,
+				message: 'Only the architect may repair the knowledge receipt ledger.',
+				errors: ['RECEIPT_REPAIR_ARCHITECT_ONLY'],
+			};
+		}
 		if (_ctx?.sessionID && args.session_id !== _ctx.sessionID) {
 			return {
 				success: false,

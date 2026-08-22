@@ -16,10 +16,6 @@ import {
 	createWorkflowTestSessionWithPassedTask,
 } from '../../helpers/workflow-session-factory';
 
-// ============================================================================
-// readTaskEvidenceRaw unit tests
-// ============================================================================
-
 describe('readTaskEvidenceRaw', () => {
 	let tempDir: string;
 	let originalCwd: string;
@@ -462,7 +458,6 @@ describe('checkReviewerGate — evidence-first gate (Phase 3.1 fix)', () => {
 
 		const result = checkReviewerGate('1.1', tempDir);
 
-		// Should be blocked because evidence file is corrupt
 		expect(result.blocked).toBe(true);
 		expect(result.reason).toContain('corrupt or unreadable');
 		expect(result.nextAction).toContain('repair_gate_evidence');

@@ -18,15 +18,11 @@ import {
 } from '../../../src/state';
 import { seedStageBGates } from '../../helpers/task-workflow-evidence';
 
-// Import the tool after setting up environment
 const { phase_complete, executePhaseComplete } = await import(
 	'../../../src/tools/phase-complete'
 );
 
 setDefaultTimeout(30_000);
-/**
- * Helper function to write a valid retro bundle for a phase
- */
 function writeRetroBundle(
 	directory: string,
 	phaseNumber: number,

@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
+	assertTaskEvidenceWriteAllowed,
 	parseTaskEvidence,
 	TASK_WORKFLOW_SCHEMA_MARKER,
 	type TaskEvidence,
@@ -739,6 +740,18 @@ export async function repairTaskGateEvidence(
 					message: `Task gate evidence for ${args.task_id} is already in repaired fail-closed state.`,
 				};
 			}
+			if (
+				read.status === 'valid' &&
+				read.evidence?.workflow?.schema === TASK_WORKFLOW_SCHEMA_MARKER
+			) {
+				return {
+					success: false,
+					message: 'TASK_GATE_EVIDENCE_REPAIR_NOT_REQUIRED',
+					errors: [
+						`TASK_GATE_EVIDENCE_REPAIR_NOT_REQUIRED: ${args.task_id} has valid authoritative evidence. Use the normal workflow repair path; this tool only rebuilds corrupt or legacy evidence.`,
+					],
+				};
+			}
 
 			if (
 				typeof args.expected_sha256 === 'string' &&
@@ -829,6 +842,7 @@ export async function repairTaskGateEvidence(
 					latestReceipt?.generation ?? null,
 				);
 			}
+			assertTaskEvidenceWriteAllowed(canonicalDirectory, args.task_id);
 			await atomicWriteFile(
 				taskEvidenceFilePath(canonicalDirectory, args.task_id),
 				serialized,

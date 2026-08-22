@@ -2237,18 +2237,18 @@ export function createPhaseCompleteTool(
 				.describe(
 					'Explicit project root directory. When provided, .swarm/ is resolved relative to this path instead of the plugin context directory. Use this when CWD differs from the actual project root.',
 				),
-			accept_violations: z
+		accept_violations: z
 				.array(z.string())
 				.optional()
-				.describe(
-					'ARCHITECT ONLY. Critical knowledge-directive IDs (or exact trace_id/entry_id pairs when an ID is ambiguous) to explicitly accept as unresolved. Requires accept_violations_justification. Each is logged as an override event.',
-				),
+			.describe(
+				'DEPRECATED COMPATIBILITY INPUT. phase_complete never records directive overrides. When supplied, it fails closed with recovery instructions for the architect-only record_directive_override action.',
+			),
 			accept_violations_justification: z
 				.string()
 				.optional()
-				.describe(
-					'Written justification required when accept_violations is provided.',
-				),
+			.describe(
+				'Written justification retained only for deprecated compatibility input; use it with record_directive_override instead.',
+			),
 		},
 		execute: async (args, directory, ctx) => {
 			// Parse and validate arguments
