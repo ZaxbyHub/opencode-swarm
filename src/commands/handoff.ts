@@ -2,8 +2,6 @@
  * Handle /swarm handoff command
  * Generates a handoff brief, writes to .swarm/handoff.md, triggers snapshot, and returns markdown.
  */
-import crypto from 'node:crypto';
-import { renameSync, unlinkSync } from 'node:fs';
 import { validateSwarmPath } from '../hooks/utils';
 import {
 	formatContinuationPrompt,
@@ -15,8 +13,7 @@ import {
 	writeSnapshot,
 } from '../session/snapshot-writer';
 import { swarmState } from '../state';
-import { bunWrite } from '../utils/bun-compat';
-import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
+import { atomicWriteSwarmFile } from '../utils/atomic-write';
 
 const HANDOFF_SOURCE_SESSION_PREFIX =
 	'<!-- opencode-swarm-handoff-source-session:';
@@ -42,55 +39,28 @@ export async function handleHandoffCommand(
 	// Format as markdown
 	const markdown = formatHandoffMarkdown(handoffData);
 
-	// Write to .swarm/handoff.md using atomic write (temp file + rename)
+	// Write to .swarm/handoff.md via the canonical atomic helper (issue
+	// #2035): `.swarm` containment, registered temp grammar, fsync, bounded
+	// rename retry, exact own-temp cleanup, and cache invalidation. handoff.md
+	// is read through the cached reader (`readSwarmFileAsync(directory,
+	// 'handoff.md')` at src/hooks/system-enhancer.ts and
+	// src/services/context-budget-service.ts), and the cache's stat stamp
+	// (mtime+ctime+size) cannot distinguish a same-size rewrite landing inside
+	// one filesystem timestamp tick (issue #1729) — the helper invalidates
+	// after the successful rename.
 	try {
 		const resolvedPath = validateSwarmPath(directory, 'handoff.md');
-		const tempPath = `${resolvedPath}.tmp.${crypto.randomUUID()}`;
-		await bunWrite(
-			tempPath,
+		await atomicWriteSwarmFile(
+			resolvedPath,
 			formatSessionScopedHandoffMarkdown(markdown, sessionID),
 		);
-		try {
-			renameSync(tempPath, resolvedPath);
-		} catch (renameErr) {
-			try {
-				unlinkSync(tempPath);
-			} catch {
-				/* Justification: best-effort cleanup of a temp file that was just
-				 * successfully written. Failure here means the OS or an external
-				 * process already removed it — nothing actionable to report, and
-				 * the renameErr (rethrown below) is the real signal. */
-			}
-			throw renameErr;
-		}
-		// Only after a SUCCESSFUL rename: `handoff.md` is read through the cached
-		// reader (`readSwarmFileAsync(directory, 'handoff.md')` at
-		// src/hooks/system-enhancer.ts:1021,1882 and
-		// src/services/context-budget-service.ts), and the cache's stat stamp
-		// (mtime+ctime+size) cannot distinguish a same-size rewrite landing inside
-		// one filesystem timestamp tick (issue #1729).
-		invalidateCachedArtifact(resolvedPath);
 
 		// Build continuation prompt from structured data
 		const continuationPrompt = formatContinuationPrompt(handoffData);
 
-		// Write continuation prompt as a dedicated artifact
+		// Write continuation prompt as a dedicated artifact (same helper).
 		const promptPath = validateSwarmPath(directory, 'handoff-prompt.md');
-		const promptTempPath = `${promptPath}.tmp.${crypto.randomUUID()}`;
-		await bunWrite(promptTempPath, continuationPrompt);
-		try {
-			renameSync(promptTempPath, promptPath);
-		} catch (renameErr) {
-			try {
-				unlinkSync(promptTempPath);
-			} catch {
-				/* Justification: best-effort cleanup of a temp file that was just
-				 * successfully written. Failure here means the OS or an external
-				 * process already removed it — nothing actionable to report, and
-				 * the renameErr (rethrown below) is the real signal. */
-			}
-			throw renameErr;
-		}
+		await atomicWriteSwarmFile(promptPath, continuationPrompt);
 
 		// Trigger snapshot write
 		await writeSnapshot(directory, swarmState);

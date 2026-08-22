@@ -93,7 +93,12 @@ export type TelemetryEvent =
 	// Human-only hive-store maintenance audit (issue #2033): one metadata-only event per
 	// preview/commit/rollback phase with bounded abort codes, counts, hash prefixes, and
 	// token prefixes. No lesson text and no filesystem paths ever enter the payload.
-	| 'knowledge_maintenance';
+	| 'knowledge_maintenance'
+	// Atomic-write residue health (issue #2035): bounded counts emitted when a
+	// quarantine run moves verified stale temp files (close clean stage or
+	// `/swarm config doctor --quarantine-residue`). Counts and registered
+	// grammar ids only — no file names, no paths, no content.
+	| 'residue_health';
 
 /** Stable classification for how a reviewer-gate decision was established. */
 export type ReviewerGateEvidenceKind =
@@ -854,6 +859,28 @@ export const telemetry = {
 		}>;
 	}): void {
 		_internals.emit('close_archive_result', data);
+	},
+
+	/**
+	 * Atomic-write residue health (issue #2035). Emitted after a residue
+	 * quarantine run (close clean stage / doctor flag). Bounded payload:
+	 * counts, one bounded age figure, total bytes, and per-grammar counts
+	 * keyed by the frozen registry ids — never file names, paths, or content,
+	 * enabling later reporting (PR 16/19) without leaking workspace layout.
+	 */
+	residueHealth(data: {
+		trigger: string;
+		scanned: number;
+		matched: number;
+		eligible: number;
+		ambiguous: number;
+		quarantined: number;
+		preserved: number;
+		total_bytes: number;
+		oldest_age_ms: number;
+		grammar_counts: Record<string, number>;
+	}): void {
+		_internals.emit('residue_health', data);
 	},
 
 	/**

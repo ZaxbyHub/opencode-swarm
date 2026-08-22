@@ -8,13 +8,14 @@ import {
 	realpathSync,
 	statSync,
 } from 'node:fs';
-import { mkdir, rename, unlink, writeFile } from 'node:fs/promises';
+import { mkdir } from 'node:fs/promises';
 import * as path from 'node:path';
 import lockfileImport from 'proper-lockfile';
 import { validateSwarmPath } from '../hooks/utils';
 import { getGraphNode } from '../tools/repo-graph/query';
 import { getGraphPath } from '../tools/repo-graph/storage';
 import type { RepoGraph } from '../tools/repo-graph/types';
+import { atomicWriteSwarmFile } from '../utils/atomic-write';
 import { type MemoryConfig, resolveMemoryConfig } from './config';
 import {
 	createMemoryGateway,
@@ -41,7 +42,6 @@ const MAX_INJECTION_READ_BYTES = MAX_ARTIFACT_BYTES;
 const MAX_GRAPH_BYTES = 16 * 1024 * 1024;
 const MAX_STORE_BYTES = 16 * 1024 * 1024;
 const MAX_ANCHOR_PROBES = 4000;
-const RENAME_RETRIES = 5;
 
 const lockfile = lockfileImport as unknown as {
 	lock: (
@@ -544,27 +544,14 @@ function boundDigest(digest: ReflectionDigest): {
 	return { digest: bounded, artifacts };
 }
 
+/**
+ * Canonical atomic write (issue #2035): `.swarm` containment, registered
+ * `canonical-v1` temp grammar, fsync, bounded rename retry (supersedes the
+ * local EBUSY/EPERM/EACCES loop), and exact own-temp cleanup. The historical
+ * `target.tmp.<pid>.<ts>.<rand>` grammar stays registered for residue
+ * discovery.
+ */
 async function atomicWrite(filePath: string, content: string): Promise<void> {
 	await mkdir(path.dirname(filePath), { recursive: true });
-	const tempPath = `${filePath}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}`;
-	try {
-		await writeFile(tempPath, content, 'utf-8');
-		for (let attempt = 0; ; attempt++) {
-			try {
-				await rename(tempPath, filePath);
-				break;
-			} catch (error) {
-				const code = (error as NodeJS.ErrnoException).code;
-				if (
-					attempt >= RENAME_RETRIES - 1 ||
-					!['EBUSY', 'EPERM', 'EACCES'].includes(code ?? '')
-				) {
-					throw error;
-				}
-				await new Promise((resolve) => setTimeout(resolve, 50));
-			}
-		}
-	} finally {
-		await unlink(tempPath).catch(() => {});
-	}
+	await atomicWriteSwarmFile(filePath, content);
 }

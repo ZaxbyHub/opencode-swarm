@@ -629,6 +629,20 @@ Split criteria: one behavioral aspect per file, shared test utilities extracted 
 - FR-009 Lean Turbo tests cover: acquire-locks, plan-lanes, review, runner-status, generate-mutants, set-qa-gates, get-qa-gate-profile.
 - FR-010/011/012 hook tests (Phase 4): 11 new files covering conflict-resolution, curator-types, delegate-ack-collector, delegate-directive-injection, knowledge-reinforcement, normalize-tool-name, phase-complete-directive-gate, phase-directives, semantic-diff-injection; shared fixtures consolidated in `curator-test-fixtures.ts`.
 
+### Atomic writes and residue quarantine (issue #2035)
+
+**Anti-pattern:** inventing a new temp-file naming grammar per writer; cleanup sweeps that match by substring (`startsWith('.tmp.')`) or delete without eligibility gates.
+
+**Required pattern:**
+
+- Production atomic writes under `.swarm/` go through the canonical helper in `src/utils/atomic-write.ts` (`atomicWriteSwarmFile`/`Sync`): containment, registered `<target>.<hex32>.tmp` grammar, bounded payload, fsync, bounded rename retry, exact own-temp `finally` cleanup, artifact-cache invalidation.
+- Every temp grammar — current, canonical, and legacy — is registered in `SWARM_TEMP_GRAMMARS` with producer citations; a bespoke writer may exist only with a documented invariant reason (registry `note` + `WRITER_CLASSIFICATION` entry). The ratchet test in `tests/unit/utils/atomic-write.test.ts` fails the build for any unclassified `.tmp`-constructing source file.
+- Residue discovery classifies candidates by exact registered grammars only (case-sensitive); constant-name temps (`X.tmp`, no instance token) are reported but never auto-mutated.
+- Mutation of residue is a recoverable MOVE into `.swarm/quarantine/<batch>/` with a manifest (original path, sha256, bytes, mtime, grammar, reason), eligible only when: stale (≥30 min), git-untracked (unknown tracked-state fails closed), non-symlink, no active lock, parsed target present, and unchanged since scan. Automatic destructive deletion is prohibited. Rollback is manifest-verified, idempotent, and collision-safe.
+- Close (clean stage + dry-run), `/swarm config doctor`, and diagnose all render from the ONE shared implementation in `src/services/swarm-residue.ts`; the `residue_health` telemetry event carries counts and grammar ids only — never file names, paths, or content.
+
+**Verification:** `bun test tests/unit/utils/atomic-write.test.ts tests/unit/services/swarm-residue.test.ts tests/unit/commands/doctor-residue.test.ts tests/unit/services/diagnose-residue-check.test.ts` plus the issue-named suites (`tests/unit/commands/atomic-writes.test.ts`, `tests/unit/hooks/curator-atomic-write.test.ts`, `tests/unit/commands/close-cleanup.test.ts`, `tests/integration/finalize-clean-preserves-swarm.test.ts`).
+
 ## PR checklist (pasteable into PR descriptions)
 
 ```markdown

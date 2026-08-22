@@ -6,6 +6,7 @@ import {
 	mkdtempSync,
 	readFileSync,
 	rmSync,
+	utimesSync,
 	writeFileSync,
 } from 'node:fs';
 import os from 'node:os';
@@ -68,7 +69,8 @@ describe('atomic writes — temp+rename verification (FR-008 SC-013/014/015)', (
 		expect(reportRename).toBeDefined();
 		if (reportRename) {
 			const [tempPath, finalPath] = reportRename;
-			expect(tempPath).toContain('.tmp.');
+			// Canonical grammar (issue #2035): <target>.<hex32>.tmp
+			expect(tempPath.endsWith('.tmp')).toBe(true);
 			expect(path.dirname(tempPath)).toBe(path.dirname(finalPath));
 		}
 	});
@@ -176,13 +178,14 @@ describe('atomic writes — temp+rename verification (FR-008 SC-013/014/015)', (
 		expect(contextRename).toBeDefined();
 		if (contextRename) {
 			const [tempPath] = contextRename;
-			expect(tempPath).toContain('.tmp.');
+			// Canonical grammar (issue #2035): context.md.<hex32>.tmp
+			expect(tempPath.endsWith('.tmp')).toBe(true);
 			expect(path.dirname(tempPath)).toBe(path.dirname(contextPath));
 		}
 
 		// Verify no temp files remain in .swarm/
 		const swarmFiles = realReaddirSync(path.join(testDir, '.swarm'));
-		const tempFiles = swarmFiles.filter((f) => f.includes('.tmp.'));
+		const tempFiles = swarmFiles.filter((f) => f.includes('.tmp'));
 		expect(tempFiles).toHaveLength(0);
 
 		// Verify content was written
@@ -212,5 +215,55 @@ describe('atomic writes — temp+rename verification (FR-008 SC-013/014/015)', (
 			expect(path.dirname(from)).toBe(path.dirname(to));
 			expect(from).toContain('.tmp.');
 		}
+	});
+});
+
+describe('finalize dry-run residue inventory (issue #2035)', () => {
+	it('previews residue read-only from the shared implementation and mutates nothing', async () => {
+		const { _internals: ci } = await import('../../../src/commands/close.js');
+		const { _internals: residueInternals } = await import(
+			'../../../src/services/swarm-residue.js'
+		);
+		const realQueryTracked = residueInternals.queryTracked;
+		residueInternals.queryTracked = () => ({ tracked: new Set<string>() });
+		try {
+			mkdirSync(path.join(testDir, '.swarm'), { recursive: true });
+			writeFileSync(path.join(testDir, '.swarm', 'context.md'), 'x', 'utf-8');
+			const residueRel = 'context.md.tmp.1710000000.123456789';
+			const residueAbs = path.join(testDir, '.swarm', residueRel);
+			writeFileSync(residueAbs, 'stale', 'utf-8');
+			const t = new Date(Date.now() - 2 * 60 * 60 * 1000);
+			utimesSync(residueAbs, t, t);
+
+			const report = await ci.runFinalizeDryRun(
+				testDir,
+				path.join(testDir, '.swarm'),
+				{ title: 't', phases: [] },
+				false,
+			);
+
+			expect(report).toContain('Atomic-write residue (read-only inventory)');
+			expect(report).toContain('target-suffix-tmp-num-alnum');
+			expect(report).toContain('would quarantine');
+			// Read-only: the residue is untouched, no quarantine dir appears.
+			expect(existsSync(residueAbs)).toBe(true);
+			expect(existsSync(path.join(testDir, '.swarm', 'quarantine'))).toBe(
+				false,
+			);
+		} finally {
+			residueInternals.queryTracked = realQueryTracked;
+		}
+	});
+
+	it('omits the residue section entirely when .swarm has no residue', async () => {
+		const { _internals: ci } = await import('../../../src/commands/close.js');
+		mkdirSync(path.join(testDir, '.swarm'), { recursive: true });
+		const report = await ci.runFinalizeDryRun(
+			testDir,
+			path.join(testDir, '.swarm'),
+			{ title: 't', phases: [] },
+			false,
+		);
+		expect(report).not.toContain('Atomic-write residue');
 	});
 });

@@ -3154,6 +3154,22 @@ export function checkExplicitInvalidation(
 
 export const EVIDENCE_WRITE_BLIND_SPOTS: readonly EvidenceWriteBlindSpot[] = [
 	{
+		file: 'src/utils/atomic-write.ts',
+		rule: 'R',
+		target: 'to',
+		status: 'not-an-evidence-artifact',
+		reason:
+			'Issue #2035: renameWithRetry(tempPath, resolvedTarget) inside the ' +
+			'canonical atomic-write core is parameter-passed BY CONTRACT (every ' +
+			'.swarm writer delegates here with its own already-validated target — ' +
+			'the former task-file.ts CANONICAL_HELPER exemption moved its body ' +
+			'here). The core unconditionally calls ' +
+			'invalidateCachedArtifact(resolvedTarget) after the successful rename ' +
+			'(same function, machine-checkable by RULE-checker), so the cache ' +
+			'invalidation requirement the scan enforces is met at the single ' +
+			'point every migrated writer funnels through.',
+	},
+	{
 		file: 'src/background/pending-delegations.ts',
 		rule: 'R',
 		target: 'to',

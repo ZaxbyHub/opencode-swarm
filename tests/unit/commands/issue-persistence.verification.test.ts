@@ -3,7 +3,9 @@ import * as fsSync from 'node:fs';
 import os from 'node:os';
 import * as path from 'node:path';
 import { _internals as urlSecurityInternals } from '../../../src/commands/_shared/url-security';
-import { _internals, handleIssueCommand } from '../../../src/commands/issue';
+import { handleIssueCommand } from '../../../src/commands/issue';
+// Issue #2035: the atomic-write rename seam moved to the canonical helper.
+import { _internals as atomicWriteInternals } from '../../../src/utils/atomic-write';
 
 // =============================================================================
 // Mock: bare-number resolution requires git remote detection via spawnSync
@@ -55,7 +57,7 @@ function makeIssueReferenceRenameFailAfter(n: number, errorMsg: string) {
 	renameTracker.issueRefRenameCount = 0;
 	renameTracker.issueRefFailAfter = n;
 	renameTracker.errorMsg = errorMsg;
-	_internals.renameSync = (tmpPath: string, finalPath: string) => {
+	atomicWriteInternals.renameSync = (tmpPath: string, finalPath: string) => {
 		const isIssueRef = finalPath.endsWith('issue-reference.json');
 		if (isIssueRef) {
 			renameTracker.issueRefRenameCount++;
@@ -85,10 +87,10 @@ describe('handleIssueCommand — durable persistence (issue.ts)', () => {
 			issueRefRenameCount: 0,
 			issueRefFailAfter: Infinity, // don't fail by default
 			errorMsg: '',
-			orig: _internals.renameSync,
+			orig: atomicWriteInternals.renameSync,
 		};
 		// Restore to real (idempotent)
-		_internals.renameSync = renameTracker.orig;
+		atomicWriteInternals.renameSync = renameTracker.orig;
 	});
 
 	afterEach(() => {
@@ -96,7 +98,7 @@ describe('handleIssueCommand — durable persistence (issue.ts)', () => {
 		urlSecurityInternals.spawnSync = realSpawnSync;
 
 		// Restore renameSync to real
-		_internals.renameSync = renameTracker.orig;
+		atomicWriteInternals.renameSync = renameTracker.orig;
 
 		// Clean up temp dir — best effort
 		try {

@@ -13,6 +13,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { atomicWriteSwarmFileSync } from '../utils/atomic-write';
 import { assertProjectRoot } from '../utils/project-boundary.js';
 
 import {
@@ -160,42 +161,20 @@ export const _internals = {
 };
 
 /**
- * Atomic synchronous write: write to a uniquely-named temp file, then rename.
- * On Windows, fs.renameSync can fail if the target already exists; the retry
- * after unlink handles this.
+ * Atomic synchronous write, delegated to the canonical helper (issue #2035):
+ * `.swarm` containment, registered `canonical-v1` temp grammar, fsync,
+ * bounded rename retry, and exact own-temp cleanup in `finally`. The old
+ * `.tmp-<filename>-<ts>-<pid>` grammar stays registered for residue
+ * discovery; failure-injection tests target `src/utils/atomic-write.ts:
+ * _internals` (renameSync/unlinkSync) — the seam moved there with the
+ * implementation.
  */
 function atomicWriteFileSync(
 	dir: string,
 	filename: string,
 	content: string,
 ): void {
-	const tmpPath = path.join(
-		dir,
-		`.tmp-${filename}-${Date.now()}-${process.pid}`,
-	);
-	const finalPath = path.join(dir, filename);
-	_internals.writeFileSync(tmpPath, content, 'utf-8');
-	try {
-		_internals.renameSync(tmpPath, finalPath);
-	} catch {
-		// Windows: target may already exist — unlink first, then rename
-		try {
-			_internals.unlinkSync(finalPath);
-		} catch {
-			// best effort
-		}
-		try {
-			_internals.renameSync(tmpPath, finalPath);
-		} catch (retryErr) {
-			// Clean up leaked temp file before re-throwing
-			try {
-				_internals.unlinkSync(tmpPath);
-			} catch {
-				// best effort
-			}
-			throw retryErr;
-		}
-	}
+	atomicWriteSwarmFileSync(path.join(dir, filename), content);
 }
 
 export function handleIssueCommand(directory: string, args: string[]): string {

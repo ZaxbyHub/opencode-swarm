@@ -10,17 +10,19 @@
  * with a direct, non-atomic `writeFileSync`. A reader (e.g. council evaluation
  * reading criteria, or `check_gate_status` reading evidence) could observe a
  * torn/partial file mid-write, and a concurrent writer could clobber updates.
- * The fix switched both to `atomicWriteFile`, which writes to
- * `<target>.tmp.<n>` then `renameSync`s it over the target so readers only ever
- * see a complete file.
+ * The fix routes both through `atomicWriteFile`, which (since issue #2035,
+ * via the canonical helper in src/utils/atomic-write.ts) writes to
+ * `<target>.<hex32>.tmp` then renames it over the target so readers only
+ * ever see a complete file.
  *
  * How this guard works (and how it fails on revert):
- *   `atomicWriteFile` is the ONLY caller of `task-file._internals.renameSync`,
- *   and it reads that property at call time. So if — and only if — a store
- *   routes its write through `atomicWriteFile`, we observe a `renameSync` call
- *   whose destination is exactly the store's target file. We intercept the
- *   genuine `_internals.renameSync` DI seam (no `mock.module`, real I/O) and
- *   assert that exact destination was renamed.
+ *   `atomicWriteFile` delegates to the canonical atomic helper, which is the
+ *   ONLY caller of `atomic-write._internals.renameSync`, reading that
+ *   property at call time. So if — and only if — a store routes its write
+ *   through `atomicWriteFile`, we observe a `renameSync` call whose
+ *   destination is exactly the store's target file. We intercept the genuine
+ *   `_internals.renameSync` DI seam (no `mock.module`, real I/O) and assert
+ *   that exact destination was renamed.
  *
  *   Revert that breaks this guard: replacing `atomicWriteFile(target, json)`
  *   with `writeFileSync(target, json)` in either store. Then `renameSync` is
@@ -38,13 +40,14 @@ import {
 } from '../../../src/council/council-evidence-writer';
 import { writeCriteria } from '../../../src/council/criteria-store';
 import type { CouncilSynthesis } from '../../../src/council/types';
-import {
-	taskEvidencePath,
-	_internals as taskFileInternals,
-} from '../../../src/evidence/task-file';
+import { taskEvidencePath } from '../../../src/evidence/task-file';
+// Issue #2035: atomicWriteFile delegates to the canonical helper, so the
+// renameSync seam moved to src/utils/atomic-write.ts — the guard intercepts
+// the same calls at their new home.
+import { _internals as atomicWriteInternals } from '../../../src/utils/atomic-write';
 
 // The real renameSync, captured once at module load.
-const realRenameSync = taskFileInternals.renameSync;
+const realRenameSync = atomicWriteInternals.renameSync;
 const realWithTaskEvidenceLock = councilWriterInternals.withTaskEvidenceLock;
 
 let tempDir: string;
@@ -53,16 +56,16 @@ let renameCalls: Array<{ source: string; target: string }>;
 beforeEach(() => {
 	tempDir = mkdtempSync(path.join(tmpdir(), 'council-atomic-guard-'));
 	renameCalls = [];
-	// Record every renameSync that flows through atomicWriteFile, then call
-	// through to the real implementation so the write actually completes.
-	taskFileInternals.renameSync = ((source: unknown, target: unknown) => {
+	// Record every renameSync that flows through the canonical atomic helper,
+	// then call through to the real implementation so the write completes.
+	atomicWriteInternals.renameSync = ((source: unknown, target: unknown) => {
 		renameCalls.push({ source: String(source), target: String(target) });
 		return realRenameSync(source as string, target as string);
-	}) as typeof taskFileInternals.renameSync;
+	}) as typeof atomicWriteInternals.renameSync;
 });
 
 afterEach(() => {
-	taskFileInternals.renameSync = realRenameSync;
+	atomicWriteInternals.renameSync = realRenameSync;
 	councilWriterInternals.withTaskEvidenceLock = realWithTaskEvidenceLock;
 	try {
 		rmSync(tempDir, { recursive: true, force: true });
@@ -89,7 +92,7 @@ describe('council stores — regression: primary writes are atomic (F-05)', () =
 		expect(matching).toBeDefined();
 		// The atomic write renames a temp sentinel (…tmp.<ts>.<rand>) over the
 		// target — proof it was NOT a direct in-place writeFileSync.
-		expect(matching?.source).toContain('.tmp.');
+		expect(matching?.source.endsWith('.tmp')).toBe(true);
 	});
 
 	test('council-evidence-writer.writeCouncilEvidence routes through atomicWriteFile (temp + rename)', async () => {
@@ -129,6 +132,6 @@ describe('council stores — regression: primary writes are atomic (F-05)', () =
 			(c) => path.resolve(c.target) === path.resolve(expectedTarget),
 		);
 		expect(matching).toBeDefined();
-		expect(matching?.source).toContain('.tmp.');
+		expect(matching?.source.endsWith('.tmp')).toBe(true);
 	});
 });

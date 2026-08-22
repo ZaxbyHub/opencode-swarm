@@ -622,7 +622,8 @@ describe('runCleanStage', () => {
 		expect(Array.isArray(result.cleanedFiles)).toBe(true);
 		expect(typeof result.configBackupsRemoved).toBe('number');
 		expect(typeof result.swarmPlanFilesRemoved).toBe('number');
-		expect(typeof result.tmpFilesRemoved).toBe('number');
+		expect(typeof result.residueQuarantined).toBe('number');
+		expect(typeof result.residuePreserved).toBe('number');
 	});
 
 	it('cleans archived active-state files from swarmDir', async () => {

@@ -20,6 +20,7 @@ import {
 	readdirSync,
 	readFileSync,
 	rmSync,
+	utimesSync,
 	writeFileSync,
 } from 'node:fs';
 import os from 'node:os';
@@ -1043,33 +1044,73 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 		});
 	});
 
-	// ── Test 11: .tmp.* temp file sweep (FR-013) ──────────────────────
+	// ── Test 11: atomic-write residue handling (FR-013, issue #2035) ──────
 
-	describe('.tmp.* temp file sweep', () => {
-		it('removes .tmp.* files from .swarm/ after close but leaves non-.tmp.* files untouched', async () => {
-			await writePlan();
-
-			// Create .tmp.xxx temp artifact (should be swept by close cleanup)
-			writeFileSync(path.join(swarmDir(), '.tmp.xxx'), 'stale temp data');
-
-			// Create a non-.tmp.* file that must NOT be swept
-			writeFileSync(
-				path.join(swarmDir(), 'normal-artifact.json'),
-				'{"keep":true}',
+	describe('atomic-write residue handling (issue #2035)', () => {
+		it('quarantines stale .tmp.* residue (recoverable move) but leaves non-residue files untouched', async () => {
+			const { _internals: swarmResidueInternals } = await import(
+				'../../../src/services/swarm-residue.js'
 			);
+			const realQueryTracked = swarmResidueInternals.queryTracked;
+			swarmResidueInternals.queryTracked = () => ({ tracked: new Set() });
+			try {
+				await writePlan();
 
-			await handleCloseCommand(testDir, []);
+				// Stale legacy-prefix residue (old enough to pass the 30m gate).
+				const staleResidue = path.join(swarmDir(), '.tmp.xxx');
+				writeFileSync(staleResidue, 'stale temp data');
+				const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+				utimesSync(staleResidue, twoHoursAgo, twoHoursAgo);
 
-			// .tmp.* file must be removed (stale temp sweep, not archived)
-			expect(existsSync(path.join(swarmDir(), '.tmp.xxx'))).toBe(false);
+				// Fresh residue (recent — must be PRESERVED in place).
+				writeFileSync(path.join(swarmDir(), '.tmp.recent'), 'fresh temp');
 
-			// non-.tmp.* file must survive the sweep
-			expect(existsSync(path.join(swarmDir(), 'normal-artifact.json'))).toBe(
-				true,
-			);
-			expect(
-				readFileSync(path.join(swarmDir(), 'normal-artifact.json'), 'utf-8'),
-			).toBe('{"keep":true}');
+				// A non-residue file that must never be touched.
+				writeFileSync(
+					path.join(swarmDir(), 'normal-artifact.json'),
+					'{"keep":true}',
+				);
+
+				await handleCloseCommand(testDir, []);
+
+				// Stale .tmp.* file is gone from its original location — moved
+				// (NOT deleted) into a manifest-backed quarantine batch.
+				expect(existsSync(staleResidue)).toBe(false);
+				const quarantineRoot = path.join(swarmDir(), 'quarantine');
+				const batches = existsSync(quarantineRoot)
+					? readdirSync(quarantineRoot)
+					: [];
+				expect(batches.length).toBe(1);
+				const batchDir = path.join(quarantineRoot, batches[0]!);
+				expect(existsSync(path.join(batchDir, '.tmp.xxx'))).toBe(true);
+				expect(readFileSync(path.join(batchDir, '.tmp.xxx'), 'utf-8')).toBe(
+					'stale temp data',
+				);
+				const manifest = JSON.parse(
+					readFileSync(path.join(batchDir, 'manifest.json'), 'utf-8'),
+				) as {
+					schema_version: number;
+					entries: Array<{ original_rel_path: string; sha256: string }>;
+				};
+				expect(manifest.schema_version).toBe(1);
+				expect(
+					manifest.entries.some((e) => e.original_rel_path === '.tmp.xxx'),
+				).toBe(true);
+
+				// Fresh residue is PRESERVED in place (recent — may be an active
+				// writer's temp).
+				expect(existsSync(path.join(swarmDir(), '.tmp.recent'))).toBe(true);
+
+				// Non-residue file survives untouched.
+				expect(existsSync(path.join(swarmDir(), 'normal-artifact.json'))).toBe(
+					true,
+				);
+				expect(
+					readFileSync(path.join(swarmDir(), 'normal-artifact.json'), 'utf-8'),
+				).toBe('{"keep":true}');
+			} finally {
+				swarmResidueInternals.queryTracked = realQueryTracked;
+			}
 		});
 	});
 });

@@ -19,7 +19,6 @@
  *   --persist               Also write JSON to .swarm/epic/coupling-report.json.
  */
 
-import { randomBytes } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { loadPlanJsonOnly } from '../plan/manager.js';
@@ -31,6 +30,7 @@ import {
 	formatCouplingReportMarkdown,
 } from '../turbo/epic/coupling-report.js';
 import { readTaskScopes } from '../turbo/lean/conflicts.js';
+import { atomicWriteSwarmFileSync } from '../utils/atomic-write';
 
 interface CouplingCliArgs {
 	phase?: number;
@@ -139,23 +139,18 @@ function parseArgs(args: string[]): CouplingCliArgs {
  * callers cannot collide on the same path. If `rename` fails, the tmp file
  * is unlinked best-effort to avoid orphan accumulation under `.swarm/epic/`.
  */
+/**
+ * Persist the coupling report atomically via the canonical helper (issue
+ * #2035): registered `canonical-v1` temp grammar (unique, non-predictable),
+ * fsync, bounded rename retry, and exact own-temp cleanup — replacing the
+ * previous local `target.tmp.<hex8>` temp whose grammar stays registered for
+ * residue discovery.
+ */
 function persistReportJson(directory: string, report: CouplingReport): string {
 	const epicDir = path.join(directory, '.swarm', 'epic');
 	fs.mkdirSync(epicDir, { recursive: true });
 	const filePath = path.join(epicDir, 'coupling-report.json');
-	const tmpPath = `${filePath}.tmp.${randomBytes(8).toString('hex')}`;
-	fs.writeFileSync(tmpPath, `${JSON.stringify(report, null, 2)}\n`, 'utf-8');
-	try {
-		fs.renameSync(tmpPath, filePath);
-	} catch (err) {
-		// Clean up the tmp file so a failed rename does not leave stale data.
-		try {
-			fs.unlinkSync(tmpPath);
-		} catch {
-			// best-effort cleanup
-		}
-		throw err;
-	}
+	atomicWriteSwarmFileSync(filePath, `${JSON.stringify(report, null, 2)}\n`);
 	return filePath;
 }
 

@@ -11,14 +11,7 @@
  *    read top-level fields (verdict, phase_number, timestamp) without zod stripping them.
  */
 
-import {
-	existsSync,
-	mkdirSync,
-	readFileSync,
-	renameSync,
-	unlinkSync,
-	writeFileSync,
-} from 'node:fs';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import * as path from 'node:path';
 import {
 	listEvidenceTaskIds,
@@ -27,7 +20,7 @@ import {
 } from '../evidence/manager';
 import { validateSwarmPath } from '../hooks/utils';
 import { warn } from '../utils';
-import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
+import { atomicWriteSwarmFileSync } from '../utils/atomic-write';
 import {
 	type AgentWorkSummary,
 	AgentWorkSummarySchema,
@@ -40,23 +33,15 @@ const PHASE_SUMMARY_FILE = 'phase-architecture-summary.json';
 const SUPERVISOR_REPORT_FILE = 'architecture-supervisor.json';
 const SUPERVISOR_ENTRY_TYPE = 'architecture-supervisor';
 
-/** Atomic raw sidecar write: temp-file + rename (mirrors the council writer). */
+/**
+ * Atomic raw sidecar write via the canonical helper (issue #2035):
+ * registered `canonical-v1` temp grammar, fsync, bounded rename retry, exact
+ * own-temp cleanup, and cache invalidation. The historical
+ * `target.tmp-<ts>-<pid>` grammar stays registered for residue discovery.
+ */
 function writeRawSidecar(absPath: string, bundle: unknown): void {
 	mkdirSync(path.dirname(absPath), { recursive: true });
-	const tempFile = `${absPath}.tmp-${Date.now()}-${process.pid}`;
-	try {
-		writeFileSync(tempFile, JSON.stringify(bundle, null, 2), 'utf-8');
-		renameSync(tempFile, absPath);
-		invalidateCachedArtifact(absPath);
-	} finally {
-		if (existsSync(tempFile)) {
-			try {
-				unlinkSync(tempFile);
-			} catch {
-				/* best-effort cleanup */
-			}
-		}
-	}
+	atomicWriteSwarmFileSync(absPath, JSON.stringify(bundle, null, 2));
 }
 
 // ---------------------------------------------------------------------------

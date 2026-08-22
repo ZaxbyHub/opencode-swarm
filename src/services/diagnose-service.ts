@@ -15,6 +15,7 @@ import { getExecutor } from '../sandbox/executor.js';
 import { readEffectiveSpecSync } from '../sdd/effective-spec';
 import { listCoderSettlementWalStates } from '../workflow/coder-settlement.js';
 import { checkKnowledgeHealth } from './knowledge-diagnostics.js';
+import { inventorySwarmResidue } from './swarm-residue.js';
 import { compareVersions, readVersionCache } from './version-check.js';
 import { getDeferredWarnings } from './warning-buffer.js';
 
@@ -889,6 +890,44 @@ async function getSandboxStatus(): Promise<HealthCheck> {
 }
 
 /**
+ * Bounded atomic-write residue summary (issue #2035). Rendered from the same
+ * shared inventory as the close clean stage and `/swarm config doctor`, so
+ * all three surfaces cannot disagree. Paths never enter the detail line —
+ * counts and ages only.
+ */
+async function checkResidueInventory(directory: string): Promise<HealthCheck> {
+	try {
+		const inventory = await inventorySwarmResidue(directory);
+		const s = inventory.summary;
+		if (s.matched === 0) {
+			return {
+				name: 'Atomic-write residue',
+				status: '✅',
+				detail: 'No registered temp-grammar residue under .swarm/',
+			};
+		}
+		const oldestMin = Math.round(s.oldestAgeMs / 60_000);
+		return {
+			name: 'Atomic-write residue',
+			status: '⚠️',
+			detail:
+				`${s.matched} stale temp file(s) (${s.totalBytes} bytes, oldest ${oldestMin}m old): ` +
+				`${s.eligible} quarantine-eligible, ${s.ambiguous} preserved as recent/active/tracked/ambiguous` +
+				(inventory.gitState === 'unknown'
+					? ' (git tracked-state unknown — nothing auto-quarantined)'
+					: '') +
+				'. Run /swarm config doctor for the full inventory, /swarm config doctor --quarantine-residue to act.',
+		};
+	} catch (err) {
+		return {
+			name: 'Atomic-write residue',
+			status: '⬜',
+			detail: `Inventory unavailable: ${err instanceof Error ? err.message : String(err)}`,
+		};
+	}
+}
+
+/**
  * Get diagnose data from the swarm directory.
  * Returns structured health checks for GUI, background flows, or commands.
  */
@@ -1138,6 +1177,10 @@ export async function getDiagnoseData(
 	// Check: Knowledge health (entry status breakdown, event volume, schema
 	// drift, stale-cache warning).
 	checks.push(await checkKnowledgeHealth(directory));
+
+	// Check: Atomic-write residue (issue #2035) — bounded summary derived from
+	// the SAME shared inventory as the close clean stage and config doctor.
+	checks.push(await checkResidueInventory(directory));
 
 	// Check: Agent Tool Snapshots
 	try {
