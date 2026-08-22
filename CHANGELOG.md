@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.144.7](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.144.6...v7.144.7) (2026-08-22)
+
+
+### Bug Fixes
+
+* **pr-review:** report all findings-persistence violations with expected-vs-actual ([#2277](https://github.com/ZaxbyHub/opencode-swarm/issues/2277)) ([b28cf1a](https://github.com/ZaxbyHub/opencode-swarm/commit/b28cf1acc790f7b06627c382a4abb3b5cc7379cf))
+
 ## [7.144.6](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.144.5...v7.144.6) (2026-08-22)
 
 
