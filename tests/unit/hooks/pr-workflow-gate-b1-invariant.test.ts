@@ -349,7 +349,7 @@ describe('pr-workflow-gate B1 invariant: no false positives on the settled path'
 		// Not confusable with the B1 empty-map message.
 		expect(coverage?.message).not.toContain('after successful settlement');
 		expect(projection?.message).toContain(
-			`record ${BASE_IDS[0]} has no authoritative reviewer verdict`,
+			`${BASE_IDS[0]}: no authoritative reviewer verdict (absent from the settled reviewer map)`,
 		);
 		expect(projection?.message).not.toContain('internal invariant violated');
 	});

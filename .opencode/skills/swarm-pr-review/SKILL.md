@@ -683,8 +683,8 @@ Do not rely on conversation context to preserve review findings. On Profile A,
 use `write_pr_review_artifact` with `kind: "findings"`; the controller creates
 and appends `.swarm/pr-review/<run_id>/findings.jsonl` without granting generic
 write authority over `.swarm/`. On Profiles B/C, append the same records to a
-`findings.jsonl` ledger file in your harness's session/task workspace (never
-under `.swarm/`), with the review head SHA recorded at the top of the file.
+`findings.jsonl` ledger in your harness workspace (never under `.swarm/`), with
+the review head SHA recorded at the top.
 
 Each persisted finding record must include at least:
 
@@ -696,12 +696,11 @@ Minimum field contract:
 
 - `finding_id`: stable ID from the candidate/reviewer/critic ledger.
 - `status`: one of `PENDING`, `CONFIRMED`, `DISPROVED`, or `PRE_EXISTING`.
-- `file_line`: exact `file:line` reference, or `N/A` with reason when the
-  finding is cross-file or artifact-only.
-- `evidence`: compact source-backed proof, including lane/reviewer/critic IDs or
-  command output references when available.
-- `next_action`: the next required action, such as `route_to_reviewer`,
-  `route_to_critic`, `report`, `suppress_with_reason`, or `handoff_to_feedback`.
+- `file_line`: exact `file:line`, or `N/A` with reason when cross-file.
+- `evidence`: compact source-backed proof (lane/reviewer/critic IDs or command
+  output references when available).
+- `next_action`: `route_to_reviewer`, `route_to_critic`, `report`,
+  `suppress_with_reason`, or `handoff_to_feedback`.
 
 Persist after every major validation boundary (Profile A via the controller
 calls below; Profiles B/C by appending the same boundary-tagged records to the
@@ -718,17 +717,18 @@ ledger file):
    `boundary: "post_critic"` and update final status,
    severity/action notes in `evidence`, and final reporting or handoff action.
 
-Resume/reload procedure:
+**Enforced order, dispositions, and error reporting (Profile A).** Checkpoints
+are admitted only after the trigger evaluation completes, then strictly
+`post_explorer` → `post_reviewer` → `post_critic`, each requiring the prior
+checkpoint persisted; records must match the authoritative reviewer/critic
+verdict rows, and an invalid payload is rejected in ONE call listing every
+violation as `finding_id: field expected <value>, got <value>`. Full contract
+(write order, disposition matrix, severity-omission, handoff schema):
+references/findings-persistence-contract.md.
 
-1. Before continuing any compacted or resumed review, read the latest
-   `findings.jsonl` artifact and reconstruct the candidate/reviewer/critic
-   ledger from disk before dispatching more lanes.
-2. If the artifact is missing but a review context says prior lanes ran, stop and
-   surface the missing artifact as a coverage gap instead of reclassifying from
-   memory.
-3. Append new records rather than overwriting history unless the artifact format
-   explicitly tracks revisions; latest record for a `finding_id` wins during
-   reload.
+Resume/reload procedure: read the latest `findings.jsonl` and reconstruct the
+ledger from disk before dispatching more lanes; surface a missing artifact as a
+coverage gap, never reclassify from memory; append (latest record wins).
 
 ---
 
@@ -996,8 +996,8 @@ candidate parser rather than preview-text extraction:
 If a lane has `output_degraded: true`, no usable `output_ref`, or `transcript_incomplete: true` without typed positive-candidate recovery, apply the COVERAGE GATE (Phase 3). An incomplete base or micro discovery lane may proceed only when it is explicitly named by a `salvaged_workflow_lane_recoveries` entry whose `kind` is `transcript-incomplete-terminal-candidate`; that recovery validates the retained positive `[CANDIDATE]` row only. Council, reviewer, and critic lanes never qualify for this incomplete-transcript recovery and must retry. Recovery never validates `[CLEAN]`, candidate absence, an unowned sibling lane, or an incomplete lane with no matching entry. Do not use blocking or direct-Task fallbacks while the controller is active, mark affected candidates UNVERIFIED to proceed, or infer candidate absence from a preview. Under Profiles B/C, which have no typed recovery validation, a truncated, incomplete, empty, or attestation-free subagent report is the same lane-output failure and takes the same COVERAGE GATE.
 
 After candidate parsing and before reviewer dispatch, persist the post-explorer
-candidate ledger using the Review Finding Persistence contract. This is the
-durable recovery point for context compaction before Phase 6.
+candidate ledger; it is admitted only once trigger-eval completes — from then it
+is the durable recovery point for context compaction ahead of Phase 6.
 
 **Profiles B/C row convention:** without the parser, the `[CANDIDATE]` row
 format is the extraction contract itself. Explorers emit the rows directly in
