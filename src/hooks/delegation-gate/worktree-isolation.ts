@@ -15,7 +15,7 @@ import * as path from 'node:path';
 import type { PluginConfig, WorktreeIsolationConfig } from '../../config';
 import { DEFAULT_WORKTREE_ISOLATION_CONFIG } from '../../config/constants';
 import { tryAcquireLock } from '../../parallel/file-locks';
-import { isValidEnvKey } from '../../sandbox/executor';
+import { isUntrustedEnvKey, isValidEnvKey } from '../../sandbox/executor';
 import {
 	ensureAgentSession,
 	markReviewerScopeGenerationMergebackPending,
@@ -2290,6 +2290,11 @@ export async function finishStandardWorktreeDispatch(
  * - Skips blank lines and lines starting with `#` (comments).
  * - Skips malformed lines (no `=` separator).
  * - Validates each key with `isValidEnvKey`; rejects and skips invalid keys.
+ * - Drops `GIT_*` / `LD_*` / `DYLD_*` keys via `isUntrustedEnvKey` (#2263):
+ *   the file is repo-resident, so its contents are attacker-controlled. The
+ *   `GIT_*` family is git's control plane (`GIT_SSH_COMMAND`,
+ *   `GIT_CONFIG_*`, …) and `LD_*`/`DYLD_*` are loader-hijack vectors — none
+ *   belong in a lane profile (PORT / TMPDIR / cache redirects).
  * - Returns an empty record when the file does not exist.
  *
  * Exposed via _internals for testability (no mock.module leakage).
@@ -2328,6 +2333,7 @@ export async function readLaneEnvFileFromDisk(
 		const k = line.slice(0, eqIdx);
 		const v = line.slice(eqIdx + 1);
 		if (!isValidEnvKey(k)) continue; // reject shell-injection vectors
+		if (isUntrustedEnvKey(k)) continue; // #2263: reject GIT_*/LD_*/DYLD_* control-plane keys
 		result[k] = v;
 	}
 	return result;
