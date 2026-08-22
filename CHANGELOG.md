@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.144.5](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.144.4...v7.144.5) (2026-08-22)
+
+
+### Bug Fixes
+
+* **pr-review:** inject per-lane-kind output budgets and pre-seed shell rules ([#2276](https://github.com/ZaxbyHub/opencode-swarm/issues/2276)) ([1992c8c](https://github.com/ZaxbyHub/opencode-swarm/commit/1992c8c8c9f794c271a63fe8e6dc26346561d78b))
+
 ## [7.144.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.144.3...v7.144.4) (2026-08-22)
 
 
