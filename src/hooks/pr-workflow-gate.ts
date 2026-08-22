@@ -24,6 +24,7 @@ import {
 import {
 	type BackgroundDelegationRecord,
 	type BackgroundDelegationResult,
+	type BackgroundDelegationWorkflowLaneRecovery,
 	DEFAULT_STALE_DELEGATION_TIMEOUT_MS,
 	findByBatchId,
 	readDelegations,
@@ -107,7 +108,6 @@ export type PrReviewLaneValidationPredicate =
 	| 'record.status'
 	| 'result.output_degraded'
 	| 'result.transcript_incomplete'
-	| 'result.truncated'
 	| 'result.chars'
 	| 'result.digest'
 	| 'result.output_ref'
@@ -151,6 +151,8 @@ export type PrReviewLaneValidationResult =
 			 * distinguishable from a well-formed one.
 			 */
 			salvaged?: readonly string[];
+			/** Typed recovery disclosures persisted to the durable delegation ledger. */
+			recoveries?: readonly BackgroundDelegationWorkflowLaneRecovery[];
 	  }
 	| { ok: false; failure: PrReviewLaneValidationFailure };
 
@@ -172,6 +174,21 @@ export interface PrReviewDiscoveryLaneValidationInput {
 		checkWorkflowLane?: boolean;
 	};
 }
+
+export interface PrWorkflowTransportRecoveryValidationInput {
+	directory: string;
+	record: BackgroundDelegationRecord;
+	result: BackgroundDelegationResult;
+	artifact: LaneOutputArtifact | null;
+	revisionDigest: string;
+}
+
+export type PrWorkflowTransportRecoveryValidationResult =
+	| {
+			ok: true;
+			recoveries?: readonly BackgroundDelegationWorkflowLaneRecovery[];
+	  }
+	| { ok: false; reason: string };
 
 export interface PrWorkflowCheckoutRecoveryRecord {
 	code:
@@ -2979,10 +2996,11 @@ export async function enforcePrReviewBaseDimensions(
  * is treated as "not proven failed" and denies consolidation — default-deny.
  *
  * `completed` is included because completion alone is not success: a completed
- * record whose artifact is degraded, truncated, empty or identity-mismatched
- * fails `recordsPassingBatchIntegrity` and is exactly the ran-and-failed case
- * the tier-L retry exception exists for. This set is therefore only ever
- * consulted for lanes that already failed that integrity chain.
+ * record whose durable artifact is degraded, empty, identity-mismatched, or
+ * semantically invalid is exactly the ran-and-failed case the tier-L retry
+ * exception exists for. Preview truncation alone is recoverable when the durable
+ * artifact validates. This set is therefore only consulted after both identity
+ * and revision-independent semantic validation.
  */
 const TERMINAL_FAILED_DELEGATION_STATUSES: ReadonlySet<string> = new Set([
 	'completed',
@@ -3013,8 +3031,9 @@ interface PrReviewBaseDimensionAttempts {
  *   compares each artifact's `revisionDigest` against the current worktree), so
  *   a stale artifact is correctly not a current source.
  * - **terminallyFailed** is revision-INdependent on purpose.
- *   `recordsPassingBatchIntegrity` takes no digest and checks only
- *   session-immutable identity plus the delegation outcome. If failure were
+ *   `recordsPassingBatchIntegrity` plus
+ *   `hasRevisionIndependentDiscoverySemantics` use the artifact's recorded
+ *   revision rather than the current worktree digest. If failure were
  *   derived from the revision-aware set instead, any working-tree edit would
  *   make all six dimensions read as "failed" at once and a caller could then
  *   consolidate the whole base wave into two lanes — re-opening the tier-L lane
@@ -3048,7 +3067,7 @@ function summarizePrReviewBaseDimensionAttempts(
 			const dimension = lane.ownedWorkflowLanes?.[0] ?? lane.workflowLane;
 			if (batchSuccessful.has(dimension)) dedicatedSuccessful.add(dimension);
 		}
-		const integrityPassingLaneIds = new Set(
+		const semanticallyValidLaneIds = new Set(
 			recordsPassingBatchIntegrity(
 				directory,
 				state,
@@ -3056,13 +3075,17 @@ function summarizePrReviewBaseDimensionAttempts(
 				batch.lanes,
 				'swarm-pr-review:base',
 				batch.validatedAt,
-			).map((qualified) => qualified.record.laneId),
+			)
+				.filter((qualified) =>
+					hasRevisionIndependentDiscoverySemantics(directory, qualified),
+				)
+				.map((qualified) => qualified.record.laneId),
 		);
 		const records = findByBatchId(directory, batch.batchId, {
 			parentSessionId: state.sessionID,
 		});
 		for (const lane of batch.lanes) {
-			if (integrityPassingLaneIds.has(lane.laneId)) continue;
+			if (semanticallyValidLaneIds.has(lane.laneId)) continue;
 			const laneRecords = records.filter(
 				(record) => record.laneId === lane.laneId,
 			);
@@ -3084,6 +3107,30 @@ function summarizePrReviewBaseDimensionAttempts(
 		}
 	}
 	return { successful, dedicatedSuccessful, terminallyFailed };
+}
+
+function hasRevisionIndependentDiscoverySemantics(
+	directory: string,
+	qualified: QualifiedBatchRecord,
+): boolean {
+	const ref = qualified.record.result?.outputRef?.trim();
+	if (!ref) return false;
+	const artifact = readLaneOutput(directory, ref)?.artifact ?? null;
+	if (!artifact?.revisionDigest?.trim()) return false;
+	return validatePrReviewDiscoveryLaneCompletion({
+		record: qualified.record,
+		result: qualified.record.result!,
+		artifact,
+		expected: {
+			mode: 'swarm-pr-review:base',
+			workflowLane: qualified.expectedWorkflowLane,
+			ownedWorkflowLanes: qualified.expectedOwnedLanes,
+			prHeadSha: qualified.record.workspace?.prHeadSha ?? '',
+			gitHead: qualified.record.workspace?.gitHead ?? '',
+			revisionDigest: artifact.revisionDigest,
+			reviewScope: qualified.record.workspace?.scope ?? undefined,
+		},
+	}).ok;
 }
 
 /**
@@ -9114,6 +9161,7 @@ function analyzeLaneRecordResultIntegrity(args: {
 	result: BackgroundDelegationResult | undefined;
 	expected: LaneRecordResultExpected;
 	requireCompleted: boolean;
+	allowTranscriptIncompleteRecovery: boolean;
 }): PrReviewLaneValidationResult {
 	const { record, result, expected } = args;
 	if (
@@ -9164,15 +9212,15 @@ function analyzeLaneRecordResultIntegrity(args: {
 	if (result?.outputDegraded === true) {
 		return failedLaneValidation('result.output_degraded', 'not true', true);
 	}
-	if (result?.transcriptIncomplete === true) {
+	if (
+		result?.transcriptIncomplete === true &&
+		!args.allowTranscriptIncompleteRecovery
+	) {
 		return failedLaneValidation(
 			'result.transcript_incomplete',
-			'not true',
+			'false outside discovery candidate recovery',
 			true,
 		);
-	}
-	if (result?.truncated === true) {
-		return failedLaneValidation('result.truncated', 'not true', true);
 	}
 	if ((result?.chars ?? 0) <= 0) {
 		return failedLaneValidation(
@@ -9323,6 +9371,9 @@ function analyzePrReviewBatchRecordIntegrity(args: {
 				checkWorkflowLane: args.checkWorkflowLane,
 			},
 			requireCompleted: true,
+			allowTranscriptIncompleteRecovery:
+				args.expectedMode === 'swarm-pr-review:base' ||
+				args.expectedMode === 'swarm-pr-review:micro',
 		});
 		if (!recordIntegrity.ok) return failed(recordIntegrity.failure);
 		return {
@@ -9339,11 +9390,14 @@ function analyzePrReviewBatchRecordIntegrity(args: {
  * Every record of a batch that passes the record-level integrity chain: exactly
  * one record per declared lane, exactly one record per child session, no reuse
  * of a forbidden child session, recorded after the batch was declared, exact
- * lane/ownership/mode/head match, and a complete non-degraded result.
+ * lane/ownership/mode/head match, and a non-degraded result with retrievable
+ * output. Discovery modes may pass this identity chain with a partial transcript
+ * only so the later semantic validator can distinguish positive candidate
+ * recovery from invalid negative evidence.
  *
  * Extracted so the per-item composition can reuse the identical chain instead of
  * re-deriving it. `successfulObligationsFromExactBatch` composes this with the
- * contract-marker check and keeps its exact prior semantics.
+ * contract-marker check.
  */
 function recordsPassingBatchIntegrity(
 	directory: string,
@@ -9844,6 +9898,7 @@ interface PrReviewDiscoveryCoverageAnalysis {
 	covered: boolean;
 	evidence: string | null;
 	issues: string[];
+	coverageKind: 'candidate' | 'clean' | null;
 	/**
 	 * True when coverage required any explicit normalization repair. Surfaced so
 	 * a repaired artifact is auditable rather than silently indistinguishable
@@ -9888,6 +9943,7 @@ function analyzePrReviewDiscoveryArtifact(
 			covered: false,
 			evidence: null,
 			issues,
+			coverageKind: null,
 			salvaged,
 			repairKinds,
 			failurePredicate: 'discovery.header',
@@ -9956,6 +10012,7 @@ function analyzePrReviewDiscoveryArtifact(
 			covered: false,
 			evidence: null,
 			issues,
+			coverageKind: null,
 			salvaged,
 			repairKinds,
 			failurePredicate: 'discovery.row',
@@ -9981,6 +10038,7 @@ function analyzePrReviewDiscoveryArtifact(
 				matchingCandidate.confidence,
 			].join('\0'),
 			issues,
+			coverageKind: 'candidate',
 			salvaged,
 			repairKinds,
 		};
@@ -9996,6 +10054,7 @@ function analyzePrReviewDiscoveryArtifact(
 			covered: true,
 			evidence: `${clean.coverage_scope}\0${clean.evidence}`,
 			issues,
+			coverageKind: 'clean',
 			salvaged,
 			repairKinds,
 		};
@@ -10004,6 +10063,7 @@ function analyzePrReviewDiscoveryArtifact(
 		covered: false,
 		evidence: null,
 		issues,
+		coverageKind: null,
 		salvaged,
 		repairKinds,
 		// Preserve today's predicate: a row-level defect is still reported as
@@ -10036,6 +10096,9 @@ export function validatePrReviewDiscoveryLaneCompletion(
 			checkWorkflowLane: input.expected.checkWorkflowLane ?? true,
 		},
 		requireCompleted: false,
+		allowTranscriptIncompleteRecovery:
+			input.expected.mode === 'swarm-pr-review:base' ||
+			input.expected.mode === 'swarm-pr-review:micro',
 	});
 	if (!recordIntegrity.ok) return recordIntegrity;
 	const artifactIntegrity = analyzeLaneArtifactIntegrity({
@@ -10077,14 +10140,61 @@ export function validatePrReviewDiscoveryLaneCompletion(
 	// convenience only. Do not treat it as the observability guarantee, and do not
 	// weaken the ledger write on the assumption the log covers it.
 	const salvagedLanes: string[] = [];
+	const recoveries: BackgroundDelegationWorkflowLaneRecovery[] = [];
+	const previewTruncated = input.result.truncated === true;
+	const transcriptIncomplete = input.result.transcriptIncomplete === true;
 	for (const { workflowLane, analysis } of analyses) {
 		if (!analysis.covered) continue;
-		if (!analysis.salvaged && analysis.issues.length === 0) continue;
+		const laneRecoveries: BackgroundDelegationWorkflowLaneRecovery[] = [];
+		if (previewTruncated) {
+			laneRecoveries.push({
+				workflowLane,
+				kind: 'truncated-preview-durable-artifact',
+				reason:
+					'inline preview truncated; durable artifact retained exact coverage',
+			});
+		}
+		if (transcriptIncomplete) {
+			if (analysis.coverageKind === 'candidate') {
+				laneRecoveries.push({
+					workflowLane,
+					kind: 'transcript-incomplete-terminal-candidate',
+					reason:
+						'partial transcript accepted only because a durable [CANDIDATE] row proved this lane',
+				});
+			} else if (analysis.coverageKind === 'clean') {
+				return failedLaneValidation(
+					'result.transcript_incomplete',
+					'complete transcript for every [CLEAN] attestation',
+					`workflow lane ${workflowLane} was covered only by [CLEAN] after a partial transcript fetch`,
+				);
+			}
+		}
+		if (
+			laneRecoveries.length === 0 &&
+			!analysis.salvaged &&
+			analysis.issues.length === 0
+		) {
+			continue;
+		}
 		salvagedLanes.push(workflowLane);
-		const reason =
-			analysis.repairKinds.length > 0
-				? `structural repairs applied: ${analysis.repairKinds.join(', ')}`
-				: 'one or more rows were dropped as malformed or out-of-ownership';
+		if (analysis.repairKinds.length > 0) {
+			laneRecoveries.push({
+				workflowLane,
+				kind: 'parser-normalization',
+				reason: `structural repairs applied: ${analysis.repairKinds.join(', ')}`,
+			});
+		}
+		if (analysis.issues.length > 0) {
+			laneRecoveries.push({
+				workflowLane,
+				kind: 'parser-row-recovery',
+				reason:
+					'one or more malformed or out-of-ownership rows were dropped while retaining valid coverage',
+			});
+		}
+		recoveries.push(...laneRecoveries);
+		const reason = laneRecoveries.map((recovery) => recovery.reason).join('; ');
 		warn(
 			`[pr-workflow-gate] discovery artifact salvaged: batch=${input.record.batchId ?? '(missing)'} lane=${input.record.laneId ?? '(missing)'} workflow_lane=${workflowLane} — ${reason}; retained coverage from the valid rows. Dropped-row diagnostics: ${analysis.issues.join('; ') || '(none)'}`,
 		);
@@ -10113,7 +10223,259 @@ export function validatePrReviewDiscoveryLaneCompletion(
 		}
 	}
 	return salvagedLanes.length > 0
-		? { ok: true, salvaged: salvagedLanes }
+		? { ok: true, salvaged: salvagedLanes, recoveries }
+		: { ok: true };
+}
+
+/**
+ * Collection-time proof for transport-recovered structured workflow lanes.
+ *
+ * Reviewer/critic/PR-feedback lanes normally settle later through the workflow
+ * gate, not in `collect_lane_results`, so a truncated inline preview used to
+ * pass through collection with no durable typed provenance. This helper proves
+ * the durable artifact still carries the exact rows the already-declared batch
+ * owns, allowing collection to persist the transport recovery immediately. Any
+ * unsupported or unprovable structured mode fails closed.
+ */
+export async function validatePrWorkflowTransportRecovery(
+	input: PrWorkflowTransportRecoveryValidationInput,
+): Promise<PrWorkflowTransportRecoveryValidationResult> {
+	if (
+		input.result.truncated !== true &&
+		input.result.transcriptIncomplete !== true
+	) {
+		return { ok: true };
+	}
+	const mode = input.record.mode?.trim();
+	const workflowLane = input.record.workflowLane?.trim();
+	if (!mode || !workflowLane) {
+		return {
+			ok: false,
+			reason:
+				'structured workflow transport recovery requires non-empty mode and workflow_lane provenance',
+		};
+	}
+	const recordIntegrity = analyzeLaneRecordResultIntegrity({
+		record: input.record,
+		result: input.result,
+		expected: {
+			mode,
+			workflowLane,
+			ownedWorkflowLanes: [workflowLane],
+			prHeadSha: input.record.workspace?.prHeadSha ?? '',
+			gitHead: input.record.workspace?.gitHead ?? '',
+			checkWorkflowLane: true,
+		},
+		requireCompleted: false,
+		allowTranscriptIncompleteRecovery: false,
+	});
+	if (!recordIntegrity.ok) {
+		return {
+			ok: false,
+			reason: formatPrReviewLaneValidationFailure(recordIntegrity.failure),
+		};
+	}
+	const artifactIntegrity = analyzeLaneArtifactIntegrity({
+		record: input.record,
+		result: input.result,
+		artifact: input.artifact,
+		expected: {
+			mode,
+			workflowLane,
+			prHeadSha: input.record.workspace?.prHeadSha ?? '',
+			gitHead: input.record.workspace?.gitHead ?? '',
+			revisionDigest: input.revisionDigest,
+			reviewScope: input.record.workspace?.scope ?? undefined,
+		},
+	});
+	if (!artifactIntegrity.ok) {
+		return {
+			ok: false,
+			reason: formatPrReviewLaneValidationFailure(artifactIntegrity.failure),
+		};
+	}
+	const state = await requireAnyActiveState(
+		input.directory,
+		input.record.parentSessionId,
+	);
+	const expectedMode = mode.startsWith('swarm-pr-review:')
+		? 'PR_REVIEW'
+		: mode.startsWith('swarm-pr-feedback:')
+			? 'PR_FEEDBACK'
+			: null;
+	if (!expectedMode) {
+		return {
+			ok: false,
+			reason: `structured workflow transport recovery does not support mode "${mode}"`,
+		};
+	}
+	if (state.mode !== expectedMode) {
+		return {
+			ok: false,
+			reason: `active workflow mode mismatch; expected ${expectedMode}, got ${state.mode}`,
+		};
+	}
+	const artifactText = input.artifact?.text ?? '';
+	const batchId = input.record.batchId?.trim();
+	const laneId = input.record.laneId?.trim();
+	const prReviewGateContext: PrReviewGateContext | undefined =
+		state.mode === 'PR_REVIEW'
+			? { revisionDigest: input.revisionDigest }
+			: undefined;
+	if (!batchId || !laneId) {
+		return {
+			ok: false,
+			reason:
+				'structured workflow transport recovery requires non-empty batch_id and lane_id provenance',
+		};
+	}
+	if (
+		mode === 'swarm-pr-review:reviewer' ||
+		mode === 'swarm-pr-review:critic'
+	) {
+		const phase: PrReviewComposablePhase =
+			mode === 'swarm-pr-review:reviewer' ? 'reviewer' : 'critic';
+		const batch = (state.prReviewValidationBatches ?? []).find(
+			(candidate) => candidate.batchId === batchId && candidate.phase === phase,
+		);
+		const lane = batch?.lanes.find((candidate) => candidate.laneId === laneId);
+		if (!lane || lane.workflowLane !== workflowLane) {
+			return {
+				ok: false,
+				reason:
+					'no matching declared reviewer/critic lane ownership was found for this transport recovery',
+			};
+		}
+		const itemIds = lane.reviewItemIds ?? [];
+		const reviewerClaims =
+			phase === 'critic'
+				? authoritativeReviewerClaims(
+						input.directory,
+						state,
+						prReviewGateContext ?? { revisionDigest: input.revisionDigest },
+					)
+				: undefined;
+		if (phase === 'critic' && (!reviewerClaims || reviewerClaims.size === 0)) {
+			return {
+				ok: false,
+				reason:
+					'critic transport recovery requires authoritative settled reviewer claims for every assigned item',
+			};
+		}
+		const parsed = parseLaneItemVerdicts(
+			artifactText,
+			itemIds,
+			phase,
+			reviewerClaims,
+		);
+		if (
+			itemIds.length === 0 ||
+			!itemIds.every((itemId) => parsed.has(itemId))
+		) {
+			return {
+				ok: false,
+				reason:
+					'every assigned reviewer/critic item requires one parseable verdict row in the durable artifact',
+			};
+		}
+	} else if (mode === 'swarm-pr-feedback:verification') {
+		const batch = (state.prFeedbackVerifications ?? []).find(
+			(candidate) => candidate.batchId === batchId,
+		);
+		const lane = batch?.ownership.find(
+			(candidate) => candidate.laneId === laneId,
+		);
+		if (!lane || workflowLane !== lane.laneId) {
+			return {
+				ok: false,
+				reason:
+					'no matching declared PR_FEEDBACK verification ownership was found for this transport recovery',
+			};
+		}
+		const itemIds = lane?.ownedItemIds ?? [];
+		if (
+			itemIds.length === 0 ||
+			!feedbackArtifactTextCoversItems(artifactText, itemIds)
+		) {
+			return {
+				ok: false,
+				reason:
+					'every assigned PR_FEEDBACK verification item requires one exact [FEEDBACK-VERIFIED] row in the durable artifact',
+			};
+		}
+	} else {
+		const feedbackPhase = {
+			'swarm-pr-feedback:stage-b-reviewer': {
+				phase: 'stage-b-reviewer',
+				marker: '[STAGE-B-REVIEW]',
+				verdict: 'APPROVE',
+			},
+			'swarm-pr-feedback:stage-b-test': {
+				phase: 'stage-b-test',
+				marker: '[STAGE-B-TEST]',
+				verdict: 'PASS',
+			},
+			'swarm-pr-feedback:closeout-reviewer': {
+				phase: 'closeout-reviewer',
+				marker: '[CLOSEOUT-REVIEW]',
+				verdict: 'APPROVE',
+			},
+			'swarm-pr-feedback:closeout-critic': {
+				phase: 'closeout-critic',
+				marker: '[CLOSEOUT-CRITIC]',
+				verdict: 'APPROVE',
+			},
+		}[mode];
+		if (!feedbackPhase) {
+			return {
+				ok: false,
+				reason: `structured workflow transport recovery does not support mode "${mode}"`,
+			};
+		}
+		const batch = (state.prFeedbackGateBatches ?? []).find(
+			(candidate) =>
+				candidate.batchId === batchId &&
+				candidate.phase === feedbackPhase.phase &&
+				candidate.laneId === laneId,
+		);
+		if (!batch || workflowLane !== feedbackPhase.phase) {
+			return {
+				ok: false,
+				reason:
+					'no matching declared ordered PR_FEEDBACK lane provenance was found for this transport recovery',
+			};
+		}
+		const itemIds = batch?.itemIds ?? [];
+		if (
+			itemIds.length === 0 ||
+			!itemIds.every((itemId) =>
+				artifactHasExactPositiveVerdictRow(
+					artifactText,
+					feedbackPhase.marker,
+					itemId,
+					feedbackPhase.verdict,
+				),
+			)
+		) {
+			return {
+				ok: false,
+				reason:
+					'every assigned ordered PR_FEEDBACK item requires one exact positive verdict row in the durable artifact',
+			};
+		}
+	}
+	return input.result.truncated === true
+		? {
+				ok: true,
+				recoveries: [
+					{
+						workflowLane,
+						kind: 'truncated-preview-durable-artifact',
+						reason:
+							'inline preview truncated; durable artifact retained exact coverage',
+					},
+				],
+			}
 		: { ok: true };
 }
 
@@ -10390,6 +10752,26 @@ function feedbackArtifactCoversItems(
 	const loaded = ref ? readLaneOutput(directory, ref) : null;
 	if (!loaded) return false;
 	const rows = loaded.artifact.text
+		.split(/\r?\n/)
+		.map((line) => pipeFieldsCapped(line, 4))
+		.filter((fields) => fields[0] === '[FEEDBACK-VERIFIED]');
+	if (rows.length !== itemIds.length) return false;
+	return itemIds.every((itemId) => {
+		const matches = rows.filter((fields) => fields[1] === itemId);
+		return (
+			matches.length === 1 &&
+			matches[0].length === 4 &&
+			matches[0].slice(1, 4).every(Boolean) &&
+			FEEDBACK_CLASSIFICATIONS.has(matches[0][2])
+		);
+	});
+}
+
+function feedbackArtifactTextCoversItems(
+	text: string,
+	itemIds: readonly string[],
+): boolean {
+	const rows = text
 		.split(/\r?\n/)
 		.map((line) => pipeFieldsCapped(line, 4))
 		.filter((fields) => fields[0] === '[FEEDBACK-VERIFIED]');

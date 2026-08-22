@@ -149,8 +149,8 @@ describe('system-enhancer — budget-check throw no longer drops downstream inje
 		expect(hasEnvProfile).toBe(true);
 
 		// And the budget warning itself is absent — the throw preceded it.
-		expect(output.system.some((s) => s.includes('[CONTEXT BUDGET:'))).toBe(
-			false,
-		);
+		expect(
+			output.system.some((s) => s.includes('[SWARM INJECTION FOOTPRINT:')),
+		).toBe(false);
 	});
 });

@@ -119,9 +119,16 @@ const CASES = [
 	},
 	{
 		predicate: 'result.transcript_incomplete',
-		mutate: (i) => (i.result.transcriptIncomplete = true),
+		mutate: (i) => {
+			const cleanText = `${HEADER}\n[CLEAN] | ${LANE} | complete PR diff base-1...head-1 | no finding after focused invariant review`;
+			i.result.text = cleanText;
+			i.result.chars = cleanText.length;
+			i.result.transcriptIncomplete = true;
+			i.artifact!.text = cleanText;
+			i.artifact!.chars = cleanText.length;
+			i.artifact!.bytes = cleanText.length;
+		},
 	},
-	{ predicate: 'result.truncated', mutate: (i) => (i.result.truncated = true) },
 	{ predicate: 'result.chars', mutate: (i) => (i.result.chars = 0) },
 	{ predicate: 'result.digest', mutate: (i) => (i.result.digest = ' ') },
 	{ predicate: 'result.output_ref', mutate: (i) => (i.result.outputRef = ' ') },
@@ -243,6 +250,58 @@ describe('PR review lane-local validation predicates', () => {
 		});
 	});
 
+	test('accepts a valid durable artifact when only the inline preview was truncated', () => {
+		// Issue #2258 Mode 1: the old predicate rejected the transport preview
+		// before validating the complete output_ref artifact that carries coverage.
+		const input = validInput();
+		input.result.truncated = true;
+		expect(validatePrReviewDiscoveryLaneCompletion(input)).toEqual({
+			ok: true,
+			salvaged: [LANE],
+			recoveries: [
+				{
+					workflowLane: LANE,
+					kind: 'truncated-preview-durable-artifact',
+					reason:
+						'inline preview truncated; durable artifact retained exact coverage',
+				},
+			],
+		});
+	});
+
+	test('accepts recoverable incomplete transcripts when the durable artifact is valid', () => {
+		// Issue #2258 Mode 2: the transport preview can be incomplete while the
+		// persisted artifact still contains valid positive candidate evidence.
+		const candidate = validInput();
+		candidate.result.transcriptIncomplete = true;
+		expect(validatePrReviewDiscoveryLaneCompletion(candidate)).toEqual({
+			ok: true,
+			salvaged: [LANE],
+			recoveries: [
+				{
+					workflowLane: LANE,
+					kind: 'transcript-incomplete-terminal-candidate',
+					reason:
+						'partial transcript accepted only because a durable [CANDIDATE] row proved this lane',
+				},
+			],
+		});
+
+		const clean = validInput();
+		const cleanText = `${HEADER}\n[CLEAN] | ${LANE} | complete PR diff base-1...head-1 | no finding after focused invariant review`;
+		clean.result.text = cleanText;
+		clean.result.chars = cleanText.length;
+		clean.result.transcriptIncomplete = true;
+		clean.artifact!.text = cleanText;
+		clean.artifact!.chars = cleanText.length;
+		clean.artifact!.bytes = cleanText.length;
+		const result = validatePrReviewDiscoveryLaneCompletion(clean);
+		expect(result.ok).toBe(false);
+		if (!result.ok) {
+			expect(result.failure.predicate).toBe('result.transcript_incomplete');
+		}
+	});
+
 	test.each(CASES)('reports first failure $predicate', ({
 		predicate,
 		mutate,
@@ -273,7 +332,40 @@ describe('PR review lane-local validation predicates', () => {
 		const fenced = validInput();
 		fenced.artifact!.text = `\`\`\`text\n${TEXT}\n\`\`\``;
 		const result = validatePrReviewDiscoveryLaneCompletion(fenced);
-		expect(result).toEqual({ ok: true, salvaged: [LANE] });
+		expect(result).toEqual({
+			ok: true,
+			salvaged: [LANE],
+			recoveries: [
+				{
+					workflowLane: LANE,
+					kind: 'parser-normalization',
+					reason: 'structural repairs applied: terminal-protocol-fence',
+				},
+			],
+		});
+	});
+
+	test('records row-drop salvage separately from parser normalization', () => {
+		const input = validInput();
+		const malformed = 'C-9 | wrong-lane | HIGH | correctness';
+		input.result.text = `${TEXT}\n${malformed}`;
+		input.result.chars = input.result.text.length;
+		input.artifact!.text = input.result.text;
+		input.artifact!.chars = input.result.text.length;
+		input.artifact!.bytes = input.result.text.length;
+
+		const result = validatePrReviewDiscoveryLaneCompletion(input);
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		expect(result.salvaged).toEqual([LANE]);
+		expect(result.recoveries).toEqual([
+			{
+				workflowLane: LANE,
+				kind: 'parser-row-recovery',
+				reason:
+					'one or more malformed or out-of-ownership rows were dropped while retaining valid coverage',
+			},
+		]);
 	});
 
 	test('rejects duplicate evidence across a consolidated lane', () => {
@@ -329,6 +421,13 @@ describe('PR review lane-local validation predicates', () => {
 		expect(result.ok).toBe(true);
 		if (!result.ok) return;
 		expect(result.salvaged).toEqual([LANE]);
+		expect(result.recoveries).toEqual([
+			{
+				workflowLane: LANE,
+				kind: 'parser-normalization',
+				reason: 'structural repairs applied: synthesized-header',
+			},
+		]);
 	});
 
 	test('does not mark a well-formed artifact as salvaged', () => {

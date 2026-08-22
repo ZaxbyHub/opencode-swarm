@@ -293,7 +293,7 @@ describe('telemetry', () => {
 				receivedEvents.push({ event, data });
 			});
 
-			// Test all 17 methods
+			// Test all 18 methods
 			telemetry.sessionStarted('s1', 'coder');
 			telemetry.sessionEnded('s1', 'completed');
 			telemetry.agentActivated('s1', 'reviewer', 'coder');
@@ -304,6 +304,22 @@ describe('telemetry', () => {
 			telemetry.gateFailed('s1', 'crud', '1.1', 'missing_file');
 			telemetry.phaseChanged('s1', 1, 2);
 			telemetry.budgetUpdated('s1', 75, 'coder');
+			telemetry.contextPruned({
+				sessionId: 's1',
+				agentName: 'coder',
+				trigger: 'critical_threshold',
+				usageSource: 'estimated',
+				beforeTokens: 900,
+				afterTokens: 500,
+				modelLimit: 1000,
+				maskedMessages: 1,
+				maskedToolParts: 2,
+				maskedTokensFreed: 150,
+				prunedMessages: 3,
+				prunedTextParts: 2,
+				prunedToolParts: 1,
+				prunedTokensFreed: 250,
+			});
 			telemetry.modelFallback('s1', 'coder', 'gpt-4', 'gpt-3.5', 'cost');
 			telemetry.hardLimitHit('s1', 'coder', 'tokens', 100000);
 			telemetry.revisionLimitHit('s1', 'coder');
@@ -312,7 +328,7 @@ describe('telemetry', () => {
 			telemetry.qaSkipViolation('s1', 'coder', 3);
 			telemetry.heartbeat('s1');
 
-			expect(receivedEvents.length).toBe(17);
+			expect(receivedEvents.length).toBe(18);
 
 			// Verify each event type
 			expect(receivedEvents[0].event).toBe('session_started');
@@ -325,13 +341,14 @@ describe('telemetry', () => {
 			expect(receivedEvents[7].event).toBe('gate_failed');
 			expect(receivedEvents[8].event).toBe('phase_changed');
 			expect(receivedEvents[9].event).toBe('budget_updated');
-			expect(receivedEvents[10].event).toBe('model_fallback');
-			expect(receivedEvents[11].event).toBe('hard_limit_hit');
-			expect(receivedEvents[12].event).toBe('revision_limit_hit');
-			expect(receivedEvents[13].event).toBe('loop_detected');
-			expect(receivedEvents[14].event).toBe('scope_violation');
-			expect(receivedEvents[15].event).toBe('qa_skip_violation');
-			expect(receivedEvents[16].event).toBe('heartbeat');
+			expect(receivedEvents[10].event).toBe('context_pruned');
+			expect(receivedEvents[11].event).toBe('model_fallback');
+			expect(receivedEvents[12].event).toBe('hard_limit_hit');
+			expect(receivedEvents[13].event).toBe('revision_limit_hit');
+			expect(receivedEvents[14].event).toBe('loop_detected');
+			expect(receivedEvents[15].event).toBe('scope_violation');
+			expect(receivedEvents[16].event).toBe('qa_skip_violation');
+			expect(receivedEvents[17].event).toBe('heartbeat');
 
 			// Verify data for some methods
 			expect(receivedEvents[0].data.sessionId).toBe('s1');
@@ -342,8 +359,9 @@ describe('telemetry', () => {
 			expect(receivedEvents[4].data.tokens_cache).toBe(0);
 			expect(receivedEvents[4].data.cost_usd).toBeNull();
 			expect(receivedEvents[4].data.cost_source).toBe('unavailable');
-			expect(receivedEvents[10].data.fromModel).toBe('gpt-4');
-			expect(receivedEvents[10].data.toModel).toBe('gpt-3.5');
+			expect(receivedEvents[10].data.trigger).toBe('critical_threshold');
+			expect(receivedEvents[11].data.fromModel).toBe('gpt-4');
+			expect(receivedEvents[11].data.toModel).toBe('gpt-3.5');
 		});
 	});
 

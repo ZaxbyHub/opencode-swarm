@@ -915,6 +915,8 @@ or synthesis begins, whichever layer enforces it.
 
 Inline `output` is delivered on the first poll that observes a lane settled; subsequent polls carry `output_omitted_repeat: true` with metadata and `output_ref`, and full text is retrieved via `retrieve_lane_output`.
 
+Host transport metadata is not stronger than the durable artifact. A truncated inline preview is accepted when its full `output_ref` artifact passes every identity, digest, revision, ownership, and row-coverage check. If the host status call times out, collection treats readiness as unknown and may inspect messages under a separate bounded budget, but it settles the lane only when the latest assistant message carries terminal proof. Only base and micro discovery lanes may retain independently validated positive `[CANDIDATE]` coverage from an incomplete transcript; council, reviewer, and critic outputs remain fail-closed and require retry. Incompleteness can never establish `[CLEAN]`, including for sibling dimensions in a consolidated lane. Every accepted transport recovery is disclosed in `salvaged_workflow_lanes`, with typed per-lane reasons in `salvaged_workflow_lane_recoveries`. See `references/lane-output-recoverability.md`.
+
 Before Phase 4 or synthesis, all base lanes must be settled. `dispatch_lanes_async` accepts a maximum of 8 lanes per call; base lanes (6) and micro-lanes (Phase 4) are dispatched in separate calls by design. Do not let one lane's conclusions bias another lane.
 
 **COVERAGE GATE — zero tolerance for unclosed gaps.** After `collect_lane_results`, verify every lane produced validated output. Two failure modes exist:
@@ -991,7 +993,7 @@ candidate parser rather than preview-text extraction:
 4. Stage reviewer-sized chunks, but do not dispatch reviewers yet. Phase 4 must
    complete trigger accounting and settle every launched micro-lane first.
 
-If a lane has `output_degraded: true`, `transcript_incomplete: true`, or no usable `output_ref`, apply the COVERAGE GATE (Phase 3). Do not use blocking or direct-Task fallbacks while the controller is active, mark affected candidates UNVERIFIED to proceed, or infer candidate absence from a preview. Under Profiles B/C, a truncated, empty, or attestation-free subagent report is the same lane-output failure and takes the same COVERAGE GATE.
+If a lane has `output_degraded: true`, no usable `output_ref`, or `transcript_incomplete: true` without typed positive-candidate recovery, apply the COVERAGE GATE (Phase 3). An incomplete base or micro discovery lane may proceed only when it is explicitly named by a `salvaged_workflow_lane_recoveries` entry whose `kind` is `transcript-incomplete-terminal-candidate`; that recovery validates the retained positive `[CANDIDATE]` row only. Council, reviewer, and critic lanes never qualify for this incomplete-transcript recovery and must retry. Recovery never validates `[CLEAN]`, candidate absence, an unowned sibling lane, or an incomplete lane with no matching entry. Do not use blocking or direct-Task fallbacks while the controller is active, mark affected candidates UNVERIFIED to proceed, or infer candidate absence from a preview. Under Profiles B/C, which have no typed recovery validation, a truncated, incomplete, empty, or attestation-free subagent report is the same lane-output failure and takes the same COVERAGE GATE.
 
 After candidate parsing and before reviewer dispatch, persist the post-explorer
 candidate ledger using the Review Finding Persistence contract. This is the

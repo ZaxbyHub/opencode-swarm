@@ -57,6 +57,9 @@ describe('dispatch_lanes read-only tool permissions', () => {
 			'mandatory_lane_checklist: re-read every assigned candidate',
 		);
 		expect(prompt).toContain('Do not waive or abbreviate work for speed');
+		expect(prompt).toContain(
+			'no more than 12000 characters of substantive output',
+		);
 	});
 
 	test('passes the exact read-only tool map with shell and bash removed (#1691)', async () => {

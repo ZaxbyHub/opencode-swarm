@@ -139,6 +139,15 @@ describe('swarm-pr-review deterministic async lane dispatch guidance', () => {
 		expect(phase3Section).toContain('lane_results');
 		expect(phase3Section).toContain('output_ref');
 		expect(phase3Section).toContain('retrieve_lane_output');
+		expect(phase3Section).toContain('durable artifact');
+		expect(phase3Section).toContain('readiness as unknown');
+		expect(phase3Section).toContain('terminal proof');
+		expect(phase3Section).toContain('can never establish `[CLEAN]`');
+		expect(phase3Section).toContain('salvaged_workflow_lanes');
+		expect(phase3Section).toContain('salvaged_workflow_lane_recoveries');
+		expect(phase3Section).toContain('transcript-incomplete-terminal-candidate');
+		expect(phase3Section).toContain('never validates `[CLEAN]`');
+		expect(phase3Section).toContain('have no typed recovery validation');
 		expect(phase3Section).toContain('exact six-lane gate');
 		expect(phase3Section).toContain('retry only the failed `workflow_lane`');
 		expect(phase3Section).toContain('same exact `pr_head_sha`');
@@ -340,6 +349,8 @@ describe('swarm-pr-review deterministic async lane dispatch guidance', () => {
 			expect(templateSection).toContain('unfenced plain text');
 			expect(templateSection).toContain('documentation only');
 			expect(templateSection).toContain('do not emit backticks');
+			expect(templateSection).toContain('at or below 12,000 characters');
+			expect(templateSection).toContain('Do not narrate progress');
 		}
 		expect(source).not.toContain(STALE_CLEAN_TEMPLATE);
 	});

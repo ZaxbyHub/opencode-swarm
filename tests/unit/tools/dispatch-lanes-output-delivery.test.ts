@@ -100,6 +100,14 @@ describe('recordToLaneResult output delivery de-duplication (S1.1)', () => {
 				outputDegraded: false,
 				transcriptIncomplete: false,
 				messageCount: 4,
+				salvagedWorkflowLanes: ['correctness-state'],
+				salvagedWorkflowLaneRecoveries: [
+					{
+						workflowLane: 'correctness-state',
+						kind: 'parser-normalization',
+						reason: 'structural repairs applied: synthesized-header',
+					},
+				],
 			},
 		});
 		recordToLaneResult(record, 'batch-1');
@@ -115,6 +123,14 @@ describe('recordToLaneResult output delivery de-duplication (S1.1)', () => {
 		expect(repeat.output_degraded).toBe(false);
 		expect(repeat.transcript_incomplete).toBe(false);
 		expect(repeat.message_count).toBe(4);
+		expect(repeat.salvaged_workflow_lanes).toEqual(['correctness-state']);
+		expect(repeat.salvaged_workflow_lane_recoveries).toEqual([
+			{
+				workflow_lane: 'correctness-state',
+				kind: 'parser-normalization',
+				reason: 'structural repairs applied: synthesized-header',
+			},
+		]);
 	});
 
 	test('a record whose output digest changes (lane re-run) delivers inline output again', () => {

@@ -28,9 +28,10 @@
 
 import {
 	type ContextWindowInputs,
+	isUsableContextWindow,
 	resolveContextWindow,
 } from '../config/context-window';
-import { log } from '../utils';
+import { log, warn } from '../utils';
 
 /**
  * Native model context limits (in tokens) when used on their native platform.
@@ -158,7 +159,20 @@ export function extractSessionId(
 }
 
 // Track first-call logging to avoid spam
+const MAX_TRACKED_MODEL_IDENTITIES = 256;
 const loggedFirstCalls = new Set<string>();
+const warnedUndersizedDefaults = new Set<string>();
+
+function rememberBoundedModelIdentity(set: Set<string>, key: string): boolean {
+	if (set.has(key)) return false;
+	while (set.size >= MAX_TRACKED_MODEL_IDENTITIES) {
+		const oldest = set.values().next().value;
+		if (oldest === undefined) break;
+		set.delete(oldest);
+	}
+	set.add(key);
+	return true;
+}
 
 /**
  * Static-table lookup used as `fallbackLookup` for
@@ -257,6 +271,13 @@ export function resolveModelLimit(
 		resolution.source,
 		resolution.tokens,
 	);
+	maybeWarnUndersizedDefault(
+		modelID,
+		providerID,
+		resolution.source,
+		resolution.tokens,
+		liveContextLimit,
+	);
 	return resolution.tokens;
 }
 
@@ -293,11 +314,38 @@ function logFirstCall(
 	limit: number,
 ): void {
 	const key = `${modelID || 'unknown'}::${providerID || 'unknown'}`;
-	if (!loggedFirstCalls.has(key)) {
-		loggedFirstCalls.add(key);
+	if (rememberBoundedModelIdentity(loggedFirstCalls, key)) {
 		// Startup diagnostic: debug-gated, not a warning (helps verify limit resolution at startup)
 		log(
 			`[model-limits] Resolved limit for ${modelID || '(no model)'}@${providerID || '(no provider)'}: ${limit} (source: ${source})`,
 		);
 	}
+}
+
+function maybeWarnUndersizedDefault(
+	modelID: string | undefined,
+	providerID: string | undefined,
+	source: string,
+	resolvedTokens: number,
+	liveContextLimit: unknown,
+): void {
+	if (source !== 'user_default') return;
+	if (!isUsableContextWindow(liveContextLimit)) return;
+
+	const liveTokens = Math.floor(liveContextLimit);
+	if (liveTokens <= resolvedTokens) return;
+
+	const key = `${modelID || 'unknown'}::${providerID || 'unknown'}`;
+	if (!rememberBoundedModelIdentity(warnedUndersizedDefaults, key)) return;
+
+	warn(
+		`[model-limits] context_budget.model_limits.default=${resolvedTokens} is below live model window ${liveTokens} for ${modelID || '(no model)'}@${providerID || '(no provider)'}; keeping the configured default.`,
+		{
+			modelID,
+			providerID,
+			resolvedTokens,
+			liveTokens,
+			source,
+		},
+	);
 }

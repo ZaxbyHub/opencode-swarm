@@ -142,7 +142,7 @@ describe('context-budget-service', () => {
 			const report = makeReport({ status: 'warning', budgetPct: 75 });
 
 			const first = await formatBudgetWarning(report, dir, config);
-			expect(first).toContain('[CONTEXT BUDGET: 75.0%');
+			expect(first).toContain('[SWARM INJECTION FOOTPRINT: 75.0%');
 			// Suppression is persisted, not in-memory: the state file is the proof.
 			expect(await stateFileExists()).toBe(true);
 
@@ -226,6 +226,7 @@ describe('context-budget-service', () => {
 			// 10000 / 1000 * 0.003 = 0.030
 			expect(result).toContain('$0.030/turn');
 			expect(result).toContain('~10,000 tokens/turn');
+			expect(result).toContain('SWARM INJECTION FOOTPRINT');
 		});
 
 		test('persists suppression state even when the caller discards the result', async () => {

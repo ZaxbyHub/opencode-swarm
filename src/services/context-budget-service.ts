@@ -337,11 +337,11 @@ export async function getContextBudgetReport(
 	} else if (budgetPct < config.criticalPct) {
 		status = 'warning';
 		recommendation =
-			'Consider wrapping up current phase and running /swarm handoff before starting new work.';
+			'Consider reducing injected context before starting new work.';
 	} else {
 		status = 'critical';
 		recommendation =
-			'Run /swarm handoff and start a new session to avoid cost escalation.';
+			'Reduce injected context or start a fresh session before continuing.';
 	}
 
 	// Calculate estimated session tokens (swarm tokens * turn count)
@@ -446,7 +446,7 @@ function formatWarningMessage(report: ContextBudgetReport): string {
 	const tokensPerTurn = report.swarmTotalTokens.toLocaleString();
 
 	if (report.status === 'warning') {
-		return `[CONTEXT BUDGET: ${budgetPctStr}% — swarm injecting ~${tokensPerTurn} tokens/turn. Consider wrapping current phase and running /swarm handoff before starting new work.]`;
+		return `[SWARM INJECTION FOOTPRINT: ${budgetPctStr}% of model window — swarm injecting ~${tokensPerTurn} tokens/turn. Consider reducing injected context before starting new work.]`;
 	}
 
 	// Critical status
@@ -455,7 +455,7 @@ function formatWarningMessage(report: ContextBudgetReport): string {
 		COST_PER_1K_TOKENS
 	).toFixed(3);
 
-	return `[CONTEXT BUDGET: ${budgetPctStr}% CRITICAL — swarm injecting ~${tokensPerTurn} tokens/turn. Run /swarm handoff and start a new session to avoid cost escalation. Estimated session cost scaling: ~$${costPerTurn}/turn at current context size.]`;
+	return `[SWARM INJECTION FOOTPRINT: ${budgetPctStr}% CRITICAL — swarm injecting ~${tokensPerTurn} tokens/turn. Reduce injected context or start a fresh session before continuing. Approximate current prompt cost from swarm injections: ~$${costPerTurn}/turn.]`;
 }
 
 /**
