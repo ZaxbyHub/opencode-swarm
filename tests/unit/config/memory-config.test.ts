@@ -49,6 +49,10 @@ describe('MemoryConfigSchema', () => {
 					tokenBudget: 1000,
 				},
 			},
+			reflection: {
+				enabled: false,
+				halfLifeDays: 30,
+			},
 			learning: {
 				learningRate: 0.1,
 				propagationFactor: 0.3,
@@ -130,6 +134,17 @@ describe('MemoryConfigSchema', () => {
 		expect(parsed.recall.defaultMaxItems).toBe(3);
 		expect(parsed.recall.defaultTokenBudget).toBe(500);
 		expect(parsed.recall.minScore).toBe(0.2);
+	});
+
+	test('reflection is default-off and deep-merges bounded overrides', () => {
+		const parsed = MemoryConfigSchema.parse({
+			reflection: { enabled: true },
+		});
+
+		expect(parsed.reflection).toEqual({ enabled: true, halfLifeDays: 30 });
+		expect(() =>
+			MemoryConfigSchema.parse({ reflection: { halfLifeDays: 0 } }),
+		).toThrow();
 	});
 
 	test('accepts bounded learning overrides', () => {

@@ -681,11 +681,6 @@ export async function provisionWorktree(
 			prunable: boolean;
 		}
 		let entries: ParsedWorktree[] = [];
-		let current: ParsedWorktree = {
-			path: '',
-			branch: undefined,
-			prunable: false,
-		};
 
 		if (listResult.exitCode !== 0) {
 			const raw = listResult.stderr.trim() || listResult.stdout.trim();

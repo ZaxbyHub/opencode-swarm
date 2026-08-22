@@ -12,6 +12,7 @@ import {
 	type MemoryRecallUsageByMemory,
 	type MemoryRecallUsageByRole,
 	type MemoryRecord,
+	readDeadAnchorMemoryIds,
 	readMigrationReport,
 	resolveMemoryConfig,
 	resolveMemoryStorageDir,
@@ -324,6 +325,7 @@ export async function handleMemoryStaleCommand(
 		await provider.initialize?.();
 		const report = await buildMemoryMaintenanceReport(provider, {
 			...maintenanceReportOptions(config, parsed.limit),
+			deadAnchorMemoryIds: readDeadAnchorMemoryIds(directory),
 		});
 		const lines = [
 			'## Swarm Memory Stale',
@@ -334,6 +336,7 @@ export async function handleMemoryStaleCommand(
 			`- Superseded memories shown: \`${report.supersededMemories.length}\``,
 			`- Low-utility memories shown: \`${report.lowUtilityMemories.length}\``,
 			`- Low-learned-utility (low-Q) memories shown: \`${report.lowQValueMemories.length}\``,
+			`- Dead-anchor memories shown: \`${report.deadAnchorMemories.length}\``,
 		];
 		appendMemoryLines(
 			lines,
@@ -342,6 +345,11 @@ export async function handleMemoryStaleCommand(
 		);
 		appendMemoryLines(lines, 'Deleted tombstones', report.deletedMemories);
 		appendSupersededChains(lines, report);
+		appendMemoryLines(
+			lines,
+			'Structurally stale memories (all anchors dead; retained)',
+			report.deadAnchorMemories,
+		);
 		appendMemoryLines(lines, 'Low-utility memories', report.lowUtilityMemories);
 		appendMemoryLines(
 			lines,
@@ -416,6 +424,7 @@ export async function handleMemoryImportCommand(
 			'',
 			`- Imported memories: \`${result.importedMemories}\``,
 			`- Imported proposals: \`${result.importedProposals}\``,
+			`- Imported outcomes: \`${result.importedOutcomes}\``,
 			`- Total JSONL rows scanned: \`${result.totalRows}\``,
 			`- Invalid rows: \`${result.invalidRows.length}\``,
 		];
@@ -437,21 +446,29 @@ export async function handleMemoryExportCommand(
 	) as ExportableProvider;
 	try {
 		await provider.initialize?.();
-		const memories = await provider.list({ includeExpired: true });
+		const memories = await provider.list({
+			includeExpired: true,
+			includeInactive: true,
+		});
 		const proposals = provider.listProposals
 			? await provider.listProposals()
+			: [];
+		const outcomeEvents = provider.listOutcomeEvents
+			? await provider.listOutcomeEvents()
 			: [];
 		const output = await writeJsonlExport(
 			directory,
 			config,
 			memories,
 			proposals,
+			outcomeEvents,
 		);
 		return [
 			'## Swarm Memory Export',
 			'',
 			`- Memories: \`${memories.length}\` -> \`${output.memoriesPath}\``,
 			`- Proposals: \`${proposals.length}\` -> \`${output.proposalsPath}\``,
+			`- Outcomes: \`${outcomeEvents.length}\` -> \`${output.outcomesPath}\``,
 		].join('\n');
 	} finally {
 		await provider.close?.();

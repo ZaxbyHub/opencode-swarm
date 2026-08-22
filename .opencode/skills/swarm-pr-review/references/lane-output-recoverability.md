@@ -164,6 +164,102 @@ A lane with a **recent** `updatedAt` still blocks — a check that can run and
 reports "still progressing" is not softened. Collect it with
 `collect_lane_results`, or wait for the horizon.
 
+### A live session past the horizon is retained, not discarded
+
+Nothing heartbeats `updatedAt`, so age alone cannot tell a dead lane from a slow
+one. Before settling anything, the gate now runs a **liveness probe** over the
+stale candidates: if the host affirmatively reports a lane's session as `busy` or
+`retry`, that lane is **retained** — it keeps blocking, its record stays
+`pending`/`running`, and its transcript stays collectable.
+
+The probe is deliberately **fail-open**. For its error and no-data cases that is
+the inverse of the collector's readiness check, which refuses to collect a lane it
+cannot verify; the two agree rather than invert on a host that exposes no
+`session.status` at all, where the collector proceeds and the probe reports
+`probe-unavailable`. Only a probe that RAN and named a live session may contradict
+staleness. Every other outcome settles exactly as age alone would, and says why:
+
+| Outcome | `probe_status` |
+| --- | --- |
+| No session handle, or the host exposes no `status` | `probe-unavailable` |
+| The call threw | `probe-error` |
+| The call exceeded the 5s probe deadline | `probe-timeout` |
+| The response carried an `error` | `probe-error` |
+| The response carried no `data` | `probe-no-data` |
+
+Where it surfaces: `probe_retained_lanes` on the `complete_pr_workflow` response,
+`probe_status` on both tool responses, `probedAliveLanes` / `probeStatus` on the
+`pr_workflow_lanes_presumed_stale` record, and `probeRetainedLanes` /
+`probeStatus` / `probeRetentionOverrideLanes` on the `pr_workflow_aborted` event.
+Note that the event's `openLanes` now counts fresh open lanes PLUS probe-retained
+lanes, so a successful force abort can record a non-zero value where it always
+recorded `0` before. The settled-lane disclosure
+appends either `liveness probe found no live session` or `settled despite
+liveness probe failure (<reason>)`, so "re-verified" and "not re-verified" are
+never confused.
+
+**Retention has one override, and it is human-only.** A session that never goes
+idle would otherwise make the workflow permanently unexitable. `/swarm
+abort-pr-workflow` (the `force` path, not agent-callable) clears the gate when
+probe-retained lanes are the ONLY thing still blocking, and discloses exactly
+which lanes it overrode — those sessions are not stopped and their output is not
+collected. A lane with a fresh `updatedAt` is never overridden.
+
+On that override path only, the overridden lanes' delegation records are also
+finalized to `stale` — immediately **after** the gate clears, never before.
+Without that finalization the session would be left un-restartable:
+`prepare_pr_workflow_checkout` refuses while any `pending` / `running`
+`swarm-pr-*` record of the session exists, with no age filter, and an overridden
+lane never terminates on its own. So an override is the one case where a retained
+lane's record does NOT stay `pending` and its transcript stops being collectable,
+and the disclosure says so explicitly.
+
+The ordering matters for recoverability, which is what this document is about.
+The clear is CAS-guarded and can legitimately lose its compare-and-swap and
+throw; the finalization is irreversible. Doing the irreversible half second means
+a failed clear abandons no RETAINED lane and the operator's retry is a real
+override — so **a `pr_workflow_abort_not_completed` retraction in
+`.swarm/events.jsonl` means the lanes named in `probeRetentionOverrideLanes` were
+not finalized by the override, and their output is still collectable**
+(`probeRetentionOverrideFinalized: false`).
+
+Read that scope literally. It does NOT mean the abort finalized nothing:
+settlement durably sweeps the same batch's probe-DEAD lanes to `stale` *before*
+the clear is attempted, so those are already terminal when the retraction is
+written. Nor does it guarantee the named lanes are still `pending` by the time
+you read the record — a concurrent force abort for the same session can clear and
+finalize them, and that is itself one of the ways this CAS loses. Treat
+`.swarm/delegations.jsonl` as the authority and re-read it rather than inferring
+record state from the retraction alone.
+
+The override's disclosure separates three facts that used to be conflated, and
+every one of them is a POSITIVE observation rather than an inference from
+absence:
+
+1. Which overridden records went terminal `stale` — named by `correlationId`.
+   Only these have output that is no longer collectable.
+2. Which overridden records the sweep left INTACT because they had already moved
+   on — named as `correlationId (status)` with the status actually observed on
+   disk. **This abort did not discard them, so check `collect_lane_results`
+   before assuming that work is gone.** The clause deliberately stops at "left
+   intact" rather than promising collectable output: an `error` or
+   `ingestion_error` record comes back as `failed` with no result text, and an
+   `ingesting` one is filtered out of `lane_results` until it settles, so the
+   status is what tells you whether there is anything to read. An earlier
+   version inferred (1) from a lane's absence from the still-open set, and a
+   raced-to-`completed` lane is absent for the opposite reason a finalized one
+   is, so it was reported as gone while its transcript sat on disk.
+3. Whether the session can start a new PR workflow. This is read back over EVERY
+   still-open `swarm-pr-*` record of the session, not just the overridden ones —
+   because the ordinary settlement sweep swallows a store-lock timeout and
+   returns `0`, so a lane the abort reported as settled can still be `pending` on
+   disk and refuse the next checkout preparation. When that happens the
+   disclosure names the blocking `correlationId`s instead of claiming
+   restartability.
+
+`.swarm/delegations.jsonl` remains the authority on which rows actually went
+terminal.
+
 ### A corrupted gate state no longer defeats abort
 
 If the durable gate-state file fails schema validation but is still valid JSON,

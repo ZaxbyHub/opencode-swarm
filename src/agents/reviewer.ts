@@ -3,6 +3,9 @@ import type { AgentDefinition } from './architect';
 import { READ_ONLY_LANE_GUIDANCE } from './read-only-lane-guidance';
 import { DIRECTIVE_COMPLIANCE_OUTPUT_SPEC } from './reviewer-directive-compliance.js';
 
+export const REVIEWER_MEMORY_OUTCOME_GUIDANCE =
+	'Use `swarm_memory_outcome` after evaluating recalled memory or a graph answer. When overturning a memory-backed claim, record `corrected` and include the correction text and relevant file/symbol anchors.';
+
 /** OWASP Top 10 2021 categories for security-focused review passes */
 export const SECURITY_CATEGORIES = [
 	'broken-access-control',

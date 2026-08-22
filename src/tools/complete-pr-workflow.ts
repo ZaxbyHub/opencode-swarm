@@ -46,6 +46,8 @@ export async function executeCompletePrWorkflow(
 	let staleDisclosure: {
 		presumed_stale_lanes?: string[];
 		presumed_stale_disclosure?: string;
+		probe_retained_lanes?: string[];
+		probe_status?: string;
 	} = {};
 	try {
 		const settlement = await _internals.settlePresumedStalePrWorkflowLanes(
@@ -57,6 +59,17 @@ export async function executeCompletePrWorkflow(
 				presumed_stale_lanes: settlement.presumedStaleLaneIds,
 				presumed_stale_disclosure: settlement.disclosure,
 			};
+		}
+		// Issue #2251: independent of whether anything settled. A lane the liveness
+		// probe reported as still running is exactly why completion is refused, and
+		// a degraded probe is why a lane was settled WITHOUT re-verification — both
+		// have to be visible on the failure response, which is the one an operator
+		// reads in this situation.
+		if (settlement.probedAliveLaneIds?.length) {
+			staleDisclosure.probe_retained_lanes = settlement.probedAliveLaneIds;
+		}
+		if (settlement.probeDegradedReason) {
+			staleDisclosure.probe_status = settlement.probeDegradedReason;
 		}
 	} catch {
 		// Observation only. A settlement-read failure must never convert a

@@ -144,8 +144,26 @@ describe('AGENT_TOOL_MAP', () => {
 		expect(MEMORY_AGENT_TOOL_MAP.architect).toEqual([
 			'swarm_memory_recall',
 			'swarm_memory_propose',
+			'swarm_memory_outcome',
 		]);
-		expect(MEMORY_AGENT_TOOL_MAP.critic).toEqual(['swarm_memory_recall']);
-		expect(MEMORY_AGENT_TOOL_MAP.reviewer).toEqual(['swarm_memory_recall']);
+		expect(MEMORY_AGENT_TOOL_MAP.critic).toEqual([
+			'swarm_memory_recall',
+			'swarm_memory_outcome',
+		]);
+		expect(MEMORY_AGENT_TOOL_MAP.reviewer).toEqual([
+			'swarm_memory_recall',
+			'swarm_memory_outcome',
+		]);
+		const outcomeRoles = Object.entries(MEMORY_AGENT_TOOL_MAP)
+			.filter(([, tools]) => tools?.includes('swarm_memory_outcome'))
+			.map(([role]) => role)
+			.sort();
+		expect(outcomeRoles).toEqual([
+			'architect',
+			'coder',
+			'critic',
+			'explorer',
+			'reviewer',
+		]);
 	});
 });

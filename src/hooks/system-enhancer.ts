@@ -213,6 +213,7 @@ function maybeAppendSpecDriftAdvisory(
 	);
 }
 
+import { buildReflectionInjection } from '../memory/reflection-injection';
 import {
 	analyzeDecisionDrift,
 	DEFAULT_CONTEXT_BUDGET_CONFIG,
@@ -825,6 +826,17 @@ export function createSystemEnhancerHook(
 						output.system.push(text);
 						injectedTokens += tokens;
 						return true;
+					}
+
+					if (
+						config.memory?.enabled === true &&
+						config.memory.reflection?.enabled === true
+					) {
+						const reflectionBlock = buildReflectionInjection(
+							directory,
+							estimateTokens,
+						);
+						if (reflectionBlock) tryInject(reflectionBlock);
 					}
 
 					const contextContent = await readSwarmFileAsync(

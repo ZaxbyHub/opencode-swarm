@@ -59,6 +59,20 @@ export interface MemorySource {
 	createdBy?: string;
 }
 
+/** Repository-relative structural location associated with a memory result. */
+export interface MemoryAnchor {
+	file: string;
+	symbol?: string;
+}
+
+/** A task-observed result for a recalled memory or graph answer. */
+export interface MemoryOutcome {
+	outcome: 'useful' | 'dead_end' | 'corrected';
+	at: string;
+	taskId?: string;
+	correction?: string;
+}
+
 export interface MemoryRecord {
 	id: string;
 	scope: MemoryScopeRef;
@@ -76,6 +90,10 @@ export interface MemoryRecord {
 	supersededBy?: string;
 	contentHash: string;
 	metadata: Record<string, unknown>;
+	/** Optional code-structure anchors; additive for pre-#1989 stores. */
+	anchors?: MemoryAnchor[];
+	/** Append-only materialized outcome view; provider events remain canonical. */
+	outcomes?: MemoryOutcome[];
 	// Linked Knowledge 5/5 (#1850): cohort-sharing provenance. All optional so
 	// pre-#1850 records continue to load without migration. Populated by the
 	// gateway on cohort-linked writes; validated by `validateMemoryRecordRules`
@@ -129,6 +147,8 @@ export interface NewMemoryRecord {
 	source?: MemorySource;
 	expiresAt?: string;
 	metadata?: Record<string, unknown>;
+	anchors?: MemoryAnchor[];
+	outcomes?: MemoryOutcome[];
 }
 
 export type MemoryPatch = Partial<
@@ -143,6 +163,8 @@ export type MemoryPatch = Partial<
 		| 'source'
 		| 'expiresAt'
 		| 'metadata'
+		| 'anchors'
+		| 'outcomes'
 	>
 >;
 

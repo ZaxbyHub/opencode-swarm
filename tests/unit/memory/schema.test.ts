@@ -99,6 +99,55 @@ describe('memory schema helpers', () => {
 		).toThrow('likely secret');
 	});
 
+	test('requires correction text exactly for corrected outcomes', () => {
+		expect(() =>
+			validateMemoryRecordRules(
+				makeRecord({
+					outcomes: [
+						{
+							outcome: 'corrected',
+							at: '2026-05-24T13:00:00.000Z',
+						},
+					],
+				}),
+				{ rejectDurableSecrets: true },
+			),
+		).toThrow('corrected outcomes require correction text');
+
+		expect(() =>
+			validateMemoryRecordRules(
+				makeRecord({
+					outcomes: [
+						{
+							outcome: 'useful',
+							at: '2026-05-24T13:00:00.000Z',
+							correction: 'This field is not meaningful for useful outcomes.',
+						},
+					],
+				}),
+				{ rejectDurableSecrets: true },
+			),
+		).toThrow('only valid for corrected outcomes');
+	});
+
+	test('rejects likely secrets in durable correction payloads', () => {
+		expect(() =>
+			validateMemoryRecordRules(
+				makeRecord({
+					outcomes: [
+						{
+							outcome: 'corrected',
+							at: '2026-05-24T13:00:00.000Z',
+							correction:
+								'Use Authorization: Bearer abcdefghijklmnopqrstuvwxyz12345',
+						},
+					],
+				}),
+				{ rejectDurableSecrets: true },
+			),
+		).toThrow('likely secret');
+	});
+
 	test('requires scratch memories to expire within seven days', () => {
 		const base = {
 			scope: { type: 'agent' as const, agentId: 'coder' },

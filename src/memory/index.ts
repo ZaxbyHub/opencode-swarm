@@ -15,6 +15,7 @@ export type {
 	MemoryGatewayOptions,
 	ProposeMemoryInput,
 	RecallMemoryInput,
+	RecordMemoryOutcomeInput,
 } from './gateway';
 export {
 	createConfiguredMemoryProvider,
@@ -30,12 +31,14 @@ export {
 export {
 	backupLegacyJsonl,
 	getLegacyJsonlFileStatus,
+	getLegacyOutcomeJsonlSignature,
 	type JsonlBackupResult,
 	type JsonlImportPayload,
 	type JsonlInvalidRow,
 	type JsonlMigrationReport,
 	LEGACY_JSONL_MIGRATION_NAME,
 	LEGACY_JSONL_MIGRATION_VERSION,
+	LEGACY_JSONL_OUTCOME_META_KEY,
 	readLegacyJsonl,
 	readMigrationReport,
 	resolveMemoryStorageDir,
@@ -64,6 +67,7 @@ export {
 	resolveMemoryStoreDir,
 	writeMemoryLinkPointer,
 } from './memory-link';
+export type { MemoryOutcomeEvent } from './outcome-events';
 export { buildRecallPromptBlock } from './prompt-block';
 export type {
 	MemoryCompactOptions,
@@ -87,6 +91,12 @@ export {
 	redactSecrets,
 } from './redaction';
 export {
+	readDeadAnchorMemoryIds,
+	readReflectionDigest,
+	recordOutcomeWithReflection,
+	regenerateMemoryReflection,
+} from './reflection-service';
+export {
 	MEMORY_RECALL_PROFILES,
 	type MemoryRecallProfile,
 	normalizeMemoryAgentRole,
@@ -99,6 +109,8 @@ export {
 	createMemoryId,
 	createProposalId,
 	isExpired,
+	MemoryAnchorSchema,
+	normalizeMemoryAnchorFile,
 	normalizeMemoryText,
 	validateCuratorMemoryDecision,
 	validateMemoryProposal,
@@ -116,9 +128,11 @@ export {
 export type {
 	AppliedMemoryChange,
 	CuratorMemoryDecision,
+	MemoryAnchor,
 	MemoryContext,
 	MemoryKind,
 	MemoryListFilter,
+	MemoryOutcome,
 	MemoryPatch,
 	MemoryProposal,
 	MemoryRecord,

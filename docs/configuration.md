@@ -327,6 +327,19 @@ Default resolution is presence-sensitive:
 
 When `auto_review.enabled` is `true`, every returning reviewer Task delegation has its legacy verdict and structured findings parsed and persisted when unambiguous, independently of which automatic trigger is selected. Version-7 installations with auto-review disabled keep their legacy reviewer prompts and do not parse or persist structured Stage-B receipts.
 
+#### Reviewer-scope evidence contract (v2 manifest)
+
+Reviewer evidence is bound to an exact, versioned manifest — `reviewer-task-files-v2` — built from the coder generation's guardrail-observed writes:
+
+- **Exact manifest identity.** Every file contributes its complete byte count and SHA-256, computed by a bounded-memory streaming capture (fixed 256 KiB chunks, `fstat` identity checks before and after, descriptor-first open with no-follow on POSIX). There are no per-file or aggregate byte caps on file identity: a file of any size is either fingerprinted exactly or the capture fails typed. A partial, sampled, or capped digest can never compare equal.
+- **Automatic vs manual delivery.** `max_diff_kb` is a *delivery* budget only. Files whose bytes fit the budget are marked `inline` in the reviewer prompt manifest block; the rest are marked `manual` and the reviewer is instructed to inspect them through read-only tools against the recorded SHA-256. The budget never changes which files enter the manifest and never changes the manifest digest. The reviewer Task prompt receives a bounded `<reviewer_scope_manifest>` block carrying the manifest hash, HEAD, workspace identity, and per-file state; receipts persist that exact hash.
+- **Root correctness.** The coder generation persists the canonical workspace identity (lane root for worktree-isolated coders, primary root otherwise) at dispatch time, and every capture/equality site reads from that root. Lane generations become reviewable from the primary checkout only after merge-back verification confirms the primary bytes match the lane manifest (`REVIEWER_SCOPE_MERGEBACK_VERIFIED` advisory). A merge conflict or deferred merge retains the generation in a typed `mergeback_pending` state — it is never relabeled as a generic reviewer-stale error.
+- **Retry behavior.** Transient capture classes — HEAD timeout, HEAD movement during capture, file mutation during streaming, capture deadline — get a bounded inline retry (3 attempts / 10 s). Exhausted retries throw a typed `REVIEWER_CAPTURE_RETRY_EXHAUSTED` and RETAIN the generation for an architect retry or explicit manual review; infrastructure failure never discards evidence. A genuine byte change after the coder's post-write capture is `REVIEWER_SCOPE_STALE` and discards the generation — retry can never turn a real change into equality. Permanent classes (symlink/reparse, non-regular, unreadable, outside-workspace, workspace mismatch) are typed `REVIEWER_CAPTURE_FAILED:<code>` with an `ACTION[architect]` recovery step.
+- **No-change semantics.** A successful coder with zero guardrail-observed writes AND a verified clean `git status` completes the generation as `no_change` (`coder_no_change` transition): no reviewer pass is owed, no review debt is created, and reviewer/test/task gates do not advance from it. The architect may re-dispatch the coder if changes were intended. Zero observed writes with a dirty tree stays `collecting` with an actionable `REVIEWER_SCOPE_UNATTRIBUTED_CHANGE` advisory (changes escaped guardrail observation).
+- **Legacy v1 receipts.** Receipts recorded before the v2 manifest (description `reviewer-task-files-v1`) can never satisfy a v2 rebuild: every scope this build constructs carries the v2 description, and the receipt's content-hash comparison fails closed on any v1-shaped scope. No v1 evidence is reinterpreted or backfilled and no v1 scope object is ever constructed.
+- **Retention bounds.** Unclaimed reviewer-scope generations sweep at the 2-hour idle TTL, EXCEPT the actionable merge-back states (`mergeback_pending` / `mergeback_mismatch`), which are retained until merge-back settles, same-task supersession replaces them, or the 256-generation capacity evicts them.
+- **Capture latency bound.** Capture is synchronous on the tool-after hook: worst-case stall is the 10 s batch deadline plus one 256 KiB chunk read per attempt (self-terminating via the typed `capture_deadline`); a 100 MiB file hashes in ~0.1 s on a warm cache. A lane left with stale untracked files from a prior run can surface `REVIEWER_SCOPE_UNATTRIBUTED_CHANGE` for a coder that wrote nothing — inspect the lane before re-dispatching.
+
 ```json
 {
   "auto_review": {
@@ -437,7 +450,7 @@ Optional scoped memory substrate for recall and proposal-only memory writes.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enabled` | boolean | `false` | Enable agent access to `swarm_memory_recall` and `swarm_memory_propose` |
+| `enabled` | boolean | `false` | Enable agent access to `swarm_memory_recall`, `swarm_memory_propose`, and `swarm_memory_outcome` |
 | `provider` | string | `"sqlite"` | Memory provider. Supports default `"sqlite"` and legacy/debug `"local-jsonl"` |
 | `storageDir` | string | `".swarm/memory"` | Local storage directory under the project root |
 | `sqlite.path` | string | `".swarm/memory/memory.db"` | SQLite database path. Must remain inside `.swarm/` |
@@ -450,12 +463,14 @@ Optional scoped memory substrate for recall and proposal-only memory writes.
 | `recall.injection.requireQuerySignal` | boolean | `true` | Require text, tag, file, symbol, or explicit kind query signal before automatic injection |
 | `recall.injection.maxItems` | number | `6` | Maximum memories automatically injected into agent context |
 | `recall.injection.tokenBudget` | number | `1000` | Token budget for automatic memory injection |
+| `reflection.enabled` | boolean | `false` | When `memory.enabled=true`, regenerate `.swarm/reflections/lessons.{md,json}` and allow bounded system-prompt reflection injection |
+| `reflection.halfLifeDays` | number | `30` | Half-life used for signed outcome decay |
 | `writes.mode` | string | `"propose"` | Normal agents can only create proposals |
 | `redaction.rejectDurableSecrets` | boolean | `true` | Reject durable memories that contain likely secrets |
 | `maintenance.lowUtilityMaxConfidence` | number | `0.45` | Confidence threshold used by `/swarm memory stale` low-utility reporting |
 | `maintenance.lowUtilityMinAgeDays` | number | `30` | Age threshold used by `/swarm memory stale` low-utility reporting |
 
-Memory stores durable state in `.swarm/memory/memory.db` by default. Legacy JSONL files under `.swarm/memory/` are migrated once into SQLite, backed up, and remain available through `memory.provider="local-jsonl"` for legacy/debug mode. Recall is scope-filtered and labels retrieved memory as untrusted background. Proposals do not become durable memory without curator or trusted gateway review. See [Swarm Memory](memory.md).
+Memory stores durable state in `.swarm/memory/memory.db` by default. Legacy JSONL files under `.swarm/memory/` are migrated once into SQLite, backed up, and remain available through `memory.provider="local-jsonl"` for legacy/debug mode. Recall is scope-filtered and labels retrieved memory as untrusted background. Proposals do not become durable memory without curator or trusted gateway review. Reflection remains off unless both `memory.enabled` and `memory.reflection.enabled` are true. See [Swarm Memory](memory.md).
 
 ### PR Monitor
 

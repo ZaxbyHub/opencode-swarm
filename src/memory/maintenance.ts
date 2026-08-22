@@ -58,6 +58,9 @@ export interface MemoryMaintenanceReport {
 	supersededMemories: MemoryRecord[];
 	supersededChains: MemorySupersededChain[];
 	lowUtilityMemories: MemoryRecord[];
+	/** Structurally stale memories whose anchors are all dead in the latest
+	 * worktree-local reflection digest. Reporting never deletes them. */
+	deadAnchorMemories: MemoryRecord[];
 	/**
 	 * Memories suppressed for low LEARNED utility (q-value < suppression
 	 * threshold). Distinct from `lowUtilityMemories`, which is the orthogonal
@@ -89,6 +92,8 @@ export interface MemoryMaintenanceReportOptions {
 	importanceThreshold?: number;
 	/** Learned-utility (q-value) thresholds for the low-Q / promotion surfaces. Defaults to DEFAULT_QLEARNING_CONFIG. */
 	qLearning?: QLearningConfig;
+	/** Worktree-local stale ids read from `.swarm/reflections/lessons.json`. */
+	deadAnchorMemoryIds?: ReadonlySet<string>;
 }
 
 type ObservableProvider = MemoryProvider &
@@ -132,6 +137,9 @@ export async function buildMemoryMaintenanceReport(
 			}),
 		)
 		.sort(memorySort);
+	const deadAnchorMemories = memories
+		.filter((memory) => options.deadAnchorMemoryIds?.has(memory.id) === true)
+		.sort(memorySort);
 	const neverRecalledMemories = activeMemories
 		.filter((memory) => !usageByMemory.has(memory.id))
 		.sort(memorySort);
@@ -168,6 +176,7 @@ export async function buildMemoryMaintenanceReport(
 		supersededMemories: supersededMemories.slice(0, limit),
 		supersededChains: buildSupersededChains(memories).slice(0, limit),
 		lowUtilityMemories: lowUtilityMemories.slice(0, limit),
+		deadAnchorMemories: deadAnchorMemories.slice(0, limit),
 		lowQValueMemories: lowQValueMemories.slice(0, limit),
 		promotionCandidates: promotionCandidates.slice(0, limit),
 		neverRecalledMemories: neverRecalledMemories.slice(0, limit),

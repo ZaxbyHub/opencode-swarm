@@ -41,14 +41,26 @@ import {
 import { MemoryValidationError } from './errors';
 import {
 	backupLegacyJsonl,
+	getLegacyOutcomeJsonlSignature,
 	type JsonlMigrationReport,
 	LEGACY_JSONL_MIGRATION_NAME,
 	LEGACY_JSONL_MIGRATION_VERSION,
+	LEGACY_JSONL_OUTCOME_META_KEY,
 	readLegacyJsonl,
 	writeJsonlExport,
 	writeMigrationReport,
 } from './jsonl-migration';
 import { shouldCompactMemory } from './maintenance';
+import {
+	assertEventIdentityCompatible,
+	ensureOutcomeGeneration,
+	importMaterializedOutcomeEvents,
+	type MemoryOutcomeEvent,
+	materializeOutcomeRecord,
+	stripMaterializedOutcomes,
+	validateOutcomeEvent,
+	validateOutcomeEventForMemory,
+} from './outcome-events';
 import type {
 	MemoryCompactOptions,
 	MemoryCompactResult,
@@ -78,7 +90,9 @@ import {
 } from './scoring';
 import type {
 	AppliedMemoryChange,
+	MemoryAnchor,
 	MemoryListFilter,
+	MemoryOutcome,
 	MemoryProposal,
 	MemoryRecord,
 	MemoryScopeRef,
@@ -317,6 +331,21 @@ export const MIGRATIONS: Migration[] = [
 				ON memory_recall_usage(unit_id);
 		`,
 	},
+	{
+		version: 11,
+		name: 'create_memory_outcomes',
+		sql: `
+			CREATE TABLE IF NOT EXISTS memory_outcomes (
+				id TEXT PRIMARY KEY,
+				memory_id TEXT NOT NULL,
+				generation TEXT NOT NULL,
+				at TEXT NOT NULL,
+				event_json TEXT NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_memory_outcomes_memory_generation
+				ON memory_outcomes(memory_id, generation, at, id);
+		`,
+	},
 ];
 
 interface MemoryItemRow {
@@ -351,6 +380,11 @@ interface RewardEventRow {
 	timestamp: string;
 }
 
+interface OutcomeEventRow {
+	id: string;
+	event_json: string;
+}
+
 interface DecisionTransactionResult {
 	change: AppliedMemoryChange;
 	proposal: MemoryProposal;
@@ -366,6 +400,7 @@ interface MigrationRow {
 export interface SQLiteJsonlImportResult {
 	importedMemories: number;
 	importedProposals: number;
+	importedOutcomes: number;
 	invalidRows: JsonlMigrationReport['invalidRows'];
 	totalRows: number;
 }
@@ -579,29 +614,153 @@ export class SQLiteMemoryProvider
 
 	async upsert(record: MemoryRecord): Promise<MemoryRecord> {
 		await this.initialize();
-		const existing = this.memories.get(record.id);
-		if (existing?.metadata.deleted === true) {
-			throw new MemoryValidationError(
-				'memory is tombstoned and cannot be upserted',
+		const db = this.requireDb();
+		let next: MemoryRecord;
+		const ownsTransaction = !db.inTransaction;
+		if (ownsTransaction) db.run('BEGIN IMMEDIATE');
+		try {
+			const existing = this.readMemoryById(record.id);
+			if (existing?.metadata.deleted === true) {
+				throw new MemoryValidationError(
+					'memory is tombstoned and cannot be upserted',
+				);
+			}
+			next = validateMemoryRecordRules(
+				{
+					...record,
+					createdAt: existing?.createdAt ?? record.createdAt,
+					metadata: {
+						...record.metadata,
+						outcomeGeneration:
+							existing?.metadata.outcomeGeneration ??
+							record.metadata.outcomeGeneration,
+					},
+				},
+				{ rejectDurableSecrets: this.config.redaction.rejectDurableSecrets },
 			);
+			if (
+				(next.outcomes?.length ?? 0) > 0 ||
+				typeof next.metadata.outcomeGeneration === 'string'
+			) {
+				next = ensureOutcomeGeneration(next);
+			}
+			const existingEvents = this.readOutcomeEvents(next.id);
+			const base = stripMaterializedOutcomes(next);
+			this.writeMemory(base);
+			if (typeof next.metadata.outcomeGeneration === 'string') {
+				const importedEvents = importMaterializedOutcomeEvents(
+					next,
+					existingEvents,
+				);
+				const combinedIds = new Set(
+					existingEvents
+						.filter(
+							(event) => event.generation === next.metadata.outcomeGeneration,
+						)
+						.map((event) => event.id),
+				);
+				for (const event of importedEvents) combinedIds.add(event.id);
+				if (combinedIds.size > 1000) {
+					throw new MemoryValidationError('memory outcome limit exceeded');
+				}
+				for (const event of importedEvents) {
+					this.insertOutcomeEvent(event);
+				}
+			}
+			next = materializeOutcomeRecord(base, this.readOutcomeEvents(next.id));
+			this.insertEvent('upsert', next.id);
+			if (ownsTransaction) db.run('COMMIT');
+		} catch (error) {
+			if (ownsTransaction) {
+				try {
+					db.run('ROLLBACK');
+				} catch {
+					// Preserve the upsert error when rollback also fails.
+				}
+			}
+			throw error;
 		}
-		const next = validateMemoryRecordRules(
-			{
-				...record,
-				createdAt: existing?.createdAt ?? record.createdAt,
-			},
-			{ rejectDurableSecrets: this.config.redaction.rejectDurableSecrets },
-		);
 		this.memories.set(next.id, next);
-		this.writeMemory(next);
 		await this.writeMemoryVec(next);
-		await this.event('upsert', next.id);
+		this.bumpCohortGeneration();
 		return next;
 	}
 
 	async get(id: string): Promise<MemoryRecord | null> {
 		await this.initialize();
-		return this.memories.get(id) ?? null;
+		const record = this.readMemoryById(id);
+		if (record) this.memories.set(id, record);
+		return record;
+	}
+
+	async appendOutcome(
+		memoryId: string,
+		event: { id: string; outcome: MemoryOutcome },
+		anchors: MemoryAnchor[] = [],
+	): Promise<MemoryRecord> {
+		await this.initialize();
+		let materialized: MemoryRecord | null = null;
+		const db = this.requireDb();
+		db.run('BEGIN IMMEDIATE');
+		try {
+			const row = this.requireDb()
+				.query<MemoryItemRow, [string]>(
+					'SELECT id, record_json FROM memory_items WHERE id = ? LIMIT 1',
+				)
+				.get(memoryId);
+			if (!row) throw new MemoryValidationError('target memory was not found');
+			let base = ensureOutcomeGeneration(
+				validateMemoryRecordRules(JSON.parse(row.record_json), {
+					rejectDurableSecrets: this.config.redaction.rejectDurableSecrets,
+				}),
+			);
+			if (base.metadata.deleted === true) {
+				throw new MemoryValidationError('target memory is deleted');
+			}
+			base = stripMaterializedOutcomes(base);
+			this.writeMemory(base);
+			const nextEvent = validateOutcomeEvent({
+				...event,
+				memoryId,
+				generation: base.metadata.outcomeGeneration,
+				anchors,
+			});
+			const events = this.readOutcomeEvents(memoryId);
+			assertEventIdentityCompatible(
+				events.find((candidate) => candidate.id === nextEvent.id),
+				nextEvent,
+			);
+			if (
+				events.filter(
+					(candidate) => candidate.generation === nextEvent.generation,
+				).length >= 1000 &&
+				!events.some((candidate) => candidate.id === nextEvent.id)
+			) {
+				throw new MemoryValidationError('memory outcome limit exceeded');
+			}
+			this.insertOutcomeEvent(nextEvent);
+			materialized = materializeOutcomeRecord(
+				base,
+				this.readOutcomeEvents(memoryId),
+			);
+			db.run('COMMIT');
+		} catch (error) {
+			try {
+				db.run('ROLLBACK');
+			} catch {
+				// Preserve the append error when rollback also fails.
+			}
+			throw error;
+		}
+		if (!materialized) throw new Error('outcome append did not complete');
+		this.memories.set(memoryId, materialized);
+		this.bumpCohortGeneration();
+		return materialized;
+	}
+
+	async listOutcomeEvents(): Promise<MemoryOutcomeEvent[]> {
+		await this.initialize();
+		return this.readOutcomeEvents();
 	}
 
 	async withTransaction<T>(
@@ -637,13 +796,29 @@ export class SQLiteMemoryProvider
 
 	async delete(id: string, reason?: string): Promise<void> {
 		await this.initialize();
-		const existing = this.memories.get(id);
+		const existing = this.readMemoryById(id);
 		if (!existing) return;
 		if (this.config.hardDelete) {
+			const db = this.requireDb();
+			db.run('BEGIN IMMEDIATE');
+			try {
+				db.run('DELETE FROM memory_outcomes WHERE memory_id = ?', [id]);
+				db.run('DELETE FROM memory_items WHERE id = ?', [id]);
+				this.deleteMemoryFts(id);
+				this.deleteMemoryVec(id);
+				this.insertEvent('delete', id, reason);
+				db.run('COMMIT');
+			} catch (error) {
+				try {
+					db.run('ROLLBACK');
+				} catch {
+					// Preserve the deletion error when rollback also fails.
+				}
+				throw error;
+			}
 			this.memories.delete(id);
-			this.requireDb().run('DELETE FROM memory_items WHERE id = ?', [id]);
-			this.deleteMemoryFts(id);
-			this.deleteMemoryVec(id);
+			this.bumpCohortGeneration();
+			return;
 		} else {
 			const tombstone: MemoryRecord = {
 				...existing,
@@ -1160,7 +1335,7 @@ export class SQLiteMemoryProvider
 		const whereClause =
 			conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
-		let sql = `SELECT id, record_json FROM memory_items ${whereClause} ORDER BY updated_at DESC`;
+		let sql = `SELECT id, record_json FROM memory_items ${whereClause} ORDER BY updated_at DESC, id ASC`;
 
 		if (typeof filter.limit === 'number') {
 			sql += ' LIMIT ?';
@@ -1170,11 +1345,17 @@ export class SQLiteMemoryProvider
 		const rows = db
 			.query<MemoryItemRow, SQLQueryBindings[]>(sql)
 			.all(...params);
+		const outcomeEvents = this.readOutcomeEventsForMemoryIds(
+			rows.map((row) => row.id),
+		);
 
 		let records: MemoryRecord[] = [];
 		for (const row of rows) {
-			const parsed = this.parseMemoryRow(row);
-			if (parsed) records.push(parsed);
+			const parsed = this.parseMemoryRow(row, outcomeEvents);
+			if (parsed) {
+				records.push(parsed);
+				this.memories.set(parsed.id, parsed);
+			}
 		}
 
 		// Post-filter: preserve the original includeExpired semantics for
@@ -1414,22 +1595,30 @@ export class SQLiteMemoryProvider
 		directory: string;
 		memoriesPath: string;
 		proposalsPath: string;
+		outcomesPath: string;
 		memories: number;
 		proposals: number;
+		outcomes: number;
 	}> {
 		await this.initialize();
-		const memories = await this.list({ includeExpired: true });
+		const memories = await this.list({
+			includeExpired: true,
+			includeInactive: true,
+		});
 		const proposals = await this.listProposals();
+		const outcomeEvents = this.readOutcomeEvents();
 		const output = await writeJsonlExport(
 			this.rootDirectory,
 			this.config,
 			memories,
 			proposals,
+			outcomeEvents,
 		);
 		return {
 			...output,
 			memories: memories.length,
 			proposals: proposals.length,
+			outcomes: outcomeEvents.length,
 		};
 	}
 
@@ -1472,6 +1661,7 @@ export class SQLiteMemoryProvider
 		const db = this.requireDb();
 		const compact = db.transaction(() => {
 			for (const id of removeIds) {
+				db.run('DELETE FROM memory_outcomes WHERE memory_id = ?', [id]);
 				db.run('DELETE FROM memory_items WHERE id = ?', [id]);
 				this.deleteMemoryFts(id);
 				this.deleteMemoryVec(id);
@@ -1836,10 +2026,11 @@ export class SQLiteMemoryProvider
 
 	private rebuildFtsIndex(): void {
 		const db = this.requireDb();
+		const outcomeEvents = this.readOutcomeEvents();
 		const rebuild = db.transaction(() => {
 			db.run(`DELETE FROM ${FTS_TABLE_NAME}`);
 			for (const row of this.iterateMemoryRows()) {
-				const record = this.parseMemoryRow(row);
+				const record = this.parseMemoryRow(row, outcomeEvents);
 				if (record) {
 					this.writeMemoryFts(record);
 				}
@@ -1850,8 +2041,9 @@ export class SQLiteMemoryProvider
 
 	private countValidMemoryRows(): number {
 		let count = 0;
+		const outcomeEvents = this.readOutcomeEvents();
 		for (const row of this.iterateMemoryRows()) {
-			if (this.parseMemoryRow(row)) count++;
+			if (this.parseMemoryRow(row, outcomeEvents)) count++;
 		}
 		return count;
 	}
@@ -1862,11 +2054,23 @@ export class SQLiteMemoryProvider
 			.iterate();
 	}
 
-	private parseMemoryRow(row: MemoryItemRow): MemoryRecord | null {
+	private parseMemoryRow(
+		row: MemoryItemRow,
+		outcomeEvents?: readonly MemoryOutcomeEvent[],
+	): MemoryRecord | null {
 		try {
-			return validateMemoryRecordRules(JSON.parse(row.record_json), {
+			const base = validateMemoryRecordRules(JSON.parse(row.record_json), {
 				rejectDurableSecrets: this.config.redaction.rejectDurableSecrets,
 			});
+			return validateMemoryRecordRules(
+				materializeOutcomeRecord(
+					base,
+					outcomeEvents ?? this.readOutcomeEvents(base.id),
+				),
+				{
+					rejectDurableSecrets: this.config.redaction.rejectDurableSecrets,
+				},
+			);
 		} catch {
 			return null;
 		}
@@ -1879,9 +2083,10 @@ export class SQLiteMemoryProvider
 			)
 			.all();
 		const records: MemoryRecord[] = [];
+		const outcomeEvents = this.readOutcomeEvents();
 		let invalidCount = 0;
 		for (const row of rows) {
-			const record = this.parseMemoryRow(row);
+			const record = this.parseMemoryRow(row, outcomeEvents);
 			if (record) {
 				records.push(record);
 			} else {
@@ -1919,6 +2124,7 @@ export class SQLiteMemoryProvider
 	}
 
 	private writeMemory(record: MemoryRecord): void {
+		const stored = stripMaterializedOutcomes(record);
 		this.requireDb().run(
 			`INSERT OR REPLACE INTO memory_items (
 				id,
@@ -1931,23 +2137,127 @@ export class SQLiteMemoryProvider
 				record_json
 			) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 			[
-				record.id,
-				stableScopeKey(record.scope),
-				record.kind,
-				record.updatedAt,
-				record.expiresAt ?? null,
-				record.supersededBy ?? null,
-				record.metadata.deleted === true ? 1 : 0,
-				JSON.stringify(record),
+				stored.id,
+				stableScopeKey(stored.scope),
+				stored.kind,
+				stored.updatedAt,
+				stored.expiresAt ?? null,
+				stored.supersededBy ?? null,
+				stored.metadata.deleted === true ? 1 : 0,
+				JSON.stringify(stored),
 			],
 		);
-		this.writeMemoryFts(record);
+		this.writeMemoryFts(stored);
 		// #1850 (critic CONCERN-1): bump the cohort generation marker so sibling
 		// worktrees observe this write on their next revalidation. Bumped at the
 		// provider layer so ALL write paths (propose, curator, finalize-reward,
 		// direct upsert) invalidate peers. Local writes are no-ops. Best-effort:
 		// a bump failure must never block the write.
 		this.bumpCohortGeneration();
+	}
+
+	private readMemoryById(id: string): MemoryRecord | null {
+		const row = this.requireDb()
+			.query<MemoryItemRow, [string]>(
+				'SELECT id, record_json FROM memory_items WHERE id = ? LIMIT 1',
+			)
+			.get(id);
+		return row ? this.parseMemoryRow(row) : null;
+	}
+
+	private readOutcomeEvents(memoryId?: string): MemoryOutcomeEvent[] {
+		const rows = memoryId
+			? this.requireDb()
+					.query<OutcomeEventRow, [string]>(
+						'SELECT id, event_json FROM memory_outcomes WHERE memory_id = ? ORDER BY at ASC, id ASC',
+					)
+					.all(memoryId)
+			: this.requireDb()
+					.query<OutcomeEventRow, []>(
+						'SELECT id, event_json FROM memory_outcomes ORDER BY at ASC, id ASC',
+					)
+					.all();
+		const events: MemoryOutcomeEvent[] = [];
+		for (const row of rows) {
+			try {
+				const event = validateOutcomeEvent(JSON.parse(row.event_json));
+				if (event.id !== row.id) continue;
+				events.push(event);
+			} catch {
+				// Invalid outcome rows are ignored like invalid legacy memory rows.
+			}
+		}
+		return events;
+	}
+
+	private readOutcomeEventsForMemoryIds(
+		memoryIds: readonly string[],
+	): MemoryOutcomeEvent[] {
+		if (memoryIds.length === 0) return [];
+		const events: MemoryOutcomeEvent[] = [];
+		for (let offset = 0; offset < memoryIds.length; offset += 500) {
+			const chunk = memoryIds.slice(offset, offset + 500);
+			const placeholders = chunk.map(() => '?').join(', ');
+			const rows = this.requireDb()
+				.query<OutcomeEventRow, SQLQueryBindings[]>(
+					`SELECT id, event_json FROM memory_outcomes WHERE memory_id IN (${placeholders}) ORDER BY at ASC, id ASC`,
+				)
+				.all(...chunk);
+			for (const row of rows) {
+				try {
+					const event = validateOutcomeEvent(JSON.parse(row.event_json));
+					if (event.id !== row.id) continue;
+					events.push(event);
+				} catch {
+					// Invalid outcome rows are ignored like invalid legacy memory rows.
+				}
+			}
+		}
+		return events;
+	}
+
+	private insertOutcomeEvent(event: MemoryOutcomeEvent): void {
+		const memoryRow = this.requireDb()
+			.query<MemoryItemRow, [string]>(
+				'SELECT id, record_json FROM memory_items WHERE id = ? LIMIT 1',
+			)
+			.get(event.memoryId);
+		if (!memoryRow) {
+			throw new MemoryValidationError('target memory was not found');
+		}
+		const memory = validateMemoryRecordRules(
+			JSON.parse(memoryRow.record_json),
+			{
+				rejectDurableSecrets: this.config.redaction.rejectDurableSecrets,
+			},
+		);
+		const validatedEvent = validateOutcomeEventForMemory(
+			event,
+			memory,
+			this.config.redaction.rejectDurableSecrets,
+		);
+		const existing = this.requireDb()
+			.query<OutcomeEventRow, [string]>(
+				'SELECT id, event_json FROM memory_outcomes WHERE id = ? LIMIT 1',
+			)
+			.get(validatedEvent.id);
+		if (existing) {
+			assertEventIdentityCompatible(
+				validateOutcomeEvent(JSON.parse(existing.event_json)),
+				validatedEvent,
+			);
+			return;
+		}
+		this.requireDb().run(
+			'INSERT INTO memory_outcomes (id, memory_id, generation, at, event_json) VALUES (?, ?, ?, ?, ?)',
+			[
+				validatedEvent.id,
+				validatedEvent.memoryId,
+				validatedEvent.generation,
+				validatedEvent.outcome.at,
+				JSON.stringify(validatedEvent),
+			],
+		);
 	}
 
 	/**
@@ -2308,13 +2618,33 @@ export class SQLiteMemoryProvider
 	}
 
 	private async migrateLegacyJsonlIfNeeded(): Promise<void> {
-		if (this.hasMigration(LEGACY_JSONL_MIGRATION_NAME)) return;
+		const baseImportComplete = this.hasMigration(LEGACY_JSONL_MIGRATION_NAME);
+		const storedOutcomeSignature = this.requireDb()
+			.query<{ value: string }, [string]>(
+				'SELECT value FROM _meta WHERE key = ? LIMIT 1',
+			)
+			.get(LEGACY_JSONL_OUTCOME_META_KEY)?.value;
+		const currentOutcomeSignature = await getLegacyOutcomeJsonlSignature(
+			this.rootDirectory,
+			this.config,
+		);
+		const outcomeImportComplete =
+			storedOutcomeSignature === currentOutcomeSignature;
+		if (baseImportComplete && outcomeImportComplete) return;
 		const backups = await backupLegacyJsonl(this.rootDirectory, this.config);
-		const result = await this.importLegacyJsonlRows();
+		const result = baseImportComplete
+			? await this.importLegacyOutcomeRows()
+			: await this.importLegacyJsonlRows();
 		this.lastAutomaticJsonlMigration = result;
-		this.markMigration(
-			LEGACY_JSONL_MIGRATION_VERSION,
-			LEGACY_JSONL_MIGRATION_NAME,
+		if (!baseImportComplete) {
+			this.markMigration(
+				LEGACY_JSONL_MIGRATION_VERSION,
+				LEGACY_JSONL_MIGRATION_NAME,
+			);
+		}
+		this.requireDb().run(
+			'INSERT OR REPLACE INTO _meta (key, value) VALUES (?, ?)',
+			[LEGACY_JSONL_OUTCOME_META_KEY, currentOutcomeSignature],
 		);
 		const report: JsonlMigrationReport = {
 			migration: LEGACY_JSONL_MIGRATION_NAME,
@@ -2322,6 +2652,7 @@ export class SQLiteMemoryProvider
 			skipped: false,
 			importedMemories: result.importedMemories,
 			importedProposals: result.importedProposals,
+			importedOutcomes: result.importedOutcomes,
 			invalidRows: result.invalidRows,
 			backups,
 		};
@@ -2332,6 +2663,7 @@ export class SQLiteMemoryProvider
 			JSON.stringify({
 				importedMemories: result.importedMemories,
 				importedProposals: result.importedProposals,
+				importedOutcomes: result.importedOutcomes,
 				invalidRows: result.invalidRows.length,
 			}),
 		);
@@ -2339,18 +2671,139 @@ export class SQLiteMemoryProvider
 
 	private async importLegacyJsonlRows(): Promise<SQLiteJsonlImportResult> {
 		const payload = await readLegacyJsonl(this.rootDirectory, this.config);
-		for (const record of payload.memories) {
-			this.writeMemory(record);
+		const invalidRows = [...payload.invalidRows];
+		const materializedRows: Array<{
+			line: number;
+			events: MemoryOutcomeEvent[];
+		}> = [];
+		for (const sourceRow of payload.memoryRows) {
+			const rawRecord = sourceRow.record;
+			const record =
+				(rawRecord.outcomes?.length ?? 0) > 0
+					? ensureOutcomeGeneration(rawRecord)
+					: rawRecord;
+			this.writeMemory(stripMaterializedOutcomes(record));
+			if (typeof record.metadata.outcomeGeneration === 'string') {
+				try {
+					materializedRows.push({
+						line: sourceRow.line,
+						events: importMaterializedOutcomeEvents(
+							record,
+							payload.outcomeEvents,
+						),
+					});
+				} catch (error) {
+					invalidRows.push({
+						file: 'memories.jsonl',
+						line: sourceRow.line,
+						error: error instanceof Error ? error.message : String(error),
+					});
+				}
+			}
 		}
 		for (const proposal of payload.proposals) {
 			this.writeProposal(proposal);
 		}
+		// Canonical rows are authoritative. Import them before projections from
+		// legacy materialized snapshots so a same-id conflict is attributed to the
+		// source memory row instead of rejecting the canonical event.
+		let importedOutcomes = this.importLegacyOutcomeEventRows(
+			payload.outcomeEventRows,
+			invalidRows,
+		);
+		for (const row of materializedRows) {
+			importedOutcomes += this.importLegacyMaterializedOutcomeRow(
+				row,
+				invalidRows,
+			);
+		}
 		return {
 			importedMemories: payload.memories.length,
 			importedProposals: payload.proposals.length,
-			invalidRows: payload.invalidRows,
+			importedOutcomes,
+			invalidRows,
 			totalRows: payload.totalRows,
 		};
+	}
+
+	private importLegacyMaterializedOutcomeRow(
+		row: { line: number; events: readonly MemoryOutcomeEvent[] },
+		invalidRows: JsonlMigrationReport['invalidRows'],
+	): number {
+		if (row.events.length === 0) return 0;
+		const db = this.requireDb();
+		db.run('SAVEPOINT legacy_materialized_outcome_row');
+		try {
+			let imported = 0;
+			for (const event of row.events) {
+				const alreadyImported = this.hasOutcomeEvent(event.id);
+				this.insertOutcomeEvent(event);
+				if (!alreadyImported) imported++;
+			}
+			db.run('RELEASE SAVEPOINT legacy_materialized_outcome_row');
+			return imported;
+		} catch (error) {
+			db.run('ROLLBACK TO SAVEPOINT legacy_materialized_outcome_row');
+			db.run('RELEASE SAVEPOINT legacy_materialized_outcome_row');
+			invalidRows.push({
+				file: 'memories.jsonl',
+				line: row.line,
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return 0;
+		}
+	}
+
+	private async importLegacyOutcomeRows(): Promise<SQLiteJsonlImportResult> {
+		const payload = await readLegacyJsonl(this.rootDirectory, this.config);
+		const invalidRows = payload.invalidRows.filter(
+			(row) => row.file === 'outcome-events.jsonl',
+		);
+		const importedOutcomes = this.importLegacyOutcomeEventRows(
+			payload.outcomeEventRows,
+			invalidRows,
+		);
+		return {
+			importedMemories: 0,
+			importedProposals: 0,
+			importedOutcomes,
+			invalidRows,
+			totalRows:
+				payload.outcomeEventRows.length +
+				payload.invalidRows.filter((row) => row.file === 'outcome-events.jsonl')
+					.length,
+		};
+	}
+
+	private importLegacyOutcomeEventRows(
+		rows: readonly { line: number; event: MemoryOutcomeEvent }[],
+		invalidRows: JsonlMigrationReport['invalidRows'],
+	): number {
+		let imported = 0;
+		for (const row of rows) {
+			try {
+				const alreadyImported = this.hasOutcomeEvent(row.event.id);
+				this.insertOutcomeEvent(row.event);
+				if (!alreadyImported) imported++;
+			} catch (error) {
+				invalidRows.push({
+					file: 'outcome-events.jsonl',
+					line: row.line,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}
+		return imported;
+	}
+
+	private hasOutcomeEvent(id: string): boolean {
+		return Boolean(
+			this.requireDb()
+				.query<{ id: string }, [string]>(
+					'SELECT id FROM memory_outcomes WHERE id = ? LIMIT 1',
+				)
+				.get(id),
+		);
 	}
 
 	private async event(

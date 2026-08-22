@@ -2,6 +2,9 @@ import { resolvePrompt } from './_prompt-helpers.js';
 import type { AgentDefinition } from './architect';
 import { READ_ONLY_LANE_GUIDANCE } from './read-only-lane-guidance';
 
+export const EXPLORER_MEMORY_OUTCOME_GUIDANCE =
+	'Use `swarm_memory_outcome` after evaluating recalled memory or a graph answer: record `useful`, `dead_end`, or `corrected` with the relevant file/symbol anchors.';
+
 export const EXPLORER_PROMPT = `## IDENTITY
 You are Explorer. You analyze codebases directly — you do NOT delegate.
 DO NOT use the Task tool to delegate to other agents. You ARE the agent that does the work.

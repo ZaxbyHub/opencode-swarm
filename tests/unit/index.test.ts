@@ -148,6 +148,46 @@ describe('OpenCodeSwarm Plugin Registration', () => {
 		expect(order).toEqual(['server-resolved', 'repo-graph-started']);
 	});
 
+	test('5a. memory reflection startup is opt-in and deferred until after server resolution', async () => {
+		let scheduledTasks: ReadonlyArray<() => void | Promise<void>> = [];
+		let regenerationCalls = 0;
+		const safe = getSafeDefaultConfigLoadResult();
+		restoreIndexInternals = overrideIndexInternalsForTest({
+			loadPluginConfigWithMetaAsync: (async () => ({
+				...safe,
+				config: {
+					...safe.config,
+					memory: {
+						enabled: true,
+						reflection: { enabled: true, halfLifeDays: 30 },
+					},
+				},
+			})) as any,
+			loadSnapshot: (async () => {}) as any,
+			ensureSwarmGitExcluded: (async () => {}) as any,
+			createRepoGraphBuilderHook: (() => ({
+				init: async () => {},
+				toolAfter: async () => {},
+			})) as RepoGraphBuilderFactory,
+			regenerateMemoryReflection: async () => {
+				regenerationCalls++;
+			},
+			schedulePostResolutionTasks: (tasks) => {
+				scheduledTasks = [...tasks];
+			},
+		});
+
+		await OpenCodeSwarm.server(mockPluginInput);
+		expect(regenerationCalls).toBe(0);
+
+		const reflectionTask = scheduledTasks.find(
+			(task) => task.name === 'regenerateMemoryReflectionTask',
+		);
+		expect(reflectionTask).toBeDefined();
+		await reflectionTask?.();
+		expect(regenerationCalls).toBe(1);
+	});
+
 	test('5b. issue #1782: config-load timeout falls back to safe defaults and init still completes', async () => {
 		// The parallel init I/O wraps loadPluginConfigWithMetaAsync in a 2s
 		// withTimeout. If the read stalls past 2s, init must STILL complete
