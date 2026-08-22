@@ -14,7 +14,6 @@
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import type { PluginConfig } from '../../../src/config';
 import { resolveAutoReviewConfig } from '../../../src/config/schema';
@@ -32,6 +31,7 @@ import {
 } from '../../../src/review/runtime';
 import { resetSwarmState, swarmState } from '../../../src/state';
 import { _internals as telemetryInternals } from '../../../src/telemetry';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const APPROVED = [
 	'VERDICT: APPROVED',
@@ -93,6 +93,20 @@ function diffResult(): Extract<ReviewDiffResult, { status: 'ok' }> {
 			includesWorkingTree: true,
 			scopeHash: 'a'.repeat(64),
 		},
+		manifest: {
+			schema_version: 2,
+			hash: 'd'.repeat(64),
+			content_hash: 'e'.repeat(64),
+			selector: { kind: 'working-tree' },
+			selector_key: 'working-tree',
+			review_target_kind: 'checkout-history-index-working-tree',
+			completeness: {
+				complete: true,
+				truncated: false,
+				skip_reason_codes: [],
+			},
+			path_records: [],
+		},
 	};
 }
 
@@ -114,9 +128,7 @@ function dispatchResult(
 }
 
 beforeEach(() => {
-	tmpDir = fs.realpathSync(
-		fs.mkdtempSync(path.join(os.tmpdir(), 'auto-review-fb-')),
-	);
+	tmpDir = canonicalMkdtemp('auto-review-fb-');
 	fs.mkdirSync(path.join(tmpDir, '.swarm'), { recursive: true });
 	fs.mkdirSync(path.join(tmpDir, 'src'), { recursive: true });
 	fs.writeFileSync(path.join(tmpDir, 'src', 'state.ts'), 'line\n'.repeat(20));

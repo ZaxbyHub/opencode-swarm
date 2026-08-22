@@ -65,11 +65,9 @@ function assertSafeRequirementsParent(
 		);
 	}
 	const canonicalRoot = fs.realpathSync(directory);
-	if (!samePath(canonicalRoot, directory)) {
-		throw new Error(
-			'TASK_GATE_REQUIREMENTS_UNREADABLE: project root is redirected',
-		);
-	}
+	// A direct project-root symlink is rejected above.  An alias in an ancestor
+	// (for example macOS's /var -> /private/var) is not a redirected project
+	// root, so continue exclusively from the canonical root below.
 	const segments = ['.swarm', 'evidence', 'task-gate-requirements'];
 	let current = canonicalRoot;
 	for (const segment of segments) {

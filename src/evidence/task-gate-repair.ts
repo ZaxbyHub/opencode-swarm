@@ -11,6 +11,7 @@ import { validateSwarmPath } from '../hooks/utils.js';
 import { loadPlan } from '../plan/manager.js';
 import { swarmState } from '../state.js';
 import { assertProjectRoot } from '../utils/project-boundary.js';
+import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache.js';
 import { assertStrictTaskId } from '../validation/task-id.js';
 import {
 	atomicWriteFile,
@@ -496,7 +497,9 @@ async function quarantineTaskEvidenceBytes(
 		await fileHandle.sync();
 		await fileHandle.close();
 		fileHandle = undefined;
+		invalidateCachedArtifact(tempPath);
 		await fs.promises.link(tempPath, target);
+		invalidateCachedArtifact(target);
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
 		if (await reconcileExisting()) return { digest, filePath: target };
