@@ -5019,7 +5019,7 @@ export async function assertPrReviewArtifactBoundary(
 	let state = await requireBoundState(directory, sessionID, 'PR_REVIEW');
 	if (!state.prReviewTriggerEvalPath) {
 		throw new Error(
-			'BLOCKED: PR_REVIEW findings persistence requires the trigger evaluation artifact',
+			'BLOCKED: PR_REVIEW findings persistence requires the trigger evaluation artifact (write_pr_review_trigger_eval must complete first)',
 		);
 	}
 	const persistedBoundaries = state.prReviewArtifactBoundaries ?? [];
@@ -5110,8 +5110,17 @@ export async function assertPrReviewArtifactBoundary(
 		JSON.stringify(normalizedFindingIds) !==
 			JSON.stringify([...expectedFindingIds].sort())
 	) {
+		const actualSet = new Set(normalizedFindingIds);
+		const expectedSet = new Set(expectedFindingIds);
+		const missing = [...expectedSet].filter((id) => !actualSet.has(id));
+		const extra = [...actualSet].filter((id) => !expectedSet.has(id));
+		const duplicates = [
+			...new Set(
+				findingIds.filter((id, index) => findingIds.indexOf(id) !== index),
+			),
+		].sort();
 		throw new Error(
-			`BLOCKED: PR_REVIEW ${boundary} findings must exactly cover the discovered candidate inventory`,
+			`BLOCKED: PR_REVIEW ${boundary} findings must exactly cover the discovered candidate inventory; missing: ${missing.join(', ') || '(none)'}; extra: ${extra.join(', ') || '(none)'}; duplicates: ${duplicates.join(', ') || '(none)'}`,
 		);
 	}
 	return state;
@@ -5120,7 +5129,10 @@ export async function assertPrReviewArtifactBoundary(
 /**
  * Artifact records are a projection of lane receipts, never a caller-controlled
  * replacement for them. Keep their workflow status/action aligned with the
- * reviewer and critic rows that the gate already authenticated.
+ * reviewer and critic rows that the gate already authenticated. Every violation
+ * across every record is reported in a single rejection, one line per violation
+ * with the expected and actual value, so a caller repairs a payload in one
+ * round trip instead of one rejected write per defect (issue #2277).
  */
 export async function assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts(
 	directory: string,
@@ -5129,131 +5141,232 @@ export async function assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts(
 	records: readonly PrReviewArtifactRecord[],
 ): Promise<void> {
 	const state = await requireBoundState(directory, sessionID, 'PR_REVIEW');
+	const violations: Array<{ findingId: string; detail: string }> = [];
+	const report = (
+		findingId: string,
+		field: string,
+		expected: string,
+		actual: string,
+	): void => {
+		violations.push({
+			findingId,
+			detail: `${field} expected ${expected}, got ${actual}`,
+		});
+	};
 	if (boundary === 'post_explorer') {
 		for (const record of records) {
-			if (
-				record.status !== 'PENDING' ||
-				record.next_action !== 'route_to_reviewer'
-			) {
-				throw new Error(
-					`BLOCKED: PR_REVIEW post_explorer record ${record.finding_id} must remain PENDING and route_to_reviewer`,
+			if (record.status !== 'PENDING') {
+				report(record.finding_id, 'status', '"PENDING"', `"${record.status}"`);
+			}
+			if (record.next_action !== 'route_to_reviewer') {
+				report(
+					record.finding_id,
+					'next_action',
+					'"route_to_reviewer"',
+					`"${record.next_action}"`,
 				);
 			}
 		}
-		return;
+	} else {
+		const ctx = await createPrReviewGateContext(directory, state);
+		// B1: this is the gate that used to emit the misleading "no authoritative
+		// reviewer verdict" per record. When the real cause is a settled-but-empty
+		// verdict map, the guarded accessors name that cause instead.
+		const reviewerVerdicts = authoritativeReviewerVerdictsForGate(
+			directory,
+			state,
+			ctx,
+			`assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts(${boundary})`,
+		);
+		const criticVerdicts =
+			boundary === 'post_critic'
+				? authoritativeCriticVerdictsForGate(
+						directory,
+						state,
+						ctx,
+						`assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts(${boundary})`,
+					)
+				: undefined;
+		for (const record of records) {
+			const reviewer = reviewerVerdicts.get(record.finding_id);
+			if (!reviewer) {
+				violations.push({
+					findingId: record.finding_id,
+					detail:
+						'no authoritative reviewer verdict (absent from the settled reviewer map)',
+				});
+				continue;
+			}
+			const requiresCritic =
+				reviewer.classification === 'CONFIRMED' &&
+				['CRITICAL', 'HIGH', 'MEDIUM'].includes(reviewer.severity);
+			const expectedStatus =
+				reviewer.classification === 'UNVERIFIED'
+					? 'PENDING'
+					: reviewer.classification;
+			if (boundary === 'post_reviewer') {
+				if (record.status !== expectedStatus) {
+					report(
+						record.finding_id,
+						'status',
+						`"${expectedStatus}"`,
+						`"${record.status}"`,
+					);
+				}
+				const expectedAction = requiresCritic
+					? 'route_to_critic'
+					: reviewer.classification === 'CONFIRMED' ||
+							reviewer.classification === 'PRE_EXISTING'
+						? 'report'
+						: reviewer.classification === 'DISPROVED'
+							? 'suppress_with_reason'
+							: 'route_to_reviewer';
+				if (record.next_action !== expectedAction) {
+					report(
+						record.finding_id,
+						'next_action',
+						`"${expectedAction}"`,
+						`"${record.next_action}"`,
+					);
+				}
+				if (record.severity && record.severity !== reviewer.severity) {
+					report(
+						record.finding_id,
+						'severity',
+						`"${reviewer.severity}"`,
+						`"${record.severity}"`,
+					);
+				}
+				continue;
+			}
+
+			// post_critic, non-critic-routed: the reviewer disposition is final.
+			if (!requiresCritic) {
+				const expectedAction =
+					reviewer.classification === 'CONFIRMED' ||
+					reviewer.classification === 'PRE_EXISTING'
+						? 'report'
+						: reviewer.classification === 'DISPROVED'
+							? 'suppress_with_reason'
+							: 'route_to_reviewer';
+				if (record.status !== expectedStatus) {
+					report(
+						record.finding_id,
+						'status',
+						`"${expectedStatus}"`,
+						`"${record.status}"`,
+					);
+				}
+				if (record.next_action !== expectedAction) {
+					report(
+						record.finding_id,
+						'next_action',
+						`"${expectedAction}"`,
+						`"${record.next_action}"`,
+					);
+				}
+				if (record.severity && record.severity !== reviewer.severity) {
+					report(
+						record.finding_id,
+						'severity',
+						`"${reviewer.severity}"`,
+						`"${record.severity}"`,
+					);
+				}
+				continue;
+			}
+
+			// post_critic, critic-routed: the critic verdict is authoritative.
+			const critic = criticVerdicts?.get(record.finding_id);
+			if (!critic) {
+				if (record.severity && record.severity !== reviewer.severity) {
+					report(
+						record.finding_id,
+						'severity',
+						`"${reviewer.severity}"`,
+						`"${record.severity}"`,
+					);
+				}
+				violations.push({
+					findingId: record.finding_id,
+					detail:
+						'no authoritative critic verdict (absent from the settled critic map)',
+				});
+				continue;
+			}
+			if (critic.status === 'DISPROVED') {
+				if (record.status !== 'DISPROVED') {
+					report(
+						record.finding_id,
+						'status',
+						'"DISPROVED"',
+						`"${record.status}"`,
+					);
+				}
+				if (record.next_action !== 'suppress_with_reason') {
+					report(
+						record.finding_id,
+						'next_action',
+						'"suppress_with_reason"',
+						`"${record.next_action}"`,
+					);
+				}
+			} else {
+				if (record.status !== 'CONFIRMED') {
+					report(
+						record.finding_id,
+						'status',
+						'"CONFIRMED"',
+						`"${record.status}"`,
+					);
+				}
+				if (!['report', 'handoff_to_feedback'].includes(record.next_action)) {
+					report(
+						record.finding_id,
+						'next_action',
+						'"report" or "handoff_to_feedback"',
+						`"${record.next_action}"`,
+					);
+				}
+			}
+			if (record.severity) {
+				if (reviewer.severity === critic.severity) {
+					if (record.severity !== reviewer.severity) {
+						report(
+							record.finding_id,
+							'severity',
+							`"${reviewer.severity}"`,
+							`"${record.severity}"`,
+						);
+					}
+				} else {
+					// The reviewer and critic severities disagree, so no present
+					// value satisfies both presence-guarded checks; omitting the
+					// optional field is the only passing option.
+					report(
+						record.finding_id,
+						'severity',
+						`NONE (omit field; reviewer "${reviewer.severity}" and critic "${critic.severity}" disagree)`,
+						`"${record.severity}"`,
+					);
+				}
+			}
+		}
 	}
-
-	const ctx = await createPrReviewGateContext(directory, state);
-	// B1: this is the gate that emits the misleading "no authoritative reviewer
-	// verdict" per record. When the real cause is a settled-but-empty verdict
-	// map, the guarded accessors name that cause instead.
-	const reviewerVerdicts = authoritativeReviewerVerdictsForGate(
-		directory,
-		state,
-		ctx,
-		`assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts(${boundary})`,
-	);
-	const criticVerdicts =
-		boundary === 'post_critic'
-			? authoritativeCriticVerdictsForGate(
-					directory,
-					state,
-					ctx,
-					`assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts(${boundary})`,
-				)
-			: undefined;
-	for (const record of records) {
-		const reviewer = reviewerVerdicts.get(record.finding_id);
-		if (!reviewer) {
-			throw new Error(
-				`BLOCKED: PR_REVIEW ${boundary} record ${record.finding_id} has no authoritative reviewer verdict`,
-			);
-		}
-		if (record.severity && record.severity !== reviewer.severity) {
-			throw new Error(
-				`BLOCKED: PR_REVIEW ${boundary} record ${record.finding_id} severity differs from its reviewer verdict`,
-			);
-		}
-		const requiresCritic =
-			reviewer.classification === 'CONFIRMED' &&
-			['CRITICAL', 'HIGH', 'MEDIUM'].includes(reviewer.severity);
-		if (boundary === 'post_reviewer') {
-			const expectedStatus =
-				reviewer.classification === 'UNVERIFIED'
-					? 'PENDING'
-					: reviewer.classification;
-			if (record.status !== expectedStatus) {
-				throw new Error(
-					`BLOCKED: PR_REVIEW post_reviewer record ${record.finding_id} status differs from its reviewer verdict`,
-				);
-			}
-			const expectedAction = requiresCritic
-				? 'route_to_critic'
-				: reviewer.classification === 'CONFIRMED' ||
-						reviewer.classification === 'PRE_EXISTING'
-					? 'report'
-					: reviewer.classification === 'DISPROVED'
-						? 'suppress_with_reason'
-						: 'route_to_reviewer';
-			if (record.next_action !== expectedAction) {
-				throw new Error(
-					`BLOCKED: PR_REVIEW post_reviewer record ${record.finding_id} action does not match reviewer disposition`,
-				);
-			}
-			continue;
-		}
-
-		if (!requiresCritic) {
-			const expectedStatus =
-				reviewer.classification === 'UNVERIFIED'
-					? 'PENDING'
-					: reviewer.classification;
-			const expectedAction =
-				reviewer.classification === 'CONFIRMED' ||
-				reviewer.classification === 'PRE_EXISTING'
-					? 'report'
-					: reviewer.classification === 'DISPROVED'
-						? 'suppress_with_reason'
-						: 'route_to_reviewer';
-			if (
-				record.status !== expectedStatus ||
-				record.next_action !== expectedAction
-			) {
-				throw new Error(
-					`BLOCKED: PR_REVIEW post_critic record ${record.finding_id} cannot override its non-critic reviewer disposition`,
-				);
-			}
-			continue;
-		}
-
-		const critic = criticVerdicts?.get(record.finding_id);
-		if (!critic) {
-			throw new Error(
-				`BLOCKED: PR_REVIEW post_critic record ${record.finding_id} has no authoritative critic verdict`,
-			);
-		}
-		if (record.severity && record.severity !== critic.severity) {
-			throw new Error(
-				`BLOCKED: PR_REVIEW post_critic record ${record.finding_id} severity differs from its critic verdict`,
-			);
-		}
-		if (critic.status === 'DISPROVED') {
-			if (
-				record.status !== 'DISPROVED' ||
-				record.next_action !== 'suppress_with_reason'
-			) {
-				throw new Error(
-					`BLOCKED: PR_REVIEW post_critic record ${record.finding_id} must preserve the critic DISPROVED disposition`,
-				);
-			}
-		} else if (
-			record.status !== 'CONFIRMED' ||
-			!['report', 'handoff_to_feedback'].includes(record.next_action)
-		) {
-			throw new Error(
-				`BLOCKED: PR_REVIEW post_critic record ${record.finding_id} action does not match its critic verdict`,
-			);
-		}
+	if (violations.length > 0) {
+		violations.sort((left, right) =>
+			left.findingId < right.findingId
+				? -1
+				: left.findingId > right.findingId
+					? 1
+					: 0,
+		);
+		const lines = violations.map(
+			(violation) => `  ${violation.findingId}: ${violation.detail}`,
+		);
+		throw new Error(
+			`BLOCKED: PR_REVIEW ${boundary} artifact invalid — ${violations.length} violation(s):\n${lines.join('\n')}`,
+		);
 	}
 }
 

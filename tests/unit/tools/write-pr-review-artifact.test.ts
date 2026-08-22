@@ -3,27 +3,26 @@ import { mkdtempSync, realpathSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { storeLaneOutput } from '../../../src/background/lane-output-store.js';
-import {
-	appendDelegationTransition,
-	recordPendingDelegation,
-} from '../../../src/background/pending-delegations.js';
 import {
 	_test_exports,
-	activatePrWorkflow,
 	completePrWorkflow,
-	enforcePrReviewBaseDimensions,
-	markPrReviewTriggerEvaluationComplete,
 	PR_REVIEW_BASE_DIMENSION_IDS,
-	PR_REVIEW_REQUIRED_MICRO_LANE_IDS,
 	readPrWorkflowGateState,
 	recordPrReviewValidationBatch,
 } from '../../../src/hooks/pr-workflow-gate.js';
 import { executeWritePrReviewArtifact } from '../../../src/tools/write-pr-review-artifact.js';
+import {
+	establishPrReviewPrerequisites,
+	PR_ARTIFACT_HEAD_SHA,
+	PR_ARTIFACT_REVISION_DIGEST,
+	PR_ARTIFACT_SESSION_ID,
+	persistPrReviewBatch,
+	rejectionMessage,
+} from '../../helpers/pr-review-artifact-fixtures.js';
 
-const SESSION_ID = 'write-pr-review-artifact';
-const HEAD_SHA = 'abc123';
-const REVISION_DIGEST = 'revision-1';
+const SESSION_ID = PR_ARTIFACT_SESSION_ID;
+const HEAD_SHA = PR_ARTIFACT_HEAD_SHA;
+const REVISION_DIGEST = PR_ARTIFACT_REVISION_DIGEST;
 
 let directory = '';
 const originalResolveCurrentGitHead = _test_exports.resolveCurrentGitHead;
@@ -61,148 +60,9 @@ afterEach(async () => {
 	await fs.rm(directory, { recursive: true, force: true });
 });
 
-async function persistPrReviewBatch(
-	batchId: string,
-	mode: string,
-	lanes: ReadonlyArray<{ laneId: string; workflowLane: string }>,
-	options: {
-		status?: 'completed' | 'error';
-		head?: string;
-		empty?: boolean;
-		textOverride?: string;
-		transcriptIncomplete?: boolean;
-		artifactRole?: string;
-		subagentSessionId?: string;
-	} = {},
-): Promise<void> {
-	for (const [index, lane] of lanes.entries()) {
-		const correlationId = `${batchId}-${index}`;
-		const subagentSessionId = options.subagentSessionId ?? correlationId;
-		await recordPendingDelegation(directory, {
-			correlationId,
-			jobId: null,
-			subagentSessionId,
-			parentSessionId: SESSION_ID,
-			callID: `call-${correlationId}`,
-			normalizedAgent: 'reviewer',
-			swarmPrefixedAgent: 'reviewer',
-			planTaskId: null,
-			evidenceTaskId: null,
-			batchId,
-			laneId: lane.laneId,
-			mode,
-			workflowLane: lane.workflowLane,
-			workspace: {
-				directory,
-				gitHead: HEAD_SHA,
-				dirtyHash: null,
-				prHeadSha: options.head ?? HEAD_SHA,
-				scope: null,
-			},
-		});
-		const text =
-			options.textOverride ??
-			(options.empty
-				? ''
-				: mode === 'swarm-pr-review:reviewer'
-					? '[REVIEWED] | C-001 | CONFIRMED | STRUCTURALLY_PROVEN | HIGH | YES | file.ts:1 | rationale | probe | reviewer'
-					: mode === 'swarm-pr-review:critic'
-						? '[CRITIC] | C-001 | UPHELD | HIGH | reason | no change'
-						: mode === 'swarm-pr-feedback:verification'
-							? `[FEEDBACK-VERIFIED] | ${lane.workflowLane} | CONFIRMED | evidence`
-							: `${mode === 'swarm-pr-review:micro' ? '[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence' : '[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence'}\nC-${index} | ${lane.workflowLane} | HIGH | correctness | file.ts:1 | claim | evidence | impact | HIGH`);
-		const stored = storeLaneOutput(directory, {
-			batchId,
-			laneId: lane.laneId,
-			agent: 'reviewer',
-			role: options.artifactRole ?? 'reviewer',
-			sessionId: subagentSessionId,
-			parentSessionId: SESSION_ID,
-			mode,
-			workflowLane: lane.workflowLane,
-			prHeadSha: options.head ?? HEAD_SHA,
-			gitHead: HEAD_SHA,
-			revisionDigest: REVISION_DIGEST,
-			source: 'collect_lane_results',
-			text,
-			transcriptIncomplete: options.transcriptIncomplete,
-		});
-		await appendDelegationTransition(directory, correlationId, {
-			status: options.status ?? 'completed',
-			result: {
-				text,
-				chars: stored.chars,
-				truncated: false,
-				digest: stored.digest,
-				...(stored.ref ? { outputRef: stored.ref } : {}),
-				...(options.transcriptIncomplete ? { transcriptIncomplete: true } : {}),
-			},
-		});
-	}
-}
-
-async function establishPrReviewPrerequisites(
-	runId: string = 'test-run',
-): Promise<void> {
-	await activatePrWorkflow(directory, SESSION_ID, 'PR_REVIEW', {
-		prHeadSha: HEAD_SHA,
-	});
-	const baseLanes = PR_REVIEW_BASE_DIMENSION_IDS.map((workflowLane) => ({
-		laneId: workflowLane,
-		workflowLane,
-	}));
-	await enforcePrReviewBaseDimensions(directory, SESSION_ID, baseLanes, {
-		batchId: 'base-all',
-		prHeadSha: HEAD_SHA,
-	});
-	await persistPrReviewBatch('base-all', 'swarm-pr-review:base', baseLanes);
-	for (const [
-		index,
-		workflowLane,
-	] of PR_REVIEW_REQUIRED_MICRO_LANE_IDS.entries()) {
-		const batchId = `micro-${index}`;
-		const laneId = `micro-lane-${index}`;
-		await persistPrReviewBatch(
-			batchId,
-			'swarm-pr-review:micro',
-			[{ laneId, workflowLane }],
-			{
-				textOverride: `[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence\n[CLEAN] | ${workflowLane} | exact reviewed diff | no finding after focused invariant review`,
-			},
-		);
-	}
-	const triggerRows: Array<Record<string, string>> = [];
-	for (const [
-		index,
-		workflowLane,
-	] of PR_REVIEW_REQUIRED_MICRO_LANE_IDS.entries()) {
-		triggerRows.push({
-			trigger_id: workflowLane,
-			result: 'MATCHED',
-			evidence: `Test fixture evidence for ${workflowLane}`,
-			source_batch_id: `micro-${index}`,
-			source_lane_id: `micro-lane-${index}`,
-		});
-	}
-	const triggerRelative = path.join('pr-review', runId, 'trigger-eval.json');
-	const triggerAbsolute = path.join(directory, '.swarm', triggerRelative);
-	await fs.mkdir(path.dirname(triggerAbsolute), { recursive: true });
-	await fs.writeFile(
-		triggerAbsolute,
-		JSON.stringify({ rows: triggerRows }),
-		'utf-8',
-	);
-	await markPrReviewTriggerEvaluationComplete(
-		directory,
-		SESSION_ID,
-		runId,
-		triggerRelative,
-	);
-}
-
 describe('write_pr_review_artifact', () => {
 	test('ARTIFACT-ORDER regression: requires explorer, reviewer, then critic checkpoints', async () => {
-		await establishPrReviewPrerequisites('coverage-order');
+		await establishPrReviewPrerequisites(directory, 'coverage-order');
 		const candidateIds = PR_REVIEW_BASE_DIMENSION_IDS.map(
 			(_dimension, index) => `C-${index}`,
 		);
@@ -281,7 +141,7 @@ describe('write_pr_review_artifact', () => {
 	});
 
 	test('ARTIFACT-VERDICT regression: persists only reviewer and critic-authoritative dispositions', async () => {
-		await establishPrReviewPrerequisites('review-boundaries');
+		await establishPrReviewPrerequisites(directory, 'review-boundaries');
 		const candidateIds = PR_REVIEW_BASE_DIMENSION_IDS.map(
 			(_dimension, index) => `C-${index}`,
 		);
@@ -335,6 +195,7 @@ describe('write_pr_review_artifact', () => {
 			{ batchId: 'review-boundaries', prHeadSha: HEAD_SHA },
 		);
 		await persistPrReviewBatch(
+			directory,
 			'review-boundaries',
 			'swarm-pr-review:reviewer',
 			[{ laneId: 'review-boundaries', workflowLane: 'review-boundaries' }],
@@ -357,6 +218,7 @@ describe('write_pr_review_artifact', () => {
 			{ batchId: 'critic-boundaries', prHeadSha: HEAD_SHA },
 		);
 		await persistPrReviewBatch(
+			directory,
 			'critic-boundaries',
 			'swarm-pr-review:critic',
 			[{ laneId: 'critic-boundaries', workflowLane: 'critic-boundaries' }],
@@ -376,7 +238,7 @@ describe('write_pr_review_artifact', () => {
 				{ sessionID: SESSION_ID },
 			),
 		).resolves.toContain('"success": true');
-		await expect(
+		const reviewerOverrideMessage = await rejectionMessage(
 			executeWritePrReviewArtifact(
 				{
 					kind: 'findings',
@@ -392,7 +254,23 @@ describe('write_pr_review_artifact', () => {
 				directory,
 				{ sessionID: SESSION_ID },
 			),
-		).rejects.toThrow(/status differs from its reviewer verdict/i);
+			// All violations are reported at once with expected-vs-actual (issue #2277).
+		);
+		expect(reviewerOverrideMessage).toBe(
+			[
+				'BLOCKED: PR_REVIEW post_reviewer artifact invalid — 10 violation(s):',
+				'  C-1: status expected "CONFIRMED", got "DISPROVED"',
+				'  C-1: next_action expected "route_to_critic", got "suppress_with_reason"',
+				'  C-2: status expected "CONFIRMED", got "DISPROVED"',
+				'  C-2: next_action expected "route_to_critic", got "suppress_with_reason"',
+				'  C-3: status expected "CONFIRMED", got "DISPROVED"',
+				'  C-3: next_action expected "route_to_critic", got "suppress_with_reason"',
+				'  C-4: status expected "CONFIRMED", got "DISPROVED"',
+				'  C-4: next_action expected "route_to_critic", got "suppress_with_reason"',
+				'  C-5: status expected "CONFIRMED", got "DISPROVED"',
+				'  C-5: next_action expected "route_to_critic", got "suppress_with_reason"',
+			].join('\n'),
+		);
 		await expect(
 			executeWritePrReviewArtifact(
 				{
@@ -409,7 +287,9 @@ describe('write_pr_review_artifact', () => {
 				directory,
 				{ sessionID: SESSION_ID },
 			),
-		).rejects.toThrow(/action does not match reviewer disposition/i);
+		).rejects.toThrow(
+			/C-0: next_action expected "suppress_with_reason", got "report"/,
+		);
 
 		await expect(
 			executeWritePrReviewArtifact(
@@ -424,7 +304,7 @@ describe('write_pr_review_artifact', () => {
 				{ sessionID: SESSION_ID },
 			),
 		).resolves.toContain('"success": true');
-		await expect(
+		const criticOverrideMessage = await rejectionMessage(
 			executeWritePrReviewArtifact(
 				{
 					kind: 'findings',
@@ -440,7 +320,22 @@ describe('write_pr_review_artifact', () => {
 				directory,
 				{ sessionID: SESSION_ID },
 			),
-		).rejects.toThrow(/action does not match its critic verdict/i);
+		);
+		expect(criticOverrideMessage).toBe(
+			[
+				'BLOCKED: PR_REVIEW post_critic artifact invalid — 10 violation(s):',
+				'  C-1: status expected "CONFIRMED", got "DISPROVED"',
+				'  C-1: next_action expected "report" or "handoff_to_feedback", got "suppress_with_reason"',
+				'  C-2: status expected "CONFIRMED", got "DISPROVED"',
+				'  C-2: next_action expected "report" or "handoff_to_feedback", got "suppress_with_reason"',
+				'  C-3: status expected "CONFIRMED", got "DISPROVED"',
+				'  C-3: next_action expected "report" or "handoff_to_feedback", got "suppress_with_reason"',
+				'  C-4: status expected "CONFIRMED", got "DISPROVED"',
+				'  C-4: next_action expected "report" or "handoff_to_feedback", got "suppress_with_reason"',
+				'  C-5: status expected "CONFIRMED", got "DISPROVED"',
+				'  C-5: next_action expected "report" or "handoff_to_feedback", got "suppress_with_reason"',
+			].join('\n'),
+		);
 
 		await expect(
 			executeWritePrReviewArtifact(
