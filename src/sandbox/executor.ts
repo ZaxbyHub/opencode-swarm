@@ -32,6 +32,45 @@ export function isValidEnvKey(key: string): boolean {
 }
 
 /**
+ * Issue #2263: env-var families that must never be sourced from an
+ * untrusted (repo-resident) env file, on top of the `isValidEnvKey` shape
+ * check.
+ *
+ * `.swarm/lanes/<N>.env` lives inside the repository worktree, so a hostile
+ * repository can simply commit it. If such a file were ever fed into a child
+ * process environment, these families are code-execution primitives:
+ *
+ * - `GIT_*` configuration vars — `GIT_SSH_COMMAND`, `GIT_CONFIG_COUNT` /
+ *   `GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n` (can set `core.sshCommand` or
+ *   `core.pager`), `GIT_EXTERNAL_DIFF`, `GIT_TEMPLATE_DIR`, …
+ * - Loader-hijack vars — `LD_PRELOAD`, `LD_LIBRARY_PATH`, `DYLD_*` on macOS.
+ *
+ * Prefix matching (not exact names) is deliberate: enumerating "the bad
+ * ones" inside `GIT_*` is a losing race against git's growing config-env
+ * surface, and the entire `GIT_*` namespace is a git *control* plane that a
+ * lane profile (PORT / TMPDIR / cache redirects) has no legitimate reason to
+ * touch. Matching is case-insensitive because Windows env resolution is
+ * case-insensitive (`git_ssh_command` must not slip through).
+ *
+ * `GITHUB_*` is intentionally NOT blocked: those are data-plane tokens
+ * (e.g. `GITHUB_TOKEN`) routinely passed to CLI children, not git controls.
+ */
+const UNTRUSTED_ENV_KEY_PREFIXES = ['GIT_', 'LD_', 'DYLD_'] as const;
+
+/**
+ * Returns true when `key` belongs to one of the env-var families that must
+ * never be sourced from a repo-resident (untrusted) env file.
+ * See `UNTRUSTED_ENV_KEY_PREFIXES` for the rationale.
+ */
+export function isUntrustedEnvKey(key: string): boolean {
+	const upper = key.toUpperCase();
+	for (const prefix of UNTRUSTED_ENV_KEY_PREFIXES) {
+		if (upper.startsWith(prefix)) return true;
+	}
+	return false;
+}
+
+/**
  * Interface for platform-specific sandbox executors.
  */
 export interface SandboxExecutor {
