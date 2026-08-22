@@ -161,11 +161,13 @@ describe('quarantine move-failure containment (PRR-005)', () => {
 		makeResidue(first, 3, 'alpha-stale');
 		makeResidue(second, 3, 'beta-stale');
 
-		// Simulate a concurrent process winning the SECOND entry: our rename
-		// throws ENOENT mid-batch (the exact PRR-005 trigger).
-		let calls = 0;
+		// Simulate a concurrent process winning the ALPHA entry: our rename
+		// throws ENOENT mid-batch (the exact PRR-005 trigger). Keyed on the
+		// path, not the call count — eligible entries sort oldest-first and
+		// same-millisecond fixtures can tie, so iteration order is not
+		// guaranteed to be creation order.
 		_internals.renameResidueEntry = (from: string, to: string) => {
-			if (++calls === 2) {
+			if (from.split(path.sep).pop()?.startsWith('alpha.json')) {
 				throw Object.assign(new Error('ENOENT: no such file'), {
 					code: 'ENOENT',
 				});
@@ -186,19 +188,19 @@ describe('quarantine move-failure containment (PRR-005)', () => {
 		const manifest = JSON.parse(
 			readFileSync(path.join(batchDir, 'manifest.json'), 'utf-8'),
 		) as { entries: Array<{ original_rel_path: string }> };
-		expect(manifest.entries.map((e) => e.original_rel_path)).toEqual([first]);
+		expect(manifest.entries.map((e) => e.original_rel_path)).toEqual([second]);
 		// Default rollback still works (no orphan sorted last).
 		const rb = await rollbackResidueQuarantine(projectDir);
 		expect(rb.items[0]?.status).toBe('restored');
-		expect(readFileSync(path.join(swarmDir, first), 'utf-8')).toBe(
-			'alpha-stale',
+		expect(readFileSync(path.join(swarmDir, second), 'utf-8')).toBe(
+			'beta-stale',
 		);
 
 		// Failed entry preserved in place with the typed reason.
-		const failed = result.preserved.find((p) => p.relPath === second);
+		const failed = result.preserved.find((p) => p.relPath === first);
 		expect(failed?.reasons).toContain('move-failed:ENOENT');
-		expect(readFileSync(path.join(swarmDir, second), 'utf-8')).toBe(
-			'beta-stale',
+		expect(readFileSync(path.join(swarmDir, first), 'utf-8')).toBe(
+			'alpha-stale',
 		);
 	});
 

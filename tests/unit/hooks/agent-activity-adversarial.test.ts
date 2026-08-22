@@ -354,7 +354,7 @@ describe('Agent Activity — Adversarial Security & Edge Cases', () => {
 			// (no `context.md.tmp.<timestamp>.<rand>` files linger).
 			const swarmFiles = await readdir(join(tempDir, '.swarm'));
 			const ownTempFiles = swarmFiles.filter((f) =>
-				/^context\.md\.tmp\.\d+\.\d+$/.test(f),
+				/^context\.md\.[0-9a-f]{32}\.tmp$/.test(f),
 			);
 			expect(ownTempFiles).toEqual([]);
 		});
@@ -402,13 +402,23 @@ describe('Agent Activity — Adversarial Security & Edge Cases', () => {
 			// Create initial context.md
 			await writeFile(contextPath, '# Initial\n');
 
-			// Mock Bun.write to simulate write error
-			const writeSpy = spyOn(Bun, 'write').mockImplementation(async () => {
+			// Simulate a write failure at the atomic-write seam: the canonical
+			// writer (issue #2035) writes via fs primitives, so a Bun.write
+			// spy can no longer intercept it — inject the failure at the
+			// rename step instead (temp now exists on disk, exercising the
+			// same finally-unlink cleanup the test was written to prove).
+			const awInternals = (await import('../../../src/utils/atomic-write'))
+				._internals;
+			const realRename = awInternals.renameSync;
+			awInternals.renameSync = () => {
 				throw new Error('ENOSPC: no space left on device');
-			});
-
-			// Flush should fail gracefully
-			await _flushForTesting(tempDir);
+			};
+			try {
+				// Flush should fail gracefully
+				await _flushForTesting(tempDir);
+			} finally {
+				awInternals.renameSync = realRename;
+			}
 
 			// Verify original context.md was not corrupted
 			const content = await Bun.file(contextPath).text();
@@ -419,11 +429,9 @@ describe('Agent Activity — Adversarial Security & Edge Cases', () => {
 			// stale fixed-name file.
 			const swarmFiles = await readdir(join(tempDir, '.swarm'));
 			const ownTempFiles = swarmFiles.filter((f) =>
-				/^context\.md\.tmp\.\d+\.\d+$/.test(f),
+				/^context\.md\.[0-9a-f]{32}\.tmp$/.test(f),
 			);
 			expect(ownTempFiles).toEqual([]);
-
-			writeSpy.mockRestore();
 		});
 	});
 });
