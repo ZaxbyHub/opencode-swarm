@@ -16,10 +16,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import {
-	atomicWriteFile,
-	_internals as taskFileInternals,
-} from '../../../src/evidence/task-file.js';
+import { atomicWriteFile } from '../../../src/evidence/task-file.js';
 import {
 	appendKnowledge,
 	enforceKnowledgeCap,
@@ -27,6 +24,7 @@ import {
 	rewriteKnowledge,
 	transactKnowledge,
 } from '../../../src/hooks/knowledge-store.js';
+import { _internals as taskFileInternals } from '../../../src/utils/atomic-write.js';
 
 // ============================================================================
 // Test helpers

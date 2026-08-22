@@ -162,10 +162,12 @@ describe('quarantine move-failure containment (PRR-005)', () => {
 		makeResidue(second, 3, 'beta-stale');
 
 		// Simulate a concurrent process winning the SECOND entry: our rename
-		// throws ENOENT mid-batch (the exact PRR-005 trigger).
-		let calls = 0;
+		// throws ENOENT mid-batch (the exact PRR-005 trigger). Match by ENTRY,
+		// not call ordinal — the scanner's readdir order is platform-dependent
+		// (non-alphabetical on Linux/macOS), so an ordinal-based failure would
+		// fail the wrong entry there.
 		_internals.renameResidueEntry = (from: string, to: string) => {
-			if (++calls === 2) {
+			if (from.endsWith(second)) {
 				throw Object.assign(new Error('ENOENT: no such file'), {
 					code: 'ENOENT',
 				});

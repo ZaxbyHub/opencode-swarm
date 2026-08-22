@@ -28,6 +28,7 @@ import { join } from 'node:path';
 import type { PluginConfig } from '../../../src/config';
 import { _flushForTesting } from '../../../src/hooks/agent-activity';
 import { resetSwarmState, swarmState } from '../../../src/state';
+import { _internals as atomicWriteInternals } from '../../../src/utils/atomic-write';
 
 const defaultConfig: PluginConfig = {
 	max_iterations: 5,
@@ -402,28 +403,35 @@ describe('Agent Activity — Adversarial Security & Edge Cases', () => {
 			// Create initial context.md
 			await writeFile(contextPath, '# Initial\n');
 
-			// Mock Bun.write to simulate write error
-			const writeSpy = spyOn(Bun, 'write').mockImplementation(async () => {
+			const realWriteSync = atomicWriteInternals.writeSync;
+
+			// Force the canonical writer's payload write to fail (the seam the
+			// migrated writer actually uses — Bun.write is no longer on this path).
+			atomicWriteInternals.writeSync = () => {
 				throw new Error('ENOSPC: no space left on device');
-			});
+			};
 
-			// Flush should fail gracefully
-			await _flushForTesting(tempDir);
+			try {
+				// Flush should fail gracefully
+				await _flushForTesting(tempDir);
 
-			// Verify original context.md was not corrupted
-			const content = await Bun.file(contextPath).text();
-			expect(content).toBe('# Initial\n');
+				// Verify original context.md was not corrupted
+				const content = await Bun.file(contextPath).text();
+				expect(content).toBe('# Initial\n');
 
-			// Verify the CURRENT write's own unique temp file was cleaned up
-			// by atomicWriteFile's finally-unlink, regardless of the unrelated
-			// stale fixed-name file.
-			const swarmFiles = await readdir(join(tempDir, '.swarm'));
-			const ownTempFiles = swarmFiles.filter((f) =>
-				/^context\.md\.tmp\.\d+\.\d+$/.test(f),
-			);
-			expect(ownTempFiles).toEqual([]);
-
-			writeSpy.mockRestore();
+				// Verify the CURRENT write's own unique temp file was cleaned up
+				// by atomicWriteFile's finally-unlink, regardless of the unrelated
+				// stale fixed-name file.
+				const swarmFiles = await readdir(join(tempDir, '.swarm'));
+				const ownTempFiles = swarmFiles.filter(
+					(f) =>
+						/^context\.md\.[0-9a-f]{32}\.tmp$/.test(f) ||
+						/^context\.md\.tmp\.\d+\.\d+$/.test(f),
+				);
+				expect(ownTempFiles).toEqual([]);
+			} finally {
+				atomicWriteInternals.writeSync = realWriteSync;
+			}
 		});
 	});
 });

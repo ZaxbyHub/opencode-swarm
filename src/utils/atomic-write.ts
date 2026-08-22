@@ -105,7 +105,7 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 		token: 'instance',
 		quarantineEligible: true,
 		parsesTarget: true,
-		producers: ['src/hooks/pr-workflow-gate.ts:11837'],
+		producers: ['src/hooks/pr-workflow-gate.ts:11950'],
 		note: 'pre/post-rename file-identity verification (assertOpened/ClosedSwarmFileIdentity, pr-workflow-gate.ts:11844-11889) is writer-specific and load-bearing',
 	},
 	{
@@ -618,6 +618,12 @@ export interface AtomicWriteOptions {
  */
 export const _internals = {
 	randomSuffix: (): string => randomBytes(16).toString('hex'),
+	writeSync: (
+		fd: number,
+		buffer: Uint8Array,
+		offset: number,
+		length: number,
+	): number => fs.writeSync(fd, buffer, offset, length),
 	renameSync: (from: string, to: string): ReturnType<typeof fs.renameSync> =>
 		fs.renameSync(from, to),
 	unlinkSync: (p: string): ReturnType<typeof fs.unlinkSync> => fs.unlinkSync(p),
@@ -691,23 +697,33 @@ function writeAtomicSync(
 	// rename requirement).
 	const tempPath = `${resolvedTarget}.${_internals.randomSuffix()}.tmp`;
 	fs.mkdirSync(path.dirname(tempPath), { recursive: true });
-	const fd = fs.openSync(tempPath, 'wx');
+	// The own-temp finally-unlink must cover the WRITE phase too: a failed
+	// write (ENOSPC/EBADF/…) that propagates before the rename block would
+	// otherwise leak this invocation's temp as new residue (issue #2035
+	// acceptance: "failed writes clean only their own temp and preserve the
+	// previous target").
 	try {
-		let written = 0;
-		while (written < buffer.byteLength) {
-			written += fs.writeSync(fd, buffer, written, buffer.byteLength - written);
-		}
-		if (options?.skipFsync !== true) {
-			try {
-				_internals.fsyncSync(fd);
-			} catch {
-				// fsync unsupported on this FS — durability is best-effort
+		const fd = fs.openSync(tempPath, 'wx');
+		try {
+			let written = 0;
+			while (written < buffer.byteLength) {
+				written += _internals.writeSync(
+					fd,
+					buffer,
+					written,
+					buffer.byteLength - written,
+				);
 			}
+			if (options?.skipFsync !== true) {
+				try {
+					_internals.fsyncSync(fd);
+				} catch {
+					// fsync unsupported on this FS — durability is best-effort
+				}
+			}
+		} finally {
+			fs.closeSync(fd);
 		}
-	} finally {
-		fs.closeSync(fd);
-	}
-	try {
 		renameWithRetry(tempPath, resolvedTarget);
 	} finally {
 		// Exact finally cleanup of THIS invocation's temp only (no-op after a
