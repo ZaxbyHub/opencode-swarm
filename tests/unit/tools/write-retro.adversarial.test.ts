@@ -20,7 +20,6 @@ describe('write-retro adversarial security tests', () => {
 		);
 		originalCwd = process.cwd();
 		process.chdir(tempDir);
-
 		// Create .swarm directory structure
 		fs.mkdirSync(path.join(tempDir, '.swarm'), { recursive: true });
 		fs.writeFileSync(path.join(tempDir, 'package.json'), '{}');
@@ -36,7 +35,6 @@ describe('write-retro adversarial security tests', () => {
 	});
 
 	// PATH TRAVERSAL ATTACKS
-
 	describe('path traversal attacks', () => {
 		test('rejects path traversal with ../ in task_id', async () => {
 			const args: WriteRetroArgs = {
@@ -52,7 +50,6 @@ describe('write-retro adversarial security tests', () => {
 				integration_issues: 0,
 				task_id: '../parent',
 			};
-
 			const result = await executeWriteRetro(args, tempDir);
 			const parsed = JSON.parse(result);
 
