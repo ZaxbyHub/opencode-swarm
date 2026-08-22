@@ -98,6 +98,45 @@ describe('pr-review lane response budget derivation (#2276)', () => {
 				),
 			}),
 		).toBe(18_000);
+		expect(
+			prReviewLaneResponseBudgetChars('swarm-pr-review:critic', {
+				review_item_ids: Array.from(
+					{ length: 12 },
+					(_, index) => `C-${index + 1}`,
+				),
+			}),
+		).toBe(18_000);
+		// Zero-item floors (defensive: the LaneSchema requires min(1), but the
+		// exported helper must not regress to NaN/0 if validation ever relaxes).
+		expect(
+			prReviewLaneResponseBudgetChars('swarm-pr-review:reviewer', {}),
+		).toBe(6_000);
+		expect(prReviewLaneResponseBudgetChars('swarm-pr-review:critic', {})).toBe(
+			6_000,
+		);
+		// An empty owned-lanes array floors to a single owner for micro.
+		expect(
+			prReviewLaneResponseBudgetChars('swarm-pr-review:micro', {
+				owned_workflow_lanes: [],
+			}),
+		).toBe(12_000);
+		// Cross-mode negatives: assigned item ids must never leak into modes
+		// whose budget is derived from lane kind or owned lanes alone.
+		expect(
+			prReviewLaneResponseBudgetChars('swarm-pr-review:base', {
+				review_item_ids: ['C-1', 'C-2'],
+			}),
+		).toBe(18_000);
+		expect(
+			prReviewLaneResponseBudgetChars('swarm-pr-review:council', {
+				review_item_ids: ['C-1', 'C-2'],
+			}),
+		).toBe(12_000);
+		expect(
+			prReviewLaneResponseBudgetChars('swarm-pr-review:micro', {
+				review_item_ids: ['C-1', 'C-2'],
+			}),
+		).toBe(12_000);
 	});
 
 	test('modes outside swarm-pr-review:* have no derived budget', () => {
@@ -149,8 +188,26 @@ describe('controller-appended prompt budget block (#2276)', () => {
 			review_item_ids: ['C-1', 'C-2', 'C-3'],
 		});
 		expect(criticPrompt).toContain('final_response_char_budget: 10500');
-		// At least two distinct sizes are directly observable in the prompts.
-		expect(new Set(['18000', '12000', '14000', '9000', '10500']).size).toBe(5);
+		// At least two distinct sizes observable — asserted over values actually
+		// derived from the helper, so a budget collision regresses loudly.
+		const { prReviewLaneResponseBudgetChars } = _test_exports;
+		const derivedSizes = [
+			prReviewLaneResponseBudgetChars('swarm-pr-review:base', {}),
+			prReviewLaneResponseBudgetChars('swarm-pr-review:micro', {}),
+			prReviewLaneResponseBudgetChars('swarm-pr-review:micro', {
+				owned_workflow_lanes: ['correctness-state', 'security-trust'],
+			}),
+			prReviewLaneResponseBudgetChars('swarm-pr-review:reviewer', {
+				review_item_ids: ['C-1', 'C-2'],
+			}),
+			prReviewLaneResponseBudgetChars('swarm-pr-review:critic', {
+				review_item_ids: ['C-1', 'C-2', 'C-3'],
+			}),
+		];
+		expect(new Set(derivedSizes).size).toBe(5);
+		expect([...new Set(derivedSizes)].sort((a, b) => a - b)).toEqual([
+			9_000, 10_500, 12_000, 14_000, 18_000,
+		]);
 	});
 
 	test('budget paragraph reserves terminal-row headroom and uncaps investigation', () => {
@@ -185,6 +242,8 @@ describe('controller-appended prompt budget block (#2276)', () => {
 				'no more than 12000 characters of substantive output',
 			);
 			expect(prompt).not.toContain('final_response_char_budget');
+			// The budget PARAGRAPH (not just the labeled line) must stay absent.
+			expect(prompt).not.toContain('Delivery budget (#2276)');
 		}
 	});
 });
@@ -193,7 +252,7 @@ describe('controller-appended shell rules paragraph (#2276)', () => {
 	const SHELL_RULE_SENTENCES = [
 		'run ONE standalone command per shell call',
 		'no pipes, no &&/||/; composition, no redirects, no command substitution, no backslash- or caret-escaped double quotes',
-		'up to three leading cd <dir> && prefixes',
+		'a single command optionally preceded by up to three leading cd <dir> && prefixes',
 		'a trailing 2>&1 (reads only)',
 		'a literal | inside a double-quoted gh api --jq value',
 		'Prefer the Read, Glob, and Grep tools for file inspection',
