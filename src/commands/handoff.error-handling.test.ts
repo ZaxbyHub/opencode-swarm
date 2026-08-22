@@ -5,8 +5,8 @@
  * Issue #2035 migrated handoff's file writes to the canonical
  * `atomicWriteSwarmFile` helper, so failure injection targets
  * `src/utils/atomic-write.ts:_internals` (writeSync / renameSync / unlinkSync)
- * — the seam the writer actually consults. Mocking `Bun.write` or
- * `mock.module('node:fs', ...)` no longer intercepts anything.
+ * — the seam the writer actually consults. Mocking `Bun.write` or the raw
+ * node:fs module surface no longer intercepts anything.
  */
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import { existsSync, readdirSync, rmSync } from 'node:fs';

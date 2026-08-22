@@ -6,7 +6,7 @@
  * Issue #2035 migrated handoff's writes to the canonical atomic-write helper,
  * so failure injection targets `src/utils/atomic-write.ts:_internals`
  * (renameSync / unlinkSync / writeSync) — the seam the writer consults.
- * Mocking `Bun.write` / `mock.module('node:fs', ...)` no longer intercepts.
+ * Mocking `Bun.write` / node:fs module surface no longer intercepts.
  */
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import { existsSync, readdirSync, rmSync } from 'node:fs';
