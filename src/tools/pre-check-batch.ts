@@ -25,6 +25,7 @@ import type {
 	ResolvedLinterCommand,
 } from './lint';
 import { detectResolvedLinter, _internals as lintInternals } from './lint';
+import { resolveGatePreamble } from './phase-complete/gates/gate-helpers';
 import type { QualityBudgetResult } from './quality-budget';
 import { qualityBudget } from './quality-budget';
 import type { SastScanFinding, SastScanResult } from './sast-scan';
@@ -58,6 +59,8 @@ export const _internals: {
 	runLintOnFiles: typeof runLintOnFiles;
 	platform: () => NodeJS.Platform;
 	serializePreCheckResult: typeof serializePreCheckResult;
+	resolveGatePreamble: typeof resolveGatePreamble;
+	runPreCheckBatch: typeof runPreCheckBatch;
 	MAX_COMBINED_BYTES: number;
 } = {
 	qualityBudget,
@@ -73,6 +76,8 @@ export const _internals: {
 	runLintOnFiles,
 	platform: () => process.platform,
 	serializePreCheckResult,
+	resolveGatePreamble,
+	runPreCheckBatch,
 	MAX_COMBINED_BYTES,
 };
 
@@ -94,6 +99,8 @@ export interface PreCheckBatchInput {
 	 * with capture_baseline:true.
 	 */
 	phase?: number;
+	/** Effective QA-profile value derived internally by the public tool boundary. */
+	sast_enabled?: boolean;
 }
 
 export interface ToolResult<T> {
@@ -219,6 +226,10 @@ export interface PreCheckBatchResult {
 	total_duration_ms: number;
 	/** Pre-existing SAST findings on unchanged lines, requiring reviewer triage */
 	sast_preexisting_findings?: SastScanFinding[];
+	/** Optional Semgrep exited nonzero with no findings; SAST coverage is incomplete. */
+	sast_degraded?: boolean;
+	/** SAST was intentionally disabled by the effective QA profile. */
+	sast_skipped?: boolean;
 }
 
 function truncateUtf8(value: string, maxBytes: number): string {
@@ -262,6 +273,12 @@ function serializePreCheckResult(result: PreCheckBatchResult): string {
 	const compact = {
 		batch_status: result.batch_status,
 		gates_passed: result.gates_passed,
+		...(result.sast_degraded !== undefined && {
+			sast_degraded: result.sast_degraded,
+		}),
+		...(result.sast_skipped !== undefined && {
+			sast_skipped: result.sast_skipped,
+		}),
 		lint: compactToolResult(result.lint),
 		secretscan: compactToolResult(result.secretscan),
 		sast_scan: compactToolResult(result.sast_scan),
@@ -1243,7 +1260,14 @@ export async function runPreCheckBatch(
 	const effectiveWorkspaceDir = (workspaceDir ||
 		input.directory ||
 		contextDir) as string;
-	const { files, directory, sast_threshold = 'medium', config, phase } = input;
+	const {
+		files,
+		directory,
+		sast_threshold = 'medium',
+		config,
+		phase,
+		sast_enabled = true,
+	} = input;
 
 	// Validate directory
 	const dirError = validateDirectory(directory, effectiveWorkspaceDir);
@@ -1372,16 +1396,21 @@ export async function runPreCheckBatch(
 					abortSignal,
 				),
 			),
-			limit(() =>
-				_internals.runSastScanWrapped(
-					changedFiles,
-					directory,
-					sast_threshold,
-					config,
-					phase,
-					abortSignal,
-				),
-			),
+			sast_enabled
+				? limit(() =>
+						_internals.runSastScanWrapped(
+							changedFiles,
+							directory,
+							sast_threshold,
+							config,
+							phase,
+							abortSignal,
+						),
+					)
+				: Promise.resolve<ToolResult<SastScanResult>>({
+						ran: false,
+						duration_ms: 0,
+					}),
 			limit(() =>
 				_internals.runQualityBudgetWrapped(
 					changedFiles,
@@ -1470,14 +1499,25 @@ export async function runPreCheckBatch(
 
 	// Check SAST scan (hard gate with pre-existing finding classification)
 	let sastPreexistingFindings: SastScanFinding[] | undefined;
+	let sastDegraded = false;
 	if (sastScanResult.ran && sastScanResult.result) {
 		const sastResult = sastScanResult.result;
 
 		if (sastResult.error) {
-			gatesPassed = false;
-			warn(
-				`pre_check_batch: SAST scan error (${sastResult.error}) - GATE FAILED`,
-			);
+			if (
+				sastResult.failure_kind === 'semgrep_process_exit' &&
+				sastResult.findings.length === 0
+			) {
+				sastDegraded = true;
+				warn(
+					`pre_check_batch: SAST coverage degraded (${sastResult.error}) - continuing without a gate failure`,
+				);
+			} else {
+				gatesPassed = false;
+				warn(
+					`pre_check_batch: SAST scan error (${sastResult.error}) - GATE FAILED`,
+				);
+			}
 		} else if (sastResult.baseline_used) {
 			// Baseline diff mode: verdict is driven ONLY by new_findings in sastScan.
 			// Populate reviewer triage with pre_existing_findings (if any), regardless of verdict.
@@ -1582,6 +1622,8 @@ export async function runPreCheckBatch(
 		sast_scan: sastScanResult,
 		quality_budget: qualityBudgetResult,
 		total_duration_ms: Math.round(totalDuration),
+		...(sastDegraded && { sast_degraded: true }),
+		...(!sast_enabled && { sast_skipped: true }),
 		...(sastPreexistingFindings &&
 			sastPreexistingFindings.length > 0 && {
 				sast_preexisting_findings: sastPreexistingFindings,
@@ -1600,7 +1642,7 @@ export async function runPreCheckBatch(
 export const pre_check_batch: ReturnType<typeof tool> = createSwarmTool({
 	allowWorkingDirectoryOverride: true,
 	description:
-		'Run multiple verification tools in parallel: lint, secretscan, SAST scan, and quality budget. Returns unified result with gates_passed status. Security tools (secretscan, sast_scan) are HARD GATES - failures block merging.',
+		'Run multiple verification tools in parallel: lint, secretscan, SAST scan, and quality budget. Returns unified result with gates_passed status. Security findings and incomplete SAST runs are hard failures; a Semgrep nonzero process exit with zero findings is returned as explicit sast_degraded coverage and does not block.',
 	args: {
 		files: z
 			.array(z.string())
@@ -1750,6 +1792,20 @@ export const pre_check_batch: ReturnType<typeof tool> = createSwarmTool({
 
 		// Run pre-check batch
 		try {
+			let sastEnabled = true;
+			try {
+				const preamble = await _internals.resolveGatePreamble(
+					resolvedDirectory,
+					ctx?.sessionID,
+				);
+				if (preamble.resolved && preamble.effectiveGates) {
+					sastEnabled = preamble.effectiveGates.sast_enabled;
+				}
+			} catch {
+				warn(
+					'pre_check_batch: QA-gate profile resolution failed; keeping SAST enabled',
+				);
+			}
 			const rawPhase = (typedArgs as unknown as Record<string, unknown>).phase;
 			const safePhase =
 				typeof rawPhase === 'number' &&
@@ -1758,13 +1814,14 @@ export const pre_check_batch: ReturnType<typeof tool> = createSwarmTool({
 					? rawPhase
 					: undefined;
 
-			const result = await runPreCheckBatch(
+			const result = await _internals.runPreCheckBatch(
 				{
 					files: typedArgs.files,
 					directory: resolvedDirectory,
 					sast_threshold: typedArgs.sast_threshold,
 					config: typedArgs.config,
 					phase: safePhase,
+					sast_enabled: sastEnabled,
 				},
 				workspaceAnchor,
 				directory,

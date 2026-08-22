@@ -130,6 +130,76 @@ describe('decodePreCheckResult', () => {
 		).toEqual({ kind: 'pass' });
 	});
 
+	test('accepts only explicit producer states for disabled and degraded SAST', () => {
+		expect(
+			decodePreCheckResult(
+				result(true, {
+					sast_skipped: true,
+					sast_scan: {
+						ran: false,
+						duration_ms: 0,
+					},
+				}),
+			),
+		).toEqual({ kind: 'pass' });
+		expect(
+			decodePreCheckResult(
+				result(true, {
+					sast_degraded: true,
+					sast_scan: toolResult(true, {
+						result: {
+							verdict: 'fail',
+							error: 'Semgrep exited with code 7',
+							failure_kind: 'semgrep_process_exit',
+							findings: [],
+						},
+					}),
+				}),
+			),
+		).toEqual({ kind: 'pass' });
+		expect(
+			decodePreCheckResult(
+				result(true, {
+					sast_degraded: true,
+					sast_scan: toolResult(true, {
+						result: {
+							verdict: 'fail',
+							error: 'Semgrep exited with code 7',
+							failure_kind: 'semgrep_process_exit',
+							findings: [{}],
+						},
+					}),
+				}),
+			),
+		).toEqual({ kind: 'invalid', code: 'PRE_CHECK_RESULT_INVALID' });
+		expect(
+			decodePreCheckResult(
+				result(true, {
+					sast_skipped: true,
+					sast_scan: {
+						ran: false,
+						duration_ms: 0,
+						passed: false,
+					},
+				}),
+			),
+		).toEqual({ kind: 'invalid', code: 'PRE_CHECK_RESULT_INVALID' });
+		expect(
+			decodePreCheckResult(
+				result(true, {
+					sast_degraded: true,
+					output_truncated: true,
+					sast_scan: {
+						ran: true,
+						duration_ms: 0,
+						passed: false,
+						result_omitted: true,
+					},
+				}),
+			),
+		).toEqual({ kind: 'invalid', code: 'PRE_CHECK_RESULT_INVALID' });
+	});
+
 	test('F-001 rejects unrelated pre-existing evidence for a new SAST finding', () => {
 		const finding = (rule_id: string, file: string) => ({
 			rule_id,
