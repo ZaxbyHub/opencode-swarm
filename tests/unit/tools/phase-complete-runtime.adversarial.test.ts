@@ -16,6 +16,7 @@ import {
 	resetSwarmState,
 	swarmState,
 } from '../../../src/state';
+import { freezeClock } from '../../helpers/test-clock';
 
 const { phase_complete } = await import('../../../src/tools/phase-complete');
 
@@ -104,8 +105,13 @@ function writeGateEvidence(directory: string, phase: number): void {
 describe('phase_complete tool - ADVERSARIAL SECURITY TESTS', () => {
 	let tempDir: string;
 	let originalCwd: string;
+	let restoreClock: () => void;
 
 	beforeEach(() => {
+		restoreClock = freezeClock({
+			fixedNow: 1_704_067_200_000,
+			isoNow: '2024-01-01T00:00:00.000Z',
+		});
 		resetSwarmState();
 
 		tempDir = fs.realpathSync(
@@ -133,6 +139,7 @@ describe('phase_complete tool - ADVERSARIAL SECURITY TESTS', () => {
 	});
 
 	afterEach(() => {
+		restoreClock();
 		process.chdir(originalCwd);
 		try {
 			fs.rmSync(tempDir, { recursive: true, force: true });

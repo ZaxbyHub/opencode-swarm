@@ -4,6 +4,7 @@ import * as path from 'node:path';
 
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 import { createIsolatedTestEnv } from '../../helpers/isolated-test-env';
+import { freezeClock } from '../../helpers/test-clock';
 
 const { phase_complete } = await import('../../../src/tools/phase-complete');
 
@@ -11,8 +12,13 @@ describe('phase_complete retrospective gate - ADVERSARIAL ATTACKS', () => {
 	let tempDir: string;
 	let originalCwd: string;
 	let cleanupEnv: (() => void) | null = null;
+	let restoreClock: () => void;
 
 	beforeEach(() => {
+		restoreClock = freezeClock({
+			fixedNow: 1_704_067_200_000,
+			isoNow: '2024-01-01T00:00:00.000Z',
+		});
 		resetSwarmState();
 
 		const { configDir, cleanup } = createIsolatedTestEnv();
@@ -26,6 +32,7 @@ describe('phase_complete retrospective gate - ADVERSARIAL ATTACKS', () => {
 	});
 
 	afterEach(() => {
+		restoreClock();
 		process.chdir(originalCwd);
 		if (cleanupEnv) {
 			cleanupEnv();

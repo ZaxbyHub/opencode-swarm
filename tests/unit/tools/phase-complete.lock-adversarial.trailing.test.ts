@@ -10,6 +10,7 @@ import * as path from 'node:path';
 
 import { resetSwarmState, swarmState } from '../../../src/state';
 import { executePhaseComplete } from '../../../src/tools/phase-complete';
+import { freezeClock } from '../../helpers/test-clock';
 
 vi.mock('../../../src/parallel/file-locks', () => ({
 	tryAcquireLock: vi.fn(),
@@ -205,8 +206,13 @@ describe('phase_complete adversarial trailing groups', () => {
 	let tempDir: string;
 	let originalCwd: string;
 	let eventsPath: string;
+	let restoreClock: () => void;
 
 	beforeEach(() => {
+		restoreClock = freezeClock({
+			fixedNow: 1_704_067_200_000,
+			isoNow: '2024-01-01T00:00:00.000Z',
+		});
 		tempDir = fs.realpathSync(
 			fs.mkdtempSync(path.join(os.tmpdir(), 'phase-adversarial-')),
 		);
@@ -262,6 +268,7 @@ describe('phase_complete adversarial trailing groups', () => {
 	});
 
 	afterEach(() => {
+		restoreClock();
 		process.chdir(originalCwd);
 		try {
 			fs.rmSync(tempDir, { recursive: true, force: true });
