@@ -266,7 +266,7 @@ describe('issue #2268 — stale settlement recovery helpers', () => {
 					changedFiles: [],
 				},
 			},
-			recordedAt: new Date().toISOString(),
+			recordedAt: '2026-08-21T00:00:00.000Z',
 		};
 		for (let i = 0; i < 201; i++) {
 			const taskId = `9${i}`;
