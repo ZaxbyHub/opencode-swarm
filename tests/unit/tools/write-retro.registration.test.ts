@@ -5,7 +5,6 @@
  * - No omissions in export chain
  * - Proper tool definition structure
  */
-
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -13,8 +12,14 @@ import * as path from 'node:path';
 import { AGENT_TOOL_MAP } from '../../../src/config/constants';
 import { TOOL_NAME_SET, TOOL_NAMES } from '../../../src/tools/tool-names';
 // Test the full export chain - this verifies registration
-import { executeWriteRetro, write_retro } from '../../../src/tools/write-retro';
+import {
+	executeWriteRetro as executeRawWriteRetro,
+	type WriteRetroArgs,
+	write_retro,
+} from '../../../src/tools/write-retro';
 
+const executeWriteRetro = (a: WriteRetroArgs, d: string) =>
+	executeRawWriteRetro({ ...a, verdict: 'pass' }, d);
 describe('write_retro runtime registration adversarial verification', () => {
 	let tempDir: string;
 	let originalCwd: string;

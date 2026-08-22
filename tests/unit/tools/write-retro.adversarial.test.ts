@@ -3,9 +3,12 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
-	executeWriteRetro,
+	executeWriteRetro as executeRawWriteRetro,
 	type WriteRetroArgs,
 } from '../../../src/tools/write-retro';
+
+const executeWriteRetro = (a: WriteRetroArgs, d: string) =>
+	executeRawWriteRetro({ ...a, verdict: 'pass' }, d);
 
 describe('write-retro adversarial security tests', () => {
 	let tempDir: string;
