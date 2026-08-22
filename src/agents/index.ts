@@ -27,13 +27,14 @@ import {
 import { log } from '../utils/logger';
 import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
 import { type AgentDefinition, createArchitectAgent } from './architect';
-import { createCoderAgent } from './coder';
+import { CODER_MEMORY_OUTCOME_GUIDANCE, createCoderAgent } from './coder';
 import {
 	DOMAIN_EXPERT_COUNCIL_PROMPT,
 	GENERALIST_COUNCIL_PROMPT,
 	SKEPTIC_COUNCIL_PROMPT,
 } from './council-prompts';
 import {
+	CRITIC_MEMORY_OUTCOME_GUIDANCE,
 	type CriticRole,
 	createCriticAgent,
 	createCriticAutonomousOversightAgent,
@@ -41,9 +42,15 @@ import {
 import { type CuratorRole, createCuratorAgent } from './curator-agent';
 import { createDesignerAgent } from './designer';
 import { createDocsAgent } from './docs';
-import { createExplorerAgent } from './explorer';
+import {
+	createExplorerAgent,
+	EXPLORER_MEMORY_OUTCOME_GUIDANCE,
+} from './explorer';
 import { createResearcherAgent } from './researcher';
-import { createReviewerAgent } from './reviewer';
+import {
+	createReviewerAgent,
+	REVIEWER_MEMORY_OUTCOME_GUIDANCE,
+} from './reviewer';
 import { createSkillImproverAgent } from './skill-improver';
 import { createSMEAgent } from './sme';
 import { createSpecWriterAgent } from './spec-writer';
@@ -408,6 +415,21 @@ const TYPE_A_AGENTS = [
 	{ name: 'spec_writer' as const, factory: createSpecWriterAgent },
 ] as const;
 
+const MEMORY_OUTCOME_GUIDANCE_BY_AGENT = {
+	explorer: EXPLORER_MEMORY_OUTCOME_GUIDANCE,
+	coder: CODER_MEMORY_OUTCOME_GUIDANCE,
+	reviewer: REVIEWER_MEMORY_OUTCOME_GUIDANCE,
+} as const;
+
+function appendMemoryOutcomeGuidance(
+	agent: AgentDefinition,
+	guidance: string | undefined,
+	memoryEnabled: boolean,
+): void {
+	if (!memoryEnabled || !guidance) return;
+	agent.config.prompt = `${agent.config.prompt ?? ''}\n\n${guidance}`.trim();
+}
+
 /**
  * Create agents for a single swarm
  */
@@ -560,6 +582,13 @@ If you call @coder instead of @${swarmId}_coder, the call will FAIL or go to the
 								customAppendPrompt?: string,
 							) => AgentDefinition
 						)(getModel(name), prompts.prompt, prompts.appendPrompt);
+			appendMemoryOutcomeGuidance(
+				agent,
+				MEMORY_OUTCOME_GUIDANCE_BY_AGENT[
+					name as keyof typeof MEMORY_OUTCOME_GUIDANCE_BY_AGENT
+				],
+				pluginConfig?.memory?.enabled === true,
+			);
 			agent.name = prefixName(name);
 			agents.push(applyOverrides(agent, swarmAgents, swarmPrefix, quiet));
 		}
@@ -573,6 +602,11 @@ If you call @coder instead of @${swarmId}_coder, the call will FAIL or go to the
 			criticPrompts.prompt,
 			criticPrompts.appendPrompt,
 			'plan_critic' as CriticRole,
+		);
+		appendMemoryOutcomeGuidance(
+			critic,
+			CRITIC_MEMORY_OUTCOME_GUIDANCE,
+			pluginConfig?.memory?.enabled === true,
 		);
 		critic.name = prefixName('critic');
 		agents.push(applyOverrides(critic, swarmAgents, swarmPrefix, quiet));

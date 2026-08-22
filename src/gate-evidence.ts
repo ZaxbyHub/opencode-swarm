@@ -140,7 +140,7 @@ export function assertTaskEvidenceWriteAllowed(
 		)
 	) {
 		throw new Error(
-			`CODER_SETTLEMENT_IN_PROGRESS: transition ${String(coderWal.transitionId)} owns evidence for task ${taskId}`,
+			`CODER_SETTLEMENT_IN_PROGRESS: transition ${String(coderWal.transitionId)} owns evidence for task ${taskId}. Wait for the owning transition to settle or run /swarm recover ${taskId} (or /swarm reset-session), then retry; do not remove the WAL by hand.`,
 		);
 	}
 

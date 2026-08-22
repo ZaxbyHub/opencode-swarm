@@ -76,9 +76,10 @@ describe('knowledge hive-quarantine policy (issue #2033)', () => {
 		expect(r.remainingArgs).toEqual(['preview', 'id-1']);
 	});
 
-	test('registry human-only bucket still contains exactly the expected 9 commands', () => {
-		// Mirrors the no-regression bucket snapshot in registry.tool-policy.test.ts
-		// (which cannot grow: FR-006 over-cap ratchet) — #2033's entry made it 9.
+	test('registry human-only bucket still contains exactly the expected 10 commands', () => {
+		// Mirrors the no-regression bucket snapshot in tool-policy.human-only.test.ts
+		// (moved out of the FR-006 over-capped registry.tool-policy.test.ts) —
+		// #2033's entry made it 9; #2268's /swarm recover made it 10.
 		const actual = new Set<string>();
 		for (const [name, entry] of Object.entries(COMMAND_REGISTRY)) {
 			if ((entry as { toolPolicy?: string }).toolPolicy === 'human-only') {
@@ -96,6 +97,7 @@ describe('knowledge hive-quarantine policy (issue #2033)', () => {
 				'skill-opt reject',
 				'skill-opt rollback',
 				'knowledge hive-quarantine',
+				'recover',
 			].sort(),
 		);
 	});

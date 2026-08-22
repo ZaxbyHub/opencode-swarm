@@ -18,6 +18,7 @@ import { SandboxCapabilityProbe } from '../sandbox/capability-probe.js';
 import { getExecutor } from '../sandbox/executor.js';
 import { readEffectiveSpecSync } from '../sdd/effective-spec';
 import { resolveGitExecutableAsync } from '../utils/git-executable.js';
+import { listCoderSettlementWalStates } from '../workflow/coder-settlement.js';
 import { checkKnowledgeHealth } from './knowledge-diagnostics.js';
 import { compareVersions, readVersionCache } from './version-check.js';
 import { getDeferredWarnings } from './warning-buffer.js';
@@ -988,6 +989,73 @@ export async function getDiagnoseData(
 				detail: 'Not found',
 			});
 		}
+	}
+
+	// Check: Coder settlements (issue #2268) — surface the
+	// CODER_DISPATCH_IN_PROGRESS wedge class that used to be invisible to
+	// diagnose: a non-terminal settlement WAL whose dispatch completion never
+	// arrived. Warn-level by design: a genuinely in-flight dispatch also shows
+	// up as non-terminal here and must not fail the health check. Fail-open:
+	// an inspection failure downgrades to a warning, never breaks diagnose.
+	try {
+		const { states: settlementStates, truncated } =
+			await listCoderSettlementWalStates(directory);
+		const truncationNote = truncated
+			? ' MORE settlement WALs exist than the scan cap (200) — older ones are not shown.'
+			: '';
+		if (settlementStates.length === 0) {
+			checks.push({
+				name: 'Coder Settlements',
+				status: truncated ? '⚠️' : '✅',
+				detail: truncated
+					? `Settlement WAL scan truncated at 200 — additional settlements exist but are not shown.${truncationNote}`
+					: 'No coder settlement WALs',
+			});
+		} else {
+			const nonTerminal = settlementStates.filter(
+				(entry) =>
+					entry.state === 'DISPATCHED' ||
+					entry.state === 'PREPARED' ||
+					entry.state === 'unreadable',
+			);
+			if (nonTerminal.length === 0 && !truncated) {
+				checks.push({
+					name: 'Coder Settlements',
+					status: '✅',
+					detail: `${settlementStates.length} settlement(s) all in terminal state`,
+				});
+			} else {
+				const details = nonTerminal.map((entry) => {
+					if (entry.state === 'unreadable') {
+						return `task ${entry.taskId}: WAL unreadable`;
+					}
+					const owner =
+						entry.ownedInProcess || entry.ownedByLiveForeignPid
+							? `owner pid ${entry.processId ?? '?'} still alive — in flight or wedged`
+							: 'owner process is gone — stale';
+					return `task ${entry.taskId} (${entry.state}, ${owner})`;
+				});
+				checks.push({
+					name: 'Coder Settlements',
+					status: '⚠️',
+					detail: `${
+						nonTerminal.length > 0
+							? `${nonTerminal.length} non-terminal settlement(s): ${details.join(
+									'; ',
+								)}.`
+							: 'All shown settlements are terminal, but the scan was truncated.'
+					} Stale settlements block dispatches with CODER_DISPATCH_IN_PROGRESS — run /swarm recover [task_id] (--force if no dispatch is genuinely running) or /swarm reset-session.${truncationNote}`,
+				});
+			}
+		}
+	} catch (error) {
+		checks.push({
+			name: 'Coder Settlements',
+			status: '⚠️',
+			detail: `could not inspect coder settlements: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		});
 	}
 
 	// Check: context.md exists

@@ -1792,6 +1792,13 @@ export const MemoryConfigSchema = z.object({
 				tokenBudget: 1000,
 			},
 		}),
+	/** Deterministic outcome-reflection artifact and prompt injection (#1989). */
+	reflection: z
+		.object({
+			enabled: z.boolean().default(false),
+			halfLifeDays: z.number().finite().positive().max(3650).default(30),
+		})
+		.default({ enabled: false, halfLifeDays: 30 }),
 	learning: z
 		.object({
 			learningRate: z.number().min(0).max(1).default(0.1),

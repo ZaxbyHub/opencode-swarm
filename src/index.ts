@@ -164,6 +164,7 @@ import {
 } from './hooks/trajectory-logger';
 import { realtimeAdmissionAfter } from './learning/admission.js';
 import { createMemoryLifecycleHooks } from './memory';
+import type { MemoryConfig as RuntimeMemoryConfig } from './memory/config.js';
 import { initObservability } from './observability/index.js';
 import { loadPlan } from './plan/manager.js';
 import { createPrmHook, resolvePrmPatternPersistenceOptions } from './prm';
@@ -362,6 +363,17 @@ let loadPluginConfigWithMetaAsyncForInit = loadPluginConfigWithMetaAsync;
 let loadSnapshotForInit = loadSnapshot;
 let ensureSwarmGitExcludedForInit = ensureSwarmGitExcluded;
 let resolveAutoReviewConfigForInit = resolveAutoReviewConfig;
+type RegenerateMemoryReflectionForInit = (
+	directory: string,
+	config: Partial<RuntimeMemoryConfig>,
+) => Promise<unknown>;
+let regenerateMemoryReflectionForInit: RegenerateMemoryReflectionForInit =
+	async (directory, config) => {
+		const { regenerateMemoryReflection } = await import(
+			'./memory/reflection-service.js'
+		);
+		return regenerateMemoryReflection(directory, config);
+	};
 
 export function overrideIndexInternalsForTest(overrides: {
 	createRepoGraphBuilderHook?: typeof createRepoGraphBuilderHook;
@@ -370,6 +382,7 @@ export function overrideIndexInternalsForTest(overrides: {
 	loadSnapshot?: typeof loadSnapshot;
 	ensureSwarmGitExcluded?: typeof ensureSwarmGitExcluded;
 	resolveAutoReviewConfig?: typeof resolveAutoReviewConfig;
+	regenerateMemoryReflection?: RegenerateMemoryReflectionForInit;
 }): () => void {
 	const previousCreateRepoGraphBuilderHook = createRepoGraphBuilderHookForInit;
 	const previousSchedulePostResolutionTasks =
@@ -379,6 +392,7 @@ export function overrideIndexInternalsForTest(overrides: {
 	const previousLoadSnapshot = loadSnapshotForInit;
 	const previousEnsureSwarmGitExcluded = ensureSwarmGitExcludedForInit;
 	const previousResolveAutoReviewConfig = resolveAutoReviewConfigForInit;
+	const previousRegenerateMemoryReflection = regenerateMemoryReflectionForInit;
 	if (overrides.createRepoGraphBuilderHook) {
 		createRepoGraphBuilderHookForInit = overrides.createRepoGraphBuilderHook;
 	}
@@ -398,6 +412,9 @@ export function overrideIndexInternalsForTest(overrides: {
 	if (overrides.resolveAutoReviewConfig) {
 		resolveAutoReviewConfigForInit = overrides.resolveAutoReviewConfig;
 	}
+	if (overrides.regenerateMemoryReflection) {
+		regenerateMemoryReflectionForInit = overrides.regenerateMemoryReflection;
+	}
 	return () => {
 		createRepoGraphBuilderHookForInit = previousCreateRepoGraphBuilderHook;
 		schedulePostResolutionTasksForInit = previousSchedulePostResolutionTasks;
@@ -406,6 +423,7 @@ export function overrideIndexInternalsForTest(overrides: {
 		loadSnapshotForInit = previousLoadSnapshot;
 		ensureSwarmGitExcludedForInit = previousEnsureSwarmGitExcluded;
 		resolveAutoReviewConfigForInit = previousResolveAutoReviewConfig;
+		regenerateMemoryReflectionForInit = previousRegenerateMemoryReflection;
 	};
 }
 
@@ -807,6 +825,7 @@ async function initializeOpenCodeSwarm(
 				excludeDirs: repoGraphConfig.exclude_dirs,
 			})
 		: null;
+	let repoGraphInitPromise: Promise<void> | undefined;
 	if (repoGraphHook) {
 		postResolutionTasks.push(() => {
 			const watchdog = setTimeout(() => {
@@ -817,7 +836,7 @@ async function initializeOpenCodeSwarm(
 			if (typeof (watchdog as { unref?: () => void }).unref === 'function') {
 				(watchdog as { unref: () => void }).unref();
 			}
-			repoGraphHook
+			repoGraphInitPromise = repoGraphHook
 				.init()
 				.catch(() => {
 					/* logged inside init */
@@ -1134,6 +1153,38 @@ async function initializeOpenCodeSwarm(
 				? (swarmState.agentSessions.get(sessionID)?.currentTaskId ?? undefined)
 				: undefined,
 	});
+	// Issue #1989: reflection regeneration performs provider, graph, and artifact
+	// I/O, so it belongs in the wrapper-owned post-resolution queue. Keeping the
+	// service behind a dynamic import prevents this optional startup feature from
+	// expanding the manifest-resolution path. The timeout and catch are both
+	// fail-open: a corrupt/oversized store never prevents plugin registration.
+	if (
+		config.memory?.enabled === true &&
+		config.memory.reflection?.enabled === true
+	) {
+		const reflectionConfig = config.memory as Partial<RuntimeMemoryConfig>;
+		const regenerateMemoryReflectionTask = () =>
+			withTimeout(
+				repoGraphInitPromise ?? Promise.resolve(),
+				5_000,
+				new Error('repo graph refresh exceeded reflection wait budget'),
+			)
+				.catch(() => undefined)
+				.then(() =>
+					withTimeout(
+						regenerateMemoryReflectionForInit(ctx.directory, reflectionConfig),
+						15_000,
+						new Error('memory reflection startup regeneration exceeded 15s'),
+					),
+				)
+				.catch((err: unknown) => {
+					log('memory reflection startup regeneration failed (non-fatal)', {
+						error: err instanceof Error ? err.message : String(err),
+					});
+				})
+				.then(() => undefined);
+		postResolutionTasks.push(regenerateMemoryReflectionTask);
+	}
 	// Fail-secure: honor explicit guardrails.enabled === false (preserving the full
 	// guardrails block), otherwise let Zod schema defaults fill in enabled: true.
 	const guardrailsFallback =
@@ -2512,6 +2563,11 @@ async function initializeOpenCodeSwarm(
 					description:
 						'Use /swarm reset-session to clear session state and delegation chains',
 				},
+				'swarm-recover': {
+					template: '/swarm recover $ARGUMENTS',
+					description:
+						'Use /swarm recover to settle wedged coder settlements [task_id] [--force]',
+				},
 				'swarm-simulate': {
 					template: '/swarm simulate $ARGUMENTS',
 					description: 'Use /swarm simulate to run a simulated agent session',
@@ -3183,25 +3239,25 @@ async function initializeOpenCodeSwarm(
 				}
 				// Issue #2214: a denied Task call never fires toolAfter. If the
 				// delegation gate (step 4) already durably began a coder
-				// settlement for this callID before a later fail-closed gate
-				// (steps 5-8) rejected it, roll the DISPATCHED WAL back to
-				// ABORTED so the task is not wedged until a process restart.
-				// Never throws — the original denial propagates unchanged.
+				// settlement for this callID before ANY later step in this
+				// handler rejected it — fail-closed gates 5-8 OR the advisory
+				// tail above the flag (issue #2268) — roll the DISPATCHED WAL
+				// back to ABORTED so the task is not wedged until a process
+				// restart. Never throws — the original denial propagates
+				// unchanged.
 				//
-				// INVARIANT (PR #2223 review, advisory): rollback ELIGIBILITY reuses
-				// `failClosedRegionCompleted`, so this block only fires when the
-				// denial came from the fail-closed region. That is correct today
-				// because no uncaught await exists in the advisory tail below the
-				// flag set (verified empirically by review fault injection). Any
-				// future raw-awaited call added to that tail must either set the
-				// flag first or throw only after this rollback — otherwise an
-				// advisory-tail throw would reject the call WITHOUT rolling back a
-				// begun settlement, reopening the #2214 wedge class. The
-				// gate-denial-wiring static guard pins this contract.
+				// INVARIANT (issue #2268): rollback eligibility deliberately does
+				// NOT consult `failClosedRegionCompleted`. This catch only runs
+				// when toolBefore THREW, so the Task tool never executes and any
+				// begun settlement is orphaned regardless of which region threw.
+				// abortDeniedSettlementForCall is a callID-keyed no-op when no
+				// settlement was begun for this call, so firing it
+				// unconditionally is safe for non-settlement throws (reviewer/
+				// docs/other tools). The gate-denial-wiring static guard pins
+				// this contract.
 				if (
-					!failClosedRegionCompleted &&
-					(normalizeToolName(input.tool) === 'Task' ||
-						normalizeToolName(input.tool) === 'task')
+					normalizeToolName(input.tool) === 'Task' ||
+					normalizeToolName(input.tool) === 'task'
 				) {
 					try {
 						await delegationGateHooks.abortDeniedSettlementForCall(

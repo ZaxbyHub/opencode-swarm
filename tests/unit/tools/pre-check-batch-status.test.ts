@@ -12,6 +12,7 @@ import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 function oversizedResult(
 	gatesPassed: boolean,
 	detail: string,
+	sastDegraded = false,
 ): PreCheckBatchResult {
 	const toolResult = {
 		ran: true,
@@ -21,6 +22,7 @@ function oversizedResult(
 	return {
 		batch_status: 'completed',
 		gates_passed: gatesPassed,
+		sast_degraded: sastDegraded,
 		lint: toolResult,
 		secretscan: toolResult,
 		sast_scan: toolResult,
@@ -102,7 +104,7 @@ test('serializer measures multibyte diagnostics in UTF-8 bytes and preserves a p
 		Math.floor(_internals.MAX_COMBINED_BYTES / 4),
 	);
 	const serialized = _internals.serializePreCheckResult(
-		oversizedResult(true, multibyteDetail),
+		oversizedResult(true, multibyteDetail, true),
 	);
 	const parsed = JSON.parse(serialized) as Record<string, unknown>;
 
@@ -114,6 +116,7 @@ test('serializer measures multibyte diagnostics in UTF-8 bytes and preserves a p
 		_internals.MAX_COMBINED_BYTES,
 	);
 	expect(parsed.output_truncated).toBe(true);
+	expect(parsed.sast_degraded).toBe(true);
 	const secretscan = parsed.secretscan as Record<string, unknown>;
 	// F-010 prior behavior mislabeled a successful omitted result as an error.
 	expect(secretscan.error).toBeUndefined();

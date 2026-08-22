@@ -6,13 +6,21 @@ import { containsSecret } from './redaction';
 import { MEMORY_RECALL_SENTINEL } from './sentinel';
 import type {
 	CuratorMemoryDecision,
+	MemoryAnchor,
 	MemoryKind,
+	MemoryOutcome,
 	MemoryPatch,
 	MemoryProposal,
 	MemoryRecord,
 	MemoryScopeRef,
 	NewMemoryRecord,
 } from './types';
+
+export const MAX_MEMORY_TEXT_LENGTH = 2000;
+export const MAX_MEMORY_ANCHORS = 20;
+export const MEMORY_OUTCOME_QUESTION_PREFIX = 'Outcome evidence for question: ';
+export const MAX_OUTCOME_QUESTION_LENGTH =
+	MAX_MEMORY_TEXT_LENGTH - MEMORY_OUTCOME_QUESTION_PREFIX.length;
 
 export const MemoryScopeTypeSchema = z.enum([
 	'global_user',
@@ -77,12 +85,99 @@ export const MemorySourceSchema = z
 	})
 	.strict();
 
+const MemoryAnchorFileSchema = z
+	.string()
+	.trim()
+	.min(1)
+	.max(512)
+	.transform((value, context) => {
+		try {
+			return normalizeMemoryAnchorFile(value);
+		} catch (error) {
+			context.addIssue({
+				code: 'custom',
+				message:
+					error instanceof Error ? error.message : 'invalid memory anchor path',
+			});
+			return z.NEVER;
+		}
+	});
+
+export const MemoryAnchorSchema: z.ZodType<MemoryAnchor> = z
+	.object({
+		file: MemoryAnchorFileSchema,
+		symbol: z.string().trim().min(1).max(256).optional(),
+	})
+	.strict();
+
+/** Normalize a repository-relative memory anchor to a portable identity. */
+export function normalizeMemoryAnchorFile(value: string): string {
+	const trimmed = value.trim();
+	if (
+		[...trimmed].some((character) => {
+			const code = character.charCodeAt(0);
+			return code <= 31 || code === 127;
+		})
+	) {
+		throw new MemoryValidationError(
+			'memory anchor file must not contain control characters',
+		);
+	}
+	if (
+		trimmed.startsWith('/') ||
+		trimmed.startsWith('\\') ||
+		/^[a-zA-Z]:[\\/]/.test(trimmed)
+	) {
+		throw new MemoryValidationError(
+			'memory anchor file must be repository-relative',
+		);
+	}
+	const segments = trimmed.replaceAll('\\', '/').split('/');
+	if (segments.some((segment) => segment === '..')) {
+		throw new MemoryValidationError(
+			'memory anchor file must not traverse outside the repository',
+		);
+	}
+	const normalized = segments
+		.filter((segment) => segment.length > 0 && segment !== '.')
+		.join('/');
+	if (!normalized) {
+		throw new MemoryValidationError('memory anchor file must not be empty');
+	}
+	return normalized;
+}
+
+export const MemoryOutcomeSchema: z.ZodType<MemoryOutcome> = z
+	.object({
+		outcome: z.enum(['useful', 'dead_end', 'corrected']),
+		at: z.string().datetime(),
+		taskId: z.string().trim().min(1).max(256).optional(),
+		correction: z.string().trim().min(1).max(4000).optional(),
+	})
+	.strict()
+	.superRefine((value, context) => {
+		if (value.outcome === 'corrected' && !value.correction) {
+			context.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: ['correction'],
+				message: 'corrected outcomes require correction text',
+			});
+		}
+		if (value.outcome !== 'corrected' && value.correction !== undefined) {
+			context.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: ['correction'],
+				message: 'correction text is only valid for corrected outcomes',
+			});
+		}
+	});
+
 export const MemoryRecordSchema = z
 	.object({
 		id: z.string().regex(/^mem_[a-f0-9]{16}$/),
 		scope: MemoryScopeRefSchema,
 		kind: MemoryKindSchema,
-		text: z.string().min(1).max(2000),
+		text: z.string().min(1).max(MAX_MEMORY_TEXT_LENGTH),
 		tags: z.array(z.string().min(1).max(64)).max(32),
 		confidence: z.number().min(0).max(1),
 		stability: z.enum(['ephemeral', 'session', 'durable']),
@@ -96,6 +191,8 @@ export const MemoryRecordSchema = z
 		supersededBy: z.string().optional(),
 		contentHash: z.string().regex(/^[a-f0-9]{64}$/),
 		metadata: z.record(z.string(), z.unknown()),
+		anchors: z.array(MemoryAnchorSchema).max(MAX_MEMORY_ANCHORS).optional(),
+		outcomes: z.array(MemoryOutcomeSchema).max(1000).optional(),
 		// #1850 cohort-sharing provenance (all optional for back-compat).
 		cohortId: z.string().optional(),
 		producerSessionId: z.string().optional(),
@@ -151,13 +248,15 @@ export const NewMemoryRecordSchema: z.ZodType<NewMemoryRecord> = z
 	.object({
 		scope: MemoryScopeRefSchema.optional(),
 		kind: MemoryKindSchema,
-		text: z.string().min(1).max(2000),
+		text: z.string().min(1).max(MAX_MEMORY_TEXT_LENGTH),
 		tags: z.array(z.string().min(1).max(64)).max(32).optional(),
 		confidence: z.number().min(0).max(1).optional(),
 		stability: z.enum(['ephemeral', 'session', 'durable']).optional(),
 		source: MemorySourceSchema.optional(),
 		expiresAt: z.string().datetime().optional(),
 		metadata: z.record(z.string(), z.unknown()).optional(),
+		anchors: z.array(MemoryAnchorSchema).max(MAX_MEMORY_ANCHORS).optional(),
+		outcomes: z.array(MemoryOutcomeSchema).max(1000).optional(),
 	})
 	.strict();
 
@@ -165,13 +264,15 @@ export const MemoryPatchSchema: z.ZodType<MemoryPatch> = z
 	.object({
 		scope: MemoryScopeRefSchema.optional(),
 		kind: MemoryKindSchema.optional(),
-		text: z.string().min(1).max(2000).optional(),
+		text: z.string().min(1).max(MAX_MEMORY_TEXT_LENGTH).optional(),
 		tags: z.array(z.string().min(1).max(64)).max(32).optional(),
 		confidence: z.number().min(0).max(1).optional(),
 		stability: z.enum(['ephemeral', 'session', 'durable']).optional(),
 		source: MemorySourceSchema.optional(),
 		expiresAt: z.string().datetime().optional(),
 		metadata: z.record(z.string(), z.unknown()).optional(),
+		anchors: z.array(MemoryAnchorSchema).max(MAX_MEMORY_ANCHORS).optional(),
+		outcomes: z.array(MemoryOutcomeSchema).max(1000).optional(),
 	})
 	.strict()
 	.refine((patch) => Object.keys(patch).length > 0, {
@@ -376,9 +477,39 @@ export function validateMemoryRecordRules(
 	if (
 		options.rejectDurableSecrets &&
 		parsed.stability === 'durable' &&
-		containsSecret(parsed.text)
+		(containsSecret(parsed.text) ||
+			(parsed.outcomes ?? []).some(
+				(outcome) =>
+					typeof outcome.correction === 'string' &&
+					containsSecret(outcome.correction),
+			))
 	) {
 		throw new MemoryValidationError('durable memory contains a likely secret');
+	}
+	const eventIds = parsed.metadata.outcomeEventIds;
+	if (eventIds !== undefined) {
+		if (
+			!Array.isArray(eventIds) ||
+			eventIds.length !== (parsed.outcomes?.length ?? 0) ||
+			eventIds.some(
+				(id) => typeof id !== 'string' || id.length < 1 || id.length > 256,
+			)
+		) {
+			throw new MemoryValidationError(
+				'metadata.outcomeEventIds must align with outcomes',
+			);
+		}
+	}
+	const generation = parsed.metadata.outcomeGeneration;
+	if (
+		generation !== undefined &&
+		(typeof generation !== 'string' ||
+			generation.length < 1 ||
+			generation.length > 256)
+	) {
+		throw new MemoryValidationError(
+			'metadata.outcomeGeneration must be a bounded string',
+		);
 	}
 	return parsed;
 }

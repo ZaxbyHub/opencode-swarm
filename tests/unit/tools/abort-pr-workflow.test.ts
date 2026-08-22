@@ -24,6 +24,10 @@ beforeEach(() => {
 	gateInternals.resetTrackedStateCache();
 	gateInternals.resolveCurrentGitHead = () => 'abc123';
 	gateInternals.resolveIsWorkingTreeClean = () => true;
+	// Issue #2251: settlement probes host session liveness. Pin "no host" so a
+	// `swarmState.opencodeClient` leaked by another file cannot make this suite
+	// order-dependent (or make it wait out the probe's real 5s deadline).
+	gateInternals.getSessionOps = () => null;
 });
 
 afterEach(async () => {

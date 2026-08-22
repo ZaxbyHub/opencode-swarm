@@ -23,13 +23,21 @@ export interface SemgrepOptions {
 	timeoutMs?: number;
 	/** Working directory for Semgrep execution */
 	cwd?: string;
-	/** Language identifier for --lang flag (used with useAutoConfig) */
-	lang?: string;
 	/** When true, use --config auto instead of local rulesDir (for profile-driven languages) */
 	useAutoConfig?: boolean;
 	/** Host/tool cancellation propagated to the shared subprocess runner. */
 	abortSignal?: AbortSignal;
 }
+
+export type SemgrepFailureKind =
+	| 'process_exit'
+	| 'timeout'
+	| 'cancelled'
+	| 'output_limit'
+	| 'spawn_error'
+	| 'invalid_output'
+	| 'scan_error'
+	| 'unexpected';
 
 /**
  * Result from Semgrep execution
@@ -41,6 +49,8 @@ export interface SemgrepResult {
 	findings: SastFinding[];
 	/** Error message if Semgrep failed */
 	error?: string;
+	/** Machine-readable category for an available scanner failure. */
+	failure_kind?: SemgrepFailureKind;
 	/** Engine label for the findings */
 	engine: 'tier_a' | 'tier_a+tier_b';
 }
@@ -151,6 +161,19 @@ function describeExternalToolFailure(
 		case 'spawn-error':
 			return 'Semgrep process failed to start or terminate safely';
 	}
+}
+
+const LANG_WITHOUT_PATTERN_DIAGNOSTIC =
+	'-e/--pattern and -l/--lang must both be specified';
+
+function describeSemgrepProcessExit(
+	exitCode: number | null,
+	stderr: string,
+): string {
+	if (stderr.includes(LANG_WITHOUT_PATTERN_DIAGNOSTIC)) {
+		return `Semgrep exited with code ${exitCode}: incompatible --lang option in config mode`;
+	}
+	return `Semgrep exited with code ${exitCode}; run Semgrep directly in the project to diagnose`;
 }
 
 export const _internals: {
@@ -411,6 +434,7 @@ export async function runSemgrep(
 				available: true,
 				findings: [],
 				error: 'Semgrep execution cancelled',
+				failure_kind: 'cancelled',
 				engine: 'tier_a',
 			};
 		}
@@ -418,6 +442,7 @@ export async function runSemgrep(
 			available: false,
 			findings: [],
 			error: 'Semgrep is not installed or not available on PATH',
+			failure_kind: 'spawn_error',
 			engine: 'tier_a',
 		};
 	}
@@ -428,6 +453,7 @@ export async function runSemgrep(
 			available: false,
 			findings: [],
 			error: 'Semgrep is not installed or not available on PATH',
+			failure_kind: 'spawn_error',
 			engine: 'tier_a',
 		};
 	}
@@ -437,9 +463,6 @@ export async function runSemgrep(
 		'--json',
 		'--quiet',
 	];
-	if (options.lang) {
-		args.push(`--lang=${options.lang}`);
-	}
 	args.push(...files);
 
 	try {
@@ -458,6 +481,7 @@ export async function runSemgrep(
 				available: true,
 				findings: [],
 				error: `Semgrep output exceeded ${MAX_OUTPUT_BYTES} bytes and was truncated; results incomplete`,
+				failure_kind: 'output_limit',
 				engine: 'tier_a',
 			};
 		}
@@ -466,6 +490,8 @@ export async function runSemgrep(
 				available: true,
 				findings: [],
 				error: describeExternalToolFailure(result.status),
+				failure_kind:
+					result.status === 'spawn-error' ? 'spawn_error' : result.status,
 				engine: 'tier_a',
 			};
 		}
@@ -485,7 +511,8 @@ export async function runSemgrep(
 				findings: [],
 				// Never expose raw stderr: scanners and wrappers may echo source,
 				// environment values, credentials, or host paths into diagnostics.
-				error: `Semgrep exited with code ${result.exitCode}`,
+				error: describeSemgrepProcessExit(result.exitCode, result.stderr),
+				failure_kind: 'process_exit',
 				engine: 'tier_a',
 			};
 		}
@@ -508,6 +535,13 @@ export async function runSemgrep(
 			available: true,
 			findings: [],
 			error: safeError,
+			failure_kind:
+				error instanceof SemgrepScanError
+					? 'scan_error'
+					: error instanceof Error &&
+							error.message === 'Semgrep returned invalid JSON output'
+						? 'invalid_output'
+						: 'unexpected',
 			engine: 'tier_a',
 		};
 	}

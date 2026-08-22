@@ -1,22 +1,23 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { appendFileSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import {
-	BACKGROUND_DELEGATIONS_FILE,
-	type BackgroundDelegationRecord,
 	DEFAULT_STALE_DELEGATION_TIMEOUT_MS,
 	readDelegations,
-	recordPendingDelegation,
 } from '../../../src/background/pending-delegations.js';
 import {
 	abortPrWorkflow,
 	activatePrWorkflow,
 	completePrWorkflow,
 	_test_exports as gateInternals,
-	type PrWorkflowGateState,
 	settlePresumedStalePrWorkflowLanes,
 } from '../../../src/hooks/pr-workflow-gate.js';
+import {
+	backdatePrWorkflowLane,
+	recordOpenPrWorkflowLane,
+	STALE_LANE_AGE_MS,
+	writeRawPrWorkflowGateState,
+} from '../../helpers/pr-workflow-lane-fixtures.js';
 import { freezeClock } from '../../helpers/test-clock.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
@@ -42,6 +43,14 @@ beforeEach(() => {
 	gateInternals.resolveCurrentGitHeadAsync = async () => 'abc123';
 	gateInternals.resolveIsWorkingTreeClean = () => true;
 	gateInternals.resolveIsWorkingTreeCleanAsync = async () => true;
+	// R9 (issue #2251): pin the liveness-probe session handle to "no host" so
+	// every expectation in this file rests on age alone BY CONSTRUCTION. The
+	// production default reads `swarmState.opencodeClient`, which 20+ other test
+	// files mutate — leaving it unset would make this suite order-dependent in
+	// bun's shared process, and would silently retire the "the sweep runs"
+	// premise of the ingestion_error test below the first time some other file
+	// leaked a client. `resetTrackedStateCache()` restores the real default.
+	gateInternals.getSessionOps = () => null;
 });
 
 afterEach(async () => {
@@ -56,85 +65,28 @@ afterEach(async () => {
 	await fs.rm(directory, { recursive: true, force: true });
 });
 
-/** Write a raw gate-state record straight to disk (mirrors the abort suite). */
-async function writeRawState(
+/**
+ * The three fixtures below are shared with the issue #2251 liveness-probe
+ * suites and live in `tests/helpers/pr-workflow-lane-fixtures.ts`. These
+ * directory-bound wrappers keep every call site in this file unchanged.
+ */
+const writeRawState = (
 	sessionID: string,
-	partial: Partial<PrWorkflowGateState>,
-): Promise<void> {
-	const relative = gateInternals.workflowGateStateRelativePath(sessionID);
-	const absolute = path.join(directory, '.swarm', relative);
-	await fs.mkdir(path.dirname(absolute), { recursive: true });
-	const base: PrWorkflowGateState = {
-		schemaVersion: 1,
-		revision: 0,
-		sessionID,
-		mode: 'PR_REVIEW',
-		activatedAt: '2026-07-19T00:00:00.000Z',
-		updatedAt: '2026-07-19T00:00:00.000Z',
-	};
-	await fs.writeFile(
-		absolute,
-		JSON.stringify({ ...base, ...partial }, null, 2),
-		'utf-8',
-	);
-}
-
-/** Record one open `swarm-pr-review:base` lane for `parentSessionId`. */
-async function recordOpenLane(
+	partial: Parameters<typeof writeRawPrWorkflowGateState>[2],
+) => writeRawPrWorkflowGateState(directory, sessionID, partial);
+const recordOpenLane = (
 	parentSessionId: string,
 	laneId: string,
 	correlationId: string,
-): Promise<void> {
-	await recordPendingDelegation(directory, {
-		correlationId,
-		jobId: null,
-		subagentSessionId: `sub-${correlationId}`,
-		parentSessionId,
-		callID: `call-${correlationId}`,
-		normalizedAgent: 'explorer',
-		swarmPrefixedAgent: 'explorer',
-		planTaskId: null,
-		evidenceTaskId: null,
-		batchId: 'b1',
-		laneId,
-		mode: 'swarm-pr-review:base',
-		workflowLane: laneId,
-		workspace: {
-			directory,
-			gitHead: 'abc123',
-			dirtyHash: null,
-			prHeadSha: 'abc123',
-			scope: null,
-		},
-	});
-}
-
-/**
- * Backdate a lane's `updatedAt` past the staleness horizon by appending a
- * replacement snapshot — the store folds last-write-wins per correlationId, so
- * this is the same shape a real record takes when its process stops updating.
- */
-function backdateLane(
+) =>
+	recordOpenPrWorkflowLane(directory, parentSessionId, laneId, correlationId);
+const backdateLane = (
 	correlationId: string,
 	ageMs: number,
-	status?: BackgroundDelegationRecord['status'],
-): void {
-	const record = readDelegations(directory).find(
-		(candidate) => candidate.correlationId === correlationId,
-	) as BackgroundDelegationRecord;
-	const storePath = path.join(directory, '.swarm', BACKGROUND_DELEGATIONS_FILE);
-	appendFileSync(
-		storePath,
-		`${JSON.stringify({
-			...record,
-			status: status ?? record.status,
-			updatedAt: Date.now() - ageMs,
-		})}\n`,
-		'utf-8',
-	);
-}
+	status?: Parameters<typeof backdatePrWorkflowLane>[3],
+) => backdatePrWorkflowLane(directory, correlationId, ageMs, status);
 
-const STALE_AGE_MS = DEFAULT_STALE_DELEGATION_TIMEOUT_MS + 60_000;
+const STALE_AGE_MS = STALE_LANE_AGE_MS;
 
 describe('settlePresumedStalePrWorkflowLanes — regression: W-4 stuck lanes wedge both abort and completion (R2)', () => {
 	test('a lane stale past the horizon is presumed settled, not open', async () => {
@@ -261,6 +213,10 @@ describe('settlePresumedStalePrWorkflowLanes — regression: W-4 stuck lanes wed
 		// The genuinely stale lane is load-bearing, not extra coverage: with no
 		// presumed-stale lane the function returns before the sweep ever runs, and
 		// the survival assertion below would hold with or without the restriction.
+		// Since issue #2251 the sweep is ALSO skipped when the liveness probe
+		// spares every stale candidate, which is why beforeEach pins
+		// `getSessionOps` to `() => null` — "the sweep runs" is true here by
+		// construction, not by accident.
 		await recordOpenLane('sess-retryable', 'intent-architecture', 'c-stale');
 		backdateLane('c-stale', STALE_AGE_MS);
 		await recordOpenLane('sess-retryable', 'risk-security', 'c-ingest-err');
