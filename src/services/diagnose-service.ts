@@ -17,6 +17,7 @@ import { loadPlanJsonOnly } from '../plan/manager';
 import { SandboxCapabilityProbe } from '../sandbox/capability-probe.js';
 import { getExecutor } from '../sandbox/executor.js';
 import { readEffectiveSpecSync } from '../sdd/effective-spec';
+import { resolveGitExecutableAsync } from '../utils/git-executable.js';
 import { checkKnowledgeHealth } from './knowledge-diagnostics.js';
 import { compareVersions, readVersionCache } from './version-check.js';
 import { getDeferredWarnings } from './warning-buffer.js';
@@ -384,7 +385,8 @@ async function checkGitRepository(directory: string): Promise<HealthCheck> {
 				detail: 'Invalid directory — cannot check git status',
 			};
 		}
-		child_process.execSync('git rev-parse --git-dir', {
+		const gitExecutable = await resolveGitExecutableAsync();
+		child_process.execFileSync(gitExecutable, ['rev-parse', '--git-dir'], {
 			cwd: directory,
 			stdio: 'pipe',
 		});

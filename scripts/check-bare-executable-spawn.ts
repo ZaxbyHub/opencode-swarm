@@ -21,8 +21,13 @@
  * string literal in {git, gh, sandbox-exec, bwrap} AND that argument is
  * either:
  *   1. the first positional argument of a call whose callee name is in
- *      {spawnSync, spawn, execFile, execFileSync, exec, bunSpawn,
- *      runExternalTool} — e.g. `spawnSync('git', args, opts)`;
+ *      {spawnSync, spawn, execFile, execFileSync, exec, execSync, bunSpawn,
+ *      runExternalTool} — e.g. `spawnSync('git', args, opts)`. `exec`/
+ *      `execSync` take a SHELL COMMAND STRING rather than a bare executable
+ *      argv[0], so for those two callees only, the check is against the
+ *      command string's first whitespace-delimited token (see
+ *      SHELL_STRING_CALLEES / firstCommandToken below) — e.g.
+ *      `execSync('git remote get-url origin')` is flagged on `'git'`;
  *   2. the first element of a first-argument array literal of such a call —
  *      e.g. `bunSpawn(['git', ...args], opts)`;
  *   3. an `executable:` property of an object-literal argument of ANY call
@@ -86,9 +91,29 @@ export const SPAWN_FAMILY: ReadonlySet<string> = new Set([
 	'execFile',
 	'execFileSync',
 	'exec',
+	'execSync',
 	'bunSpawn',
 	'runExternalTool',
 ]);
+
+/**
+ * `exec`/`execSync` take a SHELL COMMAND STRING, not an argv array — the
+ * first positional argument is the whole command line (e.g.
+ * `execSync('git -C . remote get-url origin', opts)`), not a bare executable
+ * name. Form 1's plain string-literal-equality check (`first.text === 'git'`)
+ * never matches that shape, so `execSync('git ...')` would silently slip
+ * through with `execSync` merely added to SPAWN_FAMILY. These two callees are
+ * flagged by their COMMAND STRING'S FIRST WHITESPACE-DELIMITED TOKEN instead.
+ */
+export const SHELL_STRING_CALLEES: ReadonlySet<string> = new Set([
+	'exec',
+	'execSync',
+]);
+
+/** First whitespace-delimited token of a shell command string. */
+function firstCommandToken(command: string): string {
+	return command.trimStart().split(/\s+/, 1)[0] ?? '';
+}
 
 export const FLAGGED_EXECUTABLES: ReadonlySet<string> = new Set([
 	'git',
@@ -174,6 +199,20 @@ export function scanSourceForBareSpawn(
 				if (
 					first &&
 					ts.isStringLiteralLike(first) &&
+					SHELL_STRING_CALLEES.has(name) &&
+					FLAGGED_EXECUTABLES.has(firstCommandToken(first.text))
+				) {
+					violations.push({
+						file: relPath,
+						line: lineOf(first.getStart(sf)),
+						form: 'first-arg',
+						executable: firstCommandToken(first.text),
+						snippet: snippetAt(first.getStart(sf)),
+					});
+				} else if (
+					first &&
+					ts.isStringLiteralLike(first) &&
+					!SHELL_STRING_CALLEES.has(name) &&
 					FLAGGED_EXECUTABLES.has(first.text)
 				) {
 					violations.push({

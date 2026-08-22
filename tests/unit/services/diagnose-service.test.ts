@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import * as realChildProcess from 'node:child_process';
-import { execSync } from 'node:child_process';
+import { execFileSync, execSync } from 'node:child_process';
 
 import * as realFs from 'node:fs';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
@@ -13,6 +13,7 @@ import { readSwarmFileAsync } from '../../../src/hooks/utils.js';
 import { loadPlanJsonOnly } from '../../../src/plan/manager.js';
 import { readEffectiveSpecSync } from '../../../src/sdd/effective-spec.js';
 import { getDiagnoseData } from '../../../src/services/diagnose-service.js';
+import { __seedGitExecutableForTests } from '../../../src/utils/git-executable.js';
 
 // Mock all the imported modules
 mock.module('../../../src/plan/manager.js', () => ({
@@ -42,6 +43,7 @@ mock.module('node:fs', () => ({
 mock.module('node:child_process', () => ({
 	...realChildProcess,
 	execSync: mock(() => Buffer.from('.git')),
+	execFileSync: mock(() => Buffer.from('.git')),
 }));
 
 // Type assertions for mocks
@@ -57,6 +59,7 @@ const mockExistsSync = existsSync as ReturnType<typeof mock>;
 const mockReadFileSync = readFileSync as ReturnType<typeof mock>;
 const mockStatSync = statSync as ReturnType<typeof mock>;
 const mockExecSync = execSync as ReturnType<typeof mock>;
+const mockExecFileSync = execFileSync as ReturnType<typeof mock>;
 
 // Helper to create minimal valid plan object
 function makePlan(
@@ -116,6 +119,8 @@ beforeEach(() => {
 	mockReadFileSync.mockReturnValue('{"version":"7.99.6"}');
 	mockStatSync.mockReturnValue({ isDirectory: () => true });
 	mockExecSync.mockReturnValue(Buffer.from('.git'));
+	mockExecFileSync.mockReturnValue(Buffer.from('.git'));
+	__seedGitExecutableForTests('git');
 	// restore env var
 	delete process.env.OPENCODE_SWARM_ID;
 });
@@ -581,8 +586,15 @@ describe('checkConfigBackups', () => {
 });
 
 describe('checkGitRepository', () => {
-	it('should pass when execSync succeeds', async () => {
-		mockExecSync.mockReturnValue(Buffer.from('.git'));
+	beforeEach(() => {
+		// The resolver's own probing is unrelated to this suite's fixture; seed
+		// it so `checkGitRepository`'s execFileSync call goes through the mock
+		// deterministically instead of a real probe.
+		__seedGitExecutableForTests('git');
+	});
+
+	it('should pass when execFileSync succeeds', async () => {
+		mockExecFileSync.mockReturnValue(Buffer.from('.git'));
 
 		const result = await getDiagnoseData('/test/dir');
 		const check = findCheck(result.checks, 'Git Repository');
@@ -592,8 +604,8 @@ describe('checkGitRepository', () => {
 		expect(check.detail).toBe('Git repository detected');
 	});
 
-	it('should fail when execSync throws', async () => {
-		mockExecSync.mockImplementation(() => {
+	it('should fail when execFileSync throws', async () => {
+		mockExecFileSync.mockImplementation(() => {
 			throw new Error('Not a git repo');
 		});
 

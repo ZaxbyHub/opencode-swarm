@@ -31,6 +31,7 @@ describe('check-bare-executable-spawn — constants', () => {
 				'execFile',
 				'execFileSync',
 				'exec',
+				'execSync',
 				'bunSpawn',
 				'runExternalTool',
 			].sort(),
@@ -87,6 +88,72 @@ describe('scanSourceForBareSpawn — form 1: first positional argument', () => {
 
 	test('a variable (not a string literal) first arg is NOT flagged', () => {
 		const v = scanSourceForBareSpawn('x.ts', 'spawnSync(cmd, args, {});');
+		expect(v).toHaveLength(0);
+	});
+});
+
+describe('scanSourceForBareSpawn — form 1 (shell-string callees: exec/execSync)', () => {
+	/**
+	 * `execSync`/`exec` take a SHELL COMMAND STRING, not an argv[0] — the
+	 * literal `'git'` string-equality check used for `spawnSync`-style
+	 * callees never matches `'git remote get-url origin'`. This is the exact
+	 * shape of the real sites this gate previously missed:
+	 * `src/knowledge/identity.ts:68`/`:131`,
+	 * `src/services/diagnose-service.ts:387` (issue #2236 follow-up).
+	 */
+	test('child_process.execSync("git remote get-url origin", opts) is flagged on the command string\'s first token', () => {
+		const v = scanSourceForBareSpawn(
+			'x.ts',
+			"child_process.execSync('git remote get-url origin', { cwd: directory });",
+		);
+		expect(v).toHaveLength(1);
+		expect(v[0]).toMatchObject({ form: 'first-arg', executable: 'git' });
+	});
+
+	test('execSync("git -C . remote get-url origin", opts) is flagged', () => {
+		const v = scanSourceForBareSpawn(
+			'x.ts',
+			"child_process.execSync('git -C . remote get-url origin', { cwd: directory, timeout: 1500 });",
+		);
+		expect(v).toHaveLength(1);
+		expect(v[0]?.executable).toBe('git');
+	});
+
+	test('execSync("git rev-parse --git-dir", opts) is flagged', () => {
+		const v = scanSourceForBareSpawn(
+			'x.ts',
+			"child_process.execSync('git rev-parse --git-dir', { cwd: directory, stdio: 'pipe' });",
+		);
+		expect(v).toHaveLength(1);
+	});
+
+	test('exec("gh pr view", cb) is flagged on the command string\'s first token', () => {
+		const v = scanSourceForBareSpawn('x.ts', "exec('gh pr view', callback);");
+		expect(v).toHaveLength(1);
+		expect(v[0]?.executable).toBe('gh');
+	});
+
+	test('execSync("ls -la") — a non-flagged binary — is NOT flagged', () => {
+		const v = scanSourceForBareSpawn('x.ts', "execSync('ls -la');");
+		expect(v).toHaveLength(0);
+	});
+
+	test('replacing execSync with execFileSync(resolvedPath, argv, opts) is NOT flagged (regression: removal must pass)', () => {
+		const v = scanSourceForBareSpawn(
+			'x.ts',
+			"child_process.execFileSync(gitExecutable, ['remote', 'get-url', 'origin'], { cwd: directory, encoding: 'utf-8' });",
+		);
+		expect(v).toHaveLength(0);
+	});
+
+	test('a non-shell-string callee (execFileSync) with a full command as its first arg is NOT flagged by the shell-string branch (form 1 exact-match still applies)', () => {
+		// execFileSync's first positional arg is the executable, so a full
+		// command sentence there is neither a bare 'git' match nor a
+		// shell-string-first-token match — correctly not flagged.
+		const v = scanSourceForBareSpawn(
+			'x.ts',
+			"execFileSync('git remote get-url origin', args, {});",
+		);
 		expect(v).toHaveLength(0);
 	});
 });
