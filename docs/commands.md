@@ -859,7 +859,11 @@ DELETE active swarm state from `.swarm/`, including `plan.md`, `plan.json`, `SWA
 
 ### `/swarm reset-session`
 
-Clear only session state (`.swarm/session/state.json` and related files). Preserves plan, evidence, and knowledge. Use when starting a new model/session but continuing the same project. Before deleting, the session state is auto-backed up to `.swarm/reset-backups/<timestamp>/` (newest 5 kept).
+Clear only session state (`.swarm/session/state.json` and related files). Preserves plan, evidence, and knowledge. Use when starting a new model/session but continuing the same project. Also recovers stale coder settlements (issue #2268): a `DISPATCHED` settlement WAL left behind by a dispatch whose completion never arrived is settled here, so future coder dispatches cannot stay wedged with `CODER_DISPATCH_IN_PROGRESS`. Before deleting, the session state is auto-backed up to `.swarm/reset-backups/<timestamp>/` (newest 5 kept).
+
+### `/swarm recover [task_id] [--force]`
+
+Settle stale coder-settlement WALs in `.swarm/coder-settlements/` — the `CODER_DISPATCH_IN_PROGRESS` / `CODER_SETTLEMENT_IN_PROGRESS` wedge class where a dispatch completed but its settlement never fired (host killed mid-dispatch, cancelled Task, gate denial; issue #2268). Safe mode recovers settlements whose owning process is gone. `--force` additionally releases ownership keys still held by this process — only use it when no coder dispatch is genuinely still running; a still-running dispatch's late completion will then report `CODER_SETTLEMENT_IDEMPOTENCY_CONFLICT` (safe to ignore, the settlement is already durably recovered). Never interrupts a dispatch owned by another live OpenCode process. Human-only: agents self-heal dead-owner settlements via `update_task_status`. `/swarm diagnose` reports non-terminal settlements with the exact remediation.
 
 ### `/swarm checkpoint <save|restore|delete|list> <label>`
 

@@ -134,15 +134,40 @@ describe('gate-denial tracker wiring in src/index.ts', () => {
 	// way the tracker assertions above do — the runtime behavior is covered by
 	// tests/unit/workflow/coder-settlement-2214*.test.ts against the hook
 	// object; this guard proves src/index.ts actually calls it.
+	// Issue #2268 widened the trigger: rollback must fire for ANY throw in the
+	// tool.execute.before handler, including the advisory tail after
+	// failClosedRegionCompleted = true — that catch only runs when the handler
+	// threw, so the Task tool never executes and a begun settlement is
+	// orphaned regardless of which region threw. Gating on the flag reopens
+	// the #2214 wedge class for any future raw-awaited tail step.
 	test('the denial catch rolls back a begun settlement for denied Task calls', () => {
 		const catchIdx = toolBeforeBlock.search(/\}\s*catch\s*\(err\)\s*\{/);
 		const catchBody = toolBeforeBlock.slice(catchIdx);
 
-		// The rollback must fire only for the fail-closed region's denials and
-		// only for Task calls...
+		// The rollback must fire for EVERY Task-call throw — the eligibility
+		// condition must NOT consult failClosedRegionCompleted...
 		expect(catchBody).toMatch(
-			/if\s*\(\s*!failClosedRegionCompleted\s*&&\s*\(\s*normalizeToolName\(input\.tool\) === 'Task'\s*\|\|\s*normalizeToolName\(input\.tool\) === 'task'\s*\)\s*\)\s*\{/,
+			/if\s*\(\s*normalizeToolName\(input\.tool\) === 'Task'\s*\|\|\s*normalizeToolName\(input\.tool\) === 'task'\s*\)\s*\{/,
 		);
+		const rollbackIfMatch = catchBody.match(
+			/if\s*\(\s*normalizeToolName\(input\.tool\) === 'Task'/,
+		);
+		expect(rollbackIfMatch).not.toBeNull();
+		// ...the flag gate must not appear between the catch keyword and the
+		// rollback call (a re-narrowed trigger is the exact #2268 regression).
+		const rollbackCallIdx = catchBody.indexOf(
+			'delegationGateHooks.abortDeniedSettlementForCall(',
+		);
+		expect(rollbackCallIdx).toBeGreaterThan(0);
+		const rollbackConditionStart = catchBody.lastIndexOf(
+			'if (',
+			rollbackCallIdx,
+		);
+		const rollbackCondition = catchBody.slice(
+			rollbackConditionStart,
+			rollbackCallIdx,
+		);
+		expect(rollbackCondition).not.toContain('failClosedRegionCompleted');
 		// ...and must call the delegation gate's rollback entry point from
 		// inside its own try/catch so the original denial still propagates, with
 		// the rethrow landing AFTER the rollback attempt.

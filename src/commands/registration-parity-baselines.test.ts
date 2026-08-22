@@ -155,6 +155,9 @@ describe('Command registration parity — classification baselines', () => {
 				'skill-opt approve',
 				'skill-opt reject',
 				'skill-opt rollback',
+				// #2268: settlement recovery escape hatch — --force releases
+				// in-process dispatch ownership, an operator-only assertion.
+				'recover',
 			]),
 			toolCommands: new Set([
 				'pr subscribe',
@@ -174,6 +177,9 @@ describe('Command registration parity — classification baselines', () => {
 				'skill-opt approve',
 				'skill-opt reject',
 				'skill-opt rollback',
+				// #2268: human-only commands stay in the swarm_command z.enum —
+				// agent attempts are refused with a surface-to-user message.
+				'recover',
 			]),
 			noArgs: new Set(['pr status', 'lanes', 'context-map stats']),
 		};

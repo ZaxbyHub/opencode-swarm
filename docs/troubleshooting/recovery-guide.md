@@ -290,6 +290,41 @@ operation identity, and observed-file set intact. Resolve the reported recovery
 condition and replay the same trusted completion; never mark the task complete
 from the child transcript alone.
 
+## 11. Wedged Coder Settlement (CODER_DISPATCH_IN_PROGRESS)
+
+Foreground coder dispatches are fenced by a durable write-ahead record at
+`.swarm/coder-settlements/{taskId}.json` (`DISPATCHED` → `PREPARED` →
+`COMMITTED`, or `ABORTED`). When the dispatch completes normally, its
+completion hook settles the record. If that completion never arrives — the
+OpenCode process was killed mid-dispatch, the Task call was cancelled without
+a completion hook, or (on plugin versions ≤ 7.141.1) a gate denied the
+dispatch after the record was written — the record stays `DISPATCHED` and
+every later dispatch for that task is refused with
+`CODER_DISPATCH_IN_PROGRESS` / `CODER_SETTLEMENT_IN_PROGRESS`. On the same
+host process, `update_task_status` and `/swarm close` are paused by the same
+guard, so the session cannot progress on its own.
+
+**Recovery:**
+
+- `/swarm recover [task_id]` — settles stale records whose owning process is
+  gone. Human-only; the swarm's agents already self-heal this case via
+  `update_task_status`.
+- `/swarm recover <task_id> --force` — additionally releases ownership keys
+  still held by the current process. Only use when no coder dispatch is
+  genuinely still running: a still-running dispatch's late completion will
+  report `CODER_SETTLEMENT_IDEMPOTENCY_CONFLICT`, which is safe to ignore.
+- `/swarm reset-session` — recovers all stale coder settlements as part of
+  clearing session state.
+- Settlements owned by another live OpenCode process (a different pid on the
+  same `.swarm/`) are never interrupted: close that instance or run
+  `/swarm recover` there.
+
+**Never delete or hand-edit `.swarm/coder-settlements/*.json`.** The record
+carries the launch baseline that attributes the coder's changes to the task;
+deleting it discards attribution and can strand review debt. `/swarm diagnose`
+reports every non-terminal settlement with its owner liveness and the exact
+remediation.
+
 ---
 
 For architecture details, see `docs/plan-durability.md`.

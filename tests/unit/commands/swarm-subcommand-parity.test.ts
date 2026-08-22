@@ -358,7 +358,9 @@ describe('swarm-subcommand-parity', () => {
 		// Pin the expected command count to prevent silent shrinkage.
 		// If commands are added to or removed from COMMAND_REGISTRY, update this number
 		// after verifying the skill's subcommand list is updated to match.
-		expect(expectedCommands.size).toBe(102);
+		// 102 → 103: /swarm recover added (issue #2268), documented in
+		// .claude/skills/swarm/SKILL.md.
+		expect(expectedCommands.size).toBe(103);
 
 		console.info(
 			`[swarm-subcommand-parity] skill documented commands (raw): ${skillRawCommands.length}`,
