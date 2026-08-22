@@ -395,7 +395,7 @@ describe('pr-workflow-gate item-keyed reviewer/critic coherence', () => {
 				],
 			),
 		).rejects.toThrow(
-			`record ${BASE_IDS[0]} has no authoritative reviewer verdict`,
+			`${BASE_IDS[0]}: no authoritative reviewer verdict (absent from the settled reviewer map)`,
 		);
 	});
 
