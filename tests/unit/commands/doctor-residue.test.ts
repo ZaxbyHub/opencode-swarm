@@ -12,6 +12,7 @@ import {
 	mkdtempSync,
 	readdirSync,
 	readFileSync,
+	realpathSync,
 	rmSync,
 	utimesSync,
 	writeFileSync,
@@ -21,6 +22,7 @@ import * as path from 'node:path';
 import { handleDoctorCommand } from '../../../src/commands/doctor';
 import { _internals as residueInternals } from '../../../src/services/swarm-residue';
 import { withFrozenClock } from '../../helpers/test-clock';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 let projectDir: string;
 let swarmDir: string;
@@ -41,7 +43,7 @@ function makeResidue(rel: string, hoursOld = 2, content = 'stale'): string {
 }
 
 beforeEach(() => {
-	projectDir = mkdtempSync(path.join(os.tmpdir(), 'doctor-residue-'));
+	projectDir = canonicalMkdtemp('doctor-residue-');
 	swarmDir = path.join(projectDir, '.swarm');
 	mkdirSync(swarmDir, { recursive: true });
 	residueInternals.queryTracked = () => ({ tracked: new Set<string>() });

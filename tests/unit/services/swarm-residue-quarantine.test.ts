@@ -10,6 +10,7 @@ import {
 	mkdtempSync,
 	readdirSync,
 	readFileSync,
+	realpathSync,
 	rmSync,
 	utimesSync,
 	writeFileSync,
@@ -23,6 +24,7 @@ import {
 	rollbackResidueQuarantine,
 } from '../../../src/services/swarm-residue';
 import { withFrozenClock } from '../../helpers/test-clock';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 let projectDir: string;
 let swarmDir: string;
@@ -50,7 +52,7 @@ function makeTarget(rel: string): string {
 }
 
 beforeEach(() => {
-	projectDir = mkdtempSync(path.join(os.tmpdir(), 'swarm-residue-q-'));
+	projectDir = canonicalMkdtemp('swarm-residue-q-');
 	swarmDir = path.join(projectDir, '.swarm');
 	mkdirSync(swarmDir, { recursive: true });
 	_internals.queryTracked = () => ({ tracked: new Set<string>() });

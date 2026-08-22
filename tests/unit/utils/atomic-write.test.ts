@@ -15,6 +15,7 @@ import {
 	mkdtempSync,
 	readdirSync,
 	readFileSync,
+	realpathSync,
 	rmSync,
 	symlinkSync,
 } from 'node:fs';
@@ -32,6 +33,7 @@ import {
 	SWARM_TEMP_GRAMMARS,
 	WRITER_CLASSIFICATION,
 } from '../../../src/utils/atomic-write';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 let projectDir: string;
 let swarmDir: string;
@@ -39,7 +41,7 @@ let swarmDir: string;
 // pin live in tests/unit/utils/atomic-write-ratchet.test.ts (FR-006 cap).
 
 beforeEach(() => {
-	projectDir = mkdtempSync(path.join(os.tmpdir(), 'atomic-write-'));
+	projectDir = canonicalMkdtemp('atomic-write-');
 	swarmDir = path.join(projectDir, '.swarm');
 	mkdirSync(swarmDir, { recursive: true });
 });
@@ -200,8 +202,8 @@ describe('assertSwarmContainedTarget', () => {
 
 	test('rejects a symlinked .swarm root', () => {
 		rmSync(projectDir, { recursive: true, force: true });
-		const realProject = mkdtempSync(path.join(os.tmpdir(), 'aw-real-'));
-		const linkedProject = mkdtempSync(path.join(os.tmpdir(), 'aw-link-'));
+		const realProject = canonicalMkdtemp('aw-real-');
+		const linkedProject = canonicalMkdtemp('aw-link-');
 		mkdirSync(path.join(realProject, '.swarm'), { recursive: true });
 		try {
 			symlinkSync(

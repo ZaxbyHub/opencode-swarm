@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import {
 	mkdirSync,
 	mkdtempSync,
+	realpathSync,
 	rmSync,
 	utimesSync,
 	writeFileSync,
@@ -18,13 +19,14 @@ import * as path from 'node:path';
 import { getDiagnoseData } from '../../../src/services/diagnose-service';
 import { _internals as residueInternals } from '../../../src/services/swarm-residue';
 import { withFrozenClock } from '../../helpers/test-clock';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 let projectDir: string;
 let swarmDir: string;
 const realQueryTracked = residueInternals.queryTracked;
 
 beforeEach(() => {
-	projectDir = mkdtempSync(path.join(os.tmpdir(), 'diagnose-residue-'));
+	projectDir = canonicalMkdtemp('diagnose-residue-');
 	swarmDir = path.join(projectDir, '.swarm');
 	mkdirSync(swarmDir, { recursive: true });
 	residueInternals.queryTracked = () => ({ tracked: new Set<string>() });

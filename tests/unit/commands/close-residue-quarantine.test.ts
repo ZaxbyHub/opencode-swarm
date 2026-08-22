@@ -24,6 +24,7 @@ import {
 	mkdtempSync,
 	readdirSync,
 	readFileSync,
+	realpathSync,
 	rmSync,
 	utimesSync,
 	writeFileSync,
@@ -39,6 +40,7 @@ import { initLedger } from '../../../src/plan/ledger.js';
 import { derivePlanId } from '../../../src/plan/utils.js';
 import * as actualState from '../../../src/state.js';
 import { withFrozenClock } from '../../helpers/test-clock';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const mockExecuteWriteRetro = mock(async (_args: unknown, _directory: string) =>
 	JSON.stringify({
@@ -170,7 +172,7 @@ describe('handleCloseCommand — atomic-write residue handling (issue #2035)', (
 	let spawnSyncSpy: ReturnType<typeof spyOn>;
 
 	beforeEach(() => {
-		testDir = mkdtempSync(path.join(os.tmpdir(), 'close-residue-test-'));
+		testDir = canonicalMkdtemp('close-residue-test-');
 		spawnSyncSpy = spyOn(childProcess, 'spawnSync').mockImplementation(((
 			...args: unknown[]
 		) =>

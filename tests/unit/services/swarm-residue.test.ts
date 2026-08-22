@@ -15,6 +15,7 @@ import {
 	mkdtempSync,
 	readdirSync,
 	readFileSync,
+	realpathSync,
 	rmSync,
 	symlinkSync,
 	utimesSync,
@@ -31,6 +32,7 @@ import {
 	rollbackResidueQuarantine,
 } from '../../../src/services/swarm-residue';
 import { withFrozenClock } from '../../helpers/test-clock';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 let projectDir: string;
 let swarmDir: string;
@@ -68,7 +70,7 @@ function entryFor(
 }
 
 beforeEach(() => {
-	projectDir = mkdtempSync(path.join(os.tmpdir(), 'swarm-residue-'));
+	projectDir = canonicalMkdtemp('swarm-residue-');
 	swarmDir = path.join(projectDir, '.swarm');
 	mkdirSync(swarmDir, { recursive: true });
 	// Deterministic tracked state: everything untracked by default.
