@@ -283,6 +283,14 @@ Category `delegation`, severity `notice`, privacy `pseudonymous`. Producer
 `src/telemetry.ts:506`. Consumers: none — owner **#2047**. Retention: **#2045**.
 Required workflow IDs: `hostSessionId`. OTel mapping: `genai`.
 
+#### model_unresolved
+Category `delegation`, severity `warning`, privacy `pseudonymous`. Producer
+`src/telemetry.ts:594` (issue #2271 bug 4: preflight confirmed a configured
+agent model id does not resolve against the provider catalog — fires before
+any dispatch attempt, unlike a runtime `model_fallback`). Consumers: none —
+owner **#2047**. Retention: **#2045**. Required workflow IDs: `hostSessionId`.
+OTel mapping: `genai`.
+
 ### Gate category
 
 #### gate_passed

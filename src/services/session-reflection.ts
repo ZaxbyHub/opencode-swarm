@@ -140,6 +140,14 @@ export interface SessionReflectionData {
 	knowledgeDelta?: KnowledgeDelta;
 	skillViolations: SkillViolationSignal[];
 	contradictionCandidates: ContradictionCandidate[];
+	/**
+	 * Issue #2271 bug 6: rejection/circuit-breaker/manual-approval event counts
+	 * by type, read from the session ledger (.swarm/events.jsonl). Gate denials
+	 * throw in tool.execute.before and never increment ToolAggregate counters
+	 * (denied calls do not fire toolAfter), so without this field a session
+	 * full of gate rejections reports "0 tool failures or gate rejections".
+	 */
+	ledgerRejections?: Record<string, number>;
 }
 
 export interface SessionReflectionResult {
@@ -308,6 +316,119 @@ async function gatherGateFailures(
 	}
 
 	return [...failures.values()].sort((a, b) => b.count - a.count);
+}
+
+/**
+ * Issue #2271 bug 6: event types in .swarm/events.jsonl that represent a
+ * rejection, circuit-breaker trip, or manual gate override. These events are
+ * written when a gate DENIES a call — and a denied call throws in
+ * tool.execute.before, so it never fires toolAfter and never increments the
+ * ToolAggregate failure counters the report used to rely on exclusively.
+ * `task_removed`, `sounding_board_consulted`, and the advisory `prm_*`
+ * pattern events are deliberately NOT here: they are process/telemetry
+ * records, not failures. (`prm_hard_stop*` is telemetry.jsonl-only — it has
+ * no events.jsonl writer, so listing it here could never match.)
+ *
+ * NOTE on field shapes: several of these writers emit NO session field
+ * (e.g. coder_retry_circuit_breaker); sessionless events are counted even in
+ * scoped mode because they cannot be attributed to a sibling session.
+ */
+const REJECTION_LEDGER_EVENT_TYPES = new Set([
+	'coder_retry_circuit_breaker',
+	'plan_critic_gate_manual_approval',
+	'architect_loop_detected',
+	'agent_conflict_detected',
+]);
+
+/** Size bound for the ledger read — session-scoped, but bounded regardless. */
+const MAX_LEDGER_BYTES = 16 * 1024 * 1024;
+
+/**
+ * Count rejection-class events in the session ledger. Reads the LIVE
+ * .swarm/events.jsonl first (finalize runs before archive in the close
+ * pipeline), falling back to the newest archived copy for a partially-run
+ * prior close. Fail-open: any read/parse problem yields empty counts.
+ *
+ * When `sessionId` is provided, events carrying a DIFFERENT session id are
+ * ignored so a per-session close summary cannot overcount sibling sessions'
+ * rejections in multi-swarm projects. Events with NO session field are still
+ * counted: several rejection writers emit none (coder_retry_circuit_breaker,
+ * architect_loop_detected), a sessionless event cannot be attributed to a
+ * sibling session, and dropping them would resurrect the bug-6 undercount in
+ * the standard close flow.
+ */
+async function gatherLedgerRejections(
+	directory: string,
+	sessionId?: string,
+): Promise<Record<string, number>> {
+	const counts: Record<string, number> = {};
+	const readLedger = async (filePath: string): Promise<string | null> => {
+		try {
+			const stat = await fs.stat(filePath);
+			if (!stat.isFile() || stat.size > MAX_LEDGER_BYTES) return null;
+			return await fs.readFile(filePath, 'utf-8');
+		} catch {
+			return null;
+		}
+	};
+
+	let content = await readLedger(
+		path.join(directory, '.swarm', 'events.jsonl'),
+	);
+	if (content === null) {
+		try {
+			const archiveRoot = path.join(directory, '.swarm', 'archive');
+			const archiveEntries = await fs.readdir(archiveRoot);
+			const archives = archiveEntries
+				.filter((entry) => entry.startsWith('swarm-'))
+				.sort();
+			for (
+				let index = archives.length - 1;
+				index >= 0 && content === null;
+				index--
+			) {
+				content = await readLedger(
+					path.join(archiveRoot, archives[index], 'events.jsonl'),
+				);
+			}
+		} catch {
+			/* no archive directory */
+		}
+	}
+	if (content === null) return counts;
+
+	for (const line of content.split('\n')) {
+		const trimmed = line.trim();
+		if (!trimmed) continue;
+		try {
+			const parsed = JSON.parse(trimmed) as {
+				type?: unknown;
+				sessionId?: unknown;
+				sessionID?: unknown;
+			};
+			if (
+				typeof parsed.type === 'string' &&
+				REJECTION_LEDGER_EVENT_TYPES.has(parsed.type)
+			) {
+				if (sessionId !== undefined) {
+					const eventSession =
+						typeof parsed.sessionId === 'string'
+							? parsed.sessionId
+							: typeof parsed.sessionID === 'string'
+								? parsed.sessionID
+								: undefined;
+					// Sessionless rejection events stay counted (see doc);
+					// only events that name a DIFFERENT session are excluded.
+					if (eventSession !== undefined && eventSession !== sessionId)
+						continue;
+				}
+				counts[parsed.type] = (counts[parsed.type] ?? 0) + 1;
+			}
+		} catch {
+			/* malformed ledger line — skip */
+		}
+	}
+	return counts;
 }
 
 // ─── Issue #2077 signal gatherers (advisory, read-only) ──────────────
@@ -869,8 +990,29 @@ function buildDeterministicReport(data: SessionReflectionData): string {
 	lines.push('## Problems Encountered');
 	lines.push('');
 
+	// Issue #2271 bug 6: ledger rejections are failures the tool counters
+	// structurally cannot see (denied calls never fire toolAfter), so both the
+	// zero-failure claim and the clean-session claim must account for them.
+	const ledgerEntries = Object.entries(data.ledgerRejections ?? {})
+		.filter(([, count]) => count > 0)
+		.sort((a, b) => b[1] - a[1]);
+	const ledgerTotal = ledgerEntries.reduce((sum, [, count]) => sum + count, 0);
+	const ledgerLines = (): void => {
+		if (ledgerTotal === 0) return;
+		lines.push(
+			`${ledgerTotal} rejection/circuit-breaker event(s) in the session ledger (events.jsonl):`,
+		);
+		for (const [type, count] of ledgerEntries.slice(0, 8)) {
+			lines.push(`- ${type}: ${count}`);
+		}
+	};
+
 	if (data.totalToolFailures === 0 && data.gateFailures.length === 0) {
-		lines.push('No tool failures or gate rejections recorded this session.');
+		if (ledgerTotal > 0) {
+			ledgerLines();
+		} else {
+			lines.push('No tool failures or gate rejections recorded this session.');
+		}
 		lines.push('');
 	} else {
 		if (data.totalToolFailures > 0) {
@@ -897,6 +1039,12 @@ function buildDeterministicReport(data: SessionReflectionData): string {
 			for (const [cat, count] of taxonomyEntries) {
 				lines.push(`- ${cat}: ${count} occurrence(s)`);
 			}
+		}
+		// Ledger rejections augment the counted failures — they are a separate
+		// failure class, not a subset of tool/evidence counts.
+		if (ledgerTotal > 0) {
+			lines.push('');
+			ledgerLines();
 		}
 		lines.push('');
 	}
@@ -929,6 +1077,7 @@ function buildDeterministicReport(data: SessionReflectionData): string {
 	if (
 		data.totalToolFailures === 0 &&
 		data.gateFailures.length === 0 &&
+		ledgerTotal === 0 &&
 		data.lessonsFromRetros.length === 0
 	) {
 		lines.push('Session completed without notable issues.');
@@ -979,6 +1128,12 @@ export async function runSessionReflection(
 		input.directory,
 	);
 	const gateFailures = await gatherGateFailures(input.directory);
+	// Issue #2271 bug 6: read the session ledger so denied (never-counted)
+	// rejections surface in the report instead of a false "0 failures".
+	const ledgerRejections = await _internals.gatherLedgerRejections(
+		input.directory,
+		input.sessionId,
+	);
 
 	// Issue #2077: advisory signal gatherers (read-only, fail-open, invoked
 	// through the _internals seam so tests inject fakes without mock.module).
@@ -1019,6 +1174,7 @@ export async function runSessionReflection(
 		knowledgeDelta,
 		skillViolations,
 		contradictionCandidates,
+		ledgerRejections,
 	};
 
 	// Issue #2077: the signals block + action proposals are computed ONCE and
@@ -1086,6 +1242,7 @@ export const _internals = {
 	gatherAgentDispatches,
 	gatherRetroLessonsAndTaxonomy,
 	gatherGateFailures,
+	gatherLedgerRejections,
 	buildReflectionDataSummary,
 	buildDeterministicReport,
 	// Issue #2077 advisory gatherers + their read-only dependencies.

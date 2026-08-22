@@ -1439,8 +1439,147 @@ export interface PorcelainV2Snapshot {
 }
 
 /**
+ * Source-code extensions that must stay VISIBLE even under `.swarm/`.
+ *
+ * The plugin's runtime artifacts are data files (`.json`, `.jsonl`, `.md`,
+ * `.env`, lock markers, extensionless blobs). A source-code file under
+ * `.swarm/` is something the plugin would never write itself — the doc-only
+ * attribution contract (workspace-snapshot-doc-only.test.ts) deliberately
+ * keeps such files visible as an anti-evasion guard so a task cannot hide
+ * code changes inside the runtime-state directory.
+ */
+const SWARM_VISIBLE_CODE_EXTENSIONS = new Set([
+	'.js',
+	'.jsx',
+	'.mjs',
+	'.cjs',
+	'.ts',
+	'.tsx',
+	'.py',
+	'.pyw',
+	'.go',
+	'.rs',
+	'.php',
+	'.pl',
+	'.java',
+	'.kt',
+	'.swift',
+	'.scala',
+	'.c',
+	'.h',
+	'.cpp',
+	'.cs',
+	'.rb',
+	'.lua',
+	'.r',
+	'.sh',
+	'.bash',
+	'.zsh',
+	'.ps1',
+	'.psm1',
+	'.bat',
+	'.cmd',
+	'.vb',
+	'.fs',
+]);
+
+/**
+ * True for plugin-owned runtime state paths (`.swarm` and the data files
+ * under it). Source-code files under `.swarm/` are NOT runtime state (see
+ * SWARM_VISIBLE_CODE_EXTENSIONS) and stay visible to attribution.
+ *
+ * Issue #2271 bug 2: the plugin continuously writes `.swarm/telemetry.jsonl`,
+ * session state, knowledge events, and evidence while a swarm runs. Those
+ * writes are runtime state (AGENTS.md invariant 4), never coder task output,
+ * so every settlement-side snapshot consumer (baseline dirtiness, attribution,
+ * Stage B workspace freshness) must treat them as invisible. Without this
+ * filter, a repo with a tracked or un-excluded `.swarm/` can never present a
+ * clean launch baseline and every coder dispatch dies with
+ * CODER_SETTLEMENT_CLEAN_BASELINE_REQUIRED.
+ *
+ * Exact lowercase `.swarm` match only: the plugin only ever creates `.swarm`,
+ * and on case-insensitive filesystems (macOS/Windows defaults) a
+ * differently-cased directory cannot coexist with it, so broadened matching
+ * would only risk false positives on case-SENSITIVE filesystems where
+ * `.SWARM` is a distinct user directory.
+ */
+export function isSwarmRuntimePath(p: string): boolean {
+	if (p === '.swarm') return true;
+	if (!p.startsWith('.swarm/')) return false;
+	const dot = p.lastIndexOf('.');
+	const extension = dot === -1 ? '' : p.slice(dot).toLowerCase();
+	return !SWARM_VISIBLE_CODE_EXTENSIONS.has(extension);
+}
+
+/**
+ * Strip `.swarm`/`.swarm/**` records from a `git status --porcelain=v2 -z`
+ * payload before it is hashed or parsed. Headers (`# ...`) always survive.
+ * Rename (`2 `) records:
+ * - primary path `.swarm` → the record AND its paired original-path record
+ *   are dropped (pure runtime churn);
+ * - primary path project source, original path `.swarm` (e.g. a runtime file
+ *   renamed into source) → the record is kept and the paired original-path
+ *   record is REPLACED with the primary path so the parser still sees a valid
+ *   pair and no `.swarm` string survives into the digest or the path arrays.
+ */
+function filterSwarmRuntimePorcelain(output: string): string {
+	const records = output.split('\0');
+	const kept: string[] = [];
+	for (let index = 0; index < records.length; index++) {
+		const record = records[index];
+		if (!record) {
+			continue;
+		}
+		if (record.startsWith('# ')) {
+			kept.push(record);
+			continue;
+		}
+		let primaryPath: string | null = null;
+		if (record.startsWith('? ')) {
+			primaryPath = record.slice(2);
+		} else if (record.startsWith('1 ')) {
+			primaryPath = porcelainV2PathAfterFields(record, 8);
+		} else if (record.startsWith('2 ')) {
+			primaryPath = porcelainV2PathAfterFields(record, 9);
+		} else if (record.startsWith('u ')) {
+			primaryPath = porcelainV2PathAfterFields(record, 10);
+		}
+		if (primaryPath !== null && isSwarmRuntimePath(primaryPath)) {
+			if (record.startsWith('2 ')) {
+				// The original path follows as its own NUL-delimited record.
+				index += 1;
+			}
+			continue;
+		}
+		if (record.startsWith('2 ') && primaryPath !== null) {
+			const originalRecord = records[index + 1];
+			kept.push(record);
+			if (
+				typeof originalRecord === 'string' &&
+				originalRecord !== '' &&
+				isSwarmRuntimePath(originalRecord)
+			) {
+				kept.push(primaryPath);
+				index += 1;
+			}
+			continue;
+		}
+		kept.push(record);
+	}
+	return kept.join('\0');
+}
+
+/**
  * Parse the one-command `git status --porcelain=v2 --branch -z` snapshot used
  * by background evidence capture. A malformed or unknown record fails closed.
+ *
+ * This parser is SHARED: `classifyPrWorkflowGitState` feeds it raw porcelain
+ * and relies on `.swarm` entries surviving in dirtyTrackedPaths/untrackedPaths
+ * so a tracked `.swarm` dirt fails closed with SWARM_STATE_TRACKING_ERROR
+ * (runtime state must never be treated as checkout dirt). It must therefore
+ * stay unfiltered; settlement-side `.swarm` immunity is applied by
+ * `filterSwarmRuntimePorcelain` before the payload reaches this parser
+ * (issue #2271 bug 2).
  */
 export function parsePorcelainV2Snapshot(
 	output: string,
@@ -1557,13 +1696,18 @@ export function captureWorkspaceSnapshot(
 	const upstreamBefore = resolveCurrentPrHeadSha
 		? runGit(directory, ['rev-parse', '@{upstream}'])
 		: null;
-	const porcelain = runGit(directory, [
+	const porcelainRaw = runGit(directory, [
 		'status',
 		'--porcelain=v2',
 		'--branch',
 		'-z',
 		'--untracked-files=all',
 	]);
+	// Issue #2271 bug 2: hash and parse the same .swarm-filtered payload so
+	// dirtyHash comparisons and changedFiles derivation stay consistent —
+	// plugin runtime writes under .swarm/ are invisible to settlement.
+	const porcelain =
+		porcelainRaw === null ? null : filterSwarmRuntimePorcelain(porcelainRaw);
 	const snapshot =
 		porcelain === null ? null : parsePorcelainV2Snapshot(porcelain);
 	const upstreamAfter = resolveCurrentPrHeadSha
@@ -1600,9 +1744,16 @@ export function changedFilesSinceSnapshot(
 	baseline: BackgroundWorkspaceSnapshot | undefined,
 ): string[] | null {
 	if (!baseline?.gitHead || baseline.changedFiles == null) return null;
+	// Issue #2271 bug 2: baselines persisted by older plugin versions (or
+	// captured through paths without the porcelain filter) may still carry
+	// .swarm runtime paths; strip them before the dirty check so plugin-owned
+	// writes never make attribution fail closed.
+	const baselineDirt = baseline.changedFiles.filter(
+		(p) => !isSwarmRuntimePath(p),
+	);
 	// A dirty baseline cannot prove which same-path edits belong to this task.
 	// Fail closed instead of treating unchanged pre-existing dirt as task output.
-	if (baseline.changedFiles.length > 0) return null;
+	if (baselineDirt.length > 0) return null;
 	const current = captureWorkspaceSnapshot(directory);
 	if (!current.gitHead || current.changedFiles == null) return null;
 
@@ -1616,8 +1767,9 @@ export function changedFilesSinceSnapshot(
 			current.gitHead,
 		]);
 		if (committed === null) return null;
-		for (const changedPath of parseNulPaths(committed))
-			changed.add(changedPath);
+		for (const changedPath of parseNulPaths(committed)) {
+			if (!isSwarmRuntimePath(changedPath)) changed.add(changedPath);
+		}
 	}
 
 	return [...changed];

@@ -511,6 +511,51 @@ export async function dispatchCriticAndWriteEvent(
 		`[full-auto-intercept] Dispatching critic: ${oversightAgent.name} using model ${criticModel}`,
 	);
 
+	// Issue #2271 bug 4: an oversight-critic model id that does not resolve
+	// fails permanently on every attempt ("Model not found"/"Forbidden") and
+	// silently disables the full-auto quality gate. Preflight it against the
+	// provider catalog; a POSITIVE unresolved result surfaces as PENDING with
+	// an actionable reason (full-auto then degrades to user escalation, its
+	// designed unavailability path) instead of wedging. Catalog unavailable →
+	// fail open and let the existing retry/classification handle it.
+	try {
+		const { checkSingleModelResolution } = await import(
+			'../services/model-preflight'
+		);
+		const resolution = await checkSingleModelResolution(criticModel, client);
+		if (resolution === 'unresolved') {
+			logger.warn(
+				`[full-auto-intercept] critic model "${criticModel}" does not resolve against the provider catalog — oversight dispatch refused`,
+			);
+			telemetry.modelUnresolved(
+				'critic_oversight',
+				criticModel,
+				'full-auto oversight dispatch preflight',
+			);
+			const result: CriticDispatchResult = {
+				verdict: 'PENDING',
+				reasoning: `Critic model "${criticModel}" does not resolve against the provider catalog — fix agents.critic_oversight.model (or the critic model) in opencode-swarm.json before full-auto can gate on a real critic verdict`,
+				evidenceChecked: [],
+				antiPatternsDetected: [],
+				escalationNeeded: true,
+				rawResponse: '',
+			};
+			await writeAutoOversightEvent(
+				directory,
+				architectOutput,
+				result.verdict,
+				result.reasoning,
+				result.evidenceChecked,
+				interactionCount,
+				deadlockCount,
+				escalationType,
+			);
+			return result;
+		}
+	} catch {
+		/* fail-open: preflight errors never block the dispatch */
+	}
+
 	let ephemeralSessionId: string | undefined;
 	const promptController = new AbortController();
 

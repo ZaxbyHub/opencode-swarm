@@ -27,6 +27,12 @@ export type TelemetryEvent =
 	| 'budget_updated'
 	| 'context_pruned'
 	| 'model_fallback'
+	/**
+	 * Issue #2271 bug 4 — a configured agent model id was POSITIVELY confirmed
+	 * unresolvable against the live provider catalog (distinct from a runtime
+	 * model_fallback: this fires at preflight, before any dispatch attempt).
+	 */
+	| 'model_unresolved'
 	| 'hard_limit_hit'
 	| 'revision_limit_hit'
 	| 'loop_detected'
@@ -602,6 +608,19 @@ export const telemetry = {
 			fromModel,
 			toModel,
 			reason,
+		});
+	},
+
+	/**
+	 * Issue #2271 bug 4 — preflight confirmed a configured model id does not
+	 * resolve against the provider catalog. Emitted once per detected model.
+	 */
+	modelUnresolved(agentName: string, model: string, detail: string): void {
+		_internals.emit('model_unresolved', {
+			sessionId: 'preflight',
+			agentName,
+			model,
+			detail,
 		});
 	},
 

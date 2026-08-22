@@ -88,6 +88,12 @@ const FIXTURES: Record<string, Record<string, unknown>> = {
 		toModel: 'b',
 		reason: 'rate_limited',
 	},
+	model_unresolved: {
+		sessionId: 'sess-1',
+		agentName: 'critic',
+		model: 'opencode/nope',
+		detail: 'provider "opencode" does not list model "nope"',
+	},
 	gate_passed: { sessionId: 'sess-1', gate: 'qa_gate', taskId: '1.1' },
 	gate_failed: {
 		sessionId: 'sess-1',
