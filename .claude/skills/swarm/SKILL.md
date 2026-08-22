@@ -39,6 +39,7 @@ These are invoked as `/swarm <subcommand>`, NOT as bare `/subcommand`. The list 
 - `/swarm rollback` — restore swarm state or project files to a checkpoint
 - `/swarm reset` — clear swarm state files `[--confirm]`
 - `/swarm reset-session` — clear session state, preserve plan/evidence/knowledge
+- `/swarm recover` — settle wedged coder settlements `[task_id] [--force]` (human-only)
 - `/swarm checkpoint` — manage project checkpoints `[save|restore|delete|list] <label>`
 - `/swarm finalize` — finalize the swarm project and archive evidence
 - `/swarm close` — deprecated alias for `/swarm finalize`
