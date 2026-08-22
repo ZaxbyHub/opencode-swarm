@@ -335,54 +335,11 @@ describe('DiagnoseService Adversarial Security Tests', () => {
 		});
 
 		describe('ATTACK VECTOR 4: plan.swarm with shell metacharacters', () => {
-			it('should treat swarm ID with shell metacharacters as plain string', async () => {
-				const maliciousPlan: Plan = makePlan({
-					swarm: '"; rm -rf /; echo "',
-					phases: [
-						{
-							id: 1,
-							name: 'Phase 1',
-							status: 'pending' as const,
-							tasks: [
-								{
-									id: '1.1',
-									phase: 1,
-									status: 'pending' as const,
-									size: 'small' as const,
-									description: 'Task 1.1',
-									depends: [],
-									files_touched: [],
-								},
-							],
-						},
-					],
-				});
-
-				mockLoadPlanJsonOnly.mockResolvedValue(maliciousPlan);
-
-				process.env.OPENCODE_SWARM_ID = '"; rm -rf /; echo "';
-
-				const result = await getDiagnoseData(testDirectory);
-
-				const identityCheck = findCheck(result.checks, 'Swarm Identity');
-				expect(identityCheck).toBeDefined();
-				expect(identityCheck?.status).toBe('✅');
-				expect(identityCheck?.detail).toContain('; rm -rf /; echo ');
-
-				// Verify git was invoked in array-argv form (never through a shell
-				// string), so the malicious swarm ID has no shell-metacharacter
-				// interpretation surface at all.
-				expect(mockExecSync).not.toHaveBeenCalled();
-				expect(mockExecFileSync).toHaveBeenCalledTimes(1);
-				expect(mockExecFileSync).toHaveBeenCalledWith(
-					'git',
-					['rev-parse', '--git-dir'],
-					{
-						cwd: testDirectory,
-						stdio: 'pipe',
-					},
-				);
-			});
+			// A sibling test here ("should treat swarm ID with shell metacharacters
+			// as plain string"), which also asserts that git was invoked in
+			// array-argv form via execFileSync, now lives in
+			// diagnose-git-repository.test.ts (extracted to keep this file under
+			// the FR-006 line-count ratchet).
 
 			it('should treat swarm ID with command substitution chars as plain string', async () => {
 				const maliciousPlan: Plan = makePlan({

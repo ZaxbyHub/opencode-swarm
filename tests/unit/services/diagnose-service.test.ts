@@ -585,51 +585,8 @@ describe('checkConfigBackups', () => {
 	});
 });
 
-describe('checkGitRepository', () => {
-	beforeEach(() => {
-		// The resolver's own probing is unrelated to this suite's fixture; seed
-		// it so `checkGitRepository`'s execFileSync call goes through the mock
-		// deterministically instead of a real probe.
-		__seedGitExecutableForTests('git');
-	});
-
-	it('should pass when execFileSync succeeds', async () => {
-		mockExecFileSync.mockReturnValue(Buffer.from('.git'));
-
-		const result = await getDiagnoseData('/test/dir');
-		const check = findCheck(result.checks, 'Git Repository');
-
-		expect(check).toBeDefined();
-		expect(check.status).toBe('✅');
-		expect(check.detail).toBe('Git repository detected');
-	});
-
-	it('should fail when execFileSync throws', async () => {
-		mockExecFileSync.mockImplementation(() => {
-			throw new Error('Not a git repo');
-		});
-
-		const result = await getDiagnoseData('/test/dir');
-		const check = findCheck(result.checks, 'Git Repository');
-
-		expect(check).toBeDefined();
-		expect(check.status).toBe('❌');
-		expect(check.detail).toBe(
-			'Not a git repository — version control recommended',
-		);
-	});
-
-	it('should fail when invalid directory', async () => {
-		mockExistsSync.mockReturnValue(false);
-
-		const result = await getDiagnoseData('/test/dir');
-		const check = findCheck(result.checks, 'Git Repository');
-
-		expect(check).toBeDefined();
-		expect(check.status).toBe('❌');
-		expect(check.detail).toBe('Invalid directory — cannot check git status');
-	});
-});
+// `checkGitRepository` coverage now lives in diagnose-git-repository.test.ts
+// (extracted to keep this file under the FR-006 line-count ratchet).
 
 describe('checkSpecStaleness', () => {
 	it('should pass with no spec', async () => {
