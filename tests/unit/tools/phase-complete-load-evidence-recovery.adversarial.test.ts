@@ -4,10 +4,10 @@
 
 import { afterEach, beforeEach, describe, expect, test, vi } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 function retrospectiveRecovery(result: {
 	gate_report?: {
@@ -76,11 +76,7 @@ describe('phase_complete - loadEvidence typed recovery adversarial testing', () 
 		resetSwarmState();
 		vi.clearAllMocks();
 
-		tempDir = fs.realpathSync(
-			fs.mkdtempSync(
-				path.join(os.tmpdir(), 'phase-complete-load-evidence-recovery-'),
-			),
-		);
+		tempDir = canonicalMkdtemp('phase-complete-load-evidence-recovery-');
 		originalCwd = process.cwd();
 		process.chdir(tempDir);
 

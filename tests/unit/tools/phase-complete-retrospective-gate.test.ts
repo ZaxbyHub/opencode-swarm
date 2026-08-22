@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const { phase_complete } = await import('../../../src/tools/phase-complete.js');
 const FIXED_TIMESTAMP = '2026-08-22T12:00:00.000Z';
@@ -28,9 +28,7 @@ describe('phase_complete retrospective gate', () => {
 
 	beforeEach(() => {
 		resetSwarmState();
-		tempDir = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'phase-complete-retro-')),
-		);
+		tempDir = canonicalMkdtemp('phase-complete-retro-');
 		originalCwd = process.cwd();
 		process.chdir(tempDir);
 

@@ -7,12 +7,12 @@
 
 import { afterEach, beforeEach, describe, expect, test, vi } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { loadPlan } from '../../../src/plan/manager';
 import { resetSwarmState, swarmState } from '../../../src/state';
 import { executePhaseComplete } from '../../../src/tools/phase-complete';
 import { freezeClock } from '../../helpers/test-clock';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 vi.mock('../../../src/parallel/file-locks', () => ({
 	tryAcquireLock: vi.fn(),
@@ -171,9 +171,7 @@ describe('executePhaseComplete locking fail-closed behavior', () => {
 			fixedNow: 1_704_067_200_000,
 			isoNow: '2024-01-01T00:00:00.000Z',
 		});
-		tempDir = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'phase-complete-lock-test-')),
-		);
+		tempDir = canonicalMkdtemp('phase-complete-lock-test-');
 		originalCwd = process.cwd();
 		process.chdir(tempDir);
 

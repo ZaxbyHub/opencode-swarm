@@ -7,7 +7,6 @@ import {
 	test,
 } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 
 import {
@@ -17,6 +16,7 @@ import {
 	swarmState,
 } from '../../../src/state';
 import { freezeClock } from '../../helpers/test-clock';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const { phase_complete } = await import('../../../src/tools/phase-complete');
 
@@ -114,9 +114,7 @@ describe('phase_complete tool - ADVERSARIAL SECURITY TESTS', () => {
 		});
 		resetSwarmState();
 
-		tempDir = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'phase-complete-adversarial-')),
-		);
+		tempDir = canonicalMkdtemp('phase-complete-adversarial-');
 		originalCwd = process.cwd();
 		process.chdir(tempDir);
 

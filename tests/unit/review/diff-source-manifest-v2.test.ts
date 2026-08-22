@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import {
 	collectReviewDiff,
 	_internals as diffSourceInternals,
 } from '../../../src/review/diff-source';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const fixtures: string[] = [];
 const originalNow = diffSourceInternals.now;
@@ -29,9 +29,7 @@ function git(directory: string, args: string[]): string {
 }
 
 function repoFixture(prefix: string): string {
-	const directory = fs.realpathSync(
-		fs.mkdtempSync(path.join(os.tmpdir(), prefix)),
-	);
+	const directory = canonicalMkdtemp(prefix);
 	fixtures.push(directory);
 	git(directory, ['init', '-b', 'main']);
 	git(directory, ['config', 'user.email', 'review@example.invalid']);

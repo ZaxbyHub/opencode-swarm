@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { resetSwarmState, swarmState } from '../../../src/state';
 import { checkReviewerGate } from '../../../src/tools/update-task-status';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 import { createWorkflowTestSessionWithPassedTask } from '../../helpers/workflow-session-factory';
 
 const PLAN_JSON = JSON.stringify({
@@ -40,9 +40,7 @@ describe('checkReviewerGate corrupt evidence guidance', () => {
 	let tmpDir: string;
 
 	beforeEach(() => {
-		tmpDir = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'recovery-guidance-test-')),
-		);
+		tmpDir = canonicalMkdtemp('recovery-guidance-test-');
 		fs.mkdirSync(path.join(tmpDir, '.swarm'), { recursive: true });
 		fs.writeFileSync(path.join(tmpDir, '.swarm', 'plan.json'), PLAN_JSON);
 		resetSwarmState();
