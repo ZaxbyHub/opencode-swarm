@@ -1,5 +1,16 @@
 # Changelog
 
+## [7.144.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.144.3...v7.144.4) (2026-08-22)
+
+
+### Bug Fixes
+
+* **commands:** register /swarm recover in remaining sibling surfaces (CI round 3) ([0f70b0d](https://github.com/ZaxbyHub/opencode-swarm/commit/0f70b0d8a8fbcfa8a8539eb48341a4fbca4f2b94))
+* **sast:** repair semgrep auto-config gate ([1950d89](https://github.com/ZaxbyHub/opencode-swarm/commit/1950d89e8fc865139cd08abb861a863062d564d2))
+* **tests:** use static recordedAt in settlement cap fixtures (test-clock gate) ([80e2389](https://github.com/ZaxbyHub/opencode-swarm/commit/80e2389bfc2cfe8cc4848785ca722467239eefd0))
+* **workflow:** /swarm recover + reset-session settlement recovery for wedged coder dispatches (issue [#2268](https://github.com/ZaxbyHub/opencode-swarm/issues/2268)) ([e96020c](https://github.com/ZaxbyHub/opencode-swarm/commit/e96020c3db0058f4ab41fb9972f89f9a95aa4416))
+* **workflow:** harden settlement recovery per PR review (issue [#2268](https://github.com/ZaxbyHub/opencode-swarm/issues/2268)) ([0c403fd](https://github.com/ZaxbyHub/opencode-swarm/commit/0c403fddd6656b1a14b5581bd3c39666b279b928))
+
 ## [7.144.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.144.2...v7.144.3) (2026-08-21)
 
 
