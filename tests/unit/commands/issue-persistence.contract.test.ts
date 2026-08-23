@@ -20,6 +20,10 @@ import os from 'node:os';
 import * as path from 'node:path';
 import { _internals as urlSecurityInternals } from '../../../src/commands/_shared/url-security';
 import { _internals, handleIssueCommand } from '../../../src/commands/issue';
+// Issue #2035: atomicWriteFileSync delegates to the canonical helper, so the
+// atomic-write rename seam lives here. The unlink seam on `issue._internals`
+// stays — issue.ts's own rollback unlink still routes through it.
+import { _internals as atomicWriteInternals } from '../../../src/utils/atomic-write';
 
 // =============================================================================
 // Mock: bare-number resolution requires git remote detection via spawnSync
@@ -58,7 +62,8 @@ let renameTracker: RenameTracker;
 
 /**
  * Inject renameSync failure for specific target files after N calls.
- * Non-matching paths always delegate to real renameSync.
+ * Non-matching paths always delegate to real renameSync. Targets the
+ * canonical atomic-write seam (issue #2035).
  */
 function installRenameFailAfter(
 	targetSuffix: string,
@@ -70,7 +75,7 @@ function installRenameFailAfter(
 	renameTracker.failAfterCount = afterCount;
 	renameTracker.errorMsg = errorMsg;
 
-	_internals.renameSync = (src: string, dest: string) => {
+	atomicWriteInternals.renameSync = (src: string, dest: string) => {
 		if (dest.endsWith(renameTracker.failOnTarget)) {
 			renameTracker.callCount++;
 			if (renameTracker.callCount > renameTracker.failAfterCount) {
@@ -85,6 +90,8 @@ function installRenameFailAfter(
 
 /**
  * Inject writeFileSync tracking — records all writes to a list.
+ * (Retained for tests that need it; the atomic-write path itself now records
+ * via the atomic-write rename seam above — issue #2035.)
  */
 type WriteTracker = {
 	writes: Array<{ path: string; content: string }>;
@@ -103,6 +110,7 @@ function installWriteTracker(): void {
 		return writeTracker.orig(filePath, content, ...rest);
 	};
 }
+void installWriteTracker;
 
 // =============================================================================
 // DI seam tracking for unlinkSync failure injection
@@ -141,9 +149,9 @@ describe('issue persistence — rollback and atomic-write contracts', () => {
 			failOnTarget: '',
 			failAfterCount: Infinity,
 			errorMsg: '',
-			orig: _internals.renameSync,
+			orig: atomicWriteInternals.renameSync,
 		};
-		_internals.renameSync = renameTracker.orig;
+		atomicWriteInternals.renameSync = renameTracker.orig;
 
 		writeTracker = {
 			writes: [],
@@ -161,7 +169,7 @@ describe('issue persistence — rollback and atomic-write contracts', () => {
 
 	afterEach(() => {
 		urlSecurityInternals.spawnSync = realSpawnSync;
-		_internals.renameSync = renameTracker.orig;
+		atomicWriteInternals.renameSync = renameTracker.orig;
 		_internals.writeFileSync = writeTracker.orig;
 		_internals.unlinkSync = unlinkTracker.orig;
 
@@ -246,10 +254,10 @@ describe('issue persistence — rollback and atomic-write contracts', () => {
 		installRenameFailAfter('issue-reference.json', 0, 'ENOENT');
 
 		// 2) Also fail the rollback rename (trace-state restore)
-		//    After the issue-reference fails, atomicWriteFileSync for rollback
-		//    will attempt rename of trace-state. We make ALL renames fail.
+		//    After the issue-reference fails, the rollback atomic write of
+		//    trace-state attempts its rename. We make ALL renames fail.
 		const realRename = renameTracker.orig;
-		_internals.renameSync = (_src: string, _dest: string) => {
+		atomicWriteInternals.renameSync = (_src: string, _dest: string) => {
 			throw Object.assign(new Error('EPERM: rollback denied'), {
 				code: 'TEST_ROLLBACK_FAIL',
 			});
@@ -264,7 +272,7 @@ describe('issue persistence — rollback and atomic-write contracts', () => {
 		expect(result).not.toContain('[MODE: ISSUE_INGEST');
 
 		// Restore for cleanup
-		_internals.renameSync = realRename;
+		atomicWriteInternals.renameSync = realRename;
 	});
 
 	// =========================================================================
@@ -313,10 +321,9 @@ describe('issue persistence — rollback and atomic-write contracts', () => {
 
 		expect(result).toContain('Failed to persist issue reference durably');
 
-		// After rollback, trace-state is restored. No issue-reference temp files
-		// should exist (the temp file was from the failed issue-reference write;
-		// atomicWriteFileSync's catch block tries unlink+retry and the temp may
-		// persist, but the final file must not exist).
+		// After rollback, trace-state is restored. No issue-reference file
+		// should exist, and the failed write's temp is cleaned by the canonical
+		// helper's finally block (issue #2035).
 		const refPath = path.join(swarmDir, 'issue-reference.json');
 		expect(fsSync.existsSync(refPath)).toBe(false);
 
@@ -324,30 +331,41 @@ describe('issue persistence — rollback and atomic-write contracts', () => {
 		const restored = JSON.parse(fsSync.readFileSync(tracePath, 'utf-8'));
 		expect(restored.issueNumber).toBe(1);
 
-		// No leftover .tmp-* files must remain after rollback
+		// No leftover temp files must remain after rollback (canonical grammar
+		// is <target>.<hex32>.tmp — match any .tmp-bearing leftover).
 		const leftoverTmp = fsSync
 			.readdirSync(swarmDir)
-			.filter((f) => f.startsWith('.tmp-'));
+			.filter((f) => f.includes('.tmp'));
 		expect(leftoverTmp).toEqual([]);
 	});
 
 	// =========================================================================
-	// Atomic write verification: temp file path used during write
+	// Atomic write verification: canonical temp path used during write
 	// =========================================================================
-	test('atomic write: writeFileSync called with .tmp- prefixed path', () => {
-		installWriteTracker();
+	test('atomic write: renames flow from canonical .tmp temps in swarmDir', () => {
+		const renameSources: Array<{ src: string; dest: string }> = [];
+		const realRename = atomicWriteInternals.renameSync;
+		atomicWriteInternals.renameSync = ((src: string, dest: string) => {
+			renameSources.push({ src, dest });
+			return realRename(src, dest);
+		}) as typeof atomicWriteInternals.renameSync;
 
-		handleIssueCommand(tempDir, ['https://github.com/owner/repo/issues/42']);
+		try {
+			handleIssueCommand(tempDir, ['https://github.com/owner/repo/issues/42']);
+		} finally {
+			atomicWriteInternals.renameSync = realRename;
+		}
 
-		// At least one write should use a .tmp- prefixed temp path
-		const tmpWrites = writeTracker.writes.filter((w) =>
-			path.basename(w.path).startsWith('.tmp-'),
+		// At least one rename per artifact (trace-state + reference), each from
+		// a canonical <target>.<hex32>.tmp sentinel in the same directory.
+		const tmpRenames = renameSources.filter((r) =>
+			path.basename(r.src).endsWith('.tmp'),
 		);
-		expect(tmpWrites.length).toBeGreaterThanOrEqual(2);
+		expect(tmpRenames.length).toBeGreaterThanOrEqual(2);
 
-		// Temp paths should be under swarmDir
-		for (const w of tmpWrites) {
-			expect(path.dirname(w.path)).toBe(swarmDir);
+		// Temp paths must share the final file's directory (same-dir rename)
+		for (const r of tmpRenames) {
+			expect(path.dirname(r.src)).toBe(path.dirname(r.dest));
 		}
 
 		// Final files should exist
@@ -358,15 +376,20 @@ describe('issue persistence — rollback and atomic-write contracts', () => {
 	});
 
 	// =========================================================================
-	// Atomic write: renameSync called (not just writeFileSync)
+	// Atomic write: renameSync called (not just a raw in-place write)
 	// =========================================================================
-	test('atomic write: renameSync invoked after writeFileSync', () => {
+	test('atomic write: renameSync invoked after temp write', () => {
 		const renameSpy = mock((_src: string, _dest: string) => {
 			return renameTracker.orig(_src, _dest);
 		});
-		_internals.renameSync = renameSpy;
+		atomicWriteInternals.renameSync =
+			renameSpy as typeof atomicWriteInternals.renameSync;
 
-		handleIssueCommand(tempDir, ['https://github.com/owner/repo/issues/42']);
+		try {
+			handleIssueCommand(tempDir, ['https://github.com/owner/repo/issues/42']);
+		} finally {
+			atomicWriteInternals.renameSync = renameTracker.orig;
+		}
 
 		// renameSync should have been called at least twice (one per artifact)
 		expect(renameSpy).toHaveBeenCalledTimes(2);

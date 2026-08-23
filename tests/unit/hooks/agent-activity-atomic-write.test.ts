@@ -6,12 +6,23 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test';
-import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { PluginConfig } from '../../../src/config';
 import { _flushForTesting } from '../../../src/hooks/agent-activity';
 import { resetSwarmState, swarmState } from '../../../src/state';
+import { _internals as atomicWriteInternals } from '../../../src/utils/atomic-write';
+
+const realWriteSync = atomicWriteInternals.writeSync;
+
+/** Any canonical-grammar or legacy temp for the flush target counts as residue. */
+async function contextTempResidue(tempDir: string): Promise<string[]> {
+	const entries = await readdir(join(tempDir, '.swarm'));
+	return entries.filter(
+		(e) => e.startsWith('context.md') && e.endsWith('.tmp'),
+	);
+}
 
 const defaultConfig: PluginConfig = {
 	max_iterations: 5,
@@ -116,94 +127,90 @@ describe('Agent Activity — Atomic Write Pattern', () => {
 		});
 
 		describe('Write failure cleanup', () => {
-			it('should clean up .tmp file when Bun.write throws', async () => {
+			it('should clean up its own temp when the payload write fails', async () => {
 				const contextPath = join(tempDir, '.swarm', 'context.md');
-				const tempPath = `${contextPath}.tmp`;
 
 				// Create initial context.md
 				await writeFile(contextPath, '# Initial\n');
 
-				// Mock Bun.write to fail
-				const writeSpy = spyOn(Bun, 'write').mockRejectedValueOnce(
-					new Error('Write failed: EIO'),
-				);
+				// Force the canonical writer's payload write to fail (the
+				// seam the migrated writer actually uses — Bun.write is no
+				// longer on this path).
+				atomicWriteInternals.writeSync = () => {
+					throw new Error('Write failed: EIO');
+				};
 
-				// Flush should not throw (error caught internally)
-				await _flushForTesting(tempDir);
+				try {
+					// Flush should not throw (error caught internally)
+					await _flushForTesting(tempDir);
 
-				// Verify temp file was cleaned up
-				const tempExists = await stat(tempPath)
-					.then(() => true)
-					.catch(() => false);
-				expect(tempExists).toBe(false);
+					// Verify the writer's OWN unique temp was cleaned up
+					expect(await contextTempResidue(tempDir)).toEqual([]);
 
-				// Verify the original context.md was NOT modified
-				const originalContent = await Bun.file(contextPath).text();
-				expect(originalContent).not.toContain('## Agent Activity');
-
-				writeSpy.mockRestore();
+					// Verify the original context.md was NOT modified
+					const originalContent = await Bun.file(contextPath).text();
+					expect(originalContent).not.toContain('## Agent Activity');
+				} finally {
+					atomicWriteInternals.writeSync = realWriteSync;
+				}
 			});
 		});
 
 		describe('Error re-throw behavior', () => {
-			it('should re-throw Bun.write error so outer catch handles it', async () => {
+			it('should re-throw the write error so outer catch handles it', async () => {
 				const contextPath = join(tempDir, '.swarm', 'context.md');
-				const tempPath = `${contextPath}.tmp`;
 
 				// Create initial context.md before setting up mocks
 				await writeFile(contextPath, '# Initial\n');
 
-				// Mock Bun.write to fail
-				const testError = new Error('Disk full');
-				const writeSpy = spyOn(Bun, 'write').mockRejectedValueOnce(testError);
+				atomicWriteInternals.writeSync = () => {
+					throw new Error('Disk full');
+				};
 
-				// Flush should complete without throwing (outer catch in doFlush handles the error)
-				// Note: warn() from utils is DEBUG-gated (OPENCODE_SWARM_DEBUG=1), so
-				// console.warn is not called in test environments. Verify side effects instead.
-				await _flushForTesting(tempDir);
+				try {
+					// Flush should complete without throwing (outer catch in
+					// doFlush handles the error). warn() from utils is
+					// DEBUG-gated (OPENCODE_SWARM_DEBUG=1), so console.warn is
+					// not called in test environments. Verify side effects.
+					await _flushForTesting(tempDir);
 
-				// Verify temp file was cleaned up
-				const tempExists = await stat(tempPath)
-					.then(() => true)
-					.catch(() => false);
-				expect(tempExists).toBe(false);
+					// Verify temp file was cleaned up
+					expect(await contextTempResidue(tempDir)).toEqual([]);
 
-				// Verify original file NOT modified
-				const originalContent = await Bun.file(contextPath).text();
-				expect(originalContent).toBe('# Initial\n');
-
-				writeSpy.mockRestore();
+					// Verify original file NOT modified
+					const originalContent = await Bun.file(contextPath).text();
+					expect(originalContent).toBe('# Initial\n');
+				} finally {
+					atomicWriteInternals.writeSync = realWriteSync;
+				}
 			});
 
 			it('should preserve pendingEvents when write fails (will retry)', async () => {
 				const contextPath = join(tempDir, '.swarm', 'context.md');
-				const tempPath = `${contextPath}.tmp`;
 
 				// Set up pending events
 				swarmState.pendingEvents = 5;
 
-				// Mock Bun.write to fail
-				const writeSpy = spyOn(Bun, 'write').mockRejectedValueOnce(
-					new Error('Write failed'),
-				);
+				atomicWriteInternals.writeSync = () => {
+					throw new Error('Write failed');
+				};
 
 				// Mock console.warn to suppress output
 				const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
 
-				// Flush
-				await _flushForTesting(tempDir);
+				try {
+					// Flush
+					await _flushForTesting(tempDir);
 
-				// Verify pendingEvents was NOT reset (comment says "Don't reset pendingEvents — will retry on next trigger")
-				expect(swarmState.pendingEvents).toBe(5);
+					// Verify pendingEvents was NOT reset (comment says "Don't reset pendingEvents — will retry on next trigger")
+					expect(swarmState.pendingEvents).toBe(5);
 
-				// Verify temp file cleaned up
-				const tempExists = await stat(tempPath)
-					.then(() => true)
-					.catch(() => false);
-				expect(tempExists).toBe(false);
-
-				writeSpy.mockRestore();
-				warnSpy.mockRestore();
+					// Verify temp file cleaned up
+					expect(await contextTempResidue(tempDir)).toEqual([]);
+				} finally {
+					atomicWriteInternals.writeSync = realWriteSync;
+					warnSpy.mockRestore();
+				}
 			});
 		});
 

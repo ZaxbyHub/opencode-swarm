@@ -7,47 +7,53 @@
  * 3. undefined thrown as error
  * 4. Object with toString that throws
  * 5. Directory path with special characters
- * 6. Simultaneous detectDarkMatter success + writeFile failure
+ *
+ * Issue #2035 migrated the report write to the canonical atomic-write helper,
+ * so the write failure is injected through `src/utils/atomic-write.ts:_internals`
+ * (writeSync) — the seam the writer consults. Mocking `node:fs/promises`
+ * writeFile no longer intercepts anything.
  */
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
-import * as fs from 'node:fs/promises';
-
+import { existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { canonicalMkdtemp } from '../../tests/helpers/tmpdir.js';
 import { _internals as coChangeAnalyzer } from '../tools/co-change-analyzer.js';
+import { _internals as atomicWriteInternals } from '../utils/atomic-write.js';
 import { handleSimulateCommand } from './simulate.js';
 
-// ---------------------------------------------------------------------------
-// Test suite
-// ---------------------------------------------------------------------------
+const realWriteSync = atomicWriteInternals.writeSync;
 
 describe('simulate command report write adversarial', () => {
 	const originalDetectDarkMatter = coChangeAnalyzer.detectDarkMatter;
+	let warnCalls: Array<[string, unknown]>;
+	let testDir: string;
 
 	beforeEach(() => {
 		coChangeAnalyzer.detectDarkMatter = originalDetectDarkMatter;
+		atomicWriteInternals.writeSync = realWriteSync;
+		testDir = canonicalMkdtemp('simulate-adv-');
+		warnCalls = [];
 	});
 
 	afterEach(() => {
 		coChangeAnalyzer.detectDarkMatter = originalDetectDarkMatter;
+		atomicWriteInternals.writeSync = realWriteSync;
+		try {
+			rmSync(testDir, { recursive: true, force: true });
+		} catch {
+			// ignore cleanup errors
+		}
 		mock.restore();
 	});
 
-	// -------------------------------------------------------------------------
-	// Attack Vector 1: Circular reference object thrown (not Error, not string)
-	// -------------------------------------------------------------------------
-	test('warn() handles circular reference object without crashing', async () => {
-		// Arrange: mock detectDarkMatter to return empty data (success path)
-		coChangeAnalyzer.detectDarkMatter = mock(async () => []);
-
-		// Mock warn to track calls
-		const warnCalls: Array<[string, unknown]> = [];
-		const warnMock = mock((msg: string, data: unknown) => {
-			warnCalls.push([msg, data]);
-		});
-
-		await mock.module('../utils', () => ({
+	/** Mock '../utils' warn and force the canonical writer's payload write to throw `thrown`. */
+	function injectWriteFailure(thrown: unknown): void {
+		mock.module('../utils', () => ({
 			error: () => {},
 			log: () => {},
-			warn: warnMock,
+			warn: (msg: string, data: unknown) => {
+				warnCalls.push([msg, data]);
+			},
 			deepMerge: () => ({}),
 			escapeRegex: () => '',
 			MAX_MERGE_DEPTH: 10,
@@ -57,70 +63,43 @@ describe('simulate command report write adversarial', () => {
 			SwarmError: class extends Error {},
 			ToolError: class extends Error {},
 		}));
+		atomicWriteInternals.writeSync = () => {
+			throw thrown as never;
+		};
+	}
 
-		// Mock writeFile to throw circular reference object
+	function residueTemps(): string[] {
+		const swarm = join(testDir, '.swarm');
+		if (!existsSync(swarm)) return [];
+		return readdirSync(swarm).filter((f) => f.endsWith('.tmp'));
+	}
+
+	// -------------------------------------------------------------------------
+	// Attack Vector 1: Circular reference object thrown (not Error, not string)
+	// -------------------------------------------------------------------------
+	test('warn() handles circular reference object without crashing', async () => {
+		coChangeAnalyzer.detectDarkMatter = mock(async () => []);
 		const circularObj: Record<string, unknown> = { a: 1 };
 		circularObj.self = circularObj; // circular reference
+		injectWriteFailure(circularObj);
 
-		await mock.module('node:fs/promises', () => ({
-			...fs,
-			mkdir: mock(async () => undefined),
-			writeFile: mock(async () => {
-				throw circularObj;
-			}),
-		}));
+		const result = await handleSimulateCommand(testDir, []);
 
-		const { handleSimulateCommand: mockedCommand } = await import(
-			'./simulate.js'
-		);
-
-		// Act & Assert: should not throw, warn should be called
-		const result = await mockedCommand('/test/workspace', []);
 		expect(result).toBe('0 hidden coupling pairs detected');
 		expect(warnCalls.length).toBe(1);
 		// String(circularObj) produces '[object Object]' not crash
+		expect(residueTemps()).toEqual([]);
 	});
 
 	// -------------------------------------------------------------------------
 	// Attack Vector 2: null thrown as error
 	// -------------------------------------------------------------------------
 	test('warn() handles null throwable without crashing', async () => {
-		// Arrange
 		coChangeAnalyzer.detectDarkMatter = mock(async () => []);
+		injectWriteFailure(null);
 
-		const warnCalls: Array<[string, unknown]> = [];
-		const warnMock = mock((msg: string, data: unknown) => {
-			warnCalls.push([msg, data]);
-		});
+		const result = await handleSimulateCommand(testDir, []);
 
-		await mock.module('../utils', () => ({
-			error: () => {},
-			log: () => {},
-			warn: warnMock,
-			deepMerge: () => ({}),
-			escapeRegex: () => '',
-			MAX_MERGE_DEPTH: 10,
-			CLIError: class extends Error {},
-			ConfigError: class extends Error {},
-			HookError: class extends Error {},
-			SwarmError: class extends Error {},
-			ToolError: class extends Error {},
-		}));
-
-		await mock.module('node:fs/promises', () => ({
-			...fs,
-			mkdir: mock(async () => undefined),
-			writeFile: mock(async () => {
-				throw null;
-			}),
-		}));
-
-		const { handleSimulateCommand: mockedCommand } = await import(
-			'./simulate.js'
-		);
-
-		// Act & Assert: should not throw
-		const result = await mockedCommand('/test/workspace', []);
 		expect(result).toBe('0 hidden coupling pairs detected');
 		expect(warnCalls.length).toBe(1);
 		// null becomes 'null' via String(null)
@@ -131,42 +110,11 @@ describe('simulate command report write adversarial', () => {
 	// Attack Vector 3: undefined thrown as error
 	// -------------------------------------------------------------------------
 	test('warn() handles undefined throwable without crashing', async () => {
-		// Arrange
 		coChangeAnalyzer.detectDarkMatter = mock(async () => []);
+		injectWriteFailure(undefined);
 
-		const warnCalls: Array<[string, unknown]> = [];
-		const warnMock = mock((msg: string, data: unknown) => {
-			warnCalls.push([msg, data]);
-		});
+		const result = await handleSimulateCommand(testDir, []);
 
-		await mock.module('../utils', () => ({
-			error: () => {},
-			log: () => {},
-			warn: warnMock,
-			deepMerge: () => ({}),
-			escapeRegex: () => '',
-			MAX_MERGE_DEPTH: 10,
-			CLIError: class extends Error {},
-			ConfigError: class extends Error {},
-			HookError: class extends Error {},
-			SwarmError: class extends Error {},
-			ToolError: class extends Error {},
-		}));
-
-		await mock.module('node:fs/promises', () => ({
-			...fs,
-			mkdir: mock(async () => undefined),
-			writeFile: mock(async () => {
-				throw undefined;
-			}),
-		}));
-
-		const { handleSimulateCommand: mockedCommand } = await import(
-			'./simulate.js'
-		);
-
-		// Act & Assert: should not throw
-		const result = await mockedCommand('/test/workspace', []);
 		expect(result).toBe('0 hidden coupling pairs detected');
 		expect(warnCalls.length).toBe(1);
 		// undefined becomes 'undefined' via String(undefined)
@@ -177,64 +125,24 @@ describe('simulate command report write adversarial', () => {
 	// Attack Vector 4: Object with toString that throws
 	// -------------------------------------------------------------------------
 	test('warn() handles object with throwing toString without crashing', async () => {
-		// Arrange
 		coChangeAnalyzer.detectDarkMatter = mock(async () => []);
-
-		const warnCalls: Array<[string, unknown]> = [];
-		const warnMock = mock((msg: string, data: unknown) => {
-			warnCalls.push([msg, data]);
-		});
-
-		await mock.module('../utils', () => ({
-			error: () => {},
-			log: () => {},
-			warn: warnMock,
-			deepMerge: () => ({}),
-			escapeRegex: () => '',
-			MAX_MERGE_DEPTH: 10,
-			CLIError: class extends Error {},
-			ConfigError: class extends Error {},
-			HookError: class extends Error {},
-			SwarmError: class extends Error {},
-			ToolError: class extends Error {},
-		}));
-
-		// Object whose toString throws
 		const badToStringObj = {
 			toString(): string {
 				throw new Error('toString failed');
 			},
 		};
+		injectWriteFailure(badToStringObj);
 
-		await mock.module('node:fs/promises', () => ({
-			...fs,
-			mkdir: mock(async () => undefined),
-			writeFile: mock(async () => {
-				throw badToStringObj;
-			}),
-		}));
-
-		const { handleSimulateCommand: mockedCommand } = await import(
-			'./simulate.js'
-		);
-
-		// Act & Assert: should not throw (err instanceof Error is false, so String(err) is called)
-		// String(badToStringObj) calls toString() which throws
-		// But wait — in JS, String() on an object that throws in toString produces '[object Object]'
-		// Actually no, if toString throws, it should propagate
-		// Let me verify this behavior — actually String() on a throwing toString DOES throw
-		// So the test expects the command to throw here... but we want it NOT to crash
-		// The code does: const writeErr = err instanceof Error ? err.message : String(err);
-		// If err is not Error AND String(err) throws, that exception propagates up
-
-		// This test verifies current behavior (may throw) — future fix could wrap in try/catch
+		// The catch block does `err instanceof Error ? err.message : String(err)`.
+		// String() on a throwing toString DOES throw, and that exception
+		// propagates out of handleSimulateCommand — documenting current
+		// behavior (a future fix could wrap the stringification in try/catch).
 		let threw = false;
 		try {
-			await mockedCommand('/test/workspace', []);
+			await handleSimulateCommand(testDir, []);
 		} catch {
 			threw = true;
 		}
-		// Current behavior: throws when toString throws
 		expect(threw).toBe(true);
 	});
 
@@ -242,68 +150,45 @@ describe('simulate command report write adversarial', () => {
 	// Attack Vector 5: Directory path contains special characters
 	// -------------------------------------------------------------------------
 	test('warn() handles directory path with special characters without crashing', async () => {
-		// Arrange
 		coChangeAnalyzer.detectDarkMatter = mock(async () => []);
-
-		const warnCalls: Array<[string, unknown]> = [];
-		const warnMock = mock((msg: string, data: unknown) => {
-			warnCalls.push([msg, data]);
-		});
-
-		await mock.module('../utils', () => ({
-			error: () => {},
-			log: () => {},
-			warn: warnMock,
-			deepMerge: () => ({}),
-			escapeRegex: () => '',
-			MAX_MERGE_DEPTH: 10,
-			CLIError: class extends Error {},
-			ConfigError: class extends Error {},
-			HookError: class extends Error {},
-			SwarmError: class extends Error {},
-			ToolError: class extends Error {},
-		}));
-
-		// Path with special characters that could break string interpolation
-		const specialDir = '/test/workspace with spaces & $pecial/chars';
-
-		await mock.module('node:fs/promises', () => ({
-			...fs,
-			mkdir: mock(async () => undefined),
-			writeFile: mock(async () => {
-				throw Object.assign(new Error('EACCES: permission denied'), {
+		// Real directory whose name carries characters that could break
+		// string interpolation in the warn message.
+		const base = canonicalMkdtemp('simulate-special-');
+		const specialDir = join(base, 'workspace with spaces & $pecial');
+		mkdirSync(specialDir, { recursive: true });
+		try {
+			injectWriteFailure(
+				Object.assign(new Error('EACCES: permission denied'), {
 					code: 'EACCES',
-				});
-			}),
-		}));
+				}),
+			);
 
-		const { handleSimulateCommand: mockedCommand } = await import(
-			'./simulate.js'
-		);
+			const result = await handleSimulateCommand(specialDir, []);
 
-		// Act & Assert: should not throw, warn message should contain the special path
-		const result = await mockedCommand(specialDir, []);
-		expect(result).toBe('0 hidden coupling pairs detected');
-		expect(warnCalls.length).toBe(1);
-		expect(warnCalls[0][0]).toContain(specialDir);
+			expect(result).toBe('0 hidden coupling pairs detected');
+			expect(warnCalls.length).toBe(1);
+			expect(warnCalls[0][0]).toContain('workspace with spaces & $pecial');
+		} finally {
+			rmSync(base, { recursive: true, force: true });
+		}
 	});
 
 	// -------------------------------------------------------------------------
 	// Attack Vector 5b: Directory path with null bytes (path traversal attempt)
 	// -------------------------------------------------------------------------
 	test('warn() handles directory path with null bytes without crashing', async () => {
-		// Arrange
 		coChangeAnalyzer.detectDarkMatter = mock(async () => []);
+		// Null bytes now fail the canonical writer's well-formedness gate
+		// BEFORE any filesystem work (issue #2035 contract) — the command
+		// must still degrade gracefully to warn + summary.
+		const nullByteDir = `${testDir}\x00/null`;
 
-		const warnCalls: Array<[string, unknown]> = [];
-		const warnMock = mock((msg: string, data: unknown) => {
-			warnCalls.push([msg, data]);
-		});
-
-		await mock.module('../utils', () => ({
+		mock.module('../utils', () => ({
 			error: () => {},
 			log: () => {},
-			warn: warnMock,
+			warn: (msg: string, data: unknown) => {
+				warnCalls.push([msg, data]);
+			},
 			deepMerge: () => ({}),
 			escapeRegex: () => '',
 			MAX_MERGE_DEPTH: 10,
@@ -314,34 +199,16 @@ describe('simulate command report write adversarial', () => {
 			ToolError: class extends Error {},
 		}));
 
-		// Path with null byte (path traversal injection attempt)
-		const nullByteDir = '/test/workspace\x00/null';
+		const result = await handleSimulateCommand(nullByteDir, []);
 
-		await mock.module('node:fs/promises', () => ({
-			...fs,
-			mkdir: mock(async () => undefined),
-			writeFile: mock(async () => {
-				throw Object.assign(new Error('ENOENT: no such file or directory'), {
-					code: 'ENOENT',
-				});
-			}),
-		}));
-
-		const { handleSimulateCommand: mockedCommand } = await import(
-			'./simulate.js'
-		);
-
-		// Act & Assert: should not throw
-		const result = await mockedCommand(nullByteDir, []);
 		expect(result).toBe('0 hidden coupling pairs detected');
 		expect(warnCalls.length).toBe(1);
 	});
 
 	// -------------------------------------------------------------------------
-	// Attack Vector 6: Simultaneous detectDarkMatter success + writeFile failure
+	// Attack Vector 6: Simultaneous detectDarkMatter success + write failure
 	// -------------------------------------------------------------------------
-	test('returns success summary when detectDarkMatter succeeds but writeFile fails', async () => {
-		// Arrange: detectDarkMatter returns pairs (success), writeFile fails
+	test('returns success summary when detectDarkMatter succeeds but the report write fails', async () => {
 		const mockPairs = [
 			{
 				fileA: 'src/a.ts',
@@ -367,91 +234,33 @@ describe('simulate command report write adversarial', () => {
 			},
 		];
 		coChangeAnalyzer.detectDarkMatter = mock(async () => mockPairs);
-
-		const warnCalls: Array<[string, unknown]> = [];
-		const warnMock = mock((msg: string, data: unknown) => {
-			warnCalls.push([msg, data]);
-		});
-
-		await mock.module('../utils', () => ({
-			error: () => {},
-			log: () => {},
-			warn: warnMock,
-			deepMerge: () => ({}),
-			escapeRegex: () => '',
-			MAX_MERGE_DEPTH: 10,
-			CLIError: class extends Error {},
-			ConfigError: class extends Error {},
-			HookError: class extends Error {},
-			SwarmError: class extends Error {},
-			ToolError: class extends Error {},
-		}));
-
-		await mock.module('node:fs/promises', () => ({
-			...fs,
-			mkdir: mock(async () => undefined),
-			writeFile: mock(async () => {
-				throw Object.assign(new Error('ENOSPC: no space left on device'), {
-					code: 'ENOSPC',
-				});
+		injectWriteFailure(
+			Object.assign(new Error('ENOSPC: no space left on device'), {
+				code: 'ENOSPC',
 			}),
-		}));
-
-		const { handleSimulateCommand: mockedCommand } = await import(
-			'./simulate.js'
 		);
 
-		// Act
-		const result = await mockedCommand('/test/workspace', []);
+		const result = await handleSimulateCommand(testDir, []);
 
-		// Assert: returns summary (not error), but also logs warning
+		// Returns summary (not error), but also logs the write warning
 		expect(result).toBe('2 hidden coupling pairs detected');
 		expect(result).not.toContain('## Simulate Report');
 		expect(result).not.toContain('Error');
 		expect(warnCalls.length).toBe(1);
 		expect(warnCalls[0][1]).toContain('ENOSPC');
+		// The failed write's own temp was cleaned up
+		expect(residueTemps()).toEqual([]);
 	});
 
 	// -------------------------------------------------------------------------
 	// Additional boundary: Number thrown as error
 	// -------------------------------------------------------------------------
 	test('warn() handles number thrown as error without crashing', async () => {
-		// Arrange
 		coChangeAnalyzer.detectDarkMatter = mock(async () => []);
+		injectWriteFailure(42);
 
-		const warnCalls: Array<[string, unknown]> = [];
-		const warnMock = mock((msg: string, data: unknown) => {
-			warnCalls.push([msg, data]);
-		});
+		const result = await handleSimulateCommand(testDir, []);
 
-		await mock.module('../utils', () => ({
-			error: () => {},
-			log: () => {},
-			warn: warnMock,
-			deepMerge: () => ({}),
-			escapeRegex: () => '',
-			MAX_MERGE_DEPTH: 10,
-			CLIError: class extends Error {},
-			ConfigError: class extends Error {},
-			HookError: class extends Error {},
-			SwarmError: class extends Error {},
-			ToolError: class extends Error {},
-		}));
-
-		await mock.module('node:fs/promises', () => ({
-			...fs,
-			mkdir: mock(async () => undefined),
-			writeFile: mock(async () => {
-				throw 42;
-			}),
-		}));
-
-		const { handleSimulateCommand: mockedCommand } = await import(
-			'./simulate.js'
-		);
-
-		// Act & Assert
-		const result = await mockedCommand('/test/workspace', []);
 		expect(result).toBe('0 hidden coupling pairs detected');
 		expect(warnCalls.length).toBe(1);
 		expect(warnCalls[0][1]).toBe('42');
@@ -461,44 +270,11 @@ describe('simulate command report write adversarial', () => {
 	// Additional boundary: Symbol thrown as error
 	// -------------------------------------------------------------------------
 	test('warn() handles Symbol thrown as error without crashing', async () => {
-		// Arrange
 		coChangeAnalyzer.detectDarkMatter = mock(async () => []);
+		injectWriteFailure(Symbol('test error'));
 
-		const warnCalls: Array<[string, unknown]> = [];
-		const warnMock = mock((msg: string, data: unknown) => {
-			warnCalls.push([msg, data]);
-		});
+		const result = await handleSimulateCommand(testDir, []);
 
-		await mock.module('../utils', () => ({
-			error: () => {},
-			log: () => {},
-			warn: warnMock,
-			deepMerge: () => ({}),
-			escapeRegex: () => '',
-			MAX_MERGE_DEPTH: 10,
-			CLIError: class extends Error {},
-			ConfigError: class extends Error {},
-			HookError: class extends Error {},
-			SwarmError: class extends Error {},
-			ToolError: class extends Error {},
-		}));
-
-		const sym = Symbol('test error');
-
-		await mock.module('node:fs/promises', () => ({
-			...fs,
-			mkdir: mock(async () => undefined),
-			writeFile: mock(async () => {
-				throw sym;
-			}),
-		}));
-
-		const { handleSimulateCommand: mockedCommand } = await import(
-			'./simulate.js'
-		);
-
-		// Act & Assert
-		const result = await mockedCommand('/test/workspace', []);
 		expect(result).toBe('0 hidden coupling pairs detected');
 		expect(warnCalls.length).toBe(1);
 		// String(Symbol) produces 'Symbol(test error)'
@@ -506,54 +282,21 @@ describe('simulate command report write adversarial', () => {
 	});
 
 	// -------------------------------------------------------------------------
-	// Additional boundary: Promise thrown as error
+	// Additional boundary: Promise-like object thrown as error
 	// -------------------------------------------------------------------------
 	test('warn() handles Promise-like object thrown as error without crashing', async () => {
-		// Arrange
 		coChangeAnalyzer.detectDarkMatter = mock(async () => []);
-
-		const warnCalls: Array<[string, unknown]> = [];
-		const warnMock = mock((msg: string, data: unknown) => {
-			warnCalls.push([msg, data]);
-		});
-
-		await mock.module('../utils', () => ({
-			error: () => {},
-			log: () => {},
-			warn: warnMock,
-			deepMerge: () => ({}),
-			escapeRegex: () => '',
-			MAX_MERGE_DEPTH: 10,
-			CLIError: class extends Error {},
-			ConfigError: class extends Error {},
-			HookError: class extends Error {},
-			SwarmError: class extends Error {},
-			ToolError: class extends Error {},
-		}));
-
-		// Simulate a thenable (Promise-like) object that is not an Error
-		// This is what you get when you do Promise.reject() - the promise itself is thrown
+		// A thenable (Promise-like) that is not an Error
 		const thenableNonError = {
 			then(_resolve: unknown, _reject: unknown) {
 				// empty - just a thenable, not a real promise
 			},
 			[Symbol.toStringTag]: 'Promise',
 		};
+		injectWriteFailure(thenableNonError);
 
-		await mock.module('node:fs/promises', () => ({
-			...fs,
-			mkdir: mock(async () => undefined),
-			writeFile: mock(async () => {
-				throw thenableNonError;
-			}),
-		}));
+		const result = await handleSimulateCommand(testDir, []);
 
-		const { handleSimulateCommand: mockedCommand } = await import(
-			'./simulate.js'
-		);
-
-		// Act & Assert: thenable becomes '[object Promise]' via String() (due to Symbol.toStringTag)
-		const result = await mockedCommand('/test/workspace', []);
 		expect(result).toBe('0 hidden coupling pairs detected');
 		expect(warnCalls.length).toBe(1);
 		// The thenable with [Symbol.toStringTag]: 'Promise' stringifies to '[object Promise]'

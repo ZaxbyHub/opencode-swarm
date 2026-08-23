@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.145.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.144.8...v7.145.0) (2026-08-23)
+
+
+### Features
+
+* **atomic-write:** unify temp grammars and quarantine stale residue ([f7ebe96](https://github.com/ZaxbyHub/opencode-swarm/commit/f7ebe963f1a147f2d20d34c94bd006b3bd92d03b))
+
 ## [7.144.8](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.144.7...v7.144.8) (2026-08-22)
 
 

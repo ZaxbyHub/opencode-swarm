@@ -20,6 +20,7 @@ import {
 	readdirSync,
 	readFileSync,
 	rmSync,
+	utimesSync,
 	writeFileSync,
 } from 'node:fs';
 import os from 'node:os';
@@ -1040,36 +1041,6 @@ describe('handleCloseCommand — expanded artifact cleanup', () => {
 			expect(existsSync(path.join(swarmDir(), 'archive'))).toBe(true);
 			// And context.md was rewritten
 			expect(existsSync(path.join(swarmDir(), 'context.md'))).toBe(true);
-		});
-	});
-
-	// ── Test 11: .tmp.* temp file sweep (FR-013) ──────────────────────
-
-	describe('.tmp.* temp file sweep', () => {
-		it('removes .tmp.* files from .swarm/ after close but leaves non-.tmp.* files untouched', async () => {
-			await writePlan();
-
-			// Create .tmp.xxx temp artifact (should be swept by close cleanup)
-			writeFileSync(path.join(swarmDir(), '.tmp.xxx'), 'stale temp data');
-
-			// Create a non-.tmp.* file that must NOT be swept
-			writeFileSync(
-				path.join(swarmDir(), 'normal-artifact.json'),
-				'{"keep":true}',
-			);
-
-			await handleCloseCommand(testDir, []);
-
-			// .tmp.* file must be removed (stale temp sweep, not archived)
-			expect(existsSync(path.join(swarmDir(), '.tmp.xxx'))).toBe(false);
-
-			// non-.tmp.* file must survive the sweep
-			expect(existsSync(path.join(swarmDir(), 'normal-artifact.json'))).toBe(
-				true,
-			);
-			expect(
-				readFileSync(path.join(swarmDir(), 'normal-artifact.json'), 'utf-8'),
-			).toBe('{"keep":true}');
 		});
 	});
 });

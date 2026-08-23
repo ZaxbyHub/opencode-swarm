@@ -2,87 +2,94 @@
  * Adversarial tests for temp file cleanup in handoff.ts
  * Tests error handling paths for renameSync/unlinkSync cleanup patterns
  * that are NOT covered by the main error-handling test suite.
+ *
+ * Issue #2035 migrated handoff's writes to the canonical atomic-write helper,
+ * so failure injection targets `src/utils/atomic-write.ts:_internals`
+ * (renameSync / unlinkSync / writeSync) — the seam the writer consults.
+ * Mocking `Bun.write` / node:fs module surface no longer intercepts.
  */
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
+import { existsSync, readdirSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { canonicalMkdtemp } from '../../tests/helpers/tmpdir.js';
 
-// ---------------------------------------------------------------------------
-// Global state for tracking call sequences
-// ---------------------------------------------------------------------------
-let bunWriteShouldThrow = false;
-let bunWriteCallCount = 0;
-let tempPathsCreated: string[] = [];
-
-// ---------------------------------------------------------------------------
-// Module-level mocks for dependencies that don't change per-test
-// ---------------------------------------------------------------------------
-
-mock.module('../utils/bun-compat', () => ({
-	bunWrite: mock(async (path: string) => {
-		bunWriteCallCount++;
-		tempPathsCreated.push(path);
-		if (bunWriteShouldThrow) {
-			throw new Error('ENOSPC: no space left on device');
-		}
-	}),
-	bunFile: mock(() => ({
-		text: mock(() => Promise.resolve('')),
-		arrayBuffer: mock(() => Promise.resolve(new ArrayBuffer(0))),
-		exists: mock(() => Promise.resolve(false)),
-		size: 0,
-	})),
-	isBun: mock(() => false),
-	bunSpawn: mock(() => ({})),
-	bunSpawnSync: mock(() => ({
-		stdout: new Uint8Array(0),
-		stderr: new Uint8Array(0),
-		exitCode: 0,
-		success: true,
-	})),
-	bunHash: mock(() => 0n),
-}));
+import { _internals as atomicWriteInternals } from '../utils/atomic-write.js';
 
 mock.module('../session/snapshot-writer', () => ({
 	writeSnapshot: mock(async () => {}),
 	flushPendingSnapshot: mock(async () => {}),
 }));
 
-// Import after mocks are set up
 import { handleHandoffCommand } from './handoff';
 
+const realWriteSync = atomicWriteInternals.writeSync;
+const realRenameSync = atomicWriteInternals.renameSync;
+const realUnlinkSync = atomicWriteInternals.unlinkSync;
+
 describe('handoff.ts temp file cleanup adversarial tests', () => {
-	const TEST_DIR = '/fake/test/project';
+	let testDir: string;
+	let unlinkTargets: string[];
+	let renameDests: string[];
+	let renameCount: number;
 
 	beforeEach(() => {
-		bunWriteShouldThrow = false;
-		bunWriteCallCount = 0;
-		tempPathsCreated = [];
+		testDir = canonicalMkdtemp('handoff-adv-');
+		unlinkTargets = [];
+		renameDests = [];
+		renameCount = 0;
+		atomicWriteInternals.writeSync = realWriteSync;
+		atomicWriteInternals.renameSync = realRenameSync;
+		atomicWriteInternals.unlinkSync = (p: string) => {
+			unlinkTargets.push(p);
+			return realUnlinkSync(p);
+		};
 	});
 
 	afterEach(() => {
+		atomicWriteInternals.writeSync = realWriteSync;
+		atomicWriteInternals.renameSync = realRenameSync;
+		atomicWriteInternals.unlinkSync = realUnlinkSync;
+		try {
+			rmSync(testDir, { recursive: true, force: true });
+		} catch {
+			// ignore cleanup errors
+		}
 		mock.restore();
 	});
 
+	function residueTemps(): string[] {
+		const swarm = join(testDir, '.swarm');
+		if (!existsSync(swarm)) return [];
+		return readdirSync(swarm).filter((f) => f.endsWith('.tmp'));
+	}
+
+	/** Renames that delegate to the real fs while recording destinations. */
+	function recordRenames(): void {
+		atomicWriteInternals.renameSync = (from: string, to: string) => {
+			renameCount++;
+			renameDests.push(to);
+			return realRenameSync(from, to);
+		};
+	}
+
 	// ---------------------------------------------------------------------------
-	// AV1: renameSync throws but unlinkSync also throws
-	// Verify: no crash, original renameErr still propagated
+	// AV1: rename fails but unlink cleanup also fails
+	// Verify: no crash, original rename error still propagated
 	// ---------------------------------------------------------------------------
 
-	test('AV1: renameSync fails, unlinkSync also fails — original error propagated, no crash', async () => {
-		await mock.module('node:fs', () => ({
-			renameSync: mock((_src: string, _dest: string) => {
-				throw new Error('EPERM: operation not permitted');
-			}),
-			unlinkSync: mock((_path: string) => {
-				throw new Error('EBUSY: resource busy');
-			}),
-			createWriteStream: mock(() => ({
-				write: mock(() => {}),
-				end: mock(() => {}),
-				on: mock(() => {}),
-			})),
-		}));
+	test('AV1: rename fails, unlink also fails — original error propagated, no crash', async () => {
+		atomicWriteInternals.renameSync = () => {
+			throw Object.assign(new Error('EPERM: operation not permitted'), {
+				code: 'EPERM',
+			});
+		};
+		atomicWriteInternals.unlinkSync = () => {
+			throw Object.assign(new Error('EBUSY: resource busy'), {
+				code: 'EBUSY',
+			});
+		};
 
-		const result = await handleHandoffCommand(TEST_DIR, []);
+		const result = await handleHandoffCommand(testDir, []);
 
 		// Should get error response, not crash
 		expect(result).toContain('Handoff Generated (file write failed)');
@@ -90,44 +97,30 @@ describe('handoff.ts temp file cleanup adversarial tests', () => {
 	});
 
 	// ---------------------------------------------------------------------------
-	// AV2: renameSync throws EPERM (permission) — cleanup verified
+	// AV2: rename throws EPERM (permission) — cleanup attempted
 	// ---------------------------------------------------------------------------
 
-	test('AV2: renameSync throws EPERM — cleanup attempted via unlinkSync', async () => {
-		const unlinkSyncCalls: string[] = [];
-		await mock.module('node:fs', () => ({
-			renameSync: mock((_src: string, _dest: string) => {
-				throw Object.assign(new Error('EPERM: operation not permitted'), {
-					code: 'EPERM',
-				});
-			}),
-			unlinkSync: mock((path: string) => {
-				unlinkSyncCalls.push(path);
-			}),
-			createWriteStream: mock(() => ({
-				write: mock(() => {}),
-				end: mock(() => {}),
-				on: mock(() => {}),
-			})),
-		}));
+	test('AV2: rename throws EPERM — own-temp cleanup attempted under the canonical grammar', async () => {
+		atomicWriteInternals.renameSync = () => {
+			throw Object.assign(new Error('EPERM: operation not permitted'), {
+				code: 'EPERM',
+			});
+		};
 
-		const result = await handleHandoffCommand(TEST_DIR, []);
+		const result = await handleHandoffCommand(testDir, []);
 
-		// unlinkSync was called for cleanup
-		expect(unlinkSyncCalls.length).toBeGreaterThan(0);
-		// Cleanup was called on temp path (contains .tmp.)
-		expect(unlinkSyncCalls[0]).toContain('.tmp.');
-		// Result indicates failure
+		// unlink was attempted for the temp
+		expect(unlinkTargets.length).toBeGreaterThan(0);
+		expect(unlinkTargets[0]).toMatch(/handoff\.md\.[0-9a-f]{32}\.tmp$/);
 		expect(result).toContain('EPERM');
 	});
 
 	// ---------------------------------------------------------------------------
-	// AV3: first file succeeds, second renameSync fails, writeSnapshot throws
-	// Verify: first error (from rename) is surfaced, not writeSnapshot error
+	// AV3: first file succeeds, second rename fails, writeSnapshot throws
+	// Verify: the rename error is surfaced, not the writeSnapshot error
 	// ---------------------------------------------------------------------------
 
 	test('AV3: second file rename fails, writeSnapshot then throws — first error surfaced', async () => {
-		// Override writeSnapshot to throw
 		mock.module('../session/snapshot-writer', () => ({
 			writeSnapshot: mock(async () => {
 				throw new Error('writeSnapshot failed');
@@ -135,67 +128,41 @@ describe('handoff.ts temp file cleanup adversarial tests', () => {
 			flushPendingSnapshot: mock(async () => {}),
 		}));
 
-		// First rename succeeds, second fails
-		let renameCount = 0;
-		await mock.module('node:fs', () => ({
-			renameSync: mock((_src: string, _dest: string) => {
-				renameCount++;
-				if (renameCount === 1) return; // first succeeds
-				throw new Error('ENOSPC: no space left on device');
-			}),
-			unlinkSync: mock((_path: string) => {}),
-			createWriteStream: mock(() => ({
-				write: mock(() => {}),
-				end: mock(() => {}),
-				on: mock(() => {}),
-			})),
-		}));
+		let localRenameCount = 0;
+		atomicWriteInternals.renameSync = (from: string, to: string) => {
+			localRenameCount++;
+			if (localRenameCount === 1) return realRenameSync(from, to);
+			throw Object.assign(new Error('ENOSPC: no space left on device'), {
+				code: 'ENOSPC',
+			});
+		};
 
-		// Re-import to get fresh mock
-		const { handleHandoffCommand: cmd } = await import('./handoff');
-		const result = await cmd(TEST_DIR, []);
+		const result = await handleHandoffCommand(testDir, []);
 
-		// The error should be from the second rename, not from writeSnapshot
 		expect(result).toContain('ENOSPC');
 		expect(result).not.toContain('writeSnapshot failed');
 	});
 
 	// ---------------------------------------------------------------------------
-	// AV4: concurrent temp file collision — UUID uniqueness
-	// Verify: each temp path is unique (UUID-based)
+	// AV4: temp paths unique per write — random-suffix collision resistance
 	// ---------------------------------------------------------------------------
 
-	test('AV4: temp paths are unique per write — UUID-based collision resistance', async () => {
-		await mock.module('node:fs', () => ({
-			renameSync: mock((_src: string, _dest: string) => {}),
-			unlinkSync: mock((_path: string) => {}),
-			createWriteStream: mock(() => ({
-				write: mock(() => {}),
-				end: mock(() => {}),
-				on: mock(() => {}),
-			})),
-		}));
+	test('AV4: temp paths are unique per write — random-suffix collision resistance', async () => {
+		recordRenames();
 
-		const result = await handleHandoffCommand(TEST_DIR, []);
+		await handleHandoffCommand(testDir, []);
 
-		// bunWrite was called twice (handoff.md and handoff-prompt.md)
-		expect(bunWriteCallCount).toBe(2);
+		// Both artifacts written (handoff.md + handoff-prompt.md)
+		expect(renameCount).toBe(2);
 
-		const [firstTempPath, secondTempPath] = tempPathsCreated;
-
-		// Paths must be unique (no collision)
-		expect(firstTempPath).not.toBe(secondTempPath);
-
-		// Each must contain .tmp. and a UUID
-		const uuidPattern =
-			/\.tmp\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-		expect(firstTempPath).toMatch(uuidPattern);
-		expect(secondTempPath).toMatch(uuidPattern);
-
-		// UUIDs must be different
-		const firstUuid = firstTempPath.split('.tmp.')[1];
-		const secondUuid = secondTempPath.split('.tmp.')[1];
-		expect(firstUuid).not.toBe(secondUuid);
+		const tempPaths = unlinkTargets;
+		// The finally-unlink observed one unique canonical temp per write
+		expect(tempPaths.length).toBe(2);
+		const suffixes = tempPaths.map(
+			(p) => p.match(/\.([0-9a-f]{32})\.tmp$/)?.[1],
+		);
+		expect(suffixes.every(Boolean)).toBe(true);
+		expect(new Set(suffixes).size).toBe(2);
 	});
 
 	// ---------------------------------------------------------------------------
@@ -204,76 +171,53 @@ describe('handoff.ts temp file cleanup adversarial tests', () => {
 	// ---------------------------------------------------------------------------
 
 	test('AV5: path traversal in filename — validateSwarmPath rejects before temp creation', async () => {
-		// This tests that validateSwarmPath prevents path traversal
-		// The validation happens at the hook level before any fs operations
-
 		const maliciousFilename = '../../../etc/passwd';
 
-		// The validateSwarmPath function rejects path traversal at the hook level
 		const { validateSwarmPath } = await import('../hooks/utils');
-		expect(() => validateSwarmPath(TEST_DIR, maliciousFilename)).toThrow(
+		expect(() => validateSwarmPath(testDir, maliciousFilename)).toThrow(
 			/path traversal detected/,
 		);
 
-		// Verify the pattern that would be used in handoff.ts
 		expect(/\.\.[/\\]/.test(maliciousFilename)).toBe(true);
 	});
 
 	// ---------------------------------------------------------------------------
-	// AV6: successful rename — unlinkSync NOT called
+	// AV6: successful writes — both artifacts committed, zero residue
 	// ---------------------------------------------------------------------------
 
-	test('AV6: successful rename — unlinkSync should NOT be called for cleanup', async () => {
-		const unlinkSyncCalls: string[] = [];
-		await mock.module('node:fs', () => ({
-			renameSync: mock((_src: string, _dest: string) => {}),
-			unlinkSync: mock((path: string) => {
-				unlinkSyncCalls.push(path);
-			}),
-			createWriteStream: mock(() => ({
-				write: mock(() => {}),
-				end: mock(() => {}),
-				on: mock(() => {}),
-			})),
-		}));
+	test('AV6: successful writes — both artifacts committed with zero temp residue', async () => {
+		recordRenames();
 
-		await handleHandoffCommand(TEST_DIR, []);
+		await handleHandoffCommand(testDir, []);
 
-		// unlinkSync should NOT be called when rename succeeds
-		expect(unlinkSyncCalls.length).toBe(0);
+		expect(renameCount).toBe(2);
+		expect(existsSync(join(testDir, '.swarm', 'handoff.md'))).toBe(true);
+		expect(existsSync(join(testDir, '.swarm', 'handoff-prompt.md'))).toBe(true);
+		// The own-temp finally-unlink is a no-op ENOENT after each successful
+		// rename — nothing is left behind.
+		expect(residueTemps()).toEqual([]);
 	});
 
 	// ---------------------------------------------------------------------------
-	// AV7: bunWrite throws — verify no temp file leak
+	// AV7: payload write fails — no rename, own temp still cleaned
 	// ---------------------------------------------------------------------------
 
-	test('AV7: bunWrite throws — no temp file to clean up, error propagated', async () => {
-		bunWriteShouldThrow = true;
+	test('AV7: payload write fails — rename never attempted, own temp cleaned, error propagated', async () => {
+		recordRenames();
+		atomicWriteInternals.writeSync = () => {
+			throw Object.assign(new Error('ENOSPC: no space left on device'), {
+				code: 'ENOSPC',
+			});
+		};
 
-		const renameSyncCalls: string[] = [];
-		const unlinkSyncCalls: string[] = [];
-		await mock.module('node:fs', () => ({
-			renameSync: mock((src: string, _dest: string) => {
-				renameSyncCalls.push(src);
-			}),
-			unlinkSync: mock((path: string) => {
-				unlinkSyncCalls.push(path);
-			}),
-			createWriteStream: mock(() => ({
-				write: mock(() => {}),
-				end: mock(() => {}),
-				on: mock(() => {}),
-			})),
-		}));
-
-		const result = await handleHandoffCommand(TEST_DIR, []);
+		const result = await handleHandoffCommand(testDir, []);
 
 		expect(result).toContain('Handoff Generated (file write failed)');
 		expect(result).toContain('ENOSPC');
-		// No rename attempted since bunWrite failed
-		expect(renameSyncCalls.length).toBe(0);
-		// No unlink since no temp file was created
-		expect(unlinkSyncCalls.length).toBe(0);
+		// No rename attempted since the payload write failed
+		expect(renameCount).toBe(0);
+		// The temp that existed before the write failure was removed
+		expect(residueTemps()).toEqual([]);
 	});
 
 	// ---------------------------------------------------------------------------
@@ -281,144 +225,101 @@ describe('handoff.ts temp file cleanup adversarial tests', () => {
 	// ---------------------------------------------------------------------------
 
 	test('AV8: consecutive calls — temp paths isolated per invocation', async () => {
-		await mock.module('node:fs', () => ({
-			renameSync: mock((_src: string, _dest: string) => {}),
-			unlinkSync: mock((_path: string) => {}),
-			createWriteStream: mock(() => ({
-				write: mock(() => {}),
-				end: mock(() => {}),
-				on: mock(() => {}),
-			})),
-		}));
+		recordRenames();
 
-		await handleHandoffCommand(TEST_DIR, []);
-		await handleHandoffCommand(TEST_DIR, []);
+		await handleHandoffCommand(testDir, []);
+		await handleHandoffCommand(testDir, []);
 
-		// All paths should be unique across invocations (4 total - 2 files x 2 calls)
-		const uniquePaths = new Set(tempPathsCreated);
-		expect(uniquePaths.size).toBe(4);
+		// 2 files x 2 calls: all temp paths unique across invocations
+		expect(unlinkTargets.length).toBe(4);
+		const suffixes = unlinkTargets.map(
+			(p) => p.match(/\.([0-9a-f]{32})\.tmp$/)?.[1],
+		);
+		expect(new Set(suffixes).size).toBe(4);
 	});
 
 	// ---------------------------------------------------------------------------
-	// AV9: unlinkSync called on non-existent path (ENOENT)
-	// Verify: unlinkSync failure doesn't prevent error propagation
+	// AV9: unlink on non-existent path (ENOENT)
+	// Verify: unlink failure doesn't prevent error propagation
 	// ---------------------------------------------------------------------------
 
-	test('AV9: unlinkSync on non-existent path — ENOENT ignored, original error surfaced', async () => {
-		await mock.module('node:fs', () => ({
-			renameSync: mock((_src: string, _dest: string) => {
-				throw new Error('EBADF: bad file descriptor');
-			}),
-			unlinkSync: mock((_path: string) => {
-				// Cleanup fails with ENOENT (file doesn't exist)
-				throw Object.assign(new Error('ENOENT: no such file'), {
-					code: 'ENOENT',
-				});
-			}),
-			createWriteStream: mock(() => ({
-				write: mock(() => {}),
-				end: mock(() => {}),
-				on: mock(() => {}),
-			})),
-		}));
+	test('AV9: unlink on non-existent path — ENOENT ignored, original error surfaced', async () => {
+		atomicWriteInternals.renameSync = () => {
+			throw Object.assign(new Error('EBADF: bad file descriptor'), {
+				code: 'EBADF',
+			});
+		};
+		atomicWriteInternals.unlinkSync = () => {
+			// Cleanup fails with ENOENT (file doesn't exist) — must be ignored
+			throw Object.assign(new Error('ENOENT: no such file'), {
+				code: 'ENOENT',
+			});
+		};
 
-		const result = await handleHandoffCommand(TEST_DIR, []);
+		const result = await handleHandoffCommand(testDir, []);
 
-		// Original rename error is still propagated
 		expect(result).toContain('EBADF');
 	});
 
 	// ---------------------------------------------------------------------------
-	// AV10: both renameSync and unlinkSync throw for second file
-	// Verify: first file is committed, second file error surfaced
+	// AV10: both rename and unlink fail for the second file
+	// Verify: first file is committed, second file's error surfaced
 	// ---------------------------------------------------------------------------
 
-	test('AV10: first file succeeds, second file both rename and unlink fail — second error surfaced', async () => {
-		let renameCount = 0;
-		const unlinkSyncCalls: string[] = [];
-		await mock.module('node:fs', () => ({
-			renameSync: mock((_src: string, _dest: string) => {
-				renameCount++;
-				if (renameCount === 1) return; // first succeeds
-				throw new Error('EACCES: permission denied');
-			}),
-			unlinkSync: mock((path: string) => {
-				unlinkSyncCalls.push(path);
-				throw new Error('EPERM: operation not permitted');
-			}),
-			createWriteStream: mock(() => ({
-				write: mock(() => {}),
-				end: mock(() => {}),
-				on: mock(() => {}),
-			})),
-		}));
+	test('AV10: first file committed, second file rename fails — second error surfaced', async () => {
+		let localRenameCount = 0;
+		atomicWriteInternals.renameSync = (from: string, to: string) => {
+			localRenameCount++;
+			if (localRenameCount === 1) return realRenameSync(from, to);
+			throw Object.assign(new Error('EIO: I/O error'), { code: 'EIO' });
+		};
 
-		const result = await handleHandoffCommand(TEST_DIR, []);
+		const result = await handleHandoffCommand(testDir, []);
 
 		// Second file's error is surfaced
-		expect(result).toContain('EACCES');
-		// First file's rename was committed (called twice, first succeeds)
-		expect(renameCount).toBe(2);
-		// Second unlink attempted (cleanup for second temp file)
-		expect(unlinkSyncCalls.length).toBe(1);
+		expect(result).toContain('EIO');
+		// First file's rename was committed
+		expect(localRenameCount).toBe(2);
+		expect(existsSync(join(testDir, '.swarm', 'handoff.md'))).toBe(true);
 	});
 
 	// ---------------------------------------------------------------------------
-	// AV11: unlinkSync race condition — file deleted before unlink is called
+	// AV11: unlink race condition — file deleted before unlink is called
 	// ---------------------------------------------------------------------------
 
 	test('AV11: file deleted between rename failure and unlink — ENOENT best-effort ignored', async () => {
 		const callOrder: string[] = [];
-		await mock.module('node:fs', () => ({
-			renameSync: mock((_src: string, _dest: string) => {
-				callOrder.push('rename');
-				throw new Error('EBUSY: resource busy');
-			}),
-			unlinkSync: mock((_path: string) => {
-				callOrder.push('unlink');
-				// File was already cleaned up by another process
-				throw Object.assign(new Error('ENOENT: no such file'), {
-					code: 'ENOENT',
-				});
-			}),
-			createWriteStream: mock(() => ({
-				write: mock(() => {}),
-				end: mock(() => {}),
-				on: mock(() => {}),
-			})),
-		}));
+		atomicWriteInternals.renameSync = () => {
+			callOrder.push('rename');
+			throw Object.assign(new Error('EBUSY: resource busy'), {
+				code: 'EBUSY',
+			});
+		};
+		atomicWriteInternals.unlinkSync = (p: string) => {
+			callOrder.push('unlink');
+			// File was already cleaned up by another process
+			throw Object.assign(new Error('ENOENT: no such file'), {
+				code: 'ENOENT',
+			});
+		};
 
-		const result = await handleHandoffCommand(TEST_DIR, []);
+		const result = await handleHandoffCommand(testDir, []);
 
-		// Both were called
 		expect(callOrder).toContain('rename');
 		expect(callOrder).toContain('unlink');
-		// Original error still propagated
 		expect(result).toContain('EBUSY');
 	});
 
 	// ---------------------------------------------------------------------------
-	// AV12: temp file created with UUID, validateSwarmPath validates final path
-	// Verify: the temp path is NOT validated (only final path matters for security)
+	// AV12: only the final path is validated by validateSwarmPath
 	// ---------------------------------------------------------------------------
 
-	test('AV12: temp paths are ephemeral — only final path validated by validateSwarmPath', async () => {
-		const finalPaths: string[] = [];
-		await mock.module('node:fs', () => ({
-			renameSync: mock((_src: string, dest: string) => {
-				finalPaths.push(dest);
-			}),
-			unlinkSync: mock((_path: string) => {}),
-			createWriteStream: mock(() => ({
-				write: mock(() => {}),
-				end: mock(() => {}),
-				on: mock(() => {}),
-			})),
-		}));
+	test('AV12: final paths stay within .swarm — only the final path is security-relevant', async () => {
+		recordRenames();
 
-		await handleHandoffCommand(TEST_DIR, []);
+		await handleHandoffCommand(testDir, []);
 
-		// Both final paths are within .swarm directory
-		expect(finalPaths.every((p) => p.includes('.swarm'))).toBe(true);
+		expect(renameDests.length).toBe(2);
+		expect(renameDests.every((p) => p.includes('.swarm'))).toBe(true);
 	});
 });

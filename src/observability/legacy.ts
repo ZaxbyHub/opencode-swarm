@@ -123,6 +123,12 @@ export const KNOWN_TELEMETRY_KEYS: Readonly<Record<string, readonly string[]>> =
 			'toModel',
 			'reason',
 		]),
+		model_unresolved: Object.freeze([
+			'sessionId',
+			'agentName',
+			'model',
+			'detail',
+		]),
 		hard_limit_hit: Object.freeze([
 			'sessionId',
 			'agentName',
@@ -277,6 +283,20 @@ export const KNOWN_TELEMETRY_KEYS: Readonly<Record<string, readonly string[]>> =
 			'backupBytes',
 			'storeSha256Prefix',
 			'token12',
+		]),
+		// Issue #2035 atomic-write residue health: counts and frozen-registry
+		// grammar ids only — no file names, paths, or content.
+		residue_health: Object.freeze([
+			'trigger',
+			'scanned',
+			'matched',
+			'eligible',
+			'ambiguous',
+			'quarantined',
+			'preserved',
+			'total_bytes',
+			'oldest_age_ms',
+			'grammar_counts',
 		]),
 	});
 

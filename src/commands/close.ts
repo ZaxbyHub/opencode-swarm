@@ -54,6 +54,11 @@ import {
 	type SkillImproveRequest,
 	type SkillImproveResult,
 } from '../services/skill-improver';
+import {
+	formatResidueInventoryLines,
+	inventorySwarmResidue,
+	quarantineSwarmResidue,
+} from '../services/swarm-residue';
 import { readEarliestSessionStart } from '../session/session-start-store.js';
 import {
 	endAgentSession,
@@ -63,8 +68,8 @@ import {
 } from '../state';
 import { telemetry as telemetryEmit } from '../telemetry';
 import { executeWriteRetro } from '../tools/write-retro';
+import { atomicWriteSwarmFile } from '../utils/atomic-write';
 import { log } from '../utils/logger';
-import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
 import {
 	type CloseTerminalResult,
 	reconcileCloseTerminalState,
@@ -615,7 +620,14 @@ export interface CleanStageResult {
 	cleanedFiles: string[];
 	configBackupsRemoved: number;
 	swarmPlanFilesRemoved: number;
-	tmpFilesRemoved: number;
+	/**
+	 * Stale atomic-write temp files MOVED into `.swarm/quarantine/<batch>/`
+	 * (issue #2035). Quarantine is a recoverable move with a manifest — the
+	 * pre-#2035 blind `.tmp.*` unlink sweep is gone; preserved candidates
+	 * (recent/active/tracked/ambiguous) are counted in `residuePreserved`.
+	 */
+	residueQuarantined: number;
+	residuePreserved: number;
 }
 
 /**
@@ -1820,43 +1832,47 @@ export async function runCleanStage(
 		}
 	}
 
-	// Remove stale .tmp.* files that were left behind by interrupted handoff
-	// writes or other transient operations. These are safe to delete because
-	// they are recreated on next session init and must be removed to avoid
-	// stale-state pollution in the archive bundle.
-	let tmpFilesRemoved = 0;
+	// Atomic-write residue (issue #2035): discover candidates by REGISTERED
+	// temp grammars (never substring heuristics), QUARANTINE verified stale
+	// residue — a recoverable, manifest-backed move; automatic destructive
+	// deletion is out of scope — and preserve + report everything else
+	// (recent, active, tracked, symlink, constant-name, ambiguous). This
+	// replaces the pre-#2035 blind `.tmp.`-prefix unlink sweep, which missed
+	// every grammar current writers produce and removed files without gates.
+	let residueQuarantined = 0;
+	let residuePreserved = 0;
 	try {
-		const swarmFiles = await fs.readdir(ctx.swarmDir);
-		const tmpFiles = swarmFiles.filter((f) => f.startsWith('.tmp.'));
-		for (const tmp of tmpFiles) {
-			try {
-				await fs.unlink(path.join(ctx.swarmDir, tmp));
-				tmpFilesRemoved++;
-			} catch (err) {
-				const errno = (err as NodeJS.ErrnoException)?.code;
-				if (errno === 'ENOENT') {
-					// Stale tmp file already absent — silent skip.
-				} else {
-					const reason = err instanceof Error ? err.message : String(err);
-					ctx.warnings.push(
-						`Failed to clean tmp file ${tmp} [${errno ?? 'unknown'}]: ${reason}`,
-					);
-				}
-			}
-		}
-	} catch (err) {
-		const errno = (err as NodeJS.ErrnoException)?.code;
-		if (errno === 'ENOENT') {
-			// swarmDir absent — nothing to clean; silent skip.
-		} else {
-			const reason = err instanceof Error ? err.message : String(err);
+		const residue = await quarantineSwarmResidue(ctx.directory, {
+			trigger: 'close',
+		});
+		residueQuarantined = residue.quarantined;
+		residuePreserved = residue.preserved.length;
+		if (residue.quarantined > 0 && residue.batchRelDir) {
+			cleanedFiles.push(
+				`${residue.quarantined} stale temp file(s) → ${residue.batchRelDir}/`,
+			);
 			ctx.warnings.push(
-				`Failed to read ${ctx.swarmDir} for tmp-file cleanup [${errno ?? 'unknown'}]: ${reason}`,
+				`Quarantined ${residue.quarantined} stale atomic-write temp file(s) to .swarm/${residue.batchRelDir}/ (recoverable; rollback: /swarm config doctor --rollback-residue-quarantine).`,
 			);
 		}
-	}
-	if (tmpFilesRemoved > 0) {
-		cleanedFiles.push(`${tmpFilesRemoved} .tmp.* file(s)`);
+		if (residue.preserved.length > 0) {
+			const sample = residue.preserved
+				.slice(0, 5)
+				.map((p) => `\`${p.relPath}\``)
+				.join(', ');
+			ctx.warnings.push(
+				`Preserved ${residue.preserved.length} residue candidate(s) in place (recent/active/tracked/ambiguous): ${sample}${residue.preserved.length > 5 ? ' …' : ''}.`,
+			);
+		}
+	} catch (err) {
+		const reason = err instanceof Error ? err.message : String(err);
+		// Honest about partial outcomes (PR review PRR-005): an abort here can
+		// occur after some entries already moved, so do not claim all were
+		// preserved. Quarantine itself now guards each entry's move, so this
+		// path only triggers on inventory/telemetry-level failures.
+		ctx.warnings.push(
+			`Atomic-write residue quarantine failed (status of individual candidates unknown — inspect .swarm/quarantine/): ${reason}`,
+		);
 	}
 
 	// Terminal-state removal (finalize knowledge-preservation fix): unconditionally
@@ -1911,20 +1927,12 @@ export async function runCleanStage(
 		'No active plan. Next session starts fresh.',
 		'',
 	].join('\n');
-	const contextTempPath = path.join(
-		path.dirname(contextPath),
-		`${path.basename(contextPath)}.tmp.${Date.now()}.${Math.floor(Math.random() * 1e9)}`,
-	);
+	// Reset context.md so new sessions start fresh. Written through the
+	// canonical atomic helper (issue #2035): contained target, registered
+	// temp grammar, exact own-temp cleanup, cache invalidation.
 	try {
-		await fs.writeFile(contextTempPath, contextContent, 'utf-8');
-		fsSync.renameSync(contextTempPath, contextPath);
-		invalidateCachedArtifact(contextPath);
+		await atomicWriteSwarmFile(contextPath, contextContent);
 	} catch (error) {
-		try {
-			fsSync.unlinkSync(contextTempPath);
-		} catch {
-			// best-effort cleanup
-		}
 		const msg = error instanceof Error ? error.message : String(error);
 		ctx.warnings.push(`Failed to reset context.md: ${msg}`);
 		log('[close-command] Failed to write context.md:', error);
@@ -1934,7 +1942,8 @@ export async function runCleanStage(
 		cleanedFiles,
 		configBackupsRemoved,
 		swarmPlanFilesRemoved,
-		tmpFilesRemoved,
+		residueQuarantined,
+		residuePreserved,
 	};
 }
 
@@ -2061,6 +2070,25 @@ export async function runFinalizeDryRun(
 		? 'would align the working tree to main/remote (git reset), pruning merged branches only with --prune-branches'
 		: 'would skip git alignment (not a git repository / git unavailable)';
 
+	// Read-only residue inventory (issue #2035): the SAME shared inventory the
+	// real close run and `/swarm config doctor` render from — a dry-run
+	// preview must never mutate, so this uses inventorySwarmResidue directly.
+	let residueSection: string[] = [];
+	try {
+		const residueInventory = await inventorySwarmResidue(directory);
+		if (residueInventory.summary.matched > 0) {
+			residueSection = [
+				'',
+				'### Atomic-write residue (read-only inventory)',
+				...formatResidueInventoryLines(residueInventory),
+				'- A real close run QUARANTINES eligible items into `.swarm/quarantine/` (recoverable, manifest-backed — never deleted); every other candidate is preserved in place.',
+			];
+		}
+	} catch {
+		// inventory is best-effort inside dry-run — its failure must not mask
+		// the rest of the report
+	}
+
 	const lines: string[] = [
 		'## /swarm finalize — DRY RUN (no changes made)',
 		'',
@@ -2100,6 +2128,7 @@ export async function runFinalizeDryRun(
 					...wouldRemoveTerminal.map((f) => `- ${f}`),
 				]
 			: []),
+		...residueSection,
 		'',
 		'### Git',
 		`- ${gitNote}`,
@@ -2430,25 +2459,11 @@ export async function handleCloseCommand(
 				: []),
 		].join('\n');
 
-		const closeSummaryTempPath = path.join(
-			path.dirname(closeSummaryPath),
-			`${path.basename(closeSummaryPath)}.tmp.${Date.now()}.${Math.floor(Math.random() * 1e9)}`,
-		);
+		// Canonical atomic helper (issue #2035): registered temp grammar,
+		// exact own-temp cleanup, and cache invalidation in one place.
 		try {
-			await fs.writeFile(closeSummaryTempPath, summaryContent, 'utf-8');
-			fsSync.renameSync(closeSummaryTempPath, closeSummaryPath);
-			// Defensive, not currently load-bearing: no cached reader consumes
-			// close-summary.md today, so this is a no-op. It is kept so the file
-			// cannot become a stale-read hazard the moment someone routes a read
-			// through `readSwarmFileAsync`, matching every other temp+rename
-			// writer in this file.
-			invalidateCachedArtifact(closeSummaryPath);
+			await atomicWriteSwarmFile(closeSummaryPath, summaryContent);
 		} catch (error) {
-			try {
-				fsSync.unlinkSync(closeSummaryTempPath);
-			} catch {
-				// best-effort cleanup
-			}
 			const msg = error instanceof Error ? error.message : String(error);
 			ctx.warnings.push(`Failed to write close-summary.md: ${msg}`);
 			log('[close-command] Failed to write close-summary.md:', error);

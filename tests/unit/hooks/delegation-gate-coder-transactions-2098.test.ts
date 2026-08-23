@@ -3,7 +3,6 @@ import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { PluginConfig } from '../../../src/config';
-import { _internals as taskFileInternals } from '../../../src/evidence/task-file';
 import {
 	getTaskWorkflowSnapshot,
 	readTaskEvidence,
@@ -11,6 +10,7 @@ import {
 } from '../../../src/gate-evidence';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
+import { _internals as taskFileInternals } from '../../../src/utils/atomic-write';
 import { recoverCoderSettlement } from '../../../src/workflow/coder-settlement';
 import { writeApprovedPlan } from '../../helpers/approved-plan';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';

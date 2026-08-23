@@ -2,6 +2,11 @@
  * Tests for the shared flat-task-file evidence write primitives (#978).
  * Covers the lock that serializes concurrent read-modify-writes to the same
  * .swarm/evidence/{taskId}.json and the atomic temp+rename write.
+ *
+ * Issue #2035: `atomicWriteFile` now delegates to the canonical helper in
+ * `src/utils/atomic-write.ts`, so failure injection targets THAT module's
+ * `_internals` seam (the task-file seam moved there with the implementation)
+ * and targets must live under a `.swarm/` root per the containment contract.
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
@@ -9,12 +14,12 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-	_internals,
 	atomicWriteFile,
 	taskEvidencePath,
 	taskEvidenceRelPath,
 	withTaskEvidenceLock,
 } from '../../../src/evidence/task-file';
+import { _internals as atomicWriteInternals } from '../../../src/utils/atomic-write';
 
 let tempDir: string;
 
@@ -90,33 +95,35 @@ describe('withTaskEvidenceLock — mutual exclusion', () => {
 
 describe('atomicWriteFile', () => {
 	test('writes the content and leaves no leftover .tmp file', async () => {
-		const target = join(tempDir, 'out.json');
+		const target = join(tempDir, '.swarm', 'out.json');
 		await atomicWriteFile(target, '{"a":1}');
 
 		expect(readFileSync(target, 'utf-8')).toBe('{"a":1}');
-		const leftovers = readdirSync(tempDir).filter((f) => f.includes('.tmp'));
+		const leftovers = readdirSync(join(tempDir, '.swarm')).filter((f) =>
+			f.includes('.tmp'),
+		);
 		expect(leftovers).toHaveLength(0);
-		expect(readdirSync(tempDir)).toEqual(['out.json']);
+		expect(readdirSync(join(tempDir, '.swarm'))).toEqual(['out.json']);
 	});
 
 	test('overwrites an existing target atomically', async () => {
-		const target = join(tempDir, 'out.json');
+		const target = join(tempDir, '.swarm', 'out.json');
 		await atomicWriteFile(target, 'first');
 		await atomicWriteFile(target, 'second');
 		expect(readFileSync(target, 'utf-8')).toBe('second');
-		expect(readdirSync(tempDir).filter((f) => f.includes('.tmp'))).toHaveLength(
-			0,
-		);
+		expect(
+			readdirSync(join(tempDir, '.swarm')).filter((f) => f.includes('.tmp')),
+		).toHaveLength(0);
 	});
 });
 
 describe('atomicWriteFile — failure paths', () => {
 	// Save the real renameSync so we can restore it after each test.
-	const realRenameSync = _internals.renameSync;
+	const realRenameSync = atomicWriteInternals.renameSync;
 
 	afterEach(() => {
 		// Restore the seam so subsequent tests (and other files) use the real fs.
-		_internals.renameSync = realRenameSync;
+		atomicWriteInternals.renameSync = realRenameSync;
 	});
 
 	test('renameSync failure cleans up the temp file and propagates the error', async () => {
@@ -125,22 +132,24 @@ describe('atomicWriteFile — failure paths', () => {
 			new Error('EPERM: operation not permitted'),
 			{ code: 'EPERM' },
 		);
-		_internals.renameSync = () => {
+		atomicWriteInternals.renameSync = () => {
 			throw epermError;
 		};
 
-		const target = join(tempDir, 'out.json');
+		const target = join(tempDir, '.swarm', 'out.json');
 
-		// Act + Assert: error propagates.
+		// Act + Assert: error propagates (after bounded retries).
 		await expect(atomicWriteFile(target, '{}')).rejects.toThrow(
 			'EPERM: operation not permitted',
 		);
 
 		// Assert: no .tmp file left behind (finally block cleaned up).
-		const leftovers = readdirSync(tempDir).filter((f) => f.includes('.tmp'));
+		const leftovers = readdirSync(join(tempDir, '.swarm')).filter((f) =>
+			f.includes('.tmp'),
+		);
 		expect(leftovers).toHaveLength(0);
 
 		// Assert: target was never written (rename never completed).
-		expect(readdirSync(tempDir)).toHaveLength(0);
+		expect(readdirSync(join(tempDir, '.swarm'))).toHaveLength(0);
 	});
 });

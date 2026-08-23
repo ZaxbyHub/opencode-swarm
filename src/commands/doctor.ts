@@ -6,7 +6,14 @@ import {
 	removeStraySwarmDir,
 	runConfigDoctor,
 } from '../services/config-doctor';
+import {
+	formatResidueInventoryLines,
+	inventorySwarmResidue,
+	quarantineSwarmResidue,
+	rollbackResidueQuarantine,
+} from '../services/swarm-residue';
 import { runToolDoctor } from '../services/tool-doctor';
+import { swarmState } from '../state';
 
 /**
  * Format tool doctor result as markdown for command output.
@@ -248,6 +255,34 @@ export async function handleDoctorCommand(
 		output += `${lines.join('\n')}\n`;
 	}
 
+	// Issue #2271 bug 4: validate configured agent model ids against the live
+	// provider catalog. Structural checks above cannot see a model that is
+	// syntactically fine but does not resolve ("Model not found"/"Forbidden").
+	// Fail-open: an unreachable catalog adds nothing to the report.
+	try {
+		const { runModelPreflight } = await import('../services/model-preflight');
+		const preflight = await runModelPreflight(
+			config,
+			swarmState.opencodeClient,
+		);
+		if (preflight.catalogAvailable) {
+			const unresolved = preflight.resolutions.filter(
+				(resolution) => resolution.status === 'unresolved',
+			);
+			if (unresolved.length > 0) {
+				output += '\n---\n\n## Agent Model Resolution\n\n';
+				output += `${unresolved.length} configured agent model(s) do not resolve against the provider catalog:\n\n`;
+				for (const resolution of unresolved) {
+					output += `- \`${resolution.agent}\` → \`${resolution.model}\`: ${resolution.detail ?? 'does not resolve'}\n`;
+				}
+				output +=
+					'\nDispatching these agents will fail permanently. Fix `agents.<role>.model` in opencode-swarm.json or remove the override.\n';
+			}
+		}
+	} catch {
+		/* fail-open: the doctor must still produce its structural report */
+	}
+
 	// Check for stray .swarm directories
 	const strayDirs = detectStraySwarmDirs(directory);
 	if (strayDirs.length > 0) {
@@ -284,6 +319,83 @@ export async function handleDoctorCommand(
 			}
 			output += '\nThese are likely from a prior bug (Issue #922). ';
 			output += 'Re-run with `--fix` to auto-clean.\n';
+		}
+	}
+
+	// Atomic-write residue (issue #2035). Default: READ-ONLY inventory from the
+	// same shared implementation the close clean stage and close dry-run use.
+	// Mutation is explicit and recoverable: --quarantine-residue moves verified
+	// stale residue into a manifest-backed .swarm/quarantine/ batch;
+	// --rollback-residue-quarantine[=<batch>] restores it. Nothing is ever
+	// deleted automatically.
+	// Exact-match the bare form or accept the '=' batch form only — a bare
+	// startsWith would also swallow typo'd longer flags like
+	// `--rollback-residue-quarantine-batch` and silently act on them
+	// (PR review PRR-024).
+	const rollbackArg = args.includes('--rollback-residue-quarantine')
+		? '--rollback-residue-quarantine'
+		: args.find((a) => a.startsWith('--rollback-residue-quarantine='));
+	if (rollbackArg) {
+		const batchId = rollbackArg.includes('=')
+			? rollbackArg.split('=')[1]
+			: undefined;
+		try {
+			const rollback = await rollbackResidueQuarantine(directory, batchId);
+			const restored = rollback.items.filter(
+				(i) => i.status === 'restored',
+			).length;
+			const already = rollback.items.filter(
+				(i) => i.status === 'already-restored',
+			).length;
+			const collisions = rollback.items.filter(
+				(i) => i.status === 'collision',
+			).length;
+			output += '\n---\n\n## Residue Quarantine Rollback\n\n';
+			output += `Batch \`${rollback.batchRelDir}\`: ${restored} restored, ${already} already restored`;
+			if (collisions > 0) {
+				output += `, ${collisions} collision(s) left in place (original location holds different content — nothing was overwritten)`;
+			}
+			output += rollback.drained
+				? '. Batch fully drained and removed.\n'
+				: '. Batch retained (unresolved entries).\n';
+		} catch (err) {
+			output += `\n❌ Residue quarantine rollback failed: ${err instanceof Error ? err.message : String(err)}\n`;
+		}
+	} else if (args.includes('--quarantine-residue')) {
+		try {
+			const result = await quarantineSwarmResidue(directory, {
+				trigger: 'doctor',
+			});
+			output += '\n---\n\n## Residue Quarantine\n\n';
+			if (result.quarantined > 0 && result.batchRelDir) {
+				output += `Quarantined ${result.quarantined} stale temp file(s) into \`.swarm/${result.batchRelDir}/\` (manifest + sha256 checksums recorded; nothing deleted).\n`;
+				output += `Rollback with: \`/swarm config doctor --rollback-residue-quarantine\`.\n`;
+			} else {
+				output +=
+					'Nothing eligible to quarantine (verified stale, untracked, unlocked, non-symlink only).\n';
+			}
+			if (result.preserved.length > 0) {
+				output += `\nPreserved in place (${result.preserved.length}):\n`;
+				for (const item of result.preserved.slice(0, 10)) {
+					output += `- \`${item.relPath}\` (${item.reasons.join(', ') || 'ineligible'})\n`;
+				}
+				if (result.preserved.length > 10)
+					output += `- … ${result.preserved.length - 10} more\n`;
+			}
+		} catch (err) {
+			output += `\n❌ Residue quarantine failed: ${err instanceof Error ? err.message : String(err)}\n`;
+		}
+	} else {
+		try {
+			const inventory = await inventorySwarmResidue(directory);
+			if (inventory.summary.matched > 0) {
+				output += '\n---\n\n## Atomic-write Residue (read-only)\n\n';
+				output += `${formatResidueInventoryLines(inventory).join('\n')}\n`;
+				output +=
+					'\nPreview only. Run `/swarm config doctor --quarantine-residue` to quarantine eligible items (recoverable), or `--rollback-residue-quarantine` to restore a batch.\n';
+			}
+		} catch {
+			// read-only inventory is best-effort — never block the doctor report
 		}
 	}
 

@@ -157,7 +157,8 @@ describe('close_archive_result telemetry event (issue #2030)', () => {
 				cleanedFiles: ['swarm.db', 'telemetry.jsonl'],
 				configBackupsRemoved: 0,
 				swarmPlanFilesRemoved: 0,
-				tmpFilesRemoved: 0,
+				residueQuarantined: 0,
+				residuePreserved: 0,
 			});
 
 			const archiveEvents = emitMock.mock.calls.filter(
@@ -209,7 +210,8 @@ describe('close_archive_result telemetry event (issue #2030)', () => {
 				cleanedFiles: [],
 				configBackupsRemoved: 0,
 				swarmPlanFilesRemoved: 0,
-				tmpFilesRemoved: 0,
+				residueQuarantined: 0,
+				residuePreserved: 0,
 			});
 
 			// Prose reflects the failure.
@@ -261,7 +263,8 @@ describe('close_archive_result telemetry event (issue #2030)', () => {
 				cleanedFiles: [],
 				configBackupsRemoved: 0,
 				swarmPlanFilesRemoved: 0,
-				tmpFilesRemoved: 0,
+				residueQuarantined: 0,
+				residuePreserved: 0,
 			});
 
 			const archiveEvents = emitMock.mock.calls.filter(
@@ -303,7 +306,8 @@ describe('close_archive_result telemetry event (issue #2030)', () => {
 				],
 				configBackupsRemoved: 0,
 				swarmPlanFilesRemoved: 0,
-				tmpFilesRemoved: 0,
+				residueQuarantined: 0,
+				residuePreserved: 0,
 			});
 
 			// Structured result array includes both dynamic artifacts.
@@ -353,7 +357,8 @@ describe('close_archive_result telemetry event (issue #2030)', () => {
 				cleanedFiles: [],
 				configBackupsRemoved: 0,
 				swarmPlanFilesRemoved: 0,
-				tmpFilesRemoved: 0,
+				residueQuarantined: 0,
+				residuePreserved: 0,
 			});
 
 			const archiveEvents = emitMock.mock.calls.filter(
@@ -392,7 +397,8 @@ describe('close_archive_result telemetry event (issue #2030)', () => {
 				cleanedFiles: ['plan.json'], // clean stage removed it anyway
 				configBackupsRemoved: 0,
 				swarmPlanFilesRemoved: 0,
-				tmpFilesRemoved: 0,
+				residueQuarantined: 0,
+				residuePreserved: 0,
 			});
 
 			const archiveEvents = emitMock.mock.calls.filter(

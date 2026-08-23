@@ -354,7 +354,14 @@ export function listActiveLocks(directory: string): FileLock[] {
 							continue;
 						}
 						locks.push({
-							filePath: file,
+							// No metadata sidecar: the original target path is
+							// unrecoverable (the sentinel name is a one-way
+							// hash), so report the FULL lock path — the
+							// absolute, resolvable identity — not the bare
+							// filename (PR review PRR-008: the bare name made
+							// consumers resolve the sentinel against the
+							// locks dir, which can never equal a real target).
+							filePath: lockPath,
 							agent: 'unknown',
 							taskId: 'unknown',
 							timestamp: new Date(acquiredAt).toISOString(),

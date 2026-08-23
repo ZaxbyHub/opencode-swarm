@@ -3,7 +3,7 @@
 Companion to `docs/evidence-and-telemetry.md` (evidence bundles + the legacy
 telemetry stream from a user's point of view) and `docs/engineering-invariants.md`
 (the invariant this PR establishes). This document is the contract definition for
-`src/observability/`: the canonical event envelope, the 43-entry event catalog,
+`src/observability/`: the canonical event envelope, the 44-entry event catalog,
 the legacy adapter, sampling/cardinality rules, the OTel mapping pin, and the
 exhaustive producer/consumer matrix across all seventeen known observability
 stores in the repository.
@@ -16,7 +16,7 @@ Issue: #2029. This is PR 01 of 23 in the observability sequence (#2029–#2051).
 
 **What this PR defines.** A single canonical `ObservabilityEvent` envelope
 (`src/observability/envelope.ts`), a discriminated catalog of every event kind
-the codebase emits today (`src/observability/catalog.ts`, 43 entries), a
+the codebase emits today (`src/observability/catalog.ts`, 44 entries), a
 relationship-validation function, a legacy-payload adapter, deterministic
 sampling and bounded-cardinality helpers, and a versioned OTel/OpenInference
 attribute-mapping table. It wires the envelope into the one live production
@@ -75,7 +75,7 @@ in production stops anything or is visible anywhere today — it is not.
 
 Defined in `src/observability/envelope.ts` as a zod schema (`z.infer`d for the
 `ObservabilityEvent` type). The schema is safe-parsed by the tests
-(`tests/unit/observability/envelope-roundtrip.test.ts`, all 43 kinds). It is **not** parsed by the
+(`tests/unit/observability/envelope-roundtrip.test.ts`, all 44 kinds). It is **not** parsed by the
 CI contract check, and **not** parsed on the `emit()` hot path; `createObservation` builds a plain
 object and never calls `.parse()`, because parsing would reallocate on every
 emit and would clone or reject `legacy.raw` (see §4).
@@ -182,9 +182,9 @@ those inputs before this change.
 
 ---
 
-## 5. The 43-entry catalog
+## 5. The 45-entry catalog
 
-Source: `src/observability/catalog.ts`. Exactly 43 entries = the 38 pre-existing members of
+Source: `src/observability/catalog.ts`. Exactly 45 entries = the 38 pre-existing members of
 `TelemetryEvent` (`src/telemetry.ts:15-92`) plus `agent_conflict_detected`
 (emitted in production via a force-cast past the type system before #2029)
 plus `close_archive_result` (issue #2030 — the structured close/archive
@@ -193,7 +193,8 @@ diagnostic projection of authoritative receipt transitions) plus
 `knowledge_maintenance` (issue #2033 — the metadata-only human-only hive-store
 quarantine audit) plus `context_pruned` (the bounded aggregate transcript
 mutation audit emitted when context-budget masking and/or pruning changes a
-session transcript).
+session transcript) plus `residue_health` (issue #2035 — the counts-only
+atomic-write residue quarantine health aggregate).
 
 Legend: **Owner** is `futureOwnerIssue` when `consumers` is empty (permitted
 only together with an owner — an empty consumer list with no owner is a CI
@@ -281,6 +282,17 @@ Category `delegation`, severity `info`, privacy `pseudonymous`. Producer
 Category `delegation`, severity `notice`, privacy `pseudonymous`. Producer
 `src/telemetry.ts:506`. Consumers: none — owner **#2047**. Retention: **#2045**.
 Required workflow IDs: `hostSessionId`. OTel mapping: `genai`.
+
+#### model_unresolved
+Category `delegation`, severity `warning`, privacy `pseudonymous`. Producer
+`src/telemetry.ts:614` (issue #2271 bug 4: preflight confirmed a configured
+agent model id does not resolve against the provider catalog — fires before
+any dispatch attempt, unlike a runtime `model_fallback`). Consumers: none —
+owner **#2047**. Retention: **#2045**. Required workflow IDs: `hostSessionId`.
+OTel mapping: `genai`. The event carries the sentinel session id `preflight`
+(there is no live session at preflight time); OTel consumers will see a
+`gen_ai.conversation.id` of `preflight` for this kind — a known, documented
+phantom-conversation artifact, not a real session.
 
 ### Gate category
 
@@ -534,13 +546,30 @@ The authoritative record of what was quarantined is the backup manifest plus
 the hive events log under the platform data dir; this event only audits that
 the operator flow ran and why it aborted, if it did.
 
+#### residue_health
+Category `lifecycle`, severity `notice`, privacy `operational`. Producer
+`src/telemetry.ts:883` (`residueHealth`, called by
+`quarantineSwarmResidue` in `src/services/swarm-residue.ts` after a
+residue quarantine run — the close clean stage or `/swarm config doctor
+--quarantine-residue`; issue #2035). Consumers: none — owner **#2047**.
+Retention: **#2047**. No workflow ID is required: residue handling runs
+outside any session/task correlation. The payload is strictly bounded counts:
+`trigger`, `scanned`, `matched`, `eligible`, `ambiguous`, `quarantined`,
+`preserved`, `total_bytes`, `oldest_age_ms`, and `grammar_counts` keyed by the
+frozen registry ids in `src/utils/atomic-write.ts` (bounded by the registry
+size). File names, filesystem paths, and file content are never emitted
+(path redaction by omission). The authoritative record of what was moved is
+the per-batch quarantine manifest under `.swarm/quarantine/`; this event only
+reports the health aggregate so later reporting (PR 16/19) can surface residue
+pressure without leaking workspace layout.
+
 ---
 
 ## 6. The exhaustive producer/consumer matrix (17 rows)
 
 **Every row carries a `file:line` citation, but those citations are
 UNGATED and go stale on any rebase that shifts a cited file.**
-`scripts/check-event-contract.ts` mechanically validates the 43-entry
+`scripts/check-event-contract.ts` mechanically validates the 44-entry
 *catalog* in §5 (catalog ↔ `TelemetryEvent` union parity, per-entry
 completeness) — it does not and cannot check this prose matrix. Treat a
 citation here as "verified as of `origin/main` `0060f48d`", not as a standing

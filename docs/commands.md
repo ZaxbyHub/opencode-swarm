@@ -528,7 +528,7 @@ The effective value is shown to the architect via an injected `AUTO PROCEED STAT
 
 Show the current resolved plugin configuration (merged global + project + CLI overrides).
 
-### `/swarm config doctor [--fix] [--restore <id>]`
+### `/swarm config doctor [--fix] [--restore <id>] [--quarantine-residue] [--rollback-residue-quarantine[=<batch>]]`
 
 Run config validation and integrity checks. Alias: `/swarm config-doctor` (hyphenated form for TUI shortcut compatibility).
 
@@ -536,6 +536,10 @@ The doctor validates all 62+ top-level schema keys with type checks (string, boo
 
 - `--fix`: auto-repair issues where safe. Creates encrypted backup first. When auto-fixable issues are found, the doctor applies fixes and re-runs to confirm resolution.
 - `--restore <id>`: revert to a previous backup.
+- `--quarantine-residue`: MOVE verified stale atomic-write temp files (registered grammars only; ≥30 min old, git-untracked, unlocked, non-symlink) into a manifest-backed `.swarm/quarantine/<batch>/` directory with sha256 checksums. Nothing is ever deleted; `/swarm finalize --dry-run` previews the same inventory.
+- `--rollback-residue-quarantine[=<batch>]`: restore a quarantine batch (default: latest). Idempotent and collision-safe — differing originals are never overwritten.
+
+**Atomic-write residue (issue #2035):** without any flag, the doctor appends a read-only `## Atomic-write Residue` section when residue is found: per-grammar counts, bytes, ages, tracked/lock/symlink signals, and the proposed action per file — all derived from the same shared inventory the close clean stage and close dry-run use.
 
 **Last-run summary:** When run without `--fix`, the command displays a summary of the previous run (if available) showing the timestamp, total findings count, and auto-fixable count before the current findings.
 

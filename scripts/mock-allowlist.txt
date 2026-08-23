@@ -137,4 +137,7 @@ src/utils/bun-compat
 src/utils/logger
 src/utils/path-security
 src/utils/spec-hash
-
+# simulate.report-write error-path tests: canonical writer is sync-primitive,
+# so only a module mock can reach the write-failure seam.
+# APPROVED-NEW: src/utils/atomic-write
+src/utils/atomic-write
