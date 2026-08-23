@@ -246,6 +246,13 @@ interface GitResult {
 
 /** Default timeout for git worktree operations (30 seconds). */
 const WORKTREE_TIMEOUT_MS = 30_000;
+/**
+ * Issue #2271 bug 1: budget for the two post-provision verification probes
+ * (`.git` stat + `git rev-parse --git-dir` inside the fresh lane). These run
+ * on an already-created lane, so a tight bound suffices — a lane whose git
+ * link cannot be probed in 5 s is broken, not slow.
+ */
+const WORKTREE_VERIFICATION_TIMEOUT_MS = 5_000;
 
 /**
  * Windows MAX_PATH safety margin. The OS limit is 260 characters; we use
@@ -886,6 +893,49 @@ export async function provisionWorktree(
 	if (addResult.exitCode !== 0) {
 		return {
 			error: `Failed to create worktree: ${addResult.stderr.trim() || addResult.stdout.trim()}`,
+		};
+	}
+
+	// Issue #2271 bug 1: `git worktree add` exiting 0 does not by itself prove
+	// the lane is a registered, usable worktree — a concurrent prune, a partial
+	// removal from a sibling dispatch's collision cleanup, or a half-consumed
+	// `worktree remove` can leave a plain directory with no `.git` link. A coder
+	// session created in such a directory writes files git can never attribute,
+	// and settlement records dispatch_no_mutation even though the coder worked.
+	// Probe git's own view of the lane before any session is created inside it.
+	// (Deliberately a git probe, not a filesystem `.git` probe: lanes live
+	// outside the project root by default, where rev-parse only succeeds inside
+	// a genuinely registered worktree; and a filesystem probe breaks the
+	// spawn-mocked provisioning tests whose lanes never exist on disk. A lane
+	// rooted inside another repository via a custom worktree_dir would still
+	// resolve — accepted residual, strictly narrower than the reported defect.)
+	const revParseResult = await runGit(
+		['rev-parse', '--git-dir'],
+		worktreePath,
+		WORKTREE_VERIFICATION_TIMEOUT_MS,
+	);
+	if (revParseResult.exitCode !== 0) {
+		// The lane is unusable; remove the partial registration so the next
+		// attempt provisions cleanly instead of colliding with this carcass.
+		// removeWorktree never REJECTS — it resolves with { error } on failure
+		// (Windows EBUSY/EPERM retries exhausted, non-force-refusable path) —
+		// so a bare .catch() cannot observe that failure. Report the removal
+		// outcome honestly instead of claiming the lane was removed.
+		const removeResult = await removeWorktree(worktreePath, directory, {
+			force: true,
+			worktreeDir: options.worktreeDir,
+		}).catch((removalError: unknown): { error: string } => ({
+			error:
+				removalError instanceof Error
+					? removalError.message
+					: String(removalError),
+		}));
+		const removalNote =
+			'error' in removeResult
+				? `The lane could NOT be removed (${removeResult.error}) — it may collide with the next provisioning attempt; clear ${worktreePath} manually if retries fail.`
+				: 'The lane was removed; retry the dispatch.';
+		return {
+			error: `WORKTREE_VERIFICATION_FAILED: lane ${worktreePath} did not register as a usable git worktree (git rev-parse --git-dir failed in the lane: ${revParseResult.stderr.trim() || revParseResult.stdout.trim() || `exit ${revParseResult.exitCode}`}). ${removalNote}`,
 		};
 	}
 

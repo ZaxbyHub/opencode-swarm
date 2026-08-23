@@ -357,6 +357,10 @@ function serializeStandardWorktreeDispatches(
 		);
 		return;
 	}
+	standardWorktreeDegradationReasonBySession.set(sessionID, {
+		reason: message,
+		at: Date.now(),
+	});
 	const session = ensureAgentSession(sessionID);
 	session.maxConcurrencyOverride = 1;
 	pushAdvisory(
@@ -365,10 +369,28 @@ function serializeStandardWorktreeDispatches(
 	);
 }
 
+/**
+ * Issue #2271 bug 1: the latest reason a session's standard worktree
+ * isolation degraded to serialized project-root execution, so dispatch sites
+ * can record a durable event when a coder runs un-isolated. Cleared when the
+ * session regains parallel eligibility.
+ */
+const standardWorktreeDegradationReasonBySession = new Map<
+	string,
+	{ reason: string; at: number }
+>();
+
+export function getStandardWorktreeDegradationReason(
+	sessionID: string,
+): { reason: string; at: number } | undefined {
+	return standardWorktreeDegradationReasonBySession.get(sessionID);
+}
+
 export function resetStandardWorktreeIsolationState(): void {
 	standardWorktreeByCallID.clear();
 	standardWorktreeSerializationSessions.clear();
 	serializationStateBySessionID.clear();
+	standardWorktreeDegradationReasonBySession.clear();
 	awaitingMergeByCallID.clear();
 	standardWorktreeMergeQueue = Promise.resolve();
 	standardWorktreeLaneIndexBySession.clear();
@@ -382,6 +404,7 @@ function releaseStandardWorktreeSerialization(sessionID: string): boolean {
 	if (!standardWorktreeSerializationSessions.has(sessionID)) return false;
 	standardWorktreeSerializationSessions.delete(sessionID);
 	serializationStateBySessionID.delete(sessionID);
+	standardWorktreeDegradationReasonBySession.delete(sessionID);
 	const session = ensureAgentSession(sessionID);
 	session.maxConcurrencyOverride = undefined;
 	pushAdvisory(
@@ -433,6 +456,7 @@ function rememberStandardWorktreeSerializationSession(
 			if (!hasInFlightStandardWorktreeDispatch(key)) {
 				standardWorktreeSerializationSessions.delete(key);
 				serializationStateBySessionID.delete(key);
+				standardWorktreeDegradationReasonBySession.delete(key);
 				evicted = true;
 				break;
 			}
@@ -1049,12 +1073,22 @@ export async function precreateStandardWorktreeSession(args: {
 		query: { directory: provisionResult.worktreePath },
 	});
 	if (!createResult.data?.id) {
+		// Issue #2271 bug 1: an abandoned lane here feeds future collision
+		// churn — surface the failed cleanup instead of swallowing it silently.
 		await _internals
 			.removeWorktree(provisionResult.worktreePath, args.directory, {
 				force: true,
 				worktreeDir: worktreeConfig.worktree_dir,
 			})
-			.catch(() => {});
+			.catch((cleanupError: unknown) => {
+				logger.log(
+					`[worktree-isolation] session-create failure cleanup could not remove lane ${provisionResult.worktreePath}: ${
+						cleanupError instanceof Error
+							? cleanupError.message
+							: String(cleanupError)
+					}`,
+				);
+			});
 		_internals.removeWorktreeProvisioningOwner(args.directory, args.callID);
 		const createError = (createResult as { error?: unknown }).error;
 		const detail =
