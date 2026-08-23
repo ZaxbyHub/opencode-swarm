@@ -14,6 +14,7 @@ import {
 	attemptBaseBatch,
 	attemptConsolidatedRetry,
 	HEAD_SHA,
+	LEGACY_PR_REVIEW_RESILIENCE_POLICY,
 	persistBaseLane,
 	recordInitialWave,
 	SESSION_ID,
@@ -274,7 +275,11 @@ describe('PR_REVIEW tier-L consolidated retry batches', () => {
 			tierLDirectory(),
 			SESSION_ID,
 			[singleton(DIM_A, 'fail'), singleton(DIM_B, 'fail')],
-			{ batchId: 'base-failed', prHeadSha: HEAD_SHA },
+			{
+				batchId: 'base-failed',
+				prHeadSha: HEAD_SHA,
+				prReviewResiliencePolicy: LEGACY_PR_REVIEW_RESILIENCE_POLICY,
+			},
 		);
 		await persistBaseLane({
 			batchId: 'base-failed',

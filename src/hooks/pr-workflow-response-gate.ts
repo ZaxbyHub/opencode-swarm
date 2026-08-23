@@ -17,15 +17,21 @@ import {
 import { validateSwarmPath } from './utils.js';
 
 const DEFAULT_WAKE_TIMEOUT_MS = 5_000;
+export const DEFAULT_BOUNDARY_QUIET_MS = 750;
+export const DEFAULT_BOUNDARY_WATCHDOG_MS = 5_000;
+export const DEFAULT_STATUS_PROBE_TIMEOUT_MS = 250;
+export const MAX_TRACKED_BOUNDARY_TOOL_PARTS = 200;
 
 export const _internals: {
 	readPrWorkflowGateState: typeof readPrWorkflowGateState;
 	claimPrFeedbackMonitorEvents: typeof claimPrFeedbackMonitorEvents;
 	readPrFeedbackMonitorQueue: typeof readPrFeedbackMonitorQueue;
+	observePrWorkflowAutoWakeEvent: typeof observePrWorkflowAutoWakeEvent;
 } = {
 	readPrWorkflowGateState,
 	claimPrFeedbackMonitorEvents,
 	readPrFeedbackMonitorQueue,
+	observePrWorkflowAutoWakeEvent,
 };
 
 /**
@@ -134,19 +140,25 @@ interface PromptResult {
 	error?: unknown;
 }
 
+type SessionReadiness = 'idle' | 'busy' | 'retry' | 'unknown';
+
 interface SessionClient {
 	prompt: (args: unknown) => Promise<PromptResult>;
 	promptAsync?: (args: unknown) => Promise<PromptResult>;
+	status?: (args: {
+		query: { directory: string };
+	}) => Promise<{ error?: unknown; data?: Record<string, { type?: unknown }> }>;
 }
 
 interface PrWorkflowResponseGateClient {
 	session?: unknown;
 }
 
-interface IdleEvent {
-	type?: unknown;
-	properties?: { sessionID?: unknown };
-}
+type TimerHandle = ReturnType<typeof setTimeout>;
+
+type ScheduleTimer = (callback: () => void, delayMs: number) => TimerHandle;
+
+type ClearScheduledTimer = (timer: TimerHandle) => void;
 
 interface WakeBudget {
 	consecutiveUnproductive: number;
@@ -176,6 +188,26 @@ interface WakeBudget {
 	suspendedReason: 'consecutive' | 'total';
 }
 
+interface BoundaryActivityState {
+	lifecycleGeneration: number;
+	lastParentActivityAt: number;
+	lastObservedAt: number;
+	lastHostStatus: SessionReadiness;
+	hostStatusGeneration: number;
+	activeToolParts: Map<string, 'pending' | 'running'>;
+	terminalToolParts: Map<string, number>;
+	removedToolParts: Map<string, number>;
+	quietDeadlineAt?: number;
+	watchdogDeadlineAt?: number;
+	timer?: TimerHandle;
+	timerGeneration: number;
+}
+
+interface ObservedBoundaryEvent {
+	sessionID?: string;
+	boundaryGeneration?: number;
+}
+
 /**
  * A total-wake ceiling is only meaningful as a finite positive integer. Every
  * other shape silently DISABLES or INVERTS the brake rather than tuning it:
@@ -196,6 +228,72 @@ function isValidTotalWakeCeiling(value: number | undefined): value is number {
 	// Number.isInteger is false for NaN and both Infinities, so this single
 	// predicate covers finiteness, integrality, and positivity.
 	return value !== undefined && Number.isInteger(value) && value > 0;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+	return typeof value === 'object' && value !== null
+		? (value as Record<string, unknown>)
+		: undefined;
+}
+
+function asArray(value: unknown): unknown[] {
+	return Array.isArray(value) ? value : [];
+}
+
+function eventEnvelope(
+	event: Record<string, unknown>,
+): Record<string, unknown> {
+	return asRecord(event.properties) ?? asRecord(event.data) ?? {};
+}
+
+function envelopeSessionID(
+	envelope: Record<string, unknown>,
+): string | undefined {
+	const info = asRecord(envelope.info);
+	const candidate =
+		envelope.sessionID ??
+		envelope.sessionId ??
+		info?.sessionID ??
+		info?.sessionId ??
+		info?.id;
+	return typeof candidate === 'string' && candidate.trim() !== ''
+		? candidate.trim()
+		: undefined;
+}
+
+function normalizeSessionReadiness(value: unknown): SessionReadiness {
+	if (value === 'idle' || value === 'busy' || value === 'retry') return value;
+	const nested = asRecord(value)?.type;
+	return nested === 'idle' || nested === 'busy' || nested === 'retry'
+		? nested
+		: 'unknown';
+}
+
+function extractToolPartID(part: Record<string, unknown>): string | undefined {
+	const state = asRecord(part.state);
+	const candidate =
+		part.id ??
+		part.partID ??
+		part.callID ??
+		state?.id ??
+		state?.partID ??
+		state?.callID;
+	return typeof candidate === 'string' && candidate.trim() !== ''
+		? candidate.trim()
+		: undefined;
+}
+
+function isInFlightToolStatus(value: unknown): value is 'pending' | 'running' {
+	return value === 'pending' || value === 'running';
+}
+
+function isTerminalToolStatus(value: unknown): boolean {
+	return (
+		value === 'completed' ||
+		value === 'error' ||
+		value === 'cancelled' ||
+		value === 'aborted'
+	);
 }
 
 function canonicalGitHubPrUrl(value: string): string | null {
@@ -365,6 +463,12 @@ export function createPrWorkflowResponseGate(options: {
 	maxConsecutiveUnproductiveWakes?: number;
 	wakeCooldownMs?: number;
 	bannerCooldownMs?: number;
+	boundaryQuietMs?: number;
+	boundaryWatchdogMs?: number;
+	statusProbeTimeoutMs?: number;
+	now?: () => number;
+	scheduleTimer?: ScheduleTimer;
+	clearScheduledTimer?: ClearScheduledTimer;
 	/** Override the per-tier default total-wake ceilings. A single number
 	 * applies uniformly to all tiers; a partial Record allows per-tier
 	 * overrides with unspecified tiers falling back to the defaults.
@@ -379,6 +483,17 @@ export function createPrWorkflowResponseGate(options: {
 	const wakeCooldownMs = options.wakeCooldownMs ?? DEFAULT_WAKE_COOLDOWN_MS;
 	const bannerCooldownMs =
 		options.bannerCooldownMs ?? DEFAULT_BANNER_COOLDOWN_MS;
+	const boundaryQuietMs = options.boundaryQuietMs ?? DEFAULT_BOUNDARY_QUIET_MS;
+	const boundaryWatchdogMs =
+		options.boundaryWatchdogMs ?? DEFAULT_BOUNDARY_WATCHDOG_MS;
+	const statusProbeTimeoutMs =
+		options.statusProbeTimeoutMs ?? DEFAULT_STATUS_PROBE_TIMEOUT_MS;
+	const now = options.now ?? (() => Date.now());
+	const scheduleTimer =
+		options.scheduleTimer ??
+		((callback, delayMs) => setTimeout(callback, delayMs));
+	const clearScheduledTimer =
+		options.clearScheduledTimer ?? ((timer) => clearTimeout(timer));
 	/**
 	 * Resolve the total-wake ceiling for a tier, validating the caller-supplied
 	 * override (see {@link isValidTotalWakeCeiling}). The check is applied to
@@ -429,6 +544,300 @@ export function createPrWorkflowResponseGate(options: {
 	 */
 	const fallbackInjections = new Map<string, number>();
 	const session = options.client?.session as SessionClient | undefined;
+	const boundaryActivityBySession = new Map<string, BoundaryActivityState>();
+	let nextBoundaryLifecycleGeneration = 1;
+
+	function allocateBoundaryLifecycleGeneration(): number {
+		for (
+			let attempts = 0;
+			attempts <= boundaryActivityBySession.size;
+			attempts += 1
+		) {
+			const candidate = nextBoundaryLifecycleGeneration;
+			nextBoundaryLifecycleGeneration =
+				candidate >= Number.MAX_SAFE_INTEGER ? 1 : candidate + 1;
+			let collision = false;
+			for (const state of boundaryActivityBySession.values()) {
+				if (state.lifecycleGeneration === candidate) {
+					collision = true;
+					break;
+				}
+			}
+			if (!collision) return candidate;
+		}
+		throw new Error('Unable to allocate PR workflow boundary generation');
+	}
+
+	function clearBoundaryTimer(state: BoundaryActivityState): void {
+		if (state.timer !== undefined) {
+			clearScheduledTimer(state.timer);
+			state.timer = undefined;
+		}
+	}
+
+	function clearBoundaryActivity(sessionID: string, dropState = true): void {
+		const state = boundaryActivityBySession.get(sessionID);
+		if (!state) return;
+		clearBoundaryTimer(state);
+		state.quietDeadlineAt = undefined;
+		state.watchdogDeadlineAt = undefined;
+		if (dropState) boundaryActivityBySession.delete(sessionID);
+	}
+
+	function evictBoundaryActivityIfOverBound(currentSessionID: string): void {
+		while (boundaryActivityBySession.size > MAX_TRACKED_WAKE_SESSIONS) {
+			let oldestKey: string | undefined;
+			let oldestSeenAt = Number.POSITIVE_INFINITY;
+			for (const [key, state] of boundaryActivityBySession) {
+				if (key === currentSessionID || activeWakeSessions.has(key)) {
+					continue;
+				}
+				if (state.lastObservedAt < oldestSeenAt) {
+					oldestSeenAt = state.lastObservedAt;
+					oldestKey = key;
+				}
+			}
+			if (oldestKey === undefined) break;
+			// Pending leases are safe to evict: cancel their timer before dropping
+			// the state. Skipping every timer-bearing entry lets a stream of idle
+			// sessions grow this map without bound because every entry is normally
+			// armed. Active wake evaluations remain protected above.
+			clearBoundaryActivity(oldestKey);
+		}
+	}
+
+	function getOrCreateBoundaryActivity(
+		sessionID: string,
+	): BoundaryActivityState {
+		let state = boundaryActivityBySession.get(sessionID);
+		if (state) return state;
+		state = {
+			lifecycleGeneration: allocateBoundaryLifecycleGeneration(),
+			lastParentActivityAt: 0,
+			lastObservedAt: now(),
+			lastHostStatus: 'unknown',
+			hostStatusGeneration: 0,
+			activeToolParts: new Map(),
+			terminalToolParts: new Map(),
+			removedToolParts: new Map(),
+			timerGeneration: 0,
+		};
+		boundaryActivityBySession.set(sessionID, state);
+		evictBoundaryActivityIfOverBound(sessionID);
+		return state;
+	}
+
+	function getLiveBoundaryActivity(
+		sessionID: string,
+		expectedGeneration: number,
+	): BoundaryActivityState | undefined {
+		const state = boundaryActivityBySession.get(sessionID);
+		return state && state.lifecycleGeneration === expectedGeneration
+			? state
+			: undefined;
+	}
+
+	function rememberBoundedKeyedTimestamp(
+		map: Map<string, number>,
+		key: string,
+		stamp: number,
+	): void {
+		map.delete(key);
+		map.set(key, stamp);
+		while (map.size > MAX_TRACKED_BOUNDARY_TOOL_PARTS) {
+			const oldest = map.keys().next().value;
+			if (typeof oldest !== 'string') break;
+			map.delete(oldest);
+		}
+	}
+
+	function rememberActiveToolPart(
+		state: BoundaryActivityState,
+		partID: string,
+		status: 'pending' | 'running',
+	): void {
+		state.activeToolParts.delete(partID);
+		state.activeToolParts.set(partID, status);
+		while (state.activeToolParts.size > MAX_TRACKED_BOUNDARY_TOOL_PARTS) {
+			const oldest = state.activeToolParts.keys().next().value;
+			if (typeof oldest !== 'string') break;
+			state.activeToolParts.delete(oldest);
+		}
+	}
+
+	function armBoundaryLeaseTimer(
+		sessionID: string,
+		state: BoundaryActivityState,
+		currentNow: number,
+	): void {
+		const quietDeadlineAt =
+			state.quietDeadlineAt ?? currentNow + Math.max(0, boundaryQuietMs);
+		const watchdogDeadlineAt =
+			state.watchdogDeadlineAt ?? currentNow + Math.max(0, boundaryWatchdogMs);
+		state.quietDeadlineAt = quietDeadlineAt;
+		state.watchdogDeadlineAt = watchdogDeadlineAt;
+		let nextWakeAt =
+			quietDeadlineAt > currentNow
+				? Math.min(quietDeadlineAt, watchdogDeadlineAt)
+				: watchdogDeadlineAt;
+		if (
+			nextWakeAt <= currentNow &&
+			(state.activeToolParts.size > 0 ||
+				state.lastHostStatus === 'busy' ||
+				state.lastHostStatus === 'retry')
+		) {
+			// Once the watchdog has expired, active parent tools and explicit
+			// busy/retry host states still defer the wake. Re-arm a bounded future
+			// retry instead of a zero-delay loop; a terminal tool event or later host
+			// status change will reset the deadlines sooner via noteParentActivity.
+			nextWakeAt = currentNow + Math.max(1, boundaryWatchdogMs);
+			state.quietDeadlineAt = nextWakeAt;
+			state.watchdogDeadlineAt = nextWakeAt;
+		}
+		const delayMs = Math.max(0, nextWakeAt - currentNow);
+		clearBoundaryTimer(state);
+		state.timerGeneration += 1;
+		const generation = state.timerGeneration;
+		const boundaryGeneration = state.lifecycleGeneration;
+		state.timer = scheduleTimer(() => {
+			void runBoundaryLeaseTimer(sessionID, generation, boundaryGeneration);
+		}, delayMs);
+		if (typeof (state.timer as { unref?: () => void }).unref === 'function') {
+			(state.timer as { unref: () => void }).unref();
+		}
+	}
+
+	function noteParentActivity(sessionID: string, stamp: number): void {
+		const state = getOrCreateBoundaryActivity(sessionID);
+		state.lastObservedAt = stamp;
+		state.lastParentActivityAt = stamp;
+		if (
+			state.quietDeadlineAt !== undefined ||
+			state.watchdogDeadlineAt !== undefined
+		) {
+			state.quietDeadlineAt = stamp + Math.max(0, boundaryQuietMs);
+			state.watchdogDeadlineAt = stamp + Math.max(0, boundaryWatchdogMs);
+			armBoundaryLeaseTimer(sessionID, state, stamp);
+		}
+	}
+
+	function observeHostStatus(
+		state: BoundaryActivityState,
+		readiness: SessionReadiness,
+		stamp: number,
+	): void {
+		state.lastObservedAt = stamp;
+		state.lastHostStatus = readiness;
+		state.hostStatusGeneration += 1;
+	}
+
+	function observeToolPartState(
+		sessionID: string,
+		part: Record<string, unknown>,
+		removed: boolean,
+		stamp: number,
+	): void {
+		const partID = extractToolPartID(part);
+		if (!partID) return;
+		const state = getOrCreateBoundaryActivity(sessionID);
+		state.lastObservedAt = stamp;
+		if (removed) {
+			state.activeToolParts.delete(partID);
+			rememberBoundedKeyedTimestamp(state.removedToolParts, partID, stamp);
+			noteParentActivity(sessionID, stamp);
+			return;
+		}
+		const rawStatus = asRecord(part.state)?.status ?? part.status;
+		if (isInFlightToolStatus(rawStatus)) {
+			if (
+				state.terminalToolParts.has(partID) ||
+				state.removedToolParts.has(partID)
+			) {
+				return;
+			}
+			rememberActiveToolPart(state, partID, rawStatus);
+			noteParentActivity(sessionID, stamp);
+			return;
+		}
+		if (!isTerminalToolStatus(rawStatus)) return;
+		state.activeToolParts.delete(partID);
+		rememberBoundedKeyedTimestamp(state.terminalToolParts, partID, stamp);
+		noteParentActivity(sessionID, stamp);
+	}
+
+	function observeBoundaryActivity(rawEvent: unknown): ObservedBoundaryEvent {
+		const event = asRecord(rawEvent);
+		if (!event) return {};
+		const envelope = eventEnvelope(event);
+		const sessionID = envelopeSessionID(envelope);
+		const stamp = now();
+		if (
+			(event.type === 'session.deleted' || event.type === 'session.removed') &&
+			sessionID
+		) {
+			clearBoundaryActivity(sessionID);
+			return { sessionID };
+		}
+		if (event.type === 'session.status' && sessionID) {
+			const state = getOrCreateBoundaryActivity(sessionID);
+			observeHostStatus(
+				state,
+				normalizeSessionReadiness(envelope.status),
+				stamp,
+			);
+			return {
+				sessionID,
+				boundaryGeneration: state.lifecycleGeneration,
+			};
+		}
+		if (event.type === 'session.idle' && sessionID) {
+			const state = getOrCreateBoundaryActivity(sessionID);
+			observeHostStatus(state, 'idle', stamp);
+			return {
+				sessionID,
+				boundaryGeneration: state.lifecycleGeneration,
+			};
+		}
+		if (event.type === 'message.updated') {
+			const info = asRecord(envelope.info);
+			const infoSessionID = envelopeSessionID(info ?? {});
+			if (info?.role === 'assistant' && infoSessionID) {
+				noteParentActivity(infoSessionID, stamp);
+				for (const partValue of asArray(info.parts ?? envelope.parts)) {
+					const part = asRecord(partValue);
+					if (!part || part.type !== 'tool') continue;
+					observeToolPartState(infoSessionID, part, false, stamp);
+				}
+				return { sessionID: infoSessionID };
+			}
+			return { sessionID: infoSessionID ?? sessionID };
+		}
+		if (
+			event.type === 'message.part.updated' ||
+			event.type === 'message.part.removed'
+		) {
+			const part = asRecord(envelope.part);
+			const partSessionID = envelopeSessionID(part ?? {}) ?? sessionID;
+			if (!part || !partSessionID) return { sessionID: partSessionID };
+			if (
+				part.type === 'text' ||
+				part.type === 'tool' ||
+				part.type === 'step-finish'
+			) {
+				noteParentActivity(partSessionID, stamp);
+			}
+			if (part.type === 'tool') {
+				observeToolPartState(
+					partSessionID,
+					part,
+					event.type === 'message.part.removed',
+					stamp,
+				);
+			}
+			return { sessionID: partSessionID };
+		}
+		return { sessionID };
+	}
 
 	/**
 	 * Enforce the {@link MAX_TRACKED_WAKE_SESSIONS} bound on `wakeBudgets`
@@ -535,6 +944,7 @@ export function createPrWorkflowResponseGate(options: {
 		bannerStamps.delete(sessionID);
 		banneredMessages.delete(sessionID);
 		fallbackInjections.delete(sessionID);
+		clearBoundaryActivity(sessionID);
 	}
 
 	/**
@@ -587,6 +997,377 @@ export function createPrWorkflowResponseGate(options: {
 		} catch {
 			// Non-fatal: the audit trail is best-effort. A failed write must
 			// never break the gate or abort the suspension bookkeeping.
+		}
+	}
+
+	async function probeSessionReadiness(
+		sessionID: string,
+	): Promise<SessionReadiness> {
+		const fallbackStatus =
+			boundaryActivityBySession.get(sessionID)?.lastHostStatus ?? 'unknown';
+		if (
+			!session ||
+			typeof session.status !== 'function' ||
+			statusProbeTimeoutMs <= 0
+		) {
+			return fallbackStatus;
+		}
+		let timer: TimerHandle | undefined;
+		try {
+			const result = await Promise.race([
+				session.status({ query: { directory: options.directory } }),
+				new Promise<never>((_resolve, reject) => {
+					timer = scheduleTimer(
+						() => reject(new Error('PR workflow session.status timed out')),
+						statusProbeTimeoutMs,
+					);
+				}),
+			]);
+			if (result?.error || !result?.data) return fallbackStatus;
+			return normalizeSessionReadiness(result.data[sessionID]?.type);
+		} catch {
+			return fallbackStatus;
+		} finally {
+			if (timer !== undefined) clearScheduledTimer(timer);
+		}
+	}
+
+	async function runBoundaryLeaseTimer(
+		sessionID: string,
+		generation: number,
+		boundaryGeneration: number,
+	): Promise<void> {
+		const state = getLiveBoundaryActivity(sessionID, boundaryGeneration);
+		if (!state || state.timerGeneration !== generation) return;
+		state.timer = undefined;
+		await runWakeEvaluation(sessionID, boundaryGeneration).catch(() => {});
+	}
+
+	async function rereadRunnableWakeState(
+		sessionID: string,
+	): Promise<
+		Awaited<ReturnType<typeof _internals.readPrWorkflowGateState>> | undefined
+	> {
+		let refreshedState: Awaited<
+			ReturnType<typeof _internals.readPrWorkflowGateState>
+		>;
+		try {
+			refreshedState = await _internals.readPrWorkflowGateState(
+				options.directory,
+				sessionID,
+			);
+		} catch {
+			// Fail closed after awaited host work: an ambiguous durable-state read
+			// must not synthesize a recovery wake against stale gate state.
+			return undefined;
+		}
+		if (!refreshedState) {
+			resetBudget(sessionID);
+			clearPrWorkflowAutoWakeState(options.directory, sessionID);
+			return undefined;
+		}
+		if (refreshedState.checkoutRecovery) {
+			clearBoundaryActivity(sessionID, false);
+			return undefined;
+		}
+		if (isPrWorkflowAutoWakeSuppressed(options.directory, sessionID)) {
+			clearBoundaryActivity(sessionID);
+			return undefined;
+		}
+		return refreshedState;
+	}
+
+	function shouldDeferBoundaryWake(
+		state: BoundaryActivityState,
+		currentTime: number,
+	): boolean {
+		const quietSatisfied =
+			state.lastParentActivityAt <= 0 ||
+			currentTime - state.lastParentActivityAt >= boundaryQuietMs;
+		if (
+			state.activeToolParts.size > 0 ||
+			state.lastHostStatus === 'busy' ||
+			state.lastHostStatus === 'retry'
+		) {
+			return true;
+		}
+		const watchdogExpired =
+			state.watchdogDeadlineAt !== undefined &&
+			currentTime >= state.watchdogDeadlineAt;
+		const unknownWithRecentActivity =
+			state.lastHostStatus === 'unknown' && !quietSatisfied;
+		const mustForce = watchdogExpired && quietSatisfied;
+		return !mustForce && (unknownWithRecentActivity || !quietSatisfied);
+	}
+
+	async function runWakeEvaluation(
+		sessionID: string,
+		boundaryGeneration: number,
+	): Promise<void> {
+		if (activeWakeSessions.has(sessionID)) return;
+		activeWakeSessions.add(sessionID);
+		try {
+			const boundary = getLiveBoundaryActivity(sessionID, boundaryGeneration);
+			if (!boundary) return;
+			let state = await _internals.readPrWorkflowGateState(
+				options.directory,
+				sessionID,
+			);
+			if (!getLiveBoundaryActivity(sessionID, boundaryGeneration)) return;
+			if (!state) {
+				resetBudget(sessionID);
+				clearPrWorkflowAutoWakeState(options.directory, sessionID);
+				clearBoundaryActivity(sessionID);
+				return;
+			}
+			if (state.checkoutRecovery) {
+				clearBoundaryActivity(sessionID, false);
+				return;
+			}
+			if (isPrWorkflowAutoWakeSuppressed(options.directory, sessionID)) {
+				clearBoundaryActivity(sessionID);
+				return;
+			}
+			if (!session) {
+				clearBoundaryActivity(sessionID, false);
+				return;
+			}
+
+			evictIfOverBound(sessionID);
+			let budget = wakeBudgets.get(sessionID);
+			if (!budget) {
+				budget = {
+					consecutiveUnproductive: 0,
+					lastWakeAt: 0,
+					suspended: false,
+					totalWakes: 0,
+					suspendedReason: 'consecutive',
+				};
+				wakeBudgets.set(sessionID, budget);
+			}
+			if (budget.suspended) {
+				clearBoundaryActivity(sessionID);
+				return;
+			}
+
+			boundary.lastObservedAt = now();
+			const baselineHostStatusGeneration = boundary.hostStatusGeneration;
+			const readiness = await probeSessionReadiness(sessionID);
+			const liveBoundary = getLiveBoundaryActivity(
+				sessionID,
+				boundaryGeneration,
+			);
+			if (!liveBoundary) return;
+			const currentTime = now();
+			liveBoundary.lastObservedAt = currentTime;
+			if (readiness !== 'unknown') {
+				if (
+					liveBoundary.hostStatusGeneration === baselineHostStatusGeneration
+				) {
+					observeHostStatus(liveBoundary, readiness, currentTime);
+				}
+			}
+			const shouldDefer = shouldDeferBoundaryWake(liveBoundary, currentTime);
+			if (shouldDefer) {
+				armBoundaryLeaseTimer(sessionID, liveBoundary, currentTime);
+				return;
+			}
+			const postStatusState = await rereadRunnableWakeState(sessionID);
+			if (!postStatusState) return;
+			if (!getLiveBoundaryActivity(sessionID, boundaryGeneration)) return;
+			state = postStatusState;
+
+			if (
+				budget.lastSeenRevision !== undefined &&
+				state.revision > budget.lastSeenRevision
+			) {
+				budget.consecutiveUnproductive = 0;
+			}
+			if (
+				budget.consecutiveUnproductive > 0 &&
+				budget.lastWakeAt > 0 &&
+				currentTime - budget.lastWakeAt < wakeCooldownMs
+			) {
+				return;
+			}
+
+			const madeProgress =
+				budget.lastSeenRevision === undefined
+					? true
+					: state.revision > budget.lastSeenRevision;
+
+			let feedbackTarget =
+				state.prFeedbackTargetUrl ?? state.prFeedbackReviewHandoff?.prUrl;
+			const queuedMonitorRecord =
+				state.mode === 'PR_FEEDBACK' &&
+				!state.prFeedbackInventory &&
+				feedbackTarget
+					? await _internals
+							.readPrFeedbackMonitorQueue(options.directory, sessionID)
+							.catch(() => null)
+					: null;
+			if (!getLiveBoundaryActivity(sessionID, boundaryGeneration)) return;
+			const prePromptState = await rereadRunnableWakeState(sessionID);
+			if (!prePromptState) return;
+			const finalBoundary = getLiveBoundaryActivity(
+				sessionID,
+				boundaryGeneration,
+			);
+			if (!finalBoundary) return;
+			state = prePromptState;
+			feedbackTarget =
+				state.prFeedbackTargetUrl ?? state.prFeedbackReviewHandoff?.prUrl;
+			const queuedMonitorEvents =
+				queuedMonitorRecord?.events.filter(
+					(event) =>
+						!event.claimedWorkflowInstanceId &&
+						Boolean(feedbackTarget) &&
+						sameGitHubPr(event.prUrl, feedbackTarget ?? ''),
+				) ?? [];
+			const queuedMonitorText =
+				queuedMonitorEvents.length > 0
+					? `\n${formatQueuedMonitorEventsText(queuedMonitorEvents)}`
+					: '';
+			const promptStartTime = now();
+			finalBoundary.lastObservedAt = promptStartTime;
+			if (shouldDeferBoundaryWake(finalBoundary, promptStartTime)) {
+				armBoundaryLeaseTimer(sessionID, finalBoundary, promptStartTime);
+				return;
+			}
+			clearBoundaryActivity(sessionID, false);
+			const pluginWakeMessageID = markPrWorkflowPluginWake(
+				options.directory,
+				sessionID,
+			);
+			let promptRejected = false;
+			let promptAccepted = false;
+			let timer: TimerHandle | undefined;
+			try {
+				const args = {
+					path: { id: sessionID },
+					body: {
+						messageID: pluginWakeMessageID,
+						parts: [
+							{
+								type: 'text',
+								text: `${blockedText(state.mode, {
+									suspended: false,
+									suspendedReason: undefined,
+									maxConsecutive: maxConsecutive,
+								})}\nDo not stop or summarize. Inspect the durable gate, dispatch or collect the next missing required lane, and continue until complete_pr_workflow succeeds. If the bind/checkout path is genuinely unreachable, call abort_pr_workflow instead of looping.${queuedMonitorText}`,
+							},
+						],
+					},
+				};
+				const call = session.promptAsync
+					? session.promptAsync(args)
+					: session.prompt(args);
+				const result = await Promise.race([
+					call,
+					new Promise<never>((_resolve, reject) => {
+						timer = scheduleTimer(
+							() => reject(new Error('PR workflow resume prompt timed out')),
+							wakeTimeoutMs,
+						);
+					}),
+				]);
+				if (result?.error != null) {
+					promptRejected = true;
+					throw new Error(
+						`PR workflow resume prompt failed: ${String(result.error)}`,
+					);
+				}
+				promptAccepted = true;
+			} finally {
+				if (timer !== undefined) clearScheduledTimer(timer);
+				if (promptRejected) {
+					cancelPrWorkflowPluginWake(
+						options.directory,
+						sessionID,
+						pluginWakeMessageID,
+					);
+				}
+				let postWakeState: Awaited<
+					ReturnType<typeof _internals.readPrWorkflowGateState>
+				>;
+				try {
+					postWakeState = await _internals.readPrWorkflowGateState(
+						options.directory,
+						sessionID,
+					);
+				} catch {
+					postWakeState = state;
+				}
+				if (
+					promptAccepted &&
+					queuedMonitorEvents.length > 0 &&
+					feedbackTarget &&
+					state.workflowInstanceId &&
+					postWakeState?.mode === 'PR_FEEDBACK' &&
+					postWakeState.workflowInstanceId === state.workflowInstanceId &&
+					!postWakeState.prFeedbackInventory &&
+					sameGitHubPr(
+						postWakeState.prFeedbackTargetUrl ??
+							postWakeState.prFeedbackReviewHandoff?.prUrl ??
+							'',
+						feedbackTarget,
+					)
+				) {
+					await _internals
+						.claimPrFeedbackMonitorEvents(
+							options.directory,
+							sessionID,
+							state.workflowInstanceId,
+							feedbackTarget,
+							queuedMonitorEvents.map((event) => event.dedupToken),
+						)
+						.catch(() => []);
+				}
+				budget.lastWakeAt = promptStartTime;
+				if (postWakeState === null) {
+					resetBudget(sessionID);
+				} else {
+					const currentRevision = postWakeState.revision;
+					const effectiveMadeProgress =
+						madeProgress ||
+						(budget.lastSeenRevision !== undefined &&
+							currentRevision > budget.lastSeenRevision);
+					budget.lastSeenRevision = currentRevision;
+					let suspensionTripped = false;
+					if (!effectiveMadeProgress) {
+						budget.consecutiveUnproductive += 1;
+						if (budget.consecutiveUnproductive >= maxConsecutive) {
+							budget.suspended = true;
+							budget.suspendedReason = 'consecutive';
+							suspensionTripped = true;
+						}
+					} else {
+						budget.consecutiveUnproductive = 0;
+					}
+					budget.totalWakes += 1;
+					const tier: PrReviewDepthTier =
+						postWakeState.prReviewDepthTier ?? 'L';
+					const totalCeiling = resolveTotalWakeCeiling(tier);
+					if (budget.totalWakes >= totalCeiling) {
+						budget.suspended = true;
+						budget.suspendedReason = 'total';
+						suspensionTripped = true;
+					}
+					if (suspensionTripped) {
+						clearBoundaryActivity(sessionID);
+						await appendWakeSuspendedEvent({
+							sessionID,
+							mode: postWakeState.mode,
+							suspendedReason: budget.suspendedReason,
+							consecutiveUnproductive: budget.consecutiveUnproductive,
+							totalWakes: budget.totalWakes,
+							tier,
+						});
+					}
+				}
+			}
+		} finally {
+			activeWakeSessions.delete(sessionID);
 		}
 	}
 
@@ -705,353 +1486,24 @@ export function createPrWorkflowResponseGate(options: {
 	};
 
 	const event = async (input: { event: unknown }): Promise<void> => {
-		const wakeDecision = await observePrWorkflowAutoWakeEvent(
+		const observed = observeBoundaryActivity(input.event);
+		const wakeDecision = await _internals.observePrWorkflowAutoWakeEvent(
 			options.directory,
 			input.event,
 		);
-		const event = input.event as
-			| (IdleEvent & { data?: { sessionID?: unknown } })
-			| undefined;
-		const sessionID = event?.properties?.sessionID ?? event?.data?.sessionID;
-		if (
-			event?.type !== 'session.idle' ||
-			typeof sessionID !== 'string' ||
-			!sessionID.trim() ||
-			wakeDecision.suppressWake ||
-			activeWakeSessions.has(sessionID)
-		) {
+		const event = asRecord(input.event);
+		const envelope = event ? eventEnvelope(event) : undefined;
+		const sessionID =
+			observed.sessionID ??
+			(envelope ? envelopeSessionID(envelope) : undefined);
+		if (!event || !sessionID?.trim()) return;
+		if (wakeDecision.suppressWake) {
+			clearBoundaryActivity(sessionID);
 			return;
 		}
-		// Claim synchronously before the first durable read. OpenCode does not
-		// await event hooks in dispatch order, so any ownership acquired after an
-		// await leaves a window for duplicate idle handlers to start together.
-		activeWakeSessions.add(sessionID);
-		try {
-			const state = await _internals.readPrWorkflowGateState(
-				options.directory,
-				sessionID,
-			);
-			if (!state) {
-				// Gate already cleared (complete_pr_workflow, abort_pr_workflow, or
-				// any future clear path). Drop the budget uniformly — no test-seam
-				// coupling to a specific clear caller.
-				resetBudget(sessionID);
-				clearPrWorkflowAutoWakeState(options.directory, sessionID);
-				return;
-			}
-			if (state.checkoutRecovery) {
-				// Manual Git recovery is a terminal startup condition, not a model
-				// retry condition. Keep the durable banner but never re-wake the model.
-				return;
-			}
-			// The idle decision above can race a later abort because OpenCode does
-			// not await event hooks in dispatch order. Recheck after durable I/O so
-			// an abort published while this read was pending still prevents the wake.
-			if (isPrWorkflowAutoWakeSuppressed(options.directory, sessionID)) return;
-			if (!session) return;
-
-			// Pass the live session id so eviction can never drop the budget this
-			// handler is about to create or mutate (see evictIfOverBound rule 2).
-			evictIfOverBound(sessionID);
-			let budget = wakeBudgets.get(sessionID);
-			if (!budget) {
-				budget = {
-					consecutiveUnproductive: 0,
-					lastWakeAt: 0,
-					suspended: false,
-					totalWakes: 0,
-					suspendedReason: 'consecutive',
-				};
-				wakeBudgets.set(sessionID, budget);
-			}
-			// Suspend check: once the consecutive-unproductive budget is
-			// exhausted, never auto-resume again. textComplete still prepends the
-			// full banner — carrying the suspension recovery notice, never
-			// downgraded to the short marker — to the first substantive part of
-			// the user's next turn.
-			if (budget.suspended) return;
-
-			const now = Date.now();
-			// Progress reset: if the durable gate's revision advanced since the
-			// last wake, the session is making healthy progress — zero the
-			// consecutive counter so long-running reviews never exhaust it.
-			if (
-				budget.lastSeenRevision !== undefined &&
-				state.revision > budget.lastSeenRevision
-			) {
-				budget.consecutiveUnproductive = 0;
-			}
-			// Cooldown: throttle only consecutive unproductive retries. The
-			// first wake after progress (consecutiveUnproductive === 0) fires
-			// immediately so active reviews are not delayed.
-			if (
-				budget.consecutiveUnproductive > 0 &&
-				budget.lastWakeAt > 0 &&
-				now - budget.lastWakeAt < wakeCooldownMs
-			) {
-				return;
-			}
-
-			const madeProgress =
-				budget.lastSeenRevision === undefined
-					? // First wake ever for this session: treat as a probe, not yet
-						// unproductive — we do not know the prior revision.
-						true
-					: state.revision > budget.lastSeenRevision;
-
-			const pluginWakeMessageID = markPrWorkflowPluginWake(
-				options.directory,
-				sessionID,
-			);
-			const feedbackTarget =
-				state.prFeedbackTargetUrl ?? state.prFeedbackReviewHandoff?.prUrl;
-			const queuedMonitorRecord =
-				state.mode === 'PR_FEEDBACK' &&
-				!state.prFeedbackInventory &&
-				feedbackTarget
-					? await _internals
-							.readPrFeedbackMonitorQueue(options.directory, sessionID)
-							.catch(() => null)
-					: null;
-			const queuedMonitorEvents =
-				queuedMonitorRecord?.events.filter(
-					(event) =>
-						!event.claimedWorkflowInstanceId &&
-						Boolean(feedbackTarget) &&
-						sameGitHubPr(event.prUrl, feedbackTarget ?? ''),
-				) ?? [];
-			const queuedMonitorText =
-				queuedMonitorEvents.length > 0
-					? `\n${formatQueuedMonitorEventsText(queuedMonitorEvents)}`
-					: '';
-			let promptRejected = false;
-			let promptAccepted = false;
-			let timer: ReturnType<typeof setTimeout> | undefined;
-			try {
-				const args = {
-					path: { id: sessionID },
-					body: {
-						messageID: pluginWakeMessageID,
-						parts: [
-							{
-								type: 'text',
-								text: `${blockedText(state.mode, {
-									suspended: false,
-									suspendedReason: undefined,
-									maxConsecutive: maxConsecutive,
-								})}\nDo not stop or summarize. Inspect the durable gate, dispatch or collect the next missing required lane, and continue until complete_pr_workflow succeeds. If the bind/checkout path is genuinely unreachable, call abort_pr_workflow instead of looping.${queuedMonitorText}`,
-							},
-						],
-					},
-				};
-				const call = session.promptAsync
-					? session.promptAsync(args)
-					: session.prompt(args);
-				const result = await Promise.race([
-					call,
-					new Promise<never>((_resolve, reject) => {
-						timer = setTimeout(
-							() => reject(new Error('PR workflow resume prompt timed out')),
-							wakeTimeoutMs,
-						);
-					}),
-				]);
-				if (result?.error != null) {
-					promptRejected = true;
-					throw new Error(
-						`PR workflow resume prompt failed: ${String(result.error)}`,
-					);
-				}
-				promptAccepted = true;
-				// Note: budget bookkeeping runs in the finally block below so an
-				// attempted wake counts against the budget even when the resume
-				// prompt itself fails or times out. Otherwise a host that keeps
-				// returning {error: ...} would never advance the consecutive
-				// counter and the auto-resume loop would run unbounded — the
-				// exact failure mode this module exists to prevent.
-			} finally {
-				if (timer) clearTimeout(timer);
-				if (promptRejected) {
-					cancelPrWorkflowPluginWake(
-						options.directory,
-						sessionID,
-						pluginWakeMessageID,
-					);
-				}
-				// Record the budget state for every attempted wake, including
-				// failures. An attempted wake that did not produce progress must
-				// count toward the consecutive-unproductive budget; otherwise a
-				// failing host resume API would recreate the unbounded loop.
-				//
-				// Re-read the durable state AFTER the promptAsync await to detect
-				// mid-wake progress. `madeProgress` was computed from a snapshot
-				// read before the await (response-gate.ts:164); if a concurrent
-				// controller tool bumped `state.revision` during the await, the
-				// pre-await `madeProgress` would be stale `false`, the counter
-				// would wrongly increment, and a healthy session could be
-				// falsely suspended at MAX-1. The fresh read here corrects that
-				// race: if the revision advanced during the wake, the wake IS
-				// productive and the counter resets.
-				let postWakeState: Awaited<
-					ReturnType<typeof _internals.readPrWorkflowGateState>
-				>;
-				try {
-					postWakeState = await _internals.readPrWorkflowGateState(
-						options.directory,
-						sessionID,
-					);
-				} catch {
-					// Two distinct causes reach this catch, and neither is a
-					// gate-clear. (a) A transient fs error (EBUSY/EMFILE, or a
-					// concurrent writer). (b) A DURABLE validation failure:
-					// readPrWorkflowGateStateFromDisk deliberately throws
-					// `BLOCKED: ... is not valid JSON` / `... is invalid` for a
-					// corrupt or schema-invalid state file
-					// (pr-workflow-gate.ts:6357-6368), and
-					// `_internals.readPrWorkflowGateState` propagates it
-					// unmodified — so a throw here is NOT necessarily transient
-					// and may recur on every subsequent wake.
-					//
-					// Falling back to the pre-wake snapshot is nonetheless the
-					// correct handling for BOTH causes. This catch is nested
-					// inside the `finally` that owns all wake bookkeeping
-					// (lastWakeAt, the consecutive counter, totalWakes, and the
-					// suspension checks below); rethrowing would skip every one
-					// of them and recreate the unbounded-wake hazard this module
-					// exists to prevent — worst under cause (b), where the error
-					// recurs and the loop would never be braked at all.
-					// Continuing with the last-known-good revision instead makes
-					// the wake count as unproductive (a revision that cannot be
-					// re-read cannot advance), so a corrupt gate file suspends
-					// the session through the normal budget path. Reserving null
-					// exclusively for a confirmed gate-clear also prevents
-					// resetBudget from wiping the just-incremented totalWakes.
-					postWakeState = state;
-				}
-				if (
-					promptAccepted &&
-					queuedMonitorEvents.length > 0 &&
-					feedbackTarget &&
-					state.workflowInstanceId &&
-					postWakeState?.mode === 'PR_FEEDBACK' &&
-					postWakeState.workflowInstanceId === state.workflowInstanceId &&
-					!postWakeState.prFeedbackInventory &&
-					sameGitHubPr(
-						postWakeState.prFeedbackTargetUrl ??
-							postWakeState.prFeedbackReviewHandoff?.prUrl ??
-							'',
-						feedbackTarget,
-					)
-				) {
-					await _internals
-						.claimPrFeedbackMonitorEvents(
-							options.directory,
-							sessionID,
-							state.workflowInstanceId,
-							feedbackTarget,
-							queuedMonitorEvents.map((event) => event.dedupToken),
-						)
-						.catch(() => []);
-				}
-				budget.lastWakeAt = now;
-				if (postWakeState === null) {
-					// Gate cleared during the wake (complete/abort). Drop the
-					// budget so a future activation starts fresh; never suspend
-					// a session whose gate just cleared. (No `return` here —
-					// biome: returning inside finally would mask try/catch flow.)
-					resetBudget(sessionID);
-				} else {
-					const currentRevision = postWakeState.revision;
-					const effectiveMadeProgress =
-						madeProgress ||
-						(budget.lastSeenRevision !== undefined &&
-							currentRevision > budget.lastSeenRevision);
-					budget.lastSeenRevision = currentRevision;
-					// Set by EITHER suspension branch below; the single audit
-					// append after both branches then reports the FINAL state.
-					// Emitting inside each branch instead would write two
-					// contradicting records for a wake that trips both budgets
-					// (reachable whenever maxConsecutive === totalCeiling), and
-					// the second one would disagree with the `suspendedReason`
-					// the user-facing banner renders.
-					let suspensionTripped = false;
-					if (!effectiveMadeProgress) {
-						budget.consecutiveUnproductive += 1;
-						if (budget.consecutiveUnproductive >= maxConsecutive) {
-							budget.suspended = true;
-							budget.suspendedReason = 'consecutive';
-							suspensionTripped = true;
-						}
-					} else {
-						budget.consecutiveUnproductive = 0;
-					}
-
-					// TOTAL-wake budget: increment on EVERY attempted wake
-					// (success, failure, timeout) and NEVER reset by progress.
-					// Read the depth tier from durable gate state; default to 'L'
-					// when absent (e.g. PR_FEEDBACK mode has no diff-stats tier).
-					//
-					// KNOWN, INTENTIONALLY UNFIXED: the tier is read per-wake
-					// while `totalWakes` is tier-agnostic, so the ceiling a
-					// budget is measured against can CHANGE mid-budget. Two
-					// directions, and they are not symmetric:
-					//
-					//  - TIGHTENING (the common case): wakes accrued before the
-					//    depth tier is bound default to 'L' (102) and are later
-					//    compared against the bound tier. If that turns out to
-					//    be S (12) or M (54), the pre-bind wakes count against
-					//    the smaller ceiling and the brake fires EARLIER. Bind
-					//    happens early and the consecutive brake (5) caps any
-					//    unproductive run, so this is a 0-3 wake skew.
-					//  - LOOSENING (real, do not claim otherwise):
-					//    `transitionPrReviewToFeedback` mints a new
-					//    `workflowInstanceId` WITHOUT clearing the durable gate,
-					//    so `resetBudget` never runs and this budget survives
-					//    into PR_FEEDBACK — where the replacement state carries
-					//    no `prReviewDepthTier` and the `?? 'L'` below therefore
-					//    raises the ceiling to 102. A tier-S review that hands
-					//    off to feedback keeps its accumulated count but gains
-					//    headroom.
-					//
-					// Left as-is deliberately: the loosening is bounded by the
-					// same 102 that a tier-L review gets, the consecutive brake
-					// stays active throughout, and both candidate "fixes"
-					// (per-tier counters, or rebasing the count when the tier
-					// binds) would loosen the FIRST case further while adding
-					// state. Do not "correct" this without re-deriving that
-					// tradeoff — and do not restore the earlier claim that the
-					// skew can only ever tighten, which is false.
-					budget.totalWakes += 1;
-					const tier: PrReviewDepthTier =
-						postWakeState.prReviewDepthTier ?? 'L';
-					const totalCeiling = resolveTotalWakeCeiling(tier);
-					if (budget.totalWakes >= totalCeiling) {
-						budget.suspended = true;
-						budget.suspendedReason = 'total';
-						suspensionTripped = true;
-					}
-					if (suspensionTripped) {
-						// Machine-readable audit record for the suspension. Both
-						// branches above route here, so exactly one line is
-						// written per suspension transition and its
-						// `suspendedReason` is by construction the value the
-						// banner will render. Awaited (never fire-and-forget) and
-						// internally non-fatal.
-						await appendWakeSuspendedEvent({
-							sessionID,
-							mode: postWakeState.mode,
-							suspendedReason: budget.suspendedReason,
-							consecutiveUnproductive: budget.consecutiveUnproductive,
-							totalWakes: budget.totalWakes,
-							tier,
-						});
-					}
-				}
-			}
-		} finally {
-			// Retain ownership through the post-wake durable read and budget update.
-			activeWakeSessions.delete(sessionID);
-		}
+		if (event.type !== 'session.idle') return;
+		if (observed.boundaryGeneration === undefined) return;
+		await runWakeEvaluation(sessionID, observed.boundaryGeneration);
 	};
 
 	return {
@@ -1065,5 +1517,29 @@ export function createPrWorkflowResponseGate(options: {
 		 */
 		_inspectWakeBudget: (sessionID: string): WakeBudget | undefined =>
 			wakeBudgets.get(sessionID),
+		_inspectBoundaryActivity: (
+			sessionID: string,
+		):
+			| {
+					lastParentActivityAt: number;
+					lastHostStatus: SessionReadiness;
+					activeToolPartCount: number;
+					quietDeadlineAt?: number;
+					watchdogDeadlineAt?: number;
+					hasTimer: boolean;
+			  }
+			| undefined => {
+			const state = boundaryActivityBySession.get(sessionID);
+			return state
+				? {
+						lastParentActivityAt: state.lastParentActivityAt,
+						lastHostStatus: state.lastHostStatus,
+						activeToolPartCount: state.activeToolParts.size,
+						quietDeadlineAt: state.quietDeadlineAt,
+						watchdogDeadlineAt: state.watchdogDeadlineAt,
+						hasTimer: state.timer !== undefined,
+					}
+				: undefined;
+		},
 	};
 }

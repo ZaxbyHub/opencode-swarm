@@ -49,10 +49,18 @@ Read and follow `../../../.opencode/skills/swarm-pr-review/SKILL.md` as the cano
   invalidates only the critic evidence for items whose reviewer row changed;
   re-run the critic for items left without a critic verdict before completion.
 - Where the swarm plugin's structured controller is active (OpenCode hosts),
-  the initial base wave is one structured exact-six batch with workflow-lane
-  and exact-head provenance at depth tier L, or a smaller consolidated batch
-  whose `owned_workflow_lanes` partition all six dimensions at tiers S/M —
-  the controller computes the tier from the bound diff. While it is active a
-  different dispatch path is not equivalent — never bypass the controller.
+  the controller computes the depth tier from the bound diff. With the default
+  `pr_review_resilience` policy enabled, Profile A must stage depth-tier M/L
+  base attempts as a singleton canary batch followed by a fanout batch
+  (`pr_review_wave_stage` / `pr_review_wave_attempt`), carrying forward only
+  unresolved obligations; typed `retry_exhausted` and `circuit_open` outcomes
+  are hard blockers, not prompts to degrade the review. Tier S keeps the legacy
+  single consolidated `owned_workflow_lanes`-partitioned batch because staged
+  resilience does not apply there. If that policy is disabled, Profile A falls
+  back to the legacy non-staged base wave: tier L may dispatch one structured
+  exact-six batch with workflow-lane and exact-head provenance, while tiers S/M
+  use a smaller consolidated batch whose `owned_workflow_lanes` still partition
+  all six dimensions. While it is active a different dispatch path is not
+  equivalent — never bypass the controller.
 - If actionable findings remain, write the canonical handoff and ask to continue with `/swarm pr-feedback <PR_URL> continue from .swarm/pr-review/<run_id>/feedback-handoff.json`.
   On Profile A this is a mechanical transition; preserve finding IDs and provenance.

@@ -148,7 +148,7 @@ describe('swarm-pr-review deterministic async lane dispatch guidance', () => {
 		expect(phase3Section).toContain('transcript-incomplete-terminal-candidate');
 		expect(phase3Section).toContain('never validates `[CLEAN]`');
 		expect(phase3Section).toContain('have no typed recovery validation');
-		expect(phase3Section).toContain('exact six-lane gate');
+		expect(phase3Section).toContain('historical tier-L full');
 		expect(phase3Section).toContain('retry only the failed `workflow_lane`');
 		expect(phase3Section).toContain('same exact `pr_head_sha`');
 		expect(phase3Section).toContain('direct Task dispatch are not equivalent');
@@ -389,8 +389,10 @@ describe('swarm-pr-review deterministic async lane dispatch guidance', () => {
 	test('.agents/skills/swarm-pr-review/SKILL.md uses capability phrasing, not runtime-specific tool names', () => {
 		const source = readSkill('.agents/skills/swarm-pr-review/SKILL.md');
 		expect(source).toContain("runtime's parallel-execution capability");
-		expect(source).toContain('different dispatch path is not equivalent');
-		expect(source).toContain('one structured exact-six batch');
+		expect(source).toContain('different dispatch path is not');
+		expect(source).toContain('equivalent');
+		expect(source).toContain('one structured');
+		expect(source).toContain('exact-six batch');
 		expect(source).toContain('PR publication contract');
 		expect(source).not.toContain('run the lanes sequentially');
 		// Controller absence is the normal Codex/ZCode state, never a dead end —
@@ -413,7 +415,8 @@ describe('swarm-pr-review deterministic async lane dispatch guidance', () => {
 		// path; the default Claude Code path is native Agent/Task dispatch.
 		expect(source).toContain('dispatch_lanes_async');
 		expect(source).toContain('collect_lane_results');
-		expect(source).toContain('direct-Task dispatch are not');
+		expect(source).toContain('direct-Task dispatch');
+		expect(source).toContain('are not equivalent');
 		expect(source).toContain('PR publication contract');
 		expect(source).not.toContain('Task-tool dispatch is the final fallback');
 		expect(source).toContain('retrieve_lane_output');

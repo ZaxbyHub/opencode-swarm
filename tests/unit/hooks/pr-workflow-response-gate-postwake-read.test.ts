@@ -57,10 +57,11 @@ describe('idle handler post-wake read — regression: read failure must not wipe
 		let callCount = 0;
 		_internals.readPrWorkflowGateState = mock(async (dir, sessionID) => {
 			callCount += 1;
-			// Odd calls are the pre-wake read of each event() invocation; even
-			// calls are the post-wake re-read in the finally block. Succeed on
-			// pre-wake, fail on post-wake, for every wake this test drives.
-			if (callCount % 2 === 1) {
+			// Each wake now performs initial, post-status, and pre-prompt durable
+			// reads before the post-wake re-read in the finally block. Only the
+			// fourth read should fail so this continues to exercise bookkeeping,
+			// not the fail-closed cancellation guards added before promptAsync.
+			if (callCount % 4 !== 0) {
 				return originalReadPrWorkflowGateState(dir, sessionID);
 			}
 			// Post-wake read: simulate a transient/validation read failure.
@@ -73,7 +74,7 @@ describe('idle handler post-wake read — regression: read failure must not wipe
 			gate.event(idleEventFor('flaky-read-session')),
 		).resolves.toBeUndefined();
 
-		expect(callCount).toBe(2);
+		expect(callCount).toBe(4);
 
 		const budget = gate._inspectWakeBudget('flaky-read-session');
 		// If the fallback were `null` (the gate-clear sentinel) instead of the

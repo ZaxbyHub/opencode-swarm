@@ -15,6 +15,7 @@ import {
 import {
 	establishReviewPrerequisites,
 	HEAD_SHA,
+	LEGACY_PR_REVIEW_RESILIENCE_POLICY,
 	persistBatch,
 	SESSION_ID,
 	setupPrWorkflowGateFixtures,
@@ -188,6 +189,7 @@ describe('pr-workflow-gate capacity GC ledger overflow', () => {
 			await enforcePrReviewBaseDimensions(tempDir, SESSION_ID, sourceLanes, {
 				batchId: 'base-source',
 				prHeadSha: HEAD_SHA,
+				prReviewResiliencePolicy: LEGACY_PR_REVIEW_RESILIENCE_POLICY,
 			});
 			await persistBatch('base-source', 'swarm-pr-review:base', sourceLanes);
 			for (let index = 0; index < MAX_WORKFLOW_BATCHES - 1; index += 1) {

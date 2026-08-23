@@ -49,10 +49,19 @@ Read and follow `../../../.opencode/skills/swarm-pr-review/SKILL.md` as the cano
   (`dispatch_lanes_async`, `collect_lane_results`, `retrieve_lane_output`),
   run Profile A instead: structured modes, incremental polling, full-text
   retrieval for every `output_ref`, `complete_pr_workflow` before the final
-  response, and an initial base wave of one exact-six batch at tier L or a
-  smaller `owned_workflow_lanes`-partitioned batch at tiers S/M (controller
-  computes the tier from the bound diff). While active, blocking dispatch
-  and direct-Task dispatch are not equivalent — never bypass it.
+  response, and controller-computed depth tiers from the bound diff. With the
+  default `pr_review_resilience` policy enabled, Profile A must stage
+  depth-tier M/L base attempts as a singleton canary batch followed by a
+  fanout batch (`pr_review_wave_stage` / `pr_review_wave_attempt`), carrying
+  forward only unresolved obligations; typed `retry_exhausted` and
+  `circuit_open` outcomes are hard blockers, not prompts to degrade the
+  review. Tier S keeps the legacy single consolidated
+  `owned_workflow_lanes`-partitioned batch because staged resilience does not
+  apply there. If that policy is disabled, Profile A falls back to the legacy
+  non-staged base wave: tier L may dispatch one exact-six batch, while tiers
+  S/M use a smaller `owned_workflow_lanes`-partitioned batch that still covers
+  all six dimensions. While active, blocking dispatch and direct-Task dispatch
+  are not equivalent — never bypass it.
 - If actionable findings remain, write the canonical handoff artifact and ask
   whether to continue with `swarm-pr-feedback`; carry validated findings
   forward with their original IDs and provenance.
