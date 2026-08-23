@@ -59,7 +59,10 @@ const DEFAULT_COMMENT_PATTERNS = [
 	{ pattern: /\bTODO\b/i, rule_id: 'placeholder/comment-todo' },
 	{ pattern: /\bFIXME\b/i, rule_id: 'placeholder/comment-fixme' },
 	{ pattern: /\bTBD\b/i, rule_id: 'placeholder/comment-other' },
-	{ pattern: /\bXXX\b/i, rule_id: 'placeholder/comment-other' },
+	// Case-sensitive: lowercase `xxx` is a common path-segment placeholder
+	// in explanatory comments (e.g. `.claude/skills/xxx/SKILL.md`) and was
+	// producing persistent false positives on scripts/drift-check.ts:1048.
+	{ pattern: /\bXXX\b/, rule_id: 'placeholder/comment-other' },
 	{ pattern: /\bHACK\b/i, rule_id: 'placeholder/comment-other' },
 ];
 
@@ -258,6 +261,27 @@ function isAllowedByGlobs(filePath: string, allowGlobs?: string[]): boolean {
 function isParserSupported(filePath: string): boolean {
 	const ext = path.extname(filePath).toLowerCase();
 	return SUPPORTED_PARSER_EXTENSIONS.has(ext);
+}
+
+// Languages the body-shape walker (collectNonStubBodyLines) has been verified
+// against: TS/JS/TSX/Python. Other SUPPORTED_PARSER_EXTENSIONS languages (Go,
+// Rust, Java, C/C++, C#, PHP, Ruby) share `function_declaration`/`block`-style
+// node names with TS/JS but have different body-wrapping shapes (e.g. Go
+// nests an extra `statement_list` inside `block`), so running the walker on
+// them silently misclassifies every function as non-stub. They continue to
+// use the regex-only pass for this rule until each is verified individually.
+const BODY_SHAPE_SUPPORTED_EXTENSIONS = new Set([
+	'.js',
+	'.jsx',
+	'.ts',
+	'.tsx',
+	'.py',
+]);
+
+function isBodyShapeSupported(filePath: string): boolean {
+	return BODY_SHAPE_SUPPORTED_EXTENSIONS.has(
+		path.extname(filePath).toLowerCase(),
+	);
 }
 
 /**
@@ -535,7 +559,8 @@ function scanWithRegex(
 
 /**
  * Tree-sitter-based scanner for supported languages
- * Adds parser-based findings to regex findings
+ * Adds parser-based findings to regex findings, then suppresses regex
+ * `code-stub-return` false positives via function-body shape analysis.
  */
 async function scanWithParser(
 	content: string,
@@ -647,12 +672,342 @@ async function scanWithParser(
 		}
 
 		walkNode(tree.rootNode);
+
+		// Body-shape analysis (TS/JS/Python only): suppress code-stub-return
+		// findings on lines inside function bodies that are NOT pure stub
+		// skeletons. The walker classifies each function body's effective
+		// statement structure and returns the line ranges of bodies with
+		// substantive subsequent behavior. For those lines, an existing
+		// regex code-stub-return finding is a false positive (guard-clause
+		// early return inside a non-stub function).
+		//
+		// Scope (this PR): TS/JS/Python only. Other parser-supported languages
+		// (Go, Rust, Java, C/C++, C#, PHP, Ruby) are out of scope — they
+		// continue to use the regex-only pass for this rule.
+		//
+		// Must live inside the try block so parse failure preserves regex
+		// findings unchanged. Gated to the verified languages (see
+		// isBodyShapeSupported) — do not widen this to all
+		// SUPPORTED_PARSER_EXTENSIONS languages without verifying each one's
+		// body-wrapping shape first.
+		if (isBodyShapeSupported(filePath)) {
+			try {
+				const nonStubBodyLines = collectNonStubBodyLines(tree.rootNode);
+				if (nonStubBodyLines.size > 0) {
+					for (let i = findings.length - 1; i >= 0; i--) {
+						const f = findings[i]!;
+						if (
+							f.rule_id === 'placeholder/code-stub-return' &&
+							nonStubBodyLines.has(f.line)
+						) {
+							findings.splice(i, 1);
+						}
+					}
+				}
+			} catch {
+				// Walker failed mid-loop — preserve remaining regex findings as-is.
+			}
+		}
+
 		tree.delete();
 	} catch {
 		// Parser error - we already have regex findings
 	}
 
 	return findings;
+}
+
+/**
+ * Classify a single expression node as a "constant literal" for stub-skeleton
+ * detection. Returns true for nodes whose source text is one of:
+ *   - `null`, `true`, `false` (JS/TS keywords; Python `none`/`True`/`False` differ)
+ *   - `number` literals (e.g. `0`, `1`)
+ *   - `string` literals (e.g. `""`)
+ *   - `array` literals (e.g. `[]`)
+ *   - `object` literals (e.g. `{}`)
+ *   - `unary_expression` with operator `-` and number operand (e.g. `-1`)
+ *   - `identifier` (a named constant reference, e.g. `CONFIG_DEFAULTS`)
+ *   - `template_string` with NO `template_substitution` children
+ *     (i.e. `\`hello\`` is constant; `\`hello ${world}\`` is not)
+ *
+ * Note: Python's `none`/`True`/`False`/`integer`/`float`/`string`/`list`/
+ * `dictionary`/`tuple` map to tree-sitter-python grammar node types and
+ * follow the same classification rules.
+ */
+// biome-ignore lint/suspicious/noExplicitAny: tree-sitter node type not exported
+function isConstantLiteralNode(node: any): boolean {
+	if (!node) return false;
+	const t = node.type;
+
+	// Direct constants
+	if (
+		t === 'null' ||
+		t === 'true' ||
+		t === 'false' ||
+		t === 'number' ||
+		t === 'string' ||
+		t === 'array' ||
+		t === 'object' ||
+		t === 'identifier' ||
+		// Python equivalents
+		t === 'none' ||
+		t === 'integer' ||
+		t === 'float' ||
+		t === 'list' ||
+		t === 'dictionary' ||
+		t === 'tuple'
+	) {
+		return true;
+	}
+
+	// Unary negative of a number (e.g. -1). The operator is the first child
+	// node (its `text` is the operator character — `-`, `+`, `!`, `~`).
+	if (
+		t === 'unary_expression' &&
+		Array.isArray(node.children) &&
+		node.children.length >= 2 &&
+		node.children[0]?.type === '-' &&
+		node.children[1]?.type === 'number'
+	) {
+		return true;
+	}
+
+	// Template string with NO substitutions
+	if (t === 'template_string') {
+		// biome-ignore lint/suspicious/noExplicitAny: tree-sitter node type not exported
+		const hasSubstitution: any =
+			Array.isArray(node.children) &&
+			node.children.some(
+				// biome-ignore lint/suspicious/noExplicitAny: tree-sitter node type not exported
+				(child: any) => child && child.type === 'template_substitution',
+			);
+		return !hasSubstitution;
+	}
+
+	return false;
+}
+
+/**
+ * Determine whether a function's body (or expression body) is a "stub
+ * skeleton" — exactly one effective statement, and that statement is a
+ * constant return (or, for expression-bodied arrows, the body expression
+ * itself is a constant).
+ *
+ * Returns true when the function IS a stub skeleton.
+ * Returns false when the function has substantive subsequent behavior
+ * (the constant return is a guard clause, not a stub).
+ */
+// biome-ignore lint/suspicious/noExplicitAny: tree-sitter node type not exported
+function isStubSkeletonFunction(fnNode: any): boolean {
+	if (!fnNode || typeof fnNode.type !== 'string') return false;
+
+	const commentTypes = new Set([
+		'comment',
+		'line_comment',
+		'block_comment',
+		'documentation_comment',
+		'doc_comment',
+	]);
+	const skipPunctuation = new Set(['{', '}', ':', ';', ',']);
+
+	// Find the body among the function's children.
+	// biome-ignore lint/suspicious/noExplicitAny: tree-sitter node type not exported
+	let bodyNode: any = null;
+	const isArrow = fnNode.type === 'arrow_function';
+
+	if (isArrow) {
+		// Arrow: use the grammar's `body` field rather than a positional
+		// skip-list. An arrow's possible leading children (`async`,
+		// `type_parameters`, a bare `identifier` param, a `comment`, etc.)
+		// kept growing every time a new arrow shape surfaced in review; the
+		// field accessor is exact regardless of which optional tokens precede
+		// the body. No availability guard: every arrow_function node from this
+		// project's tree-sitter parser exposes childForFieldName — if that
+		// ever stopped being true, throwing here (caught by scanWithParser's
+		// walker try/catch, which preserves regex findings unchanged) is
+		// safer than a `: null` fallback, which would silently disable
+		// nested-stub protection instead of failing loudly.
+		bodyNode = fnNode.childForFieldName('body');
+	} else {
+		// Block-bodied: look for `statement_block` (TS/JS) or `block`/`suite` (Python).
+		if (Array.isArray(fnNode.children)) {
+			for (const child of fnNode.children) {
+				if (
+					child &&
+					(child.type === 'statement_block' ||
+						child.type === 'block' ||
+						child.type === 'suite')
+				) {
+					bodyNode = child;
+					break;
+				}
+			}
+		}
+	}
+
+	// Skip abstract/declared methods with no body.
+	if (!bodyNode) return false;
+
+	// Expression-bodied arrow: the body node IS the expression itself.
+	// It's a stub iff that expression is a constant literal.
+	if (isArrow && bodyNode.type !== 'statement_block') {
+		return isConstantLiteralNode(bodyNode);
+	}
+
+	// Block-bodied forms: collect non-punctuation, non-comment direct children.
+	// biome-ignore lint/suspicious/noExplicitAny: tree-sitter node type not exported
+	const effectiveStatements: any[] = [];
+	if (Array.isArray(bodyNode.children)) {
+		for (const child of bodyNode.children) {
+			if (!child || typeof child.type !== 'string') continue;
+			if (commentTypes.has(child.type)) continue;
+			if (skipPunctuation.has(child.type)) continue;
+			effectiveStatements.push(child);
+		}
+	}
+
+	if (effectiveStatements.length !== 1) return false;
+
+	const stmt = effectiveStatements[0];
+	if (!stmt) return false;
+
+	// Return statement with constant expression
+	if (stmt.type === 'return_statement') {
+		// Find the expression child (skip punctuation).
+		// biome-ignore lint/suspicious/noExplicitAny: tree-sitter node type not exported
+		const exprChild: any = Array.isArray(stmt.children)
+			? stmt.children.find(
+					// biome-ignore lint/suspicious/noExplicitAny: tree-sitter node type not exported
+					(c: any) =>
+						c &&
+						typeof c.type === 'string' &&
+						c.type !== 'return' &&
+						c.type !== ';' &&
+						!commentTypes.has(c.type),
+				)
+			: null;
+		// Missing expression means `return;` — not a constant literal stub.
+		if (!exprChild) return false;
+		return isConstantLiteralNode(exprChild);
+	}
+
+	// Single non-return statement that is itself a constant literal
+	// (defensive — should not normally occur).
+	return isConstantLiteralNode(stmt);
+}
+
+/**
+ * Walk a tree-sitter root node and collect the line numbers of all function
+ * bodies whose structure is NOT a pure stub skeleton. These are the lines
+ * where a regex `code-stub-return` finding should be suppressed, because
+ * the function has substantive subsequent behavior and the constant return
+ * is a guard clause.
+ *
+ * For expression-bodied arrows (where the body's range equals the arrow's
+ * own range), we add only the lines that are INSIDE the body expression
+ * itself, NOT the entire arrow's range — otherwise a curried arrow like
+ * `const f = () => () => null;` would suppress the inner stub's finding
+ * (because the outer arrow's range covers the inner arrow too).
+ *
+ * Recognized function-like node types:
+ *   - TS/JS: `function_declaration`, `generator_function_declaration`,
+ *     `method_definition`, `arrow_function`, `function_expression`,
+ *     `generator_function`
+ *   - Python: `function_definition`
+ *
+ * `method_definition` nodes with no body (abstract/declared methods) are
+ * skipped. Getters and setters classify by their body like normal methods.
+ */
+// biome-ignore lint/suspicious/noExplicitAny: tree-sitter node type not exported
+function collectNonStubBodyLines(rootNode: any): Set<number> {
+	const result = new Set<number>();
+	const stubSkeletonRanges: Array<[number, number]> = [];
+	const functionNodeTypes = new Set([
+		'function_declaration',
+		'generator_function_declaration',
+		'method_definition',
+		'arrow_function',
+		'function_definition',
+		// Function expressions like `const cb = function() { return null; };`
+		// and `const cb = function*() { ... };` — Kimi K3 final-critic F7.
+		'function_expression',
+		'generator_function',
+	]);
+
+	// biome-ignore lint/suspicious/noExplicitAny: tree-sitter node type not exported
+	function findBodyNode(fnNode: any): any {
+		const isArrow = fnNode.type === 'arrow_function';
+		if (isArrow) {
+			// See isStubSkeletonFunction above: use the grammar's `body` field,
+			// with no availability guard — see that function's comment for why.
+			return fnNode.childForFieldName('body');
+		}
+		if (Array.isArray(fnNode.children)) {
+			for (const child of fnNode.children) {
+				if (
+					child &&
+					(child.type === 'statement_block' ||
+						child.type === 'block' ||
+						child.type === 'suite')
+				) {
+					return child;
+				}
+			}
+		}
+		return null;
+	}
+
+	// biome-ignore lint/suspicious/noExplicitAny: tree-sitter node type not exported
+	function walk(node: any) {
+		if (!node || typeof node.type !== 'string') return;
+
+		if (functionNodeTypes.has(node.type)) {
+			const bodyNode = findBodyNode(node);
+			const isStub = isStubSkeletonFunction(node);
+			if (isStub && bodyNode) {
+				// Track stub-skeleton ranges so non-stub ancestors don't
+				// over-suppress the stub's `return <literal>;` line.
+				const startLine = bodyNode.startPosition.row + 1;
+				const endLine = bodyNode.endPosition.row + 1;
+				stubSkeletonRanges.push([startLine, endLine]);
+			} else if (!isStub && bodyNode) {
+				// Non-stub function: add the BODY's range (not the function's
+				// outer range) so we don't include the function signature /
+				// closing brace. The body's range still may include nested
+				// function declarations; we subtract stub-skeleton ranges
+				// below so an inner stub isn't hidden.
+				const startLine = bodyNode.startPosition.row + 1;
+				const endLine = bodyNode.endPosition.row + 1;
+				for (let line = startLine; line <= endLine; line++) {
+					result.add(line);
+				}
+			}
+		}
+
+		// Always recurse into children so nested function-likes (e.g. inner
+		// functions inside an outer non-stub function) get classified
+		// independently.
+		if (Array.isArray(node.children)) {
+			for (const child of node.children) {
+				walk(child);
+			}
+		}
+	}
+
+	walk(rootNode);
+
+	// Subtract stub-skeleton line ranges from the suppression set. This
+	// handles the regression case: a non-stub outer function whose body
+	// contains a nested stub function. The outer's body range covers the
+	// inner's `return null;` line, but the inner IS a stub — its finding
+	// must NOT be suppressed.
+	for (const [start, end] of stubSkeletonRanges) {
+		for (let line = start; line <= end; line++) {
+			result.delete(line);
+		}
+	}
+
+	return result;
 }
 
 // ============ Main Function ============
@@ -887,3 +1242,15 @@ export const placeholder_scan: ReturnType<typeof tool> = createSwarmTool({
 		return JSON.stringify(result);
 	},
 });
+
+/**
+ * Internal seam for direct testing of the body-shape walker without
+ * exercising the full placeholderScan pipeline. Mirrors the `_internals`
+ * pattern from `src/lang/backends/typescript.ts:343-351` (AGENTS.md
+ * invariant 7 — DI over `mock.module`).
+ */
+export const _internals = {
+	collectNonStubBodyLines,
+	isStubSkeletonFunction,
+	isConstantLiteralNode,
+} as const;
