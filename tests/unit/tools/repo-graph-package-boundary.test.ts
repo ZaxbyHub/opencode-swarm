@@ -14,8 +14,9 @@ import {
 	extractFileOntology,
 } from '../../../src/tools/repo-graph';
 
-const TRIPLE = '"'.repeat(3);
-const ESCAPED_QUOTE = '""';
+const DQ = '"';
+const TRIPLE = DQ.repeat(3);
+const ESCAPED_QUOTE = DQ.repeat(2);
 
 function boundary(language: string, content: string): string {
 	return extractFileOntology({
@@ -86,6 +87,28 @@ const CSHARP_ESCAPED_QUOTE_TAIL = [
 	'',
 ].join('\n');
 
+// C# accepts either sigil order on an interpolated verbatim string. Matching
+// only `@"` left `@$"` unmasked, so the spoof this masking exists to stop was
+// still live.
+const CSHARP_AT_DOLLAR_VERBATIM = [
+	`class Q { const string S = @$${DQ}`,
+	'namespace Evil.Spoofed;',
+	`${DQ}; }`,
+	'namespace Real.App;',
+	'',
+].join('\n');
+
+// An ORDINARY string ending in `@` put the two characters `@` and `"` next to
+// each other, which a bare `@"` start pattern read as a verbatim opener and ran
+// forward to the next quote in the file — blanking a real declaration that had
+// resolved correctly before any masking existed.
+const CSHARP_STRING_ENDING_IN_AT = [
+	`[assembly: AssemblyMetadata(${DQ}contact${DQ}, ${DQ}team@${DQ})]`,
+	'namespace Real.App;',
+	`class Z { string t = ${DQ}x${DQ}; }`,
+	'',
+].join('\n');
+
 describe('packageBoundary from source declarations (issue #1529)', () => {
 	// `stripComments` removes comments but keeps string literals verbatim, so a
 	// line-initial package/namespace token inside a MULTI-LINE string matched the
@@ -129,6 +152,33 @@ describe('packageBoundary from source declarations (issue #1529)', () => {
 	// boundary fell back to the path.
 	test('a verbatim string ending in an escaped quote does not blank real code', () => {
 		expect(boundary('csharp', CSHARP_ESCAPED_QUOTE_TAIL)).toBe('Real.App');
+	});
+
+	// DISCRIMINATING, regression pin for the SECOND cut of the masking fix.
+	test('an @$ interpolated verbatim string is masked, not just $@', () => {
+		expect(boundary('csharp', CSHARP_AT_DOLLAR_VERBATIM)).toBe('Real.App');
+	});
+
+	// DISCRIMINATING, regression pin for the THIRD cut. This one is the reason
+	// the implementation is a single left-to-right scan rather than a set of
+	// regexes: only a scanner that CONSUMES ordinary string literals can know
+	// that this `@"` is not a verbatim opener.
+	test('an ordinary string ending in @ is not read as a verbatim opener', () => {
+		expect(boundary('csharp', CSHARP_STRING_ENDING_IN_AT)).toBe('Real.App');
+	});
+
+	test('an unterminated literal leaves the rest of the file readable', () => {
+		// Emitting the remainder untouched beats blanking to EOF: a later real
+		// declaration must still be found.
+		expect(
+			boundary(
+				'csharp',
+				`class C { string s = @${DQ}oops\nnamespace Real.App;\n`,
+			),
+		).toBe('Real.App');
+		expect(
+			boundary('java', `class C { String s = ${TRIPLE}\npackage com.real;\n`),
+		).toBe('com.real');
 	});
 
 	test('ordinary declarations still resolve', () => {

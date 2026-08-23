@@ -322,6 +322,47 @@ now parse these four file classes where they previously skipped them —
 `tests/unit/lang/profile-registry-extension-parity.test.ts` closes the class by
 checking every profile extension resolves through the real `extname()` lookup.
 
+### Dotted-module probe precedence
+
+Resolution runs three probes, each sweeping **every** conventional source root
+before the next probe begins:
+
+1. the full dotted path as a **file** (a type);
+2. the full dotted path as a package/namespace **directory**, resolved to a
+   representative member;
+3. the **parent** path as a file — a nested type (Java/Kotlin only, see below).
+
+**Probe specificity outranks root specificity.** A package-directory match under
+`src/main/java` beats a parent-as-file match at the repository root. This also
+changed Java behavior: `import z.Outer.Inner;` with both `z/Outer.java` and
+`src/main/java/z/Outer/Inner/` present now resolves to a member of the package
+directory rather than to `z/Outer.java`. A real directory at the full dotted
+path is strong evidence the specifier names a package, so the more specific
+probe is preferred — but it is a change, and it is pinned by test.
+
+Interleaving the probes per-root (the original shape) let the weakest probe win
+from the `''` root before a deeper root was ever considered, which is how
+`using App.Models;` resolved to an unrelated `App.cs`.
+
+### Known limitation: C# nested-type imports do not resolve
+
+Dotted-module resolution runs three probes, the last of which reads the PARENT
+path as a file so a Java nested type resolves (`a.b.Outer.Inner` ->
+`a/b/Outer.java`). That probe is **Java and Kotlin only**.
+
+A Java non-wildcard import names a type, so the probe is the normal nested-type
+syntax there. A C# `using X.Y;` names a *namespace*, and C# reaches a nested
+type through `using static X.Y.Z;` or a using-alias — neither distinguishable
+from a namespace import by the specifier string alone. Running the probe for C#
+fabricated edges to unrelated type files: `using Serilog.Sinks;` resolved to a
+local `Serilog.cs` that the source never referenced.
+
+Concretely, every C#/`.csx` specifier `X.Y.Z` where `X/Y/Z` is neither a file
+nor a directory but `X/Y.cs` exists now yields no edge. That covers both
+using-aliases and `using static`. A missing edge is preferred to a false one;
+closing the gap properly would need type resolution, which is an explicit
+non-goal.
+
 ### Known limitation: `packageBoundary` and nested Kotlin block comments
 
 `sourceBoundaryForLanguage` reads the `package` / `namespace` declaration from

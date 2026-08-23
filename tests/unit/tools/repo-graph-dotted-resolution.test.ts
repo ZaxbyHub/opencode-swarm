@@ -236,6 +236,37 @@ describe('repo-graph JVM/.NET dotted-module resolution', () => {
 		expect(appNode.ontology?.packageBoundary).toBe('com.acme');
 	});
 
+	test('probe specificity outranks root specificity for a Java nested-type shape', async () => {
+		// Behavior change worth pinning: the three probes each sweep ALL roots
+		// before the next begins, so a package-directory match under
+		// src/main/java now beats a parent-as-file match at the repo root.
+		// Previously the probes were interleaved per-root and the '' root's
+		// parent probe won. A real directory at the full dotted path is strong
+		// evidence the specifier names a package, so the more specific probe is
+		// preferred.
+		writeFile(
+			'z/Outer.java',
+			'package z;\n\npublic class Outer { public static class Inner {} }\n',
+		);
+		writeFile(
+			'src/main/java/z/Outer/Inner/M.java',
+			'package z.Outer.Inner;\n\npublic class M {}\n',
+		);
+		writeFile(
+			'z/Main.java',
+			'package z;\n\nimport z.Outer.Inner;\n\npublic class Main {}\n',
+		);
+
+		const graph = await buildWorkspaceGraphAsync(tempDir);
+		const mainNode = nodeFor(graph, 'z/Main.java');
+		const targets = graph.edges
+			.filter((e) => e.source === mainNode.filePath)
+			.map((e) => path.basename(e.target));
+
+		expect(targets).toContain('M.java');
+		expect(targets).not.toContain('Outer.java');
+	});
+
 	test('a namespace directory holding only subdirectories yields no edge', async () => {
 		// The firstSourceFileIn + parent-probe interaction. The directory exists
 		// but holds no direct source file, so the package probe finds nothing;

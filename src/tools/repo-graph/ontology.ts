@@ -144,25 +144,97 @@ const blankKeepingNewlines = (m: string): string => m.replace(/[^\n]/g, ' ');
  */
 
 function maskMultilineStringLiterals(text: string, language: string): string {
-	// ORDER MATTERS. A C# verbatim string ending in an escaped quote —
-	// `@"say ""hi"""` — contains a literal `"""`. Running the `"""` pass first
-	// pairs that tail with the next `"""` anywhere in the file and blanks every
-	// line between them, which silently deleted a real `namespace` declaration
-	// and made the boundary fall back to the path. Consuming `@"…"` first
-	// removes those quotes from consideration, so the `"""` pass only ever sees
-	// genuine triple-quoted literals.
+	// SINGLE LEFT-TO-RIGHT SCAN, deliberately not a set of independent regexes.
 	//
-	// Masking is also language-scoped: applying the `"""` pass to C# is what
-	// made the collision above reachable at all, and applying either pass to a
-	// language that has neither construct is pure cost.
-	let out = text;
-	if (language === 'csharp') {
-		// A doubled `""` is an escaped quote, not a terminator.
-		out = out.replace(/@"(?:[^"]|"")*"/g, blankKeepingNewlines);
+	// Two successive regex-only attempts each over-reached and DELETED a real
+	// declaration, in ways the previous fix did not anticipate:
+	//   - masking `"""` before `@"` let the escaped-quote tail of `@"say ""hi"""`
+	//     open a spurious region running to the next `"""` in the file;
+	//   - a bare `@"` start pattern fired on the `@"` inside an ORDINARY string
+	//     ending in `@` (`"team@"`), running forward to the next quote anywhere.
+	// Both were WORSE than the bug being fixed: the declaration was lost
+	// entirely rather than merely mis-chosen. The root cause is that a regex has
+	// no notion of already being inside a literal. Scanning once — and CONSUMING
+	// ordinary strings and char literals rather than ignoring them — removes the
+	// whole failure class instead of adding a third special case.
+	const csharp = language === 'csharp';
+	let out = '';
+	let i = 0;
+	while (i < text.length) {
+		const ch = text[i];
+
+		// Triple-quoted: Java text block, Kotlin raw string, C# 11 raw string.
+		if (text.startsWith('"""', i)) {
+			const end = text.indexOf('"""', i + 3);
+			if (end === -1) {
+				// Unterminated: emit the remainder untouched rather than blanking
+				// the rest of the file.
+				out += text.slice(i);
+				break;
+			}
+			out += `"""${blankKeepingNewlines(text.slice(i + 3, end))}"""`;
+			i = end + 3;
+			continue;
+		}
+
+		// C# verbatim, in all three legal prefix orderings: @"…", $@"…", @$"…".
+		const prefixLen = csharp ? matchVerbatimPrefix(text, i) : 0;
+		if (prefixLen > 0) {
+			const bodyStart = i + prefixLen;
+			let j = bodyStart;
+			let closed = -1;
+			while (j < text.length) {
+				if (text[j] === '"') {
+					// A doubled "" is an escaped quote and continues the literal.
+					if (text[j + 1] === '"') {
+						j += 2;
+						continue;
+					}
+					closed = j;
+					break;
+				}
+				j++;
+			}
+			if (closed === -1) {
+				out += text.slice(i);
+				break;
+			}
+			out += `${text.slice(i, bodyStart)}${blankKeepingNewlines(
+				text.slice(bodyStart, closed),
+			)}"`;
+			i = closed + 1;
+			continue;
+		}
+
+		// Ordinary string / char literal: CONSUMED, never blanked. Consuming is
+		// the whole point — it is what stops a `@` or a quote inside one from
+		// being read as the start of a multi-line literal.
+		if (ch === '"' || ch === "'") {
+			let j = i + 1;
+			while (j < text.length && text[j] !== ch) {
+				if (text[j] === '\\') j++;
+				j++;
+			}
+			out += text.slice(i, Math.min(j + 1, text.length));
+			i = j + 1;
+			continue;
+		}
+
+		out += ch;
+		i++;
 	}
-	// Java text blocks, Kotlin raw strings, and C# 11 raw strings.
-	out = out.replace(/"""[\s\S]*?"""/g, blankKeepingNewlines);
 	return out;
+}
+
+/**
+ * Length of a C# verbatim-string prefix at `i` (`@"`, `$@"`, `@$"`), or 0.
+ * C# accepts either order of the `$` and `@` sigils; matching only `@"` left
+ * `@$"…"` unmasked, which kept alive the very spoof this masking prevents.
+ */
+function matchVerbatimPrefix(text: string, i: number): number {
+	if (text.startsWith('@"', i)) return 2;
+	if (text.startsWith('$@"', i) || text.startsWith('@$"', i)) return 3;
+	return 0;
 }
 
 /**

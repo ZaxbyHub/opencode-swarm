@@ -285,8 +285,9 @@ function appendEdgeFast(
  * (`src/Contoso.Billing.Api/Svc.cs`) needs a variable split point in the dotted
  * name and is not expressible as a fixed prefix at all. Maven/Gradle test roots
  * (`src/test/java`) are omitted on purpose: adding them would let a main source
- * resolve to a test file when no main file exists, which is the same
- * fabricated-edge failure the parent-probe guard below exists to prevent.
+ * resolve to a test file whenever no main file exists, via the file and
+ * package-directory passes below — the same fabricated-edge failure this
+ * module works to avoid elsewhere.
  */
 const JVM_DOTNET_DOTTED_ROOTS = [
 	'',
@@ -392,13 +393,18 @@ function firstSourceFileIn(
 /**
  * Probe the workspace for the file a JVM/.NET dotted module specifier names.
  *
- * Two candidate shapes are tried, under each conventional source root:
- * 1. the full dotted path — `com.example.Repo` -> `com/example/Repo.java`
- *    (a type), or `com/example/` as a directory when the specifier names a
- *    package/namespace (`com.example.*`, C# `using App.Data;`);
- * 2. the parent path **as a file only** — `com.example.Outer.Inner` ->
- *    `com/example/Outer.java` (nested type), and the same shape a static
- *    member import reduces to.
+ * THREE probes run as separate passes, each sweeping EVERY conventional source
+ * root before the next probe starts. Probe specificity outranks root
+ * specificity — interleaving them per-root is what let the weakest probe win
+ * from the `''` root before a deeper root was ever considered.
+ * 1. the full dotted path as a FILE — `com.example.Repo` ->
+ *    `com/example/Repo.java` (a type);
+ * 2. the full dotted path as a package/namespace DIRECTORY, resolved to a
+ *    representative member (`com.example.*`, C# `using App.Data;`);
+ * 3. the parent path **as a file only** — `com.example.Outer.Inner` ->
+ *    `com/example/Outer.java` (nested type), and the shape a static member
+ *    import reduces to. **Java and Kotlin only**; see the probe's own comment
+ *    for why C# is excluded and what that costs.
  *
  * The parent path is deliberately NOT probed as a directory. Doing so would
  * make an import of a type that does not exist (`import com.example.Nope;`)
@@ -473,9 +479,13 @@ function findDottedModuleCandidate(
 	//    using-alias, neither distinguishable from a namespace import by the
 	//    specifier string alone. Running the probe for C# fabricated edges to
 	//    unrelated type files (`using Serilog.Sinks;` -> a local `Serilog.cs`),
-	//    and a missing edge is strictly better than a false one. The cost is
-	//    that a C# alias pointing at a nested type does not resolve; that is
-	//    recorded as a documented limitation.
+	//    and a missing edge is strictly better than a false one.
+	//
+	//    COST, stated precisely: every C#/.csx specifier `X.Y.Z` where `X/Y/Z`
+	//    is neither a file nor a directory but `X/Y.cs` exists now resolves to
+	//    null. That covers using-aliases AND `using static A.B.C;`, not aliases
+	//    alone — both reach here as a bare dotted specifier. Recorded in
+	//    docs/repo-graph-symbol-graph.md under "Limitations (by design)".
 	if (parent === null || !isJvmParentProbeLanguage(sourceFile)) return null;
 	for (const rootPrefix of JVM_DOTNET_DOTTED_ROOTS) {
 		const parentBase = path.join(workspaceRoot, rootPrefix, parent);
