@@ -1,5 +1,4 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, realpathSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -12,13 +11,12 @@ import {
 	verifyMemoryEventChainRows,
 } from '../../../src/memory';
 import { evictAndClose } from '../../../src/memory/provider-pool';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 let tmpDir: string;
 
 beforeEach(async () => {
-	tmpDir = realpathSync(
-		mkdtempSync(path.join(os.tmpdir(), 'swarm-memory-audit-')),
-	);
+	tmpDir = canonicalMkdtemp('swarm-memory-audit-');
 });
 
 afterEach(async () => {
