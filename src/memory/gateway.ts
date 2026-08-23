@@ -332,14 +332,10 @@ export class MemoryGateway {
 				source: sourceFromEvidence(evidenceRefs, this.context),
 				metadata: recordMetadata,
 			});
-			// #1466: PII policy first (no-op by default); then the base rule
-			// set (evidence/secret/sentinel validation) — the PII helper also
-			// validates internally when enabled, but the default-off path must
-			// still enforce every non-PII rule.
-			piiSummary = await this.enforceDurablePiiPolicy(proposedRecord);
-			validateMemoryRecordRules(proposedRecord, {
-				rejectDurableSecrets: this.config.redaction.rejectDurableSecrets,
-			});
+			// #1466: single funnel call — the helper runs the FULL rule set
+			// (evidence/secret/sentinel + PII threshold when findings are
+			// supplied) exactly once per record.
+			({ piiSummary } = await this.validateRecordWithPiiPolicy(proposedRecord));
 		}
 
 		if (redactedFields.size > 0) {
@@ -428,12 +424,9 @@ export class MemoryGateway {
 
 	async upsertCurated(record: MemoryRecord): Promise<MemoryRecord> {
 		this.assertEnabled();
-		// #1466: PII enforcement covers the curator write path too — the
-		// enforce helper re-validates the full rule set with findings attached.
-		await this.enforceDurablePiiPolicy(record);
-		const parsed = validateMemoryRecordRules(record, {
-			rejectDurableSecrets: this.config.redaction.rejectDurableSecrets,
-		});
+		// #1466: single validation funnel — full rule set plus PII policy
+		// when enabled (see validateRecordWithPiiPolicy).
+		const { parsed } = await this.validateRecordWithPiiPolicy(record);
 		return this.provider.upsert(parsed);
 	}
 
@@ -478,7 +471,7 @@ export class MemoryGateway {
 				// #1466: the outcome-evidence record embeds the (user-supplied)
 				// question text — run PII enforcement on it like any other
 				// durable write.
-				await this.enforceDurablePiiPolicy(candidate);
+				await this.validateRecordWithPiiPolicy(candidate);
 				await this.provider.upsert(candidate);
 			}
 			targetId = candidate.id;
@@ -554,51 +547,68 @@ export class MemoryGateway {
 		// (add / supersede replacement). The records were already rule-validated
 		// by createRecordFromNew; re-validation with findings is idempotent.
 		if (resolved.action === 'add' && resolved.memory) {
-			await this.enforceDurablePiiPolicy(resolved.memory);
+			await this.validateRecordWithPiiPolicy(resolved.memory);
 		} else if (resolved.action === 'supersede' && resolved.replacement) {
-			await this.enforceDurablePiiPolicy(resolved.replacement);
+			await this.validateRecordWithPiiPolicy(resolved.replacement);
 		}
 		return this.provider.applyCuratorDecision(resolved);
 	}
 
 	/**
-	 * #1466: PII enforcement at the write boundary — the single helper every
-	 * durable-record-materializing path funnels through (propose,
-	 * upsertCurated, recordOutcome-created records, applyCuratorDecision).
+	 * #1466: single write-boundary validation for every durable-record-
+	 * materializing path (propose, upsertCurated, recordOutcome-created
+	 * records, applyCuratorDecision).
 	 *
-	 * - `rejectDurablePii=true`: runs the detector, validates through
-	 *   `validateMemoryRecordRules` (threshold logic lives only there), and on
-	 *   rejection logs a `pii_rejected` audit event (types/score only, never
-	 *   matched text) before rethrowing. The proposal is NOT persisted —
-	 *   storing rejected PII text would defeat the control.
-	 * - `detectPii=true` (reject off): returns a matched-text-free summary for
-	 *   metadata annotation.
-	 * - Both off (default): returns undefined without running anything.
+	 * ALWAYS runs the full `validateMemoryRecordRules` rule set exactly ONCE
+	 * per record (evidence/secret/sentinel rules — including when PII policy
+	 * is off, the default). When `detectPii`/`rejectDurablePii` is on, the
+	 * configured detector runs first and its findings ride the same single
+	 * validation call (threshold logic lives only in the schema funnel). On a
+	 * PII rejection the `pii_rejected` audit event is logged (types/score
+	 * only, never matched text) before rethrowing; the rejected record is NOT
+	 * persisted — storing rejected PII text would defeat the control.
 	 *
-	 * A detector that cannot run (opt-in NER without the peer dependency)
-	 * fails closed with a typed error — never a silent skip.
+	 * Returns the parsed record plus a matched-text-free PII summary for
+	 * metadata annotation (undefined when nothing was found or detection is
+	 * off). A detector that cannot run (opt-in NER without the peer
+	 * dependency) fails closed with a typed error — never a silent skip.
 	 */
-	private async enforceDurablePiiPolicy(
-		record: MemoryRecord,
-	): Promise<
-		{ score: number; countsByType: Record<string, number> } | undefined
-	> {
+	private async validateRecordWithPiiPolicy(record: MemoryRecord): Promise<{
+		parsed: MemoryRecord;
+		piiSummary?: { score: number; countsByType: Record<string, number> };
+	}> {
 		const { detectPii, rejectDurablePii } = this.config.redaction;
-		if (!detectPii && !rejectDurablePii) return undefined;
-		if (!this.piiDetector) {
-			this.piiDetector = createPiiDetector(this.config.redaction.piiDetector);
+		let findings: PiiFinding[] | undefined;
+		if (detectPii || rejectDurablePii) {
+			if (!this.piiDetector) {
+				this.piiDetector = createPiiDetector(this.config.redaction.piiDetector);
+			}
+			findings = await this.piiDetector.detect(record.text);
 		}
-		const findings: PiiFinding[] = await this.piiDetector.detect(record.text);
-		// Always run the FULL rule set with findings attached (threshold logic
-		// lives only in validateMemoryRecordRules), then log the audit event on
-		// a PII rejection before rethrowing.
 		try {
-			validateMemoryRecordRules(record, {
+			const parsed = validateMemoryRecordRules(record, {
 				rejectDurableSecrets: this.config.redaction.rejectDurableSecrets,
 				piiFindings: findings,
 				rejectDurablePii,
 				piiThreshold: this.config.redaction.piiThreshold,
 			});
+			return {
+				parsed,
+				...(findings && findings.length > 0
+					? {
+							piiSummary: {
+								score: computePiiScore(findings),
+								countsByType: findings.reduce<Record<string, number>>(
+									(acc, f) => {
+										acc[f.type] = (acc[f.type] ?? 0) + 1;
+										return acc;
+									},
+									{},
+								),
+							},
+						}
+					: {}),
+			};
 		} catch (err) {
 			if (
 				err instanceof MemoryValidationError &&
@@ -612,15 +622,6 @@ export class MemoryGateway {
 			}
 			throw err;
 		}
-		return findings.length > 0
-			? {
-					score: computePiiScore(findings),
-					countsByType: findings.reduce<Record<string, number>>((acc, f) => {
-						acc[f.type] = (acc[f.type] ?? 0) + 1;
-						return acc;
-					}, {}),
-				}
-			: undefined;
 	}
 
 	createRecord(input: {

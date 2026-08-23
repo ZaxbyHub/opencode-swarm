@@ -645,14 +645,17 @@ function parseEvaluateArgs(
 				};
 			}
 			const resolvedFixtures = path.resolve(directory, next);
+			const projectRoot = path.resolve(directory);
 			// #1466 (DD-24): lexical prefix check first (cheap), then a
 			// filesystem-truth containment check — realpathSync resolves symlinks
 			// (a symlink inside the project pointing outside must not pass) and
 			// canonicalizes drive-letter case on Windows. An unresolvable path
 			// (missing directory, no permission) is rejected here rather than
-			// surfacing as a raw ENOENT from the fixture loader.
+			// surfacing as a raw ENOENT from the fixture loader. Roots are
+			// RESOLVED forms so a relative `directory` (e.g. ".") compares
+			// correctly against the resolved fixtures path.
 			const lexicalOk = isPathWithinAnyOf(resolvedFixtures, [
-				directory,
+				projectRoot,
 				path.join(PACKAGE_ROOT, 'tests', 'fixtures', 'memory-recall'),
 			]);
 			if (!lexicalOk) {
@@ -671,7 +674,7 @@ function parseEvaluateArgs(
 				};
 			}
 			const realRoots = [
-				directory,
+				projectRoot,
 				path.join(PACKAGE_ROOT, 'tests', 'fixtures', 'memory-recall'),
 			]
 				.map((root) => {

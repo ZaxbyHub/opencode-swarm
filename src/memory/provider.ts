@@ -92,6 +92,14 @@ export interface MemoryProvider {
 	readonly name: string;
 	initialize?(): Promise<void>;
 	close?(): Promise<void> | void;
+	/**
+	 * Persist a record. #1466 NOTE: the GATEWAY is the PII write boundary —
+	 * `MemoryGateway`'s validation funnel runs the configured PII detector
+	 * and the full rule set before records reach this method. Direct
+	 * provider-level `upsert` calls (dev tooling, evaluation fixtures,
+	 * legacy-jsonl migration) intentionally bypass PII enforcement; route
+	 * user-facing writes through the gateway when the privacy policy matters.
+	 */
 	upsert(record: MemoryRecord): Promise<MemoryRecord>;
 	appendOutcome?(
 		memoryId: string,

@@ -232,6 +232,12 @@ export function verifyMemoryEventChainRows(
 		prevHash = memoryEventRowHash(row);
 		chainedRows++;
 	}
+	// Head check. NOTE the conservative boundary: a table with ONLY legacy
+	// (pre-v13, NULL prev_hash) rows has no computed chain head — if _meta
+	// nevertheless carries a head, that means rows were chained at some point
+	// and then REPLACED by unchained ones (or the head was tampered), so the
+	// comparison fails CLOSED (verified: false). Pinned by
+	// tests/unit/memory/audit-chain.test.ts.
 	const headExpected = prevHash;
 	const headMatch =
 		headExpected === null

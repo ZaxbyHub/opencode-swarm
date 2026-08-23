@@ -507,7 +507,10 @@ keep `piiDetector: "regex"`; a missing install fails closed with a typed
 error carrying install instructions). Microsoft Presidio remains a
 documented alternative for Python-side deployments; v1 ships the
 transformers.js NER option and the regex default. All detection defaults
-are OFF — the default install performs no PII detection.
+are OFF — the default install performs no PII detection. The GATEWAY is
+the enforcement boundary: provider-level writes (dev tooling, evaluation
+fixtures, the legacy-JSONL migration) intentionally bypass PII
+enforcement — route user-facing memory writes through the gateway.
 
 **Provenance columns (migration v12).** Every `memory_items` row carries
 `source_task_id` (the unit-of-work identity that produced it, from the

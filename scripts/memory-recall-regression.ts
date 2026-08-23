@@ -114,10 +114,29 @@ async function main(): Promise<number> {
 	}
 
 	if (update) {
+		// Preserve a pre-existing baseline's tolerance when regenerating —
+		// maintainers who deliberately loosened/tightened it keep their value.
+		let tolerance = 0.05;
+		if (fs.existsSync(baselinePath)) {
+			try {
+				const prior = JSON.parse(
+					fs.readFileSync(baselinePath, 'utf-8'),
+				) as RecallBaseline;
+				if (
+					typeof prior.tolerance === 'number' &&
+					prior.tolerance >= 0 &&
+					prior.tolerance <= 1
+				) {
+					tolerance = prior.tolerance;
+				}
+			} catch {
+				// unparsable prior baseline — regenerate with the default
+			}
+		}
 		const baseline: RecallBaseline = {
 			schema_version: BASELINE_SCHEMA_VERSION,
 			embedding_model_version: EMBEDDING_MODEL_PIN,
-			tolerance: 0.05,
+			tolerance,
 			metrics: firstMetrics,
 			generated_at: new Date().toISOString(),
 		};

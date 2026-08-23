@@ -5,10 +5,10 @@ import * as path from 'node:path';
 import { loadDatabaseCtor } from '../../../src/db/sqlite-loader';
 import {
 	DEFAULT_MEMORY_CONFIG,
+	type MemoryEventRow,
 	resolveSqliteDatabasePath,
 	SQLiteMemoryProvider,
 	verifyMemoryEventChainRows,
-	type MemoryEventRow,
 } from '../../../src/memory';
 import { evictAndClose } from '../../../src/memory/provider-pool';
 
@@ -191,6 +191,18 @@ describe('verifyMemoryEventChainRows (pure)', () => {
 		expect(report.legacyRows).toBe(1);
 		expect(report.chainedRows).toBe(0);
 		expect(report.verified).toBe(true);
+	});
+
+	test('legacy-only rows with a stored head FAIL CLOSED (reviewer item: pinned boundary)', () => {
+		// No chained rows exist, yet _meta carries a head — rows were chained
+		// once and then replaced by unchained ones, or the head was tampered.
+		// Conservative-correct: unverified, not silently accepted.
+		const legacy = row({ id: 'legacy', prev_hash: null });
+		const report = verifyMemoryEventChainRows([legacy], 'some-head');
+		expect(report.legacyRows).toBe(1);
+		expect(report.chainedRows).toBe(0);
+		expect(report.headMatch).toBe(false);
+		expect(report.verified).toBe(false);
 	});
 
 	test('first chained row must anchor at GENESIS', () => {

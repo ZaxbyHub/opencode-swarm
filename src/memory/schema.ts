@@ -451,7 +451,10 @@ export function validateMemoryRecordRules(
 	// #1466 DD-14 (bundle anchor): detection also trusts the `bundle_` marker
 	// emitted by `createBundleId`, so memory text must never contain the
 	// literal prefix — otherwise a stored memory could forge "recall already
-	// injected" and suppress its own recall.
+	// injected" and suppress its own recall. The bare-prefix substring match
+	// is deliberate: prose legitimately mentioning `bundle_` is rare and the
+	// error names the exact prefix so the author can reword; a shape-only
+	// match would let `bundle_<valid-looking>` text through.
 	if (parsed.text.includes('bundle_')) {
 		throw new MemoryValidationError(
 			'memory text cannot contain the recall bundle marker prefix',
