@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, test } from 'bun:test';
+import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -20,7 +21,7 @@ import {
 
 const fixtureRoot = path.join(
 	fs.realpathSync(os.tmpdir()),
-	`retention-registry-fixture-${process.pid}-${Date.now()}`,
+	`retention-registry-fixture-${randomUUID()}`,
 );
 
 function writeModule(rel: string, source: string): void {
