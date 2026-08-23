@@ -50,8 +50,8 @@ async function seedRecords(provider: SQLiteMemoryProvider, count: number) {
 			confidence: 0.5,
 			stability: 'ephemeral' as const,
 			source: { type: 'manual' as const },
-			createdAt: new Date().toISOString(),
-			updatedAt: new Date().toISOString(),
+			createdAt: '2026-08-22T00:00:00.000Z',
+			updatedAt: '2026-08-22T00:00:00.000Z',
 			contentHash: '0'.repeat(64),
 			metadata: {},
 		};
