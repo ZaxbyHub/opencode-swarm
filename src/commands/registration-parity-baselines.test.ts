@@ -132,6 +132,9 @@ describe('Command registration parity — classification baselines', () => {
 				'skill-opt status',
 				'skill-opt diff',
 				'skill-opt history',
+				// #1466: memory audit-verify — read-only hash-chain verification
+				// of the memory audit log (agent-appropriate diagnostic).
+				'memory audit-verify',
 			]),
 			// Aliases that inherit a human-only/restricted canonical target (so
 			// the Bash CLI guardrail blocks the alias/dash form too — see
@@ -166,6 +169,8 @@ describe('Command registration parity — classification baselines', () => {
 				'learning',
 				'post-mortem',
 				...NEWER_ALLOWLIST_ADDITIONS,
+				// #1466: memory audit-verify carries toolPolicy 'agent'.
+				'memory audit-verify',
 				'review',
 				// #1822: all 9 skill-opt commands carry a toolPolicy
 				'skill-opt',
