@@ -6,6 +6,7 @@ import {
 	type MemoryConfig,
 	resolveMemoryConfig,
 } from './config';
+import { applyPatchToMemory } from './curator-decision-helpers';
 import { MemoryDisabledError, MemoryValidationError } from './errors';
 import { LocalJsonlMemoryProvider } from './local-jsonl-provider';
 import { canonicalOutcomePayload } from './outcome-events';
@@ -550,6 +551,27 @@ export class MemoryGateway {
 			await this.validateRecordWithPiiPolicy(resolved.memory);
 		} else if (resolved.action === 'supersede' && resolved.replacement) {
 			await this.validateRecordWithPiiPolicy(resolved.replacement);
+		} else if (
+			resolved.action === 'update' &&
+			resolved.patch?.text !== undefined
+		) {
+			// #1466 (final-critic item 1): the provider merges the patch inside
+			// its own transaction, where the PII detector cannot run — so the
+			// gateway pre-merges patch text against the current record and runs
+			// the SAME validation funnel on the merged result before applying.
+			// Patch-less text edits (no new text) are covered by the original
+			// record's validation.
+			const existing = await this.provider.get(resolved.targetMemoryId);
+			if (existing) {
+				const merged = applyPatchToMemory(
+					existing,
+					resolved.patch,
+					this.now().toISOString(),
+				);
+				await this.validateRecordWithPiiPolicy(merged);
+			}
+			// Absent target: the provider fails the decision with its own
+			// typed error — nothing to validate.
 		}
 		return this.provider.applyCuratorDecision(resolved);
 	}

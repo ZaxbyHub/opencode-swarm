@@ -169,7 +169,9 @@ async function main(): Promise<number> {
 	}
 
 	const tolerance =
-		typeof baseline.tolerance === 'number' && baseline.tolerance >= 0
+		typeof baseline.tolerance === 'number' &&
+		baseline.tolerance >= 0 &&
+		baseline.tolerance <= 1
 			? baseline.tolerance
 			: 0.05;
 	const currentPrecision = firstMetrics['precision@k'];

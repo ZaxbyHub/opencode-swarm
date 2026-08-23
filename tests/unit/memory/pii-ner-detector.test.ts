@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, test } from 'bun:test';
+import * as path from 'node:path';
+import { MemoryPiiDetectorError } from '../../../src/memory/errors';
 import {
 	_internals,
 	NerPiiDetector,
 	type PiiFinding,
 } from '../../../src/memory/pii';
-import { MemoryPiiDetectorError } from '../../../src/memory/errors';
 
 afterEach(() => {
 	_internals.reset();
@@ -33,6 +34,7 @@ describe('NerPiiDetector (#1466)', () => {
 	});
 
 	test('loads the model through the injected seam and maps entities to findings', async () => {
+		const fakeEnv: { cacheDir?: string } = {};
 		_internals.requireModule = () => ({
 			pipeline: async () => {
 				return async () => ({
@@ -43,7 +45,7 @@ describe('NerPiiDetector (#1466)', () => {
 					],
 				});
 			},
-			env: {},
+			env: fakeEnv,
 		});
 		const detector = new NerPiiDetector();
 		detector.assertAvailable();
@@ -54,6 +56,12 @@ describe('NerPiiDetector (#1466)', () => {
 			{ type: 'person', match: 'Brett', confidence: 0.9 },
 			{ type: 'organization', match: 'Acme Corp', confidence: 0.8 },
 		]);
+		// Final-critic item 2: the model cache dir must be an ABSOLUTE,
+		// tilde-free path — Node does not expand '~'.
+		expect(fakeEnv.cacheDir).toBeDefined();
+		expect(path.isAbsolute(fakeEnv.cacheDir as string)).toBe(true);
+		expect(fakeEnv.cacheDir).not.toContain('~');
+		expect((fakeEnv.cacheDir as string).endsWith('opencode-swarm')).toBe(false);
 	});
 
 	test('load failure is sticky — construction errors are cached and rethrown', async () => {

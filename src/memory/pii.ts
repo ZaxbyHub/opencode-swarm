@@ -15,6 +15,8 @@
  *   error rather than an opaque crash on an optional runtime path).
  */
 import { createRequire } from 'node:module';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { MemoryPiiDetectorError } from './errors';
 
 export type PiiType =
@@ -147,7 +149,18 @@ const NER_ENTITY_TYPE_MAP: Record<
 };
 
 const NER_MODEL_ID = 'Xenova/bert-base-NER';
-const NER_MODEL_CACHE_DIR = '~/.cache/opencode-swarm/models';
+/**
+ * Absolute model cache dir. Computed from os.homedir() — Node's fs (and
+ * transformers.js) do NOT tilde-expand, so a literal '~' would silently
+ * create a relative `./~` directory under the plugin host's cwd instead of
+ * the user cache (final-critic item 2).
+ */
+const NER_MODEL_CACHE_DIR = path.join(
+	os.homedir(),
+	'.cache',
+	'opencode-swarm',
+	'models',
+);
 
 /**
  * DI seam (repo convention, cf. `src/db/sqlite-loader.ts:_internals`). Tests
@@ -205,9 +218,10 @@ export class NerPiiDetector implements PiiDetector {
 	private loadError: MemoryPiiDetectorError | undefined;
 
 	/**
-	 * Eagerly verify module availability without loading the model. Used by
-	 * the write boundary to surface configuration problems before any text is
-	 * processed.
+	 * Eagerly verify module availability without loading the model. Available
+	 * for callers that want to surface opt-in misconfiguration (e.g. a future
+	 * doctor/validate surface) before any text is processed; ordinary callers
+	 * hit the same typed error from the first detect().
 	 */
 	assertAvailable(): void {
 		this.loadModule();

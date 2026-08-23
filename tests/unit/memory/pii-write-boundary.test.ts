@@ -4,10 +4,10 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { loadDatabaseCtor } from '../../../src/db/sqlite-loader';
 import {
+	DEFAULT_MEMORY_CONFIG,
 	MemoryGateway,
 	MemoryValidationError,
 	resolveSqliteDatabasePath,
-	DEFAULT_MEMORY_CONFIG,
 } from '../../../src/memory';
 import { evictAndClose } from '../../../src/memory/provider-pool';
 
@@ -53,7 +53,7 @@ function readEvents(): EventRow[] {
 }
 
 describe('PII write boundary (#1466)', () => {
-	test('default config keeps today\'s behavior — PII-bearing proposals are accepted', async () => {
+	test("default config keeps today's behavior — PII-bearing proposals are accepted", async () => {
 		const gateway = new MemoryGateway(
 			{ directory: tmpDir, sessionID: 'session-a', agentRole: 'coder' },
 			{ config: sqliteConfig() },
@@ -72,13 +72,18 @@ describe('PII write boundary (#1466)', () => {
 	test('rejectDurablePii rejects PII-bearing durable proposals and logs pii_rejected without matched text', async () => {
 		const gateway = new MemoryGateway(
 			{ directory: tmpDir, sessionID: 'session-a', agentRole: 'coder' },
-			{ config: { ...sqliteConfig(), redaction: {
-				rejectDurableSecrets: true,
-				detectPii: false,
-				piiDetector: 'regex' as const,
-				rejectDurablePii: true,
-				piiThreshold: 0.7,
-			} } },
+			{
+				config: {
+					...sqliteConfig(),
+					redaction: {
+						rejectDurableSecrets: true,
+						detectPii: false,
+						piiDetector: 'regex' as const,
+						rejectDurablePii: true,
+						piiThreshold: 0.7,
+					},
+				},
+			},
 		);
 		let thrown: unknown;
 		try {
@@ -101,19 +106,26 @@ describe('PII write boundary (#1466)', () => {
 		expect(rejection).toHaveLength(1);
 		// The audit row must carry types/score only — never the matched text.
 		expect(rejection[0].reason).toContain('email');
-		expect(rejection[0].reason).not.toContain('onboarding-owner@example-corp.com');
+		expect(rejection[0].reason).not.toContain(
+			'onboarding-owner@example-corp.com',
+		);
 	});
 
 	test('detectPii without rejectDurablePii annotates the proposal summary only', async () => {
 		const gateway = new MemoryGateway(
 			{ directory: tmpDir, sessionID: 'session-a', agentRole: 'coder' },
-			{ config: { ...sqliteConfig(), redaction: {
-				rejectDurableSecrets: true,
-				detectPii: true,
-				piiDetector: 'regex' as const,
-				rejectDurablePii: false,
-				piiThreshold: 0.7,
-			} } },
+			{
+				config: {
+					...sqliteConfig(),
+					redaction: {
+						rejectDurableSecrets: true,
+						detectPii: true,
+						piiDetector: 'regex' as const,
+						rejectDurablePii: false,
+						piiThreshold: 0.7,
+					},
+				},
+			},
 		);
 		const proposal = await gateway.propose({
 			operation: 'add',
@@ -132,13 +144,18 @@ describe('PII write boundary (#1466)', () => {
 	test('score exactly at threshold does not reject (exceeds is strict)', async () => {
 		const gateway = new MemoryGateway(
 			{ directory: tmpDir, sessionID: 'session-a', agentRole: 'coder' },
-			{ config: { ...sqliteConfig(), redaction: {
-				rejectDurableSecrets: true,
-				detectPii: false,
-				piiDetector: 'regex' as const,
-				rejectDurablePii: true,
-				piiThreshold: 0.9,
-			} } },
+			{
+				config: {
+					...sqliteConfig(),
+					redaction: {
+						rejectDurableSecrets: true,
+						detectPii: false,
+						piiDetector: 'regex' as const,
+						rejectDurablePii: true,
+						piiThreshold: 0.9,
+					},
+				},
+			},
 		);
 		const proposal = await gateway.propose({
 			operation: 'add',
@@ -153,13 +170,18 @@ describe('PII write boundary (#1466)', () => {
 	test('upsertCurated durable records are covered by the same enforcement', async () => {
 		const gateway = new MemoryGateway(
 			{ directory: tmpDir, sessionID: 'session-a', agentRole: 'curator' },
-			{ config: { ...sqliteConfig(), redaction: {
-				rejectDurableSecrets: true,
-				detectPii: false,
-				piiDetector: 'regex' as const,
-				rejectDurablePii: true,
-				piiThreshold: 0.7,
-			} } },
+			{
+				config: {
+					...sqliteConfig(),
+					redaction: {
+						rejectDurableSecrets: true,
+						detectPii: false,
+						piiDetector: 'regex' as const,
+						rejectDurablePii: true,
+						piiThreshold: 0.7,
+					},
+				},
+			},
 		);
 		// Build a fully valid durable record (id/contentHash consistent) with
 		// PII-bearing text directly through the gateway's record factory.
@@ -168,20 +190,27 @@ describe('PII write boundary (#1466)', () => {
 			text: 'Owner is owner@example-corp.com for this area.',
 			source: { type: 'file', filePath: 'docs/policy.md' },
 		});
-		await expect(gateway.upsertCurated(record)).rejects.toThrow('PII threshold');
+		await expect(gateway.upsertCurated(record)).rejects.toThrow(
+			'PII threshold',
+		);
 		expect(readEvents().some((e) => e.operation === 'pii_rejected')).toBe(true);
 	});
 
 	test('ephemeral records are not subject to durable PII rejection', async () => {
 		const gateway = new MemoryGateway(
 			{ directory: tmpDir, sessionID: 'session-a', agentRole: 'coder' },
-			{ config: { ...sqliteConfig(), redaction: {
-				rejectDurableSecrets: true,
-				detectPii: false,
-				piiDetector: 'regex' as const,
-				rejectDurablePii: true,
-				piiThreshold: 0.7,
-			} } },
+			{
+				config: {
+					...sqliteConfig(),
+					redaction: {
+						rejectDurableSecrets: true,
+						detectPii: false,
+						piiDetector: 'regex' as const,
+						rejectDurablePii: true,
+						piiThreshold: 0.7,
+					},
+				},
+			},
 		);
 		const proposal = await gateway.propose({
 			operation: 'add',
@@ -191,5 +220,50 @@ describe('PII write boundary (#1466)', () => {
 			evidenceRefs: [],
 		});
 		expect(proposal.status).toBe('pending');
+	});
+
+	test('curator update decisions with PII-bearing patch text are rejected (final-critic item 1)', async () => {
+		const gateway = new MemoryGateway(
+			{ directory: tmpDir, sessionID: 'session-a', agentRole: 'curator_phase' },
+			{
+				config: {
+					...sqliteConfig(),
+					redaction: {
+						rejectDurableSecrets: true,
+						detectPii: false,
+						piiDetector: 'regex' as const,
+						rejectDurablePii: true,
+						piiThreshold: 0.7,
+					},
+				},
+			},
+		);
+		const record = gateway.createRecord({
+			kind: 'repo_convention',
+			text: 'Clean convention text.',
+			source: { type: 'file', filePath: 'docs/policy.md' },
+		});
+		await gateway.upsertCurated(record);
+		const proposal = await gateway.propose({
+			operation: 'update',
+			kind: 'repo_convention',
+			targetMemoryId: record.id,
+			text: 'Clean updated text.',
+			rationale: 'Refine the convention wording.',
+			evidenceRefs: ['docs/policy.md'],
+		});
+		await expect(
+			gateway.applyCuratorDecision({
+				action: 'update',
+				proposalId: proposal.id,
+				targetMemoryId: record.id,
+				patch: {
+					text: 'New owner is curator-update@example-corp.com for this area.',
+				},
+				reason: 'refresh convention',
+			}),
+		).rejects.toThrow('PII threshold');
+		expect(readEvents().some((e) => e.operation === 'pii_rejected')).toBe(true);
+		await gateway.dispose();
 	});
 });
