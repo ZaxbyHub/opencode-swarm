@@ -719,6 +719,7 @@ export async function runFinalizeStage(ctx: CloseStageContext): Promise<void> {
 				retroResult = await executeWriteRetro(
 					{
 						phase: phase.id,
+						verdict: ctx.isForced ? 'fail' : 'pass',
 						summary: ctx.isForced
 							? `Phase force-closed via /swarm close --force`
 							: `Phase closed via /swarm close`,
@@ -797,6 +798,7 @@ export async function runFinalizeStage(ctx: CloseStageContext): Promise<void> {
 			const sessionRetroResult = await executeWriteRetro(
 				{
 					phase: 1,
+					verdict: ctx.isForced ? 'fail' : 'pass',
 					task_id: 'retro-session',
 					summary: ctx.isForced
 						? 'Plan-free session force-closed via /swarm close --force'

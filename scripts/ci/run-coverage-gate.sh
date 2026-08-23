@@ -63,10 +63,11 @@ while IFS= read -r test_file; do
 	# already had to be corrected twice).
 	#
 	# This job is merge-queue-only, and nothing in the workflow depends on it
-	# (`needs: [detect-release, quality, unit]`, and no job lists `coverage`
-	# in its own `needs`), so it is unordered against its peers rather than
-	# "last" — but with `timeout-minutes: 60` and the whole suite run per-file
-	# under `--isolate --coverage`, it is typically the long pole. Either way
+	# (`needs: [detect-release, quality]`, and no job lists `coverage` in its own
+	# `needs`), so it runs in parallel with the unit matrix after quality rather
+	# than extending the merge-group critical path beyond the queue deadline.
+	# With `timeout-minutes: 60` and the whole suite run per-file under
+	# `--isolate --coverage`, it is typically the long pole. Either way
 	# the stake is the same: unlike a PR-branch unit shard, a single transient
 	# flake here evicts the whole PR from the queue with no chance to
 	# self-heal — a requeue costs a full ~30-60 min re-run.

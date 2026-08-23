@@ -167,7 +167,18 @@ describe('phase_complete tool', () => {
 			fs.writeFileSync(
 				path.join(swarmDir, 'plan.json'),
 				JSON.stringify({
-					phases: [{ id: 1, status: 'pending', tasks: [] }],
+					schema_version: '1.0.0',
+					title: 'Plan-backed warning fixture',
+					swarm: 'test-swarm',
+					current_phase: 1,
+					phases: [
+						{
+							id: 1,
+							name: 'Phase 1',
+							status: 'in_progress',
+							tasks: [],
+						},
+					],
 				}),
 			);
 			expect(fs.existsSync(path.join(tempDir, '.swarm', 'plan.json'))).toBe(

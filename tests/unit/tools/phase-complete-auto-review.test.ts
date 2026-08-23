@@ -6,9 +6,14 @@ import {
 	resolveAutoReviewConfig,
 } from '../../../src/config/schema';
 import { buildApprovedReceipt } from '../../../src/hooks/review-receipt';
-import type { ReviewDiffResult } from '../../../src/review/diff-source';
+import type {
+	ReviewDiffManifest,
+	ReviewDiffResult,
+} from '../../../src/review/diff-source';
 import {
 	type AutoReviewEvidence,
+	computeAutoReviewManifestHash,
+	computeAutoReviewPolicyDigest,
 	persistAutoReviewEvidence,
 } from '../../../src/review/evidence';
 import { canonicalizeValidationCandidates } from '../../../src/review/finding-validator';
@@ -22,6 +27,23 @@ import { createSafeTestDir } from '../../helpers/safe-test-dir';
 let tmpDir: string;
 let cleanupTmpDir: () => void;
 const originalCollectReviewDiff = _internals.collectReviewDiff;
+
+function currentManifest(): ReviewDiffManifest {
+	return {
+		schema_version: 2,
+		hash: 'd'.repeat(64),
+		content_hash: 'a'.repeat(64),
+		selector: { kind: 'default' },
+		selector_key: 'default',
+		review_target_kind: 'checkout-history-index-working-tree',
+		completeness: {
+			complete: true,
+			truncated: false,
+			skip_reason_codes: [],
+		},
+		path_records: [],
+	};
+}
 
 function currentScope(): Extract<ReviewDiffResult, { status: 'ok' }> {
 	return {
@@ -46,6 +68,7 @@ function currentScope(): Extract<ReviewDiffResult, { status: 'ok' }> {
 			includesWorkingTree: true,
 			scopeHash: 'a'.repeat(64),
 		},
+		manifest: currentManifest(),
 	};
 }
 
@@ -90,6 +113,15 @@ function context(
 function evidence(
 	overrides: Partial<AutoReviewEvidence> = {},
 ): AutoReviewEvidence {
+	const reviewConfig = config('gate').auto_review;
+	if (!reviewConfig) throw new Error('auto-review config fixture is required');
+	const policyDigest = computeAutoReviewPolicyDigest(reviewConfig);
+	const { hash: _sourceHash, ...sourceManifest } = currentManifest();
+	const manifestPayload = {
+		...sourceManifest,
+		plan_requirements_hash: 'plan:none',
+		review_policy_digest: policyDigest,
+	};
 	const receiptPath = path.join(
 		tmpDir,
 		'.swarm',
@@ -97,7 +129,7 @@ function evidence(
 		'receipt.json',
 	);
 	const result: AutoReviewEvidence = {
-		schema_version: 1,
+		schema_version: 2,
 		timestamp: new Date().toISOString(),
 		trigger: 'phase_completion',
 		session_id: 'session-1',
@@ -112,12 +144,17 @@ function evidence(
 				truncated: false,
 				skipReasons: [],
 			},
+			manifest: {
+				...manifestPayload,
+				hash: computeAutoReviewManifestHash(manifestPayload),
+			},
 		},
 		policy: {
 			mode: 'gate',
 			min_confidence: 0.7,
 			structured_findings: true,
 			validate_findings: false,
+			digest: policyDigest,
 		},
 		review: {
 			status: 'completed',
@@ -176,11 +213,11 @@ describe('phase_complete final auto-review gate', () => {
 			context('gate', { autoReviewScopeHash: undefined }),
 		);
 		const missingFile = await runFinalReviewGate(context('gate'));
-		expect(missingScope.reason).toBe('FINAL_REVIEW_REQUIRED');
+		expect(missingScope.reason).toBe('FINAL_REVIEW_EVIDENCE_MISSING');
 		expect(missingFile.reason).toBe('FINAL_REVIEW_EVIDENCE_MISSING');
 	});
 
-	test('gate honors the fresh in-memory blocked result before disk evidence', async () => {
+	test('gate derives its decision from durable evidence, not transient context', async () => {
 		await persistAutoReviewEvidence(tmpDir, evidence());
 		const result = await runFinalReviewGate(
 			context('gate', {
@@ -188,8 +225,7 @@ describe('phase_complete final auto-review gate', () => {
 				autoReviewBlockReason: 'CONFIRMED_FINDINGS',
 			}),
 		);
-		expect(result.reason).toBe('FINAL_REVIEW_CURRENT_RUN_BLOCKED');
-		expect(result.message).toContain('CONFIRMED_FINDINGS');
+		expect(result.blocked).toBe(false);
 	});
 
 	test('invalid gate configuration returns an actionable block', async () => {
@@ -208,10 +244,16 @@ describe('phase_complete final auto-review gate', () => {
 
 	test('gate rejects stale evidence and independently confirmed findings', async () => {
 		await persistAutoReviewEvidence(tmpDir, evidence());
-		const stale = await runFinalReviewGate(
-			context('gate', { autoReviewScopeHash: 'c'.repeat(64) }),
-		);
+		_internals.collectReviewDiff = async () => ({
+			...currentScope(),
+			manifest: {
+				...currentManifest(),
+				content_hash: 'c'.repeat(64),
+			},
+		});
+		const stale = await runFinalReviewGate(context('gate'));
 		expect(stale.reason).toBe('FINAL_REVIEW_EVIDENCE_STALE');
+		_internals.collectReviewDiff = async () => currentScope();
 
 		const findingId = canonicalizeValidationCandidates([
 			{
@@ -363,6 +405,9 @@ describe('phase_complete final auto-review gate', () => {
 					min_confidence: 0.7,
 					structured_findings: true,
 					validate_findings: false,
+					digest: computeAutoReviewPolicyDigest(
+						config('advisory').auto_review!,
+					),
 				},
 			}),
 		);

@@ -828,7 +828,11 @@ Every candidate passes a 3-gate pipeline before entering quarantine:
 | incremental_verify | Post-coder hook for TS/JS, Go, Rust, Python, and C#; configured by `incremental_verify.*`, not invoked as a registered tool |
 | quality_budget | Enforces complexity, duplication, and test ratio limits |
 | pre_check_batch | Runs lint, secretscan, SAST, and quality budget in parallel (~15s vs ~60s sequential) |
-| phase_complete | Enforces phase completion, verifies required agents, requires a valid retrospective evidence bundle, logs events, and resets state; appends to `events.jsonl` with file locking |
+| phase_complete | Produces a complete bounded read-only gate report, revalidates the exact plan/config/evidence snapshot under lock, and commits the phase only when every applicable gate still passes |
+| run_phase_review | Architect-only: runs the bounded final-review engine and persists complete content-addressed review evidence for `phase_complete` |
+| repair_gate_evidence | Architect-only: preserves corrupt task evidence in bounded immutable quarantine and installs a fresh blocked verification generation |
+| repair_knowledge_receipt_ledger | Architect-only: validates receipt projections or salvages a corrupt authoritative ledger while requiring exact phase/session re-evaluation |
+| record_directive_override | Architect-only: records explicit critical-directive authorization separately from phase completion; unreadable authority cannot be overridden |
 | mutation_test | Applies LLM-generated mutation patches to source files and runs tests to measure kill rate; verdict is pass/warn/fail based on configurable thresholds; used by the mutation_test gate (opt-in, off by default) |
 | generate_mutants | Architect-only: generates LLM-based mutation patches (5–10 per function across 6 types: off-by-one, null substitution, operator swap, guard removal, branch swap, side-effect deletion) for direct consumption by the mutation_test tool; returns SKIP verdict on LLM failure rather than throwing |
 | write_mutation_evidence | Architect-only: writes mutation gate results atomically to `.swarm/evidence/{phase}/mutation-gate.json`; accepts verdict (PASS/WARN/FAIL/SKIP), kill rate metrics, and optional survived mutant details; normalizes uppercase-to-lowercase before persisting |

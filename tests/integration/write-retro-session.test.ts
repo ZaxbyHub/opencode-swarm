@@ -40,6 +40,7 @@ describe('executeWriteRetro: retro-session task_id (plan-free close)', () => {
 		const result = await executeWriteRetro(
 			{
 				phase: 1,
+				verdict: 'pass',
 				task_id: 'retro-session',
 				summary: 'Plan-free session closed via /swarm close',
 				task_count: 1,
@@ -98,6 +99,7 @@ describe('executeWriteRetro: retro-session task_id (plan-free close)', () => {
 			const result = await executeWriteRetro(
 				{
 					phase: 1,
+					verdict: 'pass',
 					task_id: badId,
 					summary: 'should be rejected',
 					task_count: 1,

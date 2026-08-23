@@ -85,7 +85,7 @@ describe('phase_complete critical-directive gate (e2e)', () => {
 		const parsed = JSON.parse(out);
 		expect(parsed.success).toBe(false);
 		expect(parsed.status).toBe('blocked');
-		expect(parsed.reason).toBe('unresolved_critical_directives');
+		expect(parsed.reason).toBe('UNRESOLVED_CRITICAL_DIRECTIVES');
 		expect(parsed.message).toContain('c1');
 	});
 
@@ -102,7 +102,7 @@ describe('phase_complete critical-directive gate (e2e)', () => {
 			dir,
 		);
 		const parsed = JSON.parse(out);
-		expect(parsed.reason).toBe('override_requires_justification');
+		expect(parsed.reason).toBe('OVERRIDE_REQUIRES_JUSTIFICATION');
 	});
 
 	it('honors an architect override (with justification): logs an override event and clears the directive block', async () => {
@@ -122,17 +122,15 @@ describe('phase_complete critical-directive gate (e2e)', () => {
 		const parsed = JSON.parse(out);
 		// The directive gate no longer blocks (it may still block downstream on
 		// unrelated gates like the retro gate — but NOT for directive reasons).
-		expect(parsed.reason).not.toBe('unresolved_critical_directives');
+		expect(parsed.reason).not.toBe('UNRESOLVED_CRITICAL_DIRECTIVES');
 
-		// An override event was logged for the accepted id.
+		// phase_complete deliberately does not write the separate override event.
 		const events = await readKnowledgeEvents(dir);
 		const overrides = events.filter((e) => e.type === 'override') as Array<{
 			knowledge_id: string;
 			reason?: string;
 		}>;
-		expect(overrides.length).toBe(1);
-		expect(overrides[0].knowledge_id).toBe('c1');
-		expect(overrides[0].reason).toContain('issue #123');
+		expect(overrides.length).toBe(0);
 	});
 
 	it('does not block on directive grounds when there are no critical directives', async () => {
@@ -143,8 +141,8 @@ describe('phase_complete critical-directive gate (e2e)', () => {
 			dir,
 		);
 		const parsed = JSON.parse(out);
-		expect(parsed.reason).not.toBe('unresolved_critical_directives');
-		expect(parsed.reason).not.toBe('directive_gate_failed_closed');
+		expect(parsed.reason).not.toBe('UNRESOLVED_CRITICAL_DIRECTIVES');
+		expect(parsed.reason).not.toBe('DIRECTIVE_GATE_FAILED_CLOSED');
 	});
 
 	it('uses one canonical phase label and closes receipts only after durable plan completion', async () => {

@@ -2,8 +2,11 @@ import {
 	type AutoReviewConfig,
 	resolveAutoReviewConfig,
 } from '../../../config/schema.js';
+import { loadPlanJsonOnly } from '../../../plan/manager.js';
 import { collectReviewDiff } from '../../../review/diff-source.js';
 import {
+	type AutoReviewEvidence,
+	materializeAutoReviewManifest,
 	readAutoReviewEvidenceForPhase,
 	validateAutoReviewEvidenceIntegrity,
 } from '../../../review/evidence.js';
@@ -18,7 +21,16 @@ function pass(ctx: GateContext, warnings: string[] = []): GateResult {
 	};
 }
 
-function block(ctx: GateContext, reason: string, message: string): GateResult {
+function block(
+	ctx: GateContext,
+	reason: string,
+	message: string,
+	recovery: NonNullable<GateResult['recovery']> = {
+		kind: 'tool',
+		action: 'run_phase_review',
+		args: { phase: ctx.phase, sessionID: ctx.sessionID },
+	},
+): GateResult {
 	return {
 		blocked: true,
 		reason,
@@ -26,6 +38,7 @@ function block(ctx: GateContext, reason: string, message: string): GateResult {
 		agentsDispatched: ctx.agentsDispatched,
 		agentsMissing: [],
 		warnings: [],
+		recovery,
 	};
 }
 
@@ -41,10 +54,10 @@ function evidenceStatusMatchesScope(
 /**
  * Evidence-only final review gate.
  *
- * The model dispatch belongs to the phase_complete tool body. This gate performs
+ * Model dispatch belongs to the explicit run_phase_review recovery tool. This gate performs
  * one bounded, model-free scope collection at the terminal decision point, then
- * verifies that the persisted artifact and in-memory result both describe that
- * current scope and that the configured blocking policy is satisfied.
+ * verifies that the persisted artifact describes that current scope and that
+ * the configured blocking policy is satisfied.
  */
 export async function runFinalReviewGate(
 	ctx: GateContext,
@@ -57,29 +70,27 @@ export async function runFinalReviewGate(
 			ctx,
 			'FINAL_REVIEW_CONFIG_INVALID',
 			`Phase ${ctx.phase} cannot be completed: ${error instanceof Error ? error.message : String(error)}`,
+			{
+				kind: 'tool',
+				action: 'swarm_command',
+				args: { command: 'doctor', args: ['config'] },
+			},
 		);
 	}
+	const plan = await loadPlanJsonOnly(ctx.dir).catch(() => null);
+	const finalPlanPhase = plan?.phases.at(-1)?.id === ctx.phase;
+	const allowedTriggers = new Set<AutoReviewEvidence['trigger']>();
+	if (config.final_review.on_phase_complete)
+		allowedTriggers.add('phase_completion');
+	if (finalPlanPhase && config.final_review.on_plan_complete)
+		allowedTriggers.add('plan_completion');
 	if (
 		!config.enabled ||
 		config.final_review.mode !== 'gate' ||
 		config.trigger === 'task_completion' ||
-		ctx.autoReviewTrigger === undefined
+		allowedTriggers.size === 0
 	) {
 		return pass(ctx);
-	}
-	if (ctx.autoReviewBlocked) {
-		return block(
-			ctx,
-			'FINAL_REVIEW_CURRENT_RUN_BLOCKED',
-			`Phase ${ctx.phase} cannot be completed: the current final review run blocked (${ctx.autoReviewBlockReason ?? 'unknown reason'}).`,
-		);
-	}
-	if (!ctx.autoReviewScopeHash) {
-		return block(
-			ctx,
-			'FINAL_REVIEW_REQUIRED',
-			`Phase ${ctx.phase} cannot be completed: final auto-review gate is enabled but no current scope evidence was produced.`,
-		);
 	}
 	const evidence = readAutoReviewEvidenceForPhase(ctx.dir, ctx.phase);
 	if (!evidence) {
@@ -89,13 +100,14 @@ export async function runFinalReviewGate(
 			`Phase ${ctx.phase} cannot be completed: .swarm/evidence/${ctx.phase}/auto-review.json is missing or malformed.`,
 		);
 	}
-	if (
-		evidence.scope.hash !== ctx.autoReviewScopeHash ||
-		evidence.phase !== ctx.phase ||
-		evidence.trigger !== ctx.autoReviewTrigger ||
-		(ctx.autoReviewScopeComplete !== undefined &&
-			evidence.scope.completeness.complete !== ctx.autoReviewScopeComplete)
-	) {
+	if (evidence.schema_version !== 2 || !evidence.scope.manifest) {
+		return block(
+			ctx,
+			'FINAL_REVIEW_LEGACY_RERUN',
+			`Phase ${ctx.phase} cannot be completed: final review evidence uses the legacy schema and must be rerun with run_phase_review before completion.`,
+		);
+	}
+	if (evidence.phase !== ctx.phase || !allowedTriggers.has(evidence.trigger)) {
 		return block(
 			ctx,
 			'FINAL_REVIEW_EVIDENCE_STALE',
@@ -113,29 +125,31 @@ export async function runFinalReviewGate(
 			`Phase ${ctx.phase} cannot be completed: terminal final-review scope collection failed (${currentScope.reason}).`,
 		);
 	}
+	const currentManifest = await materializeAutoReviewManifest(
+		ctx.dir,
+		currentScope.manifest,
+		config,
+	);
 	if (
-		currentScope.scopeHash !== ctx.autoReviewScopeHash ||
-		currentScope.scopeHash !== evidence.scope.hash ||
-		currentScope.headSha !== evidence.scope.head_sha ||
+		currentManifest.hash !== evidence.scope.manifest.hash ||
 		JSON.stringify(currentScope.selector) !==
 			JSON.stringify(evidence.scope.selector) ||
 		JSON.stringify(currentScope.completeness) !==
 			JSON.stringify(evidence.scope.completeness) ||
-		(ctx.autoReviewScopeComplete !== undefined &&
-			currentScope.completeness.complete !== ctx.autoReviewScopeComplete) ||
 		!evidenceStatusMatchesScope(evidence.review.status, currentScope.status)
 	) {
 		return block(
 			ctx,
 			'FINAL_REVIEW_EVIDENCE_STALE',
-			`Phase ${ctx.phase} cannot be completed: repository scope changed after final review evidence was produced.`,
+			`Phase ${ctx.phase} cannot be completed: repository scope, plan requirements, or review policy changed after final review evidence was produced.`,
 		);
 	}
 	if (
 		evidence.policy.mode !== config.final_review.mode ||
 		evidence.policy.min_confidence !== config.min_confidence ||
 		evidence.policy.structured_findings !== config.structured_findings ||
-		evidence.policy.validate_findings !== config.validate_findings
+		evidence.policy.validate_findings !== config.validate_findings ||
+		evidence.policy.digest !== currentManifest.review_policy_digest
 	) {
 		return block(
 			ctx,
@@ -144,10 +158,15 @@ export async function runFinalReviewGate(
 		);
 	}
 	const integrity = validateAutoReviewEvidenceIntegrity(ctx.dir, evidence, {
-		scopeHash: ctx.autoReviewScopeHash,
+		scopeHash: evidence.scope.hash,
 		phase: ctx.phase,
-		trigger: ctx.autoReviewTrigger,
-		policy: evidence.policy,
+		trigger: evidence.trigger as 'phase_completion' | 'plan_completion',
+		policy: {
+			mode: evidence.policy.mode,
+			min_confidence: evidence.policy.min_confidence,
+			structured_findings: evidence.policy.structured_findings,
+			validate_findings: evidence.policy.validate_findings,
+		},
 		scopeContent: currentScope.canonicalText,
 	});
 	if (!integrity.ok) {

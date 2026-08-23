@@ -85,6 +85,18 @@ export {
 	qualityBudget,
 } from './quality-budget';
 export {
+	executeRecordDirectiveOverride,
+	record_directive_override,
+} from './record-directive-override';
+export {
+	executeRepairGateEvidence,
+	repair_gate_evidence,
+} from './repair-gate-evidence';
+export {
+	executeRepairKnowledgeReceiptLedger,
+	repair_knowledge_receipt_ledger,
+} from './repair-knowledge-receipt-ledger';
+export {
 	buildWorkspaceGraph,
 	type GraphEdge,
 	type GraphNode,
@@ -99,6 +111,11 @@ export { repo_map } from './repo-map';
 export { req_coverage } from './req-coverage';
 export { retrieve_lane_output } from './retrieve-lane-output';
 export { retrieve_summary } from './retrieve-summary';
+export {
+	createRunPhaseReviewTool,
+	executeRunPhaseReview,
+	run_phase_review,
+} from './run-phase-review';
 export {
 	type SastScanFinding,
 	type SastScanInput,

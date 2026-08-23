@@ -9,12 +9,10 @@ import {
 	type WriteRetroArgs,
 } from '../../../src/tools/write-retro';
 
-/**
- * Helper function to create valid WriteRetroArgs
- */
 function makeArgs(overrides: Partial<WriteRetroArgs> = {}): WriteRetroArgs {
 	return {
 		phase: 4,
+		verdict: 'pass',
 		summary: 'Phase 4 completed',
 		task_count: 3,
 		task_complexity: 'moderate',
