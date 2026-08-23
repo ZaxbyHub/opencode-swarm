@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.144.8](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.144.7...v7.144.8) (2026-08-22)
+
+
+### Bug Fixes
+
+* security: repo-resident lane env file can set GIT_SSH_COMMAND / LD_PRELOAD (latent, currently unreachable) ([#2263](https://github.com/ZaxbyHub/opencode-swarm/issues/2263)) ([d602db7](https://github.com/ZaxbyHub/opencode-swarm/commit/d602db7b7f65707709090487c1f69ff4db7432c3))
+
 ## [7.144.7](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.144.6...v7.144.7) (2026-08-22)
 
 

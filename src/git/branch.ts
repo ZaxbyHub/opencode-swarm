@@ -1,7 +1,7 @@
 import * as child_process from 'node:child_process';
 import * as fsSync from 'node:fs';
 import path from 'node:path';
-import { isValidEnvKey } from '../sandbox/executor';
+import { isUntrustedEnvKey, isValidEnvKey } from '../sandbox/executor';
 import { mergeEnvForChild } from '../utils/bun-compat';
 import {
 	GitBinaryMissingError,
@@ -136,6 +136,15 @@ const __spawnSyncSeam = {
  * Synchronously read and parse a lane runtime profile from disk.
  * Mirrors the logic of `readLaneEnvFileFromDisk` but uses sync fs.
  * Returns an empty record when the file does not exist or cannot be read.
+ *
+ * UNTRUSTED INPUT (issue #2263): this file lives at
+ * `<worktree>/.swarm/lanes/<N>.env` — a path INSIDE the repository — so a
+ * hostile repository can simply commit it. Every key/value parsed here is
+ * attacker-controlled and must pass BOTH the `isValidEnvKey` shape check and
+ * the `isUntrustedEnvKey` denylist (drops the `GIT_*` control plane and the
+ * `LD_*`/`DYLD_*` loader-hijack families, which are code-execution
+ * primitives in a git child-process environment). The shape-only validation
+ * looks sufficient but is not — that gap is exactly what #2263 reported.
  */
 export function readLaneEnvFileFromDiskSync(
 	worktreePath: string,
@@ -164,6 +173,7 @@ export function readLaneEnvFileFromDiskSync(
 		const k = line.slice(0, eqIdx);
 		const v = line.slice(eqIdx + 1);
 		if (!isValidEnvKey(k)) continue; // reject shell-injection vectors
+		if (isUntrustedEnvKey(k)) continue; // #2263: reject GIT_*/LD_*/DYLD_* control-plane keys
 		result[k] = v;
 	}
 	return result;
