@@ -332,11 +332,21 @@ describe('PII write boundary (#1466)', () => {
 	test('FB-3 (clock): rapid scratch proposals never spuriously reject', async () => {
 		// Regression for the two-this.now()-reads bug: expiresAt - createdAt
 		// could land a millisecond over 7 days and reject 'scratch memories
-		// must expire within 7 days'. Both timestamps now derive from ONE
-		// clock read, so a burst of proposals must all succeed.
+		// must expire within 7 days'. Deterministic pin (reviewer follow-up):
+		// the injected clock ADVANCES 1ms per read, so the old two-reads code
+		// would compute exactly 7d + 1ms and reject EVERY proposal; the fixed
+		// single-snapshot code must pass all of them.
+		let clockMs = Date.parse('2026-08-22T10:00:00.000Z');
 		const gateway = new MemoryGateway(
 			{ directory: tmpDir, sessionID: 'session-a', agentRole: 'coder' },
-			{ config: sqliteConfig() },
+			{
+				config: sqliteConfig(),
+				now: () => {
+					const d = new Date(clockMs);
+					clockMs += 1;
+					return d;
+				},
+			},
 		);
 		for (let i = 0; i < 50; i++) {
 			const proposal = await gateway.propose({
@@ -348,6 +358,50 @@ describe('PII write boundary (#1466)', () => {
 			});
 			expect(proposal.status).toBe('pending');
 		}
+		await gateway.dispose();
+	});
+
+	test('FB-3 (replay path, reviewer follow-up): replayed outcome with a NEW PII-bearing correction is gated', async () => {
+		// Pin the ordering: enforcePiiTextPolicy runs BEFORE the priorEvent
+		// idempotent-replay fast path, so a replay that swaps in PII-bearing
+		// correction text cannot smuggle it through the payload-equality check.
+		const gateway = new MemoryGateway(
+			{ directory: tmpDir, sessionID: 'session-a', agentRole: 'coder' },
+			{
+				config: {
+					...sqliteConfig(),
+					redaction: {
+						rejectDurableSecrets: true,
+						detectPii: false,
+						piiDetector: 'regex' as const,
+						rejectDurablePii: true,
+						piiThreshold: 0.7,
+					},
+				},
+			},
+		);
+		const record = gateway.createRecord({
+			kind: 'code_pattern',
+			text: 'Replay ordering probe record.',
+			source: { type: 'file', filePath: 'src/a.ts' },
+		});
+		await gateway.upsertCurated(record);
+		const eventId = 'evt_replay_probe_1';
+		await gateway.recordOutcome({
+			memoryId: record.id,
+			outcome: 'corrected',
+			correction: 'Original clean correction.',
+			eventId,
+		});
+		// Same eventId replay with DIFFERENT (PII-bearing) correction text.
+		await expect(
+			gateway.recordOutcome({
+				memoryId: record.id,
+				outcome: 'corrected',
+				correction: 'Swapped owner is replay-owner@example-corp.com.',
+				eventId,
+			}),
+		).rejects.toThrow('PII threshold');
 		await gateway.dispose();
 	});
 });

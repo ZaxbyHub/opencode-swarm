@@ -23,9 +23,11 @@
  */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { evaluateMemoryRecallFixtures } from '../src/memory/evaluation';
 import { DEFAULT_MEMORY_CONFIG, resolveMemoryConfig } from '../src/memory/config';
+
+const resolvePath = (p: string) => path.resolve(p);
 
 const REPO_ROOT = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -49,7 +51,9 @@ interface RecallBaseline {
 }
 
 const BASELINE_SCHEMA_VERSION = 1;
-const EMBEDDING_MODEL_PIN = 'lexical-default-v1';
+/** Exported for the pin round-trip unit test (recall-regression-pin.test.ts). */
+export const EMBEDDING_MODEL_PIN_PLACEHOLDER = 'lexical-default-v1';
+const EMBEDDING_MODEL_PIN = EMBEDDING_MODEL_PIN_PLACEHOLDER;
 
 function parseArgs(args: string[]): {
 	update: boolean;
@@ -95,8 +99,10 @@ function metricSummary(report: Awaited<ReturnType<typeof evaluateMemoryRecallFix
  * way the sqlite provider stamps embedding_model_version — embeddings
  * disabled → lexical pin; enabled → explicit version or model:dimension.
  * Mirrors embeddingModelVersionStamp()/LocalEmbeddingProvider semantics.
+ * Exported for tests/unit/memory/recall-regression-pin.test.ts; the single
+ * source of truth for BOTH the --update writer and the gate check.
  */
-function resolveCurrentEmbeddingPin(): string {
+export function resolveCurrentEmbeddingPin(): string {
 	const embeddings = resolveMemoryConfig(DEFAULT_MEMORY_CONFIG).embeddings;
 	if (!embeddings.enabled) return EMBEDDING_MODEL_PIN;
 	return embeddings.version ?? `${embeddings.model}:${embeddings.dimension}`;
@@ -148,7 +154,9 @@ async function main(): Promise<number> {
 		}
 		const baseline: RecallBaseline = {
 			schema_version: BASELINE_SCHEMA_VERSION,
-			embedding_model_version: EMBEDDING_MODEL_PIN,
+			// Reviewer item: ONE source of truth — the same resolver the gate
+			// compares against (breaks loudly if the two ever diverge).
+			embedding_model_version: resolveCurrentEmbeddingPin(),
 			tolerance,
 			metrics: firstMetrics,
 			generated_at: new Date().toISOString(),
@@ -230,4 +238,11 @@ async function main(): Promise<number> {
 	return 0;
 }
 
-process.exit(await main());
+// Run only when executed directly (bun run scripts/...), not when imported by
+// unit tests (tests/unit/memory/recall-regression-pin.test.ts).
+const isMain =
+	process.argv[1] !== undefined &&
+	import.meta.url === pathToFileURL(resolvePath(process.argv[1])).href;
+if (isMain) {
+	process.exit(await main());
+}

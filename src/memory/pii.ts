@@ -352,6 +352,14 @@ function groupConsecutiveEntities(
 			flush();
 			continue;
 		}
+		// Adjacency by token INDEX (not array position): the 2.17.x pipeline
+		// emits one entry per input token position with the tokenizer's own
+		// index, and the upstream tokenizer decodes wordpieces into whole
+		// words before emitting, so consecutive same-entity tokens of one
+		// mention occupy contiguous index values for the NER models we pin
+		// (bert-base-NER). A future model that skips O tokens between parts
+		// would simply yield separate per-part findings (safe degradation),
+		// never a false merge.
 		if (
 			current &&
 			current.type === type &&

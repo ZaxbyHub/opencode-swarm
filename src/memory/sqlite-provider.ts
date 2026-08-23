@@ -2323,7 +2323,10 @@ export class SQLiteMemoryProvider
 		reason?: string,
 	): Promise<void> {
 		await this.initialize();
-		this.insertEvent(operation, targetId, reason);
+		// insertEvent is synchronous today; the await keeps the throw-path
+		// contract obvious if it ever becomes async (gateway callers wrap
+		// this in try/catch around the await).
+		await this.insertEvent(operation, targetId, reason);
 	}
 
 	/**
