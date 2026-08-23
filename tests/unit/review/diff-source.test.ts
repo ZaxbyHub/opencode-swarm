@@ -247,6 +247,16 @@ function installGitStub(options: {
 			return proc(`${BASE}\n`, 0, options.onKill);
 		if (joined.includes('merge-base'))
 			return proc(`${MERGE_BASE}\n`, 0, options.onKill);
+		if (joined.includes('rev-parse --show-object-format'))
+			return proc('sha1\n', 0, options.onKill);
+		if (joined.includes('ls-tree')) {
+			const relativePath = cmd.at(-1) ?? '';
+			return proc(
+				`100644 blob ${'d'.repeat(40)}\t${relativePath}\0`,
+				0,
+				options.onKill,
+			);
+		}
 		if (joined.includes('ls-files'))
 			return proc(options.untracked ?? '', 0, options.onKill);
 		if (joined.includes(' diff '))
@@ -294,6 +304,13 @@ describe('collectReviewDiff', () => {
 	test('collects merge-base through tracked working tree plus safe untracked text', async () => {
 		const fixture = createSafeTestDir('review-diff-');
 		try {
+			fs.mkdirSync(path.join(fixture.dir, 'src'));
+			fs.writeFileSync(
+				path.join(fixture.dir, 'src', 'a.ts'),
+				'same\nnew\ntail\n',
+			);
+			fs.writeFileSync(path.join(fixture.dir, 'src', 'new.ts'), 'one\ntwo\n');
+			fs.writeFileSync(path.join(fixture.dir, 'src', 'new-name.ts'), 'after\n');
 			fs.writeFileSync(path.join(fixture.dir, 'note.txt'), 'alpha\nbeta\n');
 			const calls: Array<{ cmd: string[]; opts?: BunCompatSpawnOptions }> = [];
 			let kills = 0;
