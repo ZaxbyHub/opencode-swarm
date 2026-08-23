@@ -132,7 +132,7 @@ describe('knowledge receipt ledger recovery and isolation', () => {
 			unwrap(await queryLiveMemberships(conflictDirectory)).memberships,
 		).toHaveLength(1);
 	});
-	test('recovers only an invalid partial final tail and preserves restart state', async () => {
+	test('fails closed on an invalid partial final tail without repairing authority', async () => {
 		const directory = project('receipt-ledger-tail-');
 		await seedMembership(directory);
 		const journal = path.join(
@@ -142,17 +142,18 @@ describe('knowledge receipt ledger recovery and isolation', () => {
 		);
 		fs.appendFileSync(journal, '{"schema_version":2,"seq":');
 
-		const live = unwrap(await queryLiveMemberships(directory));
-		expect(live.memberships).toHaveLength(1);
-		const recovered = fs.readFileSync(journal, 'utf8');
-		expect(recovered).not.toContain('\n{"schema_version":2,"seq":');
-		expect(recovered.endsWith('\n')).toBe(true);
+		const before = fs.readFileSync(journal, 'utf8');
+		const live = await queryLiveMemberships(directory);
+		expect(live.ok).toBe(false);
+		if (live.ok) throw new Error('expected corrupt store failure');
+		expect(live.code).toBe('store_corrupt');
+		expect(live.detail).toContain('unterminated final record');
+		expect(fs.readFileSync(journal, 'utf8')).toBe(before);
 		expect(
-			fs.readFileSync(
+			fs.existsSync(
 				path.join(directory, '.swarm', 'knowledge-receipts-v2-quarantine.json'),
-				'utf8',
 			),
-		).toContain('partial_tail');
+		).toBe(false);
 	});
 
 	test('fails closed on middle corruption instead of skipping it', async () => {

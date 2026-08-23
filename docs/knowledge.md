@@ -502,8 +502,8 @@ the `agent` identity field: `delegate` (the exposed agent's own self-report —
 stamped on every delegate terminal in both the V2 ledger and the diagnostic
 event log), `reviewer` (independent verdict), `architect` /
 `architect_marker`, `test_engineer`, `phase_override`,
-`application_gate_staleness_clear` / `application_gate_denial_limit_clear`
-(system escape hatches), `manual`, `migration`, and `unknown`. Legacy records
+`application_gate_staleness_release` / `application_gate_denial_limit_release`
+(nonterminal, audited gate releases), `manual`, `migration`, and `unknown`. Legacy records
 with an absent or ambiguous source stay `unknown` — never coerced to
 `delegate`, `ignored`, or zero. The `knowledge_receipt_transition`
 observability payload carries `receiptSemantics` (currently `2`) versioning
@@ -541,18 +541,26 @@ rebuildable snapshot do not share the diagnostic event budget.
 
 #### Receipt-ledger recovery
 
-An unterminated final journal line is treated as a crash tail: the plugin first
-preserves it in a quarantine file, then rewrites the last valid hash-chained
-prefix. Interior corruption, a hash mismatch, an unsupported schema, an
-unwritable quarantine, or a full disk intentionally fails receipt gates closed;
-the plugin does not guess which later authority is safe to discard.
+Receipt reads never repair authority as a side effect. An unterminated final
+line, interior corruption, hash mismatch, unsupported schema, permission error,
+or unavailable store fails receipt gates closed with a typed recovery action.
+The architect may then call `repair_knowledge_receipt_ledger` for the exact
+phase and session with a substantive reason. Readable authority only rebuilds
+the derived snapshot. Corrupt authority is captured byte-for-byte in a bounded
+append-only quarantine, and only its validated hash-chain prefix is installed.
+The repaired phase/session remains explicitly uncertain and blocked until the
+architect performs a comprehensive `knowledge_recall` for the affected scope
+and supplies the exact `repair_id`, phase, optional task, and
+`scope_complete: true` in `repair_re_evaluation`. Ordinary recall, automatic
+injection, partial searches, wrong repair IDs, and unrelated empty retrievals
+remain untagged and cannot clear the uncertainty.
 
-Before recovery, back up all project-local
-`.swarm/knowledge-receipts-v2*.jsonl` files. Do not hand-edit or truncate the
-authoritative journal. Free disk space when writes fail, then retry. For interior
-corruption, restore the journal and archive from a trusted project-local backup
-or reopen them with a plugin version that supports their schema. The snapshot is
-explicitly rebuildable and is never a substitute for the journal or archive.
+Do not hand-edit or truncate the authoritative journal or its quarantine.
+Free disk space or correct permissions when writes fail, then retry the typed
+recovery action. When immutable quarantine capacity is exhausted, archive it
+out of band before retrying; the repair tool never discards an older record to
+make room. The snapshot is explicitly rebuildable and is never a substitute for
+the journal or archive.
 
 Operational knowledge observations continue to be appended to:
 
@@ -595,11 +603,11 @@ two escape hatches so the gate cannot deadlock a session forever:
 
 - **`max_gate_denials`** (default `5`) — after this many consecutive denials
   against the same unacknowledged critical-directive set, the gate
-  auto-acknowledges the pending directives, clears them for that session, and
-  lets the action through.
+  records a nonterminal gate release for the pending directives and lets the
+  action through without claiming they were applied.
 - **`gate_staleness_ms`** (default `600000`, 10 minutes) — a critical
-  directive shown longer ago than this is treated as stale and auto-cleared
-  the same way, regardless of denial count.
+  directive shown longer ago than this receives the same nonterminal release,
+  regardless of denial count.
 
 Both auto-clears write an audit event to `.swarm/events.jsonl`
 (`knowledge_application_gate_denial_limit_clear` or
@@ -607,7 +615,9 @@ Both auto-clears write an audit event to `.swarm/events.jsonl`
 bypass is never silent. These are safety nets against a broken acknowledgment
 pipeline (e.g. an ack marker that failed to parse), not a routine escape path:
 enforcement still applies for the first `max_gate_denials` attempts or the
-full `gate_staleness_ms` window.
+full `gate_staleness_ms` window. A release is not a terminal outcome, does not
+count as application or promotion evidence, and does not erase the original
+directive membership.
 
 **`high_risk_tools`** — optionally override the set of tools that trigger the
 acknowledgment gate. When absent, defaults to `["save_plan",

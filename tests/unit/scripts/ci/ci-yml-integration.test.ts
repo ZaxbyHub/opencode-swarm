@@ -58,6 +58,14 @@ function extractCoverageMeasurementStep(yml: string): string {
 	return match ? match[0] : '';
 }
 
+function extractCoverageJob(yml: string): string {
+	const normalized = yml.replace(/\r\n/g, '\n');
+	const match = normalized.match(
+		/^ {2}coverage:[\s\S]*?(?=^ {2}[A-Za-z][\w-]*:|(?![\s\S]))/m,
+	);
+	return match ? match[0] : '';
+}
+
 function extractIntegrationTestsStep(yml: string): string {
 	const normalized = yml.replace(/\r\n/g, '\n');
 	const match = normalized.match(
@@ -135,7 +143,16 @@ describe('ci.yml integration — integration quarantine extraction', () => {
 describe('ci.yml integration — merge-queue coverage isolation', () => {
 	const yml = readFileSync(CI_YML_PATH, 'utf8');
 	const step = extractCoverageMeasurementStep(yml);
+	const coverageJob = extractCoverageJob(yml);
 	const coverageGateScript = readFileSync(COVERAGE_GATE_SCRIPT_PATH, 'utf8');
+
+	test('coverage starts after quality instead of waiting for the unit matrix (CI-004)', () => {
+		// Previous workflow serialized the 45-minute coverage gate behind the unit
+		// matrix, so GitHub's 60-minute merge-queue timeout evicted green runs
+		// seconds before coverage completed.
+		expect(coverageJob).toContain('needs: [detect-release, quality]');
+		expect(coverageJob).not.toMatch(/needs: \[[^\]]*\bunit\b/);
+	});
 
 	test('"Coverage gate enforcement" step delegates to the coverage helper', () => {
 		expect(step).toContain('bash scripts/ci/run-coverage-gate.sh');

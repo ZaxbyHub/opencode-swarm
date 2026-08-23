@@ -1,7 +1,7 @@
 /** V2 exact-pair phase critical gate integration tests. */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { rmSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 import {
 	commitDisplayedMembership,
@@ -195,11 +195,19 @@ describe('evaluatePhaseCriticalDirectives V2 authority', () => {
 			sessionId: 'session-a',
 			phaseLabel: PHASE,
 		});
-		expect(result).toEqual({
+		expect(result).toMatchObject({
 			blocked: true,
 			unresolved: [],
 			overridden: [],
 			failedClosed: true,
+			failure: {
+				code: 'RECEIPT_CORRUPT',
+				action_id: 'repair_knowledge_receipt_ledger',
+			},
+			recovery: {
+				kind: 'tool',
+				action: 'repair_knowledge_receipt_ledger',
+			},
 		});
 	});
 
@@ -211,11 +219,15 @@ describe('evaluatePhaseCriticalDirectives V2 authority', () => {
 			phaseLabel: PHASE,
 		});
 
-		expect(result).toEqual({
+		expect(result).toMatchObject({
 			blocked: true,
 			unresolved: [],
 			overridden: [],
 			failedClosed: true,
+			failure: {
+				code: 'RECEIPT_MISSING',
+				action_id: 'knowledge_receipt',
+			},
 		});
 	});
 
@@ -231,6 +243,48 @@ describe('evaluatePhaseCriticalDirectives V2 authority', () => {
 			overridden: [],
 			failedClosed: false,
 		});
+	});
+
+	it('fails closed on an unterminated final record without mutating authority', async () => {
+		await display('trace-partial-tail');
+		const journalPath = path.join(
+			directory,
+			'.swarm',
+			'knowledge-receipts-v2.jsonl',
+		);
+		writeFileSync(
+			journalPath,
+			`${readFileSync(journalPath, 'utf8')}{"schema_version":2,"seq":`,
+		);
+		const before = readFileSync(journalPath, 'utf8');
+		const quarantinePath = path.join(
+			directory,
+			'.swarm',
+			'knowledge-receipts-v2-quarantine.json',
+		);
+
+		const result = await evaluatePhaseCriticalDirectives({
+			directory,
+			sessionId: 'session-a',
+			phaseLabel: PHASE,
+		});
+
+		expect(result).toMatchObject({
+			blocked: true,
+			unresolved: [],
+			overridden: [],
+			failedClosed: true,
+			failure: {
+				code: 'RECEIPT_CORRUPT',
+				action_id: 'repair_knowledge_receipt_ledger',
+			},
+			recovery: {
+				kind: 'tool',
+				action: 'repair_knowledge_receipt_ledger',
+			},
+		});
+		expect(readFileSync(journalPath, 'utf8')).toBe(before);
+		expect(existsSync(quarantinePath)).toBe(false);
 	});
 
 	it('does not let a force-closed prior lifecycle contaminate a later phase gate', async () => {

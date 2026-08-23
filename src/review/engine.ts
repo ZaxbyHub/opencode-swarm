@@ -30,6 +30,7 @@ import {
 import {
 	type AutoReviewEvidence,
 	type AutoReviewEvidenceFinding,
+	materializeAutoReviewManifest,
 	persistAutoReviewEvidence,
 	readAutoReviewEvidenceForPhase,
 	validateAutoReviewEvidenceIntegrity,
@@ -83,6 +84,7 @@ export interface ReviewEngineResult {
 	receiptPath?: string;
 	evidencePath?: string;
 	scopeHash?: string;
+	manifestHash?: string;
 	scopeComplete?: boolean;
 	scopeWarnings?: string[];
 	scopeFileList?: string[];
@@ -121,13 +123,9 @@ function scopeFreshnessMismatches(
 	};
 	compare('status', reviewed.status, current.status);
 	compare('scopeHash', reviewed.scopeHash, current.scopeHash);
+	compare('manifestHash', reviewed.manifest.hash, current.manifest.hash);
 	compare('canonicalText', reviewed.canonicalText, current.canonicalText);
 	compare('reviewTextBytes', reviewed.reviewTextBytes, current.reviewTextBytes);
-	compare('headSha', reviewed.headSha, current.headSha);
-	compare('baseRef', reviewed.baseRef, current.baseRef);
-	compare('baseSha', reviewed.baseSha, current.baseSha);
-	compare('mergeBase', reviewed.mergeBase, current.mergeBase);
-	compare('rangeToSha', reviewed.rangeToSha, current.rangeToSha);
 	compare(
 		'selector',
 		JSON.stringify(reviewed.selector),
@@ -186,6 +184,7 @@ async function stalePersistenceResult(
 	result.modelCalls = modelCalls;
 	if (current.status !== 'error') {
 		result.scopeHash = current.scopeHash;
+		result.manifestHash = current.manifest.hash;
 		result.scopeComplete = current.completeness.complete;
 		Object.assign(result, scopeResultFields(current));
 	}
@@ -659,7 +658,7 @@ function baseEvidence(
 	status: AutoReviewEvidence['review']['status'],
 ): AutoReviewEvidence {
 	return {
-		schema_version: 1,
+		schema_version: 2,
 		timestamp: new Date().toISOString(),
 		trigger: input.trigger,
 		session_id: input.sessionID,
@@ -680,6 +679,7 @@ function baseEvidence(
 			min_confidence: input.config.min_confidence,
 			structured_findings: input.config.structured_findings,
 			validate_findings: input.config.validate_findings,
+			digest: undefined,
 		},
 		review: { status },
 		findings: [],
@@ -759,6 +759,12 @@ async function persistErrorResult(
 	promptRequest?: ReviewPromptRequest,
 ): Promise<ReviewEngineResult> {
 	const evidence = baseEvidence(input, diff, 'error');
+	evidence.scope.manifest = await materializeAutoReviewManifest(
+		input.directory,
+		diff.manifest,
+		input.config,
+	);
+	evidence.policy.digest = evidence.scope.manifest.review_policy_digest;
 	evidence.review.error = error;
 	addCost(evidence, dispatches);
 	try {
@@ -773,6 +779,7 @@ async function persistErrorResult(
 		}
 	}
 	result.scopeHash = diff.scopeHash;
+	result.manifestHash = evidence.scope.manifest.hash;
 	result.scopeComplete = diff.completeness.complete;
 	Object.assign(result, scopeResultFields(diff, promptRequest));
 	return result;
@@ -807,6 +814,12 @@ export async function runReviewEngine(
 	}
 	if (diff.status === 'clean') {
 		const evidence = baseEvidence(input, diff, 'clean');
+		evidence.scope.manifest = await materializeAutoReviewManifest(
+			input.directory,
+			diff.manifest,
+			input.config,
+		);
+		evidence.policy.digest = evidence.scope.manifest.review_policy_digest;
 		let evidencePath: string | undefined;
 		try {
 			evidencePath = await _internals.persistEvidence(
@@ -835,6 +848,7 @@ export async function runReviewEngine(
 			),
 			validationComplete: true,
 			scopeHash: diff.scopeHash,
+			manifestHash: evidence.scope.manifest.hash,
 			scopeComplete: diff.completeness.complete,
 			...scopeResultFields(diff),
 			evidencePath,
@@ -846,6 +860,11 @@ export async function runReviewEngine(
 		diff,
 		phase: input.phase,
 	});
+	const reviewManifest = await materializeAutoReviewManifest(
+		input.directory,
+		diff.manifest,
+		input.config,
+	);
 	if (
 		input.phase !== undefined &&
 		(input.trigger === 'phase_completion' ||
@@ -868,7 +887,8 @@ export async function runReviewEngine(
 			: undefined;
 		if (
 			existing?.review.status === 'completed' &&
-			existing.scope.head_sha === diff.headSha &&
+			existing.schema_version === 2 &&
+			existing.scope.manifest?.hash === reviewManifest.hash &&
 			integrity?.ok &&
 			integrity.receipt
 		) {
@@ -934,6 +954,7 @@ export async function runReviewEngine(
 					'auto-review.json',
 				),
 				scopeHash: existing.scope.hash,
+				manifestHash: existing.scope.manifest?.hash,
 				scopeComplete: diff.completeness.complete,
 				...scopeResultFields(diff, promptRequest),
 				reviewModel: existing.review.model,
@@ -1160,6 +1181,8 @@ export async function runReviewEngine(
 			finding.validation?.disposition === 'CONFIRMED',
 	);
 	const evidence = baseEvidence(input, diff, 'completed');
+	evidence.scope.manifest = reviewManifest;
+	evidence.policy.digest = reviewManifest.review_policy_digest;
 	evidence.review = {
 		status: 'completed',
 		output_mode: parsed.outputMode,
@@ -1314,6 +1337,7 @@ export async function runReviewEngine(
 		receiptPath,
 		evidencePath,
 		scopeHash: diff.scopeHash,
+		manifestHash: reviewManifest.hash,
 		scopeComplete: diff.completeness.complete,
 		...scopeResultFields(diff, promptRequest),
 		reviewModel: dispatched.result.modelId,

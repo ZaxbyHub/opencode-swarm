@@ -752,7 +752,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			severity: 'warning',
 			// Carries `directory` and a free-text filesystem error.
 			privacyClass: 'sensitive',
-			producer: 'src/plan/manager.ts:1842',
+			producer: 'src/plan/manager.ts:1861',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_PLAN_EVIDENCE_RETENTION,
@@ -823,7 +823,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			// Optional trace/entry/session/task/phase IDs are pseudonymous. There
 			// is no prose, path, or non-transient circuit state in the payload.
 			privacyClass: 'pseudonymous',
-			producer: 'src/hooks/knowledge-receipt-observability.ts:191',
+			producer: 'src/hooks/knowledge-receipt-observability.ts:197',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_LIFECYCLE_RETENTION,

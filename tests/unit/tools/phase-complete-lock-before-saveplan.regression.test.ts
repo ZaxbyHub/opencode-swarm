@@ -325,6 +325,7 @@ describe('phase_complete — regression: acquires plan.json lock before savePlan
 		expect(mockSavePlan).not.toHaveBeenCalled();
 		expect(parsed.success).toBe(false);
 		expect(parsed.status).toBe('incomplete');
-		expect(parsed.message).toContain('Plan write blocked: plan.json is locked');
+		expect(parsed.reason).toBe('PHASE_COMMIT_LOCKED');
+		expect(parsed.message).toContain('Plan write is locked by another agent.');
 	});
 });

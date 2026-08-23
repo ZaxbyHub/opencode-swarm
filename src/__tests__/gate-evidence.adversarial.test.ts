@@ -7,8 +7,8 @@
 
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
+import { canonicalMkdtemp } from '../../tests/helpers/tmpdir.js';
 
 mock.module('../../src/telemetry.js', () => ({
 	emit: () => {},
@@ -21,7 +21,7 @@ mock.module('../../src/telemetry.js', () => ({
 let tempDir: string;
 
 beforeEach(() => {
-	tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gate-ev-adv-'));
+	tempDir = canonicalMkdtemp('gate-ev-adv-');
 	fs.mkdirSync(path.join(tempDir, '.swarm', 'evidence'), { recursive: true });
 });
 

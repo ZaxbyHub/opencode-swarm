@@ -19,6 +19,7 @@ Writes a retrospective evidence bundle for a completed phase.
 \`\`\`json
 {
   "phase": 1,
+  "verdict": "pass",
   "summary": "Phase summary here",
   "task_count": 3,
   "task_complexity": "simple",
@@ -36,6 +37,8 @@ Writes a retrospective evidence bundle for a completed phase.
 - \`top_rejection_reasons\`: string[]
 - \`task_id\`: string (defaults to \`retro-{phase}\`)
 - \`metadata\`: Record<string, unknown>
+
+### verdict values: pass | fail
 
 ### task_complexity values: trivial | simple | moderate | complex`;
 	}

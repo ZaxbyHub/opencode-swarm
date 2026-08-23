@@ -23,6 +23,9 @@ const DEFAULT_MAX_UNTRACKED_FILE_BYTES = 64 * 1024;
 const MAX_REVIEW_BYTES = 8 * 1024 * 1024;
 const MAX_UNTRACKED_FILE_BYTES = 1024 * 1024;
 const MAX_TIMEOUT_MS = 60_000;
+const WORKTREE_IDENTITY_MAX_FILE_BYTES = 2 * 1024 * 1024;
+const WORKTREE_IDENTITY_TOTAL_BYTES = 8 * 1024 * 1024;
+const WORKTREE_IDENTITY_MAX_DURATION_MS = 2_000;
 const METADATA_OUTPUT_LIMIT = 256 * 1024;
 const STDERR_OUTPUT_LIMIT = 64 * 1024;
 const MAX_REF_LENGTH = 200;
@@ -115,6 +118,40 @@ export interface ReviewDiffStalenessMetadata {
 	scopeHash: string;
 }
 
+export interface ReviewManifestIdentity {
+	algorithm: 'sha256' | 'git-blob';
+	sha256?: string;
+	byte_length?: number;
+	git_blob_oid?: string;
+	git_object_format?: string;
+}
+
+export interface ReviewManifestPathRecord {
+	kind: ReviewDiffFileScope['kind'];
+	old_path?: string;
+	new_path?: string;
+	old_identity?: ReviewManifestIdentity;
+	new_identity?: ReviewManifestIdentity;
+}
+
+export interface ReviewDiffManifest {
+	schema_version: 2;
+	hash: string;
+	content_hash: string;
+	selector: ReviewDiffSelector;
+	selector_key: string;
+	review_target_kind:
+		| 'checkout-history-index-working-tree'
+		| 'checkout-index-working-tree'
+		| 'exact-committed-range';
+	completeness: {
+		complete: boolean;
+		truncated: boolean;
+		skip_reason_codes: ReviewDiffSkipCode[];
+	};
+	path_records: ReviewManifestPathRecord[];
+}
+
 interface ReviewDiffScopeFields {
 	selector: ReviewDiffSelector;
 	canonicalText: string;
@@ -130,6 +167,17 @@ interface ReviewDiffScopeFields {
 	files: Map<string, ReviewDiffFileScope>;
 	completeness: ReviewDiffCompleteness;
 	staleness: ReviewDiffStalenessMetadata;
+	manifest: ReviewDiffManifest;
+}
+
+interface WorkingTreeIdentityBudget {
+	remainingBytes: number;
+	deadlineMs: number;
+}
+
+interface WorkingTreeIdentityResult {
+	identity: ReviewManifestIdentity | null;
+	failure?: ReviewDiffSkipReason;
 }
 
 export type ReviewDiffResult =
@@ -655,6 +703,331 @@ function selectorKey(selector: ReviewDiffSelector): string {
 		case 'working-tree':
 			return 'working-tree';
 	}
+}
+
+function reviewTargetKind(
+	selector: ReviewDiffSelector,
+): ReviewDiffManifest['review_target_kind'] {
+	switch (selector.kind) {
+		case 'range':
+			return 'exact-committed-range';
+		case 'working-tree':
+			return 'checkout-index-working-tree';
+		default:
+			return 'checkout-history-index-working-tree';
+	}
+}
+
+function compareUtf8Bytes(left: string, right: string): number {
+	return Buffer.compare(Buffer.from(left, 'utf8'), Buffer.from(right, 'utf8'));
+}
+
+function uniqueSkipCodes(
+	skipReasons: ReviewDiffSkipReason[],
+): ReviewDiffSkipCode[] {
+	return [...new Set(skipReasons.map((item) => item.code))].sort();
+}
+
+function hashManifestPayload(
+	payload: Omit<ReviewDiffManifest, 'hash'>,
+): string {
+	return createHash('sha256')
+		.update(JSON.stringify(payload), 'utf8')
+		.digest('hex');
+}
+
+function parseObjectFormat(stdout: string): string | null {
+	const objectFormat = stdout.trim();
+	return objectFormat.length > 0 && !hasControlCharacter(objectFormat)
+		? objectFormat
+		: null;
+}
+
+function parseLsTreeBlobId(
+	stdout: string,
+	expectedPath: string,
+): string | null {
+	const trimmed = stdout.endsWith('\0') ? stdout.slice(0, -1) : stdout;
+	if (!trimmed) return null;
+	const tabIndex = trimmed.indexOf('\t');
+	if (tabIndex === -1) return null;
+	const metadata = trimmed.slice(0, tabIndex).trim().split(/\s+/);
+	const actualPath = normalizeRelativePath(trimmed.slice(tabIndex + 1));
+	if (
+		metadata.length < 3 ||
+		metadata[1] !== 'blob' ||
+		actualPath !== expectedPath ||
+		!SHA_PATTERN.test(metadata[2] ?? '')
+	) {
+		return null;
+	}
+	return metadata[2]!;
+}
+
+async function resolveGitObjectFormat(
+	root: string,
+	timeoutMs: number,
+): Promise<string | null> {
+	const result = await runGit(root, ['rev-parse', '--show-object-format'], {
+		timeoutMs,
+		maxStdoutBytes: METADATA_OUTPUT_LIMIT,
+	});
+	return result.ok ? parseObjectFormat(result.stdout) : null;
+}
+
+async function readGitBlobIdentity(
+	root: string,
+	treeish: string,
+	relativePath: string,
+	timeoutMs: number,
+	objectFormat: string,
+): Promise<ReviewManifestIdentity | null> {
+	const result = await runGit(
+		root,
+		['ls-tree', '-z', treeish, '--', relativePath],
+		{
+			timeoutMs,
+			maxStdoutBytes: METADATA_OUTPUT_LIMIT,
+		},
+	);
+	if (!result.ok) return null;
+	const blobId = parseLsTreeBlobId(result.stdout, relativePath);
+	if (!blobId) return null;
+	return {
+		algorithm: 'git-blob',
+		git_blob_oid: blobId,
+		git_object_format: objectFormat,
+	};
+}
+
+function compareStats(left: fs.BigIntStats, right: fs.BigIntStats): boolean {
+	return (
+		sameFileIdentity(left, right) &&
+		left.size === right.size &&
+		left.mtimeNs === right.mtimeNs &&
+		left.ctimeNs === right.ctimeNs
+	);
+}
+
+function hashWorkingTreeIdentity(
+	root: string,
+	rawPath: string,
+	budget: WorkingTreeIdentityBudget,
+): WorkingTreeIdentityResult {
+	const normalized = normalizeRelativePath(rawPath);
+	if (!normalized) return { identity: null };
+	const candidate = path.resolve(root, ...normalized.split('/'));
+	if (!isContained(root, candidate)) return { identity: null };
+	let handle: number | undefined;
+	const deadlineExceeded = (detail: string): WorkingTreeIdentityResult => ({
+		identity: null,
+		failure: {
+			code: 'UNREADABLE_FILE',
+			path: normalized,
+			detail,
+		},
+	});
+	try {
+		if (_internals.now() > budget.deadlineMs) {
+			return deadlineExceeded(
+				'working-tree content identity deadline expired before file hashing started',
+			);
+		}
+		const pathStat = _internals.lstatBigIntSync(candidate);
+		if (!pathStat.isFile() || pathStat.isSymbolicLink())
+			return { identity: null };
+		const canonicalBeforeOpen = _internals.realpathSync(candidate);
+		if (!isContained(root, canonicalBeforeOpen)) return { identity: null };
+		handle = _internals.openSync(canonicalBeforeOpen, 'r');
+		const openedBeforeRead = _internals.fstatBigIntSync(handle);
+		const canonicalAfterOpen = _internals.realpathSync(candidate);
+		if (
+			!openedBeforeRead.isFile() ||
+			!compareStats(pathStat, openedBeforeRead) ||
+			!samePath(canonicalBeforeOpen, canonicalAfterOpen) ||
+			!isContained(root, canonicalAfterOpen)
+		) {
+			return { identity: null };
+		}
+		if (openedBeforeRead.size > BigInt(Number.MAX_SAFE_INTEGER)) {
+			return deadlineExceeded(
+				'working-tree content identity byte length exceeds safe integer bounds',
+			);
+		}
+		if (openedBeforeRead.size > BigInt(WORKTREE_IDENTITY_MAX_FILE_BYTES)) {
+			return deadlineExceeded(
+				`working-tree content identity exceeded the ${WORKTREE_IDENTITY_MAX_FILE_BYTES}-byte per-file cap`,
+			);
+		}
+		const fileBytes = Number(openedBeforeRead.size);
+		if (fileBytes > budget.remainingBytes) {
+			return deadlineExceeded(
+				`working-tree content identity exceeded the ${WORKTREE_IDENTITY_TOTAL_BYTES}-byte aggregate cap`,
+			);
+		}
+		const hash = createHash('sha256');
+		const buffer = Buffer.alloc(64 * 1024);
+		let offset = 0;
+		while (offset < fileBytes) {
+			if (_internals.now() > budget.deadlineMs) {
+				return deadlineExceeded(
+					'working-tree content identity deadline expired while hashing file content',
+				);
+			}
+			const read = _internals.readSync(
+				handle,
+				buffer,
+				0,
+				Math.min(buffer.byteLength, fileBytes - offset),
+				offset,
+			);
+			if (read === 0) break;
+			hash.update(buffer.subarray(0, read));
+			offset += read;
+		}
+		const openedAfterRead = _internals.fstatBigIntSync(handle);
+		const canonicalAfterRead = _internals.realpathSync(candidate);
+		if (
+			!compareStats(openedBeforeRead, openedAfterRead) ||
+			!samePath(canonicalBeforeOpen, canonicalAfterRead) ||
+			!isContained(root, canonicalAfterRead) ||
+			offset !== fileBytes
+		) {
+			return { identity: null };
+		}
+		budget.remainingBytes -= fileBytes;
+		return {
+			identity: {
+				algorithm: 'sha256',
+				sha256: hash.digest('hex'),
+				byte_length: Number(openedAfterRead.size),
+			},
+		};
+	} catch {
+		return { identity: null };
+	} finally {
+		if (handle !== undefined) {
+			try {
+				_internals.closeSync(handle);
+			} catch {
+				// Best-effort cleanup.
+			}
+		}
+	}
+}
+
+async function buildReviewManifest(
+	root: string,
+	selector: ReviewDiffSelector,
+	files: Map<string, ReviewDiffFileScope>,
+	completeness: ReviewDiffCompleteness,
+	timeoutMs: number,
+	revisionContext: {
+		headSha: string;
+		mergeBase?: string;
+		baseSha?: string;
+		rangeToSha?: string;
+	},
+	contentHash: string,
+): Promise<{
+	manifest: ReviewDiffManifest;
+	identityFailures: ReviewDiffSkipReason[];
+	missingIdentityBindings: Set<string>;
+}> {
+	const objectFormat =
+		(await resolveGitObjectFormat(root, timeoutMs)) ?? 'sha1';
+	const pathRecords: ReviewManifestPathRecord[] = [];
+	const identityFailures: ReviewDiffSkipReason[] = [];
+	const missingIdentityBindings = new Set<string>();
+	const workingTreeBudget: WorkingTreeIdentityBudget | undefined =
+		selector.kind === 'range'
+			? undefined
+			: {
+					remainingBytes: WORKTREE_IDENTITY_TOTAL_BYTES,
+					deadlineMs:
+						_internals.now() +
+						Math.min(timeoutMs, WORKTREE_IDENTITY_MAX_DURATION_MS),
+				};
+	const orderedScopes = [...files.values()].sort((left, right) =>
+		compareUtf8Bytes(
+			left.newPath ?? left.oldPath ?? '',
+			right.newPath ?? right.oldPath ?? '',
+		),
+	);
+	const oldTreeForSelector =
+		selector.kind === 'working-tree'
+			? revisionContext.headSha
+			: selector.kind === 'range'
+				? selector.operator === '...'
+					? revisionContext.mergeBase
+					: revisionContext.baseSha
+				: revisionContext.mergeBase;
+	const newTreeForSelector =
+		selector.kind === 'range' ? revisionContext.rangeToSha : undefined;
+
+	for (const scope of orderedScopes) {
+		const record: ReviewManifestPathRecord = {
+			kind: scope.kind,
+			old_path: scope.oldPath,
+			new_path: scope.newPath,
+		};
+		if (scope.kind !== 'added' && scope.oldPath && oldTreeForSelector) {
+			record.old_identity =
+				(await readGitBlobIdentity(
+					root,
+					oldTreeForSelector,
+					scope.oldPath,
+					timeoutMs,
+					objectFormat,
+				)) ?? undefined;
+		}
+		if (scope.newPath) {
+			if (selector.kind === 'range' && newTreeForSelector) {
+				record.new_identity =
+					(await readGitBlobIdentity(
+						root,
+						newTreeForSelector,
+						scope.newPath,
+						timeoutMs,
+						objectFormat,
+					)) ?? undefined;
+			} else if (workingTreeBudget) {
+				const hashed = hashWorkingTreeIdentity(
+					root,
+					scope.newPath,
+					workingTreeBudget,
+				);
+				record.new_identity = hashed.identity ?? undefined;
+				if (hashed.failure) {
+					identityFailures.push(hashed.failure);
+					missingIdentityBindings.add(`new:${scope.newPath}`);
+				}
+			}
+		}
+		pathRecords.push(record);
+	}
+
+	const payload: Omit<ReviewDiffManifest, 'hash'> = {
+		schema_version: 2,
+		content_hash: contentHash,
+		selector,
+		selector_key: selectorKey(selector),
+		review_target_kind: reviewTargetKind(selector),
+		completeness: {
+			complete: completeness.complete,
+			truncated: completeness.truncated,
+			skip_reason_codes: uniqueSkipCodes(completeness.skipReasons),
+		},
+		path_records: pathRecords,
+	};
+	return {
+		manifest: {
+			...payload,
+			hash: hashManifestPayload(payload),
+		},
+		identityFailures,
+		missingIdentityBindings,
+	};
 }
 
 function boundedPositiveInteger(
@@ -1258,6 +1631,16 @@ export async function collectReviewDiff(
 	const scopeHash = createHash('sha256')
 		.update(hashPayload, 'utf8')
 		.digest('hex');
+	const reviewContentHash = createHash('sha256')
+		.update(
+			JSON.stringify({
+				selector,
+				canonicalText,
+				fileListFallback: fileListFallback ?? null,
+			}),
+			'utf8',
+		)
+		.digest('hex');
 	const completeness: ReviewDiffCompleteness = {
 		complete: skipReasons.length === 0 && !truncated,
 		truncated,
@@ -1271,6 +1654,55 @@ export async function collectReviewDiff(
 		includesWorkingTree,
 		scopeHash,
 	};
+	const { manifest, identityFailures, missingIdentityBindings } =
+		await buildReviewManifest(
+			root,
+			selector,
+			parsed.files,
+			completeness,
+			timeoutMs,
+			{
+				headSha,
+				mergeBase,
+				baseSha,
+				rangeToSha,
+			},
+			reviewContentHash,
+		);
+	skipReasons.push(...identityFailures);
+	for (const record of manifest.path_records) {
+		if (record.kind !== 'added' && record.old_path && !record.old_identity) {
+			skipReasons.push({
+				code: 'UNREADABLE_FILE',
+				path: record.old_path,
+				detail:
+					'could not bind the reviewed old-side file to a complete content identity',
+			});
+		}
+		if (
+			record.kind !== 'deleted' &&
+			record.new_path &&
+			!record.new_identity &&
+			!missingIdentityBindings.has(`new:${record.new_path}`)
+		) {
+			skipReasons.push({
+				code: 'UNREADABLE_FILE',
+				path: record.new_path,
+				detail:
+					'could not bind the reviewed new-side file to a complete content identity',
+			});
+		}
+	}
+	if (skipReasons.length > manifest.completeness.skip_reason_codes.length) {
+		completeness.complete = false;
+		manifest.completeness = {
+			complete: false,
+			truncated: completeness.truncated,
+			skip_reason_codes: uniqueSkipCodes(skipReasons),
+		};
+		const { hash: _oldHash, ...manifestPayload } = manifest;
+		manifest.hash = hashManifestPayload(manifestPayload);
+	}
 	const scope: ReviewDiffScopeFields = {
 		selector,
 		canonicalText,
@@ -1286,6 +1718,7 @@ export async function collectReviewDiff(
 		files: parsed.files,
 		completeness,
 		staleness,
+		manifest,
 	};
 	const clean =
 		canonicalText.trim().length === 0 &&
@@ -1307,6 +1740,7 @@ export const _internals: {
 	readSync: typeof fs.readSync;
 	closeSync: typeof fs.closeSync;
 	resolveGitExecutable: typeof resolveGitExecutableAsync;
+	now: () => number;
 } = {
 	bunSpawn,
 	realpathSync: fs.realpathSync,
@@ -1316,4 +1750,5 @@ export const _internals: {
 	readSync: fs.readSync,
 	closeSync: fs.closeSync,
 	resolveGitExecutable: resolveGitExecutableAsync,
+	now: () => Date.now(),
 };
