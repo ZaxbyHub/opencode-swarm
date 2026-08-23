@@ -125,6 +125,46 @@ function boundaryForModule(
 	return inferPackageBoundary(moduleName, hasManifest);
 }
 
+const blankKeepingNewlines = (m: string): string => m.replace(/[^\n]/g, ' ');
+
+/**
+ * Blank the CONTENTS of multi-line string literals, preserving newlines and
+ * length so line-anchored matching still lines up.
+ *
+ * `stripComments` removes comments but keeps string literals verbatim, so a
+ * line-initial `package` / `namespace` token inside a C# verbatim string
+ * (`@"…"`), a C# raw string, or a Java/Kotlin text block (`"""…"""`) matched the
+ * anchored regexes below and won the boundary — the real declaration lost,
+ * because `String.match` takes the first hit. That is legal, compilable source
+ * (a `@"…"` block holding SQL or config is ordinary C#), not a crafted spoof.
+ *
+ * Single-line string literals cannot cause this: a `\n` cannot appear inside
+ * one, so no interior line can be line-initial. Only the multi-line forms are
+ * masked here, which keeps the change narrow.
+ */
+
+function maskMultilineStringLiterals(text: string, language: string): string {
+	// ORDER MATTERS. A C# verbatim string ending in an escaped quote —
+	// `@"say ""hi"""` — contains a literal `"""`. Running the `"""` pass first
+	// pairs that tail with the next `"""` anywhere in the file and blanks every
+	// line between them, which silently deleted a real `namespace` declaration
+	// and made the boundary fall back to the path. Consuming `@"…"` first
+	// removes those quotes from consideration, so the `"""` pass only ever sees
+	// genuine triple-quoted literals.
+	//
+	// Masking is also language-scoped: applying the `"""` pass to C# is what
+	// made the collision above reachable at all, and applying either pass to a
+	// language that has neither construct is pure cost.
+	let out = text;
+	if (language === 'csharp') {
+		// A doubled `""` is an escaped quote, not a terminator.
+		out = out.replace(/@"(?:[^"]|"")*"/g, blankKeepingNewlines);
+	}
+	// Java text blocks, Kotlin raw strings, and C# 11 raw strings.
+	out = out.replace(/"""[\s\S]*?"""/g, blankKeepingNewlines);
+	return out;
+}
+
 /**
  * Extract the *declared* package / namespace from JVM and .NET source text.
  *
@@ -149,35 +189,14 @@ function boundaryForModule(
  * @param content - file content with comments already stripped, so a
  *   commented-out declaration cannot win
  */
-/**
- * Blank the CONTENTS of multi-line string literals, preserving newlines and
- * length so line-anchored matching still lines up.
- *
- * `stripComments` removes comments but keeps string literals verbatim, so a
- * line-initial `package` / `namespace` token inside a C# verbatim string
- * (`@"…"`), a C# raw string, or a Java/Kotlin text block (`"""…"""`) matched the
- * anchored regexes below and won the boundary — the real declaration lost,
- * because `String.match` takes the first hit. That is legal, compilable source
- * (a `@"…"` block holding SQL or config is ordinary C#), not a crafted spoof.
- *
- * Single-line string literals cannot cause this: a `\n` cannot appear inside
- * one, so no interior line can be line-initial. Only the multi-line forms are
- * masked here, which keeps the change narrow.
- */
-function maskMultilineStringLiterals(text: string): string {
-	// C# verbatim `@"…"` (a doubled `""` is an escaped quote, not a terminator)
-	// and the `"""…"""` family used by Java text blocks, Kotlin raw strings and
-	// C# raw strings.
-	return text
-		.replace(/"""[\s\S]*?"""/g, (m) => m.replace(/[^\n]/g, ' '))
-		.replace(/@"(?:[^"]|"")*"/g, (m) => m.replace(/[^\n]/g, ' '));
-}
-
 function sourceBoundaryForLanguage(
 	language: string,
 	content: string,
 ): string | null {
-	const scanned = maskMultilineStringLiterals(content);
+	if (language !== 'java' && language !== 'kotlin' && language !== 'csharp') {
+		return null;
+	}
+	const scanned = maskMultilineStringLiterals(content, language);
 	if (language === 'java' || language === 'kotlin') {
 		const pkg = scanned.match(/^[ \t]*package[ \t]+([A-Za-z_][\w.]*)[ \t]*;?/m);
 		if (pkg?.[1]) return pkg[1];

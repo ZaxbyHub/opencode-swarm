@@ -295,6 +295,16 @@ const JVM_DOTNET_DOTTED_ROOTS = [
 	'src/main/kotlin',
 ] as const;
 
+/**
+ * Whether the parent-as-file (nested type) probe applies to this source file.
+ * Java and Kotlin only — see the probe's own comment in
+ * `findDottedModuleCandidate` for why C# is excluded.
+ */
+function isJvmParentProbeLanguage(sourceFile: string): boolean {
+	const ext = path.extname(sourceFile).toLowerCase();
+	return ext === '.java' || ext === '.kt' || ext === '.kts';
+}
+
 /** Candidate file extensions for a dotted import, keyed on the *importing* file. */
 function jvmDotnetSiblingExtensions(sourceFile: string): readonly string[] {
 	switch (path.extname(sourceFile).toLowerCase()) {
@@ -335,15 +345,6 @@ const JVM_DOTNET_TEST_FILE_RE = /\w(?:Tests?|Spec)\.[A-Za-z]+$/;
  * by code-unit order is used, which is locale-independent and therefore
  * reproducible across machines.
  */
-/** True when `p` exists and is a directory. Never throws. */
-function isExistingDirectory(p: string): boolean {
-	try {
-		return fsSync.statSync(p).isDirectory();
-	} catch {
-		return false;
-	}
-}
-
 function firstSourceFileIn(
 	directory: string,
 	extensions: readonly string[],
@@ -437,6 +438,13 @@ function findDottedModuleCandidate(
 	const parent =
 		!isWildcard && parts.length > 1 ? parts.slice(0, -1).join(path.sep) : null;
 
+	// The three probes run as SEPARATE passes over every root prefix, most
+	// specific first. Interleaving them per-prefix is what let the weakest probe
+	// win: with `''` iterated first, `using App.Models;` reached the
+	// parent-as-file probe and returned an unrelated `App.cs` before the
+	// `src/App/Models/` directory under a later prefix was ever considered.
+
+	// 1. The full dotted path as a FILE — the specifier names a type.
 	for (const rootPrefix of JVM_DOTNET_DOTTED_ROOTS) {
 		const fullBase = path.join(workspaceRoot, rootPrefix, full);
 		for (const ext of extensions) {
@@ -444,24 +452,32 @@ function findDottedModuleCandidate(
 			// a live one is validated by the caller's realpath check.
 			if (existsSync(fullBase + ext)) return fullBase + ext;
 		}
+	}
 
-		// The specifier names a package/namespace directory: resolve to a
-		// representative member, matching the Go convention above.
-		const inPackage = firstSourceFileIn(fullBase, extensions);
+	// 2. The full dotted path as a package/namespace DIRECTORY — resolve to a
+	//    representative member, matching the Go convention above.
+	for (const rootPrefix of JVM_DOTNET_DOTTED_ROOTS) {
+		const inPackage = firstSourceFileIn(
+			path.join(workspaceRoot, rootPrefix, full),
+			extensions,
+		);
 		if (inPackage) return inPackage;
+	}
 
-		if (parent === null) continue;
-		// The full path EXISTS as a directory, so the specifier names a
-		// package/namespace — its last segment is not an enclosing type and the
-		// parent-as-file probe must not run. Without this, `using App.Data;`
-		// with an unrelated `App.cs` present resolved to `App.cs`: an edge to a
-		// file the source never referenced. The asymmetry is language-level —
-		// a Java non-wildcard import names a TYPE, while a C# `using X.Y;`
-		// names a NAMESPACE and carries no `.*` marker to distinguish it — so
-		// the directory's existence is the only signal available here without
-		// full type resolution.
-		if (isExistingDirectory(fullBase)) continue;
-
+	// 3. The PARENT path as a file — a nested type (`a.b.Outer.Inner` ->
+	//    `a/b/Outer.java`), and the shape a static-member import reduces to.
+	//
+	//    Java and Kotlin only. A Java non-wildcard import names a TYPE, so this
+	//    is the normal nested-type syntax there. A C# `using X.Y;` names a
+	//    NAMESPACE — C# reaches a nested type through `using static X.Y.Z;` or a
+	//    using-alias, neither distinguishable from a namespace import by the
+	//    specifier string alone. Running the probe for C# fabricated edges to
+	//    unrelated type files (`using Serilog.Sinks;` -> a local `Serilog.cs`),
+	//    and a missing edge is strictly better than a false one. The cost is
+	//    that a C# alias pointing at a nested type does not resolve; that is
+	//    recorded as a documented limitation.
+	if (parent === null || !isJvmParentProbeLanguage(sourceFile)) return null;
+	for (const rootPrefix of JVM_DOTNET_DOTTED_ROOTS) {
 		const parentBase = path.join(workspaceRoot, rootPrefix, parent);
 		for (const ext of extensions) {
 			if (existsSync(parentBase + ext)) return parentBase + ext;
