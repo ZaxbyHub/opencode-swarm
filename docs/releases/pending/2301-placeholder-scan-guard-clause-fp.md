@@ -34,6 +34,17 @@ path-shape examples (e.g. `../../../.claude/skills/xxx/SKILL.md` in
   Uppercase `XXX` placeholder still flagged; lowercase `xxx` no longer flagged
   in path-shape comments.
 
+## Known limitation
+
+- "Sole effective statement" counting treats any control-flow wrapper around
+  a constant return as substantive, even when both branches return the same
+  constant with no other behavior — e.g. `function f() { try { return null; }
+  catch (e) { return null; } }` or `function f(x) { if (x) { return null; }
+  return null; }` are genuine do-nothing stubs but are no longer flagged.
+  This trades a class of false positives (guard clauses) for a narrower class
+  of false negatives (symmetric-branch stubs); tightening effective-statement
+  counting to detect this shape is a follow-up.
+
 ## Note for future edits
 
 - Tree-sitter body-shape coverage in this fix is limited to TS/JS/Python.

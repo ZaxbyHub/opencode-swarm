@@ -263,6 +263,27 @@ function isParserSupported(filePath: string): boolean {
 	return SUPPORTED_PARSER_EXTENSIONS.has(ext);
 }
 
+// Languages the body-shape walker (collectNonStubBodyLines) has been verified
+// against: TS/JS/TSX/Python. Other SUPPORTED_PARSER_EXTENSIONS languages (Go,
+// Rust, Java, C/C++, C#, PHP, Ruby) share `function_declaration`/`block`-style
+// node names with TS/JS but have different body-wrapping shapes (e.g. Go
+// nests an extra `statement_list` inside `block`), so running the walker on
+// them silently misclassifies every function as non-stub. They continue to
+// use the regex-only pass for this rule until each is verified individually.
+const BODY_SHAPE_SUPPORTED_EXTENSIONS = new Set([
+	'.js',
+	'.jsx',
+	'.ts',
+	'.tsx',
+	'.py',
+]);
+
+function isBodyShapeSupported(filePath: string): boolean {
+	return BODY_SHAPE_SUPPORTED_EXTENSIONS.has(
+		path.extname(filePath).toLowerCase(),
+	);
+}
+
 /**
  * Check if a file is a plan file (.swarm/plan.md) that should be scanned
  * for bracket-placeholder patterns
@@ -665,22 +686,27 @@ async function scanWithParser(
 		// continue to use the regex-only pass for this rule.
 		//
 		// Must live inside the try block so parse failure preserves regex
-		// findings unchanged.
-		try {
-			const nonStubBodyLines = collectNonStubBodyLines(tree.rootNode);
-			if (nonStubBodyLines.size > 0) {
-				for (let i = findings.length - 1; i >= 0; i--) {
-					const f = findings[i]!;
-					if (
-						f.rule_id === 'placeholder/code-stub-return' &&
-						nonStubBodyLines.has(f.line)
-					) {
-						findings.splice(i, 1);
+		// findings unchanged. Gated to the verified languages (see
+		// isBodyShapeSupported) — do not widen this to all
+		// SUPPORTED_PARSER_EXTENSIONS languages without verifying each one's
+		// body-wrapping shape first.
+		if (isBodyShapeSupported(filePath)) {
+			try {
+				const nonStubBodyLines = collectNonStubBodyLines(tree.rootNode);
+				if (nonStubBodyLines.size > 0) {
+					for (let i = findings.length - 1; i >= 0; i--) {
+						const f = findings[i]!;
+						if (
+							f.rule_id === 'placeholder/code-stub-return' &&
+							nonStubBodyLines.has(f.line)
+						) {
+							findings.splice(i, 1);
+						}
 					}
 				}
+			} catch {
+				// Walker failed mid-loop — preserve remaining regex findings as-is.
 			}
-		} catch {
-			// Walker failed mid-loop — preserve remaining regex findings as-is.
 		}
 
 		tree.delete();
@@ -790,19 +816,18 @@ function isStubSkeletonFunction(fnNode: any): boolean {
 	const isArrow = fnNode.type === 'arrow_function';
 
 	if (isArrow) {
-		// Arrow: body is either a `statement_block` child or the first
-		// non-formal-parameters/non-type-annotation/non-arrow-token child.
-		// We also skip `=>` (the arrow token itself, type `=>`).
-		if (Array.isArray(fnNode.children)) {
-			for (const child of fnNode.children) {
-				if (!child || typeof child.type !== 'string') continue;
-				if (child.type === 'formal_parameters') continue;
-				if (child.type === 'type_annotation') continue;
-				if (child.type === '=>') continue;
-				bodyNode = child;
-				break;
-			}
-		}
+		// Arrow: use the grammar's `body` field rather than a positional
+		// skip-list. An arrow's possible leading children (`async`,
+		// `type_parameters`, a bare `identifier` param, a `comment`, etc.)
+		// kept growing every time a new arrow shape surfaced in review; the
+		// field accessor is exact regardless of which optional tokens precede
+		// the body. No availability guard: every arrow_function node from this
+		// project's tree-sitter parser exposes childForFieldName — if that
+		// ever stopped being true, throwing here (caught by scanWithParser's
+		// walker try/catch, which preserves regex findings unchanged) is
+		// safer than a `: null` fallback, which would silently disable
+		// nested-stub protection instead of failing loudly.
+		bodyNode = fnNode.childForFieldName('body');
 	} else {
 		// Block-bodied: look for `statement_block` (TS/JS) or `block`/`suite` (Python).
 		if (Array.isArray(fnNode.children)) {
@@ -913,16 +938,9 @@ function collectNonStubBodyLines(rootNode: any): Set<number> {
 	function findBodyNode(fnNode: any): any {
 		const isArrow = fnNode.type === 'arrow_function';
 		if (isArrow) {
-			if (Array.isArray(fnNode.children)) {
-				for (const child of fnNode.children) {
-					if (!child || typeof child.type !== 'string') continue;
-					if (child.type === 'formal_parameters') continue;
-					if (child.type === 'type_annotation') continue;
-					if (child.type === '=>') continue;
-					return child;
-				}
-			}
-			return null;
+			// See isStubSkeletonFunction above: use the grammar's `body` field,
+			// with no availability guard — see that function's comment for why.
+			return fnNode.childForFieldName('body');
 		}
 		if (Array.isArray(fnNode.children)) {
 			for (const child of fnNode.children) {

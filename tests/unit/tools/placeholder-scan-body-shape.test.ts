@@ -78,10 +78,9 @@ function f() { return {}; }
 		});
 
 		it('arrow function with block body returning null still fails via regex pass', async () => {
-			// Note: the regex patterns only match `return <literal>;` text.
-			// Expression-bodied arrows (`const f = () => 0;`) never match the
-			// regex because there's no `return` keyword. Block-bodied arrows
-			// (`const f = () => { return 0; };`) DO match — that's what we test.
+			// Note: the regex patterns only match `return <literal>;` text, so
+			// expression-bodied arrows (`() => 0`) never match (no `return`
+			// keyword) but block-bodied arrows (`() => { return 0; }`) do.
 			createTestFile(
 				tempDir,
 				'arrow.ts',
@@ -280,12 +279,10 @@ function f() { return {}; }
 
 	describe('nested arrow functions', () => {
 		it('curried arrow with expression bodies: passes (regex does not match `=> () => null`)', async () => {
-			// `const f = () => () => null;` — no `return` keyword anywhere,
-			// so the regex pass never produces a code-stub-return finding.
-			// The walker correctly classifies:
-			//   - outer arrow: body is `arrow_function` (non-stub)
-			//   - inner arrow: body is `null` (stub)
-			// But because there's no `return` statement, no finding fires.
+			// `const f = () => () => null;` — no `return` keyword anywhere, so
+			// the regex pass never produces a code-stub-return finding, even
+			// though the walker correctly classifies the outer as non-stub
+			// (body is `arrow_function`) and the inner as stub (body `null`).
 			createTestFile(tempDir, 'curried.ts', 'const f = () => () => null;\n');
 			const result = await placeholderScan(
 				{ changed_files: ['curried.ts'] },
@@ -380,6 +377,7 @@ function f() { return {}; }
 			expect(result.verdict).toBe('pass');
 		});
 	});
+
 	// Diff-aware interaction (per critic C12)
 	describe('added_lines interaction', () => {
 		it('pre-existing function body, new guard return line: no finding', async () => {
@@ -415,9 +413,8 @@ function f() { return {}; }
 
 	describe('nested function stubs are NOT over-suppressed', () => {
 		it('inner function_declaration with sole return null IS flagged even when outer is non-stub', async () => {
-			// Regression for Kimi K2.7 critical finding: walker must add
-			// body's range, not function's outer range, when classifying a
-			// non-stub function — otherwise the inner stub's return is hidden.
+			// Regression for Kimi K2.7: walker must add the body's range, not
+			// the outer function's range, or the inner stub's return is hidden.
 			createTestFile(
 				tempDir,
 				'nested.ts',
@@ -442,11 +439,9 @@ function f() { return {}; }
 		});
 
 		it('inner function_expression with sole return null IS flagged even when outer is non-stub (per critic F7)', async () => {
-			// Regression for Kimi K3 final-critic F7: function expressions
-			// like `const cb = function() { return null; }` must be classified
-			// as stub skeletons by the walker. Without `function_expression`
-			// in the walker node-type set, the inner's line falls inside the
-			// outer's body range and is over-suppressed.
+			// Regression for Kimi K3 final-critic F7: without `function_expression`
+			// in the walker node-type set, `const cb = function() { return null; }`
+			// falls inside the outer's body range and is over-suppressed.
 			createTestFile(
 				tempDir,
 				'fnexpr.ts',
