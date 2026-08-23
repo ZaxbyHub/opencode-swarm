@@ -149,19 +149,44 @@ function boundaryForModule(
  * @param content - file content with comments already stripped, so a
  *   commented-out declaration cannot win
  */
+/**
+ * Blank the CONTENTS of multi-line string literals, preserving newlines and
+ * length so line-anchored matching still lines up.
+ *
+ * `stripComments` removes comments but keeps string literals verbatim, so a
+ * line-initial `package` / `namespace` token inside a C# verbatim string
+ * (`@"…"`), a C# raw string, or a Java/Kotlin text block (`"""…"""`) matched the
+ * anchored regexes below and won the boundary — the real declaration lost,
+ * because `String.match` takes the first hit. That is legal, compilable source
+ * (a `@"…"` block holding SQL or config is ordinary C#), not a crafted spoof.
+ *
+ * Single-line string literals cannot cause this: a `\n` cannot appear inside
+ * one, so no interior line can be line-initial. Only the multi-line forms are
+ * masked here, which keeps the change narrow.
+ */
+function maskMultilineStringLiterals(text: string): string {
+	// C# verbatim `@"…"` (a doubled `""` is an escaped quote, not a terminator)
+	// and the `"""…"""` family used by Java text blocks, Kotlin raw strings and
+	// C# raw strings.
+	return text
+		.replace(/"""[\s\S]*?"""/g, (m) => m.replace(/[^\n]/g, ' '))
+		.replace(/@"(?:[^"]|"")*"/g, (m) => m.replace(/[^\n]/g, ' '));
+}
+
 function sourceBoundaryForLanguage(
 	language: string,
 	content: string,
 ): string | null {
+	const scanned = maskMultilineStringLiterals(content);
 	if (language === 'java' || language === 'kotlin') {
-		const pkg = content.match(/^[ \t]*package[ \t]+([A-Za-z_][\w.]*)[ \t]*;?/m);
+		const pkg = scanned.match(/^[ \t]*package[ \t]+([A-Za-z_][\w.]*)[ \t]*;?/m);
 		if (pkg?.[1]) return pkg[1];
 		return null;
 	}
 	if (language === 'csharp') {
 		// `\s*` (not `[ \t]*`) before the terminator so `namespace N` followed by
 		// a newline and `{` on the next line is still recognised.
-		const ns = content.match(/^[ \t]*namespace[ \t]+([A-Za-z_][\w.]*)\s*[;{]/m);
+		const ns = scanned.match(/^[ \t]*namespace[ \t]+([A-Za-z_][\w.]*)\s*[;{]/m);
 		if (ns?.[1]) return ns[1];
 		return null;
 	}

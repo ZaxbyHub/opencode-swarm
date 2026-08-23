@@ -273,9 +273,20 @@ function appendEdgeFast(
 
 /**
  * Workspace-relative source roots probed when mapping a JVM/.NET dotted module
- * name onto a file. `''` covers a package-rooted layout (`com/example/Repo.java`
- * directly under the workspace root); the rest cover the conventional
- * Maven/Gradle and .NET layouts.
+ * name onto a file.
+ *
+ * `''` covers a package-rooted layout (`com/example/Repo.java` directly under
+ * the workspace root). `'src'` covers both a `src/`-rooted package tree and the
+ * canonical .NET `src/<ProjectName>/` layout, because .NET's convention is
+ * root-namespace == project-directory name, so the dotted path lands on it
+ * directly. `src/main/java` and `src/main/kotlin` cover Maven/Gradle.
+ *
+ * Two shapes are deliberately NOT covered. A dotted project directory
+ * (`src/Contoso.Billing.Api/Svc.cs`) needs a variable split point in the dotted
+ * name and is not expressible as a fixed prefix at all. Maven/Gradle test roots
+ * (`src/test/java`) are omitted on purpose: adding them would let a main source
+ * resolve to a test file when no main file exists, which is the same
+ * fabricated-edge failure the parent-probe guard below exists to prevent.
  */
 const JVM_DOTNET_DOTTED_ROOTS = [
 	'',
@@ -324,6 +335,15 @@ const JVM_DOTNET_TEST_FILE_RE = /\w(?:Tests?|Spec)\.[A-Za-z]+$/;
  * by code-unit order is used, which is locale-independent and therefore
  * reproducible across machines.
  */
+/** True when `p` exists and is a directory. Never throws. */
+function isExistingDirectory(p: string): boolean {
+	try {
+		return fsSync.statSync(p).isDirectory();
+	} catch {
+		return false;
+	}
+}
+
 function firstSourceFileIn(
 	directory: string,
 	extensions: readonly string[],
@@ -431,6 +451,17 @@ function findDottedModuleCandidate(
 		if (inPackage) return inPackage;
 
 		if (parent === null) continue;
+		// The full path EXISTS as a directory, so the specifier names a
+		// package/namespace — its last segment is not an enclosing type and the
+		// parent-as-file probe must not run. Without this, `using App.Data;`
+		// with an unrelated `App.cs` present resolved to `App.cs`: an edge to a
+		// file the source never referenced. The asymmetry is language-level —
+		// a Java non-wildcard import names a TYPE, while a C# `using X.Y;`
+		// names a NAMESPACE and carries no `.*` marker to distinguish it — so
+		// the directory's existence is the only signal available here without
+		// full type resolution.
+		if (isExistingDirectory(fullBase)) continue;
+
 		const parentBase = path.join(workspaceRoot, rootPrefix, parent);
 		for (const ext of extensions) {
 			if (existsSync(parentBase + ext)) return parentBase + ext;

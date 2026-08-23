@@ -22,8 +22,10 @@ export const REPO_GRAPH_FILENAME = 'repo-graph.json';
  * self-gates via {@link isSchemaVersionAtLeast} rather than relying on the
  * loader (which only checks that a version string is present, not its value).
  *
- * 1.2.0 adds per-node `exportRanges` (1-based inclusive line spans for each
- * exported symbol) and the top-level `symbolEdges` array (direct symbol-to-
+ * 1.2.0 adds per-node `exportRanges` (1-based inclusive line spans keyed by
+ * symbol name — exported symbols for every grammar, plus non-exported member
+ * defs for java/kotlin/csharp; see the field docs) and the top-level
+ * `symbolEdges` array (direct symbol-to-
  * symbol reference edges). Both fields are optional, so 1.0.0 and 1.1.0 graphs
  * still load without corruption. New queries may use these fields to provide
  * more precise context-packing and symbol-level navigation.
@@ -217,11 +219,22 @@ export interface GraphNode {
 	 */
 	exportLines?: Record<string, number>;
 	/**
-	 * 1-based inclusive line span for each exported symbol, keyed by symbol
-	 * name. Present on graphs built at schema >= 1.2.0; absent on older
-	 * graphs. Used for precise context-packing around a symbol.
+	 * 1-based inclusive line span per symbol, keyed by symbol name. Present on
+	 * graphs built at schema >= 1.2.0; absent on older graphs. Used for precise
+	 * context-packing around a symbol.
 	 * Each span value uses `startLine` / `endLine` to match the codebase
 	 * convention (see `ContextPackSpan` and `FileSymbolFacts`).
+	 *
+	 * SCOPE (issue #1529): exported symbols for every grammar, PLUS
+	 * non-exported member defs for java/kotlin/csharp. A JVM/.NET member is
+	 * deliberately never a file-level export, so without that widening
+	 * `context_pack` could return no span at all for a Java method.
+	 * `exports` and `exportLines` stay exported-only in every language.
+	 *
+	 * Duplicate names resolve so this map cannot disagree with `exportLines`:
+	 * an exported def outranks a non-exported one; two exported defs take the
+	 * last (as `exportLines` does); two non-exported defs take the first, and
+	 * never appear in `exportLines` at all.
 	 */
 	exportRanges?: Record<string, { startLine: number; endLine: number }>;
 	/** Imported module specifiers */

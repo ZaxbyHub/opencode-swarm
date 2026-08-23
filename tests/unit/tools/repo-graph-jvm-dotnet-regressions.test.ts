@@ -268,18 +268,25 @@ describe('repo-graph JVM/.NET — implementation-review regressions', () => {
 	});
 
 	test('a package prefers its same-named file over an alphabetically earlier sibling', async () => {
+		// Directory case MUST match the namespace. JVM/.NET package-to-directory
+		// mapping is case-sensitive by spec and `findDottedModuleCandidate`
+		// builds the path verbatim from the specifier, so a lowercase `r/` tree
+		// under `using R.Data;` resolves on case-insensitive NTFS/APFS and fails
+		// on ext4 — it passed on Windows and macOS and broke only the Linux CI
+		// shard. Note `nodeFor` matches with case-sensitive `endsWith`, so its
+		// argument has to move with the fixture or it throws on every platform.
 		writeFile(
-			'r/Program.cs',
+			'R/Program.cs',
 			'namespace R;\n\nusing R.Data;\n\npublic class Program {}\n',
 		);
 		writeFile(
-			'r/Data/Alpha.cs',
+			'R/Data/Alpha.cs',
 			'namespace R.Data;\n\npublic class Alpha {}\n',
 		);
-		writeFile('r/Data/Data.cs', 'namespace R.Data;\n\npublic class Data {}\n');
+		writeFile('R/Data/Data.cs', 'namespace R.Data;\n\npublic class Data {}\n');
 
 		const graph = await buildWorkspaceGraphAsync(tempDir);
-		const programNode = nodeFor(graph, 'r/Program.cs');
+		const programNode = nodeFor(graph, 'R/Program.cs');
 		const targets = graph.edges
 			.filter((e) => e.source === programNode.filePath)
 			.map((e) => path.basename(e.target));
@@ -287,6 +294,53 @@ describe('repo-graph JVM/.NET — implementation-review regressions', () => {
 		// Data.cs is the meaningful representative even though Alpha.cs sorts first.
 		expect(targets).toContain('Data.cs');
 		expect(targets).not.toContain('Alpha.cs');
+	});
+
+	test('a C# namespace using does not resolve to a same-named type file', async () => {
+		// The parent-as-file probe exists for nested types (`a.b.Outer.Inner` ->
+		// `a/b/Outer.java`). It must NOT fire when the full path already exists
+		// as a directory, or a plain `using App.Data;` resolves to an unrelated
+		// `App.cs` — an edge the source never referenced. The asymmetry is
+		// language-level: a Java non-wildcard import names a TYPE, a C#
+		// `using X.Y;` names a NAMESPACE with no `.*` marker to distinguish it.
+		writeFile('App.cs', 'namespace Unrelated;\n\npublic class App {}\n');
+		writeFile(
+			'App/Data/Repositories/UserRepo.cs',
+			'namespace App.Data.Repositories;\n\npublic class UserRepo {}\n',
+		);
+		writeFile(
+			'Program.cs',
+			'namespace Top;\n\nusing App.Data;\n\npublic class Program {}\n',
+		);
+
+		const graph = await buildWorkspaceGraphAsync(tempDir);
+		const programNode = nodeFor(graph, 'Program.cs');
+		const targets = graph.edges
+			.filter((e) => e.source === programNode.filePath)
+			.map((e) => path.basename(e.target));
+
+		expect(targets).not.toContain('App.cs');
+	});
+
+	test('a genuine nested-type import still resolves to its enclosing type file', async () => {
+		// The companion to the test above: with no directory at the full path,
+		// the parent-as-file probe is the feature, not a bug.
+		writeFile(
+			'com/acme/Outer.java',
+			'package com.acme;\n\npublic class Outer { public static class Inner {} }\n',
+		);
+		writeFile(
+			'com/acme/Main.java',
+			'package com.acme;\n\nimport com.acme.Outer.Inner;\n\npublic class Main {}\n',
+		);
+
+		const graph = await buildWorkspaceGraphAsync(tempDir);
+		const mainNode = nodeFor(graph, 'com/acme/Main.java');
+		const targets = graph.edges
+			.filter((e) => e.source === mainNode.filePath)
+			.map((e) => path.basename(e.target));
+
+		expect(targets).toContain('Outer.java');
 	});
 
 	test('a package representative skips test classes, but a test-only package still resolves', async () => {

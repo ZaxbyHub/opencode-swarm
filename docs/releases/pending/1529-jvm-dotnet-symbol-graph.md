@@ -126,13 +126,22 @@ directly against current `main`.
 
 ## Migration
 
-No breaking changes. All changes are additive/corrective to existing
-extraction behavior:
+No schema change and no load/compat break — but **not purely additive**, so read
+the payload note below before assuming a rebuild is a no-op.
 
 - Graphs built before this change remain loadable; a rebuild (`repo_map
   action="build"`) is needed to pick up corrected Java/Kotlin/C# visibility,
   member typing, and package/namespace/import data.
 - No schema version change.
+- **One existing value can change, for `.js` files only.** Members of an
+  exported JavaScript class now appear in `exports` / `exportLines` /
+  `exportRanges` (see the JavaScript note above). Where a member name collides
+  with a top-level export in the same file, the existing `exportLines` entry now
+  points at the member rather than the top-level symbol, and `exports` gains a
+  duplicate name. Consumers that tolerate extra keys are unaffected; consumers
+  that read `exportLines[name]` for such a file will see a different line.
+  Java/Kotlin/C# member spans land in `exportRanges` only, so they add keys
+  without changing existing ones. TypeScript, Python, Rust and Go are unchanged.
 
 ## Documentation
 

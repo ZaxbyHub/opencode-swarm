@@ -136,7 +136,9 @@ export async function extractFileSymbols(grammarId: string, source: string): Pro
 - Method/member definitions are not promoted into file-level graph exports by
   convention-only visibility. They may carry `visibilityInfo`, but `exported`
   stays false unless an explicit export construct already made them exported.
-  This avoids simple-name collisions in `exportLines` / `exportRanges`.
+  This avoids simple-name collisions in `exportLines`. `exportRanges` DOES admit
+  JVM/.NET members (issue #1529) and resolves collisions by the three-rule policy
+  documented under "Per-language `exportRanges` scope" below.
 - `visibilityInfo` is extraction-time metadata only. It is not persisted in
   `RepoGraph` schema 1.2.0; persisted graph fields remain `exports`,
   `exportLines`, and `exportRanges`.
@@ -155,7 +157,7 @@ Additive, all optional — old graphs load unchanged.
 
 ```ts
 // GraphNode (add)
-exportRanges?: Record<string, { start: number; end: number }>; // 1-based inclusive line span per exported symbol
+exportRanges?: Record<string, { startLine: number; endLine: number }>; // 1-based inclusive span per symbol; see per-language scope below
 
 // RepoGraph (add) — symbol→symbol call graph, cross-file
 symbolEdges?: SymbolEdge[];
@@ -197,6 +199,15 @@ graphs (the `getDeadExports` pattern, `query.ts:257`).
    `estimatedTokens` budget, set `truncated` when `maxTokens` is hit.
 6. Legacy fallback: on a < 1.2.0 graph, return `schemaSupported: false` (callers
    should fall back to `callers` + manual read).
+7. Internal-symbol fallback: a BFS-reached symbol with no `exportRanges` entry is
+   NOT dropped — it is emitted as `startLine: 1, endLine: 1, mode: 'signature'`
+   with `note: 'internal symbol — span unavailable'`. A caller slicing by that
+   span reads line 1 of the file, not the symbol. This is pre-existing behavior
+   for any symbol the graph knows about but has no range for; for
+   java/kotlin/csharp it no longer fires for extracted member defs, which now
+   carry real spans. The lookup is own-property guarded, so a symbol named after
+   an `Object.prototype` member (`constructor`, `toString`) takes this path
+   rather than resolving to an inherited function.
 
 ### Tool wiring (`src/tools/repo-map.ts`) — all five surfaces
 
@@ -263,6 +274,68 @@ follows:
 - `import`/`using` declarations produce real bindings (imported symbol → local
   name), including Java static imports and Kotlin/C# aliases, so import edges
   and best-effort symbol edges can form the same way they do for TS/JS/Python.
+
+### Per-language `exportRanges` scope (issue #1529)
+
+`exports` and `exportLines` are **exported-only in every language**. A JVM/.NET
+member is deliberately not a file-level module export, and that contract did not
+change.
+
+`exportRanges` is scoped differently:
+
+| grammars | contents |
+|---|---|
+| java, kotlin, csharp | every extracted def, including non-exported members |
+| all others | exported defs only (unchanged) |
+
+The widening exists so `context_pack` can return a real span for a Java method
+instead of the `internal symbol — span unavailable` placeholder. It is gated on
+the grammar id, so no other language's payload changes.
+
+Duplicate names inside the widened grammars resolve in three cases, chosen so
+`exportRanges` can never disagree with the exported-only `exportLines`:
+
+1. an exported def outranks a non-exported one;
+2. two exported defs (a C# partial class) take the **last**, matching `exportLines`;
+3. two non-exported defs (a constructor and its class, or overloads) take the
+   **first**, and never appear in `exportLines` at all.
+
+A malformed range (non-positive or inverted) is skipped rather than written,
+because `validateGraphNode` throws on one and runs inside the scan — a single bad
+def must not abort a whole graph build. That guard is scoped to the widened
+grammars so other languages keep their previous behavior exactly.
+
+### Registry / profile extension parity
+
+`src/lang/profiles.ts` declares the extensions a language owns;
+`src/lang/registry.ts` declares what `getParserForFile` / `isSupportedFile`
+accept. These had drifted: `.csx` (C#), `.pyw` (Python) and `.rake` / `.gemspec`
+(Ruby) were declared by a profile but missing from the registry, so those files
+were walked by the graph builder yet reported unsupported by the parser registry.
+All four are now registered.
+
+Downstream effect worth knowing: `getParserForFile` also backs
+`src/tools/placeholder-scan.ts` and `src/tools/syntax-check.ts`, so those tools
+now parse these four file classes where they previously skipped them —
+`syntax_check` can report diagnostics on files it used to ignore.
+
+`tests/unit/lang/profile-registry-extension-parity.test.ts` closes the class by
+checking every profile extension resolves through the real `extname()` lookup.
+
+### Known limitation: `packageBoundary` and nested Kotlin block comments
+
+`sourceBoundaryForLanguage` reads the `package` / `namespace` declaration from
+comment-stripped source, and masks multi-line string literals so a line-initial
+declaration inside a C# verbatim string or a Java/Kotlin text block cannot win.
+
+One gap remains, deliberately not fixed here: `stripComments` does not track
+**nested** block comments. Java and C# block comments do not nest (JLS 3.7), so
+for those languages the current behavior is correct — the first `*/` really does
+close the comment. **Kotlin block comments do nest**, so a declaration inside a
+nested comment can still be read as live code. Closing this would require
+changing a shared pre-existing helper used by all ontology extraction; the impact
+is limited to a grouping/display key, so it is recorded here rather than patched
+under this issue.
 
 ## Invariant audit (for the implementing PR)
 
