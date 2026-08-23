@@ -1419,7 +1419,7 @@ export const COMMAND_REGISTRY = {
 		handler: (ctx) => handleRecoverCommand(ctx.directory, ctx.args),
 		description: 'Recover wedged coder settlements [task_id] [--force]',
 		details:
-			"Settles stale coder-settlement WALs in .swarm/coder-settlements/ — the CODER_DISPATCH_IN_PROGRESS wedge where a dispatch's completion never fired (issue #2268). Safe mode recovers settlements whose owner process is gone. --force also releases ownership keys held by this process: use only when no dispatch is genuinely running (a late completion then reports CODER_SETTLEMENT_IDEMPOTENCY_CONFLICT, safe to ignore). Never interrupts another live OpenCode process. Human-only.",
+			"Settles stale coder-settlement WALs in .swarm/coder-settlements/ — the CODER_DISPATCH_IN_PROGRESS wedge where a dispatch's completion never fired (issue #2268). Safe mode recovers settlements whose owner process is gone. --force also releases ownership keys held by this process: use only when no dispatch is genuinely running (a late completion then reports CODER_SETTLEMENT_IDEMPOTENCY_CONFLICT, safe to ignore). Never interrupts another live OpenCode process. Also repairs tasks wedged at coder_delegated with unattributed green pre_check evidence — the post-reset TASK_WORKFLOW_STAGE_A_REQUIRED wedge — by writing the missing stage_a_passed transition directly (audit events land in .swarm/events.jsonl); pass [task_id] to scope both phases to one task. Human-only.",
 		args: '[task_id] [--force]',
 		category: 'utility',
 		toolPolicy: 'human-only',

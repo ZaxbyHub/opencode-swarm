@@ -1120,6 +1120,13 @@ export interface CoderSettlementWalState {
 	transitionId?: string;
 	processId?: number;
 	recordedAt?: string;
+	/**
+	 * Whether the settlement attributed an accepted mutation. Only meaningful
+	 * on COMMITTED WALs — the parser enforces the boolean only for PREPARED
+	 * state (workflow-wal-schema.ts), so consumers must compare `=== true`.
+	 */
+	accepted?: boolean;
+	expectedGeneration?: number;
 	/** The in-process ownership registry still holds this dispatch (toolAfter never drained it). */
 	ownedInProcess: boolean;
 	/** A different, still-alive host process owns the dispatch. Never force-releasable from here. */
@@ -1164,6 +1171,8 @@ export async function listCoderSettlementWalStates(
 				transitionId: wal.transitionId,
 				processId: wal.processId,
 				recordedAt: wal.recordedAt,
+				accepted: wal.accepted === true ? true : undefined,
+				expectedGeneration: wal.expectedGeneration,
 				ownedInProcess: liveDispatches.has(
 					dispatchKey(directory, taskId, wal.transitionId),
 				),

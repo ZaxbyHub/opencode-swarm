@@ -53,6 +53,7 @@ import {
 } from '../../utils/provider-error-classification';
 import { computeSpecDiff } from '../../utils/spec-hash';
 import { isStrictTaskId } from '../../validation/task-id.js';
+import { listCoderSettlementWalStates } from '../../workflow/coder-settlement.js';
 import { resolveAgentConflict } from '../conflict-resolution';
 import { extractCurrentPhaseFromPlan } from '../extractors';
 import { normalizeToolName } from '../normalize-tool-name';
@@ -109,7 +110,131 @@ export const _internals = {
 	noOpStateSize: (): number => toolCallsSinceLastWrite.size,
 	hasNoOpState: (sessionID: string): boolean =>
 		toolCallsSinceLastWrite.has(sessionID),
+	/**
+	 * Durable Stage-A attribution fallback seam (TASK_WORKFLOW_STAGE_A_REQUIRED
+	 * post-reset wedge). Production resolves via committed settlement WALs;
+	 * tests replace this to simulate reset-flow attribution without real WAL
+	 * files. See {@link resolveDurableGateTaskId}.
+	 */
+	resolveDurableGateTaskId: (
+		directory: string,
+	): Promise<{ taskId: string } | { ambiguous: string[] } | null> =>
+		resolveDurableGateTaskId(directory),
 };
+
+/**
+ * Advisory cooldown for durable-attribution ambiguity warnings (invariant 8:
+ * session-keyed, bounded, cooldown-gated). Keyed by sessionID → single
+ * last-emitted key; a different key replaces the entry, so the map is bounded
+ * by the sessions cap below with FIFO eviction.
+ */
+const DURABLE_ATTRIBUTION_ADVISORY_COOLDOWN_MS = 60_000;
+const MAX_DURABLE_ATTRIBUTION_ADVISORY_SESSIONS = 500;
+const durableAttributionAdvisoryBySession = new Map<
+	string,
+	{ key: string; at: number }
+>();
+
+export function emitDurableAttributionAdvisory(
+	sessionID: string,
+	key: string,
+	message: string,
+): void {
+	const now = Date.now();
+	const prior = durableAttributionAdvisoryBySession.get(sessionID);
+	if (
+		prior &&
+		prior.key === key &&
+		now - prior.at < DURABLE_ATTRIBUTION_ADVISORY_COOLDOWN_MS
+	) {
+		return;
+	}
+	if (
+		!prior ||
+		durableAttributionAdvisoryBySession.size >=
+			MAX_DURABLE_ATTRIBUTION_ADVISORY_SESSIONS
+	) {
+		const oldest = durableAttributionAdvisoryBySession.keys().next().value;
+		if (
+			oldest !== undefined &&
+			durableAttributionAdvisoryBySession.size >=
+				MAX_DURABLE_ATTRIBUTION_ADVISORY_SESSIONS
+		) {
+			durableAttributionAdvisoryBySession.delete(oldest);
+		}
+	}
+	durableAttributionAdvisoryBySession.set(sessionID, { key, at: now });
+	const session = swarmState.agentSessions.get(sessionID);
+	if (session) pushAdvisory(session, message);
+}
+
+/**
+ * Stage A workflow-transition write errors that indicate an attribution or
+ * correlation miss — the post-reset wedge signature. These escalate beyond a
+ * log line because every silent one is exactly how tasks wedge at
+ * coder_delegated with no diagnostic. Duplicate transitions never throw
+ * (isDuplicateTransition returns the existing evidence), so any throw here is
+ * abnormal; TASK_WORKFLOW_TERMINAL and fencing codes stay warn-only because a
+ * late gate result after close/settlement is expected churn, not a wedge.
+ */
+export const STAGE_A_ATTRIBUTION_MISS_CODES = new Set([
+	'TASK_WORKFLOW_CODER_MUTATION_REQUIRED',
+	'TASK_WORKFLOW_STAGE_A_REQUIRED',
+	'TASK_WORKFLOW_GENERATION_MISMATCH',
+]);
+
+export function stageAWriteErrorCode(error: unknown): string | null {
+	const message = error instanceof Error ? error.message : String(error);
+	const match = /^[A-Z][A-Z0-9_]+/.exec(message);
+	return match ? match[0] : null;
+}
+
+/**
+ * Resolves gate-tool task attribution from durable state when the in-memory
+ * `currentTaskId` chain is dead (the `/swarm reset-session` wedge: it wipes
+ * `.swarm/session/` and clears every agent session, while committed coder
+ * settlement WALs survive under `.swarm/coder-settlements/`). Eligible
+ * candidates are COMMITTED settlements that attributed an accepted mutation
+ * AND whose flat evidence store still sits at `coder_delegated` — i.e. tasks
+ * that are genuinely awaiting their Stage A write.
+ *
+ * Conservative by design: exactly one eligible candidate is required. With
+ * parallel lanes several tasks can sit at `coder_delegated`; attributing a
+ * pre_check_batch run to the wrong one would corrupt the wrong task's
+ * lifecycle (the reducer accepts stage_a_passed from any coder_delegated
+ * state), so multiple candidates yield an explicit ambiguity advisory naming
+ * `/swarm recover` instead of a guess. Zero candidates means there is nothing
+ * durably attributable (the normal non-swarm flow) and returns null.
+ *
+ * Bounded: reuses the settlement-WAL scan cap (200 files, unreadable-tolerant)
+ * plus ≤200 evidence reads, and runs only on gate-tool calls whose in-memory
+ * correlation is already missing — the bounded-but-not-free cost is accepted
+ * for the narrow post-reset window rather than adding cross-call cache
+ * invalidation risk.
+ */
+async function resolveDurableGateTaskId(
+	directory: string,
+): Promise<{ taskId: string } | { ambiguous: string[] } | null> {
+	try {
+		const { states } = await listCoderSettlementWalStates(directory);
+		const eligible: string[] = [];
+		for (const state of states) {
+			if (state.state !== 'COMMITTED') continue;
+			if (state.accepted !== true) continue;
+			if (!isStrictTaskId(state.taskId)) continue;
+			const workflow = getTaskWorkflowSnapshot(
+				await readTaskEvidence(directory, state.taskId),
+			);
+			if (workflow.state === 'coder_delegated') eligible.push(state.taskId);
+		}
+		if (eligible.length === 1) return { taskId: eligible[0] };
+		if (eligible.length > 1) return { ambiguous: eligible.sort() };
+		return null;
+	} catch (error) {
+		warn('Durable gate attribution fallback failed', { error: String(error) });
+		return null;
+	}
+}
 
 /**
  * Issue #853 Layer B: tools that are structurally blocked while
@@ -689,9 +814,26 @@ export function createGuardrailsHooks(
 		output,
 	) => {
 		if (isGateTool(input.tool)) {
-			const taskId = swarmState.agentSessions.get(
-				input.sessionID,
-			)?.currentTaskId;
+			let taskId = swarmState.agentSessions.get(input.sessionID)?.currentTaskId;
+			if (!taskId) {
+				// Post-reset durable attribution fallback: reset-session wiped the
+				// in-memory chain (currentTaskId/lastCoderDelegationTaskId), so
+				// resolve the task from committed settlement WALs before giving up
+				// and silently skipping every Stage A write.
+				const fallback =
+					await _internals.resolveDurableGateTaskId(effectiveDirectory);
+				if (fallback) {
+					if ('taskId' in fallback) {
+						taskId = fallback.taskId;
+					} else if (fallback.ambiguous.length > 0) {
+						emitDurableAttributionAdvisory(
+							input.sessionID,
+							`${effectiveDirectory}\u0000${fallback.ambiguous.join(',')}`,
+							`STAGE A ATTRIBUTION AMBIGUOUS: ${fallback.ambiguous.length} tasks are settled at coder_delegated (${fallback.ambiguous.join(', ')}) but this session has no task correlation after reset-session. Stage A evidence cannot be attributed safely. Run /swarm recover to repair Stage A attribution, then re-run the gate.`,
+						);
+					}
+				}
+			}
 			if (taskId) {
 				const workflow = isStrictTaskId(taskId)
 					? getTaskWorkflowSnapshot(
@@ -818,10 +960,21 @@ export function createGuardrailsHooks(
 									session.taskWorkflowStates.set(taskId, next.state);
 									updateTaskWorkflowCache(session, taskId, next);
 								} catch (err) {
-									warn('Failed to persist Stage A failure', {
-										taskId,
-										error: String(err),
-									});
+									const code = stageAWriteErrorCode(err);
+									if (code && STAGE_A_ATTRIBUTION_MISS_CODES.has(code)) {
+										logger.criticalWarn(
+											`[guardrails] Stage A failure write failed for task ${taskId}: ${code}. Run /swarm recover ${taskId}.`,
+										);
+										pushAdvisory(
+											session,
+											`STAGE A WRITE FAILED (${code}) for task ${taskId}: pre_check_batch failed but the rework transition was rejected. Run /swarm recover ${taskId} to repair attribution.`,
+										);
+									} else {
+										warn('Failed to persist Stage A failure', {
+											taskId,
+											error: String(err),
+										});
+									}
 								}
 						} else if (verdict.kind === 'pass') {
 							if (
@@ -848,14 +1001,32 @@ export function createGuardrailsHooks(
 								session.taskWorkflowStates.set(taskId, next.state);
 								updateTaskWorkflowCache(session, taskId, next);
 							} catch (err) {
-								// Non-fatal: state may already be at or past pre_check_passed
-								warn(
-									'Failed to advance task state after pre_check_batch pass',
-									{
-										taskId,
-										error: String(err),
-									},
-								);
+								// Duplicate transitions return existing evidence without
+								// throwing, so any error here is abnormal. Attribution-miss
+								// codes are exactly how tasks silently wedge at
+								// coder_delegated post-reset — escalate them to a visible
+								// advisory instead of swallowing (TASK_WORKFLOW_TERMINAL and
+								// WAL-fencing codes stay log-only: late gate results after
+								// close/settlement are expected churn, not a wedge).
+								const code = stageAWriteErrorCode(err);
+								if (code && STAGE_A_ATTRIBUTION_MISS_CODES.has(code)) {
+									logger.criticalWarn(
+										`[guardrails] Stage A write failed for task ${taskId}: ${code} — pre_check_batch result was NOT attributed. Run /swarm recover ${taskId}.`,
+									);
+									pushAdvisory(
+										session,
+										`STAGE A WRITE FAILED (${code}) for task ${taskId}: pre_check_batch passed but the workflow transition was rejected, so Stage B dispatches will be denied with TASK_WORKFLOW_STAGE_A_REQUIRED. Run /swarm recover ${taskId} to repair attribution.`,
+									);
+								} else {
+									// Non-fatal: state may already be at or past pre_check_passed
+									warn(
+										'Failed to advance task state after pre_check_batch pass',
+										{
+											taskId,
+											error: String(err),
+										},
+									);
+								}
 							}
 						}
 					} else {

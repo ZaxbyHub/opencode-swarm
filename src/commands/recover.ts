@@ -4,6 +4,10 @@ import {
 	recoverStaleCoderSettlements,
 	type StaleSettlementRecoveryOutcome,
 } from '../workflow/coder-settlement.js';
+import {
+	repairWedgedStageA,
+	type StageARepairOutcome,
+} from '../workflow/stage-a-repair.js';
 
 /**
  * Renders one recovery outcome as a user-facing report line. Kept as a pure
@@ -38,6 +42,28 @@ function renderOutcome(outcome: StaleSettlementRecoveryOutcome): string {
 			)}`;
 		default:
 			return `❌ Task ${(outcome as { taskId: string }).taskId}: unknown outcome`;
+	}
+}
+
+/**
+ * Renders one Stage A repair outcome as a user-facing report line (pure
+ * function; same sanitization rules as renderOutcome).
+ */
+function renderStageARepairOutcome(outcome: StageARepairOutcome): string {
+	switch (outcome.outcome) {
+		case 'repaired':
+			return `✅ Task ${outcome.taskId}: Stage A repaired — stage_a_passed written at generation ${outcome.generation} without re-running the coder`;
+		case 'skipped_not_wedged':
+			return `⏭️ Task ${outcome.taskId}: workflow state is ${outcome.state} with pre_check proof present or not settled — nothing to repair`;
+		case 'skipped_not_green':
+			return `⏭️ Task ${outcome.taskId}: no green post-settlement pre-check evidence (${outcome.reason === 'no_pre_check_bundles' ? 'run pre_check_batch first' : 'latest pre-check run failed or predates the settlement'}) — refusing to mark Stage A passed without proof`;
+		case 'error':
+			return `❌ Task ${outcome.taskId}: Stage A repair failed — ${sanitizeDiagnosticText(
+				outcome.message,
+				512,
+			)}`;
+		default:
+			return `❌ Task ${(outcome as { taskId: string }).taskId}: unknown repair outcome`;
 	}
 }
 
@@ -137,5 +163,44 @@ export async function handleRecoverCommand(
 			'⚠️ --force released in-process ownership before recovery. If any of these dispatches was genuinely still running, its completion will report CODER_SETTLEMENT_IDEMPOTENCY_CONFLICT — that error is expected and safe to ignore; the settlement is already durably recovered.',
 		);
 	}
+
+	// Stage A wedge repair: tasks settled at coder_delegated whose pre_check
+	// evidence exists but was never attributed (the post-reset
+	// TASK_WORKFLOW_STAGE_A_REQUIRED wedge). Emits the missing stage_a_passed
+	// transition directly; audit events land in .swarm/events.jsonl.
+	try {
+		const { results: repairResults, truncated: repairTruncated } =
+			await repairWedgedStageA(directory, {
+				...(taskId ? { taskIds: [taskId] } : {}),
+			});
+		const repaired = repairResults.filter((r) => r.outcome === 'repaired');
+		if (repairResults.length > 0) {
+			report.push(
+				'',
+				'## Wedged Stage A Repair',
+				'',
+				...repairResults.map(renderStageARepairOutcome),
+				'',
+				repaired.length === 0
+					? 'No wedged tasks repaired.'
+					: `Repaired ${repaired.length} wedged task(s); reviewer/test_engineer dispatch is now permitted for them.`,
+			);
+			if (repairTruncated) {
+				report.push(
+					'',
+					'⚠️ More evidence files exist than the repair scan cap (200) — re-run after the tasks above are processed to reach the rest.',
+				);
+			}
+		}
+	} catch (err) {
+		report.push(
+			'',
+			`⚠️ Wedged Stage A repair failed (settlement recovery above is unaffected): ${sanitizeDiagnosticText(
+				err instanceof Error ? err.message : String(err),
+				512,
+			)}`,
+		);
+	}
+
 	return report.join('\n');
 }
