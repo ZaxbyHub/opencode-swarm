@@ -864,21 +864,33 @@ export class SQLiteMemoryProvider
 		const ownsTransaction = !db.inTransaction;
 		if (ownsTransaction) db.run('BEGIN IMMEDIATE');
 		try {
-			const existing = this.readMemoryById(record.id);
+			const existingRow = this.readMemoryItemRowById(record.id);
+			const existing = existingRow ? this.parseMemoryRow(existingRow) : null;
 			if (existing?.metadata.deleted === true) {
 				throw new MemoryValidationError(
 					'memory is tombstoned and cannot be upserted',
 				);
 			}
+			// Final-critic (PR #2310, delta 2): the choke-point merge.
+			// Callers routinely round-trip get()→upsert() (reward-capture
+			// Q-updates, evaluation, future callers); get() returns the stored
+			// (stripped) record_json shape, so without merging the existing
+			// ROW's provenance columns back in, every such rewrite would reset
+			// source_task_id/agent_role to the ALTER TABLE defaults.
+			// mergeProvenanceColumns only fills fields the record LACKS, so a
+			// caller-provided (gateway-stamped) value still wins.
+			const merged = existingRow
+				? mergeProvenanceColumns(record, existingRow)
+				: record;
 			next = validateMemoryRecordRules(
 				{
-					...record,
-					createdAt: existing?.createdAt ?? record.createdAt,
+					...merged,
+					createdAt: existing?.createdAt ?? merged.createdAt,
 					metadata: {
-						...record.metadata,
+						...merged.metadata,
 						outcomeGeneration:
 							existing?.metadata.outcomeGeneration ??
-							record.metadata.outcomeGeneration,
+							merged.metadata.outcomeGeneration,
 					},
 				},
 				{ rejectDurableSecrets: this.config.redaction.rejectDurableSecrets },
@@ -2680,10 +2692,17 @@ export class SQLiteMemoryProvider
 		this.bumpCohortGeneration();
 	}
 
+	/** Raw row (WITH provenance columns) for a single memory item. */
+	private readMemoryItemRowById(id: string): MemoryItemRow | null {
+		return (
+			this.requireDb()
+				.query<MemoryItemRow, [string]>(MEMORY_ITEM_BY_ID_SQL)
+				.get(id) ?? null
+		);
+	}
+
 	private readMemoryById(id: string): MemoryRecord | null {
-		const row = this.requireDb()
-			.query<MemoryItemRow, [string]>(MEMORY_ITEM_BY_ID_SQL)
-			.get(id);
+		const row = this.readMemoryItemRowById(id);
 		return row ? this.parseMemoryRow(row) : null;
 	}
 

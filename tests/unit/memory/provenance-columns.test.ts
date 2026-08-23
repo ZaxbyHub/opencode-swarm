@@ -242,6 +242,57 @@ describe('memory_items provenance columns (#1466 migration v12)', () => {
 		await gateway.dispose();
 	});
 
+	// Final-critic delta 2 (PR #2310): the get()→upsert() round-trip is the
+	// reward-capture Q-update path — get() returns the stored (stripped)
+	// record shape, so an unmerged upsert reset source_task_id to '' on
+	// every council reward. upsert() now merges the existing row's
+	// provenance columns (record-provided values win).
+	test('get→upsert round-trip preserves provenance (reward-capture path)', async () => {
+		const gateway = new MemoryGateway(
+			{
+				directory: tmpDir,
+				sessionID: 'session-a',
+				agentRole: 'coder',
+				unitId: '9.10',
+			},
+			{
+				config: sqliteConfig(),
+				now: () => new Date('2026-08-22T10:00:00.000Z'),
+			},
+		);
+		const record = gateway.createRecord({
+			kind: 'code_pattern',
+			text: 'roundtrip provenance probe',
+			source: { type: 'file', filePath: 'src/probe.ts' },
+		});
+		await gateway.upsertCurated(record);
+		expect(readProvenance()[0].source_task_id).toBe('9.10');
+
+		// Simulate the reward-capture shape: read via get() (stripped
+		// record_json → no provenance fields), spread-modify like setQValue,
+		// upsert the result.
+		const provider = new SQLiteMemoryProvider(tmpDir, sqliteConfig());
+		try {
+			await provider.initialize();
+			const fetched = await provider.get(record.id);
+			expect(fetched).not.toBeNull();
+			expect((fetched as Record<string, unknown>).sourceTaskId).toBeUndefined();
+			const qUpdated = {
+				...fetched!,
+				qValue: 0.9,
+				updatedAt: '2026-08-23T10:00:00.000Z',
+			};
+			await provider.upsert(qUpdated);
+			const after = readProvenance();
+			expect(after[0].source_task_id).toBe('9.10');
+			expect(after[0].agent_role).toBe('coder');
+			expect(after[0].valid_from).toBe(record.createdAt);
+		} finally {
+			provider.close?.();
+		}
+		await gateway.dispose();
+	});
+
 	test('exportJsonl carries provenance (final-critic: no export strip)', async () => {
 		const gateway = new MemoryGateway(
 			{
