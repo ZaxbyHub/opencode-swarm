@@ -49,8 +49,7 @@ describe('toolPolicy classification snapshot — no regression', () => {
 		'memory export',
 		'memory evaluate',
 		'memory consolidation-log',
-		// #1466: audit-log hash-chain verification (read-only diagnostic).
-		'memory audit-verify',
+		'memory audit-verify', // #1466: read-only audit-chain verification
 		'sdd',
 		'sdd status',
 		'sdd validate',
@@ -67,9 +66,8 @@ describe('toolPolicy classification snapshot — no regression', () => {
 		// moved from human-only for swarm-pr-subscribe parity)
 		'pr subscribe',
 		'pr unsubscribe',
-		// guardrail diagnostics (pre-existing 'agent' commands not previously
-		// enumerated here — registry is the source of truth, both carry
-		// toolPolicy: 'agent')
+		// guardrail diagnostics: pre-existing 'agent' commands not previously
+		// enumerated here — registry is the source of truth (both 'agent')
 		'guardrail explain',
 		'guardrail-log',
 		'lanes',
