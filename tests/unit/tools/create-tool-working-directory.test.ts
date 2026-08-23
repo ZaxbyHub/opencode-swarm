@@ -224,6 +224,7 @@ describe('createSwarmTool working_directory injection (issue #2171)', () => {
 		const result = await write_retro.execute(
 			{
 				phase: 1,
+				verdict: 'pass',
 				summary: 'wrapper integration',
 				task_count: 1,
 				task_complexity: 'simple',

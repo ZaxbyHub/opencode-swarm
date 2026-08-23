@@ -1,7 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { queryLiveMemberships } from '../../../src/hooks/knowledge-receipt-ledger.js';
+import {
+	commitDisplayedMembership,
+	queryLiveMemberships,
+	repairKnowledgeReceiptLedger,
+} from '../../../src/hooks/knowledge-receipt-ledger.js';
 import { knowledge_recall } from '../../../src/tools/knowledge-recall';
 import { freezeClock } from '../../helpers/test-clock.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
@@ -98,5 +102,69 @@ describe('knowledge_recall authoritative membership ordering', () => {
 		expect(result.total).toBe(0);
 		expect(result.unverifiable).toBe(true);
 		expect(result.code).toBe('store_unavailable');
+	});
+
+	test('clears a repaired scope only through an architect complete re-evaluation bound to its repair id', async () => {
+		const seeded = await commitDisplayedMembership(directory, {
+			trace_id: 'pre-repair-trace',
+			session_id: 'manual-session',
+			phase: 'phase-a',
+			task_id: 'task-a',
+			entries: [{ entry_id: 'pre-repair-entry', critical: true }],
+		});
+		if (!seeded.ok) throw new Error(seeded.detail);
+		appendFileSync(
+			join(directory, '.swarm', 'knowledge-receipts-v2.jsonl'),
+			'{corrupt-tail',
+		);
+		const repaired = await repairKnowledgeReceiptLedger(directory, {
+			phase: 'phase-a',
+			session_id: 'manual-session',
+			task_id: 'task-a',
+			reason: 'bind public recall re-evaluation',
+		});
+		if (!repaired.ok || !repaired.repair_id) {
+			throw new Error(repaired.ok ? 'missing repair id' : repaired.detail);
+		}
+
+		const denied = JSON.parse(
+			await knowledge_recall.execute(
+				{
+					query: 'validate manual retrieval',
+					tier: 'swarm',
+					repair_re_evaluation: {
+						repair_id: repaired.repair_id,
+						phase: 'phase-a',
+						task_id: 'task-a',
+						scope_complete: true,
+					},
+				},
+				{ directory, sessionID: 'manual-session', agent: 'reviewer' },
+			),
+		);
+		expect(denied.code).toBe('RECEIPT_REEVALUATION_ARCHITECT_ONLY');
+
+		const accepted = JSON.parse(
+			await knowledge_recall.execute(
+				{
+					query: 'validate manual retrieval',
+					tier: 'swarm',
+					repair_re_evaluation: {
+						repair_id: repaired.repair_id,
+						phase: 'phase-a',
+						task_id: 'task-a',
+						scope_complete: true,
+					},
+				},
+				{ directory, sessionID: 'manual-session', agent: 'architect' },
+			),
+		);
+		expect(accepted.results).toHaveLength(1);
+
+		const live = await queryLiveMemberships(directory, {
+			phase: 'phase-a',
+			session_id: 'manual-session',
+		});
+		expect(live.ok).toBe(true);
 	});
 });

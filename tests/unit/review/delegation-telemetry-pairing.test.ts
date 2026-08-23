@@ -116,6 +116,20 @@ function diffResult(): Extract<ReviewDiffResult, { status: 'ok' }> {
 			includesWorkingTree: true,
 			scopeHash: 'a'.repeat(64),
 		},
+		manifest: {
+			schema_version: 2,
+			hash: 'd'.repeat(64),
+			content_hash: 'e'.repeat(64),
+			selector: { kind: 'default' },
+			selector_key: 'default',
+			review_target_kind: 'checkout-history-index-working-tree',
+			completeness: {
+				complete: true,
+				truncated: false,
+				skip_reason_codes: [],
+			},
+			path_records: [],
+		},
 	};
 }
 

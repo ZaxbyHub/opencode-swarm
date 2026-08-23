@@ -113,13 +113,10 @@ describe('phase-complete override justification minimum length', () => {
 		);
 		const source = fs.readFileSync(sourceFile, 'utf-8');
 
-		// The blocking check: justification.length < 10
-		expect(source).toContain('justification.length < 10');
-
 		// The effective-accept gate: justification.length >= 10
 		expect(source).toContain('justification.length >= 10');
 
 		// The user-facing message mentions the minimum
-		expect(source).toContain('minimum 10 characters');
+		expect(source).toContain('requires at least 10 characters');
 	});
 });

@@ -48,8 +48,11 @@ describe('RETROSPECTIVE GATE Verification (Task 1.2)', () => {
 		expect(phaseWrapSkill).toContain('retro-{N}');
 	});
 
-	test('6. phase-wrap skill contains "verdict": "pass" in the retro bundle example', () => {
-		expect(phaseWrapSkill).toContain('"verdict": "pass"');
+	test('6. phase-wrap skill requires an explicit caller-supplied retrospective verdict', () => {
+		expect(phaseWrapSkill).toContain('exact caller-supplied \\`"verdict"\\`');
+		expect(phaseWrapSkill).toContain(
+			'Use \\`"pass"\\` only when the phase genuinely passed',
+		);
 	});
 
 	test('7. phase-wrap skill contains "type": "retrospective" in the retro bundle example', () => {

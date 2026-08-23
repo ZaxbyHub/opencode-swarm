@@ -25,6 +25,7 @@ export interface RunPhaseAutoReviewInput {
 export interface PhaseAutoReviewResult {
 	trigger?: 'phase_completion' | 'plan_completion';
 	scopeHash?: string;
+	manifestHash?: string;
 	scopeComplete?: boolean;
 	blocked?: boolean;
 	blockReason?: ReviewEngineResult['blockReason'];
@@ -105,6 +106,7 @@ export async function runPhaseAutoReview(
 	return {
 		trigger,
 		scopeHash: result.scopeHash,
+		manifestHash: result.manifestHash,
 		scopeComplete: result.scopeComplete,
 		blocked: result.blocked,
 		blockReason: result.blockReason,

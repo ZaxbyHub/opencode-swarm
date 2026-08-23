@@ -15,6 +15,7 @@ import type {
 	BunCompatSpawnOptions,
 	BunCompatSubprocess,
 } from '../../../src/utils/bun-compat';
+import { createReviewManifest } from '../../helpers/review-manifest';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
 
 const HEAD = 'a'.repeat(40);
@@ -148,6 +149,9 @@ describe('large review scope contract', () => {
 				if (joined.includes('merge-base')) {
 					return proc(`${MERGE_BASE}\n`, kill);
 				}
+				if (joined.includes('--show-object-format')) {
+					return proc('sha1\n', kill);
+				}
 				if (joined.includes('ls-files')) {
 					return proc('untracked.ts\0', kill);
 				}
@@ -247,6 +251,7 @@ describe('large review scope contract', () => {
 				includesWorkingTree: true,
 				scopeHash: 'd'.repeat(64),
 			},
+			manifest: createReviewManifest(),
 		};
 		engineInternals.collectReviewDiff = async () => diff;
 		let dispatchedPrompt = '';

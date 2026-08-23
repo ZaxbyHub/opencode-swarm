@@ -12,7 +12,10 @@ export async function runCompletionVerifyGate(
 	const { phase, dir, agentsDispatched } = ctx;
 
 	try {
-		const completionResultRaw = await executeCompletionVerify({ phase }, dir);
+		const completionResultRaw = await executeCompletionVerify(
+			{ phase, writeEvidence: false },
+			dir,
+		);
 		const completionResult = JSON.parse(completionResultRaw);
 
 		if (completionResult.status === 'blocked') {

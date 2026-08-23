@@ -1,5 +1,25 @@
 # Changelog
 
+## [7.145.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.145.1...v7.145.2) (2026-08-23)
+
+
+### Bug Fixes
+
+* **ci:** keep coverage within merge queue deadline ([eb3204f](https://github.com/ZaxbyHub/opencode-swarm/commit/eb3204f29541f16fba86c5e2d3ef5d3da89e2094))
+* **phase-complete:** repair evidence and recovery paths ([35bfe29](https://github.com/ZaxbyHub/opencode-swarm/commit/35bfe29bbeb07cd59946451d17055aabe3674b10))
+
+## [7.145.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.145.0...v7.145.1) (2026-08-23)
+
+
+### Bug Fixes
+
+* **issue-2301:** suppress guard-clause code-stub-return FPs and lowercase xxx path comments ([9547c20](https://github.com/ZaxbyHub/opencode-swarm/commit/9547c206626c45ee4940a35d7879e3f039c91b3e))
+* **issue-2301:** suppress guard-clause code-stub-return FPs and lowercase xxx path comments ([80f1476](https://github.com/ZaxbyHub/opencode-swarm/commit/80f14767af0b78ebea66d0c59c1537ddb1242a8e)), closes [#2301](https://github.com/ZaxbyHub/opencode-swarm/issues/2301)
+* **orchestration:** resolve six swarm-operation failures from issue 2271 ([79fbf3a](https://github.com/ZaxbyHub/opencode-swarm/commit/79fbf3aef12c9e51f86eb8743973ed8bdc03fd35))
+* **orchestration:** resolve six swarm-operation failures from issue 2271 ([487bc31](https://github.com/ZaxbyHub/opencode-swarm/commit/487bc3142c14b6fb7861f45b5ec16e0e074305cc))
+* **pr-feedback:** address swarm-pr-review findings on issue 2271 fixes ([3597f37](https://github.com/ZaxbyHub/opencode-swarm/commit/3597f37d7b359003fb6996cfdd103643dd4b4f7e))
+* **pr-feedback:** resolve async/generic/paren-less arrow FP+FN and Go regression from swarm-pr-review ([15dac96](https://github.com/ZaxbyHub/opencode-swarm/commit/15dac96946b29e0a7afe0bfc83a75506aff0ab47))
+
 ## [7.145.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.144.8...v7.145.0) (2026-08-23)
 
 

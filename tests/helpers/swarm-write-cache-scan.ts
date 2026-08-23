@@ -3304,6 +3304,17 @@ export const EVIDENCE_WRITE_BLIND_SPOTS: readonly EvidenceWriteBlindSpot[] = [
 			'The shim names no artifact of its own; its one caller opens ' +
 			'`${filePath}.tmp.<time>.<pid>` and renames it onto that filePath.',
 	},
+	{
+		file: 'src/evidence/task-gate-repair.ts',
+		rule: 'W',
+		target: 'serialized',
+		status: 'not-an-evidence-artifact',
+		reason:
+			'`fileHandle.writeFile(serialized)` writes bytes to the FileHandle that ' +
+			'was opened on the quarantined temporary path; `serialized` is payload, ' +
+			'not a pathname. The temp path is invalidated before the link and the ' +
+			'published quarantine target is invalidated immediately after the link.',
+	},
 	// --- Round 7: surfaced by the widened mentionsEvidencePath candidate filter
 	{
 		file: 'src/background/evidence-summary-integration.ts',

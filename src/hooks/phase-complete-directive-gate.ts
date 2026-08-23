@@ -20,10 +20,20 @@
 import { recordKnowledgeEvent } from './knowledge-events.js';
 import {
 	queryLiveMemberships,
+	type ReceiptUnavailable,
 	validateAndCommitTerminalBatch,
 } from './knowledge-receipt-ledger.js';
 
 export type DirectiveBlockReason = 'no_verdict' | 'unremediated_violation';
+
+export type DirectiveGateFailureCode =
+	| 'RECEIPT_MISSING'
+	| 'RECEIPT_CORRUPT'
+	| 'RECEIPT_LOCK_TIMEOUT'
+	| 'RECEIPT_WRONG_ROOT'
+	| 'RECEIPT_PERMISSION'
+	| 'RECEIPT_TRANSIENT'
+	| 'RECEIPT_STORE_UNAVAILABLE';
 
 export interface DirectiveGateResult {
 	blocked: boolean;
@@ -35,6 +45,132 @@ export interface DirectiveGateResult {
 	overridden: string[];
 	/** True when the gate could not read its inputs (fail-closed → blocked). */
 	failedClosed: boolean;
+	failure?: {
+		code: DirectiveGateFailureCode;
+		action_id:
+			| 'knowledge_receipt'
+			| 'phase_complete'
+			| 'repair_knowledge_receipt_ledger';
+	};
+	recovery?: {
+		kind: 'tool' | 'retry';
+		action:
+			| 'knowledge_receipt'
+			| 'phase_complete'
+			| 'repair_knowledge_receipt_ledger';
+	};
+}
+
+function classifyDirectiveGateFailure(
+	error: unknown | ReceiptUnavailable,
+): Pick<DirectiveGateResult, 'failure' | 'recovery'> {
+	if (
+		typeof error === 'object' &&
+		error !== null &&
+		'ok' in error &&
+		error.ok === false &&
+		'code' in error
+	) {
+		const unavailable = error as ReceiptUnavailable;
+		if (unavailable.code === 'store_corrupt') {
+			return {
+				failure: {
+					code: 'RECEIPT_CORRUPT',
+					action_id: 'repair_knowledge_receipt_ledger',
+				},
+				recovery: {
+					kind: 'tool',
+					action: 'repair_knowledge_receipt_ledger',
+				},
+			};
+		}
+		if (unavailable.code === 'lock_timeout') {
+			return {
+				failure: {
+					code: 'RECEIPT_LOCK_TIMEOUT',
+					action_id: 'phase_complete',
+				},
+				recovery: { kind: 'retry', action: 'phase_complete' },
+			};
+		}
+		error = unavailable.detail;
+	}
+	const message =
+		error instanceof Error
+			? error.message
+			: typeof error === 'string'
+				? error
+				: '';
+	const lower = message.toLowerCase();
+	if (lower.includes('exact session identity')) {
+		return {
+			failure: {
+				code: 'RECEIPT_MISSING',
+				action_id: 'knowledge_receipt',
+			},
+			recovery: { kind: 'tool', action: 'knowledge_receipt' },
+		};
+	}
+	if (lower.includes('corrupt') || lower.includes('legacy_unverifiable')) {
+		return {
+			failure: {
+				code: 'RECEIPT_CORRUPT',
+				action_id: 'repair_knowledge_receipt_ledger',
+			},
+			recovery: { kind: 'tool', action: 'repair_knowledge_receipt_ledger' },
+		};
+	}
+	if (lower.includes('lock_timeout')) {
+		return {
+			failure: {
+				code: 'RECEIPT_LOCK_TIMEOUT',
+				action_id: 'phase_complete',
+			},
+			recovery: { kind: 'retry', action: 'phase_complete' },
+		};
+	}
+	if (lower.includes('project root') || lower.includes('root')) {
+		return {
+			failure: {
+				code: 'RECEIPT_WRONG_ROOT',
+				action_id: 'repair_knowledge_receipt_ledger',
+			},
+			recovery: { kind: 'tool', action: 'repair_knowledge_receipt_ledger' },
+		};
+	}
+	if (
+		lower.includes('eacces') ||
+		lower.includes('eperm') ||
+		lower.includes('permission')
+	) {
+		return {
+			failure: {
+				code: 'RECEIPT_PERMISSION',
+				action_id: 'repair_knowledge_receipt_ledger',
+			},
+			recovery: { kind: 'tool', action: 'repair_knowledge_receipt_ledger' },
+		};
+	}
+	if (
+		lower.includes('ebusy') ||
+		lower.includes('temporar') ||
+		lower.includes('transient')
+	) {
+		return {
+			failure: {
+				code: 'RECEIPT_TRANSIENT',
+				action_id: 'phase_complete',
+			},
+			recovery: { kind: 'retry', action: 'phase_complete' },
+		};
+	}
+	return {
+		failure: {
+			code: 'RECEIPT_STORE_UNAVAILABLE',
+			action_id: 'repair_knowledge_receipt_ledger',
+		},
+		recovery: { kind: 'tool', action: 'repair_knowledge_receipt_ledger' },
+	};
 }
 
 /**
@@ -55,7 +191,15 @@ export async function evaluatePhaseCriticalDirectives(params: {
 			include_terminal: true,
 			include_phase_closed: false,
 		});
-		if (!state.ok) throw new Error(state.detail);
+		if (!state.ok) {
+			return {
+				blocked: true,
+				unresolved: [],
+				overridden: [],
+				failedClosed: true,
+				...classifyDirectiveGateFailure(state),
+			};
+		}
 		const criticals = state.memberships.filter(
 			(membership) => membership.critical,
 		);
@@ -104,12 +248,13 @@ export async function evaluatePhaseCriticalDirectives(params: {
 			overridden,
 			failedClosed: false,
 		};
-	} catch {
+	} catch (error) {
 		return {
 			blocked: true,
 			unresolved: [],
 			overridden: [],
 			failedClosed: true,
+			...classifyDirectiveGateFailure(error),
 		};
 	}
 }
@@ -223,7 +368,7 @@ export function formatDirectiveBlockMessage(
 		'PHASE_COMPLETE_BLOCKED: unresolved critical knowledge directive(s):',
 		...lines,
 		'Resolve each by applying/verifying the directive, recording an explicit',
-		'ignored/n_a with a reason, or (architect only) accept_violations with a',
+		'ignored/n_a with a reason, or use the separate architect-only record_directive_override action with a',
 		'written justification.',
 	].join('\n');
 }
