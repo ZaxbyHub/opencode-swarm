@@ -103,6 +103,7 @@ const QUERIES: Record<
 			(lexical_declaration
 				(variable_declarator name: (identifier) @const.name)
 			) @const.def
+			(method_definition name: (property_identifier) @method.name) @method.def
 		`,
 		imports: `
 			(import_statement) @import
@@ -210,12 +211,21 @@ const QUERIES: Record<
 			(method_declaration
 				(identifier) @func.name
 			) @func.def
+			(constructor_declaration
+				(identifier) @ctor.name
+			) @ctor.def
 			(class_declaration
 				(identifier) @class.name
 			) @class.def
 			(interface_declaration
 				(identifier) @interface.name
 			) @interface.def
+			(enum_declaration
+				(identifier) @enum.name
+			) @enum.def
+			(record_declaration
+				(identifier) @record.name
+			) @record.def
 		`,
 		imports: `
 			(import_declaration) @import
@@ -251,9 +261,12 @@ const QUERIES: Record<
 	csharp: {
 		defs: `
 			(method_declaration name: (identifier) @func.name) @func.def
+			(constructor_declaration name: (identifier) @ctor.name) @ctor.def
 			(class_declaration name: (identifier) @class.name) @class.def
 			(interface_declaration name: (identifier) @interface.name) @interface.def
 			(struct_declaration name: (identifier) @struct.name) @struct.def
+			(enum_declaration name: (identifier) @enum.name) @enum.def
+			(record_declaration name: (identifier) @record.name) @record.def
 		`,
 		imports: `
 			(using_directive) @import
@@ -363,6 +376,13 @@ const CAPTURE_KIND: Record<string, FileSymbolFacts['defs'][0]['kind']> = {
 	object: 'class',
 	mixin: 'type',
 	protocol: 'interface',
+	record: 'class',
+	// Deliberately `ctor`, not `constructor`: `CAPTURE_KIND['constructor']`
+	// would resolve to `Object.prototype.constructor` through the prototype
+	// chain, and `??` would not fire because a function is not nullish.
+	// The `Object.hasOwn` guard at the lookup site closes the class for any
+	// future prefix; this name keeps the query readable regardless.
+	ctor: 'method',
 };
 
 const DEF_TYPES = new Set([
@@ -379,6 +399,8 @@ const DEF_TYPES = new Set([
 	'struct_specifier',
 	'struct_item',
 	'struct_declaration',
+	'record_declaration',
+	'constructor_declaration',
 	'method_declaration',
 	'type_declaration',
 	'object_declaration',
@@ -396,6 +418,24 @@ const DEF_TYPES = new Set([
 	'const_declaration',
 	'method',
 	'class',
+]);
+
+/** Grammars whose members live inside an explicit type container. */
+const JVM_GRAMMARS = new Set(['java', 'kotlin', 'csharp']);
+
+/**
+ * Type-container node types for java/kotlin/csharp. A `func`/`ctor` capture
+ * with one of these as an ancestor is a *member*, not a free function, and the
+ * matched container's node type also decides the member's implicit visibility
+ * (see `containerScopedDefaultVisibility` in `symbol-visibility.ts`).
+ */
+const JVM_CONTAINER_TYPES = new Set([
+	'class_declaration',
+	'interface_declaration',
+	'struct_declaration',
+	'object_declaration',
+	'enum_declaration',
+	'record_declaration',
 ]);
 
 const PARAM_TYPES = new Set([
@@ -528,7 +568,16 @@ function buildFacts(
 		const kindKey = defCap.name.replace(/\.def$/, '');
 		const originalDefNode = asTs(defCap.node);
 		let defNode = originalDefNode;
-		let kind = CAPTURE_KIND[kindKey] ?? 'function';
+		// `Object.hasOwn`, not `?? `: a capture prefix that collides with an
+		// `Object.prototype` member (`constructor`, `toString`, `valueOf`, …)
+		// would otherwise resolve to the inherited value, which is not nullish
+		// and so silently survives the `??` fallback.
+		let kind: FileSymbolFacts['defs'][0]['kind'] = Object.hasOwn(
+			CAPTURE_KIND,
+			kindKey,
+		)
+			? CAPTURE_KIND[kindKey]
+			: 'function';
 		if (
 			grammarId === 'python' &&
 			kindKey === 'func' &&
@@ -542,6 +591,22 @@ function buildFacts(
 			hasAncestorOfType(originalDefNode, 'impl_item')
 		) {
 			kind = 'method';
+		}
+		// java/kotlin/csharp: one ancestor walk serves both the member re-typing
+		// (F1) and the container-kind visibility default (F2). Only `func`/`ctor`
+		// captures are re-typed — a *nested type* stays a type.
+		let parentContainerType: string | undefined;
+		if (JVM_GRAMMARS.has(grammarId)) {
+			parentContainerType = nearestAncestorType(
+				originalDefNode,
+				JVM_CONTAINER_TYPES,
+			);
+			if (
+				parentContainerType !== undefined &&
+				(kindKey === 'func' || kindKey === 'ctor')
+			) {
+				kind = 'method';
+			}
 		}
 		const explicitExported = exportNodes.some((en) =>
 			isNodeInside(en, defNode),
@@ -616,6 +681,7 @@ function buildFacts(
 				commonJsExport,
 				pythonAllNames,
 				pythonParentClassExported,
+				parentContainerType,
 			});
 			const exportedName = isDefaultExport
 				? 'default'
@@ -629,6 +695,9 @@ function buildFacts(
 				startLine: defNode.startPosition.row + 1,
 				endLine: defNode.endPosition.row + 1,
 			});
+			// Keep `defNodes` in step with `defs[].name` so `enclosingDecl` on a
+			// ref inside an extension function reports the same symbol name the
+			// def was emitted under.
 			defNodes.push({ node: defNode, name: localName });
 			defNameKeys.add(nodeKey(nameNode));
 		}
@@ -1274,20 +1343,49 @@ function parseGoImportHardened(
 	};
 }
 
+/**
+ * Final segment of a dotted path (`java.util.List` -> `List`).
+ *
+ * `bindings[].imported` is consumed as the `toSymbol` of a graph edge
+ * (the `toSymbol:` assignments in `buildSymbolEdges` /
+ * `src/tools/repo-graph/builder.ts`), so it must be the *declaration
+ * name* found in the target file — never the fully-qualified path, which
+ * matches no def anywhere.
+ */
+function finalDottedSegment(path: string): string {
+	const lastDot = path.lastIndexOf('.');
+	return lastDot === -1 ? path : path.slice(lastDot + 1);
+}
+
 function parseJavaImport(text: string): FileSymbolFacts['imports'][0] | null {
 	const t = text.trim();
 	// import foo.Bar;
 	// import static foo.Bar.baz;
-	const m = t.match(/^import\s+(?:static\s+)?([^;\s]+)\s*;?\s*$/);
-	if (m) {
-		return { specifier: m[1], importType: 'namespace', bindings: [] };
+	// import foo.*;  /  import static foo.Bar.*;
+	const m = t.match(/^import\s+(static\s+)?([^;\s]+)\s*;?\s*$/);
+	if (!m) return null;
+	const isStatic = Boolean(m[1]);
+	const path = m[2];
+	const last = finalDottedSegment(path);
+	// On-demand import: no single symbol is bound.
+	if (last === '*') {
+		return { specifier: path, importType: 'namespace', bindings: [] };
 	}
-	return null;
+	// `import static foo.Bar.baz` binds the member `baz` declared by the type
+	// `foo.Bar`, so the module specifier is the type, not the member.
+	const lastDot = path.lastIndexOf('.');
+	const specifier = isStatic && lastDot !== -1 ? path.slice(0, lastDot) : path;
+	return {
+		specifier,
+		importType: 'named',
+		bindings: [{ imported: last, local: last }],
+	};
 }
 
 function parseKotlinImport(text: string): FileSymbolFacts['imports'][0] | null {
 	// import foo.Bar
 	// import foo.Bar as baz
+	// import foo.*
 	// Multiple per import_header — each line is captured
 	const t = text.trim();
 	const aliased = t.match(/^import\s+([^;\s]+)\s+as\s+(\w+)/);
@@ -1295,14 +1393,25 @@ function parseKotlinImport(text: string): FileSymbolFacts['imports'][0] | null {
 		return {
 			specifier: aliased[1],
 			importType: 'named',
-			bindings: [{ imported: aliased[1], local: aliased[2] }],
+			bindings: [
+				{ imported: finalDottedSegment(aliased[1]), local: aliased[2] },
+			],
 		};
 	}
 	const simple = t.match(/^import\s+([^;\s]+)/);
-	if (simple) {
-		return { specifier: simple[1], importType: 'namespace', bindings: [] };
+	if (!simple) return null;
+	const path = simple[1];
+	const last = finalDottedSegment(path);
+	// Kotlin has no namespace-import form other than `a.b.*`; a plain import
+	// always names one declaration.
+	if (last === '*') {
+		return { specifier: path, importType: 'namespace', bindings: [] };
 	}
-	return null;
+	return {
+		specifier: path,
+		importType: 'named',
+		bindings: [{ imported: last, local: last }],
+	};
 }
 
 function parseCSharpUsing(text: string): FileSymbolFacts['imports'][0] | null {
@@ -1310,21 +1419,26 @@ function parseCSharpUsing(text: string): FileSymbolFacts['imports'][0] | null {
 	// using foo;
 	// using foo = foo.Bar;
 	// using static foo.Bar;
+	// global using foo;           (C# 10+; the default shape of a .NET 6+
+	//                              GlobalUsings.cs, so omitting it silently
+	//                              drops every import in modern projects)
 	const m = t.match(
-		/^using\s+(?:static\s+)?([^=;\s]+)\s*(?:=\s*(.+?))?\s*;?\s*$/,
+		/^(?:global\s+)?using\s+(?:static\s+)?([^=;\s]+)\s*(?:=\s*(.+?))?\s*;?\s*$/,
 	);
-	if (m) {
-		const specifier = m[2] ? m[2].trim() : m[1].trim();
-		if (m[2]) {
-			return {
-				specifier,
-				importType: 'named',
-				bindings: [{ imported: specifier, local: m[1].trim() }],
-			};
-		}
-		return { specifier: m[1].trim(), importType: 'namespace', bindings: [] };
+	if (!m) return null;
+	if (m[2]) {
+		// Alias: `using Alias = System.Text.StringBuilder;`. The specifier stays
+		// the full dotted right-hand side (parallel to a Java single-type
+		// import); only the bound symbol becomes the final segment.
+		const target = m[2].trim();
+		return {
+			specifier: target,
+			importType: 'named',
+			bindings: [{ imported: finalDottedSegment(target), local: m[1].trim() }],
+		};
 	}
-	return null;
+	// A plain `using System.Text;` imports a namespace, not a declaration.
+	return { specifier: m[1].trim(), importType: 'namespace', bindings: [] };
 }
 
 function parseCppInclude(text: string): FileSymbolFacts['imports'][0] | null {
@@ -1455,6 +1569,23 @@ function isNodeInside(outer: TsNode, inner: TsNode): boolean {
 	return (
 		inner.startIndex >= outer.startIndex && inner.endIndex <= outer.endIndex
 	);
+}
+
+/**
+ * Node type of the nearest ancestor whose type is in `types`, or `undefined`.
+ * Unlike `hasAncestorOfType` this reports *which* container matched, which the
+ * container-kind visibility matrix needs.
+ */
+function nearestAncestorType(
+	node: TsNode,
+	types: Set<string>,
+): string | undefined {
+	let current: TsNode | null = node.parent;
+	while (current) {
+		if (types.has(current.type)) return current.type;
+		current = current.parent;
+	}
+	return undefined;
 }
 
 function hasAncestorOfType(node: TsNode, types: Set<string> | string): boolean {

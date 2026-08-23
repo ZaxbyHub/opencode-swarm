@@ -272,6 +272,174 @@ function appendEdgeFast(
 // ============ Path Resolution ============
 
 /**
+ * Workspace-relative source roots probed when mapping a JVM/.NET dotted module
+ * name onto a file. `''` covers a package-rooted layout (`com/example/Repo.java`
+ * directly under the workspace root); the rest cover the conventional
+ * Maven/Gradle and .NET layouts.
+ */
+const JVM_DOTNET_DOTTED_ROOTS = [
+	'',
+	'src',
+	'src/main/java',
+	'src/main/kotlin',
+] as const;
+
+/** Candidate file extensions for a dotted import, keyed on the *importing* file. */
+function jvmDotnetSiblingExtensions(sourceFile: string): readonly string[] {
+	switch (path.extname(sourceFile).toLowerCase()) {
+		case '.java':
+			return ['.java'];
+		case '.kt':
+		case '.kts':
+			return ['.kt', '.kts'];
+		case '.cs':
+		case '.csx':
+			return ['.cs', '.csx'];
+		default:
+			return [];
+	}
+}
+
+/**
+ * Conventional JVM/.NET test-file names: `FooTest.java`, `FooTests.cs`,
+ * `FooSpec.kt`. The `Test`/`Tests`/`Spec` suffix must start with a capital, and
+ * must be preceded by another identifier character, so ordinary production
+ * names whose last syllable merely rhymes are not swept up — `Latest.cs`,
+ * `Contest.java`, `Protest.kt` and `Respec.cs` all correctly fail this.
+ */
+const JVM_DOTNET_TEST_FILE_RE = /\w(?:Tests?|Spec)\.[A-Za-z]+$/;
+
+/**
+ * Representative source file for a package/namespace specifier (`import a.b.*;`,
+ * `using App.Data;`), which names a directory rather than a single file.
+ *
+ * This mirrors the convention this module already uses for Go, whose imports
+ * are likewise package-granular: `findDirectoryEntry` prefers
+ * `<dirname>.go` and otherwise takes the first source file in the directory.
+ * The resulting edge is a package-level dependency expressed through a
+ * representative member, not a claim that the source named that exact file.
+ *
+ * A same-named file (`Data/Data.cs`) is preferred so the representative is
+ * stable and meaningful where the convention exists; otherwise the first entry
+ * by code-unit order is used, which is locale-independent and therefore
+ * reproducible across machines.
+ */
+function firstSourceFileIn(
+	directory: string,
+	extensions: readonly string[],
+): string | null {
+	try {
+		if (!fsSync.statSync(directory).isDirectory()) return null;
+		const matching = fsSync
+			.readdirSync(directory)
+			.filter((entry) =>
+				extensions.some((ext) => entry.toLowerCase().endsWith(ext)),
+			)
+			// Code-unit order, NOT localeCompare: ICU collation is host-dependent
+			// and would make graph builds differ across machines.
+			.sort();
+		// Mirror the Go precedent's `!entry.endsWith('_test.go')` filter: a test
+		// class is a poor representative of a package, and alphabetical order
+		// makes `AaaTests.cs` beat the real type. Fall back to the unfiltered
+		// list for a directory that contains nothing but tests, so a
+		// test-only package still yields an edge.
+		const nonTest = matching.filter(
+			(entry) => !JVM_DOTNET_TEST_FILE_RE.test(entry),
+		);
+		const entries = nonTest.length > 0 ? nonTest : matching;
+		const preferred = entries.find(
+			(entry) =>
+				path.basename(entry, path.extname(entry)).toLowerCase() ===
+				path.basename(directory).toLowerCase(),
+		);
+		for (const entry of preferred ? [preferred, ...entries] : entries) {
+			const candidate = path.join(directory, entry);
+			// readdirSync also returns directories; a directory named `Foo.cs`
+			// must never become an import target.
+			try {
+				if (fsSync.statSync(candidate).isFile()) return candidate;
+			} catch {
+				// unreadable entry - try the next one
+			}
+		}
+		return null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Probe the workspace for the file a JVM/.NET dotted module specifier names.
+ *
+ * Two candidate shapes are tried, under each conventional source root:
+ * 1. the full dotted path — `com.example.Repo` -> `com/example/Repo.java`
+ *    (a type), or `com/example/` as a directory when the specifier names a
+ *    package/namespace (`com.example.*`, C# `using App.Data;`);
+ * 2. the parent path **as a file only** — `com.example.Outer.Inner` ->
+ *    `com/example/Outer.java` (nested type), and the same shape a static
+ *    member import reduces to.
+ *
+ * The parent path is deliberately NOT probed as a directory. Doing so would
+ * make an import of a type that does not exist (`import com.example.Nope;`)
+ * resolve to an arbitrary alphabetically-first sibling in `com/example/`,
+ * fabricating an edge to a file the source never referenced.
+ *
+ * SECURITY: this returns a *candidate path only* and performs no symlink or
+ * containment validation of its own. The caller rewrites the result into a
+ * `./`-relative specifier and falls through to the shared relative-resolution
+ * branch, so `safeRealpathSync` symlink resolution and the workspace
+ * real-path containment check apply to a dotted specifier exactly as they do
+ * to a relative one. Never return a path from here to a caller that skips
+ * that fall-through.
+ *
+ * The `^[A-Za-z_][\w.]*(?:\.\*)?$` shape check also rejects any specifier
+ * carrying `/` or `\`, so a crafted `foo/../../etc` import never reaches the
+ * filesystem probe. It does NOT reject `..` on its own — `a..b` matches the
+ * shape. Empty segments are dropped by the `.split('.').filter(Boolean)` in the
+ * body, and THAT is what prevents a `..` path component from being built. Do
+ * not remove that filter on the assumption the shape check covers it.
+ */
+function findDottedModuleCandidate(
+	workspaceRoot: string,
+	sourceFile: string,
+	specifier: string,
+): string | null {
+	if (!/^[A-Za-z_][\w.]*(?:\.\*)?$/.test(specifier)) return null;
+	const extensions = jvmDotnetSiblingExtensions(sourceFile);
+	if (extensions.length === 0) return null;
+
+	const isWildcard = specifier.endsWith('.*');
+	const parts = specifier.replace(/\.\*$/, '').split('.').filter(Boolean);
+	if (parts.length === 0) return null;
+	const full = parts.join(path.sep);
+	// A wildcard names a package, never a type, so its last segment must not be
+	// re-interpreted as an enclosing type by the nested-type probe below.
+	const parent =
+		!isWildcard && parts.length > 1 ? parts.slice(0, -1).join(path.sep) : null;
+
+	for (const rootPrefix of JVM_DOTNET_DOTTED_ROOTS) {
+		const fullBase = path.join(workspaceRoot, rootPrefix, full);
+		for (const ext of extensions) {
+			// existsSync follows symlinks, so a dangling link is skipped here and
+			// a live one is validated by the caller's realpath check.
+			if (existsSync(fullBase + ext)) return fullBase + ext;
+		}
+
+		// The specifier names a package/namespace directory: resolve to a
+		// representative member, matching the Go convention above.
+		const inPackage = firstSourceFileIn(fullBase, extensions);
+		if (inPackage) return inPackage;
+
+		if (parent === null) continue;
+		const parentBase = path.join(workspaceRoot, rootPrefix, parent);
+		for (const ext of extensions) {
+			if (existsSync(parentBase + ext)) return parentBase + ext;
+		}
+	}
+	return null;
+}
+
+/**
  * Resolve a module specifier relative to a source file within a workspace.
  *
  * CONTRACT for bare specifiers:
@@ -341,6 +509,27 @@ export function resolveModuleSpecifier(
 			normalizedSpecifier = `${'../'.repeat(superCount)}${rustParts
 				.slice(superCount)
 				.join('/')}`;
+		} else {
+			// JVM/.NET dotted module (`com.example.Repo`, `com.example.*`). Like
+			// the `crate` branch above, this only REWRITES the specifier into a
+			// `./`-relative form; the resolution, symlink realpath, and workspace
+			// containment checks below are then applied unchanged (issue #1529,
+			// F7). No-ops for every non-JVM/.NET source file.
+			const dottedTarget = findDottedModuleCandidate(
+				workspaceRoot,
+				sourceFile,
+				normalizedSpecifier,
+			);
+			if (dottedTarget !== null) {
+				normalizedSpecifier = path
+					.relative(path.dirname(sourceFile), dottedTarget)
+					.replace(/\\/g, '/');
+				// A same-directory target yields a bare `Repo.java` with no leading
+				// `./`, which would fall through to the bare-specifier `return null`.
+				if (!normalizedSpecifier.startsWith('.')) {
+					normalizedSpecifier = `./${normalizedSpecifier}`;
+				}
+			}
 		}
 
 		// Resolve relative to source file
@@ -868,6 +1057,15 @@ function parseFileImports(
 	if (ext === '.go') {
 		return parseGoFileImports(rawContent);
 	}
+	if (ext === '.java') {
+		return parseJavaFileImports(rawContent);
+	}
+	if (ext === '.kt' || ext === '.kts') {
+		return parseKotlinFileImports(rawContent);
+	}
+	if (ext === '.cs' || ext === '.csx') {
+		return parseCSharpFileImports(rawContent);
+	}
 
 	const imports: ParsedImport[] = [];
 	const content = stripComments(rawContent);
@@ -947,6 +1145,111 @@ function makeParsedImport(
 		bindings,
 		reExport,
 	};
+}
+
+/** Final segment of a dotted name: `a.b.C` -> `C`. */
+function finalDottedSegment(value: string): string {
+	const parts = value.split('.').filter(Boolean);
+	return parts[parts.length - 1] ?? value;
+}
+
+/**
+ * Regex import fallback for Java. Used only when tree-sitter extraction fails
+ * (grammar load failure, AST timeout, parse error) and `scanFileAsync` falls
+ * back to `scanFile` — before this branch existed, `.java` fell through to the
+ * TypeScript ESM regex and produced zero imports (issue #1529, RC-10).
+ *
+ * Binding semantics deliberately mirror `parseJavaImport` in
+ * `src/lang/symbol-graph.ts` so the AST path and the fallback path emit the
+ * same shape:
+ * - `import a.b.C;`         -> specifier `a.b.C`, named, binding `C`
+ * - `import static a.b.C.m;` -> specifier `a.b.C`, named, binding `m`
+ * - `import a.b.*;`          -> specifier `a.b.*`, namespace, no named binding
+ */
+function parseJavaFileImports(rawContent: string): ParsedImport[] {
+	const imports: ParsedImport[] = [];
+	const content = stripComments(rawContent);
+	const re =
+		/^[ \t]*import[ \t]+(static[ \t]+)?([A-Za-z_][\w.]*(?:\.\*)?)[ \t]*;?[ \t]*\r?$/gm;
+	for (let m = re.exec(content); m !== null; m = re.exec(content)) {
+		const isStatic = Boolean(m[1]);
+		const raw = m[2];
+		if (raw.endsWith('.*')) {
+			const parsed = makeParsedImport(raw, 'namespace', []);
+			if (parsed) imports.push(parsed);
+			continue;
+		}
+		// A static single-member import names the member, so the module is the
+		// enclosing type and the binding is the member.
+		const imported = finalDottedSegment(raw);
+		const specifier = isStatic ? raw.split('.').slice(0, -1).join('.') : raw;
+		const parsed = makeParsedImport(specifier, 'named', [
+			{ imported, local: imported },
+		]);
+		if (parsed) imports.push(parsed);
+	}
+	return imports;
+}
+
+/**
+ * Regex import fallback for Kotlin (see {@link parseJavaFileImports}).
+ * - `import a.b.C`        -> named, binding `C`
+ * - `import a.b.C as D`   -> named, imported `C`, local `D`
+ * - `import a.b.*`        -> namespace, no named binding
+ * Kotlin has no `static` form; a member import is spelled like a type import.
+ */
+function parseKotlinFileImports(rawContent: string): ParsedImport[] {
+	const imports: ParsedImport[] = [];
+	const content = stripComments(rawContent);
+	const re =
+		/^[ \t]*import[ \t]+([A-Za-z_][\w.]*(?:\.\*)?)(?:[ \t]+as[ \t]+([A-Za-z_]\w*))?[ \t]*;?[ \t]*\r?$/gm;
+	for (let m = re.exec(content); m !== null; m = re.exec(content)) {
+		const raw = m[1];
+		const alias = m[2];
+		if (raw.endsWith('.*')) {
+			const parsed = makeParsedImport(raw, 'namespace', []);
+			if (parsed) imports.push(parsed);
+			continue;
+		}
+		const imported = finalDottedSegment(raw);
+		const parsed = makeParsedImport(raw, 'named', [
+			{ imported, local: alias ?? imported },
+		]);
+		if (parsed) imports.push(parsed);
+	}
+	return imports;
+}
+
+/**
+ * Regex import fallback for C# (see {@link parseJavaFileImports}).
+ * - `using A.B;`            -> namespace, no named binding
+ * - `using static A.B;`     -> namespace, no named binding
+ * - `using X = A.B.C;`      -> named, imported `C`, local `X`
+ * - `global using A.B;`     -> same as `using A.B;`
+ *
+ * The trailing `;` is REQUIRED by the pattern: without it, the C# 8 using
+ * *declaration* (`using var stream = File.OpenRead(p);`) and the using
+ * *statement* (`using (var x = …)`) both match and fabricate an import of a
+ * module literally named `var`. A generic alias
+ * (`using L = System.Collections.Generic.List<int>;`) is intentionally not
+ * matched rather than mis-parsed.
+ */
+function parseCSharpFileImports(rawContent: string): ParsedImport[] {
+	const imports: ParsedImport[] = [];
+	const content = stripComments(rawContent);
+	const re =
+		/^[ \t]*(?:global[ \t]+)?using[ \t]+(static[ \t]+)?(?:([A-Za-z_]\w*)[ \t]*=[ \t]*)?([A-Za-z_][\w.]*)[ \t]*;[ \t]*\r?$/gm;
+	for (let m = re.exec(content); m !== null; m = re.exec(content)) {
+		const alias = m[2];
+		const specifier = m[3];
+		const parsed = alias
+			? makeParsedImport(specifier, 'named', [
+					{ imported: finalDottedSegment(specifier), local: alias },
+				])
+			: makeParsedImport(specifier, 'namespace', []);
+		if (parsed) imports.push(parsed);
+	}
+	return imports;
 }
 
 function parsePythonFileImports(
@@ -1744,6 +2047,14 @@ function getLanguage(filePath: string): string {
 }
 
 /**
+ * Grammars whose `exportRanges` map is populated from *all* defs rather than
+ * only exported ones. JVM/.NET members are intentionally never `exported`
+ * (they are not file-level module exports), so without this `context_pack`
+ * could never return a span for a Java method (issue #1529, RC-7).
+ */
+const JVM_DOTNET_RANGE_GRAMMARS = new Set(['java', 'kotlin', 'csharp']);
+
+/**
  * Check if file content appears to be binary.
  *
  * @param content - File content as string
@@ -2027,7 +2338,73 @@ export async function scanFileAsync(
 		{};
 	for (const d of exportedDefs) {
 		exportLines[d.name] = d.startLine;
-		exportRanges[d.name] = { startLine: d.startLine, endLine: d.endLine };
+	}
+	// `exports` and `exportLines` stay exported-only — the "a JVM/.NET member is
+	// not a file-level module export" contract must not change. `exportRanges`
+	// is widened to ALL defs for java/kotlin/csharp so `context_pack` can return
+	// a real member span instead of the "internal symbol — span unavailable"
+	// placeholder (issue #1529, RC-7).
+	//
+	// The widening is language-scoped because only JVM/.NET members are wanted
+	// in `exportRanges`: admitting every non-exported def for other grammars
+	// would put private TypeScript/Python/Rust/Go helpers into a persisted,
+	// schema-validated graph field for no benefit. Non-widened grammars keep the
+	// original exported-only, unconditionally-assigned behavior, so their
+	// payloads are unchanged.
+	//
+	// The duplicate-name policy below is likewise scoped, and mirrors
+	// `exportLines` rather than diverging from it: among EXPORTED defs both maps
+	// take the last, so they cannot disagree; among non-exported defs (which
+	// never reach `exportLines`) the first wins, so a constructor or a later
+	// overload cannot displace its enclosing type.
+	const isWidenedGrammar = JVM_DOTNET_RANGE_GRAMMARS.has(grammarId);
+	// Tracks whether the def currently holding each `exportRanges` slot was
+	// exported. Widening admits non-exported members, so without this an
+	// unexported member could outrank the exported symbol of the same name.
+	const rangeIsExported: Record<string, boolean> = {};
+	for (const d of isWidenedGrammar ? facts.defs : exportedDefs) {
+		// Only the widened path needs this. validateGraphNode THROWS on a
+		// non-positive or inverted range and runs during the scan, so one
+		// malformed def would abort a whole graph build now that non-exported
+		// defs reach this map. Non-widened grammars deliberately keep the
+		// pre-existing throw-on-malformed behavior so their payloads stay
+		// byte-identical.
+		if (
+			isWidenedGrammar &&
+			(!Number.isInteger(d.startLine) ||
+				!Number.isInteger(d.endLine) ||
+				d.startLine < 1 ||
+				d.endLine < d.startLine)
+		) {
+			continue;
+		}
+		const next = { startLine: d.startLine, endLine: d.endLine };
+		const prev = exportRanges[d.name];
+		if (isWidenedGrammar && prev !== undefined) {
+			const prevExported = rangeIsExported[d.name] === true;
+			if (d.exported !== prevExported) {
+				// Exported wins outright. `exportLines` is exported-only, so letting
+				// a non-exported member hold the slot desyncs the two maps and makes
+				// context_pack serve a private member's body under the exported name
+				// (a Kotlin `class A { fun process() }` displacing the top-level
+				// `fun process()`).
+				if (!d.exported) continue;
+			} else if (d.exported) {
+				// Two exported defs of the same name (a C# partial class, or a
+				// re-declared type): fall through and let the LAST one win, exactly
+				// as the exported-only `exportLines` above does. Diverging here is
+				// what made `exportRanges` point at the first partial while
+				// `exportLines` pointed at the second.
+			} else {
+				// Two non-exported defs: keep the first in document order, so a
+				// constructor or a later overload cannot displace its type. These
+				// never appear in `exportLines`, so there is nothing to stay in sync
+				// with.
+				continue;
+			}
+		}
+		exportRanges[d.name] = next;
+		rangeIsExported[d.name] = d.exported;
 	}
 	const exportsSet = new Set(exports);
 	const isPythonPackageInit =

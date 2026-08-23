@@ -125,6 +125,49 @@ function boundaryForModule(
 	return inferPackageBoundary(moduleName, hasManifest);
 }
 
+/**
+ * Extract the *declared* package / namespace from JVM and .NET source text.
+ *
+ * `boundaryForModule` derives a boundary from the file path, which for a Java
+ * file at `src/main/java/com/example/Foo.java` yields a path prefix rather than
+ * the package the compiler actually sees (issue #1529, RC-8). The declaration
+ * in the source is the authoritative answer, so it wins when present.
+ *
+ * Grammar forms covered (verified against the real WASM grammars):
+ * - Java `package_declaration` — `package a.b.c;` (trailing `;` required).
+ * - Kotlin `package_header` — `package a.b.c` (no `;`).
+ * - C# `namespace_declaration` — `namespace N { … }` (brace may be on the
+ *   next line).
+ * - C# `file_scoped_namespace_declaration` — `namespace N;` (the .NET 6+
+ *   project-template default).
+ *
+ * Returns `null` for every other language *and* for JVM/.NET files with no
+ * declaration (Java default package, C# top-level statements), so the existing
+ * path-derived fallback still applies.
+ *
+ * @param language - tree-sitter grammar id (`java` | `kotlin` | `csharp` | …)
+ * @param content - file content with comments already stripped, so a
+ *   commented-out declaration cannot win
+ */
+function sourceBoundaryForLanguage(
+	language: string,
+	content: string,
+): string | null {
+	if (language === 'java' || language === 'kotlin') {
+		const pkg = content.match(/^[ \t]*package[ \t]+([A-Za-z_][\w.]*)[ \t]*;?/m);
+		if (pkg?.[1]) return pkg[1];
+		return null;
+	}
+	if (language === 'csharp') {
+		// `\s*` (not `[ \t]*`) before the terminator so `namespace N` followed by
+		// a newline and `{` on the next line is still recognised.
+		const ns = content.match(/^[ \t]*namespace[ \t]+([A-Za-z_][\w.]*)\s*[;{]/m);
+		if (ns?.[1]) return ns[1];
+		return null;
+	}
+	return null;
+}
+
 function inferRoles(moduleName: string, content: string): FileRole[] {
 	const normalized = normalizeModuleName(moduleName).toLowerCase();
 	const roles = new Set<FileRole>();
@@ -493,7 +536,9 @@ export function extractFileOntology(
 
 	return {
 		roles,
-		packageBoundary: boundaryForModule(moduleName, input.hasManifest),
+		packageBoundary:
+			sourceBoundaryForLanguage(input.language, content) ??
+			boundaryForModule(moduleName, input.hasManifest),
 		routes,
 		dataOperations,
 		security,

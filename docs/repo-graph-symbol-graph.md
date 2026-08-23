@@ -241,6 +241,29 @@ set is driven by the profiles, not a hard-coded list. Files whose grammar is
 unavailable or that exceed the size cap degrade to a file-level node (fail-open),
 never crashing the build.
 
+**Java, Kotlin, C#** (`.java`, `.kt`, `.kts`, `.cs`, `.csx`) are hardened as
+follows:
+
+- Class/interface/enum/record declarations and constructors are extracted as
+  defs; a nested (non-top-level) type declaration is visibility-classified
+  rather than defaulting to private.
+- Member methods declared inside a class/interface/enum/record/struct/object
+  container are typed `method` (not `function`), matching the Python/Rust
+  convention.
+- Visibility is modifier-derived per language, falling back to a
+  container-kind-aware default only when no explicit modifier is present: Java
+  members with no access modifier are **package-private**; Kotlin members are
+  **public by default** (top-level Kotlin declarations are also public by
+  default, correcting the previous `internal` default); C# members default to
+  **internal** at file scope and **private** inside a class/struct/enum body,
+  matching the language's actual default.
+- Package (Java/Kotlin `package ...;`) and namespace (C# `namespace N;` or
+  `namespace N { }`) declarations are read from source and become the graph's
+  package/namespace boundary metadata, in preference to a path-only guess.
+- `import`/`using` declarations produce real bindings (imported symbol → local
+  name), including Java static imports and Kotlin/C# aliases, so import edges
+  and best-effort symbol edges can form the same way they do for TS/JS/Python.
+
 ## Invariant audit (for the implementing PR)
 
 - **1 (plugin init): touched, must be proven safe.** Tree-sitter is async/lazy and
@@ -308,3 +331,33 @@ repo_map { "action": "context_pack", "file": "src/foo.ts", "symbol": "doThing", 
   are best-effort.
 - Symbol data requires an async rebuild; the sync builder yields file-level data
   only.
+- **Overload resolution is conservative.** The graph is name-keyed: overloaded
+  methods (Java/C# same-name, different-signature methods) share a single
+  symbol name and are not disambiguated by parameter list or return type.
+- **No inheritance or dynamic/virtual dispatch resolution.** Extraction does no
+  type resolution (an explicit non-goal), so a call through an interface,
+  abstract base, or virtual/override method is not resolved to a specific
+  overriding implementation.
+- **Kotlin extension-function dispatch is syntactic only.** An extension
+  function's receiver type is read from its declaration text, not resolved, so
+  calls are attributed by name, not by the actual receiver type at a call
+  site.
+- **C# partial classes are not merged.** Each `partial class` declaration is
+  extracted as its own, separate type declaration per file; members declared
+  in a different partial-class file are not unified into one logical type.
+- **Generated code is invisible.** No build tool is invoked (Java annotation
+  processors, C# source generators, etc.), so extraction only sees what is
+  written in the source file, never generated output.
+- **Dotted-module import resolution is best-effort.** Java/Kotlin/C# imports
+  are resolved against conventional source-root layouts on disk
+  (filesystem-based, not a build-tool classpath/package resolution). An import
+  naming a *type* that does not map to a file under a detected source root
+  produces no edge rather than a wrong one.
+- **A package/namespace import resolves to a representative file.** `import
+  a.b.*;` and `using App.Data;` name a directory, not a file. As with Go
+  package imports — which this codebase already resolves the same way — the
+  edge points at a representative member of that directory (a same-named file
+  where that convention exists, otherwise the first by code-unit order). Read
+  such an edge as "depends on this package", not as "references this exact
+  file". Consumers needing precise per-symbol attribution should use symbol
+  edges, which are only emitted for imports that bind a specific name.

@@ -542,7 +542,15 @@ export function getDeadExports(
 			candidates.push({
 				file: node.moduleName,
 				symbol,
-				line: node.exportLines?.[symbol],
+				// Own-property guard: `exportLines` is a plain object literal, so a
+				// symbol named `constructor`/`toString`/… would otherwise resolve
+				// through the prototype chain to a function and be reported as a
+				// line number. See the same guard in getContextPack.
+				line:
+					node.exportLines !== undefined &&
+					Object.hasOwn(node.exportLines, symbol)
+						? node.exportLines[symbol]
+						: undefined,
 				importerCount,
 			});
 		}
@@ -800,7 +808,18 @@ export function getContextPack(
 	const spansWithDepth: { span: ContextPackSpan; depth: number }[] = [];
 	for (const { file: symFile, symbol: sym, depth: d } of reached) {
 		const node = graph.nodes[symFile];
-		const range = node?.exportRanges?.[sym];
+		// `exportRanges` is a plain object literal, so a symbol named after an
+		// Object.prototype member (`constructor`, `toString`, `valueOf`, …)
+		// resolves through the prototype chain to a FUNCTION. That is truthy, so
+		// the `!range` fallback below would not fire and the emitted span would
+		// carry `startLine: undefined` and `estimatedTokens: NaN`. `constructor`
+		// is a real, discoverable symbol name in every language whose members
+		// this graph records, so guard the lookup by own-property.
+		const ranges = node?.exportRanges;
+		const range =
+			ranges !== undefined && Object.hasOwn(ranges, sym)
+				? ranges[sym]
+				: undefined;
 
 		if (!range) {
 			spansWithDepth.push({
