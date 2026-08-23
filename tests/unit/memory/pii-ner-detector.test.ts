@@ -1,0 +1,72 @@
+import { afterEach, describe, expect, test } from 'bun:test';
+import {
+	_internals,
+	NerPiiDetector,
+	type PiiFinding,
+} from '../../../src/memory/pii';
+import { MemoryPiiDetectorError } from '../../../src/memory/errors';
+
+afterEach(() => {
+	_internals.reset();
+});
+
+describe('NerPiiDetector (#1466)', () => {
+	test('absent peer dependency surfaces a typed error with an install hint, not ERR_MODULE_NOT_FOUND', () => {
+		_internals.requireModule = () => {
+			throw new Error("Cannot find module '@xenova/transformers'");
+		};
+		const detector = new NerPiiDetector();
+		expect(() => detector.assertAvailable()).toThrow(MemoryPiiDetectorError);
+		try {
+			detector.assertAvailable();
+		} catch (err) {
+			const message = (err as Error).message;
+			expect(message).toContain('@xenova/transformers');
+			expect(message).toContain('piiDetector');
+		}
+	});
+
+	test('module without pipeline() surfaces a typed error', () => {
+		_internals.requireModule = () => ({ notPipeline: true });
+		const detector = new NerPiiDetector();
+		expect(() => detector.assertAvailable()).toThrow(MemoryPiiDetectorError);
+	});
+
+	test('loads the model through the injected seam and maps entities to findings', async () => {
+		_internals.requireModule = () => ({
+			pipeline: async () => {
+				return async () => ({
+					answer: [
+						{ entity_group: 'PER', word: 'Brett' },
+						{ entity_group: 'ORG', word: 'Acme Corp' },
+						{ entity_group: 'MISC', word: 'ignored' },
+					],
+				});
+			},
+			env: {},
+		});
+		const detector = new NerPiiDetector();
+		detector.assertAvailable();
+		const findings: PiiFinding[] = await detector.detect(
+			'Brett works at Acme Corp',
+		);
+		expect(findings).toEqual([
+			{ type: 'person', match: 'Brett', confidence: 0.9 },
+			{ type: 'organization', match: 'Acme Corp', confidence: 0.8 },
+		]);
+	});
+
+	test('load failure is sticky — construction errors are cached and rethrown', async () => {
+		_internals.requireModule = () => {
+			throw new Error('boom');
+		};
+		const detector = new NerPiiDetector();
+		await expect(detector.detect('text')).rejects.toBeInstanceOf(
+			MemoryPiiDetectorError,
+		);
+		// Second call fails fast with the SAME typed error.
+		await expect(detector.detect('text')).rejects.toBeInstanceOf(
+			MemoryPiiDetectorError,
+		);
+	});
+});

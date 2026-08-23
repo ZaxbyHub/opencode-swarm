@@ -1,0 +1,208 @@
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { loadDatabaseCtor } from '../../../src/db/sqlite-loader';
+import {
+	DEFAULT_MEMORY_CONFIG,
+	resolveSqliteDatabasePath,
+	SQLiteMemoryProvider,
+	verifyMemoryEventChainRows,
+	type MemoryEventRow,
+} from '../../../src/memory';
+import { evictAndClose } from '../../../src/memory/provider-pool';
+
+let tmpDir: string;
+
+beforeEach(async () => {
+	tmpDir = await fs.realpath(
+		await fs.mkdtemp(path.join(os.tmpdir(), 'swarm-memory-audit-')),
+	);
+});
+
+afterEach(async () => {
+	evictAndClose(tmpDir);
+	await fs.rm(tmpDir, { recursive: true, force: true });
+});
+
+function sqliteConfig() {
+	return {
+		...DEFAULT_MEMORY_CONFIG,
+		enabled: true,
+		provider: 'sqlite' as const,
+	};
+}
+
+function openRaw() {
+	const dbPath = resolveSqliteDatabasePath(tmpDir, sqliteConfig());
+	return new (loadDatabaseCtor())(dbPath);
+}
+
+/** Insert records through the provider so events accumulate per write. */
+async function seedRecords(provider: SQLiteMemoryProvider, count: number) {
+	for (let i = 0; i < count; i++) {
+		const record = {
+			id: `mem_${String(i).padStart(16, '0')}`,
+			scope: { type: 'workspace', workspaceId: 'w' },
+			kind: 'code_pattern',
+			text: `audit chain probe record ${i}`,
+			tags: [],
+			confidence: 0.5,
+			stability: 'ephemeral' as const,
+			source: { type: 'manual' as const },
+			createdAt: new Date().toISOString(),
+			updatedAt: new Date().toISOString(),
+			contentHash: '0'.repeat(64),
+			metadata: {},
+		};
+		// Bypass full validation (hash/id) — we only need event rows; use the
+		// event append path directly through recordEvent + a curated upsert of
+		// a valid record is heavier than needed. recordEvent is enough.
+		await provider.recordEvent('pii_rejected', record.id, 'probe event');
+	}
+}
+
+describe('memory_events hash chain (#1466 migration v13)', () => {
+	test('fresh database initializes with an intact chain and matching head', async () => {
+		const provider = new SQLiteMemoryProvider(tmpDir, sqliteConfig());
+		try {
+			await provider.initialize();
+			await seedRecords(provider, 3);
+			const report = await provider.verifyAuditChain();
+			expect(report.supported).toBe(true);
+			expect(report.verified).toBe(true);
+			expect(report.legacyRows).toBe(0);
+			expect(report.chainedRows).toBe(report.totalRows);
+			expect(report.totalRows).toBeGreaterThanOrEqual(3);
+			expect(report.headMatch).toBe(true);
+		} finally {
+			provider.close?.();
+		}
+	});
+
+	test('tampering a middle row content breaks verification at the next row', async () => {
+		const provider = new SQLiteMemoryProvider(tmpDir, sqliteConfig());
+		try {
+			await provider.initialize();
+			await seedRecords(provider, 3);
+			const db = openRaw();
+			db.run(
+				"UPDATE memory_events SET reason = 'tampered' WHERE rowid = (SELECT MIN(rowid) + 1 FROM memory_events)",
+			);
+			db.close();
+			const report = await provider.verifyAuditChain();
+			expect(report.verified).toBe(false);
+			expect(report.divergence).toBeDefined();
+			expect(report.divergence?.detail).toContain('prev_hash mismatch');
+		} finally {
+			provider.close?.();
+		}
+	});
+
+	test('deleting a middle row breaks verification', async () => {
+		const provider = new SQLiteMemoryProvider(tmpDir, sqliteConfig());
+		try {
+			await provider.initialize();
+			await seedRecords(provider, 3);
+			const db = openRaw();
+			db.run(
+				'DELETE FROM memory_events WHERE rowid = (SELECT MIN(rowid) + 1 FROM memory_events)',
+			);
+			db.close();
+			const report = await provider.verifyAuditChain();
+			expect(report.verified).toBe(false);
+		} finally {
+			provider.close?.();
+		}
+	});
+
+	test('tampering the LAST row is caught by the _meta chain head', async () => {
+		const provider = new SQLiteMemoryProvider(tmpDir, sqliteConfig());
+		try {
+			await provider.initialize();
+			await seedRecords(provider, 3);
+			const db = openRaw();
+			db.run(
+				"UPDATE memory_events SET reason = 'tampered tail' WHERE rowid = (SELECT MAX(rowid) FROM memory_events)",
+			);
+			db.close();
+			const report = await provider.verifyAuditChain();
+			// Links still hold (nothing chains off the tampered tail), but the
+			// recorded head no longer matches the recomputed last-row hash.
+			expect(report.headMatch).toBe(false);
+			expect(report.verified).toBe(false);
+		} finally {
+			provider.close?.();
+		}
+	});
+
+	test('appending a rogue row outside the provider breaks verification', async () => {
+		const provider = new SQLiteMemoryProvider(tmpDir, sqliteConfig());
+		try {
+			await provider.initialize();
+			await seedRecords(provider, 2);
+			const db = openRaw();
+			db.run(
+				`INSERT INTO memory_events (id, operation, target_id, reason, timestamp, event_json, prev_hash)
+				VALUES ('rogue', 'upsert', 'x', 'rogue', '2026-08-22T00:00:00.000Z', NULL, 'GENESIS')`,
+			);
+			db.close();
+			const report = await provider.verifyAuditChain();
+			expect(report.verified).toBe(false);
+			expect(report.divergence).toBeDefined();
+		} finally {
+			provider.close?.();
+		}
+	});
+
+	test('chain backfill is idempotent across re-initialization', async () => {
+		const provider = new SQLiteMemoryProvider(tmpDir, sqliteConfig());
+		await provider.initialize();
+		await seedRecords(provider, 2);
+		provider.close?.();
+
+		const second = new SQLiteMemoryProvider(tmpDir, sqliteConfig());
+		try {
+			await second.initialize();
+			const report = await second.verifyAuditChain();
+			expect(report.verified).toBe(true);
+		} finally {
+			second.close?.();
+		}
+	});
+});
+
+describe('verifyMemoryEventChainRows (pure)', () => {
+	function row(partial: Partial<MemoryEventRow>): MemoryEventRow {
+		return {
+			id: partial.id ?? 'e1',
+			operation: partial.operation ?? 'upsert',
+			target_id: partial.target_id ?? 't',
+			reason: partial.reason ?? null,
+			timestamp: partial.timestamp ?? '2026-08-22T00:00:00.000Z',
+			event_json: partial.event_json ?? null,
+			prev_hash: partial.prev_hash ?? null,
+		};
+	}
+
+	test('a pre-v13 NULL prefix is reported as legacy, not a break', () => {
+		const legacy = row({ id: 'legacy', prev_hash: null });
+		const report = verifyMemoryEventChainRows([legacy], null);
+		expect(report.legacyRows).toBe(1);
+		expect(report.chainedRows).toBe(0);
+		expect(report.verified).toBe(true);
+	});
+
+	test('first chained row must anchor at GENESIS', () => {
+		const bad = row({ id: 'bad', prev_hash: 'deadbeef' });
+		const report = verifyMemoryEventChainRows([bad], null);
+		expect(report.verified).toBe(false);
+		expect(report.divergence?.detail).toContain('chain anchor mismatch');
+	});
+
+	test('empty table with no stored head verifies', () => {
+		const report = verifyMemoryEventChainRows([], null);
+		expect(report.verified).toBe(true);
+		expect(report.headMatch).toBe(true);
+	});
+});

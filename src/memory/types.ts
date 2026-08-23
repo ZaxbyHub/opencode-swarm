@@ -114,6 +114,18 @@ export interface MemoryRecord {
 	providerVersion?: string;
 	/** Source git revision of the producer, when available. */
 	sourceRevision?: string;
+	// #1466 Phase 6 provenance — denormalized to memory_items columns by the
+	// SQLite provider. All optional so pre-#1466 records (and the JSONL
+	// provider) stay valid; contentHash/id derive from {scope,kind,text} only.
+	/** Unit-of-work (plan task) identity that produced the record. Never
+	 * defaulted to sessionID — see MemoryContext.unitId. */
+	sourceTaskId?: string;
+	/** Embedding model version at write time (Phase 4 swaps join on this). */
+	embeddingModelVersion?: string;
+	/** When this memory became authoritative (supersede chains). */
+	validFrom?: string;
+	/** Why this record superseded its predecessor. */
+	supersedesReason?: string;
 }
 
 export interface MemoryProposal {

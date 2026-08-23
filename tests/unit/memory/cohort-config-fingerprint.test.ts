@@ -35,16 +35,40 @@ function makeTmp(prefix: string): string {
 
 describe('#1850 cohort config fingerprint inputs (acceptance #10, #13)', () => {
 	test('computeRedactionPolicyVersion is deterministic', () => {
-		const a = computeRedactionPolicyVersion(true);
-		const b = computeRedactionPolicyVersion(true);
+		const a = computeRedactionPolicyVersion({ rejectDurableSecrets: true });
+		const b = computeRedactionPolicyVersion({ rejectDurableSecrets: true });
 		expect(a).toBe(b);
 	});
 
 	test('rejectDurableSecrets=true differs from false', () => {
-		const withReject = computeRedactionPolicyVersion(true);
-		const withoutReject = computeRedactionPolicyVersion(false);
+		const withReject = computeRedactionPolicyVersion({
+			rejectDurableSecrets: true,
+		});
+		const withoutReject = computeRedactionPolicyVersion({
+			rejectDurableSecrets: false,
+		});
 		expect(withReject).not.toBe(withoutReject);
 		expect(withReject).toBeGreaterThan(withoutReject);
+	});
+
+	test('#1466 PII settings change the policy version', () => {
+		const base = computeRedactionPolicyVersion({ rejectDurableSecrets: true });
+		const withDetect = computeRedactionPolicyVersion({
+			rejectDurableSecrets: true,
+			detectPii: true,
+		});
+		const withReject = computeRedactionPolicyVersion({
+			rejectDurableSecrets: true,
+			rejectDurablePii: true,
+		});
+		const withNer = computeRedactionPolicyVersion({
+			rejectDurableSecrets: true,
+			piiDetector: 'ner',
+		});
+		expect(withDetect).not.toBe(base);
+		expect(withReject).not.toBe(base);
+		expect(withNer).not.toBe(base);
+		expect(withDetect).not.toBe(withReject);
 	});
 
 	test('version is a positive integer', () => {
@@ -92,17 +116,25 @@ describe('#1850 cohort config fingerprint inputs (acceptance #10, #13)', () => {
 	 * The value below was recorded BEFORE the #2062 F-008 undefined-to-null
 	 * change to `stableCanonicalStringify` and is unchanged after it — empirical
 	 * proof that the change did not invalidate persisted fingerprints.
+	 *
+	 * #1466: version 2 of the algorithm — the digest changes for unchanged
+	 * user config because REDACTION_POLICY_SALT went 1→2 (PII policy fields
+	 * joined computeRedactionPolicyVersion) and a secret-pattern family was
+	 * added. Per the FINGERPRINT_ALGORITHM_VERSION bump rule this is an
+	 * algorithm bump: legacy v1 cohort files fail open via the version gate
+	 * with a "re-run /swarm memory link" advisory instead of a false
+	 * config-mismatch throw. The golden below pins the v2 algorithm.
 	 */
-	test('golden digest pins the fingerprint algorithm (version 1)', () => {
+	test('golden digest pins the fingerprint algorithm (version 2)', () => {
 		const golden: MemoryCohortFingerprintInput = {
 			provider: 'sqlite',
-			redaction_policy_version: 1000042,
+			redaction_policy_version: 2000029,
 			embedding_model: 'test-model',
 			embedding_dimension: 384,
 			embedding_version: 'v1',
 		};
-		expect(computeMemoryCohortFingerprint(golden)).toBe('b805d0308348');
-		expect(FINGERPRINT_ALGORITHM_VERSION).toBe(1);
+		expect(computeMemoryCohortFingerprint(golden)).toBe('125223b54843');
+		expect(FINGERPRINT_ALGORITHM_VERSION).toBe(2);
 	});
 
 	test('golden digest is independent of key insertion order', () => {
@@ -110,10 +142,10 @@ describe('#1850 cohort config fingerprint inputs (acceptance #10, #13)', () => {
 			embedding_version: 'v1',
 			embedding_dimension: 384,
 			embedding_model: 'test-model',
-			redaction_policy_version: 1000042,
+			redaction_policy_version: 2000029,
 			provider: 'sqlite',
 		} as MemoryCohortFingerprintInput;
-		expect(computeMemoryCohortFingerprint(reordered)).toBe('b805d0308348');
+		expect(computeMemoryCohortFingerprint(reordered)).toBe('125223b54843');
 	});
 });
 
@@ -136,16 +168,23 @@ describe('#2062 F-012 classifyStoredFingerprintAlgorithmVersion', () => {
 	});
 
 	test('absent version is legacy v1, NOT the current version', () => {
-		// The core bug. With current=2 an absent field must resolve to 1 and
-		// therefore MISMATCH — not silently equal current and byte-compare.
+		// The core bug. With an explicit current an absent field must resolve
+		// to 1 and therefore MISMATCH — not silently equal current and
+		// byte-compare.
 		expect(classifyStoredFingerprintAlgorithmVersion(undefined, 2)).toEqual({
 			status: 'mismatch',
 			storedVersion: 1,
 			currentVersion: 2,
 		});
-		// ...while today (current === 1) it still compares, so no forced re-link.
+		// #1466 made the real current version 2 (REDACTION_POLICY_SALT bump),
+		// so the no-arg call — which compares against the CURRENT version —
+		// now also reports a mismatch for absent fields: legacy v1 files fail
+		// open with the re-link advisory instead of byte-comparing against a
+		// v2 digest.
 		expect(classifyStoredFingerprintAlgorithmVersion(undefined)).toEqual({
-			status: 'comparable',
+			status: 'mismatch',
+			storedVersion: 1,
+			currentVersion: 2,
 		});
 	});
 
@@ -219,10 +258,16 @@ describe('#1850 SQLite provider fingerprint enforcement (acceptance #10 fail-clo
 		dirs.push(cohortRoot);
 		const dir = makeTmp('fp-worktree-mismatch-');
 		dirs.push(dir);
-		// Write a cohort-config.json with a DELIBERATELY wrong fingerprint.
+		// Write a cohort-config.json carrying the CURRENT algorithm version
+		// with a DELIBERATELY wrong fingerprint. (#1466: without
+		// algorithm_version the file is legacy v1, which now takes the
+		// version-mismatch fail-open path — see the legacy tests below.)
 		writeFileSync(
 			path.join(cohortRoot, 'memory-cohort-config.json'),
-			JSON.stringify({ fingerprint: 'deadbeefdead' }),
+			JSON.stringify({
+				fingerprint: 'deadbeefdead',
+				algorithm_version: 2,
+			}),
 			'utf-8',
 		);
 		const provider = new SQLiteMemoryProvider(
@@ -364,15 +409,21 @@ describe('#2062 F-012 cohort config algorithm_version handling', () => {
 		provider.close();
 	});
 
-	test('legacy file with no algorithm_version still fails closed on a real mismatch', async () => {
-		// The version default must not weaken the fail-closed guarantee.
+	test('legacy file with no algorithm_version fails open after the #1466 v2 bump (no strand)', async () => {
+		// Pre-#1466 this test asserted a fail-closed throw for absent-version
+		// files. FINGERPRINT_ALGORITHM_VERSION is now 2, so an absent version
+		// means legacy v1: digests are not comparable, and the sanctioned
+		// upgrade path is fail-open with the re-link advisory (memory is
+		// never stranded over an algorithm bump alone).
 		const cohortRoot = writeStoredConfig({ fingerprint: 'deadbeefdead' });
 		const provider = new SQLiteMemoryProvider(
 			worktree(),
 			DEFAULT_MEMORY_CONFIG,
 			cohortRoot,
 		);
-		await expect(provider.initialize()).rejects.toThrow(/fingerprint mismatch/);
+		// Opens (warns) instead of throwing.
+		await provider.initialize();
+		provider.close();
 	});
 
 	test('matching algorithm_version keeps the fail-closed mismatch throw', async () => {

@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { DURABLE_MEMORY_KINDS, EVIDENCE_REQUIRED_KINDS } from './config';
 import { MemoryValidationError } from './errors';
+import { computePiiScore, type PiiFinding, summarizePiiFindings } from './pii';
 import { containsSecret } from './redaction';
 import { MEMORY_RECALL_SENTINEL } from './sentinel';
 import type {
@@ -201,6 +202,12 @@ export const MemoryRecordSchema = z
 		schemaVersion: z.number().int().min(0).optional(),
 		providerVersion: z.string().optional(),
 		sourceRevision: z.string().optional(),
+		// #1466 Phase 6 provenance (all optional for back-compat; contentHash
+		// derives from {scope,kind,text} only, so these never affect id/hash).
+		sourceTaskId: z.string().optional(),
+		embeddingModelVersion: z.string().optional(),
+		validFrom: z.string().datetime().optional(),
+		supersedesReason: z.string().optional(),
 	})
 	.strict();
 
@@ -416,7 +423,18 @@ export function hasEvidenceSource(record: MemoryRecord): boolean {
 
 export function validateMemoryRecordRules(
 	record: MemoryRecord,
-	options: { rejectDurableSecrets: boolean },
+	options: {
+		rejectDurableSecrets: boolean;
+		/**
+		 * #1466: precomputed PII findings for the record text. The DETECTOR is
+		 * async (NER), so callers run it and pass results in; this function
+		 * owns the threshold decision so it stays the single enforcement point.
+		 * Absent findings = no enforcement (JSONL import, maintenance paths).
+		 */
+		piiFindings?: PiiFinding[];
+		rejectDurablePii?: boolean;
+		piiThreshold?: number;
+	},
 ): MemoryRecord {
 	const parsed = MemoryRecordSchema.parse(record);
 	// DD-14: stored memory text must never contain the recall-injection sentinel
@@ -428,6 +446,15 @@ export function validateMemoryRecordRules(
 	if (parsed.text.includes(MEMORY_RECALL_SENTINEL)) {
 		throw new MemoryValidationError(
 			'memory text cannot contain the recall sentinel header',
+		);
+	}
+	// #1466 DD-14 (bundle anchor): detection also trusts the `bundle_` marker
+	// emitted by `createBundleId`, so memory text must never contain the
+	// literal prefix — otherwise a stored memory could forge "recall already
+	// injected" and suppress its own recall.
+	if (parsed.text.includes('bundle_')) {
+		throw new MemoryValidationError(
+			'memory text cannot contain the recall bundle marker prefix',
 		);
 	}
 	const expectedHash = computeMemoryContentHash(parsed);
@@ -485,6 +512,26 @@ export function validateMemoryRecordRules(
 			))
 	) {
 		throw new MemoryValidationError('durable memory contains a likely secret');
+	}
+	// #1466: PII rejection at the single write funnel. Score = max finding
+	// confidence; rejection fires when the score EXCEEDS the threshold.
+	if (
+		options.rejectDurablePii &&
+		parsed.stability === 'durable' &&
+		options.piiFindings !== undefined
+	) {
+		const score = computePiiScore(options.piiFindings);
+		if (score > (options.piiThreshold ?? 0.7)) {
+			const summary = summarizePiiFindings(options.piiFindings);
+			throw new MemoryValidationError(
+				`durable memory exceeds the PII threshold: score ${score.toFixed(2)} (types: ${
+					Object.entries(summary.countsByType)
+						.map(([t, n]) => `${t}x${n}`)
+						.join(', ') || 'none'
+				}) exceeded threshold ${(options.piiThreshold ?? 0.7).toFixed(2)}`,
+				'memory_pii_rejected',
+			);
+		}
 	}
 	const eventIds = parsed.metadata.outcomeEventIds;
 	if (eventIds !== undefined) {

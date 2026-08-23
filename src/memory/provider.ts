@@ -111,6 +111,17 @@ export interface MemoryProvider {
 	listRewardEvents?(
 		filter?: MemoryRewardEventFilter,
 	): Promise<MemoryRewardEvent[]>;
+	/**
+	 * #1466: append a gateway-emitted audit event to the provider's event log
+	 * (`memory_events`, hash-chained on the SQLite provider). Narrowly typed to
+	 * the PII-rejection operation — provider-internal operations stay internal.
+	 * Optional: the local-jsonl provider has no event log and simply omits it.
+	 */
+	recordEvent?(
+		operation: 'pii_rejected',
+		targetId: string,
+		reason?: string,
+	): Promise<void>;
 	compactMaintenance?(
 		options?: MemoryCompactOptions,
 	): Promise<MemoryCompactResult>;

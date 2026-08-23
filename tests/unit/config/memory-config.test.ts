@@ -65,7 +65,13 @@ describe('MemoryConfigSchema', () => {
 				propagationLookbackDays: 30,
 			},
 			writes: { mode: 'propose' },
-			redaction: { rejectDurableSecrets: true },
+			redaction: {
+				rejectDurableSecrets: true,
+				detectPii: false,
+				piiDetector: "regex",
+				rejectDurablePii: false,
+				piiThreshold: 0.7,
+			},
 			maintenance: {
 				lowUtilityMaxConfidence: 0.45,
 				lowUtilityMinAgeDays: 30,

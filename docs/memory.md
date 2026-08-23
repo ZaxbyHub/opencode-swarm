@@ -37,7 +37,11 @@ Enable local memory in `.opencode/opencode-swarm.json`:
       "mode": "propose"
     },
     "redaction": {
-      "rejectDurableSecrets": true
+      "rejectDurableSecrets": true,
+      "detectPii": false,
+      "piiDetector": "regex",
+      "rejectDurablePii": false,
+      "piiThreshold": 0.7
     },
     "embeddings": {
       "enabled": false,
@@ -477,8 +481,71 @@ The detector is intentionally conservative and covers obvious cases:
 - private key blocks
 - `Authorization: Bearer ...`
 - `.env` style `*_KEY=`, `*_TOKEN=`, `*_SECRET=`, and `*_PASSWORD=` entries
+- GitLab `glpat-`/`glptt-` tokens, Slack `xox[abprs]-` tokens, JWTs, Stripe
+  `sk_live_`/`rk_live_` keys, Google `AIza...` keys, OpenSSH private key
+  blocks, and AWS secret access keys (label-anchored, plus the
+  same-line-after-`AKIA` context heuristic) — issue #1466 (DD-05)
+- bare `?key=...` URL query parameters are NOT redacted (the env-secret
+  pattern requires at least one uppercase `PREFIX_` segment) — issue #1466
+  (DD-06)
 
 Durable memories with likely secrets are rejected. Recall output is redacted.
+
+## Privacy, Provenance, and Audit Integrity (issue #1466)
+
+**PII detection (opt-in).** `memory.redaction.detectPii: true` runs a PII
+detector over durable memory text at the write boundary and attaches a
+summary (types, counts, score — never matched text) to the proposal.
+`memory.redaction.rejectDurablePii: true` additionally rejects proposals
+whose PII score exceeds `memory.redaction.piiThreshold` (default `0.7`,
+strictly greater-than); the rejection is recorded in the audit log as a
+`pii_rejected` event with types/score only. Two implementations:
+`regex` (default; dependency-free email / phone / Luhn-validated credit
+card / SSN / IP detection) and `ner` (person/organization/location via the
+OPTIONAL `@xenova/transformers` peer dependency — install it yourself or
+keep `piiDetector: "regex"`; a missing install fails closed with a typed
+error carrying install instructions). Microsoft Presidio remains a
+documented alternative for Python-side deployments; v1 ships the
+transformers.js NER option and the regex default. All detection defaults
+are OFF — the default install performs no PII detection.
+
+**Provenance columns (migration v12).** Every `memory_items` row carries
+`source_task_id` (the unit-of-work identity that produced it, from the
+gateway context), `agent_role`, `embedding_model_version` (populated when
+embeddings are active — the join key for future embedding-model swaps),
+`valid_from` (when this memory became authoritative), and
+`supersedes_reason` (why a supersede chain replaced the predecessor).
+Legacy rows backfill with safe defaults (`''` / `'unknown'` /
+`valid_from = createdAt`).
+
+**Audit-log hash chain (migration v13).** Every `memory_events` row stores
+`prev_hash` — the SHA-256 of the full previous row — forming a
+tamper-evident chain anchored at `GENESIS`, with the head hash mirrored
+into `_meta`. `/swarm memory audit-verify [--json]` lazily walks the chain
+and reports the first divergence, deleted-row breaks, and last-row
+tampering (via the chain head). It is a SQLite-provider feature; the
+local-jsonl provider reports the gap explicitly. Chain verification runs
+only on demand — the write path adds one hash per event.
+
+**Sentinel hardening (DD-14).** Recall-injection blocks embed an
+unforgeable `bundle_<timestamp>_<hash>` marker; stored memory text
+containing the `bundle_` prefix is rejected at write time, so a stored
+memory can no longer forge "recall already injected" and silently suppress
+its own recall.
+
+**`--fixtures` traversal defense (DD-24).** `/swarm memory evaluate
+--fixtures <dir>` resolves the path against the filesystem (realpath) and
+rejects symlinks or non-canonical paths that escape the project directory
+or the bundled fixtures directory.
+
+**Recall-quality regression gate.** `bun run check:memory-recall` runs the
+golden recall evaluation twice (a determinism gate), compares
+`precision@k` against the pinned baseline
+(`tests/fixtures/memory-recall-baseline.json`), and fails on a drop
+greater than the baseline tolerance (0.05). CI runs it as the
+`memory-recall-regression` job. Regenerate the baseline with
+`bun run scripts/memory-recall-regression.ts --update` when an intentional
+metric change lands, and justify it in the PR.
 
 ## Inspecting Or Resetting Local Memory
 

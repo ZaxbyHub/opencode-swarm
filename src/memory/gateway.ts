@@ -9,6 +9,12 @@ import {
 import { MemoryDisabledError, MemoryValidationError } from './errors';
 import { LocalJsonlMemoryProvider } from './local-jsonl-provider';
 import { canonicalOutcomePayload } from './outcome-events';
+import {
+	computePiiScore,
+	createPiiDetector,
+	type PiiDetector,
+	type PiiFinding,
+} from './pii';
 import { toRecallBundle } from './prompt-block';
 import type {
 	MemoryProposalStore,
@@ -104,6 +110,8 @@ export class MemoryGateway {
 	private readonly vettedRoot: VettedMemoryRoot;
 	private readonly now: () => Date;
 	private disposed = false;
+	/** #1466: cached PII detector instance (NER keeps its loaded pipeline here). */
+	private piiDetector: PiiDetector | undefined;
 
 	constructor(
 		private readonly context: MemoryContext,
@@ -292,6 +300,11 @@ export class MemoryGateway {
 			redactProposalField('relatedMemoryIds', normalizeMemoryText(id)),
 		);
 		let proposalText = `${input.operation}:${targetMemoryId ?? ''}`;
+		// #1466: detect-only PII summary attached to proposal metadata (never
+		// matched text) when memory.redaction.detectPii is enabled.
+		let piiSummary:
+			| { score: number; countsByType: Record<string, number> }
+			| undefined;
 
 		if (needsRecord) {
 			if (!input.kind) {
@@ -319,6 +332,11 @@ export class MemoryGateway {
 				source: sourceFromEvidence(evidenceRefs, this.context),
 				metadata: recordMetadata,
 			});
+			// #1466: PII policy first (no-op by default); then the base rule
+			// set (evidence/secret/sentinel validation) — the PII helper also
+			// validates internally when enabled, but the default-off path must
+			// still enforce every non-PII rule.
+			piiSummary = await this.enforceDurablePiiPolicy(proposedRecord);
 			validateMemoryRecordRules(proposedRecord, {
 				rejectDurableSecrets: this.config.redaction.rejectDurableSecrets,
 			});
@@ -371,7 +389,7 @@ export class MemoryGateway {
 			reviewedAt,
 			rejectionReason,
 			createdAt,
-			metadata: {},
+			metadata: piiSummary ? { pii: piiSummary } : {},
 		};
 		return this.provider.createProposal(proposal);
 	}
@@ -410,6 +428,9 @@ export class MemoryGateway {
 
 	async upsertCurated(record: MemoryRecord): Promise<MemoryRecord> {
 		this.assertEnabled();
+		// #1466: PII enforcement covers the curator write path too — the
+		// enforce helper re-validates the full rule set with findings attached.
+		await this.enforceDurablePiiPolicy(record);
 		const parsed = validateMemoryRecordRules(record, {
 			rejectDurableSecrets: this.config.redaction.rejectDurableSecrets,
 		});
@@ -453,7 +474,13 @@ export class MemoryGateway {
 				metadata: { outcomeQuestion: question },
 			});
 			const existing = await this.provider.get(candidate.id);
-			if (!existing) await this.provider.upsert(candidate);
+			if (!existing) {
+				// #1466: the outcome-evidence record embeds the (user-supplied)
+				// question text — run PII enforcement on it like any other
+				// durable write.
+				await this.enforceDurablePiiPolicy(candidate);
+				await this.provider.upsert(candidate);
+			}
 			targetId = candidate.id;
 		}
 		// A write-through publication failure may cause the exact tool invocation
@@ -523,7 +550,77 @@ export class MemoryGateway {
 		}
 		const parsed = validateCuratorMemoryDecision(decision);
 		const resolved = this.resolveCuratorDecision(parsed);
+		// #1466: PII enforcement on curator-materialized durable records
+		// (add / supersede replacement). The records were already rule-validated
+		// by createRecordFromNew; re-validation with findings is idempotent.
+		if (resolved.action === 'add' && resolved.memory) {
+			await this.enforceDurablePiiPolicy(resolved.memory);
+		} else if (resolved.action === 'supersede' && resolved.replacement) {
+			await this.enforceDurablePiiPolicy(resolved.replacement);
+		}
 		return this.provider.applyCuratorDecision(resolved);
+	}
+
+	/**
+	 * #1466: PII enforcement at the write boundary — the single helper every
+	 * durable-record-materializing path funnels through (propose,
+	 * upsertCurated, recordOutcome-created records, applyCuratorDecision).
+	 *
+	 * - `rejectDurablePii=true`: runs the detector, validates through
+	 *   `validateMemoryRecordRules` (threshold logic lives only there), and on
+	 *   rejection logs a `pii_rejected` audit event (types/score only, never
+	 *   matched text) before rethrowing. The proposal is NOT persisted —
+	 *   storing rejected PII text would defeat the control.
+	 * - `detectPii=true` (reject off): returns a matched-text-free summary for
+	 *   metadata annotation.
+	 * - Both off (default): returns undefined without running anything.
+	 *
+	 * A detector that cannot run (opt-in NER without the peer dependency)
+	 * fails closed with a typed error — never a silent skip.
+	 */
+	private async enforceDurablePiiPolicy(
+		record: MemoryRecord,
+	): Promise<
+		{ score: number; countsByType: Record<string, number> } | undefined
+	> {
+		const { detectPii, rejectDurablePii } = this.config.redaction;
+		if (!detectPii && !rejectDurablePii) return undefined;
+		if (!this.piiDetector) {
+			this.piiDetector = createPiiDetector(this.config.redaction.piiDetector);
+		}
+		const findings: PiiFinding[] = await this.piiDetector.detect(record.text);
+		// Always run the FULL rule set with findings attached (threshold logic
+		// lives only in validateMemoryRecordRules), then log the audit event on
+		// a PII rejection before rethrowing.
+		try {
+			validateMemoryRecordRules(record, {
+				rejectDurableSecrets: this.config.redaction.rejectDurableSecrets,
+				piiFindings: findings,
+				rejectDurablePii,
+				piiThreshold: this.config.redaction.piiThreshold,
+			});
+		} catch (err) {
+			if (
+				err instanceof MemoryValidationError &&
+				err.code === 'memory_pii_rejected'
+			) {
+				await this.provider.recordEvent?.(
+					'pii_rejected',
+					record.id,
+					err.message,
+				);
+			}
+			throw err;
+		}
+		return findings.length > 0
+			? {
+					score: computePiiScore(findings),
+					countsByType: findings.reduce<Record<string, number>>((acc, f) => {
+						acc[f.type] = (acc[f.type] ?? 0) + 1;
+						return acc;
+					}, {}),
+				}
+			: undefined;
 	}
 
 	createRecord(input: {
@@ -538,6 +635,8 @@ export class MemoryGateway {
 		metadata?: Record<string, unknown>;
 		anchors?: MemoryAnchor[];
 		outcomes?: MemoryOutcome[];
+		/** #1466: audit reason stamped when this record supersedes another. */
+		supersedesReason?: string;
 	}): MemoryRecord {
 		const now = this.now().toISOString();
 		const text = normalizeMemoryText(input.text);
@@ -579,10 +678,19 @@ export class MemoryGateway {
 				: undefined,
 			producerSessionId: this.context.sessionID,
 			producerAgentRole: this.context.agentRole,
-			redactionPolicyVersion: computeRedactionPolicyVersion(
-				this.config.redaction.rejectDurableSecrets,
-			),
+			redactionPolicyVersion: computeRedactionPolicyVersion({
+				rejectDurableSecrets: this.config.redaction.rejectDurableSecrets,
+				detectPii: this.config.redaction.detectPii,
+				rejectDurablePii: this.config.redaction.rejectDurablePii,
+				piiDetector: this.config.redaction.piiDetector,
+			}),
 			providerVersion: this.provider.name,
+			// #1466 Phase 6 provenance. sourceTaskId comes from the unit-of-work
+			// identity and is never defaulted to sessionID (MemoryContext.unitId
+			// contract). validFrom records when this memory became authoritative.
+			sourceTaskId: this.context.unitId,
+			validFrom: now,
+			supersedesReason: input.supersedesReason,
 		};
 		return record;
 	}

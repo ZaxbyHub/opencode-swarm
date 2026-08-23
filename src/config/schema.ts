@@ -1835,8 +1835,21 @@ export const MemoryConfigSchema = z.object({
 	redaction: z
 		.object({
 			rejectDurableSecrets: z.boolean().default(true),
+			/** #1466: run the PII detector at the write boundary (opt-in). */
+			detectPii: z.boolean().default(false),
+			/** #1466: 'regex' (dependency-free default) or 'ner' (optional peer dep). */
+			piiDetector: z.enum(['regex', 'ner']).default('regex'),
+			/** #1466: reject durable memories whose PII score exceeds the threshold. */
+			rejectDurablePii: z.boolean().default(false),
+			piiThreshold: z.number().min(0).max(1).default(0.7),
 		})
-		.default({ rejectDurableSecrets: true }),
+		.default({
+			rejectDurableSecrets: true,
+			detectPii: false,
+			piiDetector: 'regex',
+			rejectDurablePii: false,
+			piiThreshold: 0.7,
+		}),
 	maintenance: z
 		.object({
 			/** @deprecated superseded by maintenance.importance (issue #1464). */
