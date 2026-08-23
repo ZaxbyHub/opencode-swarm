@@ -196,6 +196,91 @@ describe('memory_items provenance columns (#1466 migration v12)', () => {
 		await later.dispose();
 	});
 
+	// Final-critic fix (PR #2310 feedback): the reward-capture hot path
+	// (recordOutcome → appendOutcome) parses the stored row and REWRITES it.
+	// Without the column read-back merge, that rewrite reset source_task_id
+	// to '' — the provenance this PR ships silently evaporated on the first
+	// outcome. Pinned here end-to-end through the gateway.
+	test('appendOutcome preserves source_task_id (final-critic: no column clobber)', async () => {
+		const gateway = new MemoryGateway(
+			{
+				directory: tmpDir,
+				sessionID: 'session-a',
+				agentRole: 'coder',
+				unitId: '5.6',
+			},
+			{
+				config: sqliteConfig(),
+				now: () => new Date('2026-08-22T10:00:00.000Z'),
+			},
+		);
+		const record = gateway.createRecord({
+			kind: 'code_pattern',
+			text: 'outcome provenance preservation probe',
+			source: { type: 'file', filePath: 'src/probe.ts' },
+		});
+		await gateway.upsertCurated(record);
+		expect(readProvenance()[0].source_task_id).toBe('5.6');
+
+		await gateway.recordOutcome({
+			memoryId: record.id,
+			outcome: 'useful',
+		});
+		const afterOutcome = readProvenance();
+		expect(afterOutcome).toHaveLength(1);
+		expect(afterOutcome[0].source_task_id).toBe('5.6');
+		expect(afterOutcome[0].agent_role).toBe('coder');
+		expect(afterOutcome[0].valid_from).toBe(record.createdAt);
+
+		await gateway.recordOutcome({
+			memoryId: record.id,
+			outcome: 'corrected',
+			correction: 'Adjusted after review.',
+		});
+		const afterCorrection = readProvenance();
+		expect(afterCorrection[0].source_task_id).toBe('5.6');
+		await gateway.dispose();
+	});
+
+	test('exportJsonl carries provenance (final-critic: no export strip)', async () => {
+		const gateway = new MemoryGateway(
+			{
+				directory: tmpDir,
+				sessionID: 'session-a',
+				agentRole: 'coder',
+				unitId: '7.8',
+			},
+			{
+				config: sqliteConfig(),
+				now: () => new Date('2026-08-22T10:00:00.000Z'),
+			},
+		);
+		const record = gateway.createRecord({
+			kind: 'code_pattern',
+			text: 'export provenance probe',
+			source: { type: 'file', filePath: 'src/probe.ts' },
+		});
+		await gateway.upsertCurated(record);
+		const provider = new SQLiteMemoryProvider(tmpDir, sqliteConfig());
+		try {
+			const output = await provider.exportJsonl();
+			const fs = await import('node:fs');
+			const lines = fs
+				.readFileSync(output.memoriesPath, 'utf-8')
+				.trim()
+				.split('\n')
+				.filter(Boolean);
+			expect(lines).toHaveLength(1);
+			const exported = JSON.parse(lines[0]) as Record<string, unknown>;
+			expect(exported.sourceTaskId).toBe('7.8');
+			expect(exported.producerAgentRole).toBe('coder');
+			expect(exported.validFrom).toBe(record.createdAt);
+		} finally {
+			provider.close?.();
+		}
+		await gateway.dispose();
+	});
+
 	test('re-initialize is idempotent and backfill markers persist', async () => {
 		const provider = new SQLiteMemoryProvider(tmpDir, sqliteConfig());
 		await provider.initialize();

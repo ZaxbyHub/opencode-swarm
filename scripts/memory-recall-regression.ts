@@ -238,10 +238,10 @@ async function main(): Promise<number> {
 }
 
 // Run only when executed directly (bun run scripts/...), not when imported by
-// unit tests (tests/unit/memory/recall-regression-pin.test.ts). Both sides
-// are realpath-canonicalized: on Windows a symlink-invoked argv[1] would
-// otherwise differ from import.meta.url and silently no-op the gate (the
-// unsafe direction) — reviewer hardening, PR #2310 delta review.
+// unit tests (tests/unit/memory/recall-regression-pin.test.ts). argv[1] is
+// realpath-canonicalized; import.meta.url is runtime-canonical for direct
+// execution. A mismatch fails LOUD (realpathSync throws on an unresolvable
+// entry) — the gate never silently no-ops, the safe direction for CI.
 const isMain =
 	process.argv[1] !== undefined &&
 	import.meta.url ===

@@ -529,6 +529,63 @@ FROM memory_events ORDER BY rowid ASC`;
 interface MemoryItemRow {
 	id: string;
 	record_json: string;
+	// #1466 provenance columns (selected on read-back; see
+	// mergeProvenanceColumns — record_json deliberately omits these fields
+	// for old-binary compatibility, so the columns are authoritative).
+	source_task_id?: string;
+	agent_role?: string;
+	embedding_model_version?: string;
+	valid_from?: string | null;
+	supersedes_reason?: string | null;
+}
+
+/**
+ * Shared read for a single memory item INCLUDING the provenance columns.
+ * One constant = one bun query-cache slot (see backfillProvenanceColumns for
+ * the bounded-cache constraint); PR #2310 final-critic fix — every read path
+ * that parses a stored record must also read the columns so a
+ * parse→rewrite cycle (appendOutcome, curator update/supersede) cannot
+ * clobber provenance back to the ALTER TABLE defaults.
+ */
+const MEMORY_ITEM_BY_ID_SQL = `SELECT id, record_json, source_task_id, agent_role, embedding_model_version, valid_from, supersedes_reason FROM memory_items WHERE id = ? LIMIT 1`;
+
+/**
+ * Merge the provenance columns onto a record parsed from the (stripped)
+ * record_json. Columns win only where the parsed record lacks the field —
+ * in-memory records freshly stamped by the gateway keep their values.
+ */
+function mergeProvenanceColumns(
+	base: MemoryRecord,
+	row: Partial<
+		Pick<
+			MemoryItemRow,
+			| 'source_task_id'
+			| 'agent_role'
+			| 'embedding_model_version'
+			| 'valid_from'
+			| 'supersedes_reason'
+		>
+	>,
+): MemoryRecord {
+	return {
+		...base,
+		...(base.sourceTaskId === undefined && row.source_task_id !== undefined
+			? { sourceTaskId: row.source_task_id }
+			: {}),
+		...(base.producerAgentRole === undefined && row.agent_role !== undefined
+			? { producerAgentRole: row.agent_role }
+			: {}),
+		...(base.embeddingModelVersion === undefined &&
+		row.embedding_model_version !== undefined
+			? { embeddingModelVersion: row.embedding_model_version }
+			: {}),
+		...(base.validFrom === undefined && row.valid_from != null
+			? { validFrom: row.valid_from }
+			: {}),
+		...(base.supersedesReason === undefined && row.supersedes_reason != null
+			? { supersedesReason: row.supersedes_reason }
+			: {}),
+	};
 }
 
 interface FtsCandidateRow {
@@ -892,15 +949,16 @@ export class SQLiteMemoryProvider
 		db.run('BEGIN IMMEDIATE');
 		try {
 			const row = this.requireDb()
-				.query<MemoryItemRow, [string]>(
-					'SELECT id, record_json FROM memory_items WHERE id = ? LIMIT 1',
-				)
+				.query<MemoryItemRow, [string]>(MEMORY_ITEM_BY_ID_SQL)
 				.get(memoryId);
 			if (!row) throw new MemoryValidationError('target memory was not found');
 			let base = ensureOutcomeGeneration(
-				validateMemoryRecordRules(JSON.parse(row.record_json), {
-					rejectDurableSecrets: this.config.redaction.rejectDurableSecrets,
-				}),
+				validateMemoryRecordRules(
+					mergeProvenanceColumns(JSON.parse(row.record_json), row),
+					{
+						rejectDurableSecrets: this.config.redaction.rejectDurableSecrets,
+					},
+				),
 			);
 			if (base.metadata.deleted === true) {
 				throw new MemoryValidationError('target memory is deleted');
@@ -1523,7 +1581,7 @@ export class SQLiteMemoryProvider
 		const whereClause =
 			conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
-		let sql = `SELECT id, record_json FROM memory_items ${whereClause} ORDER BY updated_at DESC, id ASC`;
+		let sql = `SELECT id, record_json, source_task_id, agent_role, embedding_model_version, valid_from, supersedes_reason FROM memory_items ${whereClause} ORDER BY updated_at DESC, id ASC`;
 
 		if (typeof filter.limit === 'number') {
 			sql += ' LIMIT ?';
@@ -1798,12 +1856,39 @@ export class SQLiteMemoryProvider
 			includeExpired: true,
 			includeInactive: true,
 		});
+		// Final-critic fix (PR #2310): record_json omits the #1466 provenance
+		// fields, so an export of list() results would silently drop them and
+		// a sqlite→jsonl→import round-trip would lose attribution. Merge the
+		// authoritative columns back onto the exported records.
+		const provenanceById = new Map(
+			this.requireDb()
+				.query<
+					Pick<
+						MemoryItemRow,
+						| 'id'
+						| 'source_task_id'
+						| 'agent_role'
+						| 'embedding_model_version'
+						| 'valid_from'
+						| 'supersedes_reason'
+					>,
+					[]
+				>(
+					'SELECT id, source_task_id, agent_role, embedding_model_version, valid_from, supersedes_reason FROM memory_items',
+				)
+				.all()
+				.map((row) => [row.id, row] as const),
+		);
+		const enriched = memories.map((memory) => {
+			const row = provenanceById.get(memory.id);
+			return row ? mergeProvenanceColumns(memory, row) : memory;
+		});
 		const proposals = await this.listProposals();
 		const outcomeEvents = this.readOutcomeEvents();
 		const output = await writeJsonlExport(
 			this.rootDirectory,
 			this.config,
-			memories,
+			enriched,
 			proposals,
 			outcomeEvents,
 		);
@@ -2449,7 +2534,9 @@ export class SQLiteMemoryProvider
 
 	private *iterateMemoryRows(): IterableIterator<MemoryItemRow> {
 		yield* this.requireDb()
-			.query<MemoryItemRow, []>('SELECT id, record_json FROM memory_items')
+			.query<MemoryItemRow, []>(
+				'SELECT id, record_json, source_task_id, agent_role, embedding_model_version, valid_from, supersedes_reason FROM memory_items',
+			)
 			.iterate();
 	}
 
@@ -2458,6 +2545,12 @@ export class SQLiteMemoryProvider
 		outcomeEvents?: readonly MemoryOutcomeEvent[],
 	): MemoryRecord | null {
 		try {
+			// Deliberately NO provenance merge here: get()/list() return the
+			// stored record_json shape (stripped for old-binary compat), which
+			// keeps sqlite/local-jsonl provider parity. Provenance columns are
+			// merged only on the internal REWRITE paths (appendOutcome,
+			// insertOutcomeEvent, readActiveMemory) and on export, where losing
+			// them would clobber the columns back to defaults.
 			const base = validateMemoryRecordRules(JSON.parse(row.record_json), {
 				rejectDurableSecrets: this.config.redaction.rejectDurableSecrets,
 			});
@@ -2478,7 +2571,7 @@ export class SQLiteMemoryProvider
 	private loadMemories(): { records: MemoryRecord[]; invalidCount: number } {
 		const rows = this.requireDb()
 			.query<MemoryItemRow, []>(
-				'SELECT id, record_json FROM memory_items ORDER BY updated_at ASC',
+				'SELECT id, record_json, source_task_id, agent_role, embedding_model_version, valid_from, supersedes_reason FROM memory_items ORDER BY updated_at ASC',
 			)
 			.all();
 		const records: MemoryRecord[] = [];
@@ -2589,9 +2682,7 @@ export class SQLiteMemoryProvider
 
 	private readMemoryById(id: string): MemoryRecord | null {
 		const row = this.requireDb()
-			.query<MemoryItemRow, [string]>(
-				'SELECT id, record_json FROM memory_items WHERE id = ? LIMIT 1',
-			)
+			.query<MemoryItemRow, [string]>(MEMORY_ITEM_BY_ID_SQL)
 			.get(id);
 		return row ? this.parseMemoryRow(row) : null;
 	}
@@ -2649,15 +2740,13 @@ export class SQLiteMemoryProvider
 
 	private insertOutcomeEvent(event: MemoryOutcomeEvent): void {
 		const memoryRow = this.requireDb()
-			.query<MemoryItemRow, [string]>(
-				'SELECT id, record_json FROM memory_items WHERE id = ? LIMIT 1',
-			)
+			.query<MemoryItemRow, [string]>(MEMORY_ITEM_BY_ID_SQL)
 			.get(event.memoryId);
 		if (!memoryRow) {
 			throw new MemoryValidationError('target memory was not found');
 		}
 		const memory = validateMemoryRecordRules(
-			JSON.parse(memoryRow.record_json),
+			mergeProvenanceColumns(JSON.parse(memoryRow.record_json), memoryRow),
 			{
 				rejectDurableSecrets: this.config.redaction.rejectDurableSecrets,
 			},
@@ -3029,14 +3118,14 @@ export class SQLiteMemoryProvider
 
 	private readActiveMemory(memoryId: string): MemoryRecord {
 		const row = this.requireDb()
-			.query<MemoryItemRow, [string]>(
-				'SELECT id, record_json FROM memory_items WHERE id = ? LIMIT 1',
-			)
+			.query<MemoryItemRow, [string]>(MEMORY_ITEM_BY_ID_SQL)
 			.get(memoryId);
 		if (!row) {
 			throw new MemoryValidationError('target memory was not found');
 		}
-		const memory = this.validateDecisionMemory(JSON.parse(row.record_json));
+		const memory = this.validateDecisionMemory(
+			mergeProvenanceColumns(JSON.parse(row.record_json), row),
+		);
 		if (memory.metadata.deleted === true) {
 			throw new MemoryValidationError('target memory is deleted');
 		}
