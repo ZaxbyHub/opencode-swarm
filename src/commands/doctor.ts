@@ -13,6 +13,7 @@ import {
 	rollbackResidueQuarantine,
 } from '../services/swarm-residue';
 import { runToolDoctor } from '../services/tool-doctor';
+import { swarmState } from '../state';
 
 /**
  * Format tool doctor result as markdown for command output.
@@ -252,6 +253,34 @@ export async function handleDoctorCommand(
 				lines.push(`  - ${sanitizeForMarkdownText(w)}`);
 		}
 		output += `${lines.join('\n')}\n`;
+	}
+
+	// Issue #2271 bug 4: validate configured agent model ids against the live
+	// provider catalog. Structural checks above cannot see a model that is
+	// syntactically fine but does not resolve ("Model not found"/"Forbidden").
+	// Fail-open: an unreachable catalog adds nothing to the report.
+	try {
+		const { runModelPreflight } = await import('../services/model-preflight');
+		const preflight = await runModelPreflight(
+			config,
+			swarmState.opencodeClient,
+		);
+		if (preflight.catalogAvailable) {
+			const unresolved = preflight.resolutions.filter(
+				(resolution) => resolution.status === 'unresolved',
+			);
+			if (unresolved.length > 0) {
+				output += '\n---\n\n## Agent Model Resolution\n\n';
+				output += `${unresolved.length} configured agent model(s) do not resolve against the provider catalog:\n\n`;
+				for (const resolution of unresolved) {
+					output += `- \`${resolution.agent}\` → \`${resolution.model}\`: ${resolution.detail ?? 'does not resolve'}\n`;
+				}
+				output +=
+					'\nDispatching these agents will fail permanently. Fix `agents.<role>.model` in opencode-swarm.json or remove the override.\n';
+			}
+		}
+	} catch {
+		/* fail-open: the doctor must still produce its structural report */
 	}
 
 	// Check for stray .swarm directories

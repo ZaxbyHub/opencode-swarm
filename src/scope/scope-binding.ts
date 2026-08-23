@@ -641,6 +641,45 @@ export function hasScopeBindingDenyOverlay(binding: ScopeBinding): boolean {
 	);
 }
 
+/**
+ * Issue #2271 bug 5: deny check that ignores purely time-based (sweep)
+ * tombstones. `sweepExpired` installs an 'expired'-lifecycle tombstone at
+ * revision+1 for every lapsed generation on ANY scope read — that is not a
+ * deliberate denial, and the durable CAS in the idle-revival path re-verifies
+ * the on-disk generation anyway. Deliberate revocation classes
+ * ('revoked'/'superseded') and any failed-revocation overlay still deny.
+ */
+export function hasDeliberateScopeBindingDenyOverlay(
+	binding: ScopeBinding,
+): boolean {
+	const tombstone = scopeBindingTombstones.get(binding.generationId);
+	return Boolean(
+		tombstone &&
+			tombstone.bindingId === binding.bindingId &&
+			tombstone.revision >= binding.revision &&
+			tombstone.lifecycleState !== 'live' &&
+			tombstone.lifecycleState !== 'expired',
+	);
+}
+
+/**
+ * Issue #2271 bug 5: remove a sweep-signature tombstone so a durable-CAS
+ * revival can be admitted in memory. Only 'expired'-lifecycle tombstones at
+ * or below the revived revision are cleared — deliberate revocations and any
+ * newer overlay are preserved.
+ */
+export function clearSweepTombstoneForRevival(binding: ScopeBinding): void {
+	const tombstone = scopeBindingTombstones.get(binding.generationId);
+	if (
+		tombstone &&
+		tombstone.bindingId === binding.bindingId &&
+		tombstone.lifecycleState === 'expired' &&
+		tombstone.revision <= binding.revision
+	) {
+		scopeBindingTombstones.delete(binding.generationId);
+	}
+}
+
 /** Fail-closed overlay used only when durable revocation cannot be verified. */
 export function installFailedRevocationOverlay(
 	binding: ScopeBinding,

@@ -182,9 +182,9 @@ those inputs before this change.
 
 ---
 
-## 5. The 44-entry catalog
+## 5. The 45-entry catalog
 
-Source: `src/observability/catalog.ts`. Exactly 44 entries = the 38 pre-existing members of
+Source: `src/observability/catalog.ts`. Exactly 45 entries = the 38 pre-existing members of
 `TelemetryEvent` (`src/telemetry.ts:15-92`) plus `agent_conflict_detected`
 (emitted in production via a force-cast past the type system before #2029)
 plus `close_archive_result` (issue #2030 — the structured close/archive
@@ -282,6 +282,17 @@ Category `delegation`, severity `info`, privacy `pseudonymous`. Producer
 Category `delegation`, severity `notice`, privacy `pseudonymous`. Producer
 `src/telemetry.ts:506`. Consumers: none — owner **#2047**. Retention: **#2045**.
 Required workflow IDs: `hostSessionId`. OTel mapping: `genai`.
+
+#### model_unresolved
+Category `delegation`, severity `warning`, privacy `pseudonymous`. Producer
+`src/telemetry.ts:614` (issue #2271 bug 4: preflight confirmed a configured
+agent model id does not resolve against the provider catalog — fires before
+any dispatch attempt, unlike a runtime `model_fallback`). Consumers: none —
+owner **#2047**. Retention: **#2045**. Required workflow IDs: `hostSessionId`.
+OTel mapping: `genai`. The event carries the sentinel session id `preflight`
+(there is no live session at preflight time); OTel consumers will see a
+`gen_ai.conversation.id` of `preflight` for this kind — a known, documented
+phantom-conversation artifact, not a real session.
 
 ### Gate category
 
