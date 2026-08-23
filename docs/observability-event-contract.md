@@ -567,6 +567,16 @@ pressure without leaking workspace layout.
 
 ## 6. The exhaustive producer/consumer matrix (17 rows)
 
+> **Retention columns are owned by the retention registry** —
+> `docs/observability-retention-registry.md` + the machine-readable
+> `scripts/retention-registry.data.ts` (issue #2036). This matrix stays at
+> correlation granularity; byte/age/count limits, read amplification,
+> close/archive/reset policy, and final dispositions for every durable stream
+> live there. (Row 12's reader citation was corrected for #2036: the
+> `startsWith('swarm-')` scan is finalize-idempotency, not retention pruning —
+> archive bundles have no prune; see the registry's `close-archive-bundles`
+> row.)
+
 **Every row carries a `file:line` citation, but those citations are
 UNGATED and go stale on any rebase that shifts a cited file.**
 `scripts/check-event-contract.ts` mechanically validates the 44-entry
@@ -608,7 +618,7 @@ row 17 records the authoritative knowledge-receipt partition added by #2031.
 | 9 | `.swarm/background-delegations.jsonl` | `src/background/pending-delegations.ts` (checkpoint layer, #2034) | `pr-workflow-session-resolver.ts`, `pr-workflow-gate.ts`, `init-orphan-recovery.ts`, `delegation-gate/worktree-collision-ownership.ts` | `status` | **epoch-ms number** | `schemaVersion` 1\|2\|3 | `correlationId`, `parentSessionId`, `callID`, `jobId`, `planTaskId`, `evidenceTaskId`, `batchId`, `laneId`, `workflowLane`, `worktreeId` | no swarm-run id distinct from `parentSessionId` | bounded — compacted to checkpoint + tail above 1 MiB (#2034) | authoritative | **#2034** |
 | 10 | `.swarm/session/shell-audit.jsonl` | `src/hooks/guardrails/audit-log.ts:332` | `src/services/guardrail-log-service.ts:63` (the only module that resolves the store path); `src/hooks/guardrails/index.ts:568` names the same path when wiring the writer. **Correction:** an earlier draft of this row cited `src/commands/archive.ts` as a reader with invented line numbers and behaviour — that file contains no reference to `shell-audit` at all, and the claim was removed (issue #2029 final-critic B-4). | `type` (**stripped for `shell`**, `:344-351`) | ISO string (caller-supplied) | none | `sessionID`, `agent`, `tool` | **no `callID`** → cannot join to row 9 (`background-delegations.jsonl`) | via `session/` dir — `close.ts:421-426` | operational | **#2040** |
 | 11 | council evidence + `.swarm/council/{taskId}.rounds.jsonl` | `src/council/council-evidence-writer.ts:91` (evidence rewrite at `.swarm/evidence/{taskId}.json`; rounds append) | (council-consuming code paths; not itemized separately from evidence consumers) | none | `synthesis.timestamp` | none (implicit: `quorumSize` defaulted to 1 when absent, `:156-158`) | `sessionId` (= `swarmId`), `roundNumber` | `taskId` only in filename on the rounds log; no `callID` | evidence: yes; `council/`: **no** | authoritative | **#2046** |
-| 12 | `.swarm/archive/swarm-{ts}-{suffix}/` | `src/commands/close.ts:1051-1054` | `src/commands/close.ts:1870-1875` (`fs.readdir(archiveDir)`, filters `startsWith('swarm-')` — retention pruning only; nothing re-reads bundle *contents*) | n/a | ISO in path | preserves bytes verbatim | n/a | n/a | is the archive | governed content | **#2030** |
+| 12 | `.swarm/archive/swarm-{ts}-{suffix}/` | `src/commands/close.ts:1051-1054` | `src/commands/close.ts:2234-2235` (`readdir` + `startsWith('swarm-')` — finalize-idempotency + reflection filename scans only; nothing re-reads bundle *contents*) | n/a | ISO in path | preserves bytes verbatim | n/a | n/a | is the archive | governed content | **#2030** |
 | 13 | SQLite `memory_events` | `src/memory/sqlite-provider.ts:200-207` | memory-provider internal readers (not itemized here — index design is #2048's scope) | `operation` column | `timestamp` column, ISO string | table has no explicit version column (SQLite `_meta` table tracks migration version 4+, not per-row) | `target_id` | no `session_id`/`task_id` column | **no** | authoritative | **#2036** (retention), #2048 (index) |
 | 14 | SQLite `memory_recall_usage` | `src/memory/sqlite-provider.ts:209-214` | memory-provider internal readers | `bundle_id` column | `timestamp` column, ISO string | none (migration-versioned schema, not row-versioned) | `bundle_id`, `run_id` (added migration v9) | no `session_id`/`task_id` column | **no** | derived | **#2036**, #2048 |
 | 15 | SQLite `memory_reward_events` | `src/memory/sqlite-provider.ts:286` | memory-provider internal readers | `verdict` column | `timestamp` column, ISO string | none | `memory_id`, `run_id`, `unit_id` | no `session_id`/`task_id` column | **no** | derived | **#2036**, #2048 |
