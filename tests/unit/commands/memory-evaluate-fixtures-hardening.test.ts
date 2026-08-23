@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as realFs from 'node:fs';
+import { mkdtempSync, realpathSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -14,9 +15,7 @@ const PACKAGE_ROOT = path.resolve(
 let tmpDir: string;
 
 beforeEach(async () => {
-	tmpDir = await fs.realpath(
-		await fs.mkdtemp(path.join(os.tmpdir(), 'swarm-fixtures-')),
-	);
+	tmpDir = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'swarm-fixtures-')));
 });
 
 afterEach(async () => {
@@ -46,8 +45,8 @@ describe('--fixtures traversal defense (#1466 DD-24)', () => {
 	});
 
 	test('a symlink inside the project pointing outside is rejected', async () => {
-		const outsideRoot = await fs.realpath(
-			await fs.mkdtemp(path.join(os.tmpdir(), 'swarm-outside-')),
+		const outsideRoot = realpathSync(
+			mkdtempSync(path.join(os.tmpdir(), 'swarm-outside-')),
 		);
 		// The outside dir must have at least one .json file so the symlink
 		// would otherwise look like a plausible fixtures dir.

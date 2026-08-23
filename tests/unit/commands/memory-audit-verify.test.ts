@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { mkdtempSync, realpathSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -14,8 +15,8 @@ import { evictAndClose } from '../../../src/memory/provider-pool';
 let tmpDir: string;
 
 beforeEach(async () => {
-	tmpDir = await fs.realpath(
-		await fs.mkdtemp(path.join(os.tmpdir(), 'swarm-audit-cmd-')),
+	tmpDir = realpathSync(
+		mkdtempSync(path.join(os.tmpdir(), 'swarm-audit-cmd-')),
 	);
 });
 
