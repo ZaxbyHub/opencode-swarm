@@ -284,7 +284,7 @@ describe('phase_complete retrospective gate - ADVERSARIAL ATTACKS', () => {
 	});
 
 	describe('Attack Vector 8: Empty string verdict', () => {
-		test('verdict = \"\" should be rejected', async () => {
+		test('verdict = "" should be rejected', async () => {
 			fs.mkdirSync(path.join(tempDir, '.opencode'), { recursive: true });
 			fs.writeFileSync(
 				path.join(tempDir, '.opencode', 'opencode-swarm.json'),

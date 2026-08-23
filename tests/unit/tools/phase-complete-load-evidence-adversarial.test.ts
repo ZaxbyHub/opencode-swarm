@@ -8,9 +8,12 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 
-function retrospectiveRecovery(result: { gate_report?: { entries?: Array<{ id: string; recovery?: unknown }> } }) {
-	return result.gate_report?.entries?.find((entry) => entry.id === 'retrospective')
-		?.recovery;
+function retrospectiveRecovery(result: {
+	gate_report?: { entries?: Array<{ id: string; recovery?: unknown }> };
+}) {
+	return result.gate_report?.entries?.find(
+		(entry) => entry.id === 'retrospective',
+	)?.recovery;
 }
 
 // Mock loadEvidence and listEvidenceTaskIds from evidence/manager
@@ -599,5 +602,4 @@ describe('phase_complete - loadEvidence adversarial testing', () => {
 			expect(parsed.message).toContain('entries: Must be array');
 		});
 	});
-
 });

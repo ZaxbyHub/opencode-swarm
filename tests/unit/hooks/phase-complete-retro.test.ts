@@ -9,7 +9,6 @@ import {
 } from '../../../src/state';
 import { createIsolatedTestEnv } from '../../helpers/isolated-test-env';
 
-// Import the tool after setting up environment
 const { phase_complete } = await import('../../../src/tools/phase-complete');
 
 describe('phase_complete retrospective gate', () => {
@@ -18,17 +17,14 @@ describe('phase_complete retrospective gate', () => {
 	let cleanupEnv: (() => void) | null = null;
 
 	beforeEach(() => {
-		// Reset state before each test
 		resetSwarmState();
 
-		// Create temp directory using createIsolatedTestEnv
 		const { configDir, cleanup } = createIsolatedTestEnv();
 		tempDir = configDir;
 		cleanupEnv = cleanup;
 		originalCwd = process.cwd();
 		process.chdir(tempDir);
 
-		// Create .swarm directory and evidence directory structure
 		fs.mkdirSync(path.join(tempDir, '.swarm'), { recursive: true });
 		fs.mkdirSync(path.join(tempDir, '.swarm', 'evidence'), { recursive: true });
 	});
@@ -38,11 +34,9 @@ describe('phase_complete retrospective gate', () => {
 		if (cleanupEnv) {
 			cleanupEnv();
 		}
-		// Reset state after each test
 		resetSwarmState();
 	});
 
-	// Helper function to write a valid retro bundle
 	function writeRetroBundle(
 		taskId: string,
 		phaseNumber: number,
@@ -86,7 +80,6 @@ describe('phase_complete retrospective gate', () => {
 		);
 	}
 
-	// Helper function to write a malformed bundle
 	function writeMalformedBundle(taskId: string): void {
 		const retroDir = path.join(tempDir, '.swarm', 'evidence', taskId);
 		fs.mkdirSync(retroDir, { recursive: true });
@@ -97,12 +90,10 @@ describe('phase_complete retrospective gate', () => {
 		);
 	}
 
-	// Helper function to write gate evidence files for Phase 4 mandatory gates
 	function writeGateEvidence(phase: number): void {
 		const evidenceDir = path.join(tempDir, '.swarm', 'evidence', `${phase}`);
 		fs.mkdirSync(evidenceDir, { recursive: true });
 
-		// Write completion-verify.json
 		const completionVerify = {
 			status: 'passed',
 			tasksChecked: 1,
@@ -115,7 +106,6 @@ describe('phase_complete retrospective gate', () => {
 			JSON.stringify(completionVerify, null, 2),
 		);
 
-		// Write drift-verifier.json
 		const driftVerifier = {
 			schema_version: '1.0.0',
 			task_id: 'drift-verifier',

@@ -481,5 +481,4 @@ describe('repair_gate_evidence', () => {
 			fs.rmSync(linkedRoot, { recursive: true, force: true });
 		}
 	});
-
 });

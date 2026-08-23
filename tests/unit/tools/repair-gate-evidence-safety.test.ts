@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import type { ToolContext } from '@opencode-ai/plugin/tool';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import type { ToolContext } from '@opencode-ai/plugin/tool';
 import { transitionTaskWorkflowEvidence } from '../../../src/gate-evidence.js';
 import { resetSwarmState } from '../../../src/state.js';
 import { executeRepairGateEvidence } from '../../../src/tools/repair-gate-evidence.js';
@@ -12,7 +12,10 @@ const LINK_TYPE = process.platform === 'win32' ? 'junction' : 'dir';
 
 function writePlan(directory: string): void {
 	fs.mkdirSync(path.join(directory, '.swarm'), { recursive: true });
-	fs.writeFileSync(path.join(directory, 'package.json'), '{"name":"repair-test"}');
+	fs.writeFileSync(
+		path.join(directory, 'package.json'),
+		'{"name":"repair-test"}',
+	);
 	fs.writeFileSync(
 		path.join(directory, '.swarm', 'plan.json'),
 		JSON.stringify({

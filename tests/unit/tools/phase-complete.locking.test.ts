@@ -745,5 +745,4 @@ describe('executePhaseComplete locking behavior', () => {
 			});
 		});
 	});
-
 });

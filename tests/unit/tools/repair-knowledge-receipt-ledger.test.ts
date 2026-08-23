@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from 'bun:test';
-import type { ToolContext } from '@opencode-ai/plugin/tool';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import type { ToolContext } from '@opencode-ai/plugin/tool';
 import { commitDisplayedMembership } from '../../../src/hooks/knowledge-receipt-ledger.js';
 import { executeRepairKnowledgeReceiptLedger } from '../../../src/tools/repair-knowledge-receipt-ledger.js';
 import { createSafeTestDir } from '../../helpers/safe-test-dir.js';

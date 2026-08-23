@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 import { createIsolatedTestEnv } from '../../helpers/isolated-test-env';
+
 // Import the tool after setting up environment
 const { phase_complete } = await import('../../../src/tools/phase-complete');
 describe('phase_complete retrospective gate - ADVERSARIAL ATTACKS', () => {
@@ -566,5 +567,4 @@ describe('phase_complete retrospective gate - ADVERSARIAL ATTACKS', () => {
 			expect(parsed.message).toContain('Schema validation failed');
 		});
 	});
-
 });

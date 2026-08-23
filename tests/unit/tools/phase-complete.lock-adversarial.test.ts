@@ -683,5 +683,4 @@ describe('phase_complete adversarial locking + path tests', () => {
 			expect(parsed.message).toBe('Invalid phase number');
 		});
 	});
-
 });

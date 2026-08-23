@@ -19,7 +19,6 @@ import {
 } from '../../../src/state';
 import { executePhaseComplete } from '../../../src/tools/phase-complete';
 
-// Mutable state for mock
 let mockProfileReturnValue: QaGateProfile | null = null;
 
 const PLAN_SWARM = 'test-swarm';
@@ -119,7 +118,9 @@ function setupBaseDir(dir: string): void {
 				name: 'Phase 1',
 				status: 'in_progress',
 				type: 'code',
-				tasks: [{ id: '1.1', phase: 1, status: 'pending', description: 'Test task' }],
+				tasks: [
+					{ id: '1.1', phase: 1, status: 'pending', description: 'Test task' },
+				],
 			},
 		],
 	};
@@ -259,7 +260,6 @@ describe('phase-complete drift_check adversarial tests', () => {
 		mock.restore();
 	});
 
-	// ========== GROUP 1: Path Traversal in Phase Number ==========
 	describe('Group 1: Path traversal in phase number', () => {
 		it('blocks phase with "../" path traversal in phase number', async () => {
 			const phaseArg = '../1';

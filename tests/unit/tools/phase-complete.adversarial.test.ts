@@ -582,5 +582,4 @@ describe('phase_complete tool - ADVERSARIAL SECURITY TESTS', () => {
 			expect(parsed2.agentsDispatched).toContain('reviewer');
 		}, 30_000);
 	});
-
 });
