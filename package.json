@@ -108,6 +108,7 @@
 		"repro:1144": "bun scripts/repro-1144.mjs",
 		"repro:1873": "bun build scripts/repro-1873-entry.ts --outdir dist-build-test/repro-1873 --target node --format esm && node scripts/repro-1873.mjs",
 		"check:events": "bun run scripts/check-event-contract.ts",
+		"check:retention": "bun run scripts/check-retention-registry.ts",
 		"check:test-file-cap": "bun run scripts/check-test-file-cap.ts",
 		"check:gate-portability": "bun run scripts/check-gate-portability.ts",
 		"check:bare-spawn": "bun run scripts/check-bare-executable-spawn.ts"

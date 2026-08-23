@@ -199,6 +199,9 @@ jobs:
       - name: Event contract check (issue #2029 AC6)
         if: needs.detect-release.outputs.is-release != 'true'
         run: bun run check:events
+      - name: Retention registry check (issue #2036 gate)
+        if: needs.detect-release.outputs.is-release != 'true'
+        run: bun run check:retention
       - name: Cross-contamination check (mock.module / vi.mock leaks)
         if: needs.detect-release.outputs.is-release != 'true'
         shell: bash
