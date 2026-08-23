@@ -138,6 +138,34 @@ describe('catalog contract — AC6', () => {
 		expect(Object.keys(EVENT_CATALOG).length).toBe(unionSize);
 	});
 
+	test('prose entry counts in catalog.ts and the contract doc match the real catalog size', () => {
+		// Issue #2035 reviewer finding: adding an entry silently strands the
+		// prose counts ("Exactly 43 entries") in the catalog header and the
+		// contract doc while every structural assertion stays green. Pin the
+		// prose to the structure.
+		const repoRoot = path.resolve(import.meta.dir, '../../..');
+		const catalogSrc = fs.readFileSync(
+			path.join(repoRoot, 'src/observability/catalog.ts'),
+			'utf-8',
+		);
+		const catalogProse = /Exactly (\d+) entries/.exec(catalogSrc);
+		expect(catalogProse).not.toBeNull();
+		expect(Number(catalogProse?.[1])).toBe(CATALOG_KINDS.length);
+		const allEntriesProse = /for all (\d+) entries today/.exec(catalogSrc);
+		expect(allEntriesProse).not.toBeNull();
+		expect(Number(allEntriesProse?.[1])).toBe(CATALOG_KINDS.length);
+		const doc = fs.readFileSync(
+			path.join(repoRoot, 'docs/observability-event-contract.md'),
+			'utf-8',
+		);
+		const docHeading = /## 5\. The (\d+)-entry catalog/.exec(doc);
+		expect(docHeading).not.toBeNull();
+		expect(Number(docHeading?.[1])).toBe(CATALOG_KINDS.length);
+		const docBody = /Exactly (\d+) entries =/.exec(doc);
+		expect(docBody).not.toBeNull();
+		expect(Number(docBody?.[1])).toBe(CATALOG_KINDS.length);
+	});
+
 	test('CATALOG_KINDS has no duplicates', () => {
 		const unique = new Set(CATALOG_KINDS);
 		expect(unique.size).toBe(CATALOG_KINDS.length);

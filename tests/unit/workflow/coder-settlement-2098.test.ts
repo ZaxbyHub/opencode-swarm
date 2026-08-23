@@ -3,11 +3,11 @@ import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { captureWorkspaceSnapshot } from '../../../src/background/workspace-snapshot';
-import { _internals as taskFileInternals } from '../../../src/evidence/task-file';
 import {
 	getTaskWorkflowSnapshot,
 	readTaskEvidence,
 } from '../../../src/gate-evidence';
+import { _internals as taskFileInternals } from '../../../src/utils/atomic-write';
 import {
 	_internals,
 	beginCoderSettlement,

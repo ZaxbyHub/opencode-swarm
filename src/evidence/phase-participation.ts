@@ -25,8 +25,8 @@ import { validateSwarmPath } from '../hooks/utils.js';
 import { computePlanStructureHash } from '../plan/ledger.js';
 import { loadPlan } from '../plan/manager.js';
 import { derivePlanId, derivePlanIdentityHash } from '../plan/utils.js';
+import { atomicWriteSwarmFile } from '../utils/atomic-write';
 import { stableCanonicalStringify } from '../utils/stable-stringify.js';
-import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache.js';
 import { withEvidenceLock } from './lock.js';
 import { atomicWriteFile } from './task-file.js';
 
@@ -300,18 +300,17 @@ function readRawStore(
 	}
 }
 
+/**
+ * Canonical atomic write for the bytes store (issue #2035): containment,
+ * registered `canonical-v1` temp grammar, fsync, bounded rename retry, exact
+ * own-temp cleanup, and cache invalidation. The historical
+ * `target.tmp.<pid>.<ts>` grammar stays registered for residue discovery.
+ */
 async function atomicWriteBytes(
 	filePath: string,
 	bytes: Buffer,
 ): Promise<void> {
-	const tempPath = `${filePath}.tmp.${process.pid}.${Date.now()}`;
-	try {
-		await fs.promises.writeFile(tempPath, bytes);
-		await fs.promises.rename(tempPath, filePath);
-		invalidateCachedArtifact(filePath);
-	} finally {
-		await fs.promises.unlink(tempPath).catch(() => undefined);
-	}
+	await atomicWriteSwarmFile(filePath, bytes);
 }
 
 async function readBoundedRegularFile(

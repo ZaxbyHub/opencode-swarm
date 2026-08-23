@@ -14,7 +14,7 @@
  */
 
 import { existsSync, unlinkSync } from 'node:fs';
-import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import { BUNDLED_PROJECT_SKILLS } from '../config/bundled-skills.js';
 import {
@@ -38,6 +38,7 @@ import {
 	ALLOWED_SKILL_PATH_PREFIXES,
 	validateSkillPath,
 } from '../hooks/knowledge-validator.js';
+import { atomicWriteFileAnyRoot } from '../utils/atomic-write';
 import { warn } from '../utils/logger.js';
 import { appendSkillChangelog } from './skill-changelog.js';
 import {
@@ -584,11 +585,19 @@ function escapeMarkdown(s: string): string {
 // Atomic write
 // ============================================================================
 
+/**
+ * Canonical atomic write via the ANY-ROOT variant (issue #2035): this writer
+ * serves MIXED destinations — `.swarm/skills/...` internals and generated
+ * skill files under `.opencode/skills/generated/...` — so `.swarm` root
+ * containment is inapplicable (same documented reason as task-file's linked/
+ * hive knowledge stores). Gains the canonical grammar, fsync, bounded rename
+ * retry, and exact own-temp cleanup; the historical `target.tmp-<pid>-<ts>`
+ * grammar (which this helper previously leaked on every failure) stays
+ * registered for residue discovery.
+ */
 async function atomicWrite(p: string, content: string): Promise<void> {
 	await mkdir(path.dirname(p), { recursive: true });
-	const tmp = `${p}.tmp-${process.pid}-${Date.now()}`;
-	await writeFile(tmp, content, 'utf-8');
-	await rename(tmp, p);
+	await atomicWriteFileAnyRoot(p, content);
 }
 
 // ============================================================================

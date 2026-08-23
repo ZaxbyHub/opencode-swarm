@@ -3,7 +3,6 @@
  * Verifies warn() is called and summary is returned when writeFile throws.
  */
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
-import * as fs from 'node:fs/promises';
 
 import { _internals as coChangeAnalyzer } from '../tools/co-change-analyzer.js';
 import { handleSimulateCommand } from './simulate.js';
@@ -65,11 +64,11 @@ describe('simulate command report write error handling', () => {
 			ToolError: class extends Error {},
 		}));
 
-		// Mock writeFile to throw
-		await mock.module('node:fs/promises', () => ({
-			...fs,
-			mkdir: mock(async () => undefined),
-			writeFile: mock(async () => {
+		// Mock the canonical atomic writer (issue #2035 migration) to throw —
+		// the old fs/promises.writeFile mock can no longer intercept the
+		// sync-primitive write path.
+		await mock.module('../utils/atomic-write', () => ({
+			atomicWriteSwarmFile: mock(async () => {
 				throw Object.assign(new Error('EACCES: permission denied'), {
 					code: 'EACCES',
 				});
@@ -126,11 +125,8 @@ describe('simulate command report write error handling', () => {
 			ToolError: class extends Error {},
 		}));
 
-		// Mock writeFile to throw
-		await mock.module('node:fs/promises', () => ({
-			...fs,
-			mkdir: mock(async () => undefined),
-			writeFile: mock(async () => {
+		await mock.module('../utils/atomic-write', () => ({
+			atomicWriteSwarmFile: mock(async () => {
 				throw Object.assign(new Error('ENOSPC: no space left on device'), {
 					code: 'ENOSPC',
 				});
@@ -176,11 +172,8 @@ describe('simulate command report write error handling', () => {
 			ToolError: class extends Error {},
 		}));
 
-		// Mock writeFile to throw
-		await mock.module('node:fs/promises', () => ({
-			...fs,
-			mkdir: mock(async () => undefined),
-			writeFile: mock(async () => {
+		await mock.module('../utils/atomic-write', () => ({
+			atomicWriteSwarmFile: mock(async () => {
 				throw Object.assign(new Error('ENOENT: no such file or directory'), {
 					code: 'ENOENT',
 				});
@@ -237,11 +230,8 @@ describe('simulate command report write error handling', () => {
 			ToolError: class extends Error {},
 		}));
 
-		// Mock writeFile to succeed
-		await mock.module('node:fs/promises', () => ({
-			...fs,
-			mkdir: mock(async () => undefined),
-			writeFile: mock(async () => {}),
+		await mock.module('../utils/atomic-write', () => ({
+			atomicWriteSwarmFile: mock(async () => {}),
 		}));
 
 		// Re-import simulate to get mocked utils
@@ -279,11 +269,11 @@ describe('simulate command report write error handling', () => {
 			ToolError: class extends Error {},
 		}));
 
-		// Mock writeFile to throw
-		await mock.module('node:fs/promises', () => ({
-			...fs,
-			mkdir: mock(async () => undefined),
-			writeFile: mock(async () => {
+		// Mock the canonical atomic writer (issue #2035 migration) to throw —
+		// the old fs/promises.writeFile mock can no longer intercept the
+		// sync-primitive write path.
+		await mock.module('../utils/atomic-write', () => ({
+			atomicWriteSwarmFile: mock(async () => {
 				throw Object.assign(new Error('EACCES: permission denied'), {
 					code: 'EACCES',
 				});
@@ -327,11 +317,8 @@ describe('simulate command report write error handling', () => {
 			ToolError: class extends Error {},
 		}));
 
-		// Mock writeFile to throw a string
-		await mock.module('node:fs/promises', () => ({
-			...fs,
-			mkdir: mock(async () => undefined),
-			writeFile: mock(async () => {
+		await mock.module('../utils/atomic-write', () => ({
+			atomicWriteSwarmFile: mock(async () => {
 				throw 'Something went wrong';
 			}),
 		}));

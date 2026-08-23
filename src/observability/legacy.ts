@@ -278,6 +278,20 @@ export const KNOWN_TELEMETRY_KEYS: Readonly<Record<string, readonly string[]>> =
 			'storeSha256Prefix',
 			'token12',
 		]),
+		// Issue #2035 atomic-write residue health: counts and frozen-registry
+		// grammar ids only — no file names, paths, or content.
+		residue_health: Object.freeze([
+			'trigger',
+			'scanned',
+			'matched',
+			'eligible',
+			'ambiguous',
+			'quarantined',
+			'preserved',
+			'total_bytes',
+			'oldest_age_ms',
+			'grammar_counts',
+		]),
 	});
 
 const EMPTY_EXTRA: Record<string, unknown> = Object.freeze({});

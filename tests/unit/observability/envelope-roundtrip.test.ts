@@ -269,6 +269,24 @@ const FIXTURES: Record<string, Record<string, unknown>> = {
 		storeSha256Prefix: 'a1b2c3d4e5f6',
 		token12: '0f6c3e29fc00',
 	},
+	// Issue #2035 atomic-write residue health. Payload mirrors the real
+	// producer in src/services/swarm-residue.ts (quarantineSwarmResidue):
+	// counts + frozen-registry grammar ids only — no paths or content.
+	residue_health: {
+		trigger: 'close',
+		scanned: 148,
+		matched: 3,
+		eligible: 2,
+		ambiguous: 1,
+		quarantined: 2,
+		preserved: 1,
+		total_bytes: 4096,
+		oldest_age_ms: 5_400_000,
+		grammar_counts: {
+			'target-suffix-tmp-num-alnum': 2,
+			'dot-tmp-prefix-legacy': 1,
+		},
+	},
 };
 
 describe('envelope roundtrip — AC1 positive', () => {

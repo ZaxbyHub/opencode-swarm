@@ -55,7 +55,10 @@ import lockfile from 'proper-lockfile';
 import { type Plan, PlanSchema } from '../config/plan-schema';
 import { computePlanStructureHash } from '../plan/ledger';
 import { derivePlanId } from '../plan/utils';
-import { bunWrite } from '../utils/bun-compat';
+import {
+	atomicWriteSwarmFile,
+	atomicWriteSwarmFileSync,
+} from '../utils/atomic-write';
 import { assertProjectRoot } from '../utils/project-boundary';
 import {
 	canonicalWorkspaceIdentity,
@@ -630,11 +633,11 @@ function migrateLegacyBindingsSync(
 			if (valid && binding) {
 				const exactPath = getBindingFilePath(directory, binding);
 				if (!fs.existsSync(exactPath)) {
-					const temp = `${exactPath}.migration-${process.pid}`;
-					fs.writeFileSync(temp, JSON.stringify(binding, null, 2), {
-						flag: 'wx',
-					});
-					fs.renameSync(temp, exactPath);
+					// Canonical contained write (issue #2035) — supersedes the
+					// bespoke `.migration-<pid>` temp which had no failure
+					// cleanup; that grammar stays registered for residue
+					// discovery.
+					atomicWriteSwarmFileSync(exactPath, JSON.stringify(binding, null, 2));
 				} else {
 					const existingRaw = readBoundedFile(exactPath);
 					const existing = existingRaw
@@ -2297,35 +2300,19 @@ export function resolveAuthorizedPrFeedbackScopeBindingFromDisk(input: {
 }
 
 /**
- * Atomic write via temp + rename. Same pattern as src/gate-evidence.ts:105
- * but scoped to this module so it can live without a cross-dir dependency.
+ * Atomic write via temp + rename, delegated to the canonical helper
+ * (`src/utils/atomic-write.ts`, issue #2035): `.swarm` containment, the
+ * registered `canonical-v1` temp grammar, fsync, bounded rename retry, and
+ * exact own-temp cleanup. The temp-file grammar this module produced before
+ * (`target.tmp.<ts>.<rand>`) stays registered in `SWARM_TEMP_GRAMMARS` so
+ * historical residue remains discoverable.
  */
 async function atomicWrite(targetPath: string, content: string): Promise<void> {
-	const tempPath = `${targetPath}.tmp.${Date.now()}.${Math.floor(Math.random() * 1e9)}`;
-	try {
-		await bunWrite(tempPath, content);
-		fs.renameSync(tempPath, targetPath);
-	} finally {
-		try {
-			fs.unlinkSync(tempPath);
-		} catch {
-			/* renamed or never created */
-		}
-	}
+	await atomicWriteSwarmFile(targetPath, content);
 }
 
 function atomicWriteSync(targetPath: string, content: string): void {
-	const tempPath = `${targetPath}.tmp.${Date.now()}.${Math.floor(Math.random() * 1e9)}`;
-	try {
-		fs.writeFileSync(tempPath, content, { flag: 'wx' });
-		fs.renameSync(tempPath, targetPath);
-	} finally {
-		try {
-			fs.unlinkSync(tempPath);
-		} catch {
-			/* renamed or never created */
-		}
-	}
+	atomicWriteSwarmFileSync(targetPath, content);
 }
 
 export const _scopePersistenceInternals = {
