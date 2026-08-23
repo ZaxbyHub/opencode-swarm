@@ -49,6 +49,8 @@ describe('toolPolicy classification snapshot — no regression', () => {
 		'memory export',
 		'memory evaluate',
 		'memory consolidation-log',
+		// #1466: audit-log hash-chain verification (read-only diagnostic).
+		'memory audit-verify',
 		'sdd',
 		'sdd status',
 		'sdd validate',
