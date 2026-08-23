@@ -119,7 +119,10 @@ export function enumerateWriterModules(root: string = REPO_ROOT): string[] {
 				fs.readFileSync(path.join(root, rel), 'utf-8'),
 			);
 		} catch {
-			return false;
+			// Unreadable module (permissions, transient I/O): fail CLOSED — treat
+			// it as a writer so the ratchet demands an explicit registration or
+			// exemption rather than silently skipping coverage (PRR-011a).
+			return true;
 		}
 	});
 }
@@ -132,9 +135,9 @@ export function extractCitationPaths(citation: string): string[] {
 }
 
 function dispositionIssueIsValid(issue: number): boolean {
-	const { first, last, amendment } = RETENTION_ISSUE_SEQUENCE;
+	const { first, last, amendments } = RETENTION_ISSUE_SEQUENCE;
 	return (
-		(issue >= first && issue <= last) || issue === amendment
+		(issue >= first && issue <= last) || amendments.includes(issue)
 	);
 }
 
@@ -161,7 +164,12 @@ const VALID_CANONICAL_ROOTS = new Set([
 	'planned',
 ]);
 
-function collectRowShapeErrors(row: RetentionRow): string[] {
+/**
+ * Per-row shape/disposition validation over a SYNTHESIA-injectable row —
+ * exported so tests can drive deliberately malformed rows through the real
+ * gate logic (duplicate/empty/enum/forbidden cases; PRR-006).
+ */
+export function collectRowShapeErrors(row: RetentionRow): string[] {
 	const errors: string[] = [];
 	const label = `Row "${row.id}"`;
 
@@ -213,6 +221,9 @@ function collectRowShapeErrors(row: RetentionRow): string[] {
 	if (row.writerCitations.length === 0 && row.canonicalRoot !== 'planned') {
 		errors.push(`${label}: at least one writer citation is required.`);
 	}
+	if (row.readerCitations.length === 0 && row.canonicalRoot !== 'planned') {
+		errors.push(`${label}: at least one reader citation is required (a genuinely read-less stream still documents that fact as a reader citation).`);
+	}
 	if (!row.writeLimits.bound || !row.writeLimits.citation) {
 		errors.push(`${label}: writeLimits.bound and .citation are required.`);
 	}
@@ -237,6 +248,9 @@ function collectRowShapeErrors(row: RetentionRow): string[] {
 				(v): v is string => typeof v === 'string',
 			),
 			row.writeLimits.bound,
+			row.readBound.bound,
+			...row.writerCitations,
+			...row.readerCitations,
 		];
 		for (const text of texts) {
 			if (text.toLowerCase().includes(forbidden.toLowerCase())) {
@@ -281,8 +295,8 @@ function collectDispositionErrors(row: RetentionRow): string[] {
 	return errors;
 }
 
-/** Every cited repo path must exist (cheap rotted-citation detector). */
-function collectCitationResolutionErrors(
+/** Every cited repo path must exist and stay inside the repo root. */
+export function collectCitationResolutionErrors(
 	row: RetentionRow,
 	root: string,
 ): string[] {
@@ -300,11 +314,19 @@ function collectCitationResolutionErrors(
 		citations.push(row.disposition.proof);
 	}
 	const checked = new Set<string>();
+	const rootAbs = path.resolve(root);
 	for (const citation of citations) {
 		for (const relPath of extractCitationPaths(citation)) {
 			if (checked.has(relPath)) continue;
 			checked.add(relPath);
-			if (!fs.existsSync(path.join(root, relPath))) {
+			const abs = path.resolve(root, relPath);
+			if (abs !== rootAbs && !abs.startsWith(rootAbs + path.sep)) {
+				errors.push(
+					`Row "${row.id}": citation path "${relPath}" escapes the repo root (malformed citation).`,
+				);
+				continue;
+			}
+			if (!fs.existsSync(abs)) {
 				errors.push(
 					`Row "${row.id}": citation path "${relPath}" does not exist in the repo (rotted citation).`,
 				);
@@ -354,14 +376,41 @@ export function collectCoverageRatchetErrors(
 			);
 			continue;
 		}
-		if (
-			Object.prototype.hasOwnProperty.call(exemptModules, modulePath) &&
-			!moduleWritesDurableState(fs.readFileSync(abs, 'utf-8'))
-		) {
-			errors.push(
-				`EXEMPT_WRITER_MODULES entry "${modulePath}" no longer contains any enumerated write API call — plumbing that stopped writing is a stale exemption; remove it.`,
-			);
+		if (Object.prototype.hasOwnProperty.call(exemptModules, modulePath)) {
+			let source: string;
+			try {
+				source = fs.readFileSync(abs, 'utf-8');
+			} catch (err) {
+				const reason = err instanceof Error ? err.message : String(err);
+				errors.push(
+					`EXEMPT_WRITER_MODULES entry "${modulePath}" is unreadable (${reason}) — fix the entry or the file; the gate will not guess.`,
+				);
+				continue;
+			}
+			if (!moduleWritesDurableState(source)) {
+				errors.push(
+					`EXEMPT_WRITER_MODULES entry "${modulePath}" no longer contains any enumerated write API call — plumbing that stopped writing is a stale exemption; remove it.`,
+				);
+			}
 		}
+	}
+	return errors;
+}
+
+/** Duplicate-row-id and empty-registry guards over an injectable row set. */
+export function collectRegistryIdentityErrors(
+	rows: readonly RetentionRow[],
+): string[] {
+	const errors: string[] = [];
+	const seen = new Set<string>();
+	for (const row of rows) {
+		if (seen.has(row.id)) {
+			errors.push(`Duplicate registry row id "${row.id}".`);
+		}
+		seen.add(row.id);
+	}
+	if (rows.length === 0) {
+		errors.push('RETENTION_REGISTRY is empty — the gate is vacuous.');
 	}
 	return errors;
 }
@@ -372,31 +421,28 @@ export function collectRetentionRegistryErrors(root: string = REPO_ROOT): string
 
 	// 1) Row-shape, disposition, and citation checks.
 	for (const row of RETENTION_REGISTRY) {
-		if (seenIds.has(row.id)) {
-			errors.push(`Duplicate registry row id "${row.id}".`);
-		}
 		seenIds.add(row.id);
 		errors.push(...collectRowShapeErrors(row));
 		errors.push(...collectCitationResolutionErrors(row, root));
 	}
-	if (RETENTION_REGISTRY.length === 0) {
-		errors.push('RETENTION_REGISTRY is empty — the gate is vacuous.');
-	}
+	errors.push(...collectRegistryIdentityErrors(RETENTION_REGISTRY));
 
 	// 2+3) Writer coverage ratchet and stale-declaration checks.
 	errors.push(
 		...collectCoverageRatchetErrors(root, RETENTION_REGISTRY, EXEMPT_WRITER_MODULES),
 	);
 
-	// 4) Doc coherence: every row id must appear in the registry doc (the ids
-	// are unique slugs, so plain presence is a sufficient coherence contract);
-	// markdown link-definition anchors, when present, must map back one-to-one.
+	// 4) Doc coherence: every row id must appear in the registry doc as a
+	// backtick-wrapped slug (the doc renders ids as `id` cells). The anchor
+	// prevents substring masking — plain includes() would let a longer id
+	// (e.g. repo-graph-fingerprint) satisfy a shorter one (repo-graph).
+	// Markdown link-definition anchors, when present, must map back one-to-one.
 	if (fs.existsSync(REGISTRY_DOC)) {
 		const doc = fs.readFileSync(REGISTRY_DOC, 'utf-8');
 		for (const row of RETENTION_REGISTRY) {
-			if (!doc.includes(row.id)) {
+			if (!doc.includes(`\`${row.id}\``)) {
 				errors.push(
-					`Registry row "${row.id}" is not documented in docs/observability-retention-registry.md — document the row or remove it.`,
+					`Registry row "${row.id}" is not documented (as a \`\`${row.id}\`\` slug) in docs/observability-retention-registry.md — document the row or remove it.`,
 				);
 			}
 		}

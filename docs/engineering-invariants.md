@@ -244,7 +244,7 @@ Each entry below points at a release note in `docs/releases/` and the invariant(
   readers could scale with history with nobody accountable for the bound.
 - **Fix applied (PR 08 of the observability sequence):** the complete
   retention and read-amplification registry lives as DATA in
-  `scripts/retention-registry.data.ts` (98 rows; every stream under `.swarm/`
+  `scripts/retention-registry.data.ts` (every stream under `.swarm/`
   and the platform-data roots, with writers, readers, limits + scope, read
   bounds, lock/crash/close/reset policy, owner, and a completed disposition).
   `bun run check:retention` (`scripts/check-retention-registry.ts`, a
@@ -252,9 +252,12 @@ Each entry below points at a release note in `docs/releases/` and the invariant(
   writing module under `src/` (write APIs, atomic-write helper calls, SQLite
   open/acquire seams) and fails when a writer has no registry row, when an
   exemption goes stale, when a disposition is a placeholder, or when a
-  citation rots. The ratified document is
+  cited repo FILE no longer exists (bare-filename and line-level citation
+  accuracy stay ungated, "verified-as-of" pointers — see the registry doc's
+  Appendix A). The ratified document is
   `docs/observability-retention-registry.md`; dispositions may only be
-  fix-in-issue (sequence window #2029–#2051 or amendment #2309),
+  fix-in-issue (sequence window #2029–#2051 or a registered amendment
+  issue),
   retain-by-design (citation), or not-a-defect (source proof).
 - **Placement invariant:** the registry data deliberately lives under
   `scripts/`, never `src/` — it must never enter the plugin bundle or the

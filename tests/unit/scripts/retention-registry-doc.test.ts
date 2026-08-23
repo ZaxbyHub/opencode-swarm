@@ -27,7 +27,9 @@ describe('retention registry document coherence', () => {
 	test('every registry row id appears in the document', () => {
 		const doc = fs.readFileSync(DOC_PATH, 'utf-8');
 		for (const row of RETENTION_REGISTRY) {
-			expect(doc.includes(row.id)).toBe(true);
+			// Backtick-anchored like the gate: a longer id (repo-graph-fingerprint)
+			// must not satisfy a shorter one (repo-graph) via substring masking.
+			expect(doc.includes(`\`${row.id}\``)).toBe(true);
 		}
 	});
 

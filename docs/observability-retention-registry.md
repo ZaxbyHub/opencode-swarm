@@ -6,7 +6,7 @@ read-amplification matrix for every durable stream under `.swarm/` and the
 platform-data roots. It blocks PRs 09–23 until every row below carries an
 owner-approved final disposition.
 
-**The canonical, field-complete record is machine-readable:**
+**The canonical, field-complete record is machine-readable** (registry data schema version: `RETENTION_REGISTRY_SCHEMA_VERSION`, currently 1, exported alongside the rows)**:**
 `scripts/retention-registry.data.ts` (`RETENTION_REGISTRY`). Every row there
 carries ALL issue-required columns — path grammar, canonical root, writer
 symbols, reader symbols, schema/version, state class, privacy class,
@@ -17,10 +17,13 @@ final disposition. The CI gate `bun run check:retention`
 (`scripts/check-retention-registry.ts`) enforces: every durable-writing
 module under `src/` is registered (or on the explicit plumbing exemption
 list), every disposition is one of the three allowed kinds with a resolvable
-citation, and this document stays in lockstep with the data. This document
-renders the matrix per category and records the evidence; where prose and the
-data module disagree, the data module wins and the check fails until they
-agree.
+citation, and every row id appears in this document as a backtick-wrapped
+slug. This document renders the matrix per category and records the evidence.
+**Provenance and canonicity:** the tables below are a hand-maintained
+rendering of the data module — no committed generator exists; when a row
+changes, update the matching table cell by hand. The mechanically enforced
+doc↔data contract is row-id presence, NOT table-cell equality; the data
+module is canonical wherever the two disagree.
 
 Companion documents: `docs/observability-event-contract.md` (the 17-store
 producer/consumer matrix at correlation granularity, PR 01) and
@@ -48,6 +51,14 @@ open issues' own "independently verified cause" sections — the sequence issues
   `operational` (telemetry/diagnostic signal), `derived-rebuildable`
   (projection of authoritative state or rebuildable cache),
   `governed-content` (knowledge/evidence artifacts under retention governance).
+- **Privacy class** — `metadata` (structured/discriminator-only records: ids,
+  counters, event kinds, timing — no free-text payload), `content` (streams
+  whose primary payload is free text: lessons, reports, skills, messages,
+  agent work product), `mixed` (both). The line is the payload, not the file
+  type: an insight candidate awaiting promotion carries the same lesson bytes
+  the knowledge store does, so the feeder queue is `content` exactly like its
+  destination (issue #2036 scenario 5 forbids reclassifying content as
+  metadata to sample it freely).
 - **Limit scope** — `global` (one ceiling for the whole store),
   `per-trigger` (bounded only per invocation), `per-key` (per task/skill/file
   etc.), `session-scoped` (bounded by the close/finalize lifecycle),
@@ -277,17 +288,29 @@ open/acquire seams) and the complete writer-module-to-row mapping live in
 `EXEMPT_WRITER_MODULES`, 7 plumbing entries). **Known limitation:** a module
 that only mutates a SQLite handle acquired elsewhere is not flagged; the DB
 open/acquire seam (`getProjectDb`/`getGlobalDb`/`Database` construction) is
-the enforced boundary. Two further, deliberately documented seams: (a)
+the enforced boundary. Further, deliberately documented seams: (a)
 **helper indirection** — a handful of modules write only through shared
 transaction helpers (`transactKnowledge`/`transactFile` and friends) and are
 registered by OWNERSHIP in `writerModules` rather than by a literal write-call
-match in their own source; and (b) **copy/rename materialization** — a durable
+match in their own source; (b) **copy/rename materialization** — a durable
 stream can be materialized by `copyFileSync`/`renameSync` without any write-API
 call (the known instance, `src/commands/skill-opt.ts:231` copying eval inputs
 under `.swarm/evolution/skills/_eval-input/`, is registered on the
 skill-optimizer-evolution row). `copyFileSync` is deliberately NOT a ratchet
 pattern because read-side snapshot copies (e.g. cost-accounting's telemetry
-temp copy) would be false positives. Line citations in the data module were verified against
+temp copy) would be false positives; (c) **raw Bun-native write APIs** —
+`Bun.write(`, `Bun.file(...).writer(`, and fd-level `fs.writeSync` are not
+matched (zero instances in `src/` today; AGENTS.md already bars direct
+`Bun.*` calls outside `src/utils/bun-compat.ts`, and the wrapper's `bunWrite`
+IS matched); and (d) **comment/string-literal false positives** — the
+line-comment stripper only removes lines that START with `//`, so write APIs
+mentioned inside block comments, string literals, or trailing comments still
+match. That direction is fail-closed (a non-writer gets flagged and must be
+registered or exempted with a reason) — the safe failure mode for a coverage
+gate. Finally, citation existence checks are case-sensitive exactly like the
+Linux CI that enforces the gate; a case-mismatched citation could pass a
+case-insensitive local filesystem and fail only in CI. Line citations in the
+data module were verified against
 the gate tree and are ungated "verified as of" pointers (the same caveat the
 PR 01 matrix carries); the mechanical guarantees are the coverage ratchet and
 the disposition rules.

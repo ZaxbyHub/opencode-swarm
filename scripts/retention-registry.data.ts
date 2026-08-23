@@ -81,6 +81,9 @@ export interface RetentionRow {
 	readBound: {
 		/** full-file | tail | line-bounded | indexed | directory-scan | write-only */
 		pattern: string;
+		// NOTE: `sync` satisfies the issue-required "sync/async behavior" column
+		// as documentation-as-data for the doc/human rendering; the gate does not
+		// (and need not) mechanically consume it.
 		bound: string;
 		sync: boolean;
 		citation: string;
@@ -698,7 +701,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		],
 		schemaVersion: 'none (id recomputed from content — resolveInsightCandidateId :130-132)',
 		stateClass: 'operational',
-		privacyClass: 'metadata',
+		privacyClass: 'content',
 		writeLimits: {
 			bound: 'INSIGHT_CANDIDATES_MAX_ENTRIES 500 GLOBAL FIFO (micro-reflector.ts:291,333-335)',
 			scope: 'global',
@@ -2028,7 +2031,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			scope: 'per-trigger',
 			citation: 'close.ts:1256-1613 (no prune path — verified against source)',
 		},
-		readBound: { pattern: 'directory-scan', bound: 'filename-only scans; contents never re-read', sync: false, citation: 'close.ts:2234-2235; session-reflection.ts:414' },
+		readBound: { pattern: 'directory-scan', bound: 'filename-only scans; contents never re-read', sync: false, citation: 'close.ts:2233-2235; session-reflection.ts:414' },
 		lockModel: 'finalize.lock cross-process (close.ts:2600-2613)',
 		crashBehavior: 'archive-before-clean guard: active files unlinked only if archived (:1637-1671); archiveStageFailed prevents truthful-looking empty results',
 		closePolicy: 'IS the close archive',
@@ -2243,7 +2246,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		],
 		schemaVersion: 'CurationProposal schema (status: pending is the only written value)',
 		stateClass: 'operational',
-		privacyClass: 'metadata',
+		privacyClass: 'mixed',
 		writeLimits: { bound: 'NONE', scope: 'none', citation: 'src/knowledge/curation-policy.ts:136-150 (no cap; best-effort append)' },
 		readBound: { pattern: 'full-file', bound: 'unbounded — the diagnostics reader parses the whole file per health check', sync: false, citation: 'src/services/knowledge-diagnostics.ts:677-700' },
 		lockModel: 'none',
@@ -2493,7 +2496,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		readerCitations: ['src/services/skill-changelog.ts:63 readSkillChangelog — full-file per skill'],
 		schemaVersion: 'changelog entry schema',
 		stateClass: 'governed-content',
-		privacyClass: 'metadata',
+		privacyClass: 'mixed',
 		writeLimits: { bound: 'MAX_CHANGELOG_ENTRIES_PER_SKILL 200 FIFO per skill; NO global ceiling across skills (verify item #2309)', scope: 'per-key', citation: 'src/services/skill-changelog.ts:5' },
 		readBound: { pattern: 'full-file', bound: '≤200 lines per skill file', sync: true, citation: 'src/services/skill-changelog.ts:5,63' },
 		lockModel: 'none (trim race possible, best-effort non-fatal)',
@@ -2682,7 +2685,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		readerCitations: ['manifest-based lookup (index.json) for receipt verification'],
 		schemaVersion: 'receipt schema + index manifest',
 		stateClass: 'governed-content',
-		privacyClass: 'metadata',
+		privacyClass: 'mixed',
 		writeLimits: { bound: 'one small file per review receipt; NOT in close clean lists — accumulates', scope: 'none', citation: 'src/hooks/review-receipt.ts:14-15; close.ts clean lists (absent, verified)' },
 		readBound: { pattern: 'indexed', bound: 'manifest lookup + per-file reads', sync: false, citation: 'src/hooks/review-receipt.ts:185-195' },
 		lockModel: 'registered-bespoke atomic writes (#2035)',
@@ -2854,11 +2857,18 @@ export const EXEMPT_WRITER_MODULES: Readonly<Record<string, string>> = Object.fr
 });
 
 /** Sequence window for fix-in-issue dispositions (issue #2036 amendment clause). */
+/** Schema version of the registry data structure itself (not per-row stream schemas). */
+export const RETENTION_REGISTRY_SCHEMA_VERSION = 1;
+
 export const RETENTION_ISSUE_SEQUENCE = {
 	first: 2029,
 	last: 2051,
-	/** Sequence-amendment issue opened by this gate (residual unowned streams). */
-	amendment: 2309,
+	/**
+	 * Sequence-amendment issues opened under #2036's amendment clause (residual
+	 * unowned streams). Append new amendment issue numbers here as they are
+	 * opened — the check validates fix-in-issue against this list.
+	 */
+	amendments: [2309] as readonly number[],
 } as const;
 
 export function getRetentionRow(id: string): RetentionRow | undefined {
@@ -2876,7 +2886,9 @@ export function listRetentionWriterModules(): string[] {
 
 export const DISPOSITION_FORBIDDEN_STRINGS = [
 	'TBD',
-	'deferred',
+	// 'defer' matches both 'defer' and 'deferred' (substring scan)
+	'defer',
+	'unknown',
 	'future issue',
 ] as const;
 

@@ -4,6 +4,7 @@ import {
 	EXEMPT_WRITER_MODULES,
 	RETENTION_ISSUE_SEQUENCE,
 	RETENTION_REGISTRY,
+	RETENTION_REGISTRY_SCHEMA_VERSION,
 	RETENTION_REGISTRY_SUMMARY,
 	type RetentionRow,
 } from '../../../scripts/retention-registry.data';
@@ -31,6 +32,10 @@ function rows(): RetentionRow[] {
 }
 
 describe('retention registry rows — shape completeness', () => {
+	test('registry data schema version is pinned', () => {
+		expect(RETENTION_REGISTRY_SCHEMA_VERSION).toBe(1);
+	});
+
 	test('registry is non-empty and summary matches the data', () => {
 		expect(RETENTION_REGISTRY.length).toBeGreaterThan(50);
 		expect(RETENTION_REGISTRY_SUMMARY.rowCount).toBe(RETENTION_REGISTRY.length);
@@ -106,13 +111,13 @@ describe('retention registry rows — disposition rules (issue #2036)', () => {
 		}
 	});
 
-	test('fix-in-issue dispositions reference the sequence window or the #2309 amendment', () => {
-		const { first, last, amendment } = RETENTION_ISSUE_SEQUENCE;
+	test('fix-in-issue dispositions reference the sequence window or an amendment issue', () => {
+		const { first, last, amendments } = RETENTION_ISSUE_SEQUENCE;
 		for (const row of rows()) {
 			const d = row.disposition;
 			if (d.kind !== 'fix-in-issue') continue;
 			expect(d.issue).toBeGreaterThanOrEqual(first);
-			expect(d.issue <= last || d.issue === amendment).toBe(true);
+			expect(d.issue <= last || amendments.includes(d.issue)).toBe(true);
 			expect(d.note.trim().length).toBeGreaterThan(0);
 		}
 	});
@@ -139,9 +144,6 @@ describe('retention registry rows — disposition rules (issue #2036)', () => {
 			texts.push(row.writeLimits.bound);
 			for (const forbidden of DISPOSITION_FORBIDDEN_STRINGS) {
 				for (const text of texts) {
-					expect(`${row.id} must not contain "${forbidden}"`).toBe(
-						`${row.id} must not contain "${forbidden}"`,
-					);
 					expect(text.toLowerCase().includes(forbidden.toLowerCase())).toBe(
 						false,
 					);
@@ -153,9 +155,6 @@ describe('retention registry rows — disposition rules (issue #2036)', () => {
 	test('every verified-unbounded stream (scope none) is a fix-in-issue row', () => {
 		for (const row of rows()) {
 			if (row.writeLimits.scope === 'none') {
-				expect(`${row.id} is unbounded and must be fix-in-issue`).toBe(
-					`${row.id} is unbounded and must be fix-in-issue`,
-				);
 				expect(row.disposition.kind).toBe('fix-in-issue');
 			}
 		}
@@ -176,6 +175,14 @@ describe('retention registry rows — coverage plumbing', () => {
 			for (const m of row.writerModules) {
 				expect(exempt.has(m)).toBe(false);
 			}
+		}
+	});
+
+	test('exempt writer module keys use forward-slash src/ .ts paths', () => {
+		for (const key of Object.keys(EXEMPT_WRITER_MODULES)) {
+			expect(key.startsWith('src/')).toBe(true);
+			expect(key.includes('\\')).toBe(false);
+			expect(key.endsWith('.ts')).toBe(true);
 		}
 	});
 
