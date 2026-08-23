@@ -1050,6 +1050,42 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		},
 	},
 	{
+		id: 'task-gate-evidence',
+		category: 4,
+		pathGrammar: '.swarm/evidence/task-gate-requirements/{taskId}.jsonl (+ repaired task-gate evidence files + task-gate-quarantine/ sidecars)',
+		canonicalRoot: 'project-swarm',
+		writerModules: ['src/evidence/task-gate-repair.ts', 'src/evidence/task-gate-requirements.ts'],
+		writerCitations: [
+			'src/evidence/task-gate-requirements.ts:315 appendTaskGateRequirement via atomicWriteFile (schemaVersion 1 records); :282 read-back before append',
+			'src/evidence/task-gate-repair.ts:496 fileHandle.writeFile repaired evidence under withTaskEvidenceLock; :849 atomicWriteFile; quarantine moves into task-gate-quarantine/ (:29-31)',
+		],
+		readerCitations: [
+			'src/evidence/task-gate-requirements.ts:181 readTaskGateRequirementsReceipts — bounded read (256 KiB cap enforced :149-175), async',
+			'src/tools/repair-gate-evidence.ts + src/gate-evidence.ts consumers of the repaired evidence',
+		],
+		schemaVersion: 'schemaVersion 1 (z.literal(1), task-gate-requirements.ts:17)',
+		stateClass: 'authoritative',
+		privacyClass: 'mixed',
+		writeLimits: {
+			bound: 'MAX_TASK_GATE_REQUIREMENTS_BYTES 256 KiB per task file (:13, hard-fails OVERSIZED); repaired evidence MAX_TASK_GATE_EVIDENCE_BYTES 256 KiB (:33); quarantine caps 32 files / 12 MiB / 128 entries / 768 KiB per record (:34-37)',
+			scope: 'per-key',
+			citation: 'src/evidence/task-gate-requirements.ts:13,149-175; src/evidence/task-gate-repair.ts:33-37',
+		},
+		readBound: { pattern: 'line-bounded', bound: 'reads reject files over 256 KiB (typed error)', sync: false, citation: 'src/evidence/task-gate-requirements.ts:149-175' },
+		lockModel: 'withTaskEvidenceLock (same evidence/{taskId} key domain as the task-workflow-evidence row)',
+		crashBehavior: 'atomic writes (atomicWriteFile / fsynced fileHandle.write); torn repair quarantined with digest',
+		closePolicy: 'cleaned — evidence/ dir archived+cleaned at close',
+		resetPolicy: 'not reset',
+		legacyCompatibility: 'quarantine sidecars preserve pre-repair originals',
+		healthSignal: 'quarantine counts',
+		owner: 'this-gate',
+		disposition: {
+			kind: 'not-a-defect',
+			proof: 'Per-task hard byte caps (256 KiB each, typed OVERSIZED errors), locked atomic writes, bounded quarantine sidecars, and the close-cleaned evidence/ directory lifecycle (registered 2026-08-23 when the task-gate-repair work merged from main (#2301 family) introduced the writers).',
+		},
+	},
+
+	{
 		id: 'sast-baseline',
 		category: 4,
 		pathGrammar: '.swarm/evidence/{phase}/sast-baseline.json',

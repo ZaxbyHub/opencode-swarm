@@ -151,7 +151,7 @@ decision is *missing today* (they are untouched, never deleted-and-needed).
 | `drift-reports` | .swarm/drift-report-phase-{N}.json | governed-content | one report per phase; archived+cleaned as close dynamic artifacts (session-scoped) | indexed: per-phase files | archived+cleaned — dynamic artifact regex at close.ts:… | not a defect — this-gate |
 | `doc-drift-signals` | .swarm/doc-drift-phase-{N}.json | operational | one signal per phase; NOT in close clean lists — accumulates across phases/plans (none) | indexed: per-phase small JSON | untouched — accumulates | **fix in #2309** — #2309 |
 
-### Category 4 — Guardrail audit, attestations, scope evidence (7 rows)
+### Category 4 — Guardrail audit, attestations, scope evidence (8 rows)
 
 | Row id | Path grammar | State class | Write limit (scope) | Read bound | Close policy | Disposition → owner |
 |---|---|---|---|---|---|---|
@@ -160,8 +160,10 @@ decision is *missing today* (they are untouched, never deleted-and-needed).
 | `scopes-family` | .swarm/scopes/{scope-{taskId}.json, binding-*.json, *.generation-lock… | authoritative | MAX_FILES_PER_SCOPE 10k (:87); MAX_SCOPE_BYTES 2 MiB (:89); MAX_BINDING_FILES_TO_SCAN 10k… (global) | directory-scan: ≤10k files scanned, ≤2 MiB per scope read | cleaned-only — clearAllScopes rmSync, NOT archived ("s… | not a defect — this-gate |
 | `task-workflow-evidence` | .swarm/evidence/{taskId}.json | authoritative | retryHistory ≤3 (schema :295); per-task file; evidence/ archived+cleaned at close (per-key) | full-file: single per-task JSON | cleaned — evidence/ dir lifecycle | not a defect — this-gate |
 | `evaluation-store` | .swarm/evolution/** (gate-audit/{runId}/, runs/, decisions/, task-set… | governed-content | immutable write-once (no rewrite, divergent rewrite throws); consensus retention config-d… (global) | directory-scan: enumeration caps (1000/2000); per-artifact full reads | untouched — evolution/ is in no close clean list (held… | retain by design — this-gate |
+| `task-gate-evidence` | .swarm/evidence/task-gate-requirements/{taskId}.jsonl (+ repaired tas… | authoritative | MAX_TASK_GATE_REQUIREMENTS_BYTES 256 KiB per task file (:13, hard-fails OVERSIZED); repai… (per-key) | line-bounded: reads reject files over 256 KiB (typed error) | cleaned — evidence/ dir archived+cleaned at close | not a defect — this-gate |
 | `sast-baseline` | .swarm/evidence/{phase}/sast-baseline.json | governed-content | MAX_BASELINE_FINDINGS 2000 (:37); MAX_BASELINE_BYTES 2 MiB (:40) with truncation :413-433 (per-key) | full-file: ≤2 MiB by write-side cap | cleaned — evidence/ dir lifecycle | not a defect — this-gate |
 | `review-receipts` | .swarm/review-receipts/{YYYY-MM-DD}-{id}.json + index.json | governed-content | one small file per review receipt; NOT in close clean lists — accumulates (none) | indexed: manifest lookup + per-file reads | untouched — accumulates across reviews | **fix in #2309** — #2309 |
+
 
 ### Category 5 — Plan durability, evidence bundles, council (12 rows)
 
