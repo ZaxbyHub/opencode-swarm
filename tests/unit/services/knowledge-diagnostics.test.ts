@@ -389,10 +389,11 @@ describe('knowledge-diagnostics', () => {
 		it('#1466 legacy config with no algorithm_version is skipped after the v2 bump (no strand)', async () => {
 			// FINGERPRINT_ALGORITHM_VERSION is 2 since #1466, so an absent
 			// version means legacy v1: digests are not comparable and the
-			// field stays undefined (fail-open with the re-link advisory).
+			// debug payload reports null (fail-open with the re-link
+			// advisory) — never a false mismatch.
 			setUpLinkedMemoryCohort({ fingerprint: 'deadbeefdead' });
 			const debug = await computeKnowledgeDebug(dir);
-			expect(debug.memory.config_fingerprint_match).toBeUndefined();
+			expect(debug.memory.config_fingerprint_match).toBeNull();
 		});
 
 		it('differing algorithm_version does not report a false mismatch', async () => {
