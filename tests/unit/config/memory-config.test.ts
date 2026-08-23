@@ -68,7 +68,7 @@ describe('MemoryConfigSchema', () => {
 			redaction: {
 				rejectDurableSecrets: true,
 				detectPii: false,
-				piiDetector: "regex",
+				piiDetector: 'regex',
 				rejectDurablePii: false,
 				piiThreshold: 0.7,
 			},

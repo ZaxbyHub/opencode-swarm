@@ -1,9 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 import {
 	computePiiScore,
+	type PiiFinding,
 	RegexPiiDetector,
 	summarizePiiFindings,
-	type PiiFinding,
 } from '../../../src/memory/pii';
 
 describe('RegexPiiDetector (#1466)', () => {

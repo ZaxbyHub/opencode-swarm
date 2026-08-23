@@ -1,13 +1,13 @@
 {
-  "schema_version": 1,
-  "embedding_model_version": "lexical-default-v1",
-  "tolerance": 0.05,
-  "metrics": {
-    "precision@k": 0.20833333333333334,
-    "recall@k": 0.625,
-    "fixture_count": 8,
-    "run_count": 48,
-    "passed_run_count": 30
-  },
-  "generated_at": "2026-08-23T02:24:44.102Z"
+	"schema_version": 1,
+	"embedding_model_version": "lexical-default-v1",
+	"tolerance": 0.05,
+	"metrics": {
+		"precision@k": 0.20833333333333334,
+		"recall@k": 0.625,
+		"fixture_count": 8,
+		"run_count": 48,
+		"passed_run_count": 30
+	},
+	"generated_at": "2026-08-23T02:24:44.102Z"
 }

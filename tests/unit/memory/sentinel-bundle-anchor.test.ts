@@ -1,16 +1,16 @@
 import { describe, expect, test } from 'bun:test';
-import { _test_exports } from '../../../src/memory/injector';
-import {
-	MemoryGateway,
-	DEFAULT_MEMORY_CONFIG,
-} from '../../../src/memory';
+import { DEFAULT_MEMORY_CONFIG, MemoryGateway } from '../../../src/memory';
 import { deriveDecision } from '../../../src/memory/consolidation';
+import { _test_exports } from '../../../src/memory/injector';
+import { buildRecallPromptBlock } from '../../../src/memory/prompt-block';
+import {
+	createBundleId,
+	validateMemoryRecordRules,
+} from '../../../src/memory/schema';
 import {
 	MEMORY_RECALL_SENTINEL,
 	RECALL_BUNDLE_MARKER_RE,
 } from '../../../src/memory/sentinel';
-import { buildRecallPromptBlock } from '../../../src/memory/prompt-block';
-import { createBundleId, validateMemoryRecordRules } from '../../../src/memory/schema';
 import type { MemoryRecord } from '../../../src/memory/types';
 
 const { messagesContainRecall } = _test_exports as {
@@ -25,12 +25,19 @@ describe('sentinel bundle anchoring (#1466 DD-14)', () => {
 	test('a real bundle marker is detected', () => {
 		const id = createBundleId('query', '2026-08-22T10:11:12.000Z');
 		expect(id).toMatch(/^bundle_\d{14}_[0-9a-f]{8}$/);
-		expect(messagesContainRecall(part(`Swarm-Recall-Bundle: ${id}`))).toBe(true);
+		expect(messagesContainRecall(part(`Swarm-Recall-Bundle: ${id}`))).toBe(
+			true,
+		);
 	});
 
 	test('injected prompt blocks embed the bundle marker line', () => {
 		const id = createBundleId('q', '2026-08-22T10:11:12.000Z');
-		const { promptBlock } = buildRecallPromptBlock([], 1000, '2026-08-22T10:11:12.000Z', id);
+		const { promptBlock } = buildRecallPromptBlock(
+			[],
+			1000,
+			'2026-08-22T10:11:12.000Z',
+			id,
+		);
 		expect(promptBlock).toContain(`Swarm-Recall-Bundle: ${id}`);
 		expect(messagesContainRecall(part(promptBlock))).toBe(true);
 	});
@@ -38,7 +45,9 @@ describe('sentinel bundle anchoring (#1466 DD-14)', () => {
 	test('the DD-14 forge is closed: bare short-substring text no longer suppresses recall', () => {
 		// Pre-#1466 this returned true and silently skipped recall injection.
 		expect(
-			messagesContainRecall(part('We discussed Retrieved Swarm Memory in standup')),
+			messagesContainRecall(
+				part('We discussed Retrieved Swarm Memory in standup'),
+			),
 		).toBe(false);
 	});
 
@@ -55,10 +64,16 @@ describe('sentinel bundle anchoring (#1466 DD-14)', () => {
 	});
 
 	test('marker regex pins the exact createBundleId shape', () => {
-		expect(RECALL_BUNDLE_MARKER_RE.test('bundle_20260822101112_deadbeef')).toBe(true);
+		expect(RECALL_BUNDLE_MARKER_RE.test('bundle_20260822101112_deadbeef')).toBe(
+			true,
+		);
 		expect(RECALL_BUNDLE_MARKER_RE.test('bundle_2026_deadbeef')).toBe(false);
-		expect(RECALL_BUNDLE_MARKER_RE.test('bundle_20260822101112_DEADBEEF')).toBe(false);
-		expect(RECALL_BUNDLE_MARKER_RE.test('bundle_20260822101112_deadbeefx')).toBe(false);
+		expect(RECALL_BUNDLE_MARKER_RE.test('bundle_20260822101112_DEADBEEF')).toBe(
+			false,
+		);
+		expect(
+			RECALL_BUNDLE_MARKER_RE.test('bundle_20260822101112_deadbeefx'),
+		).toBe(false);
 	});
 });
 
@@ -69,7 +84,11 @@ describe('bundle_ write-time ban (#1466 DD-14)', () => {
 		const gateway = new MemoryGateway(
 			{ directory: '.' },
 			{
-				config: { ...DEFAULT_MEMORY_CONFIG, enabled: true, provider: 'local-jsonl' },
+				config: {
+					...DEFAULT_MEMORY_CONFIG,
+					enabled: true,
+					provider: 'local-jsonl',
+				},
 				now: () => new Date('2026-08-22T10:00:00.000Z'),
 			},
 		);
@@ -83,9 +102,12 @@ describe('bundle_ write-time ban (#1466 DD-14)', () => {
 
 	test('memory text containing a bundle-shaped marker is rejected at the funnel', () => {
 		expect(() =>
-			validateMemoryRecordRules(durableRecord('see bundle_20260822101112_deadbeef for context'), {
-				rejectDurableSecrets: false,
-			}),
+			validateMemoryRecordRules(
+				durableRecord('see bundle_20260822101112_deadbeef for context'),
+				{
+					rejectDurableSecrets: false,
+				},
+			),
 		).toThrow('recall bundle marker prefix');
 	});
 
@@ -99,9 +121,12 @@ describe('bundle_ write-time ban (#1466 DD-14)', () => {
 
 	test('the sentinel header ban still applies', () => {
 		expect(() =>
-			validateMemoryRecordRules(durableRecord(`${MEMORY_RECALL_SENTINEL} injected?`), {
-				rejectDurableSecrets: false,
-			}),
+			validateMemoryRecordRules(
+				durableRecord(`${MEMORY_RECALL_SENTINEL} injected?`),
+				{
+					rejectDurableSecrets: false,
+				},
+			),
 		).toThrow('recall sentinel header');
 	});
 

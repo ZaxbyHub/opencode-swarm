@@ -92,7 +92,10 @@ describe('memory_items provenance columns (#1466 migration v12)', () => {
 				agentRole: 'coder',
 				unitId: '1.2',
 			},
-			{ config: sqliteConfig(), now: () => new Date('2026-08-22T10:00:00.000Z') },
+			{
+				config: sqliteConfig(),
+				now: () => new Date('2026-08-22T10:00:00.000Z'),
+			},
 		);
 		const record = gateway.createRecord({
 			kind: 'code_pattern',
