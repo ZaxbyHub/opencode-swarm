@@ -472,25 +472,21 @@ jobs:
   # doing work (same pattern as integration/smoke). Skipped for release-please
   # branches (version bumps don't change coverage).
   coverage:
-    needs: [detect-release, quality, unit]
+    needs: [detect-release, quality]
     runs-on: ubuntu-latest
-    # Standalone cost: ~2-3 min setup/build + ~26-31 min full-suite coverage
-    # (the measurement alone has been observed at 30.6 min, PR #1566) = ~29-34 min
-    # worst case. This job does NOT run the sharded suite, so it sheds the ~3.5 min
-    # that helped push the old in-`unit` cell to its 40m cap. The cap balances two
-    # ceilings: it must clear the ~34 min worst-observed run (60m leaves ~26 min
-    # for slow-runner / cache-miss variance) AND stay under the merge_queue
-    # ruleset's check_response_timeout_minutes: 60 end-to-end, since coverage runs
-    # after `quality` (~1 min) via `needs` — total ~35 min < 60. This
-    # makes a timeout very unlikely for a normal run by removing the structural
-    # double-run; it is not an absolute guarantee against a pathologically slow runner.
+    # Coverage is the merge-group long pole: clean runs for PR #2290 took about
+    # 45 minutes. It must start after `quality`, in parallel with the unit matrix,
+    # so the required result arrives within ruleset 17809658's 60-minute
+    # check_response_timeout_minutes. Serializing it behind `unit` produced
+    # 63-minute merge-group runs; GitHub evicted them 26-43 seconds before the
+    # successful coverage result arrived (CI-004).
     #
-    # `needs: [..., unit]` mirrors the integration/smoke jobs: when a unit shard
-    # fails on merge_group, coverage is skipped immediately instead of running
-    # for ~30-60 min uselessly (the failed unit check already blocks the queue,
-    # so the coverage result is redundant). On pull_request, coverage's steps
-    # are gated on `merge_group` and report success without doing work, so the
-    # unit `needs` (which runs on pull_request) does not change PR feedback.
+    # A failing unit shard no longer cancels this independent job early, which
+    # may spend extra runner time on an already-blocked merge group. Correctness
+    # is unchanged: both unit checks and coverage remain required, while the
+    # parallel graph keeps successful groups inside the queue deadline. On
+    # pull_request, coverage's steps remain gated on `merge_group` and report
+    # success without doing work.
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
