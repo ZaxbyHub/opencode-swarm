@@ -113,7 +113,7 @@ describe('retrospective gate adversarial tests', () => {
 
 			expect(parsed.success).toBe(false);
 			expect(parsed.status).toBe('blocked');
-			expect(parsed.reason).toBe('RETROSPECTIVE_MISSING');
+			expect(parsed.reason).toBe('RETROSPECTIVE_SCHEMA_INVALID');
 			expect(parsed.message).toMatch(/retrospective/i);
 		});
 	});
@@ -131,7 +131,7 @@ describe('retrospective gate adversarial tests', () => {
 
 			expect(parsed.success).toBe(false);
 			expect(parsed.status).toBe('blocked');
-			expect(parsed.reason).toBe('RETROSPECTIVE_MISSING');
+			expect(parsed.reason).toBe('RETROSPECTIVE_SCHEMA_INVALID');
 			expect(parsed.message).toMatch(/retrospective/i);
 		});
 	});
@@ -149,7 +149,7 @@ describe('retrospective gate adversarial tests', () => {
 
 			expect(parsed.success).toBe(false);
 			expect(parsed.status).toBe('blocked');
-			expect(parsed.reason).toBe('RETROSPECTIVE_MISSING');
+			expect(parsed.reason).toBe('RETROSPECTIVE_FAILED');
 			expect(parsed.message).toMatch(/retrospective/i);
 		});
 	});

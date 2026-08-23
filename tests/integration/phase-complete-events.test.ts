@@ -191,7 +191,7 @@ describe('phase_complete integration — events.jsonl', () => {
 	});
 
 	describe('2. Incomplete phase (missing agents in enforce mode)', () => {
-		it('writes event with status incomplete and missing agents', async () => {
+		it('blocks before writing an event when required agents are missing', async () => {
 			// Default config: required_agents: [coder, reviewer, test_engineer], require_docs: true, policy: enforce
 			const sessionID = 'sess1';
 			ensureAgentSession(sessionID);
@@ -213,21 +213,14 @@ describe('phase_complete integration — events.jsonl', () => {
 			// Assert: tool return value has success: false
 			expect(parsed.success).toBe(false);
 			expect(parsed.status).toBe('incomplete');
+			expect(parsed.reason).toBe('REQUIRED_AGENTS_MISSING');
 			expect(parsed.agentsMissing).toContain('reviewer');
 			expect(parsed.agentsMissing).toContain('test_engineer');
 			expect(parsed.agentsMissing).toContain('docs');
 
-			// Assert: event line written with incomplete status
+			// Aggregate preflight blocks before any completion event is written.
 			const events = readEvents('phase_complete');
-			expect(events.length).toBe(1);
-
-			const event = events[0];
-			expect(event.event).toBe('phase_complete');
-			expect(event.phase).toBe(1);
-			expect(event.status).toBe('incomplete');
-			expect(event.agents_missing).toContain('reviewer');
-			expect(event.agents_missing).toContain('test_engineer');
-			expect(event.agents_missing).toContain('docs');
+			expect(events).toEqual([]);
 		});
 	});
 
