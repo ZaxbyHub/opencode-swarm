@@ -26,7 +26,7 @@ describe('--fixtures traversal defense (#1466 DD-24)', () => {
 	test('a lexical escape outside the project directory is rejected', async () => {
 		const out = await handleMemoryEvaluateCommand(tmpDir, [
 			'--fixtures',
-			path.join(os.tmpdir(), 'elsewhere'),
+			path.join(realFs.realpathSync(os.tmpdir()), 'elsewhere'),
 		]);
 		expect(out).toContain('must resolve under the project directory');
 	});
