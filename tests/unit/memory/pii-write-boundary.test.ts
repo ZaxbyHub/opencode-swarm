@@ -265,4 +265,89 @@ describe('PII write boundary (#1466)', () => {
 		expect(readEvents().some((e) => e.operation === 'pii_rejected')).toBe(true);
 		await gateway.dispose();
 	});
+
+	test('FB-3: outcome correction text runs the same PII funnel', async () => {
+		const gateway = new MemoryGateway(
+			{ directory: tmpDir, sessionID: 'session-a', agentRole: 'coder' },
+			{
+				config: {
+					...sqliteConfig(),
+					redaction: {
+						rejectDurableSecrets: true,
+						detectPii: false,
+						piiDetector: 'regex' as const,
+						rejectDurablePii: true,
+						piiThreshold: 0.7,
+					},
+				},
+			},
+		);
+		const record = gateway.createRecord({
+			kind: 'code_pattern',
+			text: 'Stable record for outcome attachment.',
+			source: { type: 'file', filePath: 'src/a.ts' },
+		});
+		await gateway.upsertCurated(record);
+		await expect(
+			gateway.recordOutcome({
+				memoryId: record.id,
+				outcome: 'corrected',
+				correction: 'Real owner is correction-owner@example-corp.com now.',
+			}),
+		).rejects.toThrow('PII threshold');
+		const rejections = readEvents().filter(
+			(e) => e.operation === 'pii_rejected',
+		);
+		expect(rejections).toHaveLength(1);
+		// FB-L3: the audit target is NOT the content-derived record id, and
+		// neither reason nor target carries the rejected text.
+		expect(rejections[0].target_id).toBe('pii_rejection');
+		expect(rejections[0].reason).not.toContain(
+			'correction-owner@example-corp.com',
+		);
+		await gateway.dispose();
+	});
+
+	test('FB-3: correction text containing the bundle_ marker is rejected', async () => {
+		const gateway = new MemoryGateway(
+			{ directory: tmpDir, sessionID: 'session-a', agentRole: 'coder' },
+			{ config: sqliteConfig() },
+		);
+		const record = gateway.createRecord({
+			kind: 'code_pattern',
+			text: 'Stable record for outcome attachment.',
+			source: { type: 'file', filePath: 'src/a.ts' },
+		});
+		await gateway.upsertCurated(record);
+		await expect(
+			gateway.recordOutcome({
+				memoryId: record.id,
+				outcome: 'corrected',
+				correction: 'See bundle_20260822101122_deadbeef for the anchor.',
+			}),
+		).rejects.toThrow('bundle marker prefix');
+		await gateway.dispose();
+	});
+
+	test('FB-3 (clock): rapid scratch proposals never spuriously reject', async () => {
+		// Regression for the two-this.now()-reads bug: expiresAt - createdAt
+		// could land a millisecond over 7 days and reject 'scratch memories
+		// must expire within 7 days'. Both timestamps now derive from ONE
+		// clock read, so a burst of proposals must all succeed.
+		const gateway = new MemoryGateway(
+			{ directory: tmpDir, sessionID: 'session-a', agentRole: 'coder' },
+			{ config: sqliteConfig() },
+		);
+		for (let i = 0; i < 50; i++) {
+			const proposal = await gateway.propose({
+				operation: 'add',
+				kind: 'scratch',
+				text: `burst scratch note ${i}`,
+				rationale: 'clock regression probe.',
+				evidenceRefs: [],
+			});
+			expect(proposal.status).toBe('pending');
+		}
+		await gateway.dispose();
+	});
 });

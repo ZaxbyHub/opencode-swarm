@@ -25,6 +25,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { evaluateMemoryRecallFixtures } from '../src/memory/evaluation';
+import { DEFAULT_MEMORY_CONFIG, resolveMemoryConfig } from '../src/memory/config';
 
 const REPO_ROOT = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -87,6 +88,18 @@ function metricSummary(report: Awaited<ReturnType<typeof evaluateMemoryRecallFix
 		run_count: s.run_count,
 		passed_run_count: s.passed_run_count,
 	};
+}
+
+/**
+ * PR #2310 feedback PRR-029: derive the CURRENT pipeline identity the same
+ * way the sqlite provider stamps embedding_model_version — embeddings
+ * disabled → lexical pin; enabled → explicit version or model:dimension.
+ * Mirrors embeddingModelVersionStamp()/LocalEmbeddingProvider semantics.
+ */
+function resolveCurrentEmbeddingPin(): string {
+	const embeddings = resolveMemoryConfig(DEFAULT_MEMORY_CONFIG).embeddings;
+	if (!embeddings.enabled) return EMBEDDING_MODEL_PIN;
+	return embeddings.version ?? `${embeddings.model}:${embeddings.dimension}`;
 }
 
 async function main(): Promise<number> {
@@ -164,6 +177,31 @@ async function main(): Promise<number> {
 	if (baseline.schema_version !== BASELINE_SCHEMA_VERSION) {
 		console.error(
 			`memory-recall-regression: baseline schema_version ${baseline.schema_version} is not supported (expected ${BASELINE_SCHEMA_VERSION}); regenerate with --update.`,
+		);
+		return 1;
+	}
+	// PR #2310 feedback PRR-029: the pipeline pin must be LOAD-BEARING — a
+	// baseline generated under one embedding pipeline identity must never be
+	// silently compared against metrics from another. The current identity is
+	// derived from the resolved default memory config (embeddings disabled →
+	// the lexical pin), so this can only trip when Phase 4 flips embeddings
+	// on — exactly the transition the issue wants guarded.
+	const currentPin = resolveCurrentEmbeddingPin();
+	if (baseline.embedding_model_version !== currentPin) {
+		console.error(
+			`memory-recall-regression: FAIL — pipeline identity drift: baseline was generated under '${baseline.embedding_model_version}' but the current evaluation pipeline is '${currentPin}'. Regenerate the baseline with --update and justify it in the PR.`,
+		);
+		return 1;
+	}
+	// PR #2310 feedback FB-L6: a delta-only gate silently passes when the
+	// fixture set SHRINKS (deleting a fixture deletes its regression signal).
+	// The committed baseline records the fixture count it was pinned against.
+	if (
+		typeof baseline.metrics.fixture_count === 'number' &&
+		firstMetrics.fixture_count < baseline.metrics.fixture_count
+	) {
+		console.error(
+			`memory-recall-regression: FAIL — fixture set shrank: ${firstMetrics.fixture_count} fixtures vs the pinned baseline's ${baseline.metrics.fixture_count}. Deleting fixtures removes regression coverage; restore them or regenerate the baseline with --update and justify it in the PR.`,
 		);
 		return 1;
 	}

@@ -46,20 +46,35 @@ describe('--fixtures traversal defense (#1466 DD-24)', () => {
 
 	test('a symlink inside the project pointing outside is rejected', async () => {
 		const outsideRoot = canonicalMkdtemp('swarm-outside-');
-		// The outside dir must have at least one .json file so the symlink
+		// The outside dir must have at least one .json file so the link
 		// would otherwise look like a plausible fixtures dir.
 		await fs.writeFile(
 			path.join(outsideRoot, 'decoy.json'),
 			JSON.stringify({ decoy: true }),
 		);
 		const linkPath = path.join(tmpDir, 'linked-fixtures');
+		// Windows junctions need no special privilege; if symlink creation was
+		// denied (EPERM/EACCES on non-developer-mode Windows), retry as a
+		// junction so the containment case still runs — and skip VISIBLY (not a
+		// bare return) when neither works.
+		let linkKind: 'symlink' | 'junction' | null = null;
 		try {
 			realFs.symlinkSync(outsideRoot, linkPath, 'dir');
+			linkKind = 'symlink';
 		} catch (err) {
-			// Windows without developer mode cannot create symlinks.
 			const code = (err as NodeJS.ErrnoException).code;
-			if (code === 'EPERM' || code === 'EACCES') return;
-			throw err;
+			if (code !== 'EPERM' && code !== 'EACCES') throw err;
+			try {
+				realFs.symlinkSync(outsideRoot, linkPath, 'junction');
+				linkKind = 'junction';
+			} catch {
+				linkKind = null;
+			}
+		}
+		if (linkKind === null) {
+			// Visible skip, not a vacuous pass (PR #2310 feedback FB-L7).
+			console.warn('SKIP: neither symlink nor junction could be created');
+			return;
 		}
 		const out = await handleMemoryEvaluateCommand(tmpDir, [
 			'--fixtures',
@@ -69,33 +84,36 @@ describe('--fixtures traversal defense (#1466 DD-24)', () => {
 		await fs.rm(outsideRoot, { recursive: true, force: true });
 	});
 
-	test('a case-variant spelling of a legitimate fixtures dir inside the project is accepted (win32)', async () => {
-		if (process.platform !== 'win32') return;
-		const fixturesDir = path.join(tmpDir, 'fixtures');
-		await fs.mkdir(fixturesDir, { recursive: true });
-		// Copy one real fixture so the evaluation actually runs.
-		await fs.copyFile(
-			path.join(
-				PACKAGE_ROOT,
-				'tests',
-				'fixtures',
-				'memory-recall',
-				'repo-conventions.json',
-			),
-			path.join(fixturesDir, 'repo-conventions.json'),
-		);
-		// Same path with the drive letter case-flipped.
-		const caseVariant =
-			tmpDir.charAt(0) === tmpDir.charAt(0).toUpperCase()
-				? tmpDir.charAt(0).toLowerCase() + tmpDir.slice(1)
-				: tmpDir.charAt(0).toUpperCase() + tmpDir.slice(1);
-		const out = await handleMemoryEvaluateCommand(caseVariant, [
-			'--fixtures',
-			fixturesDir,
-		]);
-		expect(out).not.toContain('must resolve under the project directory');
-		expect(out).not.toContain('escaped the allowed roots');
-		expect(out).not.toContain('could not be resolved');
-		expect(out).toContain('## Swarm Memory Recall Evaluation');
-	});
+	test(
+		'a case-variant spelling of a legitimate fixtures dir inside the project is accepted (win32)',
+		{ skipIf: process.platform !== 'win32' },
+		async () => {
+			const fixturesDir = path.join(tmpDir, 'fixtures');
+			await fs.mkdir(fixturesDir, { recursive: true });
+			// Copy one real fixture so the evaluation actually runs.
+			await fs.copyFile(
+				path.join(
+					PACKAGE_ROOT,
+					'tests',
+					'fixtures',
+					'memory-recall',
+					'repo-conventions.json',
+				),
+				path.join(fixturesDir, 'repo-conventions.json'),
+			);
+			// Same path with the drive letter case-flipped.
+			const caseVariant =
+				tmpDir.charAt(0) === tmpDir.charAt(0).toUpperCase()
+					? tmpDir.charAt(0).toLowerCase() + tmpDir.slice(1)
+					: tmpDir.charAt(0).toUpperCase() + tmpDir.slice(1);
+			const out = await handleMemoryEvaluateCommand(caseVariant, [
+				'--fixtures',
+				fixturesDir,
+			]);
+			expect(out).not.toContain('must resolve under the project directory');
+			expect(out).not.toContain('escaped the allowed roots');
+			expect(out).not.toContain('could not be resolved');
+			expect(out).toContain('## Swarm Memory Recall Evaluation');
+		},
+	);
 });

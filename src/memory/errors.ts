@@ -20,10 +20,15 @@ export class MemoryDisabledError extends Error {
  * operator who opted into `memory.redaction.piiDetector: 'ner'` (or into
  * PII rejection) must get an actionable error, not a silent skip of the
  * privacy control or a raw ERR_MODULE_NOT_FOUND.
+ *
+ * PR #2310 feedback (PRR-016): extends MemoryValidationError so gateway and
+ * tool-layer callers that branch on the validation-error family (and the
+ * `code` field) handle the opt-in-misconfiguration case through the same
+ * contract as every other write-boundary rejection.
  */
-export class MemoryPiiDetectorError extends Error {
+export class MemoryPiiDetectorError extends MemoryValidationError {
 	constructor(message: string) {
-		super(message);
+		super(message, 'memory_pii_detector_error');
 		this.name = 'MemoryPiiDetectorError';
 	}
 }

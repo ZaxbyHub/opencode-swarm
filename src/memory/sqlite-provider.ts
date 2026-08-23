@@ -515,6 +515,17 @@ export const MIGRATIONS: Migration[] = [
 /** #1466: name of the migration that introduces memory_events.prev_hash. */
 const EVENT_CHAIN_SCHEMA_MIGRATION_NAME = 'add_memory_events_prev_hash';
 
+/**
+ * The single chain-scan SELECT shared by backfillEventHashChain and
+ * verifyAuditChain. Extracted to a constant so the two call sites are
+ * byte-identical BY CONSTRUCTION — they share one bun query-cache slot
+ * (bounded query-cache budget, see backfillProvenanceColumns; PR #2310
+ * feedback FB-L1: the prior inline copies differed in embedded indentation
+ * and silently occupied two slots).
+ */
+const EVENT_CHAIN_SCAN_SQL = `SELECT rowid, id, operation, target_id, reason, timestamp, event_json, prev_hash
+FROM memory_events ORDER BY rowid ASC`;
+
 interface MemoryItemRow {
 	id: string;
 	record_json: string;
@@ -691,13 +702,18 @@ export class SQLiteMemoryProvider
 		// leaking the first one. A narrow wrap around only runMigrations() would
 		// miss the later throw sites, so the entire post-open body is guarded.
 		try {
-			this.db.run('PRAGMA journal_mode = WAL;');
-			this.db.run('PRAGMA synchronous = NORMAL;');
+			// PR #2310 feedback PRR-017: busy_timeout FIRST. Every statement
+			// between the raw open and this PRAGMA runs with NO busy handling,
+			// so a second connection touching the same WAL database (e.g. the
+			// audit-verify command's diagnostic provider alongside a pooled
+			// provider) could hit a raw SQLITE_BUSY during journal-mode setup.
 			const busyTimeoutMs = Math.min(
 				60000,
 				Math.max(0, Math.trunc(this.config.sqlite.busyTimeoutMs)),
 			);
 			this.db.run(`PRAGMA busy_timeout = ${busyTimeoutMs};`);
+			this.db.run('PRAGMA journal_mode = WAL;');
+			this.db.run('PRAGMA synchronous = NORMAL;');
 			this.db.run('PRAGMA foreign_keys = ON;');
 			this.runMigrations();
 			this.backfillScopeKeys();
@@ -1623,9 +1639,7 @@ export class SQLiteMemoryProvider
 		this.initialized = false;
 		this.initPromise = null;
 		this.lastAutomaticJsonlMigration = null;
-		// Chain-tail cache belongs to the closed connection — force a lazy
-		// reload on re-init (a fresh Database may see different rows).
-		this.lastEventChainHash = undefined;
+		// Migration-phase state belongs to the closed connection's init run.
 		this.eventChainReadyCache = false;
 		this.databaseStartedFresh = false;
 		this.migrationsComplete = false;
@@ -2232,10 +2246,7 @@ export class SQLiteMemoryProvider
 			}));
 		} else {
 			rows = db
-				.query<MemoryEventRow & { rowid: number }, []>(
-					`SELECT rowid, id, operation, target_id, reason, timestamp, event_json, prev_hash
-					FROM memory_events ORDER BY rowid ASC`,
-				)
+				.query<MemoryEventRow & { rowid: number }, []>(EVENT_CHAIN_SCAN_SQL)
 				.all();
 		}
 		let prevHash: string | null = null;
@@ -2254,10 +2265,6 @@ export class SQLiteMemoryProvider
 				prevHash,
 			]);
 		}
-		// The backfill rewrote every prev_hash deterministically, so any
-		// in-memory chain state from the migration-phase inserts is stale —
-		// adopt the backfill's tail as the cached chain head.
-		this.lastEventChainHash = prevHash;
 		if (rows.length > 0) {
 			this.insertEvent(
 				'migration',
@@ -2277,13 +2284,10 @@ export class SQLiteMemoryProvider
 	async verifyAuditChain(): Promise<MemoryAuditVerificationReport> {
 		await this.initialize();
 		const db = this.requireDb();
-		// Same SQL string as backfillEventHashChain's SELECT — deduped so the
-		// bounded query cache holds one entry (see backfillProvenanceColumns).
+		// Shared scan constant — one query-cache slot with the backfill
+		// (see EVENT_CHAIN_SCAN_SQL).
 		const rows = db
-			.query<MemoryEventRow & { rowid: number }, []>(
-				`SELECT rowid, id, operation, target_id, reason, timestamp, event_json, prev_hash
-				FROM memory_events ORDER BY rowid ASC`,
-			)
+			.query<MemoryEventRow & { rowid: number }, []>(EVENT_CHAIN_SCAN_SQL)
 			.all();
 		const headRow = db
 			.query<{ value: string }, [string]>(
@@ -2556,7 +2560,13 @@ export class SQLiteMemoryProvider
 				stored.expiresAt ?? null,
 				stored.supersededBy ?? null,
 				stored.metadata.deleted === true ? 1 : 0,
-				JSON.stringify(stored),
+				// PR #2310 feedback PRR-006: record_json deliberately OMITS the
+				// #1466 provenance fields — they live in the dedicated columns.
+				// The pre-PR MemoryRecordSchema is .strict(); persisting unknown
+				// keys would make every post-upgrade record invisible to an
+				// older binary (rollback / stale-cache installs) on load.
+				// Columns stay populated from the in-memory record below.
+				JSON.stringify(toLegacyCompatibleRecordJson(stored)),
 				// #1466 provenance denormalization.
 				stored.sourceTaskId ?? '',
 				stored.producerAgentRole ?? 'unknown',
@@ -3288,13 +3298,28 @@ export class SQLiteMemoryProvider
 		// bun:sqlite on a single connection is synchronous (no in-process
 		// interleaving); BEGIN IMMEDIATE additionally holds the write lock
 		// across the sequence so a second PROCESS cannot chain off the same
-		// tail between our SELECT and INSERT. Follows the upsert() nesting
+		// tail between our read and INSERT. Follows the upsert() nesting
 		// pattern: when called inside an outer transaction (e.g. migrations),
 		// that transaction already provides the atomicity.
+		//
+		// PR-feedback FB-2 (PR #2310): the tail is read from `_meta` INSIDE
+		// the transaction on EVERY insert — an earlier version cached it
+		// in-process, which let two live providers on one database (cohort
+		// siblings) each chain off a stale tail and permanently fork the
+		// chain. Reading `_meta` reuses the existing `SELECT value FROM _meta
+		// WHERE key = ?` statement (no new db.query() string — bounded
+		// query-cache budget, see backfillProvenanceColumns) and costs one
+		// indexed point-read inside a write transaction we already hold.
 		const ownsTransaction = !db.inTransaction;
 		if (ownsTransaction) db.run('BEGIN IMMEDIATE');
 		try {
-			const prevHash = this.currentEventChainTailHash();
+			const headRow = db
+				.query<{ value: string }, [string]>(
+					'SELECT value FROM _meta WHERE key = ?',
+				)
+				.get(MEMORY_EVENTS_CHAIN_HEAD_KEY);
+			// Absent head (no chained rows yet) anchors the insert at GENESIS.
+			const prevHash = headRow?.value ?? EVENT_CHAIN_GENESIS;
 			db.run(
 				`INSERT INTO memory_events (
 					id,
@@ -3324,16 +3349,12 @@ export class SQLiteMemoryProvider
 				event_json: eventJsonValue,
 				prev_hash: prevHash,
 			});
-			this.lastEventChainHash = headHash;
 			db.run(`INSERT OR REPLACE INTO _meta (key, value) VALUES (?, ?)`, [
 				MEMORY_EVENTS_CHAIN_HEAD_KEY,
 				headHash,
 			]);
 			if (ownsTransaction) db.run('COMMIT');
 		} catch (error) {
-			// Invalidate the in-memory chain cache: the insert may or may not
-			// have landed, so the next insert must re-derive from the DB tail.
-			this.lastEventChainHash = undefined;
 			if (ownsTransaction) {
 				try {
 					db.run('ROLLBACK');
@@ -3345,33 +3366,10 @@ export class SQLiteMemoryProvider
 		}
 	}
 
-	/**
-	 * #1466: hash of the FULL last memory_events row (chain tail), maintained
-	 * in memory after the first read. The lazy initial value comes from the
-	 * `_meta` chain-head mirror — written atomically with every insert — so
-	 * initialization needs NO events-table scan and reuses the existing
-	 * `SELECT value FROM _meta WHERE key = ?` statement (bounded query-cache
-	 * budget: each additional distinct db.query() SQL string can evict a
-	 * cached statement, which on Windows keeps the database file locked after
-	 * close until GC — see backfillProvenanceColumns). undefined = not loaded.
-	 */
-	private lastEventChainHash: string | null | undefined;
 	/** #1466: see runMigrations / backfillEventHashChain (fresh-DB fast path). */
 	private databaseStartedFresh = false;
 	private migrationsComplete = false;
 	private freshInitMigrationEvents: MemoryEventRow[] = [];
-	private currentEventChainTailHash(): string {
-		if (this.lastEventChainHash === undefined) {
-			const headRow = this.requireDb()
-				.query<{ value: string }, [string]>(
-					'SELECT value FROM _meta WHERE key = ?',
-				)
-				.get(MEMORY_EVENTS_CHAIN_HEAD_KEY);
-			this.lastEventChainHash = headRow?.value ?? null;
-		}
-		// null (no chained rows yet) anchors the next insert at GENESIS.
-		return this.lastEventChainHash ?? EVENT_CHAIN_GENESIS;
-	}
 
 	private requireDb(): Database {
 		if (!this.db)
@@ -3387,6 +3385,28 @@ export class SQLiteMemoryProvider
 // string literals and `--` line comments. Double-quoted SQLite identifiers are NOT in
 // scope for Phase 1 (current migrations use only single-quoted strings); document as
 // future work.
+/**
+ * PR #2310 feedback PRR-006: serialize a record for the sqlite
+ * `record_json` column WITHOUT the #1466 provenance fields. Those fields are
+ * persisted exclusively in the dedicated v12 columns; keeping them out of
+ * record_json preserves load compatibility with older binaries whose strict
+ * record schema does not know the keys (a rolled-back install would
+ * otherwise silently drop every post-upgrade record on load). The
+ * local-jsonl provider intentionally keeps the full record shape (it has no
+ * columns); loading such files with an older binary remains a documented
+ * limitation of the legacy/debug provider.
+ */
+function toLegacyCompatibleRecordJson(record: MemoryRecord): MemoryRecord {
+	const {
+		sourceTaskId: _sourceTaskId,
+		embeddingModelVersion: _embeddingModelVersion,
+		validFrom: _validFrom,
+		supersedesReason: _supersedesReason,
+		...legacy
+	} = record;
+	return legacy as MemoryRecord;
+}
+
 function splitSql(sql: string): string[] {
 	const statements: string[] = [];
 	let current = '';

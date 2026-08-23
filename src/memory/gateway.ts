@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import * as path from 'node:path';
+import { warn } from '../utils/logger';
 import {
 	DEFAULT_MEMORY_CONFIG,
 	type MemoryConfig,
@@ -15,6 +16,7 @@ import {
 	createPiiDetector,
 	type PiiDetector,
 	type PiiFinding,
+	summarizePiiFindings,
 } from './pii';
 import { toRecallBundle } from './prompt-block';
 import type {
@@ -37,6 +39,7 @@ import {
 	validateMemoryRecordRules,
 } from './schema';
 import type { RecallScoringDiagnostics } from './scoring';
+import { MEMORY_RECALL_SENTINEL } from './sentinel';
 import {
 	isCohortRoot,
 	resolveVettedMemoryRoot,
@@ -99,6 +102,14 @@ export interface RecallMemoryInput {
 	requireQuerySignal?: boolean;
 	includeExpired?: boolean;
 }
+
+/**
+ * PR #2310 feedback FB-L3: audit target for pii_rejected events. Deliberately
+ * NOT the record id (a content hash of the rejected raw text — writing a
+ * derivative of rejected content into the permanent audit chain defeats the
+ * minimization goal; nothing consumes this field).
+ */
+const PII_REJECTION_EVENT_TARGET = 'pii_rejection';
 
 export class MemoryGateway {
 	private readonly config: MemoryConfig;
@@ -456,6 +467,13 @@ export class MemoryGateway {
 				'corrected outcomes require correction text',
 			);
 		}
+		// PR #2310 feedback FB-3: correction text is free text that lands in
+		// durable outcome storage and is re-injected into prompts via the
+		// reflection path — run it through the same write-boundary checks as
+		// record bodies (sentinel/bundle bans + configured PII policy).
+		if (input.correction) {
+			await this.enforcePiiTextPolicy(normalizeMemoryText(input.correction));
+		}
 		let targetId = input.memoryId;
 		if (!targetId) {
 			const candidate = this.createRecord({
@@ -636,13 +654,78 @@ export class MemoryGateway {
 				err instanceof MemoryValidationError &&
 				err.code === 'memory_pii_rejected'
 			) {
-				await this.provider.recordEvent?.(
-					'pii_rejected',
-					record.id,
-					err.message,
-				);
+				// PR #2310 feedback PRR-003/FB-L3: an audit-write failure must
+				// never REPLACE the typed privacy-rejection error, and the
+				// event target must not be the content-derived record id (a
+				// hash of the rejected raw text).
+				try {
+					await this.provider.recordEvent?.(
+						'pii_rejected',
+						PII_REJECTION_EVENT_TARGET,
+						err.message,
+					);
+				} catch (auditErr) {
+					warn(
+						'[memory] failed to persist pii_rejected audit event (the PII rejection itself still applies)',
+						{
+							reason:
+								auditErr instanceof Error ? auditErr.message : String(auditErr),
+						},
+					);
+				}
 			}
 			throw err;
+		}
+	}
+
+	/**
+	 * PR #2310 feedback FB-3: free-text that becomes durable memory state
+	 * WITHOUT being a MemoryRecord body (outcome `correction` text — up to
+	 * 4000 chars, agent-callable, and re-injected into prompts via the
+	 * reflection path) must pass the same write-boundary checks: the DD-14
+	 * sentinel/bundle bans and, when configured, the PII threshold.
+	 */
+	private async enforcePiiTextPolicy(text: string): Promise<void> {
+		if (text.includes(MEMORY_RECALL_SENTINEL)) {
+			throw new MemoryValidationError(
+				'correction text cannot contain the recall sentinel header',
+			);
+		}
+		if (text.includes('bundle_')) {
+			throw new MemoryValidationError(
+				'correction text cannot contain the recall bundle marker prefix',
+			);
+		}
+		const { detectPii, rejectDurablePii } = this.config.redaction;
+		if (!detectPii && !rejectDurablePii) return;
+		if (!this.piiDetector) {
+			this.piiDetector = createPiiDetector(this.config.redaction.piiDetector);
+		}
+		const findings = await this.piiDetector.detect(text);
+		const score = computePiiScore(findings);
+		if (rejectDurablePii && score > this.config.redaction.piiThreshold) {
+			const summary = summarizePiiFindings(findings);
+			const message = `durable memory correction exceeds the PII threshold: score ${score.toFixed(2)} (types: ${
+				Object.entries(summary.countsByType)
+					.map(([t, n]) => `${t}x${n}`)
+					.join(', ') || 'none'
+			}) exceeded threshold ${this.config.redaction.piiThreshold.toFixed(2)}`;
+			try {
+				await this.provider.recordEvent?.(
+					'pii_rejected',
+					PII_REJECTION_EVENT_TARGET,
+					message,
+				);
+			} catch (auditErr) {
+				warn(
+					'[memory] failed to persist pii_rejected audit event (the PII rejection itself still applies)',
+					{
+						reason:
+							auditErr instanceof Error ? auditErr.message : String(auditErr),
+					},
+				);
+			}
+			throw new MemoryValidationError(message, 'memory_pii_rejected');
 		}
 	}
 
@@ -661,7 +744,13 @@ export class MemoryGateway {
 		/** #1466: audit reason stamped when this record supersedes another. */
 		supersedesReason?: string;
 	}): MemoryRecord {
-		const now = this.now().toISOString();
+		// PR #2310 feedback FB-3: ONE clock read for createdAt and expiresAt.
+		// Two separate this.now() reads straddling a millisecond made the
+		// scratch 7-day expiry check compute (now2 - now1) + 7d > 7d and
+		// spuriously reject legitimate scratch proposals (and flaked the
+		// write-boundary test at the same rate).
+		const nowDate = this.now();
+		const now = nowDate.toISOString();
 		const text = normalizeMemoryText(input.text);
 		const kind = input.kind;
 		const stability =
@@ -673,7 +762,7 @@ export class MemoryGateway {
 		const scope = this.resolveRecordScope(input.scope, stability);
 		const expiresAt =
 			kind === 'scratch'
-				? new Date(this.now().getTime() + 7 * 24 * 60 * 60 * 1000).toISOString()
+				? new Date(nowDate.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString()
 				: undefined;
 		const recordBase = { scope, kind, text };
 		const record: MemoryRecord = {

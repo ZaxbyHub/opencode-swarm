@@ -691,7 +691,9 @@ function parseEvaluateArgs(
 						'--fixtures <directory> escaped the allowed roots via a symlink or non-canonical path; it must stay under the project directory or the bundled tests/fixtures/memory-recall directory',
 				};
 			}
-			fixtureDirectory = resolvedFixtures;
+			// PR #2310 feedback FB-L2: use the VERIFIED canonical path, not the
+			// pre-realpath form — evaluate the directory that was checked.
+			fixtureDirectory = realFixtures;
 			i++;
 			continue;
 		}
@@ -800,8 +802,24 @@ function appendProposalLines(
 			proposal.status === 'rejected'
 				? ` - ${proposal.rejectionReason ?? 'no reason recorded'}`
 				: '';
+		// #1466 (PR-feedback PRR-035): surface the detect-only PII summary
+		// (types/counts/score — never matched text) so the stored metadata
+		// has an operator-visible consumer.
+		const piiSummary = proposal.metadata?.pii as
+			| { score?: number; countsByType?: Record<string, number> }
+			| undefined;
+		const piiNote =
+			piiSummary && typeof piiSummary.score === 'number'
+				? ` pii-score=${piiSummary.score.toFixed(2)}${
+						piiSummary.countsByType
+							? ` (${Object.entries(piiSummary.countsByType)
+									.map(([t, n]) => `${t}x${n}`)
+									.join(', ')})`
+							: ''
+					}`
+				: '';
 		lines.push(
-			`- \`${proposal.id}\` ${proposal.operation} ${proposal.targetMemoryId ?? proposal.proposedRecord?.id ?? 'new'} (${proposal.status})${reason}`,
+			`- \`${proposal.id}\` ${proposal.operation} ${proposal.targetMemoryId ?? proposal.proposedRecord?.id ?? 'new'} (${proposal.status})${reason}${piiNote}`,
 		);
 	}
 }

@@ -498,19 +498,24 @@ detector over durable memory text at the write boundary and attaches a
 summary (types, counts, score — never matched text) to the proposal.
 `memory.redaction.rejectDurablePii: true` additionally rejects proposals
 whose PII score exceeds `memory.redaction.piiThreshold` (default `0.7`,
-strictly greater-than); the rejection is recorded in the audit log as a
-`pii_rejected` event with types/score only. Two implementations:
-`regex` (default; dependency-free email / phone / Luhn-validated credit
-card / SSN / IP detection) and `ner` (person/organization/location via the
-OPTIONAL `@xenova/transformers` peer dependency — install it yourself or
-keep `piiDetector: "regex"`; a missing install fails closed with a typed
-error carrying install instructions). Microsoft Presidio remains a
-documented alternative for Python-side deployments; v1 ships the
-transformers.js NER option and the regex default. All detection defaults
-are OFF — the default install performs no PII detection. The GATEWAY is
-the enforcement boundary: provider-level writes (dev tooling, evaluation
-fixtures, the legacy-JSONL migration) intentionally bypass PII
-enforcement — route user-facing memory writes through the gateway.
+strictly greater-than; the schema rejects `1`, which could never fire and
+would silently disable rejection). The same checks run over outcome
+`correction` free text. Rejections are recorded in the audit log
+(SQLite provider only) as a `pii_rejected` event with types/score only.
+Two implementations: `regex` (default; dependency-free email / phone /
+Luhn-validated credit card / SSN / IP detection, normalized for detection
+against fullwidth-digit and zero-width-character evasion) and `ner`
+(person/organization/location via the OPTIONAL `@xenova/transformers`
+peer dependency — install it yourself or keep `piiDetector: "regex"`; a
+missing install fails closed with a typed error carrying install
+instructions, and concurrent first calls share one model load). Microsoft
+Presidio remains a documented alternative for Python-side deployments;
+Phase 6 (#1466) ships the transformers.js NER option and the regex
+default. All detection defaults are OFF — the default install performs no
+PII detection. The GATEWAY is the enforcement boundary: provider-level
+writes (dev tooling, evaluation fixtures, the legacy-JSONL migration)
+intentionally bypass PII enforcement — route user-facing memory writes
+through the gateway.
 
 **Provenance columns (migration v12).** Every `memory_items` row carries
 `source_task_id` (the unit-of-work identity that produced it, from the
@@ -524,11 +529,23 @@ Legacy rows backfill with safe defaults (`''` / `'unknown'` /
 **Audit-log hash chain (migration v13).** Every `memory_events` row stores
 `prev_hash` — the SHA-256 of the full previous row — forming a
 tamper-evident chain anchored at `GENESIS`, with the head hash mirrored
-into `_meta`. `/swarm memory audit-verify [--json]` lazily walks the chain
-and reports the first divergence, deleted-row breaks, and last-row
-tampering (via the chain head). It is a SQLite-provider feature; the
-local-jsonl provider reports the gap explicitly. Chain verification runs
-only on demand — the write path adds one hash per event.
+into `_meta`. The chain tail is read from `_meta` inside the same
+transaction as each insert, so concurrent providers on one database
+(cohort siblings) always chain off the true tail. `/swarm memory
+audit-verify [--json]` lazily walks the chain and reports the first
+divergence, deleted-row breaks, and last-row tampering (via the chain
+head). Scope: the chain is unkeyed SHA-256 — it detects corruption and
+tampering by anything WITHOUT database write access; an attacker who can
+write the database file can recompute the chain (PKI-bound signing is
+deliberately out of scope for v1 per #1466). Rows written by an older
+binary after this migration (no `prev_hash`) are reported as a persistent
+divergence until the database is rewritten under the new version only.
+`memory_events` rows — including `pii_rejected` metadata — are currently
+retained indefinitely (they never contain matched PII text); bounded
+retention is owned by the observability retention work (issue #2036).
+The audit log is a SQLite-provider feature; the local-jsonl provider
+reports the gap explicitly. Chain verification runs only on demand — the
+write path adds one hash and one indexed point-read per event.
 
 **Sentinel hardening (DD-14).** Recall-injection blocks embed an
 unforgeable `bundle_<timestamp>_<hash>` marker; stored memory text

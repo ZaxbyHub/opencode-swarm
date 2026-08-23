@@ -1841,7 +1841,21 @@ export const MemoryConfigSchema = z.object({
 			piiDetector: z.enum(['regex', 'ner']).default('regex'),
 			/** #1466: reject durable memories whose PII score exceeds the threshold. */
 			rejectDurablePii: z.boolean().default(false),
-			piiThreshold: z.number().min(0).max(1).default(0.7),
+			/**
+			 * #1466 / PR-feedback PRR-012: the threshold is EXCLUSIVE (a finding
+			 * rejects when its score is strictly GREATER) and detector confidences
+			 * never exceed 0.95 — a value of 1 would therefore silently disable
+			 * rejection. Reject it at the schema so the footgun is loud.
+			 */
+			piiThreshold: z
+				.number()
+				.min(0)
+				.max(1)
+				.refine(
+					(v) => v < 1,
+					'piiThreshold must be strictly less than 1 (rejection is score > threshold and scores never reach 1, so 1 would silently disable PII rejection)',
+				)
+				.default(0.7),
 		})
 		.default({
 			rejectDurableSecrets: true,

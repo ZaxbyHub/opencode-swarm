@@ -6,6 +6,7 @@ import { loadDatabaseCtor } from '../../../src/db/sqlite-loader';
 import {
 	DEFAULT_MEMORY_CONFIG,
 	type MemoryEventRow,
+	memoryEventRowHash,
 	resolveSqliteDatabasePath,
 	SQLiteMemoryProvider,
 	verifyMemoryEventChainRows,
@@ -169,6 +170,34 @@ describe('memory_events hash chain (#1466 migration v13)', () => {
 			second.close?.();
 		}
 	});
+
+	test('two live providers on one database never fork the chain (FB-2 repro, PR #2310 feedback)', async () => {
+		// Exact corruption repro from the PR review: A writes, B writes, A
+		// writes again. The old in-process tail cache made A's third insert
+		// chain off A's stale second-write head, permanently forking the
+		// chain. The tail is now read from _meta INSIDE the insert
+		// transaction, so interleaved writers always chain off the true tail.
+		const providerA = new SQLiteMemoryProvider(tmpDir, sqliteConfig());
+		const providerB = new SQLiteMemoryProvider(tmpDir, sqliteConfig());
+		try {
+			await providerA.initialize();
+			await providerB.initialize();
+			await providerA.recordEvent('pii_rejected', 'mem_a1', 'A first');
+			await providerB.recordEvent('pii_rejected', 'mem_b1', 'B first');
+			await providerA.recordEvent('pii_rejected', 'mem_a2', 'A second');
+			await providerB.recordEvent('pii_rejected', 'mem_b2', 'B second');
+			const reportA = await providerA.verifyAuditChain();
+			const reportB = await providerB.verifyAuditChain();
+			expect(reportA.verified).toBe(true);
+			expect(reportB.verified).toBe(true);
+			expect(reportA.divergence).toBeUndefined();
+			// Cross-instance continuation (PRR-022): every chained row links.
+			expect(reportA.chainedRows).toBe(reportA.totalRows);
+		} finally {
+			providerA.close?.();
+			providerB.close?.();
+		}
+	});
 });
 
 describe('verifyMemoryEventChainRows (pure)', () => {
@@ -207,6 +236,36 @@ describe('verifyMemoryEventChainRows (pure)', () => {
 	test('first chained row must anchor at GENESIS', () => {
 		const bad = row({ id: 'bad', prev_hash: 'deadbeef' });
 		const report = verifyMemoryEventChainRows([bad], null);
+		expect(report.verified).toBe(false);
+		expect(report.divergence?.detail).toContain('chain anchor mismatch');
+	});
+
+	// PRR-019: the legacy-prefix → chained transition boundary (the counting
+	// and anchor logic that pure-legacy / pure-chained tests miss).
+	test('mixed legacy prefix then GENESIS-anchored chain verifies with correct counts (PRR-019)', () => {
+		const legacyA = row({ id: 'legacy-a', prev_hash: null });
+		const legacyB = row({ id: 'legacy-b', prev_hash: null });
+		const first = memoryEventRowHash({
+			...row({ id: 'first' }),
+			prev_hash: 'GENESIS',
+		});
+		const anchor = row({ id: 'first', prev_hash: 'GENESIS' });
+		const chained = row({ id: 'second', prev_hash: first });
+		const head = memoryEventRowHash(chained);
+		const report = verifyMemoryEventChainRows(
+			[legacyA, legacyB, anchor, chained],
+			head,
+		);
+		expect(report.legacyRows).toBe(2);
+		expect(report.chainedRows).toBe(2);
+		expect(report.verified).toBe(true);
+		expect(report.headMatch).toBe(true);
+	});
+
+	test('mixed rows with a non-GENESIS first anchor still diverge (PRR-019 negative)', () => {
+		const legacy = row({ id: 'legacy', prev_hash: null });
+		const badAnchor = row({ id: 'first', prev_hash: 'not-genesis' });
+		const report = verifyMemoryEventChainRows([legacy, badAnchor], null);
 		expect(report.verified).toBe(false);
 		expect(report.divergence?.detail).toContain('chain anchor mismatch');
 	});

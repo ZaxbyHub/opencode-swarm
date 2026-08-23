@@ -506,9 +506,9 @@ Optional scoped memory substrate for recall and proposal-only memory writes.
 | `writes.mode` | string | `"propose"` | Normal agents can only create proposals |
 | `redaction.rejectDurableSecrets` | boolean | `true` | Reject durable memories that contain likely secrets |
 | `redaction.detectPii` | boolean | `false` | Run the PII detector over durable memory text at the write boundary and attach a types/score summary to proposals (issue #1466) |
-| `redaction.piiDetector` | string | `"regex"` | PII detector implementation: `regex` (dependency-free) or `ner` (requires the optional `@xenova/transformers` peer dependency; typed error when absent) |
-| `redaction.rejectDurablePii` | boolean | `false` | Reject durable memory proposals whose PII score exceeds `piiThreshold`; rejections are logged to the memory audit log as `pii_rejected` (types/score only, never matched text) |
-| `redaction.piiThreshold` | number | `0.7` | PII score threshold (max finding confidence) above which durable memories are rejected |
+| `redaction.piiDetector` | `"regex" \| "ner"` | `"regex"` | PII detector implementation: `regex` (dependency-free) or `ner` (requires the optional `@xenova/transformers` peer dependency; typed error when absent) |
+| `redaction.rejectDurablePii` | boolean | `false` | Reject durable memory proposals whose PII score exceeds `piiThreshold`; rejections are logged to the memory audit log (SQLite provider) as `pii_rejected` (types/score only, never matched text) |
+| `redaction.piiThreshold` | number | `0.7` | PII score threshold (max finding confidence) above which durable memories are rejected. Exclusive: a finding rejects only when its score is strictly GREATER; must be < 1 (scores never reach 1, so 1 would silently disable rejection and is rejected at parse) |
 | `maintenance.lowUtilityMaxConfidence` | number | `0.45` | Confidence threshold used by `/swarm memory stale` low-utility reporting |
 | `maintenance.lowUtilityMinAgeDays` | number | `30` | Age threshold used by `/swarm memory stale` low-utility reporting |
 

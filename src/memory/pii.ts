@@ -101,11 +101,29 @@ function octetsValid(m: RegExpExecArray): boolean {
 	});
 }
 
+// PR #2310 feedback FB-4: zero-width and invisible characters used to break
+// digit grouping / domain matching. NFKC alone does NOT remove them, so they
+// are stripped explicitly (same character class the repo's
+// external-content-scanner uses for invisible-content stripping).
+const INVISIBLE_CHARS_RE = /[\u200B-\u200F\u2060\uFEFF\u00AD]/g;
+
+/**
+ * Normalize text for DETECTION only (the stored/returned text is untouched):
+ * NFKC folds fullwidth/compatibility digits and letters to ASCII, and
+ * invisible characters are stripped. Without this, fullwidth digits fully
+ * evade SSN/credit-card/phone/IP detection and zero-width spaces split
+ * digit groups (execution-probed in the PR #2310 review).
+ */
+function normalizeForDetection(text: string): string {
+	return text.normalize('NFKC').replace(INVISIBLE_CHARS_RE, '');
+}
+
 /** Dependency-free detector (default). */
 export class RegexPiiDetector implements PiiDetector {
 	readonly id = 'regex' as const;
 
-	async detect(text: string): Promise<PiiFinding[]> {
+	async detect(rawText: string): Promise<PiiFinding[]> {
+		const text = normalizeForDetection(rawText);
 		const findings: PiiFinding[] = [];
 		CREDIT_CARD_RE.lastIndex = 0;
 		for (const m of text.matchAll(CREDIT_CARD_RE)) {
@@ -139,13 +157,14 @@ export class RegexPiiDetector implements PiiDetector {
 	}
 }
 
-const NER_ENTITY_TYPE_MAP: Record<
-	string,
-	{ type: PiiType; confidence: number }
-> = {
-	PER: { type: 'person', confidence: 0.9 },
-	ORG: { type: 'organization', confidence: 0.8 },
-	LOC: { type: 'location', confidence: 0.8 },
+/**
+ * BIO label (prefix-stripped) → PII type. `MISC` and unknown labels are
+ * intentionally unmapped — they are not PII for this policy.
+ */
+const NER_ENTITY_TYPE_MAP: Record<string, PiiType> = {
+	PER: 'person',
+	ORG: 'organization',
+	LOC: 'location',
 };
 
 const NER_MODEL_ID = 'Xenova/bert-base-NER';
@@ -187,8 +206,23 @@ export const _internals: {
 	},
 };
 
-interface TransformersPipelineOutput {
-	answer: Array<{ entity_group: string; word: string }>;
+/**
+ * Real @xenova/transformers@2.17.2 TokenClassificationPipeline output shape
+ * (verified against the package source at tag 2.17.2, pipelines.js:370-439):
+ * for a single string input the callback resolves to a FLAT ARRAY of token
+ * objects `{ entity, score, index, word, start, end }`. The `entity` label is
+ * the model's raw id2label value — BIO tags like `B-PER` / `I-LOC` for NER
+ * models. There is NO `grouped_entities` aggregation and NO `answer` wrapper
+ * at this version (that shape belongs to the question-answering pipeline) —
+ * consecutive-token grouping is done by the consumer (groupConsecutive
+ * below). PR #2310 feedback FB-1: the original implementation parsed a
+ * non-existent shape and would have silently returned zero findings.
+ */
+interface TransformersTokenEntity {
+	entity: string;
+	score: number;
+	index: number;
+	word: string;
 }
 
 interface TransformersModule {
@@ -196,24 +230,24 @@ interface TransformersModule {
 		task: string,
 		model: string,
 		options?: { quantized?: boolean },
-	) => Promise<
-		(
-			text: string,
-			options: { grouped_entities: boolean },
-		) => Promise<TransformersPipelineOutput | TransformersPipelineOutput[]>
-	>;
+	) => Promise<(text: string) => Promise<TransformersTokenEntity[]>>;
 	env?: { cacheDir?: string };
 }
 
 /**
  * Opt-in NER detector. Construction is cheap; the model loads on first
- * `detect()` and is cached on the instance. Absent peer dependency → typed
+ * `detect()` (memoized in-flight — PR #2310 feedback FB-5: concurrent first
+ * calls must share one load, the library does not dedupe internally) and is
+ * cached on the instance. Absent peer dependency → typed
  * `MemoryPiiDetectorError` (fail-closed with an install hint).
  */
 export class NerPiiDetector implements PiiDetector {
 	readonly id = 'ner' as const;
 	private pipeline:
 		| Awaited<ReturnType<TransformersModule['pipeline']>>
+		| undefined;
+	private pipelinePromise:
+		| Promise<Awaited<ReturnType<TransformersModule['pipeline']>>>
 		| undefined;
 	private loadError: MemoryPiiDetectorError | undefined;
 
@@ -259,33 +293,85 @@ export class NerPiiDetector implements PiiDetector {
 		}
 	}
 
-	private async getPipeline() {
-		if (this.pipeline) return this.pipeline;
-		const mod = this.loadModule();
-		this.pipeline = await mod.pipeline('token-classification', NER_MODEL_ID, {
-			quantized: true,
-		});
-		return this.pipeline;
+	private getPipeline() {
+		// In-flight memoization: concurrent first detect() calls share one
+		// pipeline construction (the library has no internal load dedupe).
+		this.pipelinePromise ??= this.loadModule()
+			.pipeline('token-classification', NER_MODEL_ID, {
+				quantized: true,
+			})
+			.then((pipe) => {
+				this.pipeline = pipe;
+				return pipe;
+			});
+		return this.pipelinePromise;
 	}
 
 	async detect(text: string): Promise<PiiFinding[]> {
-		const pipe = await this.getPipeline();
-		const output = await pipe(text, { grouped_entities: true });
-		const groups = Array.isArray(output) ? output[0] : output;
-		if (!groups?.answer) return [];
-		const findings: PiiFinding[] = [];
-		for (const entity of groups.answer) {
-			const mapped = NER_ENTITY_TYPE_MAP[entity.entity_group];
-			if (mapped && entity.word) {
-				findings.push({
-					type: mapped.type,
-					match: entity.word,
-					confidence: mapped.confidence,
-				});
-			}
-		}
-		return findings;
+		const pipe = this.pipeline ?? (await this.getPipeline());
+		// Real 2.17.2 contract: flat array of {entity:'B-PER'|'I-LOC'..., score,
+		// index, word, ...} for single-string input. No options, no aggregation.
+		const tokens = await pipe(text);
+		if (!Array.isArray(tokens)) return [];
+		return groupConsecutiveEntities(tokens);
 	}
+}
+
+/**
+ * Group consecutive BIO-tagged tokens (adjacent `index` values, same label
+ * after B-/I- prefix stripping) into single findings, mimicking the
+ * aggregation upstream libraries provide. Group confidence is the MINIMUM
+ * token score (conservative: a chain is only as strong as its weakest link).
+ */
+function groupConsecutiveEntities(
+	tokens: TransformersTokenEntity[],
+): PiiFinding[] {
+	const findings: PiiFinding[] = [];
+	let current: {
+		type: PiiType;
+		word: string;
+		minScore: number;
+		lastIndex: number;
+	} | null = null;
+	const flush = () => {
+		if (current) {
+			findings.push({
+				type: current.type,
+				match: current.word,
+				confidence: current.minScore,
+			});
+			current = null;
+		}
+	};
+	for (const token of tokens) {
+		// Strip BIO prefix: `B-PER`/`I-PER` → `PER`. Labels without a prefix
+		// (rare configs) pass through unchanged.
+		const label = token.entity.replace(/^[BI]-/, '');
+		const type = NER_ENTITY_TYPE_MAP[label];
+		if (!type || !token.word) {
+			flush();
+			continue;
+		}
+		if (
+			current &&
+			current.type === type &&
+			token.index === current.lastIndex + 1
+		) {
+			current.word = `${current.word} ${token.word}`;
+			current.minScore = Math.min(current.minScore, token.score);
+			current.lastIndex = token.index;
+		} else {
+			flush();
+			current = {
+				type,
+				word: token.word,
+				minScore: token.score,
+				lastIndex: token.index,
+			};
+		}
+	}
+	flush();
+	return findings;
 }
 
 export function createPiiDetector(kind: 'regex' | 'ner'): PiiDetector {

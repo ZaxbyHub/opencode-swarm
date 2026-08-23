@@ -99,4 +99,39 @@ describe('RegexPiiDetector (#1466)', () => {
 		);
 		expect(findings).toEqual([]);
 	});
+
+	// PR #2310 feedback FB-4: Unicode evasion — normalization is for
+	// detection only; the raw text is never altered.
+	test('fullwidth digits do not evade SSN detection (NFKC normalization)', async () => {
+		// '123-45-6789' with fullwidth digits/spaces.
+		const findings = await detector.detect(
+			'SSN \uFF11\uFF12\uFF13\uFF0D\uFF14\uFF15\uFF0D\uFF16\uFF17\uFF18\uFF19 on the form',
+		);
+		expect(findings.some((f) => f.type === 'ssn')).toBe(true);
+	});
+
+	test('zero-width characters do not break digit grouping', async () => {
+		// 4111 1111 1111 1111 with zero-width spaces interleaved.
+		const zwsp = '\u200B';
+		const obfuscated = `card 4${zwsp}111 1111 1111 1111 on file`;
+		const findings = await detector.detect(obfuscated);
+		expect(findings.some((f) => f.type === 'credit_card')).toBe(true);
+	});
+
+	test('fullwidth digits do not evade IPv4 detection', async () => {
+		const findings = await detector.detect(
+			'server \uFF11\uFF19\uFF12.\uFF11\uFF16\uFF18.\uFF11.\uFF14\uFF12 responded',
+		);
+		expect(findings.some((f) => f.type === 'ip_address')).toBe(true);
+	});
+
+	test('zero-width space in an email domain does not evade detection', async () => {
+		const findings = await detector.detect(
+			'contact a@b\u200Bc.example.com please',
+		);
+		// Either email or (after stripping) another type — the point is the
+		// address does not sail through completely undetected as an email
+		// when it would otherwise match.
+		expect(findings.length).toBeGreaterThan(0);
+	});
 });
