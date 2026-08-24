@@ -2786,14 +2786,44 @@ export function reconcileEdgeTargetKinds(graph: RepoGraph): number {
 	// would reclassify the whole graph to 'asset' — silently disabling
 	// dead-export, importer and dependent queries. Compare on a normalised form.
 	const known = new Set<string>();
-	for (const key of Object.keys(graph.nodes)) known.add(toComparablePath(key));
+	const knownFolded = new Set<string>();
+	for (const key of Object.keys(graph.nodes)) {
+		known.add(toComparablePath(key));
+		knownFolded.add(toComparablePath(key).toLowerCase());
+	}
 	for (const node of Object.values(graph.nodes)) {
 		known.add(toComparablePath(node.filePath));
+		knownFolded.add(toComparablePath(node.filePath).toLowerCase());
 	}
+	// Exact match first, case-folded only as a FALLBACK.
+	//
+	// An earlier cut folded case whenever `process.platform === 'win32'`, which
+	// is wrong in both directions: macOS is case-insensitive by default too (CI
+	// caught this — every case-differing edge was demoted to 'asset' on the
+	// macOS shard), and a case-SENSITIVE volume exists on Windows. Case
+	// sensitivity is a property of the filesystem, not the OS, and probing it
+	// per call would be wasteful in a function that runs over every edge.
+	//
+	// Try-exact-then-fold needs no platform knowledge at all. On a
+	// case-insensitive volume the fallback catches the specifier whose casing
+	// differs from disk. On a case-sensitive one, an exact hit is found whenever
+	// the target really is indexed, so the fallback only fires for a target that
+	// is NOT indexed but whose case-variant is — and there the conservative
+	// outcome (keep 'node') is the same one the pre-existing behaviour had.
+	//
+	// The exact-first ORDERING is defensive and is not separately observable:
+	// this is a boolean membership test, not a node lookup, so folding
+	// unconditionally would return the same answer. Verified by mutation —
+	// removing the fallback fails a test, reordering it does not. Do not add a
+	// test for the ordering; there is nothing to assert.
+	const isKnown = (p: string): boolean => {
+		const normalized = toComparablePath(p);
+		return known.has(normalized) || knownFolded.has(normalized.toLowerCase());
+	};
 	let reclassified = 0;
 	for (const edge of graph.edges) {
 		if (edge.targetKind !== 'node') continue;
-		if (known.has(toComparablePath(edge.target))) continue;
+		if (isKnown(edge.target)) continue;
 		edge.targetKind = 'asset';
 		reclassified++;
 	}
@@ -2806,9 +2836,7 @@ export function reconcileEdgeTargetKinds(graph: RepoGraph): number {
 	// already does on the incremental path so full and incremental builds agree.
 	if (graph.symbolEdges) {
 		graph.symbolEdges = graph.symbolEdges.filter(
-			(se) =>
-				known.has(toComparablePath(se.fromFile)) &&
-				known.has(toComparablePath(se.toFile)),
+			(se) => isKnown(se.fromFile) && isKnown(se.toFile),
 		);
 	}
 	return reclassified;
@@ -2830,8 +2858,7 @@ export function reconcileEdgeTargetKinds(graph: RepoGraph): number {
  * file's real on-disk casing.
  */
 function toComparablePath(p: string): string {
-	const normalized = normalizeGraphPath(p);
-	return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+	return normalizeGraphPath(p);
 }
 
 export function buildWorkspaceGraph(
