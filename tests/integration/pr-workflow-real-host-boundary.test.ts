@@ -77,6 +77,6 @@ describe('PR workflow gate uses the real SDK output.args boundary', () => {
 					},
 				},
 			),
-		).rejects.toThrow(/read-only and fail-closed/i);
+		).rejects.toThrow(/read-only.*method.*GET or HEAD/i);
 	});
 });
