@@ -12,6 +12,7 @@
 import * as path from 'node:path';
 import { ORCHESTRATOR_NAME, WRITE_TOOL_NAMES } from '../config/constants';
 import { stripKnownSwarmPrefix } from '../config/schema';
+import { recordFullAutoSevereEvidenceEvent } from '../full-auto/severe-result.js';
 import {
 	isPathIdentityWithin,
 	sanitizeDiagnosticText,
@@ -245,6 +246,7 @@ export function createScopeGuardHook(
 						agentName,
 						filePath,
 						taskId,
+						input.sessionID,
 						session,
 						injectAdvisory,
 						swarmState,
@@ -377,6 +379,7 @@ function reportScopeViolation(
 	agentName: string,
 	filePath: string,
 	taskId: string | null,
+	sessionID: string,
 	session: AgentSessionState | undefined,
 	injectAdvisory: ((sessionId: string, message: string) => void) | undefined,
 	state: typeof swarmState,
@@ -389,7 +392,15 @@ function reportScopeViolation(
 		.slice(0, 3)
 		.map((entry) => sanitizeDiagnosticText(entry, 128))
 		.join(', ');
-	const violationMessage = `SCOPE_VIOLATION: SCOPE VIOLATION: ${safeAgentName} attempted to modify '${safeFilePath}' which is not in declared scope for task ${taskLabel}. Declared scope: [${safeScope}${scopeEntries.length > 3 ? '...' : ''}]. Coder: correct a mistaken target; otherwise stop and ask the architect to expand declare_scope and dispatch a new Task call.`;
+	const evidenceEventID = session
+		? recordFullAutoSevereEvidenceEvent({
+				sessionID,
+				childSessionID: sessionID,
+				category: 'out_of_scope_files',
+				paths: [filePath],
+			})
+		: undefined;
+	const violationMessage = `SCOPE_VIOLATION: SCOPE VIOLATION: ${safeAgentName} attempted to modify '${safeFilePath}' which is not in declared scope for task ${taskLabel}. Declared scope: [${safeScope}${scopeEntries.length > 3 ? '...' : ''}].${evidenceEventID ? ` Evidence event: ${evidenceEventID}.` : ''} Coder: correct a mistaken target; otherwise stop and ask the architect to expand declare_scope and dispatch a new Task call.`;
 
 	denyWithArchitectAdvisory(violationMessage, session, injectAdvisory, state);
 }

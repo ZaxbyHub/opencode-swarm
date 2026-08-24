@@ -49,11 +49,6 @@ import { telemetry } from '../../telemetry.js';
 import { log, warn } from '../../utils';
 import { pushAdvisory } from '../../utils/advisory-queue';
 import * as logger from '../../utils/logger';
-import {
-	extractStatusCode,
-	TRANSIENT_MODEL_ERROR_PATTERN,
-	TRANSIENT_STATUS_CODES,
-} from '../../utils/provider-error-classification';
 import { computeSpecDiff } from '../../utils/spec-hash';
 import { isStrictTaskId } from '../../validation/task-id.js';
 import { listCoderSettlementWalStates } from '../../workflow/coder-settlement.js';
@@ -519,17 +514,6 @@ function extractErrorSignal(errorContent: unknown): string {
 
 	return parts.join(' ');
 }
-
-/**
- * v7.12: Regex pattern for degraded model errors.
- */
-const DEGRADED_ERROR_PATTERN =
-	/context.?length|token.?(limit|budget)|input.?too.?long|content.?filter|exceeds?.?(maximum.?)?tokens|maximum.?context|context.?window|too.?many.?tokens|prompt.?too.?long|message.?too.?long|request.?too.?large|max.?tokens/i;
-
-/**
- * v7.x: Subset of DEGRADED_ERROR_PATTERN for content-filter violations.
- */
-const CONTENT_FILTER_PATTERN = /content.?filter/i;
 
 /**
  * v6.33.1: No-op work detector state.
@@ -1535,26 +1519,24 @@ export function createGuardrailsHooks(
 					input.sessionID,
 					outcome.category,
 					outcome.signal,
+					{ tool: input.tool, args: input.args },
 				);
 			} else if (outcome.kind === 'success' || outcome.kind === 'neutral') {
-				clearNonTransientCircuit(input.sessionID);
+				clearNonTransientCircuit(input.sessionID, {
+					tool: input.tool,
+					args: input.args,
+				});
 			} else if (outcome.kind === 'failure') {
-				const circuitSignal = extractErrorSignal(outcome.signal);
-				const circuitStatus = extractStatusCode(circuitSignal);
-				const circuitIsTransient =
-					(circuitStatus !== null &&
-						TRANSIENT_STATUS_CODES.has(circuitStatus)) ||
-					TRANSIENT_MODEL_ERROR_PATTERN.test(circuitSignal);
-				const circuitIsDegraded = DEGRADED_ERROR_PATTERN.test(circuitSignal);
-				if (circuitIsTransient || circuitIsDegraded) {
-					clearNonTransientCircuit(input.sessionID);
-				} else {
-					recordNonTransientFailure(
-						input.sessionID,
-						'general_permanent',
-						outcome.signal,
-					);
-				}
+				// Tool output is not a provider SDK channel. A command that prints
+				// "429", "quota", or "temporarily unavailable" must never arm model
+				// retry/fallback authority. Structured provider failures arrive through
+				// the session.error request boundary in index.ts.
+				recordNonTransientFailure(
+					input.sessionID,
+					'general_permanent',
+					outcome.signal,
+					{ tool: input.tool, args: input.args },
+				);
 			}
 
 			const window = getActiveWindow(input.sessionID);
@@ -1567,162 +1549,7 @@ export function createGuardrailsHooks(
 			const hasError = outcome.kind === 'failure';
 
 			if (hasError) {
-				const errorSignal = extractErrorSignal(outcome.signal);
-
-				const extractedStatus = extractStatusCode(errorSignal);
-				const isTransientStatusCode =
-					extractedStatus !== null &&
-					TRANSIENT_STATUS_CODES.has(extractedStatus);
-
-				const isTransientPatternMatch =
-					TRANSIENT_MODEL_ERROR_PATTERN.test(errorSignal);
-
-				const isTransientMatch =
-					isTransientStatusCode || isTransientPatternMatch;
-				const maxTransientRetries = cfg.max_transient_retries ?? 5;
-
-				const isTransient =
-					!!session &&
-					isTransientMatch &&
-					window.transientRetryCount < maxTransientRetries;
-
-				const isDegraded =
-					!isTransient && DEGRADED_ERROR_PATTERN.test(errorSignal);
-
-				if (isTransient) {
-					window.transientRetryCount++;
-				} else if (isDegraded) {
-					const isContentFilter = CONTENT_FILTER_PATTERN.test(errorSignal);
-
-					if (session && !session.modelFallbackExhausted) {
-						session.model_fallback_index++;
-
-						const swarmId = _internals.extractSwarmIdFromAgentName(
-							session.agentName,
-						);
-						const baseAgentName = session.agentName
-							? session.agentName.replace(/^[^_]+[_]/, '')
-							: '';
-						const swarmAgents = _internals.getSwarmAgents(swarmId);
-						const fallbackModels =
-							swarmAgents?.[baseAgentName]?.fallback_models;
-						session.modelFallbackExhausted =
-							!fallbackModels ||
-							session.model_fallback_index > fallbackModels.length;
-
-						if (isContentFilter) {
-							pushAdvisory(
-								session,
-								`DEGRADED: Content policy violation detected (content filter). Fallback model ${session.model_fallback_index}/${fallbackModels?.length ?? 0} considered. ` +
-									`The input may need content modification to comply with provider policies.`,
-							);
-						} else {
-							pushAdvisory(
-								session,
-								`DEGRADED: Context-limit or token-limit error detected. Fallback model ${session.model_fallback_index}/${fallbackModels?.length ?? 0} considered. ` +
-									`Consider reducing input size or using /swarm handoff to switch models.`,
-							);
-						}
-					} else if (session) {
-						if (isContentFilter) {
-							pushAdvisory(
-								session,
-								`DEGRADED: Content policy violation detected (content filter). No fallback models available. ` +
-									`The input may need content modification to comply with provider policies.`,
-							);
-						} else {
-							pushAdvisory(
-								session,
-								`DEGRADED: Context-limit or token-limit error detected. No fallback models available. ` +
-									`Consider reducing input size or add "fallback_models" config.`,
-							);
-						}
-					}
-				} else {
-					window.consecutiveErrors++;
-				}
-
-				let modelFallbackAdvisoryEmitted = false;
-
-				if (
-					session &&
-					isTransientMatch &&
-					!session.modelFallbackExhausted &&
-					!isDegraded
-				) {
-					session.model_fallback_index++;
-
-					const swarmId = _internals.extractSwarmIdFromAgentName(
-						session.agentName,
-					);
-					const baseAgentName = session.agentName
-						? session.agentName.replace(/^[^_]+[_]/, '')
-						: '';
-					const swarmAgents = _internals.getSwarmAgents(swarmId);
-					const fallbackModels = swarmAgents?.[baseAgentName]?.fallback_models;
-					session.modelFallbackExhausted =
-						!fallbackModels ||
-						session.model_fallback_index > fallbackModels.length;
-
-					const fallbackModel = _internals.resolveFallbackModel(
-						baseAgentName,
-						session.model_fallback_index,
-						swarmAgents,
-					);
-
-					const primaryModel = swarmAgents?.[baseAgentName]?.model ?? 'default';
-
-					if (fallbackModel) {
-						if (swarmAgents?.[baseAgentName]) {
-							swarmAgents[baseAgentName].model = fallbackModel;
-						}
-
-						pushAdvisory(
-							session,
-							`MODEL FALLBACK: Applied fallback model "${fallbackModel}" (attempt ${session.model_fallback_index}). ` +
-								`Using /swarm handoff to reset to primary model.`,
-						);
-						modelFallbackAdvisoryEmitted = true;
-					} else {
-						pushAdvisory(
-							session,
-							`MODEL FALLBACK: Transient model error detected (attempt ${session.model_fallback_index}). ` +
-								`No fallback models configured for this agent. Add "fallback_models": ["model-a", "model-b"] ` +
-								`to the agent's config in opencode-swarm.json.`,
-						);
-						modelFallbackAdvisoryEmitted = true;
-					}
-
-					telemetry.modelFallback(
-						input.sessionID,
-						session.agentName,
-						primaryModel,
-						fallbackModel ?? 'none',
-						'transient_model_error',
-					);
-
-					swarmState.pendingEvents++;
-				}
-
-				if (
-					session &&
-					isTransient &&
-					isTransientMatch &&
-					!modelFallbackAdvisoryEmitted
-				) {
-					if (
-						!session.pendingAdvisoryMessages?.some(
-							(m: string) =>
-								m.startsWith('TRANSIENT ERROR:') ||
-								m.startsWith('MODEL FALLBACK:'),
-						)
-					) {
-						pushAdvisory(
-							session,
-							`TRANSIENT ERROR: Provider error detected (attempt ${window.transientRetryCount}/${maxTransientRetries}). Retrying...`,
-						);
-					}
-				}
+				window.consecutiveErrors++;
 			} else {
 				window.consecutiveErrors = 0;
 				window.transientRetryCount = 0;

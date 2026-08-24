@@ -260,10 +260,14 @@ Full-Auto v2 — opencode-swarm's autonomy control plane. Reduces approval frict
 | `denials.max_consecutive` | number | `3` | Pause after N consecutive denials. |
 | `denials.max_total` | number | `20` | Pause after N total denials in the session. |
 | `protected_paths` | string[] | `['.git', '.github/workflows', '.opencode', '.swarm', 'package.json', 'package-lock.json']` | Paths the Full-Auto agent is forbidden from writing. `.opencode` is in the default list to prevent the agent from editing the plugin config that governs it. |
+| `oversight.max_dispatch_retries` | number | `2` | Same-operation retry cap for transient critic infrastructure failures. |
+| `oversight.max_consecutive_dispatch_failures` | number | `3` | Consecutive infrastructure failures before Full-Auto terminates to manual control. |
+| `oversight.total_timeout_ms` | number | `120000` | Total wall-clock budget (1,000–300,000 ms) shared by critic session creation, prompt, retry/fallback, backoff, parse, and cleanup. |
+| `oversight.cleanup_timeout_ms` | number | `2000` | Short cleanup bound (100–10,000 ms) that cannot extend the total oversight deadline. |
 
 **Fail-closed semantics:**
 - Activation refuses if a config file exists but cannot be loaded (corrupt JSON, oversized, permission error) — `locked` is treated as "unknown", not "false".
-- A `paused` or `terminated` run state blocks every non-read-only tool for the session until `/swarm full-auto on` (resume) or `/swarm full-auto off` (disarm).
+- A `paused` or `terminated` run blocks non-read-only work but keeps narrowly parsed diagnosis, oversight probe, repair, handoff, abort, resume, and exit controls reachable. `/swarm full-auto retry-oversight` is an infrastructure health probe only; it cannot clear a policy, containment, sandbox, or action circuit.
 - A corrupt `.swarm/full-auto-state.json` fail-closed-blocks non-read-only tools project-wide; `/swarm full-auto status` reports this as `UNREADABLE` with the restore instructions.
 
 **Example — refuse runtime activation entirely:**

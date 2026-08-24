@@ -6,8 +6,11 @@ import {
 } from '../agents/agent-output-schema.js';
 import { FALLBACK_MODELS_MAX } from '../config/schema.js';
 import { MAX_EPHEMERAL_PROMPT_BYTE_LIMIT } from '../evaluation/ephemeral-agent-dispatcher.js';
+import {
+	classifyProviderFailure,
+	isRetryableProviderFailure,
+} from '../failures/invocation-failure.js';
 import type { ModelOverride } from '../utils/model-dispatch-fallback.js';
-import { isTransientProviderError } from '../utils/provider-error-classification.js';
 import type {
 	ReviewDispatchResult,
 	ReviewModelDispatcher,
@@ -223,9 +226,19 @@ function rejectedDispatchAttempt(
 }
 
 function isTransientDispatchFailure(dispatch: ReviewDispatchResult): boolean {
-	if (dispatch.status === 'timeout') return true;
+	if (dispatch.status === 'timeout') {
+		return isRetryableProviderFailure(
+			classifyProviderFailure({
+				name: 'TimeoutError',
+				code: 'ETIMEDOUT',
+				message: dispatch.error || 'provider timeout',
+			}),
+		);
+	}
 	if (dispatch.status !== 'error') return false;
-	return isTransientProviderError(dispatch.error ?? '');
+	return isRetryableProviderFailure(
+		classifyProviderFailure(dispatch.error ?? ''),
+	);
 }
 
 export async function runFindingValidation(

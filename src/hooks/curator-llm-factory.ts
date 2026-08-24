@@ -8,6 +8,29 @@ import { isTransientProviderError } from '../utils/provider-error-classification
 import { isAbortError } from './abort-utils.js';
 import type { CuratorLLMDelegate } from './curator.js';
 
+function resolveConfiguredFallbackModels(
+	agentBaseName: string,
+	swarmAgents?: Record<
+		string,
+		{ model?: string; fallback_models?: string[]; disabled?: boolean }
+	>,
+): string[] {
+	const configured = swarmAgents?.[agentBaseName]?.fallback_models;
+	if (configured) return configured;
+
+	const inherited: string[] = [];
+	for (let fallbackIndex = 1; ; fallbackIndex += 1) {
+		const model = resolveFallbackModel(
+			agentBaseName,
+			fallbackIndex,
+			swarmAgents,
+		);
+		if (!model) break;
+		inherited.push(model);
+	}
+	return inherited;
+}
+
 /**
  * Resolve the registered curator agent name for a given swarm session.
  *
@@ -205,6 +228,10 @@ export function createCuratorLLMDelegate(
 					? agentName.slice(0, agentName.length - baseRole.length - 1)
 					: undefined;
 			const swarmAgents = getSwarmAgents(swarmId);
+			const fallbackModels = resolveConfiguredFallbackModels(
+				baseRole,
+				swarmAgents,
+			);
 
 			// Capture the session id as a const so the type narrows to `string`
 			// inside the dispatch closure below (the `let` binding is `string |
@@ -241,6 +268,20 @@ export function createCuratorLLMDelegate(
 					}
 					return promptResult.data;
 				},
+				scope: sessionId
+					? {
+							sessionID: sessionId,
+							// The host creates one ephemeral session per delegate call. Use
+							// that ID as the logical invocation boundary so a fallback or
+							// exhausted chain cannot bleed into a later curator prompt in the
+							// same parent session.
+							invocationID: `curator:${mode}:${promptSessionId}`,
+							swarmID: swarmId,
+							role: baseRole,
+						}
+					: undefined,
+				primaryModel: swarmAgents?.[baseRole]?.model,
+				fallbackModels,
 				resolveFallback: (index) =>
 					resolveFallbackModel(baseRole, index, swarmAgents),
 				// Advance to the next model immediately on a transient/quota error —

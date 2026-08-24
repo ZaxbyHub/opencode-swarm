@@ -12,11 +12,15 @@ import { loadPluginConfig } from '../config/loader';
 import type { Plan } from '../config/plan-schema';
 import { getDurableGateEvidenceStatusForTask } from '../evidence/gate-bridge.js';
 import { listEvidenceTaskIds } from '../evidence/manager';
+import { listBlockingActionCircuitsForInvocation } from '../failures/action-circuit.js';
+import { loadFullAutoRunState } from '../full-auto/state.js';
 import { readSwarmFileAsync } from '../hooks/utils';
+import { getTaskModelRoutingStateSnapshot } from '../models/task-model-routing.js';
 import { loadPlanJsonOnly } from '../plan/manager';
 import { SandboxCapabilityProbe } from '../sandbox/capability-probe.js';
 import { getExecutor } from '../sandbox/executor.js';
 import { readEffectiveSpecSync } from '../sdd/effective-spec';
+import { getAgentSession } from '../state.js';
 import { resolveGitExecutableAsync } from '../utils/git-executable.js';
 import { listCoderSettlementWalStates } from '../workflow/coder-settlement.js';
 import { checkKnowledgeHealth } from './knowledge-diagnostics.js';
@@ -930,6 +934,7 @@ async function checkResidueInventory(directory: string): Promise<HealthCheck> {
  */
 export async function getDiagnoseData(
 	directory: string,
+	sessionID?: string,
 ): Promise<DiagnoseData> {
 	const checks: HealthCheck[] = [];
 
@@ -1281,6 +1286,50 @@ export async function getDiagnoseData(
 		detail: cacheRows.join(' | '),
 	});
 
+	// Issue #2103: bounded, privacy-safe invocation recovery state. Never render
+	// failure display text, prompts, provider output, or action arguments here.
+	if (!sessionID) {
+		checks.push({
+			name: 'Invocation recovery',
+			status: '⬜',
+			detail: 'Session unavailable; scoped circuit and model status omitted',
+		});
+	} else {
+		const invocationID = getAgentSession(sessionID)?.activeInvocationId ?? 0;
+		const circuits =
+			invocationID > 0
+				? listBlockingActionCircuitsForInvocation(sessionID, invocationID)
+				: [];
+		checks.push({
+			name: 'Invocation circuits',
+			status: circuits.length > 0 ? '⚠️' : '✅',
+			detail:
+				circuits.length > 0
+					? `${circuits.length} exact-action circuit(s) open for invocation ${invocationID}: ${[...new Set(circuits.map((entry) => entry.circuitKind))].join(', ')}`
+					: `No exact-action circuits open${invocationID > 0 ? ` for invocation ${invocationID}` : ''}`,
+		});
+		const routing = getTaskModelRoutingStateSnapshot();
+		const selections = routing.scopedSelections.filter(
+			(entry) => entry.key.sessionID === sessionID,
+		);
+		checks.push({
+			name: 'Model fallback scope',
+			status: selections.length > 0 ? '⚠️' : '✅',
+			detail:
+				selections.length > 0
+					? `${selections.length} scoped selection(s) active; highest fallback index ${Math.max(...selections.map((entry) => entry.fallbackIndex))}`
+					: 'No scoped model override is active',
+		});
+		const fullAuto = loadFullAutoRunState(directory, sessionID);
+		checks.push({
+			name: 'Full-Auto recovery',
+			status: fullAuto?.status === 'paused' ? '⚠️' : '✅',
+			detail: fullAuto
+				? `status=${fullAuto.status}; recovery_probe=${fullAuto.lastRecoveryProbe?.outcome ?? 'none'}`
+				: 'No durable Full-Auto run state for this session',
+		});
+	}
+
 	const passCount = checks.filter(
 		(c) => c.status === '✅' || c.status === '⬜',
 	).length;
@@ -1328,7 +1377,8 @@ export function formatDiagnoseMarkdown(diagnose: DiagnoseData): string {
 export async function handleDiagnoseCommand(
 	directory: string,
 	_args: string[],
+	sessionID?: string,
 ): Promise<string> {
-	const diagnoseData = await getDiagnoseData(directory);
+	const diagnoseData = await getDiagnoseData(directory, sessionID);
 	return formatDiagnoseMarkdown(diagnoseData);
 }

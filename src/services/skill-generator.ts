@@ -40,6 +40,7 @@ import {
 } from '../hooks/knowledge-validator.js';
 import { atomicWriteFileAnyRoot } from '../utils/atomic-write';
 import { warn } from '../utils/logger.js';
+import { withTimeoutSignal } from '../utils/timeout.js';
 import { appendSkillChangelog } from './skill-changelog.js';
 import {
 	appendRejectedSkillEdit,
@@ -1514,10 +1515,10 @@ export async function autoApplyProposals(
 		].join('\n');
 
 		try {
-			const response = await llmDelegate(
-				'',
-				prompt,
-				AbortSignal.timeout(30_000),
+			const response = await withTimeoutSignal(
+				(signal) => llmDelegate('', prompt, signal),
+				30_000,
+				new Error('Skill proposal evaluation timed out after 30000ms'),
 			);
 			const verdict = response.trim().toUpperCase();
 			if (verdict === 'APPROVE') {

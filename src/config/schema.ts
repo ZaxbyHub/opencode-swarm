@@ -3650,6 +3650,18 @@ export const PluginConfigSchema = z.object({
 						.min(0)
 						.max(50)
 						.default(3),
+					total_timeout_ms: z
+						.number()
+						.int()
+						.min(1000)
+						.max(300000)
+						.default(120000),
+					cleanup_timeout_ms: z
+						.number()
+						.int()
+						.min(100)
+						.max(10000)
+						.default(2000),
 				})
 				.default(() => ({
 					on_plan_change: true,
@@ -3662,6 +3674,8 @@ export const PluginConfigSchema = z.object({
 					every_minutes: 20,
 					max_dispatch_retries: 2,
 					max_consecutive_dispatch_failures: 3,
+					total_timeout_ms: 120000,
+					cleanup_timeout_ms: 2000,
 				})),
 		})
 		.optional()
@@ -3718,6 +3732,8 @@ export const PluginConfigSchema = z.object({
 				every_minutes: 20,
 				max_dispatch_retries: 2,
 				max_consecutive_dispatch_failures: 3,
+				total_timeout_ms: 120000,
+				cleanup_timeout_ms: 2000,
 			},
 		})),
 

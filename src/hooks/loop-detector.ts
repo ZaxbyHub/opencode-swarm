@@ -5,27 +5,13 @@
  * appears 3 or more consecutive times.
  */
 
+import { createActionIdentity } from '../failures/action-identity.js';
 import { swarmState } from '../state';
 
 export interface LoopDetectResult {
 	looping: boolean;
 	count: number;
 	pattern: string;
-}
-
-/**
- * Hash a delegation call into a short string key.
- * Combines toolName, targetAgent (subagent_type), and first arg key.
- */
-function hashDelegation(
-	toolName: string,
-	args: Record<string, unknown> | undefined,
-): string {
-	const targetAgent =
-		typeof args?.subagent_type === 'string' ? args.subagent_type : 'unknown';
-	const firstArgKey =
-		args != null ? (Object.keys(args)[0] ?? 'noargs') : 'noargs';
-	return `${toolName}:${targetAgent}:${firstArgKey}`;
 }
 
 /**
@@ -58,7 +44,10 @@ export function detectLoop(
 			? (args as Record<string, unknown>)
 			: undefined;
 
-	const hash = hashDelegation(toolName, argsRecord);
+	const hash = createActionIdentity({
+		tool: toolName,
+		args: argsRecord,
+	}).pattern;
 	const now = Date.now();
 
 	// Append to sliding window, cap at 10 entries

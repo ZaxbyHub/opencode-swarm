@@ -142,7 +142,7 @@ describe('Full-Auto Command Registration', () => {
 			fs.rmSync(projectDir, { recursive: true, force: true });
 		});
 
-		it('should route "full-auto on" subcommand to handleFullAutoCommand', async () => {
+		it('returns an exact swarm_command directive for "full-auto on"', async () => {
 			const handler = commandsIndex.createSwarmCommandHandler(projectDir, {});
 			const output = { parts: [] as unknown[] };
 
@@ -156,13 +156,14 @@ describe('Full-Auto Command Registration', () => {
 			);
 
 			expect(output.parts).toHaveLength(1);
-			expect((output.parts[0] as { text: string }).text).toContain(
-				'Full-Auto Mode enabled',
-			);
-			expect(getAgentSession(testSessionId)?.fullAutoMode).toBe(true);
+			const text = (output.parts[0] as { text: string }).text;
+			expect(text).toContain('Call the `swarm_command` tool exactly once');
+			expect(text).toContain('"command": "full-auto"');
+			expect(text).toContain('"on"');
+			expect(getAgentSession(testSessionId)?.fullAutoMode).toBe(false);
 		});
 
-		it('should route "full-auto off" to disable full-auto mode', async () => {
+		it('returns an exact swarm_command directive for "full-auto off"', async () => {
 			const session = getAgentSession(testSessionId);
 			session!.fullAutoMode = true;
 
@@ -178,13 +179,13 @@ describe('Full-Auto Command Registration', () => {
 				output,
 			);
 
-			expect((output.parts[0] as { text: string }).text).toContain(
-				'Full-Auto Mode disabled',
-			);
-			expect(session?.fullAutoMode).toBe(false);
+			const text = (output.parts[0] as { text: string }).text;
+			expect(text).toContain('Call the `swarm_command` tool exactly once');
+			expect(text).toContain('"off"');
+			expect(session?.fullAutoMode).toBe(true);
 		});
 
-		it('should route "full-auto" (no args) to toggle', async () => {
+		it('shows the exact grammar for "full-auto" with no args', async () => {
 			const handler = commandsIndex.createSwarmCommandHandler(projectDir, {});
 			const output = { parts: [] as unknown[] };
 
@@ -198,13 +199,12 @@ describe('Full-Auto Command Registration', () => {
 				output,
 			);
 
-			expect((output.parts[0] as { text: string }).text).toContain(
-				'Full-Auto Mode enabled',
-			);
-			expect(getAgentSession(testSessionId)?.fullAutoMode).toBe(true);
+			const text = (output.parts[0] as { text: string }).text;
+			expect(text).toContain('Usage through swarm_command');
+			expect(getAgentSession(testSessionId)?.fullAutoMode).toBe(false);
 		});
 
-		it('should return error when no active session', async () => {
+		it('returns a command directive without executing when no session is bound', async () => {
 			const handler = commandsIndex.createSwarmCommandHandler(projectDir, {});
 			const output = { parts: [] as unknown[] };
 
@@ -218,7 +218,7 @@ describe('Full-Auto Command Registration', () => {
 			);
 
 			expect((output.parts[0] as { text: string }).text).toContain(
-				'Error: No active session. Full-Auto Mode requires an active session to operate.',
+				'Call the `swarm_command` tool exactly once',
 			);
 		});
 	});

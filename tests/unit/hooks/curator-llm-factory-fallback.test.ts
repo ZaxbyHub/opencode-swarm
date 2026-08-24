@@ -29,9 +29,12 @@ function fakeClient(
 	) => Promise<unknown>,
 	promptCalls: Array<string | undefined>,
 ): typeof swarmState.opencodeClient {
+	let sessionCounter = 0;
 	return {
 		session: {
-			create: async () => ({ data: { id: 'curator-session-1' } }),
+			create: async () => ({
+				data: { id: `curator-session-${++sessionCounter}` },
+			}),
 			prompt: async (params: { body?: { model?: ModelOverride } }) => {
 				const model = params.body?.model;
 				promptCalls.push(
@@ -84,8 +87,9 @@ describe('createCuratorLLMDelegate — model failover (#1927)', () => {
 		seedCuratorFallback();
 		const promptCalls: Array<string | undefined> = [];
 		swarmState.opencodeClient = fakeClient(async (model) => {
-			// Primary (no override) hits the quota envelope; first fallback succeeds.
-			if (!model) return QUOTA_ENVELOPE;
+			// Explicit primary override now ships on the first attempt; fallback
+			// succeeds on the second attempt.
+			if (model?.modelID === 'primary-curator') return QUOTA_ENVELOPE;
 			return OK_ENVELOPE;
 		}, promptCalls);
 
@@ -94,9 +98,30 @@ describe('createCuratorLLMDelegate — model failover (#1927)', () => {
 		const out = await delegate!('sys', 'user input');
 
 		expect(out).toBe(RESULT_TEXT);
-		// Primary attempted with no override, then the first fallback model.
-		expect(promptCalls[0]).toBeUndefined();
+		expect(promptCalls[0]).toBe('prov/primary-curator');
 		expect(promptCalls[1]).toBe('prov/fb1');
+	});
+
+	test('starts each delegate call at the primary model', async () => {
+		seedCuratorFallback();
+		const promptCalls: Array<string | undefined> = [];
+		let primaryFailures = 0;
+		swarmState.opencodeClient = fakeClient(async (model) => {
+			if (model?.modelID === 'primary-curator' && primaryFailures++ === 0) {
+				return QUOTA_ENVELOPE;
+			}
+			return OK_ENVELOPE;
+		}, promptCalls);
+
+		const delegate = createCuratorLLMDelegate('/tmp/proj', 'phase', 'sess-1');
+		await delegate!('sys', 'first');
+		await delegate!('sys', 'second');
+
+		expect(promptCalls).toEqual([
+			'prov/primary-curator',
+			'prov/fb1',
+			'prov/primary-curator',
+		]);
 	});
 
 	test('emits telemetry.modelFallback on a quota failover', async () => {
@@ -107,7 +132,7 @@ describe('createCuratorLLMDelegate — model failover (#1927)', () => {
 		};
 		const promptCalls: Array<string | undefined> = [];
 		swarmState.opencodeClient = fakeClient(async (model) => {
-			if (!model) return QUOTA_ENVELOPE;
+			if (model?.modelID === 'primary-curator') return QUOTA_ENVELOPE;
 			return OK_ENVELOPE;
 		}, promptCalls);
 
@@ -139,9 +164,8 @@ describe('createCuratorLLMDelegate — model failover (#1927)', () => {
 		await expect(delegate!('sys', 'user input')).rejects.toThrow(
 			/401 unauthorized/,
 		);
-		// Only the primary was attempted — no failover on a permanent error.
 		expect(promptCalls).toHaveLength(1);
-		expect(promptCalls[0]).toBeUndefined();
+		expect(promptCalls[0]).toBe('prov/primary-curator');
 	});
 
 	test('an abort during dispatch maps to CURATOR_LLM_TIMEOUT with no failover', async () => {
@@ -192,7 +216,7 @@ describe('createCuratorLLMDelegate — model failover (#1927)', () => {
 		} as unknown as PluginConfig);
 		const promptCalls: Array<string | undefined> = [];
 		swarmState.opencodeClient = fakeClient(async (model) => {
-			if (!model) return QUOTA_ENVELOPE;
+			if (model?.modelID === 'explorer') return QUOTA_ENVELOPE;
 			return OK_ENVELOPE;
 		}, promptCalls);
 
@@ -200,6 +224,7 @@ describe('createCuratorLLMDelegate — model failover (#1927)', () => {
 		const out = await delegate!('sys', 'user input');
 
 		expect(out).toBe(RESULT_TEXT);
+		expect(promptCalls[0]).toBe('prov/explorer');
 		expect(promptCalls[1]).toBe('prov/explorer-fb1');
 	});
 
@@ -233,7 +258,7 @@ describe('createCuratorLLMDelegate — model failover (#1927)', () => {
 					promptCalls.push(
 						model ? `${model.providerID}/${model.modelID}` : undefined,
 					);
-					if (!model) return QUOTA_ENVELOPE;
+					if (model?.modelID === 's1-primary') return QUOTA_ENVELOPE;
 					return OK_ENVELOPE;
 				},
 				delete: async () => ({}),
@@ -245,6 +270,7 @@ describe('createCuratorLLMDelegate — model failover (#1927)', () => {
 
 		expect(out).toBe(RESULT_TEXT);
 		expect(agentNames[0]).toBe('swarm1_curator_phase');
+		expect(promptCalls[0]).toBe('prov/s1-primary');
 		expect(promptCalls[1]).toBe('prov/s1-fb1');
 	});
 });

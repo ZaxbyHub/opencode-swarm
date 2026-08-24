@@ -55,6 +55,22 @@ describe('swarm-* shortcut command routing', () => {
 		expect(partText(output)).toContain('"command": "evidence summary"');
 	});
 
+	it('routes the guardrail-reset shortcut to its canonical command', async () => {
+		const handler = createSwarmCommandHandler('/tmp/project', {});
+		const output = { parts: [] as unknown[] };
+
+		await handler(
+			{
+				command: 'swarm-guardrail-reset',
+				arguments: 'digest --invocation 1',
+				sessionID: 's1',
+			},
+			output,
+		);
+
+		expect(partText(output)).toContain('"command": "guardrail reset"');
+	});
+
 	it('uses canonical fallback for excluded stateful shortcuts', async () => {
 		const handler = createSwarmCommandHandler('/tmp/project', {});
 		const output = { parts: [] as unknown[] };

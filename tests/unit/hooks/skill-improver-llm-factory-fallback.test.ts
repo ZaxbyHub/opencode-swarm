@@ -25,9 +25,12 @@ function fakeClient(
 	prompt: (model: ModelOverride | undefined) => Promise<unknown>,
 	promptCalls: Array<string | undefined>,
 ): typeof swarmState.opencodeClient {
+	let sessionCounter = 0;
 	return {
 		session: {
-			create: async () => ({ data: { id: 'skill-improver-session-1' } }),
+			create: async () => ({
+				data: { id: `skill-improver-session-${++sessionCounter}` },
+			}),
 			prompt: async (params: { body?: { model?: ModelOverride } }) => {
 				const model = params.body?.model;
 				promptCalls.push(
@@ -80,7 +83,7 @@ describe('createSkillImproverLLMDelegate — model failover (#1927)', () => {
 		seedSkillImproverFallback();
 		const promptCalls: Array<string | undefined> = [];
 		swarmState.opencodeClient = fakeClient(async (model) => {
-			if (!model) return QUOTA_ENVELOPE;
+			if (model?.modelID === 'primary-skill') return QUOTA_ENVELOPE;
 			return OK_ENVELOPE;
 		}, promptCalls);
 
@@ -89,8 +92,30 @@ describe('createSkillImproverLLMDelegate — model failover (#1927)', () => {
 		const out = await delegate!('sys prompt', 'user input');
 
 		expect(out).toBe(RESULT_TEXT);
-		expect(promptCalls[0]).toBeUndefined();
+		expect(promptCalls[0]).toBe('prov/primary-skill');
 		expect(promptCalls[1]).toBe('prov/fb1');
+	});
+
+	test('starts each delegate call at the primary model', async () => {
+		seedSkillImproverFallback();
+		const promptCalls: Array<string | undefined> = [];
+		let primaryFailures = 0;
+		swarmState.opencodeClient = fakeClient(async (model) => {
+			if (model?.modelID === 'primary-skill' && primaryFailures++ === 0) {
+				return QUOTA_ENVELOPE;
+			}
+			return OK_ENVELOPE;
+		}, promptCalls);
+
+		const delegate = createSkillImproverLLMDelegate('/tmp/proj', 'sess-1');
+		await delegate!('sys', 'first');
+		await delegate!('sys', 'second');
+
+		expect(promptCalls).toEqual([
+			'prov/primary-skill',
+			'prov/fb1',
+			'prov/primary-skill',
+		]);
 	});
 
 	test('emits telemetry.modelFallback on a quota failover', async () => {
@@ -101,7 +126,7 @@ describe('createSkillImproverLLMDelegate — model failover (#1927)', () => {
 		};
 		const promptCalls: Array<string | undefined> = [];
 		swarmState.opencodeClient = fakeClient(async (model) => {
-			if (!model) return QUOTA_ENVELOPE;
+			if (model?.modelID === 'primary-skill') return QUOTA_ENVELOPE;
 			return OK_ENVELOPE;
 		}, promptCalls);
 
@@ -134,7 +159,7 @@ describe('createSkillImproverLLMDelegate — model failover (#1927)', () => {
 			/401 unauthorized/,
 		);
 		expect(promptCalls).toHaveLength(1);
-		expect(promptCalls[0]).toBeUndefined();
+		expect(promptCalls[0]).toBe('prov/primary-skill');
 	});
 
 	test('an abort during dispatch maps to SKILL_IMPROVER_LLM_TIMEOUT with no failover', async () => {
@@ -199,7 +224,7 @@ describe('createSkillImproverLLMDelegate — model failover (#1927)', () => {
 					promptCalls.push(
 						model ? `${model.providerID}/${model.modelID}` : undefined,
 					);
-					if (!model) return QUOTA_ENVELOPE;
+					if (model?.modelID === 's1-primary') return QUOTA_ENVELOPE;
 					return OK_ENVELOPE;
 				},
 				delete: async () => ({}),
@@ -211,6 +236,7 @@ describe('createSkillImproverLLMDelegate — model failover (#1927)', () => {
 
 		expect(out).toBe(RESULT_TEXT);
 		expect(agentNames[0]).toBe('swarm1_skill_improver');
+		expect(promptCalls[0]).toBe('prov/s1-primary');
 		expect(promptCalls[1]).toBe('prov/s1-fb1');
 	});
 });

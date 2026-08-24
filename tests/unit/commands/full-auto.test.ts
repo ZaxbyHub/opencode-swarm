@@ -13,13 +13,22 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { handleFullAutoCommand } from '../../../src/commands/full-auto';
 import {
+	_internals as recoveryInternals,
+	registerFullAutoRecoveryBlockerEvaluator,
+} from '../../../src/full-auto/recovery';
+import {
 	isFullAutoRunActive,
 	loadFullAutoRunState,
 } from '../../../src/full-auto/state';
-import { startAgentSession, swarmState } from '../../../src/state';
+import {
+	startAgentSession,
+	_internals as stateInternals,
+	swarmState,
+} from '../../../src/state';
 
 let tmpDir: string;
 let originalXdgConfigHome: string | undefined;
+let origClient: typeof stateInternals.swarmState.opencodeClient;
 const SESSION_ID = 'sess-full-auto-cmd';
 
 beforeEach(() => {
@@ -31,6 +40,7 @@ beforeEach(() => {
 	process.env.XDG_CONFIG_HOME = path.join(tmpDir, 'xdg-config');
 	swarmState.fullAutoEnabledInConfig = true;
 	startAgentSession(SESSION_ID, 'architect');
+	origClient = stateInternals.swarmState.opencodeClient;
 });
 
 afterEach(() => {
@@ -41,6 +51,9 @@ afterEach(() => {
 	} else {
 		process.env.XDG_CONFIG_HOME = originalXdgConfigHome;
 	}
+	stateInternals.swarmState.opencodeClient = origClient;
+	recoveryInternals.resetRecoveryBlockerEvaluator();
+	registerFullAutoRecoveryBlockerEvaluator(() => []);
 	try {
 		fs.rmSync(tmpDir, { recursive: true, force: true });
 	} catch {
@@ -96,5 +109,56 @@ describe('handleFullAutoCommand — durable-first / fail-closed', () => {
 		const session = swarmState.agentSessions.get(SESSION_ID);
 		expect(session?.fullAutoMode).toBe(true);
 		expect(isFullAutoRunActive(tmpDir, SESSION_ID)).toBe(true);
+	});
+
+	test('retry-oversight records a healthy recovery probe without replaying the action', async () => {
+		await handleFullAutoCommand(tmpDir, ['on'], SESSION_ID);
+		const { pauseFullAutoRun } = await import('../../../src/full-auto/state');
+		pauseFullAutoRun(
+			tmpDir,
+			SESSION_ID,
+			'oversight infrastructure failure after 1 attempt(s): server error',
+		);
+		stateInternals.swarmState.opencodeClient = {
+			session: {
+				create: async () => ({ data: { id: 'probe-session' }, error: null }),
+				prompt: async () => ({ data: null, error: null }),
+				delete: async () => ({}),
+			},
+		} as any;
+		const out = await handleFullAutoCommand(
+			tmpDir,
+			['retry-oversight'],
+			SESSION_ID,
+		);
+		expect(out).toContain('recovery probe succeeded');
+		expect(
+			loadFullAutoRunState(tmpDir, SESSION_ID)?.lastRecoveryProbe?.outcome,
+		).toBe('healthy');
+	});
+
+	test('resume refuses when recovery blockers remain', async () => {
+		await handleFullAutoCommand(tmpDir, ['on'], SESSION_ID);
+		const { pauseFullAutoRun, recordFullAutoRecoveryProbe } = await import(
+			'../../../src/full-auto/state'
+		);
+		pauseFullAutoRun(
+			tmpDir,
+			SESSION_ID,
+			'oversight infrastructure failure after 1 attempt(s): server error',
+		);
+		recordFullAutoRecoveryProbe(tmpDir, SESSION_ID, {
+			pauseGeneration:
+				loadFullAutoRunState(tmpDir, SESSION_ID)?.pauseGeneration ?? 0,
+			checkedAt: new Date().toISOString(),
+			expiresAt: new Date(Date.now() + 60_000).toISOString(),
+			attempts: 1,
+			outcome: 'healthy',
+			reason: 'ok',
+		});
+		registerFullAutoRecoveryBlockerEvaluator(() => ['policy_circuit']);
+		const out = await handleFullAutoCommand(tmpDir, ['resume'], SESSION_ID);
+		expect(out).toContain('policy_circuit');
+		expect(loadFullAutoRunState(tmpDir, SESSION_ID)?.status).toBe('paused');
 	});
 });

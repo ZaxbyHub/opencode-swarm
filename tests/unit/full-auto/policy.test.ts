@@ -252,7 +252,40 @@ describe('classifyFullAutoToolAction', () => {
 
 	test('escalates subagent delegation', () => {
 		const d = classifyFullAutoToolAction(
-			input({ toolName: 'Task', args: { subagent_type: 'coder' } }),
+			input({
+				toolName: 'Task',
+				args: { subagent_type: 'coder' },
+				generatedAgentNames: ['coder'],
+			}),
+		);
+		expect(d.action).toBe('escalate_critic');
+	});
+
+	test('allows read-only subagent delegation in supervised mode', () => {
+		const d = classifyFullAutoToolAction(
+			input({
+				toolName: 'Task',
+				args: { subagent_type: 'local_critic_oversight' },
+				generatedAgentNames: ['local_critic_oversight'],
+				pluginConfig: {},
+			}),
+		);
+		expect(d.action).toBe('allow');
+	});
+
+	test('strict mode still escalates read-only subagent delegation', () => {
+		const d = classifyFullAutoToolAction(
+			input({
+				toolName: 'Task',
+				args: { subagent_type: 'local_critic_oversight' },
+				generatedAgentNames: ['local_critic_oversight'],
+				fullAutoConfig: {
+					enabled: true,
+					mode: 'strict',
+					permission_policy: { enabled: true },
+				},
+				pluginConfig: {},
+			}),
 		);
 		expect(d.action).toBe('escalate_critic');
 	});
