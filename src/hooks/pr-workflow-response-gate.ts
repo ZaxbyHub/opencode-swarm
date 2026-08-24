@@ -3,6 +3,7 @@ import {
 	claimPrFeedbackMonitorEvents,
 	readPrFeedbackMonitorQueue,
 } from '../background/pr-feedback-event-queue.js';
+import { log } from '../utils';
 import {
 	cancelPrWorkflowPluginWake,
 	clearPrWorkflowAutoWakeState,
@@ -17,7 +18,9 @@ import {
 import { validateSwarmPath } from './utils.js';
 
 const DEFAULT_WAKE_TIMEOUT_MS = 5_000;
-export const DEFAULT_BOUNDARY_QUIET_MS = 750;
+// Keep automatic wake delivery out of active composition unless the bounded
+// watchdog expires. The default follows the issue #2296 two-minute boundary.
+export const DEFAULT_BOUNDARY_QUIET_MS = 120_000;
 export const DEFAULT_BOUNDARY_WATCHDOG_MS = 5_000;
 export const DEFAULT_STATUS_PROBE_TIMEOUT_MS = 250;
 export const MAX_TRACKED_BOUNDARY_TOOL_PARTS = 200;
@@ -1040,7 +1043,15 @@ export function createPrWorkflowResponseGate(options: {
 		const state = getLiveBoundaryActivity(sessionID, boundaryGeneration);
 		if (!state || state.timerGeneration !== generation) return;
 		state.timer = undefined;
-		await runWakeEvaluation(sessionID, boundaryGeneration).catch(() => {});
+		try {
+			await runWakeEvaluation(sessionID, boundaryGeneration);
+		} catch (error) {
+			log('[PrWorkflowResponseGate] boundary lease wake evaluation failed', {
+				sessionID,
+				boundaryGeneration,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
 	}
 
 	async function rereadRunnableWakeState(
@@ -1487,10 +1498,21 @@ export function createPrWorkflowResponseGate(options: {
 
 	const event = async (input: { event: unknown }): Promise<void> => {
 		const observed = observeBoundaryActivity(input.event);
-		const wakeDecision = await _internals.observePrWorkflowAutoWakeEvent(
-			options.directory,
-			input.event,
-		);
+		let wakeDecision: Awaited<
+			ReturnType<typeof _internals.observePrWorkflowAutoWakeEvent>
+		>;
+		try {
+			wakeDecision = await _internals.observePrWorkflowAutoWakeEvent(
+				options.directory,
+				input.event,
+			);
+		} catch (error) {
+			log('[PrWorkflowResponseGate] auto-wake observation failed', {
+				directory: options.directory,
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return;
+		}
 		const event = asRecord(input.event);
 		const envelope = event ? eventEnvelope(event) : undefined;
 		const sessionID =
@@ -1503,7 +1525,14 @@ export function createPrWorkflowResponseGate(options: {
 		}
 		if (event.type !== 'session.idle') return;
 		if (observed.boundaryGeneration === undefined) return;
-		await runWakeEvaluation(sessionID, observed.boundaryGeneration);
+		try {
+			await runWakeEvaluation(sessionID, observed.boundaryGeneration);
+		} catch (error) {
+			log('[PrWorkflowResponseGate] wake evaluation failed', {
+				sessionID,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
 	};
 
 	return {

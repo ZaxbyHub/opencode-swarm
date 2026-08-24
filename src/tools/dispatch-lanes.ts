@@ -260,16 +260,24 @@ const PR_WORKFLOW_LANE_CHECKLISTS: Readonly<Record<string, string>> = {
 		'challenge the closeout evidence, omissions, false confidence, severity, scope, and publication readiness',
 };
 
-const CONTROLLER_FIELD_LINE_TERMINATOR_PATTERN = /[\r\n\u2028\u2029]+/g;
+const CONTROLLER_FIELD_CONTROL_SEPARATOR_PATTERN = /[\p{Cc}\p{Zl}\p{Zp}]+/gu;
 
 function canonicalizeControllerField(value: string): string {
-	return value.replace(CONTROLLER_FIELD_LINE_TERMINATOR_PATTERN, ' ').trim();
+	return value.replace(CONTROLLER_FIELD_CONTROL_SEPARATOR_PATTERN, ' ').trim();
 }
 
-function canonicalizeControllerTokenField(value: string): string {
+type ControllerTokenClassification =
+	| { ok: true; token: string }
+	| { ok: false; reason: 'empty' | 'multiple' };
+
+function classifyControllerTokenField(
+	value: string,
+): ControllerTokenClassification {
 	const normalized = canonicalizeControllerField(value);
-	const [token = ''] = normalized.split(/\s+/, 1);
-	return token;
+	if (!normalized) return { ok: false, reason: 'empty' };
+	const tokens = normalized.split(/\s+/).filter(Boolean);
+	if (tokens.length !== 1) return { ok: false, reason: 'multiple' };
+	return { ok: true, token: tokens[0] ?? '' };
 }
 
 /**
@@ -1685,11 +1693,20 @@ export async function executeDispatchLanesAsync(
 			context.sessionID?.trim() &&
 			parsed.data.pr_review_wave_stage !== undefined
 		) {
-			await rollbackPrReviewBaseAdmissionIfUnlaunched(
-				directory,
-				context.sessionID,
-				batchId,
-			);
+			try {
+				await rollbackPrReviewBaseAdmissionIfUnlaunched(
+					directory,
+					context.sessionID,
+					batchId,
+				);
+			} catch (error) {
+				logger.log('pr-review base-admission rollback failed', {
+					batchId,
+					sessionID: context.sessionID,
+					error: error instanceof Error ? error.message : String(error),
+				});
+				throw error;
+			}
 		}
 		const failed = laneResults.filter((lane) => lane.status === 'failed');
 		const rejected = laneResults.filter((lane) => lane.status === 'rejected');
@@ -3430,16 +3447,14 @@ function applyExplorerFormatSuffix(
 				: options.mode === 'swarm-pr-review:micro' || isPrReviewCouncilExplorer
 					? 'For this micro/council lane, use the micro row family and put the exact workflow_lane only in the `micro_lane` field; do not use the base `lane` field.'
 					: "Use the row family applicable to this dispatch and put the exact workflow_lane only in that family's `lane` or `micro_lane` field.";
-		const exactLane = canonicalizeControllerTokenField(
-			lane.workflow_lane ?? lane.id,
-		);
-		const ownedLanes = lane.owned_workflow_lanes?.length
-			? lane.owned_workflow_lanes.map((owned) =>
-					canonicalizeControllerTokenField(owned),
-				)
-			: [exactLane];
-		if (!exactLane || ownedLanes.some((owned) => !owned)) {
-			const diagnostic = `Lane "${lane.id}" controller-bound explorer identity becomes empty after canonicalization`;
+		const exactLaneInput = lane.workflow_lane ?? lane.id;
+		const exactLaneResult = classifyControllerTokenField(exactLaneInput);
+		if (!exactLaneResult.ok) {
+			const reason =
+				exactLaneResult.reason === 'multiple'
+					? 'must be exactly one token after controller sanitization'
+					: 'must not be empty after controller sanitization';
+			const diagnostic = `Lane "${lane.id}" workflow_lane ${reason}`;
 			if (options.failClosed) {
 				errors.push(diagnostic);
 				return lane;
@@ -3449,6 +3464,32 @@ function applyExplorerFormatSuffix(
 			);
 			return lane;
 		}
+		const ownedLaneResults = lane.owned_workflow_lanes?.length
+			? lane.owned_workflow_lanes.map((owned, index) => ({
+					index,
+					result: classifyControllerTokenField(owned),
+				}))
+			: [{ index: 0, result: exactLaneResult }];
+		const invalidOwnedLane = ownedLaneResults.find(({ result }) => !result.ok);
+		if (invalidOwnedLane) {
+			const reason =
+				!invalidOwnedLane.result.ok &&
+				invalidOwnedLane.result.reason === 'multiple'
+					? 'must be exactly one token after controller sanitization'
+					: 'must not be empty after controller sanitization';
+			const diagnostic = `Lane "${lane.id}" owned_workflow_lanes[${invalidOwnedLane.index}] ${reason}`;
+			if (options.failClosed) {
+				errors.push(diagnostic);
+				return lane;
+			}
+			logger.log(
+				`[dispatch-lanes] applyExplorerFormatSuffix: ${diagnostic}; preserving the caller prompt for generic compatibility`,
+			);
+			return lane;
+		}
+		const ownedLanes = ownedLaneResults.map(({ result }) =>
+			result.ok ? result.token : '',
+		);
 		const identity =
 			ownedLanes.length === 1
 				? `every output row MUST use the exact lane value "${ownedLanes[0]}"`
@@ -3583,12 +3624,10 @@ function applyPrWorkflowPromptContract(
 	}
 	const errors: string[] = [];
 	const contracted = lanes.map((lane) => {
-		const normalizedMode = canonicalizeControllerTokenField(mode);
-		const workflowLane = canonicalizeControllerTokenField(
-			lane.workflow_lane ?? '',
-		);
-		const prHeadSha = canonicalizeControllerTokenField(options.prHeadSha ?? '');
-		const revisionDigest = canonicalizeControllerTokenField(
+		const normalizedMode = classifyControllerTokenField(mode);
+		const workflowLane = classifyControllerTokenField(lane.workflow_lane ?? '');
+		const prHeadSha = classifyControllerTokenField(options.prHeadSha ?? '');
+		const revisionDigest = classifyControllerTokenField(
 			options.revisionDigest ?? '',
 		);
 		const declaredScope = canonicalizeControllerField(
@@ -3596,27 +3635,53 @@ function applyPrWorkflowPromptContract(
 				'the exact checked-out PR revision and repository-defined diff context',
 		);
 		const callerFocus = canonicalizeControllerField(options.callerFocus ?? '');
-		const assignedIds = (
+		const assignedIdResults = (
 			lane.review_item_ids ??
 			lane.feedback_item_ids ??
 			[]
-		).map((itemId) => canonicalizeControllerTokenField(itemId));
-		if (!normalizedMode || !prHeadSha || !revisionDigest) {
+		).map((itemId) => classifyControllerTokenField(itemId));
+		const invalidAssignedId = assignedIdResults.find((result) => !result.ok);
+		if (!normalizedMode.ok || !prHeadSha.ok || !revisionDigest.ok) {
 			errors.push(
-				`Lane "${lane.id}" mandatory PR workflow contract contains an empty controller-owned identity after canonicalization`,
+				`Lane "${lane.id}" mandatory PR workflow contract requires non-empty single-token mode, pr_head_sha, and revision_digest values after controller sanitization`,
 			);
 			return lane;
 		}
-		const fallbackChecklist = normalizedMode.endsWith(':reviewer')
+		if (!workflowLane.ok && workflowLane.reason === 'multiple') {
+			errors.push(
+				`Lane "${lane.id}" workflow_lane must be exactly one token after controller sanitization`,
+			);
+			return lane;
+		}
+		if (invalidAssignedId) {
+			errors.push(
+				`Lane "${lane.id}" assigned_item_ids must contain exactly one token per item after controller sanitization`,
+			);
+			return lane;
+		}
+		const fallbackChecklist = normalizedMode.token.endsWith(':reviewer')
 			? 're-read every assigned candidate at its exact location; prove classification, reachability, mitigation, severity, and falsification path'
-			: normalizedMode.endsWith(':critic')
+			: normalizedMode.token.endsWith(':critic')
 				? 'challenge every assigned verdict for evidence, reachability, mitigation, severity, coherence, and required report changes'
 				: 'inspect the bound scope using the complete repository-defined contract for this lane';
-		const ownedLanes = lane.owned_workflow_lanes?.length
+		const ownedLaneResults = lane.owned_workflow_lanes?.length
 			? lane.owned_workflow_lanes.map((owned) =>
-					canonicalizeControllerTokenField(owned),
+					classifyControllerTokenField(owned),
 				)
 			: undefined;
+		const invalidOwnedLane = ownedLaneResults?.find((result) => !result.ok);
+		if (invalidOwnedLane) {
+			errors.push(
+				`Lane "${lane.id}" owned_workflow_lanes must contain exactly one token per item after controller sanitization`,
+			);
+			return lane;
+		}
+		const ownedLanes = ownedLaneResults?.map((result) =>
+			result.ok ? result.token : '',
+		);
+		const assignedIds = assignedIdResults.map((result) =>
+			result.ok ? result.token : '',
+		);
 		const checklist = ownedLanes
 			? ownedLanes
 					.map(
@@ -3624,12 +3689,14 @@ function applyPrWorkflowPromptContract(
 							`[${owned}] ${PR_WORKFLOW_LANE_CHECKLISTS[owned] ?? fallbackChecklist}`,
 					)
 					.join(' ')
-			: (PR_WORKFLOW_LANE_CHECKLISTS[workflowLane] ?? fallbackChecklist);
+			: (PR_WORKFLOW_LANE_CHECKLISTS[
+					workflowLane.ok ? workflowLane.token : ''
+				] ?? fallbackChecklist);
 		const ownedLine = ownedLanes
 			? `\nowned_workflow_lanes: ${ownedLanes.join(', ')} — every owned obligation requires its own [CANDIDATE] rows or fully populated [CLEAN] attestation naming that obligation`
 			: '';
 		const responseBudget = prReviewLaneResponseBudgetChars(
-			normalizedMode,
+			normalizedMode.token,
 			lane,
 		);
 		const budgetLine =
@@ -3649,10 +3716,10 @@ function applyPrWorkflowPromptContract(
 		const contract = `
 
 [CONTROLLER-BOUND PR WORKFLOW CONTRACT]
-mode: ${normalizedMode}
-workflow_lane: ${workflowLane || '(none)'}${ownedLine}
-pr_head_sha: ${prHeadSha}
-revision_digest: ${revisionDigest}
+mode: ${normalizedMode.token}
+workflow_lane: ${workflowLane.ok ? workflowLane.token : '(none)'}${ownedLine}
+pr_head_sha: ${prHeadSha.token}
+revision_digest: ${revisionDigest.token}
 declared_scope: ${declaredScope}
 caller_focus_non_authoritative: ${callerFocus || '(none)'}
 assigned_item_ids: ${assignedIds.length > 0 ? assignedIds.join(', ') : '(discovery lane)'}

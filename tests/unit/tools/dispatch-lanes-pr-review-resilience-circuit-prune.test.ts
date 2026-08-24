@@ -223,13 +223,19 @@ describe('dispatch_lanes PR review resilience circuit prune ordering', () => {
 
 		const state = await readPrWorkflowGateState(directory, sessionID);
 		expect(state?.prReviewBaseDispatches).toHaveLength(maxBatches);
-		expect(state?.prReviewResilience?.circuit?.count).toBe(12);
-		expect(state?.prReviewResilience?.circuit?.contributors).toHaveLength(12);
+		expect(state?.prReviewResilience?.circuit?.count).toBe(
+			PR_REVIEW_BASE_DIMENSION_IDS.length,
+		);
+		expect(state?.prReviewResilience?.circuit?.contributors).toHaveLength(
+			PR_REVIEW_BASE_DIMENSION_IDS.length,
+		);
 
 		await removeDelegationStore(directory);
 		gateInternals.resetTrackedStateCache();
 		const reloaded = await readPrWorkflowGateState(directory, sessionID);
-		expect(reloaded?.prReviewResilience?.circuit?.count).toBe(12);
+		expect(reloaded?.prReviewResilience?.circuit?.count).toBe(
+			PR_REVIEW_BASE_DIMENSION_IDS.length,
+		);
 
 		await expect(
 			enforcePrReviewBaseDimensions(

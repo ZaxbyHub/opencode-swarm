@@ -290,4 +290,57 @@ describe('dispatch_lanes PR review resilience state', () => {
 		expect(stillBlocked.failure_class).toBe('circuit_open');
 		expect(created).toBe(2);
 	});
+
+	test('does not open the circuit when the same dimension fails in multiple retry waves', async () => {
+		let created = 0;
+		dispatchInternals.getSessionOps = () => ({
+			create: mock(async () => ({ data: { id: `lane-session-${created++}` } })),
+			promptAsync: mock(async () => ({ data: undefined, error: undefined })),
+			delete: mock(async () => undefined),
+		});
+
+		for (const attempt of [0, 1] as const) {
+			const wave = await executeDispatchLanesAsync(
+				{
+					mode: 'swarm-pr-review:base',
+					pr_head_sha: 'abc123',
+					base_sha: 'def456',
+					base_ref: 'origin/main',
+					pr_review_wave_stage: 'canary',
+					pr_review_wave_attempt: attempt,
+					max_concurrent: 1,
+					lanes: [lane(`canary-${attempt}`, PR_REVIEW_BASE_DIMENSION_IDS[0]!)],
+				},
+				directory,
+				{ sessionID: 'review-session-repeat-dimension' },
+			);
+			expect(wave.success).toBe(true);
+			const record = findByBatchId(directory, String(wave.batch_id), {
+				parentSessionId: 'review-session-repeat-dimension',
+			})[0];
+			await appendDelegationTransition(directory, record!.correlationId, {
+				status: 'error',
+				result: terminalErrorResult('HTTP 503 upstream overloaded'),
+				expectedCurrentStatuses: ['pending', 'running'],
+			});
+		}
+
+		const thirdWave = await executeDispatchLanesAsync(
+			{
+				mode: 'swarm-pr-review:base',
+				pr_head_sha: 'abc123',
+				base_sha: 'def456',
+				base_ref: 'origin/main',
+				pr_review_wave_stage: 'canary',
+				pr_review_wave_attempt: 2,
+				max_concurrent: 1,
+				lanes: [lane('canary-2', PR_REVIEW_BASE_DIMENSION_IDS[1]!)],
+			},
+			directory,
+			{ sessionID: 'review-session-repeat-dimension' },
+		);
+		expect(thirdWave.success).toBe(true);
+		expect(thirdWave.failure_class).toBeUndefined();
+		expect(created).toBe(3);
+	});
 });

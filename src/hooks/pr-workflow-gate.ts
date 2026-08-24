@@ -627,8 +627,11 @@ const MAX_TRACKED_SESSIONS = 200;
 const MAX_WORKFLOW_BATCHES = 128;
 /**
  * Every valid PR_REVIEW base batch partitions the fixed six-dimension base
- * universe exactly once, so a batch can contribute at most one lane per
- * dimension and therefore no more than six distinct `(batchId, laneId)` pairs.
+ * universe exactly once, so a batch can contribute at most one failed-dimension
+ * proof per dimension and therefore no more than six contributor entries. A
+ * consolidated retry lane may own multiple failed dimensions, so the same
+ * `(batchId, laneId)` pair can legitimately appear more than once in the proof
+ * set when one lane represents multiple dimensions.
  * The resilience circuit's contributor proof set is bounded by the batch cap
  * times that per-batch maximum.
  */
@@ -3053,6 +3056,15 @@ function batchLaneRecords(
 	}).filter((record) => record.laneId === laneId);
 }
 
+function baseLaneDimensions(lane: {
+	workflowLane: PrReviewBaseDimensionId;
+	ownedWorkflowLanes?: readonly PrReviewBaseDimensionId[];
+}): readonly PrReviewBaseDimensionId[] {
+	return lane.ownedWorkflowLanes?.length
+		? lane.ownedWorkflowLanes
+		: [lane.workflowLane];
+}
+
 function batchIsTerminal(
 	directory: string,
 	state: PrWorkflowGateState,
@@ -3139,7 +3151,10 @@ function computePrReviewResilienceCircuit(
 ): PrReviewResilienceCircuitRecord | null {
 	const signatures = new Map<
 		string,
-		{ count: number; contributors: Array<{ batchId: string; laneId: string }> }
+		{
+			dimensions: Set<PrReviewBaseDimensionId>;
+			contributors: Array<{ batchId: string; laneId: string }>;
+		}
 	>();
 	for (const batch of state.prReviewBaseDispatches ?? []) {
 		for (const lane of batch.lanes) {
@@ -3150,32 +3165,33 @@ function computePrReviewResilienceCircuit(
 			const signature = classifyTerminalFailureSignature(latest);
 			if (!signature) continue;
 			const current = signatures.get(signature) ?? {
-				count: 0,
+				dimensions: new Set<PrReviewBaseDimensionId>(),
 				contributors: [],
 			};
-			const alreadyCounted = current.contributors.some(
-				(entry) =>
-					entry.batchId === batch.batchId && entry.laneId === lane.laneId,
-			);
-			if (alreadyCounted) continue;
-			current.count += 1;
-			current.contributors.push({
-				batchId: batch.batchId,
-				laneId: lane.laneId,
-			});
+			for (const dimension of baseLaneDimensions(lane)) {
+				if (current.dimensions.has(dimension)) continue;
+				current.dimensions.add(dimension);
+				current.contributors.push({
+					batchId: batch.batchId,
+					laneId: lane.laneId,
+				});
+			}
 			signatures.set(signature, current);
 		}
 	}
 	const opened = [...signatures.entries()]
-		.filter(([, entry]) => entry.count >= policy.correlatedFailureThreshold)
+		.filter(
+			([, entry]) => entry.dimensions.size >= policy.correlatedFailureThreshold,
+		)
 		.sort(
 			(left, right) =>
-				right[1].count - left[1].count || left[0].localeCompare(right[0]),
+				right[1].dimensions.size - left[1].dimensions.size ||
+				left[0].localeCompare(right[0]),
 		)[0];
 	if (!opened) return null;
 	return {
 		signature: opened[0],
-		count: opened[1].count,
+		count: opened[1].dimensions.size,
 		contributors: opened[1].contributors,
 		openedAt: state.prReviewResilience?.circuit?.openedAt ?? isoNow(),
 	};
@@ -7105,11 +7121,8 @@ export async function enforcePrWorkflowToolBefore(
 		isAllowlistedReadOnlyTool &&
 		readOnlyArgumentClassification?.safe === false
 	) {
-		const received = formatReadOnlyArgumentValue(
-			readOnlyArgumentClassification.value,
-		);
 		throw new Error(
-			`BLOCKED: PR_REVIEW is read-only; tool "${normalizedTool}" rejected argument "${readOnlyArgumentClassification.path}": ${readOnlyArgumentClassification.constraint}; received ${received}`,
+			`BLOCKED: PR_REVIEW is read-only; tool "${normalizedTool}" rejected argument "${readOnlyArgumentClassification.path}": ${readOnlyArgumentClassification.constraint}`,
 		);
 	}
 	if (
@@ -8210,16 +8223,6 @@ function classifyReadOnlyToolArguments(
 		'argument type is not supported by the read-only classifier',
 		value,
 	);
-}
-
-function formatReadOnlyArgumentValue(value: unknown): string {
-	let rendered: string;
-	try {
-		rendered = JSON.stringify(value) ?? String(value);
-	} catch {
-		rendered = String(value);
-	}
-	return rendered.length <= 160 ? rendered : `${rendered.slice(0, 157)}...`;
 }
 
 /**

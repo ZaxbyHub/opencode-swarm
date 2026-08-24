@@ -1665,6 +1665,11 @@ function validateConfigKey(path: string, value: unknown): ConfigFinding[] {
 			break;
 		}
 
+		case 'pr_review_resilience': {
+			emitObjectTypeMismatch('pr_review_resilience', value, findings);
+			break;
+		}
+
 		case 'external_skills': {
 			emitObjectTypeMismatch('external_skills', value, findings);
 			break;

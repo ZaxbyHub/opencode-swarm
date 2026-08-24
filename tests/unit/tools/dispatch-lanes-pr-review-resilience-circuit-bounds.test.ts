@@ -156,7 +156,7 @@ afterEach(async () => {
 });
 
 describe('dispatch_lanes PR review resilience circuit bounds', () => {
-	test('migrated legacy state with 132 correlated contributors opens a typed durable circuit', async () => {
+	test('migrated legacy state opens a typed durable circuit from six repeated failed dimensions, not 132 repeated lane launches', async () => {
 		let created = 0;
 		dispatchInternals.getSessionOps = () => ({
 			create: mock(async () => ({ data: { id: `lane-session-${created++}` } })),
@@ -270,16 +270,22 @@ describe('dispatch_lanes PR review resilience circuit bounds', () => {
 		expect(blocked.failure_class).toBe('circuit_open');
 
 		const state = await readPrWorkflowGateState(directory, sessionID);
-		expect(state?.prReviewResilience?.circuit?.count).toBe(132);
-		expect(state?.prReviewResilience?.circuit?.contributors).toHaveLength(132);
+		expect(state?.prReviewResilience?.circuit?.count).toBe(
+			PR_REVIEW_BASE_DIMENSION_IDS.length,
+		);
+		expect(state?.prReviewResilience?.circuit?.contributors).toHaveLength(
+			PR_REVIEW_BASE_DIMENSION_IDS.length,
+		);
 		expect(created).toBe(6);
 
 		await removeDelegationStore(directory);
 		gateInternals.resetTrackedStateCache();
 		const reloaded = await readPrWorkflowGateState(directory, sessionID);
-		expect(reloaded?.prReviewResilience?.circuit?.count).toBe(132);
+		expect(reloaded?.prReviewResilience?.circuit?.count).toBe(
+			PR_REVIEW_BASE_DIMENSION_IDS.length,
+		);
 		expect(reloaded?.prReviewResilience?.circuit?.contributors).toHaveLength(
-			132,
+			PR_REVIEW_BASE_DIMENSION_IDS.length,
 		);
 
 		const stillBlocked = await executeDispatchLanesAsync(

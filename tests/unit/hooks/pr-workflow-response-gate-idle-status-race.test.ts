@@ -108,6 +108,57 @@ describe('PR workflow response-gate idle/status ordering races', () => {
 		expect(scheduler.pendingCount()).toBe(0);
 	});
 
+	test('swallows auto-wake observation failures without rejecting the idle event', async () => {
+		const scheduler = new FakeScheduler();
+		const promptAsync = mock(async () => ({}));
+		const gate = makeRecoveryRaceGate(
+			directory,
+			scheduler,
+			promptAsync,
+			undefined,
+		);
+		const sessionID = 'idle-observe-failure';
+		await writeStateWithRevision(directory, sessionID, 0);
+		responseGateInternals.observePrWorkflowAutoWakeEvent = mock(async () => {
+			throw new Error('simulated auto-wake observation failure');
+		}) as typeof responseGateInternals.observePrWorkflowAutoWakeEvent;
+
+		await expect(gate.event(idleEventFor(sessionID))).resolves.toBeUndefined();
+
+		expect(promptAsync).not.toHaveBeenCalled();
+		expect(gate._inspectBoundaryActivity(sessionID)?.lastHostStatus).toBe(
+			'idle',
+		);
+		expect(scheduler.pendingCount()).toBe(0);
+	});
+
+	test('swallows wake-evaluation read failures without rejecting the idle event', async () => {
+		const scheduler = new FakeScheduler();
+		const promptAsync = mock(async () => ({}));
+		const gate = makeRecoveryRaceGate(
+			directory,
+			scheduler,
+			promptAsync,
+			undefined,
+		);
+		const sessionID = 'idle-read-failure';
+		await writeStateWithRevision(directory, sessionID, 0);
+		responseGateInternals.observePrWorkflowAutoWakeEvent = mock(async () => ({
+			suppressWake: false,
+		})) as typeof responseGateInternals.observePrWorkflowAutoWakeEvent;
+		responseGateInternals.readPrWorkflowGateState = mock(async () => {
+			throw new Error('simulated wake-evaluation read failure');
+		}) as typeof responseGateInternals.readPrWorkflowGateState;
+
+		await expect(gate.event(idleEventFor(sessionID))).resolves.toBeUndefined();
+
+		expect(promptAsync).not.toHaveBeenCalled();
+		expect(gate._inspectBoundaryActivity(sessionID)?.lastHostStatus).toBe(
+			'idle',
+		);
+		expect(scheduler.pendingCount()).toBe(0);
+	});
+
 	for (const newerStatus of ['busy', 'retry'] as const) {
 		test(`publishes idle before awaits without overwriting a newer ${newerStatus} host-status event`, async () => {
 			const scheduler = new FakeScheduler();

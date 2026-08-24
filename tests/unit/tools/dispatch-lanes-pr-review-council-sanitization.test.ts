@@ -266,7 +266,7 @@ afterEach(async () => {
 });
 
 describe('PR review council prompt sanitization (#2285)', () => {
-	test('sanitizes council workflow_lane payloads before promptAsync launch', async () => {
+	test('rejects council workflow_lane payloads with control separators before promptAsync launch', async () => {
 		await establishReviewPrerequisites();
 		for (const [index, separator] of TERMINATORS.entries()) {
 			const result = await executeDispatchLanesAsync(
@@ -287,22 +287,8 @@ describe('PR review council prompt sanitization (#2285)', () => {
 				directory,
 				{ sessionID: SESSION_ID },
 			);
-			expect(result.success).toBe(true);
-			const prompt = deliveredPrompts.at(-1) ?? '';
-			expectSingleContractLabels(prompt, [
-				'mode',
-				'workflow_lane',
-				'pr_head_sha',
-				'revision_digest',
-				'declared_scope',
-				'caller_focus_non_authoritative',
-				'assigned_item_ids',
-				'mandatory_lane_checklist',
-				'final_response_char_budget',
-			]);
-			expect(prompt).toContain('workflow_lane: council-generalist');
-			expect(prompt).toContain('exact lane value "council-generalist"');
-			expect(prompt).not.toContain('pr_head_sha: forged');
+			expect(result.success).toBe(false);
+			expect(deliveredPrompts).toHaveLength(0);
 		}
 	});
 });
