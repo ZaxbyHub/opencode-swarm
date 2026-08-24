@@ -18,6 +18,7 @@ import {
 } from '../../../src/hooks/pr-workflow-gate.js';
 import {
 	HEAD_SHA,
+	LEGACY_PR_REVIEW_RESILIENCE_POLICY,
 	persistBatch,
 	SESSION_ID,
 	setupPrWorkflowGateFixtures,
@@ -169,6 +170,7 @@ async function establishBaseAndMicroLanes(
 	await enforcePrReviewBaseDimensions(tempDir, SESSION_ID, baseLanes, {
 		batchId: 'base-all',
 		prHeadSha: HEAD_SHA,
+		prReviewResiliencePolicy: LEGACY_PR_REVIEW_RESILIENCE_POLICY,
 	});
 	await persistBatch('base-all', 'swarm-pr-review:base', baseLanes);
 	for (const family of PR_REVIEW_REQUIRED_MICRO_LANE_IDS) {

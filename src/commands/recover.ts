@@ -4,6 +4,10 @@ import {
 	recoverStaleCoderSettlements,
 	type StaleSettlementRecoveryOutcome,
 } from '../workflow/coder-settlement.js';
+import {
+	repairWedgedStageA,
+	type StageARepairOutcome,
+} from '../workflow/stage-a-repair.js';
 
 /**
  * Renders one recovery outcome as a user-facing report line. Kept as a pure
@@ -42,6 +46,28 @@ function renderOutcome(outcome: StaleSettlementRecoveryOutcome): string {
 }
 
 /**
+ * Renders one Stage A repair outcome as a user-facing report line (pure
+ * function; same sanitization rules as renderOutcome).
+ */
+function renderStageARepairOutcome(outcome: StageARepairOutcome): string {
+	switch (outcome.outcome) {
+		case 'repaired':
+			return `✅ Task ${outcome.taskId}: Stage A repaired — stage_a_passed written at generation ${outcome.generation} without re-running the coder`;
+		case 'skipped_not_wedged':
+			return `⏭️ Task ${outcome.taskId}: workflow state is ${outcome.state} with pre_check proof present or not settled — nothing to repair`;
+		case 'skipped_not_green':
+			return `⏭️ Task ${outcome.taskId}: no green post-settlement pre-check evidence (${outcome.reason === 'no_pre_check_bundles' ? 'missing or non-green secretscan/SAST bundle — run pre_check_batch first' : 'latest pre-check run failed or predates the settlement'}) — refusing to mark Stage A passed without proof`;
+		case 'error':
+			return `❌ Task ${outcome.taskId}: Stage A repair failed — ${sanitizeDiagnosticText(
+				outcome.message,
+				512,
+			)}`;
+		default:
+			return `❌ Task ${(outcome as { taskId: string }).taskId}: unknown repair outcome`;
+	}
+}
+
+/**
  * Handles the /swarm recover command (issue #2268).
  *
  * The user-facing invoker for coder-settlement recovery. The wedge class this
@@ -75,67 +101,108 @@ export async function handleRecoverCommand(
 
 	const { states: listed, truncated: listTruncated } =
 		await listCoderSettlementWalStates(directory);
+
+	const report: string[] = ['## Coder Settlement Recovery', ''];
+	const hasKnownWal =
+		listed.length > 0 &&
+		(!taskId || listed.some((entry) => entry.taskId === taskId));
+
 	if (listed.length === 0) {
-		return [
-			'## Coder Settlement Recovery',
-			'',
+		report.push(
 			taskId
 				? `❌ No settlement WAL for task ${taskId} (no settlement WALs found in .swarm/coder-settlements/).`
 				: 'No coder settlement WALs found in .swarm/coder-settlements/ — nothing to recover.',
-		].join('\n');
-	}
+		);
+	} else if (taskId && !hasKnownWal) {
+		report.push(
+			`❌ No settlement WAL for task ${taskId}. Known tasks: ${listed
+				.map((entry) => entry.taskId)
+				.join(', ')}`,
+		);
+	} else {
+		const { results, truncated: recoverTruncated } =
+			await recoverStaleCoderSettlements(directory, {
+				...(taskId ? { taskIds: [taskId] } : {}),
+				force,
+			});
 
-	if (taskId) {
-		const target = listed.find((entry) => entry.taskId === taskId);
-		if (!target) {
-			return [
-				'## Coder Settlement Recovery',
+		const lines = results.map((outcome) => renderOutcome(outcome));
+		const recoveredCount = results.filter(
+			(r) => r.outcome === 'recovered',
+		).length;
+		const blockedCount = results.filter(
+			(r) =>
+				r.outcome === 'owned_in_process' ||
+				r.outcome === 'owned_by_live_foreign_pid',
+		).length;
+
+		report.push(
+			...lines,
+			'',
+			`Recovered ${recoveredCount} settlement(s)${
+				blockedCount > 0
+					? `; ${blockedCount} still owned by a live dispatch (see above for the exact remediation)`
+					: ''
+			}.`,
+		);
+		if (listTruncated || recoverTruncated) {
+			report.push(
 				'',
-				`❌ No settlement WAL for task ${taskId}. Known tasks: ${listed
-					.map((entry) => entry.taskId)
-					.join(', ')}`,
-			].join('\n');
+				'⚠️ More settlement WALs exist than the recovery scan cap (200) — older settlements were NOT listed or processed. Re-run after the tasks above are settled to reach the rest.',
+			);
+		}
+		if (force && recoveredCount > 0) {
+			report.push(
+				'',
+				'⚠️ --force released in-process ownership before recovery. If any of these dispatches was genuinely still running, its completion will report CODER_SETTLEMENT_IDEMPOTENCY_CONFLICT — that error is expected and safe to ignore; the settlement is already durably recovered.',
+			);
 		}
 	}
 
-	const { results, truncated: recoverTruncated } =
-		await recoverStaleCoderSettlements(directory, {
-			...(taskId ? { taskIds: [taskId] } : {}),
-			force,
-		});
-
-	const lines = results.map((outcome) => renderOutcome(outcome));
-	const recoveredCount = results.filter(
-		(r) => r.outcome === 'recovered',
-	).length;
-	const blockedCount = results.filter(
-		(r) =>
-			r.outcome === 'owned_in_process' ||
-			r.outcome === 'owned_by_live_foreign_pid',
-	).length;
-
-	const report = [
-		'## Coder Settlement Recovery',
-		'',
-		...lines,
-		'',
-		`Recovered ${recoveredCount} settlement(s)${
-			blockedCount > 0
-				? `; ${blockedCount} still owned by a live dispatch (see above for the exact remediation)`
-				: ''
-		}.`,
-	];
-	if (listTruncated || recoverTruncated) {
+	// Stage A wedge repair runs independently of settlement-WAL presence:
+	// repairWedgedStageA scans .swarm/evidence/ directly and does not require
+	// a settlement WAL to exist (background-dispatched coder tasks never
+	// create one — see stage-b-gates.ts). Placing this after the
+	// settlement-WAL early-return checks previously made this feature
+	// unreachable whenever the target task had no listable WAL (PR review
+	// finding F-003) — it now always runs, using whatever settlement-WAL
+	// recency proof happens to be available (see stage-a-repair.ts's
+	// updatedAt fallback for the WAL-less case). Emits the missing
+	// stage_a_passed transition directly; audit events land in
+	// .swarm/events.jsonl.
+	try {
+		const { results: repairResults, truncated: repairTruncated } =
+			await repairWedgedStageA(directory, {
+				...(taskId ? { taskIds: [taskId] } : {}),
+			});
+		const repaired = repairResults.filter((r) => r.outcome === 'repaired');
+		if (repairResults.length > 0) {
+			report.push(
+				'',
+				'## Wedged Stage A Repair',
+				'',
+				...repairResults.map(renderStageARepairOutcome),
+				'',
+				repaired.length === 0
+					? 'No wedged tasks repaired.'
+					: `Repaired ${repaired.length} wedged task(s); reviewer/test_engineer dispatch is now permitted for them.`,
+			);
+			if (repairTruncated) {
+				report.push(
+					'',
+					'⚠️ More evidence files exist than the repair scan cap (200) — re-run after the tasks above are processed to reach the rest.',
+				);
+			}
+		}
+	} catch (err) {
 		report.push(
 			'',
-			'⚠️ More settlement WALs exist than the recovery scan cap (200) — older settlements were NOT listed or processed. Re-run after the tasks above are settled to reach the rest.',
+			`⚠️ Wedged Stage A repair failed (settlement recovery above is unaffected): ${sanitizeDiagnosticText(
+				err instanceof Error ? err.message : String(err),
+				512,
+			)}`,
 		);
 	}
-	if (force && recoveredCount > 0) {
-		report.push(
-			'',
-			'⚠️ --force released in-process ownership before recovery. If any of these dispatches was genuinely still running, its completion will report CODER_SETTLEMENT_IDEMPOTENCY_CONFLICT — that error is expected and safe to ignore; the settlement is already durably recovered.',
-		);
-	}
+
 	return report.join('\n');
 }

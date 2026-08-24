@@ -293,6 +293,22 @@ const FIXTURES: Record<string, Record<string, unknown>> = {
 			'dot-tmp-prefix-legacy': 1,
 		},
 	},
+
+	// Issue #2037 context-map telemetry storage health. Payload mirrors the
+	// real producer in src/context-map/telemetry.ts (compactStore/finalize):
+	// bounded counts + timestamps only — no capsule/query content, no paths.
+	context_telemetry_health: {
+		trigger: 'compaction',
+		accepted_count: 1250,
+		compacted_count: 1000,
+		retained_count: 250,
+		dropped_count: 0,
+		corrupt_count: 1,
+		oldest_timestamp: '2026-07-01T00:00:00.000Z',
+		newest_timestamp: '2026-08-22T00:00:00.000Z',
+		bytes: 131072,
+		limit_bytes: 262144,
+	},
 };
 
 describe('envelope roundtrip — AC1 positive', () => {

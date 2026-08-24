@@ -143,7 +143,9 @@ describe('PR workflow user interruption', () => {
 		releaseFirstRead(state);
 		await firstIdle;
 
-		expect(readCount).toBe(2); // one pre-wake read plus one post-wake read
+		// Initial admission, post-status, pre-prompt cancellation guard, and
+		// post-wake bookkeeping each perform a durable read.
+		expect(readCount).toBe(4);
 		expect(promptAsync).toHaveBeenCalledTimes(1);
 	});
 
@@ -167,7 +169,7 @@ describe('PR workflow user interruption', () => {
 		});
 		responseGateInternals.readPrWorkflowGateState = mock(async () => {
 			readCount += 1;
-			if (readCount === 2) {
+			if (readCount === 4) {
 				markPostReadStarted();
 				return pendingPostRead;
 			}
@@ -180,7 +182,7 @@ describe('PR workflow user interruption', () => {
 
 		// Previous code released ownership immediately after promptAsync, before
 		// this pending post-wake read, so the second idle sent another prompt.
-		expect(readCount).toBe(2);
+		expect(readCount).toBe(4);
 		expect(promptAsync).toHaveBeenCalledTimes(1);
 		releasePostRead(state);
 		await firstIdle;

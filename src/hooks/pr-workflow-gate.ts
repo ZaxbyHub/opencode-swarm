@@ -65,7 +65,10 @@ import {
 	switchPrFeedbackTrackingCandidateAsync,
 } from '../background/workspace-snapshot.js';
 import { WRITE_TOOL_NAMES } from '../config/constants.js';
-import { resolveGeneratedAgentRole } from '../config/schema.js';
+import {
+	type PrReviewResilienceConfig,
+	resolveGeneratedAgentRole,
+} from '../config/schema.js';
 import {
 	classifyPrWorkflowGitState,
 	type PrWorkflowGitState,
@@ -339,6 +342,37 @@ interface PrReviewBaseDispatchRecord {
 	validatedAt: string;
 }
 
+interface PrReviewResiliencePolicyRecord {
+	enabled: boolean;
+	canaryProbeMs: number;
+	statusProbeTimeoutMs: number;
+	correlatedFailureThreshold: number;
+	maxRetryAttemptsAfterInitial: number;
+}
+
+interface PrReviewResilienceAttemptRecord {
+	attempt: 0 | 1 | 2;
+	targetDimensions: PrReviewBaseDimensionId[];
+	canaryBatchId: string;
+	canaryLaneId: string;
+	canaryWorkflowLane: PrReviewBaseDimensionId;
+	admittedAt: string;
+	fanoutBatchId?: string;
+}
+
+interface PrReviewResilienceCircuitRecord {
+	signature: string;
+	count: number;
+	contributors: Array<{ batchId: string; laneId: string }>;
+	openedAt: string;
+}
+
+interface PrReviewResilienceStateRecord {
+	policy: PrReviewResiliencePolicyRecord;
+	attempts: PrReviewResilienceAttemptRecord[];
+	circuit?: PrReviewResilienceCircuitRecord;
+}
+
 interface PrFeedbackVerificationRecord {
 	batchId: string;
 	ownership: PrFeedbackLaneOwnership[];
@@ -504,6 +538,7 @@ export interface PrWorkflowGateState {
 	prReviewBaseDispatches?: PrReviewBaseDispatchRecord[];
 	/** @deprecated Compatibility projection of the most recent base dispatch. */
 	prReviewBaseDispatch?: PrReviewBaseDispatchRecord;
+	prReviewResilience?: PrReviewResilienceStateRecord;
 	/** Canonical ordered semantic ledger frozen by the first micro dispatch. */
 	prReviewTriggerLedger?: PrReviewInlineTriggerRow[];
 	prReviewTriggerEvalPath?: string;
@@ -590,6 +625,19 @@ interface SessionStateMutationLock {
 const GATE_SCHEMA_VERSION = 1 as const;
 const MAX_TRACKED_SESSIONS = 200;
 const MAX_WORKFLOW_BATCHES = 128;
+/**
+ * Every valid PR_REVIEW base batch partitions the fixed six-dimension base
+ * universe exactly once, so a batch can contribute at most one failed-dimension
+ * proof per dimension and therefore no more than six contributor entries. A
+ * consolidated retry lane may own multiple failed dimensions, so the same
+ * `(batchId, laneId)` pair can legitimately appear more than once in the proof
+ * set when one lane represents multiple dimensions.
+ * The resilience circuit's contributor proof set is bounded by the batch cap
+ * times that per-batch maximum.
+ */
+const MAX_PR_REVIEW_BASE_LANES_PER_BATCH = PR_REVIEW_BASE_DIMENSION_IDS.length;
+const MAX_PR_REVIEW_RESILIENCE_CIRCUIT_CONTRIBUTORS =
+	MAX_WORKFLOW_BATCHES * MAX_PR_REVIEW_BASE_LANES_PER_BATCH;
 /**
  * Ceiling on the retired-reviewer-session ledger the capacity GC maintains,
  * sized at eight child sessions per pruned batch across a full cap. If a prune
@@ -684,8 +732,65 @@ const PrReviewBaseDispatchRecordSchema = z
 					})
 					.strict(),
 			)
-			.min(1),
+			.min(1)
+			.max(MAX_PR_REVIEW_BASE_LANES_PER_BATCH),
 		validatedAt: z.string().min(1),
+	})
+	.strict();
+
+const PrReviewResiliencePolicyRecordSchema = z
+	.object({
+		enabled: z.boolean(),
+		canaryProbeMs: z.number().int().positive(),
+		statusProbeTimeoutMs: z.number().int().positive(),
+		correlatedFailureThreshold: z.number().int().min(2).max(8),
+		maxRetryAttemptsAfterInitial: z.number().int().min(0).max(2),
+	})
+	.strict();
+
+const PrReviewResilienceAttemptRecordSchema = z
+	.object({
+		attempt: z.union([z.literal(0), z.literal(1), z.literal(2)]),
+		targetDimensions: z
+			.array(PrReviewBaseDimensionIdSchema)
+			.min(1)
+			.max(PR_REVIEW_BASE_DIMENSION_IDS.length),
+		canaryBatchId: z.string().min(1),
+		canaryLaneId: z.string().min(1),
+		canaryWorkflowLane: PrReviewBaseDimensionIdSchema,
+		admittedAt: z.string().min(1),
+		fanoutBatchId: z.string().min(1).optional(),
+	})
+	.strict();
+
+const PrReviewResilienceCircuitRecordSchema = z
+	.object({
+		signature: z.string().min(1).max(512),
+		count: z
+			.number()
+			.int()
+			.min(2)
+			.max(MAX_PR_REVIEW_RESILIENCE_CIRCUIT_CONTRIBUTORS),
+		contributors: z
+			.array(
+				z
+					.object({
+						batchId: z.string().min(1),
+						laneId: z.string().min(1),
+					})
+					.strict(),
+			)
+			.min(2)
+			.max(MAX_PR_REVIEW_RESILIENCE_CIRCUIT_CONTRIBUTORS),
+		openedAt: z.string().min(1),
+	})
+	.strict();
+
+const PrReviewResilienceStateRecordSchema = z
+	.object({
+		policy: PrReviewResiliencePolicyRecordSchema,
+		attempts: z.array(PrReviewResilienceAttemptRecordSchema).max(3),
+		circuit: PrReviewResilienceCircuitRecordSchema.optional(),
 	})
 	.strict();
 
@@ -934,6 +1039,7 @@ const PrWorkflowGateStateSchema = z
 			.max(MAX_WORKFLOW_BATCHES)
 			.optional(),
 		prReviewBaseDispatch: PrReviewBaseDispatchRecordSchema.optional(),
+		prReviewResilience: PrReviewResilienceStateRecordSchema.optional(),
 		prReviewTriggerLedger: z
 			.array(PrReviewInlineTriggerRowSchema)
 			.length(PR_REVIEW_REQUIRED_TRIGGER_IDS.length)
@@ -2876,20 +2982,461 @@ export async function enforcePrWorkflowDispatchLanesAsync(
 	return state;
 }
 
+export class PrReviewResilienceCircuitOpenError extends Error {
+	readonly code = 'PR_REVIEW_RESILIENCE_CIRCUIT_OPEN' as const;
+
+	constructor(message: string) {
+		super(message);
+		this.name = 'PrReviewResilienceCircuitOpenError';
+	}
+}
+
+export class PrReviewResilienceRetryExhaustedError extends Error {
+	readonly code = 'PR_REVIEW_RESILIENCE_RETRY_EXHAUSTED' as const;
+
+	constructor(message: string) {
+		super(message);
+		this.name = 'PrReviewResilienceRetryExhaustedError';
+	}
+}
+
+function snapshotPrReviewResiliencePolicy(
+	policy?: PrReviewResilienceConfig,
+): PrReviewResiliencePolicyRecord {
+	return {
+		enabled: policy?.enabled ?? true,
+		canaryProbeMs: policy?.canary_probe_ms ?? 300_000,
+		statusProbeTimeoutMs: policy?.status_probe_timeout_ms ?? 2_000,
+		correlatedFailureThreshold: policy?.correlated_failure_threshold ?? 2,
+		maxRetryAttemptsAfterInitial: policy?.max_retry_attempts_after_initial ?? 2,
+	};
+}
+
+function declaredBaseDimensions(
+	lanes: readonly PrWorkflowLaneSpec[],
+): PrReviewBaseDimensionId[] {
+	return lanes.flatMap(
+		(lane) =>
+			(lane.ownedWorkflowLanes?.length
+				? lane.ownedWorkflowLanes
+				: [lane.workflowLane]) as PrReviewBaseDimensionId[],
+	);
+}
+
+function exactDimensionPartition(
+	actual: readonly PrReviewBaseDimensionId[],
+	expected: readonly PrReviewBaseDimensionId[],
+): boolean {
+	return (
+		actual.length === expected.length &&
+		new Set(actual).size === expected.length &&
+		expected.every((dimension) => actual.includes(dimension))
+	);
+}
+
+function latestDelegationRecord(
+	records: readonly BackgroundDelegationRecord[],
+): BackgroundDelegationRecord | null {
+	const sorted = [...records].sort((left, right) => {
+		const leftKey = left.completedAt ?? left.updatedAt ?? left.createdAt;
+		const rightKey = right.completedAt ?? right.updatedAt ?? right.createdAt;
+		return rightKey - leftKey;
+	});
+	return sorted[0] ?? null;
+}
+
+function batchLaneRecords(
+	directory: string,
+	state: PrWorkflowGateState,
+	batchId: string,
+	laneId: string,
+): BackgroundDelegationRecord[] {
+	return findByBatchId(directory, batchId, {
+		parentSessionId: state.sessionID,
+	}).filter((record) => record.laneId === laneId);
+}
+
+function baseLaneDimensions(lane: {
+	workflowLane: PrReviewBaseDimensionId;
+	ownedWorkflowLanes?: readonly PrReviewBaseDimensionId[];
+}): readonly PrReviewBaseDimensionId[] {
+	return lane.ownedWorkflowLanes?.length
+		? lane.ownedWorkflowLanes
+		: [lane.workflowLane];
+}
+
+function batchIsTerminal(
+	directory: string,
+	state: PrWorkflowGateState,
+	batchId: string,
+): boolean {
+	const records = findByBatchId(directory, batchId, {
+		parentSessionId: state.sessionID,
+	});
+	return (
+		records.length > 0 &&
+		records.every(
+			(record) =>
+				TERMINAL_FAILED_DELEGATION_STATUSES.has(record.status) ||
+				record.status === 'consumed',
+		)
+	);
+}
+
+function effectivePrReviewResiliencePolicy(
+	state: PrWorkflowGateState,
+	requestedPolicy?: PrReviewResilienceConfig,
+): PrReviewResiliencePolicyRecord {
+	return (
+		state.prReviewResilience?.policy ??
+		snapshotPrReviewResiliencePolicy(requestedPolicy)
+	);
+}
+
+function normalizeFailureSignatureText(value: string): string {
+	return value
+		.toLowerCase()
+		.replace(
+			/\b\d{4}-\d{2}-\d{2}t\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:z|[+-]\d{2}:\d{2})\b/g,
+			'<iso-timestamp>',
+		)
+		.replace(/\b\d{10,16}\b/g, '<epoch>')
+		.replace(
+			/\b((?:session|request|trace|correlation|run)(?:[_-]?id)?)\s*[:=]\s*([a-z0-9._:-]*[0-9_-][a-z0-9._:-]*)\b/g,
+			'$1=<id>',
+		)
+		.replace(
+			/\b((?:session|sess|request|req|trace|correlation|corr|run)(?:[_-]?id)?)\s+((?:(?:sess?|req|trace|corr|run)[_-][a-z0-9._:-]+|[a-z][a-z0-9._:-]*\d[a-z0-9._:-]*))\b/g,
+			'$1 <id>',
+		)
+		.replace(
+			/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/g,
+			'<uuid>',
+		)
+		.replace(/\b[0-9a-f]{16,64}\b/g, '<hex>')
+		.replace(/[a-z]:\\[^\s)]+/gi, '<path>')
+		.replace(/(?:\/[\w.@:-]+)+/g, '<path>')
+		.replace(/\s+/g, ' ')
+		.trim()
+		.slice(0, 160);
+}
+
+function classifyTerminalFailureSignature(
+	record: BackgroundDelegationRecord,
+): string | null {
+	if (!TERMINAL_FAILED_DELEGATION_STATUSES.has(record.status)) return null;
+	const result = record.terminalResult?.result ?? record.result;
+	if (!result) return `terminal-zero-output:${record.status}`;
+	const outputRef = result.outputRef?.trim();
+	const text = result.text?.trim() ?? '';
+	if (!outputRef && text.length === 0 && (result.chars ?? 0) === 0) {
+		return `terminal-zero-output:${record.status}`;
+	}
+	const errorText = result.error?.trim();
+	if (errorText) {
+		return `terminal-error-output:${record.status}:${normalizeFailureSignatureText(errorText)}`;
+	}
+	// `completed` means the child produced a result that has not necessarily been
+	// ingested yet. Non-empty, error-free output is therefore not authoritative
+	// evidence of failure; counting it would let two healthy, pending-ingestion
+	// lanes open the circuit. Empty/error completion remains classifiable above.
+	if (record.status === 'completed') return null;
+	return `terminal-nonzero-output:${record.status}`;
+}
+
+function computePrReviewResilienceCircuit(
+	directory: string,
+	state: PrWorkflowGateState,
+	policy: PrReviewResiliencePolicyRecord,
+): PrReviewResilienceCircuitRecord | null {
+	const signatures = new Map<
+		string,
+		{
+			dimensions: Set<PrReviewBaseDimensionId>;
+			contributors: Array<{ batchId: string; laneId: string }>;
+		}
+	>();
+	for (const batch of state.prReviewBaseDispatches ?? []) {
+		for (const lane of batch.lanes) {
+			const latest = latestDelegationRecord(
+				batchLaneRecords(directory, state, batch.batchId, lane.laneId),
+			);
+			if (!latest) continue;
+			const signature = classifyTerminalFailureSignature(latest);
+			if (!signature) continue;
+			const current = signatures.get(signature) ?? {
+				dimensions: new Set<PrReviewBaseDimensionId>(),
+				contributors: [],
+			};
+			for (const dimension of baseLaneDimensions(lane)) {
+				if (current.dimensions.has(dimension)) continue;
+				current.dimensions.add(dimension);
+				current.contributors.push({
+					batchId: batch.batchId,
+					laneId: lane.laneId,
+				});
+			}
+			signatures.set(signature, current);
+		}
+	}
+	const opened = [...signatures.entries()]
+		.filter(
+			([, entry]) => entry.dimensions.size >= policy.correlatedFailureThreshold,
+		)
+		.sort(
+			(left, right) =>
+				right[1].dimensions.size - left[1].dimensions.size ||
+				left[0].localeCompare(right[0]),
+		)[0];
+	if (!opened) return null;
+	return {
+		signature: opened[0],
+		count: opened[1].dimensions.size,
+		contributors: opened[1].contributors,
+		openedAt: state.prReviewResilience?.circuit?.openedAt ?? isoNow(),
+	};
+}
+
+function formatPrReviewResilienceCircuitOpenMessage(
+	circuit: PrReviewResilienceCircuitRecord,
+): string {
+	return `BLOCKED: PR_REVIEW base dispatch circuit is open after ${circuit.count} correlated terminal failures (${circuit.signature}); collect every launched lane, abort_pr_workflow, and stop without partial findings`;
+}
+
+async function preflightPrReviewResilienceCircuitBeforePrune(
+	directory: string,
+	state: PrWorkflowGateState,
+	previous: PrReviewBaseDispatchRecord[],
+	policy: PrReviewResiliencePolicyRecord,
+): Promise<{
+	state: PrWorkflowGateState;
+	previous: PrReviewBaseDispatchRecord[];
+}> {
+	let nextState = state;
+	let nextPrevious = previous;
+	let snapshot = nextState.prReviewResilience;
+	if (!snapshot) {
+		snapshot = { policy, attempts: [] };
+		if (nextPrevious.length > 0) {
+			nextState = await writeStateWhileLocked(directory, {
+				...nextState,
+				updatedAt: isoNow(),
+				prReviewResilience: snapshot,
+			});
+			nextPrevious = nextState.prReviewBaseDispatches ?? [];
+			snapshot = nextState.prReviewResilience ?? snapshot;
+		}
+	}
+	if (snapshot.circuit) {
+		throw new PrReviewResilienceCircuitOpenError(
+			formatPrReviewResilienceCircuitOpenMessage(snapshot.circuit),
+		);
+	}
+	const circuit = computePrReviewResilienceCircuit(
+		directory,
+		nextState,
+		policy,
+	);
+	if (!circuit) {
+		return { state: nextState, previous: nextPrevious };
+	}
+	const nextResilience = { ...snapshot, circuit };
+	if (
+		!nextState.prReviewResilience ||
+		nextState.prReviewResilience.circuit?.signature !== circuit.signature ||
+		nextState.prReviewResilience.circuit?.count !== circuit.count
+	) {
+		nextState = await writeStateWhileLocked(directory, {
+			...nextState,
+			updatedAt: isoNow(),
+			prReviewResilience: nextResilience,
+		});
+		nextPrevious = nextState.prReviewBaseDispatches ?? [];
+	}
+	throw new PrReviewResilienceCircuitOpenError(
+		formatPrReviewResilienceCircuitOpenMessage(circuit),
+	);
+}
+
+async function probeResilienceCanaryLiveness(
+	directory: string,
+	records: readonly BackgroundDelegationRecord[],
+	timeoutMs: number,
+): Promise<{ live: boolean; reason?: string }> {
+	const session = _test_exports.getSessionOps();
+	const status = session?.status;
+	if (!session || typeof status !== 'function') {
+		return { live: false, reason: 'status probe unavailable' };
+	}
+	const timeoutError = new Error(
+		'PR workflow resilience canary probe exceeded its deadline',
+	);
+	let response: Awaited<ReturnType<NonNullable<typeof status>>> | undefined;
+	try {
+		response = await withTimeout(
+			(async () => status.call(session, { query: { directory } }))(),
+			timeoutMs,
+			timeoutError,
+		);
+	} catch (error) {
+		return {
+			live: false,
+			reason:
+				error === timeoutError
+					? 'status probe timed out'
+					: 'status probe failed',
+		};
+	}
+	if (response?.error) return { live: false, reason: 'status probe errored' };
+	if (!response?.data)
+		return { live: false, reason: 'status probe returned no data' };
+	for (const record of records) {
+		const type = response.data[record.subagentSessionId]?.type;
+		if (type === 'busy' || type === 'retry') return { live: true };
+	}
+	return { live: false, reason: 'status probe did not report busy/retry' };
+}
+
+async function evaluatePrReviewResilienceAttempt(
+	directory: string,
+	state: PrWorkflowGateState,
+	attempt: PrReviewResilienceAttemptRecord,
+	revisionDigest: string,
+	policy: PrReviewResiliencePolicyRecord,
+): Promise<{
+	remaining: PrReviewBaseDimensionId[];
+	inFlight: PrReviewBaseDimensionId[];
+	canaryState: 'success' | 'failed' | 'live' | 'waiting';
+	reason?: string;
+	fanoutSettled: boolean;
+}> {
+	const attempts = summarizePrReviewBaseDimensionAttempts(
+		directory,
+		state,
+		revisionDigest,
+	);
+	const remaining = attempt.targetDimensions.filter(
+		(dimension) =>
+			!attempts.successful.has(dimension) && !attempts.inFlight.has(dimension),
+	);
+	const inFlight = attempt.targetDimensions.filter((dimension) =>
+		attempts.inFlight.has(dimension),
+	);
+	if (remaining.length === 0 && inFlight.length === 0) {
+		return {
+			remaining: [],
+			inFlight: [],
+			canaryState: 'success',
+			fanoutSettled: Boolean(attempt.fanoutBatchId),
+		};
+	}
+	if (attempts.successful.has(attempt.canaryWorkflowLane)) {
+		return {
+			remaining,
+			inFlight,
+			canaryState: 'success',
+			fanoutSettled: attempt.fanoutBatchId
+				? batchIsTerminal(directory, state, attempt.fanoutBatchId)
+				: false,
+		};
+	}
+	const canaryRecords = batchLaneRecords(
+		directory,
+		state,
+		attempt.canaryBatchId,
+		attempt.canaryLaneId,
+	);
+	if (
+		canaryRecords.length > 0 &&
+		canaryRecords.every((record) =>
+			TERMINAL_FAILED_DELEGATION_STATUSES.has(record.status),
+		)
+	) {
+		return { remaining, inFlight, canaryState: 'failed', fanoutSettled: false };
+	}
+	const admittedAtMs = Date.parse(attempt.admittedAt);
+	if (
+		Number.isFinite(admittedAtMs) &&
+		_test_exports.nowMs() - admittedAtMs < policy.canaryProbeMs
+	) {
+		return {
+			remaining,
+			inFlight,
+			canaryState: 'waiting',
+			reason: 'canary probe horizon has not elapsed yet',
+			fanoutSettled: false,
+		};
+	}
+	const probe = await probeResilienceCanaryLiveness(
+		directory,
+		canaryRecords,
+		policy.statusProbeTimeoutMs,
+	);
+	if (probe.live) {
+		return { remaining, inFlight, canaryState: 'live', fanoutSettled: false };
+	}
+	return {
+		remaining,
+		inFlight,
+		canaryState: 'waiting',
+		reason: probe.reason,
+		fanoutSettled: false,
+	};
+}
+
+function unresolvedPrReviewBaseDimensions(
+	attempts: Pick<PrReviewBaseDimensionAttempts, 'successful' | 'inFlight'>,
+): PrReviewBaseDimensionId[] {
+	return PR_REVIEW_BASE_DIMENSION_IDS.filter(
+		(dimension) =>
+			!attempts.successful.has(dimension) && !attempts.inFlight.has(dimension),
+	) as PrReviewBaseDimensionId[];
+}
+
+interface EnforcePrReviewBaseDimensionsOptions {
+	batchId: string;
+	prHeadSha: string;
+	revisionDigest?: string;
+	prReviewWaveStage?: 'canary' | 'fanout';
+	prReviewWaveAttempt?: 0 | 1 | 2;
+	prReviewResiliencePolicy?: PrReviewResilienceConfig;
+}
+
 export async function enforcePrReviewBaseDimensions(
 	directory: string,
 	sessionID: string,
 	lanes: readonly PrWorkflowLaneSpec[],
-	options: { batchId: string; prHeadSha: string; revisionDigest?: string },
+	options: EnforcePrReviewBaseDimensionsOptions,
 ): Promise<PrWorkflowGateState> {
-	let state = await bindPrWorkflowHead(directory, sessionID, options.prHeadSha);
+	const normalizedSessionID = normalizeSessionID(sessionID);
+	return withPrWorkflowCheckoutMutationLock(directory, async () =>
+		withSessionStateMutation(directory, normalizedSessionID, async () =>
+			enforcePrReviewBaseDimensionsWhileLocked(
+				directory,
+				normalizedSessionID,
+				lanes,
+				options,
+			),
+		),
+	);
+}
+
+async function enforcePrReviewBaseDimensionsWhileLocked(
+	directory: string,
+	normalizedSessionID: string,
+	lanes: readonly PrWorkflowLaneSpec[],
+	options: EnforcePrReviewBaseDimensionsOptions,
+): Promise<PrWorkflowGateState> {
+	let state = await bindPrWorkflowHeadWhileLocked(
+		directory,
+		normalizedSessionID,
+		options.prHeadSha,
+	);
 	if (state.mode !== 'PR_REVIEW') {
 		throw wrongModeError(state, 'PR_REVIEW');
 	}
 	const normalizedLanes = normalizeWorkflowLanes(lanes);
-	const claimedDimensionIds = normalizedLanes.flatMap(
-		(lane) => lane.ownedWorkflowLanes ?? [lane.workflowLane],
-	);
+	const claimedDimensionIds = declaredBaseDimensions(normalizedLanes);
 	const extras = claimedDimensionIds.filter(
 		(laneId) =>
 			!PR_REVIEW_BASE_DIMENSION_IDS.includes(laneId as PrReviewBaseDimensionId),
@@ -2901,11 +3448,6 @@ export async function enforcePrReviewBaseDimensions(
 			`BLOCKED: PR_REVIEW base dispatch lane ids must be drawn from: ${expected}. Received: ${received}`,
 		);
 	}
-	// Tier L requires one dedicated lane per dimension on every base batch, not
-	// only the initial wave — a later retry/supplementary batch may not use a
-	// consolidated lane to settle multiple dimensions from a single artifact
-	// that never went through the initial-wave tier check. The one exception is
-	// narrow, and every clause of it is load-bearing (issue #1968 P3.1).
 	if (
 		(state.prReviewDepthTier ?? 'L') === 'L' &&
 		normalizedLanes.some((lane) => (lane.ownedWorkflowLanes?.length ?? 1) !== 1)
@@ -2943,12 +3485,36 @@ export async function enforcePrReviewBaseDimensions(
 			`BLOCKED: PR_REVIEW base batch id "${batchId}" is already recorded`,
 		);
 	}
+	const depthTier = state.prReviewDepthTier ?? 'L';
+	const requestedWaveStage = options.prReviewWaveStage;
+	const requestedWaveAttempt = options.prReviewWaveAttempt;
+	if (
+		(requestedWaveStage === undefined) !==
+		(requestedWaveAttempt === undefined)
+	) {
+		throw new Error(
+			'BLOCKED: PR_REVIEW staged base dispatch requires both pr_review_wave_stage and pr_review_wave_attempt together',
+		);
+	}
+	const resiliencePolicy = effectivePrReviewResiliencePolicy(
+		state,
+		options.prReviewResiliencePolicy,
+	);
+	if (
+		previous.length >= MAX_WORKFLOW_BATCHES &&
+		requestedWaveStage !== undefined &&
+		requestedWaveAttempt !== undefined &&
+		depthTier !== 'S' &&
+		resiliencePolicy.enabled
+	) {
+		({ state, previous } = await preflightPrReviewResilienceCircuitBeforePrune(
+			directory,
+			state,
+			previous,
+			resiliencePolicy,
+		));
+	}
 	if (previous.length >= MAX_WORKFLOW_BATCHES) {
-		// The cap used to be a permanent dead end with no recovery path. Prune
-		// provably-inert batches from the in-memory state FIRST, then re-read
-		// `previous` from the pruned object, so the append below and the single
-		// persistState downstream both operate on the same state — a separate GC
-		// write would be undone by `[...previous, record]` and would trip the CAS.
 		state = await prunePrWorkflowBatchesForCapacity(
 			directory,
 			state,
@@ -2957,6 +3523,279 @@ export async function enforcePrReviewBaseDimensions(
 		previous = state.prReviewBaseDispatches ?? [];
 		if (previous.length >= MAX_WORKFLOW_BATCHES) {
 			throw new Error('BLOCKED: PR_REVIEW base batch limit reached');
+		}
+	}
+	let nextResilience = state.prReviewResilience;
+	if (!nextResilience) {
+		nextResilience = { policy: resiliencePolicy, attempts: [] };
+		if (previous.length > 0) {
+			state = await writeStateWhileLocked(directory, {
+				...state,
+				updatedAt: isoNow(),
+				prReviewResilience: nextResilience,
+			});
+			previous = state.prReviewBaseDispatches ?? [];
+		}
+	}
+	if (
+		resiliencePolicy.enabled &&
+		depthTier !== 'S' &&
+		requestedWaveStage === undefined
+	) {
+		throw new Error(
+			'BLOCKED: PR_REVIEW base dispatch at depth tier M or L requires canary-first staged admission while pr_review_resilience is enabled',
+		);
+	}
+	if (requestedWaveStage !== undefined && requestedWaveAttempt !== undefined) {
+		if (depthTier === 'S' || !resiliencePolicy.enabled) {
+			throw new Error(
+				'BLOCKED: staged PR_REVIEW base dispatch is valid only when pr_review_resilience is enabled at depth tier M or L',
+			);
+		}
+		let revisionDigest = options.revisionDigest;
+		if (!revisionDigest) {
+			revisionDigest = (await createPrReviewGateContext(directory, state))
+				.revisionDigest;
+		}
+		const snapshot = nextResilience ?? {
+			policy: resiliencePolicy,
+			attempts: [],
+		};
+		if (snapshot.circuit) {
+			throw new PrReviewResilienceCircuitOpenError(
+				formatPrReviewResilienceCircuitOpenMessage(snapshot.circuit),
+			);
+		}
+		const circuit = computePrReviewResilienceCircuit(
+			directory,
+			state,
+			snapshot.policy,
+		);
+		if (circuit) {
+			nextResilience = { ...snapshot, circuit };
+			if (
+				!state.prReviewResilience ||
+				state.prReviewResilience.circuit?.signature !== circuit.signature ||
+				state.prReviewResilience.circuit?.count !== circuit.count
+			) {
+				await writeStateWhileLocked(directory, {
+					...state,
+					updatedAt: isoNow(),
+					prReviewResilience: nextResilience,
+				});
+			}
+			throw new PrReviewResilienceCircuitOpenError(
+				formatPrReviewResilienceCircuitOpenMessage(circuit),
+			);
+		}
+		const lastAttempt = snapshot.attempts.at(-1);
+		if (requestedWaveStage === 'canary') {
+			let target = [
+				...PR_REVIEW_BASE_DIMENSION_IDS,
+			] as PrReviewBaseDimensionId[];
+			let expectedAttempt: 0 | 1 | 2 = 0;
+			let globalInFlight: PrReviewBaseDimensionId[] = [];
+			if (lastAttempt) {
+				const globalAttempts = summarizePrReviewBaseDimensionAttempts(
+					directory,
+					state,
+					revisionDigest,
+				);
+				globalInFlight = PR_REVIEW_BASE_DIMENSION_IDS.filter((dimension) =>
+					globalAttempts.inFlight.has(dimension),
+				) as PrReviewBaseDimensionId[];
+				const globalTarget = unresolvedPrReviewBaseDimensions(globalAttempts);
+				const evaluated = await evaluatePrReviewResilienceAttempt(
+					directory,
+					state,
+					lastAttempt,
+					revisionDigest,
+					snapshot.policy,
+				);
+				if (!lastAttempt.fanoutBatchId) {
+					if (evaluated.canaryState === 'success') {
+						if (evaluated.remaining.length > 0) {
+							throw new Error(
+								`BLOCKED: PR_REVIEW base attempt ${lastAttempt.attempt} requires its fanout batch before a later retry attempt`,
+							);
+						}
+						if (globalTarget.length === 0) {
+							throw new PrReviewResilienceRetryExhaustedError(
+								'BLOCKED: PR_REVIEW base dispatch has no unresolved obligations remaining',
+							);
+						}
+						target = [...globalTarget];
+					} else {
+						if (evaluated.canaryState === 'live') {
+							throw new Error(
+								`BLOCKED: PR_REVIEW base attempt ${lastAttempt.attempt} canary is still live; fanout is the next admissible stage`,
+							);
+						}
+						if (evaluated.canaryState === 'waiting') {
+							throw new Error(
+								`BLOCKED: PR_REVIEW base attempt ${lastAttempt.attempt} canary is not yet proven successful or live: ${evaluated.reason ?? 'probe failed closed'}`,
+							);
+						}
+						target = [...globalTarget];
+					}
+				} else {
+					if (!batchIsTerminal(directory, state, lastAttempt.fanoutBatchId)) {
+						throw new Error(
+							`BLOCKED: PR_REVIEW base attempt ${lastAttempt.attempt} fanout is still in flight`,
+						);
+					}
+					target = [...globalTarget];
+				}
+				expectedAttempt = (lastAttempt.attempt + 1) as 0 | 1 | 2;
+			} else if (previous.length > 0) {
+				const globalAttempts = summarizePrReviewBaseDimensionAttempts(
+					directory,
+					state,
+					revisionDigest,
+				);
+				globalInFlight = PR_REVIEW_BASE_DIMENSION_IDS.filter((dimension) =>
+					globalAttempts.inFlight.has(dimension),
+				) as PrReviewBaseDimensionId[];
+				target = unresolvedPrReviewBaseDimensions(globalAttempts);
+			}
+			if (target.length === 0) {
+				if (globalInFlight.length > 0) {
+					throw new Error(
+						lastAttempt
+							? `BLOCKED: PR_REVIEW base attempt ${lastAttempt.attempt} still has in-flight obligations that cannot be retried yet: ${globalInFlight.join(', ')}`
+							: `BLOCKED: PR_REVIEW base still has in-flight obligations that cannot be retried yet: ${globalInFlight.join(', ')}`,
+					);
+				}
+				throw new PrReviewResilienceRetryExhaustedError(
+					'BLOCKED: PR_REVIEW base dispatch has no unresolved obligations remaining',
+				);
+			}
+			if (
+				requestedWaveAttempt !== expectedAttempt ||
+				requestedWaveAttempt > snapshot.policy.maxRetryAttemptsAfterInitial
+			) {
+				throw new PrReviewResilienceRetryExhaustedError(
+					`BLOCKED: PR_REVIEW base allows attempt 0 plus at most ${snapshot.policy.maxRetryAttemptsAfterInitial} retry attempts`,
+				);
+			}
+			if (
+				normalizedLanes.length !== 1 ||
+				(normalizedLanes[0]?.ownedWorkflowLanes?.length ?? 1) !== 1
+			) {
+				throw new Error(
+					'BLOCKED: PR_REVIEW staged canary dispatch requires exactly one singleton base lane',
+				);
+			}
+			const canaryDimension = normalizedLanes[0]!
+				.workflowLane as PrReviewBaseDimensionId;
+			if (!target.includes(canaryDimension)) {
+				throw new Error(
+					`BLOCKED: PR_REVIEW canary lane must target one unresolved base obligation from: ${target.join(', ')}`,
+				);
+			}
+			nextResilience = {
+				policy: snapshot.policy,
+				attempts: [
+					...snapshot.attempts,
+					{
+						attempt: requestedWaveAttempt,
+						targetDimensions: target,
+						canaryBatchId: batchId,
+						canaryLaneId: normalizedLanes[0]!.laneId,
+						canaryWorkflowLane: canaryDimension,
+						admittedAt: isoNow(),
+					},
+				],
+			};
+		} else {
+			if (
+				!lastAttempt ||
+				lastAttempt.attempt !== requestedWaveAttempt ||
+				lastAttempt.fanoutBatchId
+			) {
+				throw new Error(
+					`BLOCKED: PR_REVIEW base fanout must follow the recorded canary for attempt ${requestedWaveAttempt}`,
+				);
+			}
+			const evaluated = await evaluatePrReviewResilienceAttempt(
+				directory,
+				state,
+				lastAttempt,
+				revisionDigest,
+				snapshot.policy,
+			);
+			if (evaluated.canaryState === 'failed') {
+				throw new Error(
+					`BLOCKED: PR_REVIEW base attempt ${requestedWaveAttempt} canary failed; close the attempt and carry the unresolved target into the next retry`,
+				);
+			}
+			if (evaluated.canaryState === 'waiting') {
+				throw new Error(
+					`BLOCKED: PR_REVIEW base attempt ${requestedWaveAttempt} canary is not yet proven successful or live: ${evaluated.reason ?? 'probe failed closed'}`,
+				);
+			}
+			const remainingTarget = lastAttempt.targetDimensions.filter(
+				(dimension) =>
+					dimension !== lastAttempt.canaryWorkflowLane &&
+					evaluated.remaining.includes(dimension),
+			);
+			if (remainingTarget.length === 0) {
+				throw new Error(
+					`BLOCKED: PR_REVIEW base attempt ${requestedWaveAttempt} has no remaining unresolved obligations for fanout`,
+				);
+			}
+			if (
+				!exactDimensionPartition(
+					declaredBaseDimensions(normalizedLanes),
+					remainingTarget,
+				)
+			) {
+				throw new Error(
+					`BLOCKED: PR_REVIEW base fanout must partition the remaining unresolved obligations exactly once: ${remainingTarget.join(', ')}`,
+				);
+			}
+			if (requestedWaveAttempt === 0) {
+				const combinedDimensions = [
+					lastAttempt.canaryWorkflowLane,
+					...declaredBaseDimensions(normalizedLanes),
+				];
+				if (
+					!exactDimensionPartition(
+						combinedDimensions,
+						lastAttempt.targetDimensions,
+					)
+				) {
+					throw new Error(
+						'BLOCKED: PR_REVIEW base attempt 0 canary plus fanout must partition all six base dimensions exactly once',
+					);
+				}
+				if (
+					depthTier === 'M' &&
+					normalizedLanes.length + 1 < PR_REVIEW_BASE_LANE_FLOORS.M
+				) {
+					throw new Error(
+						`BLOCKED: PR_REVIEW base attempt 0 at depth tier M requires at least ${PR_REVIEW_BASE_LANE_FLOORS.M} combined canary+fanout lanes`,
+					);
+				}
+				if (
+					depthTier === 'L' &&
+					(normalizedLanes.length + 1 !== PR_REVIEW_BASE_DIMENSION_IDS.length ||
+						normalizedLanes.some(
+							(lane) => (lane.ownedWorkflowLanes?.length ?? 1) !== 1,
+						))
+				) {
+					throw new Error(
+						'BLOCKED: PR_REVIEW base attempt 0 at depth tier L requires six singleton combined canary+fanout lanes',
+					);
+				}
+			}
+			nextResilience = {
+				...snapshot,
+				attempts: [
+					...snapshot.attempts.slice(0, -1),
+					{ ...lastAttempt, fanoutBatchId: batchId },
+				],
+			};
 		}
 	}
 	const record: PrReviewBaseDispatchRecord = {
@@ -2973,15 +3812,77 @@ export async function enforcePrReviewBaseDimensions(
 		})),
 		validatedAt: isoNow(),
 	};
-
 	const nextState: PrWorkflowGateState = {
 		...state,
 		updatedAt: isoNow(),
 		prReviewBaseDispatches: [...previous, record],
 		prReviewBaseDispatch: record,
+		...(nextResilience ? { prReviewResilience: nextResilience } : {}),
 	};
-	await persistState(directory, nextState);
-	return nextState;
+	return writeStateWhileLocked(directory, nextState);
+}
+
+export async function rollbackPrReviewBaseAdmissionIfUnlaunched(
+	directory: string,
+	sessionID: string,
+	batchId: string,
+): Promise<boolean> {
+	const normalizedSessionID = normalizeSessionID(sessionID);
+	const normalizedBatchId = normalizeBatchId(batchId);
+	return withPrWorkflowCheckoutMutationLock(directory, async () =>
+		withSessionStateMutation(directory, normalizedSessionID, async () => {
+			const state = await readPrWorkflowGateState(
+				directory,
+				normalizedSessionID,
+			);
+			if (!state || state.mode !== 'PR_REVIEW') return false;
+			const currentBaseDispatches = state.prReviewBaseDispatches ?? [];
+			if (currentBaseDispatches.at(-1)?.batchId !== normalizedBatchId) {
+				return false;
+			}
+			const batchRecords = findByBatchId(directory, normalizedBatchId, {
+				parentSessionId: normalizedSessionID,
+			});
+			if (batchRecords.length > 0) return false;
+			const nextBaseDispatches = currentBaseDispatches.slice(0, -1);
+			const lastAttempt = state.prReviewResilience?.attempts.at(-1);
+			let nextResilience = state.prReviewResilience;
+			if (lastAttempt?.canaryBatchId === normalizedBatchId) {
+				nextResilience = nextResilience
+					? {
+							...nextResilience,
+							attempts: nextResilience.attempts.slice(0, -1),
+						}
+					: nextResilience;
+			} else if (lastAttempt?.fanoutBatchId === normalizedBatchId) {
+				nextResilience = nextResilience
+					? {
+							...nextResilience,
+							attempts: [
+								...nextResilience.attempts.slice(0, -1),
+								{ ...lastAttempt, fanoutBatchId: undefined },
+							],
+						}
+					: nextResilience;
+			}
+			const shouldKeepResilience =
+				(nextBaseDispatches.length > 0 && Boolean(nextResilience?.policy)) ||
+				Boolean(nextResilience?.circuit) ||
+				(nextResilience?.attempts.length ?? 0) > 0;
+			await writeStateWhileLocked(directory, {
+				...state,
+				updatedAt: isoNow(),
+				prReviewBaseDispatches: nextBaseDispatches,
+				...(nextBaseDispatches.length > 0
+					? { prReviewBaseDispatch: nextBaseDispatches.at(-1) }
+					: { prReviewBaseDispatch: undefined }),
+				...(shouldKeepResilience
+					? { prReviewResilience: nextResilience }
+					: { prReviewResilience: undefined }),
+			});
+			return true;
+		}),
+	);
 }
 
 /**
@@ -3012,6 +3913,8 @@ const TERMINAL_FAILED_DELEGATION_STATUSES: ReadonlySet<string> = new Set([
 interface PrReviewBaseDimensionAttempts {
 	/** Dimensions with a currently authoritative successful artifact. */
 	successful: Set<string>;
+	/** Dimensions with a currently in-flight or retryable recorded lane. */
+	inFlight: Set<string>;
 	/**
 	 * The subset of `successful` supplied by a lane that owns that dimension
 	 * alone. Used by the cumulative tier-L lane floor to decide when an earlier
@@ -3045,6 +3948,7 @@ function summarizePrReviewBaseDimensionAttempts(
 	revisionDigest: string,
 ): PrReviewBaseDimensionAttempts {
 	const successful = new Set<string>();
+	const inFlight = new Set<string>();
 	const dedicatedSuccessful = new Set<string>();
 	const terminallyFailed = new Set<string>();
 	for (const batch of state.prReviewBaseDispatches ?? []) {
@@ -3089,14 +3993,22 @@ function summarizePrReviewBaseDimensionAttempts(
 			const laneRecords = records.filter(
 				(record) => record.laneId === lane.laneId,
 			);
-			// No record at all: never dispatched. Any record not in the terminal
-			// failure set: still in flight or retryable. Both deny consolidation.
+			// No record at all: never dispatched. Any recorded lane not wholly in
+			// the terminal failure set is still in flight or retryable; it is not a
+			// failed obligation yet, but it must stay out of retry targets.
+			if (laneRecords.length === 0) {
+				continue;
+			}
 			if (
-				laneRecords.length === 0 ||
 				!laneRecords.every((record) =>
 					TERMINAL_FAILED_DELEGATION_STATUSES.has(record.status),
 				)
 			) {
+				for (const dimension of lane.ownedWorkflowLanes?.length
+					? lane.ownedWorkflowLanes
+					: [lane.workflowLane]) {
+					inFlight.add(dimension);
+				}
 				continue;
 			}
 			for (const dimension of lane.ownedWorkflowLanes?.length
@@ -3106,7 +4018,7 @@ function summarizePrReviewBaseDimensionAttempts(
 			}
 		}
 	}
-	return { successful, dedicatedSuccessful, terminallyFailed };
+	return { successful, inFlight, dedicatedSuccessful, terminallyFailed };
 }
 
 function hasRevisionIndependentDiscoverySemantics(
@@ -6174,17 +7086,21 @@ export async function enforcePrWorkflowToolBefore(
 	const isTrustedWorkflowTool =
 		trustedCapability !== null &&
 		isTrustedPrWorkflowToolInvocationSafe(normalizedTool, args ?? {});
+	const isAllowlistedReadOnlyTool =
+		normalizedTool !== 'build_check' &&
+		isAllowedPrReviewReadOnlyToolName(normalizedTool);
+	const readOnlyArgumentClassification = isAllowlistedReadOnlyTool
+		? classifyReadOnlyToolArguments(normalizedTool, args ?? {})
+		: null;
 	const isNamedReadOnlyTool =
 		isTrustedWorkflowTool ||
-		(normalizedTool !== 'build_check' &&
-			isAllowedPrReviewReadOnlyToolName(normalizedTool) &&
-			readOnlyToolArgumentsAreSafe(args ?? {}));
+		(isAllowlistedReadOnlyTool &&
+			readOnlyArgumentClassification?.safe === true);
 	const isRecoverySafeEvidenceTool =
 		(trustedCapability === 'observe' &&
 			isTrustedPrWorkflowToolInvocationSafe(normalizedTool, args ?? {})) ||
-		(normalizedTool !== 'build_check' &&
-			isAllowedPrReviewReadOnlyToolName(normalizedTool) &&
-			readOnlyToolArgumentsAreSafe(args ?? {}));
+		(isAllowlistedReadOnlyTool &&
+			readOnlyArgumentClassification?.safe === true);
 	if (state.checkoutRecovery) {
 		if (
 			isRecoverySafeEvidenceTool ||
@@ -6198,6 +7114,15 @@ export async function enforcePrWorkflowToolBefore(
 		throw new Error(
 			`BLOCKED: ${state.mode} requires manual Git recovery before controller work can continue. ` +
 				`code=${state.checkoutRecovery.code} retryable=false required_action=${state.checkoutRecovery.requiredAction}`,
+		);
+	}
+	if (
+		state.mode === 'PR_REVIEW' &&
+		isAllowlistedReadOnlyTool &&
+		readOnlyArgumentClassification?.safe === false
+	) {
+		throw new Error(
+			`BLOCKED: PR_REVIEW is read-only; tool "${normalizedTool}" rejected argument "${readOnlyArgumentClassification.path}": ${readOnlyArgumentClassification.constraint}`,
 		);
 	}
 	if (
@@ -6758,6 +7683,7 @@ export const _test_exports = {
 	 * that would silently drift if the cap ever moved.
 	 */
 	MAX_WORKFLOW_BATCHES,
+	MAX_PR_REVIEW_RESILIENCE_CIRCUIT_CONTRIBUTORS,
 	/**
 	 * The three ledger ceilings whose overflow makes the capacity GC abandon a
 	 * prune and keep every batch. Exposed on the same reasoning as
@@ -7142,12 +8068,41 @@ function isAllowedPrReviewReadOnlyToolName(toolName: string): boolean {
 	);
 }
 
-function readOnlyToolArgumentsAreSafe(
+type ReadOnlyArgumentClassification =
+	| { safe: true }
+	| {
+			safe: false;
+			path: string;
+			constraint: string;
+			value: unknown;
+	  };
+
+function unsafeReadOnlyArgument(
+	path: string,
+	constraint: string,
+	value: unknown,
+): ReadOnlyArgumentClassification {
+	return { safe: false, path: path || '(root)', constraint, value };
+}
+
+function readOnlyArgumentPath(parent: string, key: string): string {
+	return parent ? `${parent}.${key}` : key;
+}
+
+function classifyReadOnlyToolArguments(
+	toolName: string,
 	value: unknown,
 	key = '',
+	path = '',
 	depth = 0,
-): boolean {
-	if (depth > 8) return false;
+): ReadOnlyArgumentClassification {
+	if (depth > 8) {
+		return unsafeReadOnlyArgument(
+			path,
+			'argument nesting exceeds the read-only depth limit of 8',
+			value,
+		);
+	}
 	const keyTokens = key
 		.replace(/([a-z0-9])([A-Z])/g, '$1_$2')
 		.split(/[._:/-]+/)
@@ -7159,24 +8114,50 @@ function readOnlyToolArgumentsAreSafe(
 			),
 		)
 	) {
-		return false;
+		return unsafeReadOnlyArgument(
+			path,
+			'argument name is mutation-bearing and is not allowed for read-only tools',
+			value,
+		);
 	}
 	if (keyTokens.some((token) => /^(?:method|verb)$/i.test(token))) {
-		return typeof value === 'string' && /^(?:GET|HEAD)$/i.test(value.trim());
+		return typeof value === 'string' && /^(?:GET|HEAD)$/i.test(value.trim())
+			? { safe: true }
+			: unsafeReadOnlyArgument(
+					path,
+					'HTTP method/verb must be GET or HEAD for a read-only tool',
+					value,
+				);
 	}
 	if (
 		keyTokens.length === 1 &&
 		keyTokens.some((token) => /^(?:action|operation)$/i.test(token))
 	) {
-		return (
-			typeof value === 'string' &&
+		return typeof value === 'string' &&
 			/^(?:check|diff|fetch|find|get|inspect|list|lookup|open|read|scan|search|show|status|view)$/i.test(
 				value.trim(),
 			)
-		);
+			? { safe: true }
+			: unsafeReadOnlyArgument(
+					path,
+					'action/operation must name a recognized observation operation',
+					value,
+				);
 	}
 	if (/^mode$/i.test(key) && typeof value === 'string') {
-		return /^(?:r|rb|read)$/i.test(value.trim());
+		const allowed =
+			toolName === 'search'
+				? /^(?:r|rb|read|literal|regex)$/i
+				: /^(?:r|rb|read)$/i;
+		return allowed.test(value.trim())
+			? { safe: true }
+			: unsafeReadOnlyArgument(
+					path,
+					toolName === 'search'
+						? 'search mode must be one of r, rb, read, literal, or regex'
+						: 'mode must be one of r, rb, or read for a read-only tool',
+					value,
+				);
 	}
 	if (typeof value === 'string') {
 		if (
@@ -7187,11 +8168,21 @@ function readOnlyToolArgumentsAreSafe(
 				value,
 			)
 		) {
-			return false;
+			return unsafeReadOnlyArgument(
+				path,
+				'query/request text contains a mutating operation',
+				value,
+			);
 		}
-		return !/(?:^(?:POST|PUT|PATCH|DELETE|CONNECT|TRACE|write|edit|patch|create|delete|destroy|remove|replace|truncate|update|upload)$|(?:^|[\r\n])\s*(?:POST|PUT|PATCH|DELETE|CONNECT|TRACE)\s+\S+(?:\s+HTTP\/\d(?:\.\d)?)?|\bmutation\b|\b(?:create|drop|alter|truncate)\s+(?:or\s+replace\s+)?(?:table|database|schema|index|view|function|procedure|trigger|sequence)\b|\b(?:delete\s+from|insert\s+into|merge\s+into|replace\s+into|upsert\s+into)\b|\bupdate\s+[A-Za-z0-9_."'`-]+(?:\s+(?:AS\s+)?[A-Za-z0-9_"'`-]+)?\s+set\b|\b(?:grant|revoke)\s+\S+\s+(?:on|from|to)\b|\b(?:call|exec(?:ute)?)\s+[A-Za-z0-9_."'`-]+|\b(?:rm|rmdir|del|remove-item|move-item|set-content|add-content)\b)/i.test(
+		return /(?:^(?:POST|PUT|PATCH|DELETE|CONNECT|TRACE|write|edit|patch|create|delete|destroy|remove|replace|truncate|update|upload)$|(?:^|[\r\n])\s*(?:POST|PUT|PATCH|DELETE|CONNECT|TRACE)\s+\S+(?:\s+HTTP\/\d(?:\.\d)?)?|\bmutation\b|\b(?:create|drop|alter|truncate)\s+(?:or\s+replace\s+)?(?:table|database|schema|index|view|function|procedure|trigger|sequence)\b|\b(?:delete\s+from|insert\s+into|merge\s+into|replace\s+into|upsert\s+into)\b|\bupdate\s+[A-Za-z0-9_."'`-]+(?:\s+(?:AS\s+)?[A-Za-z0-9_"'`-]+)?\s+set\b|\b(?:grant|revoke)\s+\S+\s+(?:on|from|to)\b|\b(?:call|exec(?:ute)?)\s+[A-Za-z0-9_."'`-]+|\b(?:rm|rmdir|del|remove-item|move-item|set-content|add-content)\b)/i.test(
 			value,
-		);
+		)
+			? unsafeReadOnlyArgument(
+					path,
+					'string value contains a mutating command or request',
+					value,
+				)
+			: { safe: true };
 	}
 	if (
 		value === null ||
@@ -7199,19 +8190,39 @@ function readOnlyToolArgumentsAreSafe(
 		typeof value === 'number' ||
 		typeof value === 'boolean'
 	) {
-		return true;
+		return { safe: true };
 	}
 	if (Array.isArray(value)) {
-		return value.every((entry) =>
-			readOnlyToolArgumentsAreSafe(entry, key, depth + 1),
-		);
+		for (let index = 0; index < value.length; index++) {
+			const result = classifyReadOnlyToolArguments(
+				toolName,
+				value[index],
+				key,
+				`${path}[${index}]`,
+				depth + 1,
+			);
+			if (!result.safe) return result;
+		}
+		return { safe: true };
 	}
 	if (typeof value === 'object') {
-		return Object.entries(value).every(([childKey, childValue]) =>
-			readOnlyToolArgumentsAreSafe(childValue, childKey, depth + 1),
-		);
+		for (const [childKey, childValue] of Object.entries(value)) {
+			const result = classifyReadOnlyToolArguments(
+				toolName,
+				childValue,
+				childKey,
+				readOnlyArgumentPath(path, childKey),
+				depth + 1,
+			);
+			if (!result.safe) return result;
+		}
+		return { safe: true };
 	}
-	return false;
+	return unsafeReadOnlyArgument(
+		path,
+		'argument type is not supported by the read-only classifier',
+		value,
+	);
 }
 
 /**

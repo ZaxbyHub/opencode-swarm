@@ -85,7 +85,7 @@ describe('PR workflow explicit capability contract', () => {
 				'mcp__github__get_pull_request',
 				{ method: 'POST', body: { title: 'changed' } },
 			),
-		).rejects.toThrow(/read-only and fail-closed/i);
+		).rejects.toThrow(/rejected argument "method".*GET or HEAD/i);
 	});
 
 	test('RT-001 regression: permits only the exact bound post-bind tracking fetch', async () => {

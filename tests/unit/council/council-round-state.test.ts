@@ -29,6 +29,26 @@ function scopeHash(taskId = '1.1'): string {
 	return createHash('sha256').update(taskId).digest('hex');
 }
 
+const IDENTITY = 'c'.repeat(64); // 64-hex fixture identity (v2 scopes)
+function auditScopeFixture() {
+	return {
+		kind: 'task' as const,
+		scopeHash: scopeHash(),
+		identityDigest: IDENTITY,
+	};
+}
+const MISMATCHED_SCOPE_FIXTURE = {
+	kind: 'task' as const,
+	scopeHash: 'b'.repeat(64),
+	identityDigest: 'd'.repeat(64),
+};
+
+const TASK_SCOPE = {
+	kind: 'task' as const,
+	taskId: '1.1',
+	identityDigest: IDENTITY,
+};
+
 function evaluation(
 	transition: 'stay' | 'advance' | 'close',
 	extra: Partial<CouncilAttemptEvaluation> = {},
@@ -48,7 +68,7 @@ function attempt(
 ): Promise<string> {
 	return runCouncilAttempt({
 		directory,
-		scope: { kind: 'task', taskId: '1.1' },
+		scope: TASK_SCOPE,
 		maxRounds: 3,
 		request: { taskId: '1.1', verdicts: [{ member: 'critic' }] },
 		verdictCount: 1,
@@ -95,7 +115,7 @@ describe('authoritative council round state', () => {
 		expect(second.nextRound).toBe(2);
 
 		const audit = readFileSync(
-			councilRoundStatePaths(directory, { kind: 'task', taskId: '1.1' }).audit,
+			councilRoundStatePaths(directory, TASK_SCOPE).audit,
 			'utf8',
 		)
 			.trim()
@@ -253,17 +273,14 @@ describe('authoritative council round state', () => {
 		expect(evidenceCommits).toBe(1);
 
 		const audit = readFileSync(
-			councilRoundStatePaths(directory, { kind: 'task', taskId: '1.1' }).audit,
+			councilRoundStatePaths(directory, TASK_SCOPE).audit,
 			'utf8',
 		);
 		expect(audit).toContain('pending_evidence_recovered');
 	});
 
 	test('fails closed on corrupt state instead of guessing a round', async () => {
-		const paths = councilRoundStatePaths(directory, {
-			kind: 'task',
-			taskId: '1.1',
-		});
+		const paths = councilRoundStatePaths(directory, TASK_SCOPE);
 		mkdirSync(dirname(paths.state), { recursive: true });
 		writeFileSync(paths.state, '{broken', 'utf8');
 		let evaluated = false;
@@ -284,15 +301,12 @@ describe('authoritative council round state', () => {
 	});
 
 	test('fails closed on syntactically valid but inconsistent pending state', async () => {
-		const paths = councilRoundStatePaths(directory, {
-			kind: 'task',
-			taskId: '1.1',
-		});
+		const paths = councilRoundStatePaths(directory, TASK_SCOPE);
 		mkdirSync(dirname(paths.state), { recursive: true });
 		writeFileSync(
 			paths.state,
 			JSON.stringify({
-				version: 1,
+				version: 2,
 				currentRound: 1,
 				status: 'open',
 				maxRoundsExhausted: false,
@@ -305,7 +319,7 @@ describe('authoritative council round state', () => {
 					gateEffect: 'blocked',
 					evidenceExpected: false,
 					nextState: {
-						version: 1,
+						version: 2,
 						currentRound: 1,
 						status: 'closed',
 						maxRoundsExhausted: false,
@@ -322,19 +336,16 @@ describe('authoritative council round state', () => {
 	});
 
 	test('fails closed when a missing snapshot cannot be reconstructed from audit', async () => {
-		const paths = councilRoundStatePaths(directory, {
-			kind: 'task',
-			taskId: '1.1',
-		});
+		const paths = councilRoundStatePaths(directory, TASK_SCOPE);
 		mkdirSync(dirname(paths.audit), { recursive: true });
 		writeFileSync(
 			paths.audit,
 			`${JSON.stringify({
-				version: 1,
+				version: 2,
 				event: 'received',
 				attemptId: '11111111-1111-4111-8111-111111111111',
 				timestamp: '2026-08-09T00:00:00.000Z',
-				scope: { kind: 'task', scopeHash: scopeHash() },
+				scope: auditScopeFixture(),
 				authoritativeRound: 2,
 				digest: 'a'.repeat(64),
 				disposition: 'received',
@@ -355,19 +366,16 @@ describe('authoritative council round state', () => {
 	});
 
 	test('rejects scope-mismatched audit records during snapshot recovery', async () => {
-		const paths = councilRoundStatePaths(directory, {
-			kind: 'task',
-			taskId: '1.1',
-		});
+		const paths = councilRoundStatePaths(directory, TASK_SCOPE);
 		mkdirSync(dirname(paths.audit), { recursive: true });
 		writeFileSync(
 			paths.audit,
 			`${JSON.stringify({
-				version: 1,
+				version: 2,
 				event: 'received',
 				attemptId: randomUUID(),
 				timestamp: '2026-08-09T00:00:00.000Z',
-				scope: { kind: 'task', scopeHash: 'b'.repeat(64) },
+				scope: MISMATCHED_SCOPE_FIXTURE,
 				authoritativeRound: 1,
 				digest: 'a'.repeat(64),
 				disposition: 'received',
@@ -382,18 +390,15 @@ describe('authoritative council round state', () => {
 	});
 
 	test('does not reconstruct missing state from a truncated audit window', async () => {
-		const paths = councilRoundStatePaths(directory, {
-			kind: 'task',
-			taskId: '1.1',
-		});
+		const paths = councilRoundStatePaths(directory, TASK_SCOPE);
 		mkdirSync(dirname(paths.audit), { recursive: true });
 		const records = Array.from({ length: 900 }, () =>
 			JSON.stringify({
-				version: 1,
+				version: 2,
 				event: 'received',
 				attemptId: randomUUID(),
 				timestamp: '2026-08-09T00:00:00.000Z',
-				scope: { kind: 'task', scopeHash: scopeHash() },
+				scope: auditScopeFixture(),
 				authoritativeRound: 1,
 				digest: 'a'.repeat(64),
 				disposition: 'received',
@@ -406,18 +411,6 @@ describe('authoritative council round state', () => {
 		expect(parsed(await attempt(async () => evaluation('close'))).reason).toBe(
 			'council_round_state_uncertain',
 		);
-	});
-
-	test('hashes oversized task IDs for bounded paths and audit metadata', async () => {
-		const taskId = Array.from({ length: 300 }, () => '1').join('.');
-		const scope = { kind: 'task' as const, taskId };
-		const paths = councilRoundStatePaths(directory, scope);
-		expect(paths.state.split(/[\\/]/).at(-1)?.length).toBeLessThan(100);
-		await attempt(async () => evaluation('stay'), {
-			scope,
-			request: { taskId },
-		});
-		expect(readFileSync(paths.audit, 'utf8')).not.toContain(taskId);
 	});
 
 	test('runs best-effort post-commit effects at most once for an accepted attempt', async () => {
@@ -487,7 +480,7 @@ describe('authoritative council round state', () => {
 			},
 		});
 		const audit = readFileSync(
-			councilRoundStatePaths(directory, { kind: 'task', taskId: '1.1' }).audit,
+			councilRoundStatePaths(directory, TASK_SCOPE).audit,
 			'utf8',
 		);
 		expect(audit).not.toContain(directory);

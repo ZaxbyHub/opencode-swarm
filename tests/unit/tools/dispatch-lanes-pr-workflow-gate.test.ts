@@ -15,6 +15,11 @@ import {
 	executeDispatchLanesAsync,
 } from '../../../src/tools/dispatch-lanes.js';
 import { initializeGitRepository } from '../helpers/git-repository.js';
+import {
+	installLegacyPrReviewPolicy,
+	restorePrReviewPolicy,
+	uniqueSessionOps,
+} from './dispatch-lanes-pr-workflow-gate.test-fixtures.js';
 
 let directory = '';
 const originalGetSessionOps = dispatchInternals.getSessionOps;
@@ -52,17 +57,6 @@ function lane(
 	};
 }
 
-function uniqueSessionOps() {
-	let sessionIndex = 0;
-	dispatchInternals.getSessionOps = () => ({
-		create: mock(async () => ({
-			data: { id: `tier-lane-session-${sessionIndex++}` },
-		})),
-		promptAsync: mock(async () => ({ data: undefined, error: undefined })),
-		delete: mock(async () => undefined),
-	});
-}
-
 beforeEach(async () => {
 	directory = realpathSync(
 		mkdtempSync(path.join(os.tmpdir(), 'dispatch-pr-gate-')),
@@ -85,6 +79,7 @@ beforeEach(async () => {
 	dispatchInternals.resolveExactMergeBase = () => 'def456';
 	dispatchInternals.resolveExactMergeBaseAsync = async (...a) =>
 		dispatchInternals.resolveExactMergeBase(...a);
+	installLegacyPrReviewPolicy();
 	dispatchInternals.getSessionOps = () => ({
 		create: mock(async () => ({ data: { id: 'lane-session' } })),
 		promptAsync: mock(async () => ({ data: undefined, error: undefined })),
@@ -106,6 +101,7 @@ afterEach(async () => {
 		originalResolveRevisionAsync;
 	dispatchInternals.resolveExactMergeBase = originalResolveMergeBase;
 	dispatchInternals.resolveExactMergeBaseAsync = originalResolveMergeBaseAsync;
+	restorePrReviewPolicy();
 	dispatchInternals.getSessionOps = originalGetSessionOps;
 	await fs.rm(directory, { recursive: true, force: true });
 });

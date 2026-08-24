@@ -848,41 +848,61 @@ cost, or predicted simplicity — permits fewer lanes than the classified tier,
 and no tier permits skipping a dimension or family. Under Profile A the
 controller computes the tier itself from the bound `base_sha...pr_head_sha`
 diff (`--numstat` totals; an uncomputable diff fails strict to tier L) and
-mechanically enforces the matching floors on every base and micro batch. The
-initial base wave and every micro batch keep the historical tier-L full
-fan-out (six singleton base lanes on the initial base wave; one micro-lane
-per family on every micro batch, not only the first), while tiers S and M
-accept consolidated lanes that declare their complete `owned_workflow_lanes`
-set — every dimension and family still owned exactly once and attested per
-family. A tier-L base **retry** may consolidate dimensions that each have a
-recorded, terminally-failed prior attempt and currently have no successful
-source, subject to two lane floors: no single lane may own all six
-dimensions, and — counted cumulatively across every recorded base batch, not
-per batch, and including batches the capacity GC has since dropped — the six
-dimensions must stay backed by at least four distinct lanes (each dimension
-no consolidated lane claims counts as one, plus the FEWEST declared
-consolidated lanes that suffice to cover the rest). That permits a small
-consolidation as failure recovery and rejects re-doing the whole wave in two
-or three lanes, whether the attempt is split across several batches or
-disguised as overlapping or duplicate consolidations — declaring more lanes
-than the cover needs buys no budget. A dimension that already has a
-successful source, or whose prior attempt is still in flight, still requires
-its own dedicated retry lane, and
-a full six-lane singleton re-dispatch is always accepted. Risk triggers
+ mechanically enforces the matching floors on every base and micro batch. With
+ the default `pr_review_resilience` policy enabled, the initial base wave is
+ staged at tiers M/L: `pr_review_wave_stage: "canary"` / `pr_review_wave_attempt: 0`
+ launches one singleton base lane first, then
+ `pr_review_wave_stage: "fanout"` carries only the remaining unresolved
+ obligations in exactly one follow-up fanout batch. Tier S keeps the legacy single
+ consolidated base batch because staged resilience does not apply there. If
+ that policy is disabled, the initial base wave falls back to the historical
+ non-staged behavior: tier L may launch all six singleton base lanes together
+ in one batch, while tiers S/M may use consolidated lanes that declare their
+ complete `owned_workflow_lanes` set — every dimension still owned exactly
+ once and attested. Micro batches retain the historical tier-L full fan-out
+ floor (one micro-lane per family on every micro batch, not only the first),
+ while tiers S and M may consolidate families so long as every family is still
+ owned exactly once and attested per family. With staged resilience enabled, a
+ tier-L base **retry** may consolidate only dimensions that are still
+ unresolved because their prior attempts reached a recorded terminal failure
+ and no lane for that dimension is currently live or in flight, subject to two
+ lane floors: no single lane may own all six dimensions, and — counted
+ cumulatively across every recorded base batch, not per batch, and including
+ batches the capacity GC has since dropped — the six dimensions must stay
+ backed by at least four distinct lanes (each dimension no consolidated lane
+ claims counts as one, plus the FEWEST declared consolidated lanes that
+ suffice to cover the rest). That permits a small consolidation as failure
+ recovery and rejects re-doing the whole wave in two or three lanes, whether
+ the attempt is disguised as overlapping or duplicate consolidations —
+ declaring more lanes than the cover needs buys no budget. Dimensions with a
+ successful source are complete and MUST NOT be re-dispatched; dimensions with
+ a live or in-flight source are not yet eligible for the retry set. The retry
+ attempt itself still stays exactly one singleton canary call plus exactly one
+ unresolved-only fanout call, never multiple fanout batches and never a fresh
+ all-six singleton re-dispatch. Risk triggers
 remain caller-side escalation on every profile: dispatch MORE than the floor
 whenever a trigger warrants it.
 
 ### Dispatch
 
-Under Profile A, launch all base lanes with `dispatch_lanes_async`. Pass the six
-lane specs together, set `mode: "swarm-pr-review:base"`, assign each lane its
-exact `workflow_lane` identifier from the table below, set `max_concurrent` to
-`6`, bind the batch with the exact current `pr_head_sha`, record the returned
-`batch_id`, and pass the exact reviewed merge base and its base ref as
-`base_sha` and `base_ref`. Use the REMOTE-TRACKING form for `base_ref`
-(`origin/main`, not `main` or `refs/heads/main`) and compute `base_sha` against
-that same ref, so the controller's recomputation matches yours. Every later base retry, micro, council, reviewer, and
-critic dispatch repeats those same exact bindings. The controller recomputes
+Under Profile A, dispatch base lanes with `dispatch_lanes_async`, set
+`mode: "swarm-pr-review:base"`, assign each lane its exact `workflow_lane`
+identifier from the table below, bind every batch with the exact current
+`pr_head_sha`, record each returned `batch_id`, and pass the exact reviewed
+merge base and its base ref as `base_sha` and `base_ref`. Use the
+REMOTE-TRACKING form for `base_ref` (`origin/main`, not `main` or
+`refs/heads/main`) and compute `base_sha` against that same ref, so the
+controller's recomputation matches yours. With the default
+`pr_review_resilience` policy enabled, tier-M/L initial base dispatch is
+ staged exactly as a singleton canary batch (`pr_review_wave_stage: "canary"`,
+ `pr_review_wave_attempt: 0`) followed by exactly one fanout batch
+(`pr_review_wave_stage: "fanout"`) that include only still-unresolved
+obligations. Tier S stays on one consolidated batch. If the policy is
+disabled, the legacy non-staged initial base wave is still valid: tier L may
+pass all six singleton base specs together in one batch, while tiers S/M may
+pass the consolidated batch shape that partitions the same six dimensions.
+Every later base retry, micro, council, reviewer, and critic dispatch repeats
+those same exact bindings. The controller recomputes
 `git merge-base -- <base_ref> <pr_head_sha>`, rejects mismatches, and replaces
 caller `scope` text with the complete verified `base_sha...pr_head_sha` PR diff;
 caller scope is retained only as a non-authoritative focus hint. Continue only non-dependent architect
@@ -898,7 +918,21 @@ malformed or truncated tool-call JSON and force clumsy file workarounds.
 All six dimensions must be covered on every PR — "small PR", "docs-only", and
 "CI-only" change what each dimension examines, never whether it is evaluated.
 Every dimension ends in its own `[CANDIDATE]` rows or a fully populated
-per-dimension `[CLEAN]` attestation. Under Profile A at depth tier L this is an exact six-lane gate, not a soft target: the controller rejects an initial base wave with fewer than six singleton lanes, and the review is BLOCKED until the missing lanes are dispatched and settled; "time-saving" is not an exception. At tiers S and M the controller instead requires the initial wave's `owned_workflow_lanes` to partition all six dimensions exactly once across at least the tier's lane floor (S ≥ 1, M ≥ 3, `max_concurrent` equal to the lane count), and settlement demands per-dimension attestation from every consolidated lane — a lane that fails any owned dimension fails them all. Under Profiles B/C, the depth tier governs lane count the same way — a tier-S diff may cover the six dimensions in one or two consolidated lanes — while dimension coverage and per-dimension attestation remain mandatory.
+per-dimension `[CLEAN]` attestation. Under Profile A, the top-level
+`pr_review_resilience` config (enabled by default) requires depth tiers M/L to
+stage each base attempt as a singleton `pr_review_wave_stage: "canary"` batch
+followed by its matching `"fanout"` batch. Attempt 0 still has to cover all six
+dimensions exactly once across the combined canary+fanout ownership: tier M
+needs at least three combined lanes, tier L needs six singleton combined lanes,
+and every later retry attempt may carry forward only the still-unresolved
+obligations into its canary/fanout pair. Use one singleton canary lane; attempts
+are numbered with `pr_review_wave_attempt`, and the default
+policy permits attempt 0 plus two retry attempts (1 and 2). If the project sets
+`pr_review_resilience.enabled: false`, or the computed tier is S, Profile A
+falls back to the legacy single-wave base dispatch. Under Profiles B/C, the
+depth tier governs lane count the same way — a tier-S diff may cover the six
+dimensions in one or two consolidated lanes — while dimension coverage and
+per-dimension attestation remain mandatory.
 
 Under Profile B, dispatch the same wave as parallel subagents through your
 harness's subagent tool: one subagent per dimension by default, consolidated
@@ -924,8 +958,8 @@ Before Phase 4 or synthesis, all base lanes must be settled. `dispatch_lanes_asy
 - **Mode B (invalid structured output):** Under Profile A, collection reports `status: failed` with a named contract predicate while retaining the non-empty preview, digest, and `output_ref`; the artifact has zero valid `[CANDIDATE]` rows and no parseable `[CLEAN] | lane | coverage_scope | evidence` attestation. Under Profiles B/C, treat the equivalent non-empty report as failed when parsing yields zero candidates and no valid clean attestation. The non-empty transcript is diagnostic evidence, never coverage proof.
 
 For ANY lane that failed (either mode):
-1. **Retry** (max 2 attempts) with materially different parameters — different session or prompt decomposition, while preserving the required structured async mode and exact head provenance.
-2. If a base lane fails under Profile A, retry only the failed `workflow_lane` identifiers with `dispatch_lanes_async`, `mode: "swarm-pr-review:base"`, the same exact `pr_head_sha`, and explorer agents. The durable gate joins successful provenance across the initial wave and retry batches. While that controller is active, blocking `dispatch_lanes` and direct Task dispatch are not equivalent because they cannot satisfy the structured provenance gate. Under Profiles B/C, retry only the failed `workflow_lane` identifiers with a fresh subagent or pass, the same exact `pr_head_sha`, and a materially different prompt decomposition.
+1. **Retry** (max 2 attempts after the initial attempt) with materially different parameters — different session or prompt decomposition, while preserving the required structured async mode and exact head provenance.
+2. If a base lane fails under Profile A, retry only the unresolved `workflow_lane` identifiers with `dispatch_lanes_async`, `mode: "swarm-pr-review:base"`, the same exact `pr_head_sha`, explorer agents, and the staged-resilience fields when that policy is enabled: a singleton `pr_review_wave_stage: "canary"` first, then a matching `"fanout"` batch only for the remaining unresolved obligations. The durable gate joins successful provenance across the initial wave and retry batches, carries unresolved obligations forward attempt by attempt, and rejects typed `retry_exhausted` or `circuit_open` outcomes before any new lane is launched. While that controller is active, blocking `dispatch_lanes` and direct Task dispatch are not equivalent because they cannot satisfy the structured provenance gate. Under Profiles B/C, retry only the failed `workflow_lane` identifiers with a fresh subagent or pass, the same exact `pr_head_sha`, and a materially different prompt decomposition.
 3. If no equivalent alternative can be verified, **STOP and surface the lane failure to the user as BLOCKED** with the lane id, scope, failure mode, retry attempts, and why equivalence could not be proven. Do not present partial findings, do not issue a review verdict, and do not synthesize from successful lanes. A low-quality partial review is worse than no review.
 4. Under Profile A: After the second failed retry, collect every lane to a
    terminal state, do not probe downstream writers or micro lanes, call

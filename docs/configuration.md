@@ -601,6 +601,42 @@ The worker is **lazily started** on first subscription (gated by `pr_monitor.ena
 
 After a successful delivery the subscription's `hasUnaddressedEvents` flag is cleared, so delivered events no longer exempt the subscription from the TTL sweep indefinitely.
 
+### pr_review_resilience
+
+Controls staged canary/fanout resilience for Profile A `PR_REVIEW` base waves.
+When enabled, depth tiers M and L must run each base attempt as a singleton
+canary batch followed by a fanout batch for the remaining unresolved
+obligations. Attempt 0 plus at most two retry attempts are allowed. Tier S, or
+an explicit `enabled: false`, keeps the legacy single-wave base dispatch.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `true` | Enable staged canary/fanout base-wave resilience for Profile A PR review. `false` preserves the legacy one-wave base dispatch. |
+| `canary_probe_ms` | number | `300000` | Milliseconds to wait before probing whether an unresolved canary lane is still live (1–3600000). |
+| `status_probe_timeout_ms` | number | `2000` | Deadline for the bounded status probe that decides whether a canary is still live before admitting a later retry (1–60000). |
+| `correlated_failure_threshold` | number | `2` | Number of normalized matching terminal failures that opens the shared base-wave circuit and blocks further staged attempts (2–8). |
+| `max_retry_attempts_after_initial` | number | `2` | Maximum retry attempts after attempt 0. The controller therefore allows attempts 0, 1, and 2 by default (0–2). |
+
+**Example** — keep staged resilience enabled with defaults:
+
+```json
+{
+  "pr_review_resilience": {
+    "enabled": true
+  }
+}
+```
+
+**Example** — disable staged canary/fanout and keep the legacy one-wave base dispatch:
+
+```json
+{
+  "pr_review_resilience": {
+    "enabled": false
+  }
+}
+```
+
 ### todo_gate
 
 Controls the TODO gate that warns about new high-priority TODO/FIXME/HACK comments introduced during a phase.
@@ -1038,11 +1074,13 @@ Opt-in verification gate that runs five specialized reviewers in parallel before
 |-------|------|---------|-------------|
 | `enabled` | boolean | `false` | Master switch for the council gate |
 | `maxRounds` | number | `3` | Maximum REJECT-retry rounds before architect must escalate to user (1–10) |
-| `parallelTimeoutMs` | number | `30000` | Per-member dispatch timeout in milliseconds (5000–120000) |
+| `parallelTimeoutMs` | number | `30000` | **DEPRECATED — inert.** No runtime consumer exists and no timeout is enforced; accepted only for parse compatibility. Config doctor warns when it is explicitly set. Remove the key — dispatch timeouts are governed by the agent host. Scheduled for removal. |
 | `vetoPriority` | boolean | `true` | When `true`, any single REJECT blocks advancement |
-| `requireAllMembers` | boolean | `false` | When `true`, reject synthesis if fewer than 5 verdicts provided. Equivalent to `minimumMembers: 5`. |
-| `minimumMembers` | number | `3` | Minimum distinct council members required for quorum (1–5). Set to 1 to disable quorum enforcement. `requireAllMembers: true` overrides this to 5 (stricter constraint wins). |
-| `escalateOnMaxRounds` | string? | undefined | Reserved for future use — no runtime behavior today |
+| `requireAllMembers` | boolean | `false` | When `true`, reject synthesis if fewer than 5 verdicts provided. Equivalent to `minimumMembers: 5`. (Task/phase councils only.) |
+| `minimumMembers` | number | `3` | Minimum distinct council members required for quorum (1–5) at the **task/phase** level. Set to 1 to disable quorum enforcement. `requireAllMembers: true` overrides this to 5 (stricter constraint wins). The **final** council is governed separately by `finalCompletionPolicy`. |
+| `escalateOnMaxRounds` | string? | undefined | **Inert.** Declared for escalation, but no handler/webhook execution exists or runs (#1650). Config doctor warns when it is set. Max-rounds exhaustion instead emits a durable structured event (`.swarm/council/events/max-rounds-exhaustion.jsonl`) and a user escalation message; the run stays fail-closed. Wiring real outbound escalation requires a separate security review. |
+| `finalCompletionPolicy` | object | `{ "mode": "all_required" }` | Final-council completion policy. `all_required` (default) preserves the exact legacy requirement: all five canonical roles, five distinct members, zero absentees. `quorum` is an explicit, bounded weakening requiring `minimumMembers` (3–5) distinct canonical members — unknown, duplicate, and cross-swarm identities never count, and config doctor visibly flags quorum mode as weaker. Member names may be exact canonical roles or multi-swarm prefixed names (e.g. `local_critic`). The normalized policy participates in the council policy digest, so any change invalidates previously accepted final-council evidence. |
+| `freshnessMaxAgeHours` | number | `24` | Maximum age in hours (1–720) for phase-council, architecture-supervisor, and final-council evidence. One shared evaluator and one captured preflight clock govern all three gates; future/invalid timestamps and evidence predating the phase retrospective fail closed. Part of the council policy digest. |
 
 When `enabled: false`, the council gate is completely inert. When enabled, `submit_council_verdicts` must be called before a task can transition to `completed`. See the [Council guide](council/README.md) for the full workflow.
 

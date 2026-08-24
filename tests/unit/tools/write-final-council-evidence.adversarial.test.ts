@@ -139,17 +139,17 @@ describe('write_final_council_evidence adversarial security tests', () => {
 		expect(parsed.membersAbsent).toEqual(['explorer']);
 	});
 
-	test('rejects invalid council member and verdict casing', async () => {
+	test('rejects invalid verdict casing at the schema boundary', async () => {
 		const result = await executeWriteFinalCouncilEvidence(
 			{
 				phase: 1,
 				projectSummary: 'Project summary',
 				verdicts: [
-					{ ...verdict('critic'), agent: 'council_generalist' },
 					{ ...verdict('reviewer'), verdict: 'approved' },
 					verdict('sme'),
 					verdict('test_engineer'),
 					verdict('explorer'),
+					verdict('critic'),
 				],
 			},
 			tempDir,
@@ -160,10 +160,41 @@ describe('write_final_council_evidence adversarial security tests', () => {
 		expect(parsed.reason).toBe('invalid arguments');
 		expect(
 			parsed.errors.map((error: { path: string }) => error.path),
-		).toContain('verdicts.0.agent');
-		expect(
-			parsed.errors.map((error: { path: string }) => error.path),
-		).toContain('verdicts.1.verdict');
+		).toContain('verdicts.0.verdict');
+	});
+
+	test('non-council member identities never count toward final quorum (#2102)', async () => {
+		// A General Council member is not a canonical final-council role. The
+		// schema now accepts arbitrary member strings (multi-swarm prefixed
+		// names must resolve), so the unknown identity is enforced at quorum
+		// time: it is excluded, reported, and can never satisfy the policy.
+		const result = await executeWriteFinalCouncilEvidence(
+			{
+				phase: 1,
+				projectSummary: 'Project summary',
+				verdicts: [
+					{ ...verdict('critic'), agent: 'council_generalist' },
+					verdict('reviewer'),
+					verdict('sme'),
+					verdict('test_engineer'),
+					verdict('explorer'),
+				],
+			},
+			tempDir,
+		);
+		const parsed = JSON.parse(result);
+
+		expect(parsed.success).toBe(false);
+		expect(parsed.reason).toBe('insufficient_quorum');
+		expect(parsed.membersVoted).toEqual([
+			'reviewer',
+			'sme',
+			'test_engineer',
+			'explorer',
+		]);
+		expect(parsed.membersAbsent).toEqual(['critic']);
+		expect(parsed.unknownAgents).toEqual(['council_generalist']);
+		expect(parsed.quorumRequired).toBe(5);
 	});
 
 	test('preserves hostile strings as inert JSON data', async () => {

@@ -380,8 +380,6 @@ describe('architect-visible checkout contract', () => {
 	const reviewSurfaces = [
 		'src/agents/architect.ts',
 		'.opencode/skills/swarm-pr-review/SKILL.md',
-		'.claude/skills/swarm-pr-review/SKILL.md',
-		'.agents/skills/swarm-pr-review/SKILL.md',
 	];
 	const feedbackSurfaces = [
 		'src/agents/architect.ts',

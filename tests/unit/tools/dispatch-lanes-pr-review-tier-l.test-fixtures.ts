@@ -13,6 +13,9 @@ import {
 	_test_exports as gateInternals,
 	PR_REVIEW_BASE_DIMENSION_IDS,
 } from '../../../src/hooks/pr-workflow-gate.js';
+import { LEGACY_PR_REVIEW_RESILIENCE_POLICY } from '../pr-review-test-policy.js';
+
+export { LEGACY_PR_REVIEW_RESILIENCE_POLICY } from '../pr-review-test-policy.js';
 
 /**
  * Shared fixtures for the tier-L consolidated-retry suites.
@@ -186,7 +189,11 @@ export async function recordInitialWave(): Promise<void> {
 		directory,
 		SESSION_ID,
 		PR_REVIEW_BASE_DIMENSION_IDS.map((dimension) => singleton(dimension)),
-		{ batchId: 'base-initial', prHeadSha: HEAD_SHA },
+		{
+			batchId: 'base-initial',
+			prHeadSha: HEAD_SHA,
+			prReviewResiliencePolicy: LEGACY_PR_REVIEW_RESILIENCE_POLICY,
+		},
 	);
 }
 
@@ -215,6 +222,7 @@ export async function attemptBaseBatch(
 		batchId,
 		prHeadSha: HEAD_SHA,
 		revisionDigest: currentRevisionDigest,
+		prReviewResiliencePolicy: LEGACY_PR_REVIEW_RESILIENCE_POLICY,
 	}).then(
 		() => null,
 		(reason: unknown) => reason as Error,

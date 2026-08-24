@@ -17,8 +17,10 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { OpencodeClient } from '@opencode-ai/sdk';
 import { ORCHESTRATOR_NAME } from './config/constants';
+import { loadPluginConfig } from './config/loader';
 import { type Plan, PlanSchema, type TaskStatus } from './config/plan-schema';
 import { stripKnownSwarmPrefix } from './config/schema';
+import { computeCouncilReviewIdentity } from './council/council-review-identity';
 import type { CouncilAgent } from './council/types';
 import {
 	getEffectiveGates,
@@ -70,6 +72,11 @@ export { AgentRunContext } from './state/agent-run-context.js';
 interface RehydrationCache {
 	planTaskStates: Map<string, TaskWorkflowState>;
 	evidenceMap: Map<string, TaskEvidence>;
+	/** Inputs for validating rehydrated task-council review identity (#2102). */
+	taskIdentityContext: {
+		plan: Plan | null;
+		councilConfig: import('./council/types').CouncilConfig | undefined;
+	};
 }
 let _rehydrationCache: RehydrationCache | null = null;
 
@@ -3357,7 +3364,21 @@ export async function buildRehydrationCache(directory: string): Promise<void> {
 	}
 
 	const evidenceMap = await readGateEvidenceFromDisk(directory);
-	_rehydrationCache = { planTaskStates, evidenceMap };
+	// Council review identity context (issue #2102): rehydrated task-council
+	// approvals must be bound to the CURRENT review-relevant plan content and
+	// council policy. The plan is already loaded above; the config read is a
+	// small bounded JSON load.
+	let councilConfig: import('./council/types').CouncilConfig | undefined;
+	try {
+		councilConfig = loadPluginConfig(directory).council;
+	} catch {
+		councilConfig = undefined;
+	}
+	_rehydrationCache = {
+		planTaskStates,
+		evidenceMap,
+		taskIdentityContext: { plan, councilConfig },
+	};
 }
 
 /**
@@ -3382,7 +3403,8 @@ export function applyRehydrationCache(session: AgentSessionState): void {
 		session.taskCouncilApproved = new Map();
 	}
 
-	const { planTaskStates, evidenceMap } = _rehydrationCache;
+	const { planTaskStates, evidenceMap, taskIdentityContext } =
+		_rehydrationCache;
 
 	for (const [taskId, planState] of planTaskStates) {
 		const existingState = session.taskWorkflowStates.get(taskId);
@@ -3435,9 +3457,34 @@ export function applyRehydrationCache(session: AgentSessionState): void {
 					roundNumber?: number;
 					quorumSize?: number;
 					workflowGeneration?: number;
+					identity_digest?: unknown;
 			  }
 			| undefined;
 		if (!council) {
+			session.taskCouncilApproved.delete(taskId);
+			continue;
+		}
+		// Council review identity cutover (issue #2102): evidence must carry the
+		// identity digest of the review-relevant plan + council policy it was
+		// approved under, and that digest must still match the CURRENT identity.
+		// Legacy evidence without identity proof fails closed (fresh council run),
+		// mirroring the pre-quorum cutover precedent above. A status-only plan
+		// change keeps the identity stable, so ordinary progress never trips this.
+		const rawIdentityDigest = council.identity_digest;
+		if (
+			typeof rawIdentityDigest !== 'string' ||
+			!/^[a-f0-9]{64}$/.test(rawIdentityDigest)
+		) {
+			session.taskCouncilApproved.delete(taskId);
+			continue;
+		}
+		const expectedIdentity = computeCouncilReviewIdentity({
+			level: 'task',
+			scope: { kind: 'task', taskId },
+			plan: taskIdentityContext.plan,
+			config: taskIdentityContext.councilConfig,
+		});
+		if (rawIdentityDigest !== expectedIdentity.identityDigest) {
 			session.taskCouncilApproved.delete(taskId);
 			continue;
 		}

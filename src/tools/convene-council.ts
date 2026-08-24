@@ -8,6 +8,7 @@ import {
 	hasCouncilEvidenceAttempt,
 	writeCouncilEvidence,
 } from '../council/council-evidence-writer';
+import { computeCouncilReviewIdentity } from '../council/council-review-identity';
 import {
 	recordUnscopedCouncilAttempt,
 	runCouncilAttempt,
@@ -15,17 +16,13 @@ import {
 import { synthesizeCouncilVerdicts } from '../council/council-service';
 import { readCriteria } from '../council/criteria-store';
 import type { CouncilMemberVerdict } from '../council/types';
+import { COUNCIL_MEMBER_ROLES } from '../council/types';
+import { loadPlan } from '../plan/manager.js';
 import { getAgentSession } from '../state';
 import { createSwarmTool } from './create-tool';
 import { resolveWorkingDirectory } from './resolve-working-directory';
 
-const ALL_MEMBERS = [
-	'critic',
-	'reviewer',
-	'sme',
-	'test_engineer',
-	'explorer',
-] as const;
+const ALL_MEMBERS = COUNCIL_MEMBER_ROLES;
 
 const FindingSchema = z.object({
 	severity: z.enum(['CRITICAL', 'HIGH', 'MEDIUM', 'LOW']),
@@ -139,6 +136,19 @@ export const submit_council_verdicts: ReturnType<typeof tool> = createSwarmTool(
 			const workingDir = resolved.directory;
 			const config = loadPluginConfig(workingDir);
 			const councilConfig = config.council;
+			let plan: Awaited<ReturnType<typeof loadPlan>> = null;
+			try {
+				plan = await loadPlan(workingDir);
+			} catch {
+				// A missing plan yields an identity with null plan fields; the
+				// rehydration consumer (which loads the plan) fails closed against it.
+			}
+			const identity = computeCouncilReviewIdentity({
+				level: 'task',
+				scope: { kind: 'task', taskId: input.taskId },
+				plan,
+				config: councilConfig,
+			});
 			const distinctMembers = new Set(
 				input.verdicts.map((verdict) => verdict.agent),
 			);
@@ -154,10 +164,15 @@ export const submit_council_verdicts: ReturnType<typeof tool> = createSwarmTool(
 
 			return runCouncilAttempt({
 				directory: workingDir,
-				scope: { kind: 'task', taskId: input.taskId },
+				scope: {
+					kind: 'task',
+					taskId: input.taskId,
+					identityDigest: identity.identityDigest,
+				},
 				clientRound: input.roundNumber,
 				maxRounds: councilConfig?.maxRounds ?? 3,
 				sessionID: ctx?.sessionID,
+				escalationConfigured: councilConfig?.escalateOnMaxRounds !== undefined,
 				request: input,
 				verdictCount: input.verdicts.length,
 				members: membersVoted,
@@ -318,6 +333,7 @@ export const submit_council_verdicts: ReturnType<typeof tool> = createSwarmTool(
 									synthesis,
 									attemptId,
 									councilWorkflowGeneration,
+									identity,
 								);
 							},
 						},

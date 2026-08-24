@@ -6,6 +6,7 @@ import {
 } from '../../../src/hooks/pr-workflow-gate.js';
 import {
 	HEAD_SHA,
+	LEGACY_PR_REVIEW_RESILIENCE_POLICY,
 	persistBatch,
 	SESSION_ID,
 	setupPrWorkflowGateFixtures,
@@ -36,6 +37,7 @@ async function establishInitialBaseWave(): Promise<void> {
 	await enforcePrReviewBaseDimensions(tempDir, SESSION_ID, singletonLanes, {
 		batchId: 'base-initial',
 		prHeadSha: HEAD_SHA,
+		prReviewResiliencePolicy: LEGACY_PR_REVIEW_RESILIENCE_POLICY,
 	});
 }
 

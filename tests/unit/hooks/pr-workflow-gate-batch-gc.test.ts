@@ -15,6 +15,7 @@ import {
 import {
 	establishReviewPrerequisites,
 	HEAD_SHA,
+	LEGACY_PR_REVIEW_RESILIENCE_POLICY,
 	persistBatch,
 	SESSION_ID,
 	setupPrWorkflowGateFixtures,
@@ -98,7 +99,11 @@ async function recordInertBaseBatches(
 			tempDir,
 			SESSION_ID,
 			[{ laneId: `${batchId}-lane`, workflowLane: DIM_A }],
-			{ batchId, prHeadSha: HEAD_SHA },
+			{
+				batchId,
+				prHeadSha: HEAD_SHA,
+				prReviewResiliencePolicy: LEGACY_PR_REVIEW_RESILIENCE_POLICY,
+			},
 		);
 		batchIds.push(batchId);
 	}
@@ -123,6 +128,7 @@ describe('pr-workflow-gate workflow batch GC', () => {
 			await enforcePrReviewBaseDimensions(tempDir, SESSION_ID, sourceLanes, {
 				batchId: 'base-source',
 				prHeadSha: HEAD_SHA,
+				prReviewResiliencePolicy: LEGACY_PR_REVIEW_RESILIENCE_POLICY,
 			});
 			await persistBatch('base-source', 'swarm-pr-review:base', sourceLanes);
 			await recordInertBaseBatches(MAX_WORKFLOW_BATCHES - 1);

@@ -2546,7 +2546,15 @@ export const CouncilConfigSchema = z
 	.object({
 		enabled: z.boolean().default(false),
 		maxRounds: z.number().int().min(1).max(10).default(3),
-		parallelTimeoutMs: z.number().int().min(5_000).max(120_000).default(30_000),
+		parallelTimeoutMs: z
+			.number()
+			.int()
+			.min(5_000)
+			.max(120_000)
+			.default(30_000)
+			.describe(
+				'DEPRECATED — inert. Accepted for parse compatibility only; no runtime consumer exists and no timeout is enforced. Config doctor warns when this is explicitly set. Remove the key; dispatch timeouts are governed by the agent host. Scheduled for removal in a future release.',
+			),
 		vetoPriority: z.boolean().default(true),
 		requireAllMembers: z
 			.boolean()
@@ -2561,19 +2569,60 @@ export const CouncilConfigSchema = z
 			.max(5)
 			.default(3)
 			.describe(
-				'Minimum distinct council member verdicts required for synthesis. Default 3. Set to 1 to disable quorum enforcement. requireAllMembers: true overrides this to 5 (stricter constraint wins).',
+				'Minimum distinct council member verdicts required for synthesis (task/phase councils only — the final council uses finalCompletionPolicy). Default 3. Set to 1 to disable quorum enforcement. requireAllMembers: true overrides this to 5 (stricter constraint wins).',
 			),
 		escalateOnMaxRounds: z
 			.string()
 			.optional()
 			.describe(
-				'Optional webhook URL or handler name invoked when maxRounds is reached without APPROVE. Declared for forward compatibility; no behavior is implemented yet.',
+				'Optional webhook URL or handler name declared for escalation when maxRounds is reached without APPROVE. REMAINS INERT — no handler or webhook execution exists or is added; config doctor warns when it is set (issue #1650). Max-rounds exhaustion emits a durable structured event and a user escalation message; wiring real outbound escalation requires a separate security review.',
 			),
 		phaseConcernsAllowComplete: z
 			.boolean()
 			.default(true)
 			.describe(
 				'When true, a phase-level council CONCERNS verdict with only MEDIUM/LOW findings does NOT block phase completion — the advisory notes are logged as warnings and the phase proceeds. When false, CONCERNS blocks like REJECT. Note: HIGH/CRITICAL findings from CONCERNS members are always promoted to requiredFixes and block at the tool level regardless of this setting. Default: true.',
+			),
+		finalCompletionPolicy: z
+			.object({
+				mode: z
+					.enum(['all_required', 'quorum'])
+					.default('all_required')
+					.describe(
+						"'all_required' (default) preserves the exact legacy final council: all five canonical roles, five distinct members, zero absentees. 'quorum' is an explicit weakening that accepts a bounded minimum of distinct canonical members instead of all five.",
+					),
+				minimumMembers: z
+					.number()
+					.int()
+					.min(3)
+					.max(5)
+					.optional()
+					.describe(
+						'Required when mode is "quorum": minimum distinct canonical council members (3–5) that must vote. Unknown, duplicate, and cross-swarm identities never count.',
+					),
+			})
+			.default({ mode: 'all_required' })
+			.superRefine((policy, ctx) => {
+				if (policy.mode === 'quorum' && policy.minimumMembers === undefined) {
+					ctx.addIssue({
+						code: 'custom',
+						path: ['minimumMembers'],
+						message:
+							'finalCompletionPolicy.mode "quorum" requires an explicit minimumMembers between 3 and 5.',
+					});
+				}
+			})
+			.describe(
+				'Final-council completion policy. Missing/default is all_required (strict five-member requirement). The normalized policy participates in the council policy digest, so any change invalidates previously accepted final-council evidence.',
+			),
+		freshnessMaxAgeHours: z
+			.number()
+			.int()
+			.min(1)
+			.max(720)
+			.default(24)
+			.describe(
+				'Maximum age (hours, 1–720) of phase-council, architecture-supervisor, and final-council evidence. Default 24 preserves prior behavior. Part of the council policy digest, so changing it invalidates prior council evidence.',
 			),
 		// General Council Mode (advisory). Optional — undefined means feature is
 		// not configured. When present and enabled: true, the architect can run
@@ -3159,6 +3208,32 @@ export function resolveExternalSkillsConfig(
 	return merged;
 }
 
+export interface PrReviewResilienceConfig {
+	enabled: boolean;
+	canary_probe_ms: number;
+	status_probe_timeout_ms: number;
+	correlated_failure_threshold: number;
+	max_retry_attempts_after_initial: number;
+}
+
+export const DEFAULT_PR_REVIEW_RESILIENCE_CONFIG: PrReviewResilienceConfig = {
+	enabled: true,
+	canary_probe_ms: 300_000,
+	status_probe_timeout_ms: 2_000,
+	correlated_failure_threshold: 2,
+	max_retry_attempts_after_initial: 2,
+};
+
+export const PrReviewResilienceConfigSchema = z
+	.object({
+		enabled: z.boolean().default(true),
+		canary_probe_ms: z.number().int().min(1).max(3_600_000).default(300_000),
+		status_probe_timeout_ms: z.number().int().min(1).max(60_000).default(2_000),
+		correlated_failure_threshold: z.number().int().min(2).max(8).default(2),
+		max_retry_attempts_after_initial: z.number().int().min(0).max(2).default(2),
+	})
+	.strict();
+
 // Main plugin configuration
 export const PluginConfigSchema = z.object({
 	/** Config format version for migration table. Increment when deprecating fields. Distinct from knowledge.schema_version. */
@@ -3251,6 +3326,9 @@ export const PluginConfigSchema = z.object({
 
 	// Hook configuration
 	hooks: HooksConfigSchema.optional(),
+
+	// PR_REVIEW base-wave staged canary/fanout resilience.
+	pr_review_resilience: PrReviewResilienceConfigSchema.optional(),
 
 	// Quality gate configuration (v6.9 anti-slop features)
 	gates: GateConfigSchema.optional(),

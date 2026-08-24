@@ -105,7 +105,7 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 		token: 'instance',
 		quarantineEligible: true,
 		parsesTarget: true,
-		producers: ['src/hooks/pr-workflow-gate.ts:11950'],
+		producers: ['src/hooks/pr-workflow-gate.ts:12961'],
 		note: 'pre/post-rename file-identity verification (assertOpened/ClosedSwarmFileIdentity, pr-workflow-gate.ts:11844-11889) is writer-specific and load-bearing',
 	},
 	{
@@ -189,7 +189,7 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 			'src/background/pending-delegations.ts:905',
 			'src/background/delegation-health.ts:300',
 			'src/hooks/delegation-gate/worktree-provisioning-owner.ts:100',
-			'src/tools/submit-phase-council-verdicts.ts:437',
+			'src/tools/submit-phase-council-verdicts.ts:458',
 			'src/summaries/store.ts:46 (pre-#2035)',
 		],
 		note: 'background lane/delegation stores keep bounded-retry rename semantics wired into their callers (#2034/#2276 delivery contracts); migration candidates for a follow-up but grammars registered',
@@ -295,7 +295,7 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 			'src/tools/record-recurrence-sweep.ts:125',
 			'src/tools/record-issue-reproduction.ts:85',
 			'src/tools/record-issue-publication.ts:74',
-			'src/tools/write-final-council-evidence.ts:311',
+			'src/tools/write-final-council-evidence.ts:403',
 		],
 		note: 'constant-name temps: no per-invocation token — reported when stale, never auto-quarantined (may be an in-flight writer of any process)',
 	},
@@ -381,6 +381,9 @@ export const WRITER_CLASSIFICATION: Readonly<
 	'src/commands/archive-sqlite.ts': 'registered-bespoke',
 	'src/context-map/capsule-persistence.ts': 'registered-bespoke',
 	'src/context-map/persistence.ts': 'registered-bespoke',
+	// bespoke atomic single-file rewrite (write tmp + rename) for the bounded
+	// context-map telemetry store; PID-scoped `.context-telemetry.jsonl.<pid>.tmp`
+	'src/context-map/telemetry.ts': 'registered-bespoke',
 	'src/evidence/documents-retention.ts': 'registered-bespoke',
 	'src/evidence/manager.ts': 'registered-bespoke',
 	'src/full-auto/state.ts': 'registered-bespoke',

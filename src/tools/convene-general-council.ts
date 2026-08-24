@@ -46,6 +46,26 @@ const WebSearchResultSchema = z.object({
 	query: z.string(),
 });
 
+/**
+ * Bounded structured claim (issue #2102 contract G). The `.catch(undefined)`
+ * on the member-level claims field means malformed or oversized claims
+ * degrade to "absent" (fallback detection) instead of rejecting the whole
+ * submission — smaller models may omit or garble the optional field.
+ */
+const ClaimSchema = z.object({
+	subject: z.string().min(1).max(120),
+	statement: z.string().min(1).max(600),
+	stance: z.enum(['support', 'oppose', 'neutral', 'concern', 'alternative']),
+	confidence: z.number().min(0).max(1),
+	evidence: z.array(z.string().max(240)).max(4).optional(),
+});
+
+const MemberClaimsSchema = z
+	.array(ClaimSchema)
+	.max(8)
+	.optional()
+	.catch(undefined);
+
 const MemberRoleEnum = z.enum([
 	'generalist',
 	'skeptic',
@@ -64,6 +84,7 @@ const Round1ResponseSchema = z.object({
 	confidence: z.number().min(0).max(1),
 	areasOfUncertainty: z.array(z.string()).default([]),
 	durationMs: z.number().nonnegative().default(0),
+	claims: MemberClaimsSchema,
 });
 
 const Round2ResponseSchema = Round1ResponseSchema.extend({
@@ -150,6 +171,7 @@ export const convene_general_council: ReturnType<typeof tool> = createSwarmTool(
 						confidence: z.number().min(0).max(1),
 						areasOfUncertainty: z.array(z.string()).optional(),
 						durationMs: z.number().nonnegative().optional(),
+						claims: MemberClaimsSchema,
 					}),
 				)
 				.describe('Round 1 member responses (one per council member).'),
@@ -181,6 +203,7 @@ export const convene_general_council: ReturnType<typeof tool> = createSwarmTool(
 						areasOfUncertainty: z.array(z.string()).optional(),
 						durationMs: z.number().nonnegative().optional(),
 						disagreementTopics: z.array(z.string()).optional(),
+						claims: MemberClaimsSchema,
 					}),
 				)
 				.optional()

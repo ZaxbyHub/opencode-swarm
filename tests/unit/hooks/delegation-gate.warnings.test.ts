@@ -126,16 +126,22 @@ describe('zero-coder-delegation detection', () => {
 		const config = makeConfig();
 		const hook = createDelegationGateHook(config, process.cwd());
 
-		// Send a coder delegation
+		// lastCoderDelegationTaskId is now written ONLY by the structured
+		// dispatch path (prepareCoderScope success in toolBefore) — the old
+		// prompt-regex writer in messagesTransform was removed (Stage A wedge
+		// fix). Simulate the structured write the dispatch performs.
+		const session = ensureAgentSession('test-session');
+		session.lastCoderDelegationTaskId = '1.1';
+
+		// Send a coder delegation; the transform must NOT clobber the
+		// structured value.
 		const messages1 = makeMessages(
 			'coder\nTASK: Task Alpha\nFILE: src/alpha.ts',
 			'architect',
 		);
 		await hook.messagesTransform({}, messages1);
 
-		// Verify task ID was tracked
-		const session = ensureAgentSession('test-session');
-		expect(session.lastCoderDelegationTaskId).toBe('Task Alpha');
+		expect(session.lastCoderDelegationTaskId).toBe('1.1');
 	});
 
 	it('should NOT track task ID from non-coder messages', async () => {

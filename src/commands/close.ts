@@ -34,6 +34,7 @@ export const closeReceiptLifecycleInternals = {
 	reconcilePhaseClose,
 };
 
+import { finalizeContextTelemetry as finalizeContextTelemetryImpl } from '../context-map/telemetry.js';
 import {
 	readKnowledge,
 	resolveSwarmKnowledgePath,
@@ -418,6 +419,14 @@ const ARCHIVE_ARTIFACTS = [
 	'background-delegations.checkpoint.json',
 	'background-delegations.manifest.json',
 	'background-delegations-health.json',
+	// Context-map telemetry store (issue #2037): the bounded single-file store
+	// (manifest header + retained window) is archived as a defined, validated
+	// cut for forensics. The tail is folded/finalized before archiving via
+	// finalizeContextTelemetry, parallel to flushAndDrainTelemetry. Deliberately
+	// omitted from ACTIVE_STATE_TO_CLEAN — the store is cross-session state and
+	// its bounded-retention mechanism is compaction (not close), so active state
+	// stays usable after close.
+	'context-telemetry.jsonl',
 ];
 
 /**
@@ -1278,6 +1287,24 @@ export async function runArchiveStage(ctx: CloseStageContext): Promise<void> {
 			const msg =
 				flushErr instanceof Error ? flushErr.message : String(flushErr);
 			ctx.warnings.push(`Telemetry flush before archive failed: ${msg}`);
+		}
+
+		// Finalize the context-map telemetry store (issue #2037) BEFORE archiving
+		// so the archived `context-telemetry.jsonl` is a defined, validated cut
+		// (tail folded into the durable aggregate, atomic single-file rewrite).
+		// Unlike the core telemetry stream this store is synchronous (no buffered
+		// writer), so no flush is needed — finalization is a fold + atomic rewrite.
+		// Fail-open: a finalize failure only warns; the close pipeline continues.
+		try {
+			_internals.finalizeContextTelemetry(ctx.directory);
+		} catch (finalizeErr) {
+			const msg =
+				finalizeErr instanceof Error
+					? finalizeErr.message
+					: String(finalizeErr);
+			ctx.warnings.push(
+				`Context-map telemetry finalize before archive failed: ${msg}`,
+			);
 		}
 
 		// Copy swarm artifacts to archive.
@@ -2673,5 +2700,12 @@ export const _internals = {
 	flushAndDrainTelemetry: async (): Promise<void> => {
 		const { flushAndDrainTelemetry } = await import('../telemetry.js');
 		return flushAndDrainTelemetry();
+	},
+	// Finalizes the bounded context-map telemetry store before archiving it
+	// (issue #2037): folds the retained tail into the durable aggregate via an
+	// atomic single-file rewrite. Synchronous, fail-open. Seam so close tests
+	// can substitute a no-op / throwing stub.
+	finalizeContextTelemetry: (directory: string): void => {
+		finalizeContextTelemetryImpl(directory);
 	},
 };

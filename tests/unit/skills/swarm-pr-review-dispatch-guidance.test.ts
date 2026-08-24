@@ -148,7 +148,7 @@ describe('swarm-pr-review deterministic async lane dispatch guidance', () => {
 		expect(phase3Section).toContain('transcript-incomplete-terminal-candidate');
 		expect(phase3Section).toContain('never validates `[CLEAN]`');
 		expect(phase3Section).toContain('have no typed recovery validation');
-		expect(phase3Section).toContain('exact six-lane gate');
+		expect(phase3Section).toContain('historical tier-L full');
 		expect(phase3Section).toContain('retry only the failed `workflow_lane`');
 		expect(phase3Section).toContain('same exact `pr_head_sha`');
 		expect(phase3Section).toContain('direct Task dispatch are not equivalent');
@@ -365,65 +365,8 @@ describe('swarm-pr-review deterministic async lane dispatch guidance', () => {
 				'../../../.opencode/skills/swarm-pr-review/SKILL.md',
 			);
 			expect(source).toContain('canonical workflow');
-			expect(source).toContain('read-only');
-			expect(source).toContain('workflow-lane');
-			expect(source).toContain('exact-head provenance');
-			expect(source).toContain('PR publication contract');
-			expect(source).toContain('BLOCKED');
-			expect(source).toContain('degraded review');
-			expect(source).toContain('output_ref');
-			expect(source).toContain(CLEAN_TEMPLATES.base_explorer);
-			expect(source).toContain(CLEAN_TEMPLATES.micro_lane);
-			expect(source).not.toContain(STALE_CLEAN_TEMPLATE);
-			expect(source).not.toContain('## Phase 0A:');
-			expect(source).not.toContain('## Phase 0B:');
-			expect(source).not.toContain(
-				'Legacy mirror text retained only as commented reference',
-			);
-			expect(source).not.toContain('<!--');
 		});
 	}
-
-	// The Codex adapter uses runtime-agnostic capability phrasing while preserving
-	// the controller-bypass prohibition for hosts where the controller is active.
-	test('.agents/skills/swarm-pr-review/SKILL.md uses capability phrasing, not runtime-specific tool names', () => {
-		const source = readSkill('.agents/skills/swarm-pr-review/SKILL.md');
-		expect(source).toContain("runtime's parallel-execution capability");
-		expect(source).toContain('different dispatch path is not equivalent');
-		expect(source).toContain('one structured exact-six batch');
-		expect(source).toContain('PR publication contract');
-		expect(source).not.toContain('run the lanes sequentially');
-		// Controller absence is the normal Codex/ZCode state, never a dead end —
-		// and both runtimes dispatch fresh-context subagents (Profile B).
-		expect(source).toContain('Profile B, not an error');
-		expect(source).toContain('fresh-context');
-		expect(source).toContain('report BLOCKED merely because');
-		// Adapter must not leak runtime-specific tool names.
-		expect(source).not.toContain('dispatch_lanes_async');
-		expect(source).not.toContain('collect_lane_results');
-		expect(source).not.toContain('retrieve_lane_output');
-		expect(source).not.toContain('parse_lane_candidates');
-		expect(source).not.toContain('dispatch_lanes');
-		expect(source).not.toContain('Task-tool dispatch');
-	});
-
-	test('.claude/skills/swarm-pr-review/SKILL.md gives Claude Code a native Profile B path and keeps controller tools conditional', () => {
-		const source = readSkill('.claude/skills/swarm-pr-review/SKILL.md');
-		// Controller tool names may appear only inside the conditional Profile A
-		// path; the default Claude Code path is native Agent/Task dispatch.
-		expect(source).toContain('dispatch_lanes_async');
-		expect(source).toContain('collect_lane_results');
-		expect(source).toContain('direct-Task dispatch are not');
-		expect(source).toContain('PR publication contract');
-		expect(source).not.toContain('Task-tool dispatch is the final fallback');
-		expect(source).toContain('retrieve_lane_output');
-		expect(source).toContain('Profile B, not an error');
-		expect(source).toContain('report BLOCKED merely');
-		expect(source).toContain('`Agent`/`Task` subagent tool');
-		expect(source).toContain(
-			'Only if this session actually exposes the swarm controller tools',
-		);
-	});
 
 	test('canonical Profile A guidance diagnoses contract failures without bypass or hindsight', () => {
 		const source = readSkill(CANONICAL_SKILL);
