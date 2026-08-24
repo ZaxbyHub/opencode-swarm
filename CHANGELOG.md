@@ -1,5 +1,14 @@
 # Changelog
 
+## [7.146.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.146.1...v7.146.2) (2026-08-24)
+
+
+### Bug Fixes
+
+* **knowledge-gate:** apply biome format/import-order to gate test ([#2325](https://github.com/ZaxbyHub/opencode-swarm/issues/2325)) ([03395df](https://github.com/ZaxbyHub/opencode-swarm/commit/03395dfee2e6947a63ab34a6bd0433f2782fcfb4))
+* **knowledge-gate:** make gate denial ack format self-discoverable and surface directive content ([229754e](https://github.com/ZaxbyHub/opencode-swarm/commit/229754e4e06781ac362e8b8452e59aed54c05188))
+* **knowledge-gate:** make gate denial ack format self-discoverable and surface directive content ([8b37108](https://github.com/ZaxbyHub/opencode-swarm/commit/8b371086123b681f36c8211ffe24b7a7961b1b1d)), closes [#2299](https://github.com/ZaxbyHub/opencode-swarm/issues/2299)
+
 ## [7.146.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.146.0...v7.146.1) (2026-08-24)
 
 
