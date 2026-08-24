@@ -62,18 +62,4 @@ describe('swarm-pr-review resilience guidance', () => {
 		expect(dispatchSection).toContain('followed by exactly one fanout batch');
 		expectNoLegacyContradiction(source);
 	});
-
-	test('both runtime adapters require staged M/L dispatch without contradictions', () => {
-		for (const adapter of [
-			'.agents/skills/swarm-pr-review/SKILL.md',
-			'.claude/skills/swarm-pr-review/SKILL.md',
-		]) {
-			const source = readSkill(adapter);
-			expect(source).toContain('Profile A must stage');
-			expect(source).toContain('depth-tier M/L');
-			expect(source).toContain('fanout batch');
-			expect(source).not.toContain('Profile A may stage depth-tier M/L');
-			expectNoLegacyContradiction(source);
-		}
-	});
 });

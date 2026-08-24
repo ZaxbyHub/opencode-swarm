@@ -294,7 +294,7 @@ describe('PR feedback shell mutation gate - read-only classifications', () => {
 			(error) => String(error),
 		);
 		expect(outcome).toContain('mode');
-		expect(outcome).toContain('write');
+		expect(outcome).toContain('search mode must be one of');
 		expect(outcome).toContain('read-only');
 		expect(outcome).not.toContain('controller-owned');
 	});
@@ -311,7 +311,7 @@ describe('PR feedback shell mutation gate - read-only classifications', () => {
 			(error) => String(error),
 		);
 		expect(outcome).toContain('requests[1].operation');
-		expect(outcome).toContain('write');
+		expect(outcome).toContain('recognized observation operation');
 	});
 
 	test('retains protected-evidence attribution for genuinely mutating tools', async () => {
