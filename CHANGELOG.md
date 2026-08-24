@@ -1,5 +1,22 @@
 # Changelog
 
+## [7.146.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.146.3...v7.146.4) (2026-08-24)
+
+
+### Bug Fixes
+
+* **background:** cap PR-review shed-marker parsing ([f9ff3c9](https://github.com/ZaxbyHub/opencode-swarm/commit/f9ff3c9d2da4096d167f042f17aeedb2a2996f18))
+* **docs/test:** address swarm-pr-review feedback on [#1611](https://github.com/ZaxbyHub/opencode-swarm/issues/1611) ([abf2162](https://github.com/ZaxbyHub/opencode-swarm/commit/abf21623789042799f1eda25628a1b94de698486))
+* **docs:** align knowledge schema example with current category/status unions ([#1611](https://github.com/ZaxbyHub/opencode-swarm/issues/1611)) ([212fc2e](https://github.com/ZaxbyHub/opencode-swarm/commit/212fc2e1c39ce8ad83e11c9ea2f3bf61ad4afa6c))
+* **pr-review:** close swarm-pr-review feedback on the severity-dialect change ([780ce0a](https://github.com/ZaxbyHub/opencode-swarm/commit/780ce0aa8fffd1727736d071004645f0f647b370))
+* **pr-review:** harden receipt diagnostics ([ea6a37d](https://github.com/ZaxbyHub/opencode-swarm/commit/ea6a37dfca62f7e5ea19365913083554bbd87913))
+* **pr-review:** unify severity dialects, close the severity-omission bypass, salvage conflicting CLEAN attestations ([711a6e2](https://github.com/ZaxbyHub/opencode-swarm/commit/711a6e299c052a598532317db27af073a6895e28))
+* **pr-review:** unify severity dialects, close the severity-omission bypass, salvage conflicting CLEAN attestations ([8eb8fc8](https://github.com/ZaxbyHub/opencode-swarm/commit/8eb8fc89048f40a5fcd5c830a04673b1d4f9233c)), closes [#2279](https://github.com/ZaxbyHub/opencode-swarm/issues/2279) [#2320](https://github.com/ZaxbyHub/opencode-swarm/issues/2320)
+* **pr-review:** validate verdict collection and partial retries ([5f70114](https://github.com/ZaxbyHub/opencode-swarm/commit/5f7011454b7bdde519460c19db033f57cdc2df9d))
+* **release-notes:** survive bot body rewrites, fall back to CHANGELOG for bare releases ([0fa14f1](https://github.com/ZaxbyHub/opencode-swarm/commit/0fa14f1cfacb516adf9ca7ae2a2a1976883ed033))
+* **release-notes:** survive bot body rewrites, fall back to CHANGELOG for bare releases (#release-notes-pipeline) ([7a7611f](https://github.com/ZaxbyHub/opencode-swarm/commit/7a7611f223b05e3f9b9655ff18d58f7057590a09))
+* **retention:** refresh delegation citations ([0b730e5](https://github.com/ZaxbyHub/opencode-swarm/commit/0b730e54d0bcd2d87d56e540f50bccdb33d09f43))
+
 ## [7.146.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.146.2...v7.146.3) (2026-08-24)
 
 
