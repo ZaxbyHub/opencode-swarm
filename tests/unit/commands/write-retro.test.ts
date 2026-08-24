@@ -47,6 +47,7 @@ describe('handleWriteRetroCommand', () => {
 		it('usage text contains all required JSON fields', async () => {
 			const result = await handleWriteRetroCommand('/test/dir', []);
 			expect(result).toContain('"phase": 1');
+			expect(result).toContain('"verdict": "pass"');
 			expect(result).toContain('"summary"');
 			expect(result).toContain('"task_count": 3');
 			expect(result).toContain('"total_tool_calls": 20');
@@ -99,6 +100,7 @@ describe('handleWriteRetroCommand', () => {
 			const result = await handleWriteRetroCommand('/test/dir', [
 				JSON.stringify({
 					phase: 4,
+					verdict: 'pass',
 					summary: 'Phase 4 complete',
 					task_count: 3,
 					task_complexity: 'simple',
@@ -129,6 +131,7 @@ describe('handleWriteRetroCommand', () => {
 			const result = await handleWriteRetroCommand('/test/dir', [
 				JSON.stringify({
 					phase: 5,
+					verdict: 'pass',
 					summary: 'Phase 5 complete',
 					task_count: 2,
 					task_complexity: 'moderate',
@@ -159,6 +162,7 @@ describe('handleWriteRetroCommand', () => {
 			const result = await handleWriteRetroCommand('/test/dir', [
 				JSON.stringify({
 					phase: 5,
+					verdict: 'pass',
 					summary: 'Phase 5 complete',
 					task_count: 1,
 					task_complexity: 'complex',
@@ -186,6 +190,7 @@ describe('handleWriteRetroCommand', () => {
 			await handleWriteRetroCommand('/test/dir', [
 				JSON.stringify({
 					phase: 3,
+					verdict: 'pass',
 					summary: 'Phase 3 summary',
 					task_count: 1,
 					task_complexity: 'simple',
@@ -201,6 +206,7 @@ describe('handleWriteRetroCommand', () => {
 
 			expect(mockExecuteWriteRetro).toHaveBeenCalledWith(
 				expect.objectContaining({
+					verdict: 'pass',
 					lessons_learned: ['Always test your code', 'Read before edit'],
 				}),
 				'/test/dir',

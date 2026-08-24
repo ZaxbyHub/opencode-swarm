@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.145.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.145.1...v7.145.2) (2026-08-23)
+
+
+### Bug Fixes
+
+* **ci:** keep coverage within merge queue deadline ([eb3204f](https://github.com/ZaxbyHub/opencode-swarm/commit/eb3204f29541f16fba86c5e2d3ef5d3da89e2094))
+* **phase-complete:** repair evidence and recovery paths ([35bfe29](https://github.com/ZaxbyHub/opencode-swarm/commit/35bfe29bbeb07cd59946451d17055aabe3674b10))
+
 ## [7.145.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.145.0...v7.145.1) (2026-08-23)
 
 

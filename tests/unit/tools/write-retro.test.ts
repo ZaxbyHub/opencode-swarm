@@ -18,6 +18,7 @@ import {
 function makeArgs(overrides: Partial<WriteRetroArgs> = {}): WriteRetroArgs {
 	return {
 		phase: 4,
+		verdict: 'pass',
 		summary: 'Phase 4 completed',
 		task_count: 3,
 		task_complexity: 'moderate',
@@ -92,6 +93,25 @@ describe('write_retro tool', () => {
 			expect(retroEntry.integration_issues).toBe(0);
 			expect(retroEntry.summary).toBe('Phase 4 completed');
 			expect(retroEntry.timestamp).toBeDefined();
+		});
+
+		test('persists a fail verdict without rewriting it to pass', async () => {
+			const args = makeArgs({
+				verdict: 'fail',
+				summary: 'Phase 4 blocked on reviewer findings',
+				test_failures: 2,
+			});
+			const result = await executeWriteRetro(args, tempDir);
+			const parsed = JSON.parse(result);
+
+			expect(parsed.success).toBe(true);
+			const loaded = await loadEvidence(tempDir, 'retro-4');
+			expect(loaded.status).toBe('found');
+			if (loaded.status !== 'found') return;
+
+			const entry = loaded.bundle.entries[0] as RetrospectiveEvidence;
+			expect(entry.verdict).toBe('fail');
+			expect(entry.summary).toContain('blocked');
 		});
 	});
 
@@ -182,6 +202,24 @@ describe('write_retro tool', () => {
 
 			expect(parsed.success).toBe(false);
 			expect(parsed.message).toContain('Invalid summary');
+		});
+
+		test('missing verdict returns stable explicit error and writes no file', async () => {
+			const args = {
+				...makeArgs(),
+				verdict: undefined,
+			} as unknown as WriteRetroArgs;
+			const result = await executeWriteRetro(args, tempDir);
+			const parsed = JSON.parse(result);
+
+			expect(parsed.success).toBe(false);
+			expect(parsed.reason).toBe('RETRO_VERDICT_REQUIRED');
+			expect(parsed.message).toContain('verdict');
+			expect(
+				fs.existsSync(
+					path.join(tempDir, '.swarm', 'evidence', 'retro-4', 'evidence.json'),
+				),
+			).toBe(false);
 		});
 	});
 

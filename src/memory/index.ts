@@ -1,6 +1,10 @@
 export type { MemoryConfig } from './config';
 export { DEFAULT_MEMORY_CONFIG, resolveMemoryConfig } from './config';
-export { MemoryDisabledError, MemoryValidationError } from './errors';
+export {
+	MemoryDisabledError,
+	MemoryPiiDetectorError,
+	MemoryValidationError,
+} from './errors';
 export {
 	evaluateMemoryRecallFixtures,
 	loadRecallEvaluationFixtures,
@@ -68,6 +72,15 @@ export {
 	writeMemoryLinkPointer,
 } from './memory-link';
 export type { MemoryOutcomeEvent } from './outcome-events';
+export {
+	computePiiScore,
+	createPiiDetector,
+	type PiiDetector,
+	type PiiFinding,
+	type PiiType,
+	RegexPiiDetector,
+	summarizePiiFindings,
+} from './pii';
 export { buildRecallPromptBlock } from './prompt-block';
 export type {
 	MemoryCompactOptions,
@@ -116,7 +129,15 @@ export {
 	validateMemoryProposal,
 	validateMemoryRecordRules,
 } from './schema';
-export { SQLiteMemoryProvider } from './sqlite-provider';
+export {
+	EVENT_CHAIN_GENESIS,
+	MEMORY_EVENTS_CHAIN_HEAD_KEY,
+	type MemoryAuditVerificationReport,
+	type MemoryEventRow,
+	memoryEventRowHash,
+	SQLiteMemoryProvider,
+	verifyMemoryEventChainRows,
+} from './sqlite-provider';
 export {
 	isCohortRoot,
 	isLocalRoot,

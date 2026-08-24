@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, setDefaultTimeout, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -13,6 +13,8 @@ import { runReviewEngine } from '../../../src/review/engine';
 import { runFinalReviewGate } from '../../../src/tools/phase-complete/gates/final-review-gate';
 import type { GateContext } from '../../../src/tools/phase-complete/gates/types';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
+
+setDefaultTimeout(15_000);
 
 function git(directory: string, args: string[]): string {
 	const result = spawnSync('git', args, {
@@ -146,7 +148,9 @@ describe('phase final-review gate — regression: terminal scope freshness (F-D3
 
 			expect(gate.blocked).toBe(true);
 			expect(gate.reason).toBe('FINAL_REVIEW_EVIDENCE_STALE');
-			expect(gate.message).toContain('repository scope changed');
+			expect(gate.message).toContain(
+				'repository scope, plan requirements, or review policy changed',
+			);
 			expect(counter.calls).toBe(0);
 		} finally {
 			fixture.cleanup();

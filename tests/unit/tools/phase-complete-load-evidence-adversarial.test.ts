@@ -2,13 +2,19 @@
  * Adversarial tests for phase-complete.ts loadEvidence callers — attack vectors only
  * Tests error propagation, memory overflow, injection, boundary violations
  */
-
 import { afterEach, beforeEach, describe, expect, test, vi } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
+
+function retrospectiveRecovery(result: {
+	gate_report?: { entries?: Array<{ id: string; recovery?: unknown }> };
+}) {
+	return result.gate_report?.entries?.find(
+		(entry) => entry.id === 'retrospective',
+	)?.recovery;
+}
 
 // Mock loadEvidence and listEvidenceTaskIds from evidence/manager
 // IMPORTANT: Use local mock variable pattern, NOT vi.mocked()
@@ -169,8 +175,8 @@ describe('phase_complete - loadEvidence adversarial testing', () => {
 		});
 	});
 
-	describe('invalid_schema with large errors array — memory overflow via join()', () => {
-		test('should handle 1000 error messages without overflow', async () => {
+	describe('invalid_schema error aggregation is bounded', () => {
+		test('caps 1000 error messages without overflow', async () => {
 			// Arrange
 			const phase = 1;
 			ensureAgentSession('sess1');
@@ -200,7 +206,9 @@ describe('phase_complete - loadEvidence adversarial testing', () => {
 			expect(parsed.status).toBe('blocked');
 			expect(parsed.message).toContain('Schema validation failed');
 			expect(parsed.message).toContain('error.field.0');
-			expect(parsed.message).toContain('error.field.999');
+			expect(parsed.message).toContain('error.field.7');
+			expect(parsed.message).not.toContain('error.field.999');
+			expect(parsed.message.length).toBeLessThanOrEqual(1024);
 		});
 
 		test('should handle each error being large (100 chars × 1000 = 100KB)', async () => {
@@ -229,9 +237,9 @@ describe('phase_complete - loadEvidence adversarial testing', () => {
 			});
 			const parsed = JSON.parse(result);
 
-			// Assert - actual length is ~91KB (1000 * ~91 chars)
+			// The public diagnostic remains bounded even for ~100KB of source errors.
 			expect(parsed.success).toBe(false);
-			expect(parsed.message.length).toBeGreaterThan(90000); // ~91KB
+			expect(parsed.message.length).toBeLessThanOrEqual(1024);
 		});
 
 		test('should handle accumulated errors from multiple retro bundles', async () => {
@@ -268,11 +276,13 @@ describe('phase_complete - loadEvidence adversarial testing', () => {
 			});
 			const parsed = JSON.parse(result);
 
-			// Assert - all errors should be accumulated
+			// The first bounded slice is retained; later entries cannot inflate output.
 			expect(parsed.success).toBe(false);
 			expect(parsed.message).toContain('Schema validation failed');
 			expect(parsed.message).toContain('bundle.error.0');
-			expect(parsed.message).toContain('bundle.error.99');
+			expect(parsed.message).toContain('bundle.error.7');
+			expect(parsed.message).not.toContain('bundle.error.99');
+			expect(parsed.message.length).toBeLessThanOrEqual(1024);
 		});
 	});
 
@@ -452,7 +462,7 @@ describe('phase_complete - loadEvidence adversarial testing', () => {
 			expect(parsed.message).toContain('Invalid phase number');
 		});
 
-		test('should accept MAX_SAFE_INTEGER but handle in template', async () => {
+		test('should accept MAX_SAFE_INTEGER and preserve it in typed recovery', async () => {
 			// Arrange
 			const phase = Number.MAX_SAFE_INTEGER;
 			ensureAgentSession('sess1');
@@ -471,9 +481,7 @@ describe('phase_complete - loadEvidence adversarial testing', () => {
 			expect(parsed.success).toBe(false);
 			expect(parsed.phase).toBe(Number.MAX_SAFE_INTEGER);
 
-			// Verify template includes MAX_SAFE_INTEGER
-			const template = JSON.parse(parsed.warnings[1] as string);
-			expect(template.entries[0].phase_number).toBe(Number.MAX_SAFE_INTEGER);
+			expect(retrospectiveRecovery(parsed)).toMatchObject({ args: { phase } });
 		});
 
 		test('should handle NaN phase', async () => {
@@ -592,115 +600,6 @@ describe('phase_complete - loadEvidence adversarial testing', () => {
 			// Check message contains multiple error types
 			expect(parsed.message).toContain('schema_version: Required');
 			expect(parsed.message).toContain('entries: Must be array');
-		});
-	});
-
-	describe('warnings[1] template — injection via phase number', () => {
-		test('should embed phase number in template without sanitization', async () => {
-			// Arrange
-			const phase = 1;
-			ensureAgentSession('sess1');
-
-			mockLoadEvidence.mockResolvedValue({ status: 'not_found' });
-			mockListEvidenceTaskIds.mockResolvedValue([]);
-
-			// Act
-			const result = await phase_complete.execute({
-				phase,
-				sessionID: 'sess1',
-			});
-			const parsed = JSON.parse(result);
-
-			// Assert - phase number appears in template
-			const template = JSON.parse(parsed.warnings[1] as string);
-			expect(template.entries[0].phase_number).toBe(1);
-			expect(template.task_id).toBe('retro-1');
-			expect(template.entries[0].summary).toContain('Phase 1');
-		});
-
-		test('should handle large phase number in template', async () => {
-			// Arrange
-			const phase = 999999999;
-			ensureAgentSession('sess1');
-
-			mockLoadEvidence.mockResolvedValue({ status: 'not_found' });
-			mockListEvidenceTaskIds.mockResolvedValue([]);
-
-			// Act
-			const result = await phase_complete.execute({
-				phase,
-				sessionID: 'sess1',
-			});
-			const parsed = JSON.parse(result);
-
-			// Assert - large phase number appears in template
-			const template = JSON.parse(parsed.warnings[1] as string);
-			expect(template.entries[0].phase_number).toBe(999999999);
-			expect(template.task_id).toBe('retro-999999999');
-		});
-
-		test('should handle MAX_SAFE_INTEGER phase in template', async () => {
-			// Arrange
-			const phase = Number.MAX_SAFE_INTEGER;
-			ensureAgentSession('sess1');
-
-			mockLoadEvidence.mockResolvedValue({ status: 'not_found' });
-			mockListEvidenceTaskIds.mockResolvedValue([]);
-
-			// Act
-			const result = await phase_complete.execute({
-				phase,
-				sessionID: 'sess1',
-			});
-			const parsed = JSON.parse(result);
-
-			// Assert - MAX_SAFE_INTEGER appears in template
-			const template = JSON.parse(parsed.warnings[1] as string);
-			expect(template.entries[0].phase_number).toBe(Number.MAX_SAFE_INTEGER);
-			expect(template.task_id).toBe(`retro-${Number.MAX_SAFE_INTEGER}`);
-		});
-
-		test('template phase_number cannot be used for JSON injection', async () => {
-			// Arrange
-			const phase = 1;
-			ensureAgentSession('sess1');
-
-			mockLoadEvidence.mockResolvedValue({ status: 'not_found' });
-			mockListEvidenceTaskIds.mockResolvedValue([]);
-
-			// Act
-			const result = await phase_complete.execute({
-				phase,
-				sessionID: 'sess1',
-			});
-			const parsed = JSON.parse(result);
-
-			// Assert - phase_number is a number, not a string, so injection impossible
-			const template = JSON.parse(parsed.warnings[1] as string);
-			expect(typeof template.entries[0].phase_number).toBe('number');
-		});
-
-		test('template task_id with phase cannot be used for injection', async () => {
-			// Arrange
-			const phase = 1;
-			ensureAgentSession('sess1');
-
-			mockLoadEvidence.mockResolvedValue({ status: 'not_found' });
-			mockListEvidenceTaskIds.mockResolvedValue([]);
-
-			// Act
-			const result = await phase_complete.execute({
-				phase,
-				sessionID: 'sess1',
-			});
-			const parsed = JSON.parse(result);
-
-			// Assert - task_id is constructed from phase, not user input
-			const template = JSON.parse(parsed.warnings[1] as string);
-			expect(template.task_id).toBe('retro-1');
-			expect(typeof template.task_id).toBe('string');
-			expect(template.task_id).not.toContain('<');
-			expect(template.task_id).not.toContain('>');
 		});
 	});
 });

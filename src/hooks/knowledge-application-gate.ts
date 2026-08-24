@@ -55,6 +55,7 @@ import {
 } from './knowledge-application.js';
 import {
 	commitApplicationOutcomeBatch,
+	commitGateReleaseBatch,
 	queryLiveMemberships,
 	type ReceiptMembership,
 } from './knowledge-receipt-ledger.js';
@@ -116,10 +117,18 @@ function selectStaleUnmarkedMemberships(
 	stalenessMs: number,
 ): ReceiptMembership[] {
 	return memberships.filter((membership) => {
-		if (membership.application_marker) return false;
+		if (membership.application_marker || hasEffectiveGateRelease(membership))
+			return false;
 		const committedAt = Date.parse(membership.committed_at);
 		return Number.isFinite(committedAt) && now - committedAt > stalenessMs;
 	});
+}
+
+function hasEffectiveGateRelease(membership: ReceiptMembership): boolean {
+	return (
+		membership.gate_release?.membership_event_id ===
+		membership.membership_event_id
+	);
 }
 
 function groupMembershipsByTrace(
@@ -221,7 +230,8 @@ export async function knowledgeApplicationGateBefore(
 		return;
 	}
 	let unackedMemberships = criticalMemberships.filter(
-		(membership) => !membership.application_marker,
+		(membership) =>
+			!membership.application_marker && !hasEffectiveGateRelease(membership),
 	);
 	if (unackedMemberships.length === 0) {
 		clearGateDenialCount(sessionID);
@@ -246,19 +256,18 @@ export async function knowledgeApplicationGateBefore(
 			for (const [traceId, memberships] of groupMembershipsByTrace(
 				staleMemberships,
 			)) {
-				const committed = await commitApplicationOutcomeBatch(directory, {
+				const committed = await commitGateReleaseBatch(directory, {
 					trace_id: traceId,
 					session_id: sessionID,
 					items: memberships.map((membership) => ({
 						entry_id: membership.entry_id,
-						outcome: 'applied' as const,
-						source: 'application_gate_staleness_clear',
+						source: 'application_gate_staleness_release',
 						reason: 'configured staleness escape hatch',
 					})),
 				});
 				if (!committed.ok || committed.rejected.length > 0) {
 					throw new Error(
-						'KNOWLEDGE_ENFORCE_GATE_DENY: could not durably record staleness clear',
+						'KNOWLEDGE_ENFORCE_GATE_DENY: could not durably record staleness release',
 					);
 				}
 			}
@@ -274,13 +283,6 @@ export async function knowledgeApplicationGateBefore(
 			const staleIds = [
 				...new Set(staleMemberships.map((membership) => membership.entry_id)),
 			];
-			for (const id of staleIds) {
-				if (
-					!unackedMemberships.some((membership) => membership.entry_id === id)
-				) {
-					addKnowledgeAckDedup(buildAckDedupKey(sessionID, id, 'applied'));
-				}
-			}
 			clearGateDenialCount(sessionID);
 			// Awaited (not fire-and-forget): the bypass state above is already
 			// committed, so the audit write is the only remaining evidence of
@@ -333,24 +335,20 @@ export async function knowledgeApplicationGateBefore(
 			for (const [traceId, memberships] of groupMembershipsByTrace(
 				unackedMemberships,
 			)) {
-				const committed = await commitApplicationOutcomeBatch(directory, {
+				const committed = await commitGateReleaseBatch(directory, {
 					trace_id: traceId,
 					session_id: sessionID,
 					items: memberships.map((membership) => ({
 						entry_id: membership.entry_id,
-						outcome: 'applied' as const,
-						source: 'application_gate_denial_limit_clear',
+						source: 'application_gate_denial_limit_release',
 						reason: 'configured denial-count escape hatch',
 					})),
 				});
 				if (!committed.ok || committed.rejected.length > 0) {
 					throw new Error(
-						'KNOWLEDGE_ENFORCE_GATE_DENY: could not durably record denial-limit clear',
+						'KNOWLEDGE_ENFORCE_GATE_DENY: could not durably record denial-limit release',
 					);
 				}
-			}
-			for (const id of unacked) {
-				addKnowledgeAckDedup(buildAckDedupKey(sessionID, id, 'applied'));
 			}
 			clearCriticalShownIds(sessionID);
 			clearGateDenialCount(sessionID);
@@ -472,7 +470,8 @@ export async function knowledgeApplicationTransformScan(
 			(membership) =>
 				membership.trace_id === ack.trace_id &&
 				membership.entry_id === ack.id &&
-				!membership.application_marker,
+				!membership.application_marker &&
+				!hasEffectiveGateRelease(membership),
 		);
 		if (memberships.length === 0) continue;
 		const byTrace = new Map<string, typeof memberships>();

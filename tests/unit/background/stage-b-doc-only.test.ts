@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import type { BackgroundDelegationRecord } from '../../../src/background/pending-delegations';
 import { ingestBackgroundStageBCompletion } from '../../../src/background/stage-b-gates';
@@ -16,6 +15,7 @@ import {
 	startAgentSession,
 	swarmState,
 } from '../../../src/state';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 function git(directory: string, args: string[]): void {
 	const result = spawnSync('git', ['-C', directory, ...args], {
@@ -57,9 +57,7 @@ let testDirectory = '';
 describe('background doc-only gate evidence', () => {
 	beforeEach(() => {
 		resetSwarmState();
-		testDirectory = fs.mkdtempSync(
-			path.join(os.tmpdir(), 'background-doc-gate-'),
-		);
+		testDirectory = canonicalMkdtemp('background-doc-gate-');
 		git(testDirectory, ['init']);
 		git(testDirectory, ['config', 'user.email', 'tests@example.com']);
 		git(testDirectory, ['config', 'user.name', 'Tests']);

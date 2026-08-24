@@ -236,6 +236,39 @@ Each entry below points at a release note in `docs/releases/` and the invariant(
   registry-completeness discipline `check-tool-registration.ts` enforces for
   tools now applies to event kinds via `check-event-contract.ts`).
 
+### Issue #2036 — Retention registry: every durable writer must be registered
+
+- **Symptom class prevented:** retention policy was defined piecemeal across
+  ~190 write call sites in ~103 modules; a new durable stream could be added
+  with no review surface forcing a retention/owner decision, and full-file
+  readers could scale with history with nobody accountable for the bound.
+- **Fix applied (PR 08 of the observability sequence):** the complete
+  retention and read-amplification registry lives as DATA in
+  `scripts/retention-registry.data.ts` (every stream under `.swarm/`
+  and the platform-data roots, with writers, readers, limits + scope, read
+  bounds, lock/crash/close/reset policy, owner, and a completed disposition).
+  `bun run check:retention` (`scripts/check-retention-registry.ts`, a
+  hard-fail CI quality step after `check:events`) enumerates every durable
+  writing module under `src/` (write APIs, atomic-write helper calls, SQLite
+  open/acquire seams) and fails when a writer has no registry row, when an
+  exemption goes stale, when a disposition is a placeholder, or when a
+  cited repo FILE no longer exists (bare-filename and line-level citation
+  accuracy stay ungated, "verified-as-of" pointers — see the registry doc's
+  Appendix A). The ratified document is
+  `docs/observability-retention-registry.md`; dispositions may only be
+  fix-in-issue (sequence window #2029–#2051 or a registered amendment
+  issue),
+  retain-by-design (citation), or not-a-defect (source proof).
+- **Placement invariant:** the registry data deliberately lives under
+  `scripts/`, never `src/` — it must never enter the plugin bundle or the
+  initialization path (invariants 1 and 2 stay untouched by construction).
+  Known limitation: a module mutating a SQLite handle acquired elsewhere is
+  invisible; the DB open/acquire seam is the enforced boundary.
+- **Maps to AGENTS.md:** invariants 4 (registry covers only `.swarm/` +
+  platform roots), 7 (tests use exported collectors with fixture trees, no
+  mock.module), 11 (registration-completeness discipline extended from
+  tools/events to durable storage), and 12 (release fragment).
+
 ### Issue #2031 — Diagnostic FIFO eviction changed receipt and gate correctness
 
 - **Symptom:** retrieval membership and terminal outcomes shared the bounded

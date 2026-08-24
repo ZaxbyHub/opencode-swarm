@@ -18,6 +18,7 @@ import { createLeanTurboReviewTool } from './lean-turbo-review.js';
 import { createLeanTurboRunPhaseTool } from './lean-turbo-run-phase.js';
 import { TOOL_MANIFEST } from './manifest';
 import { createPhaseCompleteTool } from './phase-complete.js';
+import { createRunPhaseReviewTool } from './run-phase-review.js';
 import { createSwarmCommandTool } from './swarm-command';
 
 /**
@@ -73,6 +74,12 @@ export function buildPluginToolObject(
 		reviewAgentModelRegistry,
 		getActiveAgentName,
 	});
+	tools.run_phase_review = createRunPhaseReviewTool(
+		reviewModelDispatcher,
+		reviewAgentNames,
+		reviewAgentModelRegistry,
+		getActiveAgentName,
+	);
 	tools.lean_turbo_review = createLeanTurboReviewTool(
 		reviewModelDispatcher,
 		reviewAgentNames,

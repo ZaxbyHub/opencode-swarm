@@ -194,4 +194,39 @@ describe('memory redaction', () => {
 		expect(findSecrets(text)).toEqual([]);
 		expect(redactSecrets(text)).toBe(text);
 	});
+
+	// #1466 (DD-05 context heuristic): AWS secret near an access key id
+	test('redacts a 40-char secret on the same line as an AKIA access key id', () => {
+		const secret = 'AbCdEfGhIjKlMnOpQrStUvWxYz01234567890123'; // 40 chars base64-ish
+		const text = `config: AKIAIOSFODNN7EXAMPLE secret ${secret}`;
+		expect(findSecrets(text).map((f) => f.type)).toContain(
+			'aws_secret_access_key_context',
+		);
+	});
+	test('does not redact a 40-char secret on a DIFFERENT line than the AKIA id', () => {
+		const secret = 'AbCdEfGhIjKlMnOpQrStUvWxYz01234567890123';
+		const text = `access: AKIAIOSFODNN7EXAMPLE\nsecret: ${secret}`;
+		expect(findSecrets(text).map((f) => f.type)).not.toContain(
+			'aws_secret_access_key_context',
+		);
+	});
+	test('does not redact a 40-char base64 token with no AKIA context', () => {
+		const text = 'hash: ZW50cnkgcGFzc3dvcmQgZXhhbXBsZSB0b2tlbg==';
+		expect(findSecrets(text)).toEqual([]);
+	});
+	test('does not redact when the secret is more than 200 chars after the AKIA id', () => {
+		const secret = 'AbCdEfGhIjKlMnOpQrStUvWxYz01234567890123';
+		const filler = 'x'.repeat(220);
+		const text = `AKIAIOSFODNN7EXAMPLE ${filler} ${secret}`;
+		expect(findSecrets(text).map((f) => f.type)).not.toContain(
+			'aws_secret_access_key_context',
+		);
+	});
+	test('redacts SecretAccessKey JSON-style labeled secrets', () => {
+		const secret = 'AbCdEfGhIjKlMnOpQrStUvWxYz01234567890123';
+		const text = `"SecretAccessKey": "${secret}"`;
+		expect(findSecrets(text).map((f) => f.type)).toContain(
+			'aws_secret_access_key',
+		);
+	});
 });

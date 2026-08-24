@@ -20,7 +20,7 @@ import {
 	type MemoryRecallPlannerInput,
 } from './recall-planner';
 import { appendMemoryRunLog } from './run-log';
-import { MEMORY_RECALL_SENTINEL } from './sentinel';
+import { MEMORY_RECALL_SENTINEL, RECALL_BUNDLE_MARKER_RE } from './sentinel';
 import type {
 	MemoryKind,
 	MemoryScopeRef,
@@ -534,10 +534,19 @@ function isCuratorAgent(agentRole: string): boolean {
 function messagesContainRecall(messages: unknown[]): boolean {
 	return messages.some((message) =>
 		((message as { parts?: unknown })?.parts as unknown[] | undefined)?.some(
-			(part) =>
-				typeof (part as { text?: unknown })?.text === 'string' &&
-				((part as { text: string }).text.includes(MEMORY_SENTINEL) ||
-					(part as { text: string }).text.includes('Retrieved Swarm Memory')),
+			(part) => {
+				const text = (part as { text?: unknown })?.text;
+				if (typeof text !== 'string') return false;
+				// #1466 (DD-14): bundle-anchored detection. The marker is emitted
+				// by buildRecallPromptBlock and banned from stored memory text at
+				// write time (validateMemoryRecordRules), so a stored memory cannot
+				// forge it. The full sentinel header — also write-banned — keeps
+				// pre-#1466 injected blocks detectable. The bare short-substring
+				// check is deliberately REMOVED: it was forgeable via memory text.
+				return (
+					RECALL_BUNDLE_MARKER_RE.test(text) || text.includes(MEMORY_SENTINEL)
+				);
+			},
 		),
 	);
 }

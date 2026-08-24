@@ -43,10 +43,22 @@ const SECRET_PATTERNS: SecretPattern[] = [
 	},
 	// FR-08 / DD-05: AWS secret access key. False-positive risk: keys shorter than 40 characters
 	// are rejected; the `=`/`:` separator plus key name is required to avoid matching random strings.
+	// #1466: the label set also covers JSON-style `SecretAccessKey` keys — the
+	// optional closing quote lets `"SecretAccessKey": "..."` match.
 	{
 		type: 'aws_secret_access_key',
 		pattern:
-			/\b(?:aws_secret_access_key|AWS_SECRET_ACCESS_KEY)\s*[=:]\s*[A-Za-z0-9/+=]{40}\b/g,
+			/\b(?:aws_secret_access_key|AWS_SECRET_ACCESS_KEY|secret_access_key|SecretAccessKey)"?\s*[=:]\s*["']?[A-Za-z0-9/+=]{40}\b/g,
+	},
+	// #1466 (DD-05 context heuristic): a 40-char base64 secret sitting on the SAME
+	// line as (within 200 chars after) an AWS access key id. The `[^\n]` window is
+	// intentional — requiring the same logical line keeps the heuristic off
+	// unrelated base64 blobs elsewhere in the document. False-positive risk:
+	// any 40-char base64-ish token within 200 chars after an AKIA id is
+	// redacted together with the id. Keys on separate lines are NOT matched.
+	{
+		type: 'aws_secret_access_key_context',
+		pattern: /\bAKIA[0-9A-Z]{16}\b[^\n]{0,200}?\b[A-Za-z0-9/+=]{40}\b/g,
 	},
 	// FR-08 / DD-05: Stripe secret keys. False-positive risk: keys using prefixes other than
 	// `sk_`/`rk_` or environments other than `live`/`test` are ignored; short strings are excluded.
@@ -71,21 +83,36 @@ const SECRET_PATTERNS: SecretPattern[] = [
 
 /**
  * #1850: Coarse redaction-policy fingerprint. Two cohort members with the same
- * count of secret-pattern families and the same `rejectDurableSecrets` setting
- * are considered policy-compatible; a mismatch fails closed at link time and on
+ * count of secret-pattern families and the same redaction toggles are
+ * considered policy-compatible; a mismatch fails closed at link time and on
  * cohort-root open. This is honest about what it measures (the regex pattern
- * count + the durable-rejection toggle) — it is NOT a content hash of stored
+ * count + the durable-rejection toggles) — it is NOT a content hash of stored
  * records. Bump the salt constant when the redaction contract changes
- * meaningfully (e.g. adding PII detection per #1466).
+ * meaningfully (done for #1466: PII detection settings joined the policy).
  */
-export const REDACTION_POLICY_SALT = 1;
+export const REDACTION_POLICY_SALT = 2;
+/**
+ * #1466: redaction-policy input. `detectPii`/`rejectDurablePii`/`piiDetector`
+ * are optional so non-memory callers (e.g. the consensus miner, which applies
+ * the default-off policy) keep a one-field call site. Absent PII fields are
+ * treated as off/regex — the pre-#1466 behavior.
+ */
+export interface RedactionPolicyVersionInput {
+	rejectDurableSecrets: boolean;
+	detectPii?: boolean;
+	rejectDurablePii?: boolean;
+	piiDetector?: 'regex' | 'ner';
+}
 export function computeRedactionPolicyVersion(
-	rejectDurableSecrets: boolean,
+	policy: RedactionPolicyVersionInput,
 ): number {
 	return (
 		REDACTION_POLICY_SALT * 1_000_000 +
 		SECRET_PATTERNS.length * 2 +
-		(rejectDurableSecrets ? 1 : 0)
+		(policy.rejectDurableSecrets ? 1 : 0) +
+		(policy.detectPii ? 4 : 0) +
+		(policy.rejectDurablePii ? 8 : 0) +
+		(policy.piiDetector === 'ner' ? 16 : 0)
 	);
 }
 
@@ -117,9 +144,16 @@ export interface MemoryCohortFingerprintInput {
  * `memory-cohort-config.json` and read back by every consumer.
  *
  * Version 1 is the algorithm below (sorted-key canonical JSON -> sha256 -> first
- * 12 hex chars). Files written before this field existed are treated as
+ * 12 hex chars). Files written before the field existed are treated as
  * version 1, which is exactly correct: they were produced by this same
  * algorithm, so they keep validating with no forced re-link.
+ *
+ * Version 2 (#1466): no change to canonicalization, hashing, or truncation —
+ * bumped because `redaction_policy_version` changed its value for unchanged
+ * user config (REDACTION_POLICY_SALT 1→2 with the PII policy fields joining
+ * the input, plus a new secret-pattern family). Per the rule below, a changed
+ * digest for an unchanged input is a version bump so legacy files surface as
+ * "re-run `/swarm memory link`" instead of a false config-mismatch throw.
  *
  * BUMP THIS whenever a change would alter the digest for an unchanged input —
  * e.g. a different hash, a different truncation length, a change to
@@ -128,7 +162,7 @@ export interface MemoryCohortFingerprintInput {
  * comparing fingerprints, so a bump surfaces as "re-run `/swarm memory link`"
  * instead of being misreported as a real provider/embedding config mismatch.
  */
-export const FINGERPRINT_ALGORITHM_VERSION = 1;
+export const FINGERPRINT_ALGORITHM_VERSION = 2;
 
 /**
  * #2062 F-012 (R3 fix): the algorithm version implied by a persisted cohort
@@ -247,14 +281,23 @@ export function computeMemoryCohortFingerprint(
 /** Convenience: build the fingerprint input from a memory config subset. */
 export function buildMemoryCohortFingerprintInput(config: {
 	provider: string;
-	redaction: { rejectDurableSecrets: boolean };
+	redaction: {
+		rejectDurableSecrets: boolean;
+		/** #1466 PII policy fields (optional — pre-#1466 callers omit them). */
+		detectPii?: boolean;
+		rejectDurablePii?: boolean;
+		piiDetector?: 'regex' | 'ner';
+	};
 	embeddings: { model: string; dimension: number; version?: string };
 }): MemoryCohortFingerprintInput {
 	return {
 		provider: config.provider,
-		redaction_policy_version: computeRedactionPolicyVersion(
-			config.redaction.rejectDurableSecrets,
-		),
+		redaction_policy_version: computeRedactionPolicyVersion({
+			rejectDurableSecrets: config.redaction.rejectDurableSecrets,
+			detectPii: config.redaction.detectPii,
+			rejectDurablePii: config.redaction.rejectDurablePii,
+			piiDetector: config.redaction.piiDetector,
+		}),
 		embedding_model: config.embeddings.model,
 		embedding_dimension: config.embeddings.dimension,
 		embedding_version: config.embeddings.version ?? 'default',

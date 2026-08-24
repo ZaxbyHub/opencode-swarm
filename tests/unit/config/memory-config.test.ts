@@ -65,7 +65,13 @@ describe('MemoryConfigSchema', () => {
 				propagationLookbackDays: 30,
 			},
 			writes: { mode: 'propose' },
-			redaction: { rejectDurableSecrets: true },
+			redaction: {
+				rejectDurableSecrets: true,
+				detectPii: false,
+				piiDetector: 'regex',
+				rejectDurablePii: false,
+				piiThreshold: 0.7,
+			},
 			maintenance: {
 				lowUtilityMaxConfidence: 0.45,
 				lowUtilityMinAgeDays: 30,
@@ -361,5 +367,22 @@ describe('MemoryConfigSchema', () => {
 
 		expect(config.provider).toBe('sqlite');
 		expect(config.sqlite.path).toBe('.swarm/memory/memory.db');
+	});
+
+	// PR #2310 feedback PRR-012: threshold 1 would silently disable PII
+	// rejection (scores never reach 1 and the comparison is strict >).
+	test('rejects piiThreshold = 1 (silent-disable footgun, loud at parse)', () => {
+		expect(() =>
+			MemoryConfigSchema.parse({
+				enabled: true,
+				redaction: { rejectDurablePii: true, piiThreshold: 1 },
+			}),
+		).toThrow(/strictly less than 1/);
+		expect(() =>
+			MemoryConfigSchema.parse({
+				enabled: true,
+				redaction: { piiThreshold: 0.99 },
+			}),
+		).not.toThrow();
 	});
 });

@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { loadPluginConfigWithMeta } from '../config/index.js';
 import { KnowledgeConfigSchema } from '../config/schema.js';
@@ -10,6 +10,7 @@ import {
 	type ReceiptLedgerPaths,
 	ReceiptStoreError,
 	type ReceiptStoreErrorCode,
+	readBytesIfPresent,
 	readUtf8IfPresent,
 	receiptRecordHash,
 	withReceiptLedgerLock,
@@ -68,8 +69,8 @@ export type ReceiptSourceCode =
 	| 'architect_marker'
 	| 'test_engineer'
 	| 'phase_override'
-	| 'application_gate_staleness_clear'
-	| 'application_gate_denial_limit_clear'
+	| 'application_gate_staleness_release'
+	| 'application_gate_denial_limit_release'
 	| 'manual'
 	| 'migration'
 	| 'unknown';
@@ -82,8 +83,8 @@ export const CANONICAL_RECEIPT_SOURCES: ReadonlySet<string> = new Set([
 	'architect_marker',
 	'test_engineer',
 	'phase_override',
-	'application_gate_staleness_clear',
-	'application_gate_denial_limit_clear',
+	'application_gate_staleness_release',
+	'application_gate_denial_limit_release',
 	'manual',
 	'migration',
 	'unknown',
@@ -132,6 +133,14 @@ export interface ReceiptApplicationMarker {
 	committed_at: string;
 }
 
+export interface ReceiptGateRelease {
+	source: string;
+	reason?: string;
+	event_id: string;
+	committed_at: string;
+	membership_event_id: string;
+}
+
 export interface ReceiptMembership {
 	trace_id: string;
 	entry_id: string;
@@ -151,10 +160,24 @@ export interface ReceiptMembership {
 	/** Append-only audited terminal transitions; `terminal` is the current gate state. */
 	terminal_history?: ReceiptTerminal[];
 	application_marker?: ReceiptApplicationMarker;
+	gate_release?: ReceiptGateRelease;
 	cohort_id?: string;
 	source_link_id?: string;
 	exposure_kind: ReceiptExposureKind;
 	origin: 'v2' | 'legacy';
+}
+
+export interface ReceiptRepairUncertainty {
+	phase: string;
+	session_id: string;
+	task_id?: string;
+	reason: string;
+	repair_id: string;
+	installed_at: string;
+	raw_journal_sha256: string;
+	raw_journal_bytes: number;
+	salvage_through_seq: number;
+	salvage_through_hash: string;
 }
 
 export type ReceiptExposureKind =
@@ -206,8 +229,11 @@ export type ReceiptTransitionKind =
 	| 'terminal_attempt_idempotent'
 	| 'authorized_transition_committed'
 	| 'application_marker_committed'
+	| 'gate_release_committed'
 	| 'phase_close_intent'
 	| 'phase_closed'
+	| 'repair_uncertainty_installed'
+	| 'repair_uncertainty_cleared'
 	| 'legacy_imported'
 	| 'legacy_unverifiable'
 	| 'cutover_completed'
@@ -234,6 +260,7 @@ interface LedgerState {
 	legacyTraceRegistry: Set<string>;
 	legacyUnverifiableTraceIds: Set<string>;
 	phaseLifecycle: Map<string, PhaseLifecycle>;
+	repairUncertainties: Map<string, ReceiptRepairUncertainty>;
 	auditTail: ReceiptAuditSummary[];
 	lastSeq: number;
 	lastHash: string;
@@ -258,6 +285,9 @@ const MAX_JOURNAL_BYTES = 32 * 1024 * 1024;
 const MAX_ARCHIVE_RECORDS = 10_000;
 const MAX_ARCHIVE_BYTES = 16 * 1024 * 1024;
 const MAX_LEGACY_BYTES = 32 * 1024 * 1024;
+const MAX_REPAIR_CAPTURE_BYTES = 4 * 1024 * 1024;
+const MAX_REPAIR_QUARANTINE_RECORDS = 8;
+const REPAIR_QUARANTINE_SCHEMA_VERSION = 1;
 const DEFAULT_RECEIPT_GRACE_DAYS = 7;
 const keyOf = (traceId: string, entryId: string): string =>
 	`${traceId.length}:${traceId}${entryId}`;
@@ -271,6 +301,8 @@ const phaseLifecycleKey = (
 	`${sessionId.length}:${sessionId}${phase.length}:${phase}${
 		taskId === undefined ? 'u:' : `s:${taskId.length}:${taskId}`
 	}`;
+const repairUncertaintyKey = (phase: string, sessionId: string): string =>
+	`${sessionId.length}:${sessionId}${phase.length}:${phase}`;
 
 function nowIso(): string {
 	return new Date(_internals.nowMs()).toISOString();
@@ -298,6 +330,7 @@ function emptyState(
 		legacyTraceRegistry: new Set(),
 		legacyUnverifiableTraceIds: new Set(),
 		phaseLifecycle: new Map(),
+		repairUncertainties: new Map(),
 		auditTail: [],
 		lastSeq: 0,
 		lastHash: GENESIS_HASH,
@@ -452,6 +485,87 @@ function parseApplicationMarker(
 	};
 }
 
+function parseGateRelease(value: unknown): ReceiptGateRelease | null {
+	if (!isPlainRecord(value)) return null;
+	if (
+		!hasOnlyKeys(value, [
+			'source',
+			'reason',
+			'event_id',
+			'committed_at',
+			'membership_event_id',
+		]) ||
+		typeof value.source !== 'string' ||
+		!isOptionalString(value.reason) ||
+		typeof value.event_id !== 'string' ||
+		!value.event_id ||
+		!isValidTimestamp(value.committed_at) ||
+		typeof value.membership_event_id !== 'string' ||
+		!value.membership_event_id
+	) {
+		return null;
+	}
+	return {
+		source: value.source,
+		reason: value.reason,
+		event_id: value.event_id,
+		committed_at: value.committed_at,
+		membership_event_id: value.membership_event_id,
+	};
+}
+
+function parseRepairUncertainty(
+	value: unknown,
+): ReceiptRepairUncertainty | null {
+	if (!isPlainRecord(value)) return null;
+	if (
+		!hasOnlyKeys(value, [
+			'phase',
+			'session_id',
+			'task_id',
+			'reason',
+			'repair_id',
+			'installed_at',
+			'raw_journal_sha256',
+			'raw_journal_bytes',
+			'salvage_through_seq',
+			'salvage_through_hash',
+		]) ||
+		typeof value.phase !== 'string' ||
+		!value.phase ||
+		typeof value.session_id !== 'string' ||
+		!value.session_id ||
+		!isOptionalString(value.task_id) ||
+		typeof value.reason !== 'string' ||
+		!value.reason ||
+		typeof value.repair_id !== 'string' ||
+		!value.repair_id ||
+		!isValidTimestamp(value.installed_at) ||
+		typeof value.raw_journal_sha256 !== 'string' ||
+		!/^[a-f0-9]{64}$/.test(value.raw_journal_sha256) ||
+		!Number.isInteger(value.raw_journal_bytes) ||
+		(value.raw_journal_bytes as number) < 0 ||
+		!Number.isInteger(value.salvage_through_seq) ||
+		(value.salvage_through_seq as number) < 0 ||
+		typeof value.salvage_through_hash !== 'string' ||
+		!value.salvage_through_hash
+	) {
+		return null;
+	}
+	return {
+		phase: value.phase,
+		session_id: value.session_id,
+		task_id: value.task_id,
+		reason: value.reason,
+		repair_id: value.repair_id,
+		installed_at: value.installed_at,
+		raw_journal_sha256: value.raw_journal_sha256,
+		raw_journal_bytes: value.raw_journal_bytes as number,
+		salvage_through_seq: value.salvage_through_seq as number,
+		salvage_through_hash: value.salvage_through_hash,
+	};
+}
+
 function parseMembership(value: unknown): ReceiptMembership | null {
 	if (!isPlainRecord(value)) return null;
 	if (
@@ -473,6 +587,7 @@ function parseMembership(value: unknown): ReceiptMembership | null {
 			'terminal',
 			'terminal_history',
 			'application_marker',
+			'gate_release',
 			'cohort_id',
 			'source_link_id',
 			'exposure_kind',
@@ -524,6 +639,11 @@ function parseMembership(value: unknown): ReceiptMembership | null {
 			? undefined
 			: parseApplicationMarker(value.application_marker);
 	if (marker === null) return null;
+	const gateRelease =
+		value.gate_release === undefined
+			? undefined
+			: parseGateRelease(value.gate_release);
+	if (gateRelease === null) return null;
 	return {
 		trace_id: value.trace_id,
 		entry_id: value.entry_id,
@@ -542,6 +662,7 @@ function parseMembership(value: unknown): ReceiptMembership | null {
 		terminal,
 		terminal_history: terminalHistory,
 		application_marker: marker,
+		gate_release: gateRelease,
 		cohort_id: value.cohort_id,
 		source_link_id: value.source_link_id,
 		exposure_kind: value.exposure_kind,
@@ -720,8 +841,11 @@ function parseAuditSummary(value: unknown): ReceiptAuditSummary | null {
 				'terminal_attempt_idempotent',
 				'authorized_transition_committed',
 				'application_marker_committed',
+				'gate_release_committed',
 				'phase_close_intent',
 				'phase_closed',
+				'repair_uncertainty_installed',
+				'repair_uncertainty_cleared',
 				'legacy_imported',
 				'legacy_unverifiable',
 				'cutover_completed',
@@ -816,6 +940,7 @@ function applyRecord(state: LedgerState, record: JournalRecord): void {
 		state.legacyTraceRegistry.clear();
 		state.legacyUnverifiableTraceIds.clear();
 		state.phaseLifecycle.clear();
+		state.repairUncertainties.clear();
 		state.auditTail = [];
 		if (Array.isArray(memberships)) {
 			for (const value of memberships) {
@@ -868,6 +993,17 @@ function applyRecord(state: LedgerState, record: JournalRecord): void {
 					),
 					lifecycle,
 				);
+		}
+		for (const value of Array.isArray(record.payload.repair_uncertainties)
+			? record.payload.repair_uncertainties
+			: []) {
+			const uncertainty = parseRepairUncertainty(value);
+			if (uncertainty) {
+				state.repairUncertainties.set(
+					repairUncertaintyKey(uncertainty.phase, uncertainty.session_id),
+					uncertainty,
+				);
+			}
 		}
 		for (const value of Array.isArray(record.payload.audit_tail)
 			? record.payload.audit_tail
@@ -985,6 +1121,27 @@ function applyRecord(state: LedgerState, record: JournalRecord): void {
 				membership.application_marker = { ...marker };
 			}
 		}
+	} else if (record.kind === 'gate_release_committed') {
+		for (const value of Array.isArray(record.payload.releases)
+			? record.payload.releases
+			: []) {
+			const transition = value as {
+				trace_id: string;
+				entry_id: string;
+				release: unknown;
+			};
+			const membership = state.memberships.get(
+				keyOf(transition.trace_id, transition.entry_id),
+			);
+			const release = parseGateRelease(transition.release);
+			if (
+				membership &&
+				release &&
+				release.membership_event_id === membership.membership_event_id
+			) {
+				membership.gate_release = { ...release };
+			}
+		}
 	} else if (
 		record.kind === 'phase_close_intent' ||
 		record.kind === 'phase_closed'
@@ -1041,6 +1198,30 @@ function applyRecord(state: LedgerState, record: JournalRecord): void {
 				} else if (record.kind === 'phase_closed' && !trace.phase_closed_at) {
 					trace.phase_closed_at = record.timestamp;
 				}
+			}
+		}
+	} else if (record.kind === 'repair_uncertainty_installed') {
+		const uncertainty = parseRepairUncertainty(record.payload.uncertainty);
+		if (uncertainty) {
+			state.repairUncertainties.set(
+				repairUncertaintyKey(uncertainty.phase, uncertainty.session_id),
+				uncertainty,
+			);
+		}
+	} else if (record.kind === 'repair_uncertainty_cleared') {
+		const phase = record.payload.phase;
+		const sessionId = record.payload.session_id;
+		const repairId = record.payload.repair_id;
+		if (
+			typeof phase === 'string' &&
+			phase &&
+			typeof sessionId === 'string' &&
+			sessionId
+		) {
+			const key = repairUncertaintyKey(phase, sessionId);
+			const existing = state.repairUncertainties.get(key);
+			if (!repairId || existing?.repair_id === repairId) {
+				state.repairUncertainties.delete(key);
 			}
 		}
 	} else if (record.kind === 'cutover_completed') {
@@ -1186,6 +1367,21 @@ function validateRecordPayload(row: JournalRecord): boolean {
 						payload.transitions.every(isTerminalTransition))) &&
 				(payload.markers !== undefined || payload.transitions !== undefined)
 			);
+		case 'gate_release_committed':
+			return (
+				hasOnlyKeys(payload, ['releases']) &&
+				Array.isArray(payload.releases) &&
+				payload.releases.every(
+					(item) =>
+						isPlainRecord(item) &&
+						hasOnlyKeys(item, ['trace_id', 'entry_id', 'release']) &&
+						typeof item.trace_id === 'string' &&
+						!!item.trace_id &&
+						typeof item.entry_id === 'string' &&
+						!!item.entry_id &&
+						parseGateRelease(item.release) !== null,
+				)
+			);
 		case 'terminal_attempt_idempotent':
 			return (
 				hasOnlyKeys(payload, ['trace_id', 'entry_ids']) &&
@@ -1217,6 +1413,35 @@ function validateRecordPayload(row: JournalRecord): boolean {
 				typeof payload.session_id === 'string' &&
 				!!payload.session_id &&
 				isOptionalString(payload.task_id)
+			);
+		case 'repair_uncertainty_installed':
+			return (
+				hasOnlyKeys(payload, ['uncertainty']) &&
+				parseRepairUncertainty(payload.uncertainty) !== null
+			);
+		case 'repair_uncertainty_cleared':
+			return (
+				hasOnlyKeys(payload, [
+					'phase',
+					'session_id',
+					'task_id',
+					'repair_id',
+					'cleared_by_event_id',
+					'cleared_by_trace_id',
+					'cleared_by_kind',
+				]) &&
+				typeof payload.phase === 'string' &&
+				!!payload.phase &&
+				typeof payload.session_id === 'string' &&
+				!!payload.session_id &&
+				isOptionalString(payload.task_id) &&
+				isOptionalString(payload.repair_id) &&
+				typeof payload.cleared_by_event_id === 'string' &&
+				!!payload.cleared_by_event_id &&
+				typeof payload.cleared_by_trace_id === 'string' &&
+				!!payload.cleared_by_trace_id &&
+				(payload.cleared_by_kind === 'membership_committed' ||
+					payload.cleared_by_kind === 'empty_retrieval_committed')
 			);
 		case 'legacy_unverifiable':
 			return (
@@ -1251,6 +1476,7 @@ function validateRecordPayload(row: JournalRecord): boolean {
 					'legacy_trace_registry',
 					'legacy_unverifiable_trace_ids',
 					'phase_lifecycle',
+					'repair_uncertainties',
 					'audit_tail',
 				]) &&
 				Array.isArray(payload.memberships) &&
@@ -1270,6 +1496,10 @@ function validateRecordPayload(row: JournalRecord): boolean {
 				Array.isArray(payload.phase_lifecycle) &&
 				payload.phase_lifecycle.every(
 					(item) => parsePhaseLifecycle(item) !== null,
+				) &&
+				Array.isArray(payload.repair_uncertainties) &&
+				payload.repair_uncertainties.every(
+					(item) => parseRepairUncertainty(item) !== null,
 				) &&
 				Array.isArray(payload.audit_tail) &&
 				payload.audit_tail.length <= MAX_AUDIT_TAIL_RECORDS &&
@@ -1300,8 +1530,11 @@ function validateRecord(value: unknown, state: LedgerState): JournalRecord {
 				'terminal_attempt_idempotent',
 				'authorized_transition_committed',
 				'application_marker_committed',
+				'gate_release_committed',
 				'phase_close_intent',
 				'phase_closed',
+				'repair_uncertainty_installed',
+				'repair_uncertainty_cleared',
 				'legacy_imported',
 				'legacy_unverifiable',
 				'cutover_completed',
@@ -1333,24 +1566,13 @@ async function loadState(
 		try {
 			applyRecord(state, validateRecord(JSON.parse(line), state));
 		} catch (error) {
-			const isPartialTail = i === lines.length - 1 && !endedWithNewline;
-			if (isPartialTail) {
-				await atomicWriteFsynced(
-					paths.quarantine,
-					`${JSON.stringify({
-						recovered_at: nowIso(),
-						partial_tail: line.slice(0, 1024 * 1024),
-					})}\n`,
-				);
-				await atomicWriteFsynced(
-					paths.journal,
-					`${lines.slice(0, i).filter(Boolean).join('\n')}\n`,
-				);
-				return state;
-			}
+			const tailDetail =
+				i === lines.length - 1 && !endedWithNewline
+					? ' (including an unterminated final record)'
+					: '';
 			throw new ReceiptStoreError(
 				'store_corrupt',
-				`receipt journal corruption at line ${i + 1}: ${error instanceof Error ? error.message : String(error)}`,
+				`receipt journal corruption at line ${i + 1}${tailDetail}: ${error instanceof Error ? error.message : String(error)}`,
 			);
 		}
 	}
@@ -1502,6 +1724,25 @@ function queueRecordObservations(state: LedgerState, row: JournalRecord): void {
 		}
 		return;
 	}
+	if (row.kind === 'gate_release_committed') {
+		for (const value of Array.isArray(row.payload.releases)
+			? row.payload.releases
+			: []) {
+			if (!isPlainRecord(value)) continue;
+			const release = parseGateRelease(value.release);
+			if (!release) continue;
+			state.observations.push({
+				...base,
+				reasonCode: 'committed',
+				knowledgeTraceId:
+					typeof value.trace_id === 'string' ? value.trace_id : undefined,
+				knowledgeEntryId:
+					typeof value.entry_id === 'string' ? value.entry_id : undefined,
+				receiptSource: release.source,
+			});
+		}
+		return;
+	}
 	if (row.kind === 'terminal_attempt_idempotent') {
 		for (const entryId of Array.isArray(row.payload.entry_ids)
 			? row.payload.entry_ids
@@ -1549,6 +1790,7 @@ async function writeSnapshot(
 		legacy_trace_registry: [...state.legacyTraceRegistry].sort(),
 		legacy_unverifiable_trace_ids: [...state.legacyUnverifiableTraceIds].sort(),
 		phase_lifecycle: [...state.phaseLifecycle.values()],
+		repair_uncertainties: [...state.repairUncertainties.values()],
 		audit_tail: state.auditTail,
 	};
 	await atomicWriteFsynced(paths.snapshot, `${JSON.stringify(snapshot)}\n`);
@@ -1790,11 +2032,125 @@ function isLegacyUnverifiableTrace(
 	);
 }
 
+function rawSha256(value: Buffer | string): string {
+	return createHash('sha256').update(value).digest('hex');
+}
+
+function overlappingRepairUncertainties(
+	state: LedgerState,
+	filters: {
+		phase?: string;
+		session_id?: string;
+	},
+): ReceiptRepairUncertainty[] {
+	return [...state.repairUncertainties.values()].filter((uncertainty) => {
+		if (filters.phase && filters.phase !== uncertainty.phase) return false;
+		if (filters.session_id && filters.session_id !== uncertainty.session_id) {
+			return false;
+		}
+		return true;
+	});
+}
+
+function repairUncertaintyUnavailable(
+	uncertainties: ReceiptRepairUncertainty[],
+): ReceiptUnavailable {
+	const scoped = uncertainties
+		.map((uncertainty) => `${uncertainty.session_id}/${uncertainty.phase}`)
+		.join(', ');
+	const detail = `receipt authority pending re-evaluation for repaired phase/session scope: ${scoped}`;
+	return {
+		ok: false,
+		code: 'store_unavailable',
+		detail,
+		uncertainty: detail,
+	};
+}
+
+interface ReceiptRepairQuarantineEntry {
+	schema_version: 1;
+	repair_id: string;
+	created_at: string;
+	phase: string;
+	session_id: string;
+	task_id?: string;
+	reason: string;
+	corruption_detail: string;
+	original_journal_sha256: string;
+	original_journal_bytes: number;
+	original_journal_base64: string;
+	salvage_through_seq: number;
+	salvage_through_hash: string;
+}
+
+function parseRepairQuarantineEntry(
+	value: unknown,
+): ReceiptRepairQuarantineEntry | null {
+	if (!isPlainRecord(value)) return null;
+	if (
+		!hasOnlyKeys(value, [
+			'schema_version',
+			'repair_id',
+			'created_at',
+			'phase',
+			'session_id',
+			'task_id',
+			'reason',
+			'corruption_detail',
+			'original_journal_sha256',
+			'original_journal_bytes',
+			'original_journal_base64',
+			'salvage_through_seq',
+			'salvage_through_hash',
+		]) ||
+		value.schema_version !== REPAIR_QUARANTINE_SCHEMA_VERSION ||
+		typeof value.repair_id !== 'string' ||
+		!value.repair_id ||
+		!isValidTimestamp(value.created_at) ||
+		typeof value.phase !== 'string' ||
+		!value.phase ||
+		typeof value.session_id !== 'string' ||
+		!value.session_id ||
+		!isOptionalString(value.task_id) ||
+		typeof value.reason !== 'string' ||
+		!value.reason ||
+		typeof value.corruption_detail !== 'string' ||
+		!value.corruption_detail ||
+		typeof value.original_journal_sha256 !== 'string' ||
+		!/^[a-f0-9]{64}$/.test(value.original_journal_sha256) ||
+		!Number.isInteger(value.original_journal_bytes) ||
+		(value.original_journal_bytes as number) < 0 ||
+		typeof value.original_journal_base64 !== 'string' ||
+		!Number.isInteger(value.salvage_through_seq) ||
+		(value.salvage_through_seq as number) < 0 ||
+		typeof value.salvage_through_hash !== 'string' ||
+		!value.salvage_through_hash
+	) {
+		return null;
+	}
+	return {
+		schema_version: REPAIR_QUARANTINE_SCHEMA_VERSION,
+		repair_id: value.repair_id,
+		created_at: value.created_at,
+		phase: value.phase,
+		session_id: value.session_id,
+		task_id: value.task_id,
+		reason: value.reason,
+		corruption_detail: value.corruption_detail,
+		original_journal_sha256: value.original_journal_sha256,
+		original_journal_bytes: value.original_journal_bytes as number,
+		original_journal_base64: value.original_journal_base64,
+		salvage_through_seq: value.salvage_through_seq as number,
+		salvage_through_hash: value.salvage_through_hash,
+	};
+}
+
 function hasAuthoritativeEventId(state: LedgerState, eventId: string): boolean {
 	for (const membership of state.memberships.values()) {
 		if (
 			membership.membership_event_id === eventId ||
 			membership.application_marker?.event_id === eventId ||
+			membership.gate_release?.event_id === eventId ||
 			membership.terminal?.event_id === eventId ||
 			membership.terminal_history?.some(
 				(terminal) => terminal.event_id === eventId,
@@ -1864,6 +2220,346 @@ async function runLocked<T>(
 	}
 }
 
+function buildCheckpointPayload(state: LedgerState): Record<string, unknown> {
+	return {
+		memberships: [...state.memberships.values()],
+		empty_traces: [...state.emptyTraces.values()],
+		cutover_completed: state.cutoverCompleted,
+		legacy_unverifiable: state.legacyUnverifiable,
+		legacy_trace_registry: [...state.legacyTraceRegistry].sort(),
+		legacy_unverifiable_trace_ids: [...state.legacyUnverifiableTraceIds].sort(),
+		phase_lifecycle: [...state.phaseLifecycle.values()],
+		repair_uncertainties: [...state.repairUncertainties.values()],
+		audit_tail: state.auditTail,
+	};
+}
+
+async function clearRepairUncertaintyIfFresh(
+	paths: ReceiptLedgerPaths,
+	state: LedgerState,
+	input: {
+		phase?: string;
+		session_id: string;
+		task_id?: string;
+		repair_re_evaluation?: ReceiptRepairReevaluationProof;
+	},
+	clearedBy: {
+		event_id: string;
+		trace_id: string;
+		kind: 'membership_committed' | 'empty_retrieval_committed';
+	},
+): Promise<void> {
+	if (!input.phase) return;
+	const key = repairUncertaintyKey(input.phase, input.session_id);
+	const active = state.repairUncertainties.get(key);
+	if (!active) return;
+	const proof = input.repair_re_evaluation;
+	if (
+		!proof?.scope_complete ||
+		proof.repair_id !== active.repair_id ||
+		(active.task_id !== undefined && input.task_id !== active.task_id)
+	) {
+		return;
+	}
+	await appendRecord(
+		paths,
+		state,
+		makeRecord(state, 'repair_uncertainty_cleared', {
+			phase: input.phase,
+			session_id: input.session_id,
+			task_id: input.task_id,
+			repair_id: active.repair_id,
+			cleared_by_event_id: clearedBy.event_id,
+			cleared_by_trace_id: clearedBy.trace_id,
+			cleared_by_kind: clearedBy.kind,
+		}),
+	);
+}
+
+interface SalvagedReceiptJournal {
+	state: LedgerState;
+	corruption_detail: string;
+	salvage_through_seq: number;
+	salvage_through_hash: string;
+}
+
+function salvageReceiptJournal(
+	raw: Buffer,
+	observations: KnowledgeReceiptTransitionObservation[],
+): SalvagedReceiptJournal {
+	const state = emptyState(observations);
+	const lines: Buffer[] = [];
+	let start = 0;
+	for (let index = 0; index < raw.byteLength; index++) {
+		if (raw[index] !== 0x0a) continue;
+		lines.push(raw.subarray(start, index));
+		start = index + 1;
+	}
+	if (start < raw.byteLength) lines.push(raw.subarray(start));
+	const endedWithNewline = raw.at(-1) === 0x0a;
+	const decoder = new TextDecoder('utf-8', { fatal: true });
+	for (let i = 0; i < lines.length; i++) {
+		const lineBytes = lines[i];
+		if (lineBytes.byteLength === 0) continue;
+		try {
+			const line = decoder.decode(lineBytes);
+			applyRecord(state, validateRecord(JSON.parse(line), state));
+		} catch (error) {
+			const tailDetail =
+				i === lines.length - 1 && !endedWithNewline
+					? ' (including an unterminated final record)'
+					: '';
+			return {
+				state,
+				corruption_detail: `receipt journal corruption at line ${i + 1}${tailDetail}: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+				salvage_through_seq: state.lastSeq,
+				salvage_through_hash: state.lastHash,
+			};
+		}
+	}
+	throw new ReceiptStoreError(
+		'store_unavailable',
+		'repair requested on readable receipt authority',
+	);
+}
+
+async function writeRepairQuarantineEntry(
+	paths: ReceiptLedgerPaths,
+	entry: ReceiptRepairQuarantineEntry,
+): Promise<void> {
+	const raw = await readUtf8IfPresent(
+		paths.quarantine,
+		MAX_REPAIR_CAPTURE_BYTES,
+	);
+	const existing: ReceiptRepairQuarantineEntry[] = [];
+	for (const line of raw?.split('\n') ?? []) {
+		if (!line.trim()) continue;
+		let parsed: ReceiptRepairQuarantineEntry | null = null;
+		try {
+			parsed = parseRepairQuarantineEntry(JSON.parse(line));
+		} catch {
+			parsed = null;
+		}
+		if (!parsed) {
+			throw new ReceiptStoreError(
+				'store_corrupt',
+				'receipt repair quarantine metadata is invalid',
+			);
+		}
+		existing.push(parsed);
+	}
+	if (
+		existing.some(
+			(candidate) =>
+				candidate.original_journal_sha256 === entry.original_journal_sha256 &&
+				candidate.phase === entry.phase &&
+				candidate.session_id === entry.session_id,
+		)
+	) {
+		return;
+	}
+	if (existing.length >= MAX_REPAIR_QUARANTINE_RECORDS) {
+		throw new ReceiptStoreError(
+			'store_unavailable',
+			'receipt repair quarantine is full; existing immutable records were preserved',
+		);
+	}
+	await _internals.appendFsynced(
+		paths.quarantine,
+		`${JSON.stringify(entry)}\n`,
+	);
+}
+
+export interface RepairKnowledgeReceiptLedgerInput {
+	phase: string;
+	session_id: string;
+	task_id?: string;
+	reason: string;
+	grace_days?: number;
+}
+
+export interface ReceiptRepairReevaluationProof {
+	repair_id: string;
+	/** Exact producer assertion that this retrieval covered the full repaired scope. */
+	scope_complete: boolean;
+}
+
+export async function repairKnowledgeReceiptLedger(
+	directory: string,
+	input: RepairKnowledgeReceiptLedgerInput,
+): Promise<
+	ReceiptLedgerResult<{
+		status:
+			| 'validated_projection'
+			| 'repaired_authority'
+			| 'pending_re_evaluation';
+		pending_re_evaluation: boolean;
+		repair_id?: string;
+		salvage_through_seq: number;
+		salvage_through_hash: string;
+	}>
+> {
+	const observations: KnowledgeReceiptTransitionObservation[] = [];
+	try {
+		const result = await withReceiptLedgerLock(directory, async (paths) => {
+			const repairReason = input.reason.trim();
+			if (
+				!input.phase.trim() ||
+				!input.session_id.trim() ||
+				repairReason.length < 12 ||
+				/^(fix|repair|test|debug|unknown|n\/?a|none)$/i.test(repairReason)
+			) {
+				throw new ReceiptStoreError(
+					'store_unavailable',
+					'receipt repair requires exact phase/session identity and a substantive reason',
+				);
+			}
+			let raw: Buffer | null = null;
+			try {
+				raw = await readBytesIfPresent(paths.journal, MAX_JOURNAL_BYTES);
+			} catch (error) {
+				if (error instanceof ReceiptStoreError) throw error;
+				throw new ReceiptStoreError(
+					'store_unavailable',
+					error instanceof Error ? error.message : String(error),
+				);
+			}
+			try {
+				const state = await loadState(paths, observations);
+				const resolvedGraceDays =
+					input.grace_days ??
+					(state.cutoverCompleted
+						? DEFAULT_RECEIPT_GRACE_DAYS
+						: configuredGraceDays(directory));
+				await ensureCutoverLocked(paths, state, resolvedGraceDays);
+				const overlaps = overlappingRepairUncertainties(state, {
+					phase: input.phase,
+					session_id: input.session_id,
+				});
+				await _internals.writeSnapshot(paths, state).catch(() => undefined);
+				if (overlaps.length > 0) {
+					return {
+						ok: true as const,
+						status: 'pending_re_evaluation' as const,
+						pending_re_evaluation: true,
+						repair_id: overlaps[0]?.repair_id,
+						salvage_through_seq: state.lastSeq,
+						salvage_through_hash: state.lastHash,
+					};
+				}
+				return {
+					ok: true as const,
+					status: 'validated_projection' as const,
+					pending_re_evaluation: false,
+					salvage_through_seq: state.lastSeq,
+					salvage_through_hash: state.lastHash,
+				};
+			} catch (error) {
+				if (
+					!(error instanceof ReceiptStoreError) ||
+					error.code !== 'store_corrupt'
+				) {
+					throw error;
+				}
+				if (raw === null) throw error;
+				const rawBytes = raw.byteLength;
+				if (rawBytes > MAX_REPAIR_CAPTURE_BYTES) {
+					throw new ReceiptStoreError(
+						'store_unavailable',
+						`receipt repair requires original authority <= ${MAX_REPAIR_CAPTURE_BYTES} bytes`,
+					);
+				}
+				const salvaged = salvageReceiptJournal(raw, observations);
+				const resolvedGraceDays =
+					input.grace_days ??
+					(salvaged.state.cutoverCompleted
+						? DEFAULT_RECEIPT_GRACE_DAYS
+						: configuredGraceDays(directory));
+				await ensureCutoverLocked(paths, salvaged.state, resolvedGraceDays);
+				const key = repairUncertaintyKey(input.phase, input.session_id);
+				const existing = salvaged.state.repairUncertainties.get(key);
+				const repairId = existing?.repair_id ?? randomUUID();
+				const journalHash = rawSha256(raw);
+				await writeRepairQuarantineEntry(paths, {
+					schema_version: REPAIR_QUARANTINE_SCHEMA_VERSION,
+					repair_id: repairId,
+					created_at: nowIso(),
+					phase: input.phase,
+					session_id: input.session_id,
+					task_id: input.task_id,
+					reason: repairReason,
+					corruption_detail: salvaged.corruption_detail,
+					original_journal_sha256: journalHash,
+					original_journal_bytes: rawBytes,
+					original_journal_base64: raw.toString('base64'),
+					salvage_through_seq: salvaged.salvage_through_seq,
+					salvage_through_hash: salvaged.salvage_through_hash,
+				});
+				const fresh = emptyState(observations);
+				fresh.memberships = new Map(salvaged.state.memberships);
+				fresh.traceIds = new Set(salvaged.state.traceIds);
+				fresh.emptyTraces = new Map(salvaged.state.emptyTraces);
+				fresh.cutoverCompleted = salvaged.state.cutoverCompleted;
+				fresh.legacyUnverifiable = salvaged.state.legacyUnverifiable;
+				fresh.legacyTraceRegistry = new Set(salvaged.state.legacyTraceRegistry);
+				fresh.legacyUnverifiableTraceIds = new Set(
+					salvaged.state.legacyUnverifiableTraceIds,
+				);
+				fresh.phaseLifecycle = new Map(salvaged.state.phaseLifecycle);
+				fresh.repairUncertainties = new Map(salvaged.state.repairUncertainties);
+				fresh.auditTail = [...salvaged.state.auditTail];
+				const checkpoint = makeRecord(
+					fresh,
+					'checkpoint',
+					buildCheckpointPayload(salvaged.state),
+				);
+				const rewritten = [`${JSON.stringify(checkpoint)}\n`];
+				applyRecord(fresh, checkpoint);
+				if (!existing) {
+					const uncertainty: ReceiptRepairUncertainty = {
+						phase: input.phase,
+						session_id: input.session_id,
+						task_id: input.task_id,
+						reason: repairReason,
+						repair_id: repairId,
+						installed_at: nowIso(),
+						raw_journal_sha256: journalHash,
+						raw_journal_bytes: rawBytes,
+						salvage_through_seq: salvaged.salvage_through_seq,
+						salvage_through_hash: salvaged.salvage_through_hash,
+					};
+					const install = makeRecord(fresh, 'repair_uncertainty_installed', {
+						uncertainty,
+					});
+					rewritten.push(`${JSON.stringify(install)}\n`);
+					applyRecord(fresh, install);
+				}
+				await _internals.atomicWriteFsynced(paths.journal, rewritten.join(''));
+				await _internals.writeSnapshot(paths, fresh).catch(() => undefined);
+				return {
+					ok: true as const,
+					status: 'repaired_authority' as const,
+					pending_re_evaluation: true,
+					repair_id: repairId,
+					salvage_through_seq: salvaged.salvage_through_seq,
+					salvage_through_hash: salvaged.salvage_through_hash,
+				};
+			}
+		});
+		for (const observation of observations) {
+			emitKnowledgeReceiptTransition(observation);
+		}
+		return result;
+	} catch (error) {
+		for (const observation of observations) {
+			emitKnowledgeReceiptTransition(observation);
+		}
+		return unavailable(error);
+	}
+}
+
 export interface CommitDisplayedMembershipInput {
 	trace_id: string;
 	session_id: string;
@@ -1881,6 +2577,8 @@ export interface CommitDisplayedMembershipInput {
 	source_link_id?: string;
 	/** Producer provenance used by application gates; omitted callers fail closed. */
 	exposure_kind?: ReceiptExposureKind;
+	/** Explicit repair-bound proof; ordinary retrievals intentionally omit this. */
+	repair_re_evaluation?: ReceiptRepairReevaluationProof;
 }
 
 export async function commitDisplayedMembership(
@@ -1979,6 +2677,11 @@ export async function commitDisplayedMembership(
 						eventId,
 					),
 				);
+				await clearRepairUncertaintyIfFresh(paths, state, input, {
+					event_id: eventId,
+					trace_id: input.trace_id,
+					kind: 'membership_committed',
+				});
 			}
 			return {
 				event_id: newMemberships.length
@@ -2055,6 +2758,11 @@ export async function commitEmptyRetrieval(
 					terminalEventId,
 				),
 			);
+			await clearRepairUncertaintyIfFresh(paths, state, input, {
+				event_id: eventId,
+				trace_id: input.trace_id,
+				kind: 'empty_retrieval_committed',
+			});
 			return { event_id: eventId, terminal_event_id: terminalEventId };
 		},
 	);
@@ -2504,6 +3212,123 @@ async function commitApplicationMarkerBatch(
 	});
 }
 
+export interface GateReleaseBatchInput {
+	trace_id: string;
+	session_id: string;
+	grace_days?: number;
+	items: Array<{
+		entry_id: string;
+		source?: string;
+		reason?: string;
+	}>;
+}
+
+export async function commitGateReleaseBatch(
+	directory: string,
+	input: GateReleaseBatchInput,
+): Promise<
+	ReceiptLedgerResult<{
+		committed: Array<{
+			entry_id: string;
+			event_id: string;
+			membership_event_id: string;
+		}>;
+		idempotent: Array<{
+			entry_id: string;
+			event_id: string;
+		}>;
+		rejected: Array<{ entry_id: string; reason: string }>;
+	}>
+> {
+	return runLocked(directory, input.grace_days, async (paths, state) => {
+		const committed: Array<{
+			entry_id: string;
+			event_id: string;
+			membership_event_id: string;
+		}> = [];
+		const idempotent: Array<{
+			entry_id: string;
+			event_id: string;
+		}> = [];
+		const rejected: Array<{ entry_id: string; reason: string }> = [];
+		const releases: Array<{
+			trace_id: string;
+			entry_id: string;
+			release: ReceiptGateRelease;
+		}> = [];
+		const traceExists = state.traceIds.has(input.trace_id);
+		const staged = new Set<string>();
+		for (const item of input.items) {
+			const membership = state.memberships.get(
+				keyOf(input.trace_id, item.entry_id),
+			);
+			if (!membership) {
+				rejected.push({
+					entry_id: item.entry_id,
+					reason: traceExists
+						? 'id_not_in_trace'
+						: isLegacyUnverifiableTrace(state, input.trace_id)
+							? 'legacy_unverifiable'
+							: 'trace_not_found',
+				});
+				continue;
+			}
+			if (membership.session_id !== input.session_id) {
+				rejected.push({ entry_id: item.entry_id, reason: 'wrong_session' });
+				continue;
+			}
+			if (staged.has(item.entry_id)) {
+				idempotent.push({
+					entry_id: item.entry_id,
+					event_id:
+						membership.gate_release?.event_id ??
+						releases.at(-1)?.release.event_id ??
+						'',
+				});
+				continue;
+			}
+			staged.add(item.entry_id);
+			if (
+				membership.gate_release?.membership_event_id ===
+				membership.membership_event_id
+			) {
+				idempotent.push({
+					entry_id: item.entry_id,
+					event_id: membership.gate_release.event_id,
+				});
+				continue;
+			}
+			const release: ReceiptGateRelease = {
+				source: normalizeReceiptSource(item.source),
+				reason: item.reason,
+				event_id: randomUUID(),
+				committed_at: nowIso(),
+				membership_event_id: membership.membership_event_id,
+			};
+			releases.push({
+				trace_id: input.trace_id,
+				entry_id: item.entry_id,
+				release,
+			});
+			committed.push({
+				entry_id: item.entry_id,
+				event_id: release.event_id,
+				membership_event_id: release.membership_event_id,
+			});
+		}
+		if (releases.length) {
+			await appendRecord(
+				paths,
+				state,
+				makeRecord(state, 'gate_release_committed', {
+					releases,
+				}),
+			);
+		}
+		return { committed, idempotent, rejected };
+	});
+}
+
 export interface ApplicationOutcomeBatchInput {
 	trace_id: string;
 	session_id: string;
@@ -2685,23 +3510,35 @@ export async function queryLiveMemberships(
 	return runLocked(
 		directory,
 		filters.grace_days,
-		async (_paths, state) => ({
-			memberships: [...state.memberships.values()]
-				.filter(
-					(m) =>
-						(!filters.phase || m.phase === filters.phase) &&
-						(!filters.task_id || m.task_id === filters.task_id) &&
-						(!filters.session_id || m.session_id === filters.session_id) &&
-						(filters.include_terminal !== false || !m.terminal) &&
-						(filters.include_phase_closed !== false || !m.phase_closed_at) &&
-						(!filters.exposure_kind ||
-							m.exposure_kind === filters.exposure_kind),
-				)
-				.map((m) => ({
-					...m,
-					terminal: m.terminal ? { ...m.terminal } : undefined,
-				})),
-		}),
+		async (_paths, state) => {
+			const overlaps = overlappingRepairUncertainties(state, {
+				phase: filters.phase,
+				session_id: filters.session_id,
+			});
+			if (overlaps.length > 0) {
+				throw new ReceiptStoreError(
+					'store_unavailable',
+					repairUncertaintyUnavailable(overlaps).detail,
+				);
+			}
+			return {
+				memberships: [...state.memberships.values()]
+					.filter(
+						(m) =>
+							(!filters.phase || m.phase === filters.phase) &&
+							(!filters.task_id || m.task_id === filters.task_id) &&
+							(!filters.session_id || m.session_id === filters.session_id) &&
+							(filters.include_terminal !== false || !m.terminal) &&
+							(filters.include_phase_closed !== false || !m.phase_closed_at) &&
+							(!filters.exposure_kind ||
+								m.exposure_kind === filters.exposure_kind),
+					)
+					.map((m) => ({
+						...m,
+						terminal: m.terminal ? { ...m.terminal } : undefined,
+					})),
+			};
+		},
 		{ compact: false, writeSnapshot: false },
 	);
 }
@@ -2867,7 +3704,7 @@ async function compactIfNeeded(
 	const now = _internals.nowMs();
 	const eligible = [...state.memberships.values()].filter(
 		(m) =>
-			m.terminal &&
+			(m.terminal || m.gate_release) &&
 			m.phase_closed_at &&
 			now >= Date.parse(m.phase_closed_at) + m.grace_days * 86_400_000,
 	);
@@ -2963,6 +3800,7 @@ async function compactIfNeeded(
 	fresh.legacyTraceRegistry = new Set(state.legacyTraceRegistry);
 	fresh.legacyUnverifiableTraceIds = new Set(state.legacyUnverifiableTraceIds);
 	fresh.phaseLifecycle = new Map(state.phaseLifecycle);
+	fresh.repairUncertainties = new Map(state.repairUncertainties);
 	fresh.auditTail = [...state.auditTail];
 	const checkpoint = makeRecord(fresh, 'checkpoint', {
 		memberships: [...state.memberships.values()],
@@ -2972,6 +3810,7 @@ async function compactIfNeeded(
 		legacy_trace_registry: [...state.legacyTraceRegistry].sort(),
 		legacy_unverifiable_trace_ids: [...state.legacyUnverifiableTraceIds].sort(),
 		phase_lifecycle: [...state.phaseLifecycle.values()],
+		repair_uncertainties: [...state.repairUncertainties.values()],
 		audit_tail: state.auditTail,
 	});
 	await _internals.atomicWriteFsynced(
@@ -3003,9 +3842,11 @@ export const _internals = {
 	nowMs: (): number => Date.now(),
 	writeSnapshot,
 	atomicWriteFsynced,
+	appendFsynced,
 	/** Test-only migration fixture for pre-atomic marker-only state. */
 	commitApplicationMarkerBatch,
 	maxJournalRecords: MAX_JOURNAL_RECORDS,
 	maxArchiveRecords: MAX_ARCHIVE_RECORDS,
 	maxArchiveBytes: MAX_ARCHIVE_BYTES,
+	maxRepairQuarantineRecords: MAX_REPAIR_QUARANTINE_RECORDS,
 };

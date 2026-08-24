@@ -10,18 +10,12 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import {
-	mkdirSync,
-	mkdtempSync,
-	readFileSync,
-	rmSync,
-	writeFileSync,
-} from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { closeProjectDb } from '../../../src/db/project-db';
 import { setGatesForIdentity } from '../../../src/db/qa-gate-profile';
 import { seedCouncilLaunch } from '../../helpers/task-workflow-evidence';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 let tempDir: string;
 const PLAN_SWARM = 'test-swarm';
@@ -50,7 +44,7 @@ function seedEnabledConfig(): void {
 	);
 }
 beforeEach(() => {
-	tempDir = mkdtempSync(join(tmpdir(), 'phase6-integration-'));
+	tempDir = canonicalMkdtemp('phase6-integration-');
 });
 afterEach(() => {
 	// Close project DB before deleting temp dir to avoid EBUSY on Windows

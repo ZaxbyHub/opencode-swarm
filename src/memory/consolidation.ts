@@ -169,6 +169,16 @@ export function deriveDecision(
 	if (fact.text.includes(MEMORY_RECALL_SENTINEL)) {
 		return { type: 'skip', fact, reason: 'contains recall sentinel' };
 	}
+	// #1466 (DD-14 lockstep): memory text must never contain the bundle
+	// marker prefix — validateMemoryRecordRules would reject it at write time,
+	// so skip here with the same rationale instead of failing the pass.
+	if (fact.text.includes('bundle_')) {
+		return {
+			type: 'skip',
+			fact,
+			reason: 'contains recall bundle marker prefix',
+		};
+	}
 	if (fact.kind === 'scratch') {
 		return {
 			type: 'skip',
