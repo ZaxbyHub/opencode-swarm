@@ -29,6 +29,10 @@ import {
 } from '../../../src/state';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
 
+// Deterministic fixture instant (explicit-arg Date constructor, not a raw
+// clock read — see docs/testing/test-stability.md, issue #1782).
+const FIXED_NOW_MS = new Date('2026-01-01T00:00:00.000Z').getTime();
+
 let cleanup: () => void;
 let directory: string;
 
@@ -68,7 +72,13 @@ function walPath(taskId: string): string {
 	return `${directory}/.swarm/coder-settlements/${taskId}.json`;
 }
 
-function writeCommittedWal(taskId: string): void {
+function writeCommittedWal(
+	taskId: string,
+	options?: {
+		declaredFiles?: string[];
+		state?: 'COMMITTED' | 'DISPATCHED' | 'PREPARED';
+	},
+): void {
 	require('node:fs').mkdirSync(`${directory}/.swarm/coder-settlements`, {
 		recursive: true,
 	});
@@ -76,7 +86,7 @@ function writeCommittedWal(taskId: string): void {
 		walPath(taskId),
 		JSON.stringify({
 			version: 1,
-			state: 'COMMITTED',
+			state: options?.state ?? 'COMMITTED',
 			taskId,
 			transitionId: `coder:test-${taskId}`,
 			actor: 'test',
@@ -92,10 +102,10 @@ function writeCommittedWal(taskId: string): void {
 					scope: null,
 					changedFiles: [],
 				},
-				declaredFiles: [],
+				declaredFiles: options?.declaredFiles ?? [],
 			},
 			accepted: true,
-			recordedAt: new Date().toISOString(),
+			recordedAt: new Date(FIXED_NOW_MS).toISOString(),
 		}),
 	);
 }
@@ -122,7 +132,7 @@ afterEach(() => {
 describe('durable Stage A attribution', () => {
 	test('reset-flow: fallback attributes Stage A after session wipe and advances the store', async () => {
 		await settleTask('1.1');
-		writeCommittedWal('1.1');
+		writeCommittedWal('1.1', { declaredFiles: ['src/a.ts'] });
 		// Simulate /swarm reset-session's in-memory wipe. The architect's fresh
 		// session exists again (recreated by the next message turn) but has NO
 		// currentTaskId.
@@ -132,7 +142,9 @@ describe('durable Stage A attribution', () => {
 		const hooks = createGuardrailsHooks(directory, defaultConfig());
 		await hooks.toolBefore(
 			{ tool: 'pre_check_batch', sessionID: 'architect', callID: 'c1' },
-			{ args: {} },
+			// The scanned files must intersect the task's declared files for the
+			// durable fallback to bind — this is the F-001 fix under test.
+			{ args: { files: ['src/a.ts'] } },
 		);
 		await hooks.toolAfter(
 			{ tool: 'pre_check_batch', sessionID: 'architect', callID: 'c1' },
@@ -144,6 +156,165 @@ describe('durable Stage A attribution', () => {
 		);
 		expect(workflow.state).toBe('pre_check_passed');
 		expect(workflow.generation).toBe(1);
+	});
+
+	test('F-001: an unrelated session scanning unrelated files is NOT attributed to the sole durable candidate', async () => {
+		await settleTask('1.1');
+		writeCommittedWal('1.1', { declaredFiles: ['src/a.ts'] });
+		resetSwarmState();
+		ensureAgentSession('other-session');
+
+		const hooks = createGuardrailsHooks(directory, defaultConfig());
+		await hooks.toolBefore(
+			{ tool: 'pre_check_batch', sessionID: 'other-session', callID: 'c1u' },
+			{ args: { files: ['README.md'] } },
+		);
+		await hooks.toolAfter(
+			{ tool: 'pre_check_batch', sessionID: 'other-session', callID: 'c1u' },
+			{ title: '', output: PASS_PAYLOAD, metadata: null },
+		);
+
+		const workflow = getTaskWorkflowSnapshot(
+			await readTaskEvidence(directory, '1.1'),
+		);
+		expect(workflow.state).toBe('coder_delegated');
+		const session = swarmState.agentSessions.get('other-session');
+		const advisories = session?.pendingAdvisoryMessages ?? [];
+		expect(
+			advisories.some((message) =>
+				message.includes('STAGE A ATTRIBUTION UNBOUND'),
+			),
+		).toBe(true);
+	});
+
+	test('F-001: a call with no files argument at all is NOT attributed', async () => {
+		await settleTask('1.2');
+		writeCommittedWal('1.2', { declaredFiles: ['src/b.ts'] });
+		resetSwarmState();
+		ensureAgentSession('no-files-session');
+
+		const hooks = createGuardrailsHooks(directory, defaultConfig());
+		await hooks.toolBefore(
+			{ tool: 'pre_check_batch', sessionID: 'no-files-session', callID: 'c1n' },
+			{ args: {} },
+		);
+		await hooks.toolAfter(
+			{ tool: 'pre_check_batch', sessionID: 'no-files-session', callID: 'c1n' },
+			{ title: '', output: PASS_PAYLOAD, metadata: null },
+		);
+
+		const workflow = getTaskWorkflowSnapshot(
+			await readTaskEvidence(directory, '1.2'),
+		);
+		expect(workflow.state).toBe('coder_delegated');
+	});
+
+	test('F-001: a shared empty-string file entry does NOT count as a file-scope match (test_engineer falsification)', async () => {
+		await settleTask('1.3');
+		// A wedged task whose WAL declared an empty-string entry (a genuinely
+		// malformed/placeholder scope, not a real file).
+		writeCommittedWal('1.3', { declaredFiles: [''] });
+		resetSwarmState();
+		ensureAgentSession('empty-string-session');
+
+		const hooks = createGuardrailsHooks(directory, defaultConfig());
+		await hooks.toolBefore(
+			{
+				tool: 'pre_check_batch',
+				sessionID: 'empty-string-session',
+				callID: 'c1e',
+			},
+			// The caller also passes an empty-string file entry — this must NOT
+			// be treated as matching the WAL's empty-string declaredFiles entry.
+			{ args: { files: [''] } },
+		);
+		await hooks.toolAfter(
+			{
+				tool: 'pre_check_batch',
+				sessionID: 'empty-string-session',
+				callID: 'c1e',
+			},
+			{ title: '', output: PASS_PAYLOAD, metadata: null },
+		);
+
+		const workflow = getTaskWorkflowSnapshot(
+			await readTaskEvidence(directory, '1.3'),
+		);
+		expect(workflow.state).toBe('coder_delegated');
+	});
+
+	test('F-001: caller-side path normalization binds a non-byte-identical but equivalent file scope (closeout critic)', async () => {
+		await settleTask('1.4');
+		// declaredFiles is written already canonicalized (forward slashes, no
+		// leading './') by the real dispatch path — src/scope/scope-binding.ts.
+		writeCommittedWal('1.4', { declaredFiles: ['src/a.ts'] });
+		resetSwarmState();
+		ensureAgentSession('path-variant-session');
+
+		const hooks = createGuardrailsHooks(directory, defaultConfig());
+		await hooks.toolBefore(
+			{
+				tool: 'pre_check_batch',
+				sessionID: 'path-variant-session',
+				callID: 'c1p',
+			},
+			// The caller's raw args are NOT pre-normalized — a leading './' and
+			// backslash separators must still bind to the canonical declared
+			// entry above, not silently fail to match.
+			{ args: { files: ['./src\\a.ts'] } },
+		);
+		await hooks.toolAfter(
+			{
+				tool: 'pre_check_batch',
+				sessionID: 'path-variant-session',
+				callID: 'c1p',
+			},
+			{ title: '', output: PASS_PAYLOAD, metadata: null },
+		);
+
+		const workflow = getTaskWorkflowSnapshot(
+			await readTaskEvidence(directory, '1.4'),
+		);
+		expect(workflow.state).toBe('pre_check_passed');
+	});
+
+	test('F-006: a lane still mid-dispatch (DISPATCHED) at coder_delegated widens ambiguity instead of being invisible', async () => {
+		await settleTask('4.1');
+		writeCommittedWal('4.1', { declaredFiles: ['src/a.ts'] });
+		// Task 4.2 is mid-dispatch: its evidence is already at coder_delegated
+		// but its settlement WAL hasn't committed yet.
+		await settleTask('4.2');
+		writeCommittedWal('4.2', {
+			declaredFiles: ['src/b.ts'],
+			state: 'DISPATCHED',
+		});
+		resetSwarmState();
+		ensureAgentSession('architect');
+
+		const hooks = createGuardrailsHooks(directory, defaultConfig());
+		await hooks.toolBefore(
+			{ tool: 'pre_check_batch', sessionID: 'architect', callID: 'c6' },
+			{ args: { files: ['src/a.ts'] } },
+		);
+		await hooks.toolAfter(
+			{ tool: 'pre_check_batch', sessionID: 'architect', callID: 'c6' },
+			{ title: '', output: PASS_PAYLOAD, metadata: null },
+		);
+
+		// 4.1 would otherwise be the sole COMMITTED+accepted eligible candidate
+		// (and its declared files DO match the caller's scan) — but 4.2's
+		// in-flight dispatch must still force ambiguity rather than a guess.
+		const workflow = getTaskWorkflowSnapshot(
+			await readTaskEvidence(directory, '4.1'),
+		);
+		expect(workflow.state).toBe('coder_delegated');
+		const session = swarmState.agentSessions.get('architect');
+		const advisories = session?.pendingAdvisoryMessages ?? [];
+		expect(
+			advisories.some((message) =>
+				message.includes('STAGE A ATTRIBUTION AMBIGUOUS'),
+			),
+		).toBe(true);
 	});
 
 	test('ambiguous candidates produce an advisory and never a guessed write', async () => {
@@ -226,5 +397,44 @@ describe('durable Stage A attribution', () => {
 			await readTaskEvidence(directory, '3.1'),
 		);
 		expect(workflow.state).toBe('pre_check_passed');
+	});
+
+	test('F-007: a truncated settlement-WAL scan refuses to attribute even with an apparently-sole eligible candidate', async () => {
+		await settleTask('1.1');
+		writeCommittedWal('1.1', { declaredFiles: ['src/a.ts'] });
+		// Pad past the 200-file settlement-WAL scan cap with names that sort
+		// AFTER '1.1.json' so the real candidate stays inside the scanned
+		// window while the scan as a whole is still truncated (matching.length
+		// > 200) — a second candidate beyond the cap can never be ruled out.
+		const fs = require('node:fs');
+		const dir = `${directory}/.swarm/coder-settlements`;
+		fs.mkdirSync(dir, { recursive: true });
+		for (let i = 0; i < 200; i++) {
+			fs.writeFileSync(`${dir}/9.${i}.json`, 'not valid json');
+		}
+		resetSwarmState();
+		ensureAgentSession('architect');
+
+		const hooks = createGuardrailsHooks(directory, defaultConfig());
+		await hooks.toolBefore(
+			{ tool: 'pre_check_batch', sessionID: 'architect', callID: 'c7' },
+			{ args: { files: ['src/a.ts'] } },
+		);
+		await hooks.toolAfter(
+			{ tool: 'pre_check_batch', sessionID: 'architect', callID: 'c7' },
+			{ title: '', output: PASS_PAYLOAD, metadata: null },
+		);
+
+		const workflow = getTaskWorkflowSnapshot(
+			await readTaskEvidence(directory, '1.1'),
+		);
+		expect(workflow.state).toBe('coder_delegated');
+		const session = swarmState.agentSessions.get('architect');
+		const advisories = session?.pendingAdvisoryMessages ?? [];
+		expect(
+			advisories.some((message) =>
+				message.includes('STAGE A ATTRIBUTION UNVERIFIABLE'),
+			),
+		).toBe(true);
 	});
 });

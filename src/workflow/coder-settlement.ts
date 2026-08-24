@@ -1126,7 +1126,13 @@ export interface CoderSettlementWalState {
 	 * state (workflow-wal-schema.ts), so consumers must compare `=== true`.
 	 */
 	accepted?: boolean;
-	expectedGeneration?: number;
+	/**
+	 * The file paths the dispatch declared it would change, as recorded on the
+	 * WAL at dispatch time. `null`/absent means no scope was declared. Used to
+	 * bind durable Stage-A attribution to the files a gate-tool call actually
+	 * scanned, rather than attributing on task-state cardinality alone.
+	 */
+	declaredFiles?: string[] | null;
 	/** The in-process ownership registry still holds this dispatch (toolAfter never drained it). */
 	ownedInProcess: boolean;
 	/** A different, still-alive host process owns the dispatch. Never force-releasable from here. */
@@ -1172,7 +1178,7 @@ export async function listCoderSettlementWalStates(
 				processId: wal.processId,
 				recordedAt: wal.recordedAt,
 				accepted: wal.accepted === true ? true : undefined,
-				expectedGeneration: wal.expectedGeneration,
+				declaredFiles: wal.context?.declaredFiles ?? null,
 				ownedInProcess: liveDispatches.has(
 					dispatchKey(directory, taskId, wal.transitionId),
 				),

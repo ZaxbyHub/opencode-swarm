@@ -1230,7 +1230,7 @@ Read-only tool to query the gate status of a specific task. Reads `.swarm/eviden
 **Usage**: Any phase to check task completion status without mutating evidence
 
 **Input**: `task_id` (task identifier in N.M, N.M.P, retro-N format, or internal tool ID like "sast_scan", "quality_budget", etc.)  
-**Output**: JSON with `taskId`, `status` (all_passed|incomplete|no_evidence), `required_gates`, `passed_gates`, `missing_gates`, `gates` map, `message`, `todo_scan` (advisory TODO count if available), and `secretscan_verdict` (v6.33)
+**Output**: JSON with `taskId`, `status` (all_passed|incomplete|no_evidence), `required_gates`, `passed_gates`, `missing_gates`, `gates` map, `message`, `todo_scan` (advisory TODO count if available), `secretscan_verdict` (v6.33), and the durable workflow lifecycle snapshot `workflow` (`{state, generation}` or `null`) plus an optional `workflow_attribution_hint` string present only when the task is wedged at `coder_delegated` with no attributed pre-check gate — the read-side diagnostic for the post-`/swarm reset-session` `TASK_WORKFLOW_STAGE_A_REQUIRED` wedge (issue #2315)
 
 **Secretscan verdict (v6.33)**: The tool now scans EvidenceBundle entries for `secretscan` type evidence using the `isSecretscanEvidence` type guard. When secretscan entries are found, it reports:
 - `pass` — No secrets found, no incomplete coverage, and no zero-coverage or count mismatch

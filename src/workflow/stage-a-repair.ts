@@ -7,6 +7,7 @@ import {
 	transitionTaskWorkflowEvidence,
 } from '../gate-evidence.js';
 import { validateSwarmPath } from '../hooks/utils.js';
+import { sanitizeDiagnosticText } from '../scope/path-identity.js';
 import * as logger from '../utils/logger.js';
 import { isStrictTaskId } from '../validation/task-id.js';
 import { listCoderSettlementWalStates } from './coder-settlement.js';
@@ -80,24 +81,48 @@ async function appendStageARepairEvent(
 	}
 }
 
+export type PreCheckGreennessResult =
+	| { green: true }
+	| {
+			green: false;
+			reason: 'no_pre_check_bundles' | 'pre_check_failed_or_stale';
+	  };
+
 /**
  * Decides whether durable post-settlement Stage A proof exists for a wedged
- * task. "Green" REQUIRES a secretscan evidence bundle whose latest entry is
- * pass/approved/info with full coverage and zero findings (the only Stage A
- * artifact pre_check_batch persists), plus no failing/rejected latest sast
- * entry, and every considered entry newer than the settlement commit when
+ * task. "Green" REQUIRES BOTH a secretscan evidence bundle whose latest entry
+ * is pass/approved/info with full coverage and zero findings, AND a sast_scan
+ * evidence bundle whose latest entry is pass/approved/info. Also requires
+ * every considered entry to be newer than the settlement commit when
  * `settledAfterMs` is supplied (a scan taken before the coder's mutation
  * proves nothing about it).
+ *
+ * Deliberately more conservative than `pre_check_batch`'s own default bar in
+ * two edge cases it cannot reproduce from persisted evidence alone: (1) a
+ * degraded-but-tolerated SAST run (Semgrep process failure with zero
+ * findings) persists an ordinary `verdict: 'fail'` entry structurally
+ * indistinguishable from a genuine failure — `failure_kind` is only present
+ * on the tool's transient return value, not the persisted bundle — so this
+ * function treats it as failing rather than risk silently waving through a
+ * scan that never actually completed; (2) a project running with SAST
+ * disabled (`sast_enabled: false`) never persists a `sast_scan` bundle at
+ * all, so a wedged task from such a project cannot be auto-repaired via this
+ * path and needs manual attention. Both are intentional fail-closed
+ * trade-offs for a security-relevant repair tool, not bugs — see PR #2316
+ * review finding ST-001/UIB-004 for why an absent-SAST-is-fine policy was
+ * removed in the first place.
+ *
+ * Evidence bucket names vs. entry type tags differ for SAST: the scanner
+ * persists its bundle under bucket `sast_scan` (see `src/tools/sast-scan.ts`)
+ * with individual entries tagged `type: 'sast'`.
  */
 async function hasGreenPostSettlementPreCheck(
 	directory: string,
 	settledAfterMs: number | null,
-): Promise<{
-	green: boolean;
-	reason: 'no_pre_check_bundles' | 'pre_check_failed_or_stale';
-}> {
+): Promise<PreCheckGreennessResult> {
 	let sawSecretscanGreen = false;
-	for (const evidenceType of ['secretscan', 'sast'] as const) {
+	let sawSastGreen = false;
+	for (const evidenceType of ['secretscan', 'sast_scan'] as const) {
 		let result: Awaited<ReturnType<typeof loadEvidence>>;
 		try {
 			result = await loadEvidence(directory, evidenceType, { migrate: false });
@@ -105,8 +130,9 @@ async function hasGreenPostSettlementPreCheck(
 			continue;
 		}
 		if (result.status !== 'found') continue;
+		const entryTypeTag = evidenceType === 'sast_scan' ? 'sast' : evidenceType;
 		const typed = result.bundle.entries.filter(
-			(entry) => entry.type === evidenceType,
+			(entry) => entry.type === entryTypeTag,
 		);
 		if (typed.length === 0) continue;
 		const last = typed[typed.length - 1];
@@ -114,30 +140,38 @@ async function hasGreenPostSettlementPreCheck(
 		if (settledAfterMs !== null && Number.isFinite(ts) && ts < settledAfterMs) {
 			return { green: false, reason: 'pre_check_failed_or_stale' };
 		}
-		if (
-			evidenceType === 'secretscan' &&
-			(last.verdict === 'pass' ||
-				last.verdict === 'approved' ||
-				last.verdict === 'info') &&
-			isSecretscanEvidence(last) &&
-			(last.incomplete_files ?? 0) === 0 &&
-			(last.files_scanned ?? 0) > 0 &&
-			(last.findings_count ?? 0) === 0
+		if (evidenceType === 'secretscan') {
+			if (
+				(last.verdict === 'pass' ||
+					last.verdict === 'approved' ||
+					last.verdict === 'info') &&
+				isSecretscanEvidence(last) &&
+				(last.incomplete_files ?? 0) === 0 &&
+				(last.files_scanned ?? 0) > 0 &&
+				(last.findings_count ?? 0) === 0
+			) {
+				sawSecretscanGreen = true;
+				continue;
+			}
+		} else if (
+			last.verdict === 'pass' ||
+			last.verdict === 'approved' ||
+			last.verdict === 'info'
 		) {
-			sawSecretscanGreen = true;
+			sawSastGreen = true;
 			continue;
 		}
 		if (last.verdict === 'fail' || last.verdict === 'rejected') {
 			return { green: false, reason: 'pre_check_failed_or_stale' };
 		}
 	}
-	// A green secretscan bundle is REQUIRED: it is the only pre-check artifact
-	// pre_check_batch persists today, and a sast-only record cannot vouch for
-	// the full Stage A gate.
-	if (!sawSecretscanGreen) {
+	// Both a green secretscan AND a green sast_scan bundle are REQUIRED — see
+	// this function's docstring above for the two known cases where this is
+	// intentionally more conservative than pre_check_batch's own bar.
+	if (!sawSecretscanGreen || !sawSastGreen) {
 		return { green: false, reason: 'no_pre_check_bundles' };
 	}
-	return { green: true, reason: 'no_pre_check_bundles' };
+	return { green: true };
 }
 
 /**
@@ -215,8 +249,18 @@ export async function repairWedgedStageA(
 						settledAfterMs === null ? parsed : Math.max(settledAfterMs, parsed);
 				}
 			} catch {
-				// WAL read failure must not block repair; recency check degrades
-				// to timestamp-agnostic greenness.
+				// WAL read failure falls through to the evidence-timestamp
+				// fallback below rather than disabling the recency check.
+			}
+			if (settledAfterMs === null) {
+				// No settlement WAL exists for this task (background-dispatched
+				// coder tasks never create one — see stage-b-gates.ts), or the
+				// WAL read failed. Fall back to the task's own last-transition
+				// timestamp (the accepted_mutation that put it at
+				// coder_delegated) so recency is still provable rather than
+				// silently disabled.
+				const fallbackTs = Date.parse(workflow.updatedAt);
+				if (Number.isFinite(fallbackTs)) settledAfterMs = fallbackTs;
 			}
 			const greenness = await hasGreenPostSettlementPreCheck(
 				directory,
@@ -253,7 +297,7 @@ export async function repairWedgedStageA(
 			await appendStageARepairEvent(directory, {
 				action: 'repair-failed',
 				taskId,
-				message: message.slice(0, 512),
+				message: sanitizeDiagnosticText(message, 512),
 			});
 			results.push({ taskId, outcome: 'error', message });
 		}

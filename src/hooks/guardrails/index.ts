@@ -29,7 +29,10 @@ import {
 import { loadPlan } from '../../plan/manager';
 import { getExecutor } from '../../sandbox/executor';
 import { sanitizeDiagnosticText } from '../../scope/path-identity';
-import { canonicalWorkspaceIdentity } from '../../scope/scope-binding';
+import {
+	canonicalWorkspaceIdentity,
+	normalizeScopeFiles,
+} from '../../scope/scope-binding';
 import { createScopeLeaseRenewalTracker } from '../../scope/scope-lease-renewal';
 import {
 	advanceTaskState,
@@ -112,14 +115,16 @@ export const _internals = {
 		toolCallsSinceLastWrite.has(sessionID),
 	/**
 	 * Durable Stage-A attribution fallback seam (TASK_WORKFLOW_STAGE_A_REQUIRED
-	 * post-reset wedge). Production resolves via committed settlement WALs;
-	 * tests replace this to simulate reset-flow attribution without real WAL
-	 * files. See {@link resolveDurableGateTaskId}.
+	 * post-reset wedge). This is the production call site (see `toolBefore`
+	 * below); it is also a substitution point tests may override to simulate
+	 * reset-flow attribution without real WAL files. See
+	 * {@link resolveDurableGateTaskId}.
 	 */
 	resolveDurableGateTaskId: (
 		directory: string,
-	): Promise<{ taskId: string } | { ambiguous: string[] } | null> =>
-		resolveDurableGateTaskId(directory),
+		callerFiles: string[] | null,
+	): Promise<DurableAttributionResult> =>
+		resolveDurableGateTaskId(directory, callerFiles),
 };
 
 /**
@@ -150,22 +155,30 @@ export function emitDurableAttributionAdvisory(
 		return;
 	}
 	if (
-		!prior ||
+		!prior &&
 		durableAttributionAdvisoryBySession.size >=
 			MAX_DURABLE_ATTRIBUTION_ADVISORY_SESSIONS
 	) {
+		// Only evict when this is a genuinely NEW session key — re-setting an
+		// existing session's entry never grows the map, so evicting an
+		// unrelated "oldest" session in that case would drop a still-valid
+		// cooldown for no size-driven reason.
 		const oldest = durableAttributionAdvisoryBySession.keys().next().value;
-		if (
-			oldest !== undefined &&
-			durableAttributionAdvisoryBySession.size >=
-				MAX_DURABLE_ATTRIBUTION_ADVISORY_SESSIONS
-		) {
+		if (oldest !== undefined) {
 			durableAttributionAdvisoryBySession.delete(oldest);
 		}
 	}
 	durableAttributionAdvisoryBySession.set(sessionID, { key, at: now });
 	const session = swarmState.agentSessions.get(sessionID);
-	if (session) pushAdvisory(session, message);
+	if (session) {
+		pushAdvisory(session, message);
+	} else {
+		// No live session to push the advisory to (the exact post-reset
+		// window this fallback exists for) — leave a log trace so a dropped
+		// advisory is not entirely silent, matching the write-failure paths
+		// below which always log in addition to (or instead of) advising.
+		logger.criticalWarn(`[guardrails] ${message}`);
+	}
 }
 
 /**
@@ -176,11 +189,17 @@ export function emitDurableAttributionAdvisory(
  * (isDuplicateTransition returns the existing evidence), so any throw here is
  * abnormal; TASK_WORKFLOW_TERMINAL and fencing codes stay warn-only because a
  * late gate result after close/settlement is expected churn, not a wedge.
+ *
+ * `TASK_WORKFLOW_GENERATION_MISMATCH` is deliberately EXCLUDED: it is a CAS
+ * fencing code that fires during ordinary concurrent/parallel-lane operation
+ * (a sibling transition legitimately bumped the generation between this
+ * call's read and write), not only after a reset. Escalating it here would
+ * turn a routine race into a false "run /swarm recover" advisory during
+ * normal, non-reset operation.
  */
 export const STAGE_A_ATTRIBUTION_MISS_CODES = new Set([
 	'TASK_WORKFLOW_CODER_MUTATION_REQUIRED',
 	'TASK_WORKFLOW_STAGE_A_REQUIRED',
-	'TASK_WORKFLOW_GENERATION_MISMATCH',
 ]);
 
 export function stageAWriteErrorCode(error: unknown): string | null {
@@ -188,6 +207,48 @@ export function stageAWriteErrorCode(error: unknown): string | null {
 	const match = /^[A-Z][A-Z0-9_]+/.exec(message);
 	return match ? match[0] : null;
 }
+
+/**
+ * Best-effort extraction of the file scope a gate-tool call declared, from
+ * its raw tool args. Field names vary across the ~10 gate tools
+ * (`isGateTool`); this covers the shapes actually used by tools whose result
+ * can drive a durable Stage-A write (`files: string[]`) plus a defensive
+ * `changed_files` array-of-object fallback. Returns `null` when no file
+ * scope can be determined — callers must treat that as "cannot verify",
+ * never as "no restriction".
+ */
+function extractGateCallFiles(args: unknown): string[] | null {
+	if (!args || typeof args !== 'object') return null;
+	const raw = (args as Record<string, unknown>).files;
+	if (Array.isArray(raw)) {
+		const files = raw.filter(
+			(entry): entry is string => typeof entry === 'string' && entry !== '',
+		);
+		return files.length > 0 ? files : null;
+	}
+	const changed = (args as Record<string, unknown>).changed_files;
+	if (Array.isArray(changed)) {
+		const files = changed
+			.map((entry) =>
+				typeof entry === 'string'
+					? entry
+					: entry &&
+							typeof entry === 'object' &&
+							typeof (entry as { path?: unknown }).path === 'string'
+						? (entry as { path: string }).path
+						: null,
+			)
+			.filter((entry): entry is string => entry !== null && entry !== '');
+		return files.length > 0 ? files : null;
+	}
+	return null;
+}
+
+type DurableAttributionResult =
+	| { taskId: string }
+	| { ambiguous: string[] }
+	| { unbound: string; reason: 'files_mismatch' | 'truncated' }
+	| null;
 
 /**
  * Resolves gate-tool task attribution from durable state when the in-memory
@@ -198,13 +259,29 @@ export function stageAWriteErrorCode(error: unknown): string | null {
  * AND whose flat evidence store still sits at `coder_delegated` — i.e. tasks
  * that are genuinely awaiting their Stage A write.
  *
- * Conservative by design: exactly one eligible candidate is required. With
- * parallel lanes several tasks can sit at `coder_delegated`; attributing a
- * pre_check_batch run to the wrong one would corrupt the wrong task's
- * lifecycle (the reducer accepts stage_a_passed from any coder_delegated
- * state), so multiple candidates yield an explicit ambiguity advisory naming
- * `/swarm recover` instead of a guess. Zero candidates means there is nothing
- * durably attributable (the normal non-swarm flow) and returns null.
+ * Conservative by design in three layers:
+ * 1. Exactly one eligible (COMMITTED+accepted+coder_delegated) candidate is
+ *    required. A lane still mid-dispatch (DISPATCHED/PREPARED) whose task is
+ *    already at `coder_delegated` is not itself eligible but still widens
+ *    the ambiguity set, so a second lane in flight cannot be silently
+ *    invisible to this guard.
+ * 2. A truncated settlement-WAL scan (more than 200 distinct historical
+ *    task ids) cannot prove single-candidacy — a would-be second candidate
+ *    could sort past the cap — so a truncated scan never resolves to a bare
+ *    `taskId`, even with exactly one candidate found.
+ * 3. The sole eligible candidate's declared/changed files (from its
+ *    settlement WAL) must intersect the file scope the calling gate-tool
+ *    call actually declared. Task-state cardinality alone does not prove the
+ *    call's result is actually about that task — attributing a
+ *    `pre_check_batch` run to the wrong task would corrupt the wrong task's
+ *    lifecycle (the reducer accepts `stage_a_passed` from any
+ *    `coder_delegated` state) or forge Stage-A proof for files that were
+ *    never scanned.
+ *
+ * Any of the three failure modes returns `{ unbound }` (attribution refused,
+ * advisory only) or `{ ambiguous }` rather than a guess. Zero candidates
+ * means there is nothing durably attributable (the normal non-swarm flow)
+ * and returns `null`.
  *
  * Bounded: reuses the settlement-WAL scan cap (200 files, unreadable-tolerant)
  * plus ≤200 evidence reads, and runs only on gate-tool calls whose in-memory
@@ -214,21 +291,61 @@ export function stageAWriteErrorCode(error: unknown): string | null {
  */
 async function resolveDurableGateTaskId(
 	directory: string,
-): Promise<{ taskId: string } | { ambiguous: string[] } | null> {
+	callerFiles: string[] | null,
+): Promise<DurableAttributionResult> {
 	try {
-		const { states } = await listCoderSettlementWalStates(directory);
-		const eligible: string[] = [];
+		const { states, truncated } = await listCoderSettlementWalStates(directory);
+		const eligible: (typeof states)[number][] = [];
+		const inFlightAtCoderDelegated = new Set<string>();
 		for (const state of states) {
+			if (!isStrictTaskId(state.taskId)) continue;
+			if (state.state === 'DISPATCHED' || state.state === 'PREPARED') {
+				const workflow = getTaskWorkflowSnapshot(
+					await readTaskEvidence(directory, state.taskId),
+				);
+				if (workflow.state === 'coder_delegated') {
+					inFlightAtCoderDelegated.add(state.taskId);
+				}
+				continue;
+			}
 			if (state.state !== 'COMMITTED') continue;
 			if (state.accepted !== true) continue;
-			if (!isStrictTaskId(state.taskId)) continue;
 			const workflow = getTaskWorkflowSnapshot(
 				await readTaskEvidence(directory, state.taskId),
 			);
-			if (workflow.state === 'coder_delegated') eligible.push(state.taskId);
+			if (workflow.state === 'coder_delegated') eligible.push(state);
 		}
-		if (eligible.length === 1) return { taskId: eligible[0] };
-		if (eligible.length > 1) return { ambiguous: eligible.sort() };
+		const ambiguousIds = new Set<string>([
+			...eligible.map((s) => s.taskId),
+			...inFlightAtCoderDelegated,
+		]);
+		if (ambiguousIds.size > 1) return { ambiguous: [...ambiguousIds].sort() };
+		if (eligible.length === 1) {
+			const candidate = eligible[0];
+			if (truncated) return { unbound: candidate.taskId, reason: 'truncated' };
+			const declared = candidate.declaredFiles;
+			// `declared` is already canonicalized when written to the WAL
+			// (normalizeScopePath: forward slashes, no leading `./`, no
+			// absolute paths — see src/scope/scope-binding.ts). The caller's
+			// raw `files` argument is not, so a genuinely-matching file could
+			// otherwise fail to bind on a `./`-prefix, backslash, or duplicate
+			// separator alone; normalize it the same way before comparing.
+			const normalizedCallerFiles =
+				callerFiles !== null ? normalizeScopeFiles(callerFiles) : null;
+			const bound =
+				normalizedCallerFiles !== null &&
+				normalizedCallerFiles.length > 0 &&
+				declared !== null &&
+				declared !== undefined &&
+				declared.length > 0 &&
+				// Exclude empty-string entries: an empty path is never a real
+				// file scope, and treating '' === '' as a match would bind on
+				// a shared "no scope declared" placeholder rather than a
+				// genuine file-scope intersection.
+				declared.some((f) => f !== '' && normalizedCallerFiles.includes(f));
+			if (bound) return { taskId: candidate.taskId };
+			return { unbound: candidate.taskId, reason: 'files_mismatch' };
+		}
 		return null;
 	} catch (error) {
 		warn('Durable gate attribution fallback failed', { error: String(error) });
@@ -820,16 +937,29 @@ export function createGuardrailsHooks(
 				// in-memory chain (currentTaskId/lastCoderDelegationTaskId), so
 				// resolve the task from committed settlement WALs before giving up
 				// and silently skipping every Stage A write.
-				const fallback =
-					await _internals.resolveDurableGateTaskId(effectiveDirectory);
+				const callerFiles = extractGateCallFiles(output.args);
+				const fallback = await _internals.resolveDurableGateTaskId(
+					effectiveDirectory,
+					callerFiles,
+				);
 				if (fallback) {
 					if ('taskId' in fallback) {
 						taskId = fallback.taskId;
-					} else if (fallback.ambiguous.length > 0) {
+					} else if ('ambiguous' in fallback && fallback.ambiguous.length > 0) {
+						const shown = fallback.ambiguous.slice(0, 10);
+						const more = fallback.ambiguous.length - shown.length;
 						emitDurableAttributionAdvisory(
 							input.sessionID,
 							`${effectiveDirectory}\u0000${fallback.ambiguous.join(',')}`,
-							`STAGE A ATTRIBUTION AMBIGUOUS: ${fallback.ambiguous.length} tasks are settled at coder_delegated (${fallback.ambiguous.join(', ')}) but this session has no task correlation after reset-session. Stage A evidence cannot be attributed safely. Run /swarm recover to repair Stage A attribution, then re-run the gate.`,
+							`STAGE A ATTRIBUTION AMBIGUOUS: ${fallback.ambiguous.length} tasks are settled at coder_delegated (${shown.join(', ')}${more > 0 ? `, +${more} more` : ''}) but this session has no task correlation after reset-session. Stage A evidence cannot be attributed safely. Run /swarm recover to repair Stage A attribution, then re-run the gate.`,
+						);
+					} else if ('unbound' in fallback) {
+						emitDurableAttributionAdvisory(
+							input.sessionID,
+							`${effectiveDirectory}\u0000unbound\u0000${fallback.unbound}`,
+							fallback.reason === 'truncated'
+								? `STAGE A ATTRIBUTION UNVERIFIABLE: task ${fallback.unbound} looks like the sole durable candidate at coder_delegated, but the settlement scan is truncated (more than 200 historical settlements) so a second candidate cannot be ruled out. Stage A evidence cannot be safely attributed. Run /swarm recover ${fallback.unbound} if this task is genuinely wedged.`
+								: `STAGE A ATTRIBUTION UNBOUND: task ${fallback.unbound} is the sole durable candidate at coder_delegated, but this gate call's scanned files do not match its declared changes (or no file scope was provided). Stage A evidence cannot be safely attributed. Run /swarm recover ${fallback.unbound} if this task is genuinely wedged.`,
 						);
 					}
 				}

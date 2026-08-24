@@ -17,6 +17,15 @@ import {
 } from '../../../src/gate-evidence';
 import { repairWedgedStageA } from '../../../src/workflow/stage-a-repair';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
+import { freezeClock } from '../../helpers/test-clock';
+
+// Deterministic fixture instant (explicit-arg Date constructor, not a raw
+// clock read — see docs/testing/test-stability.md, issue #1782). All
+// "current time" fixtures below are computed relative to this constant so
+// staleness comparisons stay reproducible under coverage instrumentation.
+const FIXED_NOW_MS = new Date('2026-01-01T00:00:00.000Z').getTime();
+const FIXED_NOW_ISO = new Date(FIXED_NOW_MS).toISOString();
+const FIXED_STALE_ISO = new Date(FIXED_NOW_MS - 60_000).toISOString();
 
 let cleanup: () => void;
 let directory: string;
@@ -62,7 +71,7 @@ function writeCommittedWal(
 				declaredFiles: [],
 			},
 			accepted: options?.accepted ?? true,
-			recordedAt: options?.recordedAt ?? new Date().toISOString(),
+			recordedAt: options?.recordedAt ?? new Date(FIXED_NOW_MS).toISOString(),
 		}),
 	);
 }
@@ -80,7 +89,7 @@ async function writeGreenSecretscan(timestamp?: string): Promise<void> {
 	await saveEvidence(directory, 'secretscan', {
 		task_id: 'secretscan',
 		type: 'secretscan',
-		timestamp: timestamp ?? new Date().toISOString(),
+		timestamp: timestamp ?? new Date(FIXED_NOW_MS).toISOString(),
 		agent: 'pre_check_batch',
 		verdict: 'pass',
 		summary: 'no secrets found',
@@ -92,11 +101,34 @@ async function writeGreenSecretscan(timestamp?: string): Promise<void> {
 	});
 }
 
+/** Writes a green SAST bundle to the REAL bucket the scanner tool persists to. */
+async function writeGreenSast(timestamp?: string): Promise<void> {
+	await saveEvidence(directory, 'sast_scan', {
+		task_id: 'sast_scan',
+		type: 'sast',
+		timestamp: timestamp ?? new Date(FIXED_NOW_MS).toISOString(),
+		agent: 'pre_check_batch',
+		verdict: 'pass',
+		summary: 'no findings',
+		findings: [],
+		engine: 'tier_a',
+		files_scanned: 5,
+		findings_count: 0,
+		findings_by_severity: { critical: 0, high: 0, medium: 0, low: 0 },
+	});
+}
+
+/** Convenience: both bundles green, satisfying the full Stage A bar. */
+async function writeBothGreen(timestamp?: string): Promise<void> {
+	await writeGreenSecretscan(timestamp);
+	await writeGreenSast(timestamp);
+}
+
 describe('repairWedgedStageA', () => {
 	test('repairs a wedged coder_delegated task with green pre-check evidence', async () => {
 		await settleTaskAtCoderDelegated('1.1');
 		writeCommittedWal('1.1');
-		await writeGreenSecretscan();
+		await writeBothGreen();
 
 		const { results, truncated } = await repairWedgedStageA(directory);
 
@@ -119,7 +151,7 @@ describe('repairWedgedStageA', () => {
 	test('appends a stage_a_repair audit event for each repair', async () => {
 		await settleTaskAtCoderDelegated('2.3');
 		writeCommittedWal('2.3');
-		await writeGreenSecretscan();
+		await writeBothGreen();
 
 		await repairWedgedStageA(directory);
 
@@ -148,7 +180,7 @@ describe('repairWedgedStageA', () => {
 
 		await settleTaskAtCoderDelegated('1.2');
 		writeCommittedWal('1.2');
-		await writeGreenSecretscan();
+		await writeBothGreen();
 		await repairWedgedStageA(directory); // first run repairs
 		const second = await repairWedgedStageA(directory); // already advanced
 		expect(second.results).toHaveLength(1);
@@ -182,7 +214,7 @@ describe('repairWedgedStageA', () => {
 		await saveEvidence(directory, 'secretscan', {
 			task_id: 'secretscan',
 			type: 'secretscan',
-			timestamp: new Date().toISOString(),
+			timestamp: new Date(FIXED_NOW_MS).toISOString(),
 			agent: 'pre_check_batch',
 			verdict: 'fail',
 			summary: 'secrets detected',
@@ -203,13 +235,13 @@ describe('repairWedgedStageA', () => {
 		]);
 	});
 
-	test('skips when only a sast bundle exists (secretscan is the required proof)', async () => {
+	test('skips when only a sast bundle exists at the phantom bucket (secretscan is required, and this bucket is not read)', async () => {
 		await settleTaskAtCoderDelegated('1.7');
 		writeCommittedWal('1.7');
 		await saveEvidence(directory, 'sast', {
 			task_id: 'sast',
 			type: 'sast',
-			timestamp: new Date().toISOString(),
+			timestamp: new Date(FIXED_NOW_MS).toISOString(),
 			agent: 'pre_check_batch',
 			verdict: 'pass',
 			summary: 'no findings',
@@ -230,12 +262,131 @@ describe('repairWedgedStageA', () => {
 		]);
 	});
 
+	test('skips when secretscan is green but sast_scan is absent (both are required)', async () => {
+		await settleTaskAtCoderDelegated('1.8');
+		writeCommittedWal('1.8');
+		await writeGreenSecretscan();
+
+		const { results } = await repairWedgedStageA(directory);
+		expect(results).toEqual([
+			{
+				taskId: '1.8',
+				outcome: 'skipped_not_green',
+				reason: 'no_pre_check_bundles',
+			},
+		]);
+		const workflow = getTaskWorkflowSnapshot(
+			await readTaskEvidence(directory, '1.8'),
+		);
+		expect(workflow.state).toBe('coder_delegated');
+	});
+
+	test('skips when secretscan is green but the real sast_scan bundle failed', async () => {
+		await settleTaskAtCoderDelegated('1.9');
+		writeCommittedWal('1.9');
+		await writeGreenSecretscan();
+		await saveEvidence(directory, 'sast_scan', {
+			task_id: 'sast_scan',
+			type: 'sast',
+			timestamp: new Date(FIXED_NOW_MS).toISOString(),
+			agent: 'pre_check_batch',
+			verdict: 'fail',
+			summary: '2 findings',
+			findings: [],
+			engine: 'tier_a',
+			files_scanned: 5,
+			findings_count: 2,
+			findings_by_severity: { critical: 2, high: 0, medium: 0, low: 0 },
+		});
+
+		const { results } = await repairWedgedStageA(directory);
+		expect(results).toEqual([
+			{
+				taskId: '1.9',
+				outcome: 'skipped_not_green',
+				reason: 'pre_check_failed_or_stale',
+			},
+		]);
+	});
+
+	test('repairs when both secretscan and the real sast_scan bundle are green', async () => {
+		await settleTaskAtCoderDelegated('1.10');
+		writeCommittedWal('1.10');
+		await writeBothGreen();
+
+		const { results } = await repairWedgedStageA(directory);
+		expect(results).toEqual([
+			{
+				taskId: '1.10',
+				outcome: 'repaired',
+				generation: 1,
+				transitionId: 'stage-a-repair:1.10:1',
+			},
+		]);
+	});
+
+	test('repairs a background-dispatched (WAL-less) task using its own last-transition timestamp for recency', async () => {
+		// No settlement WAL at all — mirrors a background-dispatched coder task,
+		// which never creates one (see src/background/stage-b-gates.ts).
+		// The clock is frozen for both the transition (which stamps
+		// workflow.updatedAt via the real clock in production) and the evidence
+		// write, so the two independently-sourced timestamps land at the exact
+		// same instant rather than racing against the wall clock.
+		const restore = freezeClock({ isoNow: FIXED_NOW_ISO });
+		try {
+			await settleTaskAtCoderDelegated('1.11');
+			await writeBothGreen();
+		} finally {
+			restore();
+		}
+
+		const { results } = await repairWedgedStageA(directory);
+		expect(results).toEqual([
+			{
+				taskId: '1.11',
+				outcome: 'repaired',
+				generation: 1,
+				transitionId: 'stage-a-repair:1.11:1',
+			},
+		]);
+	});
+
+	test('refuses to repair a WAL-less task off pre-check evidence that predates its own last transition', async () => {
+		// Two sequential frozen instants (not nested — freezeClock forbids
+		// stacking): the transition lands at the LATER instant, then the
+		// evidence is written at an EARLIER instant, so it genuinely predates
+		// the task's own last-transition timestamp regardless of wall-clock time.
+		let restore = freezeClock({ isoNow: FIXED_NOW_ISO });
+		try {
+			await settleTaskAtCoderDelegated('1.12');
+		} finally {
+			restore();
+		}
+		restore = freezeClock({ isoNow: FIXED_STALE_ISO });
+		try {
+			await writeBothGreen(FIXED_STALE_ISO);
+		} finally {
+			restore();
+		}
+
+		const { results } = await repairWedgedStageA(directory);
+		expect(results).toEqual([
+			{
+				taskId: '1.12',
+				outcome: 'skipped_not_green',
+				reason: 'pre_check_failed_or_stale',
+			},
+		]);
+	});
+
 	test('skips when pre-check evidence predates the settlement commit', async () => {
 		await settleTaskAtCoderDelegated('1.6');
 		// Bundle written BEFORE the settlement commit — it cannot vouch for the
 		// mutation this settlement accepted.
-		const staleTimestamp = new Date(Date.now() - 60_000).toISOString();
-		writeCommittedWal('1.6', { recordedAt: new Date().toISOString() });
+		const staleTimestamp = new Date(FIXED_NOW_MS - 60_000).toISOString();
+		writeCommittedWal('1.6', {
+			recordedAt: new Date(FIXED_NOW_MS).toISOString(),
+		});
 		await writeGreenSecretscan(staleTimestamp);
 
 		const { results } = await repairWedgedStageA(directory);
@@ -253,7 +404,7 @@ describe('repairWedgedStageA', () => {
 		await settleTaskAtCoderDelegated('3.2');
 		writeCommittedWal('3.1');
 		writeCommittedWal('3.2');
-		await writeGreenSecretscan();
+		await writeBothGreen();
 
 		const { results } = await repairWedgedStageA(directory, {
 			taskIds: ['3.2'],
@@ -267,7 +418,18 @@ describe('repairWedgedStageA', () => {
 	});
 
 	test('live DISPATCHED settlement blocks the repair loudly as a per-task error', async () => {
-		await settleTaskAtCoderDelegated('4.1');
+		// A DISPATCHED (non-COMMITTED) WAL is excluded from the settledAfterMs
+		// scan, so recency falls back to workflow.updatedAt (frozen here to the
+		// same instant as the evidence writes) — greenness must hold so the code
+		// actually reaches the transition attempt and hits the live-dispatch
+		// fence, rather than short-circuiting on a false staleness mismatch.
+		const restore = freezeClock({ isoNow: FIXED_NOW_ISO });
+		try {
+			await settleTaskAtCoderDelegated('4.1');
+			await writeBothGreen();
+		} finally {
+			restore();
+		}
 		// DISPATCHED WAL owns the evidence lane; the reducer fence must refuse.
 		fs.mkdirSync(path.dirname(walPath('4.1')), { recursive: true });
 		fs.writeFileSync(
@@ -293,10 +455,9 @@ describe('repairWedgedStageA', () => {
 					declaredFiles: [],
 				},
 				accepted: true,
-				recordedAt: new Date().toISOString(),
+				recordedAt: FIXED_NOW_ISO,
 			}),
 		);
-		await writeGreenSecretscan();
 
 		const { results } = await repairWedgedStageA(directory);
 		expect(results).toHaveLength(1);
