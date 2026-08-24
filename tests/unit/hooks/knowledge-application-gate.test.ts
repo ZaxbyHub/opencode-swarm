@@ -1,7 +1,13 @@
 /** V2-authoritative knowledge application gate integration tests. */
 
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from 'node:fs';
 import * as path from 'node:path';
 import {
 	buildAckDedupKey,
@@ -9,7 +15,6 @@ import {
 	parseAcknowledgments,
 	resolveApplicationLogPath,
 } from '../../../src/hooks/knowledge-application.js';
-import { resolveSwarmKnowledgePath } from '../../../src/hooks/knowledge-store.js';
 import {
 	knowledgeApplicationGateBefore,
 	knowledgeApplicationTransformScan,
@@ -20,6 +25,7 @@ import {
 	queryLiveMemberships,
 	validateAndCommitTerminalBatch,
 } from '../../../src/hooks/knowledge-receipt-ledger.js';
+import { resolveSwarmKnowledgePath } from '../../../src/hooks/knowledge-store.js';
 import type { MessageWithParts } from '../../../src/hooks/knowledge-types.js';
 import { swarmState } from '../../../src/state.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
@@ -134,7 +140,10 @@ describe('knowledgeApplicationGateBefore V2 authority', () => {
 		const lesson = 'Always confirm exact-pair ack tokens before delegating.';
 		const swarmPath = resolveSwarmKnowledgePath(directory);
 		mkdirSync(path.dirname(swarmPath), { recursive: true });
-		writeFileSync(swarmPath, `${JSON.stringify({ id: ENTRY, tier: 'swarm', lesson })}\n`);
+		writeFileSync(
+			swarmPath,
+			`${JSON.stringify({ id: ENTRY, tier: 'swarm', lesson })}\n`,
+		);
 		await display('trace-discover');
 		const denial = await knowledgeApplicationGateBefore(
 			directory,
