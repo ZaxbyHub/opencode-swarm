@@ -19,6 +19,7 @@ import {
 	recordTelemetry,
 	type TelemetryEntry,
 } from '../../../src/context-map/telemetry';
+import { freezeClock, type Restore } from '../../helpers/test-clock';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 function makeEntry(overrides: Partial<TelemetryEntry> = {}): TelemetryEntry {
@@ -82,11 +83,20 @@ describe('context-map telemetry store lock (issue #2037 F-2/F-4/F-5)', () => {
 
 	test('F-5: ancient lock is stale-broken — fn runs, lock released', () => {
 		fs.writeFileSync(lockPath, '', 'utf-8');
-		const ancient = new Date(Date.now() - 10 * 60_000); // > 5 min
-		fs.utimesSync(lockPath, ancient, ancient);
-		const result = _internals.withStoreLock(dir, () => 'ok');
-		expect(result).toBe('ok');
-		expect(fs.existsSync(lockPath)).toBe(false);
+		// Freeze the clock 20 min AHEAD of the lock file's real mtime so
+		// withStoreLock's internal Date.now() sees the lock as ancient
+		// (> 5 min) and stale-breaks it (test-clock lint: raw-clock files
+		// must freeze — check-test-clock.sh).
+		const restore: Restore = freezeClock({
+			fixedNow: Date.now() + 20 * 60_000,
+		});
+		try {
+			const result = _internals.withStoreLock(dir, () => 'ok');
+			expect(result).toBe('ok');
+			expect(fs.existsSync(lockPath)).toBe(false);
+		} finally {
+			restore();
+		}
 	});
 
 	test('F-5: lock is released even when fn throws', () => {
