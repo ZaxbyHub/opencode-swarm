@@ -137,16 +137,21 @@ describe('recordTelemetry', () => {
 		// cross-platform coverage.
 		if (process.platform !== 'win32') {
 			const entry = makeEntry();
-			// Patch _internals to simulate failure
-			const realAppend = _internals.appendFileSync;
-			_internals.appendFileSync = (() => {
+			// Patch _internals to simulate failure. The FIRST write on a fresh
+			// directory goes through atomicReplace (writeFileSync tmp + rename),
+			// not appendFileSync (#2037), so the failing seam must be one the
+			// atomic first-write path actually invokes. Restore in finally so a
+			// failed assertion can never leak the throwing seam into the shared
+			// module and poison later tests in this process.
+			const realWrite = _internals.writeFileSync;
+			_internals.writeFileSync = (() => {
 				throw new Error('simulated write error');
-			}) as typeof _internals.appendFileSync;
-
-			expect(recordTelemetry(entry, dir)).toBe(false);
-
-			_internals.appendFileSync =
-				realAppend as typeof _internals.appendFileSync;
+			}) as typeof _internals.writeFileSync;
+			try {
+				expect(recordTelemetry(entry, dir)).toBe(false);
+			} finally {
+				_internals.writeFileSync = realWrite as typeof _internals.writeFileSync;
+			}
 		}
 	});
 });
