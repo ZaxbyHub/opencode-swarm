@@ -461,13 +461,14 @@ The Architect prompt requires inspecting this block before:
 4. Calling `phase_complete`.
 5. Escalating or invoking `skill_improve`.
 
-For each applicable directive, the Architect emits:
+For each applicable directive, the Architect emits the exact colon-separated token pair
+carried by the block above (the `(trace_id, entry_id)` pair, not a bare entry id):
 
-- `KNOWLEDGE_APPLIED: <id>` — directive observed in the next compliant action.
-- `KNOWLEDGE_N_A: <id> reason=<short>` — does not apply this turn (neutral).
-- `KNOWLEDGE_IGNORED: <id> reason=<short>` — judged relevant but deliberately not followed (counts against the directive).
-- `KNOWLEDGE_CONTRADICTED: <id> reason=<short>` — current authority or repository evidence disproves it.
-- `KNOWLEDGE_VIOLATED: <id> reason=<short>` — runtime evidence shows it was breached.
+- `KNOWLEDGE_APPLIED:<trace_id>:<entry_id>` — directive observed in the next compliant action.
+- `KNOWLEDGE_N_A:<trace_id>:<entry_id> reason=<short>` — does not apply this turn (neutral).
+- `KNOWLEDGE_IGNORED:<trace_id>:<entry_id> reason=<short>` — judged relevant but deliberately not followed (counts against the directive).
+- `KNOWLEDGE_CONTRADICTED:<trace_id>:<entry_id> reason=<short>` — current authority or repository evidence disproves it.
+- `KNOWLEDGE_VIOLATED:<trace_id>:<entry_id> reason=<short>` — runtime evidence shows it was breached.
 
 Chat-text markers (KNOWLEDGE_APPLIED/N_A/IGNORED/CONTRADICTED/VIOLATED) are the sole mechanism that
 satisfies the knowledge-application enforcement gate. The `knowledge_receipt` tool
