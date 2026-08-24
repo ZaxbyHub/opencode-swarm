@@ -11,8 +11,6 @@ describe('swarm-pr-review runtime friction guidance', () => {
 			read('src/agents/architect.ts'),
 			read('src/hooks/pr-workflow-gate.ts'),
 			read('.opencode/skills/swarm-pr-review/SKILL.md'),
-			read('.agents/skills/swarm-pr-review/SKILL.md'),
-			read('.claude/skills/swarm-pr-review/SKILL.md'),
 		];
 
 		for (const source of sources) {

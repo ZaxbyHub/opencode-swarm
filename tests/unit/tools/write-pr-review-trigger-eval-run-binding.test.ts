@@ -33,6 +33,7 @@ import {
 	PR_REVIEW_TRIGGER_DEFINITIONS,
 	_internals as writerInternals,
 } from '../../../src/tools/write-pr-review-trigger-eval';
+import { LEGACY_PR_REVIEW_RESILIENCE_POLICY } from '../pr-review-test-policy.js';
 
 // Issue #2124: the trigger-evaluation receipt must be immutable after
 // consumption — run_id is bound to the gate state (mirroring
@@ -198,6 +199,7 @@ async function establishBoundReviewGate(root: string): Promise<void> {
 	await enforcePrReviewBaseDimensions(root, SESSION_ID, baseLanes, {
 		batchId: 'base-all',
 		prHeadSha: HEAD_SHA,
+		prReviewResiliencePolicy: LEGACY_PR_REVIEW_RESILIENCE_POLICY,
 	});
 	for (const lane of baseLanes) {
 		await recordCompletedLane(root, {

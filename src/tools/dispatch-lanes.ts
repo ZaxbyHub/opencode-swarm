@@ -37,8 +37,11 @@ import {
 	resolvePrWorkflowRevisionDigestDetailedAsync,
 } from '../background/workspace-snapshot.js';
 import { WRITE_TOOL_NAMES } from '../config/constants.js';
+import { loadPluginConfig } from '../config/loader.js';
 import {
+	DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
 	isKnownCanonicalRole,
+	type PrReviewResilienceConfig,
 	resolveGeneratedAgentRole,
 } from '../config/schema.js';
 import {
@@ -57,8 +60,11 @@ import {
 	PR_REVIEW_BASE_LANE_FLOORS,
 	PR_REVIEW_MICRO_LANE_FLOORS,
 	type PrReviewDepthTier,
+	PrReviewResilienceCircuitOpenError,
+	PrReviewResilienceRetryExhaustedError,
 	recordPrFeedbackGateBatch,
 	recordPrReviewValidationBatch,
+	rollbackPrReviewBaseAdmissionIfUnlaunched,
 	validatePrReviewDiscoveryLaneCompletion,
 	validatePrWorkflowTransportRecovery,
 } from '../hooks/pr-workflow-gate.js';
@@ -253,6 +259,26 @@ const PR_WORKFLOW_LANE_CHECKLISTS: Readonly<Record<string, string>> = {
 	'closeout-critic':
 		'challenge the closeout evidence, omissions, false confidence, severity, scope, and publication readiness',
 };
+
+const CONTROLLER_FIELD_CONTROL_SEPARATOR_PATTERN = /[\p{Cc}\p{Zl}\p{Zp}]+/gu;
+
+function canonicalizeControllerField(value: string): string {
+	return value.replace(CONTROLLER_FIELD_CONTROL_SEPARATOR_PATTERN, ' ').trim();
+}
+
+type ControllerTokenClassification =
+	| { ok: true; token: string }
+	| { ok: false; reason: 'empty' | 'multiple' };
+
+function classifyControllerTokenField(
+	value: string,
+): ControllerTokenClassification {
+	const normalized = canonicalizeControllerField(value);
+	if (!normalized) return { ok: false, reason: 'empty' };
+	const tokens = normalized.split(/\s+/).filter(Boolean);
+	if (tokens.length !== 1) return { ok: false, reason: 'multiple' };
+	return { ok: true, token: tokens[0] ?? '' };
+}
 
 /**
  * Exported so a test can assert the RENDERED contract, not its source text: the
@@ -532,6 +558,21 @@ const DispatchLanesAsyncArgsSchema = DispatchLanesArgsSchema.extend({
 		.describe(
 			'Complete immutable feedback item inventory required for swarm-pr-feedback:verification',
 		),
+	pr_review_wave_stage: z
+		.enum(['canary', 'fanout'])
+		.optional()
+		.describe(
+			'PR_REVIEW base-only staged dispatch marker. Required with pr_review_wave_attempt at depth tier M or L while pr_review_resilience is enabled. Use "canary" for the singleton probe lane and "fanout" for the follow-up batch that partitions the remaining unresolved base obligations.',
+		),
+	pr_review_wave_attempt: z
+		.number()
+		.int()
+		.min(0)
+		.max(2)
+		.optional()
+		.describe(
+			'PR_REVIEW base-only staged attempt number, required together with pr_review_wave_stage at depth tier M or L while resilience is enabled: attempt 0 is the initial wave, followed by at most two retry attempts (1 and 2) over the exact unresolved-obligation target left by the previous attempt.',
+		),
 });
 
 const CollectLaneResultsArgsSchema = z.object({
@@ -710,7 +751,11 @@ export interface DispatchLanesResult {
 
 export interface DispatchLanesAsyncResult {
 	success: boolean;
-	failure_class?: 'invalid_args' | 'no_client';
+	failure_class?:
+		| 'invalid_args'
+		| 'no_client'
+		| 'circuit_open'
+		| 'retry_exhausted';
 	message?: string;
 	batch_id: string | null;
 	dispatched: number;
@@ -796,6 +841,7 @@ export const _internals: {
 	getSessionOps: () => SessionOps | null;
 	getGeneratedAgentNames: () => readonly string[];
 	createParallelDispatcher: typeof createParallelDispatcher;
+	loadPluginConfig: typeof loadPluginConfig;
 	resolvePrWorkflowRevisionDigestAsync: typeof resolvePrWorkflowRevisionDigestAsync;
 	resolveExactMergeBaseAsync: typeof resolveExactMergeBaseAsync;
 	validatePrWorkflowTransportRecovery: typeof validatePrWorkflowTransportRecovery;
@@ -807,6 +853,7 @@ export const _internals: {
 		null,
 	getGeneratedAgentNames: () => swarmState.generatedAgentNames,
 	createParallelDispatcher,
+	loadPluginConfig,
 	resolvePrWorkflowRevisionDigestAsync,
 	resolveExactMergeBaseAsync,
 	validatePrWorkflowTransportRecovery,
@@ -864,6 +911,31 @@ type ReadOnlyToolPermissions = Record<string, false> & {
 interface DispatchLanesExecutionContext {
 	callerAgent?: string;
 	sessionID?: string;
+}
+
+function effectivePrReviewResilienceConfig(
+	configured: PrReviewResilienceConfig,
+	gateState?: {
+		prReviewResilience?: {
+			policy?: {
+				enabled: boolean;
+				canaryProbeMs: number;
+				statusProbeTimeoutMs: number;
+				correlatedFailureThreshold: number;
+				maxRetryAttemptsAfterInitial: number;
+			};
+		};
+	},
+): PrReviewResilienceConfig {
+	const policy = gateState?.prReviewResilience?.policy;
+	if (!policy) return configured;
+	return {
+		enabled: policy.enabled,
+		canary_probe_ms: policy.canaryProbeMs,
+		status_probe_timeout_ms: policy.statusProbeTimeoutMs,
+		correlated_failure_threshold: policy.correlatedFailureThreshold,
+		max_retry_attempts_after_initial: policy.maxRetryAttemptsAfterInitial,
+	};
 }
 
 export async function executeDispatchLanes(
@@ -1064,6 +1136,17 @@ export async function executeDispatchLanesAsync(
 		});
 	}
 	if (
+		(parsed.data.pr_review_wave_stage !== undefined ||
+			parsed.data.pr_review_wave_attempt !== undefined) &&
+		parsed.data.mode !== 'swarm-pr-review:base'
+	) {
+		return asyncFailureResult({
+			failure_class: 'invalid_args',
+			message:
+				'BLOCKED: pr_review_wave_stage and pr_review_wave_attempt are valid only when mode is exactly "swarm-pr-review:base".',
+		});
+	}
+	if (
 		context.sessionID?.trim() &&
 		parsed.data.pr_head_sha &&
 		(parsed.data.mode?.startsWith('swarm-pr-review:') ||
@@ -1252,9 +1335,50 @@ export async function executeDispatchLanesAsync(
 				}));
 				const depthTier: PrReviewDepthTier = gateState.prReviewDepthTier ?? 'L';
 				if (parsed.data.mode === 'swarm-pr-review:base') {
+					const configuredResilience: PrReviewResilienceConfig =
+						_internals.loadPluginConfig(directory).pr_review_resilience ??
+						DEFAULT_PR_REVIEW_RESILIENCE_CONFIG;
+					const effectiveResilience = effectivePrReviewResilienceConfig(
+						configuredResilience,
+						gateState,
+					);
+					const waveStage = parsed.data.pr_review_wave_stage;
+					const waveAttempt = parsed.data.pr_review_wave_attempt as
+						| 0
+						| 1
+						| 2
+						| undefined;
+					if ((waveStage === undefined) !== (waveAttempt === undefined)) {
+						throw new Error(
+							'BLOCKED: PR_REVIEW staged base dispatch requires both pr_review_wave_stage and pr_review_wave_attempt together',
+						);
+					}
+					if (
+						waveStage !== undefined &&
+						waveAttempt !== undefined &&
+						(!effectiveResilience.enabled || depthTier === 'S')
+					) {
+						throw new Error(
+							'BLOCKED: staged PR_REVIEW base dispatch is valid only when pr_review_resilience is enabled at depth tier M or L',
+						);
+					}
+					if (
+						effectiveResilience.enabled &&
+						depthTier !== 'S' &&
+						(waveStage === undefined || waveAttempt === undefined)
+					) {
+						throw new Error(
+							'BLOCKED: PR_REVIEW base dispatch at depth tier M or L requires canary-first pr_review_wave_stage and pr_review_wave_attempt while pr_review_resilience is enabled',
+						);
+					}
+					const stagedBaseDispatch =
+						effectiveResilience.enabled &&
+						depthTier !== 'S' &&
+						waveStage !== undefined &&
+						waveAttempt !== undefined;
 					const isInitialBase =
 						(gateState.prReviewBaseDispatches?.length ?? 0) === 0;
-					if (isInitialBase) {
+					if (isInitialBase && !stagedBaseDispatch) {
 						const ownedDimensionIds = parsed.data.lanes.flatMap((lane) =>
 							lane.owned_workflow_lanes?.length
 								? lane.owned_workflow_lanes
@@ -1294,6 +1418,27 @@ export async function executeDispatchLanesAsync(
 							);
 						}
 					}
+					if (stagedBaseDispatch) {
+						if (waveStage === 'canary') {
+							if (
+								parsed.data.lanes.length !== 1 ||
+								parsed.data.max_concurrent !== 1 ||
+								parsed.data.lanes.some(
+									(lane) => (lane.owned_workflow_lanes?.length ?? 1) !== 1,
+								)
+							) {
+								throw new Error(
+									'BLOCKED: PR_REVIEW staged base canary requires exactly one singleton lane and max_concurrent: 1',
+								);
+							}
+						} else if (
+							parsed.data.max_concurrent !== parsed.data.lanes.length
+						) {
+							throw new Error(
+								'BLOCKED: PR_REVIEW staged base fanout requires max_concurrent equal to the lane count',
+							);
+						}
+					}
 					for (const lane of parsed.data.lanes) {
 						if (
 							resolveGeneratedAgentRole(
@@ -1318,6 +1463,9 @@ export async function executeDispatchLanesAsync(
 							// per-dimension artifact state; neither may add a fresh
 							// synchronous digest resolution to the dispatch path.
 							revisionDigest: workflowRevisionDigest,
+							prReviewWaveStage: waveStage,
+							prReviewWaveAttempt: waveAttempt,
+							prReviewResiliencePolicy: effectiveResilience,
 						},
 					);
 				} else if (parsed.data.mode === 'swarm-pr-review:micro') {
@@ -1485,7 +1633,12 @@ export async function executeDispatchLanesAsync(
 			}
 		} catch (error) {
 			return asyncFailureResult({
-				failure_class: 'invalid_args',
+				failure_class:
+					error instanceof PrReviewResilienceCircuitOpenError
+						? 'circuit_open'
+						: error instanceof PrReviewResilienceRetryExhaustedError
+							? 'retry_exhausted'
+							: 'invalid_args',
 				message:
 					error instanceof Error
 						? error.message
@@ -1535,6 +1688,26 @@ export async function executeDispatchLanesAsync(
 				),
 			),
 		);
+		if (
+			parsed.data.mode === 'swarm-pr-review:base' &&
+			context.sessionID?.trim() &&
+			parsed.data.pr_review_wave_stage !== undefined
+		) {
+			try {
+				await rollbackPrReviewBaseAdmissionIfUnlaunched(
+					directory,
+					context.sessionID,
+					batchId,
+				);
+			} catch (error) {
+				logger.log('pr-review base-admission rollback failed', {
+					batchId,
+					sessionID: context.sessionID,
+					error: error instanceof Error ? error.message : String(error),
+				});
+				throw error;
+			}
+		}
 		const failed = laneResults.filter((lane) => lane.status === 'failed');
 		const rejected = laneResults.filter((lane) => lane.status === 'rejected');
 		const pending = laneResults.filter((lane) => lane.status === 'pending');
@@ -3093,7 +3266,11 @@ function failureResult(args: {
 }
 
 function asyncFailureResult(args: {
-	failure_class: 'invalid_args' | 'no_client';
+	failure_class:
+		| 'invalid_args'
+		| 'no_client'
+		| 'circuit_open'
+		| 'retry_exhausted';
 	message: string;
 	errors?: string[];
 }): DispatchLanesAsyncResult {
@@ -3270,10 +3447,49 @@ function applyExplorerFormatSuffix(
 				: options.mode === 'swarm-pr-review:micro' || isPrReviewCouncilExplorer
 					? 'For this micro/council lane, use the micro row family and put the exact workflow_lane only in the `micro_lane` field; do not use the base `lane` field.'
 					: "Use the row family applicable to this dispatch and put the exact workflow_lane only in that family's `lane` or `micro_lane` field.";
-		const exactLane = lane.workflow_lane ?? lane.id;
-		const ownedLanes = lane.owned_workflow_lanes?.length
-			? lane.owned_workflow_lanes
-			: [exactLane];
+		const exactLaneInput = lane.workflow_lane ?? lane.id;
+		const exactLaneResult = classifyControllerTokenField(exactLaneInput);
+		if (!exactLaneResult.ok) {
+			const reason =
+				exactLaneResult.reason === 'multiple'
+					? 'must be exactly one token after controller sanitization'
+					: 'must not be empty after controller sanitization';
+			const diagnostic = `Lane "${lane.id}" workflow_lane ${reason}`;
+			if (options.failClosed) {
+				errors.push(diagnostic);
+				return lane;
+			}
+			logger.log(
+				`[dispatch-lanes] applyExplorerFormatSuffix: ${diagnostic}; preserving the caller prompt for generic compatibility`,
+			);
+			return lane;
+		}
+		const ownedLaneResults = lane.owned_workflow_lanes?.length
+			? lane.owned_workflow_lanes.map((owned, index) => ({
+					index,
+					result: classifyControllerTokenField(owned),
+				}))
+			: [{ index: 0, result: exactLaneResult }];
+		const invalidOwnedLane = ownedLaneResults.find(({ result }) => !result.ok);
+		if (invalidOwnedLane) {
+			const reason =
+				!invalidOwnedLane.result.ok &&
+				invalidOwnedLane.result.reason === 'multiple'
+					? 'must be exactly one token after controller sanitization'
+					: 'must not be empty after controller sanitization';
+			const diagnostic = `Lane "${lane.id}" owned_workflow_lanes[${invalidOwnedLane.index}] ${reason}`;
+			if (options.failClosed) {
+				errors.push(diagnostic);
+				return lane;
+			}
+			logger.log(
+				`[dispatch-lanes] applyExplorerFormatSuffix: ${diagnostic}; preserving the caller prompt for generic compatibility`,
+			);
+			return lane;
+		}
+		const ownedLanes = ownedLaneResults.map(({ result }) =>
+			result.ok ? result.token : '',
+		);
 		const identity =
 			ownedLanes.length === 1
 				? `every output row MUST use the exact lane value "${ownedLanes[0]}"`
@@ -3408,16 +3624,64 @@ function applyPrWorkflowPromptContract(
 	}
 	const errors: string[] = [];
 	const contracted = lanes.map((lane) => {
-		const workflowLane = lane.workflow_lane ?? '';
-		const assignedIds = lane.review_item_ids ?? lane.feedback_item_ids ?? [];
-		const fallbackChecklist = mode.endsWith(':reviewer')
+		const normalizedMode = classifyControllerTokenField(mode);
+		const workflowLane = classifyControllerTokenField(lane.workflow_lane ?? '');
+		const prHeadSha = classifyControllerTokenField(options.prHeadSha ?? '');
+		const revisionDigest = classifyControllerTokenField(
+			options.revisionDigest ?? '',
+		);
+		const declaredScope = canonicalizeControllerField(
+			options.scope ??
+				'the exact checked-out PR revision and repository-defined diff context',
+		);
+		const callerFocus = canonicalizeControllerField(options.callerFocus ?? '');
+		const assignedIdResults = (
+			lane.review_item_ids ??
+			lane.feedback_item_ids ??
+			[]
+		).map((itemId) => classifyControllerTokenField(itemId));
+		const invalidAssignedId = assignedIdResults.find((result) => !result.ok);
+		if (!normalizedMode.ok || !prHeadSha.ok || !revisionDigest.ok) {
+			errors.push(
+				`Lane "${lane.id}" mandatory PR workflow contract requires non-empty single-token mode, pr_head_sha, and revision_digest values after controller sanitization`,
+			);
+			return lane;
+		}
+		if (!workflowLane.ok && workflowLane.reason === 'multiple') {
+			errors.push(
+				`Lane "${lane.id}" workflow_lane must be exactly one token after controller sanitization`,
+			);
+			return lane;
+		}
+		if (invalidAssignedId) {
+			errors.push(
+				`Lane "${lane.id}" assigned_item_ids must contain exactly one token per item after controller sanitization`,
+			);
+			return lane;
+		}
+		const fallbackChecklist = normalizedMode.token.endsWith(':reviewer')
 			? 're-read every assigned candidate at its exact location; prove classification, reachability, mitigation, severity, and falsification path'
-			: mode.endsWith(':critic')
+			: normalizedMode.token.endsWith(':critic')
 				? 'challenge every assigned verdict for evidence, reachability, mitigation, severity, coherence, and required report changes'
 				: 'inspect the bound scope using the complete repository-defined contract for this lane';
-		const ownedLanes = lane.owned_workflow_lanes?.length
-			? lane.owned_workflow_lanes
+		const ownedLaneResults = lane.owned_workflow_lanes?.length
+			? lane.owned_workflow_lanes.map((owned) =>
+					classifyControllerTokenField(owned),
+				)
 			: undefined;
+		const invalidOwnedLane = ownedLaneResults?.find((result) => !result.ok);
+		if (invalidOwnedLane) {
+			errors.push(
+				`Lane "${lane.id}" owned_workflow_lanes must contain exactly one token per item after controller sanitization`,
+			);
+			return lane;
+		}
+		const ownedLanes = ownedLaneResults?.map((result) =>
+			result.ok ? result.token : '',
+		);
+		const assignedIds = assignedIdResults.map((result) =>
+			result.ok ? result.token : '',
+		);
 		const checklist = ownedLanes
 			? ownedLanes
 					.map(
@@ -3425,11 +3689,16 @@ function applyPrWorkflowPromptContract(
 							`[${owned}] ${PR_WORKFLOW_LANE_CHECKLISTS[owned] ?? fallbackChecklist}`,
 					)
 					.join(' ')
-			: (PR_WORKFLOW_LANE_CHECKLISTS[workflowLane] ?? fallbackChecklist);
+			: (PR_WORKFLOW_LANE_CHECKLISTS[
+					workflowLane.ok ? workflowLane.token : ''
+				] ?? fallbackChecklist);
 		const ownedLine = ownedLanes
 			? `\nowned_workflow_lanes: ${ownedLanes.join(', ')} — every owned obligation requires its own [CANDIDATE] rows or fully populated [CLEAN] attestation naming that obligation`
 			: '';
-		const responseBudget = prReviewLaneResponseBudgetChars(mode, lane);
+		const responseBudget = prReviewLaneResponseBudgetChars(
+			normalizedMode.token,
+			lane,
+		);
 		const budgetLine =
 			responseBudget !== undefined
 				? `\nfinal_response_char_budget: ${responseBudget}`
@@ -3447,12 +3716,12 @@ function applyPrWorkflowPromptContract(
 		const contract = `
 
 [CONTROLLER-BOUND PR WORKFLOW CONTRACT]
-mode: ${mode}
-workflow_lane: ${workflowLane}${ownedLine}
-pr_head_sha: ${options.prHeadSha}
-revision_digest: ${options.revisionDigest}
-declared_scope: ${options.scope ?? 'the exact checked-out PR revision and repository-defined diff context'}
-caller_focus_non_authoritative: ${options.callerFocus ?? '(none)'}
+mode: ${normalizedMode.token}
+workflow_lane: ${workflowLane.ok ? workflowLane.token : '(none)'}${ownedLine}
+pr_head_sha: ${prHeadSha.token}
+revision_digest: ${revisionDigest.token}
+declared_scope: ${declaredScope}
+caller_focus_non_authoritative: ${callerFocus || '(none)'}
 assigned_item_ids: ${assignedIds.length > 0 ? assignedIds.join(', ') : '(discovery lane)'}
 mandatory_lane_checklist: ${checklist}${budgetLine}
 
@@ -3661,6 +3930,10 @@ export const dispatch_lanes_async: ReturnType<typeof createSwarmTool> =
 			scope: DispatchLanesAsyncArgsSchema.shape.scope,
 			trigger_evaluation: DispatchLanesAsyncArgsSchema.shape.trigger_evaluation,
 			feedback_inventory: DispatchLanesAsyncArgsSchema.shape.feedback_inventory,
+			pr_review_wave_stage:
+				DispatchLanesAsyncArgsSchema.shape.pr_review_wave_stage,
+			pr_review_wave_attempt:
+				DispatchLanesAsyncArgsSchema.shape.pr_review_wave_attempt,
 			orientation: DispatchLanesAsyncArgsSchema.shape.orientation,
 		},
 		execute: async (args: unknown, directory: string, ctx): Promise<string> => {

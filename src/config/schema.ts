@@ -3159,6 +3159,32 @@ export function resolveExternalSkillsConfig(
 	return merged;
 }
 
+export interface PrReviewResilienceConfig {
+	enabled: boolean;
+	canary_probe_ms: number;
+	status_probe_timeout_ms: number;
+	correlated_failure_threshold: number;
+	max_retry_attempts_after_initial: number;
+}
+
+export const DEFAULT_PR_REVIEW_RESILIENCE_CONFIG: PrReviewResilienceConfig = {
+	enabled: true,
+	canary_probe_ms: 300_000,
+	status_probe_timeout_ms: 2_000,
+	correlated_failure_threshold: 2,
+	max_retry_attempts_after_initial: 2,
+};
+
+export const PrReviewResilienceConfigSchema = z
+	.object({
+		enabled: z.boolean().default(true),
+		canary_probe_ms: z.number().int().min(1).max(3_600_000).default(300_000),
+		status_probe_timeout_ms: z.number().int().min(1).max(60_000).default(2_000),
+		correlated_failure_threshold: z.number().int().min(2).max(8).default(2),
+		max_retry_attempts_after_initial: z.number().int().min(0).max(2).default(2),
+	})
+	.strict();
+
 // Main plugin configuration
 export const PluginConfigSchema = z.object({
 	/** Config format version for migration table. Increment when deprecating fields. Distinct from knowledge.schema_version. */
@@ -3251,6 +3277,9 @@ export const PluginConfigSchema = z.object({
 
 	// Hook configuration
 	hooks: HooksConfigSchema.optional(),
+
+	// PR_REVIEW base-wave staged canary/fanout resilience.
+	pr_review_resilience: PrReviewResilienceConfigSchema.optional(),
 
 	// Quality gate configuration (v6.9 anti-slop features)
 	gates: GateConfigSchema.optional(),

@@ -7,6 +7,7 @@ import {
 } from '../../../src/hooks/pr-workflow-gate.js';
 import {
 	HEAD_SHA,
+	LEGACY_PR_REVIEW_RESILIENCE_POLICY,
 	persistBatch,
 	SESSION_ID,
 	setupPrWorkflowGateFixtures,
@@ -27,6 +28,7 @@ async function declareBase(batchId: string, selected = lanes()): Promise<void> {
 	await enforcePrReviewBaseDimensions(tempDir, SESSION_ID, selected, {
 		batchId,
 		prHeadSha: HEAD_SHA,
+		prReviewResiliencePolicy: LEGACY_PR_REVIEW_RESILIENCE_POLICY,
 	});
 }
 

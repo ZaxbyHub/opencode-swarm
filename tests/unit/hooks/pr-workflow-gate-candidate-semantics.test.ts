@@ -9,6 +9,7 @@ import {
 } from '../../../src/hooks/pr-workflow-gate.js';
 import {
 	HEAD_SHA,
+	LEGACY_PR_REVIEW_RESILIENCE_POLICY,
 	persistBatch,
 	SESSION_ID,
 	setupPrWorkflowGateFixtures,
@@ -34,6 +35,7 @@ describe('PR-review candidate semantics at the coverage gate', () => {
 		await enforcePrReviewBaseDimensions(tempDir, SESSION_ID, [malformedLane], {
 			batchId: 'semantic-bad',
 			prHeadSha: HEAD_SHA,
+			prReviewResiliencePolicy: LEGACY_PR_REVIEW_RESILIENCE_POLICY,
 		});
 		await persistBatch(
 			'semantic-bad',
@@ -87,6 +89,7 @@ describe('PR-review candidate semantics at the coverage gate', () => {
 		await enforcePrReviewBaseDimensions(tempDir, SESSION_ID, [mixedLane], {
 			batchId: 'semantic-mixed',
 			prHeadSha: HEAD_SHA,
+			prReviewResiliencePolicy: LEGACY_PR_REVIEW_RESILIENCE_POLICY,
 		});
 		await persistBatch('semantic-mixed', 'swarm-pr-review:base', [mixedLane], {
 			textOverride: [
@@ -150,6 +153,7 @@ describe('PR-review candidate semantics at the coverage gate', () => {
 			await enforcePrReviewBaseDimensions(tempDir, SESSION_ID, initialLanes, {
 				batchId: 'tier-m-initial',
 				prHeadSha: HEAD_SHA,
+				prReviewResiliencePolicy: LEGACY_PR_REVIEW_RESILIENCE_POLICY,
 			});
 			await persistBatch(
 				'tier-m-initial',

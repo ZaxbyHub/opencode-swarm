@@ -30,6 +30,7 @@ import {
 	executeDispatchLanesAsync,
 	type SessionOps,
 } from '../../../src/tools/dispatch-lanes.js';
+import { LEGACY_PR_REVIEW_RESILIENCE_POLICY } from '../pr-review-test-policy.js';
 
 const SESSION_ID = 'review-council';
 const HEAD_SHA = 'abc123';
@@ -124,6 +125,7 @@ async function establishReviewPrerequisites(): Promise<void> {
 	await enforcePrReviewBaseDimensions(directory, SESSION_ID, lanes, {
 		batchId: 'base-all',
 		prHeadSha: HEAD_SHA,
+		prReviewResiliencePolicy: LEGACY_PR_REVIEW_RESILIENCE_POLICY,
 	});
 	for (const [index, lane] of lanes.entries()) {
 		const correlationId = `base-${index}`;

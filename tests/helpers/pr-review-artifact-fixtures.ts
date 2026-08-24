@@ -14,6 +14,7 @@ import {
 	recordPrReviewValidationBatch,
 } from '../../src/hooks/pr-workflow-gate.js';
 import { executeWritePrReviewArtifact } from '../../src/tools/write-pr-review-artifact.js';
+import { LEGACY_PR_REVIEW_RESILIENCE_POLICY } from '../unit/pr-review-test-policy.js';
 
 export const PR_ARTIFACT_SESSION_ID = 'write-pr-review-artifact';
 export const PR_ARTIFACT_HEAD_SHA = 'abc123';
@@ -131,6 +132,7 @@ export async function establishPrReviewPrerequisites(
 	await enforcePrReviewBaseDimensions(directory, sessionID, baseLanes, {
 		batchId: 'base-all',
 		prHeadSha: headSha,
+		prReviewResiliencePolicy: LEGACY_PR_REVIEW_RESILIENCE_POLICY,
 	});
 	await persistPrReviewBatch(
 		directory,
