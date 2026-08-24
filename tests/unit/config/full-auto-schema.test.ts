@@ -34,6 +34,8 @@ describe('full_auto schema — legacy v1 shape', () => {
 			expect(r.data.full_auto?.fail_closed).toBe(true);
 			expect(r.data.full_auto?.denials?.max_consecutive).toBe(3);
 			expect(r.data.full_auto?.denials?.max_total).toBe(20);
+			expect(r.data.full_auto?.oversight?.total_timeout_ms).toBe(120000);
+			expect(r.data.full_auto?.oversight?.cleanup_timeout_ms).toBe(2000);
 		}
 	});
 
@@ -91,6 +93,26 @@ describe('full_auto schema — v2 shape', () => {
 			expect(r.data.full_auto?.denials?.on_limit).toBe('terminate');
 			expect(r.data.full_auto?.oversight?.every_tool_calls).toBe(10);
 		}
+	});
+
+	test('oversight timeout fields parse and validate', () => {
+		const ok = PluginConfigSchema.safeParse({
+			full_auto: {
+				oversight: {
+					total_timeout_ms: 3000,
+					cleanup_timeout_ms: 500,
+				},
+			},
+		});
+		expect(ok.success).toBe(true);
+		if (ok.success) {
+			expect(ok.data.full_auto?.oversight?.total_timeout_ms).toBe(3000);
+			expect(ok.data.full_auto?.oversight?.cleanup_timeout_ms).toBe(500);
+		}
+		const bad = PluginConfigSchema.safeParse({
+			full_auto: { oversight: { total_timeout_ms: 999 } },
+		});
+		expect(bad.success).toBe(false);
 	});
 
 	test('rejects invalid mode', () => {

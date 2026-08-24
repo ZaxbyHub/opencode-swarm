@@ -321,4 +321,44 @@ describe('generateMutants', () => {
 		} as any);
 		expect(result).toEqual([]);
 	});
+
+	test('retries transient provider failures on the same host-default request with no model override', async () => {
+		const seenModels: unknown[] = [];
+		mockSessionPrompt.mockImplementation(
+			async (input: { body?: { model?: unknown } }) => {
+				seenModels.push(input.body?.model);
+				if (seenModels.length < 3) {
+					throw new Error('429 rate_limit_exceeded: too many requests');
+				}
+				return {
+					data: { parts: [{ type: 'text', text: '[]' }] },
+				};
+			},
+		);
+		mock.module('../../state.js', () => ({
+			swarmState: { opencodeClient: mockClient },
+		}));
+		const { generateMutants } = await import('../generator.js');
+		const result = await generateMutants(['src/foo.ts'], {
+			directory: '/proj',
+		} as any);
+		expect(result).toEqual([]);
+		expect(mockSessionPrompt).toHaveBeenCalledTimes(3);
+		expect(seenModels).toEqual([undefined, undefined, undefined]);
+	});
+
+	test('does not retry permanent provider failures', async () => {
+		mockSessionPrompt.mockImplementation(async () => {
+			throw new Error('401 unauthorized: invalid api key');
+		});
+		mock.module('../../state.js', () => ({
+			swarmState: { opencodeClient: mockClient },
+		}));
+		const { generateMutants } = await import('../generator.js');
+		const result = await generateMutants(['src/foo.ts'], {
+			directory: '/proj',
+		} as any);
+		expect(result).toEqual([]);
+		expect(mockSessionPrompt).toHaveBeenCalledTimes(1);
+	});
 });

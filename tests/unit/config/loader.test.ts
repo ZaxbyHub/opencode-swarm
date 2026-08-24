@@ -256,11 +256,13 @@ describe('config/loader', () => {
 						],
 					},
 					oversight: {
+						cleanup_timeout_ms: 2000,
 						every_architect_turns: 5,
 						every_tool_calls: 25,
 						every_minutes: 20,
 						max_dispatch_retries: 2,
 						max_consecutive_dispatch_failures: 3,
+						total_timeout_ms: 120000,
 						on_phase_boundary: true,
 						on_task_completion: false,
 						on_plan_change: true,

@@ -185,6 +185,19 @@ export function createSkillImproverLLMDelegate(
 					}
 					return promptResult.data;
 				},
+				scope: sessionId
+					? {
+							sessionID: sessionId,
+							// Each ephemeral prompt session is an independent logical
+							// invocation. Scoping by its host-issued ID prevents a prior call's
+							// fallback/exhaustion state from contaminating the next call.
+							invocationID: `skill-improver:${promptSessionId}`,
+							swarmID: swarmId,
+							role: baseRole,
+						}
+					: undefined,
+				primaryModel: swarmAgents?.[baseRole]?.model,
+				fallbackModels: swarmAgents?.[baseRole]?.fallback_models ?? [],
 				resolveFallback: (index) =>
 					resolveFallbackModel(baseRole, index, swarmAgents),
 				// Advance to the next model immediately on a transient/quota error —

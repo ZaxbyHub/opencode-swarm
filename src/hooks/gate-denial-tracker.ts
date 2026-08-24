@@ -45,7 +45,17 @@
  */
 
 import { stripKnownSwarmPrefix } from '../config/schema';
-import { ensureAgentSession } from '../state';
+import {
+	_test_exports as actionCircuitTestExports,
+	armActionCircuitAttempt,
+	clearActionCircuit,
+	clearAllActionCircuits,
+	expireActionCircuit,
+	noteActionCircuitFailure,
+	peekActionCircuitCount,
+} from '../failures/action-circuit.js';
+import { createActionIdentity } from '../failures/action-identity.js';
+import { ensureAgentSession, getAgentSession } from '../state';
 import { telemetry } from '../telemetry.js';
 import { pushAdvisory } from '../utils/advisory-queue';
 import { normalizeToolNameLowerCase } from './normalize-tool-name';
@@ -61,16 +71,12 @@ export const DEFAULT_GATE_DENIAL_STOP_THRESHOLD = 5;
  * process touches a handful per session; 500 is the same order as the other
  * bounded per-session maps in this codebase (MAX_TRACKED_STEP_SESSIONS).
  */
-const MAX_TRACKED_DENIAL_STREAKS = 500;
-
 /**
  * Idle TTL for a streak. A denial streak that has not been touched for 30
  * minutes is stale by construction — the model moved on. Matches the
  * `execution_stall_episode_minutes` idleness window so the two containment
  * levers age out on the same clock.
  */
-const GATE_DENIAL_TTL_MS = 30 * 60_000;
-
 /**
  * Upper bound on the derived code token. Purely a key-size bound: a message
  * whose pre-colon prefix runs longer than this is not a gate code, it is prose,
@@ -82,17 +88,13 @@ const MAX_CODE_LENGTH = 64;
 /** Classification used when the message carries no recognisable code token. */
 export const UNCLASSIFIED_GATE_DENIAL_CODE = 'UNCLASSIFIED';
 
-interface DenialStreak {
-	count: number;
-	expiresAt: number;
-}
-
-const denialStreaks = new Map<string, DenialStreak>();
-
-function sweepExpired(now: number): void {
-	for (const [key, streak] of denialStreaks) {
-		if (streak.expiresAt <= now) denialStreaks.delete(key);
-	}
+function gateActionArgs(
+	tool: string,
+	_args: unknown,
+	discriminator: string,
+): Record<string, unknown> {
+	if (normalizeToolNameLowerCase(tool ?? '') !== 'task') return {};
+	return discriminator ? { subagent_type: discriminator } : {};
 }
 
 /**
@@ -101,33 +103,6 @@ function sweepExpired(now: number): void {
  * code: an unbounded map key is an unbounded map.
  */
 const MAX_DISCRIMINATOR_LENGTH = 64;
-
-/** NUL-separated so a code or tool name containing `:` cannot forge a key. */
-function streakKey(
-	sessionID: string,
-	normalizedTool: string,
-	discriminator: string,
-	code: string,
-): string {
-	return `${sessionID}\0${normalizedTool}\0${discriminator}\0${code}`;
-}
-
-/**
- * Prefix shared by every streak belonging to one
- * (session, tool, discriminator) triple.
- *
- * The TRAILING NUL is load-bearing: without it `sess\0task\0` would prefix-match
- * `sess\0task\0coder\0CODE` too, and the reset would be exactly as wide as the
- * bug this discriminator exists to fix. With it, the `''` discriminator's prefix
- * `sess\0task\0\0` cannot match a `coder`-scoped key, and vice versa.
- */
-function streakKeyPrefix(
-	sessionID: string,
-	normalizedTool: string,
-	discriminator: string,
-): string {
-	return `${sessionID}\0${normalizedTool}\0${discriminator}\0`;
-}
 
 /**
  * Sub-scope of a denial streak inside one (session, tool) pair.
@@ -302,20 +277,17 @@ export function noteGateDenial(
 		const code = deriveGateDenialCode(originalMessage);
 		const normalizedTool = normalizeToolNameLowerCase(tool ?? '');
 		const discriminator = gateDenialDiscriminator(tool, args);
-
-		const now = Date.now();
-		sweepExpired(now);
-
-		const key = streakKey(sessionID, normalizedTool, discriminator, code);
-		const count = (denialStreaks.get(key)?.count ?? 0) + 1;
-		// Re-insert so the map's insertion order is a true LRU for the size cap.
-		denialStreaks.delete(key);
-		denialStreaks.set(key, { count, expiresAt: now + GATE_DENIAL_TTL_MS });
-		while (denialStreaks.size > MAX_TRACKED_DENIAL_STREAKS) {
-			const oldest = denialStreaks.keys().next().value;
-			if (oldest === undefined || oldest === key) break;
-			denialStreaks.delete(oldest);
-		}
+		const session = ensureAgentSession(sessionID);
+		const invocationID = session.activeInvocationId ?? 0;
+		const action = createActionIdentity({
+			tool: normalizedTool,
+			args: gateActionArgs(tool, args, discriminator),
+		});
+		const generationToken = armActionCircuitAttempt(
+			sessionID,
+			invocationID,
+			action.digest,
+		);
 
 		const warnThreshold = normalizeThreshold(
 			options?.warnThreshold,
@@ -325,6 +297,21 @@ export function noteGateDenial(
 			options?.stopThreshold,
 			DEFAULT_GATE_DENIAL_STOP_THRESHOLD,
 		);
+		const circuitKind = `policy.gate_denial:${code}`;
+		const { entry } = noteActionCircuitFailure({
+			sessionID,
+			invocationID,
+			actionDigest: action.digest,
+			circuitKind,
+			signal: originalMessage,
+			generationToken,
+			hardStopThreshold:
+				code === UNCLASSIFIED_GATE_DENIAL_CODE
+					? Number.MAX_SAFE_INTEGER
+					: stopThreshold,
+		});
+		if (!entry) return NOT_COUNTED;
+		const count = entry.count;
 
 		const warned = count >= warnThreshold;
 		// The STOP rung is deliberately NARROWER than the warn rung (reviewer
@@ -358,7 +345,6 @@ export function noteGateDenial(
 
 		if (stopped) {
 			try {
-				const session = ensureAgentSession(sessionID);
 				pushAdvisory(
 					session,
 					`[swarm:gate-denial-loop:${code}] GATE DENIAL LOOP: ${count} consecutive ${code} denial(s) for tool ${normalizedTool}. STOP tool calls and report the blocker to the user with the full error text.`,
@@ -412,14 +398,15 @@ export function resetGateDenialStreaks(
 	args?: unknown,
 ): void {
 	try {
-		const prefix = streakKeyPrefix(
-			sessionID,
-			normalizeToolNameLowerCase(tool ?? ''),
-			gateDenialDiscriminator(tool, args),
-		);
-		for (const key of denialStreaks.keys()) {
-			if (key.startsWith(prefix)) denialStreaks.delete(key);
-		}
+		const session = getAgentSession(sessionID);
+		const invocationID = session?.activeInvocationId ?? 0;
+		const action = createActionIdentity({
+			tool: normalizeToolNameLowerCase(tool ?? ''),
+			args: gateActionArgs(tool, args, gateDenialDiscriminator(tool, args)),
+		});
+		clearActionCircuit(sessionID, invocationID, action.digest, {
+			reason: 'success',
+		});
 	} catch {
 		/* never throws into the hook chain */
 	}
@@ -434,15 +421,16 @@ export function resetGateDenialStreaks(
  * and `resetGateDenialStreaks`.
  */
 export function clearGateDenialStreaks(): void {
-	denialStreaks.clear();
+	clearAllActionCircuits();
 }
 
 export const _test_exports = {
-	MAX_TRACKED_DENIAL_STREAKS,
-	GATE_DENIAL_TTL_MS,
+	MAX_TRACKED_DENIAL_STREAKS:
+		actionCircuitTestExports.MAX_TRACKED_ACTION_CIRCUITS,
+	GATE_DENIAL_TTL_MS: actionCircuitTestExports.ACTION_CIRCUIT_TTL_MS,
 	MAX_CODE_LENGTH,
 	MAX_DISCRIMINATOR_LENGTH,
-	streakCount: (): number => denialStreaks.size,
+	streakCount: (): number => actionCircuitTestExports.size(),
 	/** Read a streak length without mutating it. */
 	peekStreak: (
 		sessionID: string,
@@ -450,14 +438,15 @@ export const _test_exports = {
 		code: string,
 		discriminator = '',
 	): number =>
-		denialStreaks.get(
-			streakKey(
-				sessionID,
-				normalizeToolNameLowerCase(tool),
-				discriminator,
-				code,
-			),
-		)?.count ?? 0,
+		peekActionCircuitCount(
+			sessionID,
+			getAgentSession(sessionID)?.activeInvocationId ?? 0,
+			createActionIdentity({
+				tool: normalizeToolNameLowerCase(tool),
+				args: gateActionArgs(tool, undefined, discriminator),
+			}).digest,
+			`policy.gate_denial:${code}`,
+		),
 	/** Force a streak's TTL into the past so eviction can be tested. */
 	expireStreak: (
 		sessionID: string,
@@ -465,14 +454,14 @@ export const _test_exports = {
 		code: string,
 		discriminator = '',
 	): void => {
-		const entry = denialStreaks.get(
-			streakKey(
-				sessionID,
-				normalizeToolNameLowerCase(tool),
-				discriminator,
-				code,
-			),
+		expireActionCircuit(
+			sessionID,
+			getAgentSession(sessionID)?.activeInvocationId ?? 0,
+			createActionIdentity({
+				tool: normalizeToolNameLowerCase(tool),
+				args: gateActionArgs(tool, undefined, discriminator),
+			}).digest,
+			`policy.gate_denial:${code}`,
 		);
-		if (entry) entry.expiresAt = Date.now() - 1;
 	},
 } as const;

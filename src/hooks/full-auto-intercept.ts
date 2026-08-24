@@ -15,6 +15,10 @@ import { getSwarmAgents, resolveFallbackModel } from '../agents/index.js';
 import type { PluginConfig } from '../config';
 import { stripKnownSwarmPrefix } from '../config/schema.js';
 import {
+	classifyProviderFailure,
+	isRetryableProviderFailure,
+} from '../failures/invocation-failure.js';
+import {
 	type ParsedCriticResponse,
 	parseCriticResponseFields,
 } from '../full-auto/critic-response-parser';
@@ -41,7 +45,6 @@ import { teardownEphemeralSession } from '../utils/ephemeral-session-teardown';
 import { advanceInlineFallback } from '../utils/inline-fallback-advancer.js';
 import * as logger from '../utils/logger';
 import type { ModelOverride } from '../utils/model-dispatch-fallback.js';
-import { isTransientProviderError } from '../utils/provider-error-classification.js';
 import { validateSwarmPath } from './utils';
 
 // Pattern for detecting end-of-sentence question marks (not mid-sentence like "v1?")
@@ -753,11 +756,9 @@ export async function dispatchCriticAndWriteEvent(
 			// transient gate here only controls whether a fallback is adopted, not
 			// whether a retry happens. The advance block itself is shared with
 			// `src/full-auto/oversight.ts:543–579` via `advanceInlineFallback`.
-			const failureText =
-				lastDispatchError instanceof Error
-					? lastDispatchError.message
-					: String(lastDispatchError);
-			if (isTransientProviderError(failureText)) {
+			if (
+				isRetryableProviderFailure(classifyProviderFailure(lastDispatchError))
+			) {
 				const advanced = advanceInlineFallback({
 					resolveFallback: resolveOversightFallback,
 					index: modelFallbackIndex,

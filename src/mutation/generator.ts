@@ -9,7 +9,13 @@ import type { ToolContext } from '@opencode-ai/plugin';
 import { swarmState } from '../state.js';
 import { teardownEphemeralSession } from '../utils/ephemeral-session-teardown.js';
 import * as logger from '../utils/logger.js';
+import { dispatchWithModelFallback } from '../utils/model-dispatch-fallback.js';
+import { isTransientProviderError } from '../utils/provider-error-classification.js';
+import { withTimeoutSignal } from '../utils/timeout.js';
 import type { MutationPatch } from './engine.js';
+
+const MUTATION_GENERATOR_TOTAL_TIMEOUT_MS = 60_000;
+const MUTATION_GENERATOR_MAX_RETRIES = 2;
 
 /** Slugify a string for use in mutation IDs */
 function slugify(str: string): string {
@@ -140,16 +146,38 @@ Return a JSON array where each element has:
 
 Return ONLY a valid JSON array. No markdown, no code fences, no explanation. Start your response with [ and end with ].`;
 
-		const promptResult = await client.session.prompt({
-			path: { id: ephemeralSessionId },
-			body: {
-				// Use default session agent (no specific agent name)
-				agent: undefined,
-				tools: { write: false, edit: false, patch: false },
-				parts: [{ type: 'text', text: promptText }],
-			},
-			signal: promptController.signal,
+		const startedAt = Date.now();
+		const dispatched = await dispatchWithModelFallback({
+			dispatch: async (_model, context) =>
+				await withTimeoutSignal(
+					(signal) =>
+						client.session.prompt({
+							path: { id: ephemeralSessionId! },
+							body: {
+								// Host-default non-role request: no agent + no model override.
+								agent: undefined,
+								tools: { write: false, edit: false, patch: false },
+								parts: [{ type: 'text', text: promptText }],
+							},
+							signal: signal,
+						}),
+					context.remainingMs ?? MUTATION_GENERATOR_TOTAL_TIMEOUT_MS,
+					new Error(
+						`generateMutants prompt timed out after ${context.remainingMs ?? MUTATION_GENERATOR_TOTAL_TIMEOUT_MS}ms`,
+					),
+				),
+			classify: (error) =>
+				isTransientProviderError(
+					error instanceof Error ? error.message : String(error),
+				)
+					? 'transient'
+					: 'permanent',
+			maxTransientRetriesPerModel: MUTATION_GENERATOR_MAX_RETRIES,
+			backoffMs: () => 0,
+			maxAttempts: MUTATION_GENERATOR_MAX_RETRIES + 1,
+			deadlineAtMs: startedAt + MUTATION_GENERATOR_TOTAL_TIMEOUT_MS,
 		});
+		const promptResult = dispatched.result;
 
 		if (!promptResult.data) {
 			logger.log(

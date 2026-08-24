@@ -19,7 +19,7 @@
  * - only genuinely cancellable work (the optional LLM screening call) is
  *   bounded, via a manual `AbortController` + `setTimeout` (see
  *   `timeoutSignal` below) + `isAbortError`. This deliberately does NOT use
- *   `AbortSignal.timeout(...)` (unlike `micro-reflector.ts`): Bun on Windows
+ *   the host's built-in timeout signal: Bun on Windows
  *   has a native bug where that signal's `abort` event never fires when
  *   awaited by a plain JS Promise (oven-sh/bun#29546) — exactly the shape
  *   `screenCandidate`'s caller uses — which hung this file's own tests for
@@ -58,6 +58,7 @@ import {
 	unionInsightMarker,
 } from '../hooks/micro-reflector.js';
 import { warn } from '../utils/logger.js';
+import { withTimeoutSignal } from '../utils/timeout.js';
 import type { QueuedCandidate } from './candidate-queue.js';
 import {
 	computeArrivalVelocity,
@@ -116,24 +117,6 @@ export interface AdmissionDeps {
 	/** Injectable clock/path seams for tests. */
 	now?: () => number;
 	resolveKnowledgePath?: (directory: string) => string;
-}
-
-/**
- * Cross-platform substitute for `AbortSignal.timeout(ms)` (oven-sh/bun#29546 —
- * see the module header). The timer is always cleared by the caller so a
- * candidate that resolves before the deadline cannot leak it.
- */
-function timeoutSignal(ms: number): {
-	signal: AbortSignal;
-	clear: () => void;
-} {
-	const controller = new AbortController();
-	const timer = setTimeout(() => {
-		controller.abort(
-			new DOMException('The operation timed out.', 'TimeoutError'),
-		);
-	}, ms);
-	return { signal: controller.signal, clear: () => clearTimeout(timer) };
 }
 
 /** Bounded estimate of the tokens one screening call costs. */
@@ -217,6 +200,7 @@ async function screenCandidate(
 ): Promise<boolean> {
 	const perCandidateMs = deps.llmTimeoutMs ?? 0;
 	if (!deps.llmDelegate || perCandidateMs <= 0 || !deps.sessionID) return true;
+	const llmDelegate = deps.llmDelegate;
 	if (!deps.llmBudget) return true;
 	// The screening deadline is the SMALLER of the per-candidate timeout and the
 	// drain's REMAINING wall-clock budget. Without this the drain's budget is
@@ -236,17 +220,13 @@ async function screenCandidate(
 	}
 	// Only cancellable work is bounded. The signal genuinely aborts the
 	// underlying request, unlike a Promise.race wrapper.
-	const { signal, clear } = timeoutSignal(timeoutMs);
-	try {
-		const response = await deps.llmDelegate(
-			'',
-			buildScreeningPrompt(candidate),
-			signal,
-		);
-		return !/\bREJECT\b/i.test(response ?? '');
-	} finally {
-		clear();
-	}
+	return !/\bREJECT\b/i.test(
+		await withTimeoutSignal(
+			(signal) => llmDelegate('', buildScreeningPrompt(candidate), signal),
+			timeoutMs,
+			new Error(`Knowledge admission screening timed out after ${timeoutMs}ms`),
+		),
+	);
 }
 
 /**

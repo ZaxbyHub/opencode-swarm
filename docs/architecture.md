@@ -1,5 +1,7 @@
 # OpenCode Swarm Architecture
 
+Failure classification, retry, action-local circuits, scoped model fallback, and Full-Auto supervised recovery are documented in [Invocation failures, retry, and recovery](invocation-failures.md).
+
 ## Design Philosophy
 
 OpenCode Swarm is built on a simple premise: **multi-agent systems fail when they're unstructured**.

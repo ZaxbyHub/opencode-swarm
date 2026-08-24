@@ -3,6 +3,10 @@ import * as path from 'node:path';
 import type { AutoReviewConfig } from '../config/schema.js';
 import { MAX_EPHEMERAL_PROMPT_BYTE_LIMIT } from '../evaluation/ephemeral-agent-dispatcher.js';
 import {
+	classifyProviderFailure,
+	isRetryableProviderFailure,
+} from '../failures/invocation-failure.js';
+import {
 	buildApprovedReceipt,
 	buildRejectedReceipt,
 	persistReviewReceipt,
@@ -13,10 +17,7 @@ import {
 import { parseReviewerOutput } from '../hooks/review-receipt-collector.js';
 import { telemetry } from '../telemetry.js';
 import type { ModelOverride } from '../utils/model-dispatch-fallback.js';
-import {
-	isQuotaError,
-	isTransientProviderError,
-} from '../utils/provider-error-classification.js';
+import { isQuotaError } from '../utils/provider-error-classification.js';
 import type {
 	ReviewDispatchResult,
 	ReviewModelDispatcher,
@@ -601,8 +602,17 @@ async function dispatchReviewerWithFallback(
 		const taskCompletionTimeout =
 			input.trigger === 'task_completion' &&
 			(result.status === 'timeout' || /auto-review timed out/i.test(detail));
-		const transient =
-			result.status === 'timeout' || isTransientProviderError(detail);
+		const transient = isRetryableProviderFailure(
+			classifyProviderFailure(
+				result.status === 'timeout'
+					? {
+							name: 'TimeoutError',
+							code: 'ETIMEDOUT',
+							message: detail || 'provider timeout',
+						}
+					: detail,
+			),
+		);
 		if (taskCompletionTimeout || !transient || index === models.length - 1) {
 			return { result, attempts };
 		}

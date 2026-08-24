@@ -4,7 +4,7 @@
  *
  * The bounding rule under test: `withTimeout` is a `Promise.race` that does NOT
  * cancel, so the knowledge-store transaction is never raced. Only the
- * cancellable LLM call is bounded, via `AbortSignal.timeout`.
+ * cancellable LLM call is bounded by the shared aborting timeout helper.
  *
  * Budget enforcement (retries, wall clock, requeue bound, concurrency) lives in
  * `admission-drain-budgets.test.ts`.
@@ -165,7 +165,7 @@ describe('drainSessionQueue — AbortSignal cancellation of the LLM call', () =>
 			{ ...baseDeps(), llmDelegate },
 		);
 
-		// The first attempt was cancelled by AbortSignal.timeout, the retry
+		// The first attempt was cancelled by the shared deadline signal, the retry
 		// succeeded — proving the abort is real and the failure is retryable.
 		expect(calls).toBe(2);
 		expect(seenSignals[0]).toBeInstanceOf(AbortSignal);

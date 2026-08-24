@@ -20,7 +20,21 @@
  */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { WRITE_TOOL_NAMES } from '../config/constants';
+import {
+	AGENT_TOOL_MAP,
+	COUNCIL_AGENT_TOOL_MAP,
+	EXTERNAL_SKILL_AGENT_TOOL_MAP,
+	GENERAL_COUNCIL_AGENT_TOOL_MAP,
+	MEMORY_AGENT_TOOL_MAP,
+	SKILL_AGENT_TOOL_MAP,
+	TURBO_AGENT_TOOL_MAP,
+	WRITE_TOOL_NAMES,
+} from '../config/constants';
+import {
+	getCanonicalAgentRole,
+	isKnownCanonicalRole,
+	resolveGeneratedAgentRole,
+} from '../config/schema';
 import { normalizePath } from '../utils/path';
 
 // ---------------------------------------------------------------------------
@@ -66,6 +80,7 @@ export interface FullAutoClassifierInput {
 	sessionID: string;
 	agentName?: string;
 	normalizedAgentName?: string;
+	generatedAgentNames?: string[];
 	toolName: string;
 	args: Record<string, unknown> | undefined;
 	directory: string;
@@ -76,6 +91,14 @@ export interface FullAutoClassifierInput {
 	planSummary?: string;
 	changedFiles?: string[];
 	fullAutoConfig: FullAutoPolicyConfig | undefined;
+	pluginConfig?: {
+		memory?: { enabled?: boolean };
+		external_skills?: { curation_enabled?: boolean };
+		council?: { enabled?: boolean; general?: { enabled?: boolean } };
+		turbo?: unknown;
+		skills?: { enabled?: boolean };
+		tool_filter?: { overrides?: Record<string, string[]> };
+	};
 }
 
 // ---------------------------------------------------------------------------
@@ -633,6 +656,147 @@ function isTrustedDomain(
 	});
 }
 
+function resolveAgentCapabilityTools(
+	roleName: string,
+	pluginConfig: FullAutoClassifierInput['pluginConfig'],
+): string[] {
+	const override = pluginConfig?.tool_filter?.overrides?.[roleName];
+	let tools =
+		override ?? AGENT_TOOL_MAP[roleName as keyof typeof AGENT_TOOL_MAP] ?? [];
+
+	if (pluginConfig?.memory?.enabled === true) {
+		tools = Array.from(
+			new Set([
+				...tools,
+				...(MEMORY_AGENT_TOOL_MAP[
+					roleName as keyof typeof MEMORY_AGENT_TOOL_MAP
+				] ?? []),
+			]),
+		);
+	}
+	if (pluginConfig?.external_skills?.curation_enabled === true) {
+		tools = Array.from(
+			new Set([
+				...tools,
+				...(EXTERNAL_SKILL_AGENT_TOOL_MAP[
+					roleName as keyof typeof EXTERNAL_SKILL_AGENT_TOOL_MAP
+				] ?? []),
+			]),
+		);
+	}
+	if (pluginConfig?.council?.enabled === true) {
+		tools = Array.from(
+			new Set([
+				...tools,
+				...(COUNCIL_AGENT_TOOL_MAP[
+					roleName as keyof typeof COUNCIL_AGENT_TOOL_MAP
+				] ?? []),
+			]),
+		);
+	}
+	if (pluginConfig?.council?.general?.enabled === true) {
+		tools = Array.from(
+			new Set([
+				...tools,
+				...(GENERAL_COUNCIL_AGENT_TOOL_MAP[
+					roleName as keyof typeof GENERAL_COUNCIL_AGENT_TOOL_MAP
+				] ?? []),
+			]),
+		);
+	}
+	if (pluginConfig?.turbo !== undefined) {
+		tools = Array.from(
+			new Set([
+				...tools,
+				...(TURBO_AGENT_TOOL_MAP[
+					roleName as keyof typeof TURBO_AGENT_TOOL_MAP
+				] ?? []),
+			]),
+		);
+	}
+	const skillTools =
+		SKILL_AGENT_TOOL_MAP[roleName as keyof typeof SKILL_AGENT_TOOL_MAP] ?? [];
+	if (skillTools.length > 0) {
+		if (pluginConfig?.skills?.enabled === true) {
+			tools = Array.from(new Set([...tools, ...skillTools]));
+		} else {
+			const skillSet = new Set<string>(skillTools);
+			tools = tools.filter((tool) => !skillSet.has(tool));
+		}
+	}
+	return tools;
+}
+
+function resolveDelegationRisk(
+	input: FullAutoClassifierInput,
+	subagentName: string,
+): {
+	risk: 'medium' | 'high';
+	reason: string;
+	role: string;
+	tools: string[];
+	safeReadOnly: boolean;
+} {
+	const role =
+		input.generatedAgentNames && input.generatedAgentNames.length > 0
+			? resolveGeneratedAgentRole(subagentName, input.generatedAgentNames)
+			: getCanonicalAgentRole(subagentName);
+	if (!isKnownCanonicalRole(role)) {
+		return {
+			risk: 'high',
+			reason: 'subagent role is unknown or not registry-backed',
+			role,
+			tools: [],
+			safeReadOnly: false,
+		};
+	}
+	const tools = resolveAgentCapabilityTools(role, input.pluginConfig);
+	if (tools.length === 0) {
+		return {
+			risk: 'high',
+			reason: 'subagent has no registered capability map',
+			role,
+			tools,
+			safeReadOnly: false,
+		};
+	}
+	const dangerous = tools.some(
+		(tool) =>
+			isWriteLikeTool(tool) ||
+			SHELL_TOOLS.has(tool) ||
+			NETWORK_TOOLS.has(tool) ||
+			tool === 'swarm_command' ||
+			tool === 'Task' ||
+			tool === 'task',
+	);
+	const unknown = tools.some(
+		(tool) =>
+			!isReadOnlyTool(tool) &&
+			!isWriteLikeTool(tool) &&
+			!SHELL_TOOLS.has(tool) &&
+			!NETWORK_TOOLS.has(tool) &&
+			tool !== 'swarm_command',
+	);
+	if (dangerous || unknown) {
+		return {
+			risk: 'high',
+			reason: dangerous
+				? 'delegated role can write, execute, publish, or recurse'
+				: 'delegated role exposes non-read-only unknown capabilities',
+			role,
+			tools,
+			safeReadOnly: false,
+		};
+	}
+	return {
+		risk: 'medium',
+		reason: 'delegated role is limited to registered read-only capabilities',
+		role,
+		tools,
+		safeReadOnly: true,
+	};
+}
+
 // ---------------------------------------------------------------------------
 // Main classifier
 // ---------------------------------------------------------------------------
@@ -676,13 +840,23 @@ export function classifyFullAutoToolAction(
 				input.args.subagent_type) ||
 			(typeof input.args?.agent === 'string' && input.args.agent) ||
 			'unknown';
+		const delegationRisk = resolveDelegationRisk(input, subagentName);
+		if (mode !== 'strict' && delegationRisk.safeReadOnly) {
+			return {
+				action: 'allow',
+				reason: `read-only subagent delegation allowed (${delegationRisk.role})`,
+				tier: 'local',
+			};
+		}
 		return {
 			action: 'escalate_critic',
-			reason: 'subagent delegation requires plan/scope verification',
-			risk: 'high',
+			reason: `subagent delegation requires plan/scope verification (${delegationRisk.reason})`,
+			risk: mode === 'strict' ? 'high' : delegationRisk.risk,
 			context: {
 				tool,
 				subagent: subagentName,
+				canonicalRole: delegationRisk.role,
+				registeredTools: delegationRisk.tools,
 				currentTaskID: input.currentTaskID,
 				currentPhase: input.currentPhase,
 			},

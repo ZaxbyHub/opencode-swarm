@@ -203,6 +203,40 @@ describe('createFullAutoPermissionHook', () => {
 		).resolves.toBeUndefined();
 	});
 
+	test('allows exact paused recovery full-auto swarm_command', async () => {
+		startFullAutoRun(tmpDir, 'sess-1', { enabled: true });
+		const hook = createFullAutoPermissionHook({
+			config: makeConfig(),
+			directory: tmpDir,
+		});
+		const { pauseFullAutoRun } = await import('../../../src/full-auto/state');
+		pauseFullAutoRun(
+			tmpDir,
+			'sess-1',
+			'oversight infrastructure failure after 1 attempt(s): server error',
+		);
+		await expect(
+			hook.toolBefore(fakeInput('swarm_command'), {
+				args: { command: 'full-auto', args: ['retry-oversight'] },
+			}),
+		).resolves.toBeUndefined();
+	});
+
+	test('denies arbitrary paused swarm_command arguments', async () => {
+		startFullAutoRun(tmpDir, 'sess-1', { enabled: true });
+		const hook = createFullAutoPermissionHook({
+			config: makeConfig(),
+			directory: tmpDir,
+		});
+		const { pauseFullAutoRun } = await import('../../../src/full-auto/state');
+		pauseFullAutoRun(tmpDir, 'sess-1', 'manual');
+		await expect(
+			hook.toolBefore(fakeInput('swarm_command'), {
+				args: { command: 'full-auto', args: ['retry-oversight', 'extra'] },
+			}),
+		).rejects.toThrow(/FULL_AUTO_PAUSED/);
+	});
+
 	test('three consecutive denials pause the run', async () => {
 		startFullAutoRun(tmpDir, 'sess-1', { enabled: true });
 		const hook = createFullAutoPermissionHook({

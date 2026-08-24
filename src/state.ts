@@ -32,6 +32,10 @@ import {
 	type EnvironmentProfile,
 } from './environment/profile.js';
 import {
+	clearAllActionCircuits,
+	clearInvocationActionCircuits,
+} from './failures/action-circuit.js';
+import {
 	compareTaskWorkflowStateRank,
 	getTaskWorkflowSnapshot,
 	parseTaskEvidence,
@@ -49,6 +53,10 @@ import {
 import { clearTrajectoryStepCounters } from './hooks/trajectory-step-state.js';
 import { resetSessionQueue } from './learning/candidate-queue.js';
 import { resetPrmPatternSupport } from './learning/prm-pattern-support.js';
+import {
+	clearAllTaskModelRoutingState,
+	clearPendingTaskModelRoutesForSession,
+} from './models/task-model-routing.js';
 import { loadPlanJsonOnly } from './plan/manager.js';
 import { derivePlanId } from './plan/utils.js';
 import type { EscalationTracker } from './prm/escalation.js';
@@ -1030,6 +1038,8 @@ export function resetSwarmState(): void {
 	// Full Auto Mode (Phase 4)
 	swarmState.fullAutoEnabledInConfig = false;
 	swarmState.environmentProfiles.clear();
+	clearAllActionCircuits();
+	clearAllTaskModelRoutingState();
 	// v6.70.0 gap-closure (#496): clear the module-scoped pending coder-scope
 	// map so a /swarm close + new session with a colliding taskId (e.g. "1.1")
 	// cannot inherit stale scope from the previous swarm.
@@ -2602,6 +2612,10 @@ export function beginInvocation(
 	// budget window, but non-transient STOP state and before/after correlation
 	// must never leak into a corrected follow-up turn.
 	const lastId = session.lastInvocationIdByAgent[stripped] || 0;
+	if (lastId > 0) {
+		clearInvocationActionCircuits(sessionId, lastId);
+		clearPendingTaskModelRoutesForSession(sessionId);
+	}
 	const newId = lastId + 1;
 	session.lastInvocationIdByAgent[stripped] = newId;
 	session.activeInvocationId = newId;

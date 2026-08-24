@@ -730,6 +730,11 @@ export async function dispatchPhaseCritic(
 		config?.agentModelRegistry,
 	);
 	const legacyModelConfig = resolveLegacyCriticModelConfig(agentName, config);
+	const agentBaseName = stripKnownSwarmPrefix(agentName);
+	const swarmID =
+		agentBaseName !== agentName
+			? agentName.slice(0, agentName.length - agentBaseName.length - 1)
+			: undefined;
 	let responseText: string;
 	try {
 		const dispatched = await dispatchWithModelFallback<string>({
@@ -743,6 +748,20 @@ export async function dispatchPhaseCritic(
 					model,
 					config?.dispatcher,
 				),
+			scope: {
+				sessionID,
+				invocationID: `lean-integration:${phase}`,
+				swarmID,
+				role: agentBaseName,
+			},
+			primaryModel:
+				reviewPrimaryModel(agentName, config?.agentModelRegistry) ??
+				legacyModelConfig?.swarmAgents?.[legacyModelConfig.agentBaseName]
+					?.model,
+			fallbackModels: config?.agentModelRegistry
+				? fallbackModels
+				: (legacyModelConfig?.swarmAgents?.[legacyModelConfig.agentBaseName]
+						?.fallback_models ?? []),
 			resolveFallback: (index) =>
 				config?.agentModelRegistry
 					? (fallbackModels[index - 1] ?? null)

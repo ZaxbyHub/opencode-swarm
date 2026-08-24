@@ -1467,6 +1467,16 @@ export class LeanTurboRunner {
 					if (!r.ok) throw new Error(r.error ?? 'lane dispatch failed');
 					return r;
 				},
+				scope: this._sessionID
+					? {
+							sessionID: this._sessionID,
+							invocationID: `lean-runner:${lane.laneId}`,
+							swarmID: coderSwarmId,
+							role: coderBase,
+						}
+					: undefined,
+				primaryModel: coderSwarmAgents?.[coderBase]?.model,
+				fallbackModels: coderSwarmAgents?.[coderBase]?.fallback_models ?? [],
 				resolveFallback: (index) =>
 					resolveFallbackModel(coderBase, index, coderSwarmAgents),
 				// Advance immediately on a transient/quota error — an instant

@@ -1,8 +1,7 @@
 import { beforeEach, describe, expect, it } from 'bun:test';
-import type { GuardrailsConfig } from '../../../src/config/schema';
-import { createGuardrailsHooks } from '../../../src/hooks/guardrails';
 import {
 	_test_exports,
+	assertNonTransientCircuitAllowsTool,
 	forgetToolExecution,
 	markToolExecutionSandboxWrapped,
 	nonTransientHardStopMessage,
@@ -17,26 +16,10 @@ import {
 	swarmState,
 } from '../../../src/state';
 
-const config: GuardrailsConfig = {
-	enabled: true,
-	max_tool_calls: 200,
-	max_duration_minutes: 30,
-	idle_timeout_minutes: 60,
-	max_repetitions: 10,
-	max_consecutive_errors: 5,
-	warning_threshold: 0.75,
-	shell_audit_log: false,
-	profiles: undefined,
-};
-
 function setupSession(sessionID: string): void {
 	startAgentSession(sessionID, 'coder');
 	swarmState.activeAgent.set(sessionID, 'coder');
 	beginInvocation(sessionID, 'coder');
-}
-
-function shellResult(output: string, exit: number) {
-	return { title: 'shell', output, metadata: { exit } };
 }
 
 describe('guardrails non-transient boundaries — issue #1875 review', () => {
@@ -44,19 +27,19 @@ describe('guardrails non-transient boundaries — issue #1875 review', () => {
 		resetSwarmState();
 	});
 
-	it('keeps a hard stop immutable across a late success and rejects the next tool', async () => {
+	it('keeps an exact-action hard stop without blocking other actions', () => {
 		const sessionID = 'hard-stop-immutable';
 		setupSession(sessionID);
-		const hooks = createGuardrailsHooks(process.cwd(), config);
-
-		await hooks.toolAfter(
-			{
-				tool: 'bash',
-				sessionID,
-				callID: 'fatal',
-				args: { command: 'broken' },
-			},
-			shellResult('ParserError: MissingEndCurlyBrace', 1),
+		const fatalAction = {
+			tool: 'bash',
+			args: { command: 'broken' },
+		};
+		assertNonTransientCircuitAllowsTool(sessionID, fatalAction);
+		recordNonTransientFailure(
+			sessionID,
+			'shell_parse_error',
+			'ParserError: MissingEndCurlyBrace',
+			fatalAction,
 		);
 		const stopped = getAgentSession(sessionID)?.nonTransientCircuit;
 		expect(stopped).toMatchObject({
@@ -66,43 +49,36 @@ describe('guardrails non-transient boundaries — issue #1875 review', () => {
 		});
 		const stoppedSignal = stopped?.lastSignal;
 
-		await hooks.toolAfter(
-			{
+		expect(() =>
+			assertNonTransientCircuitAllowsTool(sessionID, {
 				tool: 'bash',
-				sessionID,
-				callID: 'late-success',
-				args: { command: 'echo ok' },
-			},
-			shellResult('ok', 0),
+				args: { command: 'broken' },
+			}),
+		).toThrow('NON-TRANSIENT CIRCUIT BREAKER');
+		expect(() =>
+			assertNonTransientCircuitAllowsTool(sessionID, {
+				tool: 'read',
+				args: { filePath: 'package.json' },
+			}),
+		).not.toThrow();
+		expect(getAgentSession(sessionID)?.nonTransientCircuit?.lastSignal).toBe(
+			stoppedSignal,
 		);
-
-		expect(getAgentSession(sessionID)?.nonTransientCircuit).toMatchObject({
-			category: 'shell_parse_error',
-			sameCategoryCount: 1,
-			hardStop: true,
-			lastSignal: stoppedSignal,
-		});
-		await expect(
-			hooks.toolBefore(
-				{ tool: 'read', sessionID, callID: 'blocked-next' },
-				{ args: { filePath: 'package.json' } },
-			),
-		).rejects.toThrow('NON-TRANSIENT CIRCUIT BREAKER');
 	});
 
-	it('cannot alternate away from general_permanent without entering an immediate hard stop', async () => {
+	it('a fatal category stops its exact action without poisoning a different action', () => {
 		const sessionID = 'category-alternation';
 		setupSession(sessionID);
-		const hooks = createGuardrailsHooks(process.cwd(), config);
-
-		await hooks.toolAfter(
-			{
-				tool: 'bash',
-				sessionID,
-				callID: 'general',
-				args: { command: 'denied' },
-			},
-			shellResult('permission denied', 2),
+		const generalAction = {
+			tool: 'bash',
+			args: { command: 'denied' },
+		};
+		assertNonTransientCircuitAllowsTool(sessionID, generalAction);
+		recordNonTransientFailure(
+			sessionID,
+			'general_permanent',
+			'permission denied',
+			generalAction,
 		);
 		expect(getAgentSession(sessionID)?.nonTransientCircuit).toMatchObject({
 			category: 'general_permanent',
@@ -110,26 +86,34 @@ describe('guardrails non-transient boundaries — issue #1875 review', () => {
 			hardStop: false,
 		});
 
-		await hooks.toolAfter(
-			{
-				tool: 'bash',
-				sessionID,
-				callID: 'parser',
-				args: { command: 'broken' },
-			},
-			shellResult('ParseError: unexpected token', 1),
+		const parserAction = {
+			tool: 'bash',
+			args: { command: 'broken' },
+		};
+		assertNonTransientCircuitAllowsTool(sessionID, parserAction);
+		recordNonTransientFailure(
+			sessionID,
+			'shell_parse_error',
+			'ParseError: unexpected token',
+			parserAction,
 		);
 		expect(getAgentSession(sessionID)?.nonTransientCircuit).toMatchObject({
 			category: 'shell_parse_error',
 			sameCategoryCount: 1,
 			hardStop: true,
 		});
-		await expect(
-			hooks.toolBefore(
-				{ tool: 'bash', sessionID, callID: 'cannot-continue' },
-				{ args: { command: 'missing-tool' } },
-			),
-		).rejects.toThrow('NON-TRANSIENT CIRCUIT BREAKER');
+		expect(() =>
+			assertNonTransientCircuitAllowsTool(sessionID, {
+				tool: 'bash',
+				args: { command: 'broken' },
+			}),
+		).toThrow('NON-TRANSIENT CIRCUIT BREAKER');
+		expect(() =>
+			assertNonTransientCircuitAllowsTool(sessionID, {
+				tool: 'bash',
+				args: { command: 'echo repaired' },
+			}),
+		).not.toThrow();
 	});
 
 	it('classifies neutral exit-one adapters and fatal signals directly', () => {
@@ -153,13 +137,13 @@ describe('guardrails non-transient boundaries — issue #1875 review', () => {
 		);
 		expect(
 			_test_exports.classifyFatalSignal('[sandbox] BLOCKED: denied', false),
-		).toBe('sandbox_wrapper_failure');
+		).toBeNull();
 		expect(
 			_test_exports.classifyFatalSignal(
 				'missing-tool: command not found',
 				false,
 			),
-		).toBe('command_not_found');
+		).toBeNull();
 		expect(
 			_test_exports.classifyFatalSignal('permission denied', false),
 		).toBeNull();
@@ -186,16 +170,23 @@ describe('guardrails non-transient boundaries — issue #1875 review', () => {
 		expect(pending?.has('call-100')).toBe(true);
 	});
 
-	it('truncates retained signals and exposes remember-mark-forget lifecycle', () => {
+	it('privacy-bounds retained signals and exposes remember-mark-forget lifecycle', () => {
 		const sessionID = 'state-boundaries';
 		setupSession(sessionID);
 		const longSignal = `prefix-${'x'.repeat(1_100)}`;
 
-		recordNonTransientFailure(sessionID, 'general_permanent', longSignal);
+		assertNonTransientCircuitAllowsTool(sessionID, {
+			tool: 'bash',
+			args: { command: 'failed' },
+		});
+		recordNonTransientFailure(sessionID, 'general_permanent', longSignal, {
+			tool: 'bash',
+			args: { command: 'failed' },
+		});
 		const retained =
 			getAgentSession(sessionID)?.nonTransientCircuit?.lastSignal;
-		expect(retained).toBe(longSignal.slice(0, 1_000));
-		expect(retained).toHaveLength(1_000);
+		expect(retained).toBe(longSignal.slice(0, 512));
+		expect(retained).toHaveLength(512);
 
 		rememberToolExecution(sessionID, 'lifecycle', 'bash', 'echo ok');
 		markToolExecutionSandboxWrapped(sessionID, 'lifecycle');
@@ -223,10 +214,15 @@ describe('nonTransientHardStopMessage — diagnostic surfacing (#1896)', () => {
 		setupSession(sessionID);
 		const signal =
 			'[sandbox] BLOCKED: Failed to wrap command with bubblewrap: probe failed. Command will not be executed unsandboxed.';
+		assertNonTransientCircuitAllowsTool(sessionID, {
+			tool: 'bash',
+			args: { command: 'sandboxed command' },
+		});
 		const circuit = recordNonTransientFailure(
 			sessionID,
 			'sandbox_wrapper_failure',
 			signal,
+			{ tool: 'bash', args: { command: 'sandboxed command' } },
 		);
 		expect(circuit).not.toBeNull();
 		const msg = nonTransientHardStopMessage(circuit!);
@@ -244,10 +240,15 @@ describe('nonTransientHardStopMessage — diagnostic surfacing (#1896)', () => {
 	it('gives command-not-found remediation with the signal', () => {
 		const sessionID = 'msg-cnf';
 		setupSession(sessionID);
+		assertNonTransientCircuitAllowsTool(sessionID, {
+			tool: 'bash',
+			args: { command: 'frobnicate' },
+		});
 		const circuit = recordNonTransientFailure(
 			sessionID,
 			'command_not_found',
 			'bash: line 1: frobnicate: not found',
+			{ tool: 'bash', args: { command: 'frobnicate' } },
 		);
 		const msg = nonTransientHardStopMessage(circuit!);
 		expect(msg).toContain('Last signal:');

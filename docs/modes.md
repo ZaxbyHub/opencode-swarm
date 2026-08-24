@@ -47,8 +47,12 @@ Full-Auto is opencode-swarm's autonomy control plane. It reduces approval fricti
 ```text
 /swarm full-auto on              # activate (supervised mode by default)
 /swarm full-auto on strict       # activate with a mode override for this run
-/swarm full-auto off             # pause the run
+/swarm full-auto off             # disarm and return to interactive operation
 /swarm full-auto status          # report the durable run state
+/swarm full-auto retry-oversight # bounded infrastructure health probe while paused
+/swarm full-auto resume          # resume after the exact pause condition is repaired
+/swarm full-auto abort           # terminate the paused run
+/swarm full-auto exit            # alias for off/disarm
 /swarm full-auto                 # bare toggle
 ```
 

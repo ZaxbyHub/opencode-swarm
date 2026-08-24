@@ -55,6 +55,8 @@ export interface FullAutoRunState {
 	status: FullAutoStatus;
 	sessionID: string;
 	mode: 'assisted' | 'supervised' | 'strict';
+	runGeneration?: number;
+	pauseGeneration?: number;
 	planID?: string;
 	currentPhase?: number;
 	currentTaskID?: string;
@@ -85,6 +87,14 @@ export interface FullAutoRunState {
 		deadlockCount: number;
 		phase?: number;
 		escalatedAt: string;
+	};
+	lastRecoveryProbe?: {
+		pauseGeneration: number;
+		checkedAt: string;
+		expiresAt: string;
+		attempts: number;
+		outcome: 'healthy' | 'unhealthy';
+		reason: string;
 	};
 }
 
@@ -188,6 +198,8 @@ function emptyState(
 		status: 'idle',
 		sessionID,
 		mode,
+		runGeneration: 1,
+		pauseGeneration: 0,
 		startedAt: now,
 		updatedAt: now,
 		denialCounters: { consecutive: 0, total: 0 },
@@ -534,11 +546,13 @@ export function startFullAutoRun(
 					...existing,
 					status: 'running',
 					mode,
+					runGeneration: (existing.runGeneration ?? 0) + 1,
 					planID: options.planID ?? existing.planID,
 					currentPhase: options.phase ?? existing.currentPhase,
 					currentTaskID: options.taskID ?? existing.currentTaskID,
 					pauseReason: undefined,
 					terminateReason: undefined,
+					lastRecoveryProbe: undefined,
 					updatedAt: nowISO(),
 					denialCounters: {
 						consecutive: 0,
@@ -574,6 +588,7 @@ export function pauseFullAutoRun(
 		if (!state) return undefined;
 		state.status = 'paused';
 		state.pauseReason = reason;
+		state.pauseGeneration = (state.pauseGeneration ?? 0) + 1;
 		state.updatedAt = nowISO();
 		persisted.sessions[sessionID] = state;
 		writePersisted(directory, persisted);
@@ -604,6 +619,7 @@ export function disarmFullAutoRun(
 		state.status = 'idle';
 		state.pauseReason = reason;
 		state.terminateReason = undefined;
+		state.lastRecoveryProbe = undefined;
 		state.updatedAt = nowISO();
 		persisted.sessions[sessionID] = state;
 		writePersisted(directory, persisted);
@@ -622,6 +638,8 @@ export function terminateFullAutoRun(
 		if (!state) return undefined;
 		state.status = 'terminated';
 		state.terminateReason = reason;
+		state.pauseGeneration = (state.pauseGeneration ?? 0) + 1;
+		state.lastRecoveryProbe = undefined;
 		state.updatedAt = nowISO();
 		persisted.sessions[sessionID] = state;
 		writePersisted(directory, persisted);
@@ -812,6 +830,30 @@ export function recordFullAutoEscalation(
 			phase: detail.phase,
 			escalatedAt: nowISO(),
 		};
+		state.updatedAt = nowISO();
+		persisted.sessions[sessionID] = state;
+		writePersisted(directory, persisted);
+		return state;
+	});
+}
+
+export function recordFullAutoRecoveryProbe(
+	directory: string,
+	sessionID: string,
+	probe: {
+		pauseGeneration: number;
+		checkedAt: string;
+		expiresAt: string;
+		attempts: number;
+		outcome: 'healthy' | 'unhealthy';
+		reason: string;
+	},
+): FullAutoRunState | undefined {
+	return withStateLock(directory, () => {
+		const persisted = readPersisted(directory);
+		const state = persisted.sessions[sessionID];
+		if (!state) return undefined;
+		state.lastRecoveryProbe = probe;
 		state.updatedAt = nowISO();
 		persisted.sessions[sessionID] = state;
 		writePersisted(directory, persisted);
