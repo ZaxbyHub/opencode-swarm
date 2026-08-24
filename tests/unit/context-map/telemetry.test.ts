@@ -99,7 +99,7 @@ describe('recordTelemetry', () => {
 		expect(fs.existsSync(swarmDir)).toBe(true);
 	});
 
-	test('appends JSONL entry to .swarm/context-telemetry.jsonl', () => {
+	test('appends JSONL entry to .swarm/context-telemetry.jsonl (after the manifest header)', () => {
 		const entry = makeEntry({ task_id: '2.1' });
 		recordTelemetry(entry, dir);
 
@@ -107,13 +107,16 @@ describe('recordTelemetry', () => {
 		const content = fs.readFileSync(filePath, 'utf-8').replace(/\r\n/g, '\n');
 		const lines = content.split('\n').filter((l) => l.trim() !== '');
 
-		expect(lines.length).toBe(1);
-		const parsed = JSON.parse(lines[0]!) as TelemetryEntry;
+		// Line 1 is the issue-#2037 manifest header; the record is line 2.
+		expect(lines.length).toBe(2);
+		const header = JSON.parse(lines[0]!) as { type?: string };
+		expect(header.type).toBe('ctx-telemetry-manifest');
+		const parsed = JSON.parse(lines[1]!) as TelemetryEntry;
 		expect(parsed.task_id).toBe('2.1');
 		expect(parsed.token_estimate).toBe(1000);
 	});
 
-	test('multiple entries create multiple lines', () => {
+	test('multiple entries create multiple lines (after a single manifest header)', () => {
 		recordTelemetry(makeEntry({ task_id: '1.1' }), dir);
 		recordTelemetry(makeEntry({ task_id: '1.2' }), dir);
 		recordTelemetry(makeEntry({ task_id: '2.1' }), dir);
@@ -122,7 +125,10 @@ describe('recordTelemetry', () => {
 		const content = fs.readFileSync(filePath, 'utf-8').replace(/\r\n/g, '\n');
 		const lines = content.split('\n').filter((l) => l.trim() !== '');
 
-		expect(lines.length).toBe(3);
+		// 1 manifest header + 3 records.
+		expect(lines.length).toBe(4);
+		expect(JSON.parse(lines[0]!).type).toBe('ctx-telemetry-manifest');
+		expect(readTelemetry(dir).length).toBe(3);
 	});
 
 	test('returns false on write error when directory is not writable', () => {

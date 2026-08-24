@@ -182,10 +182,10 @@ those inputs before this change.
 
 ---
 
-## 5. The 45-entry catalog
+## 5. The 46-entry catalog
 
-Source: `src/observability/catalog.ts`. Exactly 45 entries = the 38 pre-existing members of
-`TelemetryEvent` (`src/telemetry.ts:15-92`) plus `agent_conflict_detected`
+Source: `src/observability/catalog.ts`. Exactly 46 entries = the 38 pre-existing members of
+`TelemetryEvent` (`src/telemetry.ts:15-109`) plus `agent_conflict_detected`
 (emitted in production via a force-cast past the type system before #2029)
 plus `close_archive_result` (issue #2030 — the structured close/archive
 result event) plus `knowledge_receipt_transition` (issue #2031, the bounded
@@ -194,7 +194,9 @@ diagnostic projection of authoritative receipt transitions) plus
 quarantine audit) plus `context_pruned` (the bounded aggregate transcript
 mutation audit emitted when context-budget masking and/or pruning changes a
 session transcript) plus `residue_health` (issue #2035 — the counts-only
-atomic-write residue quarantine health aggregate).
+atomic-write residue quarantine health aggregate) plus `context_telemetry_health`
+(issue #2037 — the counts-only bounded storage health aggregate for the
+`.swarm/context-telemetry.jsonl` store).
 
 Legend: **Owner** is `futureOwnerIssue` when `consumers` is empty (permitted
 only together with an owner — an empty consumer list with no owner is a CI
@@ -548,7 +550,7 @@ the operator flow ran and why it aborted, if it did.
 
 #### residue_health
 Category `lifecycle`, severity `notice`, privacy `operational`. Producer
-`src/telemetry.ts:883` (`residueHealth`, called by
+`src/telemetry.ts:908` (`residueHealth`, called by
 `quarantineSwarmResidue` in `src/services/swarm-residue.ts` after a
 residue quarantine run — the close clean stage or `/swarm config doctor
 --quarantine-residue`; issue #2035). Consumers: none — owner **#2047**.
@@ -562,6 +564,23 @@ size). File names, filesystem paths, and file content are never emitted
 the per-batch quarantine manifest under `.swarm/quarantine/`; this event only
 reports the health aggregate so later reporting (PR 16/19) can surface residue
 pressure without leaking workspace layout.
+
+#### context_telemetry_health
+Category `lifecycle`, severity `notice`, privacy `operational`. Producer
+`src/telemetry.ts:932` (`contextTelemetryHealth`, called by the bounded
+`.swarm/context-telemetry.jsonl` store in `src/context-map/telemetry.ts` after a
+compaction or close cut; issue #2037). Consumers: none — owner **#2047**.
+Retention: **#2047**. No workflow ID is required: context-map telemetry is
+per-delegation and aggregate-only. The payload is strictly bounded counts:
+`trigger` (`compaction`/`close`), `accepted_count`, `compacted_count`,
+`retained_count`, `dropped_count`, `corrupt_count`, `oldest_timestamp`,
+`newest_timestamp`, `bytes`, and `limit_bytes`. Capsule/query content and
+filesystem paths are never emitted (path redaction by omission). This is the
+health signal for the issue-#2037 bounded context-map telemetry store; the
+store itself (`.swarm/context-telemetry.jsonl` manifest + retained window) is
+the authoritative record, and this event only reports the aggregate so later
+reporting (PR 16/19) can surface retention pressure without leaking capsule
+contents or workspace layout.
 
 ---
 
