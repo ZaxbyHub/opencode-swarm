@@ -116,6 +116,10 @@ describe('handleContextMapStatsCommand', () => {
 		);
 
 		const result = await handleContextMapStatsCommand(dir);
-		expect(result).toBe('No capsule telemetry recorded.');
+		// A corrupt-only store (0 delegations but corrupt lines) must NOT be
+		// masked as "No capsule telemetry recorded." It discloses the corrupt
+		// count instead (issue #2037, PRR-007).
+		expect(result).not.toBe('No capsule telemetry recorded.');
+		expect(result).toContain('Corrupt/partial lines skipped');
 	});
 });

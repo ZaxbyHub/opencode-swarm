@@ -298,6 +298,20 @@ export const KNOWN_TELEMETRY_KEYS: Readonly<Record<string, readonly string[]>> =
 			'oldest_age_ms',
 			'grammar_counts',
 		]),
+		// Issue #2037 context-map telemetry storage health: bounded counts and
+		// timestamps only — no capsule/query content, no paths.
+		context_telemetry_health: Object.freeze([
+			'trigger',
+			'accepted_count',
+			'compacted_count',
+			'retained_count',
+			'dropped_count',
+			'corrupt_count',
+			'oldest_timestamp',
+			'newest_timestamp',
+			'bytes',
+			'limit_bytes',
+		]),
 	});
 
 const EMPTY_EXTRA: Record<string, unknown> = Object.freeze({});
