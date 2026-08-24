@@ -2422,8 +2422,10 @@ export async function scanFileAsync(
 	for (const d of isWidenedGrammar ? facts.defs : exportedDefs) {
 		// Only the widened path needs this. validateGraphNode THROWS on a
 		// non-positive or inverted range and runs during the scan, so one
-		// malformed def would abort a whole graph build now that non-exported
-		// defs reach this map. Non-widened grammars deliberately keep the
+		// malformed def would cost the WHOLE FILE — the async builder catches the
+		// throw and drops that file, so every other def in it is lost too — now
+		// that non-exported defs reach this map. It also rejects non-integer
+		// bounds. Non-widened grammars deliberately keep the
 		// pre-existing throw-on-malformed behavior so their payloads stay
 		// byte-identical.
 		if (

@@ -301,8 +301,9 @@ Duplicate names inside the widened grammars resolve in three cases, chosen so
    **first**, and never appear in `exportLines` at all.
 
 A malformed range (non-positive or inverted) is skipped rather than written,
-because `validateGraphNode` throws on one and runs inside the scan — a single bad
-def must not abort a whole graph build. That guard is scoped to the widened
+because `validateGraphNode` throws on one and runs inside the scan; the async
+builder catches that and drops the whole **file**, so one bad def would cost
+every def in it. The guard also rejects non-integer bounds. That guard is scoped to the widened
 grammars so other languages keep their previous behavior exactly.
 
 ### Registry / profile extension parity
@@ -367,13 +368,62 @@ non-goal.
 
 `sourceBoundaryForLanguage` reads the `package` / `namespace` declaration from
 comment-stripped source, and masks multi-line string literals so a line-initial
-declaration inside a C# verbatim string or a Java/Kotlin text block cannot win.
+declaration inside a C# verbatim string, a C# raw string, or a Java/Kotlin text
+block does not win.
 
-One gap remains, deliberately not fixed here: `stripComments` does not track
+This is a lexical approximation, not a parser, and it is stated that way
+deliberately: six successive review rounds each found one more input where an
+earlier absolute claim here was false. The masker handles the forms pinned in
+`tests/unit/tools/repo-graph-package-boundary.test.ts`; the known remaining gaps
+are listed below. It reads `stripComments` output, so it also inherits that
+helper's defects.
+
+Raw-literal delimiters are measured by **run length**, not assumed to be three
+quotes. A C# raw string opens on a run of N ≥ 3 — that form exists so content
+can contain `"""` — so closing on a hard-coded `"""` terminated such a literal
+on its own content and resumed the scan inside the string. Java and Kotlin only
+ever open with three.
+
+The closing fence is taken as the **last N quotes** of a run of at least N. For
+Kotlin that is the language rule. For C#, a closing run longer than N is a
+compile error (CS8998), so on compilable input this is indistinguishable from
+requiring an exact-length run; the looser rule is chosen because on malformed or
+generated input, requiring exactness makes the scan skip the run and hunt
+forward, blanking real code in between.
+
+Escape handling applies to **Java only**. A text block is the one raw form with
+escape sequences (JLS 3.10.6), and `\"""` is the JEP 378 idiom for embedding a
+text block inside a text block — only two of those quotes are unescaped, so it
+must not terminate, while `\\"""` (escaped backslash) must. C# raw strings and
+Kotlin raw strings have no escapes, so applying the same rule to them would be
+wrong in the opposite direction.
+
+The masker is a single left-to-right scan that consumes ordinary strings and
+char literals rather than ignoring them, because a regex has no notion of
+already being inside a literal. Its consume is bounded to one line, since none
+of the three languages permits a raw newline inside an ordinary string or char
+literal; an unpaired quote — a C# preprocessor message such as
+`#warning check "` or `#region Customer's data` is arbitrary
+input-characters and is never string-tokenized — is emitted as an ordinary
+character rather than consumed to EOF.
+
+Two gaps remain, deliberately not fixed here. First, an **unterminated**
+multi-line literal (`"""` or `@"` with no partner) emits the rest of the file
+untouched rather than blanking to EOF. That is the right trade — a later real
+declaration must still be findable — but it means a truncated, generated, or
+templated file leaves the remainder unmasked. Second: `stripComments` does not track
 **nested** block comments. Java and C# block comments do not nest (JLS 3.7), so
 for those languages the current behavior is correct — the first `*/` really does
 close the comment. **Kotlin block comments do nest**, so a declaration inside a
-nested comment can still be read as live code. Closing this would require
+nested comment can still be read as live code.
+
+A second, separate `stripComments` defect compounds this, in **all three**
+languages: its string state treats a backslash as an escape, but a C# verbatim
+literal has no backslash escapes. A Windows path such as `@"C:\dir\"` therefore
+swallows its own terminator, the scanner never leaves the string state, and a
+block comment below it is never stripped — so a declaration inside that comment
+can win. The string-masking remedy above consumes `stripComments` output, so it
+cannot compensate for this. Closing either would require
 changing a shared pre-existing helper used by all ontology extraction; the impact
 is limited to a grouping/display key, so it is recorded here rather than patched
 under this issue.

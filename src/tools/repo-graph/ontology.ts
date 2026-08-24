@@ -143,7 +143,15 @@ const blankKeepingNewlines = (m: string): string => m.replace(/[^\n]/g, ' ');
  * masked here, which keeps the change narrow.
  */
 
-function maskMultilineStringLiterals(text: string, language: string): string {
+/**
+ * @internal Exported only so the scanner's structural invariants (termination,
+ * length preservation, line-count preservation) can be fuzzed directly. Not
+ * re-exported from the package index; call `extractFileOntology` instead.
+ */
+export function maskMultilineStringLiterals(
+	text: string,
+	language: string,
+): string {
 	// SINGLE LEFT-TO-RIGHT SCAN, deliberately not a set of independent regexes.
 	//
 	// Two successive regex-only attempts each over-reached and DELETED a real
@@ -155,25 +163,42 @@ function maskMultilineStringLiterals(text: string, language: string): string {
 	// Both were WORSE than the bug being fixed: the declaration was lost
 	// entirely rather than merely mis-chosen. The root cause is that a regex has
 	// no notion of already being inside a literal. Scanning once — and CONSUMING
-	// ordinary strings and char literals rather than ignoring them — removes the
-	// whole failure class instead of adding a third special case.
+	// ordinary strings and char literals rather than ignoring them — removes that
+	// family (a quote or `@` inside an ordinary literal can no longer open a
+	// multi-line one) instead of adding a third special case. It is not a proof
+	// of total correctness: see the line-bound note below, and the unterminated
+	// -literal trade documented in docs/repo-graph-symbol-graph.md.
 	const csharp = language === 'csharp';
 	let out = '';
 	let i = 0;
 	while (i < text.length) {
 		const ch = text[i];
 
-		// Triple-quoted: Java text block, Kotlin raw string, C# 11 raw string.
-		if (text.startsWith('"""', i)) {
-			const end = text.indexOf('"""', i + 3);
+		// Raw/text-block literal: Java text block, Kotlin raw string, C# 11 raw
+		// string. The delimiter is NOT always three quotes. A C# raw string opens
+		// with a run of N >= 3 and closes on a run of exactly N, which is the
+		// whole point of the form: `""""…""""` is how you embed a literal `"""`.
+		// Matching a hard-coded `"""` closed such a literal on its own CONTENT,
+		// resuming the scan inside the string and deleting a real declaration
+		// below it. Java and Kotlin only ever open with three.
+		const openLen = quoteRunLength(text, i);
+		if (openLen >= 3) {
+			const delim = csharp ? openLen : 3;
+			const end = findClosingQuoteRun(
+				text,
+				i + delim,
+				delim,
+				language === 'java',
+			);
 			if (end === -1) {
 				// Unterminated: emit the remainder untouched rather than blanking
 				// the rest of the file.
 				out += text.slice(i);
 				break;
 			}
-			out += `"""${blankKeepingNewlines(text.slice(i + 3, end))}"""`;
-			i = end + 3;
+			const fence = '"'.repeat(delim);
+			out += `${fence}${blankKeepingNewlines(text.slice(i + delim, end))}${fence}`;
+			i = end + delim;
 			continue;
 		}
 
@@ -209,13 +234,30 @@ function maskMultilineStringLiterals(text: string, language: string): string {
 		// Ordinary string / char literal: CONSUMED, never blanked. Consuming is
 		// the whole point — it is what stops a `@` or a quote inside one from
 		// being read as the start of a multi-line literal.
+		//
+		// The consume is bounded to the current LINE. None of java/kotlin/csharp
+		// permits a raw newline inside an ordinary string or char literal, so a
+		// quote with no partner on its own line is not a delimiter at all — it is
+		// an odd quote in text this scanner does not tokenize, most commonly a C#
+		// preprocessor directive (`#warning check "`, `#region Customer's data`),
+		// whose message is arbitrary input-characters and is never string-tokenized.
+		// Consuming such a quote to EOF desynchronizes every branch below it:
+		// code is read as literal and literal as code, which both DELETED a real
+		// `namespace` declaration and left the FB-011 spoof winning. An unpaired
+		// quote is therefore emitted as a single ordinary character.
 		if (ch === '"' || ch === "'") {
 			let j = i + 1;
-			while (j < text.length && text[j] !== ch) {
-				if (text[j] === '\\') j++;
+			while (j < text.length && text[j] !== ch && text[j] !== '\n') {
+				// A backslash escapes the next character, but never a newline.
+				if (text[j] === '\\' && text[j + 1] !== '\n') j++;
 				j++;
 			}
-			out += text.slice(i, Math.min(j + 1, text.length));
+			if (j >= text.length || text[j] === '\n') {
+				out += ch;
+				i++;
+				continue;
+			}
+			out += text.slice(i, j + 1);
 			i = j + 1;
 			continue;
 		}
@@ -224,6 +266,57 @@ function maskMultilineStringLiterals(text: string, language: string): string {
 		i++;
 	}
 	return out;
+}
+
+/** Number of consecutive `"` characters starting at `i`. */
+function quoteRunLength(text: string, i: number): number {
+	let n = 0;
+	while (text[i + n] === '"') n++;
+	return n;
+}
+
+/**
+ * Index of the closing delimiter for a raw literal opened with `delim` quotes,
+ * or -1. Runs are measured maximally, so a longer run is never mistaken for the
+ * shorter delimiter it starts with, and the fence is taken as the LAST `delim`
+ * quotes of the closing run.
+ *
+ * `escapes` is true only for Java. A Java text block is the one raw form with
+ * escape sequences (JLS 3.10.6), and `\"""` is the JEP 378 idiom for embedding a
+ * text block inside a text block — only two of those three quotes are unescaped,
+ * so it must NOT terminate. Ignoring that closed the literal on its own content
+ * and leaked a `package` declaration out of a text block. C# raw strings and
+ * Kotlin raw strings have no escapes at all, so applying this to them would be
+ * wrong in the other direction.
+ *
+ * Taking the last `delim` quotes rather than requiring an exact-length run is
+ * deliberate. On compilable C# the two are indistinguishable — a longer closing
+ * run is CS8998 — but on malformed or generated input, requiring exactness makes
+ * the scan skip the run and hunt forward, blanking real code in between. The
+ * looser rule bounds the damage, and matches Kotlin, which genuinely ends at the
+ * last three quotes of a run.
+ */
+function findClosingQuoteRun(
+	text: string,
+	from: number,
+	delim: number,
+	escapes: boolean,
+): number {
+	let j = from;
+	while (j < text.length) {
+		if (escapes && text[j] === '\\') {
+			j += 2;
+			continue;
+		}
+		if (text[j] !== '"') {
+			j++;
+			continue;
+		}
+		const runLen = quoteRunLength(text, j);
+		if (runLen >= delim) return j + runLen - delim;
+		j += runLen;
+	}
+	return -1;
 }
 
 /**

@@ -236,6 +236,32 @@ describe('repo-graph JVM/.NET dotted-module resolution', () => {
 		expect(appNode.ontology?.packageBoundary).toBe('com.acme');
 	});
 
+	test('the canonical .NET src/<Project>/ layout resolves', async () => {
+		// Pins the bare 'src' entry in JVM_DOTNET_DOTTED_ROOTS specifically: the
+		// test above covers only 'src/main/java' and 'src/main/kotlin', so
+		// deleting 'src' left the suite green. This is also the exact shape an
+		// earlier gate round reported broken, which had no regression pin.
+		writeFile('App.cs', 'namespace App;\n\npublic class Marker {}\n');
+		writeFile(
+			'src/App/Models/User.cs',
+			'namespace App.Models;\n\npublic class User {}\n',
+		);
+		writeFile(
+			'src/App/Program.cs',
+			'namespace App;\n\nusing App.Models;\n\npublic class Program {}\n',
+		);
+
+		const graph = await buildWorkspaceGraphAsync(tempDir);
+		const programNode = nodeFor(graph, 'src/App/Program.cs');
+		const targets = graph.edges
+			.filter((e) => e.source === programNode.filePath)
+			.map((e) => path.basename(e.target));
+
+		expect(targets).toContain('User.cs');
+		// The sibling `App.cs` is the enclosing-namespace file, not the package.
+		expect(targets).not.toContain('App.cs');
+	});
+
 	test('probe specificity outranks root specificity for a Java nested-type shape', async () => {
 		// Behavior change worth pinning: the three probes each sweep ALL roots
 		// before the next begins, so a package-directory match under
