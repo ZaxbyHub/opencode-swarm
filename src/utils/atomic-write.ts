@@ -105,8 +105,8 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 		token: 'instance',
 		quarantineEligible: true,
 		parsesTarget: true,
-		producers: ['src/hooks/pr-workflow-gate.ts:12961'],
-		note: 'pre/post-rename file-identity verification (assertOpened/ClosedSwarmFileIdentity, pr-workflow-gate.ts:11844-11889) is writer-specific and load-bearing',
+		producers: ['src/hooks/pr-workflow-gate.ts:13118'],
+		note: 'pre/post-rename file-identity verification (assertOpened/ClosedSwarmFileIdentity, pr-workflow-gate.ts:13060-13116) is writer-specific and load-bearing',
 	},
 	{
 		id: 'target-suffix-tmp-num-num-json',
@@ -186,7 +186,7 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 			'src/tools/spec-write.ts:98',
 			'src/sdd/effective-spec.ts:1149',
 			'src/background/lane-output-store.ts:353',
-			'src/background/pending-delegations.ts:905',
+			'src/background/pending-delegations.ts:913',
 			'src/background/delegation-health.ts:300',
 			'src/hooks/delegation-gate/worktree-provisioning-owner.ts:100',
 			'src/tools/submit-phase-council-verdicts.ts:458',
@@ -234,7 +234,7 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 		quarantineEligible: true,
 		parsesTarget: true,
 		producers: [
-			'src/tools/write-pr-review-artifact.ts:107',
+			'src/tools/write-pr-review-artifact.ts:129',
 			'src/tools/write-pr-review-trigger-eval.ts:574',
 		],
 		note: 'bundled-skills writes outside .swarm (project skill roots) and keeps its own contained-directory logic (invariant 4 bundled-skill ownership)',

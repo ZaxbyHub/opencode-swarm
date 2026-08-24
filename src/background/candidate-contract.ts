@@ -8,6 +8,28 @@ export const CANDIDATE_SEVERITIES = [
 
 export type CandidateSeverity = (typeof CANDIDATE_SEVERITIES)[number];
 
+/**
+ * Severity vocabulary of the PR-review FINDINGS artifact.
+ *
+ * A findings record is a projection of an authenticated `[REVIEWED]`/`[CRITIC]`
+ * verdict row, never of a `[CANDIDATE]` row — so it must speak the VERDICT
+ * dialect. That dialect is `REVIEW_SEVERITIES` in `src/hooks/pr-workflow-gate.ts`,
+ * which is exactly `CANDIDATE_SEVERITIES` plus `NONE` (a DISPROVED critic verdict
+ * is *required* to carry `NONE`, and a CONFIRMED-but-cosmetic reviewer verdict
+ * legitimately does). Reusing `CANDIDATE_SEVERITIES` for findings made `NONE`
+ * unrepresentable and forced field omission as its only encoding — which in turn
+ * disabled the gate's severity comparison (issue #2279).
+ *
+ * Deliberately a SEPARATE constant rather than a widened `CANDIDATE_SEVERITIES`:
+ * that one still governs explorer/micro-lane `[CANDIDATE]` rows
+ * (`isCandidateSeverity` → `analyzeCandidateFields`) and the required sidecar
+ * field (`candidate-sidecar-store.ts`), where `NONE` is never legitimate — a
+ * candidate row asserting "no severity" is a contradiction, not a finding.
+ */
+export const FINDINGS_SEVERITIES = [...CANDIDATE_SEVERITIES, 'NONE'] as const;
+
+export type FindingsSeverity = (typeof FINDINGS_SEVERITIES)[number];
+
 export const CANDIDATE_CONFIDENCES = ['HIGH', 'MEDIUM', 'LOW'] as const;
 
 export type CandidateConfidence = (typeof CANDIDATE_CONFIDENCES)[number];
@@ -155,7 +177,8 @@ export type CandidateArtifactRepairKind =
 	| 'terminal-protocol-fence'
 	| 'redundant-clean-confidence'
 	| 'clean-evidence-pipe-tail-merge'
-	| 'summary-row-dropped';
+	| 'summary-row-dropped'
+	| 'duplicate-header-row-dropped';
 
 interface MarkdownFenceBlock {
 	openingLine: number;
@@ -268,6 +291,80 @@ function repairRedundantCleanConfidence(
  */
 const NON_CONTRACT_MARKER_LINE =
 	/^\[(?!(?:CANDIDATE|CLEAN)\])[A-Z][A-Z0-9_-]*\]/;
+
+/**
+ * True when a line is shaped exactly like a canonical candidate header — either
+ * marker-bearing (`[CANDIDATE] | candidate_id | lane | …`) or the bare field-name
+ * list re-emitted without its marker.
+ */
+function canonicalHeaderShape(line: string): { markerBearing: boolean } | null {
+	const fields = splitPipeFields(line.trim()).map((field) => field.trim());
+	if (fields.length === 0) return null;
+	if (candidateHeaderFamily(fields)) return { markerBearing: true };
+	for (const family of ['base_explorer', 'micro_lane'] as const) {
+		const canonical = CANDIDATE_FIELDS[family].map((name) =>
+			name === 'file_line' ? 'file:line' : name,
+		);
+		if (
+			fields.length === canonical.length &&
+			canonical.every((name, index) => fields[index] === name)
+		) {
+			return { markerBearing: false };
+		}
+	}
+	return null;
+}
+
+/**
+ * A lane that re-emits its header as a data row (a "placeholder" row — literal
+ * template text pasted where a finding belonged) previously had that row reach
+ * `analyzeCandidateFields`, fail, and increment `malformedRows` — which trips the
+ * zero-malformed-rows rule and destroys an otherwise-valid `[CLEAN]` attestation,
+ * possibly for a DIFFERENT lane. An echoed header carries no *parsed* information
+ * — the strict parser rejects it as a data row either way — so dropping it is
+ * parse-equivalent salvage (issue #2279).
+ *
+ * Known narrow case: a consolidated artifact carrying canonical headers for BOTH
+ * row families loses the second family's header, which is a structural marker
+ * rather than an echo. No parsed candidate value changes as a result — the rows
+ * under that header were already being read against the first header's family
+ * before this repair existed — so the only delta is the suppressed
+ * `malformed_rows` increment. That suppression is the point: it is what stops a
+ * placeholder row from voiding an unrelated lane's valid `[CLEAN]`.
+ *
+ * The survivor is the MARKER-BEARING canonical header, never merely the first
+ * such line: `selectCandidateHeader` treats the first marker-bearing line as
+ * authoritative and only falls back to a markerless one, so keeping a markerless
+ * field-name list that happened to precede the real header would delete the real
+ * header and manufacture a header failure that does not exist today.
+ *
+ * A legitimate candidate row can never be dropped here: the match demands exact
+ * equality against all nine canonical field NAMES, and `analyzeCandidateFields`
+ * independently rejects the literal `"severity"` as a severity value — a
+ * header-shaped row is definitionally not a valid candidate.
+ */
+function dropDuplicateHeaderRows(text: string): {
+	text: string;
+	dropped: boolean;
+} {
+	const lines = text.split(/\r?\n/);
+	const shapes = lines.map((line) =>
+		line.includes('|') ? canonicalHeaderShape(line) : null,
+	);
+	const keepIndex = (() => {
+		const markerBearing = shapes.findIndex((shape) => shape?.markerBearing);
+		if (markerBearing !== -1) return markerBearing;
+		return shapes.findIndex((shape) => shape !== null);
+	})();
+	if (keepIndex === -1) return { text, dropped: false };
+	const kept = lines.filter(
+		(_line, index) => shapes[index] === null || index === keepIndex,
+	);
+	return {
+		text: kept.join('\n'),
+		dropped: kept.length !== lines.length,
+	};
+}
 
 function dropNonContractMarkerRows(text: string): {
 	text: string;
@@ -453,7 +550,15 @@ export function normalizeCandidateArtifact(
 	if (cleanRepair.repaired) repairKinds.push('redundant-clean-confidence');
 	const pipeRepair = repairCleanEvidencePipes(cleanRepair.text);
 	if (pipeRepair.repaired) repairKinds.push('clean-evidence-pipe-tail-merge');
-	const text = pipeRepair.text;
+	// Runs LAST of the line-set repairs, so the duplicate-header scan sees the
+	// final line set: both the marker-row drop and the terminal-fence recovery
+	// above add or remove lines that header selection would otherwise disagree
+	// about.
+	const duplicateHeaderDrop = dropDuplicateHeaderRows(pipeRepair.text);
+	if (duplicateHeaderDrop.dropped) {
+		repairKinds.push('duplicate-header-row-dropped');
+	}
+	const text = duplicateHeaderDrop.text;
 	const header = selectCandidateHeader(text.split(/\r?\n/));
 	if (header?.markerBearing && header.family !== null) {
 		return { text, synthesizedHeader: false, repairKinds };

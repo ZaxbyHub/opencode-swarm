@@ -48,7 +48,25 @@ The orchestrator calls `parse_lane_candidates` for each `output_ref`:
 
 ### Step 2 — Structured response
 
-The parser returns a `ParseResultWithSidecar`. On success, `error` and `error_code` are absent:
+The parser returns a `ParseResultWithSidecar`. On success, `error` and `error_code` are absent.
+
+A successful receipt may additionally carry **salvage disclosure** fields, which
+report that the artifact was accepted only after a narrow, auditable repair —
+never that it was pristine (issue #2279):
+
+- `repair_kinds` — structural repairs applied before the strict parse, e.g.
+  `["duplicate-header-row-dropped"]` when a canonical header was re-emitted as a
+  data row, or `["synthesized-header"]`, `["summary-row-dropped"]`.
+- `clean_attestation_salvaged: true` plus `clean_attestation_salvage_reason` — a
+  `[CLEAN]` attestation conflicted with a same-lane `[CANDIDATE]` row, so the
+  attestation was discredited while the candidate rows were retained. The parse
+  SUCCEEDS. Do **not** read this as coverage: `clean_attestation` is absent
+  whenever it is set, so a lane with no candidate rows still fails coverage.
+  A `[CLEAN]` that failed for any other reason (degraded or partial source,
+  duplicate attestation, lane mismatch) still hard-errors and never reports a
+  salvage.
+
+Example success receipt:
 
 ```json
 {

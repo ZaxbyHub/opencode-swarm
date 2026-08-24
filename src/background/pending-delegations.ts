@@ -282,7 +282,14 @@ export type BackgroundDelegationRecoveryKind =
 	| 'parser-normalization'
 	| 'parser-row-recovery'
 	| 'truncated-preview-durable-artifact'
-	| 'transcript-incomplete-terminal-candidate';
+	| 'transcript-incomplete-terminal-candidate'
+	/**
+	 * A `[CLEAN]` attestation was discredited while the artifact's candidate rows
+	 * were retained. Distinct from `parser-normalization` (a text-shape repair by
+	 * `normalizeCandidateArtifact`) because nothing was repaired — an assertion
+	 * was dropped (issue #2279).
+	 */
+	| 'clean-attestation-salvaged';
 
 export interface BackgroundDelegationWorkflowLaneRecovery {
 	workflowLane: string;
@@ -404,6 +411,7 @@ const WorkflowLaneRecoverySchema = z
 			'parser-row-recovery',
 			'truncated-preview-durable-artifact',
 			'transcript-incomplete-terminal-candidate',
+			'clean-attestation-salvaged',
 		]),
 		reason: z.string(),
 	})
